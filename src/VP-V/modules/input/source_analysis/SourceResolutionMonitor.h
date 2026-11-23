@@ -25,7 +25,7 @@
 #include <thread>
 #include <vector>
 
-namespace SourceIdentity { namespace Chain { class ChainEstimator; } }
+namespace SourceIdentity { namespace Chain { class ChainEstimator; struct JointLatchSettings; struct StepMarkSettings; struct EdgeStatsSettings; } }
 
 // Stage 12 step B in the renderer (owner 2026-10-15): the effective
 // resolution, bitrate quality and effective bit depth of every source, and
@@ -200,6 +200,10 @@ namespace SourceResolutionMonitor
 		// the worker has analysed it.
 		void SubmitJobForTest(const std::vector<float>& tiles, int count, double seconds, int nativeWidth, int nativeHeight,
 			int baseTiles, int tileSize, double blackLevel, uint64_t sequence);
+		// TQ-S14 test seam (default false; zero production overhead): pauses the analysis worker thread before
+		// dequeuing jobs so frame-bound queue-overflow tests deterministically exercise dropped > 0 && !Reproducible().
+		// Destructor always wakes via `stopping`, preventing deadlock even if left held.
+		void SetWorkerHoldForTest(bool hold);
 		size_t HeldCount() const { std::lock_guard<std::mutex> lock(mutex); return heldCount; }
 		// Tests: register a frame as copied and in flight (what Frame() does), so ReadyFor sees it
 		// until AnalyseTilesForTest (given its sequence) completes it.
@@ -307,6 +311,12 @@ namespace SourceResolutionMonitor
 		// with SID-5 (README Settings rows, plumbing pending).
 		void SetSourceIdSafetyRules(bool on);
 		void SetSourceIdLatchAbrTrigger(bool on);
+		// Stage S2 opt-in forwarders (all default OFF; zero behavior change until explicitly enabled):
+		void SetChainJointLatch(const SourceIdentity::Chain::JointLatchSettings& s);
+		void SetChainStepMark(const SourceIdentity::Chain::StepMarkSettings& s);
+		void SetChainConventionProposals(bool on);
+		void SetChainEdgeStats(const SourceIdentity::Chain::EdgeStatsSettings& s, bool empiricalFloor = false);
+		void SetSourceIdBlockClassicalAlone(bool on);
 		// SID r2: the single-axis re-base (exactly one axis wanted below native by the consensus) is OFF by default: the re-base needs
 		// BOTH axes (a single-axis reading is a codec-grid fluke far more often than a real anamorphic source). The detection is still
 		// logged ("single-axis re-base held"). On restores the earlier behaviour. Both per-axis paths are gated: the consensus's and,
@@ -609,6 +619,7 @@ namespace SourceResolutionMonitor
 		size_t heldHead = 0, heldCount = 0;
 		Snapshot visible;               // what Read() returns when frame-bound (guarded by `mutex`)
 		std::deque<Job> jobQueue;       // frame-bound FIFO to the worker (guarded by `mutex`)
+		bool workerHoldForTest = false; // TQ-S14 test seam (guarded by `mutex`, default false)
 		mutable std::mutex outMutex;    // leaf lock: the frames in flight
 		std::deque<uint64_t> outstanding;
 		SourceClock submitClock, decideClock;   // render thread

@@ -37,8 +37,11 @@
 // stands; the record carries kFlagShadow), On (published; the consensus may use it). `Original pathway` = Off.
 //
 // Header + .cpp, C++14. One persistent worker thread, created the first time the estimator runs, joined by Stop() / the destructor.
+#include "ChainEdgeStats.h"
 #include "ChainEvidence.h"
+#include "ChainJointLatch.h"
 #include "ChainLatch.h"
+#include "ChainStepMark.h"
 #include "ChainEvidenceLog.h"
 #include "ChainGovernor.h"
 #include "ChainLines.h"
@@ -76,6 +79,11 @@ namespace SourceIdentity
 			EvidenceSettings evidence;
 			LatchSettings latch;                 // SID r2 R5 / R7: the asymmetric upscale latch (inert unless safetyRules)
 			bool safetyRules = false;            // SID r2 rules R2 + R3 + R5 + R7 as one switch, default OFF (SetSafetyRules)
+			// Stage S2 opt-in modules (2026-11-23 SourceID plan, ALL strictly OFF by default):
+			JointLatchSettings jointLatch;       // OD-1 (ChainOrJoint) & OD-2 (G1 default <= 180 s, G2 enum) + R1 fundamental-harmonic selection
+			StepMarkSettings stepMark;           // Fast ABR mid-stream size-step sentinel (mark -> 2-eval confirm -> backward void to t0)
+			bool conventionDrivenProposals = false; // P3: prioritize classical A -> latched -> SourceGeometrySet conventional sizes
+			bool useEmpiricalFloor = false;      // SHOULD-1 / EXP-8BIT: measure floorCodes via ChainEdgeStats::EstimateEmpiricalFloor
 			ReadingSettings reading;
 			GovernorSettings governor;
 			EvidenceLogSettings log;
@@ -101,6 +109,69 @@ namespace SourceIdentity
 			return 0;
 		}
 
+		// Stage S2 (P3, doc 100 s2.2): convention-driven candidate list for one axis (derived from SourceGeometrySet, zero magic constants).
+		// Priority order: (1) classical witness A's conventional size (if valid), (2) currently latched size (if valid),
+		// (3) remaining non-parked conventional geometries for (rasterW, rasterH) via RatioForms, deduplicated within +-1 px.
+		// When `conventionOnly == false`, remaining slots up to `maxCands` are filled from `extraProposed`.
+		inline int BuildConventionCandidates(
+			int axis,
+			int axisLen,
+			int rasterW,
+			int rasterH,
+			int classicalN,
+			int latchedN,
+			const int* extraProposed,
+			int extraCount,
+			bool conventionOnly,
+			int* outCands,
+			int maxCands)
+		{
+			if (axisLen < 16 || outCands == nullptr || maxCands <= 0)
+				return 0;
+			const int ax = axis == 0 ? 0 : 1;
+			int count = 0;
+			auto tryAdd = [&](int n, bool requireConventional) {
+				if (count >= maxCands || n < 16 || n >= axisLen)
+					return;
+				if (requireConventional && !Scaling::GeometrySet::ConventionalAxis(n, axisLen, ax, rasterW, rasterH))
+					return;
+				for (int i = 0; i < count; ++i)
+				{
+					const int d = outCands[i] > n ? outCands[i] - n : n - outCands[i];
+					if (d <= 1)
+						return;
+				}
+				outCands[count++] = n;
+			};
+
+			// 1. Classical witness A's conventional size (when valid).
+			tryAdd(classicalN, true);
+			// 2. Currently latched conventional size (when valid).
+			tryAdd(latchedN, true);
+			// 3. All remaining non-parked conventional geometries on the delivered raster.
+			std::size_t gCount = 0;
+			const Scaling::GeometrySet::Geometry* geoms = Scaling::GeometrySet::Geometries(gCount);
+			for (std::size_t i = 0; i < gCount && count < maxCands; ++i)
+			{
+				if (!geoms[i].apply)
+					continue;
+				double rx[2], ry[2];
+				const int forms = Scaling::GeometrySet::RatioForms(geoms[i], rasterW, rasterH, rx, ry);
+				for (int f = 0; f < forms && count < maxCands; ++f)
+				{
+					const double r = ax == 0 ? rx[f] : ry[f];
+					tryAdd(RoundToInt(static_cast<double>(axisLen) * r), true);
+				}
+			}
+			// 4. Extra proposer candidates (filtered by conventionOnly when safety rules are on).
+			if (extraProposed != nullptr)
+			{
+				for (int i = 0; i < extraCount && count < maxCands; ++i)
+					tryAdd(extraProposed[i], conventionOnly);
+			}
+			return count;
+		}
+
 		struct EstimatorCounters
 		{
 			uint64_t evaluations = 0;        // evaluations run
@@ -114,6 +185,13 @@ namespace SourceIdentity
 			uint64_t windowClears = 0;       // evidence-window clears (ClearWindow events consumed, first cut after a HOLD): no reset record
 			uint64_t fadeShots = 0;          // SID r2 N2 (F1): evidence shots started by a black / fade without a cut (safety rules on only)
 			LatchCounters latch;             // SID r2: latch entries / moves / releases by cause, held back, non-conventional (zero while the rules are off)
+			// Stage S2 counters (all zero while Stage S2 switches remain OFF):
+			JointLatchCounters jointLatch;
+			StepMarkCounters stepMark;
+			uint64_t r1HarmonicSelections = 0;
+			uint64_t p3ConventionProposals = 0;
+			uint64_t empiricalFloorEvals = 0;
+			uint64_t empiricalFloorFallbacks = 0;
 		};
 
 		// What one evaluation tested, per axis and candidate (the calibration dump of the harness reads it; any other observer may).
@@ -204,6 +282,11 @@ namespace SourceIdentity
 			void SetStreamKey(uint64_t key);
 			// The classical decision's ratios (1 = native) for the evidence log's disagreement flags.
 			void SetClassical(bool valid, double ratioH, double ratioV);
+			// Stage S2: fresh per-frame informative classical witness A reading (never sticky tracker state) for ChainJointLatch & ChainStepMark.
+			void SetClassicalFresh(bool valid, double ratioH, double ratioV, bool detailAbove = false,
+				bool mixed = false, bool subtitle = false, bool inFade = false);
+			// Stage S2: ABR rendition step event carrying boundary timestamp t0Us and signed ratioStep for ChainStepMark (inert unless stepMark.enabled).
+			void NoteAbrStepEvent(int64_t t0Us, double ratioStep, uint64_t seq);
 			// Free text for the evidence segments (input size, rate, bit depth, colour format, transfer).
 			void SetFormatInfo(const std::string& text);
 
@@ -213,6 +296,15 @@ namespace SourceIdentity
 			bool SafetyRules() const;
 			// R5 switch, default OFF: an ABR rendition step (NoteEvent AbrStep) drops an upscaled latch (E0: helps only after a rendition change).
 			void SetLatchAbrStepTrigger(bool on);
+			// ---- Stage S2 opt-in controls (all default OFF; applied cleanly at next start / epoch bump) -------------------------
+			void SetJointLatchSettings(const JointLatchSettings& s);
+			JointLatchSettings GetJointLatchSettings() const;
+			void SetStepMarkSettings(const StepMarkSettings& s);
+			StepMarkSettings GetStepMarkSettings() const;
+			void SetConventionDrivenProposals(bool on);
+			bool ConventionDrivenProposals() const;
+			void SetEdgeStatsSettings(const EdgeStatsSettings& s, bool empiricalFloor = false);
+			EdgeStatsSettings GetEdgeStatsSettings() const;
 			// N1: the count of latch releases by the no-cut CEILING (LatchEvent::ReleasedCeiling; zero while the rules are off). The monitor shows
 			// the native switch that follows one through its engage crossfade instead of the release fade. Any thread.
 			uint64_t LatchCeilingReleases() const;

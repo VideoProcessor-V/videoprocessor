@@ -35,7 +35,6 @@
 // Uses RobustStats (core/RobustStats.h) for all median / MAD / quantile / trimmed-mean operations.
 // Zero silent fallbacks: every degraded, clamped, abstained, or fallback path carries an explicit EdgeStatsReason.
 #include "ChainCommon.h"
-#include "ChainEvidence.h"
 #include "ChainNullTables.h"
 #include "DescaleVerifier.h"
 

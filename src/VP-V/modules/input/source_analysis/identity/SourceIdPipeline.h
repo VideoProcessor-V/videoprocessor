@@ -139,6 +139,12 @@ namespace SourceIdentity
 			: s_(s), consensus_(s.consensus), detector_(s.detector), notice_(s.notice), signal_(s.quality) {}
 
 		void SetConsensusOn(bool on) { consensusOn_ = on; }
+		// Stage S2 (Owner-approved OD-1, default OFF): blocks ClassicalResolution from entering upscaled alone.
+		void SetBlockClassicalAloneEntry(bool on)
+		{
+			s_.consensus.blockClassicalAloneEntry = on;
+			consensus_.SetBlockClassicalAloneEntry(on);
+		}
 		// The P14g holder the chain estimator publishes into (nullptr = no chain voter). Any thread; the worker reads it.
 		void SetGeometrySource(const Geometry::HeldState* source) { geometry_.store(source, std::memory_order_release); }
 		const Geometry::HeldState* GeometrySource() const { return geometry_.load(std::memory_order_acquire); }

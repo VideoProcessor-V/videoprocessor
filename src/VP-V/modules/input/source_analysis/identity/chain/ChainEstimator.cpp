@@ -87,6 +87,29 @@ namespace SourceIdentity
 			EvidenceLevel reqLevel = EvidenceLevel::Off;
 			bool reqSafety = false;    // SID r2: requested safety rules / ABR trigger (taken at the next clean start)
 			bool reqAbr = false;
+			// Stage S2 opt-in requested settings (ALL default OFF; taken cleanly at FreshStart):
+			JointLatchSettings reqJointLatch;
+			StepMarkSettings reqStepMark;
+			bool reqConvProposals = false;
+			EdgeStatsSettings reqEdgeStats;
+			bool reqEmpiricalFloor = false;
+			struct ClassicalFreshState
+			{
+				bool valid = false;
+				double ratioH = 1.0, ratioV = 1.0;
+				bool detailAbove = false;
+				bool mixed = false;
+				bool subtitle = false;
+				bool inFade = false;
+			};
+			ClassicalFreshState classicalFresh;
+			struct AbrStepEventRec
+			{
+				uint64_t seq = 0;
+				int64_t t0Us = 0;
+				double ratioStep = 0.0;
+			};
+			std::vector<AbrStepEventRec> abrStepEvents;
 			uint64_t runEpoch = 0;     // bumped at every not-running -> running transition (a clean start)
 			uint64_t gen = 0;          // bumped at every discontinuity (jobs of an older era are dropped)
 			std::string formatInfo;
@@ -124,6 +147,11 @@ namespace SourceIdentity
 			std::atomic<uint64_t> cLatchEntries{ 0 }, cLatchMoves{ 0 }, cLatchReleases{ 0 }, cLatchRelBound{ 0 }, cLatchRelNative{ 0 }, cLatchRelMenu{ 0 },
 				cLatchRelAbr{ 0 }, cLatchRelReset{ 0 }, cLatchHeldBack{ 0 }, cLatchNonConv{ 0 }, cLatchConfirms{ 0 }, cLatchRelHard{ 0 },
 				cLatchDeferred{ 0 }, cLatchDeferCancelled{ 0 }, cLatchRelAtCut{ 0 }, cLatchRelCeiling{ 0 };
+			// Stage S2 counters (zero while Stage S2 switches remain OFF):
+			mutable std::mutex s2CounterMutex;
+			JointLatchCounters s2JointCounters;
+			StepMarkCounters s2StepCounters;
+			std::atomic<uint64_t> cR1HarmonicSelections{ 0 }, cP3ConvProposals{ 0 }, cEmpiricalFloorEvals{ 0 }, cEmpiricalFloorFallbacks{ 0 };
 			// fx/dv-frame-quiet: each ceiling release is stamped with the newest source frame the estimator had seen, so the frame-bound
 			// monitor counts only the releases up to the frame it is allowed to see (LatchCeilingReleasesThrough), not the live counter.
 			std::atomic<uint64_t> newestSeqA{ 0 };
@@ -159,6 +187,17 @@ namespace SourceIdentity
 			Geometry::HeldState held;
 			UpscaleLatch latch;                       // SID r2 R5 / R7 (inert unless safetyOn)
 			bool safetyOn = false;                    // applied at the clean start
+			// Stage S2 worker instances (ALL inert unless explicitly enabled):
+			ChainJointLatch jointLatch;               // OD-1 / OD-2 two-witness latch
+			ChainStepMark stepMark;                   // Fast ABR step sentinel
+			bool jointLatchOn = false;
+			bool stepMarkOn = false;
+			bool convProposalsOn = false;
+			bool empiricalFloorOn = false;
+			JointLatchCounters jointLatchBase;
+			StepMarkCounters stepMarkBase;
+			uint64_t stepMarkEvalSeq = 0;
+			bool stepMarkImmediateReleasePending = false;
 			Geometry::AxisGeom heldApplied[2];        // the applied geometry the latch carries (updated by every confident reading of the latched size)
 			Geometry::AxisGeom lastFiltered[2];       // the last published applied geometry (for appliedChanged)
 			LatchCounters latchBase;                  // counters of the latch already folded into the atomics
@@ -211,7 +250,12 @@ namespace SourceIdentity
 				cfg.clockRing = ClampInt(cfg.clockRing, 4, 4096);
 				reqSafety = cfg.safetyRules;
 				reqAbr = cfg.latch.abrStepTrigger;
-				safetyA.store(reqSafety, std::memory_order_release);
+				reqJointLatch = cfg.jointLatch;
+				reqStepMark = cfg.stepMark;
+				reqConvProposals = cfg.conventionDrivenProposals;
+				reqEdgeStats = cfg.evidence.edgeStats;
+				reqEmpiricalFloor = cfg.useEmpiricalFloor;
+				safetyA.store(reqSafety || reqJointLatch.enabled, std::memory_order_release);
 				for (int a = 0; a < 2; ++a)
 				{
 					reader[a] = AxisReader(cfg.reading, levels);
@@ -323,7 +367,7 @@ namespace SourceIdentity
 					if (reqSafety == on)
 						return;
 					reqSafety = on;
-					safetyA.store(on, std::memory_order_release);
+					safetyA.store(reqSafety || reqJointLatch.enabled, std::memory_order_release);
 					cfgDirty = true;
 					++runEpoch;   // the rules change the reading: a clean start
 				}
@@ -341,6 +385,78 @@ namespace SourceIdentity
 					++runEpoch;
 				}
 				Wake();
+			}
+
+			void SetJointLatch(const JointLatchSettings& s)
+			{
+				{
+					std::lock_guard<std::mutex> lk(m);
+					reqJointLatch = s;
+					safetyA.store(reqSafety || reqJointLatch.enabled, std::memory_order_release);
+					cfgDirty = true;
+					++runEpoch;
+				}
+				Wake();
+			}
+
+			JointLatchSettings GetJointLatch() const
+			{
+				std::lock_guard<std::mutex> lk(m);
+				return reqJointLatch;
+			}
+
+			void SetStepMark(const StepMarkSettings& s)
+			{
+				{
+					std::lock_guard<std::mutex> lk(m);
+					reqStepMark = s;
+					cfgDirty = true;
+					++runEpoch;
+				}
+				Wake();
+			}
+
+			StepMarkSettings GetStepMark() const
+			{
+				std::lock_guard<std::mutex> lk(m);
+				return reqStepMark;
+			}
+
+			void SetConvProposals(bool on)
+			{
+				{
+					std::lock_guard<std::mutex> lk(m);
+					if (reqConvProposals == on)
+						return;
+					reqConvProposals = on;
+					cfgDirty = true;
+					++runEpoch;
+				}
+				Wake();
+			}
+
+			bool GetConvProposals() const
+			{
+				std::lock_guard<std::mutex> lk(m);
+				return reqConvProposals;
+			}
+
+			void SetEdgeStats(const EdgeStatsSettings& s, bool empiricalFloor)
+			{
+				{
+					std::lock_guard<std::mutex> lk(m);
+					reqEdgeStats = s;
+					reqEmpiricalFloor = empiricalFloor;
+					cfgDirty = true;
+					++runEpoch;
+				}
+				Wake();
+			}
+
+			EdgeStatsSettings GetEdgeStats() const
+			{
+				std::lock_guard<std::mutex> lk(m);
+				return reqEdgeStats;
 			}
 
 			void SetOriginal(bool original)
@@ -565,6 +681,44 @@ namespace SourceIdentity
 				classicalValid = valid;
 				classicalRatio[0] = ratioH;
 				classicalRatio[1] = ratioV;
+			}
+
+			void SetClassicalFresh(bool valid, double ratioH, double ratioV, bool detailAbove, bool mixed, bool subtitle, bool inFade)
+			{
+				std::lock_guard<std::mutex> lk(m);
+				classicalFresh.valid = valid;
+				classicalFresh.ratioH = ratioH;
+				classicalFresh.ratioV = ratioV;
+				classicalFresh.detailAbove = detailAbove;
+				classicalFresh.mixed = mixed;
+				classicalFresh.subtitle = subtitle;
+				classicalFresh.inFade = inFade;
+			}
+
+			void NoteAbrStepEvent(int64_t t0Us, double ratioStep, uint64_t seq)
+			{
+				if (!running.load(std::memory_order_acquire))
+					return;
+				bool pullForward = false;
+				{
+					std::lock_guard<std::mutex> lk(m);
+					if (!reqStepMark.enabled)
+						return;
+					AbrStepEventRec rec;
+					rec.seq = seq;
+					rec.t0Us = t0Us;
+					rec.ratioStep = ratioStep;
+					abrStepEvents.push_back(rec);
+					while (static_cast<int>(abrStepEvents.size()) > cfg.eventCap)
+						abrStepEvents.erase(abrStepEvents.begin());
+					pullForward = std::isfinite(ratioStep) && std::fabs(ratioStep) >= reqStepMark.minRatioStep;
+				}
+				if (pullForward && latchedPower.load(std::memory_order_acquire))
+				{
+					const double now = nowMs();
+					if (nextDueMs.load(std::memory_order_acquire) > now)
+						nextDueMs.store(now, std::memory_order_release);
+				}
 			}
 
 			void SetFormatInfo(const std::string& text)
@@ -915,30 +1069,66 @@ namespace SourceIdentity
 					lastAxisLen[a] = 0;
 				}
 				{
-					bool safe = false, abr = false;
+					bool safe = false, abr = false, convP = false, empF = false;
+					JointLatchSettings jCfg;
+					StepMarkSettings smCfg;
+					EdgeStatsSettings esCfg;
 					{
 						std::lock_guard<std::mutex> lk(m);
 						safe = reqSafety;
 						abr = reqAbr;
+						jCfg = reqJointLatch;
+						smCfg = reqStepMark;
+						convP = reqConvProposals;
+						esCfg = reqEdgeStats;
+						empF = reqEmpiricalFloor;
+						abrStepEvents.clear();
 					}
-					if (safetyOn)
+					if (jointLatchOn)
+					{
+						const JointLatchOutput jlo = jointLatch.Reset();
+						FoldJointLatchCounters();
+						NoteJointLatchEvent(jlo, lastTimeUs);
+					}
+					else if (safetyOn)
 					{
 						// M4: a latch held across a clean start is released visibly (counted, noticed) before the layer is rebuilt.
 						const LatchOutput lo = latch.Reset();
 						FoldLatchCounters();
 						NoteLatchEvent(lo, lastTimeUs);
 					}
+					if (stepMarkOn)
+					{
+						stepMark.Reset(StepMarkReason::ResetDiscontinuity);
+						FoldStepMarkCounters();
+					}
 					safetyOn = safe;
-					safetyLiveA.store(safe, std::memory_order_release);
+					jointLatchOn = jCfg.enabled;
+					stepMarkOn = smCfg.enabled;
+					convProposalsOn = convP;
+					empiricalFloorOn = empF;
+					const bool rulesActive = safe || jointLatchOn;
+					safetyLiveA.store(rulesActive, std::memory_order_release);
 					latchNxA.store(0, std::memory_order_release);
 					latchDeferredA.store(false, std::memory_order_release);
 					latchNyA.store(0, std::memory_order_release);
-					cfg.evidence.conventionOnly = safe;   // R2
-					cfg.evidence.pairPrior = safe;        // R3
-					cfg.latch.enabled = safe;             // R5 / R7
+					cfg.evidence.conventionOnly = rulesActive;   // R2
+					cfg.evidence.pairPrior = rulesActive;        // R3
+					cfg.evidence.edgeStats = esCfg;              // Stage S2 EXP-8BIT (default OFF)
+					cfg.latch.enabled = safe && !jointLatchOn;   // R5 / R7 legacy latch when jointLatch is OFF
 					cfg.latch.abrStepTrigger = abr;
+					cfg.jointLatch = jCfg;
+					cfg.stepMark = smCfg;
+					cfg.conventionDrivenProposals = convP;
+					cfg.useEmpiricalFloor = empF;
 					latch = UpscaleLatch(cfg.latch);
 					latchBase = LatchCounters();
+					jointLatch = ChainJointLatch(jCfg);
+					jointLatchBase = JointLatchCounters();
+					stepMark = ChainStepMark(smCfg);
+					stepMarkBase = StepMarkCounters();
+					stepMarkEvalSeq = 0;
+					stepMarkImmediateReleasePending = false;
 					for (int a = 0; a < 2; ++a)
 					{
 						heldApplied[a] = Geometry::AxisGeom();
@@ -1041,7 +1231,27 @@ namespace SourceIdentity
 					proposer[a].Reset();
 				}
 				evidence.Reset();
-				if (safetyOn)
+				if (stepMarkOn)
+				{
+					stepMark.Reset(StepMarkReason::ResetDiscontinuity);
+					FoldStepMarkCounters();
+					stepMarkImmediateReleasePending = false;
+				}
+				if (jointLatchOn)
+				{
+					const JointLatchOutput jlo = jointLatch.Reset();
+					FoldJointLatchCounters();
+					NoteJointLatchEvent(jlo, lastTimeUs);
+					latchNxA.store(0, std::memory_order_release);
+					latchDeferredA.store(false, std::memory_order_release);
+					latchNyA.store(0, std::memory_order_release);
+					for (int a = 0; a < 2; ++a)
+					{
+						heldApplied[a] = Geometry::AxisGeom();
+						lastFiltered[a] = Geometry::AxisGeom();
+					}
+				}
+				else if (safetyOn)
 				{
 					const LatchOutput lo = latch.Reset();   // M4: counted AND noticed
 					FoldLatchCounters();
@@ -1384,13 +1594,287 @@ namespace SourceIdentity
 					log.PostNotice("Source identity: upscale latch re-confirmed at " + std::to_string(timeUs / 1000000) + " s; the deferred release is cancelled");
 			}
 
-			// TODO(SID r2 R1): R1 = the fundamental-harmonic rule (integer-ratio family, the lowest member confirmed by spectral roll-off) is NOT
-			// implemented. The harmful case in E0 (doc 91 section E, E0-results.md section 3, dark60_meridian) was its use of WINDOW CARRY-OVER;
-			// the roll-off confirmation must use current-shot / stream evidence only.
-			// Filters the readers applied geometry through the latch: a confident UPSCALED reading is published only while the latch holds it
-			// (the bar met, a published conventional pair). While latched (r2 fix H1) only a reading of the LATCHED size (+-1 px per axis, after
-			// Step, so a Move has updated it) is published; any other reading, a lost confidence, or one axis reading native (L6: no single-axis
-			// geometry while latched) publishes the held latch. Native-both releases in the latch. Not called while the rules are off.
+			void FoldJointLatchCounters()
+			{
+				const JointLatchCounters& c = jointLatch.Counters();
+				const uint64_t ceilingNow = c.releasesCeiling - jointLatchBase.releasesCeiling;
+				cLatchRelCeiling.fetch_add(ceilingNow, std::memory_order_relaxed);
+				if (ceilingNow != 0)
+					LogCeilingRelease(cLatchRelCeiling.load(std::memory_order_relaxed));
+				latchDeferredA.store(jointLatch.Deferred(), std::memory_order_release);
+				{
+					std::lock_guard<std::mutex> lk(s2CounterMutex);
+					s2JointCounters.entriesChainAlone += c.entriesChainAlone - jointLatchBase.entriesChainAlone;
+					s2JointCounters.entriesJoint += c.entriesJoint - jointLatchBase.entriesJoint;
+					s2JointCounters.moves += c.moves - jointLatchBase.moves;
+					s2JointCounters.confirmsChain += c.confirmsChain - jointLatchBase.confirmsChain;
+					s2JointCounters.g2JointRenewals += c.g2JointRenewals - jointLatchBase.g2JointRenewals;
+					s2JointCounters.classicalHoldPauses += c.classicalHoldPauses - jointLatchBase.classicalHoldPauses;
+					s2JointCounters.classicalHoldDeniedByB += c.classicalHoldDeniedByB - jointLatchBase.classicalHoldDeniedByB;
+					s2JointCounters.wouldBeClassicalOnly += c.wouldBeClassicalOnly - jointLatchBase.wouldBeClassicalOnly;
+					s2JointCounters.classicalVoided += c.classicalVoided - jointLatchBase.classicalVoided;
+					s2JointCounters.blockedByStepMark += c.blockedByStepMark - jointLatchBase.blockedByStepMark;
+					s2JointCounters.heldBack += c.heldBack - jointLatchBase.heldBack;
+					s2JointCounters.nonConventional += c.nonConventional - jointLatchBase.nonConventional;
+					s2JointCounters.detailAboveTransientIgnored += c.detailAboveTransientIgnored - jointLatchBase.detailAboveTransientIgnored;
+					s2JointCounters.releases += c.releases - jointLatchBase.releases;
+					s2JointCounters.releasesStarvation += c.releasesStarvation - jointLatchBase.releasesStarvation;
+					s2JointCounters.releasesHardBound += c.releasesHardBound - jointLatchBase.releasesHardBound;
+					s2JointCounters.releasesCeiling += ceilingNow;
+					s2JointCounters.releasesAtCut += c.releasesAtCut - jointLatchBase.releasesAtCut;
+					s2JointCounters.releasesNative += c.releasesNative - jointLatchBase.releasesNative;
+					s2JointCounters.releasesDetailAbove += c.releasesDetailAbove - jointLatchBase.releasesDetailAbove;
+					s2JointCounters.releasesMenu += c.releasesMenu - jointLatchBase.releasesMenu;
+					s2JointCounters.releasesAbr += c.releasesAbr - jointLatchBase.releasesAbr;
+					s2JointCounters.releasesReset += c.releasesReset - jointLatchBase.releasesReset;
+					s2JointCounters.deferred += c.deferred - jointLatchBase.deferred;
+					s2JointCounters.deferCancelled += c.deferCancelled - jointLatchBase.deferCancelled;
+					s2JointCounters.invalidInputs += c.invalidInputs - jointLatchBase.invalidInputs;
+				}
+				jointLatchBase = c;
+			}
+
+			void FoldStepMarkCounters()
+			{
+				const StepMarkCounters& c = stepMark.Counters();
+				{
+					std::lock_guard<std::mutex> lk(s2CounterMutex);
+					s2StepCounters.marksRaised += c.marksRaised - stepMarkBase.marksRaised;
+					s2StepCounters.ignoredBelowRatioStep += c.ignoredBelowRatioStep - stepMarkBase.ignoredBelowRatioStep;
+					s2StepCounters.coalescedWhilePending += c.coalescedWhilePending - stepMarkBase.coalescedWhilePending;
+					s2StepCounters.rejectedInvalidInput += c.rejectedInvalidInput - stepMarkBase.rejectedInvalidInput;
+					s2StepCounters.confirmedByChain += c.confirmedByChain - stepMarkBase.confirmedByChain;
+					s2StepCounters.confirmedByClassical += c.confirmedByClassical - stepMarkBase.confirmedByClassical;
+					s2StepCounters.immediateReleases += c.immediateReleases - stepMarkBase.immediateReleases;
+					s2StepCounters.challengesOpened += c.challengesOpened - stepMarkBase.challengesOpened;
+					s2StepCounters.challengesCleared += c.challengesCleared - stepMarkBase.challengesCleared;
+					s2StepCounters.challengesResumedAfterUnconfirmed += c.challengesResumedAfterUnconfirmed - stepMarkBase.challengesResumedAfterUnconfirmed;
+					s2StepCounters.challengeReleases += c.challengeReleases - stepMarkBase.challengeReleases;
+					s2StepCounters.unconfirmedTimeouts += c.unconfirmedTimeouts - stepMarkBase.unconfirmedTimeouts;
+					s2StepCounters.bucketOverflowDrops += c.bucketOverflowDrops - stepMarkBase.bucketOverflowDrops;
+					s2StepCounters.resetsOnCut += c.resetsOnCut - stepMarkBase.resetsOnCut;
+					s2StepCounters.resetsDiscontinuity += c.resetsDiscontinuity - stepMarkBase.resetsDiscontinuity;
+					s2StepCounters.resetsBackwardTime += c.resetsBackwardTime - stepMarkBase.resetsBackwardTime;
+				}
+				stepMarkBase = c;
+			}
+
+			void NoteJointLatchEvent(const JointLatchOutput& jlo, int64_t timeUs)
+			{
+				if (JointLatchEventIsRelease(jlo.event))
+					log.PostNotice(std::string("Source identity: joint latch ") + JointLatchReasonText(jlo.reason) + " at " + std::to_string(timeUs / 1000000) + " s");
+				else if (jlo.deferredNow)
+					log.PostNotice(std::string("Source identity: joint latch ") + JointLatchReasonText(jlo.reason) + " at " + std::to_string(timeUs / 1000000) + " s");
+				else if (jlo.deferCancelled)
+					log.PostNotice(std::string("Source identity: joint latch ") + JointLatchReasonText(jlo.reason) + " at " + std::to_string(timeUs / 1000000) + " s");
+				else if (jlo.classicalOnlyBlocked)
+					log.PostNotice(std::string("Source identity: ") + JointLatchReasonText(jlo.reason) + " at " + std::to_string(timeUs / 1000000) + " s");
+			}
+
+			// Stage S2: R1 fundamental-harmonic order selection (SelectFundamentalHarmonic, ChainJointLatch.h) +
+			// two-witness ChainJointLatch (Owner-approved OD-1 & OD-2). Replaces legacy TODO(SID r2 R1) when jointLatchOn.
+			void ApplyJointLatch(ReadingOutput out[2], const AxisRun run[2], uint32_t flags, int64_t timeUs,
+				int rasterW, int rasterH, const ClassicalFreshState& cf)
+			{
+				bool conf[2], nat[2];
+				for (int a = 0; a < 2; ++a)
+				{
+					conf[a] = out[a].applied.state == Geometry::LatchState::Latched;
+					nat[a] = conf[a] && out[a].applied.n >= out[a].applied.N;
+				}
+				const int Nx = run[0].have ? run[0].ls.axisLen : (out[0].applied.N > 0 ? out[0].applied.N : rasterW);
+				const int Ny = run[1].have ? run[1].ls.axisLen : (out[1].applied.N > 0 ? out[1].applied.N : rasterH);
+
+				JointLatchInput jIn;
+				jIn.timeUs = timeUs;
+				jIn.c1 = thr.c1;
+				jIn.rasterW = rasterW;
+				jIn.rasterH = rasterH;
+				jIn.menuHold = (flags & (kEvMenuHold | kEvClearWindow)) != 0u || (run[0].have && run[0].up.hold) || (run[1].have && run[1].up.hold);
+				jIn.mixedContent = cf.mixed;
+				jIn.subtitleOverlay = cf.subtitle;
+				jIn.inFade = cf.inFade || ((flags & kEvFade) != 0u);
+				jIn.stepMarkPending = stepMarkOn && stepMark.BlocksEntryOrMove();
+				jIn.abrStepImmediateRelease = stepMarkImmediateReleasePending;
+				stepMarkImmediateReleasePending = false;
+				jIn.shotBoundary = shotStartedNow;
+				jIn.chainNativeBoth = nat[0] && nat[1];
+				jIn.chainInformative = (run[0].have && run[0].up.informative) || (run[1].have && run[1].up.informative);
+
+				// Fresh per-frame classical witness A (never sticky tracker state).
+				const bool classicalHasUpscale = cf.valid && std::isfinite(cf.ratioH) && std::isfinite(cf.ratioV) &&
+					cf.ratioH > 0.0 && cf.ratioH < 1.0 && cf.ratioV > 0.0 && cf.ratioV < 1.0 && Nx > 0 && Ny > 0;
+				if (classicalHasUpscale)
+				{
+					jIn.classicalValid = true;
+					jIn.classicalNx = RoundToInt(static_cast<double>(Nx) * cf.ratioH);
+					jIn.classicalNxDenom = Nx;
+					jIn.classicalNy = RoundToInt(static_cast<double>(Ny) * cf.ratioV);
+					jIn.classicalNyDenom = Ny;
+				}
+				jIn.classicalDetailAbove = cf.detailAbove;
+
+				// Witness B chain-alone pair (confident pair on both axes).
+				const AxisSummary sumX = evidence.Summary(0);
+				const AxisSummary sumY = evidence.Summary(1);
+				jIn.haveChainPair = conf[0] && conf[1] && !(nat[0] && nat[1]);
+				if (jIn.haveChainPair)
+				{
+					jIn.chainNx = out[0].applied.n;
+					jIn.chainNxDenom = out[0].applied.N;
+					jIn.chainNy = out[1].applied.n;
+					jIn.chainNyDenom = out[1].applied.N;
+					jIn.chainLlrX = out[0].applied.llr;
+					jIn.chainLlrY = out[1].applied.llr;
+					jIn.chainShots = (std::min)(sumX.shots, sumY.shots);
+				}
+
+				// R1 Fundamental-Harmonic Order Selection (ChainJointLatch.h::SelectFundamentalHarmonic):
+				// Evaluate conventional pairs present in this evaluation's current-shot evidence and pick the smallest
+				// integer-ratio fundamental confirmed by A roll-off (!detailAbove) + B current-shot credit.
+				const double jNeed = jointLatch.JointFraction(timeUs) * thr.c1;
+				if (run[0].have && run[1].have && Nx > 0 && Ny > 0)
+				{
+					std::vector<HarmonicCandidate> harmCands;
+					for (int ix = 0; ix < run[0].up.candidateCount; ++ix)
+					{
+						const int nx = run[0].up.cand[ix].n;
+						if (nx <= 0) continue;
+						const ChainEvidence::ShotDiag dx = evidence.ShotDiagAtN(0, nx);
+						for (int iy = 0; iy < run[1].up.candidateCount; ++iy)
+						{
+							const int ny = run[1].up.cand[iy].n;
+							if (ny <= 0) continue;
+							if (!Scaling::GeometrySet::AgreeingPair(nx, Nx, ny, Ny, rasterW, rasterH))
+								continue;
+							const ChainEvidence::ShotDiag dy = evidence.ShotDiagAtN(1, ny);
+							HarmonicCandidate hc;
+							hc.nx = nx; hc.Nx = Nx;
+							hc.ny = ny; hc.Ny = Ny;
+							hc.creditX = dx.open;
+							hc.creditY = dy.open;
+							const double rx = static_cast<double>(nx) / static_cast<double>(Nx);
+							const double ry = static_cast<double>(ny) / static_cast<double>(Ny);
+							const bool aAgrees = classicalHasUpscale &&
+								Scaling::GeometrySet::Near(cf.ratioH, rx) && Scaling::GeometrySet::Near(cf.ratioV, ry);
+							const bool aSeesHigher = classicalHasUpscale &&
+								(cf.ratioH > rx * (1.0 + Scaling::GeometrySet::kConventionTolerance) ||
+								 cf.ratioV > ry * (1.0 + Scaling::GeometrySet::kConventionTolerance));
+							hc.classicalRollOffConfirmed = aAgrees && !cf.detailAbove;
+							hc.detailAbove = cf.detailAbove || aSeesHigher;
+							harmCands.push_back(hc);
+						}
+					}
+					if (!harmCands.empty())
+					{
+						const HarmonicSelectionResult hRes = SelectFundamentalHarmonic(harmCands, rasterW, rasterH, jNeed);
+						if (hRes.found && hRes.reason == HarmonicSelectionReason::SelectedFundamentalConfirmed)
+						{
+							cR1HarmonicSelections.fetch_add(1, std::memory_order_relaxed);
+							// Apply confirmed fundamental to both chain pair (when chain-alone eligible) and joint target.
+							if (jIn.haveChainPair)
+							{
+								jIn.chainNx = hRes.nx; jIn.chainNxDenom = hRes.Nx;
+								jIn.chainNy = hRes.ny; jIn.chainNyDenom = hRes.Ny;
+							}
+							if (jIn.classicalValid)
+							{
+								jIn.classicalNx = hRes.nx; jIn.classicalNxDenom = hRes.Nx;
+								jIn.classicalNy = hRes.ny; jIn.classicalNyDenom = hRes.Ny;
+							}
+						}
+					}
+				}
+
+				// Witness B current-shot dwell & credit for the joint / G2 target pair.
+				const int targetNx = jointLatch.Latched() ? jointLatch.LatchedNx() : (jIn.classicalValid ? jIn.classicalNx : jIn.chainNx);
+				const int targetNy = jointLatch.Latched() ? jointLatch.LatchedNy() : (jIn.classicalValid ? jIn.classicalNy : jIn.chainNy);
+				jIn.currentShotDwellSec = (std::min)(evidence.CurrentShotDwellSec(0, timeUs), evidence.CurrentShotDwellSec(1, timeUs));
+				if (targetNx > 0 && targetNy > 0)
+				{
+					const ChainEvidence::ShotDiag dx = evidence.ShotDiagAtN(0, targetNx);
+					const ChainEvidence::ShotDiag dy = evidence.ShotDiagAtN(1, targetNy);
+					jIn.currentShotCreditX = dx.open;
+					jIn.currentShotCreditY = dy.open;
+					if (dx.openNewestUs >= 0 && dy.openNewestUs >= 0)
+						jIn.currentShotNewestCreditUs = (std::min)(dx.openNewestUs, dy.openNewestUs);
+					else
+						jIn.currentShotNewestCreditUs = (std::max)(dx.openNewestUs, dy.openNewestUs);
+				}
+
+				// Witness B incremental credits for the currently latched size (M1).
+				if (jointLatch.Latched())
+				{
+					jIn.gainX = evidence.CreditAtN(0, jointLatch.LatchedNx(), &jIn.gainTimeX, &jIn.rawX);
+					jIn.gainY = evidence.CreditAtN(1, jointLatch.LatchedNy(), &jIn.gainTimeY, &jIn.rawY);
+				}
+
+				const JointLatchOutput jlo = jointLatch.Step(jIn);
+				FoldJointLatchCounters();
+				NoteJointLatchEvent(jlo, timeUs);
+
+				// Discredit stale evidence window on starvation releases (matching UpscaleLatch M1 rule).
+				if (jlo.event == JointLatchEvent::ReleasedStarvation ||
+					jlo.event == JointLatchEvent::ReleasedHardBound ||
+					jlo.event == JointLatchEvent::ReleasedCeiling)
+				{
+					evidence.Reset();
+				}
+
+				latchNxA.store(jlo.latched ? jlo.nx : 0, std::memory_order_release);
+				latchNyA.store(jlo.latched ? jlo.ny : 0, std::memory_order_release);
+				for (int a = 0; a < 2; ++a)
+				{
+					const bool confUp = conf[a] && !nat[a];
+					Geometry::AxisGeom g = out[a].applied;
+					if (jlo.latched)
+					{
+						const int ln = a == 0 ? jlo.nx : jlo.ny;
+						const int lN = a == 0 ? jlo.Nx : jlo.Ny;
+						const int dn = out[a].applied.n > ln ? out[a].applied.n - ln : ln - out[a].applied.n;
+						if (confUp && dn <= 1)
+						{
+							heldApplied[a] = out[a].applied;
+						}
+						else if (heldApplied[a].state == Geometry::LatchState::Latched &&
+							(heldApplied[a].n > ln ? heldApplied[a].n - ln : ln - heldApplied[a].n) <= 1)
+						{
+							g = heldApplied[a];
+						}
+						else
+						{
+							// Joint entry (1-shot A+B) or R1 fundamental override: synthesize confident applied AxisGeom for the latched pair.
+							Geometry::AxisGeom jg;
+							jg.state = Geometry::LatchState::Latched;
+							jg.n = ln;
+							jg.N = lN;
+							jg.ratio = lN > 0 ? static_cast<float>(static_cast<double>(ln) / static_cast<double>(lN)) : 0.0f;
+							const double creditAxis = a == 0 ? jIn.currentShotCreditX : jIn.currentShotCreditY;
+							jg.llr = static_cast<float>((std::max)(static_cast<double>(out[a].applied.llr), creditAxis));
+							jg.conf = 1.0f;
+							jg.kernelIndex = out[a].measured.kernelIndex;
+							jg.kernelConf = out[a].measured.kernelConf;
+							heldApplied[a] = jg;
+							g = jg;
+						}
+					}
+					else
+					{
+						heldApplied[a] = Geometry::AxisGeom();
+						if (confUp)
+							g = UnsureLike(out[a].applied, jlo.reasonBits | kReasonLatchBar);
+						else if (jlo.reasonBits != 0u && !conf[a])
+							g.reasonBits |= jlo.reasonBits;
+					}
+					const bool changed = g.state != lastFiltered[a].state || g.n != lastFiltered[a].n || g.kernelIndex != lastFiltered[a].kernelIndex;
+					out[a].applied = g;
+					out[a].appliedChanged = changed;
+					lastFiltered[a] = g;
+				}
+			}
+
+			// Filters the readers applied geometry through the legacy r2 latch (used when safetyOn && !jointLatchOn).
+			// R1 fundamental-harmonic selection is implemented in ApplyJointLatch via SelectFundamentalHarmonic (ChainJointLatch.h).
 			void ApplyLatch(ReadingOutput out[2], const AxisRun run[2], uint32_t flags, int64_t timeUs, int rasterW, int rasterH)
 			{
 				bool conf[2], nat[2];
@@ -1478,12 +1962,28 @@ namespace SourceIdentity
 				std::string fmt;
 				bool classicalOk = false;
 				double classical[2] = { 1.0, 1.0 };
+				ClassicalFreshState cf;
+				std::vector<AbrStepEventRec> abrStepsNow;
 				{
 					std::lock_guard<std::mutex> lk(m);
 					fmt = formatInfo;
 					classicalOk = classicalValid;
 					classical[0] = classicalRatio[0];
 					classical[1] = classicalRatio[1];
+					cf = classicalFresh;
+					if (stepMarkOn && !abrStepEvents.empty())
+					{
+						for (size_t i = 0; i < abrStepEvents.size();)
+						{
+							if (abrStepEvents[i].seq <= s.seq)
+							{
+								abrStepsNow.push_back(abrStepEvents[i]);
+								abrStepEvents.erase(abrStepEvents.begin() + static_cast<std::ptrdiff_t>(i));
+							}
+							else
+								++i;
+						}
+					}
 				}
 				log.SetFormatInfo(fmt);
 
@@ -1501,7 +2001,8 @@ namespace SourceIdentity
 				const int cutsNow = s.cuts > 0 ? s.cuts : ((flags & kEvCut) != 0u ? 1 : 0);
 				shotId += static_cast<uint32_t>(cutsNow);
 				shotStartedNow = cutsNow > 0;
-				if (!shotStartedNow && safetyOn && (flags & (kEvBlank | kEvFade)) != 0u)
+				const bool rulesActive = safetyOn || jointLatchOn;
+				if (!shotStartedNow && rulesActive && (flags & (kEvBlank | kEvFade)) != 0u)
 				{
 					// N2 (F1): a black / fade with no cut is a visible transition: a new evidence shot, so a true upscale can re-confirm in
 					// the scene after it (and a deferred starvation release waits for that shot's dwell, ChainLatch N1). Rate-limited to
@@ -1519,6 +2020,66 @@ namespace SourceIdentity
 				{
 					haveShotStart = true;
 					shotStartUs = s.timeUs;
+				}
+				// Stage S2: ChainStepMark pre-eval processing (clean reset on cut/area change, raise pending mark on ABR step,
+				// optional fast classical confirmation). Inert unless stepMarkOn.
+				auto currentLatchCtx = [&]() {
+					StepMarkLatchContext ctx;
+					if (jointLatchOn && jointLatch.Latched())
+					{
+						ctx.latched = true;
+						ctx.nx = jointLatch.LatchedNx(); ctx.Nx = jointLatch.LatchedNxDenom();
+						ctx.ny = jointLatch.LatchedNy(); ctx.Ny = jointLatch.LatchedNyDenom();
+					}
+					else if (!jointLatchOn && safetyOn && latch.Latched())
+					{
+						ctx.latched = true;
+						ctx.nx = latch.LatchedNx(); ctx.Nx = lastAxisLen[0] > 0 ? lastAxisLen[0] : rasterW;
+						ctx.ny = latch.LatchedNy(); ctx.Ny = lastAxisLen[1] > 0 ? lastAxisLen[1] : rasterH;
+					}
+					return ctx;
+				};
+				if (stepMarkOn)
+				{
+					if (areaChanged)
+					{
+						stepMark.Reset(StepMarkReason::ResetDiscontinuity);
+						stepMarkImmediateReleasePending = false;
+					}
+					else if (cutsNow > 0)
+					{
+						stepMark.Reset(StepMarkReason::ResetOnCut);
+					}
+					for (size_t i = 0; i < abrStepsNow.size(); ++i)
+						stepMark.OnAbrStep(abrStepsNow[i].t0Us, abrStepsNow[i].ratioStep);
+					if (stepMark.IsPending() && cf.valid)
+					{
+						StepMarkClassicalFrame cfr;
+						cfr.timeUs = s.timeUs;
+						cfr.informative = true;
+						cfr.voided = cf.mixed || cf.subtitle || cf.inFade || ((flags & kEvMenuHold) != 0u);
+						cfr.nativeReading = !(cf.ratioH < 1.0 && cf.ratioV < 1.0);
+						cfr.rasterW = rasterW;
+						cfr.rasterH = rasterH;
+						if (!cfr.nativeReading && rasterW > 0 && rasterH > 0)
+						{
+							cfr.hasPair = true;
+							cfr.nx = RoundToInt(static_cast<double>(rasterW) * cf.ratioH);
+							cfr.Nx = rasterW;
+							cfr.ny = RoundToInt(static_cast<double>(rasterH) * cf.ratioV);
+							cfr.Ny = rasterH;
+						}
+						const StepMarkOutput smo = stepMark.OnClassicalFrame(cfr, currentLatchCtx());
+						if (smo.action == StepMarkAction::ConfirmVoidOnly ||
+							smo.action == StepMarkAction::ConfirmVoidAndRelease ||
+							smo.action == StepMarkAction::ConfirmVoidAndChallenge)
+						{
+							evidence.VoidBefore(smo.actionFromTimeUs);
+							if (smo.action == StepMarkAction::ConfirmVoidAndRelease)
+								stepMarkImmediateReleasePending = true;
+						}
+					}
+					FoldStepMarkCounters();
 				}
 				// Revert window: the evidence window (both axes, as a resync reset does without the reset record) is cleared BEFORE this evaluation
 				// on a ClearWindow event (the monitor: the end of a menu / mixed episode, the first cut after one) and at the first cut after a HOLD
@@ -1541,40 +2102,102 @@ namespace SourceIdentity
 				}
 				const bool latchedMode = latchedPower.load(std::memory_order_acquire);
 				const int step = cfg.outputStepOverride > 0 ? cfg.outputStepOverride : DetectStepCodes(s);
-				const double floorCodes = step >= 4 ? 1.155 : 0.289;   // the dof-normalised rounding / dither sigma (ChainEvidence.h)
+				double floorCodes = step >= 4 ? 1.155 : 0.289;   // the dof-normalised rounding / dither sigma (ChainEvidence.h)
 
 				AxisRun run[2];
 				for (int a = 0; a < 2; ++a)
 				{
+					if (ToLineSet(s, a, run[a].ls))
+						run[a].have = true;
+				}
+				// Stage S2 (SHOULD-1 / EXP-8BIT, opt-in, default OFF): empirical floor measurement via ChainEdgeStats.
+				if (empiricalFloorOn)
+				{
+					EdgeStatsSettings empCfg = cfg.evidence.edgeStats;
+					empCfg.enabled = true;
+					double measuredFloor = 0.0;
+					bool anyValid = false;
+					bool anyFallback = false;
+					for (int a = 0; a < 2; ++a)
+					{
+						if (!run[a].have)
+							continue;
+						const EmpiricalFloorResult ef = EstimateEmpiricalFloor(run[a].ls, static_cast<double>(step), empCfg);
+						if (ef.valid)
+						{
+							anyValid = true;
+							if (ef.floorCodes > measuredFloor)
+								measuredFloor = ef.floorCodes;
+							if (ef.usedTheoreticalFallback)
+								anyFallback = true;
+						}
+					}
+					if (anyValid)
+					{
+						floorCodes = measuredFloor;
+						cEmpiricalFloorEvals.fetch_add(1, std::memory_order_relaxed);
+						if (anyFallback)
+							cEmpiricalFloorFallbacks.fetch_add(1, std::memory_order_relaxed);
+					}
+				}
+
+				for (int a = 0; a < 2; ++a)
+				{
 					AxisRun& r = run[a];
-					if (!ToLineSet(s, a, r.ls))
+					if (!r.have)
 						continue;
-					r.have = true;
 					const int N = r.ls.axisLen;
 					proposer[a].AddEvaluation(r.ls);
-					int caller[4];
-					int cc = 0;
-					auto addCaller = [&caller, &cc](int n) {
-						if (n < 16 || cc >= 4)
-							return;
-						for (int i = 0; i < cc; ++i)
-							if (caller[i] == n)
-								return;
-						caller[cc++] = n;
-					};
-					if (reader[a].HasConfident() && !reader[a].ConfidentNative())
-						addCaller(reader[a].ConfidentN());
-					const AxisSummary prev = evidence.Summary(a);
-					if (prev.hasBest)
-						addCaller(prev.n);
-					addCaller(RoundToInt(static_cast<double>(N) * 0.5));
-					addCaller(RoundToInt(static_cast<double>(N) * 2.0 / 3.0));
-					ProposedCandidate prop[kMaxCandidates];
-					const int pc = proposer[a].Propose(N, caller, cc, prop, kMaxCandidates);
 					int cands[kMaxCandidates];
-					for (int i = 0; i < pc; ++i)
-						cands[i] = prop[i].n;
+					int pc = 0;
 					VerifyOptions opt;
+					if (convProposalsOn)
+					{
+						// Stage S2 (P3): convention-driven exact proposals prioritized as classical A -> latched -> SourceGeometrySet.
+						const double cRatio = a == 0 ? cf.ratioH : cf.ratioV;
+						const int classicalN = (cf.valid && std::isfinite(cRatio) && cRatio > 0.0 && cRatio < 1.0)
+							? RoundToInt(static_cast<double>(N) * cRatio) : 0;
+						int latchedN = 0;
+						if (jointLatchOn && jointLatch.Latched())
+							latchedN = a == 0 ? jointLatch.LatchedNx() : jointLatch.LatchedNy();
+						else if (safetyOn && latch.Latched())
+							latchedN = a == 0 ? latch.LatchedNx() : latch.LatchedNy();
+						else if (reader[a].HasConfident() && !reader[a].ConfidentNative())
+							latchedN = reader[a].ConfidentN();
+						ProposedCandidate prop[kMaxCandidates];
+						const int extraCnt = proposer[a].Propose(N, nullptr, 0, prop, kMaxCandidates);
+						int extraCands[kMaxCandidates];
+						for (int i = 0; i < extraCnt; ++i)
+							extraCands[i] = prop[i].n;
+						pc = BuildConventionCandidates(a, N, rasterW, rasterH, classicalN, latchedN,
+							extraCands, extraCnt, rulesActive, cands, kMaxCandidates);
+						opt.exactOnly = true;   // P3: exact-verify every prioritized conventional candidate directly
+						cP3ConvProposals.fetch_add(1, std::memory_order_relaxed);
+					}
+					else
+					{
+						int caller[4];
+						int cc = 0;
+						auto addCaller = [&caller, &cc](int n) {
+							if (n < 16 || cc >= 4)
+								return;
+							for (int i = 0; i < cc; ++i)
+								if (caller[i] == n)
+									return;
+							caller[cc++] = n;
+						};
+						if (reader[a].HasConfident() && !reader[a].ConfidentNative())
+							addCaller(reader[a].ConfidentN());
+						const AxisSummary prev = evidence.Summary(a);
+						if (prev.hasBest)
+							addCaller(prev.n);
+						addCaller(RoundToInt(static_cast<double>(N) * 0.5));
+						addCaller(RoundToInt(static_cast<double>(N) * 2.0 / 3.0));
+						ProposedCandidate prop[kMaxCandidates];
+						pc = proposer[a].Propose(N, caller, cc, prop, kMaxCandidates);
+						for (int i = 0; i < pc; ++i)
+							cands[i] = prop[i].n;
+					}
 					opt.exactLines = ExactLinesFor(cfg, latchedMode, reader[a].HasConfident(), reader[1 - a].HasConfident());
 					if (reader[a].HasConfident() && !reader[a].ConfidentNative())
 						opt.forceExactN = reader[a].ConfidentN();
@@ -1598,6 +2221,43 @@ namespace SourceIdentity
 					obs.rasterH = rasterH;
 					evidence.Submit(a, obs, run[a].up);
 				}
+				// Stage S2: feed chain evaluation into ChainStepMark while Pending or Challenging (inert unless stepMarkOn).
+				if (stepMarkOn && (stepMark.IsPending() || stepMark.IsChallenging()))
+				{
+					const StepMarkLatchContext lctx = currentLatchCtx();
+					const AxisSummary sx = evidence.Summary(0);
+					const AxisSummary sy = evidence.Summary(1);
+					TentativeEvalRecord rec;
+					rec.timeUs = s.timeUs;
+					rec.evalSeq = ++stepMarkEvalSeq;
+					rec.rasterW = rasterW;
+					rec.rasterH = rasterH;
+					if (sx.hasBest && sy.hasBest && run[0].have && run[1].have)
+					{
+						rec.hasChainPair = true;
+						rec.nx = sx.n; rec.Nx = run[0].ls.axisLen;
+						rec.ny = sy.n; rec.Ny = run[1].ls.axisLen;
+						rec.creditX = sx.llr;
+						rec.creditY = sy.llr;
+					}
+					rec.chainSeesNative = sx.nativeLlr >= thr.c1 && sy.nativeLlr >= thr.c1;
+					const bool reconfirmedNow = lctx.latched &&
+						evidence.CreditAtN(0, lctx.nx) > 0.0 && evidence.CreditAtN(1, lctx.ny) > 0.0;
+					const StepMarkOutput smo = stepMark.OnChainEvaluation(rec, lctx, reconfirmedNow);
+					if (smo.action == StepMarkAction::ConfirmVoidOnly ||
+						smo.action == StepMarkAction::ConfirmVoidAndRelease ||
+						smo.action == StepMarkAction::ConfirmVoidAndChallenge)
+					{
+						evidence.VoidBefore(smo.actionFromTimeUs);
+					}
+					if (smo.action == StepMarkAction::ConfirmVoidAndRelease ||
+						smo.action == StepMarkAction::ChallengeExpiredRelease)
+					{
+						stepMarkImmediateReleasePending = true;
+					}
+					FoldStepMarkCounters();
+				}
+
 				if (observer)
 				{
 					EvaluationDetail d;
@@ -1683,7 +2343,19 @@ namespace SourceIdentity
 					++discontinuities;
 					cDiscontinuities.fetch_add(1, std::memory_order_relaxed);
 				}
-				if (safetyOn)
+				if (jointLatchOn)
+				{
+					if (anyReset || areaChanged)
+					{
+						const JointLatchOutput jlo = jointLatch.Reset();
+						FoldJointLatchCounters();
+						NoteJointLatchEvent(jlo, s.timeUs);
+						heldApplied[0] = Geometry::AxisGeom();
+						heldApplied[1] = Geometry::AxisGeom();
+					}
+					ApplyJointLatch(out, run, flags, s.timeUs, rasterW, rasterH, cf);
+				}
+				else if (safetyOn)
 				{
 					if (anyReset || areaChanged)
 					{
@@ -1715,12 +2387,12 @@ namespace SourceIdentity
 				// N2 (S1 bound): while the monitor keeps leaving native-looking frames out on the strength of this very reading (a note since
 				// the last evaluation), the long cadence does not apply: the reading is re-tested at the acquiring cadence, so a source that
 				// genuinely became native flips it quickly (and the window of ChainEvidence follows the measured, shorter interval).
-				const bool bothConfident = safetyOn ? (out[0].applied.state == Geometry::LatchState::Latched && out[1].applied.state == Geometry::LatchState::Latched)
+				const bool bothConfident = rulesActive ? (out[0].applied.state == Geometry::LatchState::Latched && out[1].applied.state == Geometry::LatchState::Latched)
 					: (AxisConfident(reader[0]) && AxisConfident(reader[1]));
 				const bool nativeHeld = nativeHeldMask.exchange(0u, std::memory_order_acq_rel) != 0u;
-				// N1: while the new shot's re-confirm dwell is open the latch is re-tested at the acquiring cadence (the dwell is 3 s, the
-				// confident cadence 5 s). Rules on only.
-				const bool dwell = safetyOn && latch.Dwelling();
+				// N1: while the new shot's re-confirm dwell is open (or ABR step mark wants fast confirmation) re-test at acquiring cadence.
+				const bool dwell = (jointLatchOn && jointLatch.Dwelling()) || (!jointLatchOn && safetyOn && latch.Dwelling()) ||
+					(stepMarkOn && stepMark.PullNextEval());
 				const bool latchedWithPower = bothConfident && !nativeHeld && !dwell;
 				latchedPower.store(latchedWithPower, std::memory_order_release);
 				acquiringIntervalMs.store(gov.Plan(false).intervalSec * 1000.0, std::memory_order_release);
@@ -1861,6 +2533,15 @@ namespace SourceIdentity
 				c.latch.releasesAtCut = cLatchRelAtCut.load(std::memory_order_relaxed);
 				c.latch.releasesCeiling = cLatchRelCeiling.load(std::memory_order_relaxed);
 				c.fadeShots = cFadeShots.load(std::memory_order_relaxed);
+				{
+					std::lock_guard<std::mutex> lk(s2CounterMutex);
+					c.jointLatch = s2JointCounters;
+					c.stepMark = s2StepCounters;
+				}
+				c.r1HarmonicSelections = cR1HarmonicSelections.load(std::memory_order_relaxed);
+				c.p3ConventionProposals = cP3ConvProposals.load(std::memory_order_relaxed);
+				c.empiricalFloorEvals = cEmpiricalFloorEvals.load(std::memory_order_relaxed);
+				c.empiricalFloorFallbacks = cEmpiricalFloorFallbacks.load(std::memory_order_relaxed);
 				return c;
 			}
 
@@ -1917,6 +2598,11 @@ namespace SourceIdentity
 		void ChainEstimator::NoteNativeHeld(unsigned axisMask) { st_->NoteNativeHeld(axisMask); }
 		void ChainEstimator::SetStreamKey(uint64_t key) { st_->SetStreamKey(key); }
 		void ChainEstimator::SetClassical(bool valid, double ratioH, double ratioV) { st_->SetClassical(valid, ratioH, ratioV); }
+		void ChainEstimator::SetClassicalFresh(bool valid, double ratioH, double ratioV, bool detailAbove, bool mixed, bool subtitle, bool inFade)
+		{
+			st_->SetClassicalFresh(valid, ratioH, ratioV, detailAbove, mixed, subtitle, inFade);
+		}
+		void ChainEstimator::NoteAbrStepEvent(int64_t t0Us, double ratioStep, uint64_t seq) { st_->NoteAbrStepEvent(t0Us, ratioStep, seq); }
 		void ChainEstimator::SetFormatInfo(const std::string& text) { st_->SetFormatInfo(text); }
 
 		void ChainEstimator::SetEvidence(const std::string& folder, EvidenceLevel level) { st_->SetEvidence(folder, level); }
@@ -1935,6 +2621,14 @@ namespace SourceIdentity
 		void ChainEstimator::SetSafetyRules(bool on) { st_->SetSafety(on); }
 		bool ChainEstimator::SafetyRules() const { return st_->safetyA.load(std::memory_order_acquire); }
 		void ChainEstimator::SetLatchAbrStepTrigger(bool on) { st_->SetAbr(on); }
+		void ChainEstimator::SetJointLatchSettings(const JointLatchSettings& s) { st_->SetJointLatch(s); }
+		JointLatchSettings ChainEstimator::GetJointLatchSettings() const { return st_->GetJointLatch(); }
+		void ChainEstimator::SetStepMarkSettings(const StepMarkSettings& s) { st_->SetStepMark(s); }
+		StepMarkSettings ChainEstimator::GetStepMarkSettings() const { return st_->GetStepMark(); }
+		void ChainEstimator::SetConventionDrivenProposals(bool on) { st_->SetConvProposals(on); }
+		bool ChainEstimator::ConventionDrivenProposals() const { return st_->GetConvProposals(); }
+		void ChainEstimator::SetEdgeStatsSettings(const EdgeStatsSettings& s, bool empiricalFloor) { st_->SetEdgeStats(s, empiricalFloor); }
+		EdgeStatsSettings ChainEstimator::GetEdgeStatsSettings() const { return st_->GetEdgeStats(); }
 		void ChainEstimator::SetDiagnosticTag(const std::string& tag) { st_->diagTag.Set(tag); }
 		void ChainEstimator::SetDiagnosticDepths(int codedBits, int outputBits)
 		{

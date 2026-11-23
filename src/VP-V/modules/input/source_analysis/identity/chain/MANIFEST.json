@@ -14,6 +14,9 @@
     "src/VP-V/modules/input/source_analysis/identity/chain/ChainNullTables.h",
     "src/VP-V/modules/input/source_analysis/identity/chain/ChainEvidence.h",
     "src/VP-V/modules/input/source_analysis/identity/chain/ChainLatch.h",
+    "src/VP-V/modules/input/source_analysis/identity/chain/ChainStepMark.h",
+    "src/VP-V/modules/input/source_analysis/identity/chain/ChainJointLatch.h",
+    "src/VP-V/modules/input/source_analysis/identity/chain/ChainEdgeStats.h",
     "src/VP-V/modules/input/source_analysis/identity/chain/PowerProbe.h",
     "src/VP-V/modules/input/source_analysis/identity/chain/ChainReading.h",
     "src/VP-V/modules/input/source_analysis/identity/chain/ChainGovernor.h",
@@ -32,7 +35,10 @@
     "src/VP-V/modules/input/source_analysis/identity/tests/ChainEvidenceLogTests.cpp",
     "src/VP-V/modules/input/source_analysis/identity/tests/ChainGovernorStatusTests.cpp",
     "src/VP-V/modules/input/source_analysis/identity/tests/ChainEvalRegistrationTests.cpp",
-    "src/VP-V/modules/input/source_analysis/identity/tests/ChainReadingTests.cpp"
+    "src/VP-V/modules/input/source_analysis/identity/tests/ChainReadingTests.cpp",
+    "src/VP-V/modules/input/source_analysis/identity/tests/ChainStepMarkTests.cpp",
+    "src/VP-V/modules/input/source_analysis/identity/tests/ChainJointLatchTests.cpp",
+    "src/VP-V/modules/input/source_analysis/identity/tests/ChainEdgeStatsTests.cpp"
   ],
   "forwarding_headers": [],
   "components": {

@@ -744,6 +744,18 @@ if (tile < int(tiles) && g.y < ts) {
 
 	void Monitor::SetSourceIdSafetyRules(bool on) { chainEst->SetSafetyRules(on); }
 	void Monitor::SetSourceIdLatchAbrTrigger(bool on) { chainEst->SetLatchAbrStepTrigger(on); }
+	void Monitor::SetChainJointLatch(const SourceIdentity::Chain::JointLatchSettings& s) { chainEst->SetJointLatchSettings(s); }
+	void Monitor::SetChainStepMark(const SourceIdentity::Chain::StepMarkSettings& s) { chainEst->SetStepMarkSettings(s); }
+	void Monitor::SetChainConventionProposals(bool on) { chainEst->SetConventionDrivenProposals(on); }
+	void Monitor::SetChainEdgeStats(const SourceIdentity::Chain::EdgeStatsSettings& s, bool empiricalFloor)
+	{
+		chainEst->SetEdgeStatsSettings(s, empiricalFloor);
+	}
+	void Monitor::SetSourceIdBlockClassicalAlone(bool on)
+	{
+		std::lock_guard<std::mutex> evidenceGuard(evidenceMutex);
+		sourceId.SetBlockClassicalAloneEntry(on);
+	}
 
 	void Monitor::SetChainEnabled(bool on)
 	{
@@ -1315,7 +1327,7 @@ if (tile < int(tiles) && g.y < ts) {
 			bool have = false;
 			{
 				std::unique_lock<std::mutex> lock(mutex);
-				wake.wait(lock, [this] { return stopping || haveJob || !jobQueue.empty() || discontinuityCause.load(std::memory_order_acquire); });
+				wake.wait(lock, [this] { return stopping || (!workerHoldForTest && (haveJob || !jobQueue.empty() || discontinuityCause.load(std::memory_order_acquire))); });
 				if (stopping) return;
 				cause = discontinuityCause.exchange(nullptr, std::memory_order_acq_rel);
 				if (!jobQueue.empty())
@@ -1839,6 +1851,10 @@ if (tile < int(tiles) && g.y < ts) {
 				chainEst->NoteEvent(SourceIdentity::Chain::EstimatorEvent::MenuHold, rowSequence);
 			chainEst->SetClassical(snapshot.reading, snapshot.axisRatioX < 1.0 ? snapshot.axisRatioX : snapshot.declaredRatio,
 				snapshot.axisRatioY < 1.0 ? snapshot.axisRatioY : snapshot.declaredRatio);
+			// Stage S2: forward fresh per-frame informative classical reading (never sticky tracker state) for ChainJointLatch / ChainStepMark.
+			const double freshH = (frame.informative() && frame.ratioH < 1.0) ? frame.ratioH : (frame.informative() ? frame.ratio : 1.0);
+			const double freshV = (frame.informative() && frame.ratioV < 1.0) ? frame.ratioV : (frame.informative() ? frame.ratio : 1.0);
+			chainEst->SetClassicalFresh(frame.informative(), freshH, freshV, detailAboveRaw, mixedNow, false, false);
 		}
 		bool haveRecord = false;
 		SourceIdentity::Record rec;
@@ -1872,7 +1888,11 @@ if (tile < int(tiles) && g.y < ts) {
 			{
 				sourceIdEvents.fetch_add(sourceId.Events() - eventsBefore, std::memory_order_relaxed);
 				if (chainEnabled.load(std::memory_order_acquire))
+				{
 					chainEst->NoteEvent(SourceIdentity::Chain::EstimatorEvent::AbrStep, rowSequence);   // SID r2 R5 switch (inert unless on)
+					const SourceIdentity::AbrEvent& abrEv = sourceId.LastEvent();
+					chainEst->NoteAbrStepEvent(abrEv.timeUs, abrEv.ratioStep, rowSequence);            // Stage S2 ChainStepMark (inert unless on)
+				}
 			}
 			// Dump v4: every emitted ABR step event (boundary and report time) and every cut-confounded step the detector withheld.
 			if (diagAbr.MaybeOn(diagTag))
@@ -2687,6 +2707,15 @@ if (tile < int(tiles) && g.y < ts) {
 				jobsDropped.fetch_add(1, std::memory_order_relaxed);
 			}
 			jobQueue.push_back(std::move(j));
+		}
+		wake.notify_all();
+	}
+
+	void Monitor::SetWorkerHoldForTest(bool hold)
+	{
+		{
+			std::lock_guard<std::mutex> lock(mutex);
+			workerHoldForTest = hold;
 		}
 		wake.notify_all();
 	}

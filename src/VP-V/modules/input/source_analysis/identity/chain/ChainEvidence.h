@@ -57,6 +57,7 @@
 // disagreeing ones subtract it; when one axis abstains nothing is added or subtracted (relaxed).
 // Threshold: c1 = -ln(alpha) + ln(candidates x kernels), alpha = target rate per hour x interval / 3600. It is the DETECTION-confidence
 // level (reading vs UNSURE); it adds no timing.
+#include "ChainEdgeStats.h"
 #include "ChainNullTables.h"
 #include "DescaleVerifier.h"
 
@@ -103,6 +104,8 @@ namespace SourceIdentity
 			double windowMaxSec = 600.0;
 			double rateSmoothing = 0.25;         // weight of the newest gap in the running mean of the evaluation interval
 			double minShotDwellSec = kMinShotDwellSec;   // E2: a shot's evidence counts once the shot lasted this many source seconds (0 = off)
+			// Stage S2 (EXP-8BIT / L4, default OFF): segment-gated excess-variance T_ev + isolated-1/2 k/8 comb check.
+			EdgeStatsSettings edgeStats;
 		};
 
 		struct Thresholds
@@ -169,6 +172,11 @@ namespace SourceIdentity
 			double kernelMargin = 0.0;
 			double familyMargin = 0.0;
 			uint32_t reason = 0;
+			// Stage S2 (EXP-8BIT, default OFF): explicit diagnostic visibility for edge-stats and k/8 comb classification (Rule 4).
+			bool edgeStatsUsed = false;
+			bool edgeStatsFallback = false;
+			EdgeStatsReason edgeStatsReason = EdgeStatsReason::Disabled;
+			EdgeStatsReason combReason = EdgeStatsReason::Disabled;
 		};
 
 		struct EvidenceUpdate
@@ -233,6 +241,66 @@ namespace SourceIdentity
 			{
 				AxisState& a = ax_[axis == 0 ? 0 : 1];
 				a = AxisState();
+			}
+
+			// Stage S2 (ChainStepMark backward action to t0): voids 100% of evidence / credits / pending dwell items
+			// earned strictly before `cutoffTimeUs` on both axes (including any open shot that began before cutoffTimeUs),
+			// while retaining axis geometry and post-cutoff evidence.
+			void VoidBefore(int64_t cutoffTimeUs)
+			{
+				for (int a = 0; a < 2; ++a)
+				{
+					AxisState& st = ax_[a];
+					const bool openShotPreCutoff = st.haveShot && st.shotStartUs < cutoffTimeUs;
+					auto voidHyp = [&](Hypothesis& h) {
+						h.closed.erase(
+							std::remove_if(h.closed.begin(), h.closed.end(),
+								[cutoffTimeUs](const ClosedShot& cs) { return cs.timeUs < cutoffTimeUs; }),
+							h.closed.end());
+						if (openShotPreCutoff || h.shotTimeUs < cutoffTimeUs)
+						{
+							h.shotSum = 0.0;
+							h.shotTimeUs = -1;
+							h.shots = static_cast<int>(h.closed.size());
+							if (h.shots == 0)
+								h.evals = 0;
+						}
+					};
+					for (size_t i = 0; i < st.slots.size(); ++i)
+						voidHyp(st.slots[i]);
+					st.slots.erase(
+						std::remove_if(st.slots.begin(), st.slots.end(),
+							[](const Hypothesis& h) { return h.closed.empty() && h.shots == 0 && h.shotTimeUs < 0; }),
+						st.slots.end());
+					voidHyp(st.native);
+					st.pending.erase(
+						std::remove_if(st.pending.begin(), st.pending.end(),
+							[cutoffTimeUs](const PendingEvidence& pe) { return pe.timeUs < cutoffTimeUs; }),
+						st.pending.end());
+					st.credits.erase(
+						std::remove_if(st.credits.begin(), st.credits.end(),
+							[cutoffTimeUs](const EvidenceCredit& ec) { return ec.timeUs < cutoffTimeUs; }),
+						st.credits.end());
+					if (openShotPreCutoff)
+					{
+						st.shotStartUs = cutoffTimeUs;
+						st.shotMet = false;
+					}
+					if (st.slots.empty() && st.native.closed.empty() && st.native.shots == 0)
+					{
+						st.shots = 0;
+						st.informativeEvals = 0;
+					}
+				}
+			}
+
+			// Stage S2 (ChainJointLatch): elapsed source seconds of the currently tracked shot on `axis` (0 when unknown).
+			double CurrentShotDwellSec(int axis, int64_t nowUs) const
+			{
+				const AxisState& st = ax_[axis == 0 ? 0 : 1];
+				if (!st.haveShot || nowUs < st.shotStartUs)
+					return 0.0;
+				return static_cast<double>(nowUs - st.shotStartUs) / 1e6;
 			}
 
 			// R5 support (M1): forgets the credits of the newest evaluation on both axes. The estimator calls it at the start of every evaluation,
@@ -320,6 +388,26 @@ namespace SourceIdentity
 					TrackShot(st, obs.shotId, obs.timeUs, cap);
 				else
 					FlushPending(st, cap);   // no time on this evaluation: whatever was held counts now
+				// Stage S2 (EXP-8BIT Pitfall #1, opt-in): locate optional odd k/8 comb probes (3/8, 5/8, 7/8) from this
+				// evaluation's exact candidates so isolated 1/2 notches can be distinguished from 8x8 codec grids.
+				bool haveComb3 = false, haveComb5 = false, haveComb7 = false;
+				double comb3 = 0.0, comb5 = 0.0, comb7 = 0.0;
+				if (s_.edgeStats.enabled)
+				{
+					const double tol = s_.edgeStats.halfPixelTol;
+					const double dN = static_cast<double>(obs.axisLen);
+					for (size_t i = 0; i < vr.candidates.size(); ++i)
+					{
+						const CandidateResult& cr = vr.candidates[i];
+						if (!cr.valid || !cr.exactDone || cr.lineCount < 1 || !std::isfinite(cr.stat))
+							continue;
+						if (std::fabs(static_cast<double>(cr.n) - dN * 3.0 / 8.0) <= tol) { haveComb3 = true; comb3 = cr.stat; }
+						else if (std::fabs(static_cast<double>(cr.n) - dN * 5.0 / 8.0) <= tol) { haveComb5 = true; comb5 = cr.stat; }
+						else if (std::fabs(static_cast<double>(cr.n) - dN * 7.0 / 8.0) <= tol) { haveComb7 = true; comb7 = cr.stat; }
+					}
+				}
+				const bool haveAllCombProbes = haveComb3 && haveComb5 && haveComb7;
+
 				bool anyUsable = false;
 				for (size_t i = 0; i < vr.candidates.size() && out.candidateCount < kMaxCandidates; ++i)
 				{
@@ -327,7 +415,7 @@ namespace SourceIdentity
 					if (!cr.valid || !cr.exactDone || cr.lineCount < 1)
 						continue;
 					anyUsable = true;
-					Judge(cr, obs.axisLen, floorC, out.cand[out.candidateCount]);
+					Judge(cr, obs.axisLen, floorC, out.cand[out.candidateCount], haveAllCombProbes, comb3, comb5, comb7);
 					CandidateEvidence& ce = out.cand[out.candidateCount++];
 					// R2 (E0): a size that is not a conventional ratio of the measured axis is UNSURE material, never evidence.
 					if (s_.conventionOnly && ce.informative
@@ -844,7 +932,8 @@ namespace SourceIdentity
 			}
 
 			// Judges one verified candidate: gate, spatial agreement, statistic and increment.
-			void Judge(const CandidateResult& cr, int axisLen, double floorC, CandidateEvidence& ce) const
+			void Judge(const CandidateResult& cr, int axisLen, double floorC, CandidateEvidence& ce,
+				bool haveCombProbes = false, double comb3 = 0.0, double comb5 = 0.0, double comb7 = 0.0) const
 			{
 				ce.n = cr.n;
 				ce.kernel = cr.kernel;
@@ -865,6 +954,29 @@ namespace SourceIdentity
 				const int minGate = (std::max)(s_.minGateLinesFloor, static_cast<int>(std::ceil(s_.minGateFraction * static_cast<double>(nl))));
 				if (gated < minGate)
 				{
+					// Stage S2 (EXP-8BIT MUST-1, opt-in): if whole-line baseline was diluted by 70-85% flat pixels,
+					// check whether segment-gated edge statistics still find >= minInformativeSegments detailed segments.
+					if (s_.edgeStats.enabled)
+					{
+						const double dofRatio = axisLen > 0 ? ClampD(static_cast<double>(cr.n) / static_cast<double>(axisLen), 0.0, 0.999) : 0.0;
+						const SegmentGatedResult segRes = ComputeSegmentGatedStat(cr, dofRatio, floorC, s_.edgeStats);
+						ce.edgeStatsReason = segRes.reason;
+						if (segRes.valid)
+						{
+							ce.gatedOk = true;
+							ce.median = segRes.stat;
+							ce.stat = segRes.stat;
+							ce.edgeStatsUsed = true;
+							const HalfCombCheckResult comb = ClassifyHalfNotchWithCombCheck(
+								cr.n, axisLen, ce.stat, haveCombProbes, comb3, comb5, comb7, s_.edgeStats);
+							ce.cls = comb.resolvedNullClass;
+							ce.combReason = comb.reason;
+							ce.statValid = true;
+							ce.increment = ClampD(nulls_.LogLikelihoodRatio(ce.cls, ce.stat), s_.incrementMin, s_.incrementMax);
+							ce.informative = true;
+							return;
+						}
+					}
 					ce.reason |= kReasonLowDetail;
 					return;
 				}
@@ -940,6 +1052,27 @@ namespace SourceIdentity
 					return;
 				}
 				ce.stat = RobustStats::TrimmedMeanOf(kept.data(), static_cast<int>(kept.size()), s_.trimFraction);
+				// Stage S2 (EXP-8BIT, opt-in, default OFF): segment-gated excess-variance T_ev + isolated-1/2 comb check.
+				if (s_.edgeStats.enabled)
+				{
+					const double dofRatio = axisLen > 0 ? ClampD(static_cast<double>(cr.n) / static_cast<double>(axisLen), 0.0, 0.999) : 0.0;
+					const SegmentGatedResult segRes = ComputeSegmentGatedStat(cr, dofRatio, floorC, s_.edgeStats);
+					ce.edgeStatsReason = segRes.reason;
+					if (segRes.valid)
+					{
+						ce.stat = segRes.stat;
+						ce.edgeStatsUsed = true;
+					}
+					else
+					{
+						// Visible fallback to standard whole-line trimmed mean (Rule 4: never silent).
+						ce.edgeStatsFallback = true;
+					}
+					const HalfCombCheckResult comb = ClassifyHalfNotchWithCombCheck(
+						cr.n, axisLen, ce.stat, haveCombProbes, comb3, comb5, comb7, s_.edgeStats);
+					ce.cls = comb.resolvedNullClass;
+					ce.combReason = comb.reason;
+				}
 				ce.statValid = true;
 				ce.increment = ClampD(nulls_.LogLikelihoodRatio(ce.cls, ce.stat), s_.incrementMin, s_.incrementMax);
 				ce.informative = true;

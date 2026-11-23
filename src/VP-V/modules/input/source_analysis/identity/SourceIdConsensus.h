@@ -79,6 +79,10 @@ namespace SourceIdentity
 		int64_t abrWindowUs = 8000000;       // after an ABR boundary ...
 		int64_t abrDwellUs = 500000;         // ... the dwell is this long (a rendition switch is sudden)
 		double ratioTolerance = 0.03;        // relative; ratios within it are the same value
+		// Stage S2 (Owner-approved OD-1, default OFF): when true, ClassicalResolution alone NEVER enters
+		// an upscaled state from native (logged/counted visibly as "would-be (classical only)"); Chain alone
+		// and Joint (Classical + Chain) remain full entry paths.
+		bool blockClassicalAloneEntry = false;
 	};
 
 	struct FieldResult
@@ -168,6 +172,7 @@ namespace SourceIdentity
 		uint64_t holds = 0;                  // field evaluations that held a value for a reason
 		uint64_t vetoes = 0;                 // safety vetoes that moved an axis to native
 		uint64_t discontinuities = 0;
+		uint64_t classicalOnlyBlocked = 0;   // Stage S2 (OD-1): native -> upscaled entries blocked because only Classical voted
 	};
 
 	class Consensus
@@ -236,6 +241,7 @@ namespace SourceIdentity
 		const Hypothesis& Current() const { return cur_; }
 		const Stats& GetStats() const { return stats_; }
 		const Settings& GetSettings() const { return s_; }
+		void SetBlockClassicalAloneEntry(bool on) { s_.blockClassicalAloneEntry = on; }
 		uint64_t LastDiscontinuitySeq() const { return lastDiscontinuitySeq_; }
 
 	private:
@@ -262,6 +268,7 @@ namespace SourceIdentity
 			double weightedSum = 0.0;
 			double weight = 0.0;
 			int voters = 0;
+			uint32_t voterMask = 0u;         // bit vi set when VoterId(vi) joined this group
 		};
 
 		void ResetState()
@@ -393,10 +400,12 @@ namespace SourceIdentity
 					groups[g].weightedSum = 0.0;
 					groups[g].weight = 0.0;
 					groups[g].voters = 0;
+					groups[g].voterMask = 0u;
 				}
 				groups[g].weight += w;
 				groups[g].weightedSum += w * v;
 				groups[g].voters += 1;
+				groups[g].voterMask |= (1u << vi);
 				if (IsAxis(f))
 					groups[g].value = groups[g].weightedSum / groups[g].weight;
 			}
@@ -452,6 +461,24 @@ namespace SourceIdentity
 				return Hold(fr, st, "held: weak evidence");
 			if (fr.voters < needVoters)
 				return Hold(fr, st, "held: too few voters");
+
+			// Stage S2 (Owner-approved OD-1, default OFF): classical alone NEVER enters an upscaled state from native.
+			// Chain alone and Joint (Classical + Chain) remain full entry paths; releases back to native are never blocked.
+			if (s_.blockClassicalAloneEntry && IsAxis(f) &&
+				cur >= 1.0 - s_.ratioTolerance && cand.value < 1.0 - s_.ratioTolerance)
+			{
+				const uint32_t chainBit = 1u << static_cast<int>(VoterId::Chain);
+				const uint32_t classicalBit = 1u << static_cast<int>(VoterId::ClassicalResolution);
+				if ((cand.voterMask & chainBit) == 0u)
+				{
+					if ((cand.voterMask & classicalBit) != 0u)
+					{
+						++stats_.classicalOnlyBlocked;
+						return Hold(fr, st, "would-be (classical only)");
+					}
+					return Hold(fr, st, "held: no chain witness");
+				}
+			}
 
 			if (!pending)
 			{
