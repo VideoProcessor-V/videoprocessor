@@ -20,6 +20,9 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QCoreApplication>
+#include <QApplication>
+#include <QEvent>
+#include <QFrame>
 #include <QFile>
 #include <QFontDatabase>
 #include <QLabel>
@@ -2192,6 +2195,161 @@ namespace
 			}
 		}
 	}
+
+	// Rule 8 Red Team (W1R-FIX5-2): VP-V styles are hoisted ONCE onto qApp with strictly VP-V-scoped property
+	// selectors; per-widget stylesheets on vpv.section, vpv.units, cards, and setby labels stay empty; a second
+	// window does not grow qApp->styleSheet(); and Bill's General and Rendering pages carry zero VP-V style tags.
+	void testHoistedStylesStaySingleSheetAndIsolatedFromBillPages()
+	{
+		QTemporaryDir dir;
+		const QString path = WriteFixture(dir, "[general]\nrenderer: VP Renderer\n[vprenderer.Default]\n");
+		require(qApp != nullptr, "QApplication instance is missing");
+
+		qsizetype sheetSizeAfterFirst = 0;
+		QString sheetAfterFirst;
+		{
+			ConfigEditorWindow window(path, 0, true);
+			const QString appSheet = qApp->styleSheet();
+			for (const char* selector : {
+				"QFrame[vpvCard=\"true\"]",
+				"QLabel[vpvSetBy=\"true\"]",
+				"QWidget[vpvSection=\"true\"]",
+				"QTabWidget[vpvUnitsTabs=\"true\"]" })
+			{
+				require(appSheet.contains(QString::fromLatin1(selector)),
+					(std::string("qApp->styleSheet() is missing hoisted VP-V selector: ") + selector).c_str());
+			}
+			sheetSizeAfterFirst = appSheet.size();
+			sheetAfterFirst = appSheet;
+
+			auto* section = control<QWidget>(window, Vpv::ObjectName(QStringLiteral("section")));
+			auto* units = control<QTabWidget>(window, Vpv::ObjectName(QStringLiteral("units")));
+			require(section->property("vpvSection").toBool(), "vpv.section lacks vpvSection=true property");
+			require(section->styleSheet().isEmpty(),
+				("vpv.section retains a per-widget stylesheet: " + S(section->styleSheet())).c_str());
+			require(units->property("vpvUnitsTabs").toBool(), "vpv.units lacks vpvUnitsTabs=true property");
+			require(units->styleSheet().isEmpty(),
+				("vpv.units retains a per-widget stylesheet: " + S(units->styleSheet())).c_str());
+
+			int cardCount = 0;
+			for (QFrame* frame : section->findChildren<QFrame*>())
+			{
+				if (!frame->property("vpvCard").toBool()) continue;
+				++cardCount;
+				require(frame->styleSheet().isEmpty(),
+					("a vpvCard frame retains a per-widget stylesheet: " + S(frame->objectName())).c_str());
+			}
+			require(cardCount > 0, "no vpvCard=true card frames were found inside vpv.section");
+
+			int setByCount = 0;
+			for (QLabel* label : section->findChildren<QLabel*>())
+			{
+				if (!label->objectName().startsWith(QStringLiteral("vpv.setby.line."))) continue;
+				++setByCount;
+				require(label->property("vpvSetBy").toBool(),
+					("setby label lacks vpvSetBy=true property: " + S(label->objectName())).c_str());
+				require(label->styleSheet().isEmpty(),
+					("setby label retains a per-widget stylesheet: " + S(label->objectName())).c_str());
+			}
+			require(setByCount > 0, "no vpv.setby.line.* labels were found inside vpv.section");
+
+			// Negative control (Rule 3 — Bill-page isolation): Bill's General (index 0) and Rendering (index 2)
+			// pages must carry zero VP-V style-scoping properties so qApp's hoisted rules cannot bleed onto Bill's UI.
+			auto* pages = control<QStackedWidget>(window, QStringLiteral("settingsPages"));
+			require(pages->count() > 2, "settingsPages does not contain Bill's General and Rendering pages");
+			for (const int billIndex : { 0, 2 })
+			{
+				QWidget* billPage = pages->widget(billIndex);
+				require(billPage != nullptr && billPage != section && !billPage->isAncestorOf(section),
+					"expected Bill page index unexpectedly points to vpv.section");
+				const QList<QWidget*> widgets = billPage->findChildren<QWidget*>();
+				require(!widgets.isEmpty(), "Bill page has no descendant widgets (vacuous isolation check)");
+				auto checkNoVpvTags = [&](QWidget* w)
+				{
+					require(!w->property("vpvSection").toBool(),
+						("Bill page widget leaked vpvSection=true: " + S(w->objectName())).c_str());
+					require(!w->property("vpvCard").toBool(),
+						("Bill page widget leaked vpvCard=true: " + S(w->objectName())).c_str());
+					require(!w->property("vpvDrivePage").toBool(),
+						("Bill page widget leaked vpvDrivePage=true: " + S(w->objectName())).c_str());
+				};
+				checkNoVpvTags(billPage);
+				for (QWidget* child : widgets)
+					checkNoVpvTags(child);
+			}
+		}
+
+		// Idempotency: constructing a second ConfigEditorWindow must NOT append duplicate stylesheet text to qApp.
+		{
+			ConfigEditorWindow window2(path, 0, true);
+			require(qApp->styleSheet().size() == sheetSizeAfterFirst && qApp->styleSheet() == sheetAfterFirst,
+				"constructing a second ConfigEditorWindow grew or duplicated qApp->styleSheet()");
+		}
+	}
+
+	// Rule 8 Red Team (W1R-FIX5-5): Vpv::State has no reference cycle and frees cleanly on normal close, on
+	// rebuildConfigurationShell() (previous->deleteLater()), and when ConfigEditorWindow closes while an orphaned
+	// previous shell (and its timers) is still pending DeferredDelete.
+	void testSectionStateFreesOnCloseAndShellRebuildWithoutDanglingTimers()
+	{
+		QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+		QCoreApplication::processEvents();
+		QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+		QCoreApplication::processEvents();
+		const int baseline = Vpv::LiveSectionStateCount();
+
+		QTemporaryDir dir;
+		const QString path = WriteFixture(dir, "[general]\nrenderer: VP Renderer\n[vprenderer.Default]\n");
+
+		// 1. Normal open/close lifecycle + negative control proving LiveSectionStateCount tracks live states.
+		{
+			ConfigEditorWindow window(path, 0, true);
+			require(Vpv::LiveSectionStateCount() == baseline + 1,
+				"LiveSectionStateCount did not increment to baseline + 1 when ConfigEditorWindow opened");
+		}
+		QCoreApplication::processEvents();
+		QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+		QCoreApplication::processEvents();
+		require(Vpv::LiveSectionStateCount() == baseline,
+			"normal ConfigEditorWindow close leaked Vpv::State");
+
+		// 2. Shell rebuild leak test + orphaned-shell dangling-timer hazard on close.
+		{
+			ConfigEditorWindow window(path, 0, true);
+			require(Vpv::LiveSectionStateCount() == baseline + 1,
+				"LiveSectionStateCount did not increment to baseline + 1 on second window open");
+
+			// Rebuild #1: previous shell is queued for deleteLater(); draining events must free the old Vpv::State.
+			window.setRendererDiscoveryForTesting(
+				{ QStringLiteral("VP Renderer"), QStringLiteral("DirectShow - madVR") },
+				{ QStringLiteral("VP Renderer") });
+			QCoreApplication::processEvents();
+			QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+			QCoreApplication::processEvents();
+			QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+			QCoreApplication::processEvents();
+			require(control<QWidget>(window, Vpv::ObjectName(QStringLiteral("section"))) != nullptr,
+				"shell rebuild did not recreate vpv.section");
+			require(Vpv::LiveSectionStateCount() == baseline + 1,
+				"shell rebuild leaked previous Vpv::State (cycle or retained strong reference)");
+
+			// Rebuild #2 WITHOUT draining processEvents(): leave an orphaned previous shell + its timers pending
+			// DeferredDelete when ~ConfigEditorWindow() executes on scope exit.
+			window.setRendererDiscoveryForTesting(
+				{ QStringLiteral("VP Renderer"), QStringLiteral("DirectShow - madVR") },
+				{ QStringLiteral("VP Renderer") });
+			require(control<QWidget>(window, Vpv::ObjectName(QStringLiteral("section"))) != nullptr,
+				"second shell rebuild did not recreate vpv.section");
+		}
+		// Drain pending 0-ms timers and deferred deletes after ~ConfigEditorWindow(): must neither crash nor leak.
+		QCoreApplication::processEvents();
+		QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+		QCoreApplication::processEvents();
+		QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+		QCoreApplication::processEvents();
+		require(Vpv::LiveSectionStateCount() == baseline,
+			"closing ConfigEditorWindow with a pending orphaned shell leaked Vpv::State");
+	}
 }
 
 int RunVpvConfigTests(const std::function<int(const char*, const std::function<void()>&)>& run,
@@ -2231,5 +2389,7 @@ int RunVpvConfigTests(const std::function<int(const char*, const std::function<v
 	failures += run("VP-V: motion engine off greys the de-judder amount and hiccup repair (batch B)", testMotionEngineOffGreysDejudderAndHiccup);
 	failures += run("VP-V: rule-32 profile controls round trip without Bill duplicates", testRule32ProfileControlsRoundTripWithoutBillDuplicates);
 	failures += run("VP-V: legacy vprenderer pathway migrates to vpv and survives save", testLegacyVprendererPathwayMigratesToVpvAndSurvivesSave);
+	failures += run("VP-V: hoisted styles stay single-sheet and isolated from Bill pages", testHoistedStylesStaySingleSheetAndIsolatedFromBillPages);
+	failures += run("VP-V: section state frees on close and shell rebuild without dangling timers", testSectionStateFreesOnCloseAndShellRebuildWithoutDanglingTimers);
 	return failures;
 }
