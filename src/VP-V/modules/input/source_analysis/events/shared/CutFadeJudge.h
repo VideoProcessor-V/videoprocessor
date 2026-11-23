@@ -605,7 +605,7 @@ private:
                     for (int x = kLocalRadius; x < kGridW - kLocalRadius; ++x)
                         if (k->grid.g[y][x] - prev->grid.g[y][x] < -kFadeCellStepEps)
                             ++darkened;
-                if (darkened == 0 && !(ahead->scored && ahead->score.G == 0.0) && !ahead->flat) {
+                if (darkened == 0 && !(ahead->scored && ahead->score.G == 0.0)) {
                     const GridFadeFit aheadFit = FitGridFadeGrid(k->grid.g, ahead->grid.g, kShiftRadius);
                     if (aheadFit.valid && aheadFit.dir > 0) {
                         k->verdict = v;
