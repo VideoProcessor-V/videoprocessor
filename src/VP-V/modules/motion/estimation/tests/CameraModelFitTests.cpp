@@ -1626,6 +1626,214 @@ namespace VideoProcessorTest
 			Require(same.share == nominal.share, "premise: an explicit 0.25 is the nominal value");
 			Require(widened.computed && widened.share == 0.0 && !widened.detected, "the fit's final precision sets the threshold, share=" + std::to_string(widened.share));
 		}
+
+		// MC-CPU-CAMERA (GEM-149 / P2-3; verify-gemini-mc-81ee082cf.md:75-80,95): test-first frozen synthetic corpus
+		// bit-exact decision pin + 4K 8-px timing harness covering GlobalModelFit::FullFinalRefine,
+		// DynamicTexture::DetectDynamicTexture (with 2de379b5b advected residuals & e34f08a3e resolvedPrecPx),
+		// and GlobalModelObjects::ObjectTracker::Update.
+		TEST_METHOD(McCpuCameraSpeedupAndCorpusParity)
+		{
+			auto mixHash = [](uint64_t& h, const void* data, size_t n)
+			{
+				const uint8_t* p = static_cast<const uint8_t*>(data);
+				for (size_t i = 0; i < n; ++i)
+				{
+					h ^= static_cast<uint64_t>(p[i]);
+					h *= 1099511628211ull;
+				}
+			};
+			auto hashDouble = [&](uint64_t& h, double v)
+			{
+				uint64_t bits = 0;
+				std::memcpy(&bits, &v, sizeof(bits));
+				mixHash(h, &bits, sizeof(bits));
+			};
+			auto hashRecord = [&](uint64_t& h, const CameraMotion& r)
+			{
+				const uint8_t v = r.valid ? 1 : 0;
+				const uint32_t reason = static_cast<uint32_t>(r.reason);
+				const uint32_t type = static_cast<uint32_t>(r.params.type);
+				mixHash(h, &v, sizeof(v));
+				mixHash(h, &reason, sizeof(reason));
+				mixHash(h, &r.verdictFlags, sizeof(r.verdictFlags));
+				mixHash(h, &type, sizeof(type));
+				for (int q = 0; q < 9; ++q) hashDouble(h, r.params.h[q]);
+				hashDouble(h, r.confidence);
+				mixHash(h, &r.finalRefineCells, sizeof(r.finalRefineCells));
+				hashDouble(h, r.signals.dynShare);
+				hashDouble(h, r.signals.dynTemporal);
+				hashDouble(h, r.signals.dynField);
+				hashDouble(h, r.signals.dynSpatial);
+				const uint32_t nObj = static_cast<uint32_t>(r.objects.size());
+				mixHash(h, &nObj, sizeof(nObj));
+				for (const ObjectModel& o : r.objects)
+				{
+					const uint32_t ot = static_cast<uint32_t>(o.type);
+					mixHash(h, &o.id, sizeof(o.id));
+					mixHash(h, &ot, sizeof(ot));
+					mixHash(h, &o.blocks, sizeof(o.blocks));
+					for (int q = 0; q < 9; ++q) hashDouble(h, o.h[q]);
+					hashDouble(h, o.cx);
+					hashDouble(h, o.cy);
+				}
+			};
+
+			// 1. Frozen synthetic corpus across pans, zooms, rotation, perspective, multi-object, dynamic texture,
+			// advected coherent/incoherent movers (2de379b5b), and near-threshold boundary vectors.
+			Config cfg = DT();
+			cfg.staticCamera = true;
+			cfg.maxObjects = 4;
+
+			std::vector<Field> corpus;
+			{ Field f(Grid4K()); f.FromModel(Pan4K()); f.AddNoise(0.05, 1001); corpus.push_back(f); }
+			{ Field f(Grid4K()); f.FromModel(ZoomModel(1.02)); f.AddNoise(0.05, 1002); corpus.push_back(f); }
+			{ Field f(Grid4K()); f.FromModel(Rot1Deg()); f.AddNoise(0.05, 1003); corpus.push_back(f); }
+			{ Field f(Grid4K()); f.FromModel(Persp4K()); f.AddNoise(0.05, 1004); corpus.push_back(f); }
+			{
+				Field f(Grid4K()); f.FromModel(Pan4K());
+				f.AddObject(12, 12, 48, 36, -15.0, 8.0);
+				f.AddObject(140, 20, 44, 34, 18.0, -6.0);
+				f.AddObject(60, 72, 52, 40, -9.0, -14.0);
+				f.AddNoise(0.05, 1005);
+				corpus.push_back(f);
+			}
+			for (uint64_t s = 0; s < 3; ++s)
+				corpus.push_back(AnchoredWater(1100 + s, 3.0));
+			for (int p = 0; p < 3; ++p)
+				corpus.push_back(TexturedMover(p, false));
+			for (int p = 0; p < 3; ++p)
+				corpus.push_back(TexturedMover(p, true));
+			{
+				// Near-threshold boundary vectors stressing DynamicTexture sqrt vs squared comparisons (exact boundary).
+				Field f(Grid4K());
+				const Params m = PanModel(4.0, 3.0);
+				f.FromModel(m);
+				const double prec = 0.25;
+				const double thr = std::max(cfg.dynTextureCfg.absSigmas * prec, cfg.dynTextureCfg.rel * 5.0);
+				for (size_t i = 0; i < f.Count(); ++i)
+				{
+					const double eps = (static_cast<int>(i % 7) - 3) * 1e-6;
+					f.fx[i] = static_cast<float>(4.0 + (thr + eps) * ((i & 1) ? 0.6 : 1.0));
+					f.fy[i] = static_cast<float>(3.0 + (thr + eps) * ((i & 1) ? 0.8 : 0.0));
+				}
+				corpus.push_back(f);
+			}
+
+			Fitter fitter(cfg);
+			uint64_t corpusHash = 14695981039346656037ull;
+			for (size_t i = 0; i < corpus.size(); ++i)
+			{
+				PairInput in = corpus[i].Input(kPairSeconds, 50 + i);
+				in.fullFinalRefine = true;
+				const CameraMotion r = fitter.Fit(in);
+				hashRecord(corpusHash, r);
+			}
+
+			// 2. Direct 4K 8-px (480x270 = 129,600 blocks) timing harness for all three hot CPU kernels.
+			GridSpec g4k8;
+			g4k8.w = 480; g4k8.h = 270; g4k8.blockSize = 8;
+			Field fPan(g4k8);
+			fPan.FromModel(Pan4K());
+			fPan.AddObject(20, 20, 96, 72, -14.0, 9.0);
+			fPan.AddObject(280, 30, 88, 68, 17.0, -7.0);
+			fPan.AddObject(120, 140, 100, 76, -8.0, -13.0);
+			fPan.AddNoise(0.05, 2001);
+
+			Field fDynA(g4k8), fDynB(g4k8);
+			fDynA.FromModel(Pan4K()); fDynA.AddNoise(0.05, 2002);
+			fDynB.FromModel(Pan4K()); fDynB.AddNoise(0.05, 2003);
+			{
+				SplitMix64 rng(2004);
+				for (size_t i = 0; i < fDynA.Count(); ++i)
+				{
+					if (rng.Unit() < 0.15)
+					{
+						fDynA.fx[i] += static_cast<float>((rng.Unit() - 0.5) * 16.0);
+						fDynA.fy[i] += static_cast<float>((rng.Unit() - 0.5) * 16.0);
+						fDynB.fx[i] += static_cast<float>((rng.Unit() - 0.5) * 16.0);
+						fDynB.fy[i] += static_cast<float>((rng.Unit() - 0.5) * 16.0);
+					}
+				}
+			}
+
+			// Benchmark FullFinalRefine (via Fitter::Fit at 4K 8-px)
+			Config fitCfg;
+			fitCfg.maxObjects = 4;
+			Fitter benchFit(fitCfg);
+			PairInput pin = fPan.Input(kPairSeconds, 1);
+			pin.fullFinalRefine = true;
+			CameraMotion ref4k = benchFit.Fit(pin);
+			hashRecord(corpusHash, ref4k);
+			const int kIters = 15;
+			std::vector<double> fitUs(kIters), dynUs(kIters), objUs(kIters);
+			for (int it = 0; it < kIters; ++it)
+			{
+				PairInput p = fPan.Input(kPairSeconds, 2 + it);
+				p.fullFinalRefine = true;
+				const auto t0 = std::chrono::steady_clock::now();
+				const CameraMotion r = benchFit.Fit(p);
+				fitUs[it] = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+				Require(r.valid && r.finalRefineCells > 0, "4k8 fit valid");
+			}
+
+			// Benchmark DetectDynamicTexture at 4K 8-px (two consecutive frames with advected history + explicit resolvedPrecPx)
+			DynTextureState dtState;
+			const DynTextureConfig dtCfg;
+			const PairInput dInA = fDynA.Input(kPairSeconds, 1);
+			const PairInput dInB = fDynB.Input(kPairSeconds, 2);
+			DetectDynamicTexture(dtCfg, dInA, Pan4K(), dtState, 0.25);
+			const DynTextureResult dtRef = DetectDynamicTexture(dtCfg, dInB, Pan4K(), dtState, 0.25);
+			{
+				const uint8_t dc = dtRef.computed ? 1 : 0, dd = dtRef.detected ? 1 : 0;
+				mixHash(corpusHash, &dc, 1); mixHash(corpusHash, &dd, 1);
+				hashDouble(corpusHash, dtRef.share);
+				hashDouble(corpusHash, dtRef.temporal);
+				hashDouble(corpusHash, dtRef.field);
+				hashDouble(corpusHash, dtRef.spatial);
+			}
+			for (int it = 0; it < kIters; ++it)
+			{
+				const auto t0 = std::chrono::steady_clock::now();
+				const DynTextureResult r = DetectDynamicTexture(dtCfg, (it & 1) ? dInA : dInB, Pan4K(), dtState, 0.25);
+				dynUs[it] = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+				Require(r.computed, "4k8 dyn computed");
+			}
+
+			// Benchmark ObjectTracker::Update at 4K 8-px (3 objects, multiple compaction iterations)
+			ObjectInput oIn;
+			oIn.fwdX = fPan.fx.data(); oIn.fwdY = fPan.fy.data(); oIn.trust = fPan.trust.data();
+			oIn.label = ref4k.blocks->label.data();
+			oIn.gridW = g4k8.w; oIn.gridH = g4k8.h; oIn.blockSize = g4k8.blockSize;
+			oIn.picture = fPan.picture; oIn.precisionPx = 0.125; oIn.seed = 42;
+			ObjectConfig oCfg; oCfg.maxObjects = 4;
+			ObjectTracker tracker;
+			std::vector<uint8_t> objIds;
+			const std::vector<ObjectModel> oRef = tracker.Update(oIn, oCfg, objIds);
+			Require(oRef.size() >= 3, "4k8 objects found");
+			for (int it = 0; it < kIters; ++it)
+			{
+				tracker.Reset();
+				const auto t0 = std::chrono::steady_clock::now();
+				const std::vector<ObjectModel> om = tracker.Update(oIn, oCfg, objIds);
+				objUs[it] = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count();
+				Require(om.size() == oRef.size(), "4k8 objects stable");
+			}
+
+			std::sort(fitUs.begin(), fitUs.end());
+			std::sort(dynUs.begin(), dynUs.end());
+			std::sort(objUs.begin(), objUs.end());
+			char report[512];
+			std::snprintf(report, sizeof(report),
+				"MC-CPU-CAMERA 4K-8px timing (p50/p95 us): Fit+FullFinalRefine %.1f/%.1f, DynamicTexture %.1f/%.1f, ObjectTracker %.1f/%.1f | corpusHash=0x%016llx\n",
+				fitUs[kIters / 2], fitUs[(kIters * 95) / 100],
+				dynUs[kIters / 2], dynUs[(kIters * 95) / 100],
+				objUs[kIters / 2], objUs[(kIters * 95) / 100],
+				static_cast<unsigned long long>(corpusHash));
+			Logger::WriteMessage(report);
+			// Baseline corpus digest derived from untouched 69c96794a BEFORE MC-CPU-CAMERA production changes.
+			const uint64_t kExpectedCorpusHash = 0x683d01c44f33adb6ull;
+			Assert::AreEqual(kExpectedCorpusHash, corpusHash, L"MC-CPU-CAMERA frozen corpus decision/record bit-equality regression");
+		}
 	};
 
 	// Static-camera hypothesis (R1-STATIC, Config::staticCamera). Every test states its Config explicitly.

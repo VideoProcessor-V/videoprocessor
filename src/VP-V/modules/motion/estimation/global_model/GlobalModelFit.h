@@ -194,6 +194,7 @@ namespace CameraModel
 		// every element is overwritten on reuse, so the output does not depend on the pool.
 		std::vector<std::shared_ptr<BlockData>> m_blockPool;
 		std::vector<Sample> m_scratchSamples;
+		std::vector<Sample> m_scratchFullAll, m_scratchRefineBuf;
 		std::vector<int> m_scratchBlk;
 		std::vector<uint8_t> m_scratchExcluded, m_scratchZero;
 		friend struct Impl;

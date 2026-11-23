@@ -713,5 +713,407 @@ namespace VideoProcessorTest
 				Assert::IsTrue(best >= 0, L"R3 accuracy: no form within the source-px limit at this resolution");
 			}
 		}
+
+		// MC-PHOTO MUST 4(b) (verify-gemini-mc-81ee082cf.md:87-92): test-first WARP SameBytes digest pin across
+		// every photometric GPU scenario (pan 1080/4K/diagonal, fade gain/offset, masked/unmasked mover with excluded row,
+		// similarity/affine/homography/bilinear, flat fallback, too-far fallback, 1080-H/4K-Q/4K-H R16, odd 333x197 R16).
+		// Captured on untouched PhotometricRefineGpu BEFORE MC-PHOTO optimizations; MUST hold bit-for-bit unchanged after
+		// uPtGeom double cache, 16-bit uBin, 6-pass 11/10-bit median, 18x18 shared tile, verified swap, and colTab/rowTab cache.
+		BEGIN_TEST_METHOD_ATTRIBUTE(GpuMcPhotoBaselineSameBytesDigestPin)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(GpuMcPhotoBaselineSameBytesDigestPin)
+		{
+			Rig& g = RequireRig();
+			auto mixBytes = [](uint64_t& h, const void* data, size_t n)
+			{
+				const uint8_t* p = static_cast<const uint8_t*>(data);
+				for (size_t i = 0; i < n; ++i)
+				{
+					h ^= static_cast<uint64_t>(p[i]);
+					h *= 1099511628211ull;
+				}
+			};
+			auto hashResult = [&](uint64_t& h, const RefineResult& r)
+			{
+				const uint32_t st = static_cast<uint32_t>(r.status);
+				const uint32_t mt = static_cast<uint32_t>(r.model.type);
+				const uint8_t mu = r.maskUsed ? 1 : 0;
+				mixBytes(h, &st, sizeof(st));
+				mixBytes(h, &mt, sizeof(mt));
+				mixBytes(h, &mu, sizeof(mu));
+				mixBytes(h, &r.candidates, sizeof(r.candidates));
+				mixBytes(h, &r.pixels, sizeof(r.pixels));
+				mixBytes(h, &r.iterations, sizeof(r.iterations));
+				mixBytes(h, r.model.h, sizeof(r.model.h));
+				mixBytes(h, &r.gain, sizeof(double));
+				mixBytes(h, &r.offset, sizeof(double));
+				mixBytes(h, &r.residualBefore, sizeof(double));
+				mixBytes(h, &r.residualAfter, sizeof(double));
+				mixBytes(h, &r.robustSigma, sizeof(double));
+				mixBytes(h, &r.correctionPx, sizeof(double));
+				mixBytes(h, &r.lastStepPx, sizeof(double));
+			};
+
+			uint64_t digest = 14695981039346656037ull;
+			int totalCases = 0;
+			double maxModel = 0.0, maxGain = 0.0, maxOffset = 0.0;
+			auto runCase = [&](const char* tag, const Params& model, const LumaPairView& view, const Rect& pic,
+				const InlierMask& mask, const RefineOptions& o)
+			{
+				PhotometricRefinerGpu gpu(o);
+				std::string why;
+				Assert::IsTrue(gpu.Init(g.device.Get(), &why), L"GPU refiner init failed");
+				RefineGpuLuma gl;
+				g.input.Set(view);
+				Assert::IsTrue(g.input.Prepare(g.context.Get(), &gl, &why), L"input prepare failed");
+				const RefineResult r1 = gpu.Refine(g.context.Get(), model, gl, pic, mask);
+				const RefineResult r2 = gpu.Refine(g.context.Get(), model, gl, pic, mask);
+				Assert::IsTrue(SameBytes(r1, r2), L"GPU repeat not byte-equal");
+				hashResult(digest, r1);
+				// Also verify tight CPU-vs-GPU parity (MUST 4a alongside MUST 4b).
+				const RefineResult rc = PhotometricRefine(model, view, pic, mask, o);
+				Assert::IsTrue(r1.status == rc.status, L"status differs from CPU");
+				Assert::AreEqual(rc.candidates, r1.candidates, L"candidates differ from CPU");
+				Assert::AreEqual(rc.pixels, r1.pixels, L"pixels differ from CPU");
+				Assert::AreEqual(rc.iterations, r1.iterations, L"iterations differ from CPU");
+				Assert::IsTrue(r1.maskUsed == rc.maskUsed, L"maskUsed differs from CPU");
+				Assert::IsTrue(r1.model.type == rc.model.type, L"model type differs from CPU");
+				const double s = view.sourcePxPerPixel > 0 ? view.sourcePxPerPixel : 1.0;
+				const double diag = std::sqrt(static_cast<double>(pic.Width()) * pic.Width() + static_cast<double>(pic.Height()) * pic.Height());
+				const double dM = pic.Empty() ? 0.0 : MaxCornerDifference(r1.model, rc.model, pic) * diag / s;
+				const double dG = std::fabs(r1.gain - rc.gain), dO = std::fabs(r1.offset - rc.offset);
+				maxModel = (std::max)(maxModel, dM);
+				maxGain = (std::max)(maxGain, dG);
+				maxOffset = (std::max)(maxOffset, dO);
+				if (dM > 1e-9 || dG > 1e-9 || dO > 1e-9)
+				{
+					char msg[256];
+					std::snprintf(msg, sizeof(msg), "TIGHT PARITY FAIL %s: dM=%.3g dG=%.3g dO=%.3g\n", tag, dM, dG, dO);
+					GLog(msg);
+				}
+				Assert::IsTrue(dM <= 1e-9, L"MUST 4a: GPU model differs from CPU by > 1e-9 engine px");
+				Assert::IsTrue(dG <= 1e-9 && dO <= 1e-9, L"MUST 4a: GPU gain/offset differs from CPU by > 1e-9");
+				++totalCases;
+			};
+
+			// 1-3. Pan 1080 H, Pan 4K Q, Diagonal pan.
+			auto runPan = [&](const char* tag, int frameW, int frameH, double s, double tx, double ty, double ex, double ey, int pairs, uint64_t seed)
+			{
+				const int w = (frameW + static_cast<int>(s) - 1) / static_cast<int>(s), h = (frameH + static_cast<int>(s) - 1) / static_cast<int>(s);
+				const std::vector<Wave> waves = MakeWaves(seed, s, 90.0);
+				for (int k = 0; k < pairs; ++k)
+				{
+					const std::vector<uint8_t> A = To8(RenderD(w, h, s, std::vector<Layer>(1, Shifted(waves, k * tx, k * ty)), 1.0, 0.0, seed * 31 + 2 * k, 1.0));
+					const std::vector<uint8_t> B = To8(RenderD(w, h, s, std::vector<Layer>(1, Shifted(waves, (k + 1) * tx, (k + 1) * ty)), 1.0, 0.0, seed * 31 + 2 * k + 1, 1.0));
+					runCase(tag, Translation(tx + ex, ty + ey), View8(A, B, w, h, s), Pic(frameW, frameH), InlierMask(), RefineOptions());
+				}
+			};
+			runPan("1080 pan", 1920, 1080, 2.0, 2.5, 0.0, 0.8, -0.5, 2, 11);
+			runPan("4K pan", 3840, 2160, 4.0, 5.0, 0.0, 1.7, 0.6, 2, 12);
+			runPan("diag pan", 1920, 1080, 2.0, 2.5, 1.5, -0.7, 0.6, 2, 13);
+
+			// 4. Fade pan (gain + offset).
+			{
+				const int w = 960, h = 540;
+				const double s = 2.0, tx = 2.5;
+				const std::vector<Wave> waves = MakeWaves(21, s, 90.0);
+				const std::vector<uint8_t> A = To8(RenderD(w, h, s, std::vector<Layer>(1, Shifted(waves, 0, 0)), 1.0, 0.0, 1, 1.0));
+				const std::vector<uint8_t> B = To8(RenderD(w, h, s, std::vector<Layer>(1, Shifted(waves, tx, 0)), 0.8, 10.0, 2, 1.0));
+				runCase("fade", Translation(tx + 0.8, -0.4), View8(A, B, w, h, s), Pic(1920, 1080), InlierMask(), RefineOptions());
+			}
+
+			// 5. Mover masked (with excluded row) + unmasked.
+			{
+				const int frameW = 1920, frameH = 1080, w = 960, h = 540;
+				const double s = 2.0, tx = 2.5;
+				const std::vector<Wave> bg = MakeWaves(31, s, 90.0), fg = MakeWaves(32, s, 100.0);
+				const double l = 700, t = 300, rw = 640, rh = 380, mx = 14, my = -9;
+				std::vector<Layer> la(1, Shifted(bg, 0, 0)), lb(1, Shifted(bg, tx, 0));
+				Layer ma = Shifted(fg, 0, 0); ma.clip = true; ma.l = l; ma.t = t; ma.r = l + rw; ma.b = t + rh;
+				Layer mb = Shifted(fg, mx, my); mb.clip = true; mb.l = l + mx; mb.t = t + my; mb.r = l + rw + mx; mb.b = t + rh + my;
+				la.push_back(ma); lb.push_back(mb);
+				const std::vector<uint8_t> A = To8(RenderD(w, h, s, la, 1.0, 0.0, 3, 1.0));
+				const std::vector<uint8_t> B = To8(RenderD(w, h, s, lb, 1.0, 0.0, 4, 1.0));
+				BlockData blocks;
+				blocks.blockSize = 32; blocks.gridW = (frameW + 31) / 32; blocks.gridH = (frameH + 31) / 32;
+				blocks.label.assign(static_cast<size_t>(blocks.gridW) * blocks.gridH, static_cast<uint8_t>(Label::Camera));
+				blocks.excluded.assign(blocks.label.size(), 0);
+				const double ul = (std::min)(l, l + mx) - 4, ut = (std::min)(t, t + my) - 4, ur = (std::max)(l + rw, l + rw + mx) + 4, ub = (std::max)(t + rh, t + rh + my) + 4;
+				for (int by = 0; by < blocks.gridH; ++by)
+					for (int bx = 0; bx < blocks.gridW; ++bx)
+						if (bx * 32.0 + 32 > ul && bx * 32.0 < ur && by * 32.0 + 32 > ut && by * 32.0 < ub)
+							blocks.label[static_cast<size_t>(by) * blocks.gridW + bx] = static_cast<uint8_t>(Label::Object);
+				for (int bx = 0; bx < blocks.gridW; ++bx)
+					blocks.excluded[static_cast<size_t>(2) * blocks.gridW + bx] = 1;
+				runCase("mover masked", Translation(tx + 0.8, 0.5), View8(A, B, w, h, s), Pic(frameW, frameH), MaskOf(blocks), RefineOptions());
+				runCase("mover unmasked", Translation(tx + 0.8, 0.5), View8(A, B, w, h, s), Pic(frameW, frameH), InlierMask(), RefineOptions());
+			}
+
+			// 6. Similarity, Affine, Homography, Bilinear.
+			{
+				const int frameW = 1920, frameH = 1080, w = 960, h = 540;
+				const double s = 2.0;
+				const Rect pic = Pic(frameW, frameH);
+				Params truth; truth.type = ModelType::Similarity;
+				const double zc = 1.002 * std::cos(0.001), zs = 1.002 * std::sin(0.001);
+				truth.h[0] = zc; truth.h[1] = -zs; truth.h[2] = 2.5;
+				truth.h[3] = zs; truth.h[4] = zc; truth.h[5] = -1.0;
+				bool ok = false;
+				const Params inv = Invert(truth, &ok);
+				Assert::IsTrue(ok);
+				const std::vector<Wave> waves = MakeWaves(41, s, 90.0);
+				const double C[2] = { pic.CentreX(), pic.CentreY() };
+				Layer lb; lb.waves = &waves;
+				lb.m[0] = inv.h[0]; lb.m[1] = inv.h[1]; lb.m[2] = inv.h[3]; lb.m[3] = inv.h[4];
+				lb.c[0] = inv.h[2] + C[0] - (inv.h[0] * C[0] + inv.h[1] * C[1]);
+				lb.c[1] = inv.h[5] + C[1] - (inv.h[3] * C[0] + inv.h[4] * C[1]);
+				const std::vector<uint8_t> A = To8(RenderD(w, h, s, std::vector<Layer>(1, Shifted(waves, 0, 0)), 1.0, 0.0, 5, 1.0));
+				const std::vector<uint8_t> B = To8(RenderD(w, h, s, std::vector<Layer>(1, lb), 1.0, 0.0, 6, 1.0));
+				Params start = truth; start.h[2] += 0.7; start.h[5] -= 0.4; start.h[0] -= 0.0002; start.h[4] -= 0.0002;
+				Params startAff = start; startAff.type = ModelType::Affine;
+				Params startHom = start; startHom.type = ModelType::Homography; startHom.h[6] = 1e-7;
+				runCase("similarity", start, View8(A, B, w, h, s), pic, InlierMask(), RefineOptions());
+				runCase("affine", startAff, View8(A, B, w, h, s), pic, InlierMask(), RefineOptions());
+				runCase("homography", startHom, View8(A, B, w, h, s), pic, InlierMask(), RefineOptions());
+				RefineOptions bil; bil.interp = RefineInterp::Bilinear;
+				runCase("bilinear", start, View8(A, B, w, h, s), pic, InlierMask(), bil);
+			}
+
+			// 7-8. Flat fallback + too-far fallback.
+			{
+				const int w = 960, h = 540;
+				const double s = 2.0, tx = 2.5;
+				const std::vector<Wave> waves = MakeWaves(51, s, 90.0);
+				const std::vector<uint8_t> A = To8(RenderD(w, h, s, std::vector<Layer>(1, Shifted(waves, 0, 0)), 1.0, 0.0, 7, 1.0));
+				const std::vector<uint8_t> B = To8(RenderD(w, h, s, std::vector<Layer>(1, Shifted(waves, tx, 0)), 1.0, 0.0, 8, 1.0));
+				const std::vector<uint8_t> flat(static_cast<size_t>(w) * h, 128);
+				RefineOptions oFlat; oFlat.fadeTerms = false; oFlat.translationOnly = true; oFlat.maxCorrectionLumaPx = 1000.0;
+				runCase("flat no-improv", Translation(2.9, -0.3), View8(A, flat, w, h, s), Pic(1920, 1080), InlierMask(), oFlat);
+				runCase("flat template", Translation(2.9, -0.3), View8(flat, A, w, h, s), Pic(1920, 1080), InlierMask(), RefineOptions());
+				RefineOptions tight; tight.maxCorrectionLumaPx = 0.05;
+				runCase("too far", Translation(tx + 0.8, 0.0), View8(A, B, w, h, s), Pic(1920, 1080), InlierMask(), tight);
+			}
+
+			// 9-10. Cost-line R16 (4K half R16) + odd non-16-aligned dimensions (333x197 R16).
+			{
+				struct R16Case { const char* name; int fw, fh; double s; uint64_t seed; };
+				const R16Case rcs[2] = {
+					{ "4K half R16", 3840, 2160, 2.0, 83 },
+					{ "odd 333x197 R16", 666, 394, 2.0, 219 }
+				};
+				for (const R16Case& cs : rcs)
+				{
+					const int w = cs.fw / static_cast<int>(cs.s), h = cs.fh / static_cast<int>(cs.s);
+					const double tx = 1.25 * cs.s;
+					const std::vector<Wave> waves = MakeWaves(cs.seed, cs.s, 90.0);
+					const std::vector<uint16_t> A16 = To16(RenderD(w, h, cs.s, std::vector<Layer>(1, Shifted(waves, 0, 0)), 1.0, 0.0, 12, 1.0));
+					const std::vector<uint16_t> B16 = To16(RenderD(w, h, cs.s, std::vector<Layer>(1, Shifted(waves, tx, 0)), 1.0, 0.0, 13, 1.0));
+					runCase(cs.name, Translation(tx + 0.4 * cs.s, 0.0), View16(A16, B16, w, h, cs.s, 255.0 / 65535.0), Pic(cs.fw, cs.fh), InlierMask(), RefineOptions());
+				}
+			}
+
+			char msg[320];
+			std::snprintf(msg, sizeof(msg),
+				"MC-PHOTO SameBytes digest [%s]: %d cases, digest=0x%016llx, maxCpuDiff(model=%.3g px, gain=%.3g, offset=%.3g)\n",
+				g.adapter.c_str(), totalCases, static_cast<unsigned long long>(digest), maxModel, maxGain, maxOffset);
+			GLog(msg);
+			// Exact WARP SameBytes digest captured on untouched PhotometricRefineGpu BEFORE MC-PHOTO optimizations.
+			const uint64_t kExpectedWarpDigest = 0x01b1c2b49196d302ull;
+			if (g.adapter == "WARP")
+				Assert::AreEqual(kExpectedWarpDigest, digest, L"MUST 4(b): MC-PHOTO GPU output bytes diverged from pre-optimization WARP baseline");
+		}
+
+		// MC-PHOTO (GEM-142 / GEM-219 / GEM-220; verify-gemini-mc-81ee082cf.md:87-92,99,103):
+		// tiled-vs-untiled byte-equality pin (standard & odd R16 + tight 1e-9 CPU parity),
+		// verified consecutive frame-id texture swap pin (2 -> 1 -> 0 -> 2 + unverified invalidation + SameBytes),
+		// and colTab/rowTab cache hit/miss pin across EVERY key field with cold-cache SameBytes on every hit (SHOULD 3).
+		BEGIN_TEST_METHOD_ATTRIBUTE(GpuMcPhotoCacheSwapAndTilePins)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(GpuMcPhotoCacheSwapAndTilePins)
+		{
+			Rig& g = RequireRig();
+			std::string why;
+
+			// 1) GEM-219: Tiled (gsTile[18][18]) vs untiled CSCand byte-equality + tight 1e-9 CPU parity on standard & odd sizes.
+			{
+				struct Shape { const char* name; int w, h; double s; bool r16; };
+				const Shape shapes[2] = {
+					{ "standard 960x540 8-bit", 960, 540, 2.0, false },
+					{ "odd 333x197 R16", 333, 197, 2.0, true }
+				};
+				for (const Shape& sh : shapes)
+				{
+					const int frameW = sh.w * static_cast<int>(sh.s), frameH = sh.h * static_cast<int>(sh.s);
+					const double tx = 2.5, ty = -1.25;
+					const std::vector<Wave> waves = MakeWaves(219 + sh.w, sh.s, 90.0);
+					const std::vector<double> Ad = RenderD(sh.w, sh.h, sh.s, std::vector<Layer>(1, Shifted(waves, 0, 0)), 1.0, 0.0, 31, 1.0);
+					const std::vector<double> Bd = RenderD(sh.w, sh.h, sh.s, std::vector<Layer>(1, Shifted(waves, tx, ty)), 1.0, 0.0, 32, 1.0);
+					const std::vector<uint8_t> A8 = To8(Ad), B8 = To8(Bd);
+					const std::vector<uint16_t> A10 = To10(Ad), B10 = To10(Bd);
+					const LumaPairView view = sh.r16 ? View16(A10, B10, sh.w, sh.h, sh.s, 255.0 / 1023.0) : View8(A8, B8, sh.w, sh.h, sh.s);
+					const Rect pic = Pic(frameW, frameH);
+					const Params start = Translation(tx + 0.6, ty - 0.4);
+					const RefineResult rc = PhotometricRefine(start, view, pic, InlierMask(), RefineOptions());
+
+					PhotometricRefinerGpu gpuTiled, gpuUntiled;
+					Assert::IsTrue(gpuTiled.Init(g.device.Get(), &why));
+					Assert::IsTrue(gpuUntiled.Init(g.device.Get(), &why));
+					gpuTiled.SetCandTiledForTest(true);
+					gpuUntiled.SetCandTiledForTest(false);
+					RefineGpuLuma gl;
+					g.input.Set(view);
+					Assert::IsTrue(g.input.Prepare(g.context.Get(), &gl, &why));
+					const RefineResult rTiled = gpuTiled.Refine(g.context.Get(), start, gl, pic, InlierMask());
+					const RefineResult rUntiled = gpuUntiled.Refine(g.context.Get(), start, gl, pic, InlierMask());
+					Assert::IsTrue(SameBytes(rTiled, rUntiled), L"GEM-219: tiled CSCand must be byte-identical to untiled CSCand");
+					Assert::IsTrue(rTiled.status == rc.status && rTiled.candidates == rc.candidates && rTiled.pixels == rc.pixels && rTiled.iterations == rc.iterations,
+						L"GEM-219: tiled GPU matches CPU status/candidates/pixels/iterations");
+					const double diag = std::sqrt(static_cast<double>(pic.Width()) * pic.Width() + static_cast<double>(pic.Height()) * pic.Height());
+					Assert::IsTrue(MaxCornerDifference(rTiled.model, rc.model, pic) * diag / sh.s <= 1e-9,
+						L"GEM-219: tiled GPU model matches CPU within 1e-9 engine px");
+					Assert::IsTrue(std::fabs(rTiled.gain - rc.gain) <= 1e-9 && std::fabs(rTiled.offset - rc.offset) <= 1e-9,
+						L"GEM-219: tiled GPU gain/offset matches CPU within 1e-9");
+				}
+			}
+
+			// 2) GEM-142: Verified consecutive frame-id texture swap (2 -> 1 -> 0 -> 2 + unverified invalidation) + SameBytes parity.
+			{
+				const int w = 480, h = 270;
+				const double s = 2.0, tx = 2.5;
+				const std::vector<Wave> waves = MakeWaves(142, s, 90.0);
+				const std::vector<uint8_t> F1 = To8(RenderD(w, h, s, std::vector<Layer>(1, Shifted(waves, 0.0, 0.0)), 1.0, 0.0, 1, 1.0));
+				const std::vector<uint8_t> F2 = To8(RenderD(w, h, s, std::vector<Layer>(1, Shifted(waves, tx, 0.0)), 1.0, 0.0, 2, 1.0));
+				const std::vector<uint8_t> F3 = To8(RenderD(w, h, s, std::vector<Layer>(1, Shifted(waves, 2.0 * tx, 0.0)), 1.0, 0.0, 3, 1.0));
+				const Rect pic = Pic(960, 540);
+				const Params start = Translation(tx + 0.5, -0.3);
+
+				RefineUploadInput swapIn, freshIn;
+				Assert::IsTrue(swapIn.Init(g.device.Get(), &why));
+				Assert::IsTrue(freshIn.Init(g.device.Get(), &why));
+				PhotometricRefinerGpu gpu;
+				Assert::IsTrue(gpu.Init(g.device.Get(), &why));
+
+				RefineGpuLuma gl12, gl23Swap, gl23Fresh;
+				swapIn.Set(View8(F1, F2, w, h, s), 100, 101);
+				Assert::IsTrue(swapIn.Prepare(g.context.Get(), &gl12, &why));
+				Assert::AreEqual(2, swapIn.LastUploadedPlanesForTest(), L"first pair uploads both planes");
+
+				swapIn.Set(View8(F2, F3, w, h, s), 101, 102);
+				Assert::IsTrue(swapIn.Prepare(g.context.Get(), &gl23Swap, &why));
+				Assert::AreEqual(1, swapIn.LastUploadedPlanesForTest(), L"consecutive verified pair swaps tex[0]<->tex[1] and uploads 1 plane");
+				const RefineResult rSwap = gpu.Refine(g.context.Get(), start, gl23Swap, pic, InlierMask());
+
+				freshIn.Set(View8(F2, F3, w, h, s));
+				Assert::IsTrue(freshIn.Prepare(g.context.Get(), &gl23Fresh, &why));
+				Assert::AreEqual(2, freshIn.LastUploadedPlanesForTest(), L"unverified Set() uploads both planes");
+				const RefineResult rFresh = gpu.Refine(g.context.Get(), start, gl23Fresh, pic, InlierMask());
+				Assert::IsTrue(SameBytes(rSwap, rFresh), L"GEM-142: swapped texture pair must be byte-identical to fresh upload");
+
+				// Same pair repeated -> 0 uploads.
+				swapIn.Set(View8(F2, F3, w, h, s), 101, 102);
+				Assert::IsTrue(swapIn.Prepare(g.context.Get(), &gl23Swap, &why));
+				Assert::AreEqual(0, swapIn.LastUploadedPlanesForTest(), L"identical verified pair uploads 0 planes");
+
+				// Non-consecutive jump -> 2 uploads.
+				swapIn.Set(View8(F1, F3, w, h, s), 200, 201);
+				Assert::IsTrue(swapIn.Prepare(g.context.Get(), &gl12, &why));
+				Assert::AreEqual(2, swapIn.LastUploadedPlanesForTest(), L"non-consecutive pair uploads both planes");
+
+				// Unverified call invalidates cached IDs so a later verified call never aliases stale planes.
+				swapIn.Set(View8(F1, F2, w, h, s));
+				Assert::IsTrue(swapIn.Prepare(g.context.Get(), &gl12, &why));
+				Assert::AreEqual(2, swapIn.LastUploadedPlanesForTest());
+				swapIn.Set(View8(F2, F3, w, h, s), 201, 202);
+				Assert::IsTrue(swapIn.Prepare(g.context.Get(), &gl23Swap, &why));
+				Assert::AreEqual(2, swapIn.LastUploadedPlanesForTest(), L"unverified call clears cached frame IDs");
+			}
+
+			// 3) GEM-220 + SHOULD 3: colTab/rowTab cache hit/miss across EVERY key field while cellTab still uploads
+			// every frame, AND every cache hit is pinned SameBytes against a fresh cold-cache PhotometricRefinerGpu.
+			{
+				const int w = 320, h = 180;
+				const double s = 2.0, tx = 2.0;
+				const std::vector<Wave> waves = MakeWaves(220, s, 90.0);
+				const std::vector<uint8_t> A = To8(RenderD(w, h, s, std::vector<Layer>(1, Shifted(waves, 0, 0)), 1.0, 0.0, 41, 1.0));
+				const std::vector<uint8_t> B = To8(RenderD(w, h, s, std::vector<Layer>(1, Shifted(waves, tx, 0)), 1.0, 0.0, 42, 1.0));
+				const std::vector<uint8_t> A2 = To8(RenderD(w - 16, h, s, std::vector<Layer>(1, Shifted(waves, 0, 0)), 1.0, 0.0, 43, 1.0));
+				const std::vector<uint8_t> B2 = To8(RenderD(w - 16, h, s, std::vector<Layer>(1, Shifted(waves, tx, 0)), 1.0, 0.0, 44, 1.0));
+				const std::vector<uint8_t> A3 = To8(RenderD(w, h - 16, s, std::vector<Layer>(1, Shifted(waves, 0, 0)), 1.0, 0.0, 45, 1.0));
+				const std::vector<uint8_t> B3 = To8(RenderD(w, h - 16, s, std::vector<Layer>(1, Shifted(waves, tx, 0)), 1.0, 0.0, 46, 1.0));
+
+				PhotometricRefinerGpu gpu;
+				Assert::IsTrue(gpu.Init(g.device.Get(), &why));
+				const Params start = Translation(tx + 0.5, 0.0);
+				const Rect basePic = Pic(640, 360);
+
+				auto runCall = [&](const LumaPairView& v, const Rect& pic, const InlierMask& mask, bool verifyColdCacheHit)
+				{
+					RefineGpuLuma gl;
+					g.input.Set(v);
+					Assert::IsTrue(g.input.Prepare(g.context.Get(), &gl, &why));
+					const uint64_t beforeUploads = gpu.TabUploadsForTest();
+					const RefineResult rg = gpu.Refine(g.context.Get(), start, gl, pic, mask);
+					const RefineResult rc = PhotometricRefine(start, v, pic, mask, RefineOptions());
+					Assert::AreEqual(rc.candidates, rg.candidates, L"GEM-220: cached colTab/rowTab must match CPU candidates");
+					Assert::AreEqual(rc.pixels, rg.pixels, L"GEM-220: cached colTab/rowTab must match CPU pixels");
+					if (verifyColdCacheHit)
+					{
+						Assert::AreEqual(beforeUploads, gpu.TabUploadsForTest(), L"SHOULD 3: expected colTab/rowTab cache hit");
+						PhotometricRefinerGpu coldGpu;
+						Assert::IsTrue(coldGpu.Init(g.device.Get(), &why));
+						const RefineResult rCold = coldGpu.Refine(g.context.Get(), start, gl, pic, mask);
+						Assert::AreEqual<uint64_t>(1, coldGpu.TabUploadsForTest(), L"cold refiner must upload tables");
+						Assert::IsTrue(SameBytes(rg, rCold), L"SHOULD 3: table-cache hit must be SameBytes against fresh cold-cache refiner");
+					}
+					return rg;
+				};
+
+				const LumaPairView vBase = View8(A, B, w, h, s);
+				runCall(vBase, basePic, InlierMask(), false);
+				Assert::AreEqual<uint64_t>(1, gpu.TabUploadsForTest(), L"first call uploads colTab/rowTab");
+				// Hit #1: identical call -> assert SameBytes vs cold refiner.
+				runCall(vBase, basePic, InlierMask(), true);
+
+				// Change picture rect (left, top, right, bottom).
+				uint64_t expected = 1;
+				Rect rLeft = basePic; rLeft.left += 16; runCall(vBase, rLeft, InlierMask(), false); Assert::AreEqual(++expected, gpu.TabUploadsForTest());
+				Rect rTop = basePic; rTop.top += 16; runCall(vBase, rTop, InlierMask(), false); Assert::AreEqual(++expected, gpu.TabUploadsForTest());
+				Rect rRight = basePic; rRight.right -= 16; runCall(vBase, rRight, InlierMask(), false); Assert::AreEqual(++expected, gpu.TabUploadsForTest());
+				Rect rBot = basePic; rBot.bottom -= 16; runCall(vBase, rBot, InlierMask(), false); Assert::AreEqual(++expected, gpu.TabUploadsForTest());
+				// Hit #2: repeat changed rect -> assert SameBytes vs cold refiner.
+				runCall(vBase, rBot, InlierMask(), true);
+				// Change s (keep picture inside w*s, h*s).
+				runCall(View8(A, B, w, h, 3.0), basePic, InlierMask(), false); Assert::AreEqual(++expected, gpu.TabUploadsForTest());
+				// Change w, then h.
+				runCall(View8(A2, B2, w - 16, h, s), Pic(600, 360), InlierMask(), false); Assert::AreEqual(++expected, gpu.TabUploadsForTest());
+				runCall(View8(A3, B3, w, h - 16, s), Pic(640, 320), InlierMask(), false); Assert::AreEqual(++expected, gpu.TabUploadsForTest());
+
+				// Enable mask (useMask false -> true).
+				BlockData blk;
+				blk.blockSize = 32;
+				blk.gridW = 20;
+				blk.gridH = 12;
+				blk.label.assign(static_cast<size_t>(blk.gridW) * blk.gridH, static_cast<uint8_t>(Label::Camera));
+				blk.excluded.assign(blk.label.size(), 0);
+				const RefineResult rAllCam = runCall(vBase, basePic, MaskOf(blk), false);
+				Assert::AreEqual(++expected, gpu.TabUploadsForTest(), L"useMask flip misses tab cache");
+
+				// Hit #3: mutate ONLY cellTab (exclude half the blocks): colTab/rowTab HIT, cellTab STILL uploads and matches cold refiner byte-for-byte!
+				for (size_t c = 0; c < blk.excluded.size() / 2; ++c)
+					blk.excluded[c] = 1;
+				const RefineResult rHalfExcl = runCall(vBase, basePic, MaskOf(blk), true);
+				Assert::AreEqual(expected, gpu.TabUploadsForTest(), L"cellTab-only mutation must hit colTab/rowTab cache");
+				Assert::IsTrue(rHalfExcl.candidates < rAllCam.candidates, L"cellTab must still upload every frame");
+
+				// Change blockSize, gridW, gridH.
+				blk.blockSize = 16; runCall(vBase, basePic, MaskOf(blk), false); Assert::AreEqual(++expected, gpu.TabUploadsForTest());
+				blk.gridW = 19; blk.label.assign(19 * 12, static_cast<uint8_t>(Label::Camera)); blk.excluded.assign(19 * 12, 0);
+				runCall(vBase, basePic, MaskOf(blk), false); Assert::AreEqual(++expected, gpu.TabUploadsForTest());
+				blk.gridH = 11; blk.label.assign(19 * 11, static_cast<uint8_t>(Label::Camera)); blk.excluded.assign(19 * 11, 0);
+				runCall(vBase, basePic, MaskOf(blk), false); Assert::AreEqual(++expected, gpu.TabUploadsForTest());
+			}
+		}
 	};
 }

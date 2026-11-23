@@ -87,7 +87,7 @@ namespace CameraModel
 		const double precision = in.precisionPx > 0 ? in.precisionPx : 1e-6;
 
 		std::vector<Found> found;
-		std::vector<Candidate> remaining = cands;
+		std::vector<Candidate> remaining = std::move(cands);
 		const int maxAttempts = 2 * cfg.maxObjects + 2;
 		for (int attempt = 0; attempt < maxAttempts && static_cast<int>(found.size()) < cfg.maxObjects
 			&& static_cast<int>(remaining.size()) >= minSupport; ++attempt)
@@ -270,10 +270,15 @@ namespace CameraModel
 				for (size_t k = 0; k < support.size(); ++k) f.members.push_back(remaining[support[k]].index);
 				found.push_back(f);
 			}
-			// Accepted or rejected, a set formed from >= minSupport inliers leaves the pool.
-			std::vector<Candidate> next;
-			for (int j = 0; j < n; ++j) if (!drop[j]) next.push_back(remaining[j]);
-			remaining.swap(next);
+			// Accepted or rejected, a set formed from >= minSupport inliers leaves the pool (in-place compaction).
+			int write = 0;
+			for (int j = 0; j < n; ++j)
+				if (!drop[j])
+				{
+					if (write != j) remaining[write] = remaining[j];
+					++write;
+				}
+			remaining.resize(static_cast<size_t>(write));
 		}
 
 		// Persistent ids by predicted-centre matching.

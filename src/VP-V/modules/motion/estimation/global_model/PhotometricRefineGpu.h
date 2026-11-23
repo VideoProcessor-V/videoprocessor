@@ -80,7 +80,12 @@ namespace CameraModel
 		RefineUploadInput();
 		~RefineUploadInput();
 		bool Init(ID3D11Device* device, std::string* why);
-		void Set(const LumaPairView& view) { m_view = view; }
+		void Set(const LumaPairView& view) { m_view = view; m_fromId = 0; m_toId = 0; }
+		// GEM-142 (MC-PHOTO / P0-5): verified frame-id overload; Prepare() swaps tex[0] <-> tex[1] and
+		// uploads only the new `to` plane when `fromId != 0 && toId != 0 && fromId != toId && cachedTex1 == fromId`.
+		void Set(const LumaPairView& view, uint64_t fromId, uint64_t toId) { m_view = view; m_fromId = fromId; m_toId = toId; }
+		void InvalidateCache();
+		int LastUploadedPlanesForTest() const { return m_lastUploadedPlanes; }
 		bool Prepare(ID3D11DeviceContext* context, RefineGpuLuma* out, std::string* why) override;
 		const char* PathName() const override { return "cpu upload"; }
 		double LastUploadCpuMs() const { return m_uploadMs; }   // CPU time of the UpdateSubresource calls (the GPU copy is measured by the caller)
@@ -91,6 +96,8 @@ namespace CameraModel
 		struct Tex;
 		Tex* m_tex;
 		LumaPairView m_view;
+		uint64_t m_fromId = 0, m_toId = 0;
+		int m_lastUploadedPlanes = 0;
 		double m_uploadMs = 0;
 	};
 
@@ -134,6 +141,9 @@ namespace CameraModel
 		// The last call's GPU-side failure (None when the status came from the algorithm) and the per-kind counts.
 		RefineGpuFailure LastFailure() const { return m_lastFailure; }
 		const RefineGpuFailureCounters& Failures() const { return m_failures; }
+		// Test inspection hooks (GEM-219 / GEM-220): verify colTab/rowTab cache hits and tiled vs untiled CSCand parity.
+		uint64_t TabUploadsForTest() const { return m_tabUploads; }
+		void SetCandTiledForTest(bool tiled) { m_candTiled = tiled; }
 
 	private:
 		PhotometricRefinerGpu(const PhotometricRefinerGpu&);
@@ -144,6 +154,8 @@ namespace CameraModel
 		RefineCounters m_counters;
 		bool m_ready = false;
 		bool m_timing = false;
+		bool m_candTiled = true;
+		uint64_t m_tabUploads = 0;
 		std::string m_why, m_lastError;
 		RefineGpuTiming m_lastTiming;
 		RefineGpuFailure m_lastFailure = RefineGpuFailure::None;

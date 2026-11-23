@@ -12,11 +12,27 @@ namespace CameraLink
 		{
 			return static_cast<size_t>(gridW) * static_cast<size_t>(gridH) * 4 * sizeof(float);
 		}
+
+		// MUST 3 (verify-gemini-mc-81ee082cf.md:81-86): choose fp16 staging ONLY when the source texture's format
+		// is 16-bit float across every channel; never silently truncate rgba32f sources.
+		bool IsFp16Source(pl_tex tex)
+		{
+			if (!tex || !tex->params.format)
+				return false;
+			const pl_fmt fmt = tex->params.format;
+			if (fmt->type != PL_FMT_FLOAT || fmt->num_components <= 0)
+				return false;
+			for (int c = 0; c < fmt->num_components && c < 4; ++c)
+				if (fmt->component_depth[c] != 16)
+					return false;
+			return true;
+		}
 	}
 
 	FieldReadbackRing::FieldReadbackRing(pl_gpu gpu, int entries, pl_log log)
 		: m_gpu(gpu), m_log(log), m_entries(static_cast<size_t>((std::max)(entries, 3)))
 	{
+		m_flying.reserve(m_entries.size());
 	}
 
 	FieldReadbackRing::~FieldReadbackRing()
@@ -64,16 +80,20 @@ namespace CameraLink
 	bool FieldReadbackRing::TryNative(const Entry& e)
 	{
 		const int planes = 2;   // always a two-plane target: a field without a backward plane fills only the first half
-		if (m_native && m_native->Active() && m_native->Width() == e.gridW && m_native->Height() == e.gridH && m_native->Planes() == planes)
+		// MUST 3 (verify-gemini-mc-81ee082cf.md:81-86): stage fp16 ONLY when BOTH source planes (or the sole forward plane)
+		// are 16-bit float; otherwise keep R32G32B32A32_FLOAT. Include fp16 in the reuse key so format switches recreate cleanly.
+		const bool fp16 = IsFp16Source(e.fwd) && (!e.bwd || IsFp16Source(e.bwd));
+		if (m_native && m_native->Active() && m_native->Width() == e.gridW && m_native->Height() == e.gridH
+			&& m_native->Planes() == planes && m_native->IsFp16() == fp16)
 			return true;
 		if (m_nativeUnavailable)
 			return false;
 		for (const Entry& x : m_entries)
 			if (&x != &e && x.state == State::InFlight && x.native)
-				return false;   // a different geometry while copies are in flight: this request uses the buffer path / is dropped
+				return false;   // a different geometry or format while copies are in flight: this request uses the buffer path / is dropped
 		if (!m_native)
 			m_native.reset(new NativeCopyReadback());
-		if (!m_native->Create(m_log, m_gpu, static_cast<int>(m_entries.size()), e.gridW, e.gridH, planes))
+		if (!m_native->Create(m_log, m_gpu, static_cast<int>(m_entries.size()), e.gridW, e.gridH, planes, fp16))
 		{
 			m_native.reset();
 			if (!m_nativeEverOk)
@@ -259,17 +279,26 @@ namespace CameraLink
 	size_t FieldReadbackRing::Poll(std::vector<std::shared_ptr<FieldCopy>>& ready)
 	{
 		DrainParked();
-		std::vector<Entry*> flying;
+		m_flying.clear();
 		for (Entry& e : m_entries)
 			if (e.state == State::InFlight && !e.mapped)
-				flying.push_back(&e);
-		std::sort(flying.begin(), flying.end(), [](const Entry* a, const Entry* b) { return a->ticket < b->ticket; });
+				m_flying.push_back(&e);
+		std::sort(m_flying.begin(), m_flying.end(), [](const Entry* a, const Entry* b) { return a->ticket < b->ticket; });
+		auto ensureScratch = [this](size_t count) -> float*
+		{
+			if (m_scratch.capacity() < count)
+			{
+				m_scratch.reserve(count);
+				++m_scratchReallocs;
+			}
+			m_scratch.resize(count);
+			return m_scratch.data();
+		};
 		size_t n = 0;
-		for (Entry* ep : flying)
+		for (Entry* ep : m_flying)
 		{
 			Entry& e = *ep;
 			const size_t need = PlaneBytes(e.gridW, e.gridH) * (e.haveBwd ? 2 : 1);
-			std::vector<float> tmp;
 			const float* base = nullptr;
 			if (e.native)
 			{
@@ -277,8 +306,8 @@ namespace CameraLink
 				const LedDrive::ReadState state = m_native ? m_native->Poll(idx) : LedDrive::ReadState::Pending;
 				if (state == LedDrive::ReadState::Pending)
 					break;   // DXGI_ERROR_WAS_STILL_DRAWING: the copy is not done: never wait (and keep request order)
-				tmp.resize(PlaneBytes(e.gridW, e.gridH) * 2 / sizeof(float));
-				if (state == LedDrive::ReadState::Failed || !m_native->Read(idx, tmp.data()))
+				float* dst = ensureScratch(PlaneBytes(e.gridW, e.gridH) * 2 / sizeof(float));
+				if (state == LedDrive::ReadState::Failed || !m_native->Read(idx, dst))
 				{
 					// An error HRESULT, not "still drawing": freed and counted as failed (CameraLinkCore turns
 					// it into a readback event), never an entry that stays in flight forever.
@@ -287,7 +316,7 @@ namespace CameraLink
 					++m_stats.failed;
 					continue;
 				}
-				base = tmp.data();
+				base = dst;
 			}
 			else if (pl_buf_poll(m_gpu, e.buf, 0))
 				break;   // still busy; never wait (and keep request order)
@@ -304,14 +333,14 @@ namespace CameraLink
 				base = reinterpret_cast<const float*>(e.buf->data);
 			if (!base)
 			{
-				tmp.resize(need / sizeof(float));
-				if (!pl_buf_read(m_gpu, e.buf, 0, tmp.data(), need))
+				float* dst = ensureScratch(need / sizeof(float));
+				if (!pl_buf_read(m_gpu, e.buf, 0, dst, need))
 				{
 					Release(e);
 					++m_stats.failed;
 					continue;
 				}
-				base = tmp.data();
+				base = dst;
 			}
 			if (e.seed)
 			{

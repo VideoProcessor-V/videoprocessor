@@ -57,6 +57,9 @@ namespace CameraLink
 		struct Stats Stats() const { return m_stats; }
 		const char* LastError() const { return m_lastError; }
 		int Entries() const { return static_cast<int>(m_entries.size()); }
+		// Test inspection hooks (GEM-143 / MC-READBACK): prove source-format-gated fp16 staging and 0 steady-state scratch allocations.
+		uint64_t ScratchReallocationsForTest() const { return m_scratchReallocs; }
+		bool NativeIsFp16ForTest() const { return m_native && m_native->IsFp16(); }
 
 	private:
 		enum class State { Free, Pending, InFlight };
@@ -93,6 +96,10 @@ namespace CameraLink
 		bool m_nativeUnavailable = false;   // the very FIRST Create failed (not D3D11): the pl_buf path for good
 		std::vector<Entry> m_entries;
 		std::vector<pl_buf> m_parked;
+		// GEM-143 (MC-READBACK): reusable Poll() scratch buffers (0 steady-state per-poll heap allocations).
+		std::vector<Entry*> m_flying;
+		std::vector<float> m_scratch;
+		uint64_t m_scratchReallocs = 0;
 		uint64_t m_ticket = 0;
 		struct Stats m_stats;
 	};
