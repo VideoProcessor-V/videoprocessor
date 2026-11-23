@@ -1265,6 +1265,8 @@ namespace Tests
 				Assert::IsTrue(C::ClassifyBitDepthFromStep(1) == C::BitDepthClass::N10);
 				Assert::IsTrue(C::ClassifyBitDepthFromStep(1, 12) == C::BitDepthClass::N12);
 				Assert::IsTrue(C::ClassifyBitDepthFromStep(4, 8) == C::BitDepthClass::N8);
+				Assert::IsTrue(C::ClassifyBitDepthFromStep(1, 8) == C::BitDepthClass::N8,
+					L"HIGH-1 regression: 8-bit HDMI-loop stream (stepCodes == 1, outputBits == 8) must classify as N8, never N10");
 				Assert::IsTrue(C::ClassifyBitDepthFromStep(1, 10) == C::BitDepthClass::N10);
 				Assert::IsTrue(C::ClassifyBitDepthFromStep(0, 0) == C::BitDepthClass::Unknown);
 				Assert::IsTrue(C::ClassifyBitDepthFromStep(-4, 0) == C::BitDepthClass::Unknown);
@@ -1465,6 +1467,33 @@ namespace Tests
 					Assert::IsTrue(det.nullTableDepthClass == C::BitDepthClass::N8);
 					Assert::IsTrue(cnt.placeholderNullTableEvals >= 1, L"8-bit stream visibly falls back to placeholder");
 					Assert::IsTrue(cnt.depthNullTableFallbacks >= 1, L"8-bit cross-depth miss visibly counted in depthNullTableFallbacks");
+				}
+
+				// (e4) HIGH-1 regression: 8-bit HDMI-loop stream (SetDiagnosticDepths(8, 8) + outputStepOverride = 1)
+				//      with calibrated N10-only table set MUST classify as N8 and refuse N10 cross-substitution!
+				{
+					ChainFx::ManualClock clk;
+					C::EstimatorSettings cfg;
+					cfg.outputStepOverride = 1;
+					C::ChainEstimator est(cfg, clk.Fn());
+					est.SetSynchronous(true);
+					est.SetDiagnosticDepths(8, 8);
+					est.SetDepthNullTables(cal10Only, true);
+					C::EvaluationDetail det;
+					est.SetEvaluationObserver([&](const C::EvaluationDetail& d) { det = d; });
+					est.SetMode(C::EstimatorMode::On);
+
+					clk.Set(1000.0);
+					Assert::IsTrue(est.SubmitLines(snap10));
+					const C::EstimatorCounters cnt = est.GetCounters();
+					Assert::IsTrue(det.nullTableDepthClass == C::BitDepthClass::N8,
+						L"HIGH-1 regression: outputBits == 8 with step == 1 must resolve to BitDepthClass::N8");
+					Assert::IsFalse(det.nullTablesCalibrated,
+						L"HIGH-1 regression: N10 table must NOT cross-substitute onto outputBits == 8, step == 1 stream");
+					Assert::IsTrue(cnt.placeholderNullTableEvals >= 1,
+						L"HIGH-1 regression: 8-bit HDMI-loop stream visibly falls back to placeholder");
+					Assert::IsTrue(cnt.depthNullTableFallbacks >= 1,
+						L"HIGH-1 regression: 8-bit HDMI-loop miss visibly counted in depthNullTableFallbacks");
 				}
 			}
 		}
@@ -1913,6 +1942,32 @@ namespace Tests
 					L"EstimateEmpiricalFloor matches exact MeanOfMiddle reference on skewed even segment");
 				Assert::IsTrue(std::fabs(brokenFloor - refFloor) > 2.5,
 					L"negative control: broken even-length upper-only median deviates by 2x (> 2.5 codes)");
+			}
+
+			// LOW-2 guard check: RobustStats::QuantileInPlace with NaN q returns ifEmpty, negative q clamps to min,
+			// and q > 1 clamps to max across all RankRules without UB.
+			{
+				const double nanQ = std::numeric_limits<double>::quiet_NaN();
+				const double sentinel = -7.5;
+				const RobustStats::RankRule rules[3] = {
+					RobustStats::RankRule::Interpolated,
+					RobustStats::RankRule::FloorIndex,
+					RobustStats::RankRule::NearestRank
+				};
+				for (int ri = 0; ri < 3; ++ri)
+				{
+					double bufNan[5] = { 30.0, 10.0, 50.0, 20.0, 40.0 };
+					double bufNeg[5] = { 30.0, 10.0, 50.0, 20.0, 40.0 };
+					double bufHi[5] = { 30.0, 10.0, 50.0, 20.0, 40.0 };
+					Assert::AreEqual(sentinel, RobustStats::QuantileInPlace(bufNan, 5, nanQ, rules[ri], sentinel), 1e-12,
+						L"QuantileInPlace(NaN) returns ifEmpty without UB");
+					Assert::AreEqual(10.0, RobustStats::QuantileInPlace(bufNeg, 5, -0.25, rules[ri], sentinel), 1e-12,
+						L"QuantileInPlace(negative q) clamps cleanly to minimum element without UB");
+					Assert::AreEqual(50.0, RobustStats::QuantileInPlace(bufHi, 5, 1.5, rules[ri], sentinel), 1e-12,
+						L"QuantileInPlace(q > 1) clamps cleanly to maximum element without UB");
+					Assert::AreEqual(sentinel, RobustStats::QuantileInPlace(nullptr, 0, 0.25, rules[ri], sentinel), 1e-12,
+						L"QuantileInPlace(empty) returns ifEmpty");
+				}
 			}
 		}
 
