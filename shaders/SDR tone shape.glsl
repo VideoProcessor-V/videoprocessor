@@ -69,6 +69,9 @@ vec4 hook()
     vec4 color = HOOKED_texOff(0);
     if (headroom == 0.0 && strength == 0.0)
         return color;
+    // GEM-015 (Gemini PERF-5, as written): headroom only (no knee) is a scale in linear light, i.e. one
+    // factor in the signal: (L (1 - h))^(1/eotf) = v (1 - h)^(1/eotf), sign kept. Within an ulp of the full form.
+    if (strength <= 0.0) { color.rgb *= pow(1.0 - headroom, 1.0 / eotf); return color; }
     vec3 L = to_linear(color.rgb);
     vec3 y = L * (1.0 - headroom);
     vec3 shaped = y;
@@ -97,7 +100,7 @@ vec4 hook()
             vec3 blur = vec3(0.0);
             for (int j = -1; j <= 1; ++j)
                 for (int i = -1; i <= 1; ++i)
-                    blur += to_linear(HOOKED_texOff(vec2(2 * i, 2 * j)).rgb);
+                    blur += (i == 0 && j == 0) ? L : to_linear(HOOKED_texOff(vec2(2 * i, 2 * j)).rgb);   // GEM-015 (AMEND): centre reused, sum order kept
             vec3 detail = L - blur / 9.0;
             shaped += recovery * (vec3(1.0) - slope) * (1.0 - headroom) * detail;
         }

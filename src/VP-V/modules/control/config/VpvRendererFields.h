@@ -104,6 +104,7 @@ namespace VpvRenderer
 		// VP pass after libplacebo's tone mapping (shaders\DV trims.glsl; a
 		// non-certified reimplementation, see DolbyVisionTrims.h).
 		bool dvTrims = true;             // default on (test/dv-synthetic verdict, 2026-10-24; not certified)
+		std::string dvDisplayMapping = "vp";   // CF-1 P3: vp | original (original = Bill's libplacebo DV mapping, no VP trims or curve)
 		std::string dvToneMapping = "libplacebo";   // feat/dv-l8: libplacebo | dolby_style (DvDolbyStyle.h; approx.)
 		std::string dvCompareCaptureFolder;          // feat/dv-l8 WIP: DV comparison capture folder ("" = VP_DV_COMPARE_PATH / off)
 		// Restore switch (DV tunnel bug hunt 2026-10-17, default on): the whole-raster
@@ -210,10 +211,23 @@ namespace VpvRenderer
 		double ambientAdaptStrength = 1.0;
 		double ambientScreenReflect = 0.01;
 		double ambientMaxBlackNits = 1.0;
+		double ambientLuxDark = 8.0;    // CF-1 FIX1 SHOULD 3: [ambient] lux_dark (Ambient::Read), the appearance room anchors
+		double ambientLuxLit = 20.0;    // [ambient] lux_lit
 		double ambientTauUpSeconds = 15.0;
 		double ambientTauDownSeconds = 90.0;
 		BlackIntentMode intentBlack = BlackIntentMode::Off;
 		bool intentDisplay = false;
+		// CF-1 CAM-3: colour.appearance (CAM16 room and screen adaptation). In-memory fields only; the VP-V keys and the Config
+		// card are CAM-4. Off by default; the Original pathway forces it off.
+		bool appearance = false;
+		double appearanceStrength = 1.0;
+		std::string appearanceRoom = "cinema";            // cinema | living_low | living_lit | auto
+		double appearanceScreenWhiteNits = 48.0;          // the placeholder until measured
+		bool appearanceScreenWhiteMeasured = false;
+		bool appearanceHonourL11 = true;
+		bool ambientAdaptReplaced = false;                // CAM-4: ambient_adapt was on and appearance (the one owner) switched it off (PostLoad)
+		bool saturationReplaced = false;                  // FIX1 MUST 6: saturation was set and appearance (the one owner) switched it off (PostLoad)
+		int saturationConfigured = 0;                     // FIX1 MUST 6: the user's saturation while it is replaced (for the Fallbacks line)
 		// Film grain (owner 2026-10-17: never averaged or interpolated away; each switch's
 		// default is the faithful path, the other value the established one byte for byte;
 		// docs/audit/grain-audit-2026-10-17.md): interpolation_grain, deband_vp_grain_guard,
@@ -266,7 +280,11 @@ namespace VpvRenderer
 		bool pipelineOriginalPathway = false;
 		std::string pipelineOrder;
 		std::string pipelineSlotsOff;
+		// CF-1 FIX1 MUST 1 / SHOULD 7: calibrationLutStage is the RESOLVED stage (vp | libplacebo, PostLoad), which the
+		// renderer reads; calibrationLutStageConfigured is the user's calibration_lut_stage (libplacebo | vp | auto,
+		// default auto: the LUT moves to VP's last step while a VP colour step that must follow it runs).
 		std::string calibrationLutStage = "libplacebo";
+		std::string calibrationLutStageConfigured = "auto";
 		std::string hdrInference = "vp";   // [vpv] hdr_inference (F-8): the GUI's choice; dumped and fingerprinted here
 		// pipeline_entrance_once (B3, ADR-0024): the motion consumers (interpolated pictures, hiccup
 		// gap pairs, source-warp extras) warp or blend the PROCESSED A and B - the entrance stages

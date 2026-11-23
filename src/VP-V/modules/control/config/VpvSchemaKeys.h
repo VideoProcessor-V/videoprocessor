@@ -103,6 +103,7 @@ namespace ProfileSchemaHooks
 			// Owner 2026-10-13: the capture path (gpu = the low-latency GPU unpack).
 			if (key == "capture_path") return V(IsChoice(value, { "standard", "gpu" }));
 			if (key == "capture_upload") return V(IsChoice(value, { "auto", "render", "early" }));
+			if (key == "dv_display_mapping") return V(IsChoice(value, { "vp", "original" }));   // CF-1 P3
 			if (key == "dv_tone_mapping") return V(IsChoice(value, { "libplacebo", "dolby_style" }));   // feat/dv-l8
 			if (key == "dv_compare_capture_folder") return V(value.find('"') == std::string::npos);   // feat/dv-l8 WIP: a folder, "" = off
 			if (key == "source_range") return V(IsChoice(value, { "auto", "full", "limited" }));
@@ -174,6 +175,13 @@ namespace ProfileSchemaHooks
 			if (key == "ambient_max_black_nits") return V(IsNumberInRange(value, 0.0, 10.0));
 			if (key == "ambient_tau_up_s") return V(IsNumberInRange(value, 1.0, 600.0));
 			if (key == "ambient_tau_down_s") return V(IsNumberInRange(value, 1.0, 1800.0));
+			// CF-1 CAM-4 (colour.appearance, refs/125): the CAM16 room and screen adaptation.
+			if (key == "appearance") return V(IsChoice(value, { "off", "on" }));
+			if (key == "appearance_strength") return V(IsNumberInRange(value, 0.0, 1.0));
+			if (key == "appearance_room") return V(IsChoice(value, { "cinema", "living_low", "living_lit", "auto" }));
+			if (key == "appearance_screen_white_nits") return V(IsNumberInRange(value, 1.0, 1000.0));
+			if (key == "appearance_screen_white_measured") return V(IsChoice(value, { "off", "on" }));
+			if (key == "appearance_honour_l11") return V(IsChoice(value, { "off", "on" }));
 			if (key == "intent_black") return V(IsChoice(value, { "off", "report", "led_protect" }));
 			if (key == "intent_display") return V(IsChoice(value, { "off", "report" }));
 			if (key == "temporal_dither") return V(IsChoice(value, { "auto", "off", "libplacebo", "sigma_delta" }));
@@ -309,7 +317,7 @@ namespace ProfileSchemaHooks
 				return V(IsChoice(value, { "approve", "keep" }));
 			if (key == "pipeline_order" || key == "pipeline_slots_off")
 				return V(ConfigFile::NormalizeName(value).find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789_.,;> ") == std::string::npos);
-			if (key == "calibration_lut_stage") return V(IsChoice(value, { "libplacebo", "vp" }));
+			if (key == "calibration_lut_stage") return V(IsChoice(value, { "libplacebo", "vp", "auto" }));
 			if (key == "output_segments_merged") return V(IsChoice(value, { "on", "off" }));   // output segments S2/S3 (draft)
 			if (key == "hdr_inference") return V(IsChoice(value, { "vp", "original" }));   // F-8 (HdrInferenceChoice.h)
 			return Verdict::NotMine;

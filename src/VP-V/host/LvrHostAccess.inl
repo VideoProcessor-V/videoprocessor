@@ -19,7 +19,7 @@
 #include <VP-V/modules/control/skeleton/RendererHostHelpers.h>   // Package C 6: compiled in RendererHostHelpers.cpp
 
 void LibplaceboVideoRenderer::Impl::ConfigureIntentInterpreter() { ConfigureIntentMotion(); ConfigureIntentAmbient(); }
-void LibplaceboVideoRenderer::Impl::ConfigureIntentAmbient() { Vpv::LedIntent::ConfigureAmbient(vpv.led.intent, activeSettings); }
+void LibplaceboVideoRenderer::Impl::ConfigureIntentAmbient() { Vpv::LedIntent::ConfigureAmbient(vpv.led.intent, activeSettings, dvStage.AppearanceDecision().active); }
 double LibplaceboVideoRenderer::Impl::IntentTargetBlackNits(uint64_t sourceSequence) { return Vpv::LedIntent::TargetBlackNits(vpv.led.intent, vpv.motion.intent, sdrBlackNits, sourceSequence); }
 void LibplaceboVideoRenderer::Impl::EvaluateIntentBlackDisplay(const SceneDescriptor& scene, const DisplayProfile& display) { Vpv::LedIntent::EvaluateBlackDisplay(vpv.led.intent, vpv.motion.intent, activeSettings, sdrBlackNits, dynamicDrive, scene, display); }
 
@@ -152,7 +152,7 @@ EntranceSegment::Bindings LibplaceboVideoRenderer::Impl::EntranceBindings()
 
 void LibplaceboVideoRenderer::Impl::ConfigureIntentMotion()
 {
-	Vpv::IntentMotion::Configure(vpv.motion.intent, activeSettings, contentIntent.get());
+	Vpv::IntentMotion::Configure(vpv.motion.intent, activeSettings, contentIntent.get(), dvStage.AppearanceDecision().active);
 }
 
 double LibplaceboVideoRenderer::Impl::EaseBlackShare(double measured, bool haveMeasurement)

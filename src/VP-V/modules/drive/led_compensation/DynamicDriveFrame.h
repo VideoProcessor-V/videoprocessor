@@ -60,6 +60,8 @@ namespace LedDrive
 		// The gamma this frame's output is encoded for (the host's LedDisplayGamma of the target
 		// transfer): the gamma boost's base (delta 4), not the projector's compensation_eotf.
 		double displayGamma = 2.2;
+		// FIX1 MUST 6: colour.appearance runs this frame; it owns the screen-brightness correction, so gamma_boost steps aside.
+		bool appearanceActive = false;
 		double captureRateHz = 0.0;                // measured (film rate under a pulldown lock)
 		double nominalSourceRateHz = 0.0;
 		// The render-ahead schedule's next vsync in QPC seconds, when render-ahead plans this

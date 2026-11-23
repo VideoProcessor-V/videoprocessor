@@ -185,8 +185,8 @@ namespace Vpv
 				{ K::Section, "adaptiveDownscale" }, { K::Section, "adaptiveUpscale" }, { K::Hide, "upscale_light" } } },
 
 			// ---- Colour ----
-			{ "colour", "dv", "Dolby Vision", "How Dolby Vision pictures are mapped to your display.", false, false, {
-				{ K::Toggle, "dv_trims" }, { K::Row, "dv_tone_mapping" } } },
+			{ "colour", "dv", "Display mapping", "How Dolby Vision pictures are mapped to your display. VP's mapping is an approximation of Dolby's, not certified; Original uses libplacebo's own mapping.", false, false, {
+				{ K::Row, "dv_display_mapping" }, { K::Toggle, "dv_trims" }, { K::Row, "dv_tone_mapping" } } },
 			{ "colour", "range", "Range and precision", "Keeps every value the source carries.", false, false, {
 				{ K::Toggle, "preserve_extended_range" }, { K::Elsewhere, "fbo_float32" },
 				{ K::Note, "Full precision (32-bit float intermediates) is chosen once for every tier, under the global tier at the top of this page." } } },
@@ -195,6 +195,11 @@ namespace Vpv
 			{ "colour", "room", "Room-light adaptation (experimental)",
 				"Adjusts black and contrast to the room light the sensor measures.", false, false, {
 				{ K::Toggle, "ambient_adapt" } } },
+			{ "colour", "appearance", "Room and appearance (experimental)",
+				"Adapts the picture to the room and to the screen white (CAM16). While on it replaces the gamma boost and the saturation steps and takes over from room-light adaptation.", false, false, {
+				{ K::Toggle, "appearance" }, { K::Text, "appearance_room" }, { K::Text, "appearance_strength" }, { K::Text, "appearance_screen_white_nits" },
+				{ K::Toggle, "appearance_screen_white_measured" }, { K::Toggle, "appearance_honour_l11" },
+				{ K::Note, "@appearance_status" } } },
 			{ "colour", "upstream", "Tone mapping and display (Bill's pages)", "Where the colour settings that are not VP-V's live.", false, false, {
 				{ K::Note, "Tone mapping, HDR target, gamut and output gamma: VP Renderer > Tone Mapping and "
 					"VP Renderer > Color / Output. The calibration LUT file: Color / Output; where it runs: the Pipeline (expert) tab." },

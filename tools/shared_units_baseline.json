@@ -267,6 +267,12 @@
      "reason": "exponential smoothing factor of a quality/bits statistic, not a 2x2 box"
     },
     {
+     "file": "src/VP-V/modules/colour/appearance/Cam16.h",
+     "pattern": "inline double Eccentricity",
+     "kind": "false_positive",
+     "reason": "CAM16 eccentricity factor e_t = 0.25 (cos(h + 2) + 3.8) (Li et al. 2017, CIECAM02 eq. 9): a colour-appearance constant, not a 2x2 half-luma box"
+    },
+    {
      "file": "src/VP-V/modules/control/skeleton/SkeletonModule.cpp",
      "pattern": "kP1HalfLuma|HalfLumaProducer|ComputeHalfLuma",
      "kind": "false_positive",

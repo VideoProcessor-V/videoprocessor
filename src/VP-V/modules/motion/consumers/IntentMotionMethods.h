@@ -11,7 +11,7 @@ namespace Vpv
 	namespace IntentMotion
 	{
 		void Configure(MotionIntentState& state, const VpvRenderer::Fields& settings,
-			const ContentIntent::Observer* contentIntent);
+			const ContentIntent::Observer* contentIntent, bool appearanceActive = false);
 
 		double EaseBlackShare(MotionIntentState& state, double easeSeconds, double measured, bool haveMeasurement);
 	}

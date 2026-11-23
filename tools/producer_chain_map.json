@@ -36,6 +36,7 @@
     "kP10gGrainLevel": {"files": ["repair/grain_split/GrainLevelGpu.h"], "note": "P10g T3 owner fill (GrainLevelModule): reads P10 through the memo's variant Acquire; single-frame law until the temporal passes are costed"},
     "kSourceIdentity": {"files": ["input/source_analysis/identity/SourceIdPipeline.h"]},
     "kSourceGeometry": {"files": ["input/source_analysis/identity/SourceGeometryProduct.h"]},
+    "kRoomLight": {"files": ["colour/appearance/RoomLight.h"]},
     "kCodingEvidence": {"files": ["input/source_analysis/regions/CodingEvidence.cpp"], "note": "P16 is a real producer since L-P16 (r2/job1-p16): CPU per-tile owner fill registered in SkeletonModule.cpp, measure in regions/CodingEvidence.cpp; no self read since 15d J5 (the fill reads no history; the GPU fused pass re-declares lag 1)"},
     "kTdBlocks": {"files": ["repair/temporal_detail/TemporalDetailGpu.cpp"], "ignore_reserved": true, "note": "catalog says reserved; the legacy TemporalDetailGpu pass is the only code that computes td.blocks today, so it is scanned"}
   },

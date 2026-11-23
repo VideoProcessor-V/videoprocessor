@@ -11,7 +11,7 @@ namespace Vpv
 {
 	namespace LedIntent
 	{
-		void ConfigureAmbient(LedIntentState& ledIntent, const VpvRenderer::Fields& settings);
+		void ConfigureAmbient(LedIntentState& ledIntent, const VpvRenderer::Fields& settings, bool appearanceActive = false);
 
 		double TargetBlackNits(LedIntentState& ledIntent, MotionIntentState& motionIntent,
 			double sdrBlackNits, uint64_t sourceSequence);

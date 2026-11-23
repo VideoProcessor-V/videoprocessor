@@ -172,6 +172,9 @@ namespace LedDrive
 		// frame's output transfer): the gamma boost's base (delta 4).
 		void SetDisplayGamma(double gamma) { displayGamma.store(gamma, std::memory_order_release); }
 		double DisplayGamma() const override { return displayGamma.load(std::memory_order_acquire); }
+		// FIX1 MUST 6: the renderer says when colour.appearance replaces the gamma boost (the picture then carries none).
+		void SetBoostReplaced(bool replaced) { boostReplaced.store(replaced, std::memory_order_release); }
+		bool BoostReplaced() const override { return boostReplaced.load(std::memory_order_acquire); }
 		// Real-time length of one source frame (the output frame period when the
 		// source rate is unknown).
 		double SourceFramePeriodMs() const override;
@@ -282,6 +285,7 @@ namespace LedDrive
 
 	private:
 		std::atomic<double> displayGamma{ 2.2 };
+		std::atomic<bool> boostReplaced{ false };
 		void Run();
 		bool WaitUntil(std::chrono::steady_clock::time_point when);
 		// The same, also ending (false) as soon as the settings change from

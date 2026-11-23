@@ -226,8 +226,19 @@ inline void VpvDumpRendererSettings(const RendererSettings& s, std::ostream& o)
 	Put(o, "ambientAdaptStrength", s.ambientAdaptStrength);
 	Put(o, "ambientScreenReflect", s.ambientScreenReflect);
 	Put(o, "ambientMaxBlackNits", s.ambientMaxBlackNits);
+	Put(o, "ambientLuxDark", s.ambientLuxDark);
+	Put(o, "ambientLuxLit", s.ambientLuxLit);
 	Put(o, "ambientTauUpSeconds", s.ambientTauUpSeconds);
 	Put(o, "ambientTauDownSeconds", s.ambientTauDownSeconds);
+	Put(o, "appearance", s.appearance);
+	Put(o, "appearanceStrength", s.appearanceStrength);
+	Put(o, "appearanceRoom", s.appearanceRoom);
+	Put(o, "appearanceScreenWhiteNits", s.appearanceScreenWhiteNits);
+	Put(o, "appearanceScreenWhiteMeasured", s.appearanceScreenWhiteMeasured);
+	Put(o, "appearanceHonourL11", s.appearanceHonourL11);
+	Put(o, "ambientAdaptReplaced", s.ambientAdaptReplaced);
+	Put(o, "saturationReplaced", s.saturationReplaced);
+	Put(o, "saturationConfigured", s.saturationConfigured);
 	Put(o, "intentBlack", s.intentBlack);
 	Put(o, "intentDisplay", s.intentDisplay);
 	Put(o, "interpolationGrain", s.interpolationGrain);
@@ -247,6 +258,7 @@ inline void VpvDumpRendererSettings(const RendererSettings& s, std::ostream& o)
 	Put(o, "pipelineOrder", s.pipelineOrder);
 	Put(o, "pipelineSlotsOff", s.pipelineSlotsOff);
 	Put(o, "calibrationLutStage", s.calibrationLutStage);
+	Put(o, "calibrationLutStageConfigured", s.calibrationLutStageConfigured);
 	Put(o, "hdrInference", s.hdrInference);
 	Put(o, "pipelineEntranceOnce", s.pipelineEntranceOnce);
 	Put(o, "frameAnalysisStore", s.frameAnalysisStore);

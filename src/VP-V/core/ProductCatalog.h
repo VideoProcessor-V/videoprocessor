@@ -93,6 +93,7 @@ constexpr uint32_t kExpectedCodingEvidenceUnit = 1;
 constexpr uint32_t kExpectedQualityPatternUnit = 1;
 constexpr uint32_t kExpectedFieldRefineUnit = 1;
 constexpr uint32_t kExpectedTdMapsViewUnit = 1;
+constexpr uint32_t kExpectedRoomLightUnit = 1;   // CF-1 CAM-2: room_light held state (LED intent publishes, appearance reads)
 
 // Doc 83 MV4: SERVICE products. The long-pair field is not a per-frame ring product (its pair distance is the measured GOP length and the
 // service is asynchronous), so it has no id in the per-frame registry (adding one would move kSkeletonProductEnd and the live-fill owner
@@ -167,6 +168,10 @@ inline const std::vector<ProductRow>& ProductRows()
         // P10g (T3): an owner fill from the acquired P10 variant; no lane job. Single-frame law (= the unit-4 law) until the temporal passes
         // are costed (GrainLevel.h), shown as the Fallbacks line "grain_level_temporal".
         { kP10gGrainLevel, "repair/grain_split", kExpectedGrainSplitUnit, "grain level pass (per-frame memo, owner fill; single-frame law until the temporal passes are costed); first reader: hybrid upscaler" },
+        // CF-1 CAM-2: room_light is HELD STATE (no lane producer, no live fill, no RegisterOwnerFill anywhere). The folder below owns the RECORD (layout
+        // and unit version: colour/appearance/RoomLight.h); the single WRITER is the LED intent's ambient filter (drive/led_compensation/LedIntentState.h),
+        // published from control/diagnostics/StatusMethods.inl; the reader is the appearance stage at lag 1 (CF-1 FIX1 MUST 7: checked, kept; SHOULD 6: its catalog reader row is MakeRow 28).
+        { kRoomLight, "colour/appearance", kExpectedRoomLightUnit, "" },
     };
     return rows;
 }
@@ -397,6 +402,10 @@ inline const std::vector<ConsumerRow>& ConsumerRows()
         r.back().family = "temporal detail";
         r.push_back(MakeRow(27, "source geometry status", "VP-V/core/StatusText", PathwayUnit::Output, 95, {}, own,
                             "product.source_geometry", false, { kSourceGeometry }));
+        // CF-1 FIX1 SHOULD 6: the appearance stage reads room_light (HELD STATE) at lag 1, the latest sealed record; absent or lost = a dark
+        // room assumed, visibly (RoomLight::Resolve status "room: sensor (no reading; dark assumed)", "product.room_light").
+        r.push_back(MakeRow(28, "appearance (room light)", "VP-V/modules/colour/appearance/AppearanceStage", PathwayUnit::Colour, 10, {}, own,
+                            "product.room_light", false, { kRoomLight }));
         // VectorDemand consumers: ids and reads from VectorDemandProducts.h
         for (int i = 0; i < VectorDemand::kConsumerCount; ++i) {
             const VectorDemand::Consumer c = VectorDemand::ConsumerAt(i);

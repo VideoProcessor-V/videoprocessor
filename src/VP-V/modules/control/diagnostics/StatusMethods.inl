@@ -141,6 +141,8 @@ bool LibplaceboVideoRenderer::GetModuleStatus(const char* module, CString& statu
 			take(lines.fallbacks, GetFallbacksStatus(line));
 			take(lines.ledDrive, GetLedDriveStatus(line));
 			take(lines.sourceResolution, GetSourceResolutionStatus(line));
+			if (m_impl)   // CF-1 FIX1 SHOULD 5: colour.appearance in Ctrl+I, OFF included (never Config-only)
+				lines.appearance.Set(true, CString(m_impl->dvStage.AppearanceStatusShown().c_str()).GetString());
 			std::vector<std::string> extensionLines; RendererExtension::CollectStatusLines(RendererExtension::StatusKind::Lines, m_impl.get(), extensionLines); // VPV-HOOK
 			VpStatusText::SetExtensionLines(lines, extensionLines, [](const std::string& text) { return std::wstring(CString(text.c_str()).GetString()); }); // VPV-HOOK
 		}, text);
@@ -228,10 +230,12 @@ void LibplaceboVideoRenderer::SetAmbientLux(double lux, bool valid, double nowSe
 	if (!m_impl)
 		return;
 	std::lock_guard<std::mutex> guard(m_impl->vpv.led.intent.intentMutex);
-	if (!m_impl->vpv.led.intent.ambientSettings.enabled)
+	if (!m_impl->vpv.led.intent.ambientSettings.enabled && !m_impl->vpv.led.intent.roomLightFeed)
 		return;
 	if (valid && std::isfinite(lux))
 		m_impl->vpv.led.intent.ambientFilter.AddReading(lux < 0.0 ? 0.0 : lux, nowSeconds);
 	else
 		m_impl->vpv.led.intent.ambientFilter.Tick(nowSeconds);
+	// CF-1 CAM-2: the one filter, published as the room_light product (the appearance stage reads it; nothing else is estimated).
+	m_impl->vpv.led.intent.roomLight.Publish(RoomLight::MakeRecord(m_impl->vpv.led.intent.ambientFilter, 0));
 }

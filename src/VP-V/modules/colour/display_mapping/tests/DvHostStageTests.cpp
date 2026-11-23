@@ -19,6 +19,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
 #include <map>
 #include <string>
 #include <vector>
@@ -103,6 +106,20 @@ namespace Tests
 				[](const pl_hook*& hook) { hook = nullptr; } };
 		}
 
+		// The value of a named shader parameter, or nullptr when the list does not carry it.
+		inline const double* Param(const DvHostStage::ParameterList& list, const char* name)
+		{
+			for (const auto& entry : list)
+				if (std::strcmp(entry.first, name) == 0)
+					return &entry.second;
+			return nullptr;
+		}
+		inline double ParamOr(const DvHostStage::ParameterList& list, const char* name, double missing)
+		{
+			const double* v = Param(list, name);
+			return v ? *v : missing;
+		}
+
 		// One render frame as the host runs it (group D): DvHostStage phase 1, the S2 output
 		// segment collecting (the ONE emitter of the trims hook), DvHostStage phase 2.
 		struct Run
@@ -112,6 +129,9 @@ namespace Tests
 			std::string curve = "bt2390";
 			std::string folder;
 			bool colourRuns = true;
+			int trimsSlot = -1;                          // -1: the dm_trims slot follows colourRuns; 0 / 1: forced off / on (GEM-004)
+			DvHostStage::ParameterList lastParams;       // the trims parameters phase 1 handed to the segment this frame
+			bool lastTrimsWanted = false;
 			VideoState state;
 			size_t trimsHooks = 0;                       // the segment's count this frame
 			std::vector<PipelineSlots::Id> tags;         // the slots the segment tagged this frame
@@ -123,14 +143,18 @@ namespace Tests
 				OutputSegments::ColourFrame colourFrame;
 				std::vector<const pl_hook*> user;
 				colourFrame.userPreOutput = &user;
-				stage.PrepareToneAndTrims({ mode, trims, curve, folder, colourRuns, image, target, dm, 2.4, state, nullptr, 1 },
+				const bool trimsRuns = trimsSlot < 0 ? colourRuns : trimsSlot != 0;
+				stage.PrepareToneAndTrims({ mode, trims, curve, folder, colourRuns, image, target, dm, 2.4, state, nullptr, 1, trimsRuns },
 					params, templates, colourFrame.dvTrims, colourFrame.dv);
+				lastParams = colourFrame.dv;
+				lastTrimsWanted = colourFrame.dvTrims;
 				CustomHookChain::Chain tone(NoShaders()), comp(NoShaders());
 				LedDrive::MeasurementHook measure;
 				CalibrationLutStage::Hook lut;
 				OutputSegments::OutputColourSegment s2(tone, stage.TrimsHook(), measure, comp, lut);
 				PipelineSlots::Registry registry;
-				registry.SetEnabled(PipelineSlots::Id::ColourSdrToneShape, colourRuns);
+				registry.SetEnabled(PipelineSlots::Id::ColourDmTrims, trimsRuns);
+				registry.SetEnabled(PipelineSlots::Id::ColourDmCurve, colourRuns);
 				tags.clear();
 				const OutputSegments::ColourCounts counts = s2.Collect(colourFrame, registry, hooks,
 					[this, &hooks](size_t start, PipelineSlots::Id slot) { for (size_t i = start; i < hooks.size(); ++i) tags.push_back(slot); });
@@ -410,7 +434,7 @@ namespace Tests
 				run.Frame(stage, image, Target(PL_COLOR_TRC_PQ, 100.0f), &dm, params, hooks);
 				Assert::AreEqual<size_t>(1, run.trimsHooks, L"one trims hook from the segment");
 				Assert::AreEqual<ptrdiff_t>(1, std::count(hooks.begin(), hooks.end(), DummyHook()), L"exactly once in the frame");
-				Assert::IsTrue(run.tags.size() == 1 && run.tags[0] == PipelineSlots::Id::ColourSdrToneShape, L"tagged to its slot");
+				Assert::IsTrue(run.tags.size() == 1 && run.tags[0] == PipelineSlots::Id::ColourDmTrims, L"tagged to its slot");
 				Assert::IsFalse(reg.Has("Dolby Vision trims"), L"active: no fallback");
 				Assert::AreEqual(std::string("DV trims: L2"), stage.TrimsStatus());
 			}
@@ -432,6 +456,259 @@ namespace Tests
 				Assert::IsTrue(hooks.empty() && run.tags.empty());
 				Assert::IsTrue(reg.engaged.empty(), L"slot off: nothing listed");
 			}
+		}
+
+		// GEM-004 part 2 ([C]:97(b), AMEND: the dm_trims slot, not the colour slot): dv_trims on, a DV picture with DM, a
+		// calibration LUT, the colour slot ON but the colour.dm_trims slot OFF: the trims are OFF (F-12), not a fallback.
+		// Before the fix the trims engaged "Dolby Vision trims" (off with a calibration LUT) whatever the trims slot said.
+		TEST_METHOD(TrimsSlotOffWithALutIsOffNotAFallback)
+		{
+			using namespace DvHost;
+			Registry reg;
+			DvHostStage stage(NoShaders(), reg.Engage(), reg.Release());
+			Run run;
+			run.trims = true;
+			run.colourRuns = true;
+			run.trimsSlot = 0;   // colour.dm_trims off
+			pl_color_map_params params = pl_color_map_default_params;
+			std::vector<const pl_hook*> hooks;
+			const DolbyVisionTunnelFrameMetadata dm = TrimmedDm();
+			const pl_frame image = Picture(true);
+			pl_frame lutTarget = Target(PL_COLOR_TRC_PQ, 100.0f);
+			static const int dummy = 0;
+			lutTarget.lut = reinterpret_cast<const pl_custom_lut*>(&dummy);
+			for (int k = 0; k < 3; ++k)
+				run.Frame(stage, image, lutTarget, &dm, params, hooks);
+			Assert::IsFalse(reg.Has("Dolby Vision trims"), L"trims slot off + LUT: off, not listed as a fallback");
+			Assert::AreEqual(std::string("DV trims: off"), stage.TrimsStatus());
+			Assert::IsTrue(hooks.empty());
+			// The same without a LUT: still off, no shader-missing entry either.
+			hooks.clear();
+			run.Frame(stage, image, Target(PL_COLOR_TRC_PQ, 100.0f), &dm, params, hooks);
+			Assert::IsFalse(reg.Has("Dolby Vision trims"), L"trims slot off, no LUT: nothing listed");
+			Assert::AreEqual(std::string("DV trims: off"), stage.TrimsStatus());
+			Assert::IsFalse(run.lastTrimsWanted, L"no trims parameters for the segment");
+			// Control: the slot back on, the same LUT: the fallback is listed with its reason.
+			run.trimsSlot = 1;
+			run.Frame(stage, image, lutTarget, &dm, params, hooks);
+			Assert::IsTrue(reg.Has("Dolby Vision trims"));
+			Assert::AreEqual(std::string("off with a calibration LUT (it would act after the LUT)"), reg.engaged["Dolby Vision trims"]);
+			// And off again: released.
+			run.trimsSlot = 0;
+			run.Frame(stage, image, lutTarget, &dm, params, hooks);
+			Assert::IsFalse(reg.Has("Dolby Vision trims"));
+		}
+
+		// GEM-009 ([C]:131): a new device loads the trims shader afresh - ReleaseHooks clears the missing-shader flag, so the
+		// Dolby-style curve is not held back by the previous device's failure. Before the fix the flag survived the release
+		// and the next frame still fell back to bt2390 + trims.
+		TEST_METHOD(ReleaseHooksClearsTheMissingShaderFlag)
+		{
+			using namespace DvHost;
+			Registry reg;
+			DvHostStage stage(NoShaders(), reg.Engage(), reg.Release());
+			Run run;
+			run.mode = "dolby_style";
+			pl_color_map_params params = pl_color_map_default_params;
+			params.tone_mapping_function = &pl_tone_map_spline;
+			std::vector<const pl_hook*> hooks;
+			const DolbyVisionTunnelFrameMetadata dm = TrimmedDm();
+			const pl_frame image = Picture(true);
+			// Frame 1: the trims shader does not load (the flag is set after the frame); frame 2: the curve is held back.
+			run.Frame(stage, image, Target(PL_COLOR_TRC_PQ, 100.0f), &dm, params, hooks);
+			run.Frame(stage, image, Target(PL_COLOR_TRC_PQ, 100.0f), &dm, params, hooks);
+			Assert::IsTrue(reg.Has("DV tone mapping"), L"precondition: the missing shader stops the Dolby-style curve");
+			Assert::IsTrue(params.tone_mapping_function == &pl_tone_map_bt2390);
+			// The device is released: the flag is cleared, so the next frame runs the Dolby-style curve again.
+			stage.ReleaseHooks();
+			run.Frame(stage, image, Target(PL_COLOR_TRC_PQ, 100.0f), &dm, params, hooks);
+			Assert::IsFalse(reg.Has("DV tone mapping"), L"after ReleaseHooks the curve is not held back by the old failure");
+			Assert::IsTrue(params.tone_mapping_function == &DvDolbyStyle::Function());
+		}
+
+		// GEM-008: the trims shader gets the OUTPUT transfer's kind (0 power, 1 BT.1886, 2 sRGB) and its parameter (the
+		// BT.1886 black offset b from ExtendedRange::DescribeTransfer with piecewise = true) next to dv_gamma. A power-law
+		// output keeps kind 0. Before the fix neither parameter existed (BT.1886 and sRGB were a pure power law).
+		TEST_METHOD(TrimsCarryTheOutputTransferKind)
+		{
+			using namespace DvHost;
+			const DolbyVisionTunnelFrameMetadata dm = TrimmedDm();
+			const pl_frame image = Picture(true);
+			pl_color_map_params params = pl_color_map_default_params;
+			struct Case { enum pl_color_transfer trc; ExtendedRange::TransferKind kind; const wchar_t* name; };
+			const Case cases[] = {
+				{ PL_COLOR_TRC_BT_1886, ExtendedRange::TransferKind::Bt1886, L"BT.1886" },
+				{ PL_COLOR_TRC_SRGB, ExtendedRange::TransferKind::Srgb, L"sRGB" },
+				{ PL_COLOR_TRC_GAMMA24, ExtendedRange::TransferKind::Power, L"gamma 2.4" },
+				{ PL_COLOR_TRC_PQ, ExtendedRange::TransferKind::Power, L"PQ" },
+			};
+			for (const Case& c : cases)
+			{
+				Registry reg;
+				DvHostStage stage(DummyShaders(), reg.Engage(), reg.Release());
+				Run run;
+				pl_frame target = Target(c.trc, 100.0f);
+				target.color.hdr.min_luma = 0.05f;   // a non-zero black: the BT.1886 offset b is then non-zero
+				std::vector<const pl_hook*> hooks;
+				run.Frame(stage, image, target, &dm, params, hooks);
+				const std::wstring name = c.name;
+				Assert::IsTrue(run.lastTrimsWanted, (name + L": the trims act").c_str());
+				const double* kind = Param(run.lastParams, "dv_trc_kind");
+				const double* param = Param(run.lastParams, "dv_trc_param");
+				Assert::IsNotNull(kind, (name + L": dv_trc_kind is pushed").c_str());
+				Assert::IsNotNull(param, (name + L": dv_trc_param is pushed").c_str());
+				Assert::AreEqual(static_cast<double>(static_cast<int>(c.kind)), *kind, 0.0, (name + L": the transfer kind").c_str());
+				if (c.kind == ExtendedRange::TransferKind::Bt1886)
+				{
+					pl_color_space display = target.color;
+					pl_color_space_infer(&display);
+					ExtendedRange::Transfer expected{};
+					Assert::IsTrue(ExtendedRange::DescribeTransfer(display, true, expected));
+					Assert::AreEqual(static_cast<double>(expected.param), *param, 0.0, L"BT.1886 b from the inferred display");
+					Assert::IsTrue(*param > 0.0, L"a non-zero black gives a non-zero b");
+				}
+				else
+					Assert::AreEqual(0.0, *param, 0.0, (name + L": no parameter").c_str());
+				if (c.trc == PL_COLOR_TRC_GAMMA24)
+					Assert::AreEqual(2.4, ParamOr(run.lastParams, "dv_gamma", -1.0), 0.0, L"dv_gamma stays the power-law gamma");
+			}
+		}
+
+		// GEM-012 (AMEND): the per-pixel constants the shader used to recompute for every pixel are host parameters, from the
+		// CPU reference's own maths: dv_peak_pq = PQ(display peak) and dv_near_black_nits = NitsFromPq(64 / 4095) (the CPU
+		// reference's near-black threshold, NOT a truncated literal). Before the fix neither parameter was pushed.
+		TEST_METHOD(TrimsParametersCarryThePeakPqAndNearBlackNits)
+		{
+			using namespace DvHost;
+			const DolbyVisionTunnelFrameMetadata dm = TrimmedDm();
+			const pl_frame image = Picture(true);
+			pl_color_map_params params = pl_color_map_default_params;
+			for (const float peak : { 100.0f, 120.0f })
+			{
+				Registry reg;
+				DvHostStage stage(DummyShaders(), reg.Engage(), reg.Release());
+				Run run;
+				std::vector<const pl_hook*> hooks;
+				run.Frame(stage, image, Target(PL_COLOR_TRC_PQ, peak), &dm, params, hooks);
+				Assert::IsTrue(run.lastTrimsWanted, L"the trims act");
+				const double* peakPq = Param(run.lastParams, "dv_peak_pq");
+				const double* nearBlack = Param(run.lastParams, "dv_near_black_nits");
+				Assert::IsNotNull(peakPq, L"dv_peak_pq is pushed");
+				Assert::IsNotNull(nearBlack, L"dv_near_black_nits is pushed");
+				Assert::AreEqual(DvMath::PqFromNits(peak), *peakPq, 0.0, L"the PQ code of the display peak");
+				Assert::AreEqual(static_cast<double>(peak), ParamOr(run.lastParams, "dv_peak_nits", -1.0), 0.0, L"dv_peak_nits is the display peak");
+				Assert::AreEqual(DvMath::NitsFromPq(64.0 / 4095.0), *nearBlack, 0.0, L"the CPU reference's near-black threshold, exactly");
+				Assert::AreEqual(DvMath::NitsFromPq(DolbyVisionTrims::kNearBlackPq), *nearBlack, 0.0);
+			}
+		}
+
+		// GEM-016 ([C]:171): kr / kg / kb and the ICtCp matrices are cached keyed by display.primaries (and the ICtCp switch).
+		// A primaries switch must be followed, and a frame after the switch must carry exactly what a stage that never saw the
+		// old primaries computes: the cache never serves a stale value.
+		TEST_METHOD(CachedPrimariesFollowAPrimariesSwitch)
+		{
+			using namespace DvHost;
+			const DolbyVisionTunnelFrameMetadata dm = TrimmedDm();
+			const pl_frame image = Picture(true);
+			pl_color_map_params params = pl_color_map_default_params;
+			pl_frame bt2020 = Target(PL_COLOR_TRC_PQ, 100.0f), bt709 = bt2020;
+			bt709.color.primaries = PL_COLOR_PRIM_BT_709;
+			auto frame = [&](DvHostStage& stage, const char* mode, const pl_frame& target)
+			{
+				Run run;
+				run.mode = mode;
+				std::vector<const pl_hook*> hooks;
+				run.Frame(stage, image, target, &dm, params, hooks);
+				Assert::IsTrue(run.lastTrimsWanted, L"the trims act");
+				return run.lastParams;
+			};
+			auto same = [](const DvHostStage::ParameterList& a, const DvHostStage::ParameterList& b)
+			{
+				if (a.size() != b.size()) return false;
+				for (size_t i = 0; i < a.size(); ++i)
+					if (std::strcmp(a[i].first, b[i].first) != 0 || a[i].second != b[i].second) return false;
+				return true;
+			};
+			for (const char* mode : { "libplacebo", "dolby_style" })
+			{
+				Registry regFresh, regCached;
+				DvHostStage fresh(DummyShaders(), regFresh.Engage(), regFresh.Release());
+				const DvHostStage::ParameterList want709 = frame(fresh, mode, bt709);
+				DvHostStage cached(DummyShaders(), regCached.Engage(), regCached.Release());
+				const DvHostStage::ParameterList first2020 = frame(cached, mode, bt2020);
+				Assert::IsFalse(same(first2020, want709), L"the two primaries give different parameters");
+				const double* krA = Param(first2020, "dv_kr");
+				const double* krB = Param(want709, "dv_kr");
+				Assert::IsTrue(krA && krB && *krA != *krB, L"dv_kr differs between BT.2020 and BT.709");
+				// The reference value for BT.709, from the same maths the stage uses.
+				{
+					const pl_raw_primaries* prim = pl_raw_primaries_get(PL_COLOR_PRIM_BT_709);
+					const double red[2] = { prim->red.x, prim->red.y }, green[2] = { prim->green.x, prim->green.y };
+					const double blue[2] = { prim->blue.x, prim->blue.y }, white[2] = { prim->white.x, prim->white.y };
+					double kr = 0, kg = 0, kb = 0;
+					DolbyVisionTrims::LuminanceWeights(red, green, blue, white, kr, kg, kb);
+					Assert::AreEqual(kr, *krB, 1e-15, L"dv_kr is the BT.709 luminance weight");
+					Assert::AreEqual(kb, ParamOr(want709, "dv_kb", -1.0), 1e-15, L"dv_kb is the BT.709 luminance weight");
+				}
+				const DvHostStage::ParameterList after = frame(cached, mode, bt709);
+				Assert::IsTrue(same(after, want709), L"after the switch: identical to a stage that never saw BT.2020");
+				const DvHostStage::ParameterList back = frame(cached, mode, bt2020);
+				Assert::IsTrue(same(back, first2020), L"switching back restores the BT.2020 values");
+				const DvHostStage::ParameterList steady = frame(cached, mode, bt2020);
+				Assert::IsTrue(same(steady, first2020), L"a steady frame (cache hit) repeats the values");
+			}
+			// The ICtCp switch is part of the key: the same primaries, the Dolby-style curve on, then off.
+			Registry reg;
+			DvHostStage stage(DummyShaders(), reg.Engage(), reg.Release());
+			const DvHostStage::ParameterList plain = frame(stage, "libplacebo", bt709);
+			const DvHostStage::ParameterList ictcp = frame(stage, "dolby_style", bt709);
+			const DvHostStage::ParameterList plainAgain = frame(stage, "libplacebo", bt709);
+			Assert::AreEqual(0.0, ParamOr(plain, "dv_space", -1.0), 0.0);
+			Assert::AreEqual(1.0, ParamOr(ictcp, "dv_space", -1.0), 0.0);
+			Assert::IsNotNull(Param(ictcp, "dv_lms00"), L"the ICtCp matrices are present with the Dolby-style curve");
+			Assert::IsNull(Param(plainAgain, "dv_lms00"), L"and gone when it stops");
+			Assert::IsTrue(same(plain, plainAgain), L"the libplacebo-mode parameters come back unchanged");
+		}
+
+		// GEM-016 (the speed-up method: the timing test lands BEFORE the fix commit's measurement): the QPC median of 2,000
+		// PrepareToneAndTrims calls on a DV picture with the trims acting. The median is logged for the gate to quote before and
+		// after; every call must still produce the trims parameters (a faster no-op would not pass).
+		TEST_METHOD(DvHostStageCpuTiming)
+		{
+			using namespace DvHost;
+			Registry reg;
+			DvHostStage stage(DummyShaders(), reg.Engage(), reg.Release());
+			const DolbyVisionTunnelFrameMetadata dm = TrimmedDm();
+			const pl_frame image = Picture(true);
+			const pl_frame target = Target(PL_COLOR_TRC_PQ, 100.0f);
+			pl_color_map_params params = pl_color_map_default_params;
+			const std::string mode = "dolby_style", curve = "bt2390", folder;
+			VideoState state;
+			DvHostStage::ParameterList list;
+			CustomHookChain::TemplateValues templates;
+			LARGE_INTEGER freq{};
+			QueryPerformanceFrequency(&freq);
+			std::vector<double> micros;
+			micros.reserve(2000);
+			for (int k = 0; k < 2000; ++k)
+			{
+				bool wanted = false;
+				LARGE_INTEGER t0{}, t1{};
+				QueryPerformanceCounter(&t0);
+				stage.PrepareToneAndTrims({ mode, true, curve, folder, true, image, target, &dm, 2.4, state, nullptr, static_cast<uint64_t>(k + 1), true },
+					params, templates, wanted, list);
+				QueryPerformanceCounter(&t1);
+				micros.push_back(static_cast<double>(t1.QuadPart - t0.QuadPart) * 1e6 / static_cast<double>(freq.QuadPart));
+				Assert::IsTrue(wanted, L"the trims act on every call");
+				Assert::IsNotNull(Param(list, "dv_peak_nits"), L"and carry their parameters");
+				Assert::IsTrue(list.size() > 10, L"the full parameter list");
+				stage.FinishTrims(1);
+			}
+			std::sort(micros.begin(), micros.end());
+			char line[160];
+			std::snprintf(line, sizeof line, "DvHostStageCpuTiming: PrepareToneAndTrims median %.3f us over %zu calls (min %.3f us)",
+				micros[micros.size() / 2], micros.size(), micros.front());
+			Logger::WriteMessage((std::string(line) + "\n").c_str());
 		}
 
 		TEST_METHOD(GpuUnpackSessionLogsOnceAndSwitchesTheSessionToTheCpuOnce)

@@ -777,11 +777,11 @@ namespace PipelineSkeletonTestsNs
 			Assert::AreEqual(-0.375f, ChromaSiting::ShiftAfterResample(-0.5f, 0.75));   // 1440 -> 1080 class
 		}
 
-		// DVDM: the three DV display mapping placeholders change nothing and may sit anywhere in their zone,
+		// DVDM: the remaining DV display mapping placeholder (dm_pre; dm_curve and dm_trims are built since CF-1 P3) changes nothing and may sit anywhere in their zone,
 		// so they never constrain an order (OrderValidator rules 2 and 3b).
-		TEST_METHOD(DvDisplayMappingPlaceholdersAreMovableAndNonModifying)
+		TEST_METHOD(DvDisplayMappingPlaceholderIsMovableAndNonModifying)
 		{
-			for (PipelineSlots::Id id : { PipelineSlots::Id::ColourDmPre, PipelineSlots::Id::ColourDmCurve, PipelineSlots::Id::ColourDmTrims })
+			for (PipelineSlots::Id id : { PipelineSlots::Id::ColourDmPre })
 			{
 				const PipelineSlots::Contract c = PipelineSlots::ContractOf(id);
 				Assert::IsTrue(c.movable);
@@ -793,8 +793,8 @@ namespace PipelineSkeletonTestsNs
 			std::string reason;
 			Assert::IsTrue(PipelineSlots::Validate(PipelineSlots::DefaultOrder(), &reason), W(reason).c_str());
 			PipelineSlots::Registry registry;
-			Assert::IsTrue(registry.SetOrder({ PipelineSlots::Id::DriveLedMeasure, PipelineSlots::Id::DriveLedCompensation,
-				PipelineSlots::Id::ColourSdrToneShape, PipelineSlots::Id::ColourAppearance }, &reason), W(reason).c_str());
+			Assert::IsTrue(registry.SetOrder({ PipelineSlots::Id::ColourDmTrims, PipelineSlots::Id::ColourSdrToneShape,
+				PipelineSlots::Id::ColourAppearance, PipelineSlots::Id::DriveLedMeasure, PipelineSlots::Id::DriveLedCompensation }, &reason), W(reason).c_str());
 		}
 	};
 

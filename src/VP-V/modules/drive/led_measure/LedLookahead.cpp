@@ -286,7 +286,7 @@ namespace LedDrive
 			lastSequence - sourceSequence < 1000)
 			return;
 		const std::shared_ptr<const RawTransfer> current = module.CurrentRawTransfer();
-		const double boost = BoostExponent(module.Config(), module.DisplayGamma());
+		const double boost = BoostExponentUnderAppearance(module.Config().gammaBoost, module.DisplayGamma(), module.BoostReplaced());
 		if (current != transfer || boost != boostedExponent)
 		{
 			transfer = current;

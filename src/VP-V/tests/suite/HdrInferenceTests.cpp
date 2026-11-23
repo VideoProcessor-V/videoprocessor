@@ -357,6 +357,89 @@ namespace Tests
 			Assert::IsTrue(tracker.State() == HdrInferenceState::VetoedSdr);
 		}
 
+		// GEM-010 ([C]:134): the tick sources are unsigned 64-bit; "now - since" with an earlier "now" wraps to a huge
+		// "elapsed" time. An earlier tick (a clock that stepped back, or a caller handing an older stamp) must not end a
+		// suspension, confirm a candidate early, or add evidence time. Each case below fails on the unguarded subtraction.
+		TEST_METHOD(EarlierTickNeverCountsAsElapsed)
+		{
+			// Suspended: an earlier tick is inside the window, not past it.
+			{
+				uint64_t now = 100000;
+				const HdrInferenceSignal signal = LldvSignal();
+				HdrInferenceTracker tracker = InferredTracker(signal, now);
+				HdrInferenceSignal invalid = signal;
+				invalid.valid = false;
+				Assert::IsTrue(tracker.OnSignal(invalid, now).event == HdrInferenceEvent::Suspended);
+				Assert::IsTrue(tracker.OnTick(1000).event == HdrInferenceEvent::None, L"an earlier tick does not end the suspension");
+				Assert::IsTrue(tracker.State() == HdrInferenceState::Suspended);
+				Assert::IsTrue(tracker.OnSignal(invalid, 1000).event == HdrInferenceEvent::None, L"nor does an earlier invalid notification");
+				Assert::IsTrue(tracker.State() == HdrInferenceState::Suspended);
+				// An eligible return stamped earlier is still inside the window: PQ resumes at once.
+				Assert::IsTrue(tracker.OnSignal(signal, 1000).event == HdrInferenceEvent::NewEpoch);
+				Assert::IsTrue(tracker.IsInferredPq());
+				Assert::IsTrue(tracker.ResumedAfterGap());
+			}
+			// The window still runs out on a forward tick (the guard changes nothing for ordered ticks).
+			{
+				uint64_t now = 100000;
+				const HdrInferenceSignal signal = LldvSignal();
+				HdrInferenceTracker tracker = InferredTracker(signal, now);
+				HdrInferenceSignal invalid = signal;
+				invalid.valid = false;
+				tracker.OnSignal(invalid, now);
+				const uint64_t window = tracker.Options().resumeWindowMs;
+				Assert::IsTrue(tracker.OnTick(now + window - 1).event == HdrInferenceEvent::None);
+				Assert::IsTrue(tracker.OnTick(now + window).event == HdrInferenceEvent::Ended);
+			}
+			// Waiting: an earlier tick does not confirm the candidate.
+			{
+				HdrInferenceTracker tracker;
+				Assert::IsTrue(tracker.OnSignal(LldvSignal(), 100000).event == HdrInferenceEvent::CandidateSeen);
+				Assert::IsTrue(tracker.OnTick(10).event == HdrInferenceEvent::None, L"an earlier tick is not 'confirmMs elapsed'");
+				Assert::IsFalse(tracker.IsInferredPq());
+				Assert::IsTrue(tracker.State() == HdrInferenceState::Waiting);
+				Assert::IsTrue(tracker.OnTick(101499).event == HdrInferenceEvent::None);
+				Assert::IsTrue(tracker.OnTick(101500).event == HdrInferenceEvent::Inferred);
+			}
+			// Pictures: an earlier tick adds no evidence time (before the fix each added the 250 ms gap cap).
+			{
+				uint64_t now = 1000000;
+				HdrInferenceTracker tracker = InferredTracker(Hdr10FlagDroppedSignal(), now);
+				tracker.OnPicture(Picture(true), now);
+				for (int k = 1; k <= 8; ++k)
+					tracker.OnPicture(Picture(true), now - 1000u * k);
+				Assert::AreEqual(0u, tracker.ShotsWithEvidence(), L"earlier stamps carry no SDR-evidence time");
+				// Control: ordered pictures over 1 s do count a shot.
+				uint64_t later = now;
+				Shot(tracker, later, 1000, true, false);
+				Assert::AreEqual(1u, tracker.ShotsWithEvidence());
+			}
+		}
+
+		// GEM-010: the no-cut fallback timer ("armed with no cut: switch anyway after noCutFallbackMs") is measured from the
+		// arming tick; a tick or picture stamped BEFORE the arming is not "20 s later" (the unguarded subtraction wrapped and
+		// flipped to SDR at once). The fallback still fires at the real interval.
+		TEST_METHOD(NoCutFallbackWaitsAfterAnEarlierTick)
+		{
+			uint64_t now = 0;
+			HdrInferenceTracker tracker = InferredTracker(Hdr10FlagDroppedSignal(), now);
+			Shot(tracker, now, 1000, true);
+			Shot(tracker, now, 1000, true);
+			Assert::IsTrue(tracker.VetoArmed());
+			const uint64_t armed = now - 500;   // armed 0.5 s into shot 2
+			Assert::IsTrue(armed > 1000);
+			Assert::IsTrue(tracker.OnTick(100).event == HdrInferenceEvent::None, L"an earlier tick does not fire the fallback");
+			Assert::IsTrue(tracker.State() == HdrInferenceState::InferredPq);
+			Assert::IsTrue(tracker.VetoArmed());
+			Assert::IsTrue(tracker.OnPicture(Picture(true), 100).event != HdrInferenceEvent::VetoWithoutCut, L"nor does an earlier picture");
+			Assert::IsTrue(tracker.State() == HdrInferenceState::InferredPq);
+			// The interval itself is unchanged.
+			Assert::IsTrue(tracker.OnTick(armed + 19000).event == HdrInferenceEvent::None);
+			const auto update = tracker.OnTick(armed + 20100);
+			Assert::IsTrue(update.event == HdrInferenceEvent::VetoWithoutCut);
+			Assert::IsTrue(tracker.State() == HdrInferenceState::VetoedSdr);
+		}
+
 		TEST_METHOD(StaticSdrShotArmsAndSwitchesWithoutACut)
 		{
 			// A static SDR menu sent as BT.2020: one uncut shot of evidence.

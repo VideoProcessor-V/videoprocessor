@@ -1,5 +1,8 @@
 #pragma once
 
+#include "DvMath.h"
+#include <VP-V/modules/colour/extended_range/ExtendedRange.h>   // GEM-008: the output transfer (TransferKind, ToLinear)
+
 #include <video_frame_formatter/IVideoFrameFormatter.h>
 
 #include <cmath>
@@ -107,27 +110,9 @@ namespace DolbyVisionTrims
 		return p;
 	}
 
-	// SMPTE ST 2084: nits <-> PQ signal (0..1).
-	inline double PqFromNits(double nits)
-	{
-		const double m1 = 2610.0 / 16384.0, m2 = 2523.0 / 4096.0 * 128.0;
-		const double c1 = 3424.0 / 4096.0, c2 = 2413.0 / 4096.0 * 32.0, c3 = 2392.0 / 4096.0 * 32.0;
-		const double y = (nits < 0.0 ? 0.0 : nits) / 10000.0;
-		const double p = std::pow(y, m1);
-		return std::pow((c1 + c2 * p) / (1.0 + c3 * p), m2);
-	}
-
-	inline double NitsFromPq(double pq)
-	{
-		const double m1 = 2610.0 / 16384.0, m2 = 2523.0 / 4096.0 * 128.0;
-		const double c1 = 3424.0 / 4096.0, c2 = 2413.0 / 4096.0 * 32.0, c3 = 2392.0 / 4096.0 * 32.0;
-		const double e = std::pow(pq < 0.0 ? 0.0 : pq, 1.0 / m2);
-		const double num = e - c1 > 0.0 ? e - c1 : 0.0;
-		// GEM-W1B V1 colour-dv-hdr MUST-2: c2 - c3*e reaches 0 at pq ~1.99 (whiter than white plus saturation/hue
-		// trims); beyond it the quotient was negative and pow gave NaN. Floored (mirrored in DV trims.glsl).
-		const double den = c2 - c3 * e;
-		return 10000.0 * std::pow(num / (den > 1e-4 ? den : 1e-4), 1.0 / m1);
-	}
+	// SMPTE ST 2084: nits <-> PQ signal (0..1); the one implementation is DvMath.h (CF-1 P2).
+	inline double PqFromNits(double nits) { return DvMath::PqFromNits(nits); }
+	inline double NitsFromPq(double pq) { return DvMath::NitsFromPq(pq); }
 
 	struct Selection
 	{
@@ -203,6 +188,10 @@ namespace DolbyVisionTrims
 	{
 		bool pq = true;              // PQ output (HDR); else a gamma signal
 		double gamma = 2.2;          // gamma output: linear = v^gamma x peak nits
+		// GEM-008 (Gemini colour-dv-hdr SHOULD-3): a BT.1886 or sRGB output uses its own curve
+		// (ExtendedRange::DescribeTransfer, piecewise; BT.1886 b from libplacebo's linearize), not the pure power.
+		// Power (the default) keeps the gamma above, bit-identical.
+		ExtendedRange::Transfer transfer = { ExtendedRange::TransferKind::Power, 0.0f };
 		double peakNits = 1000.0;    // the display peak (the trims' reference)
 		double kr = 0.2627, kg = 0.6780, kb = 0.0593;   // luminance coefficients
 	};
@@ -229,6 +218,8 @@ namespace DolbyVisionTrims
 	{
 		if (s.pq)
 			return v < 0.0 ? -NitsFromPq(-v) : NitsFromPq(v);   // below-black kept
+		if (s.transfer.kind == ExtendedRange::TransferKind::Bt1886 || s.transfer.kind == ExtendedRange::TransferKind::Srgb)
+			return ExtendedRange::ToLinear(s.transfer, v) * s.peakNits;   // GEM-008: sign-preserving (below-black kept)
 		const double a = std::pow(std::fabs(v), s.gamma) * s.peakNits;
 		return v < 0.0 ? -a : a;
 	}
@@ -237,6 +228,8 @@ namespace DolbyVisionTrims
 	{
 		if (s.pq)
 			return nits < 0.0 ? -PqFromNits(-nits) : PqFromNits(nits);
+		if (s.transfer.kind == ExtendedRange::TransferKind::Bt1886 || s.transfer.kind == ExtendedRange::TransferKind::Srgb)
+			return ExtendedRange::FromLinear(s.transfer, nits / s.peakNits);   // GEM-008
 		const double a = std::pow(std::fabs(nits) / s.peakNits, 1.0 / s.gamma);
 		return nits < 0.0 ? -a : a;
 	}

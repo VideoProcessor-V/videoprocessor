@@ -4,6 +4,7 @@
 #include "LedIntentMethods.h"
 
 #include <DebugLog.h>
+#include <VP-V/modules/colour/appearance/AppearanceStage.h>
 #include <VP-V/modules/motion/consumers/IntentMotionMethods.h>
 
 #include <string>
@@ -12,10 +13,10 @@ namespace Vpv
 {
 	namespace LedIntent
 	{
-		void ConfigureAmbient(LedIntentState& ledIntent, const VpvRenderer::Fields& s)
+		void ConfigureAmbient(LedIntentState& ledIntent, const VpvRenderer::Fields& s, bool appearanceActive)
 		{
 			AmbientAdapt::Settings ambient;
-			ambient.enabled = s.ambientAdapt;
+			ambient.enabled = AppearanceStage::AmbientAdaptOn(s.ambientAdapt, s.ambientAdaptReplaced, appearanceActive);   // CF1-G7b: per active state
 			ambient.strength = s.ambientAdaptStrength;
 			ambient.screenReflectNitsPerLux = s.ambientScreenReflect;
 			ambient.maxBlackNits = s.ambientMaxBlackNits;
@@ -24,6 +25,7 @@ namespace Vpv
 			std::lock_guard<std::mutex> guard(ledIntent.intentMutex);
 			ledIntent.intentBlackPublished = s.intentBlack;
 			ledIntent.intentDisplayPublished = s.intentDisplay;
+			ledIntent.roomLightFeed = s.appearance && !s.pipelineOriginalPathway;   // CF-1 CAM-4: the appearance stage reads the one sensor filter
 			const AmbientAdapt::Settings& was = ledIntent.ambientSettings;
 			if (was.enabled != ambient.enabled || was.strength != ambient.strength ||
 				was.screenReflectNitsPerLux != ambient.screenReflectNitsPerLux || was.maxBlackNits != ambient.maxBlackNits ||

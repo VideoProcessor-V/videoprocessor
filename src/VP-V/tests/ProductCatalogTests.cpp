@@ -189,8 +189,8 @@ namespace ProductCatalogTestsNs
 				{ kBandMemo, "interpolator / hiccup repair" },
 			};
 			const Registry reg = SkeletonProducts();
-			Assert::AreEqual(size_t(kSkeletonProductEnd) - kReservedProductCount - 7u, sizeof(expected) / sizeof(expected[0]),
-				L"every product but the matcher pair, the two held-state records (source identity, source geometry), the causal quality pattern, the edge map, the grain level (no catalog reader row yet; owner fills only) and the camera fit field (read only by P8, as P8's declared input) has an expectation");
+			Assert::AreEqual(size_t(kSkeletonProductEnd) - kReservedProductCount - 8u, sizeof(expected) / sizeof(expected[0]),
+				L"every product but the matcher pair, the three held-state records (source identity, source geometry, room light), the causal quality pattern, the edge map, the grain level (no catalog reader row yet; owner fills only) and the camera fit field (read only by P8, as P8's declared input) has an expectation");
 			// CP-A1-D4-CAMLABEL-FIELDCOPY: p7f_camera_fit_field is written by the camera worker BEFORE P7 is published and read only by P8 (a
 			// declared product input, no consumer row): no consumer can fill it live, so it has no live-fill owner and no consumer.
 			Assert::IsNull(LiveFillOwner(kCameraFitField), L"the camera fit field has no live-fill owner (camera worker publishes it with P7)");
@@ -227,7 +227,7 @@ namespace ProductCatalogTestsNs
 			for (const ProductDecl& d : reg.All())
 				if (ConsumersOf(d.id).empty() && d.backend != Backend::RenderOnly)
 					++unread;
-			Assert::AreEqual(size_t(5) + kReservedProductCount, unread, L"the matcher pair, the causal quality pattern (substitutes read by the declared id), the edge map and the P10g grain level (no reader row yet), the camera fit field (read only by P8 as its declared input, CP-A1-D4) and the reserved absent slots of the fixed id table");
+			Assert::AreEqual(size_t(5) + kReservedProductCount, unread, L"the matcher pair, the causal quality pattern (substitutes read by the declared id), the edge map and the P10g grain level (no reader row yet), the camera fit field (read only by P8 as its declared input, CP-A1-D4) and the reserved absent slots of the fixed id table (room light is read by the appearance row, CF-1 FIX1 SHOULD 6)");
 
 			// Over the ACTIVE consumers: with the temporal-detail camera row off, P7's owner is the next lag-0 reader.
 			std::vector<uint16_t> active;
@@ -320,7 +320,7 @@ namespace ProductCatalogTestsNs
 			for (const ProductDecl& d : reg.All())
 				if (d.heldState) {
 					++held;
-					Assert::IsTrue(d.id == kSourceIdentity || d.id == kSourceGeometry, L"only the two records");
+					Assert::IsTrue(d.id == kSourceIdentity || d.id == kSourceGeometry || d.id == kRoomLight, L"only the three records");
 					// Every catalog reader reads it at lag >= 1 (a lag-0 reader would have been refused by the graph).
 					for (const ConsumerRow& c : ConsumerRows())
 						for (size_t k = 0; k < c.decl.count; ++k)
@@ -332,7 +332,7 @@ namespace ProductCatalogTestsNs
 							if (o.inputs[k].product == d.id)
 								Assert::IsTrue(o.inputs[k].lag >= 1 && o.inputs[k].lead == 0);
 				}
-			Assert::AreEqual(size_t(2), held);
+			Assert::AreEqual(size_t(3), held);
 			Assert::IsTrue(reg.Get(kSourceIdentity).heldState && reg.Get(kSourceGeometry).heldState);
 			for (uint8_t lane : { uint8_t(0), uint8_t(1), uint8_t(3) }) {
 				const Graph g = FullGraph(Settings(Dims{ 3840, 2160 }, lane), reg);

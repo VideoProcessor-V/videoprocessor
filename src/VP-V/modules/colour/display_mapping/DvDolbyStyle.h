@@ -38,8 +38,10 @@
 // come from the picture's hdr.avg_pq_y / max_pq_y (L1); when they are absent the renderer says
 // "L1 missing -> mid-range fallback" in the status (the curve then uses the range's middle). BTB / WTW: below-black residuals are carried
 // around the trims and the curve continues above the scene peak with its end slope.
-#include <VP-V/modules/colour/sdr_tone_shape/DvTrimSelection.h>
+#include <VP-V/modules/colour/display_mapping/DvMath.h>
+#include <VP-V/modules/colour/display_mapping/DvTrimSelection.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -114,29 +116,36 @@ namespace DvDolbyStyle
 	inline Curve Build(double sMin, double sAvg, double sMax, double tMin, double tMax)
 	{
 		Curve c;
-		if (!(sMax > sMin) || !(tMax > tMin))
+		// GEM-006 (Gemini colour-dv-hdr SHOULD-1, as written): a dark scene (sMax < tMax) is never expanded up to the
+		// target peak when tMin > sMin fails the fit test: the upper anchor is the lower of the two peaks. libplacebo
+		// 7.360.1's pl_tone_map_params_infer already limits output_max to input_max for a function without map_inverse
+		// (this one), so MapLut is bit-identical; direct callers (ForDm, DmCurve) get the clamp.
+		// Gate G1 MUST-4: clamped BEFORE the usability (degeneracy) test, as Gemini wrote: a scene whose peak is at or
+		// below the display black (effTMax <= tMin) is "nothing usable" (identity), never a decreasing chord.
+		const double effTMax = (std::min)(tMax, sMax);
+		if (!(sMax > sMin) || !(effTMax > tMin))
 			return c;   // nothing usable: identity
-		c.sMin = sMin; c.sMax = sMax; c.tMin = tMin; c.tMax = tMax;
-		if (sMax <= tMax + 1e-6 && sMin >= tMin - 1e-5)   // PQ(0 nits) is 7e-7, not 0: a tolerance
+		c.sMin = sMin; c.sMax = sMax; c.tMin = tMin; c.tMax = effTMax;
+		if (sMax <= effTMax + 1e-6 && sMin >= tMin - 1e-5)   // PQ(0 nits) is 7e-7, not 0: a tolerance
 		{
 			c.sMid = c.tMid = sAvg > 0.0 ? sAvg : DolbyVisionTrims::Clamp(sMin + (sMax - sMin) * kDefaultMidShare, sMin, sMax);
 			return c;   // the scene fits the target: no compression, no expansion
 		}
 		const double mid = sAvg > 0.0 ? sAvg : sMin + (sMax - sMin) * kDefaultMidShare;
 		c.sMid = DolbyVisionTrims::Clamp(mid, sMin + (sMax - sMin) * kMidMinShare, sMin + (sMax - sMin) * kMidMaxShare);
-		const double proportional = tMin + (c.sMid - sMin) * (tMax - tMin) / (sMax - sMin);
-		const double ceiling = tMin + (tMax - tMin) * kMidCeiling;
+		const double proportional = tMin + (c.sMid - sMin) * (effTMax - tMin) / (sMax - sMin);
+		const double ceiling = tMin + (effTMax - tMin) * kMidCeiling;
 		const double goal = c.sMid < ceiling ? c.sMid : ceiling;
 		// The target mid moves from the chord toward the source mid (never below the chord:
 		// the curve stays concave or straight, so it has no pole in range and is monotonic).
 		c.tMid = goal > proportional ? proportional + kMidAdaptation * (goal - proportional) : proportional;
-		if (!Solve(sMin, tMin, c.sMid, c.tMid, sMax, tMax, c.c1, c.c2, c.c3) || !(c.c2 - c.c1 * c.c3 > 0.0) ||
+		if (!Solve(sMin, tMin, c.sMid, c.tMid, sMax, effTMax, c.c1, c.c2, c.c3) || !(c.c2 - c.c1 * c.c3 > 0.0) ||
 			!(1.0 + c.c3 * sMin > 0.0) || !(1.0 + c.c3 * sMax > 0.0))
 		{
 			// Degenerate: the straight chord (still hits min / max).
 			c.tMid = proportional;
 			c.c3 = 0.0;
-			c.c2 = (tMax - tMin) / (sMax - sMin);
+			c.c2 = (effTMax - tMin) / (sMax - sMin);
 			c.c1 = tMin - c.c2 * sMin;
 		}
 		c.identity = false;
@@ -160,50 +169,14 @@ namespace DvDolbyStyle
 	// ------------------------------------------------------------------ ICtCp (BT.2100)
 
 	// Linear BT.2020 RGB (1 = 10000 nits) <-> LMS, and PQ LMS <-> ICtCp (ITU-R BT.2100 Table 7).
-	constexpr double kRgb2020ToLms[3][3] = { { 1688.0 / 4096, 2146.0 / 4096, 262.0 / 4096 },
-		{ 683.0 / 4096, 2951.0 / 4096, 462.0 / 4096 }, { 99.0 / 4096, 309.0 / 4096, 3688.0 / 4096 } };
-	constexpr double kLmsToIctcp[3][3] = { { 0.5, 0.5, 0.0 }, { 6610.0 / 4096, -13613.0 / 4096, 7003.0 / 4096 },
-		{ 17933.0 / 4096, -17390.0 / 4096, -543.0 / 4096 } };
+	// The ICtCp matrices and 3x3 helpers live in DvMath.h (CF-1 P2); same names, same arithmetic.
+	using DvMath::kRgb2020ToLms;
+	using DvMath::kLmsToIctcp;
+	using DvMath::Mul;
+	using DvMath::Invert;
 
-	inline void Mul(const double m[3][3], const double v[3], double out[3])
-	{
-		for (int r = 0; r < 3; ++r)
-			out[r] = m[r][0] * v[0] + m[r][1] * v[1] + m[r][2] * v[2];
-	}
-
-	inline bool Invert(const double m[3][3], double inv[3][3])
-	{
-		const double d = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
-			m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
-		if (!(std::fabs(d) > 1e-15))
-			return false;
-		inv[0][0] = (m[1][1] * m[2][2] - m[1][2] * m[2][1]) / d;
-		inv[0][1] = (m[0][2] * m[2][1] - m[0][1] * m[2][2]) / d;
-		inv[0][2] = (m[0][1] * m[1][2] - m[0][2] * m[1][1]) / d;
-		inv[1][0] = (m[1][2] * m[2][0] - m[1][0] * m[2][2]) / d;
-		inv[1][1] = (m[0][0] * m[2][2] - m[0][2] * m[2][0]) / d;
-		inv[1][2] = (m[0][2] * m[1][0] - m[0][0] * m[1][2]) / d;
-		inv[2][0] = (m[1][0] * m[2][1] - m[1][1] * m[2][0]) / d;
-		inv[2][1] = (m[0][1] * m[2][0] - m[0][0] * m[2][1]) / d;
-		inv[2][2] = (m[0][0] * m[1][1] - m[0][1] * m[1][0]) / d;
-		return true;
-	}
-
-	// RGB -> XYZ of primaries (CIE xy of R, G, B, W).
-	inline void RgbToXyz(const double red[2], const double green[2], const double blue[2], const double white[2], double m[3][3])
-	{
-		auto xyz = [](const double c[2], double v[3]) { v[0] = c[0] / c[1]; v[1] = 1.0; v[2] = (1.0 - c[0] - c[1]) / c[1]; };
-		double R[3], G[3], B[3], W[3];
-		xyz(red, R); xyz(green, G); xyz(blue, B); xyz(white, W);
-		const double P[3][3] = { { R[0], G[0], B[0] }, { R[1], G[1], B[1] }, { R[2], G[2], B[2] } };
-		double Pi[3][3];
-		Invert(P, Pi);
-		double S[3];
-		Mul(Pi, W, S);
-		for (int r = 0; r < 3; ++r)
-			for (int c = 0; c < 3; ++c)
-				m[r][c] = P[r][c] * S[c];
-	}
+	// RGB -> XYZ of primaries (CIE xy of R, G, B, W): DvMath.h (CF1-FIN MUST 1), same arithmetic.
+	using DvMath::RgbToXyz;
 
 	// The output RGB -> LMS matrix (linear, output primaries in, BT.2100 LMS out).
 	inline void OutputToLms(const double red[2], const double green[2], const double blue[2], const double white[2], double m[3][3])

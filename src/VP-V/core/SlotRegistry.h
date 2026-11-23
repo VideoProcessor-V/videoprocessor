@@ -26,7 +26,7 @@ namespace PipelineSlots
 		switch (id)
 		{
 		case Id::ScalingRebase: case Id::RepairDeband: case Id::RepairTextureRestore:
-		case Id::ColourSdrToneShape: case Id::DriveLedMeasure: case Id::DriveLedCompensation:
+		case Id::ColourSdrToneShape: case Id::ColourDmCurve: case Id::ColourDmTrims: case Id::DriveLedMeasure: case Id::DriveLedCompensation:
 		case Id::OutputCalibrationLut: case Id::OutputDither: case Id::DriveProjectorControl:
 		// WP-13 (m2-output-callsites.patch): the extended range and output scaling glue stages.
 		case Id::ColourExtendedRange: case Id::ScalingOutput:

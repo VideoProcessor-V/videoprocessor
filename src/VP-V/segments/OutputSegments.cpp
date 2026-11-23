@@ -38,7 +38,7 @@ namespace OutputSegments
 			}
 		};
 
-		// colour.sdr_tone_shape (delta 13) and the DV trims (same slot switch and tag).
+		// colour.sdr_tone_shape (delta 13).
 		auto toneStage = [&]()
 		{
 			if (f.toneShape)
@@ -57,17 +57,35 @@ namespace OutputSegments
 				counts.toneShape = hooks.size() - start;
 				note(start, Id::ColourSdrToneShape);
 			}
+		};
+		// colour.dm_trims (CF-1 P3): the DV L8 / L2 trims, their own slot and switch (before: the colour slot's).
+		auto dmTrimsStage = [&]()
+		{
 			if (f.dvTrims)
 			{
 				const size_t start = hooks.size();
 				dvTrims.Collect(false, hooks);
-				tag(start, Id::ColourSdrToneShape);   // as the host since 38badcb0: the trims follow the colour slot
+				tag(start, Id::ColourDmTrims);   // CF-1 P3: the trims are the colour.dm_trims slot (own switch)
 				for (size_t i = start; i < hooks.size(); ++i)
 					for (const auto& parameter : f.dv)
 						SetHookParameter(hooks[i], parameter.first, parameter.second);
 				counts.dvTrims = hooks.size() - start;
-				note(start, Id::ColourSdrToneShape);
+				note(start, Id::ColourDmTrims);
 			}
+		};
+		// colour.appearance (CF-1 CAM-3): the CAM16 room and screen adaptation, after the DV trims and before the LED measurement.
+		auto appearanceStage = [&]()
+		{
+			if (!f.appearance || !f.appearanceChain)
+				return;
+			const size_t start = hooks.size();
+			f.appearanceChain->Collect(false, hooks);
+			tag(start, Id::ColourAppearance);
+			for (size_t i = start; i < hooks.size(); ++i)
+				for (const auto& parameter : f.appearanceParams)
+					SetHookParameter(hooks[i], parameter.first, parameter.second);
+			counts.appearance = hooks.size() - start;
+			note(start, Id::ColourAppearance);
 		};
 		// drive.led_measure: sees the picture before the gain.
 		auto measureStage = [&]()
@@ -146,12 +164,13 @@ namespace OutputSegments
 
 		// The stages in the REGISTRY's effective order (validated by OrderValidator against
 		// SlotContracts), each only when its slot runs (pipeline_slots_off, Original pathway): a slot
-		// that is off adds no hook. colour.appearance (Stage 13) and drive.black_level are
-		// placeholders: no component, so they never run and cost nothing.
+		// that is off adds no hook. drive.black_level is a
+		// placeholder: no component, so it never runs and costs nothing.
 		struct Stage { Id slot; int order; int kind; };
 		Stage stages[] = {
 			{ Id::ColourSdrToneShape, registry.Order(Id::ColourSdrToneShape), 0 },
-			{ Id::ColourAppearance, registry.Order(Id::ColourAppearance), 4 },   // placeholder (Stage 13)
+			{ Id::ColourDmTrims, registry.Order(Id::ColourDmTrims), 5 },
+			{ Id::ColourAppearance, registry.Order(Id::ColourAppearance), 6 },   // CAM-3: the appearance pass
 			{ Id::DriveLedMeasure, registry.Order(Id::DriveLedMeasure), 1 },
 			{ Id::DriveLedCompensation, registry.Order(Id::DriveLedCompensation), 2 },
 			{ Id::DriveBlackLevel, registry.Order(Id::DriveBlackLevel), 4 },     // placeholder
@@ -172,6 +191,8 @@ namespace OutputSegments
 			case 1: measureStage(); break;
 			case 2: compensationStage(); break;
 			case 3: lutStage(); break;
+			case 5: dmTrimsStage(); break;
+			case 6: appearanceStage(); break;
 			default:
 				// A placeholder slot with a component but no S2 stage yet: counted for the host to report
 				// (it never runs silently, and never runs half-wired).

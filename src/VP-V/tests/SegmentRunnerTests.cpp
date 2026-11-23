@@ -171,7 +171,7 @@ namespace SegmentRunnerTestsNs
 		{
 			const size_t start = frameHooks.size();
 			m.dv.Collect(false, frameHooks);
-			TagSlotHooks(start, Id::ColourSdrToneShape);   // 38badcb0: trims follow the colour slot order
+			TagSlotHooks(start, Id::ColourDmTrims);   // CF-1 P3: trims have their own slot (38badcb0 tagged them with the tone shape)
 			for (size_t i = start; i < frameHooks.size(); ++i)
 			{
 				for (const auto& parameter : f.dv)   // dc149284: the selection's list, ICtCp list, then the fixed five
@@ -248,7 +248,7 @@ namespace SegmentRunnerTestsNs
 			PipelineSlots::Registry registry;
 			Segment s2(kS2FallbackId, OutputColourStages(), OutputColourEntry());
 			for (const StageInfo& st : s2.Active(registry))
-				Assert::IsTrue(st.slot != Id::ColourAppearance && st.slot != Id::DriveBlackLevel, W(st.name).c_str());
+				Assert::IsTrue(st.slot != Id::DriveBlackLevel, W(st.name).c_str());   // CF-1 CAM-3: colour.appearance is Built now
 			registry.SetEnabled(Id::DriveLedMeasure, false);
 			for (const StageInfo& st : s2.Active(registry))
 				Assert::IsTrue(st.slot != Id::DriveLedMeasure);
@@ -516,7 +516,7 @@ namespace SegmentRunnerTestsNs
 			// Per-slot timing attribution.
 			Assert::IsTrue(s2.SlotOf(m.measure.Hook()) == Id::DriveLedMeasure);
 			Assert::IsTrue(s2.SlotOf(m.lut.Get()) == Id::OutputCalibrationLut);
-			Assert::IsTrue(s2.SlotOf(hooks.front()) == Id::ColourSdrToneShape);
+			Assert::IsTrue(s2.SlotOf(hooks.front()) == Id::ColourDmTrims);
 			for (const pl_hook* h : user)
 				Assert::IsTrue(s2.SlotOf(h) == Id::Count);
 		}
@@ -614,7 +614,7 @@ namespace SegmentRunnerTestsNs
 			OutputSegments::ColourFrame f = Frame(variant);
 			OutputSegments::ColourFrame legacyFrame = f;
 			legacyFrame.toneShape = f.toneShape && registry.Runs(Id::ColourSdrToneShape);
-			legacyFrame.dvTrims = f.dvTrims && registry.Runs(Id::ColourSdrToneShape);
+			legacyFrame.dvTrims = f.dvTrims && registry.Runs(Id::ColourDmTrims);
 			legacyFrame.ledMeasure = f.ledMeasure && registry.Runs(Id::DriveLedMeasure);
 			legacyFrame.ledCompensation = f.ledCompensation && registry.Runs(Id::DriveLedCompensation);
 			if (!registry.Runs(Id::OutputCalibrationLut)) a.lut.SetLut(nullptr);
@@ -641,7 +641,7 @@ namespace SegmentRunnerTestsNs
 
 		TEST_METHOD(EachS2SlotSwitchesOffAndLeavesTheRestUnchanged)
 		{
-			for (Id slot : { Id::ColourSdrToneShape, Id::DriveLedMeasure, Id::DriveLedCompensation, Id::OutputCalibrationLut })
+			for (Id slot : { Id::ColourSdrToneShape, Id::ColourDmTrims, Id::DriveLedMeasure, Id::DriveLedCompensation, Id::OutputCalibrationLut })
 			{
 				PipelineSlots::Registry registry;
 				registry.SetEnabled(slot, false);
@@ -652,7 +652,7 @@ namespace SegmentRunnerTestsNs
 				std::vector<const pl_hook*> hooks;
 				OutputSegments::OutputColourSegment s2(m.tone, m.dv, m.measure, m.comp, m.lut);
 				const OutputSegments::ColourCounts c = s2.Collect(f, registry, hooks, [](size_t, Id) {});
-				const size_t added = slot == Id::ColourSdrToneShape ? c.toneShape + c.dvTrims : slot == Id::DriveLedMeasure ? c.ledMeasure :
+				const size_t added = slot == Id::ColourSdrToneShape ? c.toneShape : slot == Id::ColourDmTrims ? c.dvTrims : slot == Id::DriveLedMeasure ? c.ledMeasure :
 					slot == Id::DriveLedCompensation ? c.ledCompensation : c.lut;
 				Assert::AreEqual<size_t>(0, added, W(std::string("hook added while off: ") + PipelineSlots::Get(slot).name).c_str());
 			}
@@ -663,11 +663,10 @@ namespace SegmentRunnerTestsNs
 			PipelineSlots::Registry original;
 			original.ApplyOriginalPathway();
 			CompareWithLegacy(original, L"Original pathway");
-			// Placeholders (Stage 13, black level) switched on have no component: nothing changes.
+			// The placeholder (black level) switched on has no component: nothing changes.
 			PipelineSlots::Registry placeholders;
-			placeholders.SetEnabled(Id::ColourAppearance, true);
 			placeholders.SetEnabled(Id::DriveBlackLevel, true);
-			Assert::IsFalse(placeholders.Runs(Id::ColourAppearance) || placeholders.Runs(Id::DriveBlackLevel));
+			Assert::IsFalse(placeholders.Runs(Id::DriveBlackLevel));
 			CompareWithLegacy(placeholders, L"placeholders on");
 			PipelineSlots::Registry designed;
 			CompareWithLegacy(designed, L"designed order");
@@ -677,8 +676,8 @@ namespace SegmentRunnerTestsNs
 		{
 			PipelineSlots::Registry registry;
 			std::string reason;
-			// LED measurement and compensation before the SDR tone shape (Stage 13 keeps following it).
-			Assert::IsTrue(registry.SetOrder({ Id::DriveLedMeasure, Id::DriveLedCompensation, Id::ColourSdrToneShape, Id::ColourAppearance }, &reason),
+			// DV trims before the SDR tone shape, then Stage 13, then the LED slots (CF-1 P3 pin: trims < appearance < LED measure).
+			Assert::IsTrue(registry.SetOrder({ Id::ColourDmTrims, Id::ColourSdrToneShape, Id::ColourAppearance, Id::DriveLedMeasure, Id::DriveLedCompensation }, &reason),
 				W(reason).c_str());
 			// Equal to today's host reorder (38badcb0 tags the DV trims, so they move with their slot).
 			CompareWithLegacy(registry, L"custom order");
@@ -688,10 +687,10 @@ namespace SegmentRunnerTestsNs
 			OutputSegments::OutputColourSegment s2(m.tone, m.dv, m.measure, m.comp, m.lut);
 			s2.Collect(f, registry, hooks, [](size_t, Id) {});
 			Assert::IsTrue(hooks.size() >= 5);
-			Assert::IsTrue(hooks[0] == m.measure.Hook(), L"the measurement runs first in this order");
-			Assert::IsTrue(s2.SlotOf(hooks[1]) == Id::DriveLedCompensation, L"compensation right after the measurement");
-			Assert::IsTrue(s2.SlotOf(hooks[2]) == Id::ColourSdrToneShape && s2.SlotOf(hooks[3]) == Id::ColourSdrToneShape,
-				L"tone shape and DV trims together");
+			Assert::IsTrue(s2.SlotOf(hooks[0]) == Id::ColourDmTrims, L"the DV trims run first in this order");
+			Assert::IsTrue(s2.SlotOf(hooks[1]) == Id::ColourSdrToneShape, L"then the tone shape");
+			Assert::IsTrue(hooks[2] == m.measure.Hook() && s2.SlotOf(hooks[3]) == Id::DriveLedCompensation,
+				L"measurement then compensation after the colour slots");
 			// An invalid order is refused by the validator and changes nothing.
 			Assert::IsFalse(registry.SetOrder({ Id::DriveLedCompensation, Id::DriveLedMeasure }, &reason));
 		}
@@ -766,12 +765,12 @@ namespace SegmentRunnerTestsNs
 			PipelineSlots::Registry registry;
 			FallbackStatus::Registry fallbacks;
 			std::string reason;
-			Assert::IsTrue(registry.SetOrder({ Id::DriveLedMeasure, Id::DriveLedCompensation, Id::ColourSdrToneShape, Id::ColourAppearance }, &reason),
+			Assert::IsTrue(registry.SetOrder({ Id::ColourDmTrims, Id::ColourSdrToneShape, Id::ColourAppearance, Id::DriveLedMeasure, Id::DriveLedCompensation }, &reason),
 				W(reason).c_str());
 			Segment s2(kS2FallbackId, OutputColourStages(), OutputColourEntry());
 			Assert::IsTrue(s2.Configure(registry, true, 1, fallbacks) == Mode::Merged, W(s2.LastCheck().reason).c_str());
 			const std::vector<StageInfo> active = s2.Active(registry);
-			Assert::IsTrue(active.front().slot == Id::DriveLedMeasure, L"Active follows the registry order");
+			Assert::IsTrue(active.front().slot == Id::ColourDmTrims, L"Active follows the registry order");
 			Assert::AreEqual(std::string("Fallbacks engaged: none"), fallbacks.Heading());
 		}
 
@@ -780,8 +779,8 @@ namespace SegmentRunnerTestsNs
 		{
 			Modules m(false);
 			PipelineSlots::Registry registry;
-			registry.SetComponent(Id::ColourAppearance, true);
-			registry.SetEnabled(Id::ColourAppearance, true);
+			registry.SetComponent(Id::DriveBlackLevel, true);
+			registry.SetEnabled(Id::DriveBlackLevel, true);
 			std::vector<const pl_hook*> hooks, plain;
 			OutputSegments::OutputColourSegment s2(m.tone, m.dv, m.measure, m.comp, m.lut);
 			const OutputSegments::ColourCounts c = s2.Collect(Frame(63), registry, hooks, [](size_t, Id) {});

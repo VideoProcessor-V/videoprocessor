@@ -1238,9 +1238,13 @@
     {
       "slot": "colour.dm_curve",
       "order": 172,
-      "status": "placeholder",
-      "code_location": "placeholder (no component; the slot registers no pass and no hook)",
-      "live_files": [],
+      "status": "built",
+      "code_location": "built in CF-1 P3; the code lives in colour/display_mapping (module headers) and the call sites in segments/CoreSegments.inl + OutputSegments.cpp",
+      "live_files": [
+        "src/VP-V/modules/colour/display_mapping/DmCurve.h",
+        "src/VP-V/modules/colour/display_mapping/DvDolbyStyle.h",
+        "src/VP-V/modules/colour/display_mapping/DvMath.h"
+      ],
       "components": {
         "files": {
           "required": [],
@@ -1251,12 +1255,15 @@
           "optional": []
         },
         "tools": [],
-        "config_keys": [],
+        "config_keys": [
+          "dv_display_mapping",
+          "dv_tone_mapping"
+        ],
         "upstream_modules": [
           "colour.tone_gamut"
         ]
       },
-      "fallback_when_missing": "Placeholder: registers no pass and no hook; nothing to fall back from."
+      "fallback_when_missing": "Slot off = the configured libplacebo curve / no trims, nothing listed; a stage that cannot run engages its Fallbacks-engaged entry."
     },
     {
       "slot": "colour.extended_range",
@@ -1313,8 +1320,6 @@
         },
         "tools": [],
         "config_keys": [
-          "dv_tone_mapping",
-          "dv_trims",
           "sdr_contrast_recovery",
           "sdr_knee_start",
           "sdr_knee_strength",
@@ -1330,9 +1335,13 @@
     {
       "slot": "colour.dm_trims",
       "order": 205,
-      "status": "placeholder",
-      "code_location": "placeholder (no component; the slot registers no pass and no hook)",
-      "live_files": [],
+      "status": "built",
+      "code_location": "built in CF-1 P3; the code lives in colour/display_mapping (module headers) and the call sites in segments/CoreSegments.inl + OutputSegments.cpp",
+      "live_files": [
+        "src/VP-V/modules/colour/display_mapping/DolbyVisionTrims.h",
+        "src/VP-V/modules/colour/display_mapping/DvTrimSelection.h",
+        "src/VP-V/modules/colour/display_mapping/DvHostStage.h"
+      ],
       "components": {
         "files": {
           "required": [],
@@ -1343,21 +1352,29 @@
           "optional": []
         },
         "tools": [],
-        "config_keys": [],
+        "config_keys": [
+          "dv_display_mapping",
+          "dv_trims"
+        ],
         "upstream_modules": [
           "colour.sdr_tone_shape"
         ]
       },
-      "fallback_when_missing": "Placeholder: registers no pass and no hook; nothing to fall back from."
+      "fallback_when_missing": "Slot off = the configured libplacebo curve / no trims, nothing listed; a stage that cannot run engages its Fallbacks-engaged entry."
     },
     {
       "slot": "colour.appearance",
       "order": 210,
-      "status": "placeholder",
-      "code_location": "module (ambient adaptation config/logic, SdrAmbientLift; slot placeholder)",
+      "status": "built",
+      "code_location": "module (ambient adaptation config/logic, SdrAmbientLift; CAM16 appearance pass (AppearanceStage + shaders/vp_cam16_appearance.glsl), CPU reference CAM16 + uniform pack + room_light reader; the appearance switch and its keys (CAM-4), off by default; AppearanceStatus the Config status sentence)",
       "live_files": [
         "src/VP-V/modules/colour/appearance/SdrAmbientLift.h",
-        "src/VP-V/modules/colour/appearance/AmbientConfig.h"
+        "src/VP-V/modules/colour/appearance/AmbientConfig.h",
+        "src/VP-V/modules/colour/appearance/Cam16.h",
+        "src/VP-V/modules/colour/appearance/Cam16Uniforms.h",
+        "src/VP-V/modules/colour/appearance/RoomLight.h",
+        "src/VP-V/modules/colour/appearance/AppearanceStage.h",
+        "shaders/vp_cam16_appearance.glsl"
       ],
       "components": {
         "files": {
@@ -1373,10 +1390,10 @@
         },
         "tools": [],
         "config_keys": [
-          "appearance_adaptation",
-          "appearance_reference_surround",
-          "appearance_reference_white_nits",
-          "appearance_screen_surround",
+          "appearance",
+          "appearance_honour_l11",
+          "appearance_room",
+          "appearance_screen_white_measured",
           "appearance_screen_white_nits",
           "appearance_strength"
         ],

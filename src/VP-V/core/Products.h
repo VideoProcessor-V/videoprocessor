@@ -97,7 +97,7 @@ enum : ProductId {
     kBandMemo = 30,       // 30 band_memo (BandMemo: the per-frame low band of the grain unit; owner repair/grain_split)
     kEdgeMap = 31,        // 31 edge_map (C3 fixed id table; per-frame memo of the source-luma Sobel; readers: L-FOCUS focus map, L-B5 busy-edge; X5 AdaptiveDownscale acquires a stage/domain variant in CJ-3 (owner 11-14 16:43 (3); frozen 17:19; 102b X5-EDGEMAP-CJ3, KEDGEMAP-RULE3 UPDATE :523); later deband guard, occlusion, TD); lead 8 allocation 31, 05:2x 11-14
     kFocusMap = 32,       // 32 focus_map (L-FOCUS; RESERVED until it lands)
-    kRoomLight = 33,      // 33 room_light (DV block; RESERVED until it lands)
+    kRoomLight = 33,      // 33 room_light (CF-1 CAM-2: HELD STATE, the smoothed room light the LED intent publishes; read by the appearance stage)
     kComposedVectors = 34,// 34 composed_vectors (ECV: VpComposed::Product, modules/motion/estimation/composed; the code has landed, the id stays RESERVED until its registry decl + reader row land, lead ruling SHOULD S3)
     kP10gGrainLevel = 35, // 35 grain.level (P10g, refs/120 T3; coreplan-C10-15b-PC-grain.md:19): per-16-px-block grain level from P10, owner fill
                           // (grain_split/GrainLevelGpu.h); first reader the CF hybrid upscaler (replaces its interim ReadGrain seam)
@@ -112,7 +112,7 @@ static_assert(kSourceGeometry == 29 && kBandMemo == kSourceGeometry + 1 && kP10g
 // token, no inputs, no reader row, no catalog row), so ids stay indexes and Size() == kSkeletonProductEnd. Registry::Validate accepts an
 // absent slot ONLY at a listed id and rejects a real declaration at a listed id; Has() is false for an absent slot, so any input naming one
 // fails closed ("unknown input product"). The lane that lands a product declares it under its fixed number and deletes the number here.
-constexpr ProductId kReservedProductIds[] = { kFocusMap, kRoomLight, kComposedVectors };
+constexpr ProductId kReservedProductIds[] = { kFocusMap, kComposedVectors };
 constexpr size_t kReservedProductCount = sizeof(kReservedProductIds) / sizeof(kReservedProductIds[0]);
 constexpr bool IsReservedProduct(ProductId id)
 {
@@ -124,7 +124,7 @@ constexpr bool IsReservedProduct(ProductId id)
 // The planned token of a reserved id (shown in the product-graph doc and the Ctrl+Alt+D status line; "" for any other id).
 constexpr const char* ReservedProductName(ProductId id)
 {
-    return id == kFocusMap ? "focus_map" : id == kRoomLight ? "room_light"
+    return id == kFocusMap ? "focus_map"
          : id == kComposedVectors ? "composed_vectors" : "";
 }
 
@@ -1105,9 +1105,30 @@ inline void AppendBandMemoProduct(std::vector<ProductDecl>& decls)
     decls.push_back(p);
 }
 
-// Pads the reserved ids after (32..34) edge_map; AppendGrainLevelProduct then appends grain.level (35) and
-// camera fit field (36), so EVERY caller that completes the skeleton set (SkeletonProducts, RegionEvidence) calls
-// AppendBandMemoProduct, AppendEdgeMapProduct, AppendGrainLevelProduct in that order and gets Size() == kSkeletonProductEnd (37).
+// room_light (CF-1 CAM-2, fixed id 33): the smoothed room light of the one light-sensor filter (the LED intent's ambient filter publishes it;
+// appearance/RoomLight.h reads it). HELD STATE like P14: a single writer, readers take the latest sealed record (lag >= 1), no live fill,
+// no lane job. The record is a few floats (smoothed lux, phase, held/decayed, at-cut); with no sensor and no manual room it is simply absent
+// and the appearance stage uses its manual room preset, visibly (catalog row, status line). Cpu, T0, history 1.
+constexpr uint32_t kRoomLightRecordBytes = 64;
+inline void AppendRoomLightProduct(std::vector<ProductDecl>& decls)
+{
+    using detail::Make;
+    using namespace VpIndicator;
+    ProductDecl p = Make(kRoomLight, "room_light", "room light (held state)", Backend::Cpu, 1, Tier::T0,
+                         Bit(kFull) | Bit(kContinuity), Bit(kSettingsAnalysis));
+    p.heldState = true;
+    p.size.fixedBytes = kRoomLightRecordBytes;
+    p.residency = Residency::SystemRam;
+    p.rarelyTouched = true;
+    p.refRenderMs = 0.0f;
+    PadReservedUntil(decls, kRoomLight);
+    decls.push_back(p);
+}
+
+// Appends edge_map (31), pads 32, appends room_light (33), and pads 34; AppendGrainLevelProduct then appends
+// grain.level (35) and camera fit field (36), so EVERY caller that completes the skeleton set (SkeletonProducts,
+// RegionEvidence) calls AppendBandMemoProduct, AppendEdgeMapProduct, AppendGrainLevelProduct in that order and
+// gets Size() == kSkeletonProductEnd (37).
 inline void AppendEdgeMapProduct(std::vector<ProductDecl>& decls)
 {
     using detail::AddInput;
@@ -1124,6 +1145,7 @@ inline void AppendEdgeMapProduct(std::vector<ProductDecl>& decls)
     p.refRenderMs = 0.05f;
     PadReservedUntil(decls, kEdgeMap);
     decls.push_back(p);
+    AppendRoomLightProduct(decls);   // fixed id 33 (pads 32)
     PadReservedUntil(decls, kP10gGrainLevel);
 }
 

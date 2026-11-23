@@ -68,6 +68,12 @@ inline bool IsVpvOnlyKey(const QString& key)
         "anti_pump_band",
         "apl_persist_ms",
         "apl_weights",
+        "appearance",
+        "appearance_honour_l11",
+        "appearance_room",
+        "appearance_screen_white_measured",
+        "appearance_screen_white_nits",
+        "appearance_strength",
         "applied",
         "apply",
         "argyll_path",
@@ -205,6 +211,7 @@ inline bool IsVpvOnlyKey(const QString& key)
         "dtp94",
         "dv_compare_capture",
         "dv_compare_capture_folder",
+        "dv_display_mapping",
         "dv_tone_mapping",
         "dv_trims",
         "dv_tunnel_fixes",
@@ -584,6 +591,10 @@ inline bool IsVpvChoiceKey(const QString& key)
         "adaptive_upscale",
         "adaptive_upscale_superres_scale",
         "ambient_adapt",
+        "appearance",
+        "appearance_honour_l11",
+        "appearance_room",
+        "appearance_screen_white_measured",
         "cadence_class_fixes",
         "capture_path",
         "capture_upload",
@@ -621,6 +632,7 @@ inline bool IsVpvChoiceKey(const QString& key)
         "detail_pulse_stabilise",
         "dither_vectors",
         "downscale_light",
+        "dv_display_mapping",
         "dv_tone_mapping",
         "dv_trims",
         "dv_tunnel_fixes",
@@ -702,7 +714,7 @@ inline bool VpvRenderingDefault(const QString& key, QString& out)
             { "dejudder_est_candidates", "on" }, { "dejudder_est_qpel", "on" }, { "dejudder_est_still_zero", "on" }, { "dejudder_est_gate", "on" },
             { "dejudder_est_split", "off" }, { "dejudder_motion_rolloff", "off" }, { "dejudder_global_two", "on" },
             { "dejudder_regional_hold", "on" }, { "dejudder_pixel_trust", "on" }, { "dejudder_verify", "off" },
-            { "dejudder_landing_check", "on" }, { "native_rgb_ingest", "on" }, { "dv_tunnel_gpu_unpack", "on" }, { "dv_trims", "on" }, { "dv_tone_mapping", "libplacebo" }, { "dejudder_pulldown", "off" },
+            { "dejudder_landing_check", "on" }, { "native_rgb_ingest", "on" }, { "dv_tunnel_gpu_unpack", "on" }, { "dv_trims", "on" }, { "dv_display_mapping", "vp" }, { "dv_tone_mapping", "libplacebo" }, { "dejudder_pulldown", "off" },
             { "dejudder_fade_match", "on" }, { "dejudder_low_res", "all" }, { "dejudder_estimate_ahead", "on" },
             { "dejudder_block_taper", "off" }, { "dither_vectors", "auto" }, { "adaptive_downscale", "off" },
             { "adaptive_chroma_ssim", "off" }, { "adaptive_faithful", "auto" }, { "adaptive_grain_map", "on" },
@@ -730,6 +742,7 @@ inline bool VpvRenderingDefault(const QString& key, QString& out)
             { "cut_soft_reset", "on" },   // C5 batch B (owner 2026-11-15 08:35 U7 Q4): default on, high bar
             // Intent remainder (2026-10-17): all experimental, default off.
             { "intent_motion", "off" }, { "intent_motion_policy", "display" }, { "ambient_adapt", "off" },
+            { "appearance", "off" }, { "appearance_honour_l11", "on" }, { "appearance_screen_white_measured", "off" }, { "appearance_room", "cinema" },   // CF-1 CAM-4
             { "intent_black", "off" }, { "intent_display", "off" },
             // W4 profile-defaults-parity (GEM-033, defaults verified against VpvRendererFields.h / AdaptiveDownscale.h):
             { "adaptive_motion", "off" }, { "chroma_upscale_vp", "off" }, { "fbo_float32", "auto" },
@@ -751,6 +764,7 @@ inline bool VpvRenderingDefault(const QString& key, QString& out)
                 key == QStringLiteral("intent_content_hold_seconds") ||
                 key == QStringLiteral("detail_pulse_cap") || key == QStringLiteral("texture_restore_cap") ||
                 key.startsWith(QStringLiteral("intent_motion_")) || key == QStringLiteral("intent_ease_s") ||
+                key.startsWith(QStringLiteral("appearance_")) ||
                 key.startsWith(QStringLiteral("ambient_"))) &&
             key != QStringLiteral("dejudder_preset"))
         { out = QString(); return true; }

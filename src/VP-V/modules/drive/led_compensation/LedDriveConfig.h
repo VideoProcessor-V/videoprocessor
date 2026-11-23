@@ -1251,6 +1251,13 @@ namespace LedDrive
 		return gammaBoost > 0.0 && displayGamma > 0.0 ? displayGamma / gammaBoost : 1.0;
 	}
 
+	// FIX1 MUST 6 (doc 115 B15, one owner per correction): while colour.appearance runs it replaces the gamma boost, so the
+	// exponent is 1 (the caller lists "gamma boost: replaced by appearance" when a boost was configured).
+	inline double BoostExponentUnderAppearance(double gammaBoost, double displayGamma, bool appearanceActive)
+	{
+		return appearanceActive ? 1.0 : BoostExponent(gammaBoost, displayGamma);
+	}
+
 	inline double BoostExponent(const LedDriveConfig& led, double displayGamma = 2.2)
 	{
 		return BoostExponent(led.gammaBoost, displayGamma);

@@ -15,6 +15,7 @@
 #include <VP-V/modules/colour/display_mapping/DvDolbyStyle.h>
 
 #include <cmath>
+#include <cstring>
 #include <random>
 #include <string>
 #include <vector>
@@ -106,6 +107,114 @@ namespace Tests
 			dm.sceneMaxPq = static_cast<uint16_t>(Pq(40.0) * 4095.0);
 			dm.sceneAvgPq = static_cast<uint16_t>(Pq(4.0) * 4095.0);
 			Assert::IsTrue(DvDolbyStyle::ForDm(dm, 0.0, 48.0).identity);
+		}
+
+		// GEM-006 ([C]:115, verbatim): a dark scene is never expanded above its own peak. ForDm with a scene whose peak (40
+		// nits) is below the target (48 nits) and whose minimum (0) is below the target's: before the fix the fit test failed on
+		// the shadows and the whole scene was stretched so that its peak landed on the 48-nit target peak.
+		TEST_METHOD(DarkSceneNeverExpandsAboveItsPeak)
+		{
+			using namespace DvDolby;
+			DolbyVisionTunnelFrameMetadata dm;
+			dm.valid = true;
+			dm.sourceMinPq = 62;
+			dm.sourceMaxPq = static_cast<uint16_t>(Pq(4000.0) * 4095.0);
+			dm.hasSceneMetadata = true;
+			dm.sceneMinPq = 0;
+			dm.sceneMaxPq = static_cast<uint16_t>(Pq(40.0) * 4095.0);
+			dm.sceneAvgPq = static_cast<uint16_t>(Pq(4.0) * 4095.0);
+			const DvDolbyStyle::Curve c = DvDolbyStyle::ForDm(dm, 0.005, 48.0);
+			Assert::IsTrue(c.Map(Pq(40.0)) <= Pq(40.0) + 1e-6, L"[C]:115: the 40-nit peak is not lifted toward 48 nits");
+			Assert::IsTrue(c.Map(c.sMax) <= c.sMax + 1e-9, L"the scene peak maps to no more than itself");
+			Assert::AreEqual(c.sMax, c.tMax, 1e-12, L"the upper anchor is the scene peak, not the target peak");
+			Assert::AreEqual(c.tMin, c.Map(c.sMin), 1e-9, L"the scene minimum maps to the target minimum (the lifted black)");
+			// Across the whole scene range nothing is mapped above the scene peak and the curve stays monotonic (the lifted black is the
+			// target's own minimum, as for any scene whose shadows are below the target's).
+			double last = -1.0;
+			for (int k = 0; k <= 1000; ++k)
+			{
+				const double x = c.sMax * k / 1000.0;
+				const double y = c.Map(x);
+				Assert::IsTrue(y <= c.sMax + 1e-9, L"no value of the scene is expanded above its peak");
+				Assert::IsTrue(y >= last - 1e-12, L"monotonic");
+				last = y;
+			}
+			// The same for the direct Build call with other dark peaks and target peaks.
+			for (const double peakNits : { 5.0, 20.0, 40.0 })
+				for (const double targetNits : { 48.0, 100.0, 1000.0 })
+				{
+					const DvDolbyStyle::Curve d = DvDolbyStyle::Build(Pq(0.0), Pq(peakNits * 0.1), Pq(peakNits), Pq(0.005), Pq(targetNits));
+					Assert::IsTrue(d.Map(Pq(peakNits)) <= Pq(peakNits) + 1e-6, L"Build: a dark scene is never expanded above its peak");
+				}
+		}
+
+		// GEM-006: a scene that COMPRESSES (its peak above the target's) is untouched by the dark-scene clamp: min(tMax, sMax) is
+		// tMax there, so sMid / tMid / c1 / c2 / c3 are exactly what the pre-fix code (d0fc40841) produced. The pins are the
+		// pre-fix arithmetic evaluated in IEEE double (a line-for-line port of the pre-fix Build and Solve over the DvMath PQ).
+		TEST_METHOD(CompressingSceneCurveIsUnchanged)
+		{
+			using namespace DvDolby;
+			struct Pin { double sMin, sAvg, sMax, tMin, tMax, sMid, tMid, c1, c2, c3; };
+			const Pin pins[] = {
+				{ 0.001, 40.0, 1000.0, 0.005, 48.0, 0.419284117712411, 0.3732082723629364, -0.001680468765265592, 2.733106298397453, 4.927516856072622 },
+				{ 0.001, 150.0, 4000.0, 0.005, 100.0, 0.5493020361319259, 0.4341281181461443, 0.0020497482891898224, 2.113006050792937, 3.055344148528117 },
+				{ 0.01, 10.0, 600.0, 0.0001, 300.0, 0.29969909242098597, 0.29969909242098597, -0.024641217446563564, 1.2252274367773122, 0.47717053640945967 },
+			};
+			for (const Pin& p : pins)
+			{
+				const DvDolbyStyle::Curve c = DvDolbyStyle::Build(Pq(p.sMin), Pq(p.sAvg), Pq(p.sMax), Pq(p.tMin), Pq(p.tMax));
+				Assert::IsFalse(c.identity);
+				Assert::AreEqual(Pq(p.tMax), c.tMax, 0.0, L"the upper anchor is the target peak (the scene is brighter)");
+				Assert::AreEqual(p.sMid, c.sMid, 1e-12, L"sMid");
+				Assert::AreEqual(p.tMid, c.tMid, 1e-12, L"tMid");
+				Assert::AreEqual(p.c1, c.c1, 1e-12, L"c1");
+				Assert::AreEqual(p.c2, c.c2, 1e-12, L"c2");
+				Assert::AreEqual(p.c3, c.c3, 1e-12, L"c3");
+				Assert::AreEqual(Pq(p.tMax), c.Map(c.sMax), 1e-9, L"scene max -> target max, as before");
+			}
+		}
+
+		// GEM-006 gate G1 MUST-4: a scene whose peak is at or below the display black (sMax <= tMin) has nothing to map: Build returns the
+		// identity. Before e37296dc9 the usability test used the unclamped target peak, the clamp effTMax = min(tMax, sMax) then fell
+		// below tMin and the chord fallback had a NEGATIVE slope (a decreasing curve: a DV fade to black on a 0.005 - 0.05-nit display
+		// would size its tone LUT from it). Every case is also monotonic non-decreasing; a control that does compress is not identity.
+		TEST_METHOD(ScenePeakBelowTheBlackIsTheIdentity)
+		{
+			using namespace DvDolby;
+			struct Case { const char* name; double sMin, sAvg, sMax, tMin, tMax; };
+			const Case identity[] = {
+				{ "scene peak 0", Pq(0.0), 0.0, 0.0, Pq(0.005), Pq(100.0) },
+				{ "scene peak 0.003 nits on a 0.005-nit black", Pq(0.0), 0.0, Pq(0.003), Pq(0.005), Pq(100.0) },
+				{ "scene peak 0.005 nits on a 0.005-nit black", Pq(0.0), 0.0, Pq(0.005), Pq(0.005), Pq(100.0) },
+				{ "scene peak 0.003 nits with an average", Pq(0.0), Pq(0.001), Pq(0.003), Pq(0.005), Pq(100.0) },
+				{ "scene peak 0.02 nits on a 0.05-nit black", Pq(0.0), 0.0, Pq(0.02), Pq(0.05), Pq(100.0) },
+				{ "scene peak 0.02 nits, a bright display peak", Pq(0.0), Pq(0.01), Pq(0.02), Pq(0.05), Pq(1000.0) },
+			};
+			for (const Case& c : identity)
+			{
+				const std::wstring name(c.name, c.name + std::strlen(c.name));
+				const DvDolbyStyle::Curve curve = DvDolbyStyle::Build(c.sMin, c.sAvg, c.sMax, c.tMin, c.tMax);
+				Assert::IsTrue(curve.identity, (name + L": nothing usable is the identity").c_str());
+				double last = -1.0;
+				for (int k = 0; k <= 400; ++k)
+				{
+					const double x = k / 400.0;
+					const double y = curve.Map(x);
+					Assert::AreEqual(x, y, 0.0, (name + L": identity maps every value to itself").c_str());
+					Assert::IsTrue(y >= last, (name + L": monotonic non-decreasing").c_str());
+					last = y;
+				}
+			}
+			// Control: a scene whose peak is above the display peak still compresses (not the identity) and stays monotonic.
+			const DvDolbyStyle::Curve compress = DvDolbyStyle::Build(Pq(0.0), 0.0, Pq(100.0), Pq(0.005), Pq(48.0));
+			Assert::IsFalse(compress.identity, L"a scene that needs compressing is not the identity");
+			double last = -1.0;
+			for (int k = 0; k <= 400; ++k)
+			{
+				const double y = compress.Map(k / 400.0);
+				Assert::IsTrue(y >= last - 1e-12, L"the compressing curve is monotonic");
+				last = y;
+			}
 		}
 
 		TEST_METHOD(IctcpRoundTripsAndGreyIntensityIsPqOfLuminance)

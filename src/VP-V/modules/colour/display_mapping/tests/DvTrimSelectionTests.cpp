@@ -15,6 +15,8 @@
 #include <cstring>
 #include <random>
 #include <string>
+#include <utility>
+#include <vector>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
@@ -375,5 +377,147 @@ namespace Tests
 			Assert::IsFalse(DvTrimSelection::ValidL8(t));
 			Assert::IsFalse(DvTrimSelection::ValidL8(L2(2081)), L"an L2 block is not L8");
 		}
+		// GEM-016: the candidates of a level are a fixed stack array (CandidateList, kMaxTrims entries), not a heap vector per
+		// level per frame. The result must be the vector form exactly: the same trims, in DM order, with the same target and
+		// decoded parameters, and the same L8 counters. The reference below is the pre-change vector-form loop, written against
+		// the public decoders (Valid / ValidL8 / FromL2 / DecodeL8 / ResolveL8TargetPq). The shader-parameter list appended into a
+		// caller's reused buffer is the fresh list, and refilling the buffer does not reallocate.
+		TEST_METHOD(SelectionWithoutTheHeapMatchesTheVectorForm)
+		{
+			using namespace DvL8Trims;
+			using DvTrimSelection::Level;
+			auto reference = [](const DolbyVisionTunnelFrameMetadata& dm, Level level, int& l8Present, int& l8Unresolved, int& firstUnresolved)
+			{
+				std::vector<DvTrimSelection::Candidate> out;
+				for (int i = 0; i < dm.trimCount && i < DolbyVisionTunnelFrameMetadata::kMaxTrims; ++i)
+				{
+					const Trim& t = dm.trims[i];
+					DvTrimSelection::Candidate c;
+					c.trimIndex = i;
+					if (level == Level::L2)
+					{
+						if (!DolbyVisionTrims::Valid(t))
+							continue;
+						c.targetPq = t.targetMaxPq;
+						c.params = DvTrimSelection::FromL2(t);
+					}
+					else
+					{
+						if (!DvTrimSelection::ValidL8(t))
+							continue;
+						++l8Present;
+						c.targetPq = DvTrimSelection::ResolveL8TargetPq(dm, t.targetDisplayIndex);
+						if (c.targetPq < 0)
+						{
+							++l8Unresolved;
+							if (firstUnresolved < 0) firstUnresolved = t.targetDisplayIndex;
+							continue;
+						}
+						c.params = DvTrimSelection::DecodeL8(t);
+					}
+					out.push_back(c);
+				}
+				return out;
+			};
+			auto sameParams = [](const DvTrimSelection::ExtParams& a, const DvTrimSelection::ExtParams& b)
+			{
+				bool same = Same(a.base, b.base) && a.midContrast == b.midContrast && a.clipTrim == b.clipTrim;
+				for (int k = 0; k < DvTrimSelection::kHues; ++k)
+					same = same && a.saturation[k] == b.saturation[k] && a.hueDegrees[k] == b.hueDegrees[k];
+				return same;
+			};
+
+			std::mt19937 rng(2026);
+			std::uniform_int_distribution<int> code(1500, 2600), target(1200, 3600), count(0, 8), kind(0, 3), index(1, 5);
+			size_t compared = 0, withUnresolved = 0, full = 0;
+			for (int trial = 0; trial < 400; ++trial)
+			{
+				DolbyVisionTunnelFrameMetadata dm = Dm({});
+				if (trial % 2 == 0)
+					AddL10(dm, 3, static_cast<uint16_t>(target(rng)));
+				const int n = trial % 11 == 0 ? DolbyVisionTunnelFrameMetadata::kMaxTrims : count(rng);   // sometimes a full DM
+				for (int k = 0; k < n; ++k)
+				{
+					Trim t = kind(rng) == 0 ? L8(static_cast<uint8_t>(index(rng)), static_cast<uint16_t>(code(rng)), static_cast<uint16_t>(code(rng)))
+						: L2(static_cast<uint16_t>(target(rng)), static_cast<uint16_t>(code(rng)), static_cast<uint16_t>(code(rng)),
+							static_cast<uint16_t>(code(rng)), static_cast<uint16_t>(code(rng)), static_cast<uint16_t>(code(rng)));
+					if (t.level == 8 && trial % 3 == 0)
+					{
+						t.hasMidContrastAndClip = true;
+						t.midContrast = static_cast<uint16_t>(code(rng));
+						t.clipTrim = static_cast<uint16_t>(code(rng));
+					}
+					dm.trims[dm.trimCount++] = t;
+				}
+				if (trial % 7 == 0 && n)
+					dm.trims[0].slope = 5000;   // a corrupt block is skipped
+				for (const Level level : { Level::L2, Level::L8 })
+				{
+					int p1 = 0, u1 = 0, f1 = -1, p2 = 0, u2 = 0, f2 = -1;
+					const auto want = reference(dm, level, p2, u2, f2);
+					const DvTrimSelection::CandidateList got = level == Level::L8 ? DvTrimSelection::Candidates(dm, level, &p1, &u1, &f1) :
+						DvTrimSelection::Candidates(dm, level);
+					Assert::AreEqual(want.size(), got.size(), L"the same number of candidates");
+					for (size_t k = 0; k < want.size(); ++k)
+					{
+						Assert::AreEqual(want[k].trimIndex, got[static_cast<int>(k)].trimIndex, L"the same trim, in DM order");
+						Assert::AreEqual(want[k].targetPq, got[static_cast<int>(k)].targetPq, L"the same target");
+						Assert::IsTrue(sameParams(want[k].params, got[static_cast<int>(k)].params), L"the same decoded parameters");
+					}
+					if (level == Level::L8)
+					{
+						Assert::AreEqual(p2, p1, L"l8Present");
+						Assert::AreEqual(u2, u1, L"l8Unresolved");
+						Assert::AreEqual(f2, f1, L"firstUnresolved");
+						withUnresolved += u2 > 0 ? 1 : 0;
+					}
+					compared += want.size();
+					full += got.size() == static_cast<size_t>(DolbyVisionTunnelFrameMetadata::kMaxTrims) ? 1 : 0;
+				}
+			}
+			Assert::IsTrue(compared > 500, L"the sweep compared real candidates");
+			Assert::IsTrue(withUnresolved > 0, L"and exercised unresolved L8 targets");
+			Assert::IsTrue(full > 0, L"and a full DM (kMaxTrims candidates fit the array)");
+
+			// A DM with more trims than the array holds is clamped to kMaxTrims by the loop bound, never written past the end.
+			{
+				DolbyVisionTunnelFrameMetadata dm = Dm({});
+				for (int k = 0; k < DolbyVisionTunnelFrameMetadata::kMaxTrims; ++k)
+					dm.trims[dm.trimCount++] = L2(static_cast<uint16_t>(1500 + 100 * k));
+				const DvTrimSelection::CandidateList list = DvTrimSelection::Candidates(dm, Level::L2);
+				Assert::AreEqual<size_t>(DolbyVisionTunnelFrameMetadata::kMaxTrims, list.size());
+				Assert::AreEqual(DolbyVisionTunnelFrameMetadata::kMaxTrims - 1, list[DolbyVisionTunnelFrameMetadata::kMaxTrims - 1].trimIndex);
+			}
+
+			// The shader parameters: appended into a reused buffer = the fresh list; refilling does not reallocate.
+			DvTrimSelection::ExtParams params = DvTrimSelection::DecodeL8(L8(1, 2300, 1900));
+			params.saturation[2] = 1.25;
+			params.hueDegrees[4] = -7.5;
+			const std::vector<std::pair<const char*, double>> fresh = DvTrimSelection::ShaderParameters(params);
+			Assert::AreEqual<size_t>(21, fresh.size(), L"9 scalar parameters, 6 saturations, 6 hues");
+			std::vector<std::pair<const char*, double>> buffer;
+			buffer.reserve(64);
+			const void* storage = buffer.data();
+			for (int frame = 0; frame < 3; ++frame)
+			{
+				buffer.clear();
+				DvTrimSelection::AppendShaderParameters(params, buffer);
+				Assert::AreEqual(fresh.size(), buffer.size());
+				for (size_t k = 0; k < fresh.size(); ++k)
+				{
+					Assert::AreEqual(std::string(fresh[k].first), std::string(buffer[k].first), L"the same names in the same order");
+					Assert::AreEqual(fresh[k].second, buffer[k].second, 0.0, L"the same values");
+				}
+				Assert::IsTrue(buffer.data() == storage, L"the buffer keeps its storage across frames (no per-frame heap growth)");
+			}
+			// Appended after existing entries: they stay.
+			buffer.clear();
+			buffer.push_back({ "first", 1.0 });
+			DvTrimSelection::AppendShaderParameters(params, buffer);
+			Assert::AreEqual(fresh.size() + 1, buffer.size());
+			Assert::AreEqual(std::string("first"), std::string(buffer[0].first));
+			Assert::AreEqual(std::string("dv_slope"), std::string(buffer[1].first));
+		}
+
 	};
 }

@@ -15,6 +15,8 @@
 #include <DisplayIntent.h>
 #include <IntentInterpreterSupport.h>
 
+#include <VP-V/modules/colour/appearance/RoomLight.h>
+
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -26,6 +28,8 @@ namespace Vpv
 		mutable std::mutex intentMutex;
 		AmbientAdapt::Settings ambientSettings;               // intentMutex
 		AmbientAdapt::Filter ambientFilter;                   // intentMutex
+		RoomLight::HeldState roomLight;                       // room_light product (33): the filter above, published on each reading
+		bool roomLightFeed = false;                           // intentMutex: the appearance stage needs the filter fed even with ambient_adapt off
 		double ambientAppliedBlackNits = 0.0;                 // intentMutex: B_eff rendered now (0 = off)
 		BlackIntentStatus blackIntentStatus;                  // intentMutex
 		DisplayIntentStatus displayIntentStatus;              // intentMutex

@@ -53,6 +53,21 @@ void LibplaceboVideoRenderer::Impl::UpdatePipelineSlots(const RendererSettings& 
 		EngageFallback(PresentationOwner::FallbackId(), PresentationOwner::WithheldText());
 	else
 		ReleaseFallback(PresentationOwner::FallbackId());
+	{   // CF-1 CAM-4: appearance owns the room-light correction; ambient_adapt was forced off (VpvRendererSettings PostLoad), said here
+		const FallbackCatalog::Decision replaced = FallbackCatalog::AmbientAdaptReplaced(settings.ambientAdaptReplaced);
+		if (replaced.engaged)
+			EngageFallback(replaced.id.c_str(), replaced.reason);   // VPV-FALLBACK ambient_adapt: replaced by appearance
+		else
+			ReleaseFallback(replaced.id.c_str());
+		// FIX1 MUST 6: the saturation step is replaced by appearance (forced off in PostLoad), said here
+		const FallbackCatalog::Decision saturation = FallbackCatalog::SaturationReplaced(settings.saturationReplaced, settings.saturationConfigured);
+		if (saturation.engaged)
+			EngageFallback(saturation.id.c_str(), saturation.reason);   // VPV-FALLBACK saturation: replaced by appearance
+		else
+			ReleaseFallback(saturation.id.c_str());
+	}
+	// CF1-G7a: the calibration LUT stage's configured value (auto or not) from these settings, before the next frame's TakeLut.
+	calibrationHost.NoteConfiguredStage(settings.calibrationLutStageConfigured == "auto");
 	next.SetEntranceOnce(settings.pipelineEntranceOnce && !settings.pipelineOriginalPathway);   // B3: consumers after the entrance
 	(void)next.ActiveEntrance();   // warm the kept list here, so the render thread only reads it
 	pipelineSlots = next;
@@ -272,8 +287,7 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
     }
     auto logSdrToneShape = [&](int state)
     {
-        SyncFallback(FallbackCatalog::SdrToneShape(state == 1 || state == 3, state == 1,
-            state == 3 ? "the shader did not load" : ""));
+        SyncFallback(SdrToneShape::StateFallback(state));   // GEM-004: state 4 (calibration LUT) is listed
         if (state != sdrToneShapeLogged)
         {
             sdrToneShapeLogged = state;
@@ -287,11 +301,75 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
     // WP-14 (DvHostStage), phase 1: the Dolby-style curve hook (dv_tone_mapping), the L8 / L2 trims
     // decision and their parameters for the S2 segment (it collects, tags and parameterises the
     // trims hook - the one emitter), and the DV comparison capture.
-    dvStage.PrepareToneAndTrims({ activeSettings.dvToneMapping, activeSettings.dvTrims, activeSettings.toneMapping,
-        activeSettings.dvCompareCaptureFolder, pipelineSlots.Runs(PipelineSlots::Id::ColourSdrToneShape), renderImage, target,
+    // CF-1 P3 (either/or): dv_display_mapping=original is Bill's libplacebo DV mapping, byte-identical to
+    // dv_tone_mapping=libplacebo with dv_trims off; the stored dv_* values are kept, only the effective ones change.
+    // CF-1 P4: the contrast-recovery need for Dolby-style DV pictures is the P14 view (never a private estimate).
+    const bool dvNeedsView = activeSettings.dvDisplayMapping != "original" && activeSettings.dvToneMapping == "dolby_style" &&
+        pipelineSlots.Runs(PipelineSlots::Id::ColourDmCurve);
+    SourceIdentity::QualityView dvQualityView;
+    if (dvNeedsView) dvQualityView = vpv.sourceAnalysis.sourceMonitor.QualityView();
+    static const std::string dvOriginalTone = "libplacebo";
+    // CF-1 FIX1 MUST 3: an R12B / R12L tunnel picture cannot carry VP's mapping: libplacebo's runs, listed (DmContainer.h).
+    const char* const dvContainer = state.videoFrameEncoding == VideoFrameEncoding::R12B ? "R12B" :
+        state.videoFrameEncoding == VideoFrameEncoding::R12L ? "R12L" : "";
+    const bool dvVpMapping = dvStage.SyncContainer(state.dolbyVisionTunnel, dvContainer, activeSettings.dvDisplayMapping);
+    colourFrame.dv.swap(dvStage.TrimsParameterBuffer());   // GEM-016: last frame's list capacity (PrepareToneAndTrims clears it)
+    dvStage.PrepareToneAndTrims({ dvVpMapping ? activeSettings.dvToneMapping : dvOriginalTone, dvVpMapping && activeSettings.dvTrims, activeSettings.toneMapping,
+        activeSettings.dvCompareCaptureFolder, pipelineSlots.Runs(PipelineSlots::Id::ColourDmCurve), renderImage, target,
         convertedPayload ? &convertedPayload->dolby : nullptr, LedDisplayGamma(target.color.transfer), state,
-        convertedPayload ? Vpv::Capture::RawFrameOf(*convertedPayload) : nullptr, videoFrame.GetCounter() },   // VPV-HOOK
+        convertedPayload ? Vpv::Capture::RawFrameOf(*convertedPayload) : nullptr, videoFrame.GetCounter(),
+        pipelineSlots.Runs(PipelineSlots::Id::ColourDmTrims),
+        dvNeedsView ? &dvQualityView : nullptr },   // VPV-HOOK
         colorMapParams, hookTemplates, colourFrame.dvTrims, colourFrame.dv);
+    // CF-1 CAM-3 (colour.appearance, refs/125): the CAM16 room and screen adaptation. Off by default; off on the Original pathway.
+    // The decision, hook and status live in DvHostStage (VP-V); this is the one call site. The room is the room_light product
+    // (the LED intent's one sensor filter); the picture's L11 reference-mode flag and the trim that ran come from the DV metadata.
+    {
+        AppearanceStage::Inputs appearance;
+        appearance.on = activeSettings.appearance && pipelineSlots.Runs(PipelineSlots::Id::ColourAppearance) && !pipelineSlots.OriginalPathway();
+        if (appearance.on)
+        {
+            appearance.strength = activeSettings.appearanceStrength;
+            appearance.room.room = activeSettings.appearanceRoom == "living_low" ? RoomLight::Room::LivingLow :
+                activeSettings.appearanceRoom == "living_lit" ? RoomLight::Room::LivingLit :
+                activeSettings.appearanceRoom == "auto" ? RoomLight::Room::Auto : RoomLight::Room::Cinema;
+            appearance.room.reflectNitsPerLux = activeSettings.ambientScreenReflect;
+            appearance.room.maxBlackNits = activeSettings.ambientMaxBlackNits;
+            appearance.room.anchors.luxDark = activeSettings.ambientLuxDark;   // FIX1 SHOULD 3: [ambient] lux_dark / lux_lit
+            appearance.room.anchors.luxLit = activeSettings.ambientLuxLit;
+            appearance.recordAvailable = vpv.led.intent.roomLight.ReadLatest(appearance.record);
+            appearance.now = static_cast<double>(GetTickCount64()) / 1000.0;
+            appearance.screenWhiteNits = activeSettings.appearanceScreenWhiteNits;
+            appearance.screenWhiteMeasured = activeSettings.appearanceScreenWhiteMeasured;
+            appearance.trimApplied = colourFrame.dvTrims;
+            appearance.trimTargetNits = dvStage.TrimsTargetNits();
+            appearance.trimSaturationGain = dvStage.TrimsSaturationGain();   // FIX1 SHOULD 2: the trim x Hunt cap
+            appearance.toeKnee = dynamicDrive.PublishedParams().boostKnee;   // FIX1 SHOULD 3: gamma_boost_knee, not a fixed 0
+            appearance.signalPq = target.color.transfer == PL_COLOR_TRC_PQ;
+            appearance.outputGamma = LedDisplayGamma(target.color.transfer);
+            appearance.honourL11 = activeSettings.appearanceHonourL11;
+            appearance.calibrationLutBefore = target.lut != nullptr;   // FIX1 MUST 2 (null when VP's stage took the LUT)
+            const DolbyVisionTunnelFrameMetadata* dolbyMetadata = convertedPayload ? &convertedPayload->dolby : nullptr;
+            appearance.l11ReferenceMode = dolbyMetadata && dolbyMetadata->valid && dolbyMetadata->hasL11 && dolbyMetadata->l11ReferenceMode;
+            pl_color_space display = target.color;
+            pl_color_space_infer(&display);
+            // FIX1 SHOULD 1 (refs/125 s2): keyed by the SOURCE content: SDR content refers to 100 nits; HDR10, DV without a
+            // trim and LLDV refer to the configured sdr_target_nits (the trim target comes first when a trim ran).
+            appearance.sourceSdr = !pl_color_space_is_hdr(&renderImage.color);
+            appearance.sdrTargetNits = activeSettings.sdrTargetNits;
+            if (const pl_raw_primaries* prim = pl_raw_primaries_get(display.primaries))
+            {
+                const double red[2] = { prim->red.x, prim->red.y }, green[2] = { prim->green.x, prim->green.y };
+                const double blue[2] = { prim->blue.x, prim->blue.y }, white[2] = { prim->white.x, prim->white.y };
+                DvMath::RgbToXyz(red, green, blue, white, appearance.rgbToXyz);   // false: the BT.709 default stays
+            }
+        }
+        const AppearanceStage::Decision& decision = dvStage.PrepareAppearance(appearance, hookTemplates,
+            vpv.motion.intent.intentInterpreter ? vpv.motion.intent.intentInterpreter->DisplayedCuts() : 0);
+        colourFrame.appearance = decision.active;
+        colourFrame.appearanceParams = decision.parameters;
+        colourFrame.appearanceChain = &dvStage.AppearanceHook();
+    }
     // Rendered-frame captures (DV comparison capture; the WP-17 diagnostics adapter is the one
     // caller). The context is built only while one is on (it consumes the trim selection).
     captures.Configure(DvCompareCapture::kCommand, activeSettings.dvCompareCaptureFolder);
@@ -315,6 +393,7 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
         led.hookTemplates = &hookTemplates;
         led.sourceRange = &activeSettings.sourceRange;
         led.displayGamma = LedDisplayGamma(target.color.transfer);
+        led.appearanceActive = dvStage.AppearanceDecision().active;   // FIX1 MUST 6: appearance replaces the gamma boost
         led.captureRateHz = captureRateHz;
         led.nominalSourceRateHz = nominalSourceRateHz;
         led.renderAheadActive = RenderAheadActive() && renderAheadSchedule.Active();
@@ -347,10 +426,18 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
     customHooks.Collect(lowLatencyQueue, userFrameHooks);
     colourFrame.userPreOutput = &userFrameHooks;
     colourFrame.calibrationLut = calibrationHost.HookForFrame() != nullptr;   // S2 pushes it (WP-12: the adapter never does)
+    dvStage.SyncCalibrationLut(activeSettings.calibrationLutStageConfigured, activeSettings.calibrationLutStage, colourFrame.calibrationLut);   // FIX1 MUST 3
+    // CF1-FIN SHOULD A: auto keeps the VP stage only while a step that must follow the LUT wants to act (appearance on with a
+    // strength, or a DV picture for VP's display mapping); the next frame's TakeLut reads it (AutoKeepsVpStage).
+    calibrationHost.SetAutoNeed(activeSettings.calibrationLutStageConfigured == "auto",
+        (activeSettings.appearance && activeSettings.appearanceStrength > 0.0 && pipelineSlots.Runs(PipelineSlots::Id::ColourAppearance) &&
+            !pipelineSlots.OriginalPathway()) || dvStage.DisplayMappingWantsLutAfter());
     const OutputSegments::ColourCounts colourCounts = outputColour.Collect(colourFrame, pipelineSlots, frameHooks,
         [this](size_t start, PipelineSlots::Id slot) { TagSlotHooks(start, slot); });
     logSdrToneShape(sdrToneShapeState == 1 && colourCounts.toneShape == 0 ? 3 : sdrToneShapeState);
     dvStage.FinishTrims(colourCounts.dvTrims);   // WP-14 phase 2: state, status, fallback, logs
+    colourFrame.dv.swap(dvStage.TrimsParameterBuffer());   // GEM-016: the list back to its owner for the next frame
+    dvStage.FinishAppearance(colourCounts.appearance);   // CF-1 CAM-3: shader-missing fallback and the status line
     SyncFallback(colourCounts.unhandled ? FallbackCatalog::Engaged("S2 placeholder stage",
         "a placeholder slot has a component but no output-segment stage yet (not run)") :
         FallbackCatalog::Released("S2 placeholder stage"));
@@ -639,11 +726,33 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
         outputEncodingRepairLogged = true;
     }
     frameParams = renderParams;
+    // CF1-FIN SHOULD B: saturation is replaced only while appearance is ACTIVE this frame. PostLoad forced the step off for a
+    // configured appearance; a frame where the pass is not active (a calibration LUT before it) gets the user's saturation
+    // back, and the Fallbacks row follows the frame. Never on the Original pathway (saturationReplaced is false there).
+    const bool saturationGivenBack = activeSettings.saturationReplaced && !dvStage.AppearanceDecision().active;
+    SyncFallback(FallbackCatalog::SaturationReplaced(activeSettings.saturationReplaced && !saturationGivenBack,
+        activeSettings.saturationConfigured));   // VPV-FALLBACK saturation: replaced by appearance
+    // CF1-G7b: ambient_adapt likewise, per frame: replaced only while appearance acts (the intent interpreter's
+    // ConfigureIntentAmbient gives it back on the other frames, AppearanceStage::AmbientAdaptOn).
+    SyncFallback(FallbackCatalog::AmbientAdaptReplaced(activeSettings.ambientAdaptReplaced &&
+        !AppearanceStage::AmbientAdaptGivenBack(activeSettings.ambientAdaptReplaced, dvStage.AppearanceDecision().active)));   // VPV-FALLBACK ambient_adapt: replaced by appearance
+    // Gate G1 MUST-5: ambient_adapt given back, but the LED intent evaluation follows the saved setting: listed (Ctrl+I,
+    // Config status, problem report), never silent.
+    SyncFallback(FallbackCatalog::AmbientAdaptLedShadowCapSaved(AppearanceStage::LedShadowCapUsesSavedAmbient(
+        AppearanceStage::AmbientAdaptGivenBack(activeSettings.ambientAdaptReplaced, dvStage.AppearanceDecision().active),
+        activeSettings.ambientAdapt, activeSettings.intentBlack != BlackIntentMode::Off, activeSettings.intentDisplay,
+        vpv.led.intent.ledIntentLimitsSent.shadowMinimumShare, vpv.led.intent.ledIntentLimitsSent.ambientBlackNits)));   // VPV-FALLBACK room-light: LED shadow cap
+    if (saturationGivenBack || vpv.led.sdrLift.ambientSdrLift)
+    {
+        frameColorAdjustment = renderParams.color_adjustment ? *renderParams.color_adjustment : pl_color_adjustment_neutral;
+        if (saturationGivenBack)
+            frameColorAdjustment.saturation = 1.0f + static_cast<float>(activeSettings.saturationConfigured) / 100.0f;
+        frameParams.color_adjustment = &frameColorAdjustment;
+    }
     // Hunt 3 F2: ambient adaptation's SDR black lift, on top of the configured adjustment
     // (saturation): libplacebo's colour decode, before anything else sees the picture.
     if (vpv.led.sdrLift.ambientSdrLift)
     {
-        frameColorAdjustment = renderParams.color_adjustment ? *renderParams.color_adjustment : pl_color_adjustment_neutral;
         LibplaceboRenderParameters::ApplySdrAmbientLift(vpv.led.sdrLift.ambientSdrContrast, vpv.led.sdrLift.ambientSdrBrightness, frameColorAdjustment);
         frameParams.color_adjustment = &frameColorAdjustment;
     }

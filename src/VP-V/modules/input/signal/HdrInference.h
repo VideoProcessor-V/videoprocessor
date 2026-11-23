@@ -208,7 +208,8 @@ private:
 // 10-bit code domain (AnalysisLumaSource::Sample emits that domain for every
 // format). A frame is SDR evidence when, over the active (letterbox-cropped)
 // picture, >= 0.2% of samples are at code >= 880 or the 99.9th percentile is
-// >= 870. Real PQ material rarely reaches those codes (870 is about 3000 nits);
+// >= 870. Real PQ material rarely reaches those codes (as PQ, code 870 is about 4,700 nits
+// and 880 about 5,200; 3000 nits is about code 827);
 // SDR peak white sits at 940.
 struct HdrVetoThresholds
 {

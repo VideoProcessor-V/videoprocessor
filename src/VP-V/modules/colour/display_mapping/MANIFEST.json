@@ -7,10 +7,12 @@
   "successor_of": "colour.sdr_tone_shape",
   "code_location": "draft owner module for DV display mapping (dm.pre / dm.curve / dm.trims); P1 holds the moved Dolby-style headers",
   "live_files": [
+    "src/VP-V/modules/colour/display_mapping/DvMath.h",
     "src/VP-V/modules/colour/display_mapping/DolbyVisionTrims.h",
     "src/VP-V/modules/colour/display_mapping/DvTrimSelection.h",
     "src/VP-V/modules/colour/display_mapping/DvDolbyStyle.h",
     "src/VP-V/modules/colour/display_mapping/DvHostStage.h",
+    "src/VP-V/modules/colour/display_mapping/DmContainer.h",
     "src/VP-V/modules/colour/display_mapping/AmbientAdaptation.h"
   ],
   "components": {

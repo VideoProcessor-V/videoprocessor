@@ -3,11 +3,16 @@
   "slot": "colour.appearance",
   "unit": "colour",
   "order": 210,
-  "status": "placeholder",
-  "code_location": "module (ambient adaptation config/logic, SdrAmbientLift; slot placeholder)",
+  "status": "built",
+  "code_location": "module (ambient adaptation config/logic, SdrAmbientLift; CAM16 appearance pass (AppearanceStage + shaders/vp_cam16_appearance.glsl), CPU reference CAM16 + uniform pack + room_light reader; the appearance switch and its keys (CAM-4), off by default; AppearanceStatus the Config status sentence)",
   "live_files": [
     "src/VP-V/modules/colour/appearance/SdrAmbientLift.h",
-    "src/VP-V/modules/colour/appearance/AmbientConfig.h"
+    "src/VP-V/modules/colour/appearance/AmbientConfig.h",
+    "src/VP-V/modules/colour/appearance/Cam16.h",
+    "src/VP-V/modules/colour/appearance/Cam16Uniforms.h",
+    "src/VP-V/modules/colour/appearance/RoomLight.h",
+    "src/VP-V/modules/colour/appearance/AppearanceStage.h",
+    "shaders/vp_cam16_appearance.glsl"
   ],
   "components": {
     "files": {
@@ -23,10 +28,10 @@
     },
     "tools": [],
     "config_keys": [
-      "appearance_adaptation",
-      "appearance_reference_surround",
-      "appearance_reference_white_nits",
-      "appearance_screen_surround",
+      "appearance",
+      "appearance_honour_l11",
+      "appearance_room",
+      "appearance_screen_white_measured",
       "appearance_screen_white_nits",
       "appearance_strength"
     ],

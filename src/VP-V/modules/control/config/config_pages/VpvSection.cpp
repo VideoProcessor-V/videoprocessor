@@ -10,6 +10,7 @@
 #include "VpvTierTable.generated.h"
 
 #include <VP-V/core/DelayBudgetLadder.h>
+#include <VP-V/modules/colour/appearance/AppearanceStatus.h>
 
 #include <QAbstractButton>
 #include <QAbstractItemModel>
@@ -557,6 +558,15 @@ namespace Vpv
 					"and 960x720) that are recognised and named in the hold note and log but never re-based. conventional: only the "
 					"sizes re-base may apply. Or a list of ids (hdv_1440x1080, dvcprohd_1280x1080, dvcprohd_960x720, 1920x1080, ...). "
 					"This changes what is named, never what is applied; unknown ids are ignored and shown as a status line." },
+				// CF-1 CAM-4 (colour.appearance): the room, the strength and the screen white of the CAM16 pass.
+				{ "appearance_room", "Room (cinema | living_low | living_lit | auto)", "cinema",
+					"Default cinema (a dark room). living_low: a living room with low light (dim). living_lit: a lit living room (average). "
+					"auto: follow the room light sensor (the Dynamic Drive ambient sensor); with no reading the room is taken as dark and the "
+					"Fallbacks line says so." },
+				{ "appearance_strength", "Appearance strength (0 to 1)", "1",
+					"Default 1: the full adaptation. 0 leaves the picture unchanged; values between blend the adaptation in." },
+				{ "appearance_screen_white_nits", "Screen white (nits, 1 to 1000)", "48",
+					"The luminance of the screen white the picture is adapted to. Used as given until the measured switch below is on."},
 			};
 			for (const TextRowSpec& r : kRows)
 				if (std::string(r.key) == key) return &r;
@@ -1005,6 +1015,20 @@ namespace Vpv
 					break;
 				case ItemKind::Note:
 				{
+					if (id == QStringLiteral("@appearance_status"))
+					{
+						// CF-1 CAM-4: the live state of the appearance setting, OFF included (never silent).
+						auto* status = Help(QString());
+						status->setObjectName(ObjectName(unitId + QStringLiteral(".appearance.status")));
+						status->setProperty("help", true);
+						card.Add(status);
+						state->refreshers.push_back([state, status]()
+						{
+							const auto on = [state](const char* k) { return state->Get(k) == "on"; };
+							status->setText(QString::fromStdString(AppearanceStatus::ConfigLine(on("appearance"), on("appearance_screen_white_measured"), on("ambient_adapt"))));
+						});
+						break;
+					}
 					auto* note = Help(id);
 					note->setProperty("help", true);
 					card.Add(note);
@@ -1504,11 +1528,13 @@ namespace Vpv
 				"and the Original pathway switch cover it.")));
 			auto* form = new QFormLayout;
 
-			// Where the projector calibration LUT runs (R1): libplacebo today, VP's last output hook later.
+			// Where the projector calibration LUT runs (R1). CF-1 FIX1 MUST 1: the default is auto (the LUT moves to VP's
+			// last step while Dolby Vision trims or appearance run, which must act before it); the item order is kept.
 			auto* lutStage = new QComboBox;
 			lutStage->setObjectName(ObjectName(QStringLiteral("expert.calibration_lut_stage")));
-			lutStage->addItem(QStringLiteral("libplacebo (default; before VP's output steps)"), QString());
+			lutStage->addItem(QStringLiteral("libplacebo (before VP's output steps)"), QStringLiteral("libplacebo"));
 			lutStage->addItem(QStringLiteral("VP (the last colour step, after LED compensation)"), QStringLiteral("vp"));
+			lutStage->addItem(QStringLiteral("Auto (default; VP's step while Dolby Vision trims or appearance run, else libplacebo)"), QStringLiteral("auto"));
 			lutStage->setToolTip(QStringLiteral("Key calibration_lut_stage. VP applies the LUT after Dynamic Drive, so the LED "
 				"measurement sees target light instead of projector codes (design R1)."));
 			form->addRow(QStringLiteral("Calibration LUT runs in"), lutStage);
@@ -1682,7 +1708,8 @@ namespace Vpv
 				const auto get = [&](const char* key) { return state->host.value ? state->host.value(section, QString::fromLatin1(key)).trimmed() : QString(); };
 				{
 					const QSignalBlocker blocker(lutStage);
-					lutStage->setCurrentIndex(get("calibration_lut_stage").compare(QStringLiteral("vp"), Qt::CaseInsensitive) == 0 ? 1 : 0);
+					lutStage->setCurrentIndex(get("calibration_lut_stage").compare(QStringLiteral("vp"), Qt::CaseInsensitive) == 0 ? 1 :
+						get("calibration_lut_stage").compare(QStringLiteral("libplacebo"), Qt::CaseInsensitive) == 0 ? 0 : 2);
 					const bool original = get("pipeline_original_pathway").compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0;
 					lutStage->setEnabled(!original);
 					SetGreyReason(lutStage, original ? QStringLiteral("Greyed: the Original pathway is on (VP's additions are off).") : QString());

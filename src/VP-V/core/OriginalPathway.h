@@ -25,9 +25,9 @@ namespace OriginalPathway
 		const char* slot;   // the slot whose VP additions it removes (slots.json id)
 	};
 
-	inline const std::array<Override, 72>& Overrides()
+	inline const std::array<Override, 75>& Overrides()
 	{
-		static const std::array<Override, 72> table = { {
+		static const std::array<Override, 75> table = { {
 			{ "capture_path", "standard", "input.capture" },
 			{ "capture_upload", "render", "input.capture" },
 			{ "native_rgb_ingest", "off", "input.capture" },
@@ -35,8 +35,9 @@ namespace OriginalPathway
 			{ "dv_tunnel_fixes", "off", "input.signal" },
 			{ "hdr_inference", "original", "input.signal" },   // F-8: Bill's newlldv heuristic
 			{ "dv_compare_capture_folder", "", "input.signal" },   // feat/dv-l8: the diagnostic off
-			{ "dv_trims", "off", "colour.sdr_tone_shape" },
-			{ "dv_tone_mapping", "libplacebo", "colour.sdr_tone_shape" },   // feat/dv-l8
+			{ "dv_trims", "off", "colour.dm_trims" },
+			{ "dv_tone_mapping", "libplacebo", "colour.dm_curve" },   // feat/dv-l8
+			{ "dv_display_mapping", "original", "colour.dm_curve" },   // CF-1 P3: the either/or master (vp | original)
 			{ "queue_timing_fixes", "off", "input.queue_timing" },
 			{ "pulldown_fixes", "off", "input.queue_timing" },
 			{ "timing_continuity_fixes", "off", "input.queue_timing" },
@@ -87,6 +88,8 @@ namespace OriginalPathway
 			{ "intent_display", "off", "control.config" },
 			{ "intent_black", "off", "control.config" },
 			{ "ambient_adapt", "off", "control.config" },
+			{ "appearance", "off", "colour.appearance" },        // CF-1 CAM-4: VP addition, never in Bill's pathway
+			{ "appearance_room", "cinema", "colour.appearance" },
 			{ "temporal_dither", "libplacebo", "output.dither" },
 			{ "output_segments_merged", "off", "output.dither" },   // VP's merged output hooks: never in Bill's pathway
 			{ "dither_need", "off", "output.dither" },   // per-block extra dither amplitude: VP addition, not in Bill's pathway

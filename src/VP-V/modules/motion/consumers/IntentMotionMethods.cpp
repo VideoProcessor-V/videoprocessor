@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include <pch.h>
 #include "IntentMotionMethods.h"
+#include <VP-V/modules/colour/appearance/AppearanceStage.h>
 
 #include <algorithm>
 #include <chrono>
@@ -14,12 +15,12 @@ namespace Vpv
 		// The switches and settings from the active profile (render loop, per frame;
 		// each consumer logs only on a change).
 		void Configure(MotionIntentState& state, const VpvRenderer::Fields& s,
-			const ContentIntent::Observer* contentIntent)
+			const ContentIntent::Observer* contentIntent, bool appearanceActive)
 		{
 			IntentInterpreter::Switches switches;
 			switches.content = s.intentContent;
 			switches.motion = s.intentMotion;
-			switches.ambient = s.ambientAdapt;
+			switches.ambient = AppearanceStage::AmbientAdaptOn(s.ambientAdapt, s.ambientAdaptReplaced, appearanceActive);   // CF1-G7b
 			switches.black = s.intentBlack != BlackIntentMode::Off;
 			switches.display = s.intentDisplay;
 			IntentInterpreter::MotionSettings motion;

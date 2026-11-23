@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <VP-V/core/Ramp.h>   // ND07
+#include <VP-V/core/FallbackCatalog.h>   // GEM-004: StateFallback
 
 // Delta 13 (owner 2026-10-13, docs/VP-delta-11-shadow-boost.md): SDR tone
 // shape and headroom. Tone-mapped HDR looks better than native SDR because
@@ -57,6 +58,14 @@ namespace SdrToneShape
 	inline double EffectiveRecovery(const Settings& settings, double profileRecovery)
 	{
 		return settings.recovery < 0.0 ? std::max(0.0, profileRecovery) : settings.recovery;
+	}
+
+	// GEM-004 (Gemini colour-dv-hdr MUST-4 part 1, applied as written): the fallback for the host's state
+	// (0 off, 1 active, 2 off for HDR, 3 shader did not load, 4 off with a calibration LUT). State 4 is
+	// requested but not applied, so it is engaged and listed, never silently released (ADR-0001).
+	inline FallbackCatalog::Decision StateFallback(int state)
+	{
+		return FallbackCatalog::SdrToneShape(state == 1 || state == 3 || state == 4, state == 1, state == 3 ? "the shader did not load" : state == 4 ? "off with a calibration LUT (it would act after the LUT)" : "");
 	}
 
 	// Linear light after the placement and the knee (y: linear, already

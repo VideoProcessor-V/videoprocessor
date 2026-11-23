@@ -13,6 +13,8 @@
 #include <RendererConfigView.h>
 #include <RetiredSettings.h>
 #include <VP-V/core/SlotSwitchSettings.h>
+#include <VP-V/modules/colour/appearance/AmbientConfig.h>
+#include <VP-V/modules/output/calibration_lut/CalibrationLutHostPolicy.h>
 #include <VP-V/modules/output/presentation/PresentationOwner.h>
 #include <vprenderer/DetailPulse.h>
 #include <vprenderer/EdgeBlanking.h>
@@ -190,7 +192,9 @@ namespace VpvRendererSettings
 		readChoice("dejudder_low_res", settings.dejudderLowRes, { "off", "search", "all" });
 		readChoice("capture_path", settings.capturePath, { "standard", "gpu" });
 		readChoice("capture_upload", settings.captureUpload, { "auto", "render", "early" });
+		readChoice("dv_display_mapping", settings.dvDisplayMapping, { "vp", "original" });   // CF-1 P3
 		readChoice("dv_tone_mapping", settings.dvToneMapping, { "libplacebo", "dolby_style" });   // feat/dv-l8
+		readChoice("appearance_room", settings.appearanceRoom, { "cinema", "living_low", "living_lit", "auto" });   // CF-1 CAM-4
 		config.TryGetString(rule.section, "dv_compare_capture_folder", settings.dvCompareCaptureFolder);   // feat/dv-l8 WIP
 		config.TryGetString(rule.section, "source_geometry_detect", settings.sourceGeometryDetect);   // SID r2: recognition set
 		readChoice("source_range", settings.sourceRange, { "auto", "full", "limited" });
@@ -310,7 +314,9 @@ namespace VpvRendererSettings
 			std::make_tuple("ambient_screen_reflect", 0.0, 1.0, &settings.ambientScreenReflect),
 			std::make_tuple("ambient_max_black_nits", 0.0, 10.0, &settings.ambientMaxBlackNits),
 			std::make_tuple("ambient_tau_up_s", 1.0, 600.0, &settings.ambientTauUpSeconds),
-			std::make_tuple("ambient_tau_down_s", 1.0, 1800.0, &settings.ambientTauDownSeconds) })
+			std::make_tuple("ambient_tau_down_s", 1.0, 1800.0, &settings.ambientTauDownSeconds),
+			std::make_tuple("appearance_strength", 0.0, 1.0, &settings.appearanceStrength),   // CF-1 CAM-4
+			std::make_tuple("appearance_screen_white_nits", 1.0, 1000.0, &settings.appearanceScreenWhiteNits) })
 		{
 			if (!config.TryGetString(rule.section, std::get<0>(numeric), raw))
 				continue;
@@ -689,7 +695,10 @@ namespace VpvRendererSettings
 		}
 		// Intent interpreter items 2-5 (2026-10-17).
 		for (const auto& toggle : { std::make_pair("intent_motion", &settings.intentMotion),
-			std::make_pair("ambient_adapt", &settings.ambientAdapt) })
+			std::make_pair("ambient_adapt", &settings.ambientAdapt),
+			std::make_pair("appearance", &settings.appearance),   // CF-1 CAM-4
+			std::make_pair("appearance_screen_white_measured", &settings.appearanceScreenWhiteMeasured),
+			std::make_pair("appearance_honour_l11", &settings.appearanceHonourL11) })
 		{
 			if (!tryChoice(toggle.first, raw))
 				continue;
@@ -932,10 +941,10 @@ namespace VpvRendererSettings
 		if (TryGetPipelineString(config, "calibration_lut_stage", raw))
 		{
 			const std::string value = ConfigFile::NormalizeName(raw);
-			if (value == "libplacebo" || value == "vp")
-				settings.calibrationLutStage = value;
+			if (value == "libplacebo" || value == "vp" || value == "auto")
+				settings.calibrationLutStageConfigured = value;
 			else
-				settings.pipelineSettingsProblems += "calibration_lut_stage '" + raw + "' (libplacebo|vp); ";
+				settings.pipelineSettingsProblems += "calibration_lut_stage '" + raw + "' (libplacebo|vp|auto); ";
 		}
 		if (TryGetPipelineString(config, "output_segments_merged", raw))
 		{
@@ -1006,6 +1015,41 @@ namespace VpvRendererSettings
 			ApplyOriginal(settings);
 			overrides.chromaUpscaler = "bicubic";                 // key=chroma_upscaler (a host field, so returned)
 		}
+		// CF-1 P3 / FIX1 MUST 1-2: calibration_lut_stage auto (the default) -> vp while a VP colour step that must follow
+		// the LUT runs: dm_trims (dv_trims on, dv_display_mapping vp, the slot not in pipeline_slots_off) or appearance
+		// (appearance on, the slot not off); never on the Original pathway. The renderer reads calibrationLutStage as
+		// vp | libplacebo, so the resolution goes there; calibrationLutStageConfigured keeps the user's value (SHOULD 7).
+		settings.calibrationLutStage = CalibrationLutHost::ResolveStage(settings.calibrationLutStageConfigured,
+			CalibrationLutHost::DisplayMappingStepsRun(settings.pipelineOriginalPathway, settings.dvDisplayMapping,
+				settings.dvTrims, settings.appearance, settings.pipelineSlotsOff));
+		// CF-1 FIX1 SHOULD 3: the room anchors are [ambient] lux_dark / lux_lit, read by their owner (Ambient::Read; an invalid
+		// value keeps that key's default and is listed with the pipeline problems, never silent).
+		{
+			Ambient::Settings ambientRoom;
+			std::string ambientError;
+			if (!Ambient::Read(config, ambientRoom, ambientError))
+				settings.pipelineSettingsProblems += ambientError + "; ";
+			settings.ambientLuxDark = ambientRoom.luxDark;
+			settings.ambientLuxLit = ambientRoom.luxLit;
+		}
+		// CF-1 CAM-4: colour.appearance owns the room-light correction (doc 115 A2): while it runs (appearance on, the slot not in
+		// pipeline_slots_off, never on the Original pathway) ambient_adapt is forced off, and the Fallbacks line says so.
+		{
+			const bool appearanceSlotOff = settings.pipelineSlotsOff.find("colour.appearance") != std::string::npos;
+			// CF1-FIN SHOULD B: strength 0 is the identity (the pass is not active), so it replaces nothing. A calibration LUT
+			// before the pass (lutConflict) is per frame: the colour segment gives saturation back on such frames.
+			const bool appearanceRuns = settings.appearance && settings.appearanceStrength > 0.0 && !settings.pipelineOriginalPathway &&
+				!appearanceSlotOff;
+			settings.ambientAdaptReplaced = appearanceRuns && settings.ambientAdapt;
+			if (settings.ambientAdaptReplaced)
+				settings.ambientAdapt = false;
+			// FIX1 MUST 6 (refs/125 s4 "replaces gamma boost + saturation"; doc 115 B15): the saturation step is the
+			// appearance model's job while it runs (its M), so the step is off, visibly; the user's value is kept for the line.
+			settings.saturationReplaced = appearanceRuns && settings.saturation != 0;
+			settings.saturationConfigured = settings.saturationReplaced ? settings.saturation : 0;
+			if (settings.saturationReplaced)
+				settings.saturation = 0;
+		}
 		// Motion + queue/timing slots switched off run in their upstream form (owner 2026-10-25).
 		SlotSwitchSettings::Apply(SlotSwitchSettings::FromText(settings.pipelineSlotsOff), settings);
 		// Batch B Q3: the motion engine is one switch; OFF forces de-judder and hiccup smoothing off, visibly (the line is the Ctrl+I text).
@@ -1033,6 +1077,7 @@ namespace VpvRendererSettings
 		settings.dvCompareCaptureFolder.clear();           // key=dv_compare_capture_folder
 		settings.dvTrims = false;                          // key=dv_trims
 		settings.dvToneMapping = "libplacebo";             // key=dv_tone_mapping
+		settings.dvDisplayMapping = "original";            // key=dv_display_mapping
 		settings.queueTimingFixes = false;                 // key=queue_timing_fixes
 		settings.pulldownFixes = false;                    // key=pulldown_fixes
 		settings.timingContinuityFixes = false;            // key=timing_continuity_fixes
@@ -1079,10 +1124,13 @@ namespace VpvRendererSettings
 		settings.intentDisplay = false;                    // key=intent_display
 		settings.intentBlack = BlackIntentMode::Off;       // key=intent_black
 		settings.ambientAdapt = false;                     // key=ambient_adapt
+		settings.appearance = false;                       // key=appearance
+		settings.appearanceRoom = "cinema";                // key=appearance_room
 		settings.temporalDither = "libplacebo";            // key=temporal_dither
 		settings.outputSegmentsMerged = false;             // key=output_segments_merged
 		settings.renderAhead = false;                      // key=render_ahead
 		settings.calibrationLutStage = "libplacebo";       // key=calibration_lut_stage
+		settings.calibrationLutStageConfigured = "libplacebo";   // the user's value under the Original pathway (FIX1 MUST 1)
 		settings.hdrInference = "original";                // key=hdr_inference
 		// Settings audit 2026-10-24: VP additions the first table missed (absent from Bill's v1.4.02-beta).
 		settings.activePictureStartupHold = false;         // key=active_picture_startup_hold
@@ -1174,6 +1222,7 @@ namespace VpvRendererSettings
 			<< settings.sourceRange << '|'
 			<< settings.sourceResolution << '|'
 			<< settings.dvToneMapping << '|'
+			<< settings.dvDisplayMapping << '|'
 			<< settings.dvCompareCaptureFolder << '|'
 			<< settings.sourceResolutionAutoMinConfidence << '|'
 			<< settings.sourceResolutionEvidenceShots << '|'
@@ -1231,8 +1280,16 @@ namespace VpvRendererSettings
 			<< settings.ambientAdaptStrength << '|'
 			<< settings.ambientScreenReflect << '|'
 			<< settings.ambientMaxBlackNits << '|'
+			<< settings.ambientLuxDark << '|'
+			<< settings.ambientLuxLit << '|'
 			<< settings.ambientTauUpSeconds << '|'
 			<< settings.ambientTauDownSeconds << '|'
+			<< settings.appearance << '|'
+			<< settings.appearanceStrength << '|'
+			<< settings.appearanceRoom << '|'
+			<< settings.appearanceScreenWhiteNits << '|'
+			<< settings.appearanceScreenWhiteMeasured << '|'
+			<< settings.appearanceHonourL11 << '|'
 			<< static_cast<int>(settings.intentBlack) << '|'
 			<< settings.intentDisplay << '|'
 			<< settings.temporalDither << '|'
@@ -1389,7 +1446,8 @@ namespace VpvRendererSettings
 		changed(current.pipelineOriginalPathway != next.pipelineOriginalPathway, "pipeline_original_pathway");
 		changed(current.pipelineOrder != next.pipelineOrder, "pipeline_order");
 		changed(current.pipelineSlotsOff != next.pipelineSlotsOff, "pipeline_slots_off");
-		changed(current.calibrationLutStage != next.calibrationLutStage, "calibration_lut_stage");
+		changed(current.calibrationLutStage != next.calibrationLutStage ||
+			current.calibrationLutStageConfigured != next.calibrationLutStageConfigured, "calibration_lut_stage");
 		changed(current.hdrInference != next.hdrInference, "hdr_inference");
 		changed(current.pipelineEntranceOnce != next.pipelineEntranceOnce, "pipeline_entrance_once");
 		changed(current.frameAnalysisStore != next.frameAnalysisStore, "frame_analysis_store");
@@ -1434,8 +1492,13 @@ namespace VpvRendererSettings
 			current.intentEaseSeconds != next.intentEaseSeconds, "intent_motion");
 		changed(current.ambientAdapt != next.ambientAdapt || current.ambientAdaptStrength != next.ambientAdaptStrength ||
 			current.ambientScreenReflect != next.ambientScreenReflect || current.ambientMaxBlackNits != next.ambientMaxBlackNits ||
+			current.ambientLuxDark != next.ambientLuxDark || current.ambientLuxLit != next.ambientLuxLit ||
 			current.ambientTauUpSeconds != next.ambientTauUpSeconds ||
 			current.ambientTauDownSeconds != next.ambientTauDownSeconds, "ambient_adapt");
+		changed(current.appearance != next.appearance || current.appearanceStrength != next.appearanceStrength ||
+			current.appearanceRoom != next.appearanceRoom || current.appearanceScreenWhiteNits != next.appearanceScreenWhiteNits ||
+			current.appearanceScreenWhiteMeasured != next.appearanceScreenWhiteMeasured ||
+			current.appearanceHonourL11 != next.appearanceHonourL11, "appearance");
 		changed(current.intentBlack != next.intentBlack, "intent_black");
 		changed(current.intentDisplay != next.intentDisplay, "intent_display");
 		changed(current.temporalDither != next.temporalDither, "temporal_dither");
@@ -1501,6 +1564,7 @@ namespace VpvRendererSettings
 		changed(current.dvTunnelGpuUnpack != next.dvTunnelGpuUnpack, "dv_tunnel_gpu_unpack");
 		changed(current.dvTrims != next.dvTrims, "dv_trims");
 		changed(current.dvToneMapping != next.dvToneMapping, "dv_tone_mapping");
+		changed(current.dvDisplayMapping != next.dvDisplayMapping, "dv_display_mapping");
 		changed(current.dvCompareCaptureFolder != next.dvCompareCaptureFolder, "dv_compare_capture_folder");
 		changed(current.dvTunnelFixes != next.dvTunnelFixes, "dv_tunnel_fixes");
 		changed(current.dejudderHoldFeatherPx != next.dejudderHoldFeatherPx ||
@@ -1591,8 +1655,16 @@ namespace VpvRendererSettings
 		<< "ambient_adapt_strength=" << s.ambientAdaptStrength << "\n"
 		<< "ambient_screen_reflect=" << s.ambientScreenReflect << "\n"
 		<< "ambient_max_black_nits=" << s.ambientMaxBlackNits << "\n"
+		<< "ambient_lux_dark=" << s.ambientLuxDark << "\n"
+		<< "ambient_lux_lit=" << s.ambientLuxLit << "\n"
 		<< "ambient_tau_up_s=" << s.ambientTauUpSeconds << "\n"
 		<< "ambient_tau_down_s=" << s.ambientTauDownSeconds << "\n"
+		<< "appearance=" << (s.appearance ? "on" : "off") << "\n"
+		<< "appearance_strength=" << s.appearanceStrength << "\n"
+		<< "appearance_room=" << s.appearanceRoom << "\n"
+		<< "appearance_screen_white_nits=" << s.appearanceScreenWhiteNits << "\n"
+		<< "appearance_screen_white_measured=" << (s.appearanceScreenWhiteMeasured ? "on" : "off") << "\n"
+		<< "appearance_honour_l11=" << (s.appearanceHonourL11 ? "on" : "off") << "\n"
 		<< "intent_black=" << ToString(s.intentBlack) << "\n"
 		<< "intent_display=" << (s.intentDisplay ? "report" : "off") << "\n"
 		<< "temporal_dither=" << s.temporalDither << "\n"
@@ -1628,6 +1700,7 @@ namespace VpvRendererSettings
 		<< "dv_tunnel_gpu_unpack=" << s.dvTunnelGpuUnpack << "\n"
 		<< "dv_trims=" << s.dvTrims << "\n"
 		<< "dv_tone_mapping=" << s.dvToneMapping << "\n"
+		<< "dv_display_mapping=" << s.dvDisplayMapping << "\n"
 		<< "dv_compare_capture_folder=" << s.dvCompareCaptureFolder << "\n"
 		<< "dv_tunnel_fixes=" << (s.dvTunnelFixes ? "on" : "off") << "\n"
 		<< "hdr_inference=" << s.hdrInference << "\n"

@@ -9,6 +9,14 @@
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <ClCompile Include="..\VP-V\modules\colour\display_mapping\tests\DolbyVisionTrimsTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\colour\display_mapping\tests\DvMathTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\colour\display_mapping\tests\DvDisplayMappingSlotTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\colour\display_mapping\tests\DmCurveTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\colour\appearance\tests\Cam16ModelTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\colour\appearance\tests\RoomLightTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\colour\appearance\tests\AppearanceStageTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\colour\appearance\tests\AppearanceStatusTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\colour\appearance\tests\CamFix1Tests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\FileSideDataTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\SceneDescriptorTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\ContentIntentTests.cpp" />
@@ -35,6 +43,9 @@
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="..\VP-V\modules\colour\sdr_tone_shape\tests\SdrToneShapeHookTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\colour\sdr_tone_shape\tests\ColourShaderGpuTiming.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="..\VP-V\modules\drive\led_compensation\tests\LedCompensationHookTests.cpp">
@@ -564,6 +575,7 @@
     <ClCompile Include="..\VP-V\modules\colour\display_mapping\tests\DvTrimSelectionTests.cpp" />
     <ClCompile Include="..\VP-V\modules\colour\display_mapping\tests\DvDolbyStyleTests.cpp" />
     <ClCompile Include="..\VP-V\modules\colour\display_mapping\tests\DvHostStageTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\colour\display_mapping\tests\DvSyntheticIdentityTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\DvSignalL8HoldTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\HdrInferenceChoiceTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\signal\tests\ResyncEventTests.cpp" />

@@ -1390,7 +1390,7 @@ namespace SkeletonCoreContextTestsNs
 				Assert::IsTrue(ids[i] != uint16_t(kUserSkeletonMemo), L"not a declarable user");
 		}
 	};
-	// R14-97 M3: the reserved ids of the fixed product-id table (30 band_memo, 32 focus_map, 33 room_light, 34 composed_vectors) are ABSENT
+	// R14-97 M3: the reserved ids of the fixed product-id table (30 band_memo, 32 focus_map, 34 composed_vectors; 33 room_light landed in CF-1 CAM-2) are ABSENT
 	// slots: no declaration, no reads, fail closed everywhere a name could reach them.
 	TEST_CLASS(ReservedProductIdTests)
 	{
@@ -1401,7 +1401,7 @@ namespace SkeletonCoreContextTestsNs
 			const char* why = "";
 			Assert::IsTrue(reg.Validate(&why), L"valid with absent slots");
 			Assert::IsTrue(reg.Size() == size_t(kSkeletonProductEnd), L"Size() is the id span");
-			Assert::IsTrue(reg.ReservedAbsent() == 3u && kReservedProductCount == 3u, L"three reserved slots (kBandMemo unreserved by C8 slice 8)");
+			Assert::IsTrue(reg.ReservedAbsent() == 2u && kReservedProductCount == 2u, L"two reserved slots (kBandMemo unreserved by C8 slice 8, kRoomLight unreserved by CF-1)");
 			for (ProductId id : kReservedProductIds)
 			{
 				Assert::IsTrue(IsReservedProduct(id) && !reg.Has(id), L"absent: Has() is false");
@@ -1434,7 +1434,7 @@ namespace SkeletonCoreContextTestsNs
 			ConsumerDecl c;
 			c.id = 1;
 			c.name = "reserved reader";
-			AddConsume(c, kRoomLight);
+			AddConsume(c, kFocusMap);
 			GraphSettings gs;
 			const Graph g = BuildGraph(SkeletonProducts(), std::vector<ConsumerDecl>(1, c), gs);
 			Assert::IsFalse(g.valid, L"a consumer of an unlanded product is refused, visibly");

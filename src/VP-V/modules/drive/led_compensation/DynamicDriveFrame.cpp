@@ -1,6 +1,7 @@
 #include <pch.h>
 #include "DynamicDriveFrame.h"
 
+#include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/modules/drive/led_compensation/LedDriveModule.h>
 #include <VP-V/modules/drive/led_compensation/LedRawTransfer.h>
 #include <VP-V/modules/drive/led_measure/LedLookahead.h>
@@ -141,8 +142,18 @@ namespace LedDrive
 		// the projector's compensation_eotf.
 		const double displayGamma = in.displayGamma;
 		if (led)
+		{
 			led->SetDisplayGamma(displayGamma);
-		const double boostExponent = BoostExponent(gammaBoost.load(std::memory_order_acquire), displayGamma);
+			led->SetBoostReplaced(in.appearanceActive);
+		}
+		const double configuredBoost = gammaBoost.load(std::memory_order_acquire);
+		const double boostExponent = BoostExponentUnderAppearance(configuredBoost, displayGamma, in.appearanceActive);
+		{   // FIX1 MUST 6: appearance replaces the gamma boost, visibly
+			const FallbackCatalog::Decision replaced = FallbackCatalog::GammaBoostReplaced(
+				in.appearanceActive && BoostExponent(configuredBoost, displayGamma) != 1.0);
+			// VPV-FALLBACK gamma boost: replaced by appearance
+			if (replaced.engaged) Engage(replaced.id.c_str(), replaced.reason); else ReleaseFallback(replaced.id.c_str());
+		}
 		if (boostExponent != lastLoggedBoostExponent)
 		{
 			lastLoggedBoostExponent = boostExponent;

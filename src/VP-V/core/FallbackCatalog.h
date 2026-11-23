@@ -653,6 +653,58 @@ namespace FallbackCatalog
 		return requested && !applied ? Engaged("SDR tone shape", "not applied" +
 			(why.empty() ? std::string() : " (" + why + ")")) : Released("SDR tone shape");
 	}
+	// CF-1 P3: the calibration LUT runs as VP's last colour step because the display mapping's trims (or Stage 13) must act
+	// after it (calibration_lut_stage = auto). Engaged while that substitution lasts: the LUT is not libplacebo's.
+	inline Decision CalibrationLutDisplayMapping(bool vpStageForMapping)
+	{
+		return vpStageForMapping ? Engaged("calibration LUT: display mapping", "VP applies the calibration LUT as its last colour step (the display mapping acts before it)")
+		                         : Released("calibration LUT: display mapping");
+	}
+	// CF-1 P3: the DV display mapping cannot read this capture container (R12B / R12L RGB containers carry no DV payload path):
+	// libplacebo's own mapping runs.
+	inline Decision DvDisplayMappingContainer(bool unsupported, const std::string& container)
+	{
+		return unsupported ? Engaged("DV display mapping: container", "unsupported capture container" + (container.empty() ? std::string() : " (" + container + ")") + ": libplacebo's mapping runs")
+		                   : Released("DV display mapping: container");
+	}
+	// CF-1 CAM-4 (colour.appearance): every state in which the appearance pass is on but not doing its full job is listed.
+	inline Decision AppearanceShader(bool missing, const std::string& path = "shaders\\vp_cam16_appearance.glsl")
+	{
+		return missing ? Engaged("Colour appearance", path + " did not load") : Released("Colour appearance");
+	}
+	inline Decision RoomLightSensor(bool held, bool decaying, bool missing)
+	{
+		if (!held && !decaying && !missing)
+			return Released("room light sensor");
+		return Engaged("room light sensor", missing ? "no reading, dark assumed" : decaying ? "sensor lost, value decaying toward dark" : "sensor lost, last value held");
+	}
+	inline Decision AppearanceL11Reference(bool ignored)
+	{
+		return ignored ? Engaged("appearance: L11 reference mode", "room light ignored: reference room (dim, no veil)") : Released("appearance: L11 reference mode");
+	}
+	inline Decision AmbientAdaptReplaced(bool replaced)
+	{
+		return replaced ? Engaged("ambient_adapt: replaced by appearance", "ambient_adapt is off while appearance is on (one owner of the room-light correction)")
+		                : Released("ambient_adapt: replaced by appearance");
+	}
+	// CF-1 FIX1 MUST 6: appearance replaces the gamma boost and the saturation step (doc 115 B15: one owner per correction).
+	inline Decision GammaBoostReplaced(bool replaced)
+	{
+		return replaced ? Engaged("gamma boost: replaced by appearance", "gamma_boost is not applied while appearance is on (one owner of the screen-brightness correction)")
+		                : Released("gamma boost: replaced by appearance");
+	}
+	inline Decision SaturationReplaced(bool replaced, int configured)
+	{
+		return replaced ? Engaged("saturation: replaced by appearance", "saturation " + std::string(configured > 0 ? "+" : "") + std::to_string(configured) +
+		                      " is not applied while appearance is on (one owner of the colourfulness correction)")
+		                : Released("saturation: replaced by appearance");
+	}
+	// CF-1 FIX1 MUST 2: appearance on, but libplacebo applies the calibration LUT before it (calibration_lut_stage libplacebo): off.
+	inline Decision AppearanceCalibrationLut(bool conflict)
+	{
+		return conflict ? Engaged("appearance: calibration LUT", "off: the calibration LUT runs before it (set calibration_lut_stage to auto or vp)")
+		                : Released("appearance: calibration LUT");
+	}
 	// Adaptive downscale: GPU failures leave plain SSIM (w = 1); a missing SSimDownscaler leaves
 	// libplacebo's downscaler.
 	inline Decision OutputScaling(bool adaptiveRequested, unsigned long long newFailures, bool ssimShaderMissing)
@@ -1086,6 +1138,9 @@ namespace FallbackCatalog
 			// Band memo (P30, repair/grain_split/BandMemoFill.h; C8 slice 8): the low band of a key could not be computed (no float format, allocation
 			// failure, or the fill declined), so the reader that asked takes its existing feature-off path for that frame.
 			{ "product.band_memo_unavailable", "grain band memo (low band) could not be computed: the readers that asked (interpolator, debander, detail pulse, texture restore, temporal detail) run their feature-off forms for the frame" },
+			// Room light (CF-1 FIX1 SHOULD 6; colour/appearance/RoomLight.h): the held record is absent or the sensor is lost, so the appearance
+			// stage holds, then decays toward a dark room, and says so on its status line.
+			{ "product.room_light", "room light record unavailable or sensor lost: the appearance stage holds the last value, then assumes a dark room, shown on its status line" },
 		};
 		if (count)
 			*count = sizeof(kEntries) / sizeof(kEntries[0]);
@@ -1152,5 +1207,13 @@ namespace FallbackCatalog
 	{
 		const ProductEntry* e = FindProductEntry(id);
 		return Engaged(id, (e ? std::string(e->text) : std::string("reduced form")) + ": " + why);
+	}
+	// CF1-G7b residual (gate G1 MUST-5): on a frame where appearance does not act, ambient_adapt is given back to the
+	// render black and the SDR lift, but the host's LED intent evaluation is gated on the SAVED ambient_adapt (off while
+	// appearance is configured), so the LED shadow cap's ambient term is not refreshed. Listed while that lasts.
+	inline Decision AmbientAdaptLedShadowCapSaved(bool stale)
+	{
+		return stale ? Engaged("room-light: LED shadow cap", "room-light: LED shadow cap uses saved ambient_adapt (off) while ambient_adapt is given back")
+		             : Released("room-light: LED shadow cap");
 	}
 }

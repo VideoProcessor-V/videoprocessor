@@ -71,6 +71,7 @@
     "preserve_extended_range": "on",
     "sdr_tone_shape": "off",
     "source_range": "auto",
+    "dv_display_mapping": "vp",
     "dv_trims": "on",
     "intent_content": "off",
     "interpolation_fallback": "hold",
@@ -85,6 +86,9 @@
     "cnn_residual_stabilise": "on",
     "fbo_float32": "auto",
     "ambient_adapt": "off",
+    "appearance": "off",
+    "appearance_honour_l11": "on",
+    "appearance_screen_white_measured": "off",
     "occlusion_mask": "off",
     "optical_flow_on_demand": "auto",
     "source_resolution_frame_bound": "on"
@@ -590,7 +594,7 @@
     {
       "id": "colour",
       "name": "Colour",
-      "summary": "libplacebo tone and gamut mapping, below-black/above-white kept, SDR tone shape, Stage 13 appearance (planned).",
+      "summary": "libplacebo tone and gamut mapping, below-black/above-white kept, SDR tone shape, CAM16 room and screen appearance (off by default).",
       "slots": [
         "colour.tone_gamut",
         "colour.extended_range",
@@ -605,13 +609,22 @@
       "presets": {},
       "toggles": [
         {
+          "key": "dv_display_mapping",
+          "label": "Dolby Vision display mapping",
+          "values": [
+            "vp",
+            "original"
+          ],
+          "slot": "colour.dm_curve"
+        },
+        {
           "key": "dv_trims",
-          "label": "Dolby Vision trims for your display",
+          "label": "Dolby-style trims for your display (approximation)",
           "values": [
             "on",
             "off"
           ],
-          "slot": "colour.sdr_tone_shape"
+          "slot": "colour.dm_trims"
         },
         {
           "key": "preserve_extended_range",
@@ -649,6 +662,33 @@
             "off"
           ],
           "slot": "colour.appearance"
+        },
+        {
+          "key": "appearance",
+          "label": "Room and appearance (CAM16, experimental)",
+          "values": [
+            "on",
+            "off"
+          ],
+          "slot": "colour.appearance"
+        },
+        {
+          "key": "appearance_screen_white_measured",
+          "label": "Appearance: screen white measured",
+          "values": [
+            "on",
+            "off"
+          ],
+          "slot": "colour.appearance"
+        },
+        {
+          "key": "appearance_honour_l11",
+          "label": "Appearance: honour the L11 reference mode",
+          "values": [
+            "on",
+            "off"
+          ],
+          "slot": "colour.appearance"
         }
       ],
       "planned": [
@@ -656,11 +696,6 @@
           "key": "combined_hdr_lut",
           "label": "Combined HDR->SDR LUT (low-end cards)",
           "slot": "colour.tone_gamut"
-        },
-        {
-          "key": "appearance_adaptation",
-          "label": "Stage 13 appearance (dim screen)",
-          "slot": "colour.appearance"
         }
       ],
       "more_settings": "Tone mapping, HDR target, gamut and output gamma: VP Renderer > Tone Mapping and Color / Output. The calibration LUT file: Color / Output."
