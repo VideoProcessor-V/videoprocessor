@@ -8,9 +8,9 @@
 // exact for a 10-bit tap view). It NEVER recomputes P1 (no shared-decode fallback: that is P1Reader's live fill, a second
 // computation); a miss reads false, and the producer keeps its own decode and shows it.
 //
-// The formats whose engine codes differ from P1's (VpFrameAnalysis::P1EngineViewDiffersFromProducer: RGB structure luma, raw
-// full-range 4:2:x words) are refused here too: they stay on the producer's own decode until the owner has the registered
-// FIX (lead8/FIX-B4-RGB.md) and decides.
+// MAP-RGB-LUMA-PROXY (OD 11-15 11:11 (3)): every format is served. The former named exception (RGB structure luma, raw
+// full-range 4:2:x words, VpFrameAnalysis::P1EngineViewDiffersFromProducer) is retired: the producer no longer has a private
+// luma law, so its codes are the shared decoder's codes, the same ones P1 is built from.
 //
 // Any thread. The Acquire function is injected (the memo for the frame, from L-CORE's MemoFor); the result's pin keeps the
 // bytes alive for the copy. One reader serves every producer thread (no scratch state).
@@ -52,9 +52,9 @@ namespace VpFrameAnalysis
 			how = VpSkeleton::P1ReadKind::None;
 			if (!m_acquire || source.width <= 0 || source.height <= 0)
 				return false;
-			if (m_p1TapMsbShift != kExactP1TapMsbShift || P1EngineViewDiffersFromProducer(source))
+			if (m_p1TapMsbShift != kExactP1TapMsbShift)
 			{
-				// Another tap depth (Engine8Half not exact), or the named exception (the producer's own codes, FIX-B4-RGB).
+				// Another tap depth (Engine8Half not exact). RGB / full-range formats are served like every other (MAP-RGB-LUMA-PROXY).
 				m_ownDecode.fetch_add(1, std::memory_order_relaxed);
 				return false;
 			}
@@ -91,7 +91,8 @@ namespace VpFrameAnalysis
 
 		// Threading + lifetime: ReadEngine8 runs on the producer thread; the AcquireFn the owner supplies (VectorEngine) captures
 		// only the renderer host key (host_), which outlives the producer (VectorEngine owns it and stops the producer first).
-		// The counters have no on-screen consumer yet: register 102b row L-B4-P1-COUNTERS-NO-CONSUMER.
+		// The counters' consumer: VectorEngine::ProducerStatusSegment (Config status / Ctrl+Alt+D) and a DiagnosticHistory
+		// decision record when a count changes (L-B4-P1-COUNTERS-NO-CONSUMER).
 		uint64_t Acquired() const { return m_acquired.load(std::memory_order_relaxed); }
 		uint64_t Unread() const { return m_unread.load(std::memory_order_relaxed); }
 		uint64_t OwnDecode() const { return m_ownDecode.load(std::memory_order_relaxed); }   // refused: producer keeps its own codes

@@ -274,8 +274,8 @@ namespace MotionAhead
 		// quarter with the half-size inner matcher); 0 = the frame's half size.
 		void SetTargetSize(int w, int h) { targetW.store(w, std::memory_order_release); targetH.store(h, std::memory_order_release); }
 		// L-B4 (a): the frame's P1 (the skeleton's half luma) is the source of the 8-bit engine luma, read through this reader
-		// (Acquire(kP1HalfLuma, seq, Cpu) from this thread); null / a miss / a format whose engine codes differ from P1's
-		// (RGB, full-range 4:2:x: FIX-B4-RGB) = the producer's own HalfLuma8 decode. Any thread.
+		// (Acquire(kP1HalfLuma, seq, Cpu) from this thread); null / a miss = HalfLuma8, which reads the same shared luma plane
+		// (RGB and full range included: MAP-RGB-LUMA-PROXY, no private luma law). Any thread.
 		void SetP1Source(std::shared_ptr<VpSkeleton::IP1Source> source)
 		{ std::lock_guard<std::mutex> lock(p1Mutex); p1Source = std::move(source); }
 		uint64_t LastSubmitted() const { return lastSubmitted.load(std::memory_order_acquire); }
@@ -367,6 +367,10 @@ namespace MotionAhead
 			// chain is valid; counted, logged, named in Error() and lastRingMiss; the Ctrl+I segment VectorEngine::ProducerStatusSegment).
 			unsigned long long ringMisses = 0;
 			std::string lastRingMiss;   // the last miss's words ("" = none)
+			// L-B4-P1-COUNTERS-NO-CONSUMER: frames whose engine luma came from the skeleton's P1 (p1Reads) and frames where a wired
+			// P1 reader missed (the frame's P1 not available at read, or a refused tap depth) so HalfLuma8 read it (p1OwnReads);
+			// shown by VectorEngine::ProducerStatusSegment and recorded in DiagnosticHistory when p1OwnReads changes.
+			unsigned long long p1Reads = 0, p1OwnReads = 0;
 			double lastQueuedMs = 0.0, lastRunMs = 0.0, runMsSum = 0.0;
 		};
 		// The walk counts as present while a job waits or one ran within this long (ms); a request then never moves the
@@ -579,6 +583,7 @@ namespace MotionAhead
 		std::deque<Job> jobs;
 		OnDemand::Queue requests;           // W2-C5b, under mutex: taken after waiting `jobs` (core first, ProducerJobs.h)
 		RequestStats requestStats;          // under mutex
+		std::atomic<unsigned long long> p1ReadCount{ 0 }, p1OwnReadCount{ 0 };   // LumaAtTarget (any caller, mutex may be held); folded into RequestStats by GetRequestStats
 		bool requestRunning = false;        // W2-C5b, under mutex: the worker is serving a request now
 		bool requestOwnsGeneration = false; // W2-C5b, worker only: a no-walk request set the slot's generation (no job since)
 		uint64_t lastJobMs = 0;             // W2-C5b, under mutex: NowMs() of the last look-ahead job (0 = none yet)

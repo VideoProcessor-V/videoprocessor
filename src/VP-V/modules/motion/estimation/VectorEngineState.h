@@ -53,6 +53,7 @@ namespace VpMotion
 		// Batch B fold: motionAheadBackward (the producer fed the current frame for backward pairs) and the backward pair counter are
 		// retired with the backward pairs (competitive low latency is motion-free).
 		std::string vectorEngineLogged;
+		unsigned long long producerP1OwnLogged = 0;   // the producer's P1-miss count last recorded in DiagnosticHistory
 		int vectorDeliveredLogged = -1;                   // NoteVectorsDelivered: -1 not yet, 0 logged
 		int vectorDitherKeyLogged = -1;
 		unsigned long long vectorPairs = 0;

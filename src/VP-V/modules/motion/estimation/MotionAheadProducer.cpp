@@ -23,10 +23,9 @@ namespace MotionAhead
 {
 	namespace
 	{
-		uint32_t BigEndian32(const uint8_t* p) { return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | uint32_t(p[3]); }
-		uint32_t LittleEndian32(const uint8_t* p) { uint32_t v; std::memcpy(&v, p, 4); return v; }
-		// Motion only needs the structure: luma as (R + 2G + B) / 4 in 10-bit codes.
-		inline uint16_t LumaOf(unsigned r, unsigned g, unsigned b) { return static_cast<uint16_t>((r + 2 * g + b + 2) >> 2); }
+		// MAP-RGB-LUMA-PROXY (OD 11-15 11:11 (3)): no private RGB decode here any more. The (R + 2G + B) / 4 proxy luma and its
+		// R12B / R12L / r210 / BGRA readers are gone; RGB and full-range YCbCr read the frame's shared luma plane
+		// (AnalysisLumaSource::SharedLumaRow / Sample, the one decoder the lane's P1 is built from).
 	}
 
 	void HalfLumaPool::Start(int workers)
@@ -119,29 +118,21 @@ namespace MotionAhead
 		halfW = (w + 1) / 2;
 		halfH = (h + 1) / 2;
 		out.resize(static_cast<size_t>(halfW) * halfH);
-		// A row of 10-bit luma codes, decoded directly for the capture formats (P010 /
-		// P210 planes, v210, UYVY / HDYC, R12B, R12L, r210 / R10b / R10l, 8-bit RGB);
-		// the sampler only for anything else.
+		// A row of 10-bit luma codes: the frame's shared luma plane first (every format, RGB and full range included: the
+		// shared decoder's mapped codes are the lane's P1 codes); where the plane is not attached, a limited-range YCbCr
+		// capture format is read directly (P010 / P210 planes, v210, UYVY / HDYC: the same codes as the shared decode), and
+		// everything else - RGB, full-range YCbCr - goes through the one sampler (Sample().luma), never a private luma law.
 		const AnalysisLumaFormat format = source.format;
 		const VideoFrameEncoding encoding = source.encoding;
-		const bool planar16 = format == AnalysisLumaFormat::P010 || format == AnalysisLumaFormat::P210;
-		const bool yuv422 = format == AnalysisLumaFormat::NativeYuv422;
-		const bool rgb = format == AnalysisLumaFormat::NativeRgb;
-		// WP-23: the frame's shared luma decode (Sample().luma) replaces this decode where the
-		// codes are the same - native 4:2:2 at limited range, and the sampler's own formats
-		// (packed / decoded DV, SDR tunnel). RGB keeps its (R + 2G + B) / 4 structure luma and
-		// full-range 4:2:2 its raw codes (the shared plane holds mapped codes): vectors unchanged.
-		const bool rgbOwnDecode = rgb && (encoding == VideoFrameEncoding::R12B || encoding == VideoFrameEncoding::R12L ||
-			encoding == VideoFrameEncoding::R210 || encoding == VideoFrameEncoding::R10b || encoding == VideoFrameEncoding::R10l ||
-			encoding == VideoFrameEncoding::BGRA_8BIT || encoding == VideoFrameEncoding::ARGB_8BIT);
-		const bool sharedSameCodes = !planar16 && !rgbOwnDecode && !(yuv422 && source.fullRangeYuv);
+		const bool fullRangeYuv = source.fullRangeYuv;
+		const bool planar16 = !fullRangeYuv && (format == AnalysisLumaFormat::P010 || format == AnalysisLumaFormat::P210);
+		const bool yuv422 = !fullRangeYuv && format == AnalysisLumaFormat::NativeYuv422;
 		auto decodeRow = [&](int y, uint16_t* codes) {
-			if (sharedSameCodes)
-				if (const uint16_t* shared = source.SharedLumaRow(y))
-				{
-					std::memcpy(codes, shared, static_cast<size_t>(w) * sizeof(uint16_t));
-					return;
-				}
+			if (const uint16_t* shared = source.SharedLumaRow(y))
+			{
+				std::memcpy(codes, shared, static_cast<size_t>(w) * sizeof(uint16_t));
+				return;
+			}
 			const uint8_t* row = source.data + static_cast<size_t>(y) * source.rowBytes;
 			if (planar16)
 			{
@@ -169,64 +160,8 @@ namespace MotionAhead
 				for (int x = 0; x < w; ++x) codes[x] = static_cast<uint16_t>(row[static_cast<size_t>(x / 2) * 4 + ((x & 1) ? 3 : 1)] << 2);
 				return;
 			}
-			if (rgb && encoding == VideoFrameEncoding::R12B)
-			{
-				// Eight pixels per 36 bytes (nine big-endian-ordered words), 12-bit RGB.
-				for (int x = 0; x < w; x += 8)
-				{
-					const uint8_t* bk = row + static_cast<size_t>(x / 8) * 36;
-					auto B = [bk](int word, int index) -> unsigned { return bk[word * 4 + index]; };
-					auto L = [&B](int word, int index) -> unsigned { return B(word, index) & 0x0f; };
-					auto Hh = [&B](int word, int index) -> unsigned { return B(word, index) >> 4; };
-					const unsigned rgb8[8][3] = {
-						{ B(0, 3) | (L(0, 2) << 8), Hh(0, 2) | (B(0, 1) << 4), B(0, 0) | (L(1, 3) << 8) },
-						{ Hh(1, 3) | (B(1, 2) << 4), B(1, 1) | (L(1, 0) << 8), Hh(1, 0) | (B(2, 3) << 4) },
-						{ B(2, 2) | (L(2, 1) << 8), Hh(2, 1) | (B(2, 0) << 4), B(3, 3) | (L(3, 2) << 8) },
-						{ Hh(3, 2) | (B(3, 1) << 4), B(3, 0) | (L(4, 3) << 8), Hh(4, 3) | (B(4, 2) << 4) },
-						{ B(4, 1) | (L(4, 0) << 8), Hh(4, 0) | (B(5, 3) << 4), B(5, 2) | (L(5, 1) << 8) },
-						{ Hh(5, 1) | (B(5, 0) << 4), B(6, 3) | (L(6, 2) << 8), Hh(6, 2) | (B(6, 1) << 4) },
-						{ B(6, 0) | (L(7, 3) << 8), Hh(7, 3) | (B(7, 2) << 4), B(7, 1) | (L(7, 0) << 8) },
-						{ Hh(7, 0) | (B(8, 3) << 4), B(8, 2) | (L(8, 1) << 8), Hh(8, 1) | (B(8, 0) << 4) } };
-					for (int k = 0; k < 8 && x + k < w; ++k)
-						codes[x + k] = static_cast<uint16_t>(LumaOf(rgb8[k][0], rgb8[k][1], rgb8[k][2]) >> 2);   // 12 -> 10 bits
-				}
-				return;
-			}
-			if (rgb && encoding == VideoFrameEncoding::R12L)
-			{
-				for (int x = 0; x < w; x += 2)
-				{
-					const uint8_t* pr = row + static_cast<size_t>(x / 2) * 9;
-					const unsigned r0 = pr[0] | ((pr[1] & 0x0f) << 8), g0 = (pr[1] >> 4) | (pr[2] << 4), b0 = pr[3] | ((pr[4] & 0x0f) << 8);
-					const unsigned r1 = (pr[4] >> 4) | (pr[5] << 4), g1 = pr[6] | ((pr[7] & 0x0f) << 8), b1 = (pr[7] >> 4) | (pr[8] << 4);
-					codes[x] = static_cast<uint16_t>(LumaOf(r0, g0, b0) >> 2);
-					if (x + 1 < w) codes[x + 1] = static_cast<uint16_t>(LumaOf(r1, g1, b1) >> 2);
-				}
-				return;
-			}
-			if (rgb && (encoding == VideoFrameEncoding::R210 || encoding == VideoFrameEncoding::R10b || encoding == VideoFrameEncoding::R10l))
-			{
-				const int shift = encoding == VideoFrameEncoding::R210 ? 0 : 2;
-				for (int x = 0; x < w; ++x)
-				{
-					const uint8_t* px = row + static_cast<size_t>(x) * 4;
-					const uint32_t word = encoding == VideoFrameEncoding::R10l ? LittleEndian32(px) : BigEndian32(px);
-					codes[x] = LumaOf((word >> (20 + shift)) & 0x3ff, (word >> (10 + shift)) & 0x3ff, (word >> shift) & 0x3ff);
-				}
-				return;
-			}
-			if (rgb && (encoding == VideoFrameEncoding::BGRA_8BIT || encoding == VideoFrameEncoding::ARGB_8BIT))
-			{
-				const bool bgra = encoding == VideoFrameEncoding::BGRA_8BIT;
-				for (int x = 0; x < w; ++x)
-				{
-					const uint8_t* px = row + static_cast<size_t>(x) * 4;
-					const unsigned r = bgra ? px[2] : px[1], g = bgra ? px[1] : px[2], b = bgra ? px[0] : px[3];
-					codes[x] = static_cast<uint16_t>(LumaOf(r, g, b) << 2);
-				}
-				return;
-			}
-			AnalysisLumaSample sample;   // anything else: the sampler
+			if (source.SampleLumaRow(0, y, w, codes)) return;   // the sampler's row form (what DecodeSharedLuma uses)
+			AnalysisLumaSample sample;   // RGB, full-range YCbCr, anything else: the one sampler (the shared decoder's law)
 			for (int x = 0; x < w; ++x)
 				codes[x] = source.Sample(x, y, sample) ? sample.luma : 0;
 		};
@@ -1127,7 +1062,8 @@ namespace MotionAhead
 		const char* privateSite)
 	{
 		// The engine half: the skeleton's P1 (one decode per frame, Acquire from this thread) when it has the frame and the
-		// codes are the engine's; else the producer's own decode (RGB / full-range: FIX-B4-RGB; no source or a miss: shown).
+		// codes are the engine's (every format since MAP-RGB-LUMA-PROXY); on no source or a miss HalfLuma8 reads the same shared luma
+		// plane / sampler (no private luma law) and the miss is counted (requestStats.p1OwnReads) and shown (VectorEngine::ProducerStatusSegment).
 		std::shared_ptr<VpSkeleton::IP1Source> p1;
 		{
 			std::lock_guard<std::mutex> lock(p1Mutex);
@@ -1140,7 +1076,11 @@ namespace MotionAhead
 				return false;   // not a readable frame: nothing to do, not a failure
 			// GF-P4 MUST-12: U3 is a private copy only when the producer decoded the half luma itself (a shared P1 read is not).
 			VPV_COMPUTE_ONCE_PRIVATE_AT("U3", sequence, privateSite);
+			if (p1)   // a P1 reader is wired and missed: this frame's engine luma came from the producer's own read (shown, never silent)
+				p1OwnReadCount.fetch_add(1, std::memory_order_relaxed);   // atomic: callers may hold `mutex`
 		}
+		else
+			p1ReadCount.fetch_add(1, std::memory_order_relaxed);
 		// The de-judder's engine size: the half size, or half again (its inner matcher).
 		const int tw = targetW.load(std::memory_order_acquire), th = targetH.load(std::memory_order_acquire);
 		if (tw > 0 && th > 0 && !(tw == halfW && th == halfH))
@@ -1490,7 +1430,10 @@ namespace MotionAhead
 	Producer::RequestStats Producer::GetRequestStats() const
 	{
 		std::lock_guard<std::mutex> lock(mutex);
-		return requestStats;
+		RequestStats s = requestStats;
+		s.p1Reads = p1ReadCount.load(std::memory_order_relaxed);
+		s.p1OwnReads = p1OwnReadCount.load(std::memory_order_relaxed);
+		return s;
 	}
 
 	void Producer::Answer(OnDemand::Pending& pending, OnDemand::PairResult result)
