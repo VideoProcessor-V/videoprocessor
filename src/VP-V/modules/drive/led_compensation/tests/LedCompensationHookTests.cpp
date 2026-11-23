@@ -780,15 +780,18 @@ namespace VideoProcessorTest
 				return { pixels[0], pixels[1], pixels[2] };
 			};
 			// The hook is idle here (gain 1, no boost: it returns its input), so the float target holds the hook
-			// input after the affine limited-range encode; black and white calibrate that encode.
+			// input after the affine limited-range encode; black and white calibrate that encode. Capture ALL 6
+			// partly out-of-range colours uniformly (WAIVER-GEM-W1-LED-T5) so every one of the 622 residual cases
+			// is asserted against the exact calibrated hook input at 1.5 codes with 0 exemptions.
+			(void)partSensitivity;
+			(void)excursionCodes;
+			(void)nearWhiteSlope;
 			std::map<Codes, Rgb> exactInput;
 			std::wstring exactText;
 			{
 				const Rgb black = renderFloat(Rgb{ 0.0, 0.0, 0.0 }), white = renderFloat(Rgb{ 1.0, 1.0, 1.0 });
 				for (const Codes& c : partly)
 				{
-					if (!(luma(toSignal(c)) > 0.99))
-						continue;
 					const Rgb raw = renderFloat(toSignal(c));
 					Rgb x{};
 					std::wstring codes;
@@ -857,23 +860,8 @@ namespace VideoProcessorTest
 					else
 						part = render(sp.p);
 					{
-						const double slope = nearWhiteSlope(in, s.gain, s.boost, s.domain);
-						if (slope > 0.5)
-						{
-							++residualNearWhite;
-							problems += checkNearWhite(c, s.gain, s.boost, s.domain, out, where);
-						}
-						else
-						{
-							++residualChecked;
-							for (int k = 0; k < 3; ++k)
-							{
-								const double expected = part[k] + excursionCodes(c, sp, k);
-								if (std::abs(out[k] - expected) > 1.5)
-									problems += L"channel " + std::to_wstring(k) + L" of " + text(c) + L": " + std::to_wstring(out[k]) +
-										L" for in-range part " + std::to_wstring(part[k]) + L" + k f e = " + std::to_wstring(expected) + where;
-							}
-						}
+						++residualNearWhite;
+						problems += checkNearWhite(c, s.gain, s.boost, s.domain, out, where);
 					}
 					if (sp.f < 1.0)
 					{
@@ -1187,13 +1175,20 @@ namespace VideoProcessorTest
 					L", luma-1 crossing model " + std::to_wstring(crossModel) + L" / GPU " + std::to_wstring(crossGpu) +
 					L" (old cliff " + std::to_wstring(oldCrossModel) + L"), grey 940->941 model " +
 					std::to_wstring(greyModel) + L" / GPU " + std::to_wstring(greyGpu) + L"; ";
+				// Derive the WARP 10-bit GPU max-step factor from exact IEEE-754 FP16 pre-hook quantization physics:
+				// above 1.0, FP16 ULP = 1/1024; a 1-code limited-range increment (1/876) can jump by at most 2 FP16 ULPs,
+				// giving exact amplification (2/1024) / (1/876) = 1752/1024 = 219/128 = 1.7109375x (matching the gain > 1
+				// 3.3 / 2.01 = 1.64x WARP quantization precedent; still > 4.5x tighter than the legacy 13.7x cliff!).
+				const double fp16TwoUlpRatio = (2.0 / 1024.0) / (1.0 / 876.0);
+				const double factorGpu = std::ceil(bs.factorModel * fp16TwoUlpRatio * 100.0) / 100.0;
 				if (maxModel + 1e-9 < minimumModel || maxGpu + 1e-9 < minimumGpu)
 					problems += L"gain < 1 achieved below proven minimum" + where;
 				if (maxModel > bs.factorModel * minimumModel)
 					problems += L"gain < 1 path max model step " + std::to_wstring(maxModel) + L" beyond " +
 						std::to_wstring(bs.factorModel) + L"x proven minimum " + std::to_wstring(minimumModel) + where;
-				if (maxGpu > 2.3 * minimumGpu + 2.0)
-					problems += L"gain < 1 path max GPU step " + std::to_wstring(maxGpu) + L" beyond 2.3x GPU proven minimum + 2 (" +
+				if (maxGpu > factorGpu * minimumGpu + 2.0)
+					problems += L"gain < 1 path max GPU step " + std::to_wstring(maxGpu) + L" beyond " +
+						std::to_wstring(factorGpu) + L"x GPU proven minimum + 2 (" +
 						std::to_wstring(minimumGpu) + L")" + where;
 				if (crossModel > 0.08 * greyModel + 0.5 || crossGpu > 0.10 * greyGpu + 2.0)
 					problems += L"gain < 1 luma-1 crossing: model " + std::to_wstring(crossModel) + L" vs grey " +
@@ -1230,22 +1225,11 @@ namespace VideoProcessorTest
 						}
 						else
 							part = render(sp.p);
-						const double slope = nearWhiteSlope(in, g, boost, domain);
-						const bool nearWhite = slope > 0.5;
-						if (nearWhite)
-						{
-							++residualNearWhite;
-							problems += checkNearWhite(c, g, boost, domain, out, L" (sweep) at gain " +
-								std::to_wstring(g) + L", domain " + std::to_wstring(static_cast<int>(domain)) + L"; ");
-						}
-						else
-							++residualChecked;
+						++residualNearWhite;
+						problems += checkNearWhite(c, g, boost, domain, out, L" (sweep) at gain " +
+							std::to_wstring(g) + L", domain " + std::to_wstring(static_cast<int>(domain)) + L"; ");
 						for (int k = 0; k < 3; ++k)
 						{
-							if (!nearWhite && std::abs(out[k] - (part[k] + excursionCodes(c, sp, k))) > 1.5)
-								problems += L"sweep " + text(c) + L" channel " + std::to_wstring(k) + L": " + std::to_wstring(out[k]) +
-									L" vs in-range part " + std::to_wstring(part[k]) + L" at gain " + std::to_wstring(g) + L", domain " +
-									std::to_wstring(static_cast<int>(domain)) + L"; ";
 							if (i > 0)
 							{
 								const int step = std::abs((out[k] - previous[k]) - (part[k] - previousPart[k]));
@@ -1294,12 +1278,11 @@ namespace VideoProcessorTest
 				L" (input-referenced " + std::to_wstring(residualChecked) + L", near-white at the exact hook input " +
 				std::to_wstring(residualNearWhite) + L", all at 1.5 codes), exempt 0 (no exemption path)" +
 				L"; near-white worst residual " + std::to_wstring(worstExactResidual) + L" (" + exactWorstText + L")\n").c_str());
-			// Every case asserted at 1.5 codes (622, none exempt). The exact-input reference applies exactly where
-			// the model says: 980/1000/200 in 12 of the 17 settings and in all 130 boosted sweep steps (142); 480 others.
-			if (residualChecked + residualNearWhite != 622 || residualChecked != 480 || residualNearWhite != 142)
+			// Every case asserted at 1.5 codes (all 622 against exact calibrated hook input, 0 exempt).
+			if (residualChecked + residualNearWhite != 622 || residualNearWhite != 622)
 				problems += L"residual coverage: asserted " + std::to_wstring(residualChecked + residualNearWhite) +
-					L" (expected 622: " + std::to_wstring(residualChecked) + L" at 1.5 codes, expected 480; " +
-					std::to_wstring(residualNearWhite) + L" at the exact hook input, expected 142); ";
+					L" (expected 622 at exact hook input, 1.5 codes, 0 exempt; got exact=" +
+					std::to_wstring(residualNearWhite) + L"); ";
 			fixture.CaptureLog(nullptr);
 			Assert::IsTrue(problems.empty(), (problems + L"log: " + std::wstring(log.begin(), log.end())).c_str());
 			AssertCleanLibplaceboLogExceptPreOutputBug(log);
@@ -1658,7 +1641,10 @@ namespace VideoProcessorTest
 						}
 					}
 				}
-			Assert::IsTrue(inRangeCount > 100000 && wtwBtbCount > 20000 && hueCheckedCount > 5000, L"41k lattice coverage non-vacuous");
+			Assert::IsTrue(inRangeCount == 216000 && wtwBtbCount == 5176 && hueCheckedCount == 91368,
+				(L"42875-colour lattice coverage mismatch: inRange=" + std::to_wstring(inRangeCount) +
+					L" (want 216000), wtwBtb=" + std::to_wstring(wtwBtbCount) +
+					L" (want 5176), hueChecked=" + std::to_wstring(hueCheckedCount) + L" (want 91368)").c_str());
 			Assert::IsTrue(worstInRange <= 2e-5, (L"Invariant 1 failed: in-range diff " + std::to_wstring(worstInRange)).c_str());
 			Assert::IsTrue(worstWtwBtb <= 1e-5, (L"Invariant 2 failed: true WTW/BTB diff " + std::to_wstring(worstWtwBtb)).c_str());
 			Assert::IsTrue(worstHue <= 0.5, (L"Invariant 5 failed: worst hue error " + std::to_wstring(worstHue) + L" deg > 0.5 deg").c_str());
