@@ -49,8 +49,9 @@ namespace Vpv
 			return label;
 		}
 
-		// Input: the capture / display fix under test (was in General > General behavior). On the Input tab, so the Original
-		// pathway greys it; its runtime is off there too (CaptureDisplayFixes::Enabled, GEM-221 / MUST-8).
+		// Developer (Retirement Manager): the capture / display fix under test (was in General > General behavior).
+		// Hosted under Developer > Retirement Manager (vpvOnlyTabs), so Original pathway greys it; its runtime is off there too
+		// (CaptureDisplayFixes::Enabled, GEM-221 / MUST-8). Keeps vpv.input.card.capture_fixes objectName.
 		UnitCard CaptureFixesCard(EditorKit& kit)
 		{
 			auto* body = new QWidget;
@@ -75,34 +76,6 @@ namespace Vpv
 			layout->addWidget(note);
 			return { QStringLiteral("input"), QStringLiteral("capture_fixes"), QStringLiteral("Capture fixes (under test)"),
 				QStringLiteral("VP's fix in Bill's capture and display code (was on Bill's General page)."), body };
-		}
-
-		// Both pathways (MUST-C): Magewell fault recovery under test (was in General > General behavior). Its runtime is
-		// inside Bill's Magewell code and is NOT tied to the Original pathway yet (PENDING, owner item: it needs a Bill line), so it is
-		// not greyed there.
-		UnitCard MagewellRecoveryCard(EditorKit& kit)
-		{
-			auto* body = new QWidget;
-			auto* layout = new QVBoxLayout(body);
-			layout->setContentsMargins(0, 0, 0, 0);
-			layout->setSpacing(8);
-			// Restore switch 2026-10-17: [general] magewell_recover_faults.
-			if (QCheckBox* magewellRecover = kit.bindCheckField(QStringLiteral("Magewell: recover from capture faults (fix under test)"),
-				QStringLiteral("general"), QStringLiteral("magewell_recover_faults"), true))
-			{
-				magewellRecover->setToolTip(QStringLiteral(
-					"On (default): a Magewell fault the card recovers from (no frames for 2 s, a failed start, the capture "
-					"memory budget, a slow frame copy) holds the video invalid and restarts the device by itself. Off: the "
-					"earlier behaviour - capture stops and needs a manual Restart."));
-				layout->addWidget(magewellRecover);
-			}
-			auto* note = Note(kit, QStringLiteral(
-				"Original pathway: switching this off is PENDING (it sits inside Bill's Magewell capture code; the change "
-				"waits on the owner), so for now it still applies on Original too. Read when VideoProcessor starts."));
-			note->setObjectName(QStringLiteral("vpv.both.magewell_recovery.note"));
-			layout->addWidget(note);
-			return { QStringLiteral("both"), QStringLiteral("magewell_recovery"), QStringLiteral("Magewell fault recovery (under test)"),
-				QStringLiteral("VP's fault recovery in Bill's Magewell capture code (was on Bill's General page)."), body };
 		}
 
 		// Both pathways: room lights, the profile rules' `ambient` variable (Stage 9; was General > Room lights).
@@ -169,7 +142,7 @@ namespace Vpv
 				"room-light picture adaptation is off."));
 			linkNote->setObjectName(QStringLiteral("vpv.both.room_lights.note"));
 			ambientForm->addRow(linkNote);
-			return { QStringLiteral("both"), QStringLiteral("room_lights"), QStringLiteral("Room lights"),
+			return { QStringLiteral("both"), QStringLiteral("room_lights"), QStringLiteral("Room Light Sensor"),
 				QStringLiteral("Dark or lit room, for profiles that render to the room's black."), ambient };
 		}
 
@@ -239,7 +212,7 @@ namespace Vpv
 				"<b>$source==\"capture\"</b> VideoProcessor.exe."));
 			fileNote->setTextFormat(Qt::RichText);
 			fileForm->addRow(fileNote);
-			return { QStringLiteral("both"), QStringLiteral("file_playback"), QStringLiteral("File playback (VP Renderer filter)"),
+			return { QStringLiteral("both"), QStringLiteral("file_playback"), QStringLiteral("File Playback"),
 				QStringLiteral("Local files played in MPC-HC / MPC-BE through VP's processing. Read by the filter when it starts and when this file changes."),
 				filePlayback };
 		}
@@ -247,13 +220,12 @@ namespace Vpv
 
 	std::vector<UnitCard> WithGeneralPageCards(EditorKit& kit, const QString& unitId, std::vector<UnitCard> taken)
 	{
-		if (unitId == QStringLiteral("input"))
+		if (unitId == QStringLiteral("developer"))
 			taken.push_back(CaptureFixesCard(kit));
 		else if (unitId == QStringLiteral("both"))
 		{
 			taken.push_back(RoomLightsCard(kit));
 			taken.push_back(FilePlaybackCard(kit));
-			taken.push_back(MagewellRecoveryCard(kit));
 		}
 		return taken;
 	}

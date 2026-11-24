@@ -1102,7 +1102,7 @@ namespace Vpv
 			if (globalIndex >= 0 && globalIndex < static_cast<int>(table.tiers.size()))
 				lines << QStringLiteral("Selected (%1):").arg(Q(table.tiers[static_cast<size_t>(globalIndex)]));
 			else
-				lines << (shipped ? QStringLiteral("Active (Mixed \u2014 shipped default):") : QStringLiteral("Active (Mixed):"));
+				lines << (shipped ? QStringLiteral("Active (Mixed \u2014 shipped default):") : QStringLiteral("Active (Custom):"));
 			for (const Unit& u : table.units)
 			{
 				if (!u.Tiered()) continue;
@@ -1955,7 +1955,7 @@ namespace Vpv
 				}
 			}
 			// Draft card (e.g. repeat_render_reuse): reserved, not wired in renderer, not a live control.
-			if (spec.id && std::string(spec.id) == "draft")
+			if (spec.id && (std::string(spec.id) == "draft" || std::string(spec.id) == "output_draft"))
 			{
 				card.body->setEnabled(false);
 				card.body->setToolTip(QStringLiteral("Draft, no effect yet: reserved switch, not yet wired in the renderer."));
@@ -2030,12 +2030,58 @@ namespace Vpv
 
 		void SetGreyReason(QWidget* w, const QString& reason);   // defined below
 
-		// Camera K3 (docs 61 section 3.1): the "Camera model" group of the Motion unit. Keys of [vpv.camera], all default off
-		// (an off box removes the key); greyed in the Original pathway, and everything but the model switch is greyed while the
-		// model is off ("used only when Camera model is on"; the stored values are kept). The runtime state of the camera model is
-		// not shown here: it is the Ctrl+I "camera:" line, Fallbacks engaged (camera_model, camera_model_overlay, camera_settings,
-		// camera_dump) and the Ctrl+Alt+D section; the status row says so.
-		CardBox MakeCameraCard(const std::shared_ptr<State>& state, const QString& unitId, QVBoxLayout* parentLayout = nullptr)
+		// Camera K3 (docs 61 section 3.1): everyday preview toggle on Motion > Main (default off).
+		// All 18 developer diagnostic switches live in Developer > Pipeline & Diagnostics (MakeCameraDebugCard)
+		// and stay synchronised through state->RefreshAll().
+		CardBox MakeCameraPreviewCard(const std::shared_ptr<State>& state, QVBoxLayout* parentLayout = nullptr)
+		{
+			const QString camSection = QStringLiteral("vpv.camera");
+			CardBox card = MakeCard(ObjectName(QStringLiteral("motion.card.camera")),
+				QStringLiteral("Global Camera Model (Preview \u2014 Default Off)"),
+				QStringLiteral("Fits one global camera motion per source frame pair. Off by default and off on the Original pathway."),
+				false);
+			if (parentLayout) parentLayout->addWidget(card.frame);
+
+			auto* model = new QCheckBox(QStringLiteral("Camera model"));
+			model->setObjectName(ObjectName(QStringLiteral("camera.camera_model")));
+			model->setToolTip(QStringLiteral("Key camera_model (section [vpv.camera]). Fits one camera motion per source frame pair "
+				"for camera-guided motion steps. Needs camera_link = report in [vpv.skeleton] to attach (cfg only)."));
+			card.Form()->addRow(QStringLiteral("Camera model"), model);
+
+			auto* previewNote = Help(QStringLiteral(
+				"Preview feature (default off). Follows the motion engine: when the motion engine is off, the camera model is off. "
+				"Developer switches and diagnostics live in Developer > Pipeline & Diagnostics (enable \"Show developer tools\" above)."));
+			previewNote->setProperty("help", true);
+			card.Add(previewNote);
+
+			QObject::connect(model, &QCheckBox::toggled, model, [state, camSection](bool on)
+			{
+				if (state->refreshing || !state->host.setValue) return;
+				state->host.setValue(camSection, QStringLiteral("camera_model"), on ? QStringLiteral("on") : QString());
+				state->RefreshAll();   // the dependants in Developer > Camera diagnostics grey or un-grey at once
+			});
+
+			state->refreshers.push_back([model, camSection](const std::shared_ptr<State>& state)
+			{
+				const auto get = [&](const QString& section, const QString& key)
+				{
+					return state->host.value ? state->host.value(section, key).trimmed() : QString();
+				};
+				const auto isOn = [](const QString& v) { return v.compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0; };
+				const bool original = isOn(get(Q(TierTable().section), QStringLiteral("pipeline_original_pathway")));
+				const bool modelOn = isOn(get(camSection, QStringLiteral("camera_model")));
+				const QString originalReason = QStringLiteral("Greyed: the Original pathway is on (VP's additions are off).");
+				const QSignalBlocker blocker(model);
+				model->setChecked(modelOn);
+				model->setEnabled(!original);
+				SetGreyReason(model, original ? originalReason : QString());
+			});
+			return card;
+		}
+
+		// Camera K3 developer diagnostics card on Developer > Pipeline & Diagnostics: hosts the 18 [vpv.camera]
+		// debug switches + status readout, greyed while Camera model (Motion > Main) or VP-V pathway is off.
+		CardBox MakeCameraDebugCard(const std::shared_ptr<State>& state, QVBoxLayout* parentLayout = nullptr)
 		{
 			struct Box { const char* key; const char* label; const char* tip; };
 			static const Box kBoxes[] = {
@@ -2058,18 +2104,10 @@ namespace Vpv
 				{ "camera_use_dejudder", "Use in the de-judder", "Key camera_use_dejudder." },
 			};
 			const QString camSection = QStringLiteral("vpv.camera");
-			CardBox card = MakeCard(ObjectName(unitId + QStringLiteral(".card.camera")), QStringLiteral("Camera model"),
-				QStringLiteral("Diagnostics and switches for the global camera model. Everything is off by default and the Original "
-					"pathway keeps it off. The switches act only while the camera model is on. Camera guidance (the Measurement "
-					"switches) guide the matcher once the camera model is on (on-time rule d = 0; the governor returns to the full search "
-					"when guidance fails). The camera stays off by default and follows the motion engine: with the motion engine off it is off."), true);
+			CardBox card = MakeCard(ObjectName(QStringLiteral("developer.card.camera_debug")), QStringLiteral("Camera diagnostics (developer)"),
+				QStringLiteral("Diagnostics and per-stage switches for the global camera model (enable Camera model on Motion > Main first). "
+					"Everything is off by default and the Original pathway keeps it off. The switches act only while Camera model is on."), true);
 			if (parentLayout) parentLayout->addWidget(card.frame);
-
-			auto* model = new QCheckBox(QStringLiteral("Camera model"));
-			model->setObjectName(ObjectName(QStringLiteral("camera.camera_model")));
-			model->setToolTip(QStringLiteral("Key camera_model (section [vpv.camera]). Fits one camera motion per source frame pair "
-				"for the steps below. Needs camera_link = report in [vpv.skeleton] to attach (cfg only)."));
-			card.Form()->addRow(QStringLiteral("Camera model"), model);
 
 			auto* overlay = new QComboBox;
 			overlay->setObjectName(ObjectName(QStringLiteral("camera.camera_model_overlay")));
@@ -2102,11 +2140,6 @@ namespace Vpv
 				if (state->refreshing || !state->host.setValue) return;
 				state->host.setValue(camSection, key, value);
 			};
-			QObject::connect(model, &QCheckBox::toggled, model, [write, state](bool on)
-			{
-				write(QStringLiteral("camera_model"), on ? QStringLiteral("on") : QString());
-				state->RefreshAll();   // the dependants grey or un-grey at once (a no-op while refreshing)
-			});
 			QObject::connect(overlay, qOverload<int>(&QComboBox::currentIndexChanged), overlay, [write, overlay](int i)
 			{
 				if (i >= 0) write(QStringLiteral("camera_model_overlay"), overlay->itemData(i).toString());
@@ -2120,7 +2153,7 @@ namespace Vpv
 				});
 			}
 
-			state->refreshers.push_back([model, overlay, boxes, camSection](const std::shared_ptr<State>& state)
+			state->refreshers.push_back([overlay, boxes, camSection](const std::shared_ptr<State>& state)
 			{
 				const auto get = [&](const QString& section, const QString& key)
 				{
@@ -2131,12 +2164,6 @@ namespace Vpv
 				const bool modelOn = isOn(get(camSection, QStringLiteral("camera_model")));
 				const QString originalReason = QStringLiteral("Greyed: the Original pathway is on (VP's additions are off).");
 				const QString modelReason = QStringLiteral("Greyed: used only when Camera model is on (the stored value is kept).");
-				{
-					const QSignalBlocker blocker(model);
-					model->setChecked(modelOn);
-					model->setEnabled(!original);
-					SetGreyReason(model, original ? originalReason : QString());
-				}
 				{
 					const QSignalBlocker blocker(overlay);
 					const QString value = get(camSection, QStringLiteral("camera_model_overlay")).toLower();
@@ -2184,10 +2211,10 @@ namespace Vpv
 			sub->addTab(mainPage, QStringLiteral("Main"));
 			sub->addTab(advancedPage, QStringLiteral("Advanced"));
 			sub->setTabToolTip(0, QStringLiteral("The %1 tier and the switches you might use; start here.").arg(Q(unit.name)));
-			sub->setTabToolTip(1, QStringLiteral("What the controls on Main set (greyed until you tick Custom), tuning used only "
-				"while its feature is on, and measured internals. Normal viewing never needs it."));
+			sub->setTabToolTip(1, QStringLiteral("What the controls on Main set (greyed until you tick Custom), and tuning used only "
+				"while its feature is on. Normal viewing never needs it."));
 			auto* advancedIntro = Help(QStringLiteral("Settings set by the controls on Main (greyed, \"Set by ...\", until you tick "
-				"Custom), tuning used only while its feature is on, and the measured internals."));
+				"Custom), and tuning used only while its feature is on."));
 			advancedIntro->setProperty("help", true);
 			advanced->addWidget(advancedIntro);
 
@@ -2440,6 +2467,9 @@ namespace Vpv
 				});
 				layout->addWidget(more);
 			}
+			// Global Camera Model preview card on Motion > Main (18 debug switches live in Developer > Pipeline & Diagnostics).
+			if (unitId == QStringLiteral("motion"))
+				MakeCameraPreviewCard(state, layout);
 			// Cards whose rows the editor built on another page (VpvScalingRows.h).
 			if (state->host.unitCards)
 				for (const UnitCard& extra : state->host.unitCards(unitId))
@@ -2450,9 +2480,9 @@ namespace Vpv
 					card.Add(extra.body);
 					state->upstreamIndex.AddSubtree(extra.body);
 				}
-			// Pages of their own that the Config page host registered under this unit (e.g. Calibration
-			// under Output): one button each opens the page.
-			if (state->host.subPages && state->host.openPage)
+			// Pages of their own that the Config page host registered under this unit (Dynamic Drive and
+			// Calibration launch from Overview > Dedicated VP-V Pages so there is no duplicate card on Output > Main).
+			if (unitId != QStringLiteral("output") && state->host.subPages && state->host.openPage)
 			{
 				const std::vector<SubPage> subs = state->host.subPages(unitId);
 				if (!subs.empty())
@@ -2473,39 +2503,6 @@ namespace Vpv
 				}
 			}
 			layout->addStretch();
-
-			// 3. Advanced, last: the planned settings and the unit's stages.
-			if (unitId == QStringLiteral("motion"))
-				MakeCameraCard(state, unitId, advanced);
-			if (!unit.planned.empty())
-			{
-				CardBox planned = MakeCard(ObjectName(unitId + QStringLiteral(".card.planned")), QStringLiteral("Planned (not yet implemented)"),
-					QStringLiteral("Reserved in the pipeline; their components are not built yet."), true);
-				advanced->addWidget(planned.frame);
-				for (const Planned& p : unit.planned)
-				{
-					auto* box = new QCheckBox(QStringLiteral("(not yet implemented)"));
-					box->setObjectName(ObjectName(unitId + QStringLiteral(".planned.") + Q(p.key)));
-					box->setEnabled(false);
-					box->setToolTip(QStringLiteral("%1. Planned key %2 (slot %3): reserved in the pipeline; its component is not built yet.")
-						.arg(Q(p.label), Q(p.key), Q(p.slot)));
-					auto* name = new QLabel(Q(p.label));
-					name->setWordWrap(true);
-					planned.Form()->addRow(name, box);
-				}
-			}
-			CardBox stages = MakeCard(ObjectName(unitId + QStringLiteral(".card.stages")), QStringLiteral("Stages in this unit (pipeline order)"),
-				QString(), true);
-			advanced->addWidget(stages.frame);
-			auto* slotsHeading = Bold(ObjectName(unitId + QStringLiteral(".slots_heading")));
-			slotsHeading->setText(QStringLiteral("Each stage and what it falls back to"));
-			stages.Add(slotsHeading);
-			QStringList lines;
-			for (const char* id : unit.slotIds) lines << SlotLine(table, id);
-			auto* slotLabel = Help(lines.join(QStringLiteral("<br>")));
-			slotLabel->setTextFormat(Qt::RichText);
-			slotLabel->setObjectName(ObjectName(unitId + QStringLiteral(".slots")));
-			stages.Add(slotLabel);
 			advanced->addStretch();
 		}
 
@@ -2522,18 +2519,15 @@ namespace Vpv
 		// so Config's renderer-profile migrations never move them. The order is checked with the
 		// renderer's own validator (SlotRegistry / OrderValidator) and its plain-language reason is
 		// shown; an invalid order is never written, so the renderer never has to reject one.
-		void PopulateExpertPage(const std::shared_ptr<State>& state, QTabWidget* parentTabs)
+		void PopulateExpertPage(const std::shared_ptr<State>& state, QVBoxLayout* parentLayout)
 		{
 			const QString section = Q(TierTable().section);
-			QWidget* page = NewTabPage(QStringLiteral("Pipeline (expert)"));
-			page->setObjectName(ObjectName(QStringLiteral("expert")));
-			parentTabs->addTab(page, QStringLiteral("Pipeline (expert)"));
-			state->own.push_back(page);
-			auto* layout = new QVBoxLayout(page);
-			layout->addWidget(Help(QStringLiteral("For testing and measurement. Normal viewing never needs these: the tiers "
-				"and the Original pathway switch cover it.")));
-			auto* form = new QFormLayout;
-			layout->addLayout(form);
+			CardBox card = MakeCard(ObjectName(QStringLiteral("expert")), QStringLiteral("Pipeline overrides (expert)"),
+				QStringLiteral("For testing and measurement. Normal viewing never needs these: the tiers "
+					"and the Original pathway switch cover it."), false);
+			parentLayout->addWidget(card.frame);
+			state->own.push_back(card.frame);
+			QFormLayout* form = card.Form();
 
 			// F-8 (owner rule vp-either-or-overlaps): which HDR inference decides an unflagged BT.2020
 			// signal - VP's or Bill's original newlldv heuristic. The Original pathway selects Bill's.
@@ -2677,7 +2671,6 @@ namespace Vpv
 				slotsStatus->setText(names.isEmpty() ? QStringLiteral("Every stage on.") : QStringLiteral("Accepted."));
 				state->host.setValue(section, QStringLiteral("pipeline_slots_off"), names.join(QStringLiteral(", ")));
 			});
-			layout->addStretch();
 
 			state->refreshers.push_back([entranceOnce, merged, drain, analysis, resync, hdrInference, order, slotsOff, section](const std::shared_ptr<State>& state)
 			{
@@ -2777,10 +2770,9 @@ namespace Vpv
 		void PopulateRetirementPage(const std::shared_ptr<State>& state, QTabWidget* parentTabs)
 		{
 			const Table& table = TierTable();
-			QWidget* page = NewTabPage(QStringLiteral("Proposed retirement"));
-			page->setObjectName(ObjectName(QStringLiteral("retirement")));
-			parentTabs->addTab(page, QStringLiteral("Proposed retirement"));
-			auto* layout = new QVBoxLayout(page);
+			QVBoxLayout* layout = nullptr;
+			QWidget* page = NewSubPage(ObjectName(QStringLiteral("retirement")), QStringLiteral("Proposed retirement"), &layout);
+			parentTabs->addTab(page, QStringLiteral("Retirement Manager"));
 			auto* intro = Help(Q(table.retirementNote));
 			intro->setObjectName(ObjectName(QStringLiteral("retirement.note")));
 			layout->addWidget(intro);
@@ -2861,6 +2853,17 @@ namespace Vpv
 				layout->addWidget(card.frame);
 				FillCard(state, nullptr, QStringLiteral("retirement"), spec, card, unused);
 			}
+			// Developer/retirement unit cards built by the editor host (e.g. capture_display_fixes -> vpv.input.card.capture_fixes).
+			if (state->host.unitCards)
+				for (const UnitCard& extra : state->host.unitCards(QStringLiteral("developer")))
+				{
+					if (!extra.body) continue;
+					const QString cardUnit = extra.unit.isEmpty() ? QStringLiteral("developer") : extra.unit;
+					CardBox card = MakeCard(ObjectName(cardUnit + QStringLiteral(".card.") + extra.id), extra.title, extra.help, extra.advanced);
+					layout->addWidget(card.frame);
+					card.Add(extra.body);
+					state->upstreamIndex.AddSubtree(extra.body);
+				}
 			layout->addStretch();
 			struct CachedRetirement { QPointer<QWidget> control; QString where; QString plain; };
 			auto cachedRetirements = std::make_shared<std::vector<CachedRetirement>>();
@@ -3401,7 +3404,7 @@ namespace Vpv
 			auto groups = std::make_shared<std::vector<Group>>();
 			for (const LedGroup& g : LedAdvancedGroups())
 			{
-				CardBox card = MakeCard(ObjectName(QStringLiteral("drive.group.") + Q(g.id)), Q(g.title), Q(g.help), false);
+				CardBox card = MakeCard(ObjectName(QStringLiteral("drive.group.") + Q(g.id)), Q(g.title), Q(g.help), true);
 				advancedLayout->addWidget(card.frame);
 				auto* note = Help(QString());
 				note->setProperty("help", true);
@@ -3938,6 +3941,7 @@ namespace Vpv
 				"QTabWidget[vpvUnitsTabs=\"true\"] > QTabBar::tab { min-width: 0px; padding: 6px 10px; }\n"
 				"QWidget[vpvSection=\"true\"] QLabel[vpvOriginalNote=\"true\"] { padding: 8px; border-radius: 5px; }\n"
 				"QWidget[vpvSection=\"true\"] QLabel[vpvOffNote=\"true\"] { padding: 8px; border-radius: 5px; }\n"
+				"QWidget[vpvSection=\"true\"] QPushButton[vpvPresetBtn=\"true\"] { padding: 5px 12px; border-radius: 4px; font-weight: 600; }\n"
 				"QSlider[vpvMixedSlider=\"true\"]::handle:horizontal { background: transparent; border: 0; width: 0px; margin: 0px; }\n"
 				"/* vpv-section-style */\n");
 		}
@@ -3972,6 +3976,10 @@ namespace Vpv
 			"QWidget[vpvSection=\"true\"] QLabel[vpvOriginalNote=\"true\"] { background: #3a2a10; color: #ffd58a; padding: 8px; border-radius: 5px; }\n"
 			"QWidget[vpvSection=\"true\"] QLabel[vpvOffNote=\"true\"] { background: #1d2a38; color: #cfe0ef; padding: 8px; border-radius: 5px; }\n"
 			"QWidget[vpvSection=\"true\"] QLabel[vpvPrecisionNote=\"true\"] { color: #e0a040; }\n"
+			"QWidget[vpvSection=\"true\"] QPushButton[vpvPresetBtn=\"true\"] { color: #dce8f2; background: #142334; border: 1px solid #2b4258; border-radius: 4px; padding: 5px 12px; font-weight: 600; }\n"
+			"QWidget[vpvSection=\"true\"] QPushButton[vpvPresetBtn=\"true\"]:hover { background: #1a2e42; }\n"
+			"QWidget[vpvSection=\"true\"] QPushButton[vpvPresetBtn=\"true\"]:checked { color: #ffffff; background: #1f5c99; border: 1px solid #4ca3eb; }\n"
+			"QWidget[vpvSection=\"true\"] QPushButton[vpvPresetBtn=\"true\"]:disabled { color: #6f8396; background: #101923; border: 1px solid #1d2c3b; }\n"
 			"QSlider[vpvMixedSlider=\"true\"]::handle:horizontal { background: transparent; border: 0; width: 0px; margin: 0px; }\n"
 			"/* vpv-section-style */\n");
 	}
@@ -4046,7 +4054,7 @@ namespace Vpv
 
 		auto* originalNote = Help(QStringLiteral("<b>Original pathway: every VP-V addition is OFF.</b> The values below are "
 			"kept for when you switch back, but none of them is used now. Bill's own settings are on his pages (VP "
-			"Renderer, DirectShow, General). Settings on the <b>Both pathways</b> tab and Display calibration remain usable."));
+			"Renderer, DirectShow, General). Settings on the <b>System</b> tab and Display calibration remain usable."));
 		originalNote->setTextFormat(Qt::RichText);
 		originalNote->setProperty("vpvOriginalNote", true);
 		originalNote->setObjectName(ObjectName(QStringLiteral("original_note")));
@@ -4117,157 +4125,50 @@ namespace Vpv
 		profileLabel->setToolTip(QStringLiteral("One renderer profile for both pages: choosing it here selects it in VP Renderer > Rendering, and the other way round."));
 		strip->addWidget(profileLabel);
 		strip->addWidget(profile, 1);
+		strip->addSpacing(14);
+		auto* devToggle = new QCheckBox(QStringLiteral("Show developer tools"));
+		devToggle->setObjectName(ObjectName(QStringLiteral("developer.toggle")));
+		devToggle->setChecked(false);
+		devToggle->setToolTip(QStringLiteral("Show the Developer tab (pipeline overrides, camera diagnostics, measured internals, "
+			"pipeline inspector, and retirement manager). Off by default."));
+		strip->addWidget(devToggle);
 
-		// The unit tabs; the first, Overview, holds the global tier, full precision, fallbacks, and the
-		// Proposed retirement and Pipeline (expert) pages (kept out of the unit tab row).
+		// The unit tabs; Overview is a clean 4-card dashboard; System stays unlocked on both pathways;
+		// Developer is hidden by default until "Show developer tools" is ticked.
 		auto* tabs = new QTabWidget;
 		tabs->setObjectName(ObjectName(QStringLiteral("units")));
 		tabs->setUsesScrollButtons(true);
 		tabs->setProperty("vpvUnitsTabs", true);
-		layout->addWidget(tabs);   // directly in layout so the Both pathways tab stays clickable on Original
+		layout->addWidget(tabs);   // directly in layout so the System tab stays clickable on Original
 		QWidget* overview = NewTabPage(QStringLiteral("Overview"));
 		overview->setObjectName(ObjectName(QStringLiteral("overview")));
 		auto* overviewOuter = new QVBoxLayout(overview);
 		overviewOuter->setContentsMargins(0, 0, 0, 0);
 		overviewOuter->addWidget(content);
 		auto* overviewLayout = contentLayout;
-		overviewLayout->setSpacing(8);
+		overviewLayout->setSpacing(10);
 		tabs->addTab(overview, QStringLiteral("Overview"));
 		state->vpvOnlyTabs.push_back(overview);
-		tabs->setTabToolTip(0, QStringLiteral("Every unit at once (the global tier), full precision, fallbacks engaged, the proposed retirements and the expert pipeline settings."));
+		tabs->setTabToolTip(0, QStringLiteral("Live pipeline status, overall processing preset, 32-bit high-precision processing, and dedicated VP-V pages."));
 
-		// The global tier.
-		QStringList globalTiers;
-		for (const char* g : table.tiers) globalTiers << Q(g);
-		TierBox global = MakeTierBox(QStringLiteral("global_tier"), QStringLiteral("Global tier"), globalTiers,
-			QStringLiteral("Sets every unit's tier at once: Classic = no advanced features (straight to the projector), "
-				"Low / Mid / Upper add measured features. A unit without that step uses its nearest lower one. Each unit "
-				"can then be changed on its own tab (the global tier then shows Custom)."));
-		auto* globalHeading = Bold(ObjectName(QStringLiteral("global_tier.heading")));
-		globalHeading->setText(QStringLiteral("Global tier (every unit at once)"));
-		overviewLayout->addWidget(globalHeading);
-		global.reset->setText(QStringLiteral("Reset all units"));
-		global.defaults->setVisible(false);
-		overviewLayout->addWidget(global.box);
+		// ---- Overview Card 1: Live Pipeline Status ----
+		CardBox statusCard = MakeCard(ObjectName(QStringLiteral("overview.card.status")),
+			QStringLiteral("Live Pipeline Status"), QString(), false);
+		overviewLayout->addWidget(statusCard.frame);
+		auto* pathwayStatus = Help(QString());
+		pathwayStatus->setObjectName(ObjectName(QStringLiteral("overview.status.pathway")));
+		pathwayStatus->setTextFormat(Qt::RichText);
+		statusCard.Add(pathwayStatus);
 		auto* chips = Help(QString());
 		chips->setObjectName(ObjectName(QStringLiteral("global_tier.chips")));
 		chips->setTextFormat(Qt::RichText);
-		overviewLayout->addWidget(chips);
-		// Full precision (owner 2026-10-24): one choice for every tier, on by default (fbo_float32 auto = on);
-		// off only by choice, e.g. on a laptop GPU. The renderer key is read as before.
-		for (const Unit& u : table.units)
-			for (const Toggle& t : u.toggles)
-				if (std::string(t.key) == "fbo_float32")
-				{
-					auto* precisionHost = new QWidget;
-					overviewLayout->addWidget(precisionHost);
-					auto* precisionForm = new QFormLayout(precisionHost);
-					precisionForm->setContentsMargins(0, 0, 0, 0);
-					AddToggleRow(state, Q(u.id), t, precisionForm);
-					if (auto* combo = precisionHost->findChild<QComboBox*>(ObjectName(Q(u.id) + QStringLiteral(".fbo_float32"))))
-						combo->setToolTip(QStringLiteral("Full precision for every tier: each intermediate picture in 32-bit float. "
-							"On (the default, \"auto\"): exact highlights. Off: half-float intermediates save GPU memory bandwidth "
-							"(a few ms per frame at 4K on a laptop GPU), and values above white may round by up to 0.84 of a "
-							"10-bit step. The final output stage is always 32-bit float. Key fbo_float32."));
-					auto* precisionNote = Help(QString());
-					precisionNote->setObjectName(ObjectName(QStringLiteral("full_precision.note")));
-					precisionNote->setProperty("vpvPrecisionNote", true);
-					precisionForm->addRow(precisionNote);
-					state->refreshers.push_back([precisionNote](const std::shared_ptr<State>& state)
-					{
-						std::string v = state->Get("fbo_float32");
-						if (v.empty()) v = TierTable().Default("fbo_float32");
-						const bool off = SameValue(v, "off");
-						precisionNote->setText(off ? QStringLiteral("Full precision is off for this profile: highlights may round by "
-							"up to 0.84 of a 10-bit step (to save GPU time).") : QString());
-						precisionNote->setVisible(off);
-					});
-				}
-		state->own.push_back(global.box);
-		auto applyGlobal = [state](int g)
-		{
-			state->globalChosen = g;
-			std::vector<std::pair<std::string, std::string>> writes;
-			for (const Unit& u : TierTable().units)
-				if (u.Tiered())
-				{
-					const auto unitWrites = ApplyTier(TierTable(), u, GlobalToUnit(TierTable(), u, g), state->MakeGetter());
-					writes.insert(writes.end(), unitWrites.begin(), unitWrites.end());
-				}
-			state->Write(writes);
-			state->RefreshAll();
-		};
-		QObject::connect(global.slider, &QSlider::valueChanged, global.slider, [state, applyGlobal](int g)
-		{
-			if (!state->refreshing) applyGlobal(g);
-		});
-		QObject::connect(global.slider, &QSlider::sliderReleased, global.slider, [state, applyGlobal, global]()
-		{
-			if (!state->refreshing && MatchGlobal(TierTable(), state->MakeGetter()) != global.slider->value()) applyGlobal(global.slider->value());
-		});
-		QObject::connect(global.reset, &QPushButton::clicked, global.reset, [state, applyGlobal]()
-		{
-			if (state->globalChosen >= 0) applyGlobal(state->globalChosen);
-		});
-		state->refreshers.push_back([global, chips](const std::shared_ptr<State>& state)
-		{
-			const int g = MatchGlobal(TierTable(), state->MakeGetter());
-			// The units' own tiers, as chips (usability audit 2026-10-24).
-			const bool highContrast = IsHighContrastEnabled();
-			QStringList parts;
-			for (const Unit& u : TierTable().units)
-				if (u.Tiered())
-				{
-					const int t = MatchTier(TierTable(), u, state->MakeGetter());
-					const QString tierText = t >= 0 ? Q(u.presets[static_cast<size_t>(t)].tier) : QStringLiteral("Custom");
-					parts << (highContrast
-						? QStringLiteral("<span>&nbsp;%1: <b>%2</b>&nbsp;</span>").arg(Q(u.name), tierText)
-						: QStringLiteral("<span style=\"background:#1a2c3e; border-radius:4px;\">&nbsp;%1: <b>%2</b>&nbsp;</span>").arg(Q(u.name), tierText));
-				}
-			chips->setText(parts.join(QStringLiteral("&nbsp; ")));
-			// A mixed state has no slider position: the thumb is hidden rather than parked on Classic.
-			const bool mixed = (g < 0);
-			if (global.slider->property("vpvMixedSlider").toBool() != mixed)
-			{
-				global.slider->setProperty("vpvMixedSlider", mixed);
-				if (QStyle* s = global.slider->style())
-				{
-					s->unpolish(global.slider);
-					s->polish(global.slider);
-				}
-			}
-			if (g >= 0) state->globalChosen = g;
-			global.reset->setEnabled(state->globalChosen >= 0);
-			bool shipped = false;
-			if (g >= 0)
-			{
-				const QSignalBlocker blocker(global.slider);
-				global.slider->setValue(g);
-				global.name->setText(Q(TierTable().tiers[static_cast<size_t>(g)]));
-				global.description->setText(QStringLiteral("Every unit is on its %1 step.").arg(Q(TierTable().tiers[static_cast<size_t>(g)])));
-			}
-			else
-			{
-				// Every unit on its shipped tier (Motion Mid, the others Low) is the shipped state, not Custom.
-				shipped = true;
-				for (const Unit& u : TierTable().units)
-					if (u.Tiered() && MatchTier(TierTable(), u, state->MakeGetter()) !=
-						MatchTier(TierTable(), u, [](const std::string&) { return std::string(); }))
-						shipped = false;
-				global.name->setText(shipped ? QStringLiteral("Mixed (shipped default)") : QStringLiteral("Mixed"));
-				global.description->setText(shipped ?
-					QStringLiteral("Each unit is on the tier VP ships with (below). Click a step to put every unit on it.") :
-					QStringLiteral("The units are on different tiers (below); each tab shows its own. Click a step to put every unit on it."));
-			}
-			global.summary->setText(FormatGlobalTierSummary(TierTable(), g, shipped, *state));
-		});
-
+		statusCard.Add(chips);
 		// "Fallbacks engaged": mirrors the running renderer's heading (the r6 registry's footer
 		// label, config.live.fallbacks); no second registry here.
 		auto* fallbacks = Help(QString());
 		fallbacks->setObjectName(ObjectName(QStringLiteral("fallbacks")));
 		fallbacks->setAccessibleName(QStringLiteral("Fallbacks engaged"));
-		overviewLayout->addWidget(fallbacks);
+		statusCard.Add(fallbacks);
 		auto liveFallbacks = std::make_shared<QPointer<QLabel>>();
 		auto mirror = [fallbacks, liveFallbacks]()
 		{
@@ -4299,73 +4200,413 @@ namespace Vpv
 		});
 		BindVisibilityTimer(root, timer);
 
-		// Dynamic Drive launch card on Overview (replaces the redundant Dynamic Drive stub tab in vpv.units).
+		// ---- Overview Card 2: Overall Processing Preset ----
+		CardBox presetCard = MakeCard(ObjectName(QStringLiteral("overview.card.presets")),
+			QStringLiteral("Overall Processing Preset"),
+			QStringLiteral("Sets Motion, Repair, Scaling, and Output together. A unit without that step uses its nearest lower one; each unit can still be tuned on its own tab."),
+			false);
+		overviewLayout->addWidget(presetCard.frame);
+		auto* presetRowHost = new QWidget;
+		auto* presetRow = new QHBoxLayout(presetRowHost);
+		presetRow->setContentsMargins(0, 0, 0, 0);
+		presetRow->setSpacing(8);
+		struct PresetBtnInfo { int index; QString slug; QString label; QString tip; };
+		const std::vector<PresetBtnInfo> kPresetBtns = {
+			{ 0, QStringLiteral("classic"), QStringLiteral("Classic"), QStringLiteral("No advanced VP processing (straight to the projector).") },
+			{ 1, QStringLiteral("low"), QStringLiteral("Low"), QStringLiteral("Light measured features on every tiered unit.") },
+			{ 2, QStringLiteral("mid"), QStringLiteral("Mid"), QStringLiteral("Full measured motion, deband, grain-aware downscale, and temporal dither.") },
+			{ 3, QStringLiteral("upper"), QStringLiteral("Upper"), QStringLiteral("Highest built step on every tiered unit (quarter-block motion split where available).") },
+		};
+		auto applyGlobal = [state](int g)
+		{
+			state->globalChosen = g;
+			std::vector<std::pair<std::string, std::string>> writes;
+			for (const Unit& u : TierTable().units)
+				if (u.Tiered())
+				{
+					const auto unitWrites = ApplyTier(TierTable(), u, GlobalToUnit(TierTable(), u, g), state->MakeGetter());
+					writes.insert(writes.end(), unitWrites.begin(), unitWrites.end());
+				}
+			state->Write(writes);
+			state->RefreshAll();
+		};
+		std::vector<QPushButton*> presetButtons;
+		for (const PresetBtnInfo& info : kPresetBtns)
+		{
+			auto* btn = new QPushButton(info.label);
+			btn->setObjectName(ObjectName(QStringLiteral("global_tier.btn.") + info.slug));
+			btn->setCheckable(true);
+			btn->setProperty("vpvPresetBtn", true);
+			btn->setToolTip(info.tip);
+			presetRow->addWidget(btn);
+			presetButtons.push_back(btn);
+			const int tierIndex = info.index;
+			QObject::connect(btn, &QPushButton::clicked, btn, [state, applyGlobal, tierIndex]()
+			{
+				if (!state->refreshing) applyGlobal(tierIndex);
+			});
+		}
+		auto* globalReset = new QPushButton(QStringLiteral("Reset to Shipped"));
+		globalReset->setObjectName(ObjectName(QStringLiteral("global_tier.reset")));
+		globalReset->setToolTip(QStringLiteral("Puts Motion, Repair, Scaling, and Output back to VP's shipped default tiers."));
+		presetRow->addWidget(globalReset);
+		presetRow->addStretch(1);
+		presetCard.Add(presetRowHost);
+		state->own.push_back(presetRowHost);
+		QObject::connect(globalReset, &QPushButton::clicked, globalReset, [state]()
+		{
+			if (state->refreshing) return;
+			const Table& t = TierTable();
+			const Vpv::Getter getter = state->MakeGetter();
+			std::vector<std::pair<std::string, std::string>> writes;
+			for (const Unit& u : t.units)
+				if (u.Tiered())
+				{
+					const int shippedTier = MatchTier(t, u, [](const std::string&) { return std::string(); });
+					if (shippedTier >= 0)
+					{
+						const auto unitWrites = ApplyTier(t, u, shippedTier, getter);
+						writes.insert(writes.end(), unitWrites.begin(), unitWrites.end());
+					}
+				}
+			state->globalChosen = -1;
+			state->Write(writes);
+			state->RefreshAll();
+		});
+		auto* globalName = Bold(ObjectName(QStringLiteral("global_tier.name")));
+		auto* globalDescription = Help(QString());
+		globalDescription->setObjectName(ObjectName(QStringLiteral("global_tier.description")));
+		auto* globalSummary = Help(QString());
+		globalSummary->setObjectName(ObjectName(QStringLiteral("global_tier.summary")));
+		globalSummary->setProperty("help", true);
+		presetCard.Add(globalName);
+		presetCard.Add(globalDescription);
+		presetCard.Add(globalSummary);
+
+		state->refreshers.push_back([pathwayStatus, chips, presetButtons, globalName, globalDescription, globalSummary](const std::shared_ptr<State>& state)
+		{
+			// Line 1: mode + active Rendering profile name.
+			QString activeProfile = PlainProfileName(state);
+			if (activeProfile.compare(kDefaultProfile, Qt::CaseInsensitive) == 0)
+				activeProfile = QStringLiteral("Default (vprenderer)");
+			const QString modeText = state->vpvOn ? QStringLiteral("VP-V Enhanced") : QStringLiteral("Original (Bill's Baseline)");
+			pathwayStatus->setText(QStringLiteral("Mode: <b>%1</b> &nbsp;&middot;&nbsp; Rendering profile: <b>%2</b>")
+				.arg(modeText.toHtmlEscaped(), activeProfile.toHtmlEscaped()));
+
+			const int g = MatchGlobal(TierTable(), state->MakeGetter());
+			// Line 2: live per-unit tier summary.
+			const bool highContrast = IsHighContrastEnabled();
+			QStringList parts;
+			for (const Unit& u : TierTable().units)
+				if (u.Tiered())
+				{
+					const int t = MatchTier(TierTable(), u, state->MakeGetter());
+					const QString tierText = t >= 0 ? Q(u.presets[static_cast<size_t>(t)].tier) : QStringLiteral("Custom");
+					parts << (highContrast
+						? QStringLiteral("<span>%1: <b>%2</b></span>").arg(Q(u.name), tierText)
+						: QStringLiteral("<span style=\"background:#1a2c3e; border-radius:4px;\">&nbsp;%1: <b>%2</b>&nbsp;</span>").arg(Q(u.name), tierText));
+				}
+			chips->setText(parts.join(QStringLiteral(" &middot; ")));
+
+			for (size_t i = 0; i < presetButtons.size(); ++i)
+			{
+				const QSignalBlocker blocker(presetButtons[i]);
+				presetButtons[i]->setChecked(g == static_cast<int>(i));
+			}
+			if (g >= 0) state->globalChosen = g;
+			bool shipped = false;
+			if (g >= 0)
+			{
+				globalName->setText(Q(TierTable().tiers[static_cast<size_t>(g)]));
+				globalDescription->setText(QStringLiteral("Every tiered unit is on its %1 step.").arg(Q(TierTable().tiers[static_cast<size_t>(g)])));
+			}
+			else
+			{
+				shipped = true;
+				for (const Unit& u : TierTable().units)
+					if (u.Tiered() && MatchTier(TierTable(), u, state->MakeGetter()) !=
+						MatchTier(TierTable(), u, [](const std::string&) { return std::string(); }))
+						shipped = false;
+				globalName->setText(shipped ? QStringLiteral("Mixed (shipped default)") : QStringLiteral("Custom"));
+				globalDescription->setText(shipped ?
+					QStringLiteral("Each unit is on the tier VP ships with. Choose a preset above to set every unit together.") :
+					QStringLiteral("The units are on different tiers or custom settings; each tab shows its own. Choose a preset above or Reset to Shipped."));
+			}
+			globalSummary->setText(FormatGlobalTierSummary(TierTable(), g, shipped, *state));
+		});
+
+		// ---- Overview Card 3: 32-bit High-Precision Processing ----
+		// Full precision (owner 2026-10-24): one choice for every tier, on by default (fbo_float32 auto = on);
+		// off only by choice, e.g. on a laptop GPU. The renderer key is read as before.
+		for (const Unit& u : table.units)
+			for (const Toggle& t : u.toggles)
+				if (std::string(t.key) == "fbo_float32")
+				{
+					CardBox precisionCard = MakeCard(ObjectName(QStringLiteral("overview.card.precision")),
+						QStringLiteral("32-bit High-Precision Processing"),
+						QStringLiteral("One choice for every tier: keeps intermediate pictures in 32-bit float by default."),
+						false);
+					overviewLayout->addWidget(precisionCard.frame);
+					AddToggleRow(state, Q(u.id), t, precisionCard.Form());
+					if (auto* combo = precisionCard.body->findChild<QComboBox*>(ObjectName(Q(u.id) + QStringLiteral(".fbo_float32"))))
+						combo->setToolTip(QStringLiteral("Full precision for every tier: each intermediate picture in 32-bit float. "
+							"On (the default, \"auto\"): exact highlights. Off: half-float intermediates save GPU memory bandwidth "
+							"(a few ms per frame at 4K on a laptop GPU), and values above white may round by up to 0.84 of a "
+							"10-bit step. The final output stage is always 32-bit float. Key fbo_float32."));
+					auto* precisionNote = Help(QString());
+					precisionNote->setObjectName(ObjectName(QStringLiteral("full_precision.note")));
+					precisionNote->setProperty("vpvPrecisionNote", true);
+					precisionCard.Form()->addRow(precisionNote);
+					state->refreshers.push_back([precisionNote](const std::shared_ptr<State>& state)
+					{
+						std::string v = state->Get("fbo_float32");
+						if (v.empty()) v = TierTable().Default("fbo_float32");
+						const bool off = SameValue(v, "off");
+						precisionNote->setText(off ? QStringLiteral("Full precision is off for this profile: highlights may round by "
+							"up to 0.84 of a 10-bit step (to save GPU time).") : QString());
+						precisionNote->setVisible(off);
+					});
+				}
+
+		// ---- Overview Card 4: Dedicated VP-V Pages ----
 		if (host.subPages && host.openPage)
 		{
 			const std::vector<SubPage> driveSubs = host.subPages(QStringLiteral("drive"));
-			if (!driveSubs.empty())
+			const std::vector<SubPage> outputSubs = host.subPages(QStringLiteral("output"));
+			if (!driveSubs.empty() || !outputSubs.empty())
 			{
-				CardBox driveCard = MakeCard(ObjectName(QStringLiteral("overview.card.drive")),
-					QStringLiteral("Dynamic Drive"),
-					QStringLiteral("Projector LED dimming and black protection live on the Dynamic Drive page."), false);
-				overviewLayout->addWidget(driveCard.frame);
-				for (const SubPage& sub : driveSubs)
+				CardBox launchCard = MakeCard(ObjectName(QStringLiteral("overview.card.launch")),
+					QStringLiteral("Dedicated VP-V Pages"),
+					QStringLiteral("Open full-page tools for projector LED dimming and meter-based 3D LUT calibration."),
+					false);
+				overviewLayout->addWidget(launchCard.frame);
+				auto* launchRowHost = new QWidget;
+				auto* launchRow = new QHBoxLayout(launchRowHost);
+				launchRow->setContentsMargins(0, 0, 0, 0);
+				launchRow->setSpacing(10);
+				auto addLaunchButtons = [&](const QString& unitId, const std::vector<SubPage>& subs)
 				{
-					auto* open = new QPushButton(QStringLiteral("Open %1").arg(sub.title));
-					open->setObjectName(ObjectName(QStringLiteral("drive.subpage.") + sub.pageName));
-					open->setToolTip(sub.description);
-					open->setMaximumWidth(260);
-					const QString pageName = sub.pageName;
-					QObject::connect(open, &QPushButton::clicked, open, [state, pageName]() { state->host.openPage(pageName); });
-					driveCard.Add(open);
-				}
+					for (const SubPage& sub : subs)
+					{
+						auto* open = new QPushButton(QStringLiteral("Open %1").arg(sub.title));
+						open->setObjectName(ObjectName(unitId + QStringLiteral(".subpage.") + sub.pageName));
+						open->setToolTip(sub.description);
+						const QString pageName = sub.pageName;
+						QObject::connect(open, &QPushButton::clicked, open, [state, pageName]() { state->host.openPage(pageName); });
+						launchRow->addWidget(open);
+					}
+				};
+				addLaunchButtons(QStringLiteral("drive"), driveSubs);
+				addLaunchButtons(QStringLiteral("output"), outputSubs);
+				launchRow->addStretch(1);
+				launchCard.Add(launchRowHost);
 			}
 		}
+		overviewLayout->addStretch();
 
 		for (const Unit& u : table.units)
 		{
 			if (std::string(u.id) == "drive") continue;
 			PopulateUnitPage(state, u, tabs);
 		}
-		// GEM-058 (owner Q7): "On both pathways" cards get their own unlocked tab instead of repeating
-		// beneath every unit tab. Not added to state->vpvOnlyTabs so it remains enabled on Original.
+		// GEM-058 (owner Q7): "System" (both pathways) tab stays unlocked on Original (NOT in state->vpvOnlyTabs).
+		// Renders 5 consolidated cards: Room Light Sensor, Capture & Signal Bridges, File Playback,
+		// Global Shortcuts & Problem Reports, and Quick Profile Rules.
 		if (host.bothPathwayCards)
 		{
-			QWidget* both = NewTabPage(QStringLiteral("Both pathways"));
+			QWidget* both = NewTabPage(QStringLiteral("System"));
 			both->setObjectName(ObjectName(QStringLiteral("both")));
-			tabs->addTab(both, QStringLiteral("Both pathways"));
-			tabs->setTabToolTip(tabs->count() - 1, QStringLiteral("VP-V settings that act on both pathways (usable on Original too)."));
+			tabs->addTab(both, QStringLiteral("System"));
+			tabs->setTabToolTip(tabs->count() - 1, QStringLiteral("VP-V system settings that stay active on both VP-V and Original pathways."));
 			auto* bothLayout = new QVBoxLayout(both);
 			bothLayout->setContentsMargins(4, 8, 4, 4);
 			bothLayout->setSpacing(8);
-			auto* bothTitle = Help(QStringLiteral("<b>On both pathways</b> - these VP-V settings are not switched off by the Original pathway."));
+			auto* bothTitle = Help(QStringLiteral("<b>System (both pathways)</b> \u2014 these VP-V settings stay active on both VP-V and Original pathways."));
 			bothTitle->setTextFormat(Qt::RichText);
 			bothTitle->setObjectName(ObjectName(QStringLiteral("both.title")));
 			bothLayout->addWidget(bothTitle);
+
+			QWidget* captureBridgesCard = nullptr;
+			QWidget* shortcutsReportsCard = nullptr;
+			std::vector<QWidget*> extraBothCards;
 			for (QWidget* card : host.bothPathwayCards())
-				if (card) bothLayout->addWidget(card);
-			// Cards Bill's pages built for this block (VpvProfileUseRows.h).
+			{
+				if (!card) continue;
+				if (card->objectName() == QStringLiteral("vpv.system.card.capture_bridges"))
+					captureBridgesCard = card;
+				else if (card->objectName() == QStringLiteral("vpv.system.card.shortcuts_reports"))
+					shortcutsReportsCard = card;
+				else
+					extraBothCards.push_back(card);
+			}
+
+			UnitCard roomLightsUnit{};
+			UnitCard filePlaybackUnit{};
+			std::vector<UnitCard> profileUseUnits;
+			std::vector<UnitCard> extraUnitCards;
 			if (host.unitCards)
+			{
 				for (const UnitCard& extra : host.unitCards(QStringLiteral("both")))
 				{
 					if (!extra.body) continue;
-					CardBox card = MakeCard(ObjectName(QStringLiteral("both.card.") + extra.id), extra.title, extra.help, false);
-					bothLayout->addWidget(card.frame);
-					card.Add(extra.body);
+					if (extra.id == QStringLiteral("room_lights"))
+						roomLightsUnit = extra;
+					else if (extra.id == QStringLiteral("file_playback"))
+						filePlaybackUnit = extra;
+					else if (extra.id.startsWith(QStringLiteral("profile_use_")))
+						profileUseUnits.push_back(extra);
+					else
+						extraUnitCards.push_back(extra);
 				}
+			}
+
+			// 1. Room Light Sensor
+			if (roomLightsUnit.body)
+			{
+				CardBox card = MakeCard(ObjectName(QStringLiteral("system.card.room_lights")),
+					roomLightsUnit.title, roomLightsUnit.help, false);
+				bothLayout->addWidget(card.frame);
+				card.Add(roomLightsUnit.body);
+			}
+			// 2. Capture & Signal Bridges
+			if (captureBridgesCard) bothLayout->addWidget(captureBridgesCard);
+			// 3. File Playback
+			if (filePlaybackUnit.body)
+			{
+				CardBox card = MakeCard(ObjectName(QStringLiteral("system.card.file_playback")),
+					filePlaybackUnit.title, filePlaybackUnit.help, false);
+				bothLayout->addWidget(card.frame);
+				card.Add(filePlaybackUnit.body);
+			}
+			// 4. Global Shortcuts & Problem Reports
+			if (shortcutsReportsCard) bothLayout->addWidget(shortcutsReportsCard);
+			// 5. Quick Profile Rules (Queue + VP Renderer grouped in one card)
+			if (!profileUseUnits.empty())
+			{
+				CardBox card = MakeCard(ObjectName(QStringLiteral("system.card.profile_rules")),
+					QStringLiteral("Quick Profile Rules"),
+					QStringLiteral("Plain controls that write the Queue and VP Renderer profile selection rules."), false);
+				bothLayout->addWidget(card.frame);
+				for (const UnitCard& pu : profileUseUnits)
+				{
+					auto* subHeading = Bold(ObjectName(QStringLiteral("system.profile_rules.") + pu.id));
+					subHeading->setText(pu.title);
+					card.Add(subHeading);
+					card.Add(pu.body);
+				}
+			}
+			for (QWidget* card : extraBothCards) bothLayout->addWidget(card);
+			for (const UnitCard& extra : extraUnitCards)
+			{
+				CardBox card = MakeCard(ObjectName(QStringLiteral("both.card.") + extra.id), extra.title, extra.help, false);
+				bothLayout->addWidget(card.frame);
+				card.Add(extra.body);
+			}
 			bothLayout->addStretch();
 			state->upstreamIndex.AddSubtree(both);
 		}
+
+		// ---- Developer tab (vpv.developer): last tab on vpv.units, hidden by default ----
 		{
-			auto* more = new QTabWidget;
-			more->setObjectName(ObjectName(QStringLiteral("overview.more")));
-			more->setDocumentMode(true);
-			overviewLayout->addWidget(more);
-			PopulateRetirementPage(state, more);
-			PopulateExpertPage(state, more);
-			more->setTabToolTip(0, QStringLiteral("Switches proposed for retirement (still working until you decide), with why and where each is."));
-			more->setTabToolTip(1, QStringLiteral("For testing and measurement: the stage order, stages switched off, and diagnostics."));
-			overviewLayout->addStretch();
+			QWidget* devPage = NewTabPage(QStringLiteral("Developer"));
+			devPage->setObjectName(ObjectName(QStringLiteral("developer")));
+			state->vpvOnlyTabs.push_back(devPage);
+			const int devTabIdx = tabs->addTab(devPage, QStringLiteral("Developer"));
+			tabs->setTabToolTip(devTabIdx, QStringLiteral("Developer tools: pipeline overrides, camera diagnostics, measured internals, pipeline inspector, and retirement manager."));
+			tabs->setTabVisible(devTabIdx, false);
+			QObject::connect(devToggle, &QCheckBox::toggled, tabs, [tabs, devTabIdx](bool checked)
+			{
+				if (!checked && tabs->currentIndex() == devTabIdx)
+					tabs->setCurrentIndex(0);
+				tabs->setTabVisible(devTabIdx, checked);
+			});
+
+			auto* devOuter = new QVBoxLayout(devPage);
+			devOuter->setSpacing(8);
+			devOuter->addWidget(Help(QStringLiteral(
+				"Developer diagnostics, measured internals, pipeline stage inspection, and retirement decisions. Everyday viewing never needs these.")));
+
+			auto* devPages = new QTabWidget;
+			devPages->setObjectName(ObjectName(QStringLiteral("developer.pages")));
+			devPages->setProperty("vpvSubTabs", true);
+			devPages->setDocumentMode(true);
+			devOuter->addWidget(devPages);
+
+			// Sub-tab 1: Pipeline & Diagnostics
+			QVBoxLayout* pipeDiagLayout = nullptr;
+			QWidget* pipeDiagPage = NewSubPage(ObjectName(QStringLiteral("developer.pipeline_diagnostics")), QStringLiteral("Developer"), &pipeDiagLayout);
+			devPages->addTab(pipeDiagPage, QStringLiteral("Pipeline & Diagnostics"));
+			devPages->setTabToolTip(0, QStringLiteral("Expert pipeline overrides, camera diagnostics, readouts, and draft switches."));
+			PopulateExpertPage(state, pipeDiagLayout);
+			MakeCameraDebugCard(state, pipeDiagLayout);
+
+			// Sub-tab 2: Measured Internals
+			QVBoxLayout* internalsLayout = nullptr;
+			QWidget* internalsPage = NewSubPage(ObjectName(QStringLiteral("developer.measured_internals")), QStringLiteral("Developer"), &internalsLayout);
+			devPages->addTab(internalsPage, QStringLiteral("Measured Internals"));
+			devPages->setTabToolTip(1, QStringLiteral("Measured estimator and scaler thresholds (leave alone for normal viewing)."));
+
+			std::set<std::string> unusedDev;
+			for (const Card& spec : Organisation())
+			{
+				if (std::string(spec.unit) != "developer") continue;
+				const std::string cid = spec.id ? spec.id : "";
+				const bool isInternals = (cid == "motion_internals" || cid == "scaling_internals");
+				CardBox card = MakeCard(ObjectName(QStringLiteral("developer.card.") + Q(spec.id)),
+					Q(spec.title), Q(spec.help), spec.collapsed);
+				(isInternals ? internalsLayout : pipeDiagLayout)->addWidget(card.frame);
+				FillCard(state, nullptr, QStringLiteral("developer"), spec, card, unusedDev, devPage);
+			}
+			pipeDiagLayout->addStretch();
+			internalsLayout->addStretch();
+
+			// Sub-tab 3: Pipeline Inspector (consolidated planned & stages cards for all units)
+			QVBoxLayout* inspectorLayout = nullptr;
+			QWidget* inspectorPage = NewSubPage(ObjectName(QStringLiteral("developer.pipeline_inspector")), QStringLiteral("Developer"), &inspectorLayout);
+			devPages->addTab(inspectorPage, QStringLiteral("Pipeline Inspector"));
+			devPages->setTabToolTip(2, QStringLiteral("Planned pipeline slots and stage order per unit."));
+			inspectorLayout->addWidget(Help(QStringLiteral(
+				"Reserved planned stages and pipeline slot order for every VP-V unit (with each stage's fallback).")));
+			for (const Unit& u : table.units)
+			{
+				const QString uId = Q(u.id);
+				const QString uName = Q(u.name);
+				if (!u.planned.empty())
+				{
+					CardBox planned = MakeCard(ObjectName(uId + QStringLiteral(".card.planned")),
+						QStringLiteral("%1 \u2014 Planned (not yet implemented)").arg(uName),
+						QStringLiteral("Reserved in the pipeline; their components are not built yet."), true);
+					inspectorLayout->addWidget(planned.frame);
+					for (const Planned& p : u.planned)
+					{
+						auto* box = new QCheckBox(QStringLiteral("(not yet implemented)"));
+						box->setObjectName(ObjectName(uId + QStringLiteral(".planned.") + Q(p.key)));
+						box->setEnabled(false);
+						box->setToolTip(QStringLiteral("%1. Planned key %2 (slot %3): reserved in the pipeline; its component is not built yet.")
+							.arg(Q(p.label), Q(p.key), Q(p.slot)));
+						auto* name = new QLabel(Q(p.label));
+						name->setWordWrap(true);
+						planned.Form()->addRow(name, box);
+					}
+				}
+				CardBox stages = MakeCard(ObjectName(uId + QStringLiteral(".card.stages")),
+					QStringLiteral("%1 \u2014 Stages (pipeline order)").arg(uName), QString(), true);
+				inspectorLayout->addWidget(stages.frame);
+				auto* slotsHeading = Bold(ObjectName(uId + QStringLiteral(".slots_heading")));
+				slotsHeading->setText(QStringLiteral("Each stage and what it falls back to"));
+				stages.Add(slotsHeading);
+				QStringList lines;
+				for (const char* id : u.slotIds) lines << SlotLine(table, id);
+				auto* slotLabel = Help(lines.join(QStringLiteral("<br>")));
+				slotLabel->setTextFormat(Qt::RichText);
+				slotLabel->setObjectName(ObjectName(uId + QStringLiteral(".slots")));
+				stages.Add(slotLabel);
+			}
+			inspectorLayout->addStretch();
+
+			// Sub-tab 4: Retirement Manager
+			PopulateRetirementPage(state, devPages);
+			devPages->setTabToolTip(3, QStringLiteral("Switches proposed for retirement (still working until you decide), with why and where each is."));
 		}
 		QWidget* drivePage = OrganiseDynamicDrive(host, state);
 		OrganiseRendering(host, &state->upstreamIndex);

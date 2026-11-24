@@ -62,7 +62,7 @@ namespace Vpv
 	};
 	struct Card
 	{
-		const char* unit;          // unit id (vpv-tiers.json), or "retirement"
+		const char* unit;          // unit id (vpv-tiers.json), "retirement", or "developer"
 		const char* id;            // object name part: vpv.<unit>.card.<id>
 		const char* title;
 		const char* help;          // may be nullptr
@@ -87,8 +87,6 @@ namespace Vpv
 			{ "input", "content_tuning", "Content labels: tuning", "How long a label (film, video, sports) is held before it may change.", true, false, {
 				{ K::Row, "intent_content_hold_seconds" } },
 				{ L::Feature, "Content labels", "intent_content", nullptr, "off", "off" } },
-			{ "input", "diagnostics", "Readouts (diagnostics)", "Shown in the stats overlay; they change nothing in the picture.", true, true, {
-				{ K::Row, "intent_display" }, { K::Row, "dv_compare_capture_folder" } } },
 
 			// ---- Motion ----
 			{ "motion", "engine", "Motion engine",
@@ -134,9 +132,6 @@ namespace Vpv
 				{ K::Row, "intent_motion_policy" }, { K::Row, "intent_motion_min" }, { K::Row, "intent_motion_min_shot_s" },
 				{ K::Row, "intent_ease_s" } },
 				{ L::Feature, "Per-shot easing", "intent_motion", nullptr, "off", "off" } },
-			{ "motion", "internals", "Motion estimator (measured, leave alone)",
-				"The estimator's measured internals. Normal viewing never needs these.", true, true, {
-				{ K::Section, "dejudderEstimation" } } },
 
 			// ---- Repair ----
 			{ "repair", "deband", "Deband",
@@ -189,9 +184,6 @@ namespace Vpv
 				"Keeps the SSIM and CNN scalers' added detail steady along motion. Normal viewing never needs these.", true, false, {
 				{ K::Toggle, "ssim_residual_stabilise" }, { K::Toggle, "cnn_residual_stabilise" },
 				{ K::Row, "ssim_bitrate_floor" } } },
-			{ "scaling", "internals", "Grain-aware scaler thresholds (measured, leave alone)",
-				"Measured thresholds and weights. Normal viewing never needs these.", true, true, {
-				{ K::Section, "adaptiveDownscale" }, { K::Section, "adaptiveUpscale" }, { K::Hide, "upscale_light" } } },
 
 			// ---- Colour ----
 			{ "colour", "dv", "Display mapping", "How Dolby Vision pictures are mapped to your display. VP's mapping is an approximation of Dolby's, not certified; Original uses libplacebo's own mapping.", false, false, {
@@ -247,7 +239,17 @@ namespace Vpv
 				{ K::Row, "dither_grain_tolerance_scale" },
 				{ K::Note, "It also follows the grain map (Scaling > Grain-aware downscale)." } },
 				{ L::Feature, "VP's sigma-delta dither (the Output tier)", "temporal_dither", nullptr, "off,libplacebo", "auto" } },
-			{ "output", "draft", "Draft (no effect yet)", "Reserved draft switch; not yet wired in the renderer.", true, true, {
+
+			// ---- Developer: diagnostics, measured internals and drafts ----
+			{ "developer", "input_diagnostics", "Readouts (diagnostics)", "Shown in the stats overlay; they change nothing in the picture.", true, true, {
+				{ K::Row, "intent_display" }, { K::Row, "dv_compare_capture_folder" } } },
+			{ "developer", "motion_internals", "Motion estimator (measured, leave alone)",
+				"The estimator's measured internals. Normal viewing never needs these.", true, true, {
+				{ K::Section, "dejudderEstimation" } } },
+			{ "developer", "scaling_internals", "Grain-aware scaler thresholds (measured, leave alone)",
+				"Measured thresholds and weights. Normal viewing never needs these.", true, true, {
+				{ K::Section, "adaptiveDownscale" }, { K::Section, "adaptiveUpscale" }, { K::Hide, "upscale_light" } } },
+			{ "developer", "output_draft", "Draft (no effect yet)", "Reserved draft switch; not yet wired in the renderer.", true, true, {
 				{ K::Row, "repeat_render_reuse" } } },
 
 			// ---- Proposed retirement: the candidates' controls (they still work until approved) ----
