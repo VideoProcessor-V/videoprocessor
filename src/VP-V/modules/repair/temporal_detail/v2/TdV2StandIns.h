@@ -57,6 +57,7 @@ namespace TdV2
 		FaceNonRigidMask,
 		MissingMotionNoWholeBlend,
 		FaceMaskSizeMismatch,
+		GpuPrivateScratchFallback,
 		Count
 	};
 
@@ -144,7 +145,9 @@ namespace TdV2
 			{ StandInKind::MissingMotionNoWholeBlend, "td.fallback.no_motion_l4",
 			  "L4 missing motion field: restricted to exact-copy blocks or skipped", "Valid upstream P3/P3b motion field" },
 			{ StandInKind::FaceMaskSizeMismatch, "td.fallback.face_mask_size_mismatch",
-			  "Pass-1 face mask size mismatch (trailing cells masked fail-closed)", "Matching cell-grid faceMask vector / pl_tex" }
+			  "Pass-1 face mask size mismatch (trailing cells masked fail-closed)", "Matching cell-grid faceMask vector / pl_tex" },
+			{ StandInKind::GpuPrivateScratchFallback, "td.gpu.private_scratch_fallback",
+			  "GPU private scratch fallback (arena == nullptr)", "Shared ScratchArena kUserTemporalDetail" }
 		};
 		const size_t idx = static_cast<size_t>(kind);
 		if (idx < static_cast<size_t>(StandInKind::Count))

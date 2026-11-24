@@ -1772,6 +1772,12 @@ namespace TdV2
 		// Optional Pass-1 face / non-rigid cell mask (cellsW * cellsH luma-cell layout matching FrameProcessInput::faceMask;
 		// non-zero forces delta == 0 on all masked pixels and excludes masked cells from 3x3 covariance pooling; H13).
 		const std::vector<uint8_t>* faceMask = nullptr;
+
+		// Optional luma-parity rack-focus & matched-focus optical bokeh cell masks (cellsW * cellsH, LOW-3):
+		// - explicitFocusChangeCells != 0: hard-vetoes ALL coded chroma bands (L, M, H -> delta == 0).
+		// - explicitDefocusedCells != 0: hard-vetoes coded chroma M & H always; L band allowed ONLY under BokehMode::LowBandCellOnly.
+		const std::vector<uint8_t>* explicitFocusChangeCells = nullptr;
+		const std::vector<uint8_t>* explicitDefocusedCells = nullptr;
 	};
 
 	struct ChromaProcessResult
@@ -1796,6 +1802,7 @@ namespace TdV2
 		size_t guardViolationCells = 0;
 		size_t cflFallbackCells = 0;
 		size_t faceMaskedCells = 0;
+		size_t focusVetoCells = 0;
 		size_t nonFiniteCells = 0;
 		size_t singularCells = 0;
 		size_t singleRefA2Cells = 0;
@@ -2089,6 +2096,39 @@ namespace TdV2
 			if (res.faceMaskedCells > 0 && standIns != nullptr)
 				standIns->Engage(StandInKind::FaceNonRigidMask);
 
+			// Rack-focus & optical bokeh hard-veto parity with luma TdV2ReferenceEngine (LOW-3 & Owner Q4):
+			// - explicitFocusChangeCells != 0: vetoes ALL bands (L, M, H -> delta == 0).
+			// - explicitDefocusedCells != 0: vetoes M & H always; L band allowed ONLY under BokehMode::LowBandCellOnly.
+			auto isFocusChangeCell = [&](size_t cellIdx) -> bool
+			{
+				return in.explicitFocusChangeCells != nullptr &&
+				       cellIdx < in.explicitFocusChangeCells->size() &&
+				       (*in.explicitFocusChangeCells)[cellIdx] != 0u;
+			};
+			auto isDefocusedCell = [&](size_t cellIdx) -> bool
+			{
+				return in.explicitDefocusedCells != nullptr &&
+				       cellIdx < in.explicitDefocusedCells->size() &&
+				       (*in.explicitDefocusedCells)[cellIdx] != 0u;
+			};
+			auto isFocusVetoedBand = [&](size_t cellIdx, int bandIdx) -> bool
+			{
+				if (isFocusChangeCell(cellIdx))
+					return true;
+				if (isDefocusedCell(cellIdx))
+				{
+					if (bandIdx >= 1)
+						return true;
+					return cfg_.bokehMode != BokehMode::LowBandCellOnly;
+				}
+				return false;
+			};
+			for (size_t ci = 0; ci < numCells; ++ci)
+			{
+				if (isFocusChangeCell(ci) || isDefocusedCell(ci))
+					++res.focusVetoCells;
+			}
+
 			// =========================================================================
 			// Branch A: Unidentified coded grid -> Visible coarse-band-only chroma mode
 			// =========================================================================
@@ -2280,8 +2320,8 @@ namespace TdV2
 						for (int cx = 0; cx < res.cellsW; ++cx)
 						{
 							const size_t cIdx = static_cast<size_t>(cy) * res.cellsW + cx;
-							// Pass-1 face / non-rigid mask (H13): skip cell solve so cellW[k][cIdx] stays 0.0.
-							if (isFaceMaskedCell(cIdx))
+							// Pass-1 face / non-rigid mask (H13) and rack-focus/bokeh L-band veto (LOW-3): skip cell solve so cellW[k][cIdx] stays 0.0.
+							if (isFaceMaskedCell(cIdx) || isFocusVetoedBand(cIdx, 0))
 								continue;
 
 							double cellGrainVar = 0.0;
@@ -2338,7 +2378,7 @@ namespace TdV2
 									const double lx = in.siting.CodedToLumaX(static_cast<double>(x), dSubX);
 									const int pcx = (std::max)(0, (std::min)(res.cellsW - 1, static_cast<int>(std::floor(lx)) / cellPx));
 									const size_t pCell = static_cast<size_t>(pcy) * res.cellsW + pcx;
-									if (isFaceMaskedCell(pCell))
+									if (isFaceMaskedCell(pCell) || isFocusVetoedBand(pCell, 0))
 										continue;
 									const size_t pIdx = static_cast<size_t>(y) * dW + x;
 
@@ -2504,7 +2544,7 @@ namespace TdV2
 							const size_t cIdx = static_cast<size_t>(cy) * res.cellsW + cx;
 							const size_t pIdx = static_cast<size_t>(y) * dW + x;
 
-							if (isFaceMaskedCell(cIdx))
+							if (isFaceMaskedCell(cIdx) || isFocusVetoedBand(cIdx, 0))
 							{
 								outDelta.at(x, y) = 0.0;
 								continue;
@@ -3225,7 +3265,7 @@ namespace TdV2
 									const double lx = in.siting.CodedToLumaX(static_cast<double>(x), cSubX);
 									const int pcx = (std::max)(0, (std::min)(res.cellsW - 1, static_cast<int>(std::floor(lx)) / cellPx));
 									const size_t pCell = static_cast<size_t>(pcy) * res.cellsW + pcx;
-									if (isFaceMaskedCell(pCell))
+									if (isFaceMaskedCell(pCell) || isFocusVetoedBand(pCell, 2))
 										continue;
 									const size_t pIdx = static_cast<size_t>(y) * cW + x;
 
@@ -3337,7 +3377,7 @@ namespace TdV2
 									const double lx = in.siting.CodedToLumaX(static_cast<double>(x), cSubX);
 									const int pcx = (std::max)(0, (std::min)(res.cellsW - 1, static_cast<int>(std::floor(lx)) / cellPx));
 									const size_t pCell = static_cast<size_t>(pcy) * res.cellsW + pcx;
-									if (isFaceMaskedCell(pCell))
+									if (isFaceMaskedCell(pCell) || isFocusVetoedBand(pCell, b))
 										continue;
 									const size_t pIdx = static_cast<size_t>(y) * cW + x;
 
@@ -3450,12 +3490,13 @@ namespace TdV2
 							if (solved.nonFiniteClosed) { nonFiniteCellFlag[cIdx] = 1u; continue; }
 							if (solved.singular) { singularCellFlag[cIdx] = 1u; continue; }
 
+							const double focusGate = isFocusVetoedBand(cIdx, b) ? 0.0 : 1.0;
 							for (int ai = 0; ai < activeK; ++ai)
 							{
 								const int k = activeIdx[ai];
 								const WarpedChromaRef& wr = refs[static_cast<size_t>(k)];
 								const double mGate = (b == 0) ? wr.motionGate.gateL[cIdx] : wr.motionGate.gateMH[cIdx];
-								cellW[b][k][cIdx] = solved.weights[ai] * mGate;
+								cellW[b][k][cIdx] = solved.weights[ai] * mGate * focusGate;
 							}
 						}
 
@@ -3689,7 +3730,9 @@ namespace TdV2
 									{
 										const double lx = in.siting.CodedToLumaX(static_cast<double>(bx + i), cSubX);
 										const int cx = (std::max)(0, (std::min)(res.cellsW - 1, static_cast<int>(std::floor(lx)) / cellPx));
-										if (isFaceMaskedCell(static_cast<size_t>(cy) * res.cellsW + cx))
+										const size_t bCellIdx = static_cast<size_t>(cy) * res.cellsW + cx;
+										if (isFaceMaskedCell(bCellIdx) || isFocusChangeCell(bCellIdx) ||
+										    (isDefocusedCell(bCellIdx) && cfg_.bokehMode != BokehMode::LowBandCellOnly))
 										{
 											outCodedDelta.at(bx + i, by + j) = 0.0;
 											continue;
@@ -3752,7 +3795,8 @@ namespace TdV2
 						if (x1 <= x0) continue;
 
 						const size_t cIdx = static_cast<size_t>(cy) * res.cellsW + cx;
-						if (isFaceMaskedCell(cIdx))
+						if (isFaceMaskedCell(cIdx) || isFocusChangeCell(cIdx) ||
+						    (isDefocusedCell(cIdx) && cfg_.bokehMode != BokehMode::LowBandCellOnly))
 							continue;
 						double ownGrainE = 0.0, ownGrainFineE = 0.0, inFineE = 0.0, outFineE = 0.0;
 						double inCovOwn = 0.0, outCovOwn = 0.0;
@@ -3839,8 +3883,9 @@ namespace TdV2
 			res.deliveredDeltaCr = UpsampleDeltaToDelivered(
 				res.codedDeltaCr, lumaW, lumaH, in.codedSubsampling, in.deliveredFormat, in.siting, lumaActive, standIns);
 
-			// Keep delivered delta strictly 0.0 at every Pass-1 face-masked pixel (even when coded->delivered upsampling straddles a mask edge).
-			if (res.faceMaskedCells > 0)
+			// Keep delivered delta strictly 0.0 at every Pass-1 face-masked or rack-focus-vetoed pixel
+			// (even when coded->delivered upsampling straddles a mask edge).
+			if (res.faceMaskedCells > 0 || res.focusVetoCells > 0)
 			{
 				for (int y = delivActive.y0; y < delivActive.y1; ++y)
 				{
@@ -3850,7 +3895,9 @@ namespace TdV2
 					{
 						const double lx = in.siting.CodedToLumaX(static_cast<double>(x), dSubX);
 						const int cx = (std::max)(0, (std::min)(res.cellsW - 1, static_cast<int>(std::floor(lx)) / cellPx));
-						if (isFaceMaskedCell(static_cast<size_t>(cy) * res.cellsW + cx))
+						const size_t dCellIdx = static_cast<size_t>(cy) * res.cellsW + cx;
+						if (isFaceMaskedCell(dCellIdx) || isFocusChangeCell(dCellIdx) ||
+						    (isDefocusedCell(dCellIdx) && cfg_.bokehMode != BokehMode::LowBandCellOnly))
 						{
 							res.deliveredDeltaCb.at(x, y) = 0.0;
 							res.deliveredDeltaCr.at(x, y) = 0.0;

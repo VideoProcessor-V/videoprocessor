@@ -621,13 +621,49 @@ namespace Gpu
 			return 3u * px * bRG32 + 3u * px * bRGBA32;
 		}
 
+		// Format-aware persistent VRAM bytes for ApplyChromaDeltaGpu on ONE active delivery path at exact coded/delivered
+		// dimensions (NEVER discarding true incoming chroma: 4:2:0 budgets 1/4 luma pixels; 4:2:2 budgets 1/2; 4:4:4/RGB
+		// budgets full luma resolution for the active path only instead of simultaneous worst-case YUV + RGB 4K!).
+		static uint64_t EstimatedChromaVramBytesFor(
+			int lumaW, int lumaH, DeliveredChromaFormat deliv, ChromaSubsampling coded)
+		{
+			if (lumaW <= 0 || lumaH <= 0)
+				return 0;
+			const int dSubX = DeliveredSubsampleX(deliv);
+			const int dSubY = DeliveredSubsampleY(deliv);
+			const int cSubX = SubsampleX(coded);
+			const int cSubY = SubsampleY(coded);
+			const uint64_t dPx = static_cast<uint64_t>(ChromaDetail::SubsampledDim(lumaW, dSubX)) *
+			                     static_cast<uint64_t>(ChromaDetail::SubsampledDim(lumaH, dSubY));
+			const uint64_t cPx = static_cast<uint64_t>(ChromaDetail::SubsampledDim(lumaW, cSubX)) *
+			                     static_cast<uint64_t>(ChromaDetail::SubsampledDim(lumaH, cSubY));
+			const uint64_t bRG32 = VpSkeleton::BytesPerTexel(VpSkeleton::TexFormat::RG32F);
+			const uint64_t bRGBA32 = VpSkeleton::BytesPerTexel(VpSkeleton::TexFormat::RGBA32F);
+			// Common coded delta (cW x cH RG32F) + delivered output delta (dW x dH RG32F):
+			uint64_t total = cPx * bRG32 + dPx * bRG32;
+			if (deliv == DeliveredChromaFormat::Rgb444)
+			{
+				// Active RGB path: chromaDelivRgbTex_ + chromaOutRgbTex_ (2 x dW x dH RGBA32F).
+				total += 2u * dPx * bRGBA32;
+			}
+			else
+			{
+				// Active YUV path: chromaDelivUvTex_ (dW x dH RG32F) + chromaOutUvTex_ (dW x dH RGBA32F).
+				total += dPx * (bRG32 + bRGBA32);
+			}
+			return total;
+		}
+
 		// Persistent TD-owned VRAM bytes at w x h (persistent carryCleanTex_ + all 8 persistent cell-grid IO/output
 		// textures + Reference CPU staging/readback or RealTime fallback internal outputs + optional cached chroma).
 		// Strictly excludes ArenaRequests scratch textures (budgeted separately under kUserScratchArena /
 		// kUserScratchArenaExtra — zero double-counting!).
+		// Note (LOW-1): Preset::RealTime targets zero-copy ProcessFrameGpu; callers invoking CPU-staging ProcessFrame
+		// under Preset::RealTime pass includeCpuStagingInputs = true to budget engine-owned in*Tex_ staging planes too.
 		static uint64_t EstimatedPersistentVramBytes(
 			int w, int h, int cellPx = kCanonicalBlockPx, Preset preset = Preset::Reference,
-			bool includeChroma = false, bool includeRealTimeInternalOutputs = false)
+			bool includeChroma = false, bool includeRealTimeInternalOutputs = false,
+			bool includeCpuStagingInputs = false)
 		{
 			if (w <= 0 || h <= 0)
 				return 0;
@@ -655,17 +691,57 @@ namespace Gpu
 			total += cells * bRGBA32;
 			total += 3u * cells * bRG32;
 			total += cells * bR32;
-			// Reference preset budgets all 6 full-res R32F staging/output textures (inRecYTex_, inCleanYTex_,
-			// inRefCleanTex_, inCodecModelPbTex_, outYTex_, outCleanTex_) + 1 full-res RG32F (outDeltaTex_).
-			// RealTime targets zero-copy ProcessFrameGpu with caller-supplied outputs, unless
+			// Reference preset (or CPU-staging ProcessFrame under RealTime) budgets all 6 full-res R32F staging/output
+			// textures (inRecYTex_, inCleanYTex_, inRefCleanTex_, inCodecModelPbTex_, outYTex_, outCleanTex_) +
+			// 1 full-res RG32F (outDeltaTex_). Zero-copy RealTime ProcessFrameGpu uses caller-supplied outputs unless
 			// includeRealTimeInternalOutputs is true (budgets engine-owned fallback outYTex_, outCleanTex_, outDeltaTex_).
-			if (!compact)
+			if (!compact || includeCpuStagingInputs)
 				total += 6u * px * bR32 + 1u * px * bRG32;
 			else if (includeRealTimeInternalOutputs)
 				total += 2u * px * bR32 + 1u * px * bRG32;
 			if (includeChroma)
 				total += EstimatedChromaVramBytes(w, h);
 			return total;
+		}
+
+		// Format-aware VRAM governor user declaration budgeting the active chroma delivery/coded format exactly.
+		static VpSkeleton::VramUser MakeVramUserFor(
+			int lumaW, int lumaH, DeliveredChromaFormat deliv, ChromaSubsampling coded,
+			int cellPx = kCanonicalBlockPx, Preset preset = Preset::Reference,
+			bool includeRealTimeInternalOutputs = false, bool includeCpuStagingInputs = false)
+		{
+			VpSkeleton::VramUser u;
+			u.id = VpSkeleton::kUserTemporalDetail;
+			u.name = VpSkeleton::VramUserName(VpSkeleton::kUserTemporalDetail);
+			u.tier = VpSkeleton::Tier::T1;
+			u.shedOrder = 0;
+			u.lossless = false;
+			const uint64_t lumaBytes = EstimatedPersistentVramBytes(
+				lumaW, lumaH, cellPx, preset, false, includeRealTimeInternalOutputs, includeCpuStagingInputs);
+			const uint64_t chromaBytes = EstimatedChromaVramBytesFor(lumaW, lumaH, deliv, coded);
+			if (chromaBytes > 0)
+			{
+				u.levels.push_back(lumaBytes + chromaBytes);
+				u.levelText.push_back(nullptr);
+				if (lumaBytes > 0)
+				{
+					u.levels.push_back(lumaBytes);
+					u.levelText.push_back("luma only (GPU chroma shed)");
+				}
+				u.levels.push_back(0);
+				u.levelText.push_back("off (GPU memory shed)");
+			}
+			else
+			{
+				u.levels.push_back(lumaBytes);
+				u.levelText.push_back(nullptr);
+				if (lumaBytes > 0)
+				{
+					u.levels.push_back(0);
+					u.levelText.push_back("off (GPU memory shed)");
+				}
+			}
+			return u;
 		}
 
 		// Exact total VRAM working-set estimate in bytes at w x h (persistent TD textures + arena scratch textures).
@@ -1057,6 +1133,8 @@ namespace Gpu
 
 			// Shared zero-copy passthrough helper for seed/cut (no refs) and invalid A2 step-prior early closure:
 			// copies curClean into carryCleanTex_ + caller output targets and zeroes cell targets cleanly (ZERO ScratchArena).
+			// LOW-1: binds ONLY active target descriptors via compile-time guards so Mode::Shadow / partial-output RealTime
+			// callers NEVER allocate wasted full-res outYTex_ / outCleanTex_ / outDeltaTex_ dummy textures!
 			auto runZeroCopyPassthrough = [&](float mapsLightGain) -> bool
 			{
 				if (!Detail::EnsureTex(gpu, carryCleanTex_, w, h, fmtR32, true, true, true, false))
@@ -1068,49 +1146,30 @@ namespace Gpu
 				const bool copyClean = (out.outputCleanTex != nullptr);
 				const bool copyOutY = cfg_.ModifiesPixels() && (out.outputYTex != nullptr);
 				const bool zeroDelta = (out.tdDeltaTex != nullptr);
-				const bool sameCleanRec = (curCleanTex == in.receivedYTex);
-				const float uCopyClean = copyClean ? 1.0f : 0.0f;
-				const float uCopyOutY = copyOutY ? 1.0f : 0.0f;
-				const float uSameCleanRec = sameCleanRec ? 1.0f : 0.0f;
-				const float uZeroDelta = zeroDelta ? 1.0f : 0.0f;
-				// Ensure distinct descriptor bindings if optional targets are null (zero pl_pass_run aliasing).
-				pl_tex srcRecBind = in.receivedYTex;
-				if (sameCleanRec)
-				{
-					if (!Detail::EnsureTex(gpu, inCellPriorTex_, out.cellsW, out.cellsH, fmtRG32, true, false, true, false))
-						return failVisible("TdV2GpuEngine::ProcessFrameGpu seed dummy alloc failed", StandInKind::GpuDispatchFailed);
-					srcRecBind = inCellPriorTex_;
-				}
-				pl_tex dstClean = copyClean ? out.outputCleanTex : outCleanTex_;
-				pl_tex dstOutY = copyOutY ? out.outputYTex : outYTex_;
-				pl_tex dstDelta = zeroDelta ? out.tdDeltaTex : outDeltaTex_;
-				if (!dstClean && !Detail::EnsureTex(gpu, outCleanTex_, w, h, fmtR32, true, true, false, true))
-					return failVisible("TdV2GpuEngine::ProcessFrameGpu seed clean target alloc failed", StandInKind::GpuDispatchFailed);
-				if (!dstClean) dstClean = outCleanTex_;
-				if (!dstOutY && !Detail::EnsureTex(gpu, outYTex_, w, h, fmtR32, true, true, false, true))
-					return failVisible("TdV2GpuEngine::ProcessFrameGpu seed outY target alloc failed", StandInKind::GpuDispatchFailed);
-				if (!dstOutY) dstOutY = outYTex_;
-				if (!dstDelta && !Detail::EnsureTex(gpu, outDeltaTex_, w, h, fmtRG32, true, true, false, true))
-					return failVisible("TdV2GpuEngine::ProcessFrameGpu seed delta target alloc failed", StandInKind::GpuDispatchFailed);
-				if (!dstDelta) dstDelta = outDeltaTex_;
+				const bool distinctRec = copyOutY && (curCleanTex != in.receivedYTex);
 
-				const std::string hdr = Detail::StaticGeomDefines(w, h, out.cellsW, out.cellsH, cellPx) + Shaders::kCoreHelpers;
-				pl_shader_desc d[6] = {
-					VpvGpu::Sampled("src_clean", curCleanTex),
-					VpvGpu::Sampled("src_rec", srcRecBind),
-					VpvGpu::Storage("dst_carry", carryCleanTex_),
-					VpvGpu::Storage("dst_clean", dstClean),
-					VpvGpu::Storage("dst_out_y", dstOutY),
-					VpvGpu::Storage("dst_delta", dstDelta)
-				};
-				pl_shader_var v[4] = {
-					VpvGpu::Var("u_copy_clean", &uCopyClean),
-					VpvGpu::Var("u_copy_out_y", &uCopyOutY),
-					VpvGpu::Var("u_same_clean_rec", &uSameCleanRec),
-					VpvGpu::Var("u_zero_delta", &uZeroDelta)
-				};
+				std::string hdr = Detail::StaticGeomDefines(w, h, out.cellsW, out.cellsH, cellPx);
+				hdr += VpvGpu::DefineInt("TD_SEED_HAS_CLEAN", copyClean ? 1 : 0);
+				hdr += VpvGpu::DefineInt("TD_SEED_HAS_OUT_Y", copyOutY ? 1 : 0);
+				hdr += VpvGpu::DefineInt("TD_SEED_HAS_DELTA", zeroDelta ? 1 : 0);
+				hdr += VpvGpu::DefineInt("TD_SEED_DISTINCT_REC", distinctRec ? 1 : 0);
+				hdr += Shaders::kCoreHelpers;
+
+				pl_shader_desc d[6]{};
+				int nDescs = 0;
+				d[nDescs++] = VpvGpu::Sampled("src_clean", curCleanTex);
+				if (distinctRec)
+					d[nDescs++] = VpvGpu::Sampled("src_rec", in.receivedYTex);
+				d[nDescs++] = VpvGpu::Storage("dst_carry", carryCleanTex_);
+				if (copyClean)
+					d[nDescs++] = VpvGpu::Storage("dst_clean", out.outputCleanTex);
+				if (copyOutY)
+					d[nDescs++] = VpvGpu::Storage("dst_out_y", out.outputYTex);
+				if (zeroDelta)
+					d[nDescs++] = VpvGpu::Storage("dst_delta", out.tdDeltaTex);
+
 				if (!VpvGpu::Pass(dispatch, "td_v2_p0_seed_copy", hdr, Shaders::kPassSeedCopy,
-				                  d, 6, v, 4, Detail::GroupsFor(w, 16), Detail::GroupsFor(h, 16), 0, 16, 16))
+				                  d, nDescs, nullptr, 0, Detail::GroupsFor(w, 16), Detail::GroupsFor(h, 16), 0, 16, 16))
 				{
 					ResetCarry(gpu);
 					out.carryReset = true;
@@ -2299,6 +2358,9 @@ namespace Gpu
 			}
 			else
 			{
+				// LOW-2 / Rule 4: Private scratch fallback (arena == nullptr) MUST NEVER be silent.
+				if (standIns != nullptr)
+					standIns->Engage(StandInKind::GpuPrivateScratchFallback, "TdV2GpuEngine arena == nullptr; using owned priv* scratch textures");
 				if (!EnsurePrivateScratch(gpu, w, h, wHalf, hHalf, cw, ch, compactBands,
 				                          fmtR16, fmtR32, fmtRG32, fmtRGBA32, sc))
 				{

@@ -169,9 +169,9 @@ vec2 td_sample_half_ld3(sampler2D halfTex, ivec2 p, ivec4 halfActive)
 
 	// ---- PASS 0: Zero-Copy GPU Seed Copy & Cell-Target Zero (for ProcessFrameGpu on cut / first frame with no refs) ----
 	// Dispatch: ceil(TD_W / 16) x ceil(TD_H / 16), group 16x16.
-	// Inputs: src_clean (R32F), src_rec (R32F; distinct dummy when u_same_clean_rec > 0.5).
-	// Outputs: dst_carry (R32F), dst_clean (R32F), dst_out_y (R32F, written when u_copy_out_y > 0.5),
-	//          dst_delta (RG32F, zeroed when u_zero_delta > 0.5).
+	// Compile-time target guards (TD_SEED_HAS_CLEAN / TD_SEED_HAS_OUT_Y / TD_SEED_HAS_DELTA / TD_SEED_DISTINCT_REC)
+	// declare ONLY active descriptors so Mode::Shadow / partial-output RealTime callers NEVER allocate unused full-res
+	// dummy storage targets (LOW-1).
 	constexpr const char* kPassSeedCopy = R"GLSL(
 ivec2 p = ivec2(gl_GlobalInvocationID.xy);
 if (p.x >= TD_W || p.y >= TD_H)
@@ -180,16 +180,21 @@ if (p.x >= TD_W || p.y >= TD_H)
 float rawClean = texelFetch(src_clean, p, 0).x;
 float cVal = td_is_bad(rawClean) ? 0.0 : rawClean;
 imageStore(dst_carry, p, vec4(cVal, 0.0, 0.0, 0.0));
-if (u_copy_clean > 0.5)
-    imageStore(dst_clean, p, vec4(cVal, 0.0, 0.0, 0.0));
-if (u_copy_out_y > 0.5)
-{
-    float rawRec = (u_same_clean_rec > 0.5) ? rawClean : texelFetch(src_rec, p, 0).x;
-    float rVal = td_is_bad(rawRec) ? 0.0 : rawRec;
-    imageStore(dst_out_y, p, vec4(rVal, 0.0, 0.0, 0.0));
-}
-if (u_zero_delta > 0.5)
-    imageStore(dst_delta, p, vec4(0.0));
+#if TD_SEED_HAS_CLEAN
+imageStore(dst_clean, p, vec4(cVal, 0.0, 0.0, 0.0));
+#endif
+#if TD_SEED_HAS_OUT_Y
+#if TD_SEED_DISTINCT_REC
+float rawRec = texelFetch(src_rec, p, 0).x;
+#else
+float rawRec = rawClean;
+#endif
+float rVal = td_is_bad(rawRec) ? 0.0 : rawRec;
+imageStore(dst_out_y, p, vec4(rVal, 0.0, 0.0, 0.0));
+#endif
+#if TD_SEED_HAS_DELTA
+imageStore(dst_delta, p, vec4(0.0));
+#endif
 )GLSL";
 
 	// Zero caller-supplied cell-grid output targets on seed/cut frames so stale GPU memory is never left behind.
