@@ -47,21 +47,6 @@ namespace LedDrive
 			return black + (white - black) * relative;
 		}
 
-		// Nits back to the target signal, the inverse of the above.
-		double NitsToSignal(pl_color_transfer transfer, double nits, double black, double white)
-		{
-			if (transfer == PL_COLOR_TRC_BT_1886)
-			{
-				const double lw = std::pow(white, 1.0 / 2.4), lb = std::pow(std::max(black, 0.0), 1.0 / 2.4);
-				const double a = std::pow(lw - lb, 2.4), b = lb / (lw - lb);
-				return std::max(0.0, std::min(std::pow(std::max(nits, 0.0) / a, 1.0 / 2.4) - b, 1.0));
-			}
-			const double v = std::max(0.0, std::min((nits - black) / std::max(white - black, 1e-9), 1.0));
-			if (transfer == PL_COLOR_TRC_SRGB)
-				return v <= 0.0031308 ? v * 12.92 : 1.055 * std::pow(v, 1.0 / 2.4) - 0.055;
-			return std::pow(v, 1.0 / GammaOf(transfer));
-		}
-
 		double PqToNits(double x)
 		{
 			const double m1 = 2610.0 / 16384.0, m2 = 2523.0 / 4096.0 * 128.0;
@@ -83,6 +68,33 @@ namespace LedDrive
 			const double a = 0.17883277, b = 0.28466892, c = 0.55991073;
 			const double scene = x <= 0.5 ? x * x / 3.0 : (std::exp((x - c) / a) + b) / 12.0;
 			return 1000.0 * std::pow(scene, 1.2);
+		}
+
+		// Exact inverse of HlgToNits (ITU-R BT.2100 / ARIB STD-B67, 1000-nit reference display, gamma = 1.2).
+		double NitsToHlg(double nits)
+		{
+			const double a = 0.17883277, b = 0.28466892, c = 0.55991073;
+			const double scene = std::pow(std::max(0.0, std::min(nits / 1000.0, 1.0)), 1.0 / 1.2);
+			return scene <= 1.0 / 12.0 ? std::sqrt(3.0 * scene) : a * std::log(12.0 * scene - b) + c;
+		}
+
+		// Nits back to the target signal, the inverse of the transfer functions above.
+		double NitsToSignal(pl_color_transfer transfer, double nits, double black, double white)
+		{
+			if (transfer == PL_COLOR_TRC_PQ)
+				return NitsToPq(nits);
+			if (transfer == PL_COLOR_TRC_HLG)
+				return NitsToHlg(nits);
+			if (transfer == PL_COLOR_TRC_BT_1886)
+			{
+				const double lw = std::pow(white, 1.0 / 2.4), lb = std::pow(std::max(black, 0.0), 1.0 / 2.4);
+				const double a = std::pow(lw - lb, 2.4), b = lb / (lw - lb);
+				return std::max(0.0, std::min(std::pow(std::max(nits, 0.0) / a, 1.0 / 2.4) - b, 1.0));
+			}
+			const double v = std::max(0.0, std::min((nits - black) / std::max(white - black, 1e-9), 1.0));
+			if (transfer == PL_COLOR_TRC_SRGB)
+				return v <= 0.0031308 ? v * 12.92 : 1.055 * std::pow(v, 1.0 / 2.4) - 0.055;
+			return std::pow(v, 1.0 / GammaOf(transfer));
 		}
 
 		void Infer(const pl_color_space& sourceIn, const pl_color_space& targetIn,
@@ -112,6 +124,29 @@ namespace LedDrive
 				hash ^= bytes[i];
 				hash *= 1099511628211ull;
 			}
+		}
+
+		// Hash all value fields of pl_hdr_metadata explicitly so struct padding
+		// (e.g. after pl_hdr_bezier::num_anchors) never enters the signature.
+		void HashHdrMetadata(uint64_t& hash, const pl_hdr_metadata& hdr)
+		{
+			const float prim[8] = {
+				hdr.prim.red.x, hdr.prim.red.y,
+				hdr.prim.green.x, hdr.prim.green.y,
+				hdr.prim.blue.x, hdr.prim.blue.y,
+				hdr.prim.white.x, hdr.prim.white.y
+			};
+			Hash(hash, prim, sizeof(prim));
+			const float luma[4] = { hdr.min_luma, hdr.max_luma, hdr.max_cll, hdr.max_fall };
+			Hash(hash, luma, sizeof(luma));
+			Hash(hash, hdr.scene_max, sizeof(hdr.scene_max));
+			Hash(hash, &hdr.scene_avg, sizeof(hdr.scene_avg));
+			const float ootfScalar[3] = { hdr.ootf.target_luma, hdr.ootf.knee_x, hdr.ootf.knee_y };
+			Hash(hash, ootfScalar, sizeof(ootfScalar));
+			Hash(hash, hdr.ootf.anchors, sizeof(hdr.ootf.anchors));
+			Hash(hash, &hdr.ootf.num_anchors, sizeof(hdr.ootf.num_anchors));
+			const float cieY[2] = { hdr.max_pq_y, hdr.avg_pq_y };
+			Hash(hash, cieY, sizeof(cieY));
 		}
 	}
 
@@ -159,6 +194,7 @@ namespace LedDrive
 		const int transfers[2] = { static_cast<int>(source.transfer), static_cast<int>(target.transfer) };
 		Hash(hash, transfers, sizeof(transfers));
 		Hash(hash, range, sizeof(range));
+		HashHdrMetadata(hash, source.hdr);
 		const void* function = colorMap ? colorMap->tone_mapping_function : nullptr;
 		Hash(hash, &function, sizeof(function));
 		if (colorMap) Hash(hash, &colorMap->tone_constants, sizeof(colorMap->tone_constants));
