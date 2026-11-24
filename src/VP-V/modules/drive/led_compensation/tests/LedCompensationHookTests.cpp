@@ -1722,14 +1722,18 @@ namespace VideoProcessorTest
 			Assert::IsTrue(worstHue <= 0.5, (L"Invariant 5 failed: worst hue error " + std::to_wstring(worstHue) + L" deg > 0.5 deg").c_str());
 
 			// Invariant 4: temporal continuity across gain = 1.0 - eps to 1.0 + eps across ALL 42,875 colours
-			// (both boost off and boost on, both domains).
+			// (both boost off and boost on, both domains). With knee = 0.0 (disabling the g > 1 soft_knee highlight
+			// rolloff, which intentionally activates at g > 1 and leaves min(x, 1.0) continuous at g == 1.0), this
+			// directly pins GEM-LED-UP-SMOOTH's eff_gain / f branch switch to <= 5e-4 across all 42,875 colours.
 			double worstGainJump = 0.0;
 			for (const double b : { 1.0, 2.2 / 2.4 })
 				for (const double domain : { 0.0, 1.0 })
 				{
 					setParams(1.0 - 1e-4, b, domain);
+					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "knee", 0.0));
 					const std::vector<float> below = renderBatch(kTexW, kTexH, latticeRgba);
 					setParams(1.0 + 1e-4, b, domain);
+					Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "knee", 0.0));
 					const std::vector<float> above = renderBatch(kTexW, kTexH, latticeRgba);
 					for (int i = 0; i < kTotal; ++i)
 						for (int k = 0; k < 3; ++k)
