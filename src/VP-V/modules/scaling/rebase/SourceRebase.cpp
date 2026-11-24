@@ -77,10 +77,51 @@ if (p.x < size.x && p.y < size.y) {
     imageStore(dst, p, acc);
 }
 )GLSL";
+
+		void AppendNote(std::string& note, const std::string& entry)
+		{
+			if (!note.empty())
+				note += "; ";
+			note += entry;
+		}
+
+		// GEM-065: 2-pass intermediate format policy (inverseTemp, separableTemp).
+		// Prefer signed 32-bit float (IEEE 754 binary32, 24-bit significand: preserves
+		// negative filter lobes and >1 overshoot between passes without clipping, above
+		// 16-bit source precision). Fall back to 16-bit float (binary16, 11-bit significand)
+		// and then the plane's UNORM/fallback format, recording every degraded step visibly
+		// in `note` (no silent fallback).
+		pl_fmt SelectIntermediateFormat(pl_gpu gpu, pl_fmt fallbackFormat, enum pl_fmt_caps caps,
+			enum pl_fmt_caps fallbackCaps, int plane, const char* role, std::string& note)
+		{
+			if (!fallbackFormat)
+				return nullptr;
+			const int numComponents = fallbackFormat->num_components;
+			const std::string prefix = "plane " + std::to_string(plane) + " (" + role + "): ";
+
+			if (pl_fmt f32 = pl_find_fmt(gpu, PL_FMT_FLOAT, numComponents, 32, 32, caps))
+				return f32;
+
+			if (pl_fmt f16 = pl_find_fmt(gpu, PL_FMT_FLOAT, numComponents, 16, 16, caps))
+			{
+				AppendNote(note, prefix + (f16->name ? f16->name : "float16") +
+					" (half float: 32-bit float unavailable)");
+				return f16;
+			}
+
+			if ((fallbackFormat->caps & fallbackCaps) != fallbackCaps)
+				return nullptr;
+
+			AppendNote(note, prefix + (fallbackFormat->name ? fallbackFormat->name : "unorm") +
+				(fallbackFormat->type == PL_FMT_UNORM
+					? " (UNORM fallback: 32-bit and 16-bit float unavailable)"
+					: " (fallback: 32-bit and 16-bit float unavailable)"));
+			return fallbackFormat;
+		}
 	}
 
 	bool Module::InversePlane(pl_gpu gpu, pl_dispatch dispatch, pl_tex in, int w, int h, bool acrossInverse, bool downInverse,
-		pl_tex out, int slot)
+		pl_tex out, int slot, std::string& note)
 	{
 		const auto& list = KernelInverse::Candidates();
 		if (kernel < 0 || kernel >= static_cast<int>(list.size()) || (!acrossInverse && !downInverse))
@@ -133,10 +174,18 @@ if (p.x < size.x && p.y < size.y) {
 		};
 		if (acrossInverse && downInverse)
 		{
+			const auto inverseCaps = static_cast<enum pl_fmt_caps>(
+				PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE);
 			pl_tex_params tp{};
 			tp.w = w;
 			tp.h = in->params.h;
-			tp.format = out->params.format;
+			tp.format = SelectIntermediateFormat(gpu, out ? out->params.format : nullptr, inverseCaps, inverseCaps,
+				0, "inverse temp", note);
+			if (!tp.format)
+			{
+				error = "no storable format for kernel inverse temp";
+				return false;
+			}
 			tp.sampleable = true;
 			tp.storable = true;
 			if (!pl_tex_recreate(gpu, &inverseTemp[slot], &tp) ||
@@ -194,13 +243,15 @@ if (p.x < size.x && p.y < size.y) {
 		const bool oneAxis = factorX >= 1.0 || factorY >= 1.0;
 		slot = (std::max)(0, (std::min)(slot, kSlots - 1));
 		pl_frame result = source;
-		// This call's float-intermediate note: FormatNote() describes the last successful re-base,
-		// so "re-base precision" is released once the 16-bit path is used again (finding R1).
+		// This call's precision-fallback note: FormatNote() describes the last successful re-base,
+		// so "re-base precision" is released once the full-precision path is used again (finding R1).
 		std::string note;
+		const auto renderCaps = static_cast<enum pl_fmt_caps>(
+			PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_LINEAR);
 		for (int plane = 0; plane < source.num_planes; ++plane)
 		{
 			const pl_tex in = source.planes[plane].texture;
-			if (!in || !in->params.sampleable)
+			if (!in || !in->params.sampleable || !in->params.format)
 			{
 				error = "plane " + std::to_string(plane) + " is not sampleable";
 				++failures;
@@ -216,8 +267,7 @@ if (p.x < size.x && p.y < size.y) {
 			// Never below 16 bits: an 8-bit (or 10-bit packed) source plane would requantise the
 			// downscale and lose what the 2:1 average gains (audit 2026-10-16).
 			if (params.format->component_depth[0] < 16)
-				if (pl_fmt wide = pl_find_fmt(gpu, PL_FMT_UNORM, params.format->num_components, 16, 16,
-						static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_LINEAR)))
+				if (pl_fmt wide = pl_find_fmt(gpu, PL_FMT_UNORM, params.format->num_components, 16, 16, renderCaps))
 					params.format = wide;
 			params.sampleable = true;
 			params.renderable = true;
@@ -230,11 +280,10 @@ if (p.x < size.x && p.y < size.y) {
 				// white, below the 16 bits asked for), half float only when 32-bit is not
 				// renderable. Logged by the renderer (FormatNote).
 				const pl_fmt wanted = params.format;
-				const auto caps = static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_LINEAR);
-				params.format = pl_find_fmt(gpu, PL_FMT_FLOAT, wanted->num_components, 32, 32, caps);
+				params.format = pl_find_fmt(gpu, PL_FMT_FLOAT, wanted->num_components, 32, 32, renderCaps);
 				const bool half = !params.format;
 				if (half)
-					params.format = pl_find_fmt(gpu, PL_FMT_FLOAT, wanted->num_components, 16, 16, caps);
+					params.format = pl_find_fmt(gpu, PL_FMT_FLOAT, wanted->num_components, 16, 16, renderCaps);
 				if (!params.format)
 				{
 					error = "no renderable format for plane " + std::to_string(plane);
@@ -242,9 +291,9 @@ if (p.x < size.x && p.y < size.y) {
 					return false;
 				}
 				params.storable = plane == 0 && kernel >= 0 && (params.format->caps & PL_FMT_CAP_STORABLE);
-				note = "plane " + std::to_string(plane) + ": " + (wanted->name ? wanted->name : "?") +
+				AppendNote(note, "plane " + std::to_string(plane) + ": " + (wanted->name ? wanted->name : "?") +
 					" not renderable, " + (params.format->name ? params.format->name : "float") +
-					(half ? " (half float: 32-bit float not renderable)" : "");
+					(half ? " (half float: 32-bit float not renderable)" : ""));
 			}
 			if (!pl_tex_recreate(gpu, &textures[slot][plane], &params))
 			{
@@ -258,7 +307,7 @@ if (p.x < size.x && p.y < size.y) {
 			if (plane == 0 && kernel >= 0 && (factorX >= 1.0 || acrossHalf) && (factorY >= 1.0 || downHalf) &&
 				(params.format->caps & PL_FMT_CAP_STORABLE))
 			{
-				if (!InversePlane(gpu, dispatch, in, w, h, acrossHalf, downHalf, textures[slot][plane], slot))
+				if (!InversePlane(gpu, dispatch, in, w, h, acrossHalf, downHalf, textures[slot][plane], slot, note))
 				{
 					++failures;
 					return false;
@@ -270,9 +319,24 @@ if (p.x < size.x && p.y < size.y) {
 			if (!oneAxis && separable && plane > 0)   // chroma only: a 1D Lanczos rings into black bars (luma stays polar)
 			{
 				// Two 1D Lanczos passes: across into a temporary, then down.
-				pl_tex_params tp = params;
+				// GEM-065: prefer 32-bit float -> 16-bit float -> UNORM (with visible note)
+				// so the first pass preserves negative Lanczos lobes and overshoot into the
+				// second pass without clipping.
+				const auto separableFallbackCaps = static_cast<enum pl_fmt_caps>(
+					PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_RENDERABLE);
+				pl_tex_params tp{};
 				tp.w = w;
 				tp.h = in->params.h;
+				tp.format = SelectIntermediateFormat(gpu, params.format, renderCaps, separableFallbackCaps,
+					plane, "separable temp", note);
+				if (!tp.format)
+				{
+					error = "no renderable format for plane " + std::to_string(plane) + " separable temp";
+					++failures;
+					return false;
+				}
+				tp.sampleable = true;
+				tp.renderable = true;
 				if (!pl_tex_recreate(gpu, &separableTemp[slot][plane], &tp))
 				{
 					error = "texture allocation failed";
