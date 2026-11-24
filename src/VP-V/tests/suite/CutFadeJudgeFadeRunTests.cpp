@@ -2914,5 +2914,273 @@ namespace CutFadeJudgeFadeRunTestsNs
 			Assert::AreEqual(0, Count(res, 1, recs.size()),
 				L"non-uniform lighting drift and shadow sweep must emit 0 fades");
 		}
+
+		// Rec.709 clipped-white fade-out censorship + whole-frame stepAQ jump guard vs clipped-white ambient flicker:
+		// 1. Linear-exposure 40-frame fade-out with ~2.5% specular highlights clamped to Rec.709 peak white (235 codes)
+		//    is detected BOTH while p99 remains clipped at 235 (once 1 - gain >= 0.25) AND across steep p99 unclipping
+		//    where aSpread * 4 >= contRef while run.keep * |1 - stepAQ| < 0.25 (tested at both 3.0x and 9.0x highlight radiance).
+		// 2. Mandatory Negative Controls (Rule 3): proves aP99 == 1.0 on clipped mid-fade pair (un-exempted check would reject)
+		//    AND proves +-4% clipped-white ambient flicker (1 - gain = 0.04 < 0.25) is STILL rejected by HighlightScalingConsistent!
+		TEST_METHOD(ClippedWhiteHighlightFadeOutIsDetectedWhileAmbientFlickerIsRejected)
+		{
+			using namespace VpUnit::CutFadeJudge;
+
+			auto ClippedSpecularFrame = [](double gain, double specRadiance, uint32_t k) -> Record {
+				std::vector<uint16_t> half(size_t(kW) * kH);
+				for (uint32_t y = 0; y < kH; ++y)
+					for (uint32_t x = 0; x < kW; ++x)
+					{
+						double lin = 0.0;
+						if (x < 10u && y < 36u)
+						{
+							// 10 x 36 = 360 px = 2.5% of 14400 px -> controls p99 at Rec.709 peak white (235 codes) until unclipped.
+							lin = specRadiance * gain;
+						}
+						else
+						{
+							const double pat = 0.50
+								+ 0.22 * std::sin(double(x) * 0.18) * std::cos(double(y) * 0.16)
+								+ 0.16 * std::cos(double(x) * 0.07 + double(y) * 0.09);
+							lin = pat * gain;
+						}
+						const double clamped = (std::min)(1.0, (std::max)(0.0, lin));
+						const double code = 16.0 + 219.0 * clamped + (gain > 0.0 && clamped < 1.0 ? double(Noise(x, y, k)) / (256.0 * 16.0) : 0.0);
+						const double p4 = code * 256.0;
+						half[size_t(y) * kW + x] = static_cast<uint16_t>((std::min)(65535.0, (std::max)(0.0, std::floor(p4 + 0.5))));
+					}
+				return MakeRecordFromHalf(half);
+			};
+
+			// Test both 3.0x specular radiance (standard Rec.709 clipped highlight) and 9.0x HDR specular radiance
+			// (exercises steep p99 unclipping where aSpread * kFadeMaxDiv >= contRef while run.keep * |1 - stepAQ| < 0.25).
+			const double specRadiances[] = { 3.0, 9.0 };
+			bool verifiedSteepUnclipContinuation = false;
+			for (double specRad : specRadiances)
+			{
+				const int pre = 8, nOut = 40, postBlack = 10;
+				std::vector<Record> recs;
+				uint32_t k = 0;
+				for (int i = 0; i < pre; ++i)
+					recs.push_back(ClippedSpecularFrame(1.0, specRad, k++));
+				for (int i = 1; i <= nOut; ++i)
+					recs.push_back(ClippedSpecularFrame(1.0 - double(i) / double(nOut), specRad, k++));
+				for (int i = 0; i < postBlack; ++i)
+					recs.push_back(ClippedSpecularFrame(0.0, specRad, k++));
+
+				// Negative Control 1 (on clipped mid-fade pair: pre-1 -> pre+11, gain = 0.70, 1 - gain = 0.30 >= 0.25):
+				// Verify p99 is STILL clipped (curP99 == refP99 -> aP99 == 1.0, so un-exempted highlight check WOULD reject it!)
+				// while HighlightScalingConsistent accepts it due to clipped-white fade-out censorship.
+				{
+					const Record& rBase = recs[size_t(pre - 1)];
+					const Record& rMid = recs[size_t(pre + 11)];
+					Assert::AreEqual(rBase.p99, rMid.p99, L"Negative control: mid-fade p99 must still be clipped at 235 codes");
+					const GridFadeFit fit = FitGridFade(rBase.cells, rMid.cells, kLocalRadius);
+					Assert::IsTrue(fit.valid && fit.dir < 0 && (1.0 - fit.gain) >= 1.0 / double(kFadeMaxDiv),
+						L"precondition: clipped mid-fade pair has valid affine fit with 1 - gain >= 0.25");
+					const double aP99 = (double(rMid.p99) * kGridScale - fit.black) / (double(rBase.p99) * kGridScale - fit.black);
+					Assert::AreEqual(1.0, aP99, 1e-12, L"Negative control: clipped p99 has aP99 == 1.0 (un-exempted check would reject)");
+					Assert::IsTrue(HighlightScalingConsistent(rBase.p99, rMid.p99, fit.gain, fit.black, fit.dir),
+						L"HighlightScalingConsistent must accept clipped-white fade-out once 1 - gain >= 0.25");
+				}
+
+				const uint32_t clippedP99 = recs[size_t(pre - 1)].p99;
+				FadeRun run;
+				int preFades = 0, outFades = 0, blackFades = 0;
+				int hitsWhileClipped = 0;
+				for (size_t i = 1; i < recs.size(); ++i)
+				{
+					const uint32_t spPrev = recs[i - 1].p99 > recs[i - 1].p01 ? recs[i - 1].p99 - recs[i - 1].p01 : 0u;
+					const uint32_t spCur = recs[i].p99 > recs[i].p01 ? recs[i].p99 - recs[i].p01 : 0u;
+					const int64_t contRefBefore = int64_t((std::max)(run.refSpread, (std::max)(spPrev, spCur)));
+					const int64_t dSp = int64_t(spCur) - int64_t(spPrev);
+					const int64_t aSp = dSp < 0 ? -dSp : dSp;
+					const bool steepP99Unclip = (aSp * kFadeMaxDiv >= contRefBefore) && (recs[i].p99 < clippedP99);
+
+					const Events e = ClassifyEvents(recs[i - 1], recs[i], false, false);
+					const bool rf = FoldFadeRun(recs[i - 1], recs[i], e, run);
+					const bool isFade = e.fade || rf;
+					if (i < size_t(pre))
+						preFades += isFade ? 1 : 0;
+					else if (i < size_t(pre + nOut))
+					{
+						outFades += isFade ? 1 : 0;
+						if (isFade && recs[i].p99 == clippedP99)
+							++hitsWhileClipped;
+						if (steepP99Unclip && !e.cut && rf)
+							verifiedSteepUnclipContinuation = true;
+					}
+					else
+						blackFades += isFade ? 1 : 0;
+				}
+				Assert::AreEqual(0, preFades, L"0 false fades during static pre-fade clipped scene");
+				Assert::AreEqual(0, blackFades, L"0 false fades during black hold");
+				Assert::IsTrue(outFades >= 26, L"clipped-white 40-frame linear fade-out must hit >= 26/40 frames");
+				Assert::IsTrue(hitsWhileClipped >= 10, L"must detect fade-out hits while p99 is still clipped at 235 codes");
+			}
+			Assert::IsTrue(verifiedSteepUnclipContinuation,
+				L"hoisted whole-frame stepAQ jump guard must continue fade-out cleanly across steep p99 unclipping (aSpread * 4 >= contRef, !e.cut)");
+
+			// Negative Control 2: +-4% clipped-white ambient flicker (1 - gain = 0.04 < 0.25, curP99 == refP99 == 235 codes)
+			// must STILL be rejected by HighlightScalingConsistent!
+			{
+				const Record rA = ClippedSpecularFrame(1.00, 3.0, 9001u);
+				const Record rB = ClippedSpecularFrame(0.96, 3.0, 9002u);
+				Assert::AreEqual(rA.p99, rB.p99, L"Negative control: +-4% flicker keeps p99 clipped at 235 codes");
+				const GridFadeFit flFit = FitGridFade(rA.cells, rB.cells, kLocalRadius);
+				Assert::IsTrue(flFit.valid && flFit.dir < 0 && (1.0 - flFit.gain) < 1.0 / double(kFadeMaxDiv),
+					L"Negative control: 4% drop has valid affine fit with 1 - gain < 0.25");
+				Assert::IsFalse(HighlightScalingConsistent(rA.p99, rB.p99, flFit.gain, flFit.black, flFit.dir),
+					L"HighlightScalingConsistent must STILL reject +-4% clipped-white ambient flicker (1 - gain < 0.25)");
+			}
+		}
+
+		// Part A: Full-LSB macro-tile displacement bar (kFadeMinSpread = 1.0 code across >= 75% of lit tiles) rejects
+		// sub-code motion/exposure wobble (0.55..0.90 codes) where old 0.5-code bar would fire.
+		// Part B: Symmetric brightening HighlightScalingConsistent rejects localized bright surges (aP99 = 1.35 vs gain = 1.12)
+		// where a one-sided lower bound would accept.
+		TEST_METHOD(SubCodeMotionExposureWobbleAndBrighteningSurgeAreNotAFade)
+		{
+			using namespace VpUnit::CutFadeJudge;
+
+			// ---- Part A: Sub-code motion/exposure wobble ----
+			{
+				auto WobbleFrame = [](int frameIdx, double gain) -> Record {
+					// Discs oscillate +-5 px strictly inside tiles (0,0) and (1,3): defeats rigid cell-OLS without crossing tile edges.
+					const double cx1 = 27.0 + 5.0 * std::sin(double(frameIdx) * 0.7);
+					const double cx2 = 132.0 - 5.0 * std::sin(double(frameIdx) * 0.7);
+					std::vector<uint16_t> half(size_t(kW) * kH);
+					for (uint32_t y = 0; y < kH; ++y)
+						for (uint32_t x = 0; x < kW; ++x)
+						{
+							double pat = 0.20 + 0.08 * std::sin(double(x) * 0.18) * std::cos(double(y) * 0.14) + 0.04 * std::cos(double(y) * 0.09);
+							const double d1 = (double(x) - cx1) * (double(x) - cx1) + (double(y) - 27.0) * (double(y) - 27.0);
+							const double d2 = (double(x) - cx2) * (double(x) - cx2) + (double(y) - 62.0) * (double(y) - 62.0);
+							if (d1 <= 81.0)
+								pat = 0.38;
+							if (d2 <= 81.0)
+								pat = 0.04;
+							const double v = kBlack + gain * pat * 145.0 * 256.0;
+							half[size_t(y) * kW + x] = static_cast<uint16_t>((std::min)(65535.0, (std::max)(0.0, std::floor(v + 0.5))));
+						}
+					return MakeRecordFromHalf(half);
+				};
+
+				const double gains[] = {
+					1.000, 1.000, 1.000, 1.000,
+					0.993, 0.986, 0.979, 0.972,
+					0.979, 0.986, 0.993, 1.000,
+					0.993, 0.986, 0.979, 0.972,
+					0.979, 0.986, 0.993, 1.000,
+					1.000, 1.000, 1.000, 1.000
+				};
+				std::vector<Record> recs;
+				int idx = 0;
+				for (double g : gains)
+					recs.push_back(WobbleFrame(idx++, g));
+
+				// Mandatory In-Test Negative Control (Rule 3) on peak wobble pair recs[3] -> recs[7]:
+				// Assert >= 6/8 macro-tiles move > 0.5 code (old bar would pass!) while < 6/8 move > 1.0 code
+				// AND production FitMotionTolerantFade returns valid == false!
+				{
+					constexpr int R = kLocalRadius;
+					double gA[kGridH][kGridW], gB[kGridH][kGridW];
+					double ra[kGridH][kGridW], ca[kGridH][kGridW];
+					double vx = 0.0, vy = 0.0;
+					LoadGridCodes(recs[3].cells, gA);
+					LoadGridCodes(recs[7].cells, gB);
+					AlignGrid(gA, gB, kLocalRadius, ra, ca, &vx, &vy);
+
+					int tilesOverHalf = 0, tilesOverOne = 0;
+					for (int tr = 0; tr < 2; ++tr)
+						for (int tc = 0; tc < 4; ++tc)
+						{
+							double sr = 0.0, sc = 0.0;
+							const int y0 = R + tr * 7;
+							const int x0 = R + tc * 7;
+							for (int dy = 0; dy < 7; ++dy)
+								for (int dx = 0; dx < 7; ++dx)
+								{
+									sr += ra[y0 + dy][x0 + dx];
+									sc += ca[y0 + dy][x0 + dx];
+								}
+							const double drop = (sr - sc) / 49.0;
+							if (drop > kFadeCellStepEps)
+								++tilesOverHalf;
+							if (drop > double(kFadeMinSpread))
+								++tilesOverOne;
+						}
+					Assert::IsTrue(tilesOverHalf >= 6,
+						L"Negative control: peak sub-code wobble must move >= 6/8 macro-tiles > 0.5 code (old bar would fire)");
+					Assert::IsTrue(tilesOverOne < 6,
+						L"Negative control: peak sub-code wobble must move < 6/8 macro-tiles > 1.0 code");
+					Assert::IsFalse(FitGridFadeAligned(ra, ca, vx, vy).valid,
+						L"precondition: opposite-oscillating discs defeat rigid FitGridFadeAligned");
+					Assert::IsFalse(FitMotionTolerantFade(ra, ca, vx, vy).valid,
+						L"full-LSB macro-tile bar (1.0 code across >= 75% of lit tiles) must reject sub-code wobble");
+				}
+
+				const auto res = Play(recs);
+				Assert::AreEqual(0, Count(res, 1, recs.size()),
+					L"sub-code motion/exposure wobble must emit 0 fades across the entire sequence");
+			}
+
+			// ---- Part B: Brightening highlight surge (aP99 = 1.35 vs gain = 1.12, dir = +1) ----
+			{
+				const double black = 16.0;
+				const double gain = 1.12;
+				const uint32_t refP99 = static_cast<uint32_t>(160.0 * 256.0);
+				// (210.4 - 16) / (160 - 16) = 194.4 / 144.0 = exact 1.35
+				const uint32_t curP99 = static_cast<uint32_t>(std::floor(210.4 * 256.0 + 0.5));
+				const double aP99 = (double(curP99) * kGridScale - black) / (double(refP99) * kGridScale - black);
+
+				// Mandatory In-Test Negative Control (Rule 3): one-sided lower bound WOULD accept this +35% surge!
+				Assert::IsTrue((aP99 - 1.0) >= kFadeResidualReduction * std::fabs(1.0 - gain),
+					L"Negative control: one-sided brightening check would falsely accept aP99=1.35 vs gain=1.12");
+				Assert::IsFalse(HighlightScalingConsistent(refP99, curP99, gain, black, +1),
+					L"symmetric brightening HighlightScalingConsistent must reject highlight surge aP99=1.35 vs gain=1.12");
+
+				// Synthetic frame sequence: interior rises +12% (+3%/frame over 4 frames) while a 2.5% practical lamp surges +35%.
+				auto SurgeFrame = [](double sceneGain, double lampGain, uint32_t k) -> Record {
+					std::vector<uint16_t> half(size_t(kW) * kH);
+					for (uint32_t y = 0; y < kH; ++y)
+						for (uint32_t x = 0; x < kW; ++x)
+						{
+							double v = kBlack;
+							if (x < 10u && y < 36u)
+							{
+								v = kBlack + lampGain * (160.0 - 16.0) * 256.0;
+							}
+							else
+							{
+								const double base = 8192.0 + 20000.0 * double(x) / double(kW - 1) + 4000.0 * std::sin(double(y) * 0.14);
+								v = kBlack + sceneGain * (base - kBlack) + double(Noise(x, y, k)) * 0.125;
+							}
+							half[size_t(y) * kW + x] = static_cast<uint16_t>((std::min)(65535.0, (std::max)(0.0, std::floor(v + 0.5))));
+						}
+					return MakeRecordFromHalf(half);
+				};
+
+				std::vector<Record> surgeRecs;
+				uint32_t k = 0;
+				for (int i = 0; i < 4; ++i)
+					surgeRecs.push_back(SurgeFrame(1.00, 1.00, k++));
+				for (int i = 1; i <= 4; ++i)
+					surgeRecs.push_back(SurgeFrame(1.00 + 0.03 * double(i), 1.00 + 0.0875 * double(i), k++));
+				for (int i = 0; i < 4; ++i)
+					surgeRecs.push_back(SurgeFrame(1.12, 1.35, k++));
+
+				// Negative control: rigid FitGridFade alone returns valid == true on surgeRecs[3] -> surgeRecs[7],
+				// while HighlightScalingConsistent rejects it!
+				const GridFadeFit surgeFit = FitGridFade(surgeRecs[3].cells, surgeRecs[7].cells, kLocalRadius);
+				Assert::IsTrue(surgeFit.valid && surgeFit.dir > 0,
+					L"Negative control: rigid FitGridFade alone returns valid on brightening scene + lamp surge");
+				Assert::IsFalse(HighlightScalingConsistent(surgeRecs[3].p99, surgeRecs[7].p99, surgeFit.gain, surgeFit.black, surgeFit.dir),
+					L"HighlightScalingConsistent must reject synthetic brightening highlight surge");
+
+				const auto surgeRes = Play(surgeRecs);
+				Assert::AreEqual(0, Count(surgeRes, 1, surgeRecs.size()),
+					L"brightening highlight surge (+35% p99 vs +12% scene) must emit 0 fades");
+			}
+		}
 	};
 }
