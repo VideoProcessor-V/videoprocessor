@@ -526,6 +526,119 @@ namespace Tests
 			Assert::IsTrue(params.tone_mapping_function == &DvDolbyStyle::Function());
 		}
 
+		// S2-M1: when shaders/DV trims.glsl fails to load (NoShaders()), DvHostStage must report TrimsWillRun() == false
+		// and neutral TrimsSaturationGain() == 1.0 to CAM16 (both right after PrepareToneAndTrims - where CoreSegments.inl
+		// feeds AppearanceStage - and after FinishTrims, on frame 1 AND frame 2), while keeping the visible "NOT applied..."
+		// fallback engaged (Rule 4). The same-input negative control (DummyShaders()) proves the trim genuinely carries
+		// PeakSaturationGain == 1.25 (> 1.2) when loaded, and subsequent non-DV / trims-off frames reset both cleanly.
+		TEST_METHOD(MissingTrimsShaderReportsNoTrimAppliedAndNeutralSaturationGain)
+		{
+			using namespace DvHost;
+			DolbyVisionTunnelFrameMetadata dm = TrimmedDm();
+			dm.trims[0].slope = 2400;
+			dm.trims[0].saturationGain = 3072;   // 3072/4096 + 0.5 = 1.25 (> 1.2; non-neutral L2 saturation gain)
+			const DvTrimSelection::Selection expectedSel = DvTrimSelection::Select(dm, 100.0);
+			Assert::IsTrue(expectedSel.apply, L"test setup: L2 trim must select and apply at 100 nits");
+			const double expectedGain = DvTrimSelection::PeakSaturationGain(expectedSel.params);
+			Assert::AreEqual(1.25, expectedGain, 1e-12, L"test setup: L2 saturationGain=3072 decodes to 1.25");
+			Assert::IsTrue(expectedGain > 1.2, L"test setup: non-neutral saturation gain clearly above 1.0");
+
+			const pl_frame dvImage = Picture(true);
+			const pl_frame nonDvImage = Picture(false);
+			const pl_frame pqTarget = Target(PL_COLOR_TRC_PQ, 100.0f);
+			const std::string mode = "libplacebo";
+			const std::string curve = "bt2390";
+			const std::string folder;
+
+			// Mirrors CoreSegments.inl's two-phase sequence: CAM16 reads TrimsWillRun() and TrimsSaturationGain()
+			// immediately after PrepareToneAndTrims (before s2.Collect / FinishTrims), then we re-verify after FinishTrims.
+			auto runFrame = [&](DvHostStage& stage, const pl_frame& image, bool trimsOn, uint64_t frameCounter,
+				bool expectWillRun, double expectGain, size_t expectHooks, const wchar_t* label)
+			{
+				pl_color_map_params params = pl_color_map_default_params;
+				CustomHookChain::TemplateValues templates;
+				OutputSegments::ColourFrame colourFrame;
+				std::vector<const pl_hook*> user;
+				colourFrame.userPreOutput = &user;
+				VideoState state;
+				stage.PrepareToneAndTrims({ mode, trimsOn, curve, folder, true, image, pqTarget, &dm, 2.4, state, nullptr, frameCounter, true },
+					params, templates, colourFrame.dvTrims, colourFrame.dv);
+
+				const std::wstring prefix = std::wstring(label) + L": ";
+				if (expectWillRun)
+					Assert::IsTrue(stage.TrimsWillRun(), (prefix + L"TrimsWillRun true after PrepareToneAndTrims").c_str());
+				else
+					Assert::IsFalse(stage.TrimsWillRun(), (prefix + L"TrimsWillRun false after PrepareToneAndTrims").c_str());
+
+				if (expectGain == 1.0)
+					Assert::AreEqual(1.0, stage.TrimsSaturationGain(), 0.0, (prefix + L"neutral TrimsSaturationGain after PrepareToneAndTrims").c_str());
+				else
+				{
+					Assert::IsTrue(stage.TrimsSaturationGain() > 1.2, (prefix + L"TrimsSaturationGain > 1.2 after PrepareToneAndTrims").c_str());
+					Assert::AreEqual(expectGain, stage.TrimsSaturationGain(), 1e-12, (prefix + L"PeakSaturationGain after PrepareToneAndTrims").c_str());
+				}
+
+				CustomHookChain::Chain tone(NoShaders()), comp(NoShaders());
+				LedDrive::MeasurementHook measure;
+				CalibrationLutStage::Hook lut;
+				OutputSegments::OutputColourSegment s2(tone, stage.TrimsHook(), measure, comp, lut);
+				PipelineSlots::Registry registry;
+				registry.SetEnabled(PipelineSlots::Id::ColourDmTrims, true);
+				registry.SetEnabled(PipelineSlots::Id::ColourDmCurve, true);
+				std::vector<const pl_hook*> hooks;
+				const OutputSegments::ColourCounts counts = s2.Collect(colourFrame, registry, hooks,
+					[](size_t, PipelineSlots::Id) {});
+				Assert::AreEqual<size_t>(expectHooks, counts.dvTrims, (prefix + L"collected trims hook count").c_str());
+				stage.FinishTrims(counts.dvTrims);
+
+				if (expectWillRun)
+					Assert::IsTrue(stage.TrimsWillRun(), (prefix + L"TrimsWillRun true after FinishTrims").c_str());
+				else
+					Assert::IsFalse(stage.TrimsWillRun(), (prefix + L"TrimsWillRun false after FinishTrims").c_str());
+
+				if (expectGain == 1.0)
+					Assert::AreEqual(1.0, stage.TrimsSaturationGain(), 0.0, (prefix + L"neutral TrimsSaturationGain after FinishTrims").c_str());
+				else
+					Assert::AreEqual(expectGain, stage.TrimsSaturationGain(), 1e-12, (prefix + L"PeakSaturationGain after FinishTrims").c_str());
+			};
+
+			// Missing shader case (NoShaders()): frame 1 AND frame 2 report no trim applied and neutral 1.0 gain,
+			// while preserving the visible "NOT applied..." fallback entry (Rule 4).
+			{
+				Registry reg;
+				DvHostStage stage(NoShaders(), reg.Engage(), reg.Release());
+				Assert::IsFalse(stage.TrimsWillRun(), L"fresh stage: TrimsWillRun starts false");
+				Assert::AreEqual(1.0, stage.TrimsSaturationGain(), 0.0, L"fresh stage: TrimsSaturationGain starts neutral 1.0");
+
+				runFrame(stage, dvImage, true, 1, false, 1.0, 0, L"NoShaders frame 1");
+				Assert::IsTrue(reg.Has("Dolby Vision trims"), L"NoShaders frame 1: visible fallback engaged");
+				Assert::AreEqual(0, reg.engaged["Dolby Vision trims"].compare(0, 11, "NOT applied"),
+					L"NoShaders frame 1: fallback states NOT applied");
+
+				runFrame(stage, dvImage, true, 2, false, 1.0, 0, L"NoShaders frame 2");
+				Assert::IsTrue(reg.Has("Dolby Vision trims"), L"NoShaders frame 2: visible fallback stays engaged");
+				Assert::AreEqual(0, reg.engaged["Dolby Vision trims"].compare(0, 11, "NOT applied"),
+					L"NoShaders frame 2: fallback still states NOT applied");
+			}
+
+			// Mandatory in-test negative control (exact same DV metadata & frame with DummyShaders()):
+			// when the shader loads, TrimsWillRun() is true and TrimsSaturationGain() reports PeakSaturationGain (> 1.2).
+			// Subsequent non-DV and trims=false frames on the same stage must reset both to false / 1.0 (no stale leak).
+			{
+				Registry reg;
+				DvHostStage stage(DummyShaders(), reg.Engage(), reg.Release());
+				runFrame(stage, dvImage, true, 1, true, expectedGain, 1, L"DummyShaders active DV frame 1");
+				Assert::IsFalse(reg.Has("Dolby Vision trims"), L"DummyShaders active DV: no fallback engaged");
+
+				runFrame(stage, nonDvImage, true, 2, false, 1.0, 0, L"DummyShaders non-DV frame");
+				Assert::IsFalse(reg.Has("Dolby Vision trims"), L"DummyShaders non-DV: no fallback");
+
+				runFrame(stage, dvImage, true, 3, true, expectedGain, 1, L"DummyShaders active DV frame 3");
+				runFrame(stage, dvImage, false, 4, false, 1.0, 0, L"DummyShaders trims=false frame");
+				Assert::IsFalse(reg.Has("Dolby Vision trims"), L"DummyShaders trims=false: no fallback");
+			}
+		}
+
 		// GEM-008: the trims shader gets the OUTPUT transfer's kind (0 power, 1 BT.1886, 2 sRGB) and its parameter (the
 		// BT.1886 black offset b from ExtendedRange::DescribeTransfer with piecewise = true) next to dv_gamma. A power-law
 		// output keeps kind 0. Before the fix neither parameter existed (BT.1886 and sRGB were a pure power law).
