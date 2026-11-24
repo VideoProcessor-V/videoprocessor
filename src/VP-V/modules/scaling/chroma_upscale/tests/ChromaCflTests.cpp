@@ -1102,5 +1102,199 @@ namespace VideoProcessorTest
 			Assert::IsTrue(priv == ChromaUpscale::Gpu::CflModule::TextureBytes(W, H, cw, ch, false), L"the default is the private form");
 			Assert::IsTrue(priv - inArena == uint64_t(16) * W * H + uint64_t(112) * cw * ch, L"the temporaries move to the arena");
 		}
+
+		TEST_METHOD(ChromaCflGpu444EarlyOutResetsGrainStatus)
+		{
+			// Q#6 (GEM-068): a 4:2:0 frame with grainGuard=true and no shared grain product latches
+			// LastGrainStatus() == Missing (engaged). Immediately running a 4:4:4 frame on the same
+			// CflModule instance takes the 4:4:4 early-out and must reset LastGrainStatus() to Ring
+			// (clearing the stale fallback decision).
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = dev.Gpu();
+			const Scene sc420 = MakeScene(64, 48, 32, 24, -0.5, 0.0, 51u, 1.5, 1.5);
+			const Scene sc444 = MakeScene(32, 24, 32, 24, 0.0, 0.0, 52u, 1.0, 1.0);
+			pl_tex luma420 = UploadR16(gpu, sc420.y);
+			pl_tex chroma420 = UploadRg16(gpu, sc420.cb, sc420.cr);
+			pl_tex luma444 = UploadR16(gpu, sc444.y);
+			pl_tex chroma444 = UploadRg16(gpu, sc444.cb, sc444.cr);
+			ChromaUpscale::Gpu::CflModule module;
+			struct ScopeCleanup
+			{
+				pl_gpu gpu;
+				ChromaUpscale::Gpu::CflModule* mod;
+				std::vector<pl_tex*> texes;
+				ScopeCleanup(pl_gpu g, ChromaUpscale::Gpu::CflModule* m, std::vector<pl_tex*> ts)
+					: gpu(g), mod(m), texes(ts) {}
+				~ScopeCleanup()
+				{
+					if (mod) mod->Release(gpu);
+					for (pl_tex* t : texes)
+						if (t && *t) pl_tex_destroy(gpu, t);
+				}
+				ScopeCleanup(const ScopeCleanup&) = delete;
+				ScopeCleanup& operator=(const ScopeCleanup&) = delete;
+			} cleanup(gpu, &module, { &luma420, &chroma420, &luma444, &chroma444 });
+			Assert::IsTrue(luma420 && chroma420 && luma444 && chroma444, L"test textures uploaded");
+
+			const pl_frame src420 = Frame2(luma420, chroma420, -0.5, 0.0);
+			const pl_frame src444 = Frame2(luma444, chroma444, 0.0, 0.0);
+
+			ChromaUpscale::Gpu::Params gp;
+			gp.settings.mode = ChromaUpscale::Mode::Cfl;
+			gp.cfl.grainGuard = true;   // params.grain intentionally empty (no shared grain product)
+
+			// Negative control: 4:2:0 frame without a shared grain product must genuinely latch a non-Ring status.
+			pl_frame out420{};
+			Assert::IsTrue(module.Apply(gpu, dev.dispatch, src420, gp, out420), Wide(module.LastError()).c_str());
+			Assert::IsTrue(module.LastGrainStatus() != GrainSplit::GrainStatus::Ring,
+				L"negative control: 4:2:0 without shared grain product must latch a non-Ring grain status");
+			Assert::IsTrue(module.LastGrainStatus() == GrainSplit::GrainStatus::Missing,
+				L"negative control: 4:2:0 without shared grain product must latch GrainStatus::Missing");
+			Assert::IsTrue(module.GrainFallbackDecision().engaged,
+				L"negative control: grain fallback decision must be engaged after 4:2:0 own split");
+
+			// Immediately run a 4:4:4 frame on the EXACT SAME module instance: stale status must be cleared to Ring.
+			pl_frame out444{};
+			Assert::IsTrue(module.Apply(gpu, dev.dispatch, src444, gp, out444), Wide(module.LastError()).c_str());
+			Assert::AreEqual(std::string("4:4:4: nothing to upsample"), module.Status());
+			Assert::IsTrue(out444.planes[0].texture == luma444 && out444.planes[1].texture == chroma444,
+				L"4:4:4 early-out passes source planes through untouched");
+			Assert::IsTrue(module.LastGrainStatus() == GrainSplit::GrainStatus::Ring,
+				L"4:4:4 early-out must reset stale LastGrainStatus() to Ring");
+			Assert::IsFalse(module.GrainFallbackDecision().engaged,
+				L"4:4:4 early-out must release the stale grain fallback decision");
+		}
+
+		TEST_METHOD(ChromaCflGpuPreservesExtraNonChromaAlphaPlane)
+		{
+			// Q#6 (GEM-068): a 4:2:0 frame carrying an extra non-Cb/Cr plane (Alpha, PL_CHANNEL_A) in either
+			// 3-plane (Y, CbCr, A) or 4-plane (Y, Cb, Cr, A) layout must preserve the exact Alpha plane
+			// (texture and component mapping) at output plane 2 while still running CfL chroma upsampling.
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = dev.Gpu();
+			const int W = 64, H = 48, cw = 32, ch = 24;
+			const Scene sc = MakeScene(W, H, cw, ch, -0.5, 0.0, 53u, 1.5, 1.5);
+			const ChromaUpscale::Result model = RunModel(sc, -0.5, 0.0, ActiveRect());
+			Plane alphaPlane(W, H);
+			for (int y = 0; y < H; ++y)
+				for (int x = 0; x < W; ++x)
+					alphaPlane.at(x, y) = 64.0 + static_cast<double>((x * 11 + y * 17) % 876);
+			Quantise(alphaPlane);
+
+			pl_tex luma = UploadR16(gpu, sc.y);
+			pl_tex chroma = UploadRg16(gpu, sc.cb, sc.cr);
+			pl_tex cbTex = UploadR16(gpu, sc.cb);
+			pl_tex crTex = UploadR16(gpu, sc.cr);
+			pl_tex alphaTex = UploadR16(gpu, alphaPlane);
+			ChromaUpscale::Gpu::CflModule module;
+			struct ScopeCleanup
+			{
+				pl_gpu gpu;
+				ChromaUpscale::Gpu::CflModule* mod;
+				std::vector<pl_tex*> texes;
+				ScopeCleanup(pl_gpu g, ChromaUpscale::Gpu::CflModule* m, std::vector<pl_tex*> ts)
+					: gpu(g), mod(m), texes(ts) {}
+				~ScopeCleanup()
+				{
+					if (mod) mod->Release(gpu);
+					for (pl_tex* t : texes)
+						if (t && *t) pl_tex_destroy(gpu, t);
+				}
+				ScopeCleanup(const ScopeCleanup&) = delete;
+				ScopeCleanup& operator=(const ScopeCleanup&) = delete;
+			} cleanup(gpu, &module, { &luma, &chroma, &cbTex, &crTex, &alphaTex });
+			Assert::IsTrue(luma && chroma && cbTex && crTex && alphaTex, L"test textures uploaded");
+
+			auto makeAlphaPlPlane = [&]() {
+				pl_plane a{};
+				a.texture = alphaTex;
+				a.components = 1;
+				a.component_mapping[0] = PL_CHANNEL_A;
+				a.component_mapping[1] = PL_CHANNEL_NONE;
+				a.component_mapping[2] = PL_CHANNEL_NONE;
+				a.component_mapping[3] = PL_CHANNEL_NONE;
+				a.shift_x = 0.0f;
+				a.shift_y = 0.0f;
+				return a;
+			};
+
+			// Case 1: 3-plane 4:2:0 source (Y, subsampled CbCr, full-res Alpha).
+			pl_frame src3 = Frame2(luma, chroma, -0.5, 0.0);
+			src3.num_planes = 3;
+			src3.planes[2] = makeAlphaPlPlane();
+			src3.repr.alpha = PL_ALPHA_INDEPENDENT;
+
+			// Case 2: 4-plane 4:2:0 source (Y, subsampled Cb, subsampled Cr, full-res Alpha).
+			pl_frame src4 = Frame3(luma, cbTex, crTex, -0.5, 0.0);
+			src4.num_planes = 4;
+			src4.planes[3] = makeAlphaPlPlane();
+			src4.repr.alpha = PL_ALPHA_INDEPENDENT;
+
+			ChromaUpscale::Gpu::Params gp;
+			gp.settings.mode = ChromaUpscale::Mode::Cfl;
+
+			const pl_frame sources[2] = { src3, src4 };
+			Plane outCb[2], outCr[2];
+			for (int k = 0; k < 2; ++k)
+			{
+				const pl_frame& src = sources[k];
+				const wchar_t* tag = (k == 0) ? L"3-plane (Y+CbCr+A)" : L"4-plane (Y+Cb+Cr+A)";
+				pl_frame out{};
+				Assert::IsTrue(module.Apply(gpu, dev.dispatch, src, gp, out), Wide(module.LastError()).c_str());
+
+				// Output must have 3 planes: Y, upsampled CbCr, preserved Alpha.
+				Assert::AreEqual(3, out.num_planes, tag);
+				Assert::IsTrue(out.planes[0].texture == luma && out.planes[0].components == 1 &&
+					out.planes[0].component_mapping[0] == PL_CHANNEL_Y, L"luma plane preserved unchanged");
+
+				// Negative control: verify chroma upsampling actually ran (not a pass-through of source planes).
+				Assert::IsTrue(out.planes[1].texture != nullptr && out.planes[1].texture != src.planes[1].texture,
+					L"negative control: chroma upsampling must produce a new upsampled texture");
+				if (k == 1)
+				{
+					Assert::IsTrue(out.planes[1].texture != crTex,
+						L"negative control: 4-plane upsampled chroma must not alias source Cr texture");
+				}
+				Assert::IsTrue(out.planes[1].texture->params.w == W && out.planes[1].texture->params.h == H,
+					L"upsampled chroma texture is full luma resolution");
+				Assert::IsTrue(out.planes[1].components == 2 &&
+					out.planes[1].component_mapping[0] == PL_CHANNEL_CB &&
+					out.planes[1].component_mapping[1] == PL_CHANNEL_CR,
+					L"upsampled plane 1 maps CB and CR");
+				Assert::IsTrue(out.planes[1].shift_x == 0.0f && out.planes[1].shift_y == 0.0f,
+					L"upsampled chroma plane has zero shifts");
+
+				// Extra Alpha plane must be preserved untouched at plane 2.
+				Assert::IsTrue(out.planes[2].texture == alphaTex,
+					L"Alpha plane texture must be preserved untouched");
+				Assert::IsTrue(out.planes[2].components == 1 && out.planes[2].component_mapping[0] == PL_CHANNEL_A,
+					L"Alpha plane component mapping (PL_CHANNEL_A) must be preserved");
+				Assert::IsTrue(out.planes[2].shift_x == 0.0f && out.planes[2].shift_y == 0.0f,
+					L"Alpha plane shifts must be preserved");
+				Assert::IsTrue(out.repr.alpha == PL_ALPHA_INDEPENDENT,
+					L"frame alpha representation must be preserved");
+				Assert::IsTrue(out.planes[3].texture == nullptr,
+					L"unused plane slot 3 must be cleared");
+
+				// Verify upsampled chroma content matches the independent CPU reference model.
+				std::vector<uint16_t> raw;
+				int nc = 0;
+				Assert::IsTrue(DownloadRaw(gpu, out.planes[1].texture, raw, nc), L"upsampled chroma readable");
+				outCb[k] = Plane(W, H);
+				outCr[k] = Plane(W, H);
+				for (size_t i = 0; i < outCb[k].v.size(); ++i)
+				{
+					outCb[k].v[i] = raw[i * nc] / 64.0;
+					outCr[k].v[i] = raw[i * nc + 1] / 64.0;
+				}
+				const double wcb = MaxDiff(outCb[k], model.cb);
+				const double wcr = MaxDiff(outCr[k], model.cr);
+				Assert::IsTrue(wcb <= 0.02 && wcr <= 0.02, L"upsampled chroma matches CPU model within 0.02 codes");
+			}
+			Assert::IsTrue(outCb[0].v == outCb[1].v && outCr[0].v == outCr[1].v,
+				L"3-plane and 4-plane alpha frames produce bit-identical upsampled chroma");
+		}
 	};
 }
