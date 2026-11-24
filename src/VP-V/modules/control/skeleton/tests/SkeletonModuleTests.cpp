@@ -3597,12 +3597,14 @@ namespace SkeletonModuleTestsNs
 				L"Negative control: sequential stream status must NOT contain fade-run-missing line");
 
 			// 2. Positive case 1: 3-frame gap (16..18 skipped) -> frame 19 triggers a real ring-miss rebuild.
+			//    Advance one sequential frame (20) so Refresh updates cached status text with zero extra rebuilds.
 			for (int64_t s = 16; s <= 18; ++s)
 				StepFrame(s, false);
 			StepFrame(19, true);
+			StepFrame(20, true);
 
 			const Vpv::Skeleton::SceneCounters c1 = rig.sk.SceneCountersOf(rig.Host());
-			Assert::AreEqual(uint64_t(1), c1.fadeRunRebuilt + c1.fadeRunReduced, L"first ring-miss gap must trigger exactly 1 rebuild");
+			Assert::AreEqual(uint64_t(1), c1.fadeRunRebuilt + c1.fadeRunReduced, L"first ring-miss gap must trigger exactly 1 rebuild (0 extra on sequential frame 20)");
 			Assert::AreEqual(c1.fadeRunRebuildUsLast, c1.fadeRunRebuildUsTotal, L"after 1 rebuild, total us must equal last us");
 			Assert::AreEqual(c1.fadeRunRebuildUsLast, c1.fadeRunRebuildUsMax, L"after 1 rebuild, max us must equal last us");
 
@@ -3619,14 +3621,15 @@ namespace SkeletonModuleTestsNs
 			Assert::IsTrue(line1.find(", last ") != std::string::npos,
 				L"status line must report ', last '");
 
-			// 3. Positive case 2: 10-frame gap (20..29 skipped, > 7-pair ring depth) -> frame 30 triggers a second rebuild
-			// with reduced evidence, verifying cumulative total, monotonic max, and updated status line.
-			for (int64_t s = 20; s <= 29; ++s)
+			// 3. Positive case 2: 10-frame gap (21..30 skipped, > 7-pair ring depth) -> frame 31 triggers a second rebuild
+			// with reduced evidence; advance sequential frame 32 so Refresh updates cached status text with zero extra rebuilds.
+			for (int64_t s = 21; s <= 30; ++s)
 				StepFrame(s, false);
-			StepFrame(30, true);
+			StepFrame(31, true);
+			StepFrame(32, true);
 
 			const Vpv::Skeleton::SceneCounters c2 = rig.sk.SceneCountersOf(rig.Host());
-			Assert::AreEqual(uint64_t(2), c2.fadeRunRebuilt + c2.fadeRunReduced, L"second ring-miss gap must increment rebuild count to 2");
+			Assert::AreEqual(uint64_t(2), c2.fadeRunRebuilt + c2.fadeRunReduced, L"second ring-miss gap must increment rebuild count to 2 (0 extra on sequential frame 32)");
 			Assert::IsTrue(c2.fadeRunReduced >= uint64_t(1), L"10-frame gap beyond 7-pair ring must record reduced-evidence rebuild");
 			Assert::AreEqual(c1.fadeRunRebuildUsTotal + c2.fadeRunRebuildUsLast, c2.fadeRunRebuildUsTotal,
 				L"cumulative rebuild total us must equal previous total + last rebuild us");

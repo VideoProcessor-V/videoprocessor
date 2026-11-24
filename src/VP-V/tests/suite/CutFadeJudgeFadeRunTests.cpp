@@ -1733,13 +1733,15 @@ namespace CutFadeJudgeFadeRunTestsNs
 					for (uint32_t x = 0; x < kW; ++x)
 					{
 						const double sx = double(x) + panPx;
-						double pat = 0.45 + 0.26 * std::cos(double(y) * 0.065) + 0.14 * std::sin(sx * 0.09);
+						double pat = 0.48
+							+ 0.28 * std::sin(sx * 0.18) * std::cos(double(y) * 0.14)
+							+ 0.12 * std::cos(sx * 0.09 + double(y) * 0.08);
 						const double d1 = (double(x) - cx1) * (double(x) - cx1) + (double(y) - 30.0) * (double(y) - 30.0);
 						const double d2 = (double(x) - cx2) * (double(x) - cx2) + (double(y) - 60.0) * (double(y) - 60.0);
 						if (d1 <= 100.0)
-							pat = 0.92;
+							pat = 0.94;
 						if (d2 <= 100.0)
-							pat = 0.06;
+							pat = 0.04;
 						const double v = kBlack + gain * pat * 48000.0 + double(Noise(x, y, uint32_t(frameIdx))) * 0.25;
 						half[size_t(y) * kW + x] = static_cast<uint16_t>((std::min)(65535.0, (std::max)(0.0, std::floor(v + 0.5))));
 					}
@@ -2610,11 +2612,22 @@ namespace CutFadeJudgeFadeRunTestsNs
 				for (int i = 0; i < 6; ++i)
 					baseRecs.push_back(Picture(1.0, kBase++));
 
-				// Build AfterFailedBlackOrigin: 7x Black -> 1x FlatLift(+2 codes) -> identical N fade-in frames -> 6x Picture(1.0).
+				// Build AfterFailedBlackOrigin: 7x Black -> 1x near-black FlatLift(+2 codes, 0 < spread <= kBlackSpreadP4 so it trips e.cut, not e.flash)
+				// -> identical N fade-in frames -> 6x Picture(1.0).
+				auto MakeNearBlackFlatLift = [](uint32_t k) -> Record {
+					std::vector<uint16_t> half(size_t(kW) * kH);
+					for (uint32_t y = 0; y < kH; ++y)
+						for (uint32_t x = 0; x < kW; ++x)
+						{
+							const double v = kBlack + 2.0 * 256.0 + double(Noise(x, y, k)) * 0.5;
+							half[size_t(y) * kW + x] = static_cast<uint16_t>((std::min)(65535.0, (std::max)(0.0, std::floor(v + 0.5))));
+						}
+					return MakeRecordFromHalf(half);
+				};
 				std::vector<Record> afterRecs;
 				for (int i = 0; i < 7; ++i)
 					afterRecs.push_back(baseRecs[size_t(i)]);
-				afterRecs.push_back(ConstantFlatPicture(18.0));   // index 7: +2 code flat lift from black (16 -> 18)
+				afterRecs.push_back(MakeNearBlackFlatLift(7u));   // index 7: +2 code flat lift from black (spread ~0.98 code <= 1 code -> e.cut)
 				for (size_t i = 8; i < baseRecs.size(); ++i)
 					afterRecs.push_back(baseRecs[i]);
 
