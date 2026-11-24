@@ -722,5 +722,218 @@ namespace VideoProcessorTest
 				Assert::AreEqual(1.0, static_cast<double>(ceilData.f), 1e-7, L"extended_ceiling forwarded as 1.0 for full-range");
 			}
 		}
+
+	private:
+		// RAII teardown for DynamicDriveHost tests that start a dry-run (log_only / protocol: none)
+		// module, ensuring worker threads and shared references are stopped even if an assertion fails.
+		struct HostCleanupGuard
+		{
+			LedDrive::DynamicDriveHost& host;
+			LedDrive::DynamicDriveShared* shared;
+			HostCleanupGuard(LedDrive::DynamicDriveHost& hostIn, LedDrive::DynamicDriveShared* sharedIn = nullptr)
+				: host(hostIn), shared(sharedIn)
+			{
+			}
+			~HostCleanupGuard()
+			{
+				LedDrive::HostContext ctx;
+				ctx.frame = shared;
+				host.StopForShutdown(ctx);
+				if (shared)
+					shared->Clear();
+			}
+		};
+
+	public:
+		// S4-B1 / GEM-187: disabling drive.projector_control live (e.g. switch to Original pathway or
+		// pipeline_slots_off = drive.projector_control) must stop a running module and clear DynamicDriveShared,
+		// rather than returning early via Reconfigure().
+		TEST_METHOD(DisablingProjectorSlotStopsRunningDynamicDrive)
+		{
+			std::mutex state;
+			std::shared_ptr<QueuedFrameStatistics::IObserver> walkObserver;
+			LedDrive::DynamicDriveShared shared(walkObserver);
+			LedDrive::DynamicDriveHost host(state);
+			HostCleanupGuard cleanup(host, &shared);
+
+			AdapterConfig cfg(
+				"[projector.default]\n"
+				"protocol: none\n"
+				"[led_drive.default]\n"
+				"enabled: on\n"
+				"mode: log_only\n");
+
+			// Negative control: exact same config with projectorAllowed = true genuinely starts and publishes the module.
+			LedDrive::HostContext allowedCtx;
+			allowedCtx.frame = &shared;
+			allowedCtx.projectorAllowed = true;
+			host.ApplySnapshot(cfg.config, std::string(), allowedCtx);
+			Assert::IsNotNull(host.Module().get(), L"negative control: enabled LED drive must start when projectorAllowed is true");
+			Assert::IsNotNull(shared.Module().get(), L"negative control: running module must be published to DynamicDriveShared");
+
+			// Fix proof: exact same config with projectorAllowed = false must stop and clear the running module.
+			LedDrive::HostContext disallowedCtx;
+			disallowedCtx.frame = &shared;
+			disallowedCtx.projectorAllowed = false;
+			host.ApplySnapshot(cfg.config, std::string(), disallowedCtx);
+			Assert::IsNull(host.Module().get(), L"disabling drive.projector_control must stop a running Dynamic Drive module");
+			Assert::IsNull(shared.Module().get(), L"disabling drive.projector_control must clear the published DynamicDriveShared module");
+			Assert::AreEqual(std::string("off"), host.StatusText(), L"status must report off after projector slot is disallowed");
+		}
+
+		// S4-B1 / GEM-187: live toggle of [led_drive.default] enabled = off stops the running module
+		// and clears DynamicDriveShared even when [projector.default] is unchanged.
+		TEST_METHOD(DisablingLedDriveEnabledStopsRunningDynamicDrive)
+		{
+			std::mutex state;
+			std::shared_ptr<QueuedFrameStatistics::IObserver> walkObserver;
+			LedDrive::DynamicDriveShared shared(walkObserver);
+			LedDrive::DynamicDriveHost host(state);
+			HostCleanupGuard cleanup(host, &shared);
+
+			LedDrive::HostContext context;
+			context.frame = &shared;
+			context.projectorAllowed = true;
+
+			AdapterConfig enabledCfg(
+				"[projector.default]\n"
+				"protocol: none\n"
+				"[led_drive.default]\n"
+				"enabled: on\n"
+				"mode: log_only\n");
+			host.ApplySnapshot(enabledCfg.config, std::string(), context);
+			Assert::IsNotNull(host.Module().get(), L"negative control: enabled = on must start Dynamic Drive");
+			Assert::IsNotNull(shared.Module().get(), L"negative control: enabled = on must publish module to DynamicDriveShared");
+
+			AdapterConfig disabledCfg(
+				"[projector.default]\n"
+				"protocol: none\n"
+				"[led_drive.default]\n"
+				"enabled: off\n"
+				"mode: log_only\n");
+			host.ApplySnapshot(disabledCfg.config, std::string(), context);
+			Assert::IsNull(host.Module().get(), L"enabled = off must stop the running Dynamic Drive module");
+			Assert::IsNull(shared.Module().get(), L"enabled = off must clear the published DynamicDriveShared module");
+			Assert::AreEqual(std::string("off"), host.StatusText(), L"status must report off after enabled = off");
+		}
+
+		// S4-B1: cold startup before m_impl / UpdatePipelineSlots exists (frame == nullptr, projectorAllowed == true)
+		// must honor [vpv] pipeline_original_pathway = on from the config and never start Dynamic Drive.
+		TEST_METHOD(ColdStartupOriginalPathwayInConfigNeverStartsDynamicDrive)
+		{
+			std::mutex state;
+			LedDrive::DynamicDriveHost host(state);
+			HostCleanupGuard cleanup(host);
+
+			LedDrive::HostContext coldContext;
+			coldContext.frame = nullptr;
+			coldContext.projectorAllowed = true;
+
+			const std::string baseLedConfig =
+				"[projector.default]\n"
+				"protocol: none\n"
+				"[led_drive.default]\n"
+				"enabled: on\n"
+				"mode: log_only\n";
+
+			AdapterConfig originalCfg(baseLedConfig + "[vpv]\npipeline_original_pathway: on\n");
+			host.ApplySnapshot(originalCfg.config, std::string(), coldContext);
+			Assert::IsNull(host.Module().get(), L"cold startup with [vpv] pipeline_original_pathway = on must never start Dynamic Drive");
+			Assert::AreEqual(std::string("off"), host.StatusText(), L"status must remain off under Original pathway");
+
+			// Negative control: exact same [projector.default] / [led_drive.default] with pipeline_original_pathway = off starts the module.
+			AdapterConfig vpvCfg(baseLedConfig + "[vpv]\npipeline_original_pathway: off\n");
+			host.ApplySnapshot(vpvCfg.config, std::string(), coldContext);
+			Assert::IsNotNull(host.Module().get(), L"negative control: exact same LED config with pipeline_original_pathway = off must start Dynamic Drive");
+
+			AdapterConfig disabledCfg(
+				"[projector.default]\n"
+				"protocol: none\n"
+				"[led_drive.default]\n"
+				"enabled: off\n"
+				"mode: log_only\n");
+			host.ApplySnapshot(disabledCfg.config, std::string(), coldContext);
+			Assert::IsNull(host.Module().get(), L"cleanup must stop the started module");
+		}
+
+		// S4-B1: cold startup before m_impl / UpdatePipelineSlots exists must honor drive.projector_control
+		// in [vpv] pipeline_slots_off (including case-insensitive and whitespace-padded tokens).
+		TEST_METHOD(ColdStartupProjectorSlotOffInConfigNeverStartsDynamicDrive)
+		{
+			std::mutex state;
+			LedDrive::DynamicDriveHost host(state);
+			HostCleanupGuard cleanup(host);
+
+			LedDrive::HostContext coldContext;
+			coldContext.frame = nullptr;
+			coldContext.projectorAllowed = true;
+
+			const std::string baseLedConfig =
+				"[projector.default]\n"
+				"protocol: none\n"
+				"[led_drive.default]\n"
+				"enabled: on\n"
+				"mode: log_only\n";
+
+			AdapterConfig slotOffCfg(baseLedConfig + "[vpv]\npipeline_slots_off: repair.deband, drive.projector_control\n");
+			host.ApplySnapshot(slotOffCfg.config, std::string(), coldContext);
+			Assert::IsNull(host.Module().get(), L"cold startup with drive.projector_control in pipeline_slots_off must never start Dynamic Drive");
+			Assert::AreEqual(std::string("off"), host.StatusText(), L"status must remain off when drive.projector_control is listed off");
+
+			// Case-insensitive and whitespace-padded token matching.
+			AdapterConfig mixedCaseSlotOffCfg(baseLedConfig + "[vpv]\npipeline_slots_off:  repair.deband , \t Drive.Projector_Control  \n");
+			host.ApplySnapshot(mixedCaseSlotOffCfg.config, std::string(), coldContext);
+			Assert::IsNull(host.Module().get(), L"case-insensitive whitespace-padded Drive.Projector_Control must never start Dynamic Drive");
+			Assert::AreEqual(std::string("off"), host.StatusText(), L"status must remain off for mixed-case drive.projector_control token");
+
+			// Negative control: unrelated slot off (NOT drive.projector_control) on the exact same LED config starts the module.
+			AdapterConfig otherSlotOffCfg(baseLedConfig + "[vpv]\npipeline_slots_off: repair.deband\n");
+			host.ApplySnapshot(otherSlotOffCfg.config, std::string(), coldContext);
+			Assert::IsNotNull(host.Module().get(), L"negative control: unrelated slot in pipeline_slots_off must still allow Dynamic Drive to start");
+
+			AdapterConfig disabledCfg(
+				"[projector.default]\n"
+				"protocol: none\n"
+				"[led_drive.default]\n"
+				"enabled: off\n"
+				"mode: log_only\n");
+			host.ApplySnapshot(disabledCfg.config, std::string(), coldContext);
+			Assert::IsNull(host.Module().get(), L"cleanup must stop the started module");
+		}
+
+		// S4-B1: Attach() with projectorAllowed == false must detach and stop any running module
+		// rather than publishing it to the incoming DynamicDriveShared.
+		TEST_METHOD(AttachWithProjectorDisallowedDetachesRunningModuleAndNeverPublishes)
+		{
+			std::mutex state;
+			std::shared_ptr<QueuedFrameStatistics::IObserver> walkObserver;
+			LedDrive::DynamicDriveShared shared(walkObserver);
+			LedDrive::DynamicDriveHost host(state);
+			HostCleanupGuard cleanup(host, &shared);
+
+			AdapterConfig enabledCfg(
+				"[projector.default]\n"
+				"protocol: none\n"
+				"[led_drive.default]\n"
+				"enabled: on\n"
+				"mode: log_only\n");
+
+			// Negative control: start module while projectorAllowed = true (no frame yet).
+			LedDrive::HostContext startCtx;
+			startCtx.frame = nullptr;
+			startCtx.projectorAllowed = true;
+			host.ApplySnapshot(enabledCfg.config, std::string(), startCtx);
+			Assert::IsNotNull(host.Module().get(), L"negative control: enabled LED drive must start when projectorAllowed is true");
+
+			// Fix proof: Attach() with projectorAllowed = false must detach/stop the running module and never publish it.
+			LedDrive::HostContext attachCtx;
+			attachCtx.frame = &shared;
+			attachCtx.projectorAllowed = false;
+			host.Attach(attachCtx);
+			Assert::IsNull(shared.Module().get(), L"Attach with projectorAllowed = false must never publish a running module to DynamicDriveShared");
+			Assert::IsNull(host.Module().get(), L"Attach with projectorAllowed = false must detach and stop the running module on DynamicDriveHost");
+			Assert::IsFalse(static_cast<bool>(std::atomic_load(&walkObserver)), L"Attach with projectorAllowed = false must not publish a look-ahead observer");
+			Assert::AreEqual(std::string("off"), host.StatusText(), L"status must report off after Attach detaches the disallowed module");
+		}
 	};
 }
