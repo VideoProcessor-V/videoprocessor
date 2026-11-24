@@ -191,25 +191,10 @@ namespace VpMotion
 		VpMotion::P2View P2Pairs() const override { return P2(); }
 		// The P2 CPU form's reader (VectorEngine.cpp: FindTo + the C2a-F 2 generation check + MakeP2PairRecord).
 		bool P2RecordEndingAt(uint64_t to, VpMotion::P2PairRecord& out, std::string& why) const override;
-		void NoteP2CpuFormRead(bool served) const override
-		{
-			(served ? p2CpuFormServed_ : p2CpuFormDeclined_).fetch_add(1, std::memory_order_relaxed);
-		}
+		void NoteP2CpuFormRead(bool served) const override;
 		// The fill's call: a decline also keeps its words for the status segment's "(last: ...)" (BBP-A-COUNTS-CTRLALTD).
-		void NoteP2CpuFormRead(bool served, const std::string& why) const override
-		{
-			if (!served)
-			{
-				std::lock_guard<std::mutex> lock(p2CpuFormWhyMutex_);
-				p2CpuFormLastWhy_ = why;
-			}
-			NoteP2CpuFormRead(served);
-		}
-		std::string P2CpuFormLastDecline() const
-		{
-			std::lock_guard<std::mutex> lock(p2CpuFormWhyMutex_);
-			return p2CpuFormLastWhy_;
-		}
+		void NoteP2CpuFormRead(bool served, const std::string& why) const override;
+		std::string P2CpuFormLastDecline() const;
 		unsigned long long P2CpuFormServed() const { return p2CpuFormServed_.load(std::memory_order_relaxed); }
 		unsigned long long P2CpuFormDeclined() const { return p2CpuFormDeclined_.load(std::memory_order_relaxed); }
 		unsigned long long ShallowBackwardPairs() const { return vectorShallowBackwardPairs.load(std::memory_order_relaxed); }
@@ -365,17 +350,9 @@ namespace VpMotion
 		// atomically under flowMutex_ so a resolution switch (e.g. 1080p -> 4K) never exposes a torn (width, height) or (source, target)
 		// snapshot. Until a positive width is noted, FlowOf answers "size unknown" (unscaled) rather than guess a scale; when a positive
 		// target engine size is noted, FlowOf also refuses any stored pair whose (halfW, halfH) differs from that target as unscaled.
-		void NoteFlowSourceSize(int width, int height, int targetEngineW = 0, int targetEngineH = 0)
-		{
-			std::lock_guard<std::mutex> lock(flowMutex_);
-			flowSize_.sourceW = width > 0 ? width : 0;
-			flowSize_.sourceH = height > 0 ? height : 0;
-			const bool haveTarget = targetEngineW > 0 && targetEngineH > 0;
-			flowSize_.targetEngineW = haveTarget ? targetEngineW : 0;
-			flowSize_.targetEngineH = haveTarget ? targetEngineH : 0;
-		}
+		void NoteFlowSourceSize(int width, int height, int targetEngineW = 0, int targetEngineH = 0);
 		// Compatibility wrapper for width-only callers (tests): sets height and target size to 0 (FlowOf falls back to scaleX for Y).
-		void NoteFlowSourceWidth(int width) { NoteFlowSourceSize(width, 0, 0, 0); }
+		void NoteFlowSourceWidth(int width);
 		struct FlowReadCounters
 		{
 			unsigned long long requests = 0, served = 0;
@@ -482,14 +459,7 @@ namespace VpMotion
 		// Rule 32 (no new hook lines): the walk stages (StageOnDemandAtWalk, OnDemandIssue.h). True once per new A (the frame
 		// the dequeue takes next); false when the walk sees the same A again (the dequeue held it): no second request and no
 		// second cycle sample for it. Render thread only.
-		bool NoteOnDemandWalkFrame(uint64_t from)
-		{
-			if (onDemandWalkFromKnown_ && onDemandWalkFrom_ == from)
-				return false;
-			onDemandWalkFrom_ = from;
-			onDemandWalkFromKnown_ = true;
-			return true;
-		}
+		bool NoteOnDemandWalkFrame(uint64_t from);
 		bool TakeStagedOnDemand(OnDemandStaged& out);    // false: nothing staged since the last take
 		// Issues ONE request for the dequeue's selected pair (through RequestPair); an older one not yet claimed is abandoned.
 		void IssueOnDemand(OnDemand::PairRequest request);

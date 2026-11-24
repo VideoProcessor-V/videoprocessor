@@ -1880,4 +1880,49 @@ namespace VpMotion
 			append("ForwardShallow backward pairs served " + std::to_string(shallowBack));
 		return out;
 	}
+
+	void VectorEngine::NoteP2CpuFormRead(bool served) const
+	{
+		(served ? p2CpuFormServed_ : p2CpuFormDeclined_).fetch_add(1, std::memory_order_relaxed);
+	}
+
+	void VectorEngine::NoteP2CpuFormRead(bool served, const std::string& why) const
+	{
+		if (!served)
+		{
+			std::lock_guard<std::mutex> lock(p2CpuFormWhyMutex_);
+			p2CpuFormLastWhy_ = why;
+		}
+		NoteP2CpuFormRead(served);
+	}
+
+	std::string VectorEngine::P2CpuFormLastDecline() const
+	{
+		std::lock_guard<std::mutex> lock(p2CpuFormWhyMutex_);
+		return p2CpuFormLastWhy_;
+	}
+
+	void VectorEngine::NoteFlowSourceSize(int width, int height, int targetEngineW, int targetEngineH)
+	{
+		std::lock_guard<std::mutex> lock(flowMutex_);
+		flowSize_.sourceW = width > 0 ? width : 0;
+		flowSize_.sourceH = height > 0 ? height : 0;
+		const bool haveTarget = targetEngineW > 0 && targetEngineH > 0;
+		flowSize_.targetEngineW = haveTarget ? targetEngineW : 0;
+		flowSize_.targetEngineH = haveTarget ? targetEngineH : 0;
+	}
+
+	void VectorEngine::NoteFlowSourceWidth(int width)
+	{
+		NoteFlowSourceSize(width, 0, 0, 0);
+	}
+
+	bool VectorEngine::NoteOnDemandWalkFrame(uint64_t from)
+	{
+		if (onDemandWalkFromKnown_ && onDemandWalkFrom_ == from)
+			return false;
+		onDemandWalkFrom_ = from;
+		onDemandWalkFromKnown_ = true;
+		return true;
+	}
 }

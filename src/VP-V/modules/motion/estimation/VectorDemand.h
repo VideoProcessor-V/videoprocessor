@@ -464,33 +464,27 @@ namespace VectorDemand
 		{
 			if (!f.opticalFlow)
 			{
-				r |= bit(MotionEngineReason::OpticalFlowOff);
-				degraded = true;
+				r |= bit(MotionEngineReason::OpticalFlowOff); degraded = true;
 			}
 			if (f.nvofStartError)
 			{
-				r |= bit(MotionEngineReason::NvofUnavailable);
-				degraded = true;
+				r |= bit(MotionEngineReason::NvofUnavailable); degraded = true;
 			}
 			if (f.producerRecovering)
 			{
-				r |= bit(MotionEngineReason::ProducerRecovering);
-				degraded = true;
+				r |= bit(MotionEngineReason::ProducerRecovering); degraded = true;
 			}
 			if (f.producerNotRunning)
 			{
-				r |= bit(MotionEngineReason::ProducerNotRunning);
-				degraded = true;
+				r |= bit(MotionEngineReason::ProducerNotRunning); degraded = true;
 			}
 			if (d.reason == Reason::ForwardShallow)
 			{
-				r |= bit(MotionEngineReason::LowLatency);
-				degraded = true;
+				r |= bit(MotionEngineReason::LowLatency); degraded = true;
 			}
 			if (f.resyncWindow)
 			{
-				r |= bit(MotionEngineReason::Resync);
-				degraded = true;
+				r |= bit(MotionEngineReason::Resync); degraded = true;
 			}
 			if (!degraded && !f.producerRunning)
 				degraded = true;   // the matcher runs while the producer has not started yet (its first frame)

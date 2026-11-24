@@ -404,6 +404,52 @@ namespace MotionAhead
 		}
 	}
 
+	void Producer::SetR6AsyncExtras(bool on)
+	{
+		r6AsyncExtras.store(on, std::memory_order_release);
+	}
+
+	bool Producer::R6AsyncExtras() const
+	{
+		return r6AsyncExtras.load(std::memory_order_acquire);
+	}
+
+	R6::ExtrasStats Producer::GetR6ExtrasStats() const
+	{
+		R6::ExtrasStats s = r6ExtrasWorker.Stats();
+		const uint64_t published = r6AsyncPublished.load(std::memory_order_acquire);
+		if (s.asyncCompleted < published)
+			s.asyncCompleted = published;
+		return s;
+	}
+
+	std::string Producer::R6StatusLine() const
+	{
+		return R6::ExtrasWorker::StatusLine(GetR6ExtrasStats());
+	}
+
+	void Producer::Stats::RecordStage(const StageSample& sample)
+	{
+		lastStage = sample;
+		stageRing[stageNext] = sample;
+		stageNext = (stageNext + 1) % kStageRingSize;
+		if (stageCount < kStageRingSize)
+			++stageCount;
+	}
+
+	double Producer::Stats::StagePercentile(double StageSample::*field, double pct) const
+	{
+		if (stageCount == 0)
+			return 0.0;
+		std::array<double, kStageRingSize> sorted{};
+		for (size_t i = 0; i < stageCount; ++i)
+			sorted[i] = stageRing[i].*field;
+		std::sort(sorted.begin(), sorted.begin() + static_cast<std::ptrdiff_t>(stageCount));
+		const double clamped = pct < 0.0 ? 0.0 : (pct > 1.0 ? 1.0 : pct);
+		const size_t idx = static_cast<size_t>(clamped * static_cast<double>(stageCount - 1) + 0.5);
+		return sorted[(std::min)(idx, stageCount - 1)];
+	}
+
 	void Producer::EnsureR6ExtrasWorkerStarted()
 	{
 		const size_t cap = PendingCapacity();
