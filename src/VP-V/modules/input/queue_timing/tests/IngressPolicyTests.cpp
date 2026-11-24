@@ -9,6 +9,7 @@
 #include <VP-V/modules/input/queue_timing/IngressPolicy.h>
 #include <VP-V/modules/input/queue_timing/IngressState.h>
 #include <VP-V/core/FrameAnalysisStore.h>
+#include <VP-V/core/RunningPathwayLatch.h>
 
 #include <memory>
 #include <stdexcept>
@@ -57,6 +58,35 @@ namespace VideoProcessorTest
 			{
 				RE::ResetForTesting();
 				Vpv::Hub::ExtensionHub::Instance().ResetModulesForTesting();
+			}
+		};
+
+		// RAII restore of the process-wide running-pathway latch so no test leaks latch state across tests.
+		struct RunningPathwayGuard
+		{
+			RunningPathwayGuard() { Vpv::RunningPathway::SetForTesting(Vpv::RunningPathway::kUnknown); }
+			~RunningPathwayGuard() { Vpv::RunningPathway::SetForTesting(Vpv::RunningPathway::kUnknown); }
+			RunningPathwayGuard(const RunningPathwayGuard&) = delete;
+			RunningPathwayGuard& operator=(const RunningPathwayGuard&) = delete;
+		};
+
+		struct S1M1FakeRenderer
+		{
+			int decideCalls = 0;
+			mutable int targetCalls = 0;
+			static bool DecideDrop(void* self, RE::IngressContext& ic)
+			{
+				S1M1FakeRenderer& r = *static_cast<S1M1FakeRenderer*>(self);
+				++r.decideCalls;
+				ic.drop = true;
+				ic.filmHz = 23.976;
+				return true;
+			}
+			static void TargetSeven(const void* self, RE::QueueTargetContext& qc)
+			{
+				const S1M1FakeRenderer& r = *static_cast<const S1M1FakeRenderer*>(self);
+				++r.targetCalls;
+				qc.target = 7;
 			}
 		};
 	}
@@ -424,6 +454,189 @@ namespace VideoProcessorTest
 			Assert::IsTrue(unbound, L"one id, no top-level '; '");
 			bindings.clear();
 			Assert::AreEqual(before, Vpv::Ingress::UnboundRenderers(), L"released with the renderer");
+		}
+
+		// S1-M1: cold Original launch must leave QueueTarget and DecideIngress at Bill's values BEFORE frame 1
+		// (without any NoteOriginalPathway call). Negative control on the exact same renderer/context inputs under
+		// kVpv proves the VP-V hooks actively mutate qc.target (2 -> 7) and ic.drop (false -> true) when ungated.
+		TEST_METHOD(ColdOriginalLaunchLeavesQueueTargetAndIngressBillBeforeFirstFrame)
+		{
+			RunningPathwayGuard latchGuard;
+			Vpv::Ingress::IngressPolicy policy;
+
+			// Negative control (VP-V launch): before any NoteOriginalPathway call, VP-V hooks run.
+			Vpv::RunningPathway::SetForTesting(Vpv::RunningPathway::kVpv);
+			{
+				S1M1FakeRenderer vpvHost;
+				Vpv::Ingress::HostBinding bind(&vpvHost, &S1M1FakeRenderer::DecideDrop, &vpvHost, &S1M1FakeRenderer::TargetSeven);
+				Assert::IsTrue(bind.Registered(), L"VP-V HostBinding must register");
+				Assert::IsFalse(Vpv::Ingress::OriginalPathwayOf(&vpvHost), L"negative control: kVpv starts in VP-V pathway");
+
+				RE::FrameContext fc;
+				fc.host = &vpvHost;
+				RE::QueueTargetContext qc;
+				qc.capacity = 8;
+				qc.billTarget = 2;
+				qc.target = 2;
+				policy.OnQueueTarget(fc, qc);
+				Assert::AreEqual<size_t>(7, qc.target, L"negative control: VP-V launch must mutate qc.target from 2 to 7");
+				Assert::AreEqual(1, vpvHost.targetCalls, L"negative control: QueueTargetFn must be called under kVpv");
+
+				RE::IngressContext ic;
+				ic.host = &vpvHost;
+				ic.drop = false;
+				ic.arrivalQpc = 55;
+				const bool decided = policy.OnDecideIngress(fc, ic);
+				Assert::IsTrue(decided, L"negative control: VP-V launch must handle OnDecideIngress");
+				Assert::IsTrue(ic.drop, L"negative control: VP-V DecideFn must set ic.drop = true");
+				Assert::AreEqual(1, vpvHost.decideCalls, L"negative control: DecideFn must be called under kVpv");
+			}
+
+			// Fix proof (Original launch): fresh HostBinding without any NoteOriginalPathway call (before frame 1).
+			Vpv::RunningPathway::SetForTesting(Vpv::RunningPathway::kOriginal);
+			{
+				S1M1FakeRenderer origHost;
+				Vpv::Ingress::HostBinding bind(&origHost, &S1M1FakeRenderer::DecideDrop, &origHost, &S1M1FakeRenderer::TargetSeven);
+				Assert::IsTrue(bind.Registered(), L"Original HostBinding must register");
+				Assert::IsTrue(Vpv::Ingress::OriginalPathwayOf(&origHost), L"cold Original launch must report OriginalPathwayOf == true before frame 1");
+
+				RE::FrameContext fc;
+				fc.host = &origHost;
+				RE::QueueTargetContext qc;
+				qc.capacity = 8;
+				qc.billTarget = 2;
+				qc.target = 2;
+				policy.OnQueueTarget(fc, qc);
+				Assert::AreEqual<size_t>(2, qc.target, L"cold Original launch must preserve Bill's pre-filled qc.target == 2 before frame 1");
+				Assert::AreEqual(0, origHost.targetCalls, L"cold Original launch must NOT invoke QueueTargetFn");
+
+				RE::IngressContext ic;
+				ic.host = &origHost;
+				ic.drop = false;
+				ic.gapBefore = true;
+				ic.gapCause = "missed frames";
+				ic.arrivalQpc = 55;
+				const bool decided = policy.OnDecideIngress(fc, ic);
+				Assert::IsFalse(decided, L"cold Original launch must NOT handle OnDecideIngress before frame 1");
+				Assert::IsFalse(ic.drop, L"cold Original launch must leave ic.drop == false");
+				Assert::AreEqual<int64_t>(55, ic.arrivalQpc, L"cold Original launch must preserve Bill's pre-filled arrivalQpc");
+				Assert::AreEqual(0, origHost.decideCalls, L"cold Original launch must NOT invoke DecideFn");
+			}
+		}
+
+		// S1-M1: SettingsApplied dispatched to IngressPolicy::OnLifecycle must immediately sync the bound renderer's
+		// Original pathway in both directions while paused/idle (zero frames arrived), and Shutdown must unbind the
+		// implHost pointer so a later SettingsApplied for the same/reused impl address cannot mutate the renderer.
+		TEST_METHOD(PausedIdleSettingsAppliedSyncsOriginalPathwayBothDirectionsWithoutFrames)
+		{
+			RunningPathwayGuard latchGuard;
+			Vpv::RunningPathway::SetForTesting(Vpv::RunningPathway::kVpv);
+			Vpv::Ingress::IngressPolicy policy;
+
+			S1M1FakeRenderer renderer;
+			int impl = 0;
+			Vpv::Ingress::HostBinding bind(&renderer, &S1M1FakeRenderer::DecideDrop, &renderer, &S1M1FakeRenderer::TargetSeven);
+			Assert::IsTrue(bind.Registered(), L"HostBinding must register");
+			Vpv::Ingress::BindImplHost(&renderer, &impl);
+
+			RE::FrameContext fc;
+			fc.host = &renderer;
+
+			// Negative control: before SettingsApplied, the binding runs VP-V hooks.
+			Assert::IsFalse(Vpv::Ingress::OriginalPathwayOf(&renderer), L"negative control: starts in VP-V pathway");
+			{
+				RE::QueueTargetContext qc;
+				qc.capacity = 8;
+				qc.billTarget = 2;
+				qc.target = 2;
+				policy.OnQueueTarget(fc, qc);
+				Assert::AreEqual<size_t>(7, qc.target, L"negative control: before SettingsApplied, OnQueueTarget mutates 2 -> 7");
+				Assert::AreEqual(1, renderer.targetCalls, L"negative control: QueueTargetFn called once before SettingsApplied");
+
+				RE::IngressContext ic;
+				ic.host = &renderer;
+				ic.drop = false;
+				Assert::IsTrue(policy.OnDecideIngress(fc, ic), L"negative control: before SettingsApplied, OnDecideIngress handles frame");
+				Assert::IsTrue(ic.drop, L"negative control: before SettingsApplied, DecideFn sets ic.drop = true");
+				Assert::AreEqual(1, renderer.decideCalls, L"negative control: DecideFn called once before SettingsApplied");
+			}
+
+			// Fix proof (VP-V -> Original while paused/idle, zero frames arrived).
+			{
+				RE::LifecycleFacts toOriginal;
+				toOriginal.host = &impl;
+				toOriginal.kind = RE::Lifecycle::SettingsApplied;
+				toOriginal.code = 1;
+				policy.OnLifecycle(toOriginal);
+
+				Assert::IsTrue(Vpv::Ingress::OriginalPathwayOf(&renderer), L"SettingsApplied(code=1) must immediately set OriginalPathwayOf == true without frames");
+
+				RE::QueueTargetContext qc;
+				qc.capacity = 8;
+				qc.billTarget = 2;
+				qc.target = 2;
+				policy.OnQueueTarget(fc, qc);
+				Assert::AreEqual<size_t>(2, qc.target, L"Original pathway must preserve Bill's qc.target == 2 without frames");
+				Assert::AreEqual(1, renderer.targetCalls, L"QueueTargetFn must NOT be invoked while in Original pathway");
+
+				RE::IngressContext ic;
+				ic.host = &renderer;
+				ic.drop = false;
+				Assert::IsFalse(policy.OnDecideIngress(fc, ic), L"Original pathway must return false from OnDecideIngress without frames");
+				Assert::IsFalse(ic.drop, L"Original pathway must leave ic.drop == false");
+				Assert::AreEqual(1, renderer.decideCalls, L"DecideFn must NOT be invoked while in Original pathway");
+			}
+
+			// Fix proof (Original -> VP-V while paused/idle, zero frames arrived).
+			{
+				RE::LifecycleFacts toVpv;
+				toVpv.host = &impl;
+				toVpv.kind = RE::Lifecycle::SettingsApplied;
+				toVpv.code = 0;
+				policy.OnLifecycle(toVpv);
+
+				Assert::IsFalse(Vpv::Ingress::OriginalPathwayOf(&renderer), L"SettingsApplied(code=0) must immediately restore OriginalPathwayOf == false without frames");
+
+				RE::QueueTargetContext qc;
+				qc.capacity = 8;
+				qc.billTarget = 2;
+				qc.target = 2;
+				policy.OnQueueTarget(fc, qc);
+				Assert::AreEqual<size_t>(7, qc.target, L"VP-V pathway must immediately restore QueueTargetFn (2 -> 7) without frames");
+				Assert::AreEqual(2, renderer.targetCalls, L"QueueTargetFn must be invoked again after returning to VP-V");
+
+				RE::IngressContext ic;
+				ic.host = &renderer;
+				ic.drop = false;
+				Assert::IsTrue(policy.OnDecideIngress(fc, ic), L"VP-V pathway must immediately restore OnDecideIngress without frames");
+				Assert::IsTrue(ic.drop, L"VP-V pathway must set ic.drop = true again");
+				Assert::AreEqual(2, renderer.decideCalls, L"DecideFn must be invoked again after returning to VP-V");
+			}
+
+			// Teardown safety: Shutdown for &impl must unbind implHost so a later SettingsApplied on the same/reused
+			// address cannot mutate the unbound renderer's pathway.
+			{
+				RE::LifecycleFacts shutdown;
+				shutdown.host = &impl;
+				shutdown.kind = RE::Lifecycle::Shutdown;
+				policy.OnLifecycle(shutdown);
+				Assert::IsFalse(Vpv::Ingress::OriginalPathwayOf(&renderer), L"Shutdown for impl must not flip renderer pathway");
+
+				RE::LifecycleFacts staleOriginal;
+				staleOriginal.host = &impl;
+				staleOriginal.kind = RE::Lifecycle::SettingsApplied;
+				staleOriginal.code = 1;
+				policy.OnLifecycle(staleOriginal);
+				Assert::IsFalse(Vpv::Ingress::OriginalPathwayOf(&renderer), L"SettingsApplied after Shutdown on reused impl pointer must NOT mutate renderer pathway");
+
+				RE::QueueTargetContext qc;
+				qc.capacity = 8;
+				qc.billTarget = 2;
+				qc.target = 2;
+				policy.OnQueueTarget(fc, qc);
+				Assert::AreEqual<size_t>(7, qc.target, L"renderer must stay on VP-V after stale SettingsApplied on shut-down impl");
+				Assert::AreEqual(3, renderer.targetCalls, L"QueueTargetFn must still run after stale SettingsApplied on shut-down impl");
+			}
 		}
 	};
 }
