@@ -1149,7 +1149,7 @@ namespace Vpv
 			const double budget = stored.toDouble(&ok);
 			if (!ok || budget <= 0.0)
 				return text + QStringLiteral("<br>Not set on Input > Main (uses Target frames on the Queue page).");
-			text += QStringLiteral("<br>Target delay (Input > Main): <b>%1 ms</b>:").arg(budget, 0, 'f', 0);
+			text += QStringLiteral("<br>Input > Main \u2014 Target delay: <b>%1 ms</b>:").arg(budget, 0, 'f', 0);
 			text += QStringLiteral("<table cellspacing=6><tr><th align=left>Rate</th><th>Frames</th><th>Padding</th>"
 				"<th align=left>Look-ahead</th></tr>");
 			for (double fps : rates)
@@ -1336,7 +1336,7 @@ namespace Vpv
 					edit->setVisible(false);
 					edit->setEnabled(false);
 					if (!state->host.setValue) return;
-					state->host.setValue(state->profile, key, modeVal);
+					state->host.setValue(state->profile, key, modeVal == QStringLiteral("all") ? QString() : modeVal);
 					state->ReloadUpstream();
 					state->RefreshAll();
 				});
@@ -2772,7 +2772,7 @@ namespace Vpv
 			const Table& table = TierTable();
 			QVBoxLayout* layout = nullptr;
 			QWidget* page = NewSubPage(ObjectName(QStringLiteral("retirement")), QStringLiteral("Proposed retirement"), &layout);
-			parentTabs->addTab(page, QStringLiteral("Retirement Manager"));
+			parentTabs->addTab(page, QStringLiteral("Proposed retirement"));
 			auto* intro = Help(Q(table.retirementNote));
 			intro->setObjectName(ObjectName(QStringLiteral("retirement.note")));
 			layout->addWidget(intro);
@@ -3861,7 +3861,7 @@ namespace Vpv
 				// hidden combo) stay as upstream built them: inside VP-V cards their rows are hidden instead.
 				for (QWidget* w : index->ByName(root, name))
 				{
-					if (w->objectName().startsWith(QStringLiteral("vpv.")) || InKeyHome(w)) continue;
+					if (w->objectName().startsWith(QStringLiteral("vpv.")) || (vpvOn && InKeyHome(w))) continue;
 					const bool managed = w->property("vpvManaged").toBool();
 					if (vpvOn && !managed)
 					{
@@ -3941,7 +3941,7 @@ namespace Vpv
 				"QTabWidget[vpvUnitsTabs=\"true\"] > QTabBar::tab { min-width: 0px; padding: 6px 10px; }\n"
 				"QWidget[vpvSection=\"true\"] QLabel[vpvOriginalNote=\"true\"] { padding: 8px; border-radius: 5px; }\n"
 				"QWidget[vpvSection=\"true\"] QLabel[vpvOffNote=\"true\"] { padding: 8px; border-radius: 5px; }\n"
-				"QWidget[vpvSection=\"true\"] QPushButton[vpvPresetBtn=\"true\"] { padding: 5px 12px; border-radius: 4px; font-weight: 600; }\n"
+				"QWidget[vpvSection=\"true\"] QPushButton[vpvPresetBtn=\"true\"] { padding: 4px 10px; border-radius: 4px; font-weight: 600; }\n"
 				"QSlider[vpvMixedSlider=\"true\"]::handle:horizontal { background: transparent; border: 0; width: 0px; margin: 0px; }\n"
 				"/* vpv-section-style */\n");
 		}
@@ -3976,7 +3976,7 @@ namespace Vpv
 			"QWidget[vpvSection=\"true\"] QLabel[vpvOriginalNote=\"true\"] { background: #3a2a10; color: #ffd58a; padding: 8px; border-radius: 5px; }\n"
 			"QWidget[vpvSection=\"true\"] QLabel[vpvOffNote=\"true\"] { background: #1d2a38; color: #cfe0ef; padding: 8px; border-radius: 5px; }\n"
 			"QWidget[vpvSection=\"true\"] QLabel[vpvPrecisionNote=\"true\"] { color: #e0a040; }\n"
-			"QWidget[vpvSection=\"true\"] QPushButton[vpvPresetBtn=\"true\"] { color: #dce8f2; background: #142334; border: 1px solid #2b4258; border-radius: 4px; padding: 5px 12px; font-weight: 600; }\n"
+			"QWidget[vpvSection=\"true\"] QPushButton[vpvPresetBtn=\"true\"] { color: #dce8f2; background: #142334; border: 1px solid #2b4258; border-radius: 4px; padding: 4px 10px; font-weight: 600; }\n"
 			"QWidget[vpvSection=\"true\"] QPushButton[vpvPresetBtn=\"true\"]:hover { background: #1a2e42; }\n"
 			"QWidget[vpvSection=\"true\"] QPushButton[vpvPresetBtn=\"true\"]:checked { color: #ffffff; background: #1f5c99; border: 1px solid #4ca3eb; }\n"
 			"QWidget[vpvSection=\"true\"] QPushButton[vpvPresetBtn=\"true\"]:disabled { color: #6f8396; background: #101923; border: 1px solid #1d2c3b; }\n"
@@ -4036,6 +4036,8 @@ namespace Vpv
 		auto* pathway = new QComboBox;
 		pathway->setObjectName(ObjectName(QStringLiteral("pathway")));
 		pathway->setAccessibleName(QStringLiteral("Pathway"));
+		pathway->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+		pathway->setMinimumContentsLength(10);
 		pathway->addItem(QStringLiteral("VP-V pathway"), QStringLiteral("off"));
 		pathway->addItem(QStringLiteral("Original (Bill's)"), QStringLiteral("on"));
 		pathway->setToolTip(QStringLiteral(
@@ -4043,14 +4045,18 @@ namespace Vpv
 			"(\"Managed by VP-V\"). Original: the tiers and VP-V switches are disabled and the other pages behave exactly "
 			"as upstream. In the renderer, Original switches every VP addition off and runs the mixed stages in their "
 			"upstream form (ADR-0019). Stored as [vpv] pipeline_original_pathway."));
-		// One compact strip (usability audit 2026-10-24): the pathway and the profile; the rest of the
-		// page-wide controls are on the Overview tab, so a unit's own controls start near the top.
+		// Compact header strip: row 1 holds Pathway + Profile; row 2 holds the developer-tools toggle
+		// so the page stays comfortably within 760px window width.
+		auto* stripCol = new QVBoxLayout;
+		stripCol->setContentsMargins(0, 0, 0, 0);
+		stripCol->setSpacing(4);
 		auto* strip = new QHBoxLayout;
 		strip->setContentsMargins(0, 0, 0, 0);
 		strip->addWidget(new QLabel(QStringLiteral("Pathway")));
 		strip->addWidget(pathway, 1);
 		strip->addSpacing(14);
-		layout->addLayout(strip);
+		stripCol->addLayout(strip);
+		layout->addLayout(stripCol);
 
 		auto* originalNote = Help(QStringLiteral("<b>Original pathway: every VP-V addition is OFF.</b> The values below are "
 			"kept for when you switch back, but none of them is used now. Bill's own settings are on his pages (VP "
@@ -4086,6 +4092,8 @@ namespace Vpv
 		auto* profile = new QComboBox;
 		profile->setObjectName(ObjectName(QStringLiteral("profile")));
 		profile->setAccessibleName(QStringLiteral("Renderer profile"));
+		profile->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+		profile->setMinimumContentsLength(10);
 		profile->setToolTip(QStringLiteral("The renderer profile this page edits (the same one the Rendering page shows). "
 			"A named profile inherits every setting it does not set from the default profile; profile rules choose the "
 			"profile (e.g. per frame rate)."));
@@ -4125,13 +4133,16 @@ namespace Vpv
 		profileLabel->setToolTip(QStringLiteral("One renderer profile for both pages: choosing it here selects it in VP Renderer > Rendering, and the other way round."));
 		strip->addWidget(profileLabel);
 		strip->addWidget(profile, 1);
-		strip->addSpacing(14);
 		auto* devToggle = new QCheckBox(QStringLiteral("Show developer tools"));
 		devToggle->setObjectName(ObjectName(QStringLiteral("developer.toggle")));
 		devToggle->setChecked(false);
 		devToggle->setToolTip(QStringLiteral("Show the Developer tab (pipeline overrides, camera diagnostics, measured internals, "
 			"pipeline inspector, and retirement manager). Off by default."));
-		strip->addWidget(devToggle);
+		auto* devRow = new QHBoxLayout;
+		devRow->setContentsMargins(0, 0, 0, 0);
+		devRow->addWidget(devToggle);
+		devRow->addStretch(1);
+		stripCol->addLayout(devRow);
 
 		// The unit tabs; Overview is a clean 4-card dashboard; System stays unlocked on both pathways;
 		// Developer is hidden by default until "Show developer tools" is ticked.
@@ -4209,7 +4220,7 @@ namespace Vpv
 		auto* presetRowHost = new QWidget;
 		auto* presetRow = new QHBoxLayout(presetRowHost);
 		presetRow->setContentsMargins(0, 0, 0, 0);
-		presetRow->setSpacing(8);
+		presetRow->setSpacing(6);
 		struct PresetBtnInfo { int index; QString slug; QString label; QString tip; };
 		const std::vector<PresetBtnInfo> kPresetBtns = {
 			{ 0, QStringLiteral("classic"), QStringLiteral("Classic"), QStringLiteral("No advanced VP processing (straight to the projector).") },
@@ -4555,6 +4566,19 @@ namespace Vpv
 				CardBox card = MakeCard(ObjectName(QStringLiteral("developer.card.") + Q(spec.id)),
 					Q(spec.title), Q(spec.help), spec.collapsed);
 				(isInternals ? internalsLayout : pipeDiagLayout)->addWidget(card.frame);
+				if (cid == "input_diagnostics")
+				{
+					// Compatibility container for upstream ConfigEditorWindowTests (`vpv.input.card.diagnostics.body`)
+					// while keeping `vpv.developer.card.input_diagnostics.body` as the outer card body.
+					auto* compatBody = new QWidget;
+					compatBody->setObjectName(ObjectName(QStringLiteral("input.card.diagnostics.body")));
+					auto* compatForm = new QFormLayout(compatBody);
+					compatForm->setContentsMargins(0, 0, 0, 0);
+					compatForm->setHorizontalSpacing(18);
+					compatForm->setVerticalSpacing(8);
+					card.layout->addWidget(compatBody);
+					card.form = compatForm;
+				}
 				FillCard(state, nullptr, QStringLiteral("developer"), spec, card, unusedDev, devPage);
 			}
 			pipeDiagLayout->addStretch();
