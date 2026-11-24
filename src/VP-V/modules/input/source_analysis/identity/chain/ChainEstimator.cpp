@@ -2832,29 +2832,72 @@ namespace SourceIdentity
 					{
 						if (!run[a].have)
 							continue;
-						int bestN = RoundToInt(static_cast<double>(run[a].ls.axisLen) * 0.5);
-						double bestStat = 0.0;
-						bool haveCand = false;
+						const int axisN = run[a].ls.axisLen;
+						int bestExactN = 0;
+						double minLtiStat = 0.0;
+						bool haveExact = false;
 						for (size_t ci = 0; ci < run[a].vr.candidates.size(); ++ci)
 						{
 							const CandidateResult& cr = run[a].vr.candidates[ci];
 							if (!cr.valid || !cr.exactDone)
 								continue;
-							if (!haveCand || cr.stat < bestStat)
+							if (!haveExact || cr.stat < minLtiStat)
 							{
-								haveCand = true;
-								bestN = cr.n;
-								bestStat = cr.stat;
+								haveExact = true;
+								bestExactN = cr.n;
+								minLtiStat = cr.stat;
 							}
 						}
-						const NeuralSrResult nsr = NeuralSrWitness::Evaluate(
-							run[a].ls, bestN, bestStat, floorCodes, cfg.neuralSr, neuralSrWs[a]);
-						if (nsr.neuralUpscaled)
+						// On a nonlinear neural SR image, sharp 1-px edges break EVERY classical LTI kernel subspace,
+						// so ExactStage's top-2 LTI candidates may not include the true latent grid (e.g. 0.5x).
+						// When NO classical LTI candidate dips below ltiDipVeto, evaluate the bounded deduplicated set
+						// of exact-verified, canonical (0.5x, 2/3x matching lines 2779-2780), and proposed cutoffs
+						// against the global axis minLtiStat Pillar-1 veto; stop on first positive detection.
+						int nsrCands[kMaxCandidates + 2] = {};
+						int nsrCount = 0;
+						auto addNsrCand = [&](int n) {
+							if (n < 16 || n >= axisN || nsrCount >= kMaxCandidates + 2)
+								return;
+							for (int k = 0; k < nsrCount; ++k)
+							{
+								if (nsrCands[k] == n)
+									return;
+							}
+							nsrCands[nsrCount++] = n;
+						};
+						if (haveExact)
+							addNsrCand(bestExactN);
+						addNsrCand(RoundToInt(static_cast<double>(axisN) * 0.5));
+						addNsrCand(RoundToInt(static_cast<double>(axisN) * 2.0 / 3.0));
+						for (size_t ci = 0; ci < run[a].vr.candidates.size(); ++ci)
 						{
-							neuralSrHit[a] = true;
-							cNeuralSrDetections.fetch_add(1, std::memory_order_relaxed);
+							const CandidateResult& cr = run[a].vr.candidates[ci];
+							if (cr.valid)
+								addNsrCand(cr.n);
 						}
-						else if (nsr.verdict == NeuralSrVerdict::Abstain)
+						bool anyNotNeural = false;
+						bool anyAbstain = false;
+						for (int ni = 0; ni < nsrCount; ++ni)
+						{
+							const NeuralSrResult nsr = NeuralSrWitness::Evaluate(
+								run[a].ls, nsrCands[ni], minLtiStat, floorCodes, cfg.neuralSr, neuralSrWs[a]);
+							if (nsr.neuralUpscaled)
+							{
+								neuralSrHit[a] = true;
+								cNeuralSrDetections.fetch_add(1, std::memory_order_relaxed);
+								break;
+							}
+							if (nsr.reason == NeuralSrReason::ClassicalLtiConfirmed)
+							{
+								anyNotNeural = true;
+								break;
+							}
+							if (nsr.verdict == NeuralSrVerdict::NotNeural)
+								anyNotNeural = true;
+							else if (nsr.verdict == NeuralSrVerdict::Abstain)
+								anyAbstain = true;
+						}
+						if (!neuralSrHit[a] && !anyNotNeural && anyAbstain)
 						{
 							cNeuralSrAbstains.fetch_add(1, std::memory_order_relaxed);
 						}
