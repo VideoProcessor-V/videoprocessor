@@ -11,6 +11,7 @@
 
 #include <VP-V/modules/repair/grain_split/GrainLevel.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <random>

@@ -199,7 +199,7 @@ namespace VideoProcessorTest
 				}
 
 				Assert::IsTrue(CameraLink::Usable(last), L"true 2-quadrant shoreline pan is usable after water exclusion");
-				Assert::IsTrue(last.signals.waterExcludedShare > 0.35, L"water blocks excluded from fitter sample set");
+				Assert::IsTrue(last.signals.waterExcludedShare >= 0.45, L"water blocks excluded from fitter sample set");
 				Assert::AreEqual(8.0, last.params.h[2], 0.25, L"pan X accurately recovered");
 				Assert::AreEqual(-3.0, last.params.h[5], 0.25, L"pan Y accurately recovered");
 				Assert::IsNotNull(last.blocks.get());
