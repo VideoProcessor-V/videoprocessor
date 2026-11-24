@@ -7,6 +7,7 @@
 #include "pch.h"
 #include <VP-V/tests/VpLutGpuTestSupport.h>
 #include <VP-V/modules/motion/estimation/global_model/link/GuidanceCountsRing.h>
+#include <VP-V/modules/motion/estimation/global_model/CameraGuidanceGpu.h>
 
 #include <chrono>
 #include <memory>
@@ -141,6 +142,217 @@ namespace VideoProcessorTest
 				Assert::IsTrue(ring.Request(42, tex));
 			}
 			pl_tex_destroy(gpu, &tex);
+		}
+
+		// S3-H5: StillZero must not overwrite CONSISTENCY_BODY's trust=0 mask on bit-identical
+		// black letterbox bars outside the active picture rect, and FRAME_TRUST_BODY_A's CAMERA_OUT
+		// refinement loop must ignore out-of-picture blocks so (0, 0) bars never drag the refined
+		// camera vector toward 0. Pan (4, 0) stays within camera_window (6 px at 256p) of (0, 0),
+		// so unguarded bar blocks genuinely enter the refinement window (proven by the same-input
+		// pictureArea=false negative control).
+		BEGIN_TEST_METHOD_ATTRIBUTE(StillZeroAndCameraOutIgnoreLetterboxBarsOutsidePictureRect)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(StillZeroAndCameraOutIgnoreLetterboxBarsOutsidePictureRect)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			constexpr int kBarH = 48;   // 2.39:1-style bars: [0, 48) and [208, 256), 6 of 16 block rows (37.5%)
+			constexpr int kPanX = 4;    // exact 2-px half-res pan, within camera_window (6 px) of (0, 0)
+			const DejudderFrame fa = MakeDejudderFrame(kW, kH,
+				[kBarH](int x, int y) -> uint16_t { return (y < kBarH || y >= kH - kBarH) ? uint16_t(0) : DejudderTexture(x, y); },
+				[kBarH](int x, int y, int c) -> uint16_t { return (y < kBarH || y >= kH - kBarH) ? uint16_t(32768) : DejudderTexture(x * 2, y, 7 + c); });
+			const DejudderFrame fb = MakeDejudderFrame(kW, kH,
+				[kBarH, kPanX](int x, int y) -> uint16_t { return (y < kBarH || y >= kH - kBarH) ? uint16_t(0) : DejudderTexture(x - kPanX, y); },
+				[kBarH, kPanX](int x, int y, int c) -> uint16_t { return (y < kBarH || y >= kH - kBarH) ? uint16_t(32768) : DejudderTexture((x - kPanX / 2) * 2, y, 7 + c); });
+			DejudderGpuPlanes a, b;
+			UploadDejudderFrame(gpu, fa, a);
+			UploadDejudderFrame(gpu, fb, b);
+
+			auto downloadCamera = [gpu](const Dejudder::MotionWarp& warp) -> std::array<float, 4>
+			{
+				pl_tex cam = warp.Camera();
+				Assert::IsNotNull(cam, L"MotionWarp::Camera() must exist when objectStrength < 1 and globalPrior is enabled");
+				uint16_t texel[4] = {};
+				pl_tex_transfer_params download{};
+				download.tex = cam;
+				download.ptr = texel;
+				Assert::IsTrue(pl_tex_download(gpu, &download), L"Camera texture is not host-readable");
+				return { HalfBits(texel[0]), HalfBits(texel[1]), HalfBits(texel[2]), HalfBits(texel[3]) };
+			};
+
+			auto verifyProtected = [&](bool explicitRect, const wchar_t* label) -> std::array<float, 4>
+			{
+				Dejudder::Settings settings = DejudderTestSettings();
+				settings.estStillZero = true;
+				settings.pictureArea = true;
+				settings.globalPrior = true;
+				settings.objectStrength = 0.5f;   // enables CAMERA_OUT refinement
+				Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
+				if (explicitRect)
+					warp.SetPictureArea(0, kBarH, kW, kH - kBarH);
+				Assert::IsTrue(warp.Estimate(a.planes, b.planes), label);
+				pl_gpu_finish(gpu);
+				const DejudderField field = DownloadField(gpu, warp);
+				const std::array<float, 4> cam = downloadCamera(warp);
+
+				int barBlocks = 0;
+				int activeInterior = 0, activeMatched = 0;
+				for (int by = 0; by < field.blocksY; ++by)
+				{
+					const int cy = by * 16 + 8;
+					const bool inBar = cy < kBarH || cy >= kH - kBarH;
+					const bool inActiveInterior = cy >= kBarH + 16 && cy < kH - kBarH - 16;
+					for (int bx = 0; bx < field.blocksX; ++bx)
+					{
+						if (inBar)
+						{
+							++barBlocks;
+							Assert::IsFalse(field.trusted(bx, by),
+								(std::wstring(label) + L": letterbox bar block was resurrected as trusted by StillZero").c_str());
+						}
+						else if (inActiveInterior && bx >= 2 && bx + 2 < field.blocksX)
+						{
+							++activeInterior;
+							if (field.trusted(bx, by) &&
+								std::fabs(field.vx(bx, by) - static_cast<float>(kPanX)) <= 0.5f &&
+								std::fabs(field.vy(bx, by)) <= 0.5f)
+								++activeMatched;
+						}
+					}
+				}
+				Assert::AreEqual((kW / 16) * (2 * kBarH / 16), barBlocks, L"expected 192 letterbox bar blocks");
+				Assert::IsTrue(activeInterior > 0, L"must inspect interior active-picture blocks");
+				Assert::AreEqual(activeInterior, activeMatched,
+					(std::wstring(label) + L": interior active-picture blocks did not track the (4, 0) pan").c_str());
+				Assert::IsTrue(cam[2] > 0.5f, (std::wstring(label) + L": refined Camera() must be reliable").c_str());
+				Assert::IsTrue(cam[0] > 3.5f && cam[0] < 4.5f,
+					(std::wstring(label) + L": refined Camera().x was dragged away from the (4, 0) pan").c_str());
+				Assert::IsTrue(std::fabs(cam[1]) < 0.5f,
+					(std::wstring(label) + L": refined Camera().y drifted from 0").c_str());
+				return cam;
+			};
+
+			// Both explicit SetPictureArea and auto-detected black bars must protect bar blocks and Camera().
+			const std::array<float, 4> camExplicit = verifyProtected(true, L"explicit SetPictureArea");
+			const std::array<float, 4> camAuto = verifyProtected(false, L"auto-detected pictureArea");
+
+			// Mandatory same-input negative control (Rule 3): run on the EXACT SAME frames with pictureArea = false
+			// to prove StillZero genuinely stamps all 192 black-bar blocks (0, 0) trusted and drags Camera().x toward 0.
+			Dejudder::Settings unguarded = DejudderTestSettings();
+			unguarded.estStillZero = true;
+			unguarded.pictureArea = false;
+			unguarded.globalPrior = true;
+			unguarded.objectStrength = 0.5f;
+			Dejudder::MotionWarp negWarp(fixture.Log(), gpu, unguarded);
+			Assert::IsTrue(negWarp.Estimate(a.planes, b.planes), L"negative control letterbox estimate");
+			pl_gpu_finish(gpu);
+			const DejudderField negField = DownloadField(gpu, negWarp);
+			const std::array<float, 4> negCam = downloadCamera(negWarp);
+
+			int negBarTrustedZero = 0, negBarBlocks = 0;
+			for (int by = 0; by < negField.blocksY; ++by)
+			{
+				const int cy = by * 16 + 8;
+				if (cy >= kBarH && cy < kH - kBarH)
+					continue;
+				for (int bx = 0; bx < negField.blocksX; ++bx)
+				{
+					++negBarBlocks;
+					if (negField.trusted(bx, by) &&
+						std::fabs(negField.vx(bx, by)) < 1e-4f &&
+						std::fabs(negField.vy(bx, by)) < 1e-4f)
+						++negBarTrustedZero;
+				}
+			}
+			Assert::AreEqual(negBarBlocks, negBarTrustedZero,
+				L"negative control: unguarded StillZero must stamp every bit-identical letterbox bar block (0, 0), trust = 1");
+			Assert::IsTrue(negCam[2] > 0.5f, L"negative control: Camera() must be reliable");
+			Assert::IsTrue(negCam[0] < 3.0f,
+				L"negative control: unguarded (0, 0) letterbox bar blocks must drag refined Camera().x toward 0");
+			Assert::IsTrue(camExplicit[0] - negCam[0] > 0.8f && camAuto[0] - negCam[0] > 0.8f,
+				L"pictureArea guard must eliminate the bar-induced drag on refined Camera().x");
+		}
+
+		// S3-H5: when camera guidance skips the matcher across a cut/flash (skipMatcher = true),
+		// estStillZero = true must NOT run StillZero and stamp bit-identical active-picture blocks
+		// with (0, 0), trust = 1.0 (neither directly nor when a lowRes inner performed the skip).
+		BEGIN_TEST_METHOD_ATTRIBUTE(StillZeroDoesNotResurrectIdenticalBlocksOnCutSkippedGuidance)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(StillZeroDoesNotResurrectIdenticalBlocksOnCutSkippedGuidance)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			for (int tall = 0; tall < 2; ++tall)
+			{
+				// tall == 0: full-res search (SearchHalvings == 0); tall == 1: 1536 lines -> lowRes inner performs the skip.
+				const int w = tall ? 128 : kW;
+				const int h = tall ? 1536 : kH;
+				const int halfW = w / 2;
+				// Left half [0, halfW) is bit-identical textured picture (inside active picture, not black bars!);
+				// right half [halfW, w) cuts to an unrelated texture.
+				const DejudderFrame fa = MakeDejudderFrame(w, h,
+					[](int x, int y) { return DejudderTexture(x, y); },
+					[](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); });
+				const DejudderFrame fb = MakeDejudderFrame(w, h,
+					[halfW](int x, int y) { return x < halfW ? DejudderTexture(x, y) : DejudderTexture(x, y, 99); },
+					[halfW](int x, int y, int c) { return x * 2 < halfW ? DejudderTexture(x * 2, y, 7 + c) : DejudderTexture(x * 2, y, 107 + c); });
+				DejudderGpuPlanes a, b;
+				UploadDejudderFrame(gpu, fa, a);
+				UploadDejudderFrame(gpu, fb, b);
+
+				Dejudder::Settings settings = DejudderTestSettings();
+				settings.estStillZero = true;
+				settings.pictureArea = true;
+				settings.lowRes = (tall != 0);
+				settings.lowResAll = false;   // outer runs StillZero after inner's lowRes search skip
+
+				// Protected run: cut/flash guidance with skipMatcher = true.
+				auto cutGuidance = std::make_shared<CameraModel::GuidanceFrame>();
+				cutGuidance->active = true;
+				cutGuidance->skipMatcher = true;
+				Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
+				warp.SetCameraGuidance(cutGuidance);
+				Assert::IsTrue(warp.Estimate(a.planes, b.planes), L"cut-skipped estimate");
+				pl_gpu_finish(gpu);
+				Assert::AreEqual(tall ? 1 : 0, warp.SearchHalvings(), L"unexpected search halvings");
+				Assert::IsTrue(warp.CameraGuidanceUsed().matcherSkipped, L"guidance must report matcherSkipped");
+				const DejudderField field = DownloadField(gpu, warp);
+				const std::array<float, 3> ft = DownloadFrameTrust(gpu, warp);
+				for (int by = 0; by < field.blocksY; ++by)
+					for (int bx = 0; bx < field.blocksX; ++bx)
+						Assert::IsFalse(field.trusted(bx, by),
+							L"StillZero must not resurrect bit-identical blocks as trusted on a cut-skipped frame");
+				Assert::IsTrue(ft[0] < 1e-4f, L"cut-skipped frame trusted share must remain 0");
+
+				// Mandatory same-input negative control (Rule 3): run on the EXACT SAME frames WITHOUT cut-skip
+				// guidance to prove the bit-identical left half genuinely triggers StillZero (trust = 1, v = 0)
+				// and lifts FrameTrust share well above minTrustedShare (0.25).
+				Dejudder::MotionWarp negWarp(fixture.Log(), gpu, settings);
+				Assert::IsTrue(negWarp.Estimate(a.planes, b.planes), L"negative control unskipped estimate");
+				pl_gpu_finish(gpu);
+				Assert::IsFalse(negWarp.CameraGuidanceUsed().matcherSkipped, L"negative control must not skip matcher");
+				const DejudderField negField = DownloadField(gpu, negWarp);
+				const std::array<float, 3> negFt = DownloadFrameTrust(gpu, negWarp);
+				int leftBlocks = 0, leftStillTrusted = 0;
+				for (int by = 0; by < negField.blocksY; ++by)
+					for (int bx = 0; bx < negField.blocksX / 2; ++bx)
+					{
+						++leftBlocks;
+						if (negField.trusted(bx, by) &&
+							std::fabs(negField.vx(bx, by)) < 1e-4f &&
+							std::fabs(negField.vy(bx, by)) < 1e-4f)
+							++leftStillTrusted;
+					}
+				Assert::IsTrue(leftBlocks > 0, L"must inspect bit-identical left-half blocks");
+				Assert::AreEqual(leftBlocks, leftStillTrusted,
+					L"negative control: unskipped StillZero must stamp every bit-identical left-half block (0, 0), trust = 1");
+				Assert::IsTrue(negFt[0] >= 0.45f,
+					L"negative control: bit-identical half-frame must raise FrameTrust share >= 0.45 without cut-skip");
+			}
 		}
 	};
 }
