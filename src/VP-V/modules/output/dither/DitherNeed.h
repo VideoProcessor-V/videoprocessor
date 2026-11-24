@@ -113,14 +113,14 @@ namespace DitherNeed
 	struct LutGate
 	{
 		bool needed = false;
-		double maxGate = 0.0;     // max over codes 64..1023 of gVis
+		double maxGate = 0.0;     // max over codes 0..1023 of gVis
 		int worstCode = 0;
 	};
 
 	inline LutGate Gate(const LightLevel::Lut& lut, double qOut, const Params& p)
 	{
 		LutGate g;
-		for (int c = 64; c < LightLevel::kLutSize; ++c)
+		for (int c = 0; c < LightLevel::kLutSize; ++c)
 		{
 			const LightLevel::Entry& en = lut.e[static_cast<size_t>(c)];
 			const double v = GateVis<double>(p, en.V, en.Sout, qOut);

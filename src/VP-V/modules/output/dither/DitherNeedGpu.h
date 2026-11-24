@@ -112,7 +112,7 @@ namespace DitherNeed
 
 			// One frame: Decide (the caller's `fa.missing`, e.g. no LUT / unsupported domain / no set_texture, plus the GPU
 			// input validation), then the pass when On. Every other outcome Invalidate()s the product. The block-grid geometry
-			// of `fa` and `a` must agree (fa.grid.gw/gh = a.gridW/gridH). a.reset / a.off are set from the decision.
+			// of `fa` and `a` must agree (fa.grid.gw/gh/B = a.gridW/gridH/blockPx). a.reset / a.off are set from the decision.
 			// The pass values (params, qOut, alpha) are taken from `fa`, the one copy of the frame's values; a block grid that
 			// `fa` and `a` disagree on is a grain-grid mismatch. requireBind (default true): the product is useless without the
 			// fork's set_texture, so the frame reports kNoSetTexture; pass false to exercise the block pass alone.
@@ -122,7 +122,7 @@ namespace DitherNeed
 				if (fa.enabled)   // a missing product must read Unavailable, not NotNeeded, exactly as on the CPU
 				{
 					fa.missing |= Validate(a);
-					if (fa.grid.gw != a.gridW || fa.grid.gh != a.gridH) fa.missing |= kGrainGridMismatch;
+					if (fa.grid.gw != a.gridW || fa.grid.gh != a.gridH || fa.grid.B != a.blockPx) fa.missing |= kGrainGridMismatch;
 					if (requireBind && !Supported()) fa.missing |= kNoSetTexture;
 				}
 				a.params = fa.params;

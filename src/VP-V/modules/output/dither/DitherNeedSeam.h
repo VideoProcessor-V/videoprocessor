@@ -29,6 +29,8 @@
 #include <VP-V/modules/input/source_analysis/identity/SourceQualityView.h>
 #include <VP-V/modules/output/dither/DitherNeed.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <string>
 
@@ -61,6 +63,7 @@ namespace DitherNeedSeam
 		const SourceIdentity::QualityView* quality = nullptr;        // P14 source quality (tier, quality)
 		double grainAgeSeconds = 0.0, evidenceAgeSeconds = 0.0, lutAgeSeconds = 0.0;
 		int colorBits = 8;                                           // the link's colour depth (SigmaDeltaDomain::Domain::color)
+		int sourceBits = 0;                                          // source colour depth (0 = unspecified / same as link)
 		bool domainSupported = true;                                 // the sigma-delta can serve this output domain
 		double dtSeconds = 0.0;                                      // measured frame interval; <= 0 = unknown
 		bool discontinuity = false;                                  // cut, resync, re-base, context change
@@ -118,7 +121,8 @@ namespace DitherNeedSeam
 			if (f.nlsActive) missing |= DitherNeed::kNonLinearStretch;
 			if (stale) missing |= DitherNeed::kStaleProduct;
 
-			// Source quality decides how much of the wanted amplitude a source needs: a clean source needs none.
+			// Source quality decides how much of the wanted amplitude a source needs, floored by bit-depth quantization
+			// when the source is finer than the link (GEM-022).
 			bool classical = false;
 			if (f.quality)
 			{
@@ -128,6 +132,14 @@ namespace DitherNeedSeam
 			}
 			else
 				classical = true;   // no view at all: the full designed amplitude, said in the status
+			// Bit-depth quantization floor (GEM-022): when sourceBits > colorBits (with colorBits > 0), one source code is
+			// 2^(-sourceBits) and one link code is 2^(-colorBits), so the fraction of a link step not already quantized by
+			// the source is 1 - 2^(colorBits - sourceBits) (e.g. 10->8 = 0.75, 12->8 = 15/16, 9->8 = 0.5, <= link = 0).
+			// A clean high-bitrate source still needs link dithering for sub-link precision above the link depth.
+			const double bitDepthFloor = (f.sourceBits > f.colorBits && f.colorBits > 0)
+				? (1.0 - std::ldexp(1.0, f.colorBits - f.sourceBits))
+				: 0.0;
+			o.qualityNeed = (std::max)(o.qualityNeed, bitDepthFloor);
 			o.params = base;
 			o.params.aNeed = base.aBase + (base.aNeed - base.aBase) * o.qualityNeed;
 
@@ -135,7 +147,7 @@ namespace DitherNeedSeam
 			bool needed = true;
 			if (f.lut && !(missing & DitherNeed::kNoLut))
 				needed = cache_.Get(*f.lut, q, o.params);
-			if (o.qualityNeed < 1e-3) needed = false;   // a clean source: nothing to add
+			if (o.qualityNeed < 1e-3) needed = false;   // a clean same-or-coarser-depth source: nothing to add
 
 			DitherNeed::FrameArgs a;
 			a.params = o.params;
