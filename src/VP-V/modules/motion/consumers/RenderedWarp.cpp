@@ -350,6 +350,11 @@ if (b.x < size.x && b.y < size.y) {
 		valid = 0;
 	}
 
+	uint64_t Cache::Blits() const
+	{
+		return blits;
+	}
+
 	Rects Rounded(const pl_rect2df& source, const pl_rect2df& target, float framebufferW, float framebufferH)
 	{
 		Rects r;
@@ -404,6 +409,7 @@ if (b.x < size.x && b.y < size.y) {
 			bp.dst_rc = bp.src_rc;
 			bp.sample_mode = PL_TEX_SAMPLE_NEAREST;
 			pl_tex_blit(gpu, &bp);
+			++blits;
 		}
 		else
 		{
