@@ -2008,14 +2008,22 @@ namespace VideoProcessorTest
 
 		TEST_METHOD(DemotedPairDoesNotFeedTheCameraPrediction)
 		{
-			// After a demoted pair, a clean pan is accepted at once (the temporal filter did not learn the object's motion).
-			Fitter on(SC());
+			// After a demoted pair, a clean pan is accepted at once and sees the neutral temporal signal (0.5):
+			// the temporal filter never learned the demoted object's motion. Same-input negative control (staticCamera off):
+			// without demotion, the boat fit feeds m_temporal and drives the following pan's temporal consistency near 0.
 			Field boat = BoatLike(120);
+			Field pan(Grid4K()); pan.FromModel(Pan4K()); pan.AddNoise(0.05, 21);
+			Fitter off;
+			const CameraMotion dOff = off.Fit(boat.Input(kPairSeconds, 5));
+			Require(Usable(dOff) && dOff.verdictFlags == 0, "negative control premise (off): " + Flags(dOff));
+			const CameraMotion rOff = off.Fit(pan.Input(kPairSeconds, 6));
+			Require(rOff.signals.temporal < 0.1, "negative control (off): un-demoted boat must pollute temporal prediction, got " + std::to_string(rOff.signals.temporal));
+			Fitter on(SC());
 			const CameraMotion d = on.Fit(boat.Input(kPairSeconds, 5));
 			Require((d.verdictFlags & kVerdictStaticCamera) != 0, "premise: " + Flags(d));
-			Field pan(Grid4K()); pan.FromModel(Pan4K()); pan.AddNoise(0.05, 21);
 			const CameraMotion r = on.Fit(pan.Input(kPairSeconds, 6));
 			Require(Usable(r) && std::fabs(r.params.h[2] - 12.3) < 0.2, "clean pan after a demotion: " + Flags(r));
+			Assert::AreEqual(0.5, r.signals.temporal, 0.0, L"demoted pair must not feed m_temporal (expected exact neutral 0.5)");
 		}
 
 		TEST_METHOD(EvaluatorUnitBehaviourAndCost)
@@ -2074,7 +2082,9 @@ namespace VideoProcessorTest
 			QuantizeField(f, 1.0);
 			Fitter plain;
 			const CameraMotion r0 = plain.Fit(f.Input(kPairSeconds, 5));
-			Logger::WriteMessage(Fmt("quantized pan, no quantum declared (documentation)", r0).c_str());
+			Logger::WriteMessage(Fmt("quantized pan, no quantum declared (negative control)", r0).c_str());
+			Assert::IsFalse(Usable(r0), L"negative control: quantized pan with quantumPx == 0 must not be usable");
+			Assert::IsTrue(r0.reason == Reason::Ambiguous, L"negative control: quantized pan with quantumPx == 0 must report Reason::Ambiguous");
 			PairInput in = f.Input(kPairSeconds, 5);
 			in.quantumPx = 1.0;
 			Fitter fitter;
