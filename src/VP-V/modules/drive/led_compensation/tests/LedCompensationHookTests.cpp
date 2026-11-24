@@ -799,10 +799,18 @@ namespace VideoProcessorTest
 					{
 						x[k] = (raw[k] - black[k]) / (white[k] - black[k]);
 						const double code = 64.0 + 876.0 * x[k];
+						const double unorm10 = raw[k] * 1023.0;
 						codes += std::to_wstring(code) + L" ";
-						Assert::IsTrue(std::abs(code - idle.at(c)[k]) <= 0.5 + 1e-3,
-							(L"Hook-input capture of " + text(c) + L" channel " + std::to_wstring(k) + L" is code " +
-								std::to_wstring(code) + L", which does not round to its idle code " + std::to_wstring(idle.at(c)[k])).c_str());
+						// Validate the float target directly against the 10-bit UNORM idle render:
+						// R10G10B10A2 stores round(raw * 1023), whereas libplacebo's limited-range encode
+						// maps 10-bit codes via code/1024 (shifting code = raw*1024 above raw*1023 by up to 0.99 codes).
+						Assert::IsTrue(std::abs(unorm10 - idle.at(c)[k]) <= 0.5 + 1e-3,
+							(L"Hook-input capture of " + text(c) + L" channel " + std::to_wstring(k) + L" has unorm10 " +
+								std::to_wstring(unorm10) + L" (calibrated code " + std::to_wstring(code) +
+								L"), which does not round to its idle code " + std::to_wstring(idle.at(c)[k])).c_str());
+						Assert::IsTrue(std::abs(code - c[k]) <= 1.0 + 1e-3,
+							(L"Calibrated hook-input code of " + text(c) + L" channel " + std::to_wstring(k) +
+								L" drifted > 1 code from input: " + std::to_wstring(code)).c_str());
 					}
 					exactInput[c] = x;
 					exactText += text(c) + L" reaches the hook as codes " + codes + L"; ";
@@ -1089,8 +1097,9 @@ namespace VideoProcessorTest
 			// Gains below 1 on the same paths (gate ad68a54d6 MUST-3, tightened for GEM-LED-UP-SMOOTH), boost off,
 			// gains 0.6 / 0.8 / 0.95 in both domains. With C1 Hermite eff_gain blending:
 			// (i) Total worst 1-code step across the ENTIRE path (including the luma-1 crossing!) is bounded by the
-			//     exact achieved multiple of the path's proven minimum (1.48x..1.76x model, <= 2.3x + 2 codes GPU,
-			//     down from the old 13.7x cliff!).
+			//     exact achieved multiple of the path's proven minimum (1.48x..1.76x model, derived factorGpu * minimumGpu
+			//     + 2 codes GPU where factorGpu = ceil(factorModel * 219/128) from FP16 2-ULP quantization, down from the
+			//     old 13.7x cliff!).
 			// (ii) The luma-1 crossing step itself drops from ~1.09 * grey (~381 codes) to <= 0.08 * grey + 0.5
 			//      (model, achieved 0.010..0.058 * grey) and <= 0.10 * grey + 2.0 (GPU) — >10x tighter!
 			// (iii) In-test negative control: the old unsmoothed flat-C(1) formula on the EXACT SAME paths suffers
@@ -1506,12 +1515,22 @@ namespace VideoProcessorTest
 			Assert::AreEqual(size_t{ 1 }, comp.size(), L"libplacebo rejected LED compensation.glsl");
 			const pl_hook* hook = comp[0];
 
-			OutputEncodingRepair::Hook repair;
 			pl_color_repr fullRepr{};
 			fullRepr.sys = PL_COLOR_SYSTEM_RGB;
 			fullRepr.levels = PL_COLOR_LEVELS_FULL;
-			repair.SetTarget(fullRepr);
-			const std::vector<const pl_hook*> hooks = { repair.Get(), hook };
+			pl_color_space srgbSpace{};
+			srgbSpace.primaries = PL_COLOR_PRIM_BT_709;
+			srgbSpace.transfer = PL_COLOR_TRC_SRGB;
+			Assert::IsTrue((hook->stages & PL_HOOK_PRE_OUTPUT) != 0 && hook->input == PL_HOOK_SIG_TEX,
+				L"LED compensation.glsl must hook PREOUTPUT with PL_HOOK_SIG_TEX");
+
+			struct DispatchGuard
+			{
+				pl_dispatch dp = nullptr;
+				explicit DispatchGuard(pl_dispatch d) : dp(d) {}
+				~DispatchGuard() { if (dp) pl_dispatch_destroy(&dp); }
+			} dispatchGuard(pl_dispatch_create(fixture.Log(), fixture.Gpu()));
+			Assert::IsNotNull(dispatchGuard.dp, L"pl_dispatch_create failed");
 
 			using Rgb = std::array<double, 3>;
 			const double eotf = 2.2, knee = 0.08;
@@ -1549,26 +1568,79 @@ namespace VideoProcessorTest
 				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "extended_floor", -60.0 / 876.0));
 				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "extended_ceiling", 955.0 / 876.0));
 			};
+			// Invoke the compiled PREOUTPUT pl_hook directly on true RGBA32F input & output textures via pl_dispatch
+			// so stock libplacebo 7.360's internal FP16 FBO (ULP = 1/1024 near 1.0) does not quantize the lattice
+			// before/after the shader, letting the strict 2e-5 / 1e-5 FP32 parity invariants run unmodified.
 			auto renderBatch = [&](int w, int h, const std::vector<float>& inRgba) -> std::vector<float>
 			{
 				pl_gpu gpu = fixture.Gpu();
 				pl_fmt fmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
 					static_cast<pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
-				Assert::IsNotNull(fmt);
+				Assert::IsNotNull(fmt, L"No sampleable/renderable/host-readable RGBA32F format");
+				struct TempPool
+				{
+					pl_gpu gpu = nullptr;
+					pl_fmt fmt = nullptr;
+					std::vector<pl_tex> allocated;
+					TempPool(pl_gpu g, pl_fmt f) : gpu(g), fmt(f) {}
+					~TempPool() { for (pl_tex t : allocated) if (t) pl_tex_destroy(gpu, &t); }
+				} pool(gpu, fmt);
+				auto getTex = [](void* priv, int tw, int th) -> pl_tex
+				{
+					TempPool* p = static_cast<TempPool*>(priv);
+					pl_tex_params tp{};
+					tp.w = tw; tp.h = th; tp.format = p->fmt;
+					tp.sampleable = true; tp.renderable = true; tp.host_readable = true;
+					pl_tex t = pl_tex_create(p->gpu, &tp);
+					if (t) p->allocated.push_back(t);
+					return t;
+				};
 				pl_tex_params sp{}; sp.w = w; sp.h = h; sp.format = fmt; sp.sampleable = true; sp.initial_data = inRgba.data();
-				pl_tex_params tp{}; tp.w = w; tp.h = h; tp.format = fmt; tp.renderable = true; tp.host_readable = true;
+				pl_tex_params tp{}; tp.w = w; tp.h = h; tp.format = fmt; tp.sampleable = true; tp.renderable = true; tp.host_readable = true;
 				pl_tex src = pl_tex_create(gpu, &sp), dst = pl_tex_create(gpu, &tp);
 				Assert::IsNotNull(src); Assert::IsNotNull(dst);
-				pl_frame img = TargetLutGpuFixture::MakeRgbFrame(src);
-				pl_frame out = TargetLutGpuFixture::MakeRgbFrame(dst);
-				out.repr = fullRepr;
-				pl_render_params p = pl_render_fast_params;
-				p.dither_params = nullptr; p.error_diffusion = nullptr;
-				p.hooks = hooks.data(); p.num_hooks = static_cast<int>(hooks.size());
-				Assert::IsTrue(pl_render_image(fixture.Renderer(), &img, &out, &p));
+				pl_dispatch_reset_frame(dispatchGuard.dp);
+				if (hook->reset)
+					hook->reset(hook->priv);
+				pl_hook_params hp{};
+				hp.gpu = gpu;
+				hp.dispatch = dispatchGuard.dp;
+				hp.get_tex = getTex;
+				hp.priv = &pool;
+				hp.stage = PL_HOOK_PRE_OUTPUT;
+				hp.tex = src;
+				hp.rect = { 0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h) };
+				hp.src_rect = hp.rect;
+				hp.dst_rect = { 0, 0, w, h };
+				hp.repr = fullRepr;
+				hp.orig_repr = &fullRepr;
+				hp.color = srgbSpace;
+				hp.orig_color = &srgbSpace;
+				hp.components = 4;
+				pl_hook_res res = hook->hook(hook->priv, &hp);
+				Assert::IsFalse(res.failed, L"LED compensation.glsl hook execution failed");
+				pl_tex resultTex = nullptr;
+				if (res.output == PL_HOOK_SIG_COLOR)
+				{
+					Assert::IsNotNull(res.sh);
+					pl_dispatch_params dp{};
+					dp.shader = &res.sh;
+					dp.target = dst;
+					Assert::IsTrue(pl_dispatch_finish(dispatchGuard.dp, &dp), L"pl_dispatch_finish failed for LED compensation hook");
+					resultTex = dst;
+				}
+				else if (res.output == PL_HOOK_SIG_TEX)
+				{
+					Assert::IsNotNull(res.tex);
+					resultTex = res.tex;
+				}
+				else
+				{
+					Assert::Fail(L"Unexpected pl_hook_res output signature from LED compensation.glsl");
+				}
 				pl_gpu_finish(gpu);
 				std::vector<float> outRgba(static_cast<size_t>(w) * h * 4, 0.0f);
-				pl_tex_transfer_params dl{}; dl.tex = dst; dl.ptr = outRgba.data();
+				pl_tex_transfer_params dl{}; dl.tex = resultTex; dl.ptr = outRgba.data();
 				Assert::IsTrue(pl_tex_download(gpu, &dl));
 				pl_tex_destroy(gpu, &src); pl_tex_destroy(gpu, &dst);
 				return outRgba;
