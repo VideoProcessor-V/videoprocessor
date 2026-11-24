@@ -132,7 +132,7 @@ namespace SourceIdentity
 			double estimatedRatio = 1.0;                // effectiveRank / 8.0
 			double cliffRatio = 1.0;                    // evals[r - 1] / max(posEvals[r], effectiveNoiseFloor)
 			double trailingEnergyShare = 1.0;           // sum_{i=r}^{7} posEvals[i] / sum_{i=0}^{7} posEvals[i]
-			double spatialNoiseSigma = 0.0;             // lower-quartile 2nd-diff MAD sigma (>= floorCodes)
+			double spatialFloorCodes = 0.0;             // lower-quartile 2nd-diff MAD sigma (>= floorCodes)
 			double eigenvalues[kStaticPatchTaps] = {};  // descending eigenvalues of 8x8 covariance
 			int staticFramesUsed = 0;
 			int acceptedStaticPairs = 0;
@@ -313,7 +313,7 @@ namespace SourceIdentity
 		{
 			double rawCrossCov[kStaticPatchTaps][kStaticPatchTaps] = {}; // sum of dx_t * dx_{t-1}^T
 			double singleCov[kStaticPatchTaps][kStaticPatchTaps] = {};   // sum of 0.5*(dx_t*dx_t^T + dx_{t-1}*dx_{t-1}^T)
-			double spatialNoiseSigma = 0.0;
+			double spatialFloorCodes = 0.0;
 			int acceptedPairs = 0;
 			int rejectedPatches = 0;
 		};
@@ -503,7 +503,7 @@ namespace SourceIdentity
 			// Motion-invariant single-frame spatial noise estimate from lower-quartile (q = 1/4)
 			// kSegPx-segment 2nd-difference MAD: sigma = max(floorCodes, kMadToSigma * MAD(d) / sqrt(6)).
 			// Returns false if any sampled pixel is non-finite.
-			inline bool EstimateSpatialNoiseSigma(
+			inline bool MeasureSpatialFloorCodes(
 				const LineSet& ls,
 				double floorCodes,
 				std::vector<double>& segSigmaScratch,
@@ -784,7 +784,7 @@ namespace SourceIdentity
 
 			// Estimate spatial noise sigma and verify line finiteness before mutating workspace state.
 			double sigmaSpatial = floorCodes;
-			if (!Detail::EstimateSpatialNoiseSigma(ls, floorCodes, ws.segSigmaScratch, sigmaSpatial))
+			if (!Detail::MeasureSpatialFloorCodes(ls, floorCodes, ws.segSigmaScratch, sigmaSpatial))
 			{
 				ws.segSigmaScratch.clear();
 				res.reason = StaticRankReason::InvalidInput;
@@ -850,7 +850,7 @@ namespace SourceIdentity
 				res.valid = false;
 				res.rankCliffDetected = false;
 				res.reason = StaticRankReason::WarmingUp;
-				res.spatialNoiseSigma = sigmaSpatial;
+				res.spatialFloorCodes = sigmaSpatial;
 				res.staticFramesUsed = 1;
 				res.acceptedStaticPairs = 0;
 				res.rejectedMotionPatches = 0;
@@ -982,7 +982,7 @@ namespace SourceIdentity
 				res.valid = false;
 				res.rankCliffDetected = false;
 				res.reason = StaticRankReason::MotionRejected;
-				res.spatialNoiseSigma = sigmaSpatial;
+				res.spatialFloorCodes = sigmaSpatial;
 				res.staticFramesUsed = 1;
 				res.acceptedStaticPairs = 0;
 				res.rejectedMotionPatches = trans.rejectedPatches;
@@ -991,7 +991,7 @@ namespace SourceIdentity
 			}
 
 			// Push accepted static transition into the bounded sliding window ring.
-			trans.spatialNoiseSigma = sigmaSpatial;
+			trans.spatialFloorCodes = sigmaSpatial;
 			ws.transitions[ws.transitionHead] = trans;
 			ws.transitionHead = (ws.transitionHead + 1) % ws.activeRingCap;
 			if (ws.transitionCount < ws.activeRingCap)
@@ -1011,7 +1011,7 @@ namespace SourceIdentity
 				const StaticPatchTransition& entry = ws.transitions[slotIdx];
 				totalPairs += entry.acceptedPairs;
 				totalRejected += entry.rejectedPatches;
-				sumNoiseVar += entry.spatialNoiseSigma * entry.spatialNoiseSigma;
+				sumNoiseVar += entry.spatialFloorCodes * entry.spatialFloorCodes;
 				for (int i = 0; i < kStaticPatchTaps; ++i)
 				{
 					for (int j = 0; j < kStaticPatchTaps; ++j)
@@ -1034,7 +1034,7 @@ namespace SourceIdentity
 			ws.rejectedMotionPatches = totalRejected;
 			ws.staticFramesAccepted = ws.transitionCount + 1;
 
-			res.spatialNoiseSigma = sigmaSpatial;
+			res.spatialFloorCodes = sigmaSpatial;
 			res.staticFramesUsed = ws.staticFramesAccepted;
 			res.acceptedStaticPairs = ws.acceptedStaticPairs;
 			res.rejectedMotionPatches = ws.rejectedMotionPatches;
@@ -1097,7 +1097,7 @@ namespace SourceIdentity
 
 			std::vector<double> segScratch;
 			double sigmaSpatial = floorCodes;
-			if (!Detail::EstimateSpatialNoiseSigma(ls, floorCodes, segScratch, sigmaSpatial))
+			if (!Detail::MeasureSpatialFloorCodes(ls, floorCodes, segScratch, sigmaSpatial))
 			{
 				res.reason = StaticRankReason::InvalidInput;
 				return res;
@@ -1120,7 +1120,7 @@ namespace SourceIdentity
 			}
 
 			const int numSlots = static_cast<int>(slots.size());
-			res.spatialNoiseSigma = sigmaSpatial;
+			res.spatialFloorCodes = sigmaSpatial;
 			res.staticFramesUsed = 1;
 			res.acceptedStaticPairs = numSlots;
 			res.rejectedMotionPatches = 0;
