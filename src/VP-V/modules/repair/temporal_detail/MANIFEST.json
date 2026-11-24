@@ -29,6 +29,7 @@
     "src/VP-V/modules/repair/temporal_detail/v2/TdV2GrainQ5.h",
     "src/VP-V/modules/repair/temporal_detail/v2/TdV2Shaders.h",
     "src/VP-V/modules/repair/temporal_detail/v2/TdV2Gpu.h",
+    "src/VP-V/modules/repair/temporal_detail/v2/TdV2ChromaGpu.h",
     "src/VP-V/modules/repair/temporal_detail/v2/TdV2Scheduler.h",
     "src/VP-V/modules/repair/temporal_detail/v2/TdV2Settings.h"
   ],
