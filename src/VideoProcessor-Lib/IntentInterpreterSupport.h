@@ -47,6 +47,7 @@ namespace IntentInterpreter
     {
         bool valid = false;
         double applied = 0.0;
+        double quantised = 0.0;
         double ownerBlack = 0.0;
         double lastStepSeconds = 0.0;
     };
@@ -57,17 +58,20 @@ namespace IntentInterpreter
         if (!s.enabled || !(s.strength > 0.0))
         {
             st.valid = false;
+            st.quantised = 0.0;
             return ownerBlackNits;   // exactly the owner's black: bit-identical
         }
         if (!st.valid || st.ownerBlack != ownerBlackNits)
         {
             st.valid = true;
             st.applied = ownerBlackNits;
+            st.quantised = ownerBlackNits;
             st.ownerBlack = ownerBlackNits;
             st.lastStepSeconds = nowSeconds;
         }
         const double wanted = filterValid ?
-            AmbientAdapt::QuantisedBlackNits(s, ownerBlackNits, smoothedLux) : ownerBlackNits;
+            AmbientAdapt::QuantisedBlackNits(s, ownerBlackNits, smoothedLux, st.quantised) : ownerBlackNits;
+        st.quantised = wanted;
         const double next = AmbientAdapt::NextAppliedBlackNits(st.applied, wanted, atCut,
             nowSeconds - st.lastStepSeconds);
         if (std::isfinite(next) && next != st.applied)
