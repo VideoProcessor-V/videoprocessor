@@ -192,7 +192,7 @@ namespace Vpv
 				{
 					const std::string cause = memo.LastCause(srcProduct);
 					return Detail::Decline(out, c,
-						(half ? std::string("no GPU half luma plane (P1 has no GPU form yet)") : std::string("no source luma view"))
+						(half ? std::string("no GPU P1 half-res plane (P1 has no GPU form yet)") : std::string("no source luma view"))
 						+ (cause.empty() ? std::string() : " (" + cause + ")"));
 				}
 				if (!half)

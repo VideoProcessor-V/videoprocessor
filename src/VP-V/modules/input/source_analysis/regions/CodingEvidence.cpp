@@ -174,7 +174,7 @@ namespace CodingEvidence
 		period = 0.0;
 		const int n1 = static_cast<int>(steps.size());
 		// S4-M4 / Rule 1: a quarter 10-bit axis code in native code units (0.25 at <= 10-bit, 1.0 at 12-bit), matching MeasureTile's floor.
-		const double floorCodes = 0.25 * (std::max)(1, axisScale);   // as the earlier measure: a near-flat tile is not 'blocked'
+		const double floorCodes = (std::max)(1, axisScale) / 4.0;   // as the earlier measure: a near-flat tile is not 'blocked'
 		double best = 1.0;
 		std::vector<std::vector<double>> bins;
 		std::vector<double> m, ex;

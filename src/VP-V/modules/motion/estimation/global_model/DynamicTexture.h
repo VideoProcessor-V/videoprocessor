@@ -46,7 +46,7 @@ namespace CameraModel
 		double temporal = 0;         // incoherence vs the previous pair's residuals (0 when none / too few compared)
 		double field = 0;            // incoherence of the RAW vectors vs the previous pair's (camera + residual)
 		double spatial = 0;          // incoherence between neighbouring disagreeing blocks (always computed, no share blind spot)
-		double spatialLaplacian = 0; // whole-field share of trusted blocks with |nabla^2 v| > absSigmas * sigma_L
+		double spatialCurvature = 0; // whole-field share of trusted blocks with |nabla^2 v| > absSigmas * sigma_C
 		double rhoTemp = 0;          // whole-field camera-advected lag-1 residual autocorrelation in [-1, 1] (0 when unavailable)
 		bool haveTemporal = false;
 		bool haveRhoTemp = false;
@@ -77,18 +77,18 @@ namespace CameraModel
 	DynTextureResult DetectDynamicTexture(const DynTextureConfig& cfg, const PairInput& in, const Params& model, DynTextureState& state,
 		double resolvedPrecPx = 0);
 
-	// CE-WATER-C1 (default OFF in Config::waterBlockExclude): per-block model-free discrete vector Laplacian
+	// CE-WATER-C1 (default OFF in Config::waterBlockExclude): per-block model-free discrete vector curvature
 	// exclusion from the GlobalModelFit sample / refinement set (NEVER stamped into BlockData::excluded / Label::Overlay).
-	// For any linear camera motion (Translation, Similarity, Affine), the symmetric discrete Laplacian
-	//   L(b) = v(b) - avg(symmetric orthogonal neighbours)
+	// For any linear camera motion (Translation, Similarity, Affine), the symmetric discrete curvature
+	//   C(b) = v(b) - avg(symmetric orthogonal neighbours)
 	// vanishes identically (100% invariant to pan, zoom, and rotation speed). Under i.i.d. vector noise sigma = precPx:
-	//   - 4-point symmetric stencil (L, R, U, D): std(L_x) = sqrt(1 + 4/16) * precPx = (sqrt(5)/2) * precPx
-	//   - 2-point symmetric pair (L+R or U+D on borders): std(L_x) = sqrt(1 + 2/4) * precPx = sqrt(3/2) * precPx
+	//   - 4-point symmetric stencil (L, R, U, D): std(C_x) = sqrt(1 + 4/16) * precPx = (sqrt(5)/2) * precPx
+	//   - 2-point symmetric pair (L+R or U+D on borders): std(C_x) = sqrt(1 + 2/4) * precPx = sqrt(3/2) * precPx
 	//   - temporal difference v_t(b) - k * v_{t-1}(pb) (k = dt_t / dt_{t-1}): std(dv_x) = sqrt(1 + k^2) * precPx
 	// Thresholds derive strictly from the fitter's 3-sigma contract (Config::absThresholdSigmas = 3.0).
 	struct DynTextureExcludeConfig
 	{
-		double laplacianSigmas = 3.0;            // 3-sigma contract matching Config::absThresholdSigmas (no arbitrary rel * |v|)
+		double curvatureSigmas = 3.0;            // 3-sigma contract matching Config::absThresholdSigmas (no arbitrary rel * |v|)
 		// Remaining-rigid-support guard (CE-WATER-C1): when waterExcludedShare exceeds this elementary 1-quadrant ratio
 		// (1/4 of trusted blocks), remaining rigid support must still cover >= 3 quadrants (Config::quadrantMinShare) AND
 		// retain border-ring support >= Config::borderVetoRatio, else demote cleanly to Reason::Ambiguous | kVerdictDynamicTexture.

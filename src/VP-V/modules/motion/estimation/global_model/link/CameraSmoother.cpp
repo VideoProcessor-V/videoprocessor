@@ -15,8 +15,8 @@ namespace CameraLink
 		constexpr size_t kRetainedRecords = static_cast<size_t>(VpSkeleton::kMaxCameraLead) * 4u + 16u;
 
 		// Derived LOO innovation spike threshold fallback when BlockData is not attached (e.g. POD-decoded P7):
-		// matches Config::absThresholdSigmas (3.0) * nominal 16-px precision (0.25 px) = 0.75 source px.
-		constexpr double kLooDefaultAbsThresholdPx = 3.0 * 0.25;
+		// matches Config::absThresholdSigmas (3.0) * nominal 16-px precision (1/4 px) = 0.75 source px.
+		constexpr double kLooDefaultAbsThresholdPx = 3.0 / 4.0;
 
 		inline bool BreaksSegment(const CameraModel::CameraMotion& r, const CameraModel::CameraMotion& centre)
 		{

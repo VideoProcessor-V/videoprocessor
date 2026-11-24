@@ -119,10 +119,10 @@ namespace CameraModel
 		double inlierShare = 0, precision = 0, coverage = 0, temporal = 0.5, conditioning = 0,
 			engineAgreement = 0.5, inverse = 0.5, ambiguity = 1, logit = 0;
 		// Dynamic-texture detector statistics (Config::dynTexture; 0 otherwise): share of trusted blocks that disagree with the
-		// camera model, the temporal / spatial incoherence of that disagreement, whole-field discrete vector Laplacian share
-		// (dynLaplacian), and camera-advected lag-1 residual autocorrelation (dynRhoTemp in [-1, 1]).
+		// camera model, the temporal / spatial incoherence of that disagreement, whole-field discrete vector curvature share
+		// (dynCurvature), and camera-advected lag-1 residual autocorrelation (dynRhoTemp in [-1, 1]).
 		double dynShare = 0, dynTemporal = 0, dynSpatial = 0, dynField = 0;
-		double dynLaplacian = 0, dynRhoTemp = 0;
+		double dynCurvature = 0, dynRhoTemp = 0;
 		// CE-WATER-C1 (Config::waterBlockExclude; 0 when off): share of evaluated blocks excluded as incoherent dynamic texture / water.
 		double waterExcludedShare = 0;
 		// C4 diagnostics (populated on every valid fit):

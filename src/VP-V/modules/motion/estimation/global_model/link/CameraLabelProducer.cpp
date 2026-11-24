@@ -5,9 +5,87 @@
 #include <VP-V/core/VramUsers.h>
 
 #include <chrono>
+#include <cmath>
+#include <cstdint>
 
 namespace CameraLink
 {
+	// GEM-129: validates that `field` is either on `blocks`'s exact grid or a cleanly regriddable integer-multiple
+	// finer native grid (e.g. 8-px AheadFit field vs 16-px consumer BlockData), and populates `in` on `blocks`'s grid.
+	// Exact derivation: a picture of W x H source px gives src = ceil(W / srcBs) native cells and dst = ceil(W / dstBs)
+	// consumer blocks; when dstBs = scale * srcBs for integer scale >= 1, ceil(ceil(W / srcBs) / scale) == ceil(W / dstBs)
+	// holds identically iff (src + scale - 1) / scale == dst. When scale > 1, samples each consumer block from the native
+	// cell its centre lies in — matching AheadFlow.h RegridToConsumerGrid so aux.excluded and P8 texture dims align 1:1.
+	// Returns false on any incompatible grid shape or block-size ratio (caller refuses with "camera labels: grid mismatch").
+	bool PrepareComputePairInput(const FieldCopy& field, const CameraModel::BlockData& blocks, const CameraModel::Rect& picture,
+		CameraModel::PairInput& in, std::vector<float>& regridX, std::vector<float>& regridY, std::vector<float>& regridTrust)
+	{
+		if (!field.Valid() || field.fwdY.size() != field.Blocks() || field.fwdTrust.size() != field.Blocks() ||
+			!CameraModel::IsFiniteBits(field.blockSize))
+			return false;
+		if (blocks.gridW <= 0 || blocks.gridH <= 0 || !(blocks.blockSize > 0.0) ||
+			!CameraModel::IsFiniteBits(blocks.blockSize))
+			return false;
+		const size_t dstBlocks = static_cast<size_t>(blocks.gridW) * static_cast<size_t>(blocks.gridH);
+		if (!blocks.excluded.empty() && blocks.excluded.size() != dstBlocks)
+			return false;
+
+		const double ratio = blocks.blockSize / field.blockSize;
+		if (!CameraModel::IsFiniteBits(ratio) || ratio < 1.0 - 1e-6 || ratio > static_cast<double>(INT32_MAX))
+			return false;
+		const int64_t scale = static_cast<int64_t>(std::llround(ratio));
+		if (scale < 1 || std::fabs(blocks.blockSize - field.blockSize * static_cast<double>(scale)) > 1e-6 * blocks.blockSize)
+			return false;
+		const int64_t expectedW = (static_cast<int64_t>(field.gridW) + scale - 1) / scale;
+		const int64_t expectedH = (static_cast<int64_t>(field.gridH) + scale - 1) / scale;
+		if (expectedW != blocks.gridW || expectedH != blocks.gridH)
+			return false;
+
+		in = CameraModel::PairInput();
+		in.gridW = blocks.gridW;
+		in.gridH = blocks.gridH;
+		in.blockSize = blocks.blockSize;
+		in.picture = picture;
+		in.quantumPx = field.quantumPx;
+		if (scale == 1)
+		{
+			in.fwdX = field.fwdX.data();
+			in.fwdY = field.fwdY.data();
+			in.fwdTrust = field.fwdTrust.data();
+			return true;
+		}
+		regridX.resize(dstBlocks);
+		regridY.resize(dstBlocks);
+		regridTrust.resize(dstBlocks);
+		const int srcW = field.gridW;
+		const int srcH = field.gridH;
+		const double srcBs = field.blockSize;
+		const double dstBs = blocks.blockSize;
+		auto cellOf = [](double centre, double cellSize, int grid) -> int {
+			const int c = static_cast<int>(std::floor(centre / cellSize));
+			return c < 0 ? 0 : c > grid - 1 ? grid - 1 : c;
+		};
+		for (int ty = 0; ty < blocks.gridH; ++ty)
+		{
+			const int cy = cellOf((ty + 0.5) * dstBs, srcBs, srcH);
+			const size_t srcRow = static_cast<size_t>(cy) * static_cast<size_t>(srcW);
+			const size_t dstRow = static_cast<size_t>(ty) * static_cast<size_t>(blocks.gridW);
+			for (int tx = 0; tx < blocks.gridW; ++tx)
+			{
+				const int cx = cellOf((tx + 0.5) * dstBs, srcBs, srcW);
+				const size_t srcIdx = srcRow + static_cast<size_t>(cx);
+				const size_t dstIdx = dstRow + static_cast<size_t>(tx);
+				regridX[dstIdx] = field.fwdX[srcIdx];
+				regridY[dstIdx] = field.fwdY[srcIdx];
+				regridTrust[dstIdx] = field.fwdTrust[srcIdx];
+			}
+		}
+		in.fwdX = regridX.data();
+		in.fwdY = regridY.data();
+		in.fwdTrust = regridTrust.data();
+		return true;
+	}
+
 	CameraLabelProducer::CameraLabelProducer(pl_log log, pl_gpu gpu, LabelMode mode, int ringSlots, int liveSlots,
 		const CameraModel::Config& fitConfig, bool hostReadable)
 		: m_log(log), m_gpu(gpu), m_mode(mode), m_cfg(fitConfig), m_readable(hostReadable),

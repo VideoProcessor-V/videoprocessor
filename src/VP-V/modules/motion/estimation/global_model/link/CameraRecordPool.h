@@ -95,7 +95,7 @@ namespace CameraLink
 		w.Put(m.objectLayer.blocks);
 		w.Put(m.objectLayer.cx); w.Put(m.objectLayer.cy);
 		// CE-WATER / C4 diagnostics tail (appended to CRD2; total 595 B <= 1024 B).
-		w.Put(s.dynLaplacian); w.Put(s.dynRhoTemp);
+		w.Put(s.dynCurvature); w.Put(s.dynRhoTemp);
 		w.Put(s.rawShare); w.Put(s.shearEnergy); w.Put(s.dipoleTB); w.Put(s.dipoleLR);
 		return w.ok ? w.n : 0;
 	}
@@ -165,7 +165,7 @@ namespace CameraLink
 			for (int i = 0; i < 9; ++i) x.objectLayer.h[i] = r.Get<double>();
 			x.objectLayer.blocks = r.Get<uint32_t>();
 			x.objectLayer.cx = r.Get<double>(); x.objectLayer.cy = r.Get<double>();
-			s.dynLaplacian = r.Get<double>(); s.dynRhoTemp = r.Get<double>();
+			s.dynCurvature = r.Get<double>(); s.dynRhoTemp = r.Get<double>();
 			s.rawShare = r.Get<double>(); s.shearEnergy = r.Get<double>(); s.dipoleTB = r.Get<double>(); s.dipoleLR = r.Get<double>();
 		}
 		if (!r.ok)

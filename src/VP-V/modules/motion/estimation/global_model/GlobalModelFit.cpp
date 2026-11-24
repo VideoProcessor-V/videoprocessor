@@ -1886,7 +1886,7 @@ namespace CameraModel
 				fit.signals.dynTemporal = dt.temporal;
 				fit.signals.dynSpatial = dt.spatial;
 				fit.signals.dynField = dt.field;
-				fit.signals.dynLaplacian = dt.spatialLaplacian;
+				fit.signals.dynCurvature = dt.spatialCurvature;
 				fit.signals.dynRhoTemp = dt.rhoTemp;
 				if (dt.detected && (fit.reason == Reason::Ok || fit.reason == Reason::LowConfidence))
 				{

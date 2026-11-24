@@ -13,13 +13,13 @@ namespace CameraModel
 	{
 		inline double Len(double x, double y) { return std::sqrt(x * x + y * y); }
 
-		// Derived noise scale constants for the model-free symmetric discrete vector Laplacian under i.i.d. component
+		// Derived noise scale constants for the model-free symmetric discrete vector curvature under i.i.d. component
 		// noise sigma = prec:
 		//  * 4-point symmetric stencil v(x,y) - 1/4 (v_L + v_R + v_U + v_D): Var = (1 + 4/16) sigma^2 = (5/4) sigma^2
 		//  * 2-point symmetric opposing pair v(x,y) - 1/2 (v_A + v_B):       Var = (1 + 2/4)  sigma^2 = (3/2) sigma^2
 		// Both stencils cancel ANY linear camera motion (Translation, Similarity, Affine) identically.
-		const double kLaplacianSigma4 = std::sqrt(5.0) * 0.5;   // sqrt(5/4)
-		const double kLaplacianSigma2 = std::sqrt(1.5);         // sqrt(3/2)
+		const double kCurvatureSigma4 = std::sqrt(5.0) * 0.5;   // sqrt(5/4)
+		const double kCurvatureSigma2 = std::sqrt(1.5);         // sqrt(3/2)
 
 		// SHOULD-1: use the fitter's FINAL precision (quantum floor + raised robust scale) when passed;
 		// when called directly (resolvedPrecPx <= 0), still honour the uniform quantization sigma q / sqrt(12).
@@ -31,10 +31,10 @@ namespace CameraModel
 			return in.quantumPx > 0.0 ? std::max(base, in.quantumPx / std::sqrt(12.0)) : base;
 		}
 
-		// Evaluates the symmetric discrete vector Laplacian norm |nabla^2 v| and its derived noise sigma at (bx, by).
+		// Evaluates the symmetric discrete vector curvature norm |nabla^2 v| and its derived noise sigma at (bx, by).
 		// Returns false when neither opposing pair (L+R or U+D) is valid (so linear motion cannot be cancelled).
-		inline bool EvalSymmetricLaplacian(int bx, int by, int gw, int gh, const uint8_t* valid,
-			const float* vxArr, const float* vyArr, double prec, double* lapMagOut, double* sigmaOut)
+		inline bool EvalSymmetricCurvature(int bx, int by, int gw, int gh, const uint8_t* valid,
+			const float* vxArr, const float* vyArr, double prec, double* curvMagOut, double* sigmaOut)
 		{
 			const size_t gws = static_cast<size_t>(gw);
 			const size_t b = static_cast<size_t>(by) * gws + static_cast<size_t>(bx);
@@ -49,25 +49,25 @@ namespace CameraModel
 			double avgX = 0.0, avgY = 0.0, sigma = 0.0;
 			if (hasLR && hasUD)
 			{
-				avgX = 0.25 * (static_cast<double>(vxArr[b - 1]) + static_cast<double>(vxArr[b + 1])
-					+ static_cast<double>(vxArr[b - gws]) + static_cast<double>(vxArr[b + gws]));
-				avgY = 0.25 * (static_cast<double>(vyArr[b - 1]) + static_cast<double>(vyArr[b + 1])
-					+ static_cast<double>(vyArr[b - gws]) + static_cast<double>(vyArr[b + gws]));
-				sigma = kLaplacianSigma4 * prec;
+				avgX = (static_cast<double>(vxArr[b - 1]) + static_cast<double>(vxArr[b + 1])
+					+ static_cast<double>(vxArr[b - gws]) + static_cast<double>(vxArr[b + gws])) / 4.0;
+				avgY = (static_cast<double>(vyArr[b - 1]) + static_cast<double>(vyArr[b + 1])
+					+ static_cast<double>(vyArr[b - gws]) + static_cast<double>(vyArr[b + gws])) / 4.0;
+				sigma = kCurvatureSigma4 * prec;
 			}
 			else if (hasLR)
 			{
 				avgX = 0.5 * (static_cast<double>(vxArr[b - 1]) + static_cast<double>(vxArr[b + 1]));
 				avgY = 0.5 * (static_cast<double>(vyArr[b - 1]) + static_cast<double>(vyArr[b + 1]));
-				sigma = kLaplacianSigma2 * prec;
+				sigma = kCurvatureSigma2 * prec;
 			}
 			else
 			{
 				avgX = 0.5 * (static_cast<double>(vxArr[b - gws]) + static_cast<double>(vxArr[b + gws]));
 				avgY = 0.5 * (static_cast<double>(vyArr[b - gws]) + static_cast<double>(vyArr[b + gws]));
-				sigma = kLaplacianSigma2 * prec;
+				sigma = kCurvatureSigma2 * prec;
 			}
-			*lapMagOut = Len(static_cast<double>(vxArr[b]) - avgX, static_cast<double>(vyArr[b]) - avgY);
+			*curvMagOut = Len(static_cast<double>(vxArr[b]) - avgX, static_cast<double>(vyArr[b]) - avgY);
 			*sigmaOut = sigma;
 			return true;
 		}
@@ -219,9 +219,9 @@ namespace CameraModel
 			}
 		}
 		// Spatial incoherence (right and lower neighbours that both disagree with the model) + whole-field
-		// discrete vector Laplacian. No disagree >= minShare blind-spot gate: always computed whenever enough trusted blocks exist.
+		// discrete vector curvature. No disagree >= minShare blind-spot gate: always computed whenever enough trusted blocks exist.
 		int sCompared = 0, sIncoh = 0;
-		int lapEvaluated = 0, lapIncoh = 0;
+		int curvEvaluated = 0, curvIncoh = 0;
 		if (trusted >= std::max(1, cfg.minBlocks))
 		{
 			for (int by = 0; by < gh; ++by)
@@ -230,12 +230,12 @@ namespace CameraModel
 					const size_t a = static_cast<size_t>(by) * gw + bx;
 					if (valid[a])
 					{
-						double lapMag = 0.0, lapSigma = 0.0;
-						if (EvalSymmetricLaplacian(bx, by, gw, gh, valid.data(), vx.data(), vy.data(), prec, &lapMag, &lapSigma))
+						double curvMag = 0.0, curvSigma = 0.0;
+						if (EvalSymmetricCurvature(bx, by, gw, gh, valid.data(), vx.data(), vy.data(), prec, &curvMag, &curvSigma))
 						{
-							++lapEvaluated;
-							if (lapMag > cfg.absSigmas * lapSigma)
-								++lapIncoh;
+							++curvEvaluated;
+							if (curvMag > cfg.absSigmas * curvSigma)
+								++curvIncoh;
 						}
 					}
 					if (!dis[a])
@@ -272,7 +272,7 @@ namespace CameraModel
 			out.temporal = out.haveTemporal ? static_cast<double>(tIncoh) / tCompared : 0.0;
 			out.field = fCompared >= cfg.minCompared ? static_cast<double>(fIncoh) / fCompared : 0.0;
 			out.spatial = sCompared >= cfg.minCompared ? static_cast<double>(sIncoh) / sCompared : 0.0;
-			out.spatialLaplacian = lapEvaluated >= cfg.minCompared ? static_cast<double>(lapIncoh) / lapEvaluated : 0.0;
+			out.spatialCurvature = curvEvaluated >= cfg.minCompared ? static_cast<double>(curvIncoh) / curvEvaluated : 0.0;
 			out.haveRhoTemp = rhoCompared >= cfg.minCompared && rhoDenCur > 1e-12 && rhoDenPrev > 1e-12;
 			out.rhoTemp = out.haveRhoTemp ? std::max(-1.0, std::min(1.0, rhoNum / std::sqrt(rhoDenCur * rhoDenPrev))) : 0.0;
 			const bool temporalOk = !out.haveTemporal || out.temporal >= cfg.minTemporal;
@@ -310,7 +310,7 @@ namespace CameraModel
 		const double k = prevOk ? in.pairSeconds / prevState.seconds : 1.0;
 		// Derived temporal difference threshold: for i.i.d. noise sigma = prec on each pair,
 		// std(v_t - k * v_{t-1}) = sqrt(1 + k^2) * prec (zero arbitrary rel * |v| scaling).
-		const double temporalThr = cfg.laplacianSigmas * std::sqrt(1.0 + k * k) * prec;
+		const double temporalThr = cfg.curvatureSigmas * std::sqrt(1.0 + k * k) * prec;
 
 		// Precompute per-block validity once (inside active picture, not text-guard, finite positive trust & vector).
 		std::vector<uint8_t> valid(nb, 0);
@@ -342,11 +342,11 @@ namespace CameraModel
 					continue;
 				++stats.evaluated;
 
-				// Model-free symmetric discrete vector Laplacian (100% invariant to pan, zoom, rotation, affine speed).
-				double lapMag = 0.0, lapSigma = 0.0;
-				if (!EvalSymmetricLaplacian(bx, by, gw, gh, valid.data(), in.fwdX, in.fwdY, prec, &lapMag, &lapSigma))
+				// Model-free symmetric discrete vector curvature (100% invariant to pan, zoom, rotation, affine speed).
+				double curvMag = 0.0, curvSigma = 0.0;
+				if (!EvalSymmetricCurvature(bx, by, gw, gh, valid.data(), in.fwdX, in.fwdY, prec, &curvMag, &curvSigma))
 					continue;
-				const bool spatialIncoh = lapMag > cfg.laplacianSigmas * lapSigma;
+				const bool spatialIncoh = curvMag > cfg.curvatureSigmas * curvSigma;
 				if (!spatialIncoh)
 					continue;
 
