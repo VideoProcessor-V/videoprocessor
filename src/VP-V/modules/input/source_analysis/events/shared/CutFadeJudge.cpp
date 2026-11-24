@@ -713,8 +713,24 @@ static bool FootprintPreserved(const double refAligned[kGridH][kGridW], const do
                 }
             }
     }
-    if (fit.litCells < kFadeMinLitCells)
-        return collapsed == 0;
+    if (fit.litCells < kFadeMinLitCells) {
+        if (collapsed != 0)
+            return false;
+        int checkedCells = 0, uniformCells = 0;
+        const double refBar = fit.black + double(kFadeMinSpread);
+        for (int y = R; y < kGridH - R; ++y)
+            for (int x = R; x < kGridW - R; ++x) {
+                const double rv = refAligned[y][x];
+                const double cv = curAligned[y][x];
+                if (rv > refBar && (std::max)(rv, cv) > litBar) {
+                    ++checkedCells;
+                    const double pred = fit.gain * rv + c;
+                    if (std::fabs(cv - pred) <= kFadeResidualReduction * std::fabs(pred - rv))
+                        ++uniformCells;
+                }
+            }
+        return checkedCells > 0 && double(uniformCells) >= kFadeSpatialConsensus * double(checkedCells);
+    }
     return predLit == 0 || double(predLit - collapsed) >= kFadeSpatialConsensus * double(predLit);
 }
 
@@ -1343,7 +1359,9 @@ bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur
 
         // 1. Cumulative spatial affine fit: baseCells -> cur.cells (searchRadius = kLocalRadius = 2).
         // Align once (guarded against shifting off a stationary background), try rigid FitGridFadeAligned
-        // with multiplicative footprint preservation, then motion-tolerant FitMotionTolerantFade on the same aligned grids.
+        // with multiplicative footprint preservation. If the rigid fit fails or stalls from non-rigid OLS
+        // attenuation bias (without an explicit FootprintPreserved rejection), fall back to FitMotionTolerantFade.
+        bool cumFootprintRejected = false;
         if (run.baseGridValid) {
             double baseG[kGridH][kGridW], curG[kGridH][kGridW];
             double baseAligned[kGridH][kGridW], curBaseAligned[kGridH][kGridW];
@@ -1351,34 +1369,51 @@ bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur
             LoadGridCodes(cur.cells, curG);
             double cumFitVx = 0.0, cumFitVy = 0.0;
             AlignGridGuarded(baseG, curG, kLocalRadius, baseAligned, curBaseAligned, &cumFitVx, &cumFitVy);
-            GridFadeFit fit = FitGridFadeAligned(baseAligned, curBaseAligned, cumFitVx, cumFitVy);
-            bool fitOk = fit.valid && fit.dir == run.direction && FootprintPreserved(baseAligned, curBaseAligned, fit);
-            if (!fitOk) {
-                fit = FitMotionTolerantFade(baseAligned, curBaseAligned, cumFitVx, cumFitVy);
-                fitOk = fit.valid && fit.dir == run.direction;
-            }
-            if (fitOk && HighlightScalingConsistent(run.baseP99, cur.p99, fit.gain, fit.black, fit.dir) &&
-                StepStillMoving(fit.black)) {
-                const double k = run.anchorKeep * (std::min)(fit.gain, 1.0 / fit.gain);
-                if (k < run.keep) {
-                    if (frameKeep)
-                        *frameKeep = run.keep > 0.0 ? k / run.keep : 0.0;
-                    run.keep = k;
-                    ++run.fadePairs;
-                    if (midCapturedThisFrame)
-                        run.midAnchorKeep = run.keep;
+            const GridFadeFit rigidFit = FitGridFadeAligned(baseAligned, curBaseAligned, cumFitVx, cumFitVy);
+            const bool rigidValidDir = rigidFit.valid && rigidFit.dir == run.direction;
+            const bool rigidFootprintOk = rigidValidDir && FootprintPreserved(baseAligned, curBaseAligned, rigidFit);
+            cumFootprintRejected = rigidValidDir && !rigidFootprintOk;
+
+            auto TryAcceptCumFit = [&](const GridFadeFit& candidate) -> bool {
+                if (!(candidate.valid && candidate.dir == run.direction))
+                    return false;
+                if (!HighlightScalingConsistent(run.baseP99, cur.p99, candidate.gain, candidate.black, candidate.dir))
+                    return false;
+                const double k = run.anchorKeep * (std::min)(candidate.gain, 1.0 / candidate.gain);
+                if (!(k < run.keep))
+                    return false;
+                if (!StepStillMoving(candidate.black))
+                    return false;
+                if (frameKeep)
+                    *frameKeep = run.keep > 0.0 ? k / run.keep : 0.0;
+                run.keep = k;
+                ++run.fadePairs;
+                if (midCapturedThisFrame)
+                    run.midAnchorKeep = run.keep;
+                return true;
+            };
+
+            if (rigidFootprintOk && TryAcceptCumFit(rigidFit))
+                return true;
+            if (!cumFootprintRejected) {
+                const GridFadeFit mtFit = FitMotionTolerantFade(baseAligned, curBaseAligned, cumFitVx, cumFitVy);
+                if (TryAcceptCumFit(mtFit))
                     return true;
-                }
             }
         }
 
         // 2. Rolling adjacent re-anchor for fast pan + fade (prev.cells -> cur.cells, searchRadius = kShiftRadius = 1).
-        {
-            GridFadeFit adjFit = (preAligned != nullptr && preAligned->adjFitValid)
+        // Do not allow an adjacent pair to bypass an explicit cumulative footprint-collapse veto.
+        if (!cumFootprintRejected) {
+            const GridFadeFit rigidAdj = (preAligned != nullptr && preAligned->adjFitValid)
                 ? preAligned->adjFit
                 : FitGridFadeAligned(prevAligned, curAligned, stepVx, stepVy);
-            bool adjOk = adjFit.valid && adjFit.dir == run.direction && FootprintPreserved(prevAligned, curAligned, adjFit);
-            if (!adjOk) {
+            const bool adjValidDir = rigidAdj.valid && rigidAdj.dir == run.direction;
+            const bool adjFootprintOk = adjValidDir && FootprintPreserved(prevAligned, curAligned, rigidAdj);
+            const bool adjFootprintRejected = adjValidDir && !adjFootprintOk;
+            GridFadeFit adjFit = rigidAdj;
+            bool adjOk = adjFootprintOk;
+            if (!adjOk && !adjFootprintRejected) {
                 adjFit = FitMotionTolerantFade(prevAligned, curAligned, stepVx, stepVy);
                 adjOk = adjFit.valid && adjFit.dir == run.direction;
             }
