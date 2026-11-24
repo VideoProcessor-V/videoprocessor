@@ -3435,12 +3435,12 @@ namespace CutFadeJudgeFadeRunTestsNs
 					for (uint32_t y = 0; y < kH; ++y)
 						for (uint32_t x = 0; x < kW; ++x)
 						{
+							// Continuous 25-value zero-mean 5x5 sub-cell dither preserves every 5x5 cell mean identically
+							// while spreading pixels across 10-bit histogram bins so HistDistance/65535 stays < 0.06 (!e.cut && !e.flash).
+							const double dither = (double(int(x % 5u) * 5 + int(y % 5u)) - 12.0) * 0.25;
 							double code = 16.0;
 							if (y < kH / 2u)
 							{
-								// Zero-mean 5-px sub-cell dither keeps every 5x5 cell mean exact at 16 + gain * (180 - 16)
-								// while spreading the 10-bit histogram across ~10 bins so HistHalfL1 stays << 0.50 (!e.cut).
-								const double dither = (double(int(x % 5u) - 2)) * 0.6;
 								code = 16.0 + gain * (180.0 - 16.0) + dither;
 							}
 							else
@@ -3449,7 +3449,7 @@ namespace CutFadeJudgeFadeRunTestsNs
 								const int cy = int(y / 5u);
 								const double raw = 32.0 + 10.0 * ((double(cx) - 15.5) / 15.5) + 2.0 * std::cos(double(cy) * 0.7);
 								const double meanLow = 16.0 + gain * (32.0 - 16.0);
-								code = meanLow + lowerStretch * gain * (raw - 32.0);
+								code = meanLow + lowerStretch * gain * (raw - 32.0) + dither;
 							}
 							half[size_t(y) * kW + x] = static_cast<uint16_t>((std::min)(65535.0, (std::max)(0.0, std::floor(code * 256.0 + 0.5))));
 						}
@@ -3496,12 +3496,13 @@ namespace CutFadeJudgeFadeRunTestsNs
 				for (size_t i = 1; i <= 16u; ++i)
 				{
 					const Events e = ClassifyEvents(recs[i - 1], recs[i], false, false);
+					Assert::IsFalse(e.cut || e.flash, L"precondition: priming steps must never trip e.cut or e.flash");
 					activeBefore = FoldFadeRun(recs[i - 1], recs[i], e, run);
 				}
-				Assert::IsTrue(activeBefore && run.direction < 0,
+				Assert::IsTrue(activeBefore && run.direction < 0 && run.pairs >= 3u && run.fadePairs >= 1u,
 					L"precondition: fade-out run is active before unclipped flat-top test step");
 				const Events eStep = ClassifyEvents(rPrevStep, rTestStep, false, false);
-				Assert::IsFalse(eStep.cut, L"precondition: unclipped flat-top gentle step must not trip e.cut");
+				Assert::IsFalse(eStep.cut || eStep.flash, L"precondition: unclipped flat-top gentle step must not trip e.cut or e.flash");
 				Assert::IsTrue(FoldFadeRun(rPrevStep, rTestStep, eStep, run),
 					L"studio-white >= 234 guard must NOT strip unclipped 180-code flat-top ceiling, letting FoldFadeRun continue cleanly");
 			}
@@ -3703,6 +3704,20 @@ namespace CutFadeJudgeFadeRunTestsNs
 
 			// ---- Part (b): Near-black collapse Part C exemption ----
 			{
+				// Build real ComputeRecord frames from a 32x18 grid using continuous 25-value zero-mean 5x5 sub-cell dither
+				// so every 5x5 cell mean matches the grid exactly while 10-bit histograms stay continuous (!e.cut && !e.flash).
+				auto MakeDitheredRecordFromGrid = [](const double grid[kGridH][kGridW]) -> Record {
+					std::vector<uint16_t> half(size_t(kW) * kH);
+					for (uint32_t y = 0; y < kH; ++y)
+						for (uint32_t x = 0; x < kW; ++x)
+						{
+							const double dither = (double(int(x % 5u) * 5 + int(y % 5u)) - 12.0) * 0.25;
+							const double code = grid[y / 5u][x / 5u] + dither;
+							half[size_t(y) * kW + x] = static_cast<uint16_t>((std::min)(65535.0, (std::max)(0.0, std::floor(code * 256.0 + 0.5))));
+						}
+					return MakeRecordFromHalf(half);
+				};
+
 				double baseG[kGridH][kGridW], darkG[kGridH][kGridW];
 				for (int y = 0; y < kGridH; ++y)
 					for (int x = 0; x < kGridW; ++x)
@@ -3711,10 +3726,10 @@ namespace CutFadeJudgeFadeRunTestsNs
 							+ 0.15 * std::cos(double(x) * 0.25);
 						baseG[y][x] = 16.0 + pat * 160.0;
 					}
-				// Collapsed dark frame: exact 0.09 quantile scaling about 16, spatially inverted so corr2x2 < 0.4!
+				// Collapsed dark frame: exact 0.14 (< 0.25 = 1/kFadeMaxDiv) quantile scaling about 16, spatially inverted so corr2x2 < 0.4!
 				for (int y = 0; y < kGridH; ++y)
 					for (int x = 0; x < kGridW; ++x)
-						darkG[y][x] = 16.0 + 0.09 * (baseG[kGridH - 1 - y][kGridW - 1 - x] - 16.0);
+						darkG[y][x] = 16.0 + 0.14 * (baseG[kGridH - 1 - y][kGridW - 1 - x] - 16.0);
 
 				// Direct API + Negative Control: allowNearBlackCollapse=false rejects (corr2x2 < 0.4), true accepts!
 				Assert::IsFalse(FitMotionTolerantFade(baseG, darkG, 0.0, 0.0, false).valid,
@@ -3723,50 +3738,72 @@ namespace CutFadeJudgeFadeRunTestsNs
 				Assert::IsTrue(collapseFit.valid && collapseFit.dir < 0 && collapseFit.gain < 1.0 / double(kFadeMaxDiv),
 					L"FitMotionTolerantFade(allowNearBlackCollapse=true) must accept active near-black collapse (gain < 0.25)");
 
-				// Prime a smooth 12-step fade-out (1.0 -> 0.14, ~7%/step << 25% jump guard) so run is genuinely active
-				// with prev.mean ~ 26 < 48 before feeding the spatially-scrambled collapsed dark frame (gain = 0.09).
+				// Prime a smooth 12-step fade-out (1.0 -> 0.18, ~6.8%/step << 25% jump guard) so run is genuinely active
+				// with prev.mean ~ 29.5 < 48 before feeding the spatially-scrambled collapsed dark frame (gain = 0.14, mean ~ 26.5 < 48).
 				std::vector<Record> rampRecs;
 				for (int s = 0; s <= 12; ++s)
 				{
-					const double g = 1.0 - 0.86 * double(s) / 12.0;
+					const double g = 1.0 - 0.82 * double(s) / 12.0;
 					double stepG[kGridH][kGridW];
 					for (int y = 0; y < kGridH; ++y)
 						for (int x = 0; x < kGridW; ++x)
 							stepG[y][x] = 16.0 + g * (baseG[y][x] - 16.0);
-					rampRecs.push_back(MakeGridRecord(stepG));
+					rampRecs.push_back(MakeDitheredRecordFromGrid(stepG));
 				}
 				const Record& rPrev = rampRecs.back();
-				const Record rDark = MakeGridRecord(darkG);
+				const Record rDark = MakeDitheredRecordFromGrid(darkG);
 
 				FadeRun primedRun;
 				bool activeBefore = false;
 				for (size_t i = 1; i < rampRecs.size(); ++i)
 				{
 					const Events e = ClassifyEvents(rampRecs[i - 1], rampRecs[i], false, false);
+					Assert::IsFalse(e.cut || e.flash, L"precondition: fade-out ramp must stay on grid path (!e.cut && !e.flash)");
 					activeBefore = FoldFadeRun(rampRecs[i - 1], rampRecs[i], e, primedRun);
 				}
 				Assert::IsTrue(activeBefore && primedRun.direction < 0 && primedRun.fadePairs >= 1u && primedRun.pairs >= 2u,
 					L"precondition: fade-out run is active before near-black collapse");
 
-				// Active fade-out run -> nearBlackFall == true (fadePairs >= 1) -> FoldFadeRun continues!
+				// Verify unshadowed preconditions on the exact rPrev -> rDark step:
+				// 1) !eCol.cut && !eCol.flash -> strictly enters grid path (never if (e.cut))!
+				// 2) spreadCur > kBlackSpreadP4 && Flatness(gc) >= kFlatF -> branch #4 (CollapseToBlackOk) is unreachable!
+				// 3) aSpread * kFadeMaxDiv < contRef -> contSpreadJump == false so coldRun never resets!
+				const Events eCol = ClassifyEvents(rPrev, rDark, false, false);
+				Assert::IsFalse(eCol.cut || eCol.flash,
+					L"precondition: near-black collapse step must stay on FoldFadeRun grid path (!e.cut && !e.flash)");
+				Grid gcDark;
+				GridOf(rDark, &gcDark);
+				const uint32_t spDark = rDark.p99 > rDark.p01 ? rDark.p99 - rDark.p01 : 0u;
+				const uint32_t spPrev = rPrev.p99 > rPrev.p01 ? rPrev.p99 - rPrev.p01 : 0u;
+				const int64_t aSpCol = spDark > spPrev ? int64_t(spDark - spPrev) : int64_t(spPrev - spDark);
+				const int64_t contRefCol = int64_t((std::max)(primedRun.refSpread, (std::max)(spPrev, spDark)));
+				Assert::IsTrue(spDark > kBlackSpreadP4 && Flatness(gcDark) >= kFlatF,
+					L"precondition: rDark is non-flat (spread > 1 code & Flatness >= kFlatF) so branch #4 CollapseToBlackOk cannot shadow FitMotionTolerantFade");
+				Assert::IsTrue(aSpCol * kFadeMaxDiv < contRefCol,
+					L"precondition: aSpread * kFadeMaxDiv < contRef so coldRun does not reset via contSpreadJump");
+
+				// Active fade-out run -> nearBlackFall == true (fadePairs >= 1) -> FoldFadeRun continues via FitMotionTolerantFade!
 				{
 					FadeRun activeRun = primedRun;
-					const Events eCol = ClassifyEvents(rPrev, rDark, false, false);
+					const uint32_t prevFadePairs = activeRun.fadePairs;
 					Assert::IsTrue(FoldFadeRun(rPrev, rDark, eCol, activeRun),
-						L"active near-black fade-out collapse must continue in FoldFadeRun");
+						L"active near-black fade-out collapse must continue in FoldFadeRun via FitMotionTolerantFade nearBlackFall");
+					Assert::IsTrue(activeRun.fadePairs == prevFadePairs + 1u && activeRun.pairs >= 4u,
+						L"active near-black collapse increments fadePairs and pairs on grid path");
 				}
 
 				// Unshadowed Negative Control: identical primed run (pairs >= 2, direction == -1, baseGridValid == true)
-				// but with fadePairs == 0 && keep == 1.0 -> does NOT exit early on pairs < kFadeRunMinPairs,
+				// but with fadePairs == 0 && keep == 1.0 -> stays on grid path, does NOT exit early on pairs < kFadeRunMinPairs,
 				// reaches FitMotionTolerantFade(..., nearBlackFall=false), and is rejected solely by fadePairs >= 1u!
 				{
 					FadeRun coldRun = primedRun;
 					coldRun.fadePairs = 0u;
 					coldRun.keep = 1.0;
-					const Events eCold = ClassifyEvents(rPrev, rDark, false, false);
-					const bool coldFade = FoldFadeRun(rPrev, rDark, eCold, coldRun);
+					const bool coldFade = FoldFadeRun(rPrev, rDark, eCol, coldRun);
 					Assert::IsFalse(coldFade,
 						L"Negative control: unconfirmed run (fadePairs == 0) must NOT receive nearBlackFall Part C exemption");
+					Assert::AreEqual(0u, coldRun.fadePairs,
+						L"Negative control: coldRun fadePairs remains 0");
 					Assert::IsTrue(coldRun.pairs >= 3u,
 						L"Negative control: coldRun continued past pairs < kFadeRunMinPairs into FitMotionTolerantFade");
 				}
