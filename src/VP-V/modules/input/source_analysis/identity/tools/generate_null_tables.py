@@ -243,25 +243,26 @@ def classify_latent(n, N, rational_q_max=6, tol=2.0):
     return 3
 
 
-def classify_bit_depth_from_step(step_codes, output_bits=0, emp_floor_codes=0.0):
-    """Exact port of NullTables.h::ClassifyBitDepthFromStep (including M5/FM-2 empirical floor rule)."""
+def classify_bit_depth_from_step(step_codes, output_bits=0, emp_floor_codes=0.0, has_eight_bit_code_ladder=False):
+    """Exact port of NullTables.h::ClassifyBitDepthFromStep (including M5/FM-2/MED-1 empirical floor + code ladder rule)."""
     if step_codes >= 4:
         return "N8"
     if output_bits == 8:
         return "N8"
+    if output_bits >= 12:
+        return "N12"
     eight_bit_lsb_codes = 4.0
     eight_bit_uniform_floor = eight_bit_lsb_codes / math.sqrt(12.0)
     tol = 5.0 * CONVENTION_TOLERANCE
     if (
-        emp_floor_codes is not None
+        has_eight_bit_code_ladder
+        and emp_floor_codes is not None
         and math.isfinite(emp_floor_codes)
         and emp_floor_codes > 0.0
         and emp_floor_codes >= eight_bit_uniform_floor * (1.0 - tol)
         and emp_floor_codes < eight_bit_lsb_codes
     ):
         return "N8"
-    if output_bits >= 12:
-        return "N12"
     if step_codes == 1 or output_bits == 10:
         return "N10"
     return "unknown"
@@ -523,16 +524,22 @@ def _load_dump_v4_pair(evals_path, sizes_path, tag, manifest):
                 valid_emp.append(emp_y)
             emp_floor_codes = min(valid_emp) if valid_emp else 0.0
             null_depth_raw = (rec.get("null_depth_class") or "").strip()
+            has_ladder_raw = _parse_int(rec.get("has_eight_bit_code_ladder"), 0) == 1
             if forced_depth in DEPTHS:
                 depth = forced_depth
+            elif step_codes >= 4 or out_bits == 8:
+                depth = "N8"
+            elif out_bits >= 12:
+                depth = "N12"
+            elif null_depth_raw in DEPTHS:
+                depth = null_depth_raw
             else:
-                classified = classify_bit_depth_from_step(step_codes, out_bits, emp_floor_codes)
-                if emp_floor_codes > 0.0:
-                    depth = classified
-                elif null_depth_raw in DEPTHS:
-                    depth = null_depth_raw
-                else:
-                    depth = classified
+                depth = classify_bit_depth_from_step(
+                    step_codes,
+                    out_bits,
+                    emp_floor_codes,
+                    has_eight_bit_code_ladder=has_ladder_raw,
+                )
             eval_meta[seq] = {
                 "seq": seq,
                 "time_s": t_s,
@@ -2046,17 +2053,31 @@ def run_selftest():
         assert "DepthNullTable::PlaceholderFor(BitDepthClass::N8)" in sm_hdr
         assert "NullTableSourceKind::Calibrated" not in sm_hdr
 
-        # Negative control 9 (NEW-M2 Red-Team): Dump v4 empirical floor depth classification (8-in-10 HDMI loop)
-        # with same-input clean 10-bit (0.29) and textured 10-bit (12.0) negative controls.
+        # Negative control 9 (NEW-M2 / MED-1 Red-Team): Bit-depth classification with 8-bit code-ladder gate
+        # and 12-bit precedence, plus Dump v4 rows for 8-in-10 HDMI loop, grainy 10-bit, 12-bit, clean 10-bit,
+        # and high-texture 10-bit negative controls.
+        assert classify_bit_depth_from_step(1, 12, 1.5) == "N12", \
+            "MED-1: 12-bit output_bits with grain floor 1.5 MUST stay N12"
+        assert classify_bit_depth_from_step(1, 12, 1.5, True) == "N12", \
+            "MED-1: 12-bit output_bits MUST take precedence over empirical floor even if ladder=True"
+        assert classify_bit_depth_from_step(1, 10, 1.5) == "N10", \
+            "MED-1: grainy 10-bit (emp_floor=1.5) without 8-bit code ladder MUST stay N10"
+        assert classify_bit_depth_from_step(1, 10, 1.30, True) == "N8", \
+            "MED-1: 8-in-10 HDMI loop (emp_floor=1.30) with 8-bit code ladder MUST classify as N8"
+
         m2_dir = os.path.join(tmp, "new_m2_emp_floor")
         os.makedirs(m2_dir)
 
-        def _write_v4_emp_floor(tag, emp_x, emp_y, vx, vy):
+        def _write_v4_emp_floor(tag, emp_x, emp_y, vx, vy, output_bits=10, null_depth_class=None, has_eight_bit_code_ladder=None):
             ev_p = os.path.join(m2_dir, tag + ".b_evals.csv")
             sz_p = os.path.join(m2_dir, tag + ".b_sizes.csv")
             cols = list(REQUIRED_V4_EVAL_COLS) + [
                 "emp_floor_x", "emp_floor_y", "emp_floor_valid_x", "emp_floor_valid_y"
             ]
+            if null_depth_class is not None:
+                cols.append("null_depth_class")
+            if has_eight_bit_code_ladder is not None:
+                cols.append("has_eight_bit_code_ladder")
             with open(ev_p, "w", encoding="utf-8", newline="") as fe, \
                  open(sz_p, "w", encoding="utf-8", newline="") as fs:
                 ew = csv.writer(fe)
@@ -2064,16 +2085,48 @@ def run_selftest():
                 ew.writerow(cols)
                 sw.writerow(list(REQUIRED_V4_SIZE_COLS))
                 for s_i in (1, 2):
-                    ew.writerow([s_i, "%.3f" % (s_i * 2.0), 1, 1, 10, 10, 1, 1, 0, 0,
-                                 "%.4f" % emp_x, "%.4f" % emp_y, vx, vy])
+                    row = [s_i, "%.3f" % (s_i * 2.0), 1, 1, output_bits, output_bits, 1, 1, 0, 0,
+                           "%.4f" % emp_x, "%.4f" % emp_y, vx, vy]
+                    if null_depth_class is not None:
+                        row.append(null_depth_class)
+                    if has_eight_bit_code_ladder is not None:
+                        row.append(has_eight_bit_code_ladder)
+                    ew.writerow(row)
                     sw.writerow([s_i, "%.3f" % (s_i * 2.0), 1, "x", 1920, 960, 1, "-0.020000", 32])
                     sw.writerow([s_i, "%.3f" % (s_i * 2.0), 1, "y", 1080, 540, 1, "-0.020000", 32])
             return _load_dump_v4_pair(ev_p, sz_p, tag, {})
 
-        loop_items, loop_segs = _write_v4_emp_floor("loop_8in10", 1.30, 1.35, 1, 1)
+        loop_items, loop_segs = _write_v4_emp_floor("loop_8in10", 1.30, 1.35, 1, 1, output_bits=10, null_depth_class="N8")
         assert len(loop_items) > 0 and all(it.depth == "N8" for it in loop_items), \
-            "NEW-M2: step=1, output_bits=10, emp_floor=(1.30, 1.35) MUST classify as N8: %r" % ([it.depth for it in loop_items],)
+            "NEW-M2/MED-1: null_depth_class='N8' + emp_floor=(1.30, 1.35) MUST classify as N8: %r" % ([it.depth for it in loop_items],)
         assert len(loop_segs) == 1 and loop_segs[0]["depth"] == "N8"
+
+        # Fallback path with null_depth_class omitted:
+        #   (a) emp_floor=(1.50, 1.50) without has_eight_bit_code_ladder stays N10 (grainy 10-bit protection),
+        #   (b) emp_floor=(1.30, 1.35) with has_eight_bit_code_ladder=1 promotes to N8.
+        fb_grain_items, fb_grain_segs = _write_v4_emp_floor("fb_grain_10bit", 1.50, 1.50, 1, 1, output_bits=10)
+        assert len(fb_grain_items) > 0 and all(it.depth == "N10" for it in fb_grain_items), \
+            "MED-1 fallback: null_depth_class omitted + emp_floor=(1.50, 1.50) without ladder MUST stay N10"
+        assert len(fb_grain_segs) == 1 and fb_grain_segs[0]["depth"] == "N10"
+
+        fb_ladder_items, fb_ladder_segs = _write_v4_emp_floor(
+            "fb_ladder_8in10", 1.30, 1.35, 1, 1, output_bits=10, has_eight_bit_code_ladder=1
+        )
+        assert len(fb_ladder_items) > 0 and all(it.depth == "N8" for it in fb_ladder_items), \
+            "MED-1 fallback: null_depth_class omitted + emp_floor=(1.30, 1.35) with ladder=1 MUST promote to N8"
+        assert len(fb_ladder_segs) == 1 and fb_ladder_segs[0]["depth"] == "N8"
+
+        # Grainy 10-bit negative control: null_depth_class='N10' + emp_floor=(1.50, 1.50) stays N10!
+        grain10_items, grain10_segs = _write_v4_emp_floor("grain_10bit", 1.50, 1.50, 1, 1, output_bits=10, null_depth_class="N10")
+        assert len(grain10_items) > 0 and all(it.depth == "N10" for it in grain10_items), \
+            "MED-1 negative control: grainy 10-bit null_depth_class='N10' + emp_floor=(1.50, 1.50) MUST stay N10"
+        assert len(grain10_segs) == 1 and grain10_segs[0]["depth"] == "N10"
+
+        # 12-bit negative control: output_bits=12 + emp_floor=(1.50, 1.50) MUST classify as N12 (even if null_depth_class='N8')!
+        grain12_items, grain12_segs = _write_v4_emp_floor("grain_12bit", 1.50, 1.50, 1, 1, output_bits=12, null_depth_class="N8")
+        assert len(grain12_items) > 0 and all(it.depth == "N12" for it in grain12_items), \
+            "MED-1 negative control: 12-bit output_bits=12 + emp_floor=(1.50, 1.50) MUST classify as N12"
+        assert len(grain12_segs) == 1 and grain12_segs[0]["depth"] == "N12"
 
         # Same-input negative controls: clean 10-bit floor (0.29) and textured 10-bit (12.0 >= 4.0) stay N10!
         clean10_items, clean10_segs = _write_v4_emp_floor("clean_10bit", 0.29, 0.29, 1, 1)

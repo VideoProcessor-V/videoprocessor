@@ -864,15 +864,25 @@ namespace SourceResolution
 			}
 			return best;
 		}
-		// M8: Measure whether genuine flat white TPDF dither sits in the Nyquist tail [0.80*half, 0.97*half]
+		// M8 / LOW-2: Measure whether genuine flat white TPDF dither sits in the Nyquist tail [0.80*half, 0.97*half]
 		// rather than assuming TPDF unconditionally (which would apply a 4.5x starvation gate on undithered frames).
 		// Rule 1 derivations:
+		//   - Disjointness: tail [tail0, tail1] must lie strictly above the above-band (tail0 > a1) with tail1 - tail0 >= 3,
+		//     so high ratios (e.g., 0.75 or 5/6) whose above-band reaches/overlaps the Nyquist tail return 0.0 immediately.
 		//   - baseFloorPower = 10^quantisationFloor = step^2 / 12 (uniform quantization floor).
 		//   - kLineGateFactor = 1.5 (EvidenceSettings::lineGateFactor), kPowerGateMult = 1.5^2 = 2.25.
-		//   - Physical quantized TPDF variance = 3 * step^2 / 12 lies in [1.5, 4.5] * baseFloorPower
-		//     (above uniform 1.0, below physical TPDF upper gate 2.25 * 2.0 = 4.5; rejects film grain).
-		//   - Spectral flatness SFM = exp(mean(ln P)) / mean(P) >= 7/8 = 0.875 for >= 64-line Welch white noise
-		//     (E[SFM] >= exp(-1/128) = 0.992), rejecting sparse / textured / 1/f native 4K detail.
+		//   - Continuous TPDF dither variance = 2 * step^2 / 12 = step^2 / 6 = 2.0 * baseFloorPower (matching
+		//     DitherAwareDetailAbove(..., tpdfDither=true)); quantized TPDF reaches 3.0 * baseFloorPower, lying within
+		//     [1.5, 4.5] * baseFloorPower (kLineGateFactor to kPowerGateMult * 2.0 * baseFloorPower; rejects film grain).
+		//     The returned floor is capped at 2.0 * baseFloorPower so the above-band gate stays aligned at 2.25 * 2.0 = 4.5 * baseFloorPower.
+		//   - Log-log slope flatness: OLS log-log slope |slopePostCut| <= kMaxTailLogSlope = 0.5, the exact midpoint between
+		//     flat white TPDF dither (slope 0.0) and 1-D line-averaged natural 1/f detail (slope -1.0; 1/f^2 has -2.0),
+		//     computed over the full post-cutoff region [a0..tail1] (while tail0 > a1 enforces a disjoint Nyquist tail for
+		//     meanT/sfmT/meanA): at ratio 0.5 (half=128), [74..124] increases S_xx 18x over [103..124] alone (0.98 vs 0.0545),
+		//     reducing Hann-windowed white-noise slope SD 4.2x (~0.25 -> ~0.06, an 8.3-sigma gate on genuine white TPDF dither)
+		//     while still rejecting smooth 1/f / 1/f^2 detail (which scores SFM >= 0.99) and rising aliased tails at 8+ sigma.
+		//   - Spectral flatness SFM = exp(mean(ln P)) / mean(P) >= 7/8 = 0.875 (kTailSfmMin) on the disjoint tail [tail0..tail1]
+		//     rejects narrowband periodic spikes inside the tail.
 		double MeasureTpdfTailFloor(const FrameReading& frame, double ratio)
 		{
 			const size_t bins = frame.verticalPower.size();
@@ -886,6 +896,7 @@ namespace SourceResolution
 			constexpr double kLineGateFactor = 1.5;
 			constexpr double kPowerGateMult = kLineGateFactor * kLineGateFactor;
 			constexpr double kTailSfmMin = 7.0 / 8.0;
+			constexpr double kMaxTailLogSlope = 0.5;
 			const double tpdfMinTail = kLineGateFactor * baseFloorPower;
 			const double tpdfMaxTail = kPowerGateMult * 2.0 * baseFloorPower;
 
@@ -896,9 +907,9 @@ namespace SourceResolution
 			const int b1 = static_cast<int>(std::floor(0.9 * cut));
 			const int a0 = static_cast<int>(std::ceil(1.15 * cut));
 			const int a1 = (std::min)(static_cast<int>(std::floor(0.97 * static_cast<double>(half))), a0 + (std::max)(4, b1 - b0));
-			const int tail0 = (std::max)(a0, static_cast<int>(std::ceil(0.80 * static_cast<double>(half))));
+			const int tail0 = static_cast<int>(std::ceil(0.80 * static_cast<double>(half)));
 			const int tail1 = static_cast<int>(std::floor(0.97 * static_cast<double>(half)));
-			if (a1 - a0 < 3 || b1 - b0 < 3 || b0 < 1 || a1 > half || tail1 - tail0 < 3)
+			if (a1 - a0 < 3 || b1 - b0 < 3 || b0 < 1 || a1 > half || !(tail0 > a1) || tail1 - tail0 < 3)
 				return 0.0;
 
 			double tailMean[2] = { 0.0, 0.0 };
@@ -943,6 +954,42 @@ namespace SourceResolution
 				const double meanA = sumAbove / static_cast<double>(cntAbove);
 				// Real 1/f native detail decays toward Nyquist; flat white dither does not.
 				if (meanA > kLineGateFactor * meanT)
+					return 0.0;
+
+				// OLS log-log slope over the full post-cutoff region [a0..tail1] (disjoint tail0 > a1 already verified).
+				double sumLogK = 0.0;
+				double sumLogP = 0.0;
+				int cntPostCut = 0;
+				for (int k = a0; k <= tail1; ++k)
+				{
+					if (BlockHarmonic(k, n))
+						continue;
+					const double p = power[static_cast<size_t>(k)];
+					if (!std::isfinite(p) || !(p > 0.0))
+						return 0.0;
+					sumLogK += std::log(static_cast<double>(k));
+					sumLogP += std::log(p);
+					++cntPostCut;
+				}
+				if (cntPostCut < 3)
+					return 0.0;
+				const double meanX = sumLogK / static_cast<double>(cntPostCut);
+				const double meanY = sumLogP / static_cast<double>(cntPostCut);
+				double sxx = 0.0;
+				double sxy = 0.0;
+				for (int k = a0; k <= tail1; ++k)
+				{
+					if (BlockHarmonic(k, n))
+						continue;
+					const double dx = std::log(static_cast<double>(k)) - meanX;
+					const double dy = std::log(power[static_cast<size_t>(k)]) - meanY;
+					sxx += dx * dx;
+					sxy += dx * dy;
+				}
+				if (!(sxx > 1e-12))
+					return 0.0;
+				const double slopePostCut = sxy / sxx;
+				if (!std::isfinite(slopePostCut) || std::fabs(slopePostCut) > kMaxTailLogSlope)
 					return 0.0;
 
 				tailMean[axis] = meanT;
@@ -1094,6 +1141,10 @@ namespace SourceResolution
 
 	namespace
 	{
+		// LOW-1: Conservative lower bound on natural-image spectral drop between geometric band centers.
+		// Integrating a 2-D isotropic 1/f^2 natural-image power spectrum along 1-D lines yields ~1/f
+		// (slope -1.0), so using -2.0 * log10(fAbove / fBelow) is ~0.27 decades looser at ratio 0.5,
+		// erring safely toward native (avoiding false upscaled verdicts on softer native optics/scenes).
 		bool ExpectedNaturalDropDecades(
 			const FrameReading& frame,
 			double ratio,
@@ -1115,7 +1166,8 @@ namespace SourceResolution
 			if (a1 - a0 < 3 || b1 - b0 < 3 || b0 < 1 || a1 > half)
 				return false;
 
-			// Rule 1 exact 1/f^2 natural-image spectral-slope gate between geometric band centers.
+			// Rule 1 conservative lower-bound spectral-slope gate between geometric band centers
+			// (1-D line-averaged spectra yield ~1/f on isotropic 1/f^2 images; -2*log10 is ~0.27 decades looser at r=0.5).
 			const double fBelow = std::sqrt(static_cast<double>(b0) * static_cast<double>(b1));
 			const double fAbove = std::sqrt(static_cast<double>(a0) * static_cast<double>(a1));
 			if (!(fBelow > 0.0) || !(fAbove > fBelow))

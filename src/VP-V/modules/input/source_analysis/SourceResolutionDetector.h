@@ -351,16 +351,20 @@ namespace SourceResolution
 	// Physics-derived positive above-band detail check when Tracker::ReferenceDetail(ratio) is +infinity
 	// (e.g., chain-alone blind classical, Shadow after window clear, expired window, or R1 sub-harmonic).
 	// Requires above-band power to clear max(uniform, measured TPDF tail) floor, exceed quantisationFloor +
-	// nativeFloorDecades, and meet the exact 1/f^2 natural-image spectral slope -2*log10(fAbove/fBelow) - detailMarginDecades.
+	// nativeFloorDecades, and meet the conservative lower-bound spectral drop -2*log10(fAbove/fBelow) - detailMarginDecades
+	// (1-D line-averaged spectra yield ~1/f on an isotropic 1/f^2 natural image, so -2*log10(fAbove/fBelow) is
+	// ~0.27 decades looser at ratio 0.5, erring safely toward native).
 	bool PositiveDetailAboveNoRef(
 		const FrameReading& frame,
 		double ratio,
 		double detailMarginDecades = 0.07,
 		double nativeFloorDecades = 0.5);
 	// Physics-derived positive above-band detail check when Tracker::ReferenceDetail(ratio) is finite:
-	// requires DetailAbove >= refDetail + detailMarginDecades, the exact 1/f^2 natural-image spectral slope
-	// (rawD >= -2*log10(fAbove/fBelow) - detailMarginDecades), level >= quantisationFloor + nativeFloorDecades,
-	// and above-band power cleanly clearing max(uniform, measured TPDF tail) floor.
+	// requires DetailAbove >= refDetail + detailMarginDecades, the conservative lower-bound spectral drop
+	// (rawD >= -2*log10(fAbove/fBelow) - detailMarginDecades; 1-D line-averaged spectra yield ~1/f on an
+	// isotropic 1/f^2 natural image, so -2*log10(fAbove/fBelow) is ~0.27 decades looser at ratio 0.5,
+	// erring safely toward native), level >= quantisationFloor + nativeFloorDecades, and above-band power
+	// cleanly clearing max(uniform, measured TPDF tail) floor.
 	bool PositiveDetailAboveWithRef(
 		const FrameReading& frame,
 		double ratio,

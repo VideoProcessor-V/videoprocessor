@@ -66,9 +66,10 @@ namespace SourceIdentity
 		}
 
 		// Classifies effective bit depth from measured 10-bit code step (2^(10 - 8) = 4 for 8-bit), optional output bit depth,
-		// and optional empirical noise floor (10-bit codes).
-		// Rule 1 derivation (M5 / FM-2):
+		// optional empirical noise floor (10-bit codes), and optional 8-bit code-ladder evidence (DetectEightBitCodeLadder).
+		// Rule 1 derivation (M5 / FM-2 / MED-1):
 		//   - In 10-bit code space, 1 LSB of an 8-bit source is exactly 2^(10 - 8) = 4.0 codes.
+		//   - outputBits >= 12 is checked BEFORE the empirical-floor override so 12-bit natives can NEVER route to N8.
 		//   - Physical 8-bit quantization/dither noise floors lie strictly in [4/sqrt(12), 4.0):
 		//       * Uniform 8-bit rounding:     4 / sqrt(12) ~= 1.1547 codes
 		//       * 8-bit TPDF dither:          4 / sqrt(6)  ~= 1.6330 codes
@@ -77,23 +78,30 @@ namespace SourceIdentity
 		//     picture texture or film grain rather than an 8-bit quantization floor.
 		//   - Lower-bound relative tolerance = 5 * Scaling::GeometrySet::kConventionTolerance = 0.03 (3%,
 		//     matching SourceResolution::Tracker::Settings::tolerance and SourceIdentity::Settings::ratioTolerance).
-		//   - Explicit 8-bit outputBits or empirical floor in [(4 / sqrt(12)) * (1 - tol), 4.0) takes precedence over
-		//     stepCodes == 1 so 8-bit HDMI-loop streams classify as N8 while clean 10-bit textured streams stay N10.
-		inline BitDepthClass ClassifyBitDepthFromStep(int stepCodes, int outputBits = 0, double empFloorCodes = 0.0)
+		//   - For stepCodes < 4 and outputBits != 8 (and outputBits < 12), an empirical floor in
+		//     [(4 / sqrt(12)) * (1 - tol), 4.0) promotes to N8 ONLY when accompanied by genuine 8-bit code-ladder
+		//     evidence (hasEightBitCodeLadder == true), so 8-bit-in-10-bit HDMI-loop streams classify as N8 while
+		//     grainy 10-bit natives (grain sigma ~= 1.5 codes, step == 1) stay N10.
+		inline BitDepthClass ClassifyBitDepthFromStep(
+			int stepCodes,
+			int outputBits = 0,
+			double empFloorCodes = 0.0,
+			bool hasEightBitCodeLadder = false)
 		{
 			if (stepCodes >= 4)
 				return BitDepthClass::N8;
 			if (outputBits == 8)
 				return BitDepthClass::N8;
+			if (outputBits >= 12)
+				return BitDepthClass::N12;
 			const double eightBitLsbCodes = 4.0;
 			const double eightBitUniformFloor = eightBitLsbCodes / std::sqrt(12.0);
 			const double tol = 5.0 * Scaling::GeometrySet::kConventionTolerance;
-			if (empFloorCodes > 0.0 && std::isfinite(empFloorCodes) &&
+			if (hasEightBitCodeLadder &&
+				empFloorCodes > 0.0 && std::isfinite(empFloorCodes) &&
 				empFloorCodes >= eightBitUniformFloor * (1.0 - tol) &&
 				empFloorCodes < eightBitLsbCodes)
 				return BitDepthClass::N8;
-			if (outputBits >= 12)
-				return BitDepthClass::N12;
 			if (stepCodes == 1 || outputBits == 10)
 				return BitDepthClass::N10;
 			return BitDepthClass::Unknown;

@@ -2534,9 +2534,12 @@ namespace SourceIdentity
 						recordDepthFloor(ef, empCfg);
 					}
 				}
-				// Stage S3 (M5): bit-depth-stratified null tables & placeholder visibility (strict depth isolation; default OFF).
+				// Stage S3 (M5 / MED-1): bit-depth-stratified null tables & placeholder visibility (strict depth isolation; default OFF).
+				const bool hasEightBitLadder = (step < 4 && (effFloorMode != EmpiricalFloorMode::Off || cfg.useDepthNullTables || cfg.eightBitPromotion))
+					? DetectEightBitCodeLadder(s)
+					: false;
 				const BitDepthClass reqDepth = ClassifyBitDepthFromStep(
-					step, diagOutputBits.load(std::memory_order_acquire), haveDepthEmpFloor ? empFloorForDepth : 0.0);
+					step, diagOutputBits.load(std::memory_order_acquire), haveDepthEmpFloor ? empFloorForDepth : 0.0, hasEightBitLadder);
 				bool nullCalibrated = !evidence.Nulls().placeholder;
 				const BitDepthClass nullDepth = reqDepth;
 				if (cfg.useDepthNullTables || cfg.eightBitPromotion)

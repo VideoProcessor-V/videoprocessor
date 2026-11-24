@@ -180,6 +180,75 @@ namespace SourceIdentity
 			return (allMultiple(s.rows) && allMultiple(s.cols)) ? 4 : 1;
 		}
 
+		// Detects an 8-bit quantization code ladder embedded in 10-bit code space [0..1023]
+		// (e.g., 8-bit-in-10-bit HDMI-loop bit-replicated (c8 << 2) | (c8 >> 6) or matrix-scaled codes
+		// where DetectStepCodes returns 1 because the lower 2 bits are non-zero, yet each 4-code 8-bit LSB
+		// quartet concentrates on 1 dominant rung).
+		// Rule 1 derivations (10-bit code space [0..1023] = 256 quartets of 2^(10 - 8) = 4 codes each):
+		//   - kMinQuartetSamples = 8 (2 * 4 codes/quartet): at least 2 samples per 10-bit code slot so
+		//     sampling sparsity cannot fake an empty code; under uniform 10-bit, E[occupied/4] = 1 - (3/4)^8 = 0.900.
+		//   - kMinPopulatedQuartets = 16 (256 / 16): at least 1/16 of the 8-bit code range populated so
+		//     constant or flat patches cannot trigger.
+		//   - kMaxLadderOccupancy = 0.5 (2^(9 - 10) = 1/2 = sqrt(1/4 * 1)): bit-depth / geometric midpoint
+		//     between 8-bit occupancy (1/4) and 10-bit occupancy (1).
+		//   - kMinDominantRungShare = 0.75 (3/4): unweighted mean single-rung concentration across populated
+		//     4-code quartets (matching meanOccupancy and preventing clamped black-bar skew on 9-bit streams);
+		//     true 10-bit is ~0.25-0.35, 9-bit is ~0.50, and an 8-bit-in-10-bit bit-replicated/matrix-scaled
+		//     ladder is ~0.95-1.00.
+		inline bool DetectEightBitCodeLadder(const LineSnapshot& s)
+		{
+			if (s.rows.empty() && s.cols.empty())
+				return false;
+
+			uint32_t codeCounts[1024] = {};
+			auto accumulate = [&codeCounts](const std::vector<uint16_t>& v) {
+				for (size_t i = 0; i < v.size(); ++i)
+				{
+					const uint16_t c = v[i];
+					if (c < 1024u)
+						++codeCounts[c];
+				}
+			};
+			accumulate(s.rows);
+			accumulate(s.cols);
+
+			constexpr uint64_t kMinQuartetSamples = 8ull;
+			constexpr int kMinPopulatedQuartets = 16;
+			constexpr double kMaxLadderOccupancy = 0.5;
+			constexpr double kMinDominantRungShare = 0.75;
+
+			int populatedQuartets = 0;
+			uint64_t occupiedSlots = 0;
+			double dominantShareSum = 0.0;
+
+			for (int q = 0; q < 256; ++q)
+			{
+				const uint32_t c0 = codeCounts[q * 4 + 0];
+				const uint32_t c1 = codeCounts[q * 4 + 1];
+				const uint32_t c2 = codeCounts[q * 4 + 2];
+				const uint32_t c3 = codeCounts[q * 4 + 3];
+				const uint64_t m = static_cast<uint64_t>(c0) + c1 + c2 + c3;
+				if (m < kMinQuartetSamples)
+					continue;
+
+				++populatedQuartets;
+				occupiedSlots += static_cast<uint64_t>(c0 > 0u) + static_cast<uint64_t>(c1 > 0u) +
+					static_cast<uint64_t>(c2 > 0u) + static_cast<uint64_t>(c3 > 0u);
+				uint32_t dom = c0;
+				if (c1 > dom) dom = c1;
+				if (c2 > dom) dom = c2;
+				if (c3 > dom) dom = c3;
+				dominantShareSum += static_cast<double>(dom) / static_cast<double>(m);
+			}
+
+			if (populatedQuartets < kMinPopulatedQuartets)
+				return false;
+
+			const double meanOccupancy = static_cast<double>(occupiedSlots) / (4.0 * static_cast<double>(populatedQuartets));
+			const double dominantShare = dominantShareSum / static_cast<double>(populatedQuartets);
+			return meanOccupancy <= kMaxLadderOccupancy && dominantShare >= kMinDominantRungShare;
+		}
+
 		// FNV-1a over the snapshot's content (tests; the dump's self-check).
 		inline uint64_t SnapshotHash(const LineSnapshot& s)
 		{
