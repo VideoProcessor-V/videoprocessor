@@ -1842,5 +1842,190 @@ namespace VideoProcessorTest
 			fixture.CaptureLog(nullptr);
 			AssertCleanLibplaceboLogExceptPreOutputBug(log);
 		}
+
+		// AD#4 (DD-TRANSFER, GEM-193) Red Team adversarial test:
+		// PQ -> PQ with identical luminance bounds (noop tone map) must round-trip
+		// PQ -> nits -> PQ as the identity instead of falling into NitsToSignal's
+		// default gamma-2.4 power-law fallback.
+		TEST_METHOD(PqTargetRawTransferRoundTripsIdentityInsteadOfGamma24)
+		{
+			pl_color_space source{};
+			source.primaries = PL_COLOR_PRIM_BT_2020;
+			source.transfer = PL_COLOR_TRC_PQ;
+			source.hdr.min_luma = PL_COLOR_HDR_BLACK;
+			source.hdr.max_luma = 10000.0f;
+			const pl_color_space target = source;
+
+			const LedDrive::RawTransfer transfer = LedDrive::BuildRawTransfer(source, target, nullptr);
+			Assert::AreEqual(static_cast<size_t>(LedDrive::RAW_TRANSFER_SIZE), transfer.size(),
+				L"BuildRawTransfer must populate RAW_TRANSFER_SIZE entries");
+
+			// Representative sample positions spanning [0, RAW_TRANSFER_SIZE - 1]
+			// (corresponding to 8-bit 0, 16, 64, 128, 192, 255 in the 1024-entry table).
+			const int sampleIndices[] = { 0, 64, 256, 512, 768, LedDrive::RAW_TRANSFER_SIZE - 1 };
+			for (const int idx : sampleIndices)
+			{
+				const double x = static_cast<double>(idx) / (LedDrive::RAW_TRANSFER_SIZE - 1);
+				const double got = static_cast<double>(transfer[idx]);
+				Assert::IsTrue(std::fabs(got - x) < 1e-4,
+					(L"PQ->PQ round-trip diverged at idx=" + std::to_wstring(idx) +
+						L" (x=" + std::to_wstring(x) + L", got=" + std::to_wstring(got) + L")").c_str());
+			}
+
+			// In-test negative control (Rule 3): evaluate the broken pre-fix gamma-2.4
+			// power-law fallback on the exact same mid-scale PQ code (idx = 512, x ~= 0.5)
+			// to prove this test genuinely distinguishes PQ encoding from the gamma-2.4 fallback.
+			const double m1 = 2610.0 / 16384.0;
+			const double m2 = 2523.0 / 4096.0 * 128.0;
+			const double c1 = 3424.0 / 4096.0;
+			const double c2 = 2413.0 / 4096.0 * 32.0;
+			const double c3 = 2392.0 / 4096.0 * 32.0;
+			const double midX = 512.0 / (LedDrive::RAW_TRANSFER_SIZE - 1);
+			const double n = std::pow(midX, 1.0 / m2);
+			const double midNits = 10000.0 * std::pow(std::max(n - c1, 0.0) / (c2 - c3 * n), 1.0 / m1);
+			const double norm = std::max(0.0, std::min(
+				(midNits - static_cast<double>(PL_COLOR_HDR_BLACK)) / (10000.0 - static_cast<double>(PL_COLOR_HDR_BLACK)), 1.0));
+			const double brokenPowerLaw = std::pow(norm, 1.0 / 2.4);
+			Assert::IsTrue(std::fabs(brokenPowerLaw - midX) > 0.25,
+				(L"Negative control failed: broken gamma-2.4 fallback at PQ x=" + std::to_wstring(midX) +
+					L" produced " + std::to_wstring(brokenPowerLaw) + L" (expected error > 0.25)").c_str());
+		}
+
+		// AD#4 (DD-TRANSFER, GEM-193) Red Team adversarial test:
+		// HLG -> HLG with identical luminance bounds (noop tone map) must round-trip
+		// HLG -> nits -> HLG across both the quadratic (x <= 0.5) and logarithmic (x > 0.5)
+		// branches instead of falling into NitsToSignal's default gamma-2.4 fallback.
+		TEST_METHOD(HlgTargetRawTransferRoundTripsIdentityInsteadOfGamma24)
+		{
+			pl_color_space source{};
+			source.primaries = PL_COLOR_PRIM_BT_2020;
+			source.transfer = PL_COLOR_TRC_HLG;
+			source.hdr.min_luma = PL_COLOR_HDR_BLACK;
+			source.hdr.max_luma = PL_COLOR_HLG_PEAK;
+			const pl_color_space target = source;
+
+			const LedDrive::RawTransfer transfer = LedDrive::BuildRawTransfer(source, target, nullptr);
+			Assert::AreEqual(static_cast<size_t>(LedDrive::RAW_TRANSFER_SIZE), transfer.size(),
+				L"BuildRawTransfer must populate RAW_TRANSFER_SIZE entries");
+
+			// Representative indices covering both halves of HLG:
+			// x <= 0.5 (quadratic branch: 0, 128, 256, 511) and x > 0.5 (log branch: 512, 768, 1023).
+			const int sampleIndices[] = { 0, 128, 256, 511, 512, 768, LedDrive::RAW_TRANSFER_SIZE - 1 };
+			for (const int idx : sampleIndices)
+			{
+				const double x = static_cast<double>(idx) / (LedDrive::RAW_TRANSFER_SIZE - 1);
+				const double got = static_cast<double>(transfer[idx]);
+				Assert::IsTrue(std::fabs(got - x) < 1e-4,
+					(L"HLG->HLG round-trip diverged at idx=" + std::to_wstring(idx) +
+						L" (x=" + std::to_wstring(x) + L", got=" + std::to_wstring(got) + L")").c_str());
+			}
+
+			// In-test negative control (Rule 3): evaluate the broken pre-fix gamma-2.4
+			// power-law fallback on the exact same mid-scale HLG code (idx = 511, x ~= 0.4995;
+			// HlgToNits(x) ~= 50.6 nits, (50.6/1000)^(1/2.4) ~= 0.289, error > 0.20).
+			const double midX = 511.0 / (LedDrive::RAW_TRANSFER_SIZE - 1);
+			const double scene = midX * midX / 3.0;
+			const double midNits = 1000.0 * std::pow(scene, 1.2);
+			const double norm = std::max(0.0, std::min(
+				(midNits - static_cast<double>(PL_COLOR_HDR_BLACK)) / (1000.0 - static_cast<double>(PL_COLOR_HDR_BLACK)), 1.0));
+			const double brokenPowerLaw = std::pow(norm, 1.0 / 2.4);
+			Assert::IsTrue(std::fabs(brokenPowerLaw - midX) > 0.15,
+				(L"Negative control failed: broken gamma-2.4 fallback at HLG x=" + std::to_wstring(midX) +
+					L" produced " + std::to_wstring(brokenPowerLaw) + L" (expected error > 0.15)").c_str());
+		}
+
+		// AD#4 (DD-TRANSFER, GEM-193) Red Team adversarial test:
+		// RawTransferSignature must incorporate source.hdr metadata (max_cll, max_fall,
+		// scene_avg, etc.) so changing HDR metadata invalidates cached raw transfers even
+		// when nominal [min_luma, max_luma] range[0..3] does NOT change.
+		TEST_METHOD(RawTransferSignatureChangesWhenSourceHdrMetadataChanges)
+		{
+			pl_color_space dst{};
+			dst.primaries = PL_COLOR_PRIM_BT_709;
+			dst.transfer = PL_COLOR_TRC_GAMMA24;
+			dst.hdr.min_luma = 0.05f;
+			dst.hdr.max_luma = 100.0f;
+
+			pl_color_space srcA{};
+			srcA.primaries = PL_COLOR_PRIM_BT_2020;
+			srcA.transfer = PL_COLOR_TRC_PQ;
+			srcA.hdr.min_luma = PL_COLOR_HDR_BLACK;
+			srcA.hdr.max_luma = 1000.0f;
+			srcA.hdr.max_cll = 400.0f;
+			srcA.hdr.max_fall = 100.0f;
+
+			pl_color_space srcACopy{};
+			srcACopy.primaries = PL_COLOR_PRIM_BT_2020;
+			srcACopy.transfer = PL_COLOR_TRC_PQ;
+			srcACopy.hdr.min_luma = PL_COLOR_HDR_BLACK;
+			srcACopy.hdr.max_luma = 1000.0f;
+			srcACopy.hdr.max_cll = 400.0f;
+			srcACopy.hdr.max_fall = 100.0f;
+
+			pl_color_space srcB = srcA;
+			srcB.hdr.max_cll = 4000.0f;
+			srcB.hdr.max_fall = 1000.0f;
+
+			pl_color_space srcSceneA{};
+			srcSceneA.primaries = PL_COLOR_PRIM_BT_2020;
+			srcSceneA.transfer = PL_COLOR_TRC_PQ;
+			srcSceneA.hdr.min_luma = PL_COLOR_HDR_BLACK;
+			srcSceneA.hdr.max_luma = 1000.0f;
+			srcSceneA.hdr.scene_avg = 50.0f;
+
+			pl_color_space srcSceneB = srcSceneA;
+			srcSceneB.hdr.scene_avg = 400.0f;
+
+			// Prove the hazard is real (Rule 3): nominal luma inference (range[0..3] used
+			// by the pre-fix signature) is IDENTICAL across both pairs, so any signature
+			// that hashes only transfer + nominal min/max range collides!
+			auto nominalMinMax = [](const pl_color_space& sIn, const pl_color_space& tIn, float outRange[4])
+			{
+				pl_color_space s = sIn, t = tIn;
+				pl_color_space_infer_map(&s, &t);
+				pl_nominal_luma_params luma{};
+				luma.metadata = PL_HDR_METADATA_ANY;
+				luma.scaling = PL_HDR_NITS;
+				luma.color = &s;
+				luma.out_min = &outRange[0];
+				luma.out_max = &outRange[1];
+				pl_color_space_nominal_luma_ex(&luma);
+				luma.color = &t;
+				luma.out_min = &outRange[2];
+				luma.out_max = &outRange[3];
+				pl_color_space_nominal_luma_ex(&luma);
+			};
+			float rangeA[4] = {}, rangeB[4] = {}, rangeSceneA[4] = {}, rangeSceneB[4] = {};
+			nominalMinMax(srcA, dst, rangeA);
+			nominalMinMax(srcB, dst, rangeB);
+			nominalMinMax(srcSceneA, dst, rangeSceneA);
+			nominalMinMax(srcSceneB, dst, rangeSceneB);
+			for (int k = 0; k < 4; ++k)
+			{
+				Assert::IsTrue(rangeA[k] == rangeB[k],
+					L"Negative control failed: nominal range[0..3] must be identical when only max_cll/max_fall change");
+				Assert::IsTrue(rangeSceneA[k] == rangeSceneB[k],
+					L"Negative control failed: nominal range[0..3] must be identical when only scene_avg changes");
+			}
+
+			// In-test determinism negative control: identical inputs must produce identical signatures.
+			const uint64_t sigA1 = LedDrive::RawTransferSignature(srcA, dst, nullptr);
+			const uint64_t sigA2 = LedDrive::RawTransferSignature(srcA, dst, nullptr);
+			const uint64_t sigACopy = LedDrive::RawTransferSignature(srcACopy, dst, nullptr);
+			Assert::AreEqual(sigA1, sigA2,
+				L"RawTransferSignature must be deterministic on identical inputs");
+			Assert::AreEqual(sigA1, sigACopy,
+				L"RawTransferSignature must be identical across independently constructed equal inputs");
+
+			// Core adversarial assertions: changing max_cll/max_fall or scene_avg must change the signature!
+			const uint64_t sigB = LedDrive::RawTransferSignature(srcB, dst, nullptr);
+			Assert::AreNotEqual(sigA1, sigB,
+				L"RawTransferSignature must change when source.hdr.max_cll / max_fall change");
+
+			const uint64_t sigSceneA = LedDrive::RawTransferSignature(srcSceneA, dst, nullptr);
+			const uint64_t sigSceneB = LedDrive::RawTransferSignature(srcSceneB, dst, nullptr);
+			Assert::AreNotEqual(sigSceneA, sigSceneB,
+				L"RawTransferSignature must change when source.hdr.scene_avg changes");
+		}
 	};
 }
