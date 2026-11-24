@@ -107,7 +107,7 @@ if (q.x < size.x && q.y < size.y)
 )GLSL";
 
 		// Non-finite by the IEEE bit pattern (exponent all ones), not isnan / isinf, which a non-strict compile may fold.
-		// Shared by the P10 grain reduction shader (FinalHeader) and the motion-map shader (MotionHeader); separate passes.
+		// Shared by the P10 grain reduction shader (FinalHeader), the grain-map shader (MAP_BODY), and the motion-map shader (MotionHeader); separate passes.
 		const char* const NONFINITE_GLSL =
 			"bool ad_nonfinite(float x) { return (floatBitsToUint(x) & 0x7fffffffu) >= 0x7f800000u; }\n";
 
@@ -185,8 +185,9 @@ if (li == 0u && advance > 0.5) {
     vec4 prev = imageLoad(state_io, ivec2(0));
 )GLSL";
 
-		// A cut: the state was never initialised (first frame) or the shared cut event (the scene product's delivered cut) says so.
-		const char* const FINAL_BODY_B = R"GLSL(    bool cut = prev.a < 0.5 || cut_in > 0.5;
+		// A cut: the state was never initialised (first frame), the shared cut event (the scene product's delivered cut) says so,
+		// or the stored grain scale is negative/non-finite (self-heal immediately; never isnan() since D3DCompile/FXC folds it).
+		const char* const FINAL_BODY_B = R"GLSL(    bool cut = !(prev.a >= 0.5) || cut_in > 0.5 || !(prev.r >= 0.0) || ad_nonfinite(prev.r);
     float scale = cut ? target : mix(prev.r, target, smooth_alpha);
     // a: 1 initialised, 2 = a cut on this frame (the grain map resets too).
     imageStore(state_io, ivec2(0), vec4(scale, free_mean, 0.0, cut ? 2.0 : 1.0));
@@ -229,9 +230,10 @@ if (b.x < blocks.x && b.y < blocks.y) {
     float energy = ge.r * temporal_to_spatial * wgt;
     float target = mix(grain_floor, 1.0, 1.0 - smoothstep(grain_lo, grain_hi, energy));
     vec4 o;
-    if (!trusted)
-        o = vec4(reset ? 1.0 : texelFetch(map_in, b, 0).r, 0.0, 0.0, 1.0);
-    else if (reset || prev.a < 0.5)
+    if (!trusted) {
+        float prev_self = texelFetch(map_in, b, 0).r;
+        o = vec4((reset || !(prev_self >= 0.0) || ad_nonfinite(prev_self)) ? 1.0 : prev_self, 0.0, 0.0, 1.0);
+    } else if (reset || !(prev.a >= 0.5) || !(prev.r >= 0.0) || ad_nonfinite(prev.r))
         o = vec4(target, 1.0, 0.0, 1.0);
     else
         o = vec4(mix(prev.r, target, smooth_alpha), 1.0, 0.0, 1.0);
@@ -525,7 +527,9 @@ float rs_lin(float c)
         return rs_a * pow(c + rs_b, rs_g);
     if (rs_trc < 1.5) {
         float e = pow(c, 1.0 / 78.84375);
-        float n = max(e - 0.8359375, 0.0) / (18.8515625 - 18.6875 * e);
+        // Numerical singularity guard: for valid PQ c in [0, 1], 18.8515625 - 18.6875 * e >= 21/128 = 0.1640625 >> 1e-6;
+        // clamping at 1e-6 prevents 0/0 or negative-base pow NaN on WTW/overshoot PQ codes c > 1.0.
+        float n = max(e - 0.8359375, 0.0) / max(18.8515625 - 18.6875 * e, 1e-6);
         return pow(n, 1.0 / 0.1593017578125) * (10000.0 / 203.0);
     }
     float x = (1.0 - rs_b) * c + rs_b;
@@ -1286,7 +1290,7 @@ float rs_slope(float y)
 			{ pl_var_float("grain_hi"), &settings.grainHi, true },
 			{ pl_var_float("grain_floor"), &settings.grainFloor, true },
 			{ pl_var_float("smooth_alpha"), &alpha, true } };
-		if (!Compute(dispatch, "VideoProcessor adaptive downscale: grain map", nullptr, MAP_BODY, d, 6, v, 8,
+		if (!Compute(dispatch, "VideoProcessor adaptive downscale: grain map", NONFINITE_GLSL, MAP_BODY, d, 6, v, 8,
 			(bw + 15) / 16, (bh + 15) / 16))
 		{
 			mapReady = false;
