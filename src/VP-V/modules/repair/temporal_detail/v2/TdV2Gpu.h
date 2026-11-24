@@ -85,6 +85,8 @@ namespace Gpu
 		bool carryUsed = false;
 		bool carryReset = false;
 		bool scratchShort = false;
+		bool usedExternalBandMemo = false;       // True when caller-supplied kBandMemo curLowBandTex skipped current-frame low-band blur
+		bool externalBandMemoRejected = false;   // True when non-null curLowBandTex failed dimension/format validation (visible fail-closed)
 		bool succeeded = false;
 		std::string lastError;
 	};
@@ -115,6 +117,10 @@ namespace Gpu
 
 		// Optional Field B CodecModel prediction P_B (w x h R32F, sampleable; null => uses refs[0].clean stand-in visibly).
 		pl_tex codecModelPbTex = nullptr;
+		// Optional kBandMemo precomputed BandFromBase low band L = G(kSigmaBase) of curCleanY (SOTA #10):
+		//   w x h sampleable float (Reference or RealTime), or wHalf x hHalf sampleable float (RealTime).
+		//   When valid, skips current-frame coarse low-band H+V blur passes in a single fused shader pass; default nullptr = bit-identical baseline.
+		pl_tex curLowBandTex = nullptr;
 
 		// Optional pre-packed GPU motion, cell prior, and Pass-1 face/non-rigid mask textures (ZERO CPU upload!):
 		//   motionVecTex:  3*cw x ch RGBA32F (fixed slots: 0=prevPeak, 1=nextPeak, 2=carry; vx, vy, camVx, camVy)
@@ -181,6 +187,8 @@ namespace Gpu
 		bool carryUsed = false;
 		bool carryReset = false;
 		bool scratchShort = false;
+		bool usedExternalBandMemo = false;       // True when caller-supplied kBandMemo curLowBandTex skipped current-frame low-band blur
+		bool externalBandMemoRejected = false;   // True when non-null curLowBandTex failed dimension/format validation (visible fail-closed)
 		bool succeeded = false;
 		std::string lastError;
 		std::vector<TdMapsView::Block> tdMaps;
@@ -861,6 +869,8 @@ namespace Gpu
 			out.carryUsed = false;
 			out.carryReset = false;
 			out.scratchShort = false;
+			out.usedExternalBandMemo = false;
+			out.externalBandMemoRejected = false;
 			out.succeeded = false;
 			out.lastError.clear();
 			out.tdMaps.clear();
@@ -940,6 +950,7 @@ namespace Gpu
 					in.nextPeak.cleanTex,
 					in.prevPeak2.cleanTex,
 					in.codecModelPbTex,
+					in.curLowBandTex,
 					carryCleanTex_,
 					in.motionVecTex,
 					in.motionMetaTex,
@@ -995,6 +1006,23 @@ namespace Gpu
 				return failVisible("TdV2GpuEngine::ProcessFrameGpu prevPeak2.cleanTex dimension mismatch", StandInKind::GpuDispatchFailed);
 			if (!checkTexDim(in.codecModelPbTex, w, h))
 				return failVisible("TdV2GpuEngine::ProcessFrameGpu codecModelPbTex dimension mismatch", StandInKind::GpuDispatchFailed);
+			if (in.curLowBandTex != nullptr)
+			{
+				const pl_tex_params& mp = in.curLowBandTex->params;
+				const bool fmtOk = (mp.sampleable && mp.format != nullptr &&
+				                    mp.format->type == PL_FMT_FLOAT && mp.format->num_components >= 1);
+				const int wHalfCheck = (w + 1) / 2;
+				const int hHalfCheck = (h + 1) / 2;
+				const bool dimFull = (mp.w == w && mp.h == h);
+				const bool dimHalf = (cfg_.preset == Preset::RealTime && mp.w == wHalfCheck && mp.h == hHalfCheck);
+				if (!fmtOk || !(dimFull || dimHalf))
+				{
+					out.externalBandMemoRejected = true;
+					if (standIns != nullptr)
+						standIns->Engage(StandInKind::BandMemoW2, "TdV2GpuEngine::ProcessFrameGpu curLowBandTex invalid dimensions or format");
+					return failVisible("TdV2GpuEngine::ProcessFrameGpu curLowBandTex invalid dimensions or format (expected sampleable float w x h, or wHalf x hHalf in RealTime)", StandInKind::GpuDispatchFailed);
+				}
+			}
 			if ((in.motionVecTex != nullptr) != (in.motionMetaTex != nullptr))
 				return failVisible("TdV2GpuEngine::ProcessFrameGpu partial prepacked motion (motionVecTex and motionMetaTex must both be supplied)", StandInKind::GpuDispatchFailed);
 			if (!checkTexDim(in.motionVecTex, 3 * out.cellsW, out.cellsH))
@@ -1321,6 +1349,7 @@ namespace Gpu
 			p.cellPriorTex = in.cellPriorTex;
 			p.faceMaskTex = in.faceMaskTex;
 			p.codecModelPbTex = in.codecModelPbTex;
+			p.curLowBandTex = in.curLowBandTex;
 			p.retainedGrainVar = &in.retainedGrainVar;
 			p.cellStepScale = &in.cellStepScale;
 			p.explicitFocusChangeCells = in.explicitFocusChangeCells;
@@ -1357,6 +1386,7 @@ namespace Gpu
 			out.singularCells = oc.singularCells;
 			out.singleRefA2Cells = oc.singleRefA2Cells;
 			out.borderBilinearPixels = oc.borderBilinearPixels;
+			out.usedExternalBandMemo = oc.usedExternalBandMemo;
 			if (out.readbackCellDiagnostics)
 				out.tdMaps = std::move(oc.tdMaps);
 			out.succeeded = true;
@@ -2214,6 +2244,7 @@ namespace Gpu
 			pl_tex cellPriorTex = nullptr;       // Optional pre-packed GPU cell prior (cw x ch)
 			pl_tex faceMaskTex = nullptr;        // Optional pre-packed GPU Pass-1 face/non-rigid mask (cw x ch)
 			pl_tex codecModelPbTex = nullptr;    // Optional explicit Field B CodecModel P_B (w x h R32F)
+			pl_tex curLowBandTex = nullptr;      // Optional kBandMemo precomputed BandFromBase L = G(kSigmaBase) of curCleanY
 			const std::vector<double>* retainedGrainVar = nullptr;
 			const std::vector<double>* cellStepScale = nullptr;
 			const std::vector<uint8_t>* explicitFocusChangeCells = nullptr;
@@ -2245,6 +2276,7 @@ namespace Gpu
 			size_t borderBilinearPixels = 0;
 			bool carryReset = false;
 			bool scratchShort = false;
+			bool usedExternalBandMemo = false;
 			std::vector<TdMapsView::Block> tdMaps;
 		};
 
@@ -2869,7 +2901,68 @@ namespace Gpu
 			};
 
 			// Decompose current frame grain-free clean into curBands.
-			if (!runBandDecomp(p.curCleanTex, sc.curBands, sc.curBandsMH, sc.curBandsLD3))
+			// SOTA #10 (kBandMemo): when caller supplies a valid precomputed low band L = G(kSigmaBase),
+			// skip the current-frame coarse low-band H+V blur passes in ONE single fused shader pass!
+			if (p.curLowBandTex != nullptr)
+			{
+				const bool memoIsHalf = (p.curLowBandTex->params.w == wHalf && p.curLowBandTex->params.h == hHalf &&
+				                         (wHalf != w || hHalf != h));
+				const int rHDiff = VpUnit::BandFromBase::BandRadius(
+					0.5 * std::sqrt(VpUnit::BandFromBase::kSigmaLow * VpUnit::BandFromBase::kSigmaLow -
+					                VpUnit::BandFromBase::kSigmaBase * VpUnit::BandFromBase::kSigmaBase));
+				const size_t hDiffDim = static_cast<size_t>(10 + 2 * rHDiff);
+				const size_t shmemMemo = (fineTileDim * fineTileDim + fineTileDim * 16u +
+				                          hDiffDim * hDiffDim + hDiffDim * 10u + 100u) * sizeof(float);
+
+				std::string memoHdr = staticGeom;
+				memoHdr += VpvGpu::DefineInt("TD_MEMO_COMPACT", compactBands ? 1 : 0);
+				memoHdr += VpvGpu::DefineInt("TD_MEMO_IS_HALF", memoIsHalf ? 1 : 0);
+				memoHdr += Shaders::BuildFineTapHeader();
+				memoHdr += Shaders::BuildHalfDiffTapHeader();
+				memoHdr += Shaders::kCoreHelpers;
+				memoHdr += Shaders::kHalfBandSamplerHelper;
+				memoHdr += Shaders::kPass1BandFromMemoHeader;
+
+				pl_shader_var rectAllV[8] = {
+					VpvGpu::Var("u_ax0", &uAx0),
+					VpvGpu::Var("u_ay0", &uAy0),
+					VpvGpu::Var("u_ax1", &uAx1),
+					VpvGpu::Var("u_ay1", &uAy1),
+					VpvGpu::Var("u_hax0", &uHAx0),
+					VpvGpu::Var("u_hay0", &uHAy0),
+					VpvGpu::Var("u_hax1", &uHAx1),
+					VpvGpu::Var("u_hay1", &uHAy1)
+				};
+				bool memoOk = false;
+				if (!compactBands)
+				{
+					pl_shader_desc dm[3] = {
+						VpvGpu::Sampled("src_tex", p.curCleanTex),
+						VpvGpu::Sampled("cur_low_band", p.curLowBandTex),
+						VpvGpu::Storage("bands_out", sc.curBands)
+					};
+					memoOk = runPass("td_v2_p1_band_from_memo", memoHdr, Shaders::kPass1BandFromMemo,
+					                 dm, 3, rectAllV, 8, fullGx, fullGy, 16, 16, shmemMemo);
+				}
+				else
+				{
+					pl_shader_desc dm[4] = {
+						VpvGpu::Sampled("src_tex", p.curCleanTex),
+						VpvGpu::Sampled("cur_low_band", p.curLowBandTex),
+						VpvGpu::Storage("bands_mh_out", sc.curBandsMH),
+						VpvGpu::Storage("bands_ld3_out", sc.curBandsLD3)
+					};
+					memoOk = runPass("td_v2_p1_band_from_memo", memoHdr, Shaders::kPass1BandFromMemo,
+					                 dm, 4, rectAllV, 8, fullGx, fullGy, 16, 16, shmemMemo);
+				}
+				if (!memoOk)
+				{
+					resetCarryIfActive();
+					return failCore("td_v2_p1_band_from_memo current clean dispatch failed", StandInKind::GpuDispatchFailed);
+				}
+				oc.usedExternalBandMemo = true;
+			}
+			else if (!runBandDecomp(p.curCleanTex, sc.curBands, sc.curBandsMH, sc.curBandsLD3))
 			{
 				resetCarryIfActive();
 				return failCore("td_v2_p1_band current clean dispatch failed", StandInKind::GpuDispatchFailed);

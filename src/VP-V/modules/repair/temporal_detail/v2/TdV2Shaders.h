@@ -154,6 +154,24 @@ vec2 td_sample_half_ld3(sampler2D halfTex, ivec2 p, ivec4 halfActive)
 		return s;
 	}
 
+	// Build exact half-res Gaussian semigroup complement taps for kBandMemo D3 = L - G(kSigmaLow):
+	//   G(kSigmaLow) = G(kSigmaBase) * G(sigmaDiff), sigmaDiff = sqrt(kSigmaLow^2 - kSigmaBase^2).
+	// Evaluated at half resolution on the already-bandlimited L = G(kSigmaBase) (aliasing < -60 dB).
+	inline std::string BuildHalfDiffTapHeader()
+	{
+		const double sigmaDiff = std::sqrt(
+			VpUnit::BandFromBase::kSigmaLow * VpUnit::BandFromBase::kSigmaLow -
+			VpUnit::BandFromBase::kSigmaBase * VpUnit::BandFromBase::kSigmaBase);
+		const double sigmaHalfDiff = 0.5 * sigmaDiff;
+		const auto tHDiff = VpUnit::BandFromBase::Taps<double>(sigmaHalfDiff, 3.0, true, 0.0);
+		const int rHDiff = static_cast<int>(tHDiff.size() / 2);
+		std::string s;
+		s += VpvGpu::DefineInt("TD_RAD_HDIFF", rHDiff);
+		s += VpvGpu::ConstArray("TD_TAP_HDIFF", static_cast<int>(tHDiff.size()),
+			[&](int i) { return tHDiff[static_cast<size_t>(i)]; });
+		return s;
+	}
+
 	// Build orthonormal 8x8 DCT-II basis matrix C[u * 8 + x] = c(u) * cos(pi * (2x + 1) * u / 16).
 	inline std::string BuildDctBasisHeader()
 	{
@@ -988,6 +1006,208 @@ float bL = td_sample_half_ld3(bands_ld3_in, p, halfActive).x;
 float bM = gFine - bL;
 float bH = srcVal - gFine;
 imageStore(bands_mh_out, p, vec4(bM, bH, 0.0, 0.0));
+)GLSL";
+
+	// ---- PASS 1C (SOTA #10 — kBandMemo Shared Current-Frame Low-Band Zero-Duplicate Reuse) ----
+	// Single fused 16x16 LDS compute pass taking curCleanY + precomputed curLowBandTex (G(kSigmaBase)):
+	// - Computes exact G(kSigmaFine) via 22x22 LDS -> exact M = G_fine - L and H = src - G_fine.
+	// - Computes D3 = L - G(kSigmaLow) via exact Gaussian semigroup G(sqrt(6.0^2 - 2.5^2)) at half-res (7.8 KB total LDS).
+	// - Reference (TD_MEMO_COMPACT == 0): writes full-res RGBA32F bands_out in 1 dispatch (replaces 2 passes).
+	// - RealTime  (TD_MEMO_COMPACT == 1): writes full-res RG32F bands_mh_out + half-res RG32F bands_ld3_out in 1 dispatch (replaces 3 passes).
+	constexpr const char* kPass1BandFromMemoHeader = R"GLSL(
+shared float td_sh_m0[16 + 2 * TD_RAD_FINE][16 + 2 * TD_RAD_FINE];
+shared float td_sh_m1[16 + 2 * TD_RAD_FINE][16];
+shared float td_sh_mh0[10 + 2 * TD_RAD_HDIFF][10 + 2 * TD_RAD_HDIFF];
+shared float td_sh_mh1[10 + 2 * TD_RAD_HDIFF][10];
+shared float td_sh_ml[10][10];
+)GLSL";
+
+	constexpr const char* kPass1BandFromMemo = R"GLSL(
+int wgX = int(gl_WorkGroupID.x);
+int wgY = int(gl_WorkGroupID.y);
+int baseX = wgX * 16;
+int baseY = wgY * 16;
+int hBaseX = wgX * 8;
+int hBaseY = wgY * 8;
+int lx = int(gl_LocalInvocationID.x);
+int ly = int(gl_LocalInvocationID.y);
+int tid = ly * 16 + lx;
+ivec2 p = ivec2(baseX + lx, baseY + ly);
+
+int ax0 = int(round(u_ax0));
+int ay0 = int(round(u_ay0));
+int ax1 = int(round(u_ax1));
+int ay1 = int(round(u_ay1));
+int hax0 = int(round(u_hax0));
+int hay0 = int(round(u_hay0));
+int hax1 = int(round(u_hax1));
+int hay1 = int(round(u_hay1));
+ivec4 halfActive = ivec4(hax0, hay0, hax1, hay1);
+bool validRect = (ax1 > ax0) && (ay1 > ay0);
+bool validHalf = (hax1 > hax0) && (hay1 > hay0);
+int xMin = ax0;
+int xMax = max(ax0, ax1 - 1);
+int yMin = ay0;
+int yMax = max(ay0, ay1 - 1);
+int hxMin = hax0;
+int hxMax = max(hax0, hax1 - 1);
+int hyMin = hay0;
+int hyMax = max(hay0, hay1 - 1);
+
+// 1. Load 22x22 fine tile of curCleanY + 28x28 half-res tile of cur_low_band into LDS.
+int fTileDim = 16 + 2 * TD_RAD_FINE;
+int fTileN = fTileDim * fTileDim;
+for (int idx = tid; idx < fTileN; idx += 256)
+{
+    int ty = idx / fTileDim;
+    int tx = idx % fTileDim;
+    int gx = baseX - TD_RAD_FINE + tx;
+    int gy = baseY - TD_RAD_FINE + ty;
+    int sx = validRect ? clamp(gx, xMin, xMax) : clamp(gx, 0, TD_W - 1);
+    int sy = validRect ? clamp(gy, yMin, yMax) : clamp(gy, 0, TD_H - 1);
+    float sv = texelFetch(src_tex, ivec2(sx, sy), 0).x;
+    td_sh_m0[ty][tx] = td_is_bad(sv) ? 0.0 : sv;
+}
+
+int hTileDim = 10 + 2 * TD_RAD_HDIFF;
+int hTileN = hTileDim * hTileDim;
+for (int idx = tid; idx < hTileN; idx += 256)
+{
+    int ty = idx / hTileDim;
+    int tx = idx % hTileDim;
+    int ghx = (hBaseX - 1) - TD_RAD_HDIFF + tx;
+    int ghy = (hBaseY - 1) - TD_RAD_HDIFF + ty;
+    int chx = validHalf ? clamp(ghx, hxMin, hxMax) : clamp(ghx, 0, TD_HALF_W - 1);
+    int chy = validHalf ? clamp(ghy, hyMin, hyMax) : clamp(ghy, 0, TD_HALF_H - 1);
+#if TD_MEMO_IS_HALF
+    float lv = texelFetch(cur_low_band, ivec2(chx, chy), 0).x;
+    td_sh_mh0[ty][tx] = td_is_bad(lv) ? 0.0 : lv;
+#else
+    int fx0 = validRect ? clamp(2 * chx,     xMin, xMax) : clamp(2 * chx,     0, TD_W - 1);
+    int fx1 = validRect ? clamp(2 * chx + 1, xMin, xMax) : clamp(2 * chx + 1, 0, TD_W - 1);
+    int fy0 = validRect ? clamp(2 * chy,     yMin, yMax) : clamp(2 * chy,     0, TD_H - 1);
+    int fy1 = validRect ? clamp(2 * chy + 1, yMin, yMax) : clamp(2 * chy + 1, 0, TD_H - 1);
+    float l00 = texelFetch(cur_low_band, ivec2(fx0, fy0), 0).x;
+    float l10 = texelFetch(cur_low_band, ivec2(fx1, fy0), 0).x;
+    float l01 = texelFetch(cur_low_band, ivec2(fx0, fy1), 0).x;
+    float l11 = texelFetch(cur_low_band, ivec2(fx1, fy1), 0).x;
+    if (td_is_bad(l00)) l00 = 0.0;
+    if (td_is_bad(l10)) l10 = 0.0;
+    if (td_is_bad(l01)) l01 = 0.0;
+    if (td_is_bad(l11)) l11 = 0.0;
+    td_sh_mh0[ty][tx] = (l00 + l10 + l01 + l11) / 4.0;
+#endif
+}
+memoryBarrierShared();
+barrier();
+
+// 2. Separable horizontal convolutions in LDS (G_fine on src_tex, G_diff on half-res L).
+int fHN = fTileDim * 16;
+for (int idx = tid; idx < fHN; idx += 256)
+{
+    int ty = idx / 16;
+    int tx = idx % 16;
+    int c = tx + TD_RAD_FINE;
+    float acc = 0.0;
+    for (int k = -TD_RAD_FINE; k <= TD_RAD_FINE; ++k)
+        acc += TD_TAP_FINE[k + TD_RAD_FINE] * td_sh_m0[ty][c + k];
+    td_sh_m1[ty][tx] = acc;
+}
+int hHN = hTileDim * 10;
+for (int idx = tid; idx < hHN; idx += 256)
+{
+    int ty = idx / 10;
+    int tx = idx % 10;
+    int c = tx + TD_RAD_HDIFF;
+    float acc = 0.0;
+    for (int k = -TD_RAD_HDIFF; k <= TD_RAD_HDIFF; ++k)
+        acc += TD_TAP_HDIFF[k + TD_RAD_HDIFF] * td_sh_mh0[ty][c + k];
+    td_sh_mh1[ty][tx] = acc;
+}
+memoryBarrierShared();
+barrier();
+
+// 3. Vertical half-res G_diff -> 10x10 gLow tile in td_sh_ml.
+if (tid < 100)
+{
+    int ty = tid / 10;
+    int tx = tid % 10;
+    int c = ty + TD_RAD_HDIFF;
+    float gLow = 0.0;
+    for (int k = -TD_RAD_HDIFF; k <= TD_RAD_HDIFF; ++k)
+        gLow += TD_TAP_HDIFF[k + TD_RAD_HDIFF] * td_sh_mh1[c + k][tx];
+    td_sh_ml[ty][tx] = gLow;
+}
+memoryBarrierShared();
+barrier();
+
+// 4. Write compact half-res (L, D3) when TD_MEMO_COMPACT == 1 (first 8x8 threads of each WG).
+#if TD_MEMO_COMPACT
+if (lx < 8 && ly < 8)
+{
+    ivec2 hp = ivec2(hBaseX + lx, hBaseY + ly);
+    if (hp.x < TD_HALF_W && hp.y < TD_HALF_H)
+    {
+        if (!validHalf || hp.x < hax0 || hp.x >= hax1 || hp.y < hay0 || hp.y >= hay1)
+        {
+            imageStore(bands_ld3_out, hp, vec4(0.0));
+        }
+        else
+        {
+            float lH = td_sh_mh0[ly + 1 + TD_RAD_HDIFF][lx + 1 + TD_RAD_HDIFF];
+            float gLowH = td_sh_ml[ly + 1][lx + 1];
+            imageStore(bands_ld3_out, hp, vec4(lH, lH - gLowH, 0.0, 0.0));
+        }
+    }
+}
+#endif
+
+if (p.x >= TD_W || p.y >= TD_H)
+    return;
+
+if (!validRect || p.x < ax0 || p.x >= ax1 || p.y < ay0 || p.y >= ay1)
+{
+#if TD_MEMO_COMPACT
+    imageStore(bands_mh_out, p, vec4(0.0));
+#else
+    imageStore(bands_out, p, vec4(0.0));
+#endif
+    return;
+}
+
+int cyCenter = ly + TD_RAD_FINE;
+float gFine = 0.0;
+for (int k = -TD_RAD_FINE; k <= TD_RAD_FINE; ++k)
+    gFine += TD_TAP_FINE[k + TD_RAD_FINE] * td_sh_m1[cyCenter + k][lx];
+float srcVal = td_sh_m0[cyCenter][lx + TD_RAD_FINE];
+
+#if TD_MEMO_IS_HALF
+float rawL = td_sample_half_ld3(cur_low_band, p, halfActive).x;
+#else
+float rawL = texelFetch(cur_low_band, p, 0).x;
+#endif
+float bL = td_is_bad(rawL) ? 0.0 : rawL;
+float bM = gFine - bL;
+float bH = srcVal - gFine;
+
+#if TD_MEMO_COMPACT
+imageStore(bands_mh_out, p, vec4(bM, bH, 0.0, 0.0));
+#else
+vec2 hc = (vec2(p) - vec2(0.5)) / 2.0;
+vec2 hLo = vec2(float(hax0), float(hay0));
+vec2 hHi = vec2(float(max(hax0, hax1 - 1)), float(max(hay0, hay1 - 1)));
+vec2 hCl = clamp(hc, hLo, hHi) - vec2(float(hBaseX - 1), float(hBaseY - 1));
+vec2 locCl = clamp(hCl, vec2(0.0), vec2(9.0));
+ivec2 i0 = ivec2(floor(locCl));
+ivec2 i1 = min(ivec2(9), i0 + ivec2(1));
+vec2 f = locCl - vec2(i0);
+float g00 = td_sh_ml[i0.y][i0.x];
+float g10 = td_sh_ml[i0.y][i1.x];
+float g01 = td_sh_ml[i1.y][i0.x];
+float g11 = td_sh_ml[i1.y][i1.x];
+float gLow = (g00 + (g10 - g00) * f.x) * (1.0 - f.y) + (g01 + (g11 - g01) * f.x) * f.y;
+imageStore(bands_out, p, vec4(bL, bM, bH, bL - gLow));
+#endif
 )GLSL";
 
 	// ---- PASS 2A (Speedup 2): Coalesced 16x16 LDS Cell-Moment Reduction + Fused Focus Guard ----
