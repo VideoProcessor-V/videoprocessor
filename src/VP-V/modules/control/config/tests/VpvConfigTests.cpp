@@ -2150,7 +2150,7 @@ namespace
 		// 2. Choice defaults match VpvRenderer::Fields{} and pass VpvSchemaKeys validation.
 		const VpvRenderer::Fields fields{};
 		const std::vector<std::pair<const char*, std::string>> expected = {
-			{ "adaptive_motion", fields.adaptive.motionAdaptive ? "on" : "off" },
+			{ "adaptive_motion", fields.adaptive.motionStrength > 0.0f ? "on" : "off" },
 			{ "chroma_upscale_vp", "off" },
 			{ "fbo_float32", fields.fboFloat32 < 0 ? "auto" : (fields.fboFloat32 ? "on" : "off") },
 			{ "repeat_render_reuse", fields.repeatRenderReuse ? "on" : "off" },

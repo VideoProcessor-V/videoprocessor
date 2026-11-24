@@ -35,6 +35,7 @@
 #include <cstring>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <map>
 #include <string>
 #include <type_traits>
@@ -652,6 +653,30 @@ namespace VideoProcessorTest
 			Assert::AreEqual(0.20f, CallMotionTarget(false, 0.0f, 0.0f, 0.80f, s), 1e-6f, L"untrusted frame -> floor");
 			Assert::AreEqual(0.20f, CallMotionTarget(true, 0.0f, 0.0f, -0.50f, s), 1e-6f, L"negative confidence -> 0 -> floor");
 			Assert::AreEqual(1.00f, CallMotionTarget(true, 0.0f, 0.0f, 1.75f, s), 1e-6f, L"confidence > 1 clamps to 1");
+
+			// HIGH-1: Non-finite (NaN / +Inf / -Inf) confidence, speed, shear, and motionStrength must sanitize safely
+			// (never propagate NaN, never treat +Inf confidence as 1.0f trusted!).
+			const float qnan = std::numeric_limits<float>::quiet_NaN();
+			const float pinf = std::numeric_limits<float>::infinity();
+			const float ninf = -pinf;
+			for (float badConf : { qnan, pinf, ninf })
+			{
+				const float t = CallMotionTarget(true, 0.0f, 0.0f, badConf, s);
+				Assert::IsTrue(std::isfinite(t), L"non-finite confidence must not yield NaN/Inf");
+				Assert::AreEqual(0.20f, t, 1e-6f, L"non-finite confidence (including +Inf) must be treated as untrusted 0 -> floor");
+			}
+			for (float badSpd : { qnan, pinf, ninf })
+			{
+				const float tSpd = CallMotionTarget(true, badSpd, 0.0f, 1.0f, s);
+				const float tShr = CallMotionTarget(true, 0.0f, badSpd, 1.0f, s);
+				Assert::IsTrue(std::isfinite(tSpd) && std::isfinite(tShr), L"non-finite speed/shear must yield finite target");
+				Assert::AreEqual(0.20f, tSpd, 1e-6f, L"non-finite speed must fail safe to motionFloor");
+				Assert::AreEqual(0.20f, tShr, 1e-6f, L"non-finite shearSpeed must fail safe to motionFloor");
+			}
+			Assert::IsTrue(std::isfinite(CallMotionTerm4(true, qnan, 0.2f, 1.0f)), L"NaN mapFactor must sanitize");
+			Assert::AreEqual(0.0f, CallMotionTerm4(true, qnan, 0.2f, 1.0f), 1e-6f, L"NaN mapFactor -> alias-safe 0");
+			Assert::AreEqual(1.0f, CallMotionTerm4(true, 0.2f, 0.0f, qnan), 1e-6f, L"NaN motionStrength -> 0 (standard blend)");
+			Assert::AreEqual(1.0f, CallMotionTerm4(true, 0.2f, 0.0f, pinf), 1e-6f, L"+Inf motionStrength -> sanitized 0 (standard blend)");
 		}
 
 		// Upgrades 2 & 3 (CPU): Single motionStrength continuum (HybridBlend::MotionTerm, Settings::motionStrength),
@@ -746,6 +771,26 @@ namespace VideoProcessorTest
 				Assert::AreNotEqual(VpvRendererSettings::Fingerprint(f0, true), VpvRendererSettings::Fingerprint(f35, true),
 					L"Fingerprint must distinguish motionStrength 0.0 vs 0.35");
 
+				// BLOCKER-2: Describe() preserves checked-in golden format ("off" at <=0/non-finite, "on" at >=1, numeric in (0,1)).
+				{
+					const Dejudder::Settings m{};
+					auto describeLine = [&](float s) {
+						VpvRenderer::Fields f;
+						SetMotionStrength(f.adaptive, s);
+						return VpvRendererSettings::Describe(f, "", m, "Default");
+					};
+					Assert::IsTrue(describeLine(0.0f).find("\nadaptive_motion=off\n") != std::string::npos,
+						L"Describe() at 0.0f must emit adaptive_motion=off (golden compatibility)");
+					Assert::IsTrue(describeLine(1.0f).find("\nadaptive_motion=on\n") != std::string::npos,
+						L"Describe() at 1.0f must emit adaptive_motion=on");
+					Assert::IsTrue(describeLine(0.5f).find("\nadaptive_motion=0.5\n") != std::string::npos,
+						L"Describe() at 0.5f must emit adaptive_motion=0.5");
+					Assert::IsTrue(describeLine(std::numeric_limits<float>::quiet_NaN()).find("\nadaptive_motion=off\n") != std::string::npos,
+						L"Describe() at NaN must emit adaptive_motion=off");
+					Assert::IsTrue(describeLine(std::numeric_limits<float>::infinity()).find("\nadaptive_motion=off\n") != std::string::npos,
+						L"Describe() at +Inf must emit adaptive_motion=off");
+				}
+
 				// Original == Bill: PostLoad on Original pathway forces motionStrength to 0.0f.
 				f35.pipelineOriginalPathway = true;
 				VpvRendererSettings::PostLoad(f35, false, nullptr);
@@ -757,6 +802,11 @@ namespace VideoProcessorTest
 			//    and zero fallback / zero grainMapWanted when motionStrength == 0.
 			{
 				AdaptiveDownscale::Module module;
+				module.SetCutSource([](uint64_t, uint64_t) {
+					AdaptiveDownscale::CutVerdict v;
+					v.state = AdaptiveDownscale::CutVerdict::State::Known;
+					return v;
+				});
 				AdaptiveDownscaleStage::Stage stage{ module };
 				AdaptiveDownscale::Settings settings;
 				double weight = 1.0;
@@ -957,6 +1007,20 @@ namespace VideoProcessorTest
 			float shHalf = -1.0f;
 			Assert::IsTrue(AdProbe::CallShear(halfConfNeighbor, bw, bh, 3, 2, cropH, dt, shHalf, Rank9{}));
 			Assert::AreEqual(0.25f, shHalf, 1e-5f, L"f_n.z=0.5 scales 0.5 heights/s velocity delta to 0.25 shearSpeed");
+
+			// HIGH-1: Untrusted neighbor with +Inf velocity (0.0 * Inf would be NaN!) or NaN confidence must NOT produce NaN.
+			const float qnan = std::numeric_limits<float>::quiet_NaN();
+			const float pinf = std::numeric_limits<float>::infinity();
+			const std::vector<float> infNeighbor = makeGrid([pinf, qnan](int x, int y, float* c) {
+				if (x == 4 && y == 2) { c[0] = pinf; c[1] = 0.0f; c[2] = 0.0f; c[3] = 0.0f; }
+				else if (x == 2 && y == 2) { c[0] = 2.5f; c[1] = 0.0f; c[2] = qnan; c[3] = 0.0f; }
+				else if (x == 3 && y == 1) { c[0] = 2.5f; c[1] = 0.0f; c[2] = pinf; c[3] = 0.0f; }
+				else { c[0] = 0.0f; c[1] = 0.0f; c[2] = 1.0f; c[3] = 0.0f; }
+			});
+			float shInf = -1.0f;
+			Assert::IsTrue(AdProbe::CallShear(infNeighbor, bw, bh, 3, 2, cropH, dt, shInf, Rank9{}));
+			Assert::IsTrue(std::isfinite(shInf), L"0*Inf or NaN/+Inf neighbor confidence must never produce NaN shearSpeed");
+			Assert::AreEqual(0.0f, shInf, 1e-6f, L"non-finite neighbor confidence/velocity contributes 0 shear");
 
 			// 4. Whip-pan roll-off [2*speed_hi, 4*speed_hi] = [0.8, 1.6] heights/s with shearSpeed = 0:
 			Assert::AreEqual(1.0f, CallMotionTarget(true, 0.80f, 0.0f, 1.0f, s), 1e-6f, L"2*speed_hi (0.8): still 1.0");
@@ -1384,6 +1448,73 @@ namespace VideoProcessorTest
 			Assert::IsTrue(wGot[2] - wGot[1] < 0.13 && wGot[1] - wGot[0] > 0.17,
 				L"rendered step across 0.45->0.55 (~0.10) must be smaller than 0.25->0.45 (~0.20): proves zero cliff at 0.5");
 
+			// 3. HIGH-1 (WARP GPU): NaN/+Inf confidence & 0*Inf neighbor velocity must sanitize to floor/0 without latching NaN.
+			{
+				const float qnan = std::numeric_limits<float>::quiet_NaN();
+				const float pinf = std::numeric_limits<float>::infinity();
+				pl_tex poisonedField = rig.Field(bw, bh, [qnan, pinf](int x, int y, float* c) {
+					if (x == 1 && y == 1) { c[0] = 0.0f; c[1] = 0.0f; c[2] = qnan; c[3] = 0.0f; }       // NaN confidence
+					else if (x == 3 && y == 1) { c[0] = 0.0f; c[1] = 0.0f; c[2] = pinf; c[3] = 0.0f; }  // +Inf confidence (must NOT clamp to 1!)
+					else if (x == 5 && y == 1) { c[0] = pinf; c[1] = 0.0f; c[2] = 0.0f; c[3] = 0.0f; }  // 0 * Inf neighbor hazard for (4,1) & (6,1)
+					else if (x == 7 && y == 1) { c[0] = qnan; c[1] = 0.0f; c[2] = 1.0f; c[3] = 0.0f; }  // NaN velocity with c=1
+					else { c[0] = 0.0f; c[1] = 0.0f; c[2] = 1.0f; c[3] = 0.0f; }
+				});
+				pl_tex cleanField = rig.Field(bw, bh, [](int, int, float* c) { c[0] = 0.0f; c[1] = 0.0f; c[2] = 1.0f; c[3] = 0.0f; });
+
+				AdaptiveDownscale::Settings stNan = st;
+				stNan.motionFloor = 0.20f;
+				stNan.motionSmoothMs = 250.0f;
+				SetMotionStrength(stNan, 1.0f);
+
+				AdaptiveDownscale::Module module;
+				module.hostReadableMap = true;
+				auto runSeq = [&](uint64_t seq, pl_tex f) {
+					module.SetFrame(stNan, seq, 1.0f / 24.0f);
+					AdaptiveDownscale::Upscale up;
+					up.on = true; up.wBase = 1.0f; up.nativeWidth = static_cast<float>(sw); up.nativeHeight = static_cast<float>(sh);
+					module.SetUpscale(up);
+					AdaptiveDownscale::GrainLevelSource gl;
+					gl.level = cleanGrain; gl.sourceCrop = { 0.0f, 0.0f, static_cast<float>(sw), static_cast<float>(sh) };
+					module.SetGrainLevel(gl);
+					AdaptiveDownscale::Motion m;
+					m.field = f; m.frameTrust = trustOk;
+					m.sourceCrop = { 0.0f, 0.0f, static_cast<float>(sw), static_cast<float>(sh) };
+					module.SetMotion(m);
+					rig.RenderUnorm16(src, ow, oh, { module.Measure(), module.Blend() });
+					return rig.ReadRgba32f(module.MotionMap());
+				};
+
+				const std::vector<float> mPoison = runSeq(1, poisonedField);
+				for (int i = 0; i < bw * bh; ++i)
+				{
+					const float* cell = &mPoison[static_cast<size_t>(i) * 4];
+					Assert::IsTrue(std::isfinite(cell[0]) && std::isfinite(cell[1]),
+						(L"GPU motionMap became non-finite at block " + std::to_wstring(i)).c_str());
+				}
+				const float* nanCell = &mPoison[(static_cast<size_t>(1) * bw + 1) * 4];
+				const float* infConfCell = &mPoison[(static_cast<size_t>(1) * bw + 3) * 4];
+				const float* adjInfVelCell = &mPoison[(static_cast<size_t>(1) * bw + 4) * 4];
+				const float* nanVelCell = &mPoison[(static_cast<size_t>(1) * bw + 7) * 4];
+				Assert::AreEqual(0.20f, nanCell[0], 1e-4f, L"GPU NaN confidence -> motionFloor");
+				Assert::AreEqual(0.0f, nanCell[1], 1e-4f, L"GPU NaN confidence -> motionMap.g = 0");
+				Assert::AreEqual(0.20f, infConfCell[0], 1e-4f, L"GPU +Inf confidence must sanitize to untrusted floor (NOT 1.0!)");
+				Assert::AreEqual(0.0f, infConfCell[1], 1e-4f, L"GPU +Inf confidence -> motionMap.g = 0");
+				Assert::AreEqual(1.0f, adjInfVelCell[0], 1e-4f, L"GPU neighbor with f_n.z=0, f_n.xy=+Inf must NOT poison adjacent clean block via 0*Inf=NaN");
+				Assert::AreEqual(0.20f, nanVelCell[0], 1e-4f, L"GPU NaN velocity -> fail-safe motionFloor");
+
+				// Frame 2 clean steady: every poisoned block must recover smoothly (zero NaN latching!).
+				const std::vector<float> mRecover = runSeq(2, cleanField);
+				const float alphaRel = OnePole::AlphaForMs(1000.0f / 24.0f, 250.0f, OnePole::DtRule::AsGiven);
+				const float expectedRecover = 0.20f + (1.0f - 0.20f) * alphaRel;
+				for (int bx : { 1, 3, 7 })
+				{
+					const float* cell = &mRecover[(static_cast<size_t>(1) * bw + bx) * 4];
+					Assert::IsTrue(std::isfinite(cell[0]), L"frame 2 must remain finite (no NaN latch)");
+					Assert::AreEqual(expectedRecover, cell[0], 1e-4f, L"frame 2 recovers smoothly from sanitized floor");
+				}
+				module.Release();
+			}
+
 			rig.fixture.CaptureLog(nullptr);
 			AssertCleanLibplaceboLog(log);
 		}
@@ -1422,6 +1553,11 @@ namespace VideoProcessorTest
 				AdaptiveDownscale::MotionState& outState, bool& hasMotionTex, std::vector<std::string>& statusOut)
 			{
 				AdaptiveDownscale::Module module;
+				module.SetCutSource([](uint64_t, uint64_t) {
+					AdaptiveDownscale::CutVerdict v;
+					v.state = AdaptiveDownscale::CutVerdict::State::Known;
+					return v;
+				});
 				AdaptiveDownscaleStage::Stage stage{ module };
 				AdaptiveDownscale::Settings st = base;
 				SetMotionStrength(st, strength);
@@ -1535,6 +1671,44 @@ namespace VideoProcessorTest
 				L"downscale motionStrength 0.5 must sit halfway between standard blend and faithful floor");
 			Assert::AreEqual(0.0, MeasureSharpFraction(dnStrFull, dnStr0, dnSafe, dnW, 6, dnW - 6, 6, dnH - 6, active), 0.005,
 				L"downscale motionStrength 1.0 on whip-pan must match faithful branch");
+
+			// 3. LOW-2: Live 0.5 -> 0.0 -> 0.5 motionStrength transition on a SINGLE AdaptiveDownscale::Module instance.
+			{
+				AdaptiveDownscale::Module liveMod;
+				auto stepSingle = [&](uint64_t seq, float strength) {
+					AdaptiveDownscale::Settings st = base;
+					SetMotionStrength(st, strength);
+					liveMod.SetFrame(st, seq, 1.0f / 24.0f);
+					AdaptiveDownscale::Upscale up;
+					up.on = true; up.wBase = 1.0f; up.nativeWidth = static_cast<float>(sw); up.nativeHeight = static_cast<float>(sh);
+					liveMod.SetUpscale(up);
+					AdaptiveDownscale::GrainLevelSource gl;
+					gl.level = cleanGrain; gl.sourceCrop = { 0.0f, 0.0f, static_cast<float>(sw), static_cast<float>(sh) };
+					liveMod.SetGrainLevel(gl);
+					AdaptiveDownscale::Motion m;
+					m.field = whipField; m.frameTrust = trust;
+					m.sourceCrop = { 0.0f, 0.0f, static_cast<float>(sw), static_cast<float>(sh) };
+					liveMod.SetMotion(m);
+					return rig.RenderUnorm16(src, upW, upH, { liveMod.Measure(), liveMod.Blend() });
+				};
+				const std::vector<uint16_t> t1 = stepSingle(1, 0.5f);
+				Assert::IsTrue(liveMod.LastMotionState() == AdaptiveDownscale::MotionState::Used && liveMod.MotionMap() != nullptr);
+				Assert::AreEqual(0.5, MeasureSharpFraction(t1, upStr0, safeUp, upW, 8, upW - 8, 8, upH - 8, active), 0.015,
+					L"live transition frame 1 (0.5): blends at 0.5");
+
+				const std::vector<uint16_t> t2 = stepSingle(2, 0.0f);
+				Assert::IsTrue(liveMod.LastMotionState() == AdaptiveDownscale::MotionState::Off && liveMod.MotionMap() == nullptr,
+					L"live transition frame 2 (0.0): must drop to MotionState::Off and clear MotionMap()");
+				Assert::AreEqual(1.0, MeasureSharpFraction(t2, upStr0, safeUp, upW, 8, upW - 8, 8, upH - 8, active), 0.005,
+					L"live transition frame 2 (0.0): returns immediately to standard sharp blend");
+
+				const std::vector<uint16_t> t3 = stepSingle(3, 0.5f);
+				Assert::IsTrue(liveMod.LastMotionState() == AdaptiveDownscale::MotionState::Used && liveMod.MotionMap() != nullptr,
+					L"live transition frame 3 (0.5): cleanly resumes motion map");
+				Assert::AreEqual(0.5, MeasureSharpFraction(t3, upStr0, safeUp, upW, 8, upW - 8, 8, upH - 8, active), 0.015,
+					L"live transition frame 3 (0.5): blends cleanly back at 0.5");
+				liveMod.Release();
+			}
 
 			Assert::IsTrue(SettingsHasMotionStrength(), L"Settings::motionStrength required");
 			rig.fixture.CaptureLog(nullptr);
@@ -1867,6 +2041,11 @@ namespace VideoProcessorTest
 
 			auto runStage = [&](double wBase, bool nlsSubmitted, const NlsMaskMapping::Mapping& nlsMap) -> NlsOutcome {
 				AdaptiveDownscale::Module module;
+				module.SetCutSource([](uint64_t, uint64_t) {
+					AdaptiveDownscale::CutVerdict v;
+					v.state = AdaptiveDownscale::CutVerdict::State::Known;
+					return v;
+				});
 				AdaptiveDownscaleStage::Stage stage{ module };
 				double weight = 1.0;
 				bool grainWanted = false, noSsim = false;
@@ -1976,6 +2155,74 @@ namespace VideoProcessorTest
 			Assert::AreEqual(0.0, MeasureSharpFraction(withInvalidNls.px, sharpRef, safeRef, ow, 372, 396, 12, oh - 12, active), 0.01,
 				L"!nls.valid must drop even center pixels to motionFloor");
 
+			// 2b. HIGH-2 (Rule 4): With motionStrength == 0.0f and !nls.valid, ReadGrain() must NOT silently bind
+			//     unmapped linear AD_GRAIN_PUBLISHED — it must visibly fall back to grain_floor ("NLS map unknown")!
+			{
+				AdaptiveDownscale::Settings stGrainOnly = st;
+				SetMotionStrength(stGrainOnly, 0.0f);
+				AdaptiveDownscale::Module module;
+				module.SetCutSource([](uint64_t, uint64_t) {
+					AdaptiveDownscale::CutVerdict v;
+					v.state = AdaptiveDownscale::CutVerdict::State::Known;
+					return v;
+				});
+				AdaptiveDownscaleStage::Stage stage{ module };
+				double weight = 1.0;
+				bool grainWanted = false, noSsim = false;
+				int p10gAsks = 0;
+				AdaptiveDownscaleStage::Host host;
+				host.fallbackFramePeriod = []() { return 1.0f / 24.0f; };
+				host.bitrate = [](double& q) { q = 1.0; return false; };
+				host.nlsMapping = [&]() { return invalidNls; };
+				host.ssimInChain = []() { return false; };
+				host.publishStatus = []() {};
+				host.acquire = [&](VpSkeleton::ProductId id, uint64_t, const VpSkeleton::VariantKey&) {
+					++p10gAsks;
+					VpSkeleton::AcquireResult r;
+					if (id == VpSkeleton::kP10gGrainLevel)
+					{
+						r.status = VpSkeleton::AcquireStatus::Reused;
+						r.gpu.resource = const_cast<pl_tex_t*>(offCenterGrain);
+					}
+					return r;
+				};
+				host.motion = [&]() {
+					AdaptiveDownscaleStage::MotionSource m;
+					m.live = true; m.field = offCenterMotion; m.frameTrust = trust;
+					return m;
+				};
+				AdaptiveDownscaleStage::Frame f;
+				f.adaptive = &stGrainOnly;
+				f.adaptiveUpscale = true;
+				f.upscaleWBase = 1.0;
+				f.upscaleSuperresScale = false;
+				f.lowBitrateOff = true;
+				f.sourceSequence = 1;
+				f.nominalSourceRateHz = 24.0;
+				f.nlsSubmitted = true;
+				f.nlsFile = "CustomUnknownNLS.glsl";
+				f.sourceCrop = { 0.0f, 0.0f, static_cast<float>(sw), static_cast<float>(sh) };
+				f.targetCrop = { 0.0f, 0.0f, static_cast<float>(ow), static_cast<float>(oh) };
+
+				std::vector<const pl_hook*> hooks;
+				stage.Register(f, host, { weight, grainWanted, noSsim }, hooks);
+				const std::vector<uint16_t> grainFallbackPx = rig.RenderUnorm16(src, ow, oh, hooks);
+				Assert::IsTrue(module.Active() && module.Failures() == 0);
+				Assert::IsFalse(stage.GrainTerm().published, L"HIGH-2: !nls.valid must NOT publish unmapped linear kP10gGrainLevel");
+				Assert::IsFalse(module.PublishedGrainUsed(), L"HIGH-2: module must use grain_floor instead of unmapped AD_GRAIN_PUBLISHED");
+				Assert::IsTrue(stage.GrainTerm().cause.find("NLS") != std::string::npos,
+					(L"HIGH-2: GrainTerm().cause must name NLS, got: " + Wide(stage.GrainTerm().cause)).c_str());
+				const std::vector<std::string> gLines = stage.StatusLines();
+				Assert::IsTrue(HasSubstring(gLines, "Adaptive upscale grain: no grain level") && HasSubstring(gLines, "NLS"),
+					(L"HIGH-2: StatusLines must report visible grain fallback for unknown NLS: " + Wide(JoinLines(gLines))).c_str());
+				const FallbackCatalog::Decision gFb = stage.Fallback();
+				Assert::IsTrue(gFb.engaged && gFb.id == "output scaling" && gFb.reason.find("no grain level") != std::string::npos,
+					(L"HIGH-2: Fallback() must engage output scaling grain fallback, got: " + Wide(gFb.reason)).c_str());
+				Assert::AreEqual(0.0, MeasureSharpFraction(grainFallbackPx, sharpRef, safeRef, ow, 372, 396, 12, oh - 12, active), 0.01,
+					L"HIGH-2: !nls.valid with motionStrength=0 must drop center pixels to grain_floor (0.0), not silently blend unmapped linear grain");
+				module.Release();
+			}
+
 			// 3. Direct struct member contract check on AdaptiveDownscale::Motion::nls and GrainLevelSource::nls.
 			AdaptiveDownscale::Motion mStruct{};
 			AdaptiveDownscale::GrainLevelSource gStruct{};
@@ -2066,9 +2313,10 @@ namespace VideoProcessorTest
 						L"negative control: [0,1] clamp clips BTB");
 					Assert::IsTrue(std::fabs(RampMath::Clamp01(patchValues[3]) - patchValues[3]) * 4095.0f > 300.0f,
 						L"negative control: [0,1] clamp clips WTW");
-					const float code520 = 520.0f / 4095.0f;   // 520/4095 * 255 = 32.38 -> 32/255 * 4095 = 513.88 (error > 6 LSBs!)
-					Assert::IsTrue(std::fabs(std::round(code520 * 255.0f) / 255.0f * 4095.0f - 520.0f) > 5.0f,
-						L"negative control: 8-bit intermediate loses >5 12-bit LSBs");
+					// LOW-3: Align 8-bit quantization negative control directly to patchValues[12] (2561/4095):
+					// round(2561/4095 * 255) = 159 -> 159/255 * 4095 = 2553.35 (error > 7 LSBs!).
+					Assert::IsTrue(std::fabs(std::round(patchValues[12] * 255.0f) / 255.0f * 4095.0f - patchValues[12] * 4095.0f) > 5.0f,
+						L"negative control: 8-bit intermediate loses >5 12-bit LSBs on patchValues[12] (2561/4095)");
 
 					// Verify center pixel of each 24-px-wide output patch (x = patch * 24 + 12, y = oh / 2).
 					for (int p = 0; p < 16; ++p)
@@ -2110,8 +2358,9 @@ namespace VideoProcessorTest
 				}
 			}
 
-			// 2. Multi-frame grain retention non-regression on WARP GPU across flat (512/1023), dark-flat (80/1023),
-			//    and structured texture bands under motion-adapted blend (motionStrength = 0.5f & 1.0f, residualGrainGuard = true).
+			// 2. MEDIUM-1: Multi-frame grain retention non-regression on WARP GPU across flat (512/1023), dark-flat (80/1023),
+			//    and structured texture bands under BOTH motionStrength = 0.5f & 1.0f, with genuinely divergent sharp vs
+			//    alias-safe branches (explicitly asserted!) AND an actual in-module residualGrainGuard = false negative control!
 			{
 				const int sw = 192, sh = 96, bw = sw / 16, bh = sh / 16, ow = 288, oh = 144;
 				pl_tex trust = rig.Trust(1.0f);
@@ -2120,8 +2369,23 @@ namespace VideoProcessorTest
 					c[0] = (y >= 4) ? 2.0f : ((y >= 2) ? 1.5f : 0.0f);
 					c[1] = 0.0f; c[2] = 0.75f; c[3] = 0.0f;
 				});
-				// Published kP10gGrainLevel reporting real grain sigma = 6 (10-bit codes -> N_b = 36) so residualGrainGuard protects grain!
-				pl_tex grainPublished = rig.Field(bw, bh, [](int, int, float* c) { c[0] = 36.0f; });
+				// Published kP10gGrainLevel reporting real grain sigma = 8 (10-bit codes -> N_b = 64, 8-bit energy ~7.11)
+				// so residualGrainGuard's smoothstep(0.25, 0.75, grainy) fully protects film grain on the guarded path!
+				pl_tex grainPublished = rig.Field(bw, bh, [](int, int, float* c) { c[0] = 64.0f; });
+
+				// Distinct crisp sharp branch (POSTKERNEL high-pass sharpening hook placed BEFORE module.Blend()) so sharp
+				// and alias-safe branches genuinely diverge and carry non-zero high-frequency grain residual!
+				static const char sharpHookSrc[] =
+					"//!HOOK POSTKERNEL\n"
+					"//!BIND HOOKED\n"
+					"//!DESC test crisp sharp branch\n"
+					"vec4 hook() {\n"
+					"    vec4 c = HOOKED_tex(HOOKED_pos);\n"
+					"    vec4 blur = 0.25 * (HOOKED_texOff(vec2(-1, 0)) + HOOKED_texOff(vec2(1, 0)) + HOOKED_texOff(vec2(0, -1)) + HOOKED_texOff(vec2(0, 1)));\n"
+					"    return c + 1.5 * (c - blur);\n"
+					"}\n";
+				const pl_hook* sharpHook = pl_mpv_user_shader_parse(rig.gpu, sharpHookSrc, sizeof(sharpHookSrc) - 1);
+				Assert::IsNotNull(sharpHook, L"sharp test hook must parse");
 
 				auto baseAt = [sw](int x, int y) -> float {
 					if (x < sw / 3)
@@ -2131,13 +2395,13 @@ namespace VideoProcessorTest
 					return 512.0f / 1023.0f + 0.06f * std::sin(x * 0.45f) * std::cos(y * 0.41f);   // texture
 				};
 				auto grainSample = [](uint32_t seed, int x, int y) -> float {
-					// Deterministic Box-Muller film grain, sigma = 6 / 1023 codes.
+					// Deterministic Box-Muller film grain, sigma = 8 / 1023 codes (exact match to published N_b = 64).
 					uint32_t h1 = (static_cast<uint32_t>(y * 1024 + x) * 747796405u + seed * 2891336453u) ^ 0x9e3779b9u;
 					h1 = ((h1 >> ((h1 >> 28) + 4u)) ^ h1) * 277803737u;
 					uint32_t h2 = h1 * 1664525u + 1013904223u;
 					const double u1 = (static_cast<double>((h1 >> 8) & 0xffffffu) + 0.5) / 16777216.0;
 					const double u2 = (static_cast<double>((h2 >> 8) & 0xffffffu) + 0.5) / 16777216.0;
-					return static_cast<float>((6.0 / 1023.0) * std::sqrt(-2.0 * std::log(u1)) * std::cos(6.283185307179586 * u2));
+					return static_cast<float>((8.0 / 1023.0) * std::sqrt(-2.0 * std::log(u1)) * std::cos(6.283185307179586 * u2));
 				};
 
 				pl_tex cleanBaseTex = rig.FloatPicture(sw, sh, [&](int x, int y, float* p) {
@@ -2152,25 +2416,30 @@ namespace VideoProcessorTest
 					});
 				}
 
-				const std::vector<float> refClean = rig.RenderFloat32(cleanBaseTex, ow, oh, {}, &pl_filter_lanczos);
-				const std::vector<float> refNoisy = rig.RenderFloat32(noisyFrames[2], ow, oh, {}, &pl_filter_lanczos);
+				// Prove genuine sharp vs alias-safe branch divergence on noisyFrames[2] (non-tautological!).
+				const std::vector<float> sharpBranchPx = rig.RenderFloat32(noisyFrames[2], ow, oh, { sharpHook }, &pl_filter_lanczos);
+				const std::vector<float> safeBranchPx = rig.RenderFloat32(noisyFrames[2], ow, oh, {}, &pl_filter_ewa_lanczossharp);
+				double maxBranchDiff = 0.0;
+				for (int y = 10; y < oh - 10; ++y)
+					for (int x = 10; x < ow - 10; ++x)
+					{
+						const size_t idx = (static_cast<size_t>(y) * ow + x) * 4;
+						maxBranchDiff = (std::max)(maxBranchDiff, std::fabs(static_cast<double>(sharpBranchPx[idx]) - safeBranchPx[idx]));
+					}
+				Assert::IsTrue(maxBranchDiff > 0.02,
+					(L"MEDIUM-1 precondition: sharp vs alias-safe branches must diverge strongly, maxDiff=" + std::to_wstring(maxBranchDiff)).c_str());
 
-				// Same-input negative control: unguarded 3-frame temporal average on the exact same rendered grain sequence
-				// collapses uncorrelated grain RMS by 1 / sqrt(3) ~= 0.577 (<< 0.90)!
-				const std::vector<float> refNoisy0 = rig.RenderFloat32(noisyFrames[0], ow, oh, {}, &pl_filter_lanczos);
-				const std::vector<float> refNoisy1 = rig.RenderFloat32(noisyFrames[1], ow, oh, {}, &pl_filter_lanczos);
+				auto render3Frames = [&](float strength, bool stabiliseOn, bool grainGuardOn, pl_tex f0, pl_tex f1, pl_tex f2) {
+					AdaptiveDownscale::Settings st;
+					st.float32Picture = true;
+					st.faithfulOrtho = false;   // polar EWA LanczosSharp alias-safe partner (distinct from sharpened Lanczos sharp branch!)
+					st.cnnResidualStabilise = stabiliseOn;
+					st.residualGrainGuard = grainGuardOn;
+					st.grainFloor = 0.40f;
+					st.grainLo = 2.0f; st.grainHi = 8.0f;
+					st.motionFloor = 0.25f;
+					SetMotionStrength(st, strength);
 
-				AdaptiveDownscale::Settings st;
-				st.float32Picture = true;
-				st.faithfulOrtho = true;   // separable Lanczos alias-safe partner
-				st.cnnResidualStabilise = true;
-				st.residualGrainGuard = true;
-				st.grainFloor = 0.40f;
-				st.grainLo = 2.0f; st.grainHi = 8.0f;
-				st.motionFloor = 0.25f;
-				SetMotionStrength(st, 0.5f);
-
-				auto render3Frames = [&](pl_tex f0, pl_tex f1, pl_tex f2) {
 					AdaptiveDownscale::Module module;
 					const pl_tex seqTex[3] = { f0, f1, f2 };
 					std::vector<float> last;
@@ -2187,15 +2456,14 @@ namespace VideoProcessorTest
 						m.field = motionField; m.frameTrust = trust;
 						m.sourceCrop = { 0.0f, 0.0f, static_cast<float>(sw), static_cast<float>(sh) };
 						module.SetMotion(m);
-						last = rig.RenderFloat32(seqTex[i], ow, oh, { module.Measure(), module.Blend() }, &pl_filter_lanczos);
+						last = rig.RenderFloat32(seqTex[i], ow, oh, { module.Measure(), sharpHook, module.Blend() }, &pl_filter_lanczos);
 					}
 					Assert::IsTrue(module.Active() && module.Failures() == 0);
+					if (stabiliseOn)
+						Assert::IsTrue(module.StabilisedFrames() >= 2, L"residual stabilisation must actually execute on frames 2 & 3");
 					module.Release();
 					return last;
 				};
-
-				const std::vector<float> hybClean = render3Frames(cleanBaseTex, cleanBaseTex, cleanBaseTex);
-				const std::vector<float> hybNoisy = render3Frames(noisyFrames[0], noisyFrames[1], noisyFrames[2]);
 
 				struct BandSpec { const wchar_t* name; int x0; int x1; double minRetention; };
 				const BandSpec bands[3] = {
@@ -2203,27 +2471,45 @@ namespace VideoProcessorTest
 					{ L"dark-flat", ow / 3 + 10, 2 * ow / 3 - 10, 0.95 },
 					{ L"texture", 2 * ow / 3 + 10, ow - 10, 0.90 }
 				};
-				for (const BandSpec& b : bands)
+
+				for (float strength : { 0.5f, 1.0f })
 				{
-					double ssHyb = 0.0, ssRef = 0.0, ssNaiveTemporalAvg = 0.0;
-					for (int y = 10; y < oh - 10; ++y)
-						for (int x = b.x0; x < b.x1; ++x)
-						{
-							const size_t idx = (static_cast<size_t>(y) * ow + x) * 4;
-							const double gh = static_cast<double>(hybNoisy[idx]) - hybClean[idx];
-							const double gr = static_cast<double>(refNoisy[idx]) - refClean[idx];
-							const double gAvg = (static_cast<double>(refNoisy0[idx]) + refNoisy1[idx] + refNoisy[idx]) / 3.0 - refClean[idx];
-							ssHyb += gh * gh;
-							ssRef += gr * gr;
-							ssNaiveTemporalAvg += gAvg * gAvg;
-						}
-					const double retention = std::sqrt(ssHyb / ssRef);
-					const double naiveRetention = std::sqrt(ssNaiveTemporalAvg / ssRef);
-					Assert::IsTrue(naiveRetention < 0.65,
-						(std::wstring(L"negative control (temporal averaging) must lose grain in ") + b.name).c_str());
-					Assert::IsTrue(retention >= b.minRetention && retention <= 1.05,
-						(std::wstring(b.name) + L" grain retention out of two-sided bounds: " + std::to_wstring(retention)).c_str());
+					// Single-frame unstabilised hybrid output of frame 2 (exact per-frame grain reference for this blend strength).
+					const std::vector<float> refHybClean = render3Frames(strength, false, true, cleanBaseTex, cleanBaseTex, cleanBaseTex);
+					const std::vector<float> refHybNoisy = render3Frames(strength, false, true, noisyFrames[0], noisyFrames[1], noisyFrames[2]);
+					// Guarded 3-frame production path (residualGrainGuard = true).
+					const std::vector<float> guardedClean = render3Frames(strength, true, true, cleanBaseTex, cleanBaseTex, cleanBaseTex);
+					const std::vector<float> guardedNoisy = render3Frames(strength, true, true, noisyFrames[0], noisyFrames[1], noisyFrames[2]);
+					// In-module negative control on the exact same 3 frames: residualGrainGuard = false!
+					const std::vector<float> unguardedClean = render3Frames(strength, true, false, cleanBaseTex, cleanBaseTex, cleanBaseTex);
+					const std::vector<float> unguardedNoisy = render3Frames(strength, true, false, noisyFrames[0], noisyFrames[1], noisyFrames[2]);
+
+					for (const BandSpec& b : bands)
+					{
+						double ssGuard = 0.0, ssUnguard = 0.0, ssRef = 0.0;
+						for (int y = 10; y < oh - 10; ++y)
+							for (int x = b.x0; x < b.x1; ++x)
+							{
+								const size_t idx = (static_cast<size_t>(y) * ow + x) * 4;
+								const double gg = static_cast<double>(guardedNoisy[idx]) - guardedClean[idx];
+								const double gu = static_cast<double>(unguardedNoisy[idx]) - unguardedClean[idx];
+								const double gr = static_cast<double>(refHybNoisy[idx]) - refHybClean[idx];
+								ssGuard += gg * gg;
+								ssUnguard += gu * gu;
+								ssRef += gr * gr;
+							}
+						const double guardedRetention = std::sqrt(ssGuard / ssRef);
+						const double unguardedRetention = std::sqrt(ssUnguard / ssRef);
+						Assert::IsTrue(unguardedRetention < guardedRetention - 0.04,
+							(std::wstring(L"in-module negative control (residualGrainGuard=false) must lose grain vs guarded in ") +
+								b.name + L" at strength=" + std::to_wstring(strength) + L": unguarded=" +
+								std::to_wstring(unguardedRetention) + L", guarded=" + std::to_wstring(guardedRetention)).c_str());
+						Assert::IsTrue(guardedRetention >= b.minRetention && guardedRetention <= 1.05,
+							(std::wstring(b.name) + L" grain retention out of two-sided bounds at strength=" +
+								std::to_wstring(strength) + L": " + std::to_wstring(guardedRetention)).c_str());
+					}
 				}
+				pl_mpv_user_shader_destroy(&sharpHook);
 			}
 
 			// Require single motionStrength continuum contract to pass this suite end-to-end.
