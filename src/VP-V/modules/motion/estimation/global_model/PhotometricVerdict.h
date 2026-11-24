@@ -16,18 +16,22 @@ namespace CameraModel
 	//  * kPhotometricDisagreeSigmas = 3.0: matches the fitter's 3-sigma agreement contract
 	//    (Config::absThresholdSigmas = 3.0). A photometric correction exceeding 3 * precisionPx
 	//    disagrees with the vector fit beyond 3-sigma vector noise.
-	//  * kPhotometricQuantFloorCodes2 = 0.5 * (3 * minScaleCodes)^2 = 1.125 codes^2:
-	//    derived from RefineOptions::minScaleCodes (0.5 in 8-bit codes) and the 3-sigma contract —
-	//    the quadratic Huber cost (0.5 * r^2) of a 3-sigma quantization-floor residual. Prevents
-	//    an already-exact clean vector fit (sitting at ~0.1-0.3 codes^2) from false-triggering if
-	//    a Gauss-Newton step wobbles by rounding noise on FellBackNoImprovement.
-	//  * kPhotometricBrightnessFloorCodes2 = 0.5 * minGradientCodes^2 = 8.0 codes^2:
-	//    derived from RefineOptions::minGradientCodes (4.0 in 8-bit codes) — the quadratic Huber
-	//    cost (0.5 * r^2) of a pixel residual equal to the minimum accepted gradient magnitude
-	//    (failing brightness constancy by at least one minimum-gradient step).
+	//  * kPhotometricQuantFloorCodes2 = 0.5 * (kPhotometricDisagreeSigmas * RefineOptions().minScaleCodes)^2:
+	//    derived directly from RefineOptions::minScaleCodes (default 0.5 in 8-bit codes) and the
+	//    3-sigma contract — the quadratic Huber cost (0.5 * r^2) of a 3-sigma quantization-floor
+	//    residual (1.125 codes^2 at default). Prevents an already-exact clean vector fit (sitting at
+	//    ~0.1-0.3 codes^2) from false-triggering if a Gauss-Newton step wobbles by rounding noise on
+	//    FellBackNoImprovement.
+	//  * kPhotometricBrightnessFloorCodes2 = 0.5 * RefineOptions().minGradientCodes^2:
+	//    derived directly from RefineOptions::minGradientCodes (default 4.0 in 8-bit codes) — the
+	//    quadratic Huber cost (0.5 * r^2) of a pixel residual equal to the minimum accepted gradient
+	//    magnitude (8.0 codes^2 at default; failing brightness constancy by at least one minimum-gradient step).
 	constexpr double kPhotometricDisagreeSigmas = 3.0;
-	constexpr double kPhotometricQuantFloorCodes2 = 0.5 * (3.0 * 0.5) * (3.0 * 0.5);
-	constexpr double kPhotometricBrightnessFloorCodes2 = 0.5 * 4.0 * 4.0;
+	constexpr double kPhotometricQuantFloorCodes2 =
+		0.5 * (kPhotometricDisagreeSigmas * RefineOptions().minScaleCodes)
+		* (kPhotometricDisagreeSigmas * RefineOptions().minScaleCodes);
+	constexpr double kPhotometricBrightnessFloorCodes2 =
+		0.5 * RefineOptions().minGradientCodes * RefineOptions().minGradientCodes;
 
 	// Pure predicate: true when an attempted R3 refine indicates genuine pixel-domain disagreement
 	// with the vector model (brightness-constancy failure or > 3-sigma geometric disagreement).

@@ -71,6 +71,7 @@ namespace CameraModel
 			std::vector<uint8_t> excluded;   // per block: strictly bars or text guard (NEVER water)
 			const std::vector<uint8_t>* waterExcluded = nullptr;   // CE-WATER-C1: separate per-block water mask (not Overlay/Excluded)
 			double preWaterRingMass = 0;     // border-ring stratified trust mass before water exclusion (for remaining-rigid-support guard)
+			double preWaterTrustedMass = 0;  // total stratified trust mass before water exclusion (for remaining-rigid-support guard)
 			int bx0 = 0, bx1 = 0, by0 = 0, by1 = 0;   // grid rectangle whose block centres lie inside the picture
 			int cellsX = 1, cellsY = 1, cellsWithSample = 0;
 			double trustSum = 0;
@@ -265,6 +266,7 @@ namespace CameraModel
 			f.cellsWithSample = 0;
 			f.waterExcluded = nullptr;
 			f.preWaterRingMass = 0;
+			f.preWaterTrustedMass = 0;
 
 			const int nb = in.gridW * in.gridH;
 			const bool haveWaterMask = waterMask != nullptr && waterMask->size() == static_cast<size_t>(nb);
@@ -308,10 +310,12 @@ namespace CameraModel
 			std::vector<int> best(static_cast<size_t>(cells), -1);
 			std::vector<float> bestTrust(static_cast<size_t>(cells), 0.0f);
 			std::vector<float> preRingTrust;
+			std::vector<float> preTrusted;
 			int ringX = 0, ringY = 0;
 			if (haveWaterMask)
 			{
 				preRingTrust.assign(static_cast<size_t>(cells), 0.0f);
+				preTrusted.assign(static_cast<size_t>(cells), 0.0f);
 				ringX = std::max(1, static_cast<int>(std::lround(c.borderRingFraction * (bx1 - bx0))));
 				ringY = std::max(1, static_cast<int>(std::lround(c.borderRingFraction * (by1 - by0))));
 			}
@@ -335,6 +339,7 @@ namespace CameraModel
 				int* const bestP = best.data();
 				float* const bestT = bestTrust.data();
 				float* const preRingP = haveWaterMask ? preRingTrust.data() : nullptr;
+				float* const preTrustedP = haveWaterMask ? preTrusted.data() : nullptr;
 				const bool rowInRing = haveWaterMask && (by < by0 + ringY || by >= by1 - ringY);
 				for (int bx = bx0; bx < bx1; ++bx)
 				{
@@ -345,12 +350,22 @@ namespace CameraModel
 					if (!(tr > 0.0f))
 						continue;                              // also rejects NaN
 					const int ci = rowCell + cc[bx - bx0];
-					if (preRingP != nullptr && (rowInRing || bx < bx0 + ringX || bx >= bx1 - ringX)
-						&& tr > preRingP[ci] && FiniteF(tr))
+					if (preTrustedP != nullptr && FiniteF(tr))
 					{
-						const int b = rowBase + bx;
-						if (FiniteF(in.fwdX[b]) && FiniteF(in.fwdY[b]))
-							preRingP[ci] = tr;
+						const bool inRing = rowInRing || bx < bx0 + ringX || bx >= bx1 - ringX;
+						const bool needTrusted = tr > preTrustedP[ci];
+						const bool needRing = inRing && tr > preRingP[ci];
+						if (needTrusted || needRing)
+						{
+							const int b = rowBase + bx;
+							if (FiniteF(in.fwdX[b]) && FiniteF(in.fwdY[b]))
+							{
+								if (needTrusted)
+									preTrustedP[ci] = tr;
+								if (needRing)
+									preRingP[ci] = tr;
+							}
+						}
 					}
 					if (waterRow != nullptr && waterRow[bx] != 0)
 						continue;                              // CE-WATER-C1: skip incoherent water block during sampling
@@ -370,7 +385,10 @@ namespace CameraModel
 			if (haveWaterMask)
 			{
 				for (int ci = 0; ci < cells; ++ci)
+				{
 					f.preWaterRingMass += preRingTrust[static_cast<size_t>(ci)];
+					f.preWaterTrustedMass += preTrusted[static_cast<size_t>(ci)];
+				}
 			}
 			for (int ci = 0; ci < cells; ++ci)
 			{
@@ -1804,9 +1822,16 @@ namespace CameraModel
 				rec.confidence *= 0.495;   // below 0.5 for any logistic confidence <= 1
 				demoted = true;
 			}
-			// CE-WATER-C1 mandatory remaining-rigid-support guard: when > 1/4 (1 quadrant) of trusted blocks were excluded as water,
-			// verify the remaining rigid inliers still cover >= 3 quadrants (at Config::quadrantMinShare) AND retain border-ring
-			// rigid support >= Config::borderVetoRatio (prevents locking onto a moving boat hull when 70-85% water is removed).
+			// CE-WATER-C1 mandatory remaining-rigid-support guard (Rule 1 — derived strictly from existing contract constants):
+			// When > 1/4 (1 quadrant, supportGuardMinWaterShare) of trusted blocks were excluded as water, verify the remaining
+			// rigid inliers satisfy all three global-support invariants:
+			//  1. rigidQuadrants >= 2 (each >= Config::quadrantMinShare): a true shoreline/bridge spans >= 2 quadrants, while an
+			//     isolated 1-quadrant rigid patch cannot anchor a global model;
+			//  2. borderSupport >= Config::borderVetoRatio (0.35 of pre-water border-ring mass): rejects centered moving ships
+			//     surrounded by water (e.g. 70% water + 30% centered ship);
+			//  3. preWaterInlierShare >= Config::inlierShareLo (0.25 of pre-water stratified trusted picture mass): matches the
+			//     fitter's minimum trusted-share contract and rejects small moving boats even on a border (e.g. 80% water + 15%
+			//     boat -> 0.15 < 0.25 demoted; 60% water + 40% horizontal shoreline -> 2Q, border >= 0.35, 0.40 >= 0.25 recovered).
 			if (c.waterBlockExclude && waterExcludedShare > c.waterExcludeCfg.supportGuardMinWaterShare
 				&& rec.valid && (rec.reason == Reason::Ok || rec.reason == Reason::LowConfidence))
 			{
@@ -1830,7 +1855,8 @@ namespace CameraModel
 					if (inlMass > 0.0 && qMass[q] / inlMass >= c.quadrantMinShare)
 						++rigidQuadrants;
 				const double borderSupport = f.preWaterRingMass > 0.0 ? (inlRingMass / f.preWaterRingMass) : 0.0;
-				if (rigidQuadrants < 3 || borderSupport < c.borderVetoRatio)
+				const double preWaterInlierShare = f.preWaterTrustedMass > 0.0 ? (inlMass / f.preWaterTrustedMass) : 0.0;
+				if (rigidQuadrants < 2 || borderSupport < c.borderVetoRatio || preWaterInlierShare < c.inlierShareLo)
 				{
 					rec.reason = Reason::Ambiguous;
 					rec.verdictFlags |= kVerdictDynamicTexture;
