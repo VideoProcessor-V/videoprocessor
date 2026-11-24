@@ -143,6 +143,7 @@ namespace Gpu
 		bool transformIdentified8x8 = false;
 
 		bool isCutOrSpanInvalid = false;
+		double fadeKeep = 1.0;                   // U7 CutFadeJudge gradual fade keep in [0, 1] (default 1.0 = bit-identical; <=0 or NaN resets carry)
 		PsdShape psdShape;                       // Optional P10g grain PSD shape multipliers (default 1.0 white-noise identity)
 	};
 
@@ -1014,10 +1015,20 @@ namespace Gpu
 				return failVisible("TdV2GpuEngine::ProcessFrameGpu output texture dimension mismatch", StandInKind::GpuDispatchFailed);
 			}
 
+			bool fadeNonFinite = false;
+			const double effFadeKeep = ResolveFadeKeep(in.fadeKeep, fadeNonFinite);
+			if (fadeNonFinite)
+			{
+				if (standIns != nullptr)
+					standIns->Engage(StandInKind::NonFiniteClosure, "TdV2GpuEngine::ProcessFrameGpu non-finite fadeKeep; failing closed to 0.0");
+				out.nonFiniteCells = numCells;
+			}
+			const bool effectiveCut = in.isCutOrSpanInvalid || (effFadeKeep <= 0.0);
+
 			const bool seqDiscontinuous = hasCarry_ && hasLastSeq_ &&
 				!(in.seq == 0 && lastSeq_ == 0) &&
 				(in.seq != lastSeq_ + 1);
-			if (in.isCutOrSpanInvalid || seqDiscontinuous || (hasCarry_ && (carryW_ != w || carryH_ != h)))
+			if (effectiveCut || seqDiscontinuous || (hasCarry_ && (carryW_ != w || carryH_ != h)))
 			{
 				ResetCarry(gpu);
 				out.carryReset = true;
@@ -1107,7 +1118,7 @@ namespace Gpu
 				return preferred0;
 			};
 
-			if (!in.isCutOrSpanInvalid)
+			if (!effectiveCut)
 			{
 				if (in.prevPeak.cleanTex != nullptr)
 					tryAddGpuRef(in.prevPeak.cleanTex, false, 0, 0, in.prevPeak.motion, in.prevPeak.isExactCopyOfCurrent);
@@ -1314,6 +1325,7 @@ namespace Gpu
 			p.faceMask = in.faceMask;
 			p.a2 = a2;
 			p.psdShape = in.psdShape;
+			p.fadeKeep = effFadeKeep;
 			p.transformIdentified8x8 = in.transformIdentified8x8;
 			p.outYTex = out.outputYTex;
 			p.outCleanTex = out.outputCleanTex;
@@ -1427,11 +1439,21 @@ namespace Gpu
 			if (cfg_.enableLongAnchor && standIns != nullptr)
 				standIns->Engage(StandInKind::LongPairDrift, "enableLongAnchor requested; 1-session long pair pending");
 
-			// Cut / invalid span, resolution change, seek, or non-consecutive frame sequence resets recurrent carry cleanly.
+			bool fadeNonFinite = false;
+			const double effFadeKeep = ResolveFadeKeep(in.fadeKeep, fadeNonFinite);
+			if (fadeNonFinite)
+			{
+				if (standIns != nullptr)
+					standIns->Engage(StandInKind::NonFiniteClosure, "TdV2GpuEngine non-finite fadeKeep; failing closed to 0.0");
+				res.nonFiniteCells = numCells;
+			}
+			const bool effectiveCut = in.isCutOrSpanInvalid || (effFadeKeep <= 0.0);
+
+			// Cut / invalid span, fadeKeep <= 0, resolution change, seek, or non-consecutive frame sequence resets recurrent carry cleanly.
 			const bool seqDiscontinuous = hasCarry_ && hasLastSeq_ &&
 				!(in.seq == 0 && lastSeq_ == 0) &&
 				(in.seq != lastSeq_ + 1);
-			if (in.isCutOrSpanInvalid || seqDiscontinuous || (hasCarry_ && (carryW_ != w || carryH_ != h)))
+			if (effectiveCut || seqDiscontinuous || (hasCarry_ && (carryW_ != w || carryH_ != h)))
 			{
 				ResetCarry(gpu);
 				res.carryReset = true;
@@ -1565,7 +1587,7 @@ namespace Gpu
 				return preferred0;
 			};
 
-			if (!in.isCutOrSpanInvalid)
+			if (!effectiveCut)
 			{
 				if (in.prevPeak.cleanPlane != nullptr)
 					tryAddRefSpec(in.prevPeak.cleanPlane, false, 0, 0, in.prevPeak.motion, in.prevPeak.isExactCopyOfCurrent);
@@ -1739,6 +1761,7 @@ namespace Gpu
 			p.codecModelPbTex = codecModelPbTex;
 			p.a2 = a2;
 			p.psdShape = in.psdShape;
+			p.fadeKeep = effFadeKeep;
 			p.transformIdentified8x8 = in.transformIdentified8x8;
 			p.outYTex = outYTex_;
 			p.outCleanTex = outCleanTex_;
@@ -2192,6 +2215,7 @@ namespace Gpu
 			const std::vector<uint8_t>* faceMask = nullptr;
 			Detail::ResolvedA2StepPrior a2{};
 			PsdShape psdShape{};
+			double fadeKeep = 1.0;
 			bool transformIdentified8x8 = false;
 			pl_tex outYTex = nullptr;
 			pl_tex outCleanTex = nullptr;
@@ -2687,6 +2711,7 @@ namespace Gpu
 			const float uPsdLow = static_cast<float>(p.psdShape.bandShareLow);
 			const float uPsdMid = static_cast<float>(p.psdShape.bandShareMid);
 			const float uPsdFine = static_cast<float>(p.psdShape.bandShareFine);
+			const float uFadeKeep = static_cast<float>(p.fadeKeep);
 			const float uStepNoiseVar = static_cast<float>(stepNoiseVar);
 			const float uStructureFloor = static_cast<float>(structureFloor);
 			const float uA2Valid = a2Stats.valid ? 1.0f : 0.0f;
@@ -3030,7 +3055,7 @@ namespace Gpu
 					VpvGpu::Storage("td_maps", dstTdMaps),
 					VpvGpu::Storage("cell_diag_flags", dstDiagFlags)
 				};
-				pl_shader_var v2b[23] = {
+				pl_shader_var v2b[24] = {
 					VpvGpu::Var("u_k", &uK),
 					VpvGpu::Var("u_pool_r", &uPoolR),
 					VpvGpu::Var("u_estimator", &uEstimator),
@@ -3053,9 +3078,10 @@ namespace Gpu
 					VpvGpu::Var("u_enable_subpixel_h_debias", &uEnableSubpixelHDebias),
 					VpvGpu::Var("u_psd_low", &uPsdLow),
 					VpvGpu::Var("u_psd_mid", &uPsdMid),
-					VpvGpu::Var("u_psd_fine", &uPsdFine)
+					VpvGpu::Var("u_psd_fine", &uPsdFine),
+					VpvGpu::Var("u_fade_keep", &uFadeKeep)
 				};
-				if (!runPass("td_v2_p2b_merge_solve", p2bHdr, Shaders::kPass2MergeAndSolve, d2b, 9, v2b, 23, cellGx8, cellGy8, 8, 8))
+				if (!runPass("td_v2_p2b_merge_solve", p2bHdr, Shaders::kPass2MergeAndSolve, d2b, 9, v2b, 24, cellGx8, cellGy8, 8, 8))
 				{
 					resetCarryIfActive();
 					return failCore("td_v2_p2b_merge_solve dispatch failed", StandInKind::GpuDispatchFailed);
@@ -3213,19 +3239,20 @@ namespace Gpu
 					VpvGpu::Storage("guard_cell", dstGuardCell),
 					VpvGpu::Storage("out_y", dstOutY)
 				};
-				pl_shader_var v4[7] = {
+				pl_shader_var v4[8] = {
 					VpvGpu::Var("u_ax0", &uAx0),
 					VpvGpu::Var("u_ay0", &uAy0),
 					VpvGpu::Var("u_ax1", &uAx1),
 					VpvGpu::Var("u_ay1", &uAy1),
 					VpvGpu::Var("u_has_clean_split", &uHasCleanSplit),
 					VpvGpu::Var("u_same_clean_rec", &uSameCleanRec),
-					VpvGpu::Var("u_shadow_mode", &uShadowMode)
+					VpvGpu::Var("u_shadow_mode", &uShadowMode),
+					VpvGpu::Var("u_fade_keep", &uFadeKeep)
 				};
 				const size_t shmemP4 = (3u * fineTileDim * fineTileDim + 3u * fineTileDim * 16u + 512u + 2u) * sizeof(float);
 				const std::string p4Body = Shaders::BuildPass4FusedApplyGuardBody();
 				if (!runPass("td_v2_p4_fused_apply_guard", p4Hdr, p4Body.c_str(),
-				             d4, 9, v4, 7, cw, ch, 16, 16, shmemP4))
+				             d4, 9, v4, 8, cw, ch, 16, 16, shmemP4))
 				{
 					resetCarryIfActive();
 					return failCore("td_v2_p4_fused_apply_guard dispatch failed", StandInKind::GpuDispatchFailed);

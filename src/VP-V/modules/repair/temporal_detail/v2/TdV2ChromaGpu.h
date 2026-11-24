@@ -1532,6 +1532,7 @@ if (canCacheSingle)
         {
             if ((cellGFlags.x & 1) != 0 && cellAddBack.x > 0.0) outD.x += cellAddBack.x * regFineDiff.x;
             if ((cellGFlags.y & 1) != 0 && cellAddBack.y > 0.0) outD.y += cellAddBack.y * regFineDiff.y;
+            if (u_fade_keep < 1.0) outD *= u_fade_keep;
         }
         else
         {
@@ -1630,6 +1631,7 @@ else
                     if ((cellGFlags.x & 1) != 0 && cellAddBack.x > 0.0) outD.x += cellAddBack.x * fineDiff.x;
                     if ((cellGFlags.y & 1) != 0 && cellAddBack.y > 0.0) outD.y += cellAddBack.y * fineDiff.y;
                 }
+                if (u_fade_keep < 1.0) outD *= u_fade_keep;
                 imageStore(out_coded_delta, p, vec4(outD, 0.0, 0.0));
             }
             memoryBarrierShared();
@@ -1695,6 +1697,7 @@ else
 		double deadZonePhi = kDeadZonePhiInter;
 		double zeroCoeffFraction = 0.0;
 		bool isCutOrSpanInvalid = false;
+		double fadeKeep = 1.0;                   // U7 CutFadeJudge gradual fade keep in [0, 1] (default 1.0 = bit-identical; <=0 or NaN closes delta to 0)
 		PsdShape psdShape;                       // Optional P10g grain PSD shape multipliers (default 1.0 white-noise identity)
 	};
 
@@ -2102,7 +2105,17 @@ else
 				refSpecs.push_back(std::move(sp));
 			};
 
-			if (!in.isCutOrSpanInvalid)
+			bool fadeNonFinite = false;
+			const double effFadeKeep = ResolveFadeKeep(in.fadeKeep, fadeNonFinite);
+			if (fadeNonFinite)
+			{
+				if (standIns != nullptr)
+					standIns->Engage(StandInKind::NonFiniteClosure, "TdV2ChromaGpuEngine non-finite fadeKeep; failing closed to 0.0");
+				out.nonFiniteCells = numCells;
+			}
+			const bool effectiveCut = in.isCutOrSpanInvalid || (effFadeKeep <= 0.0);
+
+			if (!effectiveCut)
 			{
 				tryAddRef(in.prevPeak, 0, 0);
 				tryAddRef(in.nextPeak, 1, 1);
@@ -2518,6 +2531,7 @@ imageStore(out_coded_delta, p, vec4(0.0));
 			const float uPsdLow = static_cast<float>(in.psdShape.bandShareLow);
 			const float uPsdMid = static_cast<float>(in.psdShape.bandShareMid);
 			const float uPsdFine = static_cast<float>(in.psdShape.bandShareFine);
+			const float uFadeKeep = static_cast<float>(effFadeKeep);
 
 			std::string chromaGeom = Detail::StaticGeomDefines(in.lumaW, in.lumaH, cw, ch, cellPx);
 			chromaGeom += VpvGpu::DefineInt("TD_CH_W", cW);
@@ -2859,16 +2873,17 @@ float td_huber_taper(float diffSq, float diagC)
 					VpvGpu::Storage("out_coded_delta", out.outCodedDeltaTex),
 					VpvGpu::Storage("guard_cell", dstGuardCell)
 				};
-				pl_shader_var v4[11] = {
+				pl_shader_var v4[12] = {
 					VpvGpu::Var("u_cax0", &uCAx0), VpvGpu::Var("u_cay0", &uCAy0),
 					VpvGpu::Var("u_cax1", &uCAx1), VpvGpu::Var("u_cay1", &uCAy1),
 					VpvGpu::Var("u_cshift_x", &uCShiftX), VpvGpu::Var("u_cshift_y", &uCShiftY),
 					VpvGpu::Var("u_has_clean_split", &uHasSplit), VpvGpu::Var("u_same_clean_rec", &uSameCleanRec),
 					VpvGpu::Var("u_bokeh_mode", &uBokehMode), VpvGpu::Var("u_has_face_mask", &uHasFaceMask),
-					VpvGpu::Var("u_cell_prior_has_cr_grain", &uPriorHasCrGrain)
+					VpvGpu::Var("u_cell_prior_has_cr_grain", &uPriorHasCrGrain),
+					VpvGpu::Var("u_fade_keep", &uFadeKeep)
 				};
 				const std::string c4Body = ChromaShaders::BuildPassChromaGuardBody();
-				if (!runPass("td_v2_c4_guard_delta", c4Hdr, c4Body.c_str(), d4, 7, v4, 11, cw, ch, 16, 16, shC4))
+				if (!runPass("td_v2_c4_guard_delta", c4Hdr, c4Body.c_str(), d4, 7, v4, 12, cw, ch, 16, 16, shC4))
 					return failVisible("td_v2_c4_guard_delta dispatch failed", StandInKind::GpuDispatchFailed);
 				if (standIns != nullptr)
 					standIns->Engage(StandInKind::GrainGuardW4c);
@@ -3016,6 +3031,7 @@ float td_huber_taper(float diffSq, float diagC)
 			gIn.deadZonePhi = in.deadZonePhi;
 			gIn.zeroCoeffFraction = in.zeroCoeffFraction;
 			gIn.isCutOrSpanInvalid = in.isCutOrSpanInvalid;
+			gIn.fadeKeep = in.fadeKeep;
 			gIn.psdShape = in.psdShape;
 
 			if (isRgb)

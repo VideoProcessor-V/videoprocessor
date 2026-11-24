@@ -2013,6 +2013,24 @@ if (!isFace && estMode != 1 && cellRetGVar > TD_NUM_FLOOR)
     }
 }
 
+// SOTA-7 (U7 gradual fadeKeep): taper recurrent Carry (role == 2) weight strictly AFTER grain-budget scaling
+// so grain-budget normalization never cancels fadeKeep (u_fade_keep == 1.0 -> bit-identical).
+if (u_fade_keep < 1.0)
+{
+    activeBandBits = 0;
+    cellWeightSumAll = 0.0;
+    for (int b = 0; b < 3; ++b)
+    {
+        if (K > 0 && td_ref_role(0) == 2) bandW[b].x *= u_fade_keep;
+        if (K > 1 && td_ref_role(1) == 2) bandW[b].y *= u_fade_keep;
+        if (K > 2 && td_ref_role(2) == 2) bandW[b].z *= u_fade_keep;
+        float bandWSum = bandW[b].x + bandW[b].y + bandW[b].z;
+        if (bandWSum > TD_NUM_FLOOR)
+            activeBandBits |= (1 << b);
+        cellWeightSumAll += bandWSum;
+    }
+}
+
 midWeightSum = bandW[1].x + bandW[1].y + bandW[1].z;
 bandW[0].w = cellMeanCleanY;
 for (int b = 0; b < 3; ++b)
@@ -2780,10 +2798,13 @@ for (int subY = 0; subY < subTiles; ++subY)
                     pxBits |= 8u;
                 float dRaw = (badRecOrClean || badD) ? 0.0 : dTex.x;
                 float newClean = cleanV + dRaw;
+                float carryCleanVal = (u_fade_keep < 1.0)
+                    ? (u_fade_keep * newClean + (1.0 - u_fade_keep) * cleanV)
+                    : newClean;
 
                 // Write strictly grain-free out_clean & carry_clean NOW (BLOCKER-2: NEVER receives Layer-4 add-back!).
                 imageStore(out_clean, p, vec4(newClean, 0.0, 0.0, 0.0));
-                imageStore(carry_clean, p, vec4(newClean, 0.0, 0.0, 0.0));
+                imageStore(carry_clean, p, vec4(carryCleanVal, 0.0, 0.0, 0.0));
 
                 float gr = 0.0;
                 float gd = 0.0;

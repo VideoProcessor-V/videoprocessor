@@ -967,4 +967,17 @@ namespace TdV2
 		const double bound = kappaC * std::sqrt(totalStepVar);
 		return (std::max)(-bound, (std::min)(bound, rawDelta));
 	}
+
+	// Resolve U7 CutFadeJudge gradual fadeKeep in [0, 1] (Rule 1 + Rule 4):
+	// Non-finite fails closed to 0.0 (sets outNonFinite = true); finite values clamp to [0.0, 1.0].
+	inline double ResolveFadeKeep(double rawFadeKeep, bool& outNonFinite)
+	{
+		outNonFinite = false;
+		if (!std::isfinite(rawFadeKeep))
+		{
+			outNonFinite = true;
+			return 0.0;
+		}
+		return RampMath::Clamp01(rawFadeKeep);
+	}
 }

@@ -661,6 +661,7 @@ namespace TdV2
 		const TdV2Plane* codecModelPb = nullptr; // Field B CodecModel prediction P_B (null when transformIdentified8x8 engages CodecModelPbStandIn)
 
 		bool isCutOrSpanInvalid = false;      // Resets recurrent carry state immediately
+		double fadeKeep = 1.0;                // U7 CutFadeJudge gradual fade keep in [0, 1] (default 1.0 = bit-identical; <=0 or NaN resets carry)
 		const std::vector<uint8_t>* explicitFocusChangeCells = nullptr;
 		const std::vector<uint8_t>* explicitDefocusedCells = nullptr; // Upstream kFocusMap (id 32) matched-focus optical bokeh mask (Plan s1.4 L140)
 		const std::vector<uint8_t>* faceMask = nullptr; // Pass-1 per-cell (cellsW * cellsH) face/non-rigid mask (non-zero => delta == 0)
@@ -916,11 +917,22 @@ namespace TdV2
 			if (cfg_.enableLongAnchor && standIns != nullptr)
 				standIns->Engage(StandInKind::LongPairDrift, "enableLongAnchor requested; 1-session long pair pending");
 
-			// Cut / invalid span, resolution change, seek, or non-consecutive frame sequence resets recurrent carry cleanly.
+			// Resolve U7 gradual fadeKeep in [0, 1] (non-finite fails closed to 0.0 + NonFiniteClosure).
+			bool fadeNonFinite = false;
+			const double effFadeKeep = ResolveFadeKeep(in.fadeKeep, fadeNonFinite);
+			if (fadeNonFinite)
+			{
+				if (standIns != nullptr)
+					standIns->Engage(StandInKind::NonFiniteClosure, "TdV2ReferenceEngine non-finite fadeKeep; failing closed to 0.0");
+				res.nonFiniteCells = numCells;
+			}
+			const bool effectiveCut = in.isCutOrSpanInvalid || (effFadeKeep <= 0.0);
+
+			// Cut / invalid span, fadeKeep <= 0, resolution change, seek, or non-consecutive frame sequence resets recurrent carry cleanly.
 			const bool seqDiscontinuous = hasCarry_ && hasLastSeq_ &&
 				!(in.seq == 0 && lastSeq_ == 0) &&
 				(in.seq != lastSeq_ + 1);
-			if (in.isCutOrSpanInvalid || seqDiscontinuous || (hasCarry_ && (carryClean_.w != w || carryClean_.h != h)))
+			if (effectiveCut || seqDiscontinuous || (hasCarry_ && (carryClean_.w != w || carryClean_.h != h)))
 			{
 				ResetCarry();
 				res.carryReset = true;
@@ -1027,7 +1039,7 @@ namespace TdV2
 				return true;
 			};
 
-			if (!in.isCutOrSpanInvalid)
+			if (!effectiveCut)
 			{
 				if (in.prevPeak.cleanPlane != nullptr)
 					tryAddRefSpec(in.prevPeak.cleanPlane, in.prevPeak.motion, in.prevPeak.isExactCopyOfCurrent, RefRole::PrevPeak);
@@ -1675,6 +1687,27 @@ namespace TdV2
 						}
 					}
 
+					// SOTA-7 (U7 gradual fadeKeep): taper recurrent Carry weight strictly AFTER grain-budget scaling
+					// so grain-budget normalization never cancels fadeKeep (fadeKeep == 1.0 -> bit-identical).
+					if (effFadeKeep < 1.0)
+					{
+						activeBandBits = 0u;
+						cellWeightSumAll = 0.0;
+						for (int b = 0; b < 3; ++b)
+						{
+							double bandWSum = 0.0;
+							for (int k = 0; k < K; ++k)
+							{
+								if (refs[k].role == RefRole::Carry)
+									cellW[b][k][cIdx] *= effFadeKeep;
+								bandWSum += cellW[b][k][cIdx];
+							}
+							if (bandWSum > kEngineNumFloor)
+								activeBandBits |= (1u << static_cast<unsigned>(b));
+							cellWeightSumAll += bandWSum;
+						}
+					}
+
 					// Sum ALL active references (including k=2 carry) for mid-band trail confidence (MEDIUM-3).
 					double midWeightSum = 0.0;
 					for (int k = 0; k < K; ++k)
@@ -2100,8 +2133,19 @@ namespace TdV2
 			for (uint8_t nf : nonFiniteCellFlag)
 				if (nf != 0u) ++res.nonFiniteCells;
 
-			// Update recurrent carry-forward buffer strictly with the grain-free estimate `candClean`.
-			carryClean_ = candClean;
+			// Update recurrent carry-forward buffer strictly with the grain-free estimate `candClean`
+			// (under gradual U7 fadeKeep in (0, 1): fadeKeep * fusedClean + (1 - fadeKeep) * curClean).
+			if (effFadeKeep < 1.0)
+			{
+				carryClean_ = TdV2Plane(w, h, 0.0);
+				const double invKeep = 1.0 - effFadeKeep;
+				for (size_t i = 0; i < candClean.v.size(); ++i)
+					carryClean_.v[i] = effFadeKeep * candClean.v[i] + invKeep * curClean.v[i];
+			}
+			else
+			{
+				carryClean_ = candClean;
+			}
 			hasCarry_ = true;
 			hasLastSeq_ = true;
 			lastSeq_ = in.seq;

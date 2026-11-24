@@ -731,6 +731,34 @@ namespace TdV2
 			hasCfl_ = false;
 		}
 
+		// Smoothly taper existing accumulated 4:4:4 anchor weights by U7 fadeKeep in [0, 1].
+		// Non-finite or <= 0.0 resets completely; >= 1.0 is an exact no-op.
+		void ApplyFadeKeep(double fadeKeep)
+		{
+			if (!std::isfinite(fadeKeep) || fadeKeep <= 0.0)
+			{
+				Reset();
+				return;
+			}
+			if (fadeKeep >= 1.0 || !hasData_)
+				return;
+			for (size_t i = 0; i < weight_.v.size(); ++i)
+			{
+				sumCb_.v[i] *= fadeKeep;
+				sumCr_.v[i] *= fadeKeep;
+				weight_.v[i] *= fadeKeep;
+			}
+			for (CflAccum& st : cflStats_)
+			{
+				st.sumY *= fadeKeep;
+				st.sumYY *= fadeKeep;
+				st.sumCb *= fadeKeep;
+				st.sumYCb *= fadeKeep;
+				st.sumCr *= fadeKeep;
+				st.sumYCr *= fadeKeep;
+			}
+		}
+
 		bool HasData() const { return hasData_; }
 		bool HasCfl() const { return hasCfl_; }
 		int Width() const { return w_; }
@@ -1768,6 +1796,7 @@ namespace TdV2
 		bool transformIdentified8x8 = false;
 
 		bool isCutOrSpanInvalid = false;              // Resets 4:4:4 anchor canvas cleanly
+		double fadeKeep = 1.0;                        // U7 CutFadeJudge gradual fade keep in [0, 1] (default 1.0 = bit-identical; <=0 or NaN resets anchor)
 
 		// Optional Pass-1 face / non-rigid cell mask (cellsW * cellsH luma-cell layout matching FrameProcessInput::faceMask;
 		// non-zero forces delta == 0 on all masked pixels and excludes masked cells from 3x3 covariance pooling; H13).
@@ -1949,15 +1978,31 @@ namespace TdV2
 				? ActiveRect::Full(lumaW, lumaH)
 				: in.activeRect.ClampedTo(lumaW, lumaH);
 
-			// Cut / invalid span, resolution change, or ActiveRect change (e.g., aspect-ratio switch) resets 4:4:4 anchor canvas cleanly.
+			// Resolve U7 gradual fadeKeep in [0, 1] (non-finite fails closed to 0.0 + NonFiniteClosure).
+			bool fadeNonFinite = false;
+			const double effFadeKeep = ResolveFadeKeep(in.fadeKeep, fadeNonFinite);
+			if (fadeNonFinite)
+			{
+				if (standIns != nullptr)
+					standIns->Engage(StandInKind::NonFiniteClosure, "TdV2ChromaEngine non-finite fadeKeep; failing closed to 0.0");
+				res.nonFiniteCells = numCells;
+			}
+			const bool effectiveCut = in.isCutOrSpanInvalid || (effFadeKeep <= 0.0);
+
+			// Cut / invalid span, fadeKeep <= 0, resolution change, or ActiveRect change resets 4:4:4 anchor canvas cleanly;
+			// gradual fade (0 < fadeKeep < 1) smoothly decays existing accumulated anchor weights.
 			const ActiveRect& prevActive = anchorCanvas_.Active();
 			const bool activeChanged = (prevActive.x0 != lumaActive.x0 || prevActive.y0 != lumaActive.y0 ||
 			                            prevActive.x1 != lumaActive.x1 || prevActive.y1 != lumaActive.y1);
-			if (in.isCutOrSpanInvalid ||
+			if (effectiveCut ||
 			    (anchorCanvas_.HasData() && (anchorCanvas_.Width() != lumaW || anchorCanvas_.Height() != lumaH || activeChanged)))
 			{
 				ResetAnchor();
 				res.anchorReset = true;
+			}
+			else if (effFadeKeep < 1.0 && anchorCanvas_.HasData())
+			{
+				anchorCanvas_.ApplyFadeKeep(effFadeKeep);
 			}
 
 			// Validate all delivered pixels are finite (Rule 4).
@@ -2148,7 +2193,7 @@ namespace TdV2
 				res.codedDeltaCb = res.deliveredDeltaCb;
 				res.codedDeltaCr = res.deliveredDeltaCr;
 
-				if (in.isCutOrSpanInvalid)
+				if (effectiveCut)
 					return res;
 
 				// Separate delivered clean vs own grain if supplied (own grain NEVER enters coarse blend).
@@ -2641,6 +2686,11 @@ namespace TdV2
 
 				fuseCoarseSinglePlane(delivCb, curCleanCb, curCoarseCb, true, in.retainedGrainVarCb, res.deliveredDeltaCb);
 				fuseCoarseSinglePlane(delivCr, curCleanCr, curCoarseCr, false, in.retainedGrainVarCr, res.deliveredDeltaCr);
+				if (effFadeKeep < 1.0)
+				{
+					for (double& v : res.deliveredDeltaCb.v) v *= effFadeKeep;
+					for (double& v : res.deliveredDeltaCr.v) v *= effFadeKeep;
+				}
 				res.codedDeltaCb = res.deliveredDeltaCb;
 				res.codedDeltaCr = res.deliveredDeltaCr;
 
@@ -2761,8 +2811,8 @@ namespace TdV2
 					cfg_.sourceHz, in.seq, in.resetAnchorCfl);
 			};
 
-			// On cut / span-invalid frames, never blend across the cut; seed new shot's anchor canvas if isAnchorFrame && splitActive.
-			if (in.isCutOrSpanInvalid)
+			// On cut / span-invalid / fadeKeep <= 0 frames, never blend across the cut; seed new shot's anchor canvas if isAnchorFrame && splitActive.
+			if (effectiveCut)
 			{
 				ingestAnchorIfSplit();
 				return res;
@@ -3884,6 +3934,11 @@ namespace TdV2
 			               in.retainedGrainVarCb, cflRejectCb, res.codedDeltaCb);
 			fuseCodedPlane(false, codedRecCr, codedCleanCr, ownGrainCr, curBandsCr,
 			               in.retainedGrainVarCr, cflRejectCr, res.codedDeltaCr);
+			if (effFadeKeep < 1.0)
+			{
+				for (double& v : res.codedDeltaCb.v) v *= effFadeKeep;
+				for (double& v : res.codedDeltaCr.v) v *= effFadeKeep;
+			}
 
 			// B7: Upsample ONLY the signed coded delta back to the delivered chroma grid.
 			res.deliveredDeltaCb = UpsampleDeltaToDelivered(
