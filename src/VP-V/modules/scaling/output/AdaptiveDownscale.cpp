@@ -105,6 +105,11 @@ if (q.x < size.x && q.y < size.y)
     imageStore(dst, q, vpu_half_luma_rgba_at(src, ivec2(origin), q));
 )GLSL";
 
+		// Non-finite by the IEEE bit pattern (exponent all ones), not isnan / isinf, which a non-strict compile may fold.
+		// Shared by the P10 grain reduction shader (FinalHeader) and the motion-map shader (MotionHeader); separate passes.
+		const char* const NONFINITE_GLSL =
+			"bool ad_nonfinite(float x) { return (floatBitsToUint(x) & 0x7fffffffu) >= 0x7f800000u; }\n";
+
 		// One workgroup: the frame's totals, the ramp, the smoothing and the
 		// cut snap, into the persistent state (r grain_scale, g mean(1 - edge),
 		// b unused (0; the frame's mean luma is the P4 APL, read on the CPU), a initialised).
@@ -113,10 +118,14 @@ if (q.x < size.x && q.y < size.y)
 shared vec4 ad_total[256];
 #ifdef AD_P10
 shared vec2 ad_p10[256];
-// Non-finite by the IEEE bit pattern (exponent all ones), not isnan / isinf, which a non-strict compile may fold.
-bool ad_nonfinite(float x) { return (floatBitsToUint(x) & 0x7fffffffu) >= 0x7f800000u; }
 #endif
 )GLSL";
+
+		const std::string& FinalHeader()
+		{
+			static const std::string header = std::string(NONFINITE_GLSL) + FINAL_HEADER;
+			return header;
+		}
 
 		// X5-GRAIN-P10 (AD_P10: the shared products are bound): the grain energy is derived from P10's per-block grain
 		// level N (a variance, codes^2) as the mean sigma weighted by the shadow law of P11's block mean luma over P11's
@@ -229,30 +238,102 @@ if (b.x < blocks.x && b.y < blocks.y) {
 }
 )GLSL";
 
-		// Motion-adapted blend (owner 2026-10-31): the factor per block, once per source frame.
-		// A trusted block of a trusted frame ramps from 1 (steady) to the floor (fast) by its
-		// speed in picture heights per second; an untrusted one targets the floor; the one-pole
-		// follows the block's vector like the grain map; a cut (the scalar's flag) or the first
-		// map takes the target. CPU mirror: MotionTarget / MotionStep (AdaptiveDownscale.h).
+		// Motion-adapted blend: fail-safe unit clamp, smoothstep, and neighbor shear helpers matching
+		// CPU MotionSanitizeUnit / MotionSmoothstep / MotionShearSpeed (AdaptiveDownscale.h).
+		const char* const MOTION_HEADER_BODY = R"GLSL(
+float ad_unit_safe(float x)
+{
+    return ad_nonfinite(x) ? 0.0 : clamp(x, 0.0, 1.0);
+}
+float ad_smoothstep_safe(float lo, float hi, float x)
+{
+    if (ad_nonfinite(x) || ad_nonfinite(lo) || ad_nonfinite(hi))
+        return 1.0;
+    if (!(hi > lo))
+        return x < lo ? 0.0 : 1.0;
+    float span = hi - lo;
+    if (ad_nonfinite(span) || !(span > 0.0))
+        return x < lo ? 0.0 : 1.0;
+    float ratio = (x - lo) / span;
+    if (ad_nonfinite(ratio))
+        return x < lo ? 0.0 : 1.0;
+    float t = clamp(ratio, 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+float ad_neighbor_dv(vec4 fn, vec2 fxy, bool f_xy_ok)
+{
+    if (!f_xy_ok || ad_nonfinite(fn.z) || ad_nonfinite(fn.x) || ad_nonfinite(fn.y))
+        return 0.0;
+    float nc = clamp(fn.z, 0.0, 1.0);
+    if (!(nc > 0.0))
+        return 0.0;
+    float dv = length(fn.xy - fxy);
+    return ad_nonfinite(dv) ? 0.0 : nc * dv;
+}
+)GLSL";
+
+		const std::string& MotionHeader()
+		{
+			static const std::string header = std::string(NONFINITE_GLSL) + MOTION_HEADER_BODY;
+			return header;
+		}
+
+		// Motion-adapted blend (owner 2026-10-31; upgraded with continuous confidence, 4-neighbor
+		// motion-boundary shear + Option 4B rigid-pan protection, bilinear temporal advection, and
+		// asymmetric fast-attack / smooth-release one-pole). CPU mirrors: MotionTarget /
+		// MotionShearSpeed / MotionAdvectBilinear / MotionAttackReleaseAlphas / MotionStepAsymmetric.
 		const char* const MOTION_BODY = R"GLSL(
 ivec2 b = ivec2(gl_GlobalInvocationID.xy);
 ivec2 blocks = imageSize(map_out);
 if (b.x < blocks.x && b.y < blocks.y) {
+    ivec2 lim = blocks - ivec2(1);
     vec4 f = texelFetch(field, b, 0);
-    bool frame_ok = texelFetch(frame_trust, ivec2(0), 0).r >= min_trusted_share;
-    bool trusted = frame_ok && f.z > 0.5;
-    float fl = clamp(motion_floor, 0.0, 1.0);
-    float speed = length(f.xy) / max(crop_h, 1e-3) / max(frame_seconds, 1e-6);
-    float t = speed_hi > speed_lo ? clamp((speed - speed_lo) / (speed_hi - speed_lo), 0.0, 1.0) : (speed < speed_lo ? 0.0 : 1.0);
-    float ramp = t * t * (3.0 - 2.0 * t);
-    float target = trusted ? fl + (1.0 - fl) * (1.0 - ramp) : fl;
+    float trust_val = texelFetch(frame_trust, ivec2(0), 0).r;
+    bool frame_ok = !ad_nonfinite(trust_val) && !ad_nonfinite(min_trusted_share) && trust_val >= min_trusted_share;
+    bool f_xy_ok = !ad_nonfinite(f.x) && !ad_nonfinite(f.y);
+    float conf = (frame_ok && f_xy_ok) ? ad_unit_safe(f.z) : 0.0;
+    float fl = ad_unit_safe(motion_floor);
+    // 4-neighbor cardinal motion-boundary shear weighted by each neighbor's continuous confidence.
+    vec4 fn0 = texelFetch(field, clamp(b + ivec2(-1, 0), ivec2(0), lim), 0);
+    vec4 fn1 = texelFetch(field, clamp(b + ivec2( 1, 0), ivec2(0), lim), 0);
+    vec4 fn2 = texelFetch(field, clamp(b + ivec2( 0,-1), ivec2(0), lim), 0);
+    vec4 fn3 = texelFetch(field, clamp(b + ivec2( 0, 1), ivec2(0), lim), 0);
+    float max_dv = 0.0;
+    max_dv = max(max_dv, ad_neighbor_dv(fn0, f.xy, f_xy_ok));
+    max_dv = max(max_dv, ad_neighbor_dv(fn1, f.xy, f_xy_ok));
+    max_dv = max(max_dv, ad_neighbor_dv(fn2, f.xy, f_xy_ok));
+    max_dv = max(max_dv, ad_neighbor_dv(fn3, f.xy, f_xy_ok));
+    float denom = max(crop_h, 1e-3) * max(frame_seconds, 1e-6);
+    float speed = f_xy_ok ? length(f.xy) / denom : 0.0;
+    float shear_speed = max_dv / denom;
+    // Option 4B: shear ramp across speed_lo..speed_hi; rigid cinema pans stay crisp up to 2*speed_hi..4*speed_hi.
+    float ramp_shear = ad_smoothstep_safe(speed_lo, speed_hi, shear_speed);
+    float ramp_pan = ad_smoothstep_safe(2.0 * speed_hi, 4.0 * speed_hi, speed);
+    float ramp = max(ramp_shear, ramp_pan);
+    float target = fl + (1.0 - fl) * conf * (1.0 - ramp);
     vec2 c = (vec2(b) + vec2(0.5)) * 16.0;
-    vec2 pc = trusted ? c - f.xy : c;
-    ivec2 pb = clamp(ivec2(floor(pc / 16.0)), ivec2(0), blocks - ivec2(1));
-    float prev = texelFetch(map_in, pb, 0).r;
+    vec2 pc = (conf > 0.0 && f_xy_ok) ? c - f.xy : c;
+    if (ad_nonfinite(pc.x) || ad_nonfinite(pc.y))
+        pc = c;
+    // Bilinear temporal advection across block centres in map_in.
+    vec2 ppos = clamp(pc / 16.0 - vec2(0.5), vec2(0.0), vec2(lim));
+    ivec2 p0 = ivec2(floor(ppos));
+    ivec2 p1 = min(p0 + ivec2(1), lim);
+    vec2 pt = ppos - vec2(p0);
+    float m00 = texelFetch(map_in, p0, 0).r;
+    float m10 = texelFetch(map_in, ivec2(p1.x, p0.y), 0).r;
+    float m01 = texelFetch(map_in, ivec2(p0.x, p1.y), 0).r;
+    float m11 = texelFetch(map_in, p1, 0).r;
+    m00 = ad_nonfinite(m00) ? target : clamp(m00, 0.0, 1.0);
+    m10 = ad_nonfinite(m10) ? target : clamp(m10, 0.0, 1.0);
+    m01 = ad_nonfinite(m01) ? target : clamp(m01, 0.0, 1.0);
+    m11 = ad_nonfinite(m11) ? target : clamp(m11, 0.0, 1.0);
+    float prev = mix(mix(m00, m10, pt.x), mix(m01, m11, pt.x), pt.y);
     bool reset = first_map > 0.5 || texelFetch(state, ivec2(0), 0).a > 1.5;
-    float o = reset ? target : mix(prev, target, smooth_alpha);
-    imageStore(map_out, b, vec4(o, trusted ? 1.0 : 0.0, 0.0, 1.0));
+    float alpha = ad_unit_safe(target < prev ? smooth_alpha_attack : smooth_alpha_release);
+    float o = reset ? target : mix(prev, target, alpha);
+    o = ad_nonfinite(o) ? fl : clamp(o, 0.0, 1.0);
+    imageStore(map_out, b, vec4(o, conf, 0.0, 1.0));
 }
 )GLSL";
 
@@ -271,9 +352,11 @@ if (q.x < size.x && q.y < size.y) {
 #ifdef AD_USE_MAP
     {
         vec2 u = (s - src_origin) / src_size;   // 0..1 over the source crop
+#ifdef AD_HAS_NLS
         if (nls_active > 0.5)
             u = clamp(vec2(nls_coordinate(u.x, nls_scale.x, nls_protect.x),
                            nls_coordinate(u.y, nls_scale.y, nls_protect.y)), vec2(0.0), vec2(1.0));
+#endif
         vec2 sp = crop.xy + u * crop.zw;          // source pixels of the whole frame
         ivec2 msize = textureSize(grain_map, 0);
         vec2 gpos = sp / 16.0 - vec2(0.5);
@@ -291,10 +374,15 @@ if (q.x < size.x && q.y < size.y) {
 #endif
 #ifdef AD_MOTION
     // Motion-adapted blend: the factor at this output pixel's source position, bilinear
-    // between block centres (no hard block edges).
+    // between block centres (no hard block edges), scaled by continuum motion_strength.
     float mf = 1.0;
     {
-        vec2 mu = (s - src_origin) / mw_src_size;
+        vec2 mu = (s - src_origin) / max(mw_src_size, vec2(1e-6));
+#ifdef AD_HAS_NLS
+        if (mw_nls_active > 0.5)
+            mu = clamp(vec2(nls_coordinate(mu.x, nls_scale.x, nls_protect.x),
+                            nls_coordinate(mu.y, nls_scale.y, nls_protect.y)), vec2(0.0), vec2(1.0));
+#endif
         vec2 msp = mw_crop.xy + mu * mw_crop.zw;
         ivec2 mwsz = textureSize(motion_map, 0);
         vec2 mpos = msp / 16.0 - vec2(0.5);
@@ -305,7 +393,7 @@ if (q.x < size.x && q.y < size.y) {
             for (int x = 0; x <= 1; x++)
                 macc += (x == 1 ? mt.x : 1.0 - mt.x) * (y == 1 ? mt.y : 1.0 - mt.y) *
                     texelFetch(motion_map, clamp(m0 + ivec2(x, y), ivec2(0), mwsz - ivec2(1)), 0).r;
-        mf = clamp(macc, 0.0, 1.0);
+        mf = 1.0 - motion_strength * (1.0 - clamp(macc, 0.0, 1.0));
     }
 #endif
 #ifdef AD_UPSCALE
@@ -319,6 +407,11 @@ if (q.x < size.x && q.y < size.y) {
 #ifdef AD_GRAIN_PUBLISHED
     {
         vec2 gu = (s - src_origin) / max(src_size, vec2(1e-6));
+#ifdef AD_HAS_NLS
+        if (grain_nls_active > 0.5)
+            gu = clamp(vec2(nls_coordinate(gu.x, nls_scale.x, nls_protect.x),
+                            nls_coordinate(gu.y, nls_scale.y, nls_protect.y)), vec2(0.0), vec2(1.0));
+#endif
         vec2 gsp = grain_crop.xy + gu * grain_crop.zw;
         ivec2 lsize = textureSize(grain_level, 0);
         vec2 lpos = gsp / max(grain_block_px, 1.0) - vec2(0.5);
@@ -699,7 +792,7 @@ float rs_slope(float y)
 		settings = value;
 		sequence = sourceSequence;
 		static GeneralRate::FallbackNotice fallback;   // fixed-constant batch B7 2026-10-18: logged
-		frameSeconds = GeneralRate::NoteFallback(fallback, seconds > 0.0f, "adaptive downscale frame time", 24.0) ?
+		frameSeconds = GeneralRate::NoteFallback(fallback, std::isfinite(seconds) && seconds > 0.0f, "adaptive downscale frame time", 24.0) ?
 			seconds : 1.0f / 24.0f;
 	}
 
@@ -1058,11 +1151,11 @@ float rs_slope(float y)
 				{ pl_var_vec2("crop_hi"), cropHi, true } };
 			static const std::string p10Define = std::string("#define AD_P10 1\n#define ENERGY_PER_SIGMA ") +
 				std::to_string(kEdgeEnergyPerSigma) + "\n";
-			static const std::string finalImgHeader = std::string("#define AD_STATS_IMG 1\n") + FINAL_HEADER;
-			static const std::string finalP10Header = p10Define + FINAL_HEADER;
+			static const std::string finalImgHeader = std::string("#define AD_STATS_IMG 1\n") + FinalHeader();
+			static const std::string finalP10Header = p10Define + FinalHeader();
 			static const std::string finalImgP10Header = p10Define + finalImgHeader;
 			const char* finalHeader = shared ? (native ? finalImgP10Header.c_str() : finalP10Header.c_str()) :
-				(native ? finalImgHeader.c_str() : FINAL_HEADER);
+				(native ? finalImgHeader.c_str() : FinalHeader().c_str());
 			if (numDescriptors != 3 || !Compute(p->dispatch, "VideoProcessor adaptive downscale: grain",
 				finalHeader, FinalBody().c_str(), d, shared ? 6 : 3, v, shared ? 13 : 8, 1, 1))
 			{
@@ -1173,18 +1266,21 @@ float rs_slope(float y)
 
 	bool Module::UpdateMotionMap(pl_dispatch dispatch, bool advance)
 	{
-		const bool fieldPresent = motion.field && motion.frameTrust &&
-			motion.sourceCrop.y1 > motion.sourceCrop.y0 && motion.sourceCrop.x1 > motion.sourceCrop.x0;
-		if (!settings.motionAdaptive)
+		const float strength = MotionSanitizeUnit(settings.motionStrength);
+		if (!(strength > 0.0f))
 		{
 			motionReady = false;
 			motionSequence = 0;
 			motionState = MotionState::Off;
 			return true;
 		}
+		const bool fieldPresent = motion.field && motion.frameTrust &&
+			std::isfinite(motion.sourceCrop.x0) && std::isfinite(motion.sourceCrop.x1) &&
+			std::isfinite(motion.sourceCrop.y0) && std::isfinite(motion.sourceCrop.y1) &&
+			motion.sourceCrop.y1 > motion.sourceCrop.y0 && motion.sourceCrop.x1 > motion.sourceCrop.x0;
 		if (!fieldPresent)
 		{
-			// No vectors for this frame (none running, NLS, a discontinuity): factor 1 (today's
+			// No vectors for this frame (none running, unknown NLS, a discontinuity): factor 1 (today's
 			// blend), visible as "no vectors"; the map starts over when they come back.
 			if (advance)
 			{
@@ -1213,11 +1309,12 @@ float rs_slope(float y)
 		const bool first = resized || motionSequence == 0 || !motionReady || sequence != motionSequence + 1;
 		const int next = 1 - motionIndex;
 		const float firstF = first ? 1.0f : 0.0f;
-		const float alpha = OnePole::AlphaForMs(frameSeconds * 1000.0f, settings.motionSmoothMs, OnePole::DtRule::AsGiven);
+		float alphaAttack = 1.0f, alphaRelease = 1.0f;
+		MotionAttackReleaseAlphas(frameSeconds, settings.motionSmoothMs, alphaAttack, alphaRelease);
 		const float cropH = motion.sourceCrop.y1 - motion.sourceCrop.y0;
 		const pl_shader_desc d[5] = { Sampled("field", motion.field, false), Sampled("frame_trust", motion.frameTrust, false),
 			Sampled("state", state, false), Sampled("map_in", motionMap[motionIndex], false), Storage("map_out", motionMap[next]) };
-		const pl_shader_var v[8] = {
+		const pl_shader_var v[9] = {
 			{ pl_var_float("min_trusted_share"), &motion.minTrustedShare, true },
 			{ pl_var_float("first_map"), &firstF, true },
 			{ pl_var_float("crop_h"), &cropH, true },
@@ -1225,8 +1322,9 @@ float rs_slope(float y)
 			{ pl_var_float("speed_lo"), &settings.motionSpeedLo, true },
 			{ pl_var_float("speed_hi"), &settings.motionSpeedHi, true },
 			{ pl_var_float("motion_floor"), &settings.motionFloor, true },
-			{ pl_var_float("smooth_alpha"), &alpha, true } };
-		if (!Compute(dispatch, "VideoProcessor adaptive scaling: motion-adapted weights", nullptr, MOTION_BODY, d, 5, v, 8,
+			{ pl_var_float("smooth_alpha_attack"), &alphaAttack, true },
+			{ pl_var_float("smooth_alpha_release"), &alphaRelease, true } };
+		if (!Compute(dispatch, "VideoProcessor adaptive scaling: motion-adapted weights", MotionHeader().c_str(), MOTION_BODY, d, 5, v, 9,
 			(bw + 15) / 16, (bh + 15) / 16))
 		{
 			motionReady = false;
@@ -1268,17 +1366,13 @@ float rs_slope(float y)
 		const float srcSize[2] = { srcRect.x1 - srcRect.x0, srcRect.y1 - srcRect.y0 };
 		const pl_rect2df& sc = grainField.sourceCrop;
 		const float crop[4] = { sc.x0, sc.y0, sc.x1 - sc.x0, sc.y1 - sc.y0 };
-		const NlsMaskMapping::Mapping& nls = grainField.nls;
-		const float nlsActive = useMap && nls.valid ? 1.0f : 0.0f;
-		const float nlsCurve = static_cast<float>(nls.curve);
-		const float nlsGeometry = static_cast<float>(nls.geometry);
-		const float nlsScale[2] = { static_cast<float>(nls.xScale), static_cast<float>(nls.yScale) };
-		const float nlsProtect[2] = { static_cast<float>(nls.xProtect), static_cast<float>(nls.yProtect) };
 		// Stage 12 §2c / S8-1: the residual held along the vectors when they
 		// exist for this frame. A source frame presented again is recomputed
-		// against the same previous residual (never advancing).
+		// against the same previous residual (never advancing). Kept off under NLS
+		// because rs_prev lives in post-NLS output space.
 		const bool stabiliseWanted = (upscale.on ? settings.cnnResidualStabilise : settings.ssimResidualStabilise) &&
-			motion.field && motion.frameTrust && motion.sourceCrop.x1 > motion.sourceCrop.x0 && motion.sourceCrop.y1 > motion.sourceCrop.y0;
+			motion.field && motion.frameTrust && !motion.nls.valid &&
+			motion.sourceCrop.x1 > motion.sourceCrop.x0 && motion.sourceCrop.y1 > motion.sourceCrop.y0;
 		const bool repeat = residualSequence != 0 && sequence == residualSequence;
 		const bool consecutive = residualSequence != 0 && sequence == residualSequence + 1;
 		int readIndex = -1, writeIndex = 1 - residualIndex;
@@ -1310,15 +1404,17 @@ float rs_slope(float y)
 		std::vector<pl_shader_desc> d = { Sampled("hooked", p->tex, false), Sampled("faithful", faithful, false),
 			Sampled("edge", edge, true), Sampled("state", state, false), Storage("dst", out) };
 		if (useMap) d.push_back(Sampled("grain_map", map[mapIndex], false));
-		// Motion-adapted blend: the factor map for this source frame (else no binding, no code).
+		// Motion-adapted blend: continuum motionStrength (0 = standard unadapted blend).
 		// CF-2 B1 (N1.4): the stage's discontinuity verdict (resync, a drop, no live estimate) also takes the map out.
+		const float motionStrength = MotionSanitizeUnit(settings.motionStrength);
+		const bool motionOn = motionStrength > 0.0f;
 		const bool vectorsInvalid = upscale.on && upscale.vectorsInvalid;
-		const bool useMotion = settings.motionAdaptive && !vectorsInvalid && motionState == MotionState::Used && motionReady &&
+		const bool useMotion = motionOn && !vectorsInvalid && motionState == MotionState::Used && motionReady &&
 			motionSequence == sequence && motionMap[motionIndex];
 		if (useMotion) d.push_back(Sampled("motion_map", motionMap[motionIndex], false));
-		// The upscale form with adaptive_motion on and no usable map: the motion floor (the alias-safe lean), visibly
+		// The upscale form with adaptive_motion > 0 and no usable map: the motion floor (the alias-safe lean), visibly
 		// (MotionFloorUsed; the stage's status line). One-axis is faithful only already. The downscale form is unchanged.
-		const bool motionFloor = upscale.on && settings.motionAdaptive && !useMotion && !upscale.oneAxis;
+		const bool motionFloor = upscale.on && motionOn && !useMotion && !upscale.oneAxis;
 		motionFloorUsed = motionFloor;
 		// CF-2 FIX1 (gate M1): the floor's cause, for the stage's catalog entry (Stage::Fallback) and status line.
 		const char* floorCause = motionFloor ? MotionFloorCause(vectorsInvalid, motionState, motionReady,
@@ -1339,7 +1435,21 @@ float rs_slope(float y)
 			d.push_back(Sampled("rs_prev", residual[1 - writeIndex], true));
 			d.push_back(Storage("rs_out", residual[writeIndex]));
 		}
-		static const std::string mapHeader = std::string("#define AD_USE_MAP 1\n") + OcclusionMask::NlsMapGlsl();
+		// Full NLS coordinate mapping across grain map, motion map, and published grain level (emitted once).
+		const bool useMapNls = useMap && grainField.nls.valid;
+		const bool useMotionNls = useMotion && motion.nls.valid;
+		const bool useGrainLevelNls = grainPublished && grainLevel.nls.valid;
+		const bool anyNlsHelper = useMapNls || useMotionNls || useGrainLevelNls;
+		const NlsMaskMapping::Mapping& activeNls = useMapNls ? grainField.nls :
+			(useMotionNls ? motion.nls : grainLevel.nls);
+		const float nlsActive = useMapNls ? 1.0f : 0.0f;
+		const float mwNlsActive = useMotionNls ? 1.0f : 0.0f;
+		const float grainNlsActive = useGrainLevelNls ? 1.0f : 0.0f;
+		const float nlsCurve = static_cast<float>(activeNls.curve);
+		const float nlsGeometry = static_cast<float>(activeNls.geometry);
+		const float nlsScale[2] = { static_cast<float>(activeNls.xScale), static_cast<float>(activeNls.yScale) };
+		const float nlsProtect[2] = { static_cast<float>(activeNls.xProtect), static_cast<float>(activeNls.yProtect) };
+		static const std::string nlsHeader = std::string("#define AD_HAS_NLS 1\n") + OcclusionMask::NlsMapGlsl();
 		// 8b: the upscale form (and alpha for SSimSuperRes) as defines.
 		const std::string upHeader = upscale.on ? std::string("#define AD_UPSCALE 1\n") + HybridBlend::WeightGlsl() +
 			(upscale.superresAlpha ? "#define AD_SUPERRES_ALPHA 1\n" : "") +
@@ -1349,7 +1459,8 @@ float rs_slope(float y)
 		const bool guard = stabilise && settings.residualGrainGuard;
 		const std::string header = "#define AD_KW " + LumaWeightsGlsl(domain) + "\n" + upHeader +
 			(useMotion ? std::string("#define AD_MOTION 1\n") : std::string()) +
-			(useMap ? mapHeader : std::string()) +
+			(useMap ? std::string("#define AD_USE_MAP 1\n") : std::string()) +
+			(anyNlsHelper ? nlsHeader : std::string()) +
 			(stabilise ? (guard ? STABILISE_GUARD_DEFINE : STABILISE_DEFINE) : PLAIN_DEFINE);
 		const float wBase = upscale.on ? upscale.wBase : settings.wBase;
 		std::vector<pl_shader_var> v = {
@@ -1357,19 +1468,23 @@ float rs_slope(float y)
 			{ pl_var_vec2("src_per_dst"), srcPerDst, true },
 			{ pl_var_vec2("edge_origin"), edgeOrigin, true },
 			{ pl_var_float("w_base"), &wBase, true },
-			{ pl_var_float("chroma_ssim"), &chroma, true },
-			{ pl_var_vec2("src_size"), srcSize, true },
-			{ pl_var_vec4("crop"), crop, true },
-			{ pl_var_float("nls_active"), &nlsActive, true },
-			{ pl_var_float("nls_curve"), &nlsCurve, true },
-			{ pl_var_float("nls_geometry"), &nlsGeometry, true },
-			{ pl_var_vec2("nls_scale"), nlsScale, true },
-			{ pl_var_vec2("nls_protect"), nlsProtect, true } };
-		if (!useMap) v.resize(5);
+			{ pl_var_float("chroma_ssim"), &chroma, true } };
+		if (useMap || stabilise || grainPublished)
+			v.push_back({ pl_var_vec2("src_size"), srcSize, true });
+		if (useMap)
+		{
+			v.push_back({ pl_var_vec4("crop"), crop, true });
+			v.push_back({ pl_var_float("nls_active"), &nlsActive, true });
+		}
+		if (useMap || anyNlsHelper)
+		{
+			v.push_back({ pl_var_float("nls_curve"), &nlsCurve, true });
+			v.push_back({ pl_var_float("nls_geometry"), &nlsGeometry, true });
+			v.push_back({ pl_var_vec2("nls_scale"), nlsScale, true });
+			v.push_back({ pl_var_vec2("nls_protect"), nlsProtect, true });
+		}
 		if (stabilise)
 		{
-			if (!useMap)
-				v.push_back({ pl_var_vec2("src_size"), srcSize, true });   // the map path already has it
 			v.push_back({ pl_var_vec4("rs_crop"), rsCrop, true });
 			v.push_back({ pl_var_float("rs_prev_valid"), &prevValid, true });
 			v.push_back({ pl_var_float("rs_alpha"), &rsAlpha, true });
@@ -1396,8 +1511,10 @@ float rs_slope(float y)
 		{
 			v.push_back({ pl_var_vec2("mw_src_size"), srcSize, true });
 			v.push_back({ pl_var_vec4("mw_crop"), mwCrop, true });
+			v.push_back({ pl_var_float("motion_strength"), &motionStrength, true });
+			v.push_back({ pl_var_float("mw_nls_active"), &mwNlsActive, true });
 		}
-		const float motionFloorValue = RampMath::Clamp01(settings.motionFloor);
+		const float motionFloorValue = HybridBlend::MotionTerm(false, 1.0f, settings.motionFloor, motionStrength);
 		if (motionFloor)
 			v.push_back({ pl_var_float("motion_floor"), &motionFloorValue, true });
 		const pl_rect2df& gc = grainLevel.sourceCrop;
@@ -1408,13 +1525,12 @@ float rs_slope(float y)
 			v.push_back({ pl_var_float("grain_floor"), &settings.grainFloor, true });   // published or not (the floor)
 		if (grainPublished)
 		{
-			if (!stabilise)
-				v.push_back({ pl_var_vec2("src_size"), srcSize, true });   // useMap is off on this form; stabilise already has it
 			v.push_back({ pl_var_vec4("grain_crop"), grainCrop, true });
 			v.push_back({ pl_var_float("grain_lo"), &settings.grainLo, true });
 			v.push_back({ pl_var_float("grain_hi"), &settings.grainHi, true });
 			v.push_back({ pl_var_float("grain_level_scale"), &grainLevelScale, true });
 			v.push_back({ pl_var_float("grain_block_px"), &grainBlockPx, true });
+			v.push_back({ pl_var_float("grain_nls_active"), &grainNlsActive, true });
 		}
 		if (!Compute(p->dispatch, upscale.on ? "VideoProcessor adaptive upscale: blend" : "VideoProcessor adaptive downscale: blend",
 			header.c_str(), BLEND_BODY, d.data(), static_cast<int>(d.size()), v.data(), static_cast<int>(v.size()),

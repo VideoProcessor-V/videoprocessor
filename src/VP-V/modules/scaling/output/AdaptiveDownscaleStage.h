@@ -262,7 +262,8 @@ namespace AdaptiveDownscaleStage
 		bool upscaleThisFrame = false;   // Stage 8b on the frame being built
 		bool oneAxisThisFrame = false;   // ... upscaled on one axis only (faithful only)
 		int droppedPrescalers = 0;
-		bool motionAdaptiveOn = false;   // adaptive_motion on this frame (the blend registered)
+		bool motionAdaptiveOn = false;   // adaptive_motion strength > 0 on this frame (the blend registered)
+		float motionStrengthActive = 0.0f;   // active clamped continuum strength (0..1) on this frame
 		bool oneAxisLogged = false;
 		std::string statusPublished;     // the StatusLines last published
 		int upscaleRatioLogged = -1;

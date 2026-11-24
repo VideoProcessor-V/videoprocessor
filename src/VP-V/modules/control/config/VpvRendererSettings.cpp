@@ -27,6 +27,7 @@
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
+#include <locale>
 #include <map>
 #include <mutex>
 #include <set>
@@ -814,8 +815,7 @@ namespace VpvRendererSettings
 			std::make_pair("adaptive_chroma_ssim", &settings.adaptive.chromaSsim),
 			std::make_pair("adaptive_grain_map", &settings.adaptive.grainMap),
 			std::make_pair("adaptive_upscale", &settings.adaptiveUpscale),
-			std::make_pair("adaptive_upscale_superres_scale", &settings.adaptiveUpscaleSuperresScale),
-			std::make_pair("adaptive_motion", &settings.adaptive.motionAdaptive) })
+			std::make_pair("adaptive_upscale_superres_scale", &settings.adaptiveUpscaleSuperresScale) })
 		{
 			if (!tryChoice(toggle.first, raw))
 				continue;
@@ -824,6 +824,20 @@ namespace VpvRendererSettings
 			else
 				DebugLog::Log("profile '%s': invalid %s '%s'; keeping %s",
 					rule.section.c_str(), toggle.first, raw.c_str(), *toggle.second ? "on" : "off");
+		}
+		if (config.TryGetString(rule.section, "adaptive_motion", raw))
+		{
+			const std::string normalized = ConfigFile::NormalizeName(raw);
+			double parsed = 0.0;
+			if (normalized == "off")
+				settings.adaptive.motionStrength = 0.0f;
+			else if (normalized == "on")
+				settings.adaptive.motionStrength = 1.0f;
+			else if (DisplayRuleExpression::ParseNumber(raw, parsed) && std::isfinite(parsed) && parsed >= 0.0 && parsed <= 1.0)
+				settings.adaptive.motionStrength = static_cast<float>(parsed);
+			else
+				DebugLog::Log("profile '%s': invalid adaptive_motion '%s'; keeping %g",
+					rule.section.c_str(), raw.c_str(), settings.adaptive.motionStrength);
 		}
 		if (tryChoice("dejudder_warp_stage", raw))
 		{
@@ -1141,7 +1155,7 @@ namespace VpvRendererSettings
 		settings.adaptive.ssimResidualStabilise = false;   // key=ssim_residual_stabilise
 		settings.adaptive.cnnResidualStabilise = false;    // key=cnn_residual_stabilise
 		settings.adaptive.residualGrainGuard = false;      // key=residual_stabilise_grain_guard
-		settings.adaptive.motionAdaptive = false;          // key=adaptive_motion
+		settings.adaptive.motionStrength = 0.0f;           // key=adaptive_motion
 		settings.dejudderEstimateAhead = false;            // key=dejudder_estimate_ahead
 		settings.interpolationFallback = InterpolationPolicy::Fallback::Hold; // key=interpolation_fallback
 		settings.pipelineOrder.clear();                    // the designed order
@@ -1344,7 +1358,7 @@ namespace VpvRendererSettings
 			<< settings.adaptive.faithfulAuto << '|'
 			<< settings.adaptive.grainMap << '|'
 			<< settings.adaptive.grainMapSmoothMs << '|'
-			<< settings.adaptive.motionAdaptive << '|'
+			<< settings.adaptive.motionStrength << '|'
 			<< settings.adaptive.motionSpeedLo << '|'
 			<< settings.adaptive.motionSpeedHi << '|'
 			<< settings.adaptive.motionFloor << '|'
@@ -1482,7 +1496,7 @@ namespace VpvRendererSettings
 		changed(current.textureRestoreCap != next.textureRestoreCap, "texture_restore_cap");
 		changed(current.cutSoftReset != next.cutSoftReset, "cut_soft_reset");
 		changed(current.adaptive.residualGrainGuard != next.adaptive.residualGrainGuard, "residual_stabilise_grain_guard");
-		changed(current.adaptive.motionAdaptive != next.adaptive.motionAdaptive, "adaptive_motion");
+		changed(current.adaptive.motionStrength != next.adaptive.motionStrength, "adaptive_motion");
 		changed(current.interpolation != next.interpolation, "interpolation");
 		changed(current.interpolationFallback != next.interpolationFallback, "interpolation_fallback");
 		changed(current.interpolationFillGaps != next.interpolationFillGaps, "interpolation_fill_gaps");
@@ -1602,6 +1616,7 @@ namespace VpvRendererSettings
 		const std::string& rule)
 	{
 		std::ostringstream o;
+		o.imbue(std::locale::classic());
 	o << "rule=" << rule << "\n"
 		<< "capture_path=" << s.capturePath << "\n"
 		<< "capture_upload=" << s.captureUpload << "\n"
@@ -1638,7 +1653,14 @@ namespace VpvRendererSettings
 		<< "cut_soft_reset=" << (s.cutSoftReset ? "on" : "off") << "\n"
 		<< "deband_grain=" << (s.debandGrain ? "on" : "off") << "\n"
 		<< "residual_stabilise_grain_guard=" << (s.adaptive.residualGrainGuard ? "on" : "off") << "\n"
-		<< "adaptive_motion=" << (s.adaptive.motionAdaptive ? "on" : "off") << "\n"
+		<< "adaptive_motion=";
+	if (!std::isfinite(s.adaptive.motionStrength) || s.adaptive.motionStrength <= 0.0f)
+		o << "off";
+	else if (s.adaptive.motionStrength >= 1.0f)
+		o << "on";
+	else
+		o << s.adaptive.motionStrength;
+	o << "\n"
 		<< "adaptive_motion_speed_lo=" << s.adaptive.motionSpeedLo << "\n"
 		<< "adaptive_motion_speed_hi=" << s.adaptive.motionSpeedHi << "\n"
 		<< "adaptive_motion_floor=" << s.adaptive.motionFloor << "\n"

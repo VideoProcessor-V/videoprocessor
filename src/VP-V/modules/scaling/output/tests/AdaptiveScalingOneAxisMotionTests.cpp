@@ -171,9 +171,9 @@ namespace VideoProcessorTest
 		TEST_METHOD(MotionAdaptiveIsOffByDefaultAndPartOfTheSettings)
 		{
 			AdaptiveDownscale::Settings a, b;
-			Assert::IsFalse(a.motionAdaptive);
+			Assert::AreEqual(0.0f, a.motionStrength);
 			Assert::IsTrue(a == b);
-			b.motionAdaptive = true;
+			b.motionStrength = 1.0f;
 			Assert::IsFalse(a == b);
 			b = a; b.motionSpeedLo = 0.2f; Assert::IsFalse(a == b);
 			b = a; b.motionSpeedHi = 0.6f; Assert::IsFalse(a == b);
@@ -285,7 +285,7 @@ namespace VideoProcessorTest
 			f.adaptiveDownscale = true;
 			x.Run(f, hooks);
 			Assert::IsTrue(x.stage.StatusLines().empty(), L"off: no line");
-			x.settings.motionAdaptive = true;
+			x.settings.motionStrength = 1.0f;
 			hooks.clear();
 			x.Run(f, hooks);
 			Assert::IsTrue(HasLine(x.stage.StatusLines(), "Motion-adapted blend: idle"), L"no silent fallback: the module has not measured");
@@ -547,7 +547,7 @@ namespace VideoProcessorTest
 
 			// The stage: adaptive_motion on, the upscale form; the cause is on the status and on the Fallbacks entry.
 			OneAxisStageFixture x;
-			x.settings.motionAdaptive = true;
+			x.settings.motionStrength = 1.0f;
 			static int tex = 0;
 			bool live = false;
 			x.host.motion = [&]()
@@ -561,7 +561,7 @@ namespace VideoProcessorTest
 			AdaptiveDownscaleStage::Frame f = x.Frame(1920, 1080, 2560, 1440);
 			f.adaptiveUpscale = true;
 			x.Run(f, hooks);
-			Assert::IsTrue(HasLine(x.stage.StatusLines(), "Adaptive upscale motion: no vectors (alias-safe weight; no live estimate)"));
+			Assert::IsTrue(HasLine(x.stage.StatusLines(), "Adaptive upscale motion: no vectors (alias-safe weight) (no live estimate)"));
 			const FallbackCatalog::Decision d = x.stage.Fallback();
 			Assert::IsTrue(d.engaged && d.reason.find("alias-safe weight (no live estimate)") != std::string::npos);
 			live = true;
@@ -577,7 +577,7 @@ namespace VideoProcessorTest
 			hooks.clear();
 			x.Run(f, hooks);
 			Assert::AreEqual(std::string("dropped source frames"), x.stage.UpscaleMotionCause());
-			Assert::IsTrue(HasLine(x.stage.StatusLines(), "(alias-safe weight; dropped source frames)"));
+			Assert::IsTrue(HasLine(x.stage.StatusLines(), "(alias-safe weight) (dropped source frames)"));
 			hooks.clear();
 			x.Run(f, hooks);   // a repeat of 6: still the drop's verdict (no flicker)
 			Assert::AreEqual(std::string("dropped source frames"), x.stage.UpscaleMotionCause());
@@ -833,7 +833,7 @@ namespace VideoProcessorTest
 			AdaptiveDownscale::Module module;
 			module.hostReadableMap = true;
 			AdaptiveDownscale::Settings st;
-			st.motionAdaptive = true;
+			st.motionStrength = 1.0f;
 			st.motionFloor = 0.25f;
 			st.motionSmoothMs = 250.0f;
 			st.ssimResidualStabilise = false;
@@ -870,12 +870,13 @@ namespace VideoProcessorTest
 			frame(field1, 1);
 			Assert::IsTrue(module.LastMotionState() == AdaptiveDownscale::MotionState::Used, L"the map was not used");
 			std::vector<float> t = read();
+			// Upgrade 4 (4-neighbor shear): column bw/2 - 1 (background side of the moving edge) also sees 6 heights/s shear -> floor.
 			for (int y = 0; y < bh; ++y)
 				for (int x = 0; x < bw; ++x)
 				{
 					const float v = t[(static_cast<size_t>(y) * bw + x) * 4];
-					const float expected = y == 0 || x >= bw / 2 ? 0.25f : 1.0f;
-					Assert::AreEqual(expected, v, 1e-4f, L"frame 1: steady 1, fast / untrusted the floor");
+					const float expected = y == 0 || x >= bw / 2 - 1 ? 0.25f : 1.0f;
+					Assert::AreEqual(expected, v, 1e-4f, L"frame 1: steady 1, fast / shear boundary / untrusted the floor");
 				}
 			frame(field2, 1);   // a repeat of the same source frame with a different field: the map must stand unchanged
 			t = read();
@@ -883,7 +884,7 @@ namespace VideoProcessorTest
 				for (int x = 0; x < bw; ++x)
 				{
 					const float v = t[(static_cast<size_t>(y) * bw + x) * 4];
-					const float expected = y == 0 || x >= bw / 2 ? 0.25f : 1.0f;
+					const float expected = y == 0 || x >= bw / 2 - 1 ? 0.25f : 1.0f;
 					Assert::AreEqual(expected, v, 1e-4f, L"repeat seq 1 with field2: frame 1 map must stay unchanged");
 				}
 			frame(field2, 2);
@@ -893,7 +894,7 @@ namespace VideoProcessorTest
 				for (int x = 0; x < bw; ++x)
 				{
 					const float v = t[(static_cast<size_t>(y) * bw + x) * 4];
-					const float expected = y == 0 || x >= bw / 2 ? AdaptiveDownscale::MotionStep(0.25f, 1.0f, alpha, false) : 1.0f;
+					const float expected = y == 0 || x >= bw / 2 - 1 ? AdaptiveDownscale::MotionStep(0.25f, 1.0f, alpha, false) : 1.0f;
 					Assert::AreEqual(expected, v, 1e-4f, L"frame 2: the one-pole (CPU mirror)");
 				}
 			// No field: factor 1, state visible.
@@ -902,7 +903,7 @@ namespace VideoProcessorTest
 			g.Render(module, src, w / 2, h / 2, false);
 			Assert::IsTrue(module.LastMotionState() == AdaptiveDownscale::MotionState::NoVectors);
 			// Off: nothing.
-			st.motionAdaptive = false;
+			st.motionStrength = 0.0f;
 			module.SetFrame(st, 4, 1.0f / 24.0f);
 			g.Render(module, src, w / 2, h / 2, false);
 			Assert::IsTrue(module.LastMotionState() == AdaptiveDownscale::MotionState::Off);
@@ -951,7 +952,7 @@ namespace VideoProcessorTest
 			const std::vector<RgbaPixel> faithfulOnly = run(faithful, steady);
 			Assert::IsTrue(MaxDiff(plain, faithfulOnly) > 0, L"the branches must differ for the test to mean anything");
 			AdaptiveDownscale::Settings on = base;
-			on.motionAdaptive = true;
+			on.motionStrength = 1.0f;
 			Assert::AreEqual(0, MaxDiff(run(on, fast), faithfulOnly), L"fast motion, floor 0: the faithful branch");
 			Assert::IsTrue(MaxDiff(run(on, steady), plain) <= 1, L"steady, trusted: today's blend");
 			Assert::AreEqual(0, MaxDiff(run(on, nullptr), plain), L"no vectors: today's blend (factor 1)");
@@ -1087,7 +1088,7 @@ namespace VideoProcessorTest
 				settings.cnnResidualStabilise = false;   // the comparison is the weight alone
 				settings.ssimResidualStabilise = false;
 				settings.grainMap = false;
-				settings.motionAdaptive = true;
+				settings.motionStrength = 1.0f;
 				settings.motionFloor = 0.0f;
 				double weight = 1.0;
 				bool grainWanted = false, noSsim = false;
@@ -1132,7 +1133,7 @@ namespace VideoProcessorTest
 				};
 				const std::string cause = "no motion map for this source frame";
 				const std::string floorReason = "adaptive upscale: no vectors, alias-safe weight (" + cause + ")";
-				const std::string floorLine = "Adaptive upscale motion: no vectors (alias-safe weight; " + cause + ")";
+				const std::string floorLine = "Adaptive upscale motion: no vectors (alias-safe weight) (" + cause + ")";
 
 				// Frame 1: the stage's verdict usable, the module without its map: the module's floor.
 				const std::vector<RgbaPixel> floored = frame(1.0, true);
@@ -1193,7 +1194,7 @@ namespace VideoProcessorTest
 				settings.cnnResidualStabilise = false;
 				settings.ssimResidualStabilise = false;
 				settings.grainMap = false;
-				settings.motionAdaptive = false;
+				settings.motionStrength = 0.0f;
 				settings.grainFloor = 0.0f;
 				settings.grainLo = 2.0f;
 				settings.grainHi = 8.0f;

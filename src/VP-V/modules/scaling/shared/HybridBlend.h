@@ -21,6 +21,8 @@
 
 #include <VP-V/core/Ramp.h>   // RampMath::Clamp01: the shared clamp (U25)
 
+#include <cmath>
+
 namespace HybridBlend
 {
 	struct Terms
@@ -31,17 +33,29 @@ namespace HybridBlend
 		float motion = 1.0f;  // the motion term (MotionTerm)
 	};
 
-	inline float EdgeTerm(float e) { return 1.0f - RampMath::Clamp01(e); }
+	// Fail-safe unit-range clamp: non-finite values (NaN, +/-Inf) map to 0 (alias-safe / off).
+	inline float SanitizeUnit(float x)
+	{
+		return std::isfinite(x) ? RampMath::Clamp01(x) : 0.0f;
+	}
+
+	inline float EdgeTerm(float e)
+	{
+		return std::isfinite(e) ? 1.0f - RampMath::Clamp01(e) : 0.0f;
+	}
 
 	// Valid vectors: the map's factor; absent / invalid (no estimate, resync, a drop): the floor (the alias-safe lean).
-	inline float MotionTerm(bool vectorsValid, float mapFactor, float motionFloor)
+	// motionStrength (0..1): continuum blend from standard unadapted blend (0 -> 1) to full motion factor (1 -> raw).
+	inline float MotionTerm(bool vectorsValid, float mapFactor, float motionFloor, float motionStrength = 1.0f)
 	{
-		return RampMath::Clamp01(vectorsValid ? mapFactor : motionFloor);
+		const float raw = SanitizeUnit(vectorsValid ? mapFactor : motionFloor);
+		const float s = SanitizeUnit(motionStrength);
+		return 1.0f - s * (1.0f - raw);
 	}
 
 	inline float Weight(const Terms& t)
 	{
-		return RampMath::Clamp01(t.wBase * EdgeTerm(t.edge) * t.grain) * RampMath::Clamp01(t.motion);
+		return SanitizeUnit(t.wBase * EdgeTerm(t.edge) * t.grain) * SanitizeUnit(t.motion);
 	}
 
 	// One channel's luma form: the sharp value plus (1 - w) times the luma difference.

@@ -243,8 +243,8 @@ namespace ProfileSchemaHooks
 			if (key == "adaptive_grain_lo" || key == "adaptive_grain_hi") return V(IsNumberInRange(value, 0.0, 64.0));
 			if (key == "adaptive_grain_smooth_ms" || key == "adaptive_grain_map_smooth_ms")
 				return V(IsNumberInRange(value, 0.0, 10000.0));
-			// The motion-adapted blend (VP-V scaling.output, owner 2026-10-31; candidate, off).
-			if (key == "adaptive_motion") return V(IsChoice(value, { "on", "off" }));
+			// The motion-adapted blend (VP-V scaling.output: off | on | 0.0..1.0 continuum strength).
+			if (key == "adaptive_motion") return V(IsChoice(value, { "on", "off" }) || IsNumberInRange(value, 0.0, 1.0));
 			if (key == "adaptive_motion_speed_lo" || key == "adaptive_motion_speed_hi") return V(IsNumberInRange(value, 0.0, 10.0));
 			if (key == "adaptive_motion_floor") return V(IsNumberInRange(value, 0.0, 1.0));
 			if (key == "adaptive_motion_smooth_ms") return V(IsNumberInRange(value, 0.0, 10000.0));
