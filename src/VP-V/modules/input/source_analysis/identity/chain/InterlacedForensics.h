@@ -286,7 +286,14 @@ namespace SourceIdentity
 
 				const int yBegin = 2 * s;
 				const int yEnd = height - 2 * s;
-				for (int y = yBegin; y < yEnd; ++y)
+				// SOTA3-HIGH-4(b): derive interior subsampling strides from the kSegPx = 256 contract budget
+				// (target 512x256 = 131k stencil sites >> minActiveWeavePixels = 64). Small frames (<= 1025x520)
+				// stay exhaustive (step = 1); 4K frames drop ~49x from ~30 ms to < 1 ms. Force stepY odd so
+				// gcd(stepY, 4) == 1 visits every field parity uniformly for both s = 1 and s = 2 weave.
+				const int stepX = (std::max)(1, (width - 2) / (2 * kSegPx));
+				const int rawStepY = (std::max)(1, (yEnd - yBegin) / kSegPx);
+				const int stepY = (rawStepY > 1 && (rawStepY & 1) == 0) ? (rawStepY - 1) : rawStepY;
+				for (int y = yBegin; y < yEnd; y += stepY)
 				{
 					const Pix* rowCur = plane + static_cast<std::ptrdiff_t>(y) * rowStride;
 					const Pix* rowPrev = rowCur - sOff;
@@ -294,7 +301,7 @@ namespace SourceIdentity
 					const Pix* rowPrev2 = rowCur - twoSOff;
 					const Pix* rowNext2 = rowCur + twoSOff;
 
-					for (int x = 1; x < width - 1; ++x)
+					for (int x = 1; x < width - 1; x += stepX)
 					{
 						if (!IsFiniteSample(rowCur[x - 1]) || !IsFiniteSample(rowCur[x]) || !IsFiniteSample(rowCur[x + 1]) ||
 							!IsFiniteSample(rowPrev[x - 1]) || !IsFiniteSample(rowPrev[x]) || !IsFiniteSample(rowPrev[x + 1]) ||

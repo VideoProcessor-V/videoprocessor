@@ -267,6 +267,44 @@ namespace SourceIdentity
 			}
 		};
 
+		// Caller-owned reusable scratch workspace for EstimateChromaChain (Rule 2 & EFF-MED-1: zero steady-state
+		// per-frame heap allocations; zero static/thread_local mutable state).
+		struct ChromaWorkspace
+		{
+			std::vector<const double*> allLines;
+			std::vector<double> scratch;
+			std::vector<double> lineDips[kKernelCount][2];
+			std::vector<double> lineLogRms[kKernelCount][2];
+			std::vector<double> qDips[kFamilyCount][4];
+			std::vector<double> mpegDips[4];
+			std::vector<double> mpegLogRms[4];
+			std::vector<double> zBuf;
+			std::vector<double> rings;
+
+			void Reset()
+			{
+				allLines.clear();
+				scratch.clear();
+				for (int k = 0; k < kKernelCount; ++k)
+				{
+					lineDips[k][0].clear();
+					lineDips[k][1].clear();
+					lineLogRms[k][0].clear();
+					lineLogRms[k][1].clear();
+				}
+				for (int f = 0; f < kFamilyCount; ++f)
+					for (int p = 0; p < 4; ++p)
+						qDips[f][p].clear();
+				for (int p = 0; p < 4; ++p)
+				{
+					mpegDips[p].clear();
+					mpegLogRms[p].clear();
+				}
+				zBuf.clear();
+				rings.clear();
+			}
+		};
+
 		namespace detail_chroma_estimator
 		{
 			constexpr double kNumericEps = 1e-20; // Strictly numerical singularity guard
@@ -623,6 +661,9 @@ namespace SourceIdentity
 				DescaleOperator baseLoHalf[kFamilyCount];
 				DescaleOperator baseHiHalf[kFamilyCount];
 				DescaleOperator halfOps[kKernelCount][2];
+				// EFF-MED-1: cached +-0.125 MPEG-2 field-shifted bilinear operators (zero per-frame rebuild).
+				bool mpegFieldOk = false;
+				DescaleOperator halfBilinearFieldOps[2];
 
 				bool quarterOk = false;
 				int nQ = 0;
@@ -638,6 +679,7 @@ namespace SourceIdentity
 					origin = orig;
 					length = len;
 					halfOk = false;
+					mpegFieldOk = false;
 					quarterOk = false;
 
 					int repCount = 0;
@@ -668,6 +710,12 @@ namespace SourceIdentity
 							}
 						}
 						halfOk = ok;
+						if (halfOk)
+						{
+							mpegFieldOk =
+								halfBilinearFieldOps[0].Build(N, nHalf, 0, 0.125, origin, length, &memo) &&
+								halfBilinearFieldOps[1].Build(N, nHalf, 0, -0.125, origin, length, &memo);
+						}
 					}
 
 					// Quarter-resolution (n = N / 4) operators.
@@ -711,6 +759,7 @@ namespace SourceIdentity
 					for (int k = 0; k < kKernelCount; ++k)
 						for (int pi = 0; pi < 2; ++pi)
 							total += halfOps[k][pi].Bytes();
+					total += halfBilinearFieldOps[0].Bytes() + halfBilinearFieldOps[1].Bytes();
 					return total;
 				}
 			};
@@ -737,7 +786,8 @@ namespace SourceIdentity
 				const LineSet* luma,
 				double floorCodes,
 				const ChromaEstimatorSettings& s,
-				const ChromaAxisOperators& ops)
+				const ChromaAxisOperators& ops,
+				ChromaWorkspace& ws)
 			{
 				AxisHalfAnalysis out;
 				if (!ops.halfOk)
@@ -753,7 +803,8 @@ namespace SourceIdentity
 				const double gateCodes = s.lineGateFactor * floorCodes;
 				const double eps = (std::max)(floorCodes / kFloorGuardDiv, 1e-6);
 
-				std::vector<const double*> allLines;
+				std::vector<const double*>& allLines = ws.allLines;
+				allLines.clear();
 				allLines.reserve(static_cast<size_t>(cb.count) + (cr != nullptr ? static_cast<size_t>(cr->count) : 0u));
 				for (int li = 0; li < cb.count; ++li)
 					allLines.push_back(cb.Line(li));
@@ -763,9 +814,16 @@ namespace SourceIdentity
 						allLines.push_back(cr->Line(li));
 				}
 
-				std::vector<double> lineDips[kKernelCount][2];
-				std::vector<double> lineLogRms[kKernelCount][2];
-				std::vector<double> scratch;
+				for (int k = 0; k < kKernelCount; ++k)
+				{
+					ws.lineDips[k][0].clear();
+					ws.lineDips[k][1].clear();
+					ws.lineLogRms[k][0].clear();
+					ws.lineLogRms[k][1].clear();
+				}
+				auto& lineDips = ws.lineDips;
+				auto& lineLogRms = ws.lineLogRms;
+				std::vector<double>& scratch = ws.scratch;
 				double rssBatch[kResidualBatch];
 				double segSumBatch[kResidualBatch * kMaxSegs];
 				int segRows[kMaxSegs];
@@ -902,7 +960,8 @@ namespace SourceIdentity
 				double floorCodes,
 				const ChromaEstimatorSettings& s,
 				const ChromaAxisOperators& ops,
-				double& outDip)
+				double& outDip,
+				ChromaWorkspace& ws)
 			{
 				outDip = 0.0;
 				if (!ops.quarterOk)
@@ -918,7 +977,8 @@ namespace SourceIdentity
 				const double gateCodes = s.lineGateFactor * floorCodes;
 				const double eps = (std::max)(floorCodes / kFloorGuardDiv, 1e-6);
 
-				std::vector<const double*> allLines;
+				std::vector<const double*>& allLines = ws.allLines;
+				allLines.clear();
 				allLines.reserve(static_cast<size_t>(cb.count) + (cr != nullptr ? static_cast<size_t>(cr->count) : 0u));
 				for (int li = 0; li < cb.count; ++li)
 					allLines.push_back(cb.Line(li));
@@ -928,8 +988,11 @@ namespace SourceIdentity
 						allLines.push_back(cr->Line(li));
 				}
 
-				std::vector<double> dips[kFamilyCount][4];
-				std::vector<double> scratch;
+				for (int f = 0; f < kFamilyCount; ++f)
+					for (int p = 0; p < 4; ++p)
+						ws.qDips[f][p].clear();
+				auto& dips = ws.qDips;
+				std::vector<double>& scratch = ws.scratch;
 				double rssBatch[kResidualBatch];
 				double segSumBatch[kResidualBatch * kMaxSegs];
 				int segRows[kMaxSegs];
@@ -1055,7 +1118,8 @@ namespace SourceIdentity
 				const LineSet* cr,
 				double floorCodes,
 				const ChromaAxisOperators& ops,
-				double& outMedRing)
+				double& outMedRing,
+				ChromaWorkspace& ws)
 			{
 				outMedRing = 0.0;
 				if (!ops.halfOk)
@@ -1064,7 +1128,8 @@ namespace SourceIdentity
 				constexpr double kCatmullStepOvershootMid = 3.0 / 76.0;
 				const double edgeGate = 4.0 * std::sqrt(2.0) * floorCodes;
 
-				std::vector<const double*> allLines;
+				std::vector<const double*>& allLines = ws.allLines;
+				allLines.clear();
 				allLines.reserve(static_cast<size_t>(cb.count) + (cr != nullptr ? static_cast<size_t>(cr->count) : 0u));
 				for (int li = 0; li < cb.count; ++li)
 					allLines.push_back(cb.Line(li));
@@ -1074,8 +1139,9 @@ namespace SourceIdentity
 						allLines.push_back(cr->Line(li));
 				}
 
-				std::vector<double> zBuf;
-				std::vector<double> rings;
+				std::vector<double>& zBuf = ws.zBuf;
+				std::vector<double>& rings = ws.rings;
+				rings.clear();
 				for (size_t li = 0; li < allLines.size(); ++li)
 				{
 					ops.halfOps[0][0].SolveLatent(allLines[li], zBuf);
@@ -1168,7 +1234,7 @@ namespace SourceIdentity
 				const ChromaEstimatorSettings& s,
 				const ChromaAxisOperators& ops,
 				const AxisHalfAnalysis& axHalf,
-				TapMemo& memo)
+				ChromaWorkspace& ws)
 			{
 				BoxMpegProbeResult out;
 				const double eps = (std::max)(floorCodes / kFloorGuardDiv, 1e-6);
@@ -1241,19 +1307,15 @@ namespace SourceIdentity
 				const double dofHalf = 1.0 - static_cast<double>(ops.nHalf) / static_cast<double>(N);
 				const double gateCodes = s.lineGateFactor * floorCodes;
 
-				DescaleOperator opFieldPos;
-				DescaleOperator opFieldNeg;
-				const bool fieldPosOk = opFieldPos.Build(N, ops.nHalf, 0, 0.125, ops.origin, ops.length, &memo);
-				const bool fieldNegOk = opFieldNeg.Build(N, ops.nHalf, 0, -0.125, ops.origin, ops.length, &memo);
-
 				const DescaleOperator* mpegOps[4] = {
 					&ops.halfOps[0][0],
 					&ops.halfOps[0][1],
-					fieldPosOk ? &opFieldPos : nullptr,
-					fieldNegOk ? &opFieldNeg : nullptr
+					ops.mpegFieldOk ? &ops.halfBilinearFieldOps[0] : nullptr,
+					ops.mpegFieldOk ? &ops.halfBilinearFieldOps[1] : nullptr
 				};
 
-				std::vector<const double*> allLines;
+				std::vector<const double*>& allLines = ws.allLines;
+				allLines.clear();
 				allLines.reserve(static_cast<size_t>(cb.count) + (cr != nullptr ? static_cast<size_t>(cr->count) : 0u));
 				for (int li = 0; li < cb.count; ++li)
 					allLines.push_back(cb.Line(li));
@@ -1263,9 +1325,14 @@ namespace SourceIdentity
 						allLines.push_back(cr->Line(li));
 				}
 
-				std::vector<double> mpegDips[4];
-				std::vector<double> mpegLogRms[4];
-				std::vector<double> scratch;
+				for (int pi = 0; pi < 4; ++pi)
+				{
+					ws.mpegDips[pi].clear();
+					ws.mpegLogRms[pi].clear();
+				}
+				auto& mpegDips = ws.mpegDips;
+				auto& mpegLogRms = ws.mpegLogRms;
+				std::vector<double>& scratch = ws.scratch;
 				double rssBatch[kResidualBatch];
 				double segSumBatch[kResidualBatch * kMaxSegs];
 				int segRows[kMaxSegs];
@@ -1420,7 +1487,7 @@ namespace SourceIdentity
 					{
 						constexpr double kCatmullStepOvershoot = 3.0 / 38.0; // exact Catmull-Rom negative-lobe overshoot
 						double medRing = 0.0;
-						const int ringVerdict = DetectCenteredStepOvershoot(cb, cr, floorCodes, ops, medRing);
+						const int ringVerdict = DetectCenteredStepOvershoot(cb, cr, floorCodes, ops, medRing, ws);
 						if (ringVerdict < 0)
 						{
 							const double ringMargin = ClampD(
@@ -1736,9 +1803,12 @@ namespace SourceIdentity
 			{
 				entries_.clear();
 				memo_ = TapMemo(4096);
+				ws_.Reset();
 				accessTick_ = 0;
 				stats_ = ChromaOperatorCacheStats{};
 			}
+
+			ChromaWorkspace& Workspace() { return ws_; }
 
 			const detail_chroma_estimator::ChromaAxisOperators& GetOrBuild(int N, int origin, int length)
 			{
@@ -1788,6 +1858,7 @@ namespace SourceIdentity
 
 			size_t maxEntries_ = 4;
 			TapMemo memo_;
+			ChromaWorkspace ws_;
 			uint64_t accessTick_ = 0;
 			std::vector<detail_chroma_estimator::ChromaAxisOperators> entries_;
 			ChromaOperatorCacheStats stats_;
@@ -1799,7 +1870,8 @@ namespace SourceIdentity
 		inline ChromaChainEstimate EstimateChromaChain(
 			const ChromaSampleInput& in,
 			const ChromaEstimatorSettings& s = ChromaEstimatorSettings(),
-			ChromaOperatorCache* cache = nullptr)
+			ChromaOperatorCache* cache = nullptr,
+			ChromaWorkspace* ws = nullptr)
 		{
 			ChromaChainEstimate est;
 			if (!s.enabled)
@@ -1809,6 +1881,8 @@ namespace SourceIdentity
 				est.lumaCoupled.reason = ChromaEstimatorReason::Disabled;
 				return est;
 			}
+			ChromaWorkspace localWs;
+			ChromaWorkspace& work = (ws != nullptr) ? *ws : ((cache != nullptr) ? cache->Workspace() : localWs);
 
 			const bool is422 = (in.deliveredSampling == DeliveredChromaSampling::Yuv422);
 			const bool is420 = (in.deliveredSampling == DeliveredChromaSampling::Yuv420);
@@ -2135,7 +2209,7 @@ namespace SourceIdentity
 				}
 
 				const detail_chroma_estimator::AxisHalfAnalysis axV =
-					detail_chroma_estimator::AnalyzeAxisHalf(in.cbV, crV, lumaV, in.floorCodes, s, *opsV);
+					detail_chroma_estimator::AnalyzeAxisHalf(in.cbV, crV, lumaV, in.floorCodes, s, *opsV, work);
 				if (!axV.valid)
 				{
 					est.reason = ChromaEstimatorReason::InvalidInput;
@@ -2144,7 +2218,7 @@ namespace SourceIdentity
 
 				detail_chroma_estimator::BoxMpegProbeResult bmV;
 				if (s.detectBoxAndMpegChroma)
-					bmV = detail_chroma_estimator::ProbeAxisBoxAndMpeg(in.cbV, crV, in.floorCodes, s, *opsV, axV, localMemo);
+					bmV = detail_chroma_estimator::ProbeAxisBoxAndMpeg(in.cbV, crV, in.floorCodes, s, *opsV, axV, work);
 
 				est.dipV = axV.bestDip;
 				est.quarter.reason = ChromaEstimatorReason::QuarterNotSupported;
@@ -2225,7 +2299,7 @@ namespace SourceIdentity
 						if (std::fabs(pooledRms[0] - pooledRms[1]) / (std::max)(max01, 1e-12) < s.kernelMarginMin)
 						{
 							double medRingV = 0.0;
-							if (detail_chroma_estimator::DetectCenteredStepOvershoot(in.cbV, crV, in.floorCodes, *opsV, medRingV) > 0)
+							if (detail_chroma_estimator::DetectCenteredStepOvershoot(in.cbV, crV, in.floorCodes, *opsV, medRingV, work) > 0)
 								excludeNonNegLinearV = true;
 						}
 					}
@@ -2295,12 +2369,12 @@ namespace SourceIdentity
 				opsH = &localOps;
 			}
 			double qDipH = 0.0;
-			const bool qOkH = detail_chroma_estimator::EvaluateAxisQuarterDip(in.cbH, crH, in.floorCodes, s, *opsH, qDipH);
+			const bool qOkH = detail_chroma_estimator::EvaluateAxisQuarterDip(in.cbH, crH, in.floorCodes, s, *opsH, qDipH, work);
 			const detail_chroma_estimator::AxisHalfAnalysis axH =
-				detail_chroma_estimator::AnalyzeAxisHalf(in.cbH, crH, lumaH, in.floorCodes, s, *opsH);
+				detail_chroma_estimator::AnalyzeAxisHalf(in.cbH, crH, lumaH, in.floorCodes, s, *opsH, work);
 			detail_chroma_estimator::BoxMpegProbeResult bmH;
 			if (s.detectBoxAndMpegChroma)
-				bmH = detail_chroma_estimator::ProbeAxisBoxAndMpeg(in.cbH, crH, in.floorCodes, s, *opsH, axH, localMemo);
+				bmH = detail_chroma_estimator::ProbeAxisBoxAndMpeg(in.cbH, crH, in.floorCodes, s, *opsH, axH, work);
 
 			const detail_chroma_estimator::ChromaAxisOperators* opsV = nullptr;
 			if (cache != nullptr)
@@ -2313,12 +2387,12 @@ namespace SourceIdentity
 				opsV = &localOps;
 			}
 			double qDipV = 0.0;
-			const bool qOkV = detail_chroma_estimator::EvaluateAxisQuarterDip(in.cbV, crV, in.floorCodes, s, *opsV, qDipV);
+			const bool qOkV = detail_chroma_estimator::EvaluateAxisQuarterDip(in.cbV, crV, in.floorCodes, s, *opsV, qDipV, work);
 			const detail_chroma_estimator::AxisHalfAnalysis axV =
-				detail_chroma_estimator::AnalyzeAxisHalf(in.cbV, crV, lumaV, in.floorCodes, s, *opsV);
+				detail_chroma_estimator::AnalyzeAxisHalf(in.cbV, crV, lumaV, in.floorCodes, s, *opsV, work);
 			detail_chroma_estimator::BoxMpegProbeResult bmV;
 			if (s.detectBoxAndMpegChroma)
-				bmV = detail_chroma_estimator::ProbeAxisBoxAndMpeg(in.cbV, crV, in.floorCodes, s, *opsV, axV, localMemo);
+				bmV = detail_chroma_estimator::ProbeAxisBoxAndMpeg(in.cbV, crV, in.floorCodes, s, *opsV, axV, work);
 
 			if (qOkH && qOkV)
 			{

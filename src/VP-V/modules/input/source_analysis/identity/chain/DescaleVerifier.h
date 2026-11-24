@@ -206,6 +206,9 @@ namespace SourceIdentity
 				const int phaseFallbacks0 = phaseRefineFallbacks_;
 				memo_.clear();   // the solves are those of THIS call's lines
 				memoBytes_ = 0;
+				hdrLinearizedReady_ = false;
+				hdrLinearizedOk_ = false;
+				hdrPreClamped_ = 0;
 				if (ls.count < 1 || ls.axisLen < 64 || ls.length < 96 || cand == nullptr || count <= 0)
 				{
 					out.reason = (count <= 0) ? kReasonNoCandidates : kReasonBadInput;
@@ -699,14 +702,34 @@ namespace SourceIdentity
 				}
 				const int maxN = static_cast<int>(std::floor(s_.maxLatentRatio * static_cast<double>(N)));
 				const int step = s_.coarseStep < 1 ? 1 : s_.coarseStep;
-				std::vector<double> cPhases;
-				cPhases.push_back(0.0);
-				for (int q = 1; q <= (s_.phaseCount - 1) / 2; ++q)
+				// EFF-MED-1: fixed stack buffer for phaseCount <= 17 (0 heap allocations on default-OFF path).
+				double cPhasesStack[17];
+				const double* cPhases = cPhasesStack;
+				size_t cPhaseCount = 0;
+				const int halfPhases = (s_.phaseCount - 1) / 2;
+				const size_t totalPhases = static_cast<size_t>(1 + (halfPhases > 0 ? 2 * halfPhases : 0));
+				if (totalPhases <= 17u)
 				{
-					cPhases.push_back(static_cast<double>(q) * s_.phaseStep);
-					cPhases.push_back(-static_cast<double>(q) * s_.phaseStep);
+					cPhasesStack[cPhaseCount++] = 0.0;
+					for (int q = 1; q <= halfPhases; ++q)
+					{
+						cPhasesStack[cPhaseCount++] = static_cast<double>(q) * s_.phaseStep;
+						cPhasesStack[cPhaseCount++] = -static_cast<double>(q) * s_.phaseStep;
+					}
 				}
-				const size_t cPhaseCount = cPhases.size();
+				else
+				{
+					cPhasesScratch_.clear();
+					cPhasesScratch_.reserve(totalPhases);
+					cPhasesScratch_.push_back(0.0);
+					for (int q = 1; q <= halfPhases; ++q)
+					{
+						cPhasesScratch_.push_back(static_cast<double>(q) * s_.phaseStep);
+						cPhasesScratch_.push_back(-static_cast<double>(q) * s_.phaseStep);
+					}
+					cPhases = cPhasesScratch_.data();
+					cPhaseCount = cPhasesScratch_.size();
+				}
 				valsScratch_.resize(static_cast<size_t>(nWin) * static_cast<size_t>(nl));
 				bool have = false;
 				const SolveBatch* bw[2][kFamilyCount];
@@ -1218,35 +1241,93 @@ namespace SourceIdentity
 				cr.baselineMedian = FastMedianSmall(cr.lineBase.data(), nl);
 				if (s_.hdrNoise.enabled && s_.hdrNoise.transfer != HdrTransfer::Sdr && s_.hdrNoise.linearizeForDescale && !screenOnly)
 				{
-					// HIGH-4: evaluate the integer neighborhood (plus cr.nProposed in case code-space CoarseScan
-					// drifted on high-contrast PQ/HLG edges) in linearized Gauss-Markov WLS space, and populate
-					// per-line cr.lineStat / cr.lineBase / cr.lineRms + per-segment cr.segStat / cr.segBase so
-					// ChainEvidence::Judge consumes the true linearized WLS residuals.
-					std::vector<int> hdrNs = ns;
-					if (cr.nProposed >= s_.minLatent && cr.nProposed <= maxN &&
-						std::find(hdrNs.begin(), hdrNs.end(), cr.nProposed) == hdrNs.end())
+					// SOTA1-HIGH-2: linearize `ls` ONCE per DescaleVerifier::Evaluate call into hdrWs_.
+					if (!hdrLinearizedReady_)
 					{
-						hdrNs.push_back(cr.nProposed);
+						hdrLinearizedReady_ = true;
+						HdrNoiseReason linReason = HdrNoiseReason::Ok;
+						hdrLinearizedOk_ = LinearizeLineSet(ls, s_.hdrNoise, hdrWs_, linReason, hdrPreClamped_);
 					}
 					bool haveHdr = false;
 					int bestHdrN = cr.n;
-					HdrVerifyResult bestHr;
-					for (size_t hi = 0; hi < hdrNs.size(); ++hi)
+					if (hdrLinearizedOk_)
 					{
-						const int candN = hdrNs[hi];
-						const HdrVerifyResult hr = VerifyLinearizedHeteroscedastic(
-							ls, candN, s_.hdrNoise, hdrWs_, idxScratch_.data(), nl);
-						if (!hr.valid)
-							continue;
-						const bool better = !haveHdr || hr.stat < bestHr.stat ||
-							(hr.stat == bestHr.stat && std::abs(candN - cr.nProposed) < std::abs(bestHdrN - cr.nProposed));
-						if (better)
+						// HIGH-4 + SOTA1-HIGH-1/HIGH-2: honor opt.onlyKernel, skip discarded uniform diagnostic solves,
+						// reuse hdrTmpRes_/hdrBestRes_ in place, and screen multi-integer neighborhoods with 1 fast
+						// 4-tap representative kernel (bicubic_0_0.5) before running the full 4-family WLS on the winner.
+						int hdrNsBuf[16];
+						int hdrNsCount = 0;
+						auto pushHdrN = [&](int candVal) {
+							if (candVal < s_.minLatent || candVal > maxN || hdrNsCount >= 16)
+								return;
+							for (int k = 0; k < hdrNsCount; ++k)
+								if (hdrNsBuf[k] == candVal)
+									return;
+							hdrNsBuf[hdrNsCount++] = candVal;
+						};
+						for (size_t hi = 0; hi < ns.size(); ++hi)
+							pushHdrN(ns[hi]);
+						pushHdrN(cr.nProposed);
+
+						const int onlyK = (opt.onlyKernel >= 0 && opt.onlyKernel < kKernelCount) ? opt.onlyKernel : -1;
+						if (onlyK < 0 && hdrNsCount > 1)
 						{
-							haveHdr = true;
-							bestHdrN = candN;
-							bestHr = hr;
+							bool haveScreen = false;
+							int bestScreenN = hdrNsBuf[0];
+							double bestScreenStat = 0.0;
+							// Representative 4-tap cubic (bicubic_0_0.5, k=1, half-bandwidth u=3) screens exact integer n ~4x faster.
+							const int screenK = 1;
+							for (int hi = 0; hi < hdrNsCount; ++hi)
+							{
+								const int candN = hdrNsBuf[hi];
+								VerifyLinearizedHeteroscedasticInPlace(
+									ls, candN, s_.hdrNoise, hdrWs_, hdrTmpRes_, idxScratch_.data(), nl,
+									false, screenK, true, hdrPreClamped_);
+								if (!hdrTmpRes_.valid)
+									continue;
+								const bool better = !haveScreen || hdrTmpRes_.stat < bestScreenStat ||
+									(hdrTmpRes_.stat == bestScreenStat && std::abs(candN - cr.nProposed) < std::abs(bestScreenN - cr.nProposed));
+								if (better)
+								{
+									haveScreen = true;
+									bestScreenN = candN;
+									bestScreenStat = hdrTmpRes_.stat;
+								}
+							}
+							if (haveScreen)
+							{
+								VerifyLinearizedHeteroscedasticInPlace(
+									ls, bestScreenN, s_.hdrNoise, hdrWs_, hdrBestRes_, idxScratch_.data(), nl,
+									false, -1, true, hdrPreClamped_);
+								if (hdrBestRes_.valid)
+								{
+									haveHdr = true;
+									bestHdrN = bestScreenN;
+								}
+							}
+						}
+						else
+						{
+							for (int hi = 0; hi < hdrNsCount; ++hi)
+							{
+								const int candN = hdrNsBuf[hi];
+								VerifyLinearizedHeteroscedasticInPlace(
+									ls, candN, s_.hdrNoise, hdrWs_, hdrTmpRes_, idxScratch_.data(), nl,
+									false, onlyK, true, hdrPreClamped_);
+								if (!hdrTmpRes_.valid)
+									continue;
+								const bool better = !haveHdr || hdrTmpRes_.stat < hdrBestRes_.stat ||
+									(hdrTmpRes_.stat == hdrBestRes_.stat && std::abs(candN - cr.nProposed) < std::abs(bestHdrN - cr.nProposed));
+								if (better)
+								{
+									haveHdr = true;
+									bestHdrN = candN;
+									std::swap(hdrBestRes_, hdrTmpRes_);
+								}
+							}
 						}
 					}
+					const HdrVerifyResult& bestHr = hdrBestRes_;
 					cr.hdrDarkToeClampedSamples = haveHdr ? bestHr.darkToeClampedSamples : 0;
 					if (haveHdr)
 					{
@@ -1309,7 +1390,13 @@ namespace SourceIdentity
 			std::vector<double> scanSScratch_;
 			std::vector<double> valsScratch_;
 			std::vector<int> idxScratch_;
+			std::vector<double> cPhasesScratch_;
 			HdrNoiseWorkspace hdrWs_;
+			HdrVerifyResult hdrTmpRes_;
+			HdrVerifyResult hdrBestRes_;
+			bool hdrLinearizedReady_ = false;
+			bool hdrLinearizedOk_ = false;
+			int hdrPreClamped_ = 0;
 			std::vector<double> gnZ_;
 			std::vector<double> gnV_;
 			std::vector<double> gnDz_;

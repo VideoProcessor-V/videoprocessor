@@ -358,6 +358,9 @@ namespace SourceIdentity
 			std::vector<double> refCols;
 			std::vector<double> lineVals;
 
+			// Bounded reusable tap memo (SOTA1-HIGH-2: zero per-call TapMemo heap allocations).
+			TapMemo tapMemo{ 4096 };
+
 			// Bounded WLS / diagnostic scratch buffers reused across calls without static state.
 			std::vector<double> wlsTaps;
 			std::vector<int> wlsCol;
@@ -391,6 +394,7 @@ namespace SourceIdentity
 				workSolve.clear();
 				refCols.clear();
 				lineVals.clear();
+				tapMemo = TapMemo(4096);
 				wlsTaps.clear();
 				wlsCol.clear();
 				wlsMat.clear();
@@ -414,6 +418,8 @@ namespace SourceIdentity
 
 		// Converts every 10-bit code sample in `codeLs` to linear luminance Y via PqEotf / HlgInvOetf into
 		// `ws.linearLines` and computes exact per-sample `ws.localSigma[j * L + i] = LocalQuantSigmaLinear(...)`.
+		// SOTA1-HIGH-2: hoists quantization step, sigmaEp, and firstStepLinear (derivMin) once per LineSet
+		// instead of recomputing EOTF(step) per pixel.
 		inline bool LinearizeLineSet(
 			const LineSet& codeLs,
 			const HdrNoiseSettings& cfg,
@@ -460,6 +466,13 @@ namespace SourceIdentity
 			const size_t lenSz = static_cast<size_t>(codeLs.length);
 			ws.localSigma.assign(static_cast<size_t>(codeLs.count) * lenSz, 0.0);
 
+			const bool isPq = (cfg.transfer == HdrTransfer::Pq);
+			const double step = QuantStepNorm(cfg.bitDepth, cfg.limitedRange);
+			const double sigmaEp = step / std::sqrt(12.0);
+			const double firstStepLinear = isPq ? PqEotf(step) : HlgInvOetf(step);
+			const double derivMin = firstStepLinear / step;
+			const double hlgC = HlgC();
+
 			for (int j = 0; j < codeLs.count; ++j)
 			{
 				const double* src = codeLs.Line(j);
@@ -474,11 +487,53 @@ namespace SourceIdentity
 						return false;
 					}
 					const double ep = Code10ToNorm(code, cfg.limitedRange);
-					dst[i] = (cfg.transfer == HdrTransfer::Pq) ? PqEotf(ep) : HlgInvOetf(ep);
-					bool clamped = false;
-					sigRow[i] = LocalQuantSigmaLinear(cfg.transfer, code, cfg.bitDepth, cfg.limitedRange, &clamped);
-					if (clamped)
+					double yVal = 0.0;
+					double derivRaw = 0.0;
+					if (isPq)
+					{
+						if (ep > 0.0)
+						{
+							const double p = std::pow(ep, 1.0 / kPqM2);
+							const double num = (std::max)(p - kPqC1, 0.0);
+							const double den = kPqC2 - kPqC3 * p;
+							if (num > 0.0 && den > 1e-12)
+							{
+								const double ratio = num / den;
+								const double powBase = std::pow(ratio, 1.0 / kPqM1 - 1.0);
+								yVal = (ep >= 1.0) ? 1.0 : ClampD(powBase * ratio, 0.0, 1.0);
+								const double dNdD_dp = (kPqC2 - kPqC1 * kPqC3) / (den * den);
+								const double dp_dep = (1.0 / kPqM2) * (p / ep);
+								const double dY = (1.0 / kPqM1) * powBase * dNdD_dp * dp_dep;
+								derivRaw = (std::isfinite(dY) && dY > 0.0) ? dY : 0.0;
+							}
+							else if (ep >= 1.0)
+							{
+								yVal = 1.0;
+							}
+						}
+					}
+					else
+					{
+						if (ep <= 0.5)
+						{
+							yVal = (ep * ep) / 3.0;
+							derivRaw = (ep > 0.0) ? ((2.0 * ep) / 3.0) : 0.0;
+						}
+						else
+						{
+							const double ex = std::exp((ep - hlgC) / kHlgA);
+							yVal = ClampD((ex + kHlgB) / 12.0, 0.0, 1.0);
+							derivRaw = ex / (12.0 * kHlgA);
+						}
+					}
+					dst[i] = yVal;
+					double deriv = derivRaw;
+					if (!std::isfinite(deriv) || deriv < derivMin)
+					{
+						deriv = derivMin;
 						++darkToeClampedCount;
+					}
+					sigRow[i] = deriv * sigmaEp;
 				}
 			}
 
@@ -544,7 +599,6 @@ namespace SourceIdentity
 				int cmin = 0;
 				int cmax = 0;
 				const double ratio = static_cast<double>(n) / static_cast<double>(N);
-				TapMemo localMemo(256);
 				double tapScratch[8];
 				for (int j = 0; j < length; ++j)
 				{
@@ -552,7 +606,7 @@ namespace SourceIdentity
 					const double fl = std::floor(p);
 					const int64_t key = static_cast<int64_t>(std::floor((p - fl) * 1073741824.0 + 0.5));
 					double* row = &ws.wlsTaps[static_cast<size_t>(j) * static_cast<size_t>(taps)];
-					const double* tw = localMemo.Get(kernel, key, tapScratch);
+					const double* tw = ws.tapMemo.Get(kernel, key, tapScratch);
 					for (int s = 0; s < taps; ++s)
 						row[s] = tw[s];
 					const int c = static_cast<int>(fl) - r + 1;
@@ -772,27 +826,49 @@ namespace SourceIdentity
 			}
 		}
 
-		// Verifies a candidate latent size `candidateN` on HDR code-space lines using exact linearized
-		// heteroscedastic Gauss-Markov WLS (noise-whitened residuals across dark toe, midtone, and highlights),
-		// alongside the unweighted linear-MSE diagnostic `uniformLinearStat` on the exact same linearized lines.
-		inline HdrVerifyResult VerifyLinearizedHeteroscedastic(
+		// In-place Gauss-Markov WLS verifier (SOTA1-HIGH-1 & SOTA1-HIGH-2):
+		//   - Populates caller-owned `res` in place (reusing vector capacity across calls);
+		//   - Supports `alreadyLinearized = true` so callers like DescaleVerifier linearize `codeLs` ONCE per frame;
+		//   - Supports `onlyKernel >= 0` (honoring VerifyOptions::onlyKernel and fast single-kernel integer screening);
+		//   - Supports `computeUniformDiagnostic = false` to skip the discarded unweighted `unifOp` solves on hot paths.
+		inline void VerifyLinearizedHeteroscedasticInPlace(
 			const LineSet& codeLs,
 			int candidateN,
 			const HdrNoiseSettings& cfg,
 			HdrNoiseWorkspace& ws,
+			HdrVerifyResult& res,
 			const int* lineIdx = nullptr,
-			int lineCount = 0)
+			int lineCount = 0,
+			bool computeUniformDiagnostic = true,
+			int onlyKernel = -1,
+			bool alreadyLinearized = false,
+			int preClampedCount = 0)
 		{
-			HdrVerifyResult res;
+			res.valid = false;
+			res.reason = HdrNoiseReason::Disabled;
+			res.bestKernel = -1;
+			res.stat = 0.0;
+			res.whitenedRms = 0.0;
+			res.uniformLinearStat = 0.0;
+			res.darkToeClampedSamples = 0;
+			res.evaluatedLines = 0;
+			res.segCount = 0;
+			res.lineStat.clear();
+			res.lineBaseWhitened.clear();
+			res.lineRmsWhitened.clear();
+			res.segStat.clear();
+			res.segBaseWhitened.clear();
+			res.segRows.clear();
+
 			if (!cfg.enabled)
 			{
 				res.reason = HdrNoiseReason::Disabled;
-				return res;
+				return;
 			}
 			if (cfg.transfer == HdrTransfer::Sdr)
 			{
 				res.reason = HdrNoiseReason::SdrPassthrough;
-				return res;
+				return;
 			}
 			if ((cfg.transfer != HdrTransfer::Pq && cfg.transfer != HdrTransfer::Hlg) ||
 				!std::isfinite(cfg.floorGuardDivisor) || !(cfg.floorGuardDivisor > 0.0) ||
@@ -801,7 +877,7 @@ namespace SourceIdentity
 				!std::isfinite(cfg.refFraction2) || !(cfg.refFraction2 > 0.0) || cfg.refFraction2 >= 0.5)
 			{
 				res.reason = HdrNoiseReason::InvalidInput;
-				return res;
+				return;
 			}
 			if (codeLs.count <= 0 || codeLs.length <= 0 || codeLs.axisLen <= 0 ||
 				codeLs.origin < 0 || codeLs.length > codeLs.axisLen ||
@@ -809,7 +885,7 @@ namespace SourceIdentity
 				codeLs.data.size() / static_cast<size_t>(codeLs.length) < static_cast<size_t>(codeLs.count))
 			{
 				res.reason = HdrNoiseReason::InvalidInput;
-				return res;
+				return;
 			}
 
 			// Latent bounds matching DescaleVerifier.h:89-90 (minLatent = 16, maxLatentRatio = 0.985).
@@ -819,52 +895,56 @@ namespace SourceIdentity
 			if (candidateN < minLatent || candidateN > maxN || candidateN >= N)
 			{
 				res.reason = HdrNoiseReason::InvalidInput;
-				return res;
+				return;
 			}
 			const int candMargin = OperatorMargin(N, candidateN, 4);
 			if (codeLs.length - 2 * candMargin < 32)
 			{
 				res.reason = HdrNoiseReason::InsufficientSamples;
-				return res;
+				return;
 			}
 
-			// Linearize into caller-owned workspace (or keep normalized code space if linearizeForDescale == false).
-			int clampedCount = 0;
-			if (cfg.linearizeForDescale)
+			// Linearize into caller-owned workspace unless already linearized for this LineSet.
+			int clampedCount = preClampedCount;
+			if (!alreadyLinearized)
 			{
-				HdrNoiseReason linReason = HdrNoiseReason::Ok;
-				if (!LinearizeLineSet(codeLs, cfg, ws, linReason, clampedCount))
+				clampedCount = 0;
+				if (cfg.linearizeForDescale)
 				{
-					res.reason = linReason;
-					return res;
-				}
-			}
-			else
-			{
-				ws.linearLines.axis = codeLs.axis;
-				ws.linearLines.axisLen = codeLs.axisLen;
-				ws.linearLines.origin = codeLs.origin;
-				ws.linearLines.Resize(codeLs.count, codeLs.length);
-				if (codeLs.cross.size() >= static_cast<size_t>(codeLs.count))
-				{
-					for (int j = 0; j < codeLs.count; ++j)
-						ws.linearLines.cross[static_cast<size_t>(j)] = codeLs.cross[static_cast<size_t>(j)];
-				}
-				const double sigmaEp = QuantStepNorm(cfg.bitDepth, cfg.limitedRange) / std::sqrt(12.0);
-				const size_t lenSz = static_cast<size_t>(codeLs.length);
-				ws.localSigma.assign(static_cast<size_t>(codeLs.count) * lenSz, sigmaEp);
-				for (int j = 0; j < codeLs.count; ++j)
-				{
-					const double* src = codeLs.Line(j);
-					double* dst = ws.linearLines.Line(j);
-					for (int i = 0; i < codeLs.length; ++i)
+					HdrNoiseReason linReason = HdrNoiseReason::Ok;
+					if (!LinearizeLineSet(codeLs, cfg, ws, linReason, clampedCount))
 					{
-						if (!std::isfinite(src[i]))
+						res.reason = linReason;
+						return;
+					}
+				}
+				else
+				{
+					ws.linearLines.axis = codeLs.axis;
+					ws.linearLines.axisLen = codeLs.axisLen;
+					ws.linearLines.origin = codeLs.origin;
+					ws.linearLines.Resize(codeLs.count, codeLs.length);
+					if (codeLs.cross.size() >= static_cast<size_t>(codeLs.count))
+					{
+						for (int j = 0; j < codeLs.count; ++j)
+							ws.linearLines.cross[static_cast<size_t>(j)] = codeLs.cross[static_cast<size_t>(j)];
+					}
+					const double sigmaEp = QuantStepNorm(cfg.bitDepth, cfg.limitedRange) / std::sqrt(12.0);
+					const size_t lenSz0 = static_cast<size_t>(codeLs.length);
+					ws.localSigma.assign(static_cast<size_t>(codeLs.count) * lenSz0, sigmaEp);
+					for (int j = 0; j < codeLs.count; ++j)
+					{
+						const double* src = codeLs.Line(j);
+						double* dst = ws.linearLines.Line(j);
+						for (int i = 0; i < codeLs.length; ++i)
 						{
-							res.reason = HdrNoiseReason::InvalidInput;
-							return res;
+							if (!std::isfinite(src[i]))
+							{
+								res.reason = HdrNoiseReason::InvalidInput;
+								return;
+							}
+							dst[i] = Code10ToNorm(src[i], cfg.limitedRange);
 						}
-						dst[i] = Code10ToNorm(src[i], cfg.limitedRange);
 					}
 				}
 			}
@@ -898,7 +978,7 @@ namespace SourceIdentity
 			if (nref < 2)
 			{
 				res.reason = HdrNoiseReason::InsufficientSamples;
-				return res;
+				return;
 			}
 
 			const int totalLines = ws.linearLines.count;
@@ -906,7 +986,7 @@ namespace SourceIdentity
 			if (nl <= 0)
 			{
 				res.reason = HdrNoiseReason::InvalidInput;
-				return res;
+				return;
 			}
 			for (int j = 0; j < nl; ++j)
 			{
@@ -914,7 +994,7 @@ namespace SourceIdentity
 				if (srcIdx < 0 || srcIdx >= totalLines)
 				{
 					res.reason = HdrNoiseReason::InvalidInput;
-					return res;
+					return;
 				}
 			}
 			const int L = ws.linearLines.length;
@@ -923,25 +1003,42 @@ namespace SourceIdentity
 			const double epsW = 1.0 / cfg.floorGuardDivisor;
 			const int segCount = (std::min)(kMaxSegs, (L + kSegPx - 1) / kSegPx);
 
-			// Per-line RMS linear quantization sigma (exact unweighted noise floor of line j, used to derive
-			// epsU_j = sigmaRms_j / floorGuardDivisor so uniformLinearStat matches stat on homoscedastic lines).
-			ws.lineSigmaRms.assign(nlSz, 0.0);
-			for (int j = 0; j < nl; ++j)
+			if (computeUniformDiagnostic)
 			{
-				const int srcIdx = (lineIdx != nullptr && lineCount > 0) ? lineIdx[j] : j;
-				const double* sigRow = ws.localSigma.data() + static_cast<size_t>(srcIdx) * lenSz;
-				double sumSig2 = 0.0;
-				for (int i = 0; i < L; ++i)
-					sumSig2 += sigRow[i] * sigRow[i];
-				ws.lineSigmaRms[static_cast<size_t>(j)] = std::sqrt(sumSig2 / static_cast<double>(L));
+				// Per-line RMS linear quantization sigma (exact unweighted noise floor of line j, used to derive
+				// epsU_j = sigmaRms_j / floorGuardDivisor so uniformLinearStat matches stat on homoscedastic lines).
+				ws.lineSigmaRms.assign(nlSz, 0.0);
+				for (int j = 0; j < nl; ++j)
+				{
+					const int srcIdx = (lineIdx != nullptr && lineCount > 0) ? lineIdx[j] : j;
+					const double* sigRow = ws.localSigma.data() + static_cast<size_t>(srcIdx) * lenSz;
+					double sumSig2 = 0.0;
+					for (int i = 0; i < L; ++i)
+						sumSig2 += sigRow[i] * sigRow[i];
+					ws.lineSigmaRms[static_cast<size_t>(j)] = std::sqrt(sumSig2 / static_cast<double>(L));
+				}
 			}
 
-			int nrep = 0;
-			const int* reps = RepresentativeKernels(nrep);
+			int evalKernels[kFamilyCount];
+			int nEvalK = 0;
+			if (onlyKernel >= 0 && onlyKernel < kKernelCount)
+			{
+				evalKernels[0] = onlyKernel;
+				nEvalK = 1;
+			}
+			else
+			{
+				int nrep = 0;
+				const int* reps = RepresentativeKernels(nrep);
+				nEvalK = nrep;
+				for (int q = 0; q < nrep; ++q)
+					evalKernels[q] = reps[q];
+			}
 
-			// Reference baseline across nref reference sizes x representative kernels (lines + 256-px segments).
+			// Reference baseline across nref reference sizes x evaluation kernels (lines + 256-px segments).
 			ws.refCols.assign(nlSz * static_cast<size_t>(nref), 0.0);
-			ws.refColsUnif.assign(nlSz * static_cast<size_t>(nref), 0.0);
+			if (computeUniformDiagnostic)
+				ws.refColsUnif.assign(nlSz * static_cast<size_t>(nref), 0.0);
 			ws.refSegW.assign(static_cast<size_t>(nref) * nlSz * static_cast<size_t>(kMaxSegs), -1.0);
 
 			double segSumTmp[kMaxSegs];
@@ -953,22 +1050,26 @@ namespace SourceIdentity
 			for (int ri = 0; ri < nref; ++ri)
 			{
 				const int nr = refs[ri];
-				for (int q = 0; q < nrep; ++q)
+				for (int q = 0; q < nEvalK; ++q)
 				{
-					const int k = reps[q];
+					const int k = evalKernels[q];
 					Detail::WlsOperatorMeta meta;
 					if (!Detail::BuildWlsTapGeometry(N, nr, k, ws.linearLines.origin, L, ws, meta))
 					{
 						res.reason = HdrNoiseReason::InsufficientSamples;
-						return res;
+						return;
 					}
-					if (!unifOp.Build(N, nr, k, 0.0, ws.linearLines.origin, L))
+					double unifDof = 1.0;
+					if (computeUniformDiagnostic)
 					{
-						res.reason = HdrNoiseReason::SingularOperator;
-						return res;
+						if (!unifOp.Build(N, nr, k, 0.0, ws.linearLines.origin, L, &ws.tapMemo))
+						{
+							res.reason = HdrNoiseReason::SingularOperator;
+							return;
+						}
+						const double unifRawDof = 1.0 - static_cast<double>(unifOp.Nodes()) / static_cast<double>(unifOp.Length());
+						unifDof = unifRawDof < 0.02 ? 0.02 : unifRawDof;
 					}
-					const double unifRawDof = 1.0 - static_cast<double>(unifOp.Nodes()) / static_cast<double>(unifOp.Length());
-					const double unifDof = unifRawDof < 0.02 ? 0.02 : unifRawDof;
 
 					for (int j = 0; j < nl; ++j)
 					{
@@ -980,24 +1081,7 @@ namespace SourceIdentity
 						if (!Detail::SolveLineWls(yRow, sigRow, meta, epsW, ws, levelW, rawRmsW, segSumW, segRowsW))
 						{
 							res.reason = HdrNoiseReason::SingularOperator;
-							return res;
-						}
-
-						double rssU = 0.0;
-						int rowsU = 0;
-						unifOp.Residual(yRow, ws.workSolve, rssU, rowsU, segSumTmp, segRowsTmp);
-						if (rowsU <= 0 || !std::isfinite(rssU))
-						{
-							res.reason = HdrNoiseReason::SingularOperator;
-							return res;
-						}
-						const double epsU = ws.lineSigmaRms[static_cast<size_t>(j)] / cfg.floorGuardDivisor;
-						const double msU = rssU / static_cast<double>(rowsU);
-						const double levelU = std::sqrt((msU + epsU * epsU) / unifDof);
-						if (!std::isfinite(levelU) || !(levelU > 0.0))
-						{
-							res.reason = HdrNoiseReason::SingularOperator;
-							return res;
+							return;
 						}
 
 						const size_t slot = static_cast<size_t>(j) * static_cast<size_t>(nref) + static_cast<size_t>(ri);
@@ -1011,29 +1095,59 @@ namespace SourceIdentity
 									ws.refSegW[segOff + static_cast<size_t>(g)] = (segSumW[g] / static_cast<double>(segRowsW[g]) + epsW * epsW) / meta.dof;
 							}
 						}
-						if (q == 0 || levelU < ws.refColsUnif[slot])
-							ws.refColsUnif[slot] = levelU;
+
+						if (computeUniformDiagnostic)
+						{
+							double rssU = 0.0;
+							int rowsU = 0;
+							unifOp.Residual(yRow, ws.workSolve, rssU, rowsU, segSumTmp, segRowsTmp);
+							if (rowsU <= 0 || !std::isfinite(rssU))
+							{
+								res.reason = HdrNoiseReason::SingularOperator;
+								return;
+							}
+							const double epsU = ws.lineSigmaRms[static_cast<size_t>(j)] / cfg.floorGuardDivisor;
+							const double msU = rssU / static_cast<double>(rowsU);
+							const double levelU = std::sqrt((msU + epsU * epsU) / unifDof);
+							if (!std::isfinite(levelU) || !(levelU > 0.0))
+							{
+								res.reason = HdrNoiseReason::SingularOperator;
+								return;
+							}
+							if (q == 0 || levelU < ws.refColsUnif[slot])
+								ws.refColsUnif[slot] = levelU;
+						}
 					}
 				}
 			}
 
 			ws.baseLineW.assign(nlSz, 0.0);
-			ws.baseLineU.assign(nlSz, 0.0);
+			if (computeUniformDiagnostic)
+				ws.baseLineU.assign(nlSz, 0.0);
 			for (int j = 0; j < nl; ++j)
 			{
 				const size_t baseOff = static_cast<size_t>(j) * static_cast<size_t>(nref);
 				ws.baseLineW[static_cast<size_t>(j)] = RobustStats::MedianOf(&ws.refCols[baseOff], nref);
-				ws.baseLineU[static_cast<size_t>(j)] = RobustStats::MedianOf(&ws.refColsUnif[baseOff], nref);
-				if (!(ws.baseLineW[static_cast<size_t>(j)] > 0.0) || !(ws.baseLineU[static_cast<size_t>(j)] > 0.0))
+				if (!(ws.baseLineW[static_cast<size_t>(j)] > 0.0))
 				{
 					res.reason = HdrNoiseReason::SingularOperator;
-					return res;
+					return;
+				}
+				if (computeUniformDiagnostic)
+				{
+					ws.baseLineU[static_cast<size_t>(j)] = RobustStats::MedianOf(&ws.refColsUnif[baseOff], nref);
+					if (!(ws.baseLineU[static_cast<size_t>(j)] > 0.0))
+					{
+						res.reason = HdrNoiseReason::SingularOperator;
+						return;
+					}
 				}
 			}
 
-			// Evaluate candidateN across representative kernels against the fixed per-line baselines.
+			// Evaluate candidateN across evaluation kernels against the fixed per-line baselines.
 			ws.lineVals.assign(nlSz, 0.0);
-			ws.lineValsUnif.assign(nlSz, 0.0);
+			if (computeUniformDiagnostic)
+				ws.lineValsUnif.assign(nlSz, 0.0);
 			ws.lineWhitenedRms.assign(nlSz, 0.0);
 			ws.candSegSumW.assign(nlSz * static_cast<size_t>(kMaxSegs), 0.0);
 			ws.bestLineVals.assign(nlSz, 0.0);
@@ -1049,22 +1163,26 @@ namespace SourceIdentity
 			bool haveBestU = false;
 			double bestStatU = 0.0;
 
-			for (int q = 0; q < nrep; ++q)
+			for (int q = 0; q < nEvalK; ++q)
 			{
-				const int k = reps[q];
+				const int k = evalKernels[q];
 				Detail::WlsOperatorMeta meta;
 				if (!Detail::BuildWlsTapGeometry(N, candidateN, k, ws.linearLines.origin, L, ws, meta))
 				{
 					res.reason = HdrNoiseReason::InsufficientSamples;
-					return res;
+					return;
 				}
-				if (!unifOp.Build(N, candidateN, k, 0.0, ws.linearLines.origin, L))
+				double unifDof = 1.0;
+				if (computeUniformDiagnostic)
 				{
-					res.reason = HdrNoiseReason::SingularOperator;
-					return res;
+					if (!unifOp.Build(N, candidateN, k, 0.0, ws.linearLines.origin, L, &ws.tapMemo))
+					{
+						res.reason = HdrNoiseReason::SingularOperator;
+						return;
+					}
+					const double unifRawDof = 1.0 - static_cast<double>(unifOp.Nodes()) / static_cast<double>(unifOp.Length());
+					unifDof = unifRawDof < 0.02 ? 0.02 : unifRawDof;
 				}
-				const double unifRawDof = 1.0 - static_cast<double>(unifOp.Nodes()) / static_cast<double>(unifOp.Length());
-				const double unifDof = unifRawDof < 0.02 ? 0.02 : unifRawDof;
 
 				int lastSegRowsW[kMaxSegs] = {};
 				for (int j = 0; j < nl; ++j)
@@ -1077,7 +1195,7 @@ namespace SourceIdentity
 					if (!Detail::SolveLineWls(yRow, sigRow, meta, epsW, ws, levelW, rawRmsW, segSumW, segRowsW))
 					{
 						res.reason = HdrNoiseReason::SingularOperator;
-						return res;
+						return;
 					}
 					ws.lineVals[static_cast<size_t>(j)] = std::log(levelW / ws.baseLineW[static_cast<size_t>(j)]);
 					ws.lineWhitenedRms[static_cast<size_t>(j)] = rawRmsW;
@@ -1087,32 +1205,34 @@ namespace SourceIdentity
 						lastSegRowsW[g] = segRowsW[g];
 					}
 
-					double rssU = 0.0;
-					int rowsU = 0;
-					unifOp.Residual(yRow, ws.workSolve, rssU, rowsU, segSumTmp, segRowsTmp);
-					if (rowsU <= 0 || !std::isfinite(rssU))
+					if (computeUniformDiagnostic)
 					{
-						res.reason = HdrNoiseReason::SingularOperator;
-						return res;
+						double rssU = 0.0;
+						int rowsU = 0;
+						unifOp.Residual(yRow, ws.workSolve, rssU, rowsU, segSumTmp, segRowsTmp);
+						if (rowsU <= 0 || !std::isfinite(rssU))
+						{
+							res.reason = HdrNoiseReason::SingularOperator;
+							return;
+						}
+						const double epsU = ws.lineSigmaRms[static_cast<size_t>(j)] / cfg.floorGuardDivisor;
+						const double msU = rssU / static_cast<double>(rowsU);
+						const double levelU = std::sqrt((msU + epsU * epsU) / unifDof);
+						if (!std::isfinite(levelU) || !(levelU > 0.0))
+						{
+							res.reason = HdrNoiseReason::SingularOperator;
+							return;
+						}
+						ws.lineValsUnif[static_cast<size_t>(j)] = std::log(levelU / ws.baseLineU[static_cast<size_t>(j)]);
 					}
-					const double epsU = ws.lineSigmaRms[static_cast<size_t>(j)] / cfg.floorGuardDivisor;
-					const double msU = rssU / static_cast<double>(rowsU);
-					const double levelU = std::sqrt((msU + epsU * epsU) / unifDof);
-					if (!std::isfinite(levelU) || !(levelU > 0.0))
-					{
-						res.reason = HdrNoiseReason::SingularOperator;
-						return res;
-					}
-					ws.lineValsUnif[static_cast<size_t>(j)] = std::log(levelU / ws.baseLineU[static_cast<size_t>(j)]);
 				}
 
 				const double statW = RobustStats::TrimmedMeanOf(ws.lineVals.data(), nl, cfg.trimFraction);
 				const double rmsW = RobustStats::TrimmedMeanOf(ws.lineWhitenedRms.data(), nl, cfg.trimFraction);
-				const double statU = RobustStats::TrimmedMeanOf(ws.lineValsUnif.data(), nl, cfg.trimFraction);
-				if (!std::isfinite(statW) || !std::isfinite(rmsW) || !std::isfinite(statU))
+				if (!std::isfinite(statW) || !std::isfinite(rmsW))
 				{
 					res.reason = HdrNoiseReason::SingularOperator;
-					return res;
+					return;
 				}
 				if (!haveBestW || statW < bestStatW)
 				{
@@ -1127,10 +1247,19 @@ namespace SourceIdentity
 					for (int g = 0; g < segCount; ++g)
 						ws.bestSegRowsW[static_cast<size_t>(g)] = lastSegRowsW[g];
 				}
-				if (!haveBestU || statU < bestStatU)
+				if (computeUniformDiagnostic)
 				{
-					haveBestU = true;
-					bestStatU = statU;
+					const double statU = RobustStats::TrimmedMeanOf(ws.lineValsUnif.data(), nl, cfg.trimFraction);
+					if (!std::isfinite(statU))
+					{
+						res.reason = HdrNoiseReason::SingularOperator;
+						return;
+					}
+					if (!haveBestU || statU < bestStatU)
+					{
+						haveBestU = true;
+						bestStatU = statU;
+					}
 				}
 			}
 
@@ -1139,7 +1268,7 @@ namespace SourceIdentity
 			res.bestKernel = bestKernel;
 			res.stat = bestStatW;
 			res.whitenedRms = bestWhitenedRms;
-			res.uniformLinearStat = bestStatU;
+			res.uniformLinearStat = computeUniformDiagnostic ? bestStatU : 0.0;
 			res.darkToeClampedSamples = clampedCount;
 			res.evaluatedLines = nl;
 			res.segCount = segCount;
@@ -1179,6 +1308,25 @@ namespace SourceIdentity
 					}
 				}
 			}
+		}
+
+		// Verifies a candidate latent size `candidateN` on HDR code-space lines using exact linearized
+		// heteroscedastic Gauss-Markov WLS (noise-whitened residuals across dark toe, midtone, and highlights),
+		// alongside the unweighted linear-MSE diagnostic `uniformLinearStat` on the exact same linearized lines.
+		inline HdrVerifyResult VerifyLinearizedHeteroscedastic(
+			const LineSet& codeLs,
+			int candidateN,
+			const HdrNoiseSettings& cfg,
+			HdrNoiseWorkspace& ws,
+			const int* lineIdx = nullptr,
+			int lineCount = 0,
+			bool computeUniformDiagnostic = true,
+			int onlyKernel = -1)
+		{
+			HdrVerifyResult res;
+			VerifyLinearizedHeteroscedasticInPlace(
+				codeLs, candidateN, cfg, ws, res, lineIdx, lineCount,
+				computeUniformDiagnostic, onlyKernel, false, 0);
 			return res;
 		}
 	}

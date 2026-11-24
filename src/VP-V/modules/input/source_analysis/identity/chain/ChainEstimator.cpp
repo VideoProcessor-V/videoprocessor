@@ -50,7 +50,7 @@ namespace SourceIdentity
 			struct Job
 			{
 				std::shared_ptr<const LineSnapshot> snap;
-				std::shared_ptr<const LineSnapshot> staticSnap; // HIGH-3: co-located un-jittered lines for StaticPatchRankProbe (null when OFF)
+				std::shared_ptr<LineSnapshot> staticSnap; // HIGH-3 + EFF-MED-1: pooled co-located un-jittered lines for StaticPatchRankProbe (null when OFF)
 				FrameRef frame;
 				uint64_t gen = 0;
 			};
@@ -73,6 +73,7 @@ namespace SourceIdentity
 			mutable std::mutex m;
 			std::condition_variable cv;
 			std::deque<Job> jobs;
+			std::vector<std::shared_ptr<LineSnapshot>> staticSnapPool; // EFF-MED-1: bounded reusable pool (<= queueDepth + 2) for staticSnap
 			std::deque<ClockEntry> clock;
 			std::vector<EventRec> events;
 			std::vector<uint64_t> repeats;
@@ -336,7 +337,9 @@ namespace SourceIdentity
 				vs.clockCtx = this;
 				verifier.reset(new DescaleVerifier(vs));
 				// The probe's operators are 1.64x longer but only a handful (one kernel, five sizes per axis): an eighth of the byte budget holds them.
+				// SOTA1-HIGH-1: PowerProbe synthesizes a code-space 0.61x upscale and must NEVER inherit HDR linearization.
 				VerifierSettings pvs = vs;
+				pvs.hdrNoise = HdrNoiseSettings();
 				pvs.cacheBytes = vs.cacheBytes / 8;
 				probeVerifier.reset(new DescaleVerifier(pvs));
 			}
@@ -1039,14 +1042,24 @@ namespace SourceIdentity
 					job.frame.msbShift = v.msbShift;
 					job.frame.seq = v.seq;
 				}
-				// HIGH-3: when StaticPatchRankProbe is enabled, capture co-located un-jittered lines (fixed seed 0,
-				// keyed strictly by rect, never v.seq) so multi-frame cross-covariance compares identical pixels.
+				// HIGH-3 + EFF-MED-1: when StaticPatchRankProbe is enabled, capture co-located un-jittered lines (fixed seed 0,
+				// keyed strictly by rect, never v.seq) into a pooled LineSnapshot so Deliver() does zero steady-state 372 KB allocs.
 				if (wantStaticRankA.load(std::memory_order_acquire))
 				{
 					const LinePlan staticPlan = LineSampler::Plan(rect, 0ull, cfg.sampler);
 					if (staticPlan.valid)
 					{
-						std::shared_ptr<LineSnapshot> sSnap = std::make_shared<LineSnapshot>();
+						std::shared_ptr<LineSnapshot> sSnap;
+						{
+							std::lock_guard<std::mutex> lk(m);
+							if (!staticSnapPool.empty())
+							{
+								sSnap = std::move(staticSnapPool.back());
+								staticSnapPool.pop_back();
+							}
+						}
+						if (!sSnap)
+							sSnap = std::make_shared<LineSnapshot>();
 						if (CaptureLines<uint16_t>(staticPlan, v.luma, static_cast<std::ptrdiff_t>(v.strideSamples), scale, *sSnap))
 						{
 							sSnap->seq = v.seq;
@@ -1055,6 +1068,12 @@ namespace SourceIdentity
 							sSnap->timeUs = snap->timeUs;
 							sSnap->streamKey = key;
 							job.staticSnap = std::move(sSnap);
+						}
+						else
+						{
+							std::lock_guard<std::mutex> lk(m);
+							if (static_cast<int>(staticSnapPool.size()) < cfg.queueDepth + 2)
+								staticSnapPool.push_back(std::move(sSnap));
 						}
 					}
 				}
@@ -1099,6 +1118,8 @@ namespace SourceIdentity
 							snap->flags |= old->flags;
 							snap->cuts += old->cuts;
 						}
+						if (jobs.front().staticSnap && static_cast<int>(staticSnapPool.size()) < cfg.queueDepth + 2)
+							staticSnapPool.push_back(std::move(jobs.front().staticSnap));
 						jobs.pop_front();
 						cDropped.fetch_add(1, std::memory_order_relaxed);
 					}
@@ -1238,6 +1259,12 @@ namespace SourceIdentity
 						cStale.fetch_add(1, std::memory_order_relaxed);
 					else
 						Process(job);
+					if (job.staticSnap && job.staticSnap.unique())
+					{
+						std::lock_guard<std::mutex> lk(m);
+						if (static_cast<int>(staticSnapPool.size()) < cfg.queueDepth + 2)
+							staticSnapPool.push_back(std::move(job.staticSnap));
+					}
 				}
 				log.Poll();
 				return true;
@@ -1349,11 +1376,16 @@ namespace SourceIdentity
 					cfg.interlaced = intCfg;
 					cfg.staticPatchRank = sprCfg;
 					cfg.ewaJinc = ewaCfg;
+					// CFG-MED-2: compare all 9 HdrNoiseSettings fields so any threshold/parameter change rebuilds the verifier.
 					if (cfg.verifier.hdrNoise.enabled != hdrCfg.enabled ||
 						cfg.verifier.hdrNoise.transfer != hdrCfg.transfer ||
 						cfg.verifier.hdrNoise.bitDepth != hdrCfg.bitDepth ||
 						cfg.verifier.hdrNoise.limitedRange != hdrCfg.limitedRange ||
-						cfg.verifier.hdrNoise.linearizeForDescale != hdrCfg.linearizeForDescale)
+						cfg.verifier.hdrNoise.linearizeForDescale != hdrCfg.linearizeForDescale ||
+						cfg.verifier.hdrNoise.floorGuardDivisor != hdrCfg.floorGuardDivisor ||
+						cfg.verifier.hdrNoise.trimFraction != hdrCfg.trimFraction ||
+						cfg.verifier.hdrNoise.refFraction1 != hdrCfg.refFraction1 ||
+						cfg.verifier.hdrNoise.refFraction2 != hdrCfg.refFraction2)
 					{
 						cfg.verifier.hdrNoise = hdrCfg;
 						BuildVerifiers();
@@ -2945,7 +2977,17 @@ namespace SourceIdentity
 									bphase = cr.phase;
 								}
 							}
-							if (haveBest)
+							if (a == 0 && !haveDip)
+							{
+								// SOTA3-HIGH-4(a): native-H 1920x1080i has no horizontal upscale dip (rH = 1.0);
+								// fall back to full axisLen so AnalyzeMotionBob still evaluates 1080i->540p field height
+								// (still gated by MeasureHorizBandwidthAboveHalf > 2.25).
+								bi.validH = true;
+								bi.nH = run[0].ls.axisLen;
+								bi.NH = run[0].ls.axisLen;
+								bi.statH = 0.0;
+							}
+							else if (haveBest)
 							{
 								if (a == 0)
 								{
@@ -2968,13 +3010,28 @@ namespace SourceIdentity
 					}
 					if (!interlacedRes.interlacedDetected && job.frame.Valid())
 					{
-						// HIGH-2: scale raw tap plane samples by 2^(msbShift - 6) into 10-bit code units (handles P010 msbShift==0 and LSB 10-bit msbShift==6 identically).
+						// HIGH-2 + SOTA3-HIGH-4(b): scale raw tap plane samples by 2^(msbShift - 6) into 10-bit code units
+						// and crop to s.active so letterbox/pillarbox bars never dilute flatCombVar.
 						const double weaveScale = std::ldexp(1.0, job.frame.msbShift - 6);
+						const int fw = static_cast<int>(job.frame.width);
+						const int fh = static_cast<int>(job.frame.height);
+						const int fStride = static_cast<int>(job.frame.strideSamples);
+						int ax = 0, ay = 0, aw = fw, ah = fh;
+						if (s.active.w > 0 && s.active.h > 0 && fw > 0 && fh > 0)
+						{
+							ax = (std::max)(0, (std::min)(s.active.x, fw - 1));
+							ay = (std::max)(0, (std::min)(s.active.y, fh - 1));
+							aw = (std::min)(s.active.w, fw - ax);
+							ah = (std::min)(s.active.h, fh - ay);
+						}
+						const uint16_t* weavePlane = job.frame.luma +
+							static_cast<std::ptrdiff_t>(ay) * static_cast<std::ptrdiff_t>(fStride) +
+							static_cast<std::ptrdiff_t>(ax);
 						const InterlacedResult weaveRes = AnalyzeWeaveComb(
-							job.frame.luma,
-							static_cast<int>(job.frame.width),
-							static_cast<int>(job.frame.height),
-							static_cast<int>(job.frame.strideSamples),
+							weavePlane,
+							aw,
+							ah,
+							fStride,
 							floorCodes,
 							cfg.interlaced,
 							weaveScale);
@@ -3382,10 +3439,10 @@ namespace SourceIdentity
 				{
 					stepMarkImmediateReleasePending = false;
 				}
-				if (out[0].measuredChanged || out[1].measuredChanged)
-					++geometryGen;
-				if (out[0].appliedChanged || out[1].appliedChanged)
-					++appliedGen;
+				// SOTA2-HIGH-3 & SOTA3-HIGH-4(c): apply Neural SR and Interlaced applied-state overrides BEFORE
+				// geometryGen/appliedGen bumps so multi-eval AI-upscaled or interlaced streams never falsely latch as
+				// confident NativeCoded/progressive, appliedGen increments cleanly, and StatusLine() renders the reason.
+				bool sotaDemotedApplied = false;
 				if (cfg.neuralSr.enabled)
 				{
 					for (int a = 0; a < 2; ++a)
@@ -3393,7 +3450,16 @@ namespace SourceIdentity
 						if (neuralSrHit[a])
 						{
 							out[a].measured.reasonBits |= kReasonNeuralSrDetected;
-							out[a].applied.reasonBits |= kReasonNeuralSrDetected;
+							const Geometry::AxisGeom prevApp = out[a].applied;
+							out[a].applied = UnsureLike(out[a].applied, out[a].applied.reasonBits | kReasonNeuralSrDetected);
+							sotaDemotedApplied = true;
+							if (out[a].applied.state != prevApp.state || out[a].applied.n != prevApp.n ||
+								out[a].applied.kernelIndex != prevApp.kernelIndex)
+							{
+								out[a].appliedChanged = true;
+							}
+							if (jointLatchOn || safetyOn)
+								lastFiltered[a] = out[a].applied;
 						}
 					}
 				}
@@ -3404,14 +3470,39 @@ namespace SourceIdentity
 						out[a].measured.reasonBits |= kReasonInterlacedBob;
 						out[a].applied.reasonBits |= kReasonInterlacedBob;
 					}
-					// Never misreport motion-bobbed 1080i->2160p as confident progressive 540p on the vertical axis.
+					// Never misreport motion-bobbed 1080i->2160p as confident progressive 540p on the vertical axis,
+					// nor weave-combed interlaced frames as confident progressive output.
 					if (interlacedRes.kind == InterlacedKind::MotionBob &&
 						out[1].applied.state == Geometry::LatchState::Latched &&
 						out[1].applied.n < out[1].applied.N)
 					{
-						out[1].applied = UnsureLike(out[1].applied, kReasonInterlacedBob);
+						out[1].applied = UnsureLike(out[1].applied, out[1].applied.reasonBits | kReasonInterlacedBob);
+						out[1].appliedChanged = true;
+						sotaDemotedApplied = true;
+						if (jointLatchOn || safetyOn)
+							lastFiltered[1] = out[1].applied;
+					}
+					else if (interlacedRes.kind == InterlacedKind::WeaveComb)
+					{
+						for (int a = 0; a < 2; ++a)
+						{
+							const Geometry::AxisGeom prevApp = out[a].applied;
+							out[a].applied = UnsureLike(out[a].applied, out[a].applied.reasonBits | kReasonInterlacedBob);
+							if (out[a].applied.state != prevApp.state || out[a].applied.n != prevApp.n ||
+								out[a].applied.kernelIndex != prevApp.kernelIndex)
+							{
+								out[a].appliedChanged = true;
+								sotaDemotedApplied = true;
+							}
+							if (jointLatchOn || safetyOn)
+								lastFiltered[a] = out[a].applied;
+						}
 					}
 				}
+				if (out[0].measuredChanged || out[1].measuredChanged)
+					++geometryGen;
+				if (out[0].appliedChanged || out[1].appliedChanged)
+					++appliedGen;
 				if (cfg.staticPatchRank.enabled)
 				{
 					for (int a = 0; a < 2; ++a)
@@ -3443,8 +3534,9 @@ namespace SourceIdentity
 				// N2 (S1 bound): while the monitor keeps leaving native-looking frames out on the strength of this very reading (a note since
 				// the last evaluation), the long cadence does not apply: the reading is re-tested at the acquiring cadence, so a source that
 				// genuinely became native flips it quickly (and the window of ChainEvidence follows the measured, shorter interval).
-				const bool bothConfident = rulesActive ? (out[0].applied.state == Geometry::LatchState::Latched && out[1].applied.state == Geometry::LatchState::Latched)
-					: (AxisConfident(reader[0]) && AxisConfident(reader[1]));
+				const bool bothConfident = sotaDemotedApplied ? false :
+					(rulesActive ? (out[0].applied.state == Geometry::LatchState::Latched && out[1].applied.state == Geometry::LatchState::Latched)
+						: (AxisConfident(reader[0]) && AxisConfident(reader[1])));
 				const bool nativeHeld = nativeHeldMask.exchange(0u, std::memory_order_acq_rel) != 0u;
 				// N1: while the new shot's re-confirm dwell is open (or ABR step mark wants fast confirmation) re-test at acquiring cadence.
 				const bool dwell = (jointLatchOn && jointLatch.Dwelling()) || (!jointLatchOn && safetyOn && latch.Dwelling()) ||

@@ -9,18 +9,18 @@
 // abstaining on native broadband streams and moving-camera shots. Zero pixel modification.
 //
 // Signal-processing physics & Rule 1 derivations (zero arbitrary constants):
-//   1. First-difference pre-whitening (dx[i] = x[i+1] - x[i], m = 8 taps over m+1 = 9 pixels):
-//        - Linear LTI operator: preserves exact Landau-Pollak bandlimited rank r = round(alpha * m)
-//          for any linear upscaler of ratio alpha (e.g., r = 2 for 1/4, 4 for 1/2, 6 for 3/4).
-//        - Annihilates per-patch DC without reducing the 8-D subspace dimension (zero structural rank loss).
-//        - Pre-whitens natural 1/f^2 native spectra via |2 sin(pi f)|^2, flattening native broadband
-//          eigenvalues so native 2160p stays full-rank (r = 8).
+//   1. Even-parity-aligned line-demeaned 8-pixel patches (u[i] = x[i] - lineMean, m = 8 taps):
+//        - Even-origin alignment (((origin + offset) & 1) == 0) ensures 2x upscaled patches enclose
+//          4 complete latent samples without splitting boundary samples, preserving Landau-Pollak
+//          bandlimited rank r = round(alpha * m) (e.g., r = 2 for 1/4, 4 for 1/2, 6 for 3/4).
+//        - Line-mean subtraction removes DC offset while preserving flat passband gain across all
+//          leading modes and exact 1x pixel grain variance (avoiding 2x first-difference noise amplification).
 //        - Exact m = 8 matches the 8-px codec transform block width and resolves canonical k/8 ratios.
 //   2. Lag-1 cross-covariance temporal noise cancellation:
 //        For static patches x_t = s + n_t with i.i.d. temporal grain n_t (E[n_t n_{t-1}^T] = 0):
-//          E[dx_t dx_{t-1}^T] = E[dx_s dx_s^T]  (exact symmetric PSD signal covariance, zero grain bias!).
-//        By contrast, single-frame covariance E[dx_t dx_t^T] = E[dx_s dx_s^T] + C_dn adds high-frequency
-//        grain eigenvalues 4 * sigma_n^2 * sin^2(k pi / 18) directly into the trailing modes.
+//          E[u_t u_{t-1}^T] = E[u_s u_s^T]  (exact symmetric PSD signal covariance, zero grain bias!).
+//        By contrast, single-frame covariance E[u_t u_t^T] = E[u_s u_s^T] + sigma_n^2 * I adds
+//        white grain variance directly into every trailing eigenvalue.
 //   3. Spatial noise estimate (motion-invariant, matching ChainEdgeStats.h):
 //        Second difference d_i = y_{i-1} - 2*y_i + y_{i+1} has Var(d_i) = 6 * sigma^2 for white noise,
 //        so sigma_seg = (RobustStats::kMadToSigma * MAD(d)) / sqrt(6). Lower quartile (q = 1/4) over
@@ -30,19 +30,21 @@
 //          Var(r[i]) = 2 * sigma_spatial^2; mean-square over m = 8 samples has upper 3-sigma chi-square
 //          bound 2 * sigma_spatial^2 * (1 + motionChiSigma * sqrt(2 / m)). Fewer than minStaticPatchFraction
 //          (elementary quarter 1/4) static patches rejects the frame transition.
-//        - Stage 2 (directional shift & sub-pixel asymmetry gate): on any static scene, AM-GM gives
-//          0.5*(dx[i]^2 + dx[i+d]^2) >= dx[i]*dx[i+d] pointwise and E[dx_t[i]*dx_{t-1}[i+1] -
-//          dx_t[i+1]*dx_{t-1}[i]] = 0 identically. Significant off-diagonal peak excess or lag-1
+//        - Stage 2a (directional shift & sub-pixel asymmetry gate): on any static scene, AM-GM gives
+//          0.5*(u[i]^2 + u[i+d]^2) >= u[i]*u[i+d] pointwise and E[u_t[i]*u_{t-1}[i+1] -
+//          u_t[i+1]*u_{t-1}[i]] = 0 identically. Significant off-diagonal peak excess or lag-1
 //          asymmetry (> 3-sigma sampling SE) catches slow 0.5-3 px pans even on uniformly textured frames.
+//        - Stage 2b (unbiased all-slot large-displacement decorrelation gate): when substantial patches fail
+//          Stage 1 (staticFraction < 1 - minStaticPatchFraction), check unbiased lag-0 cross-power across
+//          ALL slots to defeat Stage-1 selection bias on large (>= 8 px) pans.
 //   5. Rank-cliff & high-frequency nullspace criteria:
-//        - Sampling noise floor of dx cross-covariance: 2 * sigma_spatial^2 / sqrt(acceptedStaticPairs),
+//        - Sampling noise floor of lag-1 cross-covariance: sigma_spatial^2 / sqrt(acceptedStaticPairs),
 //          combined with empirical Wigner symmetry floor max(0, -lambda_min) of the PSD cross-covariance.
 //        - Cliff ratio >= minCliffEigenRatio = 4.0 (2^2, 6 dB eigenvalue drop) AND trailing energy share
 //          <= maxTrailingEnergyShare = 1 / (2 * m) = 1/16 = 0.0625.
 //        - High-frequency nullspace guard via 1-D discrete Neumann Laplacian Rayleigh quotient:
 //          mean trailing roughness >= 2.0 (= 4 * sin^2(pi/4), exact half-Nyquist midpoint) and > leading,
-//          plus cliff mode roughness >= 0.5 * 4 * sin^2(r*pi/(2m)) when well above noise, blocking false
-//          triggers from first-difference f = 0 suppression on native white-noise textures.
+//          plus cliff mode roughness >= 0.5 * 4 * sin^2(r*pi/(2m)) when well above noise.
 //        - Top signal RMS >= minSignalToFloorRatio * floorCodes (1.5, ChainEvidence.h::lineGateFactor).
 //
 // Rule 2: Zero static or thread_local mutable state; all history and scratch live in caller-owned
@@ -69,7 +71,7 @@ namespace SourceIdentity
 		// Exact m = 8 1-D first-difference taps (covering m + 1 = 9 adjacent pixels):
 		// resolves canonical k/8 ratios (1/4, 3/8, 1/2, 5/8, 3/4, 7/8) and matches 8-px codec block width.
 		constexpr int kStaticPatchTaps = 8;
-		constexpr int kStaticPatchPixels = kStaticPatchTaps + 1;
+		constexpr int kStaticPatchPixels = kStaticPatchTaps;
 
 		// Bounded caller-owned temporal ring (K = 4..8 static frames):
 		// K >= 4 reduces temporal noise variance >= 4x and yields >= 3 lag-1 transitions; K <= 8 caps memory.
@@ -340,6 +342,7 @@ namespace SourceIdentity
 			std::vector<double> currRawPatches;
 			std::vector<double> currDiffPatches;
 			std::vector<double> segSigmaScratch;
+			std::vector<double> lineMeansScratch;
 
 			// Strictly bounded sliding window of up to (kStaticPatchMaxFrames - 1) lag-1 transitions.
 			StaticPatchTransition transitions[kStaticPatchMaxFrames - 1];
@@ -394,6 +397,7 @@ namespace SourceIdentity
 				currRawPatches.clear();
 				currDiffPatches.clear();
 				segSigmaScratch.clear();
+				lineMeansScratch.clear();
 				activeRingCap = kStaticPatchMaxFrames - 1;
 				framesObserved = 0;
 				motionRejectedFrames = 0;
@@ -580,20 +584,21 @@ namespace SourceIdentity
 				return true;
 			}
 
-			// Extracts raw 9-pixel patches (for Stage 1 temporal diff gate) and line-demeaned 8-pixel patches
+			// Extracts raw 8-pixel patches (for Stage 1 temporal diff gate) and line-demeaned 8-pixel patches
 			// u[i] = x[i] - lineMean (preserving flat passband gain across all 4 modes [0, 0.25] and 1x pixel
 			// grain variance instead of 2x first-difference variance). Returns false if any sample is non-finite.
 			inline bool ExtractPatches(
 				const LineSet& ls,
 				const std::vector<StaticPatchSlot>& slots,
 				std::vector<double>& outRaw,
-				std::vector<double>& outDiff)
+				std::vector<double>& outDiff,
+				std::vector<double>& lineMeansScratch)
 			{
 				const size_t numSlots = slots.size();
 				outRaw.resize(numSlots * static_cast<size_t>(kStaticPatchPixels));
 				outDiff.resize(numSlots * static_cast<size_t>(kStaticPatchTaps));
 
-				std::vector<double> lineMeans(static_cast<size_t>(ls.count), 0.0);
+				lineMeansScratch.assign(static_cast<size_t>(ls.count), 0.0);
 				for (int li = 0; li < ls.count; ++li)
 				{
 					const double* line = ls.Line(li);
@@ -605,13 +610,13 @@ namespace SourceIdentity
 							return false;
 						sum += v;
 					}
-					lineMeans[static_cast<size_t>(li)] = sum / static_cast<double>(ls.length);
+					lineMeansScratch[static_cast<size_t>(li)] = sum / static_cast<double>(ls.length);
 				}
 
 				for (size_t s = 0; s < numSlots; ++s)
 				{
 					const int li = slots[s].lineIdx;
-					const double mean = lineMeans[static_cast<size_t>(li)];
+					const double mean = lineMeansScratch[static_cast<size_t>(li)];
 					const double* y = ls.Line(li) + slots[s].offset;
 					double* rawDst = outRaw.data() + s * static_cast<size_t>(kStaticPatchPixels);
 					double* diffDst = outDiff.data() + s * static_cast<size_t>(kStaticPatchTaps);
@@ -865,7 +870,7 @@ namespace SourceIdentity
 			}
 
 			// Extract current frame's patches into caller-owned scratch buffers.
-			if (!Detail::ExtractPatches(ls, ws.slots, ws.currRawPatches, ws.currDiffPatches))
+			if (!Detail::ExtractPatches(ls, ws.slots, ws.currRawPatches, ws.currDiffPatches, ws.lineMeansScratch))
 			{
 				res.reason = StaticRankReason::InvalidInput;
 				return res;
@@ -1163,7 +1168,8 @@ namespace SourceIdentity
 
 			std::vector<double> rawPatches;
 			std::vector<double> diffPatches;
-			if (!Detail::ExtractPatches(ls, slots, rawPatches, diffPatches))
+			std::vector<double> lineMeans;
+			if (!Detail::ExtractPatches(ls, slots, rawPatches, diffPatches, lineMeans))
 			{
 				res.reason = StaticRankReason::InvalidInput;
 				return res;
