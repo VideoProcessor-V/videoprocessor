@@ -738,9 +738,9 @@ namespace VpMotion
 		if (!pending.changed)
 			return false;
 		motionInvalidations += pending.invalidations;
-		// GEM-110 (VE-SCALE): a source format change invalidates the remembered source / target raster size so FlowOf never
+		// GEM-110 (VE-SCALE): a source format or rebase change invalidates the remembered source / target raster size so FlowOf never
 		// applies a pre-switch size (e.g. 1080p) to a post-switch pair (e.g. 4K) even when both share the same engine size.
-		if (pending.cause == MotionValidity::Cause::SourceFormatChange)
+		if (pending.cause == MotionValidity::Cause::SourceFormatChange || pending.cause == MotionValidity::Cause::RebaseChange)
 			NoteFlowSourceSize(0, 0, 0, 0);
 		return true;
 	}
