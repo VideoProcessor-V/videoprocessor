@@ -627,12 +627,11 @@ bool HighlightScalingConsistent(uint32_t refP99P4, uint32_t curP99P4, double gai
     if (dir < 0 && cp <= rp + double(kFadeMinSpread) && (1.0 - gain) >= 1.0 / double(kFadeMaxDiv))
         return true;
     const double aP99 = (cp - black) / (rp - black);
-    // For brightening (dir > 0), enforce exact multiplicative reciprocal [0.5, 2.0] consistency around (gain - 1)
+    // For brightening (dir > 0), enforce symmetric +-50% (kFadeResidualReduction) consistency around gain
     // to reject both pinned highlights (ambient flicker) and localized bright surges / flashes (aP99 >> gain).
     // For darkening (dir < 0), enforce lower bound on highlight drop so fast-unclipping fade-outs are preserved.
     if (dir > 0)
-        return kFadeResidualReduction * (gain - 1.0) <= (aP99 - 1.0) &&
-            (aP99 - 1.0) <= (1.0 / kFadeResidualReduction) * (gain - 1.0);
+        return std::fabs(aP99 - gain) <= kFadeResidualReduction * std::fabs(1.0 - gain);
     return double(dir) * (aP99 - 1.0) >= kFadeResidualReduction * std::fabs(1.0 - gain);
 }
 
