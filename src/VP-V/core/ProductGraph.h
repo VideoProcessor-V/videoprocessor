@@ -24,7 +24,8 @@
 //   live pool = 0, lane-only, no live fill)
 //   live pool = history + 1 + R (+1 for a held span product) + one spare per input reference held
 //               by lane readers x lane jobs in flight (a late lane reader may pin a released live
-//               buffer until its job ends):
+//               buffer until its job ends; laneVisible views are excluded because lane readers read
+//               the externally owned view directly and never pin a live-pool buffer):
 //               every frame the render holds may be
 //               a live fill (design B3 says R + 1; that leaves no live buffer for a history frame
 //               that was itself filled live, so an in-render-only history product could not run)
@@ -465,13 +466,16 @@ inline Graph BuildGraph(const Registry& reg, const std::vector<ConsumerDecl>& co
     // Input references held by lane jobs: a (late) lane reader pins its inputs for one job at a time
     // (one producer per product), so at most this many released live buffers can be pinned at once.
     // That many spares mean the render never runs short of a live buffer and never waits.
+    // A laneVisible product (e.g. kP13SourceRing) is a zero-copy view of externally owned data
+    // (queue / early upload): lane jobs read the view directly and never pin a SlotSet live-pool
+    // buffer of that product, so lane reads of laneVisible views do not add live-pool spares.
     std::vector<unsigned> laneReadRefs(n, 0);
     for (ProductId p : order) {
         const ProductDecl& d = reg.Get(p);
         if (d.backend == Backend::RenderOnly)
             continue;
         for (size_t k = 0; k < d.inputCount; ++k)
-            ++laneReadRefs[Resolve(reg, d.inputs[k].product, gs)];
+            laneReadRefs[Resolve(reg, d.inputs[k].product, gs)] += reg.Get(Resolve(reg, d.inputs[k].product, gs)).laneVisible ? 0u : 1u;
     }
 
     const unsigned R = gs.renderAhead;
