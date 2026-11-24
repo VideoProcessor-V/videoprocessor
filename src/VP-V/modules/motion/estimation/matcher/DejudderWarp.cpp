@@ -1082,17 +1082,19 @@ if (b.x < size.x && b.y < size.y) {
     } else {
         ivec2 psz = textureSize(luma_a, 0);
         bool same = true;
+        bool any_px = false;
         for (int y = 0; y < bs.y && same; y++)
             for (int x = 0; x < bs.x; x++) {
                 ivec2 p = o + ivec2(x, y);
                 if (p.x >= psz.x || p.y >= psz.y)
                     continue;
+                any_px = true;
                 if (texelFetch(luma_a, p, 0).r != texelFetch(luma_b, p, 0).r) { same = false; break; }
             }
 #ifdef SUB_FIELD
-        imageStore(dst, b, same ? vec4(0.0, 0.0, 1.0, 1.0) : f);
+        imageStore(dst, b, (same && any_px) ? vec4(0.0, 0.0, 1.0, 1.0) : f);
 #else
-        imageStore(dst, b, same ? vec4(0.0, 0.0, 1.0, 0.0) : f);
+        imageStore(dst, b, (same && any_px) ? vec4(0.0, 0.0, 1.0, 0.0) : f);
 #endif
     }
 }
@@ -3903,9 +3905,14 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		ofWeighted = false;
 		noPairAhead = false;
 		pairSizeMismatch = false;
-		const bool useAhead = ahead && ahead->halfW == halfW && ahead->halfH == halfH &&
+		const bool dimsOk = ahead && ahead->halfW == halfW && ahead->halfH == halfH &&
+			ahead->gridW > 0 && ahead->gridH > 0 &&
 			ahead->gridW == (halfW + 3) / 4 && ahead->gridH == (halfH + 3) / 4;
-		if (!useAhead)
+		const size_t expectedInts = dimsOk ?
+			static_cast<size_t>(ahead->gridW) * static_cast<size_t>(ahead->gridH) * 2u : 0u;
+		const bool dataOk = dimsOk && expectedInts > 0 &&
+			ahead->forward.size() >= expectedInts && ahead->backward.size() >= expectedInts;
+		if (!dataOk)
 		{
 			noPairAhead = true;
 			pairSizeMismatch = static_cast<bool>(ahead);   // a pair was handed over and did not fit: told apart from a missing pair
@@ -4534,9 +4541,10 @@ if (b.x < blocks.x && b.y < blocks.y) {
 				trustDescs.push_back(Sampled("hist_a", l2A, false));
 				trustDescs.push_back(Sampled("hist_b", l2B, false));
 			}
-			const bool fadeOn = settings.fadeMatch && fadeState;
+			const pl_tex activeFade = FadeStateTexture();
+			const bool fadeOn = settings.fadeMatch && activeFade != nullptr;
 			if (fadeOn)
-				trustDescs.push_back(Sampled("fade_state", fadeState, false));
+				trustDescs.push_back(Sampled("fade_state", activeFade, false));
 			if (rolloffGlobal || cameraOut)
 				trustDescs.push_back(Sampled("global_vec", globalVector[0], false));
 			if (cameraOut)
