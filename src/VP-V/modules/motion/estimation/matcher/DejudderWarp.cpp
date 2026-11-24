@@ -3930,13 +3930,18 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		d3d->device->GetImmediateContext(&context);
 		const int w = halfW, h = halfH;
 		// The flow textures of the half size's grid (the engine's grid: 4 x 4), written from the pair's CPU fields.
-		if (w != ofW || h != ofH)
+		if (w != ofW || h != ofH || !ofFlow[0] || !ofFlow[1] || !ofFlowTex[0] || !ofFlowTex[1])
 		{
-			for (int i = 0; i < 2; ++i)
-			{
-				pl_tex_destroy(gpu, &ofFlowTex[i]);
-				ofFlow[i].Release();
-			}
+			auto releaseFlow = [&]() {
+				for (int i = 0; i < 2; ++i)
+				{
+					pl_tex_destroy(gpu, &ofFlowTex[i]);
+					ofFlow[i].Release();
+				}
+				ofW = 0;
+				ofH = 0;
+			};
+			releaseFlow();
 			auto make = [&](int tw, int th, DXGI_FORMAT format, CComPtr<ID3D11Texture2D>& out) {
 				D3D11_TEXTURE2D_DESC desc{};
 				desc.Width = static_cast<UINT>(tw); desc.Height = static_cast<UINT>(th);
@@ -3949,11 +3954,17 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			for (int i = 0; i < 2; ++i)
 			{
 				if (!make(gw, gh, NvOpticalFlow::Engine::FlowFormat(), ofFlow[i]))
+				{
+					releaseFlow();
 					return fail("cannot create its textures");
+				}
 				pl_d3d11_wrap_params wrapFlow{}; wrapFlow.tex = ofFlow[i];
 				ofFlowTex[i] = pl_d3d11_wrap(gpu, &wrapFlow);
 				if (!ofFlowTex[i])
+				{
+					releaseFlow();
 					return fail("cannot share its textures with libplacebo");
+				}
 			}
 			ofW = w; ofH = h;
 		}
