@@ -558,8 +558,11 @@ void hook()
     // emitted (also on the stable DLL, which has no output clamp).
     float code_bits = ten ? 10.0 : 8.0;
     float code_unit = exp2(code_bits - 8.0);
-    float code_min = limited ? code_unit : 0.0;
-    float code_max = limited ? 255.0 * code_unit - 1.0 : exp2(code_bits) - 1.0;
+    float timing_min = limited ? code_unit : 0.0;
+    // GEM-SD-CARRY / GEM-026 (Rule 1: ITU-R BT.601/BT.709/BT.2020 limited-range
+    // nominal black is 16 * 2^(n-8) = 16 at 8-bit, 64 at 10-bit; 0 in full range).
+    float black_code = limited ? 16.0 * code_unit : 0.0;
+    vec3 code_max = vec3(limited ? 255.0 * code_unit - 1.0 : exp2(code_bits) - 1.0);
 
     vec4 src = HOOKED_mul * texelFetch(HOOKED_raw, pos, 0);
     vec3 x = src.rgb * in_scale;
@@ -601,6 +604,14 @@ void hook()
         ramp = floor(ramp * 4.0 + 0.5) * 0.25;   // quantise to 10-bit grid
         x = vec3(ten ? ramp * 4.0 : ramp);
     }
+
+    // GEM-SD-CARRY / GEM-026: prevent legal/above-black pixels (x >= black_code)
+    // from dithering below studio black into BTB (k < 16 at 8-bit, k < 64 at
+    // 10-bit) in both quantiser branches, while keeping true BTB content
+    // (x < black_code) clamped only at timing_min (preserving ADR-0002 footroom).
+    // For x >= black_code, clamping k up to black_code keeps x - k >= 0 so
+    // r_next = x + r - k stays within +-resid_bound(amp) and unbiased.
+    vec3 code_min = mix(vec3(timing_min), vec3(black_code), vec3(greaterThanEqual(x, vec3(black_code))));
 
     vec3 k;
     // libplacebo adds 1 to `frame` for every pass it runs and this is the
