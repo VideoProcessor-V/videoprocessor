@@ -12,6 +12,7 @@
     "src/VP-V/modules/input/source_analysis/identity/chain/KernelBank.h",
     "src/VP-V/modules/input/source_analysis/identity/chain/DescaleVerifier.h",
     "src/VP-V/modules/input/source_analysis/identity/chain/HdrNoiseFloor.h",
+    "src/VP-V/modules/input/source_analysis/identity/chain/NeuralSrWitness.h",
     "src/VP-V/modules/input/source_analysis/identity/chain/ChainNullTables.h",
     "src/VP-V/modules/input/source_analysis/identity/chain/NullTables.h",
     "src/VP-V/modules/input/source_analysis/identity/chain/ChainEvidence.h",

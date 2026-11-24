@@ -53,6 +53,7 @@ namespace SourceIdentity
 		constexpr uint32_t kReasonJointEntry = 1u << 19;        // latched via Joint A+B entry (L1)
 		constexpr uint32_t kReasonChainAloneEntry = 1u << 20;   // latched via Chain-Alone entry (L1)
 		constexpr uint32_t kReasonNullTableMismatch = 1u << 21; // segment-gated excess-variance stat abstained because active null table is Placeholder or not stat-matched (M4)
+		constexpr uint32_t kReasonNeuralSrDetected = 1u << 22;  // SOTA #2 (default OFF): neural / AI super-resolution detected (skip LTI inverse)
 
 		// One axis worth of sampled lines in 10-bit code units (8-bit planes are scaled by 4 by the caller).
 		struct LineSet

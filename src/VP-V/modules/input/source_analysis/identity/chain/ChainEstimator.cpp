@@ -100,6 +100,7 @@ namespace SourceIdentity
 			bool reqUseDepthNullTables = false;
 			DepthNullTableSet reqDepthNullTables = DepthNullTableSet::PlaceholderOnly();
 			HdrNoiseSettings reqHdrNoise;
+			NeuralSrSettings reqNeuralSr;
 			struct ClassicalFreshState
 			{
 				bool valid = false;
@@ -171,8 +172,9 @@ namespace SourceIdentity
 			// Pass-2 audit closure counters (M1, M3, M4, L2):
 			std::atomic<uint64_t> cClassicalFreshStaleDrops{ 0 }, cP3ScreenOnlyCandidates{ 0 },
 				cEdgeStatsNullTableAbstains{ 0 }, cAbrStepEventsEvicted{ 0 };
-			// SOTA #1 counters (zero while hdrNoise.enabled == false):
+			// SOTA #1-#2 counters (zero while switches are OFF):
 			std::atomic<uint64_t> cHdrLinearizedEvals{ 0 }, cHdrDarkToeClamps{ 0 };
+			std::atomic<uint64_t> cNeuralSrDetections{ 0 }, cNeuralSrAbstains{ 0 };
 			// fx/dv-frame-quiet: each ceiling release is stamped with the newest source frame the estimator had seen, so the frame-bound
 			// monitor counts only the releases up to the frame it is allowed to see (LatchCeilingReleasesThrough), not the live counter.
 			std::atomic<uint64_t> newestSeqA{ 0 };
@@ -207,6 +209,7 @@ namespace SourceIdentity
 			// SID-OPT: hoisted per-axis run buffers & PowerProbe workspaces (under procMutex; retain capacity across evals, zero state leak).
 			AxisRun evalRun[2];
 			PowerProbe::Workspace probeWs[2];
+			NeuralSrWorkspace neuralSrWs[2];
 			Governor gov;
 			EvidenceLog log;
 			Geometry::HeldState held;
@@ -287,6 +290,7 @@ namespace SourceIdentity
 				reqUseDepthNullTables = cfg.useDepthNullTables;
 				reqDepthNullTables = cfg.depthNullTables;
 				reqHdrNoise = cfg.hdrNoise;
+				reqNeuralSr = cfg.neuralSr;
 				if (cfg.hdrNoise.enabled)
 					cfg.verifier.hdrNoise = cfg.hdrNoise;
 				safetyA.store(reqSafety || reqJointLatch.enabled, std::memory_order_release);
@@ -544,6 +548,17 @@ namespace SourceIdentity
 				{
 					std::lock_guard<std::mutex> lk(m);
 					reqHdrNoise = s;
+					cfgDirty = true;
+					++runEpoch;
+				}
+				Wake();
+			}
+
+			void SetNeuralSr(const NeuralSrSettings& s)
+			{
+				{
+					std::lock_guard<std::mutex> lk(m);
+					reqNeuralSr = s;
 					cfgDirty = true;
 					++runEpoch;
 				}
@@ -1168,6 +1183,7 @@ namespace SourceIdentity
 					lastAxisLen[a] = 0;
 					evalRun[a] = AxisRun();
 					probeWs[a].Reset();
+					neuralSrWs[a].Reset();
 				}
 				{
 					bool safe = false, abr = false, convP = false;
@@ -1178,6 +1194,7 @@ namespace SourceIdentity
 					EdgeStatsSettings esCfg;
 					DepthNullTableSet depthN = DepthNullTableSet::PlaceholderOnly();
 					HdrNoiseSettings hdrCfg;
+					NeuralSrSettings nsrCfg;
 					{
 						std::lock_guard<std::mutex> lk(m);
 						safe = reqSafety;
@@ -1191,6 +1208,7 @@ namespace SourceIdentity
 						useDepthN = reqUseDepthNullTables;
 						depthN = reqDepthNullTables;
 						hdrCfg = reqHdrNoise;
+						nsrCfg = reqNeuralSr;
 						abrStepEvents.clear();
 					}
 					if (jointLatchOn)
@@ -1237,6 +1255,7 @@ namespace SourceIdentity
 					cfg.useDepthNullTables = useDepthN;
 					cfg.depthNullTables = depthN;
 					cfg.hdrNoise = hdrCfg;
+					cfg.neuralSr = nsrCfg;
 					if (cfg.verifier.hdrNoise.enabled != hdrCfg.enabled ||
 						cfg.verifier.hdrNoise.transfer != hdrCfg.transfer ||
 						cfg.verifier.hdrNoise.bitDepth != hdrCfg.bitDepth ||
@@ -1361,6 +1380,7 @@ namespace SourceIdentity
 					evalRun[a].up = EvidenceUpdate();
 					evalRun[a].vr = VerifyResult();
 					probeWs[a].Reset();
+					neuralSrWs[a].Reset();
 				}
 				evidence.Reset();
 				if (stepMarkOn)
@@ -2682,6 +2702,42 @@ namespace SourceIdentity
 					}
 					PowerProbe::Run(*probeVerifier, r.ls, floorCodes, static_cast<double>(step), cfg.probe, r.pr, &probeWs[a]);
 				}
+				// SOTA #2 (opt-in, default OFF): AI / Neural SR witness (strictly inert unless cfg.neuralSr.enabled).
+				bool neuralSrHit[2] = { false, false };
+				if (cfg.neuralSr.enabled)
+				{
+					for (int a = 0; a < 2; ++a)
+					{
+						if (!run[a].have)
+							continue;
+						int bestN = RoundToInt(static_cast<double>(run[a].ls.axisLen) * 0.5);
+						double bestStat = 0.0;
+						bool haveCand = false;
+						for (size_t ci = 0; ci < run[a].vr.candidates.size(); ++ci)
+						{
+							const CandidateResult& cr = run[a].vr.candidates[ci];
+							if (!cr.valid || !cr.exactDone)
+								continue;
+							if (!haveCand || cr.stat < bestStat)
+							{
+								haveCand = true;
+								bestN = cr.n;
+								bestStat = cr.stat;
+							}
+						}
+						const NeuralSrResult nsr = NeuralSrWitness::Evaluate(
+							run[a].ls, bestN, bestStat, floorCodes, cfg.neuralSr, neuralSrWs[a]);
+						if (nsr.neuralUpscaled)
+						{
+							neuralSrHit[a] = true;
+							cNeuralSrDetections.fetch_add(1, std::memory_order_relaxed);
+						}
+						else if (nsr.verdict == NeuralSrVerdict::Abstain)
+						{
+							cNeuralSrAbstains.fetch_add(1, std::memory_order_relaxed);
+						}
+					}
+				}
 				for (int a = 0; a < 2; ++a)
 				{
 					if (!run[a].have)
@@ -2987,6 +3043,17 @@ namespace SourceIdentity
 					++geometryGen;
 				if (out[0].appliedChanged || out[1].appliedChanged)
 					++appliedGen;
+				if (cfg.neuralSr.enabled)
+				{
+					for (int a = 0; a < 2; ++a)
+					{
+						if (neuralSrHit[a])
+						{
+							out[a].measured.reasonBits |= kReasonNeuralSrDetected;
+							out[a].applied.reasonBits |= kReasonNeuralSrDetected;
+						}
+					}
+				}
 
 				bool cold = false;
 				for (int a = 0; a < 2; ++a)
@@ -3207,6 +3274,8 @@ namespace SourceIdentity
 				c.abrStepEventsEvicted = cAbrStepEventsEvicted.load(std::memory_order_relaxed);
 				c.hdrLinearizedEvals = cHdrLinearizedEvals.load(std::memory_order_relaxed);
 				c.hdrDarkToeClamps = cHdrDarkToeClamps.load(std::memory_order_relaxed);
+				c.neuralSrDetections = cNeuralSrDetections.load(std::memory_order_relaxed);
+				c.neuralSrAbstains = cNeuralSrAbstains.load(std::memory_order_relaxed);
 				return c;
 			}
 
@@ -3310,6 +3379,7 @@ namespace SourceIdentity
 		void ChainEstimator::SetEightBitPromotion(bool on) { st_->SetEightBitPromotion(on); }
 		void ChainEstimator::SetDepthNullTables(const DepthNullTableSet& tables, bool enable) { st_->SetDepthNullTables(tables, enable); }
 		void ChainEstimator::SetHdrNoiseSettings(const HdrNoiseSettings& s) { st_->SetHdrNoise(s); }
+		void ChainEstimator::SetNeuralSrSettings(const NeuralSrSettings& s) { st_->SetNeuralSr(s); }
 		void ChainEstimator::SetDiagnosticTag(const std::string& tag) { st_->diagTag.Set(tag); }
 		void ChainEstimator::SetDiagnosticDepths(int codedBits, int outputBits)
 		{
