@@ -15,6 +15,8 @@
 // steady state the lane sees, and frames >= 10 are claimable.
 
 #include "../../../../tests/SettingsTestSupport.h"
+#include <VP-V/modules/repair/grain_split/BandMemo.h>
+#include <VP-V/modules/repair/grain_split/BandMemoFill.h>
 #include <VP-V/modules/repair/grain_split/GrainNode.h>
 #include <VP-V/modules/repair/grain_split/GrainNodeGpu.h>
 #include <VP-V/modules/repair/grain_split/GrainSplitGpu.h>
@@ -25,7 +27,10 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
+#include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
@@ -645,6 +650,552 @@ namespace GrainNodeTestsNs
 			Assert::AreEqual(size_t(3), base, L"base: base, s1, s2 (the main map)");
 			Assert::AreEqual(size_t(5), modifiers, L"modifiers: f, N, e3, e1, e2");
 			Assert::IsTrue(hasN && hasF && hasE3, L"the modifier fields the consumers derive from");
+		}
+
+		// S2-H5 / CT-M6 (BandMemo.h codec): canonical BandKey round-trips cleanly (including kMinSigmaPx = 0.5e-6);
+		// non-canonical param0 >= 1000 aliases (which would split memo slots under distinct VariantKey hashes),
+		// sub-quantum / non-positive / non-finite / overflow sigmas, half-zero sizes, and stray crop fields MUST
+		// be rejected by Encodable/ToVariant/FromVariant.
+		TEST_METHOD(BandMemoCodecRejectsNonCanonicalParam0AndSubQuantumSigma)
+		{
+			namespace BM = VpUnit::BandMemo;
+			using VK = VpSkeleton::VariantKey;
+
+			// 1. Canonical round-trips: standard sigmaPx = 1.5, micro-pixel remainder, kMinSigmaPx = 0.5e-6, and Law::Low.
+			BM::BandKey k15;
+			k15.sigmaPx = 1.5;
+			Assert::IsTrue(BM::Encodable(k15), L"sigmaPx=1.5 is encodable");
+			const VK v15 = BM::ToVariant(k15);
+			Assert::AreEqual(uint32_t(1500), v15.sigmaMilli, L"1.5 px -> 1500 milli-px");
+			Assert::AreEqual(uint32_t(0), uint32_t(v15.param0), L"1.5 px -> 0 micro-px remainder");
+			BM::BandKey out;
+			Assert::IsTrue(BM::FromVariant(v15, &out), L"canonical sigmaPx=1.5 decodes");
+			Assert::IsTrue(std::fabs(out.sigmaPx - 1.5) < 1e-12, L"sigmaPx=1.5 round-trips");
+			Assert::IsTrue(out.resolution == BM::Stage::Full && out.law == BM::Law::Taps
+				&& out.edge == VpUnit::BandFromBase::EdgeMode::Replicate && out.minOne && out.factor == 3.0 && out.eps == 0.0,
+				L"default BandKey fields round-trip");
+			Assert::IsTrue(BM::ToVariant(out) == v15, L"re-encoding canonical BandKey is identical");
+
+			BM::BandKey kRich;
+			kRich.resolution = BM::Stage::Half;
+			kRich.pipelineStage = 2;
+			kRich.plane = 1;
+			kRich.width = 960;
+			kRich.height = 540;
+			kRich.sigmaPx = 1.50025;
+			kRich.law = BM::Law::Taps;
+			kRich.edge = VpUnit::BandFromBase::EdgeMode::Reflect;
+			kRich.factor = 2.5;
+			kRich.minOne = false;
+			kRich.eps = 1e-9;
+			Assert::IsTrue(BM::Encodable(kRich), L"rich canonical BandKey is encodable");
+			const VK vRich = BM::ToVariant(kRich);
+			Assert::AreEqual(uint32_t(1500), vRich.sigmaMilli, L"rich sigmaMilli");
+			Assert::AreEqual(uint32_t(250), uint32_t(vRich.param0), L"rich micro-px remainder");
+			Assert::IsTrue(BM::FromVariant(vRich, &out), L"rich BandKey decodes");
+			Assert::IsTrue(std::fabs(out.sigmaPx - 1.50025) < 1e-12 && out.resolution == BM::Stage::Half
+				&& out.pipelineStage == 2 && out.plane == 1 && out.width == 960u && out.height == 540u
+				&& out.edge == VpUnit::BandFromBase::EdgeMode::Reflect && out.factor == 2.5
+				&& !out.minOne && std::fabs(out.eps - 1e-9) < 1e-18,
+				L"every rich BandKey field survives ToVariant -> FromVariant");
+			Assert::IsTrue(BM::ToVariant(out) == vRich, L"rich key re-encodes identically");
+
+			BM::BandKey kMin;
+			kMin.sigmaPx = BM::kMinSigmaPx;   // 0.5e-6 px: rounds to 1 micro-px quantum under std::llround
+			Assert::IsTrue(std::fabs(BM::kMinSigmaPx - 0.5e-6) < 1e-18, L"kMinSigmaPx is 0.5e-6");
+			Assert::IsTrue(BM::Encodable(kMin), L"kMinSigmaPx is encodable");
+			const VK vMin = BM::ToVariant(kMin);
+			Assert::IsFalse(vMin.IsDefault(), L"kMinSigmaPx does not collapse to the default zero key");
+			Assert::AreEqual(uint32_t(0), vMin.sigmaMilli, L"kMinSigmaPx sigmaMilli == 0");
+			Assert::AreEqual(uint32_t(1), uint32_t(vMin.param0), L"kMinSigmaPx rounds to 1 micro-px");
+			Assert::IsTrue(BM::FromVariant(vMin, &out), L"kMinSigmaPx variant decodes cleanly");
+			Assert::IsTrue(std::fabs(out.sigmaPx - 1.0e-6) < 1e-15, L"kMinSigmaPx decodes to 1 micro-px quantum");
+			Assert::IsTrue(BM::ToVariant(out) == vMin, L"decoded kMinSigmaPx re-encodes identically");
+
+			BM::BandKey kLow;
+			kLow.sigmaPx = 2.0;
+			kLow.law = BM::Law::Low;
+			Assert::IsTrue(BM::Encodable(kLow), L"canonical Law::Low is encodable");
+			const VK vLow = BM::ToVariant(kLow);
+			Assert::IsTrue(BM::FromVariant(vLow, &out) && out.law == BM::Law::Low && std::fabs(out.sigmaPx - 2.0) < 1e-12,
+				L"Law::Low round-trips cleanly");
+
+			VK vParam999 = v15;
+			vParam999.sigmaMilli = 1;
+			vParam999.param0 = 999;
+			Assert::IsTrue(BM::FromVariant(vParam999, &out) && std::fabs(out.sigmaPx - 1.999e-3) < 1e-12,
+				L"upper canonical boundary param0=999 succeeds");
+
+			// 2. Non-canonical param0 >= 1000 aliases MUST be rejected, with same-input positive & negative controls.
+			BM::BandKey sentinel;
+			sentinel.sigmaPx = 42.0;
+
+			BM::BandKey k20;
+			k20.sigmaPx = 2.0;
+			const VK vCanon20 = BM::ToVariant(k20);   // sigmaMilli=2000, param0=0
+
+			VK vAlias1000 = vCanon20;
+			vAlias1000.sigmaMilli = 1999;
+			vAlias1000.param0 = 1000;   // exact same mathematical sigma (1999*1000 + 1000)/1e6 == 2.0
+			// Negative control (Rule 3): prove the slot-splitting hazard is real — VariantKey::Canonical() alone
+			// does NOT collapse param0=1000 into sigmaMilli+1, so their memo keys and hashes diverge.
+			Assert::IsTrue(vAlias1000 != vCanon20 && vAlias1000.Canonical() != vCanon20.Canonical(),
+				L"negative control: VariantKey::Canonical alone leaves param0=1000 distinct from sigmaMilli+1");
+			Assert::AreNotEqual(vCanon20.Hash(), vAlias1000.Hash(),
+				L"negative control: non-canonical param0=1000 hashes to a different memo slot");
+			out = sentinel;
+			Assert::IsFalse(BM::FromVariant(vAlias1000, &out), L"non-canonical param0=1000 MUST be rejected");
+			Assert::AreEqual(sentinel.sigmaPx, out.sigmaPx, L"failed FromVariant leaves out untouched");
+			// Same-input positive control: shifting 1000 micro-px into sigmaMilli yields the canonical spelling.
+			VK vCanonFrom1000 = vAlias1000;
+			vCanonFrom1000.sigmaMilli += 1u;
+			vCanonFrom1000.param0 = uint16_t(vCanonFrom1000.param0 - BM::kMicroPerMilli);
+			Assert::IsTrue(vCanonFrom1000 == vCanon20, L"normalized alias equals canonical variant");
+			Assert::IsTrue(BM::FromVariant(vCanonFrom1000, &out) && std::fabs(out.sigmaPx - 2.0) < 1e-12,
+				L"positive control: canonical spelling (sigmaMilli+1, param0-1000) succeeds");
+
+			VK vAlias1500 = vCanon20;
+			vAlias1500.sigmaMilli = 1999;
+			vAlias1500.param0 = 1500;   // exact same mathematical sigma 2.0005 as (sigmaMilli=2000, param0=500)
+			out = sentinel;
+			Assert::IsFalse(BM::FromVariant(vAlias1500, &out), L"non-canonical param0=1500 MUST be rejected");
+			Assert::AreEqual(sentinel.sigmaPx, out.sigmaPx, L"failed FromVariant(param0=1500) leaves out untouched");
+			VK vCanonFrom1500 = vAlias1500;
+			vCanonFrom1500.sigmaMilli += 1u;
+			vCanonFrom1500.param0 = uint16_t(vCanonFrom1500.param0 - BM::kMicroPerMilli);
+			Assert::AreNotEqual(vAlias1500.Hash(), vCanonFrom1500.Hash(),
+				L"negative control: param0=1500 has a distinct hash from its canonical spelling");
+			Assert::IsTrue(BM::FromVariant(vCanonFrom1500, &out) && std::fabs(out.sigmaPx - 2.0005) < 1e-12,
+				L"positive control: canonical spelling (sigmaMilli=2000, param0=500) succeeds");
+			Assert::IsTrue(BM::ToVariant(out) == vCanonFrom1500, L"canonical 2.0005 round-trips identically");
+
+			VK vZeroMilliAlias1000;
+			vZeroMilliAlias1000.sigmaMilli = 0;
+			vZeroMilliAlias1000.param0 = 1000;
+			Assert::IsFalse(BM::FromVariant(vZeroMilliAlias1000, &out), L"sigmaMilli=0, param0=1000 MUST be rejected");
+			VK vZeroMilliCanon;
+			vZeroMilliCanon.sigmaMilli = 1;
+			vZeroMilliCanon.param0 = 0;
+			Assert::IsTrue(BM::FromVariant(vZeroMilliCanon, &out) && std::fabs(out.sigmaPx - 1.0e-3) < 1e-12,
+				L"positive control: sigmaMilli=1, param0=0 succeeds");
+
+			// 3. Sub-quantum, zero, negative, NaN, Inf, and over-max sigmas MUST be rejected.
+			// Negative control (Rule 3): prove the sub-quantum rounding hazard on the exact input 0.25e-6 —
+			// strictly > 0.0, yet std::llround(0.25e-6 * 1e6) == 0 collides with the invalid zero sentinel,
+			// whereas kMinSigmaPx (0.5e-6) rounds to 1.
+			Assert::IsTrue(0.25e-6 > 0.0, L"negative control: 0.25e-6 passes a naive sigmaPx > 0 check");
+			Assert::AreEqual(0LL, std::llround(0.25e-6 * double(BM::kMicroPerPx)),
+				L"negative control: 0.25e-6 rounds to 0 micro-px and would collide with zero key without kMinSigmaPx floor");
+			Assert::AreEqual(1LL, std::llround(BM::kMinSigmaPx * double(BM::kMicroPerPx)),
+				L"kMinSigmaPx rounds to 1 micro-px");
+
+			const double badSigmas[] = {
+				0.25e-6,
+				0.49e-6,
+				0.0,
+				-1.0,
+				std::numeric_limits<double>::quiet_NaN(),
+				std::numeric_limits<double>::infinity(),
+				-std::numeric_limits<double>::infinity(),
+				BM::kMaxSigmaPx + 1.0,
+			};
+			const VK zeroKey;
+			for (double badSigma : badSigmas)
+			{
+				BM::BandKey bad;
+				bad.sigmaPx = badSigma;
+				Assert::IsFalse(BM::Encodable(bad), L"invalid/sub-quantum sigmaPx must not be Encodable");
+				const VK vBad = BM::ToVariant(bad);
+				Assert::IsTrue(vBad == zeroKey && vBad.IsDefault(), L"ToVariant of unencodable sigma returns zero key");
+				out = sentinel;
+				Assert::IsFalse(BM::FromVariant(vBad, &out), L"FromVariant rejects zero key from unencodable sigma");
+				Assert::AreEqual(sentinel.sigmaPx, out.sigmaPx, L"out untouched on rejected zero key");
+			}
+			Assert::IsFalse(BM::FromVariant(zeroKey, &out), L"default zero VariantKey is rejected");
+
+			// 4. Half-zero size and stray crop fields MUST be rejected, with same-input positive controls.
+			VK vHalfW = v15;
+			vHalfW.width = 1920;
+			vHalfW.height = 0;
+			Assert::IsFalse(BM::FromVariant(vHalfW, &out), L"half-zero size (width!=0, height==0) MUST be rejected");
+
+			VK vHalfH = v15;
+			vHalfH.width = 0;
+			vHalfH.height = 1080;
+			Assert::IsFalse(BM::FromVariant(vHalfH, &out), L"half-zero size (width==0, height!=0) MUST be rejected");
+
+			VK vFullSize = v15;
+			vFullSize.width = 1920;
+			vFullSize.height = 1080;
+			Assert::IsTrue(BM::FromVariant(vFullSize, &out) && out.width == 1920u && out.height == 1080u,
+				L"positive control: both non-zero width and height succeed");
+
+			// Stray crop fields: HasCrop() is false when only cropX / cropY / cropW / cropH is set, proving
+			// checking HasCrop() alone is insufficient (Rule 3 negative control).
+			VK vCropX = v15;
+			vCropX.cropX = 16;
+			Assert::IsFalse(vCropX.HasCrop(), L"negative control: HasCrop() is false for stray cropX");
+			Assert::IsFalse(BM::FromVariant(vCropX, &out), L"stray cropX MUST be rejected");
+
+			VK vCropY = v15;
+			vCropY.cropY = 8;
+			Assert::IsFalse(vCropY.HasCrop(), L"negative control: HasCrop() is false for stray cropY");
+			Assert::IsFalse(BM::FromVariant(vCropY, &out), L"stray cropY MUST be rejected");
+
+			VK vCropW = v15;
+			vCropW.cropW = 64;
+			Assert::IsFalse(vCropW.HasCrop(), L"negative control: HasCrop() is false for stray cropW");
+			Assert::IsFalse(BM::FromVariant(vCropW, &out), L"stray cropW MUST be rejected");
+
+			VK vCropH = v15;
+			vCropH.cropH = 64;
+			Assert::IsFalse(vCropH.HasCrop(), L"negative control: HasCrop() is false for stray cropH");
+			Assert::IsFalse(BM::FromVariant(vCropH, &out), L"stray cropH MUST be rejected");
+
+			VK vCropBoth = v15;
+			vCropBoth.cropW = 64;
+			vCropBoth.cropH = 64;
+			Assert::IsTrue(vCropBoth.HasCrop(), L"full crop has HasCrop()==true");
+			Assert::IsFalse(BM::FromVariant(vCropBoth, &out), L"crop rectangle MUST be rejected");
+		}
+
+		// S2-H5 / CT-M6 (BandMemoFill.h):
+		//   (a) BandMemoModule surfaces registration refusals via FallbackLines()/OnStatus(StatusKind::Fallbacks),
+		//       resets tried_ on Forget (want == 0) so re-observing the exact same size succeeds and clears fallbacks;
+		//   (b) MakeBandMemoOwnerFill rejects RGB SourcePlanes offers and mismatched kAxisSize BEFORE allocating GPU
+		//       textures, records visible decline diagnostics, and surfaces them via FallbackLine/OnStatus(Fallbacks)
+		//       while staying silent on non-Fallbacks StatusKinds.
+		TEST_METHOD(BandMemoFillRejectsRgbAndSizeMismatchAndReportsFallbacks)
+		{
+			namespace BM = VpUnit::BandMemo;
+			namespace GB = Vpv::GrainBand;
+			namespace RE = RendererExtension;
+			using Vpv::Capture::SourcePlanes;
+			using Vpv::Capture::SourcePlaneSet;
+
+			struct SourceHostGuard
+			{
+				const void* host = nullptr;
+				explicit SourceHostGuard(const void* h) : host(h) {}
+				~SourceHostGuard()
+				{
+					if (host != nullptr)
+						SourcePlanes::Forget(host);
+				}
+				SourceHostGuard(const SourceHostGuard&) = delete;
+				SourceHostGuard& operator=(const SourceHostGuard&) = delete;
+			};
+
+			struct FakeDemand : Vpv::Skeleton::IExternalDemand
+			{
+				VpSkeleton::SkeletonMemo* memo = nullptr;
+				bool refuse = false;
+				VpSkeleton::SkeletonMemo::Registration refuseCode = VpSkeleton::SkeletonMemo::Registration::NotInCatalog;
+				int registerCalls = 0;
+				int replaceCalls = 0;
+				VpSkeleton::OwnerFill lastFill;
+
+				void SetExternalDemand(const void*, const void*, const std::vector<VpSkeleton::ConsumerDecl>&,
+					const std::vector<VpSkeleton::ProductId>&) override {}
+				void ClearExternalDemand(const void*, const void*) override {}
+
+				VpSkeleton::SkeletonMemo::Registration RegisterOwnerFill(VpSkeleton::ProductId id, VpSkeleton::AcquireForm form,
+					const std::string& unit, VpSkeleton::OwnerFill fill) override
+				{
+					++registerCalls;
+					lastFill = fill;
+					if (refuse)
+						return refuseCode;
+					return memo != nullptr
+						? memo->RegisterOwnerFill(id, form, unit, std::move(fill))
+						: VpSkeleton::SkeletonMemo::Registration::Registered;
+				}
+
+				VpSkeleton::SkeletonMemo::Registration ReplaceOwnerFill(VpSkeleton::ProductId id, VpSkeleton::AcquireForm form,
+					const std::string& unit, VpSkeleton::OwnerFill fill) override
+				{
+					++replaceCalls;
+					lastFill = fill;
+					if (refuse)
+						return refuseCode;
+					return memo != nullptr
+						? memo->ReplaceOwnerFill(id, form, unit, std::move(fill))
+						: VpSkeleton::SkeletonMemo::Registration::Replaced;
+				}
+
+				bool UnregisterOwnerFill(VpSkeleton::ProductId id, VpSkeleton::AcquireForm form, const std::string& unit) override
+				{
+					return memo != nullptr && memo->UnregisterOwnerFill(id, form, unit);
+				}
+			};
+
+			// Opaque GPU device test double: non-null GPU/dispatch pointers, counts and refuses every texture allocation.
+			struct RefusingDevice : VpSkeleton::IOwnerGpuDevice
+			{
+				int gpuTag = 0;
+				int dispatchTag = 0;
+				int asked = 0;
+				void* OwnerGpu() const override { return const_cast<int*>(&gpuTag); }
+				void* OwnerDispatch() const override { return const_cast<int*>(&dispatchTag); }
+				bool CreateOwnerTexture(const VpSkeleton::TexShape&, VpSkeleton::GpuMemoHandle&, std::string& why) override
+				{
+					++asked;
+					why = "test device makes no texture";
+					return false;
+				}
+			};
+
+			// ---- Part (a): registration failure visibility, tried_ latch, Forget reset, and same-size recovery ----
+			{
+				VpSkeleton::SkeletonMemo memo;
+				FakeDemand demand;
+				demand.memo = &memo;
+				demand.refuse = true;
+				demand.refuseCode = VpSkeleton::SkeletonMemo::Registration::NotInCatalog;
+
+				GB::BandMemoModule module;
+				int host = 0;
+				const VpSkeleton::Dims d1080{ 1920, 1080 };
+
+				Assert::IsFalse(module.Registered(), L"not registered initially");
+				Assert::AreEqual(uint64_t(0), module.RegisteredReserveBytes(), L"no reserve initially");
+				Assert::IsTrue(module.FallbackLines().empty(), L"no fallback line before any size is observed");
+				Assert::AreEqual(uint64_t(0), module.Stats().fills.load(), L"no fills initially");
+				Assert::AreEqual(uint64_t(0), module.Stats().declines.load(), L"no declines initially");
+
+				// Registration initially fails -> visible fallback line naming the catalog refusal.
+				Assert::IsFalse(module.Observe(&host, d1080, &demand), L"refused registration returns false");
+				Assert::IsFalse(module.Registered(), L"module stays unregistered on refusal");
+				Assert::AreEqual(1, demand.registerCalls, L"one registration attempt");
+				const std::vector<std::string> fb = module.FallbackLines();
+				Assert::AreEqual(size_t(1), fb.size(), L"refused registration must emit a visible FallbackLine (Rule 4)");
+				Assert::IsTrue(Contains(fb[0], GB::kBandMemoFallbackId), L"fallback line carries product.band_memo_unavailable id");
+				Assert::IsTrue(Contains(fb[0], "not in the catalog"), L"fallback line visibly names the registration refusal");
+
+				// OnStatus emits the fallback line on VP-V pathway for StatusKind::Fallbacks, and stays silent on others.
+				RE::Context ctx{};
+				ctx.host = &host;
+				std::vector<std::string> statusLines;
+				module.OnStatus(ctx, RE::StatusKind::Fallbacks, statusLines, nullptr, nullptr);
+				Assert::AreEqual(size_t(1), statusLines.size(), L"OnStatus(Fallbacks) emits the fallback line on VP-V pathway");
+				Assert::AreEqual(fb[0], statusLines[0], L"OnStatus(Fallbacks) matches FallbackLines()");
+
+				std::vector<std::string> nonFbLines;
+				module.OnStatus(ctx, RE::StatusKind::Lines, nonFbLines, nullptr, nullptr);
+				module.OnStatus(ctx, RE::StatusKind::WorkerFault, nonFbLines, nullptr, nullptr);
+				module.OnStatus(ctx, RE::StatusKind::WorkerOk, nonFbLines, nullptr, nullptr);
+				Assert::IsTrue(nonFbLines.empty(), L"OnStatus stays silent on non-Fallbacks status kinds");
+
+				// Same-input negative control (Rule 3): while the host stays attached at the same size, tried_ == want
+				// latches even after demand stops refusing — proving tried_ is actively suppressing same-size retries
+				// until Forget resets it.
+				demand.refuse = false;
+				Assert::IsFalse(module.Observe(&host, d1080, &demand), L"negative control: without Forget, same size stays latched");
+				Assert::AreEqual(1, demand.registerCalls, L"negative control: still 1 attempt before Forget");
+				Assert::IsFalse(module.Registered(), L"negative control: still unregistered before Forget");
+				Assert::AreEqual(size_t(1), module.FallbackLines().size(), L"fallback line persists while still refused/latched");
+
+				// Forget(host) drops want to 0, resetting tried_ and clearing regProblem_.
+				module.Forget(&host, &demand);
+				Assert::IsTrue(module.FallbackLines().empty(), L"after Forget (want==0), nothing is owed and FallbackLines clears");
+
+				// Re-observing the EXACT SAME size once demand accepts MUST retry and succeed (on pre-fix code,
+				// tried_ was never reset on Forget so this remained permanently stuck at Registered()==false).
+				Assert::IsTrue(module.Observe(&host, d1080, &demand), L"after Forget, re-observing exact same size succeeds");
+				Assert::AreEqual(2, demand.registerCalls, L"registration retried once after Forget reset tried_");
+				Assert::IsTrue(module.Registered(), L"module is now registered");
+				Assert::AreEqual(GB::BandMemoReserveBytes(d1080), module.RegisteredReserveBytes(), L"reserve matches 1080p");
+				Assert::IsTrue(memo.HasOwnerFill(VpSkeleton::kBandMemo, VpSkeleton::AcquireForm::Gpu), L"memo holds kBandMemo fill");
+				Assert::IsTrue(module.FallbackLines().empty(), L"healthy registration clears FallbackLines");
+
+				statusLines.clear();
+				module.OnStatus(ctx, RE::StatusKind::Fallbacks, statusLines, nullptr, nullptr);
+				Assert::IsTrue(statusLines.empty(), L"OnStatus(Fallbacks) is empty once registered cleanly");
+			}
+
+			// ---- Part (b): RGB rejection, kAxisSize mismatch before GPU allocation, and OnStatus/FallbackLine ----
+			{
+				int fillHost = 0;
+				SourceHostGuard hostGuard(&fillHost);
+
+				pl_tex_t lumaTex{};
+				lumaTex.params.w = 128;
+				lumaTex.params.h = 96;
+				pl_tex_t halfTex{};
+				halfTex.params.w = 64;
+				halfTex.params.h = 48;
+
+				RefusingDevice dev;
+				VpSkeleton::SkeletonMemo fillMemo;
+				fillMemo.SetHost(&fillHost);
+				fillMemo.SetRenderThread(std::this_thread::get_id());
+				fillMemo.SetGpuDispatcherPresent(true);
+				fillMemo.SetGpuBudget(true, uint64_t(1) << 28);
+				fillMemo.SetGpuDevice(&dev);
+
+				Assert::IsTrue(fillMemo.RegisterOwnerFill(VpSkeleton::kP13SourceRing, VpSkeleton::AcquireForm::Gpu,
+					SourcePlanes::kUnit, SourcePlanes::MakeOwnerFill()) == VpSkeleton::SkeletonMemo::Registration::Registered,
+					L"P13 source-planes owner registered");
+
+				// Stub GPU P1 half-luma view so Stage::Half can prove BandMemoFill's own RGB guard stops RGB BEFORE
+				// acquiring P1 or allocating GPU textures (independent of P13's own RGB check).
+				VpSkeleton::OwnerFill halfFill;
+				halfFill.view = true;
+				halfFill.frameScoped = true;
+				halfFill.fill = [&halfTex](const VpSkeleton::OwnerFillRequest&, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+					out.gpu.resource = &halfTex;
+					out.gpu.width = uint32_t(halfTex.params.w);
+					out.gpu.height = uint32_t(halfTex.params.h);
+					out.gpu.bytes = 0;
+					return true;
+				};
+				Assert::IsTrue(fillMemo.RegisterOwnerFill(VpSkeleton::kP1HalfLuma, VpSkeleton::AcquireForm::Gpu,
+					VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP1HalfLuma), std::move(halfFill))
+					== VpSkeleton::SkeletonMemo::Registration::Registered, L"stub GPU P1 half-luma owner registered");
+
+				const VpSkeleton::Dims lumaDims{ 128, 96 };
+				const uint64_t reserve = GB::BandMemoReserveBytes(lumaDims);
+
+				// (b1) Direct MakeBandMemoOwnerFill: RGB offer (facts->rgb == true) rejected with "RGB" in LastDecline & FallbackLine.
+				const std::shared_ptr<GB::Counters> directCounters = std::make_shared<GB::Counters>();
+				const VpSkeleton::OwnerFill directFill = GB::MakeBandMemoOwnerFill(reserve, directCounters);
+
+				SourcePlaneSet rgbSet;
+				rgbSet.seq = 10;
+				rgbSet.planes = 1;
+				rgbSet.tex[0] = &lumaTex;
+				rgbSet.components[0] = 3;
+				rgbSet.repr.sys = PL_COLOR_SYSTEM_RGB;
+				rgbSet.rgb = true;
+				rgbSet.origin = "band_memo test rgb";
+				Assert::IsTrue(SourcePlanes::Offer(&fillHost, rgbSet), L"RGB plane set offered");
+
+				BM::BandKey fullKey;
+				fullKey.sigmaPx = 1.5;
+				fullKey.resolution = BM::Stage::Full;
+				VpSkeleton::OwnerGpuContext gpuCtx(&dev, reserve);
+				VpSkeleton::OwnerFillRequest req;
+				req.host = &fillHost;
+				req.id = VpSkeleton::kBandMemo;
+				req.seq = 10;
+				req.form = VpSkeleton::AcquireForm::Gpu;
+				req.variant = BM::ToVariant(fullKey);
+				req.gpu = &gpuCtx;
+
+				VpSkeleton::OwnerFillOutput out;
+				Assert::IsFalse(directFill.fill(req, fillMemo, out), L"RGB Full-stage request MUST be declined");
+				Assert::IsTrue(Contains(out.declineReason, "RGB"), L"RGB declineReason names RGB");
+				Assert::AreEqual(0, dev.asked, L"RGB decline happens before any GPU texture allocation");
+				Assert::AreEqual(uint64_t(1), directCounters->declines.load(), L"RGB decline is counted");
+				Assert::IsTrue(directCounters->lastDeclined.load(), L"lastDeclined engaged on RGB decline");
+				Assert::IsTrue(Contains(directCounters->LastDecline(), "RGB"), L"counters->LastDecline() records RGB");
+				const std::string rgbFallback = GB::FallbackLine(std::string(), directCounters->declines.load(),
+					directCounters->LastDecline(), directCounters->lastDeclined.load());
+				Assert::IsFalse(rgbFallback.empty(), L"FallbackLine is non-empty after RGB decline");
+				Assert::IsTrue(Contains(rgbFallback, GB::kBandMemoFallbackId), L"FallbackLine carries product.band_memo_unavailable");
+				Assert::IsTrue(Contains(rgbFallback, "RGB"), L"FallbackLine visibly surfaces RGB reason");
+
+				// Same RGB offer on Stage::Half (where P1 would otherwise return a valid 64x48 texture):
+				// BandMemoFill's own RGB check rejects it BEFORE P1/Allocate (dev.asked remains 0).
+				BM::BandKey halfKey;
+				halfKey.sigmaPx = 1.5;
+				halfKey.resolution = BM::Stage::Half;
+				req.variant = BM::ToVariant(halfKey);
+				out = VpSkeleton::OwnerFillOutput();
+				Assert::IsFalse(directFill.fill(req, fillMemo, out), L"RGB Half-stage request MUST also be declined");
+				Assert::IsTrue(Contains(out.declineReason, "RGB"), L"RGB Half-stage declineReason names RGB");
+				Assert::AreEqual(0, dev.asked, L"RGB Half-stage decline happens before any GPU texture allocation");
+
+				// Same-input positive control (Rule 3): flipping ONLY rgb=false on the exact same Half-stage path
+				// passes the RGB guard and reaches GPU allocation (dev.asked increments from 0 to 1).
+				SourcePlaneSet yuvHalfSet = rgbSet;
+				yuvHalfSet.seq = 11;
+				yuvHalfSet.repr.sys = PL_COLOR_SYSTEM_BT_709;
+				yuvHalfSet.rgb = false;
+				yuvHalfSet.components[0] = 1;
+				Assert::IsTrue(SourcePlanes::Offer(&fillHost, yuvHalfSet), L"YUV plane set offered for positive control");
+				req.seq = 11;
+				out = VpSkeleton::OwnerFillOutput();
+				Assert::IsFalse(directFill.fill(req, fillMemo, out), L"refusing fake device declines at allocation");
+				Assert::AreEqual(1, dev.asked, L"positive control: YUV passes RGB guard and reaches GPU texture allocation");
+				Assert::IsFalse(Contains(out.declineReason, "RGB"), L"positive control: YUV decline is not an RGB rejection");
+
+				// (b2) Mismatched kAxisSize checked BEFORE GPU texture allocation, routed through BandMemoModule + SkeletonMemo.
+				dev.asked = 0;
+				FakeDemand fillDemand;
+				fillDemand.memo = &fillMemo;
+				GB::BandMemoModule fillModule;
+				Assert::IsTrue(fillModule.Observe(&fillHost, lumaDims, &fillDemand), L"BandMemoModule registers on fillMemo");
+				Assert::IsTrue(fillModule.Registered(), L"fillModule registered");
+				Assert::IsTrue(fillModule.FallbackLines().empty(), L"no fallback line before any fill decline");
+
+				SourcePlaneSet yuvSet;
+				yuvSet.seq = 20;
+				yuvSet.planes = 1;
+				yuvSet.tex[0] = &lumaTex;   // 128x96
+				yuvSet.components[0] = 1;
+				yuvSet.repr.sys = PL_COLOR_SYSTEM_BT_709;
+				yuvSet.rgb = false;
+				yuvSet.origin = "band_memo test yuv";
+				Assert::IsTrue(SourcePlanes::Offer(&fillHost, yuvSet), L"128x96 YUV source offered");
+
+				BM::BandKey wrongSizeKey;
+				wrongSizeKey.sigmaPx = 1.5;
+				wrongSizeKey.width = 64;
+				wrongSizeKey.height = 48;
+				const VpSkeleton::AcquireResult mismatchRes = fillMemo.Acquire(
+					VpSkeleton::kBandMemo, 20, VpSkeleton::AcquireForm::Gpu, BM::ToVariant(wrongSizeKey));
+				Assert::IsFalse(mismatchRes.Ok(), L"mismatched kAxisSize (64x48 vs 128x96) MUST be declined");
+				Assert::IsTrue(mismatchRes.cause == VpSkeleton::AcquireCause::OwnerDeclined, L"cause is OwnerDeclined");
+				Assert::AreEqual(0, dev.asked, L"size mismatch MUST be rejected BEFORE allocating GPU textures");
+				Assert::AreEqual(uint64_t(1), fillModule.Stats().declines.load(), L"size mismatch decline counted in module Stats()");
+				const std::string sizeDecline = fillModule.Stats().LastDecline();
+				Assert::IsTrue(Contains(sizeDecline, "64x48") && Contains(sizeDecline, "128x96") && Contains(sizeDecline, "does not match"),
+					L"LastDecline visibly names requested 64x48 vs input 128x96 mismatch");
+
+				const std::vector<std::string> modFb = fillModule.FallbackLines();
+				Assert::AreEqual(size_t(1), modFb.size(), L"BandMemoModule FallbackLines surfaces the fill decline");
+				Assert::IsTrue(Contains(modFb[0], GB::kBandMemoFallbackId) && Contains(modFb[0], "64x48") && Contains(modFb[0], "128x96"),
+					L"module FallbackLine names product.band_memo_unavailable and the size mismatch");
+
+				RE::Context fillCtx{};
+				fillCtx.host = &fillHost;
+				std::vector<std::string> fillStatus;
+				fillModule.OnStatus(fillCtx, RE::StatusKind::Fallbacks, fillStatus, nullptr, nullptr);
+				Assert::AreEqual(size_t(1), fillStatus.size(), L"OnStatus(Fallbacks) emits the fill decline on VP-V pathway");
+				Assert::AreEqual(modFb[0], fillStatus[0], L"OnStatus(Fallbacks) matches module FallbackLines()");
+
+				std::vector<std::string> fillNonFb;
+				fillModule.OnStatus(fillCtx, RE::StatusKind::Lines, fillNonFb, nullptr, nullptr);
+				fillModule.OnStatus(fillCtx, RE::StatusKind::WorkerFault, fillNonFb, nullptr, nullptr);
+				fillModule.OnStatus(fillCtx, RE::StatusKind::WorkerOk, fillNonFb, nullptr, nullptr);
+				Assert::IsTrue(fillNonFb.empty(), L"OnStatus stays silent on non-Fallbacks status kinds during active decline");
+
+				// Same-input positive controls (Rule 3): on the exact same 128x96 source luma (seq 20), both an
+				// exact matching kAxisSize (128x96) and an unspecified size (0x0) pass the size check and proceed
+				// to GPU texture allocation (dev.asked increments to 1, then 2).
+				BM::BandKey matchSizeKey;
+				matchSizeKey.sigmaPx = 1.5;
+				matchSizeKey.width = 128;
+				matchSizeKey.height = 96;
+				const VpSkeleton::AcquireResult matchRes = fillMemo.Acquire(
+					VpSkeleton::kBandMemo, 20, VpSkeleton::AcquireForm::Gpu, BM::ToVariant(matchSizeKey));
+				Assert::IsFalse(matchRes.Ok(), L"fake device refuses texture allocation");
+				Assert::AreEqual(1, dev.asked, L"positive control: matching 128x96 kAxisSize passes size guard to GPU allocation");
+				Assert::IsFalse(Contains(fillModule.Stats().LastDecline(), "does not match"),
+					L"positive control: matching 128x96 does not fail size check");
+
+				BM::BandKey unspecSizeKey;
+				unspecSizeKey.sigmaPx = 1.5;
+				const VpSkeleton::AcquireResult unspecRes = fillMemo.Acquire(
+					VpSkeleton::kBandMemo, 20, VpSkeleton::AcquireForm::Gpu, BM::ToVariant(unspecSizeKey));
+				Assert::IsFalse(unspecRes.Ok(), L"fake device refuses texture allocation");
+				Assert::AreEqual(2, dev.asked, L"positive control: unspecified 0x0 size passes size guard to GPU allocation");
+				Assert::IsFalse(Contains(fillModule.Stats().LastDecline(), "does not match"),
+					L"positive control: unspecified 0x0 size does not fail size check");
+
+				fillMemo.ReleaseGpuSpots();
+			}
 		}
 	};
 }
