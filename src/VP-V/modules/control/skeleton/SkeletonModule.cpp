@@ -2125,11 +2125,6 @@ namespace Vpv
 						break;
 					}
 				}
-				// Exact when the walk joined a ring entry or reached the stream's first frame (nothing earlier to know); else reduced evidence.
-				if (joined || oldest <= 1)
-					st.sceneRunRebuilt.fetch_add(1, std::memory_order_relaxed);
-				else
-					st.sceneRunReduced.fetch_add(1, std::memory_order_relaxed);
 				run = start;
 				VpUnit::CutFadeJudge::AlignedPairCache cache;
 				for (size_t i = recs.size() - 1; i > 0; --i)
@@ -2147,6 +2142,13 @@ namespace Vpv
 					prevMax, us, std::memory_order_relaxed, std::memory_order_relaxed))
 				{
 				}
+				// Publish rebuild count with release ordering AFTER timing updates so concurrent readers acquiring
+				// sceneRunRebuilt / sceneRunReduced never observe a nonzero rebuild count with 0.00 ms timing.
+				// Exact when the walk joined a ring entry or reached the stream's first frame (nothing earlier to know); else reduced evidence.
+				if (joined || oldest <= 1)
+					st.sceneRunRebuilt.fetch_add(1, std::memory_order_release);
+				else
+					st.sceneRunReduced.fetch_add(1, std::memory_order_release);
 				return run;
 			}
 
@@ -2193,6 +2195,9 @@ namespace Vpv
 				// Scene EVENTS (cut / fade / flash) are scene facts: classified from the P4 records alone. This function reads NO validity source
 				// (no VpIndicator::TemporalValid, no Indicator at all): whether a vector pair is usable across a resync is answered only by the P5a
 				// MotionValidity facade (coordinator ruling 2026-11-08; tools/test_check_shared_units.py test_scene_facts_reads_no_validity_source).
+				// Intentionally retains the literal 4-argument VpLaneProducts::ClassifyEvents(a, c, false, false) call pinned by
+				// test_scene_facts_reads_no_validity_source; SceneRunBefore's 7-pair rebuild loop wires AlignedPairCache directly through
+				// VpUnit::CutFadeJudge::ClassifyEvents, and FoldFadeRun eliminates its internal redundant AlignGrid calls via FitGridFadeAligned.
 				VpLaneProducts::EventSignals e = VpLaneProducts::ClassifyEvents(a, c, false, false);
 				double fadeKeep = 1.0;
 				{
@@ -2568,8 +2573,8 @@ namespace Vpv
 				c.storeReads = st->sceneStoreReads.load(std::memory_order_relaxed);
 				c.liveFills = st->sceneLiveFills.load(std::memory_order_relaxed);
 				c.cacheHits = st->sceneCacheHits.load(std::memory_order_relaxed);
-				c.fadeRunRebuilt = st->sceneRunRebuilt.load(std::memory_order_relaxed);
-				c.fadeRunReduced = st->sceneRunReduced.load(std::memory_order_relaxed);
+				c.fadeRunRebuilt = st->sceneRunRebuilt.load(std::memory_order_acquire);
+				c.fadeRunReduced = st->sceneRunReduced.load(std::memory_order_acquire);
 				c.fadeRunRebuildUsTotal = st->sceneRunRebuildUsTotal.load(std::memory_order_relaxed);
 				c.fadeRunRebuildUsMax = st->sceneRunRebuildUsMax.load(std::memory_order_relaxed);
 				c.fadeRunRebuildUsLast = st->sceneRunRebuildUsLast.load(std::memory_order_relaxed);
@@ -3760,8 +3765,8 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 						std::to_string(PassTimers::Inbox::Motion().Dropped()) + " dropped (the queue is bounded; with nobody draining it the oldest is dropped)");   // MV7: the producers' posted timings (also drained into the pass-timer readout by the host)
 			}
 			{
-				const uint64_t rebuilt = st.sceneRunRebuilt.load(std::memory_order_relaxed);
-				const uint64_t reduced = st.sceneRunReduced.load(std::memory_order_relaxed);
+				const uint64_t rebuilt = st.sceneRunRebuilt.load(std::memory_order_acquire);
+				const uint64_t reduced = st.sceneRunReduced.load(std::memory_order_acquire);
 				if (rebuilt != 0 || reduced != 0)
 				{
 					const uint64_t count = rebuilt + reduced;

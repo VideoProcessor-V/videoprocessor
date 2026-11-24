@@ -5,11 +5,13 @@
 // P4 records, and the veto detector's grid + histogram cut rule. Shared by the lane (ClassifyEvents), SkeletonModule, and
 // HdrVetoCutDetector::Observe so every consumer calls ONE implementation. Cut/fade/flash are never stored: every consumer derives them.
 //
-// First-principles 576-cell spatial affine fade law (owner ruling 2026-11-22 16:53 EST; zero fitted constants):
+// First-principles 576-cell spatial affine fade law (v4/v5; zero fitted constants):
 //   - Decoupled global translation alignment (integer + symmetric sub-cell Gauss-Newton / Lucas-Kanade) over the 32x18 P4 cell grid
-//   - Global OLS affine fit cur ~= A * ref_aligned + c with implied black b = c / (1 - A) in (kFadeMinBlack, kFadeMaxBlack)
-//   - Motion-compensated L2 variance reduction over litCells: V_fade < 0.5 * V_id (R^2_delta > 0.50, with sqrt(V_id) > 0.5 code)
-//   - Motion-compensated spatial consensus (>= 75% of changing lit cells) and whole-picture coverage (>= 50% of lit cells)
+//   - Rigid OLS affine fit cur ~= A * ref_aligned + c (FitGridFadeAligned) with implied black b = c / (1 - A) in (kFadeMinBlack, kFadeMaxBlack),
+//     L2 variance reduction V_fade < 0.5 * V_id, spatial consensus >= 75%, whole-picture coverage >= 50%, sparse-only FootprintPreserved, and
+//     HighlightScalingConsistent (with ITU-R BT.709-6 kStudioPeakWhiteCodes = 235.0 clipped-white censorship)
+//   - Motion-tolerant fallback (FitMotionTolerantFade): 392-cell order-statistic OLS with SNR-matched gain floor kFadeRunMinGain / kFadeResidualReduction,
+//     4x2 macro-tile affine uniformity & L2 reduction, and 14x7 2x2-pooled correlation >= kSameStructure
 //   - Gridless fallback preserves the M4 (mean, spread) pair/run laws for tiny planes (< 32x18) and synthetic gridless records.
 //
 // Pure C++14, no Windows or GPU headers. Heavy non-template CPU bodies live in CutFadeJudge.cpp (VideoProcessor-Lib).
@@ -65,7 +67,7 @@ constexpr double kBlackMaxP4 = double(kFadeMaxBlack) * kP4CodesPerEightBit;     
 // Elementary textbook ratios for the 576-cell spatial affine fade law.
 constexpr double kFadeResidualReduction = 0.5;                // 50% reduction bar: lit-cell L2 variance explained > 50% (V_fade < 0.5 * V_id) & AlignGrid shift-improvement check
 constexpr double kFadeSpatialConsensus = 0.75;                // >= 3/4 of changing lit cells move in the fade direction
-constexpr double kFadeSpatialCoverage = 0.5;                  // >= 1/2 of lit cells participate in the fade direction & above-LSB StepStillMoving majority
+constexpr double kFadeSpatialCoverage = 0.5;                  // >= 1/2 of lit cells participate in the fade direction (and >= 1/2 of 4x2 tiles lit / stationary-background guard)
 constexpr double kFadeCellStepEps = 0.5 * double(kFadeMinSpread); // 0.5 8-bit code = half-LSB quantization floor
 // ITU-R BT.709-6 / Rec.601 studio-swing nominal peak white (8-bit code 235 on kGridScale = 1/256).
 constexpr double kStudioPeakWhiteCodes = 235.0;

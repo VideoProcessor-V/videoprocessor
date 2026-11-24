@@ -465,7 +465,11 @@ GridFadeFit FitMotionTolerantFade(const double refAligned[kGridH][kGridW], const
     const double A = sxy / sxx;
     const double c = my - A * mx;
     fit.gain = A;
-    if (!(A > 0.0) || std::fabs(1.0 - A) <= kFadeRunMinGain)
+    // FitMotionTolerantFade runs only when rigid 392-cell OLS failed V_fade < kFadeResidualReduction * V_id,
+    // meaning non-rigid motion accounts for >= kFadeResidualReduction (50%) of variance. Matching rigid OLS's
+    // implied-black b = c / (1 - A) SNR therefore requires 1 / kFadeResidualReduction (2x) cumulative gain.
+    const double minMotionGain = kFadeRunMinGain / kFadeResidualReduction;
+    if (!(A > 0.0 && std::fabs(1.0 - A) > minMotionGain))
         return fit;
 
     const double b = c / (1.0 - A);
@@ -1190,10 +1194,13 @@ bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur
             }
         std::sort(pSorted, pSorted + kIntN);
         std::sort(cSorted, cSorted + kIntN);
-        // Exclude a pinned clipped-white ceiling plateau (prev & cur max within kFadeCellStepEps) from stepAQ:
-        // when midtones darken while hard-clipped peak white stays pinned at ceiling, the ceiling lever arm can
-        // otherwise force Cov(p, c) > Var(p) -> stepAQ > 1.0 despite every unclipped pixel darkening.
-        const bool topPinned = std::fabs(pSorted[kIntN - 1] - cSorted[kIntN - 1]) <= kFadeCellStepEps;
+        // Exclude a pinned ITU-R BT.709-6 studio-peak-white ceiling plateau (>= 235 - 1 code, prev & cur max
+        // within kFadeCellStepEps) from stepAQ: when midtones darken while hard-clipped peak white stays pinned
+        // at ceiling, the ceiling lever arm can otherwise force Cov(p, c) > Var(p) -> stepAQ > 1.0 despite every
+        // unclipped pixel darkening. Unclipped flat-top scenes (< 234 codes) are never stripped.
+        const bool topPinned = pSorted[kIntN - 1] >= kStudioPeakWhiteCodes - double(kFadeMinSpread) &&
+            cSorted[kIntN - 1] >= kStudioPeakWhiteCodes - double(kFadeMinSpread) &&
+            std::fabs(pSorted[kIntN - 1] - cSorted[kIntN - 1]) <= kFadeCellStepEps;
         int kEnd = kIntN;
         if (topPinned) {
             const double pCeil = pSorted[kIntN - 1] - double(kFadeMinSpread);
@@ -1294,7 +1301,7 @@ bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur
                 if (run.midGridValid) {
                     for (int i = 0; i < kGridW * kGridH; ++i)
                         run.baseCells[i] = run.midCells[i];
-                    run.baseP99 = run.midP99;
+                    run.baseP99 = run.midP99; // baseMean is unused on the grid path (gridless fallback only)
                     run.anchorKeep = run.midAnchorKeep;
                     run.cumVx = run.midCumVx;
                     run.cumVy = run.midCumVy;
@@ -1453,7 +1460,7 @@ bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur
 
             if (rigidFootprintOk && TryAcceptCumFit(rigidFit))
                 return true;
-            if (!cumFootprintRejected && run.pairs >= uint32_t(kRefFrames)) {
+            if (!cumFootprintRejected) {
                 const GridFadeFit mtFit = FitMotionTolerantFade(baseAligned, curBaseAligned, cumFitVx, cumFitVy, nearBlackFall);
                 if (TryAcceptCumFit(mtFit))
                     return true;
@@ -1471,7 +1478,7 @@ bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur
             const bool adjFootprintRejected = adjValidDir && !adjFootprintOk;
             GridFadeFit adjFit = rigidAdj;
             bool adjOk = adjFootprintOk;
-            if (!adjOk && !adjFootprintRejected && run.pairs >= uint32_t(kRefFrames)) {
+            if (!adjOk && !adjFootprintRejected) {
                 adjFit = FitMotionTolerantFade(prevAligned, curAligned, stepVx, stepVy, nearBlackFall);
                 adjOk = adjFit.valid && adjFit.dir == run.direction;
             }
