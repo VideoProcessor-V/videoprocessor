@@ -1068,13 +1068,18 @@ bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur
 
         const bool fromBlack = spreadPrev <= kBlackSpreadP4 && prev.mean < kBlackMeanMaxP4 &&
             dMean > 0 && dP99 > 0 && aMean < kMaxFadeStepP4 && aSpread < kMaxFadeStepP4;
+        // Bounded near-black fade-in rise (e.g. frames k = 1..3 of a linear ramp after a failed black-origin reset,
+        // where spreadPrev > 1 code yet aSpread / spread = 1/(k+1) >= 1/kFadeMaxDiv): exempt from relative jump guard.
+        const bool nearBlackRise = prev.mean < kBlackMeanMaxP4 && dMean > 0 && dP99 > 0 && dSpread > 0 &&
+            aMean < kMaxFadeStepP4 && aSpread < kMaxFadeStepP4;
         const bool jump = (aMean * kFadeMaxDiv >= contRef || aSpread * kFadeMaxDiv >= contRef) &&
-            !(run.blackOrigin && dMean > 0 && aMean < kMaxFadeStepP4 && aSpread < kMaxFadeStepP4);
+            !(run.blackOrigin && dMean > 0 && aMean < kMaxFadeStepP4 && aSpread < kMaxFadeStepP4) && !nearBlackRise;
         const bool continues = run.direction != 0 && !jump && (stepDir == run.direction || stepDir == 0);
 
         if (!continues) {
             run = FadeRun();
-            if (stepDir == 0 || (!fromBlack && (aMean * kFadeMaxDiv >= int64_t(spread) || aSpread * kFadeMaxDiv >= int64_t(spread)))) {
+            if (stepDir == 0 || (!(fromBlack || nearBlackRise) &&
+                                 (aMean * kFadeMaxDiv >= int64_t(spread) || aSpread * kFadeMaxDiv >= int64_t(spread)))) {
                 FadeRunEndAt(run, cur);
                 return false;
             }
