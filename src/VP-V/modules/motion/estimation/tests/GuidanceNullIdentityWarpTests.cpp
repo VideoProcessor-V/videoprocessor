@@ -354,5 +354,208 @@ namespace VideoProcessorTest
 					L"negative control: bit-identical half-frame must raise FrameTrust share >= 0.45 without cut-skip");
 			}
 		}
+
+		// GEM-118 (VE-MATCHER-FIXES): STILL_ZERO_BODY must require at least one in-bounds pixel (any_px)
+		// before stamping (0, 0, 1, 1) onto subField. On a 64x24 frame (height not a multiple of 16 ->
+		// blocksX = 4, blocksY = 2 -> subField is 8x4 with block_px = 8), row by = 3 covers source
+		// y = 24..31, ALL >= psz.y = 24. With pictureArea = false (in_picture_() == true), only any_px
+		// prevents vacuous same == true from clobbering row by = 3 with (0, 0, 1, 1).
+		BEGIN_TEST_METHOD_ATTRIBUTE(StillZeroDoesNotStampOutOfBoundsSubFieldRowOnNonMultipleOf16Height)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(StillZeroDoesNotStampOutOfBoundsSubFieldRowOnNonMultipleOf16Height)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			constexpr int kSubW = 64, kSubH = 24;   // 24 % 16 == 8 -> blocksY = 2, subField height = 4, row 3 is y=24..31 (OOB)
+			constexpr int kPanX = 4;                // exact 2-px half-res pan aligned to 4-px texture cells
+			const DejudderFrame fa = MakeDejudderFrame(kSubW, kSubH,
+				[](int x, int y) { return DejudderTexture(x, y); },
+				[](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); });
+			const DejudderFrame fb = MakeDejudderFrame(kSubW, kSubH,
+				[kPanX](int x, int y) { return DejudderTexture(x - kPanX, y); },
+				[kPanX](int x, int y, int c) { return DejudderTexture((x - kPanX / 2) * 2, y, 7 + c); });
+			DejudderGpuPlanes a, b;
+			UploadDejudderFrame(gpu, fa, a);
+			UploadDejudderFrame(gpu, fb, b);
+
+			auto downloadSubField = [gpu](const Dejudder::MotionWarp& warp, int& sw, int& sh) -> std::vector<float>
+			{
+				pl_tex sf = warp.SubField();
+				Assert::IsNotNull(sf, L"MotionWarp::SubField() must exist when estSplit is enabled");
+				sw = sf->params.w;
+				sh = sf->params.h;
+				Assert::AreEqual(warp.BlocksX() * 2, sw, L"SubField width must be 2 * BlocksX");
+				Assert::AreEqual(warp.BlocksY() * 2, sh, L"SubField height must be 2 * BlocksY");
+				std::vector<uint16_t> half(static_cast<size_t>(sw) * sh * 4);
+				pl_tex_transfer_params download{};
+				download.tex = sf;
+				download.ptr = half.data();
+				Assert::IsTrue(pl_tex_download(gpu, &download), L"SubField texture is not host-readable");
+				std::vector<float> out(half.size());
+				for (size_t i = 0; i < half.size(); ++i)
+					out[i] = HalfBits(half[i]);
+				return out;
+			};
+
+			auto isStillZeroStamp = [](float vx, float vy, float trust, float w) -> bool
+			{
+				return std::fabs(vx) < 1e-4f && std::fabs(vy) < 1e-4f && trust > 0.5f && w > 0.5f;
+			};
+
+			Dejudder::Settings settings = DejudderTestSettings();
+			settings.estStillZero = true;
+			settings.estSplit = true;
+			settings.pictureArea = false;   // in_picture_() is always true; ONLY any_px guards OOB row by == 3
+			settings.hostReadable = true;
+
+			// 1. Panning pair (A, B): out-of-bounds row by == 3 must NOT be stamped (0, 0, 1, 1),
+			// and interior unsplit sub-blocks on row by == 3 must preserve the parent's (4, 0) pan with w == 0.
+			{
+				Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
+				Assert::IsTrue(warp.Estimate(a.planes, b.planes), L"panning 64x24 estimate");
+				pl_gpu_finish(gpu);
+				Assert::AreEqual(4, warp.BlocksX(), L"64 px width must produce 4 parent blocks");
+				Assert::AreEqual(2, warp.BlocksY(), L"24 px height must produce 2 parent blocks");
+				int sw = 0, sh = 0;
+				const std::vector<float> sf = downloadSubField(warp, sw, sh);
+				Assert::AreEqual(8, sw, L"expected 8 sub-blocks across");
+				Assert::AreEqual(4, sh, L"expected 4 sub-block rows (row 3 covers y = 24..31 >= 24)");
+				for (int bx = 0; bx < sw; ++bx)
+				{
+					const size_t idx = (static_cast<size_t>(3) * sw + bx) * 4;
+					const float vx = sf[idx], vy = sf[idx + 1], trust = sf[idx + 2], w = sf[idx + 3];
+					Assert::IsFalse(isStillZeroStamp(vx, vy, trust, w),
+						L"GEM-118: StillZero must not stamp out-of-bounds subField row by=3 with (0, 0, 1, 1)");
+					if (bx >= 2 && bx <= 5)
+					{
+						Assert::IsTrue(w < 0.5f,
+							L"GEM-118: interior unsplit sub-block on OOB row by=3 must keep split flag w=0");
+						Assert::IsTrue(trust > 0.5f &&
+							std::fabs(vx - static_cast<float>(kPanX)) <= 0.5f &&
+							std::fabs(vy) <= 0.5f,
+							L"GEM-118: interior sub-block on OOB row by=3 must preserve parent pan (4, 0)");
+					}
+				}
+			}
+
+			// 2. Mandatory same-input negative control (Rule 3): identical frames (A == A, exact same 64x24
+			// size and settings) prove StillZero genuinely runs on subField and stamps every in-bounds
+			// sub-block (by in 0..2) with (0, 0, 1, 1), while OOB row by == 3 still is NOT stamped.
+			{
+				Dejudder::MotionWarp stillWarp(fixture.Log(), gpu, settings);
+				Assert::IsTrue(stillWarp.Estimate(a.planes, a.planes), L"identical 64x24 estimate (negative control)");
+				pl_gpu_finish(gpu);
+				int sw = 0, sh = 0;
+				const std::vector<float> sf = downloadSubField(stillWarp, sw, sh);
+				Assert::AreEqual(8, sw);
+				Assert::AreEqual(4, sh);
+				for (int by = 0; by < 3; ++by)
+					for (int bx = 0; bx < sw; ++bx)
+					{
+						const size_t idx = (static_cast<size_t>(by) * sw + bx) * 4;
+						Assert::IsTrue(isStillZeroStamp(sf[idx], sf[idx + 1], sf[idx + 2], sf[idx + 3]),
+							L"negative control: StillZero must stamp every in-bounds sub-block (by=0..2) on A==A with (0, 0, 1, 1)");
+					}
+				for (int bx = 0; bx < sw; ++bx)
+				{
+					const size_t idx = (static_cast<size_t>(3) * sw + bx) * 4;
+					Assert::IsFalse(isStillZeroStamp(sf[idx], sf[idx + 1], sf[idx + 2], sf[idx + 3]),
+						L"GEM-118: even on identical A==A, StillZero must not stamp out-of-bounds row by=3 with (0, 0, 1, 1)");
+					Assert::IsTrue(sf[idx + 3] < 0.5f,
+						L"GEM-118: out-of-bounds row by=3 on identical A==A must keep incoming w=0");
+				}
+			}
+		}
+
+		// GEM-115 (VE-MATCHER-FIXES): OpticalFlowSearch must verify ahead->forward.size() and
+		// ahead->backward.size() cover gridW * gridH * 2 int16s before calling UpdateSubresource.
+		// A truncated or empty vector buffer with matching halfW/halfH/gridW/gridH must be rejected
+		// cleanly with NoPairAhead() == true and PairSizeMismatch() == true (falling back to block
+		// search), whereas a nullptr ahead pair reports NoPairAhead() == true and PairSizeMismatch() == false.
+		BEGIN_TEST_METHOD_ATTRIBUTE(OpticalFlowSearchRejectsTruncatedBackwardVectorsWithVisibleDiagnostics)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(OpticalFlowSearchRejectsTruncatedBackwardVectorsWithVisibleDiagnostics)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			constexpr int kOfW = 128, kOfH = 64;
+			constexpr int kPanX = 4;
+			const DejudderFrame fa = MakeDejudderFrame(kOfW, kOfH,
+				[](int x, int y) { return DejudderTexture(x, y); },
+				[](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); });
+			const DejudderFrame fb = MakeDejudderFrame(kOfW, kOfH,
+				[kPanX](int x, int y) { return DejudderTexture(x - kPanX, y); },
+				[kPanX](int x, int y, int c) { return DejudderTexture((x - kPanX / 2) * 2, y, 7 + c); });
+			DejudderGpuPlanes a, b;
+			UploadDejudderFrame(gpu, fa, a);
+			UploadDejudderFrame(gpu, fb, b);
+
+			const std::shared_ptr<MotionAhead::Flow> completeFlow =
+				SyntheticAheadFlow(kOfW, kOfH, kPanX / 2, 10, 0, 0, 0, 0);
+			const size_t expectedInts = static_cast<size_t>(completeFlow->gridW) *
+				static_cast<size_t>(completeFlow->gridH) * 2u;
+			Assert::IsTrue(expectedInts >= 4u, L"synthetic flow grid must be non-empty");
+			Assert::AreEqual(expectedInts, completeFlow->forward.size(), L"complete forward vector count");
+			Assert::AreEqual(expectedInts, completeFlow->backward.size(), L"complete backward vector count");
+
+			Dejudder::Settings settings = DejudderTestSettings();
+			settings.opticalFlow = true;
+			Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
+
+			// 1. Complete flow baseline on exact same inputs: proves dimsOk and D3D11 upload succeed
+			// when both forward and backward arrays hold gridW * gridH * 2 elements.
+			warp.SetExternalFlow(completeFlow);
+			Assert::IsTrue(warp.Estimate(a.planes, b.planes), L"complete external flow estimate");
+			Assert::IsFalse(warp.NoPairAhead(), L"complete matching flow must not report NoPairAhead");
+			Assert::IsFalse(warp.PairSizeMismatch(), L"complete matching flow must not report PairSizeMismatch");
+			Assert::IsTrue(warp.ExternalFlowUsed(), L"complete matching flow must be accepted and uploaded");
+			Assert::IsTrue(warp.OpticalFlowUsed(), L"complete matching flow must mark OpticalFlowUsed");
+
+			// 2. Truncated backward (one vector short: expectedInts - 2) with matching metadata and full forward.
+			auto truncBackward = std::make_shared<MotionAhead::Flow>(*completeFlow);
+			truncBackward->backward.resize(expectedInts - 2u);
+			warp.SetExternalFlow(truncBackward);
+			Assert::IsTrue(warp.Estimate(a.planes, b.planes), L"truncated backward flow must fall back cleanly");
+			Assert::IsTrue(warp.NoPairAhead(), L"GEM-115: truncated backward flow must report NoPairAhead");
+			Assert::IsTrue(warp.PairSizeMismatch(), L"GEM-115: truncated backward flow must report PairSizeMismatch");
+			Assert::IsFalse(warp.ExternalFlowUsed(), L"GEM-115: truncated backward flow must not be uploaded");
+			Assert::IsFalse(warp.OpticalFlowUsed(), L"GEM-115: truncated backward flow must fall back to block search");
+
+			// 3. Empty backward with matching metadata and full forward (pre-fix passed nullptr/empty to UpdateSubresource).
+			auto emptyBackward = std::make_shared<MotionAhead::Flow>(*completeFlow);
+			emptyBackward->backward.clear();
+			warp.SetExternalFlow(emptyBackward);
+			Assert::IsTrue(warp.Estimate(a.planes, b.planes), L"empty backward flow must fall back cleanly without OOB read");
+			Assert::IsTrue(warp.NoPairAhead(), L"GEM-115: empty backward flow must report NoPairAhead");
+			Assert::IsTrue(warp.PairSizeMismatch(), L"GEM-115: empty backward flow must report PairSizeMismatch");
+			Assert::IsFalse(warp.ExternalFlowUsed(), L"GEM-115: empty backward flow must not be uploaded");
+			Assert::IsFalse(warp.OpticalFlowUsed(), L"GEM-115: empty backward flow must fall back to block search");
+
+			// 4. Symmetric guard check: truncated forward (one vector short: expectedInts - 2) with full backward.
+			auto truncForward = std::make_shared<MotionAhead::Flow>(*completeFlow);
+			truncForward->forward.resize(expectedInts - 2u);
+			warp.SetExternalFlow(truncForward);
+			Assert::IsTrue(warp.Estimate(a.planes, b.planes), L"truncated forward flow must fall back cleanly");
+			Assert::IsTrue(warp.NoPairAhead(), L"GEM-115: truncated forward flow must report NoPairAhead");
+			Assert::IsTrue(warp.PairSizeMismatch(), L"GEM-115: truncated forward flow must report PairSizeMismatch");
+			Assert::IsFalse(warp.ExternalFlowUsed(), L"GEM-115: truncated forward flow must not be uploaded");
+			Assert::IsFalse(warp.OpticalFlowUsed(), L"GEM-115: truncated forward flow must fall back to block search");
+
+			// 5. Mandatory same-input negative control (Rule 3): nullptr ahead pair on the exact same frames
+			// must report NoPairAhead() == true AND PairSizeMismatch() == false (distinguishing a missing pair
+			// from a truncated/mismatched pair, and proving PairSizeMismatch resets cleanly).
+			warp.SetExternalFlow(nullptr);
+			Assert::IsTrue(warp.Estimate(a.planes, b.planes), L"null external flow estimate (negative control)");
+			Assert::IsTrue(warp.NoPairAhead(), L"negative control: null ahead pair must report NoPairAhead");
+			Assert::IsFalse(warp.PairSizeMismatch(),
+				L"negative control: null ahead pair must report PairSizeMismatch == false");
+			Assert::IsFalse(warp.ExternalFlowUsed(), L"negative control: null ahead pair must not mark ExternalFlowUsed");
+			Assert::IsFalse(warp.OpticalFlowUsed(), L"negative control: null ahead pair must not mark OpticalFlowUsed");
+			pl_gpu_finish(gpu);
+		}
 	};
 }
