@@ -607,11 +607,27 @@ namespace Gpu
 			return total;
 		}
 
-		// Persistent TD-owned VRAM bytes at w x h (persistent carryCleanTex_ + persistent cell-grid IO/output textures +
-		// Reference CPU staging/readback). Strictly excludes ArenaRequests scratch textures (budgeted separately under
-		// kUserScratchArena / kUserScratchArenaExtra — zero double-counting!).
+		// Exact worst-case persistent VRAM bytes for all 6 cached chroma textures allocated by ApplyChromaDeltaGpu
+		// at full resolution (w x h) when both YUV and RGB delivery paths are cached on the same engine:
+		//   RG32F (3):   chromaCodedDeltaTex_, chromaDelivUvTex_, chromaOutDeltaTex_
+		//   RGBA32F (3): chromaOutUvTex_, chromaDelivRgbTex_, chromaOutRgbTex_
+		static uint64_t EstimatedChromaVramBytes(int w, int h)
+		{
+			if (w <= 0 || h <= 0)
+				return 0;
+			const uint64_t px = static_cast<uint64_t>(w) * static_cast<uint64_t>(h);
+			const uint64_t bRG32 = VpSkeleton::BytesPerTexel(VpSkeleton::TexFormat::RG32F);
+			const uint64_t bRGBA32 = VpSkeleton::BytesPerTexel(VpSkeleton::TexFormat::RGBA32F);
+			return 3u * px * bRG32 + 3u * px * bRGBA32;
+		}
+
+		// Persistent TD-owned VRAM bytes at w x h (persistent carryCleanTex_ + all 8 persistent cell-grid IO/output
+		// textures + Reference CPU staging/readback or RealTime fallback internal outputs + optional cached chroma).
+		// Strictly excludes ArenaRequests scratch textures (budgeted separately under kUserScratchArena /
+		// kUserScratchArenaExtra — zero double-counting!).
 		static uint64_t EstimatedPersistentVramBytes(
-			int w, int h, int cellPx = kCanonicalBlockPx, Preset preset = Preset::Reference)
+			int w, int h, int cellPx = kCanonicalBlockPx, Preset preset = Preset::Reference,
+			bool includeChroma = false, bool includeRealTimeInternalOutputs = false)
 		{
 			if (w <= 0 || h <= 0)
 				return 0;
@@ -629,29 +645,46 @@ namespace Gpu
 			uint64_t total = 0;
 			// Persistent carryCleanTex_ (1 x R32F)
 			total += 1u * px * bR32;
-			// Cell-grid IO/output textures (motionVec, motionMeta, cellPrior, tdMaps, diagFlags, guardCell, warpDiag)
+			// All 8 cell-grid persistent IO/output textures:
+			//   inMotionVecTex_ (3*cells RGBA32F), inMotionMetaTex_ (3*cells RG32F),
+			//   outTdMapsTex_ (3*cells RGBA32F), outDiagFlagsTex_ (cells RGBA32F),
+			//   inCellPriorTex_ / outGuardCellTex_ / outWarpDiagTex_ (3 * cells RG32F),
+			//   inFaceMaskTex_ (cells R32F).
 			total += (3u * cells) * (bRGBA32 + bRG32);
 			total += (3u * cells) * bRGBA32;
 			total += cells * bRGBA32;
 			total += 3u * cells * bRG32;
-			// Reference preset also budgets full-res ProcessFrame CPU staging/readback (5 R32F + 1 RG32F; RealTime targets zero-copy ProcessFrameGpu).
+			total += cells * bR32;
+			// Reference preset budgets all 6 full-res R32F staging/output textures (inRecYTex_, inCleanYTex_,
+			// inRefCleanTex_, inCodecModelPbTex_, outYTex_, outCleanTex_) + 1 full-res RG32F (outDeltaTex_).
+			// RealTime targets zero-copy ProcessFrameGpu with caller-supplied outputs, unless
+			// includeRealTimeInternalOutputs is true (budgets engine-owned fallback outYTex_, outCleanTex_, outDeltaTex_).
 			if (!compact)
-				total += 5u * px * bR32 + 1u * px * bRG32;
+				total += 6u * px * bR32 + 1u * px * bRG32;
+			else if (includeRealTimeInternalOutputs)
+				total += 2u * px * bR32 + 1u * px * bRG32;
+			if (includeChroma)
+				total += EstimatedChromaVramBytes(w, h);
 			return total;
 		}
 
 		// Exact total VRAM working-set estimate in bytes at w x h (persistent TD textures + arena scratch textures).
 		static uint64_t EstimatedVramBytes(
-			int w, int h, int cellPx = kCanonicalBlockPx, Preset preset = Preset::Reference)
+			int w, int h, int cellPx = kCanonicalBlockPx, Preset preset = Preset::Reference,
+			bool includeChroma = false, bool includeRealTimeInternalOutputs = false)
 		{
-			return EstimatedPersistentVramBytes(w, h, cellPx, preset) +
+			return EstimatedPersistentVramBytes(w, h, cellPx, preset, includeChroma, includeRealTimeInternalOutputs) +
 			       EstimatedScratchVramBytes(w, h, cellPx, preset);
 		}
 
 		// VRAM governor user declaration under VpSkeleton::kUserTemporalDetail (sheddable Tier T1).
 		// Budgets ONLY persistent TD-owned VRAM so scratch-arena textures are NOT double-counted against kUserScratchArenaExtra!
+		// Callers using ApplyChromaDeltaGpu pass includeChroma = true (adds stepped levels [luma+chroma, luma-only, 0]
+		// so the governor can shed GPU chroma before luma), and callers invoking ProcessFrameGpu without external
+		// output textures pass includeRealTimeInternalOutputs = true so fallback engine-owned outputs are budgeted honestly.
 		static VpSkeleton::VramUser MakeVramUser(
-			int w, int h, int cellPx = kCanonicalBlockPx, Preset preset = Preset::Reference)
+			int w, int h, int cellPx = kCanonicalBlockPx, Preset preset = Preset::Reference,
+			bool includeChroma = false, bool includeRealTimeInternalOutputs = false)
 		{
 			VpSkeleton::VramUser u;
 			u.id = VpSkeleton::kUserTemporalDetail;
@@ -659,15 +692,67 @@ namespace Gpu
 			u.tier = VpSkeleton::Tier::T1;
 			u.shedOrder = 0;
 			u.lossless = false;
-			const uint64_t bytes = EstimatedPersistentVramBytes(w, h, cellPx, preset);
-			u.levels.push_back(bytes);
-			u.levelText.push_back(nullptr);
-			if (bytes > 0)
+			const uint64_t lumaBytes = EstimatedPersistentVramBytes(
+				w, h, cellPx, preset, false, includeRealTimeInternalOutputs);
+			const uint64_t chromaBytes = includeChroma ? EstimatedChromaVramBytes(w, h) : 0;
+			if (includeChroma && chromaBytes > 0)
 			{
+				u.levels.push_back(lumaBytes + chromaBytes);
+				u.levelText.push_back(nullptr);
+				if (lumaBytes > 0)
+				{
+					u.levels.push_back(lumaBytes);
+					u.levelText.push_back("luma only (GPU chroma shed)");
+				}
 				u.levels.push_back(0);
 				u.levelText.push_back("off (GPU memory shed)");
 			}
+			else
+			{
+				u.levels.push_back(lumaBytes);
+				u.levelText.push_back(nullptr);
+				if (lumaBytes > 0)
+				{
+					u.levels.push_back(0);
+					u.levelText.push_back("off (GPU memory shed)");
+				}
+			}
 			return u;
+		}
+
+		// Live allocated byte introspection over ALL 16 persistent luma pl_tex members (exact 1:1 match with Release(gpu)).
+		uint64_t AllocatedPersistentLumaVramBytes() const
+		{
+			uint64_t total = 0;
+			for (pl_tex t : {
+				carryCleanTex_,
+				inRecYTex_, inCleanYTex_, inRefCleanTex_, inCodecModelPbTex_,
+				inMotionVecTex_, inMotionMetaTex_, inCellPriorTex_, inFaceMaskTex_,
+				outYTex_, outCleanTex_, outDeltaTex_, outTdMapsTex_,
+				outDiagFlagsTex_, outGuardCellTex_, outWarpDiagTex_ })
+			{
+				total += VpSkeleton::TexBytesOf(t);
+			}
+			return total;
+		}
+
+		// Live allocated byte introspection over ALL 6 persistent chroma pl_tex members (exact 1:1 match with Release(gpu)).
+		uint64_t AllocatedPersistentChromaVramBytes() const
+		{
+			uint64_t total = 0;
+			for (pl_tex t : {
+				chromaCodedDeltaTex_, chromaDelivUvTex_, chromaDelivRgbTex_,
+				chromaOutUvTex_, chromaOutRgbTex_, chromaOutDeltaTex_ })
+			{
+				total += VpSkeleton::TexBytesOf(t);
+			}
+			return total;
+		}
+
+		// Live total allocated persistent VRAM bytes held by this engine (luma + chroma).
+		uint64_t AllocatedPersistentVramBytes() const
+		{
+			return AllocatedPersistentLumaVramBytes() + AllocatedPersistentChromaVramBytes();
 		}
 
 		// Zero-copy GPU-resident execution directly on caller-supplied pl_tex planes (ZERO CPU plane upload/download!).
@@ -834,7 +919,11 @@ namespace Gpu
 			if (!checkTexDim(in.cellPriorTex, out.cellsW, out.cellsH))
 				return failVisible("TdV2GpuEngine::ProcessFrameGpu cellPriorTex dimension mismatch (expected cellsW x cellsH)", StandInKind::GpuDispatchFailed);
 			if (!checkTexDim(in.faceMaskTex, out.cellsW, out.cellsH))
+			{
+				if (standIns != nullptr)
+					standIns->Engage(StandInKind::FaceMaskSizeMismatch, "TdV2GpuEngine::ProcessFrameGpu faceMaskTex dimension mismatch (expected cellsW x cellsH)");
 				return failVisible("TdV2GpuEngine::ProcessFrameGpu faceMaskTex dimension mismatch (expected cellsW x cellsH)", StandInKind::GpuDispatchFailed);
+			}
 			if (!checkTexDim(out.outputYTex, w, h) || !checkTexDim(out.outputCleanTex, w, h) || !checkTexDim(out.tdDeltaTex, w, h) ||
 			    !checkTexDim(out.tdMapsTex, out.cellsW, 3 * out.cellsH) || !checkTexDim(out.diagFlagsTex, out.cellsW, out.cellsH) ||
 			    !checkTexDim(out.guardCellTex, out.cellsW, out.cellsH) || !checkTexDim(out.warpDiagTex, out.cellsW, out.cellsH))
@@ -1100,11 +1189,18 @@ namespace Gpu
 			// Seed / cut frame with no references: GPU-only copy into carryCleanTex_ + zero targets.
 			if (refSpecs.empty())
 			{
-				if (in.faceMask != nullptr)
+				if (in.faceMask != nullptr && !in.faceMask->empty())
 				{
-					const size_t n = (std::min)(numCells, in.faceMask->size());
-					for (size_t i = 0; i < n; ++i)
-						if ((*in.faceMask)[i] != 0u) ++out.faceMaskedCells;
+					if (in.faceMask->size() != numCells && standIns != nullptr)
+					{
+						standIns->Engage(
+							StandInKind::FaceMaskSizeMismatch,
+							in.faceMask->size() < numCells
+								? "TdV2GpuEngine::ProcessFrameGpu faceMask undersized vs cell grid; masking trailing cells fail-closed"
+								: "TdV2GpuEngine::ProcessFrameGpu faceMask oversized vs cell grid");
+					}
+					for (size_t i = 0; i < numCells; ++i)
+						if (i >= in.faceMask->size() || (*in.faceMask)[i] != 0u) ++out.faceMaskedCells;
 				}
 				if ((in.faceMaskTex != nullptr || out.faceMaskedCells > 0) && standIns != nullptr)
 					standIns->Engage(StandInKind::FaceNonRigidMask);
@@ -1431,11 +1527,18 @@ namespace Gpu
 					res.carryReset = res.carryReset || hadCarry;
 					return failVisible("TdV2GpuEngine carry seed upload failed", StandInKind::GpuDispatchFailed);
 				}
-				if (effFaceMask != nullptr)
+				if (effFaceMask != nullptr && !effFaceMask->empty())
 				{
-					const size_t n = (std::min)(numCells, effFaceMask->size());
-					for (size_t i = 0; i < n; ++i)
-						if ((*effFaceMask)[i] != 0u) ++res.faceMaskedCells;
+					if (effFaceMask->size() != numCells && standIns != nullptr)
+					{
+						standIns->Engage(
+							StandInKind::FaceMaskSizeMismatch,
+							effFaceMask->size() < numCells
+								? "TdV2GpuEngine faceMask undersized vs cell grid; masking trailing cells fail-closed"
+								: "TdV2GpuEngine faceMask oversized vs cell grid");
+					}
+					for (size_t i = 0; i < numCells; ++i)
+						if (i >= effFaceMask->size() || (*effFaceMask)[i] != 0u) ++res.faceMaskedCells;
 					if (res.faceMaskedCells > 0 && standIns != nullptr)
 						standIns->Engage(StandInKind::FaceNonRigidMask);
 				}
@@ -2388,16 +2491,30 @@ namespace Gpu
 			}
 
 			// H13: Optional Pass-1 face / non-rigid mask texture (zero upload when absent).
+			// Reject dimension-mismatched explicit faceMaskTex visibly (never sample OOB);
+			// engage FaceMaskSizeMismatch when CPU faceMask size mismatches numCells (masking trailing cells fail-closed when undersized).
 			pl_tex faceMaskTex = p.faceMaskTex;
+			if (faceMaskTex != nullptr && (faceMaskTex->params.w != cw || faceMaskTex->params.h != ch))
+			{
+				resetCarryIfActive();
+				return failCore("TdV2GpuEngine faceMaskTex dimension mismatch (expected cellsW x cellsH)", StandInKind::FaceMaskSizeMismatch);
+			}
 			bool hasFaceMask = (faceMaskTex != nullptr);
 			size_t cpuFaceMaskedCount = 0;
 			if (!hasFaceMask && p.faceMask != nullptr && !p.faceMask->empty())
 			{
-				std::vector<float> fmBuf(numCells, 0.0f);
-				const size_t n = (std::min)(numCells, p.faceMask->size());
-				for (size_t i = 0; i < n; ++i)
+				if (p.faceMask->size() != numCells && standIns != nullptr)
 				{
-					if ((*p.faceMask)[i] != 0u)
+					standIns->Engage(
+						StandInKind::FaceMaskSizeMismatch,
+						p.faceMask->size() < numCells
+							? "TdV2GpuEngine faceMask undersized vs cell grid; masking trailing cells fail-closed"
+							: "TdV2GpuEngine faceMask oversized vs cell grid");
+				}
+				std::vector<float> fmBuf(numCells, 0.0f);
+				for (size_t i = 0; i < numCells; ++i)
+				{
+					if (i >= p.faceMask->size() || (*p.faceMask)[i] != 0u)
 					{
 						fmBuf[i] = 1.0f;
 						++cpuFaceMaskedCount;

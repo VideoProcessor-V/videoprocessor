@@ -1114,9 +1114,22 @@ namespace TdV2
 			const int gW = (w + grainCellPx - 1) / grainCellPx;
 			std::vector<double> cellRetainedGrain(numCells, 0.0);
 
+			const bool faceMaskSizeMismatch = (in.faceMask != nullptr && !in.faceMask->empty() && in.faceMask->size() != numCells);
+			if (faceMaskSizeMismatch && standIns != nullptr)
+			{
+				standIns->Engage(
+					StandInKind::FaceMaskSizeMismatch,
+					in.faceMask->size() < numCells
+						? "TdV2ReferenceEngine faceMask undersized vs cell grid; masking trailing cells fail-closed"
+						: "TdV2ReferenceEngine faceMask oversized vs cell grid");
+			}
 			auto isFaceMaskedCell = [&](size_t cellIdx) -> bool
 			{
-				return in.faceMask != nullptr && cellIdx < in.faceMask->size() && (*in.faceMask)[cellIdx] != 0u;
+				if (in.faceMask == nullptr || in.faceMask->empty())
+					return false;
+				if (cellIdx >= in.faceMask->size())
+					return true;
+				return (*in.faceMask)[cellIdx] != 0u;
 			};
 
 			// Role-based independent A1 instrument partner lookup (NEVER allows Carry <-> PrevPeak/PrevPeak2/NextPeak

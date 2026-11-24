@@ -56,6 +56,7 @@ namespace TdV2
 		GpuInputOutputAlias,
 		FaceNonRigidMask,
 		MissingMotionNoWholeBlend,
+		FaceMaskSizeMismatch,
 		Count
 	};
 
@@ -141,7 +142,9 @@ namespace TdV2
 			{ StandInKind::FaceNonRigidMask, "td.mask.face_nonrigid",
 			  "Pass-1 face/non-rigid mask active (delta=0)", "Pass-2 TD-OB/TD-PX non-rigid tracking" },
 			{ StandInKind::MissingMotionNoWholeBlend, "td.fallback.no_motion_l4",
-			  "L4 missing motion field: restricted to exact-copy blocks or skipped", "Valid upstream P3/P3b motion field" }
+			  "L4 missing motion field: restricted to exact-copy blocks or skipped", "Valid upstream P3/P3b motion field" },
+			{ StandInKind::FaceMaskSizeMismatch, "td.fallback.face_mask_size_mismatch",
+			  "Pass-1 face mask size mismatch (trailing cells masked fail-closed)", "Matching cell-grid faceMask vector / pl_tex" }
 		};
 		const size_t idx = static_cast<size_t>(kind);
 		if (idx < static_cast<size_t>(StandInKind::Count))

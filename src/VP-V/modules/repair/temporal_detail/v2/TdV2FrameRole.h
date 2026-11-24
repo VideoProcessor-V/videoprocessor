@@ -472,6 +472,8 @@ namespace TdV2
 			dec.record.seq = ev.seq;
 
 			// Non-finite check (Rule 4: fail closed with visible abstain counter; also check invalid sourceBits).
+			// Flush all earlier un-emitted buffered frames in strictly monotonic sequence order BEFORE emitting
+			// the non-finite abstain record for `ev.seq` so buffered records are never emitted out of order.
 			if (!std::isfinite(ev.qualityScore) || !std::isfinite(ev.stepMean) ||
 			    !std::isfinite(ev.stepP90) || !std::isfinite(ev.stepMax) ||
 			    !std::isfinite(ev.exactCopyFracPrev1) || !std::isfinite(ev.exactCopyFracPrev2) ||
@@ -479,7 +481,20 @@ namespace TdV2
 			{
 				if (standIns != nullptr)
 					standIns->Engage(StandInKind::NonFiniteClosure, "TdV2FrameRoleDetector non-finite or invalid sourceBits");
-				return Abstain(dec, AbstainReason::NonFiniteEvidence, ev.seq, leadFrames_, /*emitRecord=*/true);
+				std::vector<FrameRoleDecision> pendingFlushed;
+				for (size_t i = 0; i < window_.size(); ++i)
+				{
+					if (window_[i].emitted)
+						continue;
+					const size_t remAhead = window_.size() - 1 - i;
+					const uint8_t availLead = static_cast<uint8_t>((std::min)(static_cast<size_t>(kMaxLeadFrames), remAhead));
+					FrameRoleDecision fd = ClassifyTargetWithLead(i, window_[i].ev, availLead, /*forceProvisional=*/true);
+					window_[i].emitted = true;
+					pendingFlushed.push_back(std::move(fd));
+				}
+				Abstain(dec, AbstainReason::NonFiniteEvidence, ev.seq, leadFrames_, /*emitRecord=*/true);
+				dec.flushedBeforeCut = std::move(pendingFlushed);
+				return dec;
 			}
 
 			// Cut immediately flushes ALL un-emitted pre-cut frames in sequence order (with available reduced lead,
@@ -581,6 +596,7 @@ namespace TdV2
 		}
 
 		// Flush the latest buffered frame causally (lead = 0, marked provisional, never duplicating an already-emitted frame).
+		// Any earlier un-emitted buffered entries are flushed first in strictly monotonic sequence order into `flushedBeforeCut`.
 		FrameRoleDecision ClassifyLatestCausal(StandInRegistry* standIns = nullptr)
 		{
 			if (standIns != nullptr)
@@ -590,11 +606,27 @@ namespace TdV2
 			if (window_.empty())
 				return Abstain(dec, AbstainReason::InsufficientWindow, 0, 0, /*emitRecord=*/false);
 			const size_t idx = window_.size() - 1;
+			std::vector<FrameRoleDecision> pendingFlushed;
+			for (size_t i = 0; i < idx; ++i)
+			{
+				if (window_[i].emitted)
+					continue;
+				const size_t remAhead = window_.size() - 1 - i;
+				const uint8_t availLead = static_cast<uint8_t>((std::min)(static_cast<size_t>(kMaxLeadFrames), remAhead));
+				FrameRoleDecision fd = ClassifyTargetWithLead(i, window_[i].ev, availLead, /*forceProvisional=*/true);
+				window_[i].emitted = true;
+				pendingFlushed.push_back(std::move(fd));
+			}
 			if (window_[idx].emitted)
-				return Abstain(dec, AbstainReason::InsufficientWindow, window_[idx].ev.seq, 0, /*emitRecord=*/false);
+			{
+				Abstain(dec, AbstainReason::InsufficientWindow, window_[idx].ev.seq, 0, /*emitRecord=*/false);
+				dec.flushedBeforeCut = std::move(pendingFlushed);
+				return dec;
+			}
 			FrameRoleDecision fd = ClassifyTargetWithLead(idx, window_[idx].ev, 0, /*forceProvisional=*/true);
 			if (fd.produced)
 				window_[idx].emitted = true;
+			fd.flushedBeforeCut = std::move(pendingFlushed);
 			return fd;
 		}
 

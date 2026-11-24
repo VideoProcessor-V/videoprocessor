@@ -64,6 +64,78 @@ namespace TdV2
 		return sx * sy;
 	}
 
+	// Exact 2D separable high-pass band-weighted Catmull-Rom bicubic variance transfer gain
+	// beta_HP(vx, vy) = ||H * W||_2^2 / ||H||_2^2 for H = I - G_x G_y and bicubic W = w_x w_y (Rule 1 Parseval identity).
+	// Reduces identically to 1.0 at integer shifts (num == den), falls back to BicubicWarpVarianceGain(vx, vy)
+	// when gx or gy is empty (H = I), and is strictly < BicubicWarpVarianceGain(vx, vy) at sub-pixel shifts
+	// because high-pass H emphasizes high frequencies where bicubic interpolation attenuates more strongly.
+	inline double HighPassBicubicWarpVarianceGain(
+		double vx,
+		double vy,
+		const std::vector<double>& gx,
+		const std::vector<double>& gy)
+	{
+		if (!std::isfinite(vx) || !std::isfinite(vy))
+			return 1.0;
+		if (gx.empty() || gy.empty())
+			return BicubicWarpVarianceGain(vx, vy);
+
+		auto computeAxis = [](double v, const std::vector<double>& g,
+		                      double& outWW, double& outUU, double& outWU, double& outGG, double& outG0)
+		{
+			const double f = v - std::floor(v);
+			double w[4] = {};
+			VpComposed::CubicWeights(f, w);
+
+			const int gLen = static_cast<int>(g.size());
+			const int r = gLen / 2;
+			const int mMin = -r - 1;
+			const int mMax = (gLen - 1 - r) + 2;
+
+			auto gAt = [&](int offset) -> double
+			{
+				const int idx = offset + r;
+				return (idx >= 0 && idx < gLen) ? g[static_cast<size_t>(idx)] : 0.0;
+			};
+
+			outWW = 0.0;
+			for (int i = 0; i < 4; ++i)
+				outWW += w[i] * w[i];
+
+			outGG = 0.0;
+			for (int j = 0; j < gLen; ++j)
+				outGG += g[static_cast<size_t>(j)] * g[static_cast<size_t>(j)];
+			outG0 = g[static_cast<size_t>(r)];
+
+			outUU = 0.0;
+			outWU = 0.0;
+			for (int m = mMin; m <= mMax; ++m)
+			{
+				double u = 0.0;
+				for (int i = 0; i < 4; ++i)
+					u += w[i] * gAt(m - (i - 1));
+				outUU += u * u;
+				if (m >= -1 && m <= 2)
+					outWU += w[m + 1] * u;
+			}
+		};
+
+		double wwX = 0.0, uuX = 0.0, wuX = 0.0, ggX = 0.0, g0X = 0.0;
+		double wwY = 0.0, uuY = 0.0, wuY = 0.0, ggY = 0.0, g0Y = 0.0;
+		computeAxis(vx, gx, wwX, uuX, wuX, ggX, g0X);
+		computeAxis(vy, gy, wwY, uuY, wuY, ggY, g0Y);
+
+		const double den = 1.0 - 2.0 * g0X * g0Y + ggX * ggY;
+		if (!(den > kQ5NumericalFloor))
+			return BicubicWarpVarianceGain(vx, vy);
+
+		const double num = wwX * wwY - 2.0 * wuX * wuY + uuX * uuY;
+		const double ratio = num / den;
+		if (!std::isfinite(ratio))
+			return BicubicWarpVarianceGain(vx, vy);
+		return ratio < 0.0 ? 0.0 : (ratio > 1.0 ? 1.0 : ratio);
+	}
+
 	// Cross form (GrainLevel v5 L1 baseline): I_cross = max(0, E - C).
 	// Non-finite inputs or negative E close visibly to 0.
 	inline double ComputeCrossIr(double E, double C, StandInRegistry* standIns = nullptr)
@@ -80,7 +152,8 @@ namespace TdV2
 
 	// Exact bias-corrected projection form (Q5(a) half-pixel bicubic attenuation immune, Rule 1):
 	// Model under sub-pixel bicubic warp W with multiplicative texture attenuation alpha in (0, 1] and
-	// warp variance transfer gain beta = ||W||_2^2 in (0, 1]:
+	// exact band-weighted warp variance transfer gain warpGainBeta = ||H * W||_2^2 / ||H||_2^2 in (0, 1]
+	// (reduces to ||W||_2^2 for white/unfiltered noise H = I, and is strictly < ||W||_2^2 on high-pass bands H = I - G):
 	//   X = T + G_0,   W Y_prev = alpha * T + W G_1   (G_0, G_1 independent zero-mean variance sigma^2)
 	// Observable second moments (S = E[T^2] >= 0):
 	//   E = S + sigma^2,   C = alpha * S,   E_prev = alpha^2 * S + beta * sigma^2.

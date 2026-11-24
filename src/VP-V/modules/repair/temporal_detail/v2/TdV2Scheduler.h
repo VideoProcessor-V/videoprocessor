@@ -816,6 +816,11 @@ namespace TdV2
 			if (hasExplicitRef)
 			{
 				refGuide = ctx->referenceClean;
+				prevClean_ = *ctx->referenceClean;
+				prevCleanValid_.assign(
+					static_cast<size_t>(curClean.w) * static_cast<size_t>(curClean.h),
+					static_cast<uint8_t>(1u));
+				hasPrevClean_ = true;
 			}
 			else if (hasPrevClean_ && prevClean_.w == curClean.w && prevClean_.h == curClean.h)
 			{

@@ -2063,9 +2063,23 @@ namespace TdV2
 			}
 
 			// Pass-1 face / non-rigid cell mask (H13 parity with TdV2ReferenceEngine.h): count unique masked cells once upfront.
+			// If non-empty faceMask size mismatches numCells, engage FaceMaskSizeMismatch visibly (and mask trailing cells fail-closed when undersized).
+			const bool faceMaskSizeMismatch = (in.faceMask != nullptr && !in.faceMask->empty() && in.faceMask->size() != numCells);
+			if (faceMaskSizeMismatch && standIns != nullptr)
+			{
+				standIns->Engage(
+					StandInKind::FaceMaskSizeMismatch,
+					in.faceMask->size() < numCells
+						? "TdV2ChromaEngine faceMask undersized vs cell grid; masking trailing cells fail-closed"
+						: "TdV2ChromaEngine faceMask oversized vs cell grid");
+			}
 			auto isFaceMaskedCell = [&](size_t cellIdx) -> bool
 			{
-				return in.faceMask != nullptr && cellIdx < in.faceMask->size() && (*in.faceMask)[cellIdx] != 0u;
+				if (in.faceMask == nullptr || in.faceMask->empty())
+					return false;
+				if (cellIdx >= in.faceMask->size())
+					return true;
+				return (*in.faceMask)[cellIdx] != 0u;
 			};
 			for (size_t ci = 0; ci < numCells; ++ci)
 			{
@@ -2133,6 +2147,8 @@ namespace TdV2
 
 				const double sigmaX = kUnidentifiedChromaSigmaLumaPx / static_cast<double>(dSubX);
 				const double sigmaY = kUnidentifiedChromaSigmaLumaPx / static_cast<double>(dSubY);
+				const auto gxCoarse = VpUnit::BandFromBase::Taps<double>(sigmaX, 3.0, true, 0.0);
+				const auto gyCoarse = VpUnit::BandFromBase::Taps<double>(sigmaY, 3.0, true, 0.0);
 				double coarseGain = 1.0;
 				const TdV2Plane curCoarseCb = ChromaDetail::BlurActiveAnisotropic(curCleanCb, delivActive, sigmaX, sigmaY, coarseGain);
 				const TdV2Plane curCoarseCr = ChromaDetail::BlurActiveAnisotropic(curCleanCr, delivActive, sigmaX, sigmaY, coarseGain);
@@ -2256,6 +2272,8 @@ namespace TdV2
 					}
 					const int poolR = cfg_.momentPoolRadiusCells > 0 ? cfg_.momentPoolRadiusCells : 0;
 					const int gW = (lumaW + grainCellPx - 1) / grainCellPx;
+					std::vector<double> blindCellEnergies;
+					std::vector<double> blindCellIrs;
 
 					for (int cy = 0; cy < res.cellsH; ++cy)
 					{
@@ -2305,6 +2323,8 @@ namespace TdV2
 							const int px1 = (std::min)(delivActive.x1, ((cx + poolR + 1) * cellPx + dSubX - 1) / dSubX);
 
 							double sumCurHi2 = 0.0;
+							double ownCurHi2 = 0.0;
+							size_t ownHiCount = 0;
 							double sumRefHi2[kMaxBlendRefs] = {};
 							double sumCrossHi[kMaxBlendRefs] = {};
 							size_t hiCount = 0;
@@ -2325,6 +2345,14 @@ namespace TdV2
 									bool allValid = true;
 									float diffs[kMaxBlendRefs] = {};
 									const double curV = curCoarse.at(x, y);
+									const double cHi = (!splitActive && !hasCellGrainPrior)
+										? (curClean.at(x, y) - curV)
+										: 0.0;
+									if (!splitActive && !hasCellGrainPrior && pCell == cIdx)
+									{
+										ownCurHi2 += cHi * cHi;
+										++ownHiCount;
+									}
 									for (int k = 0; k < K; ++k)
 									{
 										if (cRefs[k].validPx[pIdx] == 0u || cRefs[k].motionGate.gateL[pCell] <= 0.0)
@@ -2346,7 +2374,6 @@ namespace TdV2
 										}
 										if (!splitActive && !hasCellGrainPrior)
 										{
-											const double cHi = curClean.at(x, y) - curV;
 											sumCurHi2 += cHi * cHi;
 											for (int k = 0; k < K; ++k)
 											{
@@ -2369,7 +2396,10 @@ namespace TdV2
 							{
 								const double invHi = 1.0 / static_cast<double>(hiCount);
 								const double meanCur = sumCurHi2 * invHi;
-								const double hiGain = (std::max)(kEngineNumFloor, 1.0 - coarseGain);
+								const double g0X = !gxCoarse.empty() ? gxCoarse[gxCoarse.size() / 2] : 0.0;
+								const double g0Y = !gyCoarse.empty() ? gyCoarse[gyCoarse.size() / 2] : 0.0;
+								// Exact Parseval white-noise variance gain ||I - G_x G_y||_2^2 (Rule 1).
+								const double hiGain = (std::max)(kEngineNumFloor, 1.0 - 2.0 * g0X * g0Y + coarseGain);
 								// Exact 1-LSB uniform quantization variance transferred through the high-pass band (Rule 1).
 								const double refQuantFloor = ((kDefaultStepPriorLsb * kDefaultStepPriorLsb) / 12.0) * hiGain;
 								double sumProjIr = 0.0;
@@ -2384,14 +2414,19 @@ namespace TdV2
 									const double vyD = (cIdx < cRefs[k].motionVy.size())
 										? (cRefs[k].motionVy[cIdx] / static_cast<double>(dSubY))
 										: 0.0;
-									const double warpBeta = BicubicWarpVarianceGain(vxD, vyD);
+									const double warpBeta = HighPassBicubicWarpVarianceGain(vxD, vyD, gxCoarse, gyCoarse);
 									if (meanRef > refQuantFloor)
 									{
 										sumProjIr += ComputeProjectionIr(meanCur, cross, meanRef, standIns, warpBeta);
 										++validRefCnt;
 									}
 								}
-								cellGrainVar = (validRefCnt > 0) ? ((sumProjIr / static_cast<double>(K)) / hiGain) : 0.0;
+								cellGrainVar = (validRefCnt > 0) ? ((sumProjIr / static_cast<double>(validRefCnt)) / hiGain) : 0.0;
+								const double ownE = (ownHiCount > 0)
+									? (ownCurHi2 / static_cast<double>(ownHiCount))
+									: meanCur;
+								blindCellEnergies.push_back(ownE);
+								blindCellIrs.push_back(cellGrainVar);
 							}
 
 							double C[kMaxBlendRefs][kMaxBlendRefs] = {};
@@ -2434,6 +2469,23 @@ namespace TdV2
 
 							for (int k = 0; k < K; ++k)
 								cellW[k][cIdx] = solved.weights[k] * cRefs[k].motionGate.gateL[cIdx];
+						}
+					}
+
+					// Q5(b) integration (LOW-3 parity with Branch B): exclude crushed-black zero-energy flat blocks
+					// strictly by measured high-pass energy when aggregating blind unsplit NLF diagnostics.
+					if (!splitActive && !blindCellEnergies.empty())
+					{
+						const size_t delivCellPxW = static_cast<size_t>((std::max)(1, cellPx / dSubX));
+						const size_t delivCellPxH = static_cast<size_t>((std::max)(1, cellPx / dSubY));
+						const DarkNlfResult nlfRes = AccumulateDarkNlfExcludingZeroEnergy(
+							blindCellEnergies, blindCellIrs, delivCellPxW * delivCellPxH,
+							1.0, 0.5, standIns);
+						res.excludedZeroEnergyBlocks += nlfRes.excludedZeroEnergyBlocks;
+						if (nlfRes.valid)
+						{
+							if (isCb) res.estimatedBlindNlfCb = nlfRes.nlfEstimate;
+							else      res.estimatedBlindNlfCr = nlfRes.nlfEstimate;
 						}
 					}
 
@@ -3088,6 +3140,8 @@ namespace TdV2
 					blindCellIrs.reserve(numCells);
 				}
 
+				const auto g1 = VpUnit::BandFromBase::Taps<double>(VpUnit::BandFromBase::kSigmaFine, 3.0, true, 0.0);
+
 				for (int cy = 0; cy < res.cellsH; ++cy)
 				{
 					for (int cx = 0; cx < res.cellsW; ++cx)
@@ -3148,7 +3202,7 @@ namespace TdV2
 						const int px1 = (std::min)(codedActive.x1, ((cx + poolR + 1) * cellPx + cSubX - 1) / cSubX);
 
 						// H2 + Q5(a) + Q5(b): When !splitActive and no explicit per-cell grain prior was supplied, derive
-						// bias-corrected projection innovation ComputeProjectionIr(..., BicubicWarpVarianceGain) / gains.fine
+						// bias-corrected projection innovation ComputeProjectionIr(..., HighPassBicubicWarpVarianceGain) / gains.fine
 						// over the exact same pooled window (immune to sub-pixel bicubic texture attenuation on coded chroma pans).
 						// Clean grain-free refs below the exact 1-LSB quantization floor contribute 0.0.
 						if (!splitActive && !hasCellGrainPrior)
@@ -3215,6 +3269,7 @@ namespace TdV2
 								// Exact 1-LSB uniform quantization variance transferred through the fine band (Rule 1).
 								const double refQuantFloor = ((kDefaultStepPriorLsb * kDefaultStepPriorLsb) / 12.0) * gains.fine;
 								double sumProjIr = 0.0;
+								size_t validRefCnt = 0;
 								for (int ai = 0; ai < activeK; ++ai)
 								{
 									const int k = activeIdx[ai];
@@ -3226,11 +3281,14 @@ namespace TdV2
 									const double vyC = (cIdx < refs[static_cast<size_t>(k)].motionVy.size())
 										? (refs[static_cast<size_t>(k)].motionVy[cIdx] / static_cast<double>(cSubY))
 										: 0.0;
-									const double warpBeta = BicubicWarpVarianceGain(vxC, vyC);
+									const double warpBeta = HighPassBicubicWarpVarianceGain(vxC, vyC, g1, g1);
 									if (meanRef > refQuantFloor)
+									{
 										sumProjIr += ComputeProjectionIr(meanCur, cross, meanRef, standIns, warpBeta);
+										++validRefCnt;
+									}
 								}
-								cellInnov = (sumProjIr / static_cast<double>(activeK)) / gains.fine;
+								cellInnov = (validRefCnt > 0) ? ((sumProjIr / static_cast<double>(validRefCnt)) / gains.fine) : 0.0;
 								cellGrainVar = cellInnov;
 							}
 							if (ownCellCnt > 0)
