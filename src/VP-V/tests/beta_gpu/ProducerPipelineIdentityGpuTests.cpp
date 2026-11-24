@@ -9,11 +9,13 @@
 //   (iii) P2 payload hashes (forward, backward, forwardCost, backwardCost, global, second, costWeight,
 //         fbError) are identical between serial submission and pipelined submission (3 staging sets +
 //         ENGINE/BACK split) across 600 frames, 2 independent runs, with temporal hints ON and OFF.
-// Missing NVIDIA / NVOF hardware logs explicit SKIP-NO-HARDWARE (never a silent pass).
+// Missing NVIDIA / NVOF hardware routes through HardwarePrerequisites::RequireOrSkip(Kind::Gpu)
+// (logs SKIP-NO-GPU, and fails under VP_TEST_REQUIRE_GPU=1 / VP_TEST_REQUIRE_ALL=1).
 #include <CppUnitTest.h>
 
 #include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
 #include <VP-V/modules/motion/estimation/NvOpticalFlow.h>
+#include <VP-V/tests/support/HardwarePrerequisites.h>
 #include <AnalysisLumaSource.h>
 
 #include <atlbase.h>
@@ -22,8 +24,12 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <condition_variable>
 #include <cstdint>
+#include <cstring>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -126,6 +132,228 @@ namespace ProducerPipelineIdentity
 		return h;
 	}
 
+	// Synthetic non-trivial multi-quadrant / multi-layer flow for (ii):
+	// - Top 55% of rows (low-cost dominant layer, top 35% <= median cost): coherent dominant pan,
+	//   opposite sign between forward and backward so channel-swap bugs are caught immediately.
+	// - Bottom-left quadrant (low-cost second layer, ~22.5% of cells): distinct secondary motion
+	//   with asymmetric forward/backward vectors -> populates second[0..1] and non-zero fbError.
+	// - Bottom-right quadrant (~22.5% of cells): top half intermediate cost (smoothstep costWeight
+	//   strictly in (0, 1)), bottom half high cost (costWeight == 0.0f), plus noisy/out-of-range
+	//   vectors exercising vote range clipping and occlusion fbError.
+	inline MotionAhead::Flow MakeMultiQuadrantFlow(int halfW, int halfH, uint32_t seed)
+	{
+		MotionAhead::Flow f;
+		f.halfW = halfW;
+		f.halfH = halfH;
+		f.gridW = (halfW + 3) / 4;
+		f.gridH = (halfH + 3) / 4;
+		const size_t cells = static_cast<size_t>(f.gridW) * static_cast<size_t>(f.gridH);
+		f.forward.resize(cells * 2);
+		f.backward.resize(cells * 2);
+		f.forwardCost.resize(cells);
+		f.backwardCost.resize(cells);
+
+		const int lowY = (f.gridH * 7) / 20;
+		const int splitY = (f.gridH * 11) / 20;
+		const int splitX = f.gridW / 2;
+		const int occMidY = splitY + (f.gridH - splitY) / 2;
+
+		// Units: 1 engine cell = 4 half-size px = 128 S10.5 units (0.5 cell = 64 units).
+		const int fwdDomX = 384 + static_cast<int>(seed % 5) * 64;             // +3.0 .. +5.0 cells
+		const int fwdDomY = -192 - static_cast<int>((seed / 5) % 4) * 64;      // -1.5 .. -3.0 cells
+		const int bwdDomX = -fwdDomX;
+		const int bwdDomY = -fwdDomY;
+
+		const int fwdSecX = -704 - static_cast<int>(seed % 3) * 64;            // -5.5 .. -6.5 cells
+		const int fwdSecY = 384 + static_cast<int>((seed / 3) % 3) * 64;       // +3.0 .. +4.0 cells
+		const int bwdSecX = 896 + static_cast<int>(seed % 3) * 64;             // +7.0 .. +8.0 cells (asymmetric)
+		const int bwdSecY = -512 - static_cast<int>((seed / 3) % 3) * 64;      // -4.0 .. -5.0 cells (asymmetric)
+
+		for (int y = 0; y < f.gridH; ++y)
+		{
+			for (int x = 0; x < f.gridW; ++x)
+			{
+				const size_t idx = static_cast<size_t>(y) * static_cast<size_t>(f.gridW) + static_cast<size_t>(x);
+				const uint32_t h1 = Hash2(static_cast<uint32_t>(x) ^ (seed * 17u + 3u), static_cast<uint32_t>(y) ^ (seed * 31u + 7u));
+				const uint32_t h2 = Hash2(static_cast<uint32_t>(x) + seed * 13u + 101u, static_cast<uint32_t>(y) + seed * 29u + 53u);
+				const int jx = static_cast<int>(h1 % 17u) - 8;                 // [-8..+8] S10.5 = [-0.25..+0.25] half px
+				const int jy = static_cast<int>((h1 >> 8) % 17u) - 8;
+				const int bjx = static_cast<int>(h2 % 17u) - 8;
+				const int bjy = static_cast<int>((h2 >> 8) % 17u) - 8;
+
+				int fx = 0, fy = 0, bx = 0, by = 0;
+				uint8_t fc = 10, bc = 10;
+				if (y < splitY)
+				{
+					fx = fwdDomX + jx;
+					fy = fwdDomY + jy;
+					bx = bwdDomX + bjx;
+					by = bwdDomY + bjy;
+					const uint8_t baseCost = (y < lowY) ? 10u : 18u;
+					fc = static_cast<uint8_t>(baseCost + (h1 & 3u));
+					bc = static_cast<uint8_t>(baseCost + (h2 & 3u));
+				}
+				else if (x < splitX)
+				{
+					fx = fwdSecX + jx;
+					fy = fwdSecY + jy;
+					bx = bwdSecX + bjx;
+					by = bwdSecY + bjy;
+					fc = static_cast<uint8_t>(10u + (h1 & 3u));
+					bc = static_cast<uint8_t>(10u + (h2 & 3u));
+				}
+				else
+				{
+					// Occluded / high-cost quadrant including vectors beyond +-40 cells (+-5120 S10.5).
+					fx = static_cast<int>(h1 % 12801u) - 6400;
+					fy = static_cast<int>((h1 >> 11) % 12801u) - 6400;
+					bx = static_cast<int>(h2 % 12801u) - 6400;
+					by = static_cast<int>((h2 >> 11) % 12801u) - 6400;
+					fc = (y < occMidY) ? 35u : 220u;
+					bc = (y < occMidY) ? 35u : 220u;
+				}
+				f.forward[idx * 2] = static_cast<int16_t>(fx);
+				f.forward[idx * 2 + 1] = static_cast<int16_t>(fy);
+				f.backward[idx * 2] = static_cast<int16_t>(bx);
+				f.backward[idx * 2 + 1] = static_cast<int16_t>(by);
+				f.forwardCost[idx] = fc;
+				f.backwardCost[idx] = bc;
+			}
+		}
+		return f;
+	}
+
+	// RAII persistent 2-wide vote runner mirroring Producer::VoteWorker / Producer::RunFlowGlobalsParallel:
+	// caller runs forward FlowGlobal while persistent worker thread runs backward FlowGlobal concurrently.
+	class TwoWideVoteRunner
+	{
+	public:
+		TwoWideVoteRunner()
+		{
+			worker_ = std::thread([this] { Loop(); });
+		}
+		~TwoWideVoteRunner()
+		{
+			{
+				std::lock_guard<std::mutex> lock(mutex_);
+				stop_ = true;
+			}
+			workCv_.notify_all();
+			if (worker_.joinable())
+				worker_.join();
+		}
+		TwoWideVoteRunner(const TwoWideVoteRunner&) = delete;
+		TwoWideVoteRunner& operator=(const TwoWideVoteRunner&) = delete;
+
+		void RunGlobalsAndExtras(MotionAhead::Flow& flow, bool general)
+		{
+			{
+				std::lock_guard<std::mutex> lock(mutex_);
+				flow_ = &flow;
+				general_ = general;
+				pending_ = true;
+			}
+			workCv_.notify_one();
+			MotionAhead::FlowGlobal(flow.forward, flow.forwardCost, flow.gridW, flow.gridH, flow.global[0], flow.second[0], general);
+			{
+				std::unique_lock<std::mutex> lock(mutex_);
+				doneCv_.wait(lock, [this] { return !pending_; });
+			}
+			flow.globalSet = true;
+			flow.globalGeneral = general;
+			MotionAhead::FlowExtras(flow);
+		}
+
+	private:
+		void Loop()
+		{
+			for (;;)
+			{
+				MotionAhead::Flow* flow = nullptr;
+				bool general = true;
+				{
+					std::unique_lock<std::mutex> lock(mutex_);
+					workCv_.wait(lock, [this] { return stop_ || pending_; });
+					if (stop_ && !pending_)
+						return;
+					flow = flow_;
+					general = general_;
+				}
+				if (flow)
+					MotionAhead::FlowGlobal(flow->backward, flow->backwardCost, flow->gridW, flow->gridH,
+						flow->global[1], flow->second[1], general);
+				{
+					std::lock_guard<std::mutex> lock(mutex_);
+					flow_ = nullptr;
+					pending_ = false;
+				}
+				doneCv_.notify_one();
+			}
+		}
+
+		std::mutex mutex_;
+		std::condition_variable workCv_;
+		std::condition_variable doneCv_;
+		std::thread worker_;
+		MotionAhead::Flow* flow_ = nullptr;
+		bool general_ = true;
+		bool pending_ = false;
+		bool stop_ = false;
+	};
+
+	// Verifies that a Flow published by Producer::BackWorker (which invokes the private
+	// Producer::RunFlowGlobalsParallel + FlowExtras) is bit-identical to serial FlowGlobals + FlowExtras.
+	inline bool VerifyFlowGlobalsAndExtrasMatchSerial(const MotionAhead::Flow& produced, std::string& mismatch)
+	{
+		if (!produced.globalSet)
+		{
+			mismatch = "producer published Flow with globalSet == false";
+			return false;
+		}
+		MotionAhead::Flow serial;
+		serial.halfW = produced.halfW;
+		serial.halfH = produced.halfH;
+		serial.gridW = produced.gridW;
+		serial.gridH = produced.gridH;
+		serial.forward = produced.forward;
+		serial.backward = produced.backward;
+		serial.forwardCost = produced.forwardCost;
+		serial.backwardCost = produced.backwardCost;
+		MotionAhead::FlowGlobals(serial, produced.globalGeneral);
+		MotionAhead::FlowExtras(serial);
+
+		if (serial.blocksX != produced.blocksX || serial.blocksY != produced.blocksY)
+		{
+			mismatch = "blocksX/blocksY mismatch between parallel producer and serial FlowExtras";
+			return false;
+		}
+		if (std::memcmp(serial.global, produced.global, sizeof(serial.global)) != 0)
+		{
+			mismatch = "global[2][4] mismatch between Producer::RunFlowGlobalsParallel and serial FlowGlobals";
+			return false;
+		}
+		if (std::memcmp(serial.second, produced.second, sizeof(serial.second)) != 0)
+		{
+			mismatch = "second[2][4] mismatch between Producer::RunFlowGlobalsParallel and serial FlowGlobals";
+			return false;
+		}
+		if (serial.costWeight.size() != produced.costWeight.size() ||
+			(!serial.costWeight.empty() &&
+				std::memcmp(serial.costWeight.data(), produced.costWeight.data(), serial.costWeight.size() * sizeof(float)) != 0))
+		{
+			mismatch = "costWeight mismatch between parallel producer and serial FlowExtras";
+			return false;
+		}
+		if (serial.fbError.size() != produced.fbError.size() ||
+			(!serial.fbError.empty() &&
+				std::memcmp(serial.fbError.data(), produced.fbError.data(), serial.fbError.size() * sizeof(float)) != 0))
+		{
+			mismatch = "fbError mismatch between parallel producer and serial FlowExtras";
+			return false;
+		}
+		return true;
+	}
+
 	inline bool NvidiaDevice(CComPtr<ID3D11Device>& device)
 	{
 		CComPtr<IDXGIFactory1> factory;
@@ -174,6 +402,13 @@ namespace ProducerPipelineIdentity
 			MotionAhead::FlowPtr flow = producer.Take(static_cast<uint64_t>(nextCollect - 1), static_cast<uint64_t>(nextCollect));
 			if (flow)
 			{
+				std::string mismatch;
+				if (!VerifyFlowGlobalsAndExtrasMatchSerial(*flow, mismatch))
+				{
+					why = "pair " + std::to_string(nextCollect - 1) + "->" + std::to_string(nextCollect) + ": " + mismatch;
+					producer.Stop();
+					return false;
+				}
 				hashes.push_back(HashFlow(*flow));
 				producer.Prune(static_cast<uint64_t>(nextCollect));
 				++nextCollect;
@@ -195,6 +430,9 @@ namespace ProducerPipelineIdentity
 TEST_CLASS(ProducerPipelineIdentityGpuTests)
 {
 public:
+	BEGIN_TEST_METHOD_ATTRIBUTE(EngineInputHashPerFrameMatchesBetweenSerialAndHalfLumaPool)
+		TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+	END_TEST_METHOD_ATTRIBUTE()
 	TEST_METHOD(EngineInputHashPerFrameMatchesBetweenSerialAndHalfLumaPool)
 	{
 		using namespace ProducerPipelineIdentity;
@@ -210,22 +448,228 @@ public:
 			Assert::IsTrue(MotionAhead::HalfLuma8(src, pooledBuf, pw, ph, &pool));
 			Assert::AreEqual(sw, pw);
 			Assert::AreEqual(sh, ph);
+			Assert::AreEqual(serialBuf.size(), pooledBuf.size());
 			const uint64_t hSerial = Fnv(1469598103934665603ull, serialBuf.data(), serialBuf.size());
 			const uint64_t hPooled = Fnv(1469598103934665603ull, pooledBuf.data(), pooledBuf.size());
 			Assert::AreEqual(hSerial, hPooled, L"engine-input luma hash must be byte-identical");
+			Assert::AreEqual(0, std::memcmp(serialBuf.data(), pooledBuf.data(), serialBuf.size()),
+				L"engine-input luma buffer must be byte-identical");
+		}
+
+		// Also exercise halfH >= 256 (960x540 -> halfH = 270) so HalfLumaPool::Run actually dispatches
+		// across worker threads rather than taking the totalRows < 256 single-thread fast path.
+		const Canvas wideCanvas = MakeCanvas(960, 540);
+		for (int f = 0; f < 60; ++f)
+		{
+			const AnalysisLumaSource src = FrameOf(wideCanvas, static_cast<uint64_t>(f));
+			Assert::IsTrue(MotionAhead::HalfLuma8(src, serialBuf, sw, sh, nullptr));
+			Assert::IsTrue(MotionAhead::HalfLuma8(src, pooledBuf, pw, ph, &pool));
+			Assert::AreEqual(480, sw);
+			Assert::AreEqual(270, sh);
+			Assert::AreEqual(sw, pw);
+			Assert::AreEqual(sh, ph);
+			Assert::AreEqual(serialBuf.size(), pooledBuf.size());
+			const uint64_t hSerial = Fnv(1469598103934665603ull, serialBuf.data(), serialBuf.size());
+			const uint64_t hPooled = Fnv(1469598103934665603ull, pooledBuf.data(), pooledBuf.size());
+			Assert::AreEqual(hSerial, hPooled, L"multi-threaded HalfLumaPool hash must be byte-identical");
+			Assert::AreEqual(0, std::memcmp(serialBuf.data(), pooledBuf.data(), serialBuf.size()),
+				L"multi-threaded HalfLumaPool buffer must be byte-identical");
+		}
+
+		// Same-input negative control: perturbing one P010 pixel in a copy of frame 0 changes the hash and bytes.
+		{
+			Canvas perturbed = wideCanvas;
+			perturbed.words = std::make_shared<std::vector<uint16_t>>(*wideCanvas.words);
+			const size_t probeIdx = static_cast<size_t>(wideCanvas.frameH / 2) * static_cast<size_t>(wideCanvas.canvasW) +
+				static_cast<size_t>(wideCanvas.frameW / 2);
+			const uint16_t origCode = static_cast<uint16_t>((*perturbed.words)[probeIdx] >> 6);
+			const uint16_t shiftedCode = origCode > 512u ? static_cast<uint16_t>(origCode - 64u) : static_cast<uint16_t>(origCode + 64u);
+			(*perturbed.words)[probeIdx] = static_cast<uint16_t>(shiftedCode << 6);
+			const AnalysisLumaSource baseSrc = FrameOf(wideCanvas, 0);
+			const AnalysisLumaSource pertSrc = FrameOf(perturbed, 0);
+			Assert::IsTrue(MotionAhead::HalfLuma8(baseSrc, serialBuf, sw, sh, nullptr));
+			Assert::IsTrue(MotionAhead::HalfLuma8(pertSrc, pooledBuf, pw, ph, &pool));
+			const uint64_t hBase = Fnv(1469598103934665603ull, serialBuf.data(), serialBuf.size());
+			const uint64_t hPert = Fnv(1469598103934665603ull, pooledBuf.data(), pooledBuf.size());
+			Assert::AreNotEqual(hBase, hPert, L"negative control: single-pixel perturbation must change engine-input hash");
+			Assert::AreNotEqual(0, std::memcmp(serialBuf.data(), pooledBuf.data(), serialBuf.size()),
+				L"negative control: single-pixel perturbation must change engine-input bytes");
 		}
 		pool.Stop();
 	}
 
+	BEGIN_TEST_METHOD_ATTRIBUTE(TwoWideParallelFlowGlobalsAndExtrasMatchesSerialBitIdentically)
+		TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+	END_TEST_METHOD_ATTRIBUTE()
+	TEST_METHOD(TwoWideParallelFlowGlobalsAndExtrasMatchesSerialBitIdentically)
+	{
+		using namespace ProducerPipelineIdentity;
+		TwoWideVoteRunner parallelRunner;
+
+		struct CaseSpec { int halfW; int halfH; uint32_t seed; bool general; };
+		std::vector<CaseSpec> cases;
+		for (uint32_t s = 0; s < 24; ++s)
+			cases.push_back(CaseSpec{ 320, 180, s, (s & 1u) == 0u });
+		// Edge-block odd grid dimensions and >2160-line height (8 * gridH = 2400 > 2160) where general scales FlowVoteRange.
+		cases.push_back(CaseSpec{ 326, 182, 101u, true });
+		cases.push_back(CaseSpec{ 326, 182, 102u, false });
+		cases.push_back(CaseSpec{ 240, 1200, 201u, true });
+		cases.push_back(CaseSpec{ 240, 1200, 202u, false });
+		Assert::IsTrue(MotionAhead::FlowVoteRange(300, true) > MotionAhead::FlowVoteRange(300, false),
+			L"high-res gridH=300 must exercise distinct general=true vs general=false vote ranges");
+
+		for (const CaseSpec& c : cases)
+		{
+			const MotionAhead::Flow baseFlow = MakeMultiQuadrantFlow(c.halfW, c.halfH, c.seed);
+			MotionAhead::Flow serialFlow = baseFlow;
+			MotionAhead::Flow parallelFlow = baseFlow;
+
+			MotionAhead::FlowGlobals(serialFlow, c.general);
+			MotionAhead::FlowExtras(serialFlow);
+			parallelRunner.RunGlobalsAndExtras(parallelFlow, c.general);
+
+			// Non-triviality invariants: prove every output field carries real varied signal, never vacuous zeros.
+			for (int d = 0; d < 2; ++d)
+			{
+				Assert::IsTrue(serialFlow.global[d][3] > 0.5f && serialFlow.global[d][2] < 0.9f,
+					L"dominant global layer must be valid and usable");
+				Assert::IsTrue(std::fabs(serialFlow.global[d][0]) >= 2.0f && std::fabs(serialFlow.global[d][1]) >= 1.0f,
+					L"dominant global motion must be non-zero");
+				Assert::IsTrue(serialFlow.second[d][3] > 0.5f,
+					L"second motion layer must be populated");
+				Assert::IsTrue(std::fabs(serialFlow.second[d][0] - serialFlow.global[d][0]) >= 2.0f,
+					L"second layer must be distinct from dominant global layer");
+			}
+			Assert::IsTrue(serialFlow.global[0][0] > 0.0f && serialFlow.global[1][0] < 0.0f,
+				L"forward and backward global motion must be distinct");
+			Assert::IsTrue(!serialFlow.costWeight.empty() && !serialFlow.fbError.empty(),
+				L"costWeight and fbError must be populated");
+
+			bool sawTrusted = false, sawSmooth = false, sawZero = false;
+			for (float w : serialFlow.costWeight)
+			{
+				if (w >= 0.9999f) sawTrusted = true;
+				else if (w <= 0.0001f) sawZero = true;
+				else sawSmooth = true;
+			}
+			Assert::IsTrue(sawTrusted && sawSmooth && sawZero,
+				L"costWeight must span trusted (1.0), smoothstep (0, 1), and untrusted (0.0) regimes");
+
+			bool sawConsistent = false, sawInconsistent = false;
+			for (float e : serialFlow.fbError)
+			{
+				if (e < 0.5f) sawConsistent = true;
+				if (e > 2.0f) sawInconsistent = true;
+			}
+			Assert::IsTrue(sawConsistent && sawInconsistent,
+				L"fbError must span both consistent (<0.5 px) and inconsistent (>2.0 px) cells");
+
+			// Bit-for-bit identity between 2-wide parallel FlowGlobal + FlowExtras and serial FlowGlobals + FlowExtras.
+			Assert::AreEqual(serialFlow.globalSet, parallelFlow.globalSet);
+			Assert::AreEqual(serialFlow.globalGeneral, parallelFlow.globalGeneral);
+			Assert::AreEqual(serialFlow.blocksX, parallelFlow.blocksX);
+			Assert::AreEqual(serialFlow.blocksY, parallelFlow.blocksY);
+			Assert::AreEqual(0, std::memcmp(serialFlow.global, parallelFlow.global, sizeof(serialFlow.global)),
+				L"2-wide parallel global[2][4] must match serial bit-for-bit");
+			Assert::AreEqual(0, std::memcmp(serialFlow.second, parallelFlow.second, sizeof(serialFlow.second)),
+				L"2-wide parallel second[2][4] must match serial bit-for-bit");
+			Assert::AreEqual(serialFlow.costWeight.size(), parallelFlow.costWeight.size());
+			Assert::AreEqual(0, std::memcmp(serialFlow.costWeight.data(), parallelFlow.costWeight.data(),
+				serialFlow.costWeight.size() * sizeof(float)),
+				L"2-wide parallel costWeight must match serial bit-for-bit");
+			Assert::AreEqual(serialFlow.fbError.size(), parallelFlow.fbError.size());
+			Assert::AreEqual(0, std::memcmp(serialFlow.fbError.data(), parallelFlow.fbError.data(),
+				serialFlow.fbError.size() * sizeof(float)),
+				L"2-wide parallel fbError must match serial bit-for-bit");
+			Assert::AreEqual(HashFlow(serialFlow), HashFlow(parallelFlow),
+				L"full P2 payload hash must match bit-for-bit between 2-wide parallel and serial");
+		}
+
+		// Same-input negative controls on the exact same multi-quadrant flow (prove mismatches are detected).
+		const MotionAhead::Flow baseFlow = MakeMultiQuadrantFlow(320, 180, 7u);
+		MotionAhead::Flow serialRef = baseFlow;
+		MotionAhead::FlowGlobals(serialRef, true);
+		MotionAhead::FlowExtras(serialRef);
+		const uint64_t refHash = HashFlow(serialRef);
+
+		// Negative control 1a: perturbing a single forward vector cell must produce non-zero fbError memcmp & hash diff.
+		{
+			MotionAhead::Flow singleVec = baseFlow;
+			const size_t probeCell = static_cast<size_t>(singleVec.gridW) + 1u;
+			singleVec.forward[probeCell * 2] = static_cast<int16_t>(singleVec.forward[probeCell * 2] + 64);
+			MotionAhead::FlowGlobals(singleVec, true);
+			MotionAhead::FlowExtras(singleVec);
+			Assert::AreNotEqual(0, std::memcmp(serialRef.fbError.data(), singleVec.fbError.data(),
+				serialRef.fbError.size() * sizeof(float)),
+				L"negative control: single-cell vector perturbation must change fbError");
+			Assert::AreNotEqual(refHash, HashFlow(singleVec),
+				L"negative control: single-cell vector perturbation must change HashFlow");
+		}
+
+		// Negative control 1b: shifting dominant cluster vectors must change global[0] and HashFlow.
+		{
+			MotionAhead::Flow shiftedVec = baseFlow;
+			const int lowY = (shiftedVec.gridH * 7) / 20;
+			for (int y = 0; y < lowY; ++y)
+				for (int x = 0; x < shiftedVec.gridW; ++x)
+				{
+					const size_t idx = static_cast<size_t>(y) * static_cast<size_t>(shiftedVec.gridW) + static_cast<size_t>(x);
+					shiftedVec.forward[idx * 2] = static_cast<int16_t>(shiftedVec.forward[idx * 2] + 128);
+				}
+			MotionAhead::FlowGlobals(shiftedVec, true);
+			MotionAhead::FlowExtras(shiftedVec);
+			Assert::AreNotEqual(0, std::memcmp(serialRef.global, shiftedVec.global, sizeof(serialRef.global)),
+				L"negative control: dominant cluster shift must change global[2][4]");
+			Assert::AreNotEqual(refHash, HashFlow(shiftedVec),
+				L"negative control: dominant cluster shift must change HashFlow");
+		}
+
+		// Negative control 2: perturbing forwardCost on one trusted 2x2 cell block must change costWeight & HashFlow.
+		{
+			MotionAhead::Flow perturbedCost = baseFlow;
+			for (int cy = 0; cy < 2; ++cy)
+				for (int cx = 0; cx < 2; ++cx)
+					perturbedCost.forwardCost[static_cast<size_t>(cy) * static_cast<size_t>(perturbedCost.gridW) + static_cast<size_t>(cx)] = 250u;
+			MotionAhead::FlowGlobals(perturbedCost, true);
+			MotionAhead::FlowExtras(perturbedCost);
+			Assert::AreNotEqual(0, std::memcmp(serialRef.costWeight.data(), perturbedCost.costWeight.data(),
+				serialRef.costWeight.size() * sizeof(float)),
+				L"negative control: block cost perturbation must change costWeight");
+			Assert::AreNotEqual(refHash, HashFlow(perturbedCost),
+				L"negative control: block cost perturbation must change HashFlow");
+		}
+
+		// Negative control 3: broken 2-wide dispatch that erroneously votes forward into both lanes must fail memcmp & hash.
+		{
+			MotionAhead::Flow brokenParallel = baseFlow;
+			MotionAhead::FlowGlobal(brokenParallel.forward, brokenParallel.forwardCost, brokenParallel.gridW, brokenParallel.gridH,
+				brokenParallel.global[0], brokenParallel.second[0], true);
+			MotionAhead::FlowGlobal(brokenParallel.forward, brokenParallel.forwardCost, brokenParallel.gridW, brokenParallel.gridH,
+				brokenParallel.global[1], brokenParallel.second[1], true);
+			brokenParallel.globalSet = true;
+			brokenParallel.globalGeneral = true;
+			MotionAhead::FlowExtras(brokenParallel);
+			Assert::AreNotEqual(0, std::memcmp(serialRef.global, brokenParallel.global, sizeof(serialRef.global)),
+				L"negative control: broken 2-wide forward/backward channel bug must change global[2][4]");
+			Assert::AreNotEqual(0, std::memcmp(serialRef.second, brokenParallel.second, sizeof(serialRef.second)),
+				L"negative control: broken 2-wide forward/backward channel bug must change second[2][4]");
+			Assert::AreNotEqual(refHash, HashFlow(brokenParallel),
+				L"negative control: broken 2-wide channel bug must change HashFlow");
+		}
+	}
+
+	BEGIN_TEST_METHOD_ATTRIBUTE(P2HashesSerialEqualsPipelined600FramesTwoRunsHintsOnAndOff)
+		TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+	END_TEST_METHOD_ATTRIBUTE()
 	TEST_METHOD(P2HashesSerialEqualsPipelined600FramesTwoRunsHintsOnAndOff)
 	{
 		using namespace ProducerPipelineIdentity;
 		CComPtr<ID3D11Device> device;
-		if (!NvidiaDevice(device))
-		{
-			Logger::WriteMessage("SKIP-NO-HARDWARE: ProducerPipelineIdentityGpuTests requires an NVIDIA D3D11 adapter with NVOF.\n");
+		if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Gpu,
+				"P2HashesSerialEqualsPipelined600FramesTwoRunsHintsOnAndOff",
+				NvidiaDevice(device),
+				"requires an NVIDIA D3D11 adapter with NVOF"))
 			return;
-		}
 		const Canvas canvas = MakeCanvas(640, 360);
 		constexpr int kFrames = 600;
 		for (int hintsInt = 0; hintsInt <= 1; ++hintsInt)
@@ -235,10 +679,14 @@ public:
 			std::string why;
 			if (!CollectHashes(device, canvas, kFrames, false, hints, serialA, why))
 			{
-				if (why.find("nvofapi64.dll") != std::string::npos || why.find("no optical flow engine") != std::string::npos)
+				if (hintsInt == 0 &&
+					(why.find("nvofapi64.dll") != std::string::npos || why.find("no optical flow engine") != std::string::npos))
 				{
-					Logger::WriteMessage(("SKIP-NO-HARDWARE: NVOF unavailable (" + why + ").\n").c_str());
-					return;
+					if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Gpu,
+							"P2HashesSerialEqualsPipelined600FramesTwoRunsHintsOnAndOff",
+							false,
+							"NVOF unavailable (" + why + ")"))
+						return;
 				}
 				Assert::Fail(std::wstring(why.begin(), why.end()).c_str());
 			}
