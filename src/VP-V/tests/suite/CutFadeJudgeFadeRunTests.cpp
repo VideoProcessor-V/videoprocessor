@@ -3447,9 +3447,9 @@ namespace CutFadeJudgeFadeRunTestsNs
 							{
 								const int cx = int(x / 5u);
 								const int cy = int(y / 5u);
-								const double raw = 32.0 + 10.0 * ((double(cx) - 15.5) / 15.5) + 2.0 * std::cos(double(cy) * 0.7);
-								const double meanLow = 16.0 + gain * (32.0 - 16.0);
-								code = meanLow + lowerStretch * gain * (raw - 32.0) + dither;
+								const double raw = 60.0 + 18.0 * ((double(cx) - 15.5) / 15.5) + 2.0 * std::cos(double(cy) * 0.7);
+								const double meanLow = 16.0 + gain * (60.0 - 16.0);
+								code = meanLow + lowerStretch * gain * (raw - 60.0) + dither;
 							}
 							half[size_t(y) * kW + x] = static_cast<uint16_t>((std::min)(65535.0, (std::max)(0.0, std::floor(code * 256.0 + 0.5))));
 						}
@@ -3457,11 +3457,12 @@ namespace CutFadeJudgeFadeRunTestsNs
 				};
 
 				// Prime a smooth fade-out from 1.000 -> 0.960 (16 steps of -0.0025), then test step 0.960 -> 0.9575
-				// with lowerStretch = 1.03 so top drops -0.41 code (<= 0.50) while stripped lower slope >= 1.0!
+				// with lowerStretch = 1.01 so top drops -0.41 code (<= 0.50), sSameZero/(sSameZero+sOppZero) > 98% >> 75%,
+				// and Full392StepSlope < 1.0 while stripped lower slope >= 1.0!
 				std::vector<Record> recs;
 				for (int s = 0; s <= 16; ++s)
 					recs.push_back(UnclippedFlatTopHalfFrame(1.0 - 0.0025 * double(s), 1.0));
-				recs.push_back(UnclippedFlatTopHalfFrame(0.9575, 1.03));
+				recs.push_back(UnclippedFlatTopHalfFrame(0.9575, 1.01));
 
 				const Record& rPrevStep = recs[16];
 				const Record& rTestStep = recs[17];
@@ -3718,15 +3719,19 @@ namespace CutFadeJudgeFadeRunTestsNs
 					return MakeRecordFromHalf(half);
 				};
 
+				// Strictly monotonic diagonal ramp + zero-2x2-sum checkerboard texture:
+				// - 2x2 pooling cancels (-1)^(x+y) identically to 0, so corr2x2 == -1.0 at EVERY shift (sy, sx) in [-2, +2]^2!
+				// - Alternating +-6 code texture keeps cell-level Flatness(gcDark) ~ 0.052 >= kFlatF (0.02), blocking CollapseToBlackOk!
 				double baseG[kGridH][kGridW], darkG[kGridH][kGridW];
 				for (int y = 0; y < kGridH; ++y)
 					for (int x = 0; x < kGridW; ++x)
 					{
-						const double pat = 0.45 + 0.25 * std::sin(double(x) * 0.5) * std::cos(double(y) * 0.6)
-							+ 0.15 * std::cos(double(x) * 0.25);
-						baseG[y][x] = 16.0 + pat * 160.0;
+						const double rx = (double(x) / double(kGridW - 1) - 0.5) * 2.0;
+						const double ry = (double(y) / double(kGridH - 1) - 0.5) * 2.0;
+						const double chk = ((x + y) % 2 == 0) ? 6.0 : -6.0;
+						baseG[y][x] = 16.0 + 96.0 + 32.0 * rx + 16.0 * ry + chk;
 					}
-				// Collapsed dark frame: exact 0.14 (< 0.25 = 1/kFadeMaxDiv) quantile scaling about 16, spatially inverted so corr2x2 < 0.4!
+				// Collapsed dark frame: exact 0.14 (< 0.25 = 1/kFadeMaxDiv) quantile scaling about 16, 180-deg inverted so corr2x2 == -1.0!
 				for (int y = 0; y < kGridH; ++y)
 					for (int x = 0; x < kGridW; ++x)
 						darkG[y][x] = 16.0 + 0.14 * (baseG[kGridH - 1 - y][kGridW - 1 - x] - 16.0);
@@ -3738,12 +3743,12 @@ namespace CutFadeJudgeFadeRunTestsNs
 				Assert::IsTrue(collapseFit.valid && collapseFit.dir < 0 && collapseFit.gain < 1.0 / double(kFadeMaxDiv),
 					L"FitMotionTolerantFade(allowNearBlackCollapse=true) must accept active near-black collapse (gain < 0.25)");
 
-				// Prime a smooth 12-step fade-out (1.0 -> 0.18, ~6.8%/step << 25% jump guard) so run is genuinely active
-				// with prev.mean ~ 29.5 < 48 before feeding the spatially-scrambled collapsed dark frame (gain = 0.14, mean ~ 26.5 < 48).
+				// Prime a smooth 14-step fade-out (1.0 -> 0.18, ~5.9%/step << 25% jump guard, max HistHalfL1 ~ 0.40 < 0.50) so run is genuinely active
+				// with prev.mean ~ 33.3 < 48 before feeding the 180-deg inverted collapsed dark frame (gain = 0.14, mean ~ 29.4 < 48, stepAQ = 0.778).
 				std::vector<Record> rampRecs;
-				for (int s = 0; s <= 12; ++s)
+				for (int s = 0; s <= 14; ++s)
 				{
-					const double g = 1.0 - 0.82 * double(s) / 12.0;
+					const double g = 1.0 - 0.82 * double(s) / 14.0;
 					double stepG[kGridH][kGridW];
 					for (int y = 0; y < kGridH; ++y)
 						for (int x = 0; x < kGridW; ++x)
