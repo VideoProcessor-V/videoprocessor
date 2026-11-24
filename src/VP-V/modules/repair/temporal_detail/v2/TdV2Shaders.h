@@ -2784,12 +2784,17 @@ for (int stride = 32; stride > 0; stride >>= 1)
 }
 
 uint cpFlags = td_s_nz[0];
+#if defined(TD_POCS_HAS_STEP_SCALE) && TD_POCS_HAS_STEP_SCALE
 int bCx = min(TD_CW - 1, max(0, bx) / TD_CELL_PX);
 int bCy = min(TD_CH - 1, max(0, by) / TD_CELL_PX);
 float rawBlockScale = (u_cell_prior_has_step_scale > 0.5) ? texelFetch(cell_prior, ivec2(bCx, bCy), 0).z : 1.0;
 bool blkBadScale = td_is_bad(rawBlockScale) || !(rawBlockScale > 0.0);
 float blockStepDelta = blkBadScale ? 0.0 : (u_step_delta * clamp(rawBlockScale, TD_STEP_SCALE_MIN, TD_STEP_SCALE_MAX));
 bool blkBad = blkBadIn || ((cpFlags & 1u) != 0u) || blkBadScale;
+#else
+float blockStepDelta = u_step_delta;
+bool blkBad = blkBadIn || ((cpFlags & 1u) != 0u);
+#endif
 bool blkInvalidRef0 = ((cpFlags & 2u) != 0u);
 bool runPocs = blkHasDelta && !blkBad && !blkInvalidRef0;
 float cVal = runPocs ? rawC : 0.0;

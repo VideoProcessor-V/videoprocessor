@@ -3307,6 +3307,7 @@ namespace Gpu
 					standIns->Engage(StandInKind::CodecModelPbStandIn, "TdV2GpuEngine STRICT/CELL using refs[0].clean stand-in for Field B P_B");
 
 				std::string pHdr = staticGeom;
+				pHdr += VpvGpu::DefineInt("TD_POCS_HAS_STEP_SCALE", 1);
 				pHdr += VpvGpu::Define("TD_STEP_SCALE_MIN", kCellStepScaleMin);
 				pHdr += VpvGpu::Define("TD_STEP_SCALE_MAX", kCellStepScaleMax);
 				pHdr += Shaders::BuildDctBasisHeader();
