@@ -361,16 +361,28 @@ namespace VpMotion
 		// only a FlowOf call evicts, never another pair's FlowOf by itself. Without a board: until the next FlowOf of another pair.
 		// (The earlier text said "until the NEXT FlowOf call": that was the single lease.)
 		bool FlowOf(uint64_t seq, FlowView& out) const override;
-		// The source width the engine size derives from (the statistics service notes it each time it sizes the producer); until then
-		// FlowOf answers "size unknown" rather than guess a scale.
-		void NoteFlowSourceWidth(int width) { flowSourceWidth_.store(width, std::memory_order_relaxed); }
+		// The source raster size (and optionally the expected engine luma size from SizeFor) the producer was sized for, recorded
+		// atomically under flowMutex_ so a resolution switch (e.g. 1080p -> 4K) never exposes a torn (width, height) or (source, target)
+		// snapshot. Until a positive width is noted, FlowOf answers "size unknown" (unscaled) rather than guess a scale; when a positive
+		// target engine size is noted, FlowOf also refuses any stored pair whose (halfW, halfH) differs from that target as unscaled.
+		void NoteFlowSourceSize(int width, int height, int targetEngineW = 0, int targetEngineH = 0)
+		{
+			std::lock_guard<std::mutex> lock(flowMutex_);
+			flowSize_.sourceW = width > 0 ? width : 0;
+			flowSize_.sourceH = height > 0 ? height : 0;
+			const bool haveTarget = targetEngineW > 0 && targetEngineH > 0;
+			flowSize_.targetEngineW = haveTarget ? targetEngineW : 0;
+			flowSize_.targetEngineH = haveTarget ? targetEngineH : 0;
+		}
+		// Compatibility wrapper for width-only callers (tests): sets height and target size to 0 (FlowOf falls back to scaleX for Y).
+		void NoteFlowSourceWidth(int width) { NoteFlowSourceSize(width, 0, 0, 0); }
 		struct FlowReadCounters
 		{
 			unsigned long long requests = 0, served = 0;
 			unsigned long long noProducer = 0;     // no producer (low latency, optical flow off, not started / dropped)
 			unsigned long long noPair = 0;         // the producer has no such pair (not computed yet, pruned, older generation)
 			unsigned long long invalidated = 0;    // the vectors-valid state does not hold the pair (resync, gap, format change)
-			unsigned long long unscaled = 0;       // the source size the engine size derives from is not known yet
+			unsigned long long unscaled = 0;       // the source size is not known yet, or the stored pair's engine size does not match the current target size
 			// W1-C3: the per-pair work (computed once per pair id, whatever the number of FlowOf calls): the lease builds (source-px
 			// conversion of the pair) and the cell-trust computations (FlowView::CellTrust, once per direction and tolerance while the pair is the current lease).
 			unsigned long long conversions = 0;
@@ -544,18 +556,18 @@ namespace VpMotion
 		uint8_t p1AheadDepth_ = 0;
 		uint64_t p1AheadErasures_ = 0;
 		int p1AheadDemandOwner_ = 0;
-		// QKP slice E (design s9.3): FlowOf's leases are a MAP keyed (from, to, scale), bounded by the SAME derived queue window as the
+		// QKP slice E (design s9.3): FlowOf's leases are a MAP keyed (from, to, scaleX, scaleY), bounded by the SAME derived queue window as the
 		// frame memo (core/QueueWindow.h; the board is the host's one snapshot, fed by SetQueueWindowBoard). A lease is dropped when its
 		// frame is older than current - back, when its pair is no longer in the P2 slot (a lease never extends P2 retention), or when
 		// the vectors-valid epoch / the board's invalidation epoch moved. Without a board the behaviour is today's single lease. In production
 		// there is no board yet (slice E is dormant: no host wiring, LeaseWindowLine not displayed; 102b QKP-E-HOST-WIRING), so it is not shown.
-		// FlowOf's lease (one per pair): the shared pair and the converted planes the last returned view points into (render thread; the mutex only
+		// FlowOf's lease (one per pair and per-axis scale): the shared pair and the converted planes the last returned view points into (render thread; the mutex only
 		// makes a stray second reader safe, it does not extend a view's validity).
 		struct FlowLease : IFlowTrustMemo
 		{
 			MotionAhead::FlowPtr flow;
 			uint64_t from = 0, to = 0;
-			double scale = 0;
+			double scaleX = 0, scaleY = 0;
 			uint64_t validityEpoch = 0, boardEpoch = 0;   // QKP E: the epochs the lease was built in (a moved epoch drops it)
 			std::vector<float> x, y;
 			// W1-C3: the cell trust memo, one entry per tolerance asked for this pair (each computed once and counted). A std::list so a
@@ -577,7 +589,13 @@ namespace VpMotion
 			const float* Trust(float toleranceEnginePx, bool backward) const;
 		};
 		mutable std::mutex flowMutex_;
-		using LeaseKey = std::tuple<uint64_t, uint64_t, double>;   // (from, to, scale)
+		struct FlowSourceSize
+		{
+			int sourceW = 0, sourceH = 0;
+			int targetEngineW = 0, targetEngineH = 0;
+		};
+		FlowSourceSize flowSize_;   // under flowMutex_: atomic (sourceW, sourceH, targetEngineW, targetEngineH) snapshot (ServeStatistics / RunDejudderEstimate)
+		using LeaseKey = std::tuple<uint64_t, uint64_t, double, double>;   // (from, to, scaleX, scaleY)
 		mutable std::map<LeaseKey, std::shared_ptr<FlowLease>> flowLeases_;
 		std::atomic<const VpSkeleton::QueueWindowBoard*> queueBoard_{ nullptr };
 		mutable LeaseCounters leaseCounters_;
@@ -592,7 +610,6 @@ namespace VpMotion
 		bool p2CpuFormRecordedAny_ = false;          // the first read has been recorded (render thread)
 		unsigned long long motionAheadP1DeferredRecorded_ = 0;   // P1 deferrals at the last DiagnosticHistory record (render thread)
 		unsigned long long vectorShallowBackwardRecorded_ = 0;   // ForwardShallow backward pairs at the last DiagnosticHistory record (render thread)
-		std::atomic<int> flowSourceWidth_{ 0 };   // the source width the engine size was last made for (ServeStatistics)
 		InvalidateSink invalidateSink_ = nullptr;
 		const IMatcherView* matcher_ = nullptr;
 		std::atomic<IPreEstimateHook*> preEstimateHook_{ nullptr };

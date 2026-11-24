@@ -237,6 +237,7 @@ namespace VpMotion
 			motionEnginePairsBase += motionProducer->GetStats().pairs;   // W2-C1: Work().producerPairs keeps them
 			motionProducer->Stop();
 			PublishProducer(nullptr);   // hardening: a loop copy keeps the stopped producer alive until its use ends
+			NoteFlowSourceSize(0, 0, 0, 0);   // GEM-110 (VE-SCALE): never carry a stopped session's raster / target size into a new stream
 			Vpv::FrameAnalysis::NoteP1CpuDemand(host_, false);
 		}
 		// Audit 2026-10-16: a failure is retried once the producer is wanted again (optical flow off and on,
@@ -610,7 +611,7 @@ namespace VpMotion
 		vectorStatsSequence = sequence;
 		int engineW = 0, engineH = 0, halvings = 0;
 		SizeFor(facts.lowResSearch, width, height, engineW, engineH, halvings);
-		NoteFlowSourceWidth(width);
+		NoteFlowSourceSize(width, height, engineW, engineH);
 		motionProducer->SetTargetSize(engineW, engineH);
 		MotionAhead::FlowPtr flow;
 		uint64_t from = sequence, to = nextSequence;
@@ -684,6 +685,10 @@ namespace VpMotion
 		if (!pending.changed)
 			return false;
 		motionInvalidations += pending.invalidations;
+		// GEM-110 (VE-SCALE): a source format change invalidates the remembered source / target raster size so FlowOf never
+		// applies a pre-switch size (e.g. 1080p) to a post-switch pair (e.g. 4K) even when both share the same engine size.
+		if (pending.cause == MotionValidity::Cause::SourceFormatChange)
+			NoteFlowSourceSize(0, 0, 0, 0);
 		return true;
 	}
 
@@ -899,6 +904,7 @@ namespace VpMotion
 				engine.motionProducerStartFailed = false;
 				engine.motionProducerStopLogged = false;
 				engine.motionProducerStartRetry = MotionAhead::ProducerRecovery();
+				engine.NoteFlowSourceSize(0, 0, 0, 0);
 				if (producer)
 					engine.motionEnginePairsBase += producer->GetStats().pairs;
 			});
@@ -1123,10 +1129,22 @@ namespace VpMotion
 		if (!flow || flow->gridW <= 0 || flow->gridH <= 0 || flow->halfW <= 0 ||
 			flow->forward.size() < static_cast<size_t>(flow->gridW) * static_cast<size_t>(flow->gridH) * 2)
 			return absent(flowReads_.noPair);
-		const int sourceWidth = flowSourceWidth_.load(std::memory_order_relaxed);
+		const int sourceWidth = flowSize_.sourceW;
+		const int sourceHeight = flowSize_.sourceH;
+		const int targetEngineW = flowSize_.targetEngineW;
+		const int targetEngineH = flowSize_.targetEngineH;
 		if (sourceWidth <= 0)
 			return absent(flowReads_.unscaled);
-		const double scale = static_cast<double>(sourceWidth) / flow->halfW;   // source px per engine px (a ratio, never a constant)
+		// GEM-110 (VE-SCALE): when an explicit target engine size was recorded (ServeStatistics / RunDejudderEstimate),
+		// never serve a stored pair whose engine dimensions do not match it (e.g. a stale 1080p pair across a 1080p -> 4K switch).
+		if (targetEngineW > 0 && targetEngineH > 0 &&
+			(flow->halfW != targetEngineW || flow->halfH != targetEngineH))
+			return absent(flowReads_.unscaled);
+		const double scaleX = static_cast<double>(sourceWidth) / flow->halfW;   // horizontal source px per engine px (a ratio, never a constant)
+		const double scaleY = (sourceHeight > 0 && flow->halfH > 0)
+			? static_cast<double>(sourceHeight) / flow->halfH
+			: scaleX;   // vertical source px per engine px; falls back to scaleX for legacy width-only callers
+		const LeaseKey key(from, to, scaleX, scaleY);
 		// ---- QKP slice E: the lease window (design s9.3) ----
 		const uint64_t validityEpoch = motionValidity.Epoch();
 		const VpSkeleton::QueueWindowBoard* const board = queueBoard_.load(std::memory_order_acquire);
@@ -1158,7 +1176,7 @@ namespace VpMotion
 		else
 			for (auto it = flowLeases_.begin(); it != flowLeases_.end();)
 			{
-				if (std::get<0>(it->first) != from || std::get<1>(it->first) != to)   // no board: the single lease (today's behaviour; not displayed yet, 102b QKP-E-HOST-WIRING)
+				if (it->first != key)   // no board: the single lease (today's behaviour; not displayed yet, 102b QKP-E-HOST-WIRING)
 				{
 					++leaseCounters_.droppedSingle;
 					it = flowLeases_.erase(it);
@@ -1177,7 +1195,7 @@ namespace VpMotion
 			else
 				++it;
 		}
-		std::shared_ptr<FlowLease>& slot = flowLeases_[LeaseKey(from, to, scale)];
+		std::shared_ptr<FlowLease>& slot = flowLeases_[key];
 		if (!slot || slot->flow != flow)
 		{
 			auto lease = std::make_shared<FlowLease>();
@@ -1188,7 +1206,8 @@ namespace VpMotion
 			lease->flow = flow;
 			lease->from = from;
 			lease->to = to;
-			lease->scale = scale;
+			lease->scaleX = scaleX;
+			lease->scaleY = scaleY;
 			lease->validityEpoch = validityEpoch;
 			lease->boardEpoch = boardEpoch;
 			const size_t cells = static_cast<size_t>(flow->gridW) * static_cast<size_t>(flow->gridH);
@@ -1196,8 +1215,8 @@ namespace VpMotion
 			lease->y.resize(cells);
 			for (size_t i = 0; i < cells; ++i)
 			{
-				lease->x[i] = static_cast<float>(flow->forward[i * 2] / 32.0 * scale);
-				lease->y[i] = static_cast<float>(flow->forward[i * 2 + 1] / 32.0 * scale);
+				lease->x[i] = static_cast<float>(flow->forward[i * 2] / 32.0 * scaleX);
+				lease->y[i] = static_cast<float>(flow->forward[i * 2 + 1] / 32.0 * scaleY);
 			}
 			slot = std::move(lease);
 		}
@@ -1206,7 +1225,8 @@ namespace VpMotion
 		out.y = flowLease_->y.data();
 		out.gridW = flow->gridW;
 		out.gridH = flow->gridH;
-		out.blockSize = 4.0 * scale;   // a cell is 4 x 4 engine px
+		out.blockSize = 4.0 * scaleX;   // a cell is 4 x 4 engine px
+		out.blockSizeY = 4.0 * scaleY;
 		// The original payload, not a copy: the lease keeps `flow` (and so these arrays) alive while the pair is inside the lease window
 		// (until it leaves it or an invalidation; no board: until the next FlowOf of another pair).
 		const size_t flowCells = static_cast<size_t>(flow->gridW) * static_cast<size_t>(flow->gridH);
@@ -1215,7 +1235,8 @@ namespace VpMotion
 		out.forwardCost = flow->forwardCost.size() >= flowCells ? flow->forwardCost.data() : nullptr;
 		out.backwardCost = flow->backwardCost.size() >= flowCells ? flow->backwardCost.data() : nullptr;
 		out.rawUnitsPerEnginePx = 32.0;
-		out.enginePxToSource = scale;
+		out.enginePxToSource = scaleX;
+		out.enginePxToSourceY = scaleY;
 		out.cellEnginePx = 4;
 		out.engineW = flow->halfW;
 		out.engineH = flow->halfH;

@@ -297,8 +297,14 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 	sb.sequence = bSequence;
 	if (vectorEngine.motionProducer && vectorEngine.motionProducer->Running() && !vectorEstimate.motionEngineWarming)
 	{
-		int engineW = 0, engineH = 0;
-		if (dejudder->EngineInputSize(engineW, engineH))
+		int engineW = 0, engineH = 0, halvings = 0;
+		if (width > 0 && height > 0)
+		{
+			VpMotion::VectorEngine::SizeFor(dejudder->GetSettings().lowRes, width, height, engineW, engineH, halvings);
+			vectorEngine.NoteFlowSourceSize(width, height, engineW, engineH);
+			vectorEngine.motionProducer->SetTargetSize(engineW, engineH);
+		}
+		else if (dejudder->EngineInputSize(engineW, engineH))
 			vectorEngine.motionProducer->SetTargetSize(engineW, engineH);
 		// MotionValidity step 1 D: a stored pair only for adjacent frames of the current
 		// epoch (otherwise the matcher runs).
