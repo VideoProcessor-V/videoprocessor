@@ -64,7 +64,7 @@ namespace Gpu
 		}
 
 		// Shared sited coordinate helpers (exact algebraic match to SitingSpec::CodedToLumaX/Y & LumaToCodedX/Y).
-		constexpr const char* kChromaSitingHelpers = R"GLSL(
+		constexpr const char* kSitedCoordHelpers = R"GLSL(
 float td_coded_to_luma_x(float cx)
 {
     float s = (TD_CSUB_X > 1) ? u_cshift_x : 0.0;
@@ -2521,7 +2521,7 @@ imageStore(out_coded_delta, p, vec4(0.0));
 				return failVisible("td_v2_c1_band current chroma failed", StandInKind::GpuDispatchFailed);
 
 			// ---- PASS C1A + C1B/C: Warp each reference + Band Split ----
-			const std::string cWarpHdr = chromaGeom + Shaders::kCoreHelpers + ChromaShaders::kChromaSitingHelpers + ChromaShaders::kPassChromaWarpHeader;
+			const std::string cWarpHdr = chromaGeom + Shaders::kCoreHelpers + ChromaShaders::kSitedCoordHelpers + ChromaShaders::kPassChromaWarpHeader;
 			const size_t shChWarp = (20u * 20u * 3u) * sizeof(float);
 			int curFlagsSlot = 0;
 			for (int k = K - 1; k >= 0; --k)
@@ -2568,7 +2568,7 @@ imageStore(out_coded_delta, p, vec4(0.0));
 			const bool sameCleanRec = (codedCleanTex == codedRecTex);
 			const float uSameCleanRec = sameCleanRec ? 1.0f : 0.0f;
 			{
-				const std::string c2aHdr = chromaGeom + Shaders::kCoreHelpers + ChromaShaders::kChromaSitingHelpers +
+				const std::string c2aHdr = chromaGeom + Shaders::kCoreHelpers + ChromaShaders::kSitedCoordHelpers +
 				                           ChromaShaders::kPassChromaCellStatsHeader;
 				pl_shader_desc d2a[18] = {
 					VpvGpu::Sampled("cur_l", sc.curL), VpvGpu::Sampled("cur_mh", sc.curMH),
@@ -2664,7 +2664,7 @@ imageStore(out_coded_delta, p, vec4(0.0));
 				c3Hdr += VpvGpu::Define("TD_STEP_SCALE_MIN", kCellStepScaleMin);
 				c3Hdr += VpvGpu::Define("TD_STEP_SCALE_MAX", kCellStepScaleMax);
 				c3Hdr += Shaders::kCoreHelpers;
-				c3Hdr += ChromaShaders::kChromaSitingHelpers;
+				c3Hdr += ChromaShaders::kSitedCoordHelpers;
 				c3Hdr += R"GLSL(
 float td_a2_band_peak_sq(int b) { return (b == 1) ? TD_A2_PEAK_MID_SQ : 1.0; }
 float td_vec_comp(vec4 v, int k) { if (k == 0) return v.x; if (k == 1) return v.y; return v.z; }
@@ -2711,7 +2711,7 @@ float td_huber_taper(float diffSq, float diagC)
 				c4Hdr += VpvGpu::Define("TD_GAIN_FINE", gains.fine);
 				c4Hdr += VpvGpu::Define("TD_MIN_VAR_RETENTION", TdGuardPort::kMinVarianceRetention);
 				c4Hdr += Shaders::kCoreHelpers;
-				c4Hdr += ChromaShaders::kChromaSitingHelpers;
+				c4Hdr += ChromaShaders::kSitedCoordHelpers;
 				c4Hdr += ChromaShaders::kPassChromaGuardHeader;
 
 				pl_shader_desc d4[7] = {

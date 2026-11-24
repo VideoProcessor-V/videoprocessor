@@ -769,7 +769,7 @@ namespace TdV2
 		int cellPx,
 		double diff,
 		double cleanY,
-		double noiseSigmaFloor,
+		double quantSigmaFloor,
 		bool enableHuber)
 	{
 		if (cellWeights == nullptr || cellMeanY == nullptr || cellStdY == nullptr ||
@@ -815,8 +815,8 @@ namespace TdV2
 		const double s11 = tx * ty;
 
 		const double baseQuantSigma = std::sqrt((kDefaultStepPriorLsb * kDefaultStepPriorLsb) / 12.0);
-		const double effNoiseFloor = (std::isfinite(noiseSigmaFloor) && noiseSigmaFloor > baseQuantSigma)
-			? noiseSigmaFloor
+		const double effQuantFloor = (std::isfinite(quantSigmaFloor) && quantSigmaFloor > baseQuantSigma)
+			? quantSigmaFloor
 			: baseQuantSigma;
 
 		auto rangeAffinity = [&](size_t idx) -> double
@@ -825,7 +825,7 @@ namespace TdV2
 			const double sd = cellStdY[idx];
 			if (!std::isfinite(m) || !std::isfinite(sd))
 				return 1.0;
-			const double sigL = sd > effNoiseFloor ? sd : effNoiseFloor;
+			const double sigL = sd > effQuantFloor ? sd : effQuantFloor;
 			const double dL = cleanY - m;
 			return std::exp(-(dL * dL) / (2.0 * sigL * sigL));
 		};
@@ -1806,13 +1806,13 @@ namespace TdV2
 							if (cfg_.enableEdgeAwareWeightUpsample)
 							{
 								const double pxStepScale = cellStepScales[cIdx];
-								const double pxNoiseSigma = std::sqrt((std::max)(0.0, a2Stats.totalVar * pxStepScale * pxStepScale));
+								const double pxQuantSigma = std::sqrt((std::max)(0.0, a2Stats.totalVar * pxStepScale * pxStepScale));
 								wEff = SpatialGuidedBilinearWeight(
 									cellW[b][k].data(), cellDiagC[b][k].data(),
 									cellMeanCleanY.data(), cellStdCleanY.data(),
 									res.cellsW, res.cellsH,
 									static_cast<double>(x), static_cast<double>(y), cellPx,
-									diff, curClean.at(x, y), pxNoiseSigma, cfg_.enablePerCornerHuber);
+									diff, curClean.at(x, y), pxQuantSigma, cfg_.enablePerCornerHuber);
 							}
 							else if (cfg_.enablePerCornerHuber)
 							{
