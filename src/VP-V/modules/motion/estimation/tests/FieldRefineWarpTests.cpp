@@ -308,5 +308,260 @@ if (p.x < 48 && p.y < 32) {
 			if (bad != 0)
 				Fail("the offset accessor differs from the CPU reference on " + std::to_string(bad) + " pixels");
 		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(NonFiniteSeedsAreTaggedInvalidAndExcludedFromOffsetOnGpu)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(NonFiniteSeedsAreTaggedInvalidAndExcludedFromOffsetOnGpu)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			pl_dispatch dispatch = pl_dispatch_create(fixture.Log(), gpu);
+			Assert::IsNotNull(dispatch);
+
+			struct Cleanup
+			{
+				pl_gpu gpu = nullptr;
+				pl_dispatch* dispatch = nullptr;
+				std::vector<pl_tex*> textures;
+				Cleanup(pl_gpu g, pl_dispatch* d) : gpu(g), dispatch(d) {}
+				~Cleanup()
+				{
+					for (pl_tex* t : textures)
+						if (t && *t)
+							pl_tex_destroy(gpu, t);
+					if (dispatch && *dispatch)
+						pl_dispatch_destroy(dispatch);
+				}
+			} cleanup(gpu, &dispatch);
+
+			const int gw = 6, gh = 4, bs = 8;
+			const int hw = 32, hh = 24;
+			const int sw = gw * bs, sh = gh * bs;
+			const size_t nb = static_cast<size_t>(gw) * gh;
+			std::vector<float> a(static_cast<size_t>(hw) * hh), b(a.size());
+			std::vector<float> p3(nb * 2), cam(nb * 2), p3Tex(nb * 4), camTex(nb * 4);
+			std::vector<uint8_t> camMask(nb, 0), occ(nb, 0);
+
+			auto ramp = [](double x, double y) { return 10.0 * x + 3.5 * y + 20.0; };
+			for (int y = 0; y < hh; ++y)
+				for (int x = 0; x < hw; ++x)
+				{
+					// Uniform pan: half-px (2, 1) = source (4, 2); B(q) = A(q - m).
+					a[static_cast<size_t>(y) * hw + x] = static_cast<float>(ramp(x, y));
+					b[static_cast<size_t>(y) * hw + x] = static_cast<float>(ramp(x - 2.0, y - 1.0));
+				}
+			for (size_t i = 0; i < nb; ++i)
+			{
+				p3[i * 2] = 4.0f; p3[i * 2 + 1] = 2.0f;
+				cam[i * 2] = 4.0f; cam[i * 2 + 1] = 2.0f;
+				p3Tex[i * 4] = 4.0f; p3Tex[i * 4 + 1] = 2.0f; p3Tex[i * 4 + 2] = 1.0f; p3Tex[i * 4 + 3] = 0.0f;
+				camTex[i * 4] = 4.0f; camTex[i * 4 + 1] = 2.0f; camTex[i * 4 + 2] = 0.0f; camTex[i * 4 + 3] = 0.0f;
+			}
+
+			const float qnan = std::numeric_limits<float>::quiet_NaN();
+			const float inf = std::numeric_limits<float>::infinity();
+			auto idxOf = [&](int bx, int by) { return static_cast<size_t>(by) * gw + bx; };
+
+			// 1) NaN in s.x even with s.z = 1.0.
+			const size_t nanXIdx = idxOf(2, 1);
+			p3[nanXIdx * 2] = qnan;
+			p3Tex[nanXIdx * 4] = qnan;
+			p3Tex[nanXIdx * 4 + 2] = 1.0f;
+
+			// 2) +Inf in s.y even with s.z = 1.0 (must NOT falsely mark neighbour (1, 1) as kBoundary).
+			const size_t infYIdx = idxOf(1, 2);
+			p3[infYIdx * 2 + 1] = inf;
+			p3Tex[infYIdx * 4 + 1] = inf;
+			p3Tex[infYIdx * 4 + 2] = 1.0f;
+
+			// 3) -Inf in s.x with s.z = 1.0 and occluded = 1 (kInvalid takes precedence over kOccluded).
+			const size_t negInfOccIdx = idxOf(4, 1);
+			p3[negInfOccIdx * 2] = -inf;
+			occ[negInfOccIdx] = 1;
+			p3Tex[negInfOccIdx * 4] = -inf;
+			p3Tex[negInfOccIdx * 4 + 2] = 1.0f;
+			p3Tex[negInfOccIdx * 4 + 3] = 1.0f;
+
+			// 4) NaN in s.z with large finite s.xy (must emit kKept | kInvalid and NOT flag neighbour (3, 2) as kBoundary).
+			const size_t nanZIdx = idxOf(4, 2);
+			p3[nanZIdx * 2] = qnan;
+			p3[nanZIdx * 2 + 1] = qnan;
+			p3Tex[nanZIdx * 4] = 99.0f;
+			p3Tex[nanZIdx * 4 + 1] = 99.0f;
+			p3Tex[nanZIdx * 4 + 2] = qnan;
+
+			// 5) Valid P3 with cameraMask = 1 and non-finite cam.xy = (NaN, 2.0).
+			const size_t camNanIdx = idxOf(3, 1);
+			camMask[camNanIdx] = 1;
+			cam[camNanIdx * 2] = qnan;
+			camTex[camNanIdx * 4] = qnan;
+			camTex[camNanIdx * 4 + 2] = 1.0f;
+
+			// 6) Valid P3 with cameraMask = 1 and non-finite cam.xy = (+Inf, -Inf).
+			const size_t camInfIdx = idxOf(3, 2);
+			camMask[camInfIdx] = 1;
+			cam[camInfIdx * 2] = inf;
+			cam[camInfIdx * 2 + 1] = -inf;
+			camTex[camInfIdx * 4] = inf;
+			camTex[camInfIdx * 4 + 1] = -inf;
+			camTex[camInfIdx * 4 + 2] = 1.0f;
+
+			Input in;
+			in.lumaA = a.data(); in.lumaB = b.data(); in.w = hw; in.h = hh; in.gridW = gw; in.gridH = gh;
+			in.p3 = p3.data(); in.camera = cam.data(); in.cameraMask = camMask.data(); in.occluded = occ.data();
+			const Params prm;
+			std::vector<Block> ref;
+			RefineField(in, prm, ref);
+
+			pl_tex aTex = MakeTex(gpu, 1, hw, hh, a.data(), false, false);
+			pl_tex bTex = MakeTex(gpu, 1, hw, hh, b.data(), false, false);
+			pl_tex p3t = MakeTex(gpu, 4, gw, gh, p3Tex.data(), false, false);
+			pl_tex camt = MakeTex(gpu, 4, gw, gh, camTex.data(), false, false);
+			std::vector<float> zeroField(nb * 4, 0.0f);
+			pl_tex searchOutTex = MakeTex(gpu, 4, gw, gh, zeroField.data(), true, true);
+			std::vector<float> zeroOff(static_cast<size_t>(sw) * sh * 4, 0.0f);
+			pl_tex offOutTex = MakeTex(gpu, 4, sw, sh, zeroOff.data(), true, true);
+			pl_tex negFieldTex = nullptr;
+			pl_tex negOffTex = MakeTex(gpu, 4, sw, sh, zeroOff.data(), true, true);
+			cleanup.textures = { &aTex, &bTex, &p3t, &camt, &searchOutTex, &offOutTex, &negFieldTex, &negOffTex };
+
+			const int size[2] = { hw, hh }, grid[2] = { gw, gh };
+			const int blockHalf = prm.blockSource / 2, margin = prm.margin, useCam = 1;
+			const float thr = prm.boundaryThr, eps = prm.keepEps;
+			const pl_shader_var searchVars[7] = {
+				{ pl_var_ivec2("fr_size"), size, true },
+				{ pl_var_ivec2("fr_grid"), grid, true },
+				{ pl_var_int("fr_block_half"), &blockHalf, true },
+				{ pl_var_int("fr_margin"), &margin, true },
+				{ pl_var_float("fr_boundary_thr"), &thr, true },
+				{ pl_var_float("fr_keep_eps"), &eps, true },
+				{ pl_var_int("fr_use_cam"), &useCam, true }
+			};
+			const pl_shader_desc searchDesc[5] = {
+				Sampled("fr_a", aTex), Sampled("fr_b", bTex), Sampled("fr_p3", p3t), Sampled("fr_cam", camt),
+				Storage("test_out", searchOutTex)
+			};
+			static const char* const kSearchBody = R"GLSL(
+ivec2 blk = ivec2(gl_GlobalInvocationID.xy);
+if (blk.x < fr_grid.x && blk.y < fr_grid.y)
+    imageStore(test_out, blk, vpu_field_refine_search(blk));
+)GLSL";
+			Assert::IsTrue(RunCustom(dispatch, FieldRefineSearchGlsl(), kSearchBody, searchDesc, 5, searchVars, 7, gw, gh),
+				L"vpu_field_refine_search failed on non-finite seed grid");
+			const std::vector<float> gotSearch = Download4(gpu, searchOutTex);
+
+			// Verify search shader GPU/CPU parity on every block (bit-exact on all invalid and interior valid blocks).
+			for (size_t i = 0; i < nb; ++i)
+			{
+				const int bx = static_cast<int>(i % gw), by = static_cast<int>(i / gw);
+				const Block& r = ref[i];
+				Assert::IsTrue(std::isfinite(gotSearch[i * 4]) && std::isfinite(gotSearch[i * 4 + 1]) &&
+					std::isfinite(gotSearch[i * 4 + 2]) && std::isfinite(gotSearch[i * 4 + 3]),
+					L"vpu_field_refine_search must never emit NaN or Inf");
+				Assert::AreEqual(static_cast<int>(r.flags), static_cast<int>(gotSearch[i * 4 + 3] + 0.5f),
+					L"GPU/CPU search flags mismatch");
+				if (i == nanXIdx || i == infYIdx || i == negInfOccIdx || i == nanZIdx)
+				{
+					Assert::AreEqual(static_cast<int>(kKept | kInvalid), static_cast<int>(r.flags));
+					Assert::AreEqual(0.0f, gotSearch[i * 4], 0.0f, L"invalid block GPU vx must be 0");
+					Assert::AreEqual(0.0f, gotSearch[i * 4 + 1], 0.0f, L"invalid block GPU vy must be 0");
+					Assert::AreEqual(0.0f, gotSearch[i * 4 + 2], 0.0f, L"invalid block GPU conf must be 0");
+					Assert::AreEqual(static_cast<float>(kKept | kInvalid), gotSearch[i * 4 + 3], 0.0f, L"invalid block GPU flags must be 18");
+				}
+				else if (bx >= 1 && by >= 1)
+				{
+					Assert::AreEqual(static_cast<int>(kKept), static_cast<int>(r.flags));
+					Assert::AreEqual(r.vx, gotSearch[i * 4], 0.0f, L"interior valid block GPU vx must match CPU bit-exactly");
+					Assert::AreEqual(r.vy, gotSearch[i * 4 + 1], 0.0f, L"interior valid block GPU vy must match CPU bit-exactly");
+					Assert::AreEqual(static_cast<float>(r.confidence), gotSearch[i * 4 + 2], 0.0f, L"interior valid block GPU conf must match CPU bit-exactly");
+				}
+				else
+				{
+					Assert::AreEqual(r.vx, gotSearch[i * 4], 1e-4f, L"border block GPU vx mismatch");
+					Assert::AreEqual(r.vy, gotSearch[i * 4 + 1], 1e-4f, L"border block GPU vy mismatch");
+					Assert::AreEqual(static_cast<float>(r.confidence), gotSearch[i * 4 + 2], 1.0f, L"border block GPU conf mismatch");
+				}
+			}
+
+			// Feed the real GPU search output directly into vpu_field_refine_offset.
+			const int block = bs;
+			const pl_shader_var offsetVars[2] = {
+				{ pl_var_ivec2("vpu_field_refine_grid"), grid, true },
+				{ pl_var_int("vpu_field_refine_block"), &block, true }
+			};
+			const pl_shader_desc offsetDesc[2] = {
+				Sampled("vpu_field_refine_tex", searchOutTex),
+				Storage("test_out", offOutTex)
+			};
+			static const char* const kOffsetBody = R"GLSL(
+ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+if (p.x < 48 && p.y < 32) {
+    vec2 o = vpu_field_refine_offset(vec2(p) + vec2(0.5, 0.5));
+    imageStore(test_out, p, vec4(o, 0.0, 0.0));
+}
+)GLSL";
+			Assert::IsTrue(RunCustom(dispatch, FieldRefineOffsetGlsl(), kOffsetBody, offsetDesc, 2, offsetVars, 2, sw, sh),
+				L"vpu_field_refine_offset failed on search output");
+			const std::vector<float> gotOff = Download4(gpu, offOutTex);
+
+			int offBad = 0;
+			double offMaxAbs = 0.0;
+			for (int y = 0; y < sh; ++y)
+				for (int x = 0; x < sw; ++x)
+				{
+					float ox = 0.0f, oy = 0.0f;
+					Offset(ref.data(), gw, gh, bs, static_cast<float>(x) + 0.5f, static_cast<float>(y) + 0.5f, ox, oy);
+					const size_t k = (static_cast<size_t>(y) * sw + x) * 4;
+					if (!std::isfinite(gotOff[k]) || !std::isfinite(gotOff[k + 1]))
+					{
+						++offBad;
+						continue;
+					}
+					const double e = std::max(std::fabs(gotOff[k] - ox), std::fabs(gotOff[k + 1] - oy));
+					offMaxAbs = std::max(offMaxAbs, e);
+					if (e > 1e-4)
+						++offBad;
+				}
+			if (offBad != 0)
+				Fail("vpu_field_refine_offset differs from CPU Offset() on " + std::to_string(offBad) + " pixels (max_abs=" + std::to_string(offMaxAbs) + ")");
+
+			// Verify exact zero offset at interior pixels bordering invalid blocks and inside invalid blocks.
+			const int checkPixels[5][2] = { { 15, 12 }, { 12, 15 }, { 16, 12 }, { 12, 16 }, { 31, 12 } };
+			for (const auto& pt : checkPixels)
+			{
+				const size_t k = (static_cast<size_t>(pt[1]) * sw + pt[0]) * 4;
+				Assert::AreEqual(0.0f, gotOff[k], 0.0f, L"protected GPU offset bordering/inside invalid block must be zero x");
+				Assert::AreEqual(0.0f, gotOff[k + 1], 0.0f, L"protected GPU offset bordering/inside invalid block must be zero y");
+			}
+
+			// Rule 3 same-input GPU negative control: strip kInvalid back to pre-AB1#2 kKept on the exact same GPU search output.
+			std::vector<float> negField = gotSearch;
+			std::vector<Block> negRef = ref;
+			for (size_t idx : { nanXIdx, infYIdx, negInfOccIdx, nanZIdx })
+			{
+				negRef[idx].flags = static_cast<uint8_t>(negRef[idx].flags & ~kInvalid);
+				negField[idx * 4 + 3] = static_cast<float>(negRef[idx].flags);
+			}
+			negFieldTex = MakeTex(gpu, 4, gw, gh, negField.data(), false, false);
+			const pl_shader_desc negDesc[2] = {
+				Sampled("vpu_field_refine_tex", negFieldTex),
+				Storage("test_out", negOffTex)
+			};
+			Assert::IsTrue(RunCustom(dispatch, FieldRefineOffsetGlsl(), kOffsetBody, negDesc, 2, offsetVars, 2, sw, sh),
+				L"vpu_field_refine_offset negative control failed");
+			const std::vector<float> negOff = Download4(gpu, negOffTex);
+			for (const auto& pt : checkPixels)
+			{
+				float ox = 0.0f, oy = 0.0f;
+				Offset(negRef.data(), gw, gh, bs, static_cast<float>(pt[0]) + 0.5f, static_cast<float>(pt[1]) + 0.5f, ox, oy);
+				const size_t k = (static_cast<size_t>(pt[1]) * sw + pt[0]) * 4;
+				Assert::AreEqual(ox, negOff[k], 1e-4f, L"negative control GPU/CPU x parity mismatch");
+				Assert::AreEqual(oy, negOff[k + 1], 1e-4f, L"negative control GPU/CPU y parity mismatch");
+				Assert::IsTrue(std::fabs(negOff[k]) > 0.5f && std::fabs(negOff[k + 1]) > 0.5f,
+					L"negative control: without kInvalid, GPU offset must be pulled away from valid pan");
+			}
+		}
 	};
 }
