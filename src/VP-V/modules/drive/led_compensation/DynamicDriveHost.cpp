@@ -1,6 +1,8 @@
 #include <pch.h>
 #include "DynamicDriveHost.h"
 
+#include <VP-V/core/PipelineSlots.h>
+#include <VP-V/core/RunningPathway.h>
 #include <VP-V/modules/drive/led_compensation/LedDriveConfig.h>
 #include <VP-V/modules/drive/led_compensation/LedDriveModule.h>
 #include <VP-V/modules/drive/led_compensation/LedDriveHoldover.h>
@@ -8,6 +10,7 @@
 #include <filesource/FileHostSettings.h>
 #include <ConfigFile.h>
 #include <DebugLog.h>
+#include <RendererConfigView.h>
 
 #include <Windows.h>
 
@@ -17,6 +20,47 @@
 
 namespace LedDrive
 {
+	namespace
+	{
+		bool TryGetPipelineString(const ConfigFile& config, const char* key, std::string& value)
+		{
+			return config.TryGetString("vpv", key, value) || RendererConfigView(config).TryGetDisplayString(key, value);
+		}
+
+		// Mirrors VpvRendererSettings ReadGlobal ([vpv] first, then [vprenderer] / display section):
+		// slot drive.projector_control is off on the Original pathway or when listed in pipeline_slots_off.
+		bool ConfigAllowsProjectorControl(const ConfigFile& config)
+		{
+			std::string raw;
+			if (TryGetPipelineString(config, "pipeline_original_pathway", raw) &&
+				ConfigFile::NormalizeName(raw) == "on")
+				return false;
+			if (!TryGetPipelineString(config, "pipeline_slots_off", raw))
+				return true;
+			const char* const slotName = PipelineSlots::Get(PipelineSlots::Id::DriveProjectorControl).name;
+			std::string token;
+			auto tokenDisables = [&]() -> bool
+			{
+				if (token.empty())
+					return false;
+				const bool match = ConfigFile::NormalizeName(token) == slotName;
+				token.clear();
+				return match;
+			};
+			for (char ch : raw)
+			{
+				if (ch == ',' || ch == ' ' || ch == ';' || ch == '\t')
+				{
+					if (tokenDisables())
+						return false;
+				}
+				else
+					token += ch;
+			}
+			return !tokenDisables();
+		}
+	}
+
 	DynamicDriveShared::DynamicDriveShared(std::shared_ptr<QueuedFrameStatistics::IObserver>& walkObserverIn) :
 		walkObserver(walkObserverIn)
 	{
@@ -114,13 +158,34 @@ namespace LedDrive
 
 	void DynamicDriveHost::Attach(const HostContext& context)
 	{
+		std::shared_ptr<LedDriveModule> stopped;
+		std::shared_ptr<LedDriveModule> attached;
+		DynamicDriveParams publishedParams;
+		std::string publishedRejection;
+		{
+			std::lock_guard<std::mutex> guard(stateMutex);
+			if (!context.projectorAllowed)
+				stopped = DetachLocked(context);
+			else
+				attached = module;
+			publishedParams = params;
+			publishedRejection = rejection;
+		}
+		if (stopped)
+		{
+			stopped->Stop();
+			DebugLog::Log("Dynamic Drive: stopped on attach (slot drive.projector_control off: Original pathway or pipeline_slots_off)");
+		}
 		if (!context.frame)
 			return;
-		context.frame->PublishModule(module);
-		if (module)
-			context.frame->PublishObserver(module, true);
-		context.frame->PublishParams(params);
-		context.frame->PublishRejection(rejection);
+		if (context.projectorAllowed)
+		{
+			context.frame->PublishModule(attached);
+			if (attached)
+				context.frame->PublishObserver(attached, true);
+		}
+		context.frame->PublishParams(publishedParams);
+		context.frame->PublishRejection(publishedRejection);
 	}
 
 	void DynamicDriveHost::ParkForHoldover(const HostContext& context)
@@ -198,10 +263,13 @@ namespace LedDrive
 		if (context.frame)
 			context.frame->PublishParams(params);
 		// VP-V: slot drive.projector_control (off in the Original pathway, ADR-0019, or at slot
-		// level): the RS-232 LED/CNTR drive is not started.
-		const bool projectorAllowed = context.projectorAllowed;
-		if (next == signature && (module != nullptr) ==
-			(valid && projectorAllowed && ReadLedDriveConfig(config).enabled))
+		// level): the RS-232 LED/CNTR drive is not started, and a running module is stopped.
+		// On cold startup (context.frame == nullptr, before Build creates Impl), also honour the
+		// latched process pathway so an Original process stays off even if the snapshot lacks [vpv].
+		const bool projectorAllowed = context.projectorAllowed && ConfigAllowsProjectorControl(config) &&
+			(context.frame != nullptr || !Vpv::RunningPathway::Original());
+		const LedDriveConfig& led = boostConfig;
+		if (next == signature && (module != nullptr) == (valid && projectorAllowed && led.enabled))
 			return;
 		// A broken LED profile never stops VP: it is left out (built-in values plus the main
 		// settings) and said once per change.
@@ -211,7 +279,8 @@ namespace LedDrive
 				profileProblem.c_str());
 		// Tuning and script/compensate switches go to the running module, so the LED carries on
 		// from its level instead of restoring full light.
-		if (valid && module && module->Reconfigure(ReadProjectorConfig(config), ReadLedDriveConfig(config)))
+		if (valid && projectorAllowed && led.enabled && module &&
+			module->Reconfigure(ReadProjectorConfig(config), led))
 		{
 			signature = next;
 			if (context.frame)
@@ -230,7 +299,6 @@ namespace LedDrive
 				validationError.c_str());
 			return;
 		}
-		const LedDriveConfig led = ReadLedDriveConfig(config);
 		if (!led.enabled || !projectorAllowed)
 		{
 			if (previous || (led.enabled && !projectorAllowed))
