@@ -270,6 +270,8 @@ namespace SourceIdentity
 			int Length() const { return L_; }
 			int Margin() const { return margin_; }
 			int Nodes() const { return m_; }
+			int Taps() const { return taps_; }
+			const int* FirstNodes() const { return cl_.data(); }
 			// Heap bytes held by this operator (the verifier's cache is bounded by the sum of these).
 			size_t Bytes() const { return sizeof(DescaleOperator) + w_.capacity() * sizeof(double) + cl_.capacity() * sizeof(int) + chol_.capacity() * sizeof(double); }
 
@@ -516,6 +518,53 @@ namespace SourceIdentity
 				}
 				for (int g = 0; g < G; ++g)
 					rss[g] = acc[g];
+			}
+
+			// SOTA #5 (additive const helpers for Golub-Pereyra Gauss-Newton phase refinement; untouched by W1 path):
+			// Solves (U^T U + ridge*I) z = U^T y into caller-owned `zOut`.
+			void SolveLatent(const double* y, std::vector<double>& zOut) const
+			{
+				const size_t bw = static_cast<size_t>(u_ + 1);
+				zOut.assign(static_cast<size_t>(m_), 0.0);
+				double* z = zOut.data();
+				for (int j = 0; j < L_; ++j)
+				{
+					const double* w = &w_[static_cast<size_t>(j) * static_cast<size_t>(taps_)];
+					const int c = cl_[static_cast<size_t>(j)];
+					const double yj = y[j];
+					for (int s = 0; s < taps_; ++s)
+						z[c + s] += w[s] * yj;
+				}
+				for (int i = 0; i < m_; ++i)
+				{
+					double v = z[i];
+					const int k0 = i - u_ > 0 ? i - u_ : 0;
+					for (int k = k0; k < i; ++k)
+						v -= chol_[static_cast<size_t>(i) * bw + static_cast<size_t>(i - k)] * z[k];
+					z[i] = v * chol_[static_cast<size_t>(i) * bw];
+				}
+				for (int i = m_ - 1; i >= 0; --i)
+				{
+					double v = z[i];
+					const int k1 = i + u_ < m_ - 1 ? i + u_ : m_ - 1;
+					for (int k = i + 1; k <= k1; ++k)
+						v -= chol_[static_cast<size_t>(k) * bw + static_cast<size_t>(k - i)] * z[k];
+					z[i] = v * chol_[static_cast<size_t>(i) * bw];
+				}
+			}
+
+			// Evaluates pred = U z over all L_ rows into caller-owned `predOut`.
+			void ApplyForward(const double* z, double* predOut) const
+			{
+				for (int j = 0; j < L_; ++j)
+				{
+					const double* w = &w_[static_cast<size_t>(j) * static_cast<size_t>(taps_)];
+					const int c = cl_[static_cast<size_t>(j)];
+					double pred = 0.0;
+					for (int s = 0; s < taps_; ++s)
+						pred += w[s] * z[c + s];
+					predOut[j] = pred;
+				}
 			}
 
 		private:

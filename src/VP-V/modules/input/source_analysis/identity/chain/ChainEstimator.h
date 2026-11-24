@@ -48,6 +48,7 @@
 #include "ChainReading.h"
 #include "ChainStatus.h"
 #include "DescaleVerifier.h"
+#include "EwaJincProbe.h"
 #include "HdrNoiseFloor.h"
 #include "InterlacedForensics.h"
 #include "NeuralSrWitness.h"
@@ -96,11 +97,12 @@ namespace SourceIdentity
 			bool eightBitPromotion = false;      // When true, enables edgeStats.enabled, EmpiricalFloorMode::Live, and depth null-table selection
 			bool useDepthNullTables = false;     // Selects bit-depth-stratified null tables via depthNullTables.Select(...)
 			DepthNullTableSet depthNullTables = DepthNullTableSet::PlaceholderOnly();
-			// SOTA #1-#4 opt-in (strictly OFF by default; Original pathway forces OFF):
+			// SOTA #1-#5 opt-in (strictly OFF by default; Original pathway forces OFF):
 			HdrNoiseSettings hdrNoise;
 			NeuralSrSettings neuralSr;
 			InterlacedSettings interlaced;
 			StaticPatchRankSettings staticPatchRank;
+			EwaJincSettings ewaJinc;
 			ReadingSettings reading;
 			GovernorSettings governor;
 			EvidenceLogSettings log;
@@ -230,6 +232,8 @@ namespace SourceIdentity
 			uint64_t staticRankEvals = 0;
 			uint64_t staticRankCliffsDetected = 0;
 			uint64_t staticRankMotionAbstains = 0;
+			uint64_t ewaJincVerifications = 0;
+			uint64_t phaseRefineFallbacks = 0;
 		};
 
 		// What one evaluation tested, per axis and candidate (the calibration dump of the harness reads it; any other observer may).
@@ -380,6 +384,7 @@ namespace SourceIdentity
 			void SetNeuralSrSettings(const NeuralSrSettings& s);
 			void SetInterlacedSettings(const InterlacedSettings& s);
 			void SetStaticPatchRankSettings(const StaticPatchRankSettings& s);
+			void SetEwaJincSettings(const EwaJincSettings& s);
 			// N1: the count of latch releases by the no-cut CEILING (LatchEvent::ReleasedCeiling; zero while the rules are off). The monitor shows
 			// the native switch that follows one through its engage crossfade instead of the release fade. Any thread.
 			uint64_t LatchCeilingReleases() const;

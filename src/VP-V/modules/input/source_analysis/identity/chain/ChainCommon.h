@@ -56,6 +56,7 @@ namespace SourceIdentity
 		constexpr uint32_t kReasonNeuralSrDetected = 1u << 22;  // SOTA #2 (default OFF): neural / AI super-resolution detected (skip LTI inverse)
 		constexpr uint32_t kReasonInterlacedBob = 1u << 23;     // SOTA #3 (default OFF): interlaced broadcast (motion-bob or weave-comb) detected
 		constexpr uint32_t kReasonStaticRankCliff = 1u << 24;   // SOTA #4 (default OFF): multi-frame static-patch covariance rank cliff detected
+		constexpr uint32_t kReasonEwaJincVerified = 1u << 25;   // SOTA #5 (default OFF): 2-D radial EWA-Jinc3 kernel family verified
 
 		// One axis worth of sampled lines in 10-bit code units (8-bit planes are scaled by 4 by the caller).
 		struct LineSet

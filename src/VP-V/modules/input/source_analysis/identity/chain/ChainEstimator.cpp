@@ -103,6 +103,7 @@ namespace SourceIdentity
 			NeuralSrSettings reqNeuralSr;
 			InterlacedSettings reqInterlaced;
 			StaticPatchRankSettings reqStaticPatchRank;
+			EwaJincSettings reqEwaJinc;
 			struct ClassicalFreshState
 			{
 				bool valid = false;
@@ -179,6 +180,7 @@ namespace SourceIdentity
 			std::atomic<uint64_t> cNeuralSrDetections{ 0 }, cNeuralSrAbstains{ 0 };
 			std::atomic<uint64_t> cInterlacedBobDetections{ 0 }, cInterlacedWeaveDetections{ 0 }, cInterlacedAbstains{ 0 };
 			std::atomic<uint64_t> cStaticRankEvals{ 0 }, cStaticRankCliffsDetected{ 0 }, cStaticRankMotionAbstains{ 0 };
+			std::atomic<uint64_t> cEwaJincVerifications{ 0 }, cPhaseRefineFallbacks{ 0 };
 			// fx/dv-frame-quiet: each ceiling release is stamped with the newest source frame the estimator had seen, so the frame-bound
 			// monitor counts only the releases up to the frame it is allowed to see (LatchCeilingReleasesThrough), not the live counter.
 			std::atomic<uint64_t> newestSeqA{ 0 };
@@ -216,6 +218,8 @@ namespace SourceIdentity
 			NeuralSrWorkspace neuralSrWs[2];
 			InterlacedWorkspace interlacedWs;
 			StaticPatchWorkspace staticRankWs[2];
+			EwaJincWorkspace ewaJincWs;
+			std::vector<double> ewaPatchBuf;
 			Governor gov;
 			EvidenceLog log;
 			Geometry::HeldState held;
@@ -299,6 +303,7 @@ namespace SourceIdentity
 				reqNeuralSr = cfg.neuralSr;
 				reqInterlaced = cfg.interlaced;
 				reqStaticPatchRank = cfg.staticPatchRank;
+				reqEwaJinc = cfg.ewaJinc;
 				if (cfg.hdrNoise.enabled)
 					cfg.verifier.hdrNoise = cfg.hdrNoise;
 				safetyA.store(reqSafety || reqJointLatch.enabled, std::memory_order_release);
@@ -589,6 +594,17 @@ namespace SourceIdentity
 				{
 					std::lock_guard<std::mutex> lk(m);
 					reqStaticPatchRank = s;
+					cfgDirty = true;
+					++runEpoch;
+				}
+				Wake();
+			}
+
+			void SetEwaJinc(const EwaJincSettings& s)
+			{
+				{
+					std::lock_guard<std::mutex> lk(m);
+					reqEwaJinc = s;
 					cfgDirty = true;
 					++runEpoch;
 				}
@@ -1217,6 +1233,7 @@ namespace SourceIdentity
 					staticRankWs[a].Reset();
 				}
 				interlacedWs.Reset();
+				ewaJincWs.Reset();
 				{
 					bool safe = false, abr = false, convP = false;
 					bool eightBitP = false, useDepthN = false;
@@ -1229,6 +1246,7 @@ namespace SourceIdentity
 					NeuralSrSettings nsrCfg;
 					InterlacedSettings intCfg;
 					StaticPatchRankSettings sprCfg;
+					EwaJincSettings ewaCfg;
 					{
 						std::lock_guard<std::mutex> lk(m);
 						safe = reqSafety;
@@ -1245,6 +1263,7 @@ namespace SourceIdentity
 						nsrCfg = reqNeuralSr;
 						intCfg = reqInterlaced;
 						sprCfg = reqStaticPatchRank;
+						ewaCfg = reqEwaJinc;
 						abrStepEvents.clear();
 					}
 					if (jointLatchOn)
@@ -1294,6 +1313,7 @@ namespace SourceIdentity
 					cfg.neuralSr = nsrCfg;
 					cfg.interlaced = intCfg;
 					cfg.staticPatchRank = sprCfg;
+					cfg.ewaJinc = ewaCfg;
 					if (cfg.verifier.hdrNoise.enabled != hdrCfg.enabled ||
 						cfg.verifier.hdrNoise.transfer != hdrCfg.transfer ||
 						cfg.verifier.hdrNoise.bitDepth != hdrCfg.bitDepth ||
@@ -1422,6 +1442,7 @@ namespace SourceIdentity
 					staticRankWs[a].Reset();
 				}
 				interlacedWs.Reset();
+				ewaJincWs.Reset();
 				evidence.Reset();
 				if (stepMarkOn)
 				{
@@ -2740,6 +2761,8 @@ namespace SourceIdentity
 						if (r.vr.candidates[ci].hdrDarkToeClampedSamples > 0)
 							cHdrDarkToeClamps.fetch_add(static_cast<uint64_t>(r.vr.candidates[ci].hdrDarkToeClampedSamples), std::memory_order_relaxed);
 					}
+					if (r.vr.phaseRefineFallbacks > 0)
+						cPhaseRefineFallbacks.fetch_add(static_cast<uint64_t>(r.vr.phaseRefineFallbacks), std::memory_order_relaxed);
 					PowerProbe::Run(*probeVerifier, r.ls, floorCodes, static_cast<double>(step), cfg.probe, r.pr, &probeWs[a]);
 				}
 				// SOTA #2 (opt-in, default OFF): AI / Neural SR witness (strictly inert unless cfg.neuralSr.enabled).
@@ -2869,6 +2892,58 @@ namespace SourceIdentity
 						else if (staticRankRes[a].reason == StaticRankReason::MotionRejected ||
 							staticRankRes[a].reason == StaticRankReason::InsufficientStaticPatches)
 							cStaticRankMotionAbstains.fetch_add(1, std::memory_order_relaxed);
+					}
+				}
+				// SOTA #5 (opt-in, default OFF): 2-D radial EWA-Jinc3 small-patch witness when a full luma plane is attached.
+				bool ewaJincVerified = false;
+				if (cfg.ewaJinc.enabled && job.frame.Valid() && run[0].have && run[1].have)
+				{
+					int bestN[2] = { 0, 0 };
+					double bestPhase[2] = { 0.0, 0.0 };
+					bool haveAxis[2] = { false, false };
+					for (int a = 0; a < 2; ++a)
+					{
+						double bstat = 0.0;
+						for (size_t ci = 0; ci < run[a].vr.candidates.size(); ++ci)
+						{
+							const CandidateResult& cr = run[a].vr.candidates[ci];
+							if (!cr.valid || !cr.exactDone)
+								continue;
+							if (!haveAxis[a] || cr.stat < bstat)
+							{
+								haveAxis[a] = true;
+								bstat = cr.stat;
+								bestN[a] = cr.n;
+								bestPhase[a] = cr.phase;
+							}
+						}
+					}
+					const int ps = cfg.ewaJinc.patchSize > 0 ? cfg.ewaJinc.patchSize : 24;
+					if (haveAxis[0] && haveAxis[1] && s.active.w >= ps && s.active.h >= ps &&
+						static_cast<int>(job.frame.width) >= s.active.x + s.active.w &&
+						static_cast<int>(job.frame.height) >= s.active.y + s.active.h)
+					{
+						const int ox = (s.active.w - ps) / 2;
+						const int oy = (s.active.h - ps) / 2;
+						const double scale = std::pow(2.0, static_cast<double>(job.frame.msbShift) - 6.0);
+						ewaPatchBuf.resize(static_cast<size_t>(ps) * static_cast<size_t>(ps));
+						for (int py = 0; py < ps; ++py)
+						{
+							const uint16_t* row = job.frame.luma +
+								static_cast<std::ptrdiff_t>(s.active.y + oy + py) * static_cast<std::ptrdiff_t>(job.frame.strideSamples) +
+								(s.active.x + ox);
+							for (int px = 0; px < ps; ++px)
+								ewaPatchBuf[static_cast<size_t>(py) * static_cast<size_t>(ps) + static_cast<size_t>(px)] = static_cast<double>(row[px]) * scale;
+						}
+						const EwaProbeResult er = EvaluatePatch(
+							ewaPatchBuf.data(), ps, ps, ps, ox, oy,
+							s.active.w, bestN[0], s.active.h, bestN[1],
+							bestPhase[0], bestPhase[1], floorCodes, cfg.ewaJinc, ewaJincWs);
+						if (er.valid && er.verdict == EwaProbeVerdict::EwaJinc)
+						{
+							ewaJincVerified = true;
+							cEwaJincVerifications.fetch_add(1, std::memory_order_relaxed);
+						}
 					}
 				}
 				for (int a = 0; a < 2; ++a)
@@ -3218,6 +3293,14 @@ namespace SourceIdentity
 							out[a].measured.reasonBits |= kReasonStaticRankCliff;
 					}
 				}
+				if (cfg.ewaJinc.enabled && ewaJincVerified)
+				{
+					for (int a = 0; a < 2; ++a)
+					{
+						out[a].measured.reasonBits |= kReasonEwaJincVerified;
+						out[a].applied.reasonBits |= kReasonEwaJincVerified;
+					}
+				}
 
 				bool cold = false;
 				for (int a = 0; a < 2; ++a)
@@ -3446,6 +3529,8 @@ namespace SourceIdentity
 				c.staticRankEvals = cStaticRankEvals.load(std::memory_order_relaxed);
 				c.staticRankCliffsDetected = cStaticRankCliffsDetected.load(std::memory_order_relaxed);
 				c.staticRankMotionAbstains = cStaticRankMotionAbstains.load(std::memory_order_relaxed);
+				c.ewaJincVerifications = cEwaJincVerifications.load(std::memory_order_relaxed);
+				c.phaseRefineFallbacks = cPhaseRefineFallbacks.load(std::memory_order_relaxed);
 				return c;
 			}
 
@@ -3552,6 +3637,7 @@ namespace SourceIdentity
 		void ChainEstimator::SetNeuralSrSettings(const NeuralSrSettings& s) { st_->SetNeuralSr(s); }
 		void ChainEstimator::SetInterlacedSettings(const InterlacedSettings& s) { st_->SetInterlaced(s); }
 		void ChainEstimator::SetStaticPatchRankSettings(const StaticPatchRankSettings& s) { st_->SetStaticPatchRank(s); }
+		void ChainEstimator::SetEwaJincSettings(const EwaJincSettings& s) { st_->SetEwaJinc(s); }
 		void ChainEstimator::SetDiagnosticTag(const std::string& tag) { st_->diagTag.Set(tag); }
 		void ChainEstimator::SetDiagnosticDepths(int codedBits, int outputBits)
 		{

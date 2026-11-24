@@ -42,6 +42,7 @@
 #include <map>
 #include <memory>
 
+#include "EwaJincProbe.h"
 #include "HdrNoiseFloor.h"
 #include "KernelBank.h"
 
@@ -101,6 +102,7 @@ namespace SourceIdentity
 			                                                              // tap memo <= 1/16 of it, kept solves about 2 MB. The probe verifier gets 1/8 of it.
 			bool batchedSolve = true;           // false: solve the lines one at a time with the reference routine (same bits; for tests and bisecting)
 			HdrNoiseSettings hdrNoise;          // SOTA #1 (default OFF): heteroscedastic PQ/HLG linearized WLS verification
+			bool gaussNewtonPhaseRefine = false;// SOTA #5 (default OFF): 1-step analytical Golub-Pereyra Gauss-Newton sub-pixel phase refinement
 		};
 
 		struct VerifyOptions
@@ -157,6 +159,10 @@ namespace SourceIdentity
 			double hdrWhitenedStat = 0.0;
 			double hdrWhitenedRms = 0.0;
 			int hdrDarkToeClampedSamples = 0;
+			// SOTA #5 (default OFF): 1-step analytical Gauss-Newton sub-pixel phase refinement diagnostics.
+			bool phaseRefined = false;
+			bool phaseRefineFallback = false;
+			double phaseRefineStep = 0.0;
 		};
 
 		struct VerifyResult
@@ -167,6 +173,7 @@ namespace SourceIdentity
 			int operatorBuilds = 0;   // deterministic work counters of this call
 			int solves = 0;           // line solves executed
 			int solvesReused = 0;     // line solves read back from an earlier identical solve of the same call (not executed)
+			int phaseRefineFallbacks = 0; // SOTA #5 (Rule 4): ill-conditioned or non-improving Gauss-Newton phase refinement fallbacks
 			std::vector<CandidateResult> candidates;
 		};
 
@@ -176,7 +183,7 @@ namespace SourceIdentity
 			explicit DescaleVerifier(const VerifierSettings& s = VerifierSettings()) : s_(s), taps_(TapEntriesFor(s.cacheBytes)) {}
 
 			const VerifierSettings& Settings() const { return s_; }
-			void ClearCache() { cache_.clear(); lru_.clear(); cacheBytes_ = 0; memo_.clear(); memoBytes_ = 0; hdrWs_.Reset(); }
+			void ClearCache() { cache_.clear(); lru_.clear(); cacheBytes_ = 0; memo_.clear(); memoBytes_ = 0; hdrWs_.Reset(); gnZ_.clear(); gnV_.clear(); gnDz_.clear(); gnPred_.clear(); gnProj_.clear(); gnDw_.clear(); }
 			size_t CachedOperators() const { return cache_.size(); }
 			// Heap bytes of everything this verifier keeps for speed: operators + tap memo + (during a call) the kept solves. After every
 			// Evaluate this is <= cacheBytes (unless ONE operator alone is larger than the budget); the tap memo survives ClearCache.
@@ -190,11 +197,13 @@ namespace SourceIdentity
 				out.operatorBuilds = 0;
 				out.solves = 0;
 				out.solvesReused = 0;
+				out.phaseRefineFallbacks = 0;
 				out.candidates.clear();
 				const double clock0 = s_.nowMs != nullptr ? s_.nowMs(s_.clockCtx) : 0.0;
 				const int builds0 = builds_;
 				const int solves0 = solves_;
 				const int reused0 = reused_;
+				const int phaseFallbacks0 = phaseRefineFallbacks_;
 				memo_.clear();   // the solves are those of THIS call's lines
 				memoBytes_ = 0;
 				if (ls.count < 1 || ls.axisLen < 64 || ls.length < 96 || cand == nullptr || count <= 0)
@@ -365,6 +374,7 @@ namespace SourceIdentity
 				out.operatorBuilds = builds_ - builds0;
 				out.solves = solves_ - solves0;
 				out.solvesReused = reused_ - reused0;
+				out.phaseRefineFallbacks = phaseRefineFallbacks_ - phaseFallbacks0;
 				Evict();   // with the kept solves still counted: the call's peak, not only its end state, is inside the budget
 				memo_.clear();
 				memoBytes_ = 0;
@@ -947,6 +957,113 @@ namespace SourceIdentity
 				cr.stat = scores[bi].T;
 				cr.kernelMargin = haveSecond ? second - scores[bi].T : 0.0;
 				cr.familyMargin = haveOther ? otherFam - scores[bi].T : 0.0;
+				// SOTA #5 (opt-in, default OFF): 1-step analytical Golub-Pereyra variable-projection Gauss-Newton phase refinement.
+				if (s_.gaussNewtonPhaseRefine && !screenOnly)
+				{
+					OpKey gnKey;
+					gnKey.N = N;
+					gnKey.n = nStar;
+					gnKey.kernel = cr.kernel;
+					gnKey.phaseQ = PhaseQ(cr.phase);
+					gnKey.origin = ls.origin;
+					gnKey.length = L;
+					const double phi0 = static_cast<double>(gnKey.phaseQ) / 1024.0;
+					const DescaleOperator* op0 = Op(gnKey, phi0);
+					if (op0 == nullptr || !op0->Ok())
+					{
+						cr.phaseRefineFallback = true;
+						++phaseRefineFallbacks_;
+					}
+					else
+					{
+						const int taps = op0->Taps();
+						const int margin = op0->Margin();
+						const double ratio = static_cast<double>(nStar) / static_cast<double>(N);
+						const int* cl = op0->FirstNodes();
+						gnV_.assign(static_cast<size_t>(L), 0.0);
+						gnPred_.assign(static_cast<size_t>(L), 0.0);
+						gnProj_.assign(static_cast<size_t>(L), 0.0);
+						gnDw_.assign(static_cast<size_t>(L) * static_cast<size_t>(taps), 0.0);
+						double wTmp[8], dwTmp[8];
+						for (int j = 0; j < L; ++j)
+						{
+							const double p = (static_cast<double>(ls.origin + j) + 0.5) * ratio - 0.5 + phi0;
+							const double fl = std::floor(p);
+							const double t = p - fl;
+							TapWeightDerivatives(cr.kernel, t, wTmp, dwTmp);
+							double* drow = &gnDw_[static_cast<size_t>(j) * static_cast<size_t>(taps)];
+							for (int s = 0; s < taps; ++s)
+								drow[s] = dwTmp[s];
+						}
+						double gradAcc = 0.0;
+						double hessAcc = 0.0;
+						double rssAcc = 0.0;
+						for (int i = 0; i < nl; ++i)
+						{
+							const double* yi = ls.Line(idxScratch_[static_cast<size_t>(i)]);
+							op0->SolveLatent(yi, gnZ_);
+							op0->ApplyForward(gnZ_.data(), gnPred_.data());
+							for (int j = 0; j < L; ++j)
+							{
+								const double* drow = &gnDw_[static_cast<size_t>(j) * static_cast<size_t>(taps)];
+								const int c = cl[j];
+								double vj = 0.0;
+								for (int s = 0; s < taps; ++s)
+									vj += drow[s] * gnZ_[static_cast<size_t>(c + s)];
+								gnV_[static_cast<size_t>(j)] = vj;
+							}
+							op0->SolveLatent(gnV_.data(), gnDz_);
+							op0->ApplyForward(gnDz_.data(), gnProj_.data());
+							for (int j = margin; j < L - margin; ++j)
+							{
+								const double rj = yi[j] - gnPred_[static_cast<size_t>(j)];
+								const double drj = -(gnV_[static_cast<size_t>(j)] - gnProj_[static_cast<size_t>(j)]);
+								gradAcc += rj * drj;
+								hessAcc += drj * drj;
+								rssAcc += rj * rj;
+							}
+						}
+						// Strictly numerical ill-conditioning guard (Rule 1 & Rule 4).
+						const double curvMin = 1e-9 * (std::max)(rssAcc, 1.0);
+						if (!(hessAcc > curvMin) || !std::isfinite(gradAcc) || !std::isfinite(hessAcc))
+						{
+							cr.phaseRefineFallback = true;
+							++phaseRefineFallbacks_;
+						}
+						else
+						{
+							const double dphi = ClampD(-gradAcc / (hessAcc + 1e-12), -0.25, 0.25);
+							const double phi1 = phi0 + dphi;
+							const SolveBatch* sb1 = SolveWindow(ls, 1, idxScratch_.data(), nl, 0, L, nStar, cr.kernel, phi1);
+							if (sb1 == nullptr)
+							{
+								cr.phaseRefineFallback = true;
+								++phaseRefineFallbacks_;
+							}
+							else
+							{
+								for (int i = 0; i < nl; ++i)
+									valsScratch_[static_cast<size_t>(i)] = std::log(sb1->s[static_cast<size_t>(i)] / baseScratch_[static_cast<size_t>(i)]);
+								const double t1 = FastTrimmedMeanSmall(valsScratch_.data(), nl, s_.trimFraction);
+								if (std::isfinite(t1) && t1 < cr.stat)
+								{
+									cr.phase = static_cast<double>(PhaseQ(phi1)) / 1024.0;
+									cr.stat = t1;
+									cr.kernelT[cr.kernel] = t1;
+									cr.kernelMargin = haveSecond ? second - t1 : 0.0;
+									cr.familyMargin = haveOther ? otherFam - t1 : 0.0;
+									cr.phaseRefined = true;
+									cr.phaseRefineStep = cr.phase - phi0;
+								}
+								else
+								{
+									cr.phaseRefineFallback = true;
+									++phaseRefineFallbacks_;
+								}
+							}
+						}
+					}
+				}
 				cr.lineCount = nl;
 				const int segCount = (std::min)(kMaxSegs, (L + kSegPx - 1) / kSegPx);
 				cr.segCount = segCount;
@@ -1034,9 +1151,16 @@ namespace SourceIdentity
 			std::vector<double> valsScratch_;
 			std::vector<int> idxScratch_;
 			HdrNoiseWorkspace hdrWs_;
+			std::vector<double> gnZ_;
+			std::vector<double> gnV_;
+			std::vector<double> gnDz_;
+			std::vector<double> gnPred_;
+			std::vector<double> gnProj_;
+			std::vector<double> gnDw_;
 			int builds_ = 0;
 			int solves_ = 0;
 			int reused_ = 0;
+			int phaseRefineFallbacks_ = 0;
 		};
 	}
 }
