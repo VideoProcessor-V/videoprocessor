@@ -73,6 +73,32 @@ namespace ProducerThroughput
 		return out;
 	}
 
+	struct ScopedTimerPeriod
+	{
+		UINT periodMs = 0;
+		bool active = false;
+		explicit ScopedTimerPeriod(UINT ms) : periodMs(ms), active(timeBeginPeriod(ms) == TIMERR_NOERROR) {}
+		~ScopedTimerPeriod()
+		{
+			if (active)
+				timeEndPeriod(periodMs);
+		}
+		ScopedTimerPeriod(const ScopedTimerPeriod&) = delete;
+		ScopedTimerPeriod& operator=(const ScopedTimerPeriod&) = delete;
+	};
+
+	inline std::wstring ToWide(const std::string& s)
+	{
+		if (s.empty())
+			return std::wstring();
+		const int needed = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), nullptr, 0);
+		if (needed <= 0)
+			return std::wstring(s.begin(), s.end());
+		std::wstring out(static_cast<size_t>(needed), L'\0');
+		MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), &out[0], needed);
+		return out;
+	}
+
 	struct Dist
 	{
 		std::vector<double> v;
@@ -566,7 +592,7 @@ public:
 			Logger::WriteMessage("ProducerThroughputBench: no NVIDIA adapter; nothing run.\n");
 			Assert::Fail(L"no NVIDIA D3D11 adapter");
 		}
-		timeBeginPeriod(1);
+		ScopedTimerPeriod timerPeriod(1);
 		std::map<std::string, Canvas> canvases;
 		canvases["4K"] = MakeCanvas(3840, 2160);
 		canvases["1080p"] = MakeCanvas(1920, 1080);
@@ -589,6 +615,7 @@ public:
 			// Determinism A/A (refs/105 risk 1): serial vs serial, fresh producers.
 			for (int q = 0; q < 2; ++q)
 			{
+				const std::string label = q ? "4K quarter" : "1080p half";
 				const Canvas& c = q ? canvases["4K"] : canvases["1080p"];
 				std::vector<uint64_t> h1, h2;
 				std::string why;
@@ -596,8 +623,13 @@ public:
 				size_t same = 0;
 				for (size_t i = 0; ok && i < h1.size() && i < h2.size(); ++i)
 					same += h1[i] == h2[i] ? 1 : 0;
-				say(std::string("AA-determinism ") + (q ? "4K quarter" : "1080p half") + ": " +
+				say("AA-determinism " + label + ": " +
 					(ok ? std::to_string(same) + "/" + std::to_string(h1.size()) + " pair hashes identical" : "FAILED " + why));
+				Assert::IsTrue(ok, ToWide("AA-determinism " + label + " failed: " + why).c_str());
+				Assert::IsTrue(!h1.empty(), ToWide("AA-determinism " + label + " produced no pair hashes").c_str());
+				Assert::AreEqual(h1.size(), h2.size(), ToWide("AA-determinism " + label + " hash count mismatch").c_str());
+				Assert::AreEqual(h1.size(), same, ToWide("AA-determinism " + label + " pair hash mismatch: " +
+					std::to_string(same) + "/" + std::to_string(h1.size()) + " identical").c_str());
 			}
 		}
 
@@ -630,9 +662,22 @@ public:
 			Row r = RunOne(device, canvases[item.second.res], item.second, seconds);
 			r.tag = item.first;
 			r.order = ++order;
+			if (r.failures > 0)
+			{
+				if (!r.error.empty())
+					r.error += "; ";
+				r.error += "failures=" + std::to_string(r.failures);
+			}
+			if (r.published == 0)
+			{
+				if (!r.error.empty())
+					r.error += "; ";
+				r.error += "published=0";
+			}
 			csv << CsvLine(r) << "\n";
 			csv.flush();
-			errors += r.error.empty() ? 0 : 1;
+			const bool runFailed = !r.error.empty() || r.failures > 0 || r.published == 0;
+			errors += runFailed ? 1 : 0;
 			const double rest = (r.service.Count() && r.luma.Count() && r.extras.Count()) ?
 				(std::max)(0.0, r.service.Mean() - r.luma.Mean() - r.extras.Mean()) : -1.0;
 			say(r.tag + " " + item.second.Label() + " eng " + std::to_string(r.engineW) + "x" + std::to_string(r.engineH) +
@@ -645,7 +690,6 @@ public:
 				" lost " + std::to_string(r.lost) + " | cpu foreign " + Fmt(r.foreignCpu) + "% " + (r.foreignCpu > 10.0 ? "CONTENDED" : "idle") +
 				(r.error.empty() ? "" : " | ERROR " + r.error));
 		}
-		timeEndPeriod(1);
 		say("== part " + part + " done: " + std::to_string(plan.size()) + " runs, " + std::to_string(errors) + " with errors");
 		Assert::IsTrue(errors == 0, L"a bench run failed (see pt-bench-summary.txt)");
 	}
