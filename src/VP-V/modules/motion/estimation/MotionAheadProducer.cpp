@@ -834,7 +834,7 @@ namespace MotionAhead
 		stagingRing.Clear();
 		engine.reset();
 		VpSkeleton::VramUsers::Instance().Withdraw(this, VpSkeleton::kUserNvofProducer);   // MV7: re-declared below for the new size
-		VpSkeleton::VramUsers::Instance().MarkActive(this, VpSkeleton::kUserNvofProducer, true);   // an open that fails below leaves it active without a declaration: shown by the skeleton
+		VpSkeleton::VramUsers::Instance().MarkActive(this, VpSkeleton::kUserNvofProducer, true);
 		for (int i = 0; i < 2; ++i)
 		{
 			flowTex[i].Release(); costTex[i].Release();
@@ -853,6 +853,17 @@ namespace MotionAhead
 			lumaTex[i].Release();
 		lumaRing.Clear();
 		havePrevious = false;
+		// Tear down any partial allocations and withdraw/deactivate VRAM accounting on any failure
+		// while preserving the exact error string and ENGINE-thread staging-ring affinity.
+		auto fail = [&](std::string msg) {
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				error = std::move(msg);
+			}
+			ReleaseEngine();
+			stagingRing.BindEngineThread();
+			return false;
+		};
 		const int gw = (halfW + 3) / 4, gh = (halfH + 3) / 4;
 		auto make = [&](int tw, int th, DXGI_FORMAT format, bool staging, CComPtr<ID3D11Texture2D>& tex) {
 			D3D11_TEXTURE2D_DESC desc{};
@@ -865,19 +876,11 @@ namespace MotionAhead
 		};
 		for (int i = 0; i < kLumaRingSlots; ++i)
 			if (!make(halfW, halfH, NvOpticalFlow::Engine::InputFormat(), false, lumaTex[i]))
-			{
-				std::lock_guard<std::mutex> lock(mutex);
-				error = "cannot create its textures";
-				return false;
-			}
+				return fail("cannot create its textures");
 		for (int i = 0; i < 2; ++i)
 			if (!make(gw, gh, NvOpticalFlow::Engine::FlowFormat(), false, flowTex[i]) ||
 				!make(gw, gh, NvOpticalFlow::Engine::CostFormat(), false, costTex[i]))
-			{
-				std::lock_guard<std::mutex> lock(mutex);
-				error = "cannot create its textures";
-				return false;
-			}
+				return fail("cannot create its textures");
 		D3D11_QUERY_DESC qd{};
 		qd.Query = D3D11_QUERY_EVENT;
 		for (int k = 0; k < kStagingSets; ++k)
@@ -885,26 +888,13 @@ namespace MotionAhead
 			for (int i = 0; i < 2; ++i)
 				if (!make(gw, gh, NvOpticalFlow::Engine::FlowFormat(), true, stagingSets[k].flowRead[i]) ||
 					!make(gw, gh, NvOpticalFlow::Engine::CostFormat(), true, stagingSets[k].costRead[i]))
-				{
-					std::lock_guard<std::mutex> lock(mutex);
-					error = "cannot create its textures";
-					return false;
-				}
+					return fail("cannot create its textures");
 			if (FAILED(device->CreateQuery(&qd, &stagingSets[k].eventQuery)))
-			{
-				std::lock_guard<std::mutex> lock(mutex);
-				error = "cannot create its event query";
-				return false;
-			}
+				return fail("cannot create its event query");
 		}
 		engine = std::make_unique<NvOpticalFlow::Engine>();
 		if (!engine->Open(device, context, halfW, halfH, preset, true))
-		{
-			std::lock_guard<std::mutex> lock(mutex);
-			error = engine->LastError();
-			engine.reset();
-			return false;
-		}
+			return fail(engine->LastError());
 		sizeW = halfW;
 		sizeH = halfH;
 		// MV7: the ring textures (2 sets) are this producer's VRAM; the governor counts them (VramUsers.h). The readback staging copies are system RAM: not counted.

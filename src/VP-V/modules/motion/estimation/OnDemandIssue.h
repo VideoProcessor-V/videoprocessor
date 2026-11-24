@@ -112,8 +112,8 @@ namespace MotionAhead
 			return;
 		if (to == from + 1 && producer->LastSubmitted() >= to)
 			return;   // the walk submitted B: its job computes (or computed) this pair
-		if (engine.P2().Find(from, to))
-			return;   // already computed ahead
+		if (engine.FindCurrent(from, to))
+			return;   // already computed ahead for the current stream generation
 		if (!engine.OnDemandConsumerActive())
 			return;   // counted (idleSkips)
 		::VpMotion::OnDemand::PairRequest request;
