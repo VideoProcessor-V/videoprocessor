@@ -742,6 +742,168 @@ namespace VideoProcessorTest
 			}
 		}
 
+		// W23-A3 S2-H3 (WARP): uninitialised rgba16f storage textures (RESID / RESID_NEXT / PREV / PREV_NEXT) can hold
+		// NaN or Inf on frame 1. Pre-fix `abs(rs.a - VALID_TAG) >= 1e-3` evaluated to false on NaN (accepting garbage
+		// rs.rgb), and pre-fix lacked any(isinf(rs.rgb)) / any(isinf(ps.rgb)) (clamping +Inf to +0.5). This test runs
+		// the real expanded `shaders/Temporal sigma-delta.glsl` on WARP with a seed pass immediately before the
+		// unmodified quantizer pass that pre-fills four 8x16 regions for the exact same input pixel (code 100.3,
+		// full-range 8-bit, zero dither):
+		//   Region 0 (x in [0, 8)):   NaN tag in rs.a + garbage +0.45 in rs.rgb -> must be rejected (output 100; pre-fix gave 101)
+		//   Region 1 (x in [8, 16)):  +Inf in rs.rgb with VALID_TAG             -> must be rejected (output 100; pre-fix gave 101)
+		//   Region 2 (x in [16, 24)): +Inf in ps.rgb with VALID_TAG & +0.45     -> must be rejected (output 100)
+		//   Region 3 (x in [24, 32)): same-input negative control (Rule 3) -- VALID_TAG + finite ps.rgb + +0.45 residual ->
+		//     MUST pass carried() and flip the exact same input pixel from 100 to 101, proving the seed pass ran and the
+		//     carried() rejection in Regions 0..2 is non-vacuous.
+		BEGIN_TEST_METHOD_ATTRIBUTE(SigmaDeltaCarriedRejectsNanAndInfStateTagOnFrameOne)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(SigmaDeltaCarriedRejectsNanAndInfStateTagOnFrameOne)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			const int width = 32, height = 16;
+			static const char* const kSeedPass = R"GLSL(//!HOOK OUTPUT
+//!BIND HOOKED
+//!BIND RESID
+//!BIND PREV
+//!BIND RESID_NEXT
+//!BIND PREV_NEXT
+//!SAVE S2H3_SEED
+//!COMPONENTS 1
+//!WIDTH HOOKED.w
+//!HEIGHT HOOKED.h
+//!DESC Test S2-H3: pre-fill sigma-delta rgba16f state with NaN/Inf/valid regions
+//!COMPUTE 16 16
+
+#define VALID_TAG (0.25 + 0.0078125 * mod(floor(instance_tag), 64.0))
+
+void hook()
+{
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(out_image);
+    ivec2 state_size = imageSize(RESID);
+    if (pos.x >= size.x || pos.y >= size.y || pos.x >= state_size.x || pos.y >= state_size.y)
+        return;
+    float qnan = uintBitsToFloat((pos.x < 100000) ? 0x7fc00000u : 0u);
+    float pinf = uintBitsToFloat((pos.x < 100000) ? 0x7f800000u : 0u);
+    vec4 rs;
+    vec4 ps;
+    if (pos.x < 8) {
+        rs = vec4(0.45, 0.45, 0.45, qnan);
+        ps = vec4(100.25, 100.25, 100.25, 1.0);
+    } else if (pos.x < 16) {
+        rs = vec4(pinf, pinf, pinf, VALID_TAG);
+        ps = vec4(100.25, 100.25, 100.25, 1.0);
+    } else if (pos.x < 24) {
+        rs = vec4(0.45, 0.45, 0.45, VALID_TAG);
+        ps = vec4(pinf, pinf, pinf, 1.0);
+    } else {
+        rs = vec4(0.45, 0.45, 0.45, VALID_TAG);
+        ps = vec4(100.25, 100.25, 100.25, 1.0);
+    }
+    imageStore(RESID, pos, rs);
+    imageStore(PREV, pos, ps);
+    imageStore(RESID_NEXT, pos, rs);
+    imageStore(PREV_NEXT, pos, ps);
+    imageStore(out_image, pos, vec4(0.0));
+}
+
+)GLSL";
+			CustomHookChain::Chain chain({
+				[](const std::string& file, std::string& source, std::string& reason)
+				{
+					source = LoadBundledShader(file.c_str());
+					if (source.empty())
+					{
+						reason = "bundled shader not found";
+						return false;
+					}
+					const size_t descPos = source.find("//!DESC VideoProcessor temporal sigma-delta quantizer");
+					if (descPos == std::string::npos)
+					{
+						reason = "quantizer pass marker not found";
+						return false;
+					}
+					const size_t hookPos = source.rfind("//!HOOK OUTPUT", descPos);
+					if (hookPos == std::string::npos)
+					{
+						reason = "quantizer pass //!HOOK OUTPUT not found";
+						return false;
+					}
+					source.insert(hookPos, kSeedPass);
+					return true;
+				},
+				[&fixture](const std::string& source) -> const pl_hook*
+				{
+					return pl_mpv_user_shader_parse(fixture.Gpu(), source.data(), source.size());
+				},
+				[](const pl_hook*& hook) { pl_mpv_user_shader_destroy(&hook); } });
+			ConfiguredShaderRule sigma;
+			sigma.name = "sigma_delta";
+			sigma.filename = "Temporal sigma-delta.glsl";
+			sigma.stageOrder = 90;
+			sigma.parameters = { { "enabled", "1" }, { "levels_full", "1" }, { "swapchain_bits", "8" },
+				{ "color_bits", "8" }, { "noise_amplitude", "0" }, { "motion_threshold", "1" },
+				{ "motion_compensation", "0" } };
+			chain.Configure({ sigma });
+			CustomHookChain::TemplateValues values;
+			values.outputWidth = width;
+			values.outputHeight = height;
+			values.sourceWidth = width;
+			values.sourceHeight = height;
+			values.refreshHz = 60.0;
+			values.sourceFps = 60.0;
+			std::string log;
+			fixture.CaptureLog(&log);
+			chain.Ensure(values);
+			fixture.CaptureLog(nullptr);
+			std::vector<const pl_hook*> hooks;
+			chain.Collect(false, hooks);
+			Assert::AreEqual(size_t{ 1 }, hooks.size(), (L"libplacebo rejected the S2-H3 seeded sigma-delta shader: " +
+				std::wstring(log.begin(), log.end())).c_str());
+			AssertCleanLibplaceboLog(log);
+
+			fixture.CaptureLog(&log);
+			const std::vector<std::vector<int>> out = fixture.RenderSequence(hooks[0], width, height, 1,
+				[](int, int, int) { return 100.3; });
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
+			Assert::AreEqual(size_t{ 1 }, out.size(), L"expected 1 rendered frame");
+			Assert::AreEqual(static_cast<size_t>(width) * height, out[0].size(), L"unexpected output pixel count");
+
+			for (int y = 0; y < height; ++y)
+			{
+				for (int x = 0; x < width; ++x)
+				{
+					const int got = out[0][static_cast<size_t>(y) * width + x];
+					if (x < 8)
+					{
+						Assert::AreEqual(100, got,
+							(L"S2-H3 Region 0 (NaN tag in rs.a + 0.45 garbage residual) corrupted pixel (" +
+								std::to_wstring(x) + L"," + std::to_wstring(y) + L") to " + std::to_wstring(got)).c_str());
+					}
+					else if (x < 16)
+					{
+						Assert::AreEqual(100, got,
+							(L"S2-H3 Region 1 (+Inf in rs.rgb with valid tag) corrupted pixel (" +
+								std::to_wstring(x) + L"," + std::to_wstring(y) + L") to " + std::to_wstring(got)).c_str());
+					}
+					else if (x < 24)
+					{
+						Assert::AreEqual(100, got,
+							(L"S2-H3 Region 2 (+Inf in ps.rgb with valid tag) corrupted pixel (" +
+								std::to_wstring(x) + L"," + std::to_wstring(y) + L") to " + std::to_wstring(got)).c_str());
+					}
+					else
+					{
+						Assert::AreEqual(101, got,
+							(L"S2-H3 Region 3 (same-input negative control: valid tag + finite ps + 0.45 residual) failed to carry at pixel (" +
+								std::to_wstring(x) + L"," + std::to_wstring(y) + L"), got " + std::to_wstring(got)).c_str());
+					}
+				}
+			}
+		}
+
 		// Gate verify 2026-10-17: the sigma-delta on the GPU is unbiased. Flat patches at every
 		// 10-bit level and at off-grid levels (every 1/32 code around chosen codes, exactly
 		// representable in the rgba16f OUTPUT texture) go through the shader for 192 static
