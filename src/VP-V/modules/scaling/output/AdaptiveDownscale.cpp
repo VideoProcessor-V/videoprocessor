@@ -105,6 +105,11 @@ if (q.x < size.x && q.y < size.y)
     imageStore(dst, q, vpu_half_luma_rgba_at(src, ivec2(origin), q));
 )GLSL";
 
+		// Non-finite by the IEEE bit pattern (exponent all ones), not isnan / isinf, which a non-strict compile may fold.
+		// Shared by the P10 grain reduction shader (FinalHeader) and the motion-map shader (MotionHeader); separate passes.
+		const char* const NONFINITE_GLSL =
+			"bool ad_nonfinite(float x) { return (floatBitsToUint(x) & 0x7fffffffu) >= 0x7f800000u; }\n";
+
 		// One workgroup: the frame's totals, the ramp, the smoothing and the
 		// cut snap, into the persistent state (r grain_scale, g mean(1 - edge),
 		// b unused (0; the frame's mean luma is the P4 APL, read on the CPU), a initialised).
@@ -113,10 +118,14 @@ if (q.x < size.x && q.y < size.y)
 shared vec4 ad_total[256];
 #ifdef AD_P10
 shared vec2 ad_p10[256];
-// Non-finite by the IEEE bit pattern (exponent all ones), not isnan / isinf, which a non-strict compile may fold.
-bool ad_nonfinite(float x) { return (floatBitsToUint(x) & 0x7fffffffu) >= 0x7f800000u; }
 #endif
 )GLSL";
+
+		const std::string& FinalHeader()
+		{
+			static const std::string header = std::string(NONFINITE_GLSL) + FINAL_HEADER;
+			return header;
+		}
 
 		// X5-GRAIN-P10 (AD_P10: the shared products are bound): the grain energy is derived from P10's per-block grain
 		// level N (a variance, codes^2) as the mean sigma weighted by the shadow law of P11's block mean luma over P11's
@@ -229,16 +238,45 @@ if (b.x < blocks.x && b.y < blocks.y) {
 }
 )GLSL";
 
-		// Motion-adapted blend: safe smoothstep matching CPU MotionSmoothstep (AdaptiveDownscale.h).
-		const char* const MOTION_HEADER = R"GLSL(
+		// Motion-adapted blend: fail-safe unit clamp, smoothstep, and neighbor shear helpers matching
+		// CPU MotionSanitizeUnit / MotionSmoothstep / MotionShearSpeed (AdaptiveDownscale.h).
+		const char* const MOTION_HEADER_BODY = R"GLSL(
+float ad_unit_safe(float x)
+{
+    return ad_nonfinite(x) ? 0.0 : clamp(x, 0.0, 1.0);
+}
 float ad_smoothstep_safe(float lo, float hi, float x)
 {
+    if (ad_nonfinite(x) || ad_nonfinite(lo) || ad_nonfinite(hi))
+        return 1.0;
     if (!(hi > lo))
         return x < lo ? 0.0 : 1.0;
-    float t = clamp((x - lo) / (hi - lo), 0.0, 1.0);
+    float span = hi - lo;
+    if (ad_nonfinite(span) || !(span > 0.0))
+        return x < lo ? 0.0 : 1.0;
+    float ratio = (x - lo) / span;
+    if (ad_nonfinite(ratio))
+        return x < lo ? 0.0 : 1.0;
+    float t = clamp(ratio, 0.0, 1.0);
     return t * t * (3.0 - 2.0 * t);
 }
+float ad_neighbor_dv(vec4 fn, vec2 fxy, bool f_xy_ok)
+{
+    if (!f_xy_ok || ad_nonfinite(fn.z) || ad_nonfinite(fn.x) || ad_nonfinite(fn.y))
+        return 0.0;
+    float nc = clamp(fn.z, 0.0, 1.0);
+    if (!(nc > 0.0))
+        return 0.0;
+    float dv = length(fn.xy - fxy);
+    return ad_nonfinite(dv) ? 0.0 : nc * dv;
+}
 )GLSL";
+
+		const std::string& MotionHeader()
+		{
+			static const std::string header = std::string(NONFINITE_GLSL) + MOTION_HEADER_BODY;
+			return header;
+		}
 
 		// Motion-adapted blend (owner 2026-10-31; upgraded with continuous confidence, 4-neighbor
 		// motion-boundary shear + Option 4B rigid-pan protection, bilinear temporal advection, and
@@ -250,21 +288,23 @@ ivec2 blocks = imageSize(map_out);
 if (b.x < blocks.x && b.y < blocks.y) {
     ivec2 lim = blocks - ivec2(1);
     vec4 f = texelFetch(field, b, 0);
-    bool frame_ok = texelFetch(frame_trust, ivec2(0), 0).r >= min_trusted_share;
-    float conf = frame_ok ? clamp(f.z, 0.0, 1.0) : 0.0;
-    float fl = clamp(motion_floor, 0.0, 1.0);
+    float trust_val = texelFetch(frame_trust, ivec2(0), 0).r;
+    bool frame_ok = !ad_nonfinite(trust_val) && !ad_nonfinite(min_trusted_share) && trust_val >= min_trusted_share;
+    bool f_xy_ok = !ad_nonfinite(f.x) && !ad_nonfinite(f.y);
+    float conf = (frame_ok && f_xy_ok) ? ad_unit_safe(f.z) : 0.0;
+    float fl = ad_unit_safe(motion_floor);
     // 4-neighbor cardinal motion-boundary shear weighted by each neighbor's continuous confidence.
     vec4 fn0 = texelFetch(field, clamp(b + ivec2(-1, 0), ivec2(0), lim), 0);
     vec4 fn1 = texelFetch(field, clamp(b + ivec2( 1, 0), ivec2(0), lim), 0);
     vec4 fn2 = texelFetch(field, clamp(b + ivec2( 0,-1), ivec2(0), lim), 0);
     vec4 fn3 = texelFetch(field, clamp(b + ivec2( 0, 1), ivec2(0), lim), 0);
     float max_dv = 0.0;
-    max_dv = max(max_dv, clamp(fn0.z, 0.0, 1.0) * length(fn0.xy - f.xy));
-    max_dv = max(max_dv, clamp(fn1.z, 0.0, 1.0) * length(fn1.xy - f.xy));
-    max_dv = max(max_dv, clamp(fn2.z, 0.0, 1.0) * length(fn2.xy - f.xy));
-    max_dv = max(max_dv, clamp(fn3.z, 0.0, 1.0) * length(fn3.xy - f.xy));
+    max_dv = max(max_dv, ad_neighbor_dv(fn0, f.xy, f_xy_ok));
+    max_dv = max(max_dv, ad_neighbor_dv(fn1, f.xy, f_xy_ok));
+    max_dv = max(max_dv, ad_neighbor_dv(fn2, f.xy, f_xy_ok));
+    max_dv = max(max_dv, ad_neighbor_dv(fn3, f.xy, f_xy_ok));
     float denom = max(crop_h, 1e-3) * max(frame_seconds, 1e-6);
-    float speed = length(f.xy) / denom;
+    float speed = f_xy_ok ? length(f.xy) / denom : 0.0;
     float shear_speed = max_dv / denom;
     // Option 4B: shear ramp across speed_lo..speed_hi; rigid cinema pans stay crisp up to 2*speed_hi..4*speed_hi.
     float ramp_shear = ad_smoothstep_safe(speed_lo, speed_hi, shear_speed);
@@ -272,7 +312,9 @@ if (b.x < blocks.x && b.y < blocks.y) {
     float ramp = max(ramp_shear, ramp_pan);
     float target = fl + (1.0 - fl) * conf * (1.0 - ramp);
     vec2 c = (vec2(b) + vec2(0.5)) * 16.0;
-    vec2 pc = conf > 0.0 ? c - f.xy : c;
+    vec2 pc = (conf > 0.0 && f_xy_ok) ? c - f.xy : c;
+    if (ad_nonfinite(pc.x) || ad_nonfinite(pc.y))
+        pc = c;
     // Bilinear temporal advection across block centres in map_in.
     vec2 ppos = clamp(pc / 16.0 - vec2(0.5), vec2(0.0), vec2(lim));
     ivec2 p0 = ivec2(floor(ppos));
@@ -282,10 +324,15 @@ if (b.x < blocks.x && b.y < blocks.y) {
     float m10 = texelFetch(map_in, ivec2(p1.x, p0.y), 0).r;
     float m01 = texelFetch(map_in, ivec2(p0.x, p1.y), 0).r;
     float m11 = texelFetch(map_in, p1, 0).r;
+    m00 = ad_nonfinite(m00) ? target : clamp(m00, 0.0, 1.0);
+    m10 = ad_nonfinite(m10) ? target : clamp(m10, 0.0, 1.0);
+    m01 = ad_nonfinite(m01) ? target : clamp(m01, 0.0, 1.0);
+    m11 = ad_nonfinite(m11) ? target : clamp(m11, 0.0, 1.0);
     float prev = mix(mix(m00, m10, pt.x), mix(m01, m11, pt.x), pt.y);
     bool reset = first_map > 0.5 || texelFetch(state, ivec2(0), 0).a > 1.5;
-    float alpha = target < prev ? smooth_alpha_attack : smooth_alpha_release;
+    float alpha = ad_unit_safe(target < prev ? smooth_alpha_attack : smooth_alpha_release);
     float o = reset ? target : mix(prev, target, alpha);
+    o = ad_nonfinite(o) ? fl : clamp(o, 0.0, 1.0);
     imageStore(map_out, b, vec4(o, conf, 0.0, 1.0));
 }
 )GLSL";
@@ -745,7 +792,7 @@ float rs_slope(float y)
 		settings = value;
 		sequence = sourceSequence;
 		static GeneralRate::FallbackNotice fallback;   // fixed-constant batch B7 2026-10-18: logged
-		frameSeconds = GeneralRate::NoteFallback(fallback, seconds > 0.0f, "adaptive downscale frame time", 24.0) ?
+		frameSeconds = GeneralRate::NoteFallback(fallback, std::isfinite(seconds) && seconds > 0.0f, "adaptive downscale frame time", 24.0) ?
 			seconds : 1.0f / 24.0f;
 	}
 
@@ -1104,11 +1151,11 @@ float rs_slope(float y)
 				{ pl_var_vec2("crop_hi"), cropHi, true } };
 			static const std::string p10Define = std::string("#define AD_P10 1\n#define ENERGY_PER_SIGMA ") +
 				std::to_string(kEdgeEnergyPerSigma) + "\n";
-			static const std::string finalImgHeader = std::string("#define AD_STATS_IMG 1\n") + FINAL_HEADER;
-			static const std::string finalP10Header = p10Define + FINAL_HEADER;
+			static const std::string finalImgHeader = std::string("#define AD_STATS_IMG 1\n") + FinalHeader();
+			static const std::string finalP10Header = p10Define + FinalHeader();
 			static const std::string finalImgP10Header = p10Define + finalImgHeader;
 			const char* finalHeader = shared ? (native ? finalImgP10Header.c_str() : finalP10Header.c_str()) :
-				(native ? finalImgHeader.c_str() : FINAL_HEADER);
+				(native ? finalImgHeader.c_str() : FinalHeader().c_str());
 			if (numDescriptors != 3 || !Compute(p->dispatch, "VideoProcessor adaptive downscale: grain",
 				finalHeader, FinalBody().c_str(), d, shared ? 6 : 3, v, shared ? 13 : 8, 1, 1))
 			{
@@ -1219,7 +1266,7 @@ float rs_slope(float y)
 
 	bool Module::UpdateMotionMap(pl_dispatch dispatch, bool advance)
 	{
-		const float strength = RampMath::Clamp01(settings.motionStrength);
+		const float strength = MotionSanitizeUnit(settings.motionStrength);
 		if (!(strength > 0.0f))
 		{
 			motionReady = false;
@@ -1228,6 +1275,8 @@ float rs_slope(float y)
 			return true;
 		}
 		const bool fieldPresent = motion.field && motion.frameTrust &&
+			std::isfinite(motion.sourceCrop.x0) && std::isfinite(motion.sourceCrop.x1) &&
+			std::isfinite(motion.sourceCrop.y0) && std::isfinite(motion.sourceCrop.y1) &&
 			motion.sourceCrop.y1 > motion.sourceCrop.y0 && motion.sourceCrop.x1 > motion.sourceCrop.x0;
 		if (!fieldPresent)
 		{
@@ -1275,7 +1324,7 @@ float rs_slope(float y)
 			{ pl_var_float("motion_floor"), &settings.motionFloor, true },
 			{ pl_var_float("smooth_alpha_attack"), &alphaAttack, true },
 			{ pl_var_float("smooth_alpha_release"), &alphaRelease, true } };
-		if (!Compute(dispatch, "VideoProcessor adaptive scaling: motion-adapted weights", MOTION_HEADER, MOTION_BODY, d, 5, v, 9,
+		if (!Compute(dispatch, "VideoProcessor adaptive scaling: motion-adapted weights", MotionHeader().c_str(), MOTION_BODY, d, 5, v, 9,
 			(bw + 15) / 16, (bh + 15) / 16))
 		{
 			motionReady = false;
@@ -1357,7 +1406,7 @@ float rs_slope(float y)
 		if (useMap) d.push_back(Sampled("grain_map", map[mapIndex], false));
 		// Motion-adapted blend: continuum motionStrength (0 = standard unadapted blend).
 		// CF-2 B1 (N1.4): the stage's discontinuity verdict (resync, a drop, no live estimate) also takes the map out.
-		const float motionStrength = RampMath::Clamp01(settings.motionStrength);
+		const float motionStrength = MotionSanitizeUnit(settings.motionStrength);
 		const bool motionOn = motionStrength > 0.0f;
 		const bool vectorsInvalid = upscale.on && upscale.vectorsInvalid;
 		const bool useMotion = motionOn && !vectorsInvalid && motionState == MotionState::Used && motionReady &&

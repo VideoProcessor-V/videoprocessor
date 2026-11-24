@@ -27,6 +27,7 @@
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
+#include <locale>
 #include <map>
 #include <mutex>
 #include <set>
@@ -832,7 +833,7 @@ namespace VpvRendererSettings
 				settings.adaptive.motionStrength = 0.0f;
 			else if (normalized == "on")
 				settings.adaptive.motionStrength = 1.0f;
-			else if (DisplayRuleExpression::ParseNumber(raw, parsed) && parsed >= 0.0 && parsed <= 1.0)
+			else if (DisplayRuleExpression::ParseNumber(raw, parsed) && std::isfinite(parsed) && parsed >= 0.0 && parsed <= 1.0)
 				settings.adaptive.motionStrength = static_cast<float>(parsed);
 			else
 				DebugLog::Log("profile '%s': invalid adaptive_motion '%s'; keeping %g",
@@ -1615,6 +1616,7 @@ namespace VpvRendererSettings
 		const std::string& rule)
 	{
 		std::ostringstream o;
+		o.imbue(std::locale::classic());
 	o << "rule=" << rule << "\n"
 		<< "capture_path=" << s.capturePath << "\n"
 		<< "capture_upload=" << s.captureUpload << "\n"
@@ -1651,7 +1653,14 @@ namespace VpvRendererSettings
 		<< "cut_soft_reset=" << (s.cutSoftReset ? "on" : "off") << "\n"
 		<< "deband_grain=" << (s.debandGrain ? "on" : "off") << "\n"
 		<< "residual_stabilise_grain_guard=" << (s.adaptive.residualGrainGuard ? "on" : "off") << "\n"
-		<< "adaptive_motion=" << s.adaptive.motionStrength << "\n"
+		<< "adaptive_motion=";
+	if (!std::isfinite(s.adaptive.motionStrength) || s.adaptive.motionStrength <= 0.0f)
+		o << "off";
+	else if (s.adaptive.motionStrength >= 1.0f)
+		o << "on";
+	else
+		o << s.adaptive.motionStrength;
+	o << "\n"
 		<< "adaptive_motion_speed_lo=" << s.adaptive.motionSpeedLo << "\n"
 		<< "adaptive_motion_speed_hi=" << s.adaptive.motionSpeedHi << "\n"
 		<< "adaptive_motion_floor=" << s.adaptive.motionFloor << "\n"

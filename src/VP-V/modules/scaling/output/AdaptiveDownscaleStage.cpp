@@ -3,7 +3,6 @@
 
 #include <DebugLog.h>
 #include <VP-V/core/Products.h>
-#include <VP-V/core/Ramp.h>
 #include <VP-V/modules/control/skeleton/SkeletonAccess.h>
 #include <VP-V/modules/output/dither/CustomHookChain.h>
 #include <VP-V/modules/scaling/output/DownscaleLight.h>
@@ -11,7 +10,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdio>
 
 // WP-13: moved from LibplaceboVideoRenderer.cpp (RenderLocked, Stage 8-2 / 8b and 8-1).
 // Statement order, the host reads and the log text are unchanged.
@@ -82,6 +80,11 @@ namespace AdaptiveDownscaleStage
 		{
 			module.ClearGrainLevel();
 			TermSource t;
+			if (frame.nlsSubmitted && !nlsMap.valid)
+			{
+				t.cause = "NLS map unknown";
+				return t;
+			}
 			VpSkeleton::AcquireResult r;
 			if (host.acquire)
 				r = host.acquire(VpSkeleton::kP10gGrainLevel, frame.sourceSequence, VpSkeleton::VariantKey());
@@ -160,7 +163,7 @@ namespace AdaptiveDownscaleStage
 		oneAxisThisFrame = oneAxis;
 		droppedPrescalers = 0;
 		motionStrengthActive = (frame.slotRuns && frame.adaptive && (upscaleBlend || frame.adaptiveDownscale))
-			? RampMath::Clamp01(frame.adaptive->motionStrength) : 0.0f;
+			? AdaptiveDownscale::MotionSanitizeUnit(frame.adaptive->motionStrength) : 0.0f;
 		motionAdaptiveOn = motionStrengthActive > 0.0f;
 		const NlsMaskMapping::Mapping nlsMap = (frame.nlsSubmitted && host.nlsMapping)
 			? host.nlsMapping() : NlsMaskMapping::Mapping{};
@@ -274,7 +277,7 @@ namespace AdaptiveDownscaleStage
 			module.ClearGrainField();
 			grainOffered = SetSharedGrain(module, host);
 			SetResidualMotion(module, frame, m, nlsMap, nlsUnknown);
-			state.grainMapWanted = (RampMath::Clamp01(adaptive.motionStrength) > 0.0f) && module.Active() && frame.vectorsRun;
+			state.grainMapWanted = (AdaptiveDownscale::MotionSanitizeUnit(adaptive.motionStrength) > 0.0f) && module.Active() && frame.vectorsRun;
 			hooks.insert(hooks.begin(), module.Measure());
 			// The blend before SSimSuperRes (both POST_KERNEL): SuperRes refines the blended picture
 			// with its strength scaled by the grain term.
@@ -341,7 +344,7 @@ namespace AdaptiveDownscaleStage
 				// The next source frame's estimate runs for the map when the blend acts on this
 				// picture (a downscale; Active() is the last measured frame's).
 				// The motion-adapted blend needs this frame's vectors as much as the map does.
-				state.grainMapWanted = (adaptive.grainMap || RampMath::Clamp01(adaptive.motionStrength) > 0.0f) && module.Active() && frame.vectorsRun;
+				state.grainMapWanted = (adaptive.grainMap || AdaptiveDownscale::MotionSanitizeUnit(adaptive.motionStrength) > 0.0f) && module.Active() && frame.vectorsRun;
 				hooks.insert(hooks.begin(), module.Measure());
 				hooks.push_back(module.Blend());
 				state.noSsimLogged = false;
@@ -411,9 +414,9 @@ namespace AdaptiveDownscaleStage
 		}
 		if (motionAdaptiveOn)
 		{
-			char strengthBuf[16] = {};
-			std::snprintf(strengthBuf, sizeof(strengthBuf), "%.2f", motionStrengthActive);
-			const std::string strengthText(strengthBuf);
+			const int pct = static_cast<int>(std::lround(AdaptiveDownscale::MotionSanitizeUnit(motionStrengthActive) * 100.0f));
+			const std::string strengthText = std::to_string(pct / 100) + "." +
+				(pct % 100 < 10 ? "0" : "") + std::to_string(pct % 100);
 			const AdaptiveDownscale::MotionState m = module.LastMotionState();
 			lines.push_back(upscaleThisFrame && module.MotionFloorUsed() ?
 				"Motion-adapted blend: strength " + strengthText + " (no vectors on this frame; upscale: alias-safe lean)" :
