@@ -212,9 +212,15 @@ if (blk.x < GS_BW && blk.y < GS_BH) {
 }
 )GLSL";
 
-			// 4a. LEVEL (refs/116b, unit 4): ONE workgroup. Per luma bin the 10th percentile of the blocks' quiet values, by an integer
-			// histogram of 1/8-octave classes (key from the float bits: identical to GrainSplit::LevelKey), -> level_out(bin) =
-			// (class-midpoint level in ten-bit-equivalent codes^2, valid, 0, 0). Integer counts make the table order-independent.
+			// 4a. LEVEL (refs/116b, unit 4; GS 155 zero-energy exclusion): ONE workgroup. Per luma bin the 10th percentile of
+			// the blocks' quiet values, by an integer histogram of 1/8-octave classes (key from the float bits: identical to
+			// GrainSplit::LevelKey), -> level_out(bin) = (class-midpoint level in ten-bit-equivalent codes^2, valid, 0, 0).
+			// Integer counts make the table order-independent.
+			// GS 155: at the two quantization boundary bins (bin 0 crushed black, bin GS_LEVEL_BINS - 1 clipped white), blocks
+			// with ten-bit-equivalent energy q <= 1/12 code^2 (GS_LEVEL_ZERO_FLOOR, variance of uniform [-0.5, +0.5] code
+			// quantization rounding error: integral_{-0.5}^{+0.5} x^2 dx = 1/12) are excluded so flat-clipped blocks cannot
+			// collapse the boundary percentile toward zero. Exclusion is strictly by energy, NEVER by pixel code value
+			// (ADR-0002: grainy BTB/WTW blocks have q > 1/12 and remain included). Mirrors GrainSplit::GrainLevelTable.
 			const char* const LEVEL_HEADER = R"GLSL(
 #define GS_KEYS 160
 shared uint s_hist[GS_LEVEL_BINS * GS_KEYS];
@@ -244,8 +250,9 @@ barrier();
 for (uint i = li; i < uint(GS_BW * GS_BH); i += 256u) {
     ivec2 b = ivec2(int(i % uint(GS_BW)), int(i / uint(GS_BW)));
     float q = texelFetch(quiet, b, 0).x / (GS_CODE_SCALE * GS_CODE_SCALE);
-    int key = clamp(int(floatBitsToUint(max(q, 0.015625)) >> 20) - 968, 0, GS_KEYS - 1);
     int bin = gs_level_bin(gs_block_luma(b) / GS_CODE_SCALE);
+    if ((bin == 0 || bin == GS_LEVEL_BINS - 1) && !(q > GS_LEVEL_ZERO_FLOOR)) continue;
+    int key = clamp(int(floatBitsToUint(max(q, 0.015625)) >> 20) - 968, 0, GS_KEYS - 1);
     atomicAdd(s_hist[bin * GS_KEYS + key], 1u);
     atomicAdd(s_n[bin], 1u);
 }
@@ -670,7 +677,8 @@ if (p.x < GS_W && p.y < GS_H) {
 					DefineInt("GS_B", B) + DefineInt("GS_BW", bw) + DefineInt("GS_BH", bh) + DefineInt("GS_UNIT_VERSION", GrainSplit::kUnitVersion) +
 					DefineInt("GS_LEVEL_BINS", params.levelBins) + DefineInt("GS_LEVEL_PCT", params.levelPercentile) +
 					DefineInt("GS_LEVEL_MINB", params.levelMinBlocks) + DefineInt("GS_LEVEL_ON", params.levelCap ? 1 : 0) +
-					Define("GS_CODE_SCALE", GrainSplit::DepthScale(params.sourceBits));
+					Define("GS_CODE_SCALE", GrainSplit::DepthScale(params.sourceBits)) +
+					Define("GS_LEVEL_ZERO_FLOOR", GrainSplit::kLevelZeroEnergyFloor);
 				const double s1 = params.sigmaFine * scale, sb = params.sigmaBase * scale, s6 = params.sigmaLow * scale;
 				t.r1 = GaussRadius(s1);
 				t.rb = GrainSplit::V3HalfRadius(sb);

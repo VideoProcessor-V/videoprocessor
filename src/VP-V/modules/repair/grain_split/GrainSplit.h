@@ -211,6 +211,15 @@ namespace GrainSplit
 	// ---- NLF cap (refs/116b s4) ----
 	constexpr int kLevelKeyBase = 968;   // (127 - 6) x 8: key 0 = 2^-6 codes^2
 	constexpr int kLevelKeys = 160;      // 1/8-octave classes, 2^-6 .. 2^14 codes^2
+	// GS 155 zero-energy exclusion floor: uniform quantization rounding error on [-0.5, +0.5] code has variance
+	// integral_{-0.5}^{+0.5} x^2 dx = 1/12 code^2 (ten-bit-equivalent codes^2, scaled by DepthScale(sourceBits)^2).
+	// Because grainCal calibrates `quiet` to white-noise variance, flat-clipped / crushed blocks at the two
+	// quantization boundary bins (bin 0 crushed black, bin levelBins - 1 clipped white) satisfy quiet/es <= 1/12
+	// and are excluded from NLF bin accumulation so they cannot collapse boundary percentiles toward zero.
+	// Exclusion is strictly by energy, NEVER by pixel code value (ADR-0002: grainy BTB and WTW blocks have
+	// quiet/es > 1/12 and remain included). Midtone bins keep zero-energy blocks so clean grain-free frames with
+	// flat + texture still cap N to the quiet floor.
+	constexpr double kLevelZeroEnergyFloor = 1.0 / 12.0;
 	inline uint32_t LevelFloatBits(float v) { uint32_t u; std::memcpy(&u, &v, sizeof(u)); return u; }
 	inline float LevelBitsFloat(uint32_t u) { float v; std::memcpy(&v, &u, sizeof(v)); return v; }
 	// Integer class key of a quiet value in ten-bit-equivalent codes^2: identical on CPU and GPU.
@@ -227,6 +236,11 @@ namespace GrainSplit
 		const int j = static_cast<int>(std::floor(lumaTen * p.levelBins / 1024.0));
 		return j < 0 ? 0 : (j >= p.levelBins ? p.levelBins - 1 : j);
 	}
+	// GS 155 boundary-bin zero-energy exclusion (NaN-safe, strictly energy-gated, never by code value).
+	inline bool LevelBlockExcluded(int bin, double quiet10, const Params& p)
+	{
+		return (bin == 0 || bin == p.levelBins - 1) && !(quiet10 > kLevelZeroEnergyFloor);
+	}
 	// The per-bin table: quiet and blockLuma in the plane's own codes; level[] in ten-bit-equivalent codes^2; valid[j]
 	// false for a bin with fewer than levelMinBlocks blocks. level / valid hold at least p.levelBins entries.
 	inline void GrainLevelTable(const std::vector<double>& quiet, const std::vector<double>& blockLuma, const Params& p, double* level, bool* valid)
@@ -234,7 +248,12 @@ namespace GrainSplit
 		const double cs = DepthScale(p.sourceBits), es = cs * cs;
 		std::vector<std::vector<int>> keys(static_cast<size_t>(p.levelBins));
 		for (size_t i = 0; i < quiet.size(); ++i)
-			keys[static_cast<size_t>(LevelBin(blockLuma[i] / cs, p))].push_back(LevelKey(quiet[i] / es));
+		{
+			const int bin = LevelBin(blockLuma[i] / cs, p);
+			const double q = quiet[i] / es;
+			if (LevelBlockExcluded(bin, q, p)) continue;
+			keys[static_cast<size_t>(bin)].push_back(LevelKey(q));
+		}
 		for (int j = 0; j < p.levelBins; ++j)
 		{
 			std::vector<int>& k = keys[static_cast<size_t>(j)];
