@@ -225,6 +225,9 @@ namespace GrainUnitGpuTestsNs
 	TEST_CLASS(GrainUnitGpuTests)
 	{
 	public:
+		BEGIN_TEST_METHOD_ATTRIBUTE(GrainUnitStampsVersionAndSourceFrame)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(GrainUnitStampsVersionAndSourceFrame)
 		{
 			GpuDevice dev;
@@ -276,6 +279,9 @@ namespace GrainUnitGpuTestsNs
 			Assert::IsTrue(full.find(define) != std::string::npos && compact.find(define) != std::string::npos, L"the GLSL embeds the unit version");
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(GrainUnitCompactIsRefusedAbove12Bits)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(GrainUnitCompactIsRefusedAbove12Bits)
 		{
 			GpuDevice dev;
@@ -320,6 +326,9 @@ namespace GrainUnitGpuTestsNs
 			}
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(GrainUnitCompactNeverClampsAFloatPlane)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(GrainUnitCompactNeverClampsAFloatPlane)
 		{
 			// A float plane can carry blacker-than-black (< 0) and whiter-than-white (> 1): Compact's unorm base would clamp
@@ -353,6 +362,9 @@ namespace GrainUnitGpuTestsNs
 			pl_tex_destroy(gpu, &plane);
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(GrainUnitLaneAndLiveFillShareOneCompute)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(GrainUnitLaneAndLiveFillShareOneCompute)
 		{
 			GpuDevice dev;
@@ -434,6 +446,9 @@ namespace GrainUnitGpuTestsNs
 		// Audit 2 A: one code path, one instance per thread. A lane instance (own Splitter + own pl_dispatch, on its own
 		// thread, writing a ring buffer) and a render instance (own Splitter + dispatch, this thread, writing a live
 		// buffer) produce bit-identical slots.
+		BEGIN_TEST_METHOD_ATTRIBUTE(GrainUnitLaneAndRenderInstancesAreBitIdentical)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(GrainUnitLaneAndRenderInstancesAreBitIdentical)
 		{
 			GpuDevice dev;
@@ -502,6 +517,9 @@ namespace GrainUnitGpuTestsNs
 
 		// Audit 2 A: a SplitterFill is bound to the thread of its first Fill; another thread's Fill is refused visibly and
 		// does no GPU work; an arena bound to another thread is refused too. The owning thread keeps working.
+		BEGIN_TEST_METHOD_ATTRIBUTE(GrainUnitFillRefusesAnotherThreadAndAnotherThreadsArena)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(GrainUnitFillRefusesAnotherThreadAndAnotherThreadsArena)
 		{
 			GpuDevice dev;
@@ -561,6 +579,9 @@ namespace GrainUnitGpuTestsNs
 		// Audit 2 B: the block grid follows the node's real block edge. At 8K the edge doubles (B = 32): the layout's grid
 		// is ceil(w / 32) x ceil(h / 32), it passes the declaration check (the declaration is the upper bound at 16 px), and a
 		// grid larger than declared (B = 8) is refused. A fill at B = 32 into node textures succeeds.
+		BEGIN_TEST_METHOD_ATTRIBUTE(GrainUnitBlockGridFollowsTheBlockEdge)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(GrainUnitBlockGridFollowsTheBlockEdge)
 		{
 			const VpSkeleton::Registry reg = VpSkeleton::SkeletonProducts();
@@ -618,6 +639,9 @@ namespace GrainUnitGpuTestsNs
 		// Audit 2 C: Compact requested on a plane that refuses it (a float plane) is laid out as Full (ChooseNodeLayout),
 		// so the fill succeeds as Full with the visible storage fallback; targets laid out for a storage the plane no longer
 		// grants are refused visibly (the host lays the node out again) instead of failing inside Compute forever.
+		BEGIN_TEST_METHOD_ATTRIBUTE(GrainUnitDowngradedCompactIsLaidOutAsFull)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(GrainUnitDowngradedCompactIsLaidOutAsFull)
 		{
 			GpuDevice dev;
@@ -674,6 +698,9 @@ namespace GrainUnitGpuTestsNs
 		// Compute(gpu, dispatch, ..., Options{seq}) on the same plane: split and blocks bit-identical, the same Frame stamps. Two
 		// variants: the default law at B 16 and an eighth scale (1.5) at its block edge 24. It makes exactly the ContextShapesOf
 		// textures (the reserve = what is made); one byte under that reserve, or a closed context, refuses visibly and keeps nothing.
+		BEGIN_TEST_METHOD_ATTRIBUTE(GrainUnitContextEntryEqualsCompute)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(GrainUnitContextEntryEqualsCompute)
 		{
 			GpuDevice dev;
@@ -745,6 +772,9 @@ namespace GrainUnitGpuTestsNs
 		// GF-P1 S6 (MUST-6 measurement): a 4K luma at B 16 through the memo variant. The context is granted every texture the fill
 		// makes (ContextShapesOf: the peak), but the memo's spot keeps only the two outputs once the fill returns, so the memo's
 		// GPU bytes after the fill and the seal are split + blocks, not the seven-texture total. Logs the before and after in MB.
+		BEGIN_TEST_METHOD_ATTRIBUTE(GrainVariantSpotHoldsOnlyTheOutputs4K)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(GrainVariantSpotHoldsOnlyTheOutputs4K)
 		{
 			GpuDevice dev;
@@ -806,6 +836,9 @@ namespace GrainUnitGpuTestsNs
 			return w;
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(GrainVariantLawFollowsTheCodeUnit)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(GrainVariantLawFollowsTheCodeUnit)
 		{
 			GpuDevice dev;
