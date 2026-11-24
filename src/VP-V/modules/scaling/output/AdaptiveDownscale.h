@@ -555,10 +555,10 @@ namespace AdaptiveDownscale
 		bool grainDomainRefused = false;   // ... a valid source was refused: the measure domain is not the gamma code domain
 		Motion motion{};
 		pl_tex residual[2] = { nullptr, nullptr };   // luma residual: this source frame's and the previous one's
-		int residualIndex = 0;                        // residual[residualIndex] = residualSequence's
-		bool residualPrevValid = false;
+		int residualIndex = 0, residualW = 0, residualH = 0;   // residual[residualIndex] = residualSequence's; size (audit 2026-10-16)
+		bool residualPrevValid = false, residualCropValid = false;
 		uint64_t residualSequence = 0;
-		int residualW = 0, residualH = 0;              // the residual textures' size (audit 2026-10-16)
+		pl_rect2df lastResidualCrop = pl_rect2df();    // GEM-070: source crop cached with residual[residualIndex]
 		unsigned long long stabilised = 0;
 		pl_tex motionMap[2] = { nullptr, nullptr };   // motion-adapted blend: factor per block
 		int motionIndex = 0;

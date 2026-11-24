@@ -483,8 +483,9 @@ if (q.x < size.x && q.y < size.y) {
 		// branch) held along the trusted motion - the previous frame's residual
 		// where this content was (source pixels of the field, mapped into the
 		// hooked picture and the output) - a one-pole; the faithful part is
-		// untouched; untrusted blocks, a failed frame trust or no previous
-		// residual: this frame's own.
+		// untouched; untrusted blocks, a failed frame trust, a confirmed scene
+		// cut (state.a: 1 = steady, 2 = cut) or no previous residual: this
+		// frame's own.
 		const char* const STABILISE_DEFINE = R"GLSL(
 #define STABILISE_AND_STORE { \
     const vec3 kr = AD_KW; \
@@ -494,7 +495,7 @@ if (q.x < size.x && q.y < size.y) {
     ivec2 fsz = textureSize(rs_field, 0); \
     vec4 f = texelFetch(rs_field, clamp(ivec2(floor(sps / 16.0)), ivec2(0), fsz - ivec2(1)), 0); \
     bool frame_ok = texelFetch(rs_trust, ivec2(0), 0).r >= rs_min_share; \
-    if (rs_prev_valid > 0.5 && frame_ok && f.z > 0.5) { \
+    if (rs_prev_valid > 0.5 && frame_ok && f.z > 0.5 && texelFetch(state, ivec2(0), 0).a < 1.5) { \
         vec2 sprev = s - f.xy * src_size / rs_crop.zw; \
         vec2 qprev = (sprev - src_origin) / src_per_dst; \
         float rp = texture(rs_prev, qprev / vec2(size)).r; \
@@ -563,7 +564,7 @@ float rs_slope(float y)
     ivec2 fsz = textureSize(rs_field, 0); \
     vec4 f = texelFetch(rs_field, clamp(ivec2(floor(sps / 16.0)), ivec2(0), fsz - ivec2(1)), 0); \
     bool frame_ok = texelFetch(rs_trust, ivec2(0), 0).r >= rs_min_share; \
-    if (rs_prev_valid > 0.5 && frame_ok && f.z > 0.5) { \
+    if (rs_prev_valid > 0.5 && frame_ok && f.z > 0.5 && texelFetch(state, ivec2(0), 0).a < 1.5) { \
         vec2 sprev = s - f.xy * src_size / rs_crop.zw; \
         vec2 qprev = (sprev - src_origin) / src_per_dst; \
         ivec2 psz = textureSize(rs_prev, 0); \
@@ -716,6 +717,8 @@ float rs_slope(float y)
 		mapState = MapState::NoField;
 		residualSequence = 0;
 		residualPrevValid = false;
+		residualCropValid = false;
+		lastResidualCrop = pl_rect2df{};
 		motionReady = false;
 		motionSequence = 0;
 		motionSourceCrop = pl_rect2df{};
@@ -749,8 +752,10 @@ float rs_slope(float y)
 		edgeOrdinal.Reset();
 		residualIndex = 0;
 		residualPrevValid = false;
+		residualCropValid = false;
 		residualSequence = 0;
 		residualW = residualH = 0;
+		lastResidualCrop = pl_rect2df{};
 		motionIndex = 0;
 		motionReady = false;
 		motionSequence = 0;
@@ -1439,12 +1444,15 @@ float rs_slope(float y)
 			Ensure(gpu, residual[1 - writeIndex], w, h, 1, 16, false, true);
 		if (readIndex >= 0 && readIndex != 1 - writeIndex)
 			readIndex = -1;   // (never: the previous residual is always the other texture)
-		// A new size recreated the textures: nothing previous to read (audit 2026-10-16: an
-		// undefined texture was mixed in for one frame after a resize / zoom / crop change).
-		if (w != residualW || h != residualH)
+		// A new size recreated the textures, or the source crop shifted (GEM-070: rs_prev lives in the previous
+		// crop's output coordinates, so sampling it across a crop shift mixes misaligned pixels): nothing previous to read.
+		const bool residualCropChanged = stabilise && residualCropValid &&
+			!(motion.sourceCrop.x0 == lastResidualCrop.x0 && motion.sourceCrop.y0 == lastResidualCrop.y0 &&
+			  motion.sourceCrop.x1 == lastResidualCrop.x1 && motion.sourceCrop.y1 == lastResidualCrop.y1);
+		if (w != residualW || h != residualH || residualCropChanged)
 		{
 			readIndex = -1;
-			residualPrevValid = false;   // GEM-W1B V3 MUST-2: both textures were recreated; a later repeat has no previous
+			residualPrevValid = false;   // GEM-W1B V3 MUST-2: no valid previous residual for this size/crop (repeats included)
 		}
 		residualW = w;
 		residualH = h;
@@ -1597,16 +1605,20 @@ float rs_slope(float y)
 		{
 			if (!repeat)
 			{
-				residualPrevValid = consecutive && readIndex >= 0;   // GEM-W1B V3 MUST-2: a resize frame wrote no previous
+				residualPrevValid = consecutive && readIndex >= 0;   // GEM-W1B V3 MUST-2: a resize/crop-shift frame wrote no previous
 				residualIndex = writeIndex;
 				residualSequence = sequence;
 			}
+			lastResidualCrop = motion.sourceCrop;
+			residualCropValid = true;
 			if (prevValid > 0.5f) ++stabilised;
 		}
 		else if (!repeat)
 		{
 			residualSequence = 0;
 			residualPrevValid = false;
+			residualCropValid = false;
+			lastResidualCrop = pl_rect2df{};
 		}
 		pl_hook_res res{};
 		res.output = PL_HOOK_SIG_TEX;
