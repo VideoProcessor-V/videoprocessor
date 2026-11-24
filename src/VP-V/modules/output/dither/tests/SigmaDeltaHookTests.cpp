@@ -904,6 +904,243 @@ void hook()
 			}
 		}
 
+		// W23-A3 S2-H4 (WARP): exact output codes must never flicker at half-code dither amplitude (amp = 0.5).
+		// Without zeroing d on exact codes, FP32 rounding of `x + d` for ign(pos, frame / 5) near 1.0 reaches
+		// `x + 0.5f` (at x = 512.0f, 0.5 ULP is 2^-15 = 1/32768) and flips `floor(x + d + 0.5)` from 512 to 513
+		// in both the enabled = 1 and enabled = 0 branches.
+		// Runs the real expanded `shaders/Temporal sigma-delta.glsl` on WARP over a 64x64 (4,096 px) 10-bit
+		// full-range grid for 12 refreshes (advancing frame / 5 across 0..11, which hits high ign values near 1.0),
+		// with two Rule 3 same-input negative controls:
+		//   (i)  The pre-fix un-zeroed FP32 formula on the exact same 64x64 x 12 (pos, frame/5) coordinates at
+		//        x = 512.0f, amp = 0.5f MUST produce > 0 flipped pixels (proving the FP32 rounding hazard is real).
+		//   (ii) A non-exact fractional 10-bit input (1026.25 / 2048.0, landing on 1026/2048 = 512.4990 codes on
+		//        both truncating and rounding rgba16f stores, outside the exact-code snap window) on the exact same
+		//        shader MUST still dither across {512, 513} on frame 0 (r = 0) in both enabled = 1 and enabled = 0
+		//        branches (proving d was not globally disabled).
+		BEGIN_TEST_METHOD_ATTRIBUTE(SigmaDeltaExactCodeNeverFlickersAtHalfCodeAmplitude)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(SigmaDeltaExactCodeNeverFlickersAtHalfCodeAmplitude)
+		{
+			constexpr int width = 64;
+			constexpr int height = 64;
+			constexpr int frames = 12;
+			constexpr int exactCode = 512;
+			constexpr float exactValue = static_cast<float>(exactCode) / 1023.0f;
+			// Quarter rgba16f step above 1026/2048 (= 512.4990 codes): truncating and rounding rgba16f stores
+			// both hold 1026/2048 (offset +0.4990 > above 0.2598, so the exact-code snap does not fire), and
+			// an rgba32f store holds 512.6239 (also strictly fractional and outside the 1e-3 snap).
+			constexpr float fractionalValue = 1026.25f / 2048.0f;
+
+			// Rule 3 negative control (i): prove the un-zeroed FP32 rounding hazard genuinely flips > 0 pixels
+			// on this exact 64x64 x 12 (pos, frame/5) grid at x = 512.0f, amp = 0.5f.
+			int unzeroedFlips = 0;
+			for (int f = 0; f < frames; ++f)
+			{
+				for (int y = 0; y < height; ++y)
+				{
+					for (int x = 0; x < width; ++x)
+					{
+						const float ign = SigmaDeltaDomain::Ign(static_cast<float>(x), static_cast<float>(y), f);
+						const float d = (ign - 0.5f) * 2.0f * 0.5f;
+						const float xPlusD = static_cast<float>(exactCode) + d;
+						const int unzeroed = static_cast<int>(std::floor(xPlusD + 0.5f));
+						if (unzeroed != exactCode)
+							++unzeroedFlips;
+					}
+				}
+			}
+			Assert::IsTrue(unzeroedFlips > 0,
+				L"S2-H4 negative control (i): un-zeroed FP32 floor(512 + d + 0.5) must flip > 0 pixels on the 64x64 x 12 grid");
+
+			auto renderTenBitFrames = [&](bool enabled, float sourceValue, int frameCount) -> std::vector<std::vector<uint32_t>>
+			{
+				TargetLutGpuFixture fixture;
+				Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+				pl_gpu gpu = fixture.Gpu();
+
+				struct LogCaptureGuard
+				{
+					TargetLutGpuFixture& owner;
+					~LogCaptureGuard() { owner.CaptureLog(nullptr); }
+				};
+				struct TexGuard
+				{
+					pl_gpu owner;
+					pl_tex tex = nullptr;
+					~TexGuard()
+					{
+						if (tex)
+							pl_tex_destroy(owner, &tex);
+					}
+				};
+
+				CustomHookChain::Chain chain(SigmaLoader(fixture));
+				ConfiguredShaderRule sigma;
+				sigma.name = "sigma_delta";
+				sigma.filename = "Temporal sigma-delta.glsl";
+				sigma.stageOrder = 90;
+				sigma.parameters = {
+					{ "enabled", enabled ? "1" : "0" },
+					{ "levels_full", "1" },
+					{ "swapchain_bits", "10" },
+					{ "color_bits", "10" },
+					{ "noise_amplitude", "0.5" },
+					{ "motion_compensation", "0" }
+				};
+				chain.Configure({ sigma });
+				CustomHookChain::TemplateValues values;
+				values.outputWidth = values.sourceWidth = width;
+				values.outputHeight = values.sourceHeight = height;
+				values.refreshHz = values.sourceFps = 60.0;
+
+				std::string log;
+				{
+					LogCaptureGuard guard{ fixture };
+					fixture.CaptureLog(&log);
+					chain.Ensure(values);
+				}
+				std::vector<const pl_hook*> hooks;
+				chain.Collect(false, hooks);
+				Assert::AreEqual(size_t{ 1 }, hooks.size(),
+					(L"libplacebo rejected Temporal sigma-delta.glsl: " + std::wstring(log.begin(), log.end())).c_str());
+				AssertCleanLibplaceboLog(log);
+
+				pl_fmt sourceFormat = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, PL_FMT_CAP_SAMPLEABLE);
+				Assert::IsNotNull(sourceFormat, L"No sampleable RGBA32F source format");
+				pl_fmt targetFormat = nullptr;
+				const auto targetCaps = static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE);
+				for (int i = 0; i < gpu->num_formats; ++i)
+				{
+					pl_fmt f = gpu->formats[i];
+					if (f->type == PL_FMT_UNORM && f->num_components == 4 && f->component_depth[0] == 10 &&
+						f->texel_size == 4 && (f->caps & targetCaps) == targetCaps && f->host_bits[0] == 10)
+					{
+						targetFormat = f;
+						break;
+					}
+				}
+				Assert::IsNotNull(targetFormat, L"No host-readable RGB10A2 target format");
+
+				const size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
+				std::vector<float> texels(pixelCount * 4);
+				for (size_t i = 0; i < pixelCount; ++i)
+				{
+					texels[i * 4 + 0] = sourceValue;
+					texels[i * 4 + 1] = sourceValue;
+					texels[i * 4 + 2] = sourceValue;
+					texels[i * 4 + 3] = 1.0f;
+				}
+
+				pl_tex_params sp{};
+				sp.w = width;
+				sp.h = height;
+				sp.format = sourceFormat;
+				sp.sampleable = true;
+				sp.initial_data = texels.data();
+				TexGuard sourceGuard{ gpu, pl_tex_create(gpu, &sp) };
+				Assert::IsNotNull(sourceGuard.tex, L"Failed to create 64x64 source texture");
+
+				pl_tex_params tp{};
+				tp.w = width;
+				tp.h = height;
+				tp.format = targetFormat;
+				tp.renderable = true;
+				tp.host_readable = true;
+				TexGuard targetGuard{ gpu, pl_tex_create(gpu, &tp) };
+				Assert::IsNotNull(targetGuard.tex, L"Failed to create 64x64 RGB10A2 target texture");
+
+				pl_frame image = TargetLutGpuFixture::MakeRgbFrame(sourceGuard.tex);
+				pl_frame output = TargetLutGpuFixture::MakeRgbFrame(targetGuard.tex);
+				output.repr.levels = PL_COLOR_LEVELS_FULL;
+				output.repr.bits.sample_depth = 10;
+				output.repr.bits.color_depth = 10;
+				output.repr.bits.bit_shift = 0;
+
+				pl_render_params params = pl_render_fast_params;
+				params.dither_params = nullptr;
+				params.error_diffusion = nullptr;
+				params.hooks = hooks.data();
+				params.num_hooks = static_cast<int>(hooks.size());
+
+				std::vector<std::vector<uint32_t>> rendered;
+				rendered.reserve(static_cast<size_t>(frameCount));
+				{
+					LogCaptureGuard guard{ fixture };
+					fixture.CaptureLog(&log);
+					for (int f = 0; f < frameCount; ++f)
+					{
+						Assert::IsTrue(pl_render_image(fixture.Renderer(), &image, &output, &params),
+							L"pl_render_image failed for S2-H4 10-bit frame");
+						pl_gpu_finish(gpu);
+						std::vector<uint32_t> pixels(pixelCount, 0u);
+						pl_tex_transfer_params download{};
+						download.tex = targetGuard.tex;
+						download.ptr = pixels.data();
+						Assert::IsTrue(pl_tex_download(gpu, &download), L"pl_tex_download failed for S2-H4");
+						rendered.push_back(std::move(pixels));
+					}
+				}
+				AssertCleanLibplaceboLog(log);
+				return rendered;
+			};
+
+			// Protected behavior: BOTH enabled = 1 and enabled = 0 branches must emit exact code 512 on
+			// EVERY pixel of the 64x64 grid across all 12 refreshes (zero pixels flicker to 513 or 511).
+			for (const bool enabled : { true, false })
+			{
+				const std::wstring branch = enabled ? L"enabled=1" : L"enabled=0";
+				const std::vector<std::vector<uint32_t>> exactFrames = renderTenBitFrames(enabled, exactValue, frames);
+				Assert::AreEqual(static_cast<size_t>(frames), exactFrames.size(), L"unexpected frame count");
+				for (int f = 0; f < frames; ++f)
+				{
+					Assert::AreEqual(static_cast<size_t>(width) * static_cast<size_t>(height), exactFrames[f].size(),
+						L"unexpected pixel count");
+					for (int y = 0; y < height; ++y)
+					{
+						for (int x = 0; x < width; ++x)
+						{
+							const uint32_t pixel = exactFrames[f][static_cast<size_t>(y) * width + x];
+							const int r = static_cast<int>(pixel & 1023u);
+							const int g = static_cast<int>((pixel >> 10) & 1023u);
+							const int b = static_cast<int>((pixel >> 20) & 1023u);
+							if (r != exactCode || g != exactCode || b != exactCode)
+							{
+								Assert::Fail((L"S2-H4 exact code 512 flickered at amp=0.5 (" + branch +
+									L", refresh " + std::to_wstring(f) + L", pixel " +
+									std::to_wstring(x) + L"," + std::to_wstring(y) +
+									L"): got R=" + std::to_wstring(r) + L" G=" + std::to_wstring(g) +
+									L" B=" + std::to_wstring(b)).c_str());
+							}
+						}
+					}
+				}
+
+				// Rule 3 negative control (ii): a non-exact fractional input on the exact same shader
+				// must still dither across {512, 513} on frame 0 (r = 0), proving d was not globally disabled.
+				const std::vector<std::vector<uint32_t>> fracFrames = renderTenBitFrames(enabled, fractionalValue, 1);
+				Assert::AreEqual(size_t{ 1 }, fracFrames.size(), L"expected 1 fractional negative-control frame");
+				int count512 = 0;
+				int count513 = 0;
+				for (const uint32_t pixel : fracFrames[0])
+				{
+					const int r = static_cast<int>(pixel & 1023u);
+					const int g = static_cast<int>((pixel >> 10) & 1023u);
+					const int b = static_cast<int>((pixel >> 20) & 1023u);
+					Assert::IsTrue((r == 512 || r == 513) && g == r && b == r,
+						(L"S2-H4 fractional control (" + branch + L") emitted out-of-range code: R=" +
+							std::to_wstring(r) + L" G=" + std::to_wstring(g) + L" B=" + std::to_wstring(b)).c_str());
+					if (r == 512)
+						++count512;
+					else
+						++count513;
+				}
+				Assert::IsTrue(count512 > 0 && count513 > 0,
+					(L"S2-H4 negative control (ii) (" + branch + L"): fractional input must dither across {512, 513} " +
+						L"(count512=" + std::to_wstring(count512) + L", count513=" + std::to_wstring(count513) + L")").c_str());
+			}
+		}
+
 		// Gate verify 2026-10-17: the sigma-delta on the GPU is unbiased. Flat patches at every
 		// 10-bit level and at off-grid levels (every 1/32 code around chosen codes, exactly
 		// representable in the rgba16f OUTPUT texture) go through the shader for 192 static
