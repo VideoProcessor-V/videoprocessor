@@ -56,6 +56,7 @@ namespace FallbackPlainText
 			{ "gamma boost: replaced by appearance", "The gamma boost is not applied because the colour appearance setting is on and does that job" },
 			{ "saturation: replaced by appearance", "The saturation setting is not applied because the colour appearance setting is on and does that job" },
 			{ "appearance: calibration LUT", "The room and screen colour adaptation is off because the calibration table is applied before it" },
+			{ "appearance: output transfer", "The room and screen colour adaptation is off because the output transfer is not supported (PQ, gamma, BT.1886 or sRGB only)" },
 			{ "native readback", "Some graphics-card readbacks use a simpler ready check, so analysis results may arrive later" },
 			{ "early upload", "Early upload of frames to the graphics card is off" },
 			{ "early upload frames", "Early upload is holding fewer frames than requested" },

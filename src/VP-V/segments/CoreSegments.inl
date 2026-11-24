@@ -353,7 +353,9 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
             appearance.trimTargetNits = dvStage.TrimsTargetNits();
             appearance.trimSaturationGain = dvStage.TrimsSaturationGain();   // FIX1 SHOULD 2: the trim x Hunt cap
             appearance.toeKnee = dynamicDrive.PublishedParams().boostKnee;   // FIX1 SHOULD 3: gamma_boost_knee, not a fixed 0
-            appearance.signalPq = target.color.transfer == PL_COLOR_TRC_PQ;
+            const ExtendedRange::OutputTransfer appTrc = ExtendedRange::DescribeOutputTransfer(target.color);
+            appearance.transferSupported = appTrc.supported; appearance.signalPq = appTrc.pq;
+            appearance.transferKind = appTrc.kind; appearance.transferParam = appTrc.param;
             appearance.outputGamma = LedDisplayGamma(target.color.transfer);
             appearance.honourL11 = activeSettings.appearanceHonourL11;
             appearance.calibrationLutBefore = target.lut != nullptr;   // FIX1 MUST 2 (null when VP's stage took the LUT)

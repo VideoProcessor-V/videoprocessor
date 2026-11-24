@@ -198,6 +198,20 @@
 //!MAXIMUM 4.0
 2.4
 
+//!PARAM apx_trc_kind
+//!DESC output transfer of a gamma signal: 0 power (apx_gamma), 1 BT.1886, 2 sRGB
+//!TYPE float
+//!MINIMUM 0.0
+//!MAXIMUM 2.0
+0.0
+
+//!PARAM apx_trc_param
+//!DESC BT.1886 black offset b (0 = pure 2.4)
+//!TYPE float
+//!MINIMUM 0.0
+//!MAXIMUM 100.0
+0.0
+
 //!PARAM apx_knee
 //!DESC encoded level below which the model blends out (gamma_boost_knee, the delta-11 toe; 0 = none)
 //!TYPE float
@@ -362,12 +376,45 @@ float ap_nits_from_pq(float pq)
     return 10000.0 * pow(max(e - AP_PQ_C1, 0.0) / max(den, 1e-4), 1.0 / AP_PQ_M1);
 }
 
+// S2-H2: BT.1886 and sRGB output transfers in relative linear light (odd below 0),
+// matching shaders/DV trims.glsl (dv_trc_lin / dv_trc_enc) and ExtendedRange::ToLinear / FromLinear.
+// Standards: ITU-R BT.1886 (gamma 2.4, black offset b = apx_trc_param) and IEC 61966-2-1 (sRGB).
+float ap_trc_lin(float v)
+{
+    float a = abs(v);
+    float r = a;
+    if (apx_trc_kind < 1.5) {
+        float b = max(apx_trc_param, 0.0);
+        float k = pow(b, 2.4);
+        r = (pow(a + b, 2.4) - k) / (pow(1.0 + b, 2.4) - k);
+    } else {
+        r = a <= 0.04045 ? a * (1.0 / 12.92) : pow((a + 0.055) * (1.0 / 1.055), 2.4);
+    }
+    return v < 0.0 ? -r : r;
+}
+
+float ap_trc_enc(float l)
+{
+    float a = abs(l);
+    float r = a;
+    if (apx_trc_kind < 1.5) {
+        float b = max(apx_trc_param, 0.0);
+        float k = pow(b, 2.4);
+        r = pow(a * (pow(1.0 + b, 2.4) - k) + k, 1.0 / 2.4) - b;
+    } else {
+        r = a <= 0.0031308 ? a * 12.92 : 1.055 * pow(a, 1.0 / 2.4) - 0.055;
+    }
+    return l < 0.0 ? -r : r;
+}
+
 // Encoded code -> linear light relative to the reference white (1 = white), codes inside 0..1 only.
 float ap_to_rel(float v)
 {
     if (apx_pq > 0.5)
         return ap_nits_from_pq(v) / max(apx_ref_nits, 1e-6);
-    return pow(v, apx_gamma);
+    if (apx_trc_kind > 0.5)
+        return ap_trc_lin(v);
+    return pow(max(v, 0.0), apx_gamma);
 }
 
 // Light relative to the SCREEN white -> encoded code.
@@ -376,6 +423,8 @@ float ap_from_rel(float r)
     r = max(r, 0.0);
     if (apx_pq > 0.5)
         return ap_pq_from_nits(r * apx_screen_nits);
+    if (apx_trc_kind > 0.5)
+        return ap_trc_enc(r);
     return pow(r, 1.0 / apx_gamma);
 }
 

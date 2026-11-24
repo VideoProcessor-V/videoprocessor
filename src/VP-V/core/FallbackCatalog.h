@@ -708,9 +708,9 @@ namespace FallbackCatalog
 	// CF-1 FIX1 MUST 2: appearance on, but libplacebo applies the calibration LUT before it (calibration_lut_stage libplacebo): off.
 	inline Decision AppearanceCalibrationLut(bool conflict)
 	{
-		return conflict ? Engaged("appearance: calibration LUT", "off: the calibration LUT runs before it (set calibration_lut_stage to auto or vp)")
-		                : Released("appearance: calibration LUT");
+		return conflict ? Engaged("appearance: calibration LUT", "off: the calibration LUT runs before it (set calibration_lut_stage to auto or vp)") : Released("appearance: calibration LUT");
 	}
+	inline Decision AppearanceOutputTransfer(bool unsupported) { return unsupported ? Engaged("appearance: output transfer", "off: unsupported output transfer (PQ, gamma, BT.1886 or sRGB outputs only)") : Released("appearance: output transfer"); }
 	// Adaptive downscale: GPU failures leave plain SSIM (w = 1); a missing SSimDownscaler leaves
 	// libplacebo's downscaler.
 	inline Decision OutputScaling(bool adaptiveRequested, unsigned long long newFailures, bool ssimShaderMissing)

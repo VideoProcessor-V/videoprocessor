@@ -479,6 +479,38 @@ color.a = 1.0;
 		return "?";
 	}
 
+	// S2-H2: output-transfer gate shared by DvHostStage (DV trims) and AppearanceStage (CAM16).
+	// Accepts PQ, pure-power gamma (GAMMA18..GAMMA28), BT.1886 and sRGB (with BT.1886 black offset b
+	// read from libplacebo's own linearize on the inferred display); all others (HLG, linear, log, unknown)
+	// return supported = false.
+	OutputTransfer DescribeOutputTransfer(const pl_color_space& targetColor)
+	{
+		OutputTransfer out;
+		const enum pl_color_transfer trc = targetColor.transfer;
+		if (trc == PL_COLOR_TRC_PQ)
+		{
+			out.supported = true;
+			out.pq = true;
+			return out;
+		}
+		if (trc == PL_COLOR_TRC_BT_1886 || trc == PL_COLOR_TRC_SRGB)
+		{
+			pl_color_space display = targetColor;
+			pl_color_space_infer(&display);
+			Transfer t;
+			if (DescribeTransfer(display, true, t))
+			{
+				out.supported = true;
+				out.kind = static_cast<int>(t.kind);
+				out.param = static_cast<double>(t.param);
+			}
+			return out;
+		}
+		if (PowerGamma(trc) > 0.0)
+			out.supported = true;
+		return out;
+	}
+
 	// Audit 2026-10-16: the LUT carry's math (CPU mirror of LATE_LUT_*).
 	bool LutCarryable(const pl_custom_lut* lut)
 	{

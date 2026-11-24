@@ -266,6 +266,7 @@ public:
 		sync(FallbackCatalog::AppearanceL11Reference(m_appearanceWanted && m_appearanceDecision.l11Ignored));
 		// VPV-FALLBACK appearance: calibration LUT
 		sync(FallbackCatalog::AppearanceCalibrationLut(m_appearanceWanted && m_appearanceDecision.lutConflict));
+		sync(FallbackCatalog::AppearanceOutputTransfer(m_appearanceWanted && m_appearanceDecision.transferUnsupported));   // VPV-FALLBACK appearance: output transfer
 		if (shaderMissing)
 			m_appearanceStatus = "appearance: shader missing (shaders\\vp_cam16_appearance.glsl did not load)";
 		else
@@ -381,21 +382,9 @@ public:
 			std::string state;
 			const bool dvPicture = state.empty() && renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION &&
 				f.dm && f.dm->valid;
-			pl_color_space display = target.color;
-			pl_color_space_infer(&display);
-			const bool pq = target.color.transfer == PL_COLOR_TRC_PQ;
-			// Review C5: only transfers that are a pure power law (or BT.1886 / sRGB,
-			// which LedDisplayGamma maps to 2.4 / 2.2); linear, HLG and others: off.
-			const enum pl_color_transfer trc = target.color.transfer;
-			// GEM-008 (Gemini colour-dv-hdr SHOULD-3, AMEND): BT.1886 and sRGB use their own curve, described by
-			// ExtendedRange::DescribeTransfer with piecewise = true (BT.1886 b from libplacebo's linearize of the inferred
-			// display). It cannot describe one (false): the existing visible state "off for this output transfer".
-			ExtendedRange::Transfer trimsTransfer = { ExtendedRange::TransferKind::Power, 0.0f };
-			const bool piecewiseTransfer = trc == PL_COLOR_TRC_BT_1886 || trc == PL_COLOR_TRC_SRGB;
-			const bool transferDescribed = !piecewiseTransfer || ExtendedRange::DescribeTransfer(display, true, trimsTransfer);
-			const bool gammaSignal = (trc == PL_COLOR_TRC_GAMMA18 || trc == PL_COLOR_TRC_GAMMA20 ||
-				trc == PL_COLOR_TRC_GAMMA22 || trc == PL_COLOR_TRC_GAMMA24 || trc == PL_COLOR_TRC_GAMMA26 ||
-				trc == PL_COLOR_TRC_GAMMA28 || piecewiseTransfer) && transferDescribed;
+			pl_color_space display = target.color; pl_color_space_infer(&display);
+			const ExtendedRange::OutputTransfer trimsTrc = ExtendedRange::DescribeOutputTransfer(target.color);
+			const bool pq = trimsTrc.pq, gammaSignal = trimsTrc.supported && !trimsTrc.pq;
 			std::string params;
 			DvTrimSelection::Selection selection;   // feat/dv-l8: L8, else L2, else none
 			if (!f.trims || !f.trimsStageRuns)
@@ -455,9 +444,8 @@ public:
 					trimsParams.insert(trimsParams.end(), ictcp.begin(), ictcp.end());
 					trimsParams.push_back({ "dv_signal_pq", pq ? 1.0 : 0.0 });
 					trimsParams.push_back({ "dv_gamma", f.outputGamma });
-					// GEM-008: the output transfer kind (0 power: dv_gamma; 1 BT.1886; 2 sRGB) and its parameter (BT.1886 b).
-					trimsParams.push_back({ "dv_trc_kind", piecewiseTransfer ? static_cast<double>(static_cast<int>(trimsTransfer.kind)) : 0.0 });
-					trimsParams.push_back({ "dv_trc_param", piecewiseTransfer ? static_cast<double>(trimsTransfer.param) : 0.0 });
+					trimsParams.push_back({ "dv_trc_kind", static_cast<double>(trimsTrc.kind) });   // GEM-008: 0 power, 1 BT.1886, 2 sRGB
+					trimsParams.push_back({ "dv_trc_param", trimsTrc.param });                      // GEM-008: BT.1886 black offset b
 					trimsParams.push_back({ "dv_peak_nits", display.hdr.max_luma });
 					// GEM-012 (AMEND): the per-pixel constants once per frame on the CPU, from the CPU reference's own maths.
 					trimsParams.push_back({ "dv_peak_pq", DvMath::PqFromNits(display.hdr.max_luma) });
