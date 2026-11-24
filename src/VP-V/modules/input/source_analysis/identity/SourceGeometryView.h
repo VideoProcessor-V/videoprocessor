@@ -258,6 +258,11 @@ namespace SourceGeometry
 		add(SourceIdentity::Chain::kReasonLatchRelease, "latch released");
 		add(SourceIdentity::Chain::kReasonMenuHold, "menu");
 		add(SourceIdentity::Chain::kReasonAbrStep, "rendition step");
+		// SID S2/S3 (LOW-A): zero while S2/S3 switches are off (W1 status stays byte-identical).
+		add(SourceIdentity::Chain::kReasonScreenOnly, "screen only");
+		add(SourceIdentity::Chain::kReasonJointEntry, "joint entry");
+		add(SourceIdentity::Chain::kReasonChainAloneEntry, "chain-alone entry");
+		add(SourceIdentity::Chain::kReasonNullTableMismatch, "null-table mismatch");
 		return w;
 	}
 

@@ -52,6 +52,7 @@ namespace SourceIdentity
 			// SID r2 (M4): the safety rules applied at the clean start, the latched size (0 = none) and the latch counters. Nothing of it is
 			// shown while the rules are off (the lines stay byte identical).
 			bool safetyRules = false;
+			bool jointLatch = false;        // Stage S2 joint latch active (may be on with or without legacy safetyRules)
 			int latchNx = 0, latchNy = 0;
 			bool latchDeferred = false;     // N1: a starvation release of the latch waits for the next cut / black / fade
 			LatchCounters latch;
@@ -107,15 +108,24 @@ namespace SourceIdentity
 
 			inline const char* AxisName(int a) { return a == 0 ? "H" : "V"; }
 
-			// SID r2 (M4): the latch reasons of the published (applied) geometry. Only the r2 bits: they are zero while the rules are off.
-			constexpr uint32_t kLatchReasonBits = kReasonNonConventional | kReasonLatchBar | kReasonLatchRelease | kReasonMenuHold | kReasonAbrStep;
+			// SID r2 (M4) + S2/S3 (LOW-A): the latch and S2/S3 reasons of the published (applied) geometry. Zero while the rules/S2/S3 are off.
+			constexpr uint32_t kLatchReasonBits = kReasonNonConventional | kReasonLatchBar | kReasonLatchRelease | kReasonMenuHold | kReasonAbrStep |
+				kReasonScreenOnly | kReasonJointEntry | kReasonChainAloneEntry | kReasonNullTableMismatch;
 
-			// SID r2 (M4): "; upscale latch 1920x1080" / "; no upscale latch" while the rules are on; "; SID safety rules: off" while off
-			// (S-3f a: the default state is visible, never silent; the detail text still says nothing of the latch while off).
+			// SID r2 (M4) + S2 (LOW-A): "; upscale latch 1920x1080" / "; no upscale latch" while safety rules are on;
+			// "; joint upscale latch 1920x1080" / "; joint latch: active (no upscale latch)" when jointLatch is on without safetyRules;
+			// "; SID safety rules: off" while both are off (S-3f a: default state visible, byte-identical to W1).
 			inline std::string LatchClause(const ChainStatusInput& in)
 			{
-				if (!in.safetyRules)
+				if (!in.safetyRules && !in.jointLatch)
 					return "; SID safety rules: off";
+				if (in.jointLatch && !in.safetyRules)
+				{
+					if (in.latchNx > 0 && in.latchNy > 0)
+						return "; joint upscale latch " + std::to_string(in.latchNx) + "x" + std::to_string(in.latchNy) +
+							(in.latchDeferred ? " (release deferred to the next cut)" : "");
+					return "; joint latch: active (no upscale latch)";
+				}
 				if (in.latchNx > 0 && in.latchNy > 0)
 					return "; upscale latch " + std::to_string(in.latchNx) + "x" + std::to_string(in.latchNy) +
 						(in.latchDeferred ? " (release deferred to the next cut)" : "");
@@ -258,6 +268,12 @@ namespace SourceIdentity
 					std::to_string(c.releasesBound) + ", hard bound " + std::to_string(c.releasesHardBound) + "), deferred " + std::to_string(c.deferred) +
 					" (cancelled " + std::to_string(c.deferCancelled) + "), held back " + std::to_string(c.heldBack) + ", not conventional " +
 					std::to_string(c.nonConventional) + "\n";
+			}
+			else if (in.jointLatch)
+			{
+				t += "  joint latch on: latch " + (in.latchNx > 0 && in.latchNy > 0
+					? std::to_string(in.latchNx) + "x" + std::to_string(in.latchNy)
+					: std::string("none")) + (in.latchDeferred ? " (release deferred to the next cut)" : "") + "\n";
 			}
 			if (!in.evidenceText.empty())
 				t += "  " + in.evidenceText + "\n";

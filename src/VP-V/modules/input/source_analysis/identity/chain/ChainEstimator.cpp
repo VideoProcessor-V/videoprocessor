@@ -190,7 +190,8 @@ namespace SourceIdentity
 				return n;
 			}
 			std::atomic<bool> latchDeferredA{ false };   // SID r2 N1: a starvation release waits for the next cut / black / fade (status)
-			std::atomic<bool> safetyLiveA{ false };      // SID r2: the rules applied at the clean start (status)
+			std::atomic<bool> safetyLiveA{ false };      // SID r2: legacy safety rules applied at the clean start (status)
+			std::atomic<bool> jointLatchLiveA{ false };  // Stage S2 (LOW-A): joint latch applied at the clean start (status)
 			std::atomic<int> latchNxA{ 0 }, latchNyA{ 0 };   // SID r2: the latched size (0 = no latch; status)
 
 			// ---- the worker's own state (procMutex: one processing thread at a time) ---------------------------------------
@@ -1196,7 +1197,8 @@ namespace SourceIdentity
 					stepMarkOn = smCfg.enabled;
 					convProposalsOn = convP;
 					const bool rulesActive = safe || jointLatchOn;
-					safetyLiveA.store(rulesActive, std::memory_order_release);
+					safetyLiveA.store(safe, std::memory_order_release);
+					jointLatchLiveA.store(jointLatchOn, std::memory_order_release);
 					latchNxA.store(0, std::memory_order_release);
 					latchDeferredA.store(false, std::memory_order_release);
 					latchNyA.store(0, std::memory_order_release);
@@ -3017,7 +3019,46 @@ namespace SourceIdentity
 				// Dump v4 (VP_SID_DUMP_V4_DIR): LAST, after the cost, the schedule, the published record and the status (audit M2: its I/O and
 				// verifier delay nothing the decision or its timing reads); reads only (its verifier and its files are its own).
 				if (diagEvals.Ready(diagTag, "b_evals", Diag::EvalsHeaderV4()))
-					DumpV4(run, out, flags, windowCleared, s.seq, s.timeUs, rasterW, rasterH, step, floorCodes, classicalOk, classical, cost, diagExtra);
+				{
+					DiagEvalExtra v4Extra = diagExtra;
+					// LOW-B: when all S3 switches are OFF and no manifest depth override is supplied (step < 4, outputBits < 12),
+					// lazily compute empirical floor + 8-bit code ladder strictly AFTER gov.NoteCost so default-OFF offline
+					// Dump v4 captures self-tag 8-in-10 HDMI loops as N8 at zero live runtime cost.
+					const int outBitsV4 = diagOutputBits.load(std::memory_order_acquire);
+					if (effFloorMode == EmpiricalFloorMode::Off && !cfg.useDepthNullTables && !cfg.eightBitPromotion &&
+						step < 4 && outBitsV4 < 12)
+					{
+						EdgeStatsSettings lazyCfg = cfg.evidence.edgeStats;
+						lazyCfg.enabled = true;
+						bool haveLazyFloor = false;
+						double lazyFloor = 0.0;
+						const double q = std::isfinite(lazyCfg.quietSegmentQuantile)
+							? ClampD(lazyCfg.quietSegmentQuantile, 0.0, 0.5)
+							: (1.0 / 4.0);
+						for (int a = 0; a < 2; ++a)
+						{
+							if (!run[a].have)
+								continue;
+							const EmpiricalFloorResult ef = EstimateEmpiricalFloor(run[a].ls, static_cast<double>(step), lazyCfg);
+							v4Extra.empFloor[a] = ef.floorCodes;
+							v4Extra.empValid[a] = ef.valid;
+							if (!ef.valid)
+								continue;
+							const double axisDepthFloor = (ef.totalSegments > 0 &&
+								static_cast<double>(ef.zeroSegmentsSkipped) >= q * static_cast<double>(ef.totalSegments))
+								? 0.0
+								: ef.floorCodes;
+							if (!haveLazyFloor || axisDepthFloor < lazyFloor)
+							{
+								lazyFloor = axisDepthFloor;
+								haveLazyFloor = true;
+							}
+						}
+						const bool lazyLadder = DetectEightBitCodeLadder(s);
+						v4Extra.nullDepth = ClassifyBitDepthFromStep(step, outBitsV4, haveLazyFloor ? lazyFloor : 0.0, lazyLadder);
+					}
+					DumpV4(run, out, flags, windowCleared, s.seq, s.timeUs, rasterW, rasterH, step, floorCodes, classicalOk, classical, cost, v4Extra);
+				}
 			}
 
 			// ---- status ---------------------------------------------------------------------------------------------------
@@ -3067,6 +3108,7 @@ namespace SourceIdentity
 				in.stale = c.stale;
 				in.windowClears = c.windowClears;
 				in.safetyRules = safetyLiveA.load(std::memory_order_acquire);
+				in.jointLatch = jointLatchLiveA.load(std::memory_order_acquire);
 				in.latchNx = latchNxA.load(std::memory_order_acquire);
 				in.latchNy = latchNyA.load(std::memory_order_acquire);
 				in.latchDeferred = latchDeferredA.load(std::memory_order_acquire);
