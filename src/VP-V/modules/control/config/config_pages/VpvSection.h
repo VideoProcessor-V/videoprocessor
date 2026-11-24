@@ -77,6 +77,14 @@ namespace Vpv
 		std::function<std::vector<UnitCard>(const QString& unitId)> unitCards;
 	};
 
+	// Ensures VP-V's property-scoped stylesheet rules are installed once on qApp
+	// (idempotent; call before building pages to avoid post-build StyleChange cascades).
+	void EnsureSectionStyleSheet();
+
+	// Populates an already-parented VP-V page body in place (top-down, avoiding bottom-up
+	// reparenting cascades). CreateSection allocates a root and delegates here.
+	void PopulateSection(QWidget* root, const Host& host);
+
 	// The VP-V page body (the host wraps it in its own page frame).
 	QWidget* CreateSection(const Host& host);
 
@@ -92,6 +100,9 @@ namespace Vpv
 
 	// The pathway stored in [vpv] (default VP-V when absent).
 	bool PathwayIsVpv(const Host& host);
+
+	// Diagnostic count of currently alive Vpv::State instances (for deterministic leak verification).
+	int LiveSectionStateCount();
 
 	// Object names (tests and automation).
 	inline QString ObjectName(const QString& part) { return QStringLiteral("vpv.") + part; }

@@ -27,6 +27,9 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QCoreApplication>
+#include <QApplication>
+#include <QEvent>
+#include <QFrame>
 #include <QFile>
 #include <QFontDatabase>
 #include <QLabel>
@@ -2509,6 +2512,473 @@ namespace
 			control<QWidget>(window, QStringLiteral("config.shortcuts.global_actions"))->isEnabled(),
 			"GEM-058: Both pathways tab stays unlocked and editable in Original pathway");
 	}
+
+	// Rule 8 Red Team (Failure 1): cut_soft_reset and source_resolution_frame_bound are real, live, interactive
+	// rule-32 controls on the VP-V page (vpv.repair.cut_soft_reset, vpv.scaling.source_resolution_frame_bound per GEM-053)
+	// that round-trip edits and clears cleanly to [vprenderer.Default] without leaking duplicate QWidgets onto Bill's
+	// pages or detached dummy QObject coverage aliases.
+	void testRule32ProfileControlsRoundTripWithoutBillDuplicates()
+	{
+		auto checkNoBillDuplicatesAndAliasOwnership = [](ConfigEditorWindow& window, QWidget* cutWidget, QWidget* frameBoundWidget)
+		{
+			require(window.findChild<QWidget*>(QStringLiteral("config.vprenderer.cut_soft_reset")) == nullptr &&
+				window.findChildren<QWidget*>(QStringLiteral("config.vprenderer.cut_soft_reset")).isEmpty(),
+				"duplicate QWidget leaked onto Bill's pages for cut_soft_reset");
+			require(window.findChild<QWidget*>(QStringLiteral("config.vprenderer.source_resolution_frame_bound")) == nullptr &&
+				window.findChildren<QWidget*>(QStringLiteral("config.vprenderer.source_resolution_frame_bound")).isEmpty(),
+				"duplicate QWidget leaked onto Bill's pages for source_resolution_frame_bound");
+			const std::pair<QString, QWidget*> pairs[] = {
+				{ QStringLiteral("config.vprenderer.cut_soft_reset"), cutWidget },
+				{ QStringLiteral("config.vprenderer.source_resolution_frame_bound"), frameBoundWidget },
+			};
+			for (const auto& pair : pairs)
+			{
+				for (QObject* alias : window.findChildren<QObject*>(pair.first))
+				{
+					require(qobject_cast<QWidget*>(alias) == nullptr,
+						("coverage alias must not be a QWidget: " + S(pair.first)).c_str());
+					require(alias->parent() == pair.second,
+						("coverage alias must be a direct child of the live VP-V control: " + S(pair.first)).c_str());
+				}
+			}
+		};
+
+		QTemporaryDir dir;
+		// W23 feature lock: cut_soft_reset is active while detail_pulse_stabilise or texture_restore is on.
+		const QString path = WriteFixture(dir, "[general]\nrenderer: VP Renderer\n[vprenderer.Default]\ndetail_pulse_stabilise: on\n");
+		const QString cutName = Vpv::ObjectName(QStringLiteral("repair.cut_soft_reset"));
+		const QString frameBoundName = Vpv::ObjectName(QStringLiteral("scaling.source_resolution_frame_bound"));
+		{
+			ConfigEditorWindow window(path, 0, true);
+			auto* section = control<QWidget>(window, Vpv::ObjectName(QStringLiteral("section")));
+			require(window.findChildren<QComboBox*>(cutName).size() == 1,
+				"vpv.repair.cut_soft_reset is not present exactly once");
+			require(window.findChildren<QComboBox*>(frameBoundName).size() == 1,
+				"vpv.scaling.source_resolution_frame_bound is not present exactly once");
+			auto* cut = control<QComboBox>(window, cutName);
+			auto* frameBound = control<QComboBox>(window, frameBoundName);
+			require(section->isAncestorOf(cut) && cut->isEnabled(),
+				"vpv.repair.cut_soft_reset is not a live control on the VP-V page");
+			require(section->isAncestorOf(frameBound) && frameBound->isEnabled(),
+				"vpv.scaling.source_resolution_frame_bound is not a live control on the VP-V page");
+			// Baseline defaults before editing (guards against pre-baked "off" values).
+			require(cut->currentData().toString().isEmpty(),
+				"vpv.repair.cut_soft_reset did not start at its unset default");
+			require(frameBound->currentData().toString().isEmpty(),
+				"vpv.scaling.source_resolution_frame_bound did not start at its unset default");
+			checkNoBillDuplicatesAndAliasOwnership(window, cut, frameBound);
+
+			const int offIdx = cut->findData(QStringLiteral("off"));
+			require(offIdx >= 0, "vpv.repair.cut_soft_reset does not offer 'off'");
+			const int fbOffIdx = frameBound->findData(QStringLiteral("off"));
+			require(fbOffIdx >= 0, "vpv.scaling.source_resolution_frame_bound does not offer 'off'");
+			cut->setCurrentIndex(offIdx);
+			frameBound->setCurrentIndex(fbOffIdx);
+			QCoreApplication::processEvents();
+			require(control<QPushButton>(window, QStringLiteral("applyConfiguration"))->isEnabled(),
+				"editing rule-32 VP-V controls did not mark the document edited");
+			save(window);
+		}
+		{
+			ConfigFile config;
+			require(config.Load(path.toStdString(), ConfigFile::ReadPolicy::Fresh), "cannot reload saved config");
+			std::string v;
+			require(config.TryGetString("vprenderer.default", "cut_soft_reset", v) && Vpv::SameValue(v, "off"),
+				("cut_soft_reset=off was not written to [vprenderer.Default]\n" + FileText(path)).c_str());
+			require(config.TryGetString("vprenderer.default", "source_resolution_frame_bound", v) && Vpv::SameValue(v, "off"),
+				("source_resolution_frame_bound=off was not written to [vprenderer.Default]\n" + FileText(path)).c_str());
+			require(!config.TryGetString("vprenderer", "cut_soft_reset", v),
+				"cut_soft_reset leaked into the base [vprenderer] section");
+			require(!config.TryGetString("vprenderer", "source_resolution_frame_bound", v),
+				"source_resolution_frame_bound leaked into the base [vprenderer] section");
+			requireVpReads(path);
+		}
+		{
+			ConfigEditorWindow reopened(path, 0, true);
+			auto* cut = control<QComboBox>(reopened, cutName);
+			auto* frameBound = control<QComboBox>(reopened, frameBoundName);
+			require(cut->currentData().toString().compare(QStringLiteral("off"), Qt::CaseInsensitive) == 0,
+				"cut_soft_reset=off did not reload into the VP-V UI");
+			require(frameBound->currentData().toString().compare(QStringLiteral("off"), Qt::CaseInsensitive) == 0,
+				"source_resolution_frame_bound=off did not reload into the VP-V UI");
+			checkNoBillDuplicatesAndAliasOwnership(reopened, cut, frameBound);
+
+			// Bidirectional round-trip: reset both back to unset defaults and verify removal from disk.
+			cut->setCurrentIndex(0);
+			frameBound->setCurrentIndex(0);
+			QCoreApplication::processEvents();
+			save(reopened);
+		}
+		{
+			ConfigFile cleared;
+			require(cleared.Load(path.toStdString(), ConfigFile::ReadPolicy::Fresh), "cannot reload cleared config");
+			std::string v;
+			require(!cleared.TryGetString("vprenderer.default", "cut_soft_reset", v),
+				("resetting cut_soft_reset to default did not remove the key\n" + FileText(path)).c_str());
+			require(!cleared.TryGetString("vprenderer.default", "source_resolution_frame_bound", v),
+				("resetting source_resolution_frame_bound to default did not remove the key\n" + FileText(path)).c_str());
+			requireVpReads(path);
+		}
+	}
+
+	// Rule 8 Red Team (Failure 3): legacy [vprenderer] pipeline_original_pathway migrates cleanly to [vpv],
+	// never strands in [vprenderer.profile_1] or any other section, obeys [vpv] precedence, preserves co-located
+	// renderer profile settings, and never treats a named [vprenderer.*] profile section as global [vpv].
+	void testLegacyVprendererPathwayMigratesToVpvAndSurvivesSave()
+	{
+		auto hasNonVpvPathway = [](const ConfigFile& cfg)
+		{
+			for (const std::string& section : cfg.GetSectionNames())
+			{
+				if (ConfigFile::NormalizeName(section) == "vpv") continue;
+				std::string v;
+				if (cfg.TryGetString(section, "pipeline_original_pathway", v)) return true;
+			}
+			return false;
+		};
+		auto pathwayValue = [](ConfigEditorWindow& window)
+		{
+			return control<QComboBox>(window, Vpv::ObjectName(QStringLiteral("pathway")))->currentData().toString();
+		};
+		auto requireDefaultGlobalActions = [](ConfigEditorWindow& window, bool expectStateReport, const char* context)
+		{
+			auto* edit = control<QLineEdit>(window, QStringLiteral("config.shortcuts.global_actions"));
+			require(edit->text().isEmpty(), context);
+			const QString expected = expectStateReport ? QStringLiteral("Default: state_report") : QStringLiteral("Default: none");
+			require(edit->placeholderText().contains(expected), context);
+		};
+
+		// Case 1: Save round-trip & zero stranding in [vprenderer] or [vprenderer.profile_1].
+		{
+			QTemporaryDir dir;
+			const QString path = WriteFixture(dir,
+				"[general]\nrenderer: VP Renderer\n[vprenderer]\npipeline_original_pathway: On\n");
+			{
+				ConfigEditorWindow window(path, 0, true);
+				requireDefaultGlobalActions(window, false,
+					"Case 1: legacy [vprenderer] pathway=On did not show Original global_actions default (none)");
+				require(pathwayValue(window).compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0,
+					"Case 1: vpv.pathway did not show Original (on)");
+				require(!control<QWidget>(window, Vpv::ObjectName(QStringLiteral("content")))->isEnabled(),
+					"Case 1: VP-V content was not disabled on Original pathway");
+				save(window);
+			}
+			ConfigFile config;
+			require(config.Load(path.toStdString(), ConfigFile::ReadPolicy::Fresh), "Case 1: cannot reload saved config");
+			std::string v;
+			require(config.TryGetString("vpv", "pipeline_original_pathway", v) &&
+				QString::fromStdString(v).trimmed().compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0,
+				("Case 1: [vpv] pipeline_original_pathway was not migrated to 'on'\n" + FileText(path)).c_str());
+			require(!config.TryGetString("vprenderer", "pipeline_original_pathway", v),
+				("Case 1: [vprenderer] retained pipeline_original_pathway\n" + FileText(path)).c_str());
+			require(!config.TryGetString("vprenderer.profile_1", "pipeline_original_pathway", v),
+				("Case 1: pipeline_original_pathway stranded in [vprenderer.profile_1]\n" + FileText(path)).c_str());
+			require(!hasNonVpvPathway(config),
+				("Case 1: pipeline_original_pathway stranded in a non-[vpv] section\n" + FileText(path)).c_str());
+			requireVpReads(path);
+			{
+				ConfigEditorWindow reopened(path, 0, true);
+				requireDefaultGlobalActions(reopened, false,
+					"Case 1: reopened config lost Original global_actions default after save");
+				require(pathwayValue(reopened).compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0,
+					"Case 1: reopened config did not stay on Original pathway");
+				require(!control<QWidget>(reopened, Vpv::ObjectName(QStringLiteral("content")))->isEnabled(),
+					"Case 1: reopened VP-V content was not disabled");
+			}
+		}
+
+		// Case 2: [vpv] precedence over legacy [vprenderer].
+		{
+			QTemporaryDir dir;
+			const QString path = WriteFixture(dir,
+				"[general]\nrenderer: VP Renderer\n[vpv]\npipeline_original_pathway: off\n[vprenderer]\npipeline_original_pathway: on\n");
+			{
+				ConfigEditorWindow window(path, 0, true);
+				requireDefaultGlobalActions(window, true,
+					"Case 2: [vpv] pipeline_original_pathway=off did not take precedence over [vprenderer]=on");
+				require(pathwayValue(window).compare(QStringLiteral("off"), Qt::CaseInsensitive) == 0,
+					"Case 2: vpv.pathway did not honour [vpv] off over [vprenderer] on");
+				require(control<QWidget>(window, Vpv::ObjectName(QStringLiteral("content")))->isEnabled(),
+					"Case 2: VP-V content was disabled despite [vpv] off");
+				save(window);
+			}
+			ConfigFile config;
+			require(config.Load(path.toStdString(), ConfigFile::ReadPolicy::Fresh), "Case 2: cannot reload saved config");
+			std::string v;
+			require(config.TryGetString("vpv", "pipeline_original_pathway", v) &&
+				QString::fromStdString(v).trimmed().compare(QStringLiteral("off"), Qt::CaseInsensitive) == 0,
+				("Case 2: [vpv] off was overwritten on save\n" + FileText(path)).c_str());
+			require(!config.TryGetString("vprenderer", "pipeline_original_pathway", v) &&
+				!config.TryGetString("vprenderer.profile_1", "pipeline_original_pathway", v) &&
+				!hasNonVpvPathway(config),
+				("Case 2: legacy [vprenderer] pathway leaked or stranded on save\n" + FileText(path)).c_str());
+			requireVpReads(path);
+			{
+				ConfigEditorWindow reopened(path, 0, true);
+				requireDefaultGlobalActions(reopened, true,
+					"Case 2: reopened config did not preserve [vpv] precedence");
+			}
+		}
+
+		// Case 3a: Mixed [vprenderer] with upscaler: lanczos + pipeline_original_pathway: On.
+		{
+			QTemporaryDir dir;
+			const QString path = WriteFixture(dir,
+				"[general]\nrenderer: VP Renderer\n[vprenderer]\nupscaler: lanczos\npipeline_original_pathway: On\n");
+			{
+				ConfigEditorWindow window(path, 0, true);
+				requireDefaultGlobalActions(window, false,
+					"Case 3a: mixed [vprenderer] pathway=On did not show Original global_actions default");
+				require(pathwayValue(window).compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0,
+					"Case 3a: mixed [vprenderer] did not select Original pathway");
+				save(window);
+			}
+			ConfigFile config;
+			require(config.Load(path.toStdString(), ConfigFile::ReadPolicy::Fresh), "Case 3a: cannot reload saved config");
+			std::string v;
+			require(config.TryGetString("vpv", "pipeline_original_pathway", v) &&
+				QString::fromStdString(v).trimmed().compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0,
+				("Case 3a: [vpv] pipeline_original_pathway was not migrated\n" + FileText(path)).c_str());
+			require(!hasNonVpvPathway(config),
+				("Case 3a: pipeline_original_pathway stranded outside [vpv]\n" + FileText(path)).c_str());
+			bool preservedUpscaler = false;
+			for (const std::string& section : config.GetSectionNames())
+			{
+				if (ConfigFile::NormalizeName(section).rfind("vprenderer.", 0) != 0) continue;
+				std::string u;
+				if (config.TryGetString(section, "upscaler", u) && Vpv::SameValue(u, "lanczos"))
+					preservedUpscaler = true;
+			}
+			require(preservedUpscaler,
+				("Case 3a: upscaler: lanczos was lost during legacy [vprenderer] migration\n" + FileText(path)).c_str());
+			requireVpReads(path);
+			{
+				ConfigEditorWindow reopened(path, 0, true);
+				requireDefaultGlobalActions(reopened, false,
+					"Case 3a: reopened config lost Original global_actions default");
+				reopened.selectPage(QStringLiteral("Scaling"));
+				QCoreApplication::processEvents();
+				require(control<QComboBox>(reopened, QStringLiteral("config.vprenderer.scaling.upscaler"))->currentData().toString()
+					== QStringLiteral("lanczos"),
+					"Case 3a: upscaler: lanczos did not survive into reopened Scaling UI");
+			}
+		}
+
+		// Case 3b: Mixed [vprenderer] with rendering-owned sdr_target_nits: 120 + pipeline_original_pathway: On
+		// (guards against a shortcut migration that drops the whole [vprenderer] section unconditionally).
+		{
+			QTemporaryDir dir;
+			const QString path = WriteFixture(dir,
+				"[general]\nrenderer: VP Renderer\n[vprenderer]\nsdr_target_nits: 120\npipeline_original_pathway: On\n");
+			{
+				ConfigEditorWindow window(path, 0, true);
+				requireDefaultGlobalActions(window, false,
+					"Case 3b: mixed [vprenderer] pathway=On did not show Original global_actions default");
+				save(window);
+			}
+			ConfigFile config;
+			require(config.Load(path.toStdString(), ConfigFile::ReadPolicy::Fresh), "Case 3b: cannot reload saved config");
+			std::string v;
+			require(config.TryGetString("vpv", "pipeline_original_pathway", v) &&
+				QString::fromStdString(v).trimmed().compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0,
+				("Case 3b: [vpv] pipeline_original_pathway was not migrated\n" + FileText(path)).c_str());
+			require(!hasNonVpvPathway(config),
+				("Case 3b: pipeline_original_pathway stranded outside [vpv]\n" + FileText(path)).c_str());
+			bool preservedNits = false;
+			for (const std::string& section : config.GetSectionNames())
+			{
+				if (ConfigFile::NormalizeName(section).rfind("vprenderer.", 0) != 0) continue;
+				std::string nits;
+				if (config.TryGetString(section, "sdr_target_nits", nits) && Vpv::SameValue(nits, "120"))
+					preservedNits = true;
+			}
+			require(preservedNits,
+				("Case 3b: sdr_target_nits: 120 was dropped when migrating [vprenderer] pathway\n" + FileText(path)).c_str());
+			requireVpReads(path);
+		}
+
+		// Case 4 (Negative control): named profile [vprenderer.Default] must NOT be treated as global [vpv].
+		{
+			QTemporaryDir dir;
+			const QString path = WriteFixture(dir,
+				"[general]\nrenderer: VP Renderer\n[vprenderer.Default]\npipeline_original_pathway: on\n");
+			{
+				ConfigEditorWindow window(path, 0, true);
+				requireDefaultGlobalActions(window, true,
+					"Case 4: named [vprenderer.Default] was wrongly treated as global Original pathway");
+				require(pathwayValue(window).compare(QStringLiteral("off"), Qt::CaseInsensitive) == 0,
+					"Case 4: vpv.pathway wrongly read pipeline_original_pathway from [vprenderer.Default]");
+				require(control<QWidget>(window, Vpv::ObjectName(QStringLiteral("content")))->isEnabled(),
+					"Case 4: VP-V content was wrongly disabled by [vprenderer.Default]");
+				save(window);
+			}
+			ConfigFile config;
+			require(config.Load(path.toStdString(), ConfigFile::ReadPolicy::Fresh), "Case 4: cannot reload saved config");
+			std::string v;
+			require(!config.TryGetString("vpv", "pipeline_original_pathway", v),
+				("Case 4: named [vprenderer.Default] key was wrongly promoted to [vpv]\n" + FileText(path)).c_str());
+			{
+				ConfigEditorWindow reopened(path, 0, true);
+				requireDefaultGlobalActions(reopened, true,
+					"Case 4: reopened config wrongly switched away from state_report");
+			}
+		}
+	}
+
+	// Rule 8 Red Team (W1R-FIX5-2): VP-V styles are hoisted ONCE onto qApp with strictly VP-V-scoped property
+	// selectors; per-widget stylesheets on vpv.section, vpv.units, cards, and setby labels stay empty; a second
+	// window does not grow qApp->styleSheet(); and Bill's General and Rendering pages carry zero VP-V style tags.
+	void testHoistedStylesStaySingleSheetAndIsolatedFromBillPages()
+	{
+		QTemporaryDir dir;
+		const QString path = WriteFixture(dir, "[general]\nrenderer: VP Renderer\n[vprenderer.Default]\n");
+		require(qApp != nullptr, "QApplication instance is missing");
+
+		qsizetype sheetSizeAfterFirst = 0;
+		QString sheetAfterFirst;
+		{
+			ConfigEditorWindow window(path, 0, true);
+			const QString appSheet = qApp->styleSheet();
+			for (const char* selector : {
+				"QFrame[vpvCard=\"true\"]",
+				"QLabel[vpvSetBy=\"true\"]",
+				"QWidget[vpvSection=\"true\"]",
+				"QTabWidget[vpvUnitsTabs=\"true\"]" })
+			{
+				require(appSheet.contains(QString::fromLatin1(selector)),
+					(std::string("qApp->styleSheet() is missing hoisted VP-V selector: ") + selector).c_str());
+			}
+			sheetSizeAfterFirst = appSheet.size();
+			sheetAfterFirst = appSheet;
+
+			auto* section = control<QWidget>(window, Vpv::ObjectName(QStringLiteral("section")));
+			auto* units = control<QTabWidget>(window, Vpv::ObjectName(QStringLiteral("units")));
+			require(section->property("vpvSection").toBool(), "vpv.section lacks vpvSection=true property");
+			require(section->styleSheet().isEmpty(),
+				("vpv.section retains a per-widget stylesheet: " + S(section->styleSheet())).c_str());
+			require(units->property("vpvUnitsTabs").toBool(), "vpv.units lacks vpvUnitsTabs=true property");
+			require(units->styleSheet().isEmpty(),
+				("vpv.units retains a per-widget stylesheet: " + S(units->styleSheet())).c_str());
+
+			int cardCount = 0;
+			for (QFrame* frame : section->findChildren<QFrame*>())
+			{
+				if (!frame->property("vpvCard").toBool()) continue;
+				++cardCount;
+				require(frame->styleSheet().isEmpty(),
+					("a vpvCard frame retains a per-widget stylesheet: " + S(frame->objectName())).c_str());
+			}
+			require(cardCount > 0, "no vpvCard=true card frames were found inside vpv.section");
+
+			int setByCount = 0;
+			for (QLabel* label : section->findChildren<QLabel*>())
+			{
+				if (!label->objectName().startsWith(QStringLiteral("vpv.setby.line."))) continue;
+				++setByCount;
+				require(label->property("vpvSetBy").toBool(),
+					("setby label lacks vpvSetBy=true property: " + S(label->objectName())).c_str());
+				require(label->styleSheet().isEmpty(),
+					("setby label retains a per-widget stylesheet: " + S(label->objectName())).c_str());
+			}
+			require(setByCount > 0, "no vpv.setby.line.* labels were found inside vpv.section");
+
+			// Negative control (Rule 3 — Bill-page isolation): Bill's General (index 0) and Rendering (index 2)
+			// pages must carry zero VP-V style-scoping properties so qApp's hoisted rules cannot bleed onto Bill's UI.
+			auto* pages = control<QStackedWidget>(window, QStringLiteral("settingsPages"));
+			require(pages->count() > 2, "settingsPages does not contain Bill's General and Rendering pages");
+			for (const int billIndex : { 0, 2 })
+			{
+				QWidget* billPage = pages->widget(billIndex);
+				require(billPage != nullptr && billPage != section && !billPage->isAncestorOf(section),
+					"expected Bill page index unexpectedly points to vpv.section");
+				const QList<QWidget*> widgets = billPage->findChildren<QWidget*>();
+				require(!widgets.isEmpty(), "Bill page has no descendant widgets (vacuous isolation check)");
+				auto checkNoVpvTags = [&](QWidget* w)
+				{
+					require(!w->property("vpvSection").toBool(),
+						("Bill page widget leaked vpvSection=true: " + S(w->objectName())).c_str());
+					require(!w->property("vpvCard").toBool(),
+						("Bill page widget leaked vpvCard=true: " + S(w->objectName())).c_str());
+					require(!w->property("vpvDrivePage").toBool(),
+						("Bill page widget leaked vpvDrivePage=true: " + S(w->objectName())).c_str());
+				};
+				checkNoVpvTags(billPage);
+				for (QWidget* child : widgets)
+					checkNoVpvTags(child);
+			}
+		}
+
+		// Idempotency: constructing a second ConfigEditorWindow must NOT append duplicate stylesheet text to qApp.
+		{
+			ConfigEditorWindow window2(path, 0, true);
+			require(qApp->styleSheet().size() == sheetSizeAfterFirst && qApp->styleSheet() == sheetAfterFirst,
+				"constructing a second ConfigEditorWindow grew or duplicated qApp->styleSheet()");
+		}
+	}
+
+	// Rule 8 Red Team (W1R-FIX5-5): Vpv::State has no reference cycle and frees cleanly on normal close, on
+	// rebuildConfigurationShell() (previous->deleteLater()), and when ConfigEditorWindow closes while an orphaned
+	// previous shell (and its timers) is still pending DeferredDelete.
+	void testSectionStateFreesOnCloseAndShellRebuildWithoutDanglingTimers()
+	{
+		QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+		QCoreApplication::processEvents();
+		QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+		QCoreApplication::processEvents();
+		const int baseline = Vpv::LiveSectionStateCount();
+
+		QTemporaryDir dir;
+		const QString path = WriteFixture(dir, "[general]\nrenderer: VP Renderer\n[vprenderer.Default]\n");
+
+		// 1. Normal open/close lifecycle + negative control proving LiveSectionStateCount tracks live states.
+		{
+			ConfigEditorWindow window(path, 0, true);
+			require(Vpv::LiveSectionStateCount() == baseline + 1,
+				"LiveSectionStateCount did not increment to baseline + 1 when ConfigEditorWindow opened");
+		}
+		QCoreApplication::processEvents();
+		QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+		QCoreApplication::processEvents();
+		require(Vpv::LiveSectionStateCount() == baseline,
+			"normal ConfigEditorWindow close leaked Vpv::State");
+
+		// 2. Shell rebuild leak test + orphaned-shell dangling-timer hazard on close.
+		{
+			ConfigEditorWindow window(path, 0, true);
+			require(Vpv::LiveSectionStateCount() == baseline + 1,
+				"LiveSectionStateCount did not increment to baseline + 1 on second window open");
+
+			// Rebuild #1: previous shell is queued for deleteLater(); draining events must free the old Vpv::State.
+			window.setRendererDiscoveryForTesting(
+				{ QStringLiteral("VP Renderer"), QStringLiteral("DirectShow - madVR") },
+				{ QStringLiteral("VP Renderer") });
+			QCoreApplication::processEvents();
+			QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+			QCoreApplication::processEvents();
+			QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+			QCoreApplication::processEvents();
+			require(control<QWidget>(window, Vpv::ObjectName(QStringLiteral("section"))) != nullptr,
+				"shell rebuild did not recreate vpv.section");
+			require(Vpv::LiveSectionStateCount() == baseline + 1,
+				"shell rebuild leaked previous Vpv::State (cycle or retained strong reference)");
+
+			// Rebuild #2 WITHOUT draining processEvents(): leave an orphaned previous shell + its timers pending
+			// DeferredDelete when ~ConfigEditorWindow() executes on scope exit.
+			window.setRendererDiscoveryForTesting(
+				{ QStringLiteral("VP Renderer"), QStringLiteral("DirectShow - madVR") },
+				{ QStringLiteral("VP Renderer") });
+			require(control<QWidget>(window, Vpv::ObjectName(QStringLiteral("section"))) != nullptr,
+				"second shell rebuild did not recreate vpv.section");
+		}
+		// Drain pending 0-ms timers and deferred deletes after ~ConfigEditorWindow(): must neither crash nor leak.
+		QCoreApplication::processEvents();
+		QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+		QCoreApplication::processEvents();
+		QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+		QCoreApplication::processEvents();
+		require(Vpv::LiveSectionStateCount() == baseline,
+			"closing ConfigEditorWindow with a pending orphaned shell leaked Vpv::State");
+	}
 }
 
 int RunVpvConfigTests(const std::function<int(const char*, const std::function<void()>&)>& run,
@@ -2554,5 +3024,9 @@ int RunVpvConfigTests(const std::function<int(const char*, const std::function<v
 	failures += run("VP-V: config placement, links, planned tiers and feature locks (CB W4-2)", testConfigPlacementFixes);
 	failures += run("VP-V: editor state fixes (queue grey, global_actions placeholder, managed grey, calibration note)", testEditorStateFixes);
 	failures += run("VP-V: Both pathways tab unlocked and queue_target under Input (CB W4-5)", testBothPathwaysTabAndQueueTargetInInput);
+	failures += run("VP-V: rule-32 profile controls round trip without Bill duplicates", testRule32ProfileControlsRoundTripWithoutBillDuplicates);
+	failures += run("VP-V: legacy vprenderer pathway migrates to vpv and survives save", testLegacyVprendererPathwayMigratesToVpvAndSurvivesSave);
+	failures += run("VP-V: hoisted styles stay single-sheet and isolated from Bill pages", testHoistedStylesStaySingleSheetAndIsolatedFromBillPages);
+	failures += run("VP-V: section state frees on close and shell rebuild without dangling timers", testSectionStateFreesOnCloseAndShellRebuildWithoutDanglingTimers);
 	return failures;
 }
