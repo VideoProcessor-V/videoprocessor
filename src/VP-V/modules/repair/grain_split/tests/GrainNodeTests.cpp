@@ -1197,6 +1197,162 @@ namespace GrainNodeTestsNs
 				fillMemo.ReleaseGpuSpots();
 			}
 		}
+
+		// S2-H5 Follow-Up (MEDIUM-3): a failed ReplaceOwnerFill leaves the previously registered fill active on the
+		// skeleton; BandMemoModule must preserve Registered()==true and the prior RegisteredReserveBytes(), surface the
+		// failed replace visibly via FallbackLines()/OnStatus(Fallbacks) (Rule 4), use ReplaceOwnerFill (not RegisterOwnerFill,
+		// which the real skeleton refuses with AlreadyRegistered) on the next resize, and clear regProblem_ + reset tried_
+		// when returning to the already-registered size so retrying the previously failed size later succeeds.
+		TEST_METHOD(BandMemoModulePreservesRegistrationOnFailedReplaceAndRetriesOnNextResize)
+		{
+			namespace GB = Vpv::GrainBand;
+			namespace RE = RendererExtension;
+
+			struct ReplaceDemand : Vpv::Skeleton::IExternalDemand
+			{
+				VpSkeleton::SkeletonMemo* memo = nullptr;
+				bool refuseReplace = false;
+				VpSkeleton::SkeletonMemo::Registration refuseCode = VpSkeleton::SkeletonMemo::Registration::BadDefaults;
+				int registerCalls = 0;
+				int replaceCalls = 0;
+				uint64_t lastReserveBytes = 0;
+
+				void SetExternalDemand(const void*, const void*, const std::vector<VpSkeleton::ConsumerDecl>&,
+					const std::vector<VpSkeleton::ProductId>&) override {}
+				void ClearExternalDemand(const void*, const void*) override {}
+
+				VpSkeleton::SkeletonMemo::Registration RegisterOwnerFill(VpSkeleton::ProductId id, VpSkeleton::AcquireForm form,
+					const std::string& unit, VpSkeleton::OwnerFill fill) override
+				{
+					++registerCalls;
+					lastReserveBytes = fill.reserveBytes;
+					return memo->RegisterOwnerFill(id, form, unit, std::move(fill));
+				}
+
+				VpSkeleton::SkeletonMemo::Registration ReplaceOwnerFill(VpSkeleton::ProductId id, VpSkeleton::AcquireForm form,
+					const std::string& unit, VpSkeleton::OwnerFill fill) override
+				{
+					++replaceCalls;
+					lastReserveBytes = fill.reserveBytes;
+					if (refuseReplace)
+						return refuseCode;
+					return memo->ReplaceOwnerFill(id, form, unit, std::move(fill));
+				}
+
+				bool UnregisterOwnerFill(VpSkeleton::ProductId id, VpSkeleton::AcquireForm form, const std::string& unit) override
+				{
+					return memo->UnregisterOwnerFill(id, form, unit);
+				}
+			};
+
+			VpSkeleton::SkeletonMemo memo;
+			ReplaceDemand demand;
+			demand.memo = &memo;
+
+			GB::BandMemoModule module;
+			int host = 0;
+			RE::Context ctx{};
+			ctx.host = &host;
+
+			const VpSkeleton::Dims d1080{ 1920, 1080 };
+			const VpSkeleton::Dims d1440{ 2560, 1440 };
+			const VpSkeleton::Dims d4k{ 3840, 2160 };
+			const uint64_t r1080 = GB::BandMemoReserveBytes(d1080);
+			const uint64_t r1440 = GB::BandMemoReserveBytes(d1440);
+			const uint64_t r4k = GB::BandMemoReserveBytes(d4k);
+			const std::string r4kText = std::to_string(r4k);
+
+			// 1. Initial registration at 1920x1080.
+			Assert::IsTrue(module.Observe(&host, d1080, &demand), L"initial 1080p registration succeeds");
+			Assert::IsTrue(module.Registered(), L"module is registered at 1080p");
+			Assert::AreEqual(r1080, module.RegisteredReserveBytes(), L"registered reserve matches 1080p");
+			Assert::AreEqual(1, demand.registerCalls, L"initial registration uses RegisterOwnerFill once");
+			Assert::AreEqual(0, demand.replaceCalls, L"initial registration does not call ReplaceOwnerFill");
+			Assert::AreEqual(r1080, demand.lastReserveBytes, L"registered fill carries 1080p reserve");
+			Assert::IsTrue(memo.HasOwnerFill(VpSkeleton::kBandMemo, VpSkeleton::AcquireForm::Gpu), L"skeleton holds kBandMemo fill");
+			Assert::IsTrue(module.FallbackLines().empty(), L"healthy initial registration has no fallback line");
+
+			// 2. Refuse ReplaceOwnerFill on resize to 3840x2160 while keeping the 1080p fill registered in the skeleton.
+			demand.refuseReplace = true;
+			Assert::IsTrue(module.Observe(&host, d4k, &demand), L"failed replace preserves active registration");
+			Assert::AreEqual(1, demand.registerCalls, L"failed replace does not call RegisterOwnerFill");
+			Assert::AreEqual(1, demand.replaceCalls, L"resize invokes ReplaceOwnerFill once");
+			Assert::IsTrue(module.Registered(), L"Registered() stays true after failed ReplaceOwnerFill");
+			Assert::AreEqual(r1080, module.RegisteredReserveBytes(), L"RegisteredReserveBytes() stays at prior 1080p reserve");
+			Assert::IsTrue(memo.HasOwnerFill(VpSkeleton::kBandMemo, VpSkeleton::AcquireForm::Gpu), L"prior 1080p fill remains registered");
+
+			const std::vector<std::string> fb1 = module.FallbackLines();
+			Assert::AreEqual(size_t(1), fb1.size(), L"failed replace emits a visible FallbackLine (Rule 4)");
+			Assert::IsTrue(Contains(fb1[0], GB::kBandMemoFallbackId), L"fallback line carries product.band_memo_unavailable id");
+			Assert::IsTrue(Contains(fb1[0], "refused: bad defaults"), L"fallback line names the replace refusal");
+			Assert::IsTrue(Contains(fb1[0], r4kText.c_str()), L"fallback line names the requested 4K reserve");
+
+			std::vector<std::string> statusLines;
+			module.OnStatus(ctx, RE::StatusKind::Fallbacks, statusLines, nullptr, nullptr);
+			Assert::AreEqual(size_t(1), statusLines.size(), L"OnStatus(Fallbacks) surfaces the failed replace");
+			Assert::AreEqual(fb1[0], statusLines[0], L"OnStatus(Fallbacks) matches FallbackLines()");
+
+			// Same-input negative control (Rule 3): prove the skeleton contract hazard is real — on the exact same
+			// SkeletonMemo where the 1080p fill stayed registered, calling RegisterOwnerFill (what pre-fix code did
+			// after clobbering registered_ to false) fails with AlreadyRegistered.
+			const VpSkeleton::SkeletonMemo::Registration negReg = memo.RegisterOwnerFill(
+				VpSkeleton::kBandMemo, VpSkeleton::AcquireForm::Gpu, GB::kBandMemoUnit, GB::MakeBandMemoOwnerFill(r1440));
+			Assert::IsTrue(negReg == VpSkeleton::SkeletonMemo::Registration::AlreadyRegistered,
+				L"negative control: real skeleton refuses RegisterOwnerFill with AlreadyRegistered while prior fill is active");
+
+			// 3. Accept ReplaceOwnerFill again (while real skeleton still refuses RegisterOwnerFill with AlreadyRegistered)
+			//    and resize to 2560x1440: module must call ReplaceOwnerFill (not RegisterOwnerFill) and recover cleanly.
+			demand.refuseReplace = false;
+			Assert::IsTrue(module.Observe(&host, d1440, &demand), L"next resize retries via ReplaceOwnerFill and succeeds");
+			Assert::AreEqual(1, demand.registerCalls, L"next resize must NOT call RegisterOwnerFill");
+			Assert::AreEqual(2, demand.replaceCalls, L"next resize calls ReplaceOwnerFill");
+			Assert::IsTrue(module.Registered(), L"module stays registered after replace recovery");
+			Assert::AreEqual(r1440, module.RegisteredReserveBytes(), L"RegisteredReserveBytes() updates to 1440p");
+			Assert::AreEqual(r1440, demand.lastReserveBytes, L"replaced fill carries 1440p reserve");
+			Assert::IsTrue(module.FallbackLines().empty(), L"successful replace clears FallbackLines");
+
+			statusLines.clear();
+			module.OnStatus(ctx, RE::StatusKind::Fallbacks, statusLines, nullptr, nullptr);
+			Assert::IsTrue(statusLines.empty(), L"OnStatus(Fallbacks) clears after successful replace");
+
+			// 4. Returning to the already-registered size (2560x1440) after a failed replace (3840x2160) clears
+			//    regProblem_ and resets tried_ so retrying the exact previously failed size (3840x2160) later succeeds.
+			demand.refuseReplace = true;
+			Assert::IsTrue(module.Observe(&host, d4k, &demand), L"second failed replace preserves 1440p registration");
+			Assert::AreEqual(1, demand.registerCalls, L"still no extra RegisterOwnerFill");
+			Assert::AreEqual(3, demand.replaceCalls, L"4K resize invokes ReplaceOwnerFill");
+			Assert::IsTrue(module.Registered(), L"Registered() stays true on second failed replace");
+			Assert::AreEqual(r1440, module.RegisteredReserveBytes(), L"prior 1440p reserve preserved on second failed replace");
+			const std::vector<std::string> fb2 = module.FallbackLines();
+			Assert::AreEqual(size_t(1), fb2.size(), L"second failed replace emits visible FallbackLine");
+			Assert::IsTrue(Contains(fb2[0], "refused: bad defaults") && Contains(fb2[0], r4kText.c_str()),
+				L"second failed replace names refusal and 4K reserve");
+
+			// Same-input negative control (Rule 3): before returning to 1440p, re-observing 4K stays latched at tried_==r4k.
+			demand.refuseReplace = false;
+			Assert::IsTrue(module.Observe(&host, d4k, &demand), L"negative control: latched 4K keeps active 1440p registration");
+			Assert::AreEqual(3, demand.replaceCalls, L"negative control: without returning to registered size, tried_ suppresses 4K retry");
+			Assert::AreEqual(r1440, module.RegisteredReserveBytes(), L"negative control: reserve stays 1440p while 4K is latched");
+			Assert::AreEqual(size_t(1), module.FallbackLines().size(), L"negative control: fallback persists while latched at failed size");
+
+			// Returning to the already-registered size clears regProblem_ and resets tried_ back to reserve_.
+			Assert::IsTrue(module.Observe(&host, d1440, &demand), L"returning to already-registered 1440p succeeds");
+			Assert::AreEqual(3, demand.replaceCalls, L"returning to already-registered size needs no ReplaceOwnerFill");
+			Assert::AreEqual(1, demand.registerCalls, L"returning to already-registered size needs no RegisterOwnerFill");
+			Assert::IsTrue(module.Registered(), L"still registered at 1440p");
+			Assert::AreEqual(r1440, module.RegisteredReserveBytes(), L"reserve stays 1440p");
+			Assert::IsTrue(module.FallbackLines().empty(), L"returning to already-registered size clears regProblem_");
+
+			// Retrying the exact previously failed size (3840x2160) now succeeds because tried_ was reset.
+			Assert::IsTrue(module.Observe(&host, d4k, &demand), L"retrying previously failed 4K succeeds after returning to registered size");
+			Assert::AreEqual(1, demand.registerCalls, L"4K retry uses ReplaceOwnerFill, not RegisterOwnerFill");
+			Assert::AreEqual(4, demand.replaceCalls, L"returning to registered size reset tried_, so 4K retries ReplaceOwnerFill");
+			Assert::IsTrue(module.Registered(), L"module is registered at 4K after retry");
+			Assert::AreEqual(r4k, module.RegisteredReserveBytes(), L"RegisteredReserveBytes() updates to 4K");
+			Assert::AreEqual(r4k, demand.lastReserveBytes, L"replaced fill carries 4K reserve");
+			Assert::IsTrue(memo.HasOwnerFill(VpSkeleton::kBandMemo, VpSkeleton::AcquireForm::Gpu), L"skeleton holds updated kBandMemo fill");
+			Assert::IsTrue(module.FallbackLines().empty(), L"FallbackLines stays clear after 4K retry succeeds");
+		}
 	};
 }
 
