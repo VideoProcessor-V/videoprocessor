@@ -11,6 +11,7 @@
 //   4. LateCarryPolicyQ7aCarriesUpTo2FramesNeverL3ClampAndResetsOnCut
 //   5. SettingsDefaultOffOriginalPathwayBitExactConfigRoundTripAndCtrlIStatus
 //   6. DownstreamQ9DitherNeedBitDepthFloorAndSigmaDeltaAboveBlackBtbClamp
+//   7. LateCarryPersistsPrevCleanValidAcrossHop2AndGuardsMissingRefGuideOn8x8Pocs
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -2391,6 +2392,253 @@ namespace TdV2SchedulerConfigNs
 							L"Full-range target must NOT artificially clamp at limited reference black (16/64)");
 					}
 				}
+			}
+		}
+
+		// =========================================================================
+		// 7. Item #5 Red-First: LateCarry prevCleanValid_ Persistence Across Hop 2
+		//    & Guarding Missing refGuide on 8x8 DCT STRICT/CELL POCS
+		// =========================================================================
+		TEST_METHOD(LateCarryPersistsPrevCleanValidAcrossHop2AndGuardsMissingRefGuideOn8x8Pocs)
+		{
+			// Derived uniform quantization prior: stepDelta = 12.0, deadZonePhi = 1/6 -> theta = 10.0,
+			// uniform quantization variance = Delta^2 / 12 = 12.0 -> 3-sigma pixel bound = 3 * sqrt(12) ~= 10.3923 codes.
+			const double stepDelta = 12.0;
+			const double phi = kDeadZonePhiInter;
+			const double theta = (1.0 - phi) * stepDelta; // 10.0
+			const double stepTotalVar = (stepDelta * stepDelta) / 12.0; // 12.0
+			const int cellPx = 16;
+
+			// -------------------------------------------------------------------------
+			// Sub-case A: Hop-2 prevCleanValid_ persistence + invalid-origin protection
+			// -------------------------------------------------------------------------
+			{
+				const int w = 64;
+				const int h = 64;
+				const int cellsW = w / cellPx; // 4
+				const int cellsH = h / cellPx; // 4
+				const ActiveRect active = ActiveRect::Full(w, h);
+
+				// Sharp high-contrast horizontal step (+80 codes at y=40) + linear horizontal ramp (+1.0 code/px).
+				// Linear in x and piecewise constant in y => exact zero bicubic ringing under pure horizontal pan (vx=+1.5, vy=0).
+				auto scene = [](double x, double y) -> double
+				{
+					return 420.0 + (y >= 40.0 ? 80.0 : 0.0) + 1.0 * x;
+				};
+
+				TdV2Plane onTimeClean(w, h, 0.0);
+				for (int y = 0; y < h; ++y)
+					for (int x = 0; x < w; ++x)
+						onTimeClean.at(x, y) = scene(static_cast<double>(x), static_cast<double>(y));
+
+				const TdV2Plane onTimeDelta(w, h, +9.0);
+
+				TdV2LateCarryController ctrl;
+				StandInRegistry si;
+				ctrl.OnOnTimeFrame(onTimeDelta, &si, &onTimeClean);
+
+				// Hop 1: cell (1, 1) ([16, 32)^2) has valid == 0 and bogus large vector while curClean1 has a -80 code spike there.
+				// Outside [16, 32)^2: curClean1 = scene - 6.0 (agrees with +9.0 * 2/3 = +6.0).
+				CellMotionField mf1 = CellMotionField::Uniform(cellsW, cellsH, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Camera);
+				const size_t invalidCell = 1u * static_cast<size_t>(cellsW) + 1u; // cell (1, 1) -> [16, 32)^2
+				mf1.valid[invalidCell] = 0u;
+				mf1.vx[invalidCell] = 25.0;
+				mf1.vy[invalidCell] = -19.0;
+
+				TdV2Plane curClean1(w, h, 0.0);
+				for (int y = 0; y < h; ++y)
+				{
+					for (int x = 0; x < w; ++x)
+					{
+						const bool inInvalid = (x >= 16 && x < 32 && y >= 16 && y < 32);
+						curClean1.at(x, y) = scene(static_cast<double>(x), static_cast<double>(y)) - (inInvalid ? 80.0 : 6.0);
+					}
+				}
+
+				const LateCarryDecision dec1 = ctrl.OnLateFrame(
+					curClean1, active, &mf1, stepTotalVar, cellsW, cellsH, cellPx, &si, nullptr);
+				Assert::IsTrue(dec1.carried && !dec1.expired && !dec1.usesL3Clamp,
+					L"Sub-case A Hop 1 must carry cleanly");
+				Assert::AreEqual(1, dec1.lateStreak);
+				Assert::AreEqual(static_cast<size_t>(0u), dec1.residualRejectedPixels,
+					L"Sub-case A Hop 1 must have 0 residual-rejected pixels");
+				Assert::AreEqual(0.0, MaxAbsPlaneRect(dec1.delta, ActiveRect{ 16, 16, 32, 32 }),
+					L"Sub-case A Hop 1 invalid cell [16,32)^2 must have exact 0.0 delta");
+
+				// Hop 2: valid == 1 everywhere with pan (+1.5, 0.0) crossing cell (1, 1) boundary into adjacent pixels
+				// (x = 14, 15 in 8x8 block (8, 16) and x = 30, 31 in 8x8 block (24, 16)), under 8x8 DCT STRICT with no codecModelPb/referenceClean.
+				const CellMotionField mf2 = CellMotionField::Uniform(cellsW, cellsH, 1.5, 0.0, 1.5, 0.0, RegionMotionClass::Camera);
+				TdV2Plane curClean2(w, h, 0.0);
+				for (int y = 0; y < h; ++y)
+					for (int x = 0; x < w; ++x)
+						curClean2.at(x, y) = scene(static_cast<double>(x) + 1.5, static_cast<double>(y)) - 6.0;
+
+				LateCarryContext ctx2;
+				ctx2.transformIdentified8x8 = true;
+				ctx2.residualMode = ResidualMode::Strict;
+				ctx2.stepDelta = stepDelta;
+				ctx2.deadZonePhi = phi;
+				ctx2.sourceBits = 10;
+				ctx2.cellProjIterations = 2;
+				ctx2.codecModelPb = nullptr;
+				ctx2.referenceClean = nullptr;
+
+				StandInRegistry si2;
+				const LateCarryDecision dec2 = ctrl.OnLateFrame(
+					curClean2, active, &mf2, stepTotalVar, cellsW, cellsH, cellPx, &si2, &ctx2);
+
+				Assert::IsTrue(dec2.carried && !dec2.expired && !dec2.usesL3Clamp,
+					L"Sub-case A Hop 2 must carry cleanly without L3 clamp");
+				Assert::AreEqual(2, dec2.lateStreak);
+				Assert::IsFalse(si2.IsActive(StandInKind::NonFiniteClosure),
+					L"Sub-case A Hop 2 must not trip NonFiniteClosure");
+
+				// 1. ZERO false residual rejections against Hop-1's poisoned -80 fallback in [16, 32)^2!
+				Assert::AreEqual(static_cast<size_t>(0u), dec2.residualRejectedPixels,
+					FormatMsg("Sub-case A Hop 2 falsely rejected %.0f pixels against Hop-1 invalid -80 fallback",
+						static_cast<double>(dec2.residualRejectedPixels)).c_str());
+
+				// 2. Pixels & 8x8 blocks touching Hop-1's invalid [16, 32)^2 origin fall back cleanly to ApplyTransformUnknownBound:
+				//    - At (14, 20) (sx=15.5) and (30, 20) (sx=31.5): Catmull-Rom([9,9,0,0], 0.5) * 1/3 = 4.5 / 3 = +1.5 (NOT rejected/crushed!).
+				//    - At (10, 20) inside the same 8x8 block (8, 16): 9.0 * 1/3 = +3.0 (NOT crushed to 0 by poisoned -80 STRICT DCT!).
+				Assert::AreEqual(1.5, dec2.delta.at(14, 20), 1e-6,
+					FormatMsg("Sub-case A Hop 2 delta(14,20)=%.6f != 1.5 (poisoned by Hop-1 -80 fallback?)",
+						dec2.delta.at(14, 20)).c_str());
+				Assert::AreEqual(1.5, dec2.delta.at(30, 20), 1e-6,
+					FormatMsg("Sub-case A Hop 2 delta(30,20)=%.6f != 1.5 (poisoned by Hop-1 -80 fallback?)",
+						dec2.delta.at(30, 20)).c_str());
+				Assert::AreEqual(3.0, dec2.delta.at(10, 20), 1e-6,
+					FormatMsg("Sub-case A Hop 2 delta(10,20)=%.6f != 3.0 (8x8 block (8,16) projected against poisoned prevClean_?)",
+						dec2.delta.at(10, 20)).c_str());
+				Assert::IsTrue(si2.IsActive(StandInKind::TransformUnknownBound),
+					L"Sub-case A Hop 2 must engage TransformUnknownBound for blocks touching Hop-1 invalid prevClean_");
+
+				// 3. Anti-cheat non-vacuity: clean interior 8x8 block (40, 40) (far from invalid [16,32)^2) STILL runs
+				//    8x8 DCT STRICT projection (sentRes = -6.0 => |DC| = 48 >= theta=10 => locked to 0.0 delta)!
+				Assert::IsTrue(dec2.usedTransformProjection,
+					L"Sub-case A Hop 2 must still run 8x8 DCT projection on valid interior blocks");
+				Assert::AreEqual(0.0, MaxAbsPlaneRect(dec2.delta, ActiveRect{ 40, 40, 48, 48 }), 1e-6,
+					L"Sub-case A Hop 2 valid block (40,40) must enforce STRICT 8x8 DCT projection");
+
+				// 4. MANDATORY IN-TEST NEGATIVE CONTROL (Rule 3): Run an unprotected Hop-2 baseline that drops
+				//    Hop-1 prevCleanValidMask (treating Hop-1's fallback-poisoned warpedPrevClean as valid everywhere,
+				//    exactly like pre-fix code) on the EXACT SAME (onTimeClean, curClean1, curClean2, mf1, mf2)!
+				{
+					TdV2Plane naiveHop1Clean, naiveHop2Clean;
+					std::vector<uint8_t> naiveMask1, naiveMask2;
+					WarpCleanReference(onTimeClean, curClean1, active, mf1.vx, mf1.vy, cellsW, cellsH, cellPx,
+						naiveHop1Clean, naiveMask1, nullptr, &mf1.valid);
+					// Unprotected Hop 2 ignores naiveMask1 == 0 in [16,32)^2 and warps naiveHop1Clean as valid!
+					WarpCleanReference(naiveHop1Clean, curClean2, active, mf2.vx, mf2.vy, cellsW, cellsH, cellPx,
+						naiveHop2Clean, naiveMask2, nullptr, &mf2.valid);
+
+					// Feed naiveHop2Clean as explicit referenceClean (valid everywhere) into a fresh controller at Hop 2:
+					TdV2LateCarryController naiveCtrl;
+					naiveCtrl.OnOnTimeFrame(onTimeDelta, nullptr, &onTimeClean);
+					naiveCtrl.OnLateFrame(curClean1, active, &mf1, stepTotalVar, cellsW, cellsH, cellPx, nullptr, nullptr);
+					LateCarryContext naiveCtx2 = ctx2;
+					naiveCtx2.referenceClean = &naiveHop2Clean;
+					const LateCarryDecision naiveDec2 = naiveCtrl.OnLateFrame(
+						curClean2, active, &mf2, stepTotalVar, cellsW, cellsH, cellPx, nullptr, &naiveCtx2);
+
+					Assert::IsTrue(naiveDec2.residualRejectedPixels >= 32u,
+						FormatMsg("Sub-case A negative control: unprotected Hop-2 rejected %.0f < 32 pixels on poisoned -80 ref",
+							static_cast<double>(naiveDec2.residualRejectedPixels)).c_str());
+					Assert::IsTrue(std::fabs(naiveDec2.delta.at(10, 20) - 3.0) > 1.5,
+						FormatMsg("Sub-case A negative control: unprotected Hop-2 delta(10,20)=%.4f was not distorted > 1.5 codes",
+							naiveDec2.delta.at(10, 20)).c_str());
+				}
+			}
+
+			// -------------------------------------------------------------------------
+			// Sub-case B: refGuide == nullptr with transformIdentified8x8 == true and
+			//             codecModelPb == nullptr MUST fall back to ApplyTransformUnknownBound
+			//             (NEVER synthesize predClean = curClean with sentRes == 0!)
+			// -------------------------------------------------------------------------
+			{
+				const int w = 32;
+				const int h = 32;
+				const int cellsW = w / cellPx; // 2
+				const int cellsH = h / cellPx; // 2
+				const ActiveRect active = ActiveRect::Full(w, h);
+
+				const TdV2Plane curClean(w, h, 420.0);
+				// Plant constant +3.0 DC carried delta -> Hop 1 decay (2/3) = +2.0 everywhere.
+				// In 8x8 DCT: DC = 8 * 2.0 = 16.0 > theta (10.0):
+				//   - Buggy predClean = curClean (sentRes == 0) clips DC to theta = 10.0 -> pixel delta = 10/8 = 1.25!
+				//   - Correct ApplyTransformUnknownBound (3 * sqrt(12) = 10.39) preserves pixel delta = +2.00 EXACTLY!
+				const TdV2Plane onTimeDelta(w, h, +3.0);
+				const CellMotionField stillMf = CellMotionField::Uniform(
+					cellsW, cellsH, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+
+				TdV2LateCarryController ctrlB;
+				StandInRegistry siB;
+				ctrlB.OnOnTimeFrame(onTimeDelta, &siB, /*onTimeClean=*/nullptr); // NO stored prevClean_!
+
+				LateCarryContext ctxB;
+				ctxB.transformIdentified8x8 = true;
+				ctxB.residualMode = ResidualMode::Strict;
+				ctxB.stepDelta = stepDelta;
+				ctxB.deadZonePhi = phi;
+				ctxB.sourceBits = 10;
+				ctxB.cellProjIterations = 2;
+				ctxB.codecModelPb = nullptr;
+				ctxB.referenceClean = nullptr;
+
+				const LateCarryDecision decB = ctrlB.OnLateFrame(
+					curClean, active, &stillMf, stepTotalVar, cellsW, cellsH, cellPx, &siB, &ctxB);
+
+				Assert::IsTrue(decB.carried && !decB.expired && !decB.usesL3Clamp,
+					L"Sub-case B must carry cleanly without L3 clamp");
+				Assert::IsFalse(decB.usedTransformProjection,
+					L"Sub-case B with null codecModelPb and null refGuide must NOT claim 8x8 DCT projection ran");
+				Assert::IsTrue(siB.IsActive(StandInKind::TransformUnknownBound),
+					L"Sub-case B must visibly engage StandInKind::TransformUnknownBound");
+				Assert::IsFalse(siB.IsActive(StandInKind::CodecModelPbStandIn),
+					L"Sub-case B must NOT falsely engage CodecModelPbStandIn when no reference guide exists for 8x8 DCT");
+
+				// Exact +2.0 carried delta everywhere (NOT clipped to theta / 8 = 1.25!).
+				for (int y = 0; y < h; ++y)
+				{
+					for (int x = 0; x < w; ++x)
+					{
+						Assert::AreEqual(2.0, decB.delta.at(x, y), 1e-6,
+							FormatMsg("Sub-case B delta(%.0f,%.0f)=%.6f != 2.0 (buggy predClean=curClean clipped to 1.25?)",
+								static_cast<double>(x), static_cast<double>(y), decB.delta.at(x, y)).c_str());
+					}
+				}
+
+				// MANDATORY IN-TEST NEGATIVE CONTROL (Rule 3) on the EXACT SAME (curClean, onTimeDelta, stillMf, stepDelta=12, phi=1/6):
+				// 1. Direct naive predClean = curClean (sentRes == 0, blendRes == +2.0) 8x8 STRICT DCT clips DC from 16.0 to
+				//    theta = 10.0 -> pixel delta = theta / 8 = 1.25 (0.75 code distortion proving the hazard is real!).
+				double sentZero[64] = {};
+				double blendTwo[64] = {};
+				double projOut[64] = {};
+				for (int i = 0; i < 64; ++i)
+					blendTwo[i] = 2.0;
+				ProjectResidual8x8Dct(sentZero, blendTwo, stepDelta, phi, ResidualMode::Strict, projOut);
+				const double expectedBuggyClip = theta / 8.0; // 1.25
+				Assert::AreEqual(expectedBuggyClip, projOut[0], 1e-6,
+					FormatMsg("Sub-case B negative control: naive sentRes=0 DCT output=%.6f != %.6f",
+						projOut[0], expectedBuggyClip).c_str());
+				Assert::IsTrue(std::fabs(decB.delta.at(0, 0) - projOut[0]) > 0.70,
+					L"Sub-case B negative control: protected fallback must differ from buggy sentRes=0 clip by > 0.70 codes");
+
+				// 2. Positive control: supplying an explicit Field B codecModelPb (= 420.0) on the EXACT SAME inputs
+				//    genuinely executes 8x8 DCT STRICT projection (delta == 1.25, usedTransformProjection == true)!
+				TdV2LateCarryController ctrlPb;
+				StandInRegistry siPb;
+				ctrlPb.OnOnTimeFrame(onTimeDelta, &siPb, /*onTimeClean=*/nullptr);
+				LateCarryContext ctxPb = ctxB;
+				ctxPb.codecModelPb = &curClean;
+				const LateCarryDecision decPb = ctrlPb.OnLateFrame(
+					curClean, active, &stillMf, stepTotalVar, cellsW, cellsH, cellPx, &siPb, &ctxPb);
+				Assert::IsTrue(decPb.carried && decPb.usedTransformProjection,
+					L"Sub-case B positive control: explicit codecModelPb must execute 8x8 DCT projection");
+				Assert::AreEqual(expectedBuggyClip, decPb.delta.at(0, 0), 1e-6,
+					L"Sub-case B positive control: explicit codecModelPb with sentRes=0 must clip DC to theta/8 = 1.25");
+				Assert::IsFalse(siPb.IsActive(StandInKind::CodecModelPbStandIn),
+					L"Sub-case B positive control: explicit codecModelPb must not engage CodecModelPbStandIn");
 			}
 		}
 	};

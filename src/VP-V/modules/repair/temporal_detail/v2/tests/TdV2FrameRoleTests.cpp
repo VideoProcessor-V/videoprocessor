@@ -616,6 +616,222 @@ namespace Tests
 						L"Genuine 8x8 blocked positive control MUST detect detectedPeriodY == 8");
 				}
 			}
+
+			TEST_METHOD(FrameRoleNeverDuplicatesOrStrandsRecordsAcrossCausalFlushAndLeadChanges)
+			{
+				// Red-First Adversarial State-Machine Proof (Rule 3 & Rule 4):
+				//   - Sub-case A1: ClassifyLatestCausal() followed by PushAndClassify() at lead=2 MUST NEVER emit seq=3 twice!
+				//   - Sub-case A2: SetLeadFrames(0 -> 2) followed by PushAndClassify() MUST NEVER re-emit already-emitted seq=1,2!
+				//   - Sub-case B:  SetLeadFrames(2 -> 0) MUST NEVER strand buffered frames (12,13) or silently evict/drop them
+				//                  across sustained streaming beyond kMaxWindowFrames; exact-once delivery with DroppedRecordCount()==0!
+				StandInRegistry reg;
+
+				// ---- Sub-case A1: ClassifyLatestCausal -> PushAndClassify(4, 5) duplicate bug ----
+				{
+					TdV2FrameRoleDetector det(2);
+					std::map<uint64_t, int> emitCount;
+					auto collect = [&](const FrameRoleDecision& d)
+					{
+						for (const auto& fl : d.flushedBeforeCut)
+							if (fl.produced)
+								++emitCount[fl.record.seq];
+						if (d.produced)
+							++emitCount[d.record.seq];
+					};
+
+					// Push seq 1, 2, 3 with lead=2 -> seq 1 emitted, seq 2 & 3 buffered.
+					const auto d1 = det.PushAndClassify(MakeEv(1, 0.95), &reg);
+					const auto d2 = det.PushAndClassify(MakeEv(2, 0.52), &reg);
+					const auto d3 = det.PushAndClassify(MakeEv(3, 0.91), &reg);
+					Assert::IsFalse(d1.produced);
+					Assert::IsFalse(d2.produced);
+					Assert::IsTrue(d3.produced && d3.record.seq == 1);
+					collect(d1);
+					collect(d2);
+					collect(d3);
+
+					// Provisionally emit latest buffered frame (seq=3) causally!
+					const auto lc = det.ClassifyLatestCausal(&reg);
+					Assert::IsTrue(lc.produced, L"ClassifyLatestCausal must emit seq=3 provisionally once");
+					Assert::AreEqual(static_cast<uint64_t>(3), lc.record.seq);
+					Assert::IsTrue((lc.record.validityBits & QualityPattern::kProvisional) != 0);
+					collect(lc);
+
+					// Continue pushing seq=4 (targets seq=2) and seq=5 (targets seq=3, ALREADY emitted!).
+					const auto d4 = det.PushAndClassify(MakeEv(4, 0.50), &reg);
+					const auto d5 = det.PushAndClassify(MakeEv(5, 0.93), &reg);
+					collect(d4);
+					collect(d5);
+
+					// Flush trailing un-emitted frames (4, 5) at stream end.
+					const auto eos = det.FlushEndOfStream(&reg);
+					for (const auto& ef : eos)
+						collect(ef);
+					Assert::IsTrue(det.FlushEndOfStream(&reg).empty(),
+						L"Repeated FlushEndOfStream must return empty");
+
+					Assert::AreEqual(static_cast<size_t>(5), emitCount.size(),
+						L"Exact-once set {1,2,3,4,5} must contain all 5 sequences");
+					for (uint64_t s = 1; s <= 5; ++s)
+					{
+						Assert::AreEqual(1, emitCount[s],
+							L"ClassifyLatestCausal -> PushAndClassify MUST emit every seq {1..5} EXACTLY ONCE (never duplicate seq=3!)");
+					}
+					Assert::AreEqual(static_cast<uint64_t>(0), det.DroppedRecordCount(),
+						L"ClassifyLatestCausal -> PushAndClassify must have DroppedRecordCount() == 0");
+				}
+
+				// ---- Sub-case A2: SetLeadFrames(0 -> 2) duplicate bug ----
+				{
+					TdV2FrameRoleDetector det(0);
+					std::map<uint64_t, int> emitCount;
+					auto collect = [&](const FrameRoleDecision& d)
+					{
+						for (const auto& fl : d.flushedBeforeCut)
+							if (fl.produced)
+								++emitCount[fl.record.seq];
+						if (d.produced)
+							++emitCount[d.record.seq];
+					};
+
+					// Lead=0 emits seq=1 and seq=2 immediately.
+					const auto d1 = det.PushAndClassify(MakeEv(1, 0.95), &reg);
+					const auto d2 = det.PushAndClassify(MakeEv(2, 0.52), &reg);
+					Assert::IsTrue(d1.produced && d1.record.seq == 1);
+					Assert::IsTrue(d2.produced && d2.record.seq == 2);
+					collect(d1);
+					collect(d2);
+
+					// Switch lead 0 -> 2 and push seq=3, 4 (window targetIdx lands on already-emitted seq=1, 2!).
+					det.SetLeadFrames(2);
+					const auto d3 = det.PushAndClassify(MakeEv(3, 0.92), &reg);
+					const auto d4 = det.PushAndClassify(MakeEv(4, 0.50), &reg);
+					const auto d5 = det.PushAndClassify(MakeEv(5, 0.90), &reg);
+					collect(d3);
+					collect(d4);
+					collect(d5);
+
+					const auto eos = det.FlushEndOfStream(&reg);
+					for (const auto& ef : eos)
+						collect(ef);
+
+					Assert::AreEqual(static_cast<size_t>(5), emitCount.size(),
+						L"SetLeadFrames(0->2) must deliver all 5 sequences {1..5}");
+					for (uint64_t s = 1; s <= 5; ++s)
+					{
+						Assert::AreEqual(1, emitCount[s],
+							L"SetLeadFrames(0->2) MUST NEVER re-emit already-emitted seq=1 or seq=2");
+					}
+					Assert::AreEqual(static_cast<uint64_t>(0), det.DroppedRecordCount(),
+						L"SetLeadFrames(0->2) must have DroppedRecordCount() == 0");
+				}
+
+				// ---- Sub-case B: SetLeadFrames(2 -> 0) stranding & silent eviction bug ----
+				{
+					// Part B1: seq 10..15 — buffered 12,13 MUST be flushed (not stranded out-of-order!) when pushing 14,15 after SetLeadFrames(0).
+					TdV2FrameRoleDetector det(2);
+					std::map<uint64_t, int> emitCount;
+					std::vector<uint64_t> emittedOrder;
+					auto collect = [&](const FrameRoleDecision& d)
+					{
+						for (const auto& fl : d.flushedBeforeCut)
+						{
+							if (fl.produced)
+							{
+								++emitCount[fl.record.seq];
+								emittedOrder.push_back(fl.record.seq);
+							}
+						}
+						if (d.produced)
+						{
+							++emitCount[d.record.seq];
+							emittedOrder.push_back(d.record.seq);
+						}
+					};
+
+					// Push 10, 11, 12, 13 with lead=2 -> 10, 11 emitted; 12, 13 buffered.
+					collect(det.PushAndClassify(MakeEv(10, 0.95), &reg));
+					collect(det.PushAndClassify(MakeEv(11, 0.52), &reg));
+					collect(det.PushAndClassify(MakeEv(12, 0.91), &reg));
+					collect(det.PushAndClassify(MakeEv(13, 0.50), &reg));
+					Assert::AreEqual(static_cast<size_t>(2), emittedOrder.size());
+					Assert::AreEqual(static_cast<uint64_t>(10), emittedOrder[0]);
+					Assert::AreEqual(static_cast<uint64_t>(11), emittedOrder[1]);
+
+					// Drop lead 2 -> 0 and push 14, 15: buffered 12, 13 must flush cleanly before/with 14, not stay stranded!
+					det.SetLeadFrames(0);
+					collect(det.PushAndClassify(MakeEv(14, 0.93), &reg));
+					collect(det.PushAndClassify(MakeEv(15, 0.51), &reg));
+
+					// Verify 12 & 13 were already emitted in monotonic order BEFORE FlushEndOfStream (zero stranding!).
+					Assert::AreEqual(1, emitCount[12],
+						L"SetLeadFrames(2->0) must flush buffered seq=12 on push 14/15 rather than leaving it stranded");
+					Assert::AreEqual(1, emitCount[13],
+						L"SetLeadFrames(2->0) must flush buffered seq=13 on push 14/15 rather than leaving it stranded");
+
+					const auto eos = det.FlushEndOfStream(&reg);
+					for (const auto& ef : eos)
+						collect(ef);
+
+					Assert::AreEqual(static_cast<size_t>(6), emitCount.size(),
+						L"SetLeadFrames(2->0) must deliver all 6 sequences {10..15}");
+					Assert::AreEqual(static_cast<size_t>(6), emittedOrder.size(),
+						L"Exact-once delivery must emit 6 total records for {10..15}");
+					for (uint64_t s = 10; s <= 15; ++s)
+					{
+						Assert::AreEqual(1, emitCount[s],
+							L"Every seq in {10..15} MUST be emitted EXACTLY ONCE across SetLeadFrames(2->0)");
+						Assert::AreEqual(s, emittedOrder[static_cast<size_t>(s - 10)],
+							L"Emitted sequence order across SetLeadFrames(2->0) must stay strictly monotonic {10..15}");
+					}
+					Assert::AreEqual(static_cast<uint64_t>(0), det.DroppedRecordCount(),
+						L"SetLeadFrames(2->0) must record DroppedRecordCount() == 0");
+
+					// Part B2: Sustained stream beyond kMaxWindowFrames (9) after SetLeadFrames(2 -> 0) + Negative Control!
+					// Proves pre-fix stranding would literally evict & drop seq 22, 23 once > 9 frames enter window_,
+					// and ignoring flushedBeforeCut (naive caller) misses the flushed pre-switch records!
+					TdV2FrameRoleDetector detLong(2);
+					std::map<uint64_t, int> longEmitCount;
+					std::map<uint64_t, int> naiveIgnoreFlushCount;
+					auto collectLong = [&](const FrameRoleDecision& d)
+					{
+						for (const auto& fl : d.flushedBeforeCut)
+							if (fl.produced)
+								++longEmitCount[fl.record.seq];
+						if (d.produced)
+						{
+							++longEmitCount[d.record.seq];
+							++naiveIgnoreFlushCount[d.record.seq];
+						}
+					};
+
+					for (uint64_t s = 20; s <= 23; ++s)
+						collectLong(detLong.PushAndClassify(MakeEv(s, (s % 2 == 0) ? 0.94 : 0.52), &reg));
+					detLong.SetLeadFrames(0);
+					for (uint64_t s = 24; s <= 33; ++s)
+						collectLong(detLong.PushAndClassify(MakeEv(s, (s % 2 == 0) ? 0.92 : 0.51), &reg));
+					const auto longEos = detLong.FlushEndOfStream(&reg);
+					for (const auto& ef : longEos)
+						if (ef.produced)
+							++longEmitCount[ef.record.seq];
+
+					// Mandatory same-input negative control (Rule 3): ignoring flushedBeforeCut loses pre-switch buffered 22, 23!
+					Assert::AreEqual(0, naiveIgnoreFlushCount[22],
+						L"Negative control: caller ignoring flushedBeforeCut across SetLeadFrames(2->0) loses seq=22");
+					Assert::AreEqual(0, naiveIgnoreFlushCount[23],
+						L"Negative control: caller ignoring flushedBeforeCut across SetLeadFrames(2->0) loses seq=23");
+
+					Assert::AreEqual(static_cast<size_t>(14), longEmitCount.size(),
+						L"Sustained stream beyond kMaxWindowFrames after SetLeadFrames(2->0) must deliver all 14 seqs {20..33}");
+					for (uint64_t s = 20; s <= 33; ++s)
+					{
+						Assert::AreEqual(1, longEmitCount[s],
+							L"Sustained stream after SetLeadFrames(2->0) MUST emit every seq {20..33} EXACTLY ONCE (zero eviction drops!)");
+					}
+					Assert::AreEqual(static_cast<uint64_t>(0), detLong.DroppedRecordCount(),
+						L"Sustained stream after SetLeadFrames(2->0) MUST keep DroppedRecordCount() == 0");
+				}
+			}
 		};
 	}
 }

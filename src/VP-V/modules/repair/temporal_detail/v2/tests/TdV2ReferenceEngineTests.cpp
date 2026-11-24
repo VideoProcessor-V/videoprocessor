@@ -470,9 +470,13 @@ namespace Tests
 			TEST_METHOD(HalfPixelPanPreservesCleanRecoveryWithoutArtifacts)
 			{
 				// Plan s1.6, s3.2 TD-S3(4) & s3.4 (Grain MUST-2): 0.5-px sub-pixel pan invariant
-				// WITH planted independent two-seed grain, asserting clean recovery AND full authoritative
-				// grain preservation (betaOwn >= 0.98, |betaForeign| <= 0.02, RMS +/-2%, lag1Evaluated == true,
-				// lag1Rise <= +0.02), backed by a same-input unprotected negative control!
+				// WITH realistic 15%-leaked independent two-seed grain ACTUALLY fed into eng.ProcessFrame(in1/in2)
+				// (cleanY, prevPeak, nextPeak) + retainedGrainVar, asserting genuine clean recovery (> 2.0 dB) AND
+				// full authoritative grain preservation evaluated against the ACTUAL 0.5-px warped foreign grain
+				// fields (betaOwn >= 0.98, |betaForeign| <= 0.02 vs BOTH warpedForeignPrev and warpedForeignNext,
+				// RMS +/-2%, lag1Evaluated == true, lag1Rise <= +0.02), backed by BOTH:
+				//   - Mandatory Negative Control 1: unprotected naive 0.5-px pan temporal blend (regressed vs warpedForeignPrev)
+				//   - Mandatory Negative Control 2: same-input Layer-2-disabled engine (`retainedGrainVar` cleared)!
 				const int w = 96, h = 96;
 				const size_t n = static_cast<size_t>(w) * h;
 				const ActiveRect interior{ 8, 8, w - 8, h - 8 };
@@ -487,90 +491,176 @@ namespace Tests
 				const TdV2Plane masterPrev2 = RenderMaster(w, h, 0.0, 0.0);
 				const TdV2Plane masterNext2 = RenderMaster(w, h, +1.0, 0.0);
 
-				const TdV2Plane peakPrev1Clean = AddCodingError(masterPrev1, 1.2, 301);
-				const TdV2Plane peakNext1Clean = AddCodingError(masterNext1, 1.2, 302);
-				const TdV2Plane valley1Clean = AddCodingError(masterF1, 6.5, 304, 0.30);
+				// Construct realistic L+M band coding wear on valley1 and valley2 (~12.0 raw sigma, matching Test 5)
+				// so clean recovery lives in L/M while 15% leaked film grain lives in H!
+				auto addLowMidCodingWear = [&](const TdV2Plane& m, double rawSigma, uint32_t seed) -> TdV2Plane
+				{
+					const TdV2Plane whiteNoise = AddCodingError(TdV2Plane(w, h, 0.0), rawSigma, seed);
+					const ThreeBandPlanes nb = DecomposeActiveBands(whiteNoise, ActiveRect::Full(w, h));
+					TdV2Plane out = m;
+					for (size_t i = 0; i < n; ++i)
+						out.v[i] = m.v[i] + nb.L.v[i] + nb.M.v[i];
+					return out;
+				};
 
-				const TdV2Plane peakPrev2Clean = AddCodingError(masterPrev2, 1.2, 311);
-				const TdV2Plane peakNext2Clean = AddCodingError(masterNext2, 1.2, 312);
-				const TdV2Plane valley2Clean = AddCodingError(masterF2, 6.5, 303, 0.30);
+				const TdV2Plane peakPrev1Clean = AddCodingError(masterPrev1, 0.8, 301);
+				const TdV2Plane peakNext1Clean = AddCodingError(masterNext1, 0.8, 302);
+				const TdV2Plane valley1Clean = addLowMidCodingWear(masterF1, 12.0, 304);
 
-				// Plant independent two-seed film grain across Frame 1, Frame 2, and peak references.
+				const TdV2Plane peakPrev2Clean = AddCodingError(masterPrev2, 0.8, 311);
+				const TdV2Plane peakNext2Clean = AddCodingError(masterNext2, 0.8, 312);
+				const TdV2Plane valley2Clean = addLowMidCodingWear(masterF2, 12.0, 303);
+
+				// Plant independent film grain across Frame 1, Frame 2, and peak references, with realistic
+				// 15% upstream separation leakage ACTUALLY present in cleanY, prevPeak, and nextPeak!
 				std::mt19937 rng(305u);
-				const double grainSigma = 12.0;
+				const double grainSigma = 14.0;
+				const double leak = 0.15;
 				std::normal_distribution<double> gDist(0.0, grainSigma);
-				std::vector<double> prevOwnGrain(n), ownGrain(n), foreignGrainPrev(n), foreignGrainNext(n);
-				TdV2Plane valley1Recv(w, h), valley2Recv(w, h), peakPrev2Recv(w, h), peakNext2Recv(w, h);
+				std::vector<double> prevOwnGrain(n), ownGrain(n);
+				std::vector<double> foreignGrainPrev1(n), foreignGrainNext1(n);
+				std::vector<double> foreignGrainPrev(n), foreignGrainNext(n);
+				TdV2Plane valley1Recv(w, h), valley2Recv(w, h);
+				TdV2Plane peakPrev1Recv(w, h), peakNext1Recv(w, h), peakPrev2Recv(w, h), peakNext2Recv(w, h);
+				TdV2Plane valley1CleanImp(w, h), valley2CleanImp(w, h);
+				TdV2Plane peakPrev1CleanImp(w, h), peakNext1CleanImp(w, h);
+				TdV2Plane peakPrev2CleanImp(w, h), peakNext2CleanImp(w, h);
 				for (size_t i = 0; i < n; ++i)
 				{
 					prevOwnGrain[i] = gDist(rng);
 					ownGrain[i] = gDist(rng);
+					foreignGrainPrev1[i] = gDist(rng);
+					foreignGrainNext1[i] = gDist(rng);
 					foreignGrainPrev[i] = gDist(rng);
 					foreignGrainNext[i] = gDist(rng);
+
 					valley1Recv.v[i] = valley1Clean.v[i] + prevOwnGrain[i];
 					valley2Recv.v[i] = valley2Clean.v[i] + ownGrain[i];
+					peakPrev1Recv.v[i] = peakPrev1Clean.v[i] + foreignGrainPrev1[i];
+					peakNext1Recv.v[i] = peakNext1Clean.v[i] + foreignGrainNext1[i];
 					peakPrev2Recv.v[i] = peakPrev2Clean.v[i] + foreignGrainPrev[i];
 					peakNext2Recv.v[i] = peakNext2Clean.v[i] + foreignGrainNext[i];
-				}
 
-				// Mandatory In-Test Negative Control (Rule 3):
-				// Unprotected temporal blend of the 0.5-px panned grainy frames destroys own grain & leaks foreign grain!
-				TdV2Plane warpedPrevRecv, warpedNextRecv;
-				std::vector<uint8_t> vpValid, vnValid;
+					valley1CleanImp.v[i] = valley1Clean.v[i] + leak * prevOwnGrain[i];
+					valley2CleanImp.v[i] = valley2Clean.v[i] + leak * ownGrain[i];
+					peakPrev1CleanImp.v[i] = peakPrev1Clean.v[i] + leak * foreignGrainPrev1[i];
+					peakNext1CleanImp.v[i] = peakNext1Clean.v[i] + leak * foreignGrainNext1[i];
+					peakPrev2CleanImp.v[i] = peakPrev2Clean.v[i] + leak * foreignGrainPrev[i];
+					peakNext2CleanImp.v[i] = peakNext2Clean.v[i] + leak * foreignGrainNext[i];
+				}
+				const double leakedVar = (leak * grainSigma) * (leak * grainSigma);
+				const std::vector<double> retainedVar(static_cast<size_t>(cw) * ch, leakedVar);
+
 				CellMotionField mfPrev = CellMotionField::Uniform(cw, ch, +0.5, 0.0, +0.5, 0.0, RegionMotionClass::Camera);
 				CellMotionField mfNext = CellMotionField::Uniform(cw, ch, -0.5, 0.0, -0.5, 0.0, RegionMotionClass::Camera);
 				// Frame 2 (ox=+0.5) -> Frame 1 carry (ox=0.0): sample Frame 1 at x + 0.5.
 				CellMotionField mfCarry = CellMotionField::Uniform(cw, ch, +0.5, 0.0, +0.5, 0.0, RegionMotionClass::Camera);
-				WarpCleanReference(peakPrev2Recv, valley2Recv, ActiveRect::Full(w, h), mfPrev.vx, mfPrev.vy, cw, ch, 16, warpedPrevRecv, vpValid);
-				WarpCleanReference(peakNext2Recv, valley2Recv, ActiveRect::Full(w, h), mfNext.vx, mfNext.vy, cw, ch, 16, warpedNextRecv, vnValid);
+
+				// Warp foreignGrainPrev (+0.5, 0.0) and foreignGrainNext (-0.5, 0.0) via WarpCleanReference so
+				// grain regression evaluates foreign grain transfer against the ACTUAL 0.5-px warped foreign grain!
+				TdV2Plane foreignGrainPrevPlane(w, h, 0.0), foreignGrainNextPlane(w, h, 0.0), zeroPlane(w, h, 0.0);
+				foreignGrainPrevPlane.v = foreignGrainPrev;
+				foreignGrainNextPlane.v = foreignGrainNext;
+				TdV2Plane warpedForeignPrev, warpedForeignNext;
+				std::vector<uint8_t> wfpValid, wfnValid;
+				WarpCleanReference(foreignGrainPrevPlane, zeroPlane, ActiveRect::Full(w, h), mfPrev.vx, mfPrev.vy, cw, ch, 16, warpedForeignPrev, wfpValid);
+				WarpCleanReference(foreignGrainNextPlane, zeroPlane, ActiveRect::Full(w, h), mfNext.vx, mfNext.vy, cw, ch, 16, warpedForeignNext, wfnValid);
+
+				// Mandatory In-Test Negative Control 1 (Rule 3):
+				// Unprotected temporal blend of the 0.5-px panned grainy frames destroys own grain & leaks warped foreign grain!
+				TdV2Plane warpedPrev1Recv, warpedNext1Recv, warpedPrev2Recv, warpedNext2Recv;
+				std::vector<uint8_t> vp1Valid, vn1Valid, vp2Valid, vn2Valid;
+				WarpCleanReference(peakPrev1Recv, valley1Recv, ActiveRect::Full(w, h), mfPrev.vx, mfPrev.vy, cw, ch, 16, warpedPrev1Recv, vp1Valid);
+				WarpCleanReference(peakNext1Recv, valley1Recv, ActiveRect::Full(w, h), mfNext.vx, mfNext.vy, cw, ch, 16, warpedNext1Recv, vn1Valid);
+				WarpCleanReference(peakPrev2Recv, valley2Recv, ActiveRect::Full(w, h), mfPrev.vx, mfPrev.vy, cw, ch, 16, warpedPrev2Recv, vp2Valid);
+				WarpCleanReference(peakNext2Recv, valley2Recv, ActiveRect::Full(w, h), mfNext.vx, mfNext.vy, cw, ch, 16, warpedNext2Recv, vn2Valid);
 
 				std::vector<double> naiveOut1(n), naiveOut2(n), naivePrevRes(n);
 				for (size_t i = 0; i < n; ++i)
 				{
-					naiveOut1[i] = (valley1Recv.v[i] + warpedPrevRecv.v[i] + warpedNextRecv.v[i]) / 3.0;
-					naiveOut2[i] = (valley2Recv.v[i] + warpedPrevRecv.v[i] + warpedNextRecv.v[i]) / 3.0;
+					naiveOut1[i] = (valley1Recv.v[i] + warpedPrev1Recv.v[i] + warpedNext1Recv.v[i]) / 3.0;
+					naiveOut2[i] = (valley2Recv.v[i] + warpedPrev2Recv.v[i] + warpedNext2Recv.v[i]) / 3.0;
 					naivePrevRes[i] = naiveOut1[i] - masterF1.v[i];
 				}
 				const auto naiveRep = EvaluateGrainTransfer(
-					masterF2.v.data(), ownGrain.data(), foreignGrainPrev.data(), naiveOut2.data(), n,
+					masterF2.v.data(), ownGrain.data(), warpedForeignPrev.v.data(), naiveOut2.data(), n,
 					naivePrevRes.data(), prevOwnGrain.data());
 				Assert::IsTrue(naiveRep.valid && naiveRep.lag1Evaluated);
 				Assert::IsFalse(naiveRep.passesAuthoritativeBar,
 					L"Negative control: unprotected 0.5-px pan blend MUST fail authoritative grain bar");
 				Assert::IsTrue(naiveRep.betaOwn < 0.75,
 					L"Negative control: unprotected 0.5-px pan blend destroys own grain (betaOwn < 0.75)");
-
-				Config cfg = MakePreset(Preset::Reference, Mode::On);
-				TdV2ReferenceEngine eng(cfg);
-				StandInRegistry reg;
+				Assert::IsTrue(naiveRep.betaForeign > 0.25,
+					L"Negative control: unprotected 0.5-px pan blend leaks warped foreign grain (betaForeign > 0.25)");
 
 				FrameProcessInput in1;
 				in1.seq = 19;
 				in1.receivedY = valley1Recv;
 				in1.hasCleanSplit = true;
-				in1.cleanY = valley1Clean;
-				in1.prevPeak = { &peakPrev1Clean, &mfPrev, false };
-				in1.nextPeak = { &peakNext1Clean, &mfNext, false };
+				in1.cleanY = valley1CleanImp;
+				in1.retainedGrainVar = retainedVar;
+				in1.prevPeak = { &peakPrev1CleanImp, &mfPrev, false };
+				in1.nextPeak = { &peakNext1CleanImp, &mfNext, false };
 				in1.hasStepPrior = true;
-				in1.estimatedStepDelta = 14.0;
-				const auto res1 = eng.ProcessFrame(in1, &reg);
+				in1.estimatedStepDelta = 12.0;
 
 				FrameProcessInput in2;
 				in2.seq = 20;
 				in2.receivedY = valley2Recv;
 				in2.hasCleanSplit = true;
-				in2.cleanY = valley2Clean;
-				in2.prevPeak = { &peakPrev2Clean, &mfPrev, false };
-				in2.nextPeak = { &peakNext2Clean, &mfNext, false };
+				in2.cleanY = valley2CleanImp;
+				in2.retainedGrainVar = retainedVar;
+				in2.prevPeak = { &peakPrev2CleanImp, &mfPrev, false };
+				in2.nextPeak = { &peakNext2CleanImp, &mfNext, false };
 				in2.hasCarryMotion = true;
 				in2.carryMotion = mfCarry;
 				in2.hasStepPrior = true;
-				in2.estimatedStepDelta = 14.0;
+				in2.estimatedStepDelta = 12.0;
+
+				// Mandatory In-Test Negative Control 2 (Rule 3):
+				// Run the EXACT SAME 15%-leaked 0.5-px pan inputs with Layer-2 disabled (`retainedGrainVar` cleared)!
+				{
+					Config cfgNoL2 = MakePreset(Preset::Reference, Mode::On);
+					TdV2ReferenceEngine engNoL2(cfgNoL2);
+					StandInRegistry regNoL2;
+
+					FrameProcessInput in1NoL2 = in1;
+					in1NoL2.retainedGrainVar.clear();
+					FrameProcessInput in2NoL2 = in2;
+					in2NoL2.retainedGrainVar.clear();
+
+					const auto res1NoL2 = engNoL2.ProcessFrame(in1NoL2, &regNoL2);
+					const auto res2NoL2 = engNoL2.ProcessFrame(in2NoL2, &regNoL2);
+
+					std::vector<double> prevResNoL2(n);
+					for (size_t i = 0; i < n; ++i)
+						prevResNoL2[i] = res1NoL2.outputY.v[i] - masterF1.v[i];
+
+					const auto noL2Rep = EvaluateGrainTransfer(
+						masterF2.v.data(), ownGrain.data(), warpedForeignPrev.v.data(), res2NoL2.outputY.v.data(), n,
+						prevResNoL2.data(), prevOwnGrain.data());
+					Assert::IsTrue(noL2Rep.valid && noL2Rep.lag1Evaluated);
+					Assert::IsFalse(noL2Rep.passesAuthoritativeBar,
+						L"Negative control: Layer-2-disabled engine on 15%-leaked 0.5-px pan inputs MUST fail authoritative grain bar");
+					Assert::IsTrue(std::fabs(noL2Rep.betaForeign) > kGrainBarMaxBetaForeign || noL2Rep.betaOwn < kGrainBarMinBetaOwn,
+						L"Negative control: Layer-2-disabled 0.5-px pan must exhibit real own-grain loss or warped foreign-grain leak");
+				}
+
+				Config cfg = MakePreset(Preset::Reference, Mode::On);
+				TdV2ReferenceEngine eng(cfg);
+				StandInRegistry reg;
+
+				const auto res1 = eng.ProcessFrame(in1, &reg);
 				const auto res2 = eng.ProcessFrame(in2, &reg);
+
+				// Genuine clean recovery measured on true clean layer `valley2Clean + (res2.outputClean - valley2CleanImp)` vs `masterF2`!
+				TdV2Plane repairedCleanTrue(w, h, 0.0);
+				for (size_t i = 0; i < n; ++i)
+					repairedCleanTrue.v[i] = valley2Clean.v[i] + (res2.outputClean.v[i] - valley2CleanImp.v[i]);
 
 				double dbBase = 0.0, dbOut = 0.0;
 				Assert::IsTrue(ComputePsnrDb(PlaneMse(masterF2, valley2Clean, interior), 1023.0, dbBase));
-				Assert::IsTrue(ComputePsnrDb(PlaneMse(masterF2, res2.outputClean, interior), 1023.0, dbOut));
+				Assert::IsTrue(ComputePsnrDb(PlaneMse(masterF2, repairedCleanTrue, interior), 1023.0, dbOut));
 				const double gain = dbOut - dbBase;
 
 				std::vector<double> prevRes(n);
@@ -578,22 +668,27 @@ namespace Tests
 					prevRes[i] = res1.outputY.v[i] - masterF1.v[i];
 
 				const auto gRep = EvaluateGrainTransfer(
-					masterF2.v.data(), ownGrain.data(), foreignGrainPrev.data(), res2.outputY.v.data(), n,
+					masterF2.v.data(), ownGrain.data(), warpedForeignPrev.v.data(), res2.outputY.v.data(), n,
+					prevRes.data(), prevOwnGrain.data());
+				const auto gRepNext = EvaluateGrainTransfer(
+					masterF2.v.data(), ownGrain.data(), warpedForeignNext.v.data(), res2.outputY.v.data(), n,
 					prevRes.data(), prevOwnGrain.data());
 
 				char buf[256];
 				std::snprintf(buf, sizeof(buf),
-					"0.5-px sub-pixel pan: cleanGain=+%.3f dB | betaOwn=%.4f betaFor=%.4f stdRatio=%.4f lag1Rise=%.4f",
-					gain, gRep.betaOwn, gRep.betaForeign, gRep.stdRatio, gRep.lag1Rise);
+					"0.5-px sub-pixel pan (15%% leak): cleanGain=+%.3f dB | betaOwn=%.4f betaForP=%.4f betaForN=%.4f stdRatio=%.4f lag1Rise=%.4f",
+					gain, gRep.betaOwn, gRep.betaForeign, gRepNext.betaForeign, gRep.stdRatio, gRep.lag1Rise);
 				Logger::WriteMessage(buf);
 
 				Assert::IsTrue(gain > 2.0, L"0.5-px sub-pixel pan must recover clean layer with strong positive dB gain");
 				Assert::IsTrue(gRep.valid && gRep.lag1Evaluated && gRep.passesAuthoritativeBar,
-					L"0.5-px sub-pixel pan with planted grain MUST pass full authoritative grain bar (lag1Evaluated==true)");
+					L"0.5-px sub-pixel pan with 15%-leaked grain MUST pass full authoritative grain bar (lag1Evaluated==true)");
 				Assert::IsTrue(gRep.betaOwn >= kGrainBarMinBetaOwn);
 				Assert::IsTrue(std::fabs(gRep.betaForeign) <= kGrainBarMaxBetaForeign);
 				Assert::IsTrue(std::fabs(gRep.stdRatio - 1.0) <= kGrainBarMaxRmsError);
 				Assert::IsTrue(gRep.lag1Rise <= kGrainBarMaxLag1Rise);
+				Assert::IsTrue(gRepNext.valid && gRepNext.lag1Evaluated && std::fabs(gRepNext.betaForeign) <= kGrainBarMaxBetaForeign,
+					L"0.5-px sub-pixel pan foreign grain leakage from warped nextPeak MUST stay <= 0.02");
 			}
 
 			TEST_METHOD(HonestFourLayerGrainPreservationAndLayer4CarryPurity)

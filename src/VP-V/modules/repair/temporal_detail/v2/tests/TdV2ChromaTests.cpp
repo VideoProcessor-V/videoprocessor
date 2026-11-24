@@ -4424,6 +4424,847 @@ namespace Tests
 					}
 				}
 			}
+
+			// =========================================================================
+			// 17. Item #2 [MED Red-First]: Unsplit Blind Chroma Sub-Pixel Pan
+			//     Preserves Grain Without Projection Collapse (Identified & Unidentified)
+			// =========================================================================
+			TEST_METHOD(UnsplitBlindChromaSubpixelPanPreservesGrainWithoutProjectionCollapse)
+			{
+				// Textured 4:2:0 chroma scene (128x128 luma -> 64x64 coded chroma) undergoing a 1.0-px horizontal
+				// luma pan (= 0.5-px sub-pixel coded chroma displacement!) with strong fine chroma texture +
+				// realistic film grain (grainSigma = 14.0) + coding wear, processed UNSPLIT (hasCleanSplit = false,
+				// retainedGrainVar empty) across 2 consecutive frames so lag1Evaluated == true!
+				// Pre-fix symmetric innovation clamps ir = E[r^2] - E[c*r] < 0 under 0.5-px bicubic attenuation on
+				// strong fine texture -> collapses cellGrainVar & estimatedBlindNlfCb to 0.0 and breaks grain bar!
+				const int w = 128, h = 128;
+				const int cw = w / 16, ch = h / 16;
+				const int cW = w / 2, cH = h / 2;
+				const size_t cN = static_cast<size_t>(cW) * cH;
+				const ActiveRect active = ActiveRect::Full(w, h);
+				const ActiveRect cActive = ActiveRect::Full(cW, cH);
+				const SitingSpec siting = SitingSpec::Left();
+
+				// Strong fine chroma texture monochromatic in x (period = 5.2 luma px = 2.6 coded px -> strong 0.5-px
+				// Catmull-Rom attenuation alpha ~= 0.51 while vertical vy == 0 keeps vertical attenuation exact 1.0).
+				auto renderFineTextured420 = [&](double oxLuma, bool isCb) -> TdV2Plane
+				{
+					TdV2Plane p(cW, cH, 512.0);
+					for (int cy = 0; cy < cH; ++cy)
+					{
+						const double ly = siting.CodedToLumaY(static_cast<double>(cy), 2);
+						const double yEnv = isCb
+							? (0.65 + 0.35 * std::cos(2.0 * kPi * ly / 32.0))
+							: (0.65 + 0.35 * std::sin(2.0 * kPi * ly / 28.0));
+						for (int cx = 0; cx < cW; ++cx)
+						{
+							const double lx = siting.CodedToLumaX(static_cast<double>(cx), 2) + oxLuma;
+							const double wave = isCb
+								? (70.0 * std::sin(2.0 * kPi * lx / 5.2 + 0.3))
+								: (65.0 * std::cos(2.0 * kPi * lx / 5.2 + 0.9));
+							p.at(cx, cy) = 512.0 + wave * yEnv;
+						}
+					}
+					return p;
+				};
+
+				// Mild low-band coding wear (variance ~1.5 code^2 << grainSigma^2 = 196 so unsplit stdRatio stays well inside +/-2%).
+				auto addLowBandWear = [&](const TdV2Plane& base, double rawSigma, uint32_t seed) -> TdV2Plane
+				{
+					const TdV2Plane zeroP(base.w, base.h, 0.0);
+					const TdV2Plane rawNoise = AddGaussianNoise(zeroP, rawSigma, seed, cActive);
+					const ThreeBandPlanes nb = DecomposeActiveBands(rawNoise, cActive);
+					TdV2Plane out = base;
+					for (size_t i = 0; i < out.v.size(); ++i)
+						out.v[i] += nb.L.v[i] + 0.15 * nb.M.v[i];
+					return out;
+				};
+
+				// Continuous 1.0-px luma pan (= 0.5-px coded 4:2:0 pan) across Frame 1 (ox=0) and Frame 2 (ox=+1).
+				const TdV2Plane masterF1Cb = renderFineTextured420(0.0, true);
+				const TdV2Plane masterF1Cr = renderFineTextured420(0.0, false);
+				const TdV2Plane masterPrev1Cb = renderFineTextured420(-1.0, true);
+				const TdV2Plane masterPrev1Cr = renderFineTextured420(-1.0, false);
+				const TdV2Plane masterNext1Cb = renderFineTextured420(+1.0, true);
+				const TdV2Plane masterNext1Cr = renderFineTextured420(+1.0, false);
+
+				const TdV2Plane masterF2Cb = renderFineTextured420(+1.0, true);
+				const TdV2Plane masterF2Cr = renderFineTextured420(+1.0, false);
+				const TdV2Plane masterPrev2Cb = renderFineTextured420(0.0, true);
+				const TdV2Plane masterPrev2Cr = renderFineTextured420(0.0, false);
+				const TdV2Plane masterNext2Cb = renderFineTextured420(+2.0, true);
+				const TdV2Plane masterNext2Cr = renderFineTextured420(+2.0, false);
+
+				const TdV2Plane valley1CleanCb = addLowBandWear(masterF1Cb, 10.0, 1701u);
+				const TdV2Plane valley1CleanCr = addLowBandWear(masterF1Cr, 10.0, 1702u);
+				const TdV2Plane valley2CleanCb = addLowBandWear(masterF2Cb, 10.0, 1703u);
+				const TdV2Plane valley2CleanCr = addLowBandWear(masterF2Cr, 10.0, 1704u);
+
+				// Independent multi-seed film grain (grainSigma = 14.0) on all frames and peak references.
+				const double grainSigma = 14.0;
+				std::mt19937 rng(1710u);
+				std::normal_distribution<double> gd(0.0, grainSigma);
+				std::vector<double> prevOwnCb(cN), prevOwnCr(cN), ownCb(cN), ownCr(cN);
+				std::vector<double> forPrev1Cb(cN), forPrev1Cr(cN), forNext1Cb(cN), forNext1Cr(cN);
+				std::vector<double> forPrev2Cb(cN), forPrev2Cr(cN), forNext2Cb(cN), forNext2Cr(cN);
+
+				TdV2Plane cur1RecCb(cW, cH), cur1RecCr(cW, cH), cur2RecCb(cW, cH), cur2RecCr(cW, cH);
+				TdV2Plane prev1RecCb(cW, cH), prev1RecCr(cW, cH), next1RecCb(cW, cH), next1RecCr(cW, cH);
+				TdV2Plane prev2RecCb(cW, cH), prev2RecCr(cW, cH), next2RecCb(cW, cH), next2RecCr(cW, cH);
+
+				for (size_t i = 0; i < cN; ++i)
+				{
+					prevOwnCb[i] = gd(rng);  prevOwnCr[i] = gd(rng);
+					ownCb[i] = gd(rng);      ownCr[i] = gd(rng);
+					forPrev1Cb[i] = gd(rng); forPrev1Cr[i] = gd(rng);
+					forNext1Cb[i] = gd(rng); forNext1Cr[i] = gd(rng);
+					forPrev2Cb[i] = gd(rng); forPrev2Cr[i] = gd(rng);
+					forNext2Cb[i] = gd(rng); forNext2Cr[i] = gd(rng);
+
+					cur1RecCb.v[i] = valley1CleanCb.v[i] + prevOwnCb[i];
+					cur1RecCr.v[i] = valley1CleanCr.v[i] + prevOwnCr[i];
+					cur2RecCb.v[i] = valley2CleanCb.v[i] + ownCb[i];
+					cur2RecCr.v[i] = valley2CleanCr.v[i] + ownCr[i];
+
+					prev1RecCb.v[i] = masterPrev1Cb.v[i] + forPrev1Cb[i];
+					prev1RecCr.v[i] = masterPrev1Cr.v[i] + forPrev1Cr[i];
+					next1RecCb.v[i] = masterNext1Cb.v[i] + forNext1Cb[i];
+					next1RecCr.v[i] = masterNext1Cr.v[i] + forNext1Cr[i];
+
+					prev2RecCb.v[i] = masterPrev2Cb.v[i] + forPrev2Cb[i];
+					prev2RecCr.v[i] = masterPrev2Cr.v[i] + forPrev2Cr[i];
+					next2RecCb.v[i] = masterNext2Cb.v[i] + forNext2Cb[i];
+					next2RecCr.v[i] = masterNext2Cr.v[i] + forNext2Cr[i];
+				}
+
+				const CellMotionField mfPrev = CellMotionField::Uniform(cw, ch, +1.0, 0.0, +1.0, 0.0, RegionMotionClass::Camera);
+				const CellMotionField mfNext = CellMotionField::Uniform(cw, ch, -1.0, 0.0, -1.0, 0.0, RegionMotionClass::Camera);
+
+				// Warp Frame 2's foreign grain by +1.0 / -1.0 luma px (+0.5 / -0.5 coded px) so regression tests actual warped transfer!
+				TdV2Plane zeroCoded(cW, cH, 0.0);
+				TdV2Plane fPrev2CbPlane(cW, cH), fPrev2CrPlane(cW, cH), fNext2CbPlane(cW, cH), fNext2CrPlane(cW, cH);
+				fPrev2CbPlane.v = forPrev2Cb; fPrev2CrPlane.v = forPrev2Cr;
+				fNext2CbPlane.v = forNext2Cb; fNext2CrPlane.v = forNext2Cr;
+				TdV2Plane warpedForPrevCb, warpedForPrevCr, warpedForNextCb, warpedForNextCr;
+				std::vector<uint8_t> wv1, wv2, wv3, wv4;
+				ChromaDetail::WarpChromaPlaneWithLumaMotion(fPrev2CbPlane, zeroCoded, cActive, 2, 2, siting, mfPrev.vx, mfPrev.vy, cw, ch, 16, warpedForPrevCb, wv1);
+				ChromaDetail::WarpChromaPlaneWithLumaMotion(fPrev2CrPlane, zeroCoded, cActive, 2, 2, siting, mfPrev.vx, mfPrev.vy, cw, ch, 16, warpedForPrevCr, wv2);
+				ChromaDetail::WarpChromaPlaneWithLumaMotion(fNext2CbPlane, zeroCoded, cActive, 2, 2, siting, mfNext.vx, mfNext.vy, cw, ch, 16, warpedForNextCb, wv3);
+				ChromaDetail::WarpChromaPlaneWithLumaMotion(fNext2CrPlane, zeroCoded, cActive, 2, 2, siting, mfNext.vx, mfNext.vy, cw, ch, 16, warpedForNextCr, wv4);
+
+				// ---- Mandatory In-Test Negative Control (Rule 3): Same-input unprotected 0.5-px pan direct blend ----
+				{
+					TdV2Plane wp1Cb, wn1Cb, wp2Cb, wn2Cb, wp1Cr, wn1Cr, wp2Cr, wn2Cr;
+					std::vector<uint8_t> dv;
+					ChromaDetail::WarpChromaPlaneWithLumaMotion(prev1RecCb, cur1RecCb, cActive, 2, 2, siting, mfPrev.vx, mfPrev.vy, cw, ch, 16, wp1Cb, dv);
+					ChromaDetail::WarpChromaPlaneWithLumaMotion(next1RecCb, cur1RecCb, cActive, 2, 2, siting, mfNext.vx, mfNext.vy, cw, ch, 16, wn1Cb, dv);
+					ChromaDetail::WarpChromaPlaneWithLumaMotion(prev2RecCb, cur2RecCb, cActive, 2, 2, siting, mfPrev.vx, mfPrev.vy, cw, ch, 16, wp2Cb, dv);
+					ChromaDetail::WarpChromaPlaneWithLumaMotion(next2RecCb, cur2RecCb, cActive, 2, 2, siting, mfNext.vx, mfNext.vy, cw, ch, 16, wn2Cb, dv);
+					ChromaDetail::WarpChromaPlaneWithLumaMotion(prev1RecCr, cur1RecCr, cActive, 2, 2, siting, mfPrev.vx, mfPrev.vy, cw, ch, 16, wp1Cr, dv);
+					ChromaDetail::WarpChromaPlaneWithLumaMotion(next1RecCr, cur1RecCr, cActive, 2, 2, siting, mfNext.vx, mfNext.vy, cw, ch, 16, wn1Cr, dv);
+					ChromaDetail::WarpChromaPlaneWithLumaMotion(prev2RecCr, cur2RecCr, cActive, 2, 2, siting, mfPrev.vx, mfPrev.vy, cw, ch, 16, wp2Cr, dv);
+					ChromaDetail::WarpChromaPlaneWithLumaMotion(next2RecCr, cur2RecCr, cActive, 2, 2, siting, mfNext.vx, mfNext.vy, cw, ch, 16, wn2Cr, dv);
+
+					std::vector<double> naive1Cb(cN), naive2Cb(cN), naivePrevResCb(cN);
+					std::vector<double> naive1Cr(cN), naive2Cr(cN), naivePrevResCr(cN);
+					for (size_t i = 0; i < cN; ++i)
+					{
+						naive1Cb[i] = (cur1RecCb.v[i] + wp1Cb.v[i] + wn1Cb.v[i]) / 3.0;
+						naive2Cb[i] = (cur2RecCb.v[i] + wp2Cb.v[i] + wn2Cb.v[i]) / 3.0;
+						naivePrevResCb[i] = naive1Cb[i] - masterF1Cb.v[i];
+						naive1Cr[i] = (cur1RecCr.v[i] + wp1Cr.v[i] + wn1Cr.v[i]) / 3.0;
+						naive2Cr[i] = (cur2RecCr.v[i] + wp2Cr.v[i] + wn2Cr.v[i]) / 3.0;
+						naivePrevResCr[i] = naive1Cr[i] - masterF1Cr.v[i];
+					}
+					const auto naiveRepCb = EvaluateGrainTransfer(
+						masterF2Cb.v.data(), ownCb.data(), warpedForPrevCb.v.data(), naive2Cb.data(), cN,
+						naivePrevResCb.data(), prevOwnCb.data());
+					const auto naiveRepCr = EvaluateGrainTransfer(
+						masterF2Cr.v.data(), ownCr.data(), warpedForPrevCr.v.data(), naive2Cr.data(), cN,
+						naivePrevResCr.data(), prevOwnCr.data());
+					Assert::IsTrue(naiveRepCb.valid && naiveRepCb.lag1Evaluated && naiveRepCr.valid && naiveRepCr.lag1Evaluated);
+					Assert::IsFalse(naiveRepCb.passesAuthoritativeBar,
+						L"Negative control: direct 0.5-px pan chroma blend MUST fail authoritative grain bar (Cb)");
+					Assert::IsFalse(naiveRepCr.passesAuthoritativeBar,
+						L"Negative control: direct 0.5-px pan chroma blend MUST fail authoritative grain bar (Cr)");
+					Assert::IsTrue(naiveRepCb.betaOwn < 0.75 && naiveRepCb.betaForeign > 0.20,
+						L"Negative control: direct blend must destroy own grain and leak warped foreign grain");
+				}
+
+				auto buildUnsplitPair = [&](ChromaGridStatus status, ChromaProcessInput& outIn1, ChromaProcessInput& outIn2)
+				{
+					outIn1 = ChromaProcessInput{};
+					outIn1.seq = 1;
+					outIn1.deliveredFormat = DeliveredChromaFormat::Yuv420;
+					outIn1.codedSubsampling = ChromaSubsampling::Yuv420;
+					outIn1.gridStatus = status;
+					outIn1.siting = siting;
+					outIn1.lumaW = w;
+					outIn1.lumaH = h;
+					outIn1.activeRect = active;
+					outIn1.receivedCb = cur1RecCb;
+					outIn1.receivedCr = cur1RecCr;
+					outIn1.hasCleanSplit = false; // Unsplit blind path; retainedGrainVarCb/Cr intentionally empty!
+					outIn1.prevPeak = { &prev1RecCb, &prev1RecCr, &mfPrev, false };
+					outIn1.nextPeak = { &next1RecCb, &next1RecCr, &mfNext, false };
+					outIn1.hasStepPrior = true;
+					outIn1.estimatedStepDelta = 14.0;
+
+					outIn2 = outIn1;
+					outIn2.seq = 2;
+					outIn2.receivedCb = cur2RecCb;
+					outIn2.receivedCr = cur2RecCr;
+					outIn2.prevPeak = { &prev2RecCb, &prev2RecCr, &mfPrev, false };
+					outIn2.nextPeak = { &next2RecCb, &next2RecCr, &mfNext, false };
+				};
+
+				const Config cfg = MakePreset(Preset::Reference, Mode::On);
+
+				// ---- Sub-case A: Identified 4:2:0 sub-pixel pan (Branch B) ----
+				{
+					ChromaProcessInput in1, in2;
+					buildUnsplitPair(ChromaGridStatus::Identified, in1, in2);
+					TdV2ChromaEngine eng(cfg);
+					StandInRegistry reg;
+					const auto res1 = eng.ProcessFrame(in1, &reg);
+					const auto res2 = eng.ProcessFrame(in2, &reg);
+
+					AssertPlaneAllFinite(res2.outputCb, L"Branch B unsplit pan outputCb must be finite");
+					AssertPlaneAllFinite(res2.outputCr, L"Branch B unsplit pan outputCr must be finite");
+					Assert::IsTrue(reg.IsActive(StandInKind::P10gGrainSeparator),
+						L"Unsplit blind chroma path must visibly engage P10gGrainSeparator stand-in");
+
+					std::vector<double> prevResCb(cN), prevResCr(cN);
+					for (size_t i = 0; i < cN; ++i)
+					{
+						prevResCb[i] = res1.outputCb.v[i] - masterF1Cb.v[i];
+						prevResCr[i] = res1.outputCr.v[i] - masterF1Cr.v[i];
+					}
+					const auto repCb = EvaluateGrainTransfer(
+						masterF2Cb.v.data(), ownCb.data(), warpedForPrevCb.v.data(), res2.outputCb.v.data(), cN,
+						prevResCb.data(), prevOwnCb.data());
+					const auto repCr = EvaluateGrainTransfer(
+						masterF2Cr.v.data(), ownCr.data(), warpedForPrevCr.v.data(), res2.outputCr.v.data(), cN,
+						prevResCr.data(), prevOwnCr.data());
+					const auto repCbNext = EvaluateGrainTransfer(
+						masterF2Cb.v.data(), ownCb.data(), warpedForNextCb.v.data(), res2.outputCb.v.data(), cN,
+						prevResCb.data(), prevOwnCb.data());
+					const auto repCrNext = EvaluateGrainTransfer(
+						masterF2Cr.v.data(), ownCr.data(), warpedForNextCr.v.data(), res2.outputCr.v.data(), cN,
+						prevResCr.data(), prevOwnCr.data());
+
+					char buf[256];
+					std::snprintf(buf, sizeof(buf),
+						"Unsplit 4:2:0 subpixel pan (Branch B): blindNlf=%.2f/%.2f (sigma^2=%.1f) | betaOwn=%.4f/%.4f betaFor=%.4f/%.4f stdRatio=%.4f/%.4f lag1=%.4f/%.4f",
+						res2.estimatedBlindNlfCb, res2.estimatedBlindNlfCr, grainSigma * grainSigma,
+						repCb.betaOwn, repCr.betaOwn, repCb.betaForeign, repCr.betaForeign,
+						repCb.stdRatio, repCr.stdRatio, repCb.lag1Rise, repCr.lag1Rise);
+					Logger::WriteMessage(buf);
+
+					Assert::IsTrue(res2.estimatedBlindNlfCb > 0.25 * grainSigma * grainSigma,
+						L"Branch B blind estimator MUST NOT collapse to 0.0 on textured 0.5-px coded chroma pan (Cb)");
+					Assert::IsTrue(res2.estimatedBlindNlfCr > 0.25 * grainSigma * grainSigma,
+						L"Branch B blind estimator MUST NOT collapse to 0.0 on textured 0.5-px coded chroma pan (Cr)");
+
+					Assert::IsTrue(repCb.valid && repCb.lag1Evaluated && repCb.passesAuthoritativeBar,
+						L"Branch B unsplit 0.5-px pan Cb MUST pass full authoritative grain bar (lag1Evaluated==true)");
+					Assert::IsTrue(repCr.valid && repCr.lag1Evaluated && repCr.passesAuthoritativeBar,
+						L"Branch B unsplit 0.5-px pan Cr MUST pass full authoritative grain bar (lag1Evaluated==true)");
+					Assert::IsTrue(repCb.betaOwn >= kGrainBarMinBetaOwn && std::fabs(repCb.betaForeign) <= kGrainBarMaxBetaForeign);
+					Assert::IsTrue(std::fabs(repCb.stdRatio - 1.0) <= kGrainBarMaxRmsError && repCb.lag1Rise <= kGrainBarMaxLag1Rise);
+					Assert::IsTrue(repCbNext.valid && repCbNext.lag1Evaluated && std::fabs(repCbNext.betaForeign) <= kGrainBarMaxBetaForeign);
+					Assert::IsTrue(repCrNext.valid && repCrNext.lag1Evaluated && std::fabs(repCrNext.betaForeign) <= kGrainBarMaxBetaForeign);
+				}
+
+				// ---- Sub-case B: Unidentified 4:2:0 sub-pixel pan (Branch A) ----
+				{
+					ChromaProcessInput in1, in2;
+					buildUnsplitPair(ChromaGridStatus::Unidentified, in1, in2);
+					TdV2ChromaEngine eng(cfg);
+					StandInRegistry reg;
+					const auto res1 = eng.ProcessFrame(in1, &reg);
+					const auto res2 = eng.ProcessFrame(in2, &reg);
+
+					AssertPlaneAllFinite(res2.outputCb, L"Branch A unsplit pan outputCb must be finite");
+					AssertPlaneAllFinite(res2.outputCr, L"Branch A unsplit pan outputCr must be finite");
+					Assert::IsTrue(res2.coarseBandOnly, L"Branch A must run coarse-band-only mode");
+					Assert::IsTrue(reg.IsActive(StandInKind::ChromaGridDetector));
+					Assert::IsTrue(reg.IsActive(StandInKind::P10gGrainSeparator));
+
+					std::vector<double> prevResCb(cN), prevResCr(cN);
+					for (size_t i = 0; i < cN; ++i)
+					{
+						prevResCb[i] = res1.outputCb.v[i] - masterF1Cb.v[i];
+						prevResCr[i] = res1.outputCr.v[i] - masterF1Cr.v[i];
+					}
+					const auto repCb = EvaluateGrainTransfer(
+						masterF2Cb.v.data(), ownCb.data(), warpedForPrevCb.v.data(), res2.outputCb.v.data(), cN,
+						prevResCb.data(), prevOwnCb.data());
+					const auto repCr = EvaluateGrainTransfer(
+						masterF2Cr.v.data(), ownCr.data(), warpedForPrevCr.v.data(), res2.outputCr.v.data(), cN,
+						prevResCr.data(), prevOwnCr.data());
+					const auto repCbNext = EvaluateGrainTransfer(
+						masterF2Cb.v.data(), ownCb.data(), warpedForNextCb.v.data(), res2.outputCb.v.data(), cN,
+						prevResCb.data(), prevOwnCb.data());
+					const auto repCrNext = EvaluateGrainTransfer(
+						masterF2Cr.v.data(), ownCr.data(), warpedForNextCr.v.data(), res2.outputCr.v.data(), cN,
+						prevResCr.data(), prevOwnCr.data());
+
+					Assert::IsTrue(repCb.valid && repCb.lag1Evaluated && repCb.passesAuthoritativeBar,
+						L"Branch A unsplit 0.5-px pan Cb MUST pass full authoritative grain bar (lag1Evaluated==true)");
+					Assert::IsTrue(repCr.valid && repCr.lag1Evaluated && repCr.passesAuthoritativeBar,
+						L"Branch A unsplit 0.5-px pan Cr MUST pass full authoritative grain bar (lag1Evaluated==true)");
+					Assert::IsTrue(repCb.betaOwn >= kGrainBarMinBetaOwn && std::fabs(repCb.betaForeign) <= kGrainBarMaxBetaForeign);
+					Assert::IsTrue(std::fabs(repCb.stdRatio - 1.0) <= kGrainBarMaxRmsError && repCb.lag1Rise <= kGrainBarMaxLag1Rise);
+					Assert::IsTrue(repCbNext.valid && repCbNext.lag1Evaluated && std::fabs(repCbNext.betaForeign) <= kGrainBarMaxBetaForeign);
+					Assert::IsTrue(repCrNext.valid && repCrNext.lag1Evaluated && std::fabs(repCrNext.betaForeign) <= kGrainBarMaxBetaForeign);
+				}
+
+				// ---- Sub-case C: Grain-free flat & textured anchors (grainSigma = 0.0) -> quantization-floor guard ----
+				{
+					// C1: Flat grain-free shifted anchor (512.0 constant, 0 grain) -> zero-energy blocks excluded, NLF < 1.0!
+					const TdV2Plane flat512(cW, cH, 512.0);
+					ChromaProcessInput inFlat;
+					inFlat.seq = 10;
+					inFlat.deliveredFormat = DeliveredChromaFormat::Yuv420;
+					inFlat.codedSubsampling = ChromaSubsampling::Yuv420;
+					inFlat.gridStatus = ChromaGridStatus::Identified;
+					inFlat.siting = siting;
+					inFlat.lumaW = w;
+					inFlat.lumaH = h;
+					inFlat.activeRect = active;
+					inFlat.receivedCb = flat512;
+					inFlat.receivedCr = flat512;
+					inFlat.hasCleanSplit = false;
+					inFlat.prevPeak = { &flat512, &flat512, &mfPrev, false };
+					inFlat.nextPeak = { &flat512, &flat512, &mfNext, false };
+					inFlat.hasStepPrior = true;
+					inFlat.estimatedStepDelta = 14.0;
+
+					TdV2ChromaEngine engFlat(cfg);
+					StandInRegistry regFlat;
+					const auto resFlat = engFlat.ProcessFrame(inFlat, &regFlat);
+					Assert::IsTrue(resFlat.excludedZeroEnergyBlocks > 0,
+						L"Flat grain-free anchor must exclude zero-energy flat blocks via quantization floor");
+					Assert::IsTrue(resFlat.estimatedBlindNlfCb < 1.0 && resFlat.estimatedBlindNlfCr < 1.0,
+						L"Flat grain-free anchor MUST NOT produce spurious huge estimatedBlindNlfCb/Cr (< 1.0 code^2)");
+
+					// C2: Textured grain-free shifted anchor (monochromatic smooth texture, grainSigma = 0.0) -> NLF < 1.0!
+					auto renderCleanShiftedTex = [&](double oxLuma, bool isCb) -> TdV2Plane
+					{
+						TdV2Plane p(cW, cH, 512.0);
+						for (int cy = 0; cy < cH; ++cy)
+						{
+							const double ly = siting.CodedToLumaY(static_cast<double>(cy), 2);
+							for (int cx = 0; cx < cW; ++cx)
+							{
+								const double lx = siting.CodedToLumaX(static_cast<double>(cx), 2) + oxLuma;
+								const double v = isCb
+									? (40.0 * std::sin(2.0 * kPi * lx / 16.0 + 0.3) * std::cos(2.0 * kPi * ly / 24.0))
+									: (40.0 * std::cos(2.0 * kPi * lx / 16.0 + 0.8) * std::sin(2.0 * kPi * ly / 24.0));
+								p.at(cx, cy) = 512.0 + v;
+							}
+						}
+						return p;
+					};
+					const TdV2Plane texCurCb = renderCleanShiftedTex(0.0, true);
+					const TdV2Plane texCurCr = renderCleanShiftedTex(0.0, false);
+					const TdV2Plane texPrevCb = renderCleanShiftedTex(-1.0, true);
+					const TdV2Plane texPrevCr = renderCleanShiftedTex(-1.0, false);
+					const TdV2Plane texNextCb = renderCleanShiftedTex(+1.0, true);
+					const TdV2Plane texNextCr = renderCleanShiftedTex(+1.0, false);
+
+					ChromaProcessInput inTex = inFlat;
+					inTex.seq = 11;
+					inTex.receivedCb = texCurCb;
+					inTex.receivedCr = texCurCr;
+					inTex.prevPeak = { &texPrevCb, &texPrevCr, &mfPrev, false };
+					inTex.nextPeak = { &texNextCb, &texNextCr, &mfNext, false };
+
+					TdV2ChromaEngine engTex(cfg);
+					StandInRegistry regTex;
+					const auto resTex = engTex.ProcessFrame(inTex, &regTex);
+					Assert::IsTrue(resTex.estimatedBlindNlfCb < 1.0 && resTex.estimatedBlindNlfCr < 1.0,
+						L"Textured grain-free shifted anchor (grainSigma=0.0) MUST keep estimatedBlindNlfCb/Cr < 1.0 code^2");
+				}
+			}
+
+			// =========================================================================
+			// 18. Item #4a/b [MED Red-First]: Mode::Off Resets AnchorCanvas AND
+			//     enablePerCornerHuber Toggle + Unpooled min(ownDiag, C) Protects Micro-Motion
+			// =========================================================================
+			TEST_METHOD(ChromaOffResetsAnchorCanvasAndPerCornerHuberToggleProtectsMicroMotion)
+			{
+				// ---- Sub-case A: Mode::Off resets anchorCanvas_ (no stale anchor ghosting after Off->On) ----
+				{
+					const int w = 64, h = 64;
+					const int cw = w / 16, ch = h / 16;
+					const int cW = w / 2, cH = h / 2;
+					const ActiveRect active = ActiveRect::Full(w, h);
+					const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+					const SitingSpec siting = SitingSpec::Left();
+
+					const TdV2Plane sceneACb(cW, cH, 400.0), sceneACr(cW, cH, 620.0);
+					const TdV2Plane sceneBCb(cW, cH, 600.0), sceneBCr(cW, cH, 420.0);
+
+					auto makeAnchorInput = [&](uint64_t seq, const TdV2Plane& cb, const TdV2Plane& cr, bool isAnchor, bool readAnchor)
+					{
+						ChromaProcessInput in;
+						in.seq = seq;
+						in.deliveredFormat = DeliveredChromaFormat::Yuv420;
+						in.codedSubsampling = ChromaSubsampling::Yuv420;
+						in.gridStatus = ChromaGridStatus::Identified;
+						in.siting = siting;
+						in.lumaW = w;
+						in.lumaH = h;
+						in.activeRect = active;
+						in.receivedCb = cb;
+						in.receivedCr = cr;
+						in.hasCleanSplit = true;
+						in.cleanCb = cb;
+						in.cleanCr = cr;
+						in.isAnchorFrame = isAnchor;
+						in.enableAnchorCanvasRef = readAnchor;
+						in.enableCarriedCfl = false;
+						in.hasAnchorReadMotion = readAnchor;
+						if (readAnchor)
+							in.anchorReadMotion = stillMf;
+						in.hasStepPrior = true;
+						in.estimatedStepDelta = 24.0;
+						return in;
+					};
+
+					// Path 1: Seed anchorCanvas_ in Mode::On -> SetConfig(Mode::Off) MUST immediately reset anchorCanvas_!
+					TdV2ChromaEngine eng(MakePreset(Preset::Reference, Mode::On));
+					StandInRegistry reg;
+					eng.ProcessFrame(makeAnchorInput(1, sceneACb, sceneACr, /*isAnchor=*/true, /*readAnchor=*/false), &reg);
+					Assert::IsTrue(eng.AnchorCanvas().HasData(), L"Seeding anchor in Mode::On must populate AnchorCanvas()");
+
+					eng.SetConfig(MakePreset(Preset::Reference, Mode::Off));
+					Assert::IsFalse(eng.AnchorCanvas().HasData(),
+						L"SetConfig(Mode::Off) MUST immediately reset anchorCanvas_ (HasData() == false)");
+
+					// ProcessFrame in Mode::Off must be bit-exact passthrough with zero stand-ins engaged.
+					StandInRegistry regOff;
+					const auto resOff = eng.ProcessFrame(makeAnchorInput(2, sceneBCb, sceneBCr, /*isAnchor=*/false, /*readAnchor=*/true), &regOff);
+					Assert::IsFalse(regOff.AnyActive(), L"Mode::Off must perform zero work");
+					AssertPlanesBitExact(sceneBCb, resOff.outputCb, L"Mode::Off Cb must remain bit-exact");
+					AssertPlanesBitExact(sceneBCr, resOff.outputCr, L"Mode::Off Cr must remain bit-exact");
+
+					// Re-enabling Mode::On after Mode::Off must NOT ghost stale pre-Off sceneA into sceneB!
+					eng.SetConfig(MakePreset(Preset::Reference, Mode::On));
+					StandInRegistry regAfterOff;
+					const auto resAfterOff = eng.ProcessFrame(makeAnchorInput(3, sceneBCb, sceneBCr, /*isAnchor=*/false, /*readAnchor=*/true), &regAfterOff);
+					Assert::IsFalse(resAfterOff.anchorCanvasUsed,
+						L"Re-enabling Mode::On after Mode::Off must NOT read stale pre-Off anchorCanvas_");
+					AssertPlanesBitExact(sceneBCb, resAfterOff.outputCb, L"Post-Off->On Cb must have zero stale-anchor ghosting");
+					AssertPlanesBitExact(sceneBCr, resAfterOff.outputCr, L"Post-Off->On Cr must have zero stale-anchor ghosting");
+
+					// Path 2 (Positive / Contrast Control): Seed -> SetConfig(Mode::On) keeps AnchorCanvas() populated and active!
+					eng.ProcessFrame(makeAnchorInput(4, sceneACb, sceneACr, /*isAnchor=*/true, /*readAnchor=*/false), &reg);
+					Assert::IsTrue(eng.AnchorCanvas().HasData(), L"Re-seeded anchor must populate AnchorCanvas()");
+					eng.SetConfig(MakePreset(Preset::Reference, Mode::On));
+					Assert::IsTrue(eng.AnchorCanvas().HasData(),
+						L"SetConfig(Mode::On) while staying enabled MUST preserve AnchorCanvas().HasData()");
+					StandInRegistry regKept;
+					const auto resKept = eng.ProcessFrame(makeAnchorInput(5, sceneBCb, sceneBCr, /*isAnchor=*/false, /*readAnchor=*/true), &regKept);
+					Assert::IsTrue(resKept.anchorCanvasUsed,
+						L"Control: keeping Mode::On preserves active anchorCanvas_ (proves stale anchor WOULD be read if Mode::Off did not reset)");
+				}
+
+				// ---- Sub-case B: enablePerCornerHuber toggle + unpooled min(ownDiag, C) on Chroma ----
+				//   1. Primary Yuv444 (160x160 coded = 16x16 coded px/cell, exact 1:1 twin of luma Test 12b geometry):
+				//      runs across BOTH Preset::RealTime (poolR=0) AND Preset::Reference (poolR=1).
+				//   2. Additional Yuv420 (80x80 coded = 8x8 coded px/cell): Preset::RealTime check.
+				{
+					const int w = 160, h = 160; // 10x10 canonical 16x16 luma cells = 100 cells (1% granularity, mirroring CPU Test 12b!)
+					const int cellPx = 16;
+					const int cw = w / cellPx, ch = h / cellPx;
+					const ActiveRect active = ActiveRect::Full(w, h);
+					const SitingSpec siting = SitingSpec::Left();
+					const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+
+					auto verifyMicroMotion = [&](
+						DeliveredChromaFormat delivFmt,
+						ChromaSubsampling codedSub,
+						const TdV2Plane& curMasterCb,
+						const TdV2Plane& curMasterCr,
+						const TdV2Plane& curRecCb,
+						const TdV2Plane& curRecCr,
+						const TdV2Plane& prevPeakCb,
+						const TdV2Plane& prevPeakCr,
+						const TdV2Plane& nextPeakCb,
+						const TdV2Plane& nextPeakCr,
+						const ActiveRect& microCellRect,
+						const ActiveRect& bgRect,
+						int codedCellPx,
+						Preset preset,
+						const char* tag)
+					{
+						const double curMicroRmseCb = MaskedRmse(curMasterCb, curRecCb, microCellRect);
+						const double curMicroRmseCr = MaskedRmse(curMasterCr, curRecCr, microCellRect);
+						const double curBgRmseCb = MaskedRmse(curMasterCb, curRecCb, bgRect);
+						const double curBgRmseCr = MaskedRmse(curMasterCr, curRecCr, bgRect);
+						const double curBgMseCb = curBgRmseCb * curBgRmseCb;
+						const double curBgMseCr = curBgRmseCr * curBgRmseCr;
+
+						auto runChromaPreset = [&](bool enablePerCornerHuber) -> ChromaProcessResult
+						{
+							Config cfg = MakePreset(preset, Mode::On);
+							cfg.enablePerCornerHuber = enablePerCornerHuber;
+							TdV2ChromaEngine eng(cfg);
+							StandInRegistry reg;
+
+							ChromaProcessInput in;
+							in.seq = 180;
+							in.deliveredFormat = delivFmt;
+							in.codedSubsampling = codedSub;
+							in.gridStatus = ChromaGridStatus::Identified;
+							in.siting = siting;
+							in.lumaW = w;
+							in.lumaH = h;
+							in.activeRect = active;
+							in.receivedCb = curRecCb;
+							in.receivedCr = curRecCr;
+							in.hasCleanSplit = true;
+							in.cleanCb = curRecCb;
+							in.cleanCr = curRecCr;
+							in.prevPeak = { &prevPeakCb, &prevPeakCr, &stillMf, false };
+							in.nextPeak = { &nextPeakCb, &nextPeakCr, &stillMf, false };
+							in.hasStepPrior = true;
+							in.estimatedStepDelta = 14.0;
+							in.deadZonePhi = kDeadZonePhiInter;
+							in.zeroCoeffFraction = 0.20;
+							return eng.ProcessFrame(in, &reg);
+						};
+
+						auto countBadBlocks = [&](const TdV2Plane& out, const TdV2Plane& cur, const TdV2Plane& master) -> size_t
+						{
+							size_t bad = 0;
+							for (int cy = 0; cy < ch; ++cy)
+							{
+								for (int cx = 0; cx < cw; ++cx)
+								{
+									const ActiveRect br{ cx * codedCellPx, cy * codedCellPx, (cx + 1) * codedCellPx, (cy + 1) * codedCellPx };
+									const double baseR = MaskedRmse(master, cur, br);
+									const double outR = MaskedRmse(master, out, br);
+									if (outR > 1.10 * baseR)
+										++bad;
+								}
+							}
+							return bad;
+						};
+
+						const ChromaProcessResult resOn = runChromaPreset(/*enablePerCornerHuber=*/true);
+						const ChromaProcessResult resOff = runChromaPreset(/*enablePerCornerHuber=*/false);
+						AssertPlaneAllFinite(resOn.outputCb, L"Chroma Huber-ON outputCb must be finite");
+						AssertPlaneAllFinite(resOn.outputCr, L"Chroma Huber-ON outputCr must be finite");
+						AssertPlaneAllFinite(resOff.outputCb, L"Chroma Huber-OFF outputCb must be finite");
+						AssertPlaneAllFinite(resOff.outputCr, L"Chroma Huber-OFF outputCr must be finite");
+
+						const double onMicroRmseCb = MaskedRmse(curMasterCb, resOn.outputCb, microCellRect);
+						const double offMicroRmseCb = MaskedRmse(curMasterCb, resOff.outputCb, microCellRect);
+						const double onMicroRmseCr = MaskedRmse(curMasterCr, resOn.outputCr, microCellRect);
+						const double offMicroRmseCr = MaskedRmse(curMasterCr, resOff.outputCr, microCellRect);
+
+						const double onBgRmseCb = MaskedRmse(curMasterCb, resOn.outputCb, bgRect);
+						const double onBgRmseCr = MaskedRmse(curMasterCr, resOn.outputCr, bgRect);
+						const double onBgMseCb = onBgRmseCb * onBgRmseCb;
+						const double onBgMseCr = onBgRmseCr * onBgRmseCr;
+
+						const size_t badCb = countBadBlocks(resOn.outputCb, curRecCb, curMasterCb);
+						const size_t badCr = countBadBlocks(resOn.outputCr, curRecCr, curMasterCr);
+
+						char buf[256];
+						std::snprintf(buf, sizeof(buf),
+							"Chroma micro-motion (%s %s): Cb cur=%.3f on=%.3f off=%.3f (bad=%zu/100) | Cr cur=%.3f on=%.3f off=%.3f (bad=%zu/100)",
+							tag, PresetToken(preset), curMicroRmseCb, onMicroRmseCb, offMicroRmseCb, badCb,
+							curMicroRmseCr, onMicroRmseCr, offMicroRmseCr, badCr);
+						Logger::WriteMessage(buf);
+
+						// Mandatory In-Test Negative Control (Rule 3): enablePerCornerHuber = false on EXACT SAME inputs!
+						Assert::IsTrue(offMicroRmseCb > onMicroRmseCb && offMicroRmseCb > curMicroRmseCb,
+							L"Negative control: disabling enablePerCornerHuber on Chroma Cb MUST worsen cell (5,5) RMSE above both Huber-ON and current input");
+						Assert::IsTrue(offMicroRmseCr > onMicroRmseCr && offMicroRmseCr > curMicroRmseCr,
+							L"Negative control: disabling enablePerCornerHuber on Chroma Cr MUST worsen cell (5,5) RMSE above both Huber-ON and current input");
+
+						// Protected engine assertions: strict no-harm + plan s3.3 <= 1% blocks worsened > 10% + genuine background repair!
+						Assert::IsTrue(onMicroRmseCb <= curMicroRmseCb,
+							L"Chroma enablePerCornerHuber=true MUST satisfy strict no-harm on cell (5,5) Cb (onMicroRmse <= curMicroRmse)");
+						Assert::IsTrue(onMicroRmseCr <= curMicroRmseCr,
+							L"Chroma enablePerCornerHuber=true MUST satisfy strict no-harm on cell (5,5) Cr (onMicroRmse <= curMicroRmse)");
+						Assert::IsTrue(static_cast<double>(badCb) / static_cast<double>(cw * ch) <= 0.01,
+							L"Plan s3.3 safety bar: <= 1% of chroma Cb blocks may worsen error by > 10%");
+						Assert::IsTrue(static_cast<double>(badCr) / static_cast<double>(cw * ch) <= 0.01,
+							L"Plan s3.3 safety bar: <= 1% of chroma Cr blocks may worsen error by > 10%");
+						Assert::IsTrue(onBgMseCb < 0.50 * curBgMseCb && onBgMseCr < 0.50 * curBgMseCr,
+							L"Non-vacuity: stationary chroma background MUST achieve >= 50% MSE reduction");
+					};
+
+					// 1. Primary Yuv444 (160x160 coded = 16x16 coded px/cell, exact 1:1 twin of luma Test 12b geometry)
+					//    across BOTH Preset::RealTime (poolR=0) AND Preset::Reference (poolR=1)!
+					{
+						auto renderMicroChroma444 = [&](double foldShiftY, bool isCb) -> TdV2Plane
+						{
+							TdV2Plane p(w, h, 512.0);
+							const double sign = isCb ? 1.0 : -1.0;
+							for (int y = 0; y < h; ++y)
+							{
+								for (int x = 0; x < w; ++x)
+								{
+									const double base = 512.0 + sign * 38.0 * std::cos(2.0 * kPi * x / 128.0) * std::cos(2.0 * kPi * y / 112.0);
+									const double tex = sign * (9.0 * std::sin(2.0 * kPi * (x / 7.3 + y / 9.1) + 0.3)
+									                         + 7.0 * std::cos(2.0 * kPi * (x / 5.1 - y / 6.7) + 1.4));
+									double val = base + tex;
+									// Exact 1:1 twin of luma Test 12b crease inside cell (5, 5) ([80..96) x [80..96)).
+									if (x >= 80 && x < 90)
+									{
+										const double dx = static_cast<double>(x) - 84.5;
+										const double centerY = 85.0 + foldShiftY;
+										const double dy = static_cast<double>(y) - centerY;
+										const double horizTaper = std::exp(-0.5 * (dx / 3.2) * (dx / 3.2));
+										val -= sign * 140.0 * horizTaper * std::exp(-0.5 * (dy / 0.75) * (dy / 0.75));
+										val += sign *  50.0 * horizTaper * std::exp(-0.5 * ((dy + 1.6) / 0.75) * ((dy + 1.6) / 0.75));
+									}
+									p.at(x, y) = val;
+								}
+							}
+							return p;
+						};
+
+						const TdV2Plane refMasterCb = renderMicroChroma444(0.0, true);
+						const TdV2Plane refMasterCr = renderMicroChroma444(0.0, false);
+						const TdV2Plane curMasterCb = renderMicroChroma444(2.0, true);
+						const TdV2Plane curMasterCr = renderMicroChroma444(2.0, false);
+
+						const TdV2Plane curRecCb = AddGaussianNoise(curMasterCb, 7.0, 1811u, active);
+						const TdV2Plane curRecCr = AddGaussianNoise(curMasterCr, 7.0, 1812u, active);
+						const TdV2Plane prevPeakCb = AddGaussianNoise(refMasterCb, 1.2, 1813u, active);
+						const TdV2Plane prevPeakCr = AddGaussianNoise(refMasterCr, 1.2, 1814u, active);
+						const TdV2Plane nextPeakCb = AddGaussianNoise(refMasterCb, 1.2, 1815u, active);
+						const TdV2Plane nextPeakCr = AddGaussianNoise(refMasterCr, 1.2, 1816u, active);
+
+						const ActiveRect microCellRect444{ 80, 80, 96, 96 };
+						const ActiveRect bgRect444{ 16, 16, 64, 64 };
+						for (Preset preset : { Preset::RealTime, Preset::Reference })
+						{
+							verifyMicroMotion(
+								DeliveredChromaFormat::Yuv444, ChromaSubsampling::Yuv444,
+								curMasterCb, curMasterCr, curRecCb, curRecCr,
+								prevPeakCb, prevPeakCr, nextPeakCb, nextPeakCr,
+								microCellRect444, bgRect444, 16, preset, "444");
+						}
+					}
+
+					// 2. Additional Yuv420 (80x80 coded = 8x8 coded px/cell): Preset::RealTime check.
+					{
+						const int cW = w / 2, cH = h / 2;
+						const ActiveRect cActive = ActiveRect::Full(cW, cH);
+						auto renderMicroChroma420 = [&](double foldShiftCodedY, bool isCb) -> TdV2Plane
+						{
+							TdV2Plane p(cW, cH, 512.0);
+							const double sign = isCb ? 1.0 : -1.0;
+							for (int y = 0; y < cH; ++y)
+							{
+								for (int x = 0; x < cW; ++x)
+								{
+									const double base = 512.0 + sign * 24.0 * std::cos(2.0 * kPi * x / 64.0) * std::cos(2.0 * kPi * y / 56.0);
+									const double tex = sign * (7.0 * std::sin(2.0 * kPi * (x / 5.3 + y / 6.7) + 0.3)
+									                         + 5.0 * std::cos(2.0 * kPi * (x / 4.1 - y / 5.1) + 1.4));
+									double val = base + tex;
+									// Localized moving non-rigid crease near the left interior boundary of cell (5, 5) ([40..48) x [40..48)).
+									if (x >= 40 && x < 45)
+									{
+										const double dx = static_cast<double>(x) - 42.0;
+										const double centerY = 42.5 + foldShiftCodedY;
+										const double dy = static_cast<double>(y) - centerY;
+										const double horizTaper = std::exp(-0.5 * (dx / 1.6) * (dx / 1.6));
+										val -= sign * 150.0 * horizTaper * std::exp(-0.5 * (dy / 0.60) * (dy / 0.60));
+										val += sign *  55.0 * horizTaper * std::exp(-0.5 * ((dy + 1.2) / 0.60) * ((dy + 1.2) / 0.60));
+									}
+									p.at(x, y) = val;
+								}
+							}
+							return p;
+						};
+
+						const TdV2Plane refMasterCb = renderMicroChroma420(0.0, true);
+						const TdV2Plane refMasterCr = renderMicroChroma420(0.0, false);
+						const TdV2Plane curMasterCb = renderMicroChroma420(1.5, true);
+						const TdV2Plane curMasterCr = renderMicroChroma420(1.5, false);
+
+						const TdV2Plane curRecCb = AddGaussianNoise(curMasterCb, 7.0, 1801u, cActive);
+						const TdV2Plane curRecCr = AddGaussianNoise(curMasterCr, 7.0, 1802u, cActive);
+						const TdV2Plane prevPeakCb = AddGaussianNoise(refMasterCb, 1.2, 1803u, cActive);
+						const TdV2Plane prevPeakCr = AddGaussianNoise(refMasterCr, 1.2, 1804u, cActive);
+						const TdV2Plane nextPeakCb = AddGaussianNoise(refMasterCb, 1.2, 1805u, cActive);
+						const TdV2Plane nextPeakCr = AddGaussianNoise(refMasterCr, 1.2, 1806u, cActive);
+
+						const ActiveRect microCellRect420{ 40, 40, 48, 48 };
+						const ActiveRect bgRect420{ 8, 8, 32, 32 };
+						verifyMicroMotion(
+							DeliveredChromaFormat::Yuv420, ChromaSubsampling::Yuv420,
+							curMasterCb, curMasterCr, curRecCb, curRecCr,
+							prevPeakCb, prevPeakCr, nextPeakCb, nextPeakCr,
+							microCellRect420, bgRect420, 8, Preset::RealTime, "420");
+					}
+				}
+
+				// ---- Sub-case C (Item #4c / H13): Pass-1 faceMask exact zero-delta + unmasked negative control ----
+				// Mask an interior 2x2 luma-cell face region (cells (3..4, 3..4) -> 4 cells -> coded 4:2:0 [24..40)^2)
+				// on BOTH Identified 4:2:0 (transformIdentified8x8=true, ResidualMode::Cell) AND Unidentified coarse-only (Branch A).
+				{
+					const int w = 128, h = 128;
+					const int cellPx = 16;
+					const int cw = w / cellPx, ch = h / cellPx; // 8x8 luma cells
+					const int cW = w / 2, cH = h / 2;           // 64x64 coded 4:2:0 (8x8 coded px per cell)
+					const ActiveRect active = ActiveRect::Full(w, h);
+					const ActiveRect cActive = ActiveRect::Full(cW, cH);
+					const SitingSpec siting = SitingSpec::Left();
+					const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+
+					// Smooth base chroma field on 64x64 coded 4:2:0.
+					TdV2Plane masterCb(cW, cH, 512.0), masterCr(cW, cH, 512.0);
+					for (int cy = 0; cy < cH; ++cy)
+					{
+						for (int cx = 0; cx < cW; ++cx)
+						{
+							masterCb.at(cx, cy) = 512.0 + 24.0 * std::sin(2.0 * kPi * cx / 64.0) * std::cos(2.0 * kPi * cy / 64.0);
+							masterCr.at(cx, cy) = 512.0 - 24.0 * std::cos(2.0 * kPi * cx / 64.0) * std::sin(2.0 * kPi * cy / 64.0);
+						}
+					}
+
+					// Interior 2x2 luma-cell face mask: cells (3,3), (4,3), (3,4), (4,4) -> 4 cells -> coded [24..40) x [24..40).
+					std::vector<uint8_t> faceMask(static_cast<size_t>(cw) * ch, 0u);
+					for (int cy = 3; cy < 5; ++cy)
+						for (int cx = 3; cx < 5; ++cx)
+							faceMask[static_cast<size_t>(cy) * cw + cx] = 1u;
+
+					const ActiveRect bgRect{ 0, 0, 16, 16 }; // Stationary unmasked background far from face cells.
+
+					const TdV2Plane prevPeakCb = AddGaussianNoise(masterCb, 0.8, 1851u, cActive);
+					const TdV2Plane prevPeakCr = AddGaussianNoise(masterCr, 0.8, 1852u, cActive);
+					const TdV2Plane nextPeakCb = AddGaussianNoise(masterCb, 0.8, 1853u, cActive);
+					const TdV2Plane nextPeakCr = AddGaussianNoise(masterCr, 0.8, 1854u, cActive);
+
+					// Identified (Branch B, 8x8 DCT CELL): Gaussian coding noise (sigma = 7.0);
+					// Unidentified (Branch A, coarse G(16)): coarse low-frequency chroma banding (+9 Cb / -9 Cr + mild noise).
+					const TdV2Plane curIdCb = AddGaussianNoise(masterCb, 7.0, 1855u, cActive);
+					const TdV2Plane curIdCr = AddGaussianNoise(masterCr, 7.0, 1856u, cActive);
+
+					TdV2Plane curUnidCb = AddGaussianNoise(masterCb, 0.5, 1857u, cActive);
+					TdV2Plane curUnidCr = AddGaussianNoise(masterCr, 0.5, 1858u, cActive);
+					for (size_t i = 0; i < curUnidCb.v.size(); ++i)
+					{
+						curUnidCb.v[i] += 9.0;
+						curUnidCr.v[i] -= 9.0;
+					}
+
+					struct FaceGridCase
+					{
+						ChromaGridStatus status;
+						bool transform8x8;
+						const TdV2Plane* curCb;
+						const TdV2Plane* curCr;
+						const wchar_t* label;
+					};
+					const FaceGridCase cases[2] = {
+						{ ChromaGridStatus::Identified,   true,  &curIdCb,   &curIdCr,   L"Identified-420-8x8DCT-Cell" },
+						{ ChromaGridStatus::Unidentified, false, &curUnidCb, &curUnidCr, L"Unidentified-420-CoarseOnly" }
+					};
+
+					for (const FaceGridCase& fc : cases)
+					{
+						Config cfg = MakePreset(Preset::Reference, Mode::On);
+						cfg.residualMode = ResidualMode::Cell;
+						cfg.cellProjIterations = 2;
+
+						ChromaProcessInput baseIn;
+						baseIn.seq = 190;
+						baseIn.deliveredFormat = DeliveredChromaFormat::Yuv420;
+						baseIn.codedSubsampling = ChromaSubsampling::Yuv420;
+						baseIn.gridStatus = fc.status;
+						baseIn.siting = siting;
+						baseIn.lumaW = w;
+						baseIn.lumaH = h;
+						baseIn.activeRect = active;
+						baseIn.receivedCb = *fc.curCb;
+						baseIn.receivedCr = *fc.curCr;
+						baseIn.hasCleanSplit = true;
+						baseIn.cleanCb = *fc.curCb;
+						baseIn.cleanCr = *fc.curCr;
+						baseIn.prevPeak = { &prevPeakCb, &prevPeakCr, &stillMf, false };
+						baseIn.nextPeak = { &nextPeakCb, &nextPeakCr, &stillMf, false };
+						baseIn.hasStepPrior = true;
+						baseIn.estimatedStepDelta = 24.0;
+						baseIn.deadZonePhi = kDeadZonePhiInter;
+						baseIn.zeroCoeffFraction = 0.35;
+						baseIn.transformIdentified8x8 = fc.transform8x8;
+
+						// Mandatory Same-Input Negative Control (Rule 3): faceMask == nullptr MUST modify face pixels (> 0.5 code)!
+						TdV2ChromaEngine engUnmasked(cfg);
+						StandInRegistry regUnmasked;
+						const ChromaProcessResult resUnmasked = engUnmasked.ProcessFrame(baseIn, &regUnmasked);
+						Assert::AreEqual(static_cast<size_t>(0), resUnmasked.faceMaskedCells,
+							(std::wstring(fc.label) + L": Negative control unmasked run must report faceMaskedCells == 0").c_str());
+						Assert::IsFalse(regUnmasked.IsActive(StandInKind::FaceNonRigidMask),
+							(std::wstring(fc.label) + L": Negative control unmasked run must NOT engage FaceNonRigidMask").c_str());
+
+						double maxUnmaskedCb = 0.0, maxUnmaskedCr = 0.0;
+						for (int y = 24; y < 40; ++y)
+						{
+							for (int x = 24; x < 40; ++x)
+							{
+								maxUnmaskedCb = (std::max)(maxUnmaskedCb, std::fabs(resUnmasked.outputCb.at(x, y) - fc.curCb->at(x, y)));
+								maxUnmaskedCr = (std::max)(maxUnmaskedCr, std::fabs(resUnmasked.outputCr.at(x, y) - fc.curCr->at(x, y)));
+							}
+						}
+						Assert::IsTrue(maxUnmaskedCb > 0.5 && maxUnmaskedCr > 0.5,
+							(std::wstring(fc.label) + L": Negative control unmasked face cells MUST receive non-zero chroma delta (> 0.5 code)").c_str());
+
+						// Protected Pass-1 faceMask run: exact bit-for-bit 0.0 delta on EVERY pixel in masked cells [24..40)^2!
+						ChromaProcessInput maskedIn = baseIn;
+						maskedIn.faceMask = &faceMask;
+						TdV2ChromaEngine engMasked(cfg);
+						StandInRegistry regMasked;
+						const ChromaProcessResult resMasked = engMasked.ProcessFrame(maskedIn, &regMasked);
+						AssertPlaneAllFinite(resMasked.outputCb, L"Chroma face-masked outputCb must be finite");
+						AssertPlaneAllFinite(resMasked.outputCr, L"Chroma face-masked outputCr must be finite");
+
+						Assert::AreEqual(static_cast<size_t>(4), resMasked.faceMaskedCells,
+							(std::wstring(fc.label) + L": faceMaskedCells MUST equal exact 4 masked luma cells").c_str());
+						Assert::IsTrue(regMasked.IsActive(StandInKind::FaceNonRigidMask),
+							(std::wstring(fc.label) + L": FaceNonRigidMask stand-in MUST be visibly active").c_str());
+
+						for (int y = 24; y < 40; ++y)
+						{
+							for (int x = 24; x < 40; ++x)
+							{
+								Assert::AreEqual(0.0, resMasked.codedDeltaCb.at(x, y), 0.0,
+									(std::wstring(fc.label) + L": masked face codedDeltaCb MUST be exact 0.0").c_str());
+								Assert::AreEqual(0.0, resMasked.codedDeltaCr.at(x, y), 0.0,
+									(std::wstring(fc.label) + L": masked face codedDeltaCr MUST be exact 0.0").c_str());
+								Assert::AreEqual(fc.curCb->at(x, y), resMasked.outputCb.at(x, y), 0.0,
+									(std::wstring(fc.label) + L": masked face outputCb MUST be bit-exact to received").c_str());
+								Assert::AreEqual(fc.curCr->at(x, y), resMasked.outputCr.at(x, y), 0.0,
+									(std::wstring(fc.label) + L": masked face outputCr MUST be bit-exact to received").c_str());
+							}
+						}
+
+						// Non-vacuity: stationary unmasked background MUST still repair >= 50% MSE!
+						const double curBgRmseCb = MaskedRmse(masterCb, *fc.curCb, bgRect);
+						const double curBgRmseCr = MaskedRmse(masterCr, *fc.curCr, bgRect);
+						const double outBgRmseCb = MaskedRmse(masterCb, resMasked.outputCb, bgRect);
+						const double outBgRmseCr = MaskedRmse(masterCr, resMasked.outputCr, bgRect);
+						const double curBgMseCb = curBgRmseCb * curBgRmseCb;
+						const double curBgMseCr = curBgRmseCr * curBgRmseCr;
+						const double outBgMseCb = outBgRmseCb * outBgRmseCb;
+						const double outBgMseCr = outBgRmseCr * outBgRmseCr;
+						Assert::IsTrue(outBgMseCb < 0.50 * curBgMseCb && outBgMseCr < 0.50 * curBgMseCr,
+							(std::wstring(fc.label) + L": stationary unmasked chroma background MUST achieve >= 50% MSE reduction").c_str());
+					}
+				}
+			}
 		};
 	}
 }

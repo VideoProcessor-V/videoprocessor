@@ -19,6 +19,7 @@
 //  13. GpuCutSeedZeroHygieneZeroCopyRefValidationSingleNanClosureAndNon16PillarboxGeometry
 //  14. SigmaDeltaWarpShaderQ9bAboveBlackNeverDipsBtbWhileTrueBtbPreserved
 //  15. GpuMatchesCpuOnPrevPeak2CodecModelPbInvalidMotionPocsSkipAndSkyBandingParsevalBound
+//  16. ZeroCopyTelemetryStandInsAndPersistentOnlyVramUserNoDoubleCount
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -1607,8 +1608,15 @@ namespace TdV2GpuWarpNs
 				L"MakeVramUser id must be kUserTemporalDetail");
 			Assert::AreEqual(static_cast<int>(VpSkeleton::Tier::T1), static_cast<int>(vUser.tier),
 				L"MakeVramUser tier must be Tier::T1");
+			const uint64_t estPersistentBytes = TdV2GpuEngine::EstimatedPersistentVramBytes(w, h);
+			const uint64_t estScratchBytes = TdV2GpuEngine::EstimatedScratchVramBytes(w, h);
 			Assert::IsTrue(vUser.levels.size() >= 2u, L"MakeVramUser must declare full level + shed-to-0 level");
-			Assert::AreEqual(estBytes, vUser.levels[0], L"MakeVramUser levels[0] must equal EstimatedVramBytes(w, h)");
+			Assert::AreEqual(estPersistentBytes, vUser.levels[0],
+				L"MakeVramUser levels[0] must equal EstimatedPersistentVramBytes(w, h) (persistent-only, no scratch double-count)");
+			Assert::AreEqual(estBytes, vUser.levels[0] + estScratchBytes,
+				L"MakeVramUser levels[0] + EstimatedScratchVramBytes(w, h) must equal EstimatedVramBytes(w, h)");
+			Assert::IsTrue(vUser.levels[0] > 0u && vUser.levels[0] < estBytes,
+				L"MakeVramUser levels[0] must strictly exclude scratch arena bytes");
 			Assert::AreEqual(static_cast<uint64_t>(0u), vUser.levels.back(), L"MakeVramUser shed level must be 0");
 
 			// Null GPU yields empty ArenaRequests.
@@ -2812,9 +2820,15 @@ imageStore(dst_bad, p, vec4(y, 0.0, 0.0, 0.0));
 				L"MakeVramUser(RealTime) id must be kUserTemporalDetail");
 			Assert::AreEqual(static_cast<int>(VpSkeleton::Tier::T1), static_cast<int>(rtUser.tier),
 				L"MakeVramUser(RealTime) tier must be Tier::T1");
+			const uint64_t rtPersistent4k = TdV2GpuEngine::EstimatedPersistentVramBytes(3840, 2160, 16, Preset::RealTime);
+			const uint64_t rtScratch4k    = TdV2GpuEngine::EstimatedScratchVramBytes(3840, 2160, 16, Preset::RealTime);
 			Assert::IsTrue(rtUser.levels.size() >= 2u, L"MakeVramUser(RealTime) must have full + shed-to-0 levels");
-			Assert::AreEqual(rtVram4k, rtUser.levels[0],
-				L"MakeVramUser(RealTime) levels[0] must match EstimatedVramBytes(..., Preset::RealTime)");
+			Assert::AreEqual(rtPersistent4k, rtUser.levels[0],
+				L"MakeVramUser(RealTime) levels[0] must equal EstimatedPersistentVramBytes(..., Preset::RealTime) (no scratch double-count)");
+			Assert::AreEqual(rtVram4k, rtUser.levels[0] + rtScratch4k,
+				L"MakeVramUser(RealTime) levels[0] + EstimatedScratchVramBytes(..., Preset::RealTime) must equal EstimatedVramBytes");
+			Assert::IsTrue(rtUser.levels[0] > 0u && rtUser.levels[0] < rtVram4k,
+				L"MakeVramUser(RealTime) levels[0] must strictly exclude scratch arena bytes");
 			Assert::AreEqual(static_cast<uint64_t>(0u), rtUser.levels.back(),
 				L"MakeVramUser(RealTime) shed level must be 0");
 
@@ -5678,6 +5692,320 @@ imageStore(dst_alias, p, vec4(v + 1.0, 0.0, 0.0, 0.0));
 				Assert::IsTrue(oldWhiteNoiseLBound < 1.25 && peakSkyDelta > oldWhiteNoiseLBound + 0.5,
 					FormatMsg("M3 negative control: peakSkyDelta=%.3f did not clear old white-noise L bound=%.3f + 0.5",
 						peakSkyDelta, oldWhiteNoiseLBound).c_str());
+			}
+		}
+
+		// =========================================================================
+		// 16. Item #6 Red-First:
+		//     (a) Zero-copy (!readbackCellDiagnostics) StandInRegistry telemetry:
+		//         GrainGuardW4c, SingleRefA1ToA2Fallback, and non-8-aligned
+		//         TransformUnknownBound remainder strips
+		//     (b) H-VRAM: MakeVramUser persistent-only accounting (ZERO scratch
+		//         arena double-counting with kUserScratchArenaExtra)
+		// =========================================================================
+		BEGIN_TEST_METHOD_ATTRIBUTE(ZeroCopyTelemetryStandInsAndPersistentOnlyVramUserNoDoubleCount)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(ZeroCopyTelemetryStandInsAndPersistentOnlyVramUserNoDoubleCount)
+		{
+			WarpGpuContext ctx;
+
+			// -------------------------------------------------------------------------
+			// Sub-case A: !readbackCellDiagnostics zero-copy StandInRegistry telemetry
+			// -------------------------------------------------------------------------
+			{
+				struct OwnedTex
+				{
+					pl_gpu gpu = nullptr;
+					pl_tex tex = nullptr;
+					explicit OwnedTex(pl_gpu g) : gpu(g) {}
+					~OwnedTex()
+					{
+						if (gpu != nullptr && tex != nullptr)
+							pl_tex_destroy(gpu, &tex);
+					}
+					OwnedTex(const OwnedTex&) = delete;
+					OwnedTex& operator=(const OwnedTex&) = delete;
+				};
+
+				const int w = 64;
+				const int h = 64;
+				const int cw = w / 16;
+				const int ch = h / 16;
+				const ActiveRect full = ActiveRect::Full(w, h);
+
+				const pl_fmt fmtR32 = VpSkeleton::PlTexBackend::FindFormat(ctx.gpu, VpSkeleton::TexFormat::R32F);
+				const pl_fmt fmtRG32 = VpSkeleton::PlTexBackend::FindFormat(ctx.gpu, VpSkeleton::TexFormat::RG32F);
+				const pl_fmt fmtRGBA32 = VpSkeleton::PlTexBackend::FindFormat(ctx.gpu, VpSkeleton::TexFormat::RGBA32F);
+				Assert::IsNotNull(fmtR32, L"R32F unsupported on WARP");
+				Assert::IsNotNull(fmtRG32, L"RG32F unsupported on WARP");
+				Assert::IsNotNull(fmtRGBA32, L"RGBA32F unsupported on WARP");
+
+				OwnedTex inRecTex(ctx.gpu), inCleanTex(ctx.gpu), inPrevTex(ctx.gpu), inNextTex(ctx.gpu);
+				OwnedTex outYTex(ctx.gpu), outCleanTex(ctx.gpu), outDeltaTex(ctx.gpu);
+				OwnedTex outMapsTex(ctx.gpu), outDiagTex(ctx.gpu), outGuardTex(ctx.gpu), outWarpDiagTex(ctx.gpu);
+
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, inRecTex.tex, w, h, fmtR32, true, false, true, false));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, inCleanTex.tex, w, h, fmtR32, true, false, true, false));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, inPrevTex.tex, w, h, fmtR32, true, false, true, false));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, inNextTex.tex, w, h, fmtR32, true, false, true, false));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, outYTex.tex, w, h, fmtR32, true, true, false, true));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, outCleanTex.tex, w, h, fmtR32, true, true, false, true));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, outDeltaTex.tex, w, h, fmtRG32, true, true, false, true));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, outMapsTex.tex, cw, 3 * ch, fmtRGBA32, true, true, false, true));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, outDiagTex.tex, cw, ch, fmtRGBA32, true, true, false, true));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, outGuardTex.tex, cw, ch, fmtRG32, true, true, false, true));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, outWarpDiagTex.tex, cw, ch, fmtRG32, true, true, false, true));
+
+				const TdV2Plane master = RenderScene(w, h, 0.0, 0.0);
+				const TdV2Plane curClean = AddCodingDamage(master, 8.0, 16001u, 0.0, full);
+				const TdV2Plane prevClean = AddCodingDamage(master, 1.5, 16002u, 0.0, full);
+				const TdV2Plane nextClean = AddCodingDamage(master, 1.5, 16003u, 0.0, full);
+
+				// Include genuine ownGrain + retainedGrainVar so Layer-4 TdGuardPort evaluates every active cell.
+				TdV2Plane receivedY = curClean;
+				std::mt19937 gRng(16004u);
+				std::normal_distribution<double> gDist(0.0, 2.0);
+				for (double& v : receivedY.v)
+					v += gDist(gRng);
+				const std::vector<double> retainedGrainVar(static_cast<size_t>(cw * ch), 16.0);
+				const CellMotionField stillMf = CellMotionField::Uniform(
+					cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+
+				Assert::IsTrue(Detail::UploadPlaneR32F(ctx.gpu, inRecTex.tex, receivedY));
+				Assert::IsTrue(Detail::UploadPlaneR32F(ctx.gpu, inCleanTex.tex, curClean));
+				Assert::IsTrue(Detail::UploadPlaneR32F(ctx.gpu, inPrevTex.tex, prevClean));
+				Assert::IsTrue(Detail::UploadPlaneR32F(ctx.gpu, inNextTex.tex, nextClean));
+
+				Config cfg = MakePreset(Preset::Reference, Mode::On);
+				cfg.enableLongAnchor = false;
+				cfg.enableCarryForward = false;
+				Assert::AreEqual(static_cast<int>(VarianceEstimator::A3_ConservativeMin), static_cast<int>(cfg.estimator),
+					L"Default Reference preset must use A3_ConservativeMin");
+
+				auto makeBaseOut = [&](bool readbackDiag) -> GpuFrameOutput
+				{
+					GpuFrameOutput o;
+					o.outputYTex = outYTex.tex;
+					o.outputCleanTex = outCleanTex.tex;
+					o.tdDeltaTex = outDeltaTex.tex;
+					o.tdMapsTex = outMapsTex.tex;
+					o.diagFlagsTex = outDiagTex.tex;
+					o.guardCellTex = outGuardTex.tex;
+					o.warpDiagTex = outWarpDiagTex.tex;
+					o.readbackCellDiagnostics = readbackDiag;
+					return o;
+				};
+
+				// ---- A1: Single-ref active frame (prevPeak != null, nextPeak == null, carry inactive, A3 default) ----
+				{
+					GpuFrameInput inSingle;
+					inSingle.seq = 1601;
+					inSingle.w = w;
+					inSingle.h = h;
+					inSingle.receivedYTex = inRecTex.tex;
+					inSingle.cleanYTex = inCleanTex.tex;
+					inSingle.hasCleanSplit = true;
+					inSingle.activeRect = full;
+					inSingle.prevPeak = { inPrevTex.tex, &stillMf, false };
+					inSingle.nextPeak = { nullptr, nullptr, false };
+					inSingle.retainedGrainVar = retainedGrainVar;
+					inSingle.hasStepPrior = true;
+					inSingle.estimatedStepDelta = 24.0;
+					inSingle.deadZonePhi = kDeadZonePhiInter;
+					inSingle.zeroCoeffFraction = 0.35;
+					inSingle.transformIdentified8x8 = false;
+
+					GpuEngineGuard zcGuard(ctx.gpu, cfg);
+					GpuFrameOutput zcOut = makeBaseOut(/*readbackDiag=*/false);
+					StandInRegistry siZc;
+					Assert::IsTrue(zcGuard.engine.ProcessFrameGpu(ctx.gpu, ctx.dispatch, inSingle, zcOut, nullptr, &siZc),
+						L"A1 zero-copy single-ref ProcessFrameGpu failed");
+					Assert::IsTrue(zcOut.succeeded && !zcOut.carryUsed, L"A1 zero-copy single-ref must succeed without carry");
+					Assert::AreEqual(static_cast<size_t>(1u), zcOut.activeRefCount, L"A1 must fuse exactly 1 reference");
+					Assert::IsTrue(zcOut.tdMaps.empty(), L"Zero-copy (!readbackCellDiagnostics) must skip CPU tdMaps readback");
+
+					Assert::IsTrue(siZc.IsActive(StandInKind::GrainGuardW4c),
+						L"A1 zero-copy (!readbackCellDiagnostics) MUST visibly engage StandInKind::GrainGuardW4c");
+					Assert::IsTrue(siZc.IsActive(StandInKind::SingleRefA1ToA2Fallback),
+						L"A1 zero-copy single-ref A3 MUST visibly engage StandInKind::SingleRefA1ToA2Fallback");
+					Assert::IsTrue(siZc.IsActive(StandInKind::TransformUnknownBound),
+						L"A1 zero-copy with transformIdentified8x8=false must engage StandInKind::TransformUnknownBound");
+
+					// Parity check with readbackCellDiagnostics = true on exact same input: confirms GPU genuinely evaluated both!
+					GpuEngineGuard rbGuard(ctx.gpu, cfg);
+					GpuFrameOutput rbOut = makeBaseOut(/*readbackDiag=*/true);
+					StandInRegistry siRb;
+					Assert::IsTrue(rbGuard.engine.ProcessFrameGpu(ctx.gpu, ctx.dispatch, inSingle, rbOut, nullptr, &siRb));
+					Assert::IsTrue(rbOut.singleRefA2Cells > 0u, L"A1 readback parity: GPU must report singleRefA2Cells > 0");
+					Assert::IsTrue(siRb.IsActive(StandInKind::GrainGuardW4c), L"A1 readback parity: GrainGuardW4c active");
+					Assert::IsTrue(siRb.IsActive(StandInKind::SingleRefA1ToA2Fallback), L"A1 readback parity: SingleRefA1ToA2Fallback active");
+
+					// MANDATORY NEGATIVE CONTROL (Rule 3): Dual-ref (prevPeak + nextPeak) on the EXACT SAME frame
+					// with readbackCellDiagnostics = false MUST NOT falsely engage SingleRefA1ToA2Fallback!
+					GpuFrameInput inDual = inSingle;
+					inDual.seq = 1602;
+					inDual.nextPeak = { inNextTex.tex, &stillMf, false };
+					GpuEngineGuard dualGuard(ctx.gpu, cfg);
+					GpuFrameOutput dualOut = makeBaseOut(/*readbackDiag=*/false);
+					StandInRegistry siDual;
+					Assert::IsTrue(dualGuard.engine.ProcessFrameGpu(ctx.gpu, ctx.dispatch, inDual, dualOut, nullptr, &siDual));
+					Assert::AreEqual(static_cast<size_t>(2u), dualOut.activeRefCount, L"A1 negative control must fuse 2 refs");
+					Assert::IsTrue(siDual.IsActive(StandInKind::GrainGuardW4c),
+						L"A1 negative control dual-ref must still engage GrainGuardW4c");
+					Assert::IsFalse(siDual.IsActive(StandInKind::SingleRefA1ToA2Fallback),
+						L"A1 negative control: dual-ref zero-copy must NOT engage SingleRefA1ToA2Fallback");
+				}
+
+				// ---- A2: Non-8-aligned active rect ({2, 2, 62, 62} on 64x64) with transformIdentified8x8 = true ----
+				{
+					GpuFrameInput inNon8;
+					inNon8.seq = 1610;
+					inNon8.w = w;
+					inNon8.h = h;
+					inNon8.receivedYTex = inRecTex.tex;
+					inNon8.cleanYTex = inCleanTex.tex;
+					inNon8.hasCleanSplit = true;
+					inNon8.activeRect = ActiveRect{ 2, 2, 62, 62 }; // Interior 8x8 = [8,56)^2; non-empty remainder strips!
+					inNon8.prevPeak = { inPrevTex.tex, &stillMf, false };
+					inNon8.nextPeak = { inNextTex.tex, &stillMf, false };
+					inNon8.retainedGrainVar = retainedGrainVar;
+					inNon8.hasStepPrior = true;
+					inNon8.estimatedStepDelta = 24.0;
+					inNon8.deadZonePhi = kDeadZonePhiInter;
+					inNon8.zeroCoeffFraction = 0.35;
+					inNon8.transformIdentified8x8 = true;
+
+					GpuEngineGuard zcNon8Guard(ctx.gpu, cfg);
+					GpuFrameOutput zcNon8Out = makeBaseOut(/*readbackDiag=*/false);
+					StandInRegistry siNon8;
+					Assert::IsTrue(zcNon8Guard.engine.ProcessFrameGpu(ctx.gpu, ctx.dispatch, inNon8, zcNon8Out, nullptr, &siNon8),
+						L"A2 zero-copy non-8-aligned ProcessFrameGpu failed");
+					Assert::IsTrue(zcNon8Out.succeeded && zcNon8Out.tdMaps.empty());
+					Assert::IsTrue(siNon8.IsActive(StandInKind::TransformUnknownBound),
+						L"A2 zero-copy non-8-aligned {2,2,62,62} with transformIdentified8x8=true MUST engage TransformUnknownBound for remainder strips");
+					Assert::IsTrue(siNon8.IsActive(StandInKind::GrainGuardW4c),
+						L"A2 zero-copy must engage GrainGuardW4c");
+					Assert::IsTrue(siNon8.IsActive(StandInKind::CodecModelPbStandIn),
+						L"A2 zero-copy with null codecModelPbTex must engage CodecModelPbStandIn");
+
+					// Parity check with readbackCellDiagnostics = true on exact same {2, 2, 62, 62} input:
+					GpuEngineGuard rbNon8Guard(ctx.gpu, cfg);
+					GpuFrameOutput rbNon8Out = makeBaseOut(/*readbackDiag=*/true);
+					StandInRegistry siRbNon8;
+					Assert::IsTrue(rbNon8Guard.engine.ProcessFrameGpu(ctx.gpu, ctx.dispatch, inNon8, rbNon8Out, nullptr, &siRbNon8));
+					Assert::IsTrue(siRbNon8.IsActive(StandInKind::TransformUnknownBound),
+						L"A2 readback parity: {2,2,62,62} remainder strips genuinely engaged TransformUnknownBound on GPU");
+
+					// MANDATORY NEGATIVE CONTROL (Rule 3): Exact same frame with 8-aligned activeRect {8, 8, 56, 56}
+					// (ZERO remainder strips) and readbackCellDiagnostics = false MUST NOT engage TransformUnknownBound!
+					GpuFrameInput inAligned = inNon8;
+					inAligned.seq = 1611;
+					inAligned.activeRect = ActiveRect{ 8, 8, 56, 56 };
+					GpuEngineGuard alGuard(ctx.gpu, cfg);
+					GpuFrameOutput alOut = makeBaseOut(/*readbackDiag=*/false);
+					StandInRegistry siAligned;
+					Assert::IsTrue(alGuard.engine.ProcessFrameGpu(ctx.gpu, ctx.dispatch, inAligned, alOut, nullptr, &siAligned));
+					Assert::IsTrue(alOut.succeeded);
+					Assert::IsFalse(siAligned.IsActive(StandInKind::TransformUnknownBound),
+						L"A2 negative control: 8-aligned {8,8,56,56} with transformIdentified8x8=true must NOT engage TransformUnknownBound");
+				}
+			}
+
+			// -------------------------------------------------------------------------
+			// Sub-case B (H-VRAM): MakeVramUser persistent-only accounting — ZERO
+			//                      scratch arena double-counting with kUserScratchArenaExtra
+			// -------------------------------------------------------------------------
+			{
+				const int w4k = 3840;
+				const int h4k = 2160;
+				const int cellPx = 16;
+
+				auto sumArenaRequestBytes = [](const std::vector<VpSkeleton::ArenaRequest>& reqs) -> uint64_t
+				{
+					uint64_t sum = 0;
+					for (const VpSkeleton::ArenaRequest& r : reqs)
+					{
+						sum += static_cast<uint64_t>(VpSkeleton::BytesPerTexel(r.shape.fmt)) *
+						       static_cast<uint64_t>(r.shape.w) *
+						       static_cast<uint64_t>(r.shape.h) *
+						       static_cast<uint64_t>(r.count);
+					}
+					return sum;
+				};
+
+				for (Preset preset : { Preset::Reference, Preset::RealTime })
+				{
+					const char* tag = (preset == Preset::Reference) ? "Preset::Reference" : "Preset::RealTime";
+
+					const std::vector<VpSkeleton::ArenaRequest> reqs =
+						TdV2GpuEngine::ArenaRequests(ctx.gpu, w4k, h4k, cellPx, preset);
+					Assert::IsFalse(reqs.empty(), FormatTagMsg(tag, "ArenaRequests(4K) must be non-empty").c_str());
+
+					const uint64_t arenaReqBytes = sumArenaRequestBytes(reqs);
+					Assert::IsTrue(arenaReqBytes > 0u, FormatTagMsg(tag, "arenaReqBytes must be > 0").c_str());
+					const VpSkeleton::ArenaPlan planT1 = VpSkeleton::PlanArena(reqs, VpSkeleton::Tier::T1);
+					Assert::AreEqual(arenaReqBytes, planT1.bytes,
+						FormatTagMsg(tag, "PlanArena(T1).bytes must equal summed ArenaRequests bytes").c_str());
+
+					const VpSkeleton::VramUser vUser = TdV2GpuEngine::MakeVramUser(w4k, h4k, cellPx, preset);
+					const uint64_t total = TdV2GpuEngine::EstimatedVramBytes(w4k, h4k, cellPx, preset);
+
+					Assert::AreEqual(static_cast<int>(VpSkeleton::kUserTemporalDetail), static_cast<int>(vUser.id),
+						FormatTagMsg(tag, "MakeVramUser id must be kUserTemporalDetail").c_str());
+					Assert::AreEqual(static_cast<int>(VpSkeleton::Tier::T1), static_cast<int>(vUser.tier),
+						FormatTagMsg(tag, "MakeVramUser tier must be Tier::T1").c_str());
+					Assert::IsTrue(vUser.levels.size() >= 2u, FormatTagMsg(tag, "MakeVramUser must declare full + shed-to-0").c_str());
+					Assert::AreEqual(static_cast<uint64_t>(0u), vUser.levels.back(),
+						FormatTagMsg(tag, "MakeVramUser final shed level must be 0").c_str());
+
+					Assert::IsTrue(vUser.levels[0] > 0u && vUser.levels[0] < total,
+						FormatTagMsg(tag, "MakeVramUser levels[0] (%.0f B) must be strictly persistent-only (< total %.0f B)",
+							static_cast<double>(vUser.levels[0]), static_cast<double>(total)).c_str());
+					Assert::AreEqual(total, vUser.levels[0] + arenaReqBytes,
+						FormatTagMsg(tag, "MakeVramUser.levels[0] + arenaReqBytes (%.0f B) must equal EstimatedVramBytes (%.0f B) with ZERO double-count",
+							static_cast<double>(vUser.levels[0] + arenaReqBytes), static_cast<double>(total)).c_str());
+
+					// MANDATORY BEHAVIORAL NEGATIVE CONTROL (Rule 3) via real VpSkeleton::PlanVram:
+					// Budget equals the exact 4K working set `total` (+ 4 KiB ceil margin, << arenaReqBytes):
+					//   - Protected persistent-only MakeVramUser + ScratchArenaExtraUser fits 100% (0 steps, 0 sheds)!
+					//   - Naive double-counting VramUser (levels[0] == total, pre-fix bug!) + ScratchArenaExtraUser
+					//     on the EXACT SAME GovernorInput exceeds budget by arenaReqBytes and forces false shedding!
+					const VpSkeleton::VramUser arenaExtra = VpSkeleton::ScratchArenaExtraUser(reqs);
+					Assert::AreEqual(arenaReqBytes, arenaExtra.levels[0],
+						FormatTagMsg(tag, "ScratchArenaExtraUser levels[0] must equal arenaReqBytes").c_str());
+
+					VpSkeleton::GovernorInput govIn;
+					govIn.headroom = VpSkeleton::kHeadroomStart;
+					govIn.ownUsageBytes = 0;
+					govIn.card.vramUsageBytes = 0;
+					govIn.card.vramBudgetBytes =
+						static_cast<uint64_t>(std::ceil(static_cast<double>(total) / VpSkeleton::kHeadroomStart)) + 4096u;
+					govIn.users.push_back(vUser);
+					govIn.users.push_back(arenaExtra);
+
+					const VpSkeleton::GovernorPlan goodPlan = VpSkeleton::PlanVram(govIn);
+					Assert::IsTrue(goodPlan.fits, FormatTagMsg(tag, "Persistent-only MakeVramUser + ScratchArenaExtra must fit in exact working-set budget").c_str());
+					Assert::AreEqual(0u, goodPlan.steps, FormatTagMsg(tag, "Persistent-only MakeVramUser must take 0 shed steps").c_str());
+					Assert::AreEqual(total, goodPlan.totalBytes, FormatTagMsg(tag, "Governor totalBytes must equal exact EstimatedVramBytes").c_str());
+					const VpSkeleton::UserGrant* goodTd = goodPlan.Find(VpSkeleton::kUserTemporalDetail);
+					const VpSkeleton::UserGrant* goodArena = goodPlan.Find(VpSkeleton::kUserScratchArenaExtra);
+					Assert::IsNotNull(goodTd);
+					Assert::IsNotNull(goodArena);
+					Assert::IsFalse(goodTd->reduced || goodTd->shed, FormatTagMsg(tag, "TD user must keep full level 0").c_str());
+					Assert::IsFalse(goodArena->reduced || goodArena->shed, FormatTagMsg(tag, "ScratchArenaExtra must keep full level 0").c_str());
+
+					VpSkeleton::GovernorInput naiveGovIn = govIn;
+					naiveGovIn.users[0].levels[0] = total; // Pre-fix double-count bug: includes scratch arena inside MakeVramUser!
+					const VpSkeleton::GovernorPlan naivePlan = VpSkeleton::PlanVram(naiveGovIn);
+					const VpSkeleton::UserGrant* naiveTd = naivePlan.Find(VpSkeleton::kUserTemporalDetail);
+					const VpSkeleton::UserGrant* naiveArena = naivePlan.Find(VpSkeleton::kUserScratchArenaExtra);
+					Assert::IsNotNull(naiveTd);
+					Assert::IsNotNull(naiveArena);
+					Assert::IsTrue(naivePlan.steps >= 1u && (naiveTd->shed || naiveArena->shed),
+						FormatTagMsg(tag, "Negative control: double-counting MakeVramUser on exact same budget MUST force false governor shedding (steps=%.0f)",
+							static_cast<double>(naivePlan.steps)).c_str());
+				}
 			}
 		}
 	};
