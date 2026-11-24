@@ -2695,5 +2695,224 @@ namespace CutFadeJudgeFadeRunTestsNs
 					L"D7 bound: first detected fade frame after failedBlackOrigin is delayed by at most 1 frame");
 			}
 		}
+
+		// Derived Fix A (FootprintPreserved vs blanket 25% lit-area floor): a sparse centered static textured title card
+		// covering only 60/392 = 15.3% of the interior (< kFadeMinLitCells = 98) on pure black must still be detected cleanly
+		// across fade-out to black and fade-in from black, while ZoomingDarkeningCenterGraphicOnBlackIsNotAFade stays 0 fades.
+		TEST_METHOD(SparseStaticTitleCardOnBlackFadeOutAndInIsDetected)
+		{
+			using namespace VpUnit::CutFadeJudge;
+
+			auto TitleCardFrame = [](double gain, uint32_t k) -> Record {
+				std::vector<uint16_t> half(size_t(kW) * kH);
+				for (uint32_t y = 0; y < kH; ++y)
+					for (uint32_t x = 0; x < kW; ++x)
+					{
+						// Centered static card: 50x30 px = 10x6 = 60 interior grid cells (15.3% of 392, strictly < kFadeMinLitCells = 98).
+						const bool inCard = (x >= 55u && x < 105u && y >= 30u && y < 60u);
+						double v = kBlack;
+						if (inCard && gain > 0.0)
+						{
+							const double pat = 0.60 + 0.20 * std::sin(double(x) * 0.25) + 0.15 * std::cos(double(y) * 0.30);
+							v = kBlack + gain * pat * 48000.0 + double(Noise(x, y, k)) * 0.125;
+						}
+						half[size_t(y) * kW + x] = static_cast<uint16_t>((std::min)(65535.0, (std::max)(0.0, std::floor(v + 0.5))));
+					}
+				return MakeRecordFromHalf(half);
+			};
+
+			const int pre = 8, nOut = 48, holdBlack = 12, nIn = 48, post = 8;
+			std::vector<Record> recs;
+			uint32_t k = 0;
+			for (int i = 0; i < pre; ++i)
+				recs.push_back(TitleCardFrame(1.0, k++));
+			for (int i = 1; i <= nOut; ++i)
+				recs.push_back(i == nOut ? TitleCardFrame(0.0, k++) : TitleCardFrame(1.0 - double(i) / double(nOut), k++));
+			for (int i = 0; i < holdBlack; ++i)
+				recs.push_back(TitleCardFrame(0.0, k++));
+			for (int i = 1; i <= nIn; ++i)
+				recs.push_back(TitleCardFrame(double(i) / double(nIn), k++));
+			for (int i = 0; i < post; ++i)
+				recs.push_back(TitleCardFrame(1.0, k++));
+
+			// Mandatory In-Test Negative Control (Rule 3): verify on a mid-fade pair that rigid FitGridFadeGrid succeeds
+			// with litCells strictly below kFadeMinLitCells (98) — proving a blanket 25% lit-area floor would wrongly reject
+			// this genuine sparse title-card fade, whereas FootprintPreserved accepts it!
+			{
+				double gBase[kGridH][kGridW], gMid[kGridH][kGridW];
+				LoadGridCodes(recs[size_t(pre - 1)].cells, gBase);
+				LoadGridCodes(recs[size_t(pre + 12)].cells, gMid);
+				const GridFadeFit midFit = FitGridFadeGrid(gBase, gMid, kLocalRadius);
+				Assert::IsTrue(midFit.valid && midFit.dir < 0,
+					L"Negative control: rigid FitGridFadeGrid must detect sparse static title-card fade");
+				Assert::IsTrue(midFit.litCells > 0 && midFit.litCells < kFadeMinLitCells,
+					L"Negative control: title card litCells must be strictly below kFadeMinLitCells (98) so a blanket 25% floor would reject it");
+			}
+
+			const size_t outBegin = size_t(pre);
+			const size_t outEnd = outBegin + size_t(nOut);
+			const size_t blackEnd = outEnd + size_t(holdBlack);
+			const size_t inEnd = blackEnd + size_t(nIn);
+
+			FadeRun run;
+			int preFades = 0, outFades = 0, blackFades = 0, inFades = 0, postFades = 0;
+			double fadeOutKeepProd = 1.0;
+			for (size_t i = 1; i < recs.size(); ++i)
+			{
+				const Events e = ClassifyEvents(recs[i - 1], recs[i], false, false);
+				double rk = 1.0;
+				const bool rf = FoldFadeRun(recs[i - 1], recs[i], e, run, &rk);
+				const bool isFade = e.fade || rf;
+				if (i < outBegin)
+					preFades += isFade ? 1 : 0;
+				else if (i < outEnd)
+				{
+					outFades += isFade ? 1 : 0;
+					fadeOutKeepProd *= FrameFadeKeep(recs[i - 1], recs[i], e.fade, rf, rk);
+				}
+				else if (i < blackEnd)
+					blackFades += isFade ? 1 : 0;
+				else if (i < inEnd)
+					inFades += isFade ? 1 : 0;
+				else
+					postFades += isFade ? 1 : 0;
+			}
+
+			Assert::AreEqual(0, preFades, L"0 false fades on static pre-fade title card");
+			Assert::AreEqual(0, blackFades, L"0 false fades on black hold");
+			Assert::AreEqual(0, postFades, L"0 false fades on static post-fade title card");
+			Assert::IsTrue(outFades >= 44, L"sparse static title-card 48-frame fade-out must hit >= 44/48 frames");
+			Assert::IsTrue(inFades >= 44, L"sparse static title-card 48-frame fade-in must hit >= 44/48 frames");
+			Assert::IsTrue(fadeOutKeepProd < 0.5, L"sparse static title-card fade-out must decay history keep < 0.5");
+		}
+
+		// Derived Fix B (FitMotionTolerantFade Part B per-tile affine scaling uniformity + macro-tile L2 variance reduction):
+		// A full-frame textured scene under a non-uniform shadow sweep (left 4 macro-tiles darken ~25%, right 4 darken ~2.5%)
+		// with gentle local drift passes Part A quantile OLS, passes Part C coarse structure, AND darkens all 8/8 macro-tiles
+		// > kFadeCellStepEps (so naive sign-only Part B would falsely fire!), yet FitMotionTolerantFade returns valid == false
+		// and Play(recs) emits 0 fades across all 30 frames.
+		TEST_METHOD(NonUniformLightingDriftAndShadowSweepAreNotAFade)
+		{
+			using namespace VpUnit::CutFadeJudge;
+
+			std::vector<Record> recs;
+			recs.reserve(30);
+			for (int i = 0; i < 30; ++i)
+			{
+				const double t = i < 4 ? 0.0 : (i > 25 ? 1.0 : double(i - 3) / 22.0);
+				std::vector<uint16_t> half(size_t(kW) * kH);
+				for (uint32_t y = 0; y < kH; ++y)
+					for (uint32_t x = 0; x < kW; ++x)
+					{
+						const double sx = double(x) + (y < kH / 2u ? 6.0 * t : -6.0 * t);
+						double u = 0.0;
+						double gain = 1.0;
+						if (x < kW / 2u)
+						{
+							u = 0.53 + 0.22 * std::sin(sx * 0.24) * std::cos(double(y) * 0.18) + 0.14 * std::cos(double(y) * 0.09);
+							gain = 1.0 - 0.25 * t;
+						}
+						else
+						{
+							u = 0.47 + 0.17 * std::sin(sx * 0.24) * std::cos(double(y) * 0.18) + 0.12 * std::cos(double(y) * 0.09);
+							gain = 1.0 - 0.025 * t;
+						}
+						const double v = kBlack + gain * u * 48000.0 + double(Noise(x, y, uint32_t(i))) * 0.125;
+						half[size_t(y) * kW + x] = static_cast<uint16_t>((std::min)(65535.0, (std::max)(0.0, std::floor(v + 0.5))));
+					}
+				recs.push_back(MakeRecordFromHalf(half));
+			}
+
+			// Mandatory In-Test Negative Control (Rule 3) on mid-sweep pair recs[6] -> recs[22]:
+			// Prove (1) all 8/8 4x2 macro-tiles darkened > kFadeCellStepEps (naive sign-only Part B would accept!),
+			// (2) sorted order-statistic OLS (Part A alone) satisfies |1 - A_q| > kFadeRunMinGain, b_q in (-12, 48),
+			// and vFade_q < kFadeResidualReduction * vId_q, YET (3) production FitMotionTolerantFade returns valid == false!
+			{
+				constexpr int R = kLocalRadius;
+				constexpr int kIntN = (kGridH - 2 * R) * (kGridW - 2 * R);
+				double gA[kGridH][kGridW], gB[kGridH][kGridW];
+				double ra[kGridH][kGridW], ca[kGridH][kGridW];
+				double vx = 0.0, vy = 0.0;
+				LoadGridCodes(recs[6].cells, gA);
+				LoadGridCodes(recs[22].cells, gB);
+				AlignGrid(gA, gB, kLocalRadius, ra, ca, &vx, &vy);
+
+				// Check Part A (sorted order-statistic OLS) directly on (ra, ca).
+				std::vector<double> rSorted, cSorted;
+				rSorted.reserve(size_t(kIntN));
+				cSorted.reserve(size_t(kIntN));
+				for (int y = R; y < kGridH - R; ++y)
+					for (int x = R; x < kGridW - R; ++x)
+					{
+						rSorted.push_back(ra[y][x]);
+						cSorted.push_back(ca[y][x]);
+					}
+				std::sort(rSorted.begin(), rSorted.end());
+				std::sort(cSorted.begin(), cSorted.end());
+				double sxQ = 0.0, syQ = 0.0;
+				for (int k = 0; k < kIntN; ++k)
+				{
+					sxQ += rSorted[size_t(k)];
+					syQ += cSorted[size_t(k)];
+				}
+				const double mxQ = sxQ / double(kIntN);
+				const double myQ = syQ / double(kIntN);
+				double sxxQ = 0.0, sxyQ = 0.0;
+				for (int k = 0; k < kIntN; ++k)
+				{
+					const double dx = rSorted[size_t(k)] - mxQ;
+					sxxQ += dx * dx;
+					sxyQ += dx * (cSorted[size_t(k)] - myQ);
+				}
+				const double aQ = sxyQ / sxxQ;
+				const double cQ = myQ - aQ * mxQ;
+				const double bQ = cQ / (1.0 - aQ);
+				double vIdQ = 0.0, vFadeQ = 0.0;
+				for (int k = 0; k < kIntN; ++k)
+				{
+					const double dId = cSorted[size_t(k)] - rSorted[size_t(k)];
+					const double dFade = cSorted[size_t(k)] - (aQ * rSorted[size_t(k)] + cQ);
+					vIdQ += dId * dId;
+					vFadeQ += dFade * dFade;
+				}
+				Assert::IsTrue(aQ > 0.0 && std::fabs(1.0 - aQ) > kFadeRunMinGain,
+					L"Negative control: Part A quantile OLS satisfies |1 - A_q| > kFadeRunMinGain");
+				Assert::IsTrue(bQ > double(kFadeMinBlack) && bQ < double(kFadeMaxBlack),
+					L"Negative control: Part A quantile implied black lies strictly in (kFadeMinBlack, kFadeMaxBlack)");
+				Assert::IsTrue(vFadeQ < kFadeResidualReduction * vIdQ,
+					L"Negative control: Part A quantile OLS satisfies vFade_q < 0.5 * vId_q");
+
+				// Check 4x2 macro-tile signs directly on (ra, ca).
+				int tileSameEps = 0, tileOppEps = 0;
+				for (int tr = 0; tr < 2; ++tr)
+					for (int tc = 0; tc < 4; ++tc)
+					{
+						double sr = 0.0, sc = 0.0;
+						const int y0 = R + tr * 7;
+						const int x0 = R + tc * 7;
+						for (int dy = 0; dy < 7; ++dy)
+							for (int dx = 0; dx < 7; ++dx)
+							{
+								sr += ra[y0 + dy][x0 + dx];
+								sc += ca[y0 + dy][x0 + dx];
+							}
+						const double dTile = (sc - sr) / 49.0;
+						if (-dTile > kFadeCellStepEps)
+							++tileSameEps;
+						else if (dTile > kFadeCellStepEps)
+							++tileOppEps;
+					}
+				Assert::IsTrue(tileSameEps >= 6 && tileOppEps == 0,
+					L"Negative control: >= 6/8 macro-tiles darkened > kFadeCellStepEps with 0 opposing (sign-only Part B would falsely pass!)");
+
+				const GridFadeFit mtFit = FitMotionTolerantFade(ra, ca, vx, vy);
+				Assert::IsFalse(mtFit.valid,
+					L"Derived Fix B: FitMotionTolerantFade must reject non-uniform shadow sweep via per-tile affine uniformity / macro-tile L2 reduction");
+			}
+
+			const auto res = Play(recs);
+			Assert::AreEqual(0, Count(res, 1, recs.size()),
+				L"non-uniform lighting drift and shadow sweep must emit 0 fades");
+		}
 	};
 }
