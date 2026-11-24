@@ -2788,5 +2788,444 @@ namespace VideoProcessorTest
 			fixture.CaptureLog(nullptr);
 			AssertCleanLibplaceboLog(log);
 		}
+
+		// Step-5 Package J#3 (MC-WARP: GEM-141, GEM-145, GEM-217):
+		// 1) GEM-141 lazy warpedLuma/warpedChroma: Estimate on a non-storable chroma plane succeeds
+		//    and drives DejudderRendered::Warp without allocating source warp planes, whereas
+		//    MotionWarp::Warp(shift > 0) lazily refuses with "plane format not storable:" (same-input
+		//    negative control); on storable 4:2:2 planes, mismatched 4:2:0 Warp is refused with
+		//    "Warp without a matching Estimate", valid matching Warp lazily allocates distinct planes,
+		//    and a subsequent luma-only Estimate invalidates those planes.
+		// 2) GEM-141 zero-motion texelFetch short-circuit & GEM-217 Cache::Apply blit_dst fast path:
+		//    on a 256x128 50%-static / occluded-seam / panning-(8,0) frame pair, Cache records one
+		//    blittable copy, static left-half output matches cached A bit-for-bit (0 codes across RGB),
+		//    and panning right half shifts cleanly by (4, 0) at shift=0.5 (negative control: differs
+		//    strictly from unwarped A).
+		// 3) GEM-145 hold_weight interior early-out + feather boundary parity (holdFeatherPx = 4):
+		//    interior panning pixels (distance >= 4 from all 4 block edges) match hard-edge warp
+		//    bit-for-bit, while feather-band pixels adjacent to the untrusted seam blend cleanly
+		//    between A and hard-edge warp (negative control: differs from both hard-edge and A).
+		BEGIN_TEST_METHOD_ATTRIBUTE(McWarpStaticAndPanParityFeatherAndCacheBlitWorkOnWarp)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(McWarpStaticAndPanParityFeatherAndCacheBlitWorkOnWarp)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			struct TexGuard
+			{
+				pl_gpu gpu = nullptr;
+				pl_tex tex = nullptr;
+				~TexGuard() { if (gpu && tex) pl_tex_destroy(gpu, &tex); }
+			};
+			struct LogGuard
+			{
+				TargetLutGpuFixture& f;
+				~LogGuard() { f.CaptureLog(nullptr); }
+			};
+			std::string log;
+			fixture.CaptureLog(&log);
+			LogGuard logGuard{ fixture };
+
+			const int width = 256, height = 128;
+			static constexpr int dx = 8;
+			// Left half [0, 128): bit-identical static texture (blocks 0..7 -> exact zero vector).
+			// Seam column [128, 144): uncorrelated disappearing/uncovered strip (block 8 -> untrusted hold).
+			// Right half [144, 256): clean horizontal pan by (+8, 0) (blocks 10..14 -> trusted pan).
+			const DejudderFrame a = MakeDejudderFrame(width, height,
+				[](int x, int y) {
+					if (x < 128) return DejudderTexture(x, y, 0);
+					if (x < 144) return DejudderTexture(x, y, 55);
+					return DejudderTexture(x, y, 17);
+				},
+				[](int cx, int y, int c) {
+					return cx < 72 ? DejudderTexture(cx * 2, y, 7 + c) : DejudderTexture(cx * 2, y, 23 + c);
+				});
+			const DejudderFrame b = MakeDejudderFrame(width, height,
+				[](int x, int y) {
+					if (x < 128) return DejudderTexture(x, y, 0);
+					if (x < 144) return DejudderTexture(x, y, 99);
+					return DejudderTexture(x - dx, y, 17);
+				},
+				[](int cx, int y, int c) {
+					return cx < 72 ? DejudderTexture(cx * 2, y, 7 + c) : DejudderTexture((cx - dx / 2) * 2, y, 23 + c);
+				});
+			DejudderGpuPlanes planesA, planesB;
+			UploadDejudderFrame(gpu, a, planesA);
+			UploadDejudderFrame(gpu, b, planesB);
+
+			Dejudder::Settings settings = DejudderTestSettings();
+			settings.estStillZero = true;
+			settings.holdFeatherPx = 4.0f;
+			Dejudder::Settings settingsNoFeather = settings;
+			settingsNoFeather.holdFeatherPx = 0.0f;
+
+			// Part 1 (GEM-141 red-green proof): Estimate must NOT eagerly allocate warpedLuma/warpedChroma.
+			// With a sampleable non-storable chroma texture, pre-fix EnsureTextures failed Estimate with
+			// "plane format not storable:"; post-fix Estimate succeeds and only Warp(shift > 0) rejects it.
+			TexGuard nonStorableChroma{ gpu, nullptr };
+			for (int pass = 0; pass < 2 && !nonStorableChroma.tex; ++pass)
+			{
+				for (int i = 0; i < gpu->num_formats && !nonStorableChroma.tex; ++i)
+				{
+					pl_fmt f = gpu->formats[i];
+					if (!f || f->opaque || f->emulated || f->num_planes != 0 || f->texel_size == 0)
+						continue;
+					if ((f->caps & PL_FMT_CAP_SAMPLEABLE) == 0 || (f->caps & PL_FMT_CAP_STORABLE) != 0)
+						continue;
+					if (pass == 0 && (f->type != PL_FMT_UNORM || f->num_components < 2))
+						continue;
+					pl_tex_params cp{};
+					cp.w = width / 2;
+					cp.h = height;
+					cp.format = f;
+					cp.sampleable = true;
+					nonStorableChroma.tex = pl_tex_create(gpu, &cp);
+				}
+			}
+			Assert::IsNotNull(nonStorableChroma.tex, L"D3D11/WARP must expose a sampleable non-storable format");
+			Dejudder::Planes lazyA = planesA.planes;
+			Dejudder::Planes lazyB = planesB.planes;
+			lazyA.chroma = nonStorableChroma.tex;
+			lazyB.chroma = nonStorableChroma.tex;
+			Dejudder::MotionWarp lazyWarp(fixture.Log(), gpu, settings);
+			Assert::IsTrue(lazyWarp.Estimate(lazyA, lazyB),
+				ExtendedRangeGpuProbe::ToWide("GEM-141: Estimate must not eagerly allocate warpedChroma: " + lazyWarp.LastError()).c_str());
+			Assert::IsNotNull(lazyWarp.Field());
+			Assert::IsNotNull(lazyWarp.FrameTrust());
+			{
+				Dejudder::Planes holdOut{};
+				Assert::IsTrue(lazyWarp.Warp(lazyA, 0.0f, holdOut), L"shift == 0 hold must not allocate warped planes");
+				Assert::IsTrue(holdOut.luma == lazyA.luma && holdOut.chroma == lazyA.chroma);
+				Dejudder::Planes failOut{};
+				Assert::IsFalse(lazyWarp.Warp(lazyA, 0.5f, failOut),
+					L"negative control: source Warp(shift > 0) must lazily enforce storable chroma on demand");
+				Assert::IsTrue(lazyWarp.LastError().rfind("plane format not storable:", 0) == 0,
+					ExtendedRangeGpuProbe::ToWide("unexpected lazyWarp error: " + lazyWarp.LastError()).c_str());
+			}
+
+			// Part 2: Estimate on the storable 4:2:2 pair and verify all three motion regions exist.
+			Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
+			Assert::IsTrue(warp.Estimate(planesA.planes, planesB.planes),
+				ExtendedRangeGpuProbe::ToWide(warp.LastError()).c_str());
+			const DejudderField field = DownloadField(gpu, warp);
+			Assert::AreEqual(16, field.blocksX);
+			Assert::AreEqual(8, field.blocksY);
+			for (int by = 0; by < field.blocksY; ++by)
+			{
+				for (int bx = 0; bx < 8; ++bx)
+				{
+					Assert::IsTrue(field.trusted(bx, by), L"static left-half blocks must be trusted");
+					Assert::AreEqual(0.0f, field.vx(bx, by), 0.0f, L"static left-half vx must be exact 0");
+					Assert::AreEqual(0.0f, field.vy(bx, by), 0.0f, L"static left-half vy must be exact 0");
+				}
+				Assert::IsFalse(field.trusted(8, by), L"occluded seam column (bx == 8) must be untrusted/held");
+			}
+			for (int by = 1; by < field.blocksY - 1; ++by)
+				for (int bx = 11; bx <= 13; ++bx)
+				{
+					Assert::IsTrue(field.trusted(bx, by), L"panning right-half interior blocks must be trusted");
+					Assert::IsTrue(std::fabs(field.vx(bx, by) - static_cast<float>(dx)) <= 0.5f &&
+						std::fabs(field.vy(bx, by)) <= 0.5f,
+						L"panning right-half interior must estimate (+8, 0)");
+				}
+
+			// Part 3 (GEM-217 + GEM-141 + GEM-145): Cache A at PRE_OUTPUT and run DejudderRendered::Warp.
+			pl_tex_params targetParams{};
+			targetParams.w = width;
+			targetParams.h = height;
+			targetParams.format = pl_find_fmt(gpu, PL_FMT_UNORM, 4, 8, 8,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+			Assert::IsNotNull(targetParams.format);
+			targetParams.renderable = true;
+			targetParams.host_readable = true;
+			TexGuard targetTex{ gpu, pl_tex_create(gpu, &targetParams) };
+			Assert::IsNotNull(targetTex.tex);
+			pl_render_params params = pl_render_fast_params;
+			params.dither_params = nullptr;
+			params.error_diffusion = nullptr;
+			auto makeTarget = [&]()
+			{
+				pl_frame t = TargetLutGpuFixture::MakeRgbFrame(targetTex.tex);
+				t.repr.levels = PL_COLOR_LEVELS_FULL;
+				t.color.transfer = PL_COLOR_TRC_BT_1886;
+				return t;
+			};
+			auto downloadTarget = [&]()
+			{
+				pl_gpu_finish(gpu);
+				std::vector<RgbaPixel> output(static_cast<size_t>(width) * height);
+				pl_tex_transfer_params d{};
+				d.tex = targetTex.tex;
+				d.ptr = output.data();
+				Assert::IsTrue(pl_tex_download(gpu, &d));
+				return output;
+			};
+
+			DejudderRendered::Cache cache;
+			DejudderRendered::Warp rendered(fixture.Log(), gpu);
+			{
+				pl_frame image{};
+				image.num_planes = 2;
+				image.planes[0].texture = planesA.planes.luma;
+				image.planes[0].components = 1;
+				image.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+				image.planes[1].texture = planesA.planes.chroma;
+				image.planes[1].components = 2;
+				image.planes[1].component_mapping[0] = PL_CHANNEL_CB;
+				image.planes[1].component_mapping[1] = PL_CHANNEL_CR;
+				image.repr.sys = PL_COLOR_SYSTEM_BT_709;
+				image.repr.levels = PL_COLOR_LEVELS_FULL;
+				image.color.primaries = PL_COLOR_PRIM_BT_709;
+				image.color.transfer = PL_COLOR_TRC_BT_1886;
+				pl_frame_set_chroma_location(&image, PL_CHROMA_LEFT);
+				pl_frame t = makeTarget();
+				std::vector<const pl_hook*> hooks = { cache.Hook() };
+				OutputEncodingRepair::Hook repair;
+				if (OutputEncodingRepair::Needed(hooks, nullptr, PL_LUT_UNKNOWN))
+				{
+					repair.SetTarget(t.repr);
+					hooks.insert(hooks.begin(), repair.Get());
+				}
+				pl_render_params p = params;
+				p.hooks = hooks.data();
+				p.num_hooks = static_cast<int>(hooks.size());
+				cache.Arm(7);
+				Assert::IsTrue(pl_render_image(fixture.Renderer(), &image, &t, &p));
+			}
+			const std::vector<RgbaPixel> own = downloadTarget();
+			Assert::AreEqual(1ULL, cache.Copies(), L"GEM-217: Cache::Apply must increment Copies() once");
+			Assert::AreEqual(0ULL, cache.Failed(), L"GEM-217: Cache::Apply must not fail");
+			const pl_tex cachedTex = cache.Texture(7);
+			Assert::IsNotNull(cachedTex, L"cached texture for sequence 7 must be present");
+			Assert::AreEqual(width, cachedTex->params.w);
+			Assert::AreEqual(height, cachedTex->params.h);
+			if ((cachedTex->params.format->caps & PL_FMT_CAP_BLITTABLE) != 0)
+				Assert::IsTrue(cachedTex->params.blit_dst,
+					L"GEM-217: cache texture must enable blit_dst for pl_tex_blit fast path");
+
+			DejudderRendered::Geometry g;
+			g.sourceCrop = { 0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height) };
+			g.targetCrop = { 0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height) };
+
+			// Verify rendered warp runs cleanly using the estimate-only (non-storable chroma) field too.
+			{
+				pl_tex lazyRenderedOut = nullptr;
+				Assert::IsTrue(rendered.Run(cachedTex, lazyWarp.Field(), lazyWarp.FrameTrust(),
+					lazyWarp.GetSettings().minTrustedShare, 0.5f, g, lazyRenderedOut, nullptr, &settings),
+					ExtendedRangeGpuProbe::ToWide("rendered warp with estimate-only field: " + rendered.Error()).c_str());
+				Assert::IsNotNull(lazyRenderedOut);
+			}
+
+			auto renderExtra = [&](const Dejudder::Settings& matcherSettings, pl_tex* dispOut)
+			{
+				pl_tex out = nullptr;
+				Assert::IsTrue(rendered.Run(cachedTex, warp.Field(), warp.FrameTrust(),
+					warp.GetSettings().minTrustedShare, 0.5f, g, out, nullptr, &matcherSettings,
+					nullptr, nullptr, nullptr, dispOut, 1.0f),
+					ExtendedRangeGpuProbe::ToWide(rendered.Error() + "; log: " + log).c_str());
+				pl_frame image = DejudderRendered::Frame(out, cache.Repr(), cache.Color());
+				pl_frame t = makeTarget();
+				std::vector<const pl_hook*> kept;
+				const pl_render_params p = DejudderRendered::OutputOnly(params, {}, kept);
+				Assert::IsTrue(pl_render_image(fixture.Renderer(), &image, &t, &p));
+				return downloadTarget();
+			};
+
+			const std::vector<RgbaPixel> hardPixels = renderExtra(settingsNoFeather, nullptr);
+			pl_tex dispTex = nullptr;
+			const std::vector<RgbaPixel> softPixels = renderExtra(settings, &dispTex);
+			Assert::IsNotNull(dispTex, L"WRITE_DISP must produce displacement texture");
+			Assert::AreEqual(width, dispTex->params.w);
+			Assert::AreEqual(height, dispTex->params.h);
+			Assert::AreEqual(16, dispTex->params.format->component_depth[0],
+				L"GEM-141: displacement texture must stay rgba16f");
+
+			auto rgbDiff = [](const RgbaPixel& p, const RgbaPixel& q)
+			{
+				return std::max({ std::abs(p.r - q.r), std::abs(p.g - q.g), std::abs(p.b - q.b) });
+			};
+
+			// Static left half [0, 128): bit-exact 0-code match across R, G, B (GEM-141 texelFetch short-circuit + GEM-217 blit).
+			int maxStaticSoftDiff = 0, maxStaticHardDiff = 0;
+			for (int y = 0; y < height; ++y)
+				for (int x = 0; x < 128; ++x)
+				{
+					const size_t i = static_cast<size_t>(y) * width + x;
+					maxStaticSoftDiff = (std::max)(maxStaticSoftDiff, rgbDiff(softPixels[i], own[i]));
+					maxStaticHardDiff = (std::max)(maxStaticHardDiff, rgbDiff(hardPixels[i], own[i]));
+				}
+			Assert::AreEqual(0, maxStaticSoftDiff, L"static left half (feathered) must match cached A bit-for-bit");
+			Assert::AreEqual(0, maxStaticHardDiff, L"static left half (hard) must match cached A bit-for-bit");
+
+			// Panning right interior [176, 224) x [16, 112): exact (+4, 0) shift + same-input negative control vs unwarped A.
+			double bestError = 1e30, unwarpedError = 0.0;
+			int bestX = 0, bestY = 0;
+			int panTotal = 0, panDiffFromOwn = 0;
+			for (int y = 16; y < height - 16; ++y)
+				for (int x = 176; x < 224; ++x)
+				{
+					const size_t i = static_cast<size_t>(y) * width + x;
+					++panTotal;
+					if (rgbDiff(softPixels[i], own[i]) > 2)
+						++panDiffFromOwn;
+					unwarpedError += std::abs(softPixels[i].r - own[i].r) +
+						std::abs(softPixels[i].g - own[i].g) + std::abs(softPixels[i].b - own[i].b);
+				}
+			for (int oy = -4; oy <= 4; ++oy)
+				for (int ox = -8; ox <= 8; ++ox)
+				{
+					double error = 0.0;
+					for (int y = 16; y < height - 16; ++y)
+						for (int x = 176; x < 224; ++x)
+						{
+							const RgbaPixel& m = softPixels[static_cast<size_t>(y) * width + x];
+							const RgbaPixel& o = own[static_cast<size_t>(y - oy) * width + (x - ox)];
+							error += std::abs(m.r - o.r) + std::abs(m.g - o.g) + std::abs(m.b - o.b);
+						}
+					if (error < bestError) { bestError = error; bestX = ox; bestY = oy; }
+				}
+			Assert::IsTrue(panDiffFromOwn > panTotal / 2,
+				L"negative control: panning right half must differ strictly from unwarped A (not a pass-through)");
+			Assert::IsTrue(bestX == dx / 2 && bestY == 0,
+				(L"panning right half shifted by (" + std::to_wstring(bestX) + L", " +
+					std::to_wstring(bestY) + L"), expected (4, 0)").c_str());
+			Assert::IsTrue(bestError * 4 < unwarpedError,
+				L"shifted panning alignment error must be far smaller than unwarped error");
+
+			// GEM-145 hold_weight interior early-out + feather boundary parity.
+			auto clampd = [](double v, double lo, double hi) { return (std::min)((std::max)(v, lo), hi); };
+			auto smooth = [&](double e, double x) { const double t = clampd(x / e, 0.0, 1.0); return t * t * (3.0 - 2.0 * t); };
+			int interiorCount = 0, interiorMaxDiff = 0;
+			int bandedPixels = 0, bandedChangedFromHard = 0, bandedChangedFromOwn = 0;
+			double worstFeatherErr = 0.0;
+			for (int y = 16; y < height - 16; ++y)
+				for (int x = 144; x < 240; ++x)
+				{
+					const int bx = x / 16, by = y / 16;
+					if (!field.trusted(bx, by))
+						continue;
+					const size_t i = static_cast<size_t>(y) * width + x;
+					const int lx = x % 16, ly = y % 16;
+					if (lx >= 4 && lx <= 11 && ly >= 4 && ly <= 11)
+					{
+						// Distance >= 4.0 from all 4 block edges -> GEM-145 early-out returns 1.0 identically.
+						++interiorCount;
+						interiorMaxDiff = (std::max)(interiorMaxDiff, rgbDiff(softPixels[i], hardPixels[i]));
+					}
+					double d = 1e9;
+					for (int ny = -1; ny <= 1; ++ny)
+						for (int nx = -1; nx <= 1; ++nx)
+						{
+							const int cx = bx + nx, cy = by + ny;
+							if ((nx == 0 && ny == 0) || cx < 0 || cy < 0 || cx >= field.blocksX || cy >= field.blocksY ||
+								field.trusted(cx, cy))
+								continue;
+							const double px = x + 0.5, py = y + 0.5;
+							const double qx = clampd(px, cx * 16.0, cx * 16.0 + 16.0);
+							const double qy = clampd(py, cy * 16.0, cy * 16.0 + 16.0);
+							d = (std::min)(d, std::hypot(px - qx, py - qy));
+						}
+					const double hw = smooth(4.0, d);
+					if (hw > 0.0 && hw < 1.0)
+					{
+						++bandedPixels;
+						if (rgbDiff(softPixels[i], hardPixels[i]) > 0) ++bandedChangedFromHard;
+						if (rgbDiff(softPixels[i], own[i]) > 0) ++bandedChangedFromOwn;
+						const double er = std::fabs(softPixels[i].r - (own[i].r + hw * (hardPixels[i].r - own[i].r)));
+						const double eg = std::fabs(softPixels[i].g - (own[i].g + hw * (hardPixels[i].g - own[i].g)));
+						const double eb = std::fabs(softPixels[i].b - (own[i].b + hw * (hardPixels[i].b - own[i].b)));
+						worstFeatherErr = (std::max)(worstFeatherErr, (std::max)(er, (std::max)(eg, eb)));
+					}
+				}
+			Assert::IsTrue(interiorCount > 1000, L"expected interior panning pixels exercising GEM-145 early-out");
+			Assert::AreEqual(0, interiorMaxDiff,
+				L"GEM-145: interior pixels (distance >= feather from all 4 block edges) must match hard-edge warp bit-for-bit");
+			Assert::IsTrue(bandedPixels > 50, L"expected feather-band pixels adjacent to untrusted seam");
+			Assert::IsTrue(bandedChangedFromHard > 20,
+				L"negative control: feather-band pixels must blend away from hard-edge warp (early-out must not misfire)");
+			Assert::IsTrue(bandedChangedFromOwn > 20,
+				L"negative control: feather-band pixels must not collapse to unwarped A");
+			Assert::IsTrue(worstFeatherErr <= 2.0,
+				(L"feather-band worst RGB deviation " + std::to_wstring(worstFeatherErr) + L" exceeded 2 codes").c_str());
+
+			// Part 4 (GEM-141): Layout mismatch refusal before lazy allocation, then valid lazy source Warp,
+			// then stale warped-plane invalidation after a luma-only Estimate.
+			pl_fmt rg16 = pl_find_fmt(gpu, PL_FMT_UNORM, 2, 16, 16,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE | PL_FMT_CAP_LINEAR | PL_FMT_CAP_HOST_READABLE));
+			Assert::IsNotNull(rg16);
+			std::vector<uint16_t> chroma420Data(static_cast<size_t>(width / 2) * (height / 2) * 2, 32768u);
+			pl_tex_params c420p{};
+			c420p.w = width / 2;
+			c420p.h = height / 2;
+			c420p.format = rg16;
+			c420p.sampleable = true;
+			c420p.host_readable = true;
+			c420p.initial_data = chroma420Data.data();
+			TexGuard mismatchChroma{ gpu, pl_tex_create(gpu, &c420p) };
+			Assert::IsNotNull(mismatchChroma.tex);
+
+			Dejudder::Planes mismatchedA = planesA.planes;
+			mismatchedA.chroma = mismatchChroma.tex;
+			mismatchedA.chromaShiftY = 1;
+			Dejudder::Planes mismatchOut{};
+			Assert::IsFalse(warp.Warp(mismatchedA, 0.5f, mismatchOut),
+				L"mismatched 4:2:0 chroma layout must be refused by Warp");
+			Assert::IsTrue(warp.LastError() == "Warp without a matching Estimate",
+				ExtendedRangeGpuProbe::ToWide("unexpected mismatch error: " + warp.LastError()).c_str());
+			Assert::IsTrue(mismatchOut.luma == mismatchedA.luma && mismatchOut.chroma == mismatchedA.chroma,
+				L"refused mismatch must leave output planes pointing to input (no warped planes returned)");
+
+			Dejudder::Planes validOut{};
+			Assert::IsTrue(warp.Warp(planesA.planes, 0.5f, validOut),
+				ExtendedRangeGpuProbe::ToWide("valid matching source Warp failed: " + warp.LastError()).c_str());
+			Assert::IsNotNull(validOut.luma);
+			Assert::IsNotNull(validOut.chroma);
+			Assert::IsTrue(validOut.luma != planesA.planes.luma && validOut.chroma != planesA.planes.chroma,
+				L"GEM-141: valid matching Warp must lazily allocate distinct warpedLuma and warpedChroma");
+			const std::vector<uint16_t> warpedLuma = DownloadPlane(gpu, validOut.luma);
+			int maxSrcStaticDiff = 0;
+			for (int y = 0; y < height; ++y)
+				for (int x = 0; x < 128; ++x)
+				{
+					const size_t i = static_cast<size_t>(y) * width + x;
+					maxSrcStaticDiff = (std::max)(maxSrcStaticDiff, std::abs(static_cast<int>(warpedLuma[i]) - static_cast<int>(a.luma[i])));
+				}
+			Assert::AreEqual(0, maxSrcStaticDiff, L"source Warp static left half must match A luma bit-for-bit");
+			long long srcUnwarpedErr = 0, srcShiftedErr = 0;
+			int srcPanDiff = 0;
+			for (int y = 16; y < height - 16; ++y)
+				for (int x = 176; x < 224; ++x)
+				{
+					const size_t i = static_cast<size_t>(y) * width + x;
+					const size_t shiftedIdx = static_cast<size_t>(y) * width + (x - dx / 2);
+					const int dUnwarped = std::abs(static_cast<int>(warpedLuma[i]) - static_cast<int>(a.luma[i]));
+					const int dShifted = std::abs(static_cast<int>(warpedLuma[i]) - static_cast<int>(a.luma[shiftedIdx]));
+					if (dUnwarped > 512) ++srcPanDiff;
+					srcUnwarpedErr += dUnwarped;
+					srcShiftedErr += dShifted;
+				}
+			Assert::IsTrue(srcPanDiff > panTotal / 2 && srcShiftedErr * 4 < srcUnwarpedErr,
+				L"source Warp panning right half must shift by (+4, 0) rather than pass through unwarped A");
+
+			// Stale warped-plane invalidation: luma-only Estimate must drop prior 4:2:2 layout so old Warp is refused.
+			Dejudder::Planes lumaOnlyA = planesA.planes;
+			Dejudder::Planes lumaOnlyB = planesB.planes;
+			lumaOnlyA.chroma = nullptr;
+			lumaOnlyB.chroma = nullptr;
+			Assert::IsTrue(warp.Estimate(lumaOnlyA, lumaOnlyB),
+				ExtendedRangeGpuProbe::ToWide(warp.LastError()).c_str());
+			Dejudder::Planes afterLumaOnlyOut{};
+			Assert::IsFalse(warp.Warp(planesA.planes, 0.5f, afterLumaOnlyOut),
+				L"4:2:2 Warp must be refused after luma-only Estimate invalidated cached warped planes");
+			Assert::IsTrue(warp.LastError() == "Warp without a matching Estimate",
+				ExtendedRangeGpuProbe::ToWide("unexpected post-luma-only error: " + warp.LastError()).c_str());
+
+			cache.Release();
+			Assert::IsNull(cache.Texture(7));
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLogExceptPreOutputBug(log);
+		}
 	};
 }
