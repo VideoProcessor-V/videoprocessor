@@ -400,7 +400,7 @@ namespace TdV2
 		QualityPattern::Record record{};  // Exact 64-byte skeleton POD
 		AbstainReason abstain = AbstainReason::None;
 		bool produced = false;
-		// Pre-cut pending frames flushed in sequence order with available reduced lead (marked provisional; zero silent drops).
+		// Pending frames flushed in sequence order before a cut or lead reduction with available reduced lead (marked provisional; zero silent drops).
 		std::vector<FrameRoleDecision> flushedBeforeCut;
 	};
 
@@ -416,9 +416,24 @@ namespace TdV2
 		{
 		}
 
-		void SetLeadFrames(uint8_t leadFrames)
+		void SetLeadFrames(uint8_t leadFrames, std::vector<FrameRoleDecision>* flushedOut = nullptr)
 		{
 			leadFrames_ = leadFrames > kMaxLeadFrames ? kMaxLeadFrames : leadFrames;
+			if (flushedOut != nullptr && window_.size() > static_cast<size_t>(leadFrames_))
+			{
+				const size_t flushEnd = window_.size() - static_cast<size_t>(leadFrames_);
+				for (size_t i = 0; i < flushEnd; ++i)
+				{
+					if (window_[i].emitted)
+						continue;
+					const size_t remAhead = window_.size() - 1 - i;
+					const uint8_t availLead = static_cast<uint8_t>((std::min)(static_cast<size_t>(kMaxLeadFrames), remAhead));
+					FrameRoleDecision fd = ClassifyTargetWithLead(i, window_[i].ev, availLead, /*forceProvisional=*/true);
+					if (fd.produced)
+						window_[i].emitted = true;
+					flushedOut->push_back(std::move(fd));
+				}
+			}
 		}
 
 		uint8_t LeadFrames() const { return leadFrames_; }
@@ -514,9 +529,34 @@ namespace TdV2
 			}
 
 			const size_t targetIdx = window_.size() - 1 - static_cast<size_t>(leadFrames_);
+
+			// Flush any stranded earlier un-emitted frames (e.g., after SetLeadFrames(higher -> lower) without flushedOut)
+			// in sequence order before classifying targetIdx so pending records are never stranded or dropped on eviction.
+			std::vector<FrameRoleDecision> pendingFlushed;
+			for (size_t i = 0; i < targetIdx; ++i)
+			{
+				if (window_[i].emitted)
+					continue;
+				const size_t remAhead = window_.size() - 1 - i;
+				const uint8_t availLead = static_cast<uint8_t>((std::min)(static_cast<size_t>(kMaxLeadFrames), remAhead));
+				FrameRoleDecision fd = ClassifyTargetWithLead(i, window_[i].ev, availLead, /*forceProvisional=*/true);
+				if (fd.produced)
+					window_[i].emitted = true;
+				pendingFlushed.push_back(std::move(fd));
+			}
+
+			// Never duplicate an already-emitted entry (e.g., after ClassifyLatestCausal() or SetLeadFrames(0 -> 2)).
+			if (window_[targetIdx].emitted)
+			{
+				Abstain(dec, AbstainReason::InsufficientWindow, window_[targetIdx].ev.seq, leadFrames_, /*emitRecord=*/false);
+				dec.flushedBeforeCut = std::move(pendingFlushed);
+				return dec;
+			}
+
 			FrameRoleDecision outDec = ClassifyTarget(targetIdx, window_[targetIdx].ev);
 			if (outDec.produced)
 				window_[targetIdx].emitted = true;
+			outDec.flushedBeforeCut = std::move(pendingFlushed);
 			return outDec;
 		}
 
@@ -550,7 +590,7 @@ namespace TdV2
 			if (window_.empty())
 				return Abstain(dec, AbstainReason::InsufficientWindow, 0, 0, /*emitRecord=*/false);
 			const size_t idx = window_.size() - 1;
-			if (window_[idx].emitted || (hasEmittedSeq_ && window_[idx].ev.seq == lastEmittedSeq_))
+			if (window_[idx].emitted)
 				return Abstain(dec, AbstainReason::InsufficientWindow, window_[idx].ev.seq, 0, /*emitRecord=*/false);
 			FrameRoleDecision fd = ClassifyTargetWithLead(idx, window_[idx].ev, 0, /*forceProvisional=*/true);
 			if (fd.produced)

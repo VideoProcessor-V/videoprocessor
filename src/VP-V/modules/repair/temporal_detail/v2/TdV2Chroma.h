@@ -1768,6 +1768,10 @@ namespace TdV2
 		bool transformIdentified8x8 = false;
 
 		bool isCutOrSpanInvalid = false;              // Resets 4:4:4 anchor canvas cleanly
+
+		// Optional Pass-1 face / non-rigid cell mask (cellsW * cellsH luma-cell layout matching FrameProcessInput::faceMask;
+		// non-zero forces delta == 0 on all masked pixels and excludes masked cells from 3x3 covariance pooling; H13).
+		const std::vector<uint8_t>* faceMask = nullptr;
 	};
 
 	struct ChromaProcessResult
@@ -1791,6 +1795,7 @@ namespace TdV2
 		size_t activeRefCount = 0;
 		size_t guardViolationCells = 0;
 		size_t cflFallbackCells = 0;
+		size_t faceMaskedCells = 0;
 		size_t nonFiniteCells = 0;
 		size_t singularCells = 0;
 		size_t singleRefA2Cells = 0;
@@ -1820,7 +1825,12 @@ namespace TdV2
 		{
 		}
 
-		void SetConfig(const Config& cfg) { cfg_ = cfg; }
+		void SetConfig(const Config& cfg)
+		{
+			cfg_ = cfg;
+			if (!cfg_.IsEnabled())
+				ResetAnchor();
+		}
 		const Config& GetConfig() const { return cfg_; }
 
 		void ResetAnchor() { anchorCanvas_.Reset(); }
@@ -1899,9 +1909,16 @@ namespace TdV2
 			res.cellsH = (lumaH + cellPx - 1) / cellPx;
 			const size_t numCells = static_cast<size_t>(res.cellsW) * static_cast<size_t>(res.cellsH);
 
-			// Mode::Off -> zero work, bit-exact passthrough!
+			// Mode::Off -> reset any stale anchor canvas so Off->On never blends stale history, then bit-exact passthrough!
 			if (!cfg_.IsEnabled())
+			{
+				if (anchorCanvas_.HasData())
+				{
+					ResetAnchor();
+					res.anchorReset = true;
+				}
 				return res;
+			}
 
 			// Upfront sourceBits validation (Rule 4).
 			const double peakCode = PeakCodeForBits(cfg_.sourceBits);
@@ -2045,6 +2062,19 @@ namespace TdV2
 				return res;
 			}
 
+			// Pass-1 face / non-rigid cell mask (H13 parity with TdV2ReferenceEngine.h): count unique masked cells once upfront.
+			auto isFaceMaskedCell = [&](size_t cellIdx) -> bool
+			{
+				return in.faceMask != nullptr && cellIdx < in.faceMask->size() && (*in.faceMask)[cellIdx] != 0u;
+			};
+			for (size_t ci = 0; ci < numCells; ++ci)
+			{
+				if (isFaceMaskedCell(ci))
+					++res.faceMaskedCells;
+			}
+			if (res.faceMaskedCells > 0 && standIns != nullptr)
+				standIns->Engage(StandInKind::FaceNonRigidMask);
+
 			// =========================================================================
 			// Branch A: Unidentified coded grid -> Visible coarse-band-only chroma mode
 			// =========================================================================
@@ -2114,6 +2144,8 @@ namespace TdV2
 					TdV2Plane coarseCb;
 					TdV2Plane coarseCr;
 					std::vector<uint8_t> validPx;
+					std::vector<double> motionVx;
+					std::vector<double> motionVy;
 					MotionGateResult motionGate;
 					bool isExactCopy = false;
 				};
@@ -2170,6 +2202,8 @@ namespace TdV2
 
 					CoarseRef cr;
 					cr.isExactCopy = rIn.isExactCopyOfCurrent;
+					cr.motionVx = useMf->vx;
+					cr.motionVy = useMf->vy;
 					std::vector<uint8_t> validCb, validCr;
 					const WarpDiagnostics dCb = ChromaDetail::WarpChromaPlaneWithLumaMotion(
 						*rIn.cleanCb, curCleanCb, delivActive, dSubX, dSubY, in.siting,
@@ -2228,6 +2262,10 @@ namespace TdV2
 						for (int cx = 0; cx < res.cellsW; ++cx)
 						{
 							const size_t cIdx = static_cast<size_t>(cy) * res.cellsW + cx;
+							// Pass-1 face / non-rigid mask (H13): skip cell solve so cellW[k][cIdx] stays 0.0.
+							if (isFaceMaskedCell(cIdx))
+								continue;
+
 							double cellGrainVar = 0.0;
 							bool hasCellGrainPrior = false;
 							if (!retainedGrainVar.empty())
@@ -2259,6 +2297,8 @@ namespace TdV2
 							}
 
 							MomentAccumulatorFp32 acc(K);
+							double ownSumSq[kMaxBlendRefs] = {};
+							size_t ownSampleCount = 0;
 							const int py0 = (std::max)(delivActive.y0, ((cy - poolR) * cellPx) / dSubY);
 							const int py1 = (std::min)(delivActive.y1, ((cy + poolR + 1) * cellPx + dSubY - 1) / dSubY);
 							const int px0 = (std::max)(delivActive.x0, ((cx - poolR) * cellPx) / dSubX);
@@ -2278,6 +2318,8 @@ namespace TdV2
 									const double lx = in.siting.CodedToLumaX(static_cast<double>(x), dSubX);
 									const int pcx = (std::max)(0, (std::min)(res.cellsW - 1, static_cast<int>(std::floor(lx)) / cellPx));
 									const size_t pCell = static_cast<size_t>(pcy) * res.cellsW + pcx;
+									if (isFaceMaskedCell(pCell))
+										continue;
 									const size_t pIdx = static_cast<size_t>(y) * dW + x;
 
 									bool allValid = true;
@@ -2296,6 +2338,12 @@ namespace TdV2
 									if (allValid)
 									{
 										acc.AddSample(diffs);
+										if (pCell == cIdx)
+										{
+											++ownSampleCount;
+											for (int k = 0; k < K; ++k)
+												ownSumSq[k] += static_cast<double>(diffs[k]) * static_cast<double>(diffs[k]);
+										}
 										if (!splitActive && !hasCellGrainPrior)
 										{
 											const double cHi = curClean.at(x, y) - curV;
@@ -2321,25 +2369,41 @@ namespace TdV2
 							{
 								const double invHi = 1.0 / static_cast<double>(hiCount);
 								const double meanCur = sumCurHi2 * invHi;
-								double sumICur = 0.0, sumIRef = 0.0;
+								const double hiGain = (std::max)(kEngineNumFloor, 1.0 - coarseGain);
+								// Exact 1-LSB uniform quantization variance transferred through the high-pass band (Rule 1).
+								const double refQuantFloor = ((kDefaultStepPriorLsb * kDefaultStepPriorLsb) / 12.0) * hiGain;
+								double sumProjIr = 0.0;
+								size_t validRefCnt = 0;
 								for (int k = 0; k < K; ++k)
 								{
+									const double meanRef = sumRefHi2[k] * invHi;
 									const double cross = sumCrossHi[k] * invHi;
-									const double ic = meanCur - cross;
-									const double ir = sumRefHi2[k] * invHi - cross;
-									sumICur += (ic > 0.0 ? ic : 0.0);
-									sumIRef += (ir > 0.0 ? ir : 0.0);
+									const double vxD = (cIdx < cRefs[k].motionVx.size())
+										? (cRefs[k].motionVx[cIdx] / static_cast<double>(dSubX))
+										: 0.0;
+									const double vyD = (cIdx < cRefs[k].motionVy.size())
+										? (cRefs[k].motionVy[cIdx] / static_cast<double>(dSubY))
+										: 0.0;
+									const double warpBeta = BicubicWarpVarianceGain(vxD, vyD);
+									if (meanRef > refQuantFloor)
+									{
+										sumProjIr += ComputeProjectionIr(meanCur, cross, meanRef, standIns, warpBeta);
+										++validRefCnt;
+									}
 								}
-								const double meanICur = sumICur / static_cast<double>(K);
-								const double meanIRef = sumIRef / static_cast<double>(K);
-								const double hiGain = (std::max)(kEngineNumFloor, 1.0 - coarseGain);
-								cellGrainVar = std::sqrt(meanICur * meanIRef) / hiGain;
+								cellGrainVar = (validRefCnt > 0) ? ((sumProjIr / static_cast<double>(K)) / hiGain) : 0.0;
 							}
 
 							double C[kMaxBlendRefs][kMaxBlendRefs] = {};
 							acc.SecondMoment(C);
+							// Store unpooled own-cell second moment capped by pooled C[k][k] (1:1 parity with TdV2ReferenceEngine.h).
 							for (int k = 0; k < K; ++k)
-								cellDiagC[k][cIdx] = C[k][k];
+							{
+								const double ownDiag = (ownSampleCount > 0)
+									? (ownSumSq[k] / static_cast<double>(ownSampleCount))
+									: C[k][k];
+								cellDiagC[k][cIdx] = (std::min)(ownDiag, C[k][k]);
+							}
 
 							double cVec[kMaxBlendRefs] = {};
 							for (int k = 0; k < K; ++k)
@@ -2386,19 +2450,26 @@ namespace TdV2
 							const size_t cIdx = static_cast<size_t>(cy) * res.cellsW + cx;
 							const size_t pIdx = static_cast<size_t>(y) * dW + x;
 
+							if (isFaceMaskedCell(cIdx))
+							{
+								outDelta.at(x, y) = 0.0;
+								continue;
+							}
+
 							const double curV = curCoarse.at(x, y);
 							double delta = 0.0;
 							for (int k = 0; k < K; ++k)
 							{
 								if (cRefs[k].validPx[pIdx] == 0u || cellW[k][cIdx] <= 0.0)
 									continue;
-								const double wSpat = SpatialBilinearWeight(cellW[k].data(), res.cellsW, res.cellsH, lx, ly, cellPx);
-								if (wSpat <= 0.0)
-									continue;
 								const TdV2Plane& refP = isCb ? cRefs[k].coarseCb : cRefs[k].coarseCr;
 								const double diff = curV - refP.at(x, y);
-								const double taper = HuberPixelTaper(diff, cellDiagC[k][cIdx]);
-								delta -= (wSpat * taper) * diff;
+								const double wEff = cfg_.enablePerCornerHuber
+									? SpatialBilinearHuberWeight(cellW[k].data(), cellDiagC[k].data(), res.cellsW, res.cellsH, lx, ly, cellPx, diff)
+									: SpatialBilinearWeight(cellW[k].data(), res.cellsW, res.cellsH, lx, ly, cellPx);
+								if (wEff <= 0.0)
+									continue;
+								delta -= wEff * diff;
 							}
 							if (std::fabs(delta) > 0.0)
 								delta = ApplyTransformUnknownBound(delta, bandVar, standIns);
@@ -2425,6 +2496,8 @@ namespace TdV2
 								const int x0 = (std::max)(delivActive.x0, (cx * cellPx) / dSubX);
 								const int x1 = (std::min)(delivActive.x1, ((cx + 1) * cellPx + dSubX - 1) / dSubX);
 								if (x1 <= x0) continue;
+								if (isFaceMaskedCell(static_cast<size_t>(cy) * res.cellsW + cx))
+									continue;
 								double inFineE = 0.0, outFineE = 0.0;
 								size_t cnt = 0;
 								for (int y = y0; y < y1; ++y)
@@ -2607,6 +2680,8 @@ namespace TdV2
 				ThreeBandPlanes bandsCb;
 				ThreeBandPlanes bandsCr;
 				std::vector<uint8_t> validPx;
+				std::vector<double> motionVx;
+				std::vector<double> motionVy;
 				MotionGateResult motionGate;
 				bool isExactCopy = false;
 				bool isCfl = false;
@@ -2692,6 +2767,8 @@ namespace TdV2
 
 				WarpedChromaRef wr;
 				wr.isExactCopy = rIn.isExactCopyOfCurrent;
+				wr.motionVx = useMf->vx;
+				wr.motionVy = useMf->vy;
 				std::vector<uint8_t> validCb, validCr;
 				const WarpDiagnostics dCb = ChromaDetail::WarpChromaPlaneWithLumaMotion(
 					*refCb, codedCleanCb, codedActive, cSubX, cSubY, in.siting,
@@ -2750,6 +2827,8 @@ namespace TdV2
 			{
 				WarpedChromaRef wr;
 				wr.isAnchorDerived = true;
+				wr.motionVx = anchorReadMf->vx;
+				wr.motionVy = anchorReadMf->vy;
 				uint64_t gapFilled = 0;
 				if (anchorCanvas_.SampleAtCodedGrid(
 						in.codedSubsampling, in.siting, lumaActive, anchorReadMf, cellPx,
@@ -2774,6 +2853,8 @@ namespace TdV2
 				WarpedChromaRef wr;
 				wr.isCfl = true;
 				wr.isAnchorDerived = true;
+				wr.motionVx = anchorReadMf->vx;
+				wr.motionVy = anchorReadMf->vy;
 				if (anchorCanvas_.PredictCarriedCflAtCodedGrid(
 						in.codedSubsampling, in.siting, lumaActive, anchorReadMf, cellPx,
 						wr.cleanCb, wr.cleanCr, wr.validPx, standIns,
@@ -3012,6 +3093,9 @@ namespace TdV2
 					for (int cx = 0; cx < res.cellsW; ++cx)
 					{
 						const size_t cIdx = static_cast<size_t>(cy) * res.cellsW + cx;
+						// Pass-1 face / non-rigid mask (H13): skip cell solve so cellW[b][k][cIdx] stays 0.0.
+						if (isFaceMaskedCell(cIdx))
+							continue;
 
 						double cellGrainVar = 0.0;
 						bool hasCellGrainPrior = false;
@@ -3063,10 +3147,10 @@ namespace TdV2
 						const int px0 = (std::max)(codedActive.x0, ((cx - poolR) * cellPx) / cSubX);
 						const int px1 = (std::min)(codedActive.x1, ((cx + poolR + 1) * cellPx + cSubX - 1) / cSubX);
 
-						// H2 + Q5(b): When !splitActive and no explicit per-cell grain prior was supplied, derive
-						// symmetric temporal fine-band innovation sqrt(mean(I_{X->k}) * mean(I_{k->X})) / gains.fine
-						// over the exact same pooled window. Strictly 0 on clean W4 blurry edges or clean refs,
-						// and exact sigma^2 on multi-seed unsplit grainy frames so Layer-2 A1 protects L/M/H grain!
+						// H2 + Q5(a) + Q5(b): When !splitActive and no explicit per-cell grain prior was supplied, derive
+						// bias-corrected projection innovation ComputeProjectionIr(..., BicubicWarpVarianceGain) / gains.fine
+						// over the exact same pooled window (immune to sub-pixel bicubic texture attenuation on coded chroma pans).
+						// Clean grain-free refs below the exact 1-LSB quantization floor contribute 0.0.
 						if (!splitActive && !hasCellGrainPrior)
 						{
 							double sumCurH2 = 0.0;
@@ -3085,6 +3169,8 @@ namespace TdV2
 									const double lx = in.siting.CodedToLumaX(static_cast<double>(x), cSubX);
 									const int pcx = (std::max)(0, (std::min)(res.cellsW - 1, static_cast<int>(std::floor(lx)) / cellPx));
 									const size_t pCell = static_cast<size_t>(pcy) * res.cellsW + pcx;
+									if (isFaceMaskedCell(pCell))
+										continue;
 									const size_t pIdx = static_cast<size_t>(y) * cW + x;
 
 									const double hCur = curBands.H.at(x, y);
@@ -3126,18 +3212,25 @@ namespace TdV2
 							{
 								const double invH = 1.0 / static_cast<double>(hCnt);
 								const double meanCur = sumCurH2 * invH;
-								double sumICur = 0.0, sumIRef = 0.0;
+								// Exact 1-LSB uniform quantization variance transferred through the fine band (Rule 1).
+								const double refQuantFloor = ((kDefaultStepPriorLsb * kDefaultStepPriorLsb) / 12.0) * gains.fine;
+								double sumProjIr = 0.0;
 								for (int ai = 0; ai < activeK; ++ai)
 								{
+									const int k = activeIdx[ai];
+									const double meanRef = sumRefH2[ai] * invH;
 									const double cross = sumCrossH[ai] * invH;
-									const double ic = meanCur - cross;
-									const double ir = sumRefH2[ai] * invH - cross;
-									sumICur += (ic > 0.0 ? ic : 0.0);
-									sumIRef += (ir > 0.0 ? ir : 0.0);
+									const double vxC = (cIdx < refs[static_cast<size_t>(k)].motionVx.size())
+										? (refs[static_cast<size_t>(k)].motionVx[cIdx] / static_cast<double>(cSubX))
+										: 0.0;
+									const double vyC = (cIdx < refs[static_cast<size_t>(k)].motionVy.size())
+										? (refs[static_cast<size_t>(k)].motionVy[cIdx] / static_cast<double>(cSubY))
+										: 0.0;
+									const double warpBeta = BicubicWarpVarianceGain(vxC, vyC);
+									if (meanRef > refQuantFloor)
+										sumProjIr += ComputeProjectionIr(meanCur, cross, meanRef, standIns, warpBeta);
 								}
-								const double meanICur = sumICur / static_cast<double>(activeK);
-								const double meanIRef = sumIRef / static_cast<double>(activeK);
-								cellInnov = std::sqrt(meanICur * meanIRef) / gains.fine;
+								cellInnov = (sumProjIr / static_cast<double>(activeK)) / gains.fine;
 								cellGrainVar = cellInnov;
 							}
 							if (ownCellCnt > 0)
@@ -3172,6 +3265,8 @@ namespace TdV2
 						{
 							const TdV2Plane& curB = bandPlaneOf(curBands, b);
 							MomentAccumulatorFp32 acc(activeK);
+							double ownSumSq[kMaxBlendRefs] = {};
+							size_t ownSampleCount = 0;
 
 							for (int y = py0; y < py1; ++y)
 							{
@@ -3182,6 +3277,8 @@ namespace TdV2
 									const double lx = in.siting.CodedToLumaX(static_cast<double>(x), cSubX);
 									const int pcx = (std::max)(0, (std::min)(res.cellsW - 1, static_cast<int>(std::floor(lx)) / cellPx));
 									const size_t pCell = static_cast<size_t>(pcy) * res.cellsW + pcx;
+									if (isFaceMaskedCell(pCell))
+										continue;
 									const size_t pIdx = static_cast<size_t>(y) * cW + x;
 
 									bool allValid = true;
@@ -3201,7 +3298,15 @@ namespace TdV2
 										diffs[ai] = static_cast<float>(curV - bandPlaneOf(rBands, b).at(x, y));
 									}
 									if (allValid)
+									{
 										acc.AddSample(diffs);
+										if (pCell == cIdx)
+										{
+											++ownSampleCount;
+											for (int ai = 0; ai < activeK; ++ai)
+												ownSumSq[ai] += static_cast<double>(diffs[ai]) * static_cast<double>(diffs[ai]);
+										}
+									}
 								}
 							}
 
@@ -3210,8 +3315,14 @@ namespace TdV2
 
 							double C[kMaxBlendRefs][kMaxBlendRefs] = {};
 							acc.SecondMoment(C);
+							// Store unpooled own-cell second moment capped by pooled C[ai][ai] (1:1 parity with TdV2ReferenceEngine.h).
 							for (int ai = 0; ai < activeK; ++ai)
-								cellDiagC[b][activeIdx[ai]][cIdx] = C[ai][ai];
+							{
+								const double ownDiag = (ownSampleCount > 0)
+									? (ownSumSq[ai] / static_cast<double>(ownSampleCount))
+									: C[ai][ai];
+								cellDiagC[b][activeIdx[ai]][cIdx] = (std::min)(ownDiag, C[ai][ai]);
+							}
 
 							double cVec[kMaxBlendRefs] = {};
 							for (int ai = 0; ai < activeK; ++ai)
@@ -3423,6 +3534,13 @@ namespace TdV2
 						const size_t cIdx = static_cast<size_t>(cy) * res.cellsW + cx;
 						const size_t pIdx = static_cast<size_t>(y) * cW + x;
 
+						// Pass-1 face / non-rigid mask: exact delta == 0.0 at every masked pixel (H13).
+						if (isFaceMaskedCell(cIdx))
+						{
+							outCodedDelta.at(x, y) = 0.0;
+							continue;
+						}
+
 						const bool inFull8x8Block = canRunPocs &&
 						                            (x >= bxStart) && (x < bxEnd) && (y >= byStart) && (y < byEnd) &&
 						                            isBlockPredValid((x / 8) * 8, (y / 8) * 8);
@@ -3436,13 +3554,14 @@ namespace TdV2
 							{
 								if (refs[static_cast<size_t>(k)].validPx[pIdx] == 0u || cellW[b][k][cIdx] <= 0.0)
 									continue;
-								const double wSpat = SpatialBilinearWeight(cellW[b][k].data(), res.cellsW, res.cellsH, lx, ly, cellPx);
-								if (wSpat <= 0.0)
-									continue;
 								const ThreeBandPlanes& rBands = isCb ? refs[static_cast<size_t>(k)].bandsCb : refs[static_cast<size_t>(k)].bandsCr;
 								const double diff = curV - bandPlaneOf(rBands, b).at(x, y);
-								const double taper = HuberPixelTaper(diff, cellDiagC[b][k][cIdx]);
-								bandDelta -= (wSpat * taper) * diff;
+								const double wEff = cfg_.enablePerCornerHuber
+									? SpatialBilinearHuberWeight(cellW[b][k].data(), cellDiagC[b][k].data(), res.cellsW, res.cellsH, lx, ly, cellPx, diff)
+									: SpatialBilinearWeight(cellW[b][k].data(), res.cellsW, res.cellsH, lx, ly, cellPx);
+								if (wEff <= 0.0)
+									continue;
+								bandDelta -= wEff * diff;
 							}
 							if (!inFull8x8Block)
 							{
@@ -3504,8 +3623,17 @@ namespace TdV2
 								ProjectResidual8x8Dct(sentRes, blendRes, effStepDelta, effPhi, cfg_.residualMode, projRes);
 								for (int j = 0; j < 8; ++j)
 								{
+									const double ly = in.siting.CodedToLumaY(static_cast<double>(by + j), cSubY);
+									const int cy = (std::max)(0, (std::min)(res.cellsH - 1, static_cast<int>(std::floor(ly)) / cellPx));
 									for (int i = 0; i < 8; ++i)
 									{
+										const double lx = in.siting.CodedToLumaX(static_cast<double>(bx + i), cSubX);
+										const int cx = (std::max)(0, (std::min)(res.cellsW - 1, static_cast<int>(std::floor(lx)) / cellPx));
+										if (isFaceMaskedCell(static_cast<size_t>(cy) * res.cellsW + cx))
+										{
+											outCodedDelta.at(bx + i, by + j) = 0.0;
+											continue;
+										}
 										const double cVal = codedClean.at(bx + i, by + j);
 										const double pVal = predClean.at(bx + i, by + j);
 										outCodedDelta.at(bx + i, by + j) = (pVal + projRes[j * 8 + i]) - cVal;
@@ -3564,6 +3692,8 @@ namespace TdV2
 						if (x1 <= x0) continue;
 
 						const size_t cIdx = static_cast<size_t>(cy) * res.cellsW + cx;
+						if (isFaceMaskedCell(cIdx))
+							continue;
 						double ownGrainE = 0.0, ownGrainFineE = 0.0, inFineE = 0.0, outFineE = 0.0;
 						double inCovOwn = 0.0, outCovOwn = 0.0;
 						size_t cnt = 0;
@@ -3648,6 +3778,26 @@ namespace TdV2
 				res.codedDeltaCb, lumaW, lumaH, in.codedSubsampling, in.deliveredFormat, in.siting, lumaActive, standIns);
 			res.deliveredDeltaCr = UpsampleDeltaToDelivered(
 				res.codedDeltaCr, lumaW, lumaH, in.codedSubsampling, in.deliveredFormat, in.siting, lumaActive, standIns);
+
+			// Keep delivered delta strictly 0.0 at every Pass-1 face-masked pixel (even when coded->delivered upsampling straddles a mask edge).
+			if (res.faceMaskedCells > 0)
+			{
+				for (int y = delivActive.y0; y < delivActive.y1; ++y)
+				{
+					const double ly = in.siting.CodedToLumaY(static_cast<double>(y), dSubY);
+					const int cy = (std::max)(0, (std::min)(res.cellsH - 1, static_cast<int>(std::floor(ly)) / cellPx));
+					for (int x = delivActive.x0; x < delivActive.x1; ++x)
+					{
+						const double lx = in.siting.CodedToLumaX(static_cast<double>(x), dSubX);
+						const int cx = (std::max)(0, (std::min)(res.cellsW - 1, static_cast<int>(std::floor(lx)) / cellPx));
+						if (isFaceMaskedCell(static_cast<size_t>(cy) * res.cellsW + cx))
+						{
+							res.deliveredDeltaCb.at(x, y) = 0.0;
+							res.deliveredDeltaCr.at(x, y) = 0.0;
+						}
+					}
+				}
+			}
 
 			// B8: Apply delivered signed delta strictly inside ActiveRect (Mode::On only; Shadow stays passthrough).
 			if (cfg_.ModifiesPixels())

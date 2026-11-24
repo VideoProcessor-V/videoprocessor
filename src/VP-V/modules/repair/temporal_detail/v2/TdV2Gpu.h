@@ -452,6 +452,53 @@ namespace Gpu
 			r.stats = ComputeRoundingCellStats(r.effStepDelta, r.effPhi, r.effZeroFrac);
 			return r;
 		}
+
+		// Canonical per-frame scratch-arena request list (single source of truth shared by ArenaRequests
+		// and EstimatedScratchVramBytes so VRAM accounting can NEVER drift from arena allocations).
+		inline std::vector<VpSkeleton::ArenaRequest> BuildArenaRequests(
+			int w, int h, int cellPx = kCanonicalBlockPx, Preset preset = Preset::Reference)
+		{
+			std::vector<VpSkeleton::ArenaRequest> reqs;
+			if (w <= 0 || h <= 0)
+				return reqs;
+
+			const bool compact = (preset == Preset::RealTime);
+			const int effCellPx = cellPx > 0 ? cellPx : kCanonicalBlockPx;
+			const uint32_t uw = static_cast<uint32_t>(w);
+			const uint32_t uh = static_cast<uint32_t>(h);
+			const uint32_t wHalf = static_cast<uint32_t>((w + 1) / 2);
+			const uint32_t hHalf = static_cast<uint32_t>((h + 1) / 2);
+			const uint32_t cw = static_cast<uint32_t>((w + effCellPx - 1) / effCellPx);
+			const uint32_t ch = static_cast<uint32_t>((h + effCellPx - 1) / effCellPx);
+
+			auto pushReq = [&](uint32_t rw, uint32_t rh, VpSkeleton::TexFormat fmt, uint8_t count)
+			{
+				VpSkeleton::ArenaRequest r;
+				r.scope = kArenaScope;
+				r.owner = kArenaOwner;
+				r.tier = VpSkeleton::Tier::T1;
+				r.shape = VpSkeleton::TexShape{ rw, rh, fmt };
+				r.count = count;
+				reqs.push_back(r);
+			};
+
+			if (compact)
+			{
+				pushReq(uw, uh, VpSkeleton::TexFormat::RG32F, 5);        // curBandsMH, refBandsMH[0..2], deltaScratch (strictly FP32 per plan L60)
+				pushReq(wHalf, hHalf, VpSkeleton::TexFormat::RG32F, 5);  // curBandsLD3, refBandsLD3[0..2], bandHalfTmp (FP32)
+			}
+			else
+			{
+				pushReq(uw, uh, VpSkeleton::TexFormat::RGBA32F, 5);      // curBands, refBands[0..2], bandTmpH
+				pushReq(uw, uh, VpSkeleton::TexFormat::RG32F, 1);        // deltaScratch
+			}
+			pushReq(uw, uh, VpSkeleton::TexFormat::R32F, 1);             // warpedVal (reused across k=K-1..0)
+			pushReq(uw, uh, VpSkeleton::TexFormat::R16, 2);              // refFlags[0..1] (ping-pong packed 3-ref x 3-bit)
+			pushReq(3u * cw, ch, VpSkeleton::TexFormat::RGBA32F, 3);     // motionGate, cellWeights, cellDiagC
+			pushReq(3u * cw, 3u * ch, VpSkeleton::TexFormat::RGBA32F, 1);// cellStats (Chan-Pebay 10 floats/band/cell)
+			pushReq(cw, ch, VpSkeleton::TexFormat::RGBA32F, 1);          // cellFocus (focusFlags[bit0=focusChange,bit1=isDefocused], cellOwnGrainVar, spatialRms, isFace)
+			return reqs;
+		}
 	} // namespace Detail
 
 	// ---- Libplacebo Compute GPU Engine (Stage TD-S5 + TD-S5-OPT) ----
@@ -538,69 +585,42 @@ namespace Gpu
 		static std::vector<VpSkeleton::ArenaRequest> ArenaRequests(
 			pl_gpu gpu, int w, int h, int cellPx = kCanonicalBlockPx, Preset preset = Preset::Reference)
 		{
-			std::vector<VpSkeleton::ArenaRequest> reqs;
 			if (!gpu || w <= 0 || h <= 0)
-				return reqs;
+				return {};
 			if (!VpSkeleton::PlTexBackend::FindFormat(gpu, VpSkeleton::TexFormat::R16) ||
 			    !VpSkeleton::PlTexBackend::FindFormat(gpu, VpSkeleton::TexFormat::R32F) ||
 			    !VpSkeleton::PlTexBackend::FindFormat(gpu, VpSkeleton::TexFormat::RG32F) ||
 			    !VpSkeleton::PlTexBackend::FindFormat(gpu, VpSkeleton::TexFormat::RGBA32F))
 			{
-				return reqs;
+				return {};
 			}
-			const bool compact = (preset == Preset::RealTime);
-
-			const int effCellPx = cellPx > 0 ? cellPx : kCanonicalBlockPx;
-			const uint32_t uw = static_cast<uint32_t>(w);
-			const uint32_t uh = static_cast<uint32_t>(h);
-			const uint32_t wHalf = static_cast<uint32_t>((w + 1) / 2);
-			const uint32_t hHalf = static_cast<uint32_t>((h + 1) / 2);
-			const uint32_t cw = static_cast<uint32_t>((w + effCellPx - 1) / effCellPx);
-			const uint32_t ch = static_cast<uint32_t>((h + effCellPx - 1) / effCellPx);
-
-			auto pushReq = [&](uint32_t rw, uint32_t rh, VpSkeleton::TexFormat fmt, uint8_t count)
-			{
-				VpSkeleton::ArenaRequest r;
-				r.scope = kArenaScope;
-				r.owner = kArenaOwner;
-				r.tier = VpSkeleton::Tier::T1;
-				r.shape = VpSkeleton::TexShape{ rw, rh, fmt };
-				r.count = count;
-				reqs.push_back(r);
-			};
-
-			if (compact)
-			{
-				pushReq(uw, uh, VpSkeleton::TexFormat::RG32F, 5);        // curBandsMH, refBandsMH[0..2], deltaScratch (strictly FP32 per plan L60)
-				pushReq(wHalf, hHalf, VpSkeleton::TexFormat::RG32F, 5);  // curBandsLD3, refBandsLD3[0..2], bandHalfTmp (FP32)
-			}
-			else
-			{
-				pushReq(uw, uh, VpSkeleton::TexFormat::RGBA32F, 5);      // curBands, refBands[0..2], bandTmpH
-				pushReq(uw, uh, VpSkeleton::TexFormat::RG32F, 1);        // deltaScratch
-			}
-			pushReq(uw, uh, VpSkeleton::TexFormat::R32F, 1);             // warpedVal (reused across k=K-1..0)
-			pushReq(uw, uh, VpSkeleton::TexFormat::R16, 2);              // refFlags[0..1] (ping-pong packed 3-ref x 3-bit)
-			pushReq(3u * cw, ch, VpSkeleton::TexFormat::RGBA32F, 3);     // motionGate, cellWeights, cellDiagC
-			pushReq(3u * cw, 3u * ch, VpSkeleton::TexFormat::RGBA32F, 1);// cellStats (Chan-Pebay 10 floats/band/cell)
-			pushReq(cw, ch, VpSkeleton::TexFormat::RGBA32F, 1);          // cellFocus (focusFlags[bit0=focusChange,bit1=isDefocused], cellOwnGrainVar, spatialRms, isFace)
-			return reqs;
+			return Detail::BuildArenaRequests(w, h, cellPx, preset);
 		}
 
-		// Exact VRAM working-set estimate in bytes at w x h (persistent carry + arena scratch + IO/output textures).
-		static uint64_t EstimatedVramBytes(
+		// Exact scratch-arena VRAM bytes derived directly from Detail::BuildArenaRequests (single source of truth — zero drift!).
+		static uint64_t EstimatedScratchVramBytes(
+			int w, int h, int cellPx = kCanonicalBlockPx, Preset preset = Preset::Reference)
+		{
+			uint64_t total = 0;
+			for (const VpSkeleton::ArenaRequest& r : Detail::BuildArenaRequests(w, h, cellPx, preset))
+				total += VpSkeleton::ShapeBytes(r.shape) * static_cast<uint64_t>(r.count);
+			return total;
+		}
+
+		// Persistent TD-owned VRAM bytes at w x h (persistent carryCleanTex_ + persistent cell-grid IO/output textures +
+		// Reference CPU staging/readback). Strictly excludes ArenaRequests scratch textures (budgeted separately under
+		// kUserScratchArena / kUserScratchArenaExtra — zero double-counting!).
+		static uint64_t EstimatedPersistentVramBytes(
 			int w, int h, int cellPx = kCanonicalBlockPx, Preset preset = Preset::Reference)
 		{
 			if (w <= 0 || h <= 0)
 				return 0;
 			const int effCellPx = cellPx > 0 ? cellPx : kCanonicalBlockPx;
 			const uint64_t px = static_cast<uint64_t>(w) * static_cast<uint64_t>(h);
-			const uint64_t pxHalf = static_cast<uint64_t>((w + 1) / 2) * static_cast<uint64_t>((h + 1) / 2);
 			const uint64_t cw = static_cast<uint64_t>((w + effCellPx - 1) / effCellPx);
 			const uint64_t ch = static_cast<uint64_t>((h + effCellPx - 1) / effCellPx);
 			const uint64_t cells = cw * ch;
 
-			const uint64_t bR16 = VpSkeleton::BytesPerTexel(VpSkeleton::TexFormat::R16);
 			const uint64_t bR32 = VpSkeleton::BytesPerTexel(VpSkeleton::TexFormat::R32F);
 			const uint64_t bRG32 = VpSkeleton::BytesPerTexel(VpSkeleton::TexFormat::RG32F);
 			const uint64_t bRGBA32 = VpSkeleton::BytesPerTexel(VpSkeleton::TexFormat::RGBA32F);
@@ -609,22 +629,6 @@ namespace Gpu
 			uint64_t total = 0;
 			// Persistent carryCleanTex_ (1 x R32F)
 			total += 1u * px * bR32;
-			// Scratch set (matching ArenaRequests 1:1 — all band storage strictly FP32 per plan L60)
-			if (compact)
-			{
-				total += 4u * px * bRG32;
-				total += 5u * pxHalf * bRG32;
-			}
-			else
-			{
-				total += 5u * px * bRGBA32;
-			}
-			total += 1u * px * bR32;
-			total += 2u * px * bR16;
-			total += 1u * px * bRG32;
-			total += 3u * (3u * cells) * bRGBA32;
-			total += 1u * (9u * cells) * bRGBA32;
-			total += 1u * cells * bRGBA32;
 			// Cell-grid IO/output textures (motionVec, motionMeta, cellPrior, tdMaps, diagFlags, guardCell, warpDiag)
 			total += (3u * cells) * (bRGBA32 + bRG32);
 			total += (3u * cells) * bRGBA32;
@@ -636,7 +640,16 @@ namespace Gpu
 			return total;
 		}
 
+		// Exact total VRAM working-set estimate in bytes at w x h (persistent TD textures + arena scratch textures).
+		static uint64_t EstimatedVramBytes(
+			int w, int h, int cellPx = kCanonicalBlockPx, Preset preset = Preset::Reference)
+		{
+			return EstimatedPersistentVramBytes(w, h, cellPx, preset) +
+			       EstimatedScratchVramBytes(w, h, cellPx, preset);
+		}
+
 		// VRAM governor user declaration under VpSkeleton::kUserTemporalDetail (sheddable Tier T1).
+		// Budgets ONLY persistent TD-owned VRAM so scratch-arena textures are NOT double-counted against kUserScratchArenaExtra!
 		static VpSkeleton::VramUser MakeVramUser(
 			int w, int h, int cellPx = kCanonicalBlockPx, Preset preset = Preset::Reference)
 		{
@@ -646,7 +659,7 @@ namespace Gpu
 			u.tier = VpSkeleton::Tier::T1;
 			u.shedOrder = 0;
 			u.lossless = false;
-			const uint64_t bytes = EstimatedVramBytes(w, h, cellPx, preset);
+			const uint64_t bytes = EstimatedPersistentVramBytes(w, h, cellPx, preset);
 			u.levels.push_back(bytes);
 			u.levelText.push_back(nullptr);
 			if (bytes > 0)
@@ -2995,11 +3008,58 @@ namespace Gpu
 
 			if (!p.readbackCellDiag)
 			{
-				// Zero-copy realtime path (no CPU readback): still keep visible StandInRegistry telemetry accurate (Rule 4)!
+				// Zero-copy realtime path (no CPU readback): engage ALL host-deterministic StandInRegistry tokens cleanly (Rule 4)!
 				if (standIns != nullptr)
 				{
-					if (!runDctPocs)
+					const bool hasActiveArea = !ar.Empty();
+					// 1. Pass 4 always evaluates Layer-4 TdGuardPort on active cells when K > 0.
+					if (K > 0 && hasActiveArea)
+						standIns->Engage(StandInKind::GrainGuardW4c);
+
+					// 2. Single-ref / role-unpartnered A1->A2 fallback (mirrors td_find_independent_a1_partner in Pass 2B 1:1).
+					if (cfg_.estimator != VarianceEstimator::A2_RoundingCells && K > 0 && hasActiveArea)
+					{
+						bool anyRefLacksA1Partner = (K == 1);
+						if (!anyRefLacksA1Partner)
+						{
+							for (int k = 0; k < K; ++k)
+							{
+								const int myRole = refSpecs[static_cast<size_t>(k)].refRole;
+								bool foundPartner = false;
+								for (int j = 0; j < K; ++j)
+								{
+									if (j == k)
+										continue;
+									const int other = refSpecs[static_cast<size_t>(j)].refRole;
+									if (other == 2) // Carry never instruments another ref in A1
+										continue;
+									if ((myRole == 0 && (other == 1 || other == 3)) ||
+									    (myRole == 1 && (other == 0 || other == 3)) ||
+									    (myRole == 3 && (other == 1 || other == 0)) ||
+									    (myRole == 2 && other == 1))
+									{
+										foundPartner = true;
+										break;
+									}
+								}
+								if (!foundPartner)
+								{
+									anyRefLacksA1Partner = true;
+									break;
+								}
+							}
+						}
+						if (anyRefLacksA1Partner)
+							standIns->Engage(StandInKind::SingleRefA1ToA2Fallback);
+					}
+
+					// 3. TransformUnknownBound: engaged when Pass 3B did not run OR when non-8-aligned remainder strips exist.
+					const bool hasRemainderStrips =
+						(bxStart > ar.x0) || (bxEnd < ar.x1) || (byStart > ar.y0) || (byEnd < ar.y1);
+					if (hasActiveArea && (!runDctPocs || hasRemainderStrips))
 						standIns->Engage(StandInKind::TransformUnknownBound);
+
+					// 4. Pass-1 face / non-rigid mask visibility.
 					if (p.faceMaskTex != nullptr || cpuFaceMaskedCount > 0)
 						standIns->Engage(StandInKind::FaceNonRigidMask);
 				}

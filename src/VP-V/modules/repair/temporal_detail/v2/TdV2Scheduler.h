@@ -649,11 +649,13 @@ namespace TdV2
 			    onTimeClean->w == delta.w && onTimeClean->h == delta.h)
 			{
 				prevClean_ = *onTimeClean;
+				prevCleanValid_.assign(static_cast<size_t>(onTimeClean->w) * static_cast<size_t>(onTimeClean->h), 1u);
 				hasPrevClean_ = true;
 			}
 			else
 			{
 				prevClean_ = TdV2Plane{};
+				prevCleanValid_.clear();
 				hasPrevClean_ = false;
 			}
 			lateStreak_ = 0;
@@ -671,6 +673,7 @@ namespace TdV2
 			prevDelta_ = TdV2Plane{};
 			hasPrevDelta_ = false;
 			prevClean_ = TdV2Plane{};
+			prevCleanValid_.clear();
 			hasPrevClean_ = false;
 			lateStreak_ = 0;
 			expired_ = false;
@@ -704,6 +707,7 @@ namespace TdV2
 			auto makeExpired = [&](const char* detail) -> LateCarryDecision
 			{
 				expired_ = true;
+				prevCleanValid_.clear();
 				dec.carried = false;
 				dec.expired = true;
 				dec.usesL3Clamp = false;
@@ -820,8 +824,62 @@ namespace TdV2
 					carryMotion->vx, carryMotion->vy,
 					cellsW, cellsH, cellPx,
 					warpedPrevClean, prevCleanValidMask, nullptr, &carryMotion->valid);
+
+				// Propagate prior-hop invalidity across the 4x4 bicubic sampling footprint so
+				// late frame 2 never samples OOB/invalid-motion fallback pixels from late frame 1.
+				const size_t expectedPixels = static_cast<size_t>(curClean.w) * static_cast<size_t>(curClean.h);
+				if (prevCleanValid_.size() == expectedPixels)
+				{
+					for (int y = ar.y0; y < ar.y1; ++y)
+					{
+						const int cy = (std::min)(cellsH - 1, y / cellPx);
+						for (int x = ar.x0; x < ar.x1; ++x)
+						{
+							const size_t pIdx = static_cast<size_t>(y) * static_cast<size_t>(curClean.w) + static_cast<size_t>(x);
+							if (prevCleanValidMask[pIdx] == 0u)
+								continue;
+							const int cx = (std::min)(cellsW - 1, x / cellPx);
+							const size_t cIdx = static_cast<size_t>(cy) * static_cast<size_t>(cellsW) + static_cast<size_t>(cx);
+							const double vx = carryMotion->vx[cIdx];
+							const double vy = carryMotion->vy[cIdx];
+							if (!std::isfinite(vx) || !std::isfinite(vy))
+							{
+								prevCleanValidMask[pIdx] = 0u;
+								warpedPrevClean.at(x, y) = curClean.at(x, y);
+								continue;
+							}
+							const double sx = static_cast<double>(x) + vx;
+							const double sy = static_cast<double>(y) + vy;
+							const int ix0 = static_cast<int>(std::floor(sx)) - 1;
+							const int iy0 = static_cast<int>(std::floor(sy)) - 1;
+							bool anyInvalidTap = false;
+							for (int ty = iy0; ty <= iy0 + 3 && !anyInvalidTap; ++ty)
+							{
+								const int clampedY = (std::max)(ar.y0, (std::min)(ar.y1 - 1, ty));
+								for (int tx = ix0; tx <= ix0 + 3; ++tx)
+								{
+									const int clampedX = (std::max)(ar.x0, (std::min)(ar.x1 - 1, tx));
+									const size_t tapIdx = static_cast<size_t>(clampedY) * static_cast<size_t>(curClean.w) +
+									                      static_cast<size_t>(clampedX);
+									if (prevCleanValid_[tapIdx] == 0u)
+									{
+										anyInvalidTap = true;
+										break;
+									}
+								}
+							}
+							if (anyInvalidTap)
+							{
+								prevCleanValidMask[pIdx] = 0u;
+								warpedPrevClean.at(x, y) = curClean.at(x, y);
+							}
+						}
+					}
+				}
+
 				refGuide = &warpedPrevClean;
 				prevClean_ = warpedPrevClean;
+				prevCleanValid_ = prevCleanValidMask;
 			}
 
 			const int bxStart = ((ar.x0 + 7) / 8) * 8;
@@ -829,6 +887,62 @@ namespace TdV2
 			const int bxEnd = (ar.x1 / 8) * 8;
 			const int byEnd = (ar.y1 / 8) * 8;
 			const bool hasInterior8x8 = useTransform8x8 && (bxStart < bxEnd) && (byStart < byEnd);
+
+			const bool hasValidPb = (ctx != nullptr && ctx->codecModelPb != nullptr &&
+			                         !ctx->codecModelPb->Empty() &&
+			                         ctx->codecModelPb->w == curClean.w && ctx->codecModelPb->h == curClean.h);
+
+			auto isBlockRefGuideValid = [&](int bx, int by) -> bool
+			{
+				if (refGuide == nullptr)
+					return false;
+				if (hasExplicitRef)
+					return true;
+				for (int j = 0; j < 8; ++j)
+				{
+					const size_t rowBase = static_cast<size_t>(by + j) * static_cast<size_t>(curClean.w);
+					for (int i = 0; i < 8; ++i)
+					{
+						const size_t pIdx = rowBase + static_cast<size_t>(bx + i);
+						if (pIdx >= prevCleanValidMask.size() || prevCleanValidMask[pIdx] == 0u)
+							return false;
+					}
+				}
+				return true;
+			};
+
+			const int numBlocksX = hasInterior8x8 ? ((bxEnd - bxStart) / 8) : 0;
+			const int numBlocksY = hasInterior8x8 ? ((byEnd - byStart) / 8) : 0;
+			std::vector<uint8_t> blockProjectable(
+				static_cast<size_t>(numBlocksX) * static_cast<size_t>(numBlocksY), 0u);
+			bool anyProjectableBlock = false;
+			if (hasInterior8x8)
+			{
+				for (int by = byStart; by < byEnd; by += 8)
+				{
+					const int bRow = (by - byStart) / 8;
+					for (int bx = bxStart; bx < bxEnd; bx += 8)
+					{
+						if (hasValidPb || isBlockRefGuideValid(bx, by))
+						{
+							const int bCol = (bx - bxStart) / 8;
+							blockProjectable[static_cast<size_t>(bRow) * static_cast<size_t>(numBlocksX) +
+							                 static_cast<size_t>(bCol)] = 1u;
+							anyProjectableBlock = true;
+						}
+					}
+				}
+			}
+
+			auto canProjectBlock = [&](int bx, int by) -> bool
+			{
+				if (!hasInterior8x8 || bx < bxStart || bx + 8 > bxEnd || by < byStart || by + 8 > byEnd)
+					return false;
+				const int bCol = (bx - bxStart) / 8;
+				const int bRow = (by - byStart) / 8;
+				return blockProjectable[static_cast<size_t>(bRow) * static_cast<size_t>(numBlocksX) +
+				                        static_cast<size_t>(bCol)] != 0u;
+			};
 
 			// Keep an un-decayed 1-hop warped delta so late frame 2 can advance accurately by another 1-hop carryMotion.
 			TdV2Plane nextPrevDelta(curClean.w, curClean.h, 0.0);
@@ -905,7 +1019,9 @@ namespace TdV2
 						}
 					}
 
-					const bool inFull8x8 = hasInterior8x8 && (x >= bxStart) && (x < bxEnd) && (y >= byStart) && (y < byEnd);
+					const bool inFull8x8 = hasInterior8x8 && (x >= bxStart) && (x < bxEnd) &&
+					                       (y >= byStart) && (y < byEnd) &&
+					                       canProjectBlock((x / 8) * 8, (y / 8) * 8);
 					if (inFull8x8)
 					{
 						dec.delta.at(x, y) = scaled;
@@ -920,11 +1036,11 @@ namespace TdV2
 			}
 
 			// Transform-identified 8x8 DCT STRICT/CELL projection on carried delta when active (Q7a & H14).
-			if (hasInterior8x8)
+			// Only run on blocks with a valid prediction (codecModelPb or fully valid refGuide); unprojectable blocks
+			// already fell cleanly into ApplyTransformUnknownBound above.
+			if (hasInterior8x8 && anyProjectableBlock)
 			{
-				const bool hasValidPb = (ctx->codecModelPb != nullptr && !ctx->codecModelPb->Empty() &&
-				                         ctx->codecModelPb->w == curClean.w && ctx->codecModelPb->h == curClean.h);
-				const TdV2Plane& predClean = hasValidPb ? *ctx->codecModelPb : (refGuide != nullptr ? *refGuide : curClean);
+				const TdV2Plane& predClean = hasValidPb ? *ctx->codecModelPb : *refGuide;
 				if (!hasValidPb && standIns != nullptr)
 				{
 					standIns->Engage(StandInKind::CodecModelPbStandIn,
@@ -940,6 +1056,8 @@ namespace TdV2
 					{
 						for (int bx = bxStart; bx < bxEnd; bx += 8)
 						{
+							if (!canProjectBlock(bx, by))
+								continue;
 							bool anyNonZero = false;
 							for (int j = 0; j < 8 && !anyNonZero; ++j)
 								for (int i = 0; i < 8; ++i)
@@ -987,13 +1105,16 @@ namespace TdV2
 						}
 					}
 
-					// Pixel-domain code range projection [0, peakCode] (2-set POCS).
+					// Pixel-domain code range projection [0, peakCode] (2-set POCS) on projected blocks only.
 					if (peakCode > 0.0)
 					{
 						for (int y = byStart; y < byEnd; ++y)
 						{
+							const int by = (y / 8) * 8;
 							for (int x = bxStart; x < bxEnd; ++x)
 							{
+								if (!canProjectBlock((x / 8) * 8, by))
+									continue;
 								const double dVal = dec.delta.at(x, y);
 								if (dVal == 0.0)
 									continue;
@@ -1008,9 +1129,10 @@ namespace TdV2
 				// Re-enforce strict 0.0 on masked cells (Overlay / DynamicTexture / invalid motion) after 8x8 DCT.
 				for (int y = byStart; y < byEnd; ++y)
 				{
+					const int by = (y / 8) * 8;
 					for (int x = bxStart; x < bxEnd; ++x)
 					{
-						if (isMaskedPixel(x, y))
+						if (canProjectBlock((x / 8) * 8, by) && isMaskedPixel(x, y))
 							dec.delta.at(x, y) = 0.0;
 					}
 				}
@@ -1047,6 +1169,7 @@ namespace TdV2
 		TdV2Plane prevDelta_;
 		bool hasPrevDelta_ = false;
 		TdV2Plane prevClean_;
+		std::vector<uint8_t> prevCleanValid_;
 		bool hasPrevClean_ = false;
 		int lateStreak_ = 0;
 		bool expired_ = false;
