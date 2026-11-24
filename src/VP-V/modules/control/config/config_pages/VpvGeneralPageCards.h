@@ -24,6 +24,8 @@
 #include <VP-V/modules/control/config/config_pages/VpvSection.h>
 #include <vector>
 
+class QLineEdit;
+
 namespace ConfigPageHost
 {
 	class EditorKit;
@@ -34,4 +36,8 @@ namespace Vpv
 	// The unit cards of `unitId`: `taken` (the cards Bill's pages built, VpvConfigPages.h) followed by this
 	// file's cards for that unit (none for other units).
 	std::vector<UnitCard> WithGeneralPageCards(ConfigPageHost::EditorKit& kit, const QString& unitId, std::vector<UnitCard> taken);
+
+	// UTF-8 text field helper for EditorKit::bindTextField (CUI-M1): reads via kit.value (UTF-8 decoded),
+	// writes UTF-8 via kit.setKnown / kit.removeKnown, and marks dirty with editOrder_ tracking.
+	QLineEdit* BindUtf8TextField(ConfigPageHost::EditorKit& kit, const QString& section, const QString& key, const QString& fallback, const QString& accessibleName);
 }

@@ -2370,7 +2370,7 @@ namespace Vpv
                 out = v;
                 return true;
             };
-            auto syncAdaptiveMotion = [adaptiveMotion, adaptiveMotionMode, adaptiveMotionStrength, motionRows, parseStrength]()
+            auto syncAdaptiveMotion = [adaptiveMotion, adaptiveMotionMode, adaptiveMotionStrength, motionRows, parseStrength](bool forceSpinSync)
             {
                 const QSignalBlocker blockMode(adaptiveMotionMode);
                 const QSignalBlocker blockStrength(adaptiveMotionStrength);
@@ -2403,7 +2403,8 @@ namespace Vpv
                     adaptiveMotionMode->setCurrentIndex(adaptiveMotionMode->findData(QStringLiteral("custom")));
                     adaptiveMotionStrength->setVisible(true);
                     adaptiveMotionStrength->setEnabled(true);
-                    if (std::abs(adaptiveMotionStrength->value() - strengthValue) >= 1e-6 && !adaptiveMotionStrength->hasFocus())
+                    if (std::abs(adaptiveMotionStrength->value() - strengthValue) >= 1e-6 &&
+                        (forceSpinSync || !adaptiveMotionStrength->hasFocus()))
                         adaptiveMotionStrength->setValue(strengthValue);
                     active = strengthValue > 0.0;
                 }
@@ -2421,7 +2422,7 @@ namespace Vpv
                 }
             };
             QObject::connect(adaptiveMotion, &QLineEdit::textChanged, receiver, [syncAdaptiveMotion](const QString&) {
-                syncAdaptiveMotion();
+                syncAdaptiveMotion(false);
             });
             QObject::connect(adaptiveMotionMode, qOverload<int>(&QComboBox::currentIndexChanged), receiver,
                 [adaptiveMotion, adaptiveMotionMode, adaptiveMotionStrength, parseStrength, syncAdaptiveMotion](int)
@@ -2432,7 +2433,7 @@ namespace Vpv
                     if (adaptiveMotion->text() != chosen)
                         adaptiveMotion->setText(chosen);
                     else
-                        syncAdaptiveMotion();
+                        syncAdaptiveMotion(false);
                 }
                 else if (chosen == QStringLiteral("custom"))
                 {
@@ -2448,7 +2449,7 @@ namespace Vpv
                         adaptiveMotion->setText(QString::number(adaptiveMotionStrength->value(), 'g', 4));
                     }
                     else
-                        syncAdaptiveMotion();
+                        syncAdaptiveMotion(true);
                 }
             });
             QObject::connect(adaptiveMotionStrength, qOverload<double>(&QDoubleSpinBox::valueChanged), receiver,
@@ -2463,9 +2464,9 @@ namespace Vpv
             auto* adaptiveMotionRefresh = new QAction(adaptiveMotionControls);
             adaptiveMotionRefresh->setObjectName(controlName(sectionPrefix, QStringLiteral("adaptive_motion_refresh")));
             QObject::connect(adaptiveMotionRefresh, &QAction::triggered, receiver, [syncAdaptiveMotion]() {
-                syncAdaptiveMotion();
+                syncAdaptiveMotion(true);
             });
-            syncAdaptiveMotion();
+            syncAdaptiveMotion(true);
         }
         MarkGpuCost(form, adaptiveOn, 2);
         MarkGpuCost(form, adaptiveMap, 1);

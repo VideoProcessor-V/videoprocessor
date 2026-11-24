@@ -2,6 +2,7 @@
 #include <VP-V/core/SlotRegistry.h>
 
 #include "VpvSection.h"
+#include "VpvConfigProviders.h"
 
 #include "VpvOrganisation.h"
 #define VPV_RENDERING_DEFAULTS_PURE
@@ -11,6 +12,7 @@
 
 #include <VP-V/core/DelayBudgetLadder.h>
 #include <VP-V/modules/colour/appearance/AppearanceStatus.h>
+#include <VP-V/modules/output/calibration_lut/CalibrationLutHostPolicy.h>
 
 #include <QAbstractButton>
 #include <QAbstractItemModel>
@@ -49,6 +51,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -608,18 +611,26 @@ namespace Vpv
 		}
 
 		// The Config page a widget is on (createPage's viewport is named "<title> settings"); a
-		// control moved onto the VP-V page (organisation pass) says which unit tab and card.
+		// control moved onto the VP-V page (organisation pass) says which unit tab, sub-tab(s), and card.
 		QString PageOf(const QWidget* w)
 		{
-			QString card, tab;
+			QString card;
+			QStringList tabs;
 			for (const QWidget* p = w ? w->parentWidget() : nullptr; p; p = p->parentWidget())
 			{
 				if (card.isEmpty() && !p->property("vpvCardTitle").toString().isEmpty())
 					card = p->property("vpvCardTitle").toString();
-				if (tab.isEmpty() && !p->property("vpvTabTitle").toString().isEmpty())
-					tab = p->property("vpvTabTitle").toString();
+				const QString t = p->property("vpvTabTitle").toString();
+				if (!t.isEmpty() && !tabs.contains(t))
+					tabs.prepend(t);
 				if (p->objectName() == ObjectName(QStringLiteral("section")))
-					return QStringLiteral("VP-V > ") + tab + (card.isEmpty() ? QString() : QStringLiteral(" > ") + card);
+				{
+					QStringList parts;
+					parts << QStringLiteral("VP-V");
+					parts << tabs;
+					if (!card.isEmpty()) parts << card;
+					return parts.join(QStringLiteral(" > "));
+				}
 				if (p->objectName() == QStringLiteral("pageViewport") && qobject_cast<const QScrollArea*>(p))
 				{
 					QString page = p->accessibleName();
@@ -1294,6 +1305,10 @@ namespace Vpv
 				vbox->setContentsMargins(0, 0, 0, 0);
 				vbox->setSpacing(4);
 
+				auto* modeRow = new QHBoxLayout;
+				modeRow->setContentsMargins(0, 0, 0, 0);
+				modeRow->setSpacing(4);
+
 				auto* mode = new QComboBox;
 				mode->setObjectName(ObjectName(unitId + QLatin1Char('.') + key + QStringLiteral(".mode")));
 				mode->setAccessibleName(Q(spec.label));
@@ -1301,7 +1316,18 @@ namespace Vpv
 				mode->addItem(QStringLiteral("Conventional sizes only"), QStringLiteral("conventional"));
 				mode->addItem(QStringLiteral("Custom IDs..."), QStringLiteral("custom"));
 				mode->setToolTip(Q(spec.tip) + QStringLiteral("\n\nKey %1 (renderer profile).").arg(key));
-				vbox->addWidget(mode);
+				modeRow->addWidget(mode, 1);
+
+				auto* reset = new QToolButton;
+				reset->setObjectName(ObjectName(unitId + QLatin1Char('.') + key + QStringLiteral(".reset")));
+				reset->setIcon(reset->style()->standardIcon(QStyle::SP_BrowserReload));
+				reset->setFixedSize(26, 26);
+				reset->setProperty("vpvResetForKey", key);
+				reset->setToolTip(QStringLiteral("Reset %1 to inherited / default (clears this profile's override).").arg(Q(spec.label)));
+				reset->setAccessibleName(QStringLiteral("Reset %1 to inherited or default").arg(Q(spec.label)));
+				reset->setEnabled(false);
+				modeRow->addWidget(reset);
+				vbox->addLayout(modeRow);
 
 				auto* edit = new QLineEdit;
 				edit->setObjectName(ObjectName(unitId + QLatin1Char('.') + key));
@@ -1317,7 +1343,18 @@ namespace Vpv
 				state->own.push_back(container);
 
 				auto pendingCustom = std::make_shared<bool>(false);
+				auto forceReset = std::make_shared<bool>(false);
 				auto lastProfile = std::make_shared<QString>(state->profile);
+
+				QObject::connect(reset, &QToolButton::clicked, reset, [state, key, pendingCustom, forceReset]()
+				{
+					if (state->refreshing || !state->host.setValue) return;
+					*pendingCustom = false;
+					*forceReset = true;
+					state->host.setValue(state->profile, key, QString());
+					state->ReloadUpstream();
+					state->RefreshAll();
+				});
 
 				QObject::connect(mode, qOverload<int>(&QComboBox::currentIndexChanged), mode,
 					[state, mode, edit, key, pendingCustom](int index)
@@ -1366,8 +1403,10 @@ namespace Vpv
 					state->RefreshAll();
 				});
 
-				state->refreshers.push_back([mode, edit, k, pendingCustom, lastProfile](const std::shared_ptr<State>& state)
+				state->refreshers.push_back([mode, edit, reset, k, pendingCustom, forceReset, lastProfile](const std::shared_ptr<State>& state)
 				{
+					const bool resetNow = *forceReset;
+					*forceReset = false;
 					if (*lastProfile != state->profile || state->reloading)
 					{
 						*pendingCustom = false;
@@ -1377,7 +1416,7 @@ namespace Vpv
 					const QString lower = stored.toLower();
 					const bool isAll = lower.isEmpty() || lower == QStringLiteral("all");
 					const bool isConv = lower == QStringLiteral("conventional");
-					const bool showCustom = (!isAll && !isConv) || *pendingCustom || (edit->isVisible() && edit->hasFocus());
+					const bool showCustom = (!isAll && !isConv) || *pendingCustom || (!resetNow && edit->isVisible() && edit->hasFocus());
 					const QSignalBlocker modeBlocker(mode);
 					const QSignalBlocker editBlocker(edit);
 					if (showCustom)
@@ -1385,7 +1424,7 @@ namespace Vpv
 						mode->setCurrentIndex(2);
 						edit->setVisible(true);
 						edit->setEnabled(true);
-						if (!edit->hasFocus() && !*pendingCustom) edit->setText(stored);
+						if (resetNow || (!edit->hasFocus() && !*pendingCustom)) edit->setText(stored);
 					}
 					else
 					{
@@ -1394,6 +1433,8 @@ namespace Vpv
 						edit->setEnabled(false);
 						edit->setText(QString());
 					}
+					if (!reset->property("vpvLocked").toBool())
+						reset->setEnabled(state->vpvOn && !state->Own(k).empty());
 				});
 				return container;
 			}
@@ -1450,8 +1491,13 @@ namespace Vpv
 			return nullptr;
 		}
 
-		QDoubleSpinBox* AddNumberRow(const std::shared_ptr<State>& state, const QString& unitId, const NumberRowSpec& spec, QFormLayout* form)
+		QWidget* AddNumberRow(const std::shared_ptr<State>& state, const QString& unitId, const NumberRowSpec& spec, QFormLayout* form)
 		{
+			auto* row = new QWidget;
+			auto* rowLayout = new QHBoxLayout(row);
+			rowLayout->setContentsMargins(0, 0, 0, 0);
+			rowLayout->setSpacing(4);
+
 			auto* spin = new QDoubleSpinBox;
 			const QString key = Q(spec.key);
 			spin->setObjectName(ObjectName(unitId + QLatin1Char('.') + key));
@@ -1464,10 +1510,31 @@ namespace Vpv
 			if (spec.suffix && *spec.suffix) spin->setSuffix(Q(spec.suffix));
 			spin->setValue(spec.defaultValue);
 			spin->setToolTip(Q(spec.tip) + QStringLiteral("\n\nKey %1 (renderer profile).").arg(key));
-			form->addRow(Q(spec.label), spin);
-			state->own.push_back(spin);
+			rowLayout->addWidget(spin, 1);
+
+			auto* reset = new QToolButton;
+			reset->setObjectName(ObjectName(unitId + QLatin1Char('.') + key + QStringLiteral(".reset")));
+			reset->setIcon(reset->style()->standardIcon(QStyle::SP_BrowserReload));
+			reset->setFixedSize(26, 26);
+			reset->setProperty("vpvResetForKey", key);
+			reset->setToolTip(QStringLiteral("Reset %1 to inherited / default (clears this profile's override).").arg(Q(spec.label)));
+			reset->setAccessibleName(QStringLiteral("Reset %1 to inherited or default").arg(Q(spec.label)));
+			reset->setEnabled(false);
+			rowLayout->addWidget(reset);
+
+			form->addRow(Q(spec.label), row);
+			state->own.push_back(row);
 			const std::string k = spec.key;
 			const double defaultVal = spec.defaultValue;
+			auto forceSync = std::make_shared<bool>(false);
+			QObject::connect(reset, &QToolButton::clicked, reset, [state, key, forceSync]()
+			{
+				if (state->refreshing || !state->host.setValue) return;
+				*forceSync = true;
+				state->host.setValue(state->profile, key, QString());
+				state->ReloadUpstream();
+				state->RefreshAll();
+			});
 			QObject::connect(spin, qOverload<double>(&QDoubleSpinBox::valueChanged), spin, [state, key, k](double val)
 			{
 				if (state->refreshing || !state->host.setValue) return;
@@ -1477,19 +1544,23 @@ namespace Vpv
 				state->ReloadUpstream();
 				state->RefreshAll();
 			});
-			state->refreshers.push_back([spin, k, defaultVal](const std::shared_ptr<State>& state)
+			state->refreshers.push_back([spin, reset, k, defaultVal, forceSync](const std::shared_ptr<State>& state)
 			{
+				const bool force = *forceSync;
+				*forceSync = false;
 				const QString raw = QString::fromStdString(state->Get(k));
 				bool ok = false;
 				const double parsed = raw.toDouble(&ok);
-				const double target = (!raw.isEmpty() && ok) ? parsed : defaultVal;
-				if (state->reloading || !spin->hasFocus())
+				const double target = (!raw.isEmpty() && ok && std::isfinite(parsed)) ? parsed : defaultVal;
+				if (force || state->reloading || !spin->hasFocus())
 				{
 					const QSignalBlocker blocker(spin);
 					spin->setValue(target);
 				}
+				if (!reset->property("vpvLocked").toBool())
+					reset->setEnabled(state->vpvOn && !state->Own(k).empty());
 			});
-			return spin;
+			return row;
 		}
 
 		const Toggle* FindToggle(const Unit& unit, const char* key)
@@ -1546,9 +1617,50 @@ namespace Vpv
 			return true;
 		}
 
+		// Reads pipeline_slots_off from [vpv] first, then the active/default renderer profile,
+		// mirroring VpvRendererSettings::ReadGlobal (TryGetPipelineString).
+		std::string PipelineSlotsOff(const std::shared_ptr<State>& state)
+		{
+			if (state->host.value)
+			{
+				const QString vpvSlots = state->host.value(Q(TierTable().section), QStringLiteral("pipeline_slots_off")).trimmed();
+				if (!vpvSlots.isEmpty())
+					return vpvSlots.toStdString();
+			}
+			return state->Get("pipeline_slots_off");
+		}
+
+		// Mirrors VpvRendererSettings::PostLoad (lines 1055-1062): colour.appearance replaces ambient_adapt
+		// and gamma boost / saturation only when appearance == "on", parsed appearance_strength > 0.0
+		// (default 1.0 when unset or out of [0, 1]), on the VP-V pathway, and colour.appearance is not
+		// listed in pipeline_slots_off.
+		bool IsAppearanceActive(const std::shared_ptr<State>& state)
+		{
+			if (!state->vpvOn)
+				return false;
+			std::string app = state->Get("appearance");
+			if (app.empty()) app = TierTable().Default("appearance");
+			if (!SameValue(app, "on"))
+				return false;
+			const std::string rawStrength = state->Get("appearance_strength");
+			double strength = 1.0;   // VpvRenderer::Fields::appearanceStrength built-in default
+			if (!rawStrength.empty())
+			{
+				bool ok = false;
+				const double parsed = QString::fromStdString(rawStrength).toDouble(&ok);
+				if (ok && std::isfinite(parsed) && parsed >= 0.0 && parsed <= 1.0)
+					strength = parsed;
+			}
+			if (!(strength > 0.0))
+				return false;
+			return !CalibrationLutHost::ContainsSlotToken(PipelineSlotsOff(state), "colour.appearance");
+		}
+
 		bool IsReplacedByActive(const std::shared_ptr<State>& state, const char* key)
 		{
 			if (!key || !*key) return false;
+			if (std::string(key) == "appearance")
+				return IsAppearanceActive(state);
 			std::string v = state->Get(key);
 			if (v.empty()) v = TierTable().Default(key);
 			return SameValue(v, "on");
@@ -1651,7 +1763,9 @@ namespace Vpv
 				}
 				break;
 			case LockKind::ReplacedBy:
-				locked = EffectiveOff(state, spec);
+				locked = (spec.masterKey && std::string(spec.masterKey) == "appearance")
+					? IsAppearanceActive(state)
+					: EffectiveOff(state, spec);
 				why = QStringLiteral("Replaced by %1 while active.").arg(Q(spec.master));
 				if (locked) lock->unusedBecause = QStringLiteral("replaced by %1 while active").arg(Q(spec.master));
 				break;
@@ -1708,7 +1822,9 @@ namespace Vpv
 					{
 						w->setProperty("vpvLocked", false);
 						w->setProperty("derivedSetting", false);
-						w->setEnabled(state->vpvOn);
+						const bool ownActive = !w->property("vpvResetForKey").isValid() ||
+							!state->Own(w->property("vpvResetForKey").toString().toStdString()).empty();
+						w->setEnabled(state->vpvOn && ownActive);
 						w->setToolTip(w->property("vpvLockTip").toString());
 					}
 				}
@@ -1943,8 +2059,8 @@ namespace Vpv
 				{
 					const NumberRowSpec* numSpec = FindNumberRow(item.id);
 					if (!numSpec) { state->missing << QStringLiteral("number %1 (%2)").arg(id, unitId); break; }
-					QDoubleSpinBox* spin = AddNumberRow(state, unitId, *numSpec, card.Form());
-					AddFieldNote(state, spin, id, itemLock(item.id));
+					QWidget* rowField = AddNumberRow(state, unitId, *numSpec, card.Form());
+					AddFieldNote(state, rowField, id, itemLock(item.id));
 					lock->keys << id;
 					break;
 				}
@@ -1963,7 +2079,20 @@ namespace Vpv
 						state->refreshers.push_back([status](const std::shared_ptr<State>& state)
 						{
 							const auto on = [&state](const char* k) { return SameValue(state->Get(k), "on"); };
-							status->setText(QString::fromStdString(AppearanceStatus::ConfigLine(on("appearance"), on("appearance_screen_white_measured"), on("ambient_adapt"))));
+							const bool appOn = on("appearance");
+							const bool appActive = IsAppearanceActive(state);
+							if (appOn && !appActive)
+							{
+								if (!state->vpvOn)
+									status->setText(QStringLiteral("appearance: off (Original pathway)"));
+								else if (CalibrationLutHost::ContainsSlotToken(PipelineSlotsOff(state), "colour.appearance"))
+									status->setText(QStringLiteral("appearance on, but colour.appearance is switched off in pipeline_slots_off (inactive; replaces nothing)"));
+								else
+									status->setText(QStringLiteral("appearance on at strength 0 (inactive: identity; replaces nothing)"));
+								return;
+							}
+							status->setText(QString::fromStdString(AppearanceStatus::ConfigLine(
+								appOn, on("appearance_screen_white_measured"), appActive && on("ambient_adapt"))));
 						});
 						break;
 					}
@@ -2700,6 +2829,7 @@ namespace Vpv
 				}
 				slotsStatus->setText(names.isEmpty() ? QStringLiteral("Every stage on.") : QStringLiteral("Accepted."));
 				state->host.setValue(section, QStringLiteral("pipeline_slots_off"), names.join(QStringLiteral(", ")));
+				state->RefreshAll();
 			});
 
 			state->refreshers.push_back([entranceOnce, merged, drain, analysis, resync, hdrInference, order, slotsOff, section](const std::shared_ptr<State>& state)
@@ -4844,5 +4974,57 @@ namespace Vpv
 		ClearHiddenVpvResetStylesheets(host.upstreamRoot);
 		state->upstreamIndex.Clear();
 		state->rootIndex.Clear();
+	}
+
+	QString DecodeConfigValue(const std::string& raw)
+	{
+		const QByteArray bytes(raw.data(), static_cast<int>(raw.size()));
+		const QString utf8 = QString::fromUtf8(bytes);
+		if (utf8.toUtf8() == bytes)
+			return utf8;
+		return QString::fromLocal8Bit(bytes);
+	}
+
+	void ManagedBillGrey::OnBillField(const QString& sectionPrefix, const QString& key, QWidget* widget,
+		ConfigPageHost::ConfigFormApi& api)
+	{
+		if (!widget || sectionPrefix != QStringLiteral("vprenderer")) return;
+		if (widget->objectName().startsWith(QStringLiteral("vpv."))) return;
+		for (QWidget* p = widget; p; p = p->parentWidget())
+			if (p->property("vpvKeyHome").toBool()) return;
+		// Tier keys move into vpv.<unit>.card.tier_keys (vpvKeyHome) where LockKind::Tier owns their
+		// enabled state; never grey them here (initial load runs before VpvSection moves them).
+		static const std::set<std::string> kManagedToggles = []()
+		{
+			const Table& table = TierTable();
+			std::set<std::string> keys = ManagedKeys(table);
+			for (const Unit& u : table.units)
+				for (const Preset& p : u.presets)
+					for (const KeyValue& kv : p.set)
+						keys.erase(kv.key);
+			return keys;
+		}();
+		if (!kManagedToggles.count(key.toStdString())) return;
+		const bool vpvOn = !ConfigOriginalPathwayOn(
+			[&api](const QString& s, const QString& k) { return api.value(s, k); });
+		if (!vpvOn) return;
+		const QString prefix = QStringLiteral("Managed by VP-V: change it on the VP-V page (or switch VP-V to the "
+			"Original pathway).");
+		if (!widget->property("vpvManaged").toBool())
+		{
+			widget->setProperty("vpvWasEnabled", widget->isEnabled());
+			widget->setProperty("vpvToolTip", widget->toolTip());
+			widget->setProperty("vpvManaged", true);
+		}
+		else
+		{
+			// Profile reload rebuilt settingHelp tooltip; keep the refreshed base tooltip for Original restore.
+			const QString curTip = widget->toolTip();
+			if (!curTip.startsWith(prefix))
+				widget->setProperty("vpvToolTip", curTip);
+		}
+		widget->setEnabled(false);
+		const QString baseTip = widget->property("vpvToolTip").toString();
+		widget->setToolTip(prefix + (baseTip.isEmpty() ? QString() : QStringLiteral("\n\n") + baseTip));
 	}
 }
