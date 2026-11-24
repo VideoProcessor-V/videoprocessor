@@ -188,40 +188,7 @@ namespace AdaptiveDownscaleStage
 		// entry for kFailureHoldMs after the last failing frame, so a one-off failure does not flicker
 		// in the status and is still listed when a problem report is taken (audit 2026-10-25 M-2).
 		static constexpr unsigned long long kFailureHoldMs = 5000;
-		FallbackCatalog::Decision Fallback() const
-		{
-			// CF-2 B1 / FIX1: the upscale form's own entry (the alias-safe ScalerPass failed: the main scaler alone; no vectors,
-			// by the stage's verdict or the module's own floor: the floor; no cut verdict; no grain level: the grain floor).
-			if (upscaleThisFrame)
-			{
-				UpscaleFallbackInputs in;
-				in.requested = requested;
-				in.failureHeld = failureHeld;
-				in.scalerError = module.ScalerError();
-				in.motionAdaptiveOn = motionAdaptiveOn;
-				in.oneAxis = oneAxisThisFrame;
-				in.stageMotionCause = upscaleMotionCause;
-				in.moduleFloorUsed = module.MotionFloorUsed();
-				in.moduleFloorCause = module.MotionFloorCauseText();
-				in.cutAvailable = module.CutAvailable();
-				in.cutCause = in.cutAvailable ? std::string() : module.CutCause();
-				in.grainCause = oneAxisThisFrame ? std::string() :
-					(!grainTerm.published ? grainTerm.cause :
-					(module.PublishedGrainDomainRefused() ? std::string("measure domain is linear / HDR") : std::string()));
-				in.edgeMapStatus = module.EdgeMapStatus();
-				in.motionExternalView = upscaleMotionExternalView;
-				return UpscaleScalingFallback(in);
-			}
-			const FallbackCatalog::Decision base = FallbackCatalog::OutputScaling(requested, failureHeld ? 1u : 0u, ssimMissing);
-			// FIX-X5-CUT-P4 / C5: no scene group (the skeleton's scene product) for this frame: no cut verdict this frame (also on StatusLines()).
-			if (!base.engaged && requested && !module.CutAvailable())
-				return FallbackCatalog::Engaged("output scaling", "adaptive downscale: no cut verdict this frame (" + module.CutCause() + ")");
-			// GEM-W1B V3 MUST-6 (audit-W1B SHOULD-1): the 32 -> 16-bit float picture fallback reaches Config status and the
-			// problem report too, not only StatusLines().
-			if (!base.engaged && requested && module.HalfFloatPictureFallback())
-				return FallbackCatalog::Engaged("output scaling", "adaptive scaler: 16-bit float picture (32-bit float not available)");
-			return base;
-		}
+		FallbackCatalog::Decision Fallback() const;
 
 		// R1-W1-RES: the read path of the temporal-detail engine's products (confidence, real detail, grain, stability, motion
 		// model). Reset 1: the placeholder producer publishes nothing and the engine is not requested, so this is "not requested"
@@ -240,22 +207,7 @@ namespace AdaptiveDownscaleStage
 		// FallbackCatalog::Sync(registry, GrainSourceFallback())); the temporal-detail read is keyed by cause,
 		// "product.adaptive_downscale [td: ...]" (TdProducts::FallbackKey; host: TdProducts::SyncRead on TemporalDetailRead()),
 		// never Sync() under the bare id. Neither stands for, overwrites or releases the other (TdProductReads.h).
-		FallbackCatalog::Decision GrainSourceFallback() const
-		{
-			const char* id = "product.adaptive_downscale";
-			if (upscaleThisFrame || !grainOffered || !module.Active())
-				return FallbackCatalog::Released(id);
-			switch (module.LastGrainSourceUse())
-			{
-			case AdaptiveDownscale::GrainSourceUse::Shared: return FallbackCatalog::Released(id);
-			case AdaptiveDownscale::GrainSourceUse::NoUsableBlock: return FallbackCatalog::Engaged(id, "grain: no usable shared block");
-			case AdaptiveDownscale::GrainSourceUse::MeasureDomain: return FallbackCatalog::Engaged(id, "grain: measure domain is linear / HDR");
-			// r2 NIT: bound, outcome not read back yet; nothing has been dropped, so no downgrade is claimed (the status line says pending).
-			case AdaptiveDownscale::GrainSourceUse::Pending: return FallbackCatalog::Released(id);
-			case AdaptiveDownscale::GrainSourceUse::NotSupplied: break;
-			}
-			return FallbackCatalog::Engaged(id, "grain: the offered shared products are invalid (missing or grid mismatch)");
-		}
+		FallbackCatalog::Decision GrainSourceFallback() const;
 
 	private:
 		AdaptiveDownscale::Module& module;

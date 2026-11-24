@@ -703,6 +703,23 @@ float rs_slope(float y)
 		Release();
 	}
 
+	void Module::ForgetMap()
+	{
+		mapReady = false;
+		mapSequence = 0;
+		mapSourceCrop = pl_rect2df{};
+		mapNls = NlsMaskMapping::Mapping{};
+		mapState = MapState::NoField;
+		residualSequence = 0;
+		residualPrevValid = false;
+		motionReady = false;
+		motionSequence = 0;
+		motionSourceCrop = pl_rect2df{};
+		motionNls = NlsMaskMapping::Mapping{};
+		cutContinuous = false;
+		cutResolved = false;   // gate B-S2: the next frame asks the cut again
+	}
+
 	void Module::Release()
 	{
 		if (gpu)

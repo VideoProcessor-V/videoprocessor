@@ -469,7 +469,7 @@ namespace AdaptiveDownscale
 		// longer follows the content and starts over (consumers see NoField).
 		// C5: the next frame's cut is read from its own scene group only (no scan of the frames since the last advance: vector-validity
 		// rule, no history across a discontinuity).
-		void ForgetMap() { mapReady = false; mapSequence = 0; mapSourceCrop = pl_rect2df{}; mapNls = NlsMaskMapping::Mapping{}; mapState = MapState::NoField; residualSequence = 0; residualPrevValid = false; motionReady = false; motionSequence = 0; motionSourceCrop = pl_rect2df{}; motionNls = NlsMaskMapping::Mapping{}; cutContinuous = false; cutResolved = false; }   // gate B-S2: the next frame asks the cut again
+		void ForgetMap();   // gate B-S2: the next frame asks the cut again
 		// The newest map (r = grain scale per block, g = trusted); tests.
 		pl_tex GrainMap() const { return mapReady ? map[mapIndex] : nullptr; }
 		bool hostReadableMap = false;   // tests: the map can be downloaded
