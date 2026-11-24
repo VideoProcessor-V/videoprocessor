@@ -580,6 +580,21 @@ namespace Tests
 				L"native HDR10 PQ fine detail must NEVER false-latch as upscaled on H");
 			Assert::IsFalse(cgNat.axis[1].confident && cgNat.axis[1].n < kUhdH,
 				L"native HDR10 PQ fine detail must NEVER false-latch as upscaled on V");
+
+			// SOTA1-HIGH-1: probeVerifier on pqNatStream must evaluate PowerProbe's code-space 0.61x synthetic
+			// injection in code space (never linearizing it), so probeSeen == true and kReasonNoPower is unset:
+			Assert::IsTrue(detHdrNat.axis[0].probeRan && detHdrNat.axis[0].probeSeen,
+				L"SOTA1-HIGH-1: PowerProbe must see its code-space synthetic injection on high-contrast native HDR10 PQ (H)");
+			Assert::IsTrue(detHdrNat.axis[1].probeRan && detHdrNat.axis[1].probeSeen,
+				L"SOTA1-HIGH-1: PowerProbe must see its code-space synthetic injection on high-contrast native HDR10 PQ (V)");
+			Assert::AreEqual(uint32_t(0), recHdrNat.measured[0].reasonBits & C::kReasonNoPower,
+				L"SOTA1-HIGH-1: high-contrast native HDR10 PQ must NOT set kReasonNoPower on measured H");
+			Assert::AreEqual(uint32_t(0), recHdrNat.measured[1].reasonBits & C::kReasonNoPower,
+				L"SOTA1-HIGH-1: high-contrast native HDR10 PQ must NOT set kReasonNoPower on measured V");
+			Assert::AreEqual(uint32_t(0), recHdrNat.applied[0].reasonBits & C::kReasonNoPower,
+				L"SOTA1-HIGH-1: high-contrast native HDR10 PQ must NOT set kReasonNoPower on applied H");
+			Assert::AreEqual(uint32_t(0), recHdrNat.applied[1].reasonBits & C::kReasonNoPower,
+				L"SOTA1-HIGH-1: high-contrast native HDR10 PQ must NOT set kReasonNoPower on applied V");
 		}
 
 		// 3. Dark-toe clamp (0..64 codes), highlight ceiling (940..1023 codes), non-finite inputs, workspace reuse,
@@ -765,6 +780,139 @@ namespace Tests
 			const double perturbed = std::nextafter(vrLive.candidates[0].stat, vrLive.candidates[0].stat + 1.0);
 			Assert::IsFalse(W1DescaleRef::MemEq(vrLive.candidates[0].stat, perturbed),
 				L"negative control: 1-ULP drift must fail W1DescaleRef::MemEq");
+		}
+
+		// 4. SOTA1-HIGH-1 regression: high-contrast native HDR10 PQ stream confirms NativeCoded with probeSeen == true
+		//    and zero kReasonNoPower across every evaluation (vs same-input linearized-probe negative control that
+		//    warps PowerProbe's code-space 0.61x synthetic upscale and destroys probeSeen), plus VerifyOptions::onlyKernel
+		//    honored in linearized HDR WLS verification.
+		TEST_METHOD(Sota1HighContrastNativeHdrPowerProbeSeenAndConfirmsNativeCoded)
+		{
+			using namespace Sota1HdrFx;
+
+			C::HdrNoiseSettings pqCfg;
+			pqCfg.enabled = true;
+			pqCfg.transfer = C::HdrTransfer::Pq;
+			pqCfg.bitDepth = 10;
+			pqCfg.limitedRange = true;
+			pqCfg.linearizeForDescale = true;
+
+			// Build 3-shot x 6-eval (18 evaluations at 0.8 s cadence -> 4.0 s dwell/shot, all 3 shots inside 12.75 s window)
+			// high-contrast native 3840x2160 HDR10 PQ stream:
+			std::vector<C::LineSnapshot> pqNatStream;
+			pqNatStream.reserve(18u);
+			for (int s = 0; s < 18; ++s)
+			{
+				const bool isCut = (s % 6) == 0;
+				pqNatStream.push_back(BuildHdrSnapshot10Bit(kUhdW, kUhdH, kUhdW, kUhdH, kLanczos3, C::HdrTransfer::Pq,
+					static_cast<uint64_t>(100 + s), static_cast<int64_t>(s) * 800000,
+					0x9400ull + static_cast<uint64_t>(s * 37), isCut));
+			}
+
+			// (A) Mandatory Same-Input Negative Control on PowerProbe:
+			//     A verifier that keeps hdrNoise enabled (pre-fix SOTA1-HIGH-1 bug) linearizes PowerProbe's code-space
+			//     0.61x bicubic injection across specular PQ edges, destroying the synthetic probe dip (seen == false,
+			//     kReasonNoPower), whereas a code-space probeVerifier sees its synthetic injection cleanly!
+			{
+				C::LineSet natLsH;
+				Assert::IsTrue(C::ToLineSet(pqNatStream[0], 0, natLsH));
+				const double floorCodes = 1.0 / std::sqrt(12.0);
+				const C::ProbeSettings defProbe;
+
+				C::VerifierSettings vsCode;
+				Assert::IsFalse(vsCode.hdrNoise.enabled);
+				C::DescaleVerifier verCode(vsCode);
+
+				C::VerifierSettings vsBrokenLinearProbe;
+				vsBrokenLinearProbe.hdrNoise = pqCfg;
+				C::DescaleVerifier verBrokenLinearProbe(vsBrokenLinearProbe);
+
+				C::ProbeResult prCode, prBroken;
+				Assert::IsTrue(C::PowerProbe::Run(verCode, natLsH, floorCodes, 1.0, defProbe, prCode));
+				Assert::IsTrue(C::PowerProbe::Run(verBrokenLinearProbe, natLsH, floorCodes, 1.0, defProbe, prBroken));
+
+				Assert::IsTrue(prCode.ran && prCode.seen,
+					L"code-space probeVerifier must see PowerProbe's synthetic 0.61x upscale on high-contrast native HDR");
+				Assert::AreEqual(uint32_t(0), prCode.reason & C::kReasonNoPower);
+				Assert::IsFalse(prBroken.seen,
+					L"hazard proof (negative control): linearizing PowerProbe's code-space injection destroys probeSeen on high-contrast HDR");
+				Assert::IsTrue((prBroken.reason & C::kReasonNoPower) != 0u);
+				Assert::IsTrue(prCode.stat < prBroken.stat - 1.0);
+			}
+
+			// (B) VerifyOptions::onlyKernel honored when hdrNoise.enabled == true:
+			{
+				const C::LineSet upLs = BuildHdrLineSet(0, 1024, 512, 8, 32, kLanczos3, C::HdrTransfer::Pq, 10, true, 0xB401ull);
+				C::VerifierSettings vsHdr;
+				vsHdr.hdrNoise = pqCfg;
+				C::DescaleVerifier verHdr(vsHdr);
+				const int cand512[1] = { 512 };
+
+				C::VerifyOptions optAll;
+				optAll.exactOnly = true;
+				optAll.exactHalfWidth = 0;
+				C::VerifyResult vrAll;
+				Assert::IsTrue(verHdr.Evaluate(upLs, cand512, 1, optAll, vrAll));
+				Assert::IsTrue(vrAll.candidates[0].valid && vrAll.candidates[0].hdrLinearizedUsed);
+				Assert::AreEqual(kLanczos3, vrAll.candidates[0].kernel);
+
+				C::VerifyOptions optOnlyBicubic = optAll;
+				optOnlyBicubic.onlyKernel = kBicubic;
+				C::VerifyResult vrOnly;
+				Assert::IsTrue(verHdr.Evaluate(upLs, cand512, 1, optOnlyBicubic, vrOnly));
+				Assert::IsTrue(vrOnly.candidates[0].valid && vrOnly.candidates[0].hdrLinearizedUsed);
+				Assert::AreEqual(kBicubic, vrOnly.candidates[0].kernel,
+					L"SOTA1-HIGH-1: DescaleVerifier linearized HDR WLS path must honor VerifyOptions::onlyKernel");
+			}
+
+			// (C) End-to-end ChainEstimator with hdrNoise enabled on pqNatStream:
+			//     probeSeen == true on EVERY evaluation, zero kReasonNoPower, and Confident NativeCoded confirmation!
+			{
+				ChainFx::ManualClock clk;
+				C::EstimatorSettings cfg;
+				cfg.outputStepOverride = 1;
+				cfg.hdrNoise = pqCfg;
+				C::ChainEstimator est(cfg, clk.Fn());
+				est.SetSynchronous(true);
+				int evalCount = 0;
+				int probeSeenCountH = 0;
+				int probeSeenCountV = 0;
+				est.SetEvaluationObserver([&](const C::EvaluationDetail& d) {
+					++evalCount;
+					if (d.axis[0].probeRan && d.axis[0].probeSeen)
+						++probeSeenCountH;
+					if (d.axis[1].probeRan && d.axis[1].probeSeen)
+						++probeSeenCountV;
+				});
+				est.SetMode(C::EstimatorMode::On);
+				for (size_t i = 0; i < pqNatStream.size(); ++i)
+				{
+					clk.Set(static_cast<double>(i) * 800.0);
+					Assert::IsTrue(est.SubmitLines(pqNatStream[i]));
+				}
+
+				Assert::AreEqual(18, evalCount);
+				Assert::AreEqual(18, probeSeenCountH,
+					L"SOTA1-HIGH-1: probeSeen must be true on every evaluation of sharp native HDR10 PQ (H)");
+				Assert::AreEqual(18, probeSeenCountV,
+					L"SOTA1-HIGH-1: probeSeen must be true on every evaluation of sharp native HDR10 PQ (V)");
+
+				G::Record rec;
+				Assert::IsTrue(est.Held().ReadLatest(0, rec));
+				Assert::AreEqual(uint32_t(0), rec.measured[0].reasonBits & C::kReasonNoPower);
+				Assert::AreEqual(uint32_t(0), rec.measured[1].reasonBits & C::kReasonNoPower);
+				Assert::AreEqual(uint32_t(0), rec.applied[0].reasonBits & C::kReasonNoPower);
+				Assert::AreEqual(uint32_t(0), rec.applied[1].reasonBits & C::kReasonNoPower);
+				Assert::IsTrue(rec.codedRaster == G::CodedRaster::NativeCoded,
+					L"SOTA1-HIGH-1: sharp native HDR10 PQ stream must confirm CodedRaster::NativeCoded");
+
+				const SourceGeometry::Delivered deliv{ kUhdW, kUhdH };
+				const SourceGeometry::ConfidentGeometry cg = SourceGeometry::ConfidentOf(rec, deliv);
+				Assert::IsTrue(cg.axis[0].confident && cg.axis[0].n == kUhdW);
+				Assert::IsTrue(cg.axis[1].confident && cg.axis[1].n == kUhdH);
+				Assert::IsTrue(est.StatusLine().find("native, confident") != std::string::npos);
+				est.Stop();
+			}
 		}
 	};
 }

@@ -622,5 +622,137 @@ namespace Tests
 			Assert::IsTrue(est.GetCounters().neuralSrDetections >= 1u);
 			est.Stop();
 		}
+
+		// 4. SOTA2-HIGH-3 multi-evaluation sequence regression:
+		//    Across a multi-shot / multi-eval sequence of AI-upscaled frames with PowerProbe active:
+		//      - Mandatory same-input negative control (neuralSr.enabled == false on the exact same sequence)
+		//        accumulates positive native LLR via PowerProbe and falsely latches Confident CodedRaster::NativeCoded;
+		//      - Protected ChainEstimator (neuralSr.enabled == true on the exact same sequence) NEVER latches
+		//        Confident (!AnyConfident()) on any evaluation, bumps appliedGen when demoting confident reader
+		//        output via UnsureLike, keeps latchedPower == false, and preserves "AI-upscaled (skip LTI inverse)"
+		//        in StatusLine() throughout.
+		TEST_METHOD(Sota2MultiEvalSequenceDemotesConfidentNativeCodedBumpsAppliedGenAndPreservesStatus)
+		{
+			using namespace Sota2NeuralFx;
+
+			// Build 3-shot x 6-eval (18 evaluations at 0.8 s cadence -> 4.0 s dwell/shot, all 3 shots live in window)
+			// nonlinear AI-upscaled 1080p->4K stream:
+			std::vector<C::LineSnapshot> srStream;
+			srStream.reserve(18u);
+			for (int s = 0; s < 18; ++s)
+			{
+				const int64_t timeUs = static_cast<int64_t>(s) * 800000;
+				C::LineSnapshot snap = BuildSceneSnapshot(
+					SceneKind::ShockNeuralSr2x,
+					static_cast<uint64_t>(100 + s),
+					timeUs,
+					0x2201ull + static_cast<uint64_t>(s * 31));
+				if ((s % 6) != 0)
+				{
+					snap.flags = 0u;
+					snap.cuts = 0;
+					snap.eventTimeUs = -1;
+				}
+				srStream.push_back(snap);
+			}
+
+			const SourceGeometry::Delivered deliv{ kUhdW, kUhdH };
+
+			// (A) Mandatory Same-Input Negative Control (neuralSr.enabled == false on srStream):
+			//     PowerProbe sees its synthetic injection on sharp 1-px AI edges while LTI candidates do not dip,
+			//     causing unprotected ChainEstimator to falsely reach Confident NativeCoded!
+			{
+				ChainFx::ManualClock clk;
+				C::EstimatorSettings cfgOff;
+				cfgOff.outputStepOverride = 1;
+				Assert::IsFalse(cfgOff.neuralSr.enabled);
+				C::ChainEstimator estOff(cfgOff, clk.Fn());
+				estOff.SetSynchronous(true);
+				int probeSeenH = 0;
+				int probeSeenV = 0;
+				estOff.SetEvaluationObserver([&](const C::EvaluationDetail& d) {
+					if (d.axis[0].probeRan && d.axis[0].probeSeen)
+						++probeSeenH;
+					if (d.axis[1].probeRan && d.axis[1].probeSeen)
+						++probeSeenV;
+				});
+				estOff.SetMode(C::EstimatorMode::On);
+				for (size_t i = 0; i < srStream.size(); ++i)
+				{
+					clk.Set(static_cast<double>(i) * 800.0);
+					Assert::IsTrue(estOff.SubmitLines(srStream[i]));
+				}
+
+				Assert::AreEqual(18, probeSeenH, L"fixture: PowerProbe is active and seen on H across srStream");
+				Assert::AreEqual(18, probeSeenV, L"fixture: PowerProbe is active and seen on V across srStream");
+
+				G::Record recOff;
+				Assert::IsTrue(estOff.Held().ReadLatest(0, recOff));
+				const SourceGeometry::ConfidentGeometry cgOff = SourceGeometry::ConfidentOf(recOff, deliv);
+				Assert::IsTrue(cgOff.AnyConfident() && cgOff.axis[0].confident && cgOff.axis[1].confident,
+					L"hazard proof (negative control): with neuralSr=false, multi-eval AI-upscaled stream falsely latches Confident");
+				Assert::AreEqual(kUhdW, cgOff.axis[0].n);
+				Assert::AreEqual(kUhdH, cgOff.axis[1].n);
+				Assert::IsTrue(recOff.codedRaster == G::CodedRaster::NativeCoded,
+					L"hazard proof (negative control): with neuralSr=false, multi-eval AI-upscaled stream falsely publishes NativeCoded");
+				Assert::IsTrue(estOff.LatchedPowerForTest());
+				Assert::IsTrue(estOff.StatusLine().find("native, confident") != std::string::npos);
+				Assert::IsTrue(estOff.StatusLine().find("AI-upscaled") == std::string::npos);
+				estOff.Stop();
+			}
+
+			// (B) Protected ChainEstimator (neuralSr.enabled == true on the EXACT SAME srStream):
+			//     NEVER latches Confident on any evaluation, bumps appliedGen, and preserves StatusLine() reason!
+			{
+				ChainFx::ManualClock clk;
+				C::EstimatorSettings cfgOn;
+				cfgOn.outputStepOverride = 1;
+				cfgOn.neuralSr.enabled = true;
+				C::ChainEstimator estOn(cfgOn, clk.Fn());
+				estOn.SetSynchronous(true);
+				int probeSeenH = 0;
+				int probeSeenV = 0;
+				estOn.SetEvaluationObserver([&](const C::EvaluationDetail& d) {
+					if (d.axis[0].probeRan && d.axis[0].probeSeen)
+						++probeSeenH;
+					if (d.axis[1].probeRan && d.axis[1].probeSeen)
+						++probeSeenV;
+				});
+				estOn.SetMode(C::EstimatorMode::On);
+				for (size_t i = 0; i < srStream.size(); ++i)
+				{
+					clk.Set(static_cast<double>(i) * 800.0);
+					Assert::IsTrue(estOn.SubmitLines(srStream[i]));
+
+					G::Record stepRec;
+					Assert::IsTrue(estOn.Held().ReadLatest(0, stepRec));
+					const SourceGeometry::ConfidentGeometry stepCg = SourceGeometry::ConfidentOf(stepRec, deliv);
+					Assert::IsFalse(stepCg.AnyConfident(),
+						L"SOTA2-HIGH-3: neuralSr=true must NEVER latch Confident on any evaluation in a multi-eval AI-upscaled stream");
+					Assert::IsTrue(stepRec.codedRaster != G::CodedRaster::NativeCoded,
+						L"SOTA2-HIGH-3: neuralSr=true must NEVER publish CodedRaster::NativeCoded");
+
+					const std::string stLine = estOn.StatusLine();
+					Assert::IsTrue(stLine.find("AI-upscaled (skip LTI inverse)") != std::string::npos,
+						L"SOTA2-HIGH-3: StatusLine() must preserve 'AI-upscaled (skip LTI inverse)' across every evaluation");
+					Assert::IsTrue(stLine.find("native, confident") == std::string::npos);
+				}
+
+				Assert::AreEqual(18, probeSeenH);
+				Assert::AreEqual(18, probeSeenV);
+
+				G::Record recOn;
+				Assert::IsTrue(estOn.Held().ReadLatest(0, recOn));
+				const C::EstimatorCounters cntOn = estOn.GetCounters();
+				Assert::IsTrue(cntOn.neuralSrDetections >= 18u);
+				Assert::IsTrue(recOn.appliedGen >= 1u,
+					L"SOTA2-HIGH-3: UnsureLike demotion before ++appliedGen must bump appliedGen once AxisReader crosses c1");
+				Assert::IsFalse(estOn.LatchedPowerForTest(),
+					L"SOTA2-HIGH-3: SOTA-demoted AI-upscaled stream must not enter confident latched cadence");
+				Assert::IsTrue((recOn.applied[0].reasonBits & C::kReasonNeuralSrDetected) != 0u);
+				Assert::IsTrue((recOn.applied[1].reasonBits & C::kReasonNeuralSrDetected) != 0u);
+				estOn.Stop();
+			}
+		}
 	};
 }

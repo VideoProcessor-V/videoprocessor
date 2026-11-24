@@ -705,5 +705,279 @@ namespace Tests
 				est.Stop();
 			}
 		}
+
+		// 4. SOTA3-HIGH-4(a,c) regression: 1920x1080 native-H (nH_true = 1920, nV_true = 540) 1080i motion-bob stream
+		//    where H has no upscale dip (rH = 1.0 fallback):
+		//      - Mandatory same-input negative control (interlaced.enabled == false) falsely latches Confident
+		//        progressive 540 -> 1080 on V;
+		//      - Protected ChainEstimator (interlaced.enabled == true) detects MotionBob on every evaluation,
+		//        demotes V applied before ++appliedGen (bumping appliedGen), suppresses Confident 540 -> 1080,
+		//        and surfaces "interlaced broadcast" in StatusLine().
+		TEST_METHOD(Sota3NativeHoriz1920x1080MotionBobDetectsDemotesBumpsAppliedGenAndSurfacesStatus)
+		{
+			using namespace Sota3InterlacedFx;
+
+			// Build 4-shot x 4-eval (16 evaluations at 1.2 s cadence -> 3.6 s dwell/shot >= 3.0 s) 1920x1080
+			// native-H (srcW = 1920 -> 1920) + field-bobbed-V (srcH = 540 -> 1080, alternating +-0.25 phase) stream:
+			std::vector<C::LineSnapshot> bob1080Stream;
+			bob1080Stream.reserve(16u);
+			for (int s = 0; s < 16; ++s)
+			{
+				const bool isCut = (s % 4) == 0;
+				const double fieldPhase = ((s & 1) == 0) ? 0.25 : -0.25;
+				bob1080Stream.push_back(MakeAnisotropicSnapshot(
+					kFhdW, kFhdH, kFhdW, 540, kLanczos3, kBicubic, 0.0, fieldPhase,
+					static_cast<uint64_t>(100 + s), static_cast<int64_t>(s) * 1200000,
+					0x6100ull + static_cast<uint64_t>(s * 43), isCut));
+			}
+
+			const SourceGeometry::Delivered deliv{ kFhdW, kFhdH };
+
+			// (A) Mandatory Same-Input Negative Control (interlaced.enabled == false on bob1080Stream):
+			{
+				ChainFx::ManualClock clk;
+				C::EstimatorSettings cfgOff;
+				cfgOff.outputStepOverride = 1;
+				cfgOff.verifier.phaseCount = 5;
+				cfgOff.verifier.phaseStep = 0.25;
+				Assert::IsFalse(cfgOff.interlaced.enabled);
+				C::ChainEstimator estOff(cfgOff, clk.Fn());
+				estOff.SetSynchronous(true);
+				estOff.SetMode(C::EstimatorMode::On);
+				for (size_t i = 0; i < bob1080Stream.size(); ++i)
+				{
+					clk.Set(static_cast<double>(i) * 1200.0);
+					Assert::IsTrue(estOff.SubmitLines(bob1080Stream[i]));
+				}
+				G::Record recOff;
+				Assert::IsTrue(estOff.Held().ReadLatest(0, recOff));
+				const SourceGeometry::ConfidentGeometry cgOff = SourceGeometry::ConfidentOf(recOff, deliv);
+				Assert::IsTrue(cgOff.axis[1].confident && std::abs(cgOff.axis[1].n - 540) <= 2,
+					L"hazard proof (negative control): with interlaced=false, 1920x1080 motion-bob falsely latches progressive 540 -> 1080");
+				Assert::IsTrue(recOff.codedRaster == G::CodedRaster::PlayerUpscaled);
+				Assert::AreEqual(uint64_t(0), estOff.GetCounters().interlacedBobDetections);
+				Assert::IsTrue(estOff.StatusLine().find("540 -> 1080") != std::string::npos);
+				Assert::IsTrue(estOff.StatusLine().find("interlaced broadcast") == std::string::npos);
+				estOff.Stop();
+			}
+
+			// (B) Protected ChainEstimator (interlaced.enabled == true on the EXACT SAME bob1080Stream):
+			{
+				ChainFx::ManualClock clk;
+				C::EstimatorSettings cfgOn;
+				cfgOn.outputStepOverride = 1;
+				cfgOn.verifier.phaseCount = 5;
+				cfgOn.verifier.phaseStep = 0.25;
+				cfgOn.interlaced.enabled = true;
+				C::ChainEstimator estOn(cfgOn, clk.Fn());
+				estOn.SetSynchronous(true);
+				estOn.SetMode(C::EstimatorMode::On);
+				for (size_t i = 0; i < bob1080Stream.size(); ++i)
+				{
+					clk.Set(static_cast<double>(i) * 1200.0);
+					Assert::IsTrue(estOn.SubmitLines(bob1080Stream[i]));
+				}
+				G::Record recOn;
+				Assert::IsTrue(estOn.Held().ReadLatest(0, recOn));
+				const C::EstimatorCounters cntOn = estOn.GetCounters();
+				Assert::AreEqual(uint64_t(16), cntOn.interlacedBobDetections,
+					L"SOTA3-HIGH-4: native-H 1920x1080 motion-bob must detect MotionBob via rH=1.0 fallback");
+				Assert::AreEqual(uint64_t(0), cntOn.interlacedWeaveDetections);
+				Assert::IsTrue((recOn.measured[0].reasonBits & C::kReasonInterlacedBob) != 0u);
+				Assert::IsTrue((recOn.measured[1].reasonBits & C::kReasonInterlacedBob) != 0u);
+				Assert::IsTrue((recOn.applied[1].reasonBits & C::kReasonInterlacedBob) != 0u);
+
+				const SourceGeometry::ConfidentGeometry cgOn = SourceGeometry::ConfidentOf(recOn, deliv);
+				Assert::IsFalse(cgOn.axis[1].confident,
+					L"SOTA3-HIGH-4: interlaced=true must demote V applied so progressive 540 -> 1080 never latches");
+				Assert::IsTrue(recOn.codedRaster != G::CodedRaster::PlayerUpscaled);
+				Assert::IsTrue(recOn.appliedGen >= 1u,
+					L"SOTA3-HIGH-4: demoting V applied before ++appliedGen must bump appliedGen");
+				Assert::IsFalse(estOn.LatchedPowerForTest());
+
+				const std::string stOn = estOn.StatusLine();
+				Assert::IsTrue(stOn.find("interlaced broadcast") != std::string::npos,
+					L"SOTA3-HIGH-4: StatusLine() must surface 'interlaced broadcast' on 1920x1080 motion-bob");
+				Assert::IsTrue(stOn.find("540 -> 1080") == std::string::npos);
+				estOn.Stop();
+			}
+		}
+
+		// 5. SOTA3-HIGH-4(b,c) regression: 2.39:1 letterboxed active area inside black bars:
+		//      (A) Cropping AnalyzeWeaveComb to active prevents 2.39:1 black bars from diluting flatCombVar
+		//          on progressive horizontal gratings (vs uncropped full-frame negative control that dilutes
+		//          flatCombVar <= 0.5 * edgeCombVar and falsely fires WeaveComb);
+		//      (B) Genuine 2.39:1 letterboxed weave comb fires WeaveComb, demotes applied before ++appliedGen,
+		//          and surfaces "interlaced broadcast" in StatusLine() (vs interlaced=false negative control).
+		TEST_METHOD(Sota3Letterboxed239ScopeWeaveCombDoesNotDiluteFlatCombVarAndSurfacesStatus)
+		{
+			using namespace Sota3InterlacedFx;
+
+			const double floorCodes = 1.0 / std::sqrt(12.0);
+			C::InterlacedSettings onCfg;
+			onCfg.enabled = true;
+
+			// Exact 2.39:1 scope active region inside 1920x1080 (138-px code-64 black bars top & bottom -> 1920x804):
+			constexpr int ax = 0;
+			constexpr int ay = 138;
+			constexpr int aw = kFhdW;
+			constexpr int ah = 804;
+
+			// (A) Progressive horizontal grating + vertical mullions inside 2.39:1 black bars:
+			{
+				ChainFx::Plane lbGrating;
+				lbGrating.w = kFhdW;
+				lbGrating.h = kFhdH;
+				lbGrating.luma.assign(static_cast<size_t>(kFhdW) * static_cast<size_t>(kFhdH), 64u);
+				for (int y = ay; y < ay + ah; ++y)
+				{
+					const double slatFlat = ((y & 1) == 0) ? 260.0 : 400.0;
+					const double slatEdge = ((y & 1) == 0) ? 220.0 : 400.0;
+					uint16_t* row = &lbGrating.luma[static_cast<size_t>(y) * static_cast<size_t>(kFhdW)];
+					for (int x = 0; x < kFhdW; ++x)
+					{
+						double v = 0.0;
+						if ((x % 64) < 16)
+							v = slatEdge + 120.0 * (static_cast<double>(x % 16) / 16.0);
+						else
+							v = slatFlat + 18.0 * std::sin(0.12 * static_cast<double>(x));
+						row[x] = Quantize10(v);
+					}
+				}
+
+				// Same-input negative control: uncropped full-frame AnalyzeWeaveComb includes 276 rows of code-64
+				// black bars, diluting flatCombVar below 0.5 * edgeCombVar and falsely firing WeaveComb!
+				const C::InterlacedResult rUncropped = C::AnalyzeWeaveComb(
+					lbGrating.luma.data(), kFhdW, kFhdH, kFhdW, floorCodes, onCfg);
+				Assert::IsTrue(rUncropped.interlacedDetected && rUncropped.kind == C::InterlacedKind::WeaveComb,
+					L"hazard proof (negative control): uncropped 2.39:1 black bars dilute flatCombVar and falsely fire WeaveComb");
+				Assert::IsTrue(rUncropped.flatToEdgeCombRatio <= onCfg.weaveMaxUniformGratingShare);
+
+				// Cropped to active: flatCombVar stays undiluted (> 0.5 * edgeCombVar) -> NativeHorizontalGratingRejected!
+				const uint16_t* activePtr = lbGrating.luma.data() + static_cast<size_t>(ay) * static_cast<size_t>(kFhdW);
+				const C::InterlacedResult rCropped = C::AnalyzeWeaveComb(
+					activePtr, aw, ah, kFhdW, floorCodes, onCfg);
+				Assert::IsFalse(rCropped.interlacedDetected,
+					L"SOTA3-HIGH-4: cropping AnalyzeWeaveComb to active prevents letterbox bars from diluting flatCombVar");
+				Assert::IsTrue(rCropped.kind == C::InterlacedKind::None);
+				Assert::IsTrue(rCropped.reason == C::InterlacedReason::NativeHorizontalGratingRejected);
+				Assert::IsTrue(rCropped.flatToEdgeCombRatio > onCfg.weaveMaxUniformGratingShare);
+
+				// Live ChainEstimator::Deliver with active rect (ax, ay, aw, ah) crops to s.active and rejects:
+				ChainFx::ManualClock clk;
+				clk.Set(1000.0);
+				C::EstimatorSettings cfg;
+				cfg.outputStepOverride = 1;
+				cfg.interlaced.enabled = true;
+				C::ChainEstimator est(cfg, clk.Fn());
+				est.SetSynchronous(true);
+				est.SetMode(C::EstimatorMode::On);
+				est.NoteFrame(1, 1.0, ax, ay, aw, ah);
+				est.Deliver(ChainFx::View(lbGrating, 1));
+				Assert::AreEqual(uint64_t(1), est.GetCounters().evaluations);
+				Assert::AreEqual(uint64_t(0), est.GetCounters().interlacedWeaveDetections,
+					L"SOTA3-HIGH-4: ChainEstimator::Deliver must crop AnalyzeWeaveComb to s.active and reject letterboxed grating");
+				Assert::AreEqual(uint64_t(0), est.GetCounters().interlacedBobDetections);
+				est.Stop();
+			}
+
+			// (B) Genuine 2.39:1 letterboxed 2x upscaled weave (960x402 -> 1920x804 inside 1920x1080 black bars):
+			//     Direct AnalyzeWeaveComb + multi-eval ChainEstimator::Deliver surfaces "interlaced broadcast" in StatusLine()!
+			{
+				const ChainFx::Plane activeWeave = UpscalePlane2D(MakeWeave1080iPlane(960, 402, 7.0), aw, ah, kLanczos3);
+				ChainFx::Plane lbWeave;
+				lbWeave.w = kFhdW;
+				lbWeave.h = kFhdH;
+				lbWeave.luma.assign(static_cast<size_t>(kFhdW) * static_cast<size_t>(kFhdH), 64u);
+				for (int y = 0; y < ah; ++y)
+				{
+					const uint16_t* srcRow = &activeWeave.luma[static_cast<size_t>(y) * static_cast<size_t>(aw)];
+					uint16_t* dstRow = &lbWeave.luma[static_cast<size_t>(ay + y) * static_cast<size_t>(kFhdW)];
+					for (int x = 0; x < aw; ++x)
+						dstRow[x] = srcRow[x];
+				}
+
+				const uint16_t* activeWeavePtr = lbWeave.luma.data() + static_cast<size_t>(ay) * static_cast<size_t>(kFhdW);
+				const C::InterlacedResult rWeave = C::AnalyzeWeaveComb(
+					activeWeavePtr, aw, ah, kFhdW, floorCodes, onCfg);
+				Assert::IsTrue(rWeave.interlacedDetected);
+				Assert::IsTrue(rWeave.kind == C::InterlacedKind::WeaveComb);
+				Assert::IsTrue(rWeave.reason == C::InterlacedReason::WeaveCombConfirmed);
+				Assert::AreEqual(2, rWeave.weaveStride);
+
+				const SourceGeometry::Delivered delivActive{ aw, ah };
+
+				// Same-input negative control (interlaced.enabled == false across 4 shots x 3 frames = 12 deliveries):
+				// Falsely latches Confident progressive 402 -> 804 upscale and hides interlaced status!
+				{
+					ChainFx::ManualClock clk;
+					C::EstimatorSettings cfgOff;
+					cfgOff.outputStepOverride = 1;
+					Assert::IsFalse(cfgOff.interlaced.enabled);
+					C::ChainEstimator estOff(cfgOff, clk.Fn());
+					estOff.SetSynchronous(true);
+					estOff.SetMode(C::EstimatorMode::On);
+					for (int i = 0; i < 12; ++i)
+					{
+						const uint64_t seq = static_cast<uint64_t>(1 + i);
+						clk.Set(1000.0 + static_cast<double>(i) * 5500.0);
+						estOff.NoteFrame(seq, static_cast<double>(i) * 1.6, ax, ay, aw, ah);
+						if (i > 0 && (i % 3) == 0)
+							estOff.NoteEvent(C::EstimatorEvent::Cut, seq);
+						estOff.Deliver(ChainFx::View(lbWeave, seq));
+					}
+					Assert::AreEqual(uint64_t(12), estOff.GetCounters().evaluations);
+					G::Record recOff;
+					Assert::IsTrue(estOff.Held().ReadLatest(0, recOff));
+					const SourceGeometry::ConfidentGeometry cgOff = SourceGeometry::ConfidentOf(recOff, delivActive);
+					Assert::IsTrue(cgOff.AnyConfident(),
+						L"hazard proof (negative control): with interlaced=false, letterboxed 2x weave falsely latches Confident progressive upscale");
+					Assert::IsTrue(estOff.StatusLine().find("confident") != std::string::npos);
+					Assert::IsTrue(estOff.StatusLine().find("interlaced broadcast") == std::string::npos);
+					estOff.Stop();
+				}
+
+				// Protected run (interlaced.enabled == true across the EXACT SAME 12 deliveries):
+				// Fires WeaveComb, demotes applied before ++appliedGen, and surfaces "interlaced broadcast" in StatusLine()!
+				{
+					ChainFx::ManualClock clk;
+					C::EstimatorSettings cfgOn;
+					cfgOn.outputStepOverride = 1;
+					cfgOn.interlaced.enabled = true;
+					C::ChainEstimator estOn(cfgOn, clk.Fn());
+					estOn.SetSynchronous(true);
+					estOn.SetMode(C::EstimatorMode::On);
+					for (int i = 0; i < 12; ++i)
+					{
+						const uint64_t seq = static_cast<uint64_t>(1 + i);
+						clk.Set(1000.0 + static_cast<double>(i) * 5500.0);
+						estOn.NoteFrame(seq, static_cast<double>(i) * 1.6, ax, ay, aw, ah);
+						if (i > 0 && (i % 3) == 0)
+							estOn.NoteEvent(C::EstimatorEvent::Cut, seq);
+						estOn.Deliver(ChainFx::View(lbWeave, seq));
+					}
+					const C::EstimatorCounters cntOn = estOn.GetCounters();
+					Assert::AreEqual(uint64_t(12), cntOn.evaluations);
+					Assert::AreEqual(uint64_t(12), cntOn.interlacedWeaveDetections,
+						L"SOTA3-HIGH-4: ChainEstimator::Deliver must detect letterboxed WeaveComb on every frame");
+
+					G::Record recOn;
+					Assert::IsTrue(estOn.Held().ReadLatest(0, recOn));
+					const SourceGeometry::ConfidentGeometry cgOn = SourceGeometry::ConfidentOf(recOn, delivActive);
+					Assert::IsFalse(cgOn.AnyConfident(),
+						L"SOTA3-HIGH-4: WeaveComb must demote applied axes so progressive upscale never latches Confident");
+					Assert::IsTrue(recOn.appliedGen >= 1u,
+						L"SOTA3-HIGH-4: WeaveComb demotion before ++appliedGen must bump appliedGen");
+					Assert::IsFalse(estOn.LatchedPowerForTest());
+					Assert::IsTrue((recOn.applied[0].reasonBits & C::kReasonInterlacedBob) != 0u);
+					Assert::IsTrue((recOn.applied[1].reasonBits & C::kReasonInterlacedBob) != 0u);
+
+					const std::string stOn = estOn.StatusLine();
+					Assert::IsTrue(stOn.find("interlaced broadcast") != std::string::npos,
+						L"SOTA3-HIGH-4: StatusLine() must surface 'interlaced broadcast' when letterboxed weave comb fires");
+					estOn.Stop();
+				}
+			}
+		}
 	};
 }
