@@ -69,10 +69,88 @@ namespace Tests
 			in.on = true;
 			const AppearanceStage::Decision d = AppearanceStage::Decide(in, s);
 			Assert::IsTrue(d.active);
-			Assert::AreEqual<size_t>(10 + 10 + 7 + 9 + 9 + 1, d.parameters.size());   // + apn_* (inverse) + apx_hunt_scale
+			Assert::AreEqual<size_t>(10 + 10 + 9 + 9 + 9 + 1, d.parameters.size());   // + apx_trc_kind, apx_trc_param + apn_* (inverse) + apx_hunt_scale
 			Assert::IsTrue(d.status.find("screen white not measured") != std::string::npos);
 			in.screenWhiteMeasured = true;
 			Assert::IsTrue(AppearanceStage::Decide(in, s).status.find("not measured") == std::string::npos);
+		}
+
+		// S2-H2: unsupported output transfers (HLG, linear, log, unknown) must disable appearance
+		// visibly instead of applying power-law gamma to non-gamma codes, while supported piecewise
+		// transfers (BT.1886, sRGB) emit apx_trc_kind / apx_trc_param accurately.
+		TEST_METHOD(UnsupportedOutputTransferDisablesAppearanceVisibly)
+		{
+			auto findParam = [](const AppearanceStage::Decision& dec, const char* name) -> double
+			{
+				for (const auto& p : dec.parameters)
+					if (std::string(p.first) == name)
+						return p.second;
+				Assert::Fail(L"expected shader parameter missing");
+				return 0.0;
+			};
+
+			RoomLight::Smoother s;
+			AppearanceStage::Inputs in;
+			in.on = true;
+			in.room.room = RoomLight::Room::Auto;
+			in.recordAvailable = true;
+			in.record.valid = true;
+			in.record.smoothedLux = 15.0;
+			in.now = 1.0;
+
+			// Seed the smoother on a supported transfer first so we prove the unsupported gate resets it.
+			in.transferSupported = true;
+			const AppearanceStage::Decision seeded = AppearanceStage::Decide(in, s);
+			Assert::IsTrue(seeded.active);
+			Assert::IsFalse(seeded.transferUnsupported);
+			Assert::IsTrue(s.Initialised(), L"smoother must be initialised after an active auto-room decision");
+
+			// Unsupported output transfer on the exact same inputs: must disable visibly, emit no parameters, reset smoother.
+			in.transferSupported = false;
+			const AppearanceStage::Decision unsupported = AppearanceStage::Decide(in, s);
+			Assert::IsFalse(unsupported.active, L"unsupported output transfer must disable CAM16 appearance");
+			Assert::IsTrue(unsupported.transferUnsupported, L"decision must flag transferUnsupported");
+			Assert::IsFalse(unsupported.lutConflict, L"transfer gate must not be mislabelled as lutConflict");
+			Assert::IsTrue(unsupported.parameters.empty(), L"inactive decision must not emit shader parameters");
+			Assert::IsFalse(s.Initialised(), L"unsupported output transfer must reset the room-light smoother");
+			Assert::IsTrue(unsupported.status.find("off for this output transfer") != std::string::npos,
+				L"status line must visibly report the output transfer gate");
+
+			// Off by user choice with an unsupported transfer stays plain off (not an unsupported-transfer fallback).
+			AppearanceStage::Inputs offIn = in;
+			offIn.on = false;
+			const AppearanceStage::Decision userOff = AppearanceStage::Decide(offIn, s);
+			Assert::IsFalse(userOff.active);
+			Assert::IsFalse(userOff.transferUnsupported);
+			Assert::AreEqual(std::string("appearance: off"), userOff.status);
+
+			// Negative control (exact same inputs with transferSupported = true): appearance activates
+			// and publishes apx_trc_kind / apx_trc_param for BT.1886, sRGB, and pure-power outputs.
+			in.transferSupported = true;
+			in.transferKind = 1;
+			in.transferParam = 0.05;
+			const AppearanceStage::Decision bt1886 = AppearanceStage::Decide(in, s);
+			Assert::IsTrue(bt1886.active, L"negative control: supported BT.1886 transfer must activate appearance");
+			Assert::IsFalse(bt1886.transferUnsupported);
+			Assert::AreEqual<size_t>(10 + 10 + 9 + 9 + 9 + 1, bt1886.parameters.size());
+			Assert::AreEqual(1.0, findParam(bt1886, "apx_trc_kind"), 0.0, L"BT.1886 kind must be emitted as 1");
+			Assert::AreEqual(0.05, findParam(bt1886, "apx_trc_param"), 1e-12, L"BT.1886 black offset b must be emitted");
+
+			in.transferKind = 2;
+			in.transferParam = 0.0;
+			const AppearanceStage::Decision srgb = AppearanceStage::Decide(in, s);
+			Assert::IsTrue(srgb.active, L"negative control: supported sRGB transfer must activate appearance");
+			Assert::IsFalse(srgb.transferUnsupported);
+			Assert::AreEqual(2.0, findParam(srgb, "apx_trc_kind"), 0.0, L"sRGB kind must be emitted as 2");
+			Assert::AreEqual(0.0, findParam(srgb, "apx_trc_param"), 0.0, L"sRGB param must be emitted as 0");
+
+			in.transferKind = 0;
+			in.transferParam = 0.0;
+			const AppearanceStage::Decision power = AppearanceStage::Decide(in, s);
+			Assert::IsTrue(power.active, L"negative control: supported pure-power gamma transfer must activate appearance");
+			Assert::IsFalse(power.transferUnsupported);
+			Assert::AreEqual(0.0, findParam(power, "apx_trc_kind"), 0.0, L"pure-power kind must be emitted as 0");
+			Assert::AreEqual(0.0, findParam(power, "apx_trc_param"), 0.0);
 		}
 
 		TEST_METHOD(StrengthZeroIsTheIdentityAndNotActive)
