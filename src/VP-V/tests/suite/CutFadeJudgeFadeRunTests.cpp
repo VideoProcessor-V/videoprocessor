@@ -2918,7 +2918,7 @@ namespace CutFadeJudgeFadeRunTestsNs
 		// Rec.709 clipped-white fade-out censorship + whole-frame stepAQ jump guard vs clipped-white ambient flicker:
 		// 1. Linear-exposure 40-frame fade-out with ~2.5% specular highlights clamped to Rec.709 peak white (235 codes)
 		//    is detected BOTH while p99 remains clipped at 235 (once 1 - gain >= 0.25) AND across steep p99 unclipping
-		//    where aSpread * 4 >= contRef while run.keep * |1 - stepAQ| < 0.25 (tested at both 3.0x and 9.0x highlight radiance).
+		//    where aSpread * 4 >= contRef while run.keep * |1 - stepAQ| < 0.25 (tested at both 3.0x and 12.0x highlight radiance).
 		// 2. Mandatory Negative Controls (Rule 3): proves aP99 == 1.0 on clipped mid-fade pair (un-exempted check would reject)
 		//    AND proves +-4% clipped-white ambient flicker (1 - gain = 0.04 < 0.25) is STILL rejected by HighlightScalingConsistent!
 		TEST_METHOD(ClippedWhiteHighlightFadeOutIsDetectedWhileAmbientFlickerIsRejected)
@@ -2951,9 +2951,9 @@ namespace CutFadeJudgeFadeRunTestsNs
 				return MakeRecordFromHalf(half);
 			};
 
-			// Test both 3.0x specular radiance (standard Rec.709 clipped highlight) and 9.0x HDR specular radiance
+			// Test both 3.0x specular radiance (standard Rec.709 clipped highlight) and 12.0x HDR specular radiance
 			// (exercises steep p99 unclipping where aSpread * kFadeMaxDiv >= contRef while run.keep * |1 - stepAQ| < 0.25).
-			const double specRadiances[] = { 3.0, 9.0 };
+			const double specRadiances[] = { 3.0, 12.0 };
 			bool verifiedSteepUnclipContinuation = false;
 			for (double specRad : specRadiances)
 			{
