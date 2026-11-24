@@ -372,6 +372,21 @@ namespace MotionAhead
 		}
 	}
 
+	void Producer::RunFlowGlobalsParallelForTest(Flow& flow, bool general)
+	{
+		if (!voteThread.joinable())
+		{
+			{
+				std::lock_guard<std::mutex> lock(voteMutex);
+				voteFlow = nullptr;
+				votePending = false;
+				voteStop = false;
+			}
+			voteThread = std::thread([this] { VoteWorker(); });
+		}
+		RunFlowGlobalsParallel(flow, general);
+	}
+
 	void Producer::UpdateBehindLocked(bool wasLate, double serviceMs)
 	{
 		const double period = sourcePeriodMs.load(std::memory_order_acquire);

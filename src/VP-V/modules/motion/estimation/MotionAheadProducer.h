@@ -449,6 +449,8 @@ namespace MotionAhead
 		void SetRecoveryTimeDivisorForTest(unsigned divisor) { recoveryDivisor.store(divisor < 1 ? 1 : divisor, std::memory_order_release); }
 		// Test seam (slice 16 P3, 105 s3.7): allow disabling temporal hints to prove serial == pipelined identity with hints off.
 		void SetTemporalHintsForTest(bool enabled) { temporalHintsForTest.store(enabled, std::memory_order_release); }
+		// Test seam (CT-B3-SEAM): exercise the real 2-wide parallel VoteWorker + RunFlowGlobalsParallel path directly.
+		void RunFlowGlobalsParallelForTest(Flow& flow, bool general);
 
 	private:
 		struct Job
