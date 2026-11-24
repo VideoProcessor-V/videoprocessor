@@ -1745,8 +1745,8 @@ namespace VideoProcessorTest
 				(L"Invariant 4 failed: gain 1-eps -> 1+eps pulse " + std::to_wstring(worstGainJump) + L" > 5e-4").c_str());
 
 			// Invariant 3 + In-Test Negative Control: fine +-1 code (1/876) contour crossings across BOTH y = 1.0
-			// and max(o) = 1.0 for 3,600 saturated hues rendered directly through the real GPU shader at gain = 0.6!
-			constexpr int kGrid = 60;
+			// and max(o) = 1.0 for 3,932 saturated hue pairs rendered directly through the real GPU shader at gain = 0.6!
+			constexpr int kGrid = 80;
 			constexpr double kEps = 1.0 / 876.0;
 			std::vector<Rgb> y1Below, y1Above, m1Below, m1Above;
 			for (int ri = 0; ri < kGrid; ++ri)
