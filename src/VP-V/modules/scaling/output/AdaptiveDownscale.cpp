@@ -9,6 +9,7 @@
 
 #include <VP-V/core/LumaWeights.h>
 #include <VP-V/core/OnePole.h>
+#include <VP-V/core/Ramp.h>
 #include <VP-V/modules/input/source_analysis/events/shared/CutFadeJudge.h>
 #include <VP-V/core/PipelineSlots.h>
 #include <VP-V/core/VariantKey.h>
@@ -1562,5 +1563,166 @@ float rs_slope(float y)
 		res.components = p->components;
 		res.rect = p->rect;
 		return res;
+	}
+
+	// Fail-safe unit-range clamp for motion-adapted parameters and confidence: non-finite values (NaN, +/-Inf)
+	// map to 0 (untrusted / floor / off), never propagating NaN or clamping +Inf to 1.
+	float MotionSanitizeUnit(float x)
+	{
+		return std::isfinite(x) ? RampMath::Clamp01(x) : 0.0f;
+	}
+
+	// Motion-adapted blend: CPU mirrors of the motion-map shader (tests; the shader computes the
+	// same in float). `speed` and `shearSpeed` in picture heights per second; `confidence` continuous in 0..1.
+	float MotionSmoothstep(float lo, float hi, float x)
+	{
+		if (!std::isfinite(x) || !std::isfinite(lo) || !std::isfinite(hi))
+			return 1.0f;
+		if (!(hi > lo))
+			return x < lo ? 0.0f : 1.0f;
+		const float span = hi - lo;
+		if (!std::isfinite(span) || !(span > 0.0f))
+			return x < lo ? 0.0f : 1.0f;
+		const float ratio = (x - lo) / span;
+		if (!std::isfinite(ratio))
+			return x < lo ? 0.0f : 1.0f;
+		const float t = RampMath::Clamp01(ratio);
+		return t * t * (3.0f - 2.0f * t);
+	}
+
+	// Continuous confidence + Option 4B rigid-pan protection: shear ramps across motionSpeedLo..motionSpeedHi,
+	// while rigid cinema pans stay crisp up to the elementary power-of-2 ceiling (2*motionSpeedHi .. 4*motionSpeedHi).
+	float MotionTarget(bool frameTrusted, float speed, float shearSpeed, float confidence, const Settings& s)
+	{
+		const float fl = MotionSanitizeUnit(s.motionFloor);
+		const float c = frameTrusted ? MotionSanitizeUnit(confidence) : 0.0f;
+		const float rampShear = MotionSmoothstep(s.motionSpeedLo, s.motionSpeedHi, shearSpeed);
+		const float rampPan = MotionSmoothstep(2.0f * s.motionSpeedHi, 4.0f * s.motionSpeedHi, speed);
+		const float ramp = (std::max)(rampShear, rampPan);
+		return fl + (1.0f - fl) * c * (1.0f - ramp);
+	}
+
+	// Legacy overload forwarding cleanly to the continuous shear-aware law (exact equivalence when shearSpeed == speed).
+	float MotionTarget(bool frameTrusted, bool blockTrusted, float speed, float confidence, const Settings& s)
+	{
+		return MotionTarget(frameTrusted, speed, speed, blockTrusted ? confidence : 0.0f, s);
+	}
+
+	// The block's vector (source pixels per frame) as picture heights per second.
+	float MotionSpeed(float vx, float vy, float cropHeight, float frameSeconds)
+	{
+		if (!std::isfinite(vx) || !std::isfinite(vy) || !std::isfinite(cropHeight) || !std::isfinite(frameSeconds) ||
+			!(cropHeight > 0.0f) || !(frameSeconds > 0.0f))
+			return 0.0f;
+		const float denom = cropHeight * frameSeconds;
+		if (!std::isfinite(denom) || !(denom > 0.0f))
+			return 0.0f;
+		return std::hypot(vx, vy) / denom;
+	}
+
+	// 4-neighbor cardinal motion-boundary shear speed (picture heights per second), weighted by each neighbor's
+	// continuous confidence (clamped to 0..1) so untrusted neighbors cannot inject false shear.
+	float MotionShearSpeed(const float* fieldRgba, int bw, int bh, int bx, int by, float cropHeight, float frameSeconds)
+	{
+		if (!fieldRgba || bw <= 0 || bh <= 0 ||
+			!std::isfinite(cropHeight) || !std::isfinite(frameSeconds) ||
+			!(cropHeight > 0.0f) || !(frameSeconds > 0.0f))
+			return 0.0f;
+		const float denom = cropHeight * frameSeconds;
+		if (!std::isfinite(denom) || !(denom > 0.0f))
+			return 0.0f;
+		const int cx = (std::max)(0, (std::min)(bw - 1, bx));
+		const int cy = (std::max)(0, (std::min)(bh - 1, by));
+		const float* fb = fieldRgba + (static_cast<size_t>(cy) * static_cast<size_t>(bw) + static_cast<size_t>(cx)) * 4;
+		if (!std::isfinite(fb[0]) || !std::isfinite(fb[1]))
+			return 0.0f;
+		static constexpr int kOffsets[4][2] = { { -1, 0 }, { 1, 0 }, { 0, -1 }, { 0, 1 } };
+		float maxDv = 0.0f;
+		for (int i = 0; i < 4; ++i)
+		{
+			const int nx = (std::max)(0, (std::min)(bw - 1, cx + kOffsets[i][0]));
+			const int ny = (std::max)(0, (std::min)(bh - 1, cy + kOffsets[i][1]));
+			const float* fn = fieldRgba + (static_cast<size_t>(ny) * static_cast<size_t>(bw) + static_cast<size_t>(nx)) * 4;
+			if (!std::isfinite(fn[2]) || !std::isfinite(fn[0]) || !std::isfinite(fn[1]))
+				continue;
+			const float c = RampMath::Clamp01(fn[2]);
+			if (!(c > 0.0f))
+				continue;
+			const float dv = std::hypot(fn[0] - fb[0], fn[1] - fb[1]);
+			if (!std::isfinite(dv))
+				continue;
+			const float wdv = c * dv;
+			if (std::isfinite(wdv) && wdv > maxDv)
+				maxDv = wdv;
+		}
+		const float shear = maxDv / denom;
+		return std::isfinite(shear) ? shear : 0.0f;
+	}
+
+	// Bilinear temporal advection in the 16x16 block map (clamped to block-centre bounds [0, bw-1] x [0, bh-1]).
+	float MotionAdvectBilinear(const float* map, int bw, int bh, float pcX, float pcY, int stride)
+	{
+		if (!map || bw <= 0 || bh <= 0 || stride <= 0 || !std::isfinite(pcX) || !std::isfinite(pcY))
+			return 0.0f;
+		const float pposX = (std::max)(0.0f, (std::min)(static_cast<float>(bw - 1), pcX / 16.0f - 0.5f));
+		const float pposY = (std::max)(0.0f, (std::min)(static_cast<float>(bh - 1), pcY / 16.0f - 0.5f));
+		const int x0 = static_cast<int>(std::floor(pposX));
+		const int y0 = static_cast<int>(std::floor(pposY));
+		const int x1 = (std::min)(bw - 1, x0 + 1);
+		const int y1 = (std::min)(bh - 1, y0 + 1);
+		const float tx = pposX - static_cast<float>(x0);
+		const float ty = pposY - static_cast<float>(y0);
+		const auto at = [&](int x, int y) {
+			return MotionSanitizeUnit(map[(static_cast<size_t>(y) * static_cast<size_t>(bw) + static_cast<size_t>(x)) * static_cast<size_t>(stride)]);
+		};
+		const float top = at(x0, y0) + (at(x1, y0) - at(x0, y0)) * tx;
+		const float bot = at(x0, y1) + (at(x1, y1) - at(x0, y1)) * tx;
+		return top + (bot - top) * ty;
+	}
+
+	// Asymmetric one-pole coefficients: smooth release over smoothMs; fast attack over the elementary power-of-2
+	// ratio smoothMs / 4 (framerate-invariant via OnePole::AlphaForMs; 0 ms -> 1.0).
+	void MotionAttackReleaseAlphas(float frameSeconds, float smoothMs, float& alphaAttack, float& alphaRelease)
+	{
+		if (!std::isfinite(frameSeconds) || frameSeconds < 0.0f || !std::isfinite(smoothMs) || !(smoothMs > 0.0f))
+		{
+			alphaAttack = 1.0f;
+			alphaRelease = 1.0f;
+			return;
+		}
+		const float dtMs = frameSeconds * 1000.0f;
+		if (!std::isfinite(dtMs))
+		{
+			alphaAttack = 1.0f;
+			alphaRelease = 1.0f;
+			return;
+		}
+		alphaRelease = OnePole::AlphaForMs(dtMs, smoothMs, OnePole::DtRule::AsGiven);
+		alphaAttack = OnePole::AlphaForMs(dtMs, smoothMs * 0.25f, OnePole::DtRule::AsGiven);
+	}
+
+	// Asymmetric one-pole step: fast attack when factor drops (motion onset), smooth release when recovering.
+	float MotionStepAsymmetric(float previousAlongVector, float target, float alphaAttack, float alphaRelease, bool reset)
+	{
+		const float tgt = MotionSanitizeUnit(target);
+		if (reset || !std::isfinite(previousAlongVector))
+			return tgt;
+		const float prev = MotionSanitizeUnit(previousAlongVector);
+		const float aA = MotionSanitizeUnit(alphaAttack);
+		const float aR = MotionSanitizeUnit(alphaRelease);
+		const float alpha = tgt < prev ? aA : aR;
+		return prev + (tgt - prev) * alpha;
+	}
+
+	// The one-pole's coefficient per source frame is OnePole::AlphaForMs(frameSeconds * 1000.0f, smoothMs, AsGiven) (1 = no smoothing).
+	// One source frame of the map for one block: reset (first map, a cut, a resize) takes the target.
+	float MotionStep(float previousAlongVector, float target, float alpha, bool reset)
+	{
+		const float tgt = MotionSanitizeUnit(target);
+		if (reset || !std::isfinite(previousAlongVector))
+			return tgt;
+		const float prev = MotionSanitizeUnit(previousAlongVector);
+		const float a = MotionSanitizeUnit(alpha);
+		return prev + (tgt - prev) * a;
 	}
 }

@@ -16,8 +16,8 @@
 #include <RendererProfileConfig.h>
 #include "ConfigEditorWindow.h"
 
-#include <map>
-#include <set>
+namespace ConfigEditorCore { struct ConfigDocument; }
+namespace Vpv { bool FoldLegacyInputPolicy(ConfigEditorCore::ConfigDocument& document); }
 
 void ConfigEditorWindow::migrateRefreshKeys()
 {
@@ -185,86 +185,5 @@ void ConfigEditorWindow::migrateProfileValueNormalisations()
 
 bool ConfigEditorWindow::foldLegacyInputPolicy()
 {
-	// The input policy keys move from [vprenderer.input] / [vprenderer] to
-	// [vprenderer.input_processing], and the emptied headers are removed. Run
-	// by every load path (hunt 3, CFG7: a remote Discard skipped it).
-	bool migratedLegacyInputPolicy = false;
-	for (const char* inputKey : { "video_conversion", "container_colorspace",
-		"hdr_colorspace", "hdr_luminance" })
-	{
-		const std::string vpRendererInput =
-			document_->Get("vprenderer.input_processing", inputKey);
-		const std::string interimVpRendererInput =
-			document_->Get("vprenderer.input", inputKey);
-		const std::string legacyVpRenderer =
-			document_->Get("vprenderer", inputKey);
-		if (!interimVpRendererInput.empty())
-		{
-			if (vpRendererInput.empty())
-			{
-				document_->AddSection("vprenderer.input_processing");
-				document_->SetKnown("vprenderer.input_processing", inputKey,
-					interimVpRendererInput);
-			}
-			document_->RemoveKnown("vprenderer.input", inputKey);
-			migratedLegacyInputPolicy = true;
-		}
-		if (!legacyVpRenderer.empty())
-		{
-			if (vpRendererInput.empty() && interimVpRendererInput.empty())
-			{
-				document_->AddSection("vprenderer.input_processing");
-				document_->SetKnown("vprenderer.input_processing", inputKey,
-					legacyVpRenderer);
-			}
-			document_->RemoveKnown("vprenderer", inputKey);
-			migratedLegacyInputPolicy = true;
-		}
-	}
-	// ADR-0023 global [vpv] keys stored in legacy [vprenderer] must migrate to [vpv]
-	// BEFORE createProfilePage("vprenderer") renames [vprenderer] -> [vprenderer.profile_1].
-	// Preserve [vpv]-over-[vprenderer] precedence and leave non-global keys untouched.
-	std::map<std::string, std::string> initialVpvKeys;
-	for (const auto& entry : document_->SectionSettings("vpv"))
-		initialVpvKeys[ConfigFile::NormalizeName(entry.first)] = entry.second;
-	std::set<std::string> handledKeys;
-	for (const auto& setting : document_->SectionSettings("vprenderer"))
-	{
-		const std::string normalizedKey = ConfigFile::NormalizeName(setting.first);
-		if (!RendererProfileConfig::ProfileSchemaHooks::IsKnownGlobalKey("vpv", normalizedKey))
-			continue;
-		if (!handledKeys.insert(normalizedKey).second)
-			continue;
-		const auto existingIt = initialVpvKeys.find(normalizedKey);
-		const bool hasExplicitVpvKey = (existingIt != initialVpvKeys.end());
-		if (!hasExplicitVpvKey)
-		{
-			// Last-wins across duplicate legacy [vprenderer] entries, matching ConfigFile::Load.
-			std::string legacyValue;
-			for (const auto& candidate : document_->SectionSettings("vprenderer"))
-				if (ConfigFile::NormalizeName(candidate.first) == normalizedKey)
-					legacyValue = candidate.second;
-			if (!legacyValue.empty())
-			{
-				document_->AddSection("vpv");
-				document_->SetKnown("vpv", normalizedKey.c_str(), legacyValue);
-			}
-		}
-		else if (existingIt->second.empty() &&
-			!RendererProfileConfig::ValidateBaseSetting(normalizedKey, existingIt->second))
-		{
-			// An explicit empty [vpv] choice key already overrode the legacy [vprenderer]
-			// value above; clear all empty invalid entries so Apply saves a schema-valid file.
-			while (document_->RemoveKnown("vpv", normalizedKey.c_str())) {}
-		}
-		while (document_->RemoveKnown("vprenderer", normalizedKey.c_str())) {}
-		migratedLegacyInputPolicy = true;
-	}
-	// Removing an empty header is a visible migration (hunt 2, L9): the
-	// presence of [vprenderer] alone selects the [general] validation.
-	for (const char* emptied : { "vprenderer.input", "vprenderer" })
-		if (document_->SectionSettings(emptied).empty() &&
-			document_->RemoveSection(emptied))
-			migratedLegacyInputPolicy = true;
-	return migratedLegacyInputPolicy;
+    return document_ ? Vpv::FoldLegacyInputPolicy(*document_) : false;
 }
