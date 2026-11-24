@@ -89,7 +89,7 @@ struct PairField
     bool Usable() const
     {
         const size_t n = static_cast<size_t>(gridW > 0 ? gridW : 0) * static_cast<size_t>(gridH > 0 ? gridH : 0);
-        return valid && n > 0 && cellPx > 0.0 && vx.size() >= n && vy.size() >= n && trust.size() >= n;
+        return valid && n > 0 && std::isfinite(cellPx) && cellPx > 0.0 && vx.size() >= n && vy.size() >= n && trust.size() >= n;
     }
 };
 
@@ -113,8 +113,14 @@ struct Sampled
     float dx = 0.0f, dy = 0.0f, trust = 0.0f, unc = 0.0f;
 };
 
-// The ONE bilinear tap of the vector rasters (rule 1: Plane::At and the producer's SampleField both use it). Pixel-centre source position (x, y) on a
-// gridW x gridH raster of cellPx source px per cell, clamped to the grid. The caller checks the grid is non-empty.
+// The ONE bilinear tap of the vector rasters (rule 1: Plane::At and the producer's SampleField both use it).
+// Coordinate convention (ONE shared pixel-index convention across BilinearTap, Plane::At, Plane::Warp, Plane::SampleLanded,
+// and SampleBicubic): pixel (ix, iy) is centred at (double(ix), double(iy)), and cell (i, j) of cellPx source pixels covers
+// integer pixels [i * cellPx, (i + 1) * cellPx - 1] with centre ((i + 0.5) * cellPx - 0.5, (j + 0.5) * cellPx - 0.5).
+// Inversely, continuous cell coordinates are gx = (x + 0.5) / cellPx - 0.5, gy = (y + 0.5) / cellPx - 0.5 (derived from the
+// exact half-pixel pixel-centre offset; at cellPx == 1, integer pixel (ix, iy) maps to cell (ix, iy) with fx = fy = 0).
+// The cell anchor (x0, y0) and upper tap (x1, y1) are clamped cleanly inside [0, gridW - 1] x [0, gridH - 1] before indexing.
+// The caller checks gridW > 0, gridH > 0, and cellPx > 0.
 struct BilinearTap
 {
     size_t i00 = 0, i10 = 0, i01 = 0, i11 = 0;
@@ -122,26 +128,41 @@ struct BilinearTap
 
     BilinearTap(double x, double y, double cellPx, int gridW, int gridH)
     {
-        const double gx = (std::min)((std::max)(x / cellPx - 0.5, 0.0), double(gridW - 1));
-        const double gy = (std::min)((std::max)(y / cellPx - 0.5, 0.0), double(gridH - 1));
-        const int x0 = static_cast<int>(gx), y0 = static_cast<int>(gy);
-        const int x1 = (std::min)(x0 + 1, gridW - 1), y1 = (std::min)(y0 + 1, gridH - 1);
-        fx = static_cast<float>(gx - x0);
-        fy = static_cast<float>(gy - y0);
-        i00 = static_cast<size_t>(y0) * gridW + x0;
-        i10 = static_cast<size_t>(y0) * gridW + x1;
-        i01 = static_cast<size_t>(y1) * gridW + x0;
-        i11 = static_cast<size_t>(y1) * gridW + x1;
+        if (gridW <= 0 || gridH <= 0 || !(cellPx > 0.0) || !std::isfinite(cellPx))
+            return;
+        const double maxX = static_cast<double>(gridW - 1);
+        const double maxY = static_cast<double>(gridH - 1);
+        const double rawGx = std::isfinite(x) ? ((x + 0.5) / cellPx - 0.5) : 0.0;
+        const double rawGy = std::isfinite(y) ? ((y + 0.5) / cellPx - 0.5) : 0.0;
+        const double gx = (std::min)((std::max)(rawGx, 0.0), maxX);
+        const double gy = (std::min)((std::max)(rawGy, 0.0), maxY);
+        const int x0 = (std::min)((std::max)(static_cast<int>(std::floor(gx)), 0), gridW - 1);
+        const int y0 = (std::min)((std::max)(static_cast<int>(std::floor(gy)), 0), gridH - 1);
+        const int x1 = (std::min)(x0 + 1, gridW - 1);
+        const int y1 = (std::min)(y0 + 1, gridH - 1);
+        fx = static_cast<float>((std::min)((std::max)(gx - x0, 0.0), 1.0));
+        fy = static_cast<float>((std::min)((std::max)(gy - y0, 0.0), 1.0));
+        i00 = static_cast<size_t>(y0) * static_cast<size_t>(gridW) + static_cast<size_t>(x0);
+        i10 = static_cast<size_t>(y0) * static_cast<size_t>(gridW) + static_cast<size_t>(x1);
+        i01 = static_cast<size_t>(y1) * static_cast<size_t>(gridW) + static_cast<size_t>(x0);
+        i11 = static_cast<size_t>(y1) * static_cast<size_t>(gridW) + static_cast<size_t>(x1);
     }
     float Mix(const std::vector<float>& v) const
     {
-        const float a = v[i00] + (v[i10] - v[i00]) * fx;
-        const float b = v[i01] + (v[i11] - v[i01]) * fx;
-        return a + (b - a) * fy;
+        const float wx0 = 1.0f - fx, wx1 = fx;
+        const float wy0 = 1.0f - fy, wy1 = fy;
+        const float w00 = wx0 * wy0, w10 = wx1 * wy0, w01 = wx0 * wy1, w11 = wx1 * wy1;
+        float acc = 0.0f;
+        if (w00 > 0.0f) acc += w00 * v[i00];
+        if (w10 > 0.0f) acc += w10 * v[i10];
+        if (w01 > 0.0f) acc += w01 * v[i01];
+        if (w11 > 0.0f) acc += w11 * v[i11];
+        return acc;
     }
 };
 
-// The composed field of one (frame, direction, offset): ow x oh output cells, cell (i, j) centred on source position ((i + 0.5) step, (j + 0.5) step).
+// The composed field of one (frame, direction, offset): w x h output cells, cell (i, j) anchored at pixel-index position
+// clamp((i + 0.5) * step - 0.5, 0, srcW - 1), clamp((j + 0.5) * step - 0.5, 0, srcH - 1).
 struct Plane
 {
     uint64_t seq = 0;
@@ -154,24 +175,75 @@ struct Plane
     // True when a step of the chain had no REVERSE pair (the newest queued frame has none yet): the trust is the pair trust x kNoReverseTrust and the
     // uncertainty carries 2 x consistencyPx instead of the measured landing error. Such a plane is returned but never cached (recomputed once the pair exists).
     bool degraded = false;
+    // Product invalidation epoch when this plane was produced (used to reject stale prev hints after Invalidate()).
+    uint64_t epoch = 0;
 
     size_t Bytes() const { return (dx.size() + dy.size() + trust.size() + unc.size()) * sizeof(float); }
     // The reference frame of this plane (the frame the displacements point into).
     uint64_t RefSeq() const { return dir == Dir::Back ? seq - k : seq + k; }
 
-    // Bilinear value at source position (x, y) (pixel-centre coordinates; clamped to the grid). A position outside the frame has trust 0.
+    // Bilinear value at source pixel-index position (x, y) (same convention as BilinearTap, Warp, SampleLanded, SampleBicubic;
+    // clamped to the grid). A position outside the frame returns untrusted/zero. Corners with !(trust > 0) (or non-finite
+    // values) are masked out and weights are normalised across trusted corners only so untrusted zero-trust cells never dilute
+    // or corrupt trusted neighbours; when no weighted corner is trusted, dx = dy = trust = 0 (finite unc is still reported).
     Sampled At(double x, double y) const
     {
         Sampled s;
-        if (w <= 0 || h <= 0 || dx.empty())
+        if (w <= 0 || h <= 0 || step <= 0 || srcW <= 0 || srcH <= 0)
+            return s;
+        const size_t n = static_cast<size_t>(w) * static_cast<size_t>(h);
+        if (dx.size() < n || dy.size() < n || trust.size() < n || unc.size() < n)
             return s;
         if (!(x >= 0.0 && y >= 0.0 && x <= srcW && y <= srcH))
             return s;
         const BilinearTap tap(x, y, static_cast<double>(step), w, h);
-        s.dx = tap.Mix(dx);
-        s.dy = tap.Mix(dy);
-        s.trust = tap.Mix(trust);
-        s.unc = tap.Mix(unc);
+        const size_t idx[4] = { tap.i00, tap.i10, tap.i01, tap.i11 };
+        const double fx = static_cast<double>(tap.fx);
+        const double fy = static_cast<double>(tap.fy);
+        const double wgt[4] = {
+            (1.0 - fx) * (1.0 - fy),
+            fx * (1.0 - fy),
+            (1.0 - fx) * fy,
+            fx * fy
+        };
+        double wSum = 0.0;
+        double sumDx = 0.0, sumDy = 0.0, sumTrust = 0.0, sumUnc = 0.0;
+        for (int c = 0; c < 4; ++c) {
+            if (!(wgt[c] > 0.0))
+                continue;
+            const size_t cell = idx[c];
+            const float tk = trust[cell];
+            const float dxk = dx[cell], dyk = dy[cell], unck = unc[cell];
+            if (!std::isfinite(tk) || !(tk > 0.0f) ||
+                !std::isfinite(dxk) || !std::isfinite(dyk) || !std::isfinite(unck))
+                continue;
+            wSum += wgt[c];
+            sumDx += wgt[c] * static_cast<double>(dxk);
+            sumDy += wgt[c] * static_cast<double>(dyk);
+            sumTrust += wgt[c] * static_cast<double>(tk);
+            sumUnc += wgt[c] * static_cast<double>(unck);
+        }
+        if (wSum > 0.0) {
+            const double inv = 1.0 / wSum;
+            s.dx = static_cast<float>(sumDx * inv);
+            s.dy = static_cast<float>(sumDy * inv);
+            s.trust = static_cast<float>(sumTrust * inv);
+            s.unc = static_cast<float>(sumUnc * inv);
+            return s;
+        }
+        // All weighted corners have trust <= 0 (or non-finite): keep dx = dy = trust = 0, while reporting finite unc if present.
+        double uW = 0.0, uSum = 0.0;
+        for (int c = 0; c < 4; ++c) {
+            if (!(wgt[c] > 0.0))
+                continue;
+            const float unck = unc[idx[c]];
+            if (!std::isfinite(unck))
+                continue;
+            uW += wgt[c];
+            uSum += wgt[c] * static_cast<double>(unck);
+        }
+        if (uW > 0.0)
+            s.unc = static_cast<float>(uSum / uW);
         return s;
     }
 
@@ -326,10 +398,10 @@ public:
             uint16_t got = 0, degraded = 0;
             Got why = Got::Ok;
             std::string& dirWhy = d == Dir::Back ? r.backWhyText : r.aheadWhyText;
-            PlanePtr last;   // GF-P4 S9: plane k - 1 of this (t, d), handed to the next step (a degraded plane is not cached)
+            PlanePtr last;   // GF-P4 S9 / GEM-134: plane k - 1 of this (t, d), handed to GetWithPrev so degraded chains stay O(K)
             for (uint16_t k = 1; k <= want; ++k) {
                 PlanePtr p;
-                why = Acquire(t, d, k, p, &dirWhy, last);
+                why = GetWithPrev(t, d, k, p, &dirWhy, last);
                 last = p;
                 if (!dirWhy.empty())
                     r.lastWhy = dirWhy;
@@ -349,8 +421,8 @@ public:
     }
 
     // One plane. k == 0 is not a plane (identity). Beyond the plan: OutOfPlan.
-    // GF-P4 S9: `prev` (optional) = a plane the caller already holds; used ONLY when it is plane k - 1 of the same (t, dir) and step,
-    // so a chain of uncached degraded planes (no reverse pair) costs K computes, not K(K+1)/2. Any other value is ignored (recursion).
+    // GF-P4 S9 / GEM-134: `prev` (optional) = a plane the caller already holds; used ONLY when it is plane k - 1 of the same (t, dir), step,
+    // source size and invalidation epoch, so a chain of uncached degraded planes (no reverse pair) costs K computes, not K(K+1)/2. Any other value is ignored.
     Got Acquire(uint64_t t, Dir dir, uint16_t k, PlanePtr& out, std::string* why = nullptr, PlanePtr prev = PlanePtr())
     {
         out.reset();
@@ -363,7 +435,7 @@ public:
             ++m_stats.outOfPlan;
             return Got::OutOfPlan;
         }
-        return Get(t, dir, k, out, why, prev);
+        return GetWithPrev(t, dir, k, out, why, prev);
     }
 
     // ---- lifetime ----
@@ -479,9 +551,10 @@ private:
         m_stats.bytes = 0;
     }
 
-    Got Get(uint64_t t, Dir dir, uint16_t k, PlanePtr& out, std::string* why, const PlanePtr& prevHint = PlanePtr())
+    Got GetWithPrev(uint64_t t, Dir dir, uint16_t k, PlanePtr& out, std::string* why, const PlanePtr& prevHint = PlanePtr())
     {
-        if (m_w <= 0 || m_h <= 0 || !m_source) {
+        out.reset();
+        if (m_w <= 0 || m_h <= 0 || m_step <= 0 || !m_source) {
             ++m_stats.badGeometry;
             return Got::BadGeometry;
         }
@@ -492,14 +565,20 @@ private:
             out = hit->second;
             return Got::Ok;
         }
-        // Prerequisite: plane k - 1 (recursive publish), or the caller's hint when it IS that plane (GF-P4 S9).
+        const int outW = (m_w + m_step - 1) / m_step;
+        const int outH = (m_h + m_step - 1) / m_step;
+        const size_t outCells = static_cast<size_t>(outW) * static_cast<size_t>(outH);
+        // Prerequisite: plane k - 1 (recursive publish), or the caller's hint when it IS that plane of the current epoch (GF-P4 S9 / GEM-134).
         PlanePtr prev;
         if (k > 1) {
             if (prevHint && prevHint->seq == t && prevHint->dir == dir && prevHint->k == static_cast<uint16_t>(k - 1) && prevHint->step == m_step &&
-                prevHint->srcW == m_w && prevHint->srcH == m_h)
+                prevHint->srcW == m_w && prevHint->srcH == m_h && prevHint->w == outW && prevHint->h == outH &&
+                prevHint->epoch == m_stats.invalidations &&
+                prevHint->dx.size() >= outCells && prevHint->dy.size() >= outCells &&
+                prevHint->trust.size() >= outCells && prevHint->unc.size() >= outCells) {
                 prev = prevHint;
-            else {
-                const Got g = Get(t, dir, static_cast<uint16_t>(k - 1), prev, why);
+            } else {
+                const Got g = GetWithPrev(t, dir, static_cast<uint16_t>(k - 1), prev, why);
                 if (g != Got::Ok)
                     return g;
             }
@@ -521,7 +600,7 @@ private:
             if (why) *why = reason.empty() ? std::string("a pair of the chain is absent") : reason;
             return Got::PairAbsent;
         }
-        const uint64_t bytes = static_cast<uint64_t>((m_w + m_step - 1) / m_step) * static_cast<uint64_t>((m_h + m_step - 1) / m_step) * 4u * sizeof(float);
+        const uint64_t bytes = static_cast<uint64_t>(outCells) * 4u * sizeof(float);
         if (m_cfg.budgetBytes && m_stats.bytes + bytes > m_cfg.budgetBytes) {
             ++m_stats.budgetRefused;
             if (why) *why = "the plane budget is reached";
@@ -534,8 +613,9 @@ private:
         p->step = m_step;
         p->srcW = m_w;
         p->srcH = m_h;
-        p->w = (m_w + m_step - 1) / m_step;
-        p->h = (m_h + m_step - 1) / m_step;
+        p->w = outW;
+        p->h = outH;
+        p->epoch = m_stats.invalidations;
         const bool haveBa = m_source->Adjacent(b, a, ba, nullptr) && ba.Usable();
         ComposeStep(prev.get(), ab, haveBa ? &ba : nullptr, *p);
         p->degraded = !haveBa || (prev && prev->degraded);
@@ -564,27 +644,39 @@ private:
     // u_{n-1} at p + Vb(p) in the neighbour frame's grid. Both accumulate the same terms; the per-pixel chain is the same quantity without a resample.
     void ComposeStep(const Plane* prev, const PairField& ab, const PairField* ba, Plane& out) const
     {
-        const size_t n = static_cast<size_t>(out.w) * out.h;
+        const size_t n = static_cast<size_t>(out.w) * static_cast<size_t>(out.h);
         out.dx.assign(n, 0.0f);
         out.dy.assign(n, 0.0f);
         out.trust.assign(n, 0.0f);
         out.unc.assign(n, 0.0f);
-        const float tol = static_cast<float>(m_cfg.consistencyPx > 0.0 ? m_cfg.consistencyPx : 1.0);
+        const float tol = (std::isfinite(m_cfg.consistencyPx) && m_cfg.consistencyPx > 0.0)
+            ? static_cast<float>(m_cfg.consistencyPx) : 1.0f;
+        const float noRevTrust = std::isfinite(m_cfg.noReverseTrust)
+            ? static_cast<float>((std::min)((std::max)(m_cfg.noReverseTrust, 0.0), 1.0)) : 0.0f;
+        // Cell (i, j) centre in the ONE pixel-index convention is ((i + 0.5) * step - 0.5, (j + 0.5) * step - 0.5),
+        // clamped cleanly inside [0, srcW - 1] x [0, srcH - 1] so partial edge cells never fall outside the frame.
+        const double maxPx = out.srcW > 0 ? static_cast<double>(out.srcW - 1) : 0.0;
+        const double maxPy = out.srcH > 0 ? static_cast<double>(out.srcH - 1) : 0.0;
         for (int j = 0; j < out.h; ++j) {
+            const double py = (std::min)((std::max)((j + 0.5) * out.step - 0.5, 0.0), maxPy);
             for (int i = 0; i < out.w; ++i) {
-                const size_t idx = static_cast<size_t>(j) * out.w + i;
-                const double px = (i + 0.5) * out.step, py = (j + 0.5) * out.step;
+                const size_t idx = static_cast<size_t>(j) * static_cast<size_t>(out.w) + static_cast<size_t>(i);
+                const double px = (std::min)((std::max)((i + 0.5) * out.step - 0.5, 0.0), maxPx);
                 const float pdx = prev ? prev->dx[idx] : 0.0f, pdy = prev ? prev->dy[idx] : 0.0f;
                 const float ptr = prev ? prev->trust[idx] : 1.0f, pun = prev ? prev->unc[idx] : 0.0f;
+                if (!std::isfinite(pdx) || !std::isfinite(pdy) || !std::isfinite(ptr) || !std::isfinite(pun))
+                    continue;
                 out.dx[idx] = pdx;
                 out.dy[idx] = pdy;
                 out.unc[idx] = pun;
-                if (ptr <= 0.0f)
+                if (!(ptr > 0.0f))
                     continue;   // a dead chain stays dead (trust 0), the displacement is carried unchanged
                 const double qx = px + pdx, qy = py + pdy;   // where the chain stands in frame a
                 if (!(qx >= 0.0 && qy >= 0.0 && qx <= out.srcW && qy <= out.srcH))
                     continue;
                 const Sampled v = SampleField(ab, qx, qy);
+                if (!std::isfinite(v.dx) || !std::isfinite(v.dy) || !std::isfinite(v.trust))
+                    continue;   // GEM-125: never leak NaN/Inf displacement or trust into composed planes
                 const double rx = qx + v.dx, ry = qy + v.dy;
                 if (!(rx >= 0.0 && ry >= 0.0 && rx <= out.srcW && ry <= out.srcH))
                     continue;
@@ -592,11 +684,18 @@ private:
                 float e, consistency;
                 if (ba) {
                     const Sampled w = SampleField(*ba, rx, ry);
-                    e = std::sqrt((v.dx + w.dx) * (v.dx + w.dx) + (v.dy + w.dy) * (v.dy + w.dy));
+                    if (!std::isfinite(w.dx) || !std::isfinite(w.dy) || !std::isfinite(w.trust))
+                        continue;
+                    const double ex = static_cast<double>(v.dx) + static_cast<double>(w.dx);
+                    const double ey = static_cast<double>(v.dy) + static_cast<double>(w.dy);
+                    const double ed = std::sqrt(ex * ex + ey * ey);
+                    if (!std::isfinite(ed))
+                        continue;
+                    e = static_cast<float>(ed);
                     consistency = OpticalFlowTrust::FallOff(tol, 2.0f * tol, e);
                 } else {
                     e = 2.0f * tol;
-                    consistency = static_cast<float>(m_cfg.noReverseTrust);
+                    consistency = noRevTrust;
                 }
                 out.dx[idx] = pdx + v.dx;
                 out.dy[idx] = pdy + v.dy;
