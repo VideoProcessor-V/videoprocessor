@@ -228,7 +228,7 @@ namespace ScalerPass
 		const pl_fmt srcFmt = src.tex->params.format;
 		pl_fmt fmt = nullptr;
 		std::string newNote;
-		const bool preferStorable = polar && gpu->limits.max_shmem_size > 0;
+		const bool preferStorable = polar && gpu->glsl.compute && gpu->glsl.max_shmem_size > 0;
 		auto findFloatWithCaps = [&](int comps, unsigned caps, bool& fellBackTo16) -> pl_fmt {
 			const int bits = st.precision == Precision::F32 ? 32 : 16;
 			pl_fmt f = pl_find_fmt(gpu, PL_FMT_FLOAT, comps, bits, bits, static_cast<enum pl_fmt_caps>(caps));
