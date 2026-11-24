@@ -67,6 +67,8 @@ constexpr double kFadeResidualReduction = 0.5;                // 50% reduction b
 constexpr double kFadeSpatialConsensus = 0.75;                // >= 3/4 of changing lit cells move in the fade direction
 constexpr double kFadeSpatialCoverage = 0.5;                  // >= 1/2 of lit cells participate in the fade direction & above-LSB StepStillMoving majority
 constexpr double kFadeCellStepEps = 0.5 * double(kFadeMinSpread); // 0.5 8-bit code = half-LSB quantization floor
+// ITU-R BT.709-6 / Rec.601 studio-swing nominal peak white (8-bit code 235 on kGridScale = 1/256).
+constexpr double kStudioPeakWhiteCodes = 235.0;
 
 // ---- the record-sequence cut law "T2" (U7-accuracy, v2) constants & grid helpers -----------------------------------------
 constexpr int kGridW = int(SourceStats::kGridCols);

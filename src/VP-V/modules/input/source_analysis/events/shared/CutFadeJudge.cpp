@@ -622,9 +622,11 @@ bool HighlightScalingConsistent(uint32_t refP99P4, uint32_t curP99P4, double gai
     if (!(rp > black + double(kFadeMinSpread) && cp > black + double(kFadeMinSpread)))
         return true;
     // Clipped-white linear fade-out censorship: when a verified fade-out has dropped the unclipped
-    // scene by >= 1/kFadeMaxDiv (25%) while highlights remain non-rising within 1-code quantization jitter
-    // (cp <= rp + kFadeMinSpread), p99 may be censored at Rec.709 peak white until the highlight unclips.
-    if (dir < 0 && cp <= rp + double(kFadeMinSpread) && (1.0 - gain) >= 1.0 / double(kFadeMaxDiv))
+    // scene by >= 1/kFadeMaxDiv (25%) while highlights sit at ITU-R BT.709-6 studio peak white (>= 235 - 1 code)
+    // and remain non-rising within 1-code quantization jitter (cp <= rp + kFadeMinSpread), p99 may be censored
+    // at studio peak white until the highlight unclips.
+    if (dir < 0 && rp >= kStudioPeakWhiteCodes - double(kFadeMinSpread) &&
+        cp <= rp + double(kFadeMinSpread) && (1.0 - gain) >= 1.0 / double(kFadeMaxDiv))
         return true;
     const double aP99 = (cp - black) / (rp - black);
     // For brightening (dir > 0), enforce exact multiplicative reciprocal [0.5, 2.0] consistency around (gain - 1)
