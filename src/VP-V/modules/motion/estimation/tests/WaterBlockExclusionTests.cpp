@@ -701,5 +701,83 @@ namespace VideoProcessorTest
 			Assert::AreEqual(4.0, qStream4.record->smoothedParams.h[2], 1e-6,
 				L"in-stream spiked frame 4 is cleanly substituted to (4.0, 0.0)");
 		}
+
+		TEST_METHOD(CameraSmootherLooSpikesCountsOnlyWhenSubstitutedNotOnShortWindow)
+		{
+			// Lead = 2: push frames 1, 2, 3 (spike +6.0 px), 4 (so immediate neighbours 2 and 4 exist for LOO
+			// detection, while frame 5 = seq + 2 has NOT arrived yet -> causalWindowShort == true, smoothed == false).
+			CameraLink::CameraSmoother smoother(2);
+			CameraLink::CameraSmoother lead1Smoother(1);
+			Assert::AreEqual(2, smoother.EffectiveLead(), L"effective lead is 2");
+			Assert::AreEqual(1, lead1Smoother.EffectiveLead(), L"control smoother effective lead is 1");
+
+			for (uint64_t seq = 1; seq <= 4; ++seq)
+			{
+				const double tx = (seq == 3) ? 10.0 : 4.0;
+				auto rec = MakePanMotion(seq, tx, 0.0);
+				smoother.Push(rec);
+				lead1Smoother.Push(rec);
+			}
+
+			// 1. Query seq = 3 BEFORE frame 5 arrives: LOO detects the +6.0 px spike, but because the lead = 2
+			// window is still short (causalWindowShort == true, smoothed == false), substitution has NOT occurred
+			// and Counters().looSpikes MUST remain 0 (not incremented prematurely).
+			CameraLink::SmoothQueryResult qShort;
+			Assert::IsTrue(smoother.Query(3, qShort), L"short-window Query(3) succeeds with causal fallback");
+			Assert::IsTrue(qShort.haveLoo, L"short-window Query(3) computes LOO from neighbours 2 and 4");
+			Assert::IsTrue(qShort.looSpikeFlagged, L"short-window Query(3) flags the +6.0 px spike");
+			Assert::AreEqual(6.0, qShort.looInnovationPx, 1e-6, L"short-window Query(3) reports exact 6.0 px LOO innovation");
+			Assert::IsFalse(qShort.smoothed, L"short-window Query(3) is not smoothed yet");
+			Assert::IsTrue(qShort.causalWindowShort, L"short-window Query(3) reports causalWindowShort == true");
+			Assert::IsNotNull(qShort.record.get(), L"short-window Query(3) returns causal record");
+			Assert::IsFalse(qShort.record->smoothed, L"short-window causal record is not marked smoothed");
+			Assert::AreEqual(10.0, CameraLink::ActiveParams(*qShort.record).h[2], 1e-6,
+				L"short-window causal record preserves raw un-substituted spike");
+			Assert::AreEqual<uint64_t>(0u, smoother.Counters().looSpikes.load(),
+				L"looSpikes counter must stay 0 while causalWindowShort prevents substitution");
+			Assert::AreEqual<uint64_t>(1u, smoother.Counters().causalWindowShort.load(),
+				L"causalWindowShort counter incremented visibly");
+			Assert::AreEqual<uint64_t>(0u, smoother.Counters().smoothed.load(),
+				L"smoothed counter remains 0 while window is short");
+
+			// Same-input control (exact same 4 frames 1..4 with lead = 1, where window [2, 3, 4] IS complete):
+			// proves the exact same input immediately triggers substitution and increments looSpikes to 1 when not short.
+			CameraLink::SmoothQueryResult qLead1;
+			Assert::IsTrue(lead1Smoother.Query(3, qLead1), L"lead=1 Query(3) succeeds on frames 1..4");
+			Assert::IsTrue(qLead1.smoothed && !qLead1.causalWindowShort,
+				L"lead=1 window [2, 3, 4] is complete on frames 1..4");
+			Assert::IsTrue(qLead1.haveLoo && qLead1.looSpikeFlagged,
+				L"lead=1 flags the exact same +6.0 px spike");
+			Assert::IsNotNull(qLead1.record.get(), L"lead=1 returns substituted record");
+			Assert::AreEqual(4.0, qLead1.record->smoothedParams.h[2], 1e-6,
+				L"lead=1 substitutes the spike to 4.0 px immediately");
+			Assert::AreEqual<uint64_t>(1u, lead1Smoother.Counters().looSpikes.load(),
+				L"lead=1 increments looSpikes strictly once upon substitution");
+
+			// 2. Push frame 5 to complete the lead = 2 window and re-query seq = 3:
+			// substitution now occurs cleanly and Counters().looSpikes increments strictly once (1, NOT 2).
+			smoother.Push(MakePanMotion(5, 4.0, 0.0));
+			CameraLink::SmoothQueryResult qFull;
+			Assert::IsTrue(smoother.Query(3, qFull), L"full-window Query(3) succeeds after frame 5 arrives");
+			Assert::IsTrue(qFull.smoothed, L"full-window Query(3) is smoothed");
+			Assert::IsFalse(qFull.causalWindowShort, L"full-window Query(3) clears causalWindowShort");
+			Assert::IsTrue(qFull.haveLoo, L"full-window Query(3) has LOO");
+			Assert::IsTrue(qFull.looSpikeFlagged, L"full-window Query(3) flags the spike");
+			Assert::AreEqual(6.0, qFull.looInnovationPx, 1e-6, L"full-window Query(3) reports 6.0 px LOO innovation");
+			Assert::IsNotNull(qFull.record.get(), L"full-window Query(3) returns substituted record");
+			Assert::IsTrue(qFull.record->smoothed, L"full-window record is marked smoothed");
+			Assert::AreEqual(4.0, qFull.record->smoothedParams.h[2], 1e-6,
+				L"full-window Query(3) substitutes spike to 4.0 px");
+			Assert::AreEqual(0.0, qFull.record->smoothedParams.h[5], 1e-6,
+				L"full-window Query(3) keeps pan Y at 0.0 px");
+			Assert::AreEqual(4.0, CameraLink::ActiveParams(*qFull.record).h[2], 1e-6,
+				L"ActiveParams reflects substituted 4.0 px motion");
+			Assert::AreEqual<uint64_t>(1u, smoother.Counters().looSpikes.load(),
+				L"looSpikes counted strictly once upon substitution (NOT double-counted as 2)");
+			Assert::AreEqual<uint64_t>(1u, smoother.Counters().smoothed.load(),
+				L"smoothed counter incremented once on full-window query");
+			Assert::AreEqual<uint64_t>(1u, smoother.Counters().causalWindowShort.load(),
+				L"causalWindowShort counter remains 1 from the earlier short-window query");
+		}
 	};
 }
