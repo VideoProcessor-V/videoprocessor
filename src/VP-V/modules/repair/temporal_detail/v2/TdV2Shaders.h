@@ -1602,13 +1602,20 @@ int td_find_independent_a1_partner(int K, int k)
     return (primary >= 0) ? primary : secondary;
 }
 
-float td_est_c_a1(float crossPN, float cPP, float cNN, float retGVar, float bandShare, float subpixelBias)
+float td_psd_scale(int b)
+{
+    if (b == 0) return u_psd_low;
+    if (b == 1) return u_psd_mid;
+    return u_psd_fine;
+}
+
+float td_est_c_a1(float crossPN, float cPP, float cNN, float retGVar, float bandShare, float psdScale, float subpixelBias)
 {
     if (td_is_bad(crossPN) || td_is_bad(cPP) || td_is_bad(cNN) || td_is_bad(retGVar) ||
-        td_is_bad(bandShare) || td_is_bad(subpixelBias))
+        td_is_bad(bandShare) || td_is_bad(psdScale) || td_is_bad(subpixelBias))
         return 0.0;
     float upper = max(0.0, min(cPP, cNN));
-    float gTerm = max(0.0, retGVar) * max(0.0, bandShare);
+    float gTerm = max(0.0, retGVar) * max(0.0, bandShare) * max(0.0, psdScale);
     float raw = crossPN - gTerm - max(0.0, subpixelBias);
     if (raw <= 0.0) return 0.0;
     return min(raw, upper);
@@ -1866,6 +1873,7 @@ for (int b = 0; b < 3; ++b)
         diagOut.z = (K > 2) ? (hasOwnStats ? min(ownDiag.z, C[2][2]) : C[2][2]) : 0.0;
 
         float bGain = td_band_gain(b);
+        float psdScale = td_psd_scale(b);
         float curHVar = spatialDetailRms * spatialDetailRms;
         bool useSubpixelH = (u_enable_subpixel_h_debias > 0.5) && (b == 2);
         vec2 refMv[3];
@@ -1893,9 +1901,9 @@ for (int b = 0; b < 3; ++b)
             if (partner >= 0)
             {
                 float subBias = useSubpixelH
-                    ? td_subpixel_h_atten_bias(refMv[k], refMv[partner], curHVar, cellRetGVar * bGain)
+                    ? td_subpixel_h_atten_bias(refMv[k], refMv[partner], curHVar, cellRetGVar * bGain * psdScale)
                     : 0.0;
-                cA1 = td_est_c_a1(C[k][partner], C[k][k], C[partner][partner], cellRetGVar, bGain, subBias);
+                cA1 = td_est_c_a1(C[k][partner], C[k][k], C[partner][partner], cellRetGVar, bGain, psdScale, subBias);
             }
             else if (estMode != 1)
             {
@@ -1908,9 +1916,9 @@ for (int b = 0; b < 3; ++b)
                 {
                     if (j == k || td_is_exact_copy(j)) continue;
                     float capBias = useSubpixelH
-                        ? td_subpixel_h_atten_bias(refMv[k], refMv[j], curHVar, cellRetGVar * bGain)
+                        ? td_subpixel_h_atten_bias(refMv[k], refMv[j], curHVar, cellRetGVar * bGain * psdScale)
                         : 0.0;
-                    float cCap = td_est_c_a1(C[k][j], C[k][k], C[j][j], cellRetGVar, bGain, capBias);
+                    float cCap = td_est_c_a1(C[k][j], C[k][k], C[j][j], cellRetGVar, bGain, psdScale, capBias);
                     cVec[k] = min(cVec[k], cCap);
                 }
             }

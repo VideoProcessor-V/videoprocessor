@@ -665,6 +665,7 @@ namespace TdV2
 		const std::vector<uint8_t>* explicitDefocusedCells = nullptr; // Upstream kFocusMap (id 32) matched-focus optical bokeh mask (Plan s1.4 L140)
 		const std::vector<uint8_t>* faceMask = nullptr; // Pass-1 per-cell (cellsW * cellsH) face/non-rigid mask (non-zero => delta == 0)
 		std::vector<double> cellStepScale;    // Optional per-cell AQ/PQ step scale (cellsW * cellsH; empty => 1.0 neutral everywhere)
+		PsdShape psdShape;                    // Optional P10g grain PSD shape multipliers (default 1.0 = white-noise identity)
 	};
 
 	struct FrameProcessResult
@@ -897,11 +898,14 @@ namespace TdV2
 				return res;
 			}
 
-			// Upfront sourceBits validation (Rule 4: invalid bit depth closes cleanly and visibly).
-			if (!(PeakCodeForBits(cfg_.sourceBits) > 0.0))
+			// Upfront sourceBits and psdShape validation (Rule 4: invalid inputs close cleanly and visibly).
+			if (!(PeakCodeForBits(cfg_.sourceBits) > 0.0) || !in.psdShape.IsValid())
 			{
 				if (standIns != nullptr)
-					standIns->Engage(StandInKind::NonFiniteClosure, "TdV2ReferenceEngine invalid sourceBits");
+					standIns->Engage(StandInKind::NonFiniteClosure,
+						!(PeakCodeForBits(cfg_.sourceBits) > 0.0)
+							? "TdV2ReferenceEngine invalid sourceBits"
+							: "TdV2ReferenceEngine invalid/non-finite psdShape");
 				ResetCarry();
 				res.carryReset = true;
 				res.nonFiniteCells = numCells;
@@ -1526,7 +1530,8 @@ namespace TdV2
 							const double cA2 = (std::min)(EstimateC_A2(a2Stats, refs[k].isExactCopy) * cellStepScaleSq * a2BandPeakSq[b], C[k][k]);
 
 							// A1 grain-corrected Three-Cornered Hat using an independent peak partner (NEVER Carry <-> Peak),
-							// with optional SOTA #2 sub-pixel bicubic H-band attenuation debiasing.
+							// with P10g PsdShape psdScale (SOTA #6) and optional sub-pixel bicubic H-band debias (SOTA #2).
+							const double psdScale = in.psdShape.ForBand(b);
 							double cA1 = cA2;
 							const int partner = findIndependentA1Partner(k);
 							if (partner >= 0)
@@ -1538,10 +1543,10 @@ namespace TdV2
 									subpixelBias = ComputeSubpixelHAttenuationBias(
 										refs[k].motionVx[cIdx], refs[k].motionVy[cIdx],
 										refs[partner].motionVx[cIdx], refs[partner].motionVy[cIdx],
-										curHVar, cellRetainedGrainVar * bandTransfer[2]);
+										curHVar, cellRetainedGrainVar * bandTransfer[2] * psdScale);
 								}
 								cA1 = EstimateC_A1(C[k][partner], C[k][k], C[partner][partner],
-								                   cellRetainedGrainVar, bandTransfer[b], 1.0, 1.0, subpixelBias);
+								                   cellRetainedGrainVar, bandTransfer[b], 1.0, psdScale, subpixelBias);
 							}
 							else if (cfg_.estimator != VarianceEstimator::A2_RoundingCells)
 							{
@@ -1561,10 +1566,10 @@ namespace TdV2
 										capBias = ComputeSubpixelHAttenuationBias(
 											refs[k].motionVx[cIdx], refs[k].motionVy[cIdx],
 											refs[j].motionVx[cIdx], refs[j].motionVy[cIdx],
-											curHVar, cellRetainedGrainVar * bandTransfer[2]);
+											curHVar, cellRetainedGrainVar * bandTransfer[2] * psdScale);
 									}
 									const double cap = EstimateC_A1(C[k][j], C[k][k], C[j][j],
-									                                cellRetainedGrainVar, bandTransfer[b], 1.0, 1.0, capBias);
+									                                cellRetainedGrainVar, bandTransfer[b], 1.0, psdScale, capBias);
 									if (cap < cA1)
 										cA1 = cap;
 								}

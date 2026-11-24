@@ -143,6 +143,7 @@ namespace Gpu
 		bool transformIdentified8x8 = false;
 
 		bool isCutOrSpanInvalid = false;
+		PsdShape psdShape;                       // Optional P10g grain PSD shape multipliers (default 1.0 white-noise identity)
 	};
 
 	struct GpuFrameOutput
@@ -908,12 +909,16 @@ namespace Gpu
 			if (gpu == nullptr || dispatch == nullptr)
 				return failVisible("TdV2GpuEngine::ProcessFrameGpu null pl_gpu or pl_dispatch", StandInKind::GpuDispatchFailed);
 
-			if (!(PeakCodeForBits(cfg_.sourceBits) > 0.0))
+			if (!(PeakCodeForBits(cfg_.sourceBits) > 0.0) || !in.psdShape.IsValid())
 			{
 				ResetCarry(gpu);
 				out.carryReset = true;
 				out.nonFiniteCells = numCells;
-				return failVisible("TdV2GpuEngine::ProcessFrameGpu invalid sourceBits", StandInKind::NonFiniteClosure);
+				return failVisible(
+					!(PeakCodeForBits(cfg_.sourceBits) > 0.0)
+						? "TdV2GpuEngine::ProcessFrameGpu invalid sourceBits"
+						: "TdV2GpuEngine::ProcessFrameGpu invalid/non-finite psdShape",
+					StandInKind::NonFiniteClosure);
 			}
 
 			if (cfg_.enableLongAnchor && standIns != nullptr)
@@ -1308,6 +1313,7 @@ namespace Gpu
 			p.explicitDefocusedCells = in.explicitDefocusedCells;
 			p.faceMask = in.faceMask;
 			p.a2 = a2;
+			p.psdShape = in.psdShape;
 			p.transformIdentified8x8 = in.transformIdentified8x8;
 			p.outYTex = out.outputYTex;
 			p.outCleanTex = out.outputCleanTex;
@@ -1406,12 +1412,16 @@ namespace Gpu
 			if (gpu == nullptr || dispatch == nullptr)
 				return failVisible("TdV2GpuEngine null pl_gpu or pl_dispatch", StandInKind::GpuDispatchFailed);
 
-			if (!(PeakCodeForBits(cfg_.sourceBits) > 0.0))
+			if (!(PeakCodeForBits(cfg_.sourceBits) > 0.0) || !in.psdShape.IsValid())
 			{
 				ResetCarry(gpu);
 				res.carryReset = true;
 				res.nonFiniteCells = numCells;
-				return failVisible("TdV2GpuEngine invalid sourceBits", StandInKind::NonFiniteClosure);
+				return failVisible(
+					!(PeakCodeForBits(cfg_.sourceBits) > 0.0)
+						? "TdV2GpuEngine invalid sourceBits"
+						: "TdV2GpuEngine invalid/non-finite psdShape",
+					StandInKind::NonFiniteClosure);
 			}
 
 			if (cfg_.enableLongAnchor && standIns != nullptr)
@@ -1728,6 +1738,7 @@ namespace Gpu
 			p.faceMask = effFaceMask;
 			p.codecModelPbTex = codecModelPbTex;
 			p.a2 = a2;
+			p.psdShape = in.psdShape;
 			p.transformIdentified8x8 = in.transformIdentified8x8;
 			p.outYTex = outYTex_;
 			p.outCleanTex = outCleanTex_;
@@ -2180,6 +2191,7 @@ namespace Gpu
 			const std::vector<uint8_t>* explicitDefocusedCells = nullptr;
 			const std::vector<uint8_t>* faceMask = nullptr;
 			Detail::ResolvedA2StepPrior a2{};
+			PsdShape psdShape{};
 			bool transformIdentified8x8 = false;
 			pl_tex outYTex = nullptr;
 			pl_tex outCleanTex = nullptr;
@@ -2672,6 +2684,9 @@ namespace Gpu
 			const float uEnableSubpixelHDebias = cfg_.enableSubpixelHAttenuationDebias ? 1.0f : 0.0f;
 			const float uEnableEdgeAwareUpsample = cfg_.enableEdgeAwareWeightUpsample ? 1.0f : 0.0f;
 			const float uEnableNbrSoftClamp = cfg_.enableNeighborhoodSoftClamp ? 1.0f : 0.0f;
+			const float uPsdLow = static_cast<float>(p.psdShape.bandShareLow);
+			const float uPsdMid = static_cast<float>(p.psdShape.bandShareMid);
+			const float uPsdFine = static_cast<float>(p.psdShape.bandShareFine);
 			const float uStepNoiseVar = static_cast<float>(stepNoiseVar);
 			const float uStructureFloor = static_cast<float>(structureFloor);
 			const float uA2Valid = a2Stats.valid ? 1.0f : 0.0f;
@@ -3015,7 +3030,7 @@ namespace Gpu
 					VpvGpu::Storage("td_maps", dstTdMaps),
 					VpvGpu::Storage("cell_diag_flags", dstDiagFlags)
 				};
-				pl_shader_var v2b[20] = {
+				pl_shader_var v2b[23] = {
 					VpvGpu::Var("u_k", &uK),
 					VpvGpu::Var("u_pool_r", &uPoolR),
 					VpvGpu::Var("u_estimator", &uEstimator),
@@ -3035,9 +3050,12 @@ namespace Gpu
 					VpvGpu::Var("u_has_clean_split", &uHasCleanSplit),
 					VpvGpu::Var("u_bokeh_mode", &uBokehMode),
 					VpvGpu::Var("u_cell_prior_has_step_scale", &uCellPriorHasStepScale),
-					VpvGpu::Var("u_enable_subpixel_h_debias", &uEnableSubpixelHDebias)
+					VpvGpu::Var("u_enable_subpixel_h_debias", &uEnableSubpixelHDebias),
+					VpvGpu::Var("u_psd_low", &uPsdLow),
+					VpvGpu::Var("u_psd_mid", &uPsdMid),
+					VpvGpu::Var("u_psd_fine", &uPsdFine)
 				};
-				if (!runPass("td_v2_p2b_merge_solve", p2bHdr, Shaders::kPass2MergeAndSolve, d2b, 9, v2b, 20, cellGx8, cellGy8, 8, 8))
+				if (!runPass("td_v2_p2b_merge_solve", p2bHdr, Shaders::kPass2MergeAndSolve, d2b, 9, v2b, 23, cellGx8, cellGy8, 8, 8))
 				{
 					resetCarryIfActive();
 					return failCore("td_v2_p2b_merge_solve dispatch failed", StandInKind::GpuDispatchFailed);

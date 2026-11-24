@@ -617,6 +617,32 @@ namespace TdV2
 		return (std::isfinite(bias) && bias > 0.0) ? bias : 0.0;
 	}
 
+	// ---- SOTA #6: P10g Spectral Grain PSD Shape Multipliers (1.0 = exact white-noise identity) ----
+	// Scales EstimateC_A1's band grain subtraction N_g,b = retainedGrainVar * bandTransfer[b] * psdScale[b]
+	// so EstimateC_A1 remains unbiased under clumpy AR(2) / AV1-AFGS1 spectrally coloured film grain.
+	struct PsdShape
+	{
+		double bandShareLow = 1.0;   // Low band PSD multiplier relative to white noise (default 1.0 neutral)
+		double bandShareMid = 1.0;   // Mid band PSD multiplier relative to white noise (default 1.0 neutral)
+		double bandShareFine = 1.0;  // Fine band PSD multiplier relative to white noise (default 1.0 neutral)
+
+		static PsdShape White() { return PsdShape{ 1.0, 1.0, 1.0 }; }
+
+		double ForBand(int b) const
+		{
+			if (b == 0) return bandShareLow;
+			if (b == 1) return bandShareMid;
+			return bandShareFine;
+		}
+
+		bool IsValid() const
+		{
+			return std::isfinite(bandShareLow) && bandShareLow >= 0.0 &&
+			       std::isfinite(bandShareMid) && bandShareMid >= 0.0 &&
+			       std::isfinite(bandShareFine) && bandShareFine >= 0.0;
+		}
+	};
+
 	// ---- Blind Estimator A1: Grain-Corrected Three-Cornered Hat (refs/111 s3.2 + SOTA #2 H-band debias) ----
 	// c_A1,j = clip(E_b[d_p d_n] - kappa_g * N_g,j - subpixelAttenBias, 0, min(C_pp, C_nn))
 	// where N_g,j = retainedGrainVar * bandShare * psdScale (retainedGrainVar = mean(f'^2) * N_b from P10g).

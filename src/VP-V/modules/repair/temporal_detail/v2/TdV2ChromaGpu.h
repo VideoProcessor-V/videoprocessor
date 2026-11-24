@@ -997,6 +997,7 @@ for (int chIdx = 0; chIdx < 2; ++chIdx)
             diagOut.z = (K > 2) ? (hasOwnStats ? min(ownDiag.z, C[2][2]) : C[2][2]) : 0.0;
 
             float bGain = td_band_gain(b);
+            float psdScale = td_psd_scale(b);
             float cVec[3];
             cVec[0] = 0.0; cVec[1] = 0.0; cVec[2] = 0.0;
             for (int k = 0; k < K; ++k)
@@ -1010,7 +1011,7 @@ for (int chIdx = 0; chIdx < 2; ++chIdx)
                 int partner = td_find_independent_a1_partner(K, k);
                 if (partner >= 0)
                 {
-                    cA1 = td_est_c_a1(C[k][partner], C[k][k], C[partner][partner], chRetGVar, bGain, 0.0);
+                    cA1 = td_est_c_a1(C[k][partner], C[k][k], C[partner][partner], chRetGVar, bGain, psdScale, 0.0);
                 }
                 else if (estMode != 1)
                 {
@@ -1022,7 +1023,7 @@ for (int chIdx = 0; chIdx < 2; ++chIdx)
                     for (int j = 0; j < K; ++j)
                     {
                         if (j == k || td_is_exact_copy(j)) continue;
-                        float cCap = td_est_c_a1(C[k][j], C[k][k], C[j][j], chRetGVar, bGain, 0.0);
+                        float cCap = td_est_c_a1(C[k][j], C[k][k], C[j][j], chRetGVar, bGain, psdScale, 0.0);
                         cVec[k] = min(cVec[k], cCap);
                     }
                 }
@@ -1681,6 +1682,7 @@ else
 		double deadZonePhi = kDeadZonePhiInter;
 		double zeroCoeffFraction = 0.0;
 		bool isCutOrSpanInvalid = false;
+		PsdShape psdShape;                       // Optional P10g grain PSD shape multipliers (default 1.0 white-noise identity)
 	};
 
 	struct ChromaGpuOutput
@@ -1949,8 +1951,12 @@ else
 				return failVisible("TdV2ChromaGpuEngine::ProcessChromaGpu null pl_gpu or pl_dispatch", StandInKind::GpuDispatchFailed);
 			if (in.lumaW <= 0 || in.lumaH <= 0 || in.receivedTex == nullptr || out.outCodedDeltaTex == nullptr)
 				return failVisible("TdV2ChromaGpuEngine::ProcessChromaGpu invalid dimensions or null required texture", StandInKind::GpuDispatchFailed);
-			if (!(PeakCodeForBits(cfg_.sourceBits) > 0.0))
-				return failVisible("TdV2ChromaGpuEngine::ProcessChromaGpu invalid sourceBits", StandInKind::NonFiniteClosure);
+			if (!(PeakCodeForBits(cfg_.sourceBits) > 0.0) || !in.psdShape.IsValid())
+				return failVisible(
+					!(PeakCodeForBits(cfg_.sourceBits) > 0.0)
+						? "TdV2ChromaGpuEngine::ProcessChromaGpu invalid sourceBits"
+						: "TdV2ChromaGpuEngine::ProcessChromaGpu invalid/non-finite psdShape",
+					StandInKind::NonFiniteClosure);
 			if (!std::isfinite(in.siting.shiftX) || !std::isfinite(in.siting.shiftY))
 				return failVisible("TdV2ChromaGpuEngine::ProcessChromaGpu non-finite siting", StandInKind::NonFiniteClosure);
 
@@ -2373,6 +2379,9 @@ imageStore(out_coded_delta, p, vec4(0.0));
 			const float uKg = static_cast<float>(in.matrix.kg);
 			const float uKb = static_cast<float>(in.matrix.kb);
 			const float uMidCode = static_cast<float>(std::ldexp(1.0, cfg_.sourceBits - 1));
+			const float uPsdLow = static_cast<float>(in.psdShape.bandShareLow);
+			const float uPsdMid = static_cast<float>(in.psdShape.bandShareMid);
+			const float uPsdFine = static_cast<float>(in.psdShape.bandShareFine);
 
 			std::string chromaGeom = Detail::StaticGeomDefines(in.lumaW, in.lumaH, cw, ch, cellPx);
 			chromaGeom += VpvGpu::DefineInt("TD_CH_W", cW);
@@ -2625,7 +2634,7 @@ imageStore(out_coded_delta, p, vec4(0.0));
 					VpvGpu::Storage("cell_diag_cr", sc.diagCr),
 					VpvGpu::Storage("cell_diag_flags", dstDiagFlags)
 				};
-				pl_shader_var v2b[20] = {
+				pl_shader_var v2b[23] = {
 					VpvGpu::Var("u_k", &uK), VpvGpu::Var("u_pool_r", &uPoolR), VpvGpu::Var("u_estimator", &uEstimator),
 					VpvGpu::Var("u_ref_role_0", &uRefRole0), VpvGpu::Var("u_ref_role_1", &uRefRole1), VpvGpu::Var("u_ref_role_2", &uRefRole2),
 					VpvGpu::Var("u_ref_motion_slot_0", &uRefSlot0), VpvGpu::Var("u_ref_motion_slot_1", &uRefSlot1), VpvGpu::Var("u_ref_motion_slot_2", &uRefSlot2),
@@ -2634,9 +2643,12 @@ imageStore(out_coded_delta, p, vec4(0.0));
 					VpvGpu::Var("u_has_clean_split", &uHasSplit), VpvGpu::Var("u_bokeh_mode", &uBokehMode),
 					VpvGpu::Var("u_has_face_mask", &uHasFaceMask),
 					VpvGpu::Var("u_cell_prior_has_step_scale", &uPriorHasStep),
-					VpvGpu::Var("u_cell_prior_has_cr_grain", &uPriorHasCrGrain)
+					VpvGpu::Var("u_cell_prior_has_cr_grain", &uPriorHasCrGrain),
+					VpvGpu::Var("u_psd_low", &uPsdLow),
+					VpvGpu::Var("u_psd_mid", &uPsdMid),
+					VpvGpu::Var("u_psd_fine", &uPsdFine)
 				};
-				if (!runPass("td_v2_c2b_merge_solve", c2bHdr, ChromaShaders::kPassChromaMergeSolve, d2b, 11, v2b, 20,
+				if (!runPass("td_v2_c2b_merge_solve", c2bHdr, ChromaShaders::kPassChromaMergeSolve, d2b, 11, v2b, 23,
 				             Detail::GroupsFor(cw, 8), Detail::GroupsFor(ch, 8), 8, 8))
 				{
 					return failVisible("td_v2_c2b_merge_solve dispatch failed", StandInKind::GpuDispatchFailed);
@@ -2940,6 +2952,7 @@ float td_huber_taper(float diffSq, float diagC)
 			gIn.deadZonePhi = in.deadZonePhi;
 			gIn.zeroCoeffFraction = in.zeroCoeffFraction;
 			gIn.isCutOrSpanInvalid = in.isCutOrSpanInvalid;
+			gIn.psdShape = in.psdShape;
 
 			if (isRgb)
 			{

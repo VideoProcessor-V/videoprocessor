@@ -1778,6 +1778,9 @@ namespace TdV2
 		// - explicitDefocusedCells != 0: hard-vetoes coded chroma M & H always; L band allowed ONLY under BokehMode::LowBandCellOnly.
 		const std::vector<uint8_t>* explicitFocusChangeCells = nullptr;
 		const std::vector<uint8_t>* explicitDefocusedCells = nullptr;
+
+		// Optional P10g spectral grain PSD shape multipliers (SOTA #6; default 1.0 = white-noise identity).
+		PsdShape psdShape;
 	};
 
 	struct ChromaProcessResult
@@ -1927,12 +1930,15 @@ namespace TdV2
 				return res;
 			}
 
-			// Upfront sourceBits validation (Rule 4).
+			// Upfront sourceBits and psdShape validation (Rule 4).
 			const double peakCode = PeakCodeForBits(cfg_.sourceBits);
-			if (!(peakCode > 0.0))
+			if (!(peakCode > 0.0) || !in.psdShape.IsValid())
 			{
 				if (standIns != nullptr)
-					standIns->Engage(StandInKind::NonFiniteClosure, "TdV2ChromaEngine invalid sourceBits");
+					standIns->Engage(StandInKind::NonFiniteClosure,
+						!(peakCode > 0.0)
+							? "TdV2ChromaEngine invalid sourceBits"
+							: "TdV2ChromaEngine invalid/non-finite psdShape");
 				ResetAnchor();
 				res.anchorReset = true;
 				res.nonFiniteCells = numCells;
@@ -2492,7 +2498,8 @@ namespace TdV2
 								if (K >= 2)
 								{
 									const int partner = (k == 0) ? 1 : 0;
-									cA1 = EstimateC_A1(C[k][partner], C[k][k], C[partner][partner], cellGrainVar, coarseGain);
+									cA1 = EstimateC_A1(C[k][partner], C[k][k], C[partner][partner],
+									                   cellGrainVar, coarseGain, 1.0, in.psdShape.bandShareLow);
 								}
 								else if (cfg_.estimator != VarianceEstimator::A2_RoundingCells)
 								{
@@ -3450,10 +3457,11 @@ namespace TdV2
 										partner = cand;
 								}
 
+								const double psdScale = in.psdShape.ForBand(b);
 								if (partner >= 0)
 								{
 									cA1 = EstimateC_A1(C[ai][partner], C[ai][ai], C[partner][partner],
-									                   cellGrainVar, bandTransfer[b]);
+									                   cellGrainVar, bandTransfer[b], 1.0, psdScale);
 								}
 								else if (cfg_.estimator != VarianceEstimator::A2_RoundingCells)
 								{
@@ -3468,16 +3476,16 @@ namespace TdV2
 											if (j == ai || refs[static_cast<size_t>(activeIdx[j])].isExactCopy)
 												continue;
 											const double cap = EstimateC_A1(C[ai][j], C[ai][ai], C[j][j],
-											                                cellGrainVar, bandTransfer[b]);
+											                                cellGrainVar, bandTransfer[b], 1.0, psdScale);
 											if (cap < cA1)
 												cA1 = cap;
 										}
 									}
 									// When unsplit grain is present in a single-ref cell, cap c by excess difference
-									// variance above independent two-frame grain variance 2 * cellGrainVar * bandTransfer[b].
+									// variance above independent two-frame grain variance 2 * cellGrainVar * bandTransfer[b] * psdScale.
 									if (!splitActive && cellGrainVar > kEngineNumFloor)
 									{
-										const double excess = C[ai][ai] - 2.0 * cellGrainVar * bandTransfer[b];
+										const double excess = C[ai][ai] - 2.0 * cellGrainVar * bandTransfer[b] * psdScale;
 										cA1 = (std::min)(cA1, excess > 0.0 ? excess : 0.0);
 									}
 								}
