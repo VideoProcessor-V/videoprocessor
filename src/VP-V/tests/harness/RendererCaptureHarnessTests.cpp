@@ -8006,14 +8006,16 @@ namespace Tests
 			if (VectorTestSkip("VectorEngineGamesDepthOneEngagesAtOneAhead")) return;
 			g_harnessApplySnapshot = true;
 			g_harnessQueueTarget = 2;   // the harness sets the target itself after the snapshot (SetQueueFramePolicy)
-			const RunResult none = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
+			// LibplaceboVideoRenderer.cpp:28196 logs "Alpha queue depth summary:" every 5.0 s after first dequeue;
+			// 9.0 s wall-clock covers D3D11/libplacebo/NVOF cold-start init + prefill (~2.25 s) plus >= 5.0 s active dequeue.
+			const RunResult none = Run(VideoFrameEncoding::V210, "gpu", 9.0, false,
 				"deband_vp: on\n[queue.Low_Latency]\nqueue_size: 4\ntarget_frames: 2\n");
 			g_harnessQueueTarget = 2;
 			const FramePlan starterPlan = RatePlan(HarnessMonitorHz() * 0.4);
-			const RunResult lowStarter = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
+			const RunResult lowStarter = Run(VideoFrameEncoding::V210, "gpu", 9.0, false,
 				"deband_vp: on\ndejudder_strength: 0.25\n[queue.Low_Latency]\nqueue_size: 4\ntarget_frames: 2\n", false, &starterPlan);
 			g_harnessQueueTarget = 0;
-			const RunResult normal = Run(VideoFrameEncoding::V210, "gpu", 6.0, false,
+			const RunResult normal = Run(VideoFrameEncoding::V210, "gpu", 9.0, false,
 				"deband_vp: on\ndejudder_strength: 0.25\n[queue.Normal]\nqueue_size: 32\ntarget_frames: 5\n", false, &starterPlan);
 			g_harnessApplySnapshot = false;
 			Logger::WriteMessage(("A deband_vp only (games shallow queue):\n" + VectorTestLines(none)).c_str());
