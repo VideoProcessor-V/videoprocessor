@@ -50,6 +50,38 @@ namespace Tests
 				[](const std::string&) -> const pl_hook* { return nullptr; },
 				[](const pl_hook*& hook) { hook = nullptr; } };
 		}
+
+		// C++14 overload probe so the PQ flare test compiles and genuinely FAILS at runtime against
+		// pre-fix 2-arg Cam16::FlareToDisplayed(o, f), and invokes the real 3-arg
+		// Cam16::FlareToDisplayed(o, f, upper) unambiguously once added.
+		namespace Flare3ArgFallback
+		{
+			struct FallbackResult { double value; };
+			inline FallbackResult FlareToDisplayed(double o, double f, ...)
+			{
+				return { Cam16::FlareToDisplayed(o, f) };
+			}
+		}
+
+		namespace Flare3ArgProbe
+		{
+			inline double Unwrap(double value, bool& usedThreeArg)
+			{
+				usedThreeArg = true;
+				return value;
+			}
+			inline double Unwrap(Flare3ArgFallback::FallbackResult r, bool& usedThreeArg)
+			{
+				usedThreeArg = false;
+				return r.value;
+			}
+			inline double CallCam16Flare(double o, double f, double upper, bool& usedThreeArg)
+			{
+				using Cam16::FlareToDisplayed;
+				using Flare3ArgFallback::FlareToDisplayed;
+				return Unwrap(FlareToDisplayed(o, f, upper), usedThreeArg);
+			}
+		}
 	}
 
 	// MUST 1 / MUST 2 / SHOULD 7: the calibration LUT moves to VP's last step by default whenever a VP display-mapping step
@@ -257,6 +289,52 @@ namespace Tests
 			const std::string glsl = Fix1ReadUp("shaders\\vp_cam16_appearance.glsl");
 			Assert::IsTrue(Fix1Has(glsl, "float ap_flare(float o, float f)"));
 			Assert::IsFalse(Fix1Has(glsl, "(outLin - vec3(apx_veil))"), L"the subtract-and-clip is gone");
+		}
+
+		// S2-B1 (pure CPU): PQ flare must normalise at the PQ ceiling (upper = 10000 / screenWhiteNits),
+		// never at SDR 1.0, so HDR highlights above diffuse white (o > 1) are never boosted above o.
+		TEST_METHOD(PqFlareNormalisesAtPeakAndNeverBoostsHighlights)
+		{
+			const double f = 0.05;
+			const double upper = 10000.0 / 100.0;   // 100-nit screen white on 10,000-nit PQ ceiling
+			bool usedThreeArg = false;
+
+			// Boundary anchors: 0 maps to 0 and upper maps to upper; zero veil is identity.
+			Assert::AreEqual(0.0, Flare3ArgProbe::CallCam16Flare(0.0, f, upper, usedThreeArg), 0.0);
+			Assert::AreEqual(upper, Flare3ArgProbe::CallCam16Flare(upper, f, upper, usedThreeArg), 1e-9,
+				L"PQ flare must anchor at the PQ peak ceiling (g(upper) == upper)");
+			Assert::AreEqual(10.0, Flare3ArgProbe::CallCam16Flare(10.0, 0.0, upper, usedThreeArg), 0.0,
+				L"zero veil must remain the identity on PQ highlights");
+
+			// Strictly monotonic from shadows through diffuse white up to 10,000 nits;
+			// every interior PQ highlight (0 < o < upper) stays strictly <= o (never boosted)
+			// while displayed + flare stays above the intended luminance.
+			const double samples[] = { 0.0, 1e-4, 0.01, 0.05, 0.25, 1.0, 2.0, 5.0, 10.0, 40.0, 80.0, upper };
+			double prev = -1.0;
+			for (const double o : samples)
+			{
+				const double g = Flare3ArgProbe::CallCam16Flare(o, f, upper, usedThreeArg);
+				Assert::IsTrue(g > prev, L"PQ flare must be strictly monotonic across [0, upper]");
+				if (o > 0.0 && o < upper)
+				{
+					Assert::IsTrue(g < o,
+						(L"PQ flare must NEVER boost highlights above o (o=" + std::to_wstring(o) +
+							L", g=" + std::to_wstring(g) + L")").c_str());
+					Assert::IsTrue(g + f > o, L"seen light (displayed + flare) must not fall below intent");
+				}
+				prev = g;
+			}
+			Assert::IsTrue(usedThreeArg, L"Cam16::FlareToDisplayed must accept the PQ upper ceiling parameter");
+
+			// Mandatory in-test negative control (exact same PQ highlight inputs):
+			// SDR-normalised FlareToDisplayed(o, f) (upper = 1.0) strictly BOOSTS PQ highlights above o!
+			for (const double o : { 5.0, 10.0, 40.0, 80.0 })
+			{
+				const double sdrNormalised = Cam16::FlareToDisplayed(o, f);
+				Assert::IsTrue(sdrNormalised > o * 1.02,
+					(L"Negative control: SDR-normalised flare (upper=1.0) must boost PQ highlight o=" +
+						std::to_wstring(o) + L" above o (got " + std::to_wstring(sdrNormalised) + L")").c_str());
+			}
 		}
 	};
 	// MUST 6: appearance replaces the gamma boost and the saturation step (doc 115 B15), visibly.
