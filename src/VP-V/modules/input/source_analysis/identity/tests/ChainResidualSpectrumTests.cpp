@@ -817,6 +817,43 @@ namespace Tests
 				L"contrast control: true 10-bit TPDF dither classifies as DitherDominated");
 			Assert::IsFalse(outTpdf.neverRebase,
 				L"contrast control: true 10-bit TPDF dither allows re-basing (neverRebase == false)");
+
+			// NEW-LOW-2: 2K-DI studio upscale with BOTH 4K film grain (> physical TPDF bound) AND strong USM halo
+			// (resHalo >= gateMult * resFar) MUST STILL classify as NativeCodedStudioUpscale with neverRebase == true
+			// (never downgraded to UsmSharpened)!
+			LineSet sigGrainUsm;
+			sigGrainUsm.axisLen = kN;
+			sigGrainUsm.Resize(kLines, kN);
+			DetRng rngUsm(2026112355ull);
+			for (int li = 0; li < kLines; ++li)
+			{
+				const std::vector<double> latent = MakeBroadbandLatent(kLatentN, rngUsm);
+				const std::vector<double> upClean = Upscale1DBank(latent, kN, kLanczos3, 0.0);
+				const std::vector<double> blurred = GaussianBlur1D(upClean, 1.0);
+				std::vector<double> grainUsmRaw(static_cast<size_t>(kN), 0.0);
+				for (int i = 0; i < kN; ++i)
+				{
+					// Strong USM halo (amount = 2.5, sigma = 1.0) + 1.0-code 4K white film grain (~2.9x above tpdfUpperP = 0.375):
+					const double usmVal = upClean[static_cast<size_t>(i)] + 2.5 * (upClean[static_cast<size_t>(i)] - blurred[static_cast<size_t>(i)]);
+					grainUsmRaw[static_cast<size_t>(i)] = usmVal + 1.0 * rngUsm.Normal01();
+				}
+				const std::vector<double> qGrainUsm = Quantize10Bit(grainUsmRaw);
+				std::copy(qGrainUsm.begin(), qGrainUsm.end(), sigGrainUsm.Line(li));
+			}
+			const LineSet resGrainUsm = ComputeRealDescaleResiduals(sigGrainUsm, kLatentN, kLanczos3, 0.0);
+			const ResidualSpectrumResult outGrainUsm = ClassifyResidualSpectrum(sigGrainUsm, resGrainUsm, kLatentN, kFloor10Bit, on);
+			Assert::IsTrue(outGrainUsm.valid);
+			Assert::IsTrue(outGrainUsm.highBandPower > tpdfUpperP,
+				L"NEW-LOW-2 fixture: 1-code grain+USM far-band exceeds physical TPDF bound");
+			Assert::IsTrue(outGrainUsm.highBandFlatness >= 0.5,
+				L"NEW-LOW-2 fixture: 1-code grain+USM far-band is flat white grain");
+			Assert::IsTrue(outGrainUsm.midBandPower >= gateMult * outGrainUsm.highBandPower,
+				L"NEW-LOW-2 negative control: USM halo satisfies resHalo >= gateMult * resFar (would fall through to UsmSharpened if guarded on resHalo < gateMult * resFar)");
+			Assert::IsTrue(outGrainUsm.classification == ResidualClass::NativeCodedStudioUpscale,
+				L"NEW-LOW-2: 2K-DI studio upscale with 4K grain + USM halo must stay NativeCodedStudioUpscale");
+			Assert::IsTrue(outGrainUsm.codedRaster == SourceIdentity::Geometry::CodedRaster::NativeCoded);
+			Assert::IsTrue(outGrainUsm.neverRebase,
+				L"NEW-LOW-2: 2K-DI studio upscale with 4K grain + USM halo must set neverRebase == true");
 		}
 
 		TEST_METHOD(DoubleScaleReportsLastStageAndSurfacesFirstStageSignal)

@@ -2786,6 +2786,19 @@ namespace Tests
 
 					const SourceResolutionMonitor::ClassicalRefDetailSnapshot shRefs =
 						SourceResolutionMonitor::CaptureTrackerReferenceDetails(shTrk, shTrkH, shTrkV, kUhdW, kUhdH, true, &shRetained);
+					// LOW-1: explicitly verify shRefs.entries retained a finite 0.5 reference across Shadow tracker.Update clear!
+					bool hasRetainedFiniteHalf = false;
+					for (const auto& entry : shRefs.entries)
+					{
+						if (std::fabs(entry.ratio - 0.5) < 0.01 &&
+							std::isfinite(entry.refComb) && std::isfinite(entry.refH) && std::isfinite(entry.refV))
+						{
+							hasRetainedFiniteHalf = true;
+							break;
+						}
+					}
+					Assert::IsTrue(hasRetainedFiniteHalf,
+						L"LOW-1: CaptureTrackerReferenceDetails must retain finite 0.5 reference in shRefs.entries across Shadow window clear");
 					const C::ClassicalFreshInput shCfi =
 						SourceResolutionMonitor::BuildClassicalFreshForChain(native4kFr, shRefs, false, 999, 12500000, 0.5);
 					Assert::IsTrue(static_cast<bool>(shCfi.detailAboveAtRatio));
@@ -3379,6 +3392,240 @@ namespace Tests
 				Assert::AreEqual(uint64_t(6), est.GetCounters().abrStepEventsEvicted,
 					L"L2: pushing 10 ABR step events into eventCap=4 queue must visibly count 6 evictions");
 			}
+		}
+
+		// 19. NEW-HIGH-1: Multi-shot softer active-upscale 1080p->4K AND dark noise-floor 1080p->4K with a finite
+		//     tracker ReferenceDetail(0.5) MUST NOT fire false ReleasedDetailAbove through real CaptureTrackerReferenceDetails
+		//     + BuildClassicalFreshForChain, with same-input negative controls proving naive (d >= ref + 0.07) WOULD fire on
+		//     BOTH shots AND contrast control proving true native 4K still releases via ReleasedDetailAbove within <= 6 s!
+		TEST_METHOD(NewHigh1MultiShotSofterAndDark1080pHoldWithFiniteRefAndNative4KReleases)
+		{
+			using namespace S2Fx;
+			namespace SR = SourceResolution;
+
+			auto makeBandFrame = [](double ratioVal, double belowPow, double abovePow, double contrastVal,
+				double meanVal, double sigVal) {
+				SR::FrameReading fr;
+				fr.informativeTiles = 8;
+				fr.ratio = ratioVal;
+				fr.ratioH = ratioVal;
+				fr.ratioV = ratioVal;
+				fr.contrast = contrastVal;
+				fr.quantisationFloor = -7.1; // 10-bit uniform floor (~7.943e-8)
+				fr.mean = meanVal;
+				fr.signature = sigVal;
+				fr.verticalPower.assign(129, belowPow);
+				fr.horizontalPower.assign(129, belowPow);
+				for (size_t k = 64; k < 129; ++k)
+				{
+					fr.verticalPower[k] = abovePow;
+					fr.horizontalPower[k] = abovePow;
+				}
+				return fr;
+			};
+
+			// Shot 1: Lock Tracker (tracker, trackerH, trackerV) on crisp 1080p->4K (ratio=0.5, DetailAbove(0.5) == -2.0 dec)
+			// so ReferenceDetail(0.5) is genuinely FINITE (~ -2.0 dec).
+			SR::Tracker trk, trkH, trkV;
+			for (int f = 0; f < 24; ++f)
+			{
+				const int shot = f / 8;
+				const SR::FrameReading crispFr = makeBandFrame(
+					0.5, 1e-3, 1e-5, 0.25, (shot % 2 == 0) ? 0.35 : 0.65, 0.01 * static_cast<double>(f + 1));
+				const double sec = 0.5 * static_cast<double>(f);
+				trk.Update(crispFr, sec);
+				trkH.Update(SR::AxisFrame(crispFr, false), sec);
+				trkV.Update(SR::AxisFrame(crispFr, true), sec);
+			}
+			const double ref05 = trk.ReferenceDetail(0.5);
+			Assert::IsTrue(std::isfinite(ref05) && ref05 < -1.8, L"fixture: Tracker ReferenceDetail(0.5) is finite (~ -2.0 dec)");
+			Assert::AreEqual(0.5, trk.Ratio(), 0.05, L"fixture: Tracker locked at 0.5 on crisp Shot 1");
+
+			// Latch ChainEstimator at 1920x1080 using crisp Shot 1 via real CaptureTrackerReferenceDetails + BuildClassicalFreshForChain.
+			ChainFx::ManualClock clk;
+			C::EstimatorSettings cfg;
+			cfg.safetyRules = true;
+			cfg.jointLatch.enabled = true;
+			cfg.conventionDrivenProposals = true;
+			C::ChainEstimator est(cfg, clk.Fn());
+			est.SetSynchronous(true);
+			est.SetMode(C::EstimatorMode::On);
+
+			SourceResolutionMonitor::ClassicalRefDetailSnapshot retained;
+			uint64_t seq = 10;
+			int64_t tUs = 0;
+			const SR::FrameReading crispSteady = makeBandFrame(0.5, 1e-3, 1e-5, 0.25, 0.45, 0.50);
+			for (int i = 0; i < 6; ++i, ++seq)
+			{
+				tUs = static_cast<int64_t>(i) * 1500000;
+				clk.Set(static_cast<double>(tUs) / 1000.0);
+				const SourceResolutionMonitor::ClassicalRefDetailSnapshot refs =
+					SourceResolutionMonitor::CaptureTrackerReferenceDetails(trk, trkH, trkV, kUhdW, kUhdH, est.StatusInput().latchNx > 0, &retained);
+				const C::ClassicalFreshInput cfi =
+					SourceResolutionMonitor::BuildClassicalFreshForChain(crispSteady, refs, false, seq, tUs, 1.5);
+				est.SetClassicalFresh(cfi);
+				const C::LineSnapshot up = MakeSynthSnapshot(kUhdW, kUhdH, 1920, 1080, kBilinear, 1,
+					seq, tUs, 99300u + seq, i == 0);
+				Assert::IsTrue(est.SubmitLines(up));
+			}
+			Assert::AreEqual(1920, est.StatusInput().latchNx, L"fixture: ChainEstimator latched 1920x1080 on crisp Shot 1");
+			Assert::AreEqual(1080, est.StatusInput().latchNy);
+
+			// Shot 2: Softer active-upscale 1080p->4K (ratio = ratioH = ratioV = 0.5, DetailAbove(0.5) ~= -1.40 dec >= ref05 + 0.07!).
+			const SR::FrameReading softerFr = makeBandFrame(0.5, 1e-3, 4e-5, 0.25, 0.52, 0.61);
+			const double softDa = SR::DetailAbove(softerFr, 0.5);
+			Assert::IsTrue(std::isfinite(softDa) && softDa >= ref05 + 0.07,
+				L"negative control: naive (DetailAbove >= ref + 0.07) WOULD falsely fire detailAbove on softer active-upscale Shot 2");
+			for (int k = 0; k < 5; ++k, ++seq)
+			{
+				tUs += 1500000;
+				clk.Set(static_cast<double>(tUs) / 1000.0);
+				const SourceResolutionMonitor::ClassicalRefDetailSnapshot refs =
+					SourceResolutionMonitor::CaptureTrackerReferenceDetails(trk, trkH, trkV, kUhdW, kUhdH, true, &retained);
+				const C::ClassicalFreshInput cfiSoft =
+					SourceResolutionMonitor::BuildClassicalFreshForChain(softerFr, refs, false, seq, tUs, 1.5);
+				Assert::IsFalse(cfiSoft.detailAbove, L"NEW-HIGH-1: softer active-upscale 0.5 frame must have detailAbove == false");
+				Assert::IsTrue(static_cast<bool>(cfiSoft.detailAboveAtRatio));
+				Assert::IsFalse(cfiSoft.detailAboveAtRatio(0.5, 0.5),
+					L"NEW-HIGH-1: active-upscale 0.5 coherence guards detailAboveAtRatio(0.5, 0.5) == false");
+				est.SetClassicalFresh(cfiSoft);
+				const C::LineSnapshot up = MakeSynthSnapshot(kUhdW, kUhdH, 1920, 1080, kBilinear, 1,
+					seq, tUs, 99400u + seq, k == 0);
+				Assert::IsTrue(est.SubmitLines(up));
+			}
+			Assert::AreEqual(1920, est.StatusInput().latchNx, L"NEW-HIGH-1: latch holds 1920x1080 across > 5 s of softer Shot 2");
+			Assert::AreEqual(uint64_t(0), est.GetCounters().jointLatch.releasesDetailAbove);
+
+			// Shot 3: Dark noise-floor 1080p->4K (ratio = 1.0, contrast = 0.02, power pinned at quantisationFloor = -7.1
+			// so DetailAbove(0.5) == 0.0 >> ref05 + 0.07, while above-band level == -7.1 < -7.1 + 0.5 = -6.6!).
+			const double qFloorPow = std::pow(10.0, -7.1);
+			const SR::FrameReading darkFr = makeBandFrame(1.0, qFloorPow, qFloorPow, 0.02, 0.07, 0.72);
+			double darkLevel = 0.0;
+			const double darkDa = SR::DetailAbove(darkFr, 0.5, &darkLevel);
+			Assert::IsTrue(std::isfinite(darkDa) && darkDa >= ref05 + 0.07,
+				L"negative control: naive (DetailAbove >= ref + 0.07) WOULD falsely fire detailAbove on dark noise-floor Shot 3");
+			Assert::IsTrue(darkLevel < darkFr.quantisationFloor + 0.5,
+				L"fixture: dark noise-floor Shot 3 sits strictly below quantisationFloor + nativeFloorDecades");
+			for (int k = 0; k < 5; ++k, ++seq)
+			{
+				tUs += 1500000;
+				clk.Set(static_cast<double>(tUs) / 1000.0);
+				const SourceResolutionMonitor::ClassicalRefDetailSnapshot refs =
+					SourceResolutionMonitor::CaptureTrackerReferenceDetails(trk, trkH, trkV, kUhdW, kUhdH, true, &retained);
+				const C::ClassicalFreshInput cfiDark =
+					SourceResolutionMonitor::BuildClassicalFreshForChain(darkFr, refs, false, seq, tUs, 1.5);
+				Assert::IsFalse(cfiDark.detailAbove, L"NEW-HIGH-1: dark noise-floor frame must have detailAbove == false");
+				Assert::IsTrue(static_cast<bool>(cfiDark.detailAboveAtRatio));
+				Assert::IsFalse(cfiDark.detailAboveAtRatio(0.5, 0.5),
+					L"NEW-HIGH-1: dark noise-floor guard keeps detailAboveAtRatio(0.5, 0.5) == false");
+				est.SetClassicalFresh(cfiDark);
+				const C::LineSnapshot up = MakeSynthSnapshot(kUhdW, kUhdH, 1920, 1080, kBilinear, 1,
+					seq, tUs, 99500u + seq, k == 0);
+				Assert::IsTrue(est.SubmitLines(up));
+			}
+			Assert::AreEqual(1920, est.StatusInput().latchNx, L"NEW-HIGH-1: latch holds 1920x1080 across > 5 s of dark noise-floor Shot 3");
+			Assert::AreEqual(uint64_t(0), est.GetCounters().jointLatch.releasesDetailAbove);
+
+			// Contrast control: True native 4K (ratio=1.0, above-floor DetailAbove(0.5) ~= -0.50 dec >= ref05 + 0.07,
+			// level ~= -3.5 >> -6.6) through the EXACT SAME BuildClassicalFreshForChain MUST release within <= 6 s!
+			const SR::FrameReading native4kFr = makeBandFrame(1.0, 1e-3, 3.16e-4, 0.25, 0.58, 0.88);
+			const int64_t natStartUs = tUs + 1500000;
+			int64_t natReleaseUs = -1;
+			for (int k = 0; k < 5; ++k, ++seq)
+			{
+				tUs = natStartUs + static_cast<int64_t>(k) * 1500000;
+				clk.Set(static_cast<double>(tUs) / 1000.0);
+				const SourceResolutionMonitor::ClassicalRefDetailSnapshot refs =
+					SourceResolutionMonitor::CaptureTrackerReferenceDetails(trk, trkH, trkV, kUhdW, kUhdH, true, &retained);
+				const C::ClassicalFreshInput cfiNat =
+					SourceResolutionMonitor::BuildClassicalFreshForChain(native4kFr, refs, false, seq, tUs, 1.5);
+				Assert::IsTrue(static_cast<bool>(cfiNat.detailAboveAtRatio));
+				Assert::IsTrue(cfiNat.detailAboveAtRatio(0.5, 0.5),
+					L"contrast control: true native 4K above floor reports detailAboveAtRatio(0.5, 0.5) == true");
+				est.SetClassicalFresh(cfiNat);
+				const C::LineSnapshot flatPost = MakeFlatSnapshot(kUhdW, kUhdH, 512, seq, tUs, false);
+				Assert::IsTrue(est.SubmitLines(flatPost));
+				if (natReleaseUs < 0 && est.StatusInput().latchNx == 0)
+				{
+					natReleaseUs = tUs;
+					break;
+				}
+			}
+			Assert::IsTrue(natReleaseUs >= 0, L"contrast control: true native 4K releases 1920x1080 latch");
+			Assert::IsTrue(static_cast<double>(natReleaseUs - natStartUs) / 1e6 <= 6.0,
+				L"contrast control: true native 4K releases via ReleasedDetailAbove within <= 6 s");
+			Assert::IsTrue(est.GetCounters().jointLatch.releasesDetailAbove >= 1);
+		}
+
+		// 20. NEW-MED-1 (M2 voided classical frame in R1):
+		//     When classicalFresh is voided by subtitle or inFade (M2), its detailAbove = true MUST NOT poison R1
+		//     HarmonicCandidate::detailAbove and MUST NOT block Chain-Alone entry/hold — with same-input negative
+		//     control (unvoided detailAbove = true) proving the exact same stream IS blocked without M2 voiding!
+		TEST_METHOD(NewMed1VoidedClassicalDetailAboveDoesNotBlockChainAloneInR1)
+		{
+			using namespace S2Fx;
+
+			auto runVoidCheck = [](bool subtitle, bool inFade, int& outLatchNx, int& outLatchNy, C::EstimatorCounters& outCnt) {
+				ChainFx::ManualClock clk;
+				C::EstimatorSettings cfg;
+				cfg.safetyRules = true;
+				cfg.jointLatch.enabled = true;
+				cfg.conventionDrivenProposals = true;
+				C::ChainEstimator est(cfg, clk.Fn());
+				est.SetSynchronous(true);
+				est.SetMode(C::EstimatorMode::On);
+
+				uint64_t seq = 10;
+				int s = 0;
+				// 2 shots of 1080p->4K + extra hold evals (total > 5 s after latch to also verify no M1 release!).
+				for (int shot = 0; shot < 3; ++shot)
+				{
+					for (int k = 0; k < 5; ++k, ++s, ++seq)
+					{
+						const int64_t tUs = static_cast<int64_t>(s) * 1000000;
+						clk.Set(static_cast<double>(s) * 1500.0);
+						C::ClassicalFreshInput cf = MakeClassicalFresh(
+							true, 1.0, 1.0, true /* detailAbove = true */, seq, tUs, 1.5, false, subtitle, inFade);
+						cf.detailAboveAtRatio = [](double, double) -> bool { return true; };
+						est.SetClassicalFresh(cf);
+						const C::LineSnapshot up = MakeSynthSnapshot(kUhdW, kUhdH, 1920, 1080, kBilinear, 1,
+							seq, tUs, 99600u + seq, k == 0);
+						Assert::IsTrue(est.SubmitLines(up));
+					}
+				}
+				outLatchNx = est.StatusInput().latchNx;
+				outLatchNy = est.StatusInput().latchNy;
+				outCnt = est.GetCounters();
+			};
+
+			// (a) Voided via subtitle = true: Chain-Alone MUST enter and hold 1920x1080!
+			int subNx = -1, subNy = -1;
+			C::EstimatorCounters subCnt;
+			runVoidCheck(true, false, subNx, subNy, subCnt);
+			Assert::AreEqual(1920, subNx, L"NEW-MED-1: subtitle-voided detailAbove must not block Chain-Alone in R1");
+			Assert::AreEqual(1080, subNy);
+			Assert::IsTrue(subCnt.jointLatch.entriesChainAlone >= 1);
+			Assert::IsTrue(subCnt.jointLatch.classicalVoided > 0, L"NEW-MED-1: M2 classicalVoided counted visibly");
+			Assert::AreEqual(uint64_t(0), subCnt.jointLatch.releasesDetailAbove);
+
+			// (b) Voided via inFade = true: Chain-Alone MUST enter and hold 1920x1080!
+			int fadeNx = -1, fadeNy = -1;
+			C::EstimatorCounters fadeCnt;
+			runVoidCheck(false, true, fadeNx, fadeNy, fadeCnt);
+			Assert::AreEqual(1920, fadeNx, L"NEW-MED-1: inFade-voided detailAbove must not block Chain-Alone in R1");
+			Assert::AreEqual(1080, fadeNy);
+			Assert::IsTrue(fadeCnt.jointLatch.entriesChainAlone >= 1);
+			Assert::IsTrue(fadeCnt.jointLatch.classicalVoided > 0);
+			Assert::AreEqual(uint64_t(0), fadeCnt.jointLatch.releasesDetailAbove);
+
+			// (c) Mandatory Rule 3 Negative Control on EXACT SAME stream: unvoided (subtitle=false, inFade=false)
+			//     with detailAbove = true DOES block Chain-Alone entry!
+			int unvoidNx = -1, unvoidNy = -1;
+			C::EstimatorCounters unvoidCnt;
+			runVoidCheck(false, false, unvoidNx, unvoidNy, unvoidCnt);
+			Assert::AreEqual(0, unvoidNx, L"negative control: unvoided detailAbove=true blocks Chain-Alone entry");
+			Assert::AreEqual(0, unvoidNy);
+			Assert::AreEqual(uint64_t(0), unvoidCnt.jointLatch.entriesChainAlone);
 		}
 	};
 }
