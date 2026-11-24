@@ -4107,6 +4107,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		}
 		grainErrorValid = false;
 		fillReady = false;
+		activeFillOcclusion = nullptr;
 		searchSeedUsed = false;   // SK-MV gap seed: set again below only by the instance that searched with it (an early return reads false)
 		searchSeedRejected = false;
 		// Hunt 2 04 M1 (motion_history_fixes): the temporal state is the last estimated
@@ -4626,17 +4627,30 @@ if (b.x < blocks.x && b.y < blocks.y) {
 				holdIndex = next;
 			}
 		}
+		const bool wantDitherOcclusion = (occlusionSlot == 0 || occlusionSlot == 1);
+		bool ditherOcclusionDone = false;
 		// D5's occlusion (also with the half-size matcher: its searches are at
 		// this grid by now).
 		if (settings.occlusionFill)
 		{
 			const bool subOk = settings.estSplit && subField;
+			// GEM-121: reuse a single OCCLUSION_BODY dispatch for both D5 fill and
+			// dither occlusion when both are requested and use identical shader
+			// defines (subOk == settings.estSplit); write directly into
+			// occlusion[occlusionSlot] and alias activeFillOcclusion to it (leaving
+			// the alternating dither slot and non-dither estimates untouched).
+			const bool shareWithDither = wantDitherOcclusion && (subOk == settings.estSplit);
+			pl_tex fillTarget = shareWithDither ? occlusion[occlusionSlot] : fillOcclusion;
 			const pl_shader_desc fillDesc[4] = {
-				Sampled("fwd", forward, false), Sampled("bwd", backward, false), Storage("dst", fillOcclusion),
+				Sampled("fwd", forward, false), Sampled("bwd", backward, false), Storage("dst", fillTarget),
 				Sampled("sub_field", subField, false) };
-			if (!Dispatch("VideoProcessor de-judder: occlusion for the fill (D5)", subOk ? splitDefine : nullptr, OCCLUSION_BODY,
+			if (!Dispatch(shareWithDither ? "VideoProcessor de-judder: occlusion for the dither"
+					: "VideoProcessor de-judder: occlusion for the fill (D5)",
+				subOk ? splitDefine : nullptr, OCCLUSION_BODY,
 				fillDesc, subOk ? 4 : 3, variables, 2, blocksX, blocksY, 8))
 				return false;
+			activeFillOcclusion = fillTarget;
+			ditherOcclusionDone = shareWithDither;
 			lastB = b;
 			fillReady = b.chroma && a.chroma && b.chroma->params.w == a.chroma->params.w &&
 				b.chroma->params.h == a.chroma->params.h;
@@ -4694,7 +4708,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 				return false;
 			pixelMaskReady = true;
 		}
-		if (occlusionSlot == 0 || occlusionSlot == 1)
+		if (wantDitherOcclusion && !ditherOcclusionDone)
 		{
 			const pl_shader_desc occlusionDesc[4] = {
 				Sampled("fwd", forward, false), Sampled("bwd", backward, false),
@@ -4880,7 +4894,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		const float minShare = settings.minTrustedShare;
 		const float tolerance = settings.matchTolerance;
 		// D5: B, its backward vectors and its occlusion bound only when on.
-		const bool fill = settings.occlusionFill && fillReady && lastB.luma && lastB.chroma && !processedTarget;
+		const bool fill = settings.occlusionFill && fillReady && activeFillOcclusion && lastB.luma && lastB.chroma && !processedTarget;
 		// 11a E2: the sub-field bound (and read) only while the split is on.
 		const bool split = settings.estSplit && subField;
 		// Delta 14 R-B: the camera from D1 (when it runs).
@@ -4906,7 +4920,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		{
 			lumaDesc.push_back(Sampled("src_b", lastB.luma, true));
 			lumaDesc.push_back(Sampled("fill_bwd", backward, false));
-			lumaDesc.push_back(Sampled("fill_occ", fillOcclusion, false));
+			lumaDesc.push_back(Sampled("fill_occ", activeFillOcclusion, false));
 		}
 		if (split)
 			lumaDesc.push_back(Sampled("sub_field", subField, false));
@@ -4943,7 +4957,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		{
 			chromaDesc.push_back(Sampled("src_b", lastB.chroma, true));
 			chromaDesc.push_back(Sampled("fill_bwd", backward, false));
-			chromaDesc.push_back(Sampled("fill_occ", fillOcclusion, false));
+			chromaDesc.push_back(Sampled("fill_occ", activeFillOcclusion, false));
 		}
 		if (split)
 			chromaDesc.push_back(Sampled("sub_field", subField, false));

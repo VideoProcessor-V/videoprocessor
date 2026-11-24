@@ -735,6 +735,7 @@ namespace Dejudder
 		pl_tex globalVector[2] = { nullptr, nullptr };      // D1: forward, backward
 		pl_tex strengthState = nullptr;                     // D2/D4: last scale (rgba32f)
 		pl_tex fillOcclusion = nullptr;                     // D5: B's occlusion
+		pl_tex activeFillOcclusion = nullptr;               // GEM-121: non-owning alias (occlusion[slot] when shared, else fillOcclusion)
 		pl_tex sweep[2] = { nullptr, nullptr };             // 11a E1: the first sweep (fwd, bwd)
 		pl_tex ofSearch[2] = { nullptr, nullptr };          // the engine's block vectors (candidate mode)
 		pl_tex ofNone = nullptr;                            // bound in their place when there are none
