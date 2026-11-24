@@ -413,7 +413,9 @@ namespace TdV2
 			TdV2Plane& outWarped,
 			std::vector<uint8_t>& outValid,
 			StandInRegistry* standIns = nullptr,
-			const CellMotionField* lumaMf = nullptr)
+			const CellMotionField* lumaMf = nullptr,
+			const Homography3x3* cameraH = nullptr,
+			std::vector<uint8_t>* outNonFiniteCells = nullptr)
 		{
 			WarpDiagnostics diag;
 			const int w = refPlane.w;
@@ -483,16 +485,38 @@ namespace TdV2
 					const size_t cIdx = static_cast<size_t>(mcy) * cellsW + mcx;
 					if (hasCellValid && lumaMf->valid[cIdx] == 0u)
 						continue;
-					const double vx = lumaCellVx[cIdx];
-					const double vy = lumaCellVy[cIdx];
-					if (!std::isfinite(vx) || !std::isfinite(vy))
+					const bool useCamH = (cameraH != nullptr && cameraH->valid &&
+					                      lumaMf != nullptr && cIdx < lumaMf->cls.size() &&
+					                      lumaMf->cls[cIdx] == RegionMotionClass::Camera);
+					double sxLocal = 0.0;
+					double syLocal = 0.0;
+					if (useCamH)
 					{
-						++diag.nonFinitePixels;
-						continue;
+						double refLx = 0.0, refLy = 0.0;
+						if (!cameraH->Project(lx, ly, refLx, refLy))
+						{
+							++diag.nonFinitePixels;
+							if (outNonFiniteCells != nullptr && cIdx < outNonFiniteCells->size())
+								(*outNonFiniteCells)[cIdx] = 1u;
+							continue;
+						}
+						sxLocal = siting.LumaToCodedX(refLx, subX) - static_cast<double>(ar.x0);
+						syLocal = siting.LumaToCodedY(refLy, subY) - static_cast<double>(ar.y0);
 					}
-
-					const double sxLocal = static_cast<double>(x - ar.x0) + vx * invSubX;
-					const double syLocal = static_cast<double>(y - ar.y0) + vy * invSubY;
+					else
+					{
+						const double vx = lumaCellVx[cIdx];
+						const double vy = lumaCellVy[cIdx];
+						if (!std::isfinite(vx) || !std::isfinite(vy))
+						{
+							++diag.nonFinitePixels;
+							if (outNonFiniteCells != nullptr && cIdx < outNonFiniteCells->size())
+								(*outNonFiniteCells)[cIdx] = 1u;
+							continue;
+						}
+						sxLocal = static_cast<double>(x - ar.x0) + vx * invSubX;
+						syLocal = static_cast<double>(y - ar.y0) + vy * invSubY;
+					}
 					double val = 0.0;
 					if (VpComposed::SampleBicubic(view, sxLocal, syLocal, val) && std::isfinite(val))
 					{
@@ -1736,6 +1760,7 @@ namespace TdV2
 		const TdV2Plane* cleanCr = nullptr;           // Grain-free Cr (coded grid or delivered grid)
 		const CellMotionField* lumaMotion = nullptr;  // Luma-grid Current -> Reference motion field
 		bool isExactCopyOfCurrent = false;
+		Homography3x3 cameraHomography;               // Optional P7 3x3 camera homography (sited coded->luma->H->coded on Camera cells)
 	};
 
 	struct ChromaProcessInput
@@ -2314,10 +2339,12 @@ namespace TdV2
 					std::vector<uint8_t> validCb, validCr;
 					const WarpDiagnostics dCb = ChromaDetail::WarpChromaPlaneWithLumaMotion(
 						*rIn.cleanCb, curCleanCb, delivActive, dSubX, dSubY, in.siting,
-						useMf->vx, useMf->vy, res.cellsW, res.cellsH, cellPx, cr.warpedCb, validCb, standIns, useMf);
+						useMf->vx, useMf->vy, res.cellsW, res.cellsH, cellPx, cr.warpedCb, validCb, standIns, useMf,
+						&rIn.cameraHomography, &nonFiniteCellFlag);
 					const WarpDiagnostics dCr = ChromaDetail::WarpChromaPlaneWithLumaMotion(
 						*rIn.cleanCr, curCleanCr, delivActive, dSubX, dSubY, in.siting,
-						useMf->vx, useMf->vy, res.cellsW, res.cellsH, cellPx, cr.warpedCr, validCr, standIns, useMf);
+						useMf->vx, useMf->vy, res.cellsW, res.cellsH, cellPx, cr.warpedCr, validCr, standIns, useMf,
+						&rIn.cameraHomography, &nonFiniteCellFlag);
 					res.borderBilinearPixels += dCb.borderBilinearPixels + dCr.borderBilinearPixels;
 					if (dCb.nonFinitePixels > 0)
 						markNonFiniteRefCells(*rIn.cleanCb);
@@ -2923,10 +2950,12 @@ namespace TdV2
 				std::vector<uint8_t> validCb, validCr;
 				const WarpDiagnostics dCb = ChromaDetail::WarpChromaPlaneWithLumaMotion(
 					*refCb, codedCleanCb, codedActive, cSubX, cSubY, in.siting,
-					useMf->vx, useMf->vy, res.cellsW, res.cellsH, cellPx, wr.cleanCb, validCb, standIns, useMf);
+					useMf->vx, useMf->vy, res.cellsW, res.cellsH, cellPx, wr.cleanCb, validCb, standIns, useMf,
+					&rIn.cameraHomography, &nonFiniteCellFlag);
 				const WarpDiagnostics dCr = ChromaDetail::WarpChromaPlaneWithLumaMotion(
 					*refCr, codedCleanCr, codedActive, cSubX, cSubY, in.siting,
-					useMf->vx, useMf->vy, res.cellsW, res.cellsH, cellPx, wr.cleanCr, validCr, standIns, useMf);
+					useMf->vx, useMf->vy, res.cellsW, res.cellsH, cellPx, wr.cleanCr, validCr, standIns, useMf,
+					&rIn.cameraHomography, &nonFiniteCellFlag);
 				res.borderBilinearPixels += dCb.borderBilinearPixels + dCr.borderBilinearPixels;
 				if (dCb.nonFinitePixels > 0)
 					markNonFiniteCodedRefCells(*refCb);

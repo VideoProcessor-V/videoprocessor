@@ -980,4 +980,40 @@ namespace TdV2
 		}
 		return RampMath::Clamp01(rawFadeKeep);
 	}
+
+	// P7 3x3 projective camera homography mapping current luma pixel (x, y) -> reference luma pixel (sx, sy):
+	//   w  = h[6]*x + h[7]*y + h[8]
+	//   sx = (h[0]*x + h[1]*y + h[2]) / w
+	//   sy = (h[3]*x + h[4]*y + h[5]) / w
+	// Applied strictly on RegionMotionClass::Camera (rigid background) cells when valid == true;
+	// NEVER overrides moving foreground Object vectors. Default valid == false -> 100% bit-identical baseline.
+	struct Homography3x3
+	{
+		double h[9] = { 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0 };
+		bool valid = false;
+
+		bool AllFinite() const
+		{
+			for (int i = 0; i < 9; ++i)
+				if (!std::isfinite(h[i]))
+					return false;
+			return true;
+		}
+
+		bool Project(double x, double y, double& outSx, double& outSy) const
+		{
+			if (!valid || !AllFinite())
+				return false;
+			const double w = h[6] * x + h[7] * y + h[8];
+			if (!std::isfinite(w) || std::fabs(w) <= kEngineNumFloor)
+				return false;
+			const double sx = (h[0] * x + h[1] * y + h[2]) / w;
+			const double sy = (h[3] * x + h[4] * y + h[5]) / w;
+			if (!std::isfinite(sx) || !std::isfinite(sy))
+				return false;
+			outSx = sx;
+			outSy = sy;
+			return true;
+		}
+	};
 }

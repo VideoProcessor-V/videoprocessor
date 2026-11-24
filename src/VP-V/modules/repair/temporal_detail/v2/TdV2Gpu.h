@@ -95,6 +95,7 @@ namespace Gpu
 		pl_tex cleanTex = nullptr;               // Grain-free reference plane (w x h R32F, sampleable)
 		const CellMotionField* motion = nullptr; // Optional CPU motion field (used when motionVecTex/MetaTex null)
 		bool isExactCopyOfCurrent = false;
+		Homography3x3 cameraHomography;          // Optional P7 3x3 camera homography (used strictly on RegionMotionClass::Camera cells when valid)
 	};
 
 	struct GpuFrameInput
@@ -1051,7 +1052,8 @@ namespace Gpu
 			std::vector<ActiveRefSpec> refSpecs;
 			refSpecs.reserve(kMaxGpuRefs);
 
-			auto tryAddGpuRef = [&](pl_tex refTex, bool useCarry, int motionSlot, int refRole, const CellMotionField* mf, bool exactCopy) -> bool
+			auto tryAddGpuRef = [&](pl_tex refTex, bool useCarry, int motionSlot, int refRole, const CellMotionField* mf, bool exactCopy,
+			                        const Homography3x3& camH = Homography3x3{}) -> bool
 			{
 				if (!useCarry)
 				{
@@ -1075,6 +1077,7 @@ namespace Gpu
 				spec.motionSlot = motionSlot;
 				spec.refRole = refRole;
 				spec.isExactCopy = exactCopy;
+				spec.cameraHomography = camH;
 
 				if (!hasPrepackedMotion)
 				{
@@ -1121,9 +1124,9 @@ namespace Gpu
 			if (!effectiveCut)
 			{
 				if (in.prevPeak.cleanTex != nullptr)
-					tryAddGpuRef(in.prevPeak.cleanTex, false, 0, 0, in.prevPeak.motion, in.prevPeak.isExactCopyOfCurrent);
+					tryAddGpuRef(in.prevPeak.cleanTex, false, 0, 0, in.prevPeak.motion, in.prevPeak.isExactCopyOfCurrent, in.prevPeak.cameraHomography);
 				if (in.nextPeak.cleanTex != nullptr)
-					tryAddGpuRef(in.nextPeak.cleanTex, false, 1, 1, in.nextPeak.motion, in.nextPeak.isExactCopyOfCurrent);
+					tryAddGpuRef(in.nextPeak.cleanTex, false, 1, 1, in.nextPeak.motion, in.nextPeak.isExactCopyOfCurrent, in.nextPeak.cameraHomography);
 				if (in.prevPeak2.cleanTex != nullptr)
 				{
 					if (hasPrepackedMotion)
@@ -1136,7 +1139,7 @@ namespace Gpu
 					else
 					{
 						const int p2Slot = pickUnusedSlot(1, 2, 0);
-						tryAddGpuRef(in.prevPeak2.cleanTex, false, p2Slot, 3, in.prevPeak2.motion, in.prevPeak2.isExactCopyOfCurrent);
+						tryAddGpuRef(in.prevPeak2.cleanTex, false, p2Slot, 3, in.prevPeak2.motion, in.prevPeak2.isExactCopyOfCurrent, in.prevPeak2.cameraHomography);
 					}
 				}
 				if (cfg_.enableCarryForward && hasCarry_ && carryW_ == w && carryH_ == h)
@@ -1522,7 +1525,8 @@ namespace Gpu
 			std::vector<ActiveRefSpec> refSpecs;
 			refSpecs.reserve(kMaxGpuRefs);
 
-			auto tryAddRefSpec = [&](const TdV2Plane* refClean, bool useCarry, int motionSlot, int refRole, const CellMotionField* mf, bool exactCopy) -> bool
+			auto tryAddRefSpec = [&](const TdV2Plane* refClean, bool useCarry, int motionSlot, int refRole, const CellMotionField* mf, bool exactCopy,
+			                         const Homography3x3& camH = Homography3x3{}) -> bool
 			{
 				if (!useCarry)
 				{
@@ -1547,6 +1551,7 @@ namespace Gpu
 				spec.motionSlot = motionSlot;
 				spec.refRole = refRole;
 				spec.isExactCopy = exactCopy;
+				spec.cameraHomography = camH;
 
 				if (mf == nullptr)
 				{
@@ -1590,13 +1595,13 @@ namespace Gpu
 			if (!effectiveCut)
 			{
 				if (in.prevPeak.cleanPlane != nullptr)
-					tryAddRefSpec(in.prevPeak.cleanPlane, false, 0, 0, in.prevPeak.motion, in.prevPeak.isExactCopyOfCurrent);
+					tryAddRefSpec(in.prevPeak.cleanPlane, false, 0, 0, in.prevPeak.motion, in.prevPeak.isExactCopyOfCurrent, in.prevPeak.cameraHomography);
 				if (in.nextPeak.cleanPlane != nullptr)
-					tryAddRefSpec(in.nextPeak.cleanPlane, false, 1, 1, in.nextPeak.motion, in.nextPeak.isExactCopyOfCurrent);
+					tryAddRefSpec(in.nextPeak.cleanPlane, false, 1, 1, in.nextPeak.motion, in.nextPeak.isExactCopyOfCurrent, in.nextPeak.cameraHomography);
 				if (in.prevPeak2.cleanPlane != nullptr)
 				{
 					const int p2Slot = pickUnusedSlot(1, 2, 0);
-					tryAddRefSpec(in.prevPeak2.cleanPlane, false, p2Slot, 3, in.prevPeak2.motion, in.prevPeak2.isExactCopyOfCurrent);
+					tryAddRefSpec(in.prevPeak2.cleanPlane, false, p2Slot, 3, in.prevPeak2.motion, in.prevPeak2.isExactCopyOfCurrent, in.prevPeak2.cameraHomography);
 				}
 				if (cfg_.enableCarryForward && hasCarry_ && carryW_ == w && carryH_ == h)
 				{
@@ -2188,6 +2193,7 @@ namespace Gpu
 			int refRole = 0;                     // Independent A1 role: 0=PrevPeak, 1=NextPeak, 2=Carry, 3=PrevPeak2
 			CellMotionField motion;
 			bool isExactCopy = false;
+			Homography3x3 cameraHomography;
 		};
 
 		struct CoreDispatchParams
@@ -2865,7 +2871,9 @@ namespace Gpu
 			// ---- PASS 1B + 1C: Reverse-Order Warp (k = K-1 .. 0) + Band Decomp ----
 			// Looping k = K-1 down to 0 reuses ONE sc.warpedVal (R32F) and leaves k == 0 (refs[0].clean = P_B)
 			// bit-exact in sc.warpedVal for Pass 3B (kPass3bDctPocs) with ZERO extra VRAM!
-			const std::string warpHdr = staticGeom + Shaders::kCoreHelpers + Shaders::kPass1WarpHeader;
+			const std::string warpHdr = staticGeom +
+				VpvGpu::DefineInt("TD_CLS_CAMERA", static_cast<int>(RegionMotionClass::Camera)) +
+				Shaders::kCoreHelpers + Shaders::kPass1WarpHeader;
 			const size_t shmemWarp = (20u * 20u * 2u) * sizeof(float);
 			int curFlagsSlot = 0;
 
@@ -2892,6 +2900,18 @@ namespace Gpu
 				const float uMotionSlot = static_cast<float>(rSpec.motionSlot);
 				const float uFlagsClear = isFirst ? 1.0f : 0.0f;
 				const float uSameRefCur = sameRefCur ? 1.0f : 0.0f;
+				const float uUseH = rSpec.cameraHomography.valid ? 1.0f : 0.0f;
+				const float uH[9] = {
+					static_cast<float>(rSpec.cameraHomography.h[0]),
+					static_cast<float>(rSpec.cameraHomography.h[1]),
+					static_cast<float>(rSpec.cameraHomography.h[2]),
+					static_cast<float>(rSpec.cameraHomography.h[3]),
+					static_cast<float>(rSpec.cameraHomography.h[4]),
+					static_cast<float>(rSpec.cameraHomography.h[5]),
+					static_cast<float>(rSpec.cameraHomography.h[6]),
+					static_cast<float>(rSpec.cameraHomography.h[7]),
+					static_cast<float>(rSpec.cameraHomography.h[8])
+				};
 
 				pl_shader_desc dw[7] = {
 					VpvGpu::Sampled("ref_clean", refSrcTex),
@@ -2902,7 +2922,7 @@ namespace Gpu
 					VpvGpu::Storage("warped_val", sc.warpedVal),
 					VpvGpu::Storage("ref_flags_out", sc.refFlags[dstFlagsSlot])
 				};
-				pl_shader_var wv[8] = {
+				pl_shader_var wv[18] = {
 					VpvGpu::Var("u_ax0", &uAx0),
 					VpvGpu::Var("u_ay0", &uAy0),
 					VpvGpu::Var("u_ax1", &uAx1),
@@ -2910,9 +2930,13 @@ namespace Gpu
 					VpvGpu::Var("u_ref_idx", &uRefIdx),
 					VpvGpu::Var("u_motion_slot", &uMotionSlot),
 					VpvGpu::Var("u_flags_clear", &uFlagsClear),
-					VpvGpu::Var("u_same_ref_cur", &uSameRefCur)
+					VpvGpu::Var("u_same_ref_cur", &uSameRefCur),
+					VpvGpu::Var("u_use_homography", &uUseH),
+					VpvGpu::Var("u_h0", &uH[0]), VpvGpu::Var("u_h1", &uH[1]), VpvGpu::Var("u_h2", &uH[2]),
+					VpvGpu::Var("u_h3", &uH[3]), VpvGpu::Var("u_h4", &uH[4]), VpvGpu::Var("u_h5", &uH[5]),
+					VpvGpu::Var("u_h6", &uH[6]), VpvGpu::Var("u_h7", &uH[7]), VpvGpu::Var("u_h8", &uH[8])
 				};
-				if (!runPass("td_v2_p1_warp", warpHdr, Shaders::kPass1WarpAndGate, dw, 7, wv, 8, fullGx, fullGy, 16, 16, shmemWarp))
+				if (!runPass("td_v2_p1_warp", warpHdr, Shaders::kPass1WarpAndGate, dw, 7, wv, 18, fullGx, fullGy, 16, 16, shmemWarp))
 				{
 					resetCarryIfActive();
 					return failCore("td_v2_p1_warp dispatch failed", StandInKind::GpuDispatchFailed);

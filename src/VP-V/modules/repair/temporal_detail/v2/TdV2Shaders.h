@@ -434,11 +434,16 @@ int motionSlot = clamp(int(round(u_motion_slot)), 0, 2);
 bool flagsClear = (u_flags_clear > 0.5);
 
 // Workgroup-uniform 20x20 LDS tile fill for canonical TD_CELL_PX == 16 (constant cell MV across WG).
+// Disabled on Camera cells when P7 per-pixel homography is active so zooms/rotations/perspective have zero 16-px tile seams.
 int wgCx = min(TD_CW - 1, wg.x);
 int wgCy = min(TD_CH - 1, wg.y);
 vec2 wgMv = texelFetch(motion_vec, ivec2(motionSlot * TD_CW + wgCx, wgCy), 0).xy;
-bool wgValid = (texelFetch(motion_meta, ivec2(motionSlot * TD_CW + wgCx, wgCy), 0).y >= 0.5);
-bool useLds = (TD_CELL_PX == 16) && validRect && wgValid &&
+vec2 wgMeta = texelFetch(motion_meta, ivec2(motionSlot * TD_CW + wgCx, wgCy), 0).xy;
+int wgCls = int(round(wgMeta.x));
+bool wgValid = (wgMeta.y >= 0.5);
+bool useH = (u_use_homography > 0.5);
+bool useLds = (!useH || (TD_CELL_PX == 16 && wgCls != TD_CLS_CAMERA)) &&
+              (TD_CELL_PX == 16) && validRect && wgValid &&
               (!td_is_bad(wgMv.x)) && (!td_is_bad(wgMv.y)) &&
               (abs(wgMv.x) <= float(TD_W)) && (abs(wgMv.y) <= float(TD_H));
 int tileBaseX = 0;
@@ -481,13 +486,16 @@ if (!validRect || p.x < ax0 || p.x >= ax1 || p.y < ay0 || p.y >= ay1)
 }
 
 vec2 mv = wgMv;
+int mvCls = wgCls;
 bool mvValid = wgValid;
 if (TD_CELL_PX != 16)
 {
     int cx = min(TD_CW - 1, p.x / TD_CELL_PX);
     int cy = min(TD_CH - 1, p.y / TD_CELL_PX);
     mv = texelFetch(motion_vec, ivec2(motionSlot * TD_CW + cx, cy), 0).xy;
-    mvValid = (texelFetch(motion_meta, ivec2(motionSlot * TD_CW + cx, cy), 0).y >= 0.5);
+    vec2 pm = texelFetch(motion_meta, ivec2(motionSlot * TD_CW + cx, cy), 0).xy;
+    mvCls = int(round(pm.x));
+    mvValid = (pm.y >= 0.5);
 }
 
 // Detect non-finite pixels at `p` in ref_clean even if motion shifts away from `p` (reuse LDS when in tile).
@@ -515,19 +523,45 @@ if (!mvValid)
     return;
 }
 
-if (td_is_bad(mv.x) || td_is_bad(mv.y))
-{
-    float fb = td_fetch_cur_fallback(p);
-    uint np = td_pack_ref_flags(prevPacked, refIdx, 4);
-    if (extraBad != 0)
-        np |= 512u;
-    imageStore(warped_val, p, vec4(fb, 0.0, 0.0, 0.0));
-    imageStore(ref_flags_out, p, vec4(float(np) / 65535.0, 0.0, 0.0, 0.0));
-    return;
-}
-
 ivec2 sz = activeRect.zw - activeRect.xy;
-vec2 sLocal = vec2(float(plx), float(ply)) + mv;
+vec2 sLocal = vec2(0.0);
+if (useH && mvCls == TD_CLS_CAMERA)
+{
+    float px = float(p.x);
+    float py = float(p.y);
+    float hw = u_h6 * px + u_h7 * py + u_h8;
+    float hsx = (abs(hw) > TD_NUM_FLOOR) ? ((u_h0 * px + u_h1 * py + u_h2) / hw) : 0.0;
+    float hsy = (abs(hw) > TD_NUM_FLOOR) ? ((u_h3 * px + u_h4 * py + u_h5) / hw) : 0.0;
+    bool hBad = td_is_bad(u_h0) || td_is_bad(u_h1) || td_is_bad(u_h2) ||
+                td_is_bad(u_h3) || td_is_bad(u_h4) || td_is_bad(u_h5) ||
+                td_is_bad(u_h6) || td_is_bad(u_h7) || td_is_bad(u_h8) ||
+                td_is_bad(hw) || !(abs(hw) > TD_NUM_FLOOR) || td_is_bad(hsx) || td_is_bad(hsy);
+    if (hBad)
+    {
+        float fb = td_fetch_cur_fallback(p);
+        uint np = td_pack_ref_flags(prevPacked, refIdx, 4);
+        if (extraBad != 0)
+            np |= 512u;
+        imageStore(warped_val, p, vec4(fb, 0.0, 0.0, 0.0));
+        imageStore(ref_flags_out, p, vec4(float(np) / 65535.0, 0.0, 0.0, 0.0));
+        return;
+    }
+    sLocal = vec2(hsx - float(ax0), hsy - float(ay0));
+}
+else
+{
+    if (td_is_bad(mv.x) || td_is_bad(mv.y))
+    {
+        float fb = td_fetch_cur_fallback(p);
+        uint np = td_pack_ref_flags(prevPacked, refIdx, 4);
+        if (extraBad != 0)
+            np |= 512u;
+        imageStore(warped_val, p, vec4(fb, 0.0, 0.0, 0.0));
+        imageStore(ref_flags_out, p, vec4(float(np) / 65535.0, 0.0, 0.0, 0.0));
+        return;
+    }
+    sLocal = vec2(float(plx), float(ply)) + mv;
+}
 float outVal = 0.0;
 int outFlags = 0;
 

@@ -132,6 +132,16 @@ namespace TdV2
 	};
 
 	// Warp `refClean` into current frame coordinates using shared VpComposed::SampleBicubic inside `active`.
+	// ---- Motion Classification & Camera-Relative Fast-Object Motion Gate (plan s1.3) ----
+	enum class RegionMotionClass : uint8_t
+	{
+		Still = 0,
+		Camera = 1,
+		Object = 2,
+		Overlay = 3,
+		DynamicTexture = 4
+	};
+
 	// Out-of-bounds landings keep `outValid = 0` (zero blend/moment weight) while filling `outWarped` with the
 	// edge-clamped active-border sample (NEVER `0.0`), preventing 18-px Gaussian ringing near letterbox bars.
 	// Any non-finite pixel in `refClean` is detected visibly, excluded (`outValid = 0`), and filled from `fallbackClean`
@@ -148,7 +158,10 @@ namespace TdV2
 		TdV2Plane& outWarped,
 		std::vector<uint8_t>& outValid,
 		StandInRegistry* standIns = nullptr,
-		const std::vector<uint8_t>* cellValid = nullptr)
+		const std::vector<uint8_t>* cellValid = nullptr,
+		const std::vector<RegionMotionClass>* cellCls = nullptr,
+		const Homography3x3* cameraH = nullptr,
+		std::vector<uint8_t>* outNonFiniteCells = nullptr)
 	{
 		WarpDiagnostics diag;
 		const int w = refClean.w;
@@ -237,15 +250,37 @@ namespace TdV2
 				}
 				const double vx = cellVx[cIdx];
 				const double vy = cellVy[cIdx];
-				if (!std::isfinite(vx) || !std::isfinite(vy))
+				const bool useCamH = (cameraH != nullptr && cameraH->valid &&
+				                      cellCls != nullptr && cIdx < cellCls->size() &&
+				                      (*cellCls)[cIdx] == RegionMotionClass::Camera);
+				double sxLocal = 0.0;
+				double syLocal = 0.0;
+				if (useCamH)
 				{
-					++diag.nonFinitePixels;
-					// Leave fallbackClean value in outWarped (no zero-hole) with outValid = 0.
-					continue;
+					double hsx = 0.0, hsy = 0.0;
+					if (!cameraH->Project(static_cast<double>(x), static_cast<double>(y), hsx, hsy))
+					{
+						++diag.nonFinitePixels;
+						if (outNonFiniteCells != nullptr && cIdx < outNonFiniteCells->size())
+							(*outNonFiniteCells)[cIdx] = 1u;
+						continue;
+					}
+					sxLocal = hsx - static_cast<double>(ar.x0);
+					syLocal = hsy - static_cast<double>(ar.y0);
 				}
-
-				const double sxLocal = static_cast<double>(x - ar.x0) + vx;
-				const double syLocal = static_cast<double>(y - ar.y0) + vy;
+				else
+				{
+					if (!std::isfinite(vx) || !std::isfinite(vy))
+					{
+						++diag.nonFinitePixels;
+						if (outNonFiniteCells != nullptr && cIdx < outNonFiniteCells->size())
+							(*outNonFiniteCells)[cIdx] = 1u;
+						// Leave fallbackClean value in outWarped (no zero-hole) with outValid = 0.
+						continue;
+					}
+					sxLocal = static_cast<double>(x - ar.x0) + vx;
+					syLocal = static_cast<double>(y - ar.y0) + vy;
+				}
 				double val = 0.0;
 				if (VpComposed::SampleBicubic(view, sxLocal, syLocal, val) && std::isfinite(val))
 				{
@@ -342,16 +377,6 @@ namespace TdV2
 		}
 		return out;
 	}
-
-	// ---- Motion Classification & Camera-Relative Fast-Object Motion Gate (plan s1.3) ----
-	enum class RegionMotionClass : uint8_t
-	{
-		Still = 0,
-		Camera = 1,
-		Object = 2,
-		Overlay = 3,
-		DynamicTexture = 4
-	};
 
 	struct CellMotionField
 	{
@@ -634,6 +659,7 @@ namespace TdV2
 		const TdV2Plane* cleanPlane = nullptr;     // Grain-free reference plane
 		const CellMotionField* motion = nullptr;   // Current -> Reference motion field
 		bool isExactCopyOfCurrent = false;
+		Homography3x3 cameraHomography;            // Optional P7 3x3 camera homography (used strictly on RegionMotionClass::Camera cells when valid)
 	};
 
 	// ---- Per-Frame Input & Output Structures ----
@@ -1004,11 +1030,13 @@ namespace TdV2
 				const CellMotionField* motion = nullptr;
 				bool isExactCopy = false;
 				RefRole role = RefRole::PrevPeak;
+				Homography3x3 cameraHomography;
 			};
 			std::vector<RefSpec> refSpecs;
 			refSpecs.reserve(kMaxBlendRefs);
 
-			auto tryAddRefSpec = [&](const TdV2Plane* refClean, const CellMotionField* mf, bool exactCopy, RefRole role) -> bool
+			auto tryAddRefSpec = [&](const TdV2Plane* refClean, const CellMotionField* mf, bool exactCopy, RefRole role,
+			                         const Homography3x3& camH = Homography3x3{}) -> bool
 			{
 				if (refClean == nullptr || refClean->Empty() || refClean->w != w || refClean->h != h)
 					return false;
@@ -1035,18 +1063,18 @@ namespace TdV2
 						standIns->Engage(StandInKind::MotionFieldStandIn, "dimension-mismatched motion field; ref rejected");
 					return false;
 				}
-				refSpecs.push_back(RefSpec{ refClean, mf, exactCopy, role });
+				refSpecs.push_back(RefSpec{ refClean, mf, exactCopy, role, camH });
 				return true;
 			};
 
 			if (!effectiveCut)
 			{
 				if (in.prevPeak.cleanPlane != nullptr)
-					tryAddRefSpec(in.prevPeak.cleanPlane, in.prevPeak.motion, in.prevPeak.isExactCopyOfCurrent, RefRole::PrevPeak);
+					tryAddRefSpec(in.prevPeak.cleanPlane, in.prevPeak.motion, in.prevPeak.isExactCopyOfCurrent, RefRole::PrevPeak, in.prevPeak.cameraHomography);
 				if (in.nextPeak.cleanPlane != nullptr)
-					tryAddRefSpec(in.nextPeak.cleanPlane, in.nextPeak.motion, in.nextPeak.isExactCopyOfCurrent, RefRole::NextPeak);
+					tryAddRefSpec(in.nextPeak.cleanPlane, in.nextPeak.motion, in.nextPeak.isExactCopyOfCurrent, RefRole::NextPeak, in.nextPeak.cameraHomography);
 				if (in.prevPeak2.cleanPlane != nullptr)
-					tryAddRefSpec(in.prevPeak2.cleanPlane, in.prevPeak2.motion, in.prevPeak2.isExactCopyOfCurrent, RefRole::PrevPeak2);
+					tryAddRefSpec(in.prevPeak2.cleanPlane, in.prevPeak2.motion, in.prevPeak2.isExactCopyOfCurrent, RefRole::PrevPeak2, in.prevPeak2.cameraHomography);
 				if (cfg_.enableCarryForward && hasCarry_ && carryClean_.w == w && carryClean_.h == h)
 				{
 					if (tryAddRefSpec(&carryClean_, in.hasCarryMotion ? &in.carryMotion : nullptr, false, RefRole::Carry))
@@ -1151,7 +1179,8 @@ namespace TdV2
 				wr.motionVy = spec.motion->vy;
 				const WarpDiagnostics wDiag = WarpCleanReference(
 					*spec.cleanPlane, curClean, active, spec.motion->vx, spec.motion->vy,
-					res.cellsW, res.cellsH, cellPx, wr.clean, wr.validPx, standIns, &spec.motion->valid);
+					res.cellsW, res.cellsH, cellPx, wr.clean, wr.validPx, standIns,
+					&spec.motion->valid, &spec.motion->cls, &spec.cameraHomography, &nonFiniteCellFlag);
 				res.borderBilinearPixels += wDiag.borderBilinearPixels;
 				if (wDiag.nonFinitePixels > 0)
 				{

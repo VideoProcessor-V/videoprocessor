@@ -77,6 +77,18 @@ float td_coded_to_luma_y(float cy)
     return (cy + 0.5) * float(TD_CSUB_Y) - 0.5 + s;
 }
 
+float td_luma_to_coded_x(float lx)
+{
+    float s = (TD_CSUB_X > 1) ? u_cshift_x : 0.0;
+    return (lx + 0.5 - s) / float(TD_CSUB_X) - 0.5;
+}
+
+float td_luma_to_coded_y(float ly)
+{
+    float s = (TD_CSUB_Y > 1) ? u_cshift_y : 0.0;
+    return (ly + 0.5 - s) / float(TD_CSUB_Y) - 0.5;
+}
+
 ivec2 td_coded_to_luma_cell(ivec2 cp)
 {
     float lx = td_coded_to_luma_x(float(cp.x));
@@ -302,8 +314,9 @@ bool v11 = (texelFetch(motion_meta, ivec2(motionSlot * TD_CW + c11.x, c11.y), 0)
 bool sameMv = v00 && v10 && v01 && v11 &&
               (!td_is_bad(mv00.x)) && (!td_is_bad(mv00.y)) &&
               (mv00 == mv10) && (mv00 == mv01) && (mv00 == mv11);
+bool useH = (u_use_homography > 0.5);
 vec2 wgMvCoded = vec2(mv00.x / float(TD_CSUB_X), mv00.y / float(TD_CSUB_Y));
-bool useLds = validRect && sameMv &&
+bool useLds = (!useH) && validRect && sameMv &&
               (abs(wgMvCoded.x) <= float(TD_CH_W)) && (abs(wgMvCoded.y) <= float(TD_CH_H));
 int tileBaseX = 0;
 int tileBaseY = 0;
@@ -346,7 +359,9 @@ if (!validRect || p.x < cax0 || p.x >= cax1 || p.y < cay0 || p.y >= cay1)
 
 ivec2 lc = td_coded_to_luma_cell(p);
 vec2 mvLuma = texelFetch(motion_vec, ivec2(motionSlot * TD_CW + lc.x, lc.y), 0).xy;
-bool mvValid = (texelFetch(motion_meta, ivec2(motionSlot * TD_CW + lc.x, lc.y), 0).y >= 0.5);
+vec2 mvMeta = texelFetch(motion_meta, ivec2(motionSlot * TD_CW + lc.x, lc.y), 0).xy;
+int mvCls = int(round(mvMeta.x));
+bool mvValid = (mvMeta.y >= 0.5);
 
 vec2 selfRef = texelFetch(ref_uv, p, 0).xy;
 int extraBad = (td_is_bad(selfRef.x) || td_is_bad(selfRef.y)) ? 4 : 0;
@@ -361,19 +376,44 @@ if (!mvValid)
     return;
 }
 
-if (td_is_bad(mvLuma.x) || td_is_bad(mvLuma.y))
-{
-    vec2 fb = td_ch_cur_fallback(p);
-    uint np = td_pack_ref_flags(prevPacked, refIdx, 4);
-    if (extraBad != 0) np |= 512u;
-    imageStore(warped_uv, p, vec4(fb, 0.0, 0.0));
-    imageStore(ref_flags_out, p, vec4(float(np) / 65535.0, 0.0, 0.0, 0.0));
-    return;
-}
-
 ivec2 sz = cActive.zw - cActive.xy;
-vec2 mvCoded = vec2(mvLuma.x / float(TD_CSUB_X), mvLuma.y / float(TD_CSUB_Y));
-vec2 sLocal = vec2(float(p.x - cax0), float(p.y - cay0)) + mvCoded;
+vec2 sLocal = vec2(0.0);
+if (useH && mvCls == TD_CLS_CAMERA)
+{
+    float lx = td_coded_to_luma_x(float(p.x));
+    float ly = td_coded_to_luma_y(float(p.y));
+    float hw = u_h6 * lx + u_h7 * ly + u_h8;
+    float refLx = (abs(hw) > TD_NUM_FLOOR) ? ((u_h0 * lx + u_h1 * ly + u_h2) / hw) : 0.0;
+    float refLy = (abs(hw) > TD_NUM_FLOOR) ? ((u_h3 * lx + u_h4 * ly + u_h5) / hw) : 0.0;
+    bool hBad = td_is_bad(u_h0) || td_is_bad(u_h1) || td_is_bad(u_h2) ||
+                td_is_bad(u_h3) || td_is_bad(u_h4) || td_is_bad(u_h5) ||
+                td_is_bad(u_h6) || td_is_bad(u_h7) || td_is_bad(u_h8) ||
+                td_is_bad(hw) || !(abs(hw) > TD_NUM_FLOOR) || td_is_bad(refLx) || td_is_bad(refLy);
+    if (hBad)
+    {
+        vec2 fb = td_ch_cur_fallback(p);
+        uint np = td_pack_ref_flags(prevPacked, refIdx, 4);
+        if (extraBad != 0) np |= 512u;
+        imageStore(warped_uv, p, vec4(fb, 0.0, 0.0));
+        imageStore(ref_flags_out, p, vec4(float(np) / 65535.0, 0.0, 0.0, 0.0));
+        return;
+    }
+    sLocal = vec2(td_luma_to_coded_x(refLx) - float(cax0), td_luma_to_coded_y(refLy) - float(cay0));
+}
+else
+{
+    if (td_is_bad(mvLuma.x) || td_is_bad(mvLuma.y))
+    {
+        vec2 fb = td_ch_cur_fallback(p);
+        uint np = td_pack_ref_flags(prevPacked, refIdx, 4);
+        if (extraBad != 0) np |= 512u;
+        imageStore(warped_uv, p, vec4(fb, 0.0, 0.0));
+        imageStore(ref_flags_out, p, vec4(float(np) / 65535.0, 0.0, 0.0, 0.0));
+        return;
+    }
+    vec2 mvCoded = vec2(mvLuma.x / float(TD_CSUB_X), mvLuma.y / float(TD_CSUB_Y));
+    sLocal = vec2(float(p.x - cax0), float(p.y - cay0)) + mvCoded;
+}
 vec2 outUv = vec2(0.0);
 int outFlags = 0;
 
@@ -1653,7 +1693,9 @@ else
 		pl_tex cleanUvTex = nullptr;             // Grain-free reference chroma: cW x cH RG32F (or dW x dH RG32F / RGBA32F RGB)
 		const CellMotionField* lumaMotion = nullptr;
 		bool isExactCopyOfCurrent = false;
+		Homography3x3 cameraHomography;          // Optional P7 3x3 camera homography (sited coded->luma->H->coded on Camera cells)
 	};
+	using ChromaGpuReferenceInput = ChromaGpuRefInput;
 
 	struct ChromaGpuInput
 	{
@@ -2060,6 +2102,7 @@ else
 				int refRole = 0;
 				CellMotionField motion;
 				bool isExactCopy = false;
+				Homography3x3 cameraHomography;
 			};
 			const bool hasPrepackedMotion = (in.motionVecTex != nullptr && in.motionMetaTex != nullptr);
 			std::vector<ChromaRefSpec> refSpecs;
@@ -2081,6 +2124,7 @@ else
 				sp.motionSlot = slot;
 				sp.refRole = role;
 				sp.isExactCopy = rIn.isExactCopyOfCurrent;
+				sp.cameraHomography = rIn.cameraHomography;
 				if (!hasPrepackedMotion)
 				{
 					if (rIn.lumaMotion == nullptr)
@@ -2671,13 +2715,16 @@ imageStore(out_coded_delta, p, vec4(0.0));
 				return failVisible("td_v2_c1_band current chroma failed", StandInKind::GpuDispatchFailed);
 
 			// ---- PASS C1A + C1B/C: Warp each reference + Band Split ----
-			const std::string cWarpHdr = chromaGeom + Shaders::kCoreHelpers + ChromaShaders::kSitedCoordHelpers + ChromaShaders::kPassChromaWarpHeader;
+			const std::string cWarpHdr = chromaGeom +
+				VpvGpu::DefineInt("TD_CLS_CAMERA", static_cast<int>(RegionMotionClass::Camera)) +
+				Shaders::kCoreHelpers + ChromaShaders::kSitedCoordHelpers + ChromaShaders::kPassChromaWarpHeader;
 			const size_t shChWarp = (20u * 20u * 3u) * sizeof(float);
 			int curFlagsSlot = 0;
 			for (int k = K - 1; k >= 0; --k)
 			{
+				const ChromaRefSpec& rSpec = refSpecs[static_cast<size_t>(k)];
 				pl_tex refCodedTex = nullptr;
-				if (!reduceIfNeeded(refSpecs[static_cast<size_t>(k)].tex, false, sc.reducedRef, refCodedTex))
+				if (!reduceIfNeeded(rSpec.tex, false, sc.reducedRef, refCodedTex))
 					return failVisible("td_v2_c0_reduce ref chroma failed", StandInKind::GpuDispatchFailed);
 
 				const bool isFirst = (k == K - 1);
@@ -2685,9 +2732,21 @@ imageStore(out_coded_delta, p, vec4(0.0));
 				const int srcSlot = isFirst ? 1 : curFlagsSlot;
 				const bool sameRefCur = (refCodedTex == codedCleanTex);
 				const float uRefIdx = static_cast<float>(k);
-				const float uMotSlot = static_cast<float>(refSpecs[static_cast<size_t>(k)].motionSlot);
+				const float uMotSlot = static_cast<float>(rSpec.motionSlot);
 				const float uFlagsClear = isFirst ? 1.0f : 0.0f;
 				const float uSameRefCur = sameRefCur ? 1.0f : 0.0f;
+				const float uUseH = rSpec.cameraHomography.valid ? 1.0f : 0.0f;
+				const float uH[9] = {
+					static_cast<float>(rSpec.cameraHomography.h[0]),
+					static_cast<float>(rSpec.cameraHomography.h[1]),
+					static_cast<float>(rSpec.cameraHomography.h[2]),
+					static_cast<float>(rSpec.cameraHomography.h[3]),
+					static_cast<float>(rSpec.cameraHomography.h[4]),
+					static_cast<float>(rSpec.cameraHomography.h[5]),
+					static_cast<float>(rSpec.cameraHomography.h[6]),
+					static_cast<float>(rSpec.cameraHomography.h[7]),
+					static_cast<float>(rSpec.cameraHomography.h[8])
+				};
 
 				pl_shader_desc dw[7] = {
 					VpvGpu::Sampled("ref_uv", refCodedTex),
@@ -2698,14 +2757,18 @@ imageStore(out_coded_delta, p, vec4(0.0));
 					VpvGpu::Storage("warped_uv", sc.warpedUv),
 					VpvGpu::Storage("ref_flags_out", sc.refFlags[dstSlot])
 				};
-				pl_shader_var wv[10] = {
+				pl_shader_var wv[20] = {
 					VpvGpu::Var("u_cax0", &uCAx0), VpvGpu::Var("u_cay0", &uCAy0),
 					VpvGpu::Var("u_cax1", &uCAx1), VpvGpu::Var("u_cay1", &uCAy1),
 					VpvGpu::Var("u_cshift_x", &uCShiftX), VpvGpu::Var("u_cshift_y", &uCShiftY),
 					VpvGpu::Var("u_ref_idx", &uRefIdx), VpvGpu::Var("u_motion_slot", &uMotSlot),
-					VpvGpu::Var("u_flags_clear", &uFlagsClear), VpvGpu::Var("u_same_ref_cur", &uSameRefCur)
+					VpvGpu::Var("u_flags_clear", &uFlagsClear), VpvGpu::Var("u_same_ref_cur", &uSameRefCur),
+					VpvGpu::Var("u_use_homography", &uUseH),
+					VpvGpu::Var("u_h0", &uH[0]), VpvGpu::Var("u_h1", &uH[1]), VpvGpu::Var("u_h2", &uH[2]),
+					VpvGpu::Var("u_h3", &uH[3]), VpvGpu::Var("u_h4", &uH[4]), VpvGpu::Var("u_h5", &uH[5]),
+					VpvGpu::Var("u_h6", &uH[6]), VpvGpu::Var("u_h7", &uH[7]), VpvGpu::Var("u_h8", &uH[8])
 				};
-				if (!runPass("td_v2_c1_warp", cWarpHdr, ChromaShaders::kPassChromaWarp, dw, 7, wv, 10, cGx, cGy, 16, 16, shChWarp))
+				if (!runPass("td_v2_c1_warp", cWarpHdr, ChromaShaders::kPassChromaWarp, dw, 7, wv, 20, cGx, cGy, 16, 16, shChWarp))
 					return failVisible("td_v2_c1_warp dispatch failed", StandInKind::GpuDispatchFailed);
 				curFlagsSlot = dstSlot;
 
@@ -3085,6 +3148,7 @@ float td_huber_taper(float diffSq, float diagC)
 				gIn.prevPeak.cleanUvTex = tmpPrevTex;
 				gIn.prevPeak.lumaMotion = in.prevPeak.lumaMotion;
 				gIn.prevPeak.isExactCopyOfCurrent = in.prevPeak.isExactCopyOfCurrent;
+				gIn.prevPeak.cameraHomography = in.prevPeak.cameraHomography;
 			}
 			if (in.nextPeak.cleanCb != nullptr && in.nextPeak.cleanCr != nullptr)
 			{
@@ -3096,6 +3160,7 @@ float td_huber_taper(float diffSq, float diagC)
 				gIn.nextPeak.cleanUvTex = tmpNextTex;
 				gIn.nextPeak.lumaMotion = in.nextPeak.lumaMotion;
 				gIn.nextPeak.isExactCopyOfCurrent = in.nextPeak.isExactCopyOfCurrent;
+				gIn.nextPeak.cameraHomography = in.nextPeak.cameraHomography;
 			}
 
 			if (!Detail::EnsureTex(gpu, outCodedDeltaTex_, cW, cH, fmtRG32, true, true, false, true) ||
