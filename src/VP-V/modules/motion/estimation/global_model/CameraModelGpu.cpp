@@ -158,9 +158,18 @@ if (blk.x < cm_grid.x && blk.y < cm_grid.y) {
 		k.cx = static_cast<float>(in.picture.CentreX());
 		k.cy = static_cast<float>(in.picture.CentreY());
 		k.blockSize = static_cast<float>(in.blockSize);
-		const double prec = in.precisionPx > 0 ? in.precisionPx : 0.25 * in.blockSize / 16.0;
-		k.absThr = static_cast<float>(cfg.absThresholdSigmas * prec);
-		k.rel = static_cast<float>(cfg.relThreshold);
+		if (rec.blocks && rec.blocks->absThresholdPx > 0.0f && IsFiniteBits(rec.blocks->absThresholdPx))
+			k.absThr = rec.blocks->absThresholdPx;
+		else
+		{
+			const double base = in.precisionPx > 0 ? in.precisionPx : 0.25 * in.blockSize / 16.0;
+			// Uniform quantization sigma = quantumPx / sqrt(12), matching GlobalModelFit.cpp QuantumSigma().
+			const double prec = in.quantumPx > 0 ? (std::max)(base, in.quantumPx / std::sqrt(12.0)) : base;
+			k.absThr = static_cast<float>(cfg.absThresholdSigmas * prec);
+		}
+		k.rel = (rec.blocks && rec.blocks->relThreshold > 0.0f && IsFiniteBits(rec.blocks->relThreshold))
+			? rec.blocks->relThreshold
+			: static_cast<float>(cfg.relThreshold);
 		k.confident = rec.confidence >= 0.5 ? 1 : 0;
 		k.pixMin = static_cast<float>(cfg.pixelResidualMinShare);
 		k.flat = static_cast<float>(cfg.flatTexture);
@@ -174,6 +183,12 @@ if (blk.x < cm_grid.x && blk.y < cm_grid.y) {
 
 	void PackLabelInputs(const PairInput& in, const BlockData& blocks, std::vector<float>& field, std::vector<float>& aux)
 	{
+		if (in.gridW <= 0 || in.gridH <= 0 || !in.fwdX || !in.fwdY || !in.fwdTrust)
+		{
+			field.clear();
+			aux.clear();
+			return;
+		}
 		const size_t n = static_cast<size_t>(in.gridW) * static_cast<size_t>(in.gridH);
 		field.assign(n * 4, 0.0f);
 		aux.assign(n * 4, 0.0f);
@@ -414,6 +429,12 @@ if (blk.x < cm_grid.x && blk.y < cm_grid.y) {
 		if (!m_dispatch || !field || !aux || k.gridW <= 0 || k.gridH <= 0)
 		{
 			m_error = "no input";
+			return false;
+		}
+		if (field->params.w != k.gridW || field->params.h != k.gridH ||
+			aux->params.w != k.gridW || aux->params.h != k.gridH)
+		{
+			m_error = "camera labels: grid mismatch";
 			return false;
 		}
 		if (!m_tex[0] || m_tex[0]->params.w != k.gridW || m_tex[0]->params.h != k.gridH)

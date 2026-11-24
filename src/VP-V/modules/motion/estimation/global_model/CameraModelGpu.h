@@ -49,8 +49,9 @@ namespace CameraModel
 		int perspective = 0;                          // the model has a non-affine bottom row
 	};
 
-	// Thresholds exactly as the fitter computes them: absThr = absThresholdSigmas * prec,
-	// prec = precisionPx > 0 ? precisionPx : 0.25 * blockSize / 16.
+	// Thresholds as the fitter computed them: takes rec.blocks->absThresholdPx (and relThreshold) when
+	// present and positive (preserving NVOF quantum / R2F raised thresholds), falling back to
+	// absThresholdSigmas * prec when blocks are absent or unpopulated.
 	LabelConstants MakeLabelConstants(const CameraMotion& rec, const Config& cfg, const PairInput& in);
 
 	// Pack the pass inputs (rgba32f, gridW*gridH*4 floats each) from a pair input and the record's excluded mask.

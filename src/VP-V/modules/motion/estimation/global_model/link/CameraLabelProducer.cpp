@@ -12,18 +12,21 @@ namespace CameraLink
 		m_ring(static_cast<size_t>(ringSlots > 0 ? ringSlots : 1), nullptr),
 		m_live(static_cast<size_t>(liveSlots > 0 ? liveSlots : 1), nullptr)
 	{
-		if (mode == LabelMode::Compute)
+		if (mode == LabelMode::Compute && gpu)
 			m_pass.reset(new CameraModel::LabelPass(log, gpu, hostReadable));
 	}
 
 	CameraLabelProducer::~CameraLabelProducer()
 	{
-		for (pl_tex& t : m_ring)
-			pl_tex_destroy(m_gpu, &t);
-		for (pl_tex& t : m_live)
-			pl_tex_destroy(m_gpu, &t);
-		pl_tex_destroy(m_gpu, &m_fieldTex);
-		pl_tex_destroy(m_gpu, &m_auxTex);
+		if (m_gpu)
+		{
+			for (pl_tex& t : m_ring)
+				pl_tex_destroy(m_gpu, &t);
+			for (pl_tex& t : m_live)
+				pl_tex_destroy(m_gpu, &t);
+			pl_tex_destroy(m_gpu, &m_fieldTex);
+			pl_tex_destroy(m_gpu, &m_auxTex);
+		}
 		m_pass.reset();
 	}
 
@@ -97,24 +100,30 @@ namespace CameraLink
 
 	bool CameraLabelProducer::ProduceCompute(const CameraModel::CameraMotion& rec, const FieldCopy* field, pl_tex* slot)
 	{
-		if (!field || !field->Valid() || !rec.blocks || !m_pass)
+		if (!field || !field->Valid() || field->fwdY.size() != field->Blocks() || !rec.blocks)
 		{
 			m_error = "compute mode needs the field copy";
 			return false;
 		}
-		CameraModel::PairInput in;
-		in.gridW = field->gridW;
-		in.gridH = field->gridH;
-		in.blockSize = field->blockSize;
-		in.picture = rec.picture;
-		in.fwdX = field->fwdX.data();
-		in.fwdY = field->fwdY.data();
-		in.fwdTrust = field->fwdTrust.size() == field->Blocks() ? field->fwdTrust.data() : nullptr;
-		if (!in.fwdTrust)
+		if (field->fwdTrust.size() != field->Blocks())
 		{
 			m_error = "field copy has no trust plane";
 			return false;
 		}
+		CameraModel::PairInput in;
+		if (!PrepareComputePairInput(*field, *rec.blocks, rec.picture, in, m_regridX, m_regridY, m_regridTrust))
+		{
+			++m_gridMismatches;
+			m_error = "camera labels: grid mismatch";
+			return false;
+		}
+		if (!m_pass)
+		{
+			m_error = "compute mode needs the field copy";
+			return false;
+		}
+		if (in.fwdX == m_regridX.data())
+			++m_regridded;
 		const CameraModel::LabelConstants k = CameraModel::MakeLabelConstants(rec, m_cfg, in);
 		CameraModel::PackLabelInputs(in, *rec.blocks, m_scratch, m_scratchAux);
 		if (!Upload(&m_fieldTex, m_scratch, in.gridW, in.gridH) || !Upload(&m_auxTex, m_scratchAux, in.gridW, in.gridH))
