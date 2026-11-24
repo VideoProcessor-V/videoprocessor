@@ -339,10 +339,7 @@ namespace CameraLink
 						? static_cast<double>(causal->blocks->absThresholdPx)
 						: kLooDefaultAbsThresholdPx;
 					if (out.looInnovationPx > looThrPx)
-					{
 						out.looSpikeFlagged = true;
-						m_counters.looSpikes.fetch_add(1, std::memory_order_relaxed);
-					}
 				}
 			}
 		}
@@ -379,6 +376,7 @@ namespace CameraLink
 					sp = looSub;
 				else
 					sp = looHat;
+				m_counters.looSpikes.fetch_add(1, std::memory_order_relaxed);
 			}
 			auto rec = std::make_shared<CameraModel::CameraMotion>(*causal);
 			rec->smoothed = true;
