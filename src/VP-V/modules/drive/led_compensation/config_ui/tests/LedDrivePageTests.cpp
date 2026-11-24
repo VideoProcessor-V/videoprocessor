@@ -22,6 +22,7 @@
 #include <QPushButton>
 #include <QSpinBox>
 #include <QStackedWidget>
+#include <QTabWidget>
 #include <QTemporaryDir>
 #include <QThread>
 #include <QToolButton>
@@ -354,6 +355,35 @@ namespace
 		auto* projToggle = window.findChild<QToolButton*>(QStringLiteral("config.projector.default.advanced_toggle"));
 		require(projToggle != nullptr && projToggle->isCheckable() && !projToggle->isChecked(),
 			"Unit 3: config.projector.default.advanced_toggle must exist and start collapsed (!isChecked())");
+
+		// MED-3: select Dynamic Drive > Advanced so isVisibleTo(&window) tests the projector collapsible body directly
+		// (not an unselected page/tab). Verify collapsed initially, expanded after 1st click, re-collapsed after 2nd click.
+		window.selectPage(QStringLiteral("Dynamic Drive"));
+		auto* drivePages = window.findChild<QTabWidget*>(QStringLiteral("vpv.drivepage.pages"));
+		auto* driveAdv = window.findChild<QWidget*>(QStringLiteral("vpv.drivepage.advanced"));
+		require(drivePages != nullptr && driveAdv != nullptr,
+			"MED-3: Dynamic Drive vpv.drivepage.pages or vpv.drivepage.advanced missing");
+		drivePages->setCurrentWidget(driveAdv);
+		QCoreApplication::processEvents();
+		require(projToggle->isVisibleTo(&window),
+			"MED-3: config.projector.default.advanced_toggle must be visible to window on Dynamic Drive > Advanced");
+
+		auto* projBaud = window.findChild<QWidget*>(QStringLiteral("config.projector.default.baud"));
+		auto* projFlux = window.findChild<QWidget*>(QStringLiteral("config.projector.default.flux_table"));
+		require(projBaud != nullptr && projFlux != nullptr,
+			"MED-3: projector advanced controls (baud, flux_table) missing");
+		require(!projBaud->isVisibleTo(&window) && !projFlux->isVisibleTo(&window),
+			"MED-3 negative control: projector advanced controls (baud, flux_table) must start hidden/collapsed (!isVisibleTo(&window))");
+
+		projToggle->click();
+		QCoreApplication::processEvents();
+		require(projToggle->isChecked() && projBaud->isVisibleTo(&window) && projFlux->isVisibleTo(&window),
+			"MED-3: clicking config.projector.default.advanced_toggle must expand projector advanced controls (isVisibleTo(&window))");
+
+		projToggle->click();
+		QCoreApplication::processEvents();
+		require(!projToggle->isChecked() && !projBaud->isVisibleTo(&window) && !projFlux->isVisibleTo(&window),
+			"MED-3 negative control: clicking config.projector.default.advanced_toggle a second time must re-collapse projector advanced controls");
 
 		auto* tablesCard = window.findChild<QWidget*>(QStringLiteral("vpv.drive.group.tables"));
 		auto* tablesToggle = window.findChild<QToolButton*>(QStringLiteral("vpv.drive.group.tables.toggle"));

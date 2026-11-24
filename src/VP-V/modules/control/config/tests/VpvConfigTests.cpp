@@ -605,8 +605,12 @@ namespace
 			QString list;
 			for (const char* group : { "A", "B", "C", "D" })
 				list += control<QLabel>(window, Vpv::ObjectName(QStringLiteral("retirement.group.") + QString::fromLatin1(group) + QStringLiteral(".list")))->text();
-			// CC-GEM P2 + Unit 3 (Phase 2): capture_display_fixes sits on Capture fixes (under test) inside Developer,
-			// and magewell_recover_faults sits on System > Capture bridges; the list names those tabs/cards for them.
+			// CC-GEM P2 + Unit 3 (Phase 2) + LOW-4: capture_display_fixes sits on Capture fixes (under test) inside Developer,
+			// and magewell_recover_faults sits on System > Capture & Signal Bridges; group A's list names that exact card.
+			const QString groupAList = control<QLabel>(window, Vpv::ObjectName("retirement.group.A.list"))->text();
+			require(groupAList.contains(QStringLiteral("VP-V &gt; System &gt; Capture &amp; Signal Bridges")),
+				("LOW-4: retirement group A list must name 'VP-V > System > Capture & Signal Bridges' for magewell_recover_faults, got: " +
+					S(groupAList)).c_str());
 			require(list.contains(QStringLiteral("VP-V &gt; Proposed retirement")) &&
 				list.contains(QStringLiteral("VP-V &gt; Developer")) &&
 				list.contains(QStringLiteral("Capture fixes (under test)")) &&
@@ -1674,7 +1678,7 @@ namespace
 		require(note->text().contains(QStringLiteral("Main > Room-light adaptation")), "the Room lights card does not name Colour's Room-light adaptation");
 		bool backLink = false;
 		for (QLabel* label : window.findChildren<QLabel*>())
-			backLink = backLink || label->text().contains(QStringLiteral("set on this page's Room lights card"));
+			backLink = backLink || label->text().contains(QStringLiteral("System > Room Light Sensor card"));
 		require(backLink, "Colour's Room-light adaptation card does not name the Room lights card");
 		// Edits save under the same keys.
 		magewell->setChecked(true);
@@ -1918,6 +1922,49 @@ namespace
 			require(mode->currentData().toString() == QStringLiteral("custom") && !edit->isHidden() &&
 				edit->text() == QStringLiteral("hdv_1440x1080, 1920x1080"),
 				"saved custom source_geometry_detect value does not reopen in custom mode");
+		}
+
+		// HIGH #3 regression: named profile inheriting source_geometry_detect=conventional from [vprenderer]
+		// must stay on "all" (index 0, zero bounce back to "conventional") and save explicit source_geometry_detect: all.
+		{
+			QTemporaryDir dir2;
+			const QString inheritPath = WriteFixture(dir2,
+				"[vprenderer]\nsdr_target_nits: 100\nsource_geometry_detect: conventional\n"
+				"[vprenderer.Cinema]\nquality: high\n");
+			{
+				ConfigEditorWindow window(inheritPath, 0, true);
+				auto* profile = control<QComboBox>(window, Vpv::ObjectName("profile"));
+				auto* mode = control<QComboBox>(window, modeName);
+				auto* edit = control<QLineEdit>(window, name);
+				const int cinemaIdx = profile->findData(QStringLiteral("vprenderer.Cinema"));
+				require(cinemaIdx >= 0, "HIGH #3: Cinema profile missing from profile picker");
+				profile->setCurrentIndex(cinemaIdx);
+				QCoreApplication::processEvents();
+				// Negative control: Cinema initially inherits "conventional" from [vprenderer].
+				require(mode->currentData().toString() == QStringLiteral("conventional") && edit->isHidden(),
+					("HIGH #3 negative control: Cinema must initially inherit 'conventional', got '" +
+						S(mode->currentData().toString()) + "'").c_str());
+
+				const int allIdx = mode->findData(QStringLiteral("all"));
+				require(allIdx == 0, "HIGH #3: 'all' must be index 0 on vpv.scaling.source_geometry_detect.mode");
+				mode->setCurrentIndex(allIdx);
+				QCoreApplication::processEvents();
+				require(mode->currentIndex() == 0 && mode->currentData().toString() == QStringLiteral("all") && edit->isHidden(),
+					("HIGH #3: switching Cinema from inherited 'conventional' to 'all' bounced back to index " +
+						std::to_string(mode->currentIndex()) + " ('" + S(mode->currentData().toString()) + "')").c_str());
+				save(window);
+			}
+			ConfigFile reloaded;
+			std::string v2;
+			require(reloaded.Load(inheritPath.toStdString()), "HIGH #3: reload saved inherited-conventional config");
+			require(reloaded.TryGetString("vprenderer.cinema", "source_geometry_detect", v2) &&
+				Vpv::SameValue(v2, "all"),
+				("HIGH #3: saved [vprenderer.Cinema] must explicitly write 'source_geometry_detect: all', got '" +
+					v2 + "'\n" + FileText(inheritPath)).c_str());
+			require(reloaded.TryGetString(DefaultProfile(inheritPath), "source_geometry_detect", v2) &&
+				Vpv::SameValue(v2, "conventional"),
+				"HIGH #3: base [vprenderer] must keep 'source_geometry_detect: conventional'");
+			requireVpReads(inheritPath);
 		}
 	}
 
@@ -4392,6 +4439,12 @@ namespace
 			QCoreApplication::sendEvent(prodView, &prodShowEv);
 			QCoreApplication::sendEvent(naiveView, &naiveShowEv);
 
+			// LOW-1: prove SyncPopupForShow restored scrollbar container visibility independently of container-show resize!
+			require(prodBar->isVisibleTo(prodView) && !naiveBar->isVisibleTo(naiveView),
+				(std::string("CT-M9 Part B (LOW-1): SyncPopupForShow must restore scrollbar container visibility on QEvent::Show before prodContainer->show() (prodVisibleToView=") +
+					(prodBar->isVisibleTo(prodView) ? "true" : "false") +
+					", naiveVisibleToView=" + (naiveBar->isVisibleTo(naiveView) ? "true" : "false") + ")").c_str());
+
 			require(prodBar->maximum() > 0,
 				(std::string("CT-M9 Part B: production HiddenComboPopupCoalescer::SyncPopupForShow failed to recover scrollbar range on QEvent::Show (prodBar max=") +
 					std::to_string(prodBar->maximum()) +
@@ -4479,11 +4532,32 @@ namespace
 		// Initial load with adaptive_motion: 0.5 -> all 4 motion tuning rows enabled.
 		requireRowsEnabled(window, true, "loaded adaptive_motion: 0.5");
 
-		// Continuum controls exist and display 0.5.
+		// HIGH-1: adaptive_motion controls and all 4 tuning rows must live on Scaling > Advanced (vpv.scaling.card.adaptive_motion.body),
+		// NOT hidden away inside vpv.developer.
+		auto* scalingAdv = control<QWidget>(window, Vpv::ObjectName("scaling.advanced"));
+		auto* adaptiveMotionBody = control<QWidget>(window, Vpv::ObjectName("scaling.card.adaptive_motion.body"));
+		auto* devTab = control<QWidget>(window, Vpv::ObjectName("developer"));
+		auto* controls = control<QWidget>(window, QStringLiteral("config.vprenderer.adaptive_motion.controls"));
 		auto* mode = window.findChild<QComboBox*>(QStringLiteral("config.vprenderer.adaptive_motion.mode"));
 		auto* strength = window.findChild<QDoubleSpinBox*>(QStringLiteral("config.vprenderer.adaptive_motion.strength"));
 		require(mode != nullptr, "S4-M1: missing config.vprenderer.adaptive_motion.mode QComboBox");
 		require(strength != nullptr, "S4-M1: missing config.vprenderer.adaptive_motion.strength QDoubleSpinBox");
+		require(scalingAdv->isAncestorOf(adaptiveMotionBody) && !devTab->isAncestorOf(adaptiveMotionBody),
+			"HIGH-1: vpv.scaling.card.adaptive_motion.body must live under vpv.scaling.advanced, not vpv.developer");
+		for (QWidget* w : { static_cast<QWidget*>(controls), static_cast<QWidget*>(mode), static_cast<QWidget*>(strength) })
+			require(scalingAdv->isAncestorOf(w) && adaptiveMotionBody->isAncestorOf(w) && !devTab->isAncestorOf(w),
+				("HIGH-1: " + S(w->objectName()) + " must live under vpv.scaling.advanced / vpv.scaling.card.adaptive_motion.body, not vpv.developer").c_str());
+		for (const char* name : kMotionRows)
+		{
+			auto* w = control<QWidget>(window, QString::fromLatin1(name));
+			require(scalingAdv->isAncestorOf(w) && adaptiveMotionBody->isAncestorOf(w) && !devTab->isAncestorOf(w),
+				(std::string("HIGH-1: ") + name + " must live under vpv.scaling.advanced / vpv.scaling.card.adaptive_motion.body, not vpv.developer").c_str());
+		}
+
+		// MED-2: unconditional range check (never guarded by conditional skip).
+		require(std::abs(strength->minimum() - 0.0) < 1e-6 && std::abs(strength->maximum() - 1.0) < 1e-6,
+			("MED-2: adaptive_motion.strength must have range 0.0..1.0, got " +
+				std::to_string(strength->minimum()) + ".." + std::to_string(strength->maximum())).c_str());
 		require(!strength->isHidden() && strength->isEnabled(),
 			"S4-M1: adaptive_motion.strength must be visible and enabled for adaptive_motion: 0.5");
 		require(std::abs(strength->value() - 0.5) < 1e-4,
@@ -4517,26 +4591,65 @@ namespace
 				("S4-M1: saved file does not contain 'adaptive_motion: 0.25':\n" + fileText).c_str());
 		}
 
-		// Negative control: strength 0.0 (and mode "off") disables all 4 motion tuning rows.
-		if (strength->minimum() <= 0.0)
-		{
-			strength->setValue(0.0);
-			QCoreApplication::processEvents();
-			requireRowsEnabled(window, false, "negative control strength 0.0");
-		}
+		// Negative control (unconditional, no silent skip): strength 0.0 disables all 4 motion tuning rows.
+		strength->setValue(0.0);
+		QCoreApplication::processEvents();
+		requireRowsEnabled(window, false, "negative control strength 0.0");
+
+		// MED-2: mode "off" hides/disables strength spinbox and updates backing control to "off".
 		selectMode(mode, QStringLiteral("off"));
+		require(strength->isHidden() && !strength->isEnabled(),
+			"MED-2: adaptive_motion.strength must be hidden and disabled when mode is 'off'");
+		require(readBacking(backing).compare(QStringLiteral("off"), Qt::CaseInsensitive) == 0,
+			("MED-2: backing config.vprenderer.adaptive_motion must update to 'off', got '" +
+				S(readBacking(backing)) + "'").c_str());
 		requireRowsEnabled(window, false, "negative control mode off");
 
-		// Re-enabling via mode "on" restores all 4 motion tuning rows.
+		// MED-2: re-enabling via mode "on" hides/disables strength spinbox, updates backing control to "on", and restores all 4 rows.
 		selectMode(mode, QStringLiteral("on"));
+		require(strength->isHidden() && !strength->isEnabled(),
+			"MED-2: adaptive_motion.strength must be hidden and disabled when mode is 'on'");
+		require(readBacking(backing).compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0,
+			("MED-2: backing config.vprenderer.adaptive_motion must update to 'on', got '" +
+				S(readBacking(backing)) + "'").c_str());
 		requireRowsEnabled(window, true, "re-enabled mode on");
 
-		// Switching profiles updates enabled state cleanly: Cinema (off) -> disabled; Default -> enabled.
+		// Switching profiles updates enabled state cleanly: Cinema (off) -> disabled; selecting "Default (off)" (data "") clears override back to inherited.
 		auto* profiles = control<QListWidget>(window, QStringLiteral("config.vprenderer.profiles"));
 		require(profiles->count() >= 2, "S4-M1: expected at least 2 rendering profiles");
 		profiles->setCurrentRow(1);
 		QCoreApplication::processEvents();
 		requireRowsEnabled(window, false, "profile switched to Cinema (adaptive_motion: off)");
+
+		int defaultIdx = -1;
+		for (int i = 0; i < mode->count(); ++i)
+		{
+			if (mode->itemData(i).isValid() && mode->itemData(i).toString().isEmpty())
+			{
+				defaultIdx = i;
+				break;
+			}
+		}
+		require(defaultIdx >= 0,
+			"MED-2: adaptive_motion.mode must offer 'Default (off)' option with empty data \"\" to clear named-profile overrides");
+		mode->setCurrentIndex(defaultIdx);
+		QCoreApplication::processEvents();
+		require(strength->isHidden() && !strength->isEnabled(),
+			"MED-2: adaptive_motion.strength must be hidden and disabled for Default (off)");
+		require(readBacking(backing).isEmpty(),
+			("MED-2: selecting 'Default (off)' (data \"\") on named profile Cinema must clear backing adaptive_motion override to empty, got '" +
+				S(readBacking(backing)) + "'").c_str());
+		save(window);
+		requireVpReads(path);
+		{
+			ConfigFile cleared;
+			std::string stored;
+			require(cleared.Load(path.toStdString(), ConfigFile::ReadPolicy::Fresh),
+				"MED-2: reload config after clearing Cinema adaptive_motion override");
+			require(!cleared.TryGetString("vprenderer.cinema", "adaptive_motion", stored),
+				("MED-2: selecting 'Default (off)' on Cinema must remove [vprenderer.Cinema] adaptive_motion override, got '" +
+					stored + "'\n" + FileText(path)).c_str());
+		}
 
 		profiles->setCurrentRow(0);
 		QCoreApplication::processEvents();
@@ -4833,6 +4946,9 @@ namespace
 			auto* whiteNits = control<QDoubleSpinBox>(window, Vpv::ObjectName("colour.appearance_screen_white_nits"));
 			require(std::abs(whiteNits->minimum() - 1.0) < 1e-6 && std::abs(whiteNits->maximum() - 1000.0) < 1e-6,
 				"Unit 2: appearance_screen_white_nits QDoubleSpinBox must have range 1.0..1000.0");
+			// HIGH #2 regression: keyboardTracking must be disabled on CAM16 spinboxes so mid-typing cannot be clobbered.
+			require(!strength->keyboardTracking() && !whiteNits->keyboardTracking(),
+				"HIGH #2: appearance_strength and appearance_screen_white_nits must set keyboardTracking(false) so mid-typing is not clobbered");
 
 			auto* appearanceTuningBody = control<QWidget>(window, Vpv::ObjectName("colour.card.appearance_tuning.body"));
 			auto* appearanceMeasured = control<QComboBox>(window, Vpv::ObjectName("colour.appearance_screen_white_measured"));
@@ -4847,12 +4963,43 @@ namespace
 			require(roomTuningBody->isAncestorOf(ambientStrength),
 				"Unit 2: config.vprenderer.ambient_adapt_strength must live inside colour.card.room_tuning.body");
 
+			// LOW-2: check EVERY input control inside vpv.colour.card.room_tuning.body (not just ambient_adapt_strength).
+			auto requireAllRoomTuningInputsEnabled = [](QWidget* body, bool expected, const char* context)
+			{
+				int checked = 0;
+				for (QLineEdit* w : body->findChildren<QLineEdit*>())
+				{
+					++checked;
+					require(w->isEnabled() == expected,
+						(std::string("LOW-2 (") + context + "): room_tuning QLineEdit '" + S(w->objectName()) +
+							(expected ? "' must be enabled" : "' must be disabled")).c_str());
+				}
+				for (QComboBox* w : body->findChildren<QComboBox*>())
+				{
+					++checked;
+					require(w->isEnabled() == expected,
+						(std::string("LOW-2 (") + context + "): room_tuning QComboBox '" + S(w->objectName()) +
+							(expected ? "' must be enabled" : "' must be disabled")).c_str());
+				}
+				for (QDoubleSpinBox* w : body->findChildren<QDoubleSpinBox*>())
+				{
+					++checked;
+					require(w->isEnabled() == expected,
+						(std::string("LOW-2 (") + context + "): room_tuning QDoubleSpinBox '" + S(w->objectName()) +
+							(expected ? "' must be enabled" : "' must be disabled")).c_str());
+				}
+				require(checked >= 5,
+					(std::string("LOW-2 (") + context + "): expected at least 5 input controls inside vpv.colour.card.room_tuning.body, found " +
+						std::to_string(checked)).c_str());
+			};
+
 			// Negative control (appearance=off, ambient_adapt=on): CAM16 controls disabled, legacy room-light enabled, replaced note hidden.
 			require(!room->isEnabled() && !strength->isEnabled() && !whiteNits->isEnabled() &&
 				!appearanceMeasured->isEnabled() && !appearanceHonourL11->isEnabled(),
 				"Unit 2 negative control (appearance=off): CAM16 room/strength/white_nits/tuning controls must be disabled");
 			require(appearance->isEnabled() && ambientAdapt->isEnabled() && ambientStrength->isEnabled(),
 				"Unit 2 negative control (appearance=off): appearance switch, ambient_adapt, and ambient_adapt_strength must be enabled");
+			requireAllRoomTuningInputsEnabled(roomTuningBody, true, "appearance=off initial");
 			require(replacedNote->isHidden(),
 				"Unit 2 negative control (appearance=off): vpv.colour.room.replaced_note must be hidden");
 
@@ -4867,6 +5014,7 @@ namespace
 				"Unit 2 (appearance=on): CAM16 room/strength/white_nits/tuning controls must become enabled");
 			require(!ambientAdapt->isEnabled() && !ambientStrength->isEnabled(),
 				"Unit 2 (appearance=on): legacy ambient_adapt and ambient_adapt_strength must become disabled");
+			requireAllRoomTuningInputsEnabled(roomTuningBody, false, "appearance=on");
 			require(!replacedNote->isHidden() && replacedNote->text().contains(QStringLiteral("Replaced by CAM16 Appearance")),
 				("Unit 2 (appearance=on): vpv.colour.room.replaced_note must be visible with 'Replaced by CAM16 Appearance', got: " +
 					S(replacedNote->text())).c_str());
@@ -4879,6 +5027,7 @@ namespace
 				"Unit 2 (back to off): CAM16 controls must disable again");
 			require(ambientAdapt->isEnabled() && ambientStrength->isEnabled() && replacedNote->isHidden(),
 				"Unit 2 (back to off): legacy ambient_adapt/ambient_adapt_strength must re-enable and replaced_note must hide again");
+			requireAllRoomTuningInputsEnabled(roomTuningBody, true, "back to appearance=off");
 
 			// Switch back ON, set validated CAM16 values, and save.
 			appearance->setCurrentIndex(onIdx);
@@ -4933,6 +5082,17 @@ namespace
 			require(!control<QComboBox>(reopened, Vpv::ObjectName("colour.ambient_adapt"))->isEnabled() &&
 				!reloadedAmbientStrength->isEnabled(),
 				"Unit 2 reload: mutual exclusion disables ambient_adapt and ambient_adapt_strength on initial open");
+			for (QLineEdit* w : reloadedRoomTuningBody->findChildren<QLineEdit*>())
+				require(!w->isEnabled(),
+					("LOW-2 reload: room_tuning QLineEdit '" + S(w->objectName()) + "' must be disabled when appearance=on").c_str());
+			for (QComboBox* w : reloadedRoomTuningBody->findChildren<QComboBox*>())
+				require(!w->isEnabled(),
+					("LOW-2 reload: room_tuning QComboBox '" + S(w->objectName()) + "' must be disabled when appearance=on").c_str());
+			for (QDoubleSpinBox* w : reloadedRoomTuningBody->findChildren<QDoubleSpinBox*>())
+				require(!w->isEnabled(),
+					("LOW-2 reload: room_tuning QDoubleSpinBox '" + S(w->objectName()) + "' must be disabled when appearance=on").c_str());
+			require(!strength->keyboardTracking() && !whiteNits->keyboardTracking(),
+				"HIGH #2 reload: CAM16 spinboxes must keep keyboardTracking(false)");
 			auto* replacedNote = control<QLabel>(reopened, Vpv::ObjectName("colour.room.replaced_note"));
 			require(!replacedNote->isHidden() && replacedNote->text().contains(QStringLiteral("Replaced by CAM16 Appearance")),
 				"Unit 2 reload: replaced_note visible on initial open when appearance=on");
@@ -5008,12 +5168,20 @@ namespace
 								": " + S(texts[i])).c_str());
 				}
 			};
-			auto hasCI = [](const QString& text, const char* needle)
+			// MED-1: whole-word regex matching so "motion"/"resolution" NEVER falsely matches "on".
+			auto hasWordCI = [](const QString& text, const char* word)
 			{
-				return text.contains(QString::fromLatin1(needle), Qt::CaseInsensitive);
+				const QRegularExpression re(
+					QStringLiteral("\\b%1\\b").arg(QRegularExpression::escape(QString::fromLatin1(word))),
+					QRegularExpression::CaseInsensitiveOption);
+				return re.match(text).hasMatch();
 			};
+			// In-test negative control: prove hasWordCI rejects substring trap ("motion" / "resolution" must NOT match "on").
+			require(!hasWordCI(QStringLiteral("Source-resolution re-base off; motion off"), "on") &&
+				hasWordCI(QStringLiteral("Source-resolution re-base off; motion off"), "off"),
+				"MED-1 negative control: hasWordCI must not falsely match 'on' inside 'resolution'/'motion'");
 
-			// Repair clarity summaries (Classic 0, Low 1, Mid 2).
+			// Repair clarity summaries (Classic 0, Low 1, Mid 2, plus planned Upper 3).
 			QStringList repairTexts;
 			for (int step = 0; step <= 2; ++step)
 			{
@@ -5022,12 +5190,26 @@ namespace
 				repairTexts << repairSummary->text();
 			}
 			checkDistinctNonEmpty("repair", repairTexts);
-			require(hasCI(repairTexts[0], "deband") && hasCI(repairTexts[0], "off"),
-				("Unit 2: Repair Classic summary must mention deband + off, got: " + S(repairTexts[0])).c_str());
-			require(hasCI(repairTexts[1], "deband") && hasCI(repairTexts[1], "auto"),
-				("Unit 2: Repair Low summary must mention deband + auto/automatic, got: " + S(repairTexts[1])).c_str());
-			require(hasCI(repairTexts[2], "deband") && hasCI(repairTexts[2], "on"),
-				("Unit 2: Repair Mid summary must mention deband + on, got: " + S(repairTexts[2])).c_str());
+			require(hasWordCI(repairTexts[0], "deband") && hasWordCI(repairTexts[0], "off") && !hasWordCI(repairTexts[0], "on"),
+				("Unit 2: Repair Classic summary must mention deband + whole-word off (never on), got: " + S(repairTexts[0])).c_str());
+			require(hasWordCI(repairTexts[1], "deband") &&
+				(hasWordCI(repairTexts[1], "auto") || hasWordCI(repairTexts[1], "automatic")) && !hasWordCI(repairTexts[1], "on"),
+				("Unit 2: Repair Low summary must mention deband + whole-word auto/automatic (never on), got: " + S(repairTexts[1])).c_str());
+			require(hasWordCI(repairTexts[2], "deband") && hasWordCI(repairTexts[2], "on"),
+				("Unit 2: Repair Mid summary must mention deband + whole-word on, got: " + S(repairTexts[2])).c_str());
+
+			// MED-1: Repair Upper (step 3 — planned): stays at Mid, planned note explains Upper is planned / uses Mid.
+			auto* repairPlanned = control<QLabel>(window, Vpv::ObjectName("repair.tier.planned"));
+			repairSlider->setValue(3);
+			QCoreApplication::processEvents();
+			require(repairSlider->value() == 2,
+				"MED-1: Repair Upper (step 3, planned) must snap back to Mid (step 2) without writing");
+			require(hasWordCI(repairPlanned->text(), "Upper") && hasWordCI(repairPlanned->text(), "planned") &&
+				hasWordCI(repairPlanned->text(), "Mid"),
+				("MED-1: Repair Upper (step 3) planned note must mention Upper + planned + Mid, got: " + S(repairPlanned->text())).c_str());
+			require(hasWordCI(repairSummary->text(), "Mid") && hasWordCI(repairSummary->text(), "deband") &&
+				hasWordCI(repairSummary->text(), "on"),
+				("MED-1: Repair Upper (step 3) active summary must continue reporting Mid (deband on), got: " + S(repairSummary->text())).c_str());
 
 			// Motion clarity summaries (Classic 0, Low 1, Mid 2, Upper 3 — all 4 built).
 			auto* motionSlider = control<QSlider>(window, Vpv::ObjectName("motion.tier"));
@@ -5039,13 +5221,17 @@ namespace
 				motionTexts << motionSummary->text();
 			}
 			checkDistinctNonEmpty("motion", motionTexts);
-			require((hasCI(motionTexts[0], "optical flow") || hasCI(motionTexts[0], "motion") || hasCI(motionTexts[0], "matcher")) &&
-				hasCI(motionTexts[0], "off"),
-				("Unit 2: Motion Classic summary must explicitly state what is off, got: " + S(motionTexts[0])).c_str());
-			require((hasCI(motionTexts[2], "optical flow") || hasCI(motionTexts[2], "motion")) && hasCI(motionTexts[2], "on"),
-				("Unit 2: Motion Mid summary must explicitly state what is on, got: " + S(motionTexts[2])).c_str());
-			require(hasCI(motionTexts[3], "on"),
-				("Unit 2: Motion Upper summary must explicitly state what is on, got: " + S(motionTexts[3])).c_str());
+			require(hasWordCI(motionTexts[0], "optical flow") && hasWordCI(motionTexts[0], "off") && !hasWordCI(motionTexts[0], "on"),
+				("Unit 2: Motion Classic summary must explicitly state optical flow off (whole-word, never on), got: " + S(motionTexts[0])).c_str());
+			require(hasWordCI(motionTexts[1], "optical flow") && hasWordCI(motionTexts[1], "off") &&
+				hasWordCI(motionTexts[1], "quarter-pel") && hasWordCI(motionTexts[1], "on"),
+				("MED-1: Motion Low summary must state optical flow off + quarter-pel on, got: " + S(motionTexts[1])).c_str());
+			require(hasWordCI(motionTexts[2], "optical flow") && hasWordCI(motionTexts[2], "on") &&
+				hasWordCI(motionTexts[2], "look-ahead"),
+				("Unit 2: Motion Mid summary must explicitly state optical flow on + look-ahead, got: " + S(motionTexts[2])).c_str());
+			require(hasWordCI(motionTexts[3], "optical flow") && hasWordCI(motionTexts[3], "sub-block") &&
+				hasWordCI(motionTexts[3], "on") && !hasWordCI(motionTexts[3], "off"),
+				("Unit 2: Motion Upper summary must explicitly state optical flow + sub-block on (whole-word, never off), got: " + S(motionTexts[3])).c_str());
 
 			// Scaling clarity summaries (Classic 0, Low 1, Mid 2).
 			auto* scalingSlider = control<QSlider>(window, Vpv::ObjectName("scaling.tier"));
@@ -5057,12 +5243,15 @@ namespace
 				scalingTexts << scalingSummary->text();
 			}
 			checkDistinctNonEmpty("scaling", scalingTexts);
-			require((hasCI(scalingTexts[0], "re-base") || hasCI(scalingTexts[0], "rebase") || hasCI(scalingTexts[0], "downscale")) &&
-				hasCI(scalingTexts[0], "off"),
-				("Unit 2: Scaling Classic summary must explicitly state what is off, got: " + S(scalingTexts[0])).c_str());
-			require((hasCI(scalingTexts[2], "re-base") || hasCI(scalingTexts[2], "rebase") || hasCI(scalingTexts[2], "downscale")) &&
-				hasCI(scalingTexts[2], "on"),
-				("Unit 2: Scaling Mid summary must explicitly state what is on, got: " + S(scalingTexts[2])).c_str());
+			require(hasWordCI(scalingTexts[0], "re-base") && hasWordCI(scalingTexts[0], "downscale") &&
+				hasWordCI(scalingTexts[0], "off") && !hasWordCI(scalingTexts[0], "on"),
+				("Unit 2: Scaling Classic summary must explicitly state re-base + downscale off (whole-word, never on), got: " + S(scalingTexts[0])).c_str());
+			require(hasWordCI(scalingTexts[1], "re-base") && hasWordCI(scalingTexts[1], "auto") &&
+				hasWordCI(scalingTexts[1], "downscale") && hasWordCI(scalingTexts[1], "off") && !hasWordCI(scalingTexts[1], "on"),
+				("MED-1: Scaling Low summary must state re-base auto + downscale off (never on), got: " + S(scalingTexts[1])).c_str());
+			require(hasWordCI(scalingTexts[2], "re-base") && hasWordCI(scalingTexts[2], "downscale") &&
+				hasWordCI(scalingTexts[2], "on"),
+				("Unit 2: Scaling Mid summary must explicitly state re-base + downscale whole-word on, got: " + S(scalingTexts[2])).c_str());
 
 			// Output clarity summaries (Classic 0, Low 1, Mid 2).
 			auto* outputSlider = control<QSlider>(window, Vpv::ObjectName("output.tier"));
@@ -5075,12 +5264,14 @@ namespace
 			}
 			checkDistinctNonEmpty("output", outputTexts);
 			for (int step = 0; step <= 2; ++step)
-				require(hasCI(outputTexts[step], "dither"),
+				require(hasWordCI(outputTexts[step], "dither"),
 					("Unit 2: Output tier summary must name dither, got: " + S(outputTexts[step])).c_str());
-			require(hasCI(outputTexts[0], "libplacebo") || hasCI(outputTexts[0], "off"),
-				("Unit 2: Output Classic summary must state libplacebo/off, got: " + S(outputTexts[0])).c_str());
-			require(hasCI(outputTexts[2], "vp") || hasCI(outputTexts[2], "sigma") || hasCI(outputTexts[2], "on"),
-				("Unit 2: Output Mid summary must state VP/sigma-delta/on, got: " + S(outputTexts[2])).c_str());
+			require(hasWordCI(outputTexts[0], "libplacebo") && hasWordCI(outputTexts[0], "off") && !hasWordCI(outputTexts[0], "on"),
+				("Unit 2: Output Classic summary must state libplacebo + whole-word off (never on), got: " + S(outputTexts[0])).c_str());
+			require(hasWordCI(outputTexts[1], "auto") && hasWordCI(outputTexts[1], "vp"),
+				("MED-1: Output Low summary must state auto + VP motion-aware, got: " + S(outputTexts[1])).c_str());
+			require(hasWordCI(outputTexts[2], "vp") && hasWordCI(outputTexts[2], "on") && !hasWordCI(outputTexts[2], "off"),
+				("Unit 2: Output Mid summary must state VP + whole-word on (never off), got: " + S(outputTexts[2])).c_str());
 
 			// Overview global tier summary (Classic -> Low -> Mid -> Upper via Unit 3 preset buttons).
 			QStringList globalTexts;
@@ -5091,6 +5282,24 @@ namespace
 				globalTexts << globalSummary->text();
 			}
 			checkDistinctNonEmpty("global_tier", globalTexts);
+			// MED-1: whole-word semantic assertions across all 4 global tier presets.
+			require(hasWordCI(globalTexts[0], "Classic") && hasWordCI(globalTexts[0], "off") &&
+				!hasWordCI(globalTexts[0], "on") && hasWordCI(globalTexts[0], "libplacebo"),
+				("MED-1: Global Classic summary must state whole-word off + libplacebo (never on), got: " + S(globalTexts[0])).c_str());
+			require(hasWordCI(globalTexts[1], "Low") && hasWordCI(globalTexts[1], "quarter-pel") &&
+				(hasWordCI(globalTexts[1], "auto") || hasWordCI(globalTexts[1], "automatic")) &&
+				hasWordCI(globalTexts[1], "on") && hasWordCI(globalTexts[1], "off"),
+				("MED-1: Global Low summary must reflect light features (quarter-pel on, auto deband/re-base/dither, downscale off), got: " + S(globalTexts[1])).c_str());
+			require(hasWordCI(globalTexts[2], "Mid") && hasWordCI(globalTexts[2], "optical flow") &&
+				hasWordCI(globalTexts[2], "deband") && hasWordCI(globalTexts[2], "downscale") &&
+				hasWordCI(globalTexts[2], "dither") && hasWordCI(globalTexts[2], "on") &&
+				globalTexts[2].contains(QStringLiteral("Sub-block split off"), Qt::CaseInsensitive),
+				("MED-1: Global Mid summary must state active Mid features (optical flow/deband/downscale/dither on, sub-block split off), got: " + S(globalTexts[2])).c_str());
+			require(hasWordCI(globalTexts[3], "Upper") && hasWordCI(globalTexts[3], "optical flow") &&
+				hasWordCI(globalTexts[3], "deband") && hasWordCI(globalTexts[3], "downscale") &&
+				hasWordCI(globalTexts[3], "on") &&
+				globalTexts[3].contains(QStringLiteral("Sub-block split on"), Qt::CaseInsensitive),
+				("MED-1: Global Upper summary must state active Upper features including sub-block split on, got: " + S(globalTexts[3])).c_str());
 
 			// Save at Repair Low (1) and prove round-trip reload sticks at 1 without bounce.
 			repairSlider->setValue(1);
@@ -5190,20 +5399,22 @@ namespace
 			require(motionAdv->isAncestorOf(estAhead) && !motionMain->isAncestorOf(estAhead),
 				"Unit 2: dejudder_estimate_ahead must live inside vpv.motion.advanced, not vpv.motion.main");
 
-			// 4. render_ahead and intent_motion lock to vector_demand (negative control: enabled when on, disabled when off, re-enabled when on).
+			// 4. render_ahead, intent_motion, and camera_model (MED #6) lock to vector_demand
+			//    (negative control: enabled when on, disabled when off, re-enabled when on).
 			auto* vectorDemand = control<QComboBox>(window, Vpv::ObjectName("motion.vector_demand"));
 			auto* renderAhead = control<QWidget>(window, Vpv::ObjectName("motion.render_ahead"));
 			auto* intentMotion = control<QWidget>(window, Vpv::ObjectName("motion.intent_motion"));
-			require(renderAhead->isEnabled() && intentMotion->isEnabled(),
-				"Unit 2 negative control (vector_demand=on): render_ahead and intent_motion must start enabled");
+			auto* cameraModel = control<QCheckBox>(window, Vpv::ObjectName("camera.camera_model"));
+			require(renderAhead->isEnabled() && intentMotion->isEnabled() && cameraModel->isEnabled(),
+				"Unit 2 + MED #6 negative control (vector_demand=on): render_ahead, intent_motion, and camera_model must start enabled");
 			vectorDemand->setCurrentIndex(vectorDemand->findData(QStringLiteral("off")));
 			QCoreApplication::processEvents();
-			require(!renderAhead->isEnabled() && !intentMotion->isEnabled(),
-				"Unit 2 (vector_demand=off): render_ahead and intent_motion must disable when motion engine is off");
+			require(!renderAhead->isEnabled() && !intentMotion->isEnabled() && !cameraModel->isEnabled(),
+				"Unit 2 + MED #6 (vector_demand=off): render_ahead, intent_motion, and camera_model must disable when motion engine is off");
 			vectorDemand->setCurrentIndex(vectorDemand->findData(QStringLiteral("on")));
 			QCoreApplication::processEvents();
-			require(renderAhead->isEnabled() && intentMotion->isEnabled(),
-				"Unit 2 (vector_demand=on again): render_ahead and intent_motion must re-enable");
+			require(renderAhead->isEnabled() && intentMotion->isEnabled() && cameraModel->isEnabled(),
+				"Unit 2 + MED #6 (vector_demand=on again): render_ahead, intent_motion, and camera_model must re-enable");
 
 			// 5. dither_need lives inside Output > Main (output.card.dither_need) and calibration_lut_stage inside Output > Advanced (output.card.calibration_lut_stage), NOT vpv.expert.
 			auto* outputMain = control<QWidget>(window, Vpv::ObjectName("output.main"));

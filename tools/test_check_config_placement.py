@@ -297,9 +297,8 @@ class RepositoryTests(unittest.TestCase):
         for key in ("adaptive_motion", "adaptive_motion_floor", "adaptive_motion_smooth_ms",
                     "adaptive_motion_speed_hi", "adaptive_motion_speed_lo"):
             self.assertEqual(owners.get(key), ["scaling.output"], key)
-            # Unit 3 (Phase 2): adaptiveDownscale/adaptiveUpscale moved to developer/scaling_internals
-            # while remaining owned by scaling.output.
-            self.assertEqual(placement[key]["unit"], "developer", key)
+            # HIGH-1: adaptive_motion + its 4 tuning rows live on Scaling > Advanced (user-facing, not Developer).
+            self.assertEqual(placement[key]["unit"], "scaling", key)
         self.assertEqual(placement["repeat_render_reuse"]["unit"], "developer")
         self.assertEqual(placement["intent_display"]["unit"], "developer")
         self.assertIn("output.dither", owners["occlusion_mask"])
@@ -312,8 +311,6 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(issues["error"], [])
         self.assertEqual(issues["advisory"], [])
         self.assertEqual(chk.FIXES_CONTAINER_STAYS, ())
-        for key in chk.FIXES_CONTAINER_STAYS:
-            self.assertNotIn(key, placement, key)
         for key in ("optical_flow_fb_check", "optical_flow_global", "optical_flow_global_fallback", "source_class"):
             self.assertEqual(placement[key]["unit"], "motion", key)
         self.assertEqual(placement["ssim_bitrate_floor"]["unit"], "scaling")
