@@ -615,18 +615,20 @@ GridFadeFit FitMotionTolerantFade(const double refAligned[kGridH][kGridW], const
     return fit;
 }
 
-bool HighlightScalingConsistent(uint32_t refP99P4, uint32_t curP99P4, double gain, double black, int dir)
+bool HighlightScalingConsistent(uint32_t refP99P4, uint32_t curP99P4, double gain, double black, int dir,
+                                double clippedMinDrop)
 {
     const double rp = double(refP99P4) * kGridScale;
     const double cp = double(curP99P4) * kGridScale;
     if (!(rp > black + double(kFadeMinSpread) && cp > black + double(kFadeMinSpread)))
         return true;
     // Clipped-white linear fade-out censorship: when a verified fade-out has dropped the unclipped
-    // scene by >= 1/kFadeMaxDiv (25%) while highlights sit at ITU-R BT.709-6 studio peak white (>= 235 - 1 code)
+    // scene by >= clippedMinDrop (default 1/kFadeMaxDiv = 25% for runs; kFadeResidualReduction/kFadeMaxDiv = 12.5%
+    // for single-pair ClassifyEvents) while highlights sit at ITU-R BT.709-6 studio peak white (>= 235 - 1 code)
     // and remain non-rising within 1-code quantization jitter (cp <= rp + kFadeMinSpread), p99 may be censored
     // at studio peak white until the highlight unclips.
     if (dir < 0 && rp >= kStudioPeakWhiteCodes - double(kFadeMinSpread) &&
-        cp <= rp + double(kFadeMinSpread) && (1.0 - gain) >= 1.0 / double(kFadeMaxDiv))
+        cp <= rp + double(kFadeMinSpread) && (1.0 - gain) >= clippedMinDrop)
         return true;
     const double aP99 = (cp - black) / (rp - black);
     // For brightening (dir > 0), enforce exact multiplicative reciprocal [0.5, 2.0] consistency around (gain - 1)
@@ -683,15 +685,18 @@ static void AlignGridGuarded(const double ref[kGridH][kGridW], const double cur[
     AlignGrid(ref, cur, searchRadius, refAligned, curAligned, outVx, outVy);
 }
 
-// Multiplicative footprint preservation (Derived Fix A): under a true multiplicative fade y = A*x + b*(1-A),
-// any cell whose predicted faded value stays strictly above litFloor + 2*kFadeMinSpread cannot collapse straight
-// to black (<= litFloor + kFadeMinSpread). Rejects shrinking/zooming localized graphics on black while preserving
-// genuine sparse static title cards and dark low-key scenes fading to/from black.
+// Multiplicative footprint preservation (Derived Fix A, scoped to sparse scenes < kFadeMinLitCells):
+// full-picture scenes (>= kFadeMinLitCells) already pass FitGridFadeAligned's whole-picture coverage & R^2
+// and may experience Rec.709 shadow-toe compression. On sparse scenes (< 25% of interior lit), any cell whose
+// predicted faded value stays strictly above litFloor + 2*kFadeMinSpread cannot collapse straight to black
+// (<= litFloor + kFadeMinSpread), and lit cells must explain > 75% L2 variance with >= 75% two-sided uniformity.
 static bool FootprintPreserved(const double refAligned[kGridH][kGridW], const double curAligned[kGridH][kGridW],
                                const GridFadeFit& fit)
 {
     if (!fit.valid || !(fit.gain > 0.0) || fit.dir == 0)
         return false;
+    if (fit.litCells >= kFadeMinLitCells)
+        return true;   // full-picture scenes: FitGridFadeAligned already enforces whole-picture coverage & R^2
     constexpr int R = kLocalRadius;
     const double c = fit.black * (1.0 - fit.gain);
     double minCell = double(kFadeNoBlack);
@@ -704,49 +709,40 @@ static bool FootprintPreserved(const double refAligned[kGridH][kGridW], const do
     const double litFloor = (std::max)(fit.black, minCell);
     const double litBar = litFloor + double(kFadeMinSpread);
     const double predBar = litFloor + 2.0 * double(kFadeMinSpread);
-    int predLit = 0, collapsed = 0;
+    int collapsed = 0;
     if (fit.dir < 0) {
         for (int y = R; y < kGridH - R; ++y)
             for (int x = R; x < kGridW - R; ++x) {
                 const double rv = refAligned[y][x];
-                if (rv > litBar && (fit.gain * rv + c) > predBar) {
-                    ++predLit;
-                    if (curAligned[y][x] <= litBar)
-                        ++collapsed;
-                }
+                if (rv > litBar && (fit.gain * rv + c) > predBar && curAligned[y][x] <= litBar)
+                    ++collapsed;
             }
     } else {
         for (int y = R; y < kGridH - R; ++y)
             for (int x = R; x < kGridW - R; ++x) {
                 const double cv = curAligned[y][x];
-                if (cv > litBar && ((cv - c) / fit.gain) > predBar) {
-                    ++predLit;
-                    if (refAligned[y][x] <= litBar)
-                        ++collapsed;
-                }
+                if (cv > litBar && ((cv - c) / fit.gain) > predBar && refAligned[y][x] <= litBar)
+                    ++collapsed;
             }
     }
-    if (fit.litCells < kFadeMinLitCells) {
-        if (collapsed != 0)
-            return false;
-        if (!(fit.eFade * fit.eFade < (1.0 - kFadeSpatialConsensus) * fit.eId * fit.eId))
-            return false;
-        int checkedCells = 0, uniformCells = 0;
-        const double refBar = fit.black + double(kFadeMinSpread);
-        for (int y = R; y < kGridH - R; ++y)
-            for (int x = R; x < kGridW - R; ++x) {
-                const double rv = refAligned[y][x];
-                const double cv = curAligned[y][x];
-                if (rv > refBar && (std::max)(rv, cv) > litBar) {
-                    ++checkedCells;
-                    const double pred = fit.gain * rv + c;
-                    if (std::fabs(cv - pred) <= kFadeResidualReduction * std::fabs(pred - rv))
-                        ++uniformCells;
-                }
+    if (collapsed != 0)
+        return false;
+    if (!(fit.eFade * fit.eFade < (1.0 - kFadeSpatialConsensus) * fit.eId * fit.eId))
+        return false;
+    int checkedCells = 0, uniformCells = 0;
+    const double refBar = fit.black + double(kFadeMinSpread);
+    for (int y = R; y < kGridH - R; ++y)
+        for (int x = R; x < kGridW - R; ++x) {
+            const double rv = refAligned[y][x];
+            const double cv = curAligned[y][x];
+            if (rv > refBar && (std::max)(rv, cv) > litBar) {
+                ++checkedCells;
+                const double pred = fit.gain * rv + c;
+                if (std::fabs(cv - pred) <= kFadeResidualReduction * std::fabs(pred - rv))
+                    ++uniformCells;
             }
-        return checkedCells > 0 && double(uniformCells) >= kFadeSpatialConsensus * double(checkedCells);
-    }
-    return predLit == 0 || double(predLit - collapsed) >= kFadeSpatialConsensus * double(predLit);
+        }
+    return checkedCells > 0 && double(uniformCells) >= kFadeSpatialConsensus * double(checkedCells);
 }
 
 GridFadeFit FitGridFadeGrid(const double ref[kGridH][kGridW], const double cur[kGridH][kGridW], int searchRadius)
@@ -827,7 +823,8 @@ EventSignals ClassifyEvents(const SourceStats::Record& prev, const SourceStats::
                         stepMean * double(outCache->adjFit.dir) > 0.0 &&
                         FootprintPreserved(outCache->prevAligned, outCache->curAligned, outCache->adjFit) &&
                         std::fabs(1.0 - outCache->adjFit.gain) < 1.0 / double(kFadeMaxDiv) &&
-                        HighlightScalingConsistent(prev.p99, cur.p99, outCache->adjFit.gain, outCache->adjFit.black, outCache->adjFit.dir);
+                        HighlightScalingConsistent(prev.p99, cur.p99, outCache->adjFit.gain, outCache->adjFit.black,
+                                                   outCache->adjFit.dir, kFadeResidualReduction / double(kFadeMaxDiv));
                 } else {
                     double prevA[kGridH][kGridW], curA[kGridH][kGridW];
                     double vx = 0.0, vy = 0.0;
@@ -837,7 +834,8 @@ EventSignals ClassifyEvents(const SourceStats::Record& prev, const SourceStats::
                     e.fade = fit.valid && stepMean * double(fit.dir) > 0.0 &&
                         FootprintPreserved(prevA, curA, fit) &&
                         std::fabs(1.0 - fit.gain) < 1.0 / double(kFadeMaxDiv) &&
-                        HighlightScalingConsistent(prev.p99, cur.p99, fit.gain, fit.black, fit.dir);
+                        HighlightScalingConsistent(prev.p99, cur.p99, fit.gain, fit.black, fit.dir,
+                                                   kFadeResidualReduction / double(kFadeMaxDiv));
                 }
             }
         }
@@ -1221,6 +1219,11 @@ bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur
         // jumping relative to prev's tiny remaining contrast.
         const double contGainStep = run.direction < 0 ? (run.keep * stepGainDelta) : stepGainDelta;
         const bool contGainJump = stepSxxQ > 1e-6 && contGainStep >= 1.0 / double(kFadeMaxDiv);
+        // Require BOTH raw spread jump AND whole-frame quantile contrast jump to flag an abrupt contrast dip:
+        // 1% specular unclipping jumps only aSpread (not stepAQ), while fast clipped-white fade-outs jump only
+        // stepAQ (while aSpread stays near zero), whereas true abrupt dips jump both.
+        const bool contSpreadJump = (aSpread * kFadeMaxDiv >= contRef) && contGainJump;
+        const bool seedSpreadJump = (aSpread * kFadeMaxDiv >= int64_t(spread)) && seedGainJump;
 
         const bool fromBlack = spreadPrev <= kBlackSpreadP4 && prev.mean < kBlackMeanMaxP4 &&
             dMean > 0 && dP99 > 0 && aMean < kMaxFadeStepP4 && aSpread < kMaxFadeStepP4;
@@ -1228,14 +1231,14 @@ bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur
         // where spreadPrev > 1 code yet aSpread / spread = 1/(k+1) >= 1/kFadeMaxDiv): exempt from relative jump guard.
         const bool nearBlackRise = prev.mean < kBlackMeanMaxP4 && dMean > 0 && dP99 > 0 && dSpread > 0 &&
             aMean < kMaxFadeStepP4 && aSpread < kMaxFadeStepP4;
-        const bool jump = (aMean * kFadeMaxDiv >= contRef || contGainJump) &&
+        const bool jump = (aMean * kFadeMaxDiv >= contRef || contSpreadJump) &&
             !(run.blackOrigin && dMean > 0 && aMean < kMaxFadeStepP4 && aSpread < kMaxFadeStepP4) && !nearBlackRise;
         const bool continues = run.direction != 0 && !jump && (stepDir == run.direction || stepDir == 0);
 
         if (!continues) {
             run = FadeRun();
             if (stepDir == 0 || (!(fromBlack || nearBlackRise) &&
-                                 (aMean * kFadeMaxDiv >= int64_t(spread) || seedGainJump))) {
+                                 (aMean * kFadeMaxDiv >= int64_t(spread) || seedSpreadJump))) {
                 FadeRunEndAt(run, cur);
                 return false;
             }
@@ -1361,9 +1364,10 @@ bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur
             if (!(sSameZero > sOppZero))
                 return false;
 
-            // Fix #4: Exact 4x2 (7x7) macro-tile step consensus scoped to sub-half-LSB steps (|stepMean| <= kFadeCellStepEps) —
-            // cancels internal motion dipoles during constant-gain holds while never blocking multi-code fade steps with local object motion.
-            if (std::fabs(stepMean) <= kFadeCellStepEps) {
+            // Fix #4: Exact 4x2 (7x7) macro-tile step consensus scoped to near-stationary holds
+            // (|stepMean| <= kFadeCellStepEps AND |stepAQ - 1| <= kFadeScaleEps): cancels internal motion dipoles
+            // during constant-gain holds while never blocking genuine multi-percent scaling steps.
+            if (std::fabs(stepMean) <= kFadeCellStepEps && std::fabs(stepAQ - 1.0) <= double(kFadeScaleEps)) {
                 constexpr int kTileCols = 4;
                 constexpr int kTileRows = 2;
                 constexpr int kTileSize = 7;
