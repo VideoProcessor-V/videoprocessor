@@ -123,6 +123,89 @@ namespace TdV2
 	constexpr double kSmallArgTaylorCutoff = 1e-3;   // Switch to 4th-order Taylor series to prevent 0/0 cancellation
 	constexpr double kDctPi = 3.14159265358979323846;
 
+	// ---- SOTA #1: Per-Cell AQ & ST.2084 PQ Step Scaling (Rule 1: Derived Codec & SMPTE ST 2084 Physics) ----
+	// Physical step-scale bounds: +/- 4 octaves = +/- 24 QP steps (exact 6-QP doubling law 2^(dQP/6)), spanning [1/16, 16].
+	constexpr double kCellStepScaleMin = 1.0 / 16.0;
+	constexpr double kCellStepScaleMax = 16.0;
+	// ST.2084 PQ shadow sensitivity weight bounds: [-2, +1] octaves = [1/4, 2] relative to ITU-R BT.2408 diffuse white (203 nits).
+	constexpr double kPqStepWeightMin = 0.25;
+	constexpr double kPqStepWeightMax = 2.0;
+
+	// Compute per-cell quantization step scale factor combining:
+	//   1) HEVC / AVC / AV1 standard 6-QP step doubling law: 2^(cellQpDelta / 6) (clamped to +/- 24 QP => [1/16, 16]).
+	//   2) Exact SMPTE ST 2084 PQ EOTF logarithmic slope (Weber contrast per unit PQ code) relative to
+	//      ITU-R BT.2408 HDR diffuse white (203 nits) when `isPqHdr == true`:
+	//        S(e) = d(ln L)/de = (1/M1) * (1/(p - C1) + C3/(C2 - C3*p)) * (p / (M2 * e)),  p = e^(1/M2)
+	//        pqWeight(e) = clamp(S(e_203) / S(e), 1/4, 2)
+	//      At 203 nits: pqWeight == 1.0 exactly; in deep PQ shadows where 1 code step causes a larger relative
+	//      luminance jump, pqWeight tightens smoothly down to 0.25 to respect PQ shadow JND sensitivity.
+	// When cellQpDelta == 0 and !isPqHdr, returns exact 1.0 (100% baseline identity).
+	inline double ComputeCellStepScale(
+		double cellQpDelta,
+		double cellMeanPqCode,
+		bool isPqHdr,
+		double sourceBits = 10.0)
+	{
+		if (!std::isfinite(cellQpDelta))
+			return 1.0;
+		const double clampedQp = cellQpDelta < -24.0 ? -24.0 : (cellQpDelta > 24.0 ? 24.0 : cellQpDelta);
+		const double aqScale = std::exp2(clampedQp / 6.0);
+
+		double pqWeight = 1.0;
+		if (isPqHdr)
+		{
+			if (!std::isfinite(cellMeanPqCode) || !std::isfinite(sourceBits) || !(sourceBits > 0.0) || sourceBits > 24.0)
+				return 1.0;
+			const double peakCode = std::exp2(sourceBits) - 1.0;
+			if (!(peakCode > 0.0))
+				return 1.0;
+
+			// Exact SMPTE ST 2084 rational constants and ITU-R BT.2408 diffuse white reference (203 nits / 10000 nits).
+			constexpr double kPqM1 = 2610.0 / 16384.0;
+			constexpr double kPqM2 = (2523.0 / 4096.0) * 128.0;
+			constexpr double kPqC1 = 3424.0 / 4096.0;
+			constexpr double kPqC2 = (2413.0 / 4096.0) * 32.0;
+			constexpr double kPqC3 = (2392.0 / 4096.0) * 32.0;
+			constexpr double kPqCeilingNits = 10000.0;
+			constexpr double kBt2408DiffuseWhiteNits = 203.0;
+
+			auto pqLogSlope = [&](double e) -> double
+			{
+				if (!(e > 0.0))
+					return 0.0;
+				const double ec = (e < 1.0) ? e : 1.0;
+				const double p = std::pow(ec, 1.0 / kPqM2);
+				const double numGap = p - kPqC1;
+				const double denGap = kPqC2 - kPqC3 * p;
+				if (!(numGap > kSolvePivotFloor) || !(denGap > kSolvePivotFloor))
+					return 0.0;
+				return (1.0 / kPqM1) * (1.0 / numGap + kPqC3 / denGap) * (p / (kPqM2 * ec));
+			};
+
+			const double yRef = std::pow(kBt2408DiffuseWhiteNits / kPqCeilingNits, kPqM1);
+			const double eRef = std::pow((kPqC1 + kPqC2 * yRef) / (1.0 + kPqC3 * yRef), kPqM2);
+			const double sRef = pqLogSlope(eRef);
+
+			const double e = RampMath::Clamp01(cellMeanPqCode / peakCode);
+			const double sCur = pqLogSlope(e);
+			if (sCur > kSolvePivotFloor && sRef > kSolvePivotFloor)
+			{
+				const double rawPq = sRef / sCur;
+				pqWeight = rawPq < kPqStepWeightMin ? kPqStepWeightMin : (rawPq > kPqStepWeightMax ? kPqStepWeightMax : rawPq);
+			}
+			else
+			{
+				// Pure black (p <= C1, L == 0): Weber contrast per code step diverges -> tighten to shadow floor.
+				pqWeight = kPqStepWeightMin;
+			}
+		}
+
+		const double combined = aqScale * pqWeight;
+		if (!std::isfinite(combined))
+			return 1.0;
+		return combined < kCellStepScaleMin ? kCellStepScaleMin : (combined > kCellStepScaleMax ? kCellStepScaleMax : combined);
+	}
+
 	// ---- FP32 Centered Second-Moment Accumulator (2026-11-20 CVQE review s3) ----
 	// Accumulates exact centered second moments E[(d_k - mu_k)(d_l - mu_l)] and raw E[d_k d_l]
 	// strictly in FP32 (float), never FP16, so 10/12-bit code levels avoid float cancellation.

@@ -664,6 +664,7 @@ namespace TdV2
 		const std::vector<uint8_t>* explicitFocusChangeCells = nullptr;
 		const std::vector<uint8_t>* explicitDefocusedCells = nullptr; // Upstream kFocusMap (id 32) matched-focus optical bokeh mask (Plan s1.4 L140)
 		const std::vector<uint8_t>* faceMask = nullptr; // Pass-1 per-cell (cellsW * cellsH) face/non-rigid mask (non-zero => delta == 0)
+		std::vector<double> cellStepScale;    // Optional per-cell AQ/PQ step scale (cellsW * cellsH; empty => 1.0 neutral everywhere)
 	};
 
 	struct FrameProcessResult
@@ -1113,6 +1114,25 @@ namespace TdV2
 			const int poolR = cfg_.momentPoolRadiusCells > 0 ? cfg_.momentPoolRadiusCells : 0;
 			const int gW = (w + grainCellPx - 1) / grainCellPx;
 			std::vector<double> cellRetainedGrain(numCells, 0.0);
+			std::vector<double> cellStepScales(numCells, 1.0);
+			if (!in.cellStepScale.empty())
+			{
+				for (size_t ci = 0; ci < numCells && ci < in.cellStepScale.size(); ++ci)
+				{
+					const double sv = in.cellStepScale[ci];
+					if (std::isfinite(sv) && sv > 0.0)
+					{
+						cellStepScales[ci] = sv < kCellStepScaleMin ? kCellStepScaleMin : (sv > kCellStepScaleMax ? kCellStepScaleMax : sv);
+					}
+					else
+					{
+						cellStepScales[ci] = 0.0;
+						nonFiniteCellFlag[ci] = 1u;
+						if (standIns != nullptr)
+							standIns->Engage(StandInKind::NonFiniteClosure, "non-finite or non-positive cellStepScale");
+					}
+				}
+			}
 
 			const bool faceMaskSizeMismatch = (in.faceMask != nullptr && !in.faceMask->empty() && in.faceMask->size() != numCells);
 			if (faceMaskSizeMismatch && standIns != nullptr)
@@ -1258,6 +1278,9 @@ namespace TdV2
 						? (cellOwnGrainEnergy / static_cast<double>(spatialPxCnt))
 						: 0.0;
 
+					const double cellStepScaleVal = cellStepScales[cIdx];
+					const double cellStepScaleSq = cellStepScaleVal * cellStepScaleVal;
+
 					// H13 (plan Q2 / s1.3 L127 / s3.3): Pass-1 face / non-rigid masked cells force ALL band weights (L, M, H)
 					// strictly to 0.0 so every pixel in the masked cell stays bit-for-bit passthrough (delta == 0).
 					if (isFaceMaskedCell(cIdx))
@@ -1271,7 +1294,7 @@ namespace TdV2
 						mBlock.f[TdMapsView::kRealDetail] = static_cast<float>(spatialDetailRms);
 						mBlock.f[TdMapsView::kStability] = 0.0f;
 						mBlock.f[TdMapsView::kOwnGrain] = static_cast<float>(std::sqrt((std::max)(0.0, cellRetainedGrainVar)));
-						mBlock.f[TdMapsView::kCodingNoise] = static_cast<float>(std::sqrt((std::max)(0.0, a2Stats.totalVar)));
+						mBlock.f[TdMapsView::kCodingNoise] = static_cast<float>(std::sqrt((std::max)(0.0, a2Stats.totalVar * cellStepScaleSq)));
 						mBlock.f[TdMapsView::kLightGain] = 1.0f;
 						mBlock.f[TdMapsView::kLightOffset] = 0.0f;
 						mBlock.f[TdMapsView::kDrift] = 0.0f;
@@ -1388,9 +1411,9 @@ namespace TdV2
 						double cVec[kMaxBlendRefs] = {};
 						for (int k = 0; k < K; ++k)
 						{
-							// A2 rounding-cell prior for ref k on band b using Parseval passband supremum ||H_b||_inf^2,
-							// capped to [0, C[k][k]] per Plan L81 (c_k <= E[(e_0 - e_k)^2] = C_kk) to prevent C^-1 c inversion.
-							const double cA2 = (std::min)(EstimateC_A2(a2Stats, refs[k].isExactCopy) * a2BandPeakSq[b], C[k][k]);
+							// A2 rounding-cell prior for ref k on band b using Parseval passband supremum ||H_b||_inf^2
+							// and per-cell AQ/PQ step scale (homogeneous of degree 2 in stepDelta), capped to [0, C[k][k]].
+							const double cA2 = (std::min)(EstimateC_A2(a2Stats, refs[k].isExactCopy) * cellStepScaleSq * a2BandPeakSq[b], C[k][k]);
 
 							// A1 grain-corrected Three-Cornered Hat using an independent peak partner (NEVER Carry <-> Peak).
 							double cA1 = cA2;
@@ -1532,7 +1555,7 @@ namespace TdV2
 					mBlock.f[TdMapsView::kRealDetail] = static_cast<float>(spatialDetailRms);
 					mBlock.f[TdMapsView::kStability] = static_cast<float>(RampMath::Clamp01(cellWeightSumAll / 3.0));
 					mBlock.f[TdMapsView::kOwnGrain] = static_cast<float>(std::sqrt((std::max)(0.0, cellRetainedGrainVar)));
-					mBlock.f[TdMapsView::kCodingNoise] = static_cast<float>(std::sqrt((std::max)(0.0, a2Stats.totalVar)));
+					mBlock.f[TdMapsView::kCodingNoise] = static_cast<float>(std::sqrt((std::max)(0.0, a2Stats.totalVar * cellStepScaleSq)));
 					mBlock.f[TdMapsView::kLightGain] = 1.0f;
 					mBlock.f[TdMapsView::kLightOffset] = 0.0f;
 					mBlock.f[TdMapsView::kDrift] = 0.0f;
@@ -1627,10 +1650,11 @@ namespace TdV2
 							bandDelta -= wEff * diff;
 						}
 						// Apply derived per-band quantization-cell bound using Parseval passband supremum a2BandPeakSq[b]
-						// (consistent with cA2 and TdV2Chroma.h) when transform is unknown OR outside valid 8x8 POCS blocks.
+						// and per-cell AQ/PQ step scale when transform is unknown OR outside valid 8x8 POCS blocks.
 						if (!inFull8x8Block)
 						{
-							const double bandVar = a2Stats.totalVar * a2BandPeakSq[b];
+							const double pxStepScale = cellStepScales[cIdx];
+							const double bandVar = a2Stats.totalVar * (pxStepScale * pxStepScale) * a2BandPeakSq[b];
 							if (std::fabs(bandDelta) > 0.0)
 								bandDelta = ApplyTransformUnknownBound(bandDelta, bandVar, standIns);
 						}
@@ -1698,11 +1722,13 @@ namespace TdV2
 							const int bcy = (std::min)(res.cellsH - 1, by / cellPx);
 							const int bcx = (std::min)(res.cellsW - 1, bx / cellPx);
 							const size_t bCellIdx = static_cast<size_t>(bcy) * res.cellsW + bcx;
-							if (blockNonFinite)
+							const double blockStepScale = cellStepScales[bCellIdx];
+							if (blockNonFinite || !(blockStepScale > 0.0))
 							{
 								nonFiniteCellFlag[bCellIdx] = 1u;
 								if (standIns != nullptr)
-									standIns->Engage(StandInKind::NonFiniteClosure, "TdV2ReferenceEngine non-finite codecModelPb");
+									standIns->Engage(StandInKind::NonFiniteClosure,
+										blockNonFinite ? "TdV2ReferenceEngine non-finite codecModelPb" : "TdV2ReferenceEngine invalid cellStepScale");
 								for (int j = 0; j < 8; ++j)
 									for (int i = 0; i < 8; ++i)
 										deltaPlane.at(bx + i, by + j) = 0.0;
@@ -1711,7 +1737,7 @@ namespace TdV2
 							if (!hasValidCodecModelPb)
 								pbStandInCellFlag[bCellIdx] = 1u;
 
-							ProjectResidual8x8Dct(sentRes, blendRes, effStepDelta, effPhi, cfg_.residualMode, projRes);
+							ProjectResidual8x8Dct(sentRes, blendRes, effStepDelta * blockStepScale, effPhi, cfg_.residualMode, projRes);
 							for (int j = 0; j < 8; ++j)
 							{
 								for (int i = 0; i < 8; ++i)

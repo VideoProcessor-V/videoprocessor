@@ -118,7 +118,8 @@ namespace Gpu
 		// Optional pre-packed GPU motion, cell prior, and Pass-1 face/non-rigid mask textures (ZERO CPU upload!):
 		//   motionVecTex:  3*cw x ch RGBA32F (fixed slots: 0=prevPeak, 1=nextPeak, 2=carry; vx, vy, camVx, camVy)
 		//   motionMetaTex: 3*cw x ch RG32F   (fixed slots: 0=prevPeak, 1=nextPeak, 2=carry; cls, valid)
-		//   cellPriorTex:  cw x ch RG32F     (retainedGrainVar, explicitFocusBits[bit0=focusChange, bit1=defocused/bokeh])
+		//   cellPriorTex:  cw x ch RG32F or RGBA32F (retainedGrainVar, explicitFocusBits[bit0=focusChange, bit1=defocused/bokeh],
+		//                  optional .z = cellStepScale [defaults to 1.0 when RG32F], .w = reserved)
 		//   faceMaskTex:   cw x ch R32F/R8   (Pass-1 non-rigid/face mask: > 0.5 => strict delta=0 passthrough)
 		pl_tex motionVecTex = nullptr;
 		pl_tex motionMetaTex = nullptr;
@@ -129,6 +130,7 @@ namespace Gpu
 		CellMotionField carryMotion;
 		bool hasCarryMotion = false;
 		std::vector<double> retainedGrainVar;
+		std::vector<double> cellStepScale;
 		const std::vector<uint8_t>* explicitFocusChangeCells = nullptr;
 		const std::vector<uint8_t>* explicitDefocusedCells = nullptr;
 		const std::vector<uint8_t>* faceMask = nullptr;
@@ -683,13 +685,13 @@ namespace Gpu
 			total += 1u * px * bR32;
 			// All 8 cell-grid persistent IO/output textures:
 			//   inMotionVecTex_ (3*cells RGBA32F), inMotionMetaTex_ (3*cells RG32F),
-			//   outTdMapsTex_ (3*cells RGBA32F), outDiagFlagsTex_ (cells RGBA32F),
-			//   inCellPriorTex_ / outGuardCellTex_ / outWarpDiagTex_ (3 * cells RG32F),
+			//   outTdMapsTex_ (3*cells RGBA32F), outDiagFlagsTex_ / inCellPriorTex_ (2 * cells RGBA32F),
+			//   outGuardCellTex_ / outWarpDiagTex_ (2 * cells RG32F),
 			//   inFaceMaskTex_ (cells R32F).
 			total += (3u * cells) * (bRGBA32 + bRG32);
 			total += (3u * cells) * bRGBA32;
-			total += cells * bRGBA32;
-			total += 3u * cells * bRG32;
+			total += 2u * cells * bRGBA32;
+			total += 2u * cells * bRG32;
 			total += cells * bR32;
 			// Reference preset (or CPU-staging ProcessFrame under RealTime) budgets all 6 full-res R32F staging/output
 			// textures (inRecYTex_, inCleanYTex_, inRefCleanTex_, inCodecModelPbTex_, outYTex_, outCleanTex_) +
@@ -1301,6 +1303,7 @@ namespace Gpu
 			p.faceMaskTex = in.faceMaskTex;
 			p.codecModelPbTex = in.codecModelPbTex;
 			p.retainedGrainVar = &in.retainedGrainVar;
+			p.cellStepScale = &in.cellStepScale;
 			p.explicitFocusChangeCells = in.explicitFocusChangeCells;
 			p.explicitDefocusedCells = in.explicitDefocusedCells;
 			p.faceMask = in.faceMask;
@@ -1719,6 +1722,7 @@ namespace Gpu
 			p.curCleanTex = curCleanTex;
 			p.hasCleanSplit = hasCleanSplit;
 			p.retainedGrainVar = &in.retainedGrainVar;
+			p.cellStepScale = &in.cellStepScale;
 			p.explicitFocusChangeCells = in.explicitFocusChangeCells;
 			p.explicitDefocusedCells = Detail::TryGetExplicitDefocusedCells(in);
 			p.faceMask = effFaceMask;
@@ -2171,6 +2175,7 @@ namespace Gpu
 			pl_tex faceMaskTex = nullptr;        // Optional pre-packed GPU Pass-1 face/non-rigid mask (cw x ch)
 			pl_tex codecModelPbTex = nullptr;    // Optional explicit Field B CodecModel P_B (w x h R32F)
 			const std::vector<double>* retainedGrainVar = nullptr;
+			const std::vector<double>* cellStepScale = nullptr;
 			const std::vector<uint8_t>* explicitFocusChangeCells = nullptr;
 			const std::vector<uint8_t>* explicitDefocusedCells = nullptr;
 			const std::vector<uint8_t>* faceMask = nullptr;
@@ -2503,13 +2508,13 @@ namespace Gpu
 			pl_tex cellPriorTex = p.cellPriorTex;
 			if (!cellPriorTex)
 			{
-				if (!Detail::EnsureTex(gpu, inCellPriorTex_, cw, ch, fmtRG32, true, false, true, false))
+				if (!Detail::EnsureTex(gpu, inCellPriorTex_, cw, ch, fmtRGBA32, true, false, true, false))
 				{
 					resetCarryIfActive();
 					return failCore("TdV2GpuEngine cellPrior staging alloc failed", StandInKind::GpuDispatchFailed);
 				}
 				const int gW = (w + p.grainCellPx - 1) / p.grainCellPx;
-				std::vector<float> cellPriorBuf(numCells * 2u, 0.0f);
+				std::vector<float> cellPriorBuf(numCells * 4u, 0.0f);
 				bool grainPriorOutOfRange = false;
 				for (int cy = 0; cy < ch; ++cy)
 				{
@@ -2538,8 +2543,13 @@ namespace Gpu
 						{
 							expFc += 2.0f;
 						}
-						cellPriorBuf[cIdx * 2u + 0u] = gv;
-						cellPriorBuf[cIdx * 2u + 1u] = expFc;
+						float stepScale = 1.0f;
+						if (p.cellStepScale != nullptr && cIdx < p.cellStepScale->size())
+							stepScale = static_cast<float>((*p.cellStepScale)[cIdx]);
+						cellPriorBuf[cIdx * 4u + 0u] = gv;
+						cellPriorBuf[cIdx * 4u + 1u] = expFc;
+						cellPriorBuf[cIdx * 4u + 2u] = stepScale;
+						cellPriorBuf[cIdx * 4u + 3u] = 0.0f;
 					}
 				}
 				if (grainPriorOutOfRange && standIns != nullptr)
@@ -2551,6 +2561,9 @@ namespace Gpu
 				}
 				cellPriorTex = inCellPriorTex_;
 			}
+			// Preserve full backwards compatibility when callers supply legacy 2-channel RG32F cellPriorTex (.z defaults to 1.0).
+			const bool cellPriorHasStepScale = (cellPriorTex->params.format != nullptr && cellPriorTex->params.format->num_components >= 3);
+			const float uCellPriorHasStepScale = cellPriorHasStepScale ? 1.0f : 0.0f;
 
 			// H13: Optional Pass-1 face / non-rigid mask texture (zero upload when absent).
 			// Reject dimension-mismatched explicit faceMaskTex visibly (never sample OOB);
@@ -2981,6 +2994,8 @@ namespace Gpu
 				p2bHdr += VpvGpu::Define("TD_TRACE_REG", kDefaultTraceRegScale);
 				p2bHdr += VpvGpu::Define("TD_SOLVE_FLOOR", kSolveNumericalFloor);
 				p2bHdr += VpvGpu::Define("TD_PIVOT_FLOOR", kSolvePivotFloor);
+				p2bHdr += VpvGpu::Define("TD_STEP_SCALE_MIN", kCellStepScaleMin);
+				p2bHdr += VpvGpu::Define("TD_STEP_SCALE_MAX", kCellStepScaleMax);
 				p2bHdr += Shaders::kCoreHelpers;
 				p2bHdr += Shaders::kPass2MergeSolveHeader;
 
@@ -2994,7 +3009,7 @@ namespace Gpu
 					VpvGpu::Storage("td_maps", dstTdMaps),
 					VpvGpu::Storage("cell_diag_flags", dstDiagFlags)
 				};
-				pl_shader_var v2b[15] = {
+				pl_shader_var v2b[16] = {
 					VpvGpu::Var("u_k", &uK),
 					VpvGpu::Var("u_pool_r", &uPoolR),
 					VpvGpu::Var("u_estimator", &uEstimator),
@@ -3009,9 +3024,10 @@ namespace Gpu
 					VpvGpu::Var("u_a2_sigma_zero", &uA2SigmaZero),
 					VpvGpu::Var("u_a2_total_var", &uA2TotalVar),
 					VpvGpu::Var("u_has_clean_split", &uHasCleanSplit),
-					VpvGpu::Var("u_bokeh_mode", &uBokehMode)
+					VpvGpu::Var("u_bokeh_mode", &uBokehMode),
+					VpvGpu::Var("u_cell_prior_has_step_scale", &uCellPriorHasStepScale)
 				};
-				if (!runPass("td_v2_p2b_merge_solve", p2bHdr, Shaders::kPass2MergeAndSolve, d2b, 8, v2b, 15, cellGx8, cellGy8, 8, 8))
+				if (!runPass("td_v2_p2b_merge_solve", p2bHdr, Shaders::kPass2MergeAndSolve, d2b, 8, v2b, 16, cellGx8, cellGy8, 8, 8))
 				{
 					resetCarryIfActive();
 					return failCore("td_v2_p2b_merge_solve dispatch failed", StandInKind::GpuDispatchFailed);
@@ -3028,12 +3044,14 @@ namespace Gpu
 				bHdr += VpvGpu::Define("TD_A2_PEAK_MID_SQ", a2PeakMidSq);
 				bHdr += VpvGpu::Define("TD_HUBER_KNEE_SQ", kHuberKneeSq);
 				bHdr += VpvGpu::Define("TD_PIXEL_BOUND_SIGMA", kPixelBoundSigma);
+				bHdr += VpvGpu::Define("TD_STEP_SCALE_MIN", kCellStepScaleMin);
+				bHdr += VpvGpu::Define("TD_STEP_SCALE_MAX", kCellStepScaleMax);
 				bHdr += Shaders::kCoreHelpers;
 				if (compactBands)
 					bHdr += Shaders::kHalfBandSamplerHelper;
 				bHdr += Shaders::kPass3BlendHeader;
 
-				pl_shader_var bv[17] = {
+				pl_shader_var bv[18] = {
 					VpvGpu::Var("u_k", &uK),
 					VpvGpu::Var("u_ax0", &uAx0),
 					VpvGpu::Var("u_ay0", &uAy0),
@@ -3050,14 +3068,15 @@ namespace Gpu
 					VpvGpu::Var("u_xform_8x8", &uXform8x8),
 					VpvGpu::Var("u_a2_valid", &uA2Valid),
 					VpvGpu::Var("u_a2_total_var", &uA2TotalVar),
-					VpvGpu::Var("u_enable_per_corner_huber", &uEnableHuber)
+					VpvGpu::Var("u_enable_per_corner_huber", &uEnableHuber),
+					VpvGpu::Var("u_cell_prior_has_step_scale", &uCellPriorHasStepScale)
 				};
 
 				pl_tex deltaTarget = runDctPocs ? sc.deltaScratch : dstOutDelta;
 				bool ok3a = false;
 				if (!compactBands)
 				{
-					pl_shader_desc db[8] = {
+					pl_shader_desc db[9] = {
 						VpvGpu::Sampled("cur_bands", sc.curBands),
 						VpvGpu::Sampled("ref_bands_0", sc.refBands[0]),
 						VpvGpu::Sampled("ref_bands_1", sc.refBands[1]),
@@ -3065,13 +3084,14 @@ namespace Gpu
 						VpvGpu::Sampled("ref_flags", finalRefFlagsTex),
 						VpvGpu::Sampled("cell_weights", sc.cellWeights),
 						VpvGpu::Sampled("cell_diag_c", sc.cellDiagC),
+						VpvGpu::Sampled("cell_prior", cellPriorTex),
 						VpvGpu::Storage("delta_out", deltaTarget)
 					};
-					ok3a = runPass("td_v2_p3_blend_bound", bHdr, Shaders::kPass3BlendAndBound, db, 8, bv, 17, fullGx, fullGy);
+					ok3a = runPass("td_v2_p3_blend_bound", bHdr, Shaders::kPass3BlendAndBound, db, 9, bv, 18, fullGx, fullGy);
 				}
 				else
 				{
-					pl_shader_desc db[12] = {
+					pl_shader_desc db[13] = {
 						VpvGpu::Sampled("cur_bands_mh", sc.curBandsMH),
 						VpvGpu::Sampled("cur_bands_ld3", sc.curBandsLD3),
 						VpvGpu::Sampled("ref_bands_mh_0", sc.refBandsMH[0]),
@@ -3083,9 +3103,10 @@ namespace Gpu
 						VpvGpu::Sampled("ref_flags", finalRefFlagsTex),
 						VpvGpu::Sampled("cell_weights", sc.cellWeights),
 						VpvGpu::Sampled("cell_diag_c", sc.cellDiagC),
+						VpvGpu::Sampled("cell_prior", cellPriorTex),
 						VpvGpu::Storage("delta_out", deltaTarget)
 					};
-					ok3a = runPass("td_v2_p3_blend_bound", bHdr, Shaders::kPass3BlendAndBound, db, 12, bv, 17, fullGx, fullGy);
+					ok3a = runPass("td_v2_p3_blend_bound", bHdr, Shaders::kPass3BlendAndBound, db, 13, bv, 18, fullGx, fullGy);
 				}
 				if (!ok3a)
 				{
@@ -3105,18 +3126,21 @@ namespace Gpu
 					standIns->Engage(StandInKind::CodecModelPbStandIn, "TdV2GpuEngine STRICT/CELL using refs[0].clean stand-in for Field B P_B");
 
 				std::string pHdr = staticGeom;
+				pHdr += VpvGpu::Define("TD_STEP_SCALE_MIN", kCellStepScaleMin);
+				pHdr += VpvGpu::Define("TD_STEP_SCALE_MAX", kCellStepScaleMax);
 				pHdr += Shaders::BuildDctBasisHeader();
 				pHdr += Shaders::kCoreHelpers;
 				pHdr += Shaders::kPass3bDctHeader;
-				pl_shader_desc dp[6] = {
+				pl_shader_desc dp[7] = {
 					VpvGpu::Sampled("delta_in", sc.deltaScratch),
 					VpvGpu::Sampled("cur_clean", p.curCleanTex),
 					VpvGpu::Sampled("pred_clean", hasExplicitPb ? p.codecModelPbTex : sc.warpedVal),
 					VpvGpu::Sampled("cell_focus", sc.cellFocus),
 					VpvGpu::Sampled("ref_flags", finalRefFlagsTex),
+					VpvGpu::Sampled("cell_prior", cellPriorTex),
 					VpvGpu::Storage("delta_out", dstOutDelta)
 				};
-				pl_shader_var pv[10] = {
+				pl_shader_var pv[11] = {
 					VpvGpu::Var("u_bx0", &uBx0),
 					VpvGpu::Var("u_by0", &uBy0),
 					VpvGpu::Var("u_bx1", &uBx1),
@@ -3126,10 +3150,11 @@ namespace Gpu
 					VpvGpu::Var("u_step_delta", &uStepDelta),
 					VpvGpu::Var("u_deadzone_phi", &uDeadZonePhi),
 					VpvGpu::Var("u_peak_code", &uPeakCode),
-					VpvGpu::Var("u_has_explicit_pb", &uHasExplicitPb)
+					VpvGpu::Var("u_has_explicit_pb", &uHasExplicitPb),
+					VpvGpu::Var("u_cell_prior_has_step_scale", &uCellPriorHasStepScale)
 				};
 				const size_t shmemBytes = (5u * 64u) * sizeof(float);
-				if (!runPass("td_v2_p3_dct_pocs", pHdr, Shaders::kPass3bDctPocs, dp, 6, pv, 10,
+				if (!runPass("td_v2_p3_dct_pocs", pHdr, Shaders::kPass3bDctPocs, dp, 7, pv, 11,
 				             Detail::GroupsFor(w, 8), Detail::GroupsFor(h, 8), 8, 8, shmemBytes))
 				{
 					resetCarryIfActive();

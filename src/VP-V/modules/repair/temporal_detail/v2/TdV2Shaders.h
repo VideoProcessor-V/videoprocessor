@@ -1604,7 +1604,8 @@ for (int k = 0; k < K; ++k)
         cellNonFinite = true;
 }
 
-float rawGv = texelFetch(cell_prior, cell, 0).x;
+vec4 priorTexel = texelFetch(cell_prior, cell, 0);
+float rawGv = priorTexel.x;
 float cellRetGVar = 0.0;
 if (td_is_bad(rawGv) || rawGv < 0.0)
 {
@@ -1614,6 +1615,18 @@ else
 {
     cellRetGVar = rawGv;
 }
+
+float rawStepScale = (u_cell_prior_has_step_scale > 0.5) ? priorTexel.z : 1.0;
+float cellStepScale = 0.0;
+if (td_is_bad(rawStepScale) || !(rawStepScale > 0.0))
+{
+    cellNonFinite = true;
+}
+else
+{
+    cellStepScale = clamp(rawStepScale, TD_STEP_SCALE_MIN, TD_STEP_SCALE_MAX);
+}
+float cellStepScaleSq = cellStepScale * cellStepScale;
 
 float cellWeightSumAll = 0.0;
 float midWeightSum = 0.0;
@@ -1710,7 +1723,7 @@ for (int b = 0; b < 3; ++b)
         {
             bool exactCopy = td_is_exact_copy(k);
             float cA2 = (u_a2_valid > 0.5)
-                ? ((u_a2_sigma_sent + (exactCopy ? 0.0 : u_a2_sigma_zero)) * td_a2_band_peak_sq(b))
+                ? ((u_a2_sigma_sent + (exactCopy ? 0.0 : u_a2_sigma_zero)) * cellStepScaleSq * td_a2_band_peak_sq(b))
                 : 0.0;
             // Plan L81 physical upper bound: c_k in [0, C_{k,k}].
             cA2 = min(cA2, C[k][k]);
@@ -1837,7 +1850,7 @@ vec4 slice1 = vec4(
     spatialDetailRms,
     clamp(cellWeightSumAll / 3.0, 0.0, 1.0),
     sqrt(max(0.0, cellRetGVar)),
-    sqrt(max(0.0, u_a2_total_var)));
+    sqrt(max(0.0, u_a2_total_var * cellStepScaleSq)));
 vec4 slice2 = vec4(1.0, 0.0, 0.0, float(activeBandBits));
 
 imageStore(td_maps, ivec2(cell.x, cell.y), slice0);
@@ -1941,6 +1954,9 @@ ivec4 halfActive = ivec4(int(round(u_hax0)), int(round(u_hay0)), int(round(u_hax
 
 int cx = min(TD_CW - 1, p.x / TD_CELL_PX);
 int cy = min(TD_CH - 1, p.y / TD_CELL_PX);
+float rawStepScale = (u_cell_prior_has_step_scale > 0.5) ? texelFetch(cell_prior, ivec2(cx, cy), 0).z : 1.0;
+float cellStepScale = (td_is_bad(rawStepScale) || !(rawStepScale > 0.0)) ? 0.0 : clamp(rawStepScale, TD_STEP_SCALE_MIN, TD_STEP_SCALE_MAX);
+float cellStepScaleSq = cellStepScale * cellStepScale;
 
 bool inFull8x8 = (u_xform_8x8 > 0.5) && (bx0 < bx1) && (by0 < by1) &&
                  (p.x >= bx0) && (p.x < bx1) && (p.y >= by0) && (p.y < by1);
@@ -2027,7 +2043,7 @@ for (int b = 0; b < 3; ++b)
         bandDelta -= wEff * diff;
     }
 
-    float bandVar = (u_a2_valid > 0.5) ? (u_a2_total_var * td_a2_band_peak_sq(b)) : 0.0;
+    float bandVar = (u_a2_valid > 0.5) ? (u_a2_total_var * cellStepScaleSq * td_a2_band_peak_sq(b)) : 0.0;
     float clampedBand = bandDelta;
     if (abs(bandDelta) > 0.0)
     {
@@ -2059,19 +2075,19 @@ shared float td_s_tmp[64];
 shared float td_s_sent_dct[64];
 shared uint td_s_nz[64];
 
-float td_project_coeff(float sentCoeff, float blendCoeff, bool strictMode)
+float td_project_coeff(float sentCoeff, float blendCoeff, float stepDelta, bool strictMode)
 {
-    if (td_is_bad(sentCoeff) || td_is_bad(blendCoeff) || td_is_bad(u_step_delta) || td_is_bad(u_deadzone_phi) ||
-        u_step_delta <= 0.0 || u_deadzone_phi < 0.0 || u_deadzone_phi >= 1.0)
+    if (td_is_bad(sentCoeff) || td_is_bad(blendCoeff) || td_is_bad(stepDelta) || td_is_bad(u_deadzone_phi) ||
+        stepDelta <= 0.0 || u_deadzone_phi < 0.0 || u_deadzone_phi >= 1.0)
         return td_is_bad(sentCoeff) ? 0.0 : sentCoeff;
 
-    float theta = (1.0 - u_deadzone_phi) * u_step_delta;
+    float theta = (1.0 - u_deadzone_phi) * stepDelta;
     float absSent = abs(sentCoeff);
-    // Keep quantization level in float (avoids 32-bit int overflow on very small u_step_delta).
+    // Keep quantization level in float (avoids 32-bit int overflow on very small stepDelta).
     float level = 0.0;
     if (absSent >= theta)
     {
-        float mag = floor(absSent / u_step_delta + u_deadzone_phi);
+        float mag = floor(absSent / stepDelta + u_deadzone_phi);
         level = (sentCoeff >= 0.0) ? mag : -mag;
     }
     if (level == 0.0)
@@ -2083,13 +2099,13 @@ float td_project_coeff(float sentCoeff, float blendCoeff, bool strictMode)
     float hi = 0.0;
     if (level > 0.0)
     {
-        lo = (level - u_deadzone_phi) * u_step_delta;
-        hi = (level + 1.0 - u_deadzone_phi) * u_step_delta;
+        lo = (level - u_deadzone_phi) * stepDelta;
+        hi = (level + 1.0 - u_deadzone_phi) * stepDelta;
     }
     else
     {
-        lo = (level - 1.0 + u_deadzone_phi) * u_step_delta;
-        hi = (level + u_deadzone_phi) * u_step_delta;
+        lo = (level - 1.0 + u_deadzone_phi) * stepDelta;
+        hi = (level + u_deadzone_phi) * stepDelta;
     }
     return clamp(blendCoeff, lo, hi);
 }
@@ -2188,7 +2204,12 @@ for (int stride = 32; stride > 0; stride >>= 1)
 }
 
 uint cpFlags = td_s_nz[0];
-bool blkBad = blkBadIn || ((cpFlags & 1u) != 0u);
+int bCx = min(TD_CW - 1, max(0, bx) / TD_CELL_PX);
+int bCy = min(TD_CH - 1, max(0, by) / TD_CELL_PX);
+float rawBlockScale = (u_cell_prior_has_step_scale > 0.5) ? texelFetch(cell_prior, ivec2(bCx, bCy), 0).z : 1.0;
+bool blkBadScale = td_is_bad(rawBlockScale) || !(rawBlockScale > 0.0);
+float blockStepDelta = blkBadScale ? 0.0 : (u_step_delta * clamp(rawBlockScale, TD_STEP_SCALE_MIN, TD_STEP_SCALE_MAX));
+bool blkBad = blkBadIn || ((cpFlags & 1u) != 0u) || blkBadScale;
 bool blkInvalidRef0 = ((cpFlags & 2u) != 0u);
 bool runPocs = blkHasDelta && !blkBad && !blkInvalidRef0;
 float cVal = runPocs ? rawC : 0.0;
@@ -2239,8 +2260,8 @@ for (int it = 0; it < pocsIters; ++it)
         float blendCoeff = 0.0;
         for (int y = 0; y < 8; ++y)
             blendCoeff += td_s_tmp[y * 8 + loc.x] * TD_DCT8_BASIS[loc.y * 8 + y];
-        // Set 1: Quantization-cell coefficient projection (STRICT / CELL).
-        projCoeff = td_project_coeff(td_s_sent_dct[tid], blendCoeff, strictMode);
+        // Set 1: Quantization-cell coefficient projection (STRICT / CELL) with per-cell AQ/PQ step scale.
+        projCoeff = td_project_coeff(td_s_sent_dct[tid], blendCoeff, blockStepDelta, strictMode);
     }
     td_s_blend[tid] = projCoeff;
     memoryBarrierShared();
