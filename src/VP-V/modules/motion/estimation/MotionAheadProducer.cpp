@@ -404,10 +404,24 @@ namespace MotionAhead
 
 	void Producer::BackWorker()
 	{
-		Pipeline::BackQueue<BackItem>::Entry entry;
-		while (backQueue.Pop(entry))
+		for (;;)
 		{
-			backQueue.MarkBusy(true);
+			// Pop() atomically marks backQueue busy under mutex_; BusyGuard releases busy_ on
+			// every exit path (normal return, early continue, or exception) after entry is destroyed.
+			struct BusyGuard
+			{
+				Pipeline::BackQueue<BackItem>* q = nullptr;
+				~BusyGuard()
+				{
+					if (q)
+						q->MarkBusy(false);
+				}
+			} busyGuard;
+			Pipeline::BackQueue<BackItem>::Entry entry;
+			if (!backQueue.Pop(entry))
+				break;
+			busyGuard.q = &backQueue;
+
 			BackItem& item = entry.item;
 			const bool liveStart = backQueue.IsLive(entry.generation, entry.epoch, entry.ignoreGeneration);
 			if (!liveStart || !item.flow)
@@ -420,7 +434,6 @@ namespace MotionAhead
 					res.runMs = OnDemand::MsBetween(item.requestTaken, OnDemand::Clock::now());
 					Answer(item.pendingRequest, std::move(res));
 				}
-				backQueue.MarkBusy(false);
 				continue;
 			}
 			const auto voteStart = std::chrono::steady_clock::now();
@@ -443,7 +456,6 @@ namespace MotionAhead
 					res.runMs = OnDemand::MsBetween(item.requestTaken, OnDemand::Clock::now());
 					Answer(item.pendingRequest, std::move(res));
 				}
-				backQueue.MarkBusy(false);
 				continue;
 			}
 
@@ -487,7 +499,6 @@ namespace MotionAhead
 				res.runMs = OnDemand::MsBetween(item.requestTaken, OnDemand::Clock::now());
 				Answer(item.pendingRequest, std::move(res));
 			}
-			backQueue.MarkBusy(false);
 		}
 	}
 
