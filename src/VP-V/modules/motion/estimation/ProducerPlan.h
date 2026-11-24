@@ -31,6 +31,8 @@ namespace VpMotion
 			bool dejudderPresent = false;          // the de-judder's matcher exists
 			bool producerExists = false;           // a producer object is held
 			bool producerRunning = false;          // ... and its worker runs (meaningful with producerExists)
+			bool producerRecovering = false;       // GEM-112: producer is inside its own 3-strike backoff recovery (do not kill prematurely)
+			bool producerHasError = false;         // GEM-112: producer recorded an error (e.g. async CreateDevice failure; false = legacy decision)
 			bool startFailedLatched = false;       // an earlier start failed: not retried ...
 			bool retryDue = false;                 // ... unless its back-off is due (W2-C1; false = the old decision)
 			bool backoffActive = false;            // W2-C1: a failed start's back-off still runs: no start, latch or not (false = the old decision)
@@ -45,6 +47,7 @@ namespace VpMotion
 			Action action = Action::None;  // Start: try to create it; Stop: stop and release it (engine no longer ready)
 			bool keepBriefly = false;      // unwanted only because the de-judder was released: kept alive
 			bool clearStartFailed = false; // the retry latch is cleared (it may be started again once wanted)
+			bool latchStartFailed = false; // GEM-112: dead non-recovering producer stopped as a failed start (latch error + enter backoff)
 			bool disengage = false;        // the look-ahead engagement is dropped (unwanted: never a stale one)
 		};
 
@@ -57,6 +60,14 @@ namespace VpMotion
 				(in.onDemandWanted && in.dejudderPresent && in.opticalFlow && (!in.lowLatency || in.queueAheadCapacity >= 1));
 			if (out.wanted && !in.producerExists && (!in.startFailedLatched || in.retryDue) && !in.backoffActive && in.gpuAvailable)
 				out.action = Action::Start;
+			else if (out.wanted && in.producerExists && !in.producerRunning && !in.producerRecovering && in.producerHasError)
+			{
+				// GEM-112 (VE-LIFECYCLE): an async start failure (e.g. CreateDevice on the worker) left a dead non-recovering
+				// producer object alive with an error. Release it, latch start failure + error, and retry via the existing backoff.
+				out.action = Action::Stop;
+				out.latchStartFailed = true;
+				out.disengage = true;
+			}
 			else if (!out.wanted)
 			{
 				const bool onlyReleased = !in.dejudderPresent && in.opticalFlow && in.motionAheadFrames > 0 && !in.lowLatency;

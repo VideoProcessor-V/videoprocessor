@@ -38,6 +38,34 @@ namespace VpMotion
 		// of a recovery, not a rate.
 		constexpr ULONGLONG kResyncWindowMs = 1000;
 
+		// GEM-112 (VE-LIFECYCLE): race-free snapshot of a producer's liveness against HandleEngineFailureLocked (which
+		// mutates `running` and `recovery` under the producer's mutex): reading Running() -> GetHealth() (locks mutex) ->
+		// re-reading Running() guarantees neither running->recovering nor recovering->running tears into (!running && !recovering).
+		struct ProducerSnapshot
+		{
+			bool exists = false;
+			bool running = false;
+			bool recovering = false;
+			bool dead = false;       // exists && !running && !recovering (e.g. async CreateDevice failure)
+			bool hasError = false;   // exists && dead && !Error().empty()
+		};
+
+		ProducerSnapshot SnapshotProducer(const std::shared_ptr<MotionAhead::Producer>& producer, bool readError = false)
+		{
+			ProducerSnapshot s;
+			if (!producer)
+				return s;
+			s.exists = true;
+			s.running = producer->Running();
+			s.recovering = producer->GetHealth().recovering;
+			if (!s.running && !s.recovering)
+				s.running = producer->Running();
+			s.dead = !s.running && !s.recovering;
+			if (readError && s.dead)
+				s.hasError = !producer->Error().empty();
+			return s;
+		}
+
 		// W2-C1: the producer part of the engine facts (as PlanProducer leaves it), then the state. Render thread.
 		void RefreshEngineStatus(VectorEngine& e, ULONGLONG nowMs)
 		{
@@ -45,9 +73,11 @@ namespace VpMotion
 			f.opticalFlow = e.motionOpticalFlow;
 			f.lowLatency = e.motionLowLatency;
 			f.lowLatencyNoVectors = e.motionLowLatencyNoVectors;
-			f.producerRunning = e.motionProducer && e.motionProducer->Running();
-			f.producerRecovering = e.motionProducer && e.motionProducer->GetHealth().recovering;
-			f.nvofStartError = e.motionProducerStartFailed;   // the last start failed (latched until one succeeds or the want ends)
+			const ProducerSnapshot producerSnap = SnapshotProducer(e.motionProducer);
+			f.producerRunning = producerSnap.running;
+			f.producerRecovering = producerSnap.recovering;
+			f.nvofStartError = e.motionProducerStartFailed || producerSnap.dead;   // sync start failure, or a live dead non-recovering producer (GEM-112)
+			f.producerNotRunning = producerSnap.dead;                              // GEM-112: non-zero reason bit while a dead producer object is held
 			f.vramRelease = e.motionVramRelease;
 			const uint64_t epoch = e.motionValidity.Epoch();
 			if (e.motionStatusEpoch == 0)
@@ -160,8 +190,11 @@ namespace VpMotion
 		motionOpticalFlow = in.opticalFlow;
 		motionLowLatency = life.lowLatency;
 		life.dejudderPresent = in.dejudderPresent;
-		life.producerExists = motionProducer != nullptr;
-		life.producerRunning = motionProducer && motionProducer->Running();
+		const ProducerSnapshot producerSnap = SnapshotProducer(motionProducer, /*readError=*/true);
+		life.producerExists = producerSnap.exists;
+		life.producerRunning = producerSnap.running;
+		life.producerRecovering = producerSnap.recovering;
+		life.producerHasError = producerSnap.hasError;
 		life.startFailedLatched = motionProducerStartFailed;
 		const ULONGLONG nowMs = GetTickCount64();
 		// W2-C1: a failed start is retried on the recovery back-off (5 s, then 60 s), not every frame and not only on a settings change.
@@ -234,11 +267,27 @@ namespace VpMotion
 		{
 			// Owner: the producer stays alive once wanted - kept while the settings still want it (a resync
 			// or format change can take longer than any timer); stopped when they change.
+			// GEM-112 (VE-LIFECYCLE): when act.latchStartFailed is true, an async start failure left a dead
+			// non-recovering producer alive: capture its error, stop/release it, latch start failure + error, and back off.
+			const std::string deadError = act.latchStartFailed
+				? (motionProducer->Error().empty() ? std::string("producer stopped before running") : motionProducer->Error())
+				: std::string();
 			motionEnginePairsBase += motionProducer->GetStats().pairs;   // W2-C1: Work().producerPairs keeps them
 			motionProducer->Stop();
 			PublishProducer(nullptr);   // hardening: a loop copy keeps the stopped producer alive until its use ends
 			NoteFlowSourceSize(0, 0, 0, 0);   // GEM-110 (VE-SCALE): never carry a stopped session's raster / target size into a new stream
 			Vpv::FrameAnalysis::NoteP1CpuDemand(host_, false);
+			if (act.latchStartFailed)
+			{
+				const bool logIt = !motionProducerStartFailed || deadError != motionProducerStartError;
+				motionProducerStartFailed = true;
+				motionProducerStartError = deadError;
+				motionProducerStopLogged = false;
+				const uint64_t retryMs = motionProducerStartRetry.OnStopped(nowMs);
+				if (logIt)
+					DebugLog::Log("Motion ahead: the producer did not start (%s); the de-judder takes the block searches (no optical-flow pair); retried in %llu s",
+						deadError.c_str(), static_cast<unsigned long long>(retryMs / 1000));
+			}
 		}
 		// Audit 2026-10-16: a failure is retried once the producer is wanted again (optical flow off and on,
 		// low latency and back), and the look-ahead re-engages only after the refill - never on a stale
@@ -407,8 +456,12 @@ namespace VpMotion
 		// Batch B (plan-motion-engine-switch.md (b)): optical-flow pairs are EXPECTED when the optical-flow producer is configured and
 		// has not failed to start (previous-frame facts: the planner's motion_ahead_frames, -1 = not planned yet = expected). With none
 		// expected the field consumers use the matcher fallback and the statistics consumers are named unserved (VectorDemand::DecideForHost).
+		// GEM-112 (VE-LIFECYCLE): a live dead non-recovering producer (e.g. async CreateDevice failure before PlanProducer releases it)
+		// also means pairs are not expected, so field consumers take the matcher fallback immediately rather than silently starving.
+		const ProducerSnapshot producerSnap = SnapshotProducer(motionProducer);
 		VectorDemand::Input decided = input;
-		decided.pairsExpected = facts.opticalFlow && !motionProducerStartFailed && !motionEngineFacts.producerRecovering &&
+		decided.pairsExpected = facts.opticalFlow && !motionProducerStartFailed &&
+			!motionEngineFacts.producerRecovering && !producerSnap.recovering && !producerSnap.dead &&
 			motionAheadSetting != 0;
 		decided.pairsDeliberatelyOff = !facts.opticalFlow || motionAheadSetting == 0;   // a setting, not a fault (M4)
 		if ((cameraWanted && !input.wants[cameraFit]) || (motionCameraGated && input.wants[cameraFit]))
