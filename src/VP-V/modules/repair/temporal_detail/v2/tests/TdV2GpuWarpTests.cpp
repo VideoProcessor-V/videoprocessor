@@ -775,12 +775,21 @@ namespace TdV2GpuWarpNs
 
 				AssertCpuGpuFrameParity(cpu1, gpu1, f1.curClean, f1.receivedY, f1.active, "Frame1-CellUnknown");
 
-				// Exact StandInRegistry parity between CPU and GPU on Frame 1 (M3 / L4).
+				// Exact StandInRegistry parity between CPU and GPU on Frame 1 (M3 / L4),
+				// except LOW-2 GpuPrivateScratchFallback which MUST engage on GPU when arena == nullptr.
 				for (size_t sk = 0; sk < static_cast<size_t>(StandInKind::Count); ++sk)
 				{
 					const auto kind = static_cast<StandInKind>(sk);
-					Assert::AreEqual(cpuSi.IsActive(kind), gpuSi.IsActive(kind),
-						FormatTagMsg(MetaOf(kind).catalogKey, "Frame 1 StandInRegistry CPU vs GPU mismatch").c_str());
+					if (kind == StandInKind::GpuPrivateScratchFallback)
+					{
+						Assert::IsFalse(cpuSi.IsActive(kind), L"CPU engine must never engage GpuPrivateScratchFallback");
+						Assert::IsTrue(gpuSi.IsActive(kind), L"GPU engine with arena==nullptr must engage GpuPrivateScratchFallback");
+					}
+					else
+					{
+						Assert::AreEqual(cpuSi.IsActive(kind), gpuSi.IsActive(kind),
+							FormatTagMsg(MetaOf(kind).catalogKey, "Frame 1 StandInRegistry CPU vs GPU mismatch").c_str());
+					}
 				}
 				Assert::IsTrue(gpuSi.IsActive(StandInKind::BandMemoW2), L"Frame 1 must engage BandMemoW2");
 				Assert::IsTrue(gpuSi.IsActive(StandInKind::FocusMapK32), L"Frame 1 must engage FocusMapK32");
