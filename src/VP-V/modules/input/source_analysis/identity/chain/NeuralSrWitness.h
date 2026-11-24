@@ -678,14 +678,16 @@ namespace SourceIdentity
 							ws.edgeMask[u] |= detail_neural_sr::kMaskEdge;
 					}
 
-					// Mark +-2 px dilated edgeZone and non-maximum-suppressed edge crests.
+					// Mark dilated edgeZone (1.5 latent cycles = KernelBank support margin, >= 2 px)
+					// and non-maximum-suppressed edge crests.
+					const int edgeHalo = (std::max)(2, static_cast<int>(std::ceil(1.5 / ratio)));
 					for (int idx = 0; idx < evalTotal; ++idx)
 					{
 						const size_t u = static_cast<size_t>(idx);
 						if ((ws.edgeMask[u] & detail_neural_sr::kMaskEdge) != 0u)
 						{
-							const int dilLo = (std::max)(0, idx - 2);
-							const int dilHi = (std::min)(evalTotal - 1, idx + 2);
+							const int dilLo = (std::max)(0, idx - edgeHalo);
+							const int dilHi = (std::min)(evalTotal - 1, idx + edgeHalo);
 							for (int d = dilLo; d <= dilHi; ++d)
 								ws.edgeMask[static_cast<size_t>(d)] |= detail_neural_sr::kMaskEdgeZone;
 
@@ -697,7 +699,9 @@ namespace SourceIdentity
 						}
 					}
 
-					// Identify textured non-edge interior samples (outside dilated edgeZone, 5-px mean |gL| > floorCodes).
+					// Identify textured non-edge interior samples: outside dilated edgeZone, requiring BOTH
+					// low-pass gradient activity AND raw-signal local activity > floorCodes so FFT Gibbs ringing
+					// from crisp step edges on a flat vector-graphics background can never fabricate fake interior texture.
 					for (int idx = 0; idx < evalTotal; ++idx)
 					{
 						const size_t u = static_cast<size_t>(idx);
@@ -706,10 +710,17 @@ namespace SourceIdentity
 						const int winLo = (std::max)(0, idx - 2);
 						const int winHi = (std::min)(evalTotal - 1, idx + 2);
 						double sumAbsGL = 0.0;
+						double sumAbsRaw = 0.0;
 						for (int w = winLo; w <= winHi; ++w)
+						{
 							sumAbsGL += std::fabs(ws.gradLow[static_cast<size_t>(w)]);
-						const double localActivity = sumAbsGL / static_cast<double>(winHi - winLo + 1);
-						if (localActivity > floorCodes)
+							const int rawPos = margin + w;
+							sumAbsRaw += 0.5 * std::fabs(line[rawPos + 1] - line[rawPos - 1]);
+						}
+						const double invWin = 1.0 / static_cast<double>(winHi - winLo + 1);
+						const double localActivity = sumAbsGL * invWin;
+						const double rawActivity = sumAbsRaw * invWin;
+						if (localActivity > floorCodes && rawActivity > floorCodes)
 							ws.edgeMask[u] |= detail_neural_sr::kMaskInterior;
 					}
 
@@ -891,10 +902,11 @@ namespace SourceIdentity
 
 				const bool hasEdgePhaseLock = res.edgePhaseBicoherence >= cfg.minBicoherence;
 				const bool hasEdgeHfLocalization = res.edgeToInteriorHfRatio >= cfg.minEdgeToInteriorHfRatio;
-				const bool hasAnomalousKurtosis = res.hfKurtosis >= 3.0 * cfg.minEdgeKurtosisRatio;
 				const bool hasInteriorPsdDrop = res.interiorSpectralDropExcessDecades >= cfg.interiorDropDecadesMargin;
 
-				if (hasEdgePhaseLock && hasEdgeHfLocalization && (hasAnomalousKurtosis || hasInteriorPsdDrop))
+				// Require genuine interior PSD collapse above f_c (never allow edge kurtosis alone to bypass
+				// natural 1/f^2 broadband interior texture on sharp native 4K photography/CG).
+				if (hasEdgePhaseLock && hasEdgeHfLocalization && hasInteriorPsdDrop)
 				{
 					res.verdict = NeuralSrVerdict::NeuralSrDetected;
 					res.reason = NeuralSrReason::NeuralEdgeLockAndInteriorDrop;
