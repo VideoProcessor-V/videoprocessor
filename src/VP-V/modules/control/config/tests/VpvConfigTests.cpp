@@ -4335,7 +4335,7 @@ namespace
 			require(!prodDelivered && !naiveDelivered && naiveFilter.swallowedCount > 0,
 				"CT-M9 Part B: both production and naive filters must swallow hidden MetaCall");
 
-			// Mutate both combos with the exact same 60 items while closed, with NO intermediate processEvents().
+			// Mutate both combos with the exact same 60 items while closed.
 			{
 				const QSignalBlocker blockerA(profileCombo);
 				const QSignalBlocker blockerB(&naiveCombo);
@@ -4348,23 +4348,70 @@ namespace
 				}
 			}
 
-			// Show both popup containers directly at their cached 2-item geometry (no resize, no processEvents()).
-			QWidget* prodContainer = prodView->parentWidget();
-			QWidget* naiveContainer = naiveView->parentWidget();
-			require(prodContainer != nullptr && naiveContainer != nullptr,
-				"CT-M9 Part B: primed popups have no container widget");
-			prodContainer->show();
-			naiveContainer->show();
+			// 1. Clear Qt 6's delayedPendingLayout flag on both hidden views so QAbstractItemView::showEvent()
+			//    cannot mask a missing SyncPopupForShow, and drain any resulting events while closed.
+			prodView->doItemsLayout();
+			naiveView->doItemsLayout();
+			QCoreApplication::processEvents();
 
+			// 2. Reset both hidden scrollbars to their stale 2-item cached state and post the exact queued
+			//    MetaCalls (updateGeometries + _q_showOrHideScrollBars) while both views remain hidden.
 			QScrollBar* prodBar = prodView->verticalScrollBar();
 			QScrollBar* naiveBar = naiveView->verticalScrollBar();
-			require(prodBar != nullptr && prodBar->isVisible() && prodBar->maximum() > 0,
-				"CT-M9 Part B: production HiddenComboPopupCoalescer failed to sync scrollbar on cached-geometry show");
-			require(naiveBar != nullptr && !(naiveBar->isVisible() && naiveBar->maximum() > 0),
-				"CT-M9 negative control failed: naive SwallowHiddenMetaCallOnlyFilter unexpectedly synced scrollbar without SyncPopupForShow");
+			require(prodBar != nullptr && naiveBar != nullptr,
+				"CT-M9 Part B: primed popup views must have verticalScrollBar");
+			prodBar->setRange(0, 0);
+			require(QMetaObject::invokeMethod(prodView, "_q_showOrHideScrollBars", Qt::DirectConnection),
+				"CT-M9 Part B: failed to prime hidden prod scrollbar container");
+			naiveBar->setRange(0, 0);
+			require(QMetaObject::invokeMethod(naiveView, "_q_showOrHideScrollBars", Qt::DirectConnection),
+				"CT-M9 Part B: failed to prime hidden naive scrollbar container");
+
+			const std::uint64_t deferredBeforeLayout = Vpv::DeferredHiddenPopupEventCount();
+			const int naiveSwallowedBeforeLayout = naiveFilter.swallowedCount;
+			require(QMetaObject::invokeMethod(prodView, "updateGeometries", Qt::QueuedConnection) &&
+				QMetaObject::invokeMethod(prodView, "_q_showOrHideScrollBars", Qt::QueuedConnection) &&
+				QMetaObject::invokeMethod(naiveView, "updateGeometries", Qt::QueuedConnection) &&
+				QMetaObject::invokeMethod(naiveView, "_q_showOrHideScrollBars", Qt::QueuedConnection),
+				"CT-M9 Part B: failed to queue updateGeometries/_q_showOrHideScrollBars MetaCalls");
+			QCoreApplication::processEvents();
+
+			// 3. Verify BOTH filters genuinely intercepted and swallowed those hidden MetaCalls,
+			//    and both scrollbars remain stale (hidden, maximum == 0) while closed.
+			require(Vpv::DeferredHiddenPopupEventCount() > deferredBeforeLayout &&
+				naiveFilter.swallowedCount > naiveSwallowedBeforeLayout,
+				"CT-M9 Part B: hidden queued updateGeometries/_q_showOrHideScrollBars MetaCalls must be swallowed by both production and naive filters");
+			require(!prodBar->isVisible() && prodBar->maximum() == 0 &&
+				!naiveBar->isVisible() && naiveBar->maximum() == 0,
+				"CT-M9 Part B: both scrollbars must remain stale (hidden, maximum == 0) while closed after swallowing MetaCalls");
+
+			// 4. Isolate HiddenComboPopupCoalescer's QEvent::Show handler (SyncPopupForShow) cleanly
+			//    on both identically-primed views without container layout/resize machinery masking it.
+			QEvent prodShowEv(QEvent::Show);
+			QEvent naiveShowEv(QEvent::Show);
+			QCoreApplication::sendEvent(prodView, &prodShowEv);
+			QCoreApplication::sendEvent(naiveView, &naiveShowEv);
+
+			require(prodBar->maximum() > 0,
+				(std::string("CT-M9 Part B: production HiddenComboPopupCoalescer::SyncPopupForShow failed to recover scrollbar range on QEvent::Show (prodBar max=") +
+					std::to_string(prodBar->maximum()) +
+					", naiveBar max=" + std::to_string(naiveBar->maximum()) + ")").c_str());
+			require(naiveBar->maximum() == 0,
+				(std::string("CT-M9 negative control failed: naive SwallowHiddenMetaCallOnlyFilter unexpectedly recovered scrollbar range without SyncPopupForShow (prodBar max=") +
+					std::to_string(prodBar->maximum()) +
+					", naiveBar max=" + std::to_string(naiveBar->maximum()) + ")").c_str());
+
+			// 5. Show the production popup container and verify the synced scrollbar is immediately visible.
+			QWidget* prodContainer = prodView->parentWidget();
+			require(prodContainer != nullptr,
+				"CT-M9 Part B: primed production popup has no container widget");
+			prodContainer->show();
+			require(prodBar->isVisible() && prodBar->maximum() > 0,
+				(std::string("CT-M9 Part B: production verticalScrollBar must be visible with maximum > 0 when container is shown (prodBar visible=") +
+					(prodBar->isVisible() ? "true" : "false") +
+					", max=" + std::to_string(prodBar->maximum()) + ")").c_str());
 
 			prodContainer->hide();
-			naiveContainer->hide();
 			QCoreApplication::processEvents();
 		}
 		window.hide();
@@ -4676,11 +4723,18 @@ namespace
 		ConfigEditorWindow window(path, 0, true);
 		QCoreApplication::processEvents();
 
+		// Bill-page managed controls that remain on Bill's Rendering page (inside allRawGroup).
 		static const char* kManagedNames[] = {
-			"config.vprenderer.adaptive_upscale",
 			"config.vprenderer.low_bitrate_handling",
 			"config.vprenderer.capture_path",
+			"config.vprenderer.dv_trims",
 		};
+		// Moved managed control inside vpv.developer.card.scaling_internals (vpv.developer tab is disabled on Original).
+		auto* devTab = control<QWidget>(window, Vpv::ObjectName("developer"));
+		auto* adaptiveUpscale = control<QWidget>(window, QStringLiteral("config.vprenderer.adaptive_upscale"));
+		require(devTab->isAncestorOf(adaptiveUpscale),
+			"GEM-040: expected config.vprenderer.adaptive_upscale to live inside vpv.developer");
+
 		auto checkManagedState = [&](bool expectManaged, const char* phase)
 		{
 			for (const char* name : kManagedNames)
@@ -4702,6 +4756,24 @@ namespace
 						(std::string("GEM-040 (") + phase + "): " + name +
 							" must restore enabled with vpvManaged == false on Original pathway").c_str());
 				}
+			}
+
+			require(!adaptiveUpscale->property("derivedSetting").toBool(),
+				(std::string("GEM-040 (") + phase + "): config.vprenderer.adaptive_upscale" +
+					" must keep derivedSetting == false (preserves save-time freeze)").c_str());
+			if (expectManaged)
+			{
+				require(!adaptiveUpscale->isEnabled() && adaptiveUpscale->property("vpvManaged").toBool() &&
+					adaptiveUpscale->toolTip().startsWith(QStringLiteral("Managed by VP-V")),
+					(std::string("GEM-040 (") + phase + "): config.vprenderer.adaptive_upscale" +
+						" must remain disabled and marked Managed by VP-V").c_str());
+			}
+			else
+			{
+				require(!devTab->isEnabled() && !adaptiveUpscale->property("vpvManaged").toBool() &&
+					adaptiveUpscale->isEnabledTo(devTab),
+					(std::string("GEM-040 (") + phase + "): config.vprenderer.adaptive_upscale" +
+						" must restore its own enabled state (isEnabledTo(vpv.developer)) with vpvManaged == false while vpv.developer is disabled on Original").c_str());
 			}
 		};
 
@@ -4763,15 +4835,24 @@ namespace
 				"Unit 2: appearance_screen_white_nits QDoubleSpinBox must have range 1.0..1000.0");
 
 			auto* appearanceTuningBody = control<QWidget>(window, Vpv::ObjectName("colour.card.appearance_tuning.body"));
+			auto* appearanceMeasured = control<QComboBox>(window, Vpv::ObjectName("colour.appearance_screen_white_measured"));
+			auto* appearanceHonourL11 = control<QComboBox>(window, Vpv::ObjectName("colour.appearance_honour_l11"));
 			auto* ambientAdapt = control<QComboBox>(window, Vpv::ObjectName("colour.ambient_adapt"));
 			auto* roomTuningBody = control<QWidget>(window, Vpv::ObjectName("colour.card.room_tuning.body"));
+			auto* ambientStrength = control<QWidget>(window, QStringLiteral("config.vprenderer.ambient_adapt_strength"));
 			auto* replacedNote = control<QLabel>(window, Vpv::ObjectName("colour.room.replaced_note"));
+			require(appearanceTuningBody->isAncestorOf(appearanceMeasured) &&
+				appearanceTuningBody->isAncestorOf(appearanceHonourL11),
+				"Unit 2: appearance_screen_white_measured and appearance_honour_l11 must live inside colour.card.appearance_tuning.body");
+			require(roomTuningBody->isAncestorOf(ambientStrength),
+				"Unit 2: config.vprenderer.ambient_adapt_strength must live inside colour.card.room_tuning.body");
 
 			// Negative control (appearance=off, ambient_adapt=on): CAM16 controls disabled, legacy room-light enabled, replaced note hidden.
-			require(!room->isEnabled() && !strength->isEnabled() && !whiteNits->isEnabled() && !appearanceTuningBody->isEnabled(),
-				"Unit 2 negative control (appearance=off): CAM16 room/strength/white_nits/tuning must be disabled");
-			require(appearance->isEnabled() && ambientAdapt->isEnabled() && roomTuningBody->isEnabled(),
-				"Unit 2 negative control (appearance=off): appearance switch, ambient_adapt, and room_tuning must be enabled");
+			require(!room->isEnabled() && !strength->isEnabled() && !whiteNits->isEnabled() &&
+				!appearanceMeasured->isEnabled() && !appearanceHonourL11->isEnabled(),
+				"Unit 2 negative control (appearance=off): CAM16 room/strength/white_nits/tuning controls must be disabled");
+			require(appearance->isEnabled() && ambientAdapt->isEnabled() && ambientStrength->isEnabled(),
+				"Unit 2 negative control (appearance=off): appearance switch, ambient_adapt, and ambient_adapt_strength must be enabled");
 			require(replacedNote->isHidden(),
 				"Unit 2 negative control (appearance=off): vpv.colour.room.replaced_note must be hidden");
 
@@ -4781,10 +4862,11 @@ namespace
 			require(onIdx >= 0 && offIdx >= 0, "Unit 2: appearance combo must offer on and off");
 			appearance->setCurrentIndex(onIdx);
 			QCoreApplication::processEvents();
-			require(room->isEnabled() && strength->isEnabled() && whiteNits->isEnabled() && appearanceTuningBody->isEnabled(),
-				"Unit 2 (appearance=on): CAM16 room/strength/white_nits/tuning must become enabled");
-			require(!ambientAdapt->isEnabled() && !roomTuningBody->isEnabled(),
-				"Unit 2 (appearance=on): legacy ambient_adapt and room_tuning must become disabled");
+			require(room->isEnabled() && strength->isEnabled() && whiteNits->isEnabled() &&
+				appearanceMeasured->isEnabled() && appearanceHonourL11->isEnabled(),
+				"Unit 2 (appearance=on): CAM16 room/strength/white_nits/tuning controls must become enabled");
+			require(!ambientAdapt->isEnabled() && !ambientStrength->isEnabled(),
+				"Unit 2 (appearance=on): legacy ambient_adapt and ambient_adapt_strength must become disabled");
 			require(!replacedNote->isHidden() && replacedNote->text().contains(QStringLiteral("Replaced by CAM16 Appearance")),
 				("Unit 2 (appearance=on): vpv.colour.room.replaced_note must be visible with 'Replaced by CAM16 Appearance', got: " +
 					S(replacedNote->text())).c_str());
@@ -4792,10 +4874,11 @@ namespace
 			// Toggle back OFF to prove mutual exclusion reverses cleanly (not sticky).
 			appearance->setCurrentIndex(offIdx);
 			QCoreApplication::processEvents();
-			require(!room->isEnabled() && !strength->isEnabled() && !whiteNits->isEnabled() && !appearanceTuningBody->isEnabled(),
+			require(!room->isEnabled() && !strength->isEnabled() && !whiteNits->isEnabled() &&
+				!appearanceMeasured->isEnabled() && !appearanceHonourL11->isEnabled(),
 				"Unit 2 (back to off): CAM16 controls must disable again");
-			require(ambientAdapt->isEnabled() && roomTuningBody->isEnabled() && replacedNote->isHidden(),
-				"Unit 2 (back to off): legacy ambient_adapt/room_tuning must re-enable and replaced_note must hide again");
+			require(ambientAdapt->isEnabled() && ambientStrength->isEnabled() && replacedNote->isHidden(),
+				"Unit 2 (back to off): legacy ambient_adapt/ambient_adapt_strength must re-enable and replaced_note must hide again");
 
 			// Switch back ON, set validated CAM16 values, and save.
 			appearance->setCurrentIndex(onIdx);
@@ -4836,9 +4919,20 @@ namespace
 				"Unit 2 reload: appearance_strength round-tripped");
 			require(std::abs(whiteNits->value() - 100.0) < 1e-4,
 				"Unit 2 reload: appearance_screen_white_nits round-tripped");
+			auto* reloadedAppearanceTuningBody = control<QWidget>(reopened, Vpv::ObjectName("colour.card.appearance_tuning.body"));
+			auto* reloadedAppearanceMeasured = control<QComboBox>(reopened, Vpv::ObjectName("colour.appearance_screen_white_measured"));
+			auto* reloadedAppearanceHonourL11 = control<QComboBox>(reopened, Vpv::ObjectName("colour.appearance_honour_l11"));
+			auto* reloadedRoomTuningBody = control<QWidget>(reopened, Vpv::ObjectName("colour.card.room_tuning.body"));
+			auto* reloadedAmbientStrength = control<QWidget>(reopened, QStringLiteral("config.vprenderer.ambient_adapt_strength"));
+			require(reloadedAppearanceTuningBody->isAncestorOf(reloadedAppearanceMeasured) &&
+				reloadedAppearanceTuningBody->isAncestorOf(reloadedAppearanceHonourL11) &&
+				reloadedRoomTuningBody->isAncestorOf(reloadedAmbientStrength),
+				"Unit 2 reload: appearance tuning and room tuning controls must live inside their respective card bodies");
+			require(reloadedAppearanceMeasured->isEnabled() && reloadedAppearanceHonourL11->isEnabled(),
+				"Unit 2 reload: CAM16 appearance tuning controls must be enabled on initial open when appearance=on");
 			require(!control<QComboBox>(reopened, Vpv::ObjectName("colour.ambient_adapt"))->isEnabled() &&
-				!control<QWidget>(reopened, Vpv::ObjectName("colour.card.room_tuning.body"))->isEnabled(),
-				"Unit 2 reload: mutual exclusion disables ambient_adapt and room_tuning on initial open");
+				!reloadedAmbientStrength->isEnabled(),
+				"Unit 2 reload: mutual exclusion disables ambient_adapt and ambient_adapt_strength on initial open");
 			auto* replacedNote = control<QLabel>(reopened, Vpv::ObjectName("colour.room.replaced_note"));
 			require(!replacedNote->isHidden() && replacedNote->text().contains(QStringLiteral("Replaced by CAM16 Appearance")),
 				"Unit 2 reload: replaced_note visible on initial open when appearance=on");
