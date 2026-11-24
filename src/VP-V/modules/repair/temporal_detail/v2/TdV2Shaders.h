@@ -3079,6 +3079,27 @@ vec2 td_sample_coded_delta_sited(ivec2 dp, out int diagFlags)
     if (u_all_zero_delta > 0.5)
         return vec2(0.0);
 
+#if defined(TD_CHROMA_APPLY_HAS_VETO) && TD_CHROMA_APPLY_HAS_VETO
+    if (u_has_face_mask > 0.5 || u_has_cell_prior > 0.5)
+    {
+        float vlx = (float(dp.x) + 0.5) * float(TD_DSUB_X) - 0.5 + u_dshift_x;
+        float vly = (float(dp.y) + 0.5) * float(TD_DSUB_Y) - 0.5 + u_dshift_y;
+        int vcx = clamp(max(0, int(floor(vlx))) / TD_CELL_PX, 0, TD_CW - 1);
+        int vcy = clamp(max(0, int(floor(vly))) / TD_CELL_PX, 0, TD_CH - 1);
+        ivec2 vcell = ivec2(vcx, vcy);
+        if (u_has_face_mask > 0.5 && texelFetch(face_mask, vcell, 0).x > 0.5)
+            return vec2(0.0);
+        if (u_has_cell_prior > 0.5)
+        {
+            int vBits = int(round(texelFetch(cell_prior, vcell, 0).y));
+            bool vFocus = ((vBits & 1) != 0);
+            bool vDefoc = ((vBits & 2) != 0);
+            if (vFocus || (vDefoc && u_bokeh_mode < 0.5))
+                return vec2(0.0);
+        }
+    }
+#endif
+
     if (u_identity_grid > 0.5)
     {
         vec2 d = texelFetch(coded_delta, dp, 0).xy;

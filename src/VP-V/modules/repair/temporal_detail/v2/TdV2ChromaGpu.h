@@ -81,8 +81,8 @@ ivec2 td_coded_to_luma_cell(ivec2 cp)
 {
     float lx = td_coded_to_luma_x(float(cp.x));
     float ly = td_coded_to_luma_y(float(cp.y));
-    int cx = clamp(int(floor(lx)) / TD_CELL_PX, 0, TD_CW - 1);
-    int cy = clamp(int(floor(ly)) / TD_CELL_PX, 0, TD_CH - 1);
+    int cx = clamp(max(0, int(floor(lx))) / TD_CELL_PX, 0, TD_CW - 1);
+    int cy = clamp(max(0, int(floor(ly))) / TD_CELL_PX, 0, TD_CH - 1);
     return ivec2(cx, cy);
 }
 )GLSL";
@@ -606,16 +606,22 @@ for (int k = 0; k < K; ++k)
     if (mg.y <= 0.0) cellGateMH = false;
 }
 
-// Coded pixel window spanning luma cell (cell.x, cell.y).
-int cx0 = max(cax0, (cell.x * TD_CELL_PX) / TD_CSUB_X);
-int cy0 = max(cay0, (cell.y * TD_CELL_PX) / TD_CSUB_Y);
-int cx1 = min(cax1, ((cell.x + 1) * TD_CELL_PX + TD_CSUB_X - 1) / TD_CSUB_X);
-int cy1 = min(cay1, ((cell.y + 1) * TD_CELL_PX + TD_CSUB_Y - 1) / TD_CSUB_Y);
-int cellW = max(1, (TD_CELL_PX + TD_CSUB_X - 1) / TD_CSUB_X);
-int cellH = max(1, (TD_CELL_PX + TD_CSUB_Y - 1) / TD_CSUB_Y);
+// Coded pixel window spanning luma cell (cell.x, cell.y), padded for arbitrary siting shifts.
+int padX = (TD_CSUB_X > 1) ? (int(ceil(abs(u_cshift_x) / float(TD_CSUB_X))) + 1) : 0;
+int padY = (TD_CSUB_Y > 1) ? (int(ceil(abs(u_cshift_y) / float(TD_CSUB_Y))) + 1) : 0;
+int cellStartX = max(0, (cell.x * TD_CELL_PX) / TD_CSUB_X - padX);
+int cellStartY = max(0, (cell.y * TD_CELL_PX) / TD_CSUB_Y - padY);
+int cellEndX = min(TD_CH_W, ((cell.x + 1) * TD_CELL_PX + TD_CSUB_X - 1) / TD_CSUB_X + padX);
+int cellEndY = min(TD_CH_H, ((cell.y + 1) * TD_CELL_PX + TD_CSUB_Y - 1) / TD_CSUB_Y + padY);
+int cx0 = max(cax0, cellStartX);
+int cy0 = max(cay0, cellStartY);
+int cx1 = min(cax1, cellEndX);
+int cy1 = min(cay1, cellEndY);
+int cellW = max(0, cellEndX - cellStartX);
+int cellH = max(0, cellEndY - cellStartY);
 int subX = (cellW + 15) / 16;
 int subY = (cellH + 15) / 16;
-bool canCacheSingle = (subX == 1 && subY == 1);
+bool canCacheSingle = (subX <= 1 && subY <= 1);
 
 float ogCb2 = 0.0;
 float ogCr2 = 0.0;
@@ -642,12 +648,12 @@ for (int b = 0; b < 3; ++b)
 for (int sy = 0; sy < subY; ++sy)
 {
     int oy = sy * 16 + ly;
-    int py = (cell.y * TD_CELL_PX) / TD_CSUB_Y + oy;
+    int py = cellStartY + oy;
     if (oy >= cellH || py < cy0 || py >= cy1) continue;
     for (int sx = 0; sx < subX; ++sx)
     {
         int ox = sx * 16 + lx;
-        int px = (cell.x * TD_CELL_PX) / TD_CSUB_X + ox;
+        int px = cellStartX + ox;
         if (ox >= cellW || px < cx0 || px >= cx1) continue;
         ivec2 p = ivec2(px, py);
         if (td_coded_to_luma_cell(p) != cell) continue;
@@ -787,12 +793,12 @@ for (int chIdx = 0; chIdx < 2; ++chIdx)
                 for (int sy = 0; sy < subY; ++sy)
                 {
                     int oy = sy * 16 + ly;
-                    int py = (cell.y * TD_CELL_PX) / TD_CSUB_Y + oy;
+                    int py = cellStartY + oy;
                     if (!gOk || oy >= cellH || py < cy0 || py >= cy1) continue;
                     for (int sx = 0; sx < subX; ++sx)
                     {
                         int ox = sx * 16 + lx;
-                        int px = (cell.x * TD_CELL_PX) / TD_CSUB_X + ox;
+                        int px = cellStartX + ox;
                         if (ox >= cellW || px < cx0 || px >= cx1) continue;
                         ivec2 p = ivec2(px, py);
                         if (td_coded_to_luma_cell(p) != cell) continue;
@@ -1013,20 +1019,23 @@ for (int chIdx = 0; chIdx < 2; ++chIdx)
                 {
                     cA1 = td_est_c_a1(C[k][partner], C[k][k], C[partner][partner], chRetGVar, bGain, psdScale, 0.0);
                 }
-                else if (estMode != 1)
+                else
                 {
-                    cellSingleRefA2 = true;
-                }
-                cVec[k] = exactCopy ? 0.0 : td_select_blind_c(estMode, cA1, cA2);
-                if (!exactCopy && partner < 0 && estMode != 1)
-                {
+                    if (estMode != 1)
+                        cellSingleRefA2 = true;
                     for (int j = 0; j < K; ++j)
                     {
                         if (j == k || td_is_exact_copy(j)) continue;
                         float cCap = td_est_c_a1(C[k][j], C[k][k], C[j][j], chRetGVar, bGain, psdScale, 0.0);
-                        cVec[k] = min(cVec[k], cCap);
+                        cA1 = min(cA1, cCap);
+                    }
+                    if (u_has_clean_split < 0.5 && chRetGVar > TD_NUM_FLOOR)
+                    {
+                        float excess = max(0.0, C[k][k] - 2.0 * chRetGVar * bGain * psdScale);
+                        cA1 = min(cA1, excess);
                     }
                 }
+                cVec[k] = exactCopy ? 0.0 : td_select_blind_c(estMode, cA1, cA2);
             }
 
             float solvedW[3];
@@ -1262,13 +1271,17 @@ bool allBandVeto = ((expFocusBits & 1) != 0) || (((expFocusBits & 2) != 0) && !b
 bool cellIsFace = (u_has_face_mask > 0.5) && (texelFetch(face_mask, cell, 0).x > 0.5);
 bool cellVetoed = cellIsFace || allBandVeto;
 
-int cellStartX = (cell.x * TD_CELL_PX) / TD_CSUB_X;
-int cellStartY = (cell.y * TD_CELL_PX) / TD_CSUB_Y;
-int cellW = max(1, (TD_CELL_PX + TD_CSUB_X - 1) / TD_CSUB_X);
-int cellH = max(1, (TD_CELL_PX + TD_CSUB_Y - 1) / TD_CSUB_Y);
+int padX = (TD_CSUB_X > 1) ? (int(ceil(abs(u_cshift_x) / float(TD_CSUB_X))) + 1) : 0;
+int padY = (TD_CSUB_Y > 1) ? (int(ceil(abs(u_cshift_y) / float(TD_CSUB_Y))) + 1) : 0;
+int cellStartX = max(0, (cell.x * TD_CELL_PX) / TD_CSUB_X - padX);
+int cellStartY = max(0, (cell.y * TD_CELL_PX) / TD_CSUB_Y - padY);
+int cellEndX = min(TD_CH_W, ((cell.x + 1) * TD_CELL_PX + TD_CSUB_X - 1) / TD_CSUB_X + padX);
+int cellEndY = min(TD_CH_H, ((cell.y + 1) * TD_CELL_PX + TD_CSUB_Y - 1) / TD_CSUB_Y + padY);
+int cellW = max(0, cellEndX - cellStartX);
+int cellH = max(0, cellEndY - cellStartY);
 int subX = (cellW + 15) / 16;
 int subY = (cellH + 15) / 16;
-bool canCacheSingle = (subX == 1 && subY == 1);
+bool canCacheSingle = (subX <= 1 && subY <= 1);
 
 int tileDim = 16 + 2 * TD_RAD_FINE;
 int tileN = tileDim * tileDim;
@@ -2096,7 +2109,143 @@ else
 			}
 			out.activeRefCount = refSpecs.size();
 
-			// Helper to zero outCodedDeltaTex cleanly on no-ref / cut / invalid-A2 closure.
+			const ActiveRect lumaActive = in.activeRect.Empty()
+				? ActiveRect::Full(in.lumaW, in.lumaH)
+				: in.activeRect.ClampedTo(in.lumaW, in.lumaH);
+			const ActiveRect cActive = ChromaDetail::ToSubsampledActiveRect(lumaActive, in.lumaW, in.lumaH, cSubX, cSubY, cW, cH);
+			const ActiveRect dActive = ChromaDetail::ToSubsampledActiveRect(lumaActive, in.lumaW, in.lumaH, dSubX, dSubY, dW, dH);
+
+			const float uBokehMode = (cfg_.bokehMode == BokehMode::LowBandCellOnly) ? 1.0f : 0.0f;
+			const float uCAx0 = static_cast<float>(cActive.x0), uCAy0 = static_cast<float>(cActive.y0);
+			const float uCAx1 = static_cast<float>(cActive.x1), uCAy1 = static_cast<float>(cActive.y1);
+			const float uDAx0 = static_cast<float>(dActive.x0), uDAy0 = static_cast<float>(dActive.y0);
+			const float uDAx1 = static_cast<float>(dActive.x1), uDAy1 = static_cast<float>(dActive.y1);
+			const float uCShiftX = in.siting.shiftX, uCShiftY = in.siting.shiftY;
+			const float uDShiftX = in.siting.shiftX, uDShiftY = in.siting.shiftY;
+			const float uKr = static_cast<float>(in.matrix.kr);
+			const float uKg = static_cast<float>(in.matrix.kg);
+			const float uKb = static_cast<float>(in.matrix.kb);
+
+			const bool wantZeroCopyApply = cfg_.ModifiesPixels() &&
+				((!isRgb && out.outDeliveredUvTex != nullptr) || (isRgb && out.outDeliveredRgbTex != nullptr));
+
+			// Shared helper for zero-copy delivered chroma apply (normal veto-clamped path + all-zero passthrough closure).
+			auto runZeroCopyApply = [&](bool allZeroDelta, pl_tex vetoPriorTex, pl_tex vetoFaceTex,
+			                            float vetoHasPrior, float vetoHasFace, int& dispCount) -> bool
+			{
+				if (wantZeroCopyApply)
+				{
+					pl_tex delivDeltaTarget = out.outDeliveredDeltaTex;
+					if (!delivDeltaTarget)
+					{
+						if (!Detail::EnsureTex(gpu, outDelivDeltaTex_, dW, dH, fmtRG32, true, true, false, false))
+							return failVisible("TdV2ChromaGpuEngine outDelivDeltaTex alloc failed", StandInKind::GpuDispatchFailed);
+						delivDeltaTarget = outDelivDeltaTex_;
+					}
+					const bool identityGrid = (in.codedSubsampling == delivSub && cW == dW && cH == dH);
+					const float uAllZero = allZeroDelta ? 1.0f : 0.0f;
+					const float uIdent = identityGrid ? 1.0f : 0.0f;
+					const float uDShX = dSubX > 1 ? in.siting.shiftX : 0.0f;
+					const float uDShY = dSubY > 1 ? in.siting.shiftY : 0.0f;
+					const float uCShX = cSubX > 1 ? in.siting.shiftX : 0.0f;
+					const float uCShY = cSubY > 1 ? in.siting.shiftY : 0.0f;
+					const bool withVeto = (!allZeroDelta && vetoPriorTex != nullptr && vetoFaceTex != nullptr);
+
+					std::string aHdr;
+					aHdr += VpvGpu::DefineInt("TD_DW", dW);
+					aHdr += VpvGpu::DefineInt("TD_DH", dH);
+					aHdr += VpvGpu::DefineInt("TD_DSUB_X", dSubX);
+					aHdr += VpvGpu::DefineInt("TD_DSUB_Y", dSubY);
+					aHdr += VpvGpu::DefineInt("TD_CSUB_X", cSubX);
+					aHdr += VpvGpu::DefineInt("TD_CSUB_Y", cSubY);
+					aHdr += VpvGpu::Define("TD_NUM_FLOOR", kEngineNumFloor);
+					if (withVeto)
+					{
+						aHdr += VpvGpu::DefineInt("TD_CHROMA_APPLY_HAS_VETO", 1);
+						aHdr += VpvGpu::DefineInt("TD_CW", cw);
+						aHdr += VpvGpu::DefineInt("TD_CH", ch);
+						aHdr += VpvGpu::DefineInt("TD_CELL_PX", cellPx);
+					}
+					aHdr += Shaders::kCoreHelpers;
+					aHdr += Shaders::kPassChromaDeltaHeader;
+
+					const int dGx = Detail::GroupsFor(dW, 16);
+					const int dGy = Detail::GroupsFor(dH, 16);
+					if (!isRgb)
+					{
+						pl_shader_desc da[6] = {
+							VpvGpu::Sampled("deliv_uv", in.receivedTex),
+							VpvGpu::Sampled("coded_delta", out.outCodedDeltaTex),
+							VpvGpu::Storage("out_uv", out.outDeliveredUvTex),
+							VpvGpu::Storage("out_delta", delivDeltaTarget),
+							VpvGpu::Sampled("cell_prior", withVeto ? vetoPriorTex : in.receivedTex),
+							VpvGpu::Sampled("face_mask", withVeto ? vetoFaceTex : in.receivedTex)
+						};
+						pl_shader_var va[17] = {
+							VpvGpu::Var("u_dshift_x", &uDShX), VpvGpu::Var("u_dshift_y", &uDShY),
+							VpvGpu::Var("u_cshift_x", &uCShX), VpvGpu::Var("u_cshift_y", &uCShY),
+							VpvGpu::Var("u_all_zero_delta", &uAllZero), VpvGpu::Var("u_identity_grid", &uIdent),
+							VpvGpu::Var("u_cax0", &uCAx0), VpvGpu::Var("u_cay0", &uCAy0),
+							VpvGpu::Var("u_cax1", &uCAx1), VpvGpu::Var("u_cay1", &uCAy1),
+							VpvGpu::Var("u_dax0", &uDAx0), VpvGpu::Var("u_day0", &uDAy0),
+							VpvGpu::Var("u_dax1", &uDAx1), VpvGpu::Var("u_day1", &uDAy1),
+							VpvGpu::Var("u_has_face_mask", &vetoHasFace),
+							VpvGpu::Var("u_has_cell_prior", &vetoHasPrior),
+							VpvGpu::Var("u_bokeh_mode", &uBokehMode)
+						};
+						if (!VpvGpu::Pass(dispatch, "td_v2_chroma_apply_yuv", aHdr, Shaders::kPassChromaApplyYuv,
+						                  da, withVeto ? 6 : 4, va, withVeto ? 17 : 14, dGx, dGy, 0, 16, 16))
+							return failVisible("td_v2_chroma_apply_yuv dispatch failed", StandInKind::GpuDispatchFailed);
+					}
+					else
+					{
+						pl_shader_desc da[6] = {
+							VpvGpu::Sampled("deliv_rgb", in.receivedTex),
+							VpvGpu::Sampled("coded_delta", out.outCodedDeltaTex),
+							VpvGpu::Storage("out_rgb", out.outDeliveredRgbTex),
+							VpvGpu::Storage("out_delta", delivDeltaTarget),
+							VpvGpu::Sampled("cell_prior", withVeto ? vetoPriorTex : in.receivedTex),
+							VpvGpu::Sampled("face_mask", withVeto ? vetoFaceTex : in.receivedTex)
+						};
+						pl_shader_var va[20] = {
+							VpvGpu::Var("u_dshift_x", &uDShX), VpvGpu::Var("u_dshift_y", &uDShY),
+							VpvGpu::Var("u_cshift_x", &uCShX), VpvGpu::Var("u_cshift_y", &uCShY),
+							VpvGpu::Var("u_all_zero_delta", &uAllZero), VpvGpu::Var("u_identity_grid", &uIdent),
+							VpvGpu::Var("u_cax0", &uCAx0), VpvGpu::Var("u_cay0", &uCAy0),
+							VpvGpu::Var("u_cax1", &uCAx1), VpvGpu::Var("u_cay1", &uCAy1),
+							VpvGpu::Var("u_dax0", &uDAx0), VpvGpu::Var("u_day0", &uDAy0),
+							VpvGpu::Var("u_dax1", &uDAx1), VpvGpu::Var("u_day1", &uDAy1),
+							VpvGpu::Var("u_kr", &uKr), VpvGpu::Var("u_kg", &uKg), VpvGpu::Var("u_kb", &uKb),
+							VpvGpu::Var("u_has_face_mask", &vetoHasFace),
+							VpvGpu::Var("u_has_cell_prior", &vetoHasPrior),
+							VpvGpu::Var("u_bokeh_mode", &uBokehMode)
+						};
+						if (!VpvGpu::Pass(dispatch, "td_v2_chroma_apply_rgb", aHdr, Shaders::kPassChromaApplyRgb,
+						                  da, withVeto ? 6 : 4, va, withVeto ? 20 : 17, dGx, dGy, 0, 16, 16))
+							return failVisible("td_v2_chroma_apply_rgb dispatch failed", StandInKind::GpuDispatchFailed);
+					}
+					++dispCount;
+				}
+				else if (allZeroDelta && out.outDeliveredDeltaTex != nullptr)
+				{
+					const std::string zdHdr = VpvGpu::DefineInt("TD_CH_W", dW) + VpvGpu::DefineInt("TD_CH_H", dH);
+					constexpr const char* kZeroDelivBody = R"GLSL(
+ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+if (p.x >= TD_CH_W || p.y >= TD_CH_H) return;
+imageStore(out_coded_delta, p, vec4(0.0));
+)GLSL";
+					pl_shader_desc dzd[1] = { VpvGpu::Storage("out_coded_delta", out.outDeliveredDeltaTex) };
+					if (!VpvGpu::Pass(dispatch, "td_v2_chroma_zero_deliv_delta", zdHdr, kZeroDelivBody, dzd, 1, nullptr, 0,
+					                  Detail::GroupsFor(dW, 16), Detail::GroupsFor(dH, 16), 0, 16, 16))
+					{
+						return failVisible("td_v2_chroma_zero_deliv_delta dispatch failed", StandInKind::GpuDispatchFailed);
+					}
+					++dispCount;
+				}
+				return true;
+			};
+
+			// Helper to zero outCodedDeltaTex AND refresh delivered outputs cleanly on no-ref / cut / invalid-A2 closure.
 			auto zeroCodedDeltaAndApply = [&]() -> bool
 			{
 				const std::string zHdr = VpvGpu::DefineInt("TD_CH_W", cW) + VpvGpu::DefineInt("TD_CH_H", cH);
@@ -2111,8 +2260,11 @@ imageStore(out_coded_delta, p, vec4(0.0));
 				{
 					return failVisible("td_v2_chroma_zero_delta dispatch failed", StandInKind::GpuDispatchFailed);
 				}
-				out.dispatchCount = 1;
-				lastDispatchCount_ = 1;
+				int zDispatches = 1;
+				if (!runZeroCopyApply(true, nullptr, nullptr, 0.0f, 0.0f, zDispatches))
+					return false;
+				out.dispatchCount = zDispatches;
+				lastDispatchCount_ = zDispatches;
 				out.succeeded = true;
 				return true;
 			};
@@ -2311,7 +2463,7 @@ imageStore(out_coded_delta, p, vec4(0.0));
 			}
 			const int priorComps = cellPriorTex->params.format ? cellPriorTex->params.format->num_components : 2;
 			const float uPriorHasStep = (priorComps >= 3) ? 1.0f : 0.0f;
-			const float uPriorHasCrGrain = (priorComps >= 4 && cellPriorTex == inCellPriorTex_) ? 1.0f : 0.0f;
+			const float uPriorHasCrGrain = (priorComps >= 4) ? 1.0f : 0.0f;
 
 			pl_tex faceMaskTex = in.faceMaskTex;
 			bool hasFaceMask = (faceMaskTex != nullptr);
@@ -2337,12 +2489,6 @@ imageStore(out_coded_delta, p, vec4(0.0));
 			const float uHasFaceMask = hasFaceMask ? 1.0f : 0.0f;
 			pl_tex faceMaskBind = hasFaceMask ? faceMaskTex : sc.diagCr;
 
-			const ActiveRect lumaActive = in.activeRect.Empty()
-				? ActiveRect::Full(in.lumaW, in.lumaH)
-				: in.activeRect.ClampedTo(in.lumaW, in.lumaH);
-			const ActiveRect cActive = ChromaDetail::ToSubsampledActiveRect(lumaActive, in.lumaW, in.lumaH, cSubX, cSubY, cW, cH);
-			const ActiveRect dActive = ChromaDetail::ToSubsampledActiveRect(lumaActive, in.lumaW, in.lumaH, dSubX, dSubY, dW, dH);
-
 			const BandWhiteNoiseGains gains = ComputeBandWhiteNoiseGains();
 			const double s1Sq = VpUnit::BandFromBase::kSigmaFine * VpUnit::BandFromBase::kSigmaFine;
 			const double s2Sq = VpUnit::BandFromBase::kSigmaBase * VpUnit::BandFromBase::kSigmaBase;
@@ -2363,21 +2509,11 @@ imageStore(out_coded_delta, p, vec4(0.0));
 			const float uExact1 = (K > 1 && refSpecs[1].isExactCopy) ? 1.0f : 0.0f;
 			const float uExact2 = (K > 2 && refSpecs[2].isExactCopy) ? 1.0f : 0.0f;
 			const float uHasSplit = (in.hasCleanSplit && in.cleanUvTex != nullptr) ? 1.0f : 0.0f;
-			const float uBokehMode = (cfg_.bokehMode == BokehMode::LowBandCellOnly) ? 1.0f : 0.0f;
 			const float uEnableHuber = cfg_.enablePerCornerHuber ? 1.0f : 0.0f;
 			const float uA2Valid = a2.stats.valid ? 1.0f : 0.0f;
 			const float uA2Sent = a2.stats.valid ? static_cast<float>(a2.stats.sigmaSentSq) : 0.0f;
 			const float uA2Zero = a2.stats.valid ? static_cast<float>(a2.stats.sigmaZeroSq) : 0.0f;
 			const float uA2Total = a2.stats.valid ? static_cast<float>(a2.stats.totalVar) : 0.0f;
-			const float uCAx0 = static_cast<float>(cActive.x0), uCAy0 = static_cast<float>(cActive.y0);
-			const float uCAx1 = static_cast<float>(cActive.x1), uCAy1 = static_cast<float>(cActive.y1);
-			const float uDAx0 = static_cast<float>(dActive.x0), uDAy0 = static_cast<float>(dActive.y0);
-			const float uDAx1 = static_cast<float>(dActive.x1), uDAy1 = static_cast<float>(dActive.y1);
-			const float uCShiftX = in.siting.shiftX, uCShiftY = in.siting.shiftY;
-			const float uDShiftX = in.siting.shiftX, uDShiftY = in.siting.shiftY;
-			const float uKr = static_cast<float>(in.matrix.kr);
-			const float uKg = static_cast<float>(in.matrix.kg);
-			const float uKb = static_cast<float>(in.matrix.kb);
 			const float uMidCode = static_cast<float>(std::ldexp(1.0, cfg_.sourceBits - 1));
 			const float uPsdLow = static_cast<float>(in.psdShape.bandShareLow);
 			const float uPsdMid = static_cast<float>(in.psdShape.bandShareMid);
@@ -2738,81 +2874,9 @@ float td_huber_taper(float diffSq, float diagC)
 					standIns->Engage(StandInKind::GrainGuardW4c);
 			}
 
-			// ---- Optional Zero-Copy GPU Chroma Delta Apply (ZERO CPU roundtrip in live playback!) ----
-			const bool wantZeroCopyApply = cfg_.ModifiesPixels() &&
-				((!isRgb && out.outDeliveredUvTex != nullptr) || (isRgb && out.outDeliveredRgbTex != nullptr));
-			if (wantZeroCopyApply)
-			{
-				pl_tex delivDeltaTarget = out.outDeliveredDeltaTex;
-				if (!delivDeltaTarget)
-				{
-					if (!Detail::EnsureTex(gpu, outDelivDeltaTex_, dW, dH, fmtRG32, true, true, false, false))
-						return failVisible("TdV2ChromaGpuEngine outDelivDeltaTex alloc failed", StandInKind::GpuDispatchFailed);
-					delivDeltaTarget = outDelivDeltaTex_;
-				}
-				const bool identityGrid = (in.codedSubsampling == delivSub && cW == dW && cH == dH);
-				const float uAllZero = 0.0f;
-				const float uIdent = identityGrid ? 1.0f : 0.0f;
-				const float uDShX = dSubX > 1 ? in.siting.shiftX : 0.0f;
-				const float uDShY = dSubY > 1 ? in.siting.shiftY : 0.0f;
-				const float uCShX = cSubX > 1 ? in.siting.shiftX : 0.0f;
-				const float uCShY = cSubY > 1 ? in.siting.shiftY : 0.0f;
-
-				std::string aHdr;
-				aHdr += VpvGpu::DefineInt("TD_DW", dW);
-				aHdr += VpvGpu::DefineInt("TD_DH", dH);
-				aHdr += VpvGpu::DefineInt("TD_DSUB_X", dSubX);
-				aHdr += VpvGpu::DefineInt("TD_DSUB_Y", dSubY);
-				aHdr += VpvGpu::DefineInt("TD_CSUB_X", cSubX);
-				aHdr += VpvGpu::DefineInt("TD_CSUB_Y", cSubY);
-				aHdr += VpvGpu::Define("TD_NUM_FLOOR", kEngineNumFloor);
-				aHdr += Shaders::kCoreHelpers;
-				aHdr += Shaders::kPassChromaDeltaHeader;
-
-				const int dGx = Detail::GroupsFor(dW, 16);
-				const int dGy = Detail::GroupsFor(dH, 16);
-				if (!isRgb)
-				{
-					pl_shader_desc da[4] = {
-						VpvGpu::Sampled("deliv_uv", in.receivedTex),
-						VpvGpu::Sampled("coded_delta", out.outCodedDeltaTex),
-						VpvGpu::Storage("out_uv", out.outDeliveredUvTex),
-						VpvGpu::Storage("out_delta", delivDeltaTarget)
-					};
-					pl_shader_var va[14] = {
-						VpvGpu::Var("u_dshift_x", &uDShX), VpvGpu::Var("u_dshift_y", &uDShY),
-						VpvGpu::Var("u_cshift_x", &uCShX), VpvGpu::Var("u_cshift_y", &uCShY),
-						VpvGpu::Var("u_all_zero_delta", &uAllZero), VpvGpu::Var("u_identity_grid", &uIdent),
-						VpvGpu::Var("u_cax0", &uCAx0), VpvGpu::Var("u_cay0", &uCAy0),
-						VpvGpu::Var("u_cax1", &uCAx1), VpvGpu::Var("u_cay1", &uCAy1),
-						VpvGpu::Var("u_dax0", &uDAx0), VpvGpu::Var("u_day0", &uDAy0),
-						VpvGpu::Var("u_dax1", &uDAx1), VpvGpu::Var("u_day1", &uDAy1)
-					};
-					if (!runPass("td_v2_chroma_apply_yuv", aHdr, Shaders::kPassChromaApplyYuv, da, 4, va, 14, dGx, dGy))
-						return failVisible("td_v2_chroma_apply_yuv dispatch failed", StandInKind::GpuDispatchFailed);
-				}
-				else
-				{
-					pl_shader_desc da[4] = {
-						VpvGpu::Sampled("deliv_rgb", in.receivedTex),
-						VpvGpu::Sampled("coded_delta", out.outCodedDeltaTex),
-						VpvGpu::Storage("out_rgb", out.outDeliveredRgbTex),
-						VpvGpu::Storage("out_delta", delivDeltaTarget)
-					};
-					pl_shader_var va[17] = {
-						VpvGpu::Var("u_dshift_x", &uDShX), VpvGpu::Var("u_dshift_y", &uDShY),
-						VpvGpu::Var("u_cshift_x", &uCShX), VpvGpu::Var("u_cshift_y", &uCShY),
-						VpvGpu::Var("u_all_zero_delta", &uAllZero), VpvGpu::Var("u_identity_grid", &uIdent),
-						VpvGpu::Var("u_cax0", &uCAx0), VpvGpu::Var("u_cay0", &uCAy0),
-						VpvGpu::Var("u_cax1", &uCAx1), VpvGpu::Var("u_cay1", &uCAy1),
-						VpvGpu::Var("u_dax0", &uDAx0), VpvGpu::Var("u_day0", &uDAy0),
-						VpvGpu::Var("u_dax1", &uDAx1), VpvGpu::Var("u_day1", &uDAy1),
-						VpvGpu::Var("u_kr", &uKr), VpvGpu::Var("u_kg", &uKg), VpvGpu::Var("u_kb", &uKb)
-					};
-					if (!runPass("td_v2_chroma_apply_rgb", aHdr, Shaders::kPassChromaApplyRgb, da, 4, va, 17, dGx, dGy))
-						return failVisible("td_v2_chroma_apply_rgb dispatch failed", StandInKind::GpuDispatchFailed);
-				}
-			}
+			// ---- Optional Zero-Copy GPU Chroma Delta Apply (ZERO CPU roundtrip; post-upsample face/focus/bokeh veto parity!) ----
+			if (!runZeroCopyApply(false, cellPriorTex, faceMaskBind, 1.0f, uHasFaceMask, dispatches))
+				return false;
 
 			out.dispatchCount = dispatches;
 			lastDispatchCount_ = dispatches;
@@ -3079,7 +3143,7 @@ float td_huber_taper(float diffSq, float diagC)
 				res.codedDeltaCr.v[i] = static_cast<double>(cdBuf[i * 2u + 1u]);
 			}
 
-			if (cfg_.ModifiesPixels() && gOut.activeRefCount > 0 && gOut.a2InvalidCells == 0)
+			if (cfg_.ModifiesPixels())
 			{
 				std::vector<float> ddBuf(static_cast<size_t>(dW) * static_cast<size_t>(dH) * 2u, 0.0f);
 				if (!Detail::DownloadFloats(gpu, outDelivDeltaTex_, ddBuf.data()))
