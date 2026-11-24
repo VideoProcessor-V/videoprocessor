@@ -68,7 +68,9 @@ namespace CameraModel
 			double rel = 0;                  // relThreshold
 			std::vector<Sample> s;           // w = trust
 			std::vector<int> blk;            // block index per sample
-			std::vector<uint8_t> excluded;   // per block: bars or text guard
+			std::vector<uint8_t> excluded;   // per block: strictly bars or text guard (NEVER water)
+			const std::vector<uint8_t>* waterExcluded = nullptr;   // CE-WATER-C1: separate per-block water mask (not Overlay/Excluded)
+			double preWaterRingMass = 0;     // border-ring stratified trust mass before water exclusion (for remaining-rigid-support guard)
 			int bx0 = 0, bx1 = 0, by0 = 0, by1 = 0;   // grid rectangle whose block centres lie inside the picture
 			int cellsX = 1, cellsY = 1, cellsWithSample = 0;
 			double trustSum = 0;
@@ -261,8 +263,13 @@ namespace CameraModel
 			f.blk.clear();
 			f.trustSum = 0;
 			f.cellsWithSample = 0;
+			f.waterExcluded = nullptr;
+			f.preWaterRingMass = 0;
 
 			const int nb = in.gridW * in.gridH;
+			const bool haveWaterMask = waterMask != nullptr && waterMask->size() == static_cast<size_t>(nb);
+			if (haveWaterMask)
+				f.waterExcluded = waterMask;
 			const double bs = in.blockSize;
 			// Blocks whose centre lies inside the picture form one rectangle of the grid (bars lie outside it).
 			// The ranges are estimated and then fixed up with the exact per-centre predicate.
@@ -300,6 +307,14 @@ namespace CameraModel
 			const int cells = cellsX * cellsY;
 			std::vector<int> best(static_cast<size_t>(cells), -1);
 			std::vector<float> bestTrust(static_cast<size_t>(cells), 0.0f);
+			std::vector<float> preRingTrust;
+			int ringX = 0, ringY = 0;
+			if (haveWaterMask)
+			{
+				preRingTrust.assign(static_cast<size_t>(cells), 0.0f);
+				ringX = std::max(1, static_cast<int>(std::lround(c.borderRingFraction * (bx1 - bx0))));
+				ringY = std::max(1, static_cast<int>(std::lround(c.borderRingFraction * (by1 - by0))));
+			}
 			std::vector<int> colCell(static_cast<size_t>(std::max(0, bx1 - bx0)));
 			for (int bx = bx0; bx < bx1; ++bx)
 			{
@@ -314,22 +329,31 @@ namespace CameraModel
 				const int rowBase = by * in.gridW;
 				uint8_t* const exRow = f.excluded.data() + rowBase;
 				const uint8_t* const guardRow = in.textGuard != nullptr ? in.textGuard + rowBase : nullptr;
-				const uint8_t* const waterRow = (waterMask != nullptr && waterMask->size() == static_cast<size_t>(nb)) ? waterMask->data() + rowBase : nullptr;
+				const uint8_t* const waterRow = haveWaterMask ? waterMask->data() + rowBase : nullptr;
 				const float* const trustRow = in.fwdTrust + rowBase;
 				const int* const cc = colCell.data();
 				int* const bestP = best.data();
 				float* const bestT = bestTrust.data();
+				float* const preRingP = haveWaterMask ? preRingTrust.data() : nullptr;
+				const bool rowInRing = haveWaterMask && (by < by0 + ringY || by >= by1 - ringY);
 				for (int bx = bx0; bx < bx1; ++bx)
 				{
 					if (guardRow != nullptr && guardRow[bx] == 1)
-						continue;                              // excluded stays 1
-					if (waterRow != nullptr && waterRow[bx] != 0)
-						continue;                              // CE-WATER-C1: excluded incoherent water / dynamic-texture block
-					exRow[bx] = 0;
+						continue;                              // excluded stays 1 (strictly bars + text-guard)
+					exRow[bx] = 0;                             // NEVER mark water blocks in f.excluded (Overlay/BlockHint::Excluded)
 					const float tr = trustRow[bx];
 					if (!(tr > 0.0f))
 						continue;                              // also rejects NaN
 					const int ci = rowCell + cc[bx - bx0];
+					if (preRingP != nullptr && (rowInRing || bx < bx0 + ringX || bx >= bx1 - ringX)
+						&& tr > preRingP[ci] && FiniteF(tr))
+					{
+						const int b = rowBase + bx;
+						if (FiniteF(in.fwdX[b]) && FiniteF(in.fwdY[b]))
+							preRingP[ci] = tr;
+					}
+					if (waterRow != nullptr && waterRow[bx] != 0)
+						continue;                              // CE-WATER-C1: skip incoherent water block during sampling
 					// Validity (finite trust and vector) is tested only for a block that would win its cell;
 					// an invalid block never wins, so the chosen samples are the same as testing every block.
 					if ((bestP[ci] < 0 || tr > bestT[ci]) && FiniteF(tr))
@@ -342,6 +366,11 @@ namespace CameraModel
 						}
 					}
 				}
+			}
+			if (haveWaterMask)
+			{
+				for (int ci = 0; ci < cells; ++ci)
+					f.preWaterRingMass += preRingTrust[static_cast<size_t>(ci)];
 			}
 			for (int ci = 0; ci < cells; ++ci)
 			{
@@ -439,6 +468,67 @@ namespace CameraModel
 			out[2] = out[3] = prec / t;
 		}
 
+		// C4: RMS vector difference (source px) between a chosen Affine/Homography model and its best 4-DOF Similarity
+		// approximation over the four picture corners + picture centre (0 for Translation / Similarity).
+		double ComputeShearEnergy(const Params& model, const Rect& pic)
+		{
+			if ((model.type != ModelType::Affine && model.type != ModelType::Homography) || pic.Empty())
+				return 0.0;
+			SimilarityRates rates;
+			if (!ToSimilarity(model, pic, 1.0, rates))
+				return 0.0;
+			const Params sim = FromSimilarity(rates, 1.0);
+			const double hw = 0.5 * pic.Width(), hh = 0.5 * pic.Height();
+			const double px[5] = { -hw, hw, hw, -hw, 0.0 };
+			const double py[5] = { -hh, -hh, hh, hh, 0.0 };
+			const bool mAff = AffineRow(model);
+			double sumSq = 0.0;
+			for (int k = 0; k < 5; ++k)
+			{
+				double mx = 0.0, my = 0.0, sx = 0.0, sy = 0.0;
+				Disp(model, mAff, px[k], py[k], &mx, &my);
+				Disp(sim, true, px[k], py[k], &sx, &sy);
+				const double dx = mx - sx, dy = my - sy;
+				sumSq += dx * dx + dy * dy;
+			}
+			return std::sqrt(sumSq / 5.0);
+		}
+
+		// C4: Top-vs-Bottom (y < 0 vs y >= 0) and Left-vs-Right (x < 0 vs x >= 0) trust-weighted mean signed residual
+		// dipole norms (source px). Each sample's residual vector is capped at the existing 3 * threshold support radius
+		// (sqrt(9 * Threshold2), matching MagW2 and ChooseModel) so a tiny extreme outlier cannot mimic a half-frame drift.
+		void ComputeDipoles(const Field& f, const Params& model, double* tbOut, double* lrOut)
+		{
+			double rxT = 0.0, ryT = 0.0, wT = 0.0;
+			double rxB = 0.0, ryB = 0.0, wB = 0.0;
+			double rxL = 0.0, ryL = 0.0, wL = 0.0;
+			double rxR = 0.0, ryR = 0.0, wR = 0.0;
+			const bool aff = AffineRow(model);
+			for (size_t i = 0; i < f.s.size(); ++i)
+			{
+				const Sample& s = f.s[i];
+				double dx = 0.0, dy = 0.0;
+				Disp(model, aff, s.x, s.y, &dx, &dy);
+				double ex = s.dx - dx, ey = s.dy - dy;
+				const double r2 = ex * ex + ey * ey;
+				const double pm2 = dx * dx + dy * dy;
+				const double cap2 = 9.0 * Threshold2(f, pm2);
+				if (r2 > cap2 && r2 > 0.0)
+				{
+					const double scale = std::sqrt(cap2 / r2);
+					ex *= scale;
+					ey *= scale;
+				}
+				const double w = s.w;
+				if (s.y < 0.0) { rxT += w * ex; ryT += w * ey; wT += w; }
+				else { rxB += w * ex; ryB += w * ey; wB += w; }
+				if (s.x < 0.0) { rxL += w * ex; ryL += w * ey; wL += w; }
+				else { rxR += w * ex; ryR += w * ey; wR += w; }
+			}
+			*tbOut = (wT > 0.0 && wB > 0.0) ? std::hypot(rxT / wT - rxB / wB, ryT / wT - ryB / wB) : 0.0;
+			*lrOut = (wL > 0.0 && wR > 0.0) ? std::hypot(rxL / wL - rxR / wR, ryL / wL - ryR / wR) : 0.0;
+		}
+
 		struct ChosenModel
 		{
 			Params model;
@@ -501,6 +591,8 @@ namespace CameraModel
 			Params chosen;
 			bool haveChosen = false;
 			double chosenCost = 0;
+			Params bestSim;
+			bool haveBestSim = false;
 			// Early exit: keep H0's (refined) type and try ONE step up from the same weighted set under the same
 			// complexity-penalty test; otherwise run the whole ladder from translation.
 			int tiFirst = 0, tiLast = 3;
@@ -511,6 +603,11 @@ namespace CameraModel
 				chosen = w;
 				chosenCost = supportCost(w);
 				haveChosen = true;
+				if (w.type == ModelType::Translation || w.type == ModelType::Similarity)
+				{
+					bestSim = w;
+					haveBestSim = true;
+				}
 			}
 			for (int ti = tiFirst + (earlyExit ? 1 : 0); ti <= tiLast; ++ti)
 			{
@@ -536,6 +633,11 @@ namespace CameraModel
 					chosen = p;
 					chosenCost = cost;
 					haveChosen = true;
+					if (ty == ModelType::Translation || ty == ModelType::Similarity)
+					{
+						bestSim = p;
+						haveBestSim = true;
+					}
 					continue;
 				}
 				const double extra = ParamCount(ty) - ParamCount(chosen.type);
@@ -544,6 +646,11 @@ namespace CameraModel
 				{
 					chosen = p;
 					chosenCost = cost;
+					if (ty == ModelType::Translation || ty == ModelType::Similarity)
+					{
+						bestSim = p;
+						haveBestSim = true;
+					}
 				}
 			}
 			// Early exit, step down: the loop above only tries one step UP from H0's type, so a model that was a
@@ -569,8 +676,66 @@ namespace CameraModel
 							{
 								chosen = lp;
 								chosenCost = costLower;
+								if (lowerTy == ModelType::Translation || lowerTy == ModelType::Similarity)
+								{
+									bestSim = lp;
+									haveBestSim = true;
+								}
 							}
 						}
+					}
+				}
+			}
+			// C4 shear/dipole overfit guard: when Affine or Homography wins on mediocre rawShare (< inlierShareHi)
+			// with statistically significant non-similarity shear (shearEnergy > absThr = absThresholdSigmas * prec)
+			// AND a > absThr top-bottom or left-right signed residual dipole (water-below-horizon shear overfit),
+			// step back cleanly to the best Similarity/Translation model so non-similarity never absorbs a half-frame dipole.
+			if (haveChosen && (chosen.type == ModelType::Affine || chosen.type == ModelType::Homography))
+			{
+				double inlMass = 0.0;
+				const bool cAff = AffineRow(chosen);
+				for (size_t i = 0; i < f.s.size(); ++i)
+				{
+					double r2, pm2;
+					ResidualSq(chosen, cAff, f.s[i], &r2, &pm2);
+					if (r2 <= Threshold2(f, pm2))
+						inlMass += f.s[i].w;
+				}
+				const double chosenRawShare = f.trustSum > 0.0 ? RampMath::Clamp01<double>(inlMass / f.trustSum) : 0.0;
+				const double shearE = ComputeShearEnergy(chosen, f.pic);
+				if (chosenRawShare < c.inlierShareHi && shearE > f.absThr)
+				{
+					if (!haveBestSim)
+					{
+						const ModelType fallbacks[2] = { ModelType::Similarity, ModelType::Translation };
+						for (int fi = 0; fi < 2 && !haveBestSim; ++fi)
+						{
+							const ModelType fty = fallbacks[fi];
+							Params fp;
+							if (static_cast<int>(wbuf.size()) >= MinimalCount(fty)
+								&& FitWeighted(fty, wbuf.data(), static_cast<int>(wbuf.size()), f.halfDiag, fp))
+							{
+								fp.type = fty;
+								if (!IsDegenerate(fp, f.pic))
+								{
+									Refine(f, f.s, fp, irls);
+									if (!IsDegenerate(fp, f.pic))
+									{
+										bestSim = fp;
+										haveBestSim = true;
+									}
+								}
+							}
+						}
+					}
+					if (haveBestSim)
+					{
+						double dipTBc = 0.0, dipLRc = 0.0, dipTBs = 0.0, dipLRs = 0.0;
+						ComputeDipoles(f, chosen, &dipTBc, &dipLRc);
+						ComputeDipoles(f, bestSim, &dipTBs, &dipLRs);
+						const double maxDipole = std::max(std::max(dipTBc, dipLRc), std::max(dipTBs, dipLRs));
+						if (maxDipole > f.absThr)
+							chosen = bestSim;
 					}
 				}
 			}
@@ -638,6 +803,9 @@ namespace CameraModel
 			// A camera behind many movers (a crowd under a pan) explains about half the vectors and is still the
 			// dominant motion when no other motion competes; a competing motion is the ambiguity signal's job.
 			const double rawShare = f.trustSum > 0 ? RampMath::Clamp01<double>(inlierMass / f.trustSum) : 0.0;
+			sg.rawShare = rawShare;
+			sg.shearEnergy = ComputeShearEnergy(model, f.pic);
+			ComputeDipoles(f, model, &sg.dipoleTB, &sg.dipoleLR);
 			{
 				const double lo = c.inlierShareLo, span = std::max(1e-6, c.inlierShareHi - c.inlierShareLo);
 				sg.inlierShare = f.trustSum > 0 ? RampMath::Clamp01<double>((inlierMass / f.trustSum - lo) / span) : 0.0;
@@ -722,6 +890,8 @@ namespace CameraModel
 					const int b = by * in.gridW + bx;
 					if (f.excluded[static_cast<size_t>(b)] != 0)
 						continue;
+					if (f.waterExcluded != nullptr && (*f.waterExcluded)[static_cast<size_t>(b)] != 0)
+						continue;
 					const float tr = in.fwdTrust[b];
 					if (!(tr > 0.0f) || !FiniteF(tr) || !FiniteF(in.fwdX[b]) || !FiniteF(in.fwdY[b]))
 						continue;
@@ -743,8 +913,10 @@ namespace CameraModel
 		// form too coarse for the accuracy target at this frame size is a counted skip, never a refine), then the refine over the camera-
 		// inlier blocks (every native cell the model explains within the fit's own threshold; bars / text guard excluded), then the verdict
 		// stub. Returns true when the model was replaced (the caller rebuilds the candidate on it). The outcome is always written back.
-		static bool ApplyPhotometric(Fitter& F, const PairInput& in, const Field& f, Params& model)
+		static bool ApplyPhotometric(Fitter& F, const PairInput& in, const Field& f, Params& model, bool* disagreedOut = nullptr)
 		{
+			if (disagreedOut != nullptr)
+				*disagreedOut = false;
 			PhotometricInput* pi = in.photometric;
 			if (pi == nullptr)
 				return false;
@@ -774,6 +946,8 @@ namespace CameraModel
 					const int b = by * in.gridW + bx;
 					if (f.excluded[static_cast<size_t>(b)] != 0)
 						continue;
+					if (f.waterExcluded != nullptr && (*f.waterExcluded)[static_cast<size_t>(b)] != 0)
+						continue;
 					const float tr = in.fwdTrust[b];
 					if (!(tr > 0.0f) || !FiniteF(tr) || !FiniteF(in.fwdX[b]) || !FiniteF(in.fwdY[b]))
 						continue;
@@ -794,8 +968,8 @@ namespace CameraModel
 			mask.gridH = in.gridH;
 			mask.blockSize = in.blockSize;
 			const RefineResult raw = F.m_photometric.Refine(model, lv, in.picture, mask);
-			// The one call site of the verdict unit (plan lead20 W3): today it returns the R3 result unchanged.
-			const RefineResult r = PhotometricVerdict(model, raw, f.prec);
+			// The one call site of the verdict unit (plan lead20 W3, CE-WATER-C3).
+			const RefineResult r = PhotometricVerdict(model, raw, f.prec, disagreedOut);
 			pi->result = r;
 			if (r.status == RefineStatus::Refined)
 			{
@@ -1590,7 +1764,8 @@ namespace CameraModel
 			uint32_t fullCells = 0;
 			if (in.fullFinalRefine)
 				fullCells = FullFinalRefine(in, f, cam->model, irls, F.m_scratchFullAll, F.m_scratchRefineBuf);   // the chosen model over every native cell (owner)
-			const bool photoMoved = ApplyPhotometric(F, in, f, cam->model);   // R3: after the full-resolution refine, before the signals are built
+			bool photoDisagreed = false;
+			const bool photoMoved = ApplyPhotometric(F, in, f, cam->model, &photoDisagreed);   // R3: after the full-resolution refine, before the signals are built
 			if (fullCells > 0 || photoMoved)
 			{
 				// The refine moved the model: the inliers, the share and every signal Finish publishes are rebuilt on the refined model.
@@ -1616,12 +1791,55 @@ namespace CameraModel
 			}
 
 			CM_PROF_MARK(6);
-			// SHOULD-2 (Gemini audit): the dynamic-texture / static-camera verdicts are known BEFORE the object tracker runs, so a record that is
-			// demoted to Ambiguous does not update the tracker's history (it would otherwise learn from a water / static-ring pair). Both
-			// detectors off: nothing here runs and the record is the one it always was.
+			// SHOULD-2 (Gemini audit): the dynamic-texture / static-camera / photometric / water-support verdicts are known BEFORE
+			// Labels and the object tracker run, so a demoted record stamps no Overlay and does not update the tracker's history.
 			if (precOut != nullptr)
 				*precOut = f.prec;   // the FINAL precision (quantum floor, raised noise scale): the detectors and the temporal floor use it
-			const bool demoted = detect && ApplyDetectors(F, in, rec, f.prec);
+			bool demoted = false;
+			// CE-WATER-C3: pixel-domain photometric brightness-constancy or > 3-sigma geometric disagreement demotes cleanly.
+			if (photoDisagreed && rec.valid && (rec.reason == Reason::Ok || rec.reason == Reason::LowConfidence))
+			{
+				rec.reason = Reason::Ambiguous;
+				rec.verdictFlags |= kVerdictPhotometricDisagreement;
+				rec.confidence *= 0.495;   // below 0.5 for any logistic confidence <= 1
+				demoted = true;
+			}
+			// CE-WATER-C1 mandatory remaining-rigid-support guard: when > 1/4 (1 quadrant) of trusted blocks were excluded as water,
+			// verify the remaining rigid inliers still cover >= 3 quadrants (at Config::quadrantMinShare) AND retain border-ring
+			// rigid support >= Config::borderVetoRatio (prevents locking onto a moving boat hull when 70-85% water is removed).
+			if (c.waterBlockExclude && waterExcludedShare > c.waterExcludeCfg.supportGuardMinWaterShare
+				&& rec.valid && (rec.reason == Reason::Ok || rec.reason == Reason::LowConfidence))
+			{
+				const int ringX = std::max(1, static_cast<int>(std::lround(c.borderRingFraction * (f.bx1 - f.bx0))));
+				const int ringY = std::max(1, static_cast<int>(std::lround(c.borderRingFraction * (f.by1 - f.by0))));
+				double qMass[4] = { 0.0, 0.0, 0.0, 0.0 }, inlMass = 0.0, inlRingMass = 0.0;
+				for (size_t i = 0; i < f.s.size(); ++i)
+				{
+					if (!cam->inl[i])
+						continue;
+					const double w = f.s[i].w;
+					qMass[Quadrant(f.s[i].x, f.s[i].y)] += w;
+					inlMass += w;
+					const int b = f.blk[i];
+					const int bx = b % f.gridW, by = b / f.gridW;
+					if (bx < f.bx0 + ringX || bx >= f.bx1 - ringX || by < f.by0 + ringY || by >= f.by1 - ringY)
+						inlRingMass += w;
+				}
+				int rigidQuadrants = 0;
+				for (int q = 0; q < 4; ++q)
+					if (inlMass > 0.0 && qMass[q] / inlMass >= c.quadrantMinShare)
+						++rigidQuadrants;
+				const double borderSupport = f.preWaterRingMass > 0.0 ? (inlRingMass / f.preWaterRingMass) : 0.0;
+				if (rigidQuadrants < 3 || borderSupport < c.borderVetoRatio)
+				{
+					rec.reason = Reason::Ambiguous;
+					rec.verdictFlags |= kVerdictDynamicTexture;
+					rec.confidence *= 0.495;   // below 0.5 for any logistic confidence <= 1
+					demoted = true;
+				}
+			}
+			if (detect && ApplyDetectors(F, in, rec, f.prec))
+				demoted = true;
 			Labels(F, in, f, rec, seed, runObjects && !demoted);
 			CM_PROF_MARK(7);
 			return rec;
@@ -1642,6 +1860,8 @@ namespace CameraModel
 				fit.signals.dynTemporal = dt.temporal;
 				fit.signals.dynSpatial = dt.spatial;
 				fit.signals.dynField = dt.field;
+				fit.signals.dynLaplacian = dt.spatialLaplacian;
+				fit.signals.dynRhoTemp = dt.rhoTemp;
 				if (dt.detected && (fit.reason == Reason::Ok || fit.reason == Reason::LowConfidence))
 				{
 					fit.reason = Reason::Ambiguous;
@@ -1952,7 +2172,9 @@ namespace CameraModel
 				if (in.next != nullptr)
 				{
 					double seedPrec = 0;
-					CameraMotion seed = Impl::Run(*this, *in.next, nullptr, false, m_config.objects, false, nullptr, false, &seedPrec);
+					const bool runDetect = m_config.dynTexture || m_config.staticCamera;
+					CameraMotion seed = Impl::Run(*this, *in.next, nullptr, false, m_config.objects, false, nullptr, runDetect, &seedPrec);
+					m_dyn.Reset();   // look-ahead peek on in.next must not seed the real next pair's detector history with itself
 					if (seed.valid && ReasonUsable(seed.reason))   // GEM-131: a seed fit that is itself unusable (Ambiguous, ...) seeds nothing
 					{
 						rec.valid = true;
@@ -1974,6 +2196,11 @@ namespace CameraModel
 						m_temporal.Update(in.next->pairSeconds, seed.rates, updateFloor(*in.next, seedPrec));
 						m_seedPending = true;
 					}
+					else if (seed.verdictFlags != 0)
+					{
+						rec.verdictFlags = seed.verdictFlags;   // keep detector refusal cause visible (Rule 4)
+						rec.signals = seed.signals;
+					}
 				}
 				finish(rec);
 				return rec;
@@ -1986,11 +2213,14 @@ namespace CameraModel
 				rec.valid = false;
 				rec.reason = Reason::Flash;
 				rec.confidence = 0;
-				if (in.next != nullptr && m_havePrevious && m_previous.valid && m_previous.pairSeconds > 0 && in.next->pairSeconds > 0)
+				if (in.next != nullptr && m_havePrevious && m_previous.valid && ReasonUsable(m_previous.reason)
+					&& m_previous.pairSeconds > 0 && in.next->pairSeconds > 0)
 				{
 					const Params pre = TimeScale(m_previous.params, in.pairSeconds / m_previous.pairSeconds, in.picture);
 					const Params preForNext = TimeScale(m_previous.params, in.next->pairSeconds / m_previous.pairSeconds, in.next->picture);
-					CameraMotion nx = Impl::Run(*this, *in.next, &preForNext, false, false, false, nullptr);
+					const bool runDetect = m_config.dynTexture || m_config.staticCamera;
+					CameraMotion nx = Impl::Run(*this, *in.next, &preForNext, false, false, false, nullptr, runDetect);
+					m_dyn.Reset();   // look-ahead peek on in.next must not seed the real next pair's detector history with itself
 					if (nx.valid && ReasonUsable(nx.reason))   // GEM-131: the same verdict gate for the flash bridge
 					{
 						const Params nextP = TimeScale(nx.params, in.pairSeconds / in.next->pairSeconds, in.picture);
@@ -2027,6 +2257,11 @@ namespace CameraModel
 							rec.hypotheses = nx.hypotheses;
 						}
 					}
+					else if (nx.verdictFlags != 0)
+					{
+						rec.verdictFlags = nx.verdictFlags;   // keep detector refusal cause visible (Rule 4)
+						rec.signals = nx.signals;
+					}
 				}
 				finish(rec);
 				return rec;
@@ -2034,9 +2269,10 @@ namespace CameraModel
 
 			Params h0;
 			const Params* h0p = nullptr;
-			if (m_havePrevious && m_previous.valid && m_previous.pairSeconds > 0 && m_previous.picture == in.picture
+			if (m_havePrevious && m_previous.valid && ReasonUsable(m_previous.reason)
+				&& m_previous.pairSeconds > 0 && m_previous.picture == in.picture
 				&& m_previous.params.type != ModelType::None
-				&& (m_previous.verdictFlags & (kVerdictDynamicTexture | kVerdictStaticCamera)) == 0)   // NIT-1: a demoted record seeds nothing (no h0, no early exit)
+				&& (m_previous.verdictFlags & kVerdictAnyDemotion) == 0)   // NIT-1: any unusable or demoted record seeds nothing (no h0, no early exit)
 			{
 				h0 = TimeScale(m_previous.params, in.pairSeconds / m_previous.pairSeconds, in.picture);
 				h0.type = m_previous.params.type;
@@ -2051,7 +2287,7 @@ namespace CameraModel
 				fit.valid = false;
 				fit.confidence = 0;
 				fit.reason = Reason::DeadlineMissed;
-				fit.verdictFlags &= static_cast<uint8_t>(~(kVerdictDynamicTexture | kVerdictStaticCamera));   // a verdict reached before the clock ran out
+				fit.verdictFlags &= static_cast<uint8_t>(~kVerdictAnyDemotion);   // a verdict reached before the clock ran out
 			}
 			if (m_config.dynTexture && !fit.valid)
 				m_dyn.Reset();   // an invalid pair breaks the sequence: the next pair has no previous residual field to compare against
@@ -2062,8 +2298,8 @@ namespace CameraModel
 				m_previous = fit;
 				m_havePrevious = true;
 				m_seedPending = false;
-				if ((fit.verdictFlags & (kVerdictDynamicTexture | kVerdictStaticCamera)) == 0)
-					m_temporal.Update(in.pairSeconds, fit.rates, updateFloor(in, fitPrec));   // a water-locked fit never feeds the camera prediction
+				if (ReasonUsable(fit.reason) && (fit.verdictFlags & kVerdictAnyDemotion) == 0)
+					m_temporal.Update(in.pairSeconds, fit.rates, updateFloor(in, fitPrec));   // an unusable or demoted fit never feeds the camera prediction
 			}
 			if (m_config.twoLayer)
 				Impl::ApplyTl(*this, in, fit, tlNext);

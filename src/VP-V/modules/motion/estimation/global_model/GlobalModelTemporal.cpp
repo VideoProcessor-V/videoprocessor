@@ -162,14 +162,9 @@ namespace CameraModel
 		const CameraMotion* centre = nullptr;
 		for (size_t i = 0; i < m_records.size(); ++i)
 			if (m_records[i].seq == seq) { centre = &m_records[i]; break; }
-		if (!centre || !centre->valid) return false;
+		if (!centre || !centre->valid || !ReasonUsable(centre->reason)) return false;
 		if (m_lag == 0) { out = centre->params; return true; }
-		if (centre->reason == Reason::Cut || centre->reason == Reason::Flash
-			|| centre->reason == Reason::GenerationReset || !(centre->pairSeconds > 0))
-		{
-			out = centre->params;
-			return true;
-		}
+		if (!(centre->pairSeconds > 0)) return false;
 		const uint64_t newest = m_records.back().seq;
 		const int lag = m_lag;
 

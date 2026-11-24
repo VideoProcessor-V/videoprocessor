@@ -12,6 +12,65 @@ namespace CameraModel
 	namespace
 	{
 		inline double Len(double x, double y) { return std::sqrt(x * x + y * y); }
+
+		// Derived noise scale constants for the model-free symmetric discrete vector Laplacian under i.i.d. component
+		// noise sigma = prec:
+		//  * 4-point symmetric stencil v(x,y) - 1/4 (v_L + v_R + v_U + v_D): Var = (1 + 4/16) sigma^2 = (5/4) sigma^2
+		//  * 2-point symmetric opposing pair v(x,y) - 1/2 (v_A + v_B):       Var = (1 + 2/4)  sigma^2 = (3/2) sigma^2
+		// Both stencils cancel ANY linear camera motion (Translation, Similarity, Affine) identically.
+		const double kLaplacianSigma4 = std::sqrt(5.0) * 0.5;   // sqrt(5/4)
+		const double kLaplacianSigma2 = std::sqrt(1.5);         // sqrt(3/2)
+
+		// SHOULD-1: use the fitter's FINAL precision (quantum floor + raised robust scale) when passed;
+		// when called directly (resolvedPrecPx <= 0), still honour the uniform quantization sigma q / sqrt(12).
+		inline double ResolvePrecision(const PairInput& in, double resolvedPrecPx)
+		{
+			if (resolvedPrecPx > 0.0)
+				return resolvedPrecPx;
+			const double base = in.precisionPx > 0.0 ? in.precisionPx : 0.25 * in.blockSize / 16.0;
+			return in.quantumPx > 0.0 ? std::max(base, in.quantumPx / std::sqrt(12.0)) : base;
+		}
+
+		// Evaluates the symmetric discrete vector Laplacian norm |nabla^2 v| and its derived noise sigma at (bx, by).
+		// Returns false when neither opposing pair (L+R or U+D) is valid (so linear motion cannot be cancelled).
+		inline bool EvalSymmetricLaplacian(int bx, int by, int gw, int gh, const uint8_t* valid,
+			const float* vxArr, const float* vyArr, double prec, double* lapMagOut, double* sigmaOut)
+		{
+			const size_t gws = static_cast<size_t>(gw);
+			const size_t b = static_cast<size_t>(by) * gws + static_cast<size_t>(bx);
+			const bool hasL = bx > 0 && valid[b - 1] != 0;
+			const bool hasR = bx + 1 < gw && valid[b + 1] != 0;
+			const bool hasU = by > 0 && valid[b - gws] != 0;
+			const bool hasD = by + 1 < gh && valid[b + gws] != 0;
+			const bool hasLR = hasL && hasR;
+			const bool hasUD = hasU && hasD;
+			if (!hasLR && !hasUD)
+				return false;
+			double avgX = 0.0, avgY = 0.0, sigma = 0.0;
+			if (hasLR && hasUD)
+			{
+				avgX = 0.25 * (static_cast<double>(vxArr[b - 1]) + static_cast<double>(vxArr[b + 1])
+					+ static_cast<double>(vxArr[b - gws]) + static_cast<double>(vxArr[b + gws]));
+				avgY = 0.25 * (static_cast<double>(vyArr[b - 1]) + static_cast<double>(vyArr[b + 1])
+					+ static_cast<double>(vyArr[b - gws]) + static_cast<double>(vyArr[b + gws]));
+				sigma = kLaplacianSigma4 * prec;
+			}
+			else if (hasLR)
+			{
+				avgX = 0.5 * (static_cast<double>(vxArr[b - 1]) + static_cast<double>(vxArr[b + 1]));
+				avgY = 0.5 * (static_cast<double>(vyArr[b - 1]) + static_cast<double>(vyArr[b + 1]));
+				sigma = kLaplacianSigma2 * prec;
+			}
+			else
+			{
+				avgX = 0.5 * (static_cast<double>(vxArr[b - gws]) + static_cast<double>(vxArr[b + gws]));
+				avgY = 0.5 * (static_cast<double>(vyArr[b - gws]) + static_cast<double>(vyArr[b + gws]));
+				sigma = kLaplacianSigma2 * prec;
+			}
+			*lapMagOut = Len(static_cast<double>(vxArr[b]) - avgX, static_cast<double>(vyArr[b]) - avgY);
+			*sigmaOut = sigma;
+			return true;
+		}
 	}
 
 	DynTextureResult DetectDynamicTexture(const DynTextureConfig& cfg, const PairInput& in, const Params& model, DynTextureState& state,
@@ -23,8 +82,7 @@ namespace CameraModel
 			|| in.fwdY == nullptr || in.fwdTrust == nullptr || model.type == ModelType::None)
 			return out;
 		const size_t nb = static_cast<size_t>(gw) * static_cast<size_t>(gh);
-		// SHOULD-1: the fitter's FINAL precision (quantum floor, raised noise scale) when it passes one; 0 = the pair's nominal precision.
-		const double prec = resolvedPrecPx > 0 ? resolvedPrecPx : (in.precisionPx > 0 ? in.precisionPx : 0.25 * in.blockSize / 16.0);
+		const double prec = ResolvePrecision(in, resolvedPrecPx);
 		const double absThr = cfg.absSigmas * prec;
 		const double absThr2 = absThr * absThr;
 		const double absThrSafeLo2 = absThr2 * (1.0 - 1e-9);
@@ -47,6 +105,9 @@ namespace CameraModel
 		std::vector<float>& thr = cb.thr; std::vector<uint8_t>& valid = cb.valid; std::vector<uint8_t>& dis = cb.dis;
 		int trusted = 0, disagree = 0;
 		int tCompared = 0, tIncoh = 0, fCompared = 0, fIncoh = 0;
+		// Whole-field camera-advected lag-1 residual autocorrelation accumulators (rhoTemp).
+		int rhoCompared = 0;
+		double rhoNum = 0.0, rhoDenCur = 0.0, rhoDenPrev = 0.0;
 		for (int by = 0; by < gh; ++by)
 		{
 			const double cy = (by + 0.5) * in.blockSize;
@@ -104,6 +165,25 @@ namespace CameraModel
 							havePrev = pb < state.prev.valid.size() && state.prev.valid[pb] != 0;
 						}
 					}
+					// Camera-advected lag-1 residual autocorrelation (whole-field, unbiased by chaotic block self-advection).
+					const double sxCam = (cx - mx / k) / in.blockSize - 0.5, syCam = (cy - my / k) / in.blockSize - 0.5;
+					if (IsFiniteBits(sxCam) && IsFiniteBits(syCam) && sxCam > -0.5 && syCam > -0.5 && sxCam < gw - 0.5 && syCam < gh - 0.5)
+					{
+						const int cpx = static_cast<int>(std::floor(sxCam + 0.5)), cpy = static_cast<int>(std::floor(syCam + 0.5));
+						if (cpx >= 0 && cpx < gw && cpy >= 0 && cpy < gh)
+						{
+							const size_t cpb = static_cast<size_t>(cpy) * gw + cpx;
+							if (cpb < state.prev.valid.size() && state.prev.valid[cpb] != 0)
+							{
+								const double prx = static_cast<double>(state.prev.rx[cpb]) * k;
+								const double pry = static_cast<double>(state.prev.ry[cpb]) * k;
+								rhoNum += rxv * prx + ryv * pry;
+								rhoDenCur += r2;
+								rhoDenPrev += prx * prx + pry * pry;
+								++rhoCompared;
+							}
+						}
+					}
 				}
 				if (havePrev)
 				{
@@ -138,14 +218,26 @@ namespace CameraModel
 				}
 			}
 		}
-		// Spatial: right and lower neighbours that both disagree with the model.
+		// Spatial incoherence (right and lower neighbours that both disagree with the model) + whole-field
+		// discrete vector Laplacian. No disagree >= minShare blind-spot gate: always computed whenever enough trusted blocks exist.
 		int sCompared = 0, sIncoh = 0;
-		if (trusted >= std::max(1, cfg.minBlocks) && static_cast<double>(disagree) >= cfg.minShare * trusted)
+		int lapEvaluated = 0, lapIncoh = 0;
+		if (trusted >= std::max(1, cfg.minBlocks))
 		{
 			for (int by = 0; by < gh; ++by)
 				for (int bx = 0; bx < gw; ++bx)
 				{
 					const size_t a = static_cast<size_t>(by) * gw + bx;
+					if (valid[a])
+					{
+						double lapMag = 0.0, lapSigma = 0.0;
+						if (EvalSymmetricLaplacian(bx, by, gw, gh, valid.data(), vx.data(), vy.data(), prec, &lapMag, &lapSigma))
+						{
+							++lapEvaluated;
+							if (lapMag > cfg.absSigmas * lapSigma)
+								++lapIncoh;
+						}
+					}
 					if (!dis[a])
 						continue;
 					const double rxa = static_cast<double>(rx[a]), rya = static_cast<double>(ry[a]);
@@ -180,6 +272,9 @@ namespace CameraModel
 			out.temporal = out.haveTemporal ? static_cast<double>(tIncoh) / tCompared : 0.0;
 			out.field = fCompared >= cfg.minCompared ? static_cast<double>(fIncoh) / fCompared : 0.0;
 			out.spatial = sCompared >= cfg.minCompared ? static_cast<double>(sIncoh) / sCompared : 0.0;
+			out.spatialLaplacian = lapEvaluated >= cfg.minCompared ? static_cast<double>(lapIncoh) / lapEvaluated : 0.0;
+			out.haveRhoTemp = rhoCompared >= cfg.minCompared && rhoDenCur > 1e-12 && rhoDenPrev > 1e-12;
+			out.rhoTemp = out.haveRhoTemp ? std::max(-1.0, std::min(1.0, rhoNum / std::sqrt(rhoDenCur * rhoDenPrev))) : 0.0;
 			const bool temporalOk = !out.haveTemporal || out.temporal >= cfg.minTemporal;
 			out.detected = out.share >= cfg.minShare && temporalOk && out.spatial >= cfg.minSpatial;
 			state.have = true;
@@ -208,61 +303,59 @@ namespace CameraModel
 		}
 		const size_t nb = static_cast<size_t>(gw) * static_cast<size_t>(gh);
 		maskOut.assign(nb, 0);
-		const double prec = precPx > 0 ? precPx : (in.precisionPx > 0 ? in.precisionPx : 0.25 * in.blockSize / 16.0);
-		const double absThr = cfg.spatialSigmas * prec;
+		const double prec = ResolvePrecision(in, precPx);
 		const bool prevOk = prevState.have && prevState.gridW == gw && prevState.gridH == gh &&
 			prevState.picture == in.picture && prevState.seconds > 0 && in.pairSeconds > 0 &&
 			prevState.prev.valid.size() == nb;
 		const double k = prevOk ? in.pairSeconds / prevState.seconds : 1.0;
+		// Derived temporal difference threshold: for i.i.d. noise sigma = prec on each pair,
+		// std(v_t - k * v_{t-1}) = sqrt(1 + k^2) * prec (zero arbitrary rel * |v| scaling).
+		const double temporalThr = cfg.laplacianSigmas * std::sqrt(1.0 + k * k) * prec;
 
-		auto blockValid = [&](int bx, int by) -> bool {
-			if (bx < 0 || bx >= gw || by < 0 || by >= gh)
-				return false;
-			const double cx = (bx + 0.5) * in.blockSize, cy = (by + 0.5) * in.blockSize;
-			if (cx < in.picture.left || cx >= in.picture.right || cy < in.picture.top || cy >= in.picture.bottom)
-				return false;
-			const size_t b = static_cast<size_t>(by) * static_cast<size_t>(gw) + static_cast<size_t>(bx);
-			if (in.textGuard != nullptr && in.textGuard[b] == 1)
-				return false;
-			const float tr = in.fwdTrust[b];
-			return tr > 0.0f && IsFiniteBits(tr) && IsFiniteBits(in.fwdX[b]) && IsFiniteBits(in.fwdY[b]);
-		};
+		// Precompute per-block validity once (inside active picture, not text-guard, finite positive trust & vector).
+		std::vector<uint8_t> valid(nb, 0);
+		for (int by = 0; by < gh; ++by)
+		{
+			const double cy = (by + 0.5) * in.blockSize;
+			if (cy < in.picture.top || cy >= in.picture.bottom)
+				continue;
+			for (int bx = 0; bx < gw; ++bx)
+			{
+				const double cx = (bx + 0.5) * in.blockSize;
+				if (cx < in.picture.left || cx >= in.picture.right)
+					continue;
+				const size_t b = static_cast<size_t>(by) * static_cast<size_t>(gw) + static_cast<size_t>(bx);
+				if (in.textGuard != nullptr && in.textGuard[b] == 1)
+					continue;
+				const float tr = in.fwdTrust[b];
+				if (tr > 0.0f && IsFiniteBits(tr) && IsFiniteBits(in.fwdX[b]) && IsFiniteBits(in.fwdY[b]))
+					valid[b] = 1;
+			}
+		}
 
-		const int dx4[4] = { -1, 1, 0, 0 };
-		const int dy4[4] = { 0, 0, -1, 1 };
 		for (int by = 0; by < gh; ++by)
 		{
 			for (int bx = 0; bx < gw; ++bx)
 			{
-				if (!blockValid(bx, by))
+				const size_t b = static_cast<size_t>(by) * static_cast<size_t>(gw) + static_cast<size_t>(bx);
+				if (!valid[b])
 					continue;
 				++stats.evaluated;
-				const size_t b = static_cast<size_t>(by) * static_cast<size_t>(gw) + static_cast<size_t>(bx);
-				const double vx = in.fwdX[b], vy = in.fwdY[b];
-				const double vm = Len(vx, vy);
 
-				int validN = 0, incohN = 0;
-				for (int n = 0; n < 4; ++n)
-				{
-					const int nx = bx + dx4[n], ny = by + dy4[n];
-					if (!blockValid(nx, ny))
-						continue;
-					++validN;
-					const size_t nbIdx = static_cast<size_t>(ny) * static_cast<size_t>(gw) + static_cast<size_t>(nx);
-					const double nvx = in.fwdX[nbIdx], nvy = in.fwdY[nbIdx];
-					const double thr = std::max(absThr, cfg.rel * std::max(vm, Len(nvx, nvy)));
-					if (Len(vx - nvx, vy - nvy) > thr)
-						++incohN;
-				}
-				if (validN < cfg.minValidNeighbours)
+				// Model-free symmetric discrete vector Laplacian (100% invariant to pan, zoom, rotation, affine speed).
+				double lapMag = 0.0, lapSigma = 0.0;
+				if (!EvalSymmetricLaplacian(bx, by, gw, gh, valid.data(), in.fwdX, in.fwdY, prec, &lapMag, &lapSigma))
 					continue;
-				const double spatialFrac = static_cast<double>(incohN) / static_cast<double>(validN);
+				const bool spatialIncoh = lapMag > cfg.laplacianSigmas * lapSigma;
+				if (!spatialIncoh)
+					continue;
 
 				// Check temporal coherence against the advected previous-pair vector when history exists.
 				bool haveTemporal = false;
 				bool temporalIncoh = false;
 				if (prevOk)
 				{
+					const double vx = static_cast<double>(in.fwdX[b]), vy = static_cast<double>(in.fwdY[b]);
 					const double cx = (bx + 0.5) * in.blockSize, cy = (by + 0.5) * in.blockSize;
 					const double sx = (cx - vx / k) / in.blockSize - 0.5;
 					const double sy = (cy - vy / k) / in.blockSize - 0.5;
@@ -276,17 +369,15 @@ namespace CameraModel
 							if (prevState.prev.valid[pb] != 0)
 							{
 								haveTemporal = true;
-								const double qx = prevState.prev.vx[pb] * k, qy = prevState.prev.vy[pb] * k;
-								const double thr = std::max(absThr, cfg.rel * std::max(vm, Len(qx, qy)));
-								temporalIncoh = Len(vx - qx, vy - qy) > thr;
+								const double qx = static_cast<double>(prevState.prev.vx[pb]) * k;
+								const double qy = static_cast<double>(prevState.prev.vy[pb]) * k;
+								temporalIncoh = Len(vx - qx, vy - qy) > temporalThr;
 							}
 						}
 					}
 				}
 
-				const bool drop = haveTemporal
-					? (spatialFrac >= cfg.minSpatialIncoh && temporalIncoh)
-					: (validN >= std::max(cfg.minValidNeighbours, 3) && spatialFrac >= cfg.coldSpatialIncoh);
+				const bool drop = haveTemporal ? temporalIncoh : true;
 				if (drop)
 				{
 					maskOut[b] = 1;

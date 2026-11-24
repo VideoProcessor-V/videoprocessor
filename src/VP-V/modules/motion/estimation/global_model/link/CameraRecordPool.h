@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 // Camera link (K1-3): the record pool parallel to P7's SlotSet, and the POD codec for the P7 slot bytes.
-// The slot holds a fixed, small CameraRecordPod (declared 1 KB; the encoded CRD2 form is 547 B, CRD1 legacy is 366 B); the heavy parts (the
+// The slot holds a fixed, small CameraRecordPod (declared 1 KB; the encoded CRD2 form is 595 B, CRD1 legacy is 366 B); the heavy parts (the
 // per-block arrays and the CPU field copy) are shared_ptrs kept here, indexed by seq mod ring like the SlotSet. The
 // producer writes an entry only while it holds the claim for that seq; readers use an entry only for a seq whose slot
 // they have pinned / sealed. Pure, header-only, C++14, deterministic.
@@ -94,6 +94,9 @@ namespace CameraLink
 		for (int i = 0; i < 9; ++i) w.Put(m.objectLayer.h[i]);
 		w.Put(m.objectLayer.blocks);
 		w.Put(m.objectLayer.cx); w.Put(m.objectLayer.cy);
+		// CE-WATER / C4 diagnostics tail (appended to CRD2; total 595 B <= 1024 B).
+		w.Put(s.dynLaplacian); w.Put(s.dynRhoTemp);
+		w.Put(s.rawShare); w.Put(s.shearEnergy); w.Put(s.dipoleTB); w.Put(s.dipoleLR);
 		return w.ok ? w.n : 0;
 	}
 
@@ -162,6 +165,8 @@ namespace CameraLink
 			for (int i = 0; i < 9; ++i) x.objectLayer.h[i] = r.Get<double>();
 			x.objectLayer.blocks = r.Get<uint32_t>();
 			x.objectLayer.cx = r.Get<double>(); x.objectLayer.cy = r.Get<double>();
+			s.dynLaplacian = r.Get<double>(); s.dynRhoTemp = r.Get<double>();
+			s.rawShare = r.Get<double>(); s.shearEnergy = r.Get<double>(); s.dipoleTB = r.Get<double>(); s.dipoleLR = r.Get<double>();
 		}
 		if (!r.ok)
 			return false;

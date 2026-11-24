@@ -52,10 +52,11 @@ namespace CameraModel
 		// Records must be pushed in increasing seq. Keeps 2*lag+1 plus margin.
 		void Push(const CameraMotion& record);
 		// Smoothed params for `seq` (pair seq-1 -> seq model rescaled to that record's own
-		// pairSeconds). True only when the record is known, valid, and ALL records seq-lag..seq+lag
-		// that belong to the same segment are present (a window cut short by a cut / generation /
-		// flash boundary uses the available same-segment neighbours; a window cut short by the
-		// queue end (neighbours not pushed yet) returns false so the caller uses the current fit).
+		// pairSeconds). True only when the record is known, valid, usable (ReasonUsable), and ALL
+		// records seq-lag..seq+lag that belong to the same segment are present (a window cut short
+		// by a cut / generation / flash boundary uses the available same-segment neighbours; a window
+		// cut short by the queue end (neighbours not pushed yet) returns false so the caller uses
+		// the current fit). Unusable centres (Ambiguous, LowConfidence, Cut, Flash, ...) return false.
 		bool Smoothed(uint64_t seq, Params& out) const;
 
 	private:

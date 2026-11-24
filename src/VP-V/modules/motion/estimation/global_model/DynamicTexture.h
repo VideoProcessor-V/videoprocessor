@@ -45,8 +45,11 @@ namespace CameraModel
 		double share = 0;            // trusted blocks that disagree with the model
 		double temporal = 0;         // incoherence vs the previous pair's residuals (0 when none / too few compared)
 		double field = 0;            // incoherence of the RAW vectors vs the previous pair's (camera + residual)
-		double spatial = 0;          // incoherence between neighbouring disagreeing blocks
+		double spatial = 0;          // incoherence between neighbouring disagreeing blocks (always computed, no share blind spot)
+		double spatialLaplacian = 0; // whole-field share of trusted blocks with |nabla^2 v| > absSigmas * sigma_L
+		double rhoTemp = 0;          // whole-field camera-advected lag-1 residual autocorrelation in [-1, 1] (0 when unavailable)
 		bool haveTemporal = false;
+		bool haveRhoTemp = false;
 	};
 
 	// The previous pair's residual field (measured minus model per block, source px per pair), for the temporal term.
@@ -74,17 +77,22 @@ namespace CameraModel
 	DynTextureResult DetectDynamicTexture(const DynTextureConfig& cfg, const PairInput& in, const Params& model, DynTextureState& state,
 		double resolvedPrecPx = 0);
 
-	// CE-WATER-C1 (default OFF in Config::waterBlockExclude): per-block dynamic-texture / water incoherence
-	// exclusion from the GlobalModelFit inlier set. Unlike DetectDynamicTexture (which demotes a whole frame),
-	// this scores each block locally against its 4-neighbours and (when available) its advected previous-pair
-	// raw vector, so water / foliage blocks are excluded before RANSAC while rigid background / sky / pans remain.
+	// CE-WATER-C1 (default OFF in Config::waterBlockExclude): per-block model-free discrete vector Laplacian
+	// exclusion from the GlobalModelFit sample / refinement set (NEVER stamped into BlockData::excluded / Label::Overlay).
+	// For any linear camera motion (Translation, Similarity, Affine), the symmetric discrete Laplacian
+	//   L(b) = v(b) - avg(symmetric orthogonal neighbours)
+	// vanishes identically (100% invariant to pan, zoom, and rotation speed). Under i.i.d. vector noise sigma = precPx:
+	//   - 4-point symmetric stencil (L, R, U, D): std(L_x) = sqrt(1 + 4/16) * precPx = (sqrt(5)/2) * precPx
+	//   - 2-point symmetric pair (L+R or U+D on borders): std(L_x) = sqrt(1 + 2/4) * precPx = sqrt(3/2) * precPx
+	//   - temporal difference v_t(b) - k * v_{t-1}(pb) (k = dt_t / dt_{t-1}): std(dv_x) = sqrt(1 + k^2) * precPx
+	// Thresholds derive strictly from the fitter's 3-sigma contract (Config::absThresholdSigmas = 3.0).
 	struct DynTextureExcludeConfig
 	{
-		double spatialSigmas = 3.0;         // disagreement threshold = max(spatialSigmas * precPx, rel * max(|va|, |vb|))
-		double rel = 0.25;                  // relative tolerance so clean zooms / rotations are never flagged
-		double minSpatialIncoh = 0.5;       // fraction of valid 4-neighbours disagreeing with the block (with temporal confirm)
-		double coldSpatialIncoh = 0.75;     // stricter fraction on pair 1 when no previous field exists yet
-		int minValidNeighbours = 2;         // minimum valid 4-neighbours (3 when cold-start without temporal history)
+		double laplacianSigmas = 3.0;            // 3-sigma contract matching Config::absThresholdSigmas (no arbitrary rel * |v|)
+		// Remaining-rigid-support guard (CE-WATER-C1): when waterExcludedShare exceeds this elementary 1-quadrant ratio
+		// (1/4 of trusted blocks), remaining rigid support must still cover >= 3 quadrants (Config::quadrantMinShare) AND
+		// retain border-ring support >= Config::borderVetoRatio, else demote cleanly to Reason::Ambiguous | kVerdictDynamicTexture.
+		double supportGuardMinWaterShare = 0.25; // 1/4 = 1 quadrant of the 4-quadrant picture
 	};
 
 	struct WaterExcludeStats

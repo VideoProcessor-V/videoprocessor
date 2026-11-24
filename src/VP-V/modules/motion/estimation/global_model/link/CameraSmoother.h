@@ -76,6 +76,7 @@ namespace CameraLink
 		std::atomic<uint64_t> slotPublished{ 0 };      // P9 slots published into a SlotTable
 		std::atomic<uint64_t> slotRefused{ 0 };        // P9 slot publish attempts refused (no product / late / stale / ancestors)
 		std::atomic<uint64_t> resets{ 0 };             // smoother resets (explicit or seq discontinuity)
+		std::atomic<uint64_t> looSpikes{ 0 };          // CE-WATER-C2 (C6): single-frame LOO innovation spikes flagged & substituted
 	};
 
 	struct SmoothQueryResult
@@ -85,6 +86,10 @@ namespace CameraLink
 		bool causalShortQueue = false;   // true: queue / lane lead is 0 ("camera: causal (queue short)")
 		bool causalWindowShort = false;  // true: lead > 0, but future neighbours not yet available
 		int effectiveLead = 0;           // k = min(kMaxCameraLead, laneLead)
+		// CE-WATER-C2 (C6): leave-one-out symmetric innovation when both t-1 and t+1 are usable same-segment neighbours.
+		bool haveLoo = false;            // true when symmetric usable neighbours t-1 and t+1 were available
+		double looInnovationPx = 0.0;    // max corner/centre displacement (source px) between H_t and LOO H_hat_t = 0.5*(H_{t-1} + H_{t+1})
+		bool looSpikeFlagged = false;    // true when looInnovationPx > absThresholdSigmas * precisionPx (spike substituted cleanly)
 	};
 
 	// Visible status line for the P9 smoother (Ctrl+I / Config status / Ctrl+Alt+D).
@@ -92,12 +97,13 @@ namespace CameraLink
 	{
 		if (effectiveLead <= 0)
 			return std::string(kCausalShortQueueText);
-		char b[256];
-		std::snprintf(b, sizeof(b), "camera smoothed (P9, lead +- %d): %llu smoothed, %llu causal (window short), %llu causal (queue short), %llu published, %llu refused",
+		char b[320];
+		std::snprintf(b, sizeof(b), "camera smoothed (P9, lead +- %d): %llu smoothed, %llu causal (window short), %llu causal (queue short), %llu LOO spikes, %llu published, %llu refused",
 			effectiveLead,
 			static_cast<unsigned long long>(c.smoothed.load()),
 			static_cast<unsigned long long>(c.causalWindowShort.load()),
 			static_cast<unsigned long long>(c.causalShortQueue.load()),
+			static_cast<unsigned long long>(c.looSpikes.load()),
 			static_cast<unsigned long long>(c.slotPublished.load()),
 			static_cast<unsigned long long>(c.slotRefused.load()));
 		return b;
