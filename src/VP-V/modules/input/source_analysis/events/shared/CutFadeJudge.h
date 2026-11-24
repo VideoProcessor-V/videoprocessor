@@ -295,7 +295,8 @@ GridFadeFit FitMotionTolerantFade(const double refAligned[kGridH][kGridW], const
 
 // Verifies raw-pixel highlight p99 scales consistently with the cell-OLS fade gain about implied black
 // (rejects midtone flicker with pinned highlights; near-black p99 <= black + kFadeMinSpread passes to black-boundary rules).
-bool HighlightScalingConsistent(uint32_t refP99P4, uint32_t curP99P4, double gain, double black, int dir);
+bool HighlightScalingConsistent(uint32_t refP99P4, uint32_t curP99P4, double gain, double black, int dir,
+                                double residualRatio = 1.0, bool interiorClipped = false);
 
 GridFadeFit FitGridFadeGrid(const double ref[kGridH][kGridW], const double cur[kGridH][kGridW], int searchRadius);
 
