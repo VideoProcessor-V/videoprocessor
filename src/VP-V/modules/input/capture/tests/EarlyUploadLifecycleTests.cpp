@@ -209,12 +209,15 @@ namespace VideoProcessorTest
 
 			EarlyUpload early;
 			EarlyUpload::Slot dummySlot{ &early, 1, 0, 1 };
+			std::atomic<bool> readerReady{ false };
 			std::atomic<bool> stop{ false };
+			std::atomic<uint64_t> readerIters{ 0 };
 			std::atomic<int> badErrorObserved{ 0 };
 			std::atomic<int> unexpectedNonNull{ 0 };
 
 			std::thread reader([&]()
 			{
+				readerReady.store(true, std::memory_order_release);
 				while (!stop.load(std::memory_order_acquire))
 				{
 					if (early.AcquireReader(dummySlot) != nullptr)
@@ -227,8 +230,11 @@ namespace VideoProcessorTest
 					{
 						badErrorObserved.fetch_add(1, std::memory_order_relaxed);
 					}
+					readerIters.fetch_add(1, std::memory_order_relaxed);
 				}
 			});
+			while (!readerReady.load(std::memory_order_acquire))
+				std::this_thread::yield();
 
 			for (int i = 0; i < 2000; ++i)
 			{
@@ -240,6 +246,8 @@ namespace VideoProcessorTest
 			stop.store(true, std::memory_order_release);
 			reader.join();
 
+			Assert::IsTrue(readerIters.load() > 0u,
+				L"reader thread must execute concurrently with Open/AttachReader/Close stress loop");
 			Assert::AreEqual(0, badErrorObserved.load(), L"every concurrent LastError() snapshot must be a valid complete message");
 			Assert::AreEqual(0, unexpectedNonNull.load(), L"closed pool must never return a texture from AcquireReader");
 
