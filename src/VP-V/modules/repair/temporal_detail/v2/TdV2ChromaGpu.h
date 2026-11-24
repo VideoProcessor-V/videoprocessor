@@ -829,37 +829,63 @@ for (int chIdx = 0; chIdx < 2; ++chIdx)
             else
             {
                 bool gOk = (b == 0) ? cellGateL : cellGateMH;
-                for (int sy = 0; sy < subY; ++sy)
+                int totalSub = subX * subY;
+                for (int subIdx = 0; subIdx < totalSub; ++subIdx)
                 {
+                    int sy = subIdx / max(1, subX);
+                    int sx = subIdx - sy * max(1, subX);
                     int oy = sy * 16 + ly;
+                    int ox = sx * 16 + lx;
                     int py = cellStartY + oy;
-                    if (!gOk || oy >= cellH || py < cy0 || py >= cy1) continue;
-                    for (int sx = 0; sx < subX; ++sx)
+                    int px = cellStartX + ox;
+                    if (gOk && oy < cellH && ox < cellW && py >= cy0 && py < cy1 && px >= cx0 && px < cx1)
                     {
-                        int ox = sx * 16 + lx;
-                        int px = cellStartX + ox;
-                        if (ox >= cellW || px < cx0 || px >= cx1) continue;
                         ivec2 p = ivec2(px, py);
-                        if (td_coded_to_luma_cell(p) != cell) continue;
-                        uint packedFl = uint(round(texelFetch(ref_flags, p, 0).x * 65535.0));
-                        bool allOk = true;
-                        vec2 curB = td_ch_fetch_cur_b(p, b);
-                        vec3 dv = vec3(0.0);
-                        for (int k = 0; k < K; ++k)
+                        if (td_coded_to_luma_cell(p) == cell)
                         {
-                            if ((td_unpack_ref_flags(packedFl, k) & 1) == 0) { allOk = false; break; }
-                            vec2 rB = td_ch_fetch_ref_b(k, p, b);
-                            float d = (chIdx == 0) ? (curB.x - rB.x) : (curB.y - rB.y);
-                            if (td_is_bad(d)) { allOk = false; break; }
-                            if (k == 0) dv.x = d;
-                            else if (k == 1) dv.y = d;
-                            else dv.z = d;
-                        }
-                        if (allOk)
-                        {
-                            vec3 e = dv - mu;
-                            scA += vec4(e.x * e.x, e.x * e.y, e.x * e.z, e.y * e.y);
-                            scB += vec4(e.y * e.z, e.z * e.z, 0.0, 0.0);
+                            uint packedFl = uint(round(texelFetch(ref_flags, p, 0).x * 65535.0));
+                            bool allOk = true;
+                            vec2 curB = td_ch_fetch_cur_b(p, b);
+                            vec3 dv = vec3(0.0);
+                            if (K > 0)
+                            {
+                                if ((td_unpack_ref_flags(packedFl, 0) & 1) == 0) allOk = false;
+                                else
+                                {
+                                    vec2 r0 = td_ch_fetch_ref_b(0, p, b);
+                                    float d0 = (chIdx == 0) ? (curB.x - r0.x) : (curB.y - r0.y);
+                                    if (td_is_bad(d0)) allOk = false;
+                                    else dv.x = d0;
+                                }
+                            }
+                            if (allOk && K > 1)
+                            {
+                                if ((td_unpack_ref_flags(packedFl, 1) & 1) == 0) allOk = false;
+                                else
+                                {
+                                    vec2 r1 = td_ch_fetch_ref_b(1, p, b);
+                                    float d1 = (chIdx == 0) ? (curB.x - r1.x) : (curB.y - r1.y);
+                                    if (td_is_bad(d1)) allOk = false;
+                                    else dv.y = d1;
+                                }
+                            }
+                            if (allOk && K > 2)
+                            {
+                                if ((td_unpack_ref_flags(packedFl, 2) & 1) == 0) allOk = false;
+                                else
+                                {
+                                    vec2 r2 = td_ch_fetch_ref_b(2, p, b);
+                                    float d2 = (chIdx == 0) ? (curB.x - r2.x) : (curB.y - r2.y);
+                                    if (td_is_bad(d2)) allOk = false;
+                                    else dv.z = d2;
+                                }
+                            }
+                            if (allOk)
+                            {
+                                vec3 e = dv - mu;
+                                scA += vec4(e.x * e.x, e.x * e.y, e.x * e.z, e.y * e.y);
+                                scB += vec4(e.y * e.z, e.z * e.z, 0.0, 0.0);
+                            }
                         }
                     }
                 }
@@ -2548,7 +2574,7 @@ imageStore(out_coded_delta, p, vec4(0.0));
 				}
 			}
 			const float uHasFaceMask = hasFaceMask ? 1.0f : 0.0f;
-			pl_tex faceMaskBind = hasFaceMask ? faceMaskTex : sc.diagCr;
+			pl_tex faceMaskBind = hasFaceMask ? faceMaskTex : sc.warpedUv;
 
 			const BandWhiteNoiseGains gains = ComputeBandWhiteNoiseGains();
 			const double s1Sq = VpUnit::BandFromBase::kSigmaFine * VpUnit::BandFromBase::kSigmaFine;
