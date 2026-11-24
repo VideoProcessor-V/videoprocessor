@@ -471,9 +471,13 @@ if (p.x < GS_W && p.y < GS_H) {
 
 		void Splitter::Release(pl_gpu gpu)
 		{
-			if (gpu)
-				for (pl_tex* t : { &m_tmp, &m_low, &m_part, &m_quiet, &m_level, &m_blocks, &m_outFull, &m_outA, &m_outB })
-					if (*t) pl_tex_destroy(gpu, t);
+			for (pl_tex* t : { &m_tmp, &m_low, &m_part, &m_quiet, &m_level, &m_blocks, &m_outFull, &m_outA, &m_outB })
+			{
+				if (gpu && *t)
+					pl_tex_destroy(gpu, t);
+				*t = nullptr;
+			}
+			m_run = Run();
 			m_out = Frame();
 		}
 
