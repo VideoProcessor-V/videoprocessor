@@ -228,23 +228,50 @@ namespace ScalerPass
 		const pl_fmt srcFmt = src.tex->params.format;
 		pl_fmt fmt = nullptr;
 		std::string newNote;
+		const bool preferStorable = polar && gpu->limits.max_shmem_size > 0;
+		auto findFloatWithCaps = [&](int comps, unsigned caps, bool& fellBackTo16) -> pl_fmt {
+			const int bits = st.precision == Precision::F32 ? 32 : 16;
+			pl_fmt f = pl_find_fmt(gpu, PL_FMT_FLOAT, comps, bits, bits, static_cast<enum pl_fmt_caps>(caps));
+			if (!f && comps == 3)
+				f = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, bits, bits, static_cast<enum pl_fmt_caps>(caps));
+			if (!f && st.precision == Precision::F32)
+			{
+				f = pl_find_fmt(gpu, PL_FMT_FLOAT, comps, 16, 16, static_cast<enum pl_fmt_caps>(caps));
+				if (!f && comps == 3)
+					f = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 16, 16, static_cast<enum pl_fmt_caps>(caps));
+				if (f)
+					fellBackTo16 = true;
+			}
+			return f;
+		};
 		if (st.precision == Precision::Target)
+		{
 			fmt = st.targetFormat ? st.targetFormat : srcFmt;
+			if (preferStorable && fmt && !(fmt->caps & PL_FMT_CAP_STORABLE))
+			{
+				const int reqBits = fmt->component_depth[0] > 0 ? fmt->component_depth[0] : 16;
+				if (pl_fmt f = pl_find_fmt(gpu, fmt->type, fmt->num_components, reqBits, reqBits,
+					static_cast<enum pl_fmt_caps>(kRenderCaps | PL_FMT_CAP_STORABLE)))
+					fmt = f;
+				else if (fmt->num_components == 3)
+					if (pl_fmt f4 = pl_find_fmt(gpu, fmt->type, 4, reqBits, reqBits,
+						static_cast<enum pl_fmt_caps>(kRenderCaps | PL_FMT_CAP_STORABLE)))
+						fmt = f4;
+			}
+		}
 		else
 		{
-			const int bits = st.precision == Precision::F32 ? 32 : 16;
 			const int comps = srcFmt->num_components;
-			fmt = pl_find_fmt(gpu, PL_FMT_FLOAT, comps, bits, bits, static_cast<enum pl_fmt_caps>(kRenderCaps));
-			if (!fmt && comps == 3)
-				fmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, bits, bits, static_cast<enum pl_fmt_caps>(kRenderCaps));
-			if (!fmt && st.precision == Precision::F32)
+			bool fellBackTo16 = false;
+			if (preferStorable)
+				fmt = findFloatWithCaps(comps, kRenderCaps | PL_FMT_CAP_STORABLE, fellBackTo16);
+			if (!fmt)
 			{
-				fmt = pl_find_fmt(gpu, PL_FMT_FLOAT, comps, 16, 16, static_cast<enum pl_fmt_caps>(kRenderCaps));
-				if (!fmt && comps == 3)
-					fmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 16, 16, static_cast<enum pl_fmt_caps>(kRenderCaps));
-				if (fmt)
-					newNote = "scaler precision: half float (f32 not renderable)";
+				fellBackTo16 = false;
+				fmt = findFloatWithCaps(comps, kRenderCaps, fellBackTo16);
 			}
+			if (fellBackTo16)
+				newNote = "scaler precision: half float (f32 not renderable)";
 			else if (st.precision == Precision::F16)
 				newNote = "scaler precision: half float (f16 requested)";
 		}
