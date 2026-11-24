@@ -420,7 +420,7 @@ GridFadeFit FitGridFadeAligned(const double refAligned[kGridH][kGridW], const do
 }
 
 GridFadeFit FitMotionTolerantFade(const double refAligned[kGridH][kGridW], const double curAligned[kGridH][kGridW],
-                                  double vx, double vy)
+                                  double vx, double vy, bool allowNearBlackCollapse)
 {
     constexpr int R = kLocalRadius;
     constexpr int kIntH = kGridH - 2 * R;
@@ -577,39 +577,43 @@ GridFadeFit FitMotionTolerantFade(const double refAligned[kGridH][kGridW], const
 
     // Part C: Coarse 14x7 (2x2-pooled) scene-structure continuity >= kSameStructure (0.4).
     // 2x2 sums are scale-invariant for Pearson correlation and avoid unrelated cuts with similar histograms.
-    constexpr int kPoolH = kIntH / 2;
-    constexpr int kPoolW = kIntW / 2;
-    constexpr int kPoolN = kPoolH * kPoolW;
-    double rp[kPoolN], cp[kPoolN];
-    double sumRp = 0.0, sumCp = 0.0;
-    int pIdx = 0;
-    for (int py = 0; py < kPoolH; ++py) {
-        const int y = R + 2 * py;
-        for (int px = 0; px < kPoolW; ++px) {
-            const int x = R + 2 * px;
-            const double rv = refAligned[y][x] + refAligned[y][x + 1] + refAligned[y + 1][x] + refAligned[y + 1][x + 1];
-            const double cv = curAligned[y][x] + curAligned[y][x + 1] + curAligned[y + 1][x] + curAligned[y + 1][x + 1];
-            rp[pIdx] = rv;
-            cp[pIdx] = cv;
-            sumRp += rv;
-            sumCp += cv;
-            ++pIdx;
+    // Skip only when an already-active fade-out has collapsed >75% into black (gain < 1/kFadeMaxDiv = 0.25),
+    // where spatial correlation naturally degrades into the black floor despite Part A+B passing.
+    if (!(allowNearBlackCollapse && fit.dir < 0 && fit.gain < 1.0 / double(kFadeMaxDiv))) {
+        constexpr int kPoolH = kIntH / 2;
+        constexpr int kPoolW = kIntW / 2;
+        constexpr int kPoolN = kPoolH * kPoolW;
+        double rp[kPoolN], cp[kPoolN];
+        double sumRp = 0.0, sumCp = 0.0;
+        int pIdx = 0;
+        for (int py = 0; py < kPoolH; ++py) {
+            const int y = R + 2 * py;
+            for (int px = 0; px < kPoolW; ++px) {
+                const int x = R + 2 * px;
+                const double rv = refAligned[y][x] + refAligned[y][x + 1] + refAligned[y + 1][x] + refAligned[y + 1][x + 1];
+                const double cv = curAligned[y][x] + curAligned[y][x + 1] + curAligned[y + 1][x] + curAligned[y + 1][x + 1];
+                rp[pIdx] = rv;
+                cp[pIdx] = cv;
+                sumRp += rv;
+                sumCp += cv;
+                ++pIdx;
+            }
         }
+        const double mxP = sumRp / double(kPoolN);
+        const double myP = sumCp / double(kPoolN);
+        double sxxP = 0.0, syyP = 0.0, sxyP = 0.0;
+        for (int k = 0; k < kPoolN; ++k) {
+            const double dr = rp[k] - mxP;
+            const double dc = cp[k] - myP;
+            sxxP += dr * dr;
+            syyP += dc * dc;
+            sxyP += dr * dc;
+        }
+        const double denP = std::sqrt((sxxP > 0.0 ? sxxP : 0.0) * (syyP > 0.0 ? syyP : 0.0));
+        const double corr2x2 = denP > 1e-12 ? sxyP / denP : 0.0;
+        if (!(corr2x2 >= kSameStructure))
+            return fit;
     }
-    const double mxP = sumRp / double(kPoolN);
-    const double myP = sumCp / double(kPoolN);
-    double sxxP = 0.0, syyP = 0.0, sxyP = 0.0;
-    for (int k = 0; k < kPoolN; ++k) {
-        const double dr = rp[k] - mxP;
-        const double dc = cp[k] - myP;
-        sxxP += dr * dr;
-        syyP += dc * dc;
-        sxyP += dr * dc;
-    }
-    const double denP = std::sqrt((sxxP > 0.0 ? sxxP : 0.0) * (syyP > 0.0 ? syyP : 0.0));
-    const double corr2x2 = denP > 1e-12 ? sxyP / denP : 0.0;
-    if (!(corr2x2 >= kSameStructure))
-        return fit;
 
     fit.valid = true;
     return fit;
@@ -1450,7 +1454,7 @@ bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur
             if (rigidFootprintOk && TryAcceptCumFit(rigidFit))
                 return true;
             if (!cumFootprintRejected && run.pairs >= uint32_t(kRefFrames)) {
-                const GridFadeFit mtFit = FitMotionTolerantFade(baseAligned, curBaseAligned, cumFitVx, cumFitVy);
+                const GridFadeFit mtFit = FitMotionTolerantFade(baseAligned, curBaseAligned, cumFitVx, cumFitVy, nearBlackFall);
                 if (TryAcceptCumFit(mtFit))
                     return true;
             }
@@ -1468,7 +1472,7 @@ bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur
             GridFadeFit adjFit = rigidAdj;
             bool adjOk = adjFootprintOk;
             if (!adjOk && !adjFootprintRejected && run.pairs >= uint32_t(kRefFrames)) {
-                adjFit = FitMotionTolerantFade(prevAligned, curAligned, stepVx, stepVy);
+                adjFit = FitMotionTolerantFade(prevAligned, curAligned, stepVx, stepVy, nearBlackFall);
                 adjOk = adjFit.valid && adjFit.dir == run.direction;
             }
             if (adjOk && HighlightScalingConsistent(prev.p99, cur.p99, adjFit.gain, adjFit.black, adjFit.dir) &&
