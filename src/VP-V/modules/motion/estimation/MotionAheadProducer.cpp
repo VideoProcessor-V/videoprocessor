@@ -640,6 +640,64 @@ namespace MotionAhead
 		wake.notify_all();
 	}
 
+	bool Producer::HandleEngineFailureLocked(std::unique_lock<std::mutex>& lock)
+	{
+		++stats.failures;
+		if (++consecutiveFailures < 3)
+			return true;
+		// Persistent failure: stop (the matcher covers everything meanwhile). Bug hunt 35 #1: no
+		// longer for the session - restart with a back-off on a fresh device while still wanted.
+		lock.unlock();
+		DrainStagingSets(true);
+		backQueue.DiscardAllAndBumpEpoch();
+		backQueue.WaitIdle();
+		publishGate.Reset();
+		lock.lock();
+		if (stopping)
+			return false;
+		running = false;
+		engineReady = false;
+		jobs.clear();
+		requestStats.unavailable += requests.FailAll(OnDemand::Status::Unavailable);   // W2-C5b
+		stopError = error.empty() ? std::string("three failed jobs in a row") : error;
+		for (;;)
+		{
+			const uint64_t delay = recovery.OnStopped(NowMs());
+			const unsigned divisor = recoveryDivisor.load(std::memory_order_acquire);
+			error = stopError + "; restarting in " + std::to_string((delay + 999) / 1000) + " s (stop " +
+				std::to_string(recovery.Stops()) + ")";
+			DebugLog::Log("Motion ahead: the producer stopped (%s)", error.c_str());
+			if (wake.wait_for(lock, std::chrono::milliseconds(delay / divisor), [this] { return stopping; }))
+				return false;
+			lock.unlock();
+			// The old engine, textures and device go (a removed device cannot recover in place).
+			ReleaseEngine();
+			stagingRing.BindEngineThread();
+			{
+				std::lock_guard<std::mutex> deviceLock(mutex);
+				context.Release();
+				device.Release();
+			}
+			std::string why;
+			const bool created = CreateDevice(why);
+			lock.lock();
+			if (stopping)
+				return false;
+			if (created)
+				break;
+			stopError = why;   // no device yet: another stop, a longer wait
+		}
+		jobs.clear();
+		requestStats.unavailable += requests.FailAll(OnDemand::Status::Unavailable);   // W2-C5b
+		consecutiveFailures = 0;
+		recovery.OnRestarted(NowMs());
+		error.clear();   // the next stop names its own failure
+		DebugLog::Log("Motion ahead: the producer restarted on a new device (restart %u after: %s)",
+			recovery.Restarts(), stopError.c_str());
+		running = true;
+		return true;
+	}
+
 	void Producer::Worker()
 	{
 		stagingRing.BindEngineThread();
@@ -662,54 +720,8 @@ namespace MotionAhead
 				if (!PollReadyStagingSets(anyCompleted))
 				{
 					std::unique_lock<std::mutex> lock(mutex);
-					++stats.failures;
-					if (++consecutiveFailures >= 3)
-					{
-						lock.unlock();
-						DrainStagingSets(true);
-						backQueue.DiscardAllAndBumpEpoch();
-						backQueue.WaitIdle();
-						publishGate.Reset();
-						lock.lock();
-						running = false;
-						engineReady = false;
-						jobs.clear();
-						requestStats.unavailable += requests.FailAll(OnDemand::Status::Unavailable);
-						stopError = error.empty() ? std::string("three failed jobs in a row") : error;
-						for (;;)
-						{
-							const uint64_t delay = recovery.OnStopped(NowMs());
-							const unsigned divisor = recoveryDivisor.load(std::memory_order_acquire);
-							error = stopError + "; restarting in " + std::to_string((delay + 999) / 1000) + " s (stop " +
-								std::to_string(recovery.Stops()) + ")";
-							DebugLog::Log("Motion ahead: the producer stopped (%s)", error.c_str());
-							if (wake.wait_for(lock, std::chrono::milliseconds(delay / divisor), [this] { return stopping; }))
-								return;
-							lock.unlock();
-							ReleaseEngine();
-							stagingRing.BindEngineThread();
-							{
-								std::lock_guard<std::mutex> deviceLock(mutex);
-								context.Release();
-								device.Release();
-							}
-							std::string why;
-							const bool created = CreateDevice(why);
-							lock.lock();
-							if (stopping) return;
-							if (created)
-								break;
-							stopError = why;
-						}
-						jobs.clear();
-						requestStats.unavailable += requests.FailAll(OnDemand::Status::Unavailable);
-						consecutiveFailures = 0;
-						recovery.OnRestarted(NowMs());
-						error.clear();
-						DebugLog::Log("Motion ahead: the producer restarted on a new device (restart %u after: %s)",
-							recovery.Restarts(), stopError.c_str());
-						running = true;
-					}
+					if (!HandleEngineFailureLocked(lock))
+						return;
 					continue;
 				}
 			}
@@ -723,18 +735,29 @@ namespace MotionAhead
 				const bool canSubmit = testEngine || stagingRing.AcquireFree() != Pipeline::StagingRing<kStagingSets>::kNoSlot;
 				if (!stopping && !(canSubmit && (!requests.Empty() || !jobs.empty())))
 				{
-					if (!testEngine && stagingRing.SubmittedCount() > 0)
+					if (!testEngine && context && stagingRing.SubmittedCount() > 0)
 					{
 						// Wait on whichever comes first: new job (if a staging slot is free) or oldest GPU event.
 						// Spin-then-sleep: brief polls before a short timed wait so we neither stall nor burn CPU.
 						lock.unlock();
 						bool completed = false;
+						bool pollOk = true;
 						for (int spin = 0; spin < 8 && !completed; ++spin)
 						{
 							if (!PollReadyStagingSets(completed))
+							{
+								pollOk = false;
 								break;
+							}
 							if (!completed)
 								std::this_thread::yield();
+						}
+						if (!pollOk)
+						{
+							lock.lock();
+							if (!HandleEngineFailureLocked(lock))
+								return;
+							continue;
 						}
 						if (completed)
 							continue;
@@ -796,56 +819,8 @@ namespace MotionAhead
 					consecutiveFailures = 0;
 				continue;
 			}
-			++stats.failures;
-			if (++consecutiveFailures < 3)
-				continue;
-			// Persistent failure: stop (the matcher covers everything meanwhile). Bug hunt 35 #1: no
-			// longer for the session - restart with a back-off on a fresh device while still wanted.
-			lock.unlock();
-			DrainStagingSets(true);
-			backQueue.DiscardAllAndBumpEpoch();
-			backQueue.WaitIdle();
-			publishGate.Reset();
-			lock.lock();
-			running = false;
-			engineReady = false;
-			jobs.clear();
-			requestStats.unavailable += requests.FailAll(OnDemand::Status::Unavailable);   // W2-C5b
-			stopError = error.empty() ? std::string("three failed jobs in a row") : error;
-			for (;;)
-			{
-				const uint64_t delay = recovery.OnStopped(NowMs());
-				const unsigned divisor = recoveryDivisor.load(std::memory_order_acquire);
-				error = stopError + "; restarting in " + std::to_string((delay + 999) / 1000) + " s (stop " +
-					std::to_string(recovery.Stops()) + ")";
-				DebugLog::Log("Motion ahead: the producer stopped (%s)", error.c_str());
-				if (wake.wait_for(lock, std::chrono::milliseconds(delay / divisor), [this] { return stopping; }))
-					return;
-				lock.unlock();
-				// The old engine, textures and device go (a removed device cannot recover in place).
-				ReleaseEngine();
-				stagingRing.BindEngineThread();
-				{
-					std::lock_guard<std::mutex> deviceLock(mutex);
-					context.Release();
-					device.Release();
-				}
-				std::string why;
-				const bool created = CreateDevice(why);
-				lock.lock();
-				if (stopping) return;
-				if (created)
-					break;
-				stopError = why;   // no device yet: another stop, a longer wait
-			}
-			jobs.clear();
-			requestStats.unavailable += requests.FailAll(OnDemand::Status::Unavailable);   // W2-C5b
-			consecutiveFailures = 0;
-			recovery.OnRestarted(NowMs());
-			error.clear();   // the next stop names its own failure
-			DebugLog::Log("Motion ahead: the producer restarted on a new device (restart %u after: %s)",
-				recovery.Restarts(), stopError.c_str());
-			running = true;
+			if (!HandleEngineFailureLocked(lock))
+				return;
 		}
 	}
 
@@ -853,7 +828,8 @@ namespace MotionAhead
 	{
 		if (halfW == sizeW && halfH == sizeH && engine && engine->IsOpen()) return true;
 		// Drain all in-flight staging sets and wait for BACK before destroying the old staging textures.
-		DrainStagingSets(false);
+		if (!DrainStagingSets(false))
+			return false;
 		backQueue.WaitIdle();
 		stagingRing.Clear();
 		engine.reset();
@@ -1198,14 +1174,22 @@ namespace MotionAhead
 			costs.resize(cells);
 			D3D11_MAPPED_SUBRESOURCE map{};
 			if (FAILED(context->Map(s.flowRead[i], 0, D3D11_MAP_READ, 0, &map)))
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				error = "staging flow map failed";
 				return false;
+			}
 			for (int y = 0; y < flow->gridH; ++y)
 				std::memcpy(&vectors[static_cast<size_t>(y) * flow->gridW * 2],
 					static_cast<const uint8_t*>(map.pData) + static_cast<size_t>(y) * map.RowPitch,
 					static_cast<size_t>(flow->gridW) * 4);
 			context->Unmap(s.flowRead[i], 0);
 			if (FAILED(context->Map(s.costRead[i], 0, D3D11_MAP_READ, 0, &map)))
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				error = "staging cost map failed";
 				return false;
+			}
 			for (int y = 0; y < flow->gridH; ++y)
 				std::memcpy(&costs[static_cast<size_t>(y) * flow->gridW],
 					static_cast<const uint8_t*>(map.pData) + static_cast<size_t>(y) * map.RowPitch,
@@ -1288,7 +1272,14 @@ namespace MotionAhead
 			{
 				ok = MapAndForwardStagingSet(oldest, engineMs);
 				if (!ok)
+				{
 					FailStagingSetRequest(oldest, OnDemand::Status::Failed);
+				}
+				else
+				{
+					std::lock_guard<std::mutex> lock(mutex);
+					consecutiveFailures = 0;
+				}
 			}
 			ReleaseStagingSetMeta(oldest);
 			stagingRing.Release(oldest);
@@ -1325,7 +1316,22 @@ namespace MotionAhead
 				return true;
 			bool any = false;
 			if (!PollReadyStagingSets(any))
+			{
+				if (discard)
+				{
+					for (int k = 0; k < kStagingSets; ++k)
+					{
+						if (targetSlot == -1 || targetSlot == k)
+						{
+							FailStagingSetRequest(k, OnDemand::Status::Unavailable);
+							ReleaseStagingSetMeta(k);
+						}
+					}
+					if (targetSlot == -1)
+						stagingRing.Clear();
+				}
 				return false;
+			}
 			if (targetSlot != -1 && stagingRing.At(targetSlot).state == Pipeline::SlotState::Free)
 				return true;
 			if (targetSlot == -1 && stagingRing.SubmittedCount() == 0)

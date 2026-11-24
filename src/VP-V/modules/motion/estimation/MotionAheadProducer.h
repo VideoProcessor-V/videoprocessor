@@ -575,6 +575,9 @@ namespace MotionAhead
 		bool EnsureSize(int halfW, int halfH);
 		void ReleaseEngine();
 		bool CreateDevice(std::string& why);
+		// Failure accounting + 3-strike device-lost recovery (called on ENGINE with mutex held).
+		// Returns false if stopping became true during recovery so Worker() exits cleanly.
+		bool HandleEngineFailureLocked(std::unique_lock<std::mutex>& lock);
 		static uint64_t NowMs();
 
 		mutable std::mutex mutex;
