@@ -263,8 +263,9 @@ namespace SourceGeometry
 		add(SourceIdentity::Chain::kReasonJointEntry, "joint entry");
 		add(SourceIdentity::Chain::kReasonChainAloneEntry, "chain-alone entry");
 		add(SourceIdentity::Chain::kReasonNullTableMismatch, "null-table mismatch");
-		// SOTA #2 (default OFF): zero while neuralSr.enabled == false.
+		// SOTA #2-#3 (default OFF): zero while switches are off.
 		add(SourceIdentity::Chain::kReasonNeuralSrDetected, "AI-upscaled (skip LTI inverse)");
+		add(SourceIdentity::Chain::kReasonInterlacedBob, "interlaced broadcast");
 		return w;
 	}
 

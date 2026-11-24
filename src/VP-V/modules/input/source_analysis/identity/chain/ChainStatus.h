@@ -110,7 +110,7 @@ namespace SourceIdentity
 
 			// SID r2 (M4) + S2/S3 (LOW-A): the latch and S2/S3 reasons of the published (applied) geometry. Zero while the rules/S2/S3 are off.
 			constexpr uint32_t kLatchReasonBits = kReasonNonConventional | kReasonLatchBar | kReasonLatchRelease | kReasonMenuHold | kReasonAbrStep |
-				kReasonScreenOnly | kReasonJointEntry | kReasonChainAloneEntry | kReasonNullTableMismatch | kReasonNeuralSrDetected;
+				kReasonScreenOnly | kReasonJointEntry | kReasonChainAloneEntry | kReasonNullTableMismatch | kReasonNeuralSrDetected | kReasonInterlacedBob;
 
 			// SID r2 (M4) + S2 (LOW-A): "; upscale latch 1920x1080" / "; no upscale latch" while safety rules are on;
 			// "; joint upscale latch 1920x1080" / "; joint latch: active (no upscale latch)" when jointLatch is on without safetyRules;

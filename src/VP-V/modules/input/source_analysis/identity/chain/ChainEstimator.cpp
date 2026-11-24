@@ -101,6 +101,7 @@ namespace SourceIdentity
 			DepthNullTableSet reqDepthNullTables = DepthNullTableSet::PlaceholderOnly();
 			HdrNoiseSettings reqHdrNoise;
 			NeuralSrSettings reqNeuralSr;
+			InterlacedSettings reqInterlaced;
 			struct ClassicalFreshState
 			{
 				bool valid = false;
@@ -172,9 +173,10 @@ namespace SourceIdentity
 			// Pass-2 audit closure counters (M1, M3, M4, L2):
 			std::atomic<uint64_t> cClassicalFreshStaleDrops{ 0 }, cP3ScreenOnlyCandidates{ 0 },
 				cEdgeStatsNullTableAbstains{ 0 }, cAbrStepEventsEvicted{ 0 };
-			// SOTA #1-#2 counters (zero while switches are OFF):
+			// SOTA #1-#3 counters (zero while switches are OFF):
 			std::atomic<uint64_t> cHdrLinearizedEvals{ 0 }, cHdrDarkToeClamps{ 0 };
 			std::atomic<uint64_t> cNeuralSrDetections{ 0 }, cNeuralSrAbstains{ 0 };
+			std::atomic<uint64_t> cInterlacedBobDetections{ 0 }, cInterlacedWeaveDetections{ 0 }, cInterlacedAbstains{ 0 };
 			// fx/dv-frame-quiet: each ceiling release is stamped with the newest source frame the estimator had seen, so the frame-bound
 			// monitor counts only the releases up to the frame it is allowed to see (LatchCeilingReleasesThrough), not the live counter.
 			std::atomic<uint64_t> newestSeqA{ 0 };
@@ -210,6 +212,7 @@ namespace SourceIdentity
 			AxisRun evalRun[2];
 			PowerProbe::Workspace probeWs[2];
 			NeuralSrWorkspace neuralSrWs[2];
+			InterlacedWorkspace interlacedWs;
 			Governor gov;
 			EvidenceLog log;
 			Geometry::HeldState held;
@@ -291,6 +294,7 @@ namespace SourceIdentity
 				reqDepthNullTables = cfg.depthNullTables;
 				reqHdrNoise = cfg.hdrNoise;
 				reqNeuralSr = cfg.neuralSr;
+				reqInterlaced = cfg.interlaced;
 				if (cfg.hdrNoise.enabled)
 					cfg.verifier.hdrNoise = cfg.hdrNoise;
 				safetyA.store(reqSafety || reqJointLatch.enabled, std::memory_order_release);
@@ -559,6 +563,17 @@ namespace SourceIdentity
 				{
 					std::lock_guard<std::mutex> lk(m);
 					reqNeuralSr = s;
+					cfgDirty = true;
+					++runEpoch;
+				}
+				Wake();
+			}
+
+			void SetInterlaced(const InterlacedSettings& s)
+			{
+				{
+					std::lock_guard<std::mutex> lk(m);
+					reqInterlaced = s;
 					cfgDirty = true;
 					++runEpoch;
 				}
@@ -1185,6 +1200,7 @@ namespace SourceIdentity
 					probeWs[a].Reset();
 					neuralSrWs[a].Reset();
 				}
+				interlacedWs.Reset();
 				{
 					bool safe = false, abr = false, convP = false;
 					bool eightBitP = false, useDepthN = false;
@@ -1195,6 +1211,7 @@ namespace SourceIdentity
 					DepthNullTableSet depthN = DepthNullTableSet::PlaceholderOnly();
 					HdrNoiseSettings hdrCfg;
 					NeuralSrSettings nsrCfg;
+					InterlacedSettings intCfg;
 					{
 						std::lock_guard<std::mutex> lk(m);
 						safe = reqSafety;
@@ -1209,6 +1226,7 @@ namespace SourceIdentity
 						depthN = reqDepthNullTables;
 						hdrCfg = reqHdrNoise;
 						nsrCfg = reqNeuralSr;
+						intCfg = reqInterlaced;
 						abrStepEvents.clear();
 					}
 					if (jointLatchOn)
@@ -1256,6 +1274,7 @@ namespace SourceIdentity
 					cfg.depthNullTables = depthN;
 					cfg.hdrNoise = hdrCfg;
 					cfg.neuralSr = nsrCfg;
+					cfg.interlaced = intCfg;
 					if (cfg.verifier.hdrNoise.enabled != hdrCfg.enabled ||
 						cfg.verifier.hdrNoise.transfer != hdrCfg.transfer ||
 						cfg.verifier.hdrNoise.bitDepth != hdrCfg.bitDepth ||
@@ -1382,6 +1401,7 @@ namespace SourceIdentity
 					probeWs[a].Reset();
 					neuralSrWs[a].Reset();
 				}
+				interlacedWs.Reset();
 				evidence.Reset();
 				if (stepMarkOn)
 				{
@@ -2738,6 +2758,77 @@ namespace SourceIdentity
 						}
 					}
 				}
+				// SOTA #3 (opt-in, default OFF): Broadcast interlaced motion-bob / weave-comb forensics.
+				InterlacedResult interlacedRes;
+				if (cfg.interlaced.enabled)
+				{
+					if (run[0].have && run[1].have)
+					{
+						BobAxisInput bi;
+						for (int a = 0; a < 2; ++a)
+						{
+							bool haveBest = false;
+							int bn = 0;
+							double bstat = 0.0;
+							double bphase = 0.0;
+							for (size_t ci = 0; ci < run[a].vr.candidates.size(); ++ci)
+							{
+								const CandidateResult& cr = run[a].vr.candidates[ci];
+								if (!cr.valid || !cr.exactDone)
+									continue;
+								if (!haveBest || cr.stat < bstat)
+								{
+									haveBest = true;
+									bn = cr.n;
+									bstat = cr.stat;
+									bphase = cr.phase;
+								}
+							}
+							if (haveBest)
+							{
+								if (a == 0)
+								{
+									bi.validH = true;
+									bi.nH = bn;
+									bi.NH = run[0].ls.axisLen;
+									bi.statH = bstat;
+								}
+								else
+								{
+									bi.validV = true;
+									bi.nV = bn;
+									bi.NV = run[1].ls.axisLen;
+									bi.statV = bstat;
+									bi.phaseV = bphase;
+								}
+							}
+						}
+						interlacedRes = AnalyzeMotionBob(bi, &run[0].ls, floorCodes, s.seq, cfg.interlaced, interlacedWs);
+					}
+					if (!interlacedRes.interlacedDetected && job.frame.Valid())
+					{
+						const InterlacedResult weaveRes = AnalyzeWeaveComb(
+							job.frame.luma,
+							static_cast<int>(job.frame.width),
+							static_cast<int>(job.frame.height),
+							static_cast<int>(job.frame.strideSamples),
+							floorCodes,
+							cfg.interlaced);
+						if (weaveRes.interlacedDetected)
+							interlacedRes = weaveRes;
+					}
+					if (interlacedRes.interlacedDetected)
+					{
+						if (interlacedRes.kind == InterlacedKind::WeaveComb)
+							cInterlacedWeaveDetections.fetch_add(1, std::memory_order_relaxed);
+						else
+							cInterlacedBobDetections.fetch_add(1, std::memory_order_relaxed);
+					}
+					else if (interlacedRes.kind == InterlacedKind::Abstain)
+					{
+						cInterlacedAbstains.fetch_add(1, std::memory_order_relaxed);
+					}
+				}
 				for (int a = 0; a < 2; ++a)
 				{
 					if (!run[a].have)
@@ -3054,6 +3145,21 @@ namespace SourceIdentity
 						}
 					}
 				}
+				if (cfg.interlaced.enabled && interlacedRes.interlacedDetected)
+				{
+					for (int a = 0; a < 2; ++a)
+					{
+						out[a].measured.reasonBits |= kReasonInterlacedBob;
+						out[a].applied.reasonBits |= kReasonInterlacedBob;
+					}
+					// Never misreport motion-bobbed 1080i->2160p as confident progressive 540p on the vertical axis.
+					if (interlacedRes.kind == InterlacedKind::MotionBob &&
+						out[1].applied.state == Geometry::LatchState::Latched &&
+						out[1].applied.n < out[1].applied.N)
+					{
+						out[1].applied = UnsureLike(out[1].applied, kReasonInterlacedBob);
+					}
+				}
 
 				bool cold = false;
 				for (int a = 0; a < 2; ++a)
@@ -3276,6 +3382,9 @@ namespace SourceIdentity
 				c.hdrDarkToeClamps = cHdrDarkToeClamps.load(std::memory_order_relaxed);
 				c.neuralSrDetections = cNeuralSrDetections.load(std::memory_order_relaxed);
 				c.neuralSrAbstains = cNeuralSrAbstains.load(std::memory_order_relaxed);
+				c.interlacedBobDetections = cInterlacedBobDetections.load(std::memory_order_relaxed);
+				c.interlacedWeaveDetections = cInterlacedWeaveDetections.load(std::memory_order_relaxed);
+				c.interlacedAbstains = cInterlacedAbstains.load(std::memory_order_relaxed);
 				return c;
 			}
 
@@ -3380,6 +3489,7 @@ namespace SourceIdentity
 		void ChainEstimator::SetDepthNullTables(const DepthNullTableSet& tables, bool enable) { st_->SetDepthNullTables(tables, enable); }
 		void ChainEstimator::SetHdrNoiseSettings(const HdrNoiseSettings& s) { st_->SetHdrNoise(s); }
 		void ChainEstimator::SetNeuralSrSettings(const NeuralSrSettings& s) { st_->SetNeuralSr(s); }
+		void ChainEstimator::SetInterlacedSettings(const InterlacedSettings& s) { st_->SetInterlaced(s); }
 		void ChainEstimator::SetDiagnosticTag(const std::string& tag) { st_->diagTag.Set(tag); }
 		void ChainEstimator::SetDiagnosticDepths(int codedBits, int outputBits)
 		{
