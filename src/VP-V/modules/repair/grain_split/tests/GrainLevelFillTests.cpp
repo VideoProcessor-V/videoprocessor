@@ -473,6 +473,7 @@ namespace VideoProcessorTest
 			Assert::IsTrue(m.HasOwnerFill(kP10GrainSplit, AcquireForm::Gpu), L"the memo holds the P10 fill");
 			Assert::IsTrue(m.HasOwnerFill(kP10gGrainLevel, AcquireForm::Gpu), L"the memo holds the P10g fill");
 			Assert::AreEqual(L::ReserveBytes(GrainDims(1920, 1080)), module.RegisteredReserveBytes(), L"1080p reserve");
+			Assert::AreEqual(L::SplitReserveBytes(GrainDims(1920, 1080)), module.SplitRegisteredReserveBytes(), L"1080p P10 reserve");
 			Assert::IsFalse(module.SplitOwnerServedElsewhere(), L"the P10 owner is ours here");
 			Assert::IsTrue(module.FallbackLines().empty(), L"both registered, no fill yet: no Fallbacks line");
 
@@ -480,14 +481,219 @@ namespace VideoProcessorTest
 			Assert::AreEqual(2, demand.registers, L"same size: no re-registration");
 
 			Assert::IsTrue(module.Observe(&hostB, GrainDims(3840, 2160), &demand), L"a larger host");
-			Assert::AreEqual(1, demand.unregisters, L"the old P10g fill removed");
-			Assert::AreEqual(3, demand.registers, L"P10g re-registered once");
-			Assert::AreEqual(1, demand.splitRegisters, L"the P10 owner is never registered twice");
+			Assert::AreEqual(2, demand.unregisters, L"old P10 (via default ReplaceOwnerFill) and old P10g fills removed");
+			Assert::AreEqual(4, demand.registers, L"P10 replaced and P10g re-registered once for 4K");
+			Assert::AreEqual(2, demand.splitRegisters, L"S2-M4: P10 owner reserve updated on upward 1080p -> 4K growth");
 			Assert::AreEqual(L::ReserveBytes(GrainDims(3840, 2160)), module.RegisteredReserveBytes(), L"the largest live size");
+			Assert::AreEqual(L::SplitReserveBytes(GrainDims(3840, 2160)), module.SplitRegisteredReserveBytes(), L"4K P10 reserve");
+			Assert::IsTrue(module.SplitRegisteredReserveBytes() > L::SplitReserveBytes(GrainDims(1920, 1080)),
+				L"4K P10 reserve strictly exceeds 1080p P10 reserve");
 
 			module.Forget(&hostB, &demand);
-			Assert::AreEqual(4, demand.registers, L"the largest host left: re-registered");
+			Assert::AreEqual(3, demand.unregisters, L"only P10g unregistered while hostA remains live");
+			Assert::AreEqual(5, demand.registers, L"the largest host left: P10g re-registered for hostA");
+			Assert::AreEqual(2, demand.splitRegisters, L"P10 high-water reserve kept while a live host remains");
 			Assert::AreEqual(L::ReserveBytes(GrainDims(1920, 1080)), module.RegisteredReserveBytes(), L"the remaining host's size");
+			Assert::AreEqual(L::SplitReserveBytes(GrainDims(3840, 2160)), module.SplitRegisteredReserveBytes(),
+				L"P10 reserve stays at 4K until all hosts detach");
+		}
+
+		// S2-M4: GrainLevelModule must grow kP10GrainSplit's ahead-planner reserve atomically via ReplaceOwnerFill
+		// when source resolution grows (e.g. 720p -> 4K, avoiding the ~9x reserve underestimate hazard), preserve the
+		// active registration and report visibly on FallbackLines()/OnStatus(Fallbacks) if ReplaceOwnerFill fails
+		// (Rule 4), and re-baseline cleanly to a smaller resolution after all hosts detach (Forget) while treating
+		// a same-resolution return as a no-op.
+		BEGIN_TEST_METHOD_ATTRIBUTE(SplitOwnerReserveGrowsAtomicallyFrom720pTo4KAndRebaselinesAfterDetach)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(SplitOwnerReserveGrowsAtomicallyFrom720pTo4KAndRebaselinesAfterDetach)
+		{
+			using namespace VpSkeleton;
+			namespace L = GrainSplit::LevelGpu;
+			namespace RE = RendererExtension;
+
+			struct AtomicSplitDemand : Vpv::Skeleton::IExternalDemand
+			{
+				SkeletonMemo* memo = nullptr;
+				int splitRegisters = 0;
+				int splitReplaces = 0;
+				int splitUnregisters = 0;
+				bool refuseSplitReplace = false;
+				SkeletonMemo::Registration refuseCode = SkeletonMemo::Registration::BadDefaults;
+				uint64_t lastSplitReserveBytes = 0;
+
+				void SetExternalDemand(const void*, const void*, const std::vector<ConsumerDecl>&,
+					const std::vector<ProductId>&) override {}
+				void ClearExternalDemand(const void*, const void*) override {}
+
+				SkeletonMemo::Registration RegisterOwnerFill(ProductId id, AcquireForm form,
+					const std::string& unit, OwnerFill fill) override
+				{
+					if (id == kP10GrainSplit)
+					{
+						++splitRegisters;
+						lastSplitReserveBytes = fill.reserveBytes;
+					}
+					return memo->RegisterOwnerFill(id, form, unit, std::move(fill));
+				}
+
+				SkeletonMemo::Registration ReplaceOwnerFill(ProductId id, AcquireForm form,
+					const std::string& unit, OwnerFill fill) override
+				{
+					if (id == kP10GrainSplit)
+					{
+						++splitReplaces;
+						lastSplitReserveBytes = fill.reserveBytes;
+						if (refuseSplitReplace)
+							return refuseCode;
+					}
+					return memo->ReplaceOwnerFill(id, form, unit, std::move(fill));
+				}
+
+				bool UnregisterOwnerFill(ProductId id, AcquireForm form, const std::string& unit) override
+				{
+					if (id == kP10GrainSplit)
+						++splitUnregisters;
+					return memo->UnregisterOwnerFill(id, form, unit);
+				}
+			};
+
+			auto memoSplitReserve = [](const SkeletonMemo& m) -> uint64_t {
+				const AheadNeed need = m.MakeAheadNeed(QueueWindow{});
+				for (const AheadCost& c : need.costs)
+					if (c.id == uint16_t(kP10GrainSplit) && c.form == uint8_t(AcquireForm::Gpu))
+						return c.bytesPerFrame;
+				return uint64_t(0);
+			};
+
+			const Dims d720 = GrainDims(1280, 720);
+			const Dims d1080 = GrainDims(1920, 1080);
+			const Dims d4k = GrainDims(3840, 2160);
+			const uint64_t r720 = L::SplitReserveBytes(d720);
+			const uint64_t r1080 = L::SplitReserveBytes(d1080);
+			const uint64_t r4k = L::SplitReserveBytes(d4k);
+
+			Assert::IsTrue(r720 > uint64_t(0), L"720p split reserve is positive");
+			Assert::IsTrue(r1080 > r720 && r4k > r1080, L"split reserve grows strictly with luma dimensions");
+
+			// Same-input negative control (Rule 3): prove the pre-fix S2-M4 ~9x reserve-underestimate hazard is real.
+			// Leaving kP10GrainSplit permanently registered at 1280x720 when the stream grows to 3840x2160 understates
+			// SkeletonMemo's ahead-planner bytesPerFrame by more than 8x (~9x).
+			GrainSplit::Gpu::VariantOwner baselineOwner;
+			SkeletonMemo baselineMemo;
+			Assert::IsTrue(baselineOwner.Register(baselineMemo, 1280, 720) == SkeletonMemo::Registration::Registered,
+				L"negative control: baseline 720p P10 owner registers");
+			const uint64_t baselineReserve = memoSplitReserve(baselineMemo);
+			Assert::AreEqual(r720, baselineReserve, L"negative control: baseline memo carries 720p ahead-planner reserve");
+			Assert::IsTrue(r720 * uint64_t(8) < r4k,
+				L"negative control: SplitReserveBytes(1280x720) * 8 < SplitReserveBytes(3840x2160) (~9x underestimate hazard)");
+			Assert::IsTrue(baselineReserve * uint64_t(8) < r4k,
+				L"negative control: pre-fix 720p-pinned memo reserve violates 4K ahead-planner reserve by >8x");
+
+			SkeletonMemo memo;
+			AtomicSplitDemand demand;
+			demand.memo = &memo;
+			L::GrainLevelModule module;
+			int host = 0;
+			RE::Context ctx{};
+			ctx.host = &host;
+
+			// 1. Initial registration at 1280x720.
+			Assert::IsTrue(module.Observe(&host, d720, &demand), L"initial 720p registration succeeds");
+			Assert::IsTrue(module.SplitOwnerRegistered(), L"P10 owner registered at 720p");
+			Assert::AreEqual(r720, module.SplitRegisteredReserveBytes(), L"SplitRegisteredReserveBytes matches 720p");
+			Assert::IsTrue(memo.HasOwnerFill(kP10GrainSplit, AcquireForm::Gpu), L"memo holds kP10GrainSplit fill at 720p");
+			Assert::AreEqual(r720, memoSplitReserve(memo), L"memo ahead-planner reserve matches 720p");
+			Assert::AreEqual(1, demand.splitRegisters, L"initial P10 registration calls RegisterOwnerFill once");
+			Assert::AreEqual(0, demand.splitReplaces, L"initial P10 registration does not call ReplaceOwnerFill");
+			Assert::AreEqual(0, demand.splitUnregisters, L"initial P10 registration never unregisters");
+			Assert::IsTrue(module.FallbackLines().empty(), L"healthy 720p registration emits no fallback line");
+
+			// Same-input negative control (Rule 3): naive RegisterOwnerFill on the active memo fails with AlreadyRegistered
+			// and leaves the ahead-planner reserve stuck at 720p (proving atomic ReplaceOwnerFill is required).
+			Assert::IsTrue(baselineOwner.Register(memo, 3840, 2160) == SkeletonMemo::Registration::AlreadyRegistered,
+				L"negative control: real memo refuses second RegisterOwnerFill with AlreadyRegistered");
+			Assert::AreEqual(r720, memoSplitReserve(memo), L"negative control: refused RegisterOwnerFill leaves 720p reserve");
+
+			// 2. Failed ReplaceOwnerFill on upward growth 720p -> 4K must keep SplitOwnerRegistered() == true and
+			//    the prior valid 720p reserve intact (both in module and memo), while visibly reporting on FallbackLines()
+			//    and OnStatus(Fallbacks) (Rule 4) and latching against per-frame retries.
+			demand.refuseSplitReplace = true;
+			Assert::IsTrue(module.Observe(&host, d4k, &demand), L"P10g succeeds while P10 replace is refused");
+			Assert::AreEqual(1, demand.splitRegisters, L"failed replace does not call RegisterOwnerFill");
+			Assert::AreEqual(1, demand.splitReplaces, L"4K growth invokes ReplaceOwnerFill once");
+			Assert::AreEqual(0, demand.splitUnregisters, L"failed replace never unregisters the prior P10 fill");
+			Assert::AreEqual(r4k, demand.lastSplitReserveBytes, L"attempted replace carried 4K reserve");
+			Assert::IsTrue(module.SplitOwnerRegistered(), L"SplitOwnerRegistered stays true after failed ReplaceOwnerFill");
+			Assert::AreEqual(r720, module.SplitRegisteredReserveBytes(), L"prior valid 720p split reserve preserved on failure");
+			Assert::IsTrue(memo.HasOwnerFill(kP10GrainSplit, AcquireForm::Gpu), L"memo still holds prior 720p P10 fill");
+			Assert::AreEqual(r720, memoSplitReserve(memo), L"memo ahead-planner reserve stays at prior 720p on failure");
+
+			const std::string wantRefusal = std::string(L::kSplitUnregisteredId)
+				+ ": P10 variant owner refused: bad defaults (reserve " + std::to_string(r4k)
+				+ " B; retried at the next size change)";
+			const std::vector<std::string> fbFail = module.FallbackLines();
+			Assert::AreEqual(size_t(1), fbFail.size(), L"failed replace reports visibly on FallbackLines() (Rule 4)");
+			Assert::AreEqual(wantRefusal, fbFail[0], L"failed replace line names refusal and requested 4K reserve");
+			std::vector<std::string> statusLines;
+			module.OnStatus(ctx, RE::StatusKind::Fallbacks, statusLines, nullptr, nullptr);
+			Assert::AreEqual(size_t(1), statusLines.size(), L"OnStatus(Fallbacks) reports failed replace");
+			Assert::AreEqual(wantRefusal, statusLines[0], L"OnStatus(Fallbacks) matches FallbackLines()");
+
+			// Latch check: re-observing the same refused 4K size does not spam ReplaceOwnerFill every frame.
+			demand.refuseSplitReplace = false;
+			Assert::IsTrue(module.Observe(&host, d4k, &demand), L"latched 4K keeps P10g registered");
+			Assert::AreEqual(1, demand.splitReplaces, L"refused 4K reserve is latched and not retried every frame");
+			Assert::AreEqual(r720, module.SplitRegisteredReserveBytes(), L"reserve remains 720p while latched");
+			Assert::AreEqual(size_t(1), module.FallbackLines().size(), L"failure line persists while latched at refused size");
+
+			// Returning to the active 720p size clears splitProblem_ and resets splitTriedReserve_ without replacing.
+			Assert::IsTrue(module.Observe(&host, d720, &demand), L"returning to active 720p succeeds");
+			Assert::AreEqual(1, demand.splitReplaces, L"returning to active 720p needs no ReplaceOwnerFill");
+			Assert::IsTrue(module.FallbackLines().empty(), L"returning to active 720p clears split failure line");
+
+			// 3. Successful atomic growth from 1280x720 -> 3840x2160 (>8x reserve growth, zero unregister gap).
+			Assert::IsTrue(module.Observe(&host, d4k, &demand), L"upward 720p -> 4K growth succeeds");
+			Assert::AreEqual(1, demand.splitRegisters, L"growth never calls RegisterOwnerFill again");
+			Assert::AreEqual(2, demand.splitReplaces, L"4K growth atomically invokes ReplaceOwnerFill");
+			Assert::AreEqual(0, demand.splitUnregisters, L"atomic growth has zero unregister gap");
+			Assert::IsTrue(module.SplitOwnerRegistered(), L"P10 owner remains registered at 4K");
+			Assert::AreEqual(r4k, module.SplitRegisteredReserveBytes(), L"SplitRegisteredReserveBytes grows to 4K");
+			Assert::IsTrue(module.SplitRegisteredReserveBytes() > r720 * uint64_t(8),
+				L"4K P10 reserve exceeds 8x the 720p reserve (eliminates ~9x underestimate)");
+			Assert::IsTrue(memo.HasOwnerFill(kP10GrainSplit, AcquireForm::Gpu), L"memo holds kP10GrainSplit fill at 4K");
+			Assert::AreEqual(r4k, memoSplitReserve(memo), L"memo ahead-planner reserve updated to 4K");
+			Assert::IsTrue(module.FallbackLines().empty(), L"successful 4K growth leaves FallbackLines empty");
+
+			// Same-size 4K repeat is a no-op.
+			Assert::IsTrue(module.Observe(&host, d4k, &demand), L"same 4K size");
+			Assert::AreEqual(2, demand.splitReplaces, L"steady 4K triggers no redundant ReplaceOwnerFill");
+
+			// 4. Detach (want == 0) followed by returning at the EXACT same resolution (4K) is a no-op.
+			module.Forget(&host, &demand);
+			Assert::IsTrue(module.SplitOwnerRegistered(), L"P10 owner stays registered across detach");
+			Assert::AreEqual(0, demand.splitUnregisters, L"detach does not unregister P10 owner");
+			Assert::IsTrue(module.Observe(&host, d4k, &demand), L"returning at the same 4K resolution succeeds");
+			Assert::AreEqual(2, demand.splitReplaces, L"returning at exact same resolution after detach is a no-op");
+			Assert::AreEqual(r4k, module.SplitRegisteredReserveBytes(), L"same-resolution return keeps 4K reserve");
+			Assert::AreEqual(r4k, memoSplitReserve(memo), L"memo ahead-planner reserve stays 4K on same-resolution return");
+
+			// 5. Detach (want == 0) followed by a SMALLER returning resolution (1920x1080) re-baselines cleanly to 1080p.
+			module.Forget(&host, &demand);
+			Assert::IsTrue(module.Observe(&host, d1080, &demand), L"smaller 1080p session after detach succeeds");
+			Assert::AreEqual(1, demand.splitRegisters, L"post-detach re-baseline uses ReplaceOwnerFill, not RegisterOwnerFill");
+			Assert::AreEqual(3, demand.splitReplaces, L"post-detach smaller resolution atomically replaces P10 fill");
+			Assert::AreEqual(0, demand.splitUnregisters, L"post-detach re-baseline has zero unregister gap");
+			Assert::IsTrue(module.SplitOwnerRegistered(), L"P10 owner stays registered after re-baseline");
+			Assert::AreEqual(r1080, module.SplitRegisteredReserveBytes(), L"SplitRegisteredReserveBytes re-baselines cleanly to 1080p");
+			Assert::IsTrue(module.SplitRegisteredReserveBytes() < r4k, L"re-baselined 1080p reserve is strictly smaller than 4K");
+			Assert::IsTrue(memo.HasOwnerFill(kP10GrainSplit, AcquireForm::Gpu), L"memo holds re-baselined 1080p P10 fill");
+			Assert::AreEqual(r1080, memoSplitReserve(memo), L"memo ahead-planner reserve re-baselines cleanly to 1080p");
+			Assert::IsTrue(module.FallbackLines().empty(), L"re-baseline leaves FallbackLines empty");
+
+			// Steady 1080p after re-baseline is a no-op.
+			Assert::IsTrue(module.Observe(&host, d1080, &demand), L"steady 1080p after re-baseline");
+			Assert::AreEqual(3, demand.splitReplaces, L"steady 1080p after re-baseline triggers no extra ReplaceOwnerFill");
 		}
 
 		TEST_METHOD(ModuleDoesNotRetryARefusedRegistrationEveryFrame)
