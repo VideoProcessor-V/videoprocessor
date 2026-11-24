@@ -614,6 +614,13 @@ void hook()
     if (dither_need > 0.5)
         amp = min(amp + max(dn_extra(vec2(pos)), 0.0), 0.5);
     vec3 d = vec3((ign(vec2(pos), frame / 5) - 0.5) * 2.0 * amp);
+    // Exact-code immunity (GEM-W1B V1 MUST-1, S2-H4): an exact output code is
+    // never moved by carried residual or by dither. At amp = 0.5 (e.g. with
+    // dither_need = auto), FP32 rounding of x + d for ign near 1.0 reaches
+    // x + 0.5 and flips floor(x + d + 0.5) by +1 code (~250 px/frame at 4K
+    // 10-bit). Zeroing d here protects both the enabled and disabled branches.
+    vec3 exact_code = vec3(equal(x, floor(x + 0.5)));
+    d = mix(d, vec3(0.0), exact_code);
 
     if (enabled > 0.5) {
         ivec2 state_size = imageSize(RESID);
@@ -653,7 +660,6 @@ void hook()
         // GEM-W1B V1 sigma-delta MUST-1: an exact code is never moved, so the carried residual does not
         // act on it either (r = 0.3 then -0.7 dithered black 16 into 15/17). Where the snap above fired or
         // x is exactly a whole code: no carry in, none out.
-        vec3 exact_code = vec3(equal(x, floor(x + 0.5)));
         r = mix(r, vec3(0.0), exact_code);
 
         // First-order sigma-delta: quantise the error-corrected value, carry
