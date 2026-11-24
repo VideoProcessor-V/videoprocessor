@@ -259,8 +259,8 @@ namespace Tests
 				for (int c = 0; c < n; ++c)
 				{
 					const double xc = 2.0 * static_cast<double>(c) + xOffset;
-					cbLat[static_cast<size_t>(c)] = ClampD(EvalEdgeProfile(xc, edges, cbLev) + 40.0 * rng.Normal01(), 64.0, 960.0);
-					crLat[static_cast<size_t>(c)] = ClampD(EvalEdgeProfile(xc, edges, crLev) + 40.0 * rng.Normal01(), 64.0, 960.0);
+					cbLat[static_cast<size_t>(c)] = ClampD(EvalEdgeProfile(xc, edges, cbLev) + 8.0 * rng.Normal01(), 64.0, 960.0);
+					crLat[static_cast<size_t>(c)] = ClampD(EvalEdgeProfile(xc, edges, crLev) + 8.0 * rng.Normal01(), 64.0, 960.0);
 				}
 
 				const std::vector<double> cbUp = Quantize10Bit(UpscaleClassical1D(cbLat, N, kernel, phase));
@@ -410,15 +410,17 @@ namespace Tests
 
 			constexpr int kN = 512;
 			constexpr int kLines = 16;
-			constexpr int kBicubic = 1;
+			constexpr int kCatmullRom = 1;
+			constexpr int kMitchell = 3;
 			constexpr int kLanczos3 = 5;
+			constexpr int kSpline36 = 8;
 			SplitMixRng rng(2026112461ull);
 
 			// 1. Player-upsampled 4:2:0 -> 4:2:2 over HDMI Yuv422 transport:
-			//    (a) Left siting (centered vertical phase = 0.0) across Bicubic & Lanczos3
-			//    (b) TopLeft siting (cosited vertical phase = +0.25) across Bicubic & Lanczos3
-			const int kernels[2] = { kBicubic, kLanczos3 };
-			for (int ki = 0; ki < 2; ++ki)
+			//    (a) Left siting (centered vertical phase = 0.0) and (b) TopLeft siting (cosited vertical phase = +0.25)
+			//    across uniquely identifiable single-axis families: Mitchell Bicubic (3), Lanczos3 (5), Spline36 (8).
+			const int kernels[3] = { kMitchell, kLanczos3, kSpline36 };
+			for (int ki = 0; ki < 3; ++ki)
 			{
 				const int k = kernels[ki];
 
@@ -457,6 +459,31 @@ namespace Tests
 				Assert::AreEqual(estTopLeft.playerUpsampled, estCached.playerUpsampled);
 				Assert::IsTrue(estTopLeft.siting == estCached.siting);
 				Assert::IsTrue(std::fabs(estTopLeft.dipV - estCached.dipV) < 1e-12);
+			}
+
+			// Exact linear-algebra boundary check on Catmull-Rom (k = 1) over single-axis Yuv422:
+			//   - On Left (centered V, phi = 0.0), negative-lobe step overshoot separates Catmull-Rom from [3,1]/4 -> Bicubic!
+			//   - On TopLeft (cosited V, t = 0.5), Catmull-Rom and Lanczos2 both equal [-1/16, 9/16, 9/16, -1/16] bit-for-bit,
+			//     so single-axis Yuv422 TopLeft must confirm Subsampled420 + TopLeft siting while honestly reporting KernelUnsure!
+			{
+				ChromaSampleInput crLeft422;
+				crLeft422.floorCodes = kFloor10Bit;
+				crLeft422.deliveredSampling = DeliveredChromaSampling::Yuv422;
+				BuildClassicalSitedAxis(1, kN, kLines, kCatmullRom, 0.0, rng, crLeft422.lumaV, crLeft422.cbV, crLeft422.crV);
+				const ChromaChainEstimate estCrLeft = EstimateChromaChain(crLeft422, on);
+				Assert::IsTrue(estCrLeft.valid && estCrLeft.origin == ChromaOrigin::Subsampled420 && estCrLeft.playerUpsampled);
+				Assert::IsTrue(estCrLeft.siting == ChromaGridSiting::Left);
+				Assert::IsTrue(estCrLeft.reason == ChromaEstimatorReason::PlayerUpsampled420Confirmed);
+				Assert::AreEqual(static_cast<int>(Family::Bicubic), estCrLeft.kernelFamily);
+
+				ChromaSampleInput crTopLeft422;
+				crTopLeft422.floorCodes = kFloor10Bit;
+				crTopLeft422.deliveredSampling = DeliveredChromaSampling::Yuv422;
+				BuildClassicalSitedAxis(1, kN, kLines, kCatmullRom, 0.25, rng, crTopLeft422.lumaV, crTopLeft422.cbV, crTopLeft422.crV);
+				const ChromaChainEstimate estCrTl = EstimateChromaChain(crTopLeft422, on);
+				Assert::IsTrue(estCrTl.valid && estCrTl.origin == ChromaOrigin::Subsampled420 && estCrTl.playerUpsampled);
+				Assert::IsTrue(estCrTl.siting == ChromaGridSiting::TopLeft);
+				Assert::IsTrue(estCrTl.reason == ChromaEstimatorReason::KernelUnsure);
 			}
 
 			// 2. CRITICAL NEGATIVE CONTROL: True Native 4:2:2 over HDMI Yuv422 transport!

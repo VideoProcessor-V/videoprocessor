@@ -114,27 +114,49 @@ namespace Tests
 			std::vector<double>& outCode10)
 		{
 			std::vector<double> srcLin(static_cast<size_t>(nIn), 0.0);
-			const double yShadowBase = (tr == C::HdrTransfer::Pq) ? 0.0018 : 0.012;   // ~18 nits PQ / dark HLG shadow
-			const double yShadowTex = (tr == C::HdrTransfer::Pq) ? 0.00055 : 0.0035;  // fine shadow detail (unclipped)
-			const double ySpecHi = (tr == C::HdrTransfer::Pq) ? 0.68 : 0.72;          // ~6800 nits PQ / bright HLG specular
+			const double yShadowBase = (tr == C::HdrTransfer::Pq) ? 0.0028 : 0.015;  // ~28 nits PQ / dark HLG shadow (> code 64)
+			const double yShadowTex = (tr == C::HdrTransfer::Pq) ? 0.00055 : 0.0035; // fine shadow detail (unclipped)
+			const double yMidLit = (tr == C::HdrTransfer::Pq) ? 0.095 : 0.11;        // lit pedestal (> max Lanczos3 negative sidelobe)
+			const double ySpecHi = 0.72;                                             // ~7200 nits PQ / bright HLG specular
 
-			const int period = (std::max)(24, nIn / 14);
-			const int hiWidth = (std::max)(8, period / 4);
+			const int period = (std::max)(36, nIn / 12);
+			const int ramp = 6;
+			const int hiWidth = (std::max)(14, period / 3);
 			const int phaseJit = static_cast<int>(rng.NextU64() % static_cast<uint64_t>((std::max)(1, period / 2)));
 
 			for (int i = 0; i < nIn; ++i)
 			{
 				const int pos = (i + phaseJit) % period;
-				if (pos < hiWidth)
+				if (pos < ramp)
 				{
-					// Specular highlight plateau (pure highlight quantization variance + high-contrast step boundary).
-					srcLin[static_cast<size_t>(i)] = ySpecHi + 0.002 * std::sin(0.11 * static_cast<double>(i));
+					// Smooth log-light optical transition from dark shadow into lit zone so Lanczos3 never clips <= 0.
+					const double u = (static_cast<double>(pos) + 0.5) / static_cast<double>(ramp);
+					const double w = 0.5 - 0.5 * std::cos(C::kPi * u);
+					srcLin[static_cast<size_t>(i)] = std::exp(
+						std::log(yShadowBase) + (std::log(yMidLit) - std::log(yShadowBase)) * w);
+				}
+				else if (pos < ramp + hiWidth)
+				{
+					// Sharp 1-px high-contrast edges between lit pedestal and specular highlight (unclipped ringing + strong OETF curvature).
+					const int sub = (pos - ramp) % 9;
+					const double target = (sub < 4)
+						? (ySpecHi + 0.015 * rng.Normal01())
+						: (yMidLit + 0.008 * rng.Normal01());
+					srcLin[static_cast<size_t>(i)] = C::ClampD(target, 0.085, 0.85);
+				}
+				else if (pos < 2 * ramp + hiWidth)
+				{
+					const double u = (static_cast<double>(pos - (ramp + hiWidth)) + 0.5) / static_cast<double>(ramp);
+					const double w = 0.5 - 0.5 * std::cos(C::kPi * u);
+					srcLin[static_cast<size_t>(i)] = std::exp(
+						std::log(yMidLit) + (std::log(yShadowBase) - std::log(yMidLit)) * w);
 				}
 				else
 				{
-					// Rich bandlimited shadow/midtone texture well above dark-toe quantization floor.
+					// Rich bandlimited dark-shadow texture strictly above limited-range code 64.
+					const double minShadow = (tr == C::HdrTransfer::Pq) ? 0.0016 : 0.008;
 					const double fine = yShadowTex * rng.Normal01();
-					srcLin[static_cast<size_t>(i)] = C::ClampD(yShadowBase + fine, 0.0004, 0.95);
+					srcLin[static_cast<size_t>(i)] = C::ClampD(yShadowBase + fine, minShadow, 0.04);
 				}
 			}
 

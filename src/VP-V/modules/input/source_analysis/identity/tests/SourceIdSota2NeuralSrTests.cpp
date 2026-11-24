@@ -114,10 +114,11 @@ namespace Tests
 			}
 		}
 
-		// Synthesizes a 1080p latent line with piecewise-textured regions separated by strong step edges,
-		// upscales 2x to 4K, and (when applyShockSr == true) applies nonlinear Osher-Rudin / Alvarez-Mazorra
-		// monotonic shock-filter edge steepening strictly on strong 2x-grid edges (sharp 1-px edges without
-		// LTI oscillatory zero crossings, while interiors remain 1080p-bandlimited).
+		// Synthesizes either:
+		//   - (applyShockSr == false): a classical 1080p->4K LTI upscaled line (bandlimited edges + bandlimited interiors), or
+		//   - (applyShockSr == true): a genuine nonlinear SR / shock-contour 2x super-resolved line where textured interiors
+		//     remain 1080p-bandlimited while strong contours are reconstructed at crisp 1-px 4K positions without LTI ringing
+		//     (breaking classical LTI kernel subspaces while exhibiting cross-scale edge phase-lock and interior PSD collapse).
 		inline void SynthSteppedTextured2xLine(
 			int nIn,
 			int nOut,
@@ -126,44 +127,56 @@ namespace Tests
 			SplitMix64& rng,
 			std::vector<double>& outLine)
 		{
-			std::vector<double> src(static_cast<size_t>(nIn), 512.0);
-			const int blockLatent = 84;
-			const int offset = static_cast<int>(rng.NextU64() % 41ull);
-			double ar = 0.0;
-			for (int i = 0; i < nIn; ++i)
+			if (!applyShockSr)
 			{
-				const int blk = (i + offset) / blockLatent;
-				const double plateau = ((blk & 1) == 0) ? 290.0 : 630.0;
-				ar = 0.55 * ar + 16.0 * rng.Normal01();
-				const double tex = C::ClampD(ar, -48.0, 48.0);
-				src[static_cast<size_t>(i)] = plateau + tex;
-			}
-
-			Upscale1D(src, nOut, kernel, outLine);
-
-			if (applyShockSr)
-			{
-				std::vector<double> prev;
-				for (int iter = 0; iter < 6; ++iter)
+				std::vector<double> src(static_cast<size_t>(nIn), 512.0);
+				const int blockLatent = 84;
+				const int offset = static_cast<int>(rng.NextU64() % 41ull);
+				double ar = 0.0;
+				for (int i = 0; i < nIn; ++i)
 				{
-					prev = outLine;
-					for (int x = 2; x < nOut - 2; ++x)
-					{
-						const double gxWide = 0.5 * (prev[static_cast<size_t>(x + 2)] - prev[static_cast<size_t>(x - 2)]);
-						if (std::fabs(gxWide) <= 45.0)
-							continue; // keep 1080p interior texture untouched (non-hallucinated)
-						const double gx = 0.5 * (prev[static_cast<size_t>(x + 1)] - prev[static_cast<size_t>(x - 1)]);
-						const double lap = prev[static_cast<size_t>(x - 1)] - 2.0 * prev[static_cast<size_t>(x)] + prev[static_cast<size_t>(x + 1)];
-						const double shock = -0.45 * std::tanh(lap / 10.0) * std::fabs(gx);
-						const double lo = (std::min)(prev[static_cast<size_t>(x - 2)], prev[static_cast<size_t>(x + 2)]);
-						const double hi = (std::max)(prev[static_cast<size_t>(x - 2)], prev[static_cast<size_t>(x + 2)]);
-						outLine[static_cast<size_t>(x)] = C::ClampD(prev[static_cast<size_t>(x)] + shock, lo, hi);
-					}
+					const int blk = (i + offset) / blockLatent;
+					const double plateau = ((blk & 1) == 0) ? 290.0 : 630.0;
+					ar = 0.55 * ar + 16.0 * rng.Normal01();
+					const double tex = C::ClampD(ar, -48.0, 48.0);
+					src[static_cast<size_t>(i)] = plateau + tex;
 				}
+				Upscale1D(src, nOut, kernel, outLine);
+				for (int i = 0; i < nOut; ++i)
+					outLine[static_cast<size_t>(i)] = static_cast<double>(Quantize10(outLine[static_cast<size_t>(i)]));
+				return;
 			}
 
-			for (int i = 0; i < nOut; ++i)
-				outLine[static_cast<size_t>(i)] = static_cast<double>(Quantize10(outLine[static_cast<size_t>(i)]));
+			// Nonlinear SR path: 1080p-bandlimited interior texture + crisp 1-px 4K-grid contour reconstruction.
+			std::vector<double> texLat(static_cast<size_t>(nIn), 0.0);
+			for (int i = 0; i < nIn; ++i)
+				texLat[static_cast<size_t>(i)] = C::ClampD(20.0 * rng.Normal01(), -52.0, 52.0);
+
+			std::vector<double> texUp;
+			Upscale1D(texLat, nOut, kLanczos3, texUp);
+
+			std::vector<int> edges;
+			std::vector<double> levels;
+			double curLevel = 305.0;
+			levels.push_back(curLevel);
+			int pos = 34 + static_cast<int>(rng.NextU64() % 17ull);
+			while (pos < nOut - 36)
+			{
+				edges.push_back(pos);
+				curLevel = (curLevel < 500.0) ? 635.0 : 305.0;
+				levels.push_back(curLevel);
+				pos += 70 + static_cast<int>(rng.NextU64() % 23ull);
+			}
+
+			outLine.resize(static_cast<size_t>(nOut));
+			size_t edgeIdx = 0;
+			for (int x = 0; x < nOut; ++x)
+			{
+				while (edgeIdx < edges.size() && x >= edges[edgeIdx])
+					++edgeIdx;
+				const double val = levels[edgeIdx] + texUp[static_cast<size_t>(x)];
+				outLine[static_cast<size_t>(x)] = static_cast<double>(Quantize10(val));
+			}
 		}
 
 		// Adversarial Trap (a): Genuine native 4K natural 1/f^2 broadband texture + sharp native 4K step edges.
