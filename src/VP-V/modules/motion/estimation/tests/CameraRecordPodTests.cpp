@@ -175,13 +175,14 @@ namespace VideoProcessorTest
 			}
 		}
 
-		// GEM-137 (AB1#1): CRD2 carries verdictFlags, layerFlags, finalRefineCells, dyn/water/static/two-layer
-		// signals, layerRisk, haveObjectLayer and objectLayer while still decoding legacy 366-byte CRD1 payloads
+		// GEM-137 (AB1#1) + CE-WATER / C4: CRD2 carries verdictFlags, layerFlags, finalRefineCells, dyn/water/static/two-layer
+		// signals, layerRisk, haveObjectLayer, objectLayer, plus the 6 appended CE-WATER/C4 signal doubles (dynLaplacian,
+		// dynRhoTemp, rawShare, shearEnergy, dipoleTB, dipoleLR; total 595 B) while still decoding legacy 366-byte CRD1 payloads
 		// and refusing corrupt magic, truncated CRD2 tails, or out-of-range objectLayer.type without touching target.
 		TEST_METHOD(Crd2PreservesVerdictFlagsSignalsAndDecodesLegacyCrd1)
 		{
 			constexpr size_t kCrd1Bytes = 366;
-			constexpr size_t kCrd2Bytes = 547;
+			constexpr size_t kCrd2Bytes = 595;
 			constexpr size_t kObjectLayerTypeOffset = 454;
 
 			CameraMotion a = PodRec(108);
@@ -193,7 +194,13 @@ namespace VideoProcessorTest
 			a.signals.dynTemporal = 0.7125;
 			a.signals.dynSpatial = 0.8375;
 			a.signals.dynField = 0.4375;
+			a.signals.dynLaplacian = 0.5625;
+			a.signals.dynRhoTemp = -0.375;
 			a.signals.waterExcludedShare = 0.3125;
+			a.signals.rawShare = 0.8125;
+			a.signals.shearEnergy = 1.625;
+			a.signals.dipoleTB = 0.9375;
+			a.signals.dipoleLR = 0.28125;
 			a.signals.staticRing = 0.775;
 			a.signals.staticFit = 0.225;
 			a.signals.border = 0.825;
@@ -227,6 +234,12 @@ namespace VideoProcessorTest
 			b.seq = 55555u;
 			b.verdictFlags = 0u;
 			b.signals.border = 0.1;
+			b.signals.dynLaplacian = 0.99;
+			b.signals.dynRhoTemp = 0.99;
+			b.signals.rawShare = 0.01;
+			b.signals.shearEnergy = 9.0;
+			b.signals.dipoleTB = 9.0;
+			b.signals.dipoleLR = 9.0;
 			b.haveObjectLayer = false;
 			Assert::IsTrue(CameraLink::DecodeRecordPod(buf.data(), n, b), L"CRD2 decode succeeds");
 			Assert::AreEqual(a.seq, b.seq);
@@ -239,7 +252,13 @@ namespace VideoProcessorTest
 			Assert::AreEqual(a.signals.dynTemporal, b.signals.dynTemporal);
 			Assert::AreEqual(a.signals.dynSpatial, b.signals.dynSpatial);
 			Assert::AreEqual(a.signals.dynField, b.signals.dynField);
+			Assert::AreEqual(a.signals.dynLaplacian, b.signals.dynLaplacian);
+			Assert::AreEqual(a.signals.dynRhoTemp, b.signals.dynRhoTemp);
 			Assert::AreEqual(a.signals.waterExcludedShare, b.signals.waterExcludedShare);
+			Assert::AreEqual(a.signals.rawShare, b.signals.rawShare);
+			Assert::AreEqual(a.signals.shearEnergy, b.signals.shearEnergy);
+			Assert::AreEqual(a.signals.dipoleTB, b.signals.dipoleTB);
+			Assert::AreEqual(a.signals.dipoleLR, b.signals.dipoleLR);
 			Assert::AreEqual(a.signals.staticRing, b.signals.staticRing);
 			Assert::AreEqual(a.signals.staticFit, b.signals.staticFit);
 			Assert::AreEqual(a.signals.border, b.signals.border);
@@ -290,7 +309,13 @@ namespace VideoProcessorTest
 			Assert::AreEqual(defaults.signals.dynTemporal, legacy.signals.dynTemporal);
 			Assert::AreEqual(defaults.signals.dynSpatial, legacy.signals.dynSpatial);
 			Assert::AreEqual(defaults.signals.dynField, legacy.signals.dynField);
+			Assert::AreEqual(defaults.signals.dynLaplacian, legacy.signals.dynLaplacian);
+			Assert::AreEqual(defaults.signals.dynRhoTemp, legacy.signals.dynRhoTemp);
 			Assert::AreEqual(defaults.signals.waterExcludedShare, legacy.signals.waterExcludedShare);
+			Assert::AreEqual(defaults.signals.rawShare, legacy.signals.rawShare);
+			Assert::AreEqual(defaults.signals.shearEnergy, legacy.signals.shearEnergy);
+			Assert::AreEqual(defaults.signals.dipoleTB, legacy.signals.dipoleTB);
+			Assert::AreEqual(defaults.signals.dipoleLR, legacy.signals.dipoleLR);
 			Assert::AreEqual(defaults.signals.staticRing, legacy.signals.staticRing);
 			Assert::AreEqual(defaults.signals.staticFit, legacy.signals.staticFit);
 			Assert::AreEqual(defaults.signals.border, legacy.signals.border);
@@ -308,6 +333,8 @@ namespace VideoProcessorTest
 			// Same-input negative control (Rule 3): prove legacy CRD1 loses v2 state that CRD2 preserves.
 			Assert::AreNotEqual(a.verdictFlags, legacy.verdictFlags, L"CRD1 drops verdictFlags");
 			Assert::AreNotEqual(a.signals.waterExcludedShare, legacy.signals.waterExcludedShare, L"CRD1 drops waterExcludedShare");
+			Assert::AreNotEqual(a.signals.dynLaplacian, legacy.signals.dynLaplacian, L"CRD1 drops dynLaplacian");
+			Assert::AreNotEqual(a.signals.shearEnergy, legacy.signals.shearEnergy, L"CRD1 drops shearEnergy");
 			Assert::AreNotEqual(a.haveObjectLayer, legacy.haveObjectLayer, L"CRD1 drops objectLayer");
 
 			// (c) Negative controls: corrupt magic, truncated CRD2/CRD1 payloads, and out-of-range objectLayer.type
@@ -320,6 +347,8 @@ namespace VideoProcessorTest
 				s.layerFlags = 0xAAu;
 				s.finalRefineCells = 999u;
 				s.signals.waterExcludedShare = 0.99;
+				s.signals.dynLaplacian = 0.44;
+				s.signals.shearEnergy = 2.25;
 				s.signals.border = 0.125;
 				s.layerRisk = 0.77;
 				s.haveObjectLayer = true;
@@ -335,6 +364,8 @@ namespace VideoProcessorTest
 				Assert::AreEqual<uint8_t>(0xAAu, m.layerFlags, L"sentinel layerFlags untouched");
 				Assert::AreEqual<uint32_t>(999u, m.finalRefineCells, L"sentinel finalRefineCells untouched");
 				Assert::AreEqual(0.99, m.signals.waterExcludedShare, L"sentinel waterExcludedShare untouched");
+				Assert::AreEqual(0.44, m.signals.dynLaplacian, L"sentinel dynLaplacian untouched");
+				Assert::AreEqual(2.25, m.signals.shearEnergy, L"sentinel shearEnergy untouched");
 				Assert::AreEqual(0.125, m.signals.border, L"sentinel border untouched");
 				Assert::AreEqual(0.77, m.layerRisk, L"sentinel layerRisk untouched");
 				Assert::IsTrue(m.haveObjectLayer, L"sentinel haveObjectLayer untouched");
@@ -353,8 +384,8 @@ namespace VideoProcessorTest
 				assertSentinelUntouched(target);
 			}
 
-			// Truncated CRD2: 1 byte short (546 B) AND exact CRD1 length (366 B) with CRD2 magic
-			for (size_t truncLen : { kCrd2Bytes - 1, kCrd1Bytes })
+			// Truncated CRD2: 1 byte short (594 B), pre-CE-WATER CRD2 length (547 B), AND exact CRD1 length (366 B) with CRD2 magic
+			for (size_t truncLen : { kCrd2Bytes - 1, size_t(547), kCrd1Bytes })
 			{
 				CameraMotion target = makeSentinel();
 				Assert::IsFalse(CameraLink::DecodeRecordPod(buf.data(), truncLen, target), L"truncated CRD2 refused");

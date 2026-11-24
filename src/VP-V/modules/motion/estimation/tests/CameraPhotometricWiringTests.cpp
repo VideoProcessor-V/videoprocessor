@@ -163,20 +163,27 @@ namespace VideoProcessorTest
 
 		TEST_METHOD(AFallBackKeepsTheVectorModelAndTheRecord)
 		{
-			// The luma pair moves the OTHER way (a pan the vectors do not show): the verification refuses it and the vector model stays.
+			// The luma pair moves the OTHER way (a pan the vectors do not show): the verification refuses the warp,
+			// keeps the vector model bit-for-bit, and visibly demotes the record via kVerdictPhotometricDisagreement (CE-WATER-C3).
 			const Frame hd{ 1920, 1080 };
 			const double tx = 6.0, ty = -2.0;
 			const Field f = PanField(hd, tx, ty);
 			const CameraMotion vectorOnly = FitOnce(f, nullptr);
+			Assert::IsTrue(vectorOnly.valid && ReasonUsable(vectorOnly.reason) && vectorOnly.confidence >= 0.5,
+				L"same-input negative control: vector-only fit is usable without photometric check");
 			const LumaPair lp(hd, 2.0, -tx, -ty, 33);
 			PhotometricInput photo;
 			photo.luma = lp.View();
 			const CameraMotion r = FitOnce(f, &photo);
 			Assert::IsTrue(photo.outcome == PhotometricOutcome::FellBack, (L"the refine fell back, outcome " + std::wstring(1, L'0' + int(photo.outcome))).c_str());
 			Assert::IsTrue(photo.result.status != RefineStatus::Refined, L"its own status says why (not refined)");
+			Assert::IsTrue(vectorOnly.params.type == r.params.type, L"the vector model type is kept");
 			for (int k = 0; k < 9; ++k)
 				Assert::AreEqual(vectorOnly.params.h[k], r.params.h[k], L"the vector model is kept, bit for bit");
-			Assert::IsTrue(Pod(vectorOnly) == Pod(r), L"and so is the whole record");
+			Assert::IsTrue(r.reason == Reason::Ambiguous, L"opposite-direction luma disagreement demotes reason to Ambiguous");
+			Assert::IsTrue((r.verdictFlags & kVerdictPhotometricDisagreement) != 0, L"kVerdictPhotometricDisagreement is visibly set");
+			Assert::IsFalse(ReasonUsable(r.reason), L"demoted record is not usable");
+			Assert::IsTrue(r.confidence < 0.5, L"demoted confidence drops below 0.5");
 		}
 
 		TEST_METHOD(WithoutAPhotometricInputOrWithASkipTheRecordIsByteIdentical)
@@ -196,19 +203,51 @@ namespace VideoProcessorTest
 
 		TEST_METHOD(TheVerdictStubReturnsTheRefinedResultUnchanged)
 		{
+			// 1. Agreeing sub-3-sigma refine (correctionPx = 0.3 <= 3 * 0.25 = 0.75): passes through unchanged.
+			const Params vecModel = R3Scenes::Translation(1.5, -0.5);
 			RefineResult in;
 			in.status = RefineStatus::Refined;
 			in.model = R3Scenes::Translation(1.25, -0.5);
 			in.correctionPx = 0.3;
 			in.residualBefore = 4.0;
 			in.residualAfter = 2.0;
-			const RefineResult out = PhotometricVerdict(R3Scenes::Translation(1.5, -0.5), in, 0.25);
+			bool disagreed = true;
+			const RefineResult out = PhotometricVerdict(vecModel, in, 0.25, &disagreed);
+			Assert::IsFalse(disagreed, L"agreeing refine does not flag disagreement");
 			Assert::IsTrue(out.status == in.status);
 			for (int k = 0; k < 9; ++k)
 				Assert::AreEqual(in.model.h[k], out.model.h[k]);
 			Assert::AreEqual(in.correctionPx, out.correctionPx);
 			Assert::AreEqual(in.residualBefore, out.residualBefore);
 			Assert::AreEqual(in.residualAfter, out.residualAfter);
+
+			// 2. Live PhotometricVerdict (CE-WATER-C3): > 3-sigma geometric disagreement refuses the warp and restores vecModel.
+			RefineResult farIn = in;
+			farIn.model = R3Scenes::Translation(3.0, -0.5);
+			farIn.correctionPx = 1.5;   // > 3 * 0.25 = 0.75 px
+			bool farDisagreed = false;
+			const RefineResult farOut = PhotometricVerdict(vecModel, farIn, 0.25, &farDisagreed);
+			Assert::IsTrue(farDisagreed, L"> 3-sigma geometric correction flags disagreement");
+			Assert::IsTrue(farOut.status == RefineStatus::FellBackTooFar, L"discordant warp demoted to FellBackTooFar");
+			for (int k = 0; k < 9; ++k)
+				Assert::AreEqual(vecModel.h[k], farOut.model.h[k], L"vector model restored bit-for-bit on geometric disagreement");
+
+			// 3. Brightness-constancy disagreement on FellBackNoImprovement above gradient floor vs quantization-floor negative control.
+			RefineResult brightFail;
+			brightFail.status = RefineStatus::FellBackNoImprovement;
+			brightFail.model = vecModel;
+			brightFail.residualBefore = 12.0;
+			brightFail.residualAfter = 14.0;   // > kPhotometricBrightnessFloorCodes2 (8.0)
+			bool brightDisagreed = false;
+			(void)PhotometricVerdict(vecModel, brightFail, 0.25, &brightDisagreed);
+			Assert::IsTrue(brightDisagreed, L"brightness-constancy failure flags disagreement");
+
+			RefineResult quantNoise = brightFail;
+			quantNoise.residualBefore = 0.2;
+			quantNoise.residualAfter = 0.25;   // <= kPhotometricQuantFloorCodes2 (1.125)
+			bool quantDisagreed = true;
+			(void)PhotometricVerdict(vecModel, quantNoise, 0.25, &quantDisagreed);
+			Assert::IsFalse(quantDisagreed, L"quantization-floor rounding wobble must not false-trigger disagreement");
 		}
 
 		TEST_METHOD(EachOutcomeHasItsCounterAndTheLineAndDecisionsShowThem)
