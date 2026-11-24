@@ -3159,6 +3159,107 @@ namespace Tests
 				Assert::IsTrue(outMseM < baseMseM * 0.35,
 					L"W3 compression-softened sharp edge must achieve strong M-band detail recovery (>= 65% MSE drop)");
 			}
+
+			// =========================================================================
+			// 18. Opus Repeat Audit LOW-5: Undersized faceMask Engages Visible Stand-In
+			//     and Fails Closed Conservatively on Out-of-Range Trailing Cells
+			// =========================================================================
+			TEST_METHOD(OpusLow5UndersizedFaceMaskEngagesVisibleStandInAndFailsClosed)
+			{
+				const int w = 64;
+				const int h = 64;
+				const int cellPx = 16;
+				const int cw = w / cellPx; // 4
+				const int ch = h / cellPx; // 4 -> 16 cells
+				const ActiveRect full = ActiveRect::Full(w, h);
+				const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+
+				TdV2Plane master(w, h, 450.0);
+				TdV2Plane curY(w, h, 450.0);
+				for (int y = 0; y < h; ++y)
+				{
+					for (int x = 0; x < w; ++x)
+					{
+						const double base = 450.0 + 36.0 * std::cos(2.0 * kPi * (x + 0.5) / 32.0) * std::cos(2.0 * kPi * (y + 0.5) / 32.0);
+						master.at(x, y) = base;
+						curY.at(x, y) = base + 10.0; // Coherent compression bias across all cells 0..15
+					}
+				}
+				const TdV2Plane peakPrev = AddCodingError(master, 0.5, 5101u);
+				const TdV2Plane peakNext = AddCodingError(master, 0.5, 5102u);
+
+				const Config cfg = MakePreset(Preset::Reference, Mode::On);
+				FrameProcessInput baseIn;
+				baseIn.seq = 301;
+				baseIn.receivedY = curY;
+				baseIn.hasCleanSplit = true;
+				baseIn.cleanY = curY;
+				baseIn.activeRect = full;
+				baseIn.prevPeak = { &peakPrev, &stillMf, false };
+				baseIn.nextPeak = { &peakNext, &stillMf, false };
+				baseIn.hasStepPrior = true;
+				baseIn.estimatedStepDelta = 24.0;
+				baseIn.deadZonePhi = kDeadZonePhiInter;
+				baseIn.zeroCoeffFraction = 0.35;
+
+				// Mandatory Same-Input Negative Control (Rule 3): faceMask == nullptr MUST modify trailing cells 1..15!
+				TdV2ReferenceEngine engUnmasked(cfg);
+				StandInRegistry regUnmasked;
+				const FrameProcessResult resUnmasked = engUnmasked.ProcessFrame(baseIn, &regUnmasked);
+				AssertAllFinite(resUnmasked.outputY, L"Negative control unmasked outputY must be finite");
+				Assert::IsFalse(regUnmasked.IsActive(StandInKind::FaceNonRigidMask),
+					L"Negative control unmasked run must not engage FaceNonRigidMask");
+				Assert::IsFalse(regUnmasked.IsActive(StandInKind::FaceMaskSizeMismatch),
+					L"Negative control unmasked run must not engage FaceMaskSizeMismatch");
+				Assert::AreEqual(static_cast<size_t>(0u), resUnmasked.faceMaskedCells);
+
+				double maxTrailingUnmaskedDelta = 0.0;
+				for (int y = 0; y < h; ++y)
+				{
+					for (int x = 0; x < w; ++x)
+					{
+						if (x < cellPx && y < cellPx)
+							continue; // Cell 0
+						maxTrailingUnmaskedDelta = (std::max)(maxTrailingUnmaskedDelta, std::fabs(resUnmasked.outputY.at(x, y) - curY.at(x, y)));
+					}
+				}
+				Assert::IsTrue(maxTrailingUnmaskedDelta > 0.5,
+					L"Negative control: trailing cells 1..15 with faceMask==nullptr MUST receive real non-zero blending delta (> 0.5)");
+
+				// Undersized non-empty faceMask (length 1 < 16, missing cells 1..15):
+				// MUST visibly engage FaceNonRigidMask AND conservatively fail closed (delta == 0) on trailing cells 1..15!
+				const std::vector<uint8_t> undersizedFaceMask{ 0u };
+				FrameProcessInput undersizedIn = baseIn;
+				undersizedIn.faceMask = &undersizedFaceMask;
+
+				TdV2ReferenceEngine engUndersized(cfg);
+				StandInRegistry regUndersized;
+				const FrameProcessResult resUndersized = engUndersized.ProcessFrame(undersizedIn, &regUndersized);
+				AssertAllFinite(resUndersized.outputY, L"Undersized faceMask outputY must be finite");
+
+				Assert::IsTrue(regUndersized.IsActive(StandInKind::FaceNonRigidMask),
+					L"Opus LOW-5: undersized faceMask MUST visibly engage StandInKind::FaceNonRigidMask");
+				Assert::IsTrue(regUndersized.IsActive(StandInKind::FaceMaskSizeMismatch),
+					L"Opus LOW-5: undersized faceMask MUST visibly engage StandInKind::FaceMaskSizeMismatch");
+				Assert::AreEqual(w, resUndersized.outputY.w);
+				Assert::AreEqual(h, resUndersized.outputY.h);
+
+				for (int y = 0; y < h; ++y)
+				{
+					for (int x = 0; x < w; ++x)
+					{
+						if (x < cellPx && y < cellPx)
+							continue; // Trailing cells 1..15 only
+						Assert::AreEqual(curY.at(x, y), resUndersized.outputY.at(x, y), 0.0,
+							L"Opus LOW-5: undersized faceMask MUST conservatively force trailing cells 1..15 delta == 0 (output == received)");
+						if (!resUndersized.outputClean.Empty())
+						{
+							Assert::AreEqual(curY.at(x, y), resUndersized.outputClean.at(x, y), 0.0,
+								L"Opus LOW-5: undersized faceMask MUST conservatively force trailing cells 1..15 outputClean == received");
+						}
+					}
+				}
+			}
 		};
 	}
 }

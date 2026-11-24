@@ -318,24 +318,34 @@ namespace Tests
 				Assert::AreEqual(1, causalEmit[50]);
 				Assert::AreEqual(static_cast<uint64_t>(0), detCausal.DroppedRecordCount());
 
-				// Direct ClassifyLatestCausal coverage (R4 L1): emits latest buffered seq provisionally once,
-				// suppresses repeat duplicate, and lets FlushEndOfStream emit only the remaining un-emitted seq!
+				// Direct ClassifyLatestCausal coverage (R4 L1 + Opus LOW-2 monotonic flush):
+				// flushes older buffered seq 101 into flushedBeforeCut BEFORE emitting latest seq 102 provisionally once
+				// (strictly monotonic {101, 102}), suppresses repeat duplicates, and leaves FlushEndOfStream empty!
 				{
 					TdV2FrameRoleDetector detLatest(2);
 					Assert::IsFalse(detLatest.PushAndClassify(MakeEv(101, 0.94), &reg).produced);
 					Assert::IsFalse(detLatest.PushAndClassify(MakeEv(102, 0.52), &reg).produced);
 					const auto lc1 = detLatest.ClassifyLatestCausal(&reg);
+					Assert::AreEqual(static_cast<size_t>(1), lc1.flushedBeforeCut.size(),
+						L"ClassifyLatestCausal must flush older buffered seq 101 before emitting seq 102");
+					Assert::IsTrue(lc1.flushedBeforeCut[0].produced,
+						L"Flushed older seq 101 must be produced");
+					Assert::AreEqual(static_cast<uint64_t>(101), lc1.flushedBeforeCut[0].record.seq,
+						L"Flushed older record must be seq 101 (strictly monotonic before 102)");
+					Assert::IsTrue((lc1.flushedBeforeCut[0].record.validityBits & QualityPattern::kProvisional) != 0,
+						L"Flushed older seq 101 must set kProvisional visibly");
 					Assert::IsTrue(lc1.produced, L"ClassifyLatestCausal must emit latest buffered frame once");
 					Assert::IsTrue((lc1.record.validityBits & QualityPattern::kProvisional) != 0,
 						L"ClassifyLatestCausal must set kProvisional visibly");
 					Assert::AreEqual(static_cast<uint64_t>(102), lc1.record.seq);
-					Assert::IsFalse(detLatest.ClassifyLatestCausal(&reg).produced,
+					const auto lc2 = detLatest.ClassifyLatestCausal(&reg);
+					Assert::IsFalse(lc2.produced,
 						L"Repeated ClassifyLatestCausal must not duplicate already-emitted seq 102");
+					Assert::IsTrue(lc2.flushedBeforeCut.empty(),
+						L"Repeated ClassifyLatestCausal must not re-flush already-emitted seq 101");
 					const auto lcEos = detLatest.FlushEndOfStream(&reg);
-					Assert::AreEqual(static_cast<size_t>(1), lcEos.size(),
-						L"FlushEndOfStream after ClassifyLatestCausal must emit only remaining seq 101");
-					Assert::IsTrue(lcEos[0].produced);
-					Assert::AreEqual(static_cast<uint64_t>(101), lcEos[0].record.seq);
+					Assert::IsTrue(lcEos.empty(),
+						L"FlushEndOfStream after monotonic ClassifyLatestCausal must be empty (0 remaining un-emitted frames)");
 					Assert::IsFalse(detLatest.ClassifyLatestCausal(&reg).produced,
 						L"ClassifyLatestCausal after FlushEndOfStream must return produced == false");
 					Assert::AreEqual(static_cast<uint64_t>(0), detLatest.DroppedRecordCount());
@@ -626,17 +636,26 @@ namespace Tests
 				//                  across sustained streaming beyond kMaxWindowFrames; exact-once delivery with DroppedRecordCount()==0!
 				StandInRegistry reg;
 
-				// ---- Sub-case A1: ClassifyLatestCausal -> PushAndClassify(4, 5) duplicate bug ----
+				// ---- Sub-case A1: ClassifyLatestCausal -> PushAndClassify(4, 5) duplicate & monotonic-order bug ----
 				{
 					TdV2FrameRoleDetector det(2);
 					std::map<uint64_t, int> emitCount;
+					std::vector<uint64_t> emittedOrder;
 					auto collect = [&](const FrameRoleDecision& d)
 					{
 						for (const auto& fl : d.flushedBeforeCut)
+						{
 							if (fl.produced)
+							{
 								++emitCount[fl.record.seq];
+								emittedOrder.push_back(fl.record.seq);
+							}
+						}
 						if (d.produced)
+						{
 							++emitCount[d.record.seq];
+							emittedOrder.push_back(d.record.seq);
+						}
 					};
 
 					// Push seq 1, 2, 3 with lead=2 -> seq 1 emitted, seq 2 & 3 buffered.
@@ -651,6 +670,7 @@ namespace Tests
 					collect(d3);
 
 					// Provisionally emit latest buffered frame (seq=3) causally!
+					// Older un-emitted buffered frame seq=2 MUST flush into flushedBeforeCut before seq=3.
 					const auto lc = det.ClassifyLatestCausal(&reg);
 					Assert::IsTrue(lc.produced, L"ClassifyLatestCausal must emit seq=3 provisionally once");
 					Assert::AreEqual(static_cast<uint64_t>(3), lc.record.seq);
@@ -672,10 +692,14 @@ namespace Tests
 
 					Assert::AreEqual(static_cast<size_t>(5), emitCount.size(),
 						L"Exact-once set {1,2,3,4,5} must contain all 5 sequences");
+					Assert::AreEqual(static_cast<size_t>(5), emittedOrder.size(),
+						L"ClassifyLatestCausal -> PushAndClassify must emit 5 total records for {1..5}");
 					for (uint64_t s = 1; s <= 5; ++s)
 					{
 						Assert::AreEqual(1, emitCount[s],
 							L"ClassifyLatestCausal -> PushAndClassify MUST emit every seq {1..5} EXACTLY ONCE (never duplicate seq=3!)");
+						Assert::AreEqual(s, emittedOrder[static_cast<size_t>(s - 1)],
+							L"Opus LOW-2: ClassifyLatestCausal -> PushAndClassify MUST emit sequences in strictly monotonic order {1,2,3,4,5}");
 					}
 					Assert::AreEqual(static_cast<uint64_t>(0), det.DroppedRecordCount(),
 						L"ClassifyLatestCausal -> PushAndClassify must have DroppedRecordCount() == 0");
@@ -831,6 +855,99 @@ namespace Tests
 					Assert::AreEqual(static_cast<uint64_t>(0), detLong.DroppedRecordCount(),
 						L"Sustained stream after SetLeadFrames(2->0) MUST keep DroppedRecordCount() == 0");
 				}
+			}
+
+			TEST_METHOD(OpusLow2NonFiniteAbstainFlushesOlderBufferedFramesMonotonically)
+			{
+				// Opus Repeat Audit LOW-2 Red-First Adversarial Test (Rules 3 & 4):
+				// With lead=2, push valid seq=1,2,3 (emits 1, buffers 2 & 3), then push non-finite seq=4 (qualityScore=NaN).
+				// Older un-emitted buffered frames (2, 3) MUST flush in sequence order into flushedBeforeCut BEFORE seq=4
+				// is emitted as AbstainReason::NonFiniteEvidence so the overall emitted sequence is strictly {1,2,3,4}!
+				TdV2FrameRoleDetector det(2);
+				StandInRegistry reg;
+				std::map<uint64_t, int> emitCount;
+				std::map<uint64_t, int> naiveIgnoreFlushCount;
+				std::vector<uint64_t> emittedOrder;
+				auto collect = [&](const FrameRoleDecision& d)
+				{
+					for (const auto& fl : d.flushedBeforeCut)
+					{
+						if (fl.produced)
+						{
+							++emitCount[fl.record.seq];
+							emittedOrder.push_back(fl.record.seq);
+						}
+					}
+					if (d.produced)
+					{
+						++emitCount[d.record.seq];
+						++naiveIgnoreFlushCount[d.record.seq];
+						emittedOrder.push_back(d.record.seq);
+					}
+				};
+
+				const auto d1 = det.PushAndClassify(MakeEv(1, 0.95), &reg);
+				const auto d2 = det.PushAndClassify(MakeEv(2, 0.52), &reg);
+				const auto d3 = det.PushAndClassify(MakeEv(3, 0.91), &reg);
+				Assert::IsFalse(d1.produced);
+				Assert::IsFalse(d2.produced);
+				Assert::IsTrue(d3.produced && d3.record.seq == 1);
+				collect(d1);
+				collect(d2);
+				collect(d3);
+
+				// Push non-finite seq=4: MUST flush buffered seq=2,3 BEFORE emitting seq=4!
+				const FrameRoleEvidence bad4 = MakeEv(4, std::numeric_limits<double>::quiet_NaN());
+				const auto d4 = det.PushAndClassify(bad4, &reg);
+				Assert::IsTrue(d4.produced, L"Non-finite frame seq=4 must produce an explicit abstain record");
+				Assert::AreEqual(static_cast<uint64_t>(4), d4.record.seq);
+				Assert::AreEqual(static_cast<int>(AbstainReason::NonFiniteEvidence), static_cast<int>(d4.abstain),
+					L"Non-finite frame seq=4 must record AbstainReason::NonFiniteEvidence");
+				Assert::IsTrue(reg.IsActive(StandInKind::NonFiniteClosure),
+					L"Non-finite frame seq=4 must visibly engage StandInKind::NonFiniteClosure");
+				collect(d4);
+
+				// Flush EOS (should produce zero extra records since 2 & 3 already flushed before seq=4).
+				const auto eos = det.FlushEndOfStream(&reg);
+				for (const auto& ef : eos)
+					collect(ef);
+				Assert::IsTrue(det.FlushEndOfStream(&reg).empty(),
+					L"Repeated FlushEndOfStream must return empty");
+
+				// Exact-once, zero drops, strictly monotonic order {1, 2, 3, 4}!
+				Assert::AreEqual(static_cast<size_t>(4), emitCount.size(),
+					L"Exact-once set must contain all 4 sequences {1,2,3,4}");
+				Assert::AreEqual(static_cast<size_t>(4), emittedOrder.size(),
+					L"Total emitted record count must equal 4");
+				for (uint64_t s = 1; s <= 4; ++s)
+				{
+					Assert::AreEqual(1, emitCount[s],
+						L"Every seq in {1..4} MUST be emitted EXACTLY ONCE across non-finite abstain");
+					Assert::AreEqual(s, emittedOrder[static_cast<size_t>(s - 1)],
+						L"Opus LOW-2: Non-finite abstain MUST emit older buffered frames (2,3) BEFORE seq=4 -> monotonic {1,2,3,4}");
+				}
+				Assert::AreEqual(static_cast<uint64_t>(0), det.DroppedRecordCount(),
+					L"Non-finite abstain flush must have DroppedRecordCount() == 0");
+
+				// Mandatory Same-Input Negative Control (Rule 3):
+				// (a) A naive caller ignoring d4.flushedBeforeCut misses buffered seqs 2 & 3 on the exact same stream.
+				Assert::AreEqual(0, naiveIgnoreFlushCount[2],
+					L"Negative control: caller ignoring flushedBeforeCut on non-finite seq=4 misses buffered seq=2");
+				Assert::AreEqual(0, naiveIgnoreFlushCount[3],
+					L"Negative control: caller ignoring flushedBeforeCut on non-finite seq=4 misses buffered seq=3");
+
+				// (b) On the exact same prefix {1,2,3} followed by a FINITE seq=4, normal lead=2 emits seq=2 directly
+				//     with empty flushedBeforeCut (proving seq=2,3 genuinely sat buffered before seq=4 arrived).
+				TdV2FrameRoleDetector detCtrl(2);
+				StandInRegistry regCtrl;
+				detCtrl.PushAndClassify(MakeEv(1, 0.95), &regCtrl);
+				detCtrl.PushAndClassify(MakeEv(2, 0.52), &regCtrl);
+				detCtrl.PushAndClassify(MakeEv(3, 0.91), &regCtrl);
+				const auto d4Valid = detCtrl.PushAndClassify(MakeEv(4, 0.50), &regCtrl);
+				Assert::IsTrue(d4Valid.flushedBeforeCut.empty(),
+					L"Control: finite seq=4 at lead=2 must not trigger flushedBeforeCut");
+				Assert::IsTrue(d4Valid.produced && d4Valid.record.seq == 2,
+					L"Control: finite seq=4 at lead=2 emits buffered seq=2 normally");
 			}
 		};
 	}

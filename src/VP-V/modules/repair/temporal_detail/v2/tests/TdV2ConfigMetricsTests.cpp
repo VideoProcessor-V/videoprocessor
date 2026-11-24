@@ -158,7 +158,8 @@ namespace Tests
 					StandInKind::GrainPriorOutOfRange,
 					StandInKind::GpuInputOutputAlias,
 					StandInKind::FaceNonRigidMask,
-					StandInKind::MissingMotionNoWholeBlend
+					StandInKind::MissingMotionNoWholeBlend,
+					StandInKind::FaceMaskSizeMismatch
 				};
 				for (StandInKind nk : newKinds)
 				{

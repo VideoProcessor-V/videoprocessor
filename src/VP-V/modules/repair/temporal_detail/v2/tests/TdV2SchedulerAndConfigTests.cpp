@@ -2641,6 +2641,102 @@ namespace TdV2SchedulerConfigNs
 					L"Sub-case B positive control: explicit codecModelPb must not engage CodecModelPbStandIn");
 			}
 		}
+
+		// =========================================================================
+		// 9. Opus Repeat Audit LOW-1: Late-Carry Frame 1 Explicit referenceClean
+		//    Must Advance prevClean_ So Frame 2 (Without Explicit Ref) Warps 1 Hop
+		// =========================================================================
+		TEST_METHOD(OpusLow1LateCarryFrame1ExplicitRefAdvancesPrevCleanForFrame2)
+		{
+			// On-time frame 0 has a sharp vertical step edge at x = 16 (600 left, 100 right) with +12.0 clean carry delta.
+			// Late frame 1 shifts scene +8 px (step at x = 24, vx = -8.0) and supplies explicit ctx.referenceClean at x = 24.
+			// Late frame 2 shifts scene another +8 px (step at x = 32, vx = -8.0) with NO explicit referenceClean (nullptr).
+			// In interior strip x in [26..30), y in [16..48), 1-hop warp lands at sx in [18..22) (bicubic taps [17..23]):
+			//   - Properly advanced prevClean_ (step at x = 24) yields refVal = 600 vs curVal = 594 -> desiredDir = +6 > 0 ->
+			//     exact +4.0 (= +12 * 1/3) carry applied with zero false rejections on the strip!
+			//   - Pre-fix stale 2-hop-old prevClean_ (step stuck at x = 16) yields refVal = 100 vs curVal = 594 ->
+			//     desiredDir = -494 < 0 -> Q7a falsely rejects 100% of valid carry on [26..30) (delta == 0.0)!
+			const int w = 64;
+			const int h = 64;
+			const int cellPx = 16;
+			const int cellsW = w / cellPx; // 4
+			const int cellsH = h / cellPx; // 4
+			const ActiveRect active = ActiveRect::Full(w, h);
+			const ActiveRect stepStrip{ 26, 16, 30, 48 }; // 4 x 32 = 128 pixels strictly inside shifted step band
+
+			const double stepDelta = 12.0;
+			const double phi = kDeadZonePhiInter;
+			const RoundingCellStats a2 = ComputeRoundingCellStats(stepDelta, phi, 0.0);
+			Assert::IsTrue(a2.valid && a2.totalVar > 0.0);
+			const double stepTotalVar = a2.totalVar;
+
+			auto makeStepPlane = [&](int stepX, double bias) -> TdV2Plane
+			{
+				TdV2Plane p(w, h, 0.0);
+				for (int y = 0; y < h; ++y)
+					for (int x = 0; x < w; ++x)
+						p.at(x, y) = (x < stepX ? 600.0 : 100.0) + bias;
+				return p;
+			};
+
+			const TdV2Plane onTimeClean = makeStepPlane(16, 0.0);
+			const TdV2Plane onTimeDelta(w, h, +12.0);
+			const CellMotionField mfShift = CellMotionField::Uniform(
+				cellsW, cellsH, -8.0, 0.0, -8.0, 0.0, RegionMotionClass::Camera);
+
+			const TdV2Plane refClean1 = makeStepPlane(24, 0.0);
+			const TdV2Plane curClean1 = makeStepPlane(24, -6.0);
+			const TdV2Plane curClean2 = makeStepPlane(32, -6.0);
+
+			LateCarryContext ctx1;
+			ctx1.transformIdentified8x8 = false;
+			ctx1.referenceClean = &refClean1;
+
+			TdV2LateCarryController ctrl;
+			StandInRegistry si;
+			ctrl.OnOnTimeFrame(onTimeDelta, &si, &onTimeClean);
+
+			const LateCarryDecision res1 = ctrl.OnLateFrame(
+				curClean1, active, &mfShift, stepTotalVar, cellsW, cellsH, cellPx, &si, &ctx1);
+			Assert::IsTrue(res1.carried && !res1.expired, L"Late frame 1 with explicit referenceClean must carry");
+			Assert::AreEqual(static_cast<size_t>(0u), res1.residualRejectedPixels,
+				L"Late frame 1 aligned explicit referenceClean must have 0 residual rejections");
+			Assert::IsTrue(res1.delta.at(28, 32) > 2.0,
+				L"Late frame 1 must apply positive carried delta");
+
+			// Late frame 2 WITHOUT explicit referenceClean (ctx == nullptr -> warps stored prevClean_ by 1 hop).
+			const LateCarryDecision res2 = ctrl.OnLateFrame(
+				curClean2, active, &mfShift, stepTotalVar, cellsW, cellsH, cellPx, &si, nullptr);
+			Assert::IsTrue(res2.carried && !res2.expired, L"Late frame 2 without explicit referenceClean must carry");
+			for (int y = stepStrip.y0; y < stepStrip.y1; ++y)
+			{
+				for (int x = stepStrip.x0; x < stepStrip.x1; ++x)
+				{
+					Assert::AreEqual(4.0, res2.delta.at(x, y), 1e-6,
+						FormatMsg("Opus LOW-1: Late frame 2 delta(%.0f,%.0f)=%.6f != 4.0 (stale 2-hop prevClean_ falsely triggered Q7a rejection!)",
+							static_cast<double>(x), static_cast<double>(y), res2.delta.at(x, y)).c_str());
+				}
+			}
+
+			// Mandatory Same-Input Negative Control (Rule 3):
+			// Exact same frame 0 + frame 1 + motion mfShift + ctx == nullptr, EXCEPT frame 2 curClean genuinely has an
+			// unaligned scene cut/jump (900.0 everywhere -> refVal - curVal < 0 opposing +4.0 carry). Q7a MUST reject!
+			const TdV2Plane curClean2Cut(w, h, 900.0);
+			TdV2LateCarryController negCtrl;
+			StandInRegistry negSi;
+			negCtrl.OnOnTimeFrame(onTimeDelta, &negSi, &onTimeClean);
+			const LateCarryDecision negRes1 = negCtrl.OnLateFrame(
+				curClean1, active, &mfShift, stepTotalVar, cellsW, cellsH, cellPx, &negSi, &ctx1);
+			Assert::IsTrue(negRes1.carried && !negRes1.expired);
+			const LateCarryDecision negRes2 = negCtrl.OnLateFrame(
+				curClean2Cut, active, &mfShift, stepTotalVar, cellsW, cellsH, cellPx, &negSi, nullptr);
+			Assert::IsTrue(negRes2.carried && !negRes2.expired,
+				L"Negative control late frame 2 must execute Q7a residual check (not expire)");
+			Assert::AreEqual(0.0, MaxAbsPlaneRect(negRes2.delta, stepStrip), 1e-9,
+				L"Negative control: unaligned scene cut on frame 2 MUST be 100% rejected by Q7a on stepStrip");
+			Assert::IsTrue(negRes2.residualRejectedPixels >= static_cast<size_t>(stepStrip.Width() * stepStrip.Height()),
+				L"Negative control: unaligned scene cut on frame 2 MUST report residualRejectedPixels >= strip size");
+		}
 	};
 } // namespace TdV2SchedulerConfigNs
 } // namespace Tests

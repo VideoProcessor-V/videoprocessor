@@ -4710,6 +4710,11 @@ namespace Tests
 						masterF2Cr.v.data(), ownCr.data(), warpedForNextCr.v.data(), res2.outputCr.v.data(), cN,
 						prevResCr.data(), prevOwnCr.data());
 
+					Assert::IsTrue(res2.estimatedBlindNlfCb > 0.25 * grainSigma * grainSigma,
+						L"Opus LOW-3: Branch A blind estimator MUST report non-zero estimatedBlindNlfCb > 0.25*sigma^2 on textured 0.5-px pan");
+					Assert::IsTrue(res2.estimatedBlindNlfCr > 0.25 * grainSigma * grainSigma,
+						L"Opus LOW-3: Branch A blind estimator MUST report non-zero estimatedBlindNlfCr > 0.25*sigma^2 on textured 0.5-px pan");
+
 					Assert::IsTrue(repCb.valid && repCb.lag1Evaluated && repCb.passesAuthoritativeBar,
 						L"Branch A unsplit 0.5-px pan Cb MUST pass full authoritative grain bar (lag1Evaluated==true)");
 					Assert::IsTrue(repCr.valid && repCr.lag1Evaluated && repCr.passesAuthoritativeBar,
@@ -5262,6 +5267,398 @@ namespace Tests
 						const double outBgMseCr = outBgRmseCr * outBgRmseCr;
 						Assert::IsTrue(outBgMseCb < 0.50 * curBgMseCb && outBgMseCr < 0.50 * curBgMseCr,
 							(std::wstring(fc.label) + L": stationary unmasked chroma background MUST achieve >= 50% MSE reduction").c_str());
+					}
+				}
+			}
+
+			// =========================================================================
+			// 14. Opus Repeat Audit LOW-4: Blind Chroma NLF Must Divide Only by
+			//     Contributing References (meanRef > refQuantFloor), Not K / activeK
+			// =========================================================================
+			TEST_METHOD(OpusLow4BlindChromaDividesByContributingRefsAndUsesBandWeightedWarpGain)
+			{
+				const int w = 64;
+				const int h = 64;
+				const int cellPx = 16;
+				const int cw = w / cellPx; // 4
+				const int ch = h / cellPx; // 4
+				const int cW = w / 2;      // 32
+				const int cH = h / 2;      // 32
+				const size_t cN = static_cast<size_t>(cW) * static_cast<size_t>(cH);
+				const ActiveRect active = ActiveRect::Full(w, h);
+				const SitingSpec siting = SitingSpec::Left();
+				const double grainSigma = 6.0;
+
+				auto renderTexturedChroma = [&](double oxLuma, bool isCb) -> TdV2Plane
+				{
+					TdV2Plane p(cW, cH, 512.0);
+					for (int cy = 0; cy < cH; ++cy)
+					{
+						const double ly = siting.CodedToLumaY(static_cast<double>(cy), 2);
+						for (int cx = 0; cx < cW; ++cx)
+						{
+							const double lx = siting.CodedToLumaX(static_cast<double>(cx), 2) + oxLuma;
+							const double t1 = (isCb ? 48.0 : -42.0) * std::sin(2.0 * kPi * lx / 24.0) * std::cos(2.0 * kPi * ly / 28.0);
+							const double t2 = (isCb ? 22.0 : 26.0) * std::cos(2.0 * kPi * (lx + 0.5 * ly) / 14.0);
+							p.at(cx, cy) = 512.0 + t1 + t2;
+						}
+					}
+					return p;
+				};
+
+				TdV2Plane curRecCb = renderTexturedChroma(0.0, true);
+				TdV2Plane curRecCr = renderTexturedChroma(0.0, false);
+				TdV2Plane prevRecCb = renderTexturedChroma(-1.0, true);
+				TdV2Plane prevRecCr = renderTexturedChroma(-1.0, false);
+				TdV2Plane nextRealCb = renderTexturedChroma(+1.0, true);
+				TdV2Plane nextRealCr = renderTexturedChroma(+1.0, false);
+
+				std::mt19937 rng(42401u);
+				std::normal_distribution<double> gd(0.0, grainSigma);
+				for (size_t i = 0; i < cN; ++i)
+				{
+					curRecCb.v[i] += gd(rng);
+					curRecCr.v[i] += gd(rng);
+					prevRecCb.v[i] += gd(rng);
+					prevRecCr.v[i] += gd(rng);
+					nextRealCb.v[i] += gd(rng);
+					nextRealCr.v[i] += gd(rng);
+				}
+
+				const TdV2Plane flatZero(cW, cH, 0.0);
+				const CellMotionField mfPrev = CellMotionField::Uniform(cw, ch, +1.0, 0.0, +1.0, 0.0, RegionMotionClass::Camera);
+				const CellMotionField mfNext = CellMotionField::Uniform(cw, ch, -1.0, 0.0, -1.0, 0.0, RegionMotionClass::Camera);
+				const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+
+				const Config cfg = MakePreset(Preset::Reference, Mode::On);
+
+				struct BranchCase
+				{
+					ChromaGridStatus status;
+					const wchar_t* label;
+				};
+				const BranchCase branches[2] = {
+					{ ChromaGridStatus::Identified,   L"Branch B (Identified)" },
+					{ ChromaGridStatus::Unidentified, L"Branch A (Unidentified)" }
+				};
+
+				for (const BranchCase& bc : branches)
+				{
+					auto makeBaseIn = [&](uint64_t seq) -> ChromaProcessInput
+					{
+						ChromaProcessInput in;
+						in.seq = seq;
+						in.deliveredFormat = DeliveredChromaFormat::Yuv420;
+						in.codedSubsampling = ChromaSubsampling::Yuv420;
+						in.gridStatus = bc.status;
+						in.siting = siting;
+						in.lumaW = w;
+						in.lumaH = h;
+						in.activeRect = active;
+						in.receivedCb = curRecCb;
+						in.receivedCr = curRecCr;
+						in.hasCleanSplit = false; // Unsplit blind path; retainedGrainVarCb/Cr empty!
+						in.prevPeak = { &prevRecCb, &prevRecCr, &mfPrev, false };
+						in.hasStepPrior = true;
+						in.estimatedStepDelta = 14.0;
+						return in;
+					};
+
+					// Run 1 (oneRef): 1 normal textured+grainy reference (prevPeak, meanRef > refQuantFloor).
+					ChromaProcessInput inOne = makeBaseIn(101);
+					TdV2ChromaEngine engOne(cfg);
+					StandInRegistry regOne;
+					const ChromaProcessResult resOne = engOne.ProcessFrame(inOne, &regOne);
+					AssertPlaneAllFinite(resOne.outputCb, L"LOW-4 oneRef outputCb must be finite");
+					AssertPlaneAllFinite(resOne.outputCr, L"LOW-4 oneRef outputCr must be finite");
+					Assert::IsTrue(resOne.estimatedBlindNlfCb > 0.25 * grainSigma * grainSigma,
+						(std::wstring(bc.label) + L": oneRef estimatedBlindNlfCb must be > 0.25*sigma^2").c_str());
+					Assert::IsTrue(resOne.estimatedBlindNlfCr > 0.25 * grainSigma * grainSigma,
+						(std::wstring(bc.label) + L": oneRef estimatedBlindNlfCr must be > 0.25*sigma^2").c_str());
+
+					// Run 2 (twoRefWithCrushedBlack): exact same prevPeak PLUS a 2nd reference whose chroma is flat 0.0
+					// (meanRef == 0.0 <= refQuantFloor -> ONLY 1 of 2 references contributes!).
+					ChromaProcessInput inTwo = makeBaseIn(102);
+					inTwo.nextPeak = { &flatZero, &flatZero, &stillMf, false };
+					TdV2ChromaEngine engTwo(cfg);
+					StandInRegistry regTwo;
+					const ChromaProcessResult resTwo = engTwo.ProcessFrame(inTwo, &regTwo);
+					AssertPlaneAllFinite(resTwo.outputCb, L"LOW-4 twoRefWithCrushedBlack outputCb must be finite");
+					AssertPlaneAllFinite(resTwo.outputCr, L"LOW-4 twoRefWithCrushedBlack outputCr must be finite");
+
+					Assert::IsTrue(resTwo.estimatedBlindNlfCb >= 0.85 * resOne.estimatedBlindNlfCb,
+						(std::wstring(bc.label) + L": Opus LOW-4 crushed-black 2nd ref MUST NOT dilute estimatedBlindNlfCb by dividing by K/activeK=2").c_str());
+					Assert::IsTrue(resTwo.estimatedBlindNlfCr >= 0.85 * resOne.estimatedBlindNlfCr,
+						(std::wstring(bc.label) + L": Opus LOW-4 crushed-black 2nd ref MUST NOT dilute estimatedBlindNlfCr by dividing by K/activeK=2").c_str());
+					Assert::IsTrue(resTwo.estimatedBlindNlfCb <= 1.15 * resOne.estimatedBlindNlfCb &&
+					               resTwo.estimatedBlindNlfCr <= 1.15 * resOne.estimatedBlindNlfCr,
+						(std::wstring(bc.label) + L": crushed-black 2nd ref must not inflate estimatedBlindNlf beyond 1.15x oneRef").c_str());
+
+					// Anti-cheat control (2 genuinely contributing refs): average over validRefCnt==2 stays near 1.0x oneRef
+					// (catches any bogus fix that drops the denominator instead of dividing by validRefCnt!).
+					ChromaProcessInput inTwoReal = makeBaseIn(103);
+					inTwoReal.nextPeak = { &nextRealCb, &nextRealCr, &mfNext, false };
+					TdV2ChromaEngine engTwoReal(cfg);
+					StandInRegistry regTwoReal;
+					const ChromaProcessResult resTwoReal = engTwoReal.ProcessFrame(inTwoReal, &regTwoReal);
+					Assert::IsTrue(resTwoReal.estimatedBlindNlfCb >= 0.65 * resOne.estimatedBlindNlfCb &&
+					               resTwoReal.estimatedBlindNlfCb <= 1.45 * resOne.estimatedBlindNlfCb,
+						(std::wstring(bc.label) + L": 2 contributing refs must average cleanly by validRefCnt==2 (Cb)").c_str());
+					Assert::IsTrue(resTwoReal.estimatedBlindNlfCr >= 0.65 * resOne.estimatedBlindNlfCr &&
+					               resTwoReal.estimatedBlindNlfCr <= 1.45 * resOne.estimatedBlindNlfCr,
+						(std::wstring(bc.label) + L": 2 contributing refs must average cleanly by validRefCnt==2 (Cr)").c_str());
+
+					// Mandatory Same-Input Negative Control (Rule 3):
+					// All-flat crushed-black frame + refs (0 contributing refs) must still report < 1.0 code^2!
+					ChromaProcessInput inAllFlat = makeBaseIn(104);
+					inAllFlat.receivedCb = flatZero;
+					inAllFlat.receivedCr = flatZero;
+					inAllFlat.prevPeak = { &flatZero, &flatZero, &stillMf, false };
+					inAllFlat.nextPeak = { &flatZero, &flatZero, &stillMf, false };
+					TdV2ChromaEngine engAllFlat(cfg);
+					StandInRegistry regAllFlat;
+					const ChromaProcessResult resAllFlat = engAllFlat.ProcessFrame(inAllFlat, &regAllFlat);
+					Assert::IsTrue(resAllFlat.estimatedBlindNlfCb < 1.0 && resAllFlat.estimatedBlindNlfCr < 1.0,
+						(std::wstring(bc.label) + L": Negative control all-flat zero-ref frame must remain < 1.0 code^2").c_str());
+				}
+
+				// ---- Direct Parseval / 2-D Spatial Convolution Verification of HighPassBicubicWarpVarianceGain ----
+				{
+					const std::vector<double> g1 = VpUnit::BandFromBase::Taps<double>(VpUnit::BandFromBase::kSigmaFine, 3.0, true, 0.0);
+					Assert::IsFalse(g1.empty(), L"BandFromBase::Taps(kSigmaFine) must be non-empty");
+
+					// Integer shifts MUST return exact 1.0 (zero bicubic attenuation on integer grid).
+					Assert::AreEqual(1.0, HighPassBicubicWarpVarianceGain(0.0, 0.0, g1, g1), 1e-12,
+						L"Opus LOW-4: HighPassBicubicWarpVarianceGain(0, 0) must equal exact 1.0");
+					Assert::AreEqual(1.0, HighPassBicubicWarpVarianceGain(3.0, -2.0, g1, g1), 1e-12,
+						L"Opus LOW-4: HighPassBicubicWarpVarianceGain(3, -2) must equal exact 1.0");
+
+					// Independent brute-force 2-D spatial kernel convolution sum((H * W)^2) / sum(H^2)
+					// where H(dx, dy) = delta(dx, dy) - g1(dx)*g1(dy) and W(ox, oy) = wx(ox)*wy(oy).
+					const int gLen = static_cast<int>(g1.size());
+					const int r = gLen / 2;
+					const int dMin = -r;
+					const int dMax = gLen - 1 - r;
+					auto h2d = [&](int dx, int dy) -> double
+					{
+						if (dx < dMin || dx > dMax || dy < dMin || dy > dMax)
+							return 0.0;
+						const double gxy = g1[static_cast<size_t>(dx + r)] * g1[static_cast<size_t>(dy + r)];
+						return ((dx == 0 && dy == 0) ? 1.0 : 0.0) - gxy;
+					};
+					double sumH2 = 0.0;
+					for (int dy = dMin; dy <= dMax; ++dy)
+						for (int dx = dMin; dx <= dMax; ++dx)
+						{
+							const double hv = h2d(dx, dy);
+							sumH2 += hv * hv;
+						}
+					Assert::IsTrue(sumH2 > 0.1, L"High-pass kernel energy sum(H^2) must be strictly positive");
+
+					auto bruteForce2dGain = [&](double vx, double vy) -> double
+					{
+						const double fx = vx - std::floor(vx);
+						const double fy = vy - std::floor(vy);
+						double wx[4] = {}, wy[4] = {};
+						VpComposed::CubicWeights(fx, wx);
+						VpComposed::CubicWeights(fy, wy);
+						const int mMin = dMin - 1;
+						const int mMax = dMax + 2;
+						double sumHW2 = 0.0;
+						for (int my = mMin; my <= mMax; ++my)
+						{
+							for (int mx = mMin; mx <= mMax; ++mx)
+							{
+								double acc = 0.0;
+								for (int iy = 0; iy < 4; ++iy)
+									for (int ix = 0; ix < 4; ++ix)
+										acc += wx[ix] * wy[iy] * h2d(mx - (ix - 1), my - (iy - 1));
+								sumHW2 += acc * acc;
+							}
+						}
+						return sumHW2 / sumH2;
+					};
+
+					struct ShiftCase
+					{
+						double vx;
+						double vy;
+						double minGapVsWhite;
+					};
+					const ShiftCase shifts[2] = {
+						{ 0.5, 0.0, 0.05 }, // 1-D half-pixel pan: white 164/256 ~= 0.6406 vs high-pass ~= 0.54 (gap ~= 0.10)
+						{ 0.5, 0.5, 0.08 }  // 2-D half-pixel pan: stronger high-pass attenuation gap vs white-noise gain
+					};
+					for (const ShiftCase& sh : shifts)
+					{
+						const double hpGain = HighPassBicubicWarpVarianceGain(sh.vx, sh.vy, g1, g1);
+						const double whiteGain = BicubicWarpVarianceGain(sh.vx, sh.vy);
+						const double bruteGain = bruteForce2dGain(sh.vx, sh.vy);
+
+						Assert::AreEqual(bruteGain, hpGain, 1e-10,
+							L"Opus LOW-4: HighPassBicubicWarpVarianceGain MUST match independent 2-D spatial convolution sum((H*W)^2)/sum(H^2) to 1e-10");
+						Assert::IsTrue(hpGain > 0.0 && hpGain < whiteGain,
+							L"Opus LOW-4: HighPassBicubicWarpVarianceGain at sub-pixel shift MUST be strictly < white-noise BicubicWarpVarianceGain");
+						// Negative control: white-noise BicubicWarpVarianceGain materially overstates high-pass warped grain gain
+						// and genuinely underestimates true own grain variance sigma^2 = 36.0 in ComputeProjectionIr,
+						// whereas band-weighted HighPassBicubicWarpVarianceGain recovers exact sigma^2 = 36.0!
+						Assert::IsTrue((whiteGain - hpGain) > sh.minGapVsWhite,
+							L"Negative control: white-noise BicubicWarpVarianceGain must materially overstate high-pass warp gain at half-pixel shift");
+
+						const double texS = 2000.0;
+						const double trueSigma2 = 36.0;
+						const double alpha = 0.65;
+						const double momE = texS + trueSigma2;
+						const double momC = alpha * texS;
+						const double momEprev = alpha * alpha * texS + hpGain * trueSigma2;
+						const double irHp = ComputeProjectionIr(momE, momC, momEprev, nullptr, hpGain);
+						const double irWhite = ComputeProjectionIr(momE, momC, momEprev, nullptr, whiteGain);
+						Assert::AreEqual(trueSigma2, irHp, 1e-9,
+							L"Opus LOW-4: ComputeProjectionIr with band-weighted HighPassBicubicWarpVarianceGain MUST recover exact sigma^2 = 36.0");
+						Assert::IsTrue(irWhite < trueSigma2 - 2.0,
+							L"Negative control: ComputeProjectionIr with white-noise BicubicWarpVarianceGain MUST underestimate true sigma^2 = 36.0 by > 2.0 code^2");
+					}
+				}
+			}
+
+			// =========================================================================
+			// 15. Opus Repeat Audit LOW-5: Undersized faceMask Engages Visible Stand-In
+			//     and Fails Closed Conservatively on Out-of-Range Trailing Cells
+			// =========================================================================
+			TEST_METHOD(OpusLow5UndersizedFaceMaskEngagesVisibleStandInAndFailsClosed)
+			{
+				const int w = 64;
+				const int h = 64;
+				const int cellPx = 16;
+				const int cw = w / cellPx; // 4
+				const int ch = h / cellPx; // 4 -> 16 cells
+				const int cW = w / 2;      // 32
+				const int cH = h / 2;      // 32
+				const ActiveRect active = ActiveRect::Full(w, h);
+				const SitingSpec siting = SitingSpec::Left();
+				const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+
+				TdV2Plane prevPeakCb(cW, cH, 512.0), prevPeakCr(cW, cH, 512.0);
+				TdV2Plane nextPeakCb(cW, cH, 512.0), nextPeakCr(cW, cH, 512.0);
+				TdV2Plane curCb(cW, cH, 512.0), curCr(cW, cH, 512.0);
+				std::mt19937 refRng(5501u);
+				std::normal_distribution<double> refJitter(0.0, 0.5);
+				for (int cy = 0; cy < cH; ++cy)
+				{
+					for (int cx = 0; cx < cW; ++cx)
+					{
+						const double baseCb = 512.0 + 36.0 * std::sin(2.0 * kPi * (cx + 0.5) / 16.0);
+						const double baseCr = 512.0 - 32.0 * std::cos(2.0 * kPi * (cy + 0.5) / 16.0);
+						prevPeakCb.at(cx, cy) = baseCb + refJitter(refRng);
+						prevPeakCr.at(cx, cy) = baseCr + refJitter(refRng);
+						nextPeakCb.at(cx, cy) = baseCb + refJitter(refRng);
+						nextPeakCr.at(cx, cy) = baseCr + refJitter(refRng);
+						// Coherent +10.0 code low-frequency compression bias across all cells (including trailing cells 1..15).
+						curCb.at(cx, cy) = baseCb + 10.0;
+						curCr.at(cx, cy) = baseCr - 10.0;
+					}
+				}
+
+				const std::vector<uint8_t> undersizedFaceMask{ 0u }; // Length 1 < 16: cells 1..15 missing!
+				const Config cfg = MakePreset(Preset::Reference, Mode::On);
+
+				struct GridCase
+				{
+					ChromaGridStatus status;
+					bool transform8x8;
+					const wchar_t* label;
+				};
+				const GridCase cases[2] = {
+					{ ChromaGridStatus::Identified,   true,  L"Identified-420" },
+					{ ChromaGridStatus::Unidentified, false, L"Unidentified-420" }
+				};
+
+				for (const GridCase& gc : cases)
+				{
+					ChromaProcessInput baseIn;
+					baseIn.seq = 250;
+					baseIn.deliveredFormat = DeliveredChromaFormat::Yuv420;
+					baseIn.codedSubsampling = ChromaSubsampling::Yuv420;
+					baseIn.gridStatus = gc.status;
+					baseIn.siting = siting;
+					baseIn.lumaW = w;
+					baseIn.lumaH = h;
+					baseIn.activeRect = active;
+					baseIn.receivedCb = curCb;
+					baseIn.receivedCr = curCr;
+					baseIn.hasCleanSplit = true;
+					baseIn.cleanCb = curCb;
+					baseIn.cleanCr = curCr;
+					baseIn.prevPeak = { &prevPeakCb, &prevPeakCr, &stillMf, false };
+					baseIn.nextPeak = { &nextPeakCb, &nextPeakCr, &stillMf, false };
+					baseIn.hasStepPrior = true;
+					baseIn.estimatedStepDelta = 24.0;
+					baseIn.deadZonePhi = kDeadZonePhiInter;
+					baseIn.zeroCoeffFraction = 0.35;
+					baseIn.transformIdentified8x8 = gc.transform8x8;
+
+					// Mandatory Same-Input Negative Control (Rule 3): faceMask == nullptr MUST blend trailing cells 1..15!
+					TdV2ChromaEngine engUnmasked(cfg);
+					StandInRegistry regUnmasked;
+					const ChromaProcessResult resUnmasked = engUnmasked.ProcessFrame(baseIn, &regUnmasked);
+					Assert::IsFalse(regUnmasked.IsActive(StandInKind::FaceNonRigidMask),
+						(std::wstring(gc.label) + L": Negative control unmasked run must not engage FaceNonRigidMask").c_str());
+					Assert::IsFalse(regUnmasked.IsActive(StandInKind::FaceMaskSizeMismatch),
+						(std::wstring(gc.label) + L": Negative control unmasked run must not engage FaceMaskSizeMismatch").c_str());
+
+					double maxTrailingUnmaskedCb = 0.0, maxTrailingUnmaskedCr = 0.0;
+					for (int cy = 0; cy < cH; ++cy)
+					{
+						for (int cx = 0; cx < cW; ++cx)
+						{
+							if (cx < 8 && cy < 8)
+								continue; // Cell 0 (luma [0,16)^2)
+							maxTrailingUnmaskedCb = (std::max)(maxTrailingUnmaskedCb, std::fabs(resUnmasked.outputCb.at(cx, cy) - curCb.at(cx, cy)));
+							maxTrailingUnmaskedCr = (std::max)(maxTrailingUnmaskedCr, std::fabs(resUnmasked.outputCr.at(cx, cy) - curCr.at(cx, cy)));
+						}
+					}
+					Assert::IsTrue(maxTrailingUnmaskedCb > 0.5 && maxTrailingUnmaskedCr > 0.5,
+						(std::wstring(gc.label) + L": Negative control trailing cells 1..15 must receive real non-zero delta (> 0.5)").c_str());
+
+					// Undersized non-empty faceMask (size 1 < 16): MUST engage visible stand-in AND conservatively mask trailing cells 1..15!
+					ChromaProcessInput undersizedIn = baseIn;
+					undersizedIn.faceMask = &undersizedFaceMask;
+					TdV2ChromaEngine engUndersized(cfg);
+					StandInRegistry regUndersized;
+					const ChromaProcessResult resUndersized = engUndersized.ProcessFrame(undersizedIn, &regUndersized);
+					AssertPlaneAllFinite(resUndersized.outputCb, L"Undersized faceMask outputCb must be finite");
+					AssertPlaneAllFinite(resUndersized.outputCr, L"Undersized faceMask outputCr must be finite");
+
+					Assert::IsTrue(regUndersized.IsActive(StandInKind::FaceNonRigidMask),
+						(std::wstring(gc.label) + L": Opus LOW-5 undersized faceMask MUST visibly engage StandInKind::FaceNonRigidMask").c_str());
+					Assert::IsTrue(regUndersized.IsActive(StandInKind::FaceMaskSizeMismatch),
+						(std::wstring(gc.label) + L": Opus LOW-5 undersized faceMask MUST visibly engage StandInKind::FaceMaskSizeMismatch").c_str());
+					Assert::AreEqual(cW, resUndersized.outputCb.w);
+					Assert::AreEqual(cH, resUndersized.outputCb.h);
+					Assert::AreEqual(cW, resUndersized.outputCr.w);
+					Assert::AreEqual(cH, resUndersized.outputCr.h);
+
+					for (int cy = 0; cy < cH; ++cy)
+					{
+						for (int cx = 0; cx < cW; ++cx)
+						{
+							if (cx < 8 && cy < 8)
+								continue; // Trailing cells 1..15 only
+							if (!resUndersized.codedDeltaCb.Empty())
+							{
+								Assert::AreEqual(0.0, resUndersized.codedDeltaCb.at(cx, cy), 0.0,
+									(std::wstring(gc.label) + L": Opus LOW-5 undersized faceMask MUST force trailing cells 1..15 codedDeltaCb == 0.0").c_str());
+							}
+							if (!resUndersized.codedDeltaCr.Empty())
+							{
+								Assert::AreEqual(0.0, resUndersized.codedDeltaCr.at(cx, cy), 0.0,
+									(std::wstring(gc.label) + L": Opus LOW-5 undersized faceMask MUST force trailing cells 1..15 codedDeltaCr == 0.0").c_str());
+							}
+							Assert::AreEqual(curCb.at(cx, cy), resUndersized.outputCb.at(cx, cy), 0.0,
+								(std::wstring(gc.label) + L": Opus LOW-5 undersized faceMask MUST leave trailing cells 1..15 outputCb == received").c_str());
+							Assert::AreEqual(curCr.at(cx, cy), resUndersized.outputCr.at(cx, cy), 0.0,
+								(std::wstring(gc.label) + L": Opus LOW-5 undersized faceMask MUST leave trailing cells 1..15 outputCr == received").c_str());
+						}
 					}
 				}
 			}

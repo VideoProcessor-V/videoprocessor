@@ -6008,6 +6008,447 @@ imageStore(dst_alias, p, vec4(v + 1.0, 0.0, 0.0, 0.0));
 				}
 			}
 		}
+
+		// =========================================================================
+		// 14. Opus Repeat Audit MED-1: Actual Allocated Persistent Textures Must Be
+		//     Covered by EstimatedPersistentVramBytes on Real D3D11 WARP
+		// =========================================================================
+		BEGIN_TEST_METHOD_ATTRIBUTE(OpusMed1ActualAllocatedPersistentTexturesCoveredByVramEstimate)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(OpusMed1ActualAllocatedPersistentTexturesCoveredByVramEstimate)
+		{
+			WarpGpuContext ctx;
+			struct OwnedTex
+			{
+				pl_gpu gpu = nullptr;
+				pl_tex tex = nullptr;
+				explicit OwnedTex(pl_gpu g) : gpu(g) {}
+				~OwnedTex()
+				{
+					if (gpu != nullptr && tex != nullptr)
+						pl_tex_destroy(gpu, &tex);
+				}
+				OwnedTex(const OwnedTex&) = delete;
+				OwnedTex& operator=(const OwnedTex&) = delete;
+			};
+
+			const int w = 64;
+			const int h = 64;
+			const int cellPx = 16;
+			const int cw = w / cellPx; // 4
+			const int ch = h / cellPx; // 4
+			const uint64_t cells = static_cast<uint64_t>(cw) * static_cast<uint64_t>(ch); // 16
+			const ActiveRect full = ActiveRect::Full(w, h);
+
+			const TdV2Plane master = RenderScene(w, h, 0.0, 0.0);
+			const TdV2Plane curClean = AddCodingDamage(master, 8.0, 17101u, 0.0, full);
+			const TdV2Plane prevClean = AddCodingDamage(master, 1.5, 17102u, 0.0, full);
+			const TdV2Plane nextClean = AddCodingDamage(master, 1.5, 17103u, 0.0, full);
+			const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+
+			// Non-empty 16-cell faceMask with masked cells so inFaceMaskTex_ is genuinely allocated on WARP.
+			std::vector<uint8_t> faceMask(static_cast<size_t>(cells), 0u);
+			faceMask[0] = 1u;
+			faceMask[5] = 1u;
+			const std::vector<double> retainedGrainVar(static_cast<size_t>(cells), 12.0);
+
+			FrameProcessInput in;
+			in.seq = 1710;
+			in.receivedY = curClean;
+			in.hasCleanSplit = true;
+			in.cleanY = curClean;
+			in.activeRect = full;
+			in.prevPeak = { &prevClean, &stillMf, false };
+			in.nextPeak = { &nextClean, &stillMf, false };
+			in.retainedGrainVar = retainedGrainVar;
+			in.codecModelPb = &master; // Non-null 64x64 plane -> allocates inCodecModelPbTex_ on WARP!
+			in.faceMask = &faceMask;   // Non-empty masked cells -> allocates inFaceMaskTex_ on WARP!
+			in.hasStepPrior = true;
+			in.estimatedStepDelta = 24.0;
+			in.deadZonePhi = kDeadZonePhiInter;
+			in.zeroCoeffFraction = 0.35;
+			in.transformIdentified8x8 = true;
+
+			// ---- Part A: Preset::Reference live pl_tex byte introspection (luma + full-res YUV/RGB chroma + Release) ----
+			const Config cfgRef = MakePreset(Preset::Reference, Mode::On);
+			GpuEngineGuard guard(ctx.gpu, cfgRef);
+			StandInRegistry reg;
+			Assert::AreEqual(static_cast<uint64_t>(0u), guard.engine.AllocatedPersistentVramBytes(),
+				L"Fresh TdV2GpuEngine must start with 0 allocated persistent VRAM bytes");
+
+			const GpuProcessResult res = guard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, in, nullptr, &reg);
+			Assert::IsTrue(res.succeeded, L"MED-1 Reference ProcessFrame on WARP must succeed");
+			Assert::AreEqual(static_cast<size_t>(2u), res.faceMaskedCells,
+				L"MED-1 WARP run must genuinely upload & apply inFaceMaskTex_ (2 masked cells)");
+			Assert::IsTrue(guard.engine.HasCarry(),
+				L"MED-1 WARP run must genuinely allocate persistent carryCleanTex_");
+
+			const uint64_t liveRefLumaBytes = guard.engine.AllocatedPersistentLumaVramBytes();
+			const uint64_t estRefLumaBytes =
+				TdV2GpuEngine::EstimatedPersistentVramBytes(w, h, cellPx, Preset::Reference);
+			Assert::IsTrue(liveRefLumaBytes > 0u, L"Live Reference luma persistent VRAM bytes must be > 0");
+			Assert::AreEqual(estRefLumaBytes, liveRefLumaBytes,
+				FormatMsg("Opus MED-1: live AllocatedPersistentLumaVramBytes (%.0f B) must exactly match EstimatedPersistentVramBytes(Reference) (%.0f B)",
+					static_cast<double>(liveRefLumaBytes), static_cast<double>(estRefLumaBytes)).c_str());
+			Assert::AreEqual(static_cast<uint64_t>(0u), guard.engine.AllocatedPersistentChromaVramBytes(),
+				L"Chroma persistent VRAM bytes must be 0 before ApplyChromaDeltaGpu");
+
+			// Execute ApplyChromaDeltaGpu on BOTH YUV 4:4:4 and RGB 4:4:4 paths at full w x h
+			// so all 6 persistent chroma pl_tex members are genuinely allocated at w x h on WARP.
+			const TdV2Plane codedDeltaCb(w, h, +4.0);
+			const TdV2Plane codedDeltaCr(w, h, -3.0);
+
+			ChromaGpuApplyInput yuvIn;
+			yuvIn.lumaW = w;
+			yuvIn.lumaH = h;
+			yuvIn.deliveredFormat = DeliveredChromaFormat::Yuv444;
+			yuvIn.codedSubsampling = ChromaSubsampling::Yuv444;
+			yuvIn.siting = SitingSpec::Left();
+			yuvIn.activeRect = full;
+			yuvIn.deliveredCb = TdV2Plane(w, h, 512.0);
+			yuvIn.deliveredCr = TdV2Plane(w, h, 512.0);
+			yuvIn.codedDeltaCb = codedDeltaCb;
+			yuvIn.codedDeltaCr = codedDeltaCr;
+			const ChromaGpuApplyResult yuvRes = guard.engine.ApplyChromaDeltaGpu(ctx.gpu, ctx.dispatch, yuvIn, &reg);
+			Assert::IsTrue(yuvRes.succeeded && yuvRes.dispatchCount == 1,
+				L"MED-1 ApplyChromaDeltaGpu YUV 4:4:4 path must allocate chroma textures and dispatch on WARP");
+
+			ChromaGpuApplyInput rgbIn;
+			rgbIn.lumaW = w;
+			rgbIn.lumaH = h;
+			rgbIn.deliveredFormat = DeliveredChromaFormat::Rgb444;
+			rgbIn.codedSubsampling = ChromaSubsampling::Yuv444;
+			rgbIn.siting = SitingSpec::Left();
+			rgbIn.activeRect = full;
+			rgbIn.deliveredR = TdV2Plane(w, h, 500.0);
+			rgbIn.deliveredG = TdV2Plane(w, h, 500.0);
+			rgbIn.deliveredB = TdV2Plane(w, h, 500.0);
+			rgbIn.codedDeltaCb = codedDeltaCb;
+			rgbIn.codedDeltaCr = codedDeltaCr;
+			const ChromaGpuApplyResult rgbRes = guard.engine.ApplyChromaDeltaGpu(ctx.gpu, ctx.dispatch, rgbIn, &reg);
+			Assert::IsTrue(rgbRes.succeeded && rgbRes.dispatchCount == 1,
+				L"MED-1 ApplyChromaDeltaGpu RGB 4:4:4 path must allocate RGB chroma textures and dispatch on WARP");
+
+			const uint64_t liveChromaBytes = guard.engine.AllocatedPersistentChromaVramBytes();
+			const uint64_t estChromaBytes = TdV2GpuEngine::EstimatedChromaVramBytes(w, h);
+			const uint64_t liveTotalBytes = guard.engine.AllocatedPersistentVramBytes();
+			const uint64_t estRefWithChromaBytes =
+				TdV2GpuEngine::EstimatedPersistentVramBytes(w, h, cellPx, Preset::Reference, /*includeChroma=*/true);
+
+			Assert::AreEqual(estChromaBytes, liveChromaBytes,
+				FormatMsg("Opus MED-1: live AllocatedPersistentChromaVramBytes (%.0f B) must equal EstimatedChromaVramBytes (%.0f B)",
+					static_cast<double>(liveChromaBytes), static_cast<double>(estChromaBytes)).c_str());
+			Assert::AreEqual(estRefWithChromaBytes, liveTotalBytes,
+				FormatMsg("Opus MED-1: live AllocatedPersistentVramBytes (%.0f B) must equal EstimatedPersistentVramBytes(Reference, includeChroma=true) (%.0f B)",
+					static_cast<double>(liveTotalBytes), static_cast<double>(estRefWithChromaBytes)).c_str());
+
+			// Mandatory Same-Input Negative Control (Rule 3):
+			// Once ApplyChromaDeltaGpu allocates all 6 persistent chroma textures, a luma-only estimate (includeChroma=false)
+			// genuinely under-reports live AllocatedPersistentVramBytes(), whereas includeChroma=true covers it 100%!
+			const uint64_t lumaOnlyEst =
+				TdV2GpuEngine::EstimatedPersistentVramBytes(w, h, cellPx, Preset::Reference, /*includeChroma=*/false);
+			Assert::IsTrue(lumaOnlyEst < liveTotalBytes,
+				FormatMsg("Negative control: luma-only EstimatedPersistentVramBytes(includeChroma=false) (%.0f B) MUST strictly under-report live AllocatedPersistentVramBytes (%.0f B) after ApplyChromaDeltaGpu",
+					static_cast<double>(lumaOnlyEst), static_cast<double>(liveTotalBytes)).c_str());
+
+			// Release(gpu) MUST free all persistent textures back to exact 0!
+			guard.engine.Release(ctx.gpu);
+			Assert::AreEqual(static_cast<uint64_t>(0u), guard.engine.AllocatedPersistentLumaVramBytes(),
+				L"Release(gpu) must reset AllocatedPersistentLumaVramBytes() to 0");
+			Assert::AreEqual(static_cast<uint64_t>(0u), guard.engine.AllocatedPersistentChromaVramBytes(),
+				L"Release(gpu) must reset AllocatedPersistentChromaVramBytes() to 0");
+			Assert::AreEqual(static_cast<uint64_t>(0u), guard.engine.AllocatedPersistentVramBytes(),
+				L"Release(gpu) must reset AllocatedPersistentVramBytes() to 0");
+
+			// ---- Part B: Preset::RealTime Zero-Copy vs Internal-Output Live Allocation Proof ----
+			{
+				const pl_fmt fmtR32 = VpSkeleton::PlTexBackend::FindFormat(ctx.gpu, VpSkeleton::TexFormat::R32F);
+				const pl_fmt fmtRG32 = VpSkeleton::PlTexBackend::FindFormat(ctx.gpu, VpSkeleton::TexFormat::RG32F);
+				const pl_fmt fmtRGBA32 = VpSkeleton::PlTexBackend::FindFormat(ctx.gpu, VpSkeleton::TexFormat::RGBA32F);
+				Assert::IsNotNull(fmtR32);
+				Assert::IsNotNull(fmtRG32);
+				Assert::IsNotNull(fmtRGBA32);
+
+				OwnedTex inRecTex(ctx.gpu), inCleanTex(ctx.gpu), inPrevTex(ctx.gpu), inNextTex(ctx.gpu);
+				OwnedTex outYTex(ctx.gpu), outCleanTex(ctx.gpu), outDeltaTex(ctx.gpu);
+				OwnedTex outMapsTex(ctx.gpu), outDiagTex(ctx.gpu), outGuardTex(ctx.gpu), outWarpDiagTex(ctx.gpu);
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, inRecTex.tex, w, h, fmtR32, true, false, true, false));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, inCleanTex.tex, w, h, fmtR32, true, false, true, false));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, inPrevTex.tex, w, h, fmtR32, true, false, true, false));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, inNextTex.tex, w, h, fmtR32, true, false, true, false));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, outYTex.tex, w, h, fmtR32, true, true, false, true));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, outCleanTex.tex, w, h, fmtR32, true, true, false, true));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, outDeltaTex.tex, w, h, fmtRG32, true, true, false, true));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, outMapsTex.tex, cw, 3 * ch, fmtRGBA32, true, true, false, true));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, outDiagTex.tex, cw, ch, fmtRGBA32, true, true, false, true));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, outGuardTex.tex, cw, ch, fmtRG32, true, true, false, true));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, outWarpDiagTex.tex, cw, ch, fmtRG32, true, true, false, true));
+
+				Assert::IsTrue(Detail::UploadPlaneR32F(ctx.gpu, inRecTex.tex, curClean));
+				Assert::IsTrue(Detail::UploadPlaneR32F(ctx.gpu, inCleanTex.tex, curClean));
+				Assert::IsTrue(Detail::UploadPlaneR32F(ctx.gpu, inPrevTex.tex, prevClean));
+				Assert::IsTrue(Detail::UploadPlaneR32F(ctx.gpu, inNextTex.tex, nextClean));
+
+				GpuFrameInput rtIn;
+				rtIn.seq = 1711;
+				rtIn.w = w;
+				rtIn.h = h;
+				rtIn.receivedYTex = inRecTex.tex;
+				rtIn.cleanYTex = inCleanTex.tex;
+				rtIn.hasCleanSplit = true;
+				rtIn.activeRect = full;
+				rtIn.prevPeak = { inPrevTex.tex, &stillMf, false };
+				rtIn.nextPeak = { inNextTex.tex, &stillMf, false };
+				rtIn.retainedGrainVar = retainedGrainVar;
+				rtIn.faceMask = &faceMask;
+				rtIn.hasStepPrior = true;
+				rtIn.estimatedStepDelta = 24.0;
+				rtIn.deadZonePhi = kDeadZonePhiInter;
+				rtIn.zeroCoeffFraction = 0.35;
+
+				const Config cfgRt = MakePreset(Preset::RealTime, Mode::On);
+				const uint64_t estRtZc = TdV2GpuEngine::EstimatedPersistentVramBytes(
+					w, h, cellPx, Preset::RealTime, /*includeChroma=*/false, /*includeRealTimeInternalOutputs=*/false);
+				const uint64_t estRtInt = TdV2GpuEngine::EstimatedPersistentVramBytes(
+					w, h, cellPx, Preset::RealTime, /*includeChroma=*/false, /*includeRealTimeInternalOutputs=*/true);
+
+				// B1: RealTime zero-copy with caller-owned output textures
+				GpuEngineGuard rtZcGuard(ctx.gpu, cfgRt);
+				GpuFrameOutput rtZcOut;
+				rtZcOut.outputYTex = outYTex.tex;
+				rtZcOut.outputCleanTex = outCleanTex.tex;
+				rtZcOut.tdDeltaTex = outDeltaTex.tex;
+				rtZcOut.tdMapsTex = outMapsTex.tex;
+				rtZcOut.diagFlagsTex = outDiagTex.tex;
+				rtZcOut.guardCellTex = outGuardTex.tex;
+				rtZcOut.warpDiagTex = outWarpDiagTex.tex;
+				StandInRegistry siRtZc;
+				Assert::IsTrue(rtZcGuard.engine.ProcessFrameGpu(ctx.gpu, ctx.dispatch, rtIn, rtZcOut, nullptr, &siRtZc),
+					L"RealTime zero-copy ProcessFrameGpu must succeed");
+				const uint64_t liveRtZc = rtZcGuard.engine.AllocatedPersistentLumaVramBytes();
+				Assert::IsTrue(liveRtZc > 0u && liveRtZc <= estRtZc,
+					FormatMsg("Opus MED-1: RealTime zero-copy live luma bytes (%.0f B) must be in (0, %.0f B]",
+						static_cast<double>(liveRtZc), static_cast<double>(estRtZc)).c_str());
+
+				// B2: RealTime with nullptr output textures (engine allocates internal fallback outputs!)
+				GpuEngineGuard rtIntGuard(ctx.gpu, cfgRt);
+				GpuFrameOutput rtIntOut; // All caller output textures intentionally nullptr
+				StandInRegistry siRtInt;
+				Assert::IsTrue(rtIntGuard.engine.ProcessFrameGpu(ctx.gpu, ctx.dispatch, rtIn, rtIntOut, nullptr, &siRtInt),
+					L"RealTime internal-output ProcessFrameGpu must succeed");
+				const uint64_t liveRtInt = rtIntGuard.engine.AllocatedPersistentLumaVramBytes();
+				Assert::IsTrue(liveRtInt > estRtZc,
+					FormatMsg("Negative control: RealTime internal-output live luma bytes (%.0f B) MUST exceed zero-copy estimate (%.0f B)",
+						static_cast<double>(liveRtInt), static_cast<double>(estRtZc)).c_str());
+				Assert::IsTrue(liveRtInt <= estRtInt,
+					FormatMsg("Opus MED-1: RealTime internal-output live luma bytes (%.0f B) MUST be <= includeRealTimeInternalOutputs estimate (%.0f B)",
+						static_cast<double>(liveRtInt), static_cast<double>(estRtInt)).c_str());
+
+				rtZcGuard.engine.Release(ctx.gpu);
+				rtIntGuard.engine.Release(ctx.gpu);
+				Assert::AreEqual(static_cast<uint64_t>(0u), rtZcGuard.engine.AllocatedPersistentVramBytes());
+				Assert::AreEqual(static_cast<uint64_t>(0u), rtIntGuard.engine.AllocatedPersistentVramBytes());
+			}
+
+			// ---- Part C: MakeVramUser(includeChroma=true) 3-Level Stepped Shedding & PlanVram Integration ----
+			{
+				const VpSkeleton::VramUser vUserChroma =
+					TdV2GpuEngine::MakeVramUser(w, h, cellPx, Preset::Reference, /*includeChroma=*/true);
+				Assert::AreEqual(static_cast<size_t>(3u), vUserChroma.levels.size(),
+					L"MakeVramUser(includeChroma=true) must expose 3 stepped levels [luma+chroma, luma-only, 0]");
+				Assert::AreEqual(estRefWithChromaBytes, vUserChroma.levels[0],
+					L"MakeVramUser(includeChroma=true) level 0 must equal luma + chroma persistent bytes");
+				Assert::AreEqual(estRefLumaBytes, vUserChroma.levels[1],
+					L"MakeVramUser(includeChroma=true) level 1 must equal luma-only persistent bytes");
+				Assert::AreEqual(static_cast<uint64_t>(0u), vUserChroma.levels[2],
+					L"MakeVramUser(includeChroma=true) level 2 must be 0 (off)");
+
+				const std::vector<VpSkeleton::ArenaRequest> reqs =
+					TdV2GpuEngine::ArenaRequests(ctx.gpu, w, h, cellPx, Preset::Reference);
+				const VpSkeleton::VramUser arenaExtra = VpSkeleton::ScratchArenaExtraUser(reqs);
+				const uint64_t totalWithChroma =
+					TdV2GpuEngine::EstimatedVramBytes(w, h, cellPx, Preset::Reference, /*includeChroma=*/true);
+				const uint64_t totalLumaOnly =
+					TdV2GpuEngine::EstimatedVramBytes(w, h, cellPx, Preset::Reference, /*includeChroma=*/false);
+
+				VpSkeleton::GovernorInput govIn;
+				govIn.headroom = VpSkeleton::kHeadroomStart;
+				govIn.ownUsageBytes = 0;
+				govIn.card.vramUsageBytes = 0;
+				govIn.card.vramBudgetBytes =
+					static_cast<uint64_t>(std::ceil(static_cast<double>(totalWithChroma) / VpSkeleton::kHeadroomStart)) + 4096u;
+				govIn.users.push_back(vUserChroma);
+				govIn.users.push_back(arenaExtra);
+
+				const VpSkeleton::GovernorPlan fullPlan = VpSkeleton::PlanVram(govIn);
+				Assert::IsTrue(fullPlan.fits, L"MakeVramUser(includeChroma=true) + ScratchArenaExtra must fit in exact working-set budget");
+				Assert::AreEqual(0u, fullPlan.steps, L"Full luma+chroma budget must require 0 shed steps");
+				Assert::AreEqual(totalWithChroma, fullPlan.totalBytes,
+					L"Governor totalBytes must equal EstimatedVramBytes(Reference, includeChroma=true)");
+
+				// Tighter budget fitting luma+scratch (not luma+chroma+scratch) steps cleanly to level 1 (luma only)!
+				VpSkeleton::GovernorInput tightGov = govIn;
+				tightGov.card.vramBudgetBytes =
+					static_cast<uint64_t>(std::ceil(static_cast<double>(totalLumaOnly) / VpSkeleton::kHeadroomStart)) + 4096u;
+				const VpSkeleton::GovernorPlan steppedPlan = VpSkeleton::PlanVram(tightGov);
+				const VpSkeleton::UserGrant* tdGrant = steppedPlan.Find(VpSkeleton::kUserTemporalDetail);
+				Assert::IsNotNull(tdGrant);
+				Assert::IsTrue(steppedPlan.fits && tdGrant->reduced && !tdGrant->shed,
+					L"Tighter budget fitting luma+scratch must shed GPU chroma (level 1) rather than shedding TD completely");
+				Assert::AreEqual(estRefLumaBytes, tdGrant->bytes,
+					L"Stepped TD grant must keep exact luma-only persistent bytes");
+			}
+		}
+
+		// =========================================================================
+		// 15. Opus Repeat Audit LOW-5: Undersized faceMask Engages Visible Stand-In
+		//     and Fails Closed Conservatively on Out-of-Range Trailing Cells (GPU)
+		// =========================================================================
+		BEGIN_TEST_METHOD_ATTRIBUTE(OpusLow5UndersizedFaceMaskEngagesVisibleStandInAndFailsClosed)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(OpusLow5UndersizedFaceMaskEngagesVisibleStandInAndFailsClosed)
+		{
+			WarpGpuContext ctx;
+			const int w = 64;
+			const int h = 64;
+			const int cellPx = 16;
+			const int cw = w / cellPx; // 4
+			const int ch = h / cellPx; // 4 -> 16 cells
+			const ActiveRect full = ActiveRect::Full(w, h);
+			const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+
+			const TdV2Plane master = RenderScene(w, h, 0.0, 0.0);
+			TdV2Plane curY(w, h, 0.0);
+			for (size_t i = 0; i < master.v.size(); ++i)
+				curY.v[i] = master.v[i] + 10.0; // Coherent +10.0 compression bias across all 16 cells
+			const TdV2Plane prevClean = AddCodingDamage(master, 0.5, 17201u, 0.0, full);
+			const TdV2Plane nextClean = AddCodingDamage(master, 0.5, 17202u, 0.0, full);
+
+			const Config cfg = MakePreset(Preset::Reference, Mode::On);
+			FrameProcessInput baseIn;
+			baseIn.seq = 1720;
+			baseIn.receivedY = curY;
+			baseIn.hasCleanSplit = true;
+			baseIn.cleanY = curY;
+			baseIn.activeRect = full;
+			baseIn.prevPeak = { &prevClean, &stillMf, false };
+			baseIn.nextPeak = { &nextClean, &stillMf, false };
+			baseIn.hasStepPrior = true;
+			baseIn.estimatedStepDelta = 24.0;
+			baseIn.deadZonePhi = kDeadZonePhiInter;
+			baseIn.zeroCoeffFraction = 0.35;
+
+			// Mandatory Same-Input Negative Control (Rule 3): faceMask == nullptr MUST blend trailing cells 1..15!
+			GpuEngineGuard unmaskedGuard(ctx.gpu, cfg);
+			StandInRegistry regUnmasked;
+			const GpuProcessResult resUnmasked =
+				unmaskedGuard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, baseIn, nullptr, &regUnmasked);
+			Assert::IsTrue(resUnmasked.succeeded, L"Negative control unmasked GPU ProcessFrame must succeed");
+			Assert::IsFalse(regUnmasked.IsActive(StandInKind::FaceNonRigidMask),
+				L"Negative control unmasked GPU run must not engage FaceNonRigidMask");
+			Assert::IsFalse(regUnmasked.IsActive(StandInKind::FaceMaskSizeMismatch),
+				L"Negative control unmasked GPU run must not engage FaceMaskSizeMismatch");
+			Assert::AreEqual(static_cast<size_t>(0u), resUnmasked.faceMaskedCells);
+
+			double maxTrailingUnmaskedDelta = 0.0;
+			for (int y = 0; y < h; ++y)
+			{
+				for (int x = 0; x < w; ++x)
+				{
+					if (x < cellPx && y < cellPx)
+						continue; // Cell 0
+					maxTrailingUnmaskedDelta = (std::max)(maxTrailingUnmaskedDelta, std::fabs(resUnmasked.tdDelta.at(x, y)));
+				}
+			}
+			Assert::IsTrue(maxTrailingUnmaskedDelta > 0.5,
+				FormatMsg("Negative control: GPU trailing cells 1..15 with faceMask==nullptr MUST receive real delta > 0.5 (got %.4f)",
+					maxTrailingUnmaskedDelta).c_str());
+
+			// Undersized non-empty faceMask (length 1 < 16, missing cells 1..15):
+			// MUST visibly engage FaceNonRigidMask AND conservatively fail closed (delta == 0) on trailing cells 1..15!
+			const std::vector<uint8_t> undersizedFaceMask{ 0u };
+			FrameProcessInput undersizedIn = baseIn;
+			undersizedIn.faceMask = &undersizedFaceMask;
+
+			GpuEngineGuard undersizedGuard(ctx.gpu, cfg);
+			StandInRegistry regUndersized;
+			const GpuProcessResult resUndersized =
+				undersizedGuard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, undersizedIn, nullptr, &regUndersized);
+
+			Assert::IsTrue(regUndersized.IsActive(StandInKind::FaceNonRigidMask),
+				L"Opus LOW-5: GPU undersized faceMask MUST visibly engage StandInKind::FaceNonRigidMask");
+			Assert::IsTrue(regUndersized.IsActive(StandInKind::FaceMaskSizeMismatch),
+				L"Opus LOW-5: GPU undersized faceMask MUST visibly engage StandInKind::FaceMaskSizeMismatch");
+			Assert::AreEqual(w, resUndersized.outputY.w);
+			Assert::AreEqual(h, resUndersized.outputY.h);
+
+			for (int y = 0; y < h; ++y)
+			{
+				for (int x = 0; x < w; ++x)
+				{
+					if (x < cellPx && y < cellPx)
+						continue; // Trailing cells 1..15 only
+					if (!resUndersized.tdDelta.Empty())
+					{
+						Assert::IsTrue(std::fabs(resUndersized.tdDelta.at(x, y)) <= 1e-5,
+							FormatMsg("Opus LOW-5: GPU undersized faceMask trailing cell pixel (%.0f,%.0f) tdDelta=%.6f MUST be 0.0",
+								static_cast<double>(x), static_cast<double>(y), resUndersized.tdDelta.at(x, y)).c_str());
+					}
+					Assert::IsTrue(std::fabs(resUndersized.outputY.at(x, y) - curY.at(x, y)) <= 1e-4,
+						FormatMsg("Opus LOW-5: GPU undersized faceMask trailing cell pixel (%.0f,%.0f) outputY=%.4f != received=%.4f",
+							static_cast<double>(x), static_cast<double>(y), resUndersized.outputY.at(x, y), curY.at(x, y)).c_str());
+				}
+			}
+
+			// Also verify ProcessFrameGpu rejects a dimension-mismatched GPU faceMaskTex (1x1 != 4x4) cleanly & visibly!
+			{
+				struct OwnedTex
+				{
+					pl_gpu gpu = nullptr;
+					pl_tex tex = nullptr;
+					explicit OwnedTex(pl_gpu g) : gpu(g) {}
+					~OwnedTex()
+					{
+						if (gpu != nullptr && tex != nullptr)
+							pl_tex_destroy(gpu, &tex);
+					}
+					OwnedTex(const OwnedTex&) = delete;
+					OwnedTex& operator=(const OwnedTex&) = delete;
+				};
+
+				const pl_fmt fmtR32 = VpSkeleton::PlTexBackend::FindFormat(ctx.gpu, VpSkeleton::TexFormat::R32F);
+				Assert::IsNotNull(fmtR32);
+
+				OwnedTex inRecTex(ctx.gpu), outYTex(ctx.gpu), badFaceMaskTex(ctx.gpu);
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, inRecTex.tex, w, h, fmtR32, true, false, true, false));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, outYTex.tex, w, h, fmtR32, true, true, false, true));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, badFaceMaskTex.tex, 1, 1, fmtR32, true, false, true, false));
+				Assert::IsTrue(Detail::UploadPlaneR32F(ctx.gpu, inRecTex.tex, curY));
+
+				GpuFrameInput badTexIn;
+				badTexIn.seq = 1721;
+				badTexIn.w = w;
+				badTexIn.h = h;
+				badTexIn.receivedYTex = inRecTex.tex;
+				badTexIn.activeRect = full;
+				badTexIn.faceMaskTex = badFaceMaskTex.tex; // 1x1 != cellsW x cellsH (4x4)!
+				badTexIn.hasStepPrior = true;
+				badTexIn.estimatedStepDelta = 24.0;
+
+				GpuFrameOutput badTexOut;
+				badTexOut.outputYTex = outYTex.tex;
+				GpuEngineGuard badTexGuard(ctx.gpu, cfg);
+				StandInRegistry siBadTex;
+				const bool ok = badTexGuard.engine.ProcessFrameGpu(
+					ctx.gpu, ctx.dispatch, badTexIn, badTexOut, nullptr, &siBadTex);
+				Assert::IsFalse(ok, L"Opus LOW-5: ProcessFrameGpu MUST fail cleanly on dimension-mismatched faceMaskTex");
+				Assert::IsFalse(badTexOut.succeeded, L"Opus LOW-5: mismatched faceMaskTex must leave out.succeeded == false");
+				Assert::IsTrue(siBadTex.IsActive(StandInKind::FaceMaskSizeMismatch),
+					L"Opus LOW-5: ProcessFrameGpu mismatched faceMaskTex MUST visibly engage StandInKind::FaceMaskSizeMismatch");
+			}
+		}
 	};
 } // namespace TdV2GpuWarpNs
 } // namespace Tests
