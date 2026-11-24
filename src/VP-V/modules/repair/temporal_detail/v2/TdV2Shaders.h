@@ -1494,14 +1494,16 @@ if (tid == 0)
     else if (totCur.w > 0.5 && K > 0)
     {
         float invC = 1.0 / totCur.w;
+        float quantMidRmsBound = sqrt(12.0 * max(0.0, u_step_noise_var)) * TD_HM_PEAK;
         for (int k = 0; k < K; ++k)
         {
             float rM2 = totRefM2[k] * invC;
             float rM3 = totRefD3[k] * invC;
             float rEnergy = rM2 + rM3;
             float rF = (rEnergy > TD_NUM_FLOOR) ? (rM2 / (rEnergy + TD_NUM_FLOOR)) : 1.0;
-            if (rEnergy > u_structure_floor && cM2 < rM2 && curFDebiased <= TD_F_DEFOCUS &&
-                (rF - curF) > TD_F_SHIFT_DELTA)
+            if (rEnergy > u_structure_floor && cM2 < rM2 && curFDebiased < TD_F_SHARP &&
+                (rF - curF) > TD_F_SHIFT_DELTA &&
+                (sqrt(rM2) - sqrt(cM2)) > quantMidRmsBound)
             {
                 focusChange = true;
                 break;

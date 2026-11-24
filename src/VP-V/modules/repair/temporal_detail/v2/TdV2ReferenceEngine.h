@@ -582,6 +582,13 @@ namespace TdV2
 		const double fSharp = AnalyticalEdgeFocusRatio(0.0);
 		const double fDefocus = AnalyticalEdgeFocusRatio(VpUnit::BandFromBase::kSigmaBase);
 		const double fShiftDelta = fSharp - fDefocus;
+		// Exact Parseval M-band passband supremum ||H_M||_inf and uniform-step deadzone RMS bound
+		// Delta_eff * ||H_M||_inf = sqrt(12 * stepNoiseVar) * ||H_M||_inf (Rule 1: zero magic numbers).
+		const double s1SqF = VpUnit::BandFromBase::kSigmaFine * VpUnit::BandFromBase::kSigmaFine;
+		const double s2SqF = VpUnit::BandFromBase::kSigmaBase * VpUnit::BandFromBase::kSigmaBase;
+		const double wStarSqF = (2.0 * std::log(VpUnit::BandFromBase::kSigmaBase / VpUnit::BandFromBase::kSigmaFine)) / (s2SqF - s1SqF);
+		const double hmPeakF = std::exp(-(s1SqF * wStarSqF) / 2.0) - std::exp(-(s2SqF * wStarSqF) / 2.0);
+		const double quantMidRmsBound = std::sqrt(12.0 * stepNoiseVar) * hmPeakF;
 
 		const ActiveRect ar = active.ClampedTo(curBands.M.w, curBands.M.h);
 
@@ -650,17 +657,17 @@ namespace TdV2
 				else
 				{
 					// Detect genuine focal-plane shift (rack focus) along motion respecting Parseval's theorem:
-					// Optical defocus (|H(w)| <= 1) strictly reduces mid-band energy (curM2 < refM2), pulls
-					// current noise-debiased focus ratio into the optical defocus regime (curFDebiased <= fDefocus),
-					// and drops focus ratio by > F(0) - F(kSigmaBase), so both static curved smooth gradients
-					// (refF ~= curF) and focused B-frames with quantization-attenuated M-band (curFDebiased > fDefocus)
-					// NEVER trigger false focusChange vetoes!
+					// Optical defocus (|H(w)| <= 1) strictly reduces mid-band energy (curM2 < refM2), drops focus
+					// ratio by > F(0) - F(kSigmaBase), AND reduces M-band RMS by strictly more than the codec's
+					// derived deadzone quantization bound Delta_eff * ||H_M||_inf = sqrt(12 * stepNoiseVar) * ||H_M||_inf,
+					// so static curved skies (refF ~= curF) and B-frame quantization wipes NEVER trigger false vetoes!
 					for (const auto& rb : refBands)
 					{
 						double refEnergy = 0.0, refM2 = 0.0;
 						const double refF = cellFocusRatio(rb, cx, cy, refEnergy, refM2);
-						if (refEnergy > structureFloor && curM2 < refM2 && curFDebiased <= fDefocus &&
-						    (refF - curF) > fShiftDelta)
+						if (refEnergy > structureFloor && curM2 < refM2 && curFDebiased < fSharp &&
+						    (refF - curF) > fShiftDelta &&
+						    (std::sqrt(refM2) - std::sqrt(curM2)) > quantMidRmsBound)
 						{
 							info[idx].focusChange = true;
 							break;

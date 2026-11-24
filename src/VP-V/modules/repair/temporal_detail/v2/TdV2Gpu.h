@@ -2713,6 +2713,10 @@ namespace Gpu
 			const double fSharp = AnalyticalEdgeFocusRatio(0.0);
 			const double fDefocus = AnalyticalEdgeFocusRatio(VpUnit::BandFromBase::kSigmaBase);
 			const double fShiftDelta = fSharp - fDefocus;
+			const double s1SqF = VpUnit::BandFromBase::kSigmaFine * VpUnit::BandFromBase::kSigmaFine;
+			const double s2SqF = VpUnit::BandFromBase::kSigmaBase * VpUnit::BandFromBase::kSigmaBase;
+			const double wStarSqF = (2.0 * std::log(VpUnit::BandFromBase::kSigmaBase / VpUnit::BandFromBase::kSigmaFine)) / (s2SqF - s1SqF);
+			const double hmPeakF = std::exp(-(s1SqF * wStarSqF) / 2.0) - std::exp(-(s2SqF * wStarSqF) / 2.0);
 
 			// Active rect & half-res active rect UBOs (zero recompiles on aspect-ratio/bar changes!).
 			const ActiveRect& ar = p.active;
@@ -3073,6 +3077,7 @@ namespace Gpu
 				p2aHdr += VpvGpu::Define("TD_F_SHARP", fSharp);
 				p2aHdr += VpvGpu::Define("TD_F_DEFOCUS", fDefocus);
 				p2aHdr += VpvGpu::Define("TD_F_SHIFT_DELTA", fShiftDelta);
+				p2aHdr += VpvGpu::Define("TD_HM_PEAK", hmPeakF);
 				p2aHdr += Shaders::kCoreHelpers;
 				if (compactBands)
 					p2aHdr += Shaders::kHalfBandSamplerHelper;
