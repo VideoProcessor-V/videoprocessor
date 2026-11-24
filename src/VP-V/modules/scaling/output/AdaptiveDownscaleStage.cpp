@@ -3,6 +3,7 @@
 
 #include <DebugLog.h>
 #include <VP-V/core/Products.h>
+#include <VP-V/core/Ramp.h>
 #include <VP-V/modules/control/skeleton/SkeletonAccess.h>
 #include <VP-V/modules/output/dither/CustomHookChain.h>
 #include <VP-V/modules/scaling/output/DownscaleLight.h>
@@ -10,6 +11,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 
 // WP-13: moved from LibplaceboVideoRenderer.cpp (RenderLocked, Stage 8-2 / 8b and 8-1).
 // Statement order, the host reads and the log text are unchanged.
@@ -53,18 +55,21 @@ namespace AdaptiveDownscaleStage
 			return true;
 		}
 
-		// Stage 12 §2c / S8-1: the motion for holding the CNN / SSIM residual (vectors of this source
-		// frame only; never with NLS - its map is not linear; never starts the matcher).
-		void SetResidualMotion(AdaptiveDownscale::Module& module, const Frame& frame, const MotionSource& m)
+		// Stage 12 §2c / S8-1: the motion for holding the CNN / SSIM residual and the motion-adapted blend
+		// (vectors of this source frame only; carries known NLS mapping when NLS is active so the motion-adapted
+		// blend warps through nls_coordinate while residual hold stays off; never starts the matcher).
+		void SetResidualMotion(AdaptiveDownscale::Module& module, const Frame& frame, const MotionSource& m,
+			const NlsMaskMapping::Mapping& nlsMap, bool nlsUnknown)
 		{
 			module.ClearMotion();
-			if (!frame.nlsSubmitted && m.live && m.field && m.frameTrust)
+			if (!nlsUnknown && m.live && m.field && m.frameTrust)
 			{
 				AdaptiveDownscale::Motion motion;
 				motion.field = m.field;
 				motion.frameTrust = m.frameTrust;
 				motion.minTrustedShare = m.minTrustedShare;
 				motion.sourceCrop = frame.sourceCrop;
+				motion.nls = frame.nlsSubmitted ? nlsMap : NlsMaskMapping::Mapping{};
 				module.SetMotion(motion);
 			}
 		}
@@ -72,7 +77,8 @@ namespace AdaptiveDownscaleStage
 		// CF-2 switch-over: the grain term's single seam. kP10gGrainLevel (id 35, "grain.level", the repair.grain_split owner
 		// fill; RGBA32F, one texel per 16 x 16 source-luma block, x = N_b) through the skeleton: published = the module reads it;
 		// anything else = grain_floor (no private grain term), with the cause. One ask per upscale frame.
-		TermSource ReadGrain(const Frame& frame, const Host& host, AdaptiveDownscale::Module& module)
+		TermSource ReadGrain(const Frame& frame, const Host& host, AdaptiveDownscale::Module& module,
+			const NlsMaskMapping::Mapping& nlsMap)
 		{
 			module.ClearGrainLevel();
 			TermSource t;
@@ -98,6 +104,7 @@ namespace AdaptiveDownscaleStage
 			gs.level = static_cast<pl_tex>(r.gpu.resource);
 			gs.pin = r.pin;
 			gs.sourceCrop = frame.sourceCrop;
+			gs.nls = (frame.nlsSubmitted && nlsMap.valid) ? nlsMap : NlsMaskMapping::Mapping{};
 			module.SetGrainLevel(gs);
 			t.published = true;
 			return t;
@@ -107,7 +114,7 @@ namespace AdaptiveDownscaleStage
 	FallbackCatalog::Decision UpscaleScalingFallback(const UpscaleFallbackInputs& in)
 	{
 		const bool stageFloor = in.motionAdaptiveOn && !in.oneAxis && !in.stageMotionCause.empty();
-		const bool floor = stageFloor || in.moduleFloorUsed;
+		const bool floor = stageFloor || (in.motionAdaptiveOn && !in.oneAxis && in.moduleFloorUsed);
 		const FallbackCatalog::Decision base = FallbackCatalog::OutputScalingUpscale(in.requested, in.failureHeld, in.scalerError,
 			floor, stageFloor ? in.stageMotionCause : in.moduleFloorCause);
 		if (base.engaged || !in.requested)
@@ -152,8 +159,12 @@ namespace AdaptiveDownscaleStage
 		const bool oneAxis = upscaleBlend && axes.oneAxis;
 		oneAxisThisFrame = oneAxis;
 		droppedPrescalers = 0;
-		motionAdaptiveOn = frame.slotRuns && frame.adaptive && frame.adaptive->motionAdaptive &&
-			(upscaleBlend || frame.adaptiveDownscale);
+		motionStrengthActive = (frame.slotRuns && frame.adaptive && (upscaleBlend || frame.adaptiveDownscale))
+			? RampMath::Clamp01(frame.adaptive->motionStrength) : 0.0f;
+		motionAdaptiveOn = motionStrengthActive > 0.0f;
+		const NlsMaskMapping::Mapping nlsMap = (frame.nlsSubmitted && host.nlsMapping)
+			? host.nlsMapping() : NlsMaskMapping::Mapping{};
+		const bool nlsUnknown = frame.nlsSubmitted && !nlsMap.valid;
 		const bool downscaleOn = frame.slotRuns && frame.adaptiveDownscale;   // slot off: as adaptive_downscale off
 		upscaleThisFrame = upscaleBlend;
 		if (!upscaleBlend)
@@ -239,17 +250,17 @@ namespace AdaptiveDownscaleStage
 			// repeat of the last sequence keeps the first presentation's verdict (no flicker on a repeated frame). Not an Acquire:
 			// P3 has no GPU Acquire publication at this tip (MotionSource).
 			const MotionSource m = host.motion();
-			upscaleMotionExternalView = !oneAxis && frame.vectorsRun && !frame.nlsSubmitted && m.live && m.field && m.frameTrust;
+			upscaleMotionExternalView = !oneAxis && frame.vectorsRun && !nlsUnknown && m.live && m.field && m.frameTrust;
 			if (!(haveMotionSequence && frame.sourceSequence == motionSequenceSeen))
 			{
-				const char* why = MotionDiscontinuity(frame.vectorsRun, frame.nlsSubmitted, m.live && m.field && m.frameTrust,
+				const char* why = MotionDiscontinuity(frame.vectorsRun, nlsUnknown, m.live && m.field && m.frameTrust,
 					haveMotionSequence, motionSequenceSeen, frame.sourceSequence);
 				upscaleMotionCause = why ? why : "";
 				haveMotionSequence = true;
 				motionSequenceSeen = frame.sourceSequence;
 			}
 			up.vectorsInvalid = !upscaleMotionCause.empty();
-			grainTerm = ReadGrain(frame, host, module);
+			grainTerm = ReadGrain(frame, host, module, nlsMap);
 			if (oneAxis != oneAxisLogged)
 			{
 				oneAxisLogged = oneAxis;
@@ -262,8 +273,8 @@ namespace AdaptiveDownscaleStage
 			// estimate is still wanted for the residual hold and the motion-adapted blend.
 			module.ClearGrainField();
 			grainOffered = SetSharedGrain(module, host);
-			SetResidualMotion(module, frame, m);
-			state.grainMapWanted = adaptive.motionAdaptive && module.Active() && frame.vectorsRun;
+			SetResidualMotion(module, frame, m, nlsMap, nlsUnknown);
+			state.grainMapWanted = (RampMath::Clamp01(adaptive.motionStrength) > 0.0f) && module.Active() && frame.vectorsRun;
 			hooks.insert(hooks.begin(), module.Measure());
 			// The blend before SSimSuperRes (both POST_KERNEL): SuperRes refines the blended picture
 			// with its strength scaled by the grain term.
@@ -303,7 +314,7 @@ namespace AdaptiveDownscaleStage
 				module.ClearGrainField();
 				grainOffered = SetSharedGrain(module, host);
 				const MotionSource m = host.motion();
-				SetResidualMotion(module, frame, m);
+				SetResidualMotion(module, frame, m, nlsMap, nlsUnknown);
 				if (adaptive.grainMap && m.live && m.grainError)
 				{
 					AdaptiveDownscale::GrainField field;
@@ -315,7 +326,7 @@ namespace AdaptiveDownscaleStage
 					bool known = true;
 					if (frame.nlsSubmitted)
 					{
-						field.nls = host.nlsMapping();
+						field.nls = nlsMap;
 						known = field.nls.valid;
 					}
 					if (known)
@@ -330,7 +341,7 @@ namespace AdaptiveDownscaleStage
 				// The next source frame's estimate runs for the map when the blend acts on this
 				// picture (a downscale; Active() is the last measured frame's).
 				// The motion-adapted blend needs this frame's vectors as much as the map does.
-				state.grainMapWanted = (adaptive.grainMap || adaptive.motionAdaptive) && module.Active() && frame.vectorsRun;
+				state.grainMapWanted = (adaptive.grainMap || RampMath::Clamp01(adaptive.motionStrength) > 0.0f) && module.Active() && frame.vectorsRun;
 				hooks.insert(hooks.begin(), module.Measure());
 				hooks.push_back(module.Blend());
 				state.noSsimLogged = false;
@@ -391,22 +402,26 @@ namespace AdaptiveDownscaleStage
 			// M4 (CF-2): P3 motion read via host.motion ExternalView (no GPU Acquire publication yet) — visible, never silent.
 			if (!oneAxisThisFrame && upscaleMotionExternalView)
 				lines.push_back("Adaptive upscale motion: P3 read through the ExternalView (P3 has no GPU publication)");
-			// N1.4: no / invalid vectors with adaptive_motion on: the motion floor, with the cause (one-axis: faithful only already).
+			// N1.4: no / invalid vectors with adaptive_motion > 0: the motion floor, with the cause (one-axis: faithful only already).
 			if (motionAdaptiveOn && !oneAxisThisFrame && !upscaleMotionCause.empty())
-				lines.push_back("Adaptive upscale motion: no vectors (alias-safe weight; " + upscaleMotionCause + ")");
+				lines.push_back("Adaptive upscale motion: no vectors (alias-safe weight) (" + upscaleMotionCause + ")");
 			// FIX1 (gate M1): the module's own floor (no usable factor map) while the stage found the vectors usable.
-			else if (module.MotionFloorUsed())
-				lines.push_back("Adaptive upscale motion: no vectors (alias-safe weight; " + module.MotionFloorCauseText() + ")");
+			else if (motionAdaptiveOn && !oneAxisThisFrame && module.MotionFloorUsed())
+				lines.push_back("Adaptive upscale motion: no vectors (alias-safe weight) (" + module.MotionFloorCauseText() + ")");
 		}
 		if (motionAdaptiveOn)
 		{
+			char strengthBuf[16] = {};
+			std::snprintf(strengthBuf, sizeof(strengthBuf), "%.2f", motionStrengthActive);
+			const std::string strengthText(strengthBuf);
 			const AdaptiveDownscale::MotionState m = module.LastMotionState();
 			lines.push_back(upscaleThisFrame && module.MotionFloorUsed() ?
-				"Motion-adapted blend: no vectors on this frame (upscale: the motion floor, alias-safe lean)" :
+				"Motion-adapted blend: strength " + strengthText + " (no vectors on this frame; upscale: alias-safe lean)" :
 				m == AdaptiveDownscale::MotionState::Used ?
-				"Motion-adapted blend: on (vectors; untracked or fast motion uses the faithful scaler)" :
-				m == AdaptiveDownscale::MotionState::NoVectors ? "Motion-adapted blend: no vectors on this frame (plain blend)" :
-				"Motion-adapted blend: idle (the blend did not run on the last frame)");
+				"Motion-adapted blend: strength " + strengthText + " (vectors; untracked or fast motion uses the faithful scaler)" :
+				m == AdaptiveDownscale::MotionState::NoVectors ?
+				"Motion-adapted blend: strength " + strengthText + " (no vectors on this frame; plain blend)" :
+				"Motion-adapted blend: idle (strength " + strengthText + "; the blend did not run on the last frame)");
 		}
 		// FIX-X5-CUT-P4 / C5: never a silent downgrade. No scene group for this frame: no cut verdict this frame.
 		if (!module.CutAvailable())

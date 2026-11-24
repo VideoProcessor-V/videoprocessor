@@ -34,9 +34,12 @@ namespace HybridBlend
 	inline float EdgeTerm(float e) { return 1.0f - RampMath::Clamp01(e); }
 
 	// Valid vectors: the map's factor; absent / invalid (no estimate, resync, a drop): the floor (the alias-safe lean).
-	inline float MotionTerm(bool vectorsValid, float mapFactor, float motionFloor)
+	// motionStrength (0..1): continuum blend from standard unadapted blend (0 -> 1) to full motion factor (1 -> raw).
+	inline float MotionTerm(bool vectorsValid, float mapFactor, float motionFloor, float motionStrength = 1.0f)
 	{
-		return RampMath::Clamp01(vectorsValid ? mapFactor : motionFloor);
+		const float raw = RampMath::Clamp01(vectorsValid ? mapFactor : motionFloor);
+		const float s = RampMath::Clamp01(motionStrength);
+		return 1.0f - s * (1.0f - raw);
 	}
 
 	inline float Weight(const Terms& t)

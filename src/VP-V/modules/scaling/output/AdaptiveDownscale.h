@@ -4,6 +4,8 @@
 #include <libplacebo/shaders.h>
 
 #include <VP-V/core/LumaWeights.h>
+#include <VP-V/core/OnePole.h>
+#include <VP-V/core/Ramp.h>
 #include <VP-V/modules/scaling/output/NlsMaskMapping.h>
 #include <VP-V/modules/drive/led_measure/ReadbackRing.h>
 #include <VP-V/modules/scaling/output/AdaptiveDownscaleCut.h>
@@ -100,17 +102,15 @@ namespace AdaptiveDownscale
 		// effective state (fbo_float32); falls back to 16-bit float when the
 		// GPU has no suitable rgba32f format. Precision only, no switch.
 		bool float32Picture = true;
-		// Motion-adapted blend (owner 2026-10-31; candidate, off by default until the sweep):
+		// Motion-adapted blend (owner 2026-10-31; continuum strength [0, 1], 0 = standard unadapted blend):
 		// the sharper branch's weight (SSIM on a downscale, the CNN on an upscale) kept where
 		// the content is steady and confidently tracked and lowered towards the faithful branch
-		// on fast or untrusted motion. Per 16x16 block of the de-judder's field, once per source
-		// frame: target = floor + (1 - floor) x confidence x (1 - smoothstep(speed_lo, speed_hi,
-		// speed)) for a trusted block of a trusted frame, else floor; speed in picture heights
-		// per second (general over sizes and rates); a one-pole over motionSmoothMs that follows
-		// the block's vector (no flicker at motion boundaries); bilinear between block centres
-		// in the blend; w x= the map. Lowering w only moves towards the faithful branch, which
-		// keeps the grain. No vectors (or NLS): the factor is 1 (today's blend), shown in status.
-		bool motionAdaptive = false;
+		// on motion-boundary shear, fast rigid pans, or low confidence. Per 16x16 block once per source
+		// frame: target = floor + (1 - floor) x conf x (1 - max(smoothstep(speed_lo, speed_hi, shear_speed),
+		// smoothstep(2*speed_hi, 4*speed_hi, speed))); bilinear temporal advection along the vector with
+		// asymmetric fast-attack (tau/4) / smooth-release (tau) one-pole; bilinear between block centres
+		// in the blend; mf = 1 - motionStrength x (1 - mapFactor).
+		float motionStrength = 0.0f;     // 0 = off (standard blend), 1 = full motion-adapted blend
 		float motionSpeedLo = 0.1f;      // picture heights per second: full sharper-branch weight below
 		float motionSpeedHi = 0.4f;      // picture heights per second: the floor above
 		float motionFloor = 0.0f;        // the factor on fast / untrusted motion (0 = faithful only)
@@ -126,7 +126,7 @@ namespace AdaptiveDownscale
 			a.cnnResidualStabilise == b.cnnResidualStabilise && a.ssimResidualStabilise == b.ssimResidualStabilise &&
 			a.residualGrainGuard == b.residualGrainGuard &&
 			a.float32Picture == b.float32Picture &&
-			a.motionAdaptive == b.motionAdaptive && a.motionSpeedLo == b.motionSpeedLo && a.motionSpeedHi == b.motionSpeedHi &&
+			a.motionStrength == b.motionStrength && a.motionSpeedLo == b.motionSpeedLo && a.motionSpeedHi == b.motionSpeedHi &&
 			a.motionFloor == b.motionFloor && a.motionSmoothMs == b.motionSmoothMs;
 	}
 
@@ -188,6 +188,7 @@ namespace AdaptiveDownscale
 		pl_tex frameTrust = nullptr;   // MotionWarp::FrameTrust(): r = the trusted share
 		float minTrustedShare = 0.25f;
 		pl_rect2df sourceCrop{};       // the source crop libplacebo scales, in the field's source pixels
+		NlsMaskMapping::Mapping nls{}; // NLS coordinate mapping when active (residual hold stays off under NLS)
 	};
 
 	// Stage 12 §2c / delta 15 S8-2 (owner 2026-10-15): the weight scale for a
@@ -242,27 +243,93 @@ namespace AdaptiveDownscale
 	}
 
 	// Motion-adapted blend: CPU mirrors of the motion-map shader (tests; the shader computes the
-	// same in float). `speed` in picture heights per second; `confidence` 0..1 is 1 today (the
-	// camera model's per-block confidence multiplies in when it lands).
+	// same in float). `speed` and `shearSpeed` in picture heights per second; `confidence` continuous in 0..1.
 	inline float MotionSmoothstep(float lo, float hi, float x)
 	{
 		if (!(hi > lo)) return x < lo ? 0.0f : 1.0f;
-		float t = (x - lo) / (hi - lo);
-		t = t < 0.0f ? 0.0f : t > 1.0f ? 1.0f : t;
+		const float t = RampMath::Clamp01((x - lo) / (hi - lo));
 		return t * t * (3.0f - 2.0f * t);
 	}
+	// Continuous confidence + Option 4B rigid-pan protection: shear ramps across motionSpeedLo..motionSpeedHi,
+	// while rigid cinema pans stay crisp up to the elementary power-of-2 ceiling (2*motionSpeedHi .. 4*motionSpeedHi).
+	inline float MotionTarget(bool frameTrusted, float speed, float shearSpeed, float confidence, const Settings& s)
+	{
+		const float fl = RampMath::Clamp01(s.motionFloor);
+		const float c = frameTrusted ? RampMath::Clamp01(confidence) : 0.0f;
+		const float rampShear = MotionSmoothstep(s.motionSpeedLo, s.motionSpeedHi, shearSpeed);
+		const float rampPan = MotionSmoothstep(2.0f * s.motionSpeedHi, 4.0f * s.motionSpeedHi, speed);
+		const float ramp = (std::max)(rampShear, rampPan);
+		return fl + (1.0f - fl) * c * (1.0f - ramp);
+	}
+	// Legacy overload forwarding cleanly to the continuous shear-aware law (exact equivalence when shearSpeed == speed).
 	inline float MotionTarget(bool frameTrusted, bool blockTrusted, float speed, float confidence, const Settings& s)
 	{
-		const float floor = s.motionFloor < 0.0f ? 0.0f : s.motionFloor > 1.0f ? 1.0f : s.motionFloor;
-		if (!frameTrusted || !blockTrusted) return floor;
-		const float c = confidence < 0.0f ? 0.0f : confidence > 1.0f ? 1.0f : confidence;
-		return floor + (1.0f - floor) * c * (1.0f - MotionSmoothstep(s.motionSpeedLo, s.motionSpeedHi, speed));
+		return MotionTarget(frameTrusted, speed, speed, blockTrusted ? confidence : 0.0f, s);
 	}
 	// The block's vector (source pixels per frame) as picture heights per second.
 	inline float MotionSpeed(float vx, float vy, float cropHeight, float frameSeconds)
 	{
 		if (!(cropHeight > 0.0f) || !(frameSeconds > 0.0f)) return 0.0f;
 		return std::sqrt(vx * vx + vy * vy) / cropHeight / frameSeconds;
+	}
+	// 4-neighbor cardinal motion-boundary shear speed (picture heights per second), weighted by each neighbor's
+	// continuous confidence (clamped to 0..1) so untrusted neighbors cannot inject false shear.
+	inline float MotionShearSpeed(const float* fieldRgba, int bw, int bh, int bx, int by, float cropHeight, float frameSeconds)
+	{
+		if (!fieldRgba || bw <= 0 || bh <= 0 || !(cropHeight > 0.0f) || !(frameSeconds > 0.0f))
+			return 0.0f;
+		const int cx = (std::max)(0, (std::min)(bw - 1, bx));
+		const int cy = (std::max)(0, (std::min)(bh - 1, by));
+		const float* fb = fieldRgba + (static_cast<size_t>(cy) * static_cast<size_t>(bw) + static_cast<size_t>(cx)) * 4;
+		static constexpr int kOffsets[4][2] = { { -1, 0 }, { 1, 0 }, { 0, -1 }, { 0, 1 } };
+		float maxDv = 0.0f;
+		for (int i = 0; i < 4; ++i)
+		{
+			const int nx = (std::max)(0, (std::min)(bw - 1, cx + kOffsets[i][0]));
+			const int ny = (std::max)(0, (std::min)(bh - 1, cy + kOffsets[i][1]));
+			const float* fn = fieldRgba + (static_cast<size_t>(ny) * static_cast<size_t>(bw) + static_cast<size_t>(nx)) * 4;
+			const float dvx = fn[0] - fb[0];
+			const float dvy = fn[1] - fb[1];
+			const float wdv = RampMath::Clamp01(fn[2]) * std::sqrt(dvx * dvx + dvy * dvy);
+			if (wdv > maxDv)
+				maxDv = wdv;
+		}
+		return maxDv / (cropHeight * frameSeconds);
+	}
+	// Bilinear temporal advection in the 16x16 block map (clamped to block-centre bounds [0, bw-1] x [0, bh-1]).
+	inline float MotionAdvectBilinear(const float* map, int bw, int bh, float pcX, float pcY, int stride = 1)
+	{
+		if (!map || bw <= 0 || bh <= 0 || stride <= 0)
+			return 0.0f;
+		const float pposX = (std::max)(0.0f, (std::min)(static_cast<float>(bw - 1), pcX / 16.0f - 0.5f));
+		const float pposY = (std::max)(0.0f, (std::min)(static_cast<float>(bh - 1), pcY / 16.0f - 0.5f));
+		const int x0 = static_cast<int>(std::floor(pposX));
+		const int y0 = static_cast<int>(std::floor(pposY));
+		const int x1 = (std::min)(bw - 1, x0 + 1);
+		const int y1 = (std::min)(bh - 1, y0 + 1);
+		const float tx = pposX - static_cast<float>(x0);
+		const float ty = pposY - static_cast<float>(y0);
+		const auto at = [&](int x, int y) {
+			return map[(static_cast<size_t>(y) * static_cast<size_t>(bw) + static_cast<size_t>(x)) * static_cast<size_t>(stride)];
+		};
+		const float top = at(x0, y0) + (at(x1, y0) - at(x0, y0)) * tx;
+		const float bot = at(x0, y1) + (at(x1, y1) - at(x0, y1)) * tx;
+		return top + (bot - top) * ty;
+	}
+	// Asymmetric one-pole coefficients: smooth release over smoothMs; fast attack over the elementary power-of-2
+	// ratio smoothMs / 4 (framerate-invariant via OnePole::AlphaForMs; 0 ms -> 1.0).
+	inline void MotionAttackReleaseAlphas(float frameSeconds, float smoothMs, float& alphaAttack, float& alphaRelease)
+	{
+		const float dtMs = frameSeconds * 1000.0f;
+		alphaRelease = OnePole::AlphaForMs(dtMs, smoothMs, OnePole::DtRule::AsGiven);
+		alphaAttack = OnePole::AlphaForMs(dtMs, smoothMs * 0.25f, OnePole::DtRule::AsGiven);
+	}
+	// Asymmetric one-pole step: fast attack when factor drops (motion onset), smooth release when recovering.
+	inline float MotionStepAsymmetric(float previousAlongVector, float target, float alphaAttack, float alphaRelease, bool reset)
+	{
+		if (reset) return target;
+		const float alpha = target < previousAlongVector ? alphaAttack : alphaRelease;
+		return previousAlongVector + (target - previousAlongVector) * alpha;
 	}
 	// The one-pole's coefficient per source frame is OnePole::AlphaForMs(frameSeconds * 1000.0f, smoothMs, AsGiven) (1 = no smoothing).
 	// One source frame of the map for one block: reset (first map, a cut, a resize) takes the target.
@@ -335,6 +402,7 @@ namespace AdaptiveDownscale
 		pl_rect2df sourceCrop{};               // the source crop in the level's source-luma pixels
 		float codeToEightBit = 255.0f / 1023.0f;   // M2 (grain-consumes-cb-u1): source analysis codes -> 8-bit codes
 		int blockPx = 16;                          // S1: block size of the kP10gGrainLevel grid (GrainSplit::DefaultParams().blockPx)
+		NlsMaskMapping::Mapping nls{};             // NLS coordinate mapping when active
 	};
 
 	// M2 (grain-consumes-cb-u1): sqrt(N_b) in source analysis codes -> the grain ramp's 8-bit mean-|Laplacian| energy units.
