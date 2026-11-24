@@ -158,7 +158,6 @@ namespace Vpv
 					QPushButton* child = addLeaf(info.name, index(info.name));
 					child->setProperty("vpvChild", true);
 					child->setProperty("vpvParent", title);
-					child->setStyleSheet(QStringLiteral("QPushButton { padding-left: 26px; }"));
 				}
 			}
 		}

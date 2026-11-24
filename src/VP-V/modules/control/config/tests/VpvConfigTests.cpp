@@ -61,16 +61,26 @@ namespace
 		}
 	} g_defaultQtFontDirInit;
 }
+#include <QAbstractItemView>
+#include <QColor>
+#include <QElapsedTimer>
 #include <QLineEdit>
+#include <QLayout>
+#include <QListView>
 #include <QListWidget>
+#include <QPointer>
 #include <QToolButton>
 #include <QSlider>
 #include <QSpinBox>
 #include <QSpinBox>
 #include <QTemporaryDir>
+#include <QTimer>
 #include <QWidget>
 
 #include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <deque>
 #include <functional>
 #include <map>
 #include <set>
@@ -2533,6 +2543,8 @@ namespace
 			};
 			for (const auto& pair : pairs)
 			{
+				require(window.findChildren<QObject*>(pair.first).size() == 1,
+					("expected exactly one coverage alias QObject for: " + S(pair.first)).c_str());
 				for (QObject* alias : window.findChildren<QObject*>(pair.first))
 				{
 					require(qobject_cast<QWidget*>(alias) == nullptr,
@@ -2949,9 +2961,12 @@ namespace
 				"LiveSectionStateCount did not increment to baseline + 1 on second window open");
 
 			// Rebuild #1: previous shell is queued for deleteLater(); draining events must free the old Vpv::State.
+			const QPointer<QWidget> secBeforeRebuild1(control<QWidget>(window, Vpv::ObjectName(QStringLiteral("section"))));
 			window.setRendererDiscoveryForTesting(
 				{ QStringLiteral("VP Renderer"), QStringLiteral("DirectShow - madVR") },
 				{ QStringLiteral("VP Renderer") });
+			require(Vpv::LiveSectionStateCount() == baseline + 2,
+				"shell rebuild #1 did not allocate a second Vpv::State while previous shell is pending DeferredDelete");
 			QCoreApplication::processEvents();
 			QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
 			QCoreApplication::processEvents();
@@ -2959,16 +2974,23 @@ namespace
 			QCoreApplication::processEvents();
 			require(control<QWidget>(window, Vpv::ObjectName(QStringLiteral("section"))) != nullptr,
 				"shell rebuild did not recreate vpv.section");
+			require(secBeforeRebuild1.isNull() &&
+				control<QWidget>(window, Vpv::ObjectName(QStringLiteral("section"))) != secBeforeRebuild1.data(),
+				"shell rebuild #1 did not destroy and replace the previous vpv.section");
 			require(Vpv::LiveSectionStateCount() == baseline + 1,
 				"shell rebuild leaked previous Vpv::State (cycle or retained strong reference)");
 
 			// Rebuild #2 WITHOUT draining processEvents(): leave an orphaned previous shell + its timers pending
 			// DeferredDelete when ~ConfigEditorWindow() executes on scope exit.
+			const QPointer<QWidget> secBeforeRebuild2(control<QWidget>(window, Vpv::ObjectName(QStringLiteral("section"))));
 			window.setRendererDiscoveryForTesting(
 				{ QStringLiteral("VP Renderer"), QStringLiteral("DirectShow - madVR") },
 				{ QStringLiteral("VP Renderer") });
 			require(control<QWidget>(window, Vpv::ObjectName(QStringLiteral("section"))) != nullptr,
 				"second shell rebuild did not recreate vpv.section");
+			require(Vpv::LiveSectionStateCount() == baseline + 2 &&
+				control<QWidget>(window, Vpv::ObjectName(QStringLiteral("section"))) != secBeforeRebuild2.data(),
+				"second shell rebuild did not leave previous Vpv::State pending DeferredDelete on a distinct vpv.section");
 		}
 		// Drain pending 0-ms timers and deferred deletes after ~ConfigEditorWindow(): must neither crash nor leak.
 		QCoreApplication::processEvents();
@@ -2978,6 +3000,1154 @@ namespace
 		QCoreApplication::processEvents();
 		require(Vpv::LiveSectionStateCount() == baseline,
 			"closing ConfigEditorWindow with a pending orphaned shell leaked Vpv::State");
+	}
+
+	// Rule 8 Red Team (D2): an explicit empty key in [vpv] (pipeline_original_pathway:) MUST NOT be
+	// overwritten by a legacy [vprenderer] value; same-input negative control verifies an absent [vpv]
+	// key still migrates legacy [vprenderer] = on.
+	void testD2EmptyVpvKeyNotOverwrittenByLegacyVprenderer()
+	{
+		auto hasNonVpvPathway = [](const ConfigFile& cfg)
+		{
+			for (const std::string& section : cfg.GetSectionNames())
+			{
+				if (ConfigFile::NormalizeName(section) == "vpv") continue;
+				std::string v;
+				if (cfg.TryGetString(section, "pipeline_original_pathway", v)) return true;
+			}
+			return false;
+		};
+		auto pathwayValue = [](ConfigEditorWindow& window)
+		{
+			return control<QComboBox>(window, Vpv::ObjectName(QStringLiteral("pathway")))->currentData().toString();
+		};
+		auto requireDefaultGlobalActions = [](ConfigEditorWindow& window, bool expectStateReport, const char* context)
+		{
+			auto* edit = control<QLineEdit>(window, QStringLiteral("config.shortcuts.global_actions"));
+			require(edit->text().isEmpty(), context);
+			const QString expected = expectStateReport ? QStringLiteral("Default: state_report") : QStringLiteral("Default: none");
+			require(edit->placeholderText().contains(expected), context);
+		};
+
+		// Case A (bug): explicit empty [vpv] key must win over legacy [vprenderer] = on.
+		{
+			QTemporaryDir dir;
+			const QString path = WriteFixture(dir,
+				"[general]\nrenderer: VP Renderer\n[vpv]\npipeline_original_pathway:\n[vprenderer]\npipeline_original_pathway: on\n");
+			{
+				ConfigEditorWindow window(path, 0, true);
+				require(pathwayValue(window).compare(QStringLiteral("off"), Qt::CaseInsensitive) == 0,
+					"D2 Case A: empty [vpv] pipeline_original_pathway was overwritten by legacy [vprenderer]=on");
+				require(control<QWidget>(window, Vpv::ObjectName(QStringLiteral("content")))->isEnabled(),
+					"D2 Case A: vpv.content was disabled despite explicit empty [vpv] key");
+				requireDefaultGlobalActions(window, true,
+					"D2 Case A: config.shortcuts.global_actions did not retain VP-V default (state_report)");
+				save(window);
+			}
+			ConfigFile config;
+			require(config.Load(path.toStdString(), ConfigFile::ReadPolicy::Fresh),
+				"D2 Case A: cannot reload saved config");
+			std::string v;
+			const bool hasVpvKey = config.TryGetString("vpv", "pipeline_original_pathway", v);
+			require(!hasVpvKey || QString::fromStdString(v).trimmed().isEmpty(),
+				("D2 Case A: saved [vpv] pipeline_original_pathway was overwritten with '" + v + "'\n" + FileText(path)).c_str());
+			require(!config.TryGetString("vprenderer", "pipeline_original_pathway", v),
+				("D2 Case A: legacy [vprenderer] pipeline_original_pathway was not removed\n" + FileText(path)).c_str());
+			require(!config.TryGetString("vprenderer.profile_1", "pipeline_original_pathway", v),
+				("D2 Case A: pipeline_original_pathway stranded in [vprenderer.profile_1]\n" + FileText(path)).c_str());
+			require(!hasNonVpvPathway(config),
+				("D2 Case A: pipeline_original_pathway stranded outside [vpv]\n" + FileText(path)).c_str());
+			requireVpReads(path);
+			{
+				ConfigEditorWindow reopened(path, 0, true);
+				require(pathwayValue(reopened).compare(QStringLiteral("off"), Qt::CaseInsensitive) == 0,
+					"D2 Case A: reopened config did not stay on VP-V pathway");
+				require(control<QWidget>(reopened, Vpv::ObjectName(QStringLiteral("content")))->isEnabled(),
+					"D2 Case A: reopened vpv.content was disabled");
+				requireDefaultGlobalActions(reopened, true,
+					"D2 Case A: reopened config.shortcuts.global_actions lost VP-V default (state_report)");
+			}
+		}
+
+		// Case B (same-input negative control): key ABSENT from [vpv] must still migrate legacy [vprenderer] = on.
+		{
+			QTemporaryDir dir;
+			const QString path = WriteFixture(dir,
+				"[general]\nrenderer: VP Renderer\n[vpv]\n[vprenderer]\npipeline_original_pathway: on\n");
+			{
+				ConfigEditorWindow window(path, 0, true);
+				require(pathwayValue(window).compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0,
+					"D2 Case B (negative control): absent [vpv] key did not migrate legacy [vprenderer]=on");
+				require(!control<QWidget>(window, Vpv::ObjectName(QStringLiteral("content")))->isEnabled(),
+					"D2 Case B (negative control): vpv.content was not disabled on Original pathway");
+				requireDefaultGlobalActions(window, false,
+					"D2 Case B (negative control): config.shortcuts.global_actions did not switch to Original default (none)");
+				save(window);
+			}
+			ConfigFile config;
+			require(config.Load(path.toStdString(), ConfigFile::ReadPolicy::Fresh),
+				"D2 Case B (negative control): cannot reload saved config");
+			std::string v;
+			require(config.TryGetString("vpv", "pipeline_original_pathway", v) &&
+				QString::fromStdString(v).trimmed().compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0,
+				("D2 Case B (negative control): [vpv] pipeline_original_pathway did not migrate to 'on'\n" + FileText(path)).c_str());
+			require(!config.TryGetString("vprenderer", "pipeline_original_pathway", v) &&
+				!config.TryGetString("vprenderer.profile_1", "pipeline_original_pathway", v) &&
+				!hasNonVpvPathway(config),
+				("D2 Case B (negative control): legacy [vprenderer] key was not removed\n" + FileText(path)).c_str());
+			requireVpReads(path);
+		}
+
+		// Case C (edge case): duplicate [vprenderer] pathway lines + whitespace-only explicit [vpv] key
+		// + co-located rendering key (sdr_target_nits: 120) must preserve [vpv], strip every legacy duplicate,
+		// and preserve co-located rendering settings.
+		{
+			QTemporaryDir dir;
+			const QString path = WriteFixture(dir,
+				"[general]\nrenderer: VP Renderer\n"
+				"[vpv]\npipeline_original_pathway:   \n"
+				"[vprenderer]\nsdr_target_nits: 120\n"
+				"pipeline_original_pathway: on\n"
+				"pipeline_original_pathway: on\n");
+			{
+				ConfigEditorWindow window(path, 0, true);
+				require(pathwayValue(window).compare(QStringLiteral("off"), Qt::CaseInsensitive) == 0,
+					"D2 Case C: whitespace-only [vpv] key was overwritten by duplicate legacy [vprenderer]=on");
+				require(control<QWidget>(window, Vpv::ObjectName(QStringLiteral("content")))->isEnabled(),
+					"D2 Case C: vpv.content was disabled despite explicit whitespace-only [vpv] key");
+				requireDefaultGlobalActions(window, true,
+					"D2 Case C: config.shortcuts.global_actions did not retain VP-V default (state_report)");
+				save(window);
+			}
+			ConfigFile config;
+			require(config.Load(path.toStdString(), ConfigFile::ReadPolicy::Fresh),
+				"D2 Case C: cannot reload saved config");
+			std::string v;
+			const bool hasVpvKey = config.TryGetString("vpv", "pipeline_original_pathway", v);
+			require(!hasVpvKey || QString::fromStdString(v).trimmed().isEmpty(),
+				("D2 Case C: saved [vpv] pipeline_original_pathway was overwritten with '" + v + "'\n" + FileText(path)).c_str());
+			require(!config.TryGetString("vprenderer", "pipeline_original_pathway", v) &&
+				!config.TryGetString("vprenderer.profile_1", "pipeline_original_pathway", v) &&
+				!hasNonVpvPathway(config),
+				("D2 Case C: duplicate legacy pipeline_original_pathway survived outside [vpv]\n" + FileText(path)).c_str());
+			bool preservedNits = false;
+			for (const std::string& section : config.GetSectionNames())
+			{
+				if (ConfigFile::NormalizeName(section).rfind("vprenderer.", 0) != 0) continue;
+				std::string nits;
+				if (config.TryGetString(section, "sdr_target_nits", nits) && Vpv::SameValue(nits, "120"))
+					preservedNits = true;
+			}
+			require(preservedNits,
+				("D2 Case C: co-located sdr_target_nits: 120 was dropped during duplicate legacy pathway cleanup\n" + FileText(path)).c_str());
+			requireVpReads(path);
+			{
+				ConfigEditorWindow reopened(path, 0, true);
+				require(pathwayValue(reopened).compare(QStringLiteral("off"), Qt::CaseInsensitive) == 0,
+					"D2 Case C: reopened config did not stay on VP-V pathway");
+				require(control<QWidget>(reopened, Vpv::ObjectName(QStringLiteral("content")))->isEnabled(),
+					"D2 Case C: reopened vpv.content was disabled");
+				requireDefaultGlobalActions(reopened, true,
+					"D2 Case C: reopened config.shortcuts.global_actions lost VP-V default (state_report)");
+			}
+		}
+	}
+
+	// Rule 8 Red Team (D3): VP-V and Dynamic Drive 1000 ms refresh timers must not tick while hidden,
+	// must stop when an ACTIVE page is detached or hidden, must resume and run their live callbacks
+	// after transient detach + timeout + re-attach, and must free cleanly with zero Vpv::State leaks.
+	void testD3RefreshTimersSurviveTransientDetachWithoutFiringWhileHidden()
+	{
+		QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+		QCoreApplication::processEvents();
+		QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+		QCoreApplication::processEvents();
+		const int baseline = Vpv::LiveSectionStateCount();
+
+		QTemporaryDir dir;
+		const QString path = WriteFixture(dir, "[general]\nrenderer: VP Renderer\n[vprenderer.Default]\n");
+		{
+			ConfigEditorWindow window(path, 0, true);
+			auto* root = control<QWidget>(window, Vpv::ObjectName(QStringLiteral("section")));
+			auto* fallbacks = control<QLabel>(window, Vpv::ObjectName(QStringLiteral("fallbacks")));
+			auto* drivePages = control<QWidget>(window, Vpv::ObjectName(QStringLiteral("drivepage.pages")));
+			auto* driveOffNote = control<QLabel>(window, Vpv::ObjectName(QStringLiteral("drivepage.off_note")));
+
+			auto find1000msTimer = [](QObject* parent) -> QTimer*
+			{
+				for (QTimer* t : parent->findChildren<QTimer*>(QString(), Qt::FindDirectChildrenOnly))
+					if (t->interval() == 1000) return t;
+				return nullptr;
+			};
+			QTimer* rootTimer = find1000msTimer(fallbacks);
+			QTimer* driveTimer = find1000msTimer(drivePages);
+			require(rootTimer != nullptr, "D3: missing 1000 ms refresh QTimer on vpv.fallbacks");
+			require(driveTimer != nullptr, "D3: missing 1000 ms refresh QTimer on vpv.drivepage.pages");
+
+			// Hidden safety before show: neither timer may tick while the window is hidden.
+			require(!root->isVisible() && !drivePages->isVisible(),
+				"D3: expected vpv.section and vpv.drivepage.pages to start hidden before window.show()");
+			require(!rootTimer->isActive(),
+				"D3: vpv.fallbacks refresh timer is active while window is still hidden");
+			require(!driveTimer->isActive(),
+				"D3: vpv.drivepage.pages refresh timer is active while window is still hidden");
+
+			// VP-V page: show FIRST -> verify ACTIVE -> detach ACTIVE root -> timeout -> re-attach -> verify callback -> hide ACTIVE root.
+			{
+				window.selectPage(QStringLiteral("VP-V"));
+				window.show();
+				QCoreApplication::processEvents();
+				require(root->isVisible(), "D3: vpv.section did not become visible on initial show");
+				require(rootTimer->isActive(), "D3: vpv.fallbacks timer did not activate when VP-V page was shown");
+				require(!driveTimer->isActive(),
+					"D3: vpv.drivepage.pages timer should remain stopped while VP-V page is active");
+
+				QWidget* origParent = root->parentWidget();
+				QLayout* origLayout = origParent ? origParent->layout() : nullptr;
+				require(origParent != nullptr, "D3: vpv.section has no parent widget before detach");
+				root->setParent(nullptr);
+				QCoreApplication::processEvents();
+				require(!rootTimer->isActive(),
+					"D3: detaching an ACTIVE vpv.section did not stop vpv.fallbacks timer");
+				QMetaObject::invokeMethod(rootTimer, "timeout", Qt::DirectConnection);
+				require(!rootTimer->isActive(),
+					"D3: vpv.fallbacks timer restarted unexpectedly while vpv.section was detached");
+
+				if (origLayout) origLayout->addWidget(root);
+				else root->setParent(origParent);
+				root->setVisible(true);
+				window.selectPage(QStringLiteral("VP-V"));
+				window.show();
+				QCoreApplication::processEvents();
+				require(root->isVisible(), "D3: vpv.section did not become visible after re-attach and show");
+				require(rootTimer->isActive(),
+					"D3: vpv.fallbacks refresh timer did not restart after transient detach and re-attach");
+				require(!driveTimer->isActive(),
+					"D3: vpv.drivepage.pages timer should remain stopped while VP-V page is shown");
+
+				// Unconditional callback proof (never silently skipped): mirror() must overwrite sentinel text.
+				fallbacks->setText(QStringLiteral("D3-sentinel-before-tick"));
+				QMetaObject::invokeMethod(rootTimer, "timeout", Qt::DirectConnection);
+				require(fallbacks->text() != QStringLiteral("D3-sentinel-before-tick"),
+					"D3: rootTimer timeout did not execute mirror() after re-attach");
+				if (auto* liveFallbacks = window.findChild<QLabel*>(QStringLiteral("config.live.fallbacks")))
+				{
+					liveFallbacks->setText(QStringLiteral("Fallbacks engaged: D3 live probe"));
+					QMetaObject::invokeMethod(rootTimer, "timeout", Qt::DirectConnection);
+					require(fallbacks->text() == QStringLiteral("Fallbacks engaged: D3 live probe"),
+						"D3: vpv.fallbacks timer callback did not mirror config.live.fallbacks after re-attach");
+				}
+				require(rootTimer->isActive(),
+					"D3: vpv.fallbacks timer stopped on timeout while visible and attached");
+
+				// Negative control: hiding an ACTIVE VP-V page must stop rootTimer.
+				window.hide();
+				QCoreApplication::processEvents();
+				require(!rootTimer->isActive(), "D3: ACTIVE vpv.fallbacks timer stayed active after window.hide()");
+				require(!driveTimer->isActive(), "D3: vpv.drivepage.pages timer stayed active after window.hide()");
+			}
+
+			// Dynamic Drive page: show FIRST -> verify ACTIVE -> detach ACTIVE drivePages -> timeout -> re-attach -> verify callback -> hide ACTIVE drivePages.
+			{
+				window.selectPage(QStringLiteral("Dynamic Drive"));
+				window.show();
+				QCoreApplication::processEvents();
+				require(drivePages->isVisible(), "D3: vpv.drivepage.pages did not become visible on initial show");
+				require(driveTimer->isActive(), "D3: vpv.drivepage.pages timer did not activate when Dynamic Drive page was shown");
+				require(!rootTimer->isActive(),
+					"D3: vpv.fallbacks timer should remain stopped while Dynamic Drive page is active");
+
+				QWidget* origParent = drivePages->parentWidget();
+				QLayout* origLayout = origParent ? origParent->layout() : nullptr;
+				require(origParent != nullptr, "D3: vpv.drivepage.pages has no parent widget before detach");
+				drivePages->setParent(nullptr);
+				QCoreApplication::processEvents();
+				require(!driveTimer->isActive(),
+					"D3: detaching an ACTIVE vpv.drivepage.pages did not stop driveTimer");
+				QMetaObject::invokeMethod(driveTimer, "timeout", Qt::DirectConnection);
+				require(!driveTimer->isActive(),
+					"D3: vpv.drivepage.pages timer restarted unexpectedly while detached");
+
+				if (origLayout) origLayout->addWidget(drivePages);
+				else drivePages->setParent(origParent);
+				drivePages->setVisible(true);
+				window.selectPage(QStringLiteral("Dynamic Drive"));
+				window.show();
+				QCoreApplication::processEvents();
+				require(drivePages->isVisible(), "D3: vpv.drivepage.pages did not become visible after re-attach and show");
+				require(driveTimer->isActive(),
+					"D3: vpv.drivepage.pages refresh timer did not restart after transient detach and re-attach");
+				require(!rootTimer->isActive(),
+					"D3: vpv.fallbacks timer did not stop when navigating away to Dynamic Drive");
+
+				// Unconditional driveTimer callback proof: refreshReasons() must overwrite drivepage.off_note sentinel.
+				driveOffNote->setText(QStringLiteral("D3-drive-sentinel-before-tick"));
+				QMetaObject::invokeMethod(driveTimer, "timeout", Qt::DirectConnection);
+				require(driveOffNote->text() != QStringLiteral("D3-drive-sentinel-before-tick"),
+					"D3: driveTimer timeout did not execute refreshReasons() after re-attach");
+				require(driveTimer->isActive(),
+					"D3: vpv.drivepage.pages timer stopped on timeout while visible and attached");
+
+				// Negative control: hiding an ACTIVE Dynamic Drive page must stop driveTimer.
+				window.hide();
+				QCoreApplication::processEvents();
+				require(!driveTimer->isActive(), "D3: ACTIVE vpv.drivepage.pages timer stayed active after window.hide()");
+				require(!rootTimer->isActive(), "D3: vpv.fallbacks timer stayed active after window.hide()");
+			}
+
+			// Live visible page-switch check (without hiding window): switching VP-V -> Dynamic Drive
+			// must stop rootTimer and start driveTimer cleanly.
+			{
+				window.selectPage(QStringLiteral("VP-V"));
+				window.show();
+				QCoreApplication::processEvents();
+				require(root->isVisible() && rootTimer->isActive() && !driveTimer->isActive(),
+					"D3: live page switch baseline expected VP-V timer active and Dynamic Drive timer stopped");
+				window.selectPage(QStringLiteral("Dynamic Drive"));
+				QCoreApplication::processEvents();
+				require(drivePages->isVisible() && driveTimer->isActive() && !rootTimer->isActive(),
+					"D3: live page switch VP-V -> Dynamic Drive did not stop rootTimer and start driveTimer");
+				window.hide();
+				QCoreApplication::processEvents();
+				require(!rootTimer->isActive() && !driveTimer->isActive(),
+					"D3: timers stayed active after window.hide() following live page switch");
+			}
+		}
+		QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+		QCoreApplication::processEvents();
+		QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+		QCoreApplication::processEvents();
+		require(Vpv::LiveSectionStateCount() == baseline,
+			"D3: Vpv::LiveSectionStateCount() did not return to baseline after window destroy");
+	}
+
+	// Rule 8 Red Team (D4-D5): zero per-widget VP-V styles (including vpvChild sidebar leaves and
+	// all vpv.section descendants), hoisted qApp stylesheet slices cleanly at the begin marker and
+	// matches SectionStyleSheetForMode(), preserves focus/tab-bar/disabled-heading/note-specificity
+	// cascade priority, keeps high-contrast free of color overrides, and keeps every VP-V selector scoped.
+	void testD4D5StylesheetCascadePriorityAndZeroPerWidgetVpvStyles()
+	{
+		QTemporaryDir dir;
+		const QString path = WriteFixture(dir, "[general]\nrenderer: VP Renderer\n[vprenderer.Default]\n");
+		require(qApp != nullptr, "QApplication instance is missing");
+		ConfigEditorWindow window(path, 0, true);
+
+		// 1. Zero per-widget stylesheets on vpvChild sidebar leaves (Dynamic Drive, Calibration)
+		//    and on all VP-V descendants inside vpv.section (excluding Bill's bindChoiceField
+		//    QAbstractItemView popups and visible Bill .reset_override buttons).
+		int vpvChildCount = 0;
+		for (QPushButton* btn : window.findChildren<QPushButton*>())
+		{
+			if (!btn->property("vpvChild").toBool()) continue;
+			++vpvChildCount;
+			require(btn->styleSheet().isEmpty(),
+				("D4-D5: vpvChild sidebar button retains a per-widget stylesheet (" + S(btn->text()) + "): " + S(btn->styleSheet())).c_str());
+		}
+		require(vpvChildCount >= 2, "D4-D5: expected at least 2 vpvChild sidebar buttons (Dynamic Drive, Calibration)");
+
+		auto* section = control<QWidget>(window, Vpv::ObjectName(QStringLiteral("section")));
+		require(section->styleSheet().isEmpty(),
+			("D4-D5: vpv.section itself retains a per-widget stylesheet: " + S(section->styleSheet())).c_str());
+		int scannedVpvWidgets = 0;
+		for (QWidget* w : section->findChildren<QWidget*>())
+		{
+			if (qobject_cast<QAbstractItemView*>(w) != nullptr) continue;
+			const bool isVisibleBillReset = qobject_cast<QPushButton*>(w) != nullptr &&
+				w->objectName().endsWith(QStringLiteral(".reset_override")) &&
+				w->parentWidget() && !w->parentWidget()->isHidden();
+			if (isVisibleBillReset) continue;
+			++scannedVpvWidgets;
+			require(w->styleSheet().isEmpty(),
+				("D4-D5: widget inside vpv.section retains a per-widget stylesheet (" +
+					std::string(w->metaObject()->className()) + " '" + S(w->objectName()) + "'): " +
+					S(w->styleSheet())).c_str());
+		}
+		require(scannedVpvWidgets > 50,
+			"D4-D5: unexpectedly few descendant widgets scanned inside vpv.section");
+		for (const char* driveNote : { "drivepage.original_note", "drivepage.off_note" })
+		{
+			auto* note = control<QLabel>(window, Vpv::ObjectName(QString::fromLatin1(driveNote)));
+			require(note->styleSheet().isEmpty(),
+				(std::string("D4-D5: VpvSection Dynamic Drive note retains a per-widget stylesheet (") +
+					driveNote + "): " + S(note->styleSheet())).c_str());
+		}
+
+		// 2. Slice qApp->styleSheet() strictly at /* vpv-section-style-begin */ (non-tautological boundary)
+		//    and verify live wiring to Vpv::SectionStyleSheetForMode().
+		const QString appSheet = qApp->styleSheet();
+		const QString beginMarker = QStringLiteral("/* vpv-section-style-begin */");
+		const int markerPos = appSheet.indexOf(beginMarker);
+		require(markerPos >= 0,
+			"D4-D5: qApp->styleSheet() is missing /* vpv-section-style-begin */ marker");
+		const QString billSheet = appSheet.left(markerPos);
+		const QString vpvSheet = appSheet.mid(markerPos);
+		require(billSheet.contains(QStringLiteral("QLabel[help=\"true\"]")) && !billSheet.contains(QStringLiteral("[vpv")),
+			"D4-D5 negative control: expected Bill's VpTheme rules (without [vpv) strictly before /* vpv-section-style-begin */");
+
+		const QString dark = Vpv::SectionStyleSheetForMode(false);
+		const QString hc = Vpv::SectionStyleSheetForMode(true);
+		const bool expectHighContrast = !billSheet.contains(QLatin1Char('#'));
+		require(vpvSheet.trimmed() == (expectHighContrast ? hc : dark).trimmed(),
+			"D4-D5: installed qApp VP-V stylesheet does not match the active high-contrast/dark mode from SectionStyleSheetForMode()");
+
+		// Structural CSS rule/declaration parser (eliminates comment/comma/pseudo-state regex loopholes).
+		struct CssRule
+		{
+			QString selector;
+			QString body;
+		};
+		auto parseCssRules = [](const QString& css, const char* label) -> std::vector<CssRule>
+		{
+			QString cleaned = css;
+			cleaned.remove(QRegularExpression(QStringLiteral(R"(/\*[\s\S]*?\*/)")));
+			std::vector<CssRule> rules;
+			for (const QString& block : cleaned.split(QLatin1Char('}')))
+			{
+				const QString trimmed = block.trimmed();
+				if (trimmed.isEmpty()) continue;
+				const int brace = trimmed.indexOf(QLatin1Char('{'));
+				require(brace > 0, (std::string("D4-D5 (") + label + "): malformed CSS rule: " + S(trimmed)).c_str());
+				const QString selectorList = trimmed.left(brace);
+				const QString body = trimmed.mid(brace + 1).trimmed();
+				for (const QString& sel : selectorList.split(QLatin1Char(',')))
+				{
+					const QString s = sel.trimmed();
+					require(!s.isEmpty(), (std::string("D4-D5 (") + label + "): empty selector in rule list").c_str());
+					rules.push_back(CssRule{ s, body });
+				}
+			}
+			return rules;
+		};
+		auto parseDecls = [](const QString& body) -> std::vector<std::pair<QString, QString>>
+		{
+			std::vector<std::pair<QString, QString>> decls;
+			for (const QString& part : body.split(QLatin1Char(';')))
+			{
+				const QString t = part.trimmed();
+				if (t.isEmpty()) continue;
+				const int colon = t.indexOf(QLatin1Char(':'));
+				if (colon <= 0) continue;
+				decls.emplace_back(t.left(colon).trimmed(), t.mid(colon + 1).trimmed());
+			}
+			return decls;
+		};
+		auto findDeclValue = [&](const QString& body, const QString& propName) -> QString
+		{
+			QString result;
+			for (const auto& kv : parseDecls(body))
+				if (kv.first.compare(propName, Qt::CaseInsensitive) == 0) result = kv.second;
+			return result;
+		};
+		auto hasPseudoState = [](const QString& sel) -> bool
+		{
+			QString s = sel;
+			s.replace(QStringLiteral("::"), QString());
+			return s.contains(QLatin1Char(':'));
+		};
+		auto requireAllSelectorsVpvScoped = [&](const std::vector<CssRule>& rules, int minRules, const char* label)
+		{
+			require(static_cast<int>(rules.size()) >= minRules,
+				(std::string("D4-D5 (") + label + "): unexpectedly few CSS rules parsed: " + std::to_string(rules.size())).c_str());
+			for (const CssRule& r : rules)
+			{
+				require(r.selector.contains(QStringLiteral("[vpv")),
+					(std::string("D4-D5 (") + label + "): unscoped selector risks bleeding onto Bill's pages: " + S(r.selector)).c_str());
+			}
+		};
+
+		const std::vector<CssRule> vpvRules = parseCssRules(vpvSheet, "qApp vpvSheet");
+		const std::vector<CssRule> darkRules = parseCssRules(dark, "darkMode");
+		const std::vector<CssRule> hcRules = parseCssRules(hc, "highContrast");
+		requireAllSelectorsVpvScoped(vpvRules, 4, "qApp vpvSheet");
+		requireAllSelectorsVpvScoped(darkRules, 10, "darkMode");
+		requireAllSelectorsVpvScoped(hcRules, 4, "highContrast");
+
+		// 3. Dark-mode cascade priority checks on parsed SectionStyleSheetForMode(false) rules.
+		require(dark.contains(QLatin1Char('#')),
+			"D4-D5 negative control: dark-mode VP-V stylesheet must carry dark theme hex colors that high-contrast omits");
+
+		auto hasVpvChildPaddingRule = [&](const std::vector<CssRule>& rules) -> bool
+		{
+			for (const CssRule& r : rules)
+			{
+				if (r.selector.startsWith(QStringLiteral("QPushButton")) &&
+					r.selector.contains(QStringLiteral("[vpvChild=\"true\"]")) &&
+					!hasPseudoState(r.selector) &&
+					!findDeclValue(r.body, QStringLiteral("padding-left")).isEmpty())
+					return true;
+			}
+			return false;
+		};
+		require(hasVpvChildPaddingRule(darkRules),
+			"D4-D5: dark-mode VP-V stylesheet is missing a hoisted QPushButton[vpvChild=\"true\"] padding-left rule");
+
+		bool hasPairErrorColor = false;
+		for (const CssRule& r : darkRules)
+		{
+			if (r.selector.contains(QStringLiteral("QLineEdit[vpvPairError=\"true\"]")) &&
+				!hasPseudoState(r.selector))
+			{
+				const QColor c(findDeclValue(r.body, QStringLiteral("color")));
+				if (c.isValid()) { hasPairErrorColor = true; break; }
+			}
+		}
+		require(hasPairErrorColor,
+			"D4-D5: dark-mode VP-V stylesheet is missing a valid color on QLineEdit[vpvPairError=\"true\"]");
+
+		// Preserve visible :focus border on QToolButton[profileSection="true"]:focus (not clobbering VpTheme.cpp:244).
+		require(appSheet.contains(QStringLiteral("QToolButton[profileSection=\"true\"]:focus")),
+			"D4-D5: QToolButton[profileSection=\"true\"]:focus is missing from qApp->styleSheet()");
+		bool overridesProfileSection = false;
+		bool preservesProfileSectionFocus = false;
+		for (const CssRule& r : darkRules)
+		{
+			if (r.selector.contains(QStringLiteral("QToolButton[profileSection=\"true\"]")) &&
+				!hasPseudoState(r.selector))
+			{
+				overridesProfileSection = true;
+			}
+			if (r.selector.contains(QStringLiteral("QWidget[vpvSection=\"true\"]")) &&
+				r.selector.contains(QStringLiteral("QToolButton[profileSection=\"true\"]:focus")) &&
+				!r.selector.contains(QStringLiteral(":hover")) &&
+				!r.selector.contains(QStringLiteral(":disabled")))
+			{
+				const QString border = findDeclValue(r.body, QStringLiteral("border"));
+				const QStringList parts = border.split(QRegularExpression(QStringLiteral(R"(\s+)")), Qt::SkipEmptyParts);
+				if (parts.size() >= 3 &&
+					parts[0].compare(QStringLiteral("1px"), Qt::CaseInsensitive) == 0 &&
+					parts[1].compare(QStringLiteral("solid"), Qt::CaseInsensitive) == 0)
+				{
+					const QColor bc(parts[2]);
+					if (bc.isValid() && bc.alpha() > 0) preservesProfileSectionFocus = true;
+				}
+			}
+		}
+		require(!overridesProfileSection || preservesProfileSectionFocus,
+			"D4-D5: dark-mode VP-V stylesheet overrides QToolButton[profileSection=\"true\"] without preserving visible 1px solid :focus border");
+
+		// Explicit QTabBar QToolButton rule under vpvSection with a valid foreground color.
+		bool hasTabBarToolButtonColor = false;
+		for (const CssRule& r : darkRules)
+		{
+			if (r.selector.contains(QStringLiteral("QWidget[vpvSection=\"true\"]")) &&
+				(r.selector.contains(QStringLiteral("QTabBar QToolButton")) ||
+					r.selector.contains(QStringLiteral("QTabBar > QToolButton"))) &&
+				!hasPseudoState(r.selector))
+			{
+				if (QColor(findDeclValue(r.body, QStringLiteral("color"))).isValid())
+				{
+					hasTabBarToolButtonColor = true;
+					break;
+				}
+			}
+		}
+		require(hasTabBarToolButtonColor,
+			"D4-D5: dark-mode VP-V stylesheet is missing a QWidget[vpvSection=\"true\"] QTabBar QToolButton rule with a valid color");
+
+		// Enabled vs :disabled dimming verification for vpvCardHeading and vpvSetBy (extracted directly
+		// from winning enabled and matching :disabled rules by lightness, respecting vpvSection specificity).
+		auto requireDimmedDisabledLabel = [&](const char* prop, bool requireScopedDisabled)
+		{
+			const QString token = QStringLiteral("QLabel[%1=\"true\"]").arg(QString::fromLatin1(prop));
+			const QString disabledToken = token + QStringLiteral(":disabled");
+			QColor enabledColor;
+			int enabledSpec = -1;
+			for (const CssRule& r : darkRules)
+			{
+				if (!r.selector.contains(token) || hasPseudoState(r.selector)) continue;
+				const QColor c(findDeclValue(r.body, QStringLiteral("color")));
+				if (!c.isValid()) continue;
+				const int spec = r.selector.contains(QStringLiteral("QWidget[vpvSection=\"true\"]")) ? 2 : 1;
+				if (spec >= enabledSpec) { enabledSpec = spec; enabledColor = c; }
+			}
+			require(enabledColor.isValid(),
+				(std::string("D4-D5: dark-mode VP-V stylesheet is missing an enabled color rule for ") + prop).c_str());
+
+			const bool needScopedDisabled = requireScopedDisabled || (enabledSpec >= 2);
+			QColor disabledColor;
+			int disabledSpec = -1;
+			for (const CssRule& r : darkRules)
+			{
+				if (!r.selector.contains(disabledToken) ||
+					r.selector.contains(QStringLiteral(":hover")) ||
+					r.selector.contains(QStringLiteral(":focus")))
+					continue;
+				const bool scoped = r.selector.contains(QStringLiteral("QWidget[vpvSection=\"true\"]"));
+				if (needScopedDisabled && !scoped) continue;
+				const QColor c(findDeclValue(r.body, QStringLiteral("color")));
+				if (!c.isValid()) continue;
+				const int spec = scoped ? 2 : 1;
+				if (spec >= disabledSpec) { disabledSpec = spec; disabledColor = c; }
+			}
+			require(disabledColor.isValid(),
+				(std::string("D4-D5: dark-mode VP-V stylesheet is missing a matching :disabled color rule for ") + prop).c_str());
+			require(disabledColor.lightness() < enabledColor.lightness(),
+				(std::string("D4-D5: dark-mode :disabled color for ") + prop + " does not dim below its enabled color").c_str());
+		};
+		requireDimmedDisabledLabel("vpvCardHeading", true);
+		requireDimmedDisabledLabel("vpvSetBy", false);
+
+		// vpvPrecisionNote, vpvOriginalNote, vpvOffNote scoped under QWidget[vpvSection="true"] with a
+		// valid foreground color (strictly higher specificity than VpTheme's QLabel[help="true"]),
+		// AND verified against the live widgets and their vpvSection ancestor (zero dead CSS).
+		for (const char* prop : { "vpvPrecisionNote", "vpvOriginalNote", "vpvOffNote" })
+		{
+			const QString token = QStringLiteral("QLabel[%1=\"true\"]").arg(QString::fromLatin1(prop));
+			bool foundValidNoteColor = false;
+			for (const CssRule& r : darkRules)
+			{
+				if (r.selector.contains(QStringLiteral("QWidget[vpvSection=\"true\"]")) &&
+					r.selector.contains(token) &&
+					!hasPseudoState(r.selector) &&
+					QColor(findDeclValue(r.body, QStringLiteral("color"))).isValid())
+				{
+					foundValidNoteColor = true;
+					break;
+				}
+			}
+			require(foundValidNoteColor,
+				(std::string("D4-D5: ") + prop + " is missing a vpvSection-scoped QLabel valid color rule").c_str());
+		}
+		auto hasVpvSectionAncestor = [](const QWidget* w) -> bool
+		{
+			for (const QWidget* anc = w ? w->parentWidget() : nullptr; anc; anc = anc->parentWidget())
+				if (anc->property("vpvSection").toBool()) return true;
+			return false;
+		};
+		const std::pair<const char*, const char*> liveNoteChecks[] = {
+			{ "full_precision.note", "vpvPrecisionNote" },
+			{ "original_note", "vpvOriginalNote" },
+			{ "drivepage.original_note", "vpvOriginalNote" },
+			{ "drivepage.off_note", "vpvOffNote" },
+		};
+		for (const auto& nc : liveNoteChecks)
+		{
+			auto* label = control<QLabel>(window, Vpv::ObjectName(QString::fromLatin1(nc.first)));
+			require(label->property(nc.second).toBool(),
+				(std::string("D4-D5: live note widget vpv.") + nc.first + " lacks property " + nc.second + "=true").c_str());
+			require(hasVpvSectionAncestor(label),
+				(std::string("D4-D5: live note widget vpv.") + nc.first + " has no QWidget[vpvSection=\"true\"] ancestor").c_str());
+		}
+
+		// 4. D4 high-contrast mode verification via parsed SectionStyleSheetForMode(true) declarations:
+		//    zero color/gradient declarations, background strictly transparent, border/outline strictly 0/0px/none.
+		require(!hc.isEmpty(), "D4-D5: high-contrast VP-V stylesheet must not be empty");
+		require(hc.contains(beginMarker) && hc.contains(QStringLiteral("/* vpv-section-style */")),
+			"D4-D5: high-contrast VP-V stylesheet is missing begin/end style markers");
+		for (const CssRule& r : hcRules)
+		{
+			for (const auto& kv : parseDecls(r.body))
+			{
+				const QString& key = kv.first;
+				const QString& val = kv.second;
+				require(!key.contains(QStringLiteral("color"), Qt::CaseInsensitive),
+					("D4-D5: high-contrast rule sets forbidden color property (" + S(key) + ": " + S(val) + ")").c_str());
+				require(!val.contains(QLatin1Char('#')) &&
+					!val.contains(QStringLiteral("rgb("), Qt::CaseInsensitive) &&
+					!val.contains(QStringLiteral("rgba("), Qt::CaseInsensitive) &&
+					!val.contains(QStringLiteral("hsl("), Qt::CaseInsensitive) &&
+					!val.contains(QStringLiteral("hsla("), Qt::CaseInsensitive) &&
+					!val.contains(QStringLiteral("hsv("), Qt::CaseInsensitive) &&
+					!val.contains(QStringLiteral("hsva("), Qt::CaseInsensitive) &&
+					!val.contains(QStringLiteral("gradient("), Qt::CaseInsensitive),
+					("D4-D5: high-contrast rule contains forbidden color/gradient literal (" + S(key) + ": " + S(val) + ")").c_str());
+				if (key.compare(QStringLiteral("background"), Qt::CaseInsensitive) == 0)
+				{
+					require(val.compare(QStringLiteral("transparent"), Qt::CaseInsensitive) == 0,
+						("D4-D5: high-contrast background must be strictly transparent, got: " + S(val)).c_str());
+				}
+				const QString lowerKey = key.toLower();
+				if (lowerKey == QStringLiteral("border") ||
+					lowerKey == QStringLiteral("border-top") ||
+					lowerKey == QStringLiteral("border-right") ||
+					lowerKey == QStringLiteral("border-bottom") ||
+					lowerKey == QStringLiteral("border-left") ||
+					lowerKey == QStringLiteral("outline"))
+				{
+					const QString lowerVal = val.toLower();
+					require(lowerVal == QStringLiteral("0") ||
+						lowerVal == QStringLiteral("0px") ||
+						lowerVal == QStringLiteral("none"),
+						("D4-D5: high-contrast " + S(key) + " must be 0/0px/none, got: " + S(val)).c_str());
+				}
+			}
+		}
+		require(hasVpvChildPaddingRule(hcRules),
+			"D4-D5: high-contrast VP-V stylesheet is missing structural QPushButton[vpvChild=\"true\"] padding-left rule");
+	}
+
+	// Rule 8 Red Team (Item 5): hidden VP-V combo popups intercept queued QComboBoxListView MetaCalls
+	// during shell rebuilds (while unfiltered Bill combos prove the Qt hazard is real), model mutations
+	// on closed VP-V combos never busy-spin delayedLayout timers, hidden vpvRow .reset_override buttons
+	// carry zero per-widget stylesheets, and coalesced VP-V combos lay out items, scrollbars, and open
+	// interactive selection cleanly on showPopup().
+	void testItem5HiddenVpvComboPopupsCoalesceEventsAndSyncOnShow()
+	{
+		QTemporaryDir dir;
+		const QString path = WriteFixture(dir,
+			"[general]\nrenderer: VP Renderer\n[vprenderer.Default]\ndetail_pulse_stabilise: on\n");
+		require(qApp != nullptr, "QApplication instance is missing");
+
+		ConfigEditorWindow window(path, 0, true);
+		QCoreApplication::processEvents();
+		window.setRendererDiscoveryForTesting({
+			QStringLiteral("VP Renderer"),
+			QStringLiteral("DirectShow - madVR"),
+			QStringLiteral("DirectShow - Video Renderer"),
+			QStringLiteral("DirectShow - Video Mixing Renderer 9") }, {
+			QStringLiteral("VP Renderer"),
+			QStringLiteral("DirectShow - madVR") });
+		auto* pages = control<QStackedWidget>(window, QStringLiteral("settingsPages"));
+		require(pages->count() > 7, "Item 5: settingsPages has fewer than 8 pages");
+		pages->setCurrentIndex(7);
+		auto* hideLegacyRenderers = control<QCheckBox>(window, QStringLiteral("config.general.hide_legacy_renderers"));
+
+		auto isVpvCombo = [](QComboBox* combo) -> bool
+		{
+			if (!combo) return false;
+			const QString name = combo->objectName();
+			if (name.startsWith(QStringLiteral("vpv.")) ||
+				name.startsWith(QStringLiteral("calibration.")) ||
+				name.startsWith(QStringLiteral("config.calibration.")))
+				return true;
+			const QString prefix = QStringLiteral("config.vprenderer.");
+			if (name.startsWith(prefix))
+			{
+				const QString tail = name.mid(prefix.size());
+				if (Vpv::IsVpvOnlyKey(tail) || Vpv::IsVpvChoiceKey(tail))
+					return true;
+				const int lastDot = tail.lastIndexOf(QLatin1Char('.'));
+				if (lastDot >= 0 && lastDot + 1 < tail.size())
+				{
+					const QString key = tail.mid(lastDot + 1);
+					if (Vpv::IsVpvOnlyKey(key) || Vpv::IsVpvChoiceKey(key))
+						return true;
+				}
+			}
+			for (QWidget* anc = combo; anc; anc = anc->parentWidget())
+			{
+				const QString ancName = anc->objectName();
+				if (ancName == QStringLiteral("vpv.section") ||
+					ancName == QStringLiteral("vpv.drivepage.pages"))
+					return true;
+			}
+			return false;
+		};
+
+		int billComboMetaCalls = 0;
+		int vpvComboMetaCalls = 0;
+		struct ComboMetaCallSpy : QObject
+		{
+			std::function<bool(QComboBox*)> classifyVpv;
+			int* billCount = nullptr;
+			int* vpvCount = nullptr;
+			bool eventFilter(QObject* receiver, QEvent* event) override
+			{
+				if (event && event->type() == QEvent::MetaCall && receiver && receiver->metaObject() &&
+					std::strcmp(receiver->metaObject()->className(), "QComboBoxListView") == 0)
+				{
+					QComboBox* owner = nullptr;
+					for (QObject* p = receiver->parent(); p; p = p->parent())
+					{
+						if (auto* cb = qobject_cast<QComboBox*>(p))
+						{
+							owner = cb;
+							break;
+						}
+					}
+					if (owner)
+					{
+						if (classifyVpv(owner)) ++(*vpvCount);
+						else ++(*billCount);
+					}
+				}
+				return QObject::eventFilter(receiver, event);
+			}
+		};
+		struct ObjectEventFilterGuard
+		{
+			QObject* target = nullptr;
+			QObject* filter = nullptr;
+			ObjectEventFilterGuard(QObject* t, QObject* f) : target(t), filter(f)
+			{
+				if (target && filter) target->installEventFilter(filter);
+			}
+			~ObjectEventFilterGuard()
+			{
+				if (target && filter) target->removeEventFilter(filter);
+			}
+		};
+
+		auto* rendererCombo = control<QComboBox>(window, QStringLiteral("config.general.renderer"));
+		auto* rendererListView = qobject_cast<QListView*>(rendererCombo->view());
+		require(rendererListView != nullptr, "Item 5: config.general.renderer does not use a QListView");
+		auto countVisibleRows = [](QComboBox* cb, QListView* lv)
+		{
+			int n = 0;
+			for (int i = 0; i < cb->count(); ++i)
+				if (!lv->isRowHidden(i)) ++n;
+			return n;
+		};
+		require(hideLegacyRenderers->isChecked(),
+			"Item 5: expected hide_legacy_renderers to start checked before toggling false");
+		const int visibleRenderersBefore = countVisibleRows(rendererCombo, rendererListView);
+
+		qint64 toggleElapsedMs = 0;
+		std::uint64_t deferredBefore = 0;
+		std::uint64_t deferredAfter = 0;
+		{
+			ComboMetaCallSpy spy;
+			spy.classifyVpv = isVpvCombo;
+			spy.billCount = &billComboMetaCalls;
+			spy.vpvCount = &vpvComboMetaCalls;
+			ObjectEventFilterGuard guard(qApp, &spy);
+			deferredBefore = Vpv::DeferredHiddenPopupEventCount();
+			QElapsedTimer toggleTimer;
+			toggleTimer.start();
+			hideLegacyRenderers->setChecked(false);
+			QCoreApplication::processEvents();
+			toggleElapsedMs = toggleTimer.elapsed();
+			deferredAfter = Vpv::DeferredHiddenPopupEventCount();
+		}
+		require(!hideLegacyRenderers->isChecked(),
+			"Item 5: hide_legacy_renderers did not uncheck after setChecked(false)");
+		const int visibleRenderersAfter = countVisibleRows(rendererCombo, rendererListView);
+		require(visibleRenderersAfter > visibleRenderersBefore,
+			("Item 5: unchecking hide_legacy_renderers did not reveal legacy renderers (before=" +
+				std::to_string(visibleRenderersBefore) + ", after=" + std::to_string(visibleRenderersAfter) + ")").c_str());
+		const std::uint64_t deferredDelta = deferredAfter - deferredBefore;
+
+		// 1. In-test negative control: unfiltered Bill combos genuinely incur hundreds of QComboBoxListView MetaCalls.
+		require(billComboMetaCalls > 500,
+			("Item 5 negative control failed: expected > 500 Bill QComboBoxListView MetaCalls during shell rebuild, got " +
+				std::to_string(billComboMetaCalls) + " (vpv=" + std::to_string(vpvComboMetaCalls) + ")").c_str());
+
+		// 2. Aligned MetaCall interception + Rule 4 observability + latency bound:
+		//    qApp's spy and deferredBefore/deferredAfter bracket the exact same event-drain window;
+		//    both vpvComboMetaCalls and deferredDelta must be > 0, and every VP-V MetaCall reaching
+		//    the loop must be intercepted by HiddenComboPopupCoalescer.
+		require(vpvComboMetaCalls > 0,
+			("Item 5 non-vacuous guard: expected > 0 VP-V QComboBoxListView MetaCalls reaching event loop during drain, got " +
+				std::to_string(vpvComboMetaCalls) + " (bill=" + std::to_string(billComboMetaCalls) + ")").c_str());
+		require(deferredDelta > 0,
+			("Item 5 Rule 4 observability: expected > 0 deferred hidden popup events during drain, got " +
+				std::to_string(deferredDelta) + " (before=" + std::to_string(deferredBefore) +
+				", after=" + std::to_string(deferredAfter) + ")").c_str());
+		require(deferredDelta == static_cast<std::uint64_t>(vpvComboMetaCalls),
+			("Item 5 interception mismatch: deferredDelta=" + std::to_string(deferredDelta) +
+				" != vpvComboMetaCalls=" + std::to_string(vpvComboMetaCalls) +
+				" (expected exact 1-to-1 interception of closed VP-V QComboBoxListView MetaCalls)").c_str());
+		require(toggleElapsedMs < 250,
+			("Item 5 latency bound: hideLegacyRenderers toggle + processEvents took " +
+				std::to_string(toggleElapsedMs) + " ms (limit < 250 ms)").c_str());
+
+		// 2b. Independent closed-popup MetaCall suppression proof across EVERY closed combo in window
+		//     + symmetric Bill negative control (ZERO reliance on production's own counter):
+		//     queue a real MetaCall to every closed combo's existing QAbstractItemView, drain once,
+		//     and verify 100% of VP-V combos suppressed it while 100% of Bill combos delivered it.
+		{
+			struct ClosedMetaCallProbe
+			{
+				QString name;
+				bool delivered = false;
+			};
+			std::deque<ClosedMetaCallProbe> vpvProbes;
+			std::deque<ClosedMetaCallProbe> billProbes;
+			for (QComboBox* cb : window.findChildren<QComboBox*>())
+			{
+				QAbstractItemView* v = cb->findChild<QAbstractItemView*>();
+				if (!v || v->isVisible()) continue;
+				const QString label = cb->objectName().isEmpty() ? QStringLiteral("<unnamed>") : cb->objectName();
+				auto& bucket = isVpvCombo(cb) ? vpvProbes : billProbes;
+				bucket.push_back(ClosedMetaCallProbe{ label, false });
+				bool* deliveredPtr = &bucket.back().delivered;
+				QMetaObject::invokeMethod(v, [deliveredPtr]() { *deliveredPtr = true; }, Qt::QueuedConnection);
+			}
+			QCoreApplication::processEvents();
+			require(vpvProbes.size() >= 100,
+				("Item 5 closed-suppression probe: expected >= 100 closed VP-V combos, found " +
+					std::to_string(vpvProbes.size())).c_str());
+			require(billProbes.size() >= 20,
+				("Item 5 closed-suppression negative control: expected >= 20 closed Bill combos, found " +
+					std::to_string(billProbes.size())).c_str());
+			for (const ClosedMetaCallProbe& p : vpvProbes)
+			{
+				require(!p.delivered,
+					("Item 5: closed VP-V popup view failed to suppress queued MetaCall on " + S(p.name)).c_str());
+			}
+			for (const ClosedMetaCallProbe& p : billProbes)
+			{
+				require(p.delivered,
+					("Item 5 negative control: closed Bill popup view did not deliver queued MetaCall on " + S(p.name)).c_str());
+			}
+		}
+
+		// 3. BLOCKER #1 busy-spin regression check + in-test negative control:
+		//    Phase 1 simulates swallowing QEvent::Timer on profileView and proves Qt's delayedLayout
+		//    0-ms timer genuinely busy-spins across 3 consecutive passes; Phase 2 removes the swallow
+		//    filter and proves production's coalescer lets delayedLayout fire once and settle to 0.
+		{
+			auto* profileCombo = control<QComboBox>(window, Vpv::ObjectName(QStringLiteral("profile")));
+			QAbstractItemView* profileView = profileCombo->view();
+			require(profileView != nullptr && !profileView->isVisible(),
+				"Item 5 busy-spin check: expected vpv.profile popup view to be hidden");
+
+			std::vector<std::pair<QString, QVariant>> savedItems;
+			savedItems.reserve(static_cast<size_t>(profileCombo->count()));
+			for (int i = 0; i < profileCombo->count(); ++i)
+				savedItems.emplace_back(profileCombo->itemText(i), profileCombo->itemData(i));
+			require(!savedItems.empty(), "Item 5 busy-spin check: vpv.profile has no items to mutate");
+			const int savedIdx = profileCombo->currentIndex();
+
+			struct ViewTimerSpy : QObject
+			{
+				int timerEvents = 0;
+				bool eventFilter(QObject* receiver, QEvent* event) override
+				{
+					if (event && event->type() == QEvent::Timer) ++timerEvents;
+					return QObject::eventFilter(receiver, event);
+				}
+			};
+			struct SwallowTimerFilter : QObject
+			{
+				bool eventFilter(QObject* receiver, QEvent* event) override
+				{
+					if (event && event->type() == QEvent::Timer) return true;
+					return QObject::eventFilter(receiver, event);
+				}
+			};
+			ViewTimerSpy timerSpy;
+
+			// Phase 1 (negative control): install SwallowTimerFilter first, then timerSpy second so
+			// timerSpy runs first and observes every spin tick before SwallowTimerFilter consumes it.
+			{
+				SwallowTimerFilter swallow;
+				ObjectEventFilterGuard swallowGuard(profileView, &swallow);
+				ObjectEventFilterGuard spyGuard(profileView, &timerSpy);
+				{
+					const QSignalBlocker blocker(profileCombo);
+					profileCombo->addItem(QStringLiteral("busy_spin_probe"), QStringLiteral("probe"));
+					profileCombo->clear();
+					for (const auto& item : savedItems)
+						profileCombo->addItem(item.first, item.second);
+					profileCombo->setCurrentIndex(savedIdx);
+				}
+				int badPassTimers[3] = {};
+				for (int pass = 0; pass < 3; ++pass)
+				{
+					timerSpy.timerEvents = 0;
+					QCoreApplication::processEvents();
+					badPassTimers[pass] = timerSpy.timerEvents;
+				}
+				require(badPassTimers[0] > 0 && badPassTimers[1] > 0 && badPassTimers[2] > 0,
+					("Item 5 busy-spin negative control: swallowing QEvent::Timer did not trigger delayedLayout spin "
+						"(badPasses=[" + std::to_string(badPassTimers[0]) + "," +
+						std::to_string(badPassTimers[1]) + "," + std::to_string(badPassTimers[2]) + "])").c_str());
+			}
+
+			// Phase 2 (production behavior): without SwallowTimerFilter, delayedLayout fires and stops cleanly.
+			{
+				ObjectEventFilterGuard spyGuard(profileView, &timerSpy);
+				int passTimers[5] = {};
+				for (int pass = 0; pass < 5; ++pass)
+				{
+					timerSpy.timerEvents = 0;
+					QCoreApplication::processEvents();
+					passTimers[pass] = timerSpy.timerEvents;
+				}
+				require(passTimers[0] + passTimers[1] > 0,
+					("Item 5 busy-spin check: delayedLayout timer did not fire and clear after removing swallow filter "
+						"(passes=[" + std::to_string(passTimers[0]) + "," + std::to_string(passTimers[1]) + "])").c_str());
+				require(passTimers[2] == 0 && passTimers[3] == 0 && passTimers[4] == 0,
+					("Item 5 busy-spin regression: hidden VP-V QAbstractItemView kept receiving QEvent::Timer "
+						"(passes=[" + std::to_string(passTimers[0]) + "," + std::to_string(passTimers[1]) + "," +
+						std::to_string(passTimers[2]) + "," + std::to_string(passTimers[3]) + "," +
+						std::to_string(passTimers[4]) + "])").c_str());
+			}
+		}
+
+		// 4. Hidden vpvRow .reset_override positive-count guard + zero per-widget stylesheets + Bill negative control.
+		int hiddenVpvResetTotal = 0;
+		int hiddenVpvResetStyled = 0;
+		int visibleBillResetStyled = 0;
+		for (QPushButton* btn : window.findChildren<QPushButton*>())
+		{
+			if (!btn->objectName().endsWith(QStringLiteral(".reset_override"))) continue;
+			const QWidget* holder = btn->parentWidget();
+			const bool isHiddenVpvReset = holder && holder->isHidden() &&
+				(qobject_cast<const QComboBox*>(holder->parentWidget()) != nullptr);
+			if (isHiddenVpvReset)
+			{
+				++hiddenVpvResetTotal;
+				if (!btn->styleSheet().isEmpty()) ++hiddenVpvResetStyled;
+			}
+			else if (holder && !holder->isHidden() && !btn->styleSheet().isEmpty())
+			{
+				++visibleBillResetStyled;
+			}
+		}
+		require(hiddenVpvResetTotal > 0,
+			"Item 5 non-vacuous guard failed: expected > 0 hidden vpvRow .reset_override buttons");
+		require(visibleBillResetStyled > 0,
+			"Item 5 negative control failed: expected at least one visible Bill .reset_override button to retain its stylesheet");
+		require(hiddenVpvResetStyled == 0,
+			("Item 5: found " + std::to_string(hiddenVpvResetStyled) + " of " + std::to_string(hiddenVpvResetTotal) +
+				" hidden vpvRow .reset_override buttons retaining non-empty stylesheets").c_str());
+
+		// 5. Real show-sync proof on 3 combos (header, VP-V toggle with forced overflow scrollbar,
+		//    and moved config.vprenderer.* VP-V combo with >= 4 items): verify layout rects, vertical
+		//    scrollbar sync on overflow, and non-suppression of events while popup is open.
+		window.selectPage(QStringLiteral("VP-V"));
+		window.show();
+		QCoreApplication::processEvents();
+		auto* pathway = control<QComboBox>(window, Vpv::ObjectName(QStringLiteral("pathway")));
+		auto* units = control<QTabWidget>(window, Vpv::ObjectName(QStringLiteral("units")));
+		auto* repairTab = control<QWidget>(window, Vpv::ObjectName(QStringLiteral("repair")));
+		auto* scalingTab = control<QWidget>(window, Vpv::ObjectName(QStringLiteral("scaling")));
+		auto* cutSoftReset = control<QComboBox>(window, Vpv::ObjectName(QStringLiteral("repair.cut_soft_reset")));
+		auto* chromaVpv = control<QComboBox>(window, QStringLiteral("config.vprenderer.scaling.chroma_upscaler.vpv"));
+
+		auto verifyPopupSync = [](QComboBox* combo, const char* label, int minItems)
+		{
+			require(combo->count() >= minItems,
+				(std::string("Item 5 show-sync: combo has too few items (") + std::to_string(combo->count()) +
+					" < " + std::to_string(minItems) + "): " + label).c_str());
+
+			combo->showPopup();
+			QCoreApplication::processEvents();
+			QAbstractItemView* view = combo->view();
+			require(view && view->isVisible(),
+				(std::string("Item 5 show-sync: popup view did not become visible on showPopup(): ") + label).c_str());
+			require(view->width() > 0 && view->height() > 0,
+				(std::string("Item 5 show-sync: popup view has degenerate geometry: ") + label).c_str());
+			const auto* listView = qobject_cast<QListView*>(view);
+			int rowA = -1;
+			int rowB = -1;
+			for (int r = 0; r < combo->count(); ++r)
+			{
+				if (listView && listView->isRowHidden(r)) continue;
+				if (rowA < 0) rowA = r;
+				else { rowB = r; break; }
+			}
+			require(rowA >= 0 && rowB > rowA,
+				(std::string("Item 5 show-sync: fewer than 2 non-hidden popup rows on ") + label).c_str());
+			const QRect r0 = view->visualRect(combo->model()->index(rowA, 0));
+			const QRect r1 = view->visualRect(combo->model()->index(rowB, 0));
+			require(!r0.isEmpty() && !r1.isEmpty() && r0.bottom() < r1.top(),
+				(std::string("Item 5 show-sync: unlaid-out or overlapping item visualRects on ") + label).c_str());
+
+			// Direct MetaCall delivery check while open: coalescer must NOT suppress QEvent::MetaCall on
+			// an actively open popup view.
+			bool openMetaCallDelivered = false;
+			QMetaObject::invokeMethod(view, [&openMetaCallDelivered]() { openMetaCallDelivered = true; }, Qt::QueuedConnection);
+			QCoreApplication::processEvents();
+			require(openMetaCallDelivered,
+				(std::string("Item 5 show-sync: coalescer suppressed MetaCall on open popup view: ") + label).c_str());
+
+			// Interactive selection while open: open popup view must genuinely track the selection.
+			const int origIdx = combo->currentIndex();
+			const int altIdx = (origIdx == rowA) ? rowB : rowA;
+			combo->setCurrentIndex(altIdx);
+			QCoreApplication::processEvents();
+			require(view->isVisible() && combo->currentIndex() == altIdx && view->currentIndex().row() == altIdx,
+				(std::string("Item 5 show-sync: open popup view did not track interactive selection on ") + label).c_str());
+			combo->setCurrentIndex(origIdx);
+			QCoreApplication::processEvents();
+
+			combo->hidePopup();
+			QCoreApplication::processEvents();
+			bool postHideDelivered = false;
+			QMetaObject::invokeMethod(view, [&postHideDelivered]() { postHideDelivered = true; }, Qt::QueuedConnection);
+			QCoreApplication::processEvents();
+			require(!postHideDelivered,
+				(std::string("Item 5 show-sync: coalescer did not re-engage after hidePopup() on ") + label).c_str());
+		};
+
+		verifyPopupSync(pathway, "vpv.pathway", 2);
+		units->setCurrentWidget(repairTab);
+		QCoreApplication::processEvents();
+		verifyPopupSync(cutSoftReset, "vpv.repair.cut_soft_reset", 3);
+		units->setCurrentWidget(scalingTab);
+		QCoreApplication::processEvents();
+		verifyPopupSync(chromaVpv, "config.vprenderer.scaling.chroma_upscaler.vpv", 4);
+
+		// Genuine Fusion-overflowing scrollbar sync check (matching ConfigEditorWindowTests.cpp:1291):
+		// in Qt 6 Fusion (SH_ComboBox_Popup == true), a popup overflows only when its item height
+		// exceeds screen height; add 60 items while closed, then open and assert verticalScrollBar syncs.
+		{
+			auto* profileCombo = control<QComboBox>(window, Vpv::ObjectName(QStringLiteral("profile")));
+			std::vector<std::pair<QString, QVariant>> savedItems;
+			savedItems.reserve(static_cast<size_t>(profileCombo->count()));
+			for (int i = 0; i < profileCombo->count(); ++i)
+				savedItems.emplace_back(profileCombo->itemText(i), profileCombo->itemData(i));
+			const int savedIdx = profileCombo->currentIndex();
+			struct RestoreProfileCombo
+			{
+				QComboBox* cb;
+				const std::vector<std::pair<QString, QVariant>>* items;
+				int idx;
+				~RestoreProfileCombo()
+				{
+					if (!cb) return;
+					cb->hidePopup();
+					const QSignalBlocker blocker(cb);
+					cb->clear();
+					for (const auto& it : *items) cb->addItem(it.first, it.second);
+					cb->setCurrentIndex(idx);
+				}
+			} restoreGuard{ profileCombo, &savedItems, savedIdx };
+
+			{
+				const QSignalBlocker blocker(profileCombo);
+				for (int i = 0; i < 60; ++i)
+					profileCombo->addItem(QStringLiteral("Overflow probe %1").arg(i), QStringLiteral("probe_%1").arg(i));
+			}
+			QCoreApplication::processEvents();
+
+			profileCombo->showPopup();
+			QCoreApplication::processEvents();
+			QAbstractItemView* view = profileCombo->view();
+			require(view && view->isVisible(),
+				"Item 5 overflow show-sync: vpv.profile popup view did not become visible");
+			require(view->width() > 0 && view->height() > 0,
+				"Item 5 overflow show-sync: vpv.profile popup view has degenerate geometry");
+			QScrollBar* bar = view->verticalScrollBar();
+			require(bar != nullptr && bar->maximum() > 0,
+				"Item 5 overflow show-sync: verticalScrollBar did not sync maximum > 0 on 60-item Fusion popup");
+			if (view->verticalScrollBarPolicy() != Qt::ScrollBarAlwaysOff)
+			{
+				require(bar->isVisible(),
+					"Item 5 overflow show-sync: verticalScrollBar is not visible when policy allows scrollbars");
+			}
+			else
+			{
+				QWidget* container = view->parentWidget();
+				require(container != nullptr,
+					"Item 5 overflow show-sync: popup view has no container parent under ScrollBarAlwaysOff");
+				bool hasVisibleScroller = false;
+				for (QWidget* child : container->findChildren<QWidget*>())
+				{
+					if (child->metaObject() &&
+						std::strcmp(child->metaObject()->className(), "QComboBoxPrivateScroller") == 0 &&
+						child->isVisible())
+					{
+						hasVisibleScroller = true;
+						break;
+					}
+				}
+				require(hasVisibleScroller,
+					"Item 5 overflow show-sync: expected a visible QComboBoxPrivateScroller under Fusion ScrollBarAlwaysOff");
+			}
+			const int beforeScroll = bar->value();
+			bar->setValue(bar->maximum());
+			QCoreApplication::processEvents();
+			require(bar->value() > beforeScroll,
+				"Item 5 overflow show-sync: open 60-item popup did not scroll");
+			profileCombo->hidePopup();
+			QCoreApplication::processEvents();
+		}
+		window.hide();
+		QCoreApplication::processEvents();
 	}
 }
 
@@ -3028,5 +4198,9 @@ int RunVpvConfigTests(const std::function<int(const char*, const std::function<v
 	failures += run("VP-V: legacy vprenderer pathway migrates to vpv and survives save", testLegacyVprendererPathwayMigratesToVpvAndSurvivesSave);
 	failures += run("VP-V: hoisted styles stay single-sheet and isolated from Bill pages", testHoistedStylesStaySingleSheetAndIsolatedFromBillPages);
 	failures += run("VP-V: section state frees on close and shell rebuild without dangling timers", testSectionStateFreesOnCloseAndShellRebuildWithoutDanglingTimers);
+	failures += run("VP-V: D2 empty [vpv] key is not overwritten by legacy [vprenderer] value", testD2EmptyVpvKeyNotOverwrittenByLegacyVprenderer);
+	failures += run("VP-V: D3 refresh timers survive transient detach and re-attach without firing while hidden", testD3RefreshTimersSurviveTransientDetachWithoutFiringWhileHidden);
+	failures += run("VP-V: D4-D5 stylesheet cascade priority and zero per-widget VP-V styles", testD4D5StylesheetCascadePriorityAndZeroPerWidgetVpvStyles);
+	failures += run("VP-V: Item 5 hidden VP-V combo popups coalesce events and sync on show", testItem5HiddenVpvComboPopupsCoalesceEventsAndSyncOnShow);
 	return failures;
 }
