@@ -73,5 +73,11 @@ size_t LibplaceboVideoRenderer::LockedFilmQueueTarget(size_t desired) const
 
 void LibplaceboVideoRenderer::QueueTargetThunk(const void* self, RendererExtension::QueueTargetContext& qc)
 {
-	qc.target = static_cast<const LibplaceboVideoRenderer*>(self)->QueueTargetVp();
+	const auto* const renderer = static_cast<const LibplaceboVideoRenderer*>(self);
+	uint32_t fixBits = 0;
+	if (renderer->m_impl) Vpv::Ingress::BindImplHost(self, renderer->m_impl.get());
+	if (renderer->m_impl && Vpv::Hub::ExtensionHub::Instance().FixSwitchBits(renderer->m_impl.get(), fixBits) &&
+		FixSwitchesFromBits(fixBits).originalPathway)
+		return Vpv::Ingress::NoteOriginalPathway(self, true);
+	qc.target = renderer->QueueTargetVp();
 }

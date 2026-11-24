@@ -19,6 +19,7 @@ LedDrive::HostContext LibplaceboVideoRenderer::DynamicDriveContext() const
 	LedDrive::HostContext context;
 	if (m_impl)
 	{
+		Vpv::Ingress::BindImplHost(this, m_impl.get());
 		context.frame = &m_impl->dynamicDrive;
 		// VP-V: slot drive.projector_control (off in the Original pathway, ADR-0019, or at slot level).
 		context.projectorAllowed = m_impl->pipelineSlots.Runs(PipelineSlots::Id::DriveProjectorControl);

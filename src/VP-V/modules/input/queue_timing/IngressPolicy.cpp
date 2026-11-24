@@ -3,7 +3,9 @@
 
 #include <pch.h>
 #include "IngressPolicy.h"
+#include "IngressState.h"
 
+#include <VP-V/core/RunningPathway.h>
 #include <VP-V/core/hub/HostSlots.h>
 #include <DebugLog.h>
 
@@ -17,6 +19,11 @@ namespace Vpv
 	{
 		namespace
 		{
+			// Single-word pathway state: bit 0 = active Original pathway flag, upper 63 bits = monotonic update
+			// sequence so a BindImplHost sync can never overwrite a concurrent SettingsApplied / NoteOriginalPathway.
+			constexpr uint64_t kOriginalBit = 1u;
+			constexpr uint64_t kSeqStep = 2u;
+
 			struct Entry
 			{
 				const void* host = nullptr;
@@ -25,8 +32,21 @@ namespace Vpv
 				FaultFn fault = nullptr;
 				void* self = nullptr;
 				std::atomic<uint64_t> faults{ 0 };   // this renderer's contained throws (slice 4 F4: per renderer)
-				std::atomic<bool> originalPathway{ false };   // PHASE 1: the renderer's active pathway (NoteOriginalPathway)
+				std::atomic<const void*> implHost{ nullptr };   // S1-M1: associated Impl* for SettingsApplied / GpuReleased
+				std::atomic<uint64_t> pathwayState{ 0 };        // PHASE 1 + S1-M1: (seq << 1) | originalBit
 			};
+
+			void StorePathway(Entry& entry, bool original)
+			{
+				uint64_t cur = entry.pathwayState.load(std::memory_order_acquire);
+				for (;;)
+				{
+					const uint64_t next = ((cur & ~kOriginalBit) + kSeqStep) | (original ? kOriginalBit : 0u);
+					if (entry.pathwayState.compare_exchange_weak(cur, next, std::memory_order_acq_rel, std::memory_order_acquire))
+						return;
+				}
+			}
+
 			Hub::HostSlots<Entry>& Slots()
 			{
 				static Hub::HostSlots<Entry> slots;
@@ -50,6 +70,7 @@ namespace Vpv
 			entry->self = self;
 			entry->queueTarget = queueTarget;
 			entry->fault = fault;
+			entry->pathwayState.store(Vpv::RunningPathway::Original() ? kOriginalBit : 0u, std::memory_order_release);
 			registered_ = Slots().Put(host, entry);
 			if (registered_)
 				return;
@@ -119,16 +140,49 @@ namespace Vpv
 				entry->queueTarget(entry->self, qc);
 		}
 
+		void BindImplHost(const void* rendererHost, const void* implHost)
+		{
+			if (!rendererHost)
+				return;
+			const std::shared_ptr<Entry> entry = Slots().Find(rendererHost);
+			if (!entry)
+				return;
+			uint64_t stateBefore = entry->pathwayState.load(std::memory_order_acquire);
+			if (entry->implHost.exchange(implHost, std::memory_order_acq_rel) == implHost)
+				return;
+			if (!implHost)
+				return;
+			std::atomic_thread_fence(std::memory_order_seq_cst);
+			uint32_t fixBits = 0;
+			bool synced = false;
+			bool original = false;
+			if (Hub::ExtensionHub::Instance().FixSwitchBits(implHost, fixBits))
+			{
+				synced = true;
+				original = IngressState::FixSwitchesFromBits(fixBits).originalPathway;
+			}
+			else if (Hub::ExtensionHub::Instance().OriginalPathway(implHost))
+			{
+				synced = true;
+				original = true;
+			}
+			if (synced)
+			{
+				const uint64_t next = ((stateBefore & ~kOriginalBit) + kSeqStep) | (original ? kOriginalBit : 0u);
+				entry->pathwayState.compare_exchange_strong(stateBefore, next, std::memory_order_acq_rel, std::memory_order_relaxed);
+			}
+		}
+
 		void NoteOriginalPathway(const void* host, bool original)
 		{
 			if (const std::shared_ptr<Entry> entry = Slots().Find(host))
-				entry->originalPathway.store(original, std::memory_order_release);
+				StorePathway(*entry, original);
 		}
 
 		bool OriginalPathwayOf(const void* host)
 		{
 			const std::shared_ptr<Entry> entry = Slots().Find(host);
-			return entry && entry->originalPathway.load(std::memory_order_acquire);
+			return entry && (entry->pathwayState.load(std::memory_order_acquire) & kOriginalBit) != 0;
 		}
 
 		size_t BoundHosts() { return Slots().States(); }
@@ -138,6 +192,47 @@ namespace Vpv
 			uint64_t total = 0;   // over the live renderers only: a retired renderer's faults go with it
 			Slots().ForEach([&](const void*, const std::shared_ptr<Entry>& e) { total += e->faults.load(std::memory_order_relaxed); });
 			return total;
+		}
+
+		void IngressPolicy::OnLifecycle(RE::LifecycleFacts& f)
+		{
+			if (!f.host)
+				return;
+			if (f.kind == RE::Lifecycle::SettingsApplied)
+			{
+				std::atomic_thread_fence(std::memory_order_seq_cst);
+				const bool original = f.code != 0;
+				Slots().ForEach([&](const void*, const std::shared_ptr<Entry>& entry)
+				{
+					if (entry->implHost.load(std::memory_order_acquire) == f.host)
+						StorePathway(*entry, original);
+				});
+			}
+			else if (f.kind == RE::Lifecycle::GpuReleased || f.kind == RE::Lifecycle::Shutdown)
+			{
+				Slots().ForEach([&](const void*, const std::shared_ptr<Entry>& entry)
+				{
+					const void* expected = f.host;
+					entry->implHost.compare_exchange_strong(expected, nullptr, std::memory_order_acq_rel, std::memory_order_relaxed);
+				});
+			}
+		}
+
+		// Original pathway: not handled, so Bill's pre-filled facts stand (his OnVideoFrame: no pulldown, no stale gap).
+		bool IngressPolicy::OnDecideIngress(RE::FrameContext&, RE::IngressContext& ic)   // VPV-GATED
+		{
+			const bool originalPathway = OriginalPathwayOf(ic.host);
+			if (originalPathway) return false;
+			return Decide(ic);
+		}
+
+		// Original pathway: qc.target stays Bill's own value (PrefillTargetLocked's ClampDesiredDepthToCapacity, which
+		// BillQueuePolicy::QueueTarget computed from the same inputs before).
+		void IngressPolicy::OnQueueTarget(RE::FrameContext& c, RE::QueueTargetContext& qc)   // VPV-GATED
+		{
+			const bool originalPathway = OriginalPathwayOf(c.host);
+			if (originalPathway) return;
+			QueueTarget(c.host, qc);
 		}
 
 		void IngressPolicy::OnStatus(const RE::Context&, RE::StatusKind kind, std::vector<std::string>& lines, const char*, const char*)

@@ -57,8 +57,9 @@ namespace Vpv
 
 		// PHASE 1 of the host seams plan (refs/107 s2.4 item 1; owner E3 2026-11-11): the pathway the renderer's ACTIVE
 		// settings select, kept on its binding (the ingress host key is the renderer, not the Impl the hub's
-		// SettingsApplied fact is keyed by). The renderer tells it from the first arrival on, when it changes
-		// (IngressState::SyncIngressSwitches in IngressPolicy.inl / TimedFileFrames.inl); no binding = VP-V (as before).
+		// SettingsApplied fact is keyed by). Initialised from RunningPathway::Original() at binding creation and kept in
+		// sync via BindImplHost + OnLifecycle(SettingsApplied) as well as per-arrival NoteOriginalPathway.
+		void BindImplHost(const void* rendererHost, const void* implHost);
 		void NoteOriginalPathway(const void* host, bool original);
 		bool OriginalPathwayOf(const void* host);
 
@@ -66,21 +67,9 @@ namespace Vpv
 		{
 		public:
 			const char* Name() const override { return "input.queue_timing"; }
-			// Original pathway: not handled, so Bill's pre-filled facts stand (his OnVideoFrame: no pulldown, no stale gap).
-			bool OnDecideIngress(RE::FrameContext&, RE::IngressContext& ic) override   // VPV-GATED
-			{
-				const bool originalPathway = OriginalPathwayOf(ic.host);
-				if (originalPathway) return false;
-				return Decide(ic);
-			}
-			// Original pathway: qc.target stays Bill's own value (PrefillTargetLocked's ClampDesiredDepthToCapacity, which
-			// BillQueuePolicy::QueueTarget computed from the same inputs before).
-			void OnQueueTarget(RE::FrameContext& c, RE::QueueTargetContext& qc) override   // VPV-GATED
-			{
-				const bool originalPathway = OriginalPathwayOf(c.host);
-				if (originalPathway) return;
-				QueueTarget(c.host, qc);
-			}
+			void OnLifecycle(RE::LifecycleFacts& f) override;
+			bool OnDecideIngress(RE::FrameContext&, RE::IngressContext& ic) override;
+			void OnQueueTarget(RE::FrameContext& c, RE::QueueTargetContext& qc) override;
 			void OnStatus(const RE::Context&, RE::StatusKind kind, std::vector<std::string>& lines, const char*, const char*) override;
 		};
 
