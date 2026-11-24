@@ -107,24 +107,25 @@ namespace D8SceneJudgeAgreementNs
 		if (row == "tos_24p_3min" && part == 2 && parts == 6)
 		{
 			// Part 3 [1440-2160): achieved 97.497% (2/5 on 2034..2038, 0 false fades).
-			// Known cut-law item 102b U7-TOS-2041-VFX-CUT: decoder frame 2040 (delivered at 2041) is an abrupt S=0.02,
-			// spread 1->180 VFX cut into moving sparks (already in U7CutTruthGateTests dontCare {2040,2045}); ONLY 2041 allowed.
+			// Known cut-law item 102b U7-TOS-2041-VFX-CUT (D1 Option (b) pending Owner truth review): decoder frame 2040
+			// (delivered at 2041) is an abrupt S=0.02, spread 1->180 VFX cut into moving sparks (already in U7CutTruthGateTests
+			// dontCare {2040,2045}); ONLY 2041 allowed.
 			return { 97.49, 0, { { 2034, 2038, 2 } }, { 2041 } };
 		}
 		if (row == "tos_24p_3min" && part == 3 && parts == 6)
 		{
-			// Part 4 [2160-2880): achieved 78.581% (12/150 across 2311..2323 [2], 2358..2413 [9], 2543..2618 [1]; 16 false fades).
-			return { 78.58, 16, { { 2311, 2323, 2 }, { 2358, 2413, 9 }, { 2543, 2618, 1 } }, {} };
+			// Part 4 [2160-2880): U7 v5 achieved 81.502% (18/150 across 2311..2323 [2], 2358..2413 [9], 2543..2618 [7]; 1 false fade, down from 16).
+			return { 81.50, 1, { { 2311, 2323, 2 }, { 2358, 2413, 9 }, { 2543, 2618, 7 } }, {} };
 		}
 		if (row == "fade_synthetic" && part == 0 && parts == 1)
 		{
-			// fade_synthetic [0-240): achieved 93.724% (82/96: 35/48 fade-out, 47/48 fade-in; 1 post-fade tail at 160; keep=0.0000).
-			return { 93.72, 1, { { 40, 87, 35 }, { 112, 159, 47 } }, {} };
+			// fade_synthetic [0-240): U7 v5 achieved 94.561% (84/96: 37/48 fade-out, 47/48 fade-in; <= 1 false fade; keep=0.0000).
+			return { 94.56, 1, { { 40, 87, 37 }, { 112, 159, 47 } }, {} };
 		}
 		if (row == "pan_480pxs_fade_23976p" && part == 0 && parts == 1)
 		{
-			// pan_480pxs_fade_23976p [0-719): achieved 98.189% (131/143: 66/72 fade-in, 65/71 fade-out; 1 post-fade tail at 73).
-			return { 98.18, 1, { { 1, 72, 66 }, { 648, 718, 65 } }, {} };
+			// pan_480pxs_fade_23976p [0-719): U7 v5 achieved 98.607% (133/143: 66/72 fade-in, 67/71 fade-out; 0 false fades).
+			return { 98.60, 0, { { 1, 72, 66 }, { 648, 718, 67 } }, {} };
 		}
 		return {};
 	}
