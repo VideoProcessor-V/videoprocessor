@@ -1415,5 +1415,205 @@ namespace VideoProcessorTest
 			Assert::AreEqual(50, runProjector->contrast);
 			control.Close();
 		}
+
+		// GEM-192: auto-framing downgrade from Terminator::Auto (with readBack = true) to
+		// unacknowledged "script" framing on a silent projector must set
+		// DriverStatus::framingDowngraded = true and engage LedDriveModule::kFramingFallbackId
+		// ("projector framing"), while acknowledging ports and explicit Terminator::Script
+		// keep framingDowngraded = false and never engage the fallback.
+		TEST_METHOD(AutoFramingDowngradeToScriptSetsFramingDowngradedAndModuleFallback)
+		{
+			struct DriverCloseGuard
+			{
+				std::unique_ptr<IProjectorDriver> driver;
+				explicit DriverCloseGuard(std::unique_ptr<IProjectorDriver> driverIn)
+					: driver(std::move(driverIn))
+				{
+				}
+				DriverCloseGuard(const DriverCloseGuard&) = delete;
+				DriverCloseGuard& operator=(const DriverCloseGuard&) = delete;
+				~DriverCloseGuard()
+				{
+					if (driver)
+						driver->Close();
+				}
+			};
+			struct ModuleStopGuard
+			{
+				std::unique_ptr<LedDriveModule> mod;
+				TestClock* clock;
+				ModuleStopGuard(std::unique_ptr<LedDriveModule> modIn, TestClock* clockIn)
+					: mod(std::move(modIn)), clock(clockIn)
+				{
+				}
+				ModuleStopGuard(const ModuleStopGuard&) = delete;
+				ModuleStopGuard& operator=(const ModuleStopGuard&) = delete;
+				~ModuleStopGuard()
+				{
+					if (mod)
+					{
+						if (clock && !mod->DrivingProjector())
+							clock->To(clock->Ms() + 60000.0);
+						mod->Stop();
+					}
+				}
+			};
+
+			auto advanceModuleReady = [](TestClock& clock, LedDriveModule& mod) -> bool
+			{
+				const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+				while (std::chrono::steady_clock::now() < deadline)
+				{
+					if (mod.DrivingProjector() && clock.clock->SettledCount() >= 1)
+						return true;
+					if (clock.clock->SettledCount() >= 1)
+						clock.To(clock.Ms() + 50.0);
+					else
+						std::this_thread::sleep_for(std::chrono::milliseconds(2));
+				}
+				return mod.DrivingProjector() && clock.clock->SettledCount() >= 1;
+			};
+
+			auto findFallbackReason = [](const std::vector<FallbackStatus::Entry>& entries, const char* id,
+				std::string& reasonOut) -> bool
+			{
+				for (const FallbackStatus::Entry& e : entries)
+				{
+					if (e.id == id)
+					{
+						reasonOut = e.reason;
+						return true;
+					}
+				}
+				return false;
+			};
+
+			// 1. Negative control 1 (acknowledging projector under Terminator::Auto + readBack = true):
+			// answers LPW1? with CR framing -> framing == "cr" and framingDowngraded == false.
+			{
+				auto ackProjector = std::make_shared<FakeProjector>();
+				ProjectorConfig cfg = FastConfig();
+				cfg.terminator = Terminator::Auto;
+				cfg.readBack = true;
+				TestClock clock;
+				DriverCloseGuard guard{ OpenDriver(ackProjector, cfg, clock) };
+				const DriverStatus status = guard.driver->Status();
+				Assert::AreEqual(std::string("cr"), status.framing,
+					L"negative control 1: acknowledging projector must select cr framing");
+				Assert::IsTrue(status.acknowledged,
+					L"negative control 1: acknowledging projector must set acknowledged = true");
+				Assert::IsFalse(status.framingDowngraded,
+					L"negative control 1: acknowledging projector must set framingDowngraded = false");
+			}
+
+			// 2. Negative control 2 (explicit Terminator::Script): explicitly configured script mode
+			// is a deliberate choice, NOT a downgrade -> framing == "script" and framingDowngraded == false.
+			{
+				auto scriptProjector = std::make_shared<FakeProjector>();
+				ProjectorConfig cfg = FastConfig();
+				cfg.terminator = Terminator::Script;
+				cfg.readBack = true;
+				TestClock clock;
+				DriverCloseGuard guard{ OpenDriver(scriptProjector, cfg, clock) };
+				const DriverStatus status = guard.driver->Status();
+				Assert::AreEqual(std::string("script"), status.framing,
+					L"negative control 2: explicit Terminator::Script must select script framing");
+				Assert::IsFalse(status.acknowledged,
+					L"negative control 2: explicit Terminator::Script is unacknowledged");
+				Assert::IsFalse(status.framingDowngraded,
+					L"negative control 2: explicit Terminator::Script must NOT set framingDowngraded");
+			}
+
+			// 3. Negative control 3 (send-only readBack = false with Terminator::Auto): send-only
+			// deliberately uses script bytes without probing -> framing == "script" and framingDowngraded == false.
+			{
+				auto sendOnlyProjector = std::make_shared<FakeProjector>();
+				ProjectorConfig cfg = FastConfig();
+				cfg.terminator = Terminator::Auto;
+				cfg.readBack = false;
+				TestClock clock;
+				DriverCloseGuard guard{ OpenDriver(sendOnlyProjector, cfg, clock) };
+				const DriverStatus status = guard.driver->Status();
+				Assert::AreEqual(std::string("script"), status.framing,
+					L"negative control 3: readBack=false Terminator::Auto uses script framing");
+				Assert::IsFalse(status.framingDowngraded,
+					L"negative control 3: send-only readBack=false must NOT set framingDowngraded");
+			}
+
+			// 4. Fix proof (silent projector under Terminator::Auto + readBack = true):
+			// no replies to cr or literal_cr probes -> downgrades to script with framingDowngraded == true.
+			{
+				auto silentProjector = std::make_shared<FakeProjector>();
+				silentProjector->silent = true;
+				ProjectorConfig cfg = FastConfig();
+				cfg.terminator = Terminator::Auto;
+				cfg.readBack = true;
+				TestClock clock;
+				DriverCloseGuard guard{ OpenDriver(silentProjector, cfg, clock) };
+				const DriverStatus status = guard.driver->Status();
+				Assert::AreEqual(std::string("script"), status.framing,
+					L"silent projector under Terminator::Auto must fall back to script framing");
+				Assert::IsFalse(status.acknowledged,
+					L"downgraded script framing must have acknowledged = false");
+				Assert::IsTrue(status.framingDowngraded,
+					L"silent projector auto-framing downgrade must set framingDowngraded = true");
+			}
+
+			// 5. Module-level verification: LedDriveModule surfaces kFramingFallbackId ("projector framing")
+			// on the silent auto-framing downgrade port, and does NOT surface it on the acknowledging port.
+			Assert::AreEqual(std::string("projector framing"), std::string(LedDriveModule::kFramingFallbackId),
+				L"kFramingFallbackId must be \"projector framing\"");
+
+			LedDriveConfig ledCfg;
+			ledCfg.enabled = true;
+			ledCfg.mode = Mode::Script;
+
+			ProjectorConfig modPort = FastConfig();
+			modPort.terminator = Terminator::Auto;
+			modPort.readBack = true;
+
+			// Negative-control module: acknowledging port -> no kFramingFallbackId entry.
+			{
+				TestClock clock;
+				auto ackProjector = std::make_shared<FakeProjector>();
+				ModuleStopGuard guard{
+					std::make_unique<LedDriveModule>(modPort, ledCfg,
+						[ackProjector] { return std::make_unique<FakePort>(ackProjector); }, clock),
+					&clock };
+				Bind(clock, *guard.mod, ackProjector);
+				guard.mod->Start();
+				Assert::IsTrue(advanceModuleReady(clock, *guard.mod),
+					L"negative control: acknowledging LedDriveModule must finish startup");
+				Assert::AreEqual(std::string("cr"), guard.mod->ProjectorStatus().framing);
+				Assert::IsFalse(guard.mod->ProjectorStatus().framingDowngraded,
+					L"negative control: acknowledging LedDriveModule must not report framingDowngraded");
+				std::string reason;
+				Assert::IsFalse(findFallbackReason(guard.mod->FallbackEntries(), LedDriveModule::kFramingFallbackId, reason),
+					L"negative control: acknowledging LedDriveModule must NOT surface kFramingFallbackId");
+			}
+
+			// Fix-proof module: silent port -> surfaces kFramingFallbackId ("projector framing") in FallbackEntries().
+			{
+				TestClock clock;
+				auto silentProjector = std::make_shared<FakeProjector>();
+				silentProjector->silent = true;
+				ModuleStopGuard guard{
+					std::make_unique<LedDriveModule>(modPort, ledCfg,
+						[silentProjector] { return std::make_unique<FakePort>(silentProjector); }, clock),
+					&clock };
+				Bind(clock, *guard.mod, silentProjector);
+				guard.mod->Start();
+				Assert::IsTrue(advanceModuleReady(clock, *guard.mod),
+					L"silent LedDriveModule must finish auto-framing downgrade startup");
+				Assert::AreEqual(std::string("script"), guard.mod->ProjectorStatus().framing);
+				Assert::IsTrue(guard.mod->ProjectorStatus().framingDowngraded,
+					L"silent LedDriveModule must report framingDowngraded = true");
+				std::string reason;
+				Assert::IsTrue(findFallbackReason(guard.mod->FallbackEntries(), LedDriveModule::kFramingFallbackId, reason),
+					L"silent LedDriveModule must surface kFramingFallbackId in FallbackEntries()");
+				Assert::IsFalse(reason.empty(),
+					L"kFramingFallbackId entry must carry a non-empty reason");
+			}
+		}
 	};
 }

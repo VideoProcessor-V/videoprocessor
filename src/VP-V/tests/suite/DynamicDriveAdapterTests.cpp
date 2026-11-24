@@ -1273,5 +1273,175 @@ namespace VideoProcessorTest
 			Assert::IsTrue(finalWeak.expired(),
 				L"destroying DynamicDriveHost must cleanly stop, join, and release its module without hanging or leaking");
 		}
+
+		// GEM-185: DynamicDriveFrame::MergeModuleFallbacks must surface ALL entries from
+		// LedDriveModule::FallbackEntries() (not only kHoldFallbackId and kDryRunFallbackId)
+		// into FallbackStatus::Registry::Heading(), and release them when cleared or removed.
+		TEST_METHOD(MergeModuleFallbacksSurfacesAllModuleFallbackEntriesIncludingNonHoldNonDryRun)
+		{
+			struct ModuleStopGuard
+			{
+				std::shared_ptr<LedDrive::LedDriveModule> mod;
+				TestClock* clock;
+				ModuleStopGuard(std::shared_ptr<LedDrive::LedDriveModule> modIn, TestClock* clockIn)
+					: mod(std::move(modIn)), clock(clockIn)
+				{
+				}
+				ModuleStopGuard(const ModuleStopGuard&) = delete;
+				ModuleStopGuard& operator=(const ModuleStopGuard&) = delete;
+				~ModuleStopGuard()
+				{
+					if (mod)
+					{
+						if (clock && !mod->DrivingProjector())
+							clock->To(clock->Ms() + 60000.0);
+						mod->Stop();
+					}
+				}
+			};
+
+			auto advanceUntilReady = [](TestClock& clock, LedDrive::LedDriveModule& mod) -> bool
+			{
+				const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+				while (std::chrono::steady_clock::now() < deadline)
+				{
+					if (mod.DrivingProjector() && clock.clock->SettledCount() >= 1)
+						return true;
+					if (clock.clock->SettledCount() >= 1)
+						clock.To(clock.Ms() + 50.0);
+					else
+						std::this_thread::sleep_for(std::chrono::milliseconds(2));
+				}
+				return mod.DrivingProjector() && clock.clock->SettledCount() >= 1;
+			};
+
+			auto hasModuleEntry = [](const std::vector<FallbackStatus::Entry>& entries, const char* id) -> bool
+			{
+				return std::any_of(entries.begin(), entries.end(),
+					[id](const FallbackStatus::Entry& e) { return e.id == id; });
+			};
+
+			auto makePortConfig = []()
+			{
+				LedDrive::ProjectorConfig port;
+				port.protocol = "barco_ascii";
+				port.terminator = LedDrive::Terminator::Auto;
+				port.readBack = true;
+				port.ackTimeoutMs = 40;
+				port.minCommandGapMs = 0;
+				port.maxLevelsPerCommand = 0;
+				return port;
+			};
+
+			auto makeLedConfig = []()
+			{
+				LedDrive::LedDriveConfig cfg;
+				cfg.enabled = true;
+				cfg.mode = LedDrive::Mode::Script;
+				return cfg;
+			};
+
+			FrameFixture f;
+			FrameFacts facts;
+			std::vector<const pl_hook*> hooks;
+
+			// 1. Negative control: an acknowledging projector with known scenes has no module
+			// fallback entries; MergeModuleFallbacks must keep fallbacks.Heading() clean.
+			TestClock cleanClock;
+			auto cleanProjector = std::make_shared<FakeProjector>();
+			auto cleanModule = std::make_shared<LedDrive::LedDriveModule>(makePortConfig(), makeLedConfig(),
+				[cleanProjector] { return std::make_unique<FakePort>(cleanProjector); }, cleanClock);
+			Bind(cleanClock, *cleanModule, cleanProjector);
+			ModuleStopGuard cleanGuard{ cleanModule, &cleanClock };
+			SceneVerdicts verdicts;
+			cleanModule->SetSceneReaderForTesting(verdicts.Reader());
+			cleanModule->Start();
+			Assert::IsTrue(advanceUntilReady(cleanClock, *cleanModule),
+				L"negative control: acknowledging module must finish startup");
+			Assert::IsTrue(cleanModule->FallbackEntries().empty(),
+				L"negative control: acknowledging module must have empty FallbackEntries()");
+
+			f.frame.PublishModule(cleanModule);
+			RunS2(f.frame, facts.in, hooks, NoTag);
+			Assert::IsTrue(f.fallbacks.Entries().empty(),
+				L"negative control: clean module must engage no fallbacks in registry");
+			Assert::AreEqual(std::string("Fallbacks engaged: none"), f.fallbacks.Heading(),
+				L"negative control: clean module heading must report none");
+			Assert::IsFalse(f.fallbacks.Engaged(LedDrive::LedDriveModule::kFramingFallbackId),
+				L"negative control: clean module must not engage projector framing fallback");
+			Assert::IsTrue(f.fallbacks.Heading().find("projector framing") == std::string::npos,
+				L"negative control: clean module heading must not contain projector framing");
+
+			// 2. Fix proof A (non-hold / non-dry-run cut-judge entry): engaging kCutJudgeFallbackId
+			// on the module must be merged into fallbacks.Heading() and released when the module clears it.
+			LedDrive::RawMeasurement raw{};
+			raw.histogram[128] = 100;
+			raw.sum = 100u * 128u * LedDrive::SUM_SCALE;
+			raw.blocks = 100u;
+			raw.maximum = 128u * LedDrive::SUM_SCALE;
+			verdicts.Unknown(1, "no frame analysis store");
+			cleanModule->SubmitMeasurement(raw, 1);
+			Assert::IsTrue(hasModuleEntry(cleanModule->FallbackEntries(), LedDrive::LedDriveModule::kCutJudgeFallbackId),
+				L"module must carry non-hold/non-dry-run cut-judge entry in FallbackEntries()");
+			hooks.clear();
+			RunS2(f.frame, facts.in, hooks, NoTag);
+			Assert::IsTrue(f.fallbacks.Engaged(LedDrive::LedDriveModule::kCutJudgeFallbackId),
+				L"MergeModuleFallbacks must engage kCutJudgeFallbackId in renderer registry");
+			Assert::IsTrue(f.fallbacks.Heading().find(LedDrive::LedDriveModule::kCutJudgeFallbackId) != std::string::npos,
+				L"fallbacks.Heading() must surface kCutJudgeFallbackId");
+
+			// Recover scene knowledge on next frame -> module releases kCutJudgeFallbackId -> heading releases it.
+			cleanModule->SubmitMeasurement(raw, 2);
+			Assert::IsFalse(hasModuleEntry(cleanModule->FallbackEntries(), LedDrive::LedDriveModule::kCutJudgeFallbackId),
+				L"module must release cut-judge entry once scene is known");
+			hooks.clear();
+			RunS2(f.frame, facts.in, hooks, NoTag);
+			Assert::IsFalse(f.fallbacks.Engaged(LedDrive::LedDriveModule::kCutJudgeFallbackId),
+				L"MergeModuleFallbacks must release kCutJudgeFallbackId once module clears it");
+			Assert::AreEqual(std::string("Fallbacks engaged: none"), f.fallbacks.Heading(),
+				L"fallbacks.Heading() must return to none after cut-judge entry clears");
+
+			// 3. Fix proof B (non-hold / non-dry-run framing-downgrade entry via silent port):
+			// exact same config with silent projector triggers auto-framing downgrade ->
+			// FallbackEntries() carries kFramingFallbackId ("projector framing"), which
+			// MergeModuleFallbacks must surface in fallbacks.Heading() and release on Clear().
+			TestClock silentClock;
+			auto silentProjector = std::make_shared<FakeProjector>();
+			silentProjector->silent = true;
+			auto silentModule = std::make_shared<LedDrive::LedDriveModule>(makePortConfig(), makeLedConfig(),
+				[silentProjector] { return std::make_unique<FakePort>(silentProjector); }, silentClock);
+			Bind(silentClock, *silentModule, silentProjector);
+			ModuleStopGuard silentGuard{ silentModule, &silentClock };
+			silentModule->Start();
+			Assert::IsTrue(advanceUntilReady(silentClock, *silentModule),
+				L"silent-port module must finish auto-framing downgrade startup");
+			Assert::IsTrue(hasModuleEntry(silentModule->FallbackEntries(), LedDrive::LedDriveModule::kFramingFallbackId),
+				L"silent-port auto-framing downgrade must populate kFramingFallbackId in FallbackEntries()");
+
+			f.frame.PublishModule(silentModule);
+			hooks.clear();
+			RunS2(f.frame, facts.in, hooks, NoTag);
+			Assert::IsFalse(f.fallbacks.Engaged(LedDrive::LedDriveModule::kHoldFallbackId),
+				L"script-mode silent module must not rely on kHoldFallbackId");
+			Assert::IsFalse(f.fallbacks.Engaged(LedDrive::LedDriveModule::kDryRunFallbackId),
+				L"open silent port must not rely on kDryRunFallbackId");
+			Assert::IsTrue(f.fallbacks.Engaged(LedDrive::LedDriveModule::kFramingFallbackId),
+				L"MergeModuleFallbacks must engage kFramingFallbackId in renderer registry");
+			Assert::IsTrue(f.fallbacks.Heading().find("projector framing") != std::string::npos,
+				L"fallbacks.Heading() must contain \"projector framing\" after MergeModuleFallbacks");
+			Assert::IsFalse(ReasonOf(f.fallbacks, LedDrive::LedDriveModule::kFramingFallbackId).empty(),
+				L"merged projector framing fallback must carry a non-empty reason");
+
+			// Clear the module from DynamicDriveFrame -> next frame must release "projector framing".
+			f.frame.Clear();
+			hooks.clear();
+			RunS2(f.frame, facts.in, hooks, NoTag);
+			Assert::IsFalse(f.fallbacks.Engaged(LedDrive::LedDriveModule::kFramingFallbackId),
+				L"clearing the module must release kFramingFallbackId from renderer registry");
+			Assert::IsTrue(f.fallbacks.Heading().find("projector framing") == std::string::npos,
+				L"fallbacks.Heading() must release \"projector framing\" after Clear()");
+			Assert::AreEqual(std::string("Fallbacks engaged: none"), f.fallbacks.Heading(),
+				L"fallbacks.Heading() must return to none after Clear()");
+		}
 	};
 }

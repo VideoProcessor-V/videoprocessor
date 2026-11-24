@@ -308,5 +308,73 @@ namespace CalibrationLutHostTests
 			Assert::AreEqual(kStressRounds, exactOnceRounds,
 				L"all 10,000 rounds must be consumed by exactly 1 of the 2 racing consumers");
 		}
+
+		// GEM-197: SlopeFallbackDecision must be strictly zero-gated on CalibrationLutStage::SlopeFallbacks()
+		// so "BTB/WTW carried at slope 1" is never surfaced when edge-slope extrapolation succeeded (count == 0),
+		// engages visibly when slopeFallbacks > 0, stays idempotent without heading churn, and releases cleanly at 0.
+		TEST_METHOD(SlopeFallbackDecisionIsZeroGatedAndSurfacesOnlyWhenSlopeFallbacksOccur)
+		{
+			FallbackStatus::Registry registry;
+
+			// 1. Negative control (slopeFallbacks == 0): decision must remain released and leave heading at none.
+			const FallbackCatalog::Decision zero = SlopeFallbackDecision(0);
+			Assert::IsFalse(zero.engaged,
+				L"negative control: SlopeFallbackDecision(0) must NOT be engaged");
+			Assert::AreEqual(std::string("calibration LUT BTB/WTW"), zero.id,
+				L"negative control: SlopeFallbackDecision(0) must carry stable id");
+			Assert::IsTrue(zero.reason.empty(),
+				L"negative control: released SlopeFallbackDecision(0) must have empty reason");
+			Assert::IsFalse(FallbackCatalog::Sync(registry, zero),
+				L"negative control: syncing released decision into clean registry changes nothing");
+			Assert::IsFalse(registry.Engaged("calibration LUT BTB/WTW"),
+				L"negative control: registry must not engage calibration LUT BTB/WTW at 0");
+			Assert::IsTrue(registry.Entries().empty(),
+				L"negative control: registry entries must remain empty at 0");
+			Assert::AreEqual(std::string("Fallbacks engaged: none"), registry.Heading(),
+				L"negative control: heading must remain \"Fallbacks engaged: none\" at 0");
+			Assert::IsTrue(registry.Heading().find("BTB/WTW carried at slope 1") == std::string::npos,
+				L"negative control: heading must not mention slope 1 at 0");
+
+			// 2. Fix proof (slopeFallbacks == 1 and 42): decision must engage with slope-1 reason and surface in Heading().
+			const FallbackCatalog::Decision one = SlopeFallbackDecision(1);
+			Assert::IsTrue(one.engaged,
+				L"SlopeFallbackDecision(1) must be engaged");
+			Assert::AreEqual(std::string("calibration LUT BTB/WTW"), one.id,
+				L"SlopeFallbackDecision(1) must carry stable id");
+			Assert::IsTrue(one.reason.find("BTB/WTW carried at slope 1") != std::string::npos,
+				L"SlopeFallbackDecision(1) reason must contain \"BTB/WTW carried at slope 1\"");
+			Assert::IsTrue(FallbackCatalog::Sync(registry, one),
+				L"syncing engaged decision into clean registry must report heading change");
+			Assert::IsTrue(registry.Engaged("calibration LUT BTB/WTW"),
+				L"registry must engage calibration LUT BTB/WTW when slopeFallbacks == 1");
+			Assert::IsTrue(registry.Heading().find("calibration LUT BTB/WTW") != std::string::npos,
+				L"registry.Heading() must surface \"calibration LUT BTB/WTW\"");
+			Assert::IsTrue(registry.Heading().find("BTB/WTW carried at slope 1") != std::string::npos,
+				L"registry.Heading() must include \"BTB/WTW carried at slope 1\"");
+
+			const FallbackCatalog::Decision many = SlopeFallbackDecision(42);
+			Assert::IsTrue(many.engaged,
+				L"SlopeFallbackDecision(42) must be engaged");
+			Assert::AreEqual(std::string("calibration LUT BTB/WTW"), many.id,
+				L"SlopeFallbackDecision(42) must carry stable id");
+			Assert::IsTrue(many.reason.find("BTB/WTW carried at slope 1") != std::string::npos,
+				L"SlopeFallbackDecision(42) reason must contain \"BTB/WTW carried at slope 1\"");
+			Assert::IsFalse(FallbackCatalog::Sync(registry, many),
+				L"subsequent non-zero counts must not churn the heading");
+			Assert::IsTrue(registry.Engaged("calibration LUT BTB/WTW"),
+				L"registry must remain engaged at slopeFallbacks == 42");
+
+			// 3. Release round-trip: syncing SlopeFallbackDecision(0) must release back to "Fallbacks engaged: none".
+			Assert::IsTrue(FallbackCatalog::Sync(registry, SlopeFallbackDecision(0)),
+				L"syncing SlopeFallbackDecision(0) after engagement must release and report heading change");
+			Assert::IsFalse(registry.Engaged("calibration LUT BTB/WTW"),
+				L"calibration LUT BTB/WTW must be released when count returns to 0");
+			Assert::IsTrue(registry.Entries().empty(),
+				L"registry entries must be empty after release");
+			Assert::AreEqual(std::string("Fallbacks engaged: none"), registry.Heading(),
+				L"heading must return to \"Fallbacks engaged: none\" after release");
+			Assert::IsFalse(FallbackCatalog::Sync(registry, SlopeFallbackDecision(0)),
+				L"releasing twice changes nothing");
+		}
 	};
 }
