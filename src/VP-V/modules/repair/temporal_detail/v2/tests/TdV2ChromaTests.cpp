@@ -1583,18 +1583,18 @@ namespace Tests
 			// =========================================================================
 			TEST_METHOD(UnidentifiedCodedGridRunsVisibleCoarseBandOnly)
 			{
-				// 160x160 with interior [56, 104) (48x48 >= 1 full 40-px banding cycle) so even SpatialBilinearWeight's
-				// neighbor cells ([48, 112)) and their 3x3 pooling neighborhoods ([32, 128)) stay strictly beyond
-				// the 3*sigma = 24 px G(8.0) border-replication radius!
-				const int w = 160, h = 160;
+				// 256x256 with interior [104, 152) (48x48) strictly beyond the 3*sigma = 96 px G(32.0) border-replication
+				// radius (kUnidentifiedChromaSigmaLumaPx = 32.0 luma px = 8 px on the 1/4 luma grid per plan s1.5 L168!).
+				const int w = 256, h = 256;
 				const int cw = w / 16, ch = h / 16;
 				const ActiveRect active = ActiveRect::Full(w, h);
-				const ActiveRect interior{ 56, 56, 104, 104 };
+				const ActiveRect interior{ 104, 104, 152, 152 };
 				const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
 
 				// Construct signal with BOTH:
-				//   (1) Low-frequency chroma banding (smooth ramp quantized to 14-code bands in current frame, clean in peaks)
-				//   (2) High-frequency chroma detail (period-3 px sinusoid, strictly above sigma = 8 px coarse band,
+				//   (1) Low-frequency chroma banding (gentle sky-like gradient quantized to 16-code bands -> ~320 px wide bands
+				//       that genuinely live inside the sigma = 32 luma px coarse band, baseCoarseErr > 1.5 codes)
+				//   (2) High-frequency chroma detail (period-3 px sinusoid, strictly above sigma = 32 px coarse band,
 				//       present ONLY in current frame and absent in peaks so any full-band blend would destroy it!)
 				TdV2Plane masterLowCb(w, h, 512.0), masterLowCr(w, h, 512.0);
 				TdV2Plane hfDetailCb(w, h, 0.0), hfDetailCr(w, h, 0.0);
@@ -1604,10 +1604,10 @@ namespace Tests
 				{
 					for (int x = 0; x < w; ++x)
 					{
-						// Genuine low-frequency chroma banding: smooth sky-like gradient quantized to 16-code steps
-						// (~40 px wide bands that genuinely live in the sigma = 8 px coarse band, baseCoarseErr > 1.5 codes).
-						const double lowCb = 460.0 + 0.40 * x + 0.10 * y;
-						const double lowCr = 560.0 - 0.35 * x + 0.10 * y;
+						// Genuine wide-band sky chroma gradient quantized to 16-code steps (band step around x ~= 84,
+						// yielding ~3.5+ codes of smooth coarse-band error across interior [104, 152)^2 at sigma = 32).
+						const double lowCb = 482.5 + 0.05 * x + 0.01 * y;
+						const double lowCr = 541.5 - 0.05 * x - 0.01 * y;
 						masterLowCb.at(x, y) = lowCb;
 						masterLowCr.at(x, y) = lowCr;
 
@@ -1615,7 +1615,7 @@ namespace Tests
 						const double bandCb = 16.0 * std::floor(lowCb / 16.0 + 0.5);
 						const double bandCr = 16.0 * std::floor(lowCr / 16.0 + 0.5);
 
-						// High-frequency period-3 px chroma detail (attenuated by e^-140 in sigma=8 coarse band!).
+						// High-frequency period-3 px chroma detail (suppressed to truncated 3-sigma sidelobe floor in G(32)!).
 						const double hfCb = 22.0 * std::sin(2.0 * kPi * x / 3.0) * std::cos(2.0 * kPi * y / 3.0);
 						const double hfCr = 18.0 * std::cos(2.0 * kPi * x / 3.0) * std::sin(2.0 * kPi * y / 3.0);
 						hfDetailCb.at(x, y) = hfCb;
@@ -1743,16 +1743,19 @@ namespace Tests
 					L"Coarse-band-only mode must genuinely reduce low-frequency chroma banding by >= 35%");
 				Assert::IsTrue(naiveHfCorruptErr > 5.0,
 					L"Negative control: naive full-band chroma blend MUST severely corrupt high-frequency chroma");
-				Assert::IsTrue(hfDeltaDiffCb <= 1.25 * idealHfLeakCb && hfDeltaDiffCb < 1e-5,
-					L"Direct HF-detail invariance: planted period-3 px HF Cb must stay at exact truncated G(8) floor (< 1e-5)");
-				Assert::IsTrue(hfDeltaDiffCr <= 1.25 * idealHfLeakCr && hfDeltaDiffCr < 1e-5,
-					L"Direct HF-detail invariance: planted period-3 px HF Cr must stay at exact truncated G(8) floor (< 1e-5)");
+				// IEEE-754 FP32 moment-accumulator quantization floor (MomentAccumulatorFp32 stores diffs in float32;
+				// at sigma=32 the G(32) sidelobe reaches ~1.8e-7, right at 4*FLT_EPSILON*baseCoarseErr).
+				const double fp32MomentFloor = 4.0 * static_cast<double>(std::numeric_limits<float>::epsilon()) * baseCoarseErr;
+				Assert::IsTrue(hfDeltaDiffCb <= (std::max)(1.25 * idealHfLeakCb, fp32MomentFloor) && hfDeltaDiffCb < 1e-5,
+					L"Direct HF-detail invariance: planted period-3 px HF Cb must stay at exact truncated G(32)/FP32 floor (< 1e-5)");
+				Assert::IsTrue(hfDeltaDiffCr <= (std::max)(1.25 * idealHfLeakCr, fp32MomentFloor) && hfDeltaDiffCr < 1e-5,
+					L"Direct HF-detail invariance: planted period-3 px HF Cr must stay at exact truncated G(32)/FP32 floor (< 1e-5)");
 				Assert::IsTrue(deltaFineRmsCb <= 1.15 * idealFineOverlapCb && deltaMidRmsCb <= 1.15 * idealMidOverlapCb,
-					L"Cb coarse-only delta M/H must stay within 1.15x exact linear G(8) filter overlap");
+					L"Cb coarse-only delta M/H must stay within 1.15x exact linear G(32) filter overlap");
 				Assert::IsTrue(deltaFineRmsCr <= 1.15 * idealFineOverlapCr && deltaMidRmsCr <= 1.15 * idealMidOverlapCr,
-					L"Cr coarse-only delta M/H must stay within 1.15x exact linear G(8) filter overlap");
+					L"Cr coarse-only delta M/H must stay within 1.15x exact linear G(32) filter overlap");
 				Assert::IsTrue(hfPreservErrCb <= 1.15 * idealFineOverlapCb,
-					L"Unidentified grid coarse-only mode must leave high-frequency chroma untouched within exact G(8) overlap");
+					L"Unidentified grid coarse-only mode must leave high-frequency chroma untouched within exact G(32) overlap");
 			}
 
 			// =========================================================================
@@ -1772,32 +1775,52 @@ namespace Tests
 				const YCbCrMatrixSpec mat = YCbCrMatrixSpec::Bt709();
 				const double midCode = 512.0;
 
-				const double grainSigma = 12.0;
-				const double leakFrac = 0.015; // realistic imperfect separation (non-oracle!)
+				const double grainSigma = 16.0;
+				const double leakFrac = 0.15; // realistic >= 10% imperfect grain separation (non-oracle; exercises Layer 2!)
 				const double leakedVar = (leakFrac * grainSigma) * (leakFrac * grainSigma);
 				const std::vector<double> retainedVar(static_cast<size_t>(cw) * ch, leakedVar);
+
+				auto makeLowMidWear = [&](const TdV2Plane& base, double rawSigma, uint32_t seed, const ActiveRect& ar) -> TdV2Plane
+				{
+					const TdV2Plane zeroPlane(base.w, base.h, 0.0);
+					const TdV2Plane rawNoise = AddGaussianNoise(zeroPlane, rawSigma, seed, ar);
+					const ThreeBandPlanes nb = DecomposeActiveBands(rawNoise, ar);
+					TdV2Plane out = base;
+					for (size_t i = 0; i < out.v.size(); ++i)
+						out.v[i] += nb.L.v[i] + nb.M.v[i];
+					return out;
+				};
 
 				// ---- Sub-case A: Delivered 4:2:0 (coded 4:2:0) ----
 				{
 					const TdV2Plane masterCb = SampleAnalyticChromaPlane(w, h, 2, 2, siting, 0.0, 0.0, 64.0, 64.0, 6.0, true);
 					const TdV2Plane masterCr = SampleAnalyticChromaPlane(w, h, 2, 2, siting, 0.0, 0.0, 64.0, 64.0, 6.0, false);
 
-					const TdV2Plane curCleanTrueCb = AddGaussianNoise(masterCb, 4.0, 601, cActive);
-					const TdV2Plane curCleanTrueCr = AddGaussianNoise(masterCr, 4.0, 602, cActive);
-					const TdV2Plane prevCleanTrueCb = AddGaussianNoise(masterCb, 0.8, 603, cActive);
-					const TdV2Plane prevCleanTrueCr = AddGaussianNoise(masterCr, 0.8, 604, cActive);
-					const TdV2Plane nextCleanTrueCb = AddGaussianNoise(masterCb, 0.8, 605, cActive);
-					const TdV2Plane nextCleanTrueCr = AddGaussianNoise(masterCr, 0.8, 606, cActive);
+					// Genuine independent Frame-1 and Frame-2 L+M chroma compression wear (so L+M repairs strongly
+					// while H-band carries 15% leaked film grain that Layer 2 MUST cancel via retainedGrainVar!).
+					const TdV2Plane prevFrameCleanTrueCb = makeLowMidWear(masterCb, 12.0, 607, cActive);
+					const TdV2Plane prevFrameCleanTrueCr = makeLowMidWear(masterCr, 12.0, 608, cActive);
+					const TdV2Plane curCleanTrueCb = makeLowMidWear(masterCb, 12.0, 601, cActive);
+					const TdV2Plane curCleanTrueCr = makeLowMidWear(masterCr, 12.0, 602, cActive);
+					const TdV2Plane prevCleanTrueCb = AddGaussianNoise(masterCb, 0.5, 603, cActive);
+					const TdV2Plane prevCleanTrueCr = AddGaussianNoise(masterCr, 0.5, 604, cActive);
+					const TdV2Plane nextCleanTrueCb = AddGaussianNoise(masterCb, 0.5, 605, cActive);
+					const TdV2Plane nextCleanTrueCr = AddGaussianNoise(masterCr, 0.5, 606, cActive);
 
-					std::mt19937 rngOwn(6101), rngForPrev(6102), rngForNext(6103);
+					std::mt19937 rngOwn(6101), rngForPrev(6102), rngForNext(6103), rngPrevFrame(6104);
 					std::normal_distribution<double> gd(0.0, grainSigma);
+					std::vector<double> prevFrameOwnCb(cN), prevFrameOwnCr(cN);
 					std::vector<double> ownCb(cN), ownCr(cN), forPrevCb(cN), forPrevCr(cN), forNextCb(cN), forNextCr(cN);
+					TdV2Plane prevFrameRecCb(cW, cH), prevFrameRecCr(cW, cH);
+					TdV2Plane prevFrameCleanImpCb(cW, cH), prevFrameCleanImpCr(cW, cH);
 					TdV2Plane recCb(cW, cH), recCr(cW, cH), prevRecCb(cW, cH), prevRecCr(cW, cH), nextRecCb(cW, cH), nextRecCr(cW, cH);
 					TdV2Plane curCleanImpCb(cW, cH), curCleanImpCr(cW, cH);
 					TdV2Plane prevCleanImpCb(cW, cH), prevCleanImpCr(cW, cH), nextCleanImpCb(cW, cH), nextCleanImpCr(cW, cH);
 
 					for (size_t i = 0; i < cN; ++i)
 					{
+						prevFrameOwnCb[i] = gd(rngPrevFrame);
+						prevFrameOwnCr[i] = gd(rngPrevFrame);
 						ownCb[i] = gd(rngOwn);
 						ownCr[i] = gd(rngOwn);
 						forPrevCb[i] = gd(rngForPrev);
@@ -1805,6 +1828,8 @@ namespace Tests
 						forNextCb[i] = gd(rngForNext);
 						forNextCr[i] = gd(rngForNext);
 
+						prevFrameRecCb.v[i] = prevFrameCleanTrueCb.v[i] + prevFrameOwnCb[i];
+						prevFrameRecCr.v[i] = prevFrameCleanTrueCr.v[i] + prevFrameOwnCr[i];
 						recCb.v[i] = curCleanTrueCb.v[i] + ownCb[i];
 						recCr.v[i] = curCleanTrueCr.v[i] + ownCr[i];
 						prevRecCb.v[i] = prevCleanTrueCb.v[i] + forPrevCb[i];
@@ -1812,6 +1837,8 @@ namespace Tests
 						nextRecCb.v[i] = nextCleanTrueCb.v[i] + forNextCb[i];
 						nextRecCr.v[i] = nextCleanTrueCr.v[i] + forNextCr[i];
 
+						prevFrameCleanImpCb.v[i] = prevFrameCleanTrueCb.v[i] + leakFrac * prevFrameOwnCb[i];
+						prevFrameCleanImpCr.v[i] = prevFrameCleanTrueCr.v[i] + leakFrac * prevFrameOwnCr[i];
 						curCleanImpCb.v[i] = curCleanTrueCb.v[i] + leakFrac * ownCb[i];
 						curCleanImpCr.v[i] = curCleanTrueCr.v[i] + leakFrac * ownCr[i];
 						prevCleanImpCb.v[i] = prevCleanTrueCb.v[i] + leakFrac * forPrevCb[i];
@@ -1820,67 +1847,131 @@ namespace Tests
 						nextCleanImpCr.v[i] = nextCleanTrueCr.v[i] + leakFrac * forNextCr[i];
 					}
 
-					// Mandatory In-Test Negative Control (Rule 3): naive un-separated chroma average on EXACT SAME input!
-					std::vector<double> naiveAvgCb(cN), naiveAvgCr(cN);
+					// Mandatory In-Test Negative Control #1 (Rule 3): naive un-separated chroma average on EXACT SAME input!
+					std::vector<double> naiveAvgCb(cN), naiveAvgCr(cN), naivePrevResCb(cN), naivePrevResCr(cN);
 					for (size_t i = 0; i < cN; ++i)
 					{
+						naivePrevResCb[i] = (prevFrameRecCb.v[i] + prevRecCb.v[i] + nextRecCb.v[i]) / 3.0 - masterCb.v[i];
+						naivePrevResCr[i] = (prevFrameRecCr.v[i] + prevRecCr.v[i] + nextRecCr.v[i]) / 3.0 - masterCr.v[i];
 						naiveAvgCb[i] = (recCb.v[i] + prevRecCb.v[i] + nextRecCb.v[i]) / 3.0;
 						naiveAvgCr[i] = (recCr.v[i] + prevRecCr.v[i] + nextRecCr.v[i]) / 3.0;
 					}
-					const auto naiveRepCb = EvaluateGrainTransfer(masterCb.v.data(), ownCb.data(), forPrevCb.data(), naiveAvgCb.data(), cN);
-					const auto naiveRepCr = EvaluateGrainTransfer(masterCr.v.data(), ownCr.data(), forPrevCr.data(), naiveAvgCr.data(), cN);
-					Assert::IsTrue(naiveRepCb.valid && naiveRepCr.valid);
+					const auto naiveRepCb = EvaluateGrainTransfer(
+						masterCb.v.data(), ownCb.data(), forPrevCb.data(), naiveAvgCb.data(), cN,
+						naivePrevResCb.data(), prevFrameOwnCb.data());
+					const auto naiveRepCr = EvaluateGrainTransfer(
+						masterCr.v.data(), ownCr.data(), forPrevCr.data(), naiveAvgCr.data(), cN,
+						naivePrevResCr.data(), prevFrameOwnCr.data());
+					Assert::IsTrue(naiveRepCb.valid && naiveRepCr.valid && naiveRepCb.lag1Evaluated && naiveRepCr.lag1Evaluated);
 					Assert::IsFalse(naiveRepCb.passesAuthoritativeBar, L"Negative control: naive 4:2:0 average MUST fail grain bar");
 					Assert::IsTrue(naiveRepCb.betaOwn < 0.90 && naiveRepCb.betaForeign > 0.10,
 						L"Negative control: naive 4:2:0 average destroys own grain and leaks foreign grain");
 					Assert::IsTrue(naiveRepCr.betaOwn < 0.90 && naiveRepCr.betaForeign > 0.10);
 
-					// Run TdV2ChromaEngine on 4:2:0.
+					// Run TdV2ChromaEngine on 4:2:0 across Frame 1 & Frame 2 so lag-1 is genuinely measured (H11)!
 					Config cfg = MakePreset(Preset::Reference, Mode::On);
 					TdV2ChromaEngine eng(cfg);
 					StandInRegistry reg;
 
-					ChromaProcessInput in;
+					ChromaProcessInput in1;
+					in1.seq = 49;
+					in1.deliveredFormat = DeliveredChromaFormat::Yuv420;
+					in1.codedSubsampling = ChromaSubsampling::Yuv420;
+					in1.gridStatus = ChromaGridStatus::Identified;
+					in1.siting = siting;
+					in1.lumaW = w;
+					in1.lumaH = h;
+					in1.activeRect = active;
+					in1.receivedCb = prevFrameRecCb;
+					in1.receivedCr = prevFrameRecCr;
+					in1.hasCleanSplit = true;
+					in1.cleanCb = prevFrameCleanImpCb;
+					in1.cleanCr = prevFrameCleanImpCr;
+					in1.retainedGrainVarCb = retainedVar;
+					in1.retainedGrainVarCr = retainedVar;
+					in1.prevPeak = { &prevCleanImpCb, &prevCleanImpCr, &stillMf, false };
+					in1.nextPeak = { &nextCleanImpCb, &nextCleanImpCr, &stillMf, false };
+					in1.hasStepPrior = true;
+					in1.estimatedStepDelta = 12.0;
+					const auto res1 = eng.ProcessFrame(in1, &reg);
+
+					ChromaProcessInput in = in1;
 					in.seq = 50;
-					in.deliveredFormat = DeliveredChromaFormat::Yuv420;
-					in.codedSubsampling = ChromaSubsampling::Yuv420;
-					in.gridStatus = ChromaGridStatus::Identified;
-					in.siting = siting;
-					in.lumaW = w;
-					in.lumaH = h;
-					in.activeRect = active;
 					in.receivedCb = recCb;
 					in.receivedCr = recCr;
-					in.hasCleanSplit = true;
 					in.cleanCb = curCleanImpCb;
 					in.cleanCr = curCleanImpCr;
-					in.retainedGrainVarCb = retainedVar;
-					in.retainedGrainVarCr = retainedVar;
-					in.prevPeak = { &prevCleanImpCb, &prevCleanImpCr, &stillMf, false };
-					in.nextPeak = { &nextCleanImpCb, &nextCleanImpCr, &stillMf, false };
-					in.hasStepPrior = true;
-					in.estimatedStepDelta = 12.0;
-
 					const auto res = eng.ProcessFrame(in, &reg);
+
+					// Mandatory In-Test Negative Control #2 (Rule 3 / Test-Diff HIGH-5):
+					// Run TdV2ChromaEngine on the EXACT SAME 15%-leaked clean planes with Layer-2 retainedGrainVar DISABLED (empty)!
+					// Proves 15% leaked grain genuinely breaks the authoritative bar without Layer-2 cancellation!
+					{
+						TdV2ChromaEngine engNoL2(cfg);
+						StandInRegistry regNoL2;
+						ChromaProcessInput in1NoL2 = in1;
+						in1NoL2.retainedGrainVarCb.clear();
+						in1NoL2.retainedGrainVarCr.clear();
+						const auto res1NoL2 = engNoL2.ProcessFrame(in1NoL2, &regNoL2);
+						ChromaProcessInput inNoL2 = in;
+						inNoL2.retainedGrainVarCb.clear();
+						inNoL2.retainedGrainVarCr.clear();
+						const auto resNoL2 = engNoL2.ProcessFrame(inNoL2, &regNoL2);
+
+						std::vector<double> prevResNoL2Cb(cN), prevResNoL2Cr(cN);
+						for (size_t i = 0; i < cN; ++i)
+						{
+							prevResNoL2Cb[i] = res1NoL2.outputCb.v[i] - masterCb.v[i];
+							prevResNoL2Cr[i] = res1NoL2.outputCr.v[i] - masterCr.v[i];
+						}
+						const auto repNoL2Cb = EvaluateGrainTransfer(
+							masterCb.v.data(), ownCb.data(), forPrevCb.data(), resNoL2.outputCb.v.data(), cN,
+							prevResNoL2Cb.data(), prevFrameOwnCb.data());
+						const auto repNoL2Cr = EvaluateGrainTransfer(
+							masterCr.v.data(), ownCr.data(), forPrevCr.data(), resNoL2.outputCr.v.data(), cN,
+							prevResNoL2Cr.data(), prevFrameOwnCr.data());
+						Assert::IsTrue(repNoL2Cb.valid && repNoL2Cb.lag1Evaluated && repNoL2Cr.valid && repNoL2Cr.lag1Evaluated);
+						Assert::IsFalse(repNoL2Cb.passesAuthoritativeBar,
+							L"Negative control: Layer-2-disabled 4:2:0 engine on 15%-leaked clean planes MUST fail authoritative grain bar");
+						Assert::IsFalse(repNoL2Cr.passesAuthoritativeBar,
+							L"Negative control: Layer-2-disabled 4:2:0 engine (Cr) on 15%-leaked clean planes MUST fail authoritative grain bar");
+						Assert::IsTrue(std::fabs(repNoL2Cb.betaForeign) > kGrainBarMaxBetaForeign || repNoL2Cb.betaOwn < kGrainBarMinBetaOwn,
+							L"Negative control: Layer-2-disabled 4:2:0 engine must exhibit real own-grain loss or foreign-grain leak");
+					}
 
 					// Prove non-trivial clean-layer repair actually occurred (not a vacuous zero-delta!).
 					TdV2Plane repairedCleanCb(cW, cH);
 					for (size_t i = 0; i < cN; ++i)
-						repairedCleanCb.v[i] = curCleanImpCb.v[i] + res.codedDeltaCb.v[i];
-					const double baseCleanErr = MaskedRmse(masterCb, curCleanImpCb, cActive);
+						repairedCleanCb.v[i] = curCleanTrueCb.v[i] + res.codedDeltaCb.v[i];
+					const double baseCleanErr = MaskedRmse(masterCb, curCleanTrueCb, cActive);
 					const double outCleanErr = MaskedRmse(masterCb, repairedCleanCb, cActive);
 					Assert::IsTrue(outCleanErr < baseCleanErr * 0.70, L"4:2:0 chroma clean layer must genuinely improve");
 
-					// Evaluate authoritative grain transfer strictly against independent masterCb/Cr!
-					const auto repCb = EvaluateGrainTransfer(masterCb.v.data(), ownCb.data(), forPrevCb.data(), res.outputCb.v.data(), cN);
-					const auto repCr = EvaluateGrainTransfer(masterCr.v.data(), ownCr.data(), forPrevCr.data(), res.outputCr.v.data(), cN);
-					const auto repCbNext = EvaluateGrainTransfer(masterCb.v.data(), ownCb.data(), forNextCb.data(), res.outputCb.v.data(), cN);
+					// Evaluate authoritative grain transfer strictly against independent masterCb/Cr with lag-1!
+					std::vector<double> prevResCb(cN), prevResCr(cN);
+					for (size_t i = 0; i < cN; ++i)
+					{
+						prevResCb[i] = res1.outputCb.v[i] - masterCb.v[i];
+						prevResCr[i] = res1.outputCr.v[i] - masterCr.v[i];
+					}
+					const auto repCb = EvaluateGrainTransfer(
+						masterCb.v.data(), ownCb.data(), forPrevCb.data(), res.outputCb.v.data(), cN,
+						prevResCb.data(), prevFrameOwnCb.data());
+					const auto repCr = EvaluateGrainTransfer(
+						masterCr.v.data(), ownCr.data(), forPrevCr.data(), res.outputCr.v.data(), cN,
+						prevResCr.data(), prevFrameOwnCr.data());
+					const auto repCbNext = EvaluateGrainTransfer(
+						masterCb.v.data(), ownCb.data(), forNextCb.data(), res.outputCb.v.data(), cN,
+						prevResCb.data(), prevFrameOwnCb.data());
 
-					Assert::IsTrue(repCb.valid && repCb.passesAuthoritativeBar, L"4:2:0 Cb must pass authoritative grain bar");
-					Assert::IsTrue(repCr.valid && repCr.passesAuthoritativeBar, L"4:2:0 Cr must pass authoritative grain bar");
+					Assert::IsTrue(repCb.valid && repCb.lag1Evaluated && repCb.passesAuthoritativeBar,
+						L"4:2:0 Cb (15% leak + Layer 2) must pass authoritative grain bar with lag1Evaluated==true");
+					Assert::IsTrue(repCr.valid && repCr.lag1Evaluated && repCr.passesAuthoritativeBar,
+						L"4:2:0 Cr (15% leak + Layer 2) must pass authoritative grain bar with lag1Evaluated==true");
 					Assert::IsTrue(repCb.betaOwn >= kGrainBarMinBetaOwn && std::fabs(repCb.betaForeign) <= kGrainBarMaxBetaForeign);
 					Assert::IsTrue(std::fabs(repCb.stdRatio - 1.0) <= kGrainBarMaxRmsError);
-					Assert::IsTrue(std::fabs(repCbNext.betaForeign) <= kGrainBarMaxBetaForeign);
+					Assert::IsTrue(repCb.lag1Rise <= kGrainBarMaxLag1Rise);
+					Assert::IsTrue(repCbNext.lag1Evaluated && std::fabs(repCbNext.betaForeign) <= kGrainBarMaxBetaForeign);
 				}
 
 				// ---- Sub-case B: Delivered RGB 4:4:4 (coded 4:2:0) ----
@@ -1891,13 +1982,18 @@ namespace Tests
 					const TdV2Plane master444Cr = UpsampleChromaPlaneSited(masterCodedCr, w, h, ChromaSubsampling::Yuv420, DeliveredChromaFormat::Rgb444, siting, active);
 					const TdV2Plane masterY(w, h, 480.0);
 
-					const TdV2Plane curCleanCodedCb = AddGaussianNoise(masterCodedCb, 4.0, 621, cActive);
-					const TdV2Plane curCleanCodedCr = AddGaussianNoise(masterCodedCr, 4.0, 622, cActive);
-					const TdV2Plane prevCleanCodedCb = AddGaussianNoise(masterCodedCb, 0.8, 623, cActive);
-					const TdV2Plane prevCleanCodedCr = AddGaussianNoise(masterCodedCr, 0.8, 624, cActive);
-					const TdV2Plane nextCleanCodedCb = AddGaussianNoise(masterCodedCb, 0.8, 625, cActive);
-					const TdV2Plane nextCleanCodedCr = AddGaussianNoise(masterCodedCr, 0.8, 626, cActive);
+					// Independent Frame-1 & Frame-2 L+M chroma compression wear on coded 4:2:0 grid, upsampled to RGB 4:4:4.
+					const TdV2Plane prevFrameCleanCodedCb = makeLowMidWear(masterCodedCb, 12.0, 627, cActive);
+					const TdV2Plane prevFrameCleanCodedCr = makeLowMidWear(masterCodedCr, 12.0, 628, cActive);
+					const TdV2Plane curCleanCodedCb = makeLowMidWear(masterCodedCb, 12.0, 621, cActive);
+					const TdV2Plane curCleanCodedCr = makeLowMidWear(masterCodedCr, 12.0, 622, cActive);
+					const TdV2Plane prevCleanCodedCb = AddGaussianNoise(masterCodedCb, 0.5, 623, cActive);
+					const TdV2Plane prevCleanCodedCr = AddGaussianNoise(masterCodedCr, 0.5, 624, cActive);
+					const TdV2Plane nextCleanCodedCb = AddGaussianNoise(masterCodedCb, 0.5, 625, cActive);
+					const TdV2Plane nextCleanCodedCr = AddGaussianNoise(masterCodedCr, 0.5, 626, cActive);
 
+					const TdV2Plane prevFrameClean444Cb = UpsampleChromaPlaneSited(prevFrameCleanCodedCb, w, h, ChromaSubsampling::Yuv420, DeliveredChromaFormat::Rgb444, siting, active);
+					const TdV2Plane prevFrameClean444Cr = UpsampleChromaPlaneSited(prevFrameCleanCodedCr, w, h, ChromaSubsampling::Yuv420, DeliveredChromaFormat::Rgb444, siting, active);
 					const TdV2Plane curClean444Cb = UpsampleChromaPlaneSited(curCleanCodedCb, w, h, ChromaSubsampling::Yuv420, DeliveredChromaFormat::Rgb444, siting, active);
 					const TdV2Plane curClean444Cr = UpsampleChromaPlaneSited(curCleanCodedCr, w, h, ChromaSubsampling::Yuv420, DeliveredChromaFormat::Rgb444, siting, active);
 					const TdV2Plane prevClean444Cb = UpsampleChromaPlaneSited(prevCleanCodedCb, w, h, ChromaSubsampling::Yuv420, DeliveredChromaFormat::Rgb444, siting, active);
@@ -1905,22 +2001,69 @@ namespace Tests
 					const TdV2Plane nextClean444Cb = UpsampleChromaPlaneSited(nextCleanCodedCb, w, h, ChromaSubsampling::Yuv420, DeliveredChromaFormat::Rgb444, siting, active);
 					const TdV2Plane nextClean444Cr = UpsampleChromaPlaneSited(nextCleanCodedCr, w, h, ChromaSubsampling::Yuv420, DeliveredChromaFormat::Rgb444, siting, active);
 
-					// Plant independent two-seed 4:4:4 chroma grain on the delivered RGB stream!
-					std::mt19937 rngOwn(6301), rngForPrev(6302), rngForNext(6303);
+					// Plant independent two-seed chroma grain originating on the coded 4:2:0 stream (as on real 4:2:0 HDMI
+					// delivered as RGB 4:4:4) and upsampled via SitingSpec::Left() so ReduceToCodedGrid sees the full
+					// 15% leaked grain variance (exposing Layer-2 failure decisively when retainedGrainVar is disabled!).
+					std::mt19937 rngOwn(6301), rngForPrev(6302), rngForNext(6303), rngPrevFrame(6304);
 					std::normal_distribution<double> gd(0.0, grainSigma);
-					std::vector<double> ownCb(fN), ownCr(fN), forPrevCb(fN), forPrevCr(fN), forNextCb(fN), forNextCr(fN);
+					TdV2Plane prevFrameOwnCodedCb(cW, cH), prevFrameOwnCodedCr(cW, cH);
+					TdV2Plane ownCodedCb(cW, cH), ownCodedCr(cW, cH);
+					TdV2Plane forPrevCodedCb(cW, cH), forPrevCodedCr(cW, cH);
+					TdV2Plane forNextCodedCb(cW, cH), forNextCodedCr(cW, cH);
+					for (size_t i = 0; i < cN; ++i)
+					{
+						prevFrameOwnCodedCb.v[i] = gd(rngPrevFrame);
+						prevFrameOwnCodedCr.v[i] = gd(rngPrevFrame);
+						ownCodedCb.v[i] = gd(rngOwn);
+						ownCodedCr.v[i] = gd(rngOwn);
+						forPrevCodedCb.v[i] = gd(rngForPrev);
+						forPrevCodedCr.v[i] = gd(rngForPrev);
+						forNextCodedCb.v[i] = gd(rngForNext);
+						forNextCodedCr.v[i] = gd(rngForNext);
+					}
+					// Exact 2x2 coded-grid replication onto delivered 4:4:4 preserves white coded-grid grain spectrum
+					// without double-low-pass distortion through ReduceToCodedGrid (Var(own444) == Var(ownCoded)).
+					auto replicate2x2 = [&](const TdV2Plane& src) -> TdV2Plane
+					{
+						TdV2Plane dst(w, h, 0.0);
+						for (int cy = 0; cy < cH; ++cy)
+							for (int cx = 0; cx < cW; ++cx)
+							{
+								const double v = src.at(cx, cy);
+								dst.at(2 * cx,     2 * cy)     = v;
+								dst.at(2 * cx + 1, 2 * cy)     = v;
+								dst.at(2 * cx,     2 * cy + 1) = v;
+								dst.at(2 * cx + 1, 2 * cy + 1) = v;
+							}
+						return dst;
+					};
+					const TdV2Plane prevFrameOwn444Cb = replicate2x2(prevFrameOwnCodedCb);
+					const TdV2Plane prevFrameOwn444Cr = replicate2x2(prevFrameOwnCodedCr);
+					const TdV2Plane own444Cb = replicate2x2(ownCodedCb);
+					const TdV2Plane own444Cr = replicate2x2(ownCodedCr);
+					const TdV2Plane forPrev444Cb = replicate2x2(forPrevCodedCb);
+					const TdV2Plane forPrev444Cr = replicate2x2(forPrevCodedCr);
+					const TdV2Plane forNext444Cb = replicate2x2(forNextCodedCb);
+					const TdV2Plane forNext444Cr = replicate2x2(forNextCodedCr);
+
+					const std::vector<double>& prevFrameOwnCb = prevFrameOwn444Cb.v;
+					const std::vector<double>& prevFrameOwnCr = prevFrameOwn444Cr.v;
+					const std::vector<double>& ownCb = own444Cb.v;
+					const std::vector<double>& ownCr = own444Cr.v;
+					const std::vector<double>& forPrevCb = forPrev444Cb.v;
+					const std::vector<double>& forPrevCr = forPrev444Cr.v;
+					const std::vector<double>& forNextCb = forNext444Cb.v;
+					const std::vector<double>& forNextCr = forNext444Cr.v;
+
+					TdV2Plane prevFrameRecCb444(w, h), prevFrameRecCr444(w, h);
+					TdV2Plane prevFrameCleanImp444Cb(w, h), prevFrameCleanImp444Cr(w, h);
 					TdV2Plane recCb444(w, h), recCr444(w, h), prevRecCb444(w, h), prevRecCr444(w, h), nextRecCb444(w, h), nextRecCr444(w, h);
 					TdV2Plane curCleanImp444Cb(w, h), curCleanImp444Cr(w, h);
 					TdV2Plane prevCleanImp444Cb(w, h), prevCleanImp444Cr(w, h), nextCleanImp444Cb(w, h), nextCleanImp444Cr(w, h);
 					for (size_t i = 0; i < fN; ++i)
 					{
-						ownCb[i] = gd(rngOwn);
-						ownCr[i] = gd(rngOwn);
-						forPrevCb[i] = gd(rngForPrev);
-						forPrevCr[i] = gd(rngForPrev);
-						forNextCb[i] = gd(rngForNext);
-						forNextCr[i] = gd(rngForNext);
-
+						prevFrameRecCb444.v[i] = prevFrameClean444Cb.v[i] + prevFrameOwnCb[i];
+						prevFrameRecCr444.v[i] = prevFrameClean444Cr.v[i] + prevFrameOwnCr[i];
 						recCb444.v[i] = curClean444Cb.v[i] + ownCb[i];
 						recCr444.v[i] = curClean444Cr.v[i] + ownCr[i];
 						prevRecCb444.v[i] = prevClean444Cb.v[i] + forPrevCb[i];
@@ -1928,6 +2071,8 @@ namespace Tests
 						nextRecCb444.v[i] = nextClean444Cb.v[i] + forNextCb[i];
 						nextRecCr444.v[i] = nextClean444Cr.v[i] + forNextCr[i];
 
+						prevFrameCleanImp444Cb.v[i] = prevFrameClean444Cb.v[i] + leakFrac * prevFrameOwnCb[i];
+						prevFrameCleanImp444Cr.v[i] = prevFrameClean444Cr.v[i] + leakFrac * prevFrameOwnCr[i];
 						curCleanImp444Cb.v[i] = curClean444Cb.v[i] + leakFrac * ownCb[i];
 						curCleanImp444Cr.v[i] = curClean444Cr.v[i] + leakFrac * ownCr[i];
 						prevCleanImp444Cb.v[i] = prevClean444Cb.v[i] + leakFrac * forPrevCb[i];
@@ -1936,58 +2081,123 @@ namespace Tests
 						nextCleanImp444Cr.v[i] = nextClean444Cr.v[i] + leakFrac * forNextCr[i];
 					}
 
+					TdV2Plane prevFrameRecR, prevFrameRecG, prevFrameRecB;
 					TdV2Plane recR, recG, recB, prevR, prevG, prevB, nextR, nextG, nextB;
+					YCbCrPlanesToRgb(mat, masterY, prevFrameRecCb444, prevFrameRecCr444, midCode, prevFrameRecR, prevFrameRecG, prevFrameRecB);
 					YCbCrPlanesToRgb(mat, masterY, recCb444, recCr444, midCode, recR, recG, recB);
 					YCbCrPlanesToRgb(mat, masterY, prevRecCb444, prevRecCr444, midCode, prevR, prevG, prevB);
 					YCbCrPlanesToRgb(mat, masterY, nextRecCb444, nextRecCr444, midCode, nextR, nextG, nextB);
 
-					// Mandatory In-Test Negative Control (Rule 3): naive un-separated RGB average on EXACT SAME input!
+					// Mandatory In-Test Negative Control #1 (Rule 3): naive un-separated RGB average on EXACT SAME input!
+					TdV2Plane naivePrevR(w, h), naivePrevG(w, h), naivePrevB(w, h);
 					TdV2Plane naiveR(w, h), naiveG(w, h), naiveB(w, h);
 					for (size_t i = 0; i < fN; ++i)
 					{
+						naivePrevR.v[i] = (prevFrameRecR.v[i] + prevR.v[i] + nextR.v[i]) / 3.0;
+						naivePrevG.v[i] = (prevFrameRecG.v[i] + prevG.v[i] + nextG.v[i]) / 3.0;
+						naivePrevB.v[i] = (prevFrameRecB.v[i] + prevB.v[i] + nextB.v[i]) / 3.0;
 						naiveR.v[i] = (recR.v[i] + prevR.v[i] + nextR.v[i]) / 3.0;
 						naiveG.v[i] = (recG.v[i] + prevG.v[i] + nextG.v[i]) / 3.0;
 						naiveB.v[i] = (recB.v[i] + prevB.v[i] + nextB.v[i]) / 3.0;
 					}
-					TdV2Plane naiveY, naiveCb, naiveCr;
+					TdV2Plane naivePrevY, naivePrevCb, naivePrevCr, naiveY, naiveCb, naiveCr;
+					RgbPlanesToYCbCr(mat, naivePrevR, naivePrevG, naivePrevB, midCode, naivePrevY, naivePrevCb, naivePrevCr);
 					RgbPlanesToYCbCr(mat, naiveR, naiveG, naiveB, midCode, naiveY, naiveCb, naiveCr);
-					const auto naiveRepCb = EvaluateGrainTransfer(master444Cb.v.data(), ownCb.data(), forPrevCb.data(), naiveCb.v.data(), fN);
-					const auto naiveRepCr = EvaluateGrainTransfer(master444Cr.v.data(), ownCr.data(), forPrevCr.data(), naiveCr.v.data(), fN);
-					Assert::IsTrue(naiveRepCb.valid && naiveRepCr.valid);
+					std::vector<double> naivePrevResCb(fN), naivePrevResCr(fN);
+					for (size_t i = 0; i < fN; ++i)
+					{
+						naivePrevResCb[i] = naivePrevCb.v[i] - master444Cb.v[i];
+						naivePrevResCr[i] = naivePrevCr.v[i] - master444Cr.v[i];
+					}
+					const auto naiveRepCb = EvaluateGrainTransfer(
+						master444Cb.v.data(), ownCb.data(), forPrevCb.data(), naiveCb.v.data(), fN,
+						naivePrevResCb.data(), prevFrameOwnCb.data());
+					const auto naiveRepCr = EvaluateGrainTransfer(
+						master444Cr.v.data(), ownCr.data(), forPrevCr.data(), naiveCr.v.data(), fN,
+						naivePrevResCr.data(), prevFrameOwnCr.data());
+					Assert::IsTrue(naiveRepCb.valid && naiveRepCr.valid && naiveRepCb.lag1Evaluated && naiveRepCr.lag1Evaluated);
 					Assert::IsFalse(naiveRepCb.passesAuthoritativeBar, L"Negative control: naive RGB average MUST fail grain bar");
 					Assert::IsTrue(naiveRepCb.betaOwn < 0.90 && naiveRepCb.betaForeign > 0.10);
 					Assert::IsTrue(naiveRepCr.betaOwn < 0.90 && naiveRepCr.betaForeign > 0.10);
 
-					// Run TdV2ChromaEngine on RGB 4:4:4 (coded 4:2:0).
+					// Run TdV2ChromaEngine on RGB 4:4:4 (coded 4:2:0) across Frame 1 & Frame 2 for genuine lag-1 (H11)!
 					Config cfg = MakePreset(Preset::Reference, Mode::On);
 					TdV2ChromaEngine eng(cfg);
 					StandInRegistry reg;
 
-					ChromaProcessInput in;
+					ChromaProcessInput in1;
+					in1.seq = 50;
+					in1.deliveredFormat = DeliveredChromaFormat::Rgb444;
+					in1.codedSubsampling = ChromaSubsampling::Yuv420;
+					in1.gridStatus = ChromaGridStatus::Identified;
+					in1.siting = siting;
+					in1.matrix = mat;
+					in1.lumaW = w;
+					in1.lumaH = h;
+					in1.activeRect = active;
+					in1.receivedR = prevFrameRecR;
+					in1.receivedG = prevFrameRecG;
+					in1.receivedB = prevFrameRecB;
+					in1.hasCleanSplit = true;
+					in1.cleanCb = prevFrameCleanImp444Cb;
+					in1.cleanCr = prevFrameCleanImp444Cr;
+					in1.retainedGrainVarCb = retainedVar;
+					in1.retainedGrainVarCr = retainedVar;
+					in1.prevPeak = { &prevCleanImp444Cb, &prevCleanImp444Cr, &stillMf, false };
+					in1.nextPeak = { &nextCleanImp444Cb, &nextCleanImp444Cr, &stillMf, false };
+					in1.hasStepPrior = true;
+					in1.estimatedStepDelta = 12.0;
+					const auto res1 = eng.ProcessFrame(in1, &reg);
+
+					ChromaProcessInput in = in1;
 					in.seq = 51;
-					in.deliveredFormat = DeliveredChromaFormat::Rgb444;
-					in.codedSubsampling = ChromaSubsampling::Yuv420;
-					in.gridStatus = ChromaGridStatus::Identified;
-					in.siting = siting;
-					in.matrix = mat;
-					in.lumaW = w;
-					in.lumaH = h;
-					in.activeRect = active;
 					in.receivedR = recR;
 					in.receivedG = recG;
 					in.receivedB = recB;
-					in.hasCleanSplit = true;
 					in.cleanCb = curCleanImp444Cb;
 					in.cleanCr = curCleanImp444Cr;
-					in.retainedGrainVarCb = retainedVar;
-					in.retainedGrainVarCr = retainedVar;
-					in.prevPeak = { &prevCleanImp444Cb, &prevCleanImp444Cr, &stillMf, false };
-					in.nextPeak = { &nextCleanImp444Cb, &nextCleanImp444Cr, &stillMf, false };
-					in.hasStepPrior = true;
-					in.estimatedStepDelta = 12.0;
-
 					const auto res = eng.ProcessFrame(in, &reg);
-					TdV2Plane outY, outCb, outCr;
+
+					// Mandatory In-Test Negative Control #2 (Rule 3 / Test-Diff HIGH-5):
+					// Run TdV2ChromaEngine on the EXACT SAME 15%-leaked RGB 4:4:4 planes with Layer-2 retainedGrainVar DISABLED!
+					{
+						TdV2ChromaEngine engNoL2(cfg);
+						StandInRegistry regNoL2;
+						ChromaProcessInput in1NoL2 = in1;
+						in1NoL2.retainedGrainVarCb.clear();
+						in1NoL2.retainedGrainVarCr.clear();
+						const auto res1NoL2 = engNoL2.ProcessFrame(in1NoL2, &regNoL2);
+						ChromaProcessInput inNoL2 = in;
+						inNoL2.retainedGrainVarCb.clear();
+						inNoL2.retainedGrainVarCr.clear();
+						const auto resNoL2 = engNoL2.ProcessFrame(inNoL2, &regNoL2);
+
+						TdV2Plane n1Y, n1Cb, n1Cr, nY, nCb, nCr;
+						RgbPlanesToYCbCr(mat, res1NoL2.outputR, res1NoL2.outputG, res1NoL2.outputB, midCode, n1Y, n1Cb, n1Cr);
+						RgbPlanesToYCbCr(mat, resNoL2.outputR, resNoL2.outputG, resNoL2.outputB, midCode, nY, nCb, nCr);
+						std::vector<double> prevResNoL2Cb(fN), prevResNoL2Cr(fN);
+						for (size_t i = 0; i < fN; ++i)
+						{
+							prevResNoL2Cb[i] = n1Cb.v[i] - master444Cb.v[i];
+							prevResNoL2Cr[i] = n1Cr.v[i] - master444Cr.v[i];
+						}
+						const auto repNoL2Cb = EvaluateGrainTransfer(
+							master444Cb.v.data(), ownCb.data(), forPrevCb.data(), nCb.v.data(), fN,
+							prevResNoL2Cb.data(), prevFrameOwnCb.data());
+						const auto repNoL2Cr = EvaluateGrainTransfer(
+							master444Cr.v.data(), ownCr.data(), forPrevCr.data(), nCr.v.data(), fN,
+							prevResNoL2Cr.data(), prevFrameOwnCr.data());
+						Assert::IsTrue(repNoL2Cb.valid && repNoL2Cb.lag1Evaluated && repNoL2Cr.valid && repNoL2Cr.lag1Evaluated);
+						Assert::IsFalse(repNoL2Cb.passesAuthoritativeBar,
+							L"Negative control: Layer-2-disabled RGB 4:4:4 engine on 15%-leaked clean planes MUST fail authoritative grain bar");
+						Assert::IsFalse(repNoL2Cr.passesAuthoritativeBar,
+							L"Negative control: Layer-2-disabled RGB 4:4:4 engine (Cr) on 15%-leaked clean planes MUST fail authoritative grain bar");
+						Assert::IsTrue(std::fabs(repNoL2Cb.betaForeign) > kGrainBarMaxBetaForeign || repNoL2Cb.betaOwn < kGrainBarMinBetaOwn,
+							L"Negative control: Layer-2-disabled RGB engine must exhibit real own-grain loss or foreign-grain leak");
+					}
+
+					TdV2Plane out1Y, out1Cb, out1Cr, outY, outCb, outCr;
+					RgbPlanesToYCbCr(mat, res1.outputR, res1.outputG, res1.outputB, midCode, out1Y, out1Cb, out1Cr);
 					RgbPlanesToYCbCr(mat, res.outputR, res.outputG, res.outputB, midCode, outY, outCb, outCr);
 
 					// Verify non-trivial clean-layer repair on RGB delivered delta.
@@ -1997,22 +2207,36 @@ namespace Tests
 					Assert::IsTrue(MaskedRmse(master444Cb, repCleanCb, active) < MaskedRmse(master444Cb, curClean444Cb, active) * 0.70,
 						L"RGB chroma clean layer must genuinely improve");
 
-					const auto repCb = EvaluateGrainTransfer(master444Cb.v.data(), ownCb.data(), forPrevCb.data(), outCb.v.data(), fN);
-					const auto repCr = EvaluateGrainTransfer(master444Cr.v.data(), ownCr.data(), forPrevCr.data(), outCr.v.data(), fN);
+					std::vector<double> prevResCb(fN), prevResCr(fN);
+					for (size_t i = 0; i < fN; ++i)
+					{
+						prevResCb[i] = out1Cb.v[i] - master444Cb.v[i];
+						prevResCr[i] = out1Cr.v[i] - master444Cr.v[i];
+					}
+					const auto repCb = EvaluateGrainTransfer(
+						master444Cb.v.data(), ownCb.data(), forPrevCb.data(), outCb.v.data(), fN,
+						prevResCb.data(), prevFrameOwnCb.data());
+					const auto repCr = EvaluateGrainTransfer(
+						master444Cr.v.data(), ownCr.data(), forPrevCr.data(), outCr.v.data(), fN,
+						prevResCr.data(), prevFrameOwnCr.data());
 
 					char buf[256];
 					std::snprintf(buf, sizeof(buf),
-						"RGB Chroma Grain: betaOwn=%.4f/%.4f betaFor=%.4f/%.4f stdRatio=%.4f/%.4f | naive betaOwn=%.3f betaFor=%.3f",
+						"RGB Chroma Grain (15%% leak): betaOwn=%.4f/%.4f betaFor=%.4f/%.4f stdRatio=%.4f/%.4f lag1=%.4f/%.4f | naive betaOwn=%.3f betaFor=%.3f",
 						repCb.betaOwn, repCr.betaOwn, repCb.betaForeign, repCr.betaForeign,
-						repCb.stdRatio, repCr.stdRatio, naiveRepCb.betaOwn, naiveRepCb.betaForeign);
+						repCb.stdRatio, repCr.stdRatio, repCb.lag1Rise, repCr.lag1Rise, naiveRepCb.betaOwn, naiveRepCb.betaForeign);
 					Logger::WriteMessage(buf);
 
-					Assert::IsTrue(repCb.valid && repCb.passesAuthoritativeBar, L"RGB Cb must pass authoritative grain bar");
-					Assert::IsTrue(repCr.valid && repCr.passesAuthoritativeBar, L"RGB Cr must pass authoritative grain bar");
+					Assert::IsTrue(repCb.valid && repCb.lag1Evaluated && repCb.passesAuthoritativeBar,
+						L"RGB Cb (15% leak + Layer 2) must pass authoritative grain bar with lag1Evaluated==true");
+					Assert::IsTrue(repCr.valid && repCr.lag1Evaluated && repCr.passesAuthoritativeBar,
+						L"RGB Cr (15% leak + Layer 2) must pass authoritative grain bar with lag1Evaluated==true");
 					Assert::IsTrue(repCb.betaOwn >= kGrainBarMinBetaOwn && std::fabs(repCb.betaForeign) <= kGrainBarMaxBetaForeign);
 					Assert::IsTrue(std::fabs(repCb.stdRatio - 1.0) <= kGrainBarMaxRmsError);
+					Assert::IsTrue(repCb.lag1Rise <= kGrainBarMaxLag1Rise);
 					Assert::IsTrue(repCr.betaOwn >= kGrainBarMinBetaOwn && std::fabs(repCr.betaForeign) <= kGrainBarMaxBetaForeign);
 					Assert::IsTrue(std::fabs(repCr.stdRatio - 1.0) <= kGrainBarMaxRmsError);
+					Assert::IsTrue(repCr.lag1Rise <= kGrainBarMaxLag1Rise);
 				}
 
 				// ---- Sub-case C (HIGH-4b): Layer-4 TdGuardPort intervention + Anchor Canvas Purity ----
@@ -2115,21 +2339,26 @@ namespace Tests
 						L"AnchorCanvas must remain strictly separated from output's Layer-4 grain add-back");
 				}
 
-				// ---- Sub-case D (HIGH-4b): Raw hasCleanSplit == false chroma path ----
+				// ---- Sub-case D (H11 + H12): Raw hasCleanSplit == false chroma path — FULL authoritative bar + negative control! ----
 				{
 					const TdV2Plane masterCb = SampleAnalyticChromaPlane(w, h, 2, 2, siting, 0.0, 0.0, 64.0, 64.0, 6.0, true);
 					const TdV2Plane masterCr = SampleAnalyticChromaPlane(w, h, 2, 2, siting, 0.0, 0.0, 64.0, 64.0, 6.0, false);
-					std::mt19937 rngR1(6501), rngR2(6502), rngR3(6503);
+					std::mt19937 rngR0(6500), rngR1(6501), rngR2(6502), rngR3(6503);
 					std::normal_distribution<double> gd(0.0, grainSigma);
+					std::vector<double> rPrevFrameOwnCb(cN), rPrevFrameOwnCr(cN);
 					std::vector<double> rOwnCb(cN), rForPrevCb(cN), rForNextCb(cN);
 					std::vector<double> rOwnCr(cN), rForPrevCr(cN), rForNextCr(cN);
+					TdV2Plane rawPrevFrameCb(cW, cH), rawPrevFrameCr(cW, cH);
 					TdV2Plane rawCurCb(cW, cH), rawPrevCb(cW, cH), rawNextCb(cW, cH);
 					TdV2Plane rawCurCr(cW, cH), rawPrevCr(cW, cH), rawNextCr(cW, cH);
 					for (size_t i = 0; i < cN; ++i)
 					{
+						rPrevFrameOwnCb[i] = gd(rngR0); rPrevFrameOwnCr[i] = gd(rngR0);
 						rOwnCb[i] = gd(rngR1); rOwnCr[i] = gd(rngR1);
 						rForPrevCb[i] = gd(rngR2); rForPrevCr[i] = gd(rngR2);
 						rForNextCb[i] = gd(rngR3); rForNextCr[i] = gd(rngR3);
+						rawPrevFrameCb.v[i] = masterCb.v[i] + rPrevFrameOwnCb[i];
+						rawPrevFrameCr.v[i] = masterCr.v[i] + rPrevFrameOwnCr[i];
 						rawCurCb.v[i] = masterCb.v[i] + rOwnCb[i];
 						rawPrevCb.v[i] = masterCb.v[i] + rForPrevCb[i];
 						rawNextCb.v[i] = masterCb.v[i] + rForNextCb[i];
@@ -2137,42 +2366,83 @@ namespace Tests
 						rawPrevCr.v[i] = masterCr.v[i] + rForPrevCr[i];
 						rawNextCr.v[i] = masterCr.v[i] + rForNextCr[i];
 					}
+
+					// Mandatory In-Test Negative Control (Rule 3 / H12): unprotected direct blend on the EXACT SAME inputs!
+					std::vector<double> naiveRawPrevResCb(cN), naiveRawPrevResCr(cN), naiveRawCb(cN), naiveRawCr(cN);
+					for (size_t i = 0; i < cN; ++i)
+					{
+						naiveRawPrevResCb[i] = (rawPrevFrameCb.v[i] + rawPrevCb.v[i] + rawNextCb.v[i]) / 3.0 - masterCb.v[i];
+						naiveRawPrevResCr[i] = (rawPrevFrameCr.v[i] + rawPrevCr.v[i] + rawNextCr.v[i]) / 3.0 - masterCr.v[i];
+						naiveRawCb[i] = (rawCurCb.v[i] + rawPrevCb.v[i] + rawNextCb.v[i]) / 3.0;
+						naiveRawCr[i] = (rawCurCr.v[i] + rawPrevCr.v[i] + rawNextCr.v[i]) / 3.0;
+					}
+					const auto naiveRawRepCb = EvaluateGrainTransfer(
+						masterCb.v.data(), rOwnCb.data(), rForPrevCb.data(), naiveRawCb.data(), cN,
+						naiveRawPrevResCb.data(), rPrevFrameOwnCb.data());
+					const auto naiveRawRepCr = EvaluateGrainTransfer(
+						masterCr.v.data(), rOwnCr.data(), rForPrevCr.data(), naiveRawCr.data(), cN,
+						naiveRawPrevResCr.data(), rPrevFrameOwnCr.data());
+					Assert::IsTrue(naiveRawRepCb.valid && naiveRawRepCr.valid && naiveRawRepCb.lag1Evaluated && naiveRawRepCr.lag1Evaluated);
+					Assert::IsFalse(naiveRawRepCb.passesAuthoritativeBar,
+						L"H12 Negative control: unprotected direct blend of raw chroma MUST fail authoritative bar");
+					Assert::IsTrue(naiveRawRepCb.betaOwn < 0.75 && naiveRawRepCb.betaForeign > 0.25);
+					Assert::IsTrue(naiveRawRepCr.betaOwn < 0.75 && naiveRawRepCr.betaForeign > 0.25);
+
 					const std::vector<double> fullGVar(static_cast<size_t>(cw) * ch, grainSigma * grainSigma);
 
 					Config rCfg = MakePreset(Preset::Reference, Mode::On);
 					TdV2ChromaEngine rEng(rCfg);
 					StandInRegistry rReg;
 
-					ChromaProcessInput rIn;
+					ChromaProcessInput rIn1;
+					rIn1.seq = 60;
+					rIn1.deliveredFormat = DeliveredChromaFormat::Yuv420;
+					rIn1.codedSubsampling = ChromaSubsampling::Yuv420;
+					rIn1.gridStatus = ChromaGridStatus::Identified;
+					rIn1.siting = siting;
+					rIn1.lumaW = w;
+					rIn1.lumaH = h;
+					rIn1.activeRect = active;
+					rIn1.receivedCb = rawPrevFrameCb;
+					rIn1.receivedCr = rawPrevFrameCr;
+					rIn1.hasCleanSplit = false;
+					rIn1.retainedGrainVarCb = fullGVar;
+					rIn1.retainedGrainVarCr = fullGVar;
+					rIn1.prevPeak = { &rawPrevCb, &rawPrevCr, &stillMf, false };
+					rIn1.nextPeak = { &rawNextCb, &rawNextCr, &stillMf, false };
+					rIn1.hasStepPrior = true;
+					rIn1.estimatedStepDelta = 12.0;
+					const auto rRes1 = rEng.ProcessFrame(rIn1, &rReg);
+
+					ChromaProcessInput rIn = rIn1;
 					rIn.seq = 61;
-					rIn.deliveredFormat = DeliveredChromaFormat::Yuv420;
-					rIn.codedSubsampling = ChromaSubsampling::Yuv420;
-					rIn.gridStatus = ChromaGridStatus::Identified;
-					rIn.siting = siting;
-					rIn.lumaW = w;
-					rIn.lumaH = h;
-					rIn.activeRect = active;
 					rIn.receivedCb = rawCurCb;
 					rIn.receivedCr = rawCurCr;
-					rIn.hasCleanSplit = false;
-					rIn.retainedGrainVarCb = fullGVar;
-					rIn.retainedGrainVarCr = fullGVar;
-					rIn.prevPeak = { &rawPrevCb, &rawPrevCr, &stillMf, false };
-					rIn.nextPeak = { &rawNextCb, &rawNextCr, &stillMf, false };
-					rIn.hasStepPrior = true;
-					rIn.estimatedStepDelta = 12.0;
-
 					const auto rRes = rEng.ProcessFrame(rIn, &rReg);
 					AssertPlaneAllFinite(rRes.outputCb, L"Raw hasCleanSplit==false chroma output must be finite");
 					Assert::IsTrue(rReg.IsActive(StandInKind::P10gGrainSeparator),
 						L"Raw hasCleanSplit==false chroma path MUST visibly engage StandInKind::P10gGrainSeparator");
-					const auto rawRepCb = EvaluateGrainTransfer(masterCb.v.data(), rOwnCb.data(), rForPrevCb.data(), rRes.outputCb.v.data(), cN);
-					const auto rawRepCr = EvaluateGrainTransfer(masterCr.v.data(), rOwnCr.data(), rForPrevCr.data(), rRes.outputCr.v.data(), cN);
-					Assert::IsTrue(rawRepCb.valid && rawRepCr.valid);
-					Assert::IsTrue(rawRepCb.betaOwn >= 0.95 && std::fabs(rawRepCb.betaForeign) <= 0.03,
-						L"Raw chroma path with A1+Guard must retain >= 95% own Cb grain and reject foreign grain <= 0.03");
-					Assert::IsTrue(rawRepCr.betaOwn >= 0.95 && std::fabs(rawRepCr.betaForeign) <= 0.03,
-						L"Raw chroma path with A1+Guard must retain >= 95% own Cr grain and reject foreign grain <= 0.03");
+
+					std::vector<double> rPrevResCb(cN), rPrevResCr(cN);
+					for (size_t i = 0; i < cN; ++i)
+					{
+						rPrevResCb[i] = rRes1.outputCb.v[i] - masterCb.v[i];
+						rPrevResCr[i] = rRes1.outputCr.v[i] - masterCr.v[i];
+					}
+					const auto rawRepCb = EvaluateGrainTransfer(
+						masterCb.v.data(), rOwnCb.data(), rForPrevCb.data(), rRes.outputCb.v.data(), cN,
+						rPrevResCb.data(), rPrevFrameOwnCb.data());
+					const auto rawRepCr = EvaluateGrainTransfer(
+						masterCr.v.data(), rOwnCr.data(), rForPrevCr.data(), rRes.outputCr.v.data(), cN,
+						rPrevResCr.data(), rPrevFrameOwnCr.data());
+					Assert::IsTrue(rawRepCb.valid && rawRepCb.lag1Evaluated && rawRepCb.passesAuthoritativeBar,
+						L"H12: Raw chroma path MUST pass FULL authoritative bar (betaOwn>=0.98, |betaForeign|<=0.02, RMS +/-2%, lag1Evaluated==true)");
+					Assert::IsTrue(rawRepCr.valid && rawRepCr.lag1Evaluated && rawRepCr.passesAuthoritativeBar,
+						L"H12: Raw chroma Cr path MUST pass FULL authoritative bar (betaOwn>=0.98, |betaForeign|<=0.02, RMS +/-2%, lag1Evaluated==true)");
+					Assert::IsTrue(rawRepCb.betaOwn >= kGrainBarMinBetaOwn && std::fabs(rawRepCb.betaForeign) <= kGrainBarMaxBetaForeign);
+					Assert::IsTrue(std::fabs(rawRepCb.stdRatio - 1.0) <= kGrainBarMaxRmsError);
+					Assert::IsTrue(rawRepCr.betaOwn >= kGrainBarMinBetaOwn && std::fabs(rawRepCr.betaForeign) <= kGrainBarMaxBetaForeign);
+					Assert::IsTrue(std::fabs(rawRepCr.stdRatio - 1.0) <= kGrainBarMaxRmsError);
 				}
 			}
 
@@ -2248,8 +2518,12 @@ namespace Tests
 				Assert::IsTrue(evalA.adoptProjection, L"Q5(a) must trigger adoptProjection == true when relativeBias > 5%");
 				Assert::IsTrue(evalA.meanCrossIr > trueGrainVar * 3.0,
 					L"Negative control: raw cross form massively overestimates grain variance under 0.5-px pan");
-				Assert::IsTrue(std::fabs(evalA.meanProjIr - trueGrainVar) < std::fabs(evalA.meanCrossIr - trueGrainVar) * 0.5,
-					L"Projection form must cut 0.5-px pan texture bias decisively compared to raw cross form");
+				// Adversarial anti-2.36x-bias check (Pass-2 audit Q5(a)):
+				// Naive un-debiased E - C^2 / E_prev converges to (1 + beta_w / alpha^2) * sigma^2 ~= 2.36 * sigma^2 (~37.7)
+				// on strong 0.5-px panned texture + grain. Assert I_proj genuinely converges near trueGrainVar (16.0)
+				// within [-15%, +25%], catching the 2.36x bias immediately!
+				Assert::IsTrue(evalA.meanProjIr >= 0.85 * trueGrainVar && evalA.meanProjIr <= 1.25 * trueGrainVar,
+					L"Q5(a) projection form MUST converge near true grain variance on panned texture+grain (rejecting 2.36x bias!)");
 
 				// (b) 0.5-px panned pure high-frequency texture (zero grain):
 				StandInRegistry regB;
@@ -2302,7 +2576,6 @@ namespace Tests
 				std::vector<double> blockEnergies;
 				std::vector<double> blockIr;
 				std::vector<double> grainyOnlyIr;
-				std::vector<double> btbEnergies, btbIr, midEnergies, midIr, wtwEnergies, wtwIr;
 
 				auto measureBlock = [](const double cur[64], const double prev[64], double& outE, double& outIr)
 				{
@@ -2342,21 +2615,15 @@ namespace Tests
 						gPrev[i] = grainDist(rng);
 					}
 
-					double blkBtbC[64], blkBtbP[64], blkMidC[64], blkMidP[64], blkWtwC[64], blkWtwP[64];
+					double blkBtbC[64], blkBtbP[64], blkWtwC[64], blkWtwP[64];
 					for (int i = 0; i < 64; ++i)
 					{
 						blkBtbC[i] = 32.0 + gCur[i];  blkBtbP[i] = 32.0 + gPrev[i];
-						blkMidC[i] = 512.0 + gCur[i]; blkMidP[i] = 512.0 + gPrev[i];
 						blkWtwC[i] = 980.0 + gCur[i]; blkWtwP[i] = 980.0 + gPrev[i];
 					}
-					double eB = 0.0, irB = 0.0, eM = 0.0, irM = 0.0, eW = 0.0, irW = 0.0;
+					double eB = 0.0, irB = 0.0, eW = 0.0, irW = 0.0;
 					measureBlock(blkBtbC, blkBtbP, eB, irB);
-					measureBlock(blkMidC, blkMidP, eM, irM);
 					measureBlock(blkWtwC, blkWtwP, eW, irW);
-
-					btbEnergies.push_back(eB); btbIr.push_back(irB);
-					midEnergies.push_back(eM); midIr.push_back(irM);
-					wtwEnergies.push_back(eW); wtwIr.push_back(irW);
 
 					blockEnergies.push_back(eB); blockIr.push_back(irB); grainyOnlyIr.push_back(irB);
 					blockEnergies.push_back(eW); blockIr.push_back(irW); grainyOnlyIr.push_back(irW);
@@ -2386,22 +2653,68 @@ namespace Tests
 				Assert::AreEqual(trueGrainyNlf, res.nlfEstimate, 1e-12,
 					L"Q5(b) must recover exact dark NLF of the valid grainy blocks");
 
-				// Prove strict code-value invariance: BTB (32) == Mid-Gray (512) == WTW (980)!
-				StandInRegistry regBtb, regMid, regWtw;
-				const auto rBtb = AccumulateDarkNlfExcludingZeroEnergy(btbEnergies, btbIr, regionPixels, lsbStep, qP, &regBtb);
-				const auto rMid = AccumulateDarkNlfExcludingZeroEnergy(midEnergies, midIr, regionPixels, lsbStep, qP, &regMid);
-				const auto rWtw = AccumulateDarkNlfExcludingZeroEnergy(wtwEnergies, wtwIr, regionPixels, lsbStep, qP, &regWtw);
-				Assert::IsTrue(rBtb.valid && rMid.valid && rWtw.valid);
-				Assert::AreEqual(static_cast<size_t>(15), rBtb.retainedBlocks);
-				Assert::AreEqual(static_cast<size_t>(15), rWtw.retainedBlocks);
-				Assert::IsFalse(regBtb.IsActive(StandInKind::ZeroEnergyDarkBlockExcluded),
-					L"Valid grainy BTB blocks must NEVER be excluded");
-				Assert::IsFalse(regWtw.IsActive(StandInKind::ZeroEnergyDarkBlockExcluded),
-					L"Valid grainy WTW blocks must NEVER be excluded");
-				Assert::AreEqual(rMid.nlfEstimate, rBtb.nlfEstimate, 1e-10,
-					L"BTB grainy blocks must produce identical NLF to mid-gray blocks");
-				Assert::AreEqual(rMid.nlfEstimate, rWtw.nlfEstimate, 1e-10,
-					L"WTW grainy blocks must produce identical NLF to mid-gray blocks");
+				// Non-tautological BTB vs Crushed-Black test (Pass-2 audit Q5(b)):
+				// Low-code BTB blocks (mean code = 24 < studio black 64) carrying real non-zero grain (sigma = 1.5)
+				// mixed with truly zero-energy crushed-black blocks (constant code = 64 and code = 16, E <= E_floor).
+				// Mandatory Negative Control: a naive code-value filter (meanCode < 64) wrongly excludes ALL valid
+				// grainy BTB blocks (0 retained!), whereas energy-based Q5(b) KEEPS every non-zero-energy BTB block,
+				// EXCLUDES every zero-energy crushed block, and visibly engages ZeroEnergyDarkBlockExcluded!
+				{
+					std::mt19937 rngBtb(8099u);
+					std::normal_distribution<double> btbGrainDist(0.0, 1.5);
+					std::vector<double> mixedEnergies, mixedIr, mixedMeanCodes, expectedBtbIr;
+
+					// 12 truly zero-energy crushed blocks (6 at studio black 64, 6 at BTB code 16 -> all E == 0).
+					for (int b = 0; b < 12; ++b)
+					{
+						mixedEnergies.push_back(0.0);
+						mixedIr.push_back(0.0);
+						mixedMeanCodes.push_back(b < 6 ? 64.0 : 16.0);
+					}
+					// 12 valid grainy low-code BTB blocks (mean code = 24 < 64, real non-zero grain energy > E_floor).
+					for (int b = 0; b < 12; ++b)
+					{
+						double curBlk[64], prevBlk[64];
+						double sumCode = 0.0;
+						for (int i = 0; i < 64; ++i)
+						{
+							curBlk[i] = 24.0 + btbGrainDist(rngBtb);
+							prevBlk[i] = 24.0 + btbGrainDist(rngBtb);
+							sumCode += curBlk[i];
+						}
+						double eBlk = 0.0, irBlk = 0.0;
+						measureBlock(curBlk, prevBlk, eBlk, irBlk);
+						Assert::IsTrue(eBlk > expectedFloor * 10.0,
+							L"Non-vacuity: valid grainy BTB block must have energy well above 1-pixel half-LSB floor");
+						mixedEnergies.push_back(eBlk);
+						mixedIr.push_back(irBlk);
+						mixedMeanCodes.push_back(sumCode / 64.0);
+						expectedBtbIr.push_back(irBlk);
+					}
+
+					// Negative control: naive code-value exclusion (exclude code <= 64) drops ALL 12 valid grainy BTB blocks!
+					size_t naiveCodeRetainedBtb = 0;
+					for (size_t i = 12; i < mixedMeanCodes.size(); ++i)
+						if (mixedMeanCodes[i] > 64.0)
+							++naiveCodeRetainedBtb;
+					Assert::AreEqual(static_cast<size_t>(0), naiveCodeRetainedBtb,
+						L"Negative control: naive code-value dark filter (code <= 64) wrongly discards 100% of grainy BTB blocks");
+
+					StandInRegistry regBtbMix;
+					const auto rBtbMix = AccumulateDarkNlfExcludingZeroEnergy(
+						mixedEnergies, mixedIr, regionPixels, lsbStep, qP, &regBtbMix);
+					Assert::IsTrue(rBtbMix.valid);
+					Assert::AreEqual(static_cast<size_t>(12), rBtbMix.excludedZeroEnergyBlocks,
+						L"Energy-based Q5(b) must exclude all 12 zero-energy crushed black blocks");
+					Assert::AreEqual(static_cast<size_t>(12), rBtbMix.retainedBlocks,
+						L"Energy-based Q5(b) must KEEP all 12 low-code non-zero-energy BTB grainy blocks");
+					Assert::IsTrue(regBtbMix.IsActive(StandInKind::ZeroEnergyDarkBlockExcluded),
+						L"Excluding zero-energy crushed black blocks must engage StandInKind::ZeroEnergyDarkBlockExcluded");
+					const double expectedBtbNlf = RobustStats::Quantile(expectedBtbIr, qP, RobustStats::RankRule::Interpolated);
+					Assert::IsTrue(expectedBtbNlf > 1.0, L"Valid sigma=1.5 BTB grain NLF must be clearly non-zero");
+					Assert::AreEqual(expectedBtbNlf, rBtbMix.nlfEstimate, 1e-12,
+						L"Energy-based Q5(b) must recover exact BTB grain NLF without crushed-black pull-down");
+				}
 			}
 
 			// =========================================================================
@@ -2740,11 +3053,15 @@ namespace Tests
 					Assert::IsTrue(reg.IsActive(StandInKind::TransformUnknownBound),
 						L"Partial strips [4,8) and [56,60) MUST visibly engage StandInKind::TransformUnknownBound");
 					const RoundingCellStats st = ComputeRoundingCellStats(stepDelta, phi, 0.0);
-					const BandWhiteNoiseGains gains = ComputeBandWhiteNoiseGains();
+					// Exact Parseval passband supremum ||H_b||_inf^2 (M3): L=1.0, M=midPassbandPeak^2, H=1.0.
+					const double s1Sq = VpUnit::BandFromBase::kSigmaFine * VpUnit::BandFromBase::kSigmaFine;
+					const double s2Sq = VpUnit::BandFromBase::kSigmaBase * VpUnit::BandFromBase::kSigmaBase;
+					const double wStarSq = (2.0 * std::log(VpUnit::BandFromBase::kSigmaBase / VpUnit::BandFromBase::kSigmaFine)) / (s2Sq - s1Sq);
+					const double midPassbandPeak = std::exp(-0.5 * s1Sq * wStarSq) - std::exp(-0.5 * s2Sq * wStarSq);
 					const double maxStripBound = kPixelBoundSigma * (
-						std::sqrt(st.totalVar * gains.low) +
-						std::sqrt(st.totalVar * gains.mid) +
-						std::sqrt(st.totalVar * gains.fine));
+						std::sqrt(st.totalVar * 1.0) +
+						std::sqrt(st.totalVar * (midPassbandPeak * midPassbandPeak)) +
+						std::sqrt(st.totalVar * 1.0));
 					for (int y = 4; y < 60; ++y)
 					{
 						if (y >= 8 && y < 56) continue;
@@ -3077,6 +3394,1033 @@ namespace Tests
 							L"Odd-dim 65x65 anchor canvas must keep last coded row (cy=32) valid");
 						Assert::IsTrue(MaskedRmse(oCleanCb, oddQCb, lastRow) < 1e-3,
 							L"Odd-dim 65x65 anchor canvas must accurately retain last coded row (cy=32)");
+					}
+				}
+			}
+
+			// =========================================================================
+			// 10. H2 — No-Split, Zero-Prior Chroma Grain Protection & Canvas Non-Ingest
+			// =========================================================================
+			TEST_METHOD(ChromaNoSplitZeroPriorProtectsGrainAndBlocksCanvasIngest)
+			{
+				// Adversarial H2 proof:
+				// With hasCleanSplit == false AND retainedGrainVar empty (zero prior!), TdV2ChromaEngine MUST:
+				//   1. Protect own chroma grain and block foreign grain (full authoritative bar with lag1Evaluated == true!)
+				//   2. NEVER ingest unsplit grainy chroma into AnchorCanvas even when isAnchorFrame == true!
+				//   3. Treat hasCleanSplit == true with empty cleanCb/cleanCr identically to !splitActive!
+				// Backed by a same-input unprotected direct-blend negative control proving foreign grain leaks
+				// and own grain collapses sharply without protection.
+				const int w = 128, h = 128;
+				const int cw = w / 16, ch = h / 16;
+				const int cW = w / 2, cH = h / 2;
+				const size_t cN = static_cast<size_t>(cW) * cH;
+				const ActiveRect active = ActiveRect::Full(w, h);
+				const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+				const SitingSpec siting = SitingSpec::Left();
+				const double grainSigma = 12.0;
+
+				const TdV2Plane masterY(w, h, 450.0);
+				const TdV2Plane masterCb = SampleAnalyticChromaPlane(w, h, 2, 2, siting, 0.0, 0.0, 64.0, 64.0, 6.0, true);
+				const TdV2Plane masterCr = SampleAnalyticChromaPlane(w, h, 2, 2, siting, 0.0, 0.0, 64.0, 64.0, 6.0, false);
+
+				std::mt19937 r0(9200u), r1(9201u), r2(9202u), r3(9203u);
+				std::normal_distribution<double> gd(0.0, grainSigma);
+				std::vector<double> prevOwnCb(cN), prevOwnCr(cN), ownCb(cN), ownCr(cN);
+				std::vector<double> forPrevCb(cN), forPrevCr(cN), forNextCb(cN), forNextCr(cN);
+				TdV2Plane prevFrameCb(cW, cH), prevFrameCr(cW, cH), curCb(cW, cH), curCr(cW, cH);
+				TdV2Plane refPrevCb(cW, cH), refPrevCr(cW, cH), refNextCb(cW, cH), refNextCr(cW, cH);
+				for (size_t i = 0; i < cN; ++i)
+				{
+					prevOwnCb[i] = gd(r0); prevOwnCr[i] = gd(r0);
+					ownCb[i] = gd(r1); ownCr[i] = gd(r1);
+					forPrevCb[i] = gd(r2); forPrevCr[i] = gd(r2);
+					forNextCb[i] = gd(r3); forNextCr[i] = gd(r3);
+
+					prevFrameCb.v[i] = masterCb.v[i] + prevOwnCb[i];
+					prevFrameCr.v[i] = masterCr.v[i] + prevOwnCr[i];
+					curCb.v[i] = masterCb.v[i] + ownCb[i];
+					curCr.v[i] = masterCr.v[i] + ownCr[i];
+					refPrevCb.v[i] = masterCb.v[i] + forPrevCb[i];
+					refPrevCr.v[i] = masterCr.v[i] + forPrevCr[i];
+					refNextCb.v[i] = masterCb.v[i] + forNextCb[i];
+					refNextCr.v[i] = masterCr.v[i] + forNextCr[i];
+				}
+
+				// Mandatory In-Test Negative Control (Rule 3): unprotected direct blend without Layer-4 guard on exact same inputs!
+				std::vector<double> naivePrevResCb(cN), naivePrevResCr(cN), naiveOutCb(cN), naiveOutCr(cN);
+				for (size_t i = 0; i < cN; ++i)
+				{
+					naivePrevResCb[i] = (prevFrameCb.v[i] + refPrevCb.v[i] + refNextCb.v[i]) / 3.0 - masterCb.v[i];
+					naivePrevResCr[i] = (prevFrameCr.v[i] + refPrevCr.v[i] + refNextCr.v[i]) / 3.0 - masterCr.v[i];
+					naiveOutCb[i] = (curCb.v[i] + refPrevCb.v[i] + refNextCb.v[i]) / 3.0;
+					naiveOutCr[i] = (curCr.v[i] + refPrevCr.v[i] + refNextCr.v[i]) / 3.0;
+				}
+				const auto naiveRepCb = EvaluateGrainTransfer(
+					masterCb.v.data(), ownCb.data(), forPrevCb.data(), naiveOutCb.data(), cN,
+					naivePrevResCb.data(), prevOwnCb.data());
+				const auto naiveRepCr = EvaluateGrainTransfer(
+					masterCr.v.data(), ownCr.data(), forPrevCr.data(), naiveOutCr.data(), cN,
+					naivePrevResCr.data(), prevOwnCr.data());
+				Assert::IsTrue(naiveRepCb.valid && naiveRepCr.valid && naiveRepCb.lag1Evaluated && naiveRepCr.lag1Evaluated);
+				Assert::IsFalse(naiveRepCb.passesAuthoritativeBar,
+					L"H2 Negative control: unprotected direct blend MUST fail authoritative grain bar");
+				Assert::IsTrue(naiveRepCb.betaOwn < 0.75 && naiveRepCb.betaForeign > 0.25,
+					L"H2 Negative control: unprotected direct blend destroys own Cb grain and leaks foreign grain");
+				Assert::IsTrue(naiveRepCr.betaOwn < 0.75 && naiveRepCr.betaForeign > 0.25,
+					L"H2 Negative control: unprotected direct blend destroys own Cr grain and leaks foreign grain");
+
+				// Case A: hasCleanSplit == false, retainedGrainVarCb/Cr EMPTY (zero prior!), isAnchorFrame == true!
+				Config cfg = MakePreset(Preset::Reference, Mode::On);
+				TdV2ChromaEngine eng(cfg);
+				StandInRegistry reg;
+
+				ChromaProcessInput in1;
+				in1.seq = 1;
+				in1.deliveredFormat = DeliveredChromaFormat::Yuv420;
+				in1.codedSubsampling = ChromaSubsampling::Yuv420;
+				in1.gridStatus = ChromaGridStatus::Identified;
+				in1.siting = siting;
+				in1.lumaW = w;
+				in1.lumaH = h;
+				in1.activeRect = active;
+				in1.receivedCb = prevFrameCb;
+				in1.receivedCr = prevFrameCr;
+				in1.hasCleanSplit = false;
+				// Zero prior: retainedGrainVarCb & retainedGrainVarCr intentionally left EMPTY!
+				in1.isAnchorFrame = true;
+				in1.anchorCleanY = masterY;
+				in1.prevPeak = { &refPrevCb, &refPrevCr, &stillMf, false };
+				in1.nextPeak = { &refNextCb, &refNextCr, &stillMf, false };
+				in1.hasStepPrior = true;
+				in1.estimatedStepDelta = 16.0;
+				const auto res1 = eng.ProcessFrame(in1, &reg);
+
+				Assert::IsTrue(reg.IsActive(StandInKind::P10gGrainSeparator),
+					L"H2: no-split chroma path must visibly engage StandInKind::P10gGrainSeparator");
+				Assert::IsFalse(eng.AnchorCanvas().HasData(),
+					L"H2: AnchorCanvas MUST NEVER ingest unsplit grainy chroma (hasCleanSplit == false)");
+
+				ChromaProcessInput in2 = in1;
+				in2.seq = 2;
+				in2.receivedCb = curCb;
+				in2.receivedCr = curCr;
+				const auto res2 = eng.ProcessFrame(in2, &reg);
+				Assert::IsFalse(eng.AnchorCanvas().HasData(),
+					L"H2: AnchorCanvas MUST remain empty across unsplit frames");
+
+				std::vector<double> prevResCb(cN), prevResCr(cN);
+				for (size_t i = 0; i < cN; ++i)
+				{
+					prevResCb[i] = res1.outputCb.v[i] - masterCb.v[i];
+					prevResCr[i] = res1.outputCr.v[i] - masterCr.v[i];
+				}
+				const auto repCb = EvaluateGrainTransfer(
+					masterCb.v.data(), ownCb.data(), forPrevCb.data(), res2.outputCb.v.data(), cN,
+					prevResCb.data(), prevOwnCb.data());
+				const auto repCr = EvaluateGrainTransfer(
+					masterCr.v.data(), ownCr.data(), forPrevCr.data(), res2.outputCr.v.data(), cN,
+					prevResCr.data(), prevOwnCr.data());
+				const auto repCbNext = EvaluateGrainTransfer(
+					masterCb.v.data(), ownCb.data(), forNextCb.data(), res2.outputCb.v.data(), cN,
+					prevResCb.data(), prevOwnCb.data());
+
+				Assert::IsTrue(repCb.valid && repCb.lag1Evaluated && repCb.passesAuthoritativeBar,
+					L"H2: no-split zero-prior Cb must pass full authoritative grain bar with lag1Evaluated==true");
+				Assert::IsTrue(repCr.valid && repCr.lag1Evaluated && repCr.passesAuthoritativeBar,
+					L"H2: no-split zero-prior Cr must pass full authoritative grain bar with lag1Evaluated==true");
+				Assert::IsTrue(repCbNext.lag1Evaluated && std::fabs(repCbNext.betaForeign) <= kGrainBarMaxBetaForeign);
+
+				// Case B: hasCleanSplit == true with EMPTY cleanCb/cleanCr planes MUST behave identically to !splitActive!
+				TdV2ChromaEngine engEmpty(cfg);
+				StandInRegistry regEmpty;
+				ChromaProcessInput inEmpty1 = in1;
+				inEmpty1.hasCleanSplit = true;
+				inEmpty1.cleanCb = TdV2Plane{};
+				inEmpty1.cleanCr = TdV2Plane{};
+				const auto resEmpty1 = engEmpty.ProcessFrame(inEmpty1, &regEmpty);
+
+				ChromaProcessInput inEmpty2 = in2;
+				inEmpty2.hasCleanSplit = true;
+				inEmpty2.cleanCb = TdV2Plane{};
+				inEmpty2.cleanCr = TdV2Plane{};
+				const auto resEmpty2 = engEmpty.ProcessFrame(inEmpty2, &regEmpty);
+
+				Assert::IsTrue(regEmpty.IsActive(StandInKind::P10gGrainSeparator),
+					L"H2: hasCleanSplit=true with empty planes must behave as !splitActive and engage P10gGrainSeparator");
+				Assert::IsFalse(engEmpty.AnchorCanvas().HasData(),
+					L"H2: hasCleanSplit=true with empty planes MUST NOT ingest into AnchorCanvas");
+				AssertPlanesBitExact(res1.outputCb, resEmpty1.outputCb,
+					L"H2: hasCleanSplit=true with empty planes must match hasCleanSplit=false bit-exact (Frame 1 Cb)");
+				AssertPlanesBitExact(res2.outputCb, resEmpty2.outputCb,
+					L"H2: hasCleanSplit=true with empty planes must match hasCleanSplit=false bit-exact (Frame 2 Cb)");
+				AssertPlanesBitExact(res2.outputCr, resEmpty2.outputCr,
+					L"H2: hasCleanSplit=true with empty planes must match hasCleanSplit=false bit-exact (Frame 2 Cr)");
+			}
+
+			// =========================================================================
+			// 11. H3 — Occlusion / valid=0 Motion: Zero 0.0-Hole Band Bleed & POCS Skip
+			// =========================================================================
+			TEST_METHOD(ChromaOcclusionInvalidMotionZeroHoleBleedAndPocsSkip)
+			{
+				const int w = 96, h = 96;
+				const int cw = w / 16, ch = h / 16; // 6x6 luma cells
+				const int cW = w / 2, cH = h / 2;   // 48x48 coded 4:2:0 plane (each luma cell = 8x8 chroma px)
+				const ActiveRect active = ActiveRect::Full(w, h);
+				const ActiveRect cActive = ActiveRect::Full(cW, cH);
+				const SitingSpec siting = SitingSpec::TopLeftType2();
+				const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+
+				// Non-zero chroma (~512 Cb, ~560 Cr) with correlated luma so both AnchorCanvas AND Carried CfL run!
+				TdV2Plane anchorY(w, h, 420.0);
+				for (int y = 0; y < h; ++y)
+					for (int x = 0; x < w; ++x)
+						anchorY.at(x, y) = 420.0 + 40.0 * std::sin(2.0 * kPi * x / 16.0) * std::cos(2.0 * kPi * y / 16.0);
+
+				TdV2Plane cleanCb(cW, cH, 512.0), cleanCr(cW, cH, 560.0);
+				for (int cy = 0; cy < cH; ++cy)
+				{
+					const int ly = static_cast<int>(siting.CodedToLumaY(static_cast<double>(cy), 2));
+					for (int cx = 0; cx < cW; ++cx)
+					{
+						const int lx = static_cast<int>(siting.CodedToLumaX(static_cast<double>(cx), 2));
+						const double dy = anchorY.at(lx, ly) - 420.0;
+						cleanCb.at(cx, cy) = 512.0 + 0.30 * dy;
+						cleanCr.at(cx, cy) = 560.0 - 0.25 * dy;
+					}
+				}
+				const TdV2Plane noisyCurCb = AddGaussianNoise(cleanCb, 3.0, 9301u, cActive);
+				const TdV2Plane noisyCurCr = AddGaussianNoise(cleanCr, 3.0, 9302u, cActive);
+
+				// Occluded motion field: central 2x2 cells (cx in {2,3}, cy in {2,3} => coded [16,32) x [16,32)) have valid = 0!
+				CellMotionField occMf = stillMf;
+				for (int cy = 2; cy <= 3; ++cy)
+					for (int cx = 2; cx <= 3; ++cx)
+						occMf.valid[static_cast<size_t>(cy) * cw + cx] = 0u;
+
+				// Valid neighbor ring: 1..6 coded pixels directly outside the occluded [16, 32)^2 hole
+				// (strictly inside DecomposeActiveBands sigma=2.5 blur radius = 7.5 px!).
+				std::vector<uint8_t> ringMask(static_cast<size_t>(cW) * cH, 0u);
+				for (int cy = 10; cy < 38; ++cy)
+				{
+					for (int cx = 10; cx < 38; ++cx)
+					{
+						const bool inHole = (cx >= 16 && cx < 32 && cy >= 16 && cy < 32);
+						if (!inHole)
+							ringMask[static_cast<size_t>(cy) * cW + cx] = 1u;
+					}
+				}
+
+				// ---- Mandatory In-Test Negative Control (Rule 3): Demonstrate massive DecomposeActiveBands error from 0.0 holes ----
+				{
+					TdV2Plane zeroHolePlane = cleanCb;
+					for (int cy = 16; cy < 32; ++cy)
+						for (int cx = 16; cx < 32; ++cx)
+							zeroHolePlane.at(cx, cy) = 0.0; // what pre-H3 SampleAtCodedGrid/CfL left on valid=0!
+					const ThreeBandPlanes trueB = DecomposeActiveBands(cleanCb, cActive);
+					const ThreeBandPlanes holeB = DecomposeActiveBands(zeroHolePlane, cActive);
+					const double naiveRingBleedL = MaskedRmse(trueB.L, holeB.L, cActive, &ringMask);
+					const double naiveRingBleedM = MaskedRmse(trueB.M, holeB.M, cActive, &ringMask);
+					Assert::IsTrue(naiveRingBleedL > 30.0 && naiveRingBleedM > 15.0,
+						L"H3 Negative control: 0.0 hole blurred by DecomposeActiveBands(sigma=2.5) MUST induce massive (>30 code) band error in valid neighbors");
+				}
+
+				// ---- Sub-case A: Canvas + Carried CfL with valid=0 occlusion -> zero 0.0-hole bleed! ----
+				Config cfg = MakePreset(Preset::Reference, Mode::On);
+				cfg.estimator = VarianceEstimator::A2_RoundingCells;
+				TdV2ChromaEngine eng(cfg);
+				StandInRegistry reg;
+
+				// Seed anchor canvas & CfL on Frame 1.
+				ChromaProcessInput fAnc;
+				fAnc.seq = 1;
+				fAnc.deliveredFormat = DeliveredChromaFormat::Yuv420;
+				fAnc.codedSubsampling = ChromaSubsampling::Yuv420;
+				fAnc.gridStatus = ChromaGridStatus::Identified;
+				fAnc.siting = siting;
+				fAnc.lumaW = w;
+				fAnc.lumaH = h;
+				fAnc.activeRect = active;
+				fAnc.receivedY = anchorY;
+				fAnc.receivedCb = cleanCb;
+				fAnc.receivedCr = cleanCr;
+				fAnc.hasCleanSplit = true;
+				fAnc.cleanCb = cleanCb;
+				fAnc.cleanCr = cleanCr;
+				fAnc.isAnchorFrame = true;
+				fAnc.anchorCleanY = anchorY;
+				fAnc.hasStepPrior = true;
+				fAnc.estimatedStepDelta = 16.0;
+				eng.ProcessFrame(fAnc, &reg);
+				Assert::IsTrue(eng.AnchorCanvas().HasData() && eng.AnchorCanvas().HasCfl());
+
+				// Frame 2: occluded valid=0 central region, using Canvas + Carried CfL as references!
+				ChromaProcessInput fOcc = fAnc;
+				fOcc.seq = 2;
+				fOcc.isAnchorFrame = false;
+				fOcc.receivedCb = noisyCurCb;
+				fOcc.receivedCr = noisyCurCr;
+				fOcc.cleanCb = noisyCurCb;
+				fOcc.cleanCr = noisyCurCr;
+				fOcc.enableAnchorCanvasRef = true;
+				fOcc.enableCarriedCfl = true;
+				fOcc.hasAnchorReadMotion = true;
+				fOcc.anchorReadMotion = occMf;
+				const auto resOcc = eng.ProcessFrame(fOcc, &reg);
+				AssertPlaneAllFinite(resOcc.outputCb, L"H3 occluded outputCb must be finite");
+				AssertPlaneAllFinite(resOcc.outputCr, L"H3 occluded outputCr must be finite");
+				Assert::IsTrue(resOcc.anchorCanvasUsed && resOcc.carriedCflUsed);
+
+				// 1. Occluded valid=0 pixels stay exact passthrough!
+				for (int cy = 16; cy < 32; ++cy)
+				{
+					for (int cx = 16; cx < 32; ++cx)
+					{
+						Assert::AreEqual(noisyCurCb.at(cx, cy), resOcc.outputCb.at(cx, cy), 0.0,
+							L"H3: occluded valid=0 Cb pixels must remain untouched");
+						Assert::AreEqual(noisyCurCr.at(cx, cy), resOcc.outputCr.at(cx, cy), 0.0,
+							L"H3: occluded valid=0 Cr pixels must remain untouched");
+					}
+				}
+				// 2. Valid 1..6 px neighbor ring around occluded region has ZERO 0.0-hole dark pull!
+				double sumSignedBiasCb = 0.0, sumSignedBiasCr = 0.0;
+				size_t ringCnt = 0;
+				for (int cy = 10; cy < 38; ++cy)
+				{
+					for (int cx = 10; cx < 38; ++cx)
+					{
+						if (ringMask[static_cast<size_t>(cy) * cW + cx] == 0u)
+							continue;
+						sumSignedBiasCb += resOcc.outputCb.at(cx, cy) - cleanCb.at(cx, cy);
+						sumSignedBiasCr += resOcc.outputCr.at(cx, cy) - cleanCr.at(cx, cy);
+						++ringCnt;
+					}
+				}
+				const double ringBiasCb = sumSignedBiasCb / static_cast<double>(ringCnt);
+				const double ringBiasCr = sumSignedBiasCr / static_cast<double>(ringCnt);
+				const double ringRmseCb = MaskedRmse(cleanCb, resOcc.outputCb, cActive, &ringMask);
+				const double ringRmseCr = MaskedRmse(cleanCr, resOcc.outputCr, cActive, &ringMask);
+				Assert::IsTrue(std::fabs(ringBiasCb) < 2.0 && std::fabs(ringBiasCr) < 2.0,
+					L"H3: valid neighbor ring around valid=0 occlusion MUST have zero 0.0-hole dark bias");
+				Assert::IsTrue(ringRmseCb < MaskedRmse(cleanCb, noisyCurCb, cActive, &ringMask),
+					L"H3: valid neighbor ring around valid=0 occlusion must genuinely improve vs noisy received");
+				Assert::IsTrue(ringRmseCr < MaskedRmse(cleanCr, noisyCurCr, cActive, &ringMask));
+
+				// ---- Sub-case B: Transform-identified 8x8 DCT POCS skips invalid refs[0] prediction pixels! ----
+				// Place occMf (valid = 0 in coded [16, 32)^2 = four 8x8 blocks) on prevPeak so refs[0] IS the occluded
+				// reference whose corrupted pixels (-30 codes in [16, 32)^2) would wreck STRICT/CELL POCS if not skipped,
+				// while nextPeak carries stillMf (valid = 1 everywhere -> refs[1]) to genuinely repair [16, 32)^2!
+				const ActiveRect holeRect{ 16, 16, 32, 32 };
+				TdV2Plane corruptPrevCb = cleanCb;
+				TdV2Plane corruptPrevCr = cleanCr;
+				for (int cy = 16; cy < 32; ++cy)
+				{
+					for (int cx = 16; cx < 32; ++cx)
+					{
+						corruptPrevCb.at(cx, cy) -= 30.0;
+						corruptPrevCr.at(cx, cy) += 30.0;
+					}
+				}
+				const double baseHoleRmseCb = MaskedRmse(cleanCb, noisyCurCb, holeRect);
+				const double baseHoleRmseCr = MaskedRmse(cleanCr, noisyCurCr, holeRect);
+
+				for (ResidualMode rm : { ResidualMode::Strict, ResidualMode::Cell })
+				{
+					Config pCfg = cfg;
+					pCfg.residualMode = rm;
+
+					ChromaProcessInput fPocsOcc = fOcc;
+					fPocsOcc.seq = 3;
+					fPocsOcc.enableAnchorCanvasRef = false;
+					fPocsOcc.enableCarriedCfl = false;
+					fPocsOcc.hasAnchorReadMotion = false;
+					fPocsOcc.transformIdentified8x8 = true;
+					fPocsOcc.estimatedStepDelta = 12.0;
+					fPocsOcc.prevPeak = { &corruptPrevCb, &corruptPrevCr, &occMf, false };   // refs[0]: valid=0 on [16,32)^2!
+					fPocsOcc.nextPeak = { &cleanCb, &cleanCr, &stillMf, false };             // refs[1]: valid=1 everywhere!
+
+					TdV2ChromaEngine pEngOcc(pCfg);
+					StandInRegistry pRegOcc;
+					const auto resPocsOcc = pEngOcc.ProcessFrame(fPocsOcc, &pRegOcc);
+					AssertPlaneAllFinite(resPocsOcc.outputCb, L"H3 POCS outputCb must be finite");
+					AssertPlaneAllFinite(resPocsOcc.outputCr, L"H3 POCS outputCr must be finite");
+
+					// Same-input valid-refs[0] control (stillMf with valid = 1 everywhere on prevPeak):
+					// Proves BOTH that the 4 occluded 8x8 blocks (x2 planes = 8) were skipped in resPocsOcc AND that
+					// failing to skip corrupted refs[0] degrades [16, 32)^2 vs resPocsOcc!
+					ChromaProcessInput fPocsValid = fPocsOcc;
+					fPocsValid.prevPeak.lumaMotion = &stillMf;
+					TdV2ChromaEngine pEngValid(pCfg);
+					StandInRegistry pRegValid;
+					const auto resPocsValid = pEngValid.ProcessFrame(fPocsValid, &pRegValid);
+
+					Assert::IsTrue(resPocsOcc.codecModelPbStandInCells > 0,
+						L"H3: valid blocks outside [16,32)^2 must still run 8x8 DCT POCS cleanly");
+					Assert::IsTrue(resPocsOcc.codecModelPbStandInCells < resPocsValid.codecModelPbStandInCells,
+						L"H3: POCS must skip occluded [16,32)^2 8x8 blocks where refs[0].validPx == 0");
+					Assert::AreEqual(resPocsOcc.codecModelPbStandInCells + 8u, resPocsValid.codecModelPbStandInCells,
+						L"H3: exact 4 occluded 8x8 blocks x 2 chroma planes (8) must be skipped by POCS vs valid control");
+
+					const double occHoleRmseCb = MaskedRmse(cleanCb, resPocsOcc.outputCb, holeRect);
+					const double occHoleRmseCr = MaskedRmse(cleanCr, resPocsOcc.outputCr, holeRect);
+					const double validCorruptHoleRmseCb = MaskedRmse(cleanCb, resPocsValid.outputCb, holeRect);
+					const double pocsRingRmseCb = MaskedRmse(cleanCb, resPocsOcc.outputCb, cActive, &ringMask);
+
+					Assert::IsTrue(occHoleRmseCb < baseHoleRmseCb * 0.80 && occHoleRmseCr < baseHoleRmseCr * 0.80,
+						L"H3: skipping invalid refs[0] POCS must preserve valid refs[1] (nextPeak) repair inside [16,32)^2");
+					Assert::IsTrue(validCorruptHoleRmseCb > occHoleRmseCb,
+						L"H3 Negative control: running POCS/fusion against corrupted valid=1 refs[0] must worsen [16,32)^2 vs skipped occlusion");
+					Assert::IsTrue(pocsRingRmseCb < MaskedRmse(cleanCb, noisyCurCb, cActive, &ringMask),
+						L"H3: valid neighbor ring around occluded POCS blocks must cleanly improve");
+				}
+			}
+
+			// =========================================================================
+			// 12. H4 — Anchor Canvas Wide Gap (> Subsampling Factor) Marked Invalid & Visible
+			// =========================================================================
+			TEST_METHOD(ChromaAnchorCanvasWideGapMarkedInvalidAndVisibleStandIn)
+			{
+				const int w = 64, h = 64;
+				const int cw = w / 16, ch = h / 16; // 4x4 cells
+				const int cW = w / 2, cH = h / 2;   // 32x32 coded 4:2:0
+				const ActiveRect active = ActiveRect::Full(w, h);
+				const SitingSpec siting = SitingSpec::TopLeftType2();
+				const CellMotionField allValidMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+
+				// Create contrasting left/right chroma (650 left of gap, 370 right of gap, true scene = 512 inside gap!)
+				// and leave cell (1, 1) [16..32) x [16..32) (16 luma px wide >> subsampling factor 2!) unpopulated via splatMotion.valid=0!
+				TdV2Plane anchorCb(cW, cH, 512.0), anchorCr(cW, cH, 512.0);
+				for (int cy = 0; cy < cH; ++cy)
+				{
+					for (int cx = 0; cx < cW; ++cx)
+					{
+						if (cx < 8)      { anchorCb.at(cx, cy) = 650.0; anchorCr.at(cx, cy) = 380.0; }
+						else if (cx >= 16) { anchorCb.at(cx, cy) = 370.0; anchorCr.at(cx, cy) = 640.0; }
+						else              { anchorCb.at(cx, cy) = 512.0; anchorCr.at(cx, cy) = 512.0; }
+					}
+				}
+				CellMotionField sparseSplatMf = allValidMf;
+				// Unpopulated 16x16 luma-px wide gap across cells (1, 1) and (1, 2): x in [16, 32), y in [16, 48).
+				sparseSplatMf.valid[static_cast<size_t>(1) * cw + 1] = 0u;
+				sparseSplatMf.valid[static_cast<size_t>(2) * cw + 1] = 0u;
+
+				TdV2ChromaAnchorCanvas canvas;
+				StandInRegistry reg;
+				Assert::IsTrue(canvas.AccumulateAnchorFrame(
+					anchorCb, anchorCr, nullptr, w, h, ChromaSubsampling::Yuv420,
+					siting, active, &sparseSplatMf, 16, 10, &reg));
+
+				// 1. Direct MaterializeCanvas check: outGapFilled > 0 and StandInKind::ChromaCanvasGapFilled engaged!
+				TdV2Plane matCb, matCr;
+				uint64_t gapFilled = 0;
+				StandInRegistry matReg;
+				Assert::IsTrue(canvas.MaterializeCanvas(matCb, matCr, &gapFilled, &matReg));
+				AssertPlaneAllFinite(matCb, L"Materialized canvas Cb must be finite");
+				AssertPlaneAllFinite(matCr, L"Materialized canvas Cr must be finite");
+				Assert::IsTrue(gapFilled > 0,
+					L"H4: MaterializeCanvas on sparse samples MUST report gapFilled > 0");
+				Assert::IsTrue(matReg.IsActive(StandInKind::ChromaCanvasGapFilled),
+					L"H4: MaterializeCanvas gap-fill MUST visibly engage StandInKind::ChromaCanvasGapFilled");
+
+				// 2. SampleAtCodedGrid with allValidMf: pixels deep inside the 16-luma-px wide gap (> subsampling factor 2)
+				//    MUST have outValid == 0 (NEVER silently marked valid == 1)!
+				TdV2Plane qCb, qCr;
+				std::vector<uint8_t> qValid;
+				StandInRegistry sampleReg;
+				Assert::IsTrue(canvas.SampleAtCodedGrid(
+					ChromaSubsampling::Yuv420, siting, active, &allValidMf, 16,
+					qCb, qCr, qValid, &sampleReg));
+				Assert::IsTrue(sampleReg.IsActive(StandInKind::ChromaCanvasGapFilled),
+					L"H4: SampleAtCodedGrid on sparse canvas MUST propagate ChromaCanvasGapFilled visibility");
+
+				// Deep inside the wide gap: coded cx in [10, 14), cy in [10, 22) -> luma x in [20, 28), y in [20, 44)
+				// (>= 4 luma px away from any populated sample, strictly beyond 4:2:0 subsampling factor 2!).
+				for (int cy = 10; cy < 22; ++cy)
+				{
+					for (int cx = 10; cx < 14; ++cx)
+					{
+						Assert::AreEqual(static_cast<uint8_t>(0u), qValid[static_cast<size_t>(cy) * cW + cx],
+							L"H4: pixels beyond footprint/subsampling floor inside wide canvas gap MUST be marked outValid == 0");
+					}
+				}
+				// Meanwhile populated region far from gap MUST remain valid == 1!
+				Assert::AreEqual(static_cast<uint8_t>(1u), qValid[static_cast<size_t>(12) * cW + 4],
+					L"Populated left region must remain valid == 1");
+				Assert::AreEqual(static_cast<uint8_t>(1u), qValid[static_cast<size_t>(12) * cW + 24],
+					L"Populated right region must remain valid == 1");
+
+				// 3. Mandatory In-Test Negative Control + End-to-End TdV2ChromaEngine check (Rule 3):
+				//    On contrasting left (650) vs right (370) across the wide gap where true scene is 512,
+				//    a naive unconditional gap-fill that marks the gap valid=1 blends linear ramp 650->370 into the gap!
+				const ActiveRect gapCodedRect{ 10, 10, 14, 22 };
+				TdV2Plane curTrueCb = anchorCb, curTrueCr = anchorCr;
+				for (int cy = 8; cy < 24; ++cy)
+					for (int cx = 8; cx < 16; ++cx)
+					{
+						curTrueCb.at(cx, cy) = 512.0; // flat 512 true chroma inside the gap, contrasting with 650..370 linear ramp!
+						curTrueCr.at(cx, cy) = 512.0;
+					}
+				// Shift the gap contrast asymmetrically so linear interpolation inside [10..14) is far from 512:
+				// Left edge of gap (cx=7) = 650, right edge (cx=16) = 610 -> linear interp across gap is ~630 vs true 512!
+				TdV2Plane asymAncCb = anchorCb;
+				for (int cy = 0; cy < cH; ++cy)
+					for (int cx = 16; cx < cW; ++cx)
+						asymAncCb.at(cx, cy) = 610.0;
+
+				TdV2ChromaAnchorCanvas asymCanvas;
+				Assert::IsTrue(asymCanvas.AccumulateAnchorFrame(
+					asymAncCb, anchorCr, nullptr, w, h, ChromaSubsampling::Yuv420,
+					siting, active, &sparseSplatMf, 16, 10));
+				TdV2Plane asymMatCb, asymMatCr;
+				uint64_t asymGap = 0;
+				Assert::IsTrue(asymCanvas.MaterializeCanvas(asymMatCb, asymMatCr, &asymGap));
+				// Negative control: naive fusion treating materialized gap pixels as valid=1 introduces > 50 code error!
+				double naiveGapSq = 0.0;
+				size_t naiveGapN = 0;
+				for (int cy = gapCodedRect.y0; cy < gapCodedRect.y1; ++cy)
+				{
+					for (int cx = gapCodedRect.x0; cx < gapCodedRect.x1; ++cx)
+					{
+						const double naivePred = asymMatCb.at(2 * cx, 2 * cy);
+						const double naiveBlended = 0.5 * (512.0 + naivePred);
+						const double err = naiveBlended - 512.0;
+						naiveGapSq += err * err;
+						++naiveGapN;
+					}
+				}
+				const double naiveGapRmse = std::sqrt(naiveGapSq / static_cast<double>(naiveGapN));
+				Assert::IsTrue(naiveGapRmse > 40.0,
+					L"H4 Negative control: treating wide gap-filled canvas pixels as valid=1 MUST inject massive error (>40 codes)");
+
+				// End-to-end engine check: ingest sparse anchor, fuse valley reading from anchor canvas!
+				Config eCfg = MakePreset(Preset::Reference, Mode::On);
+				eCfg.estimator = VarianceEstimator::A2_RoundingCells;
+				TdV2ChromaEngine eng(eCfg);
+				StandInRegistry eReg;
+
+				ChromaProcessInput f1;
+				f1.seq = 1;
+				f1.deliveredFormat = DeliveredChromaFormat::Yuv420;
+				f1.codedSubsampling = ChromaSubsampling::Yuv420;
+				f1.gridStatus = ChromaGridStatus::Identified;
+				f1.siting = siting;
+				f1.lumaW = w;
+				f1.lumaH = h;
+				f1.activeRect = active;
+				f1.receivedCb = asymAncCb;
+				f1.receivedCr = anchorCr;
+				f1.hasCleanSplit = true;
+				f1.cleanCb = asymAncCb;
+				f1.cleanCr = anchorCr;
+				f1.isAnchorFrame = true;
+				f1.hasAnchorSplatMotion = true;
+				f1.anchorSplatMotion = sparseSplatMf;
+				f1.hasStepPrior = true;
+				f1.estimatedStepDelta = 24.0;
+				eng.ProcessFrame(f1, &eReg);
+
+				ChromaProcessInput f2 = f1;
+				f2.seq = 2;
+				f2.isAnchorFrame = false;
+				f2.receivedCb = curTrueCb;
+				f2.receivedCr = curTrueCr;
+				f2.cleanCb = curTrueCb;
+				f2.cleanCr = curTrueCr;
+				f2.enableAnchorCanvasRef = true;
+				f2.enableCarriedCfl = false;
+				f2.hasAnchorReadMotion = true;
+				f2.anchorReadMotion = allValidMf;
+				StandInRegistry eReg2;
+				const auto eRes2 = eng.ProcessFrame(f2, &eReg2);
+
+				Assert::IsTrue(eRes2.canvasGapFilledPixels > 0,
+					L"H4: TdV2ChromaEngine must report res.canvasGapFilledPixels > 0 when sampling sparse canvas");
+				Assert::IsTrue(eReg2.IsActive(StandInKind::ChromaCanvasGapFilled),
+					L"H4: TdV2ChromaEngine must visibly engage StandInKind::ChromaCanvasGapFilled");
+				const double tdGapRmse = MaskedRmse(curTrueCb, eRes2.outputCb, gapCodedRect);
+				Assert::AreEqual(0.0, tdGapRmse, 1e-9,
+					L"H4: wide canvas gap marked outValid==0 MUST NOT corrupt true chroma inside the gap");
+			}
+
+			// =========================================================================
+			// 13. H14 — Chroma Identified-Transform Explicit codecModelPbCb/Cr vs Stand-In
+			// =========================================================================
+			TEST_METHOD(ChromaTransformIdentifiedCodecModelPbExplicitVsStandIn)
+			{
+				const int w = 64, h = 64;
+				const int cw = w / 16, ch = h / 16;
+				const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+				const double stepDelta = 12.0;
+				const double phi = kDeadZonePhiInter;
+
+				// Under explicitPb: cur - explicitPb has SENT DC = +24.0 (> theta = 10.0, k = 2) -> STRICT restores exact 24.0!
+				// Under prevPeak stand-in (+2.5 spatial => +20.0 DCT DC offset): cur - prevPeak has ZEROED DC = +4.0 (< theta, k = 0)
+				// -> STRICT moves DC toward blend, proving explicit codecModelPbCb/Cr is genuinely used vs refs[0] stand-in!
+				TdV2Plane explicitPbCb(w, h, 500.0), explicitPbCr(w, h, 520.0);
+				TdV2Plane prevPeakDiffCb(w, h, 502.5), prevPeakDiffCr(w, h, 522.5);
+				TdV2Plane curCb(w, h, 500.0), curCr(w, h, 520.0);
+				TdV2Plane nextPeakCb(w, h, 500.0), nextPeakCr(w, h, 520.0);
+
+				double sentDct[64] = {}, targetDct[64] = {}, sentSpat[64] = {}, targetSpat[64] = {};
+				sentDct[0] = 24.0;
+				sentDct[1] = 0.0;
+				targetDct[0] = 32.0;
+				targetDct[1] = 26.0;
+				InverseDct8x8(sentDct, sentSpat);
+				InverseDct8x8(targetDct, targetSpat);
+
+				for (int by = 0; by < h; by += 8)
+				{
+					for (int bx = 0; bx < w; bx += 8)
+					{
+						for (int j = 0; j < 8; ++j)
+						{
+							for (int i = 0; i < 8; ++i)
+							{
+								curCb.at(bx + i, by + j) = explicitPbCb.at(bx + i, by + j) + sentSpat[j * 8 + i];
+								curCr.at(bx + i, by + j) = explicitPbCr.at(bx + i, by + j) + sentSpat[j * 8 + i];
+								nextPeakCb.at(bx + i, by + j) = explicitPbCb.at(bx + i, by + j) + targetSpat[j * 8 + i];
+								nextPeakCr.at(bx + i, by + j) = explicitPbCr.at(bx + i, by + j) + targetSpat[j * 8 + i];
+							}
+						}
+					}
+				}
+
+				for (ResidualMode rm : { ResidualMode::Strict, ResidualMode::Cell })
+				{
+					Config cfg = MakePreset(Preset::Reference, Mode::On);
+					cfg.estimator = VarianceEstimator::A2_RoundingCells;
+					cfg.residualMode = rm;
+					cfg.cellProjIterations = 1;
+
+					ChromaProcessInput baseIn;
+					baseIn.seq = 140;
+					baseIn.deliveredFormat = DeliveredChromaFormat::Yuv444;
+					baseIn.codedSubsampling = ChromaSubsampling::Yuv444;
+					baseIn.gridStatus = ChromaGridStatus::Identified;
+					baseIn.lumaW = w;
+					baseIn.lumaH = h;
+					baseIn.receivedCb = curCb;
+					baseIn.receivedCr = curCr;
+					baseIn.hasCleanSplit = true;
+					baseIn.cleanCb = curCb;
+					baseIn.cleanCr = curCr;
+					baseIn.prevPeak = { &prevPeakDiffCb, &prevPeakDiffCr, &stillMf, true };
+					baseIn.nextPeak = { &nextPeakCb, &nextPeakCr, &stillMf, false };
+					baseIn.hasStepPrior = true;
+					baseIn.estimatedStepDelta = stepDelta;
+					baseIn.deadZonePhi = phi;
+					baseIn.zeroCoeffFraction = 0.0;
+					baseIn.transformIdentified8x8 = true;
+
+					// Case A: Without explicit codecModelPbCb/Cr -> engages CodecModelPbStandIn visibly!
+					TdV2ChromaEngine engStandIn(cfg);
+					StandInRegistry regStandIn;
+					const auto resStandIn = engStandIn.ProcessFrame(baseIn, &regStandIn);
+					Assert::IsTrue(regStandIn.IsActive(StandInKind::CodecModelPbStandIn),
+						L"H14 chroma: identified 8x8 DCT without codecModelPbCb/Cr MUST visibly engage CodecModelPbStandIn");
+					Assert::IsTrue(resStandIn.codecModelPbStandInCells > 0,
+						L"H14 chroma: identified 8x8 DCT without codecModelPbCb/Cr MUST increment codecModelPbStandInCells");
+
+					// Case B: With explicit codecModelPbCb/Cr -> uses them WITHOUT engaging CodecModelPbStandIn!
+					ChromaProcessInput expIn = baseIn;
+					expIn.codecModelPbCb = &explicitPbCb;
+					expIn.codecModelPbCr = &explicitPbCr;
+					TdV2ChromaEngine engExplicit(cfg);
+					StandInRegistry regExplicit;
+					const auto resExplicit = engExplicit.ProcessFrame(expIn, &regExplicit);
+					Assert::IsFalse(regExplicit.IsActive(StandInKind::CodecModelPbStandIn),
+						L"H14 chroma: supplying explicit codecModelPbCb/Cr MUST NOT engage CodecModelPbStandIn");
+					Assert::AreEqual(static_cast<uint64_t>(0), resExplicit.codecModelPbStandInCells,
+						L"H14 chroma: supplying explicit codecModelPbCb/Cr MUST keep codecModelPbStandInCells == 0");
+
+					if (rm == ResidualMode::Strict)
+					{
+						double spCb[64] = {}, dctCb[64] = {};
+						for (int j = 0; j < 8; ++j)
+							for (int i = 0; i < 8; ++i)
+								spCb[j * 8 + i] = resExplicit.outputCb.at(16 + i, 16 + j) - explicitPbCb.at(16 + i, 16 + j);
+						ForwardDct8x8(spCb, dctCb);
+						Assert::AreEqual(24.0, dctCb[0], 1e-6,
+							L"Chroma explicit codecModelPbCb in STRICT mode must preserve sent DC=24 exact");
+						Assert::IsTrue(MaskedRmse(resExplicit.outputCb, resStandIn.outputCb, ActiveRect::Full(w, h)) > 1e-3,
+							L"Explicit codecModelPbCb must genuinely alter projection vs distinct refs[0] stand-in");
+					}
+				}
+			}
+
+			// =========================================================================
+			// 14. LOW/MEDIUM — Out-of-Range retainedGrainVar Engages GrainPriorOutOfRange Visibly
+			// =========================================================================
+			TEST_METHOD(ChromaGrainPriorOutOfRangeEngagesVisibleStandIn)
+			{
+				const int w = 64, h = 64;
+				const int cw = w / 16, ch = h / 16; // 4x4 = 16 cells
+				const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+				const TdV2Plane cur444(w, h, 512.0), ref444(w, h, 520.0);
+
+				for (ChromaGridStatus status : { ChromaGridStatus::Identified, ChromaGridStatus::Unidentified })
+				{
+					Config cfg = MakePreset(Preset::Reference, Mode::On);
+
+					ChromaProcessInput baseIn;
+					baseIn.seq = 150;
+					baseIn.deliveredFormat = DeliveredChromaFormat::Yuv444;
+					baseIn.codedSubsampling = ChromaSubsampling::Yuv444;
+					baseIn.gridStatus = status;
+					baseIn.lumaW = w;
+					baseIn.lumaH = h;
+					baseIn.receivedCb = cur444;
+					baseIn.receivedCr = cur444;
+					baseIn.hasCleanSplit = true;
+					baseIn.cleanCb = cur444;
+					baseIn.cleanCr = cur444;
+					baseIn.prevPeak = { &ref444, &ref444, &stillMf, false };
+					baseIn.nextPeak = { &ref444, &ref444, &stillMf, false };
+					baseIn.hasStepPrior = true;
+					baseIn.estimatedStepDelta = 12.0;
+
+					// Properly sized retainedGrainVar (16 cells) -> GrainPriorOutOfRange NOT active, oobCells == 0.
+					ChromaProcessInput okIn = baseIn;
+					okIn.retainedGrainVarCb.assign(static_cast<size_t>(cw) * ch, 4.0);
+					okIn.retainedGrainVarCr.assign(static_cast<size_t>(cw) * ch, 4.0);
+					TdV2ChromaEngine engOk(cfg);
+					StandInRegistry regOk;
+					const auto resOk = engOk.ProcessFrame(okIn, &regOk);
+					Assert::IsFalse(regOk.IsActive(StandInKind::GrainPriorOutOfRange),
+						L"Properly sized retainedGrainVar must NOT engage GrainPriorOutOfRange");
+					Assert::AreEqual(static_cast<uint64_t>(0), resOk.grainPriorOobCells);
+
+					// Truncated / out-of-range retainedGrainVar (size 1 for 16 cells!) -> visibly flagged!
+					ChromaProcessInput oobIn = baseIn;
+					oobIn.retainedGrainVarCb = { 4.0 }; // 15 cells out of range!
+					oobIn.retainedGrainVarCr = { 4.0 }; // 15 cells out of range!
+					TdV2ChromaEngine engOob(cfg);
+					StandInRegistry regOob;
+					const auto resOob = engOob.ProcessFrame(oobIn, &regOob);
+					AssertPlaneAllFinite(resOob.outputCb, L"Out-of-range retainedGrainVar Cb must remain finite");
+					AssertPlaneAllFinite(resOob.outputCr, L"Out-of-range retainedGrainVar Cr must remain finite");
+					Assert::IsTrue(regOob.IsActive(StandInKind::GrainPriorOutOfRange),
+						L"Out-of-range retainedGrainVar MUST visibly engage StandInKind::GrainPriorOutOfRange");
+					Assert::IsTrue(resOob.grainPriorOobCells > 0,
+						L"Out-of-range retainedGrainVar MUST increment res.grainPriorOobCells");
+				}
+			}
+
+			// =========================================================================
+			// 15. Full-Diff MEDIUM-1 (H9 Chroma): Missing Motion NEVER Whole-Blends Moving Content
+			// =========================================================================
+			TEST_METHOD(ChromaMissingMotionFieldNeverWholeBlendsMovingContent)
+			{
+				const int w = 64, h = 64;
+				const int cw = w / 16, ch = h / 16;
+				const int cW = w / 2, cH = h / 2;
+				const ActiveRect active = ActiveRect::Full(w, h);
+				const ActiveRect cActive = ActiveRect::Full(cW, cH);
+				const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+				const SitingSpec siting = SitingSpec::Left();
+				const Config cfg = MakePreset(Preset::Reference, Mode::On);
+
+				// Build a moving chroma vertical bar (+18 codes Cb, -18 codes Cr inside stepDelta=24 Huber knee)
+				// shifted by -6 luma px (-3 coded 4:2:0 px) in prevPeak/anchor and +6 luma px (+3 coded px) in nextPeak.
+				auto makeBar420 = [&](int cX0, int cX1, double barVal) -> TdV2Plane
+				{
+					TdV2Plane p(cW, cH, 512.0);
+					for (int y = 0; y < cH; ++y)
+						for (int x = cX0; x < cX1; ++x)
+							if (x >= 0 && x < cW)
+								p.at(x, y) = barVal;
+					return p;
+				};
+				const TdV2Plane curCb = makeBar420(12, 20, 530.0);
+				const TdV2Plane curCr = makeBar420(12, 20, 494.0);
+				const TdV2Plane prevCb = makeBar420(9, 17, 530.0);
+				const TdV2Plane prevCr = makeBar420(9, 17, 494.0);
+				const TdV2Plane nextCb = makeBar420(15, 23, 530.0);
+				const TdV2Plane nextCr = makeBar420(15, 23, 494.0);
+
+				// ---- (A) Identified coded 4:2:0 peak refs with lumaMotion == nullptr ----
+				{
+					ChromaProcessInput in;
+					in.seq = 160;
+					in.deliveredFormat = DeliveredChromaFormat::Yuv420;
+					in.codedSubsampling = ChromaSubsampling::Yuv420;
+					in.gridStatus = ChromaGridStatus::Identified;
+					in.siting = siting;
+					in.lumaW = w;
+					in.lumaH = h;
+					in.activeRect = active;
+					in.receivedCb = curCb;
+					in.receivedCr = curCr;
+					in.hasCleanSplit = true;
+					in.cleanCb = curCb;
+					in.cleanCr = curCr;
+					in.prevPeak = { &prevCb, &prevCr, nullptr, false };
+					in.nextPeak = { &nextCb, &nextCr, nullptr, false };
+					in.hasStepPrior = true;
+					in.estimatedStepDelta = 24.0;
+
+					TdV2ChromaEngine eng(cfg);
+					StandInRegistry reg;
+					const auto res = eng.ProcessFrame(in, &reg);
+					AssertPlanesBitExact(curCb, res.outputCb, L"Identified chroma null motion MUST yield exact zero ghosting (Cb)");
+					AssertPlanesBitExact(curCr, res.outputCr, L"Identified chroma null motion MUST yield exact zero ghosting (Cr)");
+					Assert::IsTrue(reg.IsActive(StandInKind::MissingMotionNoWholeBlend),
+						L"Identified chroma null motion MUST engage StandInKind::MissingMotionNoWholeBlend");
+					Assert::IsTrue(res.motionStandInRefs >= 2,
+						L"Identified chroma null motion MUST count both skipped refs in motionStandInRefs");
+
+					// Mandatory In-Test Negative Control (Rule 3): assuming Still motion on EXACT SAME moving bar ghosts severely!
+					ChromaProcessInput stillIn = in;
+					stillIn.prevPeak.lumaMotion = &stillMf;
+					stillIn.nextPeak.lumaMotion = &stillMf;
+					TdV2ChromaEngine engStill(cfg);
+					StandInRegistry regStill;
+					const auto resStill = engStill.ProcessFrame(stillIn, &regStill);
+					const double ghostRmseCb = MaskedRmse(curCb, resStill.outputCb, cActive);
+					const double ghostRmseCr = MaskedRmse(curCr, resStill.outputCr, cActive);
+					Assert::IsTrue(ghostRmseCb > 1.5 && ghostRmseCr > 1.5,
+						L"Negative control: assuming Still motion on moving chroma bar MUST cause severe ghosting");
+				}
+
+				// ---- (B) Unidentified coarse-band peak refs with lumaMotion == nullptr ----
+				{
+					// Use 128x128 with a 40-px moving chroma bar shifted -40 px in prev and +40 px in next so BOTH
+					// refs pull the coarse G(32) band downward at the center bar (zero anti-symmetric cancellation!).
+					const int uw = 128, uh = 128;
+					const int ucw = uw / 16, uch = uh / 16;
+					const ActiveRect uActive = ActiveRect::Full(uw, uh);
+					const CellMotionField uStillMf = CellMotionField::Uniform(ucw, uch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+					auto makeBar444 = [&](int x0, int x1, double barVal) -> TdV2Plane
+					{
+						TdV2Plane p(uw, uh, 512.0);
+						for (int y = 0; y < uh; ++y)
+							for (int x = x0; x < x1 && x < uw; ++x)
+								if (x >= 0)
+									p.at(x, y) = barVal;
+						return p;
+					};
+					const TdV2Plane cur444Cb = makeBar444(44, 84, 536.0);
+					const TdV2Plane cur444Cr = makeBar444(44, 84, 488.0);
+					const TdV2Plane prev444Cb = makeBar444(4, 44, 536.0);
+					const TdV2Plane prev444Cr = makeBar444(4, 44, 488.0);
+					const TdV2Plane next444Cb = makeBar444(84, 124, 536.0);
+					const TdV2Plane next444Cr = makeBar444(84, 124, 488.0);
+
+					ChromaProcessInput in;
+					in.seq = 161;
+					in.deliveredFormat = DeliveredChromaFormat::Yuv444;
+					in.codedSubsampling = ChromaSubsampling::Yuv444;
+					in.gridStatus = ChromaGridStatus::Unidentified;
+					in.lumaW = uw;
+					in.lumaH = uh;
+					in.activeRect = uActive;
+					in.receivedCb = cur444Cb;
+					in.receivedCr = cur444Cr;
+					in.hasCleanSplit = true;
+					in.cleanCb = cur444Cb;
+					in.cleanCr = cur444Cr;
+					in.prevPeak = { &prev444Cb, &prev444Cr, nullptr, false };
+					in.nextPeak = { &next444Cb, &next444Cr, nullptr, false };
+					in.hasStepPrior = true;
+					in.estimatedStepDelta = 24.0;
+
+					TdV2ChromaEngine eng(cfg);
+					StandInRegistry reg;
+					const auto res = eng.ProcessFrame(in, &reg);
+					AssertPlanesBitExact(cur444Cb, res.outputCb, L"Unidentified coarse chroma null motion MUST yield zero ghosting (Cb)");
+					AssertPlanesBitExact(cur444Cr, res.outputCr, L"Unidentified coarse chroma null motion MUST yield zero ghosting (Cr)");
+					Assert::IsTrue(reg.IsActive(StandInKind::MissingMotionNoWholeBlend),
+						L"Unidentified coarse chroma null motion MUST engage StandInKind::MissingMotionNoWholeBlend");
+					Assert::IsTrue(res.motionStandInRefs >= 2);
+
+					// Mandatory In-Test Negative Control (Rule 3): Still motion on exact same unidentified moving bar ghosts!
+					ChromaProcessInput stillIn = in;
+					stillIn.prevPeak.lumaMotion = &uStillMf;
+					stillIn.nextPeak.lumaMotion = &uStillMf;
+					TdV2ChromaEngine engStill(cfg);
+					StandInRegistry regStill;
+					const auto resStill = engStill.ProcessFrame(stillIn, &regStill);
+					Assert::IsTrue(MaskedRmse(cur444Cb, resStill.outputCb, uActive) > 0.5 &&
+					               MaskedRmse(cur444Cr, resStill.outputCr, uActive) > 0.5,
+						L"Negative control: Still motion on unidentified moving chroma bar MUST ghost visibly");
+				}
+
+				// ---- (C) Anchor canvas read (hasAnchorReadMotion == false) AND 2nd anchor splat (hasAnchorSplatMotion == false) ----
+				{
+					TdV2ChromaEngine eng(cfg);
+					StandInRegistry regSeed;
+
+					// Frame 0: seed empty anchor canvas at origin (valid initial anchor).
+					ChromaProcessInput f0;
+					f0.seq = 162;
+					f0.deliveredFormat = DeliveredChromaFormat::Yuv420;
+					f0.codedSubsampling = ChromaSubsampling::Yuv420;
+					f0.gridStatus = ChromaGridStatus::Identified;
+					f0.siting = siting;
+					f0.lumaW = w;
+					f0.lumaH = h;
+					f0.activeRect = active;
+					f0.receivedCb = prevCb;
+					f0.receivedCr = prevCr;
+					f0.hasCleanSplit = true;
+					f0.cleanCb = prevCb;
+					f0.cleanCr = prevCr;
+					f0.isAnchorFrame = true;
+					f0.hasAnchorSplatMotion = false; // empty canvas -> seeds origin cleanly
+					f0.hasStepPrior = true;
+					f0.estimatedStepDelta = 24.0;
+					eng.ProcessFrame(f0, &regSeed);
+					Assert::IsTrue(eng.AnchorCanvas().HasData());
+					Assert::AreEqual(static_cast<size_t>(1), eng.AnchorCanvas().AccumulatedFrames());
+
+					// Frame 1: moving bar with missing anchorReadMotion AND missing anchorSplatMotion on populated canvas!
+					ChromaProcessInput f1 = f0;
+					f1.seq = 163;
+					f1.receivedCb = curCb;
+					f1.receivedCr = curCr;
+					f1.cleanCb = curCb;
+					f1.cleanCr = curCr;
+					f1.enableAnchorCanvasRef = true;
+					f1.hasAnchorReadMotion = false;
+					f1.isAnchorFrame = true;
+					f1.hasAnchorSplatMotion = false;
+
+					StandInRegistry regMiss;
+					const auto resMiss = eng.ProcessFrame(f1, &regMiss);
+					Assert::IsFalse(resMiss.anchorCanvasUsed,
+						L"Missing anchorReadMotion MUST skip anchor canvas read (never assume Still!)");
+					AssertPlanesBitExact(curCb, resMiss.outputCb, L"Missing anchorReadMotion MUST produce zero ghosting (Cb)");
+					AssertPlanesBitExact(curCr, resMiss.outputCr, L"Missing anchorReadMotion MUST produce zero ghosting (Cr)");
+					Assert::IsTrue(regMiss.IsActive(StandInKind::MissingMotionNoWholeBlend),
+						L"Missing anchor read/splat motion MUST engage StandInKind::MissingMotionNoWholeBlend");
+					Assert::IsTrue(resMiss.motionStandInRefs > 0);
+					Assert::AreEqual(static_cast<size_t>(1), eng.AnchorCanvas().AccumulatedFrames(),
+						L"Missing anchorSplatMotion on populated canvas MUST skip splat accumulation (no Still ghosting into canvas!)");
+
+					// Mandatory In-Test Negative Control (Rule 3): assuming Still anchorReadMotion on exact same moving bar ghosts!
+					ChromaProcessInput f1Still = f1;
+					f1Still.seq = 164;
+					f1Still.isAnchorFrame = false;
+					f1Still.hasAnchorReadMotion = true;
+					f1Still.anchorReadMotion = stillMf;
+					StandInRegistry regStill;
+					const auto resStill = eng.ProcessFrame(f1Still, &regStill);
+					Assert::IsTrue(resStill.anchorCanvasUsed, L"Negative control: Still anchorReadMotion reads anchor canvas");
+					Assert::IsTrue(MaskedRmse(curCb, resStill.outputCb, cActive) > 1.0 &&
+					               MaskedRmse(curCr, resStill.outputCr, cActive) > 1.0,
+						L"Negative control: assuming Still anchorReadMotion on moving chroma bar MUST cause severe ghosting");
+				}
+			}
+
+			// =========================================================================
+			// 16. Full-Diff MEDIUM-3: Invalid deadZonePhi & Non-Finite StepDelta Fail Closed Visibly
+			// =========================================================================
+			TEST_METHOD(ChromaInvalidDeadZonePhiAndNonFiniteStepDeltaFailClosedVisibly)
+			{
+				const int w = 64, h = 64;
+				const int cw = w / 16, ch = h / 16;
+				const size_t numCells = static_cast<size_t>(cw) * ch;
+				const ActiveRect active = ActiveRect::Full(w, h);
+				const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+				const Config cfg = MakePreset(Preset::Reference, Mode::On);
+
+				const TdV2Plane curCb(w, h, 512.0), curCr(w, h, 512.0);
+				const TdV2Plane refCb(w, h, 524.0), refCr(w, h, 500.0);
+
+				const double kNaN = std::numeric_limits<double>::quiet_NaN();
+				const double kInf = std::numeric_limits<double>::infinity();
+
+				struct BadA2Case
+				{
+					bool hasStepPrior;
+					double stepDelta;
+					double phi;
+					double zeroFrac;
+					bool expectNonFinite;
+				};
+				const BadA2Case badCases[] = {
+					{ true,  12.0,  0.0,               0.0,  false }, // phi == 0 out of (0,1)
+					{ true,  12.0, -0.25,              0.0,  false }, // negative phi
+					{ true,  12.0,  1.0,               0.0,  false }, // phi == 1 out of (0,1)
+					{ true,  12.0,  1.5,               0.0,  false }, // phi > 1
+					{ true,  12.0,  kNaN,              0.0,  true  }, // NaN phi
+					{ false,  0.0,  kNaN,              0.0,  true  }, // NaN phi even when hasStepPrior == false
+					{ true,   0.0,  kDeadZonePhiInter, 0.0,  false }, // stepDelta == 0
+					{ true,  -4.0,  kDeadZonePhiInter, 0.0,  false }, // negative stepDelta
+					{ true,  kNaN,  kDeadZonePhiInter, 0.0,  true  }, // NaN stepDelta
+					{ true,  kInf,  kDeadZonePhiInter, 0.0,  true  }, // +Inf stepDelta
+					{ true,  12.0,  kDeadZonePhiInter, -0.1, false }, // negative zeroCoeffFraction
+					{ true,  12.0,  kDeadZonePhiInter,  1.2, false }, // zeroCoeffFraction > 1
+					{ true,  12.0,  kDeadZonePhiInter, kNaN, true  }, // NaN zeroCoeffFraction
+				};
+
+				for (ChromaGridStatus status : { ChromaGridStatus::Identified, ChromaGridStatus::Unidentified })
+				{
+					ChromaProcessInput baseIn;
+					baseIn.seq = 170;
+					baseIn.deliveredFormat = DeliveredChromaFormat::Yuv444;
+					baseIn.codedSubsampling = ChromaSubsampling::Yuv444;
+					baseIn.gridStatus = status;
+					baseIn.lumaW = w;
+					baseIn.lumaH = h;
+					baseIn.activeRect = active;
+					baseIn.receivedCb = curCb;
+					baseIn.receivedCr = curCr;
+					baseIn.hasCleanSplit = true;
+					baseIn.cleanCb = curCb;
+					baseIn.cleanCr = curCr;
+					baseIn.prevPeak = { &refCb, &refCr, &stillMf, false };
+					baseIn.nextPeak = { &refCb, &refCr, &stillMf, false };
+
+					// Positive control on the EXACT SAME planes with valid A2 stats -> genuine non-zero chroma repair!
+					{
+						ChromaProcessInput okIn = baseIn;
+						okIn.hasStepPrior = true;
+						okIn.estimatedStepDelta = 12.0;
+						okIn.deadZonePhi = kDeadZonePhiInter;
+						okIn.zeroCoeffFraction = 0.0;
+						TdV2ChromaEngine engOk(cfg);
+						StandInRegistry regOk;
+						const auto resOk = engOk.ProcessFrame(okIn, &regOk);
+						Assert::IsFalse(regOk.IsActive(StandInKind::A2StatsInvalid),
+							L"Valid A2 stats must NOT engage StandInKind::A2StatsInvalid");
+						Assert::IsFalse(regOk.IsActive(StandInKind::NonFiniteClosure),
+							L"Valid A2 stats must NOT engage StandInKind::NonFiniteClosure");
+						Assert::AreEqual(static_cast<size_t>(0), resOk.a2InvalidCells);
+						Assert::IsTrue(MaskedRmse(curCb, resOk.outputCb, active) > 0.5 &&
+						               MaskedRmse(curCr, resOk.outputCr, active) > 0.5,
+							L"Positive control: valid A2 stats must produce non-zero chroma repair");
+					}
+
+					// Adversarial bad/non-finite A2 cases -> strict passthrough delta == 0 + visible stand-in & counters!
+					for (size_t ci = 0; ci < sizeof(badCases) / sizeof(badCases[0]); ++ci)
+					{
+						const auto& bc = badCases[ci];
+						ChromaProcessInput badIn = baseIn;
+						badIn.seq = 171 + ci;
+						badIn.hasStepPrior = bc.hasStepPrior;
+						badIn.estimatedStepDelta = bc.stepDelta;
+						badIn.deadZonePhi = bc.phi;
+						badIn.zeroCoeffFraction = bc.zeroFrac;
+
+						TdV2ChromaEngine engBad(cfg);
+						StandInRegistry regBad;
+						const auto resBad = engBad.ProcessFrame(badIn, &regBad);
+						AssertPlaneAllFinite(resBad.outputCb, L"Invalid A2 chroma Cb output must remain finite");
+						AssertPlaneAllFinite(resBad.outputCr, L"Invalid A2 chroma Cr output must remain finite");
+						AssertPlanesBitExact(curCb, resBad.outputCb, L"Invalid A2 stats MUST close chroma delta to exact 0 (Cb)");
+						AssertPlanesBitExact(curCr, resBad.outputCr, L"Invalid A2 stats MUST close chroma delta to exact 0 (Cr)");
+						Assert::IsTrue(regBad.IsActive(StandInKind::A2StatsInvalid),
+							L"Invalid deadZonePhi/stepDelta/zeroFrac MUST engage StandInKind::A2StatsInvalid visibly");
+						Assert::AreEqual(numCells, resBad.a2InvalidCells,
+							L"Invalid A2 stats MUST report all cells in res.a2InvalidCells");
+						if (bc.expectNonFinite)
+						{
+							Assert::IsTrue(regBad.IsActive(StandInKind::NonFiniteClosure),
+								L"Non-finite A2 step/phi/zeroFrac MUST ALSO engage StandInKind::NonFiniteClosure visibly");
+							Assert::AreEqual(numCells, resBad.nonFiniteCells,
+								L"Non-finite A2 stats MUST report all cells in res.nonFiniteCells");
+						}
 					}
 				}
 			}

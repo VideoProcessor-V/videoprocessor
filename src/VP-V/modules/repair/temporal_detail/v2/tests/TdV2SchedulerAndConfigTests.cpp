@@ -14,6 +14,7 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include <afx.h>
 #include "CppUnitTest.h"
 
 #ifndef MAIN_SCHEMA_EXTENSION_HEADER
@@ -27,6 +28,7 @@
 #include <VP-V/core/AdmissionTable.h>
 #include <VP-V/core/AheadCeiling.h>
 #include <VP-V/core/FallbackCatalog.h>
+#include <VP-V/core/FallbackStatus.h>
 #include <VP-V/core/LaneSpareWork.h>
 #include <VP-V/core/OverloadOrder.h>
 #include <VP-V/core/PostPresentSpare.h>
@@ -37,6 +39,7 @@
 #include <VP-V/modules/motion/estimation/LaneAheadPolicy.h>
 #include <VP-V/modules/output/dither/DitherNeedSeam.h>
 #include <VP-V/modules/output/dither/SigmaDeltaDomain.h>
+#include <VP-V/modules/output/dither/SigmaDeltaVectors.h>
 #include <VP-V/modules/repair/temporal_detail/products/TdProductContracts.h>
 #include <VP-V/modules/repair/temporal_detail/products/TdProductReads.h>
 #include <VP-V/modules/repair/temporal_detail/v2/TdV2BlendMath.h>
@@ -92,6 +95,32 @@ namespace TdV2SchedulerConfigNs
 		std::ostringstream ss;
 		ss << f.rdbuf();
 		return ss.str();
+	}
+
+	inline std::string ToLowerAscii(const std::string& s)
+	{
+		std::string out;
+		out.reserve(s.size());
+		for (char c : s)
+			out.push_back((c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c);
+		return out;
+	}
+
+	inline bool ContainsIcase(const std::string& haystack, const std::string& needle)
+	{
+		return ToLowerAscii(haystack).find(ToLowerAscii(needle)) != std::string::npos;
+	}
+
+	inline std::string StripWhitespace(const std::string& s)
+	{
+		std::string out;
+		out.reserve(s.size());
+		for (char c : s)
+		{
+			if (c != ' ' && c != '\t' && c != '\r' && c != '\n')
+				out.push_back(c);
+		}
+		return out;
 	}
 
 	// Deterministic shared products bundle for DitherNeedSeam Q9a tests (pure CPU, no GPU).
@@ -775,6 +804,48 @@ namespace TdV2SchedulerConfigNs
 				}
 			}
 
+			// ---- ApplyTierToConfig takes min(preset, tier): Preset::RealTime shortcuts SC-01/SC-02 are NEVER overridden by TdTier::Full! ----
+			{
+				Config rtCfg = MakePreset(Preset::RealTime, Mode::On);
+				Assert::AreEqual(0, rtCfg.momentPoolRadiusCells, L"Preset::RealTime baseline must have momentPoolRadiusCells == 0 (SC-01)");
+				Assert::IsFalse(rtCfg.enableLongAnchor, L"Preset::RealTime baseline must have enableLongAnchor == false (SC-02)");
+				Assert::IsTrue(rtCfg.enableCarryForward, L"Preset::RealTime baseline must have enableCarryForward == true");
+
+				StandInRegistry rtFullSi;
+				const TierSpec rtFullSpec = ApplyTierToConfig(rtCfg, TdTier::Full, &rtFullSi);
+				Assert::IsTrue(rtFullSpec.tdActive && rtFullSpec.preservesCellIntegrity && !rtFullSpec.usesL3ClampForBudget);
+				Assert::AreEqual(0, rtCfg.momentPoolRadiusCells,
+					L"ApplyTierToConfig(Full) on Preset::RealTime MUST preserve momentPoolRadiusCells == 0 (min(preset, tier))");
+				Assert::IsFalse(rtCfg.enableLongAnchor,
+					L"ApplyTierToConfig(Full) on Preset::RealTime MUST preserve enableLongAnchor == false (min(preset, tier))");
+				Assert::IsTrue(rtCfg.enableCarryForward,
+					L"ApplyTierToConfig(Full) on Preset::RealTime keeps enableCarryForward == true");
+				Assert::AreEqual(static_cast<int>(Mode::On), static_cast<int>(rtCfg.mode));
+				Assert::IsFalse(rtFullSi.IsActive(StandInKind::TierSteppedDown),
+					L"ApplyTierToConfig(Full) must not engage TierSteppedDown");
+
+				// Stepping RealTime down to LocalPeaksOnly still drops enableCarryForward cleanly.
+				ApplyTierToConfig(rtCfg, TdTier::LocalPeaksOnly, &rtFullSi);
+				Assert::AreEqual(0, rtCfg.momentPoolRadiusCells);
+				Assert::IsFalse(rtCfg.enableLongAnchor);
+				Assert::IsFalse(rtCfg.enableCarryForward,
+					L"ApplyTierToConfig(LocalPeaksOnly) on Preset::RealTime must disable carryForward");
+				Assert::IsTrue(rtFullSi.IsActive(StandInKind::TierSteppedDown));
+
+				// Negative control: Preset::Reference under TdTier::Full DOES keep 3x3 pooling (1) and enableLongAnchor == true,
+				// proving Full tier genuinely permits full Reference features while min(preset, tier) protects RealTime shortcuts!
+				Config refCfg = MakePreset(Preset::Reference, Mode::On);
+				ApplyTierToConfig(refCfg, TdTier::Full, nullptr);
+				Assert::AreEqual(1, refCfg.momentPoolRadiusCells,
+					L"Negative control: Preset::Reference + TdTier::Full keeps 3x3 moment pooling (1)");
+				Assert::IsTrue(refCfg.enableLongAnchor,
+					L"Negative control: Preset::Reference + TdTier::Full keeps enableLongAnchor == true");
+				ApplyTierToConfig(refCfg, TdTier::ReducedAnchor, nullptr);
+				Assert::AreEqual(1, refCfg.momentPoolRadiusCells);
+				Assert::IsFalse(refCfg.enableLongAnchor,
+					L"Negative control: Preset::Reference + ReducedAnchor drops enableLongAnchor to false");
+			}
+
 			// ---- Owner Q8b: Laptop native 4K (3840x2160, isLaptopBudget = true) -> ReducedAnchor visibly ----
 			{
 				StandInRegistry q8bSi;
@@ -1240,6 +1311,213 @@ namespace TdV2SchedulerConfigNs
 				Assert::IsTrue(naivePostCutDelta > 10.0,
 					FormatMsg("Negative control (b): naive un-reset post-cut ghost=%.2f <= 10.0", naivePostCutDelta).c_str());
 			}
+
+			// ---- Active Bounds & Residual Consistency (8x8 STRICT / CELL Awareness when Transform Identified) ----
+			{
+				const int tw = 32;
+				const int th = 32;
+				const int tCw = 2;
+				const int tCh = 2;
+				const ActiveRect tFull = ActiveRect::Full(tw, th);
+				const ActiveRect leftHalf{ 0, 0, 16, th };
+				const ActiveRect rightHalf{ 16, 0, tw, th };
+				const double tStep = 24.0;
+				const double tPhi = kDeadZonePhiInter;
+				const double tTheta = (1.0 - tPhi) * tStep;
+
+				// Clean Field B prediction P_B = 400.0; current late frame carries strong sent DC residual (+72.0 codes
+				// -> sent DCT DC = 576.0, k = 24, cell I_24 = [568, 592] i.e. pixel DC in [71.0, 74.0]) + small AC ripple.
+				const TdV2Plane pbPlane(tw, th, 400.0);
+				TdV2Plane lateCur(tw, th, 400.0);
+				for (int y = 0; y < th; ++y)
+					for (int x = 0; x < tw; ++x)
+						lateCur.at(x, y) = 472.0 + 1.5 * std::cos(3.14159265358979323846 * (2.0 * x + 1.0) * 5.0 / 16.0);
+
+				// Stored on-time delta:
+				//   - Left half (x < 16):  +18.0 (OPPOSES desiredDir = ref - cur ~ -72 -> MUST be residual-rejected!)
+				//   - Right half (x >= 16): -30.0 (AGREES with desiredDir ~ -72 -> carried, then projected onto STRICT/CELL!)
+				TdV2Plane onTimeDelta(tw, th, 0.0);
+				for (int y = 0; y < th; ++y)
+					for (int x = 0; x < tw; ++x)
+						onTimeDelta.at(x, y) = (x < 16) ? +18.0 : -30.0;
+
+				const CellMotionField stillT = CellMotionField::Uniform(tCw, tCh, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+
+				auto measureLateDctViolCodes = [&](const TdV2Plane& deltaPlane, ResidualMode checkMode) -> double
+				{
+					double maxViol = 0.0;
+					for (int by = 0; by < th; by += 8)
+					{
+						for (int bx = 0; bx < tw; bx += 8)
+						{
+							double sentRes[64] = {}, candRes[64] = {}, sentDct[64] = {}, candDct[64] = {};
+							for (int dy = 0; dy < 8; ++dy)
+							{
+								for (int dx = 0; dx < 8; ++dx)
+								{
+									const double c = lateCur.at(bx + dx, by + dy);
+									const double p = pbPlane.at(bx + dx, by + dy);
+									sentRes[dy * 8 + dx] = c - p;
+									candRes[dy * 8 + dx] = (c + deltaPlane.at(bx + dx, by + dy)) - p;
+								}
+							}
+							ForwardDct8x8(sentRes, sentDct);
+							ForwardDct8x8(candRes, candDct);
+							for (int i = 0; i < 64; ++i)
+							{
+								const double sc = sentDct[i];
+								const double cc = candDct[i];
+								if (std::fabs(sc) < tTheta)
+									continue;
+								double violDct = 0.0;
+								if (checkMode == ResidualMode::Strict)
+								{
+									violDct = std::fabs(cc - sc);
+								}
+								else
+								{
+									const double mag = std::floor(std::fabs(sc) / tStep + tPhi);
+									const double lvl = (sc >= 0.0) ? mag : -mag;
+									const double lo = (lvl > 0.0) ? ((lvl - tPhi) * tStep) : ((lvl - 1.0 + tPhi) * tStep);
+									const double hi = (lvl > 0.0) ? ((lvl + 1.0 - tPhi) * tStep) : ((lvl + tPhi) * tStep);
+									if (cc < lo) violDct = lo - cc;
+									else if (cc > hi) violDct = cc - hi;
+								}
+								const double violCodes = violDct / 8.0;
+								if (violCodes > maxViol) maxViol = violCodes;
+							}
+						}
+					}
+					return maxViol;
+				};
+
+				// 1. Transform-identified 8x8 STRICT with explicit codecModelPb & referenceClean
+				{
+					TdV2LateCarryController strictCtrl;
+					StandInRegistry strictSi;
+					strictCtrl.OnOnTimeFrame(onTimeDelta, &strictSi);
+					LateCarryContext strictCtx;
+					strictCtx.transformIdentified8x8 = true;
+					strictCtx.residualMode = ResidualMode::Strict;
+					strictCtx.stepDelta = tStep;
+					strictCtx.deadZonePhi = tPhi;
+					strictCtx.sourceBits = 10;
+					strictCtx.cellProjIterations = 2;
+					strictCtx.codecModelPb = &pbPlane;
+					strictCtx.referenceClean = &pbPlane;
+
+					const LateCarryDecision dStrict = strictCtrl.OnLateFrame(
+						lateCur, tFull, &stillT, stepTotalVar, tCw, tCh, cellPx, &strictSi, &strictCtx);
+					Assert::IsTrue(dStrict.carried && !dStrict.expired && !dStrict.usesL3Clamp,
+						L"Late carry STRICT must succeed without L3 clamp");
+					Assert::IsTrue(dStrict.usedTransformProjection,
+						L"Late carry STRICT must run 8x8 DCT projection");
+					Assert::AreEqual(static_cast<size_t>(16u * th), dStrict.residualRejectedPixels,
+						L"Late carry STRICT must reject all opposing-residual pixels on left half");
+					Assert::AreEqual(0.0, MaxAbsPlaneRect(dStrict.delta, leftHalf), 1e-9,
+						L"Late carry STRICT opposing left-half delta must be zeroed");
+					Assert::IsFalse(strictSi.IsActive(StandInKind::CodecModelPbStandIn),
+						L"Explicit codecModelPb must NOT engage CodecModelPbStandIn");
+					const double strictViol = measureLateDctViolCodes(dStrict.delta, ResidualMode::Strict);
+					Assert::IsTrue(strictViol < 1e-5,
+						FormatMsg("Late carry STRICT violated sent DCT coeff by %.6f codes", strictViol).c_str());
+				}
+
+				// 2. Transform-identified 8x8 CELL with explicit codecModelPb & referenceClean
+				{
+					TdV2LateCarryController cellCtrl;
+					StandInRegistry cellSi;
+					cellCtrl.OnOnTimeFrame(onTimeDelta, &cellSi);
+					LateCarryContext cellCtx;
+					cellCtx.transformIdentified8x8 = true;
+					cellCtx.residualMode = ResidualMode::Cell;
+					cellCtx.stepDelta = tStep;
+					cellCtx.deadZonePhi = tPhi;
+					cellCtx.sourceBits = 10;
+					cellCtx.cellProjIterations = 2;
+					cellCtx.codecModelPb = &pbPlane;
+					cellCtx.referenceClean = &pbPlane;
+
+					const LateCarryDecision dCell = cellCtrl.OnLateFrame(
+						lateCur, tFull, &stillT, stepTotalVar, tCw, tCh, cellPx, &cellSi, &cellCtx);
+					Assert::IsTrue(dCell.carried && !dCell.expired && !dCell.usesL3Clamp,
+						L"Late carry CELL must succeed without L3 clamp");
+					Assert::IsTrue(dCell.usedTransformProjection,
+						L"Late carry CELL must run 8x8 DCT projection");
+					Assert::AreEqual(static_cast<size_t>(16u * th), dCell.residualRejectedPixels,
+						L"Late carry CELL must reject all opposing-residual pixels on left half");
+					Assert::AreEqual(0.0, MaxAbsPlaneRect(dCell.delta, leftHalf), 1e-9,
+						L"Late carry CELL opposing left-half delta must be zeroed");
+					const double cellViol = measureLateDctViolCodes(dCell.delta, ResidualMode::Cell);
+					Assert::IsTrue(cellViol < 1e-5,
+						FormatMsg("Late carry CELL violated DCT cell I_k by %.6f codes", cellViol).c_str());
+					// Non-vacuity: right half genuinely moves within cell I_24 (72 -> 71 => |delta| >= 0.5)!
+					const double cellRightMag = MaxAbsPlaneRect(dCell.delta, rightHalf);
+					Assert::IsTrue(cellRightMag >= 0.5,
+						FormatMsg("Late carry CELL non-vacuity: right-half |delta|=%.4f < 0.5", cellRightMag).c_str());
+				}
+
+				// 3. Missing Field B P_B (codecModelPb == nullptr) engages CodecModelPbStandIn visibly (Rule 4)
+				{
+					TdV2LateCarryController pbSiCtrl;
+					StandInRegistry pbSi;
+					pbSiCtrl.OnOnTimeFrame(onTimeDelta, &pbSi);
+					LateCarryContext noPbCtx;
+					noPbCtx.transformIdentified8x8 = true;
+					noPbCtx.residualMode = ResidualMode::Cell;
+					noPbCtx.stepDelta = tStep;
+					noPbCtx.deadZonePhi = tPhi;
+					noPbCtx.sourceBits = 10;
+					noPbCtx.codecModelPb = nullptr;
+					noPbCtx.referenceClean = &pbPlane;
+					const LateCarryDecision dNoPb = pbSiCtrl.OnLateFrame(
+						lateCur, tFull, &stillT, stepTotalVar, tCw, tCh, cellPx, &pbSi, &noPbCtx);
+					Assert::IsTrue(dNoPb.carried && dNoPb.usedTransformProjection);
+					Assert::IsTrue(pbSi.IsActive(StandInKind::CodecModelPbStandIn),
+						L"Late carry with null codecModelPb MUST engage StandInKind::CodecModelPbStandIn");
+				}
+
+				// 4. Invalid LateCarryContext (stepDelta <= 0 / NaN) expires cleanly & engages A2StatsInvalid visibly
+				{
+					TdV2LateCarryController badCtxCtrl;
+					StandInRegistry badCtxSi;
+					badCtxCtrl.OnOnTimeFrame(onTimeDelta, &badCtxSi);
+					LateCarryContext badCtx;
+					badCtx.transformIdentified8x8 = true;
+					badCtx.stepDelta = std::numeric_limits<double>::quiet_NaN();
+					badCtx.deadZonePhi = tPhi;
+					const LateCarryDecision dBad = badCtxCtrl.OnLateFrame(
+						lateCur, tFull, &stillT, stepTotalVar, tCw, tCh, cellPx, &badCtxSi, &badCtx);
+					Assert::IsFalse(dBad.carried);
+					Assert::IsTrue(dBad.expired);
+					Assert::AreEqual(0.0, MaxAbsPlaneRect(dBad.delta, tFull));
+					Assert::IsTrue(badCtxSi.IsActive(StandInKind::A2StatsInvalid),
+						L"Invalid STRICT/CELL late-carry context must engage A2StatsInvalid");
+					Assert::IsTrue(badCtxSi.IsActive(StandInKind::NonFiniteClosure),
+						L"NaN stepDelta in late-carry context must engage NonFiniteClosure");
+				}
+
+				// 5. MANDATORY IN-TEST NEGATIVE CONTROL (Rule 3): Pixel-domain-only carry (ctx == nullptr)
+				//    on the EXACT SAME (lateCur, onTimeDelta, stillT) fails to reject the opposing left-half delta
+				//    AND violates BOTH STRICT & CELL DCT bounds by > 5.0 codes!
+				{
+					TdV2LateCarryController naivePixCtrl;
+					naivePixCtrl.OnOnTimeFrame(onTimeDelta, nullptr);
+					const LateCarryDecision dNaive = naivePixCtrl.OnLateFrame(
+						lateCur, tFull, &stillT, stepTotalVar, tCw, tCh, cellPx, nullptr, nullptr);
+					Assert::IsTrue(dNaive.carried && !dNaive.usedTransformProjection);
+					Assert::AreEqual(static_cast<size_t>(0u), dNaive.residualRejectedPixels,
+						L"Negative control: pixel-only late carry does not check residual direction");
+					Assert::IsTrue(MaxAbsPlaneRect(dNaive.delta, leftHalf) > 5.0,
+						L"Negative control: pixel-only late carry leaks opposing +12 delta into left half");
+					const double naiveStrictViol = measureLateDctViolCodes(dNaive.delta, ResidualMode::Strict);
+					const double naiveCellViol = measureLateDctViolCodes(dNaive.delta, ResidualMode::Cell);
+					Assert::IsTrue(naiveStrictViol > 5.0,
+						FormatMsg("Negative control: pixel-only late carry STRICT violation=%.2f <= 5.0 codes", naiveStrictViol).c_str());
+					Assert::IsTrue(naiveCellViol > 5.0,
+						FormatMsg("Negative control: pixel-only late carry CELL violation=%.2f <= 5.0 codes", naiveCellViol).c_str());
+				}
+			}
 		}
 
 		// =========================================================================
@@ -1330,7 +1608,56 @@ namespace TdV2SchedulerConfigNs
 					L"Repair > Main > Temporal detail card must expose temporal_detail, td_mode, td_overlay");
 			}
 
-			// ---- Part D: VpvRenderingDefaults.h defaults & IsVpvOnlyKey binary_search sorted invariant ----
+			// ---- Part C2 (H1): Honest Config UI Drop-In Status in VpvSection.cpp (NO false claim of live renderer wiring!) ----
+			{
+				Assert::IsFalse(TdProducts::kEngineRequestedToday,
+					L"H1: TdProducts::kEngineRequestedToday must remain false while TD v2 is library-only");
+
+				const std::string secPath = RepoRootFromFile() +
+					"src\\VP-V\\modules\\control\\config\\config_pages\\VpvSection.cpp";
+				const std::string secText = ReadWholeTextFile(secPath);
+
+				const size_t tdRowPos = secText.find("{ \"temporal_detail\",");
+				const size_t tdModePos = secText.find("{ \"td_mode\",");
+				const size_t tdOverlayPos = secText.find("{ \"td_overlay\",");
+				Assert::IsTrue(tdRowPos != std::string::npos && tdModePos != std::string::npos && tdOverlayPos != std::string::npos,
+					L"VpvSection.cpp must declare temporal_detail, td_mode, and td_overlay rows");
+				Assert::IsTrue(tdRowPos < tdModePos && tdModePos < tdOverlayPos);
+
+				const std::string tdRowBlock = secText.substr(tdRowPos, tdModePos - tdRowPos);
+				const std::string tdModeBlock = secText.substr(tdModePos, tdOverlayPos - tdModePos);
+				const size_t tdOverlayEnd = secText.find("};", tdOverlayPos);
+				Assert::IsTrue(tdOverlayEnd != std::string::npos && tdOverlayEnd > tdOverlayPos);
+				const std::string tdOverlayBlock = secText.substr(tdOverlayPos, tdOverlayEnd - tdOverlayPos);
+
+				auto isHonestDropInStatus = [](const std::string& text) -> bool
+				{
+					const bool hasLibReady = ContainsIcase(text, "library ready");
+					const bool hasNotWired = ContainsIcase(text, "not wired to live renderer yet");
+					const bool hasFalseLiveClaim = ContainsIcase(text, "on: enables temporal detail repair (automatically enables");
+					return hasLibReady && hasNotWired && !hasFalseLiveClaim;
+				};
+
+				Assert::IsTrue(isHonestDropInStatus(tdRowBlock),
+					L"H1: VpvSection.cpp temporal_detail row must honestly state \"library ready\" and \"not wired to live renderer yet\" without false live-wiring claim");
+				Assert::IsTrue(isHonestDropInStatus(tdModeBlock),
+					L"H1: VpvSection.cpp td_mode row must state honest drop-in status");
+				Assert::IsTrue(isHonestDropInStatus(tdOverlayBlock),
+					L"H1: VpvSection.cpp td_overlay row must state honest drop-in status");
+
+				// Negative control (H1): real production FormatTdCtrlIStatus(wiredToLiveRenderer=true) drops the
+				// unwired caveat and fails the unwired-drop-in predicate, whereas default wiredToLiveRenderer=false passes!
+				TdCtrlIStatusInput unwiredCheck;
+				unwiredCheck.settings.mode = Mode::On;
+				Assert::IsTrue(isHonestDropInStatus(FormatTdCtrlIStatus(unwiredCheck)),
+					L"H1: default FormatTdCtrlIStatus(wiredToLiveRenderer=false) must satisfy honest drop-in check");
+				TdCtrlIStatusInput wiredCheck = unwiredCheck;
+				wiredCheck.wiredToLiveRenderer = true;
+				Assert::IsFalse(isHonestDropInStatus(FormatTdCtrlIStatus(wiredCheck)),
+					L"Negative control (H1): live FormatTdCtrlIStatus(wiredToLiveRenderer=true) must NOT match unwired drop-in status");
+			}
+
+			// ---- Part D: VpvRenderingDefaults.h defaults & direct production IsVpvOnlyKey sorted-table invariant ----
 			{
 				const std::string hdrPath = RepoRootFromFile() +
 					"src\\VP-V\\modules\\control\\config\\config_pages\\VpvRenderingDefaults.h";
@@ -1344,12 +1671,16 @@ namespace TdV2SchedulerConfigNs
 				Assert::IsTrue(text.find("if (key == QStringLiteral(\"td_overlay\")) { out = QStringLiteral(\"off\"); return true; }") != std::string::npos,
 					L"VpvRenderingDefaults.h must default td_overlay to \"off\"");
 
-				// Extract EVERY string entry from IsVpvOnlyKey's keys[] array and verify strict sorted order (binary_search law!).
+				// Inspect the production IsVpvOnlyKey function directly: verify it uses std::binary_search
+				// and that its production keys[] table is strictly sorted (no inversions, no duplicates).
 				const size_t fnPos = text.find("inline bool IsVpvOnlyKey(");
 				Assert::IsTrue(fnPos != std::string::npos, L"IsVpvOnlyKey not found in VpvRenderingDefaults.h");
 				const size_t arrStart = text.find("keys[] = {", fnPos);
 				const size_t arrEnd = text.find("};", arrStart);
 				Assert::IsTrue(arrStart != std::string::npos && arrEnd != std::string::npos && arrEnd > arrStart);
+				const size_t fnEnd = text.find("return std::binary_search(", arrEnd);
+				Assert::IsTrue(fnEnd != std::string::npos && fnEnd < arrEnd + 400u,
+					L"Production IsVpvOnlyKey must use std::binary_search on keys[]");
 				const std::string arrBody = text.substr(arrStart, arrEnd - arrStart);
 
 				std::vector<std::string> vpvKeys;
@@ -1365,45 +1696,23 @@ namespace TdV2SchedulerConfigNs
 				for (size_t i = 1; i < vpvKeys.size(); ++i)
 				{
 					Assert::IsTrue(std::strcmp(vpvKeys[i - 1].c_str(), vpvKeys[i].c_str()) < 0,
-						L"IsVpvOnlyKey keys[] MUST stay strictly sorted for std::binary_search");
+						L"Production IsVpvOnlyKey keys[] MUST be strictly ascending with zero duplicates for std::binary_search");
 				}
-				auto lookupVpvOnly = [](const std::vector<std::string>& table, const char* key) -> bool
+				auto hasKeyInSortedTable = [&](const char* key) -> bool
 				{
-					size_t lo = 0;
-					size_t hi = table.size();
-					while (lo < hi)
-					{
-						const size_t mid = lo + (hi - lo) / 2;
-						const int cmp = std::strcmp(table[mid].c_str(), key);
-						if (cmp == 0)
-							return true;
-						if (cmp < 0)
-							lo = mid + 1;
-						else
-							hi = mid;
-					}
-					return false;
+					return std::binary_search(vpvKeys.begin(), vpvKeys.end(), std::string(key),
+						[](const std::string& a, const std::string& b) { return std::strcmp(a.c_str(), b.c_str()) < 0; });
 				};
 				for (const char* tdKey : { "td_mode", "td_overlay", "temporal_detail" })
 				{
-					Assert::IsTrue(lookupVpvOnly(vpvKeys, tdKey),
-						L"IsVpvOnlyKey binary search must find temporal_detail, td_mode, td_overlay");
+					Assert::IsTrue(hasKeyInSortedTable(tdKey),
+						L"Production IsVpvOnlyKey keys[] must contain temporal_detail, td_mode, td_overlay");
 				}
-				for (const char* unknownKey : { "td_nonexistent", "temporal_detail_invalid", "td_preset" })
+				for (const char* excludedKey : { "td_nonexistent", "temporal_detail_invalid", "td_preset" })
 				{
-					Assert::IsFalse(lookupVpvOnly(vpvKeys, unknownKey),
-						L"IsVpvOnlyKey binary search must return false for unknown or harness-only keys");
+					Assert::IsFalse(hasKeyInSortedTable(excludedKey),
+						L"Production IsVpvOnlyKey keys[] must exclude unknown or harness-only keys");
 				}
-
-				// Real negative control: corrupting IsVpvOnlyKey's table order by moving "temporal_detail" out of sorted
-				// position causes binary search to miss "temporal_detail" (proving strict sort order is essential;
-				// uses explicit deterministic binary search so intentionally unsorted input incurs zero STL UB).
-				std::vector<std::string> corrupted = vpvKeys;
-				const auto tdIt = std::find(corrupted.begin(), corrupted.end(), std::string("temporal_detail"));
-				Assert::IsTrue(tdIt != corrupted.end());
-				std::iter_swap(corrupted.begin(), tdIt);
-				Assert::IsFalse(lookupVpvOnly(corrupted, "temporal_detail"),
-					L"Negative control: unsorted IsVpvOnlyKey table breaks binary search lookup of temporal_detail");
 			}
 
 			// ---- Part D2: Real Runtime Round-Trip of VpvRendererSettings (PostLoad/ApplyOriginal, Fingerprint, CopyLive, AppendDelta, Describe) ----
@@ -1554,17 +1863,22 @@ namespace TdV2SchedulerConfigNs
 					L"Original pathway MUST force Mode::Off even when temporal_detail = on");
 				Assert::IsFalse(cfgOrig.IsEnabled() || cfgOrig.ModifiesPixels());
 
-				// Q8a dependency auto-activation: ON and Shadow enable analysis lane + motion/camera group; OFF/Original disable both.
+				// Q8a dependency-plan helper: ON and Shadow plan analysis lane + motion/camera group while honestly stating not wired yet.
 				const TdDependencyActivation depOn = ResolveTdDependencies(onSettings, false);
 				Assert::IsTrue(depOn.enableAnalysisLane && depOn.enableMotionCameraGroup,
-					L"Q8a: temporal_detail=on must auto-enable analysis lane + motion/camera group");
-				Assert::IsFalse(depOn.visibleNote.empty());
+					L"Q8a: temporal_detail=on must plan analysis lane + motion/camera group");
+				Assert::IsTrue(ContainsIcase(depOn.visibleNote, "library ready") &&
+					ContainsIcase(depOn.visibleNote, "not wired to live renderer yet"),
+					L"H1: ResolveTdDependencies(on) must honestly state library ready / not wired to live renderer yet");
 
 				TdV2RuntimeSettings shadowSettings = onSettings;
 				shadowSettings.mode = Mode::Shadow;
 				const TdDependencyActivation depSh = ResolveTdDependencies(shadowSettings, false);
 				Assert::IsTrue(depSh.enableAnalysisLane && depSh.enableMotionCameraGroup,
-					L"Q8a: temporal_detail=shadow must auto-enable analysis lane + motion/camera group");
+					L"Q8a: temporal_detail=shadow must plan analysis lane + motion/camera group");
+				Assert::IsTrue(ContainsIcase(depSh.visibleNote, "library ready") &&
+					ContainsIcase(depSh.visibleNote, "not wired to live renderer yet"),
+					L"H1: ResolveTdDependencies(shadow) must honestly state library ready / not wired to live renderer yet");
 
 				const TdDependencyActivation depOrig = ResolveTdDependencies(onSettings, true);
 				Assert::IsFalse(depOrig.enableAnalysisLane || depOrig.enableMotionCameraGroup,
@@ -1575,6 +1889,9 @@ namespace TdV2SchedulerConfigNs
 				const TdDependencyActivation depOff = ResolveTdDependencies(offSettings, false);
 				Assert::IsFalse(depOff.enableAnalysisLane || depOff.enableMotionCameraGroup,
 					L"temporal_detail=off must leave analysis lane & motion/camera group disabled");
+				Assert::IsTrue(ContainsIcase(depOff.visibleNote, "library ready") &&
+					ContainsIcase(depOff.visibleNote, "not wired to live renderer yet"),
+					L"H1: ResolveTdDependencies(off) must honestly state library ready / not wired to live renderer yet");
 			}
 
 			// ---- Part G: Mode::Shadow vs Mode::On vs Original (Bit-Exact Pixel Verification + Negative Control!) ----
@@ -1692,6 +2009,9 @@ namespace TdV2SchedulerConfigNs
 				Assert::IsTrue(liveSnap.engineRequested, L"Active TD snapshot must set engineRequested == true");
 				Assert::IsTrue(liveSnap.View() == &liveSnap.snapshot, L"Active TD snapshot View() must point to live snapshot");
 				Assert::AreEqual(TdProducts::kUnitVersion, liveSnap.unit);
+				Assert::IsTrue(ContainsIcase(liveSnap.statusText, "library ready") &&
+					ContainsIcase(liveSnap.statusText, "not wired to live renderer yet"),
+					L"H1: BuildLiveTdProductSnapshot default status must honestly report library ready / not wired to live renderer yet");
 				// kTdBlocks must ONLY publish when blocksValid == true (never inferred from mapsValid/deltaValid)!
 				Assert::IsFalse(liveSnap.snapshot.Of(VpSkeleton::kTdBlocks).published,
 					L"kTdBlocks must NOT publish when blocksValid == false");
@@ -1741,15 +2061,23 @@ namespace TdV2SchedulerConfigNs
 				Assert::AreEqual(std::string(MetaOf(StandInKind::LateCarryExpired).statusText), expSnap.statusText);
 			}
 
-			// ---- Part I: FormatTdCtrlIStatus (Mode, ResidualMode, Tier, Lead E=n/4, Late Carry, Every Stand-In) ----
+			// ---- Part I: FormatTdCtrlIStatus (Honest H1 Default Drop-In Status, Mode, ResidualMode, Tier, Lead E=n/4, Late Carry, Every Stand-In) ----
 			{
 				TdCtrlIStatusInput cin;
+				Assert::IsFalse(cin.wiredToLiveRenderer,
+					L"H1: TdCtrlIStatusInput::wiredToLiveRenderer must default to false (honest drop-in status)");
 				cin.settings.mode = Mode::Off;
-				Assert::AreEqual(std::string("Temporal detail: off"), FormatTdCtrlIStatus(cin));
+				const std::string offHonest = FormatTdCtrlIStatus(cin);
+				Assert::IsTrue(ContainsIcase(offHonest, "off") &&
+					ContainsIcase(offHonest, "library ready") &&
+					ContainsIcase(offHonest, "not wired to live renderer yet"),
+					L"H1: Default OFF Ctrl+I status must state library ready and not wired to live renderer yet");
 
 				cin.settings.mode = Mode::On;
 				cin.originalPathway = true;
-				Assert::AreEqual(std::string("Temporal detail: off (Original pathway)"), FormatTdCtrlIStatus(cin));
+				const std::string origLine = FormatTdCtrlIStatus(cin);
+				Assert::IsTrue(ContainsIcase(origLine, "off (Original pathway)"),
+					L"Original pathway Ctrl+I status must state off (Original pathway)");
 
 				cin.originalPathway = false;
 				cin.settings.residualMode = ResidualMode::Strict;
@@ -1766,7 +2094,12 @@ namespace TdV2SchedulerConfigNs
 				cin.standIns = &si;
 
 				const std::string line = FormatTdCtrlIStatus(cin);
-				Assert::IsTrue(line.find("Temporal detail: on") != std::string::npos, L"Ctrl+I missing mode");
+				Assert::IsTrue(ContainsIcase(line, "library ready") &&
+					ContainsIcase(line, "not wired to live renderer yet"),
+					L"H1: Default active Ctrl+I status MUST honestly state library ready and not wired to live renderer yet");
+				Assert::IsTrue(line.find("Temporal detail: on") == std::string::npos,
+					L"H1: Unwired Ctrl+I status must NOT falsely claim \"Temporal detail: on\" is running live");
+				Assert::IsTrue(line.find("requested=on") != std::string::npos, L"Ctrl+I missing requested=on");
 				Assert::IsTrue(line.find("mode=strict") != std::string::npos, L"Ctrl+I missing residual mode");
 				Assert::IsTrue(line.find("overlay=maps") != std::string::npos, L"Ctrl+I missing overlay mode");
 				Assert::IsTrue(line.find(TdTierName(TdTier::ReducedAnchor)) != std::string::npos, L"Ctrl+I missing tier");
@@ -1778,6 +2111,15 @@ namespace TdV2SchedulerConfigNs
 					L"Ctrl+I missing engaged P10g stand-in");
 				Assert::IsTrue(line.find(MetaOf(StandInKind::LeadReduced).statusText) != std::string::npos,
 					L"Ctrl+I missing engaged LeadReduced stand-in");
+
+				// Future Wave 4-6 wired mode (wiredToLiveRenderer == true) switches cleanly to live wording.
+				TdCtrlIStatusInput wiredCin = cin;
+				wiredCin.wiredToLiveRenderer = true;
+				const std::string wiredLine = FormatTdCtrlIStatus(wiredCin);
+				Assert::IsTrue(wiredLine.find("Temporal detail: on") != std::string::npos,
+					L"Negative control (H1): wiredToLiveRenderer=true must emit live \"Temporal detail: on\"");
+				Assert::IsFalse(ContainsIcase(wiredLine, "not wired to live renderer yet"),
+					L"Negative control (H1): wiredToLiveRenderer=true must drop not-wired caveat");
 
 				// Late-expired (including when both lateCarried & lateExpired set) & on-time & ceiling clamp E=99 -> E=6/4.
 				cin.lateCarried = true;
@@ -1794,6 +2136,61 @@ namespace TdV2SchedulerConfigNs
 				const std::string onTimeLine = FormatTdCtrlIStatus(cin);
 				Assert::IsTrue(onTimeLine.find("timing=on-time") != std::string::npos, L"Ctrl+I missing timing=on-time");
 			}
+
+			// ---- Part J (SD SHOULD-5): CoreSegments.inl unconditional SigmaDelta TD SyncRead stays fresh without NextVectorGuard::Apply ----
+			{
+				const std::string segPath = RepoRootFromFile() + "src\\VP-V\\segments\\CoreSegments.inl";
+				const std::string segCompact = StripWhitespace(ReadWholeTextFile(segPath));
+				Assert::IsTrue(
+					segCompact.find("TdProducts::SyncRead(fallbacks,TdProducts::Consumer::SigmaDelta,TdProducts::ReadToday(TdProducts::Consumer::SigmaDelta))") != std::string::npos,
+					L"SD SHOULD-5: CoreSegments.inl must pass TdProducts::ReadToday(Consumer::SigmaDelta) directly into TdProducts::SyncRead");
+				Assert::IsTrue(
+					segCompact.find("TdProducts::SyncRead(fallbacks,TdProducts::Consumer::SigmaDelta,nextVectorGuard.TemporalDetailRead())") == std::string::npos,
+					L"SD SHOULD-5: CoreSegments.inl must NOT pass stale nextVectorGuard.TemporalDetailRead() into SyncRead");
+
+				// Behavioral proof + real SigmaDeltaVectors::NextVectorGuard negative control (Rule 3):
+				// Frame 1: SigmaDelta TD fallback is engaged when TD is requested with absent products.
+				const TdProducts::ReadResult engagedRead = TdProducts::Read(
+					TdProducts::Consumer::SigmaDelta, TdProducts::PlaceholderSnapshot(), /*requested=*/true, /*nowUs=*/0);
+				Assert::IsTrue(engagedRead.fallback.engaged, L"Setup: requested SigmaDelta read with placeholder must engage fallback");
+
+				// Real NextVectorGuard instance when de-judder is OFF / cadence repeat (Apply() is NOT called):
+				// guard.TemporalDetailRead() stays default-empty (unpopulated) and CANNOT reflect an active TD request!
+				SigmaDeltaVectors::NextVectorGuard unappliedGuard;
+				Assert::IsFalse(unappliedGuard.TemporalDetailRead().requested,
+					L"Negative control (SD SHOULD-5): un-applied NextVectorGuard::TemporalDetailRead() is never refreshed");
+				Assert::IsFalse(unappliedGuard.TemporalDetailRead().fallback.engaged,
+					L"Negative control (SD SHOULD-5): un-applied NextVectorGuard::TemporalDetailRead() misses engaged TD fallback");
+
+				// Negative control: feeding unappliedGuard.TemporalDetailRead() into SyncRead while TD IS requested
+				// silently strips the active SigmaDelta fallback (whereas live TdProducts::Read preserves it)!
+				FallbackStatus::Registry bugReg;
+				Assert::IsTrue(TdProducts::SyncRead(bugReg, TdProducts::Consumer::SigmaDelta, engagedRead));
+				Assert::IsFalse(bugReg.Entries().empty());
+				Assert::IsTrue(TdProducts::SyncRead(bugReg, TdProducts::Consumer::SigmaDelta, unappliedGuard.TemporalDetailRead()),
+					L"Negative control (SD SHOULD-5): un-applied NextVectorGuard::TemporalDetailRead() falsely clears engaged fallback");
+				Assert::IsTrue(bugReg.Entries().empty(),
+					L"Negative control (SD SHOULD-5): relying on NextVectorGuard::TemporalDetailRead() drops fallback when Apply() is skipped");
+
+				// Protected path (CoreSegments.inl SD SHOULD-5 fix): calling SyncRead with TdProducts::ReadToday(SigmaDelta)
+				// directly works unconditionally without NextVectorGuard::Apply(), and calling real guard.Apply(nullptr, 0, nullptr)
+				// agrees with TdProducts::ReadToday(SigmaDelta).
+				FallbackStatus::Registry freshReg;
+				Assert::IsTrue(TdProducts::SyncRead(freshReg, TdProducts::Consumer::SigmaDelta, engagedRead),
+					L"Setup: engaging SigmaDelta TD fallback must update registry");
+				Assert::IsFalse(freshReg.Entries().empty(), L"Setup: registry must hold engaged SigmaDelta TD fallback");
+				const bool released = TdProducts::SyncRead(
+					freshReg, TdProducts::Consumer::SigmaDelta, TdProducts::ReadToday(TdProducts::Consumer::SigmaDelta));
+				Assert::IsTrue(released, L"SD SHOULD-5: SyncRead(..., ReadToday(SigmaDelta)) must release stale engaged fallback without Apply()");
+				Assert::IsTrue(freshReg.Entries().empty(),
+					L"SD SHOULD-5: fresh SyncRead must leave zero stale SigmaDelta TD fallback entries when de-judder is off");
+
+				SigmaDeltaVectors::NextVectorGuard appliedGuard;
+				Assert::IsFalse(appliedGuard.Apply(nullptr, 0, nullptr));
+				Assert::AreEqual(TdProducts::ReadToday(TdProducts::Consumer::SigmaDelta).fallback.engaged,
+					appliedGuard.TemporalDetailRead().fallback.engaged,
+					L"Real NextVectorGuard::Apply(nullptr, 0, nullptr) must populate TemporalDetailRead() from ReadToday");
+			}
 		}
 
 		// =========================================================================
@@ -1803,14 +2200,24 @@ namespace TdV2SchedulerConfigNs
 		// =========================================================================
 		TEST_METHOD(DownstreamQ9DitherNeedBitDepthFloorAndSigmaDeltaAboveBlackBtbClamp)
 		{
-			// ---- Q9a: DitherNeedSeam BitDepthFloor (SD MUST-5) ----
+			// ---- Q9a: DitherNeedSeam BitDepthFloor (SD MUST-5, physics-derived RMS ratio sqrt(1 - 4^-d)) ----
 			{
-				Assert::AreEqual(0.75, DitherNeedSeam::BitDepthFloor(10, 8), 1e-12, L"10->8 bit floor must be 0.75");
-				Assert::AreEqual(0.9375, DitherNeedSeam::BitDepthFloor(12, 8), 1e-12, L"12->8 bit floor must be 0.9375");
-				Assert::AreEqual(0.75, DitherNeedSeam::BitDepthFloor(12, 10), 1e-12, L"12->10 bit floor must be 0.75");
+				const double kFloorD1 = std::sqrt(3.0 / 4.0);       // 9->8 bit:  sqrt(1 - 4^-1)
+				const double kFloorD2 = std::sqrt(15.0 / 16.0);     // 10->8 bit / 12->10 bit: sqrt(1 - 4^-2)
+				const double kFloorD4 = std::sqrt(255.0 / 256.0);   // 12->8 bit: sqrt(1 - 4^-4)
+
+				Assert::AreEqual(kFloorD1, DitherNeedSeam::BitDepthFloor(9, 8), 1e-12, L"9->8 bit floor must be sqrt(3/4)");
+				Assert::AreEqual(kFloorD2, DitherNeedSeam::BitDepthFloor(10, 8), 1e-12, L"10->8 bit floor must be sqrt(15/16)");
+				Assert::AreEqual(kFloorD4, DitherNeedSeam::BitDepthFloor(12, 8), 1e-12, L"12->8 bit floor must be sqrt(255/256)");
+				Assert::AreEqual(kFloorD2, DitherNeedSeam::BitDepthFloor(12, 10), 1e-12, L"12->10 bit floor must be sqrt(15/16)");
 				Assert::AreEqual(0.0, DitherNeedSeam::BitDepthFloor(8, 8), 1e-12, L"8->8 bit floor must be 0.0");
 				Assert::AreEqual(0.0, DitherNeedSeam::BitDepthFloor(10, 10), 1e-12, L"10->10 bit floor must be 0.0");
+				Assert::AreEqual(0.0, DitherNeedSeam::BitDepthFloor(8, 10), 1e-12, L"8->10 bit floor must be 0.0");
 				Assert::AreEqual(0.0, DitherNeedSeam::BitDepthFloor(0, 8), 1e-12, L"Unspecified sourceBits=0 floor must be 0.0");
+				// Quantization variance identity: floor^2 == 1 - 4^-d (and rejects old off-grid fraction 1 - 2^-d = 0.75).
+				Assert::AreEqual(15.0 / 16.0, DitherNeedSeam::BitDepthFloor(10, 8) * DitherNeedSeam::BitDepthFloor(10, 8), 1e-12);
+				Assert::IsTrue(std::fabs(DitherNeedSeam::BitDepthFloor(10, 8) - 0.75) > 0.20,
+					L"Q9a physics law must be RMS ratio sqrt(15/16), not off-grid fraction 0.75");
 
 				SyntheticDitherProducts clean(96, 64, /*qualityValue=*/1.0);
 				const DitherNeed::Params base;
@@ -1819,24 +2226,24 @@ namespace TdV2SchedulerConfigNs
 				DitherNeedSeam::Stage stage10;
 				const DitherNeedSeam::Outcome o10 = stage10.Evaluate(
 					/*requested=*/true, /*originalPathway=*/false, clean.MakeFeed(/*sourceBits=*/10, /*colorBits=*/8), clean.grid, base);
-				Assert::AreEqual(0.75, o10.bitDepthFloor, 1e-12);
-				Assert::AreEqual(0.75, o10.qualityNeed, 1e-12, L"Clean 10->8 must retain qualityNeed == 0.75");
+				Assert::AreEqual(kFloorD2, o10.bitDepthFloor, 1e-12);
+				Assert::AreEqual(kFloorD2, o10.qualityNeed, 1e-12, L"Clean 10->8 must retain qualityNeed == sqrt(15/16)");
 				Assert::IsTrue(o10.bitDepthFloorApplied, L"Clean 10->8 must set bitDepthFloorApplied == true");
 				Assert::AreEqual(static_cast<int>(DitherNeed::Result::On), static_cast<int>(o10.result),
 					L"Clean 10->8 must keep DitherNeed::Result::On");
 				Assert::IsTrue(o10.extraAllowed, L"Clean 10->8 must keep extraAllowed == true");
 				Assert::AreEqual(static_cast<uint64_t>(1u), stage10.Count().framesBitDepthFloor,
 					L"framesBitDepthFloor counter must increment to 1");
-				Assert::AreEqual(base.aBase + (base.aNeed - base.aBase) * 0.75, o10.params.aNeed, 1e-12);
+				Assert::AreEqual(base.aBase + (base.aNeed - base.aBase) * kFloorD2, o10.params.aNeed, 1e-12);
 				Assert::IsTrue(o10.status.find("bit-depth floor: 10->8 bit") != std::string::npos,
 					L"Visible status must report [bit-depth floor: 10->8 bit]");
 
-				// Clean 12-bit -> 8-bit link -> floor == 0.9375, On, visible status.
+				// Clean 12-bit -> 8-bit link -> floor == sqrt(255/256), On, visible status.
 				DitherNeedSeam::Stage stage12;
 				const DitherNeedSeam::Outcome o12 = stage12.Evaluate(
 					true, false, clean.MakeFeed(12, 8), clean.grid, base);
-				Assert::AreEqual(0.9375, o12.bitDepthFloor, 1e-12);
-				Assert::AreEqual(0.9375, o12.qualityNeed, 1e-12);
+				Assert::AreEqual(kFloorD4, o12.bitDepthFloor, 1e-12);
+				Assert::AreEqual(kFloorD4, o12.qualityNeed, 1e-12);
 				Assert::IsTrue(o12.bitDepthFloorApplied);
 				Assert::AreEqual(static_cast<int>(DitherNeed::Result::On), static_cast<int>(o12.result));
 				Assert::IsTrue(o12.extraAllowed);

@@ -47,6 +47,7 @@ namespace Tests
 				Assert::IsTrue(cfg.residualMode == ResidualMode::Cell, L"Default residual mode must be Cell (Q1)");
 				Assert::IsTrue(cfg.estimator == VarianceEstimator::A3_ConservativeMin, L"Default estimator must be A3");
 				Assert::IsTrue(cfg.bokehMode == BokehMode::Untouched, L"Default bokeh mode must be Untouched (Q4)");
+				Assert::IsTrue(cfg.enablePerCornerHuber, L"Default config must enable per-corner Huber taper");
 
 				// Dynamic P10-D6 block-grid mapping: 16-px TD cell to 32-px 4K grain cell + invalid-arg guards.
 				Assert::AreEqual(0, MapCellToGrainGrid(0, 16, 32));
@@ -148,6 +149,24 @@ namespace Tests
 				Assert::IsTrue(allSummary.find("motion field:") != std::string::npos);
 				Assert::IsTrue(allSummary.find("covariance solve singular") != std::string::npos);
 				Assert::IsTrue(allSummary.find("border bilinear warp fallback") != std::string::npos);
+
+				// Verify new Pass-2 audit stand-in tokens exist, are active, and have valid metadata.
+				const StandInKind newKinds[] = {
+					StandInKind::CodecModelPbStandIn,
+					StandInKind::ChromaCanvasGapFilled,
+					StandInKind::A2StatsInvalid,
+					StandInKind::GrainPriorOutOfRange,
+					StandInKind::GpuInputOutputAlias,
+					StandInKind::FaceNonRigidMask,
+					StandInKind::MissingMotionNoWholeBlend
+				};
+				for (StandInKind nk : newKinds)
+				{
+					Assert::IsTrue(allReg.IsActive(nk), L"Every Pass-2 StandInKind token must be registered in StandInRegistry");
+					const StandInMeta& nm = MetaOf(nk);
+					Assert::IsTrue(nm.kind == nk);
+					Assert::IsTrue(allSummary.find(nm.statusText) != std::string::npos);
+				}
 
 				allReg.Clear(StandInKind::StepPriorDefault);
 				Assert::IsFalse(allReg.IsActive(StandInKind::StepPriorDefault));
@@ -345,6 +364,7 @@ namespace Tests
 					clean.data(), ownG.data(), foreignG.data(), intactOut.data(), n,
 					prevResIntact.data(), prevG.data());
 				Assert::IsTrue(intactRep.valid);
+				Assert::IsTrue(intactRep.lag1Evaluated, L"Lag-1 must be marked evaluated when prev arrays are supplied");
 				Assert::IsTrue(intactRep.passesAuthoritativeBar, L"Intact 1:1 grain must pass authoritative bar");
 				Assert::AreEqual(1.0, intactRep.betaOwn, 1e-3);
 				Assert::AreEqual(0.0, intactRep.betaForeign, 1e-3);
@@ -354,6 +374,7 @@ namespace Tests
 					clean.data(), ownG.data(), foreignG.data(), blendedOut.data(), n,
 					prevResBlended.data(), prevG.data());
 				Assert::IsTrue(blendedRep.valid);
+				Assert::IsTrue(blendedRep.lag1Evaluated);
 				Assert::IsFalse(blendedRep.passesAuthoritativeBar, L"10% foreign grain averaging MUST fail authoritative bar");
 				Assert::AreEqual(0.90, blendedRep.betaOwn, 2e-2);
 				Assert::AreEqual(0.10, blendedRep.betaForeign, 2e-2);
@@ -362,8 +383,80 @@ namespace Tests
 					clean.data(), ownG.data(), foreignG.data(), intactOut.data(), n,
 					prevResFrozen.data(), prevG.data());
 				Assert::IsTrue(frozenRep.valid);
+				Assert::IsTrue(frozenRep.lag1Evaluated);
 				Assert::IsTrue(frozenRep.lag1Rise > kGrainBarMaxLag1Rise, L"Temporal grain correlation rise must be detected");
 				Assert::IsFalse(frozenRep.passesAuthoritativeBar, L"Frozen lag-1 grain correlation MUST fail authoritative bar");
+			}
+
+			TEST_METHOD(AuthoritativeGrainBarRequiresLag1Evaluation)
+			{
+				// H11 adversarial test: EvaluateGrainTransfer MUST NOT pass passesAuthoritativeBar without
+				// actually evaluating lag-1 temporal correlation (lag1Evaluated == true).
+				const size_t n = 16384;
+				std::mt19937 rng(20261123u);
+				std::normal_distribution<double> dist(0.0, 5.0);
+
+				std::vector<double> clean(n, 400.0);
+				std::vector<double> ownG(n), foreignG(n), prevG(n);
+				std::vector<double> intactOut(n), prevResIntact(n), prevResFrozen(n);
+				for (size_t i = 0; i < n; ++i)
+				{
+					ownG[i] = dist(rng);
+					foreignG[i] = dist(rng);
+					prevG[i] = dist(rng);
+					intactOut[i] = clean[i] + ownG[i];
+					prevResIntact[i] = prevG[i];
+					// Same-input temporal grain freeze hazard: previous frame leaks 20% of current frame's grain.
+					prevResFrozen[i] = 0.80 * prevG[i] + 0.20 * ownG[i];
+				}
+
+				// 1. Both prev pointers null -> valid regression metrics, yet lag1Evaluated == false & bar MUST FAIL!
+				const auto noPrevRep = EvaluateGrainTransfer(
+					clean.data(), ownG.data(), foreignG.data(), intactOut.data(), n, nullptr, nullptr);
+				Assert::IsTrue(noPrevRep.valid);
+				Assert::AreEqual(1.0, noPrevRep.betaOwn, 1e-3);
+				Assert::AreEqual(0.0, noPrevRep.betaForeign, 1e-3);
+				Assert::AreEqual(1.0, noPrevRep.stdRatio, 1e-3);
+				Assert::IsFalse(noPrevRep.lag1Evaluated,
+					L"Omitting prevOutputResidual/prevOwnGrain MUST set lag1Evaluated == false");
+				Assert::IsFalse(noPrevRep.passesAuthoritativeBar,
+					L"Authoritative grain bar MUST NOT pass when lag-1 was never evaluated");
+
+				// 2. Half-supplied prev pointers (only one non-null) -> lag1Evaluated == false & bar MUST FAIL!
+				const auto onlyPrevRes = EvaluateGrainTransfer(
+					clean.data(), ownG.data(), foreignG.data(), intactOut.data(), n, prevResIntact.data(), nullptr);
+				Assert::IsTrue(onlyPrevRes.valid);
+				Assert::IsFalse(onlyPrevRes.lag1Evaluated);
+				Assert::IsFalse(onlyPrevRes.passesAuthoritativeBar);
+
+				const auto onlyPrevGrain = EvaluateGrainTransfer(
+					clean.data(), ownG.data(), foreignG.data(), intactOut.data(), n, nullptr, prevG.data());
+				Assert::IsTrue(onlyPrevGrain.valid);
+				Assert::IsFalse(onlyPrevGrain.lag1Evaluated);
+				Assert::IsFalse(onlyPrevGrain.passesAuthoritativeBar);
+
+				// 3. Negative control on exact same current frame with frozen lag-1 prev residual:
+				//    Without prev arrays this frame falsely looked perfect (betaOwn=1, betaForeign=0, stdRatio=1),
+				//    proving why requiring lag1Evaluated == true is essential to catch temporal grain freeze!
+				const auto frozenLagRep = EvaluateGrainTransfer(
+					clean.data(), ownG.data(), foreignG.data(), intactOut.data(), n,
+					prevResFrozen.data(), prevG.data());
+				Assert::IsTrue(frozenLagRep.valid);
+				Assert::IsTrue(frozenLagRep.lag1Evaluated);
+				Assert::IsTrue(frozenLagRep.lag1Rise > kGrainBarMaxLag1Rise,
+					L"Negative control: frozen lag-1 residual MUST exceed +0.02 lag-1 rise bar");
+				Assert::IsFalse(frozenLagRep.passesAuthoritativeBar,
+					L"Negative control: frozen lag-1 residual MUST fail authoritative bar");
+
+				// 4. Both prev arrays supplied with independent grain -> lag1Evaluated == true & bar PASSES!
+				const auto fullRep = EvaluateGrainTransfer(
+					clean.data(), ownG.data(), foreignG.data(), intactOut.data(), n,
+					prevResIntact.data(), prevG.data());
+				Assert::IsTrue(fullRep.valid);
+				Assert::IsTrue(fullRep.lag1Evaluated);
+				Assert::IsTrue(fullRep.lag1Rise <= kGrainBarMaxLag1Rise);
+				Assert::IsTrue(fullRep.passesAuthoritativeBar,
+					L"Authoritative bar must pass when betaOwn/betaForeign/RMS AND lag-1 (lag1Evaluated==true) all pass");
 			}
 
 			TEST_METHOD(NonFiniteInputsAndMetricsFailClosedWithVisibleCount)

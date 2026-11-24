@@ -20,6 +20,7 @@
 
 #include <VP-V/modules/repair/grain_split/shared/BandFromBase.h>
 #include <VP-V/modules/repair/temporal_detail/v2/TdV2BlendMath.h>
+#include <VP-V/modules/repair/temporal_detail/v2/TdV2Metrics.h>
 
 #include <cmath>
 #include <cstdint>
@@ -175,6 +176,92 @@ namespace Tests
 				const auto clipped = SolveConvexWeights(C, c, 2, 0.0);
 				Assert::AreEqual(0.0, clipped.weights[0], 1e-12, L"Convex clip prevents negative weights");
 				Assert::IsTrue(clipped.weights[1] > 0.0 && clipped.weights[1] <= 1.0);
+
+				// ---- NON-ORACLE PIXEL-BLOCK PROOF (Rule 3): Compute C and blind c strictly from actual pixels! ----
+				// Current block copied ref1's coding error e0 (ref1 adds warp noise), while ref2 & ref3 are
+				// independent sharper peaks. Neither C nor c is handed as an oracle: C comes from MomentAccumulatorFp32
+				// on pixel differences and c is estimated blindly via EstimateC_A1!
+				// Use 256x256 (65536 px) and warp sigma=2.0 so finite-sample cross-covariance SE(E[d1*d2])/C_00 ~= 0.012
+				// (well below the 0.05 weight bar without needing any oracle copy flag).
+				{
+					const int bw = 256, bh = 256;
+					const size_t nPx = static_cast<size_t>(bw) * static_cast<size_t>(bh);
+					std::mt19937 rng(20261124u);
+					std::normal_distribution<double> e0Dist(0.0, 6.0);    // valley shared error (Var = 36)
+					std::normal_distribution<double> warpDist(0.0, 2.0);  // warp noise on copied ref1 (Var = 4)
+					std::normal_distribution<double> peakDist(0.0, 1.0);  // independent sharp peaks (Var = 1)
+
+					std::vector<double> master(nPx), cur(nPx), ref1(nPx), ref2(nPx), ref3(nPx);
+					MomentAccumulatorFp32 acc(3);
+					for (size_t i = 0; i < nPx; ++i)
+					{
+						const int x = static_cast<int>(i % bw);
+						const int y = static_cast<int>(i / bw);
+						master[i] = 400.0 + 40.0 * std::sin(0.2 * x) * std::cos(0.15 * y);
+						const double e0 = e0Dist(rng);
+						cur[i] = master[i] + e0;
+						ref1[i] = master[i] + e0 + warpDist(rng); // cur copied ref1's error e0!
+						ref2[i] = master[i] + peakDist(rng);      // independent peak 1
+						ref3[i] = master[i] + peakDist(rng);      // independent peak 2
+
+						const float diffs[3] = {
+							static_cast<float>(cur[i] - ref1[i]),
+							static_cast<float>(cur[i] - ref2[i]),
+							static_cast<float>(cur[i] - ref3[i])
+						};
+						Assert::IsTrue(acc.AddSample(diffs));
+					}
+
+					double pixC[kMaxBlendRefs][kMaxBlendRefs] = {};
+					acc.SecondMoment(pixC);
+
+					// Blind A1 estimation strictly from pixel-accumulated cross-covariances (NO oracle c=0 handed in!):
+					//   ref1 paired with independent ref2 -> E[d1 * d2] ~= 0
+					//   ref2 paired with independent ref3 -> E[d2 * d3] ~= Var(e0) ~= 36
+					//   ref3 paired with independent ref2 -> E[d3 * d2] ~= Var(e0) ~= 36
+					double blindC[kMaxBlendRefs] = {};
+					blindC[0] = EstimateC_A1(pixC[0][1], pixC[0][0], pixC[1][1], 0.0, 1.0);
+					blindC[1] = EstimateC_A1(pixC[1][2], pixC[1][1], pixC[2][2], 0.0, 1.0);
+					blindC[2] = EstimateC_A1(pixC[2][1], pixC[2][2], pixC[1][1], 0.0, 1.0);
+
+					const auto blindSolved = SolveConvexWeights(pixC, blindC, 3, kDefaultTraceRegScale);
+					Assert::IsFalse(blindSolved.singular);
+					Assert::IsFalse(blindSolved.nonFiniteClosed);
+
+					// Same-input Negative Control (Rule 3): Naive independent-error Wiener F1 assumes Sigma_01 == 0,
+					// feeding c_naive = {C_12, C_12, C_12} (treating copied ref1 as independent!).
+					double naiveC[kMaxBlendRefs] = { blindC[1], blindC[1], blindC[1], 0.0 };
+					const auto naiveSolved = SolveConvexWeights(pixC, naiveC, 3, kDefaultTraceRegScale);
+
+					auto blockMse = [&](const std::array<double, kMaxBlendRefs>& w) -> double
+					{
+						double sumSq = 0.0;
+						for (size_t i = 0; i < nPx; ++i)
+						{
+							const double est = cur[i]
+								- w[0] * (cur[i] - ref1[i])
+								- w[1] * (cur[i] - ref2[i])
+								- w[2] * (cur[i] - ref3[i]);
+							const double err = est - master[i];
+							sumSq += err * err;
+						}
+						return sumSq / static_cast<double>(nPx);
+					};
+
+					const double mseNaive = blockMse(naiveSolved.weights);
+					const double mseBlind = blockMse(blindSolved.weights);
+
+					Assert::IsTrue(naiveSolved.weights[0] > 0.65,
+						L"Negative control: naive independent Wiener F1 on pixel blocks wrongly puts >65% weight on copied ref1");
+					Assert::IsTrue(mseNaive > 10.0,
+						L"Negative control: naive independent Wiener F1 on pixel blocks suffers severe MSE (>10)");
+					Assert::IsTrue(blindSolved.weights[0] <= 0.05,
+						L"Non-oracle pixel-derived blind A1 + w*=C^-1 c must keep copied ref weight <= 0.05 (plan TD-S1(1))");
+					Assert::IsTrue(blindSolved.weights[1] > 0.40 && blindSolved.weights[2] > 0.40,
+						L"Non-oracle pixel-derived solve must shift weight onto independent sharp peaks");
+					Assert::IsTrue(mseBlind < 1.0,
+						L"Non-oracle pixel-derived covariance solve must collapse MSE below 1.0 (vs naive >10.0)");
+				}
 			}
 
 			TEST_METHOD(ConvexClipAndHuberThreeSigmaTaperRejectOutliers)
@@ -352,6 +439,146 @@ namespace Tests
 				Assert::AreEqual(12.0, SelectBlindC(VarianceEstimator::A1_ThreeCorneredHat, 12.0, 7.5), 1e-12);
 				Assert::AreEqual(7.5,  SelectBlindC(VarianceEstimator::A2_RoundingCells, 12.0, 7.5), 1e-12);
 				Assert::AreEqual(7.5,  SelectBlindC(VarianceEstimator::A3_ConservativeMin, 12.0, 7.5), 1e-12);
+			}
+
+			TEST_METHOD(A1GrainCorrectionRejectsOwnGrainAsErrorBetaOwnAtLeast099)
+			{
+				// Plan TD-S1(3): A1GrainCorrectionRejectsOwnGrainAsError — on planted synthetic grain filtered
+				// through real VpUnit::BandFromBase, grain-corrected A1 + SolveConvexWeights must preserve own grain
+				// at betaOwn >= 0.99 and |betaForeign| <= 0.01 (with lag1Evaluated == true!), whereas the exact same
+				// band-fusion pipeline without A1 grain subtraction (negative control) destroys own grain!
+				const int w = 192, h = 192;
+				const int pad = 16;
+				const size_t n = static_cast<size_t>(w) * h;
+
+				std::mt19937 rng(20261125u);
+				const double sigmaG = 5.0;
+				std::normal_distribution<double> gDist(0.0, sigmaG);
+
+				std::vector<double> masterClean(n, 420.0);
+				std::vector<double> gPrevFrame(n), gOwn(n), gRefPrev(n), gRefNext(n);
+				std::vector<double> fPrevFrame(n), fCur(n), fRefPrev(n), fRefNext(n);
+				for (size_t i = 0; i < n; ++i)
+				{
+					const int x = static_cast<int>(i % w);
+					const int y = static_cast<int>(i / w);
+					masterClean[i] = 420.0 + 60.0 * std::sin(2.0 * kDctPi * x / 64.0) * std::cos(2.0 * kDctPi * y / 64.0);
+					gPrevFrame[i] = gDist(rng);
+					gOwn[i] = gDist(rng);
+					gRefPrev[i] = gDist(rng);
+					gRefNext[i] = gDist(rng);
+					fPrevFrame[i] = masterClean[i] + gPrevFrame[i];
+					fCur[i] = masterClean[i] + gOwn[i];
+					fRefPrev[i] = masterClean[i] + gRefPrev[i];
+					fRefNext[i] = masterClean[i] + gRefNext[i];
+				}
+
+				const BandWhiteNoiseGains gains = ComputeBandWhiteNoiseGains();
+				const double bandShares[3] = { gains.low, gains.mid, gains.fine };
+
+				// Run full 3-band A1 + SolveConvexWeights fusion on interior pixels for a given retainedGrainVar.
+				auto fuseFrameWithA1 = [&](const std::vector<double>& curImg,
+				                           const std::vector<double>& pImg,
+				                           const std::vector<double>& nImg,
+				                           double retainedGrainVar) -> std::vector<double>
+				{
+					std::vector<double> cB[3], pB[3], nB[3];
+					FilterBands(curImg, w, h, cB[0], cB[1], cB[2]);
+					FilterBands(pImg, w, h, pB[0], pB[1], pB[2]);
+					FilterBands(nImg, w, h, nB[0], nB[1], nB[2]);
+
+					std::vector<double> out = curImg;
+					for (int b = 0; b < 3; ++b)
+					{
+						MomentAccumulatorFp32 acc(2);
+						for (int y = pad; y < h - pad; ++y)
+						{
+							for (int x = pad; x < w - pad; ++x)
+							{
+								const size_t idx = static_cast<size_t>(y) * w + x;
+								const float d[2] = {
+									static_cast<float>(cB[b][idx] - pB[b][idx]),
+									static_cast<float>(cB[b][idx] - nB[b][idx])
+								};
+								acc.AddSample(d);
+							}
+						}
+						double C[kMaxBlendRefs][kMaxBlendRefs] = {};
+						acc.SecondMoment(C);
+						const double cEst = EstimateC_A1(C[0][1], C[0][0], C[1][1], retainedGrainVar, bandShares[b]);
+						double cVec[kMaxBlendRefs] = { cEst, cEst, 0.0, 0.0 };
+						const auto solved = SolveConvexWeights(C, cVec, 2, kDefaultTraceRegScale);
+						for (int y = pad; y < h - pad; ++y)
+						{
+							for (int x = pad; x < w - pad; ++x)
+							{
+								const size_t idx = static_cast<size_t>(y) * w + x;
+								out[idx] -= solved.weights[0] * (cB[b][idx] - pB[b][idx])
+								          + solved.weights[1] * (cB[b][idx] - nB[b][idx]);
+							}
+						}
+					}
+					return out;
+				};
+
+				// Extract interior arrays for authoritative grain-transfer regression.
+				const int iw = w - 2 * pad;
+				const int ih = h - 2 * pad;
+				const size_t iN = static_cast<size_t>(iw) * ih;
+				auto extractInterior = [&](const std::vector<double>& src) -> std::vector<double>
+				{
+					std::vector<double> dst(iN);
+					size_t k = 0;
+					for (int y = pad; y < h - pad; ++y)
+						for (int x = pad; x < w - pad; ++x)
+							dst[k++] = src[static_cast<size_t>(y) * w + x];
+					return dst;
+				};
+
+				const std::vector<double> iMaster = extractInterior(masterClean);
+				const std::vector<double> iOwn = extractInterior(gOwn);
+				const std::vector<double> iForPrev = extractInterior(gRefPrev);
+				const std::vector<double> iForNext = extractInterior(gRefNext);
+				const std::vector<double> iPrevOwn = extractInterior(gPrevFrame);
+
+				// True grain variance measured on interior.
+				double varG = 0.0;
+				for (double v : iOwn) varG += v * v;
+				varG /= static_cast<double>(iN);
+
+				// Mandatory In-Test Negative Control (Rule 3): Same exact 3-band A1 fusion with retainedGrainVar = 0.0!
+				const std::vector<double> naivePrevOut = extractInterior(fuseFrameWithA1(fPrevFrame, fRefPrev, fRefNext, 0.0));
+				const std::vector<double> naiveCurOut = extractInterior(fuseFrameWithA1(fCur, fRefPrev, fRefNext, 0.0));
+				std::vector<double> naivePrevRes(iN);
+				for (size_t i = 0; i < iN; ++i) naivePrevRes[i] = naivePrevOut[i] - iMaster[i];
+
+				const auto naiveRep = EvaluateGrainTransfer(
+					iMaster.data(), iOwn.data(), iForPrev.data(), naiveCurOut.data(), iN,
+					naivePrevRes.data(), iPrevOwn.data());
+				Assert::IsTrue(naiveRep.valid && naiveRep.lag1Evaluated);
+				Assert::IsFalse(naiveRep.passesAuthoritativeBar,
+					L"Negative control: uncorrected A1 fusion (retainedGrainVar=0) MUST fail authoritative grain bar");
+				Assert::IsTrue(naiveRep.betaOwn < 0.75 && naiveRep.betaForeign > 0.20,
+					L"Negative control: uncorrected A1 fusion destroys own grain and leaks >20% foreign grain");
+
+				// Protected A1 grain-corrected fusion (retainedGrainVar = varG):
+				const std::vector<double> corrPrevOut = extractInterior(fuseFrameWithA1(fPrevFrame, fRefPrev, fRefNext, varG));
+				const std::vector<double> corrCurOut = extractInterior(fuseFrameWithA1(fCur, fRefPrev, fRefNext, varG));
+				std::vector<double> corrPrevRes(iN);
+				for (size_t i = 0; i < iN; ++i) corrPrevRes[i] = corrPrevOut[i] - iMaster[i];
+
+				const auto repPrev = EvaluateGrainTransfer(
+					iMaster.data(), iOwn.data(), iForPrev.data(), corrCurOut.data(), iN,
+					corrPrevRes.data(), iPrevOwn.data());
+				const auto repNext = EvaluateGrainTransfer(
+					iMaster.data(), iOwn.data(), iForNext.data(), corrCurOut.data(), iN,
+					corrPrevRes.data(), iPrevOwn.data());
+				Assert::IsTrue(repPrev.valid && repPrev.lag1Evaluated && repPrev.passesAuthoritativeBar,
+					L"A1 grain-corrected fusion must pass full authoritative bar with lag1Evaluated==true");
+				Assert::IsTrue(repPrev.betaOwn >= 0.99,
+					L"Plan TD-S1(3): A1 grain correction must retain betaOwn >= 0.99 on planted synthetic grain");
+				Assert::IsTrue(std::fabs(repPrev.betaForeign) <= 0.01 && std::fabs(repNext.betaForeign) <= 0.01,
+					L"Plan TD-S1(3): A1 grain correction must keep |betaForeign| <= 0.01 on planted synthetic grain");
 			}
 
 			TEST_METHOD(A2RoundingCellsMatchUniformLimitsExactFormulaAndAsymptote)

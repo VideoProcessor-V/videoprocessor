@@ -13,6 +13,12 @@
 //   7. RealTimeCompactBandPathPreservesBtbWtwGrainFocusAndCutsVram
 //   8. ProcessFrameGpuZeroCopyAndCachedChromaReuseMatchCpuWrapper
 //   9. GpuSubtleFaceMicroMotionMatchesCpuWithoutWaxSmearing
+//  10. PrepackedMotionFixedSlotsPrevNullAndTextureDimensionGuards
+//  11. ProcessFrameGpuRejectsInputOutputTextureAliasingVisibly
+//  12. GpuPass1FaceMaskForcesExactZeroDeltaOnCpuUploadAndZeroCopy
+//  13. GpuCutSeedZeroHygieneZeroCopyRefValidationSingleNanClosureAndNon16PillarboxGeometry
+//  14. SigmaDeltaWarpShaderQ9bAboveBlackNeverDipsBtbWhileTrueBtbPreserved
+//  15. GpuMatchesCpuOnPrevPeak2CodecModelPbInvalidMotionPocsSkipAndSkyBandingParsevalBound
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -21,11 +27,15 @@
 #include <libplacebo/d3d11.h>
 #include <libplacebo/dispatch.h>
 #include <libplacebo/log.h>
+#include <libplacebo/renderer.h>
+#include <libplacebo/shaders/custom.h>
 
 #include <VP-V/core/GpuAllocator.h>
 #include <VP-V/core/ScratchArena.h>
 #include <VP-V/core/VramUsers.h>
 #include <VP-V/modules/control/skeleton/PlTexBackend.h>
+#include <VP-V/modules/output/dither/CustomHookParameters.h>
+#include <VP-V/modules/output/dither/VpShaderInclude.h>
 #include <VP-V/modules/repair/grain_split/GpuPassUtil.h>
 #include <VP-V/modules/repair/temporal_detail/v2/TdV2Chroma.h>
 #include <VP-V/modules/repair/temporal_detail/v2/TdV2Gpu.h>
@@ -39,6 +49,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <iterator>
 #include <limits>
 #include <random>
 #include <string>
@@ -132,6 +144,112 @@ namespace TdV2GpuWarpNs
 		std::snprintf(detail, sizeof(detail), fmt, a, b);
 		std::string s = std::string(tag ? tag : "") + ": " + detail;
 		return std::wstring(s.begin(), s.end());
+	}
+
+	static std::string RepoRootFromFile()
+	{
+		std::string path = __FILE__;
+		std::replace(path.begin(), path.end(), '/', '\\');
+		const size_t pos = path.rfind("\\src\\");
+		Assert::IsTrue(pos != std::string::npos, L"Could not locate \\src\\ in __FILE__ path");
+		path.resize(pos + 1);
+		return path;
+	}
+
+	// Exact IEEE-754 binary16 (FP16) quantization & overflow model for Rule-3 precision negative controls:
+	// 10-bit significand (ulp = 2^(e-10) for normal values), max finite = 65504.0, overflows to +/-Inf beyond.
+	static double SimulateFp16Quantize(double v)
+	{
+		if (!std::isfinite(v))
+			return v;
+		const double av = std::fabs(v);
+		if (av > 65504.0)
+			return (v >= 0.0) ? std::numeric_limits<double>::infinity() : -std::numeric_limits<double>::infinity();
+		if (av == 0.0)
+			return 0.0;
+		const int exp = (std::max)(-14, static_cast<int>(std::floor(std::log2(av))));
+		const double step = std::ldexp(1.0, exp - 10);
+		return std::nearbyint(v / step) * step;
+	}
+
+	// Exact SC-05 half-res L-band operator (2x2 area downsample -> HalfSigma(kSigmaBase) separable Gaussian -> bilinear upsample,
+	// mirroring kPass1HalfH/kPass1HalfV/td_sample_half_ld3 in TdV2Shaders.h) to derive SC-05 transfer error bounds from physics.
+	static TdV2Plane ComputeSc05HalfResLBand(const TdV2Plane& src, const ActiveRect& active)
+	{
+		const int w = src.w;
+		const int h = src.h;
+		TdV2Plane out(w, h, 0.0);
+		const ActiveRect ar = active.ClampedTo(w, h);
+		if (ar.Empty())
+			return out;
+		const int wHalf = (w + 1) / 2;
+		const int hHalf = (h + 1) / 2;
+		const int hax0 = (std::max)(0, (std::min)(wHalf, ar.x0 / 2));
+		const int hay0 = (std::max)(0, (std::min)(hHalf, ar.y0 / 2));
+		const int hax1 = (std::max)(hax0, (std::min)(wHalf, (ar.x1 + 1) / 2));
+		const int hay1 = (std::max)(hay0, (std::min)(hHalf, (ar.y1 + 1) / 2));
+		if (hax1 <= hax0 || hay1 <= hay0)
+			return out;
+
+		auto clampInt = [](int v, int lo, int hi) { return (std::max)(lo, (std::min)(hi, v)); };
+		TdV2Plane halfIn(wHalf, hHalf, 0.0);
+		for (int hy = hay0; hy < hay1; ++hy)
+		{
+			const int sy0 = clampInt(2 * hy,     ar.y0, ar.y1 - 1);
+			const int sy1 = clampInt(2 * hy + 1, ar.y0, ar.y1 - 1);
+			for (int hx = hax0; hx < hax1; ++hx)
+			{
+				const int sx0 = clampInt(2 * hx,     ar.x0, ar.x1 - 1);
+				const int sx1 = clampInt(2 * hx + 1, ar.x0, ar.x1 - 1);
+				halfIn.at(hx, hy) = 0.25 * (src.at(sx0, sy0) + src.at(sx1, sy0) + src.at(sx0, sy1) + src.at(sx1, sy1));
+			}
+		}
+
+		const double hsBase = VpUnit::BandFromBase::HalfSigma(VpUnit::BandFromBase::kSigmaBase);
+		const auto taps = VpUnit::BandFromBase::Taps<double>(hsBase, 3.0, true, 0.0);
+		const int rad = static_cast<int>(taps.size() / 2);
+
+		TdV2Plane halfTmp(wHalf, hHalf, 0.0);
+		for (int hy = hay0; hy < hay1; ++hy)
+		{
+			for (int hx = hax0; hx < hax1; ++hx)
+			{
+				double acc = 0.0;
+				for (int k = -rad; k <= rad; ++k)
+					acc += taps[static_cast<size_t>(k + rad)] * halfIn.at(clampInt(hx + k, hax0, hax1 - 1), hy);
+				halfTmp.at(hx, hy) = acc;
+			}
+		}
+		TdV2Plane halfL(wHalf, hHalf, 0.0);
+		for (int hy = hay0; hy < hay1; ++hy)
+		{
+			for (int hx = hax0; hx < hax1; ++hx)
+			{
+				double acc = 0.0;
+				for (int k = -rad; k <= rad; ++k)
+					acc += taps[static_cast<size_t>(k + rad)] * halfTmp.at(hx, clampInt(hy + k, hay0, hay1 - 1));
+				halfL.at(hx, hy) = acc;
+			}
+		}
+
+		for (int y = ar.y0; y < ar.y1; ++y)
+		{
+			const double uy = (std::max)(static_cast<double>(hay0), (std::min)(static_cast<double>(hay1 - 1), (static_cast<double>(y) + 0.5) * 0.5 - 0.5));
+			const int iy0 = clampInt(static_cast<int>(std::floor(uy)), hay0, hay1 - 1);
+			const int iy1 = clampInt(iy0 + 1, hay0, hay1 - 1);
+			const double fy = uy - static_cast<double>(iy0);
+			for (int x = ar.x0; x < ar.x1; ++x)
+			{
+				const double ux = (std::max)(static_cast<double>(hax0), (std::min)(static_cast<double>(hax1 - 1), (static_cast<double>(x) + 0.5) * 0.5 - 0.5));
+				const int ix0 = clampInt(static_cast<int>(std::floor(ux)), hax0, hax1 - 1);
+				const int ix1 = clampInt(ix0 + 1, hax0, hax1 - 1);
+				const double fx = ux - static_cast<double>(ix0);
+				const double v00 = halfL.at(ix0, iy0), v10 = halfL.at(ix1, iy0);
+				const double v01 = halfL.at(ix0, iy1), v11 = halfL.at(ix1, iy1);
+				out.at(x, y) = (v00 + (v10 - v00) * fx) * (1.0 - fy) + (v01 + (v11 - v01) * fx) * fy;
+			}
+		}
+		return out;
 	}
 
 	// ---- Synthetic Physics Scene Generators (10-bit code domain) ----
@@ -1198,10 +1316,12 @@ namespace TdV2GpuWarpNs
 				{
 					const float kNearMaxF = 3.4e38f;
 					const float kBigDeltaF = 1.0e38f;
-					// Negative control: verify un-guarded FP32 overflows to +Inf!
-					const float kR709 = static_cast<float>(2.0 * (1.0 - YCbCrMatrixSpec::Bt709().kr));
-					volatile float vOverflow = kNearMaxF + kR709 * kBigDeltaF;
-					Assert::IsFalse(std::isfinite(static_cast<float>(vOverflow)),
+					// Negative control: verify un-guarded FP32 overflows to +Inf! (volatile inputs avoid MSVC C4756 constant-fold warning)
+					volatile float vNearMax = kNearMaxF;
+					volatile float vBigDelta = kBigDeltaF;
+					volatile float vKR709 = static_cast<float>(2.0 * (1.0 - YCbCrMatrixSpec::Bt709().kr));
+					const float vOverflow = vNearMax + vKR709 * vBigDelta;
+					Assert::IsFalse(std::isfinite(vOverflow),
 						L"Negative control: un-guarded FP32 RGB add must overflow to +Inf");
 
 					TdV2Plane ovfR = delivR;
@@ -1929,9 +2049,11 @@ imageStore(dst_bad, p, vec4(y, 0.0, 0.0, 0.0));
 				const FrameProcessResult cpuRes = cpuEng.ProcessFrame(in, &cpuSi);
 				const GpuProcessResult gpuRes = gpuGuard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, in, nullptr, &gpuSi);
 
-				Assert::IsTrue(gpuRes.succeeded, L"H3: NaN stepDelta/zeroFrac must fall back cleanly without GLSL error");
-				Assert::IsTrue(cpuSi.IsActive(StandInKind::StepPriorDefault) && gpuSi.IsActive(StandInKind::StepPriorDefault),
-					L"H3: NaN stepDelta/zeroFrac must engage StepPriorDefault on CPU & GPU");
+				Assert::IsTrue(gpuRes.succeeded, L"H3: NaN stepDelta/zeroFrac must fail closed cleanly without GLSL error");
+				Assert::IsTrue(cpuSi.IsActive(StandInKind::A2StatsInvalid) && gpuSi.IsActive(StandInKind::A2StatsInvalid),
+					L"H3: NaN stepDelta/zeroFrac with hasStepPrior=true must engage A2StatsInvalid on CPU & GPU");
+				Assert::IsTrue(cpuSi.IsActive(StandInKind::NonFiniteClosure) && gpuSi.IsActive(StandInKind::NonFiniteClosure),
+					L"H3: NaN stepDelta/zeroFrac with hasStepPrior=true must engage NonFiniteClosure on CPU & GPU");
 				AssertCpuGpuFrameParity(cpuRes, gpuRes, b.curClean, b.receivedY, b.active, "CaseH-NaNStepPrior");
 			}
 
@@ -1965,6 +2087,156 @@ imageStore(dst_bad, p, vec4(y, 0.0, 0.0, 0.0));
 				const double stepDiff = MaxAbsDiffRect(gpuOutStep4, gpuOutStep28, b.active);
 				Assert::IsTrue(stepDiff > 1.0,
 					FormatMsg("H3 negative control failed: stepDelta 4 vs 28 GPU diff=%.4f <= 1.0 (UBO stale?)", stepDiff).c_str());
+			}
+
+			// ---- Case J (MEDIUM-6): GPU Pass 3B (transformIdentified8x8) non-finite pred_clean / cur_clean closes
+			//      entire 8x8 block to delta == 0.0 (NEVER projecting against 0.0!) and increments nonFiniteCells! ----
+			{
+				struct LocalTex
+				{
+					pl_gpu gpu = nullptr;
+					pl_tex tex = nullptr;
+					explicit LocalTex(pl_gpu g) : gpu(g) {}
+					~LocalTex() { if (gpu && tex) pl_tex_destroy(gpu, &tex); }
+				};
+				const pl_fmt fmtR16    = VpSkeleton::PlTexBackend::FindFormat(ctx.gpu, VpSkeleton::TexFormat::R16);
+				const pl_fmt fmtR32    = VpSkeleton::PlTexBackend::FindFormat(ctx.gpu, VpSkeleton::TexFormat::R32F);
+				const pl_fmt fmtRG32   = VpSkeleton::PlTexBackend::FindFormat(ctx.gpu, VpSkeleton::TexFormat::RG32F);
+				const pl_fmt fmtRGBA32 = VpSkeleton::PlTexBackend::FindFormat(ctx.gpu, VpSkeleton::TexFormat::RGBA32F);
+				Assert::IsNotNull(fmtR16); Assert::IsNotNull(fmtR32); Assert::IsNotNull(fmtRG32); Assert::IsNotNull(fmtRGBA32);
+
+				// (J1) Direct WARP dispatch of Shaders::kPass3bDctPocs with single NaN in pred_clean inside block [0..8)^2
+				//      while neighbor block [8..16)^2 is 100% finite (positive control):
+				const int pw = 16, ph = 16;
+				LocalTex dInTex(ctx.gpu), curTex(ctx.gpu), predTex(ctx.gpu), focusTex(ctx.gpu), flagsTex(ctx.gpu), dOutTex(ctx.gpu);
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, dInTex.tex, pw, ph, fmtRG32, true, false, true, false));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, curTex.tex, pw, ph, fmtR32, true, false, true, false));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, predTex.tex, pw, ph, fmtR32, true, false, true, false));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, focusTex.tex, 1, 1, fmtRGBA32, true, false, true, false));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, flagsTex.tex, pw, ph, fmtR16, true, false, true, false));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, dOutTex.tex, pw, ph, fmtRG32, true, true, false, true));
+
+				std::vector<float> dInBuf(static_cast<size_t>(pw * ph) * 2u, 0.0f);
+				std::vector<float> curBuf(static_cast<size_t>(pw * ph), 500.0f);
+				std::vector<float> predBuf(static_cast<size_t>(pw * ph), 500.0f);
+				std::vector<uint16_t> flagsBuf(static_cast<size_t>(pw * ph), static_cast<uint16_t>(1u));
+				for (int i = 0; i < pw * ph; ++i)
+					dInBuf[static_cast<size_t>(i) * 2u] = 6.0f; // active non-zero delta inside [-theta, +theta]
+				predBuf[3 * pw + 3] = std::numeric_limits<float>::quiet_NaN(); // single NaN in pred_clean block (0,0)!
+				const float focusZero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+				Assert::IsTrue(Detail::UploadFloats(ctx.gpu, dInTex.tex, dInBuf.data()));
+				Assert::IsTrue(Detail::UploadFloats(ctx.gpu, curTex.tex, curBuf.data()));
+				Assert::IsTrue(Detail::UploadFloats(ctx.gpu, predTex.tex, predBuf.data()));
+				Assert::IsTrue(Detail::UploadFloats(ctx.gpu, focusTex.tex, focusZero));
+				{
+					pl_tex_transfer_params tp{};
+					tp.tex = flagsTex.tex;
+					tp.ptr = flagsBuf.data();
+					Assert::IsTrue(pl_tex_upload(ctx.gpu, &tp));
+				}
+
+				const std::string p3bHdr = Detail::StaticGeomDefines(pw, ph, 1, 1, 16)
+					+ Shaders::BuildDctBasisHeader() + Shaders::kCoreHelpers + Shaders::kPass3bDctHeader;
+				pl_shader_desc p3bD[6] = {
+					VpvGpu::Sampled("delta_in", dInTex.tex),
+					VpvGpu::Sampled("cur_clean", curTex.tex),
+					VpvGpu::Sampled("pred_clean", predTex.tex),
+					VpvGpu::Sampled("cell_focus", focusTex.tex),
+					VpvGpu::Sampled("ref_flags", flagsTex.tex),
+					VpvGpu::Storage("delta_out", dOutTex.tex)
+				};
+				float uBx0 = 0.0f, uBy0 = 0.0f, uBx1 = 16.0f, uBy1 = 16.0f;
+				float uIters = 2.0f, uResMode = 0.0f, uStep = 24.0f, uPhi = static_cast<float>(kDeadZonePhiInter), uPeak = 1023.0f;
+				float uHasExplicitPb = 1.0f;
+				pl_shader_var p3bV[10] = {
+					VpvGpu::Var("u_bx0", &uBx0), VpvGpu::Var("u_by0", &uBy0),
+					VpvGpu::Var("u_bx1", &uBx1), VpvGpu::Var("u_by1", &uBy1),
+					VpvGpu::Var("u_pocs_iters", &uIters), VpvGpu::Var("u_residual_mode", &uResMode),
+					VpvGpu::Var("u_step_delta", &uStep), VpvGpu::Var("u_deadzone_phi", &uPhi),
+					VpvGpu::Var("u_peak_code", &uPeak), VpvGpu::Var("u_has_explicit_pb", &uHasExplicitPb)
+				};
+				Assert::IsTrue(VpvGpu::Pass(ctx.dispatch, "td_v2_test_m6_p3b_nan_pred", p3bHdr, Shaders::kPass3bDctPocs,
+				                            p3bD, 6, p3bV, 10, 2, 2, (5u * 64u) * sizeof(float), 8, 8),
+					L"MEDIUM-6: direct kPass3bDctPocs dispatch failed");
+				std::vector<float> dOutBuf(static_cast<size_t>(pw * ph) * 2u, -99.0f);
+				Assert::IsTrue(Detail::DownloadFloats(ctx.gpu, dOutTex.tex, dOutBuf.data()));
+				// Block [0..8)x[0..8) with NaN pred_clean MUST close ALL 64 pixels to exact delta==0.0, flag==2.0!
+				for (int y = 0; y < 8; ++y)
+				{
+					for (int x = 0; x < 8; ++x)
+					{
+						const size_t idx = (static_cast<size_t>(y) * pw + x) * 2u;
+						Assert::AreEqual(0.0f, dOutBuf[idx], L"MEDIUM-6: NaN pred_clean block must close delta to exact 0.0");
+						Assert::AreEqual(2.0f, dOutBuf[idx + 1u], L"MEDIUM-6: NaN pred_clean block must set nonFinite flag 2.0");
+					}
+				}
+				// Positive control: neighbor valid block [8..16)x[0..8) keeps active non-zero delta (> 1.0)!
+				Assert::IsTrue(std::fabs(dOutBuf[(0u * pw + 8u) * 2u]) > 1.0f,
+					L"MEDIUM-6 positive control: valid neighbor 8x8 block must retain non-zero delta");
+				Assert::AreEqual(0.0f, dOutBuf[(0u * pw + 8u) * 2u + 1u],
+					L"MEDIUM-6 positive control: valid neighbor 8x8 block must not set nonFinite flag");
+
+				// (J2) End-to-end ProcessFrameGpu with transformIdentified8x8=true + single NaN in curCleanTex
+				//      inside block [24..32)x[24..32): entire 8x8 block closes to delta==0.0 & increments nonFiniteCells!
+				const int ew = 64, eh = 64;
+				const ActiveRect eFull = ActiveRect::Full(ew, eh);
+				const CellMotionField eStill = CellMotionField::Uniform(4, 4, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+				const TdV2Plane eMaster = RenderScene(ew, eh, 0.0, 0.0);
+				const TdV2Plane eNoisy  = AddCodingDamage(eMaster, 8.0, 4410u, 0.0, eFull);
+				TdV2Plane eCleanNan = eNoisy;
+				eCleanNan.at(26, 26) = kNaN;
+
+				LocalTex eRec(ctx.gpu), eClean(ctx.gpu), eRef(ctx.gpu), eOutY(ctx.gpu), eOutClean(ctx.gpu), eOutDelta(ctx.gpu);
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, eRec.tex, ew, eh, fmtR32, true, false, true, false));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, eClean.tex, ew, eh, fmtR32, true, false, true, false));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, eRef.tex, ew, eh, fmtR32, true, false, true, false));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, eOutY.tex, ew, eh, fmtR32, true, true, false, true));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, eOutClean.tex, ew, eh, fmtR32, true, true, false, true));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, eOutDelta.tex, ew, eh, fmtRG32, true, true, false, true));
+				Assert::IsTrue(Detail::UploadPlaneR32F(ctx.gpu, eRec.tex, eNoisy));
+				Assert::IsTrue(Detail::UploadPlaneR32F(ctx.gpu, eClean.tex, eCleanNan));
+				Assert::IsTrue(Detail::UploadPlaneR32F(ctx.gpu, eRef.tex, eMaster));
+
+				for (ResidualMode rm : { ResidualMode::Cell, ResidualMode::Strict })
+				{
+					Config c8 = cfg;
+					c8.residualMode = rm;
+					GpuEngineGuard g8(ctx.gpu, c8);
+					GpuFrameInput z8In;
+					z8In.seq = (rm == ResidualMode::Strict) ? 4412 : 4411;
+					z8In.w = ew; z8In.h = eh;
+					z8In.receivedYTex = eRec.tex;
+					z8In.cleanYTex = eClean.tex;
+					z8In.hasCleanSplit = true;
+					z8In.activeRect = eFull;
+					z8In.prevPeak = { eRef.tex, &eStill, false };
+					z8In.nextPeak = { eRef.tex, &eStill, false };
+					z8In.hasStepPrior = true;
+					z8In.estimatedStepDelta = 24.0;
+					z8In.deadZonePhi = kDeadZonePhiInter;
+					z8In.zeroCoeffFraction = 0.35;
+					z8In.transformIdentified8x8 = true;
+
+					GpuFrameOutput z8Out;
+					z8Out.outputYTex = eOutY.tex;
+					z8Out.outputCleanTex = eOutClean.tex;
+					z8Out.tdDeltaTex = eOutDelta.tex;
+					z8Out.readbackCellDiagnostics = true;
+					StandInRegistry z8Si;
+					Assert::IsTrue(g8.engine.ProcessFrameGpu(ctx.gpu, ctx.dispatch, z8In, z8Out, nullptr, &z8Si),
+						L"MEDIUM-6: ProcessFrameGpu 8x8 with NaN curClean failed");
+					Assert::IsTrue(z8Out.nonFiniteCells >= 1u, L"MEDIUM-6: 8x8 NaN block must increment nonFiniteCells >= 1");
+					Assert::IsTrue(z8Si.IsActive(StandInKind::NonFiniteClosure),
+						L"MEDIUM-6: 8x8 NaN block must engage NonFiniteClosure");
+					TdV2Plane dlY, dlDelta;
+					bool bnd = false;
+					Assert::IsTrue(Detail::DownloadPlaneR32F(ctx.gpu, eOutY.tex, ew, eh, dlY));
+					Assert::IsTrue(Detail::DownloadDeltaRG32F(ctx.gpu, eOutDelta.tex, ew, eh, dlDelta, bnd));
+					AssertAllFinitePlane(dlY, L"MEDIUM-6: 8x8 NaN block outputY must be 100% finite");
+					AssertAllFinitePlane(dlDelta, L"MEDIUM-6: 8x8 NaN block tdDelta must be 100% finite");
+					Assert::AreEqual(0.0, MaxAbsPlane(dlDelta, ActiveRect{ 24, 24, 32, 32 }),
+						L"MEDIUM-6: entire 8x8 block containing NaN must close to exact delta == 0.0");
+				}
 			}
 		}
 
@@ -2039,6 +2311,113 @@ imageStore(dst_bad, p, vec4(y, 0.0, 0.0, 0.0));
 				Assert::IsTrue(dClean <= kGpuCpuParityTol, FormatMsg("Shadow vs On outputClean diff=%.6f", dClean).c_str());
 				Assert::IsTrue(dMaps <= kGpuCpuParityTol, FormatMsg("Shadow vs On tdMaps diff=%.6f", dMaps).c_str());
 				Assert::IsTrue(MaxAbsPlane(shRes.tdDelta, b.active) > 2.0, L"Shadow tdDelta must be non-vacuously active");
+			}
+
+			// ---- MEDIUM-2: GPU Carry Lifecycle Parity With CPU (Mode::On->Off->On & Non-Consecutive seq Jump!) ----
+			{
+				ComplexSceneBundle c0 = BuildComplexFrame(0, 1.5, 0.5, false);
+				ComplexSceneBundle c1 = BuildComplexFrame(1, 1.5, 0.5, false);
+				FrameProcessInput seedIn = MakeFrameInput(c0, 10, /*withPeaks=*/false, false);
+				FrameProcessInput nextConsec = MakeFrameInput(c1, 11, /*withPeaks=*/true, false);
+				FrameProcessInput nextJump   = MakeFrameInput(c1, 15, /*withPeaks=*/true, false);
+
+				Config cfgOff = cfgOn;
+				cfgOff.mode = Mode::Off;
+
+				// (1) Positive control: consecutive seq 10 -> 11 uses carry on BOTH CPU and GPU!
+				{
+					TdV2ReferenceEngine cpuConsec(cfgOn);
+					GpuEngineGuard gpuConsec(ctx.gpu, cfgOn);
+					cpuConsec.ProcessFrame(seedIn, nullptr);
+					const GpuProcessResult gSeed = gpuConsec.engine.ProcessFrame(ctx.gpu, ctx.dispatch, seedIn, nullptr, nullptr);
+					Assert::IsTrue(gSeed.succeeded && gpuConsec.engine.HasCarry());
+					const FrameProcessResult cR = cpuConsec.ProcessFrame(nextConsec, nullptr);
+					const GpuProcessResult gR = gpuConsec.engine.ProcessFrame(ctx.gpu, ctx.dispatch, nextConsec, nullptr, nullptr);
+					Assert::IsTrue(cR.carryUsed && !cR.carryReset, L"MEDIUM-2 positive control: CPU seq 10->11 must use carry");
+					Assert::IsTrue(gR.succeeded && gR.carryUsed && !gR.carryReset,
+						L"MEDIUM-2 positive control: GPU seq 10->11 must use carry without reset");
+				}
+
+				// (2) Mode::On -> Mode::Off -> Mode::On resets carry on BOTH CPU and GPU (no stale pre-Off carry)!
+				{
+					TdV2ReferenceEngine cpuToggle(cfgOn);
+					GpuEngineGuard gpuToggle(ctx.gpu, cfgOn);
+					cpuToggle.ProcessFrame(seedIn, nullptr);
+					const GpuProcessResult gSeed = gpuToggle.engine.ProcessFrame(ctx.gpu, ctx.dispatch, seedIn, nullptr, nullptr);
+					Assert::IsTrue(gSeed.succeeded && gpuToggle.engine.HasCarry());
+
+					cpuToggle.SetConfig(cfgOff);
+					gpuToggle.engine.SetConfig(cfgOff);
+					Assert::IsFalse(cpuToggle.HasCarry(), L"MEDIUM-2: CPU SetConfig(Off) must reset carry");
+					Assert::IsFalse(gpuToggle.engine.HasCarry(), L"MEDIUM-2: GPU SetConfig(Off) must reset carry");
+					const GpuProcessResult gOff = gpuToggle.engine.ProcessFrame(ctx.gpu, ctx.dispatch, nextConsec, nullptr, nullptr);
+					Assert::IsTrue(gOff.succeeded && gOff.dispatchCount == 0);
+
+					cpuToggle.SetConfig(cfgOn);
+					gpuToggle.engine.SetConfig(cfgOn);
+					const FrameProcessResult cAfterOff = cpuToggle.ProcessFrame(nextConsec, nullptr);
+					const GpuProcessResult gAfterOff = gpuToggle.engine.ProcessFrame(ctx.gpu, ctx.dispatch, nextConsec, nullptr, nullptr);
+					Assert::IsFalse(cAfterOff.carryUsed, L"MEDIUM-2: CPU must NOT use stale pre-Off carry");
+					Assert::IsTrue(gAfterOff.succeeded && !gAfterOff.carryUsed,
+						L"MEDIUM-2: GPU must NOT use stale pre-Off carry after On->Off->On");
+					AssertCpuGpuFrameParity(cAfterOff, gAfterOff, c1.curClean, c1.receivedY, c1.active, "M2-OnOffOn");
+				}
+
+				// (3) Non-consecutive seq jump (seq 10 -> 15) resets carry on BOTH CPU and GPU (ProcessFrame & ProcessFrameGpu)!
+				{
+					TdV2ReferenceEngine cpuJump(cfgOn);
+					GpuEngineGuard gpuJump(ctx.gpu, cfgOn);
+					cpuJump.ProcessFrame(seedIn, nullptr);
+					const GpuProcessResult gSeed = gpuJump.engine.ProcessFrame(ctx.gpu, ctx.dispatch, seedIn, nullptr, nullptr);
+					Assert::IsTrue(gSeed.succeeded && gpuJump.engine.HasCarry());
+
+					const FrameProcessResult cJ = cpuJump.ProcessFrame(nextJump, nullptr);
+					const GpuProcessResult gJ = gpuJump.engine.ProcessFrame(ctx.gpu, ctx.dispatch, nextJump, nullptr, nullptr);
+					Assert::IsTrue(cJ.carryReset && !cJ.carryUsed, L"MEDIUM-2: CPU seq jump 10->15 must reset carry");
+					Assert::IsTrue(gJ.succeeded && gJ.carryReset && !gJ.carryUsed,
+						L"MEDIUM-2: GPU ProcessFrame seq jump 10->15 must reset carry");
+					AssertCpuGpuFrameParity(cJ, gJ, c1.curClean, c1.receivedY, c1.active, "M2-SeqJump");
+
+					// Zero-copy ProcessFrameGpu seq jump (10 -> 15) parity:
+					struct LocalTex
+					{
+						pl_gpu gpu = nullptr;
+						pl_tex tex = nullptr;
+						explicit LocalTex(pl_gpu g) : gpu(g) {}
+						~LocalTex() { if (gpu && tex) pl_tex_destroy(gpu, &tex); }
+					};
+					const pl_fmt fmtR32 = VpSkeleton::PlTexBackend::FindFormat(ctx.gpu, VpSkeleton::TexFormat::R32F);
+					LocalTex r0(ctx.gpu), r1(ctx.gpu), p1(ctx.gpu), n1(ctx.gpu), outY(ctx.gpu);
+					Assert::IsTrue(Detail::EnsureTex(ctx.gpu, r0.tex, c0.w, c0.h, fmtR32, true, false, true, false));
+					Assert::IsTrue(Detail::EnsureTex(ctx.gpu, r1.tex, c1.w, c1.h, fmtR32, true, false, true, false));
+					Assert::IsTrue(Detail::EnsureTex(ctx.gpu, p1.tex, c1.w, c1.h, fmtR32, true, false, true, false));
+					Assert::IsTrue(Detail::EnsureTex(ctx.gpu, n1.tex, c1.w, c1.h, fmtR32, true, false, true, false));
+					Assert::IsTrue(Detail::EnsureTex(ctx.gpu, outY.tex, c1.w, c1.h, fmtR32, true, true, false, true));
+					Assert::IsTrue(Detail::UploadPlaneR32F(ctx.gpu, r0.tex, c0.curClean));
+					Assert::IsTrue(Detail::UploadPlaneR32F(ctx.gpu, r1.tex, c1.curClean));
+					Assert::IsTrue(Detail::UploadPlaneR32F(ctx.gpu, p1.tex, c1.prevClean));
+					Assert::IsTrue(Detail::UploadPlaneR32F(ctx.gpu, n1.tex, c1.nextClean));
+
+					GpuEngineGuard zcJump(ctx.gpu, cfgOn);
+					GpuFrameInput zi0;
+					zi0.seq = 10; zi0.w = c0.w; zi0.h = c0.h;
+					zi0.receivedYTex = r0.tex; zi0.cleanYTex = r0.tex; zi0.hasCleanSplit = true; zi0.activeRect = c0.active;
+					GpuFrameOutput zo0; zo0.outputYTex = outY.tex;
+					Assert::IsTrue(zcJump.engine.ProcessFrameGpu(ctx.gpu, ctx.dispatch, zi0, zo0, nullptr, nullptr));
+					Assert::IsTrue(zcJump.engine.HasCarry());
+
+					GpuFrameInput ziJump;
+					ziJump.seq = 15; ziJump.w = c1.w; ziJump.h = c1.h;
+					ziJump.receivedYTex = r1.tex; ziJump.cleanYTex = r1.tex; ziJump.hasCleanSplit = true; ziJump.activeRect = c1.active;
+					ziJump.prevPeak = { p1.tex, &c1.prevMf, false };
+					ziJump.nextPeak = { n1.tex, &c1.nextMf, false };
+					ziJump.carryMotion = c1.carryMf; ziJump.hasCarryMotion = true;
+					ziJump.hasStepPrior = true; ziJump.estimatedStepDelta = 24.0;
+					GpuFrameOutput zoJump; zoJump.outputYTex = outY.tex;
+					Assert::IsTrue(zcJump.engine.ProcessFrameGpu(ctx.gpu, ctx.dispatch, ziJump, zoJump, nullptr, nullptr));
+					Assert::IsTrue(zoJump.succeeded && zoJump.carryReset && !zoJump.carryUsed,
+						L"MEDIUM-2: ProcessFrameGpu seq jump 10->15 must reset carry visibly");
+				}
 			}
 		}
 
@@ -2304,8 +2683,9 @@ imageStore(dst_bad, p, vec4(y, 0.0, 0.0, 0.0));
 				Assert::AreEqual(static_cast<size_t>(2u), canvas.AccumulatedFrames(),
 					L"Negative control: valid 2nd AccumulateAnchorFrame must increment AccumulatedFrames to 2");
 
-				// L4: Null splatMotion on frame 0 does NOT engage MotionFieldStandIn,
-				//     while null splatMotion on frame 1+ DOES engage MotionFieldStandIn!
+				// L4 / H9: Null splatMotion on frame 0 seeds cleanly without MotionFieldStandIn,
+				//          while null splatMotion on an already-seeded canvas (frame 1+) MUST refuse whole-frame Still blend
+				//          (returns false, leaves AccumulatedFrames == 1, engages MissingMotionNoWholeBlend & MotionFieldStandIn)!
 				TdV2ChromaAnchorCanvas nullMotCanvas;
 				StandInRegistry nullMotSi;
 				Assert::IsTrue(nullMotCanvas.AccumulateAnchorFrame(
@@ -2317,14 +2697,16 @@ imageStore(dst_bad, p, vec4(y, 0.0, 0.0, 0.0));
 				Assert::IsFalse(nullMotSi.IsActive(StandInKind::MotionFieldStandIn),
 					L"L4: Null splatMotion on frame 0 must NOT engage MotionFieldStandIn");
 
-				Assert::IsTrue(nullMotCanvas.AccumulateAnchorFrame(
+				Assert::IsFalse(nullMotCanvas.AccumulateAnchorFrame(
 					codedCb, codedCr, &cleanY, lumaW, lumaH, ChromaSubsampling::Yuv420,
 					SitingSpec::Left(), active, nullptr, cellPx, 10, &nullMotSi),
-					L"L4: Null splatMotion on frame 1 must succeed");
-				Assert::AreEqual(static_cast<size_t>(2u), nullMotCanvas.AccumulatedFrames(),
-					L"L4: Null splatMotion on frame 1 must increment AccumulatedFrames == 2");
+					L"L4/H9: Null splatMotion on already-seeded canvas (frame 1+) must return false (no fabricated Still blend)");
+				Assert::AreEqual(static_cast<size_t>(1u), nullMotCanvas.AccumulatedFrames(),
+					L"L4/H9: Null splatMotion on frame 1+ must NOT mutate AccumulatedFrames");
+				Assert::IsTrue(nullMotSi.IsActive(StandInKind::MissingMotionNoWholeBlend),
+					L"L4/H9: Null splatMotion on frame 1+ MUST engage MissingMotionNoWholeBlend");
 				Assert::IsTrue(nullMotSi.IsActive(StandInKind::MotionFieldStandIn),
-					L"L4: Null splatMotion on frame 1+ MUST engage MotionFieldStandIn");
+					L"L4/H9: Null splatMotion on frame 1+ MUST engage MotionFieldStandIn");
 			}
 
 			// =====================================================================
@@ -2414,11 +2796,15 @@ imageStore(dst_bad, p, vec4(y, 0.0, 0.0, 0.0));
 			WarpGpuContext ctx;
 
 			// ---- Part A: 4K VRAM Budget Reduction & MakeVramUser Contract ----
+			// Per-pixel FP32 footprint derivation (plan L60 — strictly FP32, never FP16):
+			//   Reference: 5*RGBA32F(80) + carry(4) + warped(4) + 2*R16(4) + delta(8) + CPU staging(28) = 128 B/px.
+			//   RealTime:  4*RG32F(32) + 5/4*RG32F(10) + carry(4) + warped(4) + 2*R16(4) + delta(8) = 62 B/px.
+			//   Exact pixel ratio = 62 / 128 = 0.4844 (+ ~0.008 cell-grid overhead = 0.492 < 0.52).
 			const uint64_t refVram4k = TdV2GpuEngine::EstimatedVramBytes(3840, 2160, 16, Preset::Reference);
 			const uint64_t rtVram4k  = TdV2GpuEngine::EstimatedVramBytes(3840, 2160, 16, Preset::RealTime);
 			Assert::IsTrue(refVram4k > 0u && rtVram4k > 0u, L"4K VRAM estimates must be > 0");
-			Assert::IsTrue(static_cast<double>(rtVram4k) < 0.45 * static_cast<double>(refVram4k),
-				FormatMsg("Preset::RealTime 4K VRAM (%.0f B) must be < 0.45x Reference (%.0f B)",
+			Assert::IsTrue(static_cast<double>(rtVram4k) < 0.52 * static_cast<double>(refVram4k),
+				FormatMsg("Preset::RealTime 4K FP32 VRAM (%.0f B) must be < 0.52x Reference (%.0f B)",
 					static_cast<double>(rtVram4k), static_cast<double>(refVram4k)).c_str());
 
 			const VpSkeleton::VramUser rtUser = TdV2GpuEngine::MakeVramUser(3840, 2160, 16, Preset::RealTime);
@@ -2437,7 +2823,7 @@ imageStore(dst_bad, p, vec4(y, 0.0, 0.0, 0.0));
 			const int cw = w / 16;
 			const int ch = h / 16;
 
-			// Reserve a ScratchArena strictly sized for Preset::RealTime (compact RG16F (M,H) + half-res RG32F (L,D3)).
+			// Reserve a ScratchArena strictly sized for Preset::RealTime (full-res FP32 RG32F (M,H) + half-res FP32 RG32F (L,D3)).
 			const std::vector<VpSkeleton::ArenaRequest> rtReqs = TdV2GpuEngine::ArenaRequests(ctx.gpu, w, h, 16, Preset::RealTime);
 			Assert::IsFalse(rtReqs.empty(), L"ArenaRequests(..., Preset::RealTime) must be non-empty");
 			const VpSkeleton::ArenaPlan rtPlan = VpSkeleton::PlanArena(rtReqs, VpSkeleton::Tier::T1);
@@ -2469,115 +2855,397 @@ imageStore(dst_bad, p, vec4(y, 0.0, 0.0, 0.0));
 					L"Negative control: ArenaScopeGuard must close cleanly on RealTime-arena shortage");
 			}
 
-			// ---- Part B: 12-bit BTB (< 256) and WTW (> 3760) Preservation Without FP16 Clipping ----
+			// ---- Part B1 (H7a): Genuine Preset::RealTime GPU vs CPU Parity on Moving Content with Distinct Refs ----
+			// Distinct moving frames (cur != prev != next, camera pan (1.5, 0.5) px/frame) with letterbox bars:
+			// verifies FP32 moments + honest SC-05 half-res L/D3 band split stay within physics-derived tolerance
+			// and Plan s3.3 shortcut ledger (<= 10% gain loss vs CPU), with a forced-degraded broken-motion control!
 			{
-				Config cfg12 = MakePreset(Preset::RealTime, Mode::On);
-				cfg12.sourceBits = 12;
-				cfg12.enableLongAnchor = false;
-				cfg12.enableCarryForward = false;
-				GpuEngineGuard rt12Guard(ctx.gpu, cfg12);
+				const double camDx = 1.5;
+				const double camDy = 0.5;
+				const ActiveRect active{ 0, 4, w, h - 4 };
 
-				const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+				const TdV2Plane masterCur  = RenderScene(w, h, 1.0 * camDx, 1.0 * camDy);
+				const TdV2Plane masterPrev = RenderScene(w, h, 0.0 * camDx, 0.0 * camDy);
+				const TdV2Plane masterNext = RenderScene(w, h, 2.0 * camDx, 2.0 * camDy);
+
+				const double noiseSigma = 8.0;
+				TdV2Plane curClean  = AddCodingDamage(masterCur,  noiseSigma, 7051u, 0.25, active);
+				TdV2Plane prevClean = AddCodingDamage(masterPrev, 1.5,        7052u, 0.0,  active);
+				TdV2Plane nextClean = AddCodingDamage(masterNext, 1.5,        7053u, 0.0,  active);
+				FillLetterboxBars(curClean,  active, 64.0,  72.0);
+				FillLetterboxBars(prevClean, active, 130.0, 145.0);
+				FillLetterboxBars(nextClean, active, 135.0, 150.0);
+
+				const CellMotionField prevMf = CellMotionField::Uniform(cw, ch, -camDx, -camDy, -camDx, -camDy, RegionMotionClass::Camera);
+				const CellMotionField nextMf = CellMotionField::Uniform(cw, ch, +camDx, +camDy, +camDx, +camDy, RegionMotionClass::Camera);
+
+				FrameProcessInput rtIn;
+				rtIn.seq = 705;
+				rtIn.receivedY = curClean;
+				rtIn.hasCleanSplit = true;
+				rtIn.cleanY = curClean;
+				rtIn.activeRect = active;
+				rtIn.prevPeak = { &prevClean, &prevMf, false };
+				rtIn.nextPeak = { &nextClean, &nextMf, false };
+				rtIn.hasStepPrior = true;
+				rtIn.estimatedStepDelta = 24.0;
+				rtIn.deadZonePhi = kDeadZonePhiInter;
+				rtIn.zeroCoeffFraction = 0.35;
+
+				Config cfgRt = MakePreset(Preset::RealTime, Mode::On);
+				cfgRt.enableLongAnchor = false;
+				cfgRt.enableCarryForward = false;
+
+				TdV2ReferenceEngine cpuRtEng(cfgRt);
+				const FrameProcessResult cpuRt = cpuRtEng.ProcessFrame(rtIn, nullptr);
+
+				GpuEngineGuard gpuRtGuard(ctx.gpu, cfgRt);
+				rtArena.BeginFrame();
+				const GpuProcessResult gpuRt = gpuRtGuard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, rtIn, &rtArena, nullptr);
+				Assert::IsTrue(gpuRt.succeeded && !gpuRt.scratchShort, L"H7a: RealTime moving GPU ProcessFrame failed");
+				AssertAllFinitePlane(gpuRt.outputY, L"H7a: RealTime moving outputY must be finite");
+
+				// Physics-derived SC-05 tolerance (Rule 1): with FP32 moments/M/H, the ONLY algorithmic difference between GPU
+				// RealTime and CPU RealTime is SC-05 half-res L/D3 band split acting on the temporal difference plane.
+				// Factor 2 accounts for both L and M = G_fine - L shifting by +/- (H_SC05 - H_Full)(diff) under convex weights.
+				const TdV2Plane curErrPlane = SubtractPlanes(curClean, masterCur);
+				const ThreeBandPlanes curErrFull = DecomposeActiveBands(curErrPlane, active);
+				const TdV2Plane curErrSc05L = ComputeSc05HalfResLBand(curErrPlane, active);
+				const double sc05DiffRmse = std::sqrt(PlaneMse(curErrSc05L, curErrFull.L, active));
+				Assert::IsTrue(sc05DiffRmse > 1e-3, L"H7a: SC-05 L-band transfer error must be non-trivial");
+
+				const double baseRmse  = std::sqrt(PlaneMse(curClean, masterCur, active));
+				const double cpuRtRmse = std::sqrt(PlaneMse(cpuRt.outputY, masterCur, active));
+				const double gpuRtRmse = std::sqrt(PlaneMse(gpuRt.outputY, masterCur, active));
+				const double rtVsCpuRmse = std::sqrt(PlaneMse(gpuRt.outputY, cpuRt.outputY, active));
+				const double cpuGain = baseRmse - cpuRtRmse;
+				const double gpuGain = baseRmse - gpuRtRmse;
+				const double sc05RmseTol = 2.0 * sc05DiffRmse + kGpuCpuParityTol;
+
+				Assert::IsTrue(cpuGain > 1.5,
+					FormatMsg("H7a non-vacuity: CPU RealTime gain=%.3f <= 1.5 codes", cpuGain).c_str());
+				Assert::IsTrue(rtVsCpuRmse <= sc05RmseTol,
+					FormatMsg("H7a: RealTime GPU vs CPU RMSE=%.4f > derived SC-05 bound %.4f", rtVsCpuRmse, sc05RmseTol).c_str());
+				Assert::IsTrue(gpuGain >= 0.90 * cpuGain,
+					FormatMsg("H7a shortcut ledger: GPU RT gain=%.3f < 0.90 * CPU RT gain (%.3f)", gpuGain, cpuGain).c_str());
+				Assert::AreEqual(0.0, MaxAbsDiffRect(gpuRt.outputY, curClean, ActiveRect{ 0, 0, w, active.y0 }),
+					L"H7a: RealTime top letterbox bar corrupted");
+				Assert::AreEqual(0.0, MaxAbsDiffRect(gpuRt.outputY, curClean, ActiveRect{ 0, active.y1, w, h }),
+					L"H7a: RealTime bottom letterbox bar corrupted");
+
+				// FORCED-DEGRADED NEGATIVE CONTROL (Rule 3): Broken/uncompensated motion (vx=vy=0) on the EXACT SAME
+				// moving frames diverges far beyond the SC-05 parity bound and loses substantial fidelity!
+				const CellMotionField brokenMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+				FrameProcessInput brokenIn = rtIn;
+				brokenIn.seq = 706;
+				brokenIn.prevPeak = { &prevClean, &brokenMf, false };
+				brokenIn.nextPeak = { &nextClean, &brokenMf, false };
+				rtArena.BeginFrame();
+				const GpuProcessResult gpuBroken = gpuRtGuard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, brokenIn, &rtArena, nullptr);
+				Assert::IsTrue(gpuBroken.succeeded, L"H7a negative control dispatch failed");
+				const double brokenVsCpuRmse = std::sqrt(PlaneMse(gpuBroken.outputY, cpuRt.outputY, active));
+				const double brokenOutRmse   = std::sqrt(PlaneMse(gpuBroken.outputY, masterCur, active));
+				Assert::IsTrue(brokenVsCpuRmse > 2.0 * sc05RmseTol,
+					FormatMsg("H7a negative control: broken-motion vs CPU RMSE=%.3f <= %.3f", brokenVsCpuRmse, 2.0 * sc05RmseTol).c_str());
+				Assert::IsTrue(brokenOutRmse > gpuRtRmse + 1.0,
+					FormatMsg("H7a negative control: broken-motion RMSE=%.3f did not degrade vs aligned=%.3f", brokenOutRmse, gpuRtRmse).c_str());
+			}
+
+			// ---- Part B2 (H7b): Non-Vacuous Moving 12-bit BTB/WTW ([4..4090]) + 18-bit FP32 Overflow Proof ----
+			{
 				const ActiveRect full = ActiveRect::Full(w, h);
+				const double camDx = 1.5;
+				const double camDy = 0.5;
+				const CellMotionField prevMf = CellMotionField::Uniform(cw, ch, -camDx, -camDy, -camDx, -camDy, RegionMotionClass::Camera);
+				const CellMotionField nextMf = CellMotionField::Uniform(cw, ch, +camDx, +camDy, +camDx, +camDy, RegionMotionClass::Camera);
 
-				struct RangeCase
+				// Build distinct rigidly-moving 12-bit frames (cur != prev != next) spanning BTB [4..250], midtones, and WTW [3800..4090]
+				// with smooth Hermite band transitions in gy (eliminating stationary-step seam artifacts under subpixel pan)
+				// and large M/H contrast (~700-900 codes) so naive FP16 quantization incurs >= 0.25-0.5 code error!
+				auto smoothstep = [](double e0, double e1, double t) -> double
 				{
-					double baseVal;
-					double slopeX;
-					double slopeY;
-					const char* name;
-					bool expectBelow256;
+					const double u = (std::max)(0.0, (std::min)(1.0, (t - e0) / (e1 - e0)));
+					return u * u * (3.0 - 2.0 * u);
 				};
-				const RangeCase rangeCases[2] = {
-					{  96.0, 1.0, 1.25, "12bit-BTB", true  }, // [96.0 .. 237.75] strictly < 256
-					{ 3784.0, 1.0, 1.50, "12bit-WTW", false } // [3784.0 .. 3941.5] strictly > 3760
-				};
-
-				for (const RangeCase& rc : rangeCases)
+				auto render12BitScene = [&](double sx, double sy) -> TdV2Plane
 				{
-					TdV2Plane master(w, h, 0.0);
-					double masterMean = 0.0;
+					TdV2Plane p(w, h, 0.0);
 					for (int y = 0; y < h; ++y)
 					{
 						for (int x = 0; x < w; ++x)
 						{
-							const double v = rc.baseVal + rc.slopeX * static_cast<double>(x) + rc.slopeY * static_cast<double>(y);
-							if (rc.expectBelow256)
-								Assert::IsTrue(v < 256.0, L"12-bit BTB fixture value must be strictly < 256");
-							else
-								Assert::IsTrue(v > 3760.0, L"12-bit WTW fixture value must be strictly > 3760");
-							master.at(x, y) = v;
-							masterMean += v;
+							const double gx = static_cast<double>(x) - sx;
+							const double gy = static_cast<double>(y) - sy;
+							const double vBtb = 128.0 + 58.0 * std::sin(2.0 * kPi * gx / 13.0) + 42.0 * std::cos(2.0 * kPi * gy / 11.0);
+							const double vMid = 2048.0
+								+ 880.0 * std::sin(2.0 * kPi * (gx / 9.0 + gy / 11.0))
+								+ 520.0 * std::cos(2.0 * kPi * (gx / 4.5 - gy / 5.5));
+							const double vWtw = 3930.0 + 75.0 * std::sin(2.0 * kPi * gx / 13.0) + 60.0 * std::cos(2.0 * kPi * gy / 11.0);
+							const double tMid = smoothstep(17.0, 23.0, gy);
+							const double tWtw = smoothstep(41.0, 47.0, gy);
+							const double val = (vBtb + (vMid - vBtb) * tMid) * (1.0 - tWtw) + vWtw * tWtw;
+							p.at(x, y) = (std::max)(4.0, (std::min)(4090.0, val));
 						}
 					}
-					masterMean /= static_cast<double>(w * h);
+					return p;
+				};
 
-					// 1. Clean flat/ramp DC & pointwise preservation (< 1e-3 error — zero FP16 clipping/quantization!).
-					FrameProcessInput inFlat;
-					inFlat.seq = rc.expectBelow256 ? 710 : 711;
-					inFlat.receivedY = master;
-					inFlat.hasCleanSplit = true;
-					inFlat.cleanY = master;
-					inFlat.activeRect = full;
-					inFlat.prevPeak = { &master, &stillMf, false };
-					inFlat.nextPeak = { &master, &stillMf, false };
-					inFlat.hasStepPrior = true;
-					inFlat.estimatedStepDelta = 48.0;
-					inFlat.deadZonePhi = kDeadZonePhiInter;
-					inFlat.zeroCoeffFraction = 0.35;
+				const TdV2Plane mCur12  = render12BitScene(1.0 * camDx, 1.0 * camDy);
+				const TdV2Plane mPrev12 = render12BitScene(0.0 * camDx, 0.0 * camDy);
+				const TdV2Plane mNext12 = render12BitScene(2.0 * camDx, 2.0 * camDy);
 
-					rtArena.BeginFrame();
-					const GpuProcessResult resFlat = rt12Guard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, inFlat, &rtArena, nullptr);
-					Assert::IsTrue(resFlat.succeeded && !resFlat.scratchShort,
-						FormatTagMsg(rc.name, "RealTime 12-bit flat/ramp ProcessFrame failed").c_str());
-					Assert::IsTrue(resFlat.dispatchCount > 0, L"RealTime 12-bit flat/ramp must execute GPU passes");
-					AssertAllFinitePlane(resFlat.outputY, L"RealTime 12-bit flat/ramp outputY must be finite");
+				// Physically self-consistent 12-bit coding damage & step prior:
+				// noise12 = 32.0 (var = 1024 code^2), estimatedStepDelta = 96.0 with zeroCoeffFraction = 0.35
+				// -> A2 totalVar = 977.1 code^2, matching injected coding damage cleanly under A3_ConservativeMin!
+				const double noise12 = 32.0;
+				const TdV2Plane cur12  = AddCodingDamage(mCur12,  noise12, 7120u, 0.0, full);
+				const TdV2Plane prev12 = AddCodingDamage(mPrev12, 4.0,     7121u, 0.0, full);
+				const TdV2Plane next12 = AddCodingDamage(mNext12, 4.0,     7122u, 0.0, full);
 
-					double outMean = 0.0;
-					for (double v : resFlat.outputY.v)
-						outMean += v;
-					outMean /= static_cast<double>(resFlat.outputY.v.size());
-					const double dcErr = std::fabs(outMean - masterMean);
-					const double maxErr = MaxAbsDiffFull(resFlat.outputY, master);
-					Assert::IsTrue(dcErr < 1e-3,
-						FormatTagMsg(rc.name, "12-bit DC error=%.6f >= 1e-3 (FP16 clipping/quantization?)", dcErr).c_str());
-					Assert::IsTrue(maxErr < 1e-3,
-						FormatTagMsg(rc.name, "12-bit max pointwise error=%.6f >= 1e-3", maxErr).c_str());
+				FrameProcessInput in12;
+				in12.seq = 712;
+				in12.receivedY = cur12;
+				in12.hasCleanSplit = true;
+				in12.cleanY = cur12;
+				in12.activeRect = full;
+				in12.prevPeak = { &prev12, &prevMf, false };
+				in12.nextPeak = { &next12, &nextMf, false };
+				in12.hasStepPrior = true;
+				in12.estimatedStepDelta = 96.0;
+				in12.deadZonePhi = kDeadZonePhiInter;
+				in12.zeroCoeffFraction = 0.35;
 
-					// 2. Active coding-noise repair inside BTB/WTW (non-vacuous: RealTime repairs noisy 12-bit BTB/WTW
-					//    without clamping out-of-studio codes!).
-					TdV2Plane noisyCur = AddCodingDamage(master, 28.0, rc.expectBelow256 ? 7120u : 7121u, 0.0, full);
-					TdV2Plane noisyPrev = AddCodingDamage(master, 4.0, rc.expectBelow256 ? 7122u : 7123u, 0.0, full);
-					TdV2Plane noisyNext = AddCodingDamage(master, 4.0, rc.expectBelow256 ? 7124u : 7125u, 0.0, full);
-					FrameProcessInput inNoisy = inFlat;
-					inNoisy.seq = rc.expectBelow256 ? 712 : 713;
-					inNoisy.receivedY = noisyCur;
-					inNoisy.cleanY = noisyCur;
-					inNoisy.prevPeak = { &noisyPrev, &stillMf, false };
-					inNoisy.nextPeak = { &noisyNext, &stillMf, false };
+				// 1. Reference FP32 GPU vs CPU at 12-bit: parity <= DepthScale(12) * 1e-3 = 4e-3 codes!
+				Config cfgRef12 = MakePreset(Preset::Reference, Mode::On);
+				cfgRef12.sourceBits = 12;
+				cfgRef12.enableLongAnchor = false;
+				cfgRef12.enableCarryForward = false;
+				TdV2ReferenceEngine cpuRef12Eng(cfgRef12);
+				GpuEngineGuard gpuRef12Guard(ctx.gpu, cfgRef12);
+				const FrameProcessResult cpuRef12 = cpuRef12Eng.ProcessFrame(in12, nullptr);
+				const GpuProcessResult gpuRef12 = gpuRef12Guard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, in12, nullptr, nullptr);
+				Assert::IsTrue(gpuRef12.succeeded, L"H7b: 12-bit Reference GPU failed");
+				const double ref12Tol = DepthScale(12) * kGpuCpuParityTol; // 4e-3 12-bit codes
+				const double ref12Err = MaxAbsDiffFull(gpuRef12.outputY, cpuRef12.outputY);
+				Assert::IsTrue(ref12Err <= ref12Tol,
+					FormatMsg("H7b: 12-bit Reference |GPU-CPU|=%.6f > %.6f", ref12Err, ref12Tol).c_str());
 
-					rtArena.BeginFrame();
-					const GpuProcessResult resNoisy = rt12Guard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, inNoisy, &rtArena, nullptr);
-					Assert::IsTrue(resNoisy.succeeded && !resNoisy.scratchShort,
-						FormatTagMsg(rc.name, "RealTime 12-bit noisy ProcessFrame failed").c_str());
-					const double baseRmse = std::sqrt(PlaneMse(noisyCur, master, full));
-					const double outRmse  = std::sqrt(PlaneMse(resNoisy.outputY, master, full));
-					Assert::IsTrue(outRmse < baseRmse * 0.70,
-						FormatTagMsg(rc.name, "RealTime 12-bit BTB/WTW failed to repair noise (out=%.2f vs base=%.2f)", outRmse, baseRmse).c_str());
+				// 2. RealTime FP32 GPU vs CPU at 12-bit on compact ScratchArena: active repair + BTB/WTW preserved!
+				Config cfgRt12 = MakePreset(Preset::RealTime, Mode::On);
+				cfgRt12.sourceBits = 12;
+				cfgRt12.enableLongAnchor = false;
+				cfgRt12.enableCarryForward = false;
+				TdV2ReferenceEngine cpuRt12Eng(cfgRt12);
+				GpuEngineGuard gpuRt12Guard(ctx.gpu, cfgRt12);
+				const FrameProcessResult cpuRt12 = cpuRt12Eng.ProcessFrame(in12, nullptr);
+				rtArena.BeginFrame();
+				const GpuProcessResult gpuRt12 = gpuRt12Guard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, in12, &rtArena, nullptr);
+				Assert::IsTrue(gpuRt12.succeeded && !gpuRt12.scratchShort, L"H7b: 12-bit RealTime GPU failed");
+				AssertAllFinitePlane(gpuRt12.outputY, L"H7b: 12-bit RealTime outputY must be finite");
 
-					// NEGATIVE CONTROL (12-bit studio clamp [256, 3760] & naive FP16 DC quantization):
-					// Clamping 12-bit BTB/WTW to studio [256, 3760] shifts DC by > 80 codes!
-					double clampedMean = 0.0;
-					for (double v : master.v)
-						clampedMean += (std::max)(256.0, (std::min)(3760.0, v));
-					clampedMean /= static_cast<double>(master.v.size());
-					const double naiveClampDcErr = std::fabs(clampedMean - masterMean);
-					Assert::IsTrue(naiveClampDcErr > 80.0,
-						FormatTagMsg(rc.name, "Negative control failed: studio clamp DC error=%.2f <= 80.0", naiveClampDcErr).c_str());
+				// Derive 12-bit SC-05 half-res L/D3 transfer bound directly from the exact linear SC-05 operator on cur12 - mCur12.
+				const TdV2Plane cur12Err = SubtractPlanes(cur12, mCur12);
+				const ThreeBandPlanes cur12ErrFull = DecomposeActiveBands(cur12Err, full);
+				const TdV2Plane cur12ErrSc05L = ComputeSc05HalfResLBand(cur12Err, full);
+				const double sc05Diff12Rmse = std::sqrt(PlaneMse(cur12ErrSc05L, cur12ErrFull.L, full));
+				const double sc05Tol12 = 2.0 * sc05Diff12Rmse + ref12Tol;
+
+				const double base12Rmse = std::sqrt(PlaneMse(cur12, mCur12, full));
+				const double rt12Rmse   = std::sqrt(PlaneMse(gpuRt12.outputY, mCur12, full));
+				const double rt12VsCpu  = std::sqrt(PlaneMse(gpuRt12.outputY, cpuRt12.outputY, full));
+				Assert::IsTrue(rt12Rmse < base12Rmse * 0.75,
+					FormatMsg("H7b: 12-bit RealTime failed to repair moving BTB/WTW (out=%.2f vs base=%.2f)", rt12Rmse, base12Rmse).c_str());
+				Assert::IsTrue(rt12VsCpu <= sc05Tol12,
+					FormatMsg("H7b: 12-bit RealTime GPU vs CPU RMSE=%.3f > derived SC-05 bound %.3f", rt12VsCpu, sc05Tol12).c_str());
+
+				// Verify BTB (< 256) and WTW (> 3760) are genuinely preserved in the moving output (not studio-clamped!).
+				double minBtbOut = 1e9, maxWtwOut = -1e9;
+				for (int y = 2; y < 16; ++y)
+					for (int x = 4; x < w - 4; ++x)
+						minBtbOut = (std::min)(minBtbOut, gpuRt12.outputY.at(x, y));
+				for (int y = 48; y < h - 2; ++y)
+					for (int x = 4; x < w - 4; ++x)
+						maxWtwOut = (std::max)(maxWtwOut, gpuRt12.outputY.at(x, y));
+				Assert::IsTrue(minBtbOut < 180.0, FormatMsg("H7b: 12-bit BTB clipped (min=%.1f >= 180)", minBtbOut).c_str());
+				Assert::IsTrue(maxWtwOut > 3950.0, FormatMsg("H7b: 12-bit WTW clipped (max=%.1f <= 3950)", maxWtwOut).c_str());
+
+				// 3. REAL FORCED-FP16 FUSION & STUDIO-CLAMP NEGATIVE CONTROLS (Rule 3) on the EXACT SAME 12-bit frames:
+				//    (i) Forced-FP16 M/H band storage inside actual Wiener solve + band recomposition (modeling pre-fix RG16F!)
+				//        diverges from exact FP64 recomposition by >= 0.15 codes (> 35x worse than FP32 GPU <= 4e-3)!
+				{
+					TdV2Plane wPrev12, wNext12;
+					std::vector<uint8_t> vp12, vn12;
+					WarpCleanReference(prev12, cur12, full, prevMf.vx, prevMf.vy, cw, ch, 16, wPrev12, vp12, nullptr);
+					WarpCleanReference(next12, cur12, full, nextMf.vx, nextMf.vy, cw, ch, 16, wNext12, vn12, nullptr);
+					const ThreeBandPlanes bCur = DecomposeActiveBands(cur12, full);
+					const ThreeBandPlanes bPrev = DecomposeActiveBands(wPrev12, full);
+					const ThreeBandPlanes bNext = DecomposeActiveBands(wNext12, full);
+
+					TdV2Plane outFp64 = cur12;
+					TdV2Plane outFp16 = cur12;
+					const BandWhiteNoiseGains bg12 = ComputeBandWhiteNoiseGains();
+					const RoundingCellStats a2_12 = ComputeRoundingCellStats(96.0, kDeadZonePhiInter, 0.35);
+
+					auto runBandFusion = [&](bool quantizeMhToFp16, TdV2Plane& dstOut)
+					{
+						auto qMh = [&](double v, int b) { return (quantizeMhToFp16 && b >= 1) ? SimulateFp16Quantize(v) : v; };
+						for (int cy = 0; cy < ch; ++cy)
+						{
+							for (int cx = 0; cx < cw; ++cx)
+							{
+								for (int b = 0; b < 3; ++b)
+								{
+									const TdV2Plane& cP = (b == 0) ? bCur.L : ((b == 1) ? bCur.M : bCur.H);
+									const TdV2Plane& pP = (b == 0) ? bPrev.L : ((b == 1) ? bPrev.M : bPrev.H);
+									const TdV2Plane& nP = (b == 0) ? bNext.L : ((b == 1) ? bNext.M : bNext.H);
+									double C[2][2] = {};
+									int cnt = 0;
+									for (int y = cy * 16; y < (cy + 1) * 16; ++y)
+									{
+										for (int x = cx * 16; x < (cx + 1) * 16; ++x)
+										{
+											const size_t idx = static_cast<size_t>(y) * w + x;
+											if (!vp12[idx] || !vn12[idx]) continue;
+											const double d0 = qMh(cP.at(x, y), b) - qMh(pP.at(x, y), b);
+											const double d1 = qMh(cP.at(x, y), b) - qMh(nP.at(x, y), b);
+											C[0][0] += d0 * d0; C[0][1] += d0 * d1; C[1][1] += d1 * d1;
+											++cnt;
+										}
+									}
+									if (cnt <= 0) continue;
+									const double invN = 1.0 / static_cast<double>(cnt);
+									double cMat[kMaxBlendRefs][kMaxBlendRefs] = {};
+									cMat[0][0] = C[0][0] * invN;
+									cMat[0][1] = C[0][1] * invN;
+									cMat[1][0] = C[0][1] * invN;
+									cMat[1][1] = C[1][1] * invN;
+									const double cA2 = a2_12.totalVar * ((b == 0) ? bg12.low : ((b == 1) ? bg12.mid : bg12.fine));
+									const double cA1 = (std::max)(0.0, cMat[0][1]);
+									const double cEst = (std::min)(cA1, cA2);
+									double cVec[kMaxBlendRefs] = {};
+									cVec[0] = (std::min)(cEst, cMat[0][0]);
+									cVec[1] = (std::min)(cEst, cMat[1][1]);
+									const BlendSolveResult sr = SolveConvexWeights(cMat, cVec, 2, kDefaultTraceRegScale, nullptr);
+									if (sr.singular || sr.nonFiniteClosed) continue;
+									for (int y = cy * 16; y < (cy + 1) * 16; ++y)
+									{
+										for (int x = cx * 16; x < (cx + 1) * 16; ++x)
+										{
+											const size_t idx = static_cast<size_t>(y) * w + x;
+											if (!vp12[idx] || !vn12[idx]) continue;
+											const double d0 = qMh(cP.at(x, y), b) - qMh(pP.at(x, y), b);
+											const double d1 = qMh(cP.at(x, y), b) - qMh(nP.at(x, y), b);
+											dstOut.at(x, y) -= (sr.weights[0] * d0 + sr.weights[1] * d1);
+										}
+									}
+								}
+							}
+						}
+					};
+					runBandFusion(/*quantizeMhToFp16=*/false, outFp64);
+					runBandFusion(/*quantizeMhToFp16=*/true,  outFp16);
+					const double fp16FusionMaxErr = MaxAbsDiffFull(outFp16, outFp64);
+					Assert::IsTrue(fp16FusionMaxErr >= 0.15,
+						FormatMsg("H7b negative control: forced-FP16 M/H band fusion error=%.4f < 0.15 (>35x FP32 ref12Tol)",
+							fp16FusionMaxErr).c_str());
 				}
+				//    (ii) Real studio-clamp engine negative control: running TdV2ReferenceEngine on studio-[256,3760]-clamped
+				//         copies of cur12/prev12/next12 corrupts BTB/WTW output by > 150 codes vs unclipped GPU output!
+				{
+					auto clampStudio12 = [](const TdV2Plane& src) -> TdV2Plane
+					{
+						TdV2Plane c = src;
+						for (double& v : c.v) v = (std::max)(256.0, (std::min)(3760.0, v));
+						return c;
+					};
+					const TdV2Plane sCur12 = clampStudio12(cur12);
+					const TdV2Plane sPrev12 = clampStudio12(prev12);
+					const TdV2Plane sNext12 = clampStudio12(next12);
+					FrameProcessInput sIn12 = in12;
+					sIn12.receivedY = sCur12; sIn12.cleanY = sCur12;
+					sIn12.prevPeak = { &sPrev12, &prevMf, false };
+					sIn12.nextPeak = { &sNext12, &nextMf, false };
+					TdV2ReferenceEngine studioEng(cfgRt12);
+					const FrameProcessResult studioRes = studioEng.ProcessFrame(sIn12, nullptr);
+					const double studioOutErr = MaxAbsDiffFull(studioRes.outputY, gpuRt12.outputY);
+					Assert::IsTrue(studioOutErr > 150.0,
+						FormatMsg("H7b negative control: studio-clamped engine output error=%.1f <= 150.0", studioOutErr).c_str());
+				}
+
+				// 4. High-bit-depth 18-bit FP32 overflow proof (sourceBits=18, peak=262143 > FP16 max 65504!):
+				//    With RG16F, M/H bands > 65504 overflow to +/-Inf and kill focus veto / corrupt output!
+				//    With FP32 RG32F, Preset::RealTime stays 100% finite with 0 nonFiniteCells!
+				const double scale18 = DepthScale(18);
+				const double dx18 = 2.0, dy18 = 1.0;
+				const CellMotionField prevMf18 = CellMotionField::Uniform(cw, ch, -dx18, -dy18, -dx18, -dy18, RegionMotionClass::Camera);
+				const CellMotionField nextMf18 = CellMotionField::Uniform(cw, ch, +dx18, +dy18, +dx18, +dy18, RegionMotionClass::Camera);
+				TdV2Plane cur18(w, h, 0.0), prev18(w, h, 0.0), next18(w, h, 0.0);
+				for (int y = 0; y < h; ++y)
+				{
+					for (int x = 0; x < w; ++x)
+					{
+						const double gxC = static_cast<double>(x) - dx18;
+						const double gyC = static_cast<double>(y) - dy18;
+						const double gxP = static_cast<double>(x);
+						const double gyP = static_cast<double>(y);
+						const double gxN = static_cast<double>(x) - 2.0 * dx18;
+						const double gyN = static_cast<double>(y) - 2.0 * dy18;
+						auto sample18 = [](double gx, double gy)
+						{
+							// Sum of period-4 orthogonal sinusoids under integer pan (2, 1):
+							// stays strictly inside valid 18-bit [8024..254120] while |H| peaks at ~86,651 > FP16 max 65,504 on ~480 px!
+							return 131072.0 + 110000.0 * 0.55 * (std::sin(2.0 * kPi * gx / 4.0) + std::cos(2.0 * kPi * gy / 4.0));
+						};
+						cur18.at(x, y)  = sample18(gxC, gyC) + 8.0 * scale18 * std::sin(static_cast<double>(x * 7 + y * 13));
+						prev18.at(x, y) = sample18(gxP, gyP);
+						next18.at(x, y) = sample18(gxN, gyN);
+					}
+				}
+				const ThreeBandPlanes bands18 = DecomposeActiveBands(cur18, full);
+				size_t fp16OverflowPx = 0;
+				for (size_t i = 0; i < cur18.v.size(); ++i)
+				{
+					if (!std::isfinite(SimulateFp16Quantize(bands18.M.v[i])) ||
+					    !std::isfinite(SimulateFp16Quantize(bands18.H.v[i])))
+					{
+						++fp16OverflowPx;
+					}
+				}
+				Assert::IsTrue(fp16OverflowPx > 50u,
+					FormatMsg("H7b negative control: 18-bit M/H bands must overflow FP16 (>50 px), got %.0f",
+						static_cast<double>(fp16OverflowPx)).c_str());
+
+				Config cfgRt18 = MakePreset(Preset::RealTime, Mode::On);
+				cfgRt18.sourceBits = 18;
+				cfgRt18.enableLongAnchor = false;
+				cfgRt18.enableCarryForward = false;
+				FrameProcessInput in18 = in12;
+				in18.seq = 718;
+				in18.receivedY = cur18;
+				in18.cleanY = cur18;
+				in18.prevPeak = { &prev18, &prevMf18, false };
+				in18.nextPeak = { &next18, &nextMf18, false };
+				in18.estimatedStepDelta = 24.0 * scale18;
+
+				GpuEngineGuard gpuRt18Guard(ctx.gpu, cfgRt18);
+				StandInRegistry si18;
+				rtArena.BeginFrame();
+				const GpuProcessResult gpuRt18 = gpuRt18Guard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, in18, &rtArena, &si18);
+				Assert::IsTrue(gpuRt18.succeeded && !gpuRt18.scratchShort, L"H7b: 18-bit RealTime FP32 GPU failed");
+				AssertAllFinitePlane(gpuRt18.outputY, L"H7b: 18-bit RealTime FP32 outputY must be 100% finite (zero FP16 overflow!)");
+				AssertAllFiniteTdMaps(gpuRt18.tdMaps, L"H7b: 18-bit RealTime FP32 tdMaps must be 100% finite");
+				Assert::AreEqual(static_cast<size_t>(0u), gpuRt18.nonFiniteCells,
+					L"H7b: 18-bit RealTime FP32 must report 0 nonFiniteCells (no RG16F Inf overflow)");
+				Assert::IsFalse(si18.IsActive(StandInKind::NonFiniteClosure),
+					L"H7b: 18-bit RealTime FP32 must NOT trip NonFiniteClosure");
+				// L2 non-vacuity: verify 18-bit FP32 GPU RealTime performed genuine non-zero repair (not a no-op)!
+				const double peakDelta18 = MaxAbsPlane(gpuRt18.tdDelta, full);
+				Assert::IsTrue(peakDelta18 > 1.0 * scale18,
+					FormatMsg("H7b L2 non-vacuity: 18-bit FP32 GPU RealTime |delta|=%.1f <= %.1f (no-op?)",
+						peakDelta18, 1.0 * scale18).c_str());
 			}
 
-			// ---- Part C: Two-Seed Planted Grain + Coding Error on Preset::RealTime ----
+			// ---- Part C (HIGH-5): Two-Seed Planted Grain (15% Leak, 2 Consecutive Frames, Full Authoritative Bar + Layer-2-Off GPU Negative Control!) ----
 			{
 				const size_t n = static_cast<size_t>(w) * static_cast<size_t>(h);
 				const ActiveRect full = ActiveRect::Full(w, h);
@@ -2585,100 +3253,163 @@ imageStore(dst_bad, p, vec4(y, 0.0, 0.0, 0.0));
 				const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
 
 				const TdV2Plane masterClean = RenderScene(w, h, 0.0, 0.0);
-				const TdV2Plane curCleanTrue = AddCodingDamage(masterClean, 7.5, 7201u, 0.25, full);
-				const TdV2Plane prevCleanTrue = AddCodingDamage(masterClean, 1.2, 7202u, 0.0, full);
-				const TdV2Plane nextCleanTrue = AddCodingDamage(masterClean, 1.2, 7203u, 0.0, full);
+				const TdV2Plane prevCleanTrue = AddCodingDamage(masterClean, 0.8, 7202u, 0.0, full);
+				const TdV2Plane nextCleanTrue = AddCodingDamage(masterClean, 0.8, 7203u, 0.0, full);
+
+				// Genuine L+M band compression wear on two consecutive valley frames so compression error lives in L/M
+				// while 15%-leaked film grain lives predominantly in H (testing Layer-2 grain-leak budget on GPU RealTime!).
+				auto addLowMidCodingWear = [&](const TdV2Plane& m, double rawSigma, uint32_t seed) -> TdV2Plane
+				{
+					const TdV2Plane whiteNoise = AddCodingDamage(TdV2Plane(w, h, 0.0), rawSigma, seed, 0.0, full);
+					const ThreeBandPlanes nb = DecomposeActiveBands(whiteNoise, full);
+					TdV2Plane out = m;
+					for (size_t i = 0; i < n; ++i)
+						out.v[i] = m.v[i] + nb.L.v[i] + nb.M.v[i];
+					return out;
+				};
+				const TdV2Plane f0CleanTrue = addLowMidCodingWear(masterClean, 12.0, 7200u);
+				const TdV2Plane f1CleanTrue = addLowMidCodingWear(masterClean, 12.0, 7201u);
 
 				std::mt19937 gRng(7210u);
-				const double grainSigma = 10.0;
+				const double grainSigma = 14.0;
 				std::normal_distribution<double> gDist(0.0, grainSigma);
-				std::vector<double> ownGrain(n), foreignGrainPrev(n), foreignGrainNext(n);
-				TdV2Plane curReceived(w, h, 0.0), prevReceived(w, h, 0.0), nextReceived(w, h, 0.0);
+				std::vector<double> prevOwnGrain(n), ownGrain(n), foreignGrainPrev(n), foreignGrainNext(n);
+				TdV2Plane f0Received(w, h, 0.0), f1Received(w, h, 0.0);
 				for (size_t i = 0; i < n; ++i)
 				{
+					prevOwnGrain[i] = gDist(gRng);
 					ownGrain[i] = gDist(gRng);
 					foreignGrainPrev[i] = gDist(gRng);
 					foreignGrainNext[i] = gDist(gRng);
-					curReceived.v[i]  = curCleanTrue.v[i]  + ownGrain[i];
-					prevReceived.v[i] = prevCleanTrue.v[i] + foreignGrainPrev[i];
-					nextReceived.v[i] = nextCleanTrue.v[i] + foreignGrainNext[i];
+					f0Received.v[i] = f0CleanTrue.v[i] + prevOwnGrain[i];
+					f1Received.v[i] = f1CleanTrue.v[i] + ownGrain[i];
 				}
 
-				// NEGATIVE CONTROL (Rule 3): Naive uniform temporal average on the EXACT SAME contaminated frames
-				// destroys own grain (betaOwn < 0.85) and leaks foreign grain (betaForeign > 0.10)!
-				std::vector<double> naiveAvg(n);
-				for (size_t i = 0; i < n; ++i)
-					naiveAvg[i] = (curReceived.v[i] + prevReceived.v[i] + nextReceived.v[i]) / 3.0;
-				const auto naiveRep = EvaluateGrainTransfer(
-					masterClean.v.data(), ownGrain.data(), foreignGrainPrev.data(), naiveAvg.data(), n);
-				Assert::IsTrue(naiveRep.valid, L"Negative control EvaluateGrainTransfer must be valid");
-				Assert::IsTrue(naiveRep.betaOwn < 0.85 && naiveRep.betaForeign > 0.10,
-					FormatMsg("Negative control failed: naive betaOwn=%.4f, betaForeign=%.4f",
-						naiveRep.betaOwn, naiveRep.betaForeign).c_str());
-
-				// Realistic imperfect grain separation (1.5% residual own/foreign grain leaked into clean planes).
-				const double leak = 0.015;
-				TdV2Plane curCleanImp(w, h, 0.0), prevCleanImp(w, h, 0.0), nextCleanImp(w, h, 0.0);
+				// Realistic >= 10% imperfect grain separation (leak = 15% of own & foreign grain left in clean planes!).
+				const double leak = 0.15;
+				TdV2Plane f0CleanImp(w, h, 0.0), f1CleanImp(w, h, 0.0), prevCleanImp(w, h, 0.0), nextCleanImp(w, h, 0.0);
 				for (size_t i = 0; i < n; ++i)
 				{
-					curCleanImp.v[i]  = curCleanTrue.v[i]  + leak * ownGrain[i];
+					f0CleanImp.v[i]   = f0CleanTrue.v[i]   + leak * prevOwnGrain[i];
+					f1CleanImp.v[i]   = f1CleanTrue.v[i]   + leak * ownGrain[i];
 					prevCleanImp.v[i] = prevCleanTrue.v[i] + leak * foreignGrainPrev[i];
 					nextCleanImp.v[i] = nextCleanTrue.v[i] + leak * foreignGrainNext[i];
 				}
 				const double leakedVar = (leak * grainSigma) * (leak * grainSigma);
-				std::vector<double> retainedVar(static_cast<size_t>(cw) * static_cast<size_t>(ch), leakedVar);
+				const std::vector<double> retainedVar(static_cast<size_t>(cw) * static_cast<size_t>(ch), leakedVar);
 
 				Config cfgRt = MakePreset(Preset::RealTime, Mode::On);
 				cfgRt.enableLongAnchor = false;
-				cfgRt.enableCarryForward = false;
-				GpuEngineGuard rtGuard(ctx.gpu, cfgRt);
+				cfgRt.enableCarryForward = true;
 
-				FrameProcessInput gIn;
-				gIn.seq = 720;
-				gIn.receivedY = curReceived;
-				gIn.hasCleanSplit = true;
-				gIn.cleanY = curCleanImp;
-				gIn.retainedGrainVar = retainedVar;
-				gIn.activeRect = full;
-				gIn.prevPeak = { &prevCleanImp, &stillMf, false };
-				gIn.nextPeak = { &nextCleanImp, &stillMf, false };
-				gIn.hasStepPrior = true;
-				gIn.estimatedStepDelta = 16.0;
-				gIn.deadZonePhi = kDeadZonePhiInter;
-				gIn.zeroCoeffFraction = 0.35;
+				auto makeGrainFrame = [&](uint64_t seq, const TdV2Plane& rec, const TdV2Plane& cln, bool withLayer2, bool withCarry)
+				{
+					FrameProcessInput gIn;
+					gIn.seq = seq;
+					gIn.receivedY = rec;
+					gIn.hasCleanSplit = true;
+					gIn.cleanY = cln;
+					if (withLayer2)
+						gIn.retainedGrainVar = retainedVar;
+					gIn.activeRect = full;
+					gIn.prevPeak = { &prevCleanImp, &stillMf, false };
+					gIn.nextPeak = { &nextCleanImp, &stillMf, false };
+					if (withCarry)
+					{
+						gIn.hasCarryMotion = true;
+						gIn.carryMotion = stillMf;
+					}
+					gIn.hasStepPrior = true;
+					gIn.estimatedStepDelta = 12.0;
+					gIn.deadZonePhi = kDeadZonePhiInter;
+					gIn.zeroCoeffFraction = 0.35;
+					return gIn;
+				};
 
-				rtArena.BeginFrame();
-				const GpuProcessResult gRes = rtGuard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, gIn, &rtArena, nullptr);
-				Assert::IsTrue(gRes.succeeded && !gRes.scratchShort, L"RealTime two-seed grain ProcessFrame failed");
-				AssertAllFinitePlane(gRes.outputY, L"RealTime grain outputY must be finite");
-				AssertAllFinitePlane(gRes.outputClean, L"RealTime grain outputClean must be finite");
+				// 1. MANDATORY SAME-INPUT NEGATIVE CONTROL (Rule 3 / HIGH-5):
+				//    Run the EXACT SAME 15%-leaked clean frames on GPU RealTime with Layer-2 disabled (retainedGrainVar empty):
+				//    MUST FAIL the authoritative grain preservation bar!
+				{
+					GpuEngineGuard noL2Guard(ctx.gpu, cfgRt);
+					rtArena.BeginFrame();
+					const GpuProcessResult r0NoL2 = noL2Guard.engine.ProcessFrame(
+						ctx.gpu, ctx.dispatch, makeGrainFrame(710, f0Received, f0CleanImp, false, false), &rtArena, nullptr);
+					Assert::IsTrue(r0NoL2.succeeded && !r0NoL2.scratchShort, L"Layer-2-off negative control frame 0 failed");
+					rtArena.BeginFrame();
+					const GpuProcessResult r1NoL2 = noL2Guard.engine.ProcessFrame(
+						ctx.gpu, ctx.dispatch, makeGrainFrame(711, f1Received, f1CleanImp, false, true), &rtArena, nullptr);
+					Assert::IsTrue(r1NoL2.succeeded && !r1NoL2.scratchShort, L"Layer-2-off negative control frame 1 failed");
 
-				// 1. Clean-layer coding error genuinely repaired vs independent masterClean!
-				const double cleanBaseRmse = std::sqrt(PlaneMse(curCleanImp, masterClean, interior));
-				const double cleanOutRmse  = std::sqrt(PlaneMse(gRes.outputClean, masterClean, interior));
-				Assert::IsTrue(cleanOutRmse < cleanBaseRmse * 0.72,
-					FormatMsg("RealTime failed to repair clean coding error: out=%.3f vs base=%.3f",
-						cleanOutRmse, cleanBaseRmse).c_str());
+					std::vector<double> prevResNoL2(n);
+					for (size_t i = 0; i < n; ++i)
+						prevResNoL2[i] = r0NoL2.outputY.v[i] - masterClean.v[i];
+					const auto noL2Rep = EvaluateGrainTransfer(
+						masterClean.v.data(), ownGrain.data(), foreignGrainPrev.data(), r1NoL2.outputY.v.data(), n,
+						prevResNoL2.data(), prevOwnGrain.data());
+					Assert::IsTrue(noL2Rep.valid && noL2Rep.lag1Evaluated,
+						L"Negative control: Layer-2-off grain regression + lag-1 must be valid");
+					Assert::IsFalse(noL2Rep.passesAuthoritativeBar,
+						FormatMsg("Negative control failed: Layer-2-off GPU on 15%%-leaked clean passed bar (betaOwn=%.4f, betaFor=%.4f)",
+							noL2Rep.betaOwn, noL2Rep.betaForeign).c_str());
+				}
 
-				// 2. Two-seed grain retention passes (betaOwn >= 0.95, |betaForeign| <= 0.03) scored strictly vs masterClean!
-				const auto rtRepPrev = EvaluateGrainTransfer(
-					masterClean.v.data(), ownGrain.data(), foreignGrainPrev.data(), gRes.outputY.v.data(), n);
-				const auto rtRepNext = EvaluateGrainTransfer(
-					masterClean.v.data(), ownGrain.data(), foreignGrainNext.data(), gRes.outputY.v.data(), n);
-				Assert::IsTrue(rtRepPrev.valid && rtRepNext.valid, L"RealTime grain regression must be valid");
-				Assert::IsTrue(rtRepPrev.betaOwn >= 0.95,
-					FormatMsg("RealTime betaOwn=%.4f < 0.95", rtRepPrev.betaOwn).c_str());
-				Assert::IsTrue(std::fabs(rtRepPrev.betaForeign) <= 0.03,
-					FormatMsg("RealTime |betaForeignPrev|=%.4f > 0.03", std::fabs(rtRepPrev.betaForeign)).c_str());
-				Assert::IsTrue(std::fabs(rtRepNext.betaForeign) <= 0.03,
-					FormatMsg("RealTime |betaForeignNext|=%.4f > 0.03", std::fabs(rtRepNext.betaForeign)).c_str());
+				// 2. PROTECTED GPU Preset::RealTime (2 consecutive frames with Layer-2 retainedGrainVar enabled):
+				//    MUST pass clean-layer repair AND FULL authoritative grain bar (lag1Evaluated == true)!
+				{
+					GpuEngineGuard rtGuard(ctx.gpu, cfgRt);
+					rtArena.BeginFrame();
+					const GpuProcessResult gRes0 = rtGuard.engine.ProcessFrame(
+						ctx.gpu, ctx.dispatch, makeGrainFrame(720, f0Received, f0CleanImp, true, false), &rtArena, nullptr);
+					Assert::IsTrue(gRes0.succeeded && !gRes0.scratchShort, L"RealTime two-seed grain frame 0 failed");
+					rtArena.BeginFrame();
+					const GpuProcessResult gRes1 = rtGuard.engine.ProcessFrame(
+						ctx.gpu, ctx.dispatch, makeGrainFrame(721, f1Received, f1CleanImp, true, true), &rtArena, nullptr);
+					Assert::IsTrue(gRes1.succeeded && !gRes1.scratchShort, L"RealTime two-seed grain frame 1 failed");
+					AssertAllFinitePlane(gRes1.outputY, L"RealTime grain outputY must be finite");
+					AssertAllFinitePlane(gRes1.outputClean, L"RealTime grain outputClean must be finite");
+
+					// Clean-layer L+M coding wear genuinely repaired vs independent masterClean (isolate clean delta
+					// without the intentionally preserved 15%-leaked H-band grain floor inside f1CleanImp / outputClean):
+					TdV2Plane repairedTrueClean(w, h, 0.0);
+					for (size_t i = 0; i < n; ++i)
+						repairedTrueClean.v[i] = f1CleanTrue.v[i] + (gRes1.outputClean.v[i] - f1CleanImp.v[i]);
+					const double cleanBaseRmse = std::sqrt(PlaneMse(f1CleanTrue, masterClean, interior));
+					const double cleanOutRmse  = std::sqrt(PlaneMse(repairedTrueClean, masterClean, interior));
+					Assert::IsTrue(cleanOutRmse < cleanBaseRmse * 0.72,
+						FormatMsg("RealTime failed to repair clean coding wear: out=%.3f vs base=%.3f",
+							cleanOutRmse, cleanBaseRmse).c_str());
+
+					// Full authoritative grain bar across 2 consecutive frames (scored strictly vs independent masterClean!):
+					std::vector<double> prevResMaster(n);
+					for (size_t i = 0; i < n; ++i)
+						prevResMaster[i] = gRes0.outputY.v[i] - masterClean.v[i];
+					const auto rtRepPrev = EvaluateGrainTransfer(
+						masterClean.v.data(), ownGrain.data(), foreignGrainPrev.data(), gRes1.outputY.v.data(), n,
+						prevResMaster.data(), prevOwnGrain.data());
+					const auto rtRepNext = EvaluateGrainTransfer(
+						masterClean.v.data(), ownGrain.data(), foreignGrainNext.data(), gRes1.outputY.v.data(), n,
+						prevResMaster.data(), prevOwnGrain.data());
+					Assert::IsTrue(rtRepPrev.valid && rtRepNext.valid && rtRepPrev.lag1Evaluated && rtRepNext.lag1Evaluated,
+						L"RealTime 2-frame grain regression + lag-1 must be valid");
+					Assert::IsTrue(rtRepPrev.passesAuthoritativeBar,
+						FormatMsg("RealTime 15%%-leak GPU failed authoritative bar (betaOwn=%.4f, betaFor=%.4f)",
+							rtRepPrev.betaOwn, rtRepPrev.betaForeign).c_str());
+					Assert::IsTrue(rtRepNext.passesAuthoritativeBar,
+						FormatMsg("RealTime 15%%-leak GPU failed authoritative bar vs next (stdRatio=%.4f, lag1Rise=%.4f)",
+							rtRepNext.stdRatio, rtRepNext.lag1Rise).c_str());
+					Assert::IsTrue(rtRepPrev.betaOwn >= kGrainBarMinBetaOwn);
+					Assert::IsTrue(std::fabs(rtRepPrev.betaForeign) <= kGrainBarMaxBetaForeign);
+					Assert::IsTrue(std::fabs(rtRepNext.betaForeign) <= kGrainBarMaxBetaForeign);
+					Assert::IsTrue(std::fabs(rtRepPrev.stdRatio - 1.0) <= kGrainBarMaxRmsError);
+					Assert::IsTrue(rtRepPrev.lag1Rise <= kGrainBarMaxLag1Rise);
+				}
 			}
 
-			// ---- Part D: Rack-Focus Veto Fires on Preset::RealTime (focusVetoCells >= 1) ----
+			// ---- Part D (Full-Diff HIGH-1): Full All-Band Rack-Focus Veto + GPU BokehMode::Untouched vs LowBandCellOnly Parity ----
 			{
 				// Dedicated interior rack-focus fixture: sharp periodic bars on prev/next in interior cell (1, 1)
 				// ([16..32) x [16..32)) vs optically defocused sigma=4.5 counterpart in curClean -> Parseval
-				// rack-focus veto MUST fire on cell (1, 1) under BOTH Reference and compact RealTime!
+				// rack-focus veto MUST fire on ALL bands (kBandMask == 0) under compact RealTime!
 				const ActiveRect full = ActiveRect::Full(w, h);
 				const ActiveRect rfRect{ 16, 16, 32, 32 };
 				const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
@@ -2734,21 +3465,93 @@ imageStore(dst_bad, p, vec4(y, 0.0, 0.0, 0.0));
 					FormatMsg("RealTime rack-focus veto failed to fire (focusVetoCells=%.0f)",
 						static_cast<double>(rfRes.focusVetoCells)).c_str());
 
-				// Interior cell (1, 1) is the planted defocused cell: rack-focus veto must zero active band mask and protect outputClean!
+				// Full-Diff HIGH-1: rack-focus (focusChange == true) MUST hard-veto ALL 3 bands (kBandMask == 0)
+				// and keep full-plane drift < 1.0 code!
 				const size_t rfCellIdx = 1u * static_cast<size_t>(cw) + 1u;
-				Assert::AreEqual(0.0f, rfRes.tdMaps[rfCellIdx].f[TdMapsView::kBandMask],
-					L"RealTime TdMaps kBandMask must be 0.0 on vetoed rack-focus cell (1, 1)");
+				const int rfBandMask = static_cast<int>(std::lround(rfRes.tdMaps[rfCellIdx].f[TdMapsView::kBandMask]));
+				Assert::AreEqual(0, rfBandMask,
+					L"RealTime TdMaps kBandMask must be 0 (ALL bands L/M/H vetoed on rack-focus cell (1, 1))");
 
-				// NEGATIVE CONTROL (Rack-focus): Naive unprotected temporal average corrupts defocused cell (1, 1) by > 20 codes!
+				// NEGATIVE CONTROL (Rack-focus): Naive unprotected temporal average corrupts defocused cell > 20 codes!
 				TdV2Plane naiveAvg(w, h, 0.0);
 				for (size_t i = 0; i < naiveAvg.v.size(); ++i)
 					naiveAvg.v[i] = (curRf.v[i] + prevRf.v[i] + nextRf.v[i]) / 3.0;
-				const double naiveRfCorrupt = std::sqrt(PlaneMse(naiveAvg, curRf, rfRect));
-				const double rtRfDrift      = std::sqrt(PlaneMse(rfRes.outputClean, curRf, rfRect));
-				Assert::IsTrue(naiveRfCorrupt > 20.0,
-					FormatMsg("Negative control failed: naive rack-focus corruption=%.2f <= 20.0", naiveRfCorrupt).c_str());
-				Assert::IsTrue(rtRfDrift < 1.0,
-					FormatMsg("RealTime rack-focus cell drift=%.3f >= 1.0 despite veto", rtRfDrift).c_str());
+				const double naiveFullCorrupt = std::sqrt(PlaneMse(naiveAvg, curRf, rfRect));
+				const double rtFullDrift      = std::sqrt(PlaneMse(rfRes.outputClean, curRf, rfRect));
+				Assert::IsTrue(naiveFullCorrupt > 20.0,
+					FormatMsg("Negative control failed: naive rack-focus full-plane corruption=%.2f <= 20.0", naiveFullCorrupt).c_str());
+				Assert::IsTrue(rtFullDrift < 1.0,
+					FormatMsg("RealTime rack-focus full-plane drift=%.3f >= 1.0 despite all-band veto", rtFullDrift).c_str());
+
+				// Matched-focus BokehMode::Untouched vs BokehMode::LowBandCellOnly GPU==CPU parity (Q4 / Full-Diff HIGH-1):
+				// All 3 frames share the SAME optically defocused blurred step edge (sigma=3.5 -> isDefocused==true, focusChange==false)
+				// while cur carries low-frequency L-band coding wear (+18-code wave in L).
+				TdV2Plane bokehBase(w, h, 0.0);
+				const double bSig = 3.5;
+				const double bInv = 1.0 / (std::sqrt(2.0) * bSig);
+				for (int y = 0; y < h; ++y)
+					for (int x = 0; x < w; ++x)
+						bokehBase.at(x, y) = 340.0 + 240.0 * 0.5 * (1.0 + std::erf((static_cast<double>(x) - 32.0) * bInv));
+
+				TdV2Plane lWearRaw(w, h, 0.0);
+				std::mt19937 bRng(7350u);
+				std::normal_distribution<double> bDist(0.0, 28.0);
+				for (double& v : lWearRaw.v) v = bDist(bRng);
+				const ThreeBandPlanes lWearBands = DecomposeActiveBands(lWearRaw, full);
+				TdV2Plane bokehCur = bokehBase;
+				for (size_t i = 0; i < bokehCur.v.size(); ++i)
+					bokehCur.v[i] += lWearBands.L.v[i];
+
+				std::vector<uint8_t> bokehMap(static_cast<size_t>(cw * ch), 1u);
+				FrameProcessInput bIn;
+				bIn.seq = 735;
+				bIn.receivedY = bokehCur;
+				bIn.hasCleanSplit = true;
+				bIn.cleanY = bokehCur;
+				bIn.activeRect = full;
+				bIn.prevPeak = { &bokehBase, &stillMf, false };
+				bIn.nextPeak = { &bokehBase, &stillMf, false };
+				bIn.explicitDefocusedCells = &bokehMap;
+				bIn.hasStepPrior = true;
+				bIn.estimatedStepDelta = 16.0;
+				bIn.deadZonePhi = kDeadZonePhiInter;
+				bIn.zeroCoeffFraction = 0.35;
+
+				const ActiveRect bokehEdgeCell{ 16, 16, 48, 48 };
+				const size_t bokehCellIdx = 1u * static_cast<size_t>(cw) + 1u;
+
+				// (a) BokehMode::Untouched: GPU matches CPU <= 1e-3, kBandMask == 0 on defocused bokeh cell, delta == 0.0!
+				{
+					Config cfgUnt = MakePreset(Preset::Reference, Mode::On);
+					cfgUnt.bokehMode = BokehMode::Untouched;
+					cfgUnt.enableLongAnchor = false;
+					TdV2ReferenceEngine cpuUnt(cfgUnt);
+					GpuEngineGuard gpuUnt(ctx.gpu, cfgUnt);
+					const FrameProcessResult cU = cpuUnt.ProcessFrame(bIn, nullptr);
+					const GpuProcessResult gU = gpuUnt.engine.ProcessFrame(ctx.gpu, ctx.dispatch, bIn, nullptr, nullptr);
+					AssertCpuGpuFrameParity(cU, gU, bokehCur, bokehCur, full, "Bokeh-Untouched");
+					Assert::AreEqual(0, static_cast<int>(std::lround(gU.tdMaps[bokehCellIdx].f[TdMapsView::kBandMask])),
+						L"BokehMode::Untouched must veto ALL bands (kBandMask == 0) on defocused cell");
+					Assert::AreEqual(0.0, MaxAbsPlane(gU.tdDelta, ActiveRect{ 16, 16, 32, 32 }),
+						L"BokehMode::Untouched must keep defocused cell delta == 0.0");
+				}
+				// (b) BokehMode::LowBandCellOnly: GPU matches CPU <= 1e-3, kBandMask == 1 (L-band ONLY; M/H == 0!), repairs L!
+				{
+					Config cfgLow = MakePreset(Preset::Reference, Mode::On);
+					cfgLow.bokehMode = BokehMode::LowBandCellOnly;
+					cfgLow.enableLongAnchor = false;
+					TdV2ReferenceEngine cpuLow(cfgLow);
+					GpuEngineGuard gpuLow(ctx.gpu, cfgLow);
+					const FrameProcessResult cL = cpuLow.ProcessFrame(bIn, nullptr);
+					const GpuProcessResult gL = gpuLow.engine.ProcessFrame(ctx.gpu, ctx.dispatch, bIn, nullptr, nullptr);
+					AssertCpuGpuFrameParity(cL, gL, bokehCur, bokehCur, full, "Bokeh-LowBandCellOnly");
+					const int bMaskLow = static_cast<int>(std::lround(gL.tdMaps[bokehCellIdx].f[TdMapsView::kBandMask]));
+					Assert::AreEqual(1, bMaskLow,
+						L"BokehMode::LowBandCellOnly must allow ONLY L-band (kBandMask == 1, M/H == 0) on defocused cell");
+					Assert::IsTrue(MaxAbsPlane(gL.tdDelta, bokehEdgeCell) > 0.5,
+						L"BokehMode::LowBandCellOnly must actively repair L-band coding wear (> 0.5 codes)");
+				}
+
 				Assert::AreEqual(static_cast<uint64_t>(0u), rtArena.NestedScopes(),
 					L"RealTime ScratchArena must finish with NestedScopes == 0");
 			}
@@ -2868,7 +3671,10 @@ imageStore(dst_bad, p, vec4(y, 0.0, 0.0, 0.0));
 				Assert::IsTrue(zcGuard.engine.ProcessFrameGpu(ctx.gpu, ctx.dispatch, zcIn0, zcOut0, nullptr, nullptr),
 					L"ProcessFrameGpu seed frame failed");
 				Assert::IsTrue(zcOut0.succeeded, L"ProcessFrameGpu seed succeeded must be true");
-				Assert::AreEqual(1, zcOut0.dispatchCount, L"ProcessFrameGpu seed frame must issue 1 copy dispatch");
+				Assert::AreEqual(2, zcOut0.dispatchCount,
+					L"ProcessFrameGpu seed frame with tdMapsTex must issue 2 dispatches (seed copy + cell zero)");
+				Assert::AreEqual(static_cast<size_t>(cw * ch), zcOut0.tdMaps.size(),
+					L"ProcessFrameGpu seed frame must populate out.tdMaps");
 				Assert::IsTrue(zcGuard.engine.HasCarry(), L"ProcessFrameGpu seed frame must establish GPU carry");
 
 				TdV2Plane zcSeedY, zcSeedClean;
@@ -3273,39 +4079,7 @@ imageStore(dst_bad, p, vec4(y, 0.0, 0.0, 0.0));
 			const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
 			const ActiveRect microRect{ 34, 37, 46, 45 };
 			const ActiveRect skinRect{ 2, 2, 30, 30 };
-
-			auto verticalEdgeContrast = [](const TdV2Plane& p, const ActiveRect& r) -> double
-			{
-				double sumAbsGrad = 0.0;
-				size_t n = 0;
-				for (int y = r.y0; y < r.y1 - 1; ++y)
-				{
-					for (int x = r.x0; x < r.x1; ++x)
-					{
-						sumAbsGrad += std::fabs(p.at(x, y + 1) - p.at(x, y));
-						++n;
-					}
-				}
-				return n > 0 ? (sumAbsGrad / static_cast<double>(n)) : 0.0;
-			};
-
-			const double gtMicroContrast = verticalEdgeContrast(curMaster, microRect);
-			Assert::IsTrue(gtMicroContrast > 25.0, L"Portrait eyelid/lip crease must have strong ground-truth edge contrast");
 			const double curSkinRmse = std::sqrt(PlaneMse(curReceived, curMaster, skinRect));
-			const double curMicroRmse = std::sqrt(PlaneMse(curReceived, curMaster, microRect));
-
-			// ---- MANDATORY IN-TEST NEGATIVE CONTROL (Rule 3): Naive uniform temporal average (cur + prev + next)/3
-			//      on the EXACT SAME portrait input severely smears the shifted eyelid (RMSE > 25, contrast < 60%)! ----
-			TdV2Plane naiveAvg(w, h, 0.0);
-			for (size_t i = 0; i < naiveAvg.v.size(); ++i)
-				naiveAvg.v[i] = (curReceived.v[i] + prevPeak.v[i] + nextPeak.v[i]) / 3.0;
-
-			const double naiveMicroRmse = std::sqrt(PlaneMse(naiveAvg, curMaster, microRect));
-			const double naiveContrastRatio = verticalEdgeContrast(naiveAvg, microRect) / gtMicroContrast;
-			Assert::IsTrue(naiveMicroRmse > 25.0,
-				FormatMsg("Negative control failed: naive portrait micro-RMSE=%.2f <= 25.0", naiveMicroRmse).c_str());
-			Assert::IsTrue(naiveContrastRatio < 0.60,
-				FormatMsg("Negative control failed: naive portrait contrastRatio=%.3f >= 0.60", naiveContrastRatio).c_str());
 
 			// Reserve a compact RealTime ScratchArena to exercise the full RealTime GPU path too.
 			const std::vector<VpSkeleton::ArenaRequest> rtReqs = TdV2GpuEngine::ArenaRequests(ctx.gpu, w, h, 16, Preset::RealTime);
@@ -3341,56 +4115,1570 @@ imageStore(dst_bad, p, vec4(y, 0.0, 0.0, 0.0));
 				in.zeroCoeffFraction = 0.35;
 				in.transformIdentified8x8 = mc.transform8x8;
 
-				// 1. CPU Reference Engine
+				// Pass-1 face mask (plan Q2 / s1.3 L127 / s3.3: moving face delta hash == 0):
+				// Mask cell (2, 2) containing the moving eyelid/lip crease!
+				std::vector<uint8_t> faceMask(static_cast<size_t>(cw) * static_cast<size_t>(ch), 0u);
+				faceMask[2u * static_cast<size_t>(cw) + 2u] = 1u;
+				in.faceMask = &faceMask;
+
+				// 1. CPU Reference Engine with Pass-1 face mask
 				Config cfgRef = MakePreset(Preset::Reference, Mode::On);
 				cfgRef.residualMode = mc.resMode;
 				cfgRef.cellProjIterations = 2;
 				cfgRef.enableLongAnchor = false;
 				TdV2ReferenceEngine cpuEng(cfgRef);
-				const FrameProcessResult cpuRes = cpuEng.ProcessFrame(in, nullptr);
+				StandInRegistry cpuFaceSi;
+				const FrameProcessResult cpuRes = cpuEng.ProcessFrame(in, &cpuFaceSi);
+				Assert::IsTrue(cpuFaceSi.IsActive(StandInKind::FaceNonRigidMask),
+					L"CPU Pass-1 faceMask must engage StandInKind::FaceNonRigidMask");
 
 				// 2. GPU Preset::Reference -> MUST match CPU within <= 1e-3 10-bit code!
 				GpuEngineGuard gpuRefGuard(ctx.gpu, cfgRef);
-				const GpuProcessResult gpuRefRes = gpuRefGuard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, in, nullptr, nullptr);
+				StandInRegistry gpuRefSi;
+				const GpuProcessResult gpuRefRes = gpuRefGuard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, in, nullptr, &gpuRefSi);
 				AssertCpuGpuFrameParity(cpuRes, gpuRefRes, curReceived, curReceived, full, mc.tag);
+				Assert::IsTrue(gpuRefSi.IsActive(StandInKind::FaceNonRigidMask),
+					L"GPU Reference Pass-1 faceMask must engage StandInKind::FaceNonRigidMask");
 
-				// 3. GPU Preset::RealTime (compact band path on ScratchArena)
+				// 3. GPU Preset::RealTime (compact FP32 band path on ScratchArena)
 				Config cfgRt = MakePreset(Preset::RealTime, Mode::On);
 				cfgRt.residualMode = mc.resMode;
 				cfgRt.cellProjIterations = 2;
 				cfgRt.enableLongAnchor = false;
 				GpuEngineGuard gpuRtGuard(ctx.gpu, cfgRt);
+				StandInRegistry gpuRtSi;
 				rtArena.BeginFrame();
-				const GpuProcessResult gpuRtRes = gpuRtGuard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, in, &rtArena, nullptr);
+				const GpuProcessResult gpuRtRes = gpuRtGuard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, in, &rtArena, &gpuRtSi);
 				Assert::IsTrue(gpuRtRes.succeeded && !gpuRtRes.scratchShort,
 					FormatTagMsg(mc.tag, "GPU RealTime portrait ProcessFrame failed").c_str());
 				AssertAllFinitePlane(gpuRtRes.outputY, L"GPU RealTime portrait outputY must be finite");
+				Assert::IsTrue(gpuRtSi.IsActive(StandInKind::FaceNonRigidMask),
+					L"GPU RealTime Pass-1 faceMask must engage StandInKind::FaceNonRigidMask");
 
-				// Verify BOTH GPU Reference and GPU RealTime preserve >= 85% shifted eyelid contrast with zero wax smearing
-				// while genuinely reducing coding noise on the surrounding still skin cells!
-				auto verifyNoWaxSmear = [&](const TdV2Plane& outY, const char* presetTag)
+				// Verify BOTH GPU Reference and GPU RealTime enforce exact delta == 0 on masked moving face cell (2,2)
+				// (plan s3.3: "moving face delta hash = 0", zero extra harm) while still repairing unmasked background!
+				TdV2Plane curReceivedF32(w, h, 0.0);
+				for (size_t i = 0; i < curReceived.v.size(); ++i)
+					curReceivedF32.v[i] = static_cast<double>(static_cast<float>(curReceived.v[i]));
+				const double curMicroRmseF32 = std::sqrt(PlaneMse(curReceivedF32, curMaster, microRect));
+				const ActiveRect faceCellRect{ 32, 32, 48, 48 };
+				auto verifyPass1FaceProtected = [&](const GpuProcessResult& r, const char* presetTag)
 				{
-					const double tdMicroRmse = std::sqrt(PlaneMse(outY, curMaster, microRect));
-					const double tdSkinRmse  = std::sqrt(PlaneMse(outY, curMaster, skinRect));
-					const double tdContrastRatio = verticalEdgeContrast(outY, microRect) / gtMicroContrast;
-
+					Assert::AreEqual(0.0, MaxAbsPlane(r.tdDelta, faceCellRect),
+						FormatTagMsg(presetTag, "Masked face cell tdDelta must be exact 0.0").c_str());
+					Assert::AreEqual(0.0, MaxAbsDiffRect(r.outputY, curReceivedF32, faceCellRect),
+						FormatTagMsg(presetTag, "Masked face cell outputY must equal R32F receivedY bit-exact").c_str());
+					const double tdMicroRmse = std::sqrt(PlaneMse(r.outputY, curMaster, microRect));
+					const double tdSkinRmse  = std::sqrt(PlaneMse(r.outputY, curMaster, skinRect));
+					Assert::AreEqual(curMicroRmseF32, tdMicroRmse, 1e-12,
+						FormatTagMsg(presetTag, "Masked face micro-RMSE=%.6f != R32F received=%.6f", tdMicroRmse, curMicroRmseF32).c_str());
 					Assert::IsTrue(tdSkinRmse < curSkinRmse * 0.88,
-						FormatTagMsg(presetTag, "still skin noise not repaired (td=%.2f vs cur=%.2f)", tdSkinRmse, curSkinRmse).c_str());
-					Assert::IsTrue(tdMicroRmse < naiveMicroRmse * 0.45,
-						FormatTagMsg(presetTag, "eyelid micro-RMSE=%.2f >= 0.45x naive (%.2f)", tdMicroRmse, naiveMicroRmse).c_str());
-					Assert::IsTrue(tdMicroRmse <= curMicroRmse + 4.0,
-						FormatTagMsg(presetTag, "eyelid micro-RMSE=%.2f > cur+4 (%.2f)", tdMicroRmse, curMicroRmse + 4.0).c_str());
-					Assert::IsTrue(tdContrastRatio >= 0.85,
-						FormatTagMsg(presetTag, "eyelid contrast retention=%.3f < 0.85 (wax smear!)", tdContrastRatio).c_str());
-					Assert::IsTrue(tdContrastRatio > naiveContrastRatio + 0.25,
-						FormatTagMsg(presetTag, "eyelid contrast=%.3f did not decisively beat naive=%.3f", tdContrastRatio, naiveContrastRatio).c_str());
+						FormatTagMsg(presetTag, "Unmasked background skin not strongly repaired (td=%.2f >= 0.88*cur=%.2f)",
+							tdSkinRmse, curSkinRmse * 0.88).c_str());
 				};
 
-				verifyNoWaxSmear(gpuRefRes.outputY, mc.transform8x8 ? "GpuRef-8x8STRICT" : "GpuRef-UnknownCELL");
-				verifyNoWaxSmear(gpuRtRes.outputY,  mc.transform8x8 ? "GpuRT-8x8STRICT"  : "GpuRT-UnknownCELL");
+				verifyPass1FaceProtected(gpuRefRes, mc.transform8x8 ? "GpuRef-8x8STRICT" : "GpuRef-UnknownCELL");
+				verifyPass1FaceProtected(gpuRtRes,  mc.transform8x8 ? "GpuRT-8x8STRICT"  : "GpuRT-UnknownCELL");
+
+				// NEGATIVE CONTROL (Unmasked run on exact same portrait): removing faceMask produces non-zero delta
+				// inside faceCellRect, proving faceMask is actively suppressing temporal blending on the moving face!
+				FrameProcessInput unmaskedIn = in;
+				unmaskedIn.faceMask = nullptr;
+				StandInRegistry unmaskedSi;
+				const GpuProcessResult unmaskedRes = gpuRefGuard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, unmaskedIn, nullptr, &unmaskedSi);
+				Assert::IsTrue(unmaskedRes.succeeded, L"Unmasked negative control failed");
+				Assert::IsFalse(unmaskedSi.IsActive(StandInKind::FaceNonRigidMask),
+					L"Negative control: unmasked run must NOT engage FaceNonRigidMask");
+				Assert::IsTrue(MaxAbsPlane(unmaskedRes.tdDelta, faceCellRect) > 1.0,
+					L"Negative control: unmasked portrait run must produce non-zero delta (> 1.0) on face cell");
+			}
+
+			// ---- Part B (H13b / Full-Diff HIGH-2): GPU Unmasked Subtle Cell-Boundary Micro-Motion
+			//      enablePerCornerHuber = true vs enablePerCornerHuber = false on BOTH Reference & RealTime! ----
+			{
+				auto renderFold = [&](double foldShiftY) -> TdV2Plane
+				{
+					TdV2Plane p(w, h, 0.0);
+					for (int y = 0; y < h; ++y)
+					{
+						for (int x = 0; x < w; ++x)
+						{
+							const double dx = static_cast<double>(x) - 32.0;
+							const double dy = static_cast<double>(y) - 32.0;
+							const double shading = 470.0 + 42.0 * std::cos(2.0 * kPi * dx / 96.0) * std::cos(2.0 * kPi * dy / 88.0);
+							const double tex = 9.0 * std::sin(2.0 * kPi * (x / 7.3 + y / 9.1) + 0.3)
+							                 + 7.0 * std::cos(2.0 * kPi * (x / 5.1 - y / 6.7) + 1.4);
+							double val = shading + tex;
+							// Subtle unmasked non-face fold localized right at the left boundary of cell (2, 2): x in [32, 42).
+							if (x >= 32 && x < 42)
+							{
+								const double cx = static_cast<double>(x) - 36.5;
+								const double centerY = 37.0 + foldShiftY;
+								const double dist = static_cast<double>(y) - centerY;
+								const double horizTaper = std::exp(-0.5 * (cx / 3.2) * (cx / 3.2));
+								val -= 140.0 * horizTaper * std::exp(-0.5 * (dist / 0.75) * (dist / 0.75));
+								val +=  50.0 * horizTaper * std::exp(-0.5 * ((dist + 1.6) / 0.75) * ((dist + 1.6) / 0.75));
+							}
+							p.at(x, y) = val;
+						}
+					}
+					return p;
+				};
+
+				const TdV2Plane fRefMaster = renderFold(0.0);
+				const TdV2Plane fCurMaster = renderFold(2.0);
+				const TdV2Plane fCurRec    = AddCodingDamage(fCurMaster, 7.0, 1251u, 0.0, full);
+				const TdV2Plane fPrevPeak  = AddCodingDamage(fRefMaster, 1.2, 1252u, 0.0, full);
+				const TdV2Plane fNextPeak  = AddCodingDamage(fRefMaster, 1.2, 1253u, 0.0, full);
+
+				const ActiveRect microCellRect{ 32, 32, 48, 48 };
+				const ActiveRect bgRect{ 2, 2, 30, 30 };
+				const double curFoldMicroRmse = std::sqrt(PlaneMse(fCurRec, fCurMaster, microCellRect));
+				const double curFoldBgRmse    = std::sqrt(PlaneMse(fCurRec, fCurMaster, bgRect));
+
+				FrameProcessInput hIn;
+				hIn.seq = 950;
+				hIn.receivedY = fCurRec;
+				hIn.hasCleanSplit = true;
+				hIn.cleanY = fCurRec;
+				hIn.activeRect = full;
+				hIn.prevPeak = { &fPrevPeak, &stillMf, false };
+				hIn.nextPeak = { &fNextPeak, &stillMf, false };
+				hIn.hasStepPrior = true;
+				hIn.estimatedStepDelta = 14.0;
+				hIn.deadZonePhi = kDeadZonePhiInter;
+				hIn.zeroCoeffFraction = 0.20;
+				hIn.faceMask = nullptr; // Explicitly UNMASKED non-face subtle micro-motion!
+
+				// 1. Preset::Reference: GPU == CPU <= 1e-3 for BOTH enablePerCornerHuber = true AND false!
+				Config cfgRefOn = MakePreset(Preset::Reference, Mode::On);
+				cfgRefOn.enableLongAnchor = false;
+				cfgRefOn.enablePerCornerHuber = true;
+				Config cfgRefOff = cfgRefOn;
+				cfgRefOff.enablePerCornerHuber = false;
+
+				TdV2ReferenceEngine cpuRefOnEng(cfgRefOn), cpuRefOffEng(cfgRefOff);
+				GpuEngineGuard gpuRefOnGuard(ctx.gpu, cfgRefOn), gpuRefOffGuard(ctx.gpu, cfgRefOff);
+				const FrameProcessResult cRefOn  = cpuRefOnEng.ProcessFrame(hIn, nullptr);
+				const FrameProcessResult cRefOff = cpuRefOffEng.ProcessFrame(hIn, nullptr);
+				const GpuProcessResult   gRefOn  = gpuRefOnGuard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, hIn, nullptr, nullptr);
+				const GpuProcessResult   gRefOff = gpuRefOffGuard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, hIn, nullptr, nullptr);
+				AssertCpuGpuFrameParity(cRefOn,  gRefOn,  fCurRec, fCurRec, full, "H13b-RefHuberON");
+				AssertCpuGpuFrameParity(cRefOff, gRefOff, fCurRec, fCurRec, full, "H13b-RefHuberOFF");
+
+				const double gRefOnMicro  = std::sqrt(PlaneMse(gRefOn.outputY,  fCurMaster, microCellRect));
+				const double gRefOffMicro = std::sqrt(PlaneMse(gRefOff.outputY, fCurMaster, microCellRect));
+				const double gRefOnBg     = std::sqrt(PlaneMse(gRefOn.outputY,  fCurMaster, bgRect));
+				Assert::IsTrue(gRefOnMicro <= curFoldMicroRmse,
+					FormatMsg("H13b GPU Reference Huber-ON violated strict no-harm (%.3f > %.3f)", gRefOnMicro, curFoldMicroRmse).c_str());
+				Assert::IsTrue(gRefOffMicro > gRefOnMicro && gRefOffMicro > curFoldMicroRmse,
+					FormatMsg("H13b GPU Reference negative control: Huber-OFF (%.3f) must degrade vs Huber-ON (%.3f) and violate no-harm",
+						gRefOffMicro, gRefOnMicro).c_str());
+				Assert::IsTrue(gRefOnBg < curFoldBgRmse * 0.88,
+					FormatMsg("H13b GPU Reference Huber-ON failed to repair stationary bg (%.2f >= %.2f)",
+						gRefOnBg, curFoldBgRmse * 0.88).c_str());
+
+				// 2. Preset::RealTime (poolR = 0): GPU Huber-ON satisfies strict no-harm while GPU Huber-OFF degrades!
+				Config cfgRtOn = MakePreset(Preset::RealTime, Mode::On);
+				cfgRtOn.enableLongAnchor = false;
+				cfgRtOn.enablePerCornerHuber = true;
+				Config cfgRtOff = cfgRtOn;
+				cfgRtOff.enablePerCornerHuber = false;
+
+				GpuEngineGuard gpuRtOnGuard(ctx.gpu, cfgRtOn), gpuRtOffGuard(ctx.gpu, cfgRtOff);
+				rtArena.BeginFrame();
+				const GpuProcessResult gRtOn  = gpuRtOnGuard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, hIn, &rtArena, nullptr);
+				rtArena.BeginFrame();
+				const GpuProcessResult gRtOff = gpuRtOffGuard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, hIn, &rtArena, nullptr);
+				Assert::IsTrue(gRtOn.succeeded && !gRtOn.scratchShort, L"H13b GPU RealTime Huber-ON failed");
+				Assert::IsTrue(gRtOff.succeeded && !gRtOff.scratchShort, L"H13b GPU RealTime Huber-OFF failed");
+
+				const double gRtOnMicro  = std::sqrt(PlaneMse(gRtOn.outputY,  fCurMaster, microCellRect));
+				const double gRtOffMicro = std::sqrt(PlaneMse(gRtOff.outputY, fCurMaster, microCellRect));
+				const double gRtOnBg     = std::sqrt(PlaneMse(gRtOn.outputY,  fCurMaster, bgRect));
+				Assert::IsTrue(gRtOnMicro <= curFoldMicroRmse,
+					FormatMsg("H13b GPU RealTime Huber-ON violated strict no-harm (%.3f > %.3f)", gRtOnMicro, curFoldMicroRmse).c_str());
+				Assert::IsTrue(gRtOffMicro > gRtOnMicro && gRtOffMicro > curFoldMicroRmse,
+					FormatMsg("H13b GPU RealTime negative control: Huber-OFF (%.3f) must worsen vs Huber-ON (%.3f)",
+						gRtOffMicro, gRtOnMicro).c_str());
+				Assert::IsTrue(gRtOnBg < curFoldBgRmse * 0.88,
+					FormatMsg("H13b GPU RealTime Huber-ON failed to repair stationary bg (%.2f >= %.2f)",
+						gRtOnBg, curFoldBgRmse * 0.88).c_str());
 			}
 			Assert::AreEqual(static_cast<uint64_t>(0u), rtArena.NestedScopes(),
 				L"Portrait RealTime ScratchArena must finish with NestedScopes == 0");
+		}
+
+		// =========================================================================
+		// 10. H5: Prepacked motionVecTex/motionMetaTex Fixed Slots (prev=0, next=1,
+		//     carry=2) With prevPeak == nullptr + Texture Dimension Mismatch Guards
+		// =========================================================================
+		BEGIN_TEST_METHOD_ATTRIBUTE(PrepackedMotionFixedSlotsPrevNullAndTextureDimensionGuards)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(PrepackedMotionFixedSlotsPrevNullAndTextureDimensionGuards)
+		{
+			WarpGpuContext ctx;
+
+			struct OwnedTex
+			{
+				pl_gpu gpu = nullptr;
+				pl_tex tex = nullptr;
+				explicit OwnedTex(pl_gpu g) : gpu(g) {}
+				~OwnedTex() { if (gpu && tex) pl_tex_destroy(gpu, &tex); }
+				OwnedTex(const OwnedTex&) = delete;
+				OwnedTex& operator=(const OwnedTex&) = delete;
+			};
+
+			const int w = 64, h = 64;
+			const int cw = w / 16, ch = h / 16;
+			const ActiveRect full = ActiveRect::Full(w, h);
+			const double dx = 2.0, dy = 1.0;
+
+			const pl_fmt fmtR32    = VpSkeleton::PlTexBackend::FindFormat(ctx.gpu, VpSkeleton::TexFormat::R32F);
+			const pl_fmt fmtRG32   = VpSkeleton::PlTexBackend::FindFormat(ctx.gpu, VpSkeleton::TexFormat::RG32F);
+			const pl_fmt fmtRGBA32 = VpSkeleton::PlTexBackend::FindFormat(ctx.gpu, VpSkeleton::TexFormat::RGBA32F);
+			Assert::IsNotNull(fmtR32); Assert::IsNotNull(fmtRG32); Assert::IsNotNull(fmtRGBA32);
+
+			// Frame 0 (seed carry): t = 0; Frame 1 (cur): t = 1 (+dx, +dy); Next peak: t = 2 (+2*dx, +2*dy).
+			// True motion from cur(t=1) to:
+			//   - slot 1 (nextPeak, t=2):  (+2.0, +1.0)
+			//   - slot 2 (carry,    t=0):  (-2.0, -1.0)  <-- OPPOSITE direction to next!
+			//   - slot 0 (prevPeak, NULL): poisoned garbage (+11.0, -9.0, valid=0)
+			// High-contrast bandlimited 10-bit scene (strong M/H energy -> zero spurious focus veto)
+			// paired with crisp I-frame carry seed (noise=0.5), noisy current valley (noise=8.0), and noisier next ref (noise=7.0)
+			// so carry dominates true-slot fusion while wrong-slot carry warping diverges sharply (> 5.0 codes)!
+			auto renderH5Scene = [&](double sx, double sy) -> TdV2Plane
+			{
+				TdV2Plane p(w, h, 0.0);
+				for (int y = 0; y < h; ++y)
+				{
+					for (int x = 0; x < w; ++x)
+					{
+						const double gx = static_cast<double>(x) - sx;
+						const double gy = static_cast<double>(y) - sy;
+						p.at(x, y) = 512.0
+							+ 120.0 * std::sin(2.0 * kPi * (gx / 11.0 + gy / 13.0))
+							+  90.0 * std::cos(2.0 * kPi * (gx / 7.0  - gy / 9.0));
+					}
+				}
+				return p;
+			};
+			const TdV2Plane m0 = renderH5Scene(0.0, 0.0);
+			const TdV2Plane m1 = renderH5Scene(1.0 * dx, 1.0 * dy);
+			const TdV2Plane m2 = renderH5Scene(2.0 * dx, 2.0 * dy);
+			const TdV2Plane f0Clean = AddCodingDamage(m0, 0.5, 10001u, 0.0, full);
+			const TdV2Plane f1Clean = AddCodingDamage(m1, 8.0, 10002u, 0.0, full);
+			const TdV2Plane f2Clean = AddCodingDamage(m2, 7.0, 10003u, 0.0, full);
+
+			const CellMotionField mfNext  = CellMotionField::Uniform(cw, ch, +dx, +dy, +dx, +dy, RegionMotionClass::Camera);
+			const CellMotionField mfCarry = CellMotionField::Uniform(cw, ch, -dx, -dy, -dx, -dy, RegionMotionClass::Camera);
+
+			Config cfg = MakePreset(Preset::Reference, Mode::On);
+			cfg.enableLongAnchor = false;
+			cfg.enableCarryForward = true;
+
+			// 1. Ground-truth CPU reference: frame 0 seed -> frame 1 with prevPeak=nullptr, nextPeak=f2Clean, carry=f0Clean.
+			TdV2ReferenceEngine cpuEng(cfg);
+			{
+				FrameProcessInput cIn0;
+				cIn0.seq = 1000;
+				cIn0.receivedY = f0Clean;
+				cIn0.hasCleanSplit = true;
+				cIn0.cleanY = f0Clean;
+				cIn0.activeRect = full;
+				cpuEng.ProcessFrame(cIn0, nullptr);
+				Assert::IsTrue(cpuEng.HasCarry(), L"CPU frame 0 must seed carry");
+			}
+			FrameProcessInput cIn1;
+			cIn1.seq = 1001;
+			cIn1.receivedY = f1Clean;
+			cIn1.hasCleanSplit = true;
+			cIn1.cleanY = f1Clean;
+			cIn1.activeRect = full;
+			cIn1.prevPeak = { nullptr, nullptr, false }; // prevPeak strictly NULL!
+			cIn1.nextPeak = { &f2Clean, &mfNext, false };
+			cIn1.carryMotion = mfCarry;
+			cIn1.hasCarryMotion = true;
+			cIn1.hasStepPrior = true;
+			cIn1.estimatedStepDelta = 24.0;
+			cIn1.deadZonePhi = kDeadZonePhiInter;
+			cIn1.zeroCoeffFraction = 0.35;
+			const FrameProcessResult cpuRes1 = cpuEng.ProcessFrame(cIn1, nullptr);
+			Assert::IsTrue(cpuRes1.carryUsed && cpuRes1.activeRefCount == 2u,
+				L"CPU frame 1 must fuse 2 refs (next + carry) with prevPeak == nullptr");
+			Assert::AreEqual(static_cast<size_t>(0u), cpuRes1.focusVetoCells,
+				L"H5 high-contrast scene must have zero spurious focus veto cells");
+
+			// 2. Zero-copy GPU ProcessFrameGpu with prepacked motionVecTex/motionMetaTex/cellPriorTex and prevPeak == nullptr!
+			OwnedTex recTex(ctx.gpu), nextTex(ctx.gpu), outYTex(ctx.gpu), outCleanTex(ctx.gpu), outDeltaTex(ctx.gpu);
+			OwnedTex motVecTex(ctx.gpu), motMetaTex(ctx.gpu), priorTex(ctx.gpu);
+			Assert::IsTrue(Detail::EnsureTex(ctx.gpu, recTex.tex, w, h, fmtR32, true, false, true, false));
+			Assert::IsTrue(Detail::EnsureTex(ctx.gpu, nextTex.tex, w, h, fmtR32, true, false, true, false));
+			Assert::IsTrue(Detail::EnsureTex(ctx.gpu, outYTex.tex, w, h, fmtR32, true, true, false, true));
+			Assert::IsTrue(Detail::EnsureTex(ctx.gpu, outCleanTex.tex, w, h, fmtR32, true, true, false, true));
+			Assert::IsTrue(Detail::EnsureTex(ctx.gpu, outDeltaTex.tex, w, h, fmtRG32, true, true, false, true));
+			Assert::IsTrue(Detail::EnsureTex(ctx.gpu, motVecTex.tex, 3 * cw, ch, fmtRGBA32, true, false, true, false));
+			Assert::IsTrue(Detail::EnsureTex(ctx.gpu, motMetaTex.tex, 3 * cw, ch, fmtRG32, true, false, true, false));
+			Assert::IsTrue(Detail::EnsureTex(ctx.gpu, priorTex.tex, cw, ch, fmtRG32, true, false, true, false));
+
+			// Pack fixed slots: slot 0 = prev (poisoned), slot 1 = next (+dx, +dy), slot 2 = carry (-dx, -dy).
+			std::vector<float> vecBuf(static_cast<size_t>(3 * cw * ch) * 4u, 0.0f);
+			std::vector<float> metaBuf(static_cast<size_t>(3 * cw * ch) * 2u, 0.0f);
+			auto writeSlot = [&](int slot, float vx, float vy, float cls, float valid)
+			{
+				for (int cy = 0; cy < ch; ++cy)
+				{
+					for (int cx = 0; cx < cw; ++cx)
+					{
+						const size_t t = static_cast<size_t>(cy) * static_cast<size_t>(3 * cw) + static_cast<size_t>(slot * cw + cx);
+						vecBuf[t * 4u + 0u] = vx;
+						vecBuf[t * 4u + 1u] = vy;
+						vecBuf[t * 4u + 2u] = vx;
+						vecBuf[t * 4u + 3u] = vy;
+						metaBuf[t * 2u + 0u] = cls;
+						metaBuf[t * 2u + 1u] = valid;
+					}
+				}
+			};
+			writeSlot(0, +11.0f, -9.0f, static_cast<float>(RegionMotionClass::Camera), 0.0f);
+			writeSlot(1, static_cast<float>(+dx), static_cast<float>(+dy), static_cast<float>(RegionMotionClass::Camera), 1.0f);
+			writeSlot(2, static_cast<float>(-dx), static_cast<float>(-dy), static_cast<float>(RegionMotionClass::Camera), 1.0f);
+			Assert::IsTrue(Detail::UploadFloats(ctx.gpu, motVecTex.tex, vecBuf.data()));
+			Assert::IsTrue(Detail::UploadFloats(ctx.gpu, motMetaTex.tex, metaBuf.data()));
+			std::vector<float> priorBuf(static_cast<size_t>(cw * ch) * 2u, 0.0f);
+			Assert::IsTrue(Detail::UploadFloats(ctx.gpu, priorTex.tex, priorBuf.data()));
+
+			GpuEngineGuard zcGuard(ctx.gpu, cfg);
+			// Seed carry on frame 0
+			Assert::IsTrue(Detail::UploadPlaneR32F(ctx.gpu, recTex.tex, f0Clean));
+			{
+				GpuFrameInput zIn0;
+				zIn0.seq = 1000; zIn0.w = w; zIn0.h = h;
+				zIn0.receivedYTex = recTex.tex;
+				zIn0.cleanYTex = recTex.tex;
+				zIn0.hasCleanSplit = true;
+				zIn0.activeRect = full;
+				GpuFrameOutput zOut0;
+				zOut0.outputYTex = outYTex.tex;
+				zOut0.outputCleanTex = outCleanTex.tex;
+				Assert::IsTrue(zcGuard.engine.ProcessFrameGpu(ctx.gpu, ctx.dispatch, zIn0, zOut0, nullptr, nullptr),
+					L"H5: zero-copy seed frame failed");
+				Assert::IsTrue(zcGuard.engine.HasCarry(), L"H5: zero-copy seed must establish carry");
+			}
+
+			// Active frame 1 with prevPeak == nullptr, nextPeak != nullptr, carry active, prepacked fixed slots!
+			Assert::IsTrue(Detail::UploadPlaneR32F(ctx.gpu, recTex.tex, f1Clean));
+			Assert::IsTrue(Detail::UploadPlaneR32F(ctx.gpu, nextTex.tex, f2Clean));
+			GpuFrameInput zIn1;
+			zIn1.seq = 1001; zIn1.w = w; zIn1.h = h;
+			zIn1.receivedYTex = recTex.tex;
+			zIn1.cleanYTex = recTex.tex;
+			zIn1.hasCleanSplit = true;
+			zIn1.activeRect = full;
+			zIn1.prevPeak = { nullptr, nullptr, false };
+			zIn1.nextPeak = { nextTex.tex, nullptr, false };
+			zIn1.motionVecTex = motVecTex.tex;
+			zIn1.motionMetaTex = motMetaTex.tex;
+			zIn1.cellPriorTex = priorTex.tex;
+			zIn1.hasStepPrior = true;
+			zIn1.estimatedStepDelta = 24.0;
+			zIn1.deadZonePhi = kDeadZonePhiInter;
+			zIn1.zeroCoeffFraction = 0.35;
+
+			GpuFrameOutput zOut1;
+			zOut1.outputYTex = outYTex.tex;
+			zOut1.outputCleanTex = outCleanTex.tex;
+			zOut1.tdDeltaTex = outDeltaTex.tex;
+			zOut1.readbackCellDiagnostics = true;
+
+			Assert::IsTrue(zcGuard.engine.ProcessFrameGpu(ctx.gpu, ctx.dispatch, zIn1, zOut1, nullptr, nullptr),
+				L"H5: prepacked fixed-slot ProcessFrameGpu with prevPeak==nullptr failed");
+			Assert::IsTrue(zOut1.succeeded && zOut1.carryUsed && zOut1.activeRefCount == 2u,
+				L"H5: prepacked frame 1 must fuse 2 refs (next + carry)");
+
+			TdV2Plane gpuOutY, gpuOutClean;
+			Assert::IsTrue(Detail::DownloadPlaneR32F(ctx.gpu, outYTex.tex, w, h, gpuOutY));
+			Assert::IsTrue(Detail::DownloadPlaneR32F(ctx.gpu, outCleanTex.tex, w, h, gpuOutClean));
+			const double parityErrY = MaxAbsDiffFull(gpuOutY, cpuRes1.outputY);
+			const double parityErrClean = MaxAbsDiffFull(gpuOutClean, cpuRes1.outputClean);
+			Assert::IsTrue(parityErrY <= kGpuCpuParityTol,
+				FormatMsg("H5: prepacked prevPeak=null outputY |GPU-CPU|=%.6f > 1e-3 (wrong motion slot?)", parityErrY).c_str());
+			Assert::IsTrue(parityErrClean <= kGpuCpuParityTol,
+				FormatMsg("H5: prepacked prevPeak=null outputClean |GPU-CPU|=%.6f > 1e-3", parityErrClean).c_str());
+
+			// NEGATIVE CONTROL (Exact pre-fix H5 slot-compaction bug on the exact same frames!):
+			// Warping carry with NEXT's vectors (+dx, +dy instead of -dx, -dy) diverges sharply from true output!
+			{
+				TdV2ReferenceEngine buggyEng(cfg);
+				FrameProcessInput bIn0;
+				bIn0.seq = 1000; bIn0.receivedY = f0Clean; bIn0.hasCleanSplit = true; bIn0.cleanY = f0Clean; bIn0.activeRect = full;
+				buggyEng.ProcessFrame(bIn0, nullptr);
+				FrameProcessInput bIn1 = cIn1;
+				bIn1.carryMotion = mfNext; // WRONG: next's opposite-direction motion applied to carry!
+				const FrameProcessResult buggyRes1 = buggyEng.ProcessFrame(bIn1, nullptr);
+				const double slotBugDiff = MaxAbsDiffFull(buggyRes1.outputY, cpuRes1.outputY);
+				const double trueRmse = std::sqrt(PlaneMse(gpuOutY, m1, full));
+				const double buggyRmse = std::sqrt(PlaneMse(buggyRes1.outputY, m1, full));
+				Assert::IsTrue(slotBugDiff > 5.0,
+					FormatMsg("H5 negative control: wrong carry motion slot diff=%.3f <= 5.0 codes", slotBugDiff).c_str());
+				Assert::IsTrue(buggyRmse > trueRmse + 0.5,
+					FormatMsg("H5 negative control: wrong carry motion RMSE=%.3f not worse than true=%.3f", buggyRmse, trueRmse).c_str());
+			}
+
+			// 2b. Round-3 MEDIUM-1: Prepacked 3*cw motion + prevPeak==null + nextPeak!=null + prevPeak2!=null + active carry:
+			//     prevPeak2 has NO fixed slot in 3*cw prepacked motion -> skips visibly (MotionFieldStandIn, motionStandInRefs>=1)
+			//     while carry stays locked to fixed slot 2 (NEVER pushed onto poisoned slot 0!) matching CPU < 1e-3!
+			{
+				OwnedTex p2Tex(ctx.gpu), m1VecTex(ctx.gpu), m1MetaTex(ctx.gpu);
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, p2Tex.tex, w, h, fmtR32, true, false, true, false));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, m1VecTex.tex, 3 * cw, ch, fmtRGBA32, true, false, true, false));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, m1MetaTex.tex, 3 * cw, ch, fmtRG32, true, false, true, false));
+				Assert::IsTrue(Detail::UploadPlaneR32F(ctx.gpu, p2Tex.tex, f0Clean));
+
+				// Poison slot 0 with valid=1.0 and bogus (vx=12, vy=12) so any slot-0 hijack would severely corrupt output!
+				std::vector<float> m1VecBuf(static_cast<size_t>(3 * cw * ch) * 4u, 0.0f);
+				std::vector<float> m1MetaBuf(static_cast<size_t>(3 * cw * ch) * 2u, 0.0f);
+				auto writeM1Slot = [&](int slot, float vx, float vy, float cls, float valid)
+				{
+					for (int cy = 0; cy < ch; ++cy)
+					{
+						for (int cx = 0; cx < cw; ++cx)
+						{
+							const size_t t = static_cast<size_t>(cy) * static_cast<size_t>(3 * cw) + static_cast<size_t>(slot * cw + cx);
+							m1VecBuf[t * 4u + 0u] = vx;  m1VecBuf[t * 4u + 1u] = vy;
+							m1VecBuf[t * 4u + 2u] = vx;  m1VecBuf[t * 4u + 3u] = vy;
+							m1MetaBuf[t * 2u + 0u] = cls; m1MetaBuf[t * 2u + 1u] = valid;
+						}
+					}
+				};
+				writeM1Slot(0, +12.0f, +12.0f, static_cast<float>(RegionMotionClass::Camera), 1.0f);
+				writeM1Slot(1, static_cast<float>(+dx), static_cast<float>(+dy), static_cast<float>(RegionMotionClass::Camera), 1.0f);
+				writeM1Slot(2, static_cast<float>(-dx), static_cast<float>(-dy), static_cast<float>(RegionMotionClass::Camera), 1.0f);
+				Assert::IsTrue(Detail::UploadFloats(ctx.gpu, m1VecTex.tex, m1VecBuf.data()));
+				Assert::IsTrue(Detail::UploadFloats(ctx.gpu, m1MetaTex.tex, m1MetaBuf.data()));
+
+				GpuEngineGuard m1Guard(ctx.gpu, cfg);
+				Assert::IsTrue(Detail::UploadPlaneR32F(ctx.gpu, recTex.tex, f0Clean));
+				{
+					GpuFrameInput sIn0;
+					sIn0.seq = 1000; sIn0.w = w; sIn0.h = h;
+					sIn0.receivedYTex = recTex.tex; sIn0.cleanYTex = recTex.tex; sIn0.hasCleanSplit = true; sIn0.activeRect = full;
+					GpuFrameOutput sOut0; sOut0.outputYTex = outYTex.tex; sOut0.outputCleanTex = outCleanTex.tex;
+					Assert::IsTrue(m1Guard.engine.ProcessFrameGpu(ctx.gpu, ctx.dispatch, sIn0, sOut0, nullptr, nullptr));
+					Assert::IsTrue(m1Guard.engine.HasCarry());
+				}
+
+				Assert::IsTrue(Detail::UploadPlaneR32F(ctx.gpu, recTex.tex, f1Clean));
+				GpuFrameInput m1In = zIn1;
+				m1In.prevPeak  = { nullptr, nullptr, false };
+				m1In.nextPeak  = { nextTex.tex, nullptr, false };
+				m1In.prevPeak2 = { p2Tex.tex, nullptr, false };
+				m1In.motionVecTex  = m1VecTex.tex;
+				m1In.motionMetaTex = m1MetaTex.tex;
+
+				GpuFrameOutput m1Out;
+				m1Out.outputYTex = outYTex.tex;
+				m1Out.outputCleanTex = outCleanTex.tex;
+				m1Out.tdDeltaTex = outDeltaTex.tex;
+				m1Out.readbackCellDiagnostics = true;
+
+				StandInRegistry m1Si;
+				Assert::IsTrue(m1Guard.engine.ProcessFrameGpu(ctx.gpu, ctx.dispatch, m1In, m1Out, nullptr, &m1Si),
+					L"Round-3 MEDIUM-1: prepacked prevPeak2+carry ProcessFrameGpu failed");
+				Assert::IsTrue(m1Out.succeeded && m1Out.carryUsed && m1Out.activeRefCount == 2u,
+					L"Round-3 MEDIUM-1: must fuse next + carry (2 refs) while skipping slotless prevPeak2");
+				Assert::IsTrue(m1Out.motionStandInRefs >= 1u,
+					L"Round-3 MEDIUM-1: skipped prevPeak2 under 3*cw prepacked motion must increment motionStandInRefs >= 1");
+				Assert::IsTrue(m1Si.IsActive(StandInKind::MotionFieldStandIn),
+					L"Round-3 MEDIUM-1: skipped prevPeak2 under 3*cw prepacked motion must engage StandInKind::MotionFieldStandIn");
+
+				TdV2Plane m1OutY;
+				Assert::IsTrue(Detail::DownloadPlaneR32F(ctx.gpu, outYTex.tex, w, h, m1OutY));
+				const double m1ParityErr = MaxAbsDiffFull(m1OutY, cpuRes1.outputY);
+				Assert::IsTrue(m1ParityErr < kGpuCpuParityTol,
+					FormatMsg("Round-3 MEDIUM-1: carry slot-2 parity |GPU-CPU|=%.6f >= 1e-3 (carry hijacked onto poisoned slot 0?)",
+						m1ParityErr).c_str());
+			}
+
+			// 3. Strict dimension-mismatch rejection tests for motionVecTex, motionMetaTex, and cellPriorTex!
+			OwnedTex badVecTex(ctx.gpu), badMetaTex(ctx.gpu), badPriorTex(ctx.gpu);
+			Assert::IsTrue(Detail::EnsureTex(ctx.gpu, badVecTex.tex, 2 * cw, ch, fmtRGBA32, true, false, true, false));
+			Assert::IsTrue(Detail::EnsureTex(ctx.gpu, badMetaTex.tex, 3 * cw, ch + 1, fmtRG32, true, false, true, false));
+			Assert::IsTrue(Detail::EnsureTex(ctx.gpu, badPriorTex.tex, cw + 1, ch, fmtRG32, true, false, true, false));
+
+			struct BadDimCase { const char* name; pl_tex mv; pl_tex mm; pl_tex cp; };
+			const BadDimCase badDims[3] = {
+				{ "motionVecTex-badW",   badVecTex.tex,  motMetaTex.tex, priorTex.tex },
+				{ "motionMetaTex-badH",  motVecTex.tex,  badMetaTex.tex, priorTex.tex },
+				{ "cellPriorTex-badW",   motVecTex.tex,  motMetaTex.tex, badPriorTex.tex }
+			};
+			for (const BadDimCase& bc : badDims)
+			{
+				GpuFrameInput badIn = zIn1;
+				badIn.motionVecTex = bc.mv;
+				badIn.motionMetaTex = bc.mm;
+				badIn.cellPriorTex = bc.cp;
+				GpuFrameOutput badOut;
+				badOut.outputYTex = outYTex.tex;
+				StandInRegistry badSi;
+				const uint64_t fBefore = zcGuard.engine.Failures();
+				const bool ok = zcGuard.engine.ProcessFrameGpu(ctx.gpu, ctx.dispatch, badIn, badOut, nullptr, &badSi);
+				Assert::IsFalse(ok, FormatTagMsg(bc.name, "Mis-sized prepacked texture must fail visibly").c_str());
+				Assert::IsFalse(badOut.succeeded, FormatTagMsg(bc.name, "out.succeeded must be false").c_str());
+				Assert::IsFalse(badOut.lastError.empty(), FormatTagMsg(bc.name, "out.lastError must be populated").c_str());
+				Assert::IsTrue(badSi.IsActive(StandInKind::GpuDispatchFailed),
+					FormatTagMsg(bc.name, "Must engage StandInKind::GpuDispatchFailed").c_str());
+				Assert::AreEqual(fBefore + 1u, zcGuard.engine.Failures(),
+					FormatTagMsg(bc.name, "Must increment Failures()").c_str());
+			}
+		}
+
+		// =========================================================================
+		// 11. H6: ProcessFrameGpu Rejects Any Input/Output pl_tex Aliasing Visibly
+		//     (StandInKind::GpuInputOutputAlias) + Live WARP SRV/UAV Hazard Proof
+		// =========================================================================
+		BEGIN_TEST_METHOD_ATTRIBUTE(ProcessFrameGpuRejectsInputOutputTextureAliasingVisibly)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(ProcessFrameGpuRejectsInputOutputTextureAliasingVisibly)
+		{
+			WarpGpuContext ctx;
+
+			struct OwnedTex
+			{
+				pl_gpu gpu = nullptr;
+				pl_tex tex = nullptr;
+				explicit OwnedTex(pl_gpu g) : gpu(g) {}
+				~OwnedTex() { if (gpu && tex) pl_tex_destroy(gpu, &tex); }
+				OwnedTex(const OwnedTex&) = delete;
+				OwnedTex& operator=(const OwnedTex&) = delete;
+			};
+
+			const int w = 64, h = 64;
+			const pl_fmt fmtR32 = VpSkeleton::PlTexBackend::FindFormat(ctx.gpu, VpSkeleton::TexFormat::R32F);
+			Assert::IsNotNull(fmtR32);
+
+			// ---- MANDATORY NEGATIVE CONTROL (Real D3D11 WARP SRV/UAV aliasing hazard proof):
+			//      Binding the SAME R32F texture (filled with 420.0f) as both sampled and storage in a raw compute pass
+			//      either fails dispatch or reads back corrupted/zeroed data (D3D11 unbinds SRV when UAV aliases)! ----
+			{
+				OwnedTex aliasRaw(ctx.gpu);
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, aliasRaw.tex, 4, 1, fmtR32, true, true, true, true));
+				const float initVals[4] = { 420.0f, 420.0f, 420.0f, 420.0f };
+				Assert::IsTrue(Detail::UploadFloats(ctx.gpu, aliasRaw.tex, initVals));
+				const char* rawAliasBody = R"GLSL(
+ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+if (p.x >= 4 || p.y >= 1) return;
+float v = texelFetch(src_alias, p, 0).x;
+imageStore(dst_alias, p, vec4(v + 1.0, 0.0, 0.0, 0.0));
+)GLSL";
+				pl_shader_desc rawD[2] = {
+					VpvGpu::Sampled("src_alias", aliasRaw.tex),
+					VpvGpu::Storage("dst_alias", aliasRaw.tex)
+				};
+				const bool rawOk = VpvGpu::Pass(ctx.dispatch, "td_v2_negctrl_srv_uav_alias", "", rawAliasBody,
+				                                rawD, 2, nullptr, 0, 1, 1, 0, 4, 1);
+				float gotVals[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+				const bool dlOk = rawOk && Detail::DownloadFloats(ctx.gpu, aliasRaw.tex, gotVals);
+				const bool corrupted = !dlOk || (std::fabs(gotVals[0] - 421.0f) > 0.5f);
+				Assert::IsTrue(corrupted,
+					FormatMsg("H6 negative control: raw D3D11 SRV/UAV alias unexpectedly produced %.2f (expected fail or corrupted != 421)",
+						static_cast<double>(gotVals[0])).c_str());
+			}
+
+			ComplexSceneBundle f1 = BuildComplexFrame(1, 1.5, 0.5, false);
+			OwnedTex recTex(ctx.gpu), cleanTex(ctx.gpu), prevTex(ctx.gpu), nextTex(ctx.gpu);
+			OwnedTex outYTex(ctx.gpu), outCleanTex(ctx.gpu);
+			Assert::IsTrue(Detail::EnsureTex(ctx.gpu, recTex.tex, w, h, fmtR32, true, true, true, true));
+			Assert::IsTrue(Detail::EnsureTex(ctx.gpu, cleanTex.tex, w, h, fmtR32, true, true, true, true));
+			Assert::IsTrue(Detail::EnsureTex(ctx.gpu, prevTex.tex, w, h, fmtR32, true, true, true, true));
+			Assert::IsTrue(Detail::EnsureTex(ctx.gpu, nextTex.tex, w, h, fmtR32, true, false, true, false));
+			Assert::IsTrue(Detail::EnsureTex(ctx.gpu, outYTex.tex, w, h, fmtR32, true, true, false, true));
+			Assert::IsTrue(Detail::EnsureTex(ctx.gpu, outCleanTex.tex, w, h, fmtR32, true, true, false, true));
+
+			Assert::IsTrue(Detail::UploadPlaneR32F(ctx.gpu, recTex.tex, f1.receivedY));
+			Assert::IsTrue(Detail::UploadPlaneR32F(ctx.gpu, cleanTex.tex, f1.curClean));
+			Assert::IsTrue(Detail::UploadPlaneR32F(ctx.gpu, prevTex.tex, f1.prevClean));
+			Assert::IsTrue(Detail::UploadPlaneR32F(ctx.gpu, nextTex.tex, f1.nextClean));
+
+			Config cfg = MakePreset(Preset::Reference, Mode::On);
+			cfg.enableLongAnchor = false;
+			cfg.enableCarryForward = false;
+			GpuEngineGuard guard(ctx.gpu, cfg);
+
+			GpuFrameInput baseIn;
+			baseIn.seq = 1100; baseIn.w = w; baseIn.h = h;
+			baseIn.receivedYTex = recTex.tex;
+			baseIn.cleanYTex = cleanTex.tex;
+			baseIn.hasCleanSplit = true;
+			baseIn.activeRect = f1.active;
+			baseIn.prevPeak = { prevTex.tex, &f1.prevMf, false };
+			baseIn.nextPeak = { nextTex.tex, &f1.nextMf, false };
+			baseIn.hasStepPrior = true;
+			baseIn.estimatedStepDelta = 24.0;
+			baseIn.zeroCoeffFraction = 0.35;
+
+			struct AliasCase { const char* name; pl_tex outY; pl_tex outClean; };
+			const AliasCase cases[5] = {
+				{ "recY==outY",         recTex.tex,   outCleanTex.tex },
+				{ "curClean==outClean", outYTex.tex,  cleanTex.tex    },
+				{ "recY==outClean",     outYTex.tex,  recTex.tex      },
+				{ "prevPeak==outY",     prevTex.tex,  outCleanTex.tex },
+				{ "outY==outClean",     outYTex.tex,  outYTex.tex     }
+			};
+
+			for (const AliasCase& ac : cases)
+			{
+				GpuFrameOutput out;
+				out.outputYTex = ac.outY;
+				out.outputCleanTex = ac.outClean;
+				StandInRegistry si;
+				const uint64_t failsBefore = guard.engine.Failures();
+				const bool ok = guard.engine.ProcessFrameGpu(ctx.gpu, ctx.dispatch, baseIn, out, nullptr, &si);
+				Assert::IsFalse(ok, FormatTagMsg(ac.name, "Aliased ProcessFrameGpu must return false").c_str());
+				Assert::IsFalse(out.succeeded, FormatTagMsg(ac.name, "Aliased out.succeeded must be false").c_str());
+				Assert::AreEqual(0, out.dispatchCount, FormatTagMsg(ac.name, "Aliased ProcessFrameGpu must issue 0 dispatches").c_str());
+				Assert::IsFalse(out.lastError.empty(), FormatTagMsg(ac.name, "Aliased out.lastError must be set").c_str());
+				Assert::IsTrue(si.IsActive(StandInKind::GpuInputOutputAlias),
+					FormatTagMsg(ac.name, "Aliased ProcessFrameGpu MUST engage StandInKind::GpuInputOutputAlias").c_str());
+				Assert::AreEqual(failsBefore + 1u, guard.engine.Failures(),
+					FormatTagMsg(ac.name, "Aliased ProcessFrameGpu must increment Failures()").c_str());
+			}
+
+			// LOW-4: Aliasing on the seed/cut path (prevPeak==null, nextPeak==null, curClean==outClean & outY==outClean)
+			// must ALSO fail visibly with StandInKind::GpuInputOutputAlias and ZERO dispatches!
+			for (bool isCut : { false, true })
+			{
+				GpuFrameInput seedAliasIn = baseIn;
+				seedAliasIn.seq = isCut ? 1102 : 1101;
+				seedAliasIn.prevPeak = { nullptr, nullptr, false };
+				seedAliasIn.nextPeak = { nullptr, nullptr, false };
+				seedAliasIn.isCutOrSpanInvalid = isCut;
+				GpuFrameOutput seedOut;
+				seedOut.outputYTex = outYTex.tex;
+				seedOut.outputCleanTex = cleanTex.tex; // Aliased with curCleanTex!
+				StandInRegistry seedSi;
+				const uint64_t failsBefore = guard.engine.Failures();
+				const bool ok = guard.engine.ProcessFrameGpu(ctx.gpu, ctx.dispatch, seedAliasIn, seedOut, nullptr, &seedSi);
+				Assert::IsFalse(ok, L"LOW-4: Seed/cut curClean==outClean alias must return false");
+				Assert::IsFalse(seedOut.succeeded, L"LOW-4: Seed/cut alias must set succeeded=false");
+				Assert::AreEqual(0, seedOut.dispatchCount, L"LOW-4: Seed/cut alias must issue 0 dispatches");
+				Assert::IsTrue(seedSi.IsActive(StandInKind::GpuInputOutputAlias),
+					L"LOW-4: Seed/cut alias must engage StandInKind::GpuInputOutputAlias");
+				Assert::AreEqual(failsBefore + 1u, guard.engine.Failures(),
+					L"LOW-4: Seed/cut alias must increment Failures()");
+			}
+
+			// Positive control: exact same input with DISTINCT output textures succeeds cleanly!
+			{
+				GpuFrameOutput okOut;
+				okOut.outputYTex = outYTex.tex;
+				okOut.outputCleanTex = outCleanTex.tex;
+				StandInRegistry okSi;
+				Assert::IsTrue(guard.engine.ProcessFrameGpu(ctx.gpu, ctx.dispatch, baseIn, okOut, nullptr, &okSi),
+					L"H6 positive control: distinct input/output textures must succeed");
+				Assert::IsTrue(okOut.succeeded);
+				Assert::IsFalse(okSi.IsActive(StandInKind::GpuInputOutputAlias));
+				TdV2Plane dlY;
+				Assert::IsTrue(Detail::DownloadPlaneR32F(ctx.gpu, outYTex.tex, w, h, dlY));
+				Assert::IsTrue(MaxAbsDiffRect(dlY, f1.receivedY, f1.active) > 2.0,
+					L"H6 positive control: distinct output must apply genuine repair");
+			}
+		}
+
+		// =========================================================================
+		// 12. H13 GPU: Pass-1 Face Mask (CPU-upload faceMask & Zero-Copy faceMaskTex)
+		//     Forces Exact delta == 0 (out == in) and Engages StandInKind::FaceNonRigidMask
+		// =========================================================================
+		BEGIN_TEST_METHOD_ATTRIBUTE(GpuPass1FaceMaskForcesExactZeroDeltaOnCpuUploadAndZeroCopy)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(GpuPass1FaceMaskForcesExactZeroDeltaOnCpuUploadAndZeroCopy)
+		{
+			WarpGpuContext ctx;
+
+			struct OwnedTex
+			{
+				pl_gpu gpu = nullptr;
+				pl_tex tex = nullptr;
+				explicit OwnedTex(pl_gpu g) : gpu(g) {}
+				~OwnedTex() { if (gpu && tex) pl_tex_destroy(gpu, &tex); }
+				OwnedTex(const OwnedTex&) = delete;
+				OwnedTex& operator=(const OwnedTex&) = delete;
+			};
+
+			const int w = 64, h = 64;
+			const int cw = w / 16, ch = h / 16;
+			const ActiveRect full = ActiveRect::Full(w, h);
+			const ActiveRect faceRect{ 16, 16, 48, 48 }; // Central 2x2 face cells: (1,1),(2,1),(1,2),(2,2)
+			const ActiveRect bgRect{ 0, 0, 16, 16 };     // Unmasked background cell (0,0)
+
+			const double dx = 1.5, dy = 0.5;
+			const TdV2Plane mCur  = RenderScene(w, h, 1.0 * dx, 1.0 * dy);
+			const TdV2Plane mPrev = RenderScene(w, h, 0.0, 0.0);
+			const TdV2Plane mNext = RenderScene(w, h, 2.0 * dx, 2.0 * dy);
+			const TdV2Plane curRec  = AddCodingDamage(mCur,  8.0, 12001u, 0.25, full);
+			const TdV2Plane prevRef = AddCodingDamage(mPrev, 1.2, 12002u, 0.0,  full);
+			const TdV2Plane nextRef = AddCodingDamage(mNext, 1.2, 12003u, 0.0,  full);
+			const CellMotionField prevMf = CellMotionField::Uniform(cw, ch, -dx, -dy, -dx, -dy, RegionMotionClass::Camera);
+			const CellMotionField nextMf = CellMotionField::Uniform(cw, ch, +dx, +dy, +dx, +dy, RegionMotionClass::Camera);
+
+			std::vector<uint8_t> faceMask(static_cast<size_t>(cw * ch), 0u);
+			faceMask[1u * cw + 1u] = 1u;
+			faceMask[1u * cw + 2u] = 1u;
+			faceMask[2u * cw + 1u] = 1u;
+			faceMask[2u * cw + 2u] = 1u;
+
+			FrameProcessInput in;
+			in.seq = 1200;
+			in.receivedY = curRec;
+			in.hasCleanSplit = true;
+			in.cleanY = curRec;
+			in.activeRect = full;
+			in.prevPeak = { &prevRef, &prevMf, false };
+			in.nextPeak = { &nextRef, &nextMf, false };
+			in.hasStepPrior = true;
+			in.estimatedStepDelta = 24.0;
+			in.zeroCoeffFraction = 0.35;
+			in.faceMask = &faceMask;
+
+			Config cfg = MakePreset(Preset::Reference, Mode::On);
+			cfg.enableLongAnchor = false;
+			cfg.enableCarryForward = false;
+
+			// 1. CPU reference vs GPU CPU-upload path (faceMask)
+			TdV2ReferenceEngine cpuEng(cfg);
+			GpuEngineGuard gpuGuard(ctx.gpu, cfg);
+			StandInRegistry cpuSi, gpuSi;
+			const FrameProcessResult cpuRes = cpuEng.ProcessFrame(in, &cpuSi);
+			const GpuProcessResult gpuRes = gpuGuard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, in, nullptr, &gpuSi);
+
+			TdV2Plane curRecF32(w, h, 0.0);
+			for (size_t i = 0; i < curRec.v.size(); ++i)
+				curRecF32.v[i] = static_cast<double>(static_cast<float>(curRec.v[i]));
+
+			AssertCpuGpuFrameParity(cpuRes, gpuRes, curRec, curRec, full, "H13-CpuUploadFaceMask");
+			Assert::IsTrue(cpuSi.IsActive(StandInKind::FaceNonRigidMask), L"CPU must engage FaceNonRigidMask");
+			Assert::IsTrue(gpuSi.IsActive(StandInKind::FaceNonRigidMask), L"GPU CPU-upload must engage FaceNonRigidMask");
+			Assert::AreEqual(0.0, MaxAbsPlane(gpuRes.tdDelta, faceRect), L"CPU-upload masked face tdDelta must be exact 0.0");
+			Assert::AreEqual(0.0, MaxAbsDiffRect(gpuRes.outputY, curRecF32, faceRect),
+				L"CPU-upload masked face outputY must equal R32F receivedY bit-exact");
+			Assert::IsTrue(MaxAbsPlane(gpuRes.tdDelta, bgRect) > 1.5,
+				L"Unmasked background cell must still receive active repair (> 1.5 codes)");
+
+			// 2. Zero-copy GPU path with pl_tex faceMaskTex (cw x ch R32F)
+			const pl_fmt fmtR32  = VpSkeleton::PlTexBackend::FindFormat(ctx.gpu, VpSkeleton::TexFormat::R32F);
+			const pl_fmt fmtRG32 = VpSkeleton::PlTexBackend::FindFormat(ctx.gpu, VpSkeleton::TexFormat::RG32F);
+			OwnedTex recTex(ctx.gpu), prevTex(ctx.gpu), nextTex(ctx.gpu), maskTex(ctx.gpu);
+			OwnedTex outYTex(ctx.gpu), outCleanTex(ctx.gpu), outDeltaTex(ctx.gpu);
+			Assert::IsTrue(Detail::EnsureTex(ctx.gpu, recTex.tex, w, h, fmtR32, true, false, true, false));
+			Assert::IsTrue(Detail::EnsureTex(ctx.gpu, prevTex.tex, w, h, fmtR32, true, false, true, false));
+			Assert::IsTrue(Detail::EnsureTex(ctx.gpu, nextTex.tex, w, h, fmtR32, true, false, true, false));
+			Assert::IsTrue(Detail::EnsureTex(ctx.gpu, maskTex.tex, cw, ch, fmtR32, true, false, true, false));
+			Assert::IsTrue(Detail::EnsureTex(ctx.gpu, outYTex.tex, w, h, fmtR32, true, true, false, true));
+			Assert::IsTrue(Detail::EnsureTex(ctx.gpu, outCleanTex.tex, w, h, fmtR32, true, true, false, true));
+			Assert::IsTrue(Detail::EnsureTex(ctx.gpu, outDeltaTex.tex, w, h, fmtRG32, true, true, false, true));
+
+			Assert::IsTrue(Detail::UploadPlaneR32F(ctx.gpu, recTex.tex, curRec));
+			Assert::IsTrue(Detail::UploadPlaneR32F(ctx.gpu, prevTex.tex, prevRef));
+			Assert::IsTrue(Detail::UploadPlaneR32F(ctx.gpu, nextTex.tex, nextRef));
+			std::vector<float> maskFloats(static_cast<size_t>(cw * ch), 0.0f);
+			for (size_t i = 0; i < faceMask.size(); ++i)
+				maskFloats[i] = faceMask[i] ? 1.0f : 0.0f;
+			Assert::IsTrue(Detail::UploadFloats(ctx.gpu, maskTex.tex, maskFloats.data()));
+
+			GpuFrameInput zIn;
+			zIn.seq = 1201; zIn.w = w; zIn.h = h;
+			zIn.receivedYTex = recTex.tex;
+			zIn.cleanYTex = recTex.tex;
+			zIn.hasCleanSplit = true;
+			zIn.activeRect = full;
+			zIn.prevPeak = { prevTex.tex, &prevMf, false };
+			zIn.nextPeak = { nextTex.tex, &nextMf, false };
+			zIn.faceMaskTex = maskTex.tex;
+			zIn.hasStepPrior = true;
+			zIn.estimatedStepDelta = 24.0;
+			zIn.zeroCoeffFraction = 0.35;
+
+			GpuFrameOutput zOut;
+			zOut.outputYTex = outYTex.tex;
+			zOut.outputCleanTex = outCleanTex.tex;
+			zOut.tdDeltaTex = outDeltaTex.tex;
+			zOut.readbackCellDiagnostics = true;
+
+			StandInRegistry zcSi;
+			Assert::IsTrue(gpuGuard.engine.ProcessFrameGpu(ctx.gpu, ctx.dispatch, zIn, zOut, nullptr, &zcSi),
+				L"H13: zero-copy ProcessFrameGpu with faceMaskTex failed");
+			Assert::IsTrue(zcSi.IsActive(StandInKind::FaceNonRigidMask),
+				L"H13: zero-copy faceMaskTex MUST engage StandInKind::FaceNonRigidMask");
+
+			TdV2Plane zOutY, zDelta;
+			bool anyBnd = false;
+			Assert::IsTrue(Detail::DownloadPlaneR32F(ctx.gpu, outYTex.tex, w, h, zOutY));
+			Assert::IsTrue(Detail::DownloadDeltaRG32F(ctx.gpu, outDeltaTex.tex, w, h, zDelta, anyBnd));
+			Assert::AreEqual(0.0, MaxAbsPlane(zDelta, faceRect), L"Zero-copy masked face tdDelta must be exact 0.0");
+			Assert::AreEqual(0.0, MaxAbsDiffRect(zOutY, curRecF32, faceRect),
+				L"Zero-copy masked face outputY must equal R32F receivedY bit-exact");
+			Assert::IsTrue(MaxAbsDiffFull(zOutY, gpuRes.outputY) <= 1e-4,
+				L"Zero-copy faceMaskTex outputY must match CPU-upload faceMask within 1e-4");
+
+			// 3. NEGATIVE CONTROL (Rule 3): Exact same GPU inputs WITHOUT faceMask / faceMaskTex produce
+			//    large non-zero delta (> 2.0 codes) on the exact same face cells!
+			{
+				FrameProcessInput unmaskedIn = in;
+				unmaskedIn.faceMask = nullptr;
+				StandInRegistry umSi;
+				const GpuProcessResult umRes = gpuGuard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, unmaskedIn, nullptr, &umSi);
+				Assert::IsTrue(umRes.succeeded);
+				Assert::IsFalse(umSi.IsActive(StandInKind::FaceNonRigidMask),
+					L"Negative control: unmasked run must NOT engage FaceNonRigidMask");
+				Assert::IsTrue(MaxAbsPlane(umRes.tdDelta, faceRect) > 2.0,
+					L"Negative control: unmasked GPU run must produce non-zero delta (> 2.0 codes) on face cells");
+				Assert::IsTrue(MaxAbsDiffRect(umRes.outputY, curRec, faceRect) > 2.0,
+					L"Negative control: unmasked GPU run must modify face cells (> 2.0 codes)");
+			}
+		}
+
+		// =========================================================================
+		// 13. GPU Hygiene & Geometry:
+		//     (a) Cut/Seed path zeros pre-dirtied tdDelta/tdMaps/diag & populates out.tdMaps
+		//     (b) Zero-copy rejects mis-sized ref textures visibly
+		//     (c) Zero-copy closes single injected NaN cleanly without 7x7 NaN spread
+		//     (d) Non-16-multiple geometry (70x54, pillarbox+letterbox [8..62)x[4..50))
+		// =========================================================================
+		BEGIN_TEST_METHOD_ATTRIBUTE(GpuCutSeedZeroHygieneZeroCopyRefValidationSingleNanClosureAndNon16PillarboxGeometry)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(GpuCutSeedZeroHygieneZeroCopyRefValidationSingleNanClosureAndNon16PillarboxGeometry)
+		{
+			WarpGpuContext ctx;
+
+			struct OwnedTex
+			{
+				pl_gpu gpu = nullptr;
+				pl_tex tex = nullptr;
+				explicit OwnedTex(pl_gpu g) : gpu(g) {}
+				~OwnedTex() { if (gpu && tex) pl_tex_destroy(gpu, &tex); }
+				OwnedTex(const OwnedTex&) = delete;
+				OwnedTex& operator=(const OwnedTex&) = delete;
+			};
+
+			const pl_fmt fmtR32    = VpSkeleton::PlTexBackend::FindFormat(ctx.gpu, VpSkeleton::TexFormat::R32F);
+			const pl_fmt fmtRG32   = VpSkeleton::PlTexBackend::FindFormat(ctx.gpu, VpSkeleton::TexFormat::RG32F);
+			const pl_fmt fmtRGBA32 = VpSkeleton::PlTexBackend::FindFormat(ctx.gpu, VpSkeleton::TexFormat::RGBA32F);
+			Assert::IsNotNull(fmtR32); Assert::IsNotNull(fmtRG32); Assert::IsNotNull(fmtRGBA32);
+
+			// ---- Part A: Cut/Seed Path Explicitly Zeros Pre-Dirtied Outputs & Populates out.tdMaps ----
+			{
+				const int w = 64, h = 64, cw = 4, ch = 4;
+				OwnedTex recTex(ctx.gpu), outYTex(ctx.gpu), outCleanTex(ctx.gpu);
+				OwnedTex outDeltaTex(ctx.gpu), outMapsTex(ctx.gpu), outDiagTex(ctx.gpu), outGuardTex(ctx.gpu), outWarpDiagTex(ctx.gpu);
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, recTex.tex, w, h, fmtR32, true, false, true, false));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, outYTex.tex, w, h, fmtR32, true, true, false, true));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, outCleanTex.tex, w, h, fmtR32, true, true, false, true));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, outDeltaTex.tex, w, h, fmtRG32, true, true, true, true));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, outMapsTex.tex, cw, 3 * ch, fmtRGBA32, true, true, true, true));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, outDiagTex.tex, cw, ch, fmtRGBA32, true, true, true, true));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, outGuardTex.tex, cw, ch, fmtRG32, true, true, true, true));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, outWarpDiagTex.tex, cw, ch, fmtRG32, true, true, true, true));
+
+				const TdV2Plane frame0 = RenderScene(w, h, 0.0, 0.0);
+				Assert::IsTrue(Detail::UploadPlaneR32F(ctx.gpu, recTex.tex, frame0));
+
+				auto dirtyAllTargets = [&]()
+				{
+					std::vector<float> dDelta(static_cast<size_t>(w * h * 2), 99.0f);
+					std::vector<float> dMaps(static_cast<size_t>(cw * 3 * ch * 4), 99.0f);
+					std::vector<float> dDiag(static_cast<size_t>(cw * ch * 4), 99.0f);
+					std::vector<float> dCell2(static_cast<size_t>(cw * ch * 2), 99.0f);
+					Assert::IsTrue(Detail::UploadFloats(ctx.gpu, outDeltaTex.tex, dDelta.data()));
+					Assert::IsTrue(Detail::UploadFloats(ctx.gpu, outMapsTex.tex, dMaps.data()));
+					Assert::IsTrue(Detail::UploadFloats(ctx.gpu, outDiagTex.tex, dDiag.data()));
+					Assert::IsTrue(Detail::UploadFloats(ctx.gpu, outGuardTex.tex, dCell2.data()));
+					Assert::IsTrue(Detail::UploadFloats(ctx.gpu, outWarpDiagTex.tex, dCell2.data()));
+					// Negative control: confirm sentinel 99.0f is genuinely present on GPU before cut/seed!
+					std::vector<float> checkDelta(static_cast<size_t>(w * h * 2), 0.0f);
+					Assert::IsTrue(Detail::DownloadFloats(ctx.gpu, outDeltaTex.tex, checkDelta.data()));
+					Assert::AreEqual(99.0f, checkDelta[0], L"Setup: pre-dirtied sentinel must be 99.0f");
+				};
+
+				auto assertAllTargetsZeroed = [&](const GpuFrameOutput& out, const wchar_t* tag)
+				{
+					Assert::IsTrue(out.succeeded, tag);
+					Assert::AreEqual(static_cast<size_t>(cw * ch), out.tdMaps.size(),
+						L"Cut/seed with readbackCellDiagnostics=true must populate non-empty out.tdMaps");
+					for (const auto& blk : out.tdMaps)
+						Assert::AreEqual(0.0f, blk.f[TdMapsView::kValidity], L"Cut/seed out.tdMaps kValidity must be 0.0f");
+
+					auto checkTexZero = [&](pl_tex tex, size_t nFloats, const wchar_t* label)
+					{
+						std::vector<float> buf(nFloats, 1.0f);
+						Assert::IsTrue(Detail::DownloadFloats(ctx.gpu, tex, buf.data()), label);
+						for (float v : buf)
+							Assert::AreEqual(0.0f, v, label);
+					};
+					checkTexZero(outDeltaTex.tex, static_cast<size_t>(w * h * 2), L"Cut/seed must zero tdDeltaTex");
+					checkTexZero(outMapsTex.tex, static_cast<size_t>(cw * 3 * ch * 4), L"Cut/seed must zero tdMapsTex");
+					checkTexZero(outDiagTex.tex, static_cast<size_t>(cw * ch * 4), L"Cut/seed must zero diagFlagsTex");
+					checkTexZero(outGuardTex.tex, static_cast<size_t>(cw * ch * 2), L"Cut/seed must zero guardCellTex");
+					checkTexZero(outWarpDiagTex.tex, static_cast<size_t>(cw * ch * 2), L"Cut/seed must zero warpDiagTex");
+				};
+
+				Config cfg = MakePreset(Preset::Reference, Mode::On);
+				cfg.enableLongAnchor = false;
+				GpuEngineGuard guard(ctx.gpu, cfg);
+
+				for (bool isCut : { false, true })
+				{
+					dirtyAllTargets();
+					GpuFrameInput zIn;
+					zIn.seq = isCut ? 1302 : 1301;
+					zIn.w = w; zIn.h = h;
+					zIn.receivedYTex = recTex.tex;
+					zIn.cleanYTex = recTex.tex;
+					zIn.hasCleanSplit = true;
+					zIn.activeRect = ActiveRect::Full(w, h);
+					zIn.isCutOrSpanInvalid = isCut;
+
+					GpuFrameOutput zOut;
+					zOut.outputYTex = outYTex.tex;
+					zOut.outputCleanTex = outCleanTex.tex;
+					zOut.tdDeltaTex = outDeltaTex.tex;
+					zOut.tdMapsTex = outMapsTex.tex;
+					zOut.diagFlagsTex = outDiagTex.tex;
+					zOut.guardCellTex = outGuardTex.tex;
+					zOut.warpDiagTex = outWarpDiagTex.tex;
+					zOut.readbackCellDiagnostics = true;
+
+					Assert::IsTrue(guard.engine.ProcessFrameGpu(ctx.gpu, ctx.dispatch, zIn, zOut, nullptr, nullptr),
+						isCut ? L"Cut ProcessFrameGpu failed" : L"Seed ProcessFrameGpu failed");
+					assertAllTargetsZeroed(zOut, isCut ? L"Cut hygiene failed" : L"Seed hygiene failed");
+				}
+			}
+
+			// ---- Part B & C: Zero-Copy Ref Dimension Validation & Single-NaN Closure (No 7x7 Spread!) ----
+			{
+				const int w = 64, h = 64, cw = 4, ch = 4;
+				const ActiveRect full = ActiveRect::Full(w, h);
+				const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+
+				OwnedTex recTex(ctx.gpu), cleanTex(ctx.gpu), goodRefTex(ctx.gpu), wrongRefTex(ctx.gpu);
+				OwnedTex outYTex(ctx.gpu), outCleanTex(ctx.gpu), outDeltaTex(ctx.gpu);
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, recTex.tex, w, h, fmtR32, true, false, true, false));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, cleanTex.tex, w, h, fmtR32, true, false, true, false));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, goodRefTex.tex, w, h, fmtR32, true, false, true, false));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, wrongRefTex.tex, 32, 32, fmtR32, true, false, true, false));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, outYTex.tex, w, h, fmtR32, true, true, false, true));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, outCleanTex.tex, w, h, fmtR32, true, true, false, true));
+				Assert::IsTrue(Detail::EnsureTex(ctx.gpu, outDeltaTex.tex, w, h, fmtRG32, true, true, false, true));
+
+				const TdV2Plane baseScene = RenderScene(w, h, 0.0, 0.0);
+				const TdV2Plane curNoisy  = AddCodingDamage(baseScene, 7.0, 1310u, 0.2, full);
+				Assert::IsTrue(Detail::UploadPlaneR32F(ctx.gpu, recTex.tex, curNoisy));
+				Assert::IsTrue(Detail::UploadPlaneR32F(ctx.gpu, cleanTex.tex, curNoisy));
+				Assert::IsTrue(Detail::UploadPlaneR32F(ctx.gpu, goodRefTex.tex, baseScene));
+
+				Config cfg = MakePreset(Preset::Reference, Mode::On);
+				cfg.enableLongAnchor = false;
+				cfg.enableCarryForward = false;
+				GpuEngineGuard guard(ctx.gpu, cfg);
+
+				// (B) Mis-sized ref texture (32x32 for 64x64 frame) rejected visibly for BOTH prevPeak and nextPeak!
+				for (bool testNext : { false, true })
+				{
+					GpuFrameInput badRefIn;
+					badRefIn.seq = testNext ? 1312 : 1311;
+					badRefIn.w = w; badRefIn.h = h;
+					badRefIn.receivedYTex = recTex.tex;
+					badRefIn.cleanYTex = cleanTex.tex;
+					badRefIn.hasCleanSplit = true;
+					badRefIn.activeRect = full;
+					badRefIn.prevPeak = { testNext ? goodRefTex.tex : wrongRefTex.tex, &stillMf, false };
+					badRefIn.nextPeak = { testNext ? wrongRefTex.tex : goodRefTex.tex, &stillMf, false };
+					GpuFrameOutput badOut;
+					badOut.outputYTex = outYTex.tex;
+					StandInRegistry badSi;
+					const bool ok = guard.engine.ProcessFrameGpu(ctx.gpu, ctx.dispatch, badRefIn, badOut, nullptr, &badSi);
+					Assert::IsFalse(ok, L"Zero-copy mis-sized ref texture must return false");
+					Assert::IsFalse(badOut.succeeded, L"Zero-copy mis-sized ref texture must set succeeded=false");
+					Assert::IsFalse(badOut.lastError.empty(), L"Zero-copy mis-sized ref texture must set lastError");
+					Assert::IsTrue(badSi.IsActive(StandInKind::GpuDispatchFailed),
+						L"Zero-copy mis-sized ref texture must engage GpuDispatchFailed");
+				}
+
+				// (C) Single injected NaN pixel in zero-copy curCleanTex: MUST close cleanly without a 7x7 NaN spread!
+				TdV2Plane singleNanPlane = curNoisy;
+				singleNanPlane.at(24, 24) = std::numeric_limits<double>::quiet_NaN();
+
+				// Negative control (Rule 3): unguarded Gaussian band decomposition spreads 1 NaN into a >= 7x7 (49-px) NaN block!
+				{
+					const ThreeBandPlanes unguardedBands = DecomposeActiveBands(singleNanPlane, full);
+					size_t spreadNaNs = 0;
+					for (int y = 21; y <= 27; ++y)
+						for (int x = 21; x <= 27; ++x)
+							if (!std::isfinite(unguardedBands.H.at(x, y)) || !std::isfinite(unguardedBands.M.at(x, y)))
+								++spreadNaNs;
+					Assert::AreEqual(static_cast<size_t>(49u), spreadNaNs,
+						L"Negative control: unguarded Gaussian blur of single NaN must poison all 49 pixels in 7x7 block");
+				}
+
+				Assert::IsTrue(Detail::UploadPlaneR32F(ctx.gpu, cleanTex.tex, singleNanPlane));
+				GpuFrameInput nanIn;
+				nanIn.seq = 1313; nanIn.w = w; nanIn.h = h;
+				nanIn.receivedYTex = recTex.tex;
+				nanIn.cleanYTex = cleanTex.tex;
+				nanIn.hasCleanSplit = true;
+				nanIn.activeRect = full;
+				nanIn.prevPeak = { goodRefTex.tex, &stillMf, false };
+				nanIn.nextPeak = { goodRefTex.tex, &stillMf, false };
+				nanIn.hasStepPrior = true;
+				nanIn.estimatedStepDelta = 20.0;
+				nanIn.zeroCoeffFraction = 0.35;
+
+				GpuFrameOutput nanOut;
+				nanOut.outputYTex = outYTex.tex;
+				nanOut.outputCleanTex = outCleanTex.tex;
+				nanOut.tdDeltaTex = outDeltaTex.tex;
+				nanOut.readbackCellDiagnostics = true;
+
+				StandInRegistry nanSi;
+				Assert::IsTrue(guard.engine.ProcessFrameGpu(ctx.gpu, ctx.dispatch, nanIn, nanOut, nullptr, &nanSi),
+					L"Zero-copy single injected NaN must complete cleanly");
+				Assert::IsTrue(nanSi.IsActive(StandInKind::NonFiniteClosure),
+					L"Zero-copy single injected NaN must engage StandInKind::NonFiniteClosure");
+
+				TdV2Plane nanOutY, nanOutClean, nanDelta;
+				bool anyBnd = false;
+				Assert::IsTrue(Detail::DownloadPlaneR32F(ctx.gpu, outYTex.tex, w, h, nanOutY));
+				Assert::IsTrue(Detail::DownloadPlaneR32F(ctx.gpu, outCleanTex.tex, w, h, nanOutClean));
+				Assert::IsTrue(Detail::DownloadDeltaRG32F(ctx.gpu, outDeltaTex.tex, w, h, nanDelta, anyBnd));
+				AssertAllFinitePlane(nanOutY, L"Zero-copy single-NaN outputY must be 100% finite (zero 7x7 NaN spread!)");
+				AssertAllFinitePlane(nanOutClean, L"Zero-copy single-NaN outputClean must be 100% finite (zero 7x7 NaN spread!)");
+				AssertAllFinitePlane(nanDelta, L"Zero-copy single-NaN tdDelta must be 100% finite (zero 7x7 NaN spread!)");
+				AssertAllFiniteTdMaps(nanOut.tdMaps, L"Zero-copy single-NaN tdMaps must be 100% finite");
+			}
+
+			// ---- Part D: Non-64x64 / Non-Multiple-of-16 Geometry (70x54, Pillarbox + Letterbox [8..62)x[4..50)) ----
+			{
+				const int w = 70, h = 54;
+				const int cw = (w + 15) / 16; // 5 (right partial edge cell = 6 px)
+				const int ch = (h + 15) / 16; // 4 (bottom partial edge cell = 6 px)
+				const ActiveRect active{ 8, 4, 62, 50 };
+				const double dx = 1.5, dy = 0.5;
+
+				auto fillAllBars = [&](TdV2Plane& p, double barVal)
+				{
+					for (int y = 0; y < h; ++y)
+						for (int x = 0; x < w; ++x)
+							if (!active.Contains(x, y))
+								p.at(x, y) = barVal;
+				};
+
+				const TdV2Plane mCur  = RenderScene(w, h, 1.0 * dx, 1.0 * dy);
+				const TdV2Plane mPrev = RenderScene(w, h, 0.0, 0.0);
+				const TdV2Plane mNext = RenderScene(w, h, 2.0 * dx, 2.0 * dy);
+				TdV2Plane curRec  = AddCodingDamage(mCur,  8.0, 1341u, 0.25, active);
+				TdV2Plane prevRef = AddCodingDamage(mPrev, 1.2, 1342u, 0.0,  active);
+				TdV2Plane nextRef = AddCodingDamage(mNext, 1.2, 1343u, 0.0,  active);
+				fillAllBars(curRec,  64.0);
+				fillAllBars(prevRef, 185.0);
+				fillAllBars(nextRef, 190.0);
+
+				const CellMotionField prevMf = CellMotionField::Uniform(cw, ch, -dx, -dy, -dx, -dy, RegionMotionClass::Camera);
+				const CellMotionField nextMf = CellMotionField::Uniform(cw, ch, +dx, +dy, +dx, +dy, RegionMotionClass::Camera);
+
+				FrameProcessInput in70;
+				in70.seq = 1340;
+				in70.receivedY = curRec;
+				in70.hasCleanSplit = true;
+				in70.cleanY = curRec;
+				in70.activeRect = active;
+				in70.prevPeak = { &prevRef, &prevMf, false };
+				in70.nextPeak = { &nextRef, &nextMf, false };
+				in70.hasStepPrior = true;
+				in70.estimatedStepDelta = 24.0;
+				in70.zeroCoeffFraction = 0.35;
+
+				// 1. Reference CPU vs GPU parity on 70x54 (both transformUnknown and 8x8 CELL)
+				for (bool xform8x8 : { false, true })
+				{
+					in70.transformIdentified8x8 = xform8x8;
+					Config cfgRef = MakePreset(Preset::Reference, Mode::On);
+					cfgRef.enableLongAnchor = false;
+					cfgRef.enableCarryForward = false;
+					TdV2ReferenceEngine cpuEng(cfgRef);
+					GpuEngineGuard gpuGuard(ctx.gpu, cfgRef);
+					const FrameProcessResult cpuRes = cpuEng.ProcessFrame(in70, nullptr);
+					const GpuProcessResult gpuRes = gpuGuard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, in70, nullptr, nullptr);
+					AssertCpuGpuFrameParity(cpuRes, gpuRes, curRec, curRec, active,
+						xform8x8 ? "Geom70x54-8x8CELL" : "Geom70x54-Unknown");
+
+					// Left & right pillarbox bars strictly bit-exact untouched!
+					const ActiveRect leftBar{ 0, 0, active.x0, h };
+					const ActiveRect rightBar{ active.x1, 0, w, h };
+					Assert::AreEqual(0.0, MaxAbsDiffRect(gpuRes.outputY, curRec, leftBar), L"70x54 left pillarbox bar corrupted");
+					Assert::AreEqual(0.0, MaxAbsDiffRect(gpuRes.outputY, curRec, rightBar), L"70x54 right pillarbox bar corrupted");
+					Assert::AreEqual(0.0, MaxAbsPlane(gpuRes.tdDelta, leftBar), L"70x54 left pillarbox tdDelta non-zero");
+					Assert::AreEqual(0.0, MaxAbsPlane(gpuRes.tdDelta, rightBar), L"70x54 right pillarbox tdDelta non-zero");
+					Assert::IsTrue(MaxAbsDiffRect(gpuRes.outputY, curRec, active) > 2.0,
+						L"70x54 active interior must receive genuine repair (> 2.0 codes)");
+				}
+
+				// 2. RealTime GPU with ScratchArena sized for 70x54: pillarbox bars remain bit-exact untouched!
+				{
+					in70.transformIdentified8x8 = false;
+					const auto rtReqs70 = TdV2GpuEngine::ArenaRequests(ctx.gpu, w, h, 16, Preset::RealTime);
+					VpSkeleton::PlTexBackend tb70(ctx.gpu);
+					VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> rtArena70(tb70);
+					Assert::IsTrue(rtArena70.Reserve(VpSkeleton::PlanArena(rtReqs70, VpSkeleton::Tier::T1)));
+					Config cfgRt = MakePreset(Preset::RealTime, Mode::On);
+					cfgRt.enableLongAnchor = false;
+					cfgRt.enableCarryForward = false;
+					GpuEngineGuard rtGuard(ctx.gpu, cfgRt);
+					rtArena70.BeginFrame();
+					const GpuProcessResult rtRes = rtGuard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, in70, &rtArena70, nullptr);
+					Assert::IsTrue(rtRes.succeeded && !rtRes.scratchShort, L"70x54 RealTime ScratchArena GPU failed");
+					Assert::AreEqual(0.0, MaxAbsDiffRect(rtRes.outputY, curRec, ActiveRect{ 0, 0, active.x0, h }),
+						L"70x54 RealTime left pillarbox bar corrupted");
+					Assert::AreEqual(0.0, MaxAbsDiffRect(rtRes.outputY, curRec, ActiveRect{ active.x1, 0, w, h }),
+						L"70x54 RealTime right pillarbox bar corrupted");
+					Assert::IsTrue(MaxAbsDiffRect(rtRes.outputY, curRec, active) > 2.0,
+						L"70x54 RealTime active interior must receive genuine repair");
+				}
+
+				// 3. NEGATIVE CONTROL (Rule 3): Naive ungated whole-frame average corrupts BOTH pillarbox bars > 20 codes!
+				const TdV2Plane nPrev = NaiveUngatedWarpWholeFrame(prevRef, -dx, -dy);
+				const TdV2Plane nNext = NaiveUngatedWarpWholeFrame(nextRef, +dx, +dy);
+				TdV2Plane naiveAvg(w, h, 0.0);
+				for (size_t i = 0; i < naiveAvg.v.size(); ++i)
+					naiveAvg.v[i] = (curRec.v[i] + nPrev.v[i] + nNext.v[i]) / 3.0;
+				Assert::IsTrue(MaxAbsDiffRect(naiveAvg, curRec, ActiveRect{ 0, 0, active.x0, h }) > 20.0,
+					L"Negative control: naive whole-frame avg must corrupt left pillarbox bar > 20 codes");
+				Assert::IsTrue(MaxAbsDiffRect(naiveAvg, curRec, ActiveRect{ active.x1, 0, w, h }) > 20.0,
+					L"Negative control: naive whole-frame avg must corrupt right pillarbox bar > 20 codes");
+			}
+		}
+
+		// =========================================================================
+		// 14. Q9b Real WARP GPU Shader Parity (shaders/Temporal sigma-delta.glsl):
+		//     Limited 8-bit 16.05 & 16.2 (amp=0.5) Produce ZERO BTB Dips (< 16),
+		//     True BTB (12.2) Stays Preserved Down to 1 (ADR-0002), and Full-Range
+		//     Control on Exact Same 16.05/16.2 Inputs Dips to 15!
+		// =========================================================================
+		BEGIN_TEST_METHOD_ATTRIBUTE(SigmaDeltaWarpShaderQ9bAboveBlackNeverDipsBtbWhileTrueBtbPreserved)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(SigmaDeltaWarpShaderQ9bAboveBlackNeverDipsBtbWhileTrueBtbPreserved)
+		{
+			WarpGpuContext ctx;
+
+			const std::string shaderPath = RepoRootFromFile() + "shaders\\Temporal sigma-delta.glsl";
+			std::ifstream f(shaderPath, std::ios::in | std::ios::binary);
+			Assert::IsTrue(f.is_open(), L"Could not open shaders\\Temporal sigma-delta.glsl");
+			std::string shaderSrc((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+			std::string includeErr;
+			Assert::IsTrue(CustomHookChain::ExpandVpIncludes(shaderSrc, includeErr),
+				L"ExpandVpIncludes failed on Temporal sigma-delta.glsl");
+
+			const pl_fmt srcFmt = pl_find_fmt(ctx.gpu, PL_FMT_FLOAT, 4, 32, 32, PL_FMT_CAP_SAMPLEABLE);
+			const pl_fmt dstFmt = pl_find_fmt(ctx.gpu, PL_FMT_UNORM, 4, 8, 8,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+			Assert::IsNotNull(srcFmt, L"WARP RGBA32F unsupported");
+			Assert::IsNotNull(dstFmt, L"WARP RGBA8 unsupported");
+
+			struct RunStats { int minCode = 255; int maxCode = 0; int countBelow16 = 0; int countAbove16 = 0; };
+			double nextInstanceTag = 1.0;
+			auto expandSizeTemplates = [](std::string src, int width, int height) -> std::string
+			{
+				auto replaceAll = [&](const std::string& token, const std::string& val)
+				{
+					size_t pos = 0;
+					while ((pos = src.find(token, pos)) != std::string::npos)
+					{
+						src.replace(pos, token.size(), val);
+						pos += val.size();
+					}
+				};
+				const std::string sw = std::to_string(width);
+				const std::string sh = std::to_string(height);
+				const std::string swQ4 = std::to_string((2 * width + 10) / 8);
+				const std::string shQ4 = std::to_string((2 * height + 10) / 8);
+				const std::string swB16 = std::to_string((2 * width + 46) / 32);
+				const std::string shB16 = std::to_string((2 * height + 46) / 32);
+				replaceAll("{{output_width}}", sw);
+				replaceAll("{{output_height}}", sh);
+				replaceAll("{{output_width_q4}}", swQ4);
+				replaceAll("{{output_height_q4}}", shQ4);
+				replaceAll("{{output_width_b16}}", swB16);
+				replaceAll("{{output_height_b16}}", shB16);
+				return src;
+			};
+
+			auto runSigmaDeltaWarp = [&](bool fullRange, double codeLevel, int width, int height, int frames) -> RunStats
+			{
+				const std::string expandedSrc = expandSizeTemplates(shaderSrc, width, height);
+				Assert::IsTrue(expandedSrc.find("{{") == std::string::npos,
+					L"Unexpanded {{template}} token left in Temporal sigma-delta.glsl");
+				const pl_hook* hook = pl_mpv_user_shader_parse(ctx.gpu, expandedSrc.data(), expandedSrc.size());
+				Assert::IsNotNull(hook, L"libplacebo rejected Temporal sigma-delta.glsl");
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "enabled", 1.0));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "levels_full", fullRange ? 1.0 : 0.0));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "swapchain_bits", 8.0));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "color_bits", 8.0));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "noise_amplitude", 0.5));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "motion_compensation", 0.0));
+				Assert::IsTrue(CustomHookChain::SetHookParameter(hook, "instance_tag", nextInstanceTag));
+				nextInstanceTag += 1.0;
+
+				pl_renderer renderer = pl_renderer_create(ctx.log, ctx.gpu);
+				Assert::IsNotNull(renderer, L"pl_renderer_create failed on WARP");
+
+				std::vector<float> srcBuf(static_cast<size_t>(width * height) * 4u, 0.0f);
+				const float normVal = static_cast<float>(codeLevel / 255.0);
+				for (int i = 0; i < width * height; ++i)
+				{
+					srcBuf[static_cast<size_t>(i) * 4u + 0u] = normVal;
+					srcBuf[static_cast<size_t>(i) * 4u + 1u] = normVal;
+					srcBuf[static_cast<size_t>(i) * 4u + 2u] = normVal;
+					srcBuf[static_cast<size_t>(i) * 4u + 3u] = 1.0f;
+				}
+				pl_tex_params sp{};
+				sp.w = width; sp.h = height; sp.format = srcFmt; sp.sampleable = true; sp.initial_data = srcBuf.data();
+				pl_tex srcTex = pl_tex_create(ctx.gpu, &sp);
+				pl_tex_params tp{};
+				tp.w = width; tp.h = height; tp.format = dstFmt; tp.renderable = true; tp.host_readable = true;
+				pl_tex dstTex = pl_tex_create(ctx.gpu, &tp);
+				Assert::IsNotNull(srcTex); Assert::IsNotNull(dstTex);
+
+				pl_frame img{};
+				img.num_planes = 1;
+				img.planes[0].texture = srcTex;
+				img.planes[0].components = 4;
+				img.planes[0].component_mapping[0] = 0;
+				img.planes[0].component_mapping[1] = 1;
+				img.planes[0].component_mapping[2] = 2;
+				img.planes[0].component_mapping[3] = 3;
+				img.repr.sys = PL_COLOR_SYSTEM_RGB;
+				img.repr.levels = PL_COLOR_LEVELS_FULL;
+
+				pl_frame tgt = img;
+				tgt.planes[0].texture = dstTex;
+
+				const pl_hook* hooks[1] = { hook };
+				pl_render_params rparams = pl_render_fast_params;
+				rparams.dither_params = nullptr;
+				rparams.error_diffusion = nullptr;
+				rparams.hooks = hooks;
+				rparams.num_hooks = 1;
+
+				std::vector<uint8_t> rgbaOut(static_cast<size_t>(width * height) * 4u, 0u);
+				RunStats st;
+				for (int fr = 0; fr < frames; ++fr)
+				{
+					Assert::IsTrue(pl_render_image(renderer, &img, &tgt, &rparams), L"pl_render_image failed on WARP");
+					pl_gpu_finish(ctx.gpu);
+					pl_tex_transfer_params dl{};
+					dl.tex = dstTex;
+					dl.ptr = rgbaOut.data();
+					Assert::IsTrue(pl_tex_download(ctx.gpu, &dl), L"pl_tex_download failed on WARP");
+					for (int i = 0; i < width * height; ++i)
+					{
+						const int rCode = static_cast<int>(rgbaOut[static_cast<size_t>(i) * 4u]);
+						if (rCode < st.minCode) st.minCode = rCode;
+						if (rCode > st.maxCode) st.maxCode = rCode;
+						if (rCode < 16) ++st.countBelow16;
+						if (rCode > 16) ++st.countAbove16;
+					}
+				}
+
+				pl_tex_destroy(ctx.gpu, &srcTex);
+				pl_tex_destroy(ctx.gpu, &dstTex);
+				pl_renderer_destroy(&renderer);
+				pl_mpv_user_shader_destroy(&hook);
+				return st;
+			};
+
+			const int rw = 16, rh = 16, nFrames = 24;
+
+			// 1. Limited-range 8-bit above-black levels 16.05 and 16.2 (amplitude = 0.5):
+			//    ZERO outputs dip below 16, while upward dither to 17 still runs actively!
+			for (double xAbove : { 16.05, 16.2 })
+			{
+				const RunStats limSt = runSigmaDeltaWarp(/*fullRange=*/false, xAbove, rw, rh, nFrames);
+				Assert::AreEqual(0, limSt.countBelow16,
+					FormatMsg("Q9b WARP violation: limited x=%.2f dipped below 16 (minCode=%.0f, dips=%.0f)",
+						xAbove, static_cast<double>(limSt.minCode), static_cast<double>(limSt.countBelow16)).c_str());
+				Assert::IsTrue(limSt.minCode >= 16, L"Q9b WARP: limited above-black minCode must be >= 16");
+				Assert::IsTrue(limSt.countAbove16 > 0,
+					FormatMsg("Q9b WARP non-vacuity: limited x=%.2f must still dither upward to 17", xAbove).c_str());
+
+				// MANDATORY NEGATIVE CONTROL (Rule 3): Full-range (levels_full = 1) on the EXACT SAME shader &
+				// EXACT SAME xAbove input (amp = 0.5) DOES dip to 15 (< 16), proving the Q9b limited-range
+				// floor_code guard in Temporal sigma-delta.glsl is genuinely preventing BTB dips!
+				const RunStats fullSt = runSigmaDeltaWarp(/*fullRange=*/true, xAbove, rw, rh, nFrames);
+				Assert::IsTrue(fullSt.countBelow16 > 0 && fullSt.minCode <= 15,
+					FormatMsg("Q9b WARP negative control: full-range x=%.2f must dip <= 15 (minCode=%.0f, dips=%.0f)",
+						xAbove, static_cast<double>(fullSt.minCode), static_cast<double>(fullSt.countBelow16)).c_str());
+			}
+
+			// 2. TRUE BTB NEGATIVE CONTROL (ADR-0002): x = 12.2 < 16 on the EXACT SAME limited-range shader
+			//    remains preserved untouched in [1, 15] (NEVER clamped up to 16)!
+			{
+				const RunStats btbSt = runSigmaDeltaWarp(/*fullRange=*/false, 12.2, rw, rh, nFrames);
+				Assert::IsTrue(btbSt.minCode >= 1 && btbSt.maxCode <= 15,
+					FormatMsg("ADR-0002 WARP violation: true BTB x=12.2 escaped [1, 15] (min=%.0f, max=%.0f)",
+						static_cast<double>(btbSt.minCode), static_cast<double>(btbSt.maxCode)).c_str());
+				Assert::IsTrue(btbSt.minCode <= 12 && btbSt.maxCode >= 13,
+					FormatMsg("ADR-0002 WARP: true BTB x=12.2 must dither normally across 12..13 (min=%.0f, max=%.0f)",
+						static_cast<double>(btbSt.minCode), static_cast<double>(btbSt.maxCode)).c_str());
+			}
+		}
+
+		// =========================================================================
+		// 15. Round-2 M1/M2/M3 GPU==CPU Parity:
+		//     (a) M1: prevPeak2 causal 2-past-peak parity + participation control
+		//     (b) M1: explicit in.codecModelPb parity + null-Pb stand-in control
+		//     (c) M2: mf.valid == 0 invalid-motion fallback & Pass-3B POCS skip
+		//     (d) M3: ApplyTransformUnknownBound Parseval a2BandPeakSq sky banding
+		// =========================================================================
+		BEGIN_TEST_METHOD_ATTRIBUTE(GpuMatchesCpuOnPrevPeak2CodecModelPbInvalidMotionPocsSkipAndSkyBandingParsevalBound)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(GpuMatchesCpuOnPrevPeak2CodecModelPbInvalidMotionPocsSkipAndSkyBandingParsevalBound)
+		{
+			WarpGpuContext ctx;
+			const int w = 64, h = 64;
+			const int cw = w / 16, ch = h / 16;
+			const ActiveRect full = ActiveRect::Full(w, h);
+
+			// ---- Part A (M1a): in.prevPeak2 Causal 2-Past-Peak Parity (nextPeak == nullptr) ----
+			{
+				const double dx = 1.5, dy = 0.5;
+				const TdV2Plane mPrev2 = RenderScene(w, h, 0.0, 0.0);
+				const TdV2Plane mPrev1 = RenderScene(w, h, 1.0 * dx, 1.0 * dy);
+				const TdV2Plane mCur   = RenderScene(w, h, 2.0 * dx, 2.0 * dy);
+
+				// Give prevPeak2 crisp low noise (0.8) vs noisier prevPeak (5.0) and noisy cur (10.0)
+				// so prevPeak2 genuinely dominates causal 2-past-peak fusion & serves as independent A1 partner!
+				const TdV2Plane prev2Clean = AddCodingDamage(mPrev2, 0.8,  15001u, 0.0, full);
+				const TdV2Plane prev1Clean = AddCodingDamage(mPrev1, 5.0,  15002u, 0.0, full);
+				const TdV2Plane curClean   = AddCodingDamage(mCur,   10.0, 15003u, 0.0, full);
+
+				const CellMotionField mfPrev1 = CellMotionField::Uniform(cw, ch, -dx, -dy, -dx, -dy, RegionMotionClass::Camera);
+				const CellMotionField mfPrev2 = CellMotionField::Uniform(cw, ch, -2.0 * dx, -2.0 * dy, -2.0 * dx, -2.0 * dy, RegionMotionClass::Camera);
+
+				Config cfg = MakePreset(Preset::Reference, Mode::On);
+				cfg.enableLongAnchor = false;
+				cfg.enableCarryForward = false;
+
+				FrameProcessInput inBoth;
+				inBoth.seq = 1501;
+				inBoth.receivedY = curClean;
+				inBoth.hasCleanSplit = true;
+				inBoth.cleanY = curClean;
+				inBoth.activeRect = full;
+				inBoth.prevPeak  = { &prev1Clean, &mfPrev1, false };
+				inBoth.nextPeak  = { nullptr, nullptr, false };
+				inBoth.prevPeak2 = { &prev2Clean, &mfPrev2, false };
+				inBoth.hasStepPrior = true;
+				inBoth.estimatedStepDelta = 24.0;
+				inBoth.deadZonePhi = kDeadZonePhiInter;
+				inBoth.zeroCoeffFraction = 0.35;
+
+				TdV2ReferenceEngine cpuEng(cfg);
+				GpuEngineGuard gpuGuard(ctx.gpu, cfg);
+				const FrameProcessResult cpuRes = cpuEng.ProcessFrame(inBoth, nullptr);
+				const GpuProcessResult   gpuRes = gpuGuard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, inBoth, nullptr, nullptr);
+				Assert::AreEqual(static_cast<size_t>(2u), cpuRes.activeRefCount, L"M1a CPU must fuse 2 causal refs (prevPeak + prevPeak2)");
+				Assert::AreEqual(static_cast<size_t>(2u), gpuRes.activeRefCount, L"M1a GPU must fuse 2 causal refs (prevPeak + prevPeak2)");
+				AssertCpuGpuFrameParity(cpuRes, gpuRes, curClean, curClean, full, "M1a-PrevPeak2");
+
+				// NEGATIVE CONTROL (prevPeak-only on exact same inputs): removing prevPeak2 diverges > 1.5 codes!
+				FrameProcessInput inPrevOnly = inBoth;
+				inPrevOnly.seq = 1502;
+				inPrevOnly.prevPeak2 = { nullptr, nullptr, false };
+				GpuEngineGuard gpuSingleGuard(ctx.gpu, cfg);
+				const GpuProcessResult gpuPrevOnly = gpuSingleGuard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, inPrevOnly, nullptr, nullptr);
+				Assert::IsTrue(gpuPrevOnly.succeeded && gpuPrevOnly.activeRefCount == 1u);
+				const double prev2Diff = MaxAbsDiffFull(gpuRes.outputY, gpuPrevOnly.outputY);
+				Assert::IsTrue(prev2Diff > 1.5,
+					FormatMsg("M1a negative control: prevPeak2 vs prevPeak-only GPU diff=%.3f <= 1.5 codes", prev2Diff).c_str());
+			}
+
+			// ---- Part B (M1b): Explicit in.codecModelPb Parity (transformIdentified8x8=true, ResidualMode::Strict) ----
+			{
+				const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+				const TdV2Plane master = RenderScene(w, h, 0.0, 0.0);
+				const TdV2Plane curNoisy = AddCodingDamage(master, 9.0, 15101u, 0.0, full);
+				const TdV2Plane refPrev  = AddCodingDamage(master, 1.0, 15102u, 0.0, full);
+				const TdV2Plane refNext  = AddCodingDamage(master, 1.0, 15103u, 0.0, full);
+
+				// Explicit Field B prediction P_B distinctly offset (+48 codes) from prevPeak so sent DCT coefficients differ!
+				TdV2Plane explicitPb = master;
+				for (double& v : explicitPb.v) v += 48.0;
+
+				Config cfg = MakePreset(Preset::Reference, Mode::On);
+				cfg.residualMode = ResidualMode::Strict;
+				cfg.cellProjIterations = 2;
+				cfg.enableLongAnchor = false;
+				cfg.enableCarryForward = false;
+
+				FrameProcessInput inPb;
+				inPb.seq = 1510;
+				inPb.receivedY = curNoisy;
+				inPb.hasCleanSplit = true;
+				inPb.cleanY = curNoisy;
+				inPb.activeRect = full;
+				inPb.prevPeak = { &refPrev, &stillMf, false };
+				inPb.nextPeak = { &refNext, &stillMf, false };
+				inPb.codecModelPb = &explicitPb;
+				inPb.hasStepPrior = true;
+				inPb.estimatedStepDelta = 24.0;
+				inPb.deadZonePhi = kDeadZonePhiInter;
+				inPb.zeroCoeffFraction = 0.35;
+				inPb.transformIdentified8x8 = true;
+
+				TdV2ReferenceEngine cpuPbEng(cfg);
+				GpuEngineGuard gpuPbGuard(ctx.gpu, cfg);
+				StandInRegistry cpuPbSi, gpuPbSi;
+				const FrameProcessResult cpuPb = cpuPbEng.ProcessFrame(inPb, &cpuPbSi);
+				const GpuProcessResult   gpuPb = gpuPbGuard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, inPb, nullptr, &gpuPbSi);
+				AssertCpuGpuFrameParity(cpuPb, gpuPb, curNoisy, curNoisy, full, "M1b-ExplicitPb");
+				Assert::IsFalse(cpuPbSi.IsActive(StandInKind::CodecModelPbStandIn),
+					L"M1b: CPU with explicit codecModelPb must NOT engage CodecModelPbStandIn");
+				Assert::IsFalse(gpuPbSi.IsActive(StandInKind::CodecModelPbStandIn),
+					L"M1b: GPU with explicit codecModelPb must NOT engage CodecModelPbStandIn");
+
+				// SAME-INPUT NEGATIVE CONTROL (in.codecModelPb = nullptr): engages CodecModelPbStandIn & alters output!
+				FrameProcessInput inNullPb = inPb;
+				inNullPb.seq = 1511;
+				inNullPb.codecModelPb = nullptr;
+				TdV2ReferenceEngine cpuNullEng(cfg);
+				GpuEngineGuard gpuNullGuard(ctx.gpu, cfg);
+				StandInRegistry cpuNullSi, gpuNullSi;
+				const FrameProcessResult cpuNull = cpuNullEng.ProcessFrame(inNullPb, &cpuNullSi);
+				const GpuProcessResult   gpuNull = gpuNullGuard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, inNullPb, nullptr, &gpuNullSi);
+				AssertCpuGpuFrameParity(cpuNull, gpuNull, curNoisy, curNoisy, full, "M1b-NullPb");
+				Assert::IsTrue(cpuNullSi.IsActive(StandInKind::CodecModelPbStandIn),
+					L"M1b negative control: CPU with null codecModelPb MUST engage CodecModelPbStandIn");
+				Assert::IsTrue(gpuNullSi.IsActive(StandInKind::CodecModelPbStandIn),
+					L"M1b negative control: GPU with null codecModelPb MUST engage CodecModelPbStandIn");
+				const double pbVsNullDiff = MaxAbsDiffFull(gpuPb.outputY, gpuNull.outputY);
+				Assert::IsTrue(pbVsNullDiff > 1.0,
+					FormatMsg("M1b negative control: explicit codecModelPb vs null Pb diff=%.3f <= 1.0 code", pbVsNullDiff).c_str());
+			}
+
+			// ---- Part C (M2): Luma mf.valid == 0 (Bogus vx=8, vy=8 in [16,32)^2) + Pass-3B POCS Skip Parity ----
+			{
+				const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+				CellMotionField badPrevMf = stillMf;
+				const size_t invalidCell = 1u * static_cast<size_t>(cw) + 1u; // [16, 32)^2
+				badPrevMf.valid[invalidCell] = 0u;
+				badPrevMf.vx[invalidCell] = 8.0;
+				badPrevMf.vy[invalidCell] = 8.0;
+
+				const TdV2Plane master = RenderScene(w, h, 0.0, 0.0);
+				const TdV2Plane curNoisy = AddCodingDamage(master, 9.0, 15201u, 0.0, full);
+				const TdV2Plane refPrev  = AddCodingDamage(master, 1.0, 15202u, 0.0, full);
+				const TdV2Plane refNext  = AddCodingDamage(master, 1.0, 15203u, 0.0, full);
+
+				Config cfg = MakePreset(Preset::Reference, Mode::On);
+				cfg.residualMode = ResidualMode::Strict;
+				cfg.cellProjIterations = 2;
+				cfg.enableLongAnchor = false;
+				cfg.enableCarryForward = false;
+
+				FrameProcessInput inM2;
+				inM2.seq = 1520;
+				inM2.receivedY = curNoisy;
+				inM2.hasCleanSplit = true;
+				inM2.cleanY = curNoisy;
+				inM2.activeRect = full;
+				inM2.prevPeak = { &refPrev, &badPrevMf, false };
+				inM2.nextPeak = { &refNext, &stillMf, false };
+				inM2.hasStepPrior = true;
+				inM2.estimatedStepDelta = 24.0;
+				inM2.deadZonePhi = kDeadZonePhiInter;
+				inM2.zeroCoeffFraction = 0.35;
+				inM2.transformIdentified8x8 = true;
+
+				TdV2ReferenceEngine cpuM2Eng(cfg);
+				GpuEngineGuard gpuM2Guard(ctx.gpu, cfg);
+				const FrameProcessResult cpuM2 = cpuM2Eng.ProcessFrame(inM2, nullptr);
+				const GpuProcessResult   gpuM2 = gpuM2Guard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, inM2, nullptr, nullptr);
+				AssertCpuGpuFrameParity(cpuM2, gpuM2, curNoisy, curNoisy, full, "M2-InvalidMotionPocsSkip");
+
+				// Explicit check inside [16, 32)^2 (bogus vector cell) + valid-motion negative control!
+				const ActiveRect invRect{ 16, 16, 32, 32 };
+				Assert::IsTrue(MaxAbsDiffRect(gpuM2.outputY, cpuM2.outputY, invRect) <= kGpuCpuParityTol,
+					L"M2: GPU vs CPU mismatch > 1e-3 inside mf.valid==0 cell [16,32)^2");
+
+				FrameProcessInput inValidM2 = inM2;
+				inValidM2.seq = 1521;
+				inValidM2.prevPeak = { &refPrev, &stillMf, false };
+				GpuEngineGuard gpuValGuard(ctx.gpu, cfg);
+				const GpuProcessResult gpuVal = gpuValGuard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, inValidM2, nullptr, nullptr);
+				Assert::IsTrue(gpuVal.succeeded);
+				Assert::IsTrue(MaxAbsDiffRect(gpuM2.outputY, gpuVal.outputY, invRect) > 0.5,
+					L"M2 negative control: valid motion vs mf.valid==0 must produce distinct output inside [16,32)^2");
+			}
+
+			// ---- Part D (M3): Luma ApplyTransformUnknownBound Parseval a2BandPeakSq on 8-Code Sky Banding Step ----
+			{
+				const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+				TdV2Plane skyMaster(w, h, 0.0);
+				TdV2Plane skyBanded(w, h, 0.0);
+				for (int y = 0; y < h; ++y)
+				{
+					for (int x = 0; x < w; ++x)
+					{
+						// Wide smooth sky gradient (slope 0.25 code/px -> 32-px wide 8-code banding step, ~89% energy in Band L,
+						// up to +/-4 codes) so the old white-noise L bound (~1.14 codes) would severely over-clip it!
+						const double v = 320.0 + 0.25 * static_cast<double>(x);
+						skyMaster.at(x, y) = v;
+						skyBanded.at(x, y) = std::floor(v / 8.0 + 0.5) * 8.0;
+					}
+				}
+
+				Config cfg = MakePreset(Preset::Reference, Mode::On);
+				cfg.enableLongAnchor = false;
+				cfg.enableCarryForward = false;
+
+				FrameProcessInput inSky;
+				inSky.seq = 1530;
+				inSky.receivedY = skyBanded;
+				inSky.hasCleanSplit = true;
+				inSky.cleanY = skyBanded;
+				inSky.activeRect = full;
+				inSky.prevPeak = { &skyMaster, &stillMf, false };
+				inSky.nextPeak = { &skyMaster, &stillMf, false };
+				inSky.hasStepPrior = true;
+				inSky.estimatedStepDelta = 8.0;
+				inSky.deadZonePhi = 0.5;
+				inSky.zeroCoeffFraction = 0.0;
+				inSky.transformIdentified8x8 = false;
+
+				TdV2ReferenceEngine cpuSkyEng(cfg);
+				GpuEngineGuard gpuSkyGuard(ctx.gpu, cfg);
+				const FrameProcessResult cpuSky = cpuSkyEng.ProcessFrame(inSky, nullptr);
+				const GpuProcessResult   gpuSky = gpuSkyGuard.engine.ProcessFrame(ctx.gpu, ctx.dispatch, inSky, nullptr, nullptr);
+				AssertCpuGpuFrameParity(cpuSky, gpuSky, skyBanded, skyBanded, full, "M3-SkyBandingParseval");
+
+				const double peakSkyDelta = MaxAbsPlane(gpuSky.tdDelta, full);
+				Assert::IsTrue(peakSkyDelta > 1.5,
+					FormatMsg("M3: 8-code sky banding delta=%.3f <= 1.5 (over-clipped by old white-noise L bound?)",
+						peakSkyDelta).c_str());
+
+				// NEGATIVE CONTROL (old white-noise L-band bound): compute old 3*sqrt(totalVar * gains.low) (~1.14 codes)
+				// and verify Parseval a2BandPeakSq[0]=1.0 genuinely lifts coherent L-band sky repair well past it!
+				const RoundingCellStats skyA2 = ComputeRoundingCellStats(8.0, 0.5, 0.0);
+				const BandWhiteNoiseGains skyGains = ComputeBandWhiteNoiseGains();
+				const double oldWhiteNoiseLBound = kPixelBoundSigma * std::sqrt(skyA2.totalVar * skyGains.low);
+				Assert::IsTrue(oldWhiteNoiseLBound < 1.25 && peakSkyDelta > oldWhiteNoiseLBound + 0.5,
+					FormatMsg("M3 negative control: peakSkyDelta=%.3f did not clear old white-noise L bound=%.3f + 0.5",
+						peakSkyDelta, oldWhiteNoiseLBound).c_str());
+			}
 		}
 	};
 } // namespace TdV2GpuWarpNs

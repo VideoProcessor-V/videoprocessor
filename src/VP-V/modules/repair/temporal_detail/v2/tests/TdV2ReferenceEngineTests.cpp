@@ -16,7 +16,8 @@
 //   9. Transform-identified 8x8 DCT on non-multiple-of-8 active frame: STRICT/CELL + bounded remainder strips + genuine 2-iter POCS
 //  10. Adversarial OOB / div-by-zero / non-finite / silent-fallback traps + resolution-change carry reset
 //  11. Scene cut and non-finite receivedY/cleanY reset cleanly with zero ghosting
-//  12. Subtle non-rigid face / eyelid-lip 1-2 px micro-deformation inside Still 16x16 cell preserved without wax smearing. CPU only.
+//  12. Pass-1 faceMask exact zero-delta + unmasked subtle micro-motion enablePerCornerHuber (with Huber-off controls)
+//  13. H9 missing-motion guard, H14 explicit codecModelPb, carry resets, invalid A2, M2 mf.valid==0 POCS skip, M3 Parseval bound. CPU only.
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -149,13 +150,16 @@ namespace Tests
 				const TdV2Plane peakN = AddCodingError(master, 1.5, 12);
 				const TdV2Plane valley = AddCodingError(master, 6.0, 13, 0.35);
 
+				const int cw = w / 16, ch = h / 16;
+				const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+
 				FrameProcessInput in;
 				in.seq = 1;
 				in.receivedY = valley;
 				in.hasCleanSplit = true;
 				in.cleanY = valley;
-				in.prevPeak.cleanPlane = &peakP;
-				in.nextPeak.cleanPlane = &peakN;
+				in.prevPeak = { &peakP, &stillMf, false };
+				in.nextPeak = { &peakN, &stillMf, false };
 				in.hasStepPrior = true;
 				in.estimatedStepDelta = 12.0;
 
@@ -465,45 +469,131 @@ namespace Tests
 
 			TEST_METHOD(HalfPixelPanPreservesCleanRecoveryWithoutArtifacts)
 			{
-				// Plan s1.6 & s3.4 (Grain MUST-2): 0.5-px sub-pixel pan invariant.
+				// Plan s1.6, s3.2 TD-S3(4) & s3.4 (Grain MUST-2): 0.5-px sub-pixel pan invariant
+				// WITH planted independent two-seed grain, asserting clean recovery AND full authoritative
+				// grain preservation (betaOwn >= 0.98, |betaForeign| <= 0.02, RMS +/-2%, lag1Evaluated == true,
+				// lag1Rise <= +0.02), backed by a same-input unprotected negative control!
 				const int w = 96, h = 96;
+				const size_t n = static_cast<size_t>(w) * h;
 				const ActiveRect interior{ 8, 8, w - 8, h - 8 };
 				const int cw = w / 16, ch = h / 16;
 
-				const TdV2Plane masterCur = RenderMaster(w, h, 0.0, 0.0);
-				const TdV2Plane masterPrev = RenderMaster(w, h, -0.5, 0.0);
-				const TdV2Plane masterNext = RenderMaster(w, h, +0.5, 0.0);
+				const TdV2Plane masterF1 = RenderMaster(w, h, 0.0, 0.0);
+				const TdV2Plane masterPrev1 = RenderMaster(w, h, -0.5, 0.0);
+				const TdV2Plane masterNext1 = RenderMaster(w, h, +0.5, 0.0);
+				// Continuous 0.5-px/frame camera pan: Frame 2 advances by +0.5 px relative to Frame 1
+				// so Frame 1 and Frame 2 have distinct sub-pixel phases (and carry warps by +0.5 px!).
+				const TdV2Plane masterF2 = RenderMaster(w, h, +0.5, 0.0);
+				const TdV2Plane masterPrev2 = RenderMaster(w, h, 0.0, 0.0);
+				const TdV2Plane masterNext2 = RenderMaster(w, h, +1.0, 0.0);
 
-				const TdV2Plane peakPrev = AddCodingError(masterPrev, 1.2, 301);
-				const TdV2Plane peakNext = AddCodingError(masterNext, 1.2, 302);
-				const TdV2Plane valley = AddCodingError(masterCur, 6.5, 303, 0.30);
+				const TdV2Plane peakPrev1Clean = AddCodingError(masterPrev1, 1.2, 301);
+				const TdV2Plane peakNext1Clean = AddCodingError(masterNext1, 1.2, 302);
+				const TdV2Plane valley1Clean = AddCodingError(masterF1, 6.5, 304, 0.30);
 
+				const TdV2Plane peakPrev2Clean = AddCodingError(masterPrev2, 1.2, 311);
+				const TdV2Plane peakNext2Clean = AddCodingError(masterNext2, 1.2, 312);
+				const TdV2Plane valley2Clean = AddCodingError(masterF2, 6.5, 303, 0.30);
+
+				// Plant independent two-seed film grain across Frame 1, Frame 2, and peak references.
+				std::mt19937 rng(305u);
+				const double grainSigma = 12.0;
+				std::normal_distribution<double> gDist(0.0, grainSigma);
+				std::vector<double> prevOwnGrain(n), ownGrain(n), foreignGrainPrev(n), foreignGrainNext(n);
+				TdV2Plane valley1Recv(w, h), valley2Recv(w, h), peakPrev2Recv(w, h), peakNext2Recv(w, h);
+				for (size_t i = 0; i < n; ++i)
+				{
+					prevOwnGrain[i] = gDist(rng);
+					ownGrain[i] = gDist(rng);
+					foreignGrainPrev[i] = gDist(rng);
+					foreignGrainNext[i] = gDist(rng);
+					valley1Recv.v[i] = valley1Clean.v[i] + prevOwnGrain[i];
+					valley2Recv.v[i] = valley2Clean.v[i] + ownGrain[i];
+					peakPrev2Recv.v[i] = peakPrev2Clean.v[i] + foreignGrainPrev[i];
+					peakNext2Recv.v[i] = peakNext2Clean.v[i] + foreignGrainNext[i];
+				}
+
+				// Mandatory In-Test Negative Control (Rule 3):
+				// Unprotected temporal blend of the 0.5-px panned grainy frames destroys own grain & leaks foreign grain!
+				TdV2Plane warpedPrevRecv, warpedNextRecv;
+				std::vector<uint8_t> vpValid, vnValid;
 				CellMotionField mfPrev = CellMotionField::Uniform(cw, ch, +0.5, 0.0, +0.5, 0.0, RegionMotionClass::Camera);
 				CellMotionField mfNext = CellMotionField::Uniform(cw, ch, -0.5, 0.0, -0.5, 0.0, RegionMotionClass::Camera);
+				// Frame 2 (ox=+0.5) -> Frame 1 carry (ox=0.0): sample Frame 1 at x + 0.5.
+				CellMotionField mfCarry = CellMotionField::Uniform(cw, ch, +0.5, 0.0, +0.5, 0.0, RegionMotionClass::Camera);
+				WarpCleanReference(peakPrev2Recv, valley2Recv, ActiveRect::Full(w, h), mfPrev.vx, mfPrev.vy, cw, ch, 16, warpedPrevRecv, vpValid);
+				WarpCleanReference(peakNext2Recv, valley2Recv, ActiveRect::Full(w, h), mfNext.vx, mfNext.vy, cw, ch, 16, warpedNextRecv, vnValid);
+
+				std::vector<double> naiveOut1(n), naiveOut2(n), naivePrevRes(n);
+				for (size_t i = 0; i < n; ++i)
+				{
+					naiveOut1[i] = (valley1Recv.v[i] + warpedPrevRecv.v[i] + warpedNextRecv.v[i]) / 3.0;
+					naiveOut2[i] = (valley2Recv.v[i] + warpedPrevRecv.v[i] + warpedNextRecv.v[i]) / 3.0;
+					naivePrevRes[i] = naiveOut1[i] - masterF1.v[i];
+				}
+				const auto naiveRep = EvaluateGrainTransfer(
+					masterF2.v.data(), ownGrain.data(), foreignGrainPrev.data(), naiveOut2.data(), n,
+					naivePrevRes.data(), prevOwnGrain.data());
+				Assert::IsTrue(naiveRep.valid && naiveRep.lag1Evaluated);
+				Assert::IsFalse(naiveRep.passesAuthoritativeBar,
+					L"Negative control: unprotected 0.5-px pan blend MUST fail authoritative grain bar");
+				Assert::IsTrue(naiveRep.betaOwn < 0.75,
+					L"Negative control: unprotected 0.5-px pan blend destroys own grain (betaOwn < 0.75)");
 
 				Config cfg = MakePreset(Preset::Reference, Mode::On);
 				TdV2ReferenceEngine eng(cfg);
 				StandInRegistry reg;
 
-				FrameProcessInput in;
-				in.seq = 20;
-				in.receivedY = valley;
-				in.hasCleanSplit = true;
-				in.cleanY = valley;
-				in.prevPeak = { &peakPrev, &mfPrev, false };
-				in.nextPeak = { &peakNext, &mfNext, false };
-				in.hasStepPrior = true;
-				in.estimatedStepDelta = 14.0;
-				const auto res = eng.ProcessFrame(in, &reg);
+				FrameProcessInput in1;
+				in1.seq = 19;
+				in1.receivedY = valley1Recv;
+				in1.hasCleanSplit = true;
+				in1.cleanY = valley1Clean;
+				in1.prevPeak = { &peakPrev1Clean, &mfPrev, false };
+				in1.nextPeak = { &peakNext1Clean, &mfNext, false };
+				in1.hasStepPrior = true;
+				in1.estimatedStepDelta = 14.0;
+				const auto res1 = eng.ProcessFrame(in1, &reg);
+
+				FrameProcessInput in2;
+				in2.seq = 20;
+				in2.receivedY = valley2Recv;
+				in2.hasCleanSplit = true;
+				in2.cleanY = valley2Clean;
+				in2.prevPeak = { &peakPrev2Clean, &mfPrev, false };
+				in2.nextPeak = { &peakNext2Clean, &mfNext, false };
+				in2.hasCarryMotion = true;
+				in2.carryMotion = mfCarry;
+				in2.hasStepPrior = true;
+				in2.estimatedStepDelta = 14.0;
+				const auto res2 = eng.ProcessFrame(in2, &reg);
 
 				double dbBase = 0.0, dbOut = 0.0;
-				Assert::IsTrue(ComputePsnrDb(PlaneMse(masterCur, valley, interior), 1023.0, dbBase));
-				Assert::IsTrue(ComputePsnrDb(PlaneMse(masterCur, res.outputY, interior), 1023.0, dbOut));
+				Assert::IsTrue(ComputePsnrDb(PlaneMse(masterF2, valley2Clean, interior), 1023.0, dbBase));
+				Assert::IsTrue(ComputePsnrDb(PlaneMse(masterF2, res2.outputClean, interior), 1023.0, dbOut));
 				const double gain = dbOut - dbBase;
-				char buf[192];
-				std::snprintf(buf, sizeof(buf), "0.5-px sub-pixel pan recovery: gain=+%.3f dB", gain);
+
+				std::vector<double> prevRes(n);
+				for (size_t i = 0; i < n; ++i)
+					prevRes[i] = res1.outputY.v[i] - masterF1.v[i];
+
+				const auto gRep = EvaluateGrainTransfer(
+					masterF2.v.data(), ownGrain.data(), foreignGrainPrev.data(), res2.outputY.v.data(), n,
+					prevRes.data(), prevOwnGrain.data());
+
+				char buf[256];
+				std::snprintf(buf, sizeof(buf),
+					"0.5-px sub-pixel pan: cleanGain=+%.3f dB | betaOwn=%.4f betaFor=%.4f stdRatio=%.4f lag1Rise=%.4f",
+					gain, gRep.betaOwn, gRep.betaForeign, gRep.stdRatio, gRep.lag1Rise);
 				Logger::WriteMessage(buf);
-				Assert::IsTrue(gain > 2.0, L"0.5-px sub-pixel pan must recover cleanly with strong positive dB gain");
+
+				Assert::IsTrue(gain > 2.0, L"0.5-px sub-pixel pan must recover clean layer with strong positive dB gain");
+				Assert::IsTrue(gRep.valid && gRep.lag1Evaluated && gRep.passesAuthoritativeBar,
+					L"0.5-px sub-pixel pan with planted grain MUST pass full authoritative grain bar (lag1Evaluated==true)");
+				Assert::IsTrue(gRep.betaOwn >= kGrainBarMinBetaOwn);
+				Assert::IsTrue(std::fabs(gRep.betaForeign) <= kGrainBarMaxBetaForeign);
+				Assert::IsTrue(std::fabs(gRep.stdRatio - 1.0) <= kGrainBarMaxRmsError);
+				Assert::IsTrue(gRep.lag1Rise <= kGrainBarMaxLag1Rise);
 			}
 
 			TEST_METHOD(HonestFourLayerGrainPreservationAndLayer4CarryPurity)
@@ -525,13 +615,24 @@ namespace Tests
 				const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
 
 				const TdV2Plane masterClean = RenderMaster(w, h);
-				const TdV2Plane peakPrevCleanTrue = AddCodingError(masterClean, 1.0, 601);
-				const TdV2Plane peakNextCleanTrue = AddCodingError(masterClean, 1.0, 602);
-				const TdV2Plane prevCurCleanTrue = AddCodingError(masterClean, 5.5, 604, 0.30);
-				const TdV2Plane curCleanTrue = AddCodingError(masterClean, 5.5, 603, 0.30);
+				const TdV2Plane peakPrevCleanTrue = AddCodingError(masterClean, 0.8, 601);
+				const TdV2Plane peakNextCleanTrue = AddCodingError(masterClean, 0.8, 602);
+				// Construct genuine L+M band compression wear on valley frames (blurred quantization/blocking noise
+				// in L+M so compression error lives in L/M while leaked film grain lives in H!).
+				auto addLowMidCodingWear = [&](const TdV2Plane& m, double rawSigma, uint32_t seed) -> TdV2Plane
+				{
+					const TdV2Plane whiteNoise = AddCodingError(TdV2Plane(w, h, 0.0), rawSigma, seed);
+					const ThreeBandPlanes nb = DecomposeActiveBands(whiteNoise, ActiveRect::Full(w, h));
+					TdV2Plane out = m;
+					for (size_t i = 0; i < n; ++i)
+						out.v[i] = m.v[i] + nb.L.v[i] + nb.M.v[i];
+					return out;
+				};
+				const TdV2Plane prevCurCleanTrue = addLowMidCodingWear(masterClean, 12.0, 604);
+				const TdV2Plane curCleanTrue = addLowMidCodingWear(masterClean, 12.0, 603);
 
 				std::mt19937 rng(777);
-				const double grainSigma = 10.0;
+				const double grainSigma = 14.0;
 				std::normal_distribution<double> grainDist(0.0, grainSigma);
 				std::vector<double> prevOwnGrain(n), ownGrain(n), foreignGrainPrev(n), foreignGrainNext(n);
 				TdV2Plane prevReceived(w, h), curReceived(w, h), peakPrevReceived(w, h), peakNextReceived(w, h);
@@ -547,14 +648,19 @@ namespace Tests
 					peakNextReceived.v[i] = peakNextCleanTrue.v[i] + foreignGrainNext[i];
 				}
 
-				// ---- Mandatory In-Test Negative Control (Rule 3) ----
+				// ---- Mandatory In-Test Negative Control 1 (Rule 3): Layers 1/2/4 disabled ----
 				// Naive temporal average of the exact same contaminated frames (curReceived, peakPrevReceived, peakNextReceived).
-				std::vector<double> naiveAvg(n);
+				std::vector<double> naiveAvgPrev(n), naiveAvg(n), naivePrevRes(n);
 				for (size_t i = 0; i < n; ++i)
+				{
+					naiveAvgPrev[i] = (prevReceived.v[i] + peakPrevReceived.v[i] + peakNextReceived.v[i]) / 3.0;
 					naiveAvg[i] = (curReceived.v[i] + peakPrevReceived.v[i] + peakNextReceived.v[i]) / 3.0;
+					naivePrevRes[i] = naiveAvgPrev[i] - masterClean.v[i];
+				}
 				const auto naiveRep = EvaluateGrainTransfer(
-					masterClean.v.data(), ownGrain.data(), foreignGrainPrev.data(), naiveAvg.data(), n);
-				Assert::IsTrue(naiveRep.valid);
+					masterClean.v.data(), ownGrain.data(), foreignGrainPrev.data(), naiveAvg.data(), n,
+					naivePrevRes.data(), prevOwnGrain.data());
+				Assert::IsTrue(naiveRep.valid && naiveRep.lag1Evaluated);
 				Assert::IsFalse(naiveRep.passesAuthoritativeBar,
 					L"Negative control: naive temporal average MUST fail authoritative grain preservation bar");
 				Assert::IsTrue(naiveRep.betaOwn < 0.75,
@@ -562,11 +668,12 @@ namespace Tests
 				Assert::IsTrue(naiveRep.betaForeign > 0.25,
 					L"Negative control: naive temporal average leaks foreign grain (betaForeign > 0.25)");
 
-				// ---- Sub-case A: Realistic Imperfect Separation (hasCleanSplit == true) ----
-				// Upstream separator leaves 1.5% residual ownGrain inside curClean AND 1.5% residual foreignGrain inside peak cleans
-				// (physically feasible for betaOwn >= 0.98 even at full temporal blend W -> 1.0).
-				const double leakCur = 0.015;
-				const double leakRef = 0.015;
+				// ---- Sub-case A (H12): Realistic >= 10% Imperfect Grain Separation (leak = 15%!) ----
+				// Upstream separator leaves 15% residual ownGrain inside curClean AND 15% residual foreignGrain inside peak cleans!
+				// Any naive convex blend on band H leaks ~0.04+ foreign grain (> 0.02) and drops betaOwn < 0.94 (< 0.98);
+				// ONLY genuine Layer-2 A1 grain subtraction (retainedGrainVar) suppresses band-H grain blending while repairing L/M!
+				const double leakCur = 0.15;
+				const double leakRef = 0.15;
 				TdV2Plane prevCurCleanImp(w, h), curCleanImp(w, h), peakPrevCleanImp(w, h), peakNextCleanImp(w, h);
 				for (size_t i = 0; i < n; ++i)
 				{
@@ -577,6 +684,53 @@ namespace Tests
 				}
 				const double leakedVar = (leakCur * grainSigma) * (leakCur * grainSigma);
 				std::vector<double> retainedVar(static_cast<size_t>(cw) * ch, leakedVar);
+
+				// ---- Mandatory In-Test Negative Control 2 (Rule 3 / H12) ----
+				// Run the EXACT SAME clean inputs (`curCleanImp`, `peakPrevCleanImp`, `peakNextCleanImp`) through the
+				// engine with Layer-2 grain subtraction disabled (`retainedGrainVar` empty) — MUST FAIL authoritative bar!
+				{
+					Config cfgNoL2 = MakePreset(Preset::Reference, Mode::On);
+					TdV2ReferenceEngine engNoL2(cfgNoL2);
+					StandInRegistry regNoL2;
+
+					FrameProcessInput f1NoL2;
+					f1NoL2.seq = 40;
+					f1NoL2.receivedY = prevReceived;
+					f1NoL2.hasCleanSplit = true;
+					f1NoL2.cleanY = prevCurCleanImp;
+					// Layer 2 disabled: retainedGrainVar intentionally omitted on the EXACT SAME 15%-leaked clean planes!
+					f1NoL2.prevPeak = { &peakPrevCleanImp, &stillMf, false };
+					f1NoL2.nextPeak = { &peakNextCleanImp, &stillMf, false };
+					f1NoL2.hasStepPrior = true;
+					f1NoL2.estimatedStepDelta = 12.0;
+					const auto r1NoL2 = engNoL2.ProcessFrame(f1NoL2, &regNoL2);
+
+					FrameProcessInput f2NoL2;
+					f2NoL2.seq = 41;
+					f2NoL2.receivedY = curReceived;
+					f2NoL2.hasCleanSplit = true;
+					f2NoL2.cleanY = curCleanImp;
+					f2NoL2.prevPeak = { &peakPrevCleanImp, &stillMf, false };
+					f2NoL2.nextPeak = { &peakNextCleanImp, &stillMf, false };
+					f2NoL2.hasCarryMotion = true;
+					f2NoL2.carryMotion = stillMf;
+					f2NoL2.hasStepPrior = true;
+					f2NoL2.estimatedStepDelta = 12.0;
+					const auto r2NoL2 = engNoL2.ProcessFrame(f2NoL2, &regNoL2);
+
+					std::vector<double> prevResNoL2(n);
+					for (size_t i = 0; i < n; ++i)
+						prevResNoL2[i] = r1NoL2.outputY.v[i] - masterClean.v[i];
+
+					const auto noL2Rep = EvaluateGrainTransfer(
+						masterClean.v.data(), ownGrain.data(), foreignGrainPrev.data(), r2NoL2.outputY.v.data(), n,
+						prevResNoL2.data(), prevOwnGrain.data());
+					Assert::IsTrue(noL2Rep.valid && noL2Rep.lag1Evaluated);
+					Assert::IsFalse(noL2Rep.passesAuthoritativeBar,
+						L"H12 Negative control: disabling Layer-2 grain subtraction on 15%-leaked inputs MUST fail authoritative bar!");
+					Assert::IsTrue(std::fabs(noL2Rep.betaForeign) > kGrainBarMaxBetaForeign || noL2Rep.betaOwn < kGrainBarMinBetaOwn,
+						L"H12 Negative control: unprotected 15%-leaked inputs MUST violate betaForeign <= 0.02 or betaOwn >= 0.98");
+				}
 
 				Config cfg = MakePreset(Preset::Reference, Mode::On);
 				TdV2ReferenceEngine eng(cfg);
@@ -591,7 +745,7 @@ namespace Tests
 				f1.prevPeak = { &peakPrevCleanImp, &stillMf, false };
 				f1.nextPeak = { &peakNextCleanImp, &stillMf, false };
 				f1.hasStepPrior = true;
-				f1.estimatedStepDelta = 14.0;
+				f1.estimatedStepDelta = 12.0;
 				const auto r1 = eng.ProcessFrame(f1, &reg);
 
 				FrameProcessInput f2;
@@ -605,7 +759,7 @@ namespace Tests
 				f2.hasCarryMotion = true;
 				f2.carryMotion = stillMf;
 				f2.hasStepPrior = true;
-				f2.estimatedStepDelta = 14.0;
+				f2.estimatedStepDelta = 12.0;
 				const auto r2 = eng.ProcessFrame(f2, &reg);
 
 				// Score STRICTLY against pre-generated independent masterClean (NEVER r2.outputClean)!
@@ -626,24 +780,25 @@ namespace Tests
 
 				char buf[256];
 				std::snprintf(buf, sizeof(buf),
-					"Honest Grain (imperfect split vs masterClean): cleanGain=+%.3f dB | betaOwn=%.4f betaForP=%.4f betaForN=%.4f stdRatio=%.4f lag1Rise=%.4f",
+					"Honest Grain (15%% leak split vs masterClean): cleanGain=+%.3f dB | betaOwn=%.4f betaForP=%.4f betaForN=%.4f stdRatio=%.4f lag1Rise=%.4f",
 					cleanDbOut - cleanDbBase, gRepPrev.betaOwn, gRepPrev.betaForeign, gRepNext.betaForeign,
 					gRepPrev.stdRatio, gRepPrev.lag1Rise);
 				Logger::WriteMessage(buf);
 
 				Assert::IsTrue(cleanDbOut - cleanDbBase > 2.0, L"Clean layer must recover compression noise strongly vs masterClean");
-				Assert::IsTrue(gRepPrev.valid && gRepPrev.passesAuthoritativeBar,
-					L"Imperfect-split output scored strictly vs masterClean must pass authoritative refs/111 s7.3 bar");
-				Assert::IsTrue(gRepNext.valid && std::fabs(gRepNext.betaForeign) <= kGrainBarMaxBetaForeign,
+				Assert::IsTrue(gRepPrev.valid && gRepPrev.lag1Evaluated && gRepPrev.passesAuthoritativeBar,
+					L"15%-leaked split output scored strictly vs masterClean must pass full authoritative refs/111 s7.3 bar (lag1Evaluated==true)");
+				Assert::IsTrue(gRepNext.valid && gRepNext.lag1Evaluated && std::fabs(gRepNext.betaForeign) <= kGrainBarMaxBetaForeign,
 					L"Foreign grain leakage from nextPeak must stay <= 0.02");
 
 				// ---- Sub-case B: Raw Noisy Input Path (hasCleanSplit == false) ----
 				// Pure film grain on masterClean with NO upstream split: Layer 2 A1 subtraction + Layer 4 TdGuardPort
-				// must protect own grain and engage P10gGrainSeparator stand-in visibly!
+				// must protect own grain across the FULL authoritative bar (with lag1Evaluated==true) and engage P10gGrainSeparator visibly!
 				{
-					TdV2Plane rawCur(w, h), rawPrev(w, h), rawNext(w, h);
+					TdV2Plane rawPrevFrame(w, h), rawCur(w, h), rawPrev(w, h), rawNext(w, h);
 					for (size_t i = 0; i < n; ++i)
 					{
+						rawPrevFrame.v[i] = masterClean.v[i] + prevOwnGrain[i];
 						rawCur.v[i] = masterClean.v[i] + ownGrain[i];
 						rawPrev.v[i] = masterClean.v[i] + foreignGrainPrev[i];
 						rawNext.v[i] = masterClean.v[i] + foreignGrainNext[i];
@@ -654,27 +809,41 @@ namespace Tests
 					TdV2ReferenceEngine engRaw(cfgRaw);
 					StandInRegistry regRaw;
 
-					FrameProcessInput fRaw;
-					fRaw.seq = 60;
-					fRaw.receivedY = rawCur;
-					fRaw.hasCleanSplit = false;
-					fRaw.retainedGrainVar = fullGrainVar;
-					fRaw.prevPeak = { &rawPrev, &stillMf, false };
-					fRaw.nextPeak = { &rawNext, &stillMf, false };
-					fRaw.hasStepPrior = true;
-					fRaw.estimatedStepDelta = 14.0;
-					const auto rRaw = engRaw.ProcessFrame(fRaw, &regRaw);
+					FrameProcessInput fRaw1;
+					fRaw1.seq = 59;
+					fRaw1.receivedY = rawPrevFrame;
+					fRaw1.hasCleanSplit = false;
+					fRaw1.retainedGrainVar = fullGrainVar;
+					fRaw1.prevPeak = { &rawPrev, &stillMf, false };
+					fRaw1.nextPeak = { &rawNext, &stillMf, false };
+					fRaw1.hasStepPrior = true;
+					fRaw1.estimatedStepDelta = 14.0;
+					const auto rRaw1 = engRaw.ProcessFrame(fRaw1, &regRaw);
 
-					AssertAllFinite(rRaw.outputY, L"Raw hasCleanSplit==false output must be finite");
+					FrameProcessInput fRaw2;
+					fRaw2.seq = 60;
+					fRaw2.receivedY = rawCur;
+					fRaw2.hasCleanSplit = false;
+					fRaw2.retainedGrainVar = fullGrainVar;
+					fRaw2.prevPeak = { &rawPrev, &stillMf, false };
+					fRaw2.nextPeak = { &rawNext, &stillMf, false };
+					fRaw2.hasCarryMotion = true;
+					fRaw2.carryMotion = stillMf;
+					fRaw2.hasStepPrior = true;
+					fRaw2.estimatedStepDelta = 14.0;
+					const auto rRaw2 = engRaw.ProcessFrame(fRaw2, &regRaw);
+
+					AssertAllFinite(rRaw2.outputY, L"Raw hasCleanSplit==false output must be finite");
 					Assert::IsTrue(regRaw.IsActive(StandInKind::P10gGrainSeparator),
 						L"Raw hasCleanSplit==false MUST engage P10gGrainSeparator stand-in visibly");
+					std::vector<double> rawPrevRes(n);
+					for (size_t i = 0; i < n; ++i)
+						rawPrevRes[i] = rRaw1.outputY.v[i] - masterClean.v[i];
 					const auto rawRep = EvaluateGrainTransfer(
-						masterClean.v.data(), ownGrain.data(), foreignGrainPrev.data(), rRaw.outputY.v.data(), n);
-					Assert::IsTrue(rawRep.valid);
-					Assert::IsTrue(rawRep.betaOwn >= 0.95,
-						L"Raw path with A1+Guard must retain >= 95% of own grain (vs naive 33%)");
-					Assert::IsTrue(std::fabs(rawRep.betaForeign) <= 0.03,
-						L"Raw path with A1+Guard must reject foreign grain <= 0.03 (vs naive 0.33)");
+						masterClean.v.data(), ownGrain.data(), foreignGrainPrev.data(), rRaw2.outputY.v.data(), n,
+						rawPrevRes.data(), prevOwnGrain.data());
+					Assert::IsTrue(rawRep.valid && rawRep.lag1Evaluated && rawRep.passesAuthoritativeBar,
+						L"Raw path with A1+Guard must pass full authoritative grain bar with lag1Evaluated==true");
 				}
 
 				// ---- Sub-case C: Layer-4 TdGuardPort Carry-Purity Test (guardViolationCells > 0) ----
@@ -853,22 +1022,42 @@ namespace Tests
 				const ThreeBandPlanes outB = DecomposeActiveBands(resRack.outputY, ActiveRect::Full(w, h));
 				const double falseRestoreH = refHEnergy > 1e-9 ? (PlaneMse(curB.H, outB.H, interior) / refHEnergy) : 0.0;
 				const double falseRestoreM = refMEnergy > 1e-9 ? (PlaneMse(curB.M, outB.M, interior) / refMEnergy) : 0.0;
+				const double rackInteriorMse = PlaneMse(defocusedCur, resRack.outputY, interior);
 				const double errLOut = PlaneMse(curB.L, outB.L, interior);
 				char buf[256];
 				std::snprintf(buf, sizeof(buf),
-					"Rack-focus under LowBandCellOnly: falseH=%.6f (naive=%.3f) falseM=%.6f errL=%.9f",
-					falseRestoreH, naiveFalseH, falseRestoreM, errLOut);
+					"Rack-focus under LowBandCellOnly: falseH=%.6f (naive=%.3f) falseM=%.6f interiorMse=%.9f errL=%.9f",
+					falseRestoreH, naiveFalseH, falseRestoreM, rackInteriorMse, errLOut);
 				Logger::WriteMessage(buf);
 				Assert::IsTrue(falseRestoreH <= 0.001, L"Owner Focus Rule: H defocus false-restore must be <= 0.1%");
 				Assert::IsTrue(falseRestoreM <= 0.001, L"Owner Focus Rule: M defocus false-restore must be <= 0.1%");
+				Assert::AreEqual(0.0, rackInteriorMse, 1e-12,
+					L"Owner Focus Rule: rack-focus (focusChange) MUST leave interior pixels bit-exact untouched (zero L/M/H delta)");
 				Assert::AreEqual(0.0, errLOut, 1e-12,
-					L"Unmatched rack-focus (focusChange) MUST gate L-band to 0 even under BokehMode::LowBandCellOnly!");
+					L"Owner Focus Rule: rack-focus (focusChange) MUST leave L-band strictly untouched even under LowBandCellOnly");
+				for (int cy = 1; cy < ch - 1; ++cy)
+				{
+					for (int cx = 1; cx < cw - 1; ++cx)
+					{
+						const unsigned mask = static_cast<unsigned>(
+							TdMapsView::Fetch(resRack.tdMaps[static_cast<size_t>(cy) * cw + cx], TdMapsView::kBandMask));
+						Assert::AreEqual(0u, mask,
+							L"Plan s1.4 L141/L143: rack-focus (focusChange) MUST hard-veto L, M, and H bands (all bits 0)");
+					}
+				}
 
-				// ---- Sub-case C: Matched-Focus Bokeh (LowBandCellOnly cleans L ONLY; M/H delta == 0!) ----
-				const TdV2Plane bokehPrev = AddCodingError(defocusedCur, 1.0, 401);
-				const TdV2Plane bokehNext = AddCodingError(defocusedCur, 1.0, 402);
-				const TdV2Plane bokehCur = AddCodingError(defocusedCur, 5.0, 403);
+				// ---- Sub-case C: Matched-Focus Bokeh (Q4: Untouched vs LowBandCellOnly, focusChange == false!) ----
+				// Plant genuine L-band bokeh noise/banding on defocusedCur (preserving defocusedCur's exact M/D3 optical
+				// bokeh signature cleanM2 > 1.0 & curFDebiased <= fDefocus, with zero Parseval contradiction on white noise).
+				const TdV2Plane bokehWhite = AddCodingError(defocusedCur, 18.0, 403);
+				const ThreeBandPlanes bokehWhiteB = DecomposeActiveBands(bokehWhite, ActiveRect::Full(w, h));
+				TdV2Plane bokehCur = defocusedCur;
+				for (size_t i = 0; i < bokehCur.v.size(); ++i)
+					bokehCur.v[i] += (bokehWhiteB.L.v[i] - curB.L.v[i]);
+				const TdV2Plane bokehPrev = AddCodingError(defocusedCur, 0.5, 401);
+				const TdV2Plane bokehNext = AddCodingError(defocusedCur, 0.5, 402);
 
+				const std::vector<uint8_t> bokehMap(static_cast<size_t>(cw) * ch, 1u);
 				FrameProcessInput bkIn;
 				bkIn.seq = 31;
 				bkIn.receivedY = bokehCur;
@@ -878,6 +1067,7 @@ namespace Tests
 				bkIn.nextPeak = { &bokehNext, &stillMf, false };
 				bkIn.hasStepPrior = true;
 				bkIn.estimatedStepDelta = 12.0;
+				bkIn.explicitDefocusedCells = &bokehMap; // kFocusMap (id 32) matched-focus bokeh mask (focusChange == false!)
 
 				Config cfgUntouched = MakePreset(Preset::Reference, Mode::On);
 				cfgUntouched.bokehMode = BokehMode::Untouched;
@@ -889,24 +1079,52 @@ namespace Tests
 				TdV2ReferenceEngine engL(cfgLowOnly);
 				const auto resL = engL.ProcessFrame(bkIn, &regRack);
 
+				const double mseBaseBokeh = PlaneMse(defocusedCur, bokehCur, interior);
 				const double mseU = PlaneMse(defocusedCur, resU.outputY, interior);
 				const double mseL = PlaneMse(defocusedCur, resL.outputY, interior);
-				Assert::IsTrue(mseL < mseU, L"Q4 LowBandCellOnly must clean matched-focus bokeh L-band noise while Untouched keeps it off");
+				const ThreeBandPlanes curBokehB = DecomposeActiveBands(bokehCur, ActiveRect::Full(w, h));
+				const ThreeBandPlanes outUB = DecomposeActiveBands(resU.outputY, ActiveRect::Full(w, h));
+				const ThreeBandPlanes outLB = DecomposeActiveBands(resL.outputY, ActiveRect::Full(w, h));
+				const double mseU_Lband = PlaneMse(curB.L, outUB.L, interior);
+				const double mseL_Lband = PlaneMse(curB.L, outLB.L, interior);
 
-				// Verify TdMapsView::kBandMask on matched-focus defocused interior cells has ZERO M/H bits (only bit 0 = L)!
+				Assert::IsTrue(resU.focusVetoCells > 0 && resL.focusVetoCells > 0,
+					L"Q4: Matched-focus bokeh gated via explicitDefocusedCells (kFocusMap id 32) must register focusVetoCells > 0");
+				Assert::AreEqual(mseBaseBokeh, mseU, 1e-12,
+					L"Q4: BokehMode::Untouched MUST leave matched-focus bokeh completely untouched (mseU == mseBaseBokeh)");
+				Assert::IsTrue(mseL < mseU,
+					L"Q4: BokehMode::LowBandCellOnly must strictly reduce bokeh error compared to BokehMode::Untouched");
+				Assert::IsTrue(mseL_Lband < mseU_Lband * 0.50,
+					L"Q4: BokehMode::LowBandCellOnly must reduce L-band bokeh MSE by >= 50% vs Untouched");
+				// Analytical Gaussian passband overlap bound: (I - G(1.0)) * (w_L(x,y) * G(2.5)) has a small (< 1%)
+				// smooth-filter passband tail even with w_M == w_H == 0 strictly; exact w_M == w_H == 0 is additionally
+				// proved by kBandMask (maskL & 6u == 0) and the matched-focus Nyquist checkerboard test immediately below.
+				Assert::IsTrue(PlaneMse(curBokehB.H, outLB.H, interior) <= 0.01 * PlaneMse(curBokehB.L, outLB.L, interior),
+					L"Q4: BokehMode::LowBandCellOnly H-band projection must stay <= 1% of L-band repair (Gaussian passband tail only)");
+
+				// Verify TdMapsView::kBandMask on matched-focus defocused interior cells cleanly distinguishes Q4 modes:
+				//   - Untouched: maskU == 0 (all bands L, M, H strictly 0)
+				//   - LowBandCellOnly: (maskL & 6u) == 0 (M and H strictly 0) AND (maskL & 1u) == 1u (L active!)
 				for (int cy = 1; cy < ch - 1; ++cy)
 				{
 					for (int cx = 1; cx < cw - 1; ++cx)
 					{
-						const unsigned mask = static_cast<unsigned>(
+						const unsigned maskL = static_cast<unsigned>(
 							TdMapsView::Fetch(resL.tdMaps[static_cast<size_t>(cy) * cw + cx], TdMapsView::kBandMask));
-						Assert::AreEqual(0u, mask & 6u,
-							L"Matched-focus bokeh under LowBandCellOnly MUST keep M (bit 1) and H (bit 2) strictly 0");
+						const unsigned maskU = static_cast<unsigned>(
+							TdMapsView::Fetch(resU.tdMaps[static_cast<size_t>(cy) * cw + cx], TdMapsView::kBandMask));
+						Assert::AreEqual(0u, maskU,
+							L"Q4: Matched-focus bokeh under BokehMode::Untouched MUST veto all bands (maskU == 0)");
+						Assert::AreEqual(0u, maskL & 6u,
+							L"Q4: Matched-focus bokeh under BokehMode::LowBandCellOnly MUST keep M (bit 1) and H (bit 2) strictly 0");
+						Assert::AreEqual(1u, maskL & 1u,
+							L"Q4: Matched-focus bokeh under BokehMode::LowBandCellOnly MUST keep L-band (bit 0) active");
 					}
 				}
 
-				// Direct M/H delta == 0 proof: plant a pure Nyquist checkerboard (zero L-band projection under G(2.5)!)
-				// on matched-focus bokehCur vs clean defocusedCur refs -> LowBandCellOnly must leave it untouched!
+				// Direct M/H delta == 0 proof on genuine matched-focus bokeh (isDefocused == true, focusChange == false):
+				// plant a pure Nyquist checkerboard (zero L/M/D3 projection!) WITHOUT explicitFocusChangeCells ->
+				// under LowBandCellOnly, isDefocused alone MUST hold H-band delta == 0.0!
 				TdV2Plane bokehChecker = defocusedCur;
 				for (int y = 0; y < h; ++y)
 					for (int x = 0; x < w; ++x)
@@ -920,15 +1138,164 @@ namespace Tests
 				bkMH.nextPeak = { &defocusedCur, &stillMf, false };
 				bkMH.hasStepPrior = true;
 				bkMH.estimatedStepDelta = 12.0;
+				bkMH.explicitDefocusedCells = &bokehMap; // matched-focus bokeh mask (explicitFocusChangeCells == nullptr!)
 				TdV2ReferenceEngine engLMH(cfgLowOnly);
 				const auto resLMH = engLMH.ProcessFrame(bkMH, &regRack);
+				Assert::IsTrue(resLMH.focusVetoCells > 0,
+					L"Matched-focus bokeh checkerboard gated via explicitDefocusedCells must engage bokeh guard");
 				double maxInteriorMhDelta = 0.0;
 				for (int y = interior.y0; y < interior.y1; ++y)
 					for (int x = interior.x0; x < interior.x1; ++x)
 						maxInteriorMhDelta = (std::max)(maxInteriorMhDelta,
 							std::fabs(resLMH.outputY.at(x, y) - bokehChecker.at(x, y)));
 				Assert::IsTrue(maxInteriorMhDelta < 1e-5,
-					L"Under LowBandCellOnly matched bokeh, pure H-band difference MUST yield 0.0 delta!");
+					L"Under genuine matched-focus bokeh (LowBandCellOnly, focusChange == false), pure H-band difference MUST yield 0.0 delta!");
+			}
+
+			TEST_METHOD(CurvedSmoothSkyBandingRepairedUnderUntouchedWithRackFocusControl)
+			{
+				// H8 Adversarial Test: Curved smooth sky / vignette gradient A * cos(2*pi*x/96) (A = 100)
+				// has non-zero D3 curvature energy (> structureFloor) and low focus ratio F ~= 0.03 < fDefocus (0.117).
+				// Under default BokehMode::Untouched, TD MUST NOT self-veto L-band banding repair on the curved sky!
+				// Simultaneously, a genuine rack-focus pull on the EXACT SAME curved-sky scene MUST still hard-veto M/H
+				// (defocus false-restore <= 0.1%).
+				const int w = 96, h = 96;
+				const int cw = w / 16, ch = h / 16;
+				const ActiveRect interior{ 16, 16, w - 16, h - 16 };
+				const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+
+				TdV2Plane masterSky(w, h), valleySky(w, h);
+				std::vector<uint8_t> skyMask(static_cast<size_t>(w) * h, kMaskW1BandedSky | kMaskTrackable);
+				for (int y = 0; y < h; ++y)
+				{
+					for (int x = 0; x < w; ++x)
+					{
+						const double val = 450.0 + 100.0 * std::cos(2.0 * kPi * x / 96.0)
+						                         + 20.0 * std::cos(2.0 * kPi * y / 96.0);
+						masterSky.at(x, y) = val;
+						// Quantized 8-code sky banding on the valley frame.
+						valleySky.at(x, y) = 8.0 * std::floor(val / 8.0 + 0.5);
+					}
+				}
+
+				// Non-vacuity proof: verify curved sky genuinely has curvature energy > 5 code^2 and F < fDefocus
+				// (confirming the pre-H8 focus guard WOULD have falsely self-vetoed this sky under BokehMode::Untouched!).
+				const ThreeBandPlanes skyBands = DecomposeActiveBands(masterSky, ActiveRect::Full(w, h));
+				double skyE2 = 0.0, skyE3 = 0.0;
+				size_t skyCnt = 0;
+				for (int y = interior.y0; y < interior.y1; ++y)
+				{
+					for (int x = interior.x0; x < interior.x1; ++x)
+					{
+						const double mv = skyBands.M.at(x, y);
+						const double d3 = skyBands.D3.at(x, y);
+						skyE2 += mv * mv;
+						skyE3 += d3 * d3;
+						++skyCnt;
+					}
+				}
+				const double skyBandEnergy = (skyE2 + skyE3) / static_cast<double>(skyCnt);
+				const double skyFocusRatio = skyE2 / (skyE2 + skyE3 + 1e-12);
+				Assert::IsTrue(skyBandEnergy > 5.0,
+					L"Non-vacuity: curved cosine sky must have genuine D3 curvature energy above structureFloor");
+				Assert::IsTrue(skyFocusRatio < AnalyticalEdgeFocusRatio(VpUnit::BandFromBase::kSigmaBase),
+					L"Non-vacuity: curved cosine sky must have F < fDefocus (exposing pre-H8 self-veto hazard)");
+
+				const TdV2Plane peakPrevSky = AddCodingError(masterSky, 0.5, 851);
+				const TdV2Plane peakNextSky = AddCodingError(masterSky, 0.5, 852);
+
+				// Run under default BokehMode::Untouched!
+				Config cfgSky = MakePreset(Preset::Reference, Mode::On);
+				Assert::IsTrue(cfgSky.bokehMode == BokehMode::Untouched);
+				TdV2ReferenceEngine engSky(cfgSky);
+				StandInRegistry regSky;
+
+				FrameProcessInput inSky;
+				inSky.seq = 1;
+				inSky.receivedY = valleySky;
+				inSky.hasCleanSplit = true;
+				inSky.cleanY = valleySky;
+				inSky.prevPeak = { &peakPrevSky, &stillMf, false };
+				inSky.nextPeak = { &peakNextSky, &stillMf, false };
+				inSky.hasStepPrior = true;
+				inSky.estimatedStepDelta = 8.0;
+				const auto resSky = engSky.ProcessFrame(inSky, &regSky);
+
+				Assert::AreEqual(static_cast<size_t>(0), resSky.focusVetoCells,
+					L"H8: curved smooth sky must NOT trigger false rack-focus vetoes");
+				int lActiveInteriorCells = 0;
+				for (int cy = 1; cy < ch - 1; ++cy)
+				{
+					for (int cx = 1; cx < cw - 1; ++cx)
+					{
+						const unsigned mask = static_cast<unsigned>(
+							TdMapsView::Fetch(resSky.tdMaps[static_cast<size_t>(cy) * cw + cx], TdMapsView::kBandMask));
+						if ((mask & 1u) != 0u)
+							++lActiveInteriorCells;
+					}
+				}
+				Assert::IsTrue(lActiveInteriorCells >= (cw - 2) * (ch - 2) / 2,
+					L"H8: L-band MUST remain active (not vetoed) across curved smooth sky under BokehMode::Untouched");
+
+				const WorstAreaReport repSky = EvaluateWorstAreaMasks(
+					masterSky.v.data(), valleySky.v.data(), resSky.outputY.v.data(), skyMask.data(), w, h, 16, 1023.0);
+				Assert::IsTrue(repSky.valid);
+				Assert::IsTrue(repSky.w1BandedSky.deltaDb > 3.0,
+					L"H8: curved smooth sky must achieve strong positive PSNR gain under default BokehMode::Untouched");
+				Assert::IsTrue(repSky.w1BandingStepReduction >= 0.30,
+					L"H8: curved smooth sky banding step error must drop >= 30% (plan s3.3 W1 bar)");
+
+				// ---- Mandatory Genuine Rack-Focus Negative Control on the SAME Curved-Sky Scene ----
+				// Add sharp foreground structure onto masterSky -> sharpRef, then pull focus optically (sigma = 4.0)
+				// along motion -> defocusedCur. Genuine focal-plane shift MUST still hard-veto M/H (<= 0.1% false restore)!
+				TdV2Plane sharpScene = masterSky;
+				for (int y = 0; y < h; ++y)
+				{
+					for (int x = 0; x < w; ++x)
+					{
+						sharpScene.at(x, y) += 28.0 * std::sin(2.0 * kPi * (x / 7.0 + y / 11.0))
+						                     + 18.0 * std::cos(2.0 * kPi * (x / 5.0 - y / 6.0));
+					}
+				}
+				const auto defocusTaps = VpUnit::BandFromBase::Taps<double>(4.0, 3.0, true, 0.0);
+				TdV2Plane defocusedScene(w, h, 0.0);
+				VpUnit::BandFromBase::BlurTaps(sharpScene.v, defocusedScene.v, w, h, defocusTaps, VpUnit::BandFromBase::EdgeMode::Replicate);
+
+				const ThreeBandPlanes curRackB = DecomposeActiveBands(defocusedScene, ActiveRect::Full(w, h));
+				const ThreeBandPlanes refRackB = DecomposeActiveBands(sharpScene, ActiveRect::Full(w, h));
+				const double refHEnergy = PlaneMse(curRackB.H, refRackB.H, interior);
+				const double refMEnergy = PlaneMse(curRackB.M, refRackB.M, interior);
+
+				// Naive unprotected blend on the exact same rack-focus pair severely violates Owner Focus Rule!
+				TdV2Plane naiveRack(w, h, 0.0);
+				for (size_t i = 0; i < defocusedScene.v.size(); ++i)
+					naiveRack.v[i] = 0.5 * defocusedScene.v[i] + 0.5 * sharpScene.v[i];
+				const ThreeBandPlanes naiveRackB = DecomposeActiveBands(naiveRack, ActiveRect::Full(w, h));
+				Assert::IsTrue(PlaneMse(curRackB.H, naiveRackB.H, interior) / refHEnergy > 0.20,
+					L"Negative control: naive blend across rack-focus must severely import sharp H detail");
+				Assert::IsTrue(PlaneMse(curRackB.M, naiveRackB.M, interior) / refMEnergy > 0.20,
+					L"Negative control: naive blend across rack-focus must severely import sharp M detail");
+
+				TdV2ReferenceEngine engRack(cfgSky);
+				StandInRegistry regRack;
+				FrameProcessInput inRack;
+				inRack.seq = 2;
+				inRack.receivedY = defocusedScene;
+				inRack.hasCleanSplit = true;
+				inRack.cleanY = defocusedScene;
+				inRack.prevPeak = { &sharpScene, &stillMf, false };
+				inRack.nextPeak = { &sharpScene, &stillMf, false };
+				inRack.hasStepPrior = true;
+				inRack.estimatedStepDelta = 12.0;
+				const auto resRack = engRack.ProcessFrame(inRack, &regRack);
+
+				Assert::IsTrue(resRack.focusVetoCells > 0,
+					L"Genuine rack-focus pull on the curved-sky scene MUST still engage focus veto");
+				const ThreeBandPlanes outRackB = DecomposeActiveBands(resRack.outputY, ActiveRect::Full(w, h));
+				const double falseH = PlaneMse(curRackB.H, outRackB.H, interior) / refHEnergy;
+				const double falseM = PlaneMse(curRackB.M, outRackB.M, interior) / refMEnergy;
+				Assert::IsTrue(falseH <= 0.001, L"Owner Focus Rule: H defocus false-restore must remain <= 0.1%");
+				Assert::IsTrue(falseM <= 0.001, L"Owner Focus Rule: M defocus false-restore must remain <= 0.1%");
 			}
 
 			TEST_METHOD(LetterboxBorderPanIntegrityBarsExactAndActiveEdgeZeroRinging)
@@ -1066,10 +1433,18 @@ namespace Tests
 					for (int x = 32; x < 48; ++x)
 						cur.at(x, y) = master.at(x, y) + 12.0;
 
-				// Cell (4, 2): Local explicit focusChange (+12-code contrast vs peak refs) directly adjacent to normal high-weight cells!
+				// Cell (4, 2): Local explicit focusChange — defocused cur (450 + 12 L-band offset) vs sharp refs carrying
+				// BOTH period-8 M-band (20*sin(2*pi*x/8)) AND Nyquist H-band (+/-30) contrast directly adjacent to normal
+				// high-weight cells (any L, M, or H bleed across the cell boundary immediately alters per-pixel output!).
 				for (int y = 32; y < 48; ++y)
 					for (int x = 64; x < 80; ++x)
-						cur.at(x, y) = master.at(x, y) + 12.0;
+					{
+						const double midPat = 20.0 * std::sin(2.0 * kPi * static_cast<double>(x) / 8.0);
+						const double highPat = (((x ^ y) & 1) ? 30.0 : -30.0);
+						cur.at(x, y) = 450.0 + 12.0;
+						peakPrev.at(x, y) = 450.0 + midPat + highPat;
+						peakNext.at(x, y) = 450.0 + midPat + highPat;
+					}
 
 				// Cell (2, 4): DynamicTexture (water/foliage) — pure Nyquist checkerboard in cur vs flat in refs
 				// (zero L-band diff, huge M/H diff -> any M/H bleed immediately alters the checkerboard!).
@@ -1124,12 +1499,18 @@ namespace Tests
 						Assert::AreEqual(cur.at(x, y), res.outputY.at(x, y), 0.0,
 							L"Overlay (subtitle) cell MUST have 0.000 weight bleed even 1 px from active neighbor border!");
 
-				// Assert 0.000 bleed inside EVERY pixel of local focusChange cell (4, 2), including 0-8 px from border!
-				Assert::AreEqual(0.0f, TdMapsView::Fetch(res.tdMaps[static_cast<size_t>(2) * cw + 4], TdMapsView::kValidity), 0.0f);
+				// Assert local focusChange cell (4, 2) hard-vetoes L, M, and H (all band bits 0, kValidity == 0)
+				// with EXACT 0.0 per-pixel bleed on EVERY pixel in [64, 80) x [32, 48) (zero diluted averaging!).
+				const unsigned focusMask = static_cast<unsigned>(
+					TdMapsView::Fetch(res.tdMaps[static_cast<size_t>(2) * cw + 4], TdMapsView::kBandMask));
+				Assert::AreEqual(0u, focusMask,
+					L"Local focusChange cell MUST hard-veto L, M, and H (all band bits strictly 0)");
+				Assert::AreEqual(0.0f, TdMapsView::Fetch(res.tdMaps[static_cast<size_t>(2) * cw + 4], TdMapsView::kValidity), 0.0f,
+					L"Local focusChange cell MUST report kValidity == 0.0f");
 				for (int y = 32; y < 48; ++y)
 					for (int x = 64; x < 80; ++x)
 						Assert::AreEqual(cur.at(x, y), res.outputY.at(x, y), 0.0,
-							L"Local focusChange cell MUST have 0.000 weight bleed even 1 px from active neighbor border!");
+							L"Local focusChange cell MUST have exact 0.000 L/M/H bleed on EVERY pixel even 1 px from active border!");
 
 				// Assert DynamicTexture cell (2, 4) keeps M/H bits strictly 0 and zero M/H checkerboard bleed!
 				const unsigned dynMask = static_cast<unsigned>(
@@ -1267,11 +1648,15 @@ namespace Tests
 				// Verify BOTH leading ([2, 8)) AND trailing ([64, 70)) remainder strips are STRICTLY BOUNDED (NOT unbounded ~200!)
 				// and engaged TransformUnknownBound visibly, while bars ([0, 2) and [70, 72)) stay bit-exact!
 				const RoundingCellStats st = ComputeRoundingCellStats(stepDelta, phi, 0.0);
-				const BandWhiteNoiseGains gains = ComputeBandWhiteNoiseGains();
+				// Exact Parseval passband supremum ||H_b||_inf^2 (M3): L=1.0, M=midPassbandPeak^2, H=1.0.
+				const double s1Sq = VpUnit::BandFromBase::kSigmaFine * VpUnit::BandFromBase::kSigmaFine;
+				const double s2Sq = VpUnit::BandFromBase::kSigmaBase * VpUnit::BandFromBase::kSigmaBase;
+				const double wStarSq = (2.0 * std::log(VpUnit::BandFromBase::kSigmaBase / VpUnit::BandFromBase::kSigmaFine)) / (s2Sq - s1Sq);
+				const double midPassbandPeak = std::exp(-0.5 * s1Sq * wStarSq) - std::exp(-0.5 * s2Sq * wStarSq);
 				const double maxPixelBound = kPixelBoundSigma * (
-					std::sqrt(st.totalVar * gains.low) +
-					std::sqrt(st.totalVar * gains.mid) +
-					std::sqrt(st.totalVar * gains.fine));
+					std::sqrt(st.totalVar * 1.0) +
+					std::sqrt(st.totalVar * (midPassbandPeak * midPassbandPeak)) +
+					std::sqrt(st.totalVar * 1.0));
 				Assert::IsTrue(regStrict.IsActive(StandInKind::TransformUnknownBound),
 					L"STRICT leading/trailing partial strips outside codec 8x8 grid must engage TransformUnknownBound visibly");
 				Assert::IsTrue(regCell.IsActive(StandInKind::TransformUnknownBound),
@@ -1411,7 +1796,7 @@ namespace Tests
 					Assert::IsTrue(reg.IsActive(StandInKind::MotionFieldStandIn));
 				}
 
-				// 2. Null CellMotionField -> visible MotionFieldStandIn!
+				// 2. Null CellMotionField -> H9: NEVER whole-frame Still blend! Must engage MissingMotionNoWholeBlend visibly!
 				{
 					Config cfg = MakePreset(Preset::Reference, Mode::On);
 					TdV2ReferenceEngine eng(cfg);
@@ -1428,9 +1813,11 @@ namespace Tests
 					in.estimatedStepDelta = 12.0;
 					const auto res = eng.ProcessFrame(in, &reg);
 
-					AssertAllFinite(res.outputY, L"Null motion field stand-in must produce finite output");
-					Assert::AreEqual(static_cast<size_t>(2), res.motionStandInRefs);
-					Assert::IsTrue(reg.IsActive(StandInKind::MotionFieldStandIn));
+					AssertAllFinite(res.outputY, L"Null motion field must produce finite output");
+					Assert::AreEqual(static_cast<size_t>(2), res.missingMotionSkippedRefs,
+						L"Null motion refs must be visibly counted in missingMotionSkippedRefs");
+					Assert::IsTrue(reg.IsActive(StandInKind::MissingMotionNoWholeBlend),
+						L"Null motion field must visibly engage StandInKind::MissingMotionNoWholeBlend");
 				}
 
 				// 3. cfg_.grainCellPx <= 0 (and cellPx <= 0) -> ZERO divide-by-zero crash!
@@ -1563,8 +1950,13 @@ namespace Tests
 					Assert::IsTrue(reg.IsActive(StandInKind::SingleRefA1ToA2Fallback));
 				}
 
-				// 8. Singular covariance cell -> ZERO crash, finite output, singularCells > 0, SingularSolveClosure visible!
-				// prevPeak = cur + 5e-5 (C_00 = 2.5e-9 > 1e-9), nextPeak = cur (C_11 = 0, a_11 = 0 + reg = 1e-9 <= kSolveNumericalFloor).
+				// 8. Tiny-scale PSD covariance cell (C_00 = 2.5e-9, C_11 = 0, reg >= 1e-9 >> kSolvePivotFloor = 1e-12):
+				// Because empirical pixel differences d_k = y_k - x always form a symmetric positive semi-definite
+				// Gram matrix C = D^T D / N >= 0, adding Tikhonov regularization reg*I (reg >= kSolveNumericalFloor = 1e-9,
+				// three orders of magnitude above kSolvePivotFloor = 1e-12) guarantees strictly positive-definite (SPD)
+				// C + reg*I for ALL valid finite pixel covariances — so real pixel inputs solve cleanly and finitely
+				// without false singularity! Direct rank-deficient / indefinite SingularSolveClosure verification is
+				// enforced in TdV2BlendMathTests::NaNInfAndSingularCovarianceCloseAllWeightsToZeroVisibly.
 				{
 					TdV2Plane flatCur(w, h, 400.0);
 					TdV2Plane flatRefEps(w, h, 400.0 + 5e-5);
@@ -1586,10 +1978,14 @@ namespace Tests
 					in.estimatedStepDelta = 12.0;
 					const auto res = eng.ProcessFrame(in, &reg);
 
-					AssertAllFinite(res.outputY, L"Singular covariance cell must produce finite output");
-					Assert::IsTrue(res.singularCells > 0, L"Singular covariance cell must increment singularCells counter");
-					Assert::IsTrue(reg.IsActive(StandInKind::SingularSolveClosure),
-						L"Singular covariance closure must engage SingularSolveClosure visibly");
+					AssertAllFinite(res.outputY, L"Tiny-scale PSD covariance cell must produce finite output");
+					Assert::AreEqual(static_cast<size_t>(0), res.singularCells,
+						L"Well-conditioned regularized PSD covariance must NOT falsely report singularity");
+					Assert::IsFalse(reg.IsActive(StandInKind::SingularSolveClosure),
+						L"Well-conditioned regularized PSD covariance must NOT falsely engage SingularSolveClosure");
+					for (size_t i = 0; i < flatCur.v.size(); ++i)
+						Assert::IsTrue(std::fabs(res.outputY.v[i] - flatCur.v[i]) <= 5e-5 + 1e-12,
+							L"Convex solve on tiny-scale PSD refs must stay strictly inside convex hull of inputs");
 				}
 
 				// 9 & 10. hasStepPrior == false AND enableLongAnchor == true -> BOTH stand-ins visibly engaged!
@@ -1668,6 +2064,41 @@ namespace Tests
 				eng.ProcessFrame(fA, &reg);
 				Assert::IsTrue(eng.HasCarry());
 
+				// Mandatory In-Test Negative Control (Rule 3):
+				// Unprotected cross-cut blending on the EXACT SAME (sceneA, sceneB) inputs ghosts scene A into scene B!
+				{
+					TdV2Plane naiveCrossCut(w, h, 0.0);
+					for (size_t i = 0; i < sceneB.v.size(); ++i)
+						naiveCrossCut.v[i] = 0.5 * (sceneA.v[i] + sceneB.v[i]);
+					const double naiveGhostRmse = std::sqrt(PlaneMse(sceneB, naiveCrossCut, ActiveRect::Full(w, h)));
+					Assert::IsTrue(naiveGhostRmse > 150.0,
+						L"Negative control: unprotected cross-cut blend must severely ghost sceneA into sceneB");
+
+					// Also verify running the engine WITHOUT isCutOrSpanInvalid on the exact same inputs DOES blend carry/ref!
+					const CellMotionField stillMf = CellMotionField::Uniform(w / 16, h / 16, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+					Config noCutCfg = MakePreset(Preset::Reference, Mode::On);
+					noCutCfg.estimator = VarianceEstimator::A2_RoundingCells;
+					TdV2ReferenceEngine noCutEng(noCutCfg);
+					StandInRegistry noCutReg;
+					noCutEng.ProcessFrame(fA, &noCutReg);
+
+					FrameProcessInput fNoCut;
+					fNoCut.seq = 2;
+					fNoCut.receivedY = sceneB;
+					fNoCut.hasCleanSplit = true;
+					fNoCut.cleanY = sceneB;
+					fNoCut.prevPeak = { &sceneA, &stillMf, false };
+					fNoCut.hasCarryMotion = true;
+					fNoCut.carryMotion = stillMf;
+					fNoCut.hasStepPrior = true;
+					fNoCut.estimatedStepDelta = 24.0;
+					fNoCut.isCutOrSpanInvalid = false;
+					const auto noCutRes = noCutEng.ProcessFrame(fNoCut, &noCutReg);
+					const double engNoCutGhost = std::sqrt(PlaneMse(sceneB, noCutRes.outputY, ActiveRect::Full(w, h)));
+					Assert::IsTrue(noCutRes.carryUsed && noCutRes.activeRefCount >= 1 && engNoCutGhost > 0.1,
+						L"Negative control: omitting isCutOrSpanInvalid on exact same sceneA->sceneB leaks carry/ref ghosting");
+				}
+
 				// Cut to scene B -> MUST reset carry and NEVER ghost scene A into scene B!
 				FrameProcessInput fCut;
 				fCut.seq = 2;
@@ -1715,24 +2146,19 @@ namespace Tests
 			}
 
 			// =========================================================================
-			// 12. Subtle Non-Rigid Face / Micro-Deformation Protection (Owner Request):
-			//     1-2 px eyelid/lip shift inside a Still (vx=vy=0) 16x16 portrait skin
-			//     cell is preserved with zero wax/plastic smearing across transform-
-			//     unknown CELL and 8x8 STRICT/CELL, while surrounding still skin noise
-			//     is genuinely repaired and naive temporal averaging severely smears it.
+			// 12a. H13a — Pass-1 Masked Face Test (Plan Q2 / s1.3 / s3.3):
+			//      Moving faces supplied via `in.faceMask` MUST have exact bit-for-bit
+			//      zero delta (`moving face delta hash == 0`), engage FaceNonRigidMask,
+			//      and report `faceMaskedCells > 0`, while unmasked still background
+			//      is repaired and an unmasked negative control proves the face WOULD
+			//      be modified without `faceMask`.
 			// =========================================================================
-			TEST_METHOD(SubtleFaceMicroMotionPreservedWithoutWaxSmearing)
+			TEST_METHOD(Pass1MaskedFaceZeroDeltaWithUnmaskedNegativeControl)
 			{
-				const int w = 64;
-				const int h = 64;
+				const int w = 64, h = 64;
 				const int cellPx = 16;
-				const int cw = w / cellPx;
-				const int ch = h / cellPx;
+				const int cw = w / cellPx, ch = h / cellPx; // 4x4 cells
 
-				// Build a realistic 10-bit portrait skin patch with cheek shading + subtle natural skin texture,
-				// plus a crisp eyelid/lip crease + catchlight highlight localized inside Still cell (2, 2) [32..48)^2.
-				// In prevPeak & nextPeak the crease sits at y0 = 39.0; in the current frame it shifts by +2.0 px to y0 = 41.0
-				// (simulating subtle blinking / speaking non-rigid micro-motion where 16x16 block ME reports vx=vy=0).
 				auto renderPortrait = [&](double eyelidShiftY) -> TdV2Plane
 				{
 					TdV2Plane p(w, h, 0.0);
@@ -1742,17 +2168,14 @@ namespace Tests
 						{
 							const double dx = static_cast<double>(x) - 32.0;
 							const double dy = static_cast<double>(y) - 32.0;
-							// Smooth skin shading + subtle organic skin-pore micro-texture.
 							const double shading = 470.0 + 42.0 * std::cos(2.0 * kPi * dx / 96.0) * std::cos(2.0 * kPi * dy / 88.0);
 							const double skinTex = 9.0 * std::sin(2.0 * kPi * (x / 7.3 + y / 9.1) + 0.3)
 							                     + 7.0 * std::cos(2.0 * kPi * (x / 5.1 - y / 6.7) + 1.4);
 							double val = shading + skinTex;
-
-							// Horizontal eyelid/lip crease + subtle upper highlight strictly inside x in [34, 46), y in [34, 46).
 							if (x >= 34 && x < 46)
 							{
 								const double cx = static_cast<double>(x) - 39.5;
-								const double arch = 0.04 * cx * cx; // gentle natural eyelid/lip curvature
+								const double arch = 0.04 * cx * cx;
 								const double centerY = 39.0 + eyelidShiftY + arch;
 								const double distCrease = static_cast<double>(y) - centerY;
 								const double distHighlight = static_cast<double>(y) - (centerY - 1.6);
@@ -1767,58 +2190,25 @@ namespace Tests
 				};
 
 				const TdV2Plane refMaster = renderPortrait(0.0);
-				const TdV2Plane curMaster = renderPortrait(2.0); // 2-px non-rigid eyelid/lip shift!
-
-				// Independent noisy coded observations (non-oracle: cur has valley coding noise, peaks have light noise).
+				const TdV2Plane curMaster = renderPortrait(2.0);
 				const TdV2Plane curReceived = AddCodingError(curMaster, 7.0, 1201u, 0.15);
 				const TdV2Plane prevPeak = AddCodingError(refMaster, 1.2, 1202u, 0.0);
 				const TdV2Plane nextPeak = AddCodingError(refMaster, 1.2, 1203u, 0.0);
-
-				// Block motion estimator sees a still head: vx = vy = 0, RegionMotionClass::Still on ALL 16x16 cells!
 				const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
 
-				// Region masks:
-				//  - microRect: shifted eyelid/lip crease inside Still cell (2, 2)
-				//  - skinRect: surrounding un-shifted textured skin region (cells (0,0), (1,0), (0,1), (1,1))
-				const ActiveRect microRect{ 34, 37, 46, 45 };
-				const ActiveRect skinRect{ 2, 2, 30, 30 };
-
-				// Local vertical edge-contrast energy along the shifted eyelid/lip crease (measures sharpness vs wax smearing).
-				auto verticalEdgeContrast = [](const TdV2Plane& p, const ActiveRect& r) -> double
+				// Mask the 2x2 face block covering cells (2,2), (3,2), (2,3), (3,3) -> [32..64) x [32..64).
+				std::vector<uint8_t> faceMask(static_cast<size_t>(cw) * ch, 0u);
+				size_t expectedMaskedCells = 0;
+				for (int cy = 2; cy < 4; ++cy)
 				{
-					double sumAbsGrad = 0.0;
-					size_t n = 0;
-					for (int y = r.y0; y < r.y1 - 1; ++y)
+					for (int cx = 2; cx < 4; ++cx)
 					{
-						for (int x = r.x0; x < r.x1; ++x)
-						{
-							sumAbsGrad += std::fabs(p.at(x, y + 1) - p.at(x, y));
-							++n;
-						}
+						faceMask[static_cast<size_t>(cy) * cw + cx] = 1u;
+						++expectedMaskedCells;
 					}
-					return n > 0 ? (sumAbsGrad / static_cast<double>(n)) : 0.0;
-				};
+				}
+				const ActiveRect bgRect{ 2, 2, 30, 30 };
 
-				const double gtMicroContrast = verticalEdgeContrast(curMaster, microRect);
-				Assert::IsTrue(gtMicroContrast > 25.0, L"Synthetic eyelid/lip crease must have strong ground-truth edge contrast");
-
-				const double curSkinRmse = std::sqrt(PlaneMse(curReceived, curMaster, skinRect));
-				const double curMicroRmse = std::sqrt(PlaneMse(curReceived, curMaster, microRect));
-
-				// ---- MANDATORY IN-TEST NEGATIVE CONTROL (Rule 3): Unprotected temporal average (cur + prev + next) / 3
-				//      on the EXACT SAME still-face input severely smears & ghosts the shifted 2-px eyelid/lip! ----
-				TdV2Plane naiveAvg(w, h, 0.0);
-				for (size_t i = 0; i < naiveAvg.v.size(); ++i)
-					naiveAvg.v[i] = (curReceived.v[i] + prevPeak.v[i] + nextPeak.v[i]) / 3.0;
-
-				const double naiveMicroRmse = std::sqrt(PlaneMse(naiveAvg, curMaster, microRect));
-				const double naiveContrastRatio = verticalEdgeContrast(naiveAvg, microRect) / gtMicroContrast;
-				Assert::IsTrue(naiveMicroRmse > 25.0,
-					L"Negative control failed: unprotected temporal average must severely smear shifted eyelid/lip (RMSE > 25)");
-				Assert::IsTrue(naiveContrastRatio < 0.60,
-					L"Negative control failed: unprotected temporal average must lose >40% of shifted eyelid/lip edge contrast");
-
-				// ---- Run TD v2 across ALL THREE quantization-constrained paths on the EXACT SAME input ----
 				struct FaceModeCase
 				{
 					bool transform8x8;
@@ -1831,51 +2221,848 @@ namespace Tests
 					{ true,  ResidualMode::Cell,   L"8x8DCT-CELL" }
 				};
 
+				const double curBgMse = PlaneMse(curReceived, curMaster, bgRect);
+
 				for (const FaceModeCase& mc : modeCases)
 				{
 					Config cfg = MakePreset(Preset::Reference, Mode::On);
 					cfg.residualMode = mc.resMode;
 					cfg.cellProjIterations = 2;
+
+					FrameProcessInput baseIn;
+					baseIn.seq = 120;
+					baseIn.receivedY = curReceived;
+					baseIn.hasCleanSplit = true;
+					baseIn.cleanY = curReceived;
+					baseIn.activeRect = ActiveRect::Full(w, h);
+					baseIn.prevPeak = { &prevPeak, &stillMf, false };
+					baseIn.nextPeak = { &nextPeak, &stillMf, false };
+					baseIn.hasStepPrior = true;
+					// Step delta = 24 (theta = 20 ~= 2.8*sigma for sigma=7 background noise) so ~95% of residual
+					// DCT coefficients sit inside the dead-zone [-theta, +theta] where 8x8DCT-STRICT lawfully repairs >= 50% MSE.
+					baseIn.estimatedStepDelta = 24.0;
+					baseIn.deadZonePhi = kDeadZonePhiInter;
+					baseIn.zeroCoeffFraction = 0.35;
+					baseIn.transformIdentified8x8 = mc.transform8x8;
+
+					// Mandatory In-Test Negative Control (Rule 3):
+					// Run EXACT SAME inputs with faceMask == nullptr -> prove face pixels WOULD be modified!
+					TdV2ReferenceEngine engUnmasked(cfg);
+					StandInRegistry regUnmasked;
+					const FrameProcessResult resUnmasked = engUnmasked.ProcessFrame(baseIn, &regUnmasked);
+					Assert::AreEqual(static_cast<size_t>(0), resUnmasked.faceMaskedCells);
+					Assert::IsFalse(regUnmasked.IsActive(StandInKind::FaceNonRigidMask));
+					double maxUnmaskedFaceDelta = 0.0;
+					for (int y = 32; y < 64; ++y)
+						for (int x = 32; x < 64; ++x)
+							maxUnmaskedFaceDelta = (std::max)(maxUnmaskedFaceDelta,
+								std::fabs(resUnmasked.outputY.at(x, y) - curReceived.at(x, y)));
+					Assert::IsTrue(maxUnmaskedFaceDelta > 1.0,
+						(std::wstring(mc.label) + L": Negative control — unmasked face MUST be modified by engine").c_str());
+
+					// Protected Pass-1 Masked Face run: supply in.faceMask!
+					FrameProcessInput maskedIn = baseIn;
+					maskedIn.faceMask = &faceMask;
+					TdV2ReferenceEngine engMasked(cfg);
+					StandInRegistry regMasked;
+					const FrameProcessResult resMasked = engMasked.ProcessFrame(maskedIn, &regMasked);
+					AssertAllFinite(resMasked.outputY, L"Masked face outputY must be finite");
+
+					Assert::IsTrue(regMasked.IsActive(StandInKind::FaceNonRigidMask),
+						(std::wstring(mc.label) + L": FaceNonRigidMask stand-in must be visibly active").c_str());
+					Assert::AreEqual(expectedMaskedCells, resMasked.faceMaskedCells,
+						(std::wstring(mc.label) + L": faceMaskedCells must match exact count of masked face cells").c_str());
+
+					// Exact bit-for-bit zero delta on EVERY pixel of EVERY masked face cell (delta hash == 0)!
+					for (int y = 32; y < 64; ++y)
+					{
+						for (int x = 32; x < 64; ++x)
+						{
+							Assert::AreEqual(curReceived.at(x, y), resMasked.outputY.at(x, y), 0.0,
+								(std::wstring(mc.label) + L": Pass-1 masked face pixel MUST have exact bit-for-bit zero delta").c_str());
+						}
+					}
+
+					// Non-vacuity: unmasked still background MUST still genuinely repair coding noise!
+					const double tdBgMse = PlaneMse(resMasked.outputY, curMaster, bgRect);
+					Assert::IsTrue(tdBgMse < curBgMse * 0.50,
+						(std::wstring(mc.label) + L": Unmasked still background must still achieve >= 50% MSE reduction").c_str());
+				}
+			}
+
+			// =========================================================================
+			// 12b. H13b — Unmasked Subtle Non-Face Organic Micro-Motion Test:
+			//      On unmasked subtle non-face micro-motion near a Still cell edge,
+			//      `cfg.enablePerCornerHuber = true` enforces strict no-harm
+			//      (`tdMicroRmse <= curMicroRmse`, `<= 1%` of blocks worsened `> 10%`
+			//      per plan s3.3, ZERO arbitrary constants), while running the EXACT
+			//      SAME engine with `cfg.enablePerCornerHuber = false` as the negative
+			//      control proves disabling per-corner Huber degrades micro-motion worse!
+			// =========================================================================
+			TEST_METHOD(UnmaskedSubtleMicroMotionNoHarmWithHuberOffNegativeControl)
+			{
+				const int w = 160, h = 160; // 10 x 10 = 100 canonical 16x16 blocks (exact 1% granularity for plan s3.3!)
+				const int cellPx = 16;
+				const int cw = w / cellPx, ch = h / cellPx;
+
+				// Organic textured surface with a localized subtle non-rigid crease/fold near the left/top
+				// interior boundary of Still cell (5, 5) ([80..96) x [80..96)) shifting by +2.0 px vertically.
+				auto renderOrganicScene = [&](double foldShiftY) -> TdV2Plane
+				{
+					TdV2Plane p(w, h, 0.0);
+					for (int y = 0; y < h; ++y)
+					{
+						for (int x = 0; x < w; ++x)
+						{
+							const double base = 460.0 + 38.0 * std::cos(2.0 * kPi * x / 128.0) * std::cos(2.0 * kPi * y / 112.0);
+							const double tex = 9.0 * std::sin(2.0 * kPi * (x / 7.3 + y / 9.1) + 0.3)
+							                 + 7.0 * std::cos(2.0 * kPi * (x / 5.1 - y / 6.7) + 1.4);
+							double val = base + tex;
+							// Subtle non-face fold localized near the left boundary of cell (5, 5): x in [80, 90), y in [82, 92).
+							if (x >= 80 && x < 90)
+							{
+								const double cx = static_cast<double>(x) - 84.5;
+								const double centerY = 85.0 + foldShiftY;
+								const double dist = static_cast<double>(y) - centerY;
+								const double horizTaper = std::exp(-0.5 * (cx / 3.2) * (cx / 3.2));
+								val -= 140.0 * horizTaper * std::exp(-0.5 * (dist / 0.75) * (dist / 0.75));
+								val +=  50.0 * horizTaper * std::exp(-0.5 * ((dist + 1.6) / 0.75) * ((dist + 1.6) / 0.75));
+							}
+							p.at(x, y) = val;
+						}
+					}
+					return p;
+				};
+
+				const TdV2Plane refMaster = renderOrganicScene(0.0);
+				const TdV2Plane curMaster = renderOrganicScene(2.0);
+				const TdV2Plane curReceived = AddCodingError(curMaster, 7.0, 1251u, 0.0);
+				const TdV2Plane prevPeak = AddCodingError(refMaster, 1.2, 1252u, 0.0);
+				const TdV2Plane nextPeak = AddCodingError(refMaster, 1.2, 1253u, 0.0);
+				const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+
+				// Evaluate micro-motion over cell (5, 5) [80..96)^2 and surrounding stationary background [16..64)^2.
+				const ActiveRect microCellRect{ 80, 80, 96, 96 };
+				const ActiveRect bgRect{ 16, 16, 64, 64 };
+				const double curMicroRmse = std::sqrt(PlaneMse(curReceived, curMaster, microCellRect));
+				const double curBgMse = PlaneMse(curReceived, curMaster, bgRect);
+
+				auto runPreset = [&](Preset preset, bool enablePerCornerHuber) -> FrameProcessResult
+				{
+					Config cfg = MakePreset(preset, Mode::On);
+					cfg.enablePerCornerHuber = enablePerCornerHuber;
 					TdV2ReferenceEngine eng(cfg);
 					StandInRegistry reg;
 
 					FrameProcessInput in;
-					in.seq = 120;
+					in.seq = 125;
 					in.receivedY = curReceived;
 					in.hasCleanSplit = true;
 					in.cleanY = curReceived;
-					in.activeRect = ActiveRect::Full(w, h);
 					in.prevPeak = { &prevPeak, &stillMf, false };
 					in.nextPeak = { &nextPeak, &stillMf, false };
 					in.hasStepPrior = true;
-					in.estimatedStepDelta = 12.0;
+					in.estimatedStepDelta = 14.0;
 					in.deadZonePhi = kDeadZonePhiInter;
-					in.zeroCoeffFraction = 0.35;
-					in.transformIdentified8x8 = mc.transform8x8;
+					in.zeroCoeffFraction = 0.20;
+					return eng.ProcessFrame(in, &reg);
+				};
 
-					const FrameProcessResult res = eng.ProcessFrame(in, &reg);
-					AssertAllFinite(res.outputY, L"Face micro-motion outputY must be 100% finite");
+				auto countBlocksWorsenedOver10Pct = [&](const TdV2Plane& out) -> size_t
+				{
+					size_t bad = 0;
+					for (int cy = 0; cy < ch; ++cy)
+					{
+						for (int cx = 0; cx < cw; ++cx)
+						{
+							const ActiveRect br{ cx * cellPx, cy * cellPx, (cx + 1) * cellPx, (cy + 1) * cellPx };
+							const double baseR = std::sqrt(PlaneMse(curReceived, curMaster, br));
+							const double outR = std::sqrt(PlaneMse(out, curMaster, br));
+							if (outR > 1.10 * baseR)
+								++bad;
+						}
+					}
+					return bad;
+				};
 
-					const double tdMicroRmse = std::sqrt(PlaneMse(res.outputY, curMaster, microRect));
-					const double tdSkinRmse = std::sqrt(PlaneMse(res.outputY, curMaster, skinRect));
-					const double tdContrastRatio = verticalEdgeContrast(res.outputY, microRect) / gtMicroContrast;
+				// 1. Preset::RealTime (poolR = 0): per-corner Huber ON vs exact same engine with per-corner Huber OFF!
+				const FrameProcessResult resRtOn = runPreset(Preset::RealTime, /*enablePerCornerHuber=*/true);
+				const FrameProcessResult resRtOff = runPreset(Preset::RealTime, /*enablePerCornerHuber=*/false);
+				AssertAllFinite(resRtOn.outputY, L"RealTime Huber-ON output must be finite");
+				AssertAllFinite(resRtOff.outputY, L"RealTime Huber-OFF output must be finite");
 
-					// 1. Non-vacuity: TD v2 genuinely cleans coding noise on the surrounding still skin region!
-					Assert::IsTrue(tdSkinRmse < curSkinRmse * 0.88,
-						(std::wstring(mc.label) + L": TD v2 must genuinely reduce still-skin coding noise (non-vacuous)").c_str());
+				const double rtOnMicroRmse = std::sqrt(PlaneMse(resRtOn.outputY, curMaster, microCellRect));
+				const double rtOffMicroRmse = std::sqrt(PlaneMse(resRtOff.outputY, curMaster, microCellRect));
+				const double rtOnBgMse = PlaneMse(resRtOn.outputY, curMaster, bgRect);
+				const size_t rtOnBadBlocks = countBlocksWorsenedOver10Pct(resRtOn.outputY);
+				const double rtOnBadFrac = static_cast<double>(rtOnBadBlocks) / static_cast<double>(cw * ch);
 
-					// 2. Micro-deformation preservation: NO wax/plastic smearing on the shifted 2-px eyelid/lip!
-					//    - RMSE stays dramatically below naive temporal smear (< 0.45x naive RMSE) and near received noise floor,
-					//    - Local vertical edge contrast retains >= 85% of independent current ground truth (vs < 60% naive).
-					Assert::IsTrue(tdMicroRmse < naiveMicroRmse * 0.45,
-						(std::wstring(mc.label) + L": TD v2 micro-motion RMSE must be < 0.45x naive temporal smear").c_str());
-					Assert::IsTrue(tdMicroRmse <= curMicroRmse + 4.0,
-						(std::wstring(mc.label) + L": TD v2 must not introduce heavy smear beyond received noise on shifted eyelid/lip").c_str());
-					Assert::IsTrue(tdContrastRatio >= 0.85,
-						(std::wstring(mc.label) + L": TD v2 must preserve >= 85% of shifted eyelid/lip edge contrast (zero wax smearing)").c_str());
-					Assert::IsTrue(tdContrastRatio > naiveContrastRatio + 0.25,
-						(std::wstring(mc.label) + L": TD v2 edge contrast must decisively beat unprotected temporal average").c_str());
+				char buf[256];
+				std::snprintf(buf, sizeof(buf),
+					"Unmasked micro-motion (RT poolR=0): curRmse=%.3f | huberON=%.3f (badBlocks=%zu/100) | huberOFF=%.3f",
+					curMicroRmse, rtOnMicroRmse, rtOnBadBlocks, rtOffMicroRmse);
+				Logger::WriteMessage(buf);
+
+				// Mandatory In-Test Negative Control (Rule 3): Exact same engine with enablePerCornerHuber = false!
+				Assert::IsTrue(rtOffMicroRmse > rtOnMicroRmse,
+					L"Negative control: disabling enablePerCornerHuber MUST worsen micro-motion RMSE on exact same inputs");
+				Assert::IsTrue(rtOffMicroRmse > curMicroRmse,
+					L"Negative control: disabling enablePerCornerHuber MUST violate strict no-harm on cell-boundary micro-motion");
+
+				// Protected engine assertions (strict no-harm + plan s3.3 <= 1% blocks worsened > 10%, ZERO arbitrary magic constants):
+				Assert::IsTrue(rtOnMicroRmse <= curMicroRmse,
+					L"enablePerCornerHuber=true MUST satisfy strict no-harm (tdMicroRmse <= curMicroRmse) on unmasked micro-motion");
+				Assert::IsTrue(rtOnBadFrac <= 0.01,
+					L"Plan s3.3 safety bar: <= 1% of blocks may worsen error by > 10%");
+				Assert::IsTrue(rtOnBgMse < curBgMse * 0.50,
+					L"Non-vacuity: stationary surrounding cells must still achieve >= 50% MSE reduction");
+
+				// 2. Preset::Reference (poolR = 1): verify strict no-harm + <= 1% worsened blocks AND Huber-off negative control!
+				const FrameProcessResult resRefOn = runPreset(Preset::Reference, /*enablePerCornerHuber=*/true);
+				const FrameProcessResult resRefOff = runPreset(Preset::Reference, /*enablePerCornerHuber=*/false);
+				AssertAllFinite(resRefOn.outputY, L"Reference Huber-ON output must be finite");
+				AssertAllFinite(resRefOff.outputY, L"Reference Huber-OFF output must be finite");
+				const double refOnMicroRmse = std::sqrt(PlaneMse(resRefOn.outputY, curMaster, microCellRect));
+				const double refOffMicroRmse = std::sqrt(PlaneMse(resRefOff.outputY, curMaster, microCellRect));
+				const double refOnBgMse = PlaneMse(resRefOn.outputY, curMaster, bgRect);
+				const size_t refOnBadBlocks = countBlocksWorsenedOver10Pct(resRefOn.outputY);
+				const double refOnBadFrac = static_cast<double>(refOnBadBlocks) / static_cast<double>(cw * ch);
+				Assert::IsTrue(refOffMicroRmse > refOnMicroRmse,
+					L"Reference negative control: disabling enablePerCornerHuber MUST worsen micro-motion RMSE on exact same inputs");
+				Assert::IsTrue(refOffMicroRmse > curMicroRmse,
+					L"Reference negative control: disabling enablePerCornerHuber MUST violate strict no-harm on cell-boundary micro-motion");
+				Assert::IsTrue(refOnMicroRmse <= curMicroRmse,
+					L"Reference preset with enablePerCornerHuber=true MUST satisfy strict no-harm on unmasked micro-motion");
+				Assert::IsTrue(refOnBadFrac <= 0.01,
+					L"Reference preset: <= 1% of blocks may worsen error by > 10% (plan s3.3)");
+				Assert::IsTrue(refOnBgMse < curBgMse * 0.50,
+					L"Reference preset: stationary surrounding cells must achieve >= 50% MSE reduction");
+			}
+
+			// =========================================================================
+			// 13. H9 — Missing Motion Field Never Whole-Blends Moving Content
+			// =========================================================================
+			TEST_METHOD(MissingMotionFieldNeverWholeBlendsMovingContentWithNegativeControl)
+			{
+				// Plan s1.2 L108 (L4): no valid vectors -> exact-copy static blocks only, or OFF (NEVER whole-frame "Still" blend!).
+				const int w = 96, h = 96;
+				const int cw = w / 16, ch = h / 16;
+				const ActiveRect edgeRect{ 24, 16, 72, 80 };
+
+				auto renderMovingBar = [&](double shiftX) -> TdV2Plane
+				{
+					TdV2Plane p(w, h, 300.0);
+					for (int y = 0; y < h; ++y)
+					{
+						for (int x = 0; x < w; ++x)
+						{
+							const double lx = static_cast<double>(x) - shiftX;
+							// High-contrast moving vertical bar (width 20 px, +300 codes) + texture!
+							const double bar = (lx >= 38.0 && lx < 58.0) ? 300.0 : 0.0;
+							const double tex = 25.0 * std::sin(2.0 * kPi * lx / 9.0) * std::cos(2.0 * kPi * y / 11.0);
+							p.at(x, y) = 320.0 + bar + tex;
+						}
+					}
+					return p;
+				};
+
+				const TdV2Plane prevFrame = renderMovingBar(-6.0);
+				const TdV2Plane curFrame = renderMovingBar(0.0);
+				const TdV2Plane nextFrame = renderMovingBar(+6.0);
+
+				// ---- Mandatory In-Test Negative Control (Rule 3): Naive whole-frame Still blend ----
+				// Simulates the pre-H9 buggy behavior that treated null motion as CellMotionField::Uniform(..., Still)!
+				{
+					const CellMotionField naiveStillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+					Config naiveCfg = MakePreset(Preset::Reference, Mode::On);
+					naiveCfg.estimator = VarianceEstimator::A2_RoundingCells;
+					TdV2ReferenceEngine naiveEng(naiveCfg);
+					StandInRegistry naiveReg;
+
+					FrameProcessInput naiveIn;
+					naiveIn.seq = 1;
+					naiveIn.receivedY = curFrame;
+					naiveIn.hasCleanSplit = true;
+					naiveIn.cleanY = curFrame;
+					naiveIn.prevPeak = { &prevFrame, &naiveStillMf, false };
+					naiveIn.nextPeak = { &nextFrame, &naiveStillMf, false };
+					naiveIn.hasStepPrior = true;
+					naiveIn.estimatedStepDelta = 24.0;
+					const auto naiveRes = naiveEng.ProcessFrame(naiveIn, &naiveReg);
+
+					TdV2Plane directAvg(w, h, 0.0);
+					for (size_t i = 0; i < curFrame.v.size(); ++i)
+						directAvg.v[i] = (curFrame.v[i] + prevFrame.v[i] + nextFrame.v[i]) / 3.0;
+					const double directGhostRmse = std::sqrt(PlaneMse(curFrame, directAvg, edgeRect));
+					const double stillEngGhostRmse = std::sqrt(PlaneMse(curFrame, naiveRes.outputY, edgeRect));
+					Assert::IsTrue(directGhostRmse > 40.0,
+						L"Negative control: naive temporal average on moving bar must ghost severely");
+					Assert::IsTrue(stillEngGhostRmse > 2.0,
+						L"Negative control: forcing Still motion field on moving bar must ghost moving edges");
 				}
+
+				// ---- Sub-case A: ref.motion == nullptr on both prevPeak and nextPeak ----
+				{
+					Config cfg = MakePreset(Preset::Reference, Mode::On);
+					cfg.enableCarryForward = false;
+					TdV2ReferenceEngine eng(cfg);
+					StandInRegistry reg;
+
+					FrameProcessInput in;
+					in.seq = 10;
+					in.receivedY = curFrame;
+					in.hasCleanSplit = true;
+					in.cleanY = curFrame;
+					in.prevPeak = { &prevFrame, nullptr, false };
+					in.nextPeak = { &nextFrame, nullptr, false };
+					in.hasStepPrior = true;
+					in.estimatedStepDelta = 24.0;
+
+					const auto res = eng.ProcessFrame(in, &reg);
+					AssertAllFinite(res.outputY, L"Null-motion output must be finite");
+					Assert::IsTrue(reg.IsActive(StandInKind::MissingMotionNoWholeBlend),
+						L"H9: null motion field MUST visibly engage StandInKind::MissingMotionNoWholeBlend");
+					Assert::AreEqual(static_cast<size_t>(2), res.missingMotionSkippedRefs,
+						L"H9: both null-motion peak references must be counted in missingMotionSkippedRefs");
+					for (size_t i = 0; i < curFrame.v.size(); ++i)
+						Assert::AreEqual(curFrame.v[i], res.outputY.v[i], 0.0,
+							L"H9: moving content with null motion MUST have exact zero ghosting (no whole-frame Still blend)");
+				}
+
+				// ---- Sub-case B: Active carry WITHOUT carryMotion (hasCarryMotion == false) ----
+				{
+					Config cfg = MakePreset(Preset::Reference, Mode::On);
+					cfg.enableCarryForward = true;
+					TdV2ReferenceEngine eng(cfg);
+					StandInRegistry reg;
+
+					// Seed carry with prevFrame (shifted -6 px).
+					FrameProcessInput f1;
+					f1.seq = 20;
+					f1.receivedY = prevFrame;
+					f1.hasCleanSplit = true;
+					f1.cleanY = prevFrame;
+					eng.ProcessFrame(f1, &reg);
+					Assert::IsTrue(eng.HasCarry());
+
+					// Frame 2: curFrame with hasCarryMotion == false and no peaks -> carry MUST NOT whole-blend as Still!
+					StandInRegistry reg2;
+					FrameProcessInput f2;
+					f2.seq = 21;
+					f2.receivedY = curFrame;
+					f2.hasCleanSplit = true;
+					f2.cleanY = curFrame;
+					f2.hasCarryMotion = false;
+					f2.hasStepPrior = true;
+					f2.estimatedStepDelta = 24.0;
+					const auto res2 = eng.ProcessFrame(f2, &reg2);
+
+					Assert::IsTrue(reg2.IsActive(StandInKind::MissingMotionNoWholeBlend),
+						L"H9: carry without carryMotion MUST engage StandInKind::MissingMotionNoWholeBlend");
+					Assert::IsTrue(res2.missingMotionSkippedRefs >= 1,
+						L"H9: skipped carry without carryMotion must increment missingMotionSkippedRefs");
+					Assert::IsFalse(res2.carryUsed,
+						L"H9: carry without carryMotion must NOT be whole-blended as Still");
+					for (size_t i = 0; i < curFrame.v.size(); ++i)
+						Assert::AreEqual(curFrame.v[i], res2.outputY.v[i], 0.0,
+							L"H9: carry without carryMotion MUST produce exact zero ghosting on moving content");
+				}
+			}
+
+			// =========================================================================
+			// 14. H14 — Identified-Transform STRICT/CELL Explicit codecModelPb vs Visible Stand-In
+			// =========================================================================
+			TEST_METHOD(TransformIdentifiedCodecModelPbExplicitVsStandIn)
+			{
+				const int w = 64, h = 64;
+				const int cw = w / 16, ch = h / 16;
+				const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+				const double stepDelta = 12.0;
+				const double phi = kDeadZonePhiInter;
+
+				// Construct explicit CodecModel prediction P_B = 350.0, DISTINCT from prevPeak (352.5 -> +20.0 DCT DC offset)!
+				// Under explicitPb: cur - explicitPb has SENT DC = +24.0 (> theta = 10.0, k = 2) -> STRICT restores exact 24.0!
+				// Under prevPeak stand-in: cur - prevPeak has ZEROED DC = +4.0 (< theta = 10.0, k = 0) -> STRICT moves DC toward blend!
+				TdV2Plane explicitPb(w, h, 350.0);
+				TdV2Plane prevPeakDiffFromPb(w, h, 352.5); // +2.5 spatial => +20.0 DCT DC offset (pushes cur-prev into dead-zone k=0!)
+				TdV2Plane cur(w, h, 350.0);
+				TdV2Plane nextPeak(w, h, 350.0);
+
+				double sentDct[64] = {}, targetDct[64] = {}, sentSpat[64] = {}, targetSpat[64] = {};
+				sentDct[0] = 24.0;
+				sentDct[1] = 0.0;
+				targetDct[0] = 32.0;
+				targetDct[1] = 26.0;
+				InverseDct8x8(sentDct, sentSpat);
+				InverseDct8x8(targetDct, targetSpat);
+
+				for (int by = 0; by < h; by += 8)
+				{
+					for (int bx = 0; bx < w; bx += 8)
+					{
+						for (int j = 0; j < 8; ++j)
+						{
+							for (int i = 0; i < 8; ++i)
+							{
+								cur.at(bx + i, by + j) = explicitPb.at(bx + i, by + j) + sentSpat[j * 8 + i];
+								nextPeak.at(bx + i, by + j) = explicitPb.at(bx + i, by + j) + targetSpat[j * 8 + i];
+							}
+						}
+					}
+				}
+
+				for (ResidualMode rm : { ResidualMode::Strict, ResidualMode::Cell })
+				{
+					Config cfg = MakePreset(Preset::Reference, Mode::On);
+					cfg.estimator = VarianceEstimator::A2_RoundingCells;
+					cfg.residualMode = rm;
+					cfg.cellProjIterations = 1;
+
+					FrameProcessInput baseIn;
+					baseIn.seq = 140;
+					baseIn.receivedY = cur;
+					baseIn.hasCleanSplit = true;
+					baseIn.cleanY = cur;
+					baseIn.prevPeak = { &prevPeakDiffFromPb, &stillMf, true };
+					baseIn.nextPeak = { &nextPeak, &stillMf, false };
+					baseIn.hasStepPrior = true;
+					baseIn.estimatedStepDelta = stepDelta;
+					baseIn.deadZonePhi = phi;
+					baseIn.zeroCoeffFraction = 0.0;
+					baseIn.transformIdentified8x8 = true;
+
+					// Case A: codecModelPb == nullptr -> MUST visibly engage CodecModelPbStandIn & increment counter!
+					TdV2ReferenceEngine engStandIn(cfg);
+					StandInRegistry regStandIn;
+					const auto resStandIn = engStandIn.ProcessFrame(baseIn, &regStandIn);
+					Assert::IsTrue(regStandIn.IsActive(StandInKind::CodecModelPbStandIn),
+						L"H14: identified 8x8 DCT without explicit codecModelPb MUST visibly engage CodecModelPbStandIn");
+					Assert::IsTrue(resStandIn.codecModelPbStandInCells > 0,
+						L"H14: identified 8x8 DCT without explicit codecModelPb MUST increment codecModelPbStandInCells");
+
+					// Case B: explicit codecModelPb supplied -> MUST use it WITHOUT engaging CodecModelPbStandIn!
+					FrameProcessInput expIn = baseIn;
+					expIn.codecModelPb = &explicitPb;
+					TdV2ReferenceEngine engExplicit(cfg);
+					StandInRegistry regExplicit;
+					const auto resExplicit = engExplicit.ProcessFrame(expIn, &regExplicit);
+					Assert::IsFalse(regExplicit.IsActive(StandInKind::CodecModelPbStandIn),
+						L"H14: supplying explicit codecModelPb MUST NOT engage CodecModelPbStandIn");
+					Assert::AreEqual(static_cast<size_t>(0), resExplicit.codecModelPbStandInCells,
+						L"H14: supplying explicit codecModelPb MUST keep codecModelPbStandInCells == 0");
+
+					// Verify explicit codecModelPb is genuinely used (STRICT keeps exact DC=24 relative to explicitPb,
+					// and output differs from stand-in path where refs[0] was shifted by +15!).
+					if (rm == ResidualMode::Strict)
+					{
+						double spExp[64] = {}, dctExp[64] = {};
+						for (int j = 0; j < 8; ++j)
+							for (int i = 0; i < 8; ++i)
+								spExp[j * 8 + i] = resExplicit.outputClean.at(16 + i, 16 + j) - explicitPb.at(16 + i, 16 + j);
+						ForwardDct8x8(spExp, dctExp);
+						Assert::AreEqual(24.0, dctExp[0], 1e-6,
+							L"Explicit codecModelPb in STRICT mode must preserve sent DC=24 relative to explicitPb");
+						Assert::IsTrue(PlaneMse(resExplicit.outputClean, resStandIn.outputClean, ActiveRect::Full(w, h)) > 1e-4,
+							L"Explicit codecModelPb must genuinely alter projection vs distinct refs[0] stand-in");
+					}
+				}
+			}
+
+			// =========================================================================
+			// 15. MEDIUM Closures: Off->On / Seek / Non-Consecutive seq Carry Reset + Invalid a2Stats
+			// =========================================================================
+			TEST_METHOD(CarryResetsOnOffTransitionNonConsecutiveSeqAndInvalidA2Stats)
+			{
+				const int w = 64, h = 64;
+				const int cw = w / 16, ch = h / 16;
+				const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+				const TdV2Plane sceneA = RenderMaster(w, h, 0.0, 0.0);
+				const TdV2Plane sceneB(w, h, 780.0);
+				const TdV2Plane refA = AddCodingError(sceneA, 1.0, 1501u);
+
+				// ---- Part A: Consecutive seq uses carry (positive control), whereas Off->On and seek/gap reset carry! ----
+				{
+					// Positive control: consecutive seq 10 -> 11 DOES use carry.
+					Config onCfg = MakePreset(Preset::Reference, Mode::On);
+					TdV2ReferenceEngine engConsec(onCfg);
+					StandInRegistry reg;
+
+					FrameProcessInput f10;
+					f10.seq = 10;
+					f10.receivedY = sceneA;
+					f10.hasCleanSplit = true;
+					f10.cleanY = sceneA;
+					engConsec.ProcessFrame(f10, &reg);
+					Assert::IsTrue(engConsec.HasCarry());
+
+					FrameProcessInput f11 = f10;
+					f11.seq = 11;
+					f11.hasCarryMotion = true;
+					f11.carryMotion = stillMf;
+					const auto r11 = engConsec.ProcessFrame(f11, &reg);
+					Assert::IsTrue(r11.carryUsed && !r11.carryReset,
+						L"Positive control: consecutive seq 10->11 must reuse carry cleanly");
+
+					// Test 1: Mode::On (seq 10) -> Mode::Off (seq 11) -> Mode::On (seq 12) MUST reset stale carry!
+					TdV2ReferenceEngine engOffOn(onCfg);
+					engOffOn.ProcessFrame(f10, &reg);
+					Assert::IsTrue(engOffOn.HasCarry());
+
+					Config offCfg = onCfg;
+					offCfg.mode = Mode::Off;
+					engOffOn.SetConfig(offCfg);
+					FrameProcessInput fOff = f10;
+					fOff.seq = 11;
+					engOffOn.ProcessFrame(fOff, &reg);
+
+					engOffOn.SetConfig(onCfg);
+					FrameProcessInput fResume;
+					fResume.seq = 12;
+					fResume.receivedY = sceneB;
+					fResume.hasCleanSplit = true;
+					fResume.cleanY = sceneB;
+					fResume.hasCarryMotion = true;
+					fResume.carryMotion = stillMf;
+					const auto rResume = engOffOn.ProcessFrame(fResume, &reg);
+					Assert::IsFalse(rResume.carryUsed,
+						L"Stale pre-Off carry MUST NOT be used after Mode::Off -> Mode::On transition");
+					for (size_t i = 0; i < sceneB.v.size(); ++i)
+						Assert::AreEqual(780.0, rResume.outputY.v[i], 0.0,
+							L"Mode::Off -> Mode::On must produce zero ghosting from stale carry");
+
+					// Test 2: Forward frame drop / seek (seq 10 -> seq 15, isCutOrSpanInvalid == false) MUST reset carry!
+					TdV2ReferenceEngine engSeek(onCfg);
+					engSeek.ProcessFrame(f10, &reg);
+					Assert::IsTrue(engSeek.HasCarry());
+
+					FrameProcessInput fSeekFwd;
+					fSeekFwd.seq = 15; // non-consecutive jump (dropped 4 frames / seek)
+					fSeekFwd.receivedY = sceneB;
+					fSeekFwd.hasCleanSplit = true;
+					fSeekFwd.cleanY = sceneB;
+					fSeekFwd.hasCarryMotion = true;
+					fSeekFwd.carryMotion = stillMf;
+					fSeekFwd.isCutOrSpanInvalid = false;
+					const auto rSeekFwd = engSeek.ProcessFrame(fSeekFwd, &reg);
+					Assert::IsTrue(rSeekFwd.carryReset,
+						L"Non-consecutive forward seq jump (10 -> 15) MUST set carryReset == true");
+					Assert::IsFalse(rSeekFwd.carryUsed,
+						L"Non-consecutive forward seq jump MUST NOT reuse stale carry");
+					for (size_t i = 0; i < sceneB.v.size(); ++i)
+						Assert::AreEqual(780.0, rSeekFwd.outputY.v[i], 0.0,
+							L"Forward seek must have zero ghosting from stale carry");
+
+					// Test 3: Backward seek (seq 15 -> seq 5, isCutOrSpanInvalid == false) MUST reset carry!
+					FrameProcessInput fSeekBack;
+					fSeekBack.seq = 5;
+					fSeekBack.receivedY = sceneA;
+					fSeekBack.hasCleanSplit = true;
+					fSeekBack.cleanY = sceneA;
+					fSeekBack.hasCarryMotion = true;
+					fSeekBack.carryMotion = stillMf;
+					fSeekBack.isCutOrSpanInvalid = false;
+					const auto rSeekBack = engSeek.ProcessFrame(fSeekBack, &reg);
+					Assert::IsTrue(rSeekBack.carryReset && !rSeekBack.carryUsed,
+						L"Backward seek (15 -> 5) MUST reset carry and never reuse future carry");
+				}
+
+				// ---- Part B: Invalid a2Stats (deadZonePhi out of [0, 1) or NaN) -> A2StatsInvalid + maps invalid! ----
+				const double badPhis[] = { -0.2, 1.0, 1.5, std::numeric_limits<double>::quiet_NaN() };
+				for (double badPhi : badPhis)
+				{
+					Config cfg = MakePreset(Preset::Reference, Mode::On);
+					TdV2ReferenceEngine eng(cfg);
+					StandInRegistry reg;
+
+					FrameProcessInput in;
+					in.seq = 30;
+					in.receivedY = sceneA;
+					in.hasCleanSplit = true;
+					in.cleanY = sceneA;
+					in.prevPeak = { &refA, &stillMf, false };
+					in.nextPeak = { &refA, &stillMf, false };
+					in.hasStepPrior = true;
+					in.estimatedStepDelta = 12.0;
+					in.deadZonePhi = badPhi;
+
+					const auto res = eng.ProcessFrame(in, &reg);
+					AssertAllFinite(res.outputY, L"Invalid a2Stats must keep output finite");
+					Assert::IsTrue(reg.IsActive(StandInKind::A2StatsInvalid),
+						L"Invalid deadZonePhi MUST visibly engage StandInKind::A2StatsInvalid");
+					Assert::IsTrue(res.a2InvalidCells > 0,
+						L"Invalid a2Stats MUST increment res.a2InvalidCells");
+					for (size_t i = 0; i < sceneA.v.size(); ++i)
+						Assert::AreEqual(sceneA.v[i], res.outputY.v[i], 0.0,
+							L"Invalid a2Stats must close delta safely to zero (passthrough)");
+					for (const auto& blk : res.tdMaps)
+						Assert::AreEqual(0.0f, TdMapsView::Fetch(blk, TdMapsView::kValidity), 0.0f,
+							L"Invalid a2Stats MUST mark tdMaps cells invalid (kValidity == 0.0), never silently valid!");
+				}
+			}
+
+			// =========================================================================
+			// 16. M2 & M3 Adversarial Tests: Luma mf.valid==0 POCS Skip + Parseval Transform-Unknown Bound
+			// =========================================================================
+			TEST_METHOD(LumaInvalidMotionPocsSkipAndTransformUnknownParsevalBound)
+			{
+				// ---- Part A (M2): mf.valid == 0 prevents bogus warp AND skips 8x8 DCT POCS against invalid refs[0] ----
+				{
+					const int w = 64, h = 64;
+					const int cw = w / 16, ch = h / 16;
+					const ActiveRect holeRect{ 16, 16, 32, 32 }; // exact cell (1, 1) = four 8x8 DCT blocks
+					const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+
+					const TdV2Plane master = RenderMaster(w, h);
+					const TdV2Plane cur = AddCodingError(master, 4.0, 1601u);
+					const TdV2Plane nextClean = AddCodingError(master, 0.5, 1602u);
+					TdV2Plane corruptPrev = AddCodingError(master, 0.5, 1603u);
+					// Corrupt BOTH [16, 32)^2 and the (vx=8, vy=8)-warped fetch region [24, 40)^2 by -40 codes so any
+					// failure to respect mf.valid == 0 (in warp OR in STRICT POCS) immediately corrupts [16, 32)^2!
+					for (int y = 16; y < 40; ++y)
+						for (int x = 16; x < 40; ++x)
+							corruptPrev.at(x, y) -= 40.0;
+
+					const size_t holeCell = static_cast<size_t>(1) * cw + 1;
+					CellMotionField occMf = stillMf;
+					occMf.valid[holeCell] = 0u;
+					occMf.vx[holeCell] = 8.0;
+					occMf.vy[holeCell] = 8.0;
+
+					CellMotionField bogusValidMf = occMf;
+					bogusValidMf.valid[holeCell] = 1u; // Negative control: same bogus (8, 8) vector if valid==0 were ignored!
+
+					Config cfg = MakePreset(Preset::Reference, Mode::On);
+					cfg.residualMode = ResidualMode::Strict;
+					cfg.enableCarryForward = false;
+
+					FrameProcessInput inOcc;
+					inOcc.seq = 40;
+					inOcc.receivedY = cur;
+					inOcc.hasCleanSplit = true;
+					inOcc.cleanY = cur;
+					inOcc.prevPeak = { &corruptPrev, &occMf, false };   // refs[0]: valid==0 in cell (1, 1)
+					inOcc.nextPeak = { &nextClean, &stillMf, false };   // refs[1]: valid==1 everywhere
+					inOcc.hasStepPrior = true;
+					inOcc.estimatedStepDelta = 12.0;
+					inOcc.transformIdentified8x8 = true;
+
+					TdV2ReferenceEngine engOcc(cfg);
+					StandInRegistry regOcc;
+					const auto resOcc = engOcc.ProcessFrame(inOcc, &regOcc);
+					AssertAllFinite(resOcc.outputY, L"M2 occluded-prevPeak STRICT output must be finite");
+
+					// Valid-prevPeak control: all 16 cells valid -> POCS runs on all 16 cells.
+					FrameProcessInput inValid = inOcc;
+					inValid.prevPeak = { &nextClean, &stillMf, false };
+					TdV2ReferenceEngine engValid(cfg);
+					StandInRegistry regValid;
+					const auto resValid = engValid.ProcessFrame(inValid, &regValid);
+
+					// Mandatory In-Test Negative Control (Rule 3): exact same bogus (8, 8) vector & corruptPrev with valid==1!
+					FrameProcessInput inBogus = inOcc;
+					inBogus.prevPeak = { &corruptPrev, &bogusValidMf, false };
+					TdV2ReferenceEngine engBogus(cfg);
+					StandInRegistry regBogus;
+					const auto resBogus = engBogus.ProcessFrame(inBogus, &regBogus);
+
+					const double baseHoleMse = PlaneMse(master, cur, holeRect);
+					const double occHoleMse = PlaneMse(master, resOcc.outputY, holeRect);
+					const double bogusHoleMse = PlaneMse(master, resBogus.outputY, holeRect);
+
+					Assert::IsTrue(resOcc.codecModelPbStandInCells > 0,
+						L"M2: valid cells outside [16,32)^2 must still run 8x8 DCT POCS cleanly");
+					Assert::IsTrue(resOcc.codecModelPbStandInCells < resValid.codecModelPbStandInCells,
+						L"M2: 8x8 DCT POCS must skip occluded cell (1,1) where refs[0].validPx == 0");
+					Assert::IsTrue(occHoleMse < baseHoleMse * 0.65,
+						L"M2: cell (1,1) must cleanly improve toward master via valid nextPeak with zero garbage warp from prevPeak");
+					Assert::IsTrue(bogusHoleMse > occHoleMse * 2.0,
+						L"M2 Negative control: ignoring mf.valid==0 on bogus (8,8) prevPeak must severely corrupt [16,32)^2");
+				}
+
+				// ---- Part B (M3): Transform-unknown pixel bound uses Parseval a2BandPeakSq (NOT white-noise over-clip!) ----
+				{
+					const int w = 128, h = 128;
+					const int cw = w / 16, ch = h / 16;
+					const ActiveRect interior{ 16, 16, w - 16, h - 16 };
+					const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+
+					TdV2Plane masterSky(w, h, 0.0), valleySky(w, h, 0.0);
+					std::vector<uint8_t> skyMask(static_cast<size_t>(w) * h, kMaskW1BandedSky);
+					for (int y = 0; y < h; ++y)
+					{
+						for (int x = 0; x < w; ++x)
+						{
+							const double val = 400.0 + 0.6 * x + 0.2 * y;
+							masterSky.at(x, y) = val;
+							valleySky.at(x, y) = 8.0 * std::floor(val / 8.0 + 0.5);
+						}
+					}
+					const TdV2Plane peakPrevSky = AddCodingError(masterSky, 0.5, 1611u);
+					const TdV2Plane peakNextSky = AddCodingError(masterSky, 0.5, 1612u);
+
+					Config cfg = MakePreset(Preset::Reference, Mode::On);
+					TdV2ReferenceEngine eng(cfg);
+					StandInRegistry reg;
+
+					FrameProcessInput inSky;
+					inSky.seq = 41;
+					inSky.receivedY = valleySky;
+					inSky.hasCleanSplit = true;
+					inSky.cleanY = valleySky;
+					inSky.prevPeak = { &peakPrevSky, &stillMf, false };
+					inSky.nextPeak = { &peakNextSky, &stillMf, false };
+					inSky.hasStepPrior = true;
+					inSky.estimatedStepDelta = 8.0;
+					inSky.transformIdentified8x8 = false; // Transform-unknown pixel-domain bound!
+					const auto resSky = eng.ProcessFrame(inSky, &reg);
+
+					Assert::IsTrue(reg.IsActive(StandInKind::TransformUnknownBound),
+						L"M3: transformIdentified8x8 == false must visibly engage TransformUnknownBound");
+
+					double maxAbsDelta = 0.0;
+					for (int y = interior.y0; y < interior.y1; ++y)
+						for (int x = interior.x0; x < interior.x1; ++x)
+							maxAbsDelta = (std::max)(maxAbsDelta, std::fabs(resSky.outputY.at(x, y) - valleySky.at(x, y)));
+
+					// Mandatory In-Test Negative Control (Rule 3): old white-noise over-clip 3*sqrt((8^2/12)*gains.low) ~= 0.78!
+					const BandWhiteNoiseGains gains = ComputeBandWhiteNoiseGains();
+					const double oldWhiteNoiseBound = kPixelBoundSigma * std::sqrt((8.0 * 8.0 / 12.0) * gains.low);
+					TdV2Plane oldOverClipped = valleySky;
+					for (size_t i = 0; i < oldOverClipped.v.size(); ++i)
+					{
+						const double d = resSky.outputY.v[i] - valleySky.v[i];
+						oldOverClipped.v[i] = valleySky.v[i] + (std::max)(-oldWhiteNoiseBound, (std::min)(oldWhiteNoiseBound, d));
+					}
+					const double engineMse = PlaneMse(masterSky, resSky.outputY, interior);
+					const double overClippedMse = PlaneMse(masterSky, oldOverClipped, interior);
+
+					const WorstAreaReport repSky = EvaluateWorstAreaMasks(
+						masterSky.v.data(), valleySky.v.data(), resSky.outputY.v.data(), skyMask.data(), w, h, 16, 1023.0);
+					Assert::IsTrue(repSky.valid);
+					Assert::IsTrue(maxAbsDelta > 1.5,
+						L"M3: Parseval TransformUnknownBound must recover coherent L-band sky steps well beyond old 0.78 white-noise over-clip");
+					Assert::IsTrue(repSky.w1BandedSky.deltaDb > 3.0 && repSky.w1BandingStepReduction > 0.30,
+						L"M3: W1 8-code sky banding must recover strongly under Parseval TransformUnknownBound");
+					Assert::IsTrue(overClippedMse > engineMse * 2.0,
+						L"M3 Negative control: old white-noise 0.78 over-clip must degrade sky MSE > 2x vs Parseval bound");
+				}
+			}
+
+			// =========================================================================
+			// 17. Round-3 HIGH-1 Regression: Asymmetric Focus Debiasing Must Not Veto W3 Softened B-Frames
+			// =========================================================================
+			TEST_METHOD(W3CompressionSoftenedEdgeNotFalselyVetoedByAsymmetricFocusDebiasing)
+			{
+				// Construct exact BandFromBase eigenfunction waves (2 cycles/cell M-wave lambda=8 + 1 cycle/cell D3-wave lambda=16,
+				// even-symmetric at active borders) with moderate contrast (refM2 ~= 1.00, refD3 ~= 1.73, refE ~= 2.74 >> 1.83,
+				// refF ~= 0.367) and a mildly W3 compression-softened B-frame (20% M-band attenuation: curM2 < refM2, curF ~= 0.271,
+				// true focus drop refF - curF ~= 0.096 << fShiftDelta = 0.1908) at estimatedStepDelta = 14.0.
+				// Under the old buggy asymmetric predicate (refF - curFDebiased > fShiftDelta), subtracting stepNoiseVar*gains.mid
+				// ONLY from cur (and NOT ref) pulled cleanM2 to ~0 (curFDebiased ~= 0 < fSharp) and refF - curFDebiased ~= 0.367 > 0.1908,
+				// falsely all-band vetoing sharp edges and W3 softened B-frames!
+				const int w = 96, h = 96;
+				const int cw = w / 16, ch = h / 16;
+				const ActiveRect full = ActiveRect::Full(w, h);
+				const ActiveRect interior{ 16, 16, w - 16, h - 16 };
+				const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+
+				TdV2Plane master(w, h, 0.0), curSoft(w, h, 0.0);
+				for (int y = 0; y < h; ++y)
+				{
+					const double d3Wave = 4.2 * std::cos(2.0 * kPi * (static_cast<double>(y) + 0.5) / 16.0);
+					for (int x = 0; x < w; ++x)
+					{
+						const double mWave = 3.2 * std::cos(2.0 * kPi * (static_cast<double>(x) + 0.5) / 8.0);
+						master.at(x, y) = 450.0 + mWave + d3Wave;
+						curSoft.at(x, y) = 450.0 + 0.80 * mWave + d3Wave; // mild W3 M-band compression softening (still sharp!)
+					}
+				}
+				const TdV2Plane peakPrev = AddCodingError(master, 0.10, 1701u);
+				const TdV2Plane peakNext = AddCodingError(master, 0.10, 1702u);
+
+				const double stepDelta = 14.0;
+				const RoundingCellStats a2 = ComputeRoundingCellStats(stepDelta, kDeadZonePhiInter, 0.0);
+				const BandWhiteNoiseGains gains = ComputeBandWhiteNoiseGains();
+				const double structureFloor = 2.0 * (gains.mid + gains.d3) * a2.totalVar;
+				const double fSharp = AnalyticalEdgeFocusRatio(0.0);
+				const double fShiftDelta = fSharp - AnalyticalEdgeFocusRatio(VpUnit::BandFromBase::kSigmaBase);
+
+				// Mandatory In-Test Negative Control (Rule 3): prove the old buggy asymmetric predicate WOULD falsely
+				// veto EVERY interior cell on the EXACT SAME (curSoft, peakPrev) planes at stepDelta = 14.0!
+				const ThreeBandPlanes curB = DecomposeActiveBands(curSoft, full);
+				const ThreeBandPlanes refB = DecomposeActiveBands(peakPrev, full);
+				size_t oldBuggyFalseVetoes = 0;
+				size_t interiorCells = 0;
+				for (int cy = 1; cy < ch - 1; ++cy)
+				{
+					for (int cx = 1; cx < cw - 1; ++cx)
+					{
+						double cM2 = 0.0, cD3 = 0.0, rM2 = 0.0, rD3 = 0.0;
+						for (int y = cy * 16; y < (cy + 1) * 16; ++y)
+						{
+							for (int x = cx * 16; x < (cx + 1) * 16; ++x)
+							{
+								const double cm = curB.M.at(x, y), cd = curB.D3.at(x, y);
+								const double rm = refB.M.at(x, y), rd = refB.D3.at(x, y);
+								cM2 += cm * cm; cD3 += cd * cd;
+								rM2 += rm * rm; rD3 += rd * rd;
+							}
+						}
+						cM2 /= 256.0; cD3 /= 256.0; rM2 /= 256.0; rD3 /= 256.0;
+						const double refE = rM2 + rD3;
+						const double refF = rM2 / (refE + 1e-12);
+						const double curF = cM2 / (cM2 + cD3 + 1e-12);
+						const double cleanM2 = (std::max)(0.0, cM2 - a2.totalVar * gains.mid);
+						const double cleanM3 = (std::max)(0.0, cD3 - a2.totalVar * gains.d3);
+						const double curFDebiased = cleanM2 / (cleanM2 + cleanM3 + 1e-12);
+						Assert::IsTrue(refE > structureFloor && cM2 < rM2 && (refF - curF) < fShiftDelta * 0.60,
+							L"Fixture check: mild W3 softening must stay well below true focus-shift threshold");
+						if (refE > structureFloor && cM2 < rM2 && curFDebiased < fSharp && (refF - curFDebiased) > fShiftDelta)
+							++oldBuggyFalseVetoes;
+						++interiorCells;
+					}
+				}
+				Assert::AreEqual(interiorCells, oldBuggyFalseVetoes,
+					L"Negative control: old asymmetric (refF - curFDebiased) > fShiftDelta predicate MUST falsely veto all interior cells");
+
+				// Protected engine under fixed symmetric focus guard: ZERO false focus vetoes + strong M-band recovery!
+				Config cfg = MakePreset(Preset::Reference, Mode::On);
+				TdV2ReferenceEngine eng(cfg);
+				StandInRegistry reg;
+
+				FrameProcessInput in;
+				in.seq = 55;
+				in.receivedY = curSoft;
+				in.hasCleanSplit = true;
+				in.cleanY = curSoft;
+				in.prevPeak = { &peakPrev, &stillMf, false };
+				in.nextPeak = { &peakNext, &stillMf, false };
+				in.hasStepPrior = true;
+				in.estimatedStepDelta = stepDelta;
+				in.deadZonePhi = kDeadZonePhiInter;
+				in.zeroCoeffFraction = 0.0;
+				const auto res = eng.ProcessFrame(in, &reg);
+
+				AssertAllFinite(res.outputY, L"W3 softened B-frame output must be finite");
+				Assert::AreEqual(static_cast<size_t>(0), res.focusVetoCells,
+					L"Round-3 HIGH-1: mild W3 compression-softened sharp edge at stepDelta=14 MUST NOT trigger false focus vetoes");
+				for (int cy = 1; cy < ch - 1; ++cy)
+				{
+					for (int cx = 1; cx < cw - 1; ++cx)
+					{
+						const unsigned mask = static_cast<unsigned>(
+							TdMapsView::Fetch(res.tdMaps[static_cast<size_t>(cy) * cw + cx], TdMapsView::kBandMask));
+						Assert::AreNotEqual(0u, mask & 2u,
+							L"W3 compression-softened cell must keep M-band (bit 1) active for detail recovery");
+					}
+				}
+
+				const ThreeBandPlanes masterB = DecomposeActiveBands(master, full);
+				const ThreeBandPlanes outB = DecomposeActiveBands(res.outputY, full);
+				const double baseMseM = PlaneMse(masterB.M, curB.M, interior);
+				const double outMseM = PlaneMse(masterB.M, outB.M, interior);
+				Assert::IsTrue(outMseM < baseMseM * 0.35,
+					L"W3 compression-softened sharp edge must achieve strong M-band detail recovery (>= 65% MSE drop)");
 			}
 		};
 	}

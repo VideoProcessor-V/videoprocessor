@@ -834,6 +834,9 @@ namespace VideoProcessorTest
 				{ 512.5, 0.15, 10, true, 100.0f, 50.0f, { 512, 513, 512, 513, 513, 512, 513, 512, 513, 512, 512, 513, 512, 513, 513, 512 }, { 0x1.0000000000000p-1, 0x0.0p+0, 0x1.0000000000000p-1, 0x0.0p+0, -0x1.0000000000000p-1, 0x0.0p+0, -0x1.0000000000000p-1, 0x0.0p+0, -0x1.0000000000000p-1, 0x0.0p+0, 0x1.0000000000000p-1, 0x0.0p+0, 0x1.0000000000000p-1, 0x0.0p+0, -0x1.0000000000000p-1, 0x0.0p+0 } },
 				{ 0.2, 0.5, 8, true, 1.0f, 1.0f, { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 }, { -0x1.999999999999ap-1, -0x1.3333333333334p-1, -0x1.999999999999bp-2, -0x1.999999999999cp-3, -0x1.0000000000000p-54, -0x1.999999999999ap-1, -0x1.3333333333334p-1, -0x1.999999999999bp-2, -0x1.999999999999cp-3, -0x1.0000000000000p-54, -0x1.999999999999ap-1, -0x1.3333333333334p-1, -0x1.999999999999bp-2, -0x1.999999999999cp-3, -0x1.0000000000000p-54, -0x1.999999999999ap-1 } },
 				{ 1018.8, 0.5, 10, false, 500.0f, 300.0f, { 1019, 1019, 1018, 1019, 1019, 1019, 1019, 1018, 1019, 1019, 1019, 1019, 1018, 1019, 1019, 1019 }, { -0x1.999999999a000p-3, -0x1.999999999a000p-2, 0x1.9999999999000p-2, 0x1.9999999998000p-3, -0x1.0000000000000p-42, -0x1.999999999c000p-3, -0x1.999999999b000p-2, 0x1.9999999998000p-2, 0x1.9999999996000p-3, -0x1.0000000000000p-41, -0x1.999999999e000p-3, -0x1.999999999c000p-2, 0x1.9999999997000p-2, 0x1.9999999994000p-3, -0x1.8000000000000p-41, -0x1.99999999a0000p-3 } },
+				// Owner Q9b (SD SHOULD-1): limited-range pixels in [black, black+0.5) never dip into BTB (15 / 63).
+				{ 16.05, 0.5, 8, false, 3.0f, 5.0f, { 16, 16, 16, 16, 16, 16, 17, 16, 16, 16, 16, 16, 16, 16, 16, 16 }, { 0x1.9999999999a00p-5, 0x1.9999999999a00p-4, 0x1.3333333333380p-3, 0x1.9999999999a00p-3, 0x1.0000000000040p-2, 0x1.3333333333380p-2, -0x1.4cccccccccca0p-1, -0x1.3333333333300p-1, -0x1.1999999999960p-1, -0x1.fffffffffff80p-2, -0x1.ccccccccccc40p-2, -0x1.9999999999900p-2, -0x1.66666666665c0p-2, -0x1.3333333333280p-2, -0x1.ffffffffffe80p-3, -0x1.9999999999800p-3 } },
+				{ 64.2, 0.5, 10, false, 7.0f, 11.0f, { 64, 65, 64, 64, 64, 64, 65, 64, 64, 64, 64, 65, 64, 64, 64, 64 }, { 0x1.9999999999a00p-3, -0x1.3333333333300p-1, -0x1.9999999999900p-2, -0x1.9999999999800p-3, 0x1.0000000000000p-46, 0x1.9999999999c00p-3, -0x1.3333333333280p-1, -0x1.9999999999800p-2, -0x1.9999999999600p-3, 0x1.0000000000000p-45, 0x1.9999999999e00p-3, -0x1.3333333333200p-1, -0x1.9999999999700p-2, -0x1.9999999999400p-3, 0x1.8000000000000p-45, 0x1.999999999a000p-3 } },
 			};
 			for (const Case& c : cases)
 			{
@@ -1735,13 +1738,15 @@ namespace VideoProcessorTest
 		{
 			const std::string shader = DwLf(LoadBundledShader("Temporal sigma-delta.glsl"));
 			Assert::IsFalse(shader.empty(), L"bundled shader not found");
+			const size_t floorCode = shader.find("vec3 floor_code = limited ? mix(vec3(code_min), vec3(code_black), step(vec3(code_black), x)) : vec3(code_min);");
 			const size_t mask = shader.find("vec3 exact_code = vec3(equal(x, floor(x + 0.5)));");
 			const size_t cleared = shader.find("r = mix(r, vec3(0.0), exact_code);");
-			const size_t quantise = shader.find("k = clamp(floor(x + r + d + 0.5), code_min, code_max);");
+			const size_t quantise = shader.find("k = clamp(floor(x + r + d + 0.5), floor_code, vec3(code_max));");
 			const size_t next = shader.find("r_next = mix(r_next, vec3(0.0), exact_code);");
-			Assert::IsTrue(mask != std::string::npos && cleared != std::string::npos && quantise != std::string::npos &&
-				next != std::string::npos, L"the exact-code carry guard is missing");
-			Assert::IsTrue(mask < cleared && cleared < quantise && quantise < next, L"the guard must clear r before the quantiser and r_next after it");
+			Assert::IsTrue(floorCode != std::string::npos && mask != std::string::npos && cleared != std::string::npos &&
+				quantise != std::string::npos && next != std::string::npos, L"the exact-code carry or Q9b floor_code guard is missing");
+			Assert::IsTrue(floorCode < quantise && mask < cleared && cleared < quantise && quantise < next,
+				L"the guard must define floor_code and clear r before the quantiser and r_next after it");
 		}
 
 		TEST_METHOD(DitherNeedWarpAccessorTextIsInTheShader)

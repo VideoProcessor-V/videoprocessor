@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <random>
 #include <vector>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
@@ -183,12 +184,15 @@ namespace Tests
 
 			TEST_METHOD(NoDuplicateSeqEmittedAcrossWarmupCutResetAndFlush)
 			{
-				// Adversarial sequence-uniqueness test:
-				// Every unique seq MUST be emitted with produced == true AT MOST ONCE across initial warmup,
-				// steady-state GOP, multiple CutResets, post-cut warmups, and repeated stream-end causal flushes!
+				// H10 Adversarial EXACTLY-ONCE Delivery Proof (Rule 3 & Rule 4):
+				// Every unique pushed seq (1..14) MUST be emitted with produced == true EXACTLY ONCE
+				// (zero duplicates AND zero silently dropped pre-cut or stream-end sequences 4, 5, 9, 10, 13!)
+				// across initial warmup, steady-state GOP, multiple CutResets (flushedBeforeCut),
+				// post-cut warmups, and FlushEndOfStream(), with DroppedRecordCount() == 0!
 				TdV2FrameRoleDetector det(2);
 				StandInRegistry reg;
 				std::map<uint64_t, int> emitCount;
+				std::map<uint64_t, int> naiveNoFlushEmitCount;
 
 				auto recordEmit = [&](const FrameRoleDecision& d)
 				{
@@ -201,16 +205,16 @@ namespace Tests
 					MakeEv(2,  0.55),                         // warmup 2 -> produced == false
 					MakeEv(3,  0.90),                         // emits seq 1
 					MakeEv(4,  0.52),                         // emits seq 2
-					MakeEv(5,  0.91),                         // emits seq 3
-					MakeEv(6,  0.94, 0.5, 0.0, 0.0, true),    // CutReset #1 -> buffered, produced == false
+					MakeEv(5,  0.91),                         // emits seq 3  (buffered: 4, 5)
+					MakeEv(6,  0.94, 0.5, 0.0, 0.0, true),    // CutReset #1 -> flushedBeforeCut emits 4, 5; seq 6 buffered
 					MakeEv(7,  0.54),                         // post-cut warmup -> produced == false
 					MakeEv(8,  0.89),                         // emits seq 6 (post-cut anchor!)
 					MakeEv(9,  0.53),                         // emits seq 7
-					MakeEv(10, 0.90),                         // emits seq 8
-					MakeEv(11, 0.93, 0.5, 0.0, 0.0, true),    // CutReset #2 -> buffered, produced == false
+					MakeEv(10, 0.90),                         // emits seq 8  (buffered: 9, 10)
+					MakeEv(11, 0.93, 0.5, 0.0, 0.0, true),    // CutReset #2 -> flushedBeforeCut emits 9, 10; seq 11 buffered
 					MakeEv(12, 0.51),                         // post-cut warmup -> produced == false
 					MakeEv(13, 0.88),                         // emits seq 11
-					MakeEv(14, 0.52)                          // emits seq 12
+					MakeEv(14, 0.52)                          // emits seq 12 (buffered: 13, 14)
 				};
 
 				for (size_t i = 0; i < sizeof(stream) / sizeof(stream[0]); ++i)
@@ -221,34 +225,121 @@ namespace Tests
 						Assert::IsFalse(dec.produced,
 							L"Warmup and lead-2 CutReset calls must keep produced == false to prevent duplicate seq");
 					}
+					if (i == 5 || i == 10)
+					{
+						Assert::AreEqual(static_cast<size_t>(2), dec.flushedBeforeCut.size(),
+							L"CutReset with lead=2 must flush both pending pre-cut buffered frames in flushedBeforeCut");
+						for (const auto& fl : dec.flushedBeforeCut)
+						{
+							Assert::IsTrue(fl.produced, L"Every flushedBeforeCut record must have produced == true");
+							Assert::IsTrue((fl.record.validityBits & QualityPattern::kProvisional) != 0,
+								L"Pre-cut flushed records with reduced lead must be visibly marked kProvisional");
+							recordEmit(fl);
+						}
+					}
+					else
+					{
+						Assert::IsTrue(dec.flushedBeforeCut.empty(),
+							L"Non-cut frames must not populate flushedBeforeCut");
+					}
 					recordEmit(dec);
+					if (dec.produced)
+						++naiveNoFlushEmitCount[dec.record.seq];
 				}
 
-				// Calling ClassifyLatestCausal() twice in a row must emit seq 14 at most once!
-				const auto flush1 = det.ClassifyLatestCausal(&reg);
-				const auto flush2 = det.ClassifyLatestCausal(&reg);
-				recordEmit(flush1);
-				recordEmit(flush2);
-				Assert::IsTrue(flush1.produced, L"First stream-end causal flush emits latest buffered frame");
-				Assert::IsFalse(flush2.produced, L"Second repeated flush must NOT duplicate lastEmittedSeq");
-
-				// Verify post-cut anchor seq 6 and seq 11 WERE emitted once (not lost!) and NO seq exceeded 1 emission.
-				Assert::AreEqual(1, emitCount[6], L"Post-cut frame seq 6 must be emitted exactly once");
-				Assert::AreEqual(1, emitCount[11], L"Post-cut frame seq 11 must be emitted exactly once");
-				for (const auto& kv : emitCount)
+				// Stream end: FlushEndOfStream() must emit remaining buffered frames (13 and 14) as provisional,
+				// and a second call must return empty (zero duplicates)!
+				const auto eosFlushed = det.FlushEndOfStream(&reg);
+				Assert::AreEqual(static_cast<size_t>(2), eosFlushed.size(),
+					L"FlushEndOfStream must flush both trailing buffered frames (13 and 14)");
+				for (const auto& ef : eosFlushed)
 				{
-					Assert::AreEqual(1, kv.second, L"Every unique seq must be emitted with produced==true at most once");
+					Assert::IsTrue(ef.produced, L"FlushEndOfStream records must have produced == true");
+					Assert::IsTrue((ef.record.validityBits & QualityPattern::kProvisional) != 0,
+						L"End-of-stream flushed records must be visibly marked kProvisional");
+					recordEmit(ef);
+				}
+				const auto eosFlushedAgain = det.FlushEndOfStream(&reg);
+				Assert::IsTrue(eosFlushedAgain.empty(),
+					L"Second repeated FlushEndOfStream must return empty with zero duplicate seqs");
+
+				// Mandatory Same-Input Negative Control (Rule 3):
+				// Prove that ignoring flushedBeforeCut and FlushEndOfStream (pre-H10 behavior) silently loses 5+ frames!
+				const size_t naiveMissingCount = 14u - naiveNoFlushEmitCount.size();
+				Assert::IsTrue(naiveMissingCount >= 5u,
+					L"Negative control: without flushedBeforeCut + FlushEndOfStream, >= 5 frames (4,5,9,10,13,14) are lost");
+				Assert::AreEqual(0, naiveNoFlushEmitCount[4]);
+				Assert::AreEqual(0, naiveNoFlushEmitCount[5]);
+				Assert::AreEqual(0, naiveNoFlushEmitCount[9]);
+				Assert::AreEqual(0, naiveNoFlushEmitCount[10]);
+				Assert::AreEqual(0, naiveNoFlushEmitCount[13]);
+
+				// STRICT EXACTLY-ONCE invariant across EVERY pushed sequence 1..14!
+				Assert::AreEqual(static_cast<size_t>(14), emitCount.size(),
+					L"All 14 pushed sequences must be emitted with zero dropped records");
+				for (uint64_t s = 1; s <= 14; ++s)
+				{
+					Assert::AreEqual(1, emitCount[s],
+						L"Every pushed sequence (including pre-cut 4,5,9,10 and stream-end 13,14) MUST be emitted EXACTLY ONCE");
+				}
+				Assert::AreEqual(static_cast<uint64_t>(0), det.DroppedRecordCount(),
+					L"Clean cut+EOS flush must record DroppedRecordCount() == 0");
+
+				// Explicit Reset() drop-counter visibility test (Rule 4):
+				// Calling Reset() while buffered un-emitted frames sit in window_ MUST increment DroppedRecordCount() visibly!
+				{
+					TdV2FrameRoleDetector detDrop(2);
+					Assert::AreEqual(static_cast<uint64_t>(0), detDrop.DroppedRecordCount());
+					detDrop.PushAndClassify(MakeEv(100, 0.95), &reg); // buffered
+					detDrop.PushAndClassify(MakeEv(101, 0.55), &reg); // buffered
+					Assert::AreEqual(static_cast<uint64_t>(0), detDrop.DroppedRecordCount());
+					detDrop.Reset();
+					Assert::AreEqual(static_cast<uint64_t>(2), detDrop.DroppedRecordCount(),
+						L"Reset() with 2 buffered un-emitted frames MUST visibly increment DroppedRecordCount() by 2");
+
+					// Push 4 frames: seqs 200 & 201 emitted, seqs 202 & 203 still buffered -> Reset() adds 2 more drops.
+					detDrop.PushAndClassify(MakeEv(200, 0.95), &reg);
+					detDrop.PushAndClassify(MakeEv(201, 0.55), &reg);
+					detDrop.PushAndClassify(MakeEv(202, 0.90), &reg); // emits 200
+					detDrop.PushAndClassify(MakeEv(203, 0.52), &reg); // emits 201
+					detDrop.Reset();
+					Assert::AreEqual(static_cast<uint64_t>(4), detDrop.DroppedRecordCount(),
+						L"Second Reset() with 2 buffered un-emitted frames must accumulate DroppedRecordCount() == 4");
 				}
 
-				// Also verify lead == 0 (causal P15c) emits cut frame once and never duplicates on subsequent flush.
+				// Also verify lead == 0 (causal P15c) emits cut frame once, FlushEndOfStream is empty, and DroppedRecordCount == 0.
 				TdV2FrameRoleDetector detCausal(0);
 				std::map<uint64_t, int> causalEmit;
 				const auto c0 = detCausal.PushAndClassify(MakeEv(50, 0.95, 0.5, 0.0, 0.0, true), &reg);
 				Assert::IsTrue(c0.produced, L"Lead-0 CutReset emits immediately once");
 				++causalEmit[c0.record.seq];
-				const auto cFlush = detCausal.ClassifyLatestCausal(&reg);
-				Assert::IsFalse(cFlush.produced, L"Lead-0 flush right after CutReset must not duplicate seq");
+				const auto cFlush = detCausal.FlushEndOfStream(&reg);
+				Assert::IsTrue(cFlush.empty(), L"Lead-0 FlushEndOfStream right after CutReset must not duplicate seq");
 				Assert::AreEqual(1, causalEmit[50]);
+				Assert::AreEqual(static_cast<uint64_t>(0), detCausal.DroppedRecordCount());
+
+				// Direct ClassifyLatestCausal coverage (R4 L1): emits latest buffered seq provisionally once,
+				// suppresses repeat duplicate, and lets FlushEndOfStream emit only the remaining un-emitted seq!
+				{
+					TdV2FrameRoleDetector detLatest(2);
+					Assert::IsFalse(detLatest.PushAndClassify(MakeEv(101, 0.94), &reg).produced);
+					Assert::IsFalse(detLatest.PushAndClassify(MakeEv(102, 0.52), &reg).produced);
+					const auto lc1 = detLatest.ClassifyLatestCausal(&reg);
+					Assert::IsTrue(lc1.produced, L"ClassifyLatestCausal must emit latest buffered frame once");
+					Assert::IsTrue((lc1.record.validityBits & QualityPattern::kProvisional) != 0,
+						L"ClassifyLatestCausal must set kProvisional visibly");
+					Assert::AreEqual(static_cast<uint64_t>(102), lc1.record.seq);
+					Assert::IsFalse(detLatest.ClassifyLatestCausal(&reg).produced,
+						L"Repeated ClassifyLatestCausal must not duplicate already-emitted seq 102");
+					const auto lcEos = detLatest.FlushEndOfStream(&reg);
+					Assert::AreEqual(static_cast<size_t>(1), lcEos.size(),
+						L"FlushEndOfStream after ClassifyLatestCausal must emit only remaining seq 101");
+					Assert::IsTrue(lcEos[0].produced);
+					Assert::AreEqual(static_cast<uint64_t>(101), lcEos[0].record.seq);
+					Assert::IsFalse(detLatest.ClassifyLatestCausal(&reg).produced,
+						L"ClassifyLatestCausal after FlushEndOfStream must return produced == false");
+					Assert::AreEqual(static_cast<uint64_t>(0), detLatest.DroppedRecordCount());
+				}
 			}
 
 			TEST_METHOD(FlatBottomIbbpStabilityUnderTinyNoiseJitter)
@@ -430,6 +521,100 @@ namespace Tests
 				Assert::IsTrue(reg.IsActive(StandInKind::P16BlockGrid));
 				Assert::AreEqual(static_cast<uint64_t>(4), reg.HitCount(StandInKind::P16BlockGrid));
 				Assert::IsTrue(reg.FormatStatusSummary().find("P16 grid: TD stand-in") != std::string::npos);
+			}
+
+			TEST_METHOD(P16StandInPureWhiteNoiseHasZeroFalseBlockingPeriod)
+			{
+				// Full-Diff MEDIUM-5 Adversarial Test:
+				// Pure unblocked iid white Gaussian noise with sigma = 0.45 * depthScale puts E[|d|] = 0.5078 * depthScale
+				// right at copyTol = 0.5 * depthScale. Under an asymmetric activity gate (bx > copyTol), left-tail
+				// truncation biases meanBx/meanIx to ~1.14 and falsely triggers detectedPeriod = 8 on unblocked noise!
+				// Verify TdV2CodingGridStandIn produces detectedPeriodX == 0 && detectedPeriodY == 0 at 10-bit & 12-bit,
+				// while a genuine 8x8 blocked positive control on the exact same noise still detects period == 8.
+				const int w = 128, h = 128;
+				const size_t n = static_cast<size_t>(w) * h;
+				const int depths[2] = { 10, 12 };
+				const uint32_t seeds[2] = { 701u, 702u };
+
+				TdV2CodingGridStandIn p16;
+				StandInRegistry reg;
+
+				for (int di = 0; di < 2; ++di)
+				{
+					const int bits = depths[di];
+					const double depthScale = DepthScale(bits);
+					const double copyTol = 0.5 * depthScale;
+					const double sigma = 0.45 * depthScale;
+					const double mid = 512.0 * depthScale;
+
+					std::mt19937 rng(seeds[di]);
+					std::normal_distribution<double> nd(0.0, sigma);
+					std::vector<double> whiteNoise(n), blockedNoise(n);
+					for (int y = 0; y < h; ++y)
+					{
+						for (int x = 0; x < w; ++x)
+						{
+							const size_t i = static_cast<size_t>(y) * w + x;
+							const double g = nd(rng);
+							whiteNoise[i] = mid + g;
+							// Positive control: identical noise + genuine 8x8 block quantization steps (6 * depthScale).
+							const double blockStep = 6.0 * depthScale * static_cast<double>(((x / 8) + (y / 8)) & 1);
+							blockedNoise[i] = mid + g + blockStep;
+						}
+					}
+
+					// Mandatory In-Test Negative Control (Rule 3): naive asymmetric gate (bx > copyTol) on EXACT SAME whiteNoise!
+					double naiveBxSum = 0.0, naiveIxSum = 0.0;
+					size_t naiveBxCnt = 0, naiveIxCnt = 0;
+					for (int cy = 0; cy < h / 16; ++cy)
+					{
+						for (int cx = 0; cx < w / 16; ++cx)
+						{
+							double bSum = 0.0, iSum = 0.0;
+							size_t bCnt = 0, iCnt = 0;
+							for (int y = cy * 16; y < (cy + 1) * 16; ++y)
+							{
+								for (int x = cx * 16; x < (cx + 1) * 16; ++x)
+								{
+									if (x + 1 < w)
+									{
+										const double dx = std::fabs(whiteNoise[static_cast<size_t>(y) * w + x + 1]
+										                          - whiteNoise[static_cast<size_t>(y) * w + x]);
+										if ((x % 8) == 7) { bSum += dx; ++bCnt; }
+										else              { iSum += dx; ++iCnt; }
+									}
+								}
+							}
+							if (bCnt > 0 && iCnt > 0 && (bSum / static_cast<double>(bCnt)) > copyTol)
+							{
+								naiveBxSum += bSum; naiveBxCnt += bCnt;
+								naiveIxSum += iSum; naiveIxCnt += iCnt;
+							}
+						}
+					}
+					const double naiveRatio = (naiveBxSum / static_cast<double>(naiveBxCnt))
+					                        / (naiveIxSum / static_cast<double>(naiveIxCnt));
+					const double naiveMargin = kBlockingRatioSigma * std::sqrt(
+						kHalfNormalCvSq * (1.0 / static_cast<double>(naiveBxCnt) + 1.0 / static_cast<double>(naiveIxCnt)));
+					Assert::IsTrue(naiveRatio > 1.0 + naiveMargin,
+						L"Negative control: asymmetric bx > copyTol gate MUST suffer left-tail bias > 1 + 3*sigma on sigma=0.45*depthScale white noise");
+
+					// Protected symmetric-gated P16 stand-in MUST report ZERO false blocking period on pure white noise!
+					const auto sNoise = p16.Measure(whiteNoise.data(), nullptr, nullptr, w, h, bits, &reg);
+					Assert::IsTrue(sNoise.valid, L"P16 stand-in must return valid summary on pure white noise");
+					Assert::AreEqual(static_cast<uint16_t>(0), sNoise.detectedPeriodX,
+						L"Pure unblocked white noise (sigma=0.45*depthScale) MUST report detectedPeriodX == 0");
+					Assert::AreEqual(static_cast<uint16_t>(0), sNoise.detectedPeriodY,
+						L"Pure unblocked white noise (sigma=0.45*depthScale) MUST report detectedPeriodY == 0");
+
+					// Positive control: genuine 8x8 blocked version of the exact same noise MUST still detect period == 8!
+					const auto sBlocked = p16.Measure(blockedNoise.data(), nullptr, nullptr, w, h, bits, &reg);
+					Assert::IsTrue(sBlocked.valid);
+					Assert::AreEqual(static_cast<uint16_t>(8), sBlocked.detectedPeriodX,
+						L"Genuine 8x8 blocked positive control MUST detect detectedPeriodX == 8");
+					Assert::AreEqual(static_cast<uint16_t>(8), sBlocked.detectedPeriodY,
+						L"Genuine 8x8 blocked positive control MUST detect detectedPeriodY == 8");
+				}
 			}
 		};
 	}
