@@ -357,7 +357,13 @@ namespace Vpv
 					counters_->lastDeclined.store(false, std::memory_order_release);
 					return ok;
 				}
-				if ((ok && want == reserve_) || want == tried_)
+				if (ok && want == reserve_)
+				{
+					regProblem_.clear();
+					tried_ = reserve_;
+					return true;
+				}
+				if (want == tried_)
 					return ok;
 				if (demand == nullptr)
 					demand = static_cast<Skeleton::IExternalDemand*>(Hub::ExtensionHub::Instance().Query(Skeleton::kExternalDemandQueryId));
@@ -374,12 +380,22 @@ namespace Vpv
 					: demand->RegisterOwnerFill(VpSkeleton::kBandMemo, VpSkeleton::AcquireForm::Gpu, kBandMemoUnit,
 						MakeBandMemoOwnerFill(want, counters_));
 				const bool now = r == R::Registered || r == R::Replaced;
-				reserve_ = now ? want : uint64_t(0);
-				registered_.store(now, std::memory_order_release);
-				regProblem_ = now
-					? std::string()
-					: "owner fill " + RegistrationText(r) + " (reserve " + std::to_string(want) + " B; retried at the next size change)";
-				return now;
+				if (now)
+				{
+					reserve_ = want;
+					registered_.store(true, std::memory_order_release);
+					regProblem_.clear();
+					return true;
+				}
+				// Failed replace leaves the previously registered fill active on the skeleton: preserve registered_ and reserve_,
+				// while keeping regProblem_ visibly populated with the failed replace reason and requested reserve (Rule 4).
+				if (!ok)
+				{
+					reserve_ = uint64_t(0);
+					registered_.store(false, std::memory_order_release);
+				}
+				regProblem_ = "owner fill " + RegistrationText(r) + " (reserve " + std::to_string(want) + " B; retried at the next size change)";
+				return ok;
 			}
 			mutable std::mutex mutex_;
 			std::vector<HostSize> hosts_;
