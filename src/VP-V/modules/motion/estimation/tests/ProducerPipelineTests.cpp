@@ -231,6 +231,7 @@ namespace VideoProcessorTest
 
 				MotionAhead::Producer producer;
 				ProducerStopGuard stopGuard(producer);
+				producer.SetR6AsyncExtras(false);
 				producer.SetDepth(6);
 				Assert::IsTrue(producer.StartForTest(seam));
 
@@ -262,11 +263,15 @@ namespace VideoProcessorTest
 
 				std::lock_guard<std::mutex> lock(traceMutex);
 				Assert::AreEqual<size_t>(4, pairToSeqs.size(), L"exactly 4 pairs must run in strictly increasing order");
+				Assert::AreEqual<size_t>(4, pairContinuous.size());
 				Assert::AreEqual<uint64_t>(2, pairToSeqs[0]);
 				Assert::AreEqual<uint64_t>(3, pairToSeqs[1]);
 				Assert::AreEqual<uint64_t>(5, pairToSeqs[2]);
 				Assert::AreEqual<uint64_t>(6, pairToSeqs[3]);
+				Assert::IsFalse(pairContinuous[0], L"first pair (1,2) has no prior pair");
+				Assert::IsTrue(pairContinuous[1], L"continuous pair (2,3) must report temporal continuity");
 				Assert::IsFalse(pairContinuous[2], L"pair (4,5) after breakBefore must not claim temporal continuity");
+				Assert::IsTrue(pairContinuous[3], L"continuous pair (5,6) after re-seed must restore temporal continuity");
 			}
 
 			// (b) Same-input negative control (Rule 3): run a second real MotionAhead::Producer on the EXACT SAME
@@ -278,6 +283,7 @@ namespace VideoProcessorTest
 
 				MotionAhead::Producer controlProducer;
 				ProducerStopGuard controlStopGuard(controlProducer);
+				controlProducer.SetR6AsyncExtras(false);
 				controlProducer.SetDepth(6);
 				Assert::IsTrue(controlProducer.StartForTest(controlSeam));
 
@@ -426,6 +432,7 @@ namespace VideoProcessorTest
 			ProducerStopGuard stopGuard(producer);
 			GateOpenGuard gateGuard(gateOnFrame5);
 
+			producer.SetR6AsyncExtras(false);
 			producer.SetDepth(8);
 			Assert::IsTrue(producer.StartForTest(seam));
 
@@ -502,6 +509,10 @@ namespace VideoProcessorTest
 			Assert::IsTrue(resHit23.status == Status::FromSlot);
 			Assert::IsTrue(resHit23.flow != nullptr && resHit23.flow.get() == p2->Find(2, 3).get());
 
+			// Join the worker completely BEFORE reading stats so Producer::Answer() has finished incrementing
+			// requestStats.ready after OnDemand::Fulfil() woke the caller (eliminates under-load race).
+			producer.Stop();
+
 			const MotionAhead::Producer::Stats stats = producer.GetStats();
 			const MotionAhead::Producer::RequestStats reqStats = producer.GetRequestStats();
 			Assert::AreEqual<unsigned long long>(5ull, stats.frames);
@@ -515,8 +526,7 @@ namespace VideoProcessorTest
 			Assert::AreEqual<unsigned long long>(1ull, reqStats.forcedOffChain);
 			Assert::IsTrue(reqStats.coreAheadOfRequests >= 1ull, L"Core frame 6 must run ahead of waiting on-demand requests");
 			Assert::AreEqual<unsigned long long>(0ull, reqStats.refused + reqStats.failed);
-
-			producer.Stop();
+			Assert::AreEqual<unsigned long long>(0ull, reqStats.unavailable);
 
 			// Verify exact execution order: core 1,2,3 -> request (3,4) Chain -> core 5,6 -> requests (1,3) and (10,11) OffChain in submit order.
 			std::lock_guard<std::mutex> lock(traceMutex);
@@ -529,6 +539,118 @@ namespace VideoProcessorTest
 			Assert::IsFalse(trace[5].isRequest); Assert::AreEqual<uint64_t>(6, trace[5].to);
 			Assert::IsTrue(trace[6].isRequest);  Assert::AreEqual<uint64_t>(3, trace[6].to);  Assert::IsTrue(trace[6].mode == Mode::OffChain);
 			Assert::IsTrue(trace[7].isRequest);  Assert::AreEqual<uint64_t>(11, trace[7].to); Assert::IsTrue(trace[7].mode == Mode::OffChain);
+		}
+
+		TEST_METHOD(BackQueueIgnoreGenerationSurvivesActiveGenerationPinWithNegativeControl)
+		{
+			struct WorkItem
+			{
+				bool isRequest = false;
+				uint64_t from = 0;
+				uint64_t to = 0;
+			};
+
+			BackQueue<WorkItem> q(8);
+			const uint64_t epoch = q.Epoch();
+			const WorkItem coreGen1{ false, 1, 2 };
+			const WorkItem forcedGen2{ true, 10, 11 };
+
+			// (a) Pre-pin queueing: push gen-1 core (ignoreGeneration=false), gen-2 forced (ignoreGeneration=true),
+			// and same-input negative control (identical payload + gen 2 + epoch, ignoreGeneration=false).
+			Assert::IsTrue(q.Push(coreGen1, /*generation=*/1, epoch, /*ignoreGeneration=*/false));
+			Assert::IsTrue(q.Push(forcedGen2, /*generation=*/2, epoch, /*ignoreGeneration=*/true));
+			Assert::IsTrue(q.Push(forcedGen2, /*generation=*/2, epoch, /*ignoreGeneration=*/false));
+			Assert::AreEqual<size_t>(3, q.Size());
+
+			// Pin active generation to 1: SetActiveGeneration(1) must drop ONLY the gen-2 ignoreGeneration=false
+			// control item while keeping both the gen-1 core item and the gen-2 ignoreGeneration=true item.
+			Assert::AreEqual<size_t>(
+				1,
+				q.SetActiveGeneration(1),
+				L"SetActiveGeneration(1) must discard only the gen-2 ignoreGeneration=false negative control");
+			Assert::AreEqual<uint64_t>(1ull, q.DiscardedCount());
+			Assert::AreEqual<size_t>(2, q.Size());
+
+			// IsLive while queue is open: ignoreGeneration=true stays live across active generation pin,
+			// whereas the same-input ignoreGeneration=false negative control reports not live.
+			Assert::IsTrue(q.IsLive(1, epoch, /*ignoreGeneration=*/false));
+			Assert::IsTrue(
+				q.IsLive(2, epoch, /*ignoreGeneration=*/true),
+				L"gen-2 ignoreGeneration=true entry must remain live under active generation 1");
+			Assert::IsFalse(
+				q.IsLive(2, epoch, /*ignoreGeneration=*/false),
+				L"Negative control: gen-2 ignoreGeneration=false entry must not be live under active generation 1");
+
+			// (b) Post-pin queueing under active generation 1: gen-1 core and gen-2 ignoreGeneration=true
+			// both enqueue, while the exact same-input gen-2 ignoreGeneration=false control is rejected by Push().
+			const WorkItem coreGen1After{ false, 2, 3 };
+			const WorkItem forcedGen2After{ true, 20, 21 };
+			Assert::IsTrue(q.Push(coreGen1After, /*generation=*/1, epoch, /*ignoreGeneration=*/false));
+			Assert::IsTrue(q.Push(forcedGen2After, /*generation=*/2, epoch, /*ignoreGeneration=*/true));
+			Assert::IsFalse(
+				q.Push(forcedGen2After, /*generation=*/2, epoch, /*ignoreGeneration=*/false),
+				L"Negative control: Push with mismatched generation and ignoreGeneration=false must fail once pinned");
+
+			// Epoch guard still applies even when ignoreGeneration=true.
+			Assert::IsFalse(
+				q.Push(forcedGen2After, /*generation=*/2, epoch + 1, /*ignoreGeneration=*/true),
+				L"ignoreGeneration=true must not bypass epoch check on Push");
+			Assert::IsFalse(
+				q.IsLive(2, epoch + 1, /*ignoreGeneration=*/true),
+				L"ignoreGeneration=true must not report live for a mismatched epoch");
+
+			// Finish() closes to new pushes while allowing Pop() to drain all live items in strict FIFO order.
+			q.Finish();
+
+			std::vector<BackQueue<WorkItem>::Entry> drained;
+			BackQueue<WorkItem>::Entry e{};
+			while (q.Pop(e))
+			{
+				drained.push_back(e);
+				q.MarkBusy(false);
+			}
+
+			Assert::AreEqual<size_t>(
+				4,
+				drained.size(),
+				L"Exactly the two gen-1 core items and two gen-2 ignoreGeneration=true items must pop in FIFO order");
+
+			Assert::IsFalse(drained[0].item.isRequest);
+			Assert::AreEqual<uint64_t>(1, drained[0].generation);
+			Assert::IsFalse(drained[0].ignoreGeneration);
+			Assert::AreEqual<uint64_t>(1, drained[0].item.from);
+			Assert::AreEqual<uint64_t>(2, drained[0].item.to);
+
+			Assert::IsTrue(drained[1].item.isRequest);
+			Assert::AreEqual<uint64_t>(2, drained[1].generation);
+			Assert::IsTrue(drained[1].ignoreGeneration);
+			Assert::AreEqual<uint64_t>(10, drained[1].item.from);
+			Assert::AreEqual<uint64_t>(11, drained[1].item.to);
+
+			Assert::IsFalse(drained[2].item.isRequest);
+			Assert::AreEqual<uint64_t>(1, drained[2].generation);
+			Assert::IsFalse(drained[2].ignoreGeneration);
+			Assert::AreEqual<uint64_t>(2, drained[2].item.from);
+			Assert::AreEqual<uint64_t>(3, drained[2].item.to);
+
+			Assert::IsTrue(drained[3].item.isRequest);
+			Assert::AreEqual<uint64_t>(2, drained[3].generation);
+			Assert::IsTrue(drained[3].ignoreGeneration);
+			Assert::AreEqual<uint64_t>(20, drained[3].item.from);
+			Assert::AreEqual<uint64_t>(21, drained[3].item.to);
+
+			// (c) Epoch discard still drops ignoreGeneration=true items on Stop/restart.
+			q.Reopen();
+			const uint64_t epoch2 = q.Epoch();
+			Assert::IsTrue(q.Push(forcedGen2, /*generation=*/2, epoch2, /*ignoreGeneration=*/true));
+			Assert::AreEqual<size_t>(
+				1,
+				q.DiscardAllAndBumpEpoch(),
+				L"DiscardAllAndBumpEpoch must drop ignoreGeneration=true items on epoch bump");
+			Assert::AreEqual<size_t>(0, q.Size());
+			Assert::IsFalse(
+				q.IsLive(2, epoch2, /*ignoreGeneration=*/true),
+				L"ignoreGeneration=true item must not remain live after epoch bump");
 		}
 
 		TEST_METHOD(WaitIdleBlocksImmediatelyAfterPopBeforeConsumerFinishes)
