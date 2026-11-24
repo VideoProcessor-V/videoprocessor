@@ -252,5 +252,443 @@ namespace VideoProcessorTest
 			Assert::IsFalse(out[2].isRequest); Assert::AreEqual<uint64_t>(4, out[2].to);
 			Assert::IsTrue(out[3].isRequest);  Assert::AreEqual<uint64_t>(11, out[3].to);
 		}
+
+		TEST_METHOD(WaitIdleBlocksImmediatelyAfterPopBeforeConsumerFinishes)
+		{
+			struct ThreadJoinGuard
+			{
+				BackQueue<int>& queue;
+				std::thread& worker;
+				ThreadJoinGuard(BackQueue<int>& qRef, std::thread& tRef) : queue(qRef), worker(tRef) {}
+				ThreadJoinGuard(const ThreadJoinGuard&) = delete;
+				ThreadJoinGuard& operator=(const ThreadJoinGuard&) = delete;
+				~ThreadJoinGuard()
+				{
+					if (worker.joinable())
+					{
+						queue.Close();
+						worker.join();
+					}
+				}
+			};
+
+			BackQueue<int> q(4);
+			const uint64_t epoch = q.Epoch();
+			constexpr uint64_t kGen = 1;
+			constexpr int kPayload = 42;
+
+			// (a) Direct deterministic proof (S3-H3): Pop() must atomically mark busy_ = true under mutex_
+			// before unlocking, so WaitIdle() blocks even when the consumer has NOT called MarkBusy(true).
+			Assert::IsTrue(q.Push(kPayload, kGen, epoch));
+			BackQueue<int>::Entry e{};
+			Assert::IsTrue(q.Pop(e));
+			Assert::AreEqual(kPayload, e.item);
+
+			{
+				std::mutex cvMutex;
+				std::condition_variable cv;
+				bool waiterStarted = false;
+				std::atomic<bool> waitIdleReturned{ false };
+
+				std::thread waiter;
+				ThreadJoinGuard guard(q, waiter);
+				waiter = std::thread([&] {
+					{
+						std::lock_guard<std::mutex> lock(cvMutex);
+						waiterStarted = true;
+					}
+					cv.notify_all();
+					q.WaitIdle();
+					waitIdleReturned.store(true, std::memory_order_release);
+					{
+						std::lock_guard<std::mutex> lock(cvMutex);
+					}
+					cv.notify_all();
+				});
+
+				bool startedOk = false;
+				bool returnedEarlyWhileBusy = false;
+				bool returnedAfterMarkIdle = false;
+				{
+					std::unique_lock<std::mutex> lock(cvMutex);
+					startedOk = cv.wait_for(lock, std::chrono::seconds(5), [&] { return waiterStarted; });
+					if (startedOk)
+					{
+						// On pre-fix code, WaitIdle() observes queue_.empty() && !busy_ and returns in microseconds.
+						// On fixed code, WaitIdle() stays blocked for the full window until MarkBusy(false).
+						returnedEarlyWhileBusy = cv.wait_for(
+							lock,
+							std::chrono::milliseconds(50),
+							[&] { return waitIdleReturned.load(std::memory_order_acquire); });
+					}
+				}
+
+				q.MarkBusy(false);
+				{
+					std::unique_lock<std::mutex> lock(cvMutex);
+					returnedAfterMarkIdle = cv.wait_for(
+						lock,
+						std::chrono::seconds(2),
+						[&] { return waitIdleReturned.load(std::memory_order_acquire); });
+				}
+
+				if (!returnedAfterMarkIdle)
+					q.Close();
+				waiter.join();
+
+				Assert::IsTrue(startedOk, L"WaitIdle worker thread must start");
+				Assert::IsFalse(
+					returnedEarlyWhileBusy,
+					L"WaitIdle must not return early after Pop() before consumer completes with MarkBusy(false)");
+				Assert::IsTrue(
+					returnedAfterMarkIdle,
+					L"WaitIdle must wake promptly once consumer calls MarkBusy(false)");
+			}
+
+			// (b) Same-input negative control (Rule 3): using the exact same BackQueue<int> and (kPayload, kGen, epoch),
+			// once busy_ is cleared immediately after Pop() (matching the unprotected pre-fix busy_ == false state),
+			// WaitIdle() returns immediately without blocking — proving the hazard is real and WaitIdle is not stuck.
+			Assert::IsTrue(q.Push(kPayload, kGen, epoch));
+			BackQueue<int>::Entry negEntry{};
+			Assert::IsTrue(q.Pop(negEntry));
+			Assert::AreEqual(kPayload, negEntry.item);
+			q.MarkBusy(false);
+
+			{
+				std::mutex negMutex;
+				std::condition_variable negCv;
+				std::atomic<bool> unprotectedReturned{ false };
+
+				std::thread negWaiter;
+				ThreadJoinGuard negGuard(q, negWaiter);
+				negWaiter = std::thread([&] {
+					q.WaitIdle();
+					unprotectedReturned.store(true, std::memory_order_release);
+					{
+						std::lock_guard<std::mutex> lock(negMutex);
+					}
+					negCv.notify_all();
+				});
+
+				bool unprotectedReturnedPromptly = false;
+				{
+					std::unique_lock<std::mutex> lock(negMutex);
+					unprotectedReturnedPromptly = negCv.wait_for(
+						lock,
+						std::chrono::seconds(2),
+						[&] { return unprotectedReturned.load(std::memory_order_acquire); });
+				}
+
+				if (!unprotectedReturnedPromptly)
+					q.Close();
+				negWaiter.join();
+
+				Assert::IsTrue(
+					unprotectedReturnedPromptly,
+					L"Negative control: with busy_ cleared right after Pop() (unprotected pre-fix state), WaitIdle must return promptly");
+			}
+
+			// (c) Multi-item handoff: WaitIdle stays blocked across MarkBusy(false) while a second item is queued,
+			// remains blocked after Pop() of the second item (no MarkBusy(true) call), and wakes only after final MarkBusy(false).
+			Assert::IsTrue(q.Push(kPayload, kGen, epoch));
+			Assert::IsTrue(q.Push(kPayload + 1, kGen, epoch));
+			BackQueue<int>::Entry e1{};
+			Assert::IsTrue(q.Pop(e1));
+			Assert::AreEqual(kPayload, e1.item);
+
+			{
+				std::mutex multiMutex;
+				std::condition_variable multiCv;
+				bool multiStarted = false;
+				std::atomic<bool> multiReturned{ false };
+
+				std::thread multiWaiter;
+				ThreadJoinGuard multiGuard(q, multiWaiter);
+				multiWaiter = std::thread([&] {
+					{
+						std::lock_guard<std::mutex> lock(multiMutex);
+						multiStarted = true;
+					}
+					multiCv.notify_all();
+					q.WaitIdle();
+					multiReturned.store(true, std::memory_order_release);
+					{
+						std::lock_guard<std::mutex> lock(multiMutex);
+					}
+					multiCv.notify_all();
+				});
+
+				bool multiStartedOk = false;
+				bool returnedWhileSecondQueued = false;
+				bool returnedWhileSecondBusy = false;
+				bool returnedAfterSecondDone = false;
+
+				{
+					std::unique_lock<std::mutex> lock(multiMutex);
+					multiStartedOk = multiCv.wait_for(lock, std::chrono::seconds(5), [&] { return multiStarted; });
+				}
+
+				q.MarkBusy(false);
+				{
+					std::unique_lock<std::mutex> lock(multiMutex);
+					returnedWhileSecondQueued = multiCv.wait_for(
+						lock,
+						std::chrono::milliseconds(30),
+						[&] { return multiReturned.load(std::memory_order_acquire); });
+				}
+
+				BackQueue<int>::Entry e2{};
+				const bool poppedSecond = q.Pop(e2);
+				{
+					std::unique_lock<std::mutex> lock(multiMutex);
+					returnedWhileSecondBusy = multiCv.wait_for(
+						lock,
+						std::chrono::milliseconds(30),
+						[&] { return multiReturned.load(std::memory_order_acquire); });
+				}
+
+				q.MarkBusy(false);
+				{
+					std::unique_lock<std::mutex> lock(multiMutex);
+					returnedAfterSecondDone = multiCv.wait_for(
+						lock,
+						std::chrono::seconds(2),
+						[&] { return multiReturned.load(std::memory_order_acquire); });
+				}
+
+				if (!returnedAfterSecondDone)
+					q.Close();
+				multiWaiter.join();
+
+				Assert::IsTrue(multiStartedOk, L"Multi-item WaitIdle worker thread must start");
+				Assert::IsTrue(poppedSecond, L"Second queued item must pop cleanly");
+				Assert::AreEqual(kPayload + 1, e2.item);
+				Assert::IsFalse(returnedWhileSecondQueued, L"WaitIdle must stay blocked while second item is still queued");
+				Assert::IsFalse(returnedWhileSecondBusy, L"WaitIdle must stay blocked after popping second item before MarkBusy(false)");
+				Assert::IsTrue(returnedAfterSecondDone, L"WaitIdle must wake once second item finishes with MarkBusy(false)");
+			}
+		}
+
+		TEST_METHOD(WaitIdleWakesPromptlyWhenStaleDrainEmptiesBackQueue)
+		{
+			struct ThreadJoinGuard
+			{
+				BackQueue<int>& queue;
+				std::thread& worker;
+				ThreadJoinGuard(BackQueue<int>& qRef, std::thread& tRef) : queue(qRef), worker(tRef) {}
+				ThreadJoinGuard(const ThreadJoinGuard&) = delete;
+				ThreadJoinGuard& operator=(const ThreadJoinGuard&) = delete;
+				~ThreadJoinGuard()
+				{
+					if (worker.joinable())
+					{
+						queue.Close();
+						worker.join();
+					}
+				}
+			};
+
+			// (a) SetActiveGeneration drains the last stale-generation item while WaitIdle() is blocked.
+			{
+				BackQueue<int> q(4);
+				const uint64_t epoch = q.Epoch();
+				Assert::IsTrue(q.Push(100, /*generation=*/1, epoch));
+
+				std::mutex cvMutex;
+				std::condition_variable cv;
+				bool started = false;
+				std::atomic<bool> woke{ false };
+
+				std::thread waiter;
+				ThreadJoinGuard guard(q, waiter);
+				waiter = std::thread([&] {
+					{
+						std::lock_guard<std::mutex> lock(cvMutex);
+						started = true;
+					}
+					cv.notify_all();
+					q.WaitIdle();
+					woke.store(true, std::memory_order_release);
+					{
+						std::lock_guard<std::mutex> lock(cvMutex);
+					}
+					cv.notify_all();
+				});
+
+				bool startedOk = false;
+				bool wokeBeforeDrain = false;
+				{
+					std::unique_lock<std::mutex> lock(cvMutex);
+					startedOk = cv.wait_for(lock, std::chrono::seconds(5), [&] { return started; });
+					if (startedOk)
+					{
+						wokeBeforeDrain = cv.wait_for(
+							lock,
+							std::chrono::milliseconds(30),
+							[&] { return woke.load(std::memory_order_acquire); });
+					}
+				}
+
+				const size_t dropped = q.SetActiveGeneration(2);
+
+				bool wokeAfterGenDrain = false;
+				{
+					std::unique_lock<std::mutex> lock(cvMutex);
+					wokeAfterGenDrain = cv.wait_for(
+						lock,
+						std::chrono::seconds(2),
+						[&] { return woke.load(std::memory_order_acquire); });
+				}
+
+				if (!wokeAfterGenDrain)
+					q.Close();
+				waiter.join();
+
+				Assert::IsTrue(startedOk, L"Generation-drain WaitIdle worker thread must start");
+				Assert::IsFalse(wokeBeforeDrain, L"WaitIdle must block while stale gen-1 item is queued");
+				Assert::AreEqual<size_t>(1, dropped, L"SetActiveGeneration must drop the queued gen-1 item");
+				Assert::IsTrue(
+					wokeAfterGenDrain,
+					L"WaitIdle must wake promptly without deadlock when SetActiveGeneration drains the queue");
+			}
+
+			// (b) DiscardAllAndBumpEpoch drains the queued item while WaitIdle() is blocked.
+			{
+				BackQueue<int> q(4);
+				Assert::IsTrue(q.Push(200, /*generation=*/1, q.Epoch()));
+
+				std::mutex cvMutex;
+				std::condition_variable cv;
+				bool started = false;
+				std::atomic<bool> woke{ false };
+
+				std::thread waiter;
+				ThreadJoinGuard guard(q, waiter);
+				waiter = std::thread([&] {
+					{
+						std::lock_guard<std::mutex> lock(cvMutex);
+						started = true;
+					}
+					cv.notify_all();
+					q.WaitIdle();
+					woke.store(true, std::memory_order_release);
+					{
+						std::lock_guard<std::mutex> lock(cvMutex);
+					}
+					cv.notify_all();
+				});
+
+				bool startedOk = false;
+				bool wokeBeforeDiscard = false;
+				{
+					std::unique_lock<std::mutex> lock(cvMutex);
+					startedOk = cv.wait_for(lock, std::chrono::seconds(5), [&] { return started; });
+					if (startedOk)
+					{
+						wokeBeforeDiscard = cv.wait_for(
+							lock,
+							std::chrono::milliseconds(30),
+							[&] { return woke.load(std::memory_order_acquire); });
+					}
+				}
+
+				const size_t dropped = q.DiscardAllAndBumpEpoch();
+
+				bool wokeAfterDiscard = false;
+				{
+					std::unique_lock<std::mutex> lock(cvMutex);
+					wokeAfterDiscard = cv.wait_for(
+						lock,
+						std::chrono::seconds(2),
+						[&] { return woke.load(std::memory_order_acquire); });
+				}
+
+				if (!wokeAfterDiscard)
+					q.Close();
+				waiter.join();
+
+				Assert::IsTrue(startedOk, L"Epoch-discard WaitIdle worker thread must start");
+				Assert::IsFalse(wokeBeforeDiscard, L"WaitIdle must block while item is queued before epoch bump");
+				Assert::AreEqual<size_t>(1, dropped, L"DiscardAllAndBumpEpoch must drop the queued item");
+				Assert::IsTrue(
+					wokeAfterDiscard,
+					L"WaitIdle must wake promptly without deadlock when DiscardAllAndBumpEpoch drains the queue");
+			}
+
+			// (c) Busy-protection check during stale drain: emptying the queue via SetActiveGeneration must NOT
+			// unblock WaitIdle() while an already-popped item is still owned by the consumer until MarkBusy(false).
+			{
+				BackQueue<int> q(4);
+				const uint64_t epoch = q.Epoch();
+				Assert::IsTrue(q.Push(301, /*generation=*/1, epoch));
+				Assert::IsTrue(q.Push(302, /*generation=*/1, epoch));
+
+				BackQueue<int>::Entry e{};
+				Assert::IsTrue(q.Pop(e));
+				Assert::AreEqual(301, e.item);
+
+				std::mutex cvMutex;
+				std::condition_variable cv;
+				bool started = false;
+				std::atomic<bool> woke{ false };
+
+				std::thread waiter;
+				ThreadJoinGuard guard(q, waiter);
+				waiter = std::thread([&] {
+					{
+						std::lock_guard<std::mutex> lock(cvMutex);
+						started = true;
+					}
+					cv.notify_all();
+					q.WaitIdle();
+					woke.store(true, std::memory_order_release);
+					{
+						std::lock_guard<std::mutex> lock(cvMutex);
+					}
+					cv.notify_all();
+				});
+
+				bool startedOk = false;
+				{
+					std::unique_lock<std::mutex> lock(cvMutex);
+					startedOk = cv.wait_for(lock, std::chrono::seconds(5), [&] { return started; });
+				}
+
+				const size_t dropped = q.SetActiveGeneration(2);
+
+				bool wokeWhilePoppedBusy = false;
+				{
+					std::unique_lock<std::mutex> lock(cvMutex);
+					wokeWhilePoppedBusy = cv.wait_for(
+						lock,
+						std::chrono::milliseconds(50),
+						[&] { return woke.load(std::memory_order_acquire); });
+				}
+
+				q.MarkBusy(false);
+
+				bool wokeAfterConsumerFinished = false;
+				{
+					std::unique_lock<std::mutex> lock(cvMutex);
+					wokeAfterConsumerFinished = cv.wait_for(
+						lock,
+						std::chrono::seconds(2),
+						[&] { return woke.load(std::memory_order_acquire); });
+				}
+
+				if (!wokeAfterConsumerFinished)
+					q.Close();
+				waiter.join();
+
+				Assert::IsTrue(startedOk, L"Busy-drain WaitIdle worker thread must start");
+				Assert::AreEqual<size_t>(1, dropped, L"SetActiveGeneration must drop remaining stale queued item");
+				Assert::IsFalse(
+					wokeWhilePoppedBusy,
+					L"Stale drain emptying queue must not wake WaitIdle while an already-popped item is still busy");
+				Assert::IsTrue(
+					wokeAfterConsumerFinished,
+					L"WaitIdle must wake promptly once consumer finishes the popped item after stale drain");
+			}
+		}
 	};
 }
