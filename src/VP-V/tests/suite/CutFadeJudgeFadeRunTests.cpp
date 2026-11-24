@@ -3388,7 +3388,7 @@ namespace CutFadeJudgeFadeRunTestsNs
 			}
 
 			// (b) Unclipped flat-top scene (top half = 180-code sky/panel < 234 fading -0.41 codes/frame <= 0.50;
-			//     lower half = dim textured foreground with slight +3% local contrast tilt on the test step):
+			//     lower half = dim 2D-textured foreground with slight +1% local contrast tilt on the test step):
 			//     Break-it negative control proves Full392StepSlope < 1.0 while StrippedTopStepSlope >= 1.0
 			//     (so deleting >= kStudioPeakWhiteCodes - kFadeMinSpread from topPinned breaks stepSlopeOk!),
 			//     yet FoldFadeRun returns true ONLY because >= 234 prevented stripping the unclipped 180-code ceiling!
@@ -3447,7 +3447,9 @@ namespace CutFadeJudgeFadeRunTestsNs
 							{
 								const int cx = int(x / 5u);
 								const int cy = int(y / 5u);
-								const double raw = 60.0 + 18.0 * ((double(cx) - 15.5) / 15.5) + 2.0 * std::cos(double(cy) * 0.7);
+								const double raw = 60.0
+									+ 14.0 * std::sin(double(cx) * 0.75) * std::cos(double(cy) * 0.85)
+									+ 6.0 * std::cos(double(cx) * 0.45 + double(cy) * 0.35);
 								const double meanLow = 16.0 + gain * (60.0 - 16.0);
 								code = meanLow + lowerStretch * gain * (raw - 60.0) + dither;
 							}
