@@ -15,6 +15,7 @@
 #include <VP-V/modules/motion/consumers/OcclusionMaskHook.h>
 #include <VP-V/modules/output/dither/OutputEncodingRepair.h>
 #include <algorithm>
+#include <atomic>
 #include <Windows.h>
 #include <chrono>
 #include <fstream>
@@ -934,6 +935,343 @@ namespace VideoProcessorTest
 			Assert::IsNull(host.Module().get(), L"Attach with projectorAllowed = false must detach and stop the running module on DynamicDriveHost");
 			Assert::IsFalse(static_cast<bool>(std::atomic_load(&walkObserver)), L"Attach with projectorAllowed = false must not publish a look-ahead observer");
 			Assert::AreEqual(std::string("off"), host.StatusText(), L"status must report off after Attach detaches the disallowed module");
+		}
+
+		// GEM-188: StatusText() and Module() read concurrently from another thread while the host
+		// toggles ApplySnapshot() under stateMutex must never data-race, crash, throw, or return torn text.
+		TEST_METHOD(ConcurrentStatusTextAndUpdateNeverRaceOrCrash)
+		{
+			struct ThreadJoinGuard
+			{
+				std::atomic<bool>& stopFlag;
+				std::thread& worker;
+				ThreadJoinGuard(std::atomic<bool>& stopFlagIn, std::thread& workerIn)
+					: stopFlag(stopFlagIn), worker(workerIn)
+				{
+				}
+				ThreadJoinGuard(const ThreadJoinGuard&) = delete;
+				ThreadJoinGuard& operator=(const ThreadJoinGuard&) = delete;
+				~ThreadJoinGuard()
+				{
+					stopFlag.store(true, std::memory_order_release);
+					if (worker.joinable())
+						worker.join();
+				}
+			};
+
+			std::mutex state;
+			std::shared_ptr<QueuedFrameStatistics::IObserver> walkObserver;
+			LedDrive::DynamicDriveShared shared(walkObserver);
+			LedDrive::DynamicDriveHost host(state);
+			HostCleanupGuard cleanup(host, &shared);
+
+			LedDrive::HostContext context;
+			context.frame = &shared;
+			context.projectorAllowed = true;
+
+			AdapterConfig enabledCfg(
+				"[projector.default]\n"
+				"protocol: none\n"
+				"[led_drive.default]\n"
+				"enabled: on\n"
+				"mode: log_only\n");
+			AdapterConfig disabledCfg(
+				"[projector.default]\n"
+				"protocol: none\n"
+				"[led_drive.default]\n"
+				"enabled: off\n"
+				"mode: log_only\n");
+
+			// Negative control / baseline on the exact same configs: verify StatusText() distinguishes
+			// "off" (disabled) from an active "source ..." line (enabled).
+			{
+				std::lock_guard<std::mutex> lock(state);
+				host.ApplySnapshot(disabledCfg.config, std::string(), context);
+			}
+			Assert::IsNull(host.Module().get(), L"baseline: disabled config must not start a module");
+			Assert::AreEqual(std::string("off"), host.StatusText(), L"baseline: disabled config must report \"off\"");
+			{
+				std::lock_guard<std::mutex> lock(state);
+				host.ApplySnapshot(enabledCfg.config, std::string(), context);
+			}
+			Assert::IsNotNull(host.Module().get(), L"baseline: enabled config must start a module");
+			const std::string enabledStatus = host.StatusText();
+			Assert::IsTrue(enabledStatus.find("source ") != std::string::npos,
+				L"baseline: enabled config StatusText() must contain \"source \"");
+			Assert::AreNotEqual(std::string("off"), enabledStatus,
+				L"baseline: enabled config StatusText() must not report \"off\"");
+			{
+				std::lock_guard<std::mutex> lock(state);
+				host.ApplySnapshot(disabledCfg.config, std::string(), context);
+			}
+			Assert::AreEqual(std::string("off"), host.StatusText(), L"baseline: re-disabled config must return to \"off\"");
+
+			std::atomic<bool> stopReader{ false };
+			std::atomic<bool> readerReady{ false };
+			std::atomic<size_t> statusReads{ 0 };
+			std::atomic<size_t> invalidStatusReads{ 0 };
+			std::atomic<bool> readerThrew{ false };
+
+			std::thread reader([&]()
+			{
+				try
+				{
+					readerReady.store(true, std::memory_order_release);
+					while (!stopReader.load(std::memory_order_acquire))
+					{
+						const std::string status = host.StatusText();
+						const bool valid = (status == "off") || (status.find("source ") != std::string::npos);
+						if (!valid)
+							invalidStatusReads.fetch_add(1, std::memory_order_relaxed);
+						const std::shared_ptr<LedDrive::LedDriveModule> mod = host.Module();
+						if (mod)
+							(void)mod->DrivingProjector();
+						statusReads.fetch_add(1, std::memory_order_relaxed);
+					}
+				}
+				catch (...)
+				{
+					readerThrew.store(true, std::memory_order_release);
+				}
+			});
+			ThreadJoinGuard joinGuard(stopReader, reader);
+
+			while (!readerReady.load(std::memory_order_acquire))
+				std::this_thread::yield();
+
+			constexpr int kToggleIterations = 60;
+			for (int i = 0; i < kToggleIterations; ++i)
+			{
+				const auto& cfg = (i % 2 == 0) ? enabledCfg.config : disabledCfg.config;
+				{
+					std::lock_guard<std::mutex> lock(state);
+					host.ApplySnapshot(cfg, std::string(), context);
+				}
+				std::this_thread::yield();
+			}
+
+			stopReader.store(true, std::memory_order_release);
+			reader.join();
+
+			Assert::IsFalse(readerThrew.load(std::memory_order_acquire),
+				L"reader thread must not throw during concurrent StatusText() and Module() access");
+			Assert::IsTrue(statusReads.load(std::memory_order_acquire) > 0,
+				L"reader thread must observe StatusText()/Module() concurrently with ApplySnapshot() toggles");
+			Assert::AreEqual<size_t>(0, invalidStatusReads.load(std::memory_order_acquire),
+				L"every StatusText() observed concurrently must be either \"off\" or contain \"source \"");
+
+			// Final iteration (i = 59, odd) applied disabledCfg: verify final state matches.
+			Assert::IsNull(host.Module().get(), L"final host.Module() must match final disabled snapshot");
+			Assert::IsNull(shared.Module().get(), L"final shared.Module() must match final disabled snapshot");
+			Assert::AreEqual(std::string("off"), host.StatusText(), L"final host.StatusText() must match final disabled snapshot");
+		}
+
+		// GEM-190: full module replacement in Update() must never unlock the caller's stateMutex,
+		// must stop/release the previous module and start a distinct live replacement module, and
+		// disabling / SuspendForTest / host destruction must cleanly stop and join without hanging.
+		TEST_METHOD(UpdateDoesNotBlockOnStopAndOrdersReplacementStartAfterPreviousStop)
+		{
+			struct ThreadJoinGuard
+			{
+				std::atomic<bool>& stopFlag;
+				std::thread& worker;
+				ThreadJoinGuard(std::atomic<bool>& stopFlagIn, std::thread& workerIn)
+					: stopFlag(stopFlagIn), worker(workerIn)
+				{
+				}
+				ThreadJoinGuard(const ThreadJoinGuard&) = delete;
+				ThreadJoinGuard& operator=(const ThreadJoinGuard&) = delete;
+				~ThreadJoinGuard()
+				{
+					stopFlag.store(true, std::memory_order_release);
+					if (worker.joinable())
+						worker.join();
+				}
+			};
+
+			AdapterConfig initialCfg(
+				"[projector.default]\n"
+				"protocol: none\n"
+				"min_command_gap_ms: 200\n"
+				"[led_drive.default]\n"
+				"enabled: on\n"
+				"mode: log_only\n"
+				"tick_ms: 50\n"
+				"knee: 0.08\n");
+			AdapterConfig reconfigCfg(
+				"[projector.default]\n"
+				"protocol: none\n"
+				"min_command_gap_ms: 200\n"
+				"[led_drive.default]\n"
+				"enabled: on\n"
+				"mode: log_only\n"
+				"tick_ms: 50\n"
+				"knee: 0.12\n");
+			AdapterConfig replacedCfg(
+				"[projector.default]\n"
+				"protocol: none\n"
+				"min_command_gap_ms: 300\n"
+				"[led_drive.default]\n"
+				"enabled: on\n"
+				"mode: log_only\n"
+				"tick_ms: 50\n"
+				"knee: 0.12\n");
+			AdapterConfig disabledCfg(
+				"[projector.default]\n"
+				"protocol: none\n"
+				"min_command_gap_ms: 300\n"
+				"[led_drive.default]\n"
+				"enabled: off\n"
+				"mode: log_only\n"
+				"tick_ms: 50\n");
+
+			std::weak_ptr<LedDrive::LedDriveModule> finalWeak;
+			{
+				std::mutex state;
+				std::shared_ptr<QueuedFrameStatistics::IObserver> walkObserver;
+				LedDrive::DynamicDriveShared shared(walkObserver);
+				LedDrive::DynamicDriveHost host(state);
+				HostCleanupGuard cleanup(host, &shared);
+
+				LedDrive::HostContext context;
+				context.frame = &shared;
+				context.projectorAllowed = true;
+
+				// 1. Start the initial running module.
+				{
+					std::lock_guard<std::mutex> lock(state);
+					host.ApplySnapshot(initialCfg.config, std::string(), context);
+				}
+				std::shared_ptr<LedDrive::LedDriveModule> firstModule = host.Module();
+				Assert::IsNotNull(firstModule.get(), L"initial enabled snapshot must start a module");
+				Assert::IsTrue(shared.Module().get() == firstModule.get(), L"initial module must be published to DynamicDriveShared");
+				Assert::IsTrue(host.StatusText().find("source ") != std::string::npos, L"initial module must report active status");
+
+				// 2. Negative control: a reconfigurable tuning change (knee only, same connection params)
+				// must keep the exact same LedDriveModule pointer in-place.
+				{
+					std::lock_guard<std::mutex> lock(state);
+					host.ApplySnapshot(reconfigCfg.config, std::string(), context);
+				}
+				std::shared_ptr<LedDrive::LedDriveModule> afterReconfig = host.Module();
+				Assert::IsNotNull(afterReconfig.get(), L"negative control: reconfigured module must remain active");
+				Assert::IsTrue(afterReconfig.get() == firstModule.get(),
+					L"negative control: non-replacing reconfigurable tuning change must keep the exact same LedDriveModule pointer");
+				Assert::IsTrue(shared.Module().get() == firstModule.get(),
+					L"negative control: DynamicDriveShared must keep the exact same LedDriveModule pointer");
+				Assert::AreEqual(0.12, host.Params().knee, 1e-12,
+					L"negative control: reconfigurable tuning change must update published params");
+
+				// 3. Full module replacement (non-reconfigurable connection parameter min_command_gap_ms changed):
+				// probe stateMutex from another thread while caller holds stateLock across ApplySnapshot()
+				// to prove Update() NEVER unlocks stateMutex.
+				{
+					std::unique_lock<std::mutex> stateLock(state);
+					std::atomic<bool> stopProbe{ false };
+					std::atomic<bool> probeReady{ false };
+					std::atomic<bool> observedUnlock{ false };
+					std::atomic<size_t> probeAttempts{ 0 };
+
+					std::thread lockProbe([&]()
+					{
+						probeReady.store(true, std::memory_order_release);
+						while (!stopProbe.load(std::memory_order_acquire))
+						{
+							probeAttempts.fetch_add(1, std::memory_order_relaxed);
+							if (state.try_lock())
+							{
+								state.unlock();
+								observedUnlock.store(true, std::memory_order_release);
+								break;
+							}
+							std::this_thread::yield();
+						}
+					});
+					ThreadJoinGuard probeGuard(stopProbe, lockProbe);
+
+					while (!probeReady.load(std::memory_order_acquire) ||
+						probeAttempts.load(std::memory_order_acquire) == 0)
+						std::this_thread::yield();
+
+					host.ApplySnapshot(replacedCfg.config, std::string(), context);
+
+					stopProbe.store(true, std::memory_order_release);
+					lockProbe.join();
+
+					Assert::IsTrue(stateLock.owns_lock(), L"caller stateMutex lock must remain owned across ApplySnapshot()");
+					Assert::IsTrue(probeAttempts.load(std::memory_order_acquire) > 0,
+						L"lock probe thread must have exercised stateMutex.try_lock() across ApplySnapshot()");
+					Assert::IsFalse(observedUnlock.load(std::memory_order_acquire),
+						L"Update() must NOT unlock the caller's stateMutex during module replacement");
+				}
+
+				// 4. Verify replacement module is a distinct live instance and the previous module stops/releases.
+				std::shared_ptr<LedDrive::LedDriveModule> replacedModule = host.Module();
+				Assert::IsNotNull(replacedModule.get(), L"replacement snapshot must publish a live module");
+				Assert::IsTrue(replacedModule.get() != firstModule.get(),
+					L"non-reconfigurable change must replace the module with a distinct LedDriveModule pointer");
+				Assert::IsTrue(shared.Module().get() == replacedModule.get(),
+					L"DynamicDriveShared must publish the replacement module");
+				Assert::IsTrue(host.StatusText().find("source ") != std::string::npos,
+					L"replacement module must report active status");
+
+				const std::weak_ptr<LedDrive::LedDriveModule> firstWeak = firstModule;
+				afterReconfig.reset();
+				firstModule.reset();
+				Assert::IsTrue(WaitFor([&] { return firstWeak.expired(); }),
+					L"previous module must be stopped and released after replacement");
+
+				LedDrive::RawMeasurement raw{};
+				raw.histogram[128] = 100;
+				raw.sum = 100u * 128u * LedDrive::SUM_SCALE;
+				raw.blocks = 100u;
+				raw.maximum = 128u * LedDrive::SUM_SCALE;
+				replacedModule->SubmitMeasurement(raw, 1);
+				Assert::IsTrue(WaitFor([&] { return replacedModule->Ticks() > 0; }),
+					L"replacement module must start and run its worker tick loop after previous stop");
+
+				// 5. Disabling must cleanly stop and release the replacement module.
+				const std::weak_ptr<LedDrive::LedDriveModule> replacedWeak = replacedModule;
+				replacedModule.reset();
+				{
+					std::lock_guard<std::mutex> lock(state);
+					host.ApplySnapshot(disabledCfg.config, std::string(), context);
+				}
+				Assert::IsNull(host.Module().get(), L"disabling must clear host.Module()");
+				Assert::IsNull(shared.Module().get(), L"disabling must clear shared.Module()");
+				Assert::AreEqual(std::string("off"), host.StatusText(), L"disabling must report \"off\"");
+				Assert::IsTrue(WaitFor([&] { return replacedWeak.expired(); }),
+					L"disabling must cleanly stop and release the replacement module");
+
+				// 6. Re-enable, SuspendForTest, ResumeAfterTest, then verify destruction joins cleanly without hanging.
+				{
+					std::lock_guard<std::mutex> lock(state);
+					host.ApplySnapshot(replacedCfg.config, std::string(), context);
+				}
+				std::shared_ptr<LedDrive::LedDriveModule> suspendTarget = host.Module();
+				Assert::IsNotNull(suspendTarget.get(), L"re-enabling must start a fresh module");
+				const std::weak_ptr<LedDrive::LedDriveModule> suspendWeak = suspendTarget;
+				suspendTarget.reset();
+
+				std::string reason;
+				Assert::IsTrue(host.SuspendForTest(context, reason), L"SuspendForTest must succeed when no video is playing");
+				Assert::IsTrue(reason.empty(), L"SuspendForTest must return an empty failure reason on success");
+				Assert::IsTrue(host.Suspended(), L"host must report Suspended() after SuspendForTest");
+				Assert::IsNull(host.Module().get(), L"SuspendForTest must clear host.Module()");
+				Assert::IsNull(shared.Module().get(), L"SuspendForTest must clear shared.Module()");
+				Assert::IsTrue(WaitFor([&] { return suspendWeak.expired(); }),
+					L"SuspendForTest must cleanly stop and release the running module");
+
+				host.ResumeAfterTest(context);
+				Assert::IsFalse(host.Suspended(), L"ResumeAfterTest must clear Suspended()");
+				std::shared_ptr<LedDrive::LedDriveModule> resumedModule = host.Module();
+				Assert::IsNotNull(resumedModule.get(), L"ResumeAfterTest must restart the module");
+				finalWeak = resumedModule;
+				resumedModule.reset();
+			}
+
+			Assert::IsTrue(finalWeak.expired(),
+				L"destroying DynamicDriveHost must cleanly stop, join, and release its module without hanging or leaking");
 		}
 	};
 }

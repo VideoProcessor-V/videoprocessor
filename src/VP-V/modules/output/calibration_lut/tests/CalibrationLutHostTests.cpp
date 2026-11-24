@@ -5,7 +5,10 @@
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/modules/output/calibration_lut/CalibrationLutHostPolicy.h>
 
+#include <atomic>
 #include <string>
+#include <thread>
+#include <vector>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
@@ -155,6 +158,155 @@ namespace CalibrationLutHostTests
 			Assert::AreEqual(1023.0, PatchMaxCode(DXGI_FORMAT_R10G10B10A2_UNORM));
 			Assert::AreEqual(255.0, PatchMaxCode(DXGI_FORMAT_B8G8R8A8_UNORM));
 			Assert::AreEqual(0.0, PatchMaxCode(DXGI_FORMAT_R16G16B16A16_FLOAT));
+		}
+
+		// GEM-188: RequestCalibrationReload() (any thread) and TakeCalibrationReload() (render thread)
+		// must synchronize atomically so every single request is consumed by exactly one racing consumer
+		// (never 0, never 2 via a non-atomic read-then-write race).
+		TEST_METHOD(CalibrationReloadFlagIsAtomicAcrossThreadsAndConsumedExactlyOnce)
+		{
+			struct ConsumersJoinGuard
+			{
+				std::atomic<int>& epoch;
+				std::vector<std::thread>& threads;
+				ConsumersJoinGuard(std::atomic<int>& epochIn, std::vector<std::thread>& threadsIn)
+					: epoch(epochIn), threads(threadsIn)
+				{
+				}
+				ConsumersJoinGuard(const ConsumersJoinGuard&) = delete;
+				ConsumersJoinGuard& operator=(const ConsumersJoinGuard&) = delete;
+				~ConsumersJoinGuard()
+				{
+					epoch.store(-1, std::memory_order_release);
+					for (std::thread& t : threads)
+					{
+						if (t.joinable())
+							t.join();
+					}
+				}
+			};
+
+			ReloadPolicy policy;
+			constexpr int kNegativeControlRounds = 64;
+			constexpr int kStressRounds = 10000;
+
+			std::atomic<int> roundEpoch{ 0 };
+			std::atomic<int> roundDone{ 0 };
+			std::atomic<int> consumersReady{ 0 };
+			std::atomic<int> consumerResult0{ 0 };
+			std::atomic<int> consumerResult1{ 0 };
+			std::atomic<bool> consumerThrew{ false };
+
+			std::vector<std::thread> consumers;
+			consumers.reserve(2);
+			ConsumersJoinGuard joinGuard(roundEpoch, consumers);
+
+			for (int idx = 0; idx < 2; ++idx)
+			{
+				consumers.emplace_back([&, idx]()
+				{
+					std::atomic<int>* const resultSlot = (idx == 0) ? &consumerResult0 : &consumerResult1;
+					try
+					{
+						int lastRound = 0;
+						consumersReady.fetch_add(1, std::memory_order_acq_rel);
+						for (;;)
+						{
+							int r = roundEpoch.load(std::memory_order_acquire);
+							int spins = 0;
+							while (r == lastRound)
+							{
+								if (++spins >= 1024)
+								{
+									std::this_thread::yield();
+									spins = 0;
+								}
+								r = roundEpoch.load(std::memory_order_acquire);
+							}
+							if (r < 0)
+								break;
+							lastRound = r;
+							const bool taken = policy.TakeCalibrationReload();
+							resultSlot->store(taken ? 1 : 0, std::memory_order_release);
+							roundDone.fetch_add(1, std::memory_order_acq_rel);
+						}
+					}
+					catch (...)
+					{
+						consumerThrew.store(true, std::memory_order_release);
+						roundDone.fetch_add(1, std::memory_order_acq_rel);
+					}
+				});
+			}
+
+			while (consumersReady.load(std::memory_order_acquire) < 2)
+				std::this_thread::yield();
+
+			int currentEpoch = 0;
+			auto runRound = [&](bool requestReload) -> int
+			{
+				roundDone.store(0, std::memory_order_relaxed);
+				consumerResult0.store(0, std::memory_order_relaxed);
+				consumerResult1.store(0, std::memory_order_relaxed);
+				if (requestReload)
+					policy.RequestCalibrationReload();
+				++currentEpoch;
+				roundEpoch.store(currentEpoch, std::memory_order_release);
+				int spins = 0;
+				while (roundDone.load(std::memory_order_acquire) < 2)
+				{
+					if (++spins >= 1024)
+					{
+						std::this_thread::yield();
+						spins = 0;
+					}
+				}
+				return consumerResult0.load(std::memory_order_acquire) +
+					consumerResult1.load(std::memory_order_acquire);
+			};
+
+			// Negative control: with no RequestCalibrationReload() call, both racing consumers must return false.
+			int negativeControlTrueCount = 0;
+			for (int i = 0; i < kNegativeControlRounds; ++i)
+				negativeControlTrueCount += runRound(false);
+			Assert::AreEqual(0, negativeControlTrueCount,
+				L"negative control: without RequestCalibrationReload(), both racing consumers must return false");
+
+			// Synchronized 10,000-round stress: producer calls RequestCalibrationReload() once per round and
+			// two consumer threads race on TakeCalibrationReload() -> strictly 1 consumer must return true.
+			int zeroTakenRounds = 0;
+			int doubleTakenRounds = 0;
+			int exactOnceRounds = 0;
+			for (int i = 0; i < kStressRounds; ++i)
+			{
+				const int taken = runRound(true);
+				if (taken == 0)
+					++zeroTakenRounds;
+				else if (taken == 1)
+					++exactOnceRounds;
+				else
+					++doubleTakenRounds;
+			}
+
+			// Trailing negative control: after the final round is consumed, no stale reload flag remains.
+			Assert::AreEqual(0, runRound(false),
+				L"no stale reload flag may remain after synchronized consumption");
+
+			roundEpoch.store(-1, std::memory_order_release);
+			for (std::thread& t : consumers)
+			{
+				if (t.joinable())
+					t.join();
+			}
+
+			Assert::IsFalse(consumerThrew.load(std::memory_order_acquire),
+				L"consumer threads must not throw during concurrent TakeCalibrationReload() stress");
+			Assert::AreEqual(0, zeroTakenRounds,
+				L"every RequestCalibrationReload() round must be observed by a consumer (never 0)");
+			Assert::AreEqual(0, doubleTakenRounds,
+				L"each RequestCalibrationReload() round must be consumed by at most one consumer (never 2)");
+			Assert::AreEqual(kStressRounds, exactOnceRounds,
+				L"all 10,000 rounds must be consumed by exactly 1 of the 2 racing consumers");
 		}
 	};
 }
