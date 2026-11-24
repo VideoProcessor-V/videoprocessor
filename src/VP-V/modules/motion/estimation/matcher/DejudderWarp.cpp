@@ -321,40 +321,43 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		// search's (test: SetSerialSearchForTest). Every barrier is at the top
 		// level and reached by all threads (D3D11's HLSL compiler, X3663).
 		const char* const SEARCH_PARALLEL_HEADER = R"GLSL(
-shared float l1_sads_z[169];
-shared float l1_sads_c[169];
-shared float l1_sads_g[169];
 // The 1/8 level's bilinear samples of `to` around each start (2026-10-15):
 // every candidate's sample positions lie on the half-texel lattice
 // o1 + start + 0.5 m, m in [-8, 10]^2, so each block samples them once
 // (19 x 19 per start) instead of 16 per candidate. The positions are
 // multiples of 0.5 (exact in float) and the same texture() calls, so every
 // SAD is the same sum of the same values in the same order.
+// 4 * 361 = 1444 floats; also reused after L1 for parallel half-pel |diff|
+// (8 candidates * 144 pixels = 1152 <= 1444 floats).
 shared float l1_tab[4 * 361];
+// Cached source patches: 3x3 at 1/32 (L2), 4x4 at 1/8 (L1), 12x12 at 1/2.
+shared float l2_from[9];
+shared float l1_from[16];
+shared float from_win[144];
+// Cached target window: 18x18 = 324 floats, covering:
+// - L2 target window (2*coarse_range + 3)^2 when <= 18 (coarse_range <= 7, up to 4K+);
+// - Half-res 7x7 start window (12 + 7 - 1 = 18 -> 18x18) and 5x5 zero window (16x16 <= 18x18).
+shared float to_win[324];
 
-float sad_l1_tab(int k, ivec2 o1, int dx, int dy)
+float sad_l1_tab(int k, int dx, int dy)
 {
     float s = 0.0;
     for (int y = -1; y < 3; y++)
-        for (int x = -1; x < 3; x++) {
-            ivec2 p = o1 + ivec2(x, y);
-            s += abs(l1from(p) - l1_tab[k * 361 + (2 * y + dy + 8) * 19 + 2 * x + dx + 8]);
-        }
+        for (int x = -1; x < 3; x++)
+            s += abs(l1_from[(y + 1) * 4 + x + 1] - l1_tab[k * 361 + (2 * y + dy + 8) * 19 + 2 * x + dx + 8]);
     return s;
 }
-shared float from_win[144];
+
 // The start each candidate belongs to (1..5, 0 = the zero vector, ZGROUP =
 // the +-2 around zero) and the starts' centres: a candidate inside an earlier
 // start's window repeats an earlier one (owner 2026-10-13, shaky camera).
 #ifdef GLOBAL_TWO
 // M2: a sixth start, D1's second candidate.
+#define L1_NSTARTS 4
 #define ZGROUP 7
-#define NHALF 321
-shared float l1_sads_g2[169];
-shared vec2 s_v1g2;
 #else
+#define L1_NSTARTS 3
 #define ZGROUP 6
-#define NHALF 272
 #endif
 shared ivec2 s_centres[ZGROUP];
 
@@ -380,10 +383,6 @@ void half_cand(int i, out ivec2 v, out int start)
 
 shared float sub_sads[9];
 shared ivec2 s_v2;
-shared vec2 s_v1z;
-shared vec2 s_v1c;
-shared vec2 s_v1g;
-shared int s_half_count;
 shared ivec2 s_best;
 
 void sync_group()
@@ -393,34 +392,34 @@ void sync_group()
 }
 
 // Picks without one thread scanning every SAD: each thread keeps the best of
-// its own candidates, 16 threads reduce 16 of those each, thread 0 the last
-// 16. The serial pick (strictly smaller, in order, from a given first
-// candidate) is the minimum SAD with ties to the first candidate, then to the
-// lowest index; rank -1 marks the first candidate. That order is total, so
-// the result is exactly the serial pick in any reduction order.
+// its own candidates, 16 threads reduce SEARCH_NT/16 of those each in place
+// into their disjoint slice starts, and thread 0 reduces the last 16. The
+// serial pick (strictly smaller, in order, from a given first candidate) is
+// the minimum SAD with ties to the first candidate, then to the lowest index;
+// rank -1 marks the first candidate. That order is total, so the result is
+// exactly the serial pick in any reduction order.
 #define PK_EMPTY 0x7fffffff
-shared float pk_s[SEARCH_NT];
-shared int pk_r[SEARCH_NT];
-shared float pk2_s[16];
-shared int pk2_r[16];
+shared float pk_s[L1_NSTARTS * SEARCH_NT];
+shared int pk_r[L1_NSTARTS * SEARCH_NT];
 
 bool pk_better(float s, int r, float bs, int br)
 {
     return r != PK_EMPTY && (br == PK_EMPTY || s < bs || (s == bs && r < br));
 }
 
-// After pk_s/pk_r are written and the group synced: 16 partial picks.
+// After pk_s/pk_r [0..SEARCH_NT-1] are written and the group synced: 16 partial picks in place.
 void pk_reduce16(int li)
 {
     if (li < 16) {
+        int base = li * (SEARCH_NT / 16);
         float bs = 0.0;
         int br = PK_EMPTY;
         for (int k = 0; k < SEARCH_NT / 16; k++) {
-            int j = li * (SEARCH_NT / 16) + k;
+            int j = base + k;
             if (pk_better(pk_s[j], pk_r[j], bs, br)) { bs = pk_s[j]; br = pk_r[j]; }
         }
-        pk2_s[li] = bs;
-        pk2_r[li] = br;
+        pk_s[base] = bs;
+        pk_r[base] = br;
     }
 }
 
@@ -429,33 +428,25 @@ int pk_final(out float best)
 {
     float bs = 0.0;
     int br = PK_EMPTY;
-    for (int k = 0; k < 16; k++)
-        if (pk_better(pk2_s[k], pk2_r[k], bs, br)) { bs = pk2_s[k]; br = pk2_r[k]; }
+    for (int k = 0; k < 16; k++) {
+        int j = k * (SEARCH_NT / 16);
+        if (pk_better(pk_s[j], pk_r[j], bs, br)) { bs = pk_s[j]; br = pk_r[j]; }
+    }
     best = bs;
     return br;
 }
 
-// The block's 12x12 window of `from`, from shared memory (the same values
-// as from_at()).
-float sad_win(ivec2 o, ivec2 v)
+// 12x12 SAD from shared from_win[144] and shared to_win[324] (18x18 covering
+// o + centre + [-5..12]^2), for integer offset (dx, dy) in [-3, 3]^2.
+// Loop order (y = 0..11 outer, x = 0..11 inner) matches sad() bit-for-bit.
+float sad_win_cached(int dx, int dy)
 {
     float s = 0.0;
-    for (int y = -2; y < 10; y++)
-        for (int x = -2; x < 10; x++) {
-            ivec2 p = o + ivec2(x, y);
-            s += abs(from_win[(y + 2) * 12 + x + 2] - to_at(p + v));
-        }
-    return s;
-}
-
-float sad_sub_win(ivec2 o, vec2 v)
-{
-    float s = 0.0;
-    for (int y = -2; y < 10; y++)
-        for (int x = -2; x < 10; x++) {
-            ivec2 p = o + ivec2(x, y);
-            s += abs(from_win[(y + 2) * 12 + x + 2] - to_lin(vec2(p) + v));
-        }
+    int ox = dx + 3;
+    int oy = dy + 3;
+    for (int y = 0; y < 12; y++)
+        for (int x = 0; x < 12; x++)
+            s += abs(from_win[y * 12 + x] - to_win[(y + oy) * 18 + x + ox]);
     return s;
 }
 )GLSL";
@@ -489,8 +480,22 @@ l2_size_ = textureSize(from_l2, 0);
 ivec2 o = b * 8;
 
 // Level 2 (1/32 source): every vector within +-range texels.
+// Cache the 3x3 from_l2 patch and (2*range+3)^2 to_l2 window in shared memory
+// whenever the window fits inside to_win[324] (l2w <= 18, i.e. coarse_range <= 7).
 int side = 2 * coarse_range + 1;
 int n2 = side * side;
+int l2r = coarse_range + 1;
+int l2w = side + 2;
+bool l2_cached = coarse_range >= 0 && l2w <= 18;
+if (run && l2_cached) {
+    ivec2 c2 = b / 2;
+    if (li < 9)
+        l2_from[li] = l2from(c2 + ivec2(li % 3 - 1, li / 3 - 1));
+    int l2n = l2w * l2w;
+    for (int t = li; t < l2n; t += NT)
+        to_win[t] = l2to(c2 + ivec2(t % l2w - l2r, t / l2w - l2r));
+}
+sync_group();
 {
     // The serial pick starts from the zero vector (rank -1).
     int centre = coarse_range * side + coarse_range;
@@ -498,7 +503,17 @@ int n2 = side * side;
     int br = PK_EMPTY;
     if (run)
         for (int i = li; i < n2; i += NT) {
-            float s = sad_l2(b / 2, ivec2(i % side - coarse_range, i / side - coarse_range));
+            int dx = i % side - coarse_range;
+            int dy = i / side - coarse_range;
+            float s;
+            if (l2_cached) {
+                s = 0.0;
+                for (int y = -1; y <= 1; y++)
+                    for (int x = -1; x <= 1; x++)
+                        s += abs(l2_from[(y + 1) * 3 + x + 1] - to_win[(y + dy + l2r) * l2w + x + dx + l2r]);
+            } else {
+                s = sad_l2(b / 2, ivec2(dx, dy));
+            }
             int r = i == centre ? -1 : i;
             if (pk_better(s, r, bs, br)) { bs = s; br = r; }
         }
@@ -517,8 +532,8 @@ sync_group();
 ivec2 v2 = s_v2;
 
 // Level 1 (1/8 source), half-texel steps, +-3 around zero, around the level-2
-// result and (D1) around a confident global vector; one thread per candidate
-// of each search.
+// result and (D1) around a confident global vector; thread-local reduction
+// across each start's 169 candidates (zero per-candidate SAD arrays).
 bool have_g = false;
 vec2 vgf = vec2(0.0);
 if (use_global != 0) {
@@ -543,10 +558,12 @@ vec2 vg2 = vec2(0.0);
     }
 }
 #endif
-// The starts' sample tables (0 zero, 1 the 1/32 result, 2 the global
-// vector, 3 M2's second), then each candidate's SAD from them.
-if (run)
-    for (int e = li; e < 4 * 361; e += NT) {
+// The 4x4 from_l1 patch and each start's 19x19 to_l1 half-texel table
+// (0 zero, 1 the 1/32 result, 2 the global vector, 3 M2's second).
+if (run) {
+    if (li < 16)
+        l1_from[li] = l1from(b * 2 + ivec2(li % 4 - 1, li / 4 - 1));
+    for (int e = li; e < L1_NSTARTS * 361; e += NT) {
         int k = e / 361;
         bool wanted = k < 2 || (k == 2 && have_g);
 #ifdef GLOBAL_TWO
@@ -563,52 +580,65 @@ if (run)
 #endif
         l1_tab[e] = l1to(vec2(b * 2) + start + 0.5 * vec2(m % 19 - 8, m / 19 - 8));
     }
+}
 sync_group();
-if (run)
-    for (int i = li; i < 169; i += NT) {
-        int dx = i % 13 - 6, dy = i / 13 - 6;
-        l1_sads_z[i] = sad_l1_tab(0, b * 2, dx, dy);
-        l1_sads_c[i] = sad_l1_tab(1, b * 2, dx, dy);
-        if (have_g)
-            l1_sads_g[i] = sad_l1_tab(2, b * 2, dx, dy);
-#ifdef GLOBAL_TWO
-        if (have_g2)
-            l1_sads_g2[i] = sad_l1_tab(3, b * 2, dx, dy);
-#endif
-    }
-sync_group();
-if (run && li < 13) {
+{
     float bz = 0.0, bc = 0.0, bg = 0.0;
     int rz = PK_EMPTY, rc = PK_EMPTY, rg = PK_EMPTY;
 #ifdef GLOBAL_TWO
     float bg2 = 0.0;
     int rg2 = PK_EMPTY;
 #endif
-    for (int k = 0; k < 13; k++) {
-        int i = li * 13 + k;
-        int r = i == 84 ? -1 : i;
-        if (pk_better(l1_sads_z[i], r, bz, rz)) { bz = l1_sads_z[i]; rz = r; }
-        if (pk_better(l1_sads_c[i], r, bc, rc)) { bc = l1_sads_c[i]; rc = r; }
-        if (have_g && pk_better(l1_sads_g[i], r, bg, rg)) { bg = l1_sads_g[i]; rg = r; }
+    if (run)
+        for (int i = li; i < 169; i += NT) {
+            int dx = i % 13 - 6, dy = i / 13 - 6;
+            int r = i == 84 ? -1 : i;
+            float sz = sad_l1_tab(0, dx, dy);
+            if (pk_better(sz, r, bz, rz)) { bz = sz; rz = r; }
+            float sc = sad_l1_tab(1, dx, dy);
+            if (pk_better(sc, r, bc, rc)) { bc = sc; rc = r; }
+            if (have_g) {
+                float sg = sad_l1_tab(2, dx, dy);
+                if (pk_better(sg, r, bg, rg)) { bg = sg; rg = r; }
+            }
 #ifdef GLOBAL_TWO
-        if (have_g2 && pk_better(l1_sads_g2[i], r, bg2, rg2)) { bg2 = l1_sads_g2[i]; rg2 = r; }
+            if (have_g2) {
+                float sg2 = sad_l1_tab(3, dx, dy);
+                if (pk_better(sg2, r, bg2, rg2)) { bg2 = sg2; rg2 = r; }
+            }
 #endif
-    }
+        }
     pk_s[li] = bz; pk_r[li] = rz;
-    pk_s[13 + li] = bc; pk_r[13 + li] = rc;
-    pk_s[26 + li] = bg; pk_r[26 + li] = rg;
+    pk_s[NT + li] = bc; pk_r[NT + li] = rc;
+    pk_s[2 * NT + li] = bg; pk_r[2 * NT + li] = rg;
 #ifdef GLOBAL_TWO
-    pk_s[39 + li] = bg2; pk_r[39 + li] = rg2;
+    pk_s[3 * NT + li] = bg2; pk_r[3 * NT + li] = rg2;
 #endif
 }
 sync_group();
+if (li < L1_NSTARTS * 16) {
+    int j = li / 16;
+    int p = li % 16;
+    int base = j * NT + p * (NT / 16);
+    float bs = 0.0;
+    int br = PK_EMPTY;
+    for (int k = 0; k < NT / 16; k++) {
+        int idx = base + k;
+        if (pk_better(pk_s[idx], pk_r[idx], bs, br)) { bs = pk_s[idx]; br = pk_r[idx]; }
+    }
+    pk_s[base] = bs;
+    pk_r[base] = br;
+}
+sync_group();
 if (run && lead) {
-    int rr[4];
-    for (int j = 0; j < 4; j++) {
+    int rr[L1_NSTARTS];
+    for (int j = 0; j < L1_NSTARTS; j++) {
         float bs = 0.0;
         int br = PK_EMPTY;
-        for (int k = 0; k < 13; k++)
-            if (pk_better(pk_s[j * 13 + k], pk_r[j * 13 + k], bs, br)) { bs = pk_s[j * 13 + k]; br = pk_r[j * 13 + k]; }
+        for (int k = 0; k < 16; k++) {
+            int idx = j * NT + k * (NT / 16);
+            if (pk_better(pk_s[idx], pk_r[idx], bs, br)) { bs = pk_s[idx]; br = pk_r[idx]; }
+        }
         rr[j] = br;
     }
     // Rank -1 (the centre) and an empty list (no global start) keep the
@@ -620,9 +650,6 @@ if (run && lead) {
 #ifdef GLOBAL_TWO
     vec2 v1g2 = vg2 + (have_g2 ? L1_STEP(rr[3]) : vec2(0.0));
 #endif
-    s_v1z = v1z;
-    s_v1c = v1c;
-    s_v1g = have_g ? v1g : vec2(0.0);
 
     // Half resolution, whole pixels: the candidate list in the serial
     // order - zero first, +-3 around each start (zero-level, level-2,
@@ -649,33 +676,63 @@ if (run && lead) {
     }
 #endif
     s_centres[0] = ivec2(nstarts, 0);   // the number of starts
-    s_half_count = 1 + 49 * nstarts + 25;
 }
-if (run)
+if (run) {
     for (int i = li; i < 144; i += NT)
         from_win[i] = from_at(o + ivec2(i % 12 - 2, i / 12 - 2));
+    // Preload zero-centred 18x18 target window alongside from_win (zero extra barrier).
+    for (int t = li; t < 324; t += NT)
+        to_win[t] = to_at(o + ivec2(t % 18 - 5, t / 18 - 5));
+}
 sync_group();
-int nh = s_half_count;
+int ns = run ? s_centres[0].x : 0;
 {
-float bs = 0.0;
-int br = PK_EMPTY;
-if (run)
-    for (int i = li; i < nh; i += NT) {
-        // A repeat of an earlier candidate scores the same and comes later,
-        // so with the strict comparison it never wins: not scored (each
-        // thread checks its own; exactly the serial result).
-        ivec2 v;
-        int start;
-        half_cand(i, v, start);
-        bool repeat = i > 0 && v == ivec2(0);
-        int earlier = start == ZGROUP ? s_centres[0].x : start - 1;
-        for (int k = 1; k <= earlier; k++)
-            repeat = repeat || (abs(v.x - s_centres[k].x) <= 3 && abs(v.y - s_centres[k].y) <= 3);
-        float s = repeat ? 3.0e38 : sad_win(o, v);
-        if (pk_better(s, i, bs, br)) { bs = s; br = i; }
+    float bs = 0.0;
+    int br = PK_EMPTY;
+    // Candidate 0 (zero vector, rank 0) and the 5x5 around zero (ranks 1 + 49*ns + li, li != 12),
+    // scored from the zero-centred to_win[324] already loaded above.
+    if (run && li < 25) {
+        int dx = li % 5 - 2;
+        int dy = li / 5 - 2;
+        ivec2 v = ivec2(dx, dy);
+        int rank = li == 12 ? 0 : 1 + 49 * ns + li;
+        bool repeat = false;
+        if (li != 12) {
+            for (int k = 1; k <= ns; k++)
+                repeat = repeat || (abs(v.x - s_centres[k].x) <= 3 && abs(v.y - s_centres[k].y) <= 3);
+        }
+        if (!repeat) {
+            float s = sad_win_cached(dx, dy);
+            if (pk_better(s, rank, bs, br)) { bs = s; br = rank; }
+        }
     }
-pk_s[li] = bs;
-pk_r[li] = br;
+    // Each start k = 1..ns: load its 18x18 to_win[324] cooperatively across all NT threads,
+    // then score its 7x7 = 49 candidates from shared memory. Constant loop bound ZGROUP keeps
+    // both sync_group() calls in statically uniform control flow (D3D11 X3663 / SPIR-V).
+    for (int k = 1; k < ZGROUP; k++) {
+        sync_group();
+        if (run && k <= ns) {
+            ivec2 c = s_centres[k];
+            for (int t = li; t < 324; t += NT)
+                to_win[t] = to_at(o + c + ivec2(t % 18 - 5, t / 18 - 5));
+        }
+        sync_group();
+        if (run && k <= ns && li < 49) {
+            int dx = li % 7 - 3;
+            int dy = li / 7 - 3;
+            ivec2 v = s_centres[k] + ivec2(dx, dy);
+            bool repeat = v == ivec2(0);
+            for (int j = 1; j < k; j++)
+                repeat = repeat || (abs(v.x - s_centres[j].x) <= 3 && abs(v.y - s_centres[j].y) <= 3);
+            if (!repeat) {
+                int rank = 1 + (k - 1) * 49 + li;
+                float s = sad_win_cached(dx, dy);
+                if (pk_better(s, rank, bs, br)) { bs = s; br = rank; }
+            }
+        }
+    }
+    pk_s[li] = bs;
+    pk_r[li] = br;
 }
 sync_group();
 pk_reduce16(li);
@@ -689,9 +746,29 @@ if (run && lead) {
     s_best = best;
 }
 sync_group();
-// Half-pixel refinement (bilinear samples of `to`).
-if (run && li < 9 && li != 4)
-    sub_sads[li] = sad_sub_win(o, vec2(s_best) + 0.5 * vec2(li % 3 - 1, li / 3 - 1));
+// Half-pixel refinement (bilinear samples of `to`): all NT threads compute the
+// 8 * 144 = 1152 pixel |diff| values in parallel into l1_tab (dead after L1,
+// 1444 >= 1152 floats), then 8 threads sum each candidate serially in the exact
+// (y, x) order of SEARCH_BODY_SERIAL (100% bit-identical float summation order).
+if (run) {
+    vec2 fbase = vec2(s_best);
+    for (int e = li; e < 8 * 144; e += NT) {
+        int c = e / 144;
+        int p = e % 144;
+        int idx = c < 4 ? c : c + 1;
+        vec2 v = fbase + 0.5 * vec2(idx % 3 - 1, idx / 3 - 1);
+        ivec2 xy = o + ivec2(p % 12 - 2, p / 12 - 2);
+        l1_tab[e] = abs(from_win[p] - to_lin(vec2(xy) + v));
+    }
+}
+sync_group();
+if (run && li < 8) {
+    float s = 0.0;
+    int base = li * 144;
+    for (int p = 0; p < 144; p++)
+        s += l1_tab[base + p];
+    sub_sads[li < 4 ? li : li + 1] = s;
+}
 sync_group();
 if (run && lead) {
     vec2 fbest = vec2(best);
@@ -888,6 +965,10 @@ shared float rf_from[288];
 shared float rf_sads[32];
 shared vec2 rf_best[2];
 shared float rf_best_sad[2];
+shared vec2 rf_cand[2][12];
+shared vec2 rf_med[2];
+shared int rf_nc[2];
+shared int rf_dup[2][16];
 
 float rf_sad_sub(int sub, ivec2 o, vec2 v)
 {
@@ -925,54 +1006,70 @@ if (inside && !keep) {
 bool run = inside && !keep;
 half_size_ = textureSize(from_half, 0);
 ivec2 o = b * 8;
-// The candidate list and the neighbours' median, as the serial sweep (every
-// thread of the block builds the same list).
-vec2 cand[12];
-float xs[9];
-float ys[9];
-int nc = 0, nn = 0;
-cand[nc++] = inside ? texelFetch(sweep, b, 0).xy : vec2(0.0);
-for (int dy = -1; dy <= 1; dy++)
-    for (int dx = -1; dx <= 1; dx++) {
-        if (dx == 0 && dy == 0) continue;
-        ivec2 c = b + ivec2(dx, dy);
-        if (c.x < 0 || c.y < 0 || c.x >= blocks.x || c.y >= blocks.y) continue;
-        vec2 v = texelFetch(sweep, c, 0).xy;
-        cand[nc++] = v;
-        xs[nn] = v.x;
-        ys[nn] = v.y;
-        nn++;
+// Only lead (li == 0) per sub-block builds the candidate list, computes the
+// neighbours' median, and marks exact duplicates (first-occurrence index j < k,
+// else -1) so the other 15 threads skip duplicate fetches and duplicate 144-tap SADs.
+if (run && lead) {
+    float xs[9];
+    float ys[9];
+    int nc = 0, nn = 0;
+    rf_cand[sub][nc++] = texelFetch(sweep, b, 0).xy;
+    for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++) {
+            if (dx == 0 && dy == 0) continue;
+            ivec2 c = b + ivec2(dx, dy);
+            if (c.x < 0 || c.y < 0 || c.x >= blocks.x || c.y >= blocks.y) continue;
+            vec2 v = texelFetch(sweep, c, 0).xy;
+            rf_cand[sub][nc++] = v;
+            xs[nn] = v.x;
+            ys[nn] = v.y;
+            nn++;
+        }
+    if (use_temporal != 0)
+        rf_cand[sub][nc++] = texelFetch(previous, b, 0).xy;
+    vec4 gv = texelFetch(global_vec, ivec2(0), 0);
+    if (use_global != 0 && gv.w > 0.5 && gv.z < 0.9)
+        rf_cand[sub][nc++] = gv.xy * 4.0;
+    if (use_of != 0)
+        rf_cand[sub][nc++] = texelFetch(of_vec, b, 0).xy;
+    rf_med[sub] = nn > 0 ? vec2(vpu_median_upper(xs, nn), vpu_median_upper(ys, nn)) : rf_cand[sub][0];
+    rf_nc[sub] = nc;
+    for (int k = 0; k < nc; k++) {
+        int dup = -1;
+        for (int j = 0; j < k; j++) {
+            if (all(equal(rf_cand[sub][k], rf_cand[sub][j]))) {
+                dup = j;
+                break;
+            }
+        }
+        rf_dup[sub][k] = dup;
     }
-if (use_temporal != 0)
-    cand[nc++] = texelFetch(previous, b, 0).xy;
-vec4 gv = texelFetch(global_vec, ivec2(0), 0);
-if (use_global != 0 && gv.w > 0.5 && gv.z < 0.9)
-    cand[nc++] = gv.xy * 4.0;
-if (use_of != 0 && inside)
-    cand[nc++] = texelFetch(of_vec, b, 0).xy;
+}
 if (run)
     for (int i = li; i < 144; i += 16)
         rf_from[sub * 144 + i] = from_at(o + ivec2(i % 12 - 2, i / 12 - 2));
 pb_sync();
-if (run && li < nc)
-    rf_sads[sub * 16 + li] = rf_sad_sub(sub, o, cand[li]);
+if (run && li < rf_nc[sub] && rf_dup[sub][li] < 0)
+    rf_sads[sub * 16 + li] = rf_sad_sub(sub, o, rf_cand[sub][li]);
 pb_sync();
 if (run && lead) {
-    vec2 med = nn > 0 ? vec2(vpu_median_upper(xs, nn), vpu_median_upper(ys, nn)) : cand[0];
-    vec2 best = cand[0];
+    int nc = rf_nc[sub];
+    vec2 med = rf_med[sub];
+    vec2 best = rf_cand[sub][0];
     float best_sad = rf_sads[sub * 16];
     float best_score = best_sad / 144.0 + lambda * 2.0 * length(best - med);
     for (int k = 1; k < 12; k++) {
         if (k >= nc) break;
-        float s = rf_sads[sub * 16 + k];
-        float score = s / 144.0 + lambda * 2.0 * length(cand[k] - med);
-        if (score < best_score) { best_score = score; best_sad = s; best = cand[k]; }
+        int dup = rf_dup[sub][k];
+        float s = dup >= 0 ? rf_sads[sub * 16 + dup] : rf_sads[sub * 16 + k];
+        float score = s / 144.0 + lambda * 2.0 * length(rf_cand[sub][k] - med);
+        if (score < best_score) { best_score = score; best_sad = s; best = rf_cand[sub][k]; }
     }
     rf_best[sub] = best;
     rf_best_sad[sub] = best_sad;
 }
 pb_sync();
-vec2 best = rf_best[sub];
+vec2 best = run ? rf_best[sub] : vec2(0.0);
 if (run && li < 9 && li != 4)
     rf_sads[sub * 16 + li] = rf_sad_sub(sub, o, best + 0.5 * vec2(li % 3 - 1, li / 3 - 1));
 pb_sync();
@@ -987,7 +1084,7 @@ if (run && lead) {
         }
 #ifdef COST_W
     // The engine's trust weight stays with its own vector (within a half-size pixel).
-    float w_ = length(fbest - cand[0]) <= 1.0 ? texelFetch(sweep, b, 0).w : 1.0;
+    float w_ = length(fbest - rf_cand[sub][0]) <= 1.0 ? texelFetch(sweep, b, 0).w : 1.0;
 #else
     float w_ = 1.0;
 #endif
