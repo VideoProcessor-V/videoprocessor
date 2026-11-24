@@ -18,12 +18,17 @@
 #include <VP-V/modules/output/calibration_lut/calibration/TranscriptRecorder.h>
 #include <ConfigEditorCore.h>
 #include <ConfigFile.h>
+#include <IRenderer.h>
+#include <VP-V/abi/VpvInterfaces.h>
 #include <VP-V/modules/drive/led_compensation/LedDriveConfig.h>
+#include <VP-V/modules/drive/projector_control/LedDriveArbiter.h>
 #include <VP-V/modules/drive/projector_control/SerialPort.h>
 #include <VP-V/tests/support/HardwarePrerequisites.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <cstring>
 #include <fstream>
 #include <map>
 #include <memory>
@@ -508,6 +513,54 @@ namespace
 		}
 		return run.Status().step == wanted;
 	}
+
+	// Minimal in-process IVideoRenderer implementing vpv.calibration.v1 so
+	// CalibrationController's LED run reaches DriverProjectorControl::Open()
+	// without a GPU renderer.
+	class FakeCalibrationRenderer final : public IVideoRenderer, public Vpv::IVpvCalibration
+	{
+	public:
+		size_t GetConvertedQueueSize() override { return 0; }
+		bool OnVideoState(VideoStateComPtr&) override { return true; }
+		void OnVideoFrame(VideoFrame&) override {}
+		HRESULT OnWindowsEvent(LONG_PTR, LONG_PTR) override { return S_OK; }
+		void Build() override {}
+		void Start() override {}
+		void Stop() override {}
+		void Reset() override {}
+		void OnSize() override {}
+		void OnPaint() override {}
+		void SetFrameQueueMaxSize(size_t) override {}
+		void SetSceneAwareTimingCorrection(bool) override {}
+		size_t GetFrameQueueSize() override { return 0; }
+		double EntryLatencyMs() const override { return 0.0; }
+		double ExitLatencyMs() const override { return 0.0; }
+		uint64_t DroppedFrameCount() const override { return 0; }
+
+		void* QueryExtension(const char* iid) override
+		{
+			if (iid && std::strcmp(iid, Vpv::IVpvCalibration::Iid()) == 0)
+				return static_cast<Vpv::IVpvCalibration*>(this);
+			return nullptr;
+		}
+
+		bool GetOutput(Calibration::PatternOutputInfo& info) const override
+		{
+			info = Format(10, 8, true);
+			info.presentedGeneration = lastGeneration.load();
+			info.presentsOfGeneration = 2;
+			return true;
+		}
+
+		bool SetPattern(const Calibration::PatternRequest& request, Vpv::IVpvTextSink&) override
+		{
+			lastGeneration.store(request.generation);
+			return true;
+		}
+
+	private:
+		std::atomic<uint64_t> lastGeneration{ 0 };
+	};
 }
 
 namespace VideoProcessorTest
@@ -1523,6 +1576,80 @@ namespace VideoProcessorTest
 			Assert::IsTrue(ArgumentValue("kind: led\nlux: 12.5\n", "lux", v));
 			Assert::AreEqual(std::string("12.5"), v);
 			Assert::IsFalse(ArgumentValue("kind: led", "lux", v));
+		}
+
+		// GEM-194: CalibrationController's production LED run must wrap the
+		// projector port with LedDrive::ArbitratedSerialPortFactory() so it
+		// honors the Global\VideoProcessorLedDrive mutex rather than bypassing
+		// arbitration via raw CreateWin32SerialPort().
+		TEST_METHOD(CalibrationControllerUsesArbitratedSerialPortFactoryForLedRun)
+		{
+			const std::string folder = TempFolder("controller-arbiter");
+			const std::string path = folder + "\\VideoProcessor.cfg";
+			std::string cfg = kConfig;
+			const size_t portPos = cfg.find("port: COM7");
+			Assert::AreNotEqual(std::string::npos, portPos);
+			cfg.replace(portPos, 10, "port: COM250");
+			WriteFile(path, cfg);
+
+			auto fakeRenderer = std::make_shared<FakeCalibrationRenderer>();
+			auto runLedOnce = [&]() -> SessionStatus
+			{
+				ManualClock clock;
+				Calibration::CalibrationController::Hooks hooks;
+				hooks.configPath = [path]() { return path; };
+				hooks.renderer = [fakeRenderer]() -> std::shared_ptr<IVideoRenderer> { return fakeRenderer; };
+				hooks.clock = &clock;
+				// hooks.projectorFactory intentionally unset: exercises the real
+				// CalibrationController production serial port factory path.
+				Calibration::CalibrationController controller(hooks);
+				const std::string startReply = controller.Handle("start", "kind: led");
+				Assert::IsTrue(startReply.find("error:") != 0, W(startReply).c_str());
+				SessionStatus s;
+				for (int i = 0; i < 500; ++i)
+				{
+					Assert::IsTrue(ParseStatus(controller.Handle("status", ""), s));
+					if (IsFinal(s.step)) break;
+					Sleep(10);
+				}
+				controller.Shutdown();
+				return s;
+			};
+
+			// 1) With the machine-wide LED drive arbiter mutex held by another
+			// owner, the LED run must be refused by the arbiter BEFORE touching
+			// Win32 COM250. Pre-fix bypassed the arbiter and hit Win32 error 2.
+			std::string holdReason;
+			auto lease = LedDrive::DriveOwnership::TryAcquire(LedDrive::kLedDriveMutexName, holdReason);
+			Assert::IsTrue(lease != nullptr,
+				W("precondition: could not acquire LED drive mutex: " + holdReason).c_str());
+
+			const SessionStatus held = runLedOnce();
+			Assert::AreEqual(std::string("led"), held.kind);
+			Assert::IsTrue(held.step == SessionStep::Failed, W(held.message).c_str());
+			Assert::IsTrue(held.message.find("VideoProcessorLedDrive") != std::string::npos ||
+				held.message.find("another VideoProcessor") != std::string::npos,
+				W("LED run bypassed the LED drive arbiter mutex; message was: " + held.message).c_str());
+			Assert::IsTrue(held.message.find("Windows error") == std::string::npos,
+				W("Refused LED run must not attempt raw Win32 CreateFile on COM250; message was: " + held.message).c_str());
+
+			// 2) Negative control (same config & controller, lease released):
+			// without a contending owner the arbiter admits the open and the
+			// underlying Win32 port failure ("cannot open COM250") surfaces.
+			lease.reset();
+			const SessionStatus released = runLedOnce();
+			Assert::AreEqual(std::string("led"), released.kind);
+			Assert::IsTrue(released.step == SessionStep::Failed, W(released.message).c_str());
+			Assert::IsTrue(released.message.find("VideoProcessorLedDrive") == std::string::npos &&
+				released.message.find("another VideoProcessor") == std::string::npos,
+				W("With mutex released, arbiter must not refuse the LED run; message was: " + released.message).c_str());
+			Assert::IsTrue(released.message.find("cannot open COM250") != std::string::npos,
+				W("Expected underlying Win32 COM250 failure once arbiter admitted open; message was: " + released.message).c_str());
+
+			// Verify no mutex leak after failed open.
+			auto after = LedDrive::DriveOwnership::TryAcquire(LedDrive::kLedDriveMutexName, holdReason);
+			Assert::IsTrue(after != nullptr,
+				W("Arbiter mutex must be released after failed port open: " + holdReason).c_str());
 		}
 	};
 

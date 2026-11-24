@@ -7,6 +7,7 @@
 #include <VP-V/modules/drive/led_compensation/LedDriveConfig.h>
 #include <VP-V/modules/drive/projector_control/ProjectorDriver.h>
 #include <VP-V/modules/drive/projector_control/ConnectionTest.h>
+#include <VP-V/modules/output/calibration_lut/calibration/LedRun.h>
 
 #include <VP-V/tests/support/LedDriveTestSupport.h>
 
@@ -1233,6 +1234,186 @@ namespace VideoProcessorTest
 				L"the replaced LPW1 200 was not sent");
 			Assert::AreEqual(150, projector->light);
 			driver->Close();
+		}
+
+		// GEM-205: each BeginShutdown() must grant one forced Open attempt
+		// ahead of the reopen back-off (pre-fix left shutdownOpenTried true
+		// after the first shutdown so a second BeginShutdown() refused to try).
+		TEST_METHOD(TwoConsecutiveBeginShutdownsDuringBackoffEachForceReopen)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			TestClock clock;
+			auto driver = OpenDriver(projector, FastConfig(), clock);
+			auto opens = [&]
+			{
+				std::lock_guard<std::mutex> guard(projector->mutex);
+				return projector->opens;
+			};
+			Assert::AreEqual(1, opens());
+
+			// Drive the port closed after 5 failed writes -> 2 s reopen backoff.
+			FailScriptSendsUntilClosed(projector, *driver, 60);
+			Assert::AreEqual(1, opens());
+			// Move past the 200 ms failed-write gap while staying well inside the 2 s reopen backoff.
+			Assert::IsTrue(clock.Run(250, 10.0, 0));
+
+			// Negative control (no BeginShutdown): sends during backoff must NOT attempt Open.
+			Assert::IsFalse(driver->SetLightNow(255, 500));
+			Assert::AreEqual(1, opens(), L"Backoff must hold without BeginShutdown");
+			Assert::IsTrue(clock.Run(250, 10.0, 0));
+
+			// First BeginShutdown during backoff: forces one Open attempt even though Open fails
+			// (extending the backoff to 4 s).
+			{
+				std::lock_guard<std::mutex> guard(projector->mutex);
+				projector->openFails = true;
+			}
+			driver->BeginShutdown();
+			Assert::IsFalse(driver->SetLightNow(255, 500));
+			Assert::AreEqual(2, opens(), L"First BeginShutdown must force one Open attempt during backoff");
+
+			// A second send within the SAME shutdown must respect the new 4 s backoff (once per shutdown).
+			Assert::IsTrue(clock.Run(250, 10.0, 0));
+			Assert::IsFalse(driver->SetLightNow(255, 500));
+			Assert::AreEqual(2, opens(), L"Only one forced Open per BeginShutdown");
+
+			// Second BeginShutdown during the active 4 s backoff (outage ended):
+			// must grant a fresh forced Open attempt and restore full light.
+			Assert::IsTrue(clock.Run(250, 10.0, 0));
+			{
+				std::lock_guard<std::mutex> guard(projector->mutex);
+				projector->openFails = false;
+			}
+			driver->BeginShutdown();
+			Assert::IsTrue(driver->SetLightNow(255, 500),
+				L"Second BeginShutdown during backoff must force a second Open and restore light");
+			Assert::AreEqual(3, opens(), L"Second BeginShutdown must attempt Open a second time");
+			Assert::AreEqual(255, projector->light);
+			driver->Close();
+		}
+
+		// GEM-195: unbounded SendNow (timeoutMs == 0) must record sentLight /
+		// sentContrast in DriverStatus just like bounded SendNow (timeoutMs > 0).
+		TEST_METHOD(UnboundedSendNowRecordsSentLightAndContrastStatus)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			projector->minimum = 0;   // allow 42 inside device light range [0..255]
+			auto driver = OpenDriver(projector);
+
+			const auto initial = driver->Status();
+			Assert::AreEqual(0, initial.lightSends);
+			Assert::AreEqual(-1, initial.lastSentLight);
+			Assert::AreEqual(0, initial.contrastSends);
+			Assert::AreEqual(-1, initial.lastSentContrast);
+
+			// Unbounded SendNow (timeoutMs == 0): pre-fix omitted sentLight / sentContrast,
+			// leaving lastSentLight, lightSends, lastSentContrast, contrastSends unupdated.
+			Assert::IsTrue(driver->SendNow("LPW1", 42, 0), L"Unbounded SendNow LPW1 42 must succeed");
+			Assert::IsTrue(driver->SendNow("CNTR", 55, 0), L"Unbounded SendNow CNTR 55 must succeed");
+			const auto unbounded = driver->Status();
+			Assert::AreEqual(42, unbounded.lastSentLight, L"Unbounded SendNow must record lastSentLight");
+			Assert::IsTrue(unbounded.lightSends >= 1, L"Unbounded SendNow must increment lightSends");
+			Assert::IsTrue(unbounded.lastLightSentAt.time_since_epoch().count() != 0,
+				L"Unbounded SendNow must stamp lastLightSentAt");
+			Assert::AreEqual(55, unbounded.lastSentContrast, L"Unbounded SendNow must record lastSentContrast");
+			Assert::IsTrue(unbounded.contrastSends >= 1, L"Unbounded SendNow must increment contrastSends");
+			Assert::IsTrue(unbounded.lastContrastSentAt.time_since_epoch().count() != 0,
+				L"Unbounded SendNow must stamp lastContrastSentAt");
+			Assert::AreEqual(42, projector->light);
+			Assert::AreEqual(55, projector->contrast);
+
+			// Negative control / parity comparison: bounded SendNow (timeoutMs > 0) records
+			// sent values consistently, while a non-LPW1/CNTR command (LDMM) leaves them untouched.
+			Assert::IsTrue(driver->SendNow("LPW1", 77, 500), L"Bounded SendNow LPW1 77 must succeed");
+			Assert::IsTrue(driver->SendNow("CNTR", 60, 500), L"Bounded SendNow CNTR 60 must succeed");
+			const auto bounded = driver->Status();
+			Assert::AreEqual(77, bounded.lastSentLight);
+			Assert::AreEqual(unbounded.lightSends + 1, bounded.lightSends);
+			Assert::AreEqual(60, bounded.lastSentContrast);
+			Assert::AreEqual(unbounded.contrastSends + 1, bounded.contrastSends);
+			Assert::AreEqual(77, projector->light);
+			Assert::AreEqual(60, projector->contrast);
+
+			Assert::IsTrue(driver->SendNow("LDMM", 0, 0), L"Unbounded SendNow LDMM 0 must succeed");
+			const auto afterLdmm = driver->Status();
+			Assert::AreEqual(bounded.lightSends, afterLdmm.lightSends);
+			Assert::AreEqual(bounded.lastSentLight, afterLdmm.lastSentLight);
+			Assert::AreEqual(bounded.contrastSends, afterLdmm.contrastSends);
+			Assert::AreEqual(bounded.lastSentContrast, afterLdmm.lastSentContrast);
+
+			driver->Close();
+		}
+
+		// GEM-189: start-of-run restore (beginShutdown = false / DriverProjectorControl::RestoreForRun)
+		// restores ceiling light, neutral contrast (50), and standard dim mode (LDMM 0) while leaving
+		// the driver worker active for subsequent async SetLight / SendScript commands, contrasted
+		// against shutdown restore (beginShutdown = true) which stops async sending.
+		TEST_METHOD(RestoreForRunDoesNotEnterShutdownState)
+		{
+			auto projector = std::make_shared<FakeProjector>();
+			projector->light = 120;
+			projector->contrast = 74;
+			auto driver = OpenDriver(projector);
+
+			// 1) Non-shutdown restore (beginShutdown = false): restores ceiling, CNTR 50, LDMM 0.
+			RestoreOutcome runOutcome;
+			Assert::IsTrue(RestoreFullLight(*driver, 255, true, true, &runOutcome, false),
+				L"Non-shutdown RestoreFullLight must succeed");
+			Assert::IsTrue(runOutcome.Confirmed(), L"LDMM 0, CNTR 50, and LPW1 255 must all be confirmed");
+			Assert::AreEqual(255, projector->light);
+			Assert::AreEqual(50, projector->contrast);
+
+			// Driver worker must remain active (not in shuttingDown state): async SetLight and
+			// SendScript must continue working after the start-of-run restore.
+			driver->SetLight(180);
+			Assert::IsTrue(WaitFor([&]
+				{
+					const auto status = driver->Status();
+					return projector->light == 180 && status.lastSentLight == 180 && !status.busy;
+				}),
+				L"Async SetLight must still be processed after non-shutdown restore");
+			Assert::IsTrue(driver->SendScript("CNTR", 52),
+				L"SendScript must remain accepted after non-shutdown restore");
+			Assert::AreEqual(52, projector->contrast);
+
+			// 2) Negative control (same driver & projector): shutdown restore (beginShutdown = true)
+			// restores ceiling/neutral contrast AND enters shutdown state, stopping async sending.
+			RestoreOutcome exitOutcome;
+			Assert::IsTrue(RestoreFullLight(*driver, 255, true, true, &exitOutcome, true),
+				L"Shutdown RestoreFullLight must succeed");
+			Assert::IsTrue(exitOutcome.Confirmed());
+			Assert::AreEqual(255, projector->light);
+			Assert::AreEqual(50, projector->contrast);
+
+			driver->SetLight(140);
+			Assert::IsFalse(driver->Status().busy, L"Shutdown restore must refuse queued async SetLight");
+			Assert::IsFalse(driver->SendScript("CNTR", 54), L"Shutdown restore must refuse SendScript");
+			std::this_thread::sleep_for(std::chrono::milliseconds(100));
+			Assert::AreEqual(255, projector->light, L"Async SetLight must not execute after shutdown restore");
+			Assert::AreEqual(50, projector->contrast);
+			driver->Close();
+
+			// 3) DriverProjectorControl::RestoreForRun end-to-end check: restores ceiling/neutral
+			// contrast at start-of-run and allows subsequent SetLight/SetContrast and final Restore.
+			auto runProjector = std::make_shared<FakeProjector>();
+			runProjector->light = 120;
+			runProjector->contrast = 74;
+			Calibration::DriverProjectorControl control(FastConfig(),
+				[runProjector] { return std::make_unique<FakePort>(runProjector); });
+			std::string error, report;
+			Assert::IsTrue(control.Open(error), std::wstring(error.begin(), error.end()).c_str());
+			Assert::IsTrue(control.RestoreForRun(255, report), std::wstring(report.begin(), report.end()).c_str());
+			Assert::AreEqual(255, runProjector->light);
+			Assert::AreEqual(50, runProjector->contrast);
+			double sentAt = 0.0;
+			Assert::IsTrue(control.SetLight(180, sentAt));
+			Assert::IsTrue(control.SetContrast(55, sentAt));
+			Assert::AreEqual(180, runProjector->light);
+			Assert::AreEqual(55, runProjector->contrast);
+			Assert::IsTrue(control.Restore(255, report), std::wstring(report.begin(), report.end()).c_str());
+			Assert::AreEqual(255, runProjector->light);
+			Assert::AreEqual(50, runProjector->contrast);
+			control.Close();
 		}
 	};
 }
