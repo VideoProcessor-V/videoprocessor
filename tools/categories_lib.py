@@ -205,12 +205,21 @@ def scan_text(text, path='<text>'):
                 events.append((m.start(), 'method', args[spec[0]], spec))
     events.sort(key=lambda e: e[0])
     cls = None
+    cls_gpu = False
     attrs = {}
     out = []
     for i, (pos, kind, name, spec) in enumerate(events):
         end = events[i + 1][0] if i + 1 < len(events) else len(text)
         if kind == 'class':
             cls = name
+            # Class name or class preamble before the first TEST_METHOD / attribute block / next TEST_CLASS (CT-H1:
+            # catches class-level GPU helper structs/members such as TargetLutGpuFixture before the first TEST_METHOD).
+            pre_end = len(text)
+            for j in range(i + 1, len(events)):
+                if events[j][1] in ('begin', 'method', 'class'):
+                    pre_end = events[j][0]
+                    break
+            cls_gpu = name_says_gpu(cls) or bool(GPU_PATTERNS.search(text[pos:pre_end]))
         elif kind == 'begin':
             cat = CAT_RE.search(text, pos, end)
             if cat:
@@ -221,7 +230,7 @@ def scan_text(text, path='<text>'):
                                 'a Name~ clause on it would match every test whose name contains it, in any case')
             body = text[pos:end]
             category = spec[1] if spec is not None and spec[1] else attrs.get(name)
-            gpu = bool(GPU_PATTERNS.search(body)) or name_says_gpu(name) or bool(spec is not None and spec[2])
+            gpu = cls_gpu or bool(GPU_PATTERNS.search(body)) or name_says_gpu(name) or bool(spec is not None and spec[2])
             out.append({'cls': cls, 'method': name, 'category': category, 'gpu': gpu, 'pos': pos})
     return out
 
@@ -280,13 +289,16 @@ def best_entry(entries, cls, method):
 TEST_CLASS_TEXT = re.compile(r'\bTEST_CLASS\s*\(')
 
 
+TEST_EXTS = ('.cpp', '.inl', '.inc')
+
+
 def test_sources(root):
-    """Every .cpp under src that declares a TEST_CLASS: the *Tests.cpp files and the ones that do not follow the
-    name (LongPairBenchDump.cpp, GrainSplitV3CostBench.cpp, GrainLevelShiftBench.cpp, ProducerThroughputBench.cpp:
-    TQ-RG-C2 / MISS-1). A file whose only TEST_CLASS is in a comment is read and yields no test."""
+    """Every .cpp/.inl/.inc under src that declares a TEST_CLASS: the *Tests.cpp files and the ones that do not follow
+    the name (LongPairBenchDump.cpp, GrainSplitV3CostBench.cpp, GrainLevelShiftBench.cpp, ProducerThroughputBench.cpp,
+    X5AbCaptureTests.inl: TQ-RG-C2 / MISS-1 / CT-H1). A file whose only TEST_CLASS is in a comment is read and yields no test."""
     for base, _dirs, files in os.walk(os.path.join(root, 'src')):
         for name in sorted(files):
-            if not name.endswith('.cpp'):
+            if not name.endswith(TEST_EXTS):
                 continue
             path = os.path.join(base, name)
             if name.endswith('Tests.cpp'):

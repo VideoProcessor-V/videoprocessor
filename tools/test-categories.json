@@ -593,14 +593,14 @@
   },
   {
    "kind": "method",
-   "value": "GrainSplitV3GpuTests::V3GpuMatchesCpuReference",
-   "category": "GpuWarp",
+   "value": "GrainSplitV3GpuTests::V3P11RegionFlagsAgree",
+   "category": "Cpu",
    "file": "src/VP-V/modules/repair/grain_split/tests/GrainSplitV3GpuTests.cpp",
-   "note": "libplacebo test device from ExtendedRangeGpuProbe::TestDeviceParams: WARP unless VP_TEST_GPU=hardware; stays in the CPU run."
+   "note": "CPU-only comparison of GrainSplit::ComputeV2 and GrainSplit::Compute into the CPU region path (reviewed)."
   },
   {
-   "kind": "method",
-   "value": "GrainSplitV3GpuTests::V3GpuIsDeterministic",
+   "kind": "class",
+   "value": "GrainSplitV3GpuTests",
    "category": "GpuWarp",
    "file": "src/VP-V/modules/repair/grain_split/tests/GrainSplitV3GpuTests.cpp",
    "note": "libplacebo test device from ExtendedRangeGpuProbe::TestDeviceParams: WARP unless VP_TEST_GPU=hardware; stays in the CPU run."
@@ -804,9 +804,9 @@
   {
    "kind": "class",
    "value": "LongPairBenchDumpTests",
-   "category": "GpuHardware",
+   "category": "Bench",
    "file": "src/VP-V/modules/motion/estimation/tests/LongPairBenchDump.cpp",
-   "note": "TQ-RG-C2: the file does not end in Tests.cpp (the scan now reads every .cpp with a TEST_CLASS). Opt-in long-pair bench dump on the adapter; its attribute is GpuHardware. The Bench category and the SKIP-OPT-IN marker come with TQ-MC-S11 (CB)."
+   "note": "TQ-RG-C2 / CT-L1: opt-in long-pair bench dump on the adapter; carries Category=Bench and runs only in the dedicated Bench job."
   },
   {
    "kind": "class",
@@ -821,6 +821,195 @@
    "category": "Bench",
    "file": "src/VP-V/tests/beta_gpu/ProducerThroughputBench.cpp",
    "note": "TQ-RG-MISS-1: opt-in producer throughput bench in the Beta test host (VP_PT_BENCH=1 or VP_TEST_BENCH=1). Without the opt-in it logs SKIP-OPT-IN (not executed) and fails under VP_TEST_REQUIRE_BENCH=1 / VP_TEST_REQUIRE_ALL=1; runs only in the Bench job."
+  },
+  {
+   "kind": "class",
+   "value": "X5AbCaptureTests",
+   "category": "Bench",
+   "file": "src/VP-V/modules/scaling/output/tests/X5AbCaptureTests.inl",
+   "note": "CT-H1: opt-in X5 A/B capture bench included via .inl; carries Category=Bench and runs only in the dedicated Bench job."
+  },
+  {
+   "kind": "class",
+   "value": "ProducerPipelineIdentityGpuTests",
+   "category": "GpuHardware",
+   "file": "src/VP-V/tests/beta_gpu/ProducerPipelineIdentityGpuTests.cpp",
+   "note": "CT-H1: 600-frame NVOF serial-vs-pipelined GPU bit-identity test in Beta test host; requires real NVIDIA hardware."
+  },
+  {
+   "kind": "method",
+   "value": "SourceUnpackGpuTests::RefusalsNameTheirCauseAndKeepSourceBits",
+   "category": "Cpu",
+   "file": "src/VP-V/modules/input/capture/tests/SourceUnpackGpuTests.cpp",
+   "note": "CT-H1: CPU-only refusal/contract test inside SourceUnpackGpuTests (no GPU device created)."
+  },
+  {
+   "kind": "class",
+   "value": "SourceUnpackGpuTests",
+   "category": "GpuWarp",
+   "file": "src/VP-V/modules/input/capture/tests/SourceUnpackGpuTests.cpp",
+   "note": "CT-H1: TargetLutGpuFixture inside class Harness; WARP unless VP_TEST_GPU=hardware."
+  },
+  {
+   "kind": "method",
+   "value": "GrainUnitGpuTests::GrainUnitPinsTheFullShaderBodies",
+   "category": "Cpu",
+   "file": "src/VP-V/modules/repair/grain_split/tests/GrainUnitGpuTests.cpp",
+   "note": "CT-H1: CPU-only shader text pin test inside GrainUnitGpuTests (no GPU device created)."
+  },
+  {
+   "kind": "class",
+   "value": "GrainUnitGpuTests",
+   "category": "GpuWarp",
+   "file": "src/VP-V/modules/repair/grain_split/tests/GrainUnitGpuTests.cpp",
+   "note": "CT-H1: libplacebo test device from ExtendedRangeGpuProbe::TestDeviceParams; WARP unless VP_TEST_GPU=hardware."
+  },
+  {
+   "kind": "class",
+   "value": "GrainSplitCompactGpuTests",
+   "category": "GpuWarp",
+   "file": "src/VP-V/modules/repair/grain_split/tests/GrainSplitCompactGpuTests.cpp",
+   "note": "CT-H1: libplacebo test device from ExtendedRangeGpuProbe::TestDeviceParams; WARP unless VP_TEST_GPU=hardware."
+  },
+  {
+   "kind": "class",
+   "value": "TemporalCleanPacketGpuTests",
+   "category": "GpuWarp",
+   "file": "src/VideoProcessor-Test/MotionRendererTests.cpp",
+   "note": "CT-H1: Bill's file, left untouched; GpuFixture creates a libplacebo D3D11 device with allow_software=true."
+  },
+  {
+   "kind": "method",
+   "value": "RendererCaptureHarnessTests::DvSynthSettingsCheckFlagsDroppedSettings",
+   "category": "Cpu",
+   "file": "src/VP-V/tests/harness/RendererCaptureHarnessTests.cpp",
+   "note": "CT-H1: CPU-only settings check inside RendererCaptureHarnessTests (no GPU device created)."
+  },
+  {
+   "kind": "method",
+   "value": "RendererCaptureHarnessTests::OnScreenLiveExtrasAndEstimateAhead",
+   "category": "GpuOnScreen",
+   "file": "src/VP-V/tests/harness/RendererCaptureHarnessTests.cpp",
+   "note": "CT-L1: matches Category=GpuOnScreen attribute on this method inside GpuHardware class."
+  },
+  {
+   "kind": "method",
+   "value": "RendererCaptureHarnessTests::InterpolationOnScreenFillsTheRepeatRefreshes",
+   "category": "GpuOnScreen",
+   "file": "src/VP-V/tests/harness/RendererCaptureHarnessTests.cpp",
+   "note": "CT-L1: matches Category=GpuOnScreen attribute on this method inside GpuHardware class."
+  },
+  {
+   "kind": "method",
+   "value": "RendererCaptureHarnessTests::OnScreenRenderAheadExtras",
+   "category": "GpuOnScreen",
+   "file": "src/VP-V/tests/harness/RendererCaptureHarnessTests.cpp",
+   "note": "CT-L1: matches Category=GpuOnScreen attribute on this method inside GpuHardware class."
+  },
+  {
+   "kind": "method",
+   "value": "RendererCaptureHarnessTests::OnScreenHiccupRepairWithoutInterpolation",
+   "category": "GpuOnScreen",
+   "file": "src/VP-V/tests/harness/RendererCaptureHarnessTests.cpp",
+   "note": "CT-L1: matches Category=GpuOnScreen attribute on this method inside GpuHardware class."
+  },
+  {
+   "kind": "method",
+   "value": "SkeletonGpuDispatcherWarpTests::ProductCostAddsEveryPassOfAFrame",
+   "category": "Cpu",
+   "file": "src/VP-V/modules/control/skeleton/tests/SkeletonGpuDispatcherWarpTests.cpp",
+   "note": "Reviewed false positive of class-name GPU heuristic: pure CPU cost-record formatting test."
+  },
+  {
+   "kind": "class",
+   "value": "SkeletonGpuStatusTexts",
+   "category": "Cpu",
+   "file": "src/VP-V/modules/control/skeleton/tests/SkeletonModuleTests.cpp",
+   "note": "Reviewed false positive of class-name GPU heuristic: pure CPU FallbackCatalog text checks."
+  },
+  {
+   "kind": "class",
+   "value": "LaneGpuGrainPrivateBytesTests",
+   "category": "Cpu",
+   "file": "src/VP-V/modules/input/source_analysis/lane/tests/LaneGpuGrainKernelWarpTests.cpp",
+   "note": "Reviewed false positive of class-name GPU heuristic: pure CPU working-set byte arithmetic."
+  },
+  {
+   "kind": "method",
+   "value": "LaneGpuLightKernelWarpTests::BeginGateTruthTable",
+   "category": "Cpu",
+   "file": "src/VP-V/modules/input/source_analysis/lane/tests/LaneGpuLightKernelWarpTests.cpp",
+   "note": "Reviewed false positive of class-name GPU heuristic: pure CPU LightLevelBeginGate truth table."
+  },
+  {
+   "kind": "method",
+   "value": "LaneGpuLightKernelWarpTests::GateMappingReadsPendingAsNotMade",
+   "category": "Cpu",
+   "file": "src/VP-V/modules/input/source_analysis/lane/tests/LaneGpuLightKernelWarpTests.cpp",
+   "note": "Reviewed false positive of class-name GPU heuristic: pure CPU gate-mapping test."
+  },
+  {
+   "kind": "method",
+   "value": "LaneGpuLightKernelWarpTests::PendingReadAsNoneIsCountedAndShown",
+   "category": "Cpu",
+   "file": "src/VP-V/modules/input/source_analysis/lane/tests/LaneGpuLightKernelWarpTests.cpp",
+   "note": "Reviewed false positive of class-name GPU heuristic: pure CPU status/counter test."
+  },
+  {
+   "kind": "class",
+   "value": "P1GpuFillTests",
+   "category": "Cpu",
+   "file": "src/VP-V/modules/input/source_analysis/tests/P1GpuFillTests.cpp",
+   "note": "Reviewed false positive of class-name GPU heuristic: pure CPU float emulation of R16/Float32 kernel law."
+  },
+  {
+   "kind": "class",
+   "value": "P1GpuPyramidTextPinTests",
+   "category": "Cpu",
+   "file": "src/VP-V/modules/input/source_analysis/tests/P1GpuPyramidContractTests.cpp",
+   "note": "Reviewed false positive of class-name GPU heuristic: pure CPU shader text pin checks."
+  },
+  {
+   "kind": "class",
+   "value": "P1GpuPyramidVariantTests",
+   "category": "Cpu",
+   "file": "src/VP-V/modules/input/source_analysis/tests/P1GpuPyramidContractTests.cpp",
+   "note": "Reviewed false positive of class-name GPU heuristic: pure CPU variant key/contract checks."
+  },
+  {
+   "kind": "class",
+   "value": "CameraModelGpuMirrorTests",
+   "category": "Cpu",
+   "file": "src/VP-V/modules/motion/estimation/tests/CameraModelGpuMirrorTests.cpp",
+   "note": "Reviewed false positive of class-name GPU heuristic: pure CPU float mirror of GPU label pass."
+  },
+  {
+   "kind": "class",
+   "value": "AnalysisLaneGpuHookTests",
+   "category": "Cpu",
+   "file": "src/VP-V/tests/AnalysisLaneGpuHookTests.cpp",
+   "note": "Reviewed false positive of class-name GPU heuristic: runs against RecordingDispatcher fake, no GPU device."
+  },
+  {
+   "kind": "class",
+   "value": "GpuAllocatorTests",
+   "category": "Cpu",
+   "file": "src/VP-V/tests/GpuAllocatorTests.cpp",
+   "note": "Reviewed false positive of class-name GPU heuristic: uses FakeBackend integer handles, no GPU device."
+  },
+  {
+   "kind": "class",
+   "value": "MemoGpuGrantWithoutLaneTests",
+   "category": "Cpu",
+   "file": "src/VP-V/tests/SkeletonCoreContextTests.cpp",
+   "note": "Reviewed false positive of class-name GPU heuristic: pure CPU VRAM grant ledger logic."
+  },
+  {
+   "kind": "class",
+   "value": "DolbyVisionTunnelGpuUnpackReferenceTests",
+   "category": "Cpu",
+   "file": "src/VP-V/tests/suite/DolbyVisionTunnelFormatterVpvTests.cpp",
+   "note": "Reviewed false positive of class-name GPU heuristic: pure CPU reference emulation of shader unpack."
   }
  ]
 }

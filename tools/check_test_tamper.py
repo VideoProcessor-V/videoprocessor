@@ -67,7 +67,7 @@ def classify(path):
         return "checker"
     if any(fnmatch.fnmatch(path, g) for g in BASELINE_GLOBS):
         return "baseline"
-    if "/tests/" in path or path.endswith(("Tests.cpp", "Test.cpp")) or "/VideoProcessor-Test/" in path:
+    if "/tests/" in path or path.endswith(("Tests.cpp", "Test.cpp", "Tests.inl", "Test.inl", "Tests.inc", "Test.inc")) or "/VideoProcessor-Test/" in path:
         return "test"
     if PY_TEST_RX.match(path):
         return "test"

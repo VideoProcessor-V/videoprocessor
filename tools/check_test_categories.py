@@ -39,7 +39,7 @@ def main():
                 gpu += 1
                 if not t['category'] and not mapped:
                     problems.append(f'{rel}: {cls}::{method} uses the GPU and has no category (attribute or manifest entry)')
-            if t['category'] and mapped and (t['category'] in lib.EXCLUDED_FROM_CPU) != (mapped in lib.EXCLUDED_FROM_CPU):
+            if t['category'] and mapped and t['category'] != mapped:
                 problems.append(f'{rel}: {cls}::{method} attribute {t["category"]} disagrees with the manifest ({mapped})')
     for i, e in enumerate(manifest['entries']):
         if e['category'] not in lib.KNOWN_CATEGORIES:

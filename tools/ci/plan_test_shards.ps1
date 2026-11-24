@@ -58,20 +58,23 @@ function ClassOf([string]$test) {
 $cpuFilter = Get-VpTestFilter -Kind cpu
 # Derive excluded clauses directly from the CPU filter so every EXCLUDED_FROM_CPU category (including LoopRig,
 # Footage, Corpus, Bench, ParkedNets, Slow, UpstreamStale) is reflected in $genExcluded, matching vstest.
-$gpuClauses = @($cpuFilter -split '&' | Where-Object { $_ -notlike 'Category!=*' } | ForEach-Object { $_ -replace '!~', '~' })
+$gpuClauses = @($cpuFilter -split '&' | Where-Object { $_ -notlike 'Category!=*' } | ForEach-Object { ($_ -replace '!~', '~') -replace '!=', '=' })
 function GeneratorExcludes([string]$test) {
     $method = $test.Substring($test.LastIndexOf('::') + 2)
-    # vstest's ~ is a case-INSENSITIVE substring match: the planner matches the same way, so it and the filter agree.
+    # vstest's ~ is a case-INSENSITIVE substring match and = is a case-INSENSITIVE exact match:
+    # the planner matches the same way, so it and the filter agree.
     $ic = [System.StringComparison]::OrdinalIgnoreCase
     foreach ($c in $gpuClauses) {
         if ($c.StartsWith('FullyQualifiedName~')) { if ($test.IndexOf($c.Substring(19), $ic) -ge 0) { return $true } }
+        elseif ($c.StartsWith('FullyQualifiedName=')) { if ([string]::Equals($test, $c.Substring(19), $ic)) { return $true } }
         elseif ($c.StartsWith('Name~')) { if ($method.IndexOf($c.Substring(5), $ic) -ge 0) { return $true } }
+        elseif ($c.StartsWith('Name=')) { if ([string]::Equals($method, $c.Substring(5), $ic)) { return $true } }
         else { throw "unrecognised clause in the generated GPU filter: $c" }
     }
     $false
 }
 
-$all = @(Get-Content $TestList | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '::' } | Sort-Object -Unique)
+$all = @(Get-Content $TestList | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '::' } | Sort-Object -CaseSensitive -Unique)
 if ($all.Count -eq 0) { throw "No tests in $TestList" }
 $excludedSet = New-Object 'System.Collections.Generic.HashSet[string]'
 foreach ($t in $all) { $c = ClassOf $t; if (@($Exclude | Where-Object { $c -like "*$_*" }).Count -gt 0) { [void]$excludedSet.Add($t) } }
