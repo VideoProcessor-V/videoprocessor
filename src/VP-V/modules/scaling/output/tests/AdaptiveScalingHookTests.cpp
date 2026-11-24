@@ -2168,5 +2168,821 @@ namespace VideoProcessorTest
 			Assert::AreEqual(0, pl_renderer_get_errors(fixture.Renderer()).num_disabled_hooks, L"A hook was disabled");
 		}
 
+		// Q#2 (GEM-070 / ADS-STATE, WARP GPU):
+		// Residual stabilisation must stop holding Frame 1's luma residual across a confirmed scene cut
+		// (SetCutSource -> CutVerdict::State::Known, cut = true), for both plain (residualGrainGuard = false)
+		// and guarded (residualGrainGuard = true) paths, including on a repeat of the cut frame.
+		// Mandatory in-test negative control: the exact same Frame 1 -> Frame 2 inputs with cut = false
+		// MUST hold Frame 1's residual (> 0.01 delta vs fresh Frame 2), proving the hazard is real.
+		TEST_METHOD(ResidualHoldStopsAtAConfirmedCut)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+
+			const std::string ssimSource = LoadBundledShader("SSimDownscaler.glsl");
+			Assert::IsFalse(ssimSource.empty(), L"SSimDownscaler.glsl must load");
+			const pl_hook* ssim = pl_mpv_user_shader_parse(gpu, ssimSource.data(), ssimSource.size());
+			Assert::IsNotNull(ssim, L"SSimDownscaler.glsl must parse");
+
+			pl_fmt srcFmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR));
+			pl_fmt dstFmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+			pl_fmt fieldFmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, PL_FMT_CAP_SAMPLEABLE);
+			pl_fmt trustFmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 1, 32, 32, PL_FMT_CAP_SAMPLEABLE);
+			Assert::IsTrue(srcFmt != nullptr && dstFmt != nullptr && fieldFmt != nullptr && trustFmt != nullptr,
+				L"WARP must provide float32 source, target, motion field, and frame-trust formats");
+
+			static constexpr int sw = 128, sh = 96, dw = 64, dh = 48;
+			static constexpr int bw = sw / 16, bh = sh / 16;
+
+			auto makeSourceTex = [&](const std::function<float(int, int)>& pattern) -> pl_tex
+			{
+				std::vector<float> rgba(static_cast<size_t>(sw) * sh * 4, 0.0f);
+				for (int y = 0; y < sh; ++y)
+				{
+					for (int x = 0; x < sw; ++x)
+					{
+						const float v = pattern(x, y);
+						float* p = &rgba[(static_cast<size_t>(y) * sw + x) * 4];
+						p[0] = p[1] = p[2] = v;
+						p[3] = 1.0f;
+					}
+				}
+				pl_tex_params tp{};
+				tp.w = sw;
+				tp.h = sh;
+				tp.format = srcFmt;
+				tp.sampleable = true;
+				tp.initial_data = rgba.data();
+				pl_tex tex = pl_tex_create(gpu, &tp);
+				Assert::IsNotNull(tex, L"RGBA32F source texture creation failed");
+				return tex;
+			};
+
+			// Frame 1: high-contrast 2x2 checkerboard (left) + 2-px vertical stripes (right) so SSIM and
+			// faithful ewa_lanczossharp diverge strongly at 2x downscale (large Frame-1 residual).
+			pl_tex frame1Tex = makeSourceTex([](int x, int y) -> float
+			{
+				if (x < sw / 2)
+					return (((x / 2) + (y / 2)) % 2) != 0 ? 0.90f : 0.10f;
+				return ((x / 2) % 2) != 0 ? 0.90f : 0.10f;
+			});
+
+			// Frame 2: completely different scene — uniform flat 0.50 (top half, zero own residual)
+			// plus horizontal stripes (bottom half, orthogonal non-zero own residual).
+			pl_tex frame2Tex = makeSourceTex([](int, int y) -> float
+			{
+				if (y < sh / 2)
+					return 0.50f;
+				return ((y / 2) % 2) != 0 ? 0.72f : 0.28f;
+			});
+
+			// Valid zero-motion field: v = (0, 0), trust = 1.0 on every block; frameTrust = 1.0.
+			std::vector<float> fieldData(static_cast<size_t>(bw) * bh * 4, 0.0f);
+			for (size_t i = 0; i < static_cast<size_t>(bw) * bh; ++i)
+			{
+				fieldData[i * 4 + 0] = 0.0f;
+				fieldData[i * 4 + 1] = 0.0f;
+				fieldData[i * 4 + 2] = 1.0f;
+				fieldData[i * 4 + 3] = 0.0f;
+			}
+			pl_tex_params fp{};
+			fp.w = bw;
+			fp.h = bh;
+			fp.format = fieldFmt;
+			fp.sampleable = true;
+			fp.initial_data = fieldData.data();
+			pl_tex fieldTex = pl_tex_create(gpu, &fp);
+			Assert::IsNotNull(fieldTex, L"motion field texture creation failed");
+
+			const float trustVal = 1.0f;
+			pl_tex_params trp{};
+			trp.w = 1;
+			trp.h = 1;
+			trp.format = trustFmt;
+			trp.sampleable = true;
+			trp.initial_data = &trustVal;
+			pl_tex trustTex = pl_tex_create(gpu, &trp);
+			Assert::IsNotNull(trustTex, L"frame trust texture creation failed");
+
+			AdaptiveDownscale::Motion motion;
+			motion.field = fieldTex;
+			motion.frameTrust = trustTex;
+			motion.minTrustedShare = 0.25f;
+			motion.sourceCrop = { 0.0f, 0.0f, static_cast<float>(sw), static_cast<float>(sh) };
+
+			auto renderFrame = [&](AdaptiveDownscale::Module& module, const AdaptiveDownscale::Settings& st,
+				uint64_t seq, pl_tex src, bool withMotion) -> std::vector<float>
+			{
+				pl_tex_params tp{};
+				tp.w = dw;
+				tp.h = dh;
+				tp.format = dstFmt;
+				tp.renderable = true;
+				tp.host_readable = true;
+				pl_tex target = pl_tex_create(gpu, &tp);
+				Assert::IsNotNull(target, L"RGBA32F target texture creation failed");
+
+				pl_frame image = TargetLutGpuFixture::MakeRgbFrame(src);
+				pl_frame out = TargetLutGpuFixture::MakeRgbFrame(target);
+				image.color.transfer = out.color.transfer = PL_COLOR_TRC_GAMMA22;
+				image.color.primaries = out.color.primaries = PL_COLOR_PRIM_BT_709;
+
+				pl_render_params params = pl_render_default_params;
+				params.dither_params = nullptr;
+				params.error_diffusion = nullptr;
+				params.downscaler = &pl_filter_mitchell;
+				params.disable_linear_scaling = true;
+
+				module.SetFrame(st, seq, 1.0f / 24.0f);
+				if (withMotion)
+					module.SetMotion(motion);
+				else
+					module.ClearMotion();
+
+				const pl_hook* hooks[3] = { module.Measure(), ssim, module.Blend() };
+				params.hooks = hooks;
+				params.num_hooks = 3;
+
+				const bool ok = pl_render_image(fixture.Renderer(), &image, &out, &params);
+				pl_gpu_finish(gpu);
+				Assert::IsTrue(ok, L"pl_render_image failed on WARP");
+
+				std::vector<float> px(static_cast<size_t>(dw) * dh * 4, 0.0f);
+				pl_tex_transfer_params dl{};
+				dl.tex = target;
+				dl.ptr = px.data();
+				Assert::IsTrue(pl_tex_download(gpu, &dl), L"RGBA32F target download failed");
+				pl_tex_destroy(gpu, &target);
+				return px;
+			};
+
+			auto maxRgbAbsDiff = [](const std::vector<float>& a, const std::vector<float>& b) -> float
+			{
+				Assert::AreEqual(a.size(), b.size(), L"output frame sizes must match");
+				float worst = 0.0f;
+				for (size_t i = 0; i < a.size(); ++i)
+				{
+					Assert::IsTrue(std::isfinite(a[i]) && std::isfinite(b[i]), L"output pixels must remain finite");
+					if (i % 4 == 3)
+						continue;
+					const float d = std::fabs(a[i] - b[i]);
+					if (d > worst)
+						worst = d;
+				}
+				return worst;
+			};
+
+			auto makeSettings = [](bool stabilise, bool grainGuard)
+			{
+				AdaptiveDownscale::Settings st;
+				st.wBase = 1.0f;
+				// Hold e = 0 and g = 1 everywhere regardless of high-contrast stripes/checkerboard
+				// so the only difference between Frame 2 runs is the residual hold.
+				st.edgeLo = 10000.0f;
+				st.edgeHi = 20000.0f;
+				st.grainLo = 10000.0f;
+				st.grainHi = 20000.0f;
+				st.shadowBias = 0.0f;
+				st.grainSmoothMs = 0.0f;
+				st.grainMap = false;
+				st.ssimResidualStabilise = stabilise;
+				st.residualGrainGuard = grainGuard;
+				st.residualCodingNoiseCodes = 0.0f;
+				st.float32Picture = true;
+				return st;
+			};
+
+			auto constantCutSource = [](bool cutOnSeq2)
+			{
+				return [cutOnSeq2](uint64_t, uint64_t seq)
+				{
+					AdaptiveDownscale::CutVerdict v;
+					v.state = AdaptiveDownscale::CutVerdict::State::Known;
+					v.cut = cutOnSeq2 && (seq == 2);
+					return v;
+				};
+			};
+
+			// Precondition: verify Frame 1 has a large SSIM-vs-faithful residual (> 0.05).
+			{
+				AdaptiveDownscale::Module preMod;
+				preMod.SetCutSource(constantCutSource(false));
+				AdaptiveDownscale::Settings ssimSt = makeSettings(false, false);
+				AdaptiveDownscale::Settings faithfulSt = ssimSt;
+				faithfulSt.wBase = 0.0f;
+				const std::vector<float> f1Ssim = renderFrame(preMod, ssimSt, 1, frame1Tex, false);
+				const std::vector<float> f1Faithful = renderFrame(preMod, faithfulSt, 2, frame1Tex, false);
+				const float f1Residual = maxRgbAbsDiff(f1Ssim, f1Faithful);
+				Assert::IsTrue(f1Residual > 0.05f,
+					(L"precondition: Frame 1 must have strong SSIM-vs-faithful residual (> 0.05), got " +
+						std::to_wstring(f1Residual)).c_str());
+				preMod.Release();
+			}
+
+			for (bool grainGuard : { false, true })
+			{
+				const std::wstring modeLabel = grainGuard ? L"[residualGrainGuard=true] " : L"[residualGrainGuard=false] ";
+				const AdaptiveDownscale::Settings stStab = makeSettings(true, grainGuard);
+				const AdaptiveDownscale::Settings stNoStab = makeSettings(false, grainGuard);
+
+				// Fresh non-stabilised Frame 2 reference.
+				std::vector<float> freshFrame2;
+				{
+					AdaptiveDownscale::Module refMod;
+					refMod.SetCutSource(constantCutSource(false));
+					freshFrame2 = renderFrame(refMod, stNoStab, 1, frame2Tex, false);
+					Assert::IsTrue(refMod.Active() && refMod.Failures() == 0,
+						(modeLabel + L"fresh Frame 2 reference must render cleanly").c_str());
+					refMod.Release();
+				}
+
+				// 1. Confirmed cut on Frame 2 (seq = 2): Frame 1's residual must NOT bleed into Frame 2
+				//    (nor into a repeat presentation of Frame 2).
+				{
+					AdaptiveDownscale::Module cutMod;
+					cutMod.SetCutSource(constantCutSource(true));
+					renderFrame(cutMod, stStab, 1, frame1Tex, true);
+					const std::vector<float> cutFrame2 = renderFrame(cutMod, stStab, 2, frame2Tex, true);
+					const std::vector<float> cutFrame2Repeat = renderFrame(cutMod, stStab, 2, frame2Tex, true);
+					Assert::IsTrue(cutMod.Active() && cutMod.Failures() == 0,
+						(modeLabel + L"confirmed-cut module must stay active with zero failures").c_str());
+
+					const float cutDiff = maxRgbAbsDiff(cutFrame2, freshFrame2);
+					const float repeatDiff = maxRgbAbsDiff(cutFrame2Repeat, freshFrame2);
+					Assert::IsTrue(cutDiff <= 1e-4f,
+						(modeLabel + L"confirmed cut must stop Frame-1 residual bleed (expected <= 1e-4, got " +
+							std::to_wstring(cutDiff) + L")").c_str());
+					Assert::IsTrue(repeatDiff <= 1e-4f,
+						(modeLabel + L"repeat of confirmed-cut frame must have zero Frame-1 residual bleed (expected <= 1e-4, got " +
+							std::to_wstring(repeatDiff) + L")").c_str());
+					cutMod.Release();
+				}
+
+				// 2. MANDATORY IN-TEST NEGATIVE CONTROL (exact same Frame 1 -> Frame 2 inputs with cut = false):
+				//    Frame 2 MUST hold Frame 1's residual (diverging from fresh Frame 2 by > 0.01), proving
+				//    residual hold is genuinely active and only stopped by the confirmed cut.
+				{
+					AdaptiveDownscale::Module noCutMod;
+					noCutMod.SetCutSource(constantCutSource(false));
+					renderFrame(noCutMod, stStab, 1, frame1Tex, true);
+					const std::vector<float> noCutFrame2 = renderFrame(noCutMod, stStab, 2, frame2Tex, true);
+					Assert::IsTrue(noCutMod.Active() && noCutMod.Failures() == 0,
+						(modeLabel + L"no-cut negative control module must stay active with zero failures").c_str());
+					Assert::IsTrue(noCutMod.StabilisedFrames() >= 1ull,
+						(modeLabel + L"no-cut negative control must actually stabilise Frame 2").c_str());
+
+					const float noCutDiff = maxRgbAbsDiff(noCutFrame2, freshFrame2);
+					Assert::IsTrue(noCutDiff > 0.01f,
+						(modeLabel + L"negative control (cut=false): Frame 2 must hold Frame-1 residual (> 0.01), got " +
+							std::to_wstring(noCutDiff)).c_str());
+					noCutMod.Release();
+				}
+			}
+
+			for (pl_tex* t : { &frame1Tex, &frame2Tex, &fieldTex, &trustTex })
+				pl_tex_destroy(gpu, t);
+			pl_mpv_user_shader_destroy(&ssim);
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
+			Assert::AreEqual(0, pl_renderer_get_errors(fixture.Renderer()).num_disabled_hooks, L"A hook was disabled");
+		}
+
+		// Q#2 (GEM-070 / ADS-STATE, WARP GPU):
+		// Residual stabilisation must invalidate the previous residual when motion.sourceCrop shifts
+		// even if the output dimensions (dw x dh) stay unchanged — both on a pure crop-origin shift
+		// ({0, 0, 128, 96} -> {16, 16, 144, 112}) and on a crop-extent shift ({0, 0, 160, 128} -> {0, 0, 128, 96}),
+		// including on a subsequent repeat of Frame 2.
+		// Mandatory in-test negative control: exact same Frame 1 -> Frame 2 with UNCHANGED sourceCrop
+		// MUST blend Frame 1's residual (> 0.01 difference from fresh Frame 2).
+		TEST_METHOD(ResidualHoldStopsOnASourceCropShift)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+
+			const std::string ssimSource = LoadBundledShader("SSimDownscaler.glsl");
+			Assert::IsFalse(ssimSource.empty(), L"SSimDownscaler.glsl must load");
+			const pl_hook* ssim = pl_mpv_user_shader_parse(gpu, ssimSource.data(), ssimSource.size());
+			Assert::IsNotNull(ssim, L"SSimDownscaler.glsl must parse");
+
+			pl_fmt srcFmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR));
+			pl_fmt dstFmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+			pl_fmt fieldFmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, PL_FMT_CAP_SAMPLEABLE);
+			pl_fmt trustFmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 1, 32, 32, PL_FMT_CAP_SAMPLEABLE);
+			Assert::IsTrue(srcFmt != nullptr && dstFmt != nullptr && fieldFmt != nullptr && trustFmt != nullptr,
+				L"WARP must provide float32 source, target, motion field, and frame-trust formats");
+
+			static constexpr int sw = 160, sh = 128, dw = 64, dh = 48;
+			static constexpr int bw = sw / 16, bh = sh / 16;
+
+			const pl_rect2df cropBase  = { 0.0f,  0.0f, 128.0f,  96.0f };
+			const pl_rect2df cropShift = { 16.0f, 16.0f, 144.0f, 112.0f };
+			const pl_rect2df cropZoom  = { 0.0f,  0.0f, 160.0f, 128.0f };
+
+			auto makeSourceTex = [&](const std::function<float(int, int)>& pattern) -> pl_tex
+			{
+				std::vector<float> rgba(static_cast<size_t>(sw) * sh * 4, 0.0f);
+				for (int y = 0; y < sh; ++y)
+				{
+					for (int x = 0; x < sw; ++x)
+					{
+						const float v = pattern(x, y);
+						float* p = &rgba[(static_cast<size_t>(y) * sw + x) * 4];
+						p[0] = p[1] = p[2] = v;
+						p[3] = 1.0f;
+					}
+				}
+				pl_tex_params tp{};
+				tp.w = sw;
+				tp.h = sh;
+				tp.format = srcFmt;
+				tp.sampleable = true;
+				tp.initial_data = rgba.data();
+				pl_tex tex = pl_tex_create(gpu, &tp);
+				Assert::IsNotNull(tex, L"RGBA32F source texture creation failed");
+				return tex;
+			};
+
+			pl_tex frame1Tex = makeSourceTex([](int x, int y) -> float
+			{
+				if (x < sw / 2)
+					return (((x / 2) + (y / 2)) % 2) != 0 ? 0.90f : 0.10f;
+				return ((x / 2) % 2) != 0 ? 0.90f : 0.10f;
+			});
+
+			pl_tex frame2Tex = makeSourceTex([](int, int y) -> float
+			{
+				if (y < sh / 2)
+					return 0.50f;
+				return ((y / 2) % 2) != 0 ? 0.72f : 0.28f;
+			});
+
+			std::vector<float> fieldData(static_cast<size_t>(bw) * bh * 4, 0.0f);
+			for (size_t i = 0; i < static_cast<size_t>(bw) * bh; ++i)
+			{
+				fieldData[i * 4 + 0] = 0.0f;
+				fieldData[i * 4 + 1] = 0.0f;
+				fieldData[i * 4 + 2] = 1.0f;
+				fieldData[i * 4 + 3] = 0.0f;
+			}
+			pl_tex_params fp{};
+			fp.w = bw;
+			fp.h = bh;
+			fp.format = fieldFmt;
+			fp.sampleable = true;
+			fp.initial_data = fieldData.data();
+			pl_tex fieldTex = pl_tex_create(gpu, &fp);
+			Assert::IsNotNull(fieldTex, L"motion field texture creation failed");
+
+			const float trustVal = 1.0f;
+			pl_tex_params trp{};
+			trp.w = 1;
+			trp.h = 1;
+			trp.format = trustFmt;
+			trp.sampleable = true;
+			trp.initial_data = &trustVal;
+			pl_tex trustTex = pl_tex_create(gpu, &trp);
+			Assert::IsNotNull(trustTex, L"frame trust texture creation failed");
+
+			auto noCutSource = [](uint64_t, uint64_t)
+			{
+				AdaptiveDownscale::CutVerdict v;
+				v.state = AdaptiveDownscale::CutVerdict::State::Known;
+				v.cut = false;
+				return v;
+			};
+
+			auto renderCrop = [&](AdaptiveDownscale::Module& module, const AdaptiveDownscale::Settings& st,
+				uint64_t seq, pl_tex src, const pl_rect2df& crop, bool withMotion) -> std::vector<float>
+			{
+				pl_tex_params tp{};
+				tp.w = dw;
+				tp.h = dh;
+				tp.format = dstFmt;
+				tp.renderable = true;
+				tp.host_readable = true;
+				pl_tex target = pl_tex_create(gpu, &tp);
+				Assert::IsNotNull(target, L"RGBA32F target texture creation failed");
+
+				pl_frame image = TargetLutGpuFixture::MakeRgbFrame(src);
+				image.crop = crop;
+				pl_frame out = TargetLutGpuFixture::MakeRgbFrame(target);
+				image.color.transfer = out.color.transfer = PL_COLOR_TRC_GAMMA22;
+				image.color.primaries = out.color.primaries = PL_COLOR_PRIM_BT_709;
+
+				pl_render_params params = pl_render_default_params;
+				params.dither_params = nullptr;
+				params.error_diffusion = nullptr;
+				params.downscaler = &pl_filter_mitchell;
+				params.disable_linear_scaling = true;
+
+				module.SetFrame(st, seq, 1.0f / 24.0f);
+				if (withMotion)
+				{
+					AdaptiveDownscale::Motion m;
+					m.field = fieldTex;
+					m.frameTrust = trustTex;
+					m.minTrustedShare = 0.25f;
+					m.sourceCrop = crop;
+					module.SetMotion(m);
+				}
+				else
+				{
+					module.ClearMotion();
+				}
+
+				const pl_hook* hooks[3] = { module.Measure(), ssim, module.Blend() };
+				params.hooks = hooks;
+				params.num_hooks = 3;
+
+				const bool ok = pl_render_image(fixture.Renderer(), &image, &out, &params);
+				pl_gpu_finish(gpu);
+				Assert::IsTrue(ok, L"pl_render_image failed on WARP");
+
+				std::vector<float> px(static_cast<size_t>(dw) * dh * 4, 0.0f);
+				pl_tex_transfer_params dl{};
+				dl.tex = target;
+				dl.ptr = px.data();
+				Assert::IsTrue(pl_tex_download(gpu, &dl), L"RGBA32F target download failed");
+				pl_tex_destroy(gpu, &target);
+				return px;
+			};
+
+			auto maxRgbAbsDiff = [](const std::vector<float>& a, const std::vector<float>& b) -> float
+			{
+				Assert::AreEqual(a.size(), b.size(), L"output frame sizes must match");
+				float worst = 0.0f;
+				for (size_t i = 0; i < a.size(); ++i)
+				{
+					Assert::IsTrue(std::isfinite(a[i]) && std::isfinite(b[i]), L"output pixels must remain finite");
+					if (i % 4 == 3)
+						continue;
+					const float d = std::fabs(a[i] - b[i]);
+					if (d > worst)
+						worst = d;
+				}
+				return worst;
+			};
+
+			auto makeSettings = [](bool stabilise, bool grainGuard)
+			{
+				AdaptiveDownscale::Settings st;
+				st.wBase = 1.0f;
+				st.edgeLo = 10000.0f;
+				st.edgeHi = 20000.0f;
+				st.grainLo = 10000.0f;
+				st.grainHi = 20000.0f;
+				st.shadowBias = 0.0f;
+				st.grainSmoothMs = 0.0f;
+				st.grainMap = false;
+				st.ssimResidualStabilise = stabilise;
+				st.residualGrainGuard = grainGuard;
+				st.residualCodingNoiseCodes = 0.0f;
+				st.float32Picture = true;
+				return st;
+			};
+
+			for (bool grainGuard : { false, true })
+			{
+				const std::wstring modeLabel = grainGuard ? L"[residualGrainGuard=true] " : L"[residualGrainGuard=false] ";
+				const AdaptiveDownscale::Settings stStab = makeSettings(true, grainGuard);
+				const AdaptiveDownscale::Settings stNoStab = makeSettings(false, grainGuard);
+
+				std::vector<float> freshAtBase;
+				std::vector<float> freshAtShift;
+				{
+					AdaptiveDownscale::Module refMod;
+					refMod.SetCutSource(noCutSource);
+					freshAtBase = renderCrop(refMod, stNoStab, 1, frame2Tex, cropBase, false);
+					freshAtShift = renderCrop(refMod, stNoStab, 2, frame2Tex, cropShift, false);
+					Assert::IsTrue(refMod.Active() && refMod.Failures() == 0,
+						(modeLabel + L"fresh Frame 2 crop references must render cleanly").c_str());
+					refMod.Release();
+				}
+
+				// 1. Pure origin shift (same crop WxH 128x96 and same output WxH 64x48):
+				//    {0, 0, 128, 96} -> {16, 16, 144, 112} with cut = false.
+				{
+					AdaptiveDownscale::Module shiftMod;
+					shiftMod.SetCutSource(noCutSource);
+					renderCrop(shiftMod, stStab, 1, frame1Tex, cropBase, true);
+					const std::vector<float> shiftedFrame2 = renderCrop(shiftMod, stStab, 2, frame2Tex, cropShift, true);
+					const std::vector<float> shiftedFrame2Repeat = renderCrop(shiftMod, stStab, 2, frame2Tex, cropShift, true);
+					Assert::IsTrue(shiftMod.Active() && shiftMod.Failures() == 0,
+						(modeLabel + L"crop-shift module must stay active with zero failures").c_str());
+
+					const float shiftDiff = maxRgbAbsDiff(shiftedFrame2, freshAtShift);
+					const float repeatDiff = maxRgbAbsDiff(shiftedFrame2Repeat, freshAtShift);
+					Assert::IsTrue(shiftDiff <= 1e-4f,
+						(modeLabel + L"sourceCrop origin shift must stop Frame-1 residual bleed (expected <= 1e-4, got " +
+							std::to_wstring(shiftDiff) + L")").c_str());
+					Assert::IsTrue(repeatDiff <= 1e-4f,
+						(modeLabel + L"repeat after sourceCrop shift must have zero Frame-1 residual bleed (expected <= 1e-4, got " +
+							std::to_wstring(repeatDiff) + L")").c_str());
+					shiftMod.Release();
+				}
+
+				// 2. Crop extent/zoom shift (same origin (0, 0) and same output WxH 64x48):
+				//    {0, 0, 160, 128} -> {0, 0, 128, 96} with cut = false.
+				{
+					AdaptiveDownscale::Module zoomMod;
+					zoomMod.SetCutSource(noCutSource);
+					renderCrop(zoomMod, stStab, 1, frame1Tex, cropZoom, true);
+					const std::vector<float> zoomedFrame2 = renderCrop(zoomMod, stStab, 2, frame2Tex, cropBase, true);
+					Assert::IsTrue(zoomMod.Active() && zoomMod.Failures() == 0,
+						(modeLabel + L"crop-extent shift module must stay active with zero failures").c_str());
+
+					const float zoomDiff = maxRgbAbsDiff(zoomedFrame2, freshAtBase);
+					Assert::IsTrue(zoomDiff <= 1e-4f,
+						(modeLabel + L"sourceCrop extent shift must stop Frame-1 residual bleed (expected <= 1e-4, got " +
+							std::to_wstring(zoomDiff) + L")").c_str());
+					zoomMod.Release();
+				}
+
+				// 3. MANDATORY IN-TEST NEGATIVE CONTROL (exact same Frame 1 -> Frame 2, cut = false,
+				//    UNCHANGED sourceCrop = cropBase): Frame 2 MUST blend in Frame 1's residual (> 0.01).
+				{
+					AdaptiveDownscale::Module steadyMod;
+					steadyMod.SetCutSource(noCutSource);
+					renderCrop(steadyMod, stStab, 1, frame1Tex, cropBase, true);
+					const std::vector<float> steadyFrame2 = renderCrop(steadyMod, stStab, 2, frame2Tex, cropBase, true);
+					Assert::IsTrue(steadyMod.Active() && steadyMod.Failures() == 0,
+						(modeLabel + L"unchanged-crop negative control must stay active with zero failures").c_str());
+					Assert::IsTrue(steadyMod.StabilisedFrames() >= 1ull,
+						(modeLabel + L"unchanged-crop negative control must stabilise Frame 2").c_str());
+
+					const float steadyDiff = maxRgbAbsDiff(steadyFrame2, freshAtBase);
+					Assert::IsTrue(steadyDiff > 0.01f,
+						(modeLabel + L"negative control (unchanged sourceCrop): Frame 2 must hold Frame-1 residual (> 0.01), got " +
+							std::to_wstring(steadyDiff)).c_str());
+					steadyMod.Release();
+				}
+			}
+
+			for (pl_tex* t : { &frame1Tex, &frame2Tex, &fieldTex, &trustTex })
+				pl_tex_destroy(gpu, t);
+			pl_mpv_user_shader_destroy(&ssim);
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
+			Assert::AreEqual(0, pl_renderer_get_errors(fixture.Renderer()).num_disabled_hooks, L"A hook was disabled");
+		}
+
+		// Q#2 absorbed W1B MUST-6 test (WARP GPU):
+		// When 32-bit float picture precision is requested (float32Picture = true) and the GPU has no renderable
+		// 32-bit float format, ScalerPass falls back to 16-bit float, AdaptiveDownscale::Module::HalfFloatPictureFallback()
+		// turns true, and AdaptiveDownscaleStage::Stage surfaces the fallback visibly in BOTH StatusLines() and
+		// Fallback() ("output scaling" catalog entry).
+		// Mandatory negative controls:
+		//  (a) Switching the feature off (requested = false, either adaptiveDownscale = false or slotRuns = false)
+		//      while module.HalfFloatPictureFallback() is still latched true suppresses BOTH StatusLines() and Fallback()
+		//      (no stale fallback).
+		//  (b) Explicitly requesting 16-bit float (float32Picture = false) does not raise the fallback.
+		//  (c) Restoring renderable 32-bit float on the GPU clears HalfFloatPictureFallback(), StatusLines(), and Fallback().
+		TEST_METHOD(HalfFloatPictureFallbackIsVisible)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+
+			const std::string ssimSource = LoadBundledShader("SSimDownscaler.glsl");
+			Assert::IsFalse(ssimSource.empty(), L"SSimDownscaler.glsl must load");
+			const pl_hook* ssim = pl_mpv_user_shader_parse(gpu, ssimSource.data(), ssimSource.size());
+			Assert::IsNotNull(ssim, L"SSimDownscaler.glsl must parse");
+
+			pl_fmt srcFmt = pl_find_fmt(gpu, PL_FMT_UNORM, 4, 16, 16,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR));
+			pl_fmt dstFmt = pl_find_fmt(gpu, PL_FMT_UNORM, 4, 8, 8,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+			Assert::IsTrue(srcFmt != nullptr && dstFmt != nullptr, L"WARP must provide rgba16 source and rgba8 target formats");
+
+			static constexpr int sw = 128, sh = 96, dw = 64, dh = 48;
+			std::vector<uint16_t> srcPixels(static_cast<size_t>(sw) * sh * 4);
+			for (int y = 0; y < sh; ++y)
+			{
+				for (int x = 0; x < sw; ++x)
+				{
+					const uint16_t v = static_cast<uint16_t>(((x + y) % 2) != 0 ? 48000u : 16000u);
+					uint16_t* p = &srcPixels[(static_cast<size_t>(y) * sw + x) * 4];
+					p[0] = p[1] = p[2] = v;
+					p[3] = 65535u;
+				}
+			}
+			pl_tex_params stp{};
+			stp.w = sw;
+			stp.h = sh;
+			stp.format = srcFmt;
+			stp.sampleable = true;
+			stp.initial_data = srcPixels.data();
+			pl_tex srcTex = pl_tex_create(gpu, &stp);
+			Assert::IsNotNull(srcTex, L"source texture creation failed");
+
+			struct ScopedDisableFloat32Renderable
+			{
+				struct Saved { struct pl_fmt_t* fmt; enum pl_fmt_caps caps; };
+				std::vector<Saved> saved;
+				explicit ScopedDisableFloat32Renderable(pl_gpu g)
+				{
+					for (int i = 0; i < g->num_formats; ++i)
+					{
+						struct pl_fmt_t* f = const_cast<struct pl_fmt_t*>(g->formats[i]);
+						if (f && f->type == PL_FMT_FLOAT && f->component_depth[0] >= 32 &&
+							(f->caps & PL_FMT_CAP_RENDERABLE) != 0)
+						{
+							Saved entry;
+							entry.fmt = f;
+							entry.caps = f->caps;
+							saved.push_back(entry);
+							f->caps = static_cast<enum pl_fmt_caps>(
+								static_cast<unsigned>(f->caps) &
+								~static_cast<unsigned>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_BLENDABLE));
+						}
+					}
+				}
+				void Restore()
+				{
+					for (size_t i = 0; i < saved.size(); ++i)
+						saved[i].fmt->caps = saved[i].caps;
+					saved.clear();
+				}
+				~ScopedDisableFloat32Renderable() { Restore(); }
+			};
+
+			const std::string kExpectedStatusLine =
+				"Adaptive scaler: 16-bit float picture (32-bit float not available)";
+			const std::string kExpectedFallbackReason =
+				"adaptive scaler: 16-bit float picture (32-bit float not available)";
+
+			auto hasStatusLine = [](const std::vector<std::string>& lines, const std::string& target) -> bool
+			{
+				return std::find(lines.begin(), lines.end(), target) != lines.end();
+			};
+
+			AdaptiveDownscale::Module module;
+			// Known cut source so CutAvailable() is true and never shadows HalfFloatPictureFallback() in Fallback().
+			module.SetCutSource([](uint64_t, uint64_t)
+			{
+				AdaptiveDownscale::CutVerdict v;
+				v.state = AdaptiveDownscale::CutVerdict::State::Known;
+				v.cut = false;
+				return v;
+			});
+
+			AdaptiveDownscaleStage::Stage stage{ module };
+			AdaptiveDownscaleStage::Host host;
+			host.fallbackFramePeriod = []() { return 1.0f / 24.0f; };
+			host.bitrate = [](double& q) { q = 1.0; return false; };
+			host.nlsMapping = []() { return NlsMaskMapping::Mapping(); };
+			host.ssimInChain = []() { return true; };
+			host.motion = []() { return AdaptiveDownscaleStage::MotionSource(); };
+			host.publishStatus = []() {};
+
+			double weight = 1.0;
+			bool grainWanted = false, noSsim = false;
+			uint64_t sequence = 0;
+
+			auto runStageFrame = [&](const AdaptiveDownscale::Settings& st, bool adaptiveDownscale,
+				bool slotRuns, int fboFloat32, bool render)
+			{
+				AdaptiveDownscaleStage::Frame f;
+				f.adaptiveDownscale = adaptiveDownscale;
+				f.adaptiveUpscale = false;
+				f.slotRuns = slotRuns;
+				f.adaptive = &st;
+				f.lowBitrateOff = true;
+				f.fboFloat32 = fboFloat32;
+				f.sourceSequence = ++sequence;
+				f.nominalSourceRateHz = 24.0;
+				f.sourceCrop = { 0.0f, 0.0f, static_cast<float>(sw), static_cast<float>(sh) };
+				f.targetCrop = { 0.0f, 0.0f, static_cast<float>(dw), static_cast<float>(dh) };
+
+				std::vector<const pl_hook*> hooks = { ssim };
+				stage.Register(f, host, { weight, grainWanted, noSsim }, hooks);
+				if (!render)
+				{
+					Assert::AreEqual(size_t(1), hooks.size(), L"feature off: stage must not register adaptive hooks");
+					return;
+				}
+				Assert::IsTrue(hooks.size() == 3 && hooks.front() == module.Measure() && hooks.back() == module.Blend(),
+					L"downscale stage must register measure, SSIM, blend");
+
+				pl_tex_params tp{};
+				tp.w = dw;
+				tp.h = dh;
+				tp.format = dstFmt;
+				tp.renderable = true;
+				tp.host_readable = true;
+				pl_tex target = pl_tex_create(gpu, &tp);
+				Assert::IsNotNull(target, L"target texture creation failed");
+
+				pl_frame image = TargetLutGpuFixture::MakeRgbFrame(srcTex);
+				pl_frame out = TargetLutGpuFixture::MakeRgbFrame(target);
+				image.color.transfer = out.color.transfer = PL_COLOR_TRC_GAMMA22;
+
+				pl_render_params params = pl_render_default_params;
+				params.dither_params = nullptr;
+				params.error_diffusion = nullptr;
+				params.downscaler = &pl_filter_mitchell;
+				params.disable_linear_scaling = true;
+				params.hooks = hooks.data();
+				params.num_hooks = static_cast<int>(hooks.size());
+
+				const bool ok = pl_render_image(fixture.Renderer(), &image, &out, &params);
+				pl_gpu_finish(gpu);
+				pl_tex_destroy(gpu, &target);
+				Assert::IsTrue(ok, L"pl_render_image failed on WARP");
+			};
+
+			AdaptiveDownscale::Settings stF32;
+			stF32.float32Picture = true;
+			stF32.grainMap = false;
+			stF32.ssimResidualStabilise = false;
+
+			{
+				ScopedDisableFloat32Renderable hideFloat32(gpu);
+				Assert::IsFalse(hideFloat32.saved.empty(),
+					L"precondition: WARP must initially expose at least one renderable 32-bit float format");
+
+				// 1. Positive case: 32-bit float requested, GPU lacks renderable 32-bit float -> ScalerPass
+				//    falls back to 16-bit float -> module.HalfFloatPictureFallback() is true -> visible in
+				//    both StatusLines() and Fallback() ("output scaling").
+				runStageFrame(stF32, true, true, 1, true);
+				Assert::IsTrue(module.Active() && module.Failures() == 0,
+					L"half-float fallback frame must succeed with zero failures");
+				Assert::IsTrue(module.CutAvailable(), L"precondition: cut verdict must remain available");
+				Assert::IsTrue(module.HalfFloatPictureFallback(),
+					L"module.HalfFloatPictureFallback() must be true when 32-bit float is unavailable");
+				Assert::IsTrue(hasStatusLine(stage.StatusLines(), kExpectedStatusLine),
+					L"StatusLines() must emit the 16-bit float picture fallback line when requested");
+				{
+					const FallbackCatalog::Decision fb = stage.Fallback();
+					Assert::IsTrue(fb.engaged, L"Fallback() must be engaged when HalfFloatPictureFallback() is true and requested");
+					Assert::AreEqual(std::string("output scaling"), fb.id, L"Fallback() catalog id must be 'output scaling'");
+					Assert::AreEqual(kExpectedFallbackReason, fb.reason, L"Fallback() reason must match half-float picture fallback");
+				}
+
+				// 2. MANDATORY NEGATIVE CONTROL (requested = false, feature off while module flag is still true):
+				//    neither StatusLines() nor Fallback() may emit a stale half-float fallback.
+				runStageFrame(stF32, false, true, 1, false);
+				Assert::IsTrue(module.HalfFloatPictureFallback(),
+					L"precondition: module flag remains latched until next measure (proving stage gating is necessary)");
+				Assert::IsFalse(hasStatusLine(stage.StatusLines(), kExpectedStatusLine),
+					L"negative control (adaptiveDownscale=false): StatusLines() must not emit stale half-float fallback");
+				Assert::IsFalse(stage.Fallback().engaged,
+					L"negative control (adaptiveDownscale=false): Fallback() must not emit stale half-float fallback");
+
+				// Also check slotRuns = false (requested = false while adaptiveDownscale = true).
+				runStageFrame(stF32, true, false, 1, false);
+				Assert::IsTrue(module.HalfFloatPictureFallback(),
+					L"precondition: module flag still latched when slot is off");
+				Assert::IsFalse(hasStatusLine(stage.StatusLines(), kExpectedStatusLine),
+					L"negative control (slotRuns=false): StatusLines() must not emit stale half-float fallback");
+				Assert::IsFalse(stage.Fallback().engaged,
+					L"negative control (slotRuns=false): Fallback() must not emit stale half-float fallback");
+
+				// 3. Negative control: explicitly requesting 16-bit float (float32Picture = false) must NOT trigger fallback.
+				AdaptiveDownscale::Settings stF16 = stF32;
+				stF16.float32Picture = false;
+				runStageFrame(stF16, true, true, 0, true);
+				Assert::IsTrue(module.Active() && module.Failures() == 0, L"explicit 16-bit float frame must succeed");
+				Assert::IsFalse(module.HalfFloatPictureFallback(),
+					L"negative control (float32Picture=false): explicit 16-bit float request is not a fallback");
+				Assert::IsFalse(hasStatusLine(stage.StatusLines(), kExpectedStatusLine),
+					L"negative control (float32Picture=false): StatusLines() must not emit fallback line");
+				Assert::IsFalse(stage.Fallback().engaged,
+					L"negative control (float32Picture=false): Fallback() must not be engaged");
+
+				// Restore renderable 32-bit float formats on WARP.
+				hideFloat32.Restore();
+			}
+
+			// 4. Negative control: with renderable 32-bit float available on WARP, requesting 32-bit float succeeds
+			//    without fallback and clears StatusLines() and Fallback().
+			runStageFrame(stF32, true, true, 1, true);
+			Assert::IsTrue(module.Active() && module.Failures() == 0, L"32-bit float frame on WARP must succeed");
+			Assert::IsFalse(module.HalfFloatPictureFallback(),
+				L"negative control (32-bit float available): HalfFloatPictureFallback() must be false");
+			Assert::IsFalse(hasStatusLine(stage.StatusLines(), kExpectedStatusLine),
+				L"negative control (32-bit float available): StatusLines() must not emit fallback line");
+			Assert::IsFalse(stage.Fallback().engaged,
+				L"negative control (32-bit float available): Fallback() must not be engaged");
+
+			module.Release();
+			pl_tex_destroy(gpu, &srcTex);
+			pl_mpv_user_shader_destroy(&ssim);
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
+			Assert::AreEqual(0, pl_renderer_get_errors(fixture.Renderer()).num_disabled_hooks, L"A hook was disabled");
+		}
 	};
 }
