@@ -615,36 +615,16 @@ GridFadeFit FitMotionTolerantFade(const double refAligned[kGridH][kGridW], const
     return fit;
 }
 
-static double FitResidualRatio(const GridFadeFit& fit)
-{
-    return fit.eId > 1e-6 ? (fit.eFade * fit.eFade) / (fit.eId * fit.eId) : 1.0;
-}
-
-static bool InteriorHasHighlight(const double refAligned[kGridH][kGridW], uint32_t refP99P4)
-{
-    constexpr int R = kLocalRadius;
-    const double bar = double(refP99P4) * kGridScale - double(kFadeMinSpread);
-    for (int y = R; y < kGridH - R; ++y)
-        for (int x = R; x < kGridW - R; ++x)
-            if (refAligned[y][x] >= bar)
-                return true;
-    return false;
-}
-
-bool HighlightScalingConsistent(uint32_t refP99P4, uint32_t curP99P4, double gain, double black, int dir,
-                                double residualRatio, bool interiorClipped)
+bool HighlightScalingConsistent(uint32_t refP99P4, uint32_t curP99P4, double gain, double black, int dir)
 {
     const double rp = double(refP99P4) * kGridScale;
     const double cp = double(curP99P4) * kGridScale;
     if (!(rp > black + double(kFadeMinSpread) && cp > black + double(kFadeMinSpread)))
         return true;
     // Clipped-white linear fade-out censorship: when a verified fade-out has dropped the unclipped
-    // scene by >= 1/kFadeMaxDiv (25%) (or an interior-clipped rigid fit explains > kFadeSpatialConsensus = 75%
-    // of L2 variance) while highlights remain non-rising within 1-code quantization jitter (cp <= rp + kFadeMinSpread),
-    // p99 may be censored at Rec.709 peak white until the highlight unclips.
-    if (dir < 0 && cp <= rp + double(kFadeMinSpread) &&
-        ((1.0 - gain) >= 1.0 / double(kFadeMaxDiv) ||
-         (interiorClipped && residualRatio < (1.0 - kFadeSpatialConsensus))))
+    // scene by >= 1/kFadeMaxDiv (25%) while highlights remain non-rising within 1-code quantization jitter
+    // (cp <= rp + kFadeMinSpread), p99 may be censored at Rec.709 peak white until the highlight unclips.
+    if (dir < 0 && cp <= rp + double(kFadeMinSpread) && (1.0 - gain) >= 1.0 / double(kFadeMaxDiv))
         return true;
     const double aP99 = (cp - black) / (rp - black);
     // For brightening (dir > 0), enforce exact multiplicative reciprocal [0.5, 2.0] consistency around (gain - 1)
@@ -835,9 +815,7 @@ EventSignals ClassifyEvents(const SourceStats::Record& prev, const SourceStats::
                     e.fade = outCache->adjFit.valid &&
                         FootprintPreserved(outCache->prevAligned, outCache->curAligned, outCache->adjFit) &&
                         std::fabs(1.0 - outCache->adjFit.gain) < 1.0 / double(kFadeMaxDiv) &&
-                        HighlightScalingConsistent(prev.p99, cur.p99, outCache->adjFit.gain, outCache->adjFit.black,
-                                                   outCache->adjFit.dir, FitResidualRatio(outCache->adjFit),
-                                                   InteriorHasHighlight(outCache->prevAligned, prev.p99));
+                        HighlightScalingConsistent(prev.p99, cur.p99, outCache->adjFit.gain, outCache->adjFit.black, outCache->adjFit.dir);
                 } else {
                     double prevA[kGridH][kGridW], curA[kGridH][kGridW];
                     double vx = 0.0, vy = 0.0;
@@ -845,8 +823,7 @@ EventSignals ClassifyEvents(const SourceStats::Record& prev, const SourceStats::
                     const GridFadeFit fit = FitGridFadeAligned(prevA, curA, vx, vy);
                     e.fade = fit.valid && FootprintPreserved(prevA, curA, fit) &&
                         std::fabs(1.0 - fit.gain) < 1.0 / double(kFadeMaxDiv) &&
-                        HighlightScalingConsistent(prev.p99, cur.p99, fit.gain, fit.black, fit.dir,
-                                                   FitResidualRatio(fit), InteriorHasHighlight(prevA, prev.p99));
+                        HighlightScalingConsistent(prev.p99, cur.p99, fit.gain, fit.black, fit.dir);
                 }
             }
         }
@@ -1329,10 +1306,9 @@ bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur
 
         // Helper: verify that the current motion-aligned step (prev -> cur) is still moving in run.direction
         // (D4: symmetric-noise Bayes likelihood-ratio strict majority on above-LSB cells + all-lit majority;
-        //  D8: hoisted order-statistic OLS step slope must scale in run.direction;
-        //  motionTolerant: exact 4x2 macro-tile consensus cancels internal motion dipoles on constant-gain holds).
+        //  D8: hoisted order-statistic OLS step slope must scale in run.direction).
         const bool stepSlopeOk = !(stepSxxQ > 1e-6) || (double(run.direction) * (stepAQ - 1.0) > 0.0);
-        auto StepStillMoving = [&](double black, bool motionTolerant) -> bool {
+        auto StepStillMoving = [&](double black) -> bool {
             const bool stationary = (stepVx == 0.0 && stepVy == 0.0);
             if (stationary) {
                 if (dMean * int64_t(run.direction) <= 0)
@@ -1371,40 +1347,38 @@ bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur
             if (!(sSameZero > sOppZero))
                 return false;
 
-            // Fix #4: Exact 4x2 (7x7) macro-tile step consensus scoped to motion-tolerant fits — cancels internal
-            // motion dipoles during constant-gain holds while rigid 392-cell OLS already enforces >= 75% spatial consensus.
-            if (motionTolerant) {
-                constexpr int kTileCols = 4;
-                constexpr int kTileRows = 2;
-                constexpr int kTileSize = 7;
-                constexpr int kNumTiles = kTileCols * kTileRows;
-                constexpr double kTileArea = double(kTileSize * kTileSize);
-                int tileSameZero = 0, tileOppZero = 0;
-                for (int tr = 0; tr < kTileRows; ++tr) {
-                    for (int tc = 0; tc < kTileCols; ++tc) {
-                        double sumP = 0.0, sumC = 0.0;
-                        const int y0 = kLocalRadius + tr * kTileSize;
-                        const int x0 = kLocalRadius + tc * kTileSize;
-                        for (int dy = 0; dy < kTileSize; ++dy)
-                            for (int dx = 0; dx < kTileSize; ++dx) {
-                                sumP += prevAligned[y0 + dy][x0 + dx];
-                                sumC += curAligned[y0 + dy][x0 + dx];
-                            }
-                        const double prevTile = sumP / kTileArea;
-                        const double curTile = sumC / kTileArea;
-                        if ((std::max)(prevTile, curTile) > floor + double(kFadeMinSpread)) {
-                            const double delta = curTile - prevTile;
-                            if (double(run.direction) * delta > 0.0)
-                                ++tileSameZero;
-                            else if (-double(run.direction) * delta > 0.0)
-                                ++tileOppZero;
+            // Fix #4: Exact 4x2 (7x7) macro-tile step consensus — cancels internal motion dipoles during
+            // constant-gain holds while boosting slow-fade SNR by sqrt(49) = 7x.
+            constexpr int kTileCols = 4;
+            constexpr int kTileRows = 2;
+            constexpr int kTileSize = 7;
+            constexpr int kNumTiles = kTileCols * kTileRows;
+            constexpr double kTileArea = double(kTileSize * kTileSize);
+            int tileSameZero = 0, tileOppZero = 0;
+            for (int tr = 0; tr < kTileRows; ++tr) {
+                for (int tc = 0; tc < kTileCols; ++tc) {
+                    double sumP = 0.0, sumC = 0.0;
+                    const int y0 = kLocalRadius + tr * kTileSize;
+                    const int x0 = kLocalRadius + tc * kTileSize;
+                    for (int dy = 0; dy < kTileSize; ++dy)
+                        for (int dx = 0; dx < kTileSize; ++dx) {
+                            sumP += prevAligned[y0 + dy][x0 + dx];
+                            sumC += curAligned[y0 + dy][x0 + dx];
                         }
+                    const double prevTile = sumP / kTileArea;
+                    const double curTile = sumC / kTileArea;
+                    if ((std::max)(prevTile, curTile) > floor + double(kFadeMinSpread)) {
+                        const double delta = curTile - prevTile;
+                        if (double(run.direction) * delta > 0.0)
+                            ++tileSameZero;
+                        else if (-double(run.direction) * delta > 0.0)
+                            ++tileOppZero;
                     }
                 }
-                if (tileSameZero + tileOppZero >= int(kFadeSpatialCoverage * double(kNumTiles)) &&
-                    double(tileSameZero) < kFadeSpatialConsensus * double(tileSameZero + tileOppZero))
-                    return false;
             }
+            if (tileSameZero + tileOppZero >= int(kFadeSpatialCoverage * double(kNumTiles)) &&
+                double(tileSameZero) < kFadeSpatialConsensus * double(tileSameZero + tileOppZero))
+                return false;
 
             if (sSameEps + sOppEps > 0)
                 return sSameEps > sOppEps;
@@ -1428,18 +1402,15 @@ bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur
             const bool rigidFootprintOk = rigidValidDir && FootprintPreserved(baseAligned, curBaseAligned, rigidFit);
             cumFootprintRejected = rigidValidDir && !rigidFootprintOk;
 
-            auto TryAcceptCumFit = [&](const GridFadeFit& candidate, bool motionTolerant) -> bool {
+            auto TryAcceptCumFit = [&](const GridFadeFit& candidate) -> bool {
                 if (!(candidate.valid && candidate.dir == run.direction))
                     return false;
-                const double resRatio = motionTolerant ? 1.0 : FitResidualRatio(candidate);
-                const bool intClipped = !motionTolerant && InteriorHasHighlight(baseAligned, run.baseP99);
-                if (!HighlightScalingConsistent(run.baseP99, cur.p99, candidate.gain, candidate.black, candidate.dir,
-                                                resRatio, intClipped))
+                if (!HighlightScalingConsistent(run.baseP99, cur.p99, candidate.gain, candidate.black, candidate.dir))
                     return false;
                 const double k = run.anchorKeep * (std::min)(candidate.gain, 1.0 / candidate.gain);
                 if (!(k < run.keep))
                     return false;
-                if (!StepStillMoving(candidate.black, motionTolerant))
+                if (!StepStillMoving(candidate.black))
                     return false;
                 if (frameKeep)
                     *frameKeep = run.keep > 0.0 ? k / run.keep : 0.0;
@@ -1450,11 +1421,11 @@ bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur
                 return true;
             };
 
-            if (rigidFootprintOk && TryAcceptCumFit(rigidFit, false))
+            if (rigidFootprintOk && TryAcceptCumFit(rigidFit))
                 return true;
             if (!cumFootprintRejected && run.pairs >= uint32_t(kRefFrames)) {
                 const GridFadeFit mtFit = FitMotionTolerantFade(baseAligned, curBaseAligned, cumFitVx, cumFitVy);
-                if (TryAcceptCumFit(mtFit, true))
+                if (TryAcceptCumFit(mtFit))
                     return true;
             }
         }
@@ -1470,17 +1441,12 @@ bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur
             const bool adjFootprintRejected = adjValidDir && !adjFootprintOk;
             GridFadeFit adjFit = rigidAdj;
             bool adjOk = adjFootprintOk;
-            bool adjMotionTolerant = false;
             if (!adjOk && !adjFootprintRejected && run.pairs >= uint32_t(kRefFrames)) {
                 adjFit = FitMotionTolerantFade(prevAligned, curAligned, stepVx, stepVy);
                 adjOk = adjFit.valid && adjFit.dir == run.direction;
-                adjMotionTolerant = true;
             }
-            const double adjResRatio = adjMotionTolerant ? 1.0 : FitResidualRatio(adjFit);
-            const bool adjIntClipped = !adjMotionTolerant && InteriorHasHighlight(prevAligned, prev.p99);
-            if (adjOk && HighlightScalingConsistent(prev.p99, cur.p99, adjFit.gain, adjFit.black, adjFit.dir,
-                                                    adjResRatio, adjIntClipped) &&
-                StepStillMoving(adjFit.black, adjMotionTolerant)) {
+            if (adjOk && HighlightScalingConsistent(prev.p99, cur.p99, adjFit.gain, adjFit.black, adjFit.dir) &&
+                StepStillMoving(adjFit.black)) {
                 const double k = run.keep * (std::min)(adjFit.gain, 1.0 / adjFit.gain);
                 if (k < run.keep) {
                     CopyCellsTo16(prev.cells, run.baseCells);
