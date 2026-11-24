@@ -2396,8 +2396,10 @@ namespace TdV2
 							{
 								const double invHi = 1.0 / static_cast<double>(hiCount);
 								const double meanCur = sumCurHi2 * invHi;
-								const double g0X = !gxCoarse.empty() ? gxCoarse[gxCoarse.size() / 2] : 0.0;
-								const double g0Y = !gyCoarse.empty() ? gyCoarse[gyCoarse.size() / 2] : 0.0;
+								const size_t rxCoarse = gxCoarse.size() >> 1u;
+								const size_t ryCoarse = gyCoarse.size() >> 1u;
+								const double g0X = !gxCoarse.empty() ? gxCoarse[rxCoarse] : 0.0;
+								const double g0Y = !gyCoarse.empty() ? gyCoarse[ryCoarse] : 0.0;
 								// Exact Parseval white-noise variance gain ||I - G_x G_y||_2^2 (Rule 1).
 								const double hiGain = (std::max)(kEngineNumFloor, 1.0 - 2.0 * g0X * g0Y + coarseGain);
 								// Exact 1-LSB uniform quantization variance transferred through the high-pass band (Rule 1).

@@ -427,7 +427,9 @@ namespace TdV2
 					if (window_[i].emitted)
 						continue;
 					const size_t remAhead = window_.size() - 1 - i;
-					const uint8_t availLead = static_cast<uint8_t>((std::min)(static_cast<size_t>(kMaxLeadFrames), remAhead));
+					const uint8_t availLead = (remAhead < static_cast<size_t>(kMaxLeadFrames))
+						? static_cast<uint8_t>(remAhead)
+						: kMaxLeadFrames;
 					FrameRoleDecision fd = ClassifyTargetWithLead(i, window_[i].ev, availLead, /*forceProvisional=*/true);
 					if (fd.produced)
 						window_[i].emitted = true;
@@ -487,7 +489,9 @@ namespace TdV2
 					if (window_[i].emitted)
 						continue;
 					const size_t remAhead = window_.size() - 1 - i;
-					const uint8_t availLead = static_cast<uint8_t>((std::min)(static_cast<size_t>(kMaxLeadFrames), remAhead));
+					const uint8_t availLead = (remAhead < static_cast<size_t>(kMaxLeadFrames))
+						? static_cast<uint8_t>(remAhead)
+						: kMaxLeadFrames;
 					FrameRoleDecision fd = ClassifyTargetWithLead(i, window_[i].ev, availLead, /*forceProvisional=*/true);
 					window_[i].emitted = true;
 					pendingFlushed.push_back(std::move(fd));
@@ -510,7 +514,9 @@ namespace TdV2
 					if (window_[i].emitted)
 						continue;
 					const size_t remAhead = window_.size() - 1 - i;
-					const uint8_t availLead = static_cast<uint8_t>((std::min)(static_cast<size_t>(kMaxLeadFrames), remAhead));
+					const uint8_t availLead = (remAhead < static_cast<size_t>(kMaxLeadFrames))
+						? static_cast<uint8_t>(remAhead)
+						: kMaxLeadFrames;
 					FrameRoleDecision fd = ClassifyTargetWithLead(i, window_[i].ev, availLead, /*forceProvisional=*/true);
 					window_[i].emitted = true;
 					flushed.push_back(std::move(fd));
