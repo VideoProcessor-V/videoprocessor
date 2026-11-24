@@ -883,5 +883,382 @@ namespace VideoProcessorTest
 
 			AssertCleanLibplaceboLog(log, "OcclusionFillSingleDispatchReuseMatchesSeparateDispatchAndPreservesAlternatingSlot");
 		}
+
+		// GEM-139 (J#1 MC-SEARCH): verifies bit-exact parity of the optimized parallel SEARCH_BODY
+		// (l2_from/l1_from/to_win[324], thread-local L1 reduction, parallel half-pel into l1_tab summed
+		// in exact (y, x) order) and REFINE_BODY (lead-thread rf_cand/rf_med/rf_nc/rf_dup duplicate skip)
+		// against the untouched SEARCH_BODY_SERIAL / REFINE_BODY_SERIAL references across:
+		//   1. globalTwo = false (L1_NSTARTS = 3, ZGROUP = 6), pairs 1 (unseeded) and 2 (use_temporal != 0),
+		//   2. globalTwo = true  (L1_NSTARTS = 4, ZGROUP = 7), both seeded full-field bit-exactness vs serial
+		//      and unseeded active-second-global interior parity + genuine beyond-coarse-range two-global
+		//      (+128 / -128) tracking with same-input globalTwo = false negative control,
+		//   3. same-input non-triviality checks (pan + counter-moving object + half-pel subpixel region) and
+		//      static (F0, F0) negative control proving DownloadField + texel equality detects field changes.
+		BEGIN_TEST_METHOD_ATTRIBUTE(McSearchParallelMatchesSerialSearchBitIdenticallyAcrossSingleAndTwoGlobal)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(McSearchParallelMatchesSerialSearchBitIdenticallyAcrossSingleAndTwoGlobal)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			struct LogScope
+			{
+				TargetLutGpuFixture& f;
+				LogScope(TargetLutGpuFixture& fx, std::string* s) : f(fx) { f.CaptureLog(s); }
+				~LogScope() { f.CaptureLog(nullptr); }
+			} logScope(fixture, &log);
+
+			constexpr int kMcW = 256, kMcH = 128;
+			constexpr int kPanX = 10, kPanY = 4;       // dominant uniform pan (+5, +2) half-res -> dense REFINE_BODY duplicates
+			constexpr int kObj1Dx = -6, kObj1Dy = 6;   // distinct moving object (-3, +3) half-res
+			constexpr int kObj2Dx = 5, kObj2Dy = 3;    // odd source shift (+2.5, +1.5) half-res -> genuine half-pel refinement
+
+			auto inObj1 = [](int x, int y, int t)
+			{
+				return x >= 48 + kObj1Dx * t && x < 112 + kObj1Dx * t &&
+					y >= 16 + kObj1Dy * t && y < 80 + kObj1Dy * t;
+			};
+			auto inObj2 = [](int x, int y, int t)
+			{
+				return x >= 144 + kObj2Dx * t && x < 208 + kObj2Dx * t &&
+					y >= 52 + kObj2Dy * t && y < 116 + kObj2Dy * t;
+			};
+			// Band-limited 2D trigonometric texture for Object 2 so odd-pixel (+5, +3) shifts have
+			// < 1 code bilinear half-pel error (trusted in Field()) while whole-pel offsets have >> 10 codes.
+			auto smoothHalfPelTexture = [](int x, int y) -> uint16_t
+			{
+				const double fx = static_cast<double>(x);
+				const double fy = static_cast<double>(y);
+				const double v = 32768.0 +
+					8000.0 * std::sin(0.21 * fx + 0.13 * fy) +
+					7000.0 * std::cos(0.17 * fx - 0.23 * fy) +
+					5000.0 * std::sin(0.31 * fx + 0.29 * fy);
+				return static_cast<uint16_t>(std::lround((std::min)(65535.0, (std::max)(0.0, v))));
+			};
+
+			auto makeMultiMotionFrame = [&](int t) -> DejudderFrame
+			{
+				return MakeDejudderFrame(kMcW, kMcH,
+					[&](int x, int y) -> uint16_t
+					{
+						if (inObj1(x, y, t))
+							return DejudderTexture(x - kObj1Dx * t, y - kObj1Dy * t, 37);
+						if (inObj2(x, y, t))
+							return smoothHalfPelTexture(x - kObj2Dx * t, y - kObj2Dy * t);
+						return DejudderTexture(x - kPanX * t, y - kPanY * t, 1);
+					},
+					[&](int x, int y, int c) -> uint16_t
+					{
+						const int sx = x * 2;
+						if (inObj1(sx, y, t))
+							return DejudderTexture(sx - kObj1Dx * t, y - kObj1Dy * t, 41 + c);
+						if (inObj2(sx, y, t))
+							return static_cast<uint16_t>(32768 + c * 64);
+						return DejudderTexture(sx - kPanX * t, y - kPanY * t, 7 + c);
+					});
+			};
+
+			DejudderGpuPlanes f0, f1, f2;
+			UploadDejudderFrame(gpu, makeMultiMotionFrame(0), f0);
+			UploadDejudderFrame(gpu, makeMultiMotionFrame(1), f1);
+			UploadDejudderFrame(gpu, makeMultiMotionFrame(2), f2);
+
+			auto assertBitExact = [](const DejudderField& par, const DejudderField& ser, const wchar_t* label)
+			{
+				Assert::AreEqual(ser.blocksX, par.blocksX, (std::wstring(label) + L": blocksX mismatch").c_str());
+				Assert::AreEqual(ser.blocksY, par.blocksY, (std::wstring(label) + L": blocksY mismatch").c_str());
+				Assert::AreEqual(ser.texels.size(), par.texels.size(), (std::wstring(label) + L": texel count mismatch").c_str());
+				Assert::IsFalse(par.texels.empty(), (std::wstring(label) + L": empty field").c_str());
+				float maxAbsDiff = 0.0f;
+				size_t firstBad = par.texels.size();
+				for (size_t i = 0; i < par.texels.size(); ++i)
+				{
+					const float p = par.texels[i], s = ser.texels[i];
+					Assert::IsTrue(std::isfinite(p) && std::isfinite(s),
+						(std::wstring(label) + L": non-finite texel at index " + std::to_wstring(i)).c_str());
+					const float d = std::fabs(p - s);
+					if (d > maxAbsDiff)
+						maxAbsDiff = d;
+					if (p != s && firstBad == par.texels.size())
+						firstBad = i;
+				}
+				if (firstBad != par.texels.size() || maxAbsDiff != 0.0f)
+				{
+					const size_t blk = firstBad / 4u;
+					const size_t bx = blk % static_cast<size_t>(par.blocksX);
+					const size_t by = blk / static_cast<size_t>(par.blocksX);
+					const size_t ch = firstBad % 4u;
+					const std::wstring msg = std::wstring(label) +
+						L": parallel vs serial mismatch (maxAbsDiff=" + std::to_wstring(maxAbsDiff) +
+						L", first at block (" + std::to_wstring(bx) + L"," + std::to_wstring(by) +
+						L") ch=" + std::to_wstring(ch) + L": par=" + std::to_wstring(par.texels[firstBad]) +
+						L", ser=" + std::to_wstring(ser.texels[firstBad]) + L")";
+					Assert::Fail(msg.c_str());
+				}
+				Assert::IsTrue(par.texels == ser.texels, (std::wstring(label) + L": texels vector inequality").c_str());
+			};
+
+			auto assertNonTrivialRegions = [&](const DejudderField& field, const wchar_t* label)
+			{
+				int panBlocks = 0, obj1Blocks = 0, obj2HalfPelBlocks = 0;
+				for (int by = 0; by < field.blocksY; ++by)
+				{
+					for (int bx = 0; bx < field.blocksX; ++bx)
+					{
+						if (!field.trusted(bx, by))
+							continue;
+						const float vx = field.vx(bx, by), vy = field.vy(bx, by);
+						if (std::fabs(vx - static_cast<float>(kPanX)) <= 0.5f &&
+							std::fabs(vy - static_cast<float>(kPanY)) <= 0.5f)
+							++panBlocks;
+						if (std::fabs(vx - static_cast<float>(kObj1Dx)) <= 0.5f &&
+							std::fabs(vy - static_cast<float>(kObj1Dy)) <= 0.5f)
+							++obj1Blocks;
+						if (std::fabs(vx - static_cast<float>(kObj2Dx)) <= 0.5f &&
+							std::fabs(vy - static_cast<float>(kObj2Dy)) <= 0.5f &&
+							(std::fabs(vx - std::round(vx * 0.5f) * 2.0f) >= 0.5f ||
+								std::fabs(vy - std::round(vy * 0.5f) * 2.0f) >= 0.5f))
+							++obj2HalfPelBlocks;
+					}
+				}
+				Assert::IsTrue(panBlocks >= 32,
+					(std::wstring(label) + L": negative control failed - expected >= 32 trusted pan (+10,+4) blocks, got " +
+						std::to_wstring(panBlocks)).c_str());
+				Assert::IsTrue(obj1Blocks >= 2,
+					(std::wstring(label) + L": negative control failed - expected >= 2 trusted object-1 (-6,+6) blocks, got " +
+						std::to_wstring(obj1Blocks)).c_str());
+				Assert::IsTrue(obj2HalfPelBlocks >= 2,
+					(std::wstring(label) + L": negative control failed - expected >= 2 trusted half-pel (+5,+3) blocks, got " +
+						std::to_wstring(obj2HalfPelBlocks)).c_str());
+			};
+
+			auto makeSettings = [](bool globalTwo) -> Dejudder::Settings
+			{
+				Dejudder::Settings s = DejudderTestSettings();
+				s.globalPrior = true;
+				s.globalTwo = globalTwo;
+				s.estCandidates = true;   // enables REFINE_BODY second sweep + temporal prior on pair 2
+				s.estLambda = 0.5f;
+				s.estGate = false;
+				s.estQpel = false;
+				s.opticalFlow = false;
+				s.hostReadable = true;
+				return s;
+			};
+
+			// 1. globalTwo = false (L1_NSTARTS = 3, ZGROUP = 6): bit-exact parity of parallel SEARCH_BODY +
+			// REFINE_BODY vs SEARCH_BODY_SERIAL + REFINE_BODY_SERIAL across pair 1 (unseeded) and pair 2 (use_temporal != 0).
+			DejudderField parPair1Field, parPair1Fwd, serPair1Field, serPair2Field;
+			{
+				const Dejudder::Settings s = makeSettings(false);
+				Dejudder::MotionWarp parallelWarp(fixture.Log(), gpu, s);
+				Dejudder::MotionWarp serialWarp(fixture.Log(), gpu, s);
+				parallelWarp.SetSerialSearchForTest(false);
+				serialWarp.SetSerialSearchForTest(true);
+				parallelWarp.SetPassTiming(true, true);
+				serialWarp.SetPassTiming(true, true);
+
+				// Pair 1 (f0 -> f1, use_temporal == 0)
+				Assert::IsTrue(parallelWarp.Estimate(f0.planes, f1.planes), L"GEM-139 single-global parallel pair 1");
+				Assert::IsTrue(serialWarp.Estimate(f0.planes, f1.planes), L"GEM-139 single-global serial pair 1");
+				Assert::AreEqual(size_t(1), parallelWarp.PassMs().count("VideoProcessor de-judder: block search"),
+					L"parallelWarp must dispatch parallel SEARCH_BODY");
+				Assert::AreEqual(size_t(1), parallelWarp.PassMs().count("VideoProcessor de-judder: second sweep (11a E1)"),
+					L"parallelWarp must dispatch parallel REFINE_BODY");
+				Assert::AreEqual(size_t(1), serialWarp.PassMs().count("VideoProcessor de-judder: block search (serial reference)"),
+					L"serialWarp must dispatch SEARCH_BODY_SERIAL");
+				Assert::AreEqual(size_t(1), serialWarp.PassMs().count("VideoProcessor de-judder: second sweep (11a E1, serial reference)"),
+					L"serialWarp must dispatch REFINE_BODY_SERIAL");
+				pl_gpu_finish(gpu);
+
+				parPair1Field = DownloadField(gpu, parallelWarp);
+				serPair1Field = DownloadField(gpu, serialWarp);
+				parPair1Fwd = DownloadField(gpu, parallelWarp, parallelWarp.Forward());
+				const DejudderField serPair1Fwd = DownloadField(gpu, serialWarp, serialWarp.Forward());
+				const DejudderField parPair1Bwd = DownloadField(gpu, parallelWarp, parallelWarp.Backward());
+				const DejudderField serPair1Bwd = DownloadField(gpu, serialWarp, serialWarp.Backward());
+
+				assertBitExact(parPair1Field, serPair1Field, L"GEM-139 globalTwo=false pair 1 Field");
+				assertBitExact(parPair1Fwd, serPair1Fwd, L"GEM-139 globalTwo=false pair 1 Forward");
+				assertBitExact(parPair1Bwd, serPair1Bwd, L"GEM-139 globalTwo=false pair 1 Backward");
+				assertNonTrivialRegions(parPair1Field, L"GEM-139 globalTwo=false pair 1");
+
+				// Pair 2 (f1 -> f2, use_temporal != 0 in both SEARCH_BODY and REFINE_BODY)
+				Assert::IsTrue(parallelWarp.Estimate(f1.planes, f2.planes), L"GEM-139 single-global parallel pair 2");
+				Assert::IsTrue(serialWarp.Estimate(f1.planes, f2.planes), L"GEM-139 single-global serial pair 2");
+				pl_gpu_finish(gpu);
+
+				const DejudderField parPair2Field = DownloadField(gpu, parallelWarp);
+				serPair2Field = DownloadField(gpu, serialWarp);
+				const DejudderField parPair2Fwd = DownloadField(gpu, parallelWarp, parallelWarp.Forward());
+				const DejudderField serPair2Fwd = DownloadField(gpu, serialWarp, serialWarp.Forward());
+				const DejudderField parPair2Bwd = DownloadField(gpu, parallelWarp, parallelWarp.Backward());
+				const DejudderField serPair2Bwd = DownloadField(gpu, serialWarp, serialWarp.Backward());
+
+				assertBitExact(parPair2Field, serPair2Field, L"GEM-139 globalTwo=false pair 2 Field (temporal)");
+				assertBitExact(parPair2Fwd, serPair2Fwd, L"GEM-139 globalTwo=false pair 2 Forward (temporal)");
+				assertBitExact(parPair2Bwd, serPair2Bwd, L"GEM-139 globalTwo=false pair 2 Backward (temporal)");
+				assertNonTrivialRegions(parPair2Field, L"GEM-139 globalTwo=false pair 2 (temporal)");
+			}
+
+			// 2a. globalTwo = true (L1_NSTARTS = 4, ZGROUP = 7) seeded full-field bit-exactness vs serial reference:
+			// SEARCH_BODY_SERIAL has only one global candidate (two = settings.globalTwo && settings.globalPrior && !serialSearchForTest).
+			// Supplying the matching pan seed gives both paths the exact same globalVector while parallelWarp compiles and runs
+			// the #define GLOBAL_TWO 1 (L1_NSTARTS = 4, ZGROUP = 7) shader with globalSecond = 0 across pairs 1 and 2.
+			{
+				const Dejudder::Settings sTwo = makeSettings(true);
+				Dejudder::MotionWarp parTwoSeeded(fixture.Log(), gpu, sTwo);
+				Dejudder::MotionWarp serSeeded(fixture.Log(), gpu, sTwo);
+				parTwoSeeded.SetSerialSearchForTest(false);
+				serSeeded.SetSerialSearchForTest(true);
+				const float panSeed[2][4] = {
+					{ static_cast<float>(kPanX) / 8.0f, static_cast<float>(kPanY) / 8.0f, 0.5f, 1.0f },
+					{ -static_cast<float>(kPanX) / 8.0f, -static_cast<float>(kPanY) / 8.0f, 0.5f, 1.0f }
+				};
+
+				for (int pair = 0; pair < 2; ++pair)
+				{
+					const Dejudder::Planes& pa = pair == 0 ? f0.planes : f1.planes;
+					const Dejudder::Planes& pb = pair == 0 ? f1.planes : f2.planes;
+					parTwoSeeded.SetSearchSeed(panSeed);
+					serSeeded.SetSearchSeed(panSeed);
+					Assert::IsTrue(parTwoSeeded.Estimate(pa, pb), L"GEM-139 globalTwo=true seeded parallel estimate");
+					Assert::IsTrue(serSeeded.Estimate(pa, pb), L"GEM-139 globalTwo=true seeded serial estimate");
+					Assert::IsTrue(parTwoSeeded.SearchSeedUsed(), L"seeded parallel GLOBAL_TWO must accept pan seed");
+					Assert::IsTrue(serSeeded.SearchSeedUsed(), L"seeded serial reference must accept pan seed");
+					pl_gpu_finish(gpu);
+
+					const std::wstring tag = pair == 0 ? L"GEM-139 globalTwo=true seeded pair 1" : L"GEM-139 globalTwo=true seeded pair 2 (temporal)";
+					assertBitExact(DownloadField(gpu, parTwoSeeded), DownloadField(gpu, serSeeded), (tag + L" Field").c_str());
+					assertBitExact(DownloadField(gpu, parTwoSeeded, parTwoSeeded.Forward()),
+						DownloadField(gpu, serSeeded, serSeeded.Forward()), (tag + L" Forward").c_str());
+					assertBitExact(DownloadField(gpu, parTwoSeeded, parTwoSeeded.Backward()),
+						DownloadField(gpu, serSeeded, serSeeded.Backward()), (tag + L" Backward").c_str());
+				}
+			}
+
+			// 2b. globalTwo = true (L1_NSTARTS = 4, ZGROUP = 7) unseeded on the exact same 3-frame sequence:
+			// globalSecond is active (have_g2 == true, exercising L1 k == 3, l1_tab[3*361..], pk_s[3*NT..], ZGROUP = 7);
+			// all three regions must track cleanly and interior true-match blocks must remain bit-exact with serialWarp.
+			{
+				const Dejudder::Settings sTwo = makeSettings(true);
+				Dejudder::MotionWarp parTwoUnseeded(fixture.Log(), gpu, sTwo);
+				parTwoUnseeded.SetSerialSearchForTest(false);
+
+				const std::pair<int, int> interiorCheckBlocks[] = {
+					{ 9, 1 }, { 10, 1 }, { 11, 1 }, { 12, 1 },   // background pan (+10, +4) interior
+					{ 4, 3 },                                    // Object 1 (-6, +6) interior
+					{ 10, 5 }                                    // Object 2 (+5, +3) half-pel interior
+				};
+				for (int pair = 0; pair < 2; ++pair)
+				{
+					const Dejudder::Planes& pa = pair == 0 ? f0.planes : f1.planes;
+					const Dejudder::Planes& pb = pair == 0 ? f1.planes : f2.planes;
+					Assert::IsTrue(parTwoUnseeded.Estimate(pa, pb), L"GEM-139 globalTwo=true unseeded estimate");
+					pl_gpu_finish(gpu);
+					const DejudderField parField = DownloadField(gpu, parTwoUnseeded);
+					const DejudderField& serRef = pair == 0 ? serPair1Field : serPair2Field;
+					const std::wstring tag = pair == 0 ? L"GEM-139 globalTwo=true unseeded pair 1" : L"GEM-139 globalTwo=true unseeded pair 2 (temporal)";
+					assertNonTrivialRegions(parField, tag.c_str());
+					for (const auto& bc : interiorCheckBlocks)
+					{
+						const size_t base = (static_cast<size_t>(bc.second) * parField.blocksX + bc.first) * 4u;
+						for (size_t ch = 0; ch < 4u; ++ch)
+						{
+							Assert::IsTrue(parField.texels[base + ch] == serRef.texels[base + ch],
+								(tag + L": interior block (" + std::to_wstring(bc.first) + L"," + std::to_wstring(bc.second) +
+									L") ch=" + std::to_wstring(ch) + L" diverged from serial (" +
+									std::to_wstring(parField.texels[base + ch]) + L" vs " +
+									std::to_wstring(serRef.texels[base + ch]) + L")").c_str());
+						}
+					}
+				}
+			}
+
+			// 2c. Genuine two-global beyond-coarse-range (512x128, top +128 px / bottom -128 px, coarseRange = 3 -> +-96 px):
+			// proves GLOBAL_TWO's 4th L1 start (k == 3, l1_tab[3*361..], pk_s[3*NT..], s_centres[++nstarts], ZGROUP = 7)
+			// genuinely wins in GEM-139's refactored SEARCH_BODY across pairs 1 & 2, with same-input globalTwo = false negative control.
+			{
+				constexpr int kTwoW = 512, kTwoH = 128, kSplitY = 64, kBigDx = 128;
+				auto makeSplitFrame = [&](int t) -> DejudderFrame
+				{
+					return MakeDejudderFrame(kTwoW, kTwoH,
+						[&](int x, int y) { return y < kSplitY ? DejudderTexture(x - kBigDx * t, y, 3) : DejudderTexture(x + kBigDx * t, y, 9); },
+						[&](int x, int y, int c) { return DejudderTexture((x - (y < kSplitY ? kBigDx : -kBigDx) * t / 2) * 2, y, 7 + c); });
+				};
+				DejudderGpuPlanes t0, t1, t2;
+				UploadDejudderFrame(gpu, makeSplitFrame(0), t0);
+				UploadDejudderFrame(gpu, makeSplitFrame(1), t1);
+				UploadDejudderFrame(gpu, makeSplitFrame(2), t2);
+
+				auto countHalfMatched = [&](const DejudderField& field, bool top) -> std::pair<int, int>
+				{
+					int matched = 0, total = 0;
+					const float want = top ? static_cast<float>(kBigDx) : -static_cast<float>(kBigDx);
+					const int by0 = top ? 1 : 5;
+					const int by1 = top ? 3 : 7;
+					for (int by = by0; by < by1; ++by)
+						for (int bx = 9; bx <= 22; ++bx)
+						{
+							++total;
+							if (field.trusted(bx, by) &&
+								std::fabs(field.vx(bx, by) - want) <= 0.5f &&
+								std::fabs(field.vy(bx, by)) <= 0.5f)
+								++matched;
+						}
+					return { matched, total };
+				};
+
+				Dejudder::Settings sTwoOn = makeSettings(true);
+				sTwoOn.minTrustedShare = 0.0f;
+				Dejudder::MotionWarp twoOn(fixture.Log(), gpu, sTwoOn);
+				for (int pair = 0; pair < 2; ++pair)
+				{
+					Assert::IsTrue(twoOn.Estimate(pair == 0 ? t0.planes : t1.planes, pair == 0 ? t1.planes : t2.planes),
+						L"GEM-139 beyond-coarse globalTwo=true estimate");
+					pl_gpu_finish(gpu);
+					const DejudderField field = DownloadField(gpu, twoOn);
+					const auto top = countHalfMatched(field, true);
+					const auto bot = countHalfMatched(field, false);
+					Assert::IsTrue(top.first * 100 >= top.second * 90 && bot.first * 100 >= bot.second * 90,
+						(L"GEM-139 globalTwo=true must track both +128/-128 halves (pair " + std::to_wstring(pair + 1) +
+							L": top " + std::to_wstring(top.first) + L"/" + std::to_wstring(top.second) +
+							L", bottom " + std::to_wstring(bot.first) + L"/" + std::to_wstring(bot.second) + L")").c_str());
+				}
+
+				// Mandatory same-input negative control (Rule 3): globalTwo = false on exact same planes must miss at least one half.
+				Dejudder::Settings sTwoOff = makeSettings(false);
+				sTwoOff.minTrustedShare = 0.0f;
+				Dejudder::MotionWarp twoOff(fixture.Log(), gpu, sTwoOff);
+				Assert::IsTrue(twoOff.Estimate(t0.planes, t1.planes), L"GEM-139 beyond-coarse globalTwo=false negative control");
+				pl_gpu_finish(gpu);
+				const DejudderField offField = DownloadField(gpu, twoOff);
+				const auto offTop = countHalfMatched(offField, true);
+				const auto offBot = countHalfMatched(offField, false);
+				Assert::IsTrue(offTop.first * 100 < offTop.second * 50 || offBot.first * 100 < offBot.second * 50,
+					(L"negative control: globalTwo=false must miss at least one beyond-coarse half (top " +
+						std::to_wstring(offTop.first) + L"/" + std::to_wstring(offTop.second) +
+						L", bottom " + std::to_wstring(offBot.first) + L"/" + std::to_wstring(offBot.second) + L")").c_str());
+			}
+
+			// 3. Mandatory same-input negative control (Rule 3): static (f0, f0) on the exact same f0 plane
+			// must produce a strictly different Field() and Forward() from moving pair 1 (f0, f1), proving
+			// DownloadField + exact texel comparison catches real field differences and is not vacuous.
+			{
+				Dejudder::MotionWarp staticWarp(fixture.Log(), gpu, makeSettings(false));
+				Assert::IsTrue(staticWarp.Estimate(f0.planes, f0.planes), L"negative control static (f0, f0) estimate");
+				pl_gpu_finish(gpu);
+				const DejudderField staticField = DownloadField(gpu, staticWarp);
+				const DejudderField staticFwd = DownloadField(gpu, staticWarp, staticWarp.Forward());
+				Assert::IsTrue(parPair1Field.texels != staticField.texels,
+					L"negative control: moving pair (f0, f1) Field() must differ from static (f0, f0) Field()");
+				Assert::IsTrue(parPair1Fwd.texels != staticFwd.texels,
+					L"negative control: moving pair (f0, f1) Forward() must differ from static (f0, f0) Forward()");
+			}
+
+			AssertCleanLibplaceboLog(log, "McSearchParallelMatchesSerialSearchBitIdenticallyAcrossSingleAndTwoGlobal");
+		}
 	};
 }
