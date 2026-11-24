@@ -14,9 +14,14 @@
 
 #include <Windows.h>
 
+#include <algorithm>
+#include <condition_variable>
 #include <cstdio>
+#include <deque>
 #include <fstream>
 #include <iterator>
+#include <thread>
+#include <vector>
 
 namespace LedDrive
 {
@@ -139,8 +144,262 @@ namespace LedDrive
 		return p;
 	}
 
-	DynamicDriveHost::DynamicDriveHost(std::mutex& rendererStateMutex) : stateMutex(rendererStateMutex)
+	// GEM-190: single background lifecycle worker so Update() (called under renderer stateMutex)
+	// never blocks on LedDriveModule::Stop() while still guaranteeing ordered serial-port handoff
+	// (previous->Stop() always completes before a replacement module->Start() opens the port).
+	// Lock ordering: stateMutex -> LifecycleWorker::mutex (NEVER reverse). Stop()/Start() and final
+	// shared_ptr<LedDriveModule> destruction always run strictly outside LifecycleWorker::mutex.
+	struct DynamicDriveHost::LifecycleWorker
 	{
+		enum class TaskKind { Stop, Start };
+
+		struct Task
+		{
+			TaskKind kind;
+			std::shared_ptr<LedDriveModule> module;
+			uint64_t seq;
+		};
+
+		std::mutex mutex;
+		std::condition_variable workCv;
+		std::condition_variable idleCv;
+		std::deque<Task> queue;
+		std::shared_ptr<LedDriveModule> activeModule;
+		TaskKind activeKind = TaskKind::Stop;
+		uint64_t activeSeq = 0;
+		uint64_t nextSeq = 1;
+		bool shuttingDown = false;
+		std::thread thread;
+
+		void EnsureStartedLocked()
+		{
+			if (!thread.joinable() && !shuttingDown)
+				thread = std::thread(&LifecycleWorker::Run, this);
+		}
+
+		// Non-blocking (safe with stateMutex held): if `target` has a queued Start that has not run
+		// yet, cancels it instead of enqueueing a redundant Stop; otherwise queues Stop(target).
+		void EnqueueStop(std::shared_ptr<LedDriveModule> target)
+		{
+			if (!target)
+				return;
+			std::shared_ptr<LedDriveModule> cancelled;
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				for (auto it = queue.begin(); it != queue.end(); ++it)
+				{
+					if (it->kind == TaskKind::Start && it->module == target)
+					{
+						cancelled = std::move(it->module);
+						queue.erase(it);
+						idleCv.notify_all();
+						break;
+					}
+				}
+				if (!cancelled && !shuttingDown)
+				{
+					EnsureStartedLocked();
+					queue.push_back(Task{ TaskKind::Stop, std::move(target), nextSeq++ });
+					workCv.notify_one();
+				}
+			}
+			cancelled.reset();
+			target.reset();
+		}
+
+		// Non-blocking (safe with stateMutex held): when prior Stop/Start work is queued or in
+		// flight, queues Start(target) strictly behind it and returns true; returns false when idle
+		// so the caller may call target->Start() synchronously.
+		bool EnqueueStartIfBusy(const std::shared_ptr<LedDriveModule>& target)
+		{
+			if (!target)
+				return false;
+			std::lock_guard<std::mutex> lock(mutex);
+			if (shuttingDown || (!activeModule && queue.empty()))
+				return false;
+			EnsureStartedLocked();
+			queue.push_back(Task{ TaskKind::Start, target, nextSeq++ });
+			workCv.notify_one();
+			return true;
+		}
+
+		// Called OUTSIDE stateMutex before target->Stop(): cancels a queued Start (returning true so
+		// the caller skips Stop()) or waits out an in-flight Start() so Stop() cannot race ahead of it.
+		bool CancelOrWaitStart(const std::shared_ptr<LedDriveModule>& target)
+		{
+			if (!target)
+				return false;
+			std::shared_ptr<LedDriveModule> cancelled;
+			{
+				std::unique_lock<std::mutex> lock(mutex);
+				for (auto it = queue.begin(); it != queue.end(); ++it)
+				{
+					if (it->kind == TaskKind::Start && it->module == target)
+					{
+						cancelled = std::move(it->module);
+						queue.erase(it);
+						idleCv.notify_all();
+						break;
+					}
+				}
+				if (!cancelled)
+				{
+					idleCv.wait(lock, [this, &target]
+					{
+						return !(activeKind == TaskKind::Start && activeModule == target);
+					});
+				}
+			}
+			const bool wasCancelled = cancelled != nullptr;
+			cancelled.reset();
+			return wasCancelled;
+		}
+
+		// Called OUTSIDE stateMutex: waits until every task enqueued at or before this call finishes.
+		void Flush()
+		{
+			std::unique_lock<std::mutex> lock(mutex);
+			const uint64_t targetSeq = nextSeq - 1;
+			if (targetSeq == 0)
+				return;
+			idleCv.wait(lock, [this, targetSeq]
+			{
+				const bool activePending = activeModule != nullptr && activeSeq <= targetSeq;
+				const bool queuedPending = !queue.empty() && queue.front().seq <= targetSeq;
+				return !activePending && !queuedPending;
+			});
+		}
+
+		// Called by StopForShutdown WITHOUT stateMutex: cancels all queued Start tasks, waits out any
+		// in-flight Start() (thread spawn only, no serial I/O), and returns all active/queued Stop
+		// modules (plus any just-finished in-flight Start) so the caller stops them outside all locks.
+		std::vector<std::shared_ptr<LedDriveModule>> CancelPendingStartsAndCollectActive()
+		{
+			std::vector<std::shared_ptr<LedDriveModule>> toStop;
+			std::vector<std::shared_ptr<LedDriveModule>> releasedOutsideLock;
+			const auto addUnique = [&toStop](const std::shared_ptr<LedDriveModule>& mod)
+			{
+				if (mod && std::find(toStop.begin(), toStop.end(), mod) == toStop.end())
+					toStop.push_back(mod);
+			};
+			{
+				std::unique_lock<std::mutex> lock(mutex);
+				for (;;)
+				{
+					for (auto it = queue.begin(); it != queue.end(); )
+					{
+						if (it->kind == TaskKind::Start)
+						{
+							releasedOutsideLock.push_back(std::move(it->module));
+							it = queue.erase(it);
+						}
+						else
+							++it;
+					}
+					if (activeModule && activeKind == TaskKind::Start)
+					{
+						std::shared_ptr<LedDriveModule> starting = activeModule;
+						addUnique(starting);
+						idleCv.wait(lock, [this, &starting]
+						{
+							return !(activeKind == TaskKind::Start && activeModule == starting);
+						});
+						continue;
+					}
+					break;
+				}
+				if (activeModule)
+					addUnique(activeModule);
+				for (const Task& task : queue)
+					if (task.kind == TaskKind::Stop)
+						addUnique(task.module);
+				idleCv.notify_all();
+			}
+			releasedOutsideLock.clear();
+			return toStop;
+		}
+
+		// Called by ~DynamicDriveHost(): cancels queued Start tasks, drains queued/in-flight Stop
+		// tasks so running modules restore full light, and joins the worker thread cleanly.
+		void Shutdown()
+		{
+			std::thread workerToJoin;
+			std::vector<std::shared_ptr<LedDriveModule>> releasedOutsideLock;
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				shuttingDown = true;
+				for (auto it = queue.begin(); it != queue.end(); )
+				{
+					if (it->kind == TaskKind::Start)
+					{
+						releasedOutsideLock.push_back(std::move(it->module));
+						it = queue.erase(it);
+					}
+					else
+						++it;
+				}
+				workerToJoin = std::move(thread);
+				workCv.notify_all();
+				idleCv.notify_all();
+			}
+			releasedOutsideLock.clear();
+			if (workerToJoin.joinable())
+				workerToJoin.join();
+		}
+
+		void Run()
+		{
+			std::unique_lock<std::mutex> lock(mutex);
+			for (;;)
+			{
+				workCv.wait(lock, [this] { return !queue.empty() || shuttingDown; });
+				if (queue.empty())
+				{
+					if (shuttingDown)
+						break;
+					continue;
+				}
+				Task task = std::move(queue.front());
+				queue.pop_front();
+				activeKind = task.kind;
+				activeModule = task.module;
+				activeSeq = task.seq;
+				lock.unlock();
+
+				if (task.kind == TaskKind::Stop)
+					task.module->Stop();
+				else
+					task.module->Start();
+
+				std::shared_ptr<LedDriveModule> releaseOutsideLock;
+				lock.lock();
+				releaseOutsideLock = std::move(activeModule);
+				activeSeq = 0;
+				idleCv.notify_all();
+				lock.unlock();
+				// Release references strictly outside mutex (~LedDriveModule calls Stop()).
+				task.module.reset();
+				releaseOutsideLock.reset();
+				lock.lock();
+			}
+		}
+	};
+
+	DynamicDriveHost::DynamicDriveHost(std::mutex& rendererStateMutex) :
+		stateMutex(rendererStateMutex),
+		lifecycleWorker(std::make_unique<LifecycleWorker>())
+	{
+	}
+
+	DynamicDriveHost::~DynamicDriveHost()
+	{
+		if (lifecycleWorker)
+			lifecycleWorker->Shutdown();
+	}
+
+	std::shared_ptr<LedDriveModule> DynamicDriveHost::Module() const
+	{
+		return std::atomic_load(&module);
 	}
 
 	void DynamicDriveHost::ApplySnapshot(const std::shared_ptr<const ConfigFile>& snapshotConfiguration,
@@ -167,13 +426,14 @@ namespace LedDrive
 			if (!context.projectorAllowed)
 				stopped = DetachLocked(context);
 			else
-				attached = module;
+				attached = std::atomic_load(&module);
 			publishedParams = params;
 			publishedRejection = rejection;
 		}
 		if (stopped)
 		{
-			stopped->Stop();
+			if (!lifecycleWorker->CancelOrWaitStart(stopped))
+				stopped->Stop();
 			DebugLog::Log("Dynamic Drive: stopped on attach (slot drive.projector_control off: Original pathway or pipeline_slots_off)");
 		}
 		if (!context.frame)
@@ -193,10 +453,11 @@ namespace LedDrive
 		// VP Renderer filter (2026-10-17): in the filter process (source=file) the running LED
 		// drive is held for the next graph instead of returning the projector to full light; the
 		// capture app never gets here with a hold-over.
-		if (holdoverMs > 0 && module && !suspended)
+		lifecycleWorker->Flush();
+		const std::shared_ptr<LedDriveModule> held = std::atomic_load(&module);
+		if (holdoverMs > 0 && held && !suspended)
 		{
-			std::shared_ptr<LedDriveModule> held = module;
-			module.reset();
+			std::atomic_store(&module, std::shared_ptr<LedDriveModule>());
 			if (context.frame)
 				context.frame->PublishModule(std::shared_ptr<LedDriveModule>());
 			ProcessLedDriveHoldover().Park(held, signature, holdoverMs);
@@ -205,8 +466,8 @@ namespace LedDrive
 
 	std::shared_ptr<LedDriveModule> DynamicDriveHost::DetachLocked(const HostContext& context)
 	{
-		std::shared_ptr<LedDriveModule> previous = module;
-		module.reset();
+		std::shared_ptr<LedDriveModule> previous = std::atomic_load(&module);
+		std::atomic_store(&module, std::shared_ptr<LedDriveModule>());
 		signature.clear();
 		if (context.frame)
 			context.frame->Clear();
@@ -241,7 +502,14 @@ namespace LedDrive
 		// Bug hunt 31 H1: a rejected configuration turns the module and the gamma boost off; that is
 		// shown (the "Dynamic Drive" fallback entry and status line), never log-only. A valid Apply
 		// releases it.
-		rejection = valid ? std::string() : (validationError.empty() ? std::string("invalid settings") : validationError);
+		const std::string nextRejection = valid ? std::string() :
+			(validationError.empty() ? std::string("invalid settings") : validationError);
+		if (nextRejection != rejection)
+		{
+			rejection = nextRejection;
+			std::atomic_store(&statusRejection, rejection.empty() ?
+				std::shared_ptr<const std::string>() : std::make_shared<const std::string>(rejection));
+		}
 		if (context.frame)
 			context.frame->PublishRejection(rejection);
 		// The gamma boost applies even with the module off or in log_only.
@@ -269,7 +537,8 @@ namespace LedDrive
 		const bool projectorAllowed = context.projectorAllowed && ConfigAllowsProjectorControl(config) &&
 			(context.frame != nullptr || !Vpv::RunningPathway::Original());
 		const LedDriveConfig& led = boostConfig;
-		if (next == signature && (module != nullptr) == (valid && projectorAllowed && led.enabled))
+		std::shared_ptr<LedDriveModule> current = std::atomic_load(&module);
+		if (next == signature && (current != nullptr) == (valid && projectorAllowed && led.enabled))
 			return;
 		// A broken LED profile never stops VP: it is left out (built-in values plus the main
 		// settings) and said once per change.
@@ -279,20 +548,24 @@ namespace LedDrive
 				profileProblem.c_str());
 		// Tuning and script/compensate switches go to the running module, so the LED carries on
 		// from its level instead of restoring full light.
-		if (valid && projectorAllowed && led.enabled && module &&
-			module->Reconfigure(ReadProjectorConfig(config), led))
+		if (valid && projectorAllowed && led.enabled && current &&
+			current->Reconfigure(ReadProjectorConfig(config), led))
 		{
 			signature = next;
 			if (context.frame)
-				context.frame->PublishObserver(module, false);
+				context.frame->PublishObserver(current, false);
 			return;
 		}
 		signature = next;
-		std::shared_ptr<LedDriveModule> previous = module;
-		module.reset();
+		std::shared_ptr<LedDriveModule> previous = std::move(current);
+		const bool hadPrevious = previous != nullptr;
+		std::atomic_store(&module, std::shared_ptr<LedDriveModule>());
 		if (context.frame)
 			context.frame->Clear();
-		if (previous) previous->Stop();
+		// GEM-190: enqueue Stop() asynchronously on lifecycleWorker so stateMutex is never held
+		// across blocking serial-port teardown / worker join.
+		if (previous)
+			lifecycleWorker->EnqueueStop(std::move(previous));
 		if (!valid)
 		{
 			DebugLog::Log("Dynamic Drive: configuration rejected (%s); module and gamma boost off",
@@ -301,27 +574,32 @@ namespace LedDrive
 		}
 		if (!led.enabled || !projectorAllowed)
 		{
-			if (previous || (led.enabled && !projectorAllowed))
+			if (hadPrevious || (led.enabled && !projectorAllowed))
 				DebugLog::Log("Dynamic Drive: disabled%s", projectorAllowed ? "" :
 					" (slot drive.projector_control off: Original pathway or pipeline_slots_off)");
 			return;
 		}
 		// VP Renderer filter (2026-10-17): a drive the previous file's renderer held (same LED
 		// settings) carries on; nothing is held in the capture app.
-		module = ProcessLedDriveHoldover().Adopt(next);
-		if (!module)
+		std::shared_ptr<LedDriveModule> nextModule = ProcessLedDriveHoldover().Adopt(next);
+		if (!nextModule)
 		{
 			// The serial port goes through the LED drive arbiter: VideoProcessor.exe and the
 			// filter never drive the projector at the same time.
-			module = std::make_shared<LedDriveModule>(ReadProjectorConfig(config), led, ArbitratedSerialPortFactory());
-			module->Start();
+			nextModule = std::make_shared<LedDriveModule>(ReadProjectorConfig(config), led, ArbitratedSerialPortFactory());
+			// GEM-190: if a prior Stop() is still in flight on lifecycleWorker, queue Start()
+			// behind it so the previous module closes the port before nextModule opens it;
+			// otherwise start synchronously (cold start).
+			if (!lifecycleWorker->EnqueueStartIfBusy(nextModule))
+				nextModule->Start();
 		}
+		std::atomic_store(&module, nextModule);
 		if (context.frame)
 		{
-			context.frame->PublishModule(module);
+			context.frame->PublishModule(nextModule);
 			// The module's look-ahead watches the queued-frame walk; the aliasing pointer keeps
 			// the module alive while the walk holds it.
-			context.frame->PublishObserver(module, true);
+			context.frame->PublishObserver(nextModule, true);
 		}
 	}
 
@@ -332,8 +610,9 @@ namespace LedDrive
 		{
 			std::unique_lock<std::mutex> guard(stateMutex);
 			bool playing = false;
-			if (module)
-				playing = module->MsSinceLastFrame() < 2000.0;
+			const std::shared_ptr<LedDriveModule> current = std::atomic_load(&module);
+			if (current)
+				playing = current->MsSinceLastFrame() < 2000.0;
 			else if (context.frame)
 			{
 				const uint64_t last = context.lastRenderStartedTick;
@@ -347,9 +626,12 @@ namespace LedDrive
 			stopped = DetachLocked(context);
 			suspended = true;
 		}
+		const bool cancelledBeforeStart = stopped && lifecycleWorker->CancelOrWaitStart(stopped);
+		lifecycleWorker->Flush();
 		if (stopped)
 		{
-			stopped->Stop();
+			if (!cancelledBeforeStart)
+				stopped->Stop();
 			DebugLog::Log("Dynamic Drive: stopped for the RS-232 connection test");
 		}
 		return true;
@@ -357,24 +639,28 @@ namespace LedDrive
 
 	// Integration 2026-10-17: the forced shutdown's LED stop. The render state lock may be held
 	// by the blocked retirement, so the module comes from the render loop's atomic copy (or the
-	// host's when the lock is free at once). Stop() restores full light.
+	// host's atomic copy without waiting on stateMutex), plus any module currently stopping on
+	// lifecycleWorker. Stop() restores full light.
 	bool DynamicDriveHost::StopForShutdown(const HostContext& context)
 	{
+		std::vector<std::shared_ptr<LedDriveModule>> toStop =
+			lifecycleWorker->CancelPendingStartsAndCollectActive();
 		std::shared_ptr<LedDriveModule> running;
 		if (context.frame)
 			running = context.frame->Module();
 		if (!running)
-		{
-			std::unique_lock<std::mutex> guard(stateMutex, std::try_to_lock);
-			if (guard.owns_lock())
-				running = module;
-		}
-		if (!running)
+			running = std::atomic_load(&module);
+		if (running && std::find(toStop.begin(), toStop.end(), running) == toStop.end())
+			toStop.push_back(std::move(running));
+		if (toStop.empty())
 			return true;
 		DebugLog::Log("Dynamic Drive: stopping for the forced shutdown (restoring full light)");
 		// Bug hunt 2 2026-10-17: the restore's result (light, and LDMM / CNTR when sent), so the
 		// caller can say "not confirmed" when it was not.
-		const bool confirmed = running->Stop();
+		bool confirmed = true;
+		for (const std::shared_ptr<LedDriveModule>& target : toStop)
+			if (!target->Stop())
+				confirmed = false;
 		DebugLog::Log("Dynamic Drive: stopped for the forced shutdown%s",
 			confirmed ? "" : " (restore not confirmed)");
 		return confirmed;
@@ -388,10 +674,12 @@ namespace LedDrive
 		std::shared_ptr<LedDriveModule> stale;
 		{
 			std::unique_lock<std::mutex> guard(stateMutex);
-			if (!suspended && module)
+			if (!suspended && std::atomic_load(&module))
 				stale = DetachLocked(context);
 		}
-		if (stale)
+		const bool cancelledBeforeStart = stale && lifecycleWorker->CancelOrWaitStart(stale);
+		lifecycleWorker->Flush();
+		if (stale && !cancelledBeforeStart)
 			stale->Stop();   // closes the port before the new drive opens it
 		std::unique_lock<std::mutex> guard(stateMutex);
 		const bool wasSuspended = suspended;
@@ -411,14 +699,16 @@ namespace LedDrive
 		std::shared_ptr<LedDriveModule> stopped;
 		{
 			std::unique_lock<std::mutex> guard(stateMutex);
-			if (module)
+			if (std::atomic_load(&module))
 			{
 				stopped = DetachLocked(context);
 				suspended = true;
 				calibrationSuspended = true;
 			}
 		}
-		if (stopped)
+		const bool cancelledBeforeStart = stopped && lifecycleWorker->CancelOrWaitStart(stopped);
+		lifecycleWorker->Flush();
+		if (stopped && !cancelledBeforeStart)
 			stopped->Stop();
 		return stopped != nullptr;
 	}
@@ -433,10 +723,13 @@ namespace LedDrive
 
 	std::string DynamicDriveHost::StatusText() const
 	{
-		const std::shared_ptr<LedDriveModule> led = module;
+		const std::shared_ptr<LedDriveModule> led = std::atomic_load(&module);
 		if (!led)
-			return rejection.empty() ? std::string("off") :
-				"off: configuration rejected (" + rejection + "); LED drive and gamma boost off";
+		{
+			const std::shared_ptr<const std::string> currentRejection = std::atomic_load(&statusRejection);
+			return (!currentRejection || currentRejection->empty()) ? std::string("off") :
+				"off: configuration rejected (" + *currentRejection + "); LED drive and gamma boost off";
+		}
 		const LedDriveConfig config = led->Config();
 		const DriverStatus driver = led->ProjectorStatus();
 		const CompensationGain gain = led->CurrentGain();

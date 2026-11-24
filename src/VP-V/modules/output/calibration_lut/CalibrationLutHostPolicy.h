@@ -5,6 +5,7 @@
 #include <dxgiformat.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <string>
 
@@ -151,14 +152,9 @@ namespace CalibrationLutHost
 		}
 
 		// VP's calibration applied a finished LUT (any thread).
-		void RequestCalibrationReload() { calibrationReload = true; }
+		void RequestCalibrationReload() { calibrationReload.store(true, std::memory_order_release); }
 		// Render thread: take the request (true once per request).
-		bool TakeCalibrationReload()
-		{
-			const bool wanted = calibrationReload;
-			calibrationReload = false;
-			return wanted;
-		}
+		bool TakeCalibrationReload() { return calibrationReload.exchange(false, std::memory_order_acq_rel); }
 		static const char* CalibrationReloadNotice()
 		{
 			return "Calibration LUT loaded from the calibration run (no Config Apply)";
@@ -170,7 +166,7 @@ namespace CalibrationLutHost
 		uint64_t observedBytes = 0;
 		uint64_t observedWriteTime = 0;
 		uint64_t nextProbeMs = 0;
-		bool calibrationReload = false;
+		std::atomic<bool> calibrationReload{ false };
 	};
 
 	// ---- the calibration patterns: output facts for GetCalibrationOutput ------------------------

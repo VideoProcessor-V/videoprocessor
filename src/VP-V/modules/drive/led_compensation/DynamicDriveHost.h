@@ -110,6 +110,7 @@ namespace LedDrive
 	{
 	public:
 		explicit DynamicDriveHost(std::mutex& rendererStateMutex);
+		~DynamicDriveHost();
 		DynamicDriveHost(const DynamicDriveHost&) = delete;
 		DynamicDriveHost& operator=(const DynamicDriveHost&) = delete;
 
@@ -144,13 +145,14 @@ namespace LedDrive
 		std::string StatusText() const;
 
 		// Tests.
-		std::shared_ptr<LedDriveModule> Module() const { return module; }
+		std::shared_ptr<LedDriveModule> Module() const;
 		bool Suspended() const { return suspended; }
 		uint32_t HoldoverMs() const { return holdoverMs; }
 		const DynamicDriveParams& Params() const { return params; }
 		const std::string& Rejection() const { return rejection; }
 
 	private:
+		struct LifecycleWorker;
 		void Update(const ConfigFile& configuration, const HostContext& context);
 		// Takes the module out of the host and the render side (the caller holds the state lock).
 		std::shared_ptr<LedDriveModule> DetachLocked(const HostContext& context);
@@ -158,7 +160,7 @@ namespace LedDrive
 		std::mutex& stateMutex;
 		// The module lives here rather than in the Impl, so internal renderer resets neither
 		// restart it nor return the projector to full light. Recreated only when its
-		// configuration sections change.
+		// configuration sections change. Atomic access only (GEM-188: lockless StatusText / shutdown).
 		std::shared_ptr<LedDriveModule> module;
 		std::string signature;
 		std::string aliasConflict;   // [led_drive*] and [dynamic_drive*] both present (logged once)
@@ -175,5 +177,9 @@ namespace LedDrive
 		bool calibrationSuspended = false;
 		// Bug hunt 31 H1: the last validation error ("" = valid), published to the render side.
 		std::string rejection;
+		// GEM-188: atomic snapshot of rejection for lockless StatusText() reads.
+		std::shared_ptr<const std::string> statusRejection;
+		// GEM-190: single background worker for non-blocking Stop()/ordered Start() handoff under stateMutex.
+		std::unique_ptr<LifecycleWorker> lifecycleWorker;
 	};
 }

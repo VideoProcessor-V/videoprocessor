@@ -864,9 +864,12 @@ namespace LedDrive
 		if (predicted != predictions.end() && predicted->second.apl > 20.0 && stats.apl > 17.0)
 		{
 			const double ratio = std::max(0.25, std::min((stats.apl - 16.0) / (predicted->second.apl - 16.0), 4.0));
-			// audit 2026-10-16: weighted by the time since the last update (it
-			// runs once per new source frame, not per output frame): the output
-			// frames rendered since, at least one, at most 250 ms. Behind
+			// audit 2026-10-16: weighted by the output frames rendered since the
+			// last correction update (frameIndex advances once per BeginFrame;
+			// SubmitMeasurement runs per distinct measured sequence and updates
+			// here only when a prediction matches above the dark APL floor),
+			// clamped to at least 1 output frame (e.g. batched readbacks on one
+			// frame) and at most 250 ms of framePeriodMs. Behind
 			// correction_weight_by_time (default on); off = one output frame
 			// period per update, as before.
 			const uint64_t frames = std::max<uint64_t>(1, frameIndex - std::min(frameIndex, lastCorrectionFrame));
