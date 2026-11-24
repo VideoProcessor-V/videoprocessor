@@ -3225,19 +3225,21 @@ namespace CutFadeJudgeFadeRunTestsNs
 			using namespace VpUnit::CutFadeJudge;
 
 			auto MakeNonRigidDiscs = [](int frameIdx, double gain) -> Record {
-				const double cx1 = 36.0 + 2.0 * double(frameIdx);
-				const double cx2 = 124.0 - 2.0 * double(frameIdx);
+				const double cx1 = 42.0 + 2.0 * double(frameIdx);
+				const double cx2 = 118.0 - 2.0 * double(frameIdx);
 				std::vector<uint16_t> half(size_t(kW) * kH);
 				for (uint32_t y = 0; y < kH; ++y)
 					for (uint32_t x = 0; x < kW; ++x)
 					{
-						double pat = 0.45 + 0.26 * std::cos(double(y) * 0.065) + 0.14 * std::sin(double(x) * 0.09);
+						double pat = 0.48
+							+ 0.24 * std::sin(double(x) * 0.18) * std::cos(double(y) * 0.14)
+							+ 0.14 * std::cos(double(y) * 0.09);
 						const double d1 = (double(x) - cx1) * (double(x) - cx1) + (double(y) - 30.0) * (double(y) - 30.0);
 						const double d2 = (double(x) - cx2) * (double(x) - cx2) + (double(y) - 60.0) * (double(y) - 60.0);
 						if (d1 <= 100.0)
-							pat = 0.92;
+							pat = 0.94;
 						if (d2 <= 100.0)
-							pat = 0.06;
+							pat = 0.04;
 						const double v = kBlack + gain * pat * 48000.0;
 						half[size_t(y) * kW + x] = static_cast<uint16_t>((std::min)(65535.0, (std::max)(0.0, std::floor(v + 0.5))));
 					}
@@ -3245,8 +3247,8 @@ namespace CutFadeJudgeFadeRunTestsNs
 			};
 
 			const Record rBase = MakeNonRigidDiscs(0, 1.00);
-			const Record rRipple3Pct = MakeNonRigidDiscs(6, 0.97);
-			const Record rFade6p5Pct = MakeNonRigidDiscs(6, 0.935);
+			const Record rRipple3Pct = MakeNonRigidDiscs(3, 0.97);
+			const Record rFade6p5Pct = MakeNonRigidDiscs(3, 0.935);
 
 			double gBase[kGridH][kGridW], gRip[kGridH][kGridW], gFade[kGridH][kGridW];
 			LoadGridCodes(rBase.cells, gBase);
@@ -3254,19 +3256,21 @@ namespace CutFadeJudgeFadeRunTestsNs
 			LoadGridCodes(rFade6p5Pct.cells, gFade);
 
 			// 1. 3% non-rigid exposure ripple: rigid fails, order-statistic |1 - A_q| is strictly in (0.02, 0.04)
-			//    (negative control: old 0.02 floor would accept!), yet FitMotionTolerantFade rejects via 2x SNR floor!
+			//    (negative control: old 0.02 floor / activeFade=true would accept!), yet unconfirmed FitMotionTolerantFade rejects via 2x SNR floor!
 			{
 				double ra[kGridH][kGridW], ca[kGridH][kGridW];
 				double vx = 0.0, vy = 0.0;
 				AlignGrid(gBase, gRip, kLocalRadius, ra, ca, &vx, &vy);
 				Assert::IsFalse(FitGridFadeAligned(ra, ca, vx, vy).valid,
 					L"precondition: rigid FitGridFadeAligned fails under opposite-moving discs");
-				const GridFadeFit mtRip = FitMotionTolerantFade(ra, ca, vx, vy);
+				const GridFadeFit mtRip = FitMotionTolerantFade(ra, ca, vx, vy, false, false);
 				Assert::IsTrue(std::fabs(1.0 - mtRip.gain) > kFadeRunMinGain &&
 					std::fabs(1.0 - mtRip.gain) < kFadeRunMinGain / kFadeResidualReduction,
 					L"Negative control: 3% non-rigid ripple has |1 - A_q| in (0.02, 0.04) so old 0.02 floor would accept");
 				Assert::IsFalse(mtRip.valid,
-					L"FitMotionTolerantFade must reject 3% non-rigid ripple below 2x SNR gain floor (0.04)");
+					L"FitMotionTolerantFade(activeFade=false) must reject 3% non-rigid ripple below 2x SNR gain floor (0.04)");
+				Assert::IsTrue(FitMotionTolerantFade(ra, ca, vx, vy, false, true).valid,
+					L"Negative control: with activeFade=true (0.02 floor), the exact same aligned pair passes");
 			}
 
 			// 2. 6.5% fade-out under identical non-rigid motion: rigid still fails, FitMotionTolerantFade succeeds cleanly!
@@ -3276,7 +3280,7 @@ namespace CutFadeJudgeFadeRunTestsNs
 				AlignGrid(gBase, gFade, kLocalRadius, ra, ca, &vx, &vy);
 				Assert::IsFalse(FitGridFadeAligned(ra, ca, vx, vy).valid,
 					L"precondition: rigid FitGridFadeAligned still fails on 6.5% fade under opposite-moving discs");
-				const GridFadeFit mtFade = FitMotionTolerantFade(ra, ca, vx, vy);
+				const GridFadeFit mtFade = FitMotionTolerantFade(ra, ca, vx, vy, false, false);
 				Assert::IsTrue(mtFade.valid && mtFade.dir < 0,
 					L"FitMotionTolerantFade must accept 6.5% fade-out (> 0.04) under identical non-rigid motion");
 			}
@@ -3373,26 +3377,29 @@ namespace CutFadeJudgeFadeRunTestsNs
 					L"studio-white topPinned exclusion must allow FoldFadeRun to continue cleanly even when full-392 stepAQ > 1.0");
 			}
 
-			// (b) Unclipped flat-top scene (top plateau at 180 codes < 234) fading gently (~ -0.25 codes/frame):
-			//     assert max interior cell < 234 (topPinned does NOT trigger) and FoldFadeRun continues cleanly!
+			// (b) Unclipped flat-top scene (interior 180-code plateau < 234 over 2D textured background) fading gently (~ -0.25 codes/frame):
+			//     assert max interior cell < 234 (topPinned does NOT trigger), 0 cuts, and FoldFadeRun continues cleanly!
 			{
-				auto UnclippedFlatTopFrame = [](double gain) -> Record {
+				auto UnclippedFlatTopFrame = [](double gain, uint32_t k) -> Record {
 					std::vector<uint16_t> half(size_t(kW) * kH);
 					for (uint32_t y = 0; y < kH; ++y)
 						for (uint32_t x = 0; x < kW; ++x)
 						{
-							const double raw = (x >= 100u) ? 180.0 : (24.0 + 156.0 * double(x) / 100.0);
-							const double code = 16.0 + gain * (raw - 16.0);
+							const bool inPlateau = (x >= 25u && x < 45u && y >= 20u && y < 35u);
+							const double raw = inPlateau ? 180.0
+								: (30.0 + 130.0 * double(x) / double(kW - 1) + 12.0 * std::cos(double(y) * 0.14));
+							const double code = 16.0 + gain * (raw - 16.0) + (inPlateau ? 0.0 : double(Noise(x, y, k)) / (256.0 * 8.0));
 							half[size_t(y) * kW + x] = static_cast<uint16_t>((std::min)(65535.0, (std::max)(0.0, std::floor(code * 256.0 + 0.5))));
 						}
 					return MakeRecordFromHalf(half);
 				};
 
 				std::vector<Record> recs;
+				uint32_t k = 9600u;
 				for (int i = 0; i < 4; ++i)
-					recs.push_back(UnclippedFlatTopFrame(1.0));
+					recs.push_back(UnclippedFlatTopFrame(1.0, k++));
 				for (int i = 1; i <= 40; ++i)
-					recs.push_back(UnclippedFlatTopFrame(1.0 - 0.0025 * double(i)));   // ~ -0.25.. -0.41 codes/frame
+					recs.push_back(UnclippedFlatTopFrame(1.0 - 0.0025 * double(i), k++));   // ~ -0.25.. -0.41 codes/frame
 
 				double gMax = 0.0;
 				double g0[kGridH][kGridW];
