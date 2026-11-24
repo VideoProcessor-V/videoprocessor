@@ -275,7 +275,8 @@ namespace AdaptiveDownscaleStage
 			// Switch-over: the upscale form's grain term is kP10gGrainLevel (ReadGrain), so no private grain map here; the
 			// estimate is still wanted for the residual hold and the motion-adapted blend.
 			module.ClearGrainField();
-			grainOffered = SetSharedGrain(module, host);
+			// S4-H2: upscale uses kP10gGrainLevel via ReadGrain(), never the downscale scalar P10/P11 grainSource.
+			module.ClearGrainSource();
 			SetResidualMotion(module, frame, m, nlsMap, nlsUnknown);
 			state.grainMapWanted = (AdaptiveDownscale::MotionSanitizeUnit(adaptive.motionStrength) > 0.0f) && module.Active() && frame.vectorsRun;
 			hooks.insert(hooks.begin(), module.Measure());
@@ -442,7 +443,7 @@ namespace AdaptiveDownscaleStage
 			lines.push_back(module.EdgeMapStatus());
 		// X5-GRAIN-P10 (no silent fallbacks): which grain estimate the last scalar pass used.
 		// Gate cb-u1 r1 MUST 5: "shared" only when the read-back stats tag says the frame's energy came from P10 / P11.
-		if (module.Active())
+		if (!upscaleThisFrame && module.Active())
 			lines.push_back(GrainStatusLine(module.LastGrainSourceUse()));
 		const std::string td = TdProducts::StatusLine(TdProducts::Consumer::AdaptiveScaler, tdRead);
 		if (!td.empty())

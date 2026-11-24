@@ -243,7 +243,7 @@ namespace AdaptiveDownscaleStage
 		FallbackCatalog::Decision GrainSourceFallback() const
 		{
 			const char* id = "product.adaptive_downscale";
-			if (!grainOffered || !module.Active())
+			if (upscaleThisFrame || !grainOffered || !module.Active())
 				return FallbackCatalog::Released(id);
 			switch (module.LastGrainSourceUse())
 			{
