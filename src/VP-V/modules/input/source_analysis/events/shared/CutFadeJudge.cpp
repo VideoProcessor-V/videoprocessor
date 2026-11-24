@@ -716,6 +716,8 @@ static bool FootprintPreserved(const double refAligned[kGridH][kGridW], const do
     if (fit.litCells < kFadeMinLitCells) {
         if (collapsed != 0)
             return false;
+        if (!(fit.eFade * fit.eFade < (1.0 - kFadeSpatialConsensus) * fit.eId * fit.eId))
+            return false;
         int checkedCells = 0, uniformCells = 0;
         const double refBar = fit.black + double(kFadeMinSpread);
         for (int y = R; y < kGridH - R; ++y)
