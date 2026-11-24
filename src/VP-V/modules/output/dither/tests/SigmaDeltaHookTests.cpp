@@ -1141,6 +1141,238 @@ void hook()
 			}
 		}
 
+		// W23-A3 AC#2 / GEM-026 / GEM-SD-CARRY (WARP): in limited-range 8-bit output, a legal near-black
+		// pixel (x = 16.25, outside the exact-code snap window) must never dither below studio black into
+		// BTB (code < 16) even at half-code dither amplitude (amp = 0.5), while remaining actively dithered
+		// and unbiased around 16.25. Simultaneously, true BTB footroom (x = 12.5 < 16) on the exact same
+		// frame must pass through untouched (ADR-0002), never clamped up to 16.
+		// Rule 3 same-input negative control: the pre-fix unclamped quantiser (code_min = timing_min = 1.0)
+		// on the exact same left-half 16x16 x 32 (x, y, frame/5) grid at x = 16.25, amp = 0.5 MUST emit
+		// BTB code 15 (unclampedBtbCount > 0), proving the BTB-excursion hazard was real.
+		BEGIN_TEST_METHOD_ATTRIBUTE(SigmaDeltaNearBlackNeverEmitsBtbWhileTrueBtbPassesThrough)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(SigmaDeltaNearBlackNeverEmitsBtbWhileTrueBtbPassesThrough)
+		{
+			constexpr int width = 32;
+			constexpr int height = 16;
+			constexpr int halfWidth = width / 2;
+			constexpr int frames = 32;
+			constexpr double leftCode = 16.25;
+			constexpr double rightCode = 12.5;
+			constexpr double amplitude = 0.5;
+			constexpr double residBound = 0.5 + amplitude;
+
+			// Rule 3 same-input negative control: pre-fix unclamped loop (code_min = 1.0, code_max = 254.0)
+			// on the exact same left-half 16x16 x 32 coordinates at x = 16.25, amp = 0.5 must emit BTB code 15.
+			int unclampedBtbCount = 0;
+			for (int y = 0; y < height; ++y)
+			{
+				for (int x = 0; x < halfWidth; ++x)
+				{
+					double r = 0.0;
+					for (int f = 0; f < frames; ++f)
+					{
+						const double d = (static_cast<double>(SigmaDeltaDomain::Ign(
+							static_cast<float>(x), static_cast<float>(y), f)) - 0.5) * 2.0 * amplitude;
+						const double k = (std::min)((std::max)(std::floor(leftCode + r + d + 0.5), 1.0), 254.0);
+						r = (std::min)((std::max)(leftCode + r - k, -residBound), residBound);
+						if (static_cast<int>(k) < 16)
+							++unclampedBtbCount;
+					}
+				}
+			}
+			Assert::IsTrue(unclampedBtbCount > 0,
+				L"GEM-026 negative control: pre-fix unclamped sigma-delta at x=16.25, amp=0.5 must emit BTB (< 16)");
+
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+
+			struct LogCaptureGuard
+			{
+				TargetLutGpuFixture& owner;
+				~LogCaptureGuard() { owner.CaptureLog(nullptr); }
+			};
+			struct TexGuard
+			{
+				pl_gpu owner;
+				pl_tex tex = nullptr;
+				~TexGuard()
+				{
+					if (tex)
+						pl_tex_destroy(owner, &tex);
+				}
+			};
+
+			CustomHookChain::Chain chain(SigmaLoader(fixture));
+			ConfiguredShaderRule sigma;
+			sigma.name = "sigma_delta";
+			sigma.filename = "Temporal sigma-delta.glsl";
+			sigma.stageOrder = 90;
+			sigma.parameters = {
+				{ "enabled", "1" },
+				{ "levels_full", "0" },
+				{ "swapchain_bits", "8" },
+				{ "color_bits", "8" },
+				{ "noise_amplitude", "0.5" },
+				{ "motion_compensation", "0" }
+			};
+			chain.Configure({ sigma });
+			CustomHookChain::TemplateValues values;
+			values.outputWidth = values.sourceWidth = width;
+			values.outputHeight = values.sourceHeight = height;
+			values.refreshHz = values.sourceFps = 60.0;
+
+			std::string log;
+			{
+				LogCaptureGuard guard{ fixture };
+				fixture.CaptureLog(&log);
+				chain.Ensure(values);
+			}
+			std::vector<const pl_hook*> hooks;
+			chain.Collect(false, hooks);
+			Assert::AreEqual(size_t{ 1 }, hooks.size(),
+				(L"libplacebo rejected Temporal sigma-delta.glsl: " + std::wstring(log.begin(), log.end())).c_str());
+			AssertCleanLibplaceboLog(log);
+
+			pl_fmt sourceFormat = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, PL_FMT_CAP_SAMPLEABLE);
+			Assert::IsNotNull(sourceFormat, L"No sampleable RGBA32F source format");
+			pl_fmt targetFormat = pl_find_fmt(gpu, PL_FMT_UNORM, 4, 8, 8,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+			Assert::IsNotNull(targetFormat, L"No host-readable RGBA8 target format");
+
+			// Full-range float RGB source values that libplacebo's 8-bit limited-range encoding maps to
+			// 16.25 / 255.0 on the left half (legal near-black) and 12.5 / 255.0 on the right half (true BTB).
+			constexpr float leftSource = static_cast<float>((leftCode - 16.0) / 219.0);
+			constexpr float rightSource = static_cast<float>((rightCode - 16.0) / 219.0);
+			const size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
+			std::vector<float> texels(pixelCount * 4);
+			for (int y = 0; y < height; ++y)
+			{
+				for (int x = 0; x < width; ++x)
+				{
+					const float v = (x < halfWidth) ? leftSource : rightSource;
+					float* dst = &texels[(static_cast<size_t>(y) * width + x) * 4];
+					dst[0] = v;
+					dst[1] = v;
+					dst[2] = v;
+					dst[3] = 1.0f;
+				}
+			}
+
+			pl_tex_params sp{};
+			sp.w = width;
+			sp.h = height;
+			sp.format = sourceFormat;
+			sp.sampleable = true;
+			sp.initial_data = texels.data();
+			TexGuard sourceGuard{ gpu, pl_tex_create(gpu, &sp) };
+			Assert::IsNotNull(sourceGuard.tex, L"Failed to create 32x16 RGBA32F source texture");
+
+			pl_tex_params tp{};
+			tp.w = width;
+			tp.h = height;
+			tp.format = targetFormat;
+			tp.renderable = true;
+			tp.host_readable = true;
+			TexGuard targetGuard{ gpu, pl_tex_create(gpu, &tp) };
+			Assert::IsNotNull(targetGuard.tex, L"Failed to create 32x16 RGBA8 target texture");
+
+			pl_frame image = TargetLutGpuFixture::MakeRgbFrame(sourceGuard.tex);
+			pl_frame output = TargetLutGpuFixture::MakeRgbFrame(targetGuard.tex);
+			output.repr.levels = PL_COLOR_LEVELS_LIMITED;
+			output.repr.bits.sample_depth = 8;
+			output.repr.bits.color_depth = 8;
+			output.repr.bits.bit_shift = 0;
+
+			pl_render_params params = pl_render_fast_params;
+			params.dither_params = nullptr;
+			params.error_diffusion = nullptr;
+			params.hooks = hooks.data();
+			params.num_hooks = static_cast<int>(hooks.size());
+
+			int leftCount16 = 0;
+			int leftCount17 = 0;
+			int rightCount12 = 0;
+			int rightCount13 = 0;
+			double leftSum = 0.0;
+			double rightSum = 0.0;
+			const int halfSamples = halfWidth * height * frames;
+
+			{
+				LogCaptureGuard guard{ fixture };
+				fixture.CaptureLog(&log);
+				std::vector<RgbaPixel> pixels(pixelCount);
+				for (int f = 0; f < frames; ++f)
+				{
+					Assert::IsTrue(pl_render_image(fixture.Renderer(), &image, &output, &params),
+						L"pl_render_image failed for GEM-026 limited-range 8-bit frame");
+					pl_gpu_finish(gpu);
+					pl_tex_transfer_params download{};
+					download.tex = targetGuard.tex;
+					download.ptr = pixels.data();
+					Assert::IsTrue(pl_tex_download(gpu, &download), L"pl_tex_download failed for GEM-026");
+
+					for (int y = 0; y < height; ++y)
+					{
+						for (int x = 0; x < width; ++x)
+						{
+							const RgbaPixel p = pixels[static_cast<size_t>(y) * width + x];
+							const int code = static_cast<int>(p.r);
+							Assert::IsTrue(p.g == p.r && p.b == p.r,
+								(L"GEM-026 neutral gray channel mismatch at refresh " + std::to_wstring(f) +
+									L" (" + std::to_wstring(x) + L"," + std::to_wstring(y) + L"): R=" +
+									std::to_wstring(p.r) + L" G=" + std::to_wstring(p.g) + L" B=" +
+									std::to_wstring(p.b)).c_str());
+
+							if (x < halfWidth)
+							{
+								Assert::IsTrue(code >= 16,
+									(L"GEM-026 near-black legal pixel (x=16.25) emitted BTB code " +
+										std::to_wstring(code) + L" at refresh " + std::to_wstring(f) +
+										L" (" + std::to_wstring(x) + L"," + std::to_wstring(y) + L")").c_str());
+								if (code == 16)
+									++leftCount16;
+								else if (code == 17)
+									++leftCount17;
+								leftSum += static_cast<double>(code);
+							}
+							else
+							{
+								// True BTB (x = 12.5 < 16): must stay in BTB footroom (never clamped to 16),
+								// bounded by the first-order loop envelope floor(12.5 +- (residBound + amp) + 0.5) in [11, 14].
+								Assert::IsTrue(code >= 11 && code <= 14,
+									(L"GEM-026 true BTB pixel (x=12.5) left BTB envelope [11,14] with code " +
+										std::to_wstring(code) + L" at refresh " + std::to_wstring(f) +
+										L" (" + std::to_wstring(x) + L"," + std::to_wstring(y) + L")").c_str());
+								if (code == 12)
+									++rightCount12;
+								else if (code == 13)
+									++rightCount13;
+								rightSum += static_cast<double>(code);
+							}
+						}
+					}
+				}
+			}
+			AssertCleanLibplaceboLog(log);
+
+			// First-order loop deterministic static mean bound: residBound / frames + rgba16f store step (~0.016) < 0.05.
+			const double leftMean = leftSum / static_cast<double>(halfSamples);
+			const double rightMean = rightSum / static_cast<double>(halfSamples);
+			Assert::IsTrue(leftCount16 > 0 && leftCount17 > 0,
+				(L"GEM-026 near-black legal pixel (x=16.25) must actively dither across 16 and 17 (count16=" +
+					std::to_wstring(leftCount16) + L", count17=" + std::to_wstring(leftCount17) + L")").c_str());
+			Assert::IsTrue(std::fabs(leftMean - leftCode) < 0.05,
+				(L"GEM-026 near-black legal mean biased away from 16.25: got " + std::to_wstring(leftMean)).c_str());
+			Assert::IsTrue(rightCount12 > 0 && rightCount13 > 0,
+				(L"GEM-026 true BTB pixel (x=12.5) must actively dither across 12 and 13 (count12=" +
+					std::to_wstring(rightCount12) + L", count13=" + std::to_wstring(rightCount13) + L")").c_str());
+			Assert::IsTrue(std::fabs(rightMean - rightCode) < 0.05,
+				(L"GEM-026 true BTB mean biased away from 12.5: got " + std::to_wstring(rightMean)).c_str());
+		}
+
 		// Gate verify 2026-10-17: the sigma-delta on the GPU is unbiased. Flat patches at every
 		// 10-bit level and at off-grid levels (every 1/32 code around chosen codes, exactly
 		// representable in the rgba16f OUTPUT texture) go through the shader for 192 static
