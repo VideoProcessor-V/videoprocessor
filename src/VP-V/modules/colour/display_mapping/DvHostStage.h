@@ -194,8 +194,8 @@ public:
 		return std::exchange(m_trimsEvaluated, false) ? &m_trimsSelection : nullptr;
 	}
 	double TrimsTargetNits() const { return m_trimsTargetNits; }
-	// FIX1 SHOULD 2: the trim's largest saturation gain this frame (1 = none), for colour.appearance's trim x Hunt cap.
-	double TrimsSaturationGain() const { return m_trimsSaturationGain; }
+	// FIX1 SHOULD 2 / S2-M1: the trim's largest saturation gain this frame (1 = none) and whether the shader will run.
+	double TrimsSaturationGain() const { return m_trimsSaturationGain; } bool TrimsWillRun() const { return m_trimsWillRun; }
 
 	// The reference viewing conditions of the last DV picture (for the later CAM16 stage).
 	const std::string& ContrastRecoveryStatus() const { return m_recoveryStatus; }
@@ -295,8 +295,8 @@ public:
 	void PrepareToneAndTrims(const Frame& f, pl_color_map_params& colorMapParams,
 		const CustomHookChain::TemplateValues& hookTemplates, bool& trimsWanted, ParameterList& trimsParams)
 	{
-		m_pending = Pending();
-		trimsParams.clear();   // GEM-016: the caller may hand in last frame's buffer (TrimsParameterBuffer)
+		m_pending = Pending(); m_trimsWillRun = false; m_trimsSaturationGain = 1.0;
+		trimsWanted = false; trimsParams.clear();   // GEM-016: the caller may hand in last frame's buffer (TrimsParameterBuffer)
 		m_pending.trims = f.trims;
 		m_pending.trimsStageRuns = f.trimsStageRuns;   // GEM-004 part 2 (AMEND: the dm_trims slot, CF-1 P3)
 		if (!f.trims)
@@ -398,10 +398,8 @@ public:
 			else
 			{
 				selection = DvTrimSelection::Select(*f.dm, display.hdr.max_luma);
-				m_trimsSelection = selection;
-				m_trimsEvaluated = true;
+				m_trimsSelection = selection; m_trimsEvaluated = true;
 				m_trimsTargetNits = display.hdr.max_luma;
-				m_trimsSaturationGain = selection.apply ? DvTrimSelection::PeakSaturationGain(selection.params) : 1.0;   // FIX1 SHOULD 2
 				if (!selection.apply)
 					state = std::string("neutral: ") + selection.reason;
 				else
@@ -415,6 +413,8 @@ public:
 						m_trimsConfigured = true;
 					}
 					m_trimsHook.Ensure(hookTemplates);
+					const bool trimsLoaded = m_trimsHook.SubmittedCount(false) > 0;
+					m_trimsWillRun = trimsLoaded; m_trimsSaturationGain = trimsLoaded ? DvTrimSelection::PeakSaturationGain(selection.params) : 1.0;   // S2-M1 / FIX1 SHOULD 2
 					// Review C4: the luminance coefficients of the output's own primaries.
 					// GEM-016 (Gemini colour-dv-hdr PERF-6, as written): kr / kg / kb and the toLms / fromLms parameters
 					// cached, keyed by display.primaries (and the ICtCp switch), instead of recomputed (a matrix inversion) per frame.
@@ -573,7 +573,7 @@ private:
 	// DV comparison capture (off unless VP_DV_COMPARE_PATH; DvCompareCapture.h).
 	std::string m_trimsStatus = "DV trims: off";
 	DvTrimSelection::Selection m_trimsSelection;
-	bool m_trimsEvaluated = false;
+	bool m_trimsEvaluated = false, m_trimsWillRun = false;
 	double m_trimsTargetNits = 0.0;
 	double m_trimsSaturationGain = 1.0;
 	// feat/dv-l8 task 5: the Dolby-style DV tone mapping (dv_tone_mapping), its status, and the

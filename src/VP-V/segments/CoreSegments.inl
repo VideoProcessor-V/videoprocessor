@@ -349,7 +349,7 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
             appearance.now = static_cast<double>(GetTickCount64()) / 1000.0;
             appearance.screenWhiteNits = activeSettings.appearanceScreenWhiteNits;
             appearance.screenWhiteMeasured = activeSettings.appearanceScreenWhiteMeasured;
-            appearance.trimApplied = colourFrame.dvTrims;
+            appearance.trimApplied = dvStage.TrimsWillRun();
             appearance.trimTargetNits = dvStage.TrimsTargetNits();
             appearance.trimSaturationGain = dvStage.TrimsSaturationGain();   // FIX1 SHOULD 2: the trim x Hunt cap
             appearance.toeKnee = dynamicDrive.PublishedParams().boostKnee;   // FIX1 SHOULD 3: gamma_boost_knee, not a fixed 0
