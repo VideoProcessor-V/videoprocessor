@@ -2156,7 +2156,15 @@ namespace Vpv
                     const double a = lo->text().trimmed().toDouble(&okLo), b = hi->text().trimmed().toDouble(&okHi);
                     const bool wrong = (okLo || okHi) && (okLo ? a : loDefault) >= (okHi ? b : hiDefault) &&
                         (okHi ? b : hiDefault) > 0.0;
-                    hi->setStyleSheet(wrong ? QStringLiteral("color: #ff8a8a;") : QString());
+                    if (hi->property("vpvPairError").toBool() != wrong)
+                    {
+                        hi->setProperty("vpvPairError", wrong);
+                        if (QStyle* s = hi->style())
+                        {
+                            s->unpolish(hi);
+                            s->polish(hi);
+                        }
+                    }
                     hi->setProperty("pairWarning", wrong);
                     if (wrong)
                         hi->setToolTip(hi->property("settingHelp").toString() +

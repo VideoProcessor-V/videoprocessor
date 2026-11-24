@@ -14,10 +14,12 @@
 
 #include <QAbstractButton>
 #include <QAbstractItemModel>
+#include <QAbstractItemView>
 #include <QApplication>
 #include <QButtonGroup>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QCoreApplication>
 #include <QFrame>
 #include <QDoubleSpinBox>
 #include <QEvent>
@@ -28,9 +30,11 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QMetaObject>
 #include <QPointer>
 #include <QRegularExpression>
 #include <QScrollArea>
+#include <QSet>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QSignalBlocker>
@@ -45,10 +49,21 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <set>
 #include <vector>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 namespace Vpv
 {
@@ -312,6 +327,273 @@ namespace Vpv
 		private:
 			QHash<QObject*, QPointer<QLabel>> m_labels;
 		};
+
+		bool IsHighContrastEnabled()
+		{
+#ifdef _WIN32
+			HIGHCONTRASTW settings{};
+			settings.cbSize = sizeof(settings);
+			return SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(settings),
+				&settings, 0) != FALSE && (settings.dwFlags & HCF_HIGHCONTRASTON) != 0;
+#else
+			return false;
+#endif
+		}
+
+		std::atomic<std::uint64_t> g_deferredHiddenPopupEvents{ 0 };
+
+		bool IsVpvUpstreamCombo(const QComboBox* combo)
+		{
+			if (!combo) return false;
+			const QString name = combo->objectName();
+			if (name.startsWith(QStringLiteral("vpv.")) ||
+				name.startsWith(QStringLiteral("calibration.")) ||
+				name.startsWith(QStringLiteral("config.calibration.")))
+				return true;
+			static const QString kPrefix = QStringLiteral("config.vprenderer.");
+			if (name.startsWith(kPrefix))
+			{
+				const QString tail = name.mid(kPrefix.size());
+				if (IsVpvOnlyKey(tail) || IsVpvChoiceKey(tail))
+					return true;
+				const int lastDot = tail.lastIndexOf(QLatin1Char('.'));
+				if (lastDot >= 0 && lastDot + 1 < tail.size())
+				{
+					const QString key = tail.mid(lastDot + 1);
+					return IsVpvOnlyKey(key) || IsVpvChoiceKey(key);
+				}
+			}
+			return false;
+		}
+
+		// Coalesces/defers scrollbar MetaCall storms on hidden VP-V QComboBox popup views
+		// (including views lazily created later), and synchronously re-syncs layout/scrollbars on Show.
+		// Strictly O(1) inside eventFilter; never intercepts Timer, Style/Font/Palette, Resize, or LayoutRequest.
+		// Parented to vpv.section so lifetime and eventFilter cleanup are strictly bound to root.
+		class HiddenComboPopupCoalescer final : public QObject
+		{
+		public:
+			explicit HiddenComboPopupCoalescer(QObject* parent) : QObject(parent) {}
+
+			void WatchCombo(QComboBox* combo)
+			{
+				if (!combo || m_attachedCombos.contains(combo)) return;
+				if (auto* view = combo->findChild<QAbstractItemView*>())
+				{
+					AttachPopupOnce(combo, view);
+					return;
+				}
+				InstallOnce(combo);
+			}
+
+			void WatchVpvCombosUnder(QWidget* subtree, bool allCombos)
+			{
+				if (!subtree) return;
+				for (QComboBox* combo : subtree->findChildren<QComboBox*>())
+				{
+					if (allCombos || IsVpvUpstreamCombo(combo))
+						WatchCombo(combo);
+				}
+			}
+
+		protected:
+			bool eventFilter(QObject* obj, QEvent* ev) override
+			{
+				if (!obj || !ev) return false;
+
+				const QEvent::Type type = ev->type();
+
+				if (type == QEvent::ChildAdded)
+				{
+					if (auto* combo = qobject_cast<QComboBox*>(obj))
+					{
+						auto* childEv = static_cast<QChildEvent*>(ev);
+						QAbstractItemView* view = qobject_cast<QAbstractItemView*>(childEv->child());
+						if (!view)
+							view = combo->findChild<QAbstractItemView*>();
+						if (view)
+							AttachPopupOnce(combo, view);
+					}
+					return false;
+				}
+
+				if (type == QEvent::Show)
+				{
+					if (auto* view = qobject_cast<QAbstractItemView*>(obj))
+					{
+						if (!m_syncing.contains(view))
+							SyncPopupForShow(view);
+					}
+					return false;
+				}
+
+				if (type == QEvent::MetaCall)
+				{
+					if (auto* view = qobject_cast<QAbstractItemView*>(obj))
+					{
+						if (!m_syncing.contains(view) && !view->isVisible())
+						{
+							m_needsSync.insert(view);
+							g_deferredHiddenPopupEvents.fetch_add(1, std::memory_order_relaxed);
+							return true;
+						}
+					}
+				}
+
+				return false;
+			}
+
+		private:
+			void SyncPopupForShow(QAbstractItemView* view)
+			{
+				if (!view || !m_needsSync.remove(view))
+					return;
+				QPointer<HiddenComboPopupCoalescer> self(this);
+				QPointer<QAbstractItemView> safeView(view);
+				m_syncing.insert(view);
+				safeView->doItemsLayout();
+				if (safeView)
+				{
+					const bool geoOk = QMetaObject::invokeMethod(safeView, "updateGeometries", Qt::DirectConnection);
+					const bool barsOk = safeView
+						? QMetaObject::invokeMethod(safeView, "_q_showOrHideScrollBars", Qt::DirectConnection)
+						: false;
+					if (safeView && (!geoOk || !barsOk))
+					{
+						safeView->updateGeometry();
+						QCoreApplication::postEvent(safeView, new QEvent(QEvent::LayoutRequest));
+						qWarning("Vpv::HiddenComboPopupCoalescer: failed to sync popup layout/scrollbars");
+					}
+				}
+				if (self)
+					self->m_syncing.remove(view);
+			}
+
+			void AttachPopupOnce(QComboBox* combo, QAbstractItemView* view)
+			{
+				if (!combo || !view) return;
+				if (!m_attachedCombos.contains(combo))
+				{
+					m_attachedCombos.insert(combo);
+					if (m_watched.remove(combo))
+						combo->removeEventFilter(this);
+					else
+						QObject::connect(combo, &QObject::destroyed, this, [this](QObject* dead) { m_attachedCombos.remove(dead); });
+				}
+				if (m_watched.contains(view)) return;
+				InstallOnce(view);
+				if (!view->isVisible())
+				{
+					m_needsSync.insert(view);
+					QCoreApplication::removePostedEvents(view, QEvent::MetaCall);
+				}
+			}
+
+			void InstallOnce(QObject* target)
+			{
+				if (!target || m_watched.contains(target)) return;
+				m_watched.insert(target);
+				target->installEventFilter(this);
+				QObject::connect(target, &QObject::destroyed, this, [this](QObject* dead)
+				{
+					m_watched.remove(dead);
+					m_attachedCombos.remove(dead);
+					m_needsSync.remove(dead);
+					m_syncing.remove(dead);
+				});
+			}
+
+			QSet<QObject*> m_watched;
+			QSet<QObject*> m_attachedCombos;
+			QSet<QObject*> m_needsSync;
+			QSet<QObject*> m_syncing;
+		};
+
+		// Clears redundant per-widget stylesheets on permanently-hidden vpvRow .reset_override
+		// buttons (choiceRow parented to its QComboBox and hidden by ConfigEditorWindow).
+		// Visible .reset_override buttons and Bill-owned choiceRows are never touched.
+		void ClearHiddenVpvResetStylesheets(QWidget* subtree)
+		{
+			if (!subtree) return;
+			static const QString kSuffix = QStringLiteral(".reset_override");
+			for (QPushButton* reset : subtree->findChildren<QPushButton*>())
+			{
+				if (!reset->objectName().endsWith(kSuffix)) continue;
+				const QWidget* holder = reset->parentWidget();
+				if (!holder || !holder->isHidden()) continue;
+				if (qobject_cast<const QComboBox*>(holder->parentWidget()) == nullptr) continue;
+				if (!reset->styleSheet().isEmpty())
+					reset->setStyleSheet(QString());
+			}
+		}
+
+		bool IsAttachedAndVisible(const QWidget* w)
+		{
+			return w && w->isVisible() && w->window() && w->window() != w;
+		}
+
+		// Starts/stops a refresh QTimer strictly with watched widget visibility and top-level
+		// attachment so hidden pages never tick and transient detach/re-attach resumes cleanly.
+		class VisibilityTimerBinder final : public QObject
+		{
+		public:
+			VisibilityTimerBinder(QWidget* watched, QTimer* timer)
+				: QObject(timer), m_watched(watched), m_timer(timer)
+			{
+				if (m_watched && m_timer)
+				{
+					m_watched->installEventFilter(this);
+					SyncState();
+				}
+			}
+
+		protected:
+			bool eventFilter(QObject* obj, QEvent* ev) override
+			{
+				if (!ev || obj != m_watched.data() || !m_timer)
+					return false;
+				switch (ev->type())
+				{
+				case QEvent::Show:
+				case QEvent::ParentChange:
+				case QEvent::WindowActivate:
+					SyncState();
+					break;
+				case QEvent::Hide:
+				case QEvent::ParentAboutToChange:
+					if (m_timer->isActive())
+						m_timer->stop();
+					break;
+				default:
+					break;
+				}
+				return false;
+			}
+
+		private:
+			void SyncState()
+			{
+				if (!m_timer) return;
+				if (IsAttachedAndVisible(m_watched))
+				{
+					if (!m_timer->isActive())
+						m_timer->start();
+				}
+				else if (m_timer->isActive())
+				{
+					m_timer->stop();
+				}
+			}
+
+			QPointer<QWidget> m_watched;
+			QPointer<QTimer> m_timer;
+		};
+
+		void BindVisibilityTimer(QWidget* watched, QTimer* timer)
+		{
+			if (!watched || !timer) return;
+			new VisibilityTimerBinder(watched, timer);
+		}
 
 		// The upstream controls of a key: "config.<section>[.<group>...].<key>" (the Config naming;
 		// a control's helpers such as ".reset" end differently and are not matched).
@@ -907,30 +1189,7 @@ namespace Vpv
 			return nullptr;
 		}
 
-		// Property-scoped VP-V stylesheet installed ONCE on qApp before widgets are created:
-		// zero per-window or per-widget QStyleSheetStyle trees (no post-build StyleChange cascades,
-		// no stylesheet re-merging during reparenting, zero effect on Bill's pages).
-		QString VpvSectionStyleSheet()
-		{
-			return QStringLiteral(
-				"QWidget[vpvSection=\"true\"] QToolButton { color: #dce8f2; background: #142334; border: 1px solid #2b4258; border-radius: 4px; padding: 3px 8px; }\n"
-				"QWidget[vpvSection=\"true\"] QToolButton:hover { background: #1a2e42; }\n"
-				"QWidget[vpvSection=\"true\"] QToolButton:disabled { color: #6f8396; }\n"
-				"QWidget[vpvSection=\"true\"] QToolButton[profileSection=\"true\"] { min-height: 30px; color: #d9e7f2; background: #111d29; border: 1px solid #2b4258; border-radius: 5px; padding: 4px 9px; text-align: left; font-weight: 600; }\n"
-				"QWidget[vpvSection=\"true\"] QToolButton[profileSection=\"true\"]:hover { background: #162839; }\n"
-				"QWidget[vpvDrivePage=\"true\"] QTabWidget::pane { border: 0; background: transparent; }\n"
-				"QFrame[vpvCard=\"true\"] { background: #0c1620; border: 1px solid #22384c; border-radius: 6px; }\n"
-				"QLabel[vpvCardHeading=\"true\"] { font-size: 14px; font-weight: 650; color: #f0f6fb; }\n"
-				"QLabel[vpvSetBy=\"true\"] { color: #8fa6bb; font-size: 11px; }\n"
-				"QLabel[vpvSetBy=\"true\"]:disabled { color: #8fa6bb; }\n"
-				"QTabWidget[vpvSubTabs=\"true\"]::pane { border: 0; background: transparent; }\n"
-				"QTabWidget[vpvUnitsTabs=\"true\"]::pane { border: 0; background: transparent; }\n"
-				"QTabWidget[vpvUnitsTabs=\"true\"] > QTabBar::tab { min-width: 0px; padding: 6px 10px; }\n"
-				"QLabel[vpvOriginalNote=\"true\"] { background: #3a2a10; color: #ffd58a; padding: 8px; border-radius: 5px; }\n"
-				"QLabel[vpvOffNote=\"true\"] { background: #1d2a38; color: #cfe0ef; padding: 8px; border-radius: 5px; }\n"
-				"QLabel[vpvPrecisionNote=\"true\"] { color: #e0a040; }\n"
-				"QSlider[vpvMixedSlider=\"true\"]::handle:horizontal { background: transparent; border: 0; width: 0px; margin: 0px; }\n");
-		}
+		// Stylesheet rules live in Vpv::SectionStyleSheetForMode(bool highContrast).
 
 		// ---- Masters and the settings they set (organisation pass 2) ----
 
@@ -3090,14 +3349,14 @@ namespace Vpv
 			QPointer<QWidget> pagesPtr(pages);
 			QObject::connect(reasonTimer, &QTimer::timeout, pages, [pagesPtr, reasonTimer, refreshReasons]()
 			{
-				if (!pagesPtr || !pagesPtr->window() || pagesPtr->window() == pagesPtr)
+				if (!pagesPtr || !IsAttachedAndVisible(pagesPtr))
 				{
 					reasonTimer->stop();
 					return;
 				}
-				if (pagesPtr->isVisible()) refreshReasons();
+				refreshReasons();
 			});
-			reasonTimer->start();
+			BindVisibilityTimer(pages, reasonTimer);
 			if (state) state->refreshers.push_back([refreshReasons](const std::shared_ptr<State>&) { refreshReasons(); });
 			return pages;
 		}
@@ -3243,6 +3502,11 @@ namespace Vpv
 		return g_liveSectionStateCount.load(std::memory_order_relaxed);
 	}
 
+	std::uint64_t DeferredHiddenPopupEventCount()
+	{
+		return g_deferredHiddenPopupEvents.load(std::memory_order_relaxed);
+	}
+
 	void ApplyManagedState(const Host& host, bool vpvOn)
 	{
 		ApplyManagedIn(host, host.upstreamRoot, vpvOn);
@@ -3253,13 +3517,74 @@ namespace Vpv
 		ApplyManagedInImpl(host, root, vpvOn, nullptr);
 	}
 
+	QString SectionStyleSheetForMode(bool highContrast)
+	{
+		if (highContrast)
+		{
+			// High-contrast mode: structural/layout rules ONLY (zero hex colors, zero dark-theme
+			// color/background overrides so system High-Contrast palette remains intact).
+			// Every rule selector contains [vpv for 100% Bill-page isolation.
+			return QStringLiteral(
+				"/* vpv-section-style-begin */\n"
+				"QPushButton[nav=\"true\"][vpvChild=\"true\"] { padding-left: 26px; }\n"
+				"QWidget[vpvSection=\"true\"] QToolButton { border-radius: 4px; padding: 3px 8px; }\n"
+				"QWidget[vpvSection=\"true\"] QToolButton[profileSection=\"true\"] { min-height: 30px; border-radius: 5px; padding: 4px 9px; text-align: left; font-weight: 600; }\n"
+				"QWidget[vpvSection=\"true\"] QTabBar QToolButton { border-radius: 3px; padding: 0px; }\n"
+				"QWidget[vpvDrivePage=\"true\"] QTabWidget::pane { border: 0; background: transparent; }\n"
+				"QFrame[vpvCard=\"true\"] { border-radius: 6px; }\n"
+				"QLabel[vpvCardHeading=\"true\"] { font-size: 14px; font-weight: 650; }\n"
+				"QLabel[vpvSetBy=\"true\"] { font-size: 11px; }\n"
+				"QTabWidget[vpvSubTabs=\"true\"]::pane { border: 0; background: transparent; }\n"
+				"QTabWidget[vpvUnitsTabs=\"true\"]::pane { border: 0; background: transparent; }\n"
+				"QTabWidget[vpvUnitsTabs=\"true\"] > QTabBar::tab { min-width: 0px; padding: 6px 10px; }\n"
+				"QWidget[vpvSection=\"true\"] QLabel[vpvOriginalNote=\"true\"] { padding: 8px; border-radius: 5px; }\n"
+				"QWidget[vpvSection=\"true\"] QLabel[vpvOffNote=\"true\"] { padding: 8px; border-radius: 5px; }\n"
+				"QSlider[vpvMixedSlider=\"true\"]::handle:horizontal { background: transparent; border: 0; width: 0px; margin: 0px; }\n"
+				"/* vpv-section-style */\n");
+		}
+		// Property-scoped VP-V stylesheet installed ONCE on qApp before widgets are created:
+		// zero per-window or per-widget QStyleSheetStyle trees (no post-build StyleChange cascades,
+		// no stylesheet re-merging during reparenting, zero effect on Bill's pages).
+		// Every rule selector contains [vpv for 100% Bill-page isolation.
+		return QStringLiteral(
+			"/* vpv-section-style-begin */\n"
+			"QPushButton[nav=\"true\"][vpvChild=\"true\"] { padding-left: 26px; }\n"
+			"QLineEdit[vpvPairError=\"true\"] { color: #ff8a8a; }\n"
+			"QWidget[vpvSection=\"true\"] QToolButton { color: #dce8f2; background: #142334; border: 1px solid #2b4258; border-radius: 4px; padding: 3px 8px; }\n"
+			"QWidget[vpvSection=\"true\"] QToolButton:hover { background: #1a2e42; }\n"
+			"QWidget[vpvSection=\"true\"] QToolButton:disabled { color: #6f8396; }\n"
+			"QWidget[vpvSection=\"true\"] QToolButton[profileSection=\"true\"] { min-height: 30px; color: #d9e7f2; background: #111d29; border: 1px solid #2b4258; border-radius: 5px; padding: 4px 9px; text-align: left; font-weight: 600; }\n"
+			"QWidget[vpvSection=\"true\"] QToolButton[profileSection=\"true\"]:hover { background: #162839; }\n"
+			"QWidget[vpvSection=\"true\"] QToolButton[profileSection=\"true\"]:focus { border: 1px solid #3b9ce5; }\n"
+			"QWidget[vpvSection=\"true\"] QToolButton[profileSection=\"true\"]:disabled { color: #6f8396; }\n"
+			"QWidget[vpvSection=\"true\"] QTabBar QToolButton { color: #dce8f2; background: #142536; border: 1px solid #3a5269; border-radius: 3px; padding: 0px; }\n"
+			"QWidget[vpvSection=\"true\"] QTabBar QToolButton:hover { background: #203c53; }\n"
+			"QWidget[vpvSection=\"true\"] QTabBar QToolButton:disabled { color: #63798c; background: #101923; }\n"
+			"QWidget[vpvDrivePage=\"true\"] QTabWidget::pane { border: 0; background: transparent; }\n"
+			"QFrame[vpvCard=\"true\"] { background: #0c1620; border: 1px solid #22384c; border-radius: 6px; }\n"
+			"QLabel[vpvCardHeading=\"true\"] { font-size: 14px; font-weight: 650; }\n"
+			"QWidget[vpvSection=\"true\"] QLabel[vpvCardHeading=\"true\"] { color: #f0f6fb; }\n"
+			"QWidget[vpvSection=\"true\"] QLabel[vpvCardHeading=\"true\"]:disabled { color: #7f95a8; }\n"
+			"QLabel[vpvSetBy=\"true\"] { color: #8fa6bb; font-size: 11px; }\n"
+			"QLabel[vpvSetBy=\"true\"]:disabled { color: #6f8396; }\n"
+			"QTabWidget[vpvSubTabs=\"true\"]::pane { border: 0; background: transparent; }\n"
+			"QTabWidget[vpvUnitsTabs=\"true\"]::pane { border: 0; background: transparent; }\n"
+			"QTabWidget[vpvUnitsTabs=\"true\"] > QTabBar::tab { min-width: 0px; padding: 6px 10px; }\n"
+			"QWidget[vpvSection=\"true\"] QLabel[vpvOriginalNote=\"true\"] { background: #3a2a10; color: #ffd58a; padding: 8px; border-radius: 5px; }\n"
+			"QWidget[vpvSection=\"true\"] QLabel[vpvOffNote=\"true\"] { background: #1d2a38; color: #cfe0ef; padding: 8px; border-radius: 5px; }\n"
+			"QWidget[vpvSection=\"true\"] QLabel[vpvPrecisionNote=\"true\"] { color: #e0a040; }\n"
+			"QSlider[vpvMixedSlider=\"true\"]::handle:horizontal { background: transparent; border: 0; width: 0px; margin: 0px; }\n"
+			"/* vpv-section-style */\n");
+	}
+
 	void EnsureSectionStyleSheet()
 	{
 		if (!qApp) return;
 		const QString existing = qApp->styleSheet();
-		if (existing.contains(QStringLiteral("QFrame[vpvCard=\"true\"]"))) return;
-		qApp->setStyleSheet(existing.isEmpty() ? VpvSectionStyleSheet()
-			: existing + QLatin1Char('\n') + VpvSectionStyleSheet());
+		if (existing.contains(QStringLiteral("/* vpv-section-style */"))) return;
+		const QString sheet = SectionStyleSheetForMode(IsHighContrastEnabled());
+		qApp->setStyleSheet(existing.isEmpty() ? sheet
+			: existing + QLatin1Char('\n') + sheet);
 	}
 
 	QWidget* CreateSection(const Host& host)
@@ -3282,6 +3607,10 @@ namespace Vpv
 		root->setProperty("vpvSection", true);
 		state->root = root;
 		state->rowFollower = new RowFollowerManager(root);
+		auto* popupCoalescer = new HiddenComboPopupCoalescer(root);
+		// Pre-attach coalescer to existing upstream VP-V combo popups before rows/sections
+		// are reparented into VP-V cards so hidden popups do not storm MetaCalls during moves.
+		popupCoalescer->WatchVpvCombosUnder(host.upstreamRoot, false);
 		std::weak_ptr<State> weakSectionState(state);
 		QObject::connect(root, &QObject::destroyed, [weakSectionState](QObject*)
 		{
@@ -3485,13 +3814,16 @@ namespace Vpv
 		{
 			const int g = MatchGlobal(TierTable(), state->MakeGetter());
 			// The units' own tiers, as chips (usability audit 2026-10-24).
+			const bool highContrast = IsHighContrastEnabled();
 			QStringList parts;
 			for (const Unit& u : TierTable().units)
 				if (u.Tiered())
 				{
 					const int t = MatchTier(TierTable(), u, state->MakeGetter());
-					parts << QStringLiteral("<span style=\"background:#1a2c3e; border-radius:4px;\">&nbsp;%1: <b>%2</b>&nbsp;</span>")
-						.arg(Q(u.name), t >= 0 ? Q(u.presets[static_cast<size_t>(t)].tier) : QStringLiteral("Custom"));
+					const QString tierText = t >= 0 ? Q(u.presets[static_cast<size_t>(t)].tier) : QStringLiteral("Custom");
+					parts << (highContrast
+						? QStringLiteral("<span>&nbsp;%1: <b>%2</b>&nbsp;</span>").arg(Q(u.name), tierText)
+						: QStringLiteral("<span style=\"background:#1a2c3e; border-radius:4px;\">&nbsp;%1: <b>%2</b>&nbsp;</span>").arg(Q(u.name), tierText));
 				}
 			chips->setText(parts.join(QStringLiteral("&nbsp; ")));
 			// A mixed state has no slider position: the thumb is hidden rather than parked on Classic.
@@ -3555,14 +3887,8 @@ namespace Vpv
 		QPointer<QWidget> rootPtr(root);
 		QObject::connect(timer, &QTimer::timeout, fallbacks, [mirror, weakSectionState, rootPtr, timer]()
 		{
-			if (!rootPtr || !rootPtr->window() || rootPtr->window() == rootPtr)
-			{
-				timer->stop();
-				return;
-			}
-			if (!rootPtr->isVisible()) return;
 			const auto s = weakSectionState.lock();
-			if (!s)
+			if (!rootPtr || !s || !IsAttachedAndVisible(rootPtr))
 			{
 				timer->stop();
 				return;
@@ -3570,7 +3896,7 @@ namespace Vpv
 			mirror();
 			s->RefreshAll();
 		});
-		timer->start();
+		BindVisibilityTimer(root, timer);
 
 		for (const Unit& u : table.units)
 			PopulateUnitPage(state, u, tabs);
@@ -3786,6 +4112,14 @@ namespace Vpv
 		state->reloading = true;
 		applyPathway(PathwayIsVpv(host));
 		state->reloading = false;
+		// Coalesce hidden VP-V combo popup views across root, Dynamic Drive, and VP-V upstream rows,
+		// and clear redundant per-widget stylesheets on permanently-hidden vpvRow .reset_override buttons.
+		popupCoalescer->WatchVpvCombosUnder(root, true);
+		if (drivePage)
+			popupCoalescer->WatchVpvCombosUnder(drivePage, true);
+		popupCoalescer->WatchVpvCombosUnder(host.upstreamRoot, false);
+		ClearHiddenVpvResetStylesheets(root);
+		ClearHiddenVpvResetStylesheets(host.upstreamRoot);
 		state->upstreamIndex.Clear();
 		state->rootIndex.Clear();
 	}

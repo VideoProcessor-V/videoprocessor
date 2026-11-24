@@ -24,6 +24,7 @@
 #include <QString>
 #include <QStringList>
 
+#include <cstdint>
 #include <functional>
 #include <vector>
 
@@ -77,6 +78,10 @@ namespace Vpv
 		std::function<std::vector<UnitCard>(const QString& unitId)> unitCards;
 	};
 
+	// Returns VP-V's property-scoped stylesheet for dark mode (highContrast == false) or
+	// structural-only high-contrast mode (highContrast == true, zero color overrides).
+	QString SectionStyleSheetForMode(bool highContrast);
+
 	// Ensures VP-V's property-scoped stylesheet rules are installed once on qApp
 	// (idempotent; call before building pages to avoid post-build StyleChange cascades).
 	void EnsureSectionStyleSheet();
@@ -103,6 +108,9 @@ namespace Vpv
 
 	// Diagnostic count of currently alive Vpv::State instances (for deterministic leak verification).
 	int LiveSectionStateCount();
+
+	// Diagnostic count of hidden VP-V combo popup events deferred or purged before popup show.
+	std::uint64_t DeferredHiddenPopupEventCount();
 
 	// Object names (tests and automation).
 	inline QString ObjectName(const QString& part) { return QStringLiteral("vpv.") + part; }
