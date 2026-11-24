@@ -1341,5 +1341,191 @@ namespace VideoProcessorTest
 			Assert::IsTrue(TdProducts::FallbackKey(TdProducts::Consumer::AdaptiveScaler, TdProducts::kCauseAbsent) != std::string("product.adaptive_downscale"),
 				L"the temporal-detail read is keyed by cause, never under the grain decision's bare id");
 		}
+
+		TEST_METHOD(UpscaleDoesNotEmitDownscaleGrainSourceFallbackOrStatusLine)
+		{
+			// S4-H2: the upscale form's grain term comes from kP10gGrainLevel via ReadGrain (never the downscale scalar
+			// GrainSource P10/P11 seam). Even when the host always supplies host.grainSource (as LibplaceboVideoRenderer does),
+			// an active upscale frame must NOT invoke host.grainSource, must NOT engage GrainSourceFallback()
+			// ("product.adaptive_downscale"), and must NOT emit downscale's "Adaptive grain: ..." status line.
+			GrainRig rig;
+			Assert::IsTrue(rig.Init(), L"the WARP test device, formats and SSimDownscaler.glsl are available");
+
+			static constexpr int kUpSw = 64, kUpSh = 64, kUpDw = 128, kUpDh = 128;
+			static constexpr int kDownDw = 256, kDownDh = 160;
+			pl_tex upSrc = nullptr;
+			{
+				std::vector<uint16_t> px(static_cast<size_t>(kUpSw) * kUpSh * 4);
+				for (int y = 0; y < kUpSh; ++y)
+					for (int x = 0; x < kUpSw; ++x)
+					{
+						const uint16_t v = static_cast<uint16_t>(std::lround((110.0 + ((x + y) % 32)) * 257.0));
+						uint16_t* p = &px[(static_cast<size_t>(y) * kUpSw + x) * 4];
+						p[0] = p[1] = p[2] = v;
+						p[3] = 65535;
+					}
+				pl_tex_params tp{};
+				tp.w = kUpSw; tp.h = kUpSh; tp.format = rig.srcFmt; tp.sampleable = true; tp.initial_data = px.data();
+				upSrc = pl_tex_create(rig.gpu, &tp);
+				Assert::IsNotNull(upSrc, L"precondition: upscale source texture created");
+				rig.owned.push_back(upSrc);
+			}
+			double sigma = 0.0;
+			pl_tex downSrc = rig.Grey(WhiteNoiseField(2.0, 9001u, sigma));
+			Assert::IsNotNull(downSrc, L"precondition: downscale source texture created");
+
+			const AdaptiveDownscale::Settings st = GrainRig::Ramp();
+			const AdaptiveDownscale::GrainSource invalidSource{};
+			const AdaptiveDownscale::GrainSource validSource = rig.Source(sigma);
+			Assert::IsFalse(invalidSource.Valid(), L"precondition: empty GrainSource is invalid");
+			Assert::IsTrue(validSource.Valid(), L"precondition: shared GrainSource is valid");
+
+			auto countDownscaleGrainLines = [](const std::vector<std::string>& lines) -> size_t
+			{
+				size_t count = 0;
+				for (const std::string& line : lines)
+					if (line.rfind("Adaptive grain:", 0) == 0)
+						++count;
+				return count;
+			};
+
+			AdaptiveDownscale::Module module;
+			AdaptiveDownscaleStage::Stage stage{ module };
+			int grainSourceCalls = 0;
+			bool returnValidSource = false;
+			AdaptiveDownscaleStage::Host host;
+			host.fallbackFramePeriod = []() { return 1.0f / 24.0f; };
+			host.bitrate = [](double& q) { q = 1.0; return false; };
+			host.nlsMapping = []() { return NlsMaskMapping::Mapping(); };
+			host.ssimInChain = []() { return true; };
+			host.motion = []() { return AdaptiveDownscaleStage::MotionSource(); };
+			host.publishStatus = []() {};
+			host.grainSource = [&]() -> AdaptiveDownscale::GrainSource
+			{
+				++grainSourceCalls;
+				return returnValidSource ? validSource : invalidSource;
+			};
+
+			double weight = 1.0;
+			bool grainWanted = false, noSsim = false;
+			uint64_t sequence = 0;
+			auto renderFrame = [&](pl_tex src, int sw, int sh, int dw, int dh, bool adaptiveUpscale, bool adaptiveDownscale)
+			{
+				AdaptiveDownscaleStage::Frame f;
+				f.adaptiveUpscale = adaptiveUpscale;
+				f.adaptiveDownscale = adaptiveDownscale;
+				f.adaptive = &st;
+				f.lowBitrateOff = true;
+				f.fboFloat32 = 0;
+				f.sourceSequence = ++sequence;
+				f.nominalSourceRateHz = 24.0;
+				f.sourceCrop = { 0.0f, 0.0f, static_cast<float>(sw), static_cast<float>(sh) };
+				f.targetCrop = { 0.0f, 0.0f, static_cast<float>(dw), static_cast<float>(dh) };
+
+				std::vector<const pl_hook*> list;
+				if (!adaptiveUpscale && adaptiveDownscale)
+					list.push_back(rig.ssim);
+				stage.Register(f, host, { weight, grainWanted, noSsim }, list);
+				if (adaptiveUpscale)
+					Assert::IsTrue(list.size() == 2 && list.front() == module.Measure() && list.back() == module.Blend(),
+						L"upscale registered measure and blend");
+				else
+					Assert::IsTrue(list.size() == 3 && list.front() == module.Measure() && list.back() == module.Blend(),
+						L"downscale registered measure, SSIM, blend");
+
+				pl_tex_params tp{};
+				tp.w = dw; tp.h = dh; tp.format = rig.dstFmt; tp.renderable = true; tp.host_readable = true;
+				pl_tex target = pl_tex_create(rig.gpu, &tp);
+				Assert::IsNotNull(target, L"target texture created");
+				pl_frame image = TargetLutGpuFixture::MakeRgbFrame(src);
+				image.color.transfer = PL_COLOR_TRC_GAMMA22;
+				pl_frame out = TargetLutGpuFixture::MakeRgbFrame(target);
+				out.color.transfer = PL_COLOR_TRC_GAMMA22;
+				pl_render_params params = pl_render_default_params;
+				params.dither_params = nullptr;
+				params.error_diffusion = nullptr;
+				params.upscaler = &pl_filter_ewa_lanczossharp;
+				params.downscaler = &pl_filter_mitchell;
+				params.disable_linear_scaling = true;
+				params.sigmoid_params = nullptr;
+				params.hooks = list.data();
+				params.num_hooks = static_cast<int>(list.size());
+				const bool ok = pl_render_image(rig.fixture.Renderer(), &image, &out, &params);
+				pl_gpu_finish(rig.gpu);
+				pl_tex_destroy(rig.gpu, &target);
+				Assert::IsTrue(ok, L"the WARP render ran");
+			};
+
+			// 1. Upscale frame (64x64 -> 128x128) with host.grainSource returning an invalid/empty GrainSource.
+			returnValidSource = false;
+			grainSourceCalls = 0;
+			renderFrame(upSrc, kUpSw, kUpSh, kUpDw, kUpDh, true, false);
+			Assert::IsTrue(stage.UpscaleThisFrame(), L"upscale (invalid offered GrainSource): stage must be in upscale mode");
+			Assert::IsTrue(module.Active() && module.Failures() == 0, L"upscale (invalid offered GrainSource): module must be active with zero failures");
+			Assert::AreEqual(1, module.LastUpscaleRatio(), L"upscale (invalid offered GrainSource): prescale ratio must be 1");
+			Assert::AreEqual(0, grainSourceCalls, L"upscale (invalid offered GrainSource): host.grainSource must not be invoked on upscale");
+			{
+				const FallbackCatalog::Decision d = stage.GrainSourceFallback();
+				Assert::AreEqual(std::string("product.adaptive_downscale"), d.id, L"upscale (invalid offered GrainSource): fallback id");
+				Assert::IsFalse(d.engaged, L"upscale (invalid offered GrainSource): downscale GrainSourceFallback must NOT engage on upscale");
+				Assert::AreEqual(std::string(), d.reason, L"upscale (invalid offered GrainSource): released fallback reason must be empty");
+				Assert::AreEqual(size_t(0), countDownscaleGrainLines(stage.StatusLines()),
+					L"upscale (invalid offered GrainSource): StatusLines must contain zero downscale 'Adaptive grain:' lines");
+			}
+
+			// 2. Upscale frame (64x64 -> 128x128) with host.grainSource returning a valid GrainSource.
+			returnValidSource = true;
+			grainSourceCalls = 0;
+			renderFrame(upSrc, kUpSw, kUpSh, kUpDw, kUpDh, true, false);
+			Assert::IsTrue(stage.UpscaleThisFrame(), L"upscale (valid offered GrainSource): stage must be in upscale mode");
+			Assert::IsTrue(module.Active() && module.Failures() == 0, L"upscale (valid offered GrainSource): module must be active with zero failures");
+			Assert::AreEqual(0, grainSourceCalls, L"upscale (valid offered GrainSource): host.grainSource must not be invoked on upscale");
+			{
+				const FallbackCatalog::Decision d = stage.GrainSourceFallback();
+				Assert::AreEqual(std::string("product.adaptive_downscale"), d.id, L"upscale (valid offered GrainSource): fallback id");
+				Assert::IsFalse(d.engaged, L"upscale (valid offered GrainSource): downscale GrainSourceFallback must NOT engage on upscale");
+				Assert::AreEqual(std::string(), d.reason, L"upscale (valid offered GrainSource): released fallback reason must be empty");
+				Assert::AreEqual(size_t(0), countDownscaleGrainLines(stage.StatusLines()),
+					L"upscale (valid offered GrainSource): StatusLines must contain zero downscale 'Adaptive grain:' lines");
+			}
+
+			// 3. MANDATORY IN-TEST NEGATIVE CONTROL (exact same stage, module, and host with the exact same invalid
+			// host.grainSource callback, switched to downscale 384x240 -> 256x160 with SSIM in chain): proves the downscale
+			// GrainSourceFallback detector and "Adaptive grain:" status line are genuinely active and NOT disabled globally.
+			returnValidSource = false;
+			grainSourceCalls = 0;
+			renderFrame(downSrc, GrainRig::kSw, GrainRig::kSh, kDownDw, kDownDh, false, true);
+			Assert::IsFalse(stage.UpscaleThisFrame(), L"negative control (downscale): stage must be in downscale mode");
+			Assert::IsTrue(module.Active() && module.Failures() == 0, L"negative control (downscale): module must be active with zero failures");
+			Assert::IsTrue(grainSourceCalls > 0, L"negative control (downscale): host.grainSource must be queried on downscale");
+			{
+				const FallbackCatalog::Decision d = stage.GrainSourceFallback();
+				Assert::AreEqual(std::string("product.adaptive_downscale"), d.id, L"negative control (downscale): fallback id");
+				Assert::IsTrue(d.engaged, L"negative control (downscale): invalid offered GrainSource must engage GrainSourceFallback on downscale");
+				Assert::AreEqual(std::string("grain: the offered shared products are invalid (missing or grid mismatch)"), d.reason,
+					L"negative control (downscale): expected invalid shared products fallback reason");
+				Assert::AreEqual(size_t(1), countDownscaleGrainLines(stage.StatusLines()),
+					L"negative control (downscale): StatusLines must contain exactly one 'Adaptive grain:' line on downscale");
+			}
+
+			// 4. Downscale -> Upscale transition on the exact same stage & module (both adaptiveUpscale and adaptiveDownscale
+			// enabled, as in typical user settings): switching back to upscale must clear the downscale fallback and status line.
+			returnValidSource = false;
+			grainSourceCalls = 0;
+			renderFrame(upSrc, kUpSw, kUpSh, kUpDw, kUpDh, true, true);
+			Assert::IsTrue(stage.UpscaleThisFrame(), L"downscale->upscale transition: stage must be in upscale mode");
+			Assert::IsTrue(module.Active() && module.Failures() == 0, L"downscale->upscale transition: module must be active with zero failures");
+			Assert::AreEqual(0, grainSourceCalls, L"downscale->upscale transition: host.grainSource must not be invoked on upscale");
+			{
+				const FallbackCatalog::Decision d = stage.GrainSourceFallback();
+				Assert::AreEqual(std::string("product.adaptive_downscale"), d.id, L"downscale->upscale transition: fallback id");
+				Assert::IsFalse(d.engaged, L"downscale->upscale transition: stale downscale fallback must be released on upscale");
+				Assert::AreEqual(size_t(0), countDownscaleGrainLines(stage.StatusLines()),
+					L"downscale->upscale transition: stale 'Adaptive grain:' status line must disappear on upscale");
+			}
+
+			module.Release();
+			Assert::AreEqual(0, pl_renderer_get_errors(rig.fixture.Renderer()).num_disabled_hooks, L"no hook was disabled");
+		}
 	};
 }
