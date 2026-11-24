@@ -2558,16 +2558,37 @@ if (g.y == 0 && g.x < DN_N) {
 				Assert::AreEqual(static_cast<uint64_t>(1), finish.DitherNeedCounters().framesOn);
 			}
 
-			// Verify HookGuard::Apply + NextVectorGuard::AttachRelease path with a real parsed sigma-delta hook.
+			// Verify HookGuard::Apply + NextVectorGuard::AttachRelease path with a real parsed sigma-delta hook
+			// (expanded via CustomHookChain::Chain + TemplateValues so {{output_width*}}/{{output_height*}} resolve cleanly).
 			{
-				const std::string sdSrc = LoadBundledShader("Temporal sigma-delta.glsl");
-				Assert::IsFalse(sdSrc.empty(), L"Temporal sigma-delta.glsl not found");
-				const pl_hook* sdHook = pl_mpv_user_shader_parse(gpu, sdSrc.data(), sdSrc.size());
-				Assert::IsNotNull(sdHook, L"Temporal sigma-delta.glsl failed to parse");
-				const pl_hook* hookArr[1] = { sdHook };
+				CustomHookChain::Chain sdChain({
+					[](const std::string& file, std::string& source, std::string& reason)
+					{
+						source = LoadBundledShader(file.c_str());
+						reason = "bundled shader not found";
+						return !source.empty();
+					},
+					[gpu](const std::string& source) -> const pl_hook*
+					{
+						return pl_mpv_user_shader_parse(gpu, source.data(), source.size());
+					},
+					[](const pl_hook*& hook) { pl_mpv_user_shader_destroy(&hook); } });
+				ConfiguredShaderRule sdRule;
+				sdRule.name = "sigma_delta";
+				sdRule.filename = "Temporal sigma-delta.glsl";
+				sdChain.Configure({ sdRule });
+				CustomHookChain::TemplateValues sdValues;
+				sdValues.outputWidth = static_cast<int>(kW);
+				sdValues.outputHeight = static_cast<int>(kH);
+				sdValues.sourceWidth = static_cast<int>(kW);
+				sdValues.sourceHeight = static_cast<int>(kH);
+				sdChain.Ensure(sdValues);
+				std::vector<const pl_hook*> hookArr;
+				sdChain.Collect(false, hookArr);
+				Assert::AreEqual(size_t{ 1 }, hookArr.size(), L"Temporal sigma-delta.glsl failed to parse via CustomHookChain");
 				bool releaseAttached = false;
 				SigmaDeltaVectors::NextVectorGuard nextVecGuard;
-				const DitherNeedSeam::Outcome boundOut = finish.RunDitherNeedGpu(makeReq(liveSeq, true), hookArr, 1,
+				const DitherNeedSeam::Outcome boundOut = finish.RunDitherNeedGpu(makeReq(liveSeq, true), hookArr.data(), hookArr.size(),
 					[&](std::function<void()> fn)
 					{
 						releaseAttached = true;
@@ -2587,7 +2608,6 @@ if (g.y == 0 && g.x < DN_N) {
 					Assert::IsTrue(releaseAttached, L"NextVectorGuard::AttachRelease must receive HookGuard unbind callback");
 					nextVecGuard.Release();
 				}
-				pl_mpv_user_shader_destroy(&sdHook);
 			}
 
 			// Complete frame & verify ReleaseGpu withdraws VRAM + external demand cleanly BEFORE pl_gpu teardown (Rule 2).
