@@ -1503,7 +1503,7 @@ if (tid == 0)
             float rF = (rEnergy > TD_NUM_FLOOR) ? (rM2 / (rEnergy + TD_NUM_FLOOR)) : 1.0;
             if (rEnergy > u_structure_floor && cM2 < rM2 && curFDebiased < TD_F_SHARP &&
                 (rF - curF) > TD_F_SHIFT_DELTA &&
-                (sqrt(rM2) - sqrt(cM2)) > quantMidRmsBound)
+                (curF <= TD_F_DEFOCUS || (sqrt(rM2) - sqrt(cM2)) > quantMidRmsBound))
             {
                 focusChange = true;
                 break;

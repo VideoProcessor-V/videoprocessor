@@ -667,7 +667,7 @@ namespace TdV2
 						const double refF = cellFocusRatio(rb, cx, cy, refEnergy, refM2);
 						if (refEnergy > structureFloor && curM2 < refM2 && curFDebiased < fSharp &&
 						    (refF - curF) > fShiftDelta &&
-						    (std::sqrt(refM2) - std::sqrt(curM2)) > quantMidRmsBound)
+						    (curF <= fDefocus || (std::sqrt(refM2) - std::sqrt(curM2)) > quantMidRmsBound))
 						{
 							info[idx].focusChange = true;
 							break;
