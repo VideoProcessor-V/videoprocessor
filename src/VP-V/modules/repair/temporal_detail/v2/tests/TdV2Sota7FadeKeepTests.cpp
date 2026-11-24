@@ -238,21 +238,23 @@ namespace TdV2Sota7FadeKeepNs
 		TEST_METHOD(GpuAndCpuLumaGradualFadeKeepTapersCarryWithoutGrainNormalizerCancellation)
 		{
 			WarpContext wc;
-			VpSkeleton::PlTexBackend backend{ wc.gpu };
-			VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> arena(backend, 96u * 1024u * 1024u);
-
 			const int w = 64;
 			const int h = 64;
 			const int cw = w / 16;
 			const int ch = h / 16;
 			const size_t numCells = static_cast<size_t>(cw * ch);
 
+			VpSkeleton::PlTexBackend backend(wc.gpu);
+			VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> arena(backend);
+			Assert::IsTrue(arena.Reserve(VpSkeleton::PlanArena(
+				TdV2GpuEngine::ArenaRequests(wc.gpu, w, h, 16, Preset::Reference), VpSkeleton::Tier::T1)));
+
 			Config cfg;
 			cfg.preset = Preset::Reference;
 			cfg.mode = Mode::On;
 			cfg.sourceBits = 10;
-			cfg.cellSizePx = 16;
-			cfg.grainPriorCellPx = 16;
+			cfg.cellPx = 16;
+			cfg.grainCellPx = 16;
 			cfg.enableCarryForward = true;
 
 			const TdV2Plane master = MakeTexturedMaster(w, h, 0.15);
@@ -269,7 +271,7 @@ namespace TdV2Sota7FadeKeepNs
 			const TdV2Plane rec1Unsplit = AddPlane(clean1, grain1);
 			const TdV2Plane rec2Split = AddPlane(clean2, grain2);
 
-			const CellMotionField zeroMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, RegionMotionClass::Still);
+			const CellMotionField zeroMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
 			const std::vector<double> grainPrior(numCells, 3.2 * 3.2);
 
 			struct FadeRunOut
@@ -294,12 +296,14 @@ namespace TdV2Sota7FadeKeepNs
 				f0.receivedY = rec0;
 				f0.cleanY = clean0;
 				f0.hasCleanSplit = true;
-				f0.stepDelta = 12.0;
+				f0.hasStepPrior = true;
+				f0.estimatedStepDelta = 12.0;
 				f0.prevPeak.cleanPlane = &refPrev0;
 				f0.prevPeak.motion = &zeroMf;
 				f0.nextPeak.cleanPlane = &refNext0;
 				f0.nextPeak.motion = &zeroMf;
 				const FrameProcessResult c0 = cpuEng.ProcessFrame(f0, nullptr);
+				arena.BeginFrame();
 				const GpuProcessResult g0 = gpuEng.engine.ProcessFrame(wc.gpu, wc.dispatch, f0, &arena, nullptr);
 				Assert::IsTrue(g0.succeeded);
 				Assert::IsTrue(RmsDiff(c0.outputClean, master) < RmsDiff(clean0, master) * 0.65);
@@ -310,11 +314,13 @@ namespace TdV2Sota7FadeKeepNs
 				f1.receivedY = rec1Unsplit;
 				f1.hasCleanSplit = false;
 				f1.retainedGrainVar = grainPrior;
-				f1.stepDelta = 14.0;
+				f1.hasStepPrior = true;
+				f1.estimatedStepDelta = 14.0;
 				f1.hasCarryMotion = true;
 				f1.carryMotion = zeroMf;
 				f1.fadeKeep = fadeKeepFrame1;
 				r.cpu1 = cpuEng.ProcessFrame(f1, &r.cpuStand1);
+				arena.BeginFrame();
 				r.gpu1 = gpuEng.engine.ProcessFrame(wc.gpu, wc.dispatch, f1, &arena, &r.gpuStand1);
 				Assert::IsTrue(r.gpu1.succeeded);
 
@@ -324,11 +330,13 @@ namespace TdV2Sota7FadeKeepNs
 				f2.receivedY = rec2Split;
 				f2.cleanY = clean2;
 				f2.hasCleanSplit = true;
-				f2.stepDelta = 14.0;
+				f2.hasStepPrior = true;
+				f2.estimatedStepDelta = 14.0;
 				f2.hasCarryMotion = true;
 				f2.carryMotion = zeroMf;
 				f2.fadeKeep = 1.0;
 				r.cpu2 = cpuEng.ProcessFrame(f2, nullptr);
+				arena.BeginFrame();
 				r.gpu2 = gpuEng.engine.ProcessFrame(wc.gpu, wc.dispatch, f2, &arena, nullptr);
 				Assert::IsTrue(r.gpu2.succeeded);
 				return r;
@@ -413,9 +421,6 @@ namespace TdV2Sota7FadeKeepNs
 		TEST_METHOD(GpuAndCpuChromaGradualFadeKeepTapersAnchorAndDeltaWithoutGuardCancellation)
 		{
 			WarpContext wc;
-			VpSkeleton::PlTexBackend backend{ wc.gpu };
-			VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> arena(backend, 96u * 1024u * 1024u);
-
 			const int lumaW = 64;
 			const int lumaH = 64;
 			const int cW = 32;
@@ -424,16 +429,21 @@ namespace TdV2Sota7FadeKeepNs
 			const int ch = lumaH / 16;
 			const size_t numCells = static_cast<size_t>(cw * ch);
 
+			VpSkeleton::PlTexBackend backend(wc.gpu);
+			VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> arena(backend);
+			Assert::IsTrue(arena.Reserve(VpSkeleton::PlanArena(
+				TdV2ChromaGpuEngine::ArenaRequests(wc.gpu, lumaW, lumaH, ChromaSubsampling::Yuv420, 16), VpSkeleton::Tier::T1)));
+
 			Config cfg;
 			cfg.preset = Preset::Reference;
 			cfg.mode = Mode::On;
 			cfg.sourceBits = 10;
-			cfg.cellSizePx = 16;
-			cfg.grainPriorCellPx = 16;
+			cfg.cellPx = 16;
+			cfg.grainCellPx = 16;
 
 			const SitingSpec siting{ -0.5f, 0.0f };
 			const ActiveRect fullLuma = ActiveRect::Full(lumaW, lumaH);
-			const CellMotionField zeroMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, RegionMotionClass::Still);
+			const CellMotionField zeroMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
 
 			const TdV2Plane masterCb444 = MakeTexturedMaster(lumaW, lumaH, 0.25);
 			const TdV2Plane masterCr444 = MakeTexturedMaster(lumaW, lumaH, 1.10);
@@ -481,8 +491,8 @@ namespace TdV2Sota7FadeKeepNs
 				seedIn.cleanCr = masterCr444;
 				seedIn.hasCleanSplit = true;
 				seedIn.isAnchorFrame = true;
-				seedIn.stepDeltaCb = 8.0;
-				seedIn.stepDeltaCr = 8.0;
+				seedIn.hasStepPrior = true;
+				seedIn.estimatedStepDelta = 8.0;
 				(void)cpuEng.ProcessFrame(seedIn, nullptr);
 				Assert::IsTrue(cpuEng.AnchorCanvas().HasData());
 				outWeightBefore = RmsAbs(cpuEng.AnchorCanvas().WeightPlane());
@@ -505,8 +515,8 @@ namespace TdV2Sota7FadeKeepNs
 				in.hasCleanSplit = true;
 				in.retainedGrainVarCb = leakVar;
 				in.retainedGrainVarCr = leakVar;
-				in.stepDeltaCb = 14.0;
-				in.stepDeltaCr = 14.0;
+				in.hasStepPrior = true;
+				in.estimatedStepDelta = 14.0;
 				in.prevPeak.cleanCb = &prevCb;
 				in.prevPeak.cleanCr = &prevCr;
 				in.prevPeak.lumaMotion = &zeroMf;
@@ -519,6 +529,7 @@ namespace TdV2Sota7FadeKeepNs
 				outAnchorHasData = cpuEng.AnchorCanvas().HasData();
 				outWeightAfter = outAnchorHasData ? RmsAbs(cpuEng.AnchorCanvas().WeightPlane()) : 0.0;
 
+				arena.BeginFrame();
 				outGpu = gpuEng.engine.ProcessChromaPlanes(wc.gpu, wc.dispatch, in, &arena, &gpuSt);
 				Assert::IsTrue(outGpu.succeeded);
 			};
@@ -574,8 +585,8 @@ namespace TdV2Sota7FadeKeepNs
 				inPlain.hasCleanSplit = true;
 				inPlain.retainedGrainVarCb = leakVar;
 				inPlain.retainedGrainVarCr = leakVar;
-				inPlain.stepDeltaCb = 14.0;
-				inPlain.stepDeltaCr = 14.0;
+				inPlain.hasStepPrior = true;
+				inPlain.estimatedStepDelta = 14.0;
 				inPlain.prevPeak.cleanCb = &prevCb;
 				inPlain.prevPeak.cleanCr = &prevCr;
 				inPlain.prevPeak.lumaMotion = &zeroMf;

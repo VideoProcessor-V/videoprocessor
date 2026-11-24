@@ -239,8 +239,7 @@ namespace TdV2Sota10BandMemoNs
 		TEST_METHOD(GpuBandMemoReferenceAndRealTimeDropDispatchesAndMatchSelfComputedBands)
 		{
 			WarpContext wc;
-			VpSkeleton::PlTexBackend backend{ wc.gpu };
-			VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> arena(backend, 96u * 1024u * 1024u);
+			VpSkeleton::PlTexBackend backend(wc.gpu);
 
 			const int w = 96;
 			const int h = 64;
@@ -306,7 +305,7 @@ namespace TdV2Sota10BandMemoNs
 			tMemoHalf.tex = CreateFloatTex(wc.gpu, wHalf, hHalf, 1, true, false, memoHalfF.data());
 			tMemoPert.tex = CreateFloatTex(wc.gpu, w, h, 1, true, false, memoPertF.data());
 
-			const CellMotionField zeroMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, RegionMotionClass::Still);
+			const CellMotionField zeroMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
 
 			auto runCase = [&](Preset preset, pl_tex memoTex, GpuFrameOutput& gOut, TdV2Plane& outY, TdV2Plane& outClean)
 			{
@@ -314,7 +313,11 @@ namespace TdV2Sota10BandMemoNs
 				cfg.preset = preset;
 				cfg.mode = Mode::On;
 				cfg.sourceBits = 10;
-				cfg.cellSizePx = 16;
+				cfg.cellPx = 16;
+
+				VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> arena(backend);
+				Assert::IsTrue(arena.Reserve(VpSkeleton::PlanArena(
+					TdV2GpuEngine::ArenaRequests(wc.gpu, w, h, 16, preset), VpSkeleton::Tier::T1)));
 
 				LumaGpuGuard eng(wc.gpu, cfg);
 				OwnedTex tOutY(wc.gpu), tOutClean(wc.gpu);
@@ -323,12 +326,13 @@ namespace TdV2Sota10BandMemoNs
 
 				GpuFrameInput gIn;
 				gIn.seq = 0;
-				gIn.width = w;
-				gIn.height = h;
+				gIn.w = w;
+				gIn.h = h;
 				gIn.receivedYTex = tRec.tex;
 				gIn.cleanYTex = tClean.tex;
 				gIn.hasCleanSplit = true;
-				gIn.stepDelta = 14.0;
+				gIn.hasStepPrior = true;
+				gIn.estimatedStepDelta = 14.0;
 				gIn.prevPeak.cleanTex = tPrev.tex;
 				gIn.prevPeak.motion = &zeroMf;
 				gIn.nextPeak.cleanTex = tNext.tex;
@@ -340,6 +344,7 @@ namespace TdV2Sota10BandMemoNs
 				gOut.outputCleanTex = tOutClean.tex;
 				gOut.readbackCellDiagnostics = true;
 
+				arena.BeginFrame();
 				const bool ok = eng.engine.ProcessFrameGpu(wc.gpu, wc.dispatch, gIn, gOut, &arena, nullptr);
 				Assert::IsTrue(ok && gOut.succeeded);
 				Assert::IsTrue(Detail::DownloadPlaneR32F(wc.gpu, tOutY.tex, w, h, outY));
@@ -402,8 +407,7 @@ namespace TdV2Sota10BandMemoNs
 		TEST_METHOD(GpuBandMemoDimensionAndFormatMismatchFailClosedVisiblyZeroSilentFallback)
 		{
 			WarpContext wc;
-			VpSkeleton::PlTexBackend backend{ wc.gpu };
-			VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> arena(backend, 64u * 1024u * 1024u);
+			VpSkeleton::PlTexBackend backend(wc.gpu);
 
 			const int w = 64;
 			const int h = 64;
@@ -434,7 +438,7 @@ namespace TdV2Sota10BandMemoNs
 			tUnormMemo.tex = pl_tex_create(wc.gpu, &r8Params);
 			Assert::IsNotNull(tUnormMemo.tex);
 
-			const CellMotionField zeroMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, RegionMotionClass::Still);
+			const CellMotionField zeroMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
 
 			auto assertRejected = [&](Preset preset, pl_tex badMemo, const wchar_t* label)
 			{
@@ -442,17 +446,22 @@ namespace TdV2Sota10BandMemoNs
 				cfg.preset = preset;
 				cfg.mode = Mode::On;
 				cfg.sourceBits = 10;
-				cfg.cellSizePx = 16;
+				cfg.cellPx = 16;
+
+				VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> arena(backend);
+				Assert::IsTrue(arena.Reserve(VpSkeleton::PlanArena(
+					TdV2GpuEngine::ArenaRequests(wc.gpu, w, h, 16, preset), VpSkeleton::Tier::T1)));
 
 				LumaGpuGuard eng(wc.gpu, cfg);
 				GpuFrameInput gIn;
 				gIn.seq = 0;
-				gIn.width = w;
-				gIn.height = h;
+				gIn.w = w;
+				gIn.h = h;
 				gIn.receivedYTex = tRec.tex;
 				gIn.cleanYTex = tRec.tex;
 				gIn.hasCleanSplit = true;
-				gIn.stepDelta = 12.0;
+				gIn.hasStepPrior = true;
+				gIn.estimatedStepDelta = 12.0;
 				gIn.prevPeak.cleanTex = tPrev.tex;
 				gIn.prevPeak.motion = &zeroMf;
 				gIn.nextPeak.cleanTex = tNext.tex;
@@ -463,6 +472,7 @@ namespace TdV2Sota10BandMemoNs
 				gOut.outputYTex = tOutY.tex;
 				StandInRegistry st;
 
+				arena.BeginFrame();
 				const bool ok = eng.engine.ProcessFrameGpu(wc.gpu, wc.dispatch, gIn, gOut, &arena, &st);
 				Assert::IsFalse(ok, label);
 				Assert::IsFalse(gOut.succeeded, label);

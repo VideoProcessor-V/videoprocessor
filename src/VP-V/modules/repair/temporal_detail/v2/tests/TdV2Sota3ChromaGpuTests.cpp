@@ -349,7 +349,7 @@ namespace TdV2Sota3ChromaGpuNs
 				TdV2ChromaEngine cpuEng(cfg);
 				ChromaGpuGuard gpuGuard(ctx.gpu, cfg);
 				arena.BeginFrame();
-				const ChromaProcessResult cpuRes = cpuEng.ProcessChroma(cIn, nullptr);
+				const ChromaProcessResult cpuRes = cpuEng.ProcessFrame(cIn, nullptr);
 				const ChromaGpuProcessResult gpuRes = gpuGuard.engine.ProcessChromaPlanes(ctx.gpu, ctx.dispatch, cIn, &arena, nullptr);
 				Assert::IsTrue(gpuRes.succeeded && !gpuRes.scratchShort, L"WARP ProcessChromaPlanes failed on upsampled 4:2:0");
 				Assert::AreEqual(cW, gpuRes.codedW);
@@ -657,7 +657,7 @@ namespace TdV2Sota3ChromaGpuNs
 			TdV2ChromaEngine cpuEng(cfgUnt);
 			ChromaGpuGuard gUnt(ctx.gpu, cfgUnt);
 			StandInRegistry siUnt;
-			const ChromaProcessResult cpuUnt = cpuEng.ProcessChroma(maskedIn, nullptr);
+			const ChromaProcessResult cpuUnt = cpuEng.ProcessFrame(maskedIn, nullptr);
 			const ChromaGpuProcessResult gpuUnt = gUnt.engine.ProcessChromaPlanes(ctx.gpu, ctx.dispatch, maskedIn, nullptr, &siUnt);
 			Assert::IsTrue(gpuUnt.succeeded);
 			Assert::AreEqual(static_cast<size_t>(1u), gpuUnt.faceMaskedCells);

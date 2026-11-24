@@ -380,7 +380,7 @@ namespace TdV2Sota1StepScaleNs
 				Config cfg = MakePreset(Preset::Reference, Mode::On);
 				cfg.enableLongAnchor = false;
 				cfg.enableCarryForward = false;
-				cfg.estimator = VarianceEstimator::A3_MinOfBoth;
+				cfg.estimator = VarianceEstimator::A3_ConservativeMin;
 				cfg.residualMode = ResidualMode::Cell;
 				cfg.cellProjIterations = 2;
 

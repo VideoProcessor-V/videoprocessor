@@ -237,7 +237,7 @@ namespace TdV2Sota9MotionConfidenceNs
 	public:
 		TEST_METHOD(CpuEvaluateMotionGateContinuousConfidenceAndNanClosure)
 		{
-			CellMotionField base = CellMotionField::Uniform(4, 1, 0.0, 0.0, RegionMotionClass::Still);
+			CellMotionField base = CellMotionField::Uniform(4, 1, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
 			base.cls[0] = RegionMotionClass::Still;
 			base.cls[1] = RegionMotionClass::Camera;
 			base.cls[2] = RegionMotionClass::Object;
@@ -278,14 +278,19 @@ namespace TdV2Sota9MotionConfidenceNs
 		TEST_METHOD(GpuAndCpuLumaAndChromaContinuousConfidenceSweepMonotonicWithoutCliff)
 		{
 			WarpContext wc;
-			VpSkeleton::PlTexBackend backend{ wc.gpu };
-			VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> arena(backend, 96u * 1024u * 1024u);
-
 			const int w = 80;
 			const int h = 64;
 			const int cw = w / 16; // 5 columns
 			const int ch = h / 16; // 4 rows
 			const size_t numCells = static_cast<size_t>(cw * ch);
+
+			VpSkeleton::PlTexBackend backend(wc.gpu);
+			VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> lumaArena(backend);
+			Assert::IsTrue(lumaArena.Reserve(VpSkeleton::PlanArena(
+				TdV2GpuEngine::ArenaRequests(wc.gpu, w, h, 16, Preset::Reference), VpSkeleton::Tier::T1)));
+			VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> chromaArena(backend);
+			Assert::IsTrue(chromaArena.Reserve(VpSkeleton::PlanArena(
+				TdV2ChromaGpuEngine::ArenaRequests(wc.gpu, w, h, ChromaSubsampling::Yuv420, 16), VpSkeleton::Tier::T1)));
 
 			const TdV2Plane masterY = MakeRichScene(w, h, 0.2);
 			const TdV2Plane prevY = AddSmallNoise(masterY, 101u, 0.6);
@@ -311,7 +316,7 @@ namespace TdV2Sota9MotionConfidenceNs
 			cfg.preset = Preset::Reference;
 			cfg.mode = Mode::On;
 			cfg.sourceBits = 10;
-			cfg.cellSizePx = 16;
+			cfg.cellPx = 16;
 
 			const double confSteps[5] = { 1.0, 0.75, 0.50, 0.25, 0.0 };
 			double lumaRmsCpu[5] = {};
@@ -321,7 +326,7 @@ namespace TdV2Sota9MotionConfidenceNs
 
 			for (int si = 0; si < 5; ++si)
 			{
-				CellMotionField mf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, RegionMotionClass::Camera);
+				CellMotionField mf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Camera);
 				mf.confidence.assign(numCells, confSteps[si]);
 
 				FrameProcessInput lIn;
@@ -329,7 +334,8 @@ namespace TdV2Sota9MotionConfidenceNs
 				lIn.receivedY = curDegY;
 				lIn.cleanY = curDegY;
 				lIn.hasCleanSplit = true;
-				lIn.stepDelta = 28.0;
+				lIn.hasStepPrior = true;
+				lIn.estimatedStepDelta = 28.0;
 				lIn.prevPeak.cleanPlane = &prevY;
 				lIn.prevPeak.motion = &mf;
 				lIn.nextPeak.cleanPlane = &nextY;
@@ -338,7 +344,8 @@ namespace TdV2Sota9MotionConfidenceNs
 				TdV2ReferenceEngine cpuLuma(cfg);
 				LumaGpuGuard gpuLuma(wc.gpu, cfg);
 				const FrameProcessResult lc = cpuLuma.ProcessFrame(lIn, nullptr);
-				const GpuProcessResult lg = gpuLuma.engine.ProcessFrame(wc.gpu, wc.dispatch, lIn, &arena, nullptr);
+				lumaArena.BeginFrame();
+				const GpuProcessResult lg = gpuLuma.engine.ProcessFrame(wc.gpu, wc.dispatch, lIn, &lumaArena, nullptr);
 				Assert::IsTrue(lg.succeeded);
 				Assert::IsTrue(RmsDiff(lc.outputY, lg.outputY) < 1e-3);
 
@@ -357,8 +364,8 @@ namespace TdV2Sota9MotionConfidenceNs
 				cIn.cleanCb = delivDegCb;
 				cIn.cleanCr = delivDegCr;
 				cIn.hasCleanSplit = true;
-				cIn.stepDeltaCb = 28.0;
-				cIn.stepDeltaCr = 28.0;
+				cIn.hasStepPrior = true;
+				cIn.estimatedStepDelta = 28.0;
 				cIn.prevPeak.cleanCb = &codedPrevCb;
 				cIn.prevPeak.cleanCr = &codedPrevCr;
 				cIn.prevPeak.lumaMotion = &mf;
@@ -369,7 +376,8 @@ namespace TdV2Sota9MotionConfidenceNs
 				TdV2ChromaEngine cpuCh(cfg);
 				ChromaGpuGuard gpuCh(wc.gpu, cfg);
 				const ChromaProcessResult cc = cpuCh.ProcessFrame(cIn, nullptr);
-				const ChromaGpuProcessResult cg = gpuCh.engine.ProcessChromaPlanes(wc.gpu, wc.dispatch, cIn, &arena, nullptr);
+				chromaArena.BeginFrame();
+				const ChromaGpuProcessResult cg = gpuCh.engine.ProcessChromaPlanes(wc.gpu, wc.dispatch, cIn, &chromaArena, nullptr);
 				Assert::IsTrue(cg.succeeded);
 				Assert::IsTrue(RmsDiff(cc.outputCb, cg.outputCb) < 1e-2);
 
@@ -394,8 +402,8 @@ namespace TdV2Sota9MotionConfidenceNs
 			Assert::AreEqual(0.50 * chromaRmsGpu[0], chromaRmsGpu[2], 0.04 * chromaRmsGpu[0]);
 
 			// Spatial continuity proof vs binary cliff negative control across 5 horizontal cells [1.0, 0.75, 0.50, 0.25, 0.0] vs [1, 1, 0, 0, 0]:
-			CellMotionField mfSmooth = CellMotionField::Uniform(cw, ch, 0.0, 0.0, RegionMotionClass::Camera);
-			CellMotionField mfBinary = CellMotionField::Uniform(cw, ch, 0.0, 0.0, RegionMotionClass::Camera);
+			CellMotionField mfSmooth = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Camera);
+			CellMotionField mfBinary = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Camera);
 			mfSmooth.confidence.resize(numCells, 1.0);
 			mfBinary.confidence.resize(numCells, 1.0);
 			for (int cy = 0; cy < ch; ++cy)
@@ -413,7 +421,8 @@ namespace TdV2Sota9MotionConfidenceNs
 			inSmooth.receivedY = curDegY;
 			inSmooth.cleanY = curDegY;
 			inSmooth.hasCleanSplit = true;
-			inSmooth.stepDelta = 28.0;
+			inSmooth.hasStepPrior = true;
+			inSmooth.estimatedStepDelta = 28.0;
 			inSmooth.prevPeak.cleanPlane = &prevY;
 			inSmooth.prevPeak.motion = &mfSmooth;
 			inSmooth.nextPeak.cleanPlane = &nextY;
@@ -424,8 +433,10 @@ namespace TdV2Sota9MotionConfidenceNs
 			inBinary.nextPeak.motion = &mfBinary;
 
 			LumaGpuGuard gSmooth(wc.gpu, cfg), gBinary(wc.gpu, cfg);
-			const GpuProcessResult resSmooth = gSmooth.engine.ProcessFrame(wc.gpu, wc.dispatch, inSmooth, &arena, nullptr);
-			const GpuProcessResult resBinary = gBinary.engine.ProcessFrame(wc.gpu, wc.dispatch, inBinary, &arena, nullptr);
+			lumaArena.BeginFrame();
+			const GpuProcessResult resSmooth = gSmooth.engine.ProcessFrame(wc.gpu, wc.dispatch, inSmooth, &lumaArena, nullptr);
+			lumaArena.BeginFrame();
+			const GpuProcessResult resBinary = gBinary.engine.ProcessFrame(wc.gpu, wc.dispatch, inBinary, &lumaArena, nullptr);
 			Assert::IsTrue(resSmooth.succeeded && resBinary.succeeded);
 
 			// Measure inter-column delta jump across column boundary x = 31 -> 32 (between cell 1 and cell 2):
@@ -456,14 +467,19 @@ namespace TdV2Sota9MotionConfidenceNs
 		TEST_METHOD(GpuZeroCopyLegacyRg32fBackCompatExplicitRgba32fAndNanFailClosed)
 		{
 			WarpContext wc;
-			VpSkeleton::PlTexBackend backend{ wc.gpu };
-			VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> arena(backend, 96u * 1024u * 1024u);
-
 			const int w = 64;
 			const int h = 64;
 			const int cw = w / 16;
 			const int ch = h / 16;
 			const size_t numCells = static_cast<size_t>(cw * ch);
+
+			VpSkeleton::PlTexBackend backend(wc.gpu);
+			VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> lumaArena(backend);
+			Assert::IsTrue(lumaArena.Reserve(VpSkeleton::PlanArena(
+				TdV2GpuEngine::ArenaRequests(wc.gpu, w, h, 16, Preset::Reference), VpSkeleton::Tier::T1)));
+			VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> chromaArena(backend);
+			Assert::IsTrue(chromaArena.Reserve(VpSkeleton::PlanArena(
+				TdV2ChromaGpuEngine::ArenaRequests(wc.gpu, w, h, ChromaSubsampling::Yuv444, 16), VpSkeleton::Tier::T1)));
 
 			const TdV2Plane masterY = MakeRichScene(w, h, 0.4);
 			const TdV2Plane prevY = AddSmallNoise(masterY, 301u, 0.6);
@@ -474,7 +490,7 @@ namespace TdV2Sota9MotionConfidenceNs
 			cfg.preset = Preset::Reference;
 			cfg.mode = Mode::On;
 			cfg.sourceBits = 10;
-			cfg.cellSizePx = 16;
+			cfg.cellPx = 16;
 
 			// Upload 32-bit float luma textures for zero-copy ProcessFrameGpu.
 			auto toFloatVec = [](const TdV2Plane& p) -> std::vector<float>
@@ -535,12 +551,13 @@ namespace TdV2Sota9MotionConfidenceNs
 				LumaGpuGuard eng(wc.gpu, cfg);
 				GpuFrameInput gIn;
 				gIn.seq = 0;
-				gIn.width = w;
-				gIn.height = h;
+				gIn.w = w;
+				gIn.h = h;
 				gIn.receivedYTex = tRec.tex;
 				gIn.cleanYTex = tClean.tex;
 				gIn.hasCleanSplit = true;
-				gIn.stepDelta = 28.0;
+				gIn.hasStepPrior = true;
+				gIn.estimatedStepDelta = 28.0;
 				gIn.prevPeak.cleanTex = tPrev.tex;
 				gIn.nextPeak.cleanTex = tNext.tex;
 				gIn.motionVecTex = tMv.tex;
@@ -549,7 +566,8 @@ namespace TdV2Sota9MotionConfidenceNs
 				gOut = GpuFrameOutput{};
 				gOut.outputYTex = outTex;
 				gOut.readbackCellDiagnostics = true;
-				const bool ok = eng.engine.ProcessFrameGpu(wc.gpu, wc.dispatch, gIn, gOut, &arena, &st);
+				lumaArena.BeginFrame();
+				const bool ok = eng.engine.ProcessFrameGpu(wc.gpu, wc.dispatch, gIn, gOut, &lumaArena, &st);
 				Assert::IsTrue(ok && gOut.succeeded);
 
 				TdV2Plane pOut;
@@ -610,8 +628,8 @@ namespace TdV2Sota9MotionConfidenceNs
 				cIn.receivedTex = tUvRec.tex;
 				cIn.cleanUvTex = tUvRec.tex;
 				cIn.hasCleanSplit = true;
-				cIn.stepDeltaCb = 28.0;
-				cIn.stepDeltaCr = 28.0;
+				cIn.hasStepPrior = true;
+				cIn.estimatedStepDelta = 28.0;
 				cIn.prevPeak.cleanUvTex = tUvPrev.tex;
 				cIn.nextPeak.cleanUvTex = tUvNext.tex;
 				cIn.motionVecTex = tMv.tex;
@@ -620,7 +638,8 @@ namespace TdV2Sota9MotionConfidenceNs
 				cOut = ChromaGpuOutput{};
 				cOut.outCodedDeltaTex = outDeltaTex;
 				cOut.readbackCellDiagnostics = true;
-				const bool ok = cEng.engine.ProcessChromaGpu(wc.gpu, wc.dispatch, cIn, cOut, &arena, &st);
+				chromaArena.BeginFrame();
+				const bool ok = cEng.engine.ProcessChromaGpu(wc.gpu, wc.dispatch, cIn, cOut, &chromaArena, &st);
 				Assert::IsTrue(ok && cOut.succeeded);
 
 				std::vector<float> buf(static_cast<size_t>(w * h) * 2u, 0.0f);

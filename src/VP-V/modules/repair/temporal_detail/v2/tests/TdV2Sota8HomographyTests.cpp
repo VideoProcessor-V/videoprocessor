@@ -257,7 +257,7 @@ namespace TdV2Sota8HomographyNs
 		double objVx, double objVy,
 		bool mislabelObjAsCamera)
 	{
-		CellMotionField mf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, RegionMotionClass::Camera);
+		CellMotionField mf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Camera);
 		for (int cy = 0; cy < ch; ++cy)
 		{
 			for (int cx = 0; cx < cw; ++cx)
@@ -390,7 +390,7 @@ namespace TdV2Sota8HomographyNs
 			hZeroW.h[8] = 0.0;
 			Assert::IsFalse(hZeroW.Project(10.0, 10.0, sx, sy));
 
-			hZeroW.h[8] = 0.5 * kEngineNumFloor;
+			hZeroW.h[8] = 0.5 * kSolvePivotFloor;
 			Assert::IsFalse(hZeroW.Project(10.0, 10.0, sx, sy));
 
 			// NaN / Inf matrix entries fail closed.
@@ -406,8 +406,7 @@ namespace TdV2Sota8HomographyNs
 		TEST_METHOD(GpuAndCpuLumaHomographyEliminatesZoomRotationTileSeamsWhilePreservingObjectMvs)
 		{
 			WarpContext wc;
-			VpSkeleton::PlTexBackend backend{ wc.gpu };
-			VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> arena(backend, 96u * 1024u * 1024u);
+			VpSkeleton::PlTexBackend backend(wc.gpu);
 
 			const int w = 96;
 			const int h = 64;
@@ -438,15 +437,20 @@ namespace TdV2Sota8HomographyNs
 				cfg.preset = (presetIdx == 0) ? Preset::Reference : Preset::RealTime;
 				cfg.mode = Mode::On;
 				cfg.sourceBits = 10;
-				cfg.cellSizePx = 16;
+				cfg.cellPx = 16;
 				cfg.momentPoolRadiusCells = 0; // Isolate cell-level warp accuracy cleanly
+
+				VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> arena(backend);
+				Assert::IsTrue(arena.Reserve(VpSkeleton::PlanArena(
+					TdV2GpuEngine::ArenaRequests(wc.gpu, w, h, 16, cfg.preset), VpSkeleton::Tier::T1)));
 
 				FrameProcessInput inNoH;
 				inNoH.seq = 0;
 				inNoH.receivedY = curDeg;
 				inNoH.cleanY = curDeg;
 				inNoH.hasCleanSplit = true;
-				inNoH.stepDelta = 14.0;
+				inNoH.hasStepPrior = true;
+				inNoH.estimatedStepDelta = 14.0;
 				inNoH.prevPeak.cleanPlane = &prevRef;
 				inNoH.prevPeak.motion = &mfPrev;
 				inNoH.prevPeak.cameraHomography.valid = false;
@@ -469,8 +473,11 @@ namespace TdV2Sota8HomographyNs
 				const FrameProcessResult cWithH = cpuWithH.ProcessFrame(inWithH, nullptr);
 				const FrameProcessResult cMis = cpuMis.ProcessFrame(inMislabeled, nullptr);
 
+				arena.BeginFrame();
 				const GpuProcessResult gNoH = gpuNoH.engine.ProcessFrame(wc.gpu, wc.dispatch, inNoH, &arena, nullptr);
+				arena.BeginFrame();
 				const GpuProcessResult gWithH = gpuWithH.engine.ProcessFrame(wc.gpu, wc.dispatch, inWithH, &arena, nullptr);
+				arena.BeginFrame();
 				const GpuProcessResult gMis = gpuMis.engine.ProcessFrame(wc.gpu, wc.dispatch, inMislabeled, &arena, nullptr);
 				Assert::IsTrue(gNoH.succeeded && gWithH.succeeded && gMis.succeeded);
 
@@ -525,15 +532,17 @@ namespace TdV2Sota8HomographyNs
 		TEST_METHOD(GpuAndCpuChromaHomographySited420WarpEliminatesSeamsAndPreservesObjectMvs)
 		{
 			WarpContext wc;
-			VpSkeleton::PlTexBackend backend{ wc.gpu };
-			VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> arena(backend, 96u * 1024u * 1024u);
-
 			const int lumaW = 96;
 			const int lumaH = 64;
 			const int cw = lumaW / 16;
 			const int ch = lumaH / 16;
 			const SitingSpec siting{ -0.5f, 0.0f };
 			const ActiveRect fullLuma = ActiveRect::Full(lumaW, lumaH);
+
+			VpSkeleton::PlTexBackend backend(wc.gpu);
+			VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> arena(backend);
+			Assert::IsTrue(arena.Reserve(VpSkeleton::PlanArena(
+				TdV2ChromaGpuEngine::ArenaRequests(wc.gpu, lumaW, lumaH, ChromaSubsampling::Yuv420, 16), VpSkeleton::Tier::T1)));
 
 			// Stronger zoom (7.5%) + rotation (0.055 rad) so coded 4:2:0 sub-pixel drift is ~0.75 coded-px per cell!
 			const Homography3x3 hPrev = MakeZoomRotHomography(47.5, 31.5, 1.075, 0.055, 0.0);
@@ -568,7 +577,7 @@ namespace TdV2Sota8HomographyNs
 			cfg.preset = Preset::Reference;
 			cfg.mode = Mode::On;
 			cfg.sourceBits = 10;
-			cfg.cellSizePx = 16;
+			cfg.cellPx = 16;
 			cfg.momentPoolRadiusCells = 0;
 
 			ChromaProcessInput inNoH;
@@ -583,8 +592,8 @@ namespace TdV2Sota8HomographyNs
 			inNoH.cleanCb = delivDegCb;
 			inNoH.cleanCr = delivDegCr;
 			inNoH.hasCleanSplit = true;
-			inNoH.stepDeltaCb = 14.0;
-			inNoH.stepDeltaCr = 14.0;
+			inNoH.hasStepPrior = true;
+			inNoH.estimatedStepDelta = 14.0;
 			inNoH.prevPeak.cleanCb = &codedPrevCb;
 			inNoH.prevPeak.cleanCr = &codedPrevCr;
 			inNoH.prevPeak.lumaMotion = &mfPrev;
@@ -601,7 +610,9 @@ namespace TdV2Sota8HomographyNs
 
 			const ChromaProcessResult cNoH = cpuNoH.ProcessFrame(inNoH, nullptr);
 			const ChromaProcessResult cWithH = cpuWithH.ProcessFrame(inWithH, nullptr);
+			arena.BeginFrame();
 			const ChromaGpuProcessResult gNoH = gpuNoH.engine.ProcessChromaPlanes(wc.gpu, wc.dispatch, inNoH, &arena, nullptr);
+			arena.BeginFrame();
 			const ChromaGpuProcessResult gWithH = gpuWithH.engine.ProcessChromaPlanes(wc.gpu, wc.dispatch, inWithH, &arena, nullptr);
 			Assert::IsTrue(gNoH.succeeded && gWithH.succeeded);
 
@@ -627,13 +638,18 @@ namespace TdV2Sota8HomographyNs
 		TEST_METHOD(GpuAndCpuHomographySingularAndNonFiniteFailClosedVisibly)
 		{
 			WarpContext wc;
-			VpSkeleton::PlTexBackend backend{ wc.gpu };
-			VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> arena(backend, 96u * 1024u * 1024u);
-
 			const int w = 96;
 			const int h = 64;
 			const int cw = w / 16;
 			const int ch = h / 16;
+
+			VpSkeleton::PlTexBackend backend(wc.gpu);
+			VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> lumaArena(backend);
+			Assert::IsTrue(lumaArena.Reserve(VpSkeleton::PlanArena(
+				TdV2GpuEngine::ArenaRequests(wc.gpu, w, h, 16, Preset::Reference), VpSkeleton::Tier::T1)));
+			VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> chromaArena(backend);
+			Assert::IsTrue(chromaArena.Reserve(VpSkeleton::PlanArena(
+				TdV2ChromaGpuEngine::ArenaRequests(wc.gpu, w, h, ChromaSubsampling::Yuv444, 16), VpSkeleton::Tier::T1)));
 
 			const Homography3x3 hIdentity;
 			const TdV2Plane curMaster = RenderZoomRotAndObjFrame(w, h, nullptr, 0.0, 0.0, 0.1);
@@ -657,7 +673,7 @@ namespace TdV2Sota8HomographyNs
 			cfg.preset = Preset::Reference;
 			cfg.mode = Mode::On;
 			cfg.sourceBits = 10;
-			cfg.cellSizePx = 16;
+			cfg.cellPx = 16;
 			cfg.momentPoolRadiusCells = 0;
 
 			const Homography3x3 badCases[2] = { hSing, hNan };
@@ -668,7 +684,8 @@ namespace TdV2Sota8HomographyNs
 				lIn.receivedY = curDeg;
 				lIn.cleanY = curDeg;
 				lIn.hasCleanSplit = true;
-				lIn.stepDelta = 14.0;
+				lIn.hasStepPrior = true;
+				lIn.estimatedStepDelta = 14.0;
 				lIn.prevPeak.cleanPlane = &refClean;
 				lIn.prevPeak.motion = &mf;
 				lIn.prevPeak.cameraHomography = badCases[ci];
@@ -681,7 +698,8 @@ namespace TdV2Sota8HomographyNs
 				LumaGpuGuard gpuLuma(wc.gpu, cfg);
 
 				const FrameProcessResult cRes = cpuLuma.ProcessFrame(lIn, &cpuLumaSt);
-				const GpuProcessResult gRes = gpuLuma.engine.ProcessFrame(wc.gpu, wc.dispatch, lIn, &arena, &gpuLumaSt);
+				lumaArena.BeginFrame();
+				const GpuProcessResult gRes = gpuLuma.engine.ProcessFrame(wc.gpu, wc.dispatch, lIn, &lumaArena, &gpuLumaSt);
 				Assert::IsTrue(gRes.succeeded);
 				Assert::IsTrue(PlaneAllFinite(cRes.outputY) && PlaneAllFinite(gRes.outputY));
 
@@ -708,8 +726,8 @@ namespace TdV2Sota8HomographyNs
 				cIn.cleanCb = curDeg;
 				cIn.cleanCr = curDeg;
 				cIn.hasCleanSplit = true;
-				cIn.stepDeltaCb = 14.0;
-				cIn.stepDeltaCr = 14.0;
+				cIn.hasStepPrior = true;
+				cIn.estimatedStepDelta = 14.0;
 				cIn.prevPeak.cleanCb = &refClean;
 				cIn.prevPeak.cleanCr = &refClean;
 				cIn.prevPeak.lumaMotion = &mf;
@@ -724,7 +742,8 @@ namespace TdV2Sota8HomographyNs
 				ChromaGpuGuard gpuCh(wc.gpu, cfg);
 
 				const ChromaProcessResult ccRes = cpuCh.ProcessFrame(cIn, &cpuChSt);
-				const ChromaGpuProcessResult gcRes = gpuCh.engine.ProcessChromaPlanes(wc.gpu, wc.dispatch, cIn, &arena, &gpuChSt);
+				chromaArena.BeginFrame();
+				const ChromaGpuProcessResult gcRes = gpuCh.engine.ProcessChromaPlanes(wc.gpu, wc.dispatch, cIn, &chromaArena, &gpuChSt);
 				Assert::IsTrue(gcRes.succeeded);
 				Assert::IsTrue(PlaneAllFinite(ccRes.outputCb) && PlaneAllFinite(gcRes.outputCb));
 				Assert::IsTrue(ccRes.nonFiniteCells > 0, L"CPU chroma failed to count nonFiniteCells on degenerate homography");

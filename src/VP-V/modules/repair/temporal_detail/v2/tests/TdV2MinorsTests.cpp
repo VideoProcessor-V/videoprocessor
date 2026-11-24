@@ -459,7 +459,7 @@ namespace TdV2MinorsTestsNs
 			Config cfgUntouched = MakePreset(Preset::Reference, Mode::On);
 			cfgUntouched.bokehMode = BokehMode::Untouched;
 			TdV2ChromaEngine engCtrl(cfgUntouched);
-			const ChromaProcessResult resCtrl = engCtrl.ProcessChroma(baseIn, nullptr);
+			const ChromaProcessResult resCtrl = engCtrl.ProcessFrame(baseIn, nullptr);
 			const ThreeBandPlanes ctrlCodedBands = DecomposeActiveBands(resCtrl.codedDeltaCb, ActiveRect::Full(cW, cH));
 			const double ctrlRackPeak = MaxAbsRect(resCtrl.codedDeltaCb, rackCodedRect);
 			const double ctrlBokehL = RmsRect(ctrlCodedBands.L, bokehCodedRect);
@@ -475,7 +475,7 @@ namespace TdV2MinorsTestsNs
 			maskedIn.explicitDefocusedCells = &bokehMask;
 
 			TdV2ChromaEngine engUntouched(cfgUntouched);
-			const ChromaProcessResult resUnt = engUntouched.ProcessChroma(maskedIn, nullptr);
+			const ChromaProcessResult resUnt = engUntouched.ProcessFrame(maskedIn, nullptr);
 			Assert::AreEqual(static_cast<size_t>(2u), resUnt.focusVetoCells, L"focusVetoCells must count rack + bokeh cells");
 			Assert::AreEqual(0.0, MaxAbsRect(resUnt.codedDeltaCb, rackCodedRect), L"Rack-focus codedDeltaCb must be exact 0.0");
 			Assert::AreEqual(0.0, MaxAbsRect(resUnt.codedDeltaCr, rackCodedRect), L"Rack-focus codedDeltaCr must be exact 0.0");
@@ -495,7 +495,7 @@ namespace TdV2MinorsTestsNs
 			Config cfgBokehLow = cfgUntouched;
 			cfgBokehLow.bokehMode = BokehMode::LowBandCellOnly;
 			TdV2ChromaEngine engBokehLow(cfgBokehLow);
-			const ChromaProcessResult resLow = engBokehLow.ProcessChroma(maskedIn, nullptr);
+			const ChromaProcessResult resLow = engBokehLow.ProcessFrame(maskedIn, nullptr);
 
 			Assert::AreEqual(0.0, MaxAbsRect(resLow.codedDeltaCb, rackCodedRect),
 				L"Rack-focus cell MUST still hard-veto L/M/H == 0.0 even under BokehMode::LowBandCellOnly");

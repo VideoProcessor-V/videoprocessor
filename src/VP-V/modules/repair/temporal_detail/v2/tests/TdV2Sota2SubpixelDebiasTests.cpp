@@ -111,10 +111,10 @@ namespace TdV2Sota2SubpixelDebiasNs
 		EngineGuard& operator=(const EngineGuard&) = delete;
 	};
 
-	static std::wstring FmtMsg(const char* fmt, double a = 0.0, double b = 0.0, double c = 0.0)
+	static std::wstring FmtMsg(const char* fmt, double a = 0.0, double b = 0.0, double c = 0.0, double d = 0.0)
 	{
 		char buf[320];
-		std::snprintf(buf, sizeof(buf), fmt, a, b, c);
+		std::snprintf(buf, sizeof(buf), fmt, a, b, c, d);
 		std::string s(buf);
 		return std::wstring(s.begin(), s.end());
 	}
@@ -286,7 +286,7 @@ namespace TdV2Sota2SubpixelDebiasNs
 			Config cfgOff = MakePreset(Preset::Reference, Mode::On);
 			cfgOff.enableLongAnchor = false;
 			cfgOff.enableCarryForward = false;
-			cfgOff.estimator = VarianceEstimator::A3_MinOfBoth;
+			cfgOff.estimator = VarianceEstimator::A3_ConservativeMin;
 			cfgOff.enableSubpixelHAttenuationDebias = false;
 
 			Config cfgOn = cfgOff;

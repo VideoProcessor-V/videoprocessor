@@ -351,7 +351,7 @@ namespace TdV2AntiOverProtectionNs
 				Config c = MakePreset(preset, Mode::On);
 				c.enableLongAnchor = false;
 				c.enableCarryForward = true;
-				c.estimator = VarianceEstimator::A3_MinOfBoth;
+				c.estimator = VarianceEstimator::A3_ConservativeMin;
 				c.enablePerCornerHuber = true;
 				c.enableSubpixelHAttenuationDebias = true;
 				c.enableEdgeAwareWeightUpsample = true;

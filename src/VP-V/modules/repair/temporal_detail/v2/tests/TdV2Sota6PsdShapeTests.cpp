@@ -270,7 +270,7 @@ namespace TdV2Sota6PsdShapeNs
 			Config cfg = MakePreset(Preset::Reference, Mode::On);
 			cfg.enableLongAnchor = false;
 			cfg.enableCarryForward = false;
-			cfg.estimator = VarianceEstimator::A3_MinOfBoth;
+			cfg.estimator = VarianceEstimator::A3_ConservativeMin;
 
 			// =========================================================================
 			// Part 1: Luma CPU (TdV2ReferenceEngine) + Real D3D11 WARP GPU (TdV2GpuEngine)
@@ -372,8 +372,8 @@ namespace TdV2Sota6PsdShapeNs
 				TdV2ChromaEngine chCpuWhite(cfg), chCpuPsd(cfg);
 				ChromaGpuGuard chGpuWhite(ctx.gpu, cfg), chGpuPsd(ctx.gpu, cfg);
 
-				const ChromaProcessResult crCpuWhite = chCpuWhite.ProcessChroma(cWhiteIn, nullptr);
-				const ChromaProcessResult crCpuPsd   = chCpuPsd.ProcessChroma(cPsdIn, nullptr);
+				const ChromaProcessResult crCpuWhite = chCpuWhite.ProcessFrame(cWhiteIn, nullptr);
+				const ChromaProcessResult crCpuPsd   = chCpuPsd.ProcessFrame(cPsdIn, nullptr);
 				const ChromaGpuProcessResult crGpuWhite = chGpuWhite.engine.ProcessChromaPlanes(ctx.gpu, ctx.dispatch, cWhiteIn, nullptr, nullptr);
 				const ChromaGpuProcessResult crGpuPsd   = chGpuPsd.engine.ProcessChromaPlanes(ctx.gpu, ctx.dispatch, cPsdIn, nullptr, nullptr);
 				Assert::IsTrue(crGpuWhite.succeeded && crGpuPsd.succeeded, L"WARP chroma ProcessChromaPlanes failed in SOTA-6");
@@ -396,7 +396,7 @@ namespace TdV2Sota6PsdShapeNs
 				ChromaProcessInput badChPsd = cPsdIn;
 				badChPsd.psdShape.bandShareFine = std::numeric_limits<double>::quiet_NaN();
 				StandInRegistry siChCpuBad, siChGpuBad;
-				const ChromaProcessResult crBadCpu = chCpuPsd.ProcessChroma(badChPsd, &siChCpuBad);
+				const ChromaProcessResult crBadCpu = chCpuPsd.ProcessFrame(badChPsd, &siChCpuBad);
 				const ChromaGpuProcessResult crBadGpu = chGpuPsd.engine.ProcessChromaPlanes(ctx.gpu, ctx.dispatch, badChPsd, nullptr, &siChGpuBad);
 				Assert::IsFalse(crBadGpu.succeeded);
 				Assert::AreEqual(numCells, crBadCpu.nonFiniteCells);
