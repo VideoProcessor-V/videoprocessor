@@ -17,6 +17,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -205,7 +206,8 @@ namespace VideoProcessorTest
 			const AppearanceStage::Decision& d,
 			const std::array<double, 3>& rgbIn,
 			double veilOverride = -1.0,
-			bool simulatePreFixSdrCeiling = false)
+			bool simulatePreFixSdrCeiling = false,
+			double huntScaleOverride = -1.0)
 		{
 			if (!(in.strength > 0.0))
 				return rgbIn;
@@ -262,7 +264,8 @@ namespace VideoProcessorTest
 			const std::array<double, 3> lin = { { toRel(inRange[0]), toRel(inRange[1]), toRel(inRange[2]) } };
 			const std::array<double, 3> xyz100 = MulRowMajor3(in.rgbToXyz, { { lin[0] * 100.0, lin[1] * 100.0, lin[2] * 100.0 } });
 			Cam16::Appearance jmh = Cam16::Forward(refPrep, { { xyz100[0], xyz100[1], xyz100[2] } });
-			jmh.M *= d.huntScale;
+			const double huntScale = huntScaleOverride >= 0.0 ? huntScaleOverride : d.huntScale;
+			jmh.M *= huntScale;
 
 			auto invLin = [&](double m) -> std::array<double, 3>
 			{
@@ -274,9 +277,9 @@ namespace VideoProcessorTest
 			const double upper = (!simulatePreFixSdrCeiling && in.signalPq) ? (10000.0 / (std::max)(screenNits, 1e-6)) : 1.0;
 			auto outOfRange = [upper](const std::array<double, 3>& c) -> bool
 			{
-				const double mn = (std::min)(c[0], (std::min)(c[1], c[2]));
-				const double mx = (std::max)(c[0], (std::max)(c[1], c[2]));
-				return mn < -1e-4 || mx > upper + 1e-4;
+				return !(c[0] >= -1e-4 && c[0] <= upper + 1e-4 &&
+					c[1] >= -1e-4 && c[1] <= upper + 1e-4 &&
+					c[2] >= -1e-4 && c[2] <= upper + 1e-4);
 			};
 
 			std::array<double, 3> outLin = invLin(jmh.M);
@@ -380,10 +383,14 @@ namespace VideoProcessorTest
 			AppearanceHook apHook(fixture);
 
 			// Saturated HDR highlights above screen white (100 nits) + diffuse white + mid-tones + black.
+			// Pixel [0] (500, 80, 80) keeps Pass-2 Lit PQ chroma spread ~0.181 (generous headroom above 0.15).
+			// Pixel [1] (1500, 150, 50) collapses under the pre-fix SDR ceiling (upper = 1.0) to monochrome
+			// L ~ 3.300 (relative to 100-nit screen white), so SDR-normalized flare at f = 0.10 boosts it by
+			// ((3.300 + 0.10) / (3.300 + 0.20)) * (1.20 / 1.10) ~ 1.0588 (+5.88%, cleanly clearing > 1.05).
 			const std::vector<std::array<float, 3>> pqInputs = {
-				PqPixelFromNits(500.0, 100.0, 100.0),    // [0] red highlight
-				PqPixelFromNits(1000.0, 150.0, 50.0),    // [1] intense orange-red highlight
-				PqPixelFromNits(4000.0, 800.0, 200.0),   // [2] 4000-nit bright highlight
+				PqPixelFromNits(500.0, 80.0, 80.0),      // [0] red highlight
+				PqPixelFromNits(1500.0, 150.0, 50.0),    // [1] intense orange-red highlight (L ~ 3.300 -> +5.88% SDR flare boost)
+				PqPixelFromNits(4000.0, 800.0, 200.0),   // [2] 4000-nit bright highlight (L ~ 11.801 -> +8.15% SDR flare boost)
 				PqPixelFromNits(50.0, 200.0, 1000.0),    // [3] 1000-nit cyan-blue highlight
 				PqPixelFromNits(100.0, 100.0, 100.0),    // [4] diffuse white (screen white)
 				PqPixelFromNits(30.0, 10.0, 5.0),        // [5] dark saturated mid-tone
@@ -479,7 +486,7 @@ namespace VideoProcessorTest
 			{
 				const double yDark = PqLinearLumaNits(inDark.rgbToXyz, gpuDark[i]);
 				const double yVeiled = PqLinearLumaNits(inDark.rgbToXyz, gpuVeiled[i]);
-				// Allow 0.5% for rgba16f PREOUTPUT FBO quantization; broken SDR flare boosts by > +8%.
+				// Allow 0.5% for rgba16f PREOUTPUT FBO quantization; broken SDR flare boosts [1]/[2] by +5.88%/+8.15%.
 				Assert::IsTrue(yVeiled <= yDark * 1.005,
 					(L"PQ isolated flare boosted HDR highlight " + std::to_wstring(i) + L" (yVeiled=" +
 						std::to_wstring(yVeiled) + L" vs yDark=" + std::to_wstring(yDark) + L")").c_str());
@@ -492,8 +499,8 @@ namespace VideoProcessorTest
 
 			// Mandatory in-test negative control (exact same PQ highlight pixels):
 			// the pre-fix shader baseline (upper = 1.0 bisection + SDR-normalized (1+2f)/(1+f) flare)
-			// BOTH crushes 1000-nit & 4000-nit highlights to monochrome grey (< 0.01 PQ spread)
-			// AND boosts highlight luminance strictly above veil == 0 under veil = 0.10.
+			// BOTH crushes 1500-nit & 4000-nit highlights to monochrome grey (< 0.01 PQ spread; L ~ 3.300 and L ~ 11.801)
+			// AND boosts highlight luminance strictly above veil == 0 by > +5% (+5.88% and +8.15%) under veil = 0.10.
 			for (const size_t idx : { size_t{ 1 }, size_t{ 2 } })
 			{
 				const std::array<double, 3> px = { { pqInputs[idx][0], pqInputs[idx][1], pqInputs[idx][2] } };
@@ -533,18 +540,22 @@ namespace VideoProcessorTest
 				const size_t invPos = glsl.find("vec3 ap_inverse(", fwdPos);
 				Assert::IsTrue(invPos != std::string::npos, L"ap_inverse found");
 				const std::string fwdBody = glsl.substr(fwdPos, invPos - fwdPos);
-				const size_t bPos = fwdBody.find("float b =");
-				const size_t atanPos = fwdBody.find("atan(", bPos != std::string::npos ? bPos : 0);
-				if (atanPos != std::string::npos)
-				{
-					const size_t semiPos = fwdBody.find(';', atanPos);
-					Assert::IsTrue(bPos != std::string::npos && semiPos != std::string::npos);
-					const std::string region = fwdBody.substr(bPos, semiPos - bPos);
-					const bool guarded = region.find("if") != std::string::npos ||
-						region.find('?') != std::string::npos ||
-						region.find("max(") != std::string::npos;
-					Assert::IsTrue(guarded, L"S2-H1: ap_forward must guard atan(b, a) against a == 0 && b == 0");
-				}
+				const size_t atanPos = fwdBody.find("atan(");
+				Assert::IsTrue(atanPos != std::string::npos, L"S2-H1: ap_forward atan call not found");
+				const size_t lineNl = fwdBody.rfind('\n', atanPos);
+				const size_t stmtStart = (lineNl != std::string::npos) ? (lineNl + 1) : 0;
+				const size_t prevNl = (lineNl != std::string::npos && lineNl > 0) ? fwdBody.rfind('\n', lineNl - 1) : std::string::npos;
+				const size_t windowStart = (prevNl != std::string::npos) ? (prevNl + 1) : 0;
+				const std::string stmtPrefix = fwdBody.substr(stmtStart, atanPos - stmtStart);
+				const std::string atanWindow = fwdBody.substr(windowStart, atanPos - windowStart);
+				const bool explicitZeroCheckOnAB =
+					(atanWindow.find("a == 0.0") != std::string::npos && atanWindow.find("b == 0.0") != std::string::npos) ||
+					(atanWindow.find("a != 0.0") != std::string::npos && atanWindow.find("b != 0.0") != std::string::npos);
+				const bool guardsAtanCall = stmtPrefix.find('?') != std::string::npos ||
+					atanWindow.find("if (") != std::string::npos ||
+					atanWindow.find("if(") != std::string::npos;
+				Assert::IsTrue(explicitZeroCheckOnAB && guardsAtanCall,
+					L"S2-H1: ap_forward must explicitly guard atan(b, a) against a == 0.0 && b == 0.0");
 			}
 
 			TargetLutGpuFixture fixture;
@@ -813,6 +824,181 @@ namespace VideoProcessorTest
 					for (int c = 0; c < 3; ++c)
 						maxDelta = (std::max)(maxDelta, std::fabs(static_cast<double>(outOne[i][c]) - pixels[i][c]));
 				Assert::IsTrue(maxDelta > 0.01, L"PQ non-vacuity control: strength=1.0 must transform the frame");
+			}
+
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLogExceptPreOutputBug(cleanLog);
+		}
+
+		// S2-H1: ap_out_of_range must use a negated in-range conjunction !(c >= -1e-4 && c <= upper + 1e-4 && ...)
+		// so any NaN channel produced by float32 ap_inverse overflow evaluates true and enters M-bisection rather
+		// than silently bypassing bisection via IEEE-754 false < / > comparisons.
+		BEGIN_TEST_METHOD_ATTRIBUTE(ApOutOfRangeCatchesInverseOverflowAndRejectsNanBypass)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(ApOutOfRangeCatchesInverseOverflowAndRejectsNanBypass)
+		{
+			// (a) Structural check: ap_out_of_range in vp_cam16_appearance.glsl must use a negated in-range
+			// conjunction over c.r, c.g, c.b rather than bare < / > comparisons (which return false on NaN).
+			{
+				const std::string glsl = LoadBundledShader("vp_cam16_appearance.glsl");
+				Assert::IsFalse(glsl.empty(), L"vp_cam16_appearance.glsl is readable");
+				const size_t oorPos = glsl.find("bool ap_out_of_range(");
+				Assert::IsTrue(oorPos != std::string::npos, L"S2-H1: ap_out_of_range not found");
+				const size_t openBrace = glsl.find('{', oorPos);
+				const size_t closeBrace = openBrace != std::string::npos ? glsl.find('}', openBrace) : std::string::npos;
+				Assert::IsTrue(openBrace != std::string::npos && closeBrace != std::string::npos, L"S2-H1: ap_out_of_range body malformed");
+				const std::string oorBody = glsl.substr(openBrace, closeBrace - openBrace);
+				const size_t retPos = oorBody.find("return");
+				const size_t semiPos = retPos != std::string::npos ? oorBody.find(';', retPos) : std::string::npos;
+				Assert::IsTrue(retPos != std::string::npos && semiPos != std::string::npos, L"S2-H1: ap_out_of_range return statement missing");
+				const std::string retExpr = oorBody.substr(retPos, semiPos - retPos);
+				const bool negatedInRange = retExpr.find("!(") != std::string::npos &&
+					retExpr.find("c.r >=") != std::string::npos && retExpr.find("c.r <=") != std::string::npos &&
+					retExpr.find("c.g >=") != std::string::npos && retExpr.find("c.g <=") != std::string::npos &&
+					retExpr.find("c.b >=") != std::string::npos && retExpr.find("c.b <=") != std::string::npos &&
+					retExpr.find("&&") != std::string::npos &&
+					retExpr.find("||") == std::string::npos;
+				Assert::IsTrue(negatedInRange,
+					L"S2-H1: ap_out_of_range must use negated in-range conjunction !(c >= -1e-4 && c <= upper + 1e-4 && ...) instead of < || >");
+			}
+
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			std::string cleanLog;
+			fixture.CaptureLog(&cleanLog);
+			AppearanceHook apHook(fixture);
+
+			constexpr double kMaxHuntScale = 4.0;   // valid //!MAXIMUM in vp_cam16_appearance.glsl
+
+			// (b1) Real WARP GPU SDR BT.709 extreme overflow / float32 NaN trigger (dim 20-nit screen, 4x M):
+			// Exact fp16 pixels [0] (0.6875, 0.125, 0.8125) and [1] (0.75, 0.0625, 0.875) push ap_inverse
+			// cone responses far past +/-400 (ra/ga/ba ~ +10463/-29410/+169912 and +864/-2368/+13046),
+			// overflowing float32 ap_uncompress to (+Inf, -Inf, +Inf) and producing exact (NaN, NaN, NaN)
+			// in outLin prior to M-bisection.
+			{
+				AppearanceStage::Inputs inSdr;
+				inSdr.on = true;
+				inSdr.strength = 1.0;
+				inSdr.sourceSdr = true;
+				inSdr.signalPq = false;
+				inSdr.outputGamma = 2.4;
+				inSdr.screenWhiteNits = 20.0;
+				inSdr.room.room = RoomLight::Room::Cinema;
+
+				RoomLight::Smoother smootherSdr;
+				const AppearanceStage::Decision dSdr = AppearanceStage::Decide(inSdr, smootherSdr);
+				Assert::IsTrue(dSdr.active);
+				ApplyParameters(apHook.hook, dSdr.parameters);
+				Assert::IsTrue(CustomHookChain::SetHookParameter(apHook.hook, "apx_hunt_scale", kMaxHuntScale));
+
+				const std::vector<std::array<float, 3>> sdrExtremes = {
+					{ { 0.6875f, 0.125f, 0.8125f } },   // [0] float32 ap_inverse -> (NaN, NaN, NaN) before bisection
+					{ { 0.75f, 0.0625f, 0.875f } },     // [1] float32 ap_inverse -> (NaN, NaN, NaN) before bisection
+					{ { 1.0f, 0.0f, 1.0f } },           // [2] bright saturated magenta primary overflow
+					{ { 1.0f, 0.0f, 0.0f } },           // [3] bright saturated red primary overflow
+					{ { 0.0f, 0.0f, 1.0f } }            // [4] bright saturated blue primary overflow
+				};
+
+				const auto gpuSdr = RenderFloatPixels(fixture, apHook.hook, PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_GAMMA24, sdrExtremes);
+				AssertAllFinite(gpuSdr, L"SDR ap_out_of_range overflow/NaN pass");
+				for (size_t i = 0; i < sdrExtremes.size(); ++i)
+				{
+					const std::array<double, 3> ref = CpuReferenceAppearancePixel(
+						inSdr, dSdr, { { sdrExtremes[i][0], sdrExtremes[i][1], sdrExtremes[i][2] } }, -1.0, false, kMaxHuntScale);
+					for (int c = 0; c < 3; ++c)
+					{
+						Assert::IsTrue(gpuSdr[i][c] >= -1e-3f && gpuSdr[i][c] <= 1.0f + 1e-3f,
+							(L"SDR bisected pixel " + std::to_wstring(i) + L" ch " + std::to_wstring(c) +
+								L" escaped [0, 1] gamut (val=" + std::to_wstring(gpuSdr[i][c]) + L")").c_str());
+						Assert::AreEqual(ref[c], static_cast<double>(gpuSdr[i][c]), 2e-3,
+							(L"SDR overflow/NaN bisection GPU vs CPU mismatch at pixel " + std::to_wstring(i) +
+								L" ch " + std::to_wstring(c)).c_str());
+					}
+				}
+			}
+
+			// (b2) Real WARP GPU PQ BT.2020 extreme overflow / float32 NaN trigger (dim 20-nit screen, 4x M):
+			// Exact fp16 PQ pixels [0] (0.9453125, 0, 1) and [1] (0.9462890625, 0, 1) push ap_inverse
+			// cone responses far past +/-400 (-4255/+10648/-41127 and +2059/-5003/+19320), producing exact
+			// (NaN, NaN, NaN) in float32 outLin prior to M-bisection.
+			{
+				AppearanceStage::Inputs inPq;
+				inPq.on = true;
+				inPq.strength = 1.0;
+				inPq.sourceSdr = false;
+				inPq.signalPq = true;
+				inPq.screenWhiteNits = 20.0;
+				inPq.sdrTargetNits = 203.0;
+				inPq.room.room = RoomLight::Room::Cinema;
+				Assert::IsTrue(AppearanceStage::RgbToXyz(kBt2020Red, kBt2020Green, kBt2020Blue, DvMath::kD65, inPq.rgbToXyz));
+
+				RoomLight::Smoother smootherPq;
+				const AppearanceStage::Decision dPq = AppearanceStage::Decide(inPq, smootherPq);
+				Assert::IsTrue(dPq.active);
+				ApplyParameters(apHook.hook, dPq.parameters);
+				Assert::IsTrue(CustomHookChain::SetHookParameter(apHook.hook, "apx_hunt_scale", kMaxHuntScale));
+
+				const std::vector<std::array<float, 3>> pqExtremes = {
+					{ { 0.9453125f, 0.0f, 1.0f } },      // [0] float32 ap_inverse -> (NaN, NaN, NaN) before bisection
+					{ { 0.9462890625f, 0.0f, 1.0f } },   // [1] float32 ap_inverse -> (NaN, NaN, NaN) before bisection
+					{ { 1.0f, 0.0f, 0.0f } }             // [2] 10000-nit pure BT.2020 red overflow
+				};
+
+				const auto gpuPq = RenderFloatPixels(fixture, apHook.hook, PL_COLOR_PRIM_BT_2020, PL_COLOR_TRC_PQ, pqExtremes);
+				AssertAllFinite(gpuPq, L"PQ ap_out_of_range overflow/NaN pass");
+				for (size_t i = 0; i < pqExtremes.size(); ++i)
+				{
+					const std::array<double, 3> ref = CpuReferenceAppearancePixel(
+						inPq, dPq, { { pqExtremes[i][0], pqExtremes[i][1], pqExtremes[i][2] } }, -1.0, false, kMaxHuntScale);
+					for (int c = 0; c < 3; ++c)
+					{
+						Assert::IsTrue(gpuPq[i][c] >= -1e-3f && gpuPq[i][c] <= 1.0f + 1e-3f,
+							(L"PQ bisected pixel " + std::to_wstring(i) + L" ch " + std::to_wstring(c) +
+								L" escaped [0, 1] PQ range (val=" + std::to_wstring(gpuPq[i][c]) + L")").c_str());
+						Assert::AreEqual(ref[c], static_cast<double>(gpuPq[i][c]), 2e-3,
+							(L"PQ overflow/NaN bisection GPU vs CPU mismatch at pixel " + std::to_wstring(i) +
+								L" ch " + std::to_wstring(c)).c_str());
+					}
+				}
+			}
+
+			// (c) Mandatory in-test negative control: naive un-guarded min/max < || > and channel-wise < || >
+			// silently return false on quiet_NaN (skipping M-bisection), while the negated in-range conjunction
+			// !(c >= -1e-4 && c <= upper + 1e-4 && ...) returns true on NaN and false on in-range colours.
+			{
+				const double qnan = std::numeric_limits<double>::quiet_NaN();
+				const std::array<double, 3> allNan = { { qnan, qnan, qnan } };
+				const std::array<double, 3> oneNan = { { qnan, 0.5, 0.5 } };
+				const std::array<double, 3> inRangePx = { { 0.5, 0.5, 0.5 } };
+				for (const double upper : { 1.0, 10000.0 / 20.0 })
+				{
+					auto naiveMinMax = [upper](const std::array<double, 3>& c) -> bool
+					{
+						const double mn = (std::min)(c[0], (std::min)(c[1], c[2]));
+						const double mx = (std::max)(c[0], (std::max)(c[1], c[2]));
+						return mn < -1e-4 || mx > upper + 1e-4;
+					};
+					auto naiveChannelOr = [upper](const std::array<double, 3>& c) -> bool
+					{
+						return c[0] < -1e-4 || c[0] > upper + 1e-4 ||
+							c[1] < -1e-4 || c[1] > upper + 1e-4 ||
+							c[2] < -1e-4 || c[2] > upper + 1e-4;
+					};
+					auto negatedInRange = [upper](const std::array<double, 3>& c) -> bool
+					{
+						return !(c[0] >= -1e-4 && c[0] <= upper + 1e-4 &&
+							c[1] >= -1e-4 && c[1] <= upper + 1e-4 &&
+							c[2] >= -1e-4 && c[2] <= upper + 1e-4);
+					};
+					Assert::IsFalse(naiveMinMax(allNan), L"Negative control: naive min/max < || > silently returns false on all-NaN");
+					Assert::IsFalse(naiveMinMax(oneNan), L"Negative control: naive min/max < || > silently returns false on single-NaN");
+					Assert::IsFalse(naiveChannelOr(allNan), L"Negative control: naive channel < || > silently returns false on all-NaN");
+					Assert::IsFalse(naiveChannelOr(oneNan), L"Negative control: naive channel < || > silently returns false on single-NaN");
+					Assert::IsTrue(negatedInRange(allNan), L"Negated in-range conjunction must catch all-NaN as out-of-range");
+					Assert::IsTrue(negatedInRange(oneNan), L"Negated in-range conjunction must catch single-NaN as out-of-range");
+					Assert::IsFalse(negatedInRange(inRangePx), L"Negated in-range conjunction must accept valid in-range pixels");
+				}
 			}
 
 			fixture.CaptureLog(nullptr);
