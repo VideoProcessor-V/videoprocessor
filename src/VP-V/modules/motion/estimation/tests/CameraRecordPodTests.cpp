@@ -176,7 +176,7 @@ namespace VideoProcessorTest
 		}
 
 		// GEM-137 (AB1#1) + CE-WATER / C4: CRD2 carries verdictFlags, layerFlags, finalRefineCells, dyn/water/static/two-layer
-		// signals, layerRisk, haveObjectLayer, objectLayer, plus the 6 appended CE-WATER/C4 signal doubles (dynLaplacian,
+		// signals, layerRisk, haveObjectLayer, objectLayer, plus the 6 appended CE-WATER/C4 signal doubles (dynCurvature,
 		// dynRhoTemp, rawShare, shearEnergy, dipoleTB, dipoleLR; total 595 B) while still decoding legacy 366-byte CRD1 payloads
 		// and refusing corrupt magic, truncated CRD2 tails, or out-of-range objectLayer.type without touching target.
 		TEST_METHOD(Crd2PreservesVerdictFlagsSignalsAndDecodesLegacyCrd1)
@@ -194,7 +194,7 @@ namespace VideoProcessorTest
 			a.signals.dynTemporal = 0.7125;
 			a.signals.dynSpatial = 0.8375;
 			a.signals.dynField = 0.4375;
-			a.signals.dynLaplacian = 0.5625;
+			a.signals.dynCurvature = 0.5625;
 			a.signals.dynRhoTemp = -0.375;
 			a.signals.waterExcludedShare = 0.3125;
 			a.signals.rawShare = 0.8125;
@@ -234,7 +234,7 @@ namespace VideoProcessorTest
 			b.seq = 55555u;
 			b.verdictFlags = 0u;
 			b.signals.border = 0.1;
-			b.signals.dynLaplacian = 0.99;
+			b.signals.dynCurvature = 0.99;
 			b.signals.dynRhoTemp = 0.99;
 			b.signals.rawShare = 0.01;
 			b.signals.shearEnergy = 9.0;
@@ -252,7 +252,7 @@ namespace VideoProcessorTest
 			Assert::AreEqual(a.signals.dynTemporal, b.signals.dynTemporal);
 			Assert::AreEqual(a.signals.dynSpatial, b.signals.dynSpatial);
 			Assert::AreEqual(a.signals.dynField, b.signals.dynField);
-			Assert::AreEqual(a.signals.dynLaplacian, b.signals.dynLaplacian);
+			Assert::AreEqual(a.signals.dynCurvature, b.signals.dynCurvature);
 			Assert::AreEqual(a.signals.dynRhoTemp, b.signals.dynRhoTemp);
 			Assert::AreEqual(a.signals.waterExcludedShare, b.signals.waterExcludedShare);
 			Assert::AreEqual(a.signals.rawShare, b.signals.rawShare);
@@ -309,7 +309,7 @@ namespace VideoProcessorTest
 			Assert::AreEqual(defaults.signals.dynTemporal, legacy.signals.dynTemporal);
 			Assert::AreEqual(defaults.signals.dynSpatial, legacy.signals.dynSpatial);
 			Assert::AreEqual(defaults.signals.dynField, legacy.signals.dynField);
-			Assert::AreEqual(defaults.signals.dynLaplacian, legacy.signals.dynLaplacian);
+			Assert::AreEqual(defaults.signals.dynCurvature, legacy.signals.dynCurvature);
 			Assert::AreEqual(defaults.signals.dynRhoTemp, legacy.signals.dynRhoTemp);
 			Assert::AreEqual(defaults.signals.waterExcludedShare, legacy.signals.waterExcludedShare);
 			Assert::AreEqual(defaults.signals.rawShare, legacy.signals.rawShare);
@@ -333,7 +333,7 @@ namespace VideoProcessorTest
 			// Same-input negative control (Rule 3): prove legacy CRD1 loses v2 state that CRD2 preserves.
 			Assert::AreNotEqual(a.verdictFlags, legacy.verdictFlags, L"CRD1 drops verdictFlags");
 			Assert::AreNotEqual(a.signals.waterExcludedShare, legacy.signals.waterExcludedShare, L"CRD1 drops waterExcludedShare");
-			Assert::AreNotEqual(a.signals.dynLaplacian, legacy.signals.dynLaplacian, L"CRD1 drops dynLaplacian");
+			Assert::AreNotEqual(a.signals.dynCurvature, legacy.signals.dynCurvature, L"CRD1 drops dynCurvature");
 			Assert::AreNotEqual(a.signals.shearEnergy, legacy.signals.shearEnergy, L"CRD1 drops shearEnergy");
 			Assert::AreNotEqual(a.haveObjectLayer, legacy.haveObjectLayer, L"CRD1 drops objectLayer");
 
@@ -347,7 +347,7 @@ namespace VideoProcessorTest
 				s.layerFlags = 0xAAu;
 				s.finalRefineCells = 999u;
 				s.signals.waterExcludedShare = 0.99;
-				s.signals.dynLaplacian = 0.44;
+				s.signals.dynCurvature = 0.44;
 				s.signals.shearEnergy = 2.25;
 				s.signals.border = 0.125;
 				s.layerRisk = 0.77;
@@ -364,7 +364,7 @@ namespace VideoProcessorTest
 				Assert::AreEqual<uint8_t>(0xAAu, m.layerFlags, L"sentinel layerFlags untouched");
 				Assert::AreEqual<uint32_t>(999u, m.finalRefineCells, L"sentinel finalRefineCells untouched");
 				Assert::AreEqual(0.99, m.signals.waterExcludedShare, L"sentinel waterExcludedShare untouched");
-				Assert::AreEqual(0.44, m.signals.dynLaplacian, L"sentinel dynLaplacian untouched");
+				Assert::AreEqual(0.44, m.signals.dynCurvature, L"sentinel dynCurvature untouched");
 				Assert::AreEqual(2.25, m.signals.shearEnergy, L"sentinel shearEnergy untouched");
 				Assert::AreEqual(0.125, m.signals.border, L"sentinel border untouched");
 				Assert::AreEqual(0.77, m.layerRisk, L"sentinel layerRisk untouched");
