@@ -1173,15 +1173,27 @@ bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur
             }
         std::sort(pSorted, pSorted + kIntN);
         std::sort(cSorted, cSorted + kIntN);
+        // Exclude a pinned clipped-white ceiling plateau (prev & cur max within kFadeCellStepEps) from stepAQ:
+        // when midtones darken while hard-clipped peak white stays pinned at ceiling, the ceiling lever arm can
+        // otherwise force Cov(p, c) > Var(p) -> stepAQ > 1.0 despite every unclipped pixel darkening.
+        const bool topPinned = std::fabs(pSorted[kIntN - 1] - cSorted[kIntN - 1]) <= kFadeCellStepEps;
+        int kEnd = kIntN;
+        if (topPinned) {
+            const double pCeil = pSorted[kIntN - 1] - double(kFadeMinSpread);
+            const double cCeil = cSorted[kIntN - 1] - double(kFadeMinSpread);
+            while (kEnd > 2 && pSorted[kEnd - 1] >= pCeil && cSorted[kEnd - 1] >= cCeil)
+                --kEnd;
+        }
         double sxQ = 0.0, syQ = 0.0;
-        for (int k = 0; k < kIntN; ++k) {
+        for (int k = 0; k < kEnd; ++k) {
             sxQ += pSorted[k];
             syQ += cSorted[k];
         }
-        const double mxQ = sxQ / kN;
-        const double myQ = syQ / kN;
+        const double invEnd = 1.0 / double(kEnd);
+        const double mxQ = sxQ * invEnd;
+        const double myQ = syQ * invEnd;
         double stepSxxQ = 0.0, stepSxyQ = 0.0;
-        for (int k = 0; k < kIntN; ++k) {
+        for (int k = 0; k < kEnd; ++k) {
             const double dx = pSorted[k] - mxQ;
             stepSxxQ += dx * dx;
             stepSxyQ += dx * (cSorted[k] - myQ);
@@ -1410,7 +1422,7 @@ bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur
 
             if (rigidFootprintOk && TryAcceptCumFit(rigidFit))
                 return true;
-            if (!cumFootprintRejected) {
+            if (!cumFootprintRejected && run.pairs >= uint32_t(kRefFrames)) {
                 const GridFadeFit mtFit = FitMotionTolerantFade(baseAligned, curBaseAligned, cumFitVx, cumFitVy);
                 if (TryAcceptCumFit(mtFit))
                     return true;
@@ -1428,7 +1440,7 @@ bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur
             const bool adjFootprintRejected = adjValidDir && !adjFootprintOk;
             GridFadeFit adjFit = rigidAdj;
             bool adjOk = adjFootprintOk;
-            if (!adjOk && !adjFootprintRejected) {
+            if (!adjOk && !adjFootprintRejected && run.pairs >= uint32_t(kRefFrames)) {
                 adjFit = FitMotionTolerantFade(prevAligned, curAligned, stepVx, stepVy);
                 adjOk = adjFit.valid && adjFit.dir == run.direction;
             }
