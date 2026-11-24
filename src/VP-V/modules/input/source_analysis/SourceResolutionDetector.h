@@ -358,7 +358,8 @@ namespace SourceResolution
 		double detailMarginDecades = 0.07,
 		double nativeFloorDecades = 0.5);
 	// Physics-derived positive above-band detail check when Tracker::ReferenceDetail(ratio) is finite:
-	// requires DetailAbove >= refDetail + detailMarginDecades, level >= quantisationFloor + nativeFloorDecades,
+	// requires DetailAbove >= refDetail + detailMarginDecades, the exact 1/f^2 natural-image spectral slope
+	// (rawD >= -2*log10(fAbove/fBelow) - detailMarginDecades), level >= quantisationFloor + nativeFloorDecades,
 	// and above-band power cleanly clearing max(uniform, measured TPDF tail) floor.
 	bool PositiveDetailAboveWithRef(
 		const FrameReading& frame,

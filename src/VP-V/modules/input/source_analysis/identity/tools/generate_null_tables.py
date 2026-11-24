@@ -1813,6 +1813,18 @@ def run_selftest():
                                  truth_nx=960, truth_ny=540, rng=rng)
         _write_synthetic_v4_pair(fp_dir, "n8_fp_up_b", step_codes=4, output_bits=8, num_shots=30, evals_per_shot=2,
                                  truth_nx=960, truth_ny=540, rng=rng)
+        _write_synthetic_v4_pair(fp_dir, "n8_fp_up_k16_a", step_codes=4, output_bits=8, num_shots=20, evals_per_shot=2,
+                                 truth_nx=1320, truth_ny=743, rng=rng)
+        _write_synthetic_v4_pair(fp_dir, "n8_fp_up_k16_b", step_codes=4, output_bits=8, num_shots=20, evals_per_shot=2,
+                                 truth_nx=1320, truth_ny=743, rng=rng)
+        _write_synthetic_v4_pair(fp_dir, "n8_fp_up_rat_a", step_codes=4, output_bits=8, num_shots=20, evals_per_shot=2,
+                                 truth_nx=1280, truth_ny=720, rng=rng)
+        _write_synthetic_v4_pair(fp_dir, "n8_fp_up_rat_b", step_codes=4, output_bits=8, num_shots=20, evals_per_shot=2,
+                                 truth_nx=1280, truth_ny=720, rng=rng)
+        _write_synthetic_v4_pair(fp_dir, "n8_fp_up_gen_a", step_codes=4, output_bits=8, num_shots=20, evals_per_shot=2,
+                                 truth_nx=1100, truth_ny=618, rng=rng)
+        _write_synthetic_v4_pair(fp_dir, "n8_fp_up_gen_b", step_codes=4, output_bits=8, num_shots=20, evals_per_shot=2,
+                                 truth_nx=1100, truth_ny=618, rng=rng)
         fp_manifest_path = os.path.join(tmp, "fp_manifest.json")
         with open(fp_manifest_path, "w", encoding="utf-8") as fh:
             json.dump({
@@ -1820,10 +1832,20 @@ def run_selftest():
                 "n8_fp_nat_b": {"truth_nx": 0, "truth_ny": 0, "master": "m_fp_b"},
                 "n8_fp_up_a": {"truth_nx": 960, "truth_ny": 540, "master": "m_fp_a"},
                 "n8_fp_up_b": {"truth_nx": 960, "truth_ny": 540, "master": "m_fp_b"},
+                "n8_fp_up_k16_a": {"truth_nx": 1320, "truth_ny": 743, "master": "m_fp_a"},
+                "n8_fp_up_k16_b": {"truth_nx": 1320, "truth_ny": 743, "master": "m_fp_b"},
+                "n8_fp_up_rat_a": {"truth_nx": 1280, "truth_ny": 720, "master": "m_fp_a"},
+                "n8_fp_up_rat_b": {"truth_nx": 1280, "truth_ny": 720, "master": "m_fp_b"},
+                "n8_fp_up_gen_a": {"truth_nx": 1100, "truth_ny": 618, "master": "m_fp_a"},
+                "n8_fp_up_gen_b": {"truth_nx": 1100, "truth_ny": 618, "master": "m_fp_b"},
             }, fh)
         fp_items, fp_segs, _ = load_all_dumps([fp_dir], fp_manifest_path)
         fp_report = calibrate_all_depths(fp_items, fp_segs, min_native_shots=300)
         fp_n8 = fp_report["G-PhaseA"]["N8"]
+        assert len(fp_n8["cv_folds"]) == 2 and all(f["fit_ok"] for f in fp_n8["cv_folds"]), \
+            "NC4 must prove FP revocation on FITTED CV tables (not PLACEHOLDER fallback): %r" % (fp_n8["cv_folds"],)
+        assert all(c["status"] == "fitted" for c in fp_report["depths"]["N8"]["classes"]), \
+            "NC4 full stratum must fit all 4 classes: %r" % (fp_report["depths"]["N8"]["classes"],)
         assert fp_n8["confident_wrong_count"] >= 1, "expected native FP in burst negative control: %r" % (fp_n8,)
         assert fp_n8["heldout_native_fp"] >= 1, "expected held-out native FP in burst negative control: %r" % (fp_n8,)
         assert fp_n8["cv_passed"] is False
@@ -1852,6 +1874,18 @@ def run_selftest():
                                  truth_nx=960, truth_ny=540, rng=rng)
         _write_synthetic_v4_pair(cross_dir, "n10_fp_up_b", step_codes=1, output_bits=10, num_shots=30, evals_per_shot=2,
                                  truth_nx=960, truth_ny=540, rng=rng)
+        _write_synthetic_v4_pair(cross_dir, "n10_fp_up_k16_a", step_codes=1, output_bits=10, num_shots=20, evals_per_shot=2,
+                                 truth_nx=1320, truth_ny=743, rng=rng)
+        _write_synthetic_v4_pair(cross_dir, "n10_fp_up_k16_b", step_codes=1, output_bits=10, num_shots=20, evals_per_shot=2,
+                                 truth_nx=1320, truth_ny=743, rng=rng)
+        _write_synthetic_v4_pair(cross_dir, "n10_fp_up_rat_a", step_codes=1, output_bits=10, num_shots=20, evals_per_shot=2,
+                                 truth_nx=1280, truth_ny=720, rng=rng)
+        _write_synthetic_v4_pair(cross_dir, "n10_fp_up_rat_b", step_codes=1, output_bits=10, num_shots=20, evals_per_shot=2,
+                                 truth_nx=1280, truth_ny=720, rng=rng)
+        _write_synthetic_v4_pair(cross_dir, "n10_fp_up_gen_a", step_codes=1, output_bits=10, num_shots=20, evals_per_shot=2,
+                                 truth_nx=1100, truth_ny=618, rng=rng)
+        _write_synthetic_v4_pair(cross_dir, "n10_fp_up_gen_b", step_codes=1, output_bits=10, num_shots=20, evals_per_shot=2,
+                                 truth_nx=1100, truth_ny=618, rng=rng)
         cross_manifest_path = os.path.join(tmp, "cross_manifest.json")
         with open(cross_manifest_path, "w", encoding="utf-8") as fh:
             json.dump({
@@ -1859,14 +1893,25 @@ def run_selftest():
                 "n10_fp_nat_b": {"truth_nx": 0, "truth_ny": 0, "master": "m_n10_fp_b"},
                 "n10_fp_up_a": {"truth_nx": 960, "truth_ny": 540, "master": "m_n10_fp_a"},
                 "n10_fp_up_b": {"truth_nx": 960, "truth_ny": 540, "master": "m_n10_fp_b"},
+                "n10_fp_up_k16_a": {"truth_nx": 1320, "truth_ny": 743, "master": "m_n10_fp_a"},
+                "n10_fp_up_k16_b": {"truth_nx": 1320, "truth_ny": 743, "master": "m_n10_fp_b"},
+                "n10_fp_up_rat_a": {"truth_nx": 1280, "truth_ny": 720, "master": "m_n10_fp_a"},
+                "n10_fp_up_rat_b": {"truth_nx": 1280, "truth_ny": 720, "master": "m_n10_fp_b"},
+                "n10_fp_up_gen_a": {"truth_nx": 1100, "truth_ny": 618, "master": "m_n10_fp_a"},
+                "n10_fp_up_gen_b": {"truth_nx": 1100, "truth_ny": 618, "master": "m_n10_fp_b"},
             }, fh)
         n10_fp_items, n10_fp_segs, _ = load_all_dumps([cross_dir], cross_manifest_path)
         n8_only_items = [it for it in items if it.depth == "N8"]
         n8_only_segs = [sg for sg in segs if sg["depth"] == "N8"]
         cross_report = calibrate_all_depths(n8_only_items + n10_fp_items, n8_only_segs + n10_fp_segs, min_native_shots=300)
+        cross_n10 = cross_report["G-PhaseA"]["N10"]
+        assert len(cross_n10["cv_folds"]) == 2 and all(f["fit_ok"] for f in cross_n10["cv_folds"]), \
+            "NC6 must prove N10 FP revocation on FITTED CV tables (not PLACEHOLDER fallback): %r" % (cross_n10["cv_folds"],)
+        assert all(c["status"] == "fitted" for c in cross_report["depths"]["N10"]["classes"]), \
+            "NC6 N10 full stratum must fit all 4 classes: %r" % (cross_report["depths"]["N10"]["classes"],)
         assert cross_report["G-PhaseA"]["N8"]["calibrated"] is True
-        assert cross_report["G-PhaseA"]["N10"]["confident_wrong_count"] >= 1
-        assert cross_report["G-PhaseA"]["N10"]["calibrated"] is False
+        assert cross_n10["confident_wrong_count"] >= 1
+        assert cross_n10["calibrated"] is False
         assert cross_report["G-8bit"]["passed"] is False, "G-8bit MUST fail when N10 has native FPs"
         assert "N10 native FPs" in cross_report["G-8bit"]["g8_reason"]
 
@@ -2173,7 +2218,63 @@ def run_selftest():
         assert "NullTableSourceKind::Calibrated" not in natonly_hdr, \
             "MED-1 NC12: must NEVER emit NullTableSourceKind::Calibrated"
 
-    print("generate_null_tables.py --selftest: PASS (2-fold held-out CV, H3 overfit & single-master, NEW-M2 emp_floor, TEST-L4 drift, CARBON-MED-1 1-master-alt & native-only dead-LLR negative controls, v4+v3 stratification, G-PhaseA, G-8bit verified)")
+        # NC12b (alt_unseparated_zero_llr branch check): feed >= min_alt_per_class unseparated alt samples
+        # (m1 >= m0 - MIN_ALT_SEPARATION_SIGMA * s0: alt mean = -0.02 vs null mean = -0.01, sd = 0.05) directly
+        # into _fit_tables_from_items. Both all-4-classes unseparated and single-class (K16) unseparated MUST
+        # set all_classes_fitted = False, emit status = "alt_unseparated_zero_llr" (with dead LLR == 0.0 on
+        # fallback alt = nul), and report "not separated" in fit_reasons!
+        rng_unsep = random.Random(20261124)
+        unsep_cands = ((0, 960), (1, 1320), (2, 1280), (3, 1100))
+        n_unsep_shots = max(DEFAULT_MIN_NULL_PER_CLASS, DEFAULT_MIN_ALT_PER_CLASS) * 4
+        unsep_all_items = []
+        unsep_single_items = []
+        for c_idx, cand_n in unsep_cands:
+            for sh in range(1, n_unsep_shots + 1):
+                st_null = rng_unsep.gauss(-0.01, 0.05)
+                st_alt_unsep = rng_unsep.gauss(-0.02, 0.05)
+                st_alt_sep = rng_unsep.gauss(-0.45, 0.04)
+                it_null = SampleItem("unsep_nat", "m_unsep", "N10", sh, sh * 2.0, "x", 1920, cand_n,
+                                     st_null, c_idx, 0, 0, sh, "null")
+                it_alt_u = SampleItem("unsep_alt", "m_unsep", "N10", n_unsep_shots + sh, (n_unsep_shots + sh) * 2.0,
+                                      "x", 1920, cand_n, st_alt_unsep, c_idx, cand_n, 0, sh, "alt")
+                it_alt_s = SampleItem("sep_alt", "m_unsep", "N10", n_unsep_shots + sh, (n_unsep_shots + sh) * 2.0,
+                                      "x", 1920, cand_n, st_alt_sep, c_idx, cand_n, 0, sh, "alt")
+                unsep_all_items.append(it_null)
+                unsep_all_items.append(it_alt_u)
+                unsep_single_items.append(it_null)
+                unsep_single_items.append(it_alt_u if c_idx == 1 else it_alt_s)
+
+        unsep_tbls, unsep_diag, unsep_all_fitted, unsep_reasons = _fit_tables_from_items(
+            unsep_all_items, DEFAULT_MIN_NULL_PER_CLASS, DEFAULT_MIN_ALT_PER_CLASS
+        )
+        assert all(d["n_alt"] >= DEFAULT_MIN_ALT_PER_CLASS for d in unsep_diag), \
+            "MED-1 NC12b fixture: every class must have >= min_alt_per_class alt samples"
+        # Verify the fixture genuinely violates MIN_ALT_SEPARATION_SIGMA (and fallback produces dead LLR == 0.0):
+        assert all(llr(unsep_tbls["null"][c], unsep_tbls["alt"][c], -0.50) == 0.0 for c in range(4)), \
+            "MED-1 NC12b negative control: unseparated alt=nul fallback yields dead LLR == 0.0 on -0.50 upscale"
+        assert unsep_all_fitted is False, \
+            "MED-1 NC12b: unseparated alt across all classes MUST set all_classes_fitted = False"
+        assert all(d["status"] == "alt_unseparated_zero_llr" for d in unsep_diag), \
+            "MED-1 NC12b: every class must report status='alt_unseparated_zero_llr', got %r" % (unsep_diag,)
+        assert len(unsep_reasons) == 4 and all("not separated" in r for r in unsep_reasons), \
+            "MED-1 NC12b: 'not separated' must appear in fit_reasons for all 4 classes, got %r" % (unsep_reasons,)
+
+        # Partial collapse check: 3 cleanly separated classes + 1 unseparated class (K16) MUST still fail fit!
+        part_tbls, part_diag, part_all_fitted, part_reasons = _fit_tables_from_items(
+            unsep_single_items, DEFAULT_MIN_NULL_PER_CLASS, DEFAULT_MIN_ALT_PER_CLASS
+        )
+        assert part_all_fitted is False, \
+            "MED-1 NC12b: single unseparated class (K16) MUST still set all_classes_fitted = False"
+        assert part_diag[1]["status"] == "alt_unseparated_zero_llr" and \
+            all(part_diag[c]["status"] == "fitted" for c in (0, 2, 3)), \
+            "MED-1 NC12b: expected K16='alt_unseparated_zero_llr' and other classes='fitted', got %r" % (part_diag,)
+        assert llr(part_tbls["null"][1], part_tbls["alt"][1], -0.50) == 0.0 and \
+            all(llr(part_tbls["null"][c], part_tbls["alt"][c], -0.50) > 0.0 for c in (0, 2, 3)), \
+            "MED-1 NC12b: K16 fallback must produce dead LLR == 0.0 while fitted classes separate -0.50"
+        assert any("not separated" in r and "K16" in r for r in part_reasons), \
+            "MED-1 NC12b: 'not separated' for K16 must appear in fit_reasons, got %r" % (part_reasons,)
+
+    print("generate_null_tables.py --selftest: PASS (2-fold held-out CV, H3 overfit & single-master, NEW-M2 emp_floor, TEST-L4 drift, CARBON-MED-1 1-master-alt, native-only & unseparated-alt dead-LLR negative controls, v4+v3 stratification, G-PhaseA, G-8bit verified)")
     return 0
 
 
