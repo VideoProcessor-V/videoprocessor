@@ -9,7 +9,9 @@ invocations are the tests, with the body's Category attribute. An ALL-CAPS place
 import contextlib
 import importlib.util
 import io
+import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -481,6 +483,93 @@ public:
             text = G.names_only(G.gpu_filter(manifest, [kind]), "|")
             self.assertTrue(text, kind)
             self.assertNotIn("Category=", text)
+
+
+class PlanTestShardsExactExclusionTests(unittest.TestCase):
+    """CT-B1: tools/ci/plan_test_shards.ps1 must handle Name!= exact-method clauses without crashing
+    and must exclude ONLY the exact method name while keeping prefix/suffix sibling tests."""
+
+    def test_plan_test_shards_handles_exact_name_excludes_and_keeps_siblings(self):
+        # Verify the live repository CPU filter emits exact Name!=GpuCostLine (and NOT substring Name!~GpuCostLine).
+        cpu_clauses = G.cpu_filter(L.load_manifest()).split("&")
+        self.assertIn("Name!=GpuCostLine", cpu_clauses)
+        self.assertNotIn("Name!~GpuCostLine", cpu_clauses)
+
+        exact_excluded = "Ns::ShardPlanClass::GpuCostLine"
+        case_excluded = "Ns::ShardPlanClass::gpucostline"
+        prefix_sibling = "Ns::ShardPlanClass::GpuCostLineCases"
+        suffix_sibling = "Ns::ShardPlanClass::PrefixGpuCostLine"
+        class_excluded = "Ns::D8SceneJudgeAgreementTests::D8_Rate24_Part1"
+        plain_a = "Ns::ShardPlanClass::PlainCpuA"
+        plain_b = "Ns::ShardPlanOtherClass::PlainCpuB"
+
+        # In-test negative control: naive substring matching on "GpuCostLine" falsely drops BOTH siblings!
+        for sibling in (prefix_sibling, suffix_sibling):
+            sibling_method = sibling.rsplit("::", 1)[-1]
+            self.assertIn("gpucostline", sibling_method.lower(),
+                          "Negative control failed: sibling must contain exact-excluded method as a substring")
+
+        planner = os.path.join(_dir, "ci", "plan_test_shards.ps1")
+        with tempfile.TemporaryDirectory() as d:
+            test_list = os.path.join(d, "tests.txt")
+            out_json = os.path.join(d, "shards.json")
+            weights_json = os.path.join(d, "weights.json")
+            with open(test_list, "w", encoding="utf-8") as fh:
+                fh.write("\n".join([
+                    exact_excluded,
+                    case_excluded,
+                    prefix_sibling,
+                    suffix_sibling,
+                    class_excluded,
+                    plain_a,
+                    plain_b,
+                ]) + "\n")
+            with open(weights_json, "w", encoding="utf-8") as fh:
+                fh.write("{}\n")
+
+            env = os.environ.copy()
+            py_dir = os.path.dirname(os.path.abspath(sys.executable))
+            env["PATH"] = py_dir + os.pathsep + env.get("PATH", "")
+            proc = subprocess.run(
+                [
+                    "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                    "-File", planner,
+                    "-TestList", test_list,
+                    "-Shards", "2",
+                    "-OutFile", out_json,
+                    "-Weights", weights_json,
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=env,
+            )
+            self.assertEqual(
+                proc.returncode, 0,
+                "plan_test_shards.ps1 crashed on Name!= clause (CT-B1):\nSTDOUT:\n%s\nSTDERR:\n%s" % (
+                    proc.stdout, proc.stderr),
+            )
+            with open(out_json, "r", encoding="utf-8-sig") as fh:
+                plan = json.load(fh)
+            included = set(plan["includedTests"])
+            excluded = set(plan["excludedTests"])
+
+            # Exact method (case-insensitive, matching vstest Name= semantics) and FQN-excluded class are excluded.
+            self.assertIn(exact_excluded, excluded)
+            self.assertNotIn(exact_excluded, included)
+            self.assertIn(case_excluded, excluded)
+            self.assertNotIn(case_excluded, included)
+            self.assertIn(class_excluded, excluded)
+            self.assertNotIn(class_excluded, included)
+
+            # Prefix and suffix siblings MUST remain included (exact Name!=, not substring Name!~).
+            self.assertIn(prefix_sibling, included)
+            self.assertNotIn(prefix_sibling, excluded)
+            self.assertIn(suffix_sibling, included)
+            self.assertNotIn(suffix_sibling, excluded)
+            self.assertIn(plain_a, included)
+            self.assertIn(plain_b, included)
 
 
 if __name__ == "__main__":
