@@ -582,6 +582,7 @@
     <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\SourceIdSota1HdrTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\SourceIdSota2NeuralSrTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\SourceIdSota3InterlacedTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\SourceIdSota4StaticRankTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\ChainResidualSpectrumTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\ChainChromaEstimatorTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\ChainPatternVoterTests.cpp" />
