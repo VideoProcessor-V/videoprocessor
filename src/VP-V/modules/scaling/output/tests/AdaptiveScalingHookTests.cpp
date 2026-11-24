@@ -5,6 +5,8 @@
 #include "pch.h"
 #include <VP-V/tests/VpLutGpuTestSupport.h>
 #include <VP-V/modules/scaling/output/AdaptiveDownscaleStage.h>
+#include <VP-V/modules/input/source_analysis/regions/EdgeMapDispatch.h>
+#include <VP-V/tests/SettingsTestSupport.h>
 #include <algorithm>
 #include <cmath>
 #include <functional>
@@ -1608,13 +1610,19 @@ namespace VideoProcessorTest
 		}
 
 		// Q#1 (GEM-069 / ADS-STATE, WARP GPU):
-		//  1. An RGBA32F PL_COLOR_TRC_PQ frame containing overshoot pixels above PQ 1.0 and past the ST 2084 pole
-		//     (c = 1.05, 1.20, 1.50, 2.05, 2.50, 4.00) rendered through AdaptiveDownscale::Module + SSimDownscaler
-		//     must keep both the persistent grain state (LastStats) and every float32 output pixel strictly finite
-		//     on both the overshoot frame and the subsequent clean frame (no sticky NaN).
-		//  2. Even if an upstream frame injects literal NaN into the measure pass (poisoning state), FINAL_BODY_B
-		//     must recover cleanly to a finite grain scale on the next clean frame with cut = false (via !(prev.r >= 0.0)
-		//     rather than an ordered comparison prev.r < 0.0).
+		//  0. Direct WARP GPU test of MeasureDomainGlsl.h (ad_lin / ad_luma via DispatchEdgeMapStage) on overshootTex
+		//     containing valid PQ 1.0 and pole-crossing PQ codes {2.05, 2.50, 4.00}: every output RG32F texel must be
+		//     strictly finite and every overshoot pixel's luma must be >= MeasureLumaCode(pqDomain, {1, 1, 1}) - 1e-2f
+		//     (defeats FXC SM5.0 smoothstep(NaN)->0.0 masking).
+		//  1. An RGBA32F PL_COLOR_TRC_PQ frame with a high-grain background plus overshoot pixels above PQ 1.0 and past
+		//     the ST 2084 pole (c = 1.00, 1.05, 1.20, 1.50, 2.05, 2.50, 4.00) rendered through AdaptiveDownscale::Module
+		//     + SSimDownscaler must keep both persistent grain state (LastStats) and every float32 output pixel strictly
+		//     finite AND drive stats2.grainScale < 0.90f (catching DXBC smoothstep(NaN) -> 0.0 -> target = 1.0).
+		//  2. Poisoned-state recovery on WARP: both end-to-end (clean -> NaN -> clean) AND direct WARP dispatch of the
+		//     real production FINAL_BODY_B from AdaptiveDownscale.cpp on a 1x1 RGBA32F state_io texture pre-uploaded with
+		//     { quiet_NaN(), 0, 0, 1 } (cut_in = 0, smooth_alpha = 0.1) must snap cleanly to finite target (with an
+		//     in-test WARP negative control proving pre-fix ordered prev.r < 0.0 stays NaN), plus structural guards on
+		//     FINAL_BODY_B, MAP_BODY, and STABILISE_GUARD_DEFINE's rs_lin.
 		TEST_METHOD(MeasureStateStaysFiniteOnAnOvershootPixel)
 		{
 			TargetLutGpuFixture fixture;
@@ -1628,11 +1636,19 @@ namespace VideoProcessorTest
 			const pl_hook* ssim = pl_mpv_user_shader_parse(gpu, ssimSource.data(), ssimSource.size());
 			Assert::IsNotNull(ssim, L"SSimDownscaler.glsl must parse");
 
+			pl_dispatch dispatch = pl_dispatch_create(fixture.Log(), gpu);
+			Assert::IsNotNull(dispatch, L"pl_dispatch_create failed on WARP");
+
 			pl_fmt srcFmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
 				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR));
 			pl_fmt dstFmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
 				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
-			Assert::IsTrue(srcFmt != nullptr && dstFmt != nullptr, L"WARP must provide sampleable and host-readable RGBA32F");
+			pl_fmt rg32fFmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 2, 32, 32,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE | PL_FMT_CAP_HOST_READABLE));
+			pl_fmt rgba32fRwFmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE | PL_FMT_CAP_HOST_READABLE));
+			Assert::IsTrue(srcFmt != nullptr && dstFmt != nullptr && rg32fFmt != nullptr && rgba32fRwFmt != nullptr,
+				L"WARP must provide sampleable, storable, renderable, and host-readable RG32F/RGBA32F");
 
 			static constexpr int sw = 128, sh = 96, dw = 64, dh = 48;
 			auto makeFloatTex = [&](const std::vector<float>& rgba) -> pl_tex
@@ -1648,22 +1664,41 @@ namespace VideoProcessorTest
 				return tex;
 			};
 
+			// Genuinely smooth, grain-free surface (energy << grainLo = 2.0 in both PQ and gamma22) so
+			// Frame 1 initializes state.r = 1.0 (catching DXBC smoothstep(NaN) -> 0.0 -> target = 1.0).
 			std::vector<float> cleanData(static_cast<size_t>(sw) * sh * 4, 0.0f);
 			for (int y = 0; y < sh; ++y)
 			{
 				for (int x = 0; x < sw; ++x)
 				{
-					const float v = 0.50f + 0.02f * std::sin(x * 0.7f) * std::cos(y * 0.9f);
+					const float v = 0.40f + 0.002f * std::sin(x * 0.15f) * std::cos(y * 0.15f);
 					float* p = &cleanData[(static_cast<size_t>(y) * sw + x) * 4];
 					p[0] = p[1] = p[2] = v;
 					p[3] = 1.0f;
 				}
 			}
 
-			// Overshoot pixels include both mild WTW (> 1.0) and pole-crossing (> c_pole ~= 1.99206) PQ values.
-			const float overshootValues[] = { 1.05f, 1.20f, 1.50f, 2.05f, 2.50f, 4.00f };
-			std::vector<float> overshootData = cleanData;
-			for (size_t k = 0; k < sizeof(overshootValues) / sizeof(overshootValues[0]); ++k)
+			// High-grain deterministic PQ background (energy ~= 19.4 >> grainHi = 8.0 -> clean target = grainFloor = 0.40)
+			// plus valid PQ peak (1.0), mild WTW (> 1.0), and pole-crossing (> c_pole ~= 1.99206) PQ overshoot pixels.
+			const float overshootValues[] = { 1.00f, 1.05f, 1.20f, 1.50f, 2.05f, 2.50f, 4.00f };
+			static constexpr size_t kNumOvershootValues = sizeof(overshootValues) / sizeof(overshootValues[0]);
+			std::vector<float> overshootData(static_cast<size_t>(sw) * sh * 4, 0.0f);
+			{
+				uint32_t grainSeed = 12345u;
+				for (int y = 0; y < sh; ++y)
+				{
+					for (int x = 0; x < sw; ++x)
+					{
+						grainSeed = grainSeed * 1664525u + 1013904223u;
+						const float n = (static_cast<float>(grainSeed >> 8) / 16777216.0f - 0.5f) * 2.0f;
+						const float v = 0.40f + 0.015f * n;
+						float* p = &overshootData[(static_cast<size_t>(y) * sw + x) * 4];
+						p[0] = p[1] = p[2] = v;
+						p[3] = 1.0f;
+					}
+				}
+			}
+			for (size_t k = 0; k < kNumOvershootValues; ++k)
 			{
 				const int px = sw / 2 - 3 + static_cast<int>(k);
 				const int py = sh / 2;
@@ -1701,6 +1736,65 @@ namespace VideoProcessorTest
 					L" non-finite output components (first at index " + std::to_wstring(firstBad) + L")";
 				Assert::AreEqual(size_t(0), nonFiniteCount, msg.c_str());
 			};
+
+			// 0. Direct WARP GPU test of MeasureDomainGlsl.h (ad_lin / ad_luma) via DispatchEdgeMapStage on overshootTex.
+			//    No smoothstep sits between ad_lin and em_out, so pre-fix unclamped ad_lin writes literal NaN texels
+			//    on WARP even under FXC SM5.0, and even a flush-to-zero bug would fail gotLuma >= pq1Luma - 1e-2f.
+			{
+				pl_tex_params edgeTp{};
+				edgeTp.w = sw;
+				edgeTp.h = sh;
+				edgeTp.format = rg32fFmt;
+				edgeTp.sampleable = true;
+				edgeTp.storable = true;
+				edgeTp.host_readable = true;
+				pl_tex edgeDst = pl_tex_create(gpu, &edgeTp);
+				Assert::IsNotNull(edgeDst, L"RG32F edge-map output texture creation failed");
+
+				pl_color_space pqColor{};
+				pqColor.primaries = PL_COLOR_PRIM_BT_2020;
+				pqColor.transfer = PL_COLOR_TRC_PQ;
+				std::string dispatchWhy;
+				const bool dispatched = Vpv::Regions::DispatchEdgeMapStage(dispatch, overshootTex, pqColor,
+					PL_COLOR_SYSTEM_BT_2020_NC, PL_COLOR_PRIM_BT_2020, edgeDst, dispatchWhy);
+				Assert::IsTrue(dispatched,
+					(L"DispatchEdgeMapStage(PQ) failed on WARP: " + std::wstring(dispatchWhy.begin(), dispatchWhy.end())).c_str());
+				pl_gpu_finish(gpu);
+
+				std::vector<float> edgeRg(static_cast<size_t>(sw) * sh * 2, 0.0f);
+				pl_tex_transfer_params edgeDl{};
+				edgeDl.tex = edgeDst;
+				edgeDl.ptr = edgeRg.data();
+				Assert::IsTrue(pl_tex_download(gpu, &edgeDl), L"RG32F edge-map download failed");
+				pl_tex_destroy(gpu, &edgeDst);
+
+				assertAllFinite(edgeRg, L"Direct MeasureDomainGlsl (DispatchEdgeMapStage PQ) RG32F output");
+
+				const VpMeasure::MeasureDomain pqDomain = VpMeasure::MeasureDomainFor(pqColor,
+					PL_COLOR_SYSTEM_BT_2020_NC, PL_COLOR_PRIM_BT_2020);
+				const double pqWhiteRgb[3] = { 1.0, 1.0, 1.0 };
+				const float pq1Luma = static_cast<float>(VpMeasure::MeasureLumaCode(pqDomain, pqWhiteRgb));
+
+				for (size_t k = 0; k < kNumOvershootValues; ++k)
+				{
+					const int px = sw / 2 - 3 + static_cast<int>(k);
+					const int py = sh / 2;
+					const size_t idx = (static_cast<size_t>(py) * sw + px) * 2;
+					const float gotSobel = edgeRg[idx + 0];
+					const float gotLuma = edgeRg[idx + 1];
+					Assert::IsTrue(std::isfinite(gotSobel) && std::isfinite(gotLuma),
+						(L"Direct MeasureDomainGlsl: non-finite RG32F texel at PQ c=" + std::to_wstring(overshootValues[k])).c_str());
+					Assert::IsTrue(gotLuma >= pq1Luma - 1e-2f,
+						(L"Direct MeasureDomainGlsl: PQ overshoot luma must be >= PQ 1.0 luma (" + std::to_wstring(pq1Luma) +
+							L") at c=" + std::to_wstring(overshootValues[k]) + L", got " + std::to_wstring(gotLuma)).c_str());
+					if (k == 0)
+					{
+						Assert::IsTrue(std::fabs(gotLuma - pq1Luma) <= 1.0f,
+							(L"Direct MeasureDomainGlsl: valid PQ 1.0 pixel must match CPU MeasureLumaCode (" +
+								std::to_wstring(pq1Luma) + L"), got " + std::to_wstring(gotLuma)).c_str());
+					}
+				}
+			}
 
 			AdaptiveDownscale::Settings st;
 			st.grainMap = false;
@@ -1759,17 +1853,27 @@ namespace VideoProcessorTest
 				return v;
 			};
 
-			// 1. PQ overshoot test: clean frame -> PQ overshoot frame (with c > 1.0 and c > c_pole) -> clean frame (no cut).
+			// 1. PQ overshoot test: smooth clean frame (state.r = 1.0) -> high-grain PQ overshoot frames
+			//    (with c = 1.00..4.00 past c_pole ~= 1.99206) -> clean frame (no cut).
 			{
 				AdaptiveDownscale::Module module;
 				module.SetCutSource(noCutSource);
 				uint64_t sequence = 0;
 				std::vector<float> out2, out3;
 
-				// Frame 1: initialize state cleanly.
+				// Frame 1: initialize state cleanly near 1.0 on the smooth PQ surface.
 				renderFrame(module, sequence, cleanTex, PL_COLOR_TRC_PQ, PL_COLOR_PRIM_BT_2020, true, nullptr);
-				// Frame 2: overshoot PQ pixels (including 2.05, 2.50, 4.00 past c_pole ~= 1.99206).
-				renderFrame(module, sequence, overshootTex, PL_COLOR_TRC_PQ, PL_COLOR_PRIM_BT_2020, true, &out2);
+				renderFrame(module, sequence, cleanTex, PL_COLOR_TRC_PQ, PL_COLOR_PRIM_BT_2020, false, nullptr);
+				renderFrame(module, sequence, cleanTex, PL_COLOR_TRC_PQ, PL_COLOR_PRIM_BT_2020, false, nullptr);
+				const AdaptiveDownscale::Stats stats1 = module.LastStats();
+				Assert::IsTrue(stats1.valid && std::isfinite(stats1.grainScale) && stats1.grainScale > 0.99f,
+					(L"clean PQ Frame 1 must initialize state grainScale near 1.0, got " + std::to_wstring(stats1.grainScale)).c_str());
+
+				// Frames 2..9: high-grain PQ background + overshoot PQ pixels (including 2.05, 2.50, 4.00 past c_pole).
+				// Over 8 advancing frames (alpha ~= 0.08 toward grainFloor = 0.40), clean grainScale drops to ~0.71 < 0.90;
+				// pre-fix unclamped ad_lin poisons t.x -> NaN -> DXBC smoothstep(NaN) == 0 -> target = 1.0 (stuck at 1.0!).
+				for (int f = 0; f < 8; ++f)
+					renderFrame(module, sequence, overshootTex, PL_COLOR_TRC_PQ, PL_COLOR_PRIM_BT_2020, true, f == 7 ? &out2 : nullptr);
 				renderFrame(module, sequence, overshootTex, PL_COLOR_TRC_PQ, PL_COLOR_PRIM_BT_2020, false, nullptr);
 				renderFrame(module, sequence, overshootTex, PL_COLOR_TRC_PQ, PL_COLOR_PRIM_BT_2020, false, nullptr);
 				const AdaptiveDownscale::Stats stats2 = module.LastStats();
@@ -1777,11 +1881,14 @@ namespace VideoProcessorTest
 				Assert::IsTrue(stats2.valid, L"PQ overshoot frame: grain state statistics must be read back");
 				Assert::IsTrue(std::isfinite(stats2.grainScale) && stats2.grainScale >= st.grainFloor - 1e-4f && stats2.grainScale <= 1.0f + 1e-4f,
 					(L"PQ overshoot frame: state grainScale must stay finite and in [grainFloor, 1], got " + std::to_wstring(stats2.grainScale)).c_str());
+				Assert::IsTrue(stats2.grainScale < 0.90f,
+					(L"PQ overshoot frame: high-grain background must pull grainScale < 0.90 (catches DXBC smoothstep(NaN)->0->target=1), got " +
+						std::to_wstring(stats2.grainScale)).c_str());
 				Assert::IsTrue(std::isfinite(stats2.meanW) && stats2.meanW >= 0.0f && stats2.meanW <= st.wBase + 1e-4f,
 					(L"PQ overshoot frame: state meanW must stay finite and in [0, wBase], got " + std::to_wstring(stats2.meanW)).c_str());
 				assertAllFinite(out2, L"PQ overshoot frame output");
 
-				// Frame 3: subsequent clean PQ frame (no cut) must stay finite and uncorrupted.
+				// Subsequent clean PQ frame (no cut) must stay finite and uncorrupted.
 				renderFrame(module, sequence, cleanTex, PL_COLOR_TRC_PQ, PL_COLOR_PRIM_BT_2020, true, &out3);
 				renderFrame(module, sequence, cleanTex, PL_COLOR_TRC_PQ, PL_COLOR_PRIM_BT_2020, false, nullptr);
 				renderFrame(module, sequence, cleanTex, PL_COLOR_TRC_PQ, PL_COLOR_PRIM_BT_2020, false, nullptr);
@@ -1797,8 +1904,8 @@ namespace VideoProcessorTest
 				module.Release();
 			}
 
-			// 2. Poisoned-state recovery on WARP: clean frame -> NaN-injected frame -> clean frame with cut = false.
-			// Even if the NaN frame poisons state.r, FINAL_BODY_B must recover to a finite scale on the next clean frame.
+			// 2. Poisoned-state recovery on WARP:
+			// (a) End-to-end AdaptiveDownscale::Module: clean frame -> NaN-injected frame -> clean frame with cut = false.
 			{
 				AdaptiveDownscale::Module module;
 				module.SetCutSource(noCutSource);
@@ -1822,7 +1929,217 @@ namespace VideoProcessorTest
 				module.Release();
 			}
 
-			// 3. MANDATORY IN-TEST NEGATIVE CONTROLS:
+			// (b) Direct WARP GPU poisoned-state proof of the real production FINAL_BODY_B extracted from
+			//     AdaptiveDownscale.cpp, plus structural guards on FINAL_BODY_B, MAP_BODY, and rs_lin, plus an
+			//     in-test WARP GPU negative control proving pre-fix ordered prev.r < 0.0 stays NaN on the same input.
+			{
+				const std::string adsSource = SettingsTestSupport::ReadFile(
+					SettingsTestSupport::RepoRoot() + "src\\VP-V\\modules\\scaling\\output\\AdaptiveDownscale.cpp");
+				Assert::IsFalse(adsSource.empty(), L"Failed to read AdaptiveDownscale.cpp for shader guard verification");
+
+				auto extractGlslRaw = [&](const char* marker) -> std::string
+				{
+					const size_t pos = adsSource.find(marker);
+					Assert::IsTrue(pos != std::string::npos,
+						(L"AdaptiveDownscale.cpp missing shader literal: " + std::wstring(marker, marker + std::strlen(marker))).c_str());
+					const size_t open = adsSource.find("R\"GLSL(", pos);
+					Assert::IsTrue(open != std::string::npos, L"Missing R\"GLSL( opening delimiter in AdaptiveDownscale.cpp");
+					const size_t start = open + 7;
+					const size_t close = adsSource.find(")GLSL\"", start);
+					Assert::IsTrue(close != std::string::npos, L"Missing )GLSL\" closing delimiter in AdaptiveDownscale.cpp");
+					return adsSource.substr(start, close - start);
+				};
+
+				std::string nonfiniteGlsl;
+				{
+					const size_t nfPos = adsSource.find("const char* const NONFINITE_GLSL =");
+					if (nfPos != std::string::npos)
+					{
+						const size_t q0 = adsSource.find('"', nfPos);
+						const size_t q1 = q0 != std::string::npos ? adsSource.find('"', q0 + 1) : std::string::npos;
+						Assert::IsTrue(q0 != std::string::npos && q1 != std::string::npos, L"Malformed NONFINITE_GLSL literal");
+						std::string raw = adsSource.substr(q0 + 1, q1 - q0 - 1);
+						size_t esc = 0;
+						while ((esc = raw.find("\\n", esc)) != std::string::npos)
+						{
+							raw.replace(esc, 2, "\n");
+							++esc;
+						}
+						nonfiniteGlsl = raw;
+					}
+				}
+
+				const std::string finalHeader = extractGlslRaw("const char* const FINAL_HEADER =");
+				const std::string finalBodyA = extractGlslRaw("const char* const FINAL_BODY_A =");
+				const std::string finalBodyB = extractGlslRaw("const char* const FINAL_BODY_B =");
+				const std::string mapBody = extractGlslRaw("const char* const MAP_BODY =");
+				const std::string stabiliseGuard = extractGlslRaw("const char* const STABILISE_GUARD_DEFINE =");
+
+				// Structural invariants: unordered !(prev.r >= 0.0), zero isnan() (FXC folds it), clamped rs_lin pole.
+				Assert::IsTrue(finalBodyB.find("!(prev.r >= 0.0)") != std::string::npos,
+					L"FINAL_BODY_B must guard state.r with !(prev.r >= 0.0) so NaN triggers immediate self-heal");
+				Assert::IsTrue(finalBodyB.find("isnan(") == std::string::npos,
+					L"FINAL_BODY_B must not use isnan() (D3DCompile/FXC can fold it)");
+				Assert::IsTrue(mapBody.find("!(prev.r >= 0.0)") != std::string::npos,
+					L"MAP_BODY must guard prev.r with !(prev.r >= 0.0) so NaN triggers immediate self-heal");
+				Assert::IsTrue(mapBody.find("isnan(") == std::string::npos,
+					L"MAP_BODY must not use isnan() (D3DCompile/FXC can fold it)");
+				Assert::IsTrue(stabiliseGuard.find("max(18.8515625 - 18.6875 * e, 1e-6)") != std::string::npos,
+					L"STABILISE_GUARD_DEFINE rs_lin must clamp ST 2084 PQ denominator via max(18.8515625 - 18.6875 * e, 1e-6)");
+				Assert::IsTrue(stabiliseGuard.find("isnan(") == std::string::npos,
+					L"STABILISE_GUARD_DEFINE must not use isnan()");
+
+				// Direct WARP dispatch of production FINAL_BODY_B against 1x1 RGBA32F state_io = { quiet_NaN(), 0, 0, 1 }.
+				const float partialInit[4] = { 100.0f, 10.0f, 10.0f, 0.0f };   // energy = 10.0 > grainHi (8.0) -> target = grainFloor (0.40)
+				pl_tex_params partialTp{};
+				partialTp.w = 1;
+				partialTp.h = 1;
+				partialTp.format = srcFmt;
+				partialTp.sampleable = true;
+				partialTp.initial_data = partialInit;
+				pl_tex partialTex = pl_tex_create(gpu, &partialTp);
+				Assert::IsNotNull(partialTex, L"1x1 RGBA32F partial_in texture creation failed");
+
+				pl_tex_params stateTp{};
+				stateTp.w = 1;
+				stateTp.h = 1;
+				stateTp.format = rgba32fRwFmt;
+				stateTp.sampleable = true;
+				stateTp.storable = true;
+				stateTp.host_writable = true;
+				stateTp.host_readable = true;
+				pl_tex stateTex = pl_tex_create(gpu, &stateTp);
+				Assert::IsNotNull(stateTex, L"1x1 RGBA32F state_io texture creation failed");
+
+				pl_tex_params statsTp{};
+				statsTp.w = 1;
+				statsTp.h = 1;
+				statsTp.format = rgba32fRwFmt;
+				statsTp.sampleable = true;
+				statsTp.storable = true;
+				statsTp.host_readable = true;
+				pl_tex statsTex = pl_tex_create(gpu, &statsTp);
+				Assert::IsNotNull(statsTex, L"1x1 RGBA32F ad_stats_img texture creation failed");
+
+				auto dispatchFinalOnPoisonedState = [&](const std::string& headerText, const std::string& bodyText,
+					const char* desc, float outState[4], float outStats[4])
+				{
+					float poisonedState[4] = { std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f, 1.0f };
+					pl_tex_transfer_params up{};
+					up.tex = stateTex;
+					up.ptr = poisonedState;
+					Assert::IsTrue(pl_tex_upload(gpu, &up), L"RGBA32F poisoned state upload failed");
+
+					pl_shader_desc d[3]{};
+					d[0].desc.name = "partial_in";
+					d[0].desc.type = PL_DESC_SAMPLED_TEX;
+					d[0].binding.object = partialTex;
+					d[0].binding.address_mode = PL_TEX_ADDRESS_CLAMP;
+					d[0].binding.sample_mode = PL_TEX_SAMPLE_NEAREST;
+					d[1].desc.name = "state_io";
+					d[1].desc.type = PL_DESC_STORAGE_IMG;
+					d[1].desc.access = PL_DESC_ACCESS_READWRITE;
+					d[1].binding.object = stateTex;
+					d[2].desc.name = "ad_stats_img";
+					d[2].desc.type = PL_DESC_STORAGE_IMG;
+					d[2].desc.access = PL_DESC_ACCESS_WRITEONLY;
+					d[2].binding.object = statsTex;
+
+					const float writeStatsF = 1.0f;
+					const float advanceF = 1.0f;
+					const float cutInF = 0.0f;
+					const float totalPixelsF = 10.0f;
+					const float smoothAlphaF = 0.1f;
+					const pl_shader_var v[8] = {
+						{ pl_var_float("write_stats"), &writeStatsF, true },
+						{ pl_var_float("advance"), &advanceF, true },
+						{ pl_var_float("cut_in"), &cutInF, true },
+						{ pl_var_float("total_pixels"), &totalPixelsF, true },
+						{ pl_var_float("grain_lo"), &st.grainLo, true },
+						{ pl_var_float("grain_hi"), &st.grainHi, true },
+						{ pl_var_float("grain_floor"), &st.grainFloor, true },
+						{ pl_var_float("smooth_alpha"), &smoothAlphaF, true } };
+
+					pl_custom_shader custom{};
+					custom.description = desc;
+					custom.header = headerText.c_str();
+					custom.body = bodyText.c_str();
+					custom.input = PL_SHADER_SIG_NONE;
+					custom.output = PL_SHADER_SIG_NONE;
+					custom.descriptors = d;
+					custom.num_descriptors = 3;
+					custom.variables = v;
+					custom.num_variables = 8;
+					custom.compute = true;
+					custom.compute_group_size[0] = 16;
+					custom.compute_group_size[1] = 16;
+
+					pl_shader sh = pl_dispatch_begin(dispatch);
+					const bool customOk = pl_shader_custom(sh, &custom);
+					if (!customOk)
+						pl_dispatch_abort(dispatch, &sh);
+					Assert::IsTrue(customOk, L"pl_shader_custom failed for poisoned-state FINAL_BODY_B test");
+
+					pl_dispatch_compute_params compute{};
+					compute.shader = &sh;
+					compute.dispatch_size[0] = 1;
+					compute.dispatch_size[1] = 1;
+					compute.dispatch_size[2] = 1;
+					Assert::IsTrue(pl_dispatch_compute(dispatch, &compute), L"pl_dispatch_compute failed for poisoned-state FINAL_BODY_B test");
+					pl_gpu_finish(gpu);
+
+					pl_tex_transfer_params stateDl{};
+					stateDl.tex = stateTex;
+					stateDl.ptr = outState;
+					Assert::IsTrue(pl_tex_download(gpu, &stateDl), L"RGBA32F state_io download failed");
+
+					pl_tex_transfer_params statsDl{};
+					statsDl.tex = statsTex;
+					statsDl.ptr = outStats;
+					Assert::IsTrue(pl_tex_download(gpu, &statsDl), L"RGBA32F ad_stats_img download failed");
+				};
+
+				const std::string prodHeader = "#define AD_STATS_IMG 1\n" + nonfiniteGlsl + finalHeader;
+				const std::string prodBody = finalBodyA + finalBodyB;
+				float healedState[4] = {};
+				float healedStats[4] = {};
+				dispatchFinalOnPoisonedState(prodHeader, prodBody, "Q#1 production FINAL_BODY_B NaN self-heal", healedState, healedStats);
+				Assert::IsTrue(std::isfinite(healedState[0]) && std::fabs(healedState[0] - st.grainFloor) < 1e-4f,
+					(L"Production FINAL_BODY_B on WARP must snap poisoned prev.r=NaN cleanly to target=" +
+						std::to_wstring(st.grainFloor) + L", got " + std::to_wstring(healedState[0])).c_str());
+				Assert::IsTrue(healedState[3] > 1.5f,
+					(L"Production FINAL_BODY_B on WARP must set state.a=2.0 (cut/self-heal flag), got " +
+						std::to_wstring(healedState[3])).c_str());
+				Assert::IsTrue(std::isfinite(healedStats[0]) && std::fabs(healedStats[0] - st.grainFloor) < 1e-4f,
+					(L"Production FINAL_BODY_B on WARP must publish finite healed stats=" +
+						std::to_wstring(st.grainFloor) + L", got " + std::to_wstring(healedStats[0])).c_str());
+
+				// In-test WARP GPU negative control on the exact same poisoned { quiet_NaN(), 0, 0, 1 } texture:
+				// pre-fix ordered comparison (prev.r < 0.0) returns false for NaN, leaving state.r stuck at NaN!
+				const std::string naiveHeader = "#define AD_STATS_IMG 1\n" + finalHeader;
+				const std::string naiveBody = finalBodyA + R"GLSL(    bool cut = prev.a < 0.5 || cut_in > 0.5 || prev.r < 0.0;
+    float scale = cut ? target : mix(prev.r, target, smooth_alpha);
+    imageStore(state_io, ivec2(0), vec4(scale, free_mean, 0.0, cut ? 2.0 : 1.0));
+    if (write_stats > 0.5) {
+        imageStore(ad_stats_img, ivec2(0), vec4(scale, free_mean, 0.0, stats_tag));
+    }
+}
+)GLSL";
+				float unhealedState[4] = {};
+				float unhealedStats[4] = {};
+				dispatchFinalOnPoisonedState(naiveHeader, naiveBody, "Q#1 negative control pre-fix ordered prev.r < 0.0", unhealedState, unhealedStats);
+				Assert::IsFalse(std::isfinite(unhealedState[0]),
+					(L"WARP negative control: pre-fix ordered prev.r < 0.0 must fail to heal NaN on WARP, got " +
+						std::to_wstring(unhealedState[0])).c_str());
+				Assert::IsTrue(unhealedState[3] < 1.5f,
+					(L"WARP negative control: pre-fix ordered prev.r < 0.0 must not signal cut on NaN, got state.a=" +
+						std::to_wstring(unhealedState[3])).c_str());
+
+				for (pl_tex* t : { &partialTex, &stateTex, &statsTex })
+					pl_tex_destroy(gpu, t);
+			}
+
+			// 3. MANDATORY IN-TEST NEGATIVE CONTROLS (CPU float32 math):
 			// (a) On the exact pole-crossing overshoot pixels uploaded into overshootTex (2.05, 2.50, 4.00), the
 			//     unclamped float32 PQ inverse formula genuinely produces NaN (proving the GPU test input is hazardous).
 			for (float c : { 2.05f, 2.50f, 4.00f })
@@ -1842,6 +2159,7 @@ namespace VideoProcessorTest
 			Assert::IsFalse(std::isfinite(nan + 0.1f * (1.0f - nan)),
 				L"negative control: unguarded one-pole mix(NaN, target, alpha) remains non-finite");
 
+			pl_dispatch_destroy(&dispatch);
 			for (pl_tex* t : { &cleanTex, &overshootTex, &nanTex })
 				pl_tex_destroy(gpu, t);
 			pl_mpv_user_shader_destroy(&ssim);
@@ -1849,5 +2167,6 @@ namespace VideoProcessorTest
 			AssertCleanLibplaceboLog(log);
 			Assert::AreEqual(0, pl_renderer_get_errors(fixture.Renderer()).num_disabled_hooks, L"A hook was disabled");
 		}
+
 	};
 }
