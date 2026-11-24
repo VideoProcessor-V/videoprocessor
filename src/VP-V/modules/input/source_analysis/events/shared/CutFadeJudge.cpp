@@ -1231,7 +1231,11 @@ bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur
         // where spreadPrev > 1 code yet aSpread / spread = 1/(k+1) >= 1/kFadeMaxDiv): exempt from relative jump guard.
         const bool nearBlackRise = prev.mean < kBlackMeanMaxP4 && dMean > 0 && dP99 > 0 && dSpread > 0 &&
             aMean < kMaxFadeStepP4 && aSpread < kMaxFadeStepP4;
-        const bool jump = (aMean * kFadeMaxDiv >= contRef || contSpreadJump) &&
+        // Time-reversal dual for an active near-black fade-out collapsing into dark/black: exempt from contSpreadJump.
+        const bool nearBlackFall = run.direction < 0 && run.fadePairs >= 1u &&
+            prev.mean < kBlackMeanMaxP4 && cur.mean < kBlackMeanMaxP4 &&
+            dMean < 0 && aMean < kMaxFadeStepP4 && aMean * kFadeMaxDiv < contRef;
+        const bool jump = (aMean * kFadeMaxDiv >= contRef || (contSpreadJump && !nearBlackFall)) &&
             !(run.blackOrigin && dMean > 0 && aMean < kMaxFadeStepP4 && aSpread < kMaxFadeStepP4) && !nearBlackRise;
         const bool continues = run.direction != 0 && !jump && (stepDir == run.direction || stepDir == 0);
 
@@ -1361,7 +1365,9 @@ bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur
                             ++sOppZero;
                     }
                 }
-            if (!(sSameZero > sOppZero))
+            // Guard sub-half-LSB plateaus against noise outliers without letting sub-LSB bilinear rounding noise
+            // outvote genuine above-LSB cells when the aligned picture mean moved by > kFadeCellStepEps (0.5 code).
+            if ((std::fabs(stepMean) <= kFadeCellStepEps || sSameEps + sOppEps == 0) && !(sSameZero > sOppZero))
                 return false;
 
             // Fix #4: Exact 4x2 (7x7) macro-tile step consensus scoped to near-stationary holds
