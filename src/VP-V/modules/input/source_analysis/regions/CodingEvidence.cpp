@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstring>
 #include <utility>
+#include <VP-V/core/ComputeOnce.h>
 #include <VP-V/core/RobustStats.h>
 #include <VP-V/modules/input/source_analysis/AnalysisAxis10.h>
 
@@ -608,6 +609,7 @@ namespace CodingEvidence
 			if (!pack || pack->tiles <= 0 || !MeasurePack(*pack, tiles))
 				return false;   // nothing staged for this frame: declined (visible)
 			out.bytes = Serialise(tiles, pack->tileSize, pack->codeMaximum);
+			VPV_COMPUTE_ONCE_AT("U13", req.seq, ::ComputeOnce::Variant(0));   // compute-once detector 2 (15d J2): P16 default variant, counted only when computed
 			return true;
 		};
 		return f;
