@@ -1060,27 +1060,41 @@ if (b.x < size.x && b.y < size.y) {
 		// pixels (the searches' 8 half-size texels: 16; 8 on the sub-field). On the sub-field w = 1
 		// (the sub-block's own vector; w = 0 would mean "the parent block's vector"); on the block
 		// field w is the SAD (0). dejudder_est_still_zero switches the pass (Original: off).
+		// S3-H5: blocks whose centre lies outside the active picture rect (black bars) keep their
+		// incoming vector/trust unchanged so StillZero never restores trust=1.0 on masked bars.
+		const char* const STILL_ZERO_HEADER = R"GLSL(
+#ifdef PICTURE
+bool in_picture_(vec2 c) { vec4 r = texelFetch(picture, ivec2(0), 0); return c.x >= r.x && c.y >= r.y && c.x < r.z && c.y < r.w; }
+#else
+bool in_picture_(vec2 c) { return true; }
+#endif
+)GLSL";
+
 		const char* const STILL_ZERO_BODY = R"GLSL(
 ivec2 b = ivec2(gl_GlobalInvocationID.xy);
 ivec2 size = imageSize(dst);
 if (b.x < size.x && b.y < size.y) {
     vec4 f = texelFetch(src_field, b, 0);
-    ivec2 psz = textureSize(luma_a, 0);
     ivec2 bs = ivec2(block_px);
     ivec2 o = b * bs;
-    bool same = true;
-    for (int y = 0; y < bs.y && same; y++)
-        for (int x = 0; x < bs.x; x++) {
-            ivec2 p = o + ivec2(x, y);
-            if (p.x >= psz.x || p.y >= psz.y)
-                continue;
-            if (texelFetch(luma_a, p, 0).r != texelFetch(luma_b, p, 0).r) { same = false; break; }
-        }
+    if (!in_picture_(vec2(o) + vec2(bs) * 0.5)) {
+        imageStore(dst, b, f);
+    } else {
+        ivec2 psz = textureSize(luma_a, 0);
+        bool same = true;
+        for (int y = 0; y < bs.y && same; y++)
+            for (int x = 0; x < bs.x; x++) {
+                ivec2 p = o + ivec2(x, y);
+                if (p.x >= psz.x || p.y >= psz.y)
+                    continue;
+                if (texelFetch(luma_a, p, 0).r != texelFetch(luma_b, p, 0).r) { same = false; break; }
+            }
 #ifdef SUB_FIELD
-    imageStore(dst, b, same ? vec4(0.0, 0.0, 1.0, 1.0) : f);
+        imageStore(dst, b, same ? vec4(0.0, 0.0, 1.0, 1.0) : f);
 #else
-    imageStore(dst, b, same ? vec4(0.0, 0.0, 1.0, 0.0) : f);
+        imageStore(dst, b, same ? vec4(0.0, 0.0, 1.0, 0.0) : f);
 #endif
+    }
 }
 )GLSL";
 
@@ -1801,7 +1815,10 @@ for (uint stride = 128u; stride > 0u; stride >>= 1) {
     vec2 gpx = gv.xy * 8.0;
     vec3 c = vec3(0.0);
     for (int k = int(i); k < count; k += 256) {
-        vec4 f = texelFetch(field, ivec2(k % blocks.x, k / blocks.x), 0);
+        ivec2 bk = ivec2(k % blocks.x, k / blocks.x);
+        if (!in_picture_(vec2(bk * 16) + vec2(8.0)))
+            continue;
+        vec4 f = texelFetch(field, bk, 0);
         if (reliable && f.z > 0.5 && length(f.xy - gpx) < camera_window) c += vec3(f.xy, 1.0);
     }
     partial_c_[i] = c;
@@ -2542,14 +2559,22 @@ if (q.x < size.x && q.y < size.y) {
 			return false;
 		}
 		const bool same = a.luma == b.luma;   // one texture bound once (libplacebo rejects it twice)
-		const pl_shader_desc desc[4] = { Sampled("src_field", fieldTex, false), Sampled("luma_a", a.luma, false),
-			Sampled("luma_b", b.luma, false), Storage("dst", scratch) };
-		const pl_shader_desc descSame[3] = { desc[0], desc[1], desc[3] };
+		const bool usePicture = settings.pictureArea && picture;
+		std::vector<pl_shader_desc> desc;
+		desc.reserve(5);
+		desc.push_back(Sampled("src_field", fieldTex, false));
+		desc.push_back(Sampled("luma_a", a.luma, false));
+		if (!same)
+			desc.push_back(Sampled("luma_b", b.luma, false));
+		desc.push_back(Storage("dst", scratch));
+		if (usePicture)
+			desc.push_back(Sampled("picture", picture, false));
 		const int block = blockPixels;
 		const pl_shader_var vars[1] = { { pl_var_int("block_px"), &block, true } };
-		const std::string header = std::string(subField ? "#define SUB_FIELD 1\n" : "") + (same ? "#define luma_b luma_a\n" : "");
-		if (!Dispatch("VideoProcessor de-judder: identical blocks still", header.empty() ? nullptr : header.c_str(), STILL_ZERO_BODY,
-			same ? descSame : desc, same ? 3 : 4, vars, 1, w, h, 8))
+		const std::string header = std::string(subField ? "#define SUB_FIELD 1\n" : "") +
+			(same ? "#define luma_b luma_a\n" : "") + (usePicture ? "#define PICTURE 1\n" : "") + STILL_ZERO_HEADER;
+		if (!Dispatch("VideoProcessor de-judder: identical blocks still", header.c_str(), STILL_ZERO_BODY,
+			desc.data(), static_cast<int>(desc.size()), vars, 1, w, h, 8))
 			return false;
 		// Copied back (not swapped): the published field / sub-field textures stay the same objects.
 		const pl_shader_desc copyDesc[2] = { Sampled("src", scratch, false), Storage("dst", fieldTex) };
@@ -4434,7 +4459,12 @@ if (b.x < blocks.x && b.y < blocks.y) {
 				std::swap(field, verifyField);
 			}
 			// Identical blocks: exactly the zero vector (before the split and the frame trust).
-			if (settings.estStillZero && !StillZero(field, stillField, a, b, blocksX, blocksY, 16, false))
+			// S3-H5: skip StillZero when camera guidance skipped the matcher (cut / flash), including when a
+			// lowRes inner performed the skip, so bit-identical regions are not stamped with trust = 1.0.
+			bool matcherSkipped = cameraGuidanceUse.matcherSkipped;
+			for (const MotionWarp* w = this; !matcherSkipped && w->HalvesForSearch() && w->inner; w = w->inner.get())
+				matcherSkipped = w->inner->cameraGuidanceUse.matcherSkipped;
+			if (settings.estStillZero && !matcherSkipped && !StillZero(field, stillField, a, b, blocksX, blocksY, 16, false))
 				return false;
 			if (settings.estSplit)
 			{
@@ -4459,7 +4489,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 				if (!Dispatch("VideoProcessor de-judder: sub-block trust (11a E2)", nullptr, SUB_TRUST_BODY,
 					trustDesc2, 4, variables, 2, blocksX * 2, blocksY * 2, 8))
 					return false;
-				if (settings.estStillZero && !StillZero(subField, stillSub, a, b, blocksX * 2, blocksY * 2, 8, true))
+				if (settings.estStillZero && !matcherSkipped && !StillZero(subField, stillSub, a, b, blocksX * 2, blocksY * 2, 8, true))
 					return false;
 			}
 			const float motionLo = settings.motionScaleLo;
