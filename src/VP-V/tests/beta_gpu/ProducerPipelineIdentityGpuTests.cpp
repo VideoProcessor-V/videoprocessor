@@ -25,11 +25,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -222,84 +220,6 @@ namespace ProducerPipelineIdentity
 		}
 		return f;
 	}
-
-	// RAII persistent 2-wide vote runner mirroring Producer::VoteWorker / Producer::RunFlowGlobalsParallel:
-	// caller runs forward FlowGlobal while persistent worker thread runs backward FlowGlobal concurrently.
-	class TwoWideVoteRunner
-	{
-	public:
-		TwoWideVoteRunner()
-		{
-			worker_ = std::thread([this] { Loop(); });
-		}
-		~TwoWideVoteRunner()
-		{
-			{
-				std::lock_guard<std::mutex> lock(mutex_);
-				stop_ = true;
-			}
-			workCv_.notify_all();
-			if (worker_.joinable())
-				worker_.join();
-		}
-		TwoWideVoteRunner(const TwoWideVoteRunner&) = delete;
-		TwoWideVoteRunner& operator=(const TwoWideVoteRunner&) = delete;
-
-		void RunGlobalsAndExtras(MotionAhead::Flow& flow, bool general)
-		{
-			{
-				std::lock_guard<std::mutex> lock(mutex_);
-				flow_ = &flow;
-				general_ = general;
-				pending_ = true;
-			}
-			workCv_.notify_one();
-			MotionAhead::FlowGlobal(flow.forward, flow.forwardCost, flow.gridW, flow.gridH, flow.global[0], flow.second[0], general);
-			{
-				std::unique_lock<std::mutex> lock(mutex_);
-				doneCv_.wait(lock, [this] { return !pending_; });
-			}
-			flow.globalSet = true;
-			flow.globalGeneral = general;
-			MotionAhead::FlowExtras(flow);
-		}
-
-	private:
-		void Loop()
-		{
-			for (;;)
-			{
-				MotionAhead::Flow* flow = nullptr;
-				bool general = true;
-				{
-					std::unique_lock<std::mutex> lock(mutex_);
-					workCv_.wait(lock, [this] { return stop_ || pending_; });
-					if (stop_ && !pending_)
-						return;
-					flow = flow_;
-					general = general_;
-				}
-				if (flow)
-					MotionAhead::FlowGlobal(flow->backward, flow->backwardCost, flow->gridW, flow->gridH,
-						flow->global[1], flow->second[1], general);
-				{
-					std::lock_guard<std::mutex> lock(mutex_);
-					flow_ = nullptr;
-					pending_ = false;
-				}
-				doneCv_.notify_one();
-			}
-		}
-
-		std::mutex mutex_;
-		std::condition_variable workCv_;
-		std::condition_variable doneCv_;
-		std::thread worker_;
-		MotionAhead::Flow* flow_ = nullptr;
-		bool general_ = true;
-		bool pending_ = false;
-		bool stop_ = false;
-	};
 
 	// Verifies that a Flow published by Producer::BackWorker (which invokes the private
 	// Producer::RunFlowGlobalsParallel + FlowExtras) is bit-identical to serial FlowGlobals + FlowExtras.
@@ -504,7 +424,12 @@ public:
 	TEST_METHOD(TwoWideParallelFlowGlobalsAndExtrasMatchesSerialBitIdentically)
 	{
 		using namespace ProducerPipelineIdentity;
-		TwoWideVoteRunner parallelRunner;
+		MotionAhead::Producer producer;
+		struct ProducerStopGuard
+		{
+			MotionAhead::Producer& producer;
+			~ProducerStopGuard() { producer.Stop(); }
+		} stopGuard{ producer };
 
 		struct CaseSpec { int halfW; int halfH; uint32_t seed; bool general; };
 		std::vector<CaseSpec> cases;
@@ -526,7 +451,8 @@ public:
 
 			MotionAhead::FlowGlobals(serialFlow, c.general);
 			MotionAhead::FlowExtras(serialFlow);
-			parallelRunner.RunGlobalsAndExtras(parallelFlow, c.general);
+			producer.RunFlowGlobalsParallelForTest(parallelFlow, c.general);
+			MotionAhead::FlowExtras(parallelFlow);
 
 			// Non-triviality invariants: prove every output field carries real varied signal, never vacuous zeros.
 			for (int d = 0; d < 2; ++d)
@@ -639,8 +565,19 @@ public:
 				L"negative control: block cost perturbation must change HashFlow");
 		}
 
-		// Negative control 3: broken 2-wide dispatch that erroneously votes forward into both lanes must fail memcmp & hash.
+		// Negative control 3: contrast real Producer::RunFlowGlobalsParallelForTest against a broken
+		// 2-wide dispatch that erroneously votes forward into both lanes on the exact same baseFlow.
 		{
+			MotionAhead::Flow prodParallel = baseFlow;
+			producer.RunFlowGlobalsParallelForTest(prodParallel, true);
+			MotionAhead::FlowExtras(prodParallel);
+			Assert::AreEqual(0, std::memcmp(serialRef.global, prodParallel.global, sizeof(serialRef.global)),
+				L"Producer::RunFlowGlobalsParallelForTest global[2][4] must match serial reference");
+			Assert::AreEqual(0, std::memcmp(serialRef.second, prodParallel.second, sizeof(serialRef.second)),
+				L"Producer::RunFlowGlobalsParallelForTest second[2][4] must match serial reference");
+			Assert::AreEqual(refHash, HashFlow(prodParallel),
+				L"Producer::RunFlowGlobalsParallelForTest HashFlow must match serial reference");
+
 			MotionAhead::Flow brokenParallel = baseFlow;
 			MotionAhead::FlowGlobal(brokenParallel.forward, brokenParallel.forwardCost, brokenParallel.gridW, brokenParallel.gridH,
 				brokenParallel.global[0], brokenParallel.second[0], true);
@@ -649,6 +586,12 @@ public:
 			brokenParallel.globalSet = true;
 			brokenParallel.globalGeneral = true;
 			MotionAhead::FlowExtras(brokenParallel);
+			Assert::AreNotEqual(0, std::memcmp(prodParallel.global, brokenParallel.global, sizeof(prodParallel.global)),
+				L"negative control: broken 2-wide forward/backward channel bug must differ from Producer::RunFlowGlobalsParallelForTest global[2][4]");
+			Assert::AreNotEqual(0, std::memcmp(prodParallel.second, brokenParallel.second, sizeof(prodParallel.second)),
+				L"negative control: broken 2-wide forward/backward channel bug must differ from Producer::RunFlowGlobalsParallelForTest second[2][4]");
+			Assert::AreNotEqual(HashFlow(prodParallel), HashFlow(brokenParallel),
+				L"negative control: broken 2-wide channel bug must differ from Producer::RunFlowGlobalsParallelForTest HashFlow");
 			Assert::AreNotEqual(0, std::memcmp(serialRef.global, brokenParallel.global, sizeof(serialRef.global)),
 				L"negative control: broken 2-wide forward/backward channel bug must change global[2][4]");
 			Assert::AreNotEqual(0, std::memcmp(serialRef.second, brokenParallel.second, sizeof(serialRef.second)),
@@ -656,6 +599,7 @@ public:
 			Assert::AreNotEqual(refHash, HashFlow(brokenParallel),
 				L"negative control: broken 2-wide channel bug must change HashFlow");
 		}
+		producer.Stop();
 	}
 
 	BEGIN_TEST_METHOD_ATTRIBUTE(P2HashesSerialEqualsPipelined600FramesTwoRunsHintsOnAndOff)
