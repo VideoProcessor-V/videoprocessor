@@ -234,6 +234,164 @@ namespace Tests
             Assert::AreEqual(owner, lost);
         }
 
+        TEST_METHOD(AmbientStepHoldsHysteresisAcrossSmallLuxFluctuationsAndResetsWhenCleared)
+        {
+            const double ownerBlack = 0.05;
+            AmbientAdapt::Settings s;
+            s.enabled = true;
+            s.strength = 1.0;
+            s.screenReflectNitsPerLux = 0.01;
+            s.maxBlackNits = 1.0;
+
+            // Invert B_eff = B * 2^(x / kStepsPerStop) = B + strength * reflect * lux.
+            auto luxForStepPosition = [](double displayBlack, const AmbientAdapt::Settings& cfg, double stepPos) {
+                const double targetNits = displayBlack * std::exp2(stepPos / AmbientAdapt::kStepsPerStop);
+                return (targetNits - displayBlack) / (cfg.strength * cfg.screenReflectNitsPerLux);
+            };
+
+            // Step k = 6 (1 stop above ownerBlack = 0.05 nits -> 0.10 nits, well below maxBlackNits = 1.0).
+            // Boundary between step k and k + 1 lies at x = k + 1 = 7.0; hysteresis half-band is kHysteresisSteps (0.25).
+            constexpr int kBaseStep = 6;
+            const double boundary = static_cast<double>(kBaseStep + 1);
+            const double h = AmbientAdapt::kHysteresisSteps;
+            const double luxInit = luxForStepPosition(ownerBlack, s, static_cast<double>(kBaseStep) + 0.5);
+            const double luxJustBelow = luxForStepPosition(ownerBlack, s, boundary - 0.5 * h);
+            const double luxJustAbove = luxForStepPosition(ownerBlack, s, boundary + 0.5 * h);
+            const double luxBeyondUp = luxForStepPosition(ownerBlack, s, boundary + 2.0 * h);
+            const double luxBeyondDown = luxForStepPosition(ownerBlack, s, boundary - 2.0 * h);
+
+            const double step6 = ownerBlack * std::exp2(static_cast<double>(kBaseStep) / AmbientAdapt::kStepsPerStop);
+            const double step7 = ownerBlack * std::exp2(static_cast<double>(kBaseStep + 1) / AmbientAdapt::kStepsPerStop);
+            Assert::IsTrue(step7 > step6, L"adjacent 1/6-stop quantized levels must be distinct");
+
+            const std::vector<double> jitterLux = {
+                luxJustAbove, luxJustBelow, luxJustAbove, luxJustBelow, luxJustAbove, luxJustBelow
+            };
+
+            // 1. Same-input negative control (Rule 3): pre-fix 3-arg stateless QuantisedBlackNits MUST chatter
+            //    across the step boundary on every fluctuation in jitterLux.
+            double prevStateless = AmbientAdapt::QuantisedBlackNits(s, ownerBlack, luxInit);
+            Assert::IsTrue(std::fabs(prevStateless - step6) <= 1e-12, L"initial stateless level lands on step k");
+            size_t statelessTransitions = 0;
+            for (size_t i = 0; i < jitterLux.size(); ++i)
+            {
+                const double q = AmbientAdapt::QuantisedBlackNits(s, ownerBlack, jitterLux[i]);
+                const double expected = (i % 2 == 0) ? step7 : step6;
+                Assert::IsTrue(std::fabs(q - expected) <= 1e-12,
+                    L"negative control: stateless 3-arg QuantisedBlackNits alternates across the step boundary");
+                if (!SameBits(q, prevStateless))
+                    ++statelessTransitions;
+                prevStateless = q;
+            }
+            Assert::AreEqual(jitterLux.size(), statelessTransitions,
+                L"negative control: stateless 3-arg QuantisedBlackNits must chatter on every boundary crossing");
+
+            // 2. Protected path: IntentInterpreter::AmbientStep at cuts holds step k across the EXACT SAME jitterLux.
+            IntentInterpreter::AmbientApplyState st;
+            double now = 10.0;
+            const double initial = IntentInterpreter::AmbientStep(st, s, true, luxInit, ownerBlack, true, now);
+            Assert::IsTrue(std::fabs(initial - step6) <= 1e-12, L"initial cut lands on step k");
+            size_t protectedTransitions = 0;
+            double prevProtected = initial;
+            for (double lux : jitterLux)
+            {
+                now += 1.0;
+                const double applied = IntentInterpreter::AmbientStep(st, s, true, lux, ownerBlack, true, now);
+                Assert::IsTrue(SameBits(initial, applied),
+                    L"AmbientStep must hold previous quantized black across small fluctuations within hysteresis band");
+                if (!SameBits(applied, prevProtected))
+                    ++protectedTransitions;
+                prevProtected = applied;
+            }
+            Assert::AreEqual(size_t(0), protectedTransitions, L"no chatter within hysteresis band around lower step");
+
+            // 3. Larger swing beyond the upper hysteresis band steps cleanly to step k + 1,
+            //    holds step k + 1 across the exact same jitterLux, then steps back down beyond the lower band.
+            now += 1.0;
+            const double steppedUp = IntentInterpreter::AmbientStep(st, s, true, luxBeyondUp, ownerBlack, true, now);
+            Assert::IsTrue(std::fabs(steppedUp - step7) <= 1e-12,
+                L"lux swing beyond k + 1 + h must step cleanly to step k + 1");
+            for (double lux : jitterLux)
+            {
+                now += 1.0;
+                const double heldHigh = IntentInterpreter::AmbientStep(st, s, true, lux, ownerBlack, true, now);
+                Assert::IsTrue(SameBits(steppedUp, heldHigh),
+                    L"AmbientStep must also hold step k + 1 across small fluctuations within its hysteresis band");
+            }
+            now += 1.0;
+            const double steppedDown = IntentInterpreter::AmbientStep(st, s, true, luxBeyondDown, ownerBlack, true, now);
+            Assert::IsTrue(std::fabs(steppedDown - step6) <= 1e-12,
+                L"lux swing below (k + 1) - h must step cleanly back down to step k");
+
+            // 4a. Reset via s.enabled = false (and s.strength = 0.0): no stale step-7 hysteresis leaks across re-enable.
+            now += 1.0;
+            Assert::IsTrue(std::fabs(IntentInterpreter::AmbientStep(st, s, true, luxBeyondUp, ownerBlack, true, now) - step7) <= 1e-12,
+                L"re-enter step k + 1 before disable-reset check");
+            now += 1.0;
+            Assert::IsTrue(std::fabs(IntentInterpreter::AmbientStep(st, s, true, luxJustBelow, ownerBlack, true, now) - step7) <= 1e-12,
+                L"control before disable: luxJustBelow still holds step k + 1 while state is active");
+            s.enabled = false;
+            now += 1.0;
+            Assert::IsTrue(SameBits(ownerBlack, IntentInterpreter::AmbientStep(st, s, true, luxBeyondUp, ownerBlack, true, now)),
+                L"disabling returns ownerBlack bit-for-bit");
+            Assert::IsFalse(st.valid, L"disabling clears AmbientApplyState::valid");
+            s.enabled = true;
+            now += 1.0;
+            const double afterDisable = IntentInterpreter::AmbientStep(st, s, true, luxJustBelow, ownerBlack, true, now);
+            Assert::IsTrue(std::fabs(afterDisable - step6) <= 1e-12,
+                L"re-enabling after disable must reset hysteresis so luxJustBelow lands on step k, not stale step k + 1");
+
+            // Also verify strength == 0 clears hysteresis identically.
+            now += 1.0;
+            Assert::IsTrue(std::fabs(IntentInterpreter::AmbientStep(st, s, true, luxBeyondUp, ownerBlack, true, now) - step7) <= 1e-12,
+                L"enter step k + 1 before strength=0 reset check");
+            s.strength = 0.0;
+            now += 1.0;
+            Assert::IsTrue(SameBits(ownerBlack, IntentInterpreter::AmbientStep(st, s, true, luxBeyondUp, ownerBlack, true, now)),
+                L"strength 0 returns ownerBlack bit-for-bit");
+            Assert::IsFalse(st.valid, L"strength 0 clears AmbientApplyState::valid");
+            s.strength = 1.0;
+            now += 1.0;
+            const double afterZeroStrength = IntentInterpreter::AmbientStep(st, s, true, luxJustBelow, ownerBlack, true, now);
+            Assert::IsTrue(std::fabs(afterZeroStrength - step6) <= 1e-12,
+                L"restoring strength > 0 must reset hysteresis so luxJustBelow lands on step k, not stale step k + 1");
+
+            // 4b. Reset via filterValid = false: no stale step-7 hysteresis leaks when the filter recovers.
+            now += 1.0;
+            Assert::IsTrue(std::fabs(IntentInterpreter::AmbientStep(st, s, true, luxBeyondUp, ownerBlack, true, now) - step7) <= 1e-12,
+                L"enter step k + 1 before filterValid=false reset check");
+            now += 1.0;
+            Assert::IsTrue(std::fabs(IntentInterpreter::AmbientStep(st, s, true, luxJustBelow, ownerBlack, true, now) - step7) <= 1e-12,
+                L"control before filterValid=false: luxJustBelow holds step k + 1");
+            now += 1.0;
+            Assert::IsTrue(SameBits(ownerBlack, IntentInterpreter::AmbientStep(st, s, false, 0.0, ownerBlack, true, now)),
+                L"filterValid=false returns ownerBlack at cut");
+            now += 1.0;
+            const double afterFilterInvalid = IntentInterpreter::AmbientStep(st, s, true, luxJustBelow, ownerBlack, true, now);
+            Assert::IsTrue(std::fabs(afterFilterInvalid - step6) <= 1e-12,
+                L"recovering after filterValid=false must reset hysteresis so luxJustBelow lands on step k, not stale step k + 1");
+
+            // 4c. Reset via ownerBlackNits change: halving ownerBlack shifts step 7 (0.05 * 2^(7/6)) onto step 13 of
+            //     the new grid (0.025 * 2^(13/6)). Stale quantised state would hold step 13 at x = 13 - 0.5*h;
+            //     a clean reset must land on step 12.
+            now += 1.0;
+            const double priorStep7 = IntentInterpreter::AmbientStep(st, s, true, luxBeyondUp, ownerBlack, true, now);
+            Assert::IsTrue(std::fabs(priorStep7 - step7) <= 1e-12, L"enter step k + 1 before ownerBlack change");
+            const double ownerBlack2 = ownerBlack * 0.5;
+            constexpr int kShiftedStep = kBaseStep + 6;   // 1 stop lower ownerBlack => +6 steps on the 1/6-stop grid
+            const double luxProbeOwner2 = luxForStepPosition(ownerBlack2, s, static_cast<double>(kShiftedStep + 1) - 0.5 * h);
+            const double step12Owner2 = ownerBlack2 * std::exp2(static_cast<double>(kShiftedStep) / AmbientAdapt::kStepsPerStop);
+            const double step13Owner2 = ownerBlack2 * std::exp2(static_cast<double>(kShiftedStep + 1) / AmbientAdapt::kStepsPerStop);
+            // Negative control for 4c: prove stale priorStep7 WOULD hold step 13 on the new grid if not reset.
+            const double staleIfNotReset = AmbientAdapt::QuantisedBlackNits(s, ownerBlack2, luxProbeOwner2, priorStep7);
+            Assert::IsTrue(std::fabs(staleIfNotReset - step13Owner2) <= 1e-12,
+                L"negative control: stale prior quantised level would falsely hold step 13 on the new ownerBlack grid");
+            now += 1.0;
+            const double afterOwnerChange = IntentInterpreter::AmbientStep(st, s, true, luxProbeOwner2, ownerBlack2, true, now);
+            Assert::IsTrue(std::fabs(afterOwnerChange - step12Owner2) <= 1e-12,
+                L"changing ownerBlackNits must reset hysteresis so probe lands on step 12, not stale step 13");
+        }
+
         TEST_METHOD(AmbientLuxFromTheDetector)
         {
             Ambient::Settings settings;
