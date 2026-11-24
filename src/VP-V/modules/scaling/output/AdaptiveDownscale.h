@@ -469,7 +469,7 @@ namespace AdaptiveDownscale
 		// longer follows the content and starts over (consumers see NoField).
 		// C5: the next frame's cut is read from its own scene group only (no scan of the frames since the last advance: vector-validity
 		// rule, no history across a discontinuity).
-		void ForgetMap() { mapReady = false; mapSequence = 0; mapState = MapState::NoField; residualSequence = 0; residualPrevValid = false; motionReady = false; motionSequence = 0; cutContinuous = false; cutResolved = false; }   // gate B-S2: the next frame asks the cut again
+		void ForgetMap() { mapReady = false; mapSequence = 0; mapSourceCrop = pl_rect2df{}; mapNls = NlsMaskMapping::Mapping{}; mapState = MapState::NoField; residualSequence = 0; residualPrevValid = false; motionReady = false; motionSequence = 0; motionSourceCrop = pl_rect2df{}; motionNls = NlsMaskMapping::Mapping{}; cutContinuous = false; cutResolved = false; }   // gate B-S2: the next frame asks the cut again
 		// The newest map (r = grain scale per block, g = trusted); tests.
 		pl_tex GrainMap() const { return mapReady ? map[mapIndex] : nullptr; }
 		bool hostReadableMap = false;   // tests: the map can be downloaded
@@ -546,6 +546,8 @@ namespace AdaptiveDownscale
 		int mapIndex = 0;
 		bool mapReady = false;          // map[mapIndex] belongs to `sequence`
 		uint64_t mapSequence = 0;
+		pl_rect2df mapSourceCrop{};     // S4-H1: source crop cached with map[mapIndex] (survives ClearGrainField on repeats)
+		NlsMaskMapping::Mapping mapNls{};
 		MapState mapState = MapState::Off;
 		GrainField grainField{};
 		GrainSource grainSource{};
@@ -562,6 +564,8 @@ namespace AdaptiveDownscale
 		int motionIndex = 0;
 		bool motionReady = false;                      // motionMap[motionIndex] belongs to motionSequence
 		uint64_t motionSequence = 0;
+		pl_rect2df motionSourceCrop{};                 // S4-H1: source crop cached with motionMap[motionIndex] (survives ClearMotion on repeats)
+		NlsMaskMapping::Mapping motionNls{};
 		MotionState motionState = MotionState::Off;
 		pl_buf readback = nullptr;
 		bool readbackPending = false;

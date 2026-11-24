@@ -733,11 +733,15 @@ float rs_slope(float y)
 		motionIndex = 0;
 		motionReady = false;
 		motionSequence = 0;
+		motionSourceCrop = pl_rect2df{};
+		motionNls = NlsMaskMapping::Mapping{};
 		motionState = MotionState::Off;
 		upscaleRatio = 0;
 		mapIndex = 0;
 		mapReady = false;
 		mapSequence = 0;
+		mapSourceCrop = pl_rect2df{};
+		mapNls = NlsMaskMapping::Mapping{};
 		mapState = MapState::Off;
 		grainField = GrainField();
 		grainSource = GrainSource();
@@ -1213,6 +1217,8 @@ float rs_slope(float y)
 		if (!settings.grainMap)
 		{
 			mapReady = false;
+			mapSourceCrop = pl_rect2df{};
+			mapNls = NlsMaskMapping::Mapping{};
 			mapState = MapState::Off;
 			return true;
 		}
@@ -1224,6 +1230,8 @@ float rs_slope(float y)
 			{
 				mapReady = false;
 				mapSequence = 0;
+				mapSourceCrop = pl_rect2df{};
+				mapNls = NlsMaskMapping::Mapping{};
 			}
 			mapState = mapReady && mapSequence == sequence ? MapState::Used : MapState::NoField;
 			return true;
@@ -1240,6 +1248,8 @@ float rs_slope(float y)
 			!Ensure(gpu, map[1], bw, bh, 4, 32, false, false, hostReadableMap))
 		{
 			mapReady = false;
+			mapSourceCrop = pl_rect2df{};
+			mapNls = NlsMaskMapping::Mapping{};
 			mapState = MapState::NoField;
 			return false;
 		}
@@ -1263,12 +1273,16 @@ float rs_slope(float y)
 			(bw + 15) / 16, (bh + 15) / 16))
 		{
 			mapReady = false;
+			mapSourceCrop = pl_rect2df{};
+			mapNls = NlsMaskMapping::Mapping{};
 			mapState = MapState::NoField;
 			return false;
 		}
 		mapIndex = next;
 		mapReady = true;
 		mapSequence = sequence;
+		mapSourceCrop = gf.sourceCrop;
+		mapNls = gf.nls;
 		mapState = MapState::Used;
 		return true;
 	}
@@ -1280,6 +1294,8 @@ float rs_slope(float y)
 		{
 			motionReady = false;
 			motionSequence = 0;
+			motionSourceCrop = pl_rect2df{};
+			motionNls = NlsMaskMapping::Mapping{};
 			motionState = MotionState::Off;
 			return true;
 		}
@@ -1295,6 +1311,8 @@ float rs_slope(float y)
 			{
 				motionReady = false;
 				motionSequence = 0;
+				motionSourceCrop = pl_rect2df{};
+				motionNls = NlsMaskMapping::Mapping{};
 			}
 			motionState = motionReady && motionSequence == sequence ? MotionState::Used : MotionState::NoVectors;
 			return true;
@@ -1310,6 +1328,8 @@ float rs_slope(float y)
 			!Ensure(gpu, motionMap[1], bw, bh, 4, 32, false, false, hostReadableMap))
 		{
 			motionReady = false;
+			motionSourceCrop = pl_rect2df{};
+			motionNls = NlsMaskMapping::Mapping{};
 			motionState = MotionState::NoVectors;
 			return false;
 		}
@@ -1337,12 +1357,16 @@ float rs_slope(float y)
 			(bw + 15) / 16, (bh + 15) / 16))
 		{
 			motionReady = false;
+			motionSourceCrop = pl_rect2df{};
+			motionNls = NlsMaskMapping::Mapping{};
 			motionState = MotionState::NoVectors;
 			return false;
 		}
 		motionIndex = next;
 		motionReady = true;
 		motionSequence = sequence;
+		motionSourceCrop = motion.sourceCrop;
+		motionNls = motion.nls;
 		motionState = MotionState::Used;
 		return true;
 	}
@@ -1373,7 +1397,7 @@ float rs_slope(float y)
 		// The upscale form's grain term is kP10gGrainLevel only (below): the private map is the downscale form's.
 		const bool useMap = !upscale.on && mapState == MapState::Used && mapReady && mapSequence == sequence;
 		const float srcSize[2] = { srcRect.x1 - srcRect.x0, srcRect.y1 - srcRect.y0 };
-		const pl_rect2df& sc = grainField.sourceCrop;
+		const pl_rect2df& sc = mapSourceCrop;
 		const float crop[4] = { sc.x0, sc.y0, sc.x1 - sc.x0, sc.y1 - sc.y0 };
 		// Stage 12 §2c / S8-1: the residual held along the vectors when they
 		// exist for this frame. A source frame presented again is recomputed
@@ -1445,12 +1469,12 @@ float rs_slope(float y)
 			d.push_back(Storage("rs_out", residual[writeIndex]));
 		}
 		// Full NLS coordinate mapping across grain map, motion map, and published grain level (emitted once).
-		const bool useMapNls = useMap && grainField.nls.valid;
-		const bool useMotionNls = useMotion && motion.nls.valid;
+		const bool useMapNls = useMap && mapNls.valid;
+		const bool useMotionNls = useMotion && motionNls.valid;
 		const bool useGrainLevelNls = grainPublished && grainLevel.nls.valid;
 		const bool anyNlsHelper = useMapNls || useMotionNls || useGrainLevelNls;
-		const NlsMaskMapping::Mapping& activeNls = useMapNls ? grainField.nls :
-			(useMotionNls ? motion.nls : grainLevel.nls);
+		const NlsMaskMapping::Mapping& activeNls = useMapNls ? mapNls :
+			(useMotionNls ? motionNls : grainLevel.nls);
 		const float nlsActive = useMapNls ? 1.0f : 0.0f;
 		const float mwNlsActive = useMotionNls ? 1.0f : 0.0f;
 		const float grainNlsActive = useGrainLevelNls ? 1.0f : 0.0f;
@@ -1514,8 +1538,8 @@ float rs_slope(float y)
 			v.push_back({ pl_var_float("rs_b"), &rsTransfer.b, true });
 			v.push_back({ pl_var_float("rs_g"), &rsTransfer.g, true });
 		}
-		const float mwCrop[4] = { motion.sourceCrop.x0, motion.sourceCrop.y0,
-			motion.sourceCrop.x1 - motion.sourceCrop.x0, motion.sourceCrop.y1 - motion.sourceCrop.y0 };
+		const float mwCrop[4] = { motionSourceCrop.x0, motionSourceCrop.y0,
+			motionSourceCrop.x1 - motionSourceCrop.x0, motionSourceCrop.y1 - motionSourceCrop.y0 };
 		if (useMotion)
 		{
 			v.push_back({ pl_var_vec2("mw_src_size"), srcSize, true });
