@@ -429,10 +429,10 @@ QWidget* LedDriveBuilder::createLedDrivePage()
     {
         if (!document_) return;
         const std::string section = led.toStdString();
-        if (!document_->SetKnown(section, key.toStdString().c_str(), text.toLocal8Bit().constData()))
+        if (!document_->SetKnown(section, key.toStdString().c_str(), text.toUtf8().constData()))
         {
             document_->AddSection(section);
-            document_->SetKnown(section, key.toStdString().c_str(), text.toLocal8Bit().constData());
+            document_->SetKnown(section, key.toStdString().c_str(), text.toUtf8().constData());
         }
         markDirty();
     };
@@ -531,7 +531,22 @@ QWidget* LedDriveBuilder::createLedDrivePage()
     profileLayout->setContentsMargins(0, 0, 0, 0);
     profileLayout->setSpacing(8);
     auto* profileRow = new QHBoxLayout;
-    auto* profilePath = bindTextField(led, QStringLiteral("profile_file"));
+    auto* profilePath = new QLineEdit(value(led, QStringLiteral("profile_file")));
+    profilePath->setObjectName(controlName(led, QStringLiteral("profile_file")));
+    profilePath->setAccessibleName(DriveConfig::accessibleSettingName(QStringLiteral("profile_file")));
+    connect(profilePath, &QLineEdit::textChanged, this, [this, led](const QString& text)
+    {
+        if (!document_) return;
+        const std::string section = led.toStdString();
+        if (text.trimmed().isEmpty())
+            document_->RemoveKnown(section, "profile_file");
+        else if (!document_->SetKnown(section, "profile_file", text.toUtf8().constData()))
+        {
+            document_->AddSection(section);
+            document_->SetKnown(section, "profile_file", text.toUtf8().constData());
+        }
+        markDirty();
+    });
     profilePath->setPlaceholderText(QStringLiteral("Built-in (your dimming script's values)"));
     auto* browse = new QPushButton(QStringLiteral("Browse…"));
     browse->setObjectName(QStringLiteral("config.led_drive.default.profile_browse"));
@@ -943,10 +958,10 @@ QWidget* LedDriveBuilder::createLedDrivePage()
             const QString trimmed = text.trimmed();
             if (trimmed.isEmpty())
                 document_->RemoveKnown(section, key.toStdString().c_str());
-            else if (!document_->SetKnown(section, key.toStdString().c_str(), trimmed.toLocal8Bit().constData()))
+            else if (!document_->SetKnown(section, key.toStdString().c_str(), trimmed.toUtf8().constData()))
             {
                 document_->AddSection(section);
-                document_->SetKnown(section, key.toStdString().c_str(), trimmed.toLocal8Bit().constData());
+                document_->SetKnown(section, key.toStdString().c_str(), trimmed.toUtf8().constData());
             }
             reset->setEnabled(!trimmed.isEmpty());
             check();

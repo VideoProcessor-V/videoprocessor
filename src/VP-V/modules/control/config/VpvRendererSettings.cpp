@@ -950,9 +950,9 @@ namespace VpvRendererSettings
 				settings.pipelineSettingsProblems += "pipeline_original_pathway '" + raw + "' (on|off); ";
 		}
 		if (TryGetPipelineString(config, "pipeline_order", raw))
-			settings.pipelineOrder = ConfigFile::Trim(raw);
+			settings.pipelineOrder = ConfigFile::NormalizeName(raw);
 		if (TryGetPipelineString(config, "pipeline_slots_off", raw))
-			settings.pipelineSlotsOff = ConfigFile::Trim(raw);
+			settings.pipelineSlotsOff = ConfigFile::NormalizeName(raw);
 		if (TryGetPipelineString(config, "calibration_lut_stage", raw))
 		{
 			const std::string value = ConfigFile::NormalizeName(raw);
@@ -1052,7 +1052,7 @@ namespace VpvRendererSettings
 		// CF-1 CAM-4: colour.appearance owns the room-light correction (doc 115 A2): while it runs (appearance on, the slot not in
 		// pipeline_slots_off, never on the Original pathway) ambient_adapt is forced off, and the Fallbacks line says so.
 		{
-			const bool appearanceSlotOff = settings.pipelineSlotsOff.find("colour.appearance") != std::string::npos;
+			const bool appearanceSlotOff = CalibrationLutHost::ContainsSlotToken(settings.pipelineSlotsOff, "colour.appearance");
 			// CF1-FIN SHOULD B: strength 0 is the identity (the pass is not active), so it replaces nothing. A calibration LUT
 			// before the pass (lutConflict) is per frame: the colour segment gives saturation back on such frames.
 			const bool appearanceRuns = settings.appearance && settings.appearanceStrength > 0.0 && !settings.pipelineOriginalPathway &&

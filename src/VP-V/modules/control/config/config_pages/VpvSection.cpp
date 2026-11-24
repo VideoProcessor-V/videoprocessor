@@ -1595,7 +1595,7 @@ namespace Vpv
 						card.Add(status);
 						state->refreshers.push_back([status](const std::shared_ptr<State>& state)
 						{
-							const auto on = [&state](const char* k) { return state->Get(k) == "on"; };
+							const auto on = [&state](const char* k) { return SameValue(state->Get(k), "on"); };
 							status->setText(QString::fromStdString(AppearanceStatus::ConfigLine(on("appearance"), on("appearance_screen_white_measured"), on("ambient_adapt"))));
 						});
 						break;
@@ -2255,7 +2255,8 @@ namespace Vpv
 			QObject::connect(order, &QLineEdit::editingFinished, order, [state, order, orderStatus, section]()
 			{
 				if (!state->host.setValue) return;
-				const std::string text = order->text().trimmed().toStdString();
+				const QString normalized = order->text().trimmed().toLower();
+				const std::string text = normalized.toStdString();
 				PipelineSlots::Registry check;
 				std::string reason;
 				if (!check.SetOrderByNames(text, &reason))
@@ -2264,7 +2265,7 @@ namespace Vpv
 					return;
 				}
 				orderStatus->setText(text.empty() ? QStringLiteral("The designed order.") : QStringLiteral("Accepted."));
-				state->host.setValue(section, QStringLiteral("pipeline_order"), QString::fromStdString(text));
+				state->host.setValue(section, QStringLiteral("pipeline_order"), normalized);
 			});
 
 			// Slots switched off at slot level (zero cost: no pass, no hook).
@@ -2283,12 +2284,13 @@ namespace Vpv
 				QStringList names;
 				for (const QString& part : slotsOff->text().split(QRegularExpression(QStringLiteral("[,;\\s]+")), Qt::SkipEmptyParts))
 				{
-					if (PipelineSlots::FromName(part.toStdString().c_str()) == PipelineSlots::Id::Count)
+					const QString lowered = part.toLower();
+					if (PipelineSlots::FromName(lowered.toStdString().c_str()) == PipelineSlots::Id::Count)
 					{
 						slotsStatus->setText(QStringLiteral("Not saved: unknown stage '%1'.").arg(part));
 						return;
 					}
-					names << part;
+					names << lowered;
 				}
 				slotsStatus->setText(names.isEmpty() ? QStringLiteral("Every stage on.") : QStringLiteral("Accepted."));
 				state->host.setValue(section, QStringLiteral("pipeline_slots_off"), names.join(QStringLiteral(", ")));
