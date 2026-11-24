@@ -239,6 +239,71 @@ namespace VideoProcessorTest
 			Assert::IsTrue(error.find("did not finish") != std::string::npos, Wide(error).c_str());
 			Assert::IsTrue(seconds >= 1.4 && seconds < 6.0, std::to_wstring(seconds).c_str());
 		}
+
+		// CT-H2: optional USB meter and serial projector tests must have their own prerequisite kinds
+		// (SKIP-NO-METER / VP_TEST_REQUIRE_METER, SKIP-NO-PROJECTOR / VP_TEST_REQUIRE_PROJECTOR)
+		// isolated from VP_TEST_REQUIRE_HARDWARE=1 (which arms the GPU/host hardware gate).
+		TEST_METHOD(PeripheralPrerequisiteKindsIsolateMeterAndProjectorFromHardwareGate)
+		{
+			using HP = HardwarePrerequisites::Kind;
+			Assert::AreEqual(std::string("SKIP-NO-METER"), std::string(HardwarePrerequisites::KindMarker(HP::Meter)));
+			Assert::AreEqual(std::string("VP_TEST_REQUIRE_METER"), std::string(HardwarePrerequisites::KindEnvName(HP::Meter)));
+			Assert::AreEqual(std::string("SKIP-NO-PROJECTOR"), std::string(HardwarePrerequisites::KindMarker(HP::Projector)));
+			Assert::AreEqual(std::string("VP_TEST_REQUIRE_PROJECTOR"), std::string(HardwarePrerequisites::KindEnvName(HP::Projector)));
+
+			struct EnvGuard
+			{
+				const char* name;
+				bool had = false;
+				std::string saved;
+				explicit EnvGuard(const char* n) : name(n)
+				{
+					char* v = nullptr;
+					size_t sz = 0;
+					if (_dupenv_s(&v, &sz, name) == 0 && v) { had = true; saved = v; }
+					std::free(v);
+					_putenv_s(name, "");
+				}
+				~EnvGuard() { _putenv_s(name, had ? saved.c_str() : ""); }
+				void Set(const char* v) { _putenv_s(name, v); }
+			};
+
+			EnvGuard all("VP_TEST_REQUIRE_ALL");
+			EnvGuard hw("VP_TEST_REQUIRE_HARDWARE");
+			EnvGuard gpu("VP_TEST_REQUIRE_GPU");
+			EnvGuard meter("VP_TEST_REQUIRE_METER");
+			EnvGuard proj("VP_TEST_REQUIRE_PROJECTOR");
+
+			// With GPU/host hardware gate armed, Kind::Hardware fails (negative control proving the gate is active),
+			// while optional peripherals (Kind::Meter, Kind::Projector) remain non-fatal.
+			hw.Set("1");
+			gpu.Set("1");
+			Assert::IsTrue(HardwarePrerequisites::Required(HP::Hardware),
+				L"negative control: VP_TEST_REQUIRE_HARDWARE=1 arms Kind::Hardware");
+			Assert::IsTrue(HardwarePrerequisites::Required(HP::Gpu),
+				L"negative control: VP_TEST_REQUIRE_GPU=1 arms Kind::Gpu");
+			Assert::IsFalse(HardwarePrerequisites::Required(HP::Meter),
+				L"Kind::Meter must not fail under VP_TEST_REQUIRE_HARDWARE=1 / VP_TEST_REQUIRE_GPU=1");
+			Assert::IsFalse(HardwarePrerequisites::Required(HP::Projector),
+				L"Kind::Projector must not fail under VP_TEST_REQUIRE_HARDWARE=1 / VP_TEST_REQUIRE_GPU=1");
+
+			// Dedicated peripheral env vars arm only their own kind.
+			hw.Set("");
+			gpu.Set("");
+			meter.Set("1");
+			Assert::IsTrue(HardwarePrerequisites::Required(HP::Meter));
+			Assert::IsFalse(HardwarePrerequisites::Required(HP::Projector));
+			meter.Set("");
+			proj.Set("1");
+			Assert::IsFalse(HardwarePrerequisites::Required(HP::Meter));
+			Assert::IsTrue(HardwarePrerequisites::Required(HP::Projector));
+
+			// VP_TEST_REQUIRE_ALL=1 arms every kind including Meter and Projector.
+			proj.Set("");
+			all.Set("1");
+			Assert::IsTrue(HardwarePrerequisites::Required(HP::Meter));
+			Assert::IsTrue(HardwarePrerequisites::Required(HP::Projector));
+		}
 	};
 
 	// Gated: a real meter on a real ArgyllCMS install (VP_TEST_METER=1). Optional:
@@ -256,7 +321,7 @@ namespace VideoProcessorTest
 		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(RealMeterReadsThroughSpotread)
 		{
-			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Hardware,
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Meter,
 				"RealMeterReadsThroughSpotread", Env("VP_TEST_METER") == "1", "set VP_TEST_METER=1"))
 				return;
 			const ArgyllProbe probe = ProbeArgyll(Wide(Env("VP_TEST_ARGYLL")));

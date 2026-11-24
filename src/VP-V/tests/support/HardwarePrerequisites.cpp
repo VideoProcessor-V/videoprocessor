@@ -41,6 +41,8 @@ namespace HardwarePrerequisites
 		{
 		case Kind::Hardware: return EnvIsOne("VP_TEST_REQUIRE_HARDWARE");
 		case Kind::Gpu: return EnvIsOne("VP_TEST_REQUIRE_GPU");
+		case Kind::Meter: return EnvIsOne("VP_TEST_REQUIRE_METER");
+		case Kind::Projector: return EnvIsOne("VP_TEST_REQUIRE_PROJECTOR");
 		case Kind::Footage: return EnvIsOne("VP_TEST_REQUIRE_FOOTAGE");
 		case Kind::Corpus: return EnvIsOne("VP_TEST_REQUIRE_CORPUS");
 		case Kind::Bench: return EnvIsOne("VP_TEST_REQUIRE_BENCH");
@@ -55,6 +57,8 @@ namespace HardwarePrerequisites
 		{
 		case Kind::Hardware: return "SKIP-NO-HARDWARE";
 		case Kind::Gpu: return "SKIP-NO-GPU";
+		case Kind::Meter: return "SKIP-NO-METER";
+		case Kind::Projector: return "SKIP-NO-PROJECTOR";
 		case Kind::Footage: return "SKIP-NO-FOOTAGE";
 		case Kind::Corpus: return "SKIP-NO-CORPUS";
 		case Kind::Bench: return "SKIP-OPT-IN"; // a benchmark is opt-in (VP_TEST_BENCH=1); check_trx_coverage counts it as not executed
@@ -69,6 +73,8 @@ namespace HardwarePrerequisites
 		{
 		case Kind::Hardware: return "VP_TEST_REQUIRE_HARDWARE";
 		case Kind::Gpu: return "VP_TEST_REQUIRE_GPU";
+		case Kind::Meter: return "VP_TEST_REQUIRE_METER";
+		case Kind::Projector: return "VP_TEST_REQUIRE_PROJECTOR";
 		case Kind::Footage: return "VP_TEST_REQUIRE_FOOTAGE";
 		case Kind::Corpus: return "VP_TEST_REQUIRE_CORPUS";
 		case Kind::Bench: return "VP_TEST_REQUIRE_BENCH";

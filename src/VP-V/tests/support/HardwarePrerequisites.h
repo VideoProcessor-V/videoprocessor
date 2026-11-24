@@ -17,7 +17,7 @@
 
 namespace HardwarePrerequisites
 {
-	enum class Kind { Hardware, Gpu, Footage, Corpus, Bench, ParkedNets };
+	enum class Kind { Hardware, Gpu, Meter, Projector, Footage, Corpus, Bench, ParkedNets };
 
 	// The sustained 4K60 converter budgets are set for the machines VP runs on (the laptop
 	// has 16 logical processors, the cinema PC more); below this count the CPU class cannot

@@ -1540,7 +1540,7 @@ namespace VideoProcessorTest
 		{
 			char port[32] = {};
 			const bool hasPort = GetEnvironmentVariableA("VP_TEST_PROJECTOR", port, sizeof(port)) != 0 && port[0] != '\0';
-			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Hardware,
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Projector,
 				"ProjectorRestoreOnTheRealPort", hasPort, "set VP_TEST_PROJECTOR=COMn"))
 				return;
 			LedDrive::ProjectorConfig projector;
@@ -1644,7 +1644,7 @@ namespace VideoProcessorTest
 		{
 			char flag[8] = {};
 			const bool meterEnabled = GetEnvironmentVariableA("VP_TEST_METER", flag, sizeof(flag)) != 0 && std::string(flag) == "1";
-			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Hardware,
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Meter,
 				"RecordRealSpotreadTranscript", meterEnabled, "set VP_TEST_METER=1"))
 				return;
 			char argyll[MAX_PATH] = {}, portText[16] = {};
