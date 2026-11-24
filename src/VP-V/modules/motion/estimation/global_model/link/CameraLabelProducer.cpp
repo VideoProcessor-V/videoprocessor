@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "CameraLabelProducer.h"
 
+#include <VP-V/core/VramUsers.h>
+
 #include <chrono>
 
 namespace CameraLink
@@ -18,6 +20,13 @@ namespace CameraLink
 
 	CameraLabelProducer::~CameraLabelProducer()
 	{
+		Release();
+	}
+
+	void CameraLabelProducer::Release()
+	{
+		VpSkeleton::VramUsers::Instance().Release(this, VpSkeleton::kUserCameraModel);
+		m_declaredVram = 0;
 		if (m_gpu)
 		{
 			for (pl_tex& t : m_ring)
@@ -28,6 +37,36 @@ namespace CameraLink
 			pl_tex_destroy(m_gpu, &m_auxTex);
 		}
 		m_pass.reset();
+		m_gpu = nullptr;
+	}
+
+	uint64_t CameraLabelProducer::HeldVramBytes() const
+	{
+		uint64_t bytes = 0;
+		for (pl_tex t : m_ring)
+			bytes += VpSkeleton::TexBytesOf(t);
+		for (pl_tex t : m_live)
+			bytes += VpSkeleton::TexBytesOf(t);
+		bytes += VpSkeleton::TexBytesOf(m_fieldTex);
+		bytes += VpSkeleton::TexBytesOf(m_auxTex);
+		return bytes;
+	}
+
+	void CameraLabelProducer::UpdateVramDeclaration()
+	{
+		const uint64_t held = HeldVramBytes();
+		if (held == m_declaredVram)
+			return;
+		if (held > 0)
+		{
+			VpSkeleton::VramUsers::Instance().MarkActive(this, VpSkeleton::kUserCameraModel, true);
+			VpSkeleton::VramUsers::Instance().DeclareFixed(this, VpSkeleton::kUserCameraModel, held);
+		}
+		else
+		{
+			VpSkeleton::VramUsers::Instance().Release(this, VpSkeleton::kUserCameraModel);
+		}
+		m_declaredVram = held;
 	}
 
 	pl_tex* CameraLabelProducer::SlotOf(LabelTarget target)
@@ -48,6 +87,11 @@ namespace CameraLink
 
 	bool CameraLabelProducer::EnsureSlot(pl_tex* tex, int w, int h)
 	{
+		if (!m_gpu)
+		{
+			m_error = "no GPU device";
+			return false;
+		}
 		pl_fmt fmt = pl_find_fmt(m_gpu, PL_FMT_FLOAT, 4, 32, 32,
 			static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_BLITTABLE));
 		if (!fmt)   // upload mode needs no blit
@@ -65,7 +109,9 @@ namespace CameraLink
 		p.host_writable = true;
 		p.blit_dst = (fmt->caps & PL_FMT_CAP_BLITTABLE) != 0;
 		p.host_readable = m_readable && (fmt->caps & PL_FMT_CAP_HOST_READABLE);
-		if (!pl_tex_recreate(m_gpu, tex, &p))
+		const bool ok = pl_tex_recreate(m_gpu, tex, &p);
+		UpdateVramDeclaration();
+		if (!ok)
 		{
 			m_error = "cannot create the P8 texture";
 			return false;

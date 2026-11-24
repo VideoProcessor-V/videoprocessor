@@ -125,6 +125,9 @@ namespace CameraLink
 		const std::string& Error() const { return m_error; }
 		uint64_t GridMismatchCount() const { return m_gridMismatches; }
 		uint64_t RegridCount() const { return m_regridded; }
+		// Releases all owned label/input textures and LabelPass, withdrawing VramUsers (kUserCameraModel). Idempotent.
+		void Release();
+		uint64_t DeclaredVramBytes() const { return m_declaredVram; }
 
 	private:
 		pl_tex* SlotOf(LabelTarget target);
@@ -132,6 +135,8 @@ namespace CameraLink
 		bool Upload(pl_tex* tex, const std::vector<float>& texels, int w, int h);
 		bool ProduceUpload(const CameraModel::CameraMotion& rec, pl_tex* slot);
 		bool ProduceCompute(const CameraModel::CameraMotion& rec, const FieldCopy* field, pl_tex* slot);
+		uint64_t HeldVramBytes() const;
+		void UpdateVramDeclaration();
 
 		pl_log m_log;
 		pl_gpu m_gpu;
@@ -146,6 +151,7 @@ namespace CameraLink
 		uint32_t m_costUs = 0;
 		uint64_t m_gridMismatches = 0;
 		uint64_t m_regridded = 0;
+		uint64_t m_declaredVram = 0;
 		std::string m_error;
 	};
 }

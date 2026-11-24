@@ -129,6 +129,18 @@ if (p.x < d.x && p.y < d.y) {
 		return true;
 	}
 
+	uint64_t NativeCopyReadback::AllocatedBytes() const
+	{
+		if (!Active())
+			return 0;
+		// Exact allocation derivation (NativeTexReadback::Create): each slot owns 1 D3D11_USAGE_DEFAULT target texture
+		// and 1 D3D11_USAGE_STAGING staging texture of w x (h * planes), with 4 channels of 16-bit or 32-bit float.
+		constexpr uint64_t kTexturesPerSlot = 2ull;
+		const uint64_t texelBytes = m_fp16 ? (4ull * sizeof(uint16_t)) : (4ull * sizeof(float));
+		return static_cast<uint64_t>(Slots()) * static_cast<uint64_t>(m_w) * static_cast<uint64_t>(m_h)
+			* static_cast<uint64_t>(m_planes) * texelBytes * kTexturesPerSlot;
+	}
+
 	bool NativeCopyReadback::Start(int slot, pl_tex a, pl_tex b)
 	{
 		if (!Active() || !a)
@@ -172,14 +184,36 @@ if (p.x < d.x && p.y < d.y) {
 		if (!pl_dispatch_compute(m_dispatch, &compute))
 			return false;
 		m_native->Queue(slot);
-		pl_gpu_flush(m_gpu);   // submit the pass and the copy; never waits
+		// GEM-135 (AB1#3): defer flush so multiple Start() calls in a frame batch into ONE pl_gpu_flush(m_gpu).
+		m_pendingFlush = true;
 		return true;
+	}
+
+	bool NativeCopyReadback::FlushPending()
+	{
+		if (!m_pendingFlush || !m_gpu)
+			return false;
+		pl_gpu_flush(m_gpu);   // submit all queued passes and copies in one batch; never waits
+		m_pendingFlush = false;
+		++m_flushCount;
+		return true;
+	}
+
+	LedDrive::ReadState NativeCopyReadback::Poll(int slot)
+	{
+		if (!m_native)
+			return LedDrive::ReadState::Pending;
+		if (m_pendingFlush)
+			FlushPending();
+		return m_native->Poll(slot);
 	}
 
 	bool NativeCopyReadback::Read(int slot, float* dst)
 	{
 		if (!Active() || !dst)
 			return false;
+		if (m_pendingFlush)
+			FlushPending();
 		const int rows = m_h * m_planes;
 		if (!m_fp16)
 			return m_native->Read(slot, dst, static_cast<size_t>(m_w) * 16u, rows);
@@ -208,6 +242,9 @@ if (p.x < d.x && p.y < d.y) {
 
 	void NativeCopyReadback::Release()
 	{
+		if (m_pendingFlush && m_gpu)
+			pl_gpu_finish(m_gpu);
+		m_pendingFlush = false;
 		if (m_native)
 		{
 			m_native->Release(m_gpu);
