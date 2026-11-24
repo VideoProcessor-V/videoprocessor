@@ -340,8 +340,15 @@ namespace MotionAhead
 		// Diagnostic env opt-in: VP_R6_ASYNC_EXTRAS=1. Visible via GetR6ExtrasStats() / R6StatusLine().
 		void SetR6AsyncExtras(bool on) { r6AsyncExtras.store(on, std::memory_order_release); }
 		bool R6AsyncExtras() const { return r6AsyncExtras.load(std::memory_order_acquire); }
-		R6::ExtrasStats GetR6ExtrasStats() const { return r6ExtrasWorker.Stats(); }
-		std::string R6StatusLine() const { return R6::ExtrasWorker::StatusLine(r6ExtrasWorker.Stats()); }
+		R6::ExtrasStats GetR6ExtrasStats() const
+		{
+			R6::ExtrasStats s = r6ExtrasWorker.Stats();
+			const uint64_t published = r6AsyncPublished.load(std::memory_order_acquire);
+			if (s.asyncCompleted < published)
+				s.asyncCompleted = published;
+			return s;
+		}
+		std::string R6StatusLine() const { return R6::ExtrasWorker::StatusLine(GetR6ExtrasStats()); }
 
 		// W2-C5b: an ON-DEMAND pair for a render-time consumer (OnDemandEstimate.h). Any thread; never blocks on the worker:
 		// a pair already in the slot answers FromSlot at once (zero work); not running / stopping / restarting answers
@@ -554,6 +561,8 @@ namespace MotionAhead
 
 		void StartPipelineThreads();
 		void StopPipelineThreads();
+		void EnsureR6ExtrasWorkerStarted();
+		void FlushR6ExtrasIfStarted();
 		void BackWorker();
 		void VoteWorker();
 		void RunFlowGlobalsParallel(Flow& flow, bool general);
@@ -614,6 +623,8 @@ namespace MotionAhead
 		std::atomic<bool> cameraConsumes{ false };   // the camera fit consumes the pair stream (VectorEngine, each update)
 		std::atomic<bool> r6AsyncExtras{ false };    // R6 (0a) opt-in: overlap CPU extras with next NVOF pair (default OFF)
 		R6::ExtrasWorker r6ExtrasWorker;             // started lazily only when r6AsyncExtras is true
+		std::atomic<bool> r6WorkerStarted{ false };  // fast atomic gate: avoids locking r6ExtrasWorker when default OFF
+		std::atomic<uint64_t> r6AsyncPublished{ 0 }; // monotonic count incremented on async worker thread before P2 publish
 		std::atomic<int> targetW{ 0 }, targetH{ 0 };
 		std::mutex p1Mutex;                                 // guards p1Source (set from the render thread, read by the worker)
 		std::shared_ptr<VpSkeleton::IP1Source> p1Source;
@@ -658,6 +669,8 @@ namespace MotionAhead
 		uint64_t hintSequence = UINT64_MAX, hintGeneration = 0;   // the "to" frame of the engine's last pair
 		std::vector<uint8_t> lumaBuffer;
 		std::shared_ptr<const std::vector<uint8_t>> previousLuma;   // R3: frame previousSequence's engine luma (a copy, only while the camera consumes the stream)
+		std::vector<uint8_t> testPrevLuma;          // CPU test-seam previous half-luma for deterministic synthetic Flow
+		int testPrevHalfW = 0, testPrevHalfH = 0;
 		std::vector<uint8_t> requestLumaBuffer;   // W2-C5b: a request's `from` frame (Adopt / OffChain)
 		CComPtr<ID3D11Texture2D> requestTex[2];   // W2-C5b: the off-chain pair (from, to); empty until an OffChain request
 		int requestTexW = 0, requestTexH = 0;

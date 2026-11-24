@@ -264,6 +264,8 @@ namespace MotionAhead
 		requests.FailAll(OnDemand::Status::Unavailable);   // W2-C5b (Stop answered them already; never a broken promise)
 		testEngine.reset();
 		havePrevious = false;
+		testPrevLuma.clear();
+		testPrevHalfW = testPrevHalfH = 0;
 		engineReady = false;
 		sizeW = sizeH = 0;
 		consecutiveFailures = 0;
@@ -402,6 +404,26 @@ namespace MotionAhead
 		}
 	}
 
+	void Producer::EnsureR6ExtrasWorkerStarted()
+	{
+		const size_t cap = PendingCapacity();
+		if (!r6ExtrasWorker.Running())
+		{
+			r6ExtrasWorker.Start(cap);
+			r6WorkerStarted.store(true, std::memory_order_release);
+		}
+		else
+		{
+			r6ExtrasWorker.SetCapacity(cap);
+		}
+	}
+
+	void Producer::FlushR6ExtrasIfStarted()
+	{
+		if (r6WorkerStarted.load(std::memory_order_acquire))
+			r6ExtrasWorker.Flush();
+	}
+
 	void Producer::BackWorker()
 	{
 		for (;;)
@@ -436,6 +458,70 @@ namespace MotionAhead
 				}
 				continue;
 			}
+
+			// R6 (0a, default OFF): when enabled for core pairs, offload FlowGlobals + FlowExtras +
+			// ordered P2 publish onto the bounded FIFO r6ExtrasWorker. Off (default) = zero extra
+			// thread started, exact synchronous BACK path below.
+			const bool asyncExtras = !item.isRequest && r6AsyncExtras.load(std::memory_order_acquire);
+			if (asyncExtras)
+			{
+				EnsureR6ExtrasWorkerStarted();
+				const std::shared_ptr<Flow> flow = item.flow;
+				const uint64_t fromSeq = item.fromSeq;
+				const uint64_t toSeq = item.toSeq;
+				const uint64_t gen = item.generation;
+				const uint64_t entryGen = entry.generation;
+				const uint64_t entryEpoch = entry.epoch;
+				const bool entryIgnoreGen = entry.ignoreGeneration;
+				const bool general = item.generalRates;
+				const bool hinted = item.hinted;
+				const auto submitTime = item.submitTime;
+				const StageSample baseStage = item.stage;
+				const std::thread::id submitter = std::this_thread::get_id();
+				r6ExtrasWorker.Submit([this, flow, fromSeq, toSeq, gen, entryGen, entryEpoch, entryIgnoreGen,
+						general, hinted, submitTime, baseStage, submitter]() mutable {
+					if (!backQueue.IsLive(entryGen, entryEpoch, entryIgnoreGen))
+						return;
+					const auto voteStart = std::chrono::steady_clock::now();
+					VPV_COMPUTE_ONCE_AT("U10", toSeq, 0);
+					FlowGlobals(*flow, general);
+					const auto extrasStart = std::chrono::steady_clock::now();
+					FlowExtras(*flow);
+					const auto extrasEnd = std::chrono::steady_clock::now();
+					const double voteMs = std::chrono::duration<double, std::milli>(extrasStart - voteStart).count();
+					const double flowExtrasMs = std::chrono::duration<double, std::milli>(extrasEnd - extrasStart).count();
+					const double combinedExtrasMs = voteMs + flowExtrasMs;
+					if (!backQueue.IsLive(entryGen, entryEpoch, entryIgnoreGen))
+						return;
+					if (std::this_thread::get_id() != submitter)
+						r6AsyncPublished.fetch_add(1, std::memory_order_release);
+					if (publishGate.Accept(gen, fromSeq, toSeq))
+					{
+						slot->Publish(fromSeq, toSeq, gen, flow);   // P2: ordered publish
+						const auto published = std::chrono::steady_clock::now();
+						StageSample stage = baseStage;
+						stage.voteMs = voteMs;
+						stage.extrasMs = flowExtrasMs;
+						stage.serviceMs = stage.lumaMs + stage.engineMs + stage.mapMs + combinedExtrasMs;
+						stage.submitToPublishMs = submitTime.time_since_epoch().count() != 0 ?
+							(std::max)(0.0, std::chrono::duration<double, std::milli>(published - submitTime).count()) : stage.serviceMs;
+						engineReady = true;
+						std::lock_guard<std::mutex> lock(mutex);
+						++stats.pairs;
+						if (hinted)
+							++stats.hintedPairs;
+						stats.extrasMs = combinedExtrasMs;
+						stats.lastPairMs = stage.serviceMs;
+						stats.pairMsSum += stats.lastPairMs;
+						stats.RecordStage(stage);
+						UpdateBehindLocked(false, stage.serviceMs);
+					}
+				});
+				continue;
+			}
+
+			// Preserve strict FIFO publish ordering if R6 async extras ran earlier in this session.
+			FlushR6ExtrasIfStarted();
 			const auto voteStart = std::chrono::steady_clock::now();
 			VPV_COMPUTE_ONCE_AT("U10", item.toSeq, 0);
 			RunFlowGlobalsParallel(*item.flow, item.generalRates);
@@ -590,6 +676,7 @@ namespace MotionAhead
 		if (worker.joinable()) worker.join();
 		StopPipelineThreads();
 		r6ExtrasWorker.Stop();   // R6: drain and join any in-flight overlapped extras before releasing slot/engine
+		r6WorkerStarted.store(false, std::memory_order_release);
 		running = false;
 		// The engine first (it unregisters its textures), then the textures, then the device.
 		ReleaseEngine();
@@ -651,6 +738,7 @@ namespace MotionAhead
 		DrainStagingSets(true);
 		backQueue.DiscardAllAndBumpEpoch();
 		backQueue.WaitIdle();
+		FlushR6ExtrasIfStarted();
 		publishGate.Reset();
 		lock.lock();
 		if (stopping)
@@ -831,6 +919,7 @@ namespace MotionAhead
 		if (!DrainStagingSets(false))
 			return false;
 		backQueue.WaitIdle();
+		FlushR6ExtrasIfStarted();
 		stagingRing.Clear();
 		engine.reset();
 		VpSkeleton::VramUsers::Instance().Withdraw(this, VpSkeleton::kUserNvofProducer);   // MV7: re-declared below for the new size
@@ -929,7 +1018,7 @@ namespace MotionAhead
 			stagingRing.MarkDiscardedOtherThan(job.generation);
 			backQueue.SetActiveGeneration(job.generation);
 			backQueue.WaitIdle();
-			r6ExtrasWorker.Flush();   // R6: preserve strict generation boundary ordering before SetGeneration clears the slot
+			FlushR6ExtrasIfStarted();   // R6: preserve strict generation boundary ordering before SetGeneration clears the slot
 			slot->SetGeneration(job.generation);
 			publishGate.SetGeneration(job.generation);
 			havePrevious = false;
@@ -1540,10 +1629,13 @@ namespace MotionAhead
 				stagingRing.MarkDiscardedOtherThan(rq.generation);
 				backQueue.SetActiveGeneration(rq.generation);
 				backQueue.WaitIdle();
-				publishGate.SetGeneration(rq.generation);
 			}
+			FlushR6ExtrasIfStarted();
+			publishGate.SetGeneration(rq.generation);
 			slot->SetGeneration(rq.generation);
 			havePrevious = false;
+			testPrevLuma.clear();
+			testPrevHalfW = testPrevHalfH = 0;
 			lumaRing.ClearGenerationsOtherThan(rq.generation);   // a new generation: no frame of the old one stays
 			requestOwnsGeneration = true;
 		}
@@ -1588,7 +1680,10 @@ namespace MotionAhead
 				return false;
 			}
 			if (rq.Adjacent() && !forceOffChain)
+			{
+				FlushR6ExtrasIfStarted();
 				slot->Publish(rq.from, rq.to, rq.generation, flow);
+			}
 			engineReady = true;
 			result.flow = flow;
 			answer(Status::Ready);
@@ -1770,6 +1865,8 @@ namespace MotionAhead
 		requests.FailAll(OnDemand::Status::Unavailable);
 		testEngine = seam ? std::move(seam) : std::make_shared<TestEngine>();
 		havePrevious = false;
+		testPrevLuma.clear();
+		testPrevHalfW = testPrevHalfH = 0;
 		engineReady = false;
 		sizeW = sizeH = 0;
 		consecutiveFailures = 0;
@@ -1780,6 +1877,7 @@ namespace MotionAhead
 		recovery = ProducerRecovery();
 		stopError.clear();
 		slot->Clear();
+		publishGate.Reset();
 		requestStats = RequestStats();
 		running = true;
 		worker = std::thread([this] { Worker(); });
@@ -1802,11 +1900,19 @@ namespace MotionAhead
 		requestOwnsGeneration = false;
 		if (slot->Generation() != job.generation)
 		{
+			FlushR6ExtrasIfStarted();   // R6: preserve strict generation boundary ordering before SetGeneration clears the slot
 			slot->SetGeneration(job.generation);
+			publishGate.SetGeneration(job.generation);
 			havePrevious = false;
+			testPrevLuma.clear();
+			testPrevHalfW = testPrevHalfH = 0;
 		}
 		if (job.breakBefore)
+		{
 			havePrevious = false;
+			testPrevLuma.clear();
+			testPrevHalfW = testPrevHalfH = 0;
+		}
 		NoteWalkJob(job);
 		bool pairs = havePrevious && previousGeneration == job.generation && previousSequence + 1 == job.sequence;
 		if (pairs && testEngine->lostPairStart && testEngine->lostPairStart(job.sequence, job.generation))
@@ -1814,6 +1920,9 @@ namespace MotionAhead
 			NoteRingMiss(PairStartLostText());   // Process's FindPairStart(...).Lost() path: counted, named, no pair
 			pairs = false;
 		}
+		std::vector<uint8_t> curTestLuma;
+		int curHalfW = 0, curHalfH = 0;
+		const bool haveLuma = HalfLuma8(job.luma, curTestLuma, curHalfW, curHalfH);
 		const bool pastDeadline = !historyBehindRender.load(std::memory_order_acquire) &&
 			PastDeadline(started, job.deadline);
 		if (pastDeadline)
@@ -1828,6 +1937,17 @@ namespace MotionAhead
 			havePrevious = true;
 			previousSequence = job.sequence;
 			previousGeneration = job.generation;
+			if (haveLuma)
+			{
+				testPrevLuma = std::move(curTestLuma);
+				testPrevHalfW = curHalfW;
+				testPrevHalfH = curHalfH;
+			}
+			else
+			{
+				testPrevLuma.clear();
+				testPrevHalfW = testPrevHalfH = 0;
+			}
 			return true;
 		}
 		const bool continuous = HintsApply(hintSequence == previousSequence && hintGeneration == job.generation);
@@ -1836,25 +1956,112 @@ namespace MotionAhead
 		const auto engineStart = std::chrono::steady_clock::now();
 		const bool ok = testEngine->job ? testEngine->job(job.sequence, job.generation) : true;
 		const auto engineEnd = std::chrono::steady_clock::now();
+		const double engineMs = std::chrono::duration<double, std::milli>(engineEnd - engineStart).count();
 		if (ok && pairs)
 		{
-			slot->Publish(previousSequence, job.sequence, job.generation, std::make_shared<Flow>());
-			const auto published = std::chrono::steady_clock::now();
-			StageSample stage;
-			stage.queueWaitMs = queueWaitMs;
-			stage.engineMs = std::chrono::duration<double, std::milli>(engineEnd - engineStart).count();
-			stage.serviceMs = std::chrono::duration<double, std::milli>(published - started).count();
-			stage.submitToPublishMs = job.submitTime.time_since_epoch().count() != 0 ?
-				(std::max)(0.0, std::chrono::duration<double, std::milli>(published - job.submitTime).count()) : stage.serviceMs;
-			std::lock_guard<std::mutex> lock(mutex);
-			++stats.frames;
-			++stats.pairs;
-			if (continuous)
-				++stats.hintedPairs;
-			stats.lastPairMs = stage.serviceMs;
-			stats.pairMsSum += stage.serviceMs;
-			stats.RecordStage(stage);
-			UpdateBehindLocked(false, stage.serviceMs);
+			// Build a deterministic non-empty synthetic Flow (dimensions from HalfLuma8 or single Flow::kBlockPx
+			// fallback when job.luma is empty; S10.5 vector units 1<<5 == 1 half-px; Grid == NvOpticalFlow::Engine::Grid)
+			// so CPU seam runs exercise FlowGlobals, FlowExtras, OrderedPublishGate, and R6 async extras faithfully.
+			auto flow = std::make_shared<Flow>();
+			const int halfW = (haveLuma && curHalfW > 0 && curHalfH > 0) ? curHalfW : Flow::kBlockPx;
+			const int halfH = (haveLuma && curHalfW > 0 && curHalfH > 0) ? curHalfH : Flow::kBlockPx;
+			flow->halfW = halfW;
+			flow->halfH = halfH;
+			flow->gridW = (halfW + NvOpticalFlow::Engine::Grid - 1) / NvOpticalFlow::Engine::Grid;
+			flow->gridH = (halfH + NvOpticalFlow::Engine::Grid - 1) / NvOpticalFlow::Engine::Grid;
+			const size_t cells = static_cast<size_t>(flow->gridW) * static_cast<size_t>(flow->gridH);
+			flow->forward.resize(cells * 2);
+			flow->backward.resize(cells * 2);
+			flow->forwardCost.resize(cells);
+			flow->backwardCost.resize(cells);
+			const bool sameLumaGrid = haveLuma && curHalfW == testPrevHalfW && curHalfH == testPrevHalfH &&
+				curTestLuma.size() == testPrevLuma.size() && !curTestLuma.empty();
+			const int16_t baseVx = static_cast<int16_t>(((job.sequence & 3u) + 1u) << 5);
+			const int16_t baseVy = static_cast<int16_t>(-static_cast<int>((previousSequence & 3u) << 4));
+			for (int cy = 0; cy < flow->gridH; ++cy)
+			{
+				const int py = (std::min)(halfH - 1, cy * NvOpticalFlow::Engine::Grid);
+				for (int cx = 0; cx < flow->gridW; ++cx)
+				{
+					const int px = (std::min)(halfW - 1, cx * NvOpticalFlow::Engine::Grid);
+					const size_t cellIdx = static_cast<size_t>(cy) * static_cast<size_t>(flow->gridW) + static_cast<size_t>(cx);
+					int diff = 0;
+					if (sameLumaGrid)
+					{
+						const size_t pxIdx = static_cast<size_t>(py) * static_cast<size_t>(halfW) + static_cast<size_t>(px);
+						diff = static_cast<int>(curTestLuma[pxIdx]) - static_cast<int>(testPrevLuma[pxIdx]);
+					}
+					else
+					{
+						diff = static_cast<int>((cx + cy + static_cast<int>(job.sequence)) & 7) - 4;
+					}
+					const int16_t vx = static_cast<int16_t>(baseVx + (diff >> 3));
+					const int16_t vy = static_cast<int16_t>(baseVy - (diff >> 3));
+					flow->forward[cellIdx * 2] = vx;
+					flow->forward[cellIdx * 2 + 1] = vy;
+					flow->backward[cellIdx * 2] = static_cast<int16_t>(-vx + (diff >> 4));
+					flow->backward[cellIdx * 2 + 1] = static_cast<int16_t>(-vy);
+					const uint8_t cost = static_cast<uint8_t>((std::min)(255, std::abs(diff)));
+					flow->forwardCost[cellIdx] = cost;
+					flow->backwardCost[cellIdx] = cost;
+				}
+			}
+
+			const uint64_t fromSeq = previousSequence;
+			const uint64_t toSeq = job.sequence;
+			const uint64_t gen = job.generation;
+			const bool general = generalRates.load(std::memory_order_acquire);
+			const auto submitTime = job.submitTime;
+			const bool asyncExtras = r6AsyncExtras.load(std::memory_order_acquire);
+			auto finishPair = [this, flow, fromSeq, toSeq, gen, general, started, submitTime, queueWaitMs, engineMs, continuous](bool fromAsyncWorker) {
+				const auto extrasStart = std::chrono::steady_clock::now();
+				VPV_COMPUTE_ONCE_AT("U10", toSeq, 0);
+				FlowGlobals(*flow, general);
+				FlowExtras(*flow);
+				const auto extrasEnd = std::chrono::steady_clock::now();
+				const double extrasMs = std::chrono::duration<double, std::milli>(extrasEnd - extrasStart).count();
+				if (fromAsyncWorker)
+					r6AsyncPublished.fetch_add(1, std::memory_order_release);
+				if (publishGate.Accept(gen, fromSeq, toSeq))
+				{
+					slot->Publish(fromSeq, toSeq, gen, flow);
+					const auto published = std::chrono::steady_clock::now();
+					StageSample stage;
+					stage.queueWaitMs = queueWaitMs;
+					stage.engineMs = engineMs;
+					stage.extrasMs = extrasMs;
+					stage.serviceMs = std::chrono::duration<double, std::milli>(published - started).count();
+					stage.submitToPublishMs = submitTime.time_since_epoch().count() != 0 ?
+						(std::max)(0.0, std::chrono::duration<double, std::milli>(published - submitTime).count()) : stage.serviceMs;
+					engineReady = true;
+					std::lock_guard<std::mutex> lock(mutex);
+					++stats.pairs;
+					if (continuous)
+						++stats.hintedPairs;
+					stats.extrasMs = extrasMs;
+					stats.lastPairMs = stage.serviceMs;
+					stats.pairMsSum += stage.serviceMs;
+					stats.RecordStage(stage);
+					UpdateBehindLocked(false, stage.serviceMs);
+				}
+			};
+			if (asyncExtras)
+			{
+				EnsureR6ExtrasWorkerStarted();
+				const std::thread::id submitter = std::this_thread::get_id();
+				r6ExtrasWorker.Submit([finishPair, submitter]() mutable {
+					finishPair(std::this_thread::get_id() != submitter);
+				});
+			}
+			else
+			{
+				FlushR6ExtrasIfStarted();
+				finishPair(false);
+			}
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				++stats.frames;
+			}
 		}
 		else
 		{
@@ -1864,6 +2071,17 @@ namespace MotionAhead
 		havePrevious = true;
 		previousSequence = job.sequence;
 		previousGeneration = job.generation;
+		if (haveLuma)
+		{
+			testPrevLuma = std::move(curTestLuma);
+			testPrevHalfW = curHalfW;
+			testPrevHalfH = curHalfH;
+		}
+		else
+		{
+			testPrevLuma.clear();
+			testPrevHalfW = testPrevHalfH = 0;
+		}
 		if (ok && pairs)
 		{
 			hintSequence = job.sequence;
