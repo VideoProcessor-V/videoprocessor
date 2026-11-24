@@ -95,6 +95,8 @@ namespace Vpv
 			FrameMemo MemoFor(const void* host, uint64_t seq) override;
 			VpSkeleton::SkeletonMemo::Registration RegisterOwnerFill(VpSkeleton::ProductId id, VpSkeleton::AcquireForm form,
 				const std::string& unit, VpSkeleton::OwnerFill fill) override;
+			VpSkeleton::SkeletonMemo::Registration ReplaceOwnerFill(VpSkeleton::ProductId id, VpSkeleton::AcquireForm form,
+				const std::string& unit, VpSkeleton::OwnerFill fill) override;
 			bool UnregisterOwnerFill(VpSkeleton::ProductId id, VpSkeleton::AcquireForm form, const std::string& unit) override;
 			// Module-wide registrations held (tests / diagnostics).
 			size_t OwnerFillsRegistered() const;

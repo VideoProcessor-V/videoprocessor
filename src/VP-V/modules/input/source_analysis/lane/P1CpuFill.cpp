@@ -43,43 +43,38 @@ namespace Vpv
 			// Derived ring capacity (Rule 1): kAheadCeiling ahead frames + current frame + 1 look-back frame.
 			constexpr size_t kMaxSourceOffers = static_cast<size_t>(VpSkeleton::kAheadCeiling) + 2u;
 
-			class P1CpuModule;
-
-			std::atomic<P1CpuModule*>& RegisteredP1CpuModule()
-			{
-				static std::atomic<P1CpuModule*> module{ nullptr };
-				return module;
-			}
-
-			class P1CpuModule : public Hub::ISkeletonModule
+			class P1CpuState : public std::enable_shared_from_this<P1CpuState>
 			{
 			public:
-				~P1CpuModule() override
+				void Shutdown()
 				{
-					P1CpuModule* self = this;
-					RegisteredP1CpuModule().compare_exchange_strong(self, nullptr, std::memory_order_acq_rel);
+					shutdown_.store(true, std::memory_order_release);
+					std::vector<AnalysisLumaSource> dropped;   // destroyed AFTER locks unlock
+					{
+						std::lock_guard<std::mutex> regLock(regMutex_);
+						std::lock_guard<std::mutex> lock(mutex_);
+						for (HostEntry& h : hosts_)
+							for (Offer& o : h.ring)
+								dropped.push_back(std::move(o.source));
+						hosts_.clear();
+						desiredDepth_ = 0;
+					}
 				}
 
-				const char* Name() const override { return "input.source_analysis.p1_cpu"; }
-
-				void OnLifecycle(RE::LifecycleFacts& f) override
+				void OnEntrance(const void* host)
 				{
-					if (f.host && (f.kind == RE::Lifecycle::GpuReleased || f.kind == RE::Lifecycle::Shutdown))
-						Forget(f.host);
-				}
-
-				bool OnFrame(RE::FrameContext& c) override
-				{
-					if (c.phase != RE::FramePhase::Entrance || c.host == nullptr)
-						return false;
-					if (Hub::ExtensionHub::Instance().OriginalPathway(c.host))
-						return false;
+					if (host == nullptr || shutdown_.load(std::memory_order_acquire))
+						return;
+					if (Hub::ExtensionHub::Instance().OriginalPathway(host))
+						return;
 					bool needSync = false;
 					{
 						std::lock_guard<std::mutex> lock(mutex_);
+						if (shutdown_.load(std::memory_order_acquire))
+							return;
 						for (HostEntry& h : hosts_)
 						{
-							if (h.host == c.host)
+							if (h.host == host)
 							{
 								++h.entrances;
 								break;
@@ -91,17 +86,18 @@ namespace Vpv
 					}
 					if (needSync)
 						SyncRegistration(nullptr);
-					return false;
 				}
 
 				void NoteDemand(const void* host, bool active, Skeleton::IExternalDemand* demand = nullptr)
 				{
-					if (host == nullptr)
+					if (host == nullptr || shutdown_.load(std::memory_order_acquire))
 						return;
 					if (active && Hub::ExtensionHub::Instance().OriginalPathway(host))
 						return;
 					{
 						std::lock_guard<std::mutex> lock(mutex_);
+						if (shutdown_.load(std::memory_order_acquire))
+							return;
 						HostEntry* entry = FindOrAddLocked(host, active);
 						if (entry != nullptr)
 							entry->demandActive = active;
@@ -113,43 +109,47 @@ namespace Vpv
 				void OfferSource(const void* host, uint64_t seq, const AnalysisLumaSource& source,
 					Skeleton::IExternalDemand* demand = nullptr)
 				{
-					if (host == nullptr || !source.IsValid() || Hub::ExtensionHub::Instance().OriginalPathway(host))
+					if (host == nullptr || !source.IsValid() || shutdown_.load(std::memory_order_acquire)
+						|| Hub::ExtensionHub::Instance().OriginalPathway(host))
 						return;
 					std::vector<AnalysisLumaSource> dropped;   // destroyed AFTER mutex_ unlock (lock-order invariant)
 					bool needSync = false;
 					{
 						std::lock_guard<std::mutex> lock(mutex_);
+						if (shutdown_.load(std::memory_order_acquire))
+							return;
 						HostEntry* entry = FindOrAddLocked(host, true);
 						if (entry != nullptr)
 						{
 							entry->offered = true;
 							entry->lastOfferAt = entry->entrances;
-							if (!entry->ring.empty() && seq < entry->ring.back().seq)
+							// S1-H1: only wipe on a true large backwards seek outside the active offer window
+							// (seq + kMaxSourceOffers < ring.back().seq, written overflow-safe); in-window
+							// out-of-order offers such as MotionAheadProducer's (rq.to, rq.from) insert or
+							// update in sorted sequence order without dropping newer offers.
+							if (!entry->ring.empty() && seq < entry->ring.back().seq
+								&& (entry->ring.back().seq - seq) > static_cast<uint64_t>(kMaxSourceOffers))
 							{
-								// Sequence regression (seek / stream restart): drop stale offers cleanly.
 								for (Offer& o : entry->ring)
 									dropped.push_back(std::move(o.source));
 								entry->ring.clear();
 							}
-							bool updated = false;
-							for (Offer& o : entry->ring)
+							auto it = entry->ring.begin();
+							while (it != entry->ring.end() && it->seq < seq)
+								++it;
+							if (it != entry->ring.end() && it->seq == seq)
 							{
-								if (o.seq == seq)
-								{
-									dropped.push_back(std::move(o.source));
-									o.source = source;
-									updated = true;
-									break;
-								}
+								dropped.push_back(std::move(it->source));
+								it->source = source;
 							}
-							if (!updated)
+							else
 							{
-								while (entry->ring.size() >= kMaxSourceOffers)
+								entry->ring.insert(it, Offer{ seq, source });
+								while (entry->ring.size() > kMaxSourceOffers)
 								{
 									dropped.push_back(std::move(entry->ring.front().source));
 									entry->ring.pop_front();
 								}
-								entry->ring.push_back(Offer{ seq, source });
 							}
 						}
 						const uint16_t wantDepth = DesiredDepthLocked();
@@ -184,7 +184,7 @@ namespace Vpv
 
 				bool FindSource(const void* host, uint64_t seq, AnalysisLumaSource& out) const
 				{
-					if (host == nullptr)
+					if (host == nullptr || shutdown_.load(std::memory_order_acquire))
 						return false;
 					std::lock_guard<std::mutex> lock(mutex_);
 					for (const HostEntry& h : hosts_)
@@ -259,12 +259,18 @@ namespace Vpv
 					fill.keepFrames = 2;
 					fill.aheadDepth = aheadDepth;
 					fill.aheadBy = aheadDepth > 0 ? "motion_ahead" : nullptr;
-					P1CpuModule* const self = this;
-					fill.fill = [self](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&,
+					std::weak_ptr<P1CpuState> weakSelf = shared_from_this();
+					fill.fill = [weakSelf](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&,
 						VpSkeleton::OwnerFillOutput& out) -> bool {
 						if (req.host != nullptr && Hub::ExtensionHub::Instance().OriginalPathway(req.host))
 						{
 							out.declineReason = "p1_cpu: original pathway";
+							return false;
+						}
+						const std::shared_ptr<P1CpuState> self = weakSelf.lock();
+						if (!self)
+						{
+							out.declineReason = "p1_cpu: module shut down";
 							return false;
 						}
 						AnalysisLumaSource src;
@@ -301,9 +307,13 @@ namespace Vpv
 					// Lock order: regMutex_ -> mutex_ (brief leaf read) -> unlock mutex_ -> demand calls.
 					// Fill lambda takes only leaf mutex_ (never regMutex_), so zero deadlock or stale-depth race.
 					std::lock_guard<std::mutex> regLock(regMutex_);
+					if (shutdown_.load(std::memory_order_acquire))
+						return;
 					uint16_t wantDepth = 0;
 					{
 						std::lock_guard<std::mutex> lock(mutex_);
+						if (shutdown_.load(std::memory_order_acquire))
+							return;
 						wantDepth = DesiredDepthLocked();
 						desiredDepth_ = wantDepth;
 					}
@@ -315,48 +325,118 @@ namespace Vpv
 							Hub::ExtensionHub::Instance().Query(Skeleton::kExternalDemandQueryId));
 					if (demand == nullptr)
 						return;
-					if (ok)
-						demand->UnregisterOwnerFill(VpSkeleton::kP1HalfLuma, VpSkeleton::AcquireForm::Cpu, kP1CpuUnit);
-					const VpSkeleton::SkeletonMemo::Registration r = demand->RegisterOwnerFill(
-						VpSkeleton::kP1HalfLuma, VpSkeleton::AcquireForm::Cpu, kP1CpuUnit, MakeOwnerFill(wantDepth));
-					const bool now = r == VpSkeleton::SkeletonMemo::Registration::Registered;
-					regDepth_ = now ? wantDepth : uint16_t(0);
-					registered_.store(now, std::memory_order_release);
+					// S1-H2: atomic in-place ReplaceOwnerFill when already registered (zero unregistered NoOwnerFill gap).
+					const VpSkeleton::SkeletonMemo::Registration r = ok
+						? demand->ReplaceOwnerFill(VpSkeleton::kP1HalfLuma, VpSkeleton::AcquireForm::Cpu, kP1CpuUnit, MakeOwnerFill(wantDepth))
+						: demand->RegisterOwnerFill(VpSkeleton::kP1HalfLuma, VpSkeleton::AcquireForm::Cpu, kP1CpuUnit, MakeOwnerFill(wantDepth));
+					const bool now = r == VpSkeleton::SkeletonMemo::Registration::Registered
+						|| r == VpSkeleton::SkeletonMemo::Registration::Replaced;
+					if (now)
+					{
+						regDepth_ = wantDepth;
+						registered_.store(true, std::memory_order_release);
+					}
+					else if (!ok)
+					{
+						regDepth_ = uint16_t(0);
+						registered_.store(false, std::memory_order_release);
+					}
 				}
+
+				std::atomic<bool> shutdown_{ false };
 
 				mutable std::mutex mutex_;   // leaf mutex: protects hosts_ and desiredDepth_ only
 				std::vector<HostEntry> hosts_;
 				uint16_t desiredDepth_ = 0;
 
-				std::mutex regMutex_;        // serializes Skeleton IExternalDemand Register/Unregister calls
+				std::mutex regMutex_;        // serializes Skeleton IExternalDemand Register/Replace calls
 				uint16_t regDepth_ = 0;
 				std::atomic<bool> registered_{ false };
+			};
+
+			// S1-M3: lifetime-safe global slot holding a shared_ptr<P1CpuState> so callers snapshot a strong
+			// handle before operating and concurrent teardown (ResetModulesForTesting / Shutdown) can never UAF.
+			struct P1CpuSlot
+			{
+				std::mutex mutex;
+				std::shared_ptr<P1CpuState> active;
+			};
+
+			P1CpuSlot& GlobalP1CpuSlot()
+			{
+				static P1CpuSlot slot;
+				return slot;
+			}
+
+			std::shared_ptr<P1CpuState> SnapshotP1CpuState()
+			{
+				std::lock_guard<std::mutex> lock(GlobalP1CpuSlot().mutex);
+				return GlobalP1CpuSlot().active;
+			}
+
+			class P1CpuModule : public Hub::ISkeletonModule
+			{
+			public:
+				explicit P1CpuModule(std::shared_ptr<P1CpuState> state) : state_(std::move(state)) {}
+
+				~P1CpuModule() override
+				{
+					{
+						std::lock_guard<std::mutex> lock(GlobalP1CpuSlot().mutex);
+						if (GlobalP1CpuSlot().active == state_)
+							GlobalP1CpuSlot().active.reset();
+					}
+					if (state_)
+						state_->Shutdown();
+				}
+
+				const char* Name() const override { return "input.source_analysis.p1_cpu"; }
+
+				void OnLifecycle(RE::LifecycleFacts& f) override
+				{
+					if (f.host && state_ && (f.kind == RE::Lifecycle::GpuReleased || f.kind == RE::Lifecycle::Shutdown))
+						state_->Forget(f.host);
+				}
+
+				bool OnFrame(RE::FrameContext& c) override
+				{
+					if (c.phase != RE::FramePhase::Entrance || c.host == nullptr || !state_)
+						return false;
+					state_->OnEntrance(c.host);
+					return false;
+				}
+
+			private:
+				std::shared_ptr<P1CpuState> state_;
 			};
 		}
 
 		void RegisterP1CpuModule()
 		{
-			if (RegisteredP1CpuModule().load(std::memory_order_acquire) != nullptr)
-				return;
-			P1CpuModule* const module = new P1CpuModule();
-			Hub::ExtensionHub::Instance().AddModule(std::unique_ptr<Hub::ISkeletonModule>(module));
-			RegisteredP1CpuModule().store(module, std::memory_order_release);
+			std::shared_ptr<P1CpuState> state = std::make_shared<P1CpuState>();
+			{
+				std::lock_guard<std::mutex> lock(GlobalP1CpuSlot().mutex);
+				if (GlobalP1CpuSlot().active != nullptr)
+					return;
+				GlobalP1CpuSlot().active = state;
+			}
+			Hub::ExtensionHub::Instance().AddModule(std::unique_ptr<Hub::ISkeletonModule>(new P1CpuModule(std::move(state))));
 		}
 
 		void NoteP1CpuDemand(const void* host, bool active)
 		{
-			P1CpuModule* const module = RegisteredP1CpuModule().load(std::memory_order_acquire);
-			if (module == nullptr || host == nullptr)
+			const std::shared_ptr<P1CpuState> state = SnapshotP1CpuState();
+			if (!state || host == nullptr)
 				return;
-			module->NoteDemand(host, active);
+			state->NoteDemand(host, active);
 		}
 
 		void OfferP1CpuSource(const void* host, uint64_t seq, const AnalysisLumaSource& source)
 		{
-			P1CpuModule* const module = RegisteredP1CpuModule().load(std::memory_order_acquire);
-			if (module == nullptr || host == nullptr)
+			const std::shared_ptr<P1CpuState> state = SnapshotP1CpuState();
+			if (!state || host == nullptr)
 				return;
-			module->OfferSource(host, seq, source);
+			state->OfferSource(host, seq, source);
 		}
 	}
 }

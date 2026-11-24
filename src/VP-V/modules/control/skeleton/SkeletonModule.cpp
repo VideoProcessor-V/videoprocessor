@@ -1263,6 +1263,37 @@ namespace Vpv
 			return Reg::Registered;
 		}
 
+		VpSkeleton::SkeletonMemo::Registration SkeletonModule::ReplaceOwnerFill(VpSkeleton::ProductId id, VpSkeleton::AcquireForm form,
+			const std::string& unit, VpSkeleton::OwnerFill fill)
+		{
+			using Reg = VpSkeleton::SkeletonMemo::Registration;
+			const std::string owner = VpSkeleton::SkeletonMemo::OwnerUnitOf(id);
+			if (owner.empty())
+				return Reg::NotInCatalog;
+			if (unit != owner)
+				return Reg::NotOwner;
+			if (fill.defaults.stage != 0)
+				return Reg::BadDefaults;
+			bool had = false;
+			std::vector<std::pair<const void*, std::shared_ptr<VpSkeleton::SkeletonMemo>>> memos;
+			{
+				std::lock_guard<std::mutex> lock(ownerFillsMutex_);
+				const auto key = std::make_pair(id, form);
+				had = ownerFills_.count(key) != 0;
+				ownerFills_[key] = std::make_pair(unit, fill);
+				memoHosts_.ForEach([&memos](const void* h, const std::shared_ptr<MemoHost>& m) { memos.emplace_back(h, m->memo); });
+			}
+			const uint32_t rtid = renderTid_.load(std::memory_order_acquire);
+			const bool onRender = rtid != 0u && static_cast<uint32_t>(GetCurrentThreadId()) == rtid;
+			for (const auto& hm : memos)
+			{
+				hm.second->ReplaceOwnerFill(id, form, unit, fill);
+				if (fill.aheadDepth > 0 && onRender && hm.second->Seals() > 0)
+					DeriveMemoWindow(hm.first, hm.second, hm.second->Window().current, hosts_.Find(hm.first), false);
+			}
+			return had ? Reg::Replaced : Reg::Registered;
+		}
+
 		bool SkeletonModule::UnregisterOwnerFill(VpSkeleton::ProductId id, VpSkeleton::AcquireForm form, const std::string& unit)
 		{
 			std::vector<std::shared_ptr<VpSkeleton::SkeletonMemo>> memos;
@@ -3882,6 +3913,16 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 			if (iid && std::strcmp(iid, kExternalDemandQueryId) == 0)
 				return static_cast<IExternalDemand*>(this);
 			return nullptr;
+		}
+
+		std::string ClaimFailedNote(uint64_t claimFailed, bool backward)
+		{
+			if (claimFailed == 0)
+				return std::string();
+			const std::string n = std::to_string(claimFailed);
+			return backward
+				? "Skeleton engine feed: " + n + " pair(s) arrived after the seal of their frame (backward / low-latency mode: no look-ahead lead, so the field is complete only after its frame was sealed); no field is published for those frames and their readers use their own form (expected in this mode)"
+				: "Skeleton engine feed: " + n + " field(s) not published because their frame had already left the ring or was published before the field arrived; their readers use their own form";
 		}
 
 		void RegisterSkeletonModule()

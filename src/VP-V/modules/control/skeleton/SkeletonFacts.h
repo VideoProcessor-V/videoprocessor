@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace Vpv
@@ -196,6 +197,17 @@ namespace Vpv
 			// Any thread; start-up is the usual place. Default: NotInCatalog (no memo to install it in).
 			virtual VpSkeleton::SkeletonMemo::Registration RegisterOwnerFill(VpSkeleton::ProductId, VpSkeleton::AcquireForm,
 				const std::string& /*unit*/, VpSkeleton::OwnerFill) { return VpSkeleton::SkeletonMemo::Registration::NotInCatalog; }
+			// Atomic replacement of an existing module-wide owner fill (zero unregistered gap / NoOwnerFill race; S1-H2).
+			// Default fallback for non-SkeletonModule implementers delegates to UnregisterOwnerFill + RegisterOwnerFill.
+			virtual VpSkeleton::SkeletonMemo::Registration ReplaceOwnerFill(VpSkeleton::ProductId id, VpSkeleton::AcquireForm form,
+				const std::string& unit, VpSkeleton::OwnerFill fill)
+			{
+				if (fill.defaults.stage != 0)
+					return VpSkeleton::SkeletonMemo::Registration::BadDefaults;
+				const bool had = UnregisterOwnerFill(id, form, unit);
+				const auto r = RegisterOwnerFill(id, form, unit, std::move(fill));
+				return (had && r == VpSkeleton::SkeletonMemo::Registration::Registered) ? VpSkeleton::SkeletonMemo::Registration::Replaced : r;
+			}
 			virtual bool UnregisterOwnerFill(VpSkeleton::ProductId, VpSkeleton::AcquireForm, const std::string& /*unit*/) { return false; }
 			// The SCENE PRODUCT's get-or-compute-and-publish reader (SkeletonModule::SceneOf; owner 2026-11-14 17:38 "Ask the skeleton
 			// for it same as everything else"): the store's scene group of frame `seq`, else classified now and published. The answer is
@@ -226,14 +238,6 @@ namespace Vpv
 		// backward pairs, lane lead 0): the engine's pair (N-1, N) is only complete AFTER frame N was sealed, so the slot is already taken and the field
 		// cannot be published for that frame; its readers fall back to their own form. That is how this mode works, not a fault, and it is said so.
 		// With a lead the same counter means the frame had left the ring (or was published already) before the field arrived.
-		inline std::string ClaimFailedNote(uint64_t claimFailed, bool backward)
-		{
-			if (claimFailed == 0)
-				return std::string();
-			const std::string n = std::to_string(claimFailed);
-			return backward
-				? "Skeleton engine feed: " + n + " pair(s) arrived after the seal of their frame (backward / low-latency mode: no look-ahead lead, so the field is complete only after its frame was sealed); no field is published for those frames and their readers use their own form (expected in this mode)"
-				: "Skeleton engine feed: " + n + " field(s) not published because their frame had already left the ring or was published before the field arrived; their readers use their own form";
-		}
+		std::string ClaimFailedNote(uint64_t claimFailed, bool backward);
 	}
 }
