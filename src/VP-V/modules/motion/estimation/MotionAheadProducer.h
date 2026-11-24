@@ -106,6 +106,10 @@ namespace MotionAhead
 		return GeneralScale::AboveReferencePixels(kFlowVoteRange, 8.0 * (std::max)(0, gridH), general);
 	}
 
+	// Exact half-away-from-zero S10.5 half-size px -> half-cell (1/8-size texel * 2) bin conversion:
+	// 1 half-cell = 32 (S10.5) * 4 (engine cell) / 2 = 64 = 1<<6 raw units; half-bin = 32. Bit-identical to std::lround(v / 64.0) for all int16_t.
+	inline int FlowGlobalBinOf(int16_t v) { const int iv = static_cast<int>(v); return iv >= 0 ? ((iv + 32) >> 6) : -((-iv + 32) >> 6); }
+
 	inline void FlowGlobal(const std::vector<int16_t>& vectors, const std::vector<uint8_t>& costs, int gridW, int gridH,
 		float global[4], float second[4], bool general = true)
 	{
@@ -116,18 +120,21 @@ namespace MotionAhead
 		second[0] = second[1] = second[2] = second[3] = 0.0f;
 		const size_t cells = static_cast<size_t>(gridW) * gridH;
 		if (gridW <= 0 || gridH <= 0 || vectors.size() < cells * 2 || costs.size() < cells) return;
-		// Confident cells: cost at or below the field's median (the engine's own ranking).
-		const uint8_t costLimit = RobustStats::NthSmallest(std::vector<uint8_t>(costs.begin(), costs.begin() + cells), cells / 2);
-		std::vector<int> votes(static_cast<size_t>(kBins) * kBins, 0);
+		// Confident cells: cost at or below the field's median (exact 0-based rank cells / 2 via 256-bin stack histogram, zero heap copy).
+		uint32_t hist[256] = {};
+		for (size_t i = 0; i < cells; ++i) ++hist[costs[i]];
+		uint8_t costLimit = 255;
+		for (size_t c = 0, acc = 0, target = cells / 2; c < 256; ++c) { if ((acc += hist[c]) > target) { costLimit = static_cast<uint8_t>(c); break; } }
+		thread_local std::vector<int> votes;
+		votes.assign(static_cast<size_t>(kBins) * kBins, 0);
 		long confident = 0;
-		auto binOf = [kRange](int16_t v) { return static_cast<int>(std::lround(v / 32.0 / 4.0 * 2.0)) + 2 * kRange; };
+		const int binOffset = 2 * kRange;
 		for (size_t i = 0; i < cells; ++i)
 		{
 			if (costs[i] > costLimit) continue;
-			const int bx = binOf(vectors[i * 2]), by = binOf(vectors[i * 2 + 1]);
+			const int bx = FlowGlobalBinOf(vectors[i * 2]) + binOffset, by = FlowGlobalBinOf(vectors[i * 2 + 1]) + binOffset;
 			if (bx < 0 || by < 0 || bx >= kBins || by >= kBins) continue;
-			++votes[static_cast<size_t>(by) * kBins + bx];
-			++confident;
+			++votes[static_cast<size_t>(by) * kBins + bx]; ++confident;
 		}
 		if (confident == 0 || confident < static_cast<long>(cells / 10)) return;   // too few to judge: ambiguous (none: no 0/0, audit 2026-10-16)
 		// The 3 x 3 summed vote (a texel-and-a-half window): its peak, then away from it.
@@ -150,7 +157,7 @@ namespace MotionAhead
 				if (s > best) { best = s; bestX = x; bestY = y; }
 			}
 		// Refine: the mean of the confident cells within one texel of the peak.
-		const double px = (bestX - 2 * kRange) / 2.0, py = (bestY - 2 * kRange) / 2.0;
+		const double px = (bestX - binOffset) / 2.0, py = (bestY - binOffset) / 2.0;
 		double sx = 0.0, sy = 0.0;
 		long close = 0;
 		for (size_t i = 0; i < cells; ++i)
@@ -177,11 +184,7 @@ namespace MotionAhead
 				if (s > secondBest) { secondBest = s; sxBin = x; syBin = y; }
 			}
 		if (secondBest > 0 && secondBest >= confident / 10)
-		{
-			second[0] = static_cast<float>((sxBin - 2 * kRange) / 2.0);
-			second[1] = static_cast<float>((syBin - 2 * kRange) / 2.0);
-			second[3] = 1.0f;
-		}
+		{ second[0] = static_cast<float>((sxBin - binOffset) / 2.0); second[1] = static_cast<float>((syBin - binOffset) / 2.0); second[3] = 1.0f; }
 	}
 
 	// W1-C3: the pair's whole-frame motion both ways (Flow::global / second), worked out once on the producer's worker and flagged so
