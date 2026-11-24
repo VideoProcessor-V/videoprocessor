@@ -202,6 +202,12 @@ namespace SourceResolution
 		// ... and its mean within this share of the range above black (a bar, a black frame).
 		double nearBlackShare = 0.05;
 		double barMinimumShare = 1.0 / 32.0;   // of the tile (8 px of a 256 px tile)
+		// SOTA #1 (default OFF): heteroscedastic HDR PQ/HLG perceptual quantization floor modeling.
+		// hdrTransfer: 0 = SDR (off), 1 = SMPTE ST 2084 PQ, 2 = ARIB STD-B67 HLG.
+		bool hdrPerceptualNoiseFloor = false;
+		int hdrTransfer = 0;
+		int hdrBitDepth = 10;
+		bool hdrLimitedRange = true;
 	};
 
 	// The monitor's tile placement (owner 2026-10-15; dense grid 2026-10-16): tiles of `tile` px

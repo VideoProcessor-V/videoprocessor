@@ -42,6 +42,7 @@
 #include <map>
 #include <memory>
 
+#include "HdrNoiseFloor.h"
 #include "KernelBank.h"
 
 // No contraction (fused multiply-add) in the descale arithmetic: the batched and the single-line solve must round identically under any /arch.
@@ -99,6 +100,7 @@ namespace SourceIdentity
 			                                                              // 0 = no byte limit); 30 KB (coarse) to 400 KB (full line) per operator at 3840x2160,
 			                                                              // tap memo <= 1/16 of it, kept solves about 2 MB. The probe verifier gets 1/8 of it.
 			bool batchedSolve = true;           // false: solve the lines one at a time with the reference routine (same bits; for tests and bisecting)
+			HdrNoiseSettings hdrNoise;          // SOTA #1 (default OFF): heteroscedastic PQ/HLG linearized WLS verification
 		};
 
 		struct VerifyOptions
@@ -150,6 +152,11 @@ namespace SourceIdentity
 			std::vector<int> segRows;       // lines x segCount: inner rows of each segment
 			std::vector<double> segStat;    // lines x segCount: 0.5 ln(segment level / its baseline); 0 where segRows == 0
 			std::vector<double> segBase;    // lines x segCount: baseline rms of the segment (codes)
+			// SOTA #1 (default OFF): heteroscedastic HDR linearized WLS diagnostics (all zero/false while hdrNoise.enabled == false).
+			bool hdrLinearizedUsed = false;
+			double hdrWhitenedStat = 0.0;
+			double hdrWhitenedRms = 0.0;
+			int hdrDarkToeClampedSamples = 0;
 		};
 
 		struct VerifyResult
@@ -169,7 +176,7 @@ namespace SourceIdentity
 			explicit DescaleVerifier(const VerifierSettings& s = VerifierSettings()) : s_(s), taps_(TapEntriesFor(s.cacheBytes)) {}
 
 			const VerifierSettings& Settings() const { return s_; }
-			void ClearCache() { cache_.clear(); lru_.clear(); cacheBytes_ = 0; memo_.clear(); memoBytes_ = 0; }
+			void ClearCache() { cache_.clear(); lru_.clear(); cacheBytes_ = 0; memo_.clear(); memoBytes_ = 0; hdrWs_.Reset(); }
 			size_t CachedOperators() const { return cache_.size(); }
 			// Heap bytes of everything this verifier keeps for speed: operators + tap memo + (during a call) the kept solves. After every
 			// Evaluate this is <= cacheBytes (unless ONE operator alone is larger than the budget); the tap memo survives ClearCache.
@@ -990,6 +997,23 @@ namespace SourceIdentity
 				}
 				cr.floorCodes = FastTrimmedMeanSmall(cr.lineRms.data(), nl, s_.trimFraction);
 				cr.baselineMedian = FastMedianSmall(cr.lineBase.data(), nl);
+				if (s_.hdrNoise.enabled && s_.hdrNoise.transfer != HdrTransfer::Sdr && s_.hdrNoise.linearizeForDescale && !screenOnly)
+				{
+					const HdrVerifyResult hr = VerifyLinearizedHeteroscedastic(ls, cr.n, s_.hdrNoise, hdrWs_);
+					cr.hdrDarkToeClampedSamples = hr.darkToeClampedSamples;
+					if (hr.valid)
+					{
+						cr.hdrLinearizedUsed = true;
+						cr.hdrWhitenedStat = hr.stat;
+						cr.hdrWhitenedRms = hr.whitenedRms;
+						cr.stat = hr.stat;
+						if (hr.bestKernel >= 0 && hr.bestKernel < kKernelCount)
+						{
+							cr.kernel = hr.bestKernel;
+							cr.family = static_cast<int>(Kernel(cr.kernel).family);
+						}
+					}
+				}
 				cr.exactDone = true;
 				return 0u;
 			}
@@ -1009,6 +1033,7 @@ namespace SourceIdentity
 			std::vector<double> scanSScratch_;
 			std::vector<double> valsScratch_;
 			std::vector<int> idxScratch_;
+			HdrNoiseWorkspace hdrWs_;
 			int builds_ = 0;
 			int solves_ = 0;
 			int reused_ = 0;

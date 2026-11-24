@@ -11,6 +11,7 @@
 #include <cassert>
 #include <utility>
 #include <VP-V/core/RobustStats.h>
+#include <VP-V/modules/input/source_analysis/identity/chain/HdrNoiseFloor.h>
 
 namespace SourceResolution
 {
@@ -780,6 +781,20 @@ namespace SourceResolution
 				bits = bits >= signalBits - 0.5 ? signalBits : std::floor(bits + 0.1);
 			if (bits > 0.0 && bits < signalBits) step *= std::pow(2.0, signalBits - bits);
 			frame.quantisationFloor = std::log10(step * step / 12.0);
+			// SOTA #1 (opt-in, default OFF): heteroscedastic HDR PQ/HLG quantization floor scaled by
+			// exact ST 2084 / HLG local-vs-midtone EOTF derivative ratio and bit-depth step.
+			if (t.hdrPerceptualNoiseFloor && t.hdrTransfer != 0)
+			{
+				const SourceIdentity::Chain::HdrTransfer tr = (t.hdrTransfer == 1)
+					? SourceIdentity::Chain::HdrTransfer::Pq
+					: SourceIdentity::Chain::HdrTransfer::Hlg;
+				const double code10 = frame.mean * 1023.0;
+				const double stepRatio = SourceIdentity::Chain::PerceptualCodeStepRatio(tr, code10, t.hdrLimitedRange);
+				const double hdrStep = SourceIdentity::Chain::QuantStepNorm(t.hdrBitDepth, t.hdrLimitedRange);
+				const double floorPower = (hdrStep * hdrStep / 12.0) * (stepRatio * stepRatio);
+				if (floorPower > 0.0 && std::isfinite(floorPower))
+					frame.quantisationFloor = std::log10(floorPower);
+			}
 		}
 		if (frame.informativeTiles == 0) { frame.contrast = 0.0; return frame; }
 		frame.contrast = t.latchFixes ? frame.contrast / frame.informativeTiles / (std::max)(1e-6, 1.0 - t.blackLevel) : 0.0;

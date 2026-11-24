@@ -48,6 +48,7 @@
 #include "ChainReading.h"
 #include "ChainStatus.h"
 #include "DescaleVerifier.h"
+#include "HdrNoiseFloor.h"
 #include "NullTables.h"
 #include "PolyphaseProposer.h"
 #include "PowerProbe.h"
@@ -92,6 +93,8 @@ namespace SourceIdentity
 			bool eightBitPromotion = false;      // When true, enables edgeStats.enabled, EmpiricalFloorMode::Live, and depth null-table selection
 			bool useDepthNullTables = false;     // Selects bit-depth-stratified null tables via depthNullTables.Select(...)
 			DepthNullTableSet depthNullTables = DepthNullTableSet::PlaceholderOnly();
+			// SOTA #1 opt-in (strictly OFF by default; Original pathway forces OFF):
+			HdrNoiseSettings hdrNoise;
 			ReadingSettings reading;
 			GovernorSettings governor;
 			EvidenceLogSettings log;
@@ -210,6 +213,9 @@ namespace SourceIdentity
 			uint64_t p3ScreenOnlyCandidates = 0;     // M3: P3 two-pass screen-only candidates excluded from LLR
 			uint64_t edgeStatsNullTableAbstains = 0; // M4: edgeStats abstained on Placeholder / mismatched NullStatKind
 			uint64_t abrStepEventsEvicted = 0;       // L2: oldest abrStepEvents evicted at eventCap
+			// SOTA #1 counters (zero while hdrNoise.enabled == false):
+			uint64_t hdrLinearizedEvals = 0;
+			uint64_t hdrDarkToeClamps = 0;
 		};
 
 		// What one evaluation tested, per axis and candidate (the calibration dump of the harness reads it; any other observer may).
@@ -352,6 +358,8 @@ namespace SourceIdentity
 			void SetEmpiricalFloorMode(EmpiricalFloorMode m);
 			void SetEightBitPromotion(bool on);
 			void SetDepthNullTables(const DepthNullTableSet& tables, bool enable = true);
+			// ---- SOTA #1 opt-in control (default OFF; Original pathway forces OFF) ----------------------------------------------
+			void SetHdrNoiseSettings(const HdrNoiseSettings& s);
 			// N1: the count of latch releases by the no-cut CEILING (LatchEvent::ReleasedCeiling; zero while the rules are off). The monitor shows
 			// the native switch that follows one through its engage crossfade instead of the release fade. Any thread.
 			uint64_t LatchCeilingReleases() const;

@@ -99,6 +99,7 @@ namespace SourceIdentity
 			bool reqEightBitPromotion = false;
 			bool reqUseDepthNullTables = false;
 			DepthNullTableSet reqDepthNullTables = DepthNullTableSet::PlaceholderOnly();
+			HdrNoiseSettings reqHdrNoise;
 			struct ClassicalFreshState
 			{
 				bool valid = false;
@@ -170,6 +171,8 @@ namespace SourceIdentity
 			// Pass-2 audit closure counters (M1, M3, M4, L2):
 			std::atomic<uint64_t> cClassicalFreshStaleDrops{ 0 }, cP3ScreenOnlyCandidates{ 0 },
 				cEdgeStatsNullTableAbstains{ 0 }, cAbrStepEventsEvicted{ 0 };
+			// SOTA #1 counters (zero while hdrNoise.enabled == false):
+			std::atomic<uint64_t> cHdrLinearizedEvals{ 0 }, cHdrDarkToeClamps{ 0 };
 			// fx/dv-frame-quiet: each ceiling release is stamped with the newest source frame the estimator had seen, so the frame-bound
 			// monitor counts only the releases up to the frame it is allowed to see (LatchCeilingReleasesThrough), not the live counter.
 			std::atomic<uint64_t> newestSeqA{ 0 };
@@ -283,6 +286,9 @@ namespace SourceIdentity
 				reqEightBitPromotion = cfg.eightBitPromotion;
 				reqUseDepthNullTables = cfg.useDepthNullTables;
 				reqDepthNullTables = cfg.depthNullTables;
+				reqHdrNoise = cfg.hdrNoise;
+				if (cfg.hdrNoise.enabled)
+					cfg.verifier.hdrNoise = cfg.hdrNoise;
 				safetyA.store(reqSafety || reqJointLatch.enabled, std::memory_order_release);
 				for (int a = 0; a < 2; ++a)
 				{
@@ -527,6 +533,17 @@ namespace SourceIdentity
 					std::lock_guard<std::mutex> lk(m);
 					reqDepthNullTables = tables;
 					reqUseDepthNullTables = enable;
+					cfgDirty = true;
+					++runEpoch;
+				}
+				Wake();
+			}
+
+			void SetHdrNoise(const HdrNoiseSettings& s)
+			{
+				{
+					std::lock_guard<std::mutex> lk(m);
+					reqHdrNoise = s;
 					cfgDirty = true;
 					++runEpoch;
 				}
@@ -1160,6 +1177,7 @@ namespace SourceIdentity
 					StepMarkSettings smCfg;
 					EdgeStatsSettings esCfg;
 					DepthNullTableSet depthN = DepthNullTableSet::PlaceholderOnly();
+					HdrNoiseSettings hdrCfg;
 					{
 						std::lock_guard<std::mutex> lk(m);
 						safe = reqSafety;
@@ -1172,6 +1190,7 @@ namespace SourceIdentity
 						eightBitP = reqEightBitPromotion;
 						useDepthN = reqUseDepthNullTables;
 						depthN = reqDepthNullTables;
+						hdrCfg = reqHdrNoise;
 						abrStepEvents.clear();
 					}
 					if (jointLatchOn)
@@ -1217,6 +1236,16 @@ namespace SourceIdentity
 					cfg.eightBitPromotion = eightBitP;
 					cfg.useDepthNullTables = useDepthN;
 					cfg.depthNullTables = depthN;
+					cfg.hdrNoise = hdrCfg;
+					if (cfg.verifier.hdrNoise.enabled != hdrCfg.enabled ||
+						cfg.verifier.hdrNoise.transfer != hdrCfg.transfer ||
+						cfg.verifier.hdrNoise.bitDepth != hdrCfg.bitDepth ||
+						cfg.verifier.hdrNoise.limitedRange != hdrCfg.limitedRange ||
+						cfg.verifier.hdrNoise.linearizeForDescale != hdrCfg.linearizeForDescale)
+					{
+						cfg.verifier.hdrNoise = hdrCfg;
+						BuildVerifiers();
+					}
 					latch = UpscaleLatch(cfg.latch);
 					latchBase = LatchCounters();
 					jointLatch = ChainJointLatch(jCfg);
@@ -2643,8 +2672,14 @@ namespace SourceIdentity
 						opt.forceExactN = reader[a].ConfidentN();
 					verifier->Evaluate(r.ls, cands, pc, opt, r.vr);
 					for (size_t ci = 0; ci < r.vr.candidates.size(); ++ci)
+					{
 						if (r.vr.candidates[ci].valid && (r.vr.candidates[ci].reason & kReasonScreenOnly) != 0u)
 							cP3ScreenOnlyCandidates.fetch_add(1, std::memory_order_relaxed);
+						if (r.vr.candidates[ci].hdrLinearizedUsed)
+							cHdrLinearizedEvals.fetch_add(1, std::memory_order_relaxed);
+						if (r.vr.candidates[ci].hdrDarkToeClampedSamples > 0)
+							cHdrDarkToeClamps.fetch_add(static_cast<uint64_t>(r.vr.candidates[ci].hdrDarkToeClampedSamples), std::memory_order_relaxed);
+					}
 					PowerProbe::Run(*probeVerifier, r.ls, floorCodes, static_cast<double>(step), cfg.probe, r.pr, &probeWs[a]);
 				}
 				for (int a = 0; a < 2; ++a)
@@ -3170,6 +3205,8 @@ namespace SourceIdentity
 				c.p3ScreenOnlyCandidates = cP3ScreenOnlyCandidates.load(std::memory_order_relaxed);
 				c.edgeStatsNullTableAbstains = cEdgeStatsNullTableAbstains.load(std::memory_order_relaxed);
 				c.abrStepEventsEvicted = cAbrStepEventsEvicted.load(std::memory_order_relaxed);
+				c.hdrLinearizedEvals = cHdrLinearizedEvals.load(std::memory_order_relaxed);
+				c.hdrDarkToeClamps = cHdrDarkToeClamps.load(std::memory_order_relaxed);
 				return c;
 			}
 
@@ -3272,6 +3309,7 @@ namespace SourceIdentity
 		void ChainEstimator::SetEmpiricalFloorMode(EmpiricalFloorMode m) { st_->SetEmpiricalFloorMode(m); }
 		void ChainEstimator::SetEightBitPromotion(bool on) { st_->SetEightBitPromotion(on); }
 		void ChainEstimator::SetDepthNullTables(const DepthNullTableSet& tables, bool enable) { st_->SetDepthNullTables(tables, enable); }
+		void ChainEstimator::SetHdrNoiseSettings(const HdrNoiseSettings& s) { st_->SetHdrNoise(s); }
 		void ChainEstimator::SetDiagnosticTag(const std::string& tag) { st_->diagTag.Set(tag); }
 		void ChainEstimator::SetDiagnosticDepths(int codedBits, int outputBits)
 		{
