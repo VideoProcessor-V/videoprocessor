@@ -9,7 +9,6 @@
 #include <VP-V/modules/motion/estimation/R6LumaPass.h>
 #include <VP-V/modules/motion/estimation/R6PipelineOverlap.h>
 #include <VP-V/modules/motion/estimation/global_model/GlobalModelFit.h>
-#include <VP-V/tests/support/HardwarePrerequisites.h>
 
 #include <atlbase.h>
 #include <d3d11.h>
@@ -265,12 +264,8 @@ namespace VideoProcessorTest
 				hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, 0, levels + 1, 1, D3D11_SDK_VERSION,
 					&device, nullptr, &context);
 			}
-			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Gpu,
-					"R6ThroughputTests::HlslHalfAndQuarterShadersCompileAndMatchCpuOnWarp",
-					SUCCEEDED(hr) && device && context, "D3D11 WARP device creation failed"))
-			{
-				return;
-			}
+			Assert::IsTrue(SUCCEEDED(hr) && device && context,
+				L"D3D11 WARP device creation must succeed");
 
 			auto compileCs = [&](const char* source, const char* name, CComPtr<ID3D11ComputeShader>& shaderOut) {
 				CComPtr<ID3DBlob> code;
@@ -733,15 +728,22 @@ namespace VideoProcessorTest
 			const ProducerRun syncRun = runProducer(false);
 			const ProducerRun asyncRun = runProducer(true);
 
-			// Same-input status negative control: sync stays explicitly "off", async must visibly report active (no longer "off").
+			// Same-input status negative control: sync stays explicitly "off" with worker stopped,
+			// while async must actively run on r6ExtrasWorker with zero sync fallbacks.
 			Assert::IsTrue(syncRun.activeStatusLine.find("off") != std::string::npos,
 				L"sync Producer (SetR6AsyncExtras(false)) must report R6 async extras off");
+			Assert::IsFalse(syncRun.activeStats.running,
+				L"sync Producer must not start the R6 extras worker");
 			Assert::AreEqual(static_cast<uint64_t>(0), syncRun.activeStats.asyncCompleted,
 				L"sync Producer must not execute pairs on R6 extras worker");
-			Assert::IsTrue(asyncRun.activeStatusLine.find("off") == std::string::npos,
-				L"SetR6AsyncExtras(true) must visibly report active async extras in R6StatusLine (no longer 'off')");
-			Assert::IsTrue(asyncRun.activeStats.asyncCompleted + asyncRun.activeStats.syncFallbacks >= kGen1Pairs,
-				L"SetR6AsyncExtras(true) must actually execute published pairs through the R6 extras worker");
+			Assert::IsTrue(asyncRun.activeStats.running,
+				L"R6 async extras worker must be running when enabled");
+			Assert::IsTrue(asyncRun.activeStats.asyncCompleted >= kGen1Pairs,
+				L"R6 async extras must complete gen-1 pairs asynchronously");
+			Assert::AreEqual<uint64_t>(0ull, asyncRun.activeStats.syncFallbacks,
+				L"R6 async extras must not fall back to sync when worker is running");
+			Assert::IsTrue(asyncRun.activeStatusLine.find("(on,") != std::string::npos,
+				L"R6 status line must visibly report (on, ...)");
 
 			auto assertPairsBitIdentical = [](const std::vector<MotionAhead::FlowPtr>& a, const std::vector<MotionAhead::FlowPtr>& b) {
 				Assert::AreEqual(a.size(), b.size());
