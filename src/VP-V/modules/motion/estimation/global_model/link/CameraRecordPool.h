@@ -5,7 +5,7 @@
 // The slot holds a fixed, small CameraRecordPod (declared 1 KB; the encoded CRD2 form is 595 B, CRD1 legacy is 366 B); the heavy parts (the
 // per-block arrays and the CPU field copy) are shared_ptrs kept here, indexed by seq mod ring like the SlotSet. The
 // producer writes an entry only while it holds the claim for that seq; readers use an entry only for a seq whose slot
-// they have pinned / sealed. Pure, C++14, deterministic (EncodeRecordPod / DecodeRecordPod defined in CameraLinkCore.cpp).
+// they have pinned / sealed. Pure, C++14, deterministic (DecodeRecordPod defined in CameraLinkCore.cpp).
 #pragma once
 
 #include "FieldCopy.h"
@@ -51,14 +51,55 @@ namespace CameraLink
 				return v;
 			}
 		};
-		inline void PutFadeFields(Writer& w, const CameraModel::CameraMotion& m) { w.Put(m.fadeGain); w.Put(m.fadeOffset); }
 		inline void GetFadeFields(Reader& r, CameraModel::CameraMotion& x) { x.fadeGain = r.Get<double>(); x.fadeOffset = r.Get<double>(); }
 	}
 
 	// Encodes everything of the record except `blocks` and `objects` (the objects stay off in K1; their count is stored so
 	// a decode can tell). Writes CRD2 (v1 prefix at identical byte offsets + v2 tail). Returns the byte count, 0 when the
 	// buffer is null or too small.
-	size_t EncodeRecordPod(const CameraModel::CameraMotion& m, uint8_t* out, size_t cap);
+	inline size_t EncodeRecordPod(const CameraModel::CameraMotion& m, uint8_t* out, size_t cap)
+	{
+		if (!out || cap == 0)
+			return 0;
+		detail::Writer w(out, cap < kRecordPodMaxBytes ? cap : kRecordPodMaxBytes);
+		w.Put(kRecordPodMagic);
+		w.Put(m.seq); w.Put(m.pairFrom); w.Put(m.pairTo); w.Put(m.pairSeconds);
+		w.Put(m.resyncGeneration); w.Put(m.rebaseGeneration);
+		w.Put(uint8_t(m.valid)); w.Put(uint8_t(m.params.type)); w.Put(uint8_t(m.reason));
+		w.Put(uint8_t(m.seededFromNext | (m.bridged << 1) | (m.inFade << 2) | (m.smoothed << 3) | (m.labelsOnGpu << 4)));
+		for (int i = 0; i < 9; ++i) w.Put(m.params.h[i]);
+		w.Put(uint8_t(m.smoothedParams.type));
+		for (int i = 0; i < 9; ++i) w.Put(m.smoothedParams.h[i]);
+		w.Put(m.rates.logScale); w.Put(m.rates.angle); w.Put(m.rates.tx); w.Put(m.rates.ty);
+		w.Put(m.confidence);
+		const CameraModel::Signals& s = m.signals;
+		w.Put(s.inlierShare); w.Put(s.precision); w.Put(s.coverage); w.Put(s.temporal); w.Put(s.conditioning);
+		w.Put(s.engineAgreement); w.Put(s.inverse); w.Put(s.ambiguity); w.Put(s.logit);
+		w.Put(uint8_t(s.haveBackward | (s.haveEngine << 1)));
+		w.Put(m.fadeGain); w.Put(m.fadeOffset);
+		w.Put(m.samples); w.Put(m.hypotheses); w.Put(m.costMicros);
+		w.Put(int32_t(m.picture.left)); w.Put(int32_t(m.picture.top)); w.Put(int32_t(m.picture.right)); w.Put(int32_t(m.picture.bottom));
+		w.Put(uint32_t(m.objects.size()));
+		// CRD2 tail (GEM-137): verdict/layer flags, full-resolution refine count, dynamic-texture / water / static / two-layer signals and object layer.
+		w.Put(m.verdictFlags);
+		w.Put(m.layerFlags);
+		w.Put(m.finalRefineCells);
+		w.Put(s.dynShare); w.Put(s.dynTemporal); w.Put(s.dynSpatial); w.Put(s.dynField);
+		w.Put(s.waterExcludedShare);
+		w.Put(s.staticRing); w.Put(s.staticFit);
+		w.Put(s.border); w.Put(s.continuity);
+		w.Put(m.layerRisk);
+		w.Put(uint8_t(m.haveObjectLayer ? 1 : 0));
+		w.Put(m.objectLayer.id);
+		w.Put(uint8_t(m.objectLayer.type));
+		for (int i = 0; i < 9; ++i) w.Put(m.objectLayer.h[i]);
+		w.Put(m.objectLayer.blocks);
+		w.Put(m.objectLayer.cx); w.Put(m.objectLayer.cy);
+		// CE-WATER / C4 diagnostics tail (appended to CRD2; total 595 B <= 1024 B).
+		w.Put(s.dynCurvature); w.Put(s.dynRhoTemp);
+		w.Put(s.rawShare); w.Put(s.shearEnergy); w.Put(s.dipoleTB); w.Put(s.dipoleLR);
+		return w.ok ? w.n : 0;
+	}
 
 	// The last enumerators of the two enums the slot stores as bytes (CameraMotion.h): a stored byte above them is not a
 	// value of the enum. Keep these in step when an enumerator is appended.

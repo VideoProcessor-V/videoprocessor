@@ -914,50 +914,6 @@ namespace CameraLink
 		return guideProvider ? guideProvider(seq) : nullptr;
 	}
 
-	size_t EncodeRecordPod(const CameraModel::CameraMotion& m, uint8_t* out, size_t cap)
-	{
-		if (!out || cap == 0)
-			return 0;
-		detail::Writer w(out, cap < kRecordPodMaxBytes ? cap : kRecordPodMaxBytes);
-		w.Put(kRecordPodMagic);
-		w.Put(m.seq); w.Put(m.pairFrom); w.Put(m.pairTo); w.Put(m.pairSeconds);
-		w.Put(m.resyncGeneration); w.Put(m.rebaseGeneration);
-		w.Put(uint8_t(m.valid)); w.Put(uint8_t(m.params.type)); w.Put(uint8_t(m.reason));
-		w.Put(uint8_t(m.seededFromNext | (m.bridged << 1) | (m.inFade << 2) | (m.smoothed << 3) | (m.labelsOnGpu << 4)));
-		for (int i = 0; i < 9; ++i) w.Put(m.params.h[i]);
-		w.Put(uint8_t(m.smoothedParams.type));
-		for (int i = 0; i < 9; ++i) w.Put(m.smoothedParams.h[i]);
-		w.Put(m.rates.logScale); w.Put(m.rates.angle); w.Put(m.rates.tx); w.Put(m.rates.ty);
-		w.Put(m.confidence);
-		const CameraModel::Signals& s = m.signals;
-		w.Put(s.inlierShare); w.Put(s.precision); w.Put(s.coverage); w.Put(s.temporal); w.Put(s.conditioning);
-		w.Put(s.engineAgreement); w.Put(s.inverse); w.Put(s.ambiguity); w.Put(s.logit);
-		w.Put(uint8_t(s.haveBackward | (s.haveEngine << 1)));
-		detail::PutFadeFields(w, m);
-		w.Put(m.samples); w.Put(m.hypotheses); w.Put(m.costMicros);
-		w.Put(int32_t(m.picture.left)); w.Put(int32_t(m.picture.top)); w.Put(int32_t(m.picture.right)); w.Put(int32_t(m.picture.bottom));
-		w.Put(uint32_t(m.objects.size()));
-		// CRD2 tail (GEM-137): verdict/layer flags, full-resolution refine count, dynamic-texture / water / static / two-layer signals and object layer.
-		w.Put(m.verdictFlags);
-		w.Put(m.layerFlags);
-		w.Put(m.finalRefineCells);
-		w.Put(s.dynShare); w.Put(s.dynTemporal); w.Put(s.dynSpatial); w.Put(s.dynField);
-		w.Put(s.waterExcludedShare);
-		w.Put(s.staticRing); w.Put(s.staticFit);
-		w.Put(s.border); w.Put(s.continuity);
-		w.Put(m.layerRisk);
-		w.Put(uint8_t(m.haveObjectLayer ? 1 : 0));
-		w.Put(m.objectLayer.id);
-		w.Put(uint8_t(m.objectLayer.type));
-		for (int i = 0; i < 9; ++i) w.Put(m.objectLayer.h[i]);
-		w.Put(m.objectLayer.blocks);
-		w.Put(m.objectLayer.cx); w.Put(m.objectLayer.cy);
-		// CE-WATER / C4 diagnostics tail (appended to CRD2; total 595 B <= 1024 B).
-		w.Put(s.dynCurvature); w.Put(s.dynRhoTemp);
-		w.Put(s.rawShare); w.Put(s.shearEnergy); w.Put(s.dipoleTB); w.Put(s.dipoleLR);
-		return w.ok ? w.n : 0;
-	}
-
 	bool DecodeRecordPod(const uint8_t* in, size_t bytes, CameraModel::CameraMotion& m)
 	{
 		if (!in || bytes == 0)
