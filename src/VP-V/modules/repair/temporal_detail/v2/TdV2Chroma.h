@@ -3870,15 +3870,17 @@ namespace TdV2
 					? DecomposeActiveBands(ownGrain, codedActive, nullptr)
 					: ThreeBandPlanes{};
 
+				const int guardPadX = (cSubX > 1) ? (static_cast<int>(std::ceil(std::fabs(static_cast<double>(in.siting.shiftX)) / static_cast<double>(cSubX))) + 1) : 0;
+				const int guardPadY = (cSubY > 1) ? (static_cast<int>(std::ceil(std::fabs(static_cast<double>(in.siting.shiftY)) / static_cast<double>(cSubY))) + 1) : 0;
 				for (int cy = 0; cy < res.cellsH; ++cy)
 				{
-					const int y0 = (std::max)(codedActive.y0, (cy * cellPx) / cSubY);
-					const int y1 = (std::min)(codedActive.y1, ((cy + 1) * cellPx + cSubY - 1) / cSubY);
+					const int y0 = (std::max)(codedActive.y0, (cy * cellPx) / cSubY - guardPadY);
+					const int y1 = (std::min)(codedActive.y1, ((cy + 1) * cellPx + cSubY - 1) / cSubY + guardPadY);
 					if (y1 <= y0) continue;
 					for (int cx = 0; cx < res.cellsW; ++cx)
 					{
-						const int x0 = (std::max)(codedActive.x0, (cx * cellPx) / cSubX);
-						const int x1 = (std::min)(codedActive.x1, ((cx + 1) * cellPx + cSubX - 1) / cSubX);
+						const int x0 = (std::max)(codedActive.x0, (cx * cellPx) / cSubX - guardPadX);
+						const int x1 = (std::min)(codedActive.x1, ((cx + 1) * cellPx + cSubX - 1) / cSubX + guardPadX);
 						if (x1 <= x0) continue;
 
 						const size_t cIdx = static_cast<size_t>(cy) * res.cellsW + cx;
@@ -3890,11 +3892,13 @@ namespace TdV2
 						size_t cnt = 0;
 						for (int y = y0; y < y1; ++y)
 						{
-							if ((std::min)(res.cellsH - 1, (y * cSubY) / cellPx) != cy)
+							const double ly = in.siting.CodedToLumaY(static_cast<double>(y), cSubY);
+							if ((std::max)(0, (std::min)(res.cellsH - 1, static_cast<int>(std::floor(ly)) / cellPx)) != cy)
 								continue;
 							for (int x = x0; x < x1; ++x)
 							{
-								if ((std::min)(res.cellsW - 1, (x * cSubX) / cellPx) != cx)
+								const double lx = in.siting.CodedToLumaX(static_cast<double>(x), cSubX);
+								if ((std::max)(0, (std::min)(res.cellsW - 1, static_cast<int>(std::floor(lx)) / cellPx)) != cx)
 									continue;
 								const double og = ownGrain.at(x, y);
 								const double inf = inFullBands.H.at(x, y);
@@ -3944,11 +3948,13 @@ namespace TdV2
 							++res.guardViolationCells;
 							for (int y = y0; y < y1; ++y)
 							{
-								if ((std::min)(res.cellsH - 1, (y * cSubY) / cellPx) != cy)
+								const double ly = in.siting.CodedToLumaY(static_cast<double>(y), cSubY);
+								if ((std::max)(0, (std::min)(res.cellsH - 1, static_cast<int>(std::floor(ly)) / cellPx)) != cy)
 									continue;
 								for (int x = x0; x < x1; ++x)
 								{
-									if ((std::min)(res.cellsW - 1, (x * cSubX) / cellPx) != cx)
+									const double lx = in.siting.CodedToLumaX(static_cast<double>(x), cSubX);
+									if ((std::max)(0, (std::min)(res.cellsW - 1, static_cast<int>(std::floor(lx)) / cellPx)) != cx)
 										continue;
 									const double addBack = gDec.addBackFraction * (inFullBands.H.at(x, y) - outFullBands.H.at(x, y));
 									outCodedDelta.at(x, y) += addBack;

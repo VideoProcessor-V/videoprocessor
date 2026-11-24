@@ -273,10 +273,12 @@ void td_ch_bicubic_direct(vec2 sLocal, ivec4 cActive, ivec2 p, out vec2 outUv, o
     }
     else
     {
+        // Out-of-bounds landing: mirror CPU TdV2Chroma.h:544 (keep cur_uv fallback when finite, else clamped ref border), valid = 0.
+        vec2 fb = (u_same_ref_cur > 0.5) ? texelFetch(ref_uv, p, 0).xy : texelFetch(cur_uv, p, 0).xy;
         bool anyBad = false;
         vec2 bv = td_ch_bilinear_active(sLocal, cActive, anyBad);
-        outUv = (td_is_bad(bv.x) || td_is_bad(bv.y)) ? td_ch_cur_fallback(p) : bv;
-        outFlags = (anyBad || td_is_bad(bv.x) || td_is_bad(bv.y)) ? 4 : 0;
+        outUv = vec2(td_is_bad(fb.x) ? bv.x : fb.x, td_is_bad(fb.y) ? bv.y : fb.y);
+        outFlags = 0;
     }
 }
 )GLSL";
@@ -3293,8 +3295,9 @@ float td_huber_taper(float diffSq, float diagC)
 					res.outputCr = TdV2Plane(dW, dH, 0.0);
 					for (size_t i = 0; i < res.outputCb.v.size(); ++i)
 					{
-						res.outputCb.v[i] = static_cast<double>(outBuf[i * 4u + 0u]);
-						res.outputCr.v[i] = static_cast<double>(outBuf[i * 4u + 1u]);
+						// Preserve bit-exact double passthrough when GPU delivered delta is strictly 0.0f (face/focus/zero-conf parity).
+						res.outputCb.v[i] = (ddBuf[i * 2u + 0u] == 0.0f && std::isfinite(in.receivedCb.v[i])) ? in.receivedCb.v[i] : static_cast<double>(outBuf[i * 4u + 0u]);
+						res.outputCr.v[i] = (ddBuf[i * 2u + 1u] == 0.0f && std::isfinite(in.receivedCr.v[i])) ? in.receivedCr.v[i] : static_cast<double>(outBuf[i * 4u + 1u]);
 					}
 				}
 				else
@@ -3306,9 +3309,11 @@ float td_huber_taper(float diffSq, float diagC)
 					res.outputB = TdV2Plane(dW, dH, 0.0);
 					for (size_t i = 0; i < res.outputR.v.size(); ++i)
 					{
-						res.outputR.v[i] = static_cast<double>(outBuf[i * 4u + 0u]);
-						res.outputG.v[i] = static_cast<double>(outBuf[i * 4u + 1u]);
-						res.outputB.v[i] = static_cast<double>(outBuf[i * 4u + 2u]);
+						const bool zeroD = (ddBuf[i * 2u + 0u] == 0.0f && ddBuf[i * 2u + 1u] == 0.0f) &&
+						                   std::isfinite(in.receivedR.v[i]) && std::isfinite(in.receivedG.v[i]) && std::isfinite(in.receivedB.v[i]);
+						res.outputR.v[i] = zeroD ? in.receivedR.v[i] : static_cast<double>(outBuf[i * 4u + 0u]);
+						res.outputG.v[i] = zeroD ? in.receivedG.v[i] : static_cast<double>(outBuf[i * 4u + 1u]);
+						res.outputB.v[i] = zeroD ? in.receivedB.v[i] : static_cast<double>(outBuf[i * 4u + 2u]);
 					}
 				}
 			}
