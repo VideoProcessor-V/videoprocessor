@@ -2576,6 +2576,268 @@ namespace Tests
 				Assert::AreEqual(0, unifNx, L"negative control: uniform detailAbove=true blocks both 960x540 and 1920x1080");
 				Assert::AreEqual(0, unifNy);
 			}
+
+			// Part C (TEST-H1 + NEW-H1 + NEW-M1): Real SourceResolutionMonitor production wiring via
+			//         CaptureTrackerReferenceDetails + BuildClassicalFreshForChain -> ChainEstimator!
+			//         Proves:
+			//         (1) Blind-classical 1080p->4K spectrum through BuildClassicalFreshForChain sets detailAbove == false,
+			//             detailAboveAtRatio(0.5, 0.5) == false, enters Chain-Alone 1920x1080 and holds > 60 s (0 releases);
+			//         (2) Switching to true 1/f^2 native 4K spectrum triggers detailAboveAtRatio(0.5, 0.5) == true (both
+			//             when tracker.ReferenceDetail(0.5) == +inf AND in Shadow mode after tracker.Update clears window),
+			//             releasing via ReleasedDetailAbove within ~3 s;
+			//         (3) NEW-M1: immediately after ReleasedDetailAbove, a soft/flat native 4K eval (detailAbove == false)
+			//             does NOT re-enter 1920x1080 on stale pre-release evidence (proving evidence.Reset() ran!);
+			//         (4) Real R1 sub-harmonic 0.25 vs 0.50 through BuildClassicalFreshForChain rejects 960x540 and latches 1920x1080!
+			{
+				auto make1080pUpscaledSpectrumFrame = [](double ratioVal) {
+					SR::FrameReading fr;
+					fr.informativeTiles = 8;
+					fr.ratio = ratioVal;
+					fr.ratioH = ratioVal;
+					fr.ratioV = ratioVal;
+					fr.contrast = 0.25;
+					fr.quantisationFloor = -7.1; // 10-bit uniform floor (~7.94e-8)
+					fr.verticalPower.assign(129, 0.0);
+					fr.horizontalPower.assign(129, 0.0);
+					// Natural 1/f^2 detail up to 0.50 Nyquist (bin 64), sharply rolled off (~ -2.1 dec) above 0.50 Nyquist.
+					for (size_t k = 1; k < 64; ++k)
+					{
+						const double p = 0.1 / (static_cast<double>(k) * static_cast<double>(k));
+						fr.verticalPower[k] = p;
+						fr.horizontalPower[k] = p;
+					}
+					for (size_t k = 64; k < 129; ++k)
+					{
+						fr.verticalPower[k] = 4.0e-7;
+						fr.horizontalPower[k] = 4.0e-7;
+					}
+					return fr;
+				};
+
+				auto makeNative4kSpectrumFrame = []() {
+					SR::FrameReading fr;
+					fr.informativeTiles = 8;
+					fr.ratio = 1.0;
+					fr.ratioH = 1.0;
+					fr.ratioV = 1.0;
+					fr.contrast = 0.25;
+					fr.quantisationFloor = -7.1;
+					fr.mean = 0.55;
+					fr.signature = 0.77777;
+					fr.verticalPower.assign(129, 0.0);
+					fr.horizontalPower.assign(129, 0.0);
+					// Natural 1/f^2 native 4K detail all the way to Nyquist (DetailAbove(0.5) ~= -0.52 dec, well above floor).
+					for (size_t k = 1; k < 129; ++k)
+					{
+						const double p = 0.1 / (static_cast<double>(k) * static_cast<double>(k));
+						fr.verticalPower[k] = p;
+						fr.horizontalPower[k] = p;
+					}
+					return fr;
+				};
+
+				const SR::FrameReading blind1080Fr = make1080pUpscaledSpectrumFrame(1.0);
+				const SR::FrameReading native4kFr = makeNative4kSpectrumFrame();
+
+				// (c1) Blind-classical 1080p->4K through REAL CaptureTrackerReferenceDetails + BuildClassicalFreshForChain:
+				//      tracker reads native (ReferenceDetail(0.5) == +inf), yet Chain-Alone enters 1920x1080 and holds > 60 s!
+				SR::Tracker trk, trkH, trkV;
+				for (int i = 0; i < 6; ++i)
+				{
+					const double sec = 0.5 * static_cast<double>(i);
+					trk.Update(blind1080Fr, sec);
+					trkH.Update(SR::AxisFrame(blind1080Fr, false), sec);
+					trkV.Update(SR::AxisFrame(blind1080Fr, true), sec);
+				}
+				Assert::AreEqual(1.0, trk.Ratio(), 1e-9, L"fixture: blind classical tracker reads native");
+				Assert::IsTrue(std::isinf(trk.ReferenceDetail(0.5)), L"fixture: blind classical has +inf ReferenceDetail(0.5)");
+
+				SourceResolutionMonitor::ClassicalRefDetailSnapshot retained;
+				const SourceResolutionMonitor::ClassicalRefDetailSnapshot blindRefs =
+					SourceResolutionMonitor::CaptureTrackerReferenceDetails(trk, trkH, trkV, kUhdW, kUhdH, false, &retained);
+				const C::ClassicalFreshInput cfiProbe =
+					SourceResolutionMonitor::BuildClassicalFreshForChain(blind1080Fr, blindRefs, false, 1, 1000000, 1.5);
+				Assert::IsTrue(cfiProbe.valid);
+				Assert::IsFalse(cfiProbe.detailAbove, L"TEST-H1: BuildClassicalFreshForChain must report detailAbove==false on 1080p->4K");
+				Assert::IsTrue(static_cast<bool>(cfiProbe.detailAboveAtRatio),
+					L"TEST-H1: BuildClassicalFreshForChain must provide per-candidate detailAboveAtRatio callback");
+				Assert::IsFalse(cfiProbe.detailAboveAtRatio(0.5, 0.5),
+					L"TEST-H1: BuildClassicalFreshForChain detailAboveAtRatio(0.5, 0.5) == false on 1080p->4K");
+				Assert::IsTrue(cfiProbe.detailAboveAtRatio(0.25, 0.25),
+					L"TEST-H1: BuildClassicalFreshForChain detailAboveAtRatio(0.25, 0.25) == true on 1080p->4K");
+
+				ChainFx::ManualClock clk;
+				C::EstimatorSettings cfg;
+				cfg.safetyRules = true;
+				cfg.jointLatch.enabled = true;
+				cfg.conventionDrivenProposals = true;
+				C::ChainEstimator est(cfg, clk.Fn());
+				est.SetSynchronous(true);
+				est.SetMode(C::EstimatorMode::On);
+
+				constexpr int kHoldEvals = 56;
+				int64_t firstLatchUs = -1;
+				int64_t lastLatchUs = -1;
+				int dropsAfterLatch = 0;
+				uint64_t seq = 10;
+				int64_t tUs = 0;
+				for (int i = 0; i < kHoldEvals; ++i, ++seq)
+				{
+					tUs = static_cast<int64_t>(i) * 1500000;
+					clk.Set(static_cast<double>(tUs) / 1000.0);
+					const bool latchedNow = (est.StatusInput().latchNx > 0);
+					const SourceResolutionMonitor::ClassicalRefDetailSnapshot refs =
+						SourceResolutionMonitor::CaptureTrackerReferenceDetails(trk, trkH, trkV, kUhdW, kUhdH, latchedNow, &retained);
+					const C::ClassicalFreshInput cfi =
+						SourceResolutionMonitor::BuildClassicalFreshForChain(blind1080Fr, refs, false, seq, tUs, 1.5);
+					est.SetClassicalFresh(cfi);
+					const C::LineSnapshot up = MakeSynthSnapshot(kUhdW, kUhdH, 1920, 1080, kBilinear, 1,
+						seq, tUs, 96500u + static_cast<uint64_t>(i), (i % 8) == 0);
+					Assert::IsTrue(est.SubmitLines(up));
+
+					if (est.StatusInput().latchNx == 1920 && est.StatusInput().latchNy == 1080)
+					{
+						if (firstLatchUs < 0) firstLatchUs = tUs;
+						lastLatchUs = tUs;
+					}
+					else if (firstLatchUs >= 0)
+					{
+						++dropsAfterLatch;
+					}
+				}
+				Assert::IsTrue(firstLatchUs >= 0, L"TEST-H1: real Monitor wiring allows Chain-Alone entry on blind-classical 1080p->4K");
+				Assert::IsTrue(static_cast<double>(lastLatchUs - firstLatchUs) / 1e6 > 60.0,
+					L"TEST-H1: real Monitor wiring holds Chain-Alone > 60 s");
+				Assert::AreEqual(0, dropsAfterLatch, L"TEST-H1: 0 drops / 0 flapping through real Monitor wiring");
+				Assert::AreEqual(uint64_t(1), est.GetCounters().jointLatch.entriesChainAlone);
+				Assert::AreEqual(uint64_t(0), est.GetCounters().jointLatch.releases);
+
+				// (c2) True native 4K recovery through real BuildClassicalFreshForChain (even with +inf tracker ref!)
+				//      drives ReleasedDetailAbove within ~3 s, AND NEW-M1 proves evidence.Reset() prevents immediate re-entry!
+				const int64_t nativeStartUs = tUs + 1500000;
+				int64_t releasedAtUs = -1;
+				for (int k = 0; k < 5; ++k, ++seq)
+				{
+					tUs = nativeStartUs + static_cast<int64_t>(k) * 1500000;
+					clk.Set(static_cast<double>(tUs) / 1000.0);
+					const SourceResolutionMonitor::ClassicalRefDetailSnapshot refs =
+						SourceResolutionMonitor::CaptureTrackerReferenceDetails(trk, trkH, trkV, kUhdW, kUhdH, true, &retained);
+					const C::ClassicalFreshInput cfiNat =
+						SourceResolutionMonitor::BuildClassicalFreshForChain(native4kFr, refs, false, seq, tUs, 1.5);
+					Assert::IsTrue(static_cast<bool>(cfiNat.detailAboveAtRatio));
+					Assert::IsTrue(cfiNat.detailAboveAtRatio(0.5, 0.5),
+						L"NEW-H1: real native 4K must report detailAboveAtRatio(0.5, 0.5) == true even when tracker ReferenceDetail is +inf");
+					est.SetClassicalFresh(cfiNat);
+					// Feed uninformative flat chain lines so release is proven to come strictly from ReleasedDetailAbove!
+					const C::LineSnapshot flatNat = MakeFlatSnapshot(kUhdW, kUhdH, 512, seq, tUs, false);
+					Assert::IsTrue(est.SubmitLines(flatNat));
+					if (releasedAtUs < 0 && est.StatusInput().latchNx == 0)
+					{
+						releasedAtUs = tUs;
+						break;
+					}
+				}
+				Assert::IsTrue(releasedAtUs >= 0, L"NEW-H1: real native 4K through BuildClassicalFreshForChain releases Chain-Alone latch");
+				Assert::IsTrue(static_cast<double>(releasedAtUs - nativeStartUs) / 1e6 <= 6.0,
+					L"NEW-H1: ReleasedDetailAbove fires within ~3 s debounce window");
+				Assert::IsTrue(est.GetCounters().jointLatch.releasesDetailAbove >= 1,
+					L"NEW-H1: release counted visibly in releasesDetailAbove");
+
+				// NEW-M1 check: immediately after ReleasedDetailAbove, feed a soft/flat native 4K evaluation with
+				// classicalDetailAbove == false -> MUST NOT immediately re-enter 1920x1080 on stale pre-release evidence!
+				++seq;
+				tUs += 1500000;
+				clk.Set(static_cast<double>(tUs) / 1000.0);
+				est.SetClassicalFresh(MakeClassicalFresh(true, 1.0, 1.0, false, seq, tUs, 1.5));
+				const C::LineSnapshot postRelFlat = MakeFlatSnapshot(kUhdW, kUhdH, 512, seq, tUs, false);
+				Assert::IsTrue(est.SubmitLines(postRelFlat));
+				Assert::AreEqual(0, est.StatusInput().latchNx,
+					L"NEW-M1: ReleasedDetailAbove must reset evidence so stale pre-release credit cannot immediately re-latch");
+				Assert::AreEqual(uint64_t(1), est.GetCounters().jointLatch.entriesChainAlone,
+					L"NEW-M1: no flapping re-entry after ReleasedDetailAbove");
+
+				// (c3) Shadow-mode retained reference check: lock tracker on 0.5, capture retained refs while chainLatched,
+				//      then call tracker.Update(native4kFr) (clearing tracker's window in Shadow mode) -> BuildClassicalFreshForChain
+				//      MUST STILL detect native 4K detailAboveAtRatio(0.5, 0.5) == true!
+				{
+					SR::Tracker shTrk, shTrkH, shTrkV;
+					for (int f = 0; f < 24; ++f)
+					{
+						SR::FrameReading upFr = make1080pUpscaledSpectrumFrame(0.5);
+						const int shot = f / 8;
+						upFr.mean = (shot % 2 == 0) ? 0.35 : 0.65;
+						upFr.signature = 0.01 * static_cast<double>(f + 1);
+						const double sec = 0.5 * static_cast<double>(f);
+						shTrk.Update(upFr, sec);
+						shTrkH.Update(SR::AxisFrame(upFr, false), sec);
+						shTrkV.Update(SR::AxisFrame(upFr, true), sec);
+					}
+					Assert::IsTrue(std::isfinite(shTrk.ReferenceDetail(0.5)), L"fixture: Shadow tracker has finite ReferenceDetail(0.5)");
+
+					SourceResolutionMonitor::ClassicalRefDetailSnapshot shRetained;
+					(void)SourceResolutionMonitor::CaptureTrackerReferenceDetails(shTrk, shTrkH, shTrkV, kUhdW, kUhdH, true, &shRetained);
+
+					// Shadow mode: native 4K frame clears tracker's window (ReferenceDetail(0.5) becomes +inf)!
+					shTrk.Update(native4kFr, 12.5);
+					shTrkH.Update(SR::AxisFrame(native4kFr, false), 12.5);
+					shTrkV.Update(SR::AxisFrame(native4kFr, true), 12.5);
+					Assert::IsTrue(std::isinf(shTrk.ReferenceDetail(0.5)),
+						L"fixture: tracker.Update(native4kFr) in Shadow mode cleared tracker window");
+
+					const SourceResolutionMonitor::ClassicalRefDetailSnapshot shRefs =
+						SourceResolutionMonitor::CaptureTrackerReferenceDetails(shTrk, shTrkH, shTrkV, kUhdW, kUhdH, true, &shRetained);
+					const C::ClassicalFreshInput shCfi =
+						SourceResolutionMonitor::BuildClassicalFreshForChain(native4kFr, shRefs, false, 999, 12500000, 0.5);
+					Assert::IsTrue(static_cast<bool>(shCfi.detailAboveAtRatio));
+					Assert::IsTrue(shCfi.detailAboveAtRatio(0.5, 0.5),
+						L"NEW-H1 Shadow: BuildClassicalFreshForChain detects native 4K even after tracker.Update cleared window");
+				}
+
+				// (c4) Real R1 sub-harmonic 0.25 vs 0.50 through BuildClassicalFreshForChain -> ChainEstimator rejects 960x540 & latches 1920x1080!
+				{
+					ChainFx::ManualClock r1Clk;
+					C::EstimatorSettings r1Cfg;
+					r1Cfg.safetyRules = true;
+					r1Cfg.jointLatch.enabled = true;
+					r1Cfg.conventionDrivenProposals = true;
+					C::ChainEstimator r1Est(r1Cfg, r1Clk.Fn());
+					r1Est.SetSynchronous(true);
+					r1Est.SetMode(C::EstimatorMode::On);
+
+					uint64_t r1Seq = 200;
+					int s = 0;
+					for (int shot = 0; shot < 2; ++shot)
+					{
+						for (int k = 0; k < 5; ++k, ++s, ++r1Seq)
+						{
+							const int64_t evalUs = static_cast<int64_t>(s) * 1000000;
+							r1Clk.Set(static_cast<double>(s) * 1500.0);
+							const bool isFinal = (shot == 1 && k == 4);
+							if (isFinal)
+							{
+								const C::ClassicalFreshInput realR1Cfi =
+									SourceResolutionMonitor::BuildClassicalFreshForChain(blind1080Fr, blindRefs, false, r1Seq, evalUs, 1.5);
+								Assert::IsTrue(realR1Cfi.detailAboveAtRatio(0.25, 0.25));
+								Assert::IsFalse(realR1Cfi.detailAboveAtRatio(0.50, 0.50));
+								r1Est.SetClassicalFresh(realR1Cfi);
+							}
+							else
+							{
+								r1Est.SetClassicalFresh(MakeClassicalFresh(true, 1.0, 1.0, true, r1Seq, evalUs, 1.5));
+							}
+							const int srcW = (k < 3) ? 960 : 1920;
+							const int srcH = (k < 3) ? 540 : 1080;
+							const int kern = (k < 3) ? kLanczos3 : kBilinear;
+							const C::LineSnapshot snap = MakeSynthSnapshot(kUhdW, kUhdH, srcW, srcH, kern, 1,
+								r1Seq, evalUs, 97500u + r1Seq, k == 0);
+							Assert::IsTrue(r1Est.SubmitLines(snap));
+						}
+					}
+					Assert::AreEqual(1920, r1Est.StatusInput().latchNx,
+						L"TEST-H1 R1: real BuildClassicalFreshForChain rejects 960x540 sub-harmonic and latches 1920x1080");
+					Assert::AreEqual(1080, r1Est.StatusInput().latchNy);
+				}
+			}
 		}
 
 		// 16. H1 + M1 (HIGH/MEDIUM):
@@ -2645,7 +2907,32 @@ namespace Tests
 				Assert::AreEqual(uint64_t(0), cnt.jointLatch.releasesAbr);
 				Assert::AreEqual(uint64_t(0), cnt.jointLatch.releases);
 
-				// Same-input negative control (a): direct ChainStepMark with positiveDetailAbove = true on 2 fresh frames DOES confirm!
+				// Same-input negative control (a) (TEST-M1): run directly through the REAL latched ChainEstimator!
+				// Raise an ABR mark and feed 2 distinct fresh classical native frames WITH positive above-band detail
+				// alongside flat chain lines (so ONLY ChainEstimator's cfr.positiveDetailAbove wiring can confirm):
+				{
+					const int64_t tPosMarkUs = static_cast<int64_t>(s) * 1000000;
+					est.NoteAbrStepEvent(tPosMarkUs, +0.50, seq);
+					for (int k = 0; k < 2; ++k, ++s, ++seq)
+					{
+						const int64_t tUs = static_cast<int64_t>(s) * 1000000;
+						clk.Set(static_cast<double>(s) * 1500.0);
+						C::ClassicalFreshInput cfPos = MakeClassicalFresh(true, 1.0, 1.0, true, ++cfSeq, tUs, 1.5);
+						cfPos.detailAboveAtRatio = [](double, double) -> bool { return true; };
+						est.SetClassicalFresh(cfPos);
+						const C::LineSnapshot flatPost = MakeFlatSnapshot(kUhdW, kUhdH, 512, seq, tUs, false);
+						Assert::IsTrue(est.SubmitLines(flatPost));
+					}
+					const C::EstimatorCounters cntPos = est.GetCounters();
+					Assert::AreEqual(0, est.StatusInput().latchNx,
+						L"TEST-M1 negative control (a): real ChainEstimator releases immediately on 2 positive-detailAbove native frames");
+					Assert::IsTrue(cntPos.stepMark.confirmedByClassical >= 1,
+						L"TEST-M1: ChainEstimator wired cfr.positiveDetailAbove=true to confirm ABR mark");
+					Assert::IsTrue(cntPos.stepMark.immediateReleases >= 1);
+					Assert::IsTrue(cntPos.jointLatch.releasesAbr >= 1);
+				}
+
+				// Also verify standalone ChainStepMark::OnClassicalFrame directly for unit isolation:
 				C::StepMarkSettings smCfg;
 				smCfg.enabled = true;
 				C::ChainStepMark smDirect(smCfg);
@@ -2667,7 +2954,7 @@ namespace Tests
 				f2.timeUs = 12 * 1000000;
 				const auto oPos = smDirect.OnClassicalFrame(f2, lctx);
 				Assert::IsTrue(oPos.action == C::StepMarkAction::ConfirmVoidAndRelease,
-					L"negative control (a): genuine positiveDetailAbove=true on 2 fresh frames confirms and releases promptly");
+					L"unit control: genuine positiveDetailAbove=true on 2 fresh frames confirms and releases promptly");
 				Assert::AreEqual(uint64_t(1), smDirect.Counters().confirmedByClassical);
 				Assert::AreEqual(uint64_t(1), smDirect.Counters().immediateReleases);
 			}
@@ -2732,6 +3019,59 @@ namespace Tests
 					L"contrast control (b): 2 distinct classical frameSeqs confirm and release immediately");
 				Assert::AreEqual(uint64_t(1), est.GetCounters().stepMark.confirmedByClassical);
 				Assert::AreEqual(uint64_t(1), est.GetCounters().stepMark.immediateReleases);
+
+				// TEST-L3: Legacy 7-arg SetClassicalFresh (frameSeq == 0) also deduplicates 1 snapshot across 2 evals
+				//          via updateGen (0 false confirmations), and confirms cleanly on 2 distinct 7-arg calls!
+				{
+					ChainFx::ManualClock lClk;
+					C::EstimatorSettings lCfg;
+					lCfg.safetyRules = true;
+					lCfg.jointLatch.enabled = true;
+					lCfg.stepMark.enabled = true;
+					lCfg.conventionDrivenProposals = true;
+					C::ChainEstimator lEst(lCfg, lClk.Fn());
+					lEst.SetSynchronous(true);
+					lEst.SetMode(C::EstimatorMode::On);
+
+					uint64_t lSeq = 10;
+					int ls = 0;
+					for (; ls <= 8 && lEst.StatusInput().latchNx == 0; ++ls, ++lSeq)
+					{
+						const int64_t tUs = static_cast<int64_t>(ls) * 1000000;
+						lClk.Set(static_cast<double>(ls) * 1500.0);
+						lEst.SetClassicalFresh(true, 0.25, 0.25, false);
+						const C::LineSnapshot up540 = MakeSynthSnapshot(kUhdW, kUhdH, 960, 540, kBilinear, 1,
+							lSeq, tUs, 98500u + lSeq, ls == 0);
+						Assert::IsTrue(lEst.SubmitLines(up540));
+					}
+					Assert::AreEqual(960, lEst.StatusInput().latchNx, L"TEST-L3 fixture: latched 960x540");
+
+					// Single legacy 7-arg call across 2 flat evals -> MUST NOT double-count (0 confirmations)!
+					lEst.NoteAbrStepEvent(static_cast<int64_t>(ls) * 1000000, +0.25, lSeq);
+					lEst.SetClassicalFresh(true, 0.5, 0.5, false);
+					for (int k = 0; k < 2; ++k, ++ls, ++lSeq)
+					{
+						lClk.Set(static_cast<double>(ls) * 1500.0);
+						Assert::IsTrue(lEst.SubmitLines(MakeFlatSnapshot(kUhdW, kUhdH, 512, lSeq, static_cast<int64_t>(ls) * 1000000, false)));
+					}
+					Assert::AreEqual(960, lEst.StatusInput().latchNx,
+						L"TEST-L3: legacy 7-arg SetClassicalFresh (frameSeq==0) deduplicates 1 snapshot via updateGen");
+					Assert::AreEqual(uint64_t(0), lEst.GetCounters().stepMark.confirmedByClassical);
+					Assert::AreEqual(uint64_t(1), lEst.GetCounters().stepMark.unconfirmedTimeouts);
+
+					// 2 distinct legacy 7-arg calls across 2 flat evals -> confirms and releases immediately!
+					lEst.NoteAbrStepEvent(static_cast<int64_t>(ls) * 1000000, +0.25, lSeq);
+					for (int k = 0; k < 2; ++k, ++ls, ++lSeq)
+					{
+						lClk.Set(static_cast<double>(ls) * 1500.0);
+						lEst.SetClassicalFresh(true, 0.5, 0.5, false);
+						Assert::IsTrue(lEst.SubmitLines(MakeFlatSnapshot(kUhdW, kUhdH, 512, lSeq, static_cast<int64_t>(ls) * 1000000, false)));
+					}
+					Assert::AreEqual(0, lEst.StatusInput().latchNx,
+						L"TEST-L3: 2 distinct legacy 7-arg SetClassicalFresh calls confirm and release immediately");
+					Assert::AreEqual(uint64_t(1), lEst.GetCounters().stepMark.confirmedByClassical);
+					Assert::AreEqual(uint64_t(1), lEst.GetCounters().stepMark.immediateReleases);
+				}
 			}
 
 			// Part C (M1): ClassicalFreshInput staleness check (age > 2 * analysisIntervalSec -> drop & count visibly).
@@ -2972,15 +3312,12 @@ namespace Tests
 						L"L1: Joint entry must not set kReasonChainAloneEntry");
 					Assert::IsTrue(rec.applied[a].llr > 0.0f && rec.applied[a].llr < static_cast<float>(c1),
 						L"fixture: 1-shot Joint LLR is strictly below c1");
-					// Derived confidence (ConfFromLlr / ConfidenceOfLlr), NEVER hardcoded 1.0f when LLR < c1!
+					// TEST-L1: Exact derived ConfidenceOfLlr(llr, c1) — NEVER hardcoded 1.0f when LLR < c1!
 					Assert::IsTrue(rec.applied[a].conf > 0.0f && rec.applied[a].conf < 1.0f,
 						L"L1: Joint entry conf must be derived (< 1.0f when LLR < c1), never hardcoded 1.0f");
-					const float confSigmoid = static_cast<float>(C::ConfFromLlr(rec.applied[a].llr));
-					const float confLinear = static_cast<float>(C::ConfidenceOfLlr(rec.applied[a].llr, c1));
-					const bool matchesDerived =
-						(std::fabs(rec.applied[a].conf - confSigmoid) < 1e-3f) ||
-						(std::fabs(rec.applied[a].conf - confLinear) < 1e-3f);
-					Assert::IsTrue(matchesDerived, L"L1: Joint entry conf matches derived ConfFromLlr / ConfidenceOfLlr");
+					const float expectedConf = static_cast<float>(C::ConfidenceOfLlr(static_cast<double>(rec.applied[a].llr), c1));
+					Assert::AreEqual(expectedConf, rec.applied[a].conf, 1e-5f,
+						L"TEST-L1: Joint entry conf must equal exact ConfidenceOfLlr(llr, c1)");
 				}
 			}
 
