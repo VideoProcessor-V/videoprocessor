@@ -1500,7 +1500,7 @@ if (tid == 0)
             float rM3 = totRefD3[k] * invC;
             float rEnergy = rM2 + rM3;
             float rF = (rEnergy > TD_NUM_FLOOR) ? (rM2 / (rEnergy + TD_NUM_FLOOR)) : 1.0;
-            if (rEnergy > u_structure_floor && cM2 < rM2 && curFDebiased < TD_F_SHARP &&
+            if (rEnergy > u_structure_floor && cM2 < rM2 && curFDebiased <= TD_F_DEFOCUS &&
                 (rF - curF) > TD_F_SHIFT_DELTA)
             {
                 focusChange = true;

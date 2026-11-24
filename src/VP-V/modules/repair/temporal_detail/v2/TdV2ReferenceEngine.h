@@ -650,14 +650,16 @@ namespace TdV2
 				else
 				{
 					// Detect genuine focal-plane shift (rack focus) along motion respecting Parseval's theorem:
-					// Optical defocus (|H(w)| <= 1) strictly reduces mid-band energy (curM2 < refM2) and pulls
-					// focus ratio down by > F(0) - F(kSigmaBase), so static curved smooth gradients (sky/vignette)
-					// where refF ~= curF NEVER trigger false focusChange vetoes!
+					// Optical defocus (|H(w)| <= 1) strictly reduces mid-band energy (curM2 < refM2), pulls
+					// current noise-debiased focus ratio into the optical defocus regime (curFDebiased <= fDefocus),
+					// and drops focus ratio by > F(0) - F(kSigmaBase), so both static curved smooth gradients
+					// (refF ~= curF) and focused B-frames with quantization-attenuated M-band (curFDebiased > fDefocus)
+					// NEVER trigger false focusChange vetoes!
 					for (const auto& rb : refBands)
 					{
 						double refEnergy = 0.0, refM2 = 0.0;
 						const double refF = cellFocusRatio(rb, cx, cy, refEnergy, refM2);
-						if (refEnergy > structureFloor && curM2 < refM2 && curFDebiased < fSharp &&
+						if (refEnergy > structureFloor && curM2 < refM2 && curFDebiased <= fDefocus &&
 						    (refF - curF) > fShiftDelta)
 						{
 							info[idx].focusChange = true;
