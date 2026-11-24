@@ -446,7 +446,14 @@ namespace P1AcquireSourceTestsNs
 
 			// S1-L1: Original pathway host refuses with the explicit "p1_cpu: original pathway" reason (even when a
 			// source offer was already present before switching to Original), and ignores new OfferP1CpuSource calls.
+			SkeletonMemo origMemo;
+			origMemo.SetHost(&rig.origHost);
+			rig.demand->memo = &origMemo;
+			// OfferP1CpuSource(&rig.origHost, 9, ...) transitions desiredDepth_ 0 -> kAheadCeiling so SyncRegistration
+			// installs P1CpuFill on origMemo before NoteOriginalPathway(&rig.origHost, true) is toggled on.
 			Vpv::FrameAnalysis::OfferP1CpuSource(&rig.origHost, 9, f.source);
+			Assert::IsTrue(origMemo.HasOwnerFill(kP1HalfLuma, AcquireForm::Cpu),
+				L"precondition: P1CpuFill owner fill must be registered on origMemo before Original-pathway Acquire");
 			Vpv::Hub::ExtensionHub::Instance().NoteOriginalPathway(&rig.origHost, true);
 			{
 				AnalysisLumaSource origTracked = f.source;
@@ -458,10 +465,6 @@ namespace P1AcquireSourceTestsNs
 				origTracked.backingOwner.reset();
 				Assert::IsTrue(weakOrig.expired(), L"Original pathway OfferP1CpuSource must not retain frame backingOwner");
 			}
-			SkeletonMemo origMemo;
-			origMemo.SetHost(&rig.origHost);
-			rig.demand->memo = &origMemo;
-			Vpv::FrameAnalysis::NoteP1CpuDemand(&rig.host, true);
 			const AcquireResult origRes = origMemo.Acquire(kP1HalfLuma, 9, AcquireForm::Cpu);
 			rig.demand->memo = &rig.memo;
 			Assert::IsTrue(origRes.status == AcquireStatus::Unavailable && origRes.cause == AcquireCause::OwnerDeclined,
@@ -607,14 +610,18 @@ namespace P1AcquireSourceTestsNs
 			RealSkeletonRig rig;
 			Vpv::Skeleton::FrameMemo fm = rig.sk->MemoFor(&rig.host, 1);
 			Assert::IsTrue(fm.Valid());
-			const Frame f = Make(Kind::P010, 1);
+			// Do NOT call OfferP1CpuSource(&rig.host, ...) here: an active source offer keeps HostEntry::Active()
+			// permanently true (entrances - lastOfferAt <= kAheadCeiling), which would prevent NoteP1CpuDemand(false)
+			// from dropping desiredDepth_ to 0. With offered == false, every false/true toggle genuinely transitions
+			// wantDepth between kAheadCeiling and 0 through SyncRegistration on the real SkeletonModule.
 			Vpv::FrameAnalysis::NoteP1CpuDemand(&rig.host, true);
-			Vpv::FrameAnalysis::OfferP1CpuSource(&rig.host, 1, f.source);
 			Assert::IsTrue(fm.memo->HasOwnerFill(kP1HalfLuma, AcquireForm::Cpu),
 				L"precondition: P1CpuFill registered before concurrent transition test");
-			Assert::IsTrue(fm.memo->Acquire(kP1HalfLuma, 1, AcquireForm::Cpu).Ok(),
-				L"precondition: baseline Acquire succeeds");
+			const AcquireResult baseline = fm.memo->Acquire(kP1HalfLuma, 1, AcquireForm::Cpu);
+			Assert::IsTrue(baseline.status == AcquireStatus::Unavailable && baseline.cause == AcquireCause::OwnerDeclined,
+				L"precondition: registered P1CpuFill runs and declines missing frame with OwnerDeclined (not NoOwnerFill)");
 
+			std::atomic<int> ready{ 0 };
 			std::atomic<bool> stop{ false };
 			std::atomic<uint64_t> noOwnerFillHits{ 0 };
 			std::atomic<uint64_t> missingOwnerProbes{ 0 };
@@ -624,12 +631,13 @@ namespace P1AcquireSourceTestsNs
 			auto readerLoop = [&](uint64_t seqBase) {
 				uint64_t seq = seqBase;
 				uint64_t acquires = 0;
+				ready.fetch_add(1, std::memory_order_release);
 				while (!stop.load(std::memory_order_acquire))
 				{
 					if (!fm.memo->HasOwnerFill(kP1HalfLuma, AcquireForm::Cpu))
 						missingOwnerProbes.fetch_add(1, std::memory_order_relaxed);
 					totalProbes.fetch_add(1, std::memory_order_relaxed);
-					if (acquires < 4000u)
+					if (acquires < 8000u)
 					{
 						const AcquireResult r = fm.memo->Acquire(kP1HalfLuma, seq++, AcquireForm::Cpu);
 						if (r.status == AcquireStatus::Unavailable && r.cause == AcquireCause::NoOwnerFill)
@@ -642,8 +650,10 @@ namespace P1AcquireSourceTestsNs
 
 			std::thread readerA(readerLoop, 1000u);
 			std::thread readerB(readerLoop, 1000000u);
+			while (ready.load(std::memory_order_acquire) < 2)
+				std::this_thread::yield();
 
-			// Hammer 3,000 depth transitions (active -> inactive -> active) while readers probe continuously.
+			// Hammer 3,000 real depth transitions (kAheadCeiling -> 0 -> kAheadCeiling) while both readers probe continuously.
 			for (int i = 0; i < 1500; ++i)
 			{
 				Vpv::FrameAnalysis::NoteP1CpuDemand(&rig.host, false);
@@ -679,12 +689,14 @@ namespace P1AcquireSourceTestsNs
 
 			int host = 0;
 			const Frame f = Make(Kind::P010, 3);
+			std::atomic<int> ready{ 0 };
 			std::atomic<bool> stop{ false };
 			std::atomic<uint64_t> offers{ 0 };
 			std::atomic<uint64_t> demands{ 0 };
 
 			std::thread offerWorker([&]() {
 				uint64_t seq = 1;
+				ready.fetch_add(1, std::memory_order_release);
 				while (!stop.load(std::memory_order_acquire))
 				{
 					Vpv::FrameAnalysis::OfferP1CpuSource(&host, seq++, f.source);
@@ -693,6 +705,7 @@ namespace P1AcquireSourceTestsNs
 			});
 			std::thread demandWorker([&]() {
 				bool active = true;
+				ready.fetch_add(1, std::memory_order_release);
 				while (!stop.load(std::memory_order_acquire))
 				{
 					Vpv::FrameAnalysis::NoteP1CpuDemand(&host, active);
@@ -700,6 +713,8 @@ namespace P1AcquireSourceTestsNs
 					demands.fetch_add(1, std::memory_order_relaxed);
 				}
 			});
+			while (ready.load(std::memory_order_acquire) < 2)
+				std::this_thread::yield();
 
 			for (int i = 0; i < 200; ++i)
 			{
