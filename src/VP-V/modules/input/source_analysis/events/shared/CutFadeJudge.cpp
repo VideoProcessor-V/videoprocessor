@@ -420,7 +420,7 @@ GridFadeFit FitGridFadeAligned(const double refAligned[kGridH][kGridW], const do
 }
 
 GridFadeFit FitMotionTolerantFade(const double refAligned[kGridH][kGridW], const double curAligned[kGridH][kGridW],
-                                  double vx, double vy, bool allowNearBlackCollapse)
+                                  double vx, double vy, bool allowNearBlackCollapse, bool activeFade)
 {
     constexpr int R = kLocalRadius;
     constexpr int kIntH = kGridH - 2 * R;
@@ -467,8 +467,9 @@ GridFadeFit FitMotionTolerantFade(const double refAligned[kGridH][kGridW], const
     fit.gain = A;
     // FitMotionTolerantFade runs only when rigid 392-cell OLS failed V_fade < kFadeResidualReduction * V_id,
     // meaning non-rigid motion accounts for >= kFadeResidualReduction (50%) of variance. Matching rigid OLS's
-    // implied-black b = c / (1 - A) SNR therefore requires 1 / kFadeResidualReduction (2x) cumulative gain.
-    const double minMotionGain = kFadeRunMinGain / kFadeResidualReduction;
+    // implied-black b = c / (1 - A) SNR on onset therefore requires 1 / kFadeResidualReduction (2x) cumulative gain;
+    // once a fade is already confirmed (activeFade), kFadeRunMinGain preserves continuity across pan leapfrogs.
+    const double minMotionGain = activeFade ? kFadeRunMinGain : (kFadeRunMinGain / kFadeResidualReduction);
     if (!(A > 0.0 && std::fabs(1.0 - A) > minMotionGain))
         return fit;
 
@@ -1461,7 +1462,8 @@ bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur
             if (rigidFootprintOk && TryAcceptCumFit(rigidFit))
                 return true;
             if (!cumFootprintRejected) {
-                const GridFadeFit mtFit = FitMotionTolerantFade(baseAligned, curBaseAligned, cumFitVx, cumFitVy, nearBlackFall);
+                const GridFadeFit mtFit = FitMotionTolerantFade(baseAligned, curBaseAligned, cumFitVx, cumFitVy,
+                                                                nearBlackFall, run.fadePairs >= 1u);
                 if (TryAcceptCumFit(mtFit))
                     return true;
             }
@@ -1479,7 +1481,8 @@ bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur
             GridFadeFit adjFit = rigidAdj;
             bool adjOk = adjFootprintOk;
             if (!adjOk && !adjFootprintRejected) {
-                adjFit = FitMotionTolerantFade(prevAligned, curAligned, stepVx, stepVy, nearBlackFall);
+                adjFit = FitMotionTolerantFade(prevAligned, curAligned, stepVx, stepVy,
+                                               nearBlackFall, run.fadePairs >= 1u);
                 adjOk = adjFit.valid && adjFit.dir == run.direction;
             }
             if (adjOk && HighlightScalingConsistent(prev.p99, cur.p99, adjFit.gain, adjFit.black, adjFit.dir) &&

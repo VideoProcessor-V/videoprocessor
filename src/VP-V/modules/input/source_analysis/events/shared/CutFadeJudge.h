@@ -295,7 +295,7 @@ GridFadeFit FitGridFadeAligned(const double refAligned[kGridH][kGridW], const do
 // Motion-tolerant order-statistic OLS + exact 4x2 square macro-tile uniformity + 14x7 2x2-pooled structure continuity
 // fallback over the already-aligned 28x14 interior (zero extra AlignGrid calls, zero new constants, zero heap allocations).
 GridFadeFit FitMotionTolerantFade(const double refAligned[kGridH][kGridW], const double curAligned[kGridH][kGridW],
-                                  double vx, double vy, bool allowNearBlackCollapse = false);
+                                  double vx, double vy, bool allowNearBlackCollapse = false, bool activeFade = false);
 
 // Verifies raw-pixel highlight p99 scales consistently with the cell-OLS fade gain about implied black
 // (rejects midtone flicker with pinned highlights; near-black p99 <= black + kFadeMinSpread passes to black-boundary rules).
