@@ -8101,8 +8101,9 @@ namespace Tests
 			Assert::IsTrue(lowStarter.Logged("Motion ahead: engaged") && lowStarter.Logged("vector engine: shallow queue"),
 				(L"B: games queue with de-judder demand engages shallow look-ahead\n" + lowStarter.Tail()).c_str());
 			Assert::IsTrue(VectorsDelivered(lowStarter), (L"B: games shallow queue with de-judder demand delivers real vectors\n" + lowStarter.Tail()).c_str());
-			Assert::AreEqual(0LL, (std::max)(telB.statusCount, telB.logCount),
-				(L"B: estimate-mode shallow queue does not run ServeStatistics substitution\n" + lowStarter.Tail()).c_str());
+			const long long shallowB = (std::max)(telB.statusCount, telB.logCount);
+			Assert::IsTrue(shallowB > 0,
+				(L"B: low-latency queue disables de-judder and runs ForwardShallow ServeStatistics substitution (count > 0)\n" + lowStarter.Tail()).c_str());
 			assertNoAddedQueueDepth(lowStarter, L"B");
 			Assert::IsTrue(normal.presented, (L"C: frames presented\n" + normal.Tail()).c_str());
 			Assert::IsTrue(normal.Logged("Motion ahead: engaged"), (L"C: a Normal queue engages the look-ahead\n" + normal.Tail()).c_str());
