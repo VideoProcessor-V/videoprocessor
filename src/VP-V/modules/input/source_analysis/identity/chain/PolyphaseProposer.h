@@ -76,11 +76,8 @@ namespace SourceIdentity
 					s_.qMax = 2;
 				if (s_.qMax > 32)
 					s_.qMax = 32;
-				// SID-OPT: accumulate only maximal periods q > qMax / 2; every non-maximal period q <= qMax / 2 divides
-				// its maximal multiple M = (qMax / q) * q > qMax / 2 and is folded exactly in Scores().
-				qMinMaximal_ = s_.qMax / 2 + 1;
 				int total = 0;
-				for (int q = qMinMaximal_; q <= s_.qMax; ++q)
+				for (int q = 2; q <= s_.qMax; ++q)
 				{
 					off_[q] = total;
 					total += q;
@@ -122,7 +119,7 @@ namespace SourceIdentity
 					for (int k = 0; k < ls.length; ++k)
 						v[k] = y[k] - mean;
 					int ph[33];
-					for (int q = qMinMaximal_; q <= s_.qMax; ++q)
+					for (int q = 2; q <= s_.qMax; ++q)
 						ph[q] = (origin_ + 3) % q;   // phase class of sample k = 3; advanced by 1 per sample (no division in the loop)
 					for (int k = 3; k <= ls.length - 3; ++k)
 					{
@@ -136,7 +133,7 @@ namespace SourceIdentity
 							tm[15 + i] = f[i] * t;
 						tm[20] = t * t;
 						tm[21] = 1.0;
-						for (int q = qMinMaximal_; q <= s_.qMax; ++q)
+						for (int q = 2; q <= s_.qMax; ++q)
 						{
 							double* dst = &stats_[(static_cast<size_t>(off_[q]) + static_cast<size_t>(ph[q])) * kTerms];
 							for (int e = 0; e < kTerms; ++e)
@@ -346,50 +343,23 @@ namespace SourceIdentity
 					return;
 				double pooled[kTerms];
 				for (int e = 0; e < kTerms; ++e)
-					pooled[e] = 0.0;
-				const int qRef = s_.qMax;
-				for (int c = 0; c < qRef; ++c)
-				{
-					const double* src = &stats_[(static_cast<size_t>(off_[qRef]) + static_cast<size_t>(c)) * kTerms];
-					for (int e = 0; e < kTerms; ++e)
-						pooled[e] += src[e];
-				}
+					pooled[e] = stats_[static_cast<size_t>(off_[2]) * kTerms + e] + stats_[(static_cast<size_t>(off_[2]) + 1) * kTerms + e];
 				double rssPooled = 0.0;
 				double total = 0.0;
 				if (!Fit(pooled, rssPooled, total) || total < static_cast<double>(s_.minSamples) || !(rssPooled > 0.0))
 					return;
 				const double lnN = std::log(total);
-				double folded[kTerms];
 				for (int q = 2; q <= s_.qMax; ++q)
 				{
 					double rssQ = 0.0;
 					bool ok = true;
 					int low = 0;
 					double lowVar = 0.0;
-					const bool direct = q >= qMinMaximal_;
-					const int multM = direct ? q : (s_.qMax / q) * q;
 					for (int c = 0; c < q; ++c)
 					{
-						const double* stPtr = nullptr;
-						if (direct)
-						{
-							stPtr = &stats_[(static_cast<size_t>(off_[q]) + static_cast<size_t>(c)) * kTerms];
-						}
-						else
-						{
-							for (int e = 0; e < kTerms; ++e)
-								folded[e] = 0.0;
-							for (int cm = c; cm < multM; cm += q)
-							{
-								const double* src = &stats_[(static_cast<size_t>(off_[multM]) + static_cast<size_t>(cm)) * kTerms];
-								for (int e = 0; e < kTerms; ++e)
-									folded[e] += src[e];
-							}
-							stPtr = folded;
-						}
 						double r = 0.0;
 						double cn = 0.0;
-						if (!Fit(stPtr, r, cn))
+						if (!Fit(&stats_[(static_cast<size_t>(off_[q]) + static_cast<size_t>(c)) * kTerms], r, cn))
 						{
 							ok = false;
 							break;
@@ -418,7 +388,6 @@ namespace SourceIdentity
 			}
 
 			ProposerSettings s_;
-			int qMinMaximal_ = 2;
 			int off_[33] = {};
 			int slots_ = 0;
 			std::vector<double> stats_;

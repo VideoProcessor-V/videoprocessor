@@ -10,23 +10,39 @@
 //   - Hann-windowed averaged PSD normalization: power[k] /= (segments * windowEnergy * 2.0), matching
 //     SourceResolutionDetector.cpp:177-179 so white noise of std `floorCodes` has E[power[k]] = floorCodes^2
 //     per interior bin (0.5 * floorCodes^2 at the 1-DOF Nyquist bin).
-//   - Band boundaries relative to candidate cutoff cut = (candidateN / axisLen) * (fftN / 2):
-//     low = [0.15*cut, 0.50*cut], halo = [0.55*cut, 1.35*cut] (with above-cutoff transition sub-band
-//     [1.02*cut, 1.35*cut] where LS-projected USM residual concentrates), and far stopband
-//     far = [1.40*cut, 0.95*half] (5% Nyquist edge trim, cf. SourceResolutionDetector.cpp:829-830's
-//     0.97*half upper limit), excluding DC, Nyquist, and 8/16-px block harmonics.
-//   - Power gate: lineGateFactor = 1.5 (ChainEvidence.h) => power gate = 1.5^2 = 2.25 * floorCodes^2.
+//   - Band boundaries relative to candidate cutoff cut = (candidateN / axisLen) * (fftN / 2), derived
+//     algebraically from W1 SourceResolutionDetector.cpp:857-858 (kW1BelowLo = 0.55, kW1BelowHi = 0.90,
+//     width = 0.35, midpoint = 0.50, elementary 1/20 = 0.05 guard matching ReadingSettings::kernelMarginScale):
+//       * low  = [0.15*cut, 0.50*cut]  (0.50 - 0.35 = 0.15; equal width to W1 below-band, clears DC/Hann lobe)
+//       * halo = [0.55*cut, 1.35*cut]  (W1 0.55..1.0 + symmetric 0.35 reflection above cutoff)
+//       * far  = [1.40*cut, 0.95*half] (1.35 + 0.05 symmetric guard to 1.0 - 0.05 Nyquist edge trim)
+//     excluding DC, Nyquist, and 8/16-px block harmonics.
+//   - Power gate: lineGateFactor = 1.5 (ChainEvidence.h) => gateMult = 1.5^2 = 2.25, gateP = 2.25 * floorP.
+//   - Physical TPDF dither variance upper bound: uniform rounding floorP = floorCodes^2 = step^2 / 12;
+//     additive TPDF dither variance = 2 * floorP (quantized Schuchman TPDF = 3 * floorP); with gateMult = 2.25,
+//     tpdfUpperP = gateMult * 2.0 * floorP = 4.5 * floorP. Flat far-stopband energy in (gateP, tpdfUpperP] is
+//     DitherDominated (neverRebase = false); flat far-stopband energy > tpdfUpperP (e.g. 4K / 2K-DI film grain)
+//     is NativeCodedStudioUpscale with codedRaster = NativeCoded, neverRebase = true, and explicit reason
+//     NativeCodedGrainAboveDitherBound.
 //   - Power guard: floorGuardDivisor = 4.0 (ChainEdgeStats.h) => epsP = floorCodes^2 / 16.
-//   - Spectral flatness (Wiener entropy): SFM = exp(mean(ln P_k)) / mean(P_k) in (0, 1]; flat white
-//     dither approaches 1.0 (>= 0.5), structured / harmonic high-band detail drops below 0.5.
+//   - Spectral flatness (Wiener entropy): SFM = exp(mean(ln P_k)) / mean(P_k) in (0, 1]; midpoint 0.5
+//     (PROVISIONAL pending Stage S5 G-gate calibration) separates flat white noise/grain (>= 0.5) from
+//     structured / harmonic high-band detail (< 0.5).
 //   - Alias-pair USM inversion: on LS descale residual e = (I - P_U) M U z with M(f) = 1 + a(1 - G_sigma(f)),
-//     G_sigma(f) = exp(-2 * pi^2 * sigma^2 * f^2), at transition bin f' in [1.02*f_c, 1.35*f_c] with mirror
-//     partner f = 2*f_c - f', |E(f')|/|Y(f')| ~= a*(G_sigma(f) - G_sigma(f')) / (1 + a*(1 - G_sigma(f'))).
+//     G_sigma(f) = exp(-2 * pi^2 * sigma^2 * f^2), at transition bin f' in [1.02*f_c, 1.35*f_c] (2% Nyquist
+//     clearance avoiding the exact f' = f_c mirror singularity where dG = 0; PROVISIONAL pending Stage S5
+//     G-gate calibration) with mirror partner f = 2*f_c - f',
+//     |E(f')|/|Y(f')| ~= a*(G_sigma(f) - G_sigma(f')) / (1 + a*(1 - G_sigma(f'))).
+//     Physical gain cap kMaxUsmGain = 8.0 (2^3 = 3-bit / 18 dB dynamic-range headroom before highlight/shadow
+//     clipping; PROVISIONAL pending S5 G-gate) yields exact algebraic denominator lower bound
+//     1 / (1 + kMaxUsmGain) = 1/9 (never reusing floorGuardDivisor).
 //     Falls back to passband Wiener ratio and Gaussian half-power inversion sigma = sqrt(ln(2)/(2*pi^2))/f_half
 //     when fewer than 2 transition bins are active above gateP.
-//   - Double scaling (OD-4 E=(1)): always reports lastStageN as primary size; requires valid finite
-//     descaleStat candidates and flags firstStageN < lastStageN when power collapses by >= 1.0 decade (10x)
-//     between [0.55*f_c1, 0.90*f_c1] and [1.15*f_c1, 0.90*f_c2], prioritizing deepest confirmed descaleStat < -0.10.
+//   - Double scaling (OD-4 E=(1)): always reports lastStageN as primary size; skips n1 / lastStageN > 0.90
+//     (derived from W1 Tracker::Settings::nativeAbove = 0.9 and W1 0.90*f_c2 passband limit); requires valid
+//     finite descaleStat candidates and flags firstStageN < lastStageN when power collapses by >= 1.0 decade
+//     (10x) between [0.55*f_c1, 0.90*f_c1] and [1.15*f_c1, 0.90*f_c2], prioritizing deepest confirmed
+//     descaleStat < 3 * EvidenceSettings::majorityDip (-0.09; PROVISIONAL pending Stage S5 G-gate calibration).
 //   - Kernel fit: symmetric half-pixel tent basis h(t_b) at t_b = 0.5 * b (b = 0 .. 2*halfSupport - 1,
 //     h(halfSupport) = 0) with partition-of-unity integral 0.5*c_0 + sum_{b>=1} c_b = 1 and strictly
 //     numerical Tikhonov guard kernelFitRidge = 1e-6.
@@ -85,6 +101,7 @@ namespace SourceIdentity
 			FlatWhiteDitherFloor,
 			BandShapedUsmHalo,
 			NativeCodedHighBandEnergy,
+			NativeCodedGrainAboveDitherBound,
 			DoubleScaleConfirmed,
 			SingleStageOnly,
 			KernelFitSingular,
@@ -103,6 +120,7 @@ namespace SourceIdentity
 			case ResidualSpectrumReason::FlatWhiteDitherFloor: return "flat white dither floor above cutoff";
 			case ResidualSpectrumReason::BandShapedUsmHalo: return "band-shaped USM sharpening halo";
 			case ResidualSpectrumReason::NativeCodedHighBandEnergy: return "native-coded high-band energy (never rebase)";
+			case ResidualSpectrumReason::NativeCodedGrainAboveDitherBound: return "native-coded flat high-band energy above TPDF dither bound (never rebase)";
 			case ResidualSpectrumReason::DoubleScaleConfirmed: return "double-scale first-stage cutoff confirmed";
 			case ResidualSpectrumReason::SingleStageOnly: return "single-stage upscale only";
 			case ResidualSpectrumReason::KernelFitSingular: return "separable kernel normal equations singular";
@@ -783,16 +801,28 @@ namespace SourceIdentity
 			const double cut = ratio * static_cast<double>(half);
 			const double fCut = 0.5 * ratio; // cycles per pixel at candidate Nyquist
 
-			// Band limits around candidate Nyquist `cut`:
-			//   - low:  [0.15*cut, 0.50*cut]  (passband interior)
-			//   - halo: [0.55*cut, 1.35*cut]  (cutoff transition halo where LS-projected USM residual concentrates)
-			//   - far:  [1.40*cut, 0.95*half] (far stopband past kernel transition; 5% Nyquist edge trim)
-			const int low0 = static_cast<int>(std::ceil(0.15 * cut));
-			const int low1 = static_cast<int>(std::floor(0.50 * cut));
-			const int halo0 = static_cast<int>(std::ceil(0.55 * cut));
-			const int halo1 = (std::min)(half - 1, static_cast<int>(std::floor(1.35 * cut)));
-			const int far0 = static_cast<int>(std::ceil(1.40 * cut));
-			const int far1 = static_cast<int>(std::floor(0.95 * static_cast<double>(half)));
+			// Band limits around candidate Nyquist `cut`, derived from W1 SourceResolutionDetector.cpp:857-858
+			// (kW1BelowLo = 0.55, kW1BelowHi = 0.90, width = 0.35), passband midpoint 0.50, and elementary 1/20 = 0.05 guard
+			// (matching ReadingSettings::kernelMarginScale = 0.05):
+			//   - low:  [0.15*cut, 0.50*cut]  (passband lower half, equal 0.35 width to W1 below-band)
+			//   - halo: [0.55*cut, 1.35*cut]  (W1 0.55..1.0 + symmetric 0.35 reflection above cutoff)
+			//   - far:  [1.40*cut, 0.95*half] (halo upper + 0.05 symmetric guard to 1.0 - 0.05 Nyquist edge trim)
+			constexpr double kW1BelowLo = 0.55;
+			constexpr double kW1BelowHi = 0.90;
+			constexpr double kW1BelowWidth = kW1BelowHi - kW1BelowLo;   // 0.35
+			constexpr double kBandGuard = 0.05;                         // 1/20 elementary transition/Nyquist guard
+			constexpr double kLowHiFrac = 0.50;                         // exact passband midpoint 1/2
+			constexpr double kLowLoFrac = kLowHiFrac - kW1BelowWidth;   // 0.15
+			constexpr double kHaloLoFrac = kW1BelowLo;                  // 0.55
+			constexpr double kHaloHiFrac = 1.0 + kW1BelowWidth;         // 1.35
+			constexpr double kFarLoFrac = kHaloHiFrac + kBandGuard;     // 1.40
+			constexpr double kFarHiFrac = 1.0 - kBandGuard;             // 0.95
+			const int low0 = static_cast<int>(std::ceil(kLowLoFrac * cut));
+			const int low1 = static_cast<int>(std::floor(kLowHiFrac * cut));
+			const int halo0 = static_cast<int>(std::ceil(kHaloLoFrac * cut));
+			const int halo1 = (std::min)(half - 1, static_cast<int>(std::floor(kHaloHiFrac * cut)));
+			const int far0 = static_cast<int>(std::ceil(kFarLoFrac * cut));
+			const int far1 = static_cast<int>(std::floor(kFarHiFrac * static_cast<double>(half)));
 
 			double resLow = 0.0;
 			double resHalo = 0.0;
@@ -857,9 +887,21 @@ namespace SourceIdentity
 			const double blockHarmSigMean = blockHarmCount > 0 ? blockHarmSigSum / static_cast<double>(blockHarmCount) : 0.0;
 			const double blockHarmRatio = blockHarmResMean / (std::max)(resFar, floorP);
 
-			// 1. NativeCodedStudioUpscale (C8 / OD-4 C=(1)): structured far-stopband detail (SFM < 0.5)
+			// Physical TPDF dither variance upper bound (H4 / SID-C3):
+			//   - Uniform rounding variance floorP = floorCodes^2 = step^2 / 12.
+			//   - Additive TPDF dither variance = 2 * floorP (quantized Schuchman TPDF = 3 * floorP).
+			//   - With power gate multiplier gateMult = lineGateFactor^2 = 2.25:
+			//     tpdfUpperP = gateMult * 2.0 * floorP = 4.5 * floorP (at 10-bit: 0.375, sigma <= 0.612 codes).
+			//   - Quantized 10-bit TPDF (3 * floorP = 0.25) sits cleanly inside (gateP, tpdfUpperP] = (0.1875, 0.375];
+			//     real 4K / 2K-DI film grain (e.g. sigma ~= 2.0 codes => resFar ~= 4.0 >> 0.375) exceeds tpdfUpperP
+			//     and MUST classify as NativeCodedStudioUpscale (codedRaster = NativeCoded, neverRebase = true).
+			const double tpdfUpperP = gateMult * 2.0 * floorP;
+			// Exact midpoint 1/2 of the Wiener entropy (SFM) domain (0, 1]; PROVISIONAL pending Stage S5 G-gate calibration.
+			constexpr double kFlatnessWhiteThresh = 0.5;
+
+			// 1. NativeCodedStudioUpscale (C8 / OD-4 C=(1)): structured far-stopband detail (SFM < kFlatnessWhiteThresh)
 			//    or 8-px native codec harmonic peak >= lineGateFactor^2. USM leaves far stopband at floor.
-			const bool structuredFarBand = (sigFar > gateP) && (resFar > gateP) && (resFarFlat < 0.5);
+			const bool structuredFarBand = (sigFar > gateP) && (resFar > gateP) && (resFarFlat < kFlatnessWhiteThresh);
 			const bool blockHarmonicFarBand =
 				(blockHarmCount > 0) &&
 				(blockHarmResMean > gateP) &&
@@ -882,9 +924,27 @@ namespace SourceIdentity
 				return res;
 			}
 
-			// 2. DitherDominated: elevated flat white dither floor across far stopband with no band-shaped halo peak.
+			// 2a. NativeCodedStudioUpscale (H4 / fake-4K film-grain boundary): flat far-stopband energy EXCEEDING the
+			//     physical TPDF dither upper bound tpdfUpperP = gateMult * 2 * (step^2 / 12) is genuine native-coded
+			//     high-frequency grain/texture (never re-base), NOT dither.
+			if (resFar > tpdfUpperP &&
+				resFarFlat >= kFlatnessWhiteThresh &&
+				resHalo < gateMult * resFar)
+			{
+				res.valid = true;
+				res.classification = ResidualClass::NativeCodedStudioUpscale;
+				res.codedRaster = Geometry::CodedRaster::NativeCoded;
+				res.neverRebase = true;
+				res.reason = ResidualSpectrumReason::NativeCodedGrainAboveDitherBound;
+				res.confidence = ClampD(resFarFlat * (1.0 - tpdfUpperP / (resFar + tpdfUpperP)), 0.0, 1.0);
+				return res;
+			}
+
+			// 2b. DitherDominated: flat white TPDF dither floor within physical TPDF bound (gateP, tpdfUpperP],
+			//     with no band-shaped halo peak.
 			if (resFar > gateP &&
-				resFarFlat >= 0.5 &&
+				resFar <= tpdfUpperP &&
+				resFarFlat >= kFlatnessWhiteThresh &&
 				resHalo < gateMult * resFar)
 			{
 				res.valid = true;
@@ -908,9 +968,12 @@ namespace SourceIdentity
 				res.neverRebase = false;
 				res.reason = ResidualSpectrumReason::BandShapedUsmHalo;
 
-				// Exact analytical alias-pair USM inversion over above-cutoff transition bins [1.02*cut, 1.35*cut]:
+				// Exact analytical alias-pair USM inversion over above-cutoff transition bins [(1 + kTransNyquistGuard)*cut, halo1]:
 				// r_obs(f') ~= a * (G_sigma(f) - G_sigma(f')) / (1 + a * (1 - G_sigma(f'))), f = 2*f_c - f'.
-				const int trans0 = (std::max)(1, static_cast<int>(std::ceil(1.02 * cut)));
+				// kTransNyquistGuard = 1/50 = 0.02 clears the exact f' = f_c mirror singularity (where f = f' => dG = 0)
+				// and Hann main-lobe leakage at cut (PROVISIONAL pending Stage S5 G-gate calibration).
+				constexpr double kTransNyquistGuard = 0.02;
+				const int trans0 = (std::max)(1, static_cast<int>(std::ceil((1.0 + kTransNyquistGuard) * cut)));
 				const int trans1 = halo1;
 				std::vector<double> transFreq;
 				std::vector<double> transMirrorFreq;
@@ -940,9 +1003,12 @@ namespace SourceIdentity
 				if (transFreq.size() >= 2)
 				{
 					const double twoPiSq = 2.0 * kPi * kPi;
-					// Singularity guard derived from existing floorGuardDivisor (1 / 4^2 = 1/16) and finite gain bound (2 * 4 = 8x).
-					const double invDenomFloor = 1.0 / (s.floorGuardDivisor * s.floorGuardDivisor);
-					const double maxUsmGain = 2.0 * s.floorGuardDivisor;
+					// Physical USM contrast-boost stability bound: kMaxUsmGain = 8.0 (2^3 = 3 bits / 18 dB dynamic-range
+					// headroom before highlight/shadow clipping; PROVISIONAL pending Stage S5 G-gate calibration).
+					// Exact algebraic lower bound on 1 - a_eff*(1 - gBar) = 1 / (1 + a*(1 - gBar)) >= 1 / (1 + kMaxUsmGain)
+					// for all physical a <= kMaxUsmGain and gBar in [0, 1] (no reuse of floorGuardDivisor).
+					constexpr double kMaxUsmGain = 8.0;
+					constexpr double kInvDenomFloor = 1.0 / (1.0 + kMaxUsmGain);
 					double bestSse = 1e300;
 					double bestSigma = 1.0;
 					double bestAmount = 0.0;
@@ -974,8 +1040,8 @@ namespace SourceIdentity
 							continue;
 						const double aEff = num / den;
 						const double gBar = gBarNum / wSum;
-						const double denomInv = (std::max)(1.0 - aEff * (1.0 - gBar), invDenomFloor);
-						const double aCand = ClampD(aEff / denomInv, 0.0, maxUsmGain);
+						const double denomInv = (std::max)(1.0 - aEff * (1.0 - gBar), kInvDenomFloor);
+						const double aCand = ClampD(aEff / denomInv, 0.0, kMaxUsmGain);
 						if (!(aCand > 0.0) || !std::isfinite(aCand))
 							continue;
 						double sse = 0.0;
@@ -1272,9 +1338,15 @@ namespace SourceIdentity
 				return res;
 			}
 
-			// Derived descale dip confirmation tier: -0.10 ln units (~10% residual reduction below baseline)
-			// distinguishes genuine first-stage descale notches from 1/f^2 low-frequency spectral bias.
-			constexpr double kConfirmedDescaleDip = -0.10;
+			// Derived from W1 contract constants:
+			//   - kDoubleScaleMaxStageRatio = 0.90 (W1 SourceResolution::Tracker::Settings::nativeAbove = 0.9 and
+			//     W1 SourceResolutionDetector.cpp:857 passband upper limit 0.90*cut; n1/n2 > 0.90 collapses [1.15*f_c1, 0.90*f_c2]).
+			//   - kConfirmedDescaleDip = 3.0 * EvidenceSettings::majorityDip (-0.03 * 3 = -0.09 ln units;
+			//     PROVISIONAL pending Stage S5 G-gate calibration) distinguishes genuine first-stage descale notches
+			//     from 1/f^2 low-frequency spectral bias.
+			constexpr double kDoubleScaleMaxStageRatio = 0.90;
+			constexpr double kMajorityDipContract = -0.03; // ChainEvidence.h:92 EvidenceSettings::majorityDip
+			constexpr double kConfirmedDescaleDip = 3.0 * kMajorityDipContract;
 			int bestN1 = 0;
 			bool bestHasConfirmedDip = false;
 			double bestDescaleStat = 1e300;
@@ -1290,7 +1362,7 @@ namespace SourceIdentity
 					continue;
 				if (c.n < 16 || c.n >= lastStageN)
 					continue;
-				if (static_cast<double>(c.n) / static_cast<double>(lastStageN) > 0.90)
+				if (static_cast<double>(c.n) / static_cast<double>(lastStageN) > kDoubleScaleMaxStageRatio)
 					continue;
 				// Positive descaleStat contradicts a first-stage scaling lattice at c.n.
 				if (c.descaleStat > 0.0)

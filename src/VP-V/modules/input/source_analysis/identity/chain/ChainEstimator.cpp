@@ -95,6 +95,7 @@ namespace SourceIdentity
 			bool reqEmpiricalFloor = false;
 			// Stage S3 opt-in requested settings (ALL default OFF; taken cleanly at FreshStart):
 			EmpiricalFloorMode reqEmpiricalFloorMode = EmpiricalFloorMode::Off;
+			bool reqEmpiricalFloorModeExplicit = false;
 			bool reqEightBitPromotion = false;
 			bool reqUseDepthNullTables = false;
 			DepthNullTableSet reqDepthNullTables = DepthNullTableSet::PlaceholderOnly();
@@ -106,8 +107,14 @@ namespace SourceIdentity
 				bool mixed = false;
 				bool subtitle = false;
 				bool inFade = false;
+				uint64_t frameSeq = 0;
+				int64_t timeUs = -1;
+				double analysisIntervalSec = 0.0;
+				std::function<bool(double, double)> detailAboveAtRatio;
+				uint64_t updateGen = 0;
 			};
 			ClassicalFreshState classicalFresh;
+			uint64_t classicalFreshGen = 0;
 			struct AbrStepEventRec
 			{
 				uint64_t seq = 0;
@@ -160,6 +167,9 @@ namespace SourceIdentity
 			// Stage S3 counters (Rule 4 explicit fallback / placeholder visibility):
 			std::atomic<uint64_t> cEmpiricalFloorAllAxisFallbacks{ 0 }, cEmpiricalFloorPartialAxisFallbacks{ 0 },
 				cPlaceholderNullTableEvals{ 0 }, cDepthNullTableFallbacks{ 0 };
+			// Pass-2 audit closure counters (M1, M3, M4, L2):
+			std::atomic<uint64_t> cClassicalFreshStaleDrops{ 0 }, cP3ScreenOnlyCandidates{ 0 },
+				cEdgeStatsNullTableAbstains{ 0 }, cAbrStepEventsEvicted{ 0 };
 			// fx/dv-frame-quiet: each ceiling release is stamped with the newest source frame the estimator had seen, so the frame-bound
 			// monitor counts only the releases up to the frame it is allowed to see (LatchCeilingReleasesThrough), not the live counter.
 			std::atomic<uint64_t> newestSeqA{ 0 };
@@ -208,6 +218,8 @@ namespace SourceIdentity
 			StepMarkCounters stepMarkBase;
 			uint64_t stepMarkEvalSeq = 0;
 			bool stepMarkImmediateReleasePending = false;
+			uint64_t lastStepMarkClassicalSeq = 0;
+			uint64_t lastStepMarkClassicalGen = 0;
 			Geometry::AxisGeom heldApplied[2];        // the applied geometry the latch carries (updated by every confident reading of the latched size)
 			Geometry::AxisGeom lastFiltered[2];       // the last published applied geometry (for appliedChanged)
 			LatchCounters latchBase;                  // counters of the latch already folded into the atomics
@@ -264,8 +276,9 @@ namespace SourceIdentity
 				reqStepMark = cfg.stepMark;
 				reqConvProposals = cfg.conventionDrivenProposals;
 				reqEdgeStats = cfg.evidence.edgeStats;
-				reqEmpiricalFloor = cfg.useEmpiricalFloor;
-				reqEmpiricalFloorMode = cfg.empiricalFloorMode;
+				reqEmpiricalFloorMode = cfg.useEmpiricalFloor ? EmpiricalFloorMode::Live : cfg.empiricalFloorMode;
+				reqEmpiricalFloor = (reqEmpiricalFloorMode == EmpiricalFloorMode::Live);
+				reqEmpiricalFloorModeExplicit = !cfg.useEmpiricalFloor && (cfg.empiricalFloorMode != EmpiricalFloorMode::Off);
 				reqEightBitPromotion = cfg.eightBitPromotion;
 				reqUseDepthNullTables = cfg.useDepthNullTables;
 				reqDepthNullTables = cfg.depthNullTables;
@@ -460,7 +473,17 @@ namespace SourceIdentity
 				{
 					std::lock_guard<std::mutex> lk(m);
 					reqEdgeStats = s;
-					reqEmpiricalFloor = empiricalFloor;
+					if (empiricalFloor)
+					{
+						reqEmpiricalFloorMode = EmpiricalFloorMode::Live;
+						reqEmpiricalFloor = true;
+						reqEmpiricalFloorModeExplicit = false;
+					}
+					else if (!reqEmpiricalFloorModeExplicit)
+					{
+						reqEmpiricalFloorMode = EmpiricalFloorMode::Off;
+						reqEmpiricalFloor = false;
+					}
 					cfgDirty = true;
 					++runEpoch;
 				}
@@ -478,7 +501,8 @@ namespace SourceIdentity
 				{
 					std::lock_guard<std::mutex> lk(m);
 					reqEmpiricalFloorMode = mode;
-					reqEmpiricalFloor = false;
+					reqEmpiricalFloor = (mode == EmpiricalFloorMode::Live);
+					reqEmpiricalFloorModeExplicit = true;
 					cfgDirty = true;
 					++runEpoch;
 				}
@@ -732,16 +756,21 @@ namespace SourceIdentity
 				classicalRatio[1] = ratioV;
 			}
 
-			void SetClassicalFresh(bool valid, double ratioH, double ratioV, bool detailAbove, bool mixed, bool subtitle, bool inFade)
+			void SetClassicalFresh(const ClassicalFreshInput& in)
 			{
 				std::lock_guard<std::mutex> lk(m);
-				classicalFresh.valid = valid;
-				classicalFresh.ratioH = ratioH;
-				classicalFresh.ratioV = ratioV;
-				classicalFresh.detailAbove = detailAbove;
-				classicalFresh.mixed = mixed;
-				classicalFresh.subtitle = subtitle;
-				classicalFresh.inFade = inFade;
+				classicalFresh.valid = in.valid;
+				classicalFresh.ratioH = in.ratioH;
+				classicalFresh.ratioV = in.ratioV;
+				classicalFresh.detailAbove = in.detailAbove;
+				classicalFresh.mixed = in.mixed;
+				classicalFresh.subtitle = in.subtitle;
+				classicalFresh.inFade = in.inFade;
+				classicalFresh.frameSeq = in.frameSeq;
+				classicalFresh.timeUs = in.timeUs;
+				classicalFresh.analysisIntervalSec = in.analysisIntervalSec;
+				classicalFresh.detailAboveAtRatio = in.detailAboveAtRatio;
+				classicalFresh.updateGen = ++classicalFreshGen;
 			}
 
 			void NoteAbrStepEvent(int64_t t0Us, double ratioStep, uint64_t seq)
@@ -759,7 +788,10 @@ namespace SourceIdentity
 					rec.ratioStep = ratioStep;
 					abrStepEvents.push_back(rec);
 					while (static_cast<int>(abrStepEvents.size()) > cfg.eventCap)
+					{
 						abrStepEvents.erase(abrStepEvents.begin());
+						cAbrStepEventsEvicted.fetch_add(1, std::memory_order_relaxed);
+					}
 					pullForward = std::isfinite(ratioStep) && std::fabs(ratioStep) >= reqStepMark.minRatioStep;
 				}
 				if (pullForward && latchedPower.load(std::memory_order_acquire))
@@ -1120,7 +1152,7 @@ namespace SourceIdentity
 					probeWs[a].Reset();
 				}
 				{
-					bool safe = false, abr = false, convP = false, empF = false;
+					bool safe = false, abr = false, convP = false;
 					bool eightBitP = false, useDepthN = false;
 					EmpiricalFloorMode empMode = EmpiricalFloorMode::Off;
 					JointLatchSettings jCfg;
@@ -1135,7 +1167,6 @@ namespace SourceIdentity
 						smCfg = reqStepMark;
 						convP = reqConvProposals;
 						esCfg = reqEdgeStats;
-						empF = reqEmpiricalFloor;
 						empMode = reqEmpiricalFloorMode;
 						eightBitP = reqEightBitPromotion;
 						useDepthN = reqUseDepthNullTables;
@@ -1179,8 +1210,8 @@ namespace SourceIdentity
 					cfg.jointLatch = jCfg;
 					cfg.stepMark = smCfg;
 					cfg.conventionDrivenProposals = convP;
-					cfg.useEmpiricalFloor = empF;
 					cfg.empiricalFloorMode = empMode;
+					cfg.useEmpiricalFloor = (empMode == EmpiricalFloorMode::Live);
 					cfg.eightBitPromotion = eightBitP;
 					cfg.useDepthNullTables = useDepthN;
 					cfg.depthNullTables = depthN;
@@ -1192,6 +1223,8 @@ namespace SourceIdentity
 					stepMarkBase = StepMarkCounters();
 					stepMarkEvalSeq = 0;
 					stepMarkImmediateReleasePending = false;
+					lastStepMarkClassicalSeq = 0;
+					lastStepMarkClassicalGen = 0;
 					for (int a = 0; a < 2; ++a)
 					{
 						heldApplied[a] = Geometry::AxisGeom();
@@ -1305,6 +1338,8 @@ namespace SourceIdentity
 					FoldStepMarkCounters();
 					stepMarkImmediateReleasePending = false;
 				}
+				lastStepMarkClassicalSeq = 0;
+				lastStepMarkClassicalGen = 0;
 				if (jointLatchOn)
 				{
 					const JointLatchOutput jlo = jointLatch.Reset();
@@ -1635,7 +1670,7 @@ namespace SourceIdentity
 						const ChainEvidence::ShotDiag sd = evidence.ShotDiagAtN(a, cands[k]);
 						const Scaling::GeometrySet::Geometry& geo = geoms[gi[k]];
 						g << seq << ',' << t << ',' << shotId << ',' << (a == 0 ? 'x' : 'y') << ',' << N << ',' << cands[k] << ",\"" << geo.name << "\","
-							<< (geo.apply ? 0 : 1) << ',' << ((cr && cr->valid) ? 1 : 0) << ',' << (cr ? Diag::Num(cr->stat) : std::string()) << ','
+							<< (geo.apply ? 0 : 1) << ',' << ((cr && cr->valid && cr->exactDone) ? 1 : 0) << ',' << (cr ? Diag::Num(cr->stat) : std::string()) << ','
 							<< (cr ? cr->kernel : -1) << ',' << (cr ? cr->lineCount : 0) << ',' << Diag::Num(credit) << ',' << Diag::Num(raw) << ','
 							<< Diag::Num(static_cast<double>(newest) / 1e6) << ',' << (llr <= -1e8 ? std::string() : Diag::Num(llr)) << ','
 							<< (sd.haveSlot ? Diag::Num(sd.open) : std::string()) << ',' << sd.openShotId << ','
@@ -1802,8 +1837,9 @@ namespace SourceIdentity
 				jIn.chainInformative = (run[0].have && run[0].up.informative) || (run[1].have && run[1].up.informative);
 
 				// Fresh per-frame classical witness A (never sticky tracker state).
-				const bool classicalHasUpscale = cf.valid && std::isfinite(cf.ratioH) && std::isfinite(cf.ratioV) &&
-					cf.ratioH > 0.0 && cf.ratioH < 1.0 && cf.ratioV > 0.0 && cf.ratioV < 1.0 && Nx > 0 && Ny > 0;
+				const bool cfRatiosFinite = std::isfinite(cf.ratioH) && std::isfinite(cf.ratioV) && cf.ratioH > 0.0 && cf.ratioV > 0.0;
+				const bool classicalHasUpscale = cf.valid && cfRatiosFinite &&
+					cf.ratioH < 1.0 && cf.ratioV < 1.0 && Nx > 0 && Ny > 0;
 				if (classicalHasUpscale)
 				{
 					jIn.classicalValid = true;
@@ -1812,7 +1848,7 @@ namespace SourceIdentity
 					jIn.classicalNy = RoundToInt(static_cast<double>(Ny) * cf.ratioV);
 					jIn.classicalNyDenom = Ny;
 				}
-				jIn.classicalDetailAbove = cf.detailAbove;
+				jIn.classicalNativeReading = cf.valid && cfRatiosFinite && !(cf.ratioH < 1.0 && cf.ratioV < 1.0);
 
 				// Witness B chain-alone pair (confident pair on both axes).
 				const AxisSummary sumX = evidence.Summary(0);
@@ -1830,21 +1866,44 @@ namespace SourceIdentity
 				}
 
 				// R1 Fundamental-Harmonic Order Selection (ChainJointLatch.h::SelectFundamentalHarmonic):
-				// Evaluate conventional pairs present in this evaluation's current-shot evidence and pick the smallest
-				// integer-ratio fundamental confirmed by A roll-off (!detailAbove) + B current-shot credit.
+				// Evaluate conventional pairs across the union of this evaluation's judged candidates AND live
+				// evidence hypothesis slots (so P3 screen-only omission on one frame never blinds R1 to a live
+				// slot holding current-shot credit or chain-alone evidence), picking the smallest integer-ratio
+				// fundamental confirmed by A roll-off (!detailAbove) + B current-shot credit.
 				const double jNeed = jointLatch.JointFraction(timeUs) * thr.c1;
-				if (run[0].have && run[1].have && Nx > 0 && Ny > 0)
+				if (Nx > 0 && Ny > 0)
 				{
-					std::vector<HarmonicCandidate> harmCands;
-					for (int ix = 0; ix < run[0].up.candidateCount; ++ix)
+					std::vector<int> candNs[2];
+					for (int a = 0; a < 2; ++a)
 					{
-						const int nx = run[0].up.cand[ix].n;
-						if (nx <= 0) continue;
-						const ChainEvidence::ShotDiag dx = evidence.ShotDiagAtN(0, nx);
-						for (int iy = 0; iy < run[1].up.candidateCount; ++iy)
+						auto addUniqueN = [&](int n) {
+							if (n <= 0)
+								return;
+							for (size_t k = 0; k < candNs[a].size(); ++k)
+								if (candNs[a][k] == n)
+									return;
+							candNs[a].push_back(n);
+						};
+						if (run[a].have)
 						{
-							const int ny = run[1].up.cand[iy].n;
-							if (ny <= 0) continue;
+							for (int i = 0; i < run[a].up.candidateCount; ++i)
+								addUniqueN(run[a].up.cand[i].n);
+						}
+						std::vector<int> activeNs;
+						evidence.ActiveCandidateNs(a, activeNs);
+						for (size_t i = 0; i < activeNs.size(); ++i)
+							addUniqueN(activeNs[i]);
+						if (jIn.haveChainPair)
+							addUniqueN(a == 0 ? jIn.chainNx : jIn.chainNy);
+					}
+					std::vector<HarmonicCandidate> harmCands;
+					for (size_t ix = 0; ix < candNs[0].size(); ++ix)
+					{
+						const int nx = candNs[0][ix];
+						const ChainEvidence::ShotDiag dx = evidence.ShotDiagAtN(0, nx);
+						for (size_t iy = 0; iy < candNs[1].size(); ++iy)
+						{
+							const int ny = candNs[1][iy];
 							if (!Scaling::GeometrySet::AgreeingPair(nx, Nx, ny, Ny, rasterW, rasterH))
 								continue;
 							const ChainEvidence::ShotDiag dy = evidence.ShotDiagAtN(1, ny);
@@ -1860,8 +1919,11 @@ namespace SourceIdentity
 							const bool aSeesHigher = classicalHasUpscale &&
 								(cf.ratioH > rx * (1.0 + Scaling::GeometrySet::kConventionTolerance) ||
 								 cf.ratioV > ry * (1.0 + Scaling::GeometrySet::kConventionTolerance));
-							hc.classicalRollOffConfirmed = aAgrees && !cf.detailAbove;
-							hc.detailAbove = cf.detailAbove || aSeesHigher;
+							const bool candDetailAbove = cf.valid
+								? (cf.detailAboveAtRatio ? cf.detailAboveAtRatio(rx, ry) : cf.detailAbove)
+								: false;
+							hc.classicalRollOffConfirmed = aAgrees && !candDetailAbove;
+							hc.detailAbove = candDetailAbove || aSeesHigher;
 							harmCands.push_back(hc);
 						}
 					}
@@ -1910,6 +1972,54 @@ namespace SourceIdentity
 							jIn.classicalValid = false;
 						}
 					}
+				}
+
+				// B1 / M1: evaluate per-candidate positive detail_above at the latched pair (when latched) or the
+				// unlatched target pair (chain pair and/or classical upscale pair); never equate classical reading
+				// native (>= 1.0) with positive detail_above.
+				if (cf.valid)
+				{
+					if (jointLatch.Latched() && cf.detailAboveAtRatio)
+					{
+						const double latchedRx = jointLatch.LatchedNxDenom() > 0
+							? static_cast<double>(jointLatch.LatchedNx()) / static_cast<double>(jointLatch.LatchedNxDenom()) : 1.0;
+						const double latchedRy = jointLatch.LatchedNyDenom() > 0
+							? static_cast<double>(jointLatch.LatchedNy()) / static_cast<double>(jointLatch.LatchedNyDenom()) : 1.0;
+						jIn.classicalDetailAbove = cf.detailAboveAtRatio(latchedRx, latchedRy);
+					}
+					else if (!jointLatch.Latched() && cf.detailAboveAtRatio)
+					{
+						if (jIn.classicalValid && jIn.classicalNxDenom > 0 && jIn.classicalNyDenom > 0)
+						{
+							const double classRx = static_cast<double>(jIn.classicalNx) / static_cast<double>(jIn.classicalNxDenom);
+							const double classRy = static_cast<double>(jIn.classicalNy) / static_cast<double>(jIn.classicalNyDenom);
+							if (cf.detailAboveAtRatio(classRx, classRy))
+							{
+								if (jIn.haveChainPair)
+									jIn.classicalValid = false;
+								else
+									jIn.classicalDetailAbove = true;
+							}
+						}
+						if (jIn.haveChainPair && jIn.chainNxDenom > 0 && jIn.chainNyDenom > 0)
+						{
+							const double chainRx = static_cast<double>(jIn.chainNx) / static_cast<double>(jIn.chainNxDenom);
+							const double chainRy = static_cast<double>(jIn.chainNy) / static_cast<double>(jIn.chainNyDenom);
+							jIn.classicalDetailAbove = cf.detailAboveAtRatio(chainRx, chainRy);
+						}
+						else if (!jIn.classicalValid)
+						{
+							jIn.classicalDetailAbove = cf.detailAbove;
+						}
+					}
+					else
+					{
+						jIn.classicalDetailAbove = cf.detailAbove;
+					}
+				}
+				else
+				{
+					jIn.classicalDetailAbove = false;
 				}
 
 				// Witness B current-shot dwell & credit for the joint / G2 target pair:
@@ -1979,13 +2089,27 @@ namespace SourceIdentity
 							jg.N = lN;
 							jg.ratio = lN > 0 ? static_cast<float>(static_cast<double>(ln) / static_cast<double>(lN)) : 0.0f;
 							const double creditAxis = a == 0 ? jIn.currentShotCreditX : jIn.currentShotCreditY;
-							jg.llr = static_cast<float>((std::max)(static_cast<double>(out[a].applied.llr), creditAxis));
-							jg.conf = 1.0f;
+							// L1 (Rule 1): use honest shot-capped evidence LLR (never uncapped ShotDiag::open) so 1-shot
+							// Joint entry reports capped LLR (<= shotCapFraction * c1) and honest derived conf < 1.0f.
+							const double capLlr = evidence.LlrAtN(a, ln);
+							const double shotCap = cfg.evidence.shotCapFraction * levels.c1;
+							const double honestLlr = capLlr > -1e8
+								? (std::max)(0.0, capLlr)
+								: ClampD(creditAxis, 0.0, shotCap);
+							jg.llr = static_cast<float>(honestLlr);
+							jg.conf = static_cast<float>(ConfidenceOfLlr(static_cast<double>(jg.llr), levels.c1));
 							jg.kernelIndex = out[a].measured.kernelIndex;
 							jg.kernelConf = out[a].measured.kernelConf;
 							heldApplied[a] = jg;
 							g = jg;
 						}
+						// L1 (Rule 4): expose latch origin (Joint A+B vs Chain-Alone) explicitly in published reasonBits.
+						const uint32_t originBit = (jlo.origin == JointLatchOrigin::Joint)
+							? kReasonJointEntry
+							: kReasonChainAloneEntry;
+						const uint32_t originMask = kReasonJointEntry | kReasonChainAloneEntry;
+						heldApplied[a].reasonBits = (heldApplied[a].reasonBits & ~originMask) | originBit;
+						g.reasonBits = (g.reasonBits & ~originMask) | originBit;
 					}
 					else
 					{
@@ -2118,6 +2242,22 @@ namespace SourceIdentity
 				}
 				log.SetFormatInfo(fmt);
 
+				// M1: bound the age of the "fresh" classical witness (2x analysis interval cutoff, Rule 1/Rule 4).
+				if (cf.valid && cf.timeUs >= 0 && s.timeUs >= 0)
+				{
+					const double baseIntervalSec = (std::isfinite(cf.analysisIntervalSec) && cf.analysisIntervalSec > 0.0)
+						? cf.analysisIntervalSec
+						: (std::max)(gov.Plan(false).intervalSec, 0.5);
+					const double maxAgeUs = 2.0 * baseIntervalSec * 1e6;
+					if (s.timeUs > cf.timeUs && static_cast<double>(s.timeUs - cf.timeUs) > maxAgeUs)
+					{
+						cf.valid = false;
+						cf.detailAbove = false;
+						cf.detailAboveAtRatio = nullptr;
+						cClassicalFreshStaleDrops.fetch_add(1, std::memory_order_relaxed);
+					}
+				}
+
 				const bool areaChanged = haveArea && (s.active.x != lastActive.x || s.active.y != lastActive.y || s.active.w != lastActive.w ||
 					s.active.h != lastActive.h);
 				haveArea = true;
@@ -2184,14 +2324,34 @@ namespace SourceIdentity
 					}
 					for (size_t i = 0; i < abrStepsNow.size(); ++i)
 						stepMark.OnAbrStep(abrStepsNow[i].t0Us, abrStepsNow[i].ratioStep);
-					if (stepMark.IsPending() && cf.valid)
+					// H1: deduplicate classical frames so one stale snapshot can never be counted as two consecutive frames.
+					const bool cfIsNew = cf.valid &&
+						((cf.frameSeq > 0 && cf.frameSeq != lastStepMarkClassicalSeq) ||
+						 (cf.frameSeq == 0 && cf.updateGen > 0 && cf.updateGen != lastStepMarkClassicalGen));
+					if (stepMark.IsPending() && cfIsNew)
 					{
+						if (cf.frameSeq > 0)
+							lastStepMarkClassicalSeq = cf.frameSeq;
+						lastStepMarkClassicalGen = cf.updateGen;
+						const StepMarkLatchContext lctx = currentLatchCtx();
 						StepMarkClassicalFrame cfr;
-						cfr.timeUs = s.timeUs;
+						cfr.timeUs = cf.timeUs >= 0 ? cf.timeUs : s.timeUs;
 						const bool cfRatiosFinite = std::isfinite(cf.ratioH) && std::isfinite(cf.ratioV) && cf.ratioH > 0.0 && cf.ratioV > 0.0;
 						cfr.informative = cfRatiosFinite;
 						cfr.voided = cf.mixed || cf.subtitle || cf.inFade || ((flags & kEvMenuHold) != 0u);
 						cfr.nativeReading = cfRatiosFinite && !(cf.ratioH < 1.0 && cf.ratioV < 1.0);
+						if (lctx.latched && lctx.Nx > 0 && lctx.Ny > 0)
+						{
+							const double latchedRx = static_cast<double>(lctx.nx) / static_cast<double>(lctx.Nx);
+							const double latchedRy = static_cast<double>(lctx.ny) / static_cast<double>(lctx.Ny);
+							cfr.positiveDetailAbove = cf.detailAboveAtRatio
+								? cf.detailAboveAtRatio(latchedRx, latchedRy)
+								: cf.detailAbove;
+						}
+						else
+						{
+							cfr.positiveDetailAbove = false;
+						}
 						cfr.rasterW = rasterW;
 						cfr.rasterH = rasterH;
 						const int activeW = s.active.w > 0 ? s.active.w : (lastAxisLen[0] > 0 ? lastAxisLen[0] : rasterW);
@@ -2204,7 +2364,7 @@ namespace SourceIdentity
 							cfr.ny = RoundToInt(static_cast<double>(activeH) * cf.ratioV);
 							cfr.Ny = activeH;
 						}
-						const StepMarkOutput smo = stepMark.OnClassicalFrame(cfr, currentLatchCtx());
+						const StepMarkOutput smo = stepMark.OnClassicalFrame(cfr, lctx);
 						if (smo.action == StepMarkAction::ConfirmVoidOnly ||
 							smo.action == StepMarkAction::ConfirmVoidAndRelease ||
 							smo.action == StepMarkAction::ConfirmVoidAndChallenge)
@@ -2269,6 +2429,27 @@ namespace SourceIdentity
 				double empFloor[2] = { 0.0, 0.0 };
 				bool empValid[2] = { false, false };
 				bool empFallback = false;
+				bool haveDepthEmpFloor = false;
+				double empFloorForDepth = 0.0;
+				auto recordDepthFloor = [&](const EmpiricalFloorResult& ef, const EdgeStatsSettings& efCfg) {
+					if (!ef.valid)
+						return;
+					// M5 physics (Rule 1): EstimateEmpiricalFloor skips exact-zero-MAD flat segments. If clean flat
+					// segments account for >= quietSegmentQuantile (25%) of totalSegments, the true lower-quartile
+					// noise floor is sub-1-code (clean 10-bit ramp/flat), NOT an 8-bit HDMI-loop floor.
+					const double q = std::isfinite(efCfg.quietSegmentQuantile)
+						? ClampD(efCfg.quietSegmentQuantile, 0.0, 0.5)
+						: (1.0 / 4.0);
+					const double axisDepthFloor = (ef.totalSegments > 0 &&
+						static_cast<double>(ef.zeroSegmentsSkipped) >= q * static_cast<double>(ef.totalSegments))
+						? 0.0
+						: ef.floorCodes;
+					if (!haveDepthEmpFloor || axisDepthFloor < empFloorForDepth)
+					{
+						empFloorForDepth = axisDepthFloor;
+						haveDepthEmpFloor = true;
+					}
+				};
 				if (effFloorMode != EmpiricalFloorMode::Off)
 				{
 					EdgeStatsSettings empCfg = cfg.evidence.edgeStats;
@@ -2286,6 +2467,7 @@ namespace SourceIdentity
 						const EmpiricalFloorResult ef = EstimateEmpiricalFloor(run[a].ls, static_cast<double>(step), empCfg);
 						empFloor[a] = ef.floorCodes;
 						empValid[a] = ef.valid;
+						recordDepthFloor(ef, empCfg);
 						if (ef.valid)
 						{
 							++validAxes;
@@ -2323,8 +2505,23 @@ namespace SourceIdentity
 						cEmpiricalFloorAllAxisFallbacks.fetch_add(1, std::memory_order_relaxed);
 					}
 				}
-				// Stage S3: bit-depth-stratified null tables & placeholder visibility (strict depth isolation; default OFF).
-				const BitDepthClass reqDepth = ClassifyBitDepthFromStep(step, diagOutputBits.load(std::memory_order_acquire));
+				else if (cfg.useDepthNullTables || cfg.eightBitPromotion)
+				{
+					// M5: even with EmpiricalFloorMode::Off, measure empirical floor into a local diagnostic variable
+					// for depth classification so an 8-bit-in-10-bit HDMI loop (step==1, outputBits==10) classifies as N8, never N10.
+					EdgeStatsSettings empCfg = cfg.evidence.edgeStats;
+					empCfg.enabled = true;
+					for (int a = 0; a < 2; ++a)
+					{
+						if (!run[a].have)
+							continue;
+						const EmpiricalFloorResult ef = EstimateEmpiricalFloor(run[a].ls, static_cast<double>(step), empCfg);
+						recordDepthFloor(ef, empCfg);
+					}
+				}
+				// Stage S3 (M5): bit-depth-stratified null tables & placeholder visibility (strict depth isolation; default OFF).
+				const BitDepthClass reqDepth = ClassifyBitDepthFromStep(
+					step, diagOutputBits.load(std::memory_order_acquire), haveDepthEmpFloor ? empFloorForDepth : 0.0);
 				bool nullCalibrated = !evidence.Nulls().placeholder;
 				const BitDepthClass nullDepth = reqDepth;
 				if (cfg.useDepthNullTables || cfg.eightBitPromotion)
@@ -2425,6 +2622,9 @@ namespace SourceIdentity
 					if (reader[a].HasConfident() && !reader[a].ConfidentNative())
 						opt.forceExactN = reader[a].ConfidentN();
 					verifier->Evaluate(r.ls, cands, pc, opt, r.vr);
+					for (size_t ci = 0; ci < r.vr.candidates.size(); ++ci)
+						if (r.vr.candidates[ci].valid && (r.vr.candidates[ci].reason & kReasonScreenOnly) != 0u)
+							cP3ScreenOnlyCandidates.fetch_add(1, std::memory_order_relaxed);
 					PowerProbe::Run(*probeVerifier, r.ls, floorCodes, static_cast<double>(step), cfg.probe, r.pr, &probeWs[a]);
 				}
 				for (int a = 0; a < 2; ++a)
@@ -2443,6 +2643,9 @@ namespace SourceIdentity
 					obs.rasterW = rasterW;   // R2 / R3 ratios from the delivered raster (L3)
 					obs.rasterH = rasterH;
 					evidence.Submit(a, obs, run[a].up);
+					for (int ci = 0; ci < run[a].up.candidateCount; ++ci)
+						if (run[a].up.cand[ci].edgeStatsNullMismatch)
+							cEdgeStatsNullTableAbstains.fetch_add(1, std::memory_order_relaxed);
 				}
 				// Stage S2: feed current-eval chain evidence into ChainStepMark while Pending or Challenging (inert unless stepMarkOn).
 				if (stepMarkOn && (stepMark.IsPending() || stepMark.IsChallenging()))
@@ -2646,9 +2849,10 @@ namespace SourceIdentity
 							cd.nProposed = cr.nProposed;
 							cd.n = cr.n;
 							cd.exact = cr.exactDone;
+							cd.screenOnly = (cr.reason & kReasonScreenOnly) != 0u;
 							cd.stat = cr.stat;
 							cd.coarseStat = cr.coarseStat;
-							if (cr.exactDone)
+							if (cr.exactDone && !cd.screenOnly)
 							{
 								cd.kernel = cr.kernel;
 								cd.kernelMargin = cr.kernelMargin;
@@ -2902,6 +3106,10 @@ namespace SourceIdentity
 				c.empiricalFloorPartialAxisFallbacks = cEmpiricalFloorPartialAxisFallbacks.load(std::memory_order_relaxed);
 				c.placeholderNullTableEvals = cPlaceholderNullTableEvals.load(std::memory_order_relaxed);
 				c.depthNullTableFallbacks = cDepthNullTableFallbacks.load(std::memory_order_relaxed);
+				c.classicalFreshStaleDrops = cClassicalFreshStaleDrops.load(std::memory_order_relaxed);
+				c.p3ScreenOnlyCandidates = cP3ScreenOnlyCandidates.load(std::memory_order_relaxed);
+				c.edgeStatsNullTableAbstains = cEdgeStatsNullTableAbstains.load(std::memory_order_relaxed);
+				c.abrStepEventsEvicted = cAbrStepEventsEvicted.load(std::memory_order_relaxed);
 				return c;
 			}
 
@@ -2958,9 +3166,21 @@ namespace SourceIdentity
 		void ChainEstimator::NoteNativeHeld(unsigned axisMask) { st_->NoteNativeHeld(axisMask); }
 		void ChainEstimator::SetStreamKey(uint64_t key) { st_->SetStreamKey(key); }
 		void ChainEstimator::SetClassical(bool valid, double ratioH, double ratioV) { st_->SetClassical(valid, ratioH, ratioV); }
+		void ChainEstimator::SetClassicalFresh(const ClassicalFreshInput& in)
+		{
+			st_->SetClassicalFresh(in);
+		}
 		void ChainEstimator::SetClassicalFresh(bool valid, double ratioH, double ratioV, bool detailAbove, bool mixed, bool subtitle, bool inFade)
 		{
-			st_->SetClassicalFresh(valid, ratioH, ratioV, detailAbove, mixed, subtitle, inFade);
+			ClassicalFreshInput in;
+			in.valid = valid;
+			in.ratioH = ratioH;
+			in.ratioV = ratioV;
+			in.detailAbove = detailAbove;
+			in.mixed = mixed;
+			in.subtitle = subtitle;
+			in.inFade = inFade;
+			st_->SetClassicalFresh(in);
 		}
 		void ChainEstimator::NoteAbrStepEvent(int64_t t0Us, double ratioStep, uint64_t seq) { st_->NoteAbrStepEvent(t0Us, ratioStep, seq); }
 		void ChainEstimator::SetFormatInfo(const std::string& text) { st_->SetFormatInfo(text); }

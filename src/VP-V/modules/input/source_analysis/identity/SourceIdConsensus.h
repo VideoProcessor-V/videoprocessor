@@ -79,9 +79,9 @@ namespace SourceIdentity
 		int64_t abrWindowUs = 8000000;       // after an ABR boundary ...
 		int64_t abrDwellUs = 500000;         // ... the dwell is this long (a rendition switch is sudden)
 		double ratioTolerance = 0.03;        // relative; ratios within it are the same value
-		// Stage S2 (Owner-approved OD-1, default OFF): when true, ClassicalResolution alone NEVER enters
-		// an upscaled state from native (logged/counted visibly as "would-be (classical only)"); Chain alone
-		// and Joint (Classical + Chain) remain full entry paths.
+		// Stage S2 (Owner-approved OD-1, default OFF; M2 fix): when true, ClassicalResolution alone NEVER steps an axis
+		// LOWER (neither native -> upscaled nor upscaled -> lower-upscaled, logged/counted visibly as "would-be (classical only)");
+		// Chain alone and Joint (Classical + Chain) remain full entry/move paths; steps UP and releases to native are never blocked.
 		bool blockClassicalAloneEntry = false;
 	};
 
@@ -172,7 +172,7 @@ namespace SourceIdentity
 		uint64_t holds = 0;                  // field evaluations that held a value for a reason
 		uint64_t vetoes = 0;                 // safety vetoes that moved an axis to native
 		uint64_t discontinuities = 0;
-		uint64_t classicalOnlyBlocked = 0;   // Stage S2 (OD-1): native -> upscaled entries blocked because only Classical voted
+		uint64_t classicalOnlyBlocked = 0;   // Stage S2 (OD-1 / M2): steps lower (native -> upscaled or upscaled -> lower) blocked because only Classical voted
 	};
 
 	class Consensus
@@ -462,10 +462,12 @@ namespace SourceIdentity
 			if (fr.voters < needVoters)
 				return Hold(fr, st, "held: too few voters");
 
-			// Stage S2 (Owner-approved OD-1, default OFF): classical alone NEVER enters an upscaled state from native.
-			// Chain alone and Joint (Classical + Chain) remain full entry paths; releases back to native are never blocked.
+			// Stage S2 (Owner-approved OD-1, default OFF; M2 fix): classical alone NEVER steps an axis LOWER
+			// (neither native -> upscaled nor upscaled -> lower-upscaled such as 0.5 -> 0.25) without a chain witness.
+			// Chain alone and Joint (Classical + Chain) remain full entry/move paths; steps UP and releases back to
+			// native (cand.value > cur) are never blocked.
 			if (s_.blockClassicalAloneEntry && IsAxis(f) &&
-				cur >= 1.0 - s_.ratioTolerance && cand.value < 1.0 - s_.ratioTolerance)
+				cand.value < cur * (1.0 - s_.ratioTolerance))
 			{
 				const uint32_t chainBit = 1u << static_cast<int>(VoterId::Chain);
 				const uint32_t classicalBit = 1u << static_cast<int>(VoterId::ClassicalResolution);

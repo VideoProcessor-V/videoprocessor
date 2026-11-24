@@ -21,6 +21,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <sstream>
 
 namespace SourceResolutionMonitor
@@ -1851,10 +1852,171 @@ if (tile < int(tiles) && g.y < ts) {
 				chainEst->NoteEvent(SourceIdentity::Chain::EstimatorEvent::MenuHold, rowSequence);
 			chainEst->SetClassical(snapshot.reading, snapshot.axisRatioX < 1.0 ? snapshot.axisRatioX : snapshot.declaredRatio,
 				snapshot.axisRatioY < 1.0 ? snapshot.axisRatioY : snapshot.declaredRatio);
-			// Stage S2: forward fresh per-frame informative classical reading (never sticky tracker state) for ChainJointLatch / ChainStepMark.
+			// Stage S2 (B1 / M1): forward fresh per-frame informative classical reading (NEVER sticky tracker native
+			// state!) for ChainJointLatch / ChainStepMark.
+			// Rule 4: subtitle and inFade are explicitly false here because SourceResolutionMonitor does not yet
+			// receive a dedicated subtitle-overlay or fade-detector feed.
 			const double freshH = (frame.informative() && frame.ratioH < 1.0) ? frame.ratioH : (frame.informative() ? frame.ratio : 1.0);
 			const double freshV = (frame.informative() && frame.ratioV < 1.0) ? frame.ratioV : (frame.informative() ? frame.ratio : 1.0);
-			chainEst->SetClassicalFresh(frame.informative(), freshH, freshV, detailAboveRaw, mixedNow, false, false);
+			SourceIdentity::Chain::ClassicalFreshInput cfi;
+			cfi.valid = frame.informative();
+			cfi.ratioH = freshH;
+			cfi.ratioV = freshV;
+			cfi.detailAbove = false;   // B1: NEVER pass sticky tracker detailAboveRaw here; per-candidate check lives in detailAboveAtRatio
+			cfi.mixed = mixedNow;
+			cfi.subtitle = false;      // Rule 4: not yet fed from SourceResolutionMonitor.cpp
+			cfi.inFade = false;        // Rule 4: not yet fed from SourceResolutionMonitor.cpp
+			cfi.frameSeq = rowSequence;
+			cfi.timeUs = static_cast<int64_t>(std::llround(j.seconds * 1e6));
+			cfi.analysisIntervalSec = intervalSeconds;
+			if (frame.informative() && !frame.verticalPower.empty() && !frame.horizontalPower.empty())
+			{
+				struct RefDetailEntry
+				{
+					double ratio = 0.0;
+					double refH = std::numeric_limits<double>::infinity();
+					double refV = std::numeric_limits<double>::infinity();
+					double refComb = std::numeric_limits<double>::infinity();
+				};
+				struct DetailAboveSnapshot
+				{
+					std::vector<double> verticalPower;
+					std::vector<double> horizontalPower;
+					std::vector<RefDetailEntry> refs;
+					double detailMargin = 0.07;
+					double tol = 0.03;
+				};
+				std::shared_ptr<DetailAboveSnapshot> snap = std::make_shared<DetailAboveSnapshot>();
+				snap->verticalPower = frame.verticalPower;
+				snap->horizontalPower = frame.horizontalPower;
+				snap->detailMargin = tracker.GetSettings().detailMarginDecades;
+				snap->tol = tracker.GetSettings().tolerance;
+
+				auto addRef = [&](double r) {
+					if (!std::isfinite(r) || !(r > 0.0) || !(r < 1.0))
+						return;
+					for (size_t i = 0; i < snap->refs.size(); ++i)
+						if (std::fabs(snap->refs[i].ratio - r) <= 1e-6)
+							return;
+					RefDetailEntry e;
+					e.ratio = r;
+					e.refH = trackerH.ReferenceDetail(r);
+					e.refV = trackerV.ReferenceDetail(r);
+					e.refComb = tracker.ReferenceDetail(r);
+					snap->refs.push_back(e);
+				};
+				// Snapshot reference detail from trackers on the analysis thread (value-captured for thread safety).
+				addRef(tracker.Ratio());
+				addRef(tracker.Candidate());
+				addRef(trackerH.Ratio());
+				addRef(trackerH.Candidate());
+				addRef(trackerV.Ratio());
+				addRef(trackerV.Candidate());
+				static const double kStdRatios[] = {
+					0.25, 1.0 / 3.0, 0.375, 5.0 / 12.0, 4.0 / 9.0, 0.5,
+					5.0 / 9.0, 7.0 / 12.0, 2.0 / 3.0, 0.75, 5.0 / 6.0
+				};
+				for (double r : kStdRatios)
+					addRef(r);
+				if (j.nativeWidth > 0 && j.nativeHeight > 0)
+				{
+					std::size_t gCount = 0;
+					const Scaling::GeometrySet::Geometry* geoms = Scaling::GeometrySet::Geometries(gCount);
+					for (std::size_t gi = 0; gi < gCount; ++gi)
+					{
+						double grx[2], gry[2];
+						const int forms = Scaling::GeometrySet::RatioForms(geoms[gi], j.nativeWidth, j.nativeHeight, grx, gry);
+						for (int fi = 0; fi < forms; ++fi)
+						{
+							addRef(grx[fi]);
+							addRef(gry[fi]);
+						}
+					}
+				}
+
+				cfi.detailAboveAtRatio = [snap](double rx, double ry) -> bool {
+					auto findRef = [&](double r, double& refH, double& refV, double& refComb) -> bool {
+						if (!std::isfinite(r) || !(r > 0.0) || !(r < 1.0))
+							return false;
+						int bestIdx = -1;
+						double bestDiff = snap->tol;
+						for (size_t i = 0; i < snap->refs.size(); ++i)
+						{
+							const double d = std::fabs(snap->refs[i].ratio - r);
+							if (d <= bestDiff)
+							{
+								bestDiff = d;
+								bestIdx = static_cast<int>(i);
+							}
+						}
+						if (bestIdx < 0)
+							return false;
+						refH = snap->refs[static_cast<size_t>(bestIdx)].refH;
+						refV = snap->refs[static_cast<size_t>(bestIdx)].refV;
+						refComb = snap->refs[static_cast<size_t>(bestIdx)].refComb;
+						return true;
+					};
+
+					SourceResolution::FrameReading axisH;
+					axisH.horizontalPower = snap->horizontalPower;
+					axisH.verticalPower = snap->horizontalPower;
+
+					SourceResolution::FrameReading axisV;
+					axisV.horizontalPower = snap->verticalPower;
+					axisV.verticalPower = snap->verticalPower;
+
+					double refHx = std::numeric_limits<double>::infinity();
+					double refVx = std::numeric_limits<double>::infinity();
+					double refCx = std::numeric_limits<double>::infinity();
+					if (findRef(rx, refHx, refVx, refCx))
+					{
+						const double dH = SourceResolution::DetailAbove(axisH, rx);
+						if (!std::isinf(dH))
+						{
+							if (!std::isinf(refHx) && dH >= refHx + snap->detailMargin)
+								return true;
+							if (!std::isinf(refCx) && dH >= refCx + snap->detailMargin)
+								return true;
+						}
+					}
+
+					double refHy = std::numeric_limits<double>::infinity();
+					double refVy = std::numeric_limits<double>::infinity();
+					double refCy = std::numeric_limits<double>::infinity();
+					if (findRef(ry, refHy, refVy, refCy))
+					{
+						const double dV = SourceResolution::DetailAbove(axisV, ry);
+						if (!std::isinf(dV))
+						{
+							if (!std::isinf(refVy) && dV >= refVy + snap->detailMargin)
+								return true;
+							if (!std::isinf(refCy) && dV >= refCy + snap->detailMargin)
+								return true;
+						}
+					}
+
+					if (std::isfinite(rx) && std::isfinite(ry) && rx > 0.0 && rx < 1.0 && ry > 0.0 && ry < 1.0 &&
+						std::fabs(rx - ry) <= snap->tol)
+					{
+						double refHc = std::numeric_limits<double>::infinity();
+						double refVc = std::numeric_limits<double>::infinity();
+						double refComb = std::numeric_limits<double>::infinity();
+						const double rMid = 0.5 * (rx + ry);
+						if (findRef(rMid, refHc, refVc, refComb) && !std::isinf(refComb))
+						{
+							SourceResolution::FrameReading comb;
+							comb.horizontalPower = snap->horizontalPower;
+							comb.verticalPower = snap->verticalPower;
+							const double dComb = SourceResolution::DetailAbove(comb, rMid);
+							if (!std::isinf(dComb) && dComb >= refComb + snap->detailMargin)
+								return true;
+						}
+					}
+
+					return false;
+				};
+			}
+			chainEst->SetClassicalFresh(cfi);
 		}
 		bool haveRecord = false;
 		SourceIdentity::Record rec;

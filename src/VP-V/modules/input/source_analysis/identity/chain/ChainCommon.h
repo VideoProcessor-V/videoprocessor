@@ -49,6 +49,10 @@ namespace SourceIdentity
 		constexpr uint32_t kReasonLatchRelease = 1u << 15;      // R5: an upscaled latch was released to native (not re-confirmed within the bound)
 		constexpr uint32_t kReasonMenuHold = 1u << 16;          // R7: a menu / overlay episode: the latch is dropped, not carried into the menu
 		constexpr uint32_t kReasonAbrStep = 1u << 17;           // R5 (switch): an ABR rendition step dropped the latch
+		constexpr uint32_t kReasonScreenOnly = 1u << 18;        // P3 two-pass screen-only candidate, excluded from LLR (M3)
+		constexpr uint32_t kReasonJointEntry = 1u << 19;        // latched via Joint A+B entry (L1)
+		constexpr uint32_t kReasonChainAloneEntry = 1u << 20;   // latched via Chain-Alone entry (L1)
+		constexpr uint32_t kReasonNullTableMismatch = 1u << 21; // segment-gated excess-variance stat abstained because active null table is Placeholder or not stat-matched (M4)
 
 		// One axis worth of sampled lines in 10-bit code units (8-bit planes are scaled by 4 by the caller).
 		struct LineSet

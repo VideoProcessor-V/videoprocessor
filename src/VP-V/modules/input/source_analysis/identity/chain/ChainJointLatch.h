@@ -83,6 +83,13 @@ namespace SourceIdentity
 			Joint = 2
 		};
 
+		enum class JointLatchOrigin : uint8_t
+		{
+			None = 0,
+			ChainAlone = 1,
+			Joint = 2
+		};
+
 		enum class JointLatchReason : int
 		{
 			None = 0,
@@ -228,7 +235,8 @@ namespace SourceIdentity
 			// Witness A (Classical) FRESH per-frame informative reading (never sticky tracker state):
 			bool classicalValid = false;         // Fresh informative per-frame A reading present
 			int classicalNx = 0, classicalNxDenom = 0, classicalNy = 0, classicalNyDenom = 0;
-			bool classicalDetailAbove = false;   // M1: above-band spectral detail seen on this frame
+			bool classicalDetailAbove = false;   // M1: POSITIVE per-frame above-band spectral detail seen on this frame ONLY (never sticky tracker native!)
+			bool classicalNativeReading = false; // Informational only: classical reads native (>= 1.0); MUST NEVER trigger M1 ReleasedDetailAbove unless classicalDetailAbove == true
 		};
 
 		struct JointLatchOutput
@@ -237,6 +245,7 @@ namespace SourceIdentity
 			int nx = 0, Nx = 0, ny = 0, Ny = 0;
 			JointLatchEvent event = JointLatchEvent::None;
 			JointLatchEntryPath entryPath = JointLatchEntryPath::None;
+			JointLatchOrigin origin = JointLatchOrigin::None;
 			JointLatchReason reason = JointLatchReason::None;
 			bool confirmed = false;
 			bool g2Renewed = false;
@@ -487,6 +496,7 @@ namespace SourceIdentity
 			int LatchedNxDenom() const { return lNx_; }
 			int LatchedNyDenom() const { return lNy_; }
 			JointLatchEntryPath EntryPath() const { return entryPath_; }
+			JointLatchOrigin Origin() const { return origin_; }
 			double ReleaseClockSec() const { return clock_; }
 			bool Deferred() const { return deferred_; }
 			bool Dwelling() const { return deferred_ && dwelling_; }
@@ -627,6 +637,9 @@ namespace SourceIdentity
 				}
 
 				// M1: Debounced classical detail_above while latched (ignored when classical is void).
+				// B1 invariant: ONLY positive per-frame above-band spectral detail (in.classicalDetailAbove) may
+				// trigger M1 ReleasedDetailAbove; in.classicalNativeReading alone is uninformative and MUST NEVER
+				// release an active latch (blind classical on loop/HDMI content reads native without detail_above).
 				if (latched_)
 				{
 					if (!classicalVoid && in.classicalDetailAbove)
@@ -685,6 +698,7 @@ namespace SourceIdentity
 
 				const bool chainAloneEligible = (s_.entryPolicy == JointEntryPolicy::ChainOrJoint) &&
 					chainConv &&
+					!(!classicalVoid && in.classicalDetailAbove) &&
 					chainLlrFinite &&
 					in.chainShots >= s_.chainAloneMinShots &&
 					(std::min)(in.chainLlrX, in.chainLlrY) >= bar;
@@ -1033,6 +1047,9 @@ namespace SourceIdentity
 				lnx_ = nx; lNx_ = Nx;
 				lny_ = ny; lNy_ = Ny;
 				entryPath_ = path;
+				origin_ = (path == JointLatchEntryPath::Joint)
+					? JointLatchOrigin::Joint
+					: (path == JointLatchEntryPath::ChainAlone ? JointLatchOrigin::ChainAlone : JointLatchOrigin::None);
 			}
 
 			void Anchor(int64_t t)
@@ -1057,6 +1074,7 @@ namespace SourceIdentity
 			{
 				latched_ = false;
 				entryPath_ = JointLatchEntryPath::None;
+				origin_ = JointLatchOrigin::None;
 				clock_ = 0.0;
 				accX_ = accY_ = 0.0;
 				newestX_ = newestY_ = -1;
@@ -1087,6 +1105,7 @@ namespace SourceIdentity
 				o.nx = lnx_; o.Nx = lNx_;
 				o.ny = lny_; o.Ny = lNy_;
 				o.entryPath = entryPath_;
+				o.origin = origin_;
 				o.deferred = deferred_;
 			}
 
@@ -1096,6 +1115,7 @@ namespace SourceIdentity
 			bool started_ = false;
 			bool havePrev_ = false;
 			JointLatchEntryPath entryPath_ = JointLatchEntryPath::None;
+			JointLatchOrigin origin_ = JointLatchOrigin::None;
 			int lnx_ = 0, lNx_ = 1, lny_ = 0, lNy_ = 1;
 			int64_t prevUs_ = 0, stableSinceUs_ = 0, lastConfUs_ = 0;
 			double clock_ = 0.0;

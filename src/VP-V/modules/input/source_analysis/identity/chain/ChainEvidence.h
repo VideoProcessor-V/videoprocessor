@@ -175,6 +175,7 @@ namespace SourceIdentity
 			// Stage S2 (EXP-8BIT, default OFF): explicit diagnostic visibility for edge-stats and k/8 comb classification (Rule 4).
 			bool edgeStatsUsed = false;
 			bool edgeStatsFallback = false;
+			bool edgeStatsNullMismatch = false;  // M4: edgeStats abstained because active null table is Placeholder or not SegmentExcessVariance
 			EdgeStatsReason edgeStatsReason = EdgeStatsReason::Disabled;
 			EdgeStatsReason combReason = EdgeStatsReason::Disabled;
 		};
@@ -419,7 +420,7 @@ namespace SourceIdentity
 					for (size_t i = 0; i < vr.candidates.size(); ++i)
 					{
 						const CandidateResult& cr = vr.candidates[i];
-						if (!cr.valid || !cr.exactDone || cr.lineCount < 1)
+						if (!cr.valid || !cr.exactDone || (cr.reason & kReasonScreenOnly) != 0u || cr.lineCount < 1)
 							continue;
 						double probeStat = 0.0;
 						if (std::fabs(static_cast<double>(cr.n) - dN * 3.0 / 8.0) <= tol)
@@ -442,7 +443,7 @@ namespace SourceIdentity
 				for (size_t i = 0; i < vr.candidates.size() && out.candidateCount < kMaxCandidates; ++i)
 				{
 					const CandidateResult& cr = vr.candidates[i];
-					if (!cr.valid || !cr.exactDone || cr.lineCount < 1)
+					if (!cr.valid || !cr.exactDone || (cr.reason & kReasonScreenOnly) != 0u || cr.lineCount < 1)
 						continue;
 					anyUsable = true;
 					Judge(cr, obs.axisLen, floorC, out.cand[out.candidateCount], haveAllCombProbes, comb3, comb5, comb7);
@@ -587,6 +588,17 @@ namespace SourceIdentity
 						best = v;
 				}
 				return best;
+			}
+
+			// Read-only accessor returning all currently active hypothesis sizes `n` tracked on `axis`
+			// (used by ApplyJointLatch R1 harmonic selection so live evidence slots remain visible even
+			// on frames where a candidate was P3 screen-only and omitted from EvidenceUpdate::cand).
+			void ActiveCandidateNs(int axis, std::vector<int>& out) const
+			{
+				const AxisState& st = ax_[axis == 0 ? 0 : 1];
+				for (size_t i = 0; i < st.slots.size(); ++i)
+					if (st.slots[i].n > 0)
+						out.push_back(st.slots[i].n);
 			}
 
 			// Dump v4 (SidDiagDump.h; read only, decision neutral): the shot accounting of size n (+-1 px; the slot FindSlot would pick) on one
@@ -1049,6 +1061,16 @@ namespace SourceIdentity
 							ce.cls = comb.resolvedNullClass;
 							ce.combReason = comb.reason;
 							ce.statValid = true;
+							// M4 (Rule 4): segment-gated excess-variance stat requires a calibrated, stat-matched
+							// NullStatKind::SegmentExcessVariance table; abstain visibly on Placeholder or mismatch.
+							if (nulls_.placeholder || nulls_.statKind != NullStatKind::SegmentExcessVariance)
+							{
+								ce.edgeStatsNullMismatch = true;
+								ce.informative = false;
+								ce.increment = 0.0;
+								ce.reason |= kReasonNullTableMismatch;
+								return;
+							}
 							ce.increment = ClampD(nulls_.LogLikelihoodRatio(ce.cls, ce.stat), s_.incrementMin, s_.incrementMax);
 							ce.informative = true;
 							return;
@@ -1151,6 +1173,16 @@ namespace SourceIdentity
 					ce.combReason = comb.reason;
 				}
 				ce.statValid = true;
+				// M4 (Rule 4): segment-gated excess-variance stat requires a calibrated, stat-matched
+				// NullStatKind::SegmentExcessVariance table; abstain visibly on Placeholder or mismatch.
+				if (ce.edgeStatsUsed && (nulls_.placeholder || nulls_.statKind != NullStatKind::SegmentExcessVariance))
+				{
+					ce.edgeStatsNullMismatch = true;
+					ce.informative = false;
+					ce.increment = 0.0;
+					ce.reason |= kReasonNullTableMismatch;
+					return;
+				}
 				ce.increment = ClampD(nulls_.LogLikelihoodRatio(ce.cls, ce.stat), s_.incrementMin, s_.incrementMax);
 				ce.informative = true;
 			}

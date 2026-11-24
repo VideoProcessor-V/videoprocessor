@@ -65,9 +65,16 @@ namespace SourceIdentity
 			return kClassGeneric;
 		}
 
+		enum class NullStatKind : uint8_t
+		{
+			WholeLineLogRatio = 0,
+			SegmentExcessVariance = 1
+		};
+
 		struct NullTables
 		{
 			bool placeholder = true;
+			NullStatKind statKind = NullStatKind::WholeLineLogRatio;
 			GaussDist nul[kNullClassCount];
 			GaussDist alt[kNullClassCount];
 
@@ -75,6 +82,7 @@ namespace SourceIdentity
 			{
 				NullTables t;
 				t.placeholder = true;
+				t.statKind = NullStatKind::WholeLineLogRatio;
 				t.nul[kClassK8].mean = -0.12;       t.nul[kClassK8].sd = 0.10;
 				t.nul[kClassK16].mean = -0.10;      t.nul[kClassK16].sd = 0.08;
 				t.nul[kClassRational].mean = -0.04; t.nul[kClassRational].sd = 0.05;

@@ -345,7 +345,7 @@ namespace SourceResolution
 	double DitherAwareDetailAbove(
 		const FrameReading& frame,
 		double ratio,
-		bool tpdfDither = true,
+		bool tpdfDither = false,
 		DitherDetailAboveInfo* info = nullptr,
 		double measuredFloorPowerPerBin = 0.0);
 	// The frame's averaged mirror coherence at `ratio`, the weaker axis (0 when unknown).
@@ -520,7 +520,8 @@ namespace SourceResolution
 			double frameAloneMargin = 0.5;
 			double frameFlashSeconds = 0.25;
 			// Stage S3 (EXP-8BIT SHOULD-2, default OFF): treat native-reading frames whose above-band
-			// FFT power sits within lineGateFactor^2 (2.25x) of the TPDF dither floor as starved (no native detail).
+			// FFT power sits within lineGateFactor^2 (2.25x) of max(uniform floor, measured white TPDF tail floor)
+			// as starved (no native detail), without assuming TPDF dither unconditionally on undithered frames.
 			bool ditherFloorDetailAbove = false;
 		};
 

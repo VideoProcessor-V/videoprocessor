@@ -205,6 +205,11 @@ namespace SourceIdentity
 			uint64_t empiricalFloorPartialAxisFallbacks = 0;
 			uint64_t placeholderNullTableEvals = 0;
 			uint64_t depthNullTableFallbacks = 0;
+			// Pass-2 audit closure counters (M1, M3, M4, L2):
+			uint64_t classicalFreshStaleDrops = 0;   // M1: classicalFresh rejected as stale (> 2x analysis interval)
+			uint64_t p3ScreenOnlyCandidates = 0;     // M3: P3 two-pass screen-only candidates excluded from LLR
+			uint64_t edgeStatsNullTableAbstains = 0; // M4: edgeStats abstained on Placeholder / mismatched NullStatKind
+			uint64_t abrStepEventsEvicted = 0;       // L2: oldest abrStepEvents evicted at eventCap
 		};
 
 		// What one evaluation tested, per axis and candidate (the calibration dump of the harness reads it; any other observer may).
@@ -213,6 +218,7 @@ namespace SourceIdentity
 			int nProposed = 0;           // the size asked for
 			int n = 0;                   // the refined size (exact stage) or the coarse-refined size
 			bool exact = false;          // verified on full lines (stat is the exact statistic), else coarse only
+			bool screenOnly = false;     // M3: P3 two-pass Pass-1 screen only (hw=0, rep kernels, phase 0; excluded from LLR)
 			double stat = 0.0;           // T of the stage named by `exact`
 			double coarseStat = 0.0;
 			int kernel = -1;             // best kernel (KernelBank index; exact stage only)
@@ -256,6 +262,21 @@ namespace SourceIdentity
 		};
 		// Called on the thread that processes the evaluation (the worker; the caller in synchronous mode), after the evidence stage.
 		typedef std::function<void(const EvaluationDetail&)> EvaluationObserver;
+
+		struct ClassicalFreshInput
+		{
+			bool valid = false;
+			double ratioH = 1.0;
+			double ratioV = 1.0;
+			bool detailAbove = false;           // POSITIVE per-frame above-band measurement ONLY (never sticky tracker native!)
+			bool mixed = false;
+			bool subtitle = false;              // NOTE (Rule 4): not yet fed from SourceResolutionMonitor.cpp
+			bool inFade = false;                // NOTE (Rule 4): not yet fed from SourceResolutionMonitor.cpp
+			uint64_t frameSeq = 0;              // classical frame's own sequence (0 = unspecified)
+			int64_t timeUs = -1;                // classical frame's own source timestamp (< 0 = unspecified)
+			double analysisIntervalSec = 0.0;   // > 0: staleness cutoff is 2 * analysisIntervalSec
+			std::function<bool(double, double)> detailAboveAtRatio; // per-candidate Nyquist check (rx, ry)
+		};
 
 		class ChainEstimator
 		{
@@ -304,6 +325,7 @@ namespace SourceIdentity
 			// The classical decision's ratios (1 = native) for the evidence log's disagreement flags.
 			void SetClassical(bool valid, double ratioH, double ratioV);
 			// Stage S2: fresh per-frame informative classical witness A reading (never sticky tracker state) for ChainJointLatch & ChainStepMark.
+			void SetClassicalFresh(const ClassicalFreshInput& in);
 			void SetClassicalFresh(bool valid, double ratioH, double ratioV, bool detailAbove = false,
 				bool mixed = false, bool subtitle = false, bool inFade = false);
 			// Stage S2: ABR rendition step event carrying boundary timestamp t0Us and signed ratioStep for ChainStepMark (inert unless stepMark.enabled).

@@ -10,13 +10,14 @@
 //   - Subsampling detection via 2:1 DescaleOperator at n = N/2 compared against adjacent non-2:1
 //     baselines nLo = round(0.92 * N/2) and nHi = round(1.08 * N/2):
 //       dip = ln(s_best / s_baseline).
-//     On native 4:4:4, E[dip] ~= 0.0; dipConfirmThreshold = -0.20 (Stage S5 spec contract,
-//     ln(0.82) ~= -0.20: >= 18% DOF-normalized residual reduction below adjacent baselines;
-//     yields 0 false calls on native 4:4:4).
+//     On native 4:4:4, E[dip] ~= 0.0; dipConfirmThreshold = -0.20 (PROVISIONAL pending Stage S5
+//     G-gate calibration on real 4:4:4 vs 4:2:0 corpus; conservative multi-fold clearance above
+//     EvidenceSettings::majorityDip = -0.03, requiring >= 18% DOF-normalized residual reduction
+//     below adjacent baselines to maintain 0 false calls on native 4:4:4).
 //   - Above-Nyquist native 4:4:4 confirmation gate: lineGateFactor = 1.5 (ChainEvidence.h) =>
 //     nativeAboveRatioGate = 1.5^2 = 2.25 * floorCodes^2. Chroma FFT bands [0.08, 0.22] and
 //     [0.28, 0.48] cyc/px are derived from the 2:1 chroma Nyquist f_c = 0.25 cyc/px with the
-//     SourceResolutionDetector.cpp:829-830 transition guard around f_c (below [0.32*f_c, 0.88*f_c],
+//     SourceResolutionDetector.cpp:857-858 transition guard around f_c (below [0.32*f_c, 0.88*f_c],
 //     above [1.12*f_c, 0.96*0.5]).
 //   - Siting physics (exact KernelBank centre-aligned mapping p_i = (i + 0.5) * 0.5 - 0.5 + phi):
 //       * Centered (chroma sample m midway between 2m and 2m+1): p_{2m} = m - 0.25 => phi = 0.0.
@@ -24,11 +25,12 @@
 //     Fused with exact symmetric-kernel parity asymmetry (second-difference even/odd excess energy
 //     ratio peaks for Cosited; first-difference odd-to-even/even-to-odd excess energy ratio peaks
 //     for Centered, optionally edge-weighted by co-located luma gradients when provided).
-//   - Separation margins (Rule 1):
-//       * kernelMarginMin = 0.05 (1/20 elementary dimensionless relative residual separation between
-//         winning and runner-up kernel family before naming a classical kernel).
-//       * sitingMarginMin = 0.03 (matches |ChainEvidence::majorityDip| = 0.03 contract separation
-//         between Cosited and Centered grid siting).
+//   - Separation margins (Rule 1 — derived from existing contract constants, PROVISIONAL pending
+//     Stage S5 G-gate calibration):
+//       * kernelMarginMin = 0.05 (matches ChainReading.h:48 ReadingSettings::kernelMarginScale = 0.05,
+//         the 1 - 1/e kernel-family confidence scale, before naming a classical kernel).
+//       * sitingMarginMin = 0.03 (matches ChainEvidence.h:92 |EvidenceSettings::majorityDip| = 0.03
+//         contract separation between Cosited and Centered grid siting).
 //   - 1/4-res corroboration: evaluated whenever raw demeaned chroma std > lineGateFactor * floorCodes
 //     (even if N/2 baseline is quiet, as on 1080p-in-4K 4:2:0 where chroma is 960x540 = N/4).
 //
@@ -133,11 +135,11 @@ namespace SourceIdentity
 		struct ChromaEstimatorSettings
 		{
 			bool enabled = false;               // OFF by default (Stage S5 safe contract)
-			double lineGateFactor = 1.5;        // ChainEvidence.h contract: detail >= 1.5 * floorCodes
-			double dipConfirmThreshold = -0.20; // Derived: ln(0.82) ~= -0.20 (>= 18% DOF-normalized residual reduction below baseline)
+			double lineGateFactor = 1.5;        // ChainEvidence.h:87 contract: detail >= 1.5 * floorCodes
+			double dipConfirmThreshold = -0.20; // PROVISIONAL (pending Stage S5 G-gate calibration): multi-fold clearance above majorityDip (-0.03); >= 18% residual reduction
 			double nativeAboveRatioGate = 2.25; // Derived: lineGateFactor^2 = 1.5^2 = 2.25 (above-0.25 cyc/px chroma power gate)
-			double kernelMarginMin = 0.05;      // 5% relative residual separation between winning and runner-up kernel family
-			double sitingMarginMin = 0.03;      // 3% relative residual / parity separation between TopLeft / Left / Center
+			double kernelMarginMin = 0.05;      // Derived from ReadingSettings::kernelMarginScale (ChainReading.h:48 = 0.05); PROVISIONAL pending Stage S5 G-gate
+			double sitingMarginMin = 0.03;      // Derived from |EvidenceSettings::majorityDip| (ChainEvidence.h:92 = 0.03); PROVISIONAL pending Stage S5 G-gate
 		};
 
 		struct ChromaSampleInput

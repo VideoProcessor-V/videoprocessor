@@ -33,15 +33,22 @@ Usage:
 import argparse
 import csv
 import datetime
+import hashlib
 import json
 import math
 import os
 import random
+import re
 import sys
 import tempfile
 
 # ----------------------------------------------------------------------------------------------------------
-# Derived contract constants mirrored verbatim from ChainNullTables.h / ChainEvidence.h / NullTables.h.
+# Derived contract constants mirrored verbatim from C++ headers (verified by verify_cpp_contract_constants):
+#   - ChainNullTables.h : kClassK8..kClassGeneric, NullTables::Placeholder()
+#   - ChainCommon.h     : kMaxCandidates (8)
+#   - KernelBank.h      : kKernelCount (10)
+#   - ChainEvidence.h   : kMinShotDwellSec (3.0) and EvidenceSettings defaults
+#   - NullTables.h      : BitDepthClass / DepthNullTableSet fields
 # ----------------------------------------------------------------------------------------------------------
 CLASSES = ("K8", "K16", "Rational", "Generic")
 CLASS_CPP = ("kClassK8", "kClassK16", "kClassRational", "kClassGeneric")
@@ -53,32 +60,34 @@ DEPTH_CPP_ENUM = {
     "N12": "BitDepthClass::N12",
 }
 
-# NullTables::Placeholder() from ChainNullTables.h
+# NullTables::Placeholder() from ChainNullTables.h:81-96
 PLACEHOLDER = {
     "null": [(-0.12, 0.10), (-0.10, 0.08), (-0.04, 0.05), (-0.05, 0.06)],
     "alt": [(-0.30, 0.20)] * 4,
 }
 
-# ChainEvidence.h contract constants
-INC_MIN = -3.0
-INC_MAX = 5.0
-LINE_GATE_FRACTION = 0.25
-LINE_GATE_FLOOR = 3
-TARGET_RATE_PER_HOUR = 0.01
-THRESHOLD_INTERVAL_S = 10.0
-CANDIDATE_COUNT = 8
-KERNEL_COUNT = 10
-SHOT_CAP_FRACTION = 0.5
-MAX_HYPOTHESES = 16
-MIN_EVALS_CANDIDATE = 4
-WINDOW_YIELD_NATS = 1.4
-WINDOW_MARGIN = 1.5
-WINDOW_MIN_SEC = 10.0
-WINDOW_MAX_SEC = 600.0
-RATE_SMOOTHING = 0.25
-MIN_SHOT_DWELL_SEC = 3.0
-AGREE_TOL = 0.015
-AGREE_BONUS = 2.0
+# ChainEvidence.h:73-106 / ChainCommon.h:28 / KernelBank.h:42 contract constants
+INC_MIN = -3.0                 # ChainEvidence.h: EvidenceSettings::incrementMin
+INC_MAX = 5.0                  # ChainEvidence.h: EvidenceSettings::incrementMax
+LINE_GATE_FRACTION = 0.25      # ChainEvidence.h: EvidenceSettings::minGateFraction
+LINE_GATE_FLOOR = 3            # ChainEvidence.h: EvidenceSettings::minGateLinesFloor
+TARGET_RATE_PER_HOUR = 0.01    # ChainEvidence.h: EvidenceSettings::targetRatePerHour
+THRESHOLD_INTERVAL_S = 10.0    # ChainEvidence.h: EvidenceSettings::thresholdIntervalSec
+CANDIDATE_COUNT = 8            # ChainCommon.h: kMaxCandidates (EvidenceSettings::candidateCount)
+KERNEL_COUNT = 10              # KernelBank.h: kKernelCount (EvidenceSettings::kernelCount)
+SHOT_CAP_FRACTION = 0.5        # ChainEvidence.h: EvidenceSettings::shotCapFraction
+MAX_HYPOTHESES = 16            # ChainEvidence.h: EvidenceSettings::maxHypotheses
+MIN_EVALS_CANDIDATE = 4        # ChainEvidence.h: minimum informative evals per candidate
+WINDOW_YIELD_NATS = 1.4        # ChainEvidence.h: EvidenceSettings::windowYieldNats
+WINDOW_MARGIN = 1.5            # ChainEvidence.h: EvidenceSettings::windowMargin
+WINDOW_MIN_SEC = 10.0          # ChainEvidence.h: EvidenceSettings::windowMinSec
+WINDOW_MAX_SEC = 600.0         # ChainEvidence.h: EvidenceSettings::windowMaxSec
+RATE_SMOOTHING = 0.25          # ChainEvidence.h: EvidenceSettings::rateSmoothing
+MIN_SHOT_DWELL_SEC = 3.0       # ChainEvidence.h: kMinShotDwellSec
+AGREE_TOL = 0.015              # ChainEvidence.h: EvidenceSettings::agreementTolerance
+AGREE_BONUS = 2.0              # ChainEvidence.h: EvidenceSettings::agreementBonus
+
+DEFAULT_CV_SEED = "sid-cal"    # Exact default seed from tools/eval/source_id/calibrate_nulls.py:722
 
 # Derived statistical constants (matching calibrate_nulls.py & normal-tail quantiles):
 #   - 1 / Phi^-1(0.75) = 1.4826022... (exact Gaussian MAD-to-sigma factor)
@@ -116,6 +125,83 @@ REQUIRED_V4_EVAL_COLS = (
 REQUIRED_V4_SIZE_COLS = (
     "seq", "t_s", "shot_id", "axis", "N", "n", "valid", "stat", "lines",
 )
+
+
+# ----------------------------------------------------------------------------------------------------------
+# L4: C++ header contract constant drift guard
+# ----------------------------------------------------------------------------------------------------------
+def _parse_cpp_numeric(text, pattern, label):
+    m = re.search(pattern, text)
+    if not m:
+        raise AssertionError("contract drift guard: failed to locate %s in C++ header" % label)
+    return float(m.group(1))
+
+
+def verify_cpp_contract_constants(chain_dir=None):
+    """Parses sibling C++ chain headers to verify zero drift between Python and C++ contract constants.
+
+    Returns a dict of verified constant values when headers are present, or None if chain_dir is absent.
+    Raises AssertionError if any constant drifted.
+    """
+    if chain_dir is None:
+        chain_dir = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "chain"))
+    ev_path = os.path.join(chain_dir, "ChainEvidence.h")
+    cm_path = os.path.join(chain_dir, "ChainCommon.h")
+    kb_path = os.path.join(chain_dir, "KernelBank.h")
+    nt_path = os.path.join(chain_dir, "ChainNullTables.h")
+    if not all(os.path.isfile(p) for p in (ev_path, cm_path, kb_path, nt_path)):
+        return None
+
+    with open(ev_path, "r", encoding="utf-8") as fh:
+        ev_txt = fh.read()
+    with open(cm_path, "r", encoding="utf-8") as fh:
+        cm_txt = fh.read()
+    with open(kb_path, "r", encoding="utf-8") as fh:
+        kb_txt = fh.read()
+    with open(nt_path, "r", encoding="utf-8") as fh:
+        nt_txt = fh.read()
+
+    num_re = r"([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)"
+    checks = [
+        ("CANDIDATE_COUNT", CANDIDATE_COUNT, cm_txt, r"constexpr\s+int\s+kMaxCandidates\s*=\s*" + num_re + r"\s*;"),
+        ("KERNEL_COUNT", KERNEL_COUNT, kb_txt, r"constexpr\s+int\s+kKernelCount\s*=\s*" + num_re + r"\s*;"),
+        ("MIN_SHOT_DWELL_SEC", MIN_SHOT_DWELL_SEC, ev_txt, r"constexpr\s+double\s+kMinShotDwellSec\s*=\s*" + num_re + r"\s*;"),
+        ("TARGET_RATE_PER_HOUR", TARGET_RATE_PER_HOUR, ev_txt, r"double\s+targetRatePerHour\s*=\s*" + num_re + r"\s*;"),
+        ("THRESHOLD_INTERVAL_S", THRESHOLD_INTERVAL_S, ev_txt, r"double\s+thresholdIntervalSec\s*=\s*" + num_re + r"\s*;"),
+        ("SHOT_CAP_FRACTION", SHOT_CAP_FRACTION, ev_txt, r"double\s+shotCapFraction\s*=\s*" + num_re + r"\s*;"),
+        ("AGREE_BONUS", AGREE_BONUS, ev_txt, r"double\s+agreementBonus\s*=\s*" + num_re + r"\s*;"),
+        ("AGREE_TOL", AGREE_TOL, ev_txt, r"double\s+agreementTolerance\s*=\s*" + num_re + r"\s*;"),
+        ("LINE_GATE_FRACTION", LINE_GATE_FRACTION, ev_txt, r"double\s+minGateFraction\s*=\s*" + num_re + r"\s*;"),
+        ("LINE_GATE_FLOOR", LINE_GATE_FLOOR, ev_txt, r"int\s+minGateLinesFloor\s*=\s*" + num_re + r"\s*;"),
+        ("INC_MAX", INC_MAX, ev_txt, r"double\s+incrementMax\s*=\s*" + num_re + r"\s*;"),
+        ("INC_MIN", INC_MIN, ev_txt, r"double\s+incrementMin\s*=\s*" + num_re + r"\s*;"),
+        ("MAX_HYPOTHESES", MAX_HYPOTHESES, ev_txt, r"int\s+maxHypotheses\s*=\s*" + num_re + r"\s*;"),
+        ("WINDOW_YIELD_NATS", WINDOW_YIELD_NATS, ev_txt, r"double\s+windowYieldNats\s*=\s*" + num_re + r"\s*;"),
+        ("WINDOW_MARGIN", WINDOW_MARGIN, ev_txt, r"double\s+windowMargin\s*=\s*" + num_re + r"\s*;"),
+        ("WINDOW_MIN_SEC", WINDOW_MIN_SEC, ev_txt, r"double\s+windowMinSec\s*=\s*" + num_re + r"\s*;"),
+        ("WINDOW_MAX_SEC", WINDOW_MAX_SEC, ev_txt, r"double\s+windowMaxSec\s*=\s*" + num_re + r"\s*;"),
+        ("RATE_SMOOTHING", RATE_SMOOTHING, ev_txt, r"double\s+rateSmoothing\s*=\s*" + num_re + r"\s*;"),
+    ]
+    for c_idx, cpp_cls in enumerate(CLASS_CPP):
+        checks.append(("PLACEHOLDER.null[%s].mean" % cpp_cls, PLACEHOLDER["null"][c_idx][0], nt_txt,
+                       r"t\.nul\[" + re.escape(cpp_cls) + r"\]\.mean\s*=\s*" + num_re + r"\s*;"))
+        checks.append(("PLACEHOLDER.null[%s].sd" % cpp_cls, PLACEHOLDER["null"][c_idx][1], nt_txt,
+                       r"t\.nul\[" + re.escape(cpp_cls) + r"\]\.sd\s*=\s*" + num_re + r"\s*;"))
+    checks.append(("PLACEHOLDER.alt.mean", PLACEHOLDER["alt"][0][0], nt_txt,
+                   r"t\.alt\[c\]\.mean\s*=\s*" + num_re + r"\s*;"))
+    checks.append(("PLACEHOLDER.alt.sd", PLACEHOLDER["alt"][0][1], nt_txt,
+                   r"t\.alt\[c\]\.sd\s*=\s*" + num_re + r"\s*;"))
+
+    verified = {}
+    drifts = []
+    for name, py_val, txt, pat in checks:
+        cpp_val = _parse_cpp_numeric(txt, pat, name)
+        verified[name] = cpp_val
+        if abs(float(py_val) - cpp_val) > 1e-12:
+            drifts.append("%s: py=%r != cpp=%r" % (name, py_val, cpp_val))
+    if drifts:
+        raise AssertionError("C++ contract constant drift detected: " + "; ".join(drifts))
+    return verified
 
 
 # ----------------------------------------------------------------------------------------------------------
@@ -860,6 +946,141 @@ def simulate_native_segment(seg, items_idx, tables, c1):
 
 
 # ----------------------------------------------------------------------------------------------------------
+# Leakage-controlled 2-fold held-out cross-validation by master (ported from calibrate_nulls.py:722-818)
+# ----------------------------------------------------------------------------------------------------------
+def split_masters(masters, folds=2, seed=DEFAULT_CV_SEED):
+    """Deterministic by-master split: all reels/segments of one master share a single fold (zero leakage)."""
+    order = sorted(set(masters), key=lambda t: hashlib.sha1((seed + "|" + str(t)).encode("utf-8")).hexdigest())
+    return {t: i % folds for i, t in enumerate(order)}
+
+
+def _fit_tables_from_items(train_items, min_null_per_class, min_alt_per_class):
+    """Fits per-class null and alt Gaussian parameters strictly from train_items."""
+    null_by_cls = [[] for _ in range(4)]
+    alt_by_cls = [[] for _ in range(4)]
+    null_shots_by_cls = [set() for _ in range(4)]
+    alt_shots_by_cls = [set() for _ in range(4)]
+    for it in train_items:
+        sk = (it.reel, it.axis, it.shot_id)
+        if it.label == "null":
+            null_by_cls[it.cls].append(it.stat)
+            null_shots_by_cls[it.cls].add(sk)
+        elif it.label == "alt":
+            alt_by_cls[it.cls].append(it.stat)
+            alt_shots_by_cls[it.cls].add(sk)
+
+    fitted_null = []
+    fitted_alt = []
+    class_diag = []
+    fit_reasons = []
+    all_classes_fitted = True
+
+    for c in range(4):
+        nx = null_by_cls[c]
+        ax = alt_by_cls[c]
+        ne = len(null_shots_by_cls[c])
+        ae = len(alt_shots_by_cls[c])
+        if len(nx) < min_null_per_class or ne <= 0:
+            all_classes_fitted = False
+            fit_reasons.append("%s null count %d < %d" % (CLASSES[c], len(nx), min_null_per_class))
+            fitted_null.append(PLACEHOLDER["null"][c])
+            fitted_alt.append(PLACEHOLDER["alt"][c])
+            class_diag.append({"class": CLASSES[c], "n_null": len(nx), "n_alt": len(ax), "status": "insufficient_null"})
+            continue
+
+        m0 = median(nx)
+        s0 = max(
+            null_sd(nx, SD_NUMERICAL_FLOOR) * NULL_WIDEN_FACTOR * (1.0 + SE_UNCERTAINTY_SIGMA / math.sqrt(float(ne))),
+            SD_NUMERICAL_FLOOR,
+        )
+        nul = (m0, s0)
+
+        if len(ax) >= min_alt_per_class and ae > 0:
+            m1 = median(ax)
+            s1 = max(alt_sd(ax, SD_NUMERICAL_FLOOR) * (1.0 + SE_UNCERTAINTY_SIGMA / math.sqrt(float(ae))), SD_NUMERICAL_FLOOR)
+            if m1 < m0 - MIN_ALT_SEPARATION_SIGMA * s0:
+                alt = (m1, s1)
+                c_status = "fitted"
+            else:
+                alt = nul
+                c_status = "alt_unseparated_zero_llr"
+        else:
+            alt = nul
+            c_status = "no_alt_zero_llr"
+
+        fitted_null.append(nul)
+        fitted_alt.append(alt)
+        class_diag.append({
+            "class": CLASSES[c],
+            "n_null": len(nx),
+            "n_alt": len(ax),
+            "eff_null": ne,
+            "eff_alt": ae,
+            "null_mean": nul[0],
+            "null_sd": nul[1],
+            "alt_mean": alt[0],
+            "alt_sd": alt[1],
+            "status": c_status,
+        })
+
+    tables = {"null": fitted_null, "alt": fitted_alt}
+    if not _valid_table_params(tables):
+        all_classes_fitted = False
+        fit_reasons.append("invalid_fitted_parameters")
+    return tables, class_diag, all_classes_fitted, fit_reasons
+
+
+def evaluate_heldout(test_items, test_segs, tables, c1):
+    """Evaluates native FP replay and LLR discrimination strictly on held-out test_items / test_segs."""
+    items_idx = {}
+    for it in test_items:
+        items_idx.setdefault((it.reel, it.depth, it.axis, it.seq), []).append(it)
+
+    native_segs = [sg for sg in test_segs if all(t <= 0 for t in sg["truth"].values())]
+    native_fp = 0
+    max_native_llr = -1e9
+    sample_hours = 0.0
+    for sg in native_segs:
+        sample_hours += segment_hours(sg)
+        fps, peak_llr = simulate_native_segment(sg, items_idx, tables, c1)
+        native_fp += fps
+        if peak_llr > max_native_llr:
+            max_native_llr = peak_llr
+    worst_shot_margin = (c1 - max_native_llr) if max_native_llr > -1e8 else c1
+
+    pos_all = []
+    neg_all = []
+    pos_hd = []
+    neg_hd = []
+    for it in test_items:
+        val = llr(tables["null"][it.cls], tables["alt"][it.cls], it.stat)
+        is_half = it.N > 0 and abs(it.n - 0.5 * it.N) <= 2.0
+        if it.label == "alt":
+            pos_all.append(val)
+            if is_half:
+                pos_hd.append(val)
+        elif it.label == "null":
+            neg_all.append(val)
+            if is_half:
+                neg_hd.append(val)
+
+    return {
+        "native_fp": native_fp,
+        "native_segs": len(native_segs),
+        "sample_hours": sample_hours,
+        "worst_shot_margin": worst_shot_margin,
+        "auc_all": mann_whitney_u_auc(pos_all, neg_all),
+        "auc_hd": mann_whitney_u_auc(pos_hd, neg_hd),
+        "n_pos_hd": len(pos_hd),
+        "n_neg_hd": len(neg_hd),
+        "pos_all": pos_all,
+        "neg_all": neg_all,
+        "pos_hd": pos_hd,
+        "neg_hd": neg_hd,
+    }
+
+
+# ----------------------------------------------------------------------------------------------------------
 # Per-depth strict calibration & gate scoring
 # ----------------------------------------------------------------------------------------------------------
 def _valid_table_params(tables):
@@ -873,8 +1094,9 @@ def _valid_table_params(tables):
     return True
 
 
-def fit_depth_stratum(depth, items, segs, min_native_shots, min_null_per_class, min_alt_per_class):
-    """Fits a single bit-depth stratum strictly from its own samples (zero cross-depth pooling)."""
+def fit_depth_stratum(depth, items, segs, min_native_shots, min_null_per_class, min_alt_per_class,
+                      cv_seed=DEFAULT_CV_SEED):
+    """Fits a single bit-depth stratum strictly from its own samples with leakage-controlled 2-fold CV by master."""
     c1 = compute_c1()
     depth_items = [it for it in items if it.depth == depth]
     depth_segs = [sg for sg in segs if sg["depth"] == depth]
@@ -894,81 +1116,113 @@ def fit_depth_stratum(depth, items, segs, min_native_shots, min_null_per_class, 
             native_shot_keys.add((it.reel, it.shot_id))
     native_shots = len(native_shot_keys)
 
-    null_by_cls = [[] for _ in range(4)]
-    alt_by_cls = [[] for _ in range(4)]
-    null_shots_by_cls = [set() for _ in range(4)]
-    alt_shots_by_cls = [set() for _ in range(4)]
-    for it in depth_items:
-        sk = (it.reel, it.axis, it.shot_id)
-        if it.label == "null":
-            null_by_cls[it.cls].append(it.stat)
-            null_shots_by_cls[it.cls].add(sk)
-        elif it.label == "alt":
-            alt_by_cls[it.cls].append(it.stat)
-            alt_shots_by_cls[it.cls].add(sk)
-
     gate_reasons = []
     if native_shots < min_native_shots:
         gate_reasons.append("native_shots %d < %d" % (native_shots, min_native_shots))
     if not (math.isfinite(sample_hours) and sample_hours > 0.0):
         gate_reasons.append("sample_hours %.4f <= 0" % sample_hours)
 
-    fitted_null = []
-    fitted_alt = []
-    class_diag = []
-    all_classes_fitted = True
-
-    for c in range(4):
-        nx = null_by_cls[c]
-        ax = alt_by_cls[c]
-        ne = len(null_shots_by_cls[c])
-        ae = len(alt_shots_by_cls[c])
-        if len(nx) < min_null_per_class or ne <= 0:
-            all_classes_fitted = False
-            gate_reasons.append("%s null count %d < %d" % (CLASSES[c], len(nx), min_null_per_class))
-            fitted_null.append(PLACEHOLDER["null"][c])
-            fitted_alt.append(PLACEHOLDER["alt"][c])
-            class_diag.append({"class": CLASSES[c], "n_null": len(nx), "n_alt": len(ax), "status": "insufficient_null"})
-            continue
-
-        m0 = median(nx)
-        s0 = max(null_sd(nx, SD_NUMERICAL_FLOOR) * NULL_WIDEN_FACTOR * (1.0 + SE_UNCERTAINTY_SIGMA / math.sqrt(float(ne))), SD_NUMERICAL_FLOOR)
-        nul = (m0, s0)
-
-        if len(ax) >= min_alt_per_class and ae > 0:
-            m1 = median(ax)
-            s1 = max(alt_sd(ax, SD_NUMERICAL_FLOOR) * (1.0 + SE_UNCERTAINTY_SIGMA / math.sqrt(float(ae))), SD_NUMERICAL_FLOOR)
-            if m1 < m0 - MIN_ALT_SEPARATION_SIGMA * s0:
-                alt = (m1, s1)
-                c_status = "fitted"
-            else:
-                # Conservative: unseparated alt produces 0 LLR everywhere
-                alt = nul
-                c_status = "alt_unseparated_zero_llr"
-        else:
-            # Conservative: missing alt produces 0 LLR everywhere rather than inventing alt parameters
-            alt = nul
-            c_status = "no_alt_zero_llr"
-
-        fitted_null.append(nul)
-        fitted_alt.append(alt)
-        class_diag.append({
-            "class": CLASSES[c],
-            "n_null": len(nx),
-            "n_alt": len(ax),
-            "eff_null": ne,
-            "eff_alt": ae,
-            "null_mean": nul[0],
-            "null_sd": nul[1],
-            "alt_mean": alt[0],
-            "alt_sd": alt[1],
-            "status": c_status,
-        })
-
-    candidate_tables = {"null": fitted_null, "alt": fitted_alt}
+    # Full-stratum candidate table fit (used for C++ emission ONLY after held-out 2-fold CV passes).
+    candidate_tables, class_diag, all_classes_fitted, fit_reasons = _fit_tables_from_items(
+        depth_items, min_null_per_class, min_alt_per_class
+    )
+    gate_reasons.extend(fit_reasons)
     params_valid = _valid_table_params(candidate_tables)
-    if not params_valid:
-        gate_reasons.append("invalid_fitted_parameters")
+
+    # Leakage-controlled 2-fold cross-validation grouped by master (H3: NEVER silently fall back to in-sample).
+    depth_masters = sorted(set([it.master for it in depth_items] + [sg["master"] for sg in depth_segs]))
+    cv_folds = []
+    cv_fail_reasons = []
+    pooled_pos_all = []
+    pooled_neg_all = []
+    pooled_pos_hd = []
+    pooled_neg_hd = []
+    heldout_native_fp = 0
+    heldout_worst_shot_margin = c1
+
+    if len(depth_masters) < 2:
+        cv_passed = False
+        cv_fail_reasons.append("fewer than 2 distinct masters (%d)" % len(depth_masters))
+    else:
+        fold_of = split_masters(depth_masters, folds=2, seed=cv_seed)
+        if len(set(fold_of.values())) < 2:
+            cv_passed = False
+            cv_fail_reasons.append("master split did not yield 2 disjoint folds")
+        else:
+            fold_margins = []
+            for k in (0, 1):
+                test_fold = 1 - k
+                train_masters = sorted(m for m in depth_masters if fold_of[m] == k)
+                test_masters = sorted(m for m in depth_masters if fold_of[m] == test_fold)
+                train_items = [it for it in depth_items if fold_of[it.master] == k]
+                test_items = [it for it in depth_items if fold_of[it.master] == test_fold]
+                test_segs = [sg for sg in depth_segs if fold_of[sg["master"]] == test_fold]
+
+                fold_tables, _, fold_fit_ok, fold_fit_reasons = _fit_tables_from_items(
+                    train_items, min_null_per_class, min_alt_per_class
+                )
+                fold_params_ok = fold_fit_ok and _valid_table_params(fold_tables)
+                eval_tables = fold_tables if fold_params_ok else PLACEHOLDER
+                ev = evaluate_heldout(test_items, test_segs, eval_tables, c1)
+
+                fold_reasons = []
+                if not fold_params_ok:
+                    fold_reasons.append("train fit failed (%s)" % "; ".join(fold_fit_reasons))
+                if ev["native_segs"] <= 0:
+                    fold_reasons.append("held-out fold %d has 0 native segments" % test_fold)
+                if ev["native_fp"] > 0:
+                    fold_reasons.append("held-out native_fp %d > 0" % ev["native_fp"])
+                fold_passed = len(fold_reasons) == 0
+                if not fold_passed:
+                    cv_fail_reasons.append("fold %d->%d: %s" % (k, test_fold, "; ".join(fold_reasons)))
+
+                heldout_native_fp += ev["native_fp"]
+                if ev["native_segs"] > 0:
+                    fold_margins.append(ev["worst_shot_margin"])
+                pooled_pos_all.extend(ev["pos_all"])
+                pooled_neg_all.extend(ev["neg_all"])
+                pooled_pos_hd.extend(ev["pos_hd"])
+                pooled_neg_hd.extend(ev["neg_hd"])
+
+                cv_folds.append({
+                    "train_fold": k,
+                    "test_fold": test_fold,
+                    "train_masters": train_masters,
+                    "test_masters": test_masters,
+                    "fit_ok": fold_params_ok,
+                    "fit_reasons": fold_fit_reasons,
+                    "native_segs": ev["native_segs"],
+                    "sample_hours": ev["sample_hours"],
+                    "native_fp": ev["native_fp"],
+                    "worst_shot_margin": ev["worst_shot_margin"],
+                    "auc_all": ev["auc_all"],
+                    "auc_hd": ev["auc_hd"],
+                    "n_pos_hd": ev["n_pos_hd"],
+                    "n_neg_hd": ev["n_neg_hd"],
+                    "passed": fold_passed,
+                    "failure_reason": "ok" if fold_passed else "; ".join(fold_reasons),
+                })
+            if fold_margins:
+                heldout_worst_shot_margin = min(fold_margins)
+            cv_passed = len(cv_folds) == 2 and all(f["passed"] for f in cv_folds)
+
+    cv_failure_reason = "ok" if cv_passed else "; ".join(cv_fail_reasons)
+    if not cv_passed:
+        gate_reasons.append("cv_failed: " + cv_failure_reason)
+
+    heldout_auc_all = mann_whitney_u_auc(pooled_pos_all, pooled_neg_all)
+    heldout_auc_hd = mann_whitney_u_auc(pooled_pos_hd, pooled_neg_hd)
+
+    # Full-stratum safety check (belt-and-suspenders on emitted tables; NEVER overrides a failing CV).
+    full_ev = evaluate_heldout(
+        depth_items,
+        depth_segs,
+        candidate_tables if (all_classes_fitted and params_valid) else PLACEHOLDER,
+        c1,
+    )
+    insample_confident_wrong = full_ev["native_fp"]
+    if insample_confident_wrong > 0:
+        gate_reasons.append("confident_wrong %d > 0" % insample_confident_wrong)
 
     calibrated = (
         native_shots >= min_native_shots
@@ -976,48 +1230,14 @@ def fit_depth_stratum(depth, items, segs, min_native_shots, min_null_per_class, 
         and sample_hours > 0.0
         and all_classes_fitted
         and params_valid
+        and cv_passed
+        and heldout_native_fp == 0
+        and insample_confident_wrong == 0
     )
 
     active_tables = candidate_tables if calibrated else PLACEHOLDER
-
-    # Replay native segments with active_tables to compute G-PhaseA FP count and worst-shot margin
-    items_idx = {}
-    for it in depth_items:
-        items_idx.setdefault((it.reel, it.depth, it.axis, it.seq), []).append(it)
-    confident_wrong = 0
-    max_native_llr = -1e9
-    for sg in native_segs:
-        fps, peak_llr = simulate_native_segment(sg, items_idx, active_tables, c1)
-        confident_wrong += fps
-        if peak_llr > max_native_llr:
-            max_native_llr = peak_llr
-    worst_shot_margin = (c1 - max_native_llr) if max_native_llr > -1e8 else c1
-
-    # G-PhaseA safety revocation: never emit NullTableSourceKind::Calibrated if native replay had any confident-wrong FP.
-    if calibrated and confident_wrong > 0:
-        gate_reasons.append("confident_wrong %d > 0" % confident_wrong)
-        calibrated = False
-        active_tables = PLACEHOLDER
-
-    # Per-depth LLR distributions for AUC (G-8bit uses N8)
-    pos_all = []
-    neg_all = []
-    pos_hd = []
-    neg_hd = []
-    for it in depth_items:
-        val = llr(active_tables["null"][it.cls], active_tables["alt"][it.cls], it.stat)
-        is_half = it.N > 0 and abs(it.n - 0.5 * it.N) <= 2.0
-        if it.label == "alt":
-            pos_all.append(val)
-            if is_half:
-                pos_hd.append(val)
-        elif it.label == "null":
-            neg_all.append(val)
-            if is_half:
-                neg_hd.append(val)
-
-    auc_all = mann_whitney_u_auc(pos_all, neg_all)
-    auc_hd = mann_whitney_u_auc(pos_hd, neg_hd)
+    confident_wrong = max(heldout_native_fp, insample_confident_wrong) if cv_folds else insample_confident_wrong
+    worst_shot_margin = heldout_worst_shot_margin if cv_folds else full_ev["worst_shot_margin"]
     r3_bound = rule_of_three_bound(sample_hours)
 
     return {
@@ -1026,27 +1246,40 @@ def fit_depth_stratum(depth, items, segs, min_native_shots, min_null_per_class, 
         "source_kind": "calibrated" if calibrated else "placeholder",
         "gate_reason": "ok" if calibrated else "; ".join(gate_reasons),
         "native_shots": native_shots,
+        "distinct_masters": len(depth_masters),
         "sample_hours": sample_hours,
         "rule_of_three_bound_per_hour": r3_bound,
         "confident_wrong_count": confident_wrong,
+        "heldout_native_fp": heldout_native_fp,
+        "insample_confident_wrong_count": insample_confident_wrong,
         "worst_shot_margin": worst_shot_margin,
         "c1": c1,
-        "auc_all": auc_all,
-        "auc_hd": auc_hd,
-        "n_pos_hd": len(pos_hd),
-        "n_neg_hd": len(neg_hd),
+        "auc_all": heldout_auc_all,
+        "auc_hd": heldout_auc_hd,
+        "heldout_auc_all": heldout_auc_all,
+        "heldout_auc_hd": heldout_auc_hd,
+        "n_pos_hd": len(pooled_pos_hd),
+        "n_neg_hd": len(pooled_neg_hd),
+        "cv_passed": cv_passed,
+        "cv_failure_reason": cv_failure_reason,
+        "cv_folds": cv_folds,
         "tables": active_tables,
         "classes": class_diag,
-        "g_phase_a_passed": bool(calibrated and confident_wrong == 0 and native_shots >= min_native_shots),
+        "g_phase_a_passed": bool(
+            calibrated and cv_passed and heldout_native_fp == 0 and confident_wrong == 0 and native_shots >= min_native_shots
+        ),
     }
 
 
 def calibrate_all_depths(items, segs, min_native_shots=DEFAULT_MIN_NATIVE_SHOTS,
                          min_null_per_class=DEFAULT_MIN_NULL_PER_CLASS,
-                         min_alt_per_class=DEFAULT_MIN_ALT_PER_CLASS):
+                         min_alt_per_class=DEFAULT_MIN_ALT_PER_CLASS,
+                         cv_seed=DEFAULT_CV_SEED):
     results = {}
     for d in DEPTHS:
-        results[d] = fit_depth_stratum(d, items, segs, min_native_shots, min_null_per_class, min_alt_per_class)
+        results[d] = fit_depth_stratum(
+            d, items, segs, min_native_shots, min_null_per_class, min_alt_per_class, cv_seed=cv_seed
+        )
 
     unknown_items = sum(1 for it in items if it.depth not in DEPTHS)
     n8 = results["N8"]
@@ -1054,10 +1287,26 @@ def calibrate_all_depths(items, segs, min_native_shots=DEFAULT_MIN_NATIVE_SHOTS,
     g8_reasons = []
     if not n8["calibrated"]:
         g8_reasons.append("N8 uncalibrated (%s)" % n8["gate_reason"])
-    if not (n8["n_pos_hd"] > 0 and n8["n_neg_hd"] > 0 and math.isfinite(n8["auc_hd"])):
-        g8_reasons.append("missing N8 HD (1/2) samples (pos=%d, neg=%d)" % (n8["n_pos_hd"], n8["n_neg_hd"]))
-    elif n8["auc_hd"] < G8BIT_MIN_HD_AUC:
-        g8_reasons.append("N8 HD AUC %.4f < %.2f" % (n8["auc_hd"], G8BIT_MIN_HD_AUC))
+    if not n8["cv_passed"]:
+        g8_reasons.append("N8 2-fold CV failed (%s)" % n8["cv_failure_reason"])
+    if len(n8["cv_folds"]) != 2:
+        g8_reasons.append("missing N8 2-fold held-out HD splits")
+    else:
+        for f in n8["cv_folds"]:
+            if not (f["n_pos_hd"] > 0 and f["n_neg_hd"] > 0 and math.isfinite(f["auc_hd"])):
+                g8_reasons.append(
+                    "missing N8 HD (1/2) samples on held-out fold %d (pos=%d, neg=%d)"
+                    % (f["test_fold"], f["n_pos_hd"], f["n_neg_hd"])
+                )
+            elif f["auc_hd"] < G8BIT_MIN_HD_AUC:
+                g8_reasons.append(
+                    "N8 held-out fold %d HD AUC %.4f < %.2f" % (f["test_fold"], f["auc_hd"], G8BIT_MIN_HD_AUC)
+                )
+    if not (n8["n_pos_hd"] > 0 and n8["n_neg_hd"] > 0 and math.isfinite(n8["heldout_auc_hd"])):
+        if not any("missing N8 HD" in r for r in g8_reasons):
+            g8_reasons.append("missing N8 HD (1/2) samples (pos=%d, neg=%d)" % (n8["n_pos_hd"], n8["n_neg_hd"]))
+    elif n8["heldout_auc_hd"] < G8BIT_MIN_HD_AUC:
+        g8_reasons.append("N8 held-out HD AUC %.4f < %.2f" % (n8["heldout_auc_hd"], G8BIT_MIN_HD_AUC))
     for d in DEPTHS:
         if results[d]["confident_wrong_count"] > 0:
             g8_reasons.append("%s native FPs %d > 0" % (d, results[d]["confident_wrong_count"]))
@@ -1074,20 +1323,29 @@ def calibrate_all_depths(items, segs, min_native_shots=DEFAULT_MIN_NATIVE_SHOTS,
                 "source_kind": results[d]["source_kind"],
                 "gate_reason": results[d]["gate_reason"],
                 "native_shots": results[d]["native_shots"],
+                "distinct_masters": results[d]["distinct_masters"],
                 "sample_hours": results[d]["sample_hours"],
                 "rule_of_three_bound_per_hour": results[d]["rule_of_three_bound_per_hour"],
                 "confident_wrong_count": results[d]["confident_wrong_count"],
+                "heldout_native_fp": results[d]["heldout_native_fp"],
                 "worst_shot_margin": results[d]["worst_shot_margin"],
+                "cv_passed": results[d]["cv_passed"],
+                "cv_failure_reason": results[d]["cv_failure_reason"],
+                "cv_folds": results[d]["cv_folds"],
                 "passed": results[d]["g_phase_a_passed"],
             }
             for d in DEPTHS
         },
         "G-8bit": {
-            "n8_hd_auc": n8["auc_hd"],
-            "n8_overall_auc": n8["auc_all"],
+            "n8_hd_auc": n8["heldout_auc_hd"],
+            "n8_overall_auc": n8["heldout_auc_all"],
+            "heldout_auc_hd": n8["heldout_auc_hd"],
+            "heldout_auc_hd_folds": [f["auc_hd"] for f in n8["cv_folds"]],
             "n8_hd_pos_samples": n8["n_pos_hd"],
             "n8_hd_neg_samples": n8["n_neg_hd"],
             "native_fps_per_depth": native_fps_by_depth,
+            "cv_passed": n8["cv_passed"],
+            "cv_failure_reason": n8["cv_failure_reason"],
             "g8_reason": g8_reason,
             "passed": g8_passed,
         },
@@ -1167,34 +1425,65 @@ def render_markdown_report(report):
         "- Calibration gate minimum native shots: `%d`" % report["min_native_shots"],
         "- Unknown-depth items excluded: `%d`" % report["unknown_depth_items_excluded"],
         "",
-        "## G-PhaseA (Per-Depth Native False-Positive Bounds)",
+        "## G-PhaseA (Per-Depth Held-Out 2-Fold CV & Native False-Positive Bounds)",
         "",
-        "| Depth | Source | Native Shots | Hours | Rule-of-Three (3/H) | Confident-Wrong | Worst-Shot Margin | Gate |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |",
+        "| Depth | Source | Masters | Native Shots | Hours | Rule-of-Three (3/H) | Held-Out FPs | Worst-Shot Margin | 2-Fold CV | Gate |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |",
     ]
     for d in DEPTHS:
         g = report["G-PhaseA"][d]
         lines.append(
-            "| %s | %s | %d | %s | %s/h | %d | %s | %s (%s) |" % (
+            "| %s | %s | %d | %d | %s | %s/h | %d | %s | %s (%s) | %s (%s) |" % (
                 d,
                 g["source_kind"],
+                g["distinct_masters"],
                 g["native_shots"],
                 _fmt_num(g["sample_hours"], "%.4f"),
                 _fmt_num(g["rule_of_three_bound_per_hour"], "%.4f"),
-                g["confident_wrong_count"],
+                g["heldout_native_fp"],
                 _fmt_num(g["worst_shot_margin"], "%.3f"),
+                "PASS" if g["cv_passed"] else "FAIL",
+                g["cv_failure_reason"],
                 "PASS" if g["passed"] else "FAIL",
                 g["gate_reason"],
             )
         )
-    g8 = report["G-8bit"]
     lines.extend([
         "",
-        "## G-8bit (8-Bit HD Discrimination & Native FP Safety)",
+        "### Held-Out 2-Fold Cross-Validation Detail (Disjoint By Master)",
         "",
-        "- N8 HD (1/2) Mann-Whitney U AUC: `%s` (pos=%d, neg=%d)" % (
-            _fmt_num(g8["n8_hd_auc"], "%.5f"), g8["n8_hd_pos_samples"], g8["n8_hd_neg_samples"]),
-        "- N8 overall Mann-Whitney U AUC: `%s`" % _fmt_num(g8["n8_overall_auc"], "%.5f"),
+        "| Depth | Train->Test Fold | Test Masters | Held-Out Native Segs | Held-Out FPs | Held-Out HD AUC | Fold Verdict |",
+        "| --- | --- | ---: | ---: | ---: | ---: | --- |",
+    ])
+    for d in DEPTHS:
+        g = report["G-PhaseA"][d]
+        if not g["cv_folds"]:
+            lines.append("| %s | n/a | 0 | 0 | 0 | nan | FAIL (%s) |" % (d, g["cv_failure_reason"]))
+            continue
+        for f in g["cv_folds"]:
+            lines.append(
+                "| %s | %d->%d | %d | %d | %d | %s | %s (%s) |" % (
+                    d,
+                    f["train_fold"],
+                    f["test_fold"],
+                    len(f["test_masters"]),
+                    f["native_segs"],
+                    f["native_fp"],
+                    _fmt_num(f["auc_hd"], "%.5f"),
+                    "PASS" if f["passed"] else "FAIL",
+                    f["failure_reason"],
+                )
+            )
+    g8 = report["G-8bit"]
+    fold_aucs_str = ", ".join(_fmt_num(x, "%.5f") for x in g8.get("heldout_auc_hd_folds", [])) or "none"
+    lines.extend([
+        "",
+        "## G-8bit (8-Bit Held-Out HD Discrimination & Native FP Safety)",
+        "",
+        "- N8 held-out HD (1/2) Mann-Whitney U AUC: `%s` (folds: `[%s]`, pos=%d, neg=%d)" % (
+            _fmt_num(g8["n8_hd_auc"], "%.5f"), fold_aucs_str, g8["n8_hd_pos_samples"], g8["n8_hd_neg_samples"]),
+        "- N8 held-out overall Mann-Whitney U AUC: `%s`" % _fmt_num(g8["n8_overall_auc"], "%.5f"),
+        "- N8 2-fold CV: `%s` (%s)" % ("PASS" if g8["cv_passed"] else "FAIL", g8["cv_failure_reason"]),
         "- Native FPs per depth: `N8=%d, N10=%d, N12=%d`" % (
             g8["native_fps_per_depth"]["N8"],
             g8["native_fps_per_depth"]["N10"],
@@ -1272,9 +1561,11 @@ def _write_synthetic_v4_pair(directory, tag, step_codes, output_bits, num_shots,
                 t_s += 2.0
 
 
-def _write_synthetic_v3_csv(directory, filename, bit_depth, num_shots, truth_n, rng):
+def _write_synthetic_v3_csv(directory, filename, bit_depth, num_shots, truth_n, rng, master_name=None, reel_name=None):
     path = os.path.join(directory, filename)
     cands = [(960, 1920), (1320, 1920), (1280, 1920), (1100, 1920)]
+    master_id = master_name or ("m_v3_%d" % bit_depth)
+    reel_id = reel_name or ("v3_reel_%d" % bit_depth)
     with open(path, "w", encoding="utf-8", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(list(REQUIRED_V3_COLS))
@@ -1289,15 +1580,19 @@ def _write_synthetic_v3_csv(directory, filename, bit_depth, num_shots, truth_n, 
                     else:
                         stat = rng.gauss(-0.02, 0.02)
                     w.writerow([
-                        "v3_reel_%d" % bit_depth, "title", seq, "%.3f" % t_s, "x", N, n, CLASSES[cls_idx],
+                        reel_id, "title", seq, "%.3f" % t_s, "x", N, n, CLASSES[cls_idx],
                         "%.6f" % stat, "exact", 0, 0.1, 24, 32, 1, 0.289, truth_n, bit_depth,
-                        0, 0, shot, "%.6f" % stat, 1, "m_v3_%d" % bit_depth, 1, 0, shot,
+                        0, 0, shot, "%.6f" % stat, 1, master_id, 1, 0, shot,
                     ])
                 seq += 1
                 t_s += 2.0
 
 
 def run_selftest():
+    # L4: Verify Python contract constants match C++ headers with zero drift.
+    verified_cpp = verify_cpp_contract_constants()
+    assert verified_cpp is not None and len(verified_cpp) >= 20, "C++ contract constant verification did not locate headers"
+
     # HIGH-1: 8-bit HDMI-loop streams (step_codes == 1, output_bits == 8) MUST classify as N8, never N10.
     assert classify_bit_depth_from_step(1, 8) == "N8", "expected (1, 8) -> N8"
     assert classify_bit_depth_from_step(4, 0) == "N8"
@@ -1307,16 +1602,27 @@ def run_selftest():
     with tempfile.TemporaryDirectory() as tmp:
         v4_dir = os.path.join(tmp, "v4")
         os.makedirs(v4_dir)
-        # 1. Well-sampled N8 native (>= 1500 shots) + N8 upscaled reels covering all 4 size classes
-        _write_synthetic_v4_pair(v4_dir, "n8_native", step_codes=4, output_bits=8, num_shots=1520, evals_per_shot=2,
+        # 1. Well-sampled multi-master N8 native (>= 1500 shots total across 2 disjoint masters,
+        #    one per CV fold) + multi-master N8 upscaled reels covering all 4 size classes in both folds.
+        _write_synthetic_v4_pair(v4_dir, "n8_native_a", step_codes=4, output_bits=8, num_shots=760, evals_per_shot=2,
                                  truth_nx=0, truth_ny=0, rng=rng)
-        _write_synthetic_v4_pair(v4_dir, "n8_up_half", step_codes=4, output_bits=8, num_shots=30, evals_per_shot=2,
+        _write_synthetic_v4_pair(v4_dir, "n8_native_b", step_codes=4, output_bits=8, num_shots=760, evals_per_shot=2,
+                                 truth_nx=0, truth_ny=0, rng=rng)
+        _write_synthetic_v4_pair(v4_dir, "n8_up_half_a", step_codes=4, output_bits=8, num_shots=25, evals_per_shot=2,
                                  truth_nx=960, truth_ny=540, rng=rng)
-        _write_synthetic_v4_pair(v4_dir, "n8_up_k16", step_codes=4, output_bits=8, num_shots=25, evals_per_shot=2,
+        _write_synthetic_v4_pair(v4_dir, "n8_up_half_b", step_codes=4, output_bits=8, num_shots=25, evals_per_shot=2,
+                                 truth_nx=960, truth_ny=540, rng=rng)
+        _write_synthetic_v4_pair(v4_dir, "n8_up_k16_a", step_codes=4, output_bits=8, num_shots=20, evals_per_shot=2,
                                  truth_nx=1320, truth_ny=743, rng=rng)
-        _write_synthetic_v4_pair(v4_dir, "n8_up_rat", step_codes=4, output_bits=8, num_shots=25, evals_per_shot=2,
+        _write_synthetic_v4_pair(v4_dir, "n8_up_k16_b", step_codes=4, output_bits=8, num_shots=20, evals_per_shot=2,
+                                 truth_nx=1320, truth_ny=743, rng=rng)
+        _write_synthetic_v4_pair(v4_dir, "n8_up_rat_a", step_codes=4, output_bits=8, num_shots=20, evals_per_shot=2,
                                  truth_nx=1280, truth_ny=720, rng=rng)
-        _write_synthetic_v4_pair(v4_dir, "n8_up_gen", step_codes=4, output_bits=8, num_shots=25, evals_per_shot=2,
+        _write_synthetic_v4_pair(v4_dir, "n8_up_rat_b", step_codes=4, output_bits=8, num_shots=20, evals_per_shot=2,
+                                 truth_nx=1280, truth_ny=720, rng=rng)
+        _write_synthetic_v4_pair(v4_dir, "n8_up_gen_a", step_codes=4, output_bits=8, num_shots=20, evals_per_shot=2,
+                                 truth_nx=1100, truth_ny=618, rng=rng)
+        _write_synthetic_v4_pair(v4_dir, "n8_up_gen_b", step_codes=4, output_bits=8, num_shots=20, evals_per_shot=2,
                                  truth_nx=1100, truth_ny=618, rng=rng)
         # 2. Under-sampled N10 native (only 50 shots < 1500) -> MUST NOT calibrate!
         _write_synthetic_v4_pair(v4_dir, "n10_under", step_codes=1, output_bits=10, num_shots=50, evals_per_shot=2,
@@ -1325,27 +1631,36 @@ def run_selftest():
 
         manifest_path = os.path.join(tmp, "manifest.json")
         manifest = {
-            "n8_native": {"truth_nx": 0, "truth_ny": 0, "master": "m_n8_nat"},
-            "n8_up_half": {"truth_nx": 960, "truth_ny": 540, "master": "m_n8_h"},
-            "n8_up_k16": {"truth_nx": 1320, "truth_ny": 743, "master": "m_n8_k16"},
-            "n8_up_rat": {"truth_nx": 1280, "truth_ny": 720, "master": "m_n8_r"},
-            "n8_up_gen": {"truth_nx": 1100, "truth_ny": 618, "master": "m_n8_g"},
+            "n8_native_a": {"truth_nx": 0, "truth_ny": 0, "master": "m_n8_a"},
+            "n8_native_b": {"truth_nx": 0, "truth_ny": 0, "master": "m_n8_b"},
+            "n8_up_half_a": {"truth_nx": 960, "truth_ny": 540, "master": "m_n8_a"},
+            "n8_up_half_b": {"truth_nx": 960, "truth_ny": 540, "master": "m_n8_b"},
+            "n8_up_k16_a": {"truth_nx": 1320, "truth_ny": 743, "master": "m_n8_a"},
+            "n8_up_k16_b": {"truth_nx": 1320, "truth_ny": 743, "master": "m_n8_b"},
+            "n8_up_rat_a": {"truth_nx": 1280, "truth_ny": 720, "master": "m_n8_a"},
+            "n8_up_rat_b": {"truth_nx": 1280, "truth_ny": 720, "master": "m_n8_b"},
+            "n8_up_gen_a": {"truth_nx": 1100, "truth_ny": 618, "master": "m_n8_a"},
+            "n8_up_gen_b": {"truth_nx": 1100, "truth_ny": 618, "master": "m_n8_b"},
             "n10_under": {"truth_nx": 0, "truth_ny": 0, "master": "m_n10"},
         }
         with open(manifest_path, "w", encoding="utf-8") as fh:
             json.dump(manifest, fh)
 
         items, segs, load_info = load_all_dumps([v4_dir], manifest_path)
-        assert load_info["v4_pairs"] == 6, "expected 6 v4 pairs, got %r" % (load_info,)
+        assert load_info["v4_pairs"] == 11, "expected 11 v4 pairs, got %r" % (load_info,)
 
         report = calibrate_all_depths(items, segs, min_native_shots=DEFAULT_MIN_NATIVE_SHOTS)
 
-        # Verify N8 calibrated cleanly
+        # Verify N8 calibrated cleanly with both held-out CV folds passing
         n8 = report["G-PhaseA"]["N8"]
         assert n8["calibrated"] is True, "N8 must calibrate: %r" % (n8,)
+        assert n8["cv_passed"] is True, "N8 2-fold CV must pass: %r" % (n8,)
+        assert len(n8["cv_folds"]) == 2
+        assert all(f["passed"] and f["native_fp"] == 0 for f in n8["cv_folds"])
         assert n8["source_kind"] == "calibrated"
         assert n8["native_shots"] == 1520, "expected 1520 N8 native shots, got %d" % n8["native_shots"]
         assert n8["confident_wrong_count"] == 0, "expected 0 N8 FPs, got %d" % n8["confident_wrong_count"]
+        assert n8["heldout_native_fp"] == 0
         assert n8["passed"] is True
         expected_r3 = 3.0 / n8["sample_hours"]
         assert abs(n8["rule_of_three_bound_per_hour"] - expected_r3) < 1e-12
@@ -1353,6 +1668,7 @@ def run_selftest():
         # Negative control 1: Under-sampled N10 MUST emit Placeholder, NEVER calibrated
         n10 = report["G-PhaseA"]["N10"]
         assert n10["calibrated"] is False, "under-sampled N10 must NOT calibrate"
+        assert n10["cv_passed"] is False, "single-master N10 must fail 2-fold CV visibly"
         assert n10["source_kind"] == "placeholder"
         assert n10["native_shots"] == 50, "strict depth isolation broken for N10: %d" % n10["native_shots"]
         assert n10["passed"] is False
@@ -1360,14 +1676,16 @@ def run_selftest():
         # Negative control 2: Unpopulated N12 MUST emit Placeholder, NEVER calibrated
         n12 = report["G-PhaseA"]["N12"]
         assert n12["calibrated"] is False, "unpopulated N12 must NOT calibrate"
+        assert n12["cv_passed"] is False
         assert n12["source_kind"] == "placeholder"
         assert n12["native_shots"] == 0, "strict depth isolation broken for N12: %d" % n12["native_shots"]
         assert math.isinf(n12["rule_of_three_bound_per_hour"])
         assert n12["passed"] is False
 
-        # Verify G-8bit exact Mann-Whitney U AUC
+        # Verify G-8bit exact held-out Mann-Whitney U AUC on BOTH folds
         g8 = report["G-8bit"]
         assert math.isfinite(g8["n8_hd_auc"]) and g8["n8_hd_auc"] > 0.99, "bad N8 HD AUC: %r" % (g8,)
+        assert len(g8["heldout_auc_hd_folds"]) == 2 and all(a > 0.99 for a in g8["heldout_auc_hd_folds"])
         assert g8["passed"] is True
 
         # Verify emitted C++ header, Markdown, and JSON
@@ -1387,20 +1705,27 @@ def run_selftest():
         with open(out_json, "r", encoding="utf-8") as fh:
             parsed_json = json.load(fh)
         assert parsed_json["G-PhaseA"]["N8"]["calibrated"] is True
+        assert parsed_json["G-PhaseA"]["N8"]["cv_passed"] is True
         assert parsed_json["G-PhaseA"]["N10"]["calibrated"] is False
         assert parsed_json["G-PhaseA"]["N12"]["calibrated"] is False
 
         with open(out_md, "r", encoding="utf-8") as fh:
             md_text = fh.read()
-        assert "G-PhaseA" in md_text and "G-8bit" in md_text
+        assert "G-PhaseA" in md_text and "G-8bit" in md_text and "Held-Out 2-Fold" in md_text
 
-        # Also verify v3 cal-dump parser & strict depth stratification
+        # Also verify v3 cal-dump parser & strict depth stratification (multi-master per depth)
         v3_dir = os.path.join(tmp, "v3")
         os.makedirs(v3_dir)
-        _write_synthetic_v3_csv(v3_dir, "cal_dump_10bit.csv", bit_depth=10, num_shots=60, truth_n=0, rng=rng)
-        _write_synthetic_v3_csv(v3_dir, "cal_dump_12bit.csv", bit_depth=12, num_shots=60, truth_n=0, rng=rng)
+        _write_synthetic_v3_csv(v3_dir, "cal_dump_10bit_a.csv", bit_depth=10, num_shots=30, truth_n=0, rng=rng,
+                                master_name="m_v3_10_a", reel_name="v3_reel_10_a")
+        _write_synthetic_v3_csv(v3_dir, "cal_dump_10bit_b.csv", bit_depth=10, num_shots=30, truth_n=0, rng=rng,
+                                master_name="m_v3_10_b", reel_name="v3_reel_10_b")
+        _write_synthetic_v3_csv(v3_dir, "cal_dump_12bit_a.csv", bit_depth=12, num_shots=30, truth_n=0, rng=rng,
+                                master_name="m_v3_12_a", reel_name="v3_reel_12_a")
+        _write_synthetic_v3_csv(v3_dir, "cal_dump_12bit_b.csv", bit_depth=12, num_shots=30, truth_n=0, rng=rng,
+                                master_name="m_v3_12_b", reel_name="v3_reel_12_b")
         v3_items, v3_segs, v3_info = load_all_dumps([v3_dir])
-        assert v3_info["v3_files"] == 2
+        assert v3_info["v3_files"] == 4
         v3_report = calibrate_all_depths(v3_items, v3_segs, min_native_shots=50)
         assert v3_report["G-PhaseA"]["N10"]["calibrated"] is True
         assert v3_report["G-PhaseA"]["N12"]["calibrated"] is True
@@ -1428,29 +1753,37 @@ def run_selftest():
         # Negative control 4 (HIGH-2): high-FP native reel MUST revoke Calibrated and emit PlaceholderFor(...)
         fp_dir = os.path.join(tmp, "fp_revocation")
         os.makedirs(fp_dir)
-        _write_synthetic_v4_pair(fp_dir, "n8_fp_nat", step_codes=4, output_bits=8, num_shots=402, evals_per_shot=3,
+        _write_synthetic_v4_pair(fp_dir, "n8_fp_nat_a", step_codes=4, output_bits=8, num_shots=202, evals_per_shot=3,
                                  truth_nx=0, truth_ny=0, rng=rng, fp_burst_shots=2)
-        _write_synthetic_v4_pair(fp_dir, "n8_fp_up", step_codes=4, output_bits=8, num_shots=30, evals_per_shot=2,
+        _write_synthetic_v4_pair(fp_dir, "n8_fp_nat_b", step_codes=4, output_bits=8, num_shots=200, evals_per_shot=3,
+                                 truth_nx=0, truth_ny=0, rng=rng, fp_burst_shots=0)
+        _write_synthetic_v4_pair(fp_dir, "n8_fp_up_a", step_codes=4, output_bits=8, num_shots=30, evals_per_shot=2,
+                                 truth_nx=960, truth_ny=540, rng=rng)
+        _write_synthetic_v4_pair(fp_dir, "n8_fp_up_b", step_codes=4, output_bits=8, num_shots=30, evals_per_shot=2,
                                  truth_nx=960, truth_ny=540, rng=rng)
         fp_manifest_path = os.path.join(tmp, "fp_manifest.json")
         with open(fp_manifest_path, "w", encoding="utf-8") as fh:
             json.dump({
-                "n8_fp_nat": {"truth_nx": 0, "truth_ny": 0, "master": "m_fp_nat"},
-                "n8_fp_up": {"truth_nx": 960, "truth_ny": 540, "master": "m_fp_up"},
+                "n8_fp_nat_a": {"truth_nx": 0, "truth_ny": 0, "master": "m_fp_a"},
+                "n8_fp_nat_b": {"truth_nx": 0, "truth_ny": 0, "master": "m_fp_b"},
+                "n8_fp_up_a": {"truth_nx": 960, "truth_ny": 540, "master": "m_fp_a"},
+                "n8_fp_up_b": {"truth_nx": 960, "truth_ny": 540, "master": "m_fp_b"},
             }, fh)
         fp_items, fp_segs, _ = load_all_dumps([fp_dir], fp_manifest_path)
         fp_report = calibrate_all_depths(fp_items, fp_segs, min_native_shots=300)
         fp_n8 = fp_report["G-PhaseA"]["N8"]
         assert fp_n8["confident_wrong_count"] >= 1, "expected native FP in burst negative control: %r" % (fp_n8,)
+        assert fp_n8["heldout_native_fp"] >= 1, "expected held-out native FP in burst negative control: %r" % (fp_n8,)
+        assert fp_n8["cv_passed"] is False
         assert fp_n8["calibrated"] is False, "failing G-PhaseA stratum MUST revoke calibrated: %r" % (fp_n8,)
         assert fp_n8["source_kind"] == "placeholder"
-        assert "confident_wrong" in fp_n8["gate_reason"]
+        assert "confident_wrong" in fp_n8["gate_reason"] or "native_fp" in fp_n8["gate_reason"]
         fp_hdr = render_cpp_header(fp_report)
         assert "DepthNullTable::PlaceholderFor(BitDepthClass::N8)" in fp_hdr
         assert "NullTableSourceKind::Calibrated" not in fp_hdr
 
         # Negative control 5 (MEDIUM-2): missing N8 HD (1/2) samples MUST fail G-8bit (never substitute auc_all)
-        no_hd_items = [it for it in items if it.reel != "n8_up_half"]
+        no_hd_items = [it for it in items if it.reel not in ("n8_up_half_a", "n8_up_half_b")]
         no_hd_report = calibrate_all_depths(no_hd_items, segs, min_native_shots=DEFAULT_MIN_NATIVE_SHOTS)
         assert no_hd_report["G-8bit"]["n8_hd_pos_samples"] == 0
         assert no_hd_report["G-8bit"]["passed"] is False, "G-8bit must NOT pass without N8 HD samples"
@@ -1459,15 +1792,21 @@ def run_selftest():
         # Negative control 6 (HIGH-2): clean calibrated N8 + FP-failing N10 MUST fail G-8bit (cross-depth FP check active!)
         cross_dir = os.path.join(tmp, "cross_fp")
         os.makedirs(cross_dir)
-        _write_synthetic_v4_pair(cross_dir, "n10_fp_nat", step_codes=1, output_bits=10, num_shots=402, evals_per_shot=3,
+        _write_synthetic_v4_pair(cross_dir, "n10_fp_nat_a", step_codes=1, output_bits=10, num_shots=202, evals_per_shot=3,
                                  truth_nx=0, truth_ny=0, rng=rng, fp_burst_shots=2)
-        _write_synthetic_v4_pair(cross_dir, "n10_fp_up", step_codes=1, output_bits=10, num_shots=30, evals_per_shot=2,
+        _write_synthetic_v4_pair(cross_dir, "n10_fp_nat_b", step_codes=1, output_bits=10, num_shots=200, evals_per_shot=3,
+                                 truth_nx=0, truth_ny=0, rng=rng, fp_burst_shots=0)
+        _write_synthetic_v4_pair(cross_dir, "n10_fp_up_a", step_codes=1, output_bits=10, num_shots=30, evals_per_shot=2,
+                                 truth_nx=960, truth_ny=540, rng=rng)
+        _write_synthetic_v4_pair(cross_dir, "n10_fp_up_b", step_codes=1, output_bits=10, num_shots=30, evals_per_shot=2,
                                  truth_nx=960, truth_ny=540, rng=rng)
         cross_manifest_path = os.path.join(tmp, "cross_manifest.json")
         with open(cross_manifest_path, "w", encoding="utf-8") as fh:
             json.dump({
-                "n10_fp_nat": {"truth_nx": 0, "truth_ny": 0, "master": "m_n10_fp_nat"},
-                "n10_fp_up": {"truth_nx": 960, "truth_ny": 540, "master": "m_n10_fp_up"},
+                "n10_fp_nat_a": {"truth_nx": 0, "truth_ny": 0, "master": "m_n10_fp_a"},
+                "n10_fp_nat_b": {"truth_nx": 0, "truth_ny": 0, "master": "m_n10_fp_b"},
+                "n10_fp_up_a": {"truth_nx": 960, "truth_ny": 540, "master": "m_n10_fp_a"},
+                "n10_fp_up_b": {"truth_nx": 960, "truth_ny": 540, "master": "m_n10_fp_b"},
             }, fh)
         n10_fp_items, n10_fp_segs, _ = load_all_dumps([cross_dir], cross_manifest_path)
         n8_only_items = [it for it in items if it.depth == "N8"]
@@ -1479,7 +1818,126 @@ def run_selftest():
         assert cross_report["G-8bit"]["passed"] is False, "G-8bit MUST fail when N10 has native FPs"
         assert "N10 native FPs" in cross_report["G-8bit"]["g8_reason"]
 
-    print("generate_null_tables.py --selftest: PASS (v4+v3 stratification, gate enforcement, G-PhaseA, G-8bit verified)")
+        # Negative control 7 (H3 Red-Team): Overfitted multi-master dataset where IN-SAMPLE validation PASSES
+        # (0 in-sample native FPs, in-sample HD AUC > 0.95) yet 2-fold held-out CV by master FAILS visibly!
+        # Master A has tight clean native k/8 baseline (~ -0.01, sd 0.008); Master B has a genuinely shifted
+        # native k/8 coding-grid distribution (~ -0.18, sd 0.02). Combined in-sample null absorbs both modes
+        # (0 in-sample FPs), but training on Master A alone causes held-out Master B to trigger native FPs!
+        ovf_dir = os.path.join(tmp, "h3_overfit")
+        os.makedirs(ovf_dir)
+
+        def _write_custom_v4(directory, tag, num_shots, evals_per_shot, truth_nx, truth_ny,
+                             k8_null_mean, k8_null_sd, alt_mean, alt_sd):
+            ev_p = os.path.join(directory, tag + ".b_evals.csv")
+            sz_p = os.path.join(directory, tag + ".b_sizes.csv")
+            cx = [(960, 1920), (1320, 1920), (1280, 1920), (1100, 1920)]
+            cy = [(540, 1080), (743, 1080), (720, 1080), (618, 1080)]
+            with open(ev_p, "w", encoding="utf-8", newline="") as fe, \
+                 open(sz_p, "w", encoding="utf-8", newline="") as fs:
+                ew = csv.writer(fe)
+                sw = csv.writer(fs)
+                ew.writerow(list(REQUIRED_V4_EVAL_COLS))
+                sw.writerow(list(REQUIRED_V4_SIZE_COLS))
+                seq_i = 1
+                t_sec = 0.0
+                for sh in range(1, num_shots + 1):
+                    for _ in range(evals_per_shot):
+                        ew.writerow([seq_i, "%.3f" % t_sec, sh, 4, 8, 8, 1, 1, 0, 0])
+                        for ax_name, clist, tn in (("x", cx, truth_nx), ("y", cy, truth_ny)):
+                            for cand_n, cand_N in clist:
+                                if tn > 0 and abs(cand_n - tn) <= 1:
+                                    st_val = rng.gauss(alt_mean, alt_sd)
+                                elif classify_latent(cand_n, cand_N) == 0:
+                                    st_val = rng.gauss(k8_null_mean, k8_null_sd)
+                                else:
+                                    st_val = rng.gauss(-0.02, 0.02)
+                                sw.writerow([seq_i, "%.3f" % t_sec, sh, ax_name, cand_N, cand_n, 1, "%.6f" % st_val, 32])
+                        seq_i += 1
+                        t_sec += 2.0
+
+        _write_custom_v4(ovf_dir, "ovf_nat_a", 200, 3, 0, 0, k8_null_mean=-0.01, k8_null_sd=0.008, alt_mean=-0.50, alt_sd=0.04)
+        _write_custom_v4(ovf_dir, "ovf_nat_b", 200, 3, 0, 0, k8_null_mean=-0.18, k8_null_sd=0.020, alt_mean=-0.50, alt_sd=0.04)
+        _write_custom_v4(ovf_dir, "ovf_up_a", 25, 2, 960, 540, k8_null_mean=-0.01, k8_null_sd=0.008, alt_mean=-0.50, alt_sd=0.04)
+        _write_custom_v4(ovf_dir, "ovf_up_b", 25, 2, 960, 540, k8_null_mean=-0.18, k8_null_sd=0.020, alt_mean=-0.50, alt_sd=0.04)
+        ovf_manifest = os.path.join(tmp, "ovf_manifest.json")
+        with open(ovf_manifest, "w", encoding="utf-8") as fh:
+            json.dump({
+                "ovf_nat_a": {"truth_nx": 0, "truth_ny": 0, "master": "m_ovf_a"},
+                "ovf_nat_b": {"truth_nx": 0, "truth_ny": 0, "master": "m_ovf_b"},
+                "ovf_up_a": {"truth_nx": 960, "truth_ny": 540, "master": "m_ovf_a"},
+                "ovf_up_b": {"truth_nx": 960, "truth_ny": 540, "master": "m_ovf_b"},
+            }, fh)
+        ovf_items, ovf_segs, _ = load_all_dumps([ovf_dir], ovf_manifest)
+
+        # In-sample negative control proof: fitting & replaying on the SAME combined data PASSES (0 FPs, AUC > 0.95)!
+        ovf_insample_tbls, _, ovf_fit_ok, _ = _fit_tables_from_items(
+            ovf_items, DEFAULT_MIN_NULL_PER_CLASS, DEFAULT_MIN_ALT_PER_CLASS
+        )
+        assert ovf_fit_ok is True, "fixture: combined overfit dataset fits cleanly"
+        ovf_insample_ev = evaluate_heldout(ovf_items, ovf_segs, ovf_insample_tbls, compute_c1())
+        assert ovf_insample_ev["native_fp"] == 0, \
+            "negative control: naive in-sample replay must pass with 0 FPs, got %d" % ovf_insample_ev["native_fp"]
+        assert math.isfinite(ovf_insample_ev["auc_hd"]) and ovf_insample_ev["auc_hd"] > 0.95, \
+            "negative control: naive in-sample HD AUC must pass (> 0.95), got %r" % (ovf_insample_ev["auc_hd"],)
+
+        # Protected 2-fold held-out CV by master MUST FAIL visibly and emit PlaceholderFor(...)!
+        ovf_report = calibrate_all_depths(ovf_items, ovf_segs, min_native_shots=300)
+        ovf_n8 = ovf_report["depths"]["N8"]
+        assert ovf_n8["insample_confident_wrong_count"] == 0, \
+            "negative control: in-sample replay stays 0 FPs while held-out fails"
+        assert ovf_n8["heldout_native_fp"] > 0, \
+            "H3: held-out 2-fold CV must catch cross-master overfit native FPs: %r" % (ovf_n8,)
+        assert ovf_n8["cv_passed"] is False, "H3: overfitted dataset MUST fail cv_passed"
+        assert ovf_n8["g_phase_a_passed"] is False, "H3: overfitted dataset MUST fail g_phase_a_passed"
+        assert ovf_n8["calibrated"] is False, "H3: overfitted dataset MUST NOT calibrate"
+        assert ovf_n8["source_kind"] == "placeholder"
+        assert ovf_report["G-8bit"]["passed"] is False, "H3: G-8bit MUST fail when held-out CV fails"
+        ovf_hdr = render_cpp_header(ovf_report)
+        assert "DepthNullTable::PlaceholderFor(BitDepthClass::N8)" in ovf_hdr, \
+            "H3: overfitted N8 must emit PlaceholderFor(BitDepthClass::N8)"
+        assert "NullTableSourceKind::Calibrated" not in ovf_hdr
+
+        # Negative control 8 (H3 Red-Team): < 2 distinct masters (single-master dataset with >= 1500 native shots,
+        # 0 in-sample FPs, and high in-sample AUC) MUST FAIL held-out CV visibly — NEVER silently fall back to in-sample!
+        single_dir = os.path.join(tmp, "h3_single_master")
+        os.makedirs(single_dir)
+        _write_synthetic_v4_pair(single_dir, "sm_nat", step_codes=4, output_bits=8, num_shots=1520, evals_per_shot=2,
+                                 truth_nx=0, truth_ny=0, rng=rng)
+        _write_synthetic_v4_pair(single_dir, "sm_up_half", step_codes=4, output_bits=8, num_shots=30, evals_per_shot=2,
+                                 truth_nx=960, truth_ny=540, rng=rng)
+        _write_synthetic_v4_pair(single_dir, "sm_up_k16", step_codes=4, output_bits=8, num_shots=20, evals_per_shot=2,
+                                 truth_nx=1320, truth_ny=743, rng=rng)
+        _write_synthetic_v4_pair(single_dir, "sm_up_rat", step_codes=4, output_bits=8, num_shots=20, evals_per_shot=2,
+                                 truth_nx=1280, truth_ny=720, rng=rng)
+        _write_synthetic_v4_pair(single_dir, "sm_up_gen", step_codes=4, output_bits=8, num_shots=20, evals_per_shot=2,
+                                 truth_nx=1100, truth_ny=618, rng=rng)
+        sm_manifest = os.path.join(tmp, "sm_manifest.json")
+        with open(sm_manifest, "w", encoding="utf-8") as fh:
+            json.dump({
+                "sm_nat": {"truth_nx": 0, "truth_ny": 0, "master": "m_single_only"},
+                "sm_up_half": {"truth_nx": 960, "truth_ny": 540, "master": "m_single_only"},
+                "sm_up_k16": {"truth_nx": 1320, "truth_ny": 743, "master": "m_single_only"},
+                "sm_up_rat": {"truth_nx": 1280, "truth_ny": 720, "master": "m_single_only"},
+                "sm_up_gen": {"truth_nx": 1100, "truth_ny": 618, "master": "m_single_only"},
+            }, fh)
+        sm_items, sm_segs, _ = load_all_dumps([single_dir], sm_manifest)
+        sm_report = calibrate_all_depths(sm_items, sm_segs, min_native_shots=DEFAULT_MIN_NATIVE_SHOTS)
+        sm_n8 = sm_report["depths"]["N8"]
+        assert sm_n8["native_shots"] >= DEFAULT_MIN_NATIVE_SHOTS, "fixture: single-master has >= 1500 native shots"
+        assert sm_n8["insample_confident_wrong_count"] == 0, "fixture: single-master has 0 in-sample FPs"
+        assert sm_n8["distinct_masters"] == 1
+        assert sm_n8["cv_passed"] is False, "H3: < 2 distinct masters MUST fail held-out CV visibly"
+        assert sm_n8["cv_failure_reason"] and sm_n8["cv_failure_reason"] != "ok", \
+            "H3: single-master CV failure must report non-empty cv_failure_reason"
+        assert sm_n8["calibrated"] is False, "H3: single-master dataset MUST NOT silently fall back to calibrated"
+        assert sm_n8["g_phase_a_passed"] is False
+        assert sm_n8["source_kind"] == "placeholder"
+        assert sm_report["G-8bit"]["passed"] is False
+        sm_hdr = render_cpp_header(sm_report)
+        assert "DepthNullTable::PlaceholderFor(BitDepthClass::N8)" in sm_hdr
+        assert "NullTableSourceKind::Calibrated" not in sm_hdr
+
+    print("generate_null_tables.py --selftest: PASS (2-fold held-out CV, H3 overfit & single-master negative controls, C++ contract drift guard, v4+v3 stratification, G-PhaseA, G-8bit verified)")
     return 0
 
 

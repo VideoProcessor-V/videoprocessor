@@ -149,6 +149,7 @@ namespace SourceIdentity
 			bool informative = false;
 			bool voided = false;             // true during menu/mixed/subtitle/fade (M2: ignored, never confirms)
 			bool nativeReading = false;      // classical reads native 1.0x1.0
+			bool positiveDetailAbove = false; // H1/B1: POSITIVE per-frame above-band spectral detail (required for nativeReading to confirm)
 			bool hasPair = false;
 			int nx = 0, Nx = 0, ny = 0, Ny = 0;
 			int rasterW = 0, rasterH = 0;
@@ -349,8 +350,9 @@ namespace SourceIdentity
 				bool validDiff = false;
 				if (f.nativeReading)
 				{
-					// Native differs from any upscaled latch (and is strictly larger).
-					validDiff = ctx.latched;
+					// H1/B1: blind classical "native" without a positive per-frame DetailAbove measurement is
+					// uninformative on blind-classical/loop content and MUST NEVER confirm an ABR step.
+					validDiff = ctx.latched && f.positiveDetailAbove;
 				}
 				else if (f.hasPair && f.Nx > 0 && f.Ny > 0 && f.nx > 0 && f.ny > 0)
 				{

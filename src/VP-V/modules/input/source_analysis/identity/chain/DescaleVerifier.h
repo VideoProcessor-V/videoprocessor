@@ -308,7 +308,14 @@ namespace SourceIdentity
 							|| oddCandidate
 							|| cr.stat < opt.p3ScreenDipThreshold;
 						if (!promoteFull)
+						{
+							// M3 (Rule 4): Pass-1 screen-only candidate (hw=0, representative kernels, phase 0) was not
+							// fully verified; clear exactDone and tag kReasonScreenOnly so ChainEvidence and Dump v4
+							// exclude it from LLR and never confuse it with a full exact evaluation.
+							cr.exactDone = false;
+							cr.reason |= kReasonScreenOnly;
 							continue;
+						}
 						const int nProp = cr.nProposed;
 						cr = CandidateResult();
 						cr.nProposed = nProp;
