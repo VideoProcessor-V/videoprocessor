@@ -54,6 +54,7 @@
 #include "NullTables.h"
 #include "PolyphaseProposer.h"
 #include "PowerProbe.h"
+#include "StaticPatchRankProbe.h"
 
 #include <VP-V/core/LaneInterfaces.h>
 #include <VP-V/modules/input/source_analysis/identity/SourceGeometryProduct.h>
@@ -95,10 +96,11 @@ namespace SourceIdentity
 			bool eightBitPromotion = false;      // When true, enables edgeStats.enabled, EmpiricalFloorMode::Live, and depth null-table selection
 			bool useDepthNullTables = false;     // Selects bit-depth-stratified null tables via depthNullTables.Select(...)
 			DepthNullTableSet depthNullTables = DepthNullTableSet::PlaceholderOnly();
-			// SOTA #1-#3 opt-in (strictly OFF by default; Original pathway forces OFF):
+			// SOTA #1-#4 opt-in (strictly OFF by default; Original pathway forces OFF):
 			HdrNoiseSettings hdrNoise;
 			NeuralSrSettings neuralSr;
 			InterlacedSettings interlaced;
+			StaticPatchRankSettings staticPatchRank;
 			ReadingSettings reading;
 			GovernorSettings governor;
 			EvidenceLogSettings log;
@@ -225,6 +227,9 @@ namespace SourceIdentity
 			uint64_t interlacedBobDetections = 0;
 			uint64_t interlacedWeaveDetections = 0;
 			uint64_t interlacedAbstains = 0;
+			uint64_t staticRankEvals = 0;
+			uint64_t staticRankCliffsDetected = 0;
+			uint64_t staticRankMotionAbstains = 0;
 		};
 
 		// What one evaluation tested, per axis and candidate (the calibration dump of the harness reads it; any other observer may).
@@ -273,6 +278,9 @@ namespace SourceIdentity
 			bool empiricalFloorFallback = false;
 			bool nullTablesCalibrated = false;
 			BitDepthClass nullTableDepthClass = BitDepthClass::Unknown;
+			// SOTA #4 diagnostic visibility (false / 1.0 while staticPatchRank.enabled == false):
+			bool staticRankCliffDetected[2] = { false, false };
+			double staticRankEstimatedRatio[2] = { 1.0, 1.0 };
 			AxisDetail axis[2];
 		};
 		// Called on the thread that processes the evaluation (the worker; the caller in synchronous mode), after the evidence stage.
@@ -371,6 +379,7 @@ namespace SourceIdentity
 			void SetHdrNoiseSettings(const HdrNoiseSettings& s);
 			void SetNeuralSrSettings(const NeuralSrSettings& s);
 			void SetInterlacedSettings(const InterlacedSettings& s);
+			void SetStaticPatchRankSettings(const StaticPatchRankSettings& s);
 			// N1: the count of latch releases by the no-cut CEILING (LatchEvent::ReleasedCeiling; zero while the rules are off). The monitor shows
 			// the native switch that follows one through its engage crossfade instead of the release fade. Any thread.
 			uint64_t LatchCeilingReleases() const;

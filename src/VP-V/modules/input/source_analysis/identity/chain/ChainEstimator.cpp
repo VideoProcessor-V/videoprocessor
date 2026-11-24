@@ -102,6 +102,7 @@ namespace SourceIdentity
 			HdrNoiseSettings reqHdrNoise;
 			NeuralSrSettings reqNeuralSr;
 			InterlacedSettings reqInterlaced;
+			StaticPatchRankSettings reqStaticPatchRank;
 			struct ClassicalFreshState
 			{
 				bool valid = false;
@@ -177,6 +178,7 @@ namespace SourceIdentity
 			std::atomic<uint64_t> cHdrLinearizedEvals{ 0 }, cHdrDarkToeClamps{ 0 };
 			std::atomic<uint64_t> cNeuralSrDetections{ 0 }, cNeuralSrAbstains{ 0 };
 			std::atomic<uint64_t> cInterlacedBobDetections{ 0 }, cInterlacedWeaveDetections{ 0 }, cInterlacedAbstains{ 0 };
+			std::atomic<uint64_t> cStaticRankEvals{ 0 }, cStaticRankCliffsDetected{ 0 }, cStaticRankMotionAbstains{ 0 };
 			// fx/dv-frame-quiet: each ceiling release is stamped with the newest source frame the estimator had seen, so the frame-bound
 			// monitor counts only the releases up to the frame it is allowed to see (LatchCeilingReleasesThrough), not the live counter.
 			std::atomic<uint64_t> newestSeqA{ 0 };
@@ -213,6 +215,7 @@ namespace SourceIdentity
 			PowerProbe::Workspace probeWs[2];
 			NeuralSrWorkspace neuralSrWs[2];
 			InterlacedWorkspace interlacedWs;
+			StaticPatchWorkspace staticRankWs[2];
 			Governor gov;
 			EvidenceLog log;
 			Geometry::HeldState held;
@@ -295,6 +298,7 @@ namespace SourceIdentity
 				reqHdrNoise = cfg.hdrNoise;
 				reqNeuralSr = cfg.neuralSr;
 				reqInterlaced = cfg.interlaced;
+				reqStaticPatchRank = cfg.staticPatchRank;
 				if (cfg.hdrNoise.enabled)
 					cfg.verifier.hdrNoise = cfg.hdrNoise;
 				safetyA.store(reqSafety || reqJointLatch.enabled, std::memory_order_release);
@@ -574,6 +578,17 @@ namespace SourceIdentity
 				{
 					std::lock_guard<std::mutex> lk(m);
 					reqInterlaced = s;
+					cfgDirty = true;
+					++runEpoch;
+				}
+				Wake();
+			}
+
+			void SetStaticPatchRank(const StaticPatchRankSettings& s)
+			{
+				{
+					std::lock_guard<std::mutex> lk(m);
+					reqStaticPatchRank = s;
 					cfgDirty = true;
 					++runEpoch;
 				}
@@ -1199,6 +1214,7 @@ namespace SourceIdentity
 					evalRun[a] = AxisRun();
 					probeWs[a].Reset();
 					neuralSrWs[a].Reset();
+					staticRankWs[a].Reset();
 				}
 				interlacedWs.Reset();
 				{
@@ -1212,6 +1228,7 @@ namespace SourceIdentity
 					HdrNoiseSettings hdrCfg;
 					NeuralSrSettings nsrCfg;
 					InterlacedSettings intCfg;
+					StaticPatchRankSettings sprCfg;
 					{
 						std::lock_guard<std::mutex> lk(m);
 						safe = reqSafety;
@@ -1227,6 +1244,7 @@ namespace SourceIdentity
 						hdrCfg = reqHdrNoise;
 						nsrCfg = reqNeuralSr;
 						intCfg = reqInterlaced;
+						sprCfg = reqStaticPatchRank;
 						abrStepEvents.clear();
 					}
 					if (jointLatchOn)
@@ -1275,6 +1293,7 @@ namespace SourceIdentity
 					cfg.hdrNoise = hdrCfg;
 					cfg.neuralSr = nsrCfg;
 					cfg.interlaced = intCfg;
+					cfg.staticPatchRank = sprCfg;
 					if (cfg.verifier.hdrNoise.enabled != hdrCfg.enabled ||
 						cfg.verifier.hdrNoise.transfer != hdrCfg.transfer ||
 						cfg.verifier.hdrNoise.bitDepth != hdrCfg.bitDepth ||
@@ -1400,6 +1419,7 @@ namespace SourceIdentity
 					evalRun[a].vr = VerifyResult();
 					probeWs[a].Reset();
 					neuralSrWs[a].Reset();
+					staticRankWs[a].Reset();
 				}
 				interlacedWs.Reset();
 				evidence.Reset();
@@ -2829,6 +2849,28 @@ namespace SourceIdentity
 						cInterlacedAbstains.fetch_add(1, std::memory_order_relaxed);
 					}
 				}
+				// SOTA #4 (opt-in, default OFF): Multi-frame static-patch covariance / SVD rank-cliff probe.
+				StaticRankResult staticRankRes[2];
+				if (cfg.staticPatchRank.enabled)
+				{
+					if (areaChanged || cutsNow > 0)
+					{
+						staticRankWs[0].Reset();
+						staticRankWs[1].Reset();
+					}
+					for (int a = 0; a < 2; ++a)
+					{
+						if (!run[a].have)
+							continue;
+						staticRankRes[a] = SubmitFrame(run[a].ls, floorCodes, cfg.staticPatchRank, staticRankWs[a]);
+						cStaticRankEvals.fetch_add(1, std::memory_order_relaxed);
+						if (staticRankRes[a].rankCliffDetected)
+							cStaticRankCliffsDetected.fetch_add(1, std::memory_order_relaxed);
+						else if (staticRankRes[a].reason == StaticRankReason::MotionRejected ||
+							staticRankRes[a].reason == StaticRankReason::InsufficientStaticPatches)
+							cStaticRankMotionAbstains.fetch_add(1, std::memory_order_relaxed);
+					}
+				}
 				for (int a = 0; a < 2; ++a)
 				{
 					if (!run[a].have)
@@ -3024,6 +3066,14 @@ namespace SourceIdentity
 					d.empiricalFloorFallback = empFallback;
 					d.nullTablesCalibrated = nullCalibrated;
 					d.nullTableDepthClass = nullDepth;
+					if (cfg.staticPatchRank.enabled)
+					{
+						for (int a = 0; a < 2; ++a)
+						{
+							d.staticRankCliffDetected[a] = staticRankRes[a].rankCliffDetected;
+							d.staticRankEstimatedRatio[a] = staticRankRes[a].estimatedRatio;
+						}
+					}
 					for (int a = 0; a < 2; ++a)
 					{
 						AxisDetail& ad = d.axis[a];
@@ -3158,6 +3208,14 @@ namespace SourceIdentity
 						out[1].applied.n < out[1].applied.N)
 					{
 						out[1].applied = UnsureLike(out[1].applied, kReasonInterlacedBob);
+					}
+				}
+				if (cfg.staticPatchRank.enabled)
+				{
+					for (int a = 0; a < 2; ++a)
+					{
+						if (staticRankRes[a].rankCliffDetected)
+							out[a].measured.reasonBits |= kReasonStaticRankCliff;
 					}
 				}
 
@@ -3385,6 +3443,9 @@ namespace SourceIdentity
 				c.interlacedBobDetections = cInterlacedBobDetections.load(std::memory_order_relaxed);
 				c.interlacedWeaveDetections = cInterlacedWeaveDetections.load(std::memory_order_relaxed);
 				c.interlacedAbstains = cInterlacedAbstains.load(std::memory_order_relaxed);
+				c.staticRankEvals = cStaticRankEvals.load(std::memory_order_relaxed);
+				c.staticRankCliffsDetected = cStaticRankCliffsDetected.load(std::memory_order_relaxed);
+				c.staticRankMotionAbstains = cStaticRankMotionAbstains.load(std::memory_order_relaxed);
 				return c;
 			}
 
@@ -3490,6 +3551,7 @@ namespace SourceIdentity
 		void ChainEstimator::SetHdrNoiseSettings(const HdrNoiseSettings& s) { st_->SetHdrNoise(s); }
 		void ChainEstimator::SetNeuralSrSettings(const NeuralSrSettings& s) { st_->SetNeuralSr(s); }
 		void ChainEstimator::SetInterlacedSettings(const InterlacedSettings& s) { st_->SetInterlaced(s); }
+		void ChainEstimator::SetStaticPatchRankSettings(const StaticPatchRankSettings& s) { st_->SetStaticPatchRank(s); }
 		void ChainEstimator::SetDiagnosticTag(const std::string& tag) { st_->diagTag.Set(tag); }
 		void ChainEstimator::SetDiagnosticDepths(int codedBits, int outputBits)
 		{
