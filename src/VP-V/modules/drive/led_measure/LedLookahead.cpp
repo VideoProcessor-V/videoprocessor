@@ -253,6 +253,7 @@ namespace LedDrive
 	bool LookaheadObserver::WantsFrame(uint64_t sourceSequence) const
 	{
 		if (!module.WantsPredictions()) return false;
+		if (module.LookaheadEpoch() != streamEpoch) return true;
 		return !(sourceSequence != 0 && sourceSequence <= lastSequence &&
 			lastSequence - sourceSequence < 1000);
 	}
