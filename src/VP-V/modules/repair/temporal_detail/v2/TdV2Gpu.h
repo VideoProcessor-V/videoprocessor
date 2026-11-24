@@ -687,11 +687,11 @@ namespace Gpu
 			// Persistent carryCleanTex_ (1 x R32F)
 			total += 1u * px * bR32;
 			// All 8 cell-grid persistent IO/output textures:
-			//   inMotionVecTex_ (3*cells RGBA32F), inMotionMetaTex_ (3*cells RG32F),
+			//   inMotionVecTex_ (3*cells RGBA32F), inMotionMetaTex_ (3*cells RGBA32F: cls, valid, confidence, 0),
 			//   outTdMapsTex_ (3*cells RGBA32F), outDiagFlagsTex_ / inCellPriorTex_ (2 * cells RGBA32F),
 			//   outGuardCellTex_ / outWarpDiagTex_ (2 * cells RG32F),
 			//   inFaceMaskTex_ (cells R32F).
-			total += (3u * cells) * (bRGBA32 + bRG32);
+			total += (3u * cells) * (2u * bRGBA32);
 			total += (3u * cells) * bRGBA32;
 			total += 2u * cells * bRGBA32;
 			total += 2u * cells * bRG32;
@@ -2509,19 +2509,20 @@ namespace Gpu
 			if (!motionVecTex || !motionMetaTex)
 			{
 				if (!Detail::EnsureTex(gpu, inMotionVecTex_, 3 * cw, ch, fmtRGBA32, true, false, true, false) ||
-				    !Detail::EnsureTex(gpu, inMotionMetaTex_, 3 * cw, ch, fmtRG32, true, false, true, false))
+				    !Detail::EnsureTex(gpu, inMotionMetaTex_, 3 * cw, ch, fmtRGBA32, true, false, true, false))
 				{
 					resetCarryIfActive();
 					return failCore("TdV2GpuEngine motion staging alloc failed", StandInKind::GpuDispatchFailed);
 				}
 				std::vector<float> motVecBuf(static_cast<size_t>(3 * cw) * static_cast<size_t>(ch) * 4u, 0.0f);
-				std::vector<float> motMetaBuf(static_cast<size_t>(3 * cw) * static_cast<size_t>(ch) * 2u, 0.0f);
+				std::vector<float> motMetaBuf(static_cast<size_t>(3 * cw) * static_cast<size_t>(ch) * 4u, 0.0f);
 				for (int k = 0; k < K; ++k)
 				{
 					const CellMotionField& mf = refSpecs[static_cast<size_t>(k)].motion;
 					// H5: pack each reference into its FIXED motion slot (0=prevPeak, 1=nextPeak, 2=carry)
 					// matching prepacked GPU motion layout identically!
 					const int slot = (std::max)(0, (std::min)(2, refSpecs[static_cast<size_t>(k)].motionSlot));
+					const bool hasConf = !mf.confidence.empty();
 					for (int cy = 0; cy < ch; ++cy)
 					{
 						for (int cx = 0; cx < cw; ++cx)
@@ -2532,8 +2533,10 @@ namespace Gpu
 							motVecBuf[dstTexel * 4u + 1u] = static_cast<float>(mf.vy[srcIdx]);
 							motVecBuf[dstTexel * 4u + 2u] = static_cast<float>(mf.camVx[srcIdx]);
 							motVecBuf[dstTexel * 4u + 3u] = static_cast<float>(mf.camVy[srcIdx]);
-							motMetaBuf[dstTexel * 2u + 0u] = static_cast<float>(static_cast<int>(mf.cls[srcIdx]));
-							motMetaBuf[dstTexel * 2u + 1u] = mf.valid[srcIdx] ? 1.0f : 0.0f;
+							motMetaBuf[dstTexel * 4u + 0u] = static_cast<float>(static_cast<int>(mf.cls[srcIdx]));
+							motMetaBuf[dstTexel * 4u + 1u] = mf.valid[srcIdx] ? 1.0f : 0.0f;
+							motMetaBuf[dstTexel * 4u + 2u] = hasConf ? static_cast<float>(mf.confidence[srcIdx]) : 1.0f;
+							motMetaBuf[dstTexel * 4u + 3u] = 0.0f;
 						}
 					}
 				}
@@ -2546,6 +2549,9 @@ namespace Gpu
 				motionVecTex = inMotionVecTex_;
 				motionMetaTex = inMotionMetaTex_;
 			}
+			// Preserve full backwards compatibility when callers supply legacy 2-channel RG32F motionMetaTex (.z defaults to 1.0).
+			const bool motionMetaHasConf = (motionMetaTex->params.format != nullptr && motionMetaTex->params.format->num_components >= 3);
+			const float uMotionMetaHasConf = motionMetaHasConf ? 1.0f : 0.0f;
 
 			pl_tex cellPriorTex = p.cellPriorTex;
 			if (!cellPriorTex)
@@ -2768,13 +2774,14 @@ namespace Gpu
 					VpvGpu::Sampled("motion_meta", motionMetaTex),
 					VpvGpu::Storage("motion_gate", sc.motionGate)
 				};
-				pl_shader_var v[4] = {
+				pl_shader_var v[5] = {
 					VpvGpu::Var("u_k", &uK),
 					VpvGpu::Var("u_ref_motion_slot_0", &uRefMotionSlot0),
 					VpvGpu::Var("u_ref_motion_slot_1", &uRefMotionSlot1),
-					VpvGpu::Var("u_ref_motion_slot_2", &uRefMotionSlot2)
+					VpvGpu::Var("u_ref_motion_slot_2", &uRefMotionSlot2),
+					VpvGpu::Var("u_motion_meta_has_conf", &uMotionMetaHasConf)
 				};
-				if (!runPass("td_v2_p1_motion_gate", hdr, Shaders::kPass1MotionGate, d, 3, v, 4,
+				if (!runPass("td_v2_p1_motion_gate", hdr, Shaders::kPass1MotionGate, d, 3, v, 5,
 				             Detail::GroupsFor(K * cw, 16), Detail::GroupsFor(ch, 16), 16, 16))
 				{
 					resetCarryIfActive();

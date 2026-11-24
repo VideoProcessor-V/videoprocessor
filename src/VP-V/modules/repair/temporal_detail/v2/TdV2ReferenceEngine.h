@@ -388,6 +388,7 @@ namespace TdV2
 		std::vector<double> camVy;
 		std::vector<RegionMotionClass> cls;
 		std::vector<uint8_t> valid;
+		std::vector<double> confidence;       // Optional P3r continuous per-cell motion confidence in [0, 1] (empty => 1.0 everywhere)
 
 		bool IsWellFormed(int expectedCW, int expectedCH) const
 		{
@@ -396,7 +397,8 @@ namespace TdV2
 			const size_t n = static_cast<size_t>(expectedCW) * static_cast<size_t>(expectedCH);
 			return vx.size() == n && vy.size() == n &&
 			       camVx.size() == n && camVy.size() == n &&
-			       cls.size() == n && valid.size() == n;
+			       cls.size() == n && valid.size() == n &&
+			       (confidence.empty() || confidence.size() == n);
 		}
 
 		static CellMotionField Uniform(int cw, int ch, double mvx, double mvy,
@@ -440,7 +442,9 @@ namespace TdV2
 		out.nonFiniteCellMask.assign(n, 0u);
 
 		std::vector<double> relSpeed(n, 0.0);
+		std::vector<double> cellConf(n, 1.0);
 		std::vector<uint8_t> finiteCell(n, 0u);
+		const bool hasConf = !mf.confidence.empty();
 		for (size_t i = 0; i < n; ++i)
 		{
 			if (!mf.valid[i])
@@ -452,13 +456,24 @@ namespace TdV2
 				++out.nonFiniteCells;
 				continue;
 			}
+			if (hasConf)
+			{
+				const double rawConf = mf.confidence[i];
+				if (!std::isfinite(rawConf))
+				{
+					out.nonFiniteCellMask[i] = 1u;
+					++out.nonFiniteCells;
+					continue;
+				}
+				cellConf[i] = RampMath::Clamp01(rawConf);
+			}
 			finiteCell[i] = 1u;
 			const double dvx = mf.vx[i] - mf.camVx[i];
 			const double dvy = mf.vy[i] - mf.camVy[i];
 			relSpeed[i] = std::sqrt(dvx * dvx + dvy * dvy);
 		}
 		if (out.nonFiniteCells > 0 && standIns != nullptr)
-			standIns->Engage(StandInKind::NonFiniteClosure, "EvaluateCameraRelativeMotionGate non-finite vector");
+			standIns->Engage(StandInKind::NonFiniteClosure, "EvaluateCameraRelativeMotionGate non-finite vector or confidence");
 
 		for (int cy = 0; cy < mf.cellsH; ++cy)
 		{
@@ -501,7 +516,9 @@ namespace TdV2
 
 				// Gate L-band by speed on fast moving Object cells too (prevents coarse-band ghosting on fast movers),
 				// while Still / Camera / DynamicTexture keep L-band at 1.0 (camera pans are never gated off).
-				out.gateL[idx] = (c == RegionMotionClass::Object) ? speedGate : 1.0;
+				// P3r continuous per-cell confidence feathers both L and M/H reliability smoothly in [0, 1] (default 1.0).
+				const double conf = cellConf[idx];
+				out.gateL[idx] = ((c == RegionMotionClass::Object) ? speedGate : 1.0) * conf;
 
 				if (c == RegionMotionClass::DynamicTexture)
 				{
@@ -510,7 +527,7 @@ namespace TdV2
 				}
 				else
 				{
-					out.gateMH[idx] = speedGate;
+					out.gateMH[idx] = speedGate * conf;
 				}
 			}
 		}

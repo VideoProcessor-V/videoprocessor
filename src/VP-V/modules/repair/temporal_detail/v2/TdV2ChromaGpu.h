@@ -2439,14 +2439,15 @@ imageStore(out_coded_delta, p, vec4(0.0));
 			if (!motionVecTex || !motionMetaTex)
 			{
 				if (!Detail::EnsureTex(gpu, inMotionVecTex_, 3 * cw, ch, fmtRGBA32, true, false, true, false) ||
-				    !Detail::EnsureTex(gpu, inMotionMetaTex_, 3 * cw, ch, fmtRG32, true, false, true, false))
+				    !Detail::EnsureTex(gpu, inMotionMetaTex_, 3 * cw, ch, fmtRGBA32, true, false, true, false))
 					return failVisible("TdV2ChromaGpuEngine motion staging alloc failed", StandInKind::GpuDispatchFailed);
 				std::vector<float> mvBuf(static_cast<size_t>(3 * cw) * static_cast<size_t>(ch) * 4u, 0.0f);
-				std::vector<float> mmBuf(static_cast<size_t>(3 * cw) * static_cast<size_t>(ch) * 2u, 0.0f);
+				std::vector<float> mmBuf(static_cast<size_t>(3 * cw) * static_cast<size_t>(ch) * 4u, 0.0f);
 				for (int k = 0; k < K; ++k)
 				{
 					const CellMotionField& mf = refSpecs[static_cast<size_t>(k)].motion;
 					const int slot = (std::max)(0, (std::min)(2, refSpecs[static_cast<size_t>(k)].motionSlot));
+					const bool hasConf = !mf.confidence.empty();
 					for (int cy = 0; cy < ch; ++cy)
 					{
 						for (int cx = 0; cx < cw; ++cx)
@@ -2457,8 +2458,10 @@ imageStore(out_coded_delta, p, vec4(0.0));
 							mvBuf[dst * 4u + 1u] = static_cast<float>(mf.vy[srcIdx]);
 							mvBuf[dst * 4u + 2u] = static_cast<float>(mf.camVx[srcIdx]);
 							mvBuf[dst * 4u + 3u] = static_cast<float>(mf.camVy[srcIdx]);
-							mmBuf[dst * 2u + 0u] = static_cast<float>(static_cast<int>(mf.cls[srcIdx]));
-							mmBuf[dst * 2u + 1u] = mf.valid[srcIdx] ? 1.0f : 0.0f;
+							mmBuf[dst * 4u + 0u] = static_cast<float>(static_cast<int>(mf.cls[srcIdx]));
+							mmBuf[dst * 4u + 1u] = mf.valid[srcIdx] ? 1.0f : 0.0f;
+							mmBuf[dst * 4u + 2u] = hasConf ? static_cast<float>(mf.confidence[srcIdx]) : 1.0f;
+							mmBuf[dst * 4u + 3u] = 0.0f;
 						}
 					}
 				}
@@ -2468,6 +2471,8 @@ imageStore(out_coded_delta, p, vec4(0.0));
 				motionVecTex = inMotionVecTex_;
 				motionMetaTex = inMotionMetaTex_;
 			}
+			const int motionMetaComps = (motionMetaTex->params.format != nullptr) ? motionMetaTex->params.format->num_components : 2;
+			const float uMotionMetaHasConf = (motionMetaComps >= 3) ? 1.0f : 0.0f;
 
 			pl_tex cellPriorTex = in.cellPriorTex;
 			if (!cellPriorTex)
@@ -2665,13 +2670,14 @@ imageStore(out_coded_delta, p, vec4(0.0));
 					VpvGpu::Sampled("motion_meta", motionMetaTex),
 					VpvGpu::Storage("motion_gate", sc.motionGate)
 				};
-				pl_shader_var vmg[4] = {
+				pl_shader_var vmg[5] = {
 					VpvGpu::Var("u_k", &uK),
 					VpvGpu::Var("u_ref_motion_slot_0", &uRefSlot0),
 					VpvGpu::Var("u_ref_motion_slot_1", &uRefSlot1),
-					VpvGpu::Var("u_ref_motion_slot_2", &uRefSlot2)
+					VpvGpu::Var("u_ref_motion_slot_2", &uRefSlot2),
+					VpvGpu::Var("u_motion_meta_has_conf", &uMotionMetaHasConf)
 				};
-				if (!runPass("td_v2_c1_motion_gate", mgHdr, Shaders::kPass1MotionGate, dmg, 3, vmg, 4,
+				if (!runPass("td_v2_c1_motion_gate", mgHdr, Shaders::kPass1MotionGate, dmg, 3, vmg, 5,
 				             Detail::GroupsFor(K * cw, 16), Detail::GroupsFor(ch, 16), 16, 16))
 				{
 					return failVisible("td_v2_c1_motion_gate dispatch failed", StandInKind::GpuDispatchFailed);

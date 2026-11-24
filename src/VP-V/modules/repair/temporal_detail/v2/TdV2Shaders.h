@@ -231,23 +231,37 @@ int td_motion_slot(int rk)
     return int(round(u_ref_motion_slot_2));
 }
 
-bool td_cell_rel_speed(int rk, int cx, int cy, out float spd, out int clsOut, out bool wasNonFinite)
+bool td_cell_rel_speed(int rk, int cx, int cy, out float spd, out int clsOut, out float confOut, out bool wasNonFinite)
 {
     wasNonFinite = false;
+    confOut = 1.0;
     int slot = clamp(td_motion_slot(rk), 0, 2);
     vec4 mv = texelFetch(motion_vec, ivec2(slot * TD_CW + cx, cy), 0);
-    vec2 mm = texelFetch(motion_meta, ivec2(slot * TD_CW + cx, cy), 0).xy;
+    vec4 mm = texelFetch(motion_meta, ivec2(slot * TD_CW + cx, cy), 0);
     clsOut = int(round(mm.x));
     if (mm.y < 0.5)
     {
         spd = TD_FAST_CUTOFF * 2.0;
+        confOut = 0.0;
         return false;
     }
     if (td_is_bad(mv.x) || td_is_bad(mv.y) || td_is_bad(mv.z) || td_is_bad(mv.w))
     {
         spd = TD_FAST_CUTOFF * 2.0;
+        confOut = 0.0;
         wasNonFinite = true;
         return false;
+    }
+    if (u_motion_meta_has_conf > 0.5)
+    {
+        if (td_is_bad(mm.z))
+        {
+            spd = TD_FAST_CUTOFF * 2.0;
+            confOut = 0.0;
+            wasNonFinite = true;
+            return false;
+        }
+        confOut = clamp(mm.z, 0.0, 1.0);
     }
     vec2 d = mv.xy - mv.zw;
     spd = sqrt(dot(d, d));
@@ -268,8 +282,9 @@ int cy = gid.y;
 
 float selfSpd = 0.0;
 int selfCls = 0;
+float selfConf = 1.0;
 bool selfBad = false;
-bool selfOk = td_cell_rel_speed(rk, cx, cy, selfSpd, selfCls, selfBad);
+bool selfOk = td_cell_rel_speed(rk, cx, cy, selfSpd, selfCls, selfConf, selfBad);
 if (!selfOk)
 {
     imageStore(motion_gate, gid, vec4(0.0, 0.0, selfBad ? 1.0 : 0.0, 0.0));
@@ -293,8 +308,9 @@ for (int dy = -1; dy <= 1; ++dy)
         if (nx < 0 || nx >= TD_CW) continue;
         float nSpd = 0.0;
         int nCls = 0;
+        float nConf = 1.0;
         bool nBad = false;
-        if (td_cell_rel_speed(rk, nx, ny, nSpd, nCls, nBad) && nCls != TD_CLS_OVERLAY)
+        if (td_cell_rel_speed(rk, nx, ny, nSpd, nCls, nConf, nBad) && nCls != TD_CLS_OVERLAY)
         {
             dilatedSpd = max(dilatedSpd, nSpd);
         }
@@ -302,8 +318,8 @@ for (int dy = -1; dy <= 1; ++dy)
 }
 
 float speedGate = 1.0 - td_hermite_ramp(TD_STILL_SPEED, TD_FAST_CUTOFF, dilatedSpd);
-float gateL = (selfCls == TD_CLS_OBJECT) ? speedGate : 1.0;
-float gateMH = (selfCls == TD_CLS_DYN_TEX) ? 0.0 : speedGate;
+float gateL = ((selfCls == TD_CLS_OBJECT) ? speedGate : 1.0) * selfConf;
+float gateMH = ((selfCls == TD_CLS_DYN_TEX) ? 0.0 : speedGate) * selfConf;
 imageStore(motion_gate, gid, vec4(gateL, gateMH, 0.0, 0.0));
 )GLSL";
 
