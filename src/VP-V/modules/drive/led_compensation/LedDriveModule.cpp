@@ -387,8 +387,29 @@ namespace LedDrive
 		return std::string();
 	}
 
+	void LedDriveModule::SyncDriverFallbacks(bool framingDowngraded) const
+	{
+		if (framingDowngraded)
+			fallbacks.Engage(kFramingFallbackId,
+				"projector did not answer auto framing; downgraded to unacknowledged script bytes");
+		else
+			fallbacks.Release(kFramingFallbackId);
+	}
+
 	std::vector<FallbackStatus::Entry> LedDriveModule::FallbackEntries() const
 	{
+		bool hasDriver = false;
+		bool framingDowngraded = false;
+		{
+			std::lock_guard<std::mutex> guard(mutex);
+			if (driver)
+			{
+				hasDriver = true;
+				framingDowngraded = driver->Status().framingDowngraded;
+			}
+		}
+		if (hasDriver)
+			SyncDriverFallbacks(framingDowngraded);
 		return fallbacks.Entries();
 	}
 
@@ -1612,6 +1633,8 @@ namespace LedDrive
 			opened->Open(error);
 			driving = false;
 		}
+		// GEM-192: surface auto-framing downgrade to unacknowledged script bytes immediately after Open().
+		SyncDriverFallbacks(opened->Status().framingDowngraded);
 		// audit 2026-10-16: LDMM 0 at every start on a driven projector (one
 		// command), not only while the custom dim is configured: a crash during
 		// the custom dim with the setting later switched off left the
@@ -1625,10 +1648,13 @@ namespace LedDrive
 		if (startFlux.Linear())
 			DebugLog::Log("Dynamic Drive: no flux_table; assuming flux proportional to LPW1 (lpw_max=%d%s)",
 				range.known ? range.maximum : startLed.ledCeiling, range.known ? "" : ", from led_ceiling");
+		bool framingDowngraded = false;
 		{
 			std::lock_guard<std::mutex> guard(mutex);
 			driver = std::move(opened);
-			seenSends = driver->Status().lightSends;
+			const DriverStatus driverStatus = driver->Status();
+			seenSends = driverStatus.lightSends;
+			framingDowngraded = driverStatus.framingDowngraded;
 			live = driving;
 			// The settings now in force (a Reconfigure during the start-up
 			// found no driver and only stored them).
@@ -1637,6 +1663,7 @@ namespace LedDrive
 			// is really being driven; a dry run never changes the picture.
 			applyGain = driving && led.mode != Mode::LogOnly && led.mode != Mode::PictureOnly;
 		}
+		SyncDriverFallbacks(framingDowngraded);
 
 		LedDriveConfig current;
 		uint64_t generation = 0;

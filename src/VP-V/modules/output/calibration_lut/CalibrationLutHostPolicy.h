@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
+#include <VP-V/core/FallbackCatalog.h>
+
 #include <dxgiformat.h>
 
 #include <algorithm>
@@ -83,6 +85,9 @@ namespace CalibrationLutHost
 	// Back on libplacebo's target LUT (stage switched, failed, Original pathway): a rejection shown
 	// for the VP stage goes back to Bill's text, which his libplacebo branch keeps.
 	bool LibplaceboStageStatus(std::string& status);
+
+	// GEM-197: BTB/WTW edge-slope extrapolation fallback decision (engaged while slopeFallbacks > 0).
+	FallbackCatalog::Decision SlopeFallbackDecision(unsigned long long slopeFallbacks);
 
 	// The status "calibration LUT attached" (Ctrl+I limited-range text, "(inactive: calibration LUT)",
 	// ActiveProfileStatus, Config's usable-LUT check).

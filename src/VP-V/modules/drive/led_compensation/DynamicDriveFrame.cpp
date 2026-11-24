@@ -449,23 +449,27 @@ namespace LedDrive
 
 	void DynamicDriveFrame::MergeModuleFallbacks(const std::shared_ptr<LedDriveModule>& led)
 	{
-		// Module findings items 1 and 2: the module's own entries ("LED drive" while it holds full
-		// drive, "projector" during a dry run) join the renderer's heading; released when the
-		// module clears them or goes away. Engage/Release return at once when unchanged.
+		// Module findings items 1 and 2 + GEM-185: every entry the module publishes ("LED drive",
+		// "projector", cut-judge fallbacks, "projector framing", etc.) joins the renderer's heading;
+		// released when the module clears it or goes away. Engage/Release return at once when unchanged.
 		// Audit N1: with no module and nothing engaged, no registry calls (the LED-off frame).
-		if (!led && !moduleEntriesEngaged)
+		if (!led && mergedModuleFallbackIds.empty())
 			return;
 		const std::vector<FallbackStatus::Entry> entries = led ? led->FallbackEntries() : std::vector<FallbackStatus::Entry>();
-		for (const char* id : { LedDriveModule::kHoldFallbackId, LedDriveModule::kDryRunFallbackId })
+		std::vector<std::string> currentIds;
+		currentIds.reserve(entries.size());
+		for (const FallbackStatus::Entry& entry : entries)
 		{
-			const auto it = std::find_if(entries.begin(), entries.end(),
-				[&](const FallbackStatus::Entry& e) { return e.id == id; });
-			if (it != entries.end())
-				Engage(id, it->reason);
-			else
-				ReleaseFallback(id);
+			Engage(entry.id.c_str(), entry.reason);
+			if (std::find(currentIds.begin(), currentIds.end(), entry.id) == currentIds.end())
+				currentIds.push_back(entry.id);
 		}
-		moduleEntriesEngaged = !entries.empty();
+		for (const std::string& prevId : mergedModuleFallbackIds)
+		{
+			if (std::find(currentIds.begin(), currentIds.end(), prevId) == currentIds.end())
+				ReleaseFallback(prevId.c_str());
+		}
+		mergedModuleFallbackIds = std::move(currentIds);
 	}
 
 	bool DynamicDriveFrame::OnResync(bool full, bool timing, uint64_t sourceSequence, double sourceRateHz)

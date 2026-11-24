@@ -85,4 +85,12 @@ namespace CalibrationLutHost
 		status = kReloadRejectedPrefix + status.substr(std::char_traits<char>::length(kVpReloadRejectedPrefix));
 		return true;
 	}
+
+	FallbackCatalog::Decision SlopeFallbackDecision(unsigned long long slopeFallbacks)
+	{
+		return slopeFallbacks > 0
+			? FallbackCatalog::Engaged("calibration LUT BTB/WTW",
+				"BTB/WTW carried at slope 1 (edge-slope extrapolation unavailable for this LUT)")
+			: FallbackCatalog::Released("calibration LUT BTB/WTW");
+	}
 }

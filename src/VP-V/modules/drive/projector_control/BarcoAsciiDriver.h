@@ -109,6 +109,7 @@ namespace LedDrive
 		// Guarded by stateMutex.
 		bool stopping = false;
 		bool opened = false;
+		bool framingDowngraded = false;   // GEM-192: terminator: auto downgraded to unacknowledged script bytes
 		int pendingLight = -1;
 		int deviceLightMin = -1, deviceLightMax = -1; // queried device range; -1 = not queried
 		bool lightReplyRangeLogged = false; // bug hunt 39 #14: log once

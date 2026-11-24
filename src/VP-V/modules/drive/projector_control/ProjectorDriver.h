@@ -70,6 +70,9 @@ namespace LedDrive
 		// sent, and how many sequences have finished.
 		bool sequenceBusy = false;
 		int sequencesDone = 0;
+		// GEM-192: true when terminator: auto received no reply on cr / literal_cr
+		// and automatically downgraded to unacknowledged script bytes.
+		bool framingDowngraded = false;
 	};
 
 	class IProjectorDriver

@@ -390,6 +390,10 @@ namespace LedDrive
 		const Framing cr{ "cr", false, "\r", true };
 		const Framing literalCr{ "literal_cr", false, "cr\r", true };
 		const Framing script{ "script", true, "cr\r\n", false };
+		{
+			std::lock_guard<std::mutex> guard(stateMutex);
+			framingDowngraded = false;
+		}
 		if (!config.readBack)
 		{
 			// Send-only: no probing, no ECHO, no queries.
@@ -429,7 +433,11 @@ namespace LedDrive
 		}
 		if (config.terminator == Terminator::Auto)
 		{
-			framing = script;
+			{
+				std::lock_guard<std::mutex> guard(stateMutex);
+				framing = script;
+				framingDowngraded = true;
+			}
 			DebugLog::Log(
 				"Dynamic Drive: projector did not answer with \\r or cr\\r framing; sending the old script's exact bytes without waiting for replies");
 		}
@@ -441,6 +449,10 @@ namespace LedDrive
 	bool BarcoAsciiDriver::Open(std::string& error)
 	{
 		Close();
+		{
+			std::lock_guard<std::mutex> stateGuard(stateMutex);
+			framingDowngraded = false;   // GEM-192
+		}
 		if (!port || !port->Open(config.port, config.baud, error))
 		{
 			if (!port) error = "no serial port";
@@ -457,6 +469,7 @@ namespace LedDrive
 				std::lock_guard<std::mutex> stateGuard(stateMutex);
 				shuttingDown = false;
 				shutdownOpenTried = false;   // audit 2026-10-16 / GEM-205
+				framingDowngraded = false;   // GEM-192
 			}
 			SelectFraming();
 			int minimum = 0, maximum = 0;
@@ -1066,6 +1079,7 @@ namespace LedDrive
 		status.contrastBusy = pendingContrast >= 0 || contrastInFlight;   // audit 2026-10-16
 		status.sequenceBusy = !sequence.empty() || sequenceInFlight;
 		status.sequencesDone = sequencesDone;
+		status.framingDowngraded = framingDowngraded;   // GEM-192
 		return status;
 	}
 }

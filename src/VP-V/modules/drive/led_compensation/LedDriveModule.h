@@ -282,6 +282,8 @@ namespace LedDrive
 		static constexpr const char* kCutJudgeFallbackId = "LED cut judge";
 		// The same for the look-ahead walk: engaged while a walked (ahead) frame's scene could not be got-or-computed (genuine failure only).
 		static constexpr const char* kCutJudgeAheadFallbackId = "LED look-ahead cut judge";
+		// GEM-192: engaged when terminator: auto received no reply and downgraded to unacknowledged script bytes.
+		static constexpr const char* kFramingFallbackId = "projector framing";
 
 	private:
 		std::atomic<double> displayGamma{ 2.2 };
@@ -487,8 +489,9 @@ namespace LedDrive
 		bool measurementAvailable = true;
 		std::string measurementUnavailableReason;
 		bool holdingFull = false;
-		FallbackStatus::Registry fallbacks;
+		mutable FallbackStatus::Registry fallbacks;
 		void UpdateHoldFallbackLocked();
+		void SyncDriverFallbacks(bool framingDowngraded) const;
 		void UpdateCutJudgeFallbackLocked(bool known, const char* why);
 		void UpdateCutJudgeAheadFallbackLocked(bool known, const char* why);
 		// The look-ahead entry is judged once per walk: a walk with any failing frame engages it (first cause kept); it is released
