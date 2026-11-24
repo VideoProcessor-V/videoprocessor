@@ -890,10 +890,16 @@ namespace VideoProcessorTest
 			const bool kernelUsed = rebase.KernelUsed();
 			std::vector<float> gpuOut;
 			std::string outFmtName = "?";
+			bool outPlane0Is16Unorm = false;
 			if (applied && out.planes[0].texture)
 			{
-				if (out.planes[0].texture->params.format && out.planes[0].texture->params.format->name)
-					outFmtName = out.planes[0].texture->params.format->name;
+				if (out.planes[0].texture->params.format)
+				{
+					const pl_fmt outFmt = out.planes[0].texture->params.format;
+					if (outFmt->name)
+						outFmtName = outFmt->name;
+					outPlane0Is16Unorm = (outFmt->type == PL_FMT_UNORM && outFmt->component_depth[0] == 16);
+				}
 				DownloadRebasedPlane(gpu, out.planes[0].texture, 1, gpuOut);
 			}
 			pl_tex_destroy(gpu, &lumaTex);
@@ -902,6 +908,12 @@ namespace VideoProcessorTest
 
 			Assert::IsTrue(applied, ExtendedRangeGpuProbe::ToWide(applyErr).c_str());
 			Assert::IsTrue(kernelUsed, L"kernel-inverse 2-pass path must execute");
+			Assert::IsTrue(rebase.FormatNote().empty(),
+				(L"32-bit float intermediate happy path must not emit a precision-fallback note: " +
+					ExtendedRangeGpuProbe::ToWide(rebase.FormatNote())).c_str());
+			Assert::IsTrue(outPlane0Is16Unorm,
+				(L"Q#4 output-format compatibility: kernel-inverse output plane 0 must remain 16-bit UNORM (got " +
+					ExtendedRangeGpuProbe::ToWide(outFmtName) + L")").c_str());
 			Assert::AreEqual(static_cast<size_t>(M) * M, gpuOut.size(), L"re-based luma size");
 
 			double gpuErrFloat = 0.0, gpuDiffClamped = 0.0;
@@ -1085,14 +1097,30 @@ namespace VideoProcessorTest
 			const bool applied = rebase.Apply(gpu, dispatch, source, 0.5, out);
 			const std::string applyErr = rebase.LastError();
 			int outW = 0, outH = 0;
+			std::string outFmt0Name = "?";
 			std::string outFmtName = "?";
+			bool outPlane0Is16Unorm = false;
+			bool outPlane1Is16Unorm = false;
 			std::vector<float> gpuChroma;
+			if (applied && out.planes[0].texture && out.planes[0].texture->params.format)
+			{
+				const pl_fmt outFmt0 = out.planes[0].texture->params.format;
+				if (outFmt0->name)
+					outFmt0Name = outFmt0->name;
+				outPlane0Is16Unorm = (outFmt0->type == PL_FMT_UNORM && outFmt0->component_depth[0] == 16);
+			}
 			if (applied && out.planes[1].texture)
 			{
 				outW = out.planes[1].texture->params.w;
 				outH = out.planes[1].texture->params.h;
-				if (out.planes[1].texture->params.format && out.planes[1].texture->params.format->name)
-					outFmtName = out.planes[1].texture->params.format->name;
+				if (out.planes[1].texture->params.format)
+				{
+					const pl_fmt outFmt1 = out.planes[1].texture->params.format;
+					if (outFmt1->name)
+						outFmtName = outFmt1->name;
+					outPlane1Is16Unorm = (outFmt1->type == PL_FMT_UNORM &&
+						outFmt1->component_depth[0] == 16 && outFmt1->component_depth[1] == 16);
+				}
 				DownloadRebasedPlane(gpu, out.planes[1].texture, 2, gpuChroma);
 			}
 			pl_tex_destroy(gpu, &lumaTex);
@@ -1101,6 +1129,15 @@ namespace VideoProcessorTest
 			pl_dispatch_destroy(&dispatch);
 
 			Assert::IsTrue(applied, ExtendedRangeGpuProbe::ToWide(applyErr).c_str());
+			Assert::IsTrue(rebase.FormatNote().empty(),
+				(L"32-bit float intermediate happy path must not emit a precision-fallback note: " +
+					ExtendedRangeGpuProbe::ToWide(rebase.FormatNote())).c_str());
+			Assert::IsTrue(outPlane0Is16Unorm,
+				(L"Q#4 output-format compatibility: re-based luma plane 0 must remain 16-bit UNORM (got " +
+					ExtendedRangeGpuProbe::ToWide(outFmt0Name) + L")").c_str());
+			Assert::IsTrue(outPlane1Is16Unorm,
+				(L"Q#4 output-format compatibility: re-based chroma plane 1 must remain 16-bit UNORM (got " +
+					ExtendedRangeGpuProbe::ToWide(outFmtName) + L")").c_str());
 			Assert::AreEqual(M, outW, L"re-based chroma width");
 			Assert::AreEqual(M, outH, L"re-based chroma height");
 			Assert::AreEqual(static_cast<size_t>(M) * M * 2, gpuChroma.size(), L"re-based chroma buffer size");
