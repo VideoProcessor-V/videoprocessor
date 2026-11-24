@@ -3078,6 +3078,9 @@ namespace CutFadeJudgeFadeRunTestsNs
 			{
 				auto WobbleFrame = [](int frameIdx, double gain) -> Record {
 					// Discs oscillate +-5 px strictly inside tiles (0,0) and (1,3): defeats rigid cell-OLS without crossing tile edges.
+					// Scaled at 80 codes so a 5% wobble (|1 - A_q| ~ 0.05 > 0.04 onset floor!) still moves macro-tiles by
+					// 0.72..0.99 codes (strictly between kFadeCellStepEps = 0.5 and kFadeMinSpread = 1.0), proving Part B's
+					// 1.0-code bar (not Part A's 0.04 onset floor!) rejects the wobble!
 					const double cx1 = 27.0 + 5.0 * std::sin(double(frameIdx) * 0.7);
 					const double cx2 = 132.0 - 5.0 * std::sin(double(frameIdx) * 0.7);
 					std::vector<uint16_t> half(size_t(kW) * kH);
@@ -3091,28 +3094,28 @@ namespace CutFadeJudgeFadeRunTestsNs
 								pat = 0.38;
 							if (d2 <= 81.0)
 								pat = 0.04;
-							const double v = kBlack + gain * pat * 145.0 * 256.0;
+							const double v = kBlack + gain * pat * 80.0 * 256.0;
 							half[size_t(y) * kW + x] = static_cast<uint16_t>((std::min)(65535.0, (std::max)(0.0, std::floor(v + 0.5))));
 						}
 					return MakeRecordFromHalf(half);
 				};
 
 				const double gains[] = {
-					1.000, 1.000, 1.000, 1.000,
-					0.993, 0.986, 0.979, 0.972,
-					0.979, 0.986, 0.993, 1.000,
-					0.993, 0.986, 0.979, 0.972,
-					0.979, 0.986, 0.993, 1.000,
-					1.000, 1.000, 1.000, 1.000
+					1.0000, 1.0000, 1.0000, 1.0000,
+					0.9875, 0.9750, 0.9625, 0.9500,
+					0.9625, 0.9750, 0.9875, 1.0000,
+					0.9875, 0.9750, 0.9625, 0.9500,
+					0.9625, 0.9750, 0.9875, 1.0000,
+					1.0000, 1.0000, 1.0000, 1.0000
 				};
 				std::vector<Record> recs;
 				int idx = 0;
 				for (double g : gains)
 					recs.push_back(WobbleFrame(idx++, g));
 
-				// Mandatory In-Test Negative Control (Rule 3) on peak wobble pair recs[3] -> recs[7]:
-				// Assert >= 6/8 macro-tiles move > 0.5 code (old bar would pass!) while < 6/8 move > 1.0 code
-				// AND production FitMotionTolerantFade returns valid == false!
+				// Mandatory In-Test Negative Control (Rule 3) on peak 5% wobble pair recs[3] -> recs[7]:
+				// Assert |1 - mtWobble.gain| > 0.04 (Part A passes!), >= 6/8 macro-tiles move > 0.5 code (old bar would fire!)
+				// while < 6/8 move > 1.0 code, AND FitMotionTolerantFade rejects for BOTH activeFade=false AND activeFade=true!
 				{
 					constexpr int R = kLocalRadius;
 					double gA[kGridH][kGridW], gB[kGridH][kGridW];
@@ -3147,8 +3150,13 @@ namespace CutFadeJudgeFadeRunTestsNs
 						L"Negative control: peak sub-code wobble must move < 6/8 macro-tiles > 1.0 code");
 					Assert::IsFalse(FitGridFadeAligned(ra, ca, vx, vy).valid,
 						L"precondition: opposite-oscillating discs defeat rigid FitGridFadeAligned");
-					Assert::IsFalse(FitMotionTolerantFade(ra, ca, vx, vy).valid,
-						L"full-LSB macro-tile bar (1.0 code across >= 75% of lit tiles) must reject sub-code wobble");
+					const GridFadeFit mtWobble = FitMotionTolerantFade(ra, ca, vx, vy, false, false);
+					Assert::IsTrue(std::fabs(1.0 - mtWobble.gain) > kFadeRunMinGain / kFadeResidualReduction,
+						L"Negative control: 5% wobble clears Part A's 0.04 onset gain floor so Part B's 1.0-code bar is unshadowed");
+					Assert::IsFalse(mtWobble.valid,
+						L"full-LSB macro-tile bar (1.0 code across >= 75% of lit tiles) must reject sub-code wobble (activeFade=false)");
+					Assert::IsFalse(FitMotionTolerantFade(ra, ca, vx, vy, false, true).valid,
+						L"full-LSB macro-tile bar must also reject sub-code wobble under activeFade=true (0.02 floor)");
 				}
 
 				const auto res = Play(recs);
@@ -3218,7 +3226,7 @@ namespace CutFadeJudgeFadeRunTestsNs
 		// ---- Blind-Audit Pass 2 Break-It & Negative-Control Tests (HIGH-3 & MEDIUM-3) ---------------------------------------
 
 		// HIGH-3 #1: FitMotionTolerantFade enforces the derived 2x SNR gain floor (kFadeRunMinGain / kFadeResidualReduction = 0.04):
-		// a 3% non-rigid exposure ripple under opposite-moving discs (|1 - A_q| in (0.02, 0.04)) is rejected while a 6.5% fade-out
+		// a 2.5%-3% non-rigid exposure ripple under opposite-moving discs (|1 - A_q| in (0.02, 0.04)) is rejected while a 6.5% fade-out
 		// under identical non-rigid motion is accepted.
 		TEST_METHOD(MotionTolerantFadeEnforcesTwoXSnrGainFloor)
 		{
@@ -3257,7 +3265,7 @@ namespace CutFadeJudgeFadeRunTestsNs
 			LoadGridCodes(rRipple3Pct.cells, gRip);
 			LoadGridCodes(rFade6p5Pct.cells, gFade);
 
-			// 1. 3% non-rigid exposure ripple: rigid fails, order-statistic |1 - A_q| is strictly in (0.02, 0.04)
+			// 1. 2.5%-3% non-rigid exposure ripple: rigid fails, order-statistic |1 - A_q| is strictly in (0.02, 0.04)
 			//    (negative control: old 0.02 floor / activeFade=true would accept!), yet unconfirmed FitMotionTolerantFade rejects via 2x SNR floor!
 			{
 				double ra[kGridH][kGridW], ca[kGridH][kGridW];
@@ -3268,9 +3276,9 @@ namespace CutFadeJudgeFadeRunTestsNs
 				const GridFadeFit mtRip = FitMotionTolerantFade(ra, ca, vx, vy, false, false);
 				Assert::IsTrue(std::fabs(1.0 - mtRip.gain) > kFadeRunMinGain &&
 					std::fabs(1.0 - mtRip.gain) < kFadeRunMinGain / kFadeResidualReduction,
-					L"Negative control: 3% non-rigid ripple has |1 - A_q| in (0.02, 0.04) so old 0.02 floor would accept");
+					L"Negative control: 2.5%-3% non-rigid ripple has |1 - A_q| in (0.02, 0.04) so old 0.02 floor would accept");
 				Assert::IsFalse(mtRip.valid,
-					L"FitMotionTolerantFade(activeFade=false) must reject 3% non-rigid ripple below 2x SNR gain floor (0.04)");
+					L"FitMotionTolerantFade(activeFade=false) must reject 2.5%-3% non-rigid ripple below 2x SNR gain floor (0.04)");
 				Assert::IsTrue(FitMotionTolerantFade(ra, ca, vx, vy, false, true).valid,
 					L"Negative control: with activeFade=true (0.02 floor), the exact same aligned pair passes");
 			}
@@ -3379,44 +3387,123 @@ namespace CutFadeJudgeFadeRunTestsNs
 					L"studio-white topPinned exclusion must allow FoldFadeRun to continue cleanly even when full-392 stepAQ > 1.0");
 			}
 
-			// (b) Unclipped flat-top scene (interior 180-code plateau < 234 over 2D textured background) fading gently (~ -0.25 codes/frame):
-			//     assert max interior cell < 234 (topPinned does NOT trigger), 0 cuts, and FoldFadeRun continues cleanly!
+			// (b) Unclipped flat-top scene (top half = 180-code sky/panel < 234 fading -0.41 codes/frame <= 0.50;
+			//     lower half = dim textured foreground with slight +3% local contrast tilt on the test step):
+			//     Break-it negative control proves Full392StepSlope < 1.0 while StrippedTopStepSlope >= 1.0
+			//     (so deleting >= kStudioPeakWhiteCodes - kFadeMinSpread from topPinned breaks stepSlopeOk!),
+			//     yet FoldFadeRun returns true ONLY because >= 234 prevented stripping the unclipped 180-code ceiling!
 			{
-				auto UnclippedFlatTopFrame = [](double gain, uint32_t k) -> Record {
+				auto StrippedTopStepSlope = [&](const Record& prevR, const Record& curR) -> double {
+					double gp[kGridH][kGridW], gc[kGridH][kGridW];
+					LoadGridCodes(prevR.cells, gp);
+					LoadGridCodes(curR.cells, gc);
+					std::vector<double> ps, cs;
+					ps.reserve(size_t(kIntN));
+					cs.reserve(size_t(kIntN));
+					for (int y = R; y < kGridH - R; ++y)
+						for (int x = R; x < kGridW - R; ++x)
+						{
+							ps.push_back(gp[y][x]);
+							cs.push_back(gc[y][x]);
+						}
+					std::sort(ps.begin(), ps.end());
+					std::sort(cs.begin(), cs.end());
+					int kEnd = kIntN;
+					const double pCeil = ps[size_t(kIntN - 1)] - double(kFadeMinSpread);
+					const double cCeil = cs[size_t(kIntN - 1)] - double(kFadeMinSpread);
+					while (kEnd > 2 && ps[size_t(kEnd - 1)] >= pCeil && cs[size_t(kEnd - 1)] >= cCeil)
+						--kEnd;
+					double sx = 0.0, sy = 0.0;
+					for (int i = 0; i < kEnd; ++i)
+					{
+						sx += ps[size_t(i)];
+						sy += cs[size_t(i)];
+					}
+					const double mx = sx / double(kEnd), my = sy / double(kEnd);
+					double sxx = 0.0, sxy = 0.0;
+					for (int i = 0; i < kEnd; ++i)
+					{
+						const double dx = ps[size_t(i)] - mx;
+						sxx += dx * dx;
+						sxy += dx * (cs[size_t(i)] - my);
+					}
+					return sxx > 1e-6 ? sxy / sxx : 1.0;
+				};
+
+				auto UnclippedFlatTopHalfFrame = [](double gain, double lowerStretch) -> Record {
 					std::vector<uint16_t> half(size_t(kW) * kH);
 					for (uint32_t y = 0; y < kH; ++y)
 						for (uint32_t x = 0; x < kW; ++x)
 						{
-							const bool inPlateau = (x >= 25u && x < 45u && y >= 20u && y < 35u);
-							const double raw = inPlateau ? 180.0
-								: (30.0 + 130.0 * double(x) / double(kW - 1) + 12.0 * std::cos(double(y) * 0.14));
-							const double code = 16.0 + gain * (raw - 16.0) + (inPlateau ? 0.0 : double(Noise(x, y, k)) / (256.0 * 8.0));
+							double code = 16.0;
+							if (y < kH / 2u)
+							{
+								// Zero-mean 5-px sub-cell dither keeps every 5x5 cell mean exact at 16 + gain * (180 - 16)
+								// while spreading the 10-bit histogram across ~10 bins so HistHalfL1 stays << 0.50 (!e.cut).
+								const double dither = (double(int(x % 5u) - 2)) * 0.6;
+								code = 16.0 + gain * (180.0 - 16.0) + dither;
+							}
+							else
+							{
+								const int cx = int(x / 5u);
+								const int cy = int(y / 5u);
+								const double raw = 32.0 + 10.0 * ((double(cx) - 15.5) / 15.5) + 2.0 * std::cos(double(cy) * 0.7);
+								const double meanLow = 16.0 + gain * (32.0 - 16.0);
+								code = meanLow + lowerStretch * gain * (raw - 32.0);
+							}
 							half[size_t(y) * kW + x] = static_cast<uint16_t>((std::min)(65535.0, (std::max)(0.0, std::floor(code * 256.0 + 0.5))));
 						}
 					return MakeRecordFromHalf(half);
 				};
 
+				// Prime a smooth fade-out from 1.000 -> 0.960 (16 steps of -0.0025), then test step 0.960 -> 0.9575
+				// with lowerStretch = 1.03 so top drops -0.41 code (<= 0.50) while stripped lower slope >= 1.0!
 				std::vector<Record> recs;
-				uint32_t k = 9600u;
-				for (int i = 0; i < 4; ++i)
-					recs.push_back(UnclippedFlatTopFrame(1.0, k++));
-				for (int i = 1; i <= 40; ++i)
-					recs.push_back(UnclippedFlatTopFrame(1.0 - 0.0025 * double(i), k++));   // ~ -0.25.. -0.41 codes/frame
+				for (int s = 0; s <= 16; ++s)
+					recs.push_back(UnclippedFlatTopHalfFrame(1.0 - 0.0025 * double(s), 1.0));
+				recs.push_back(UnclippedFlatTopHalfFrame(0.9575, 1.03));
 
-				double gMax = 0.0;
-				double g0[kGridH][kGridW];
-				LoadGridCodes(recs[4].cells, g0);
+				const Record& rPrevStep = recs[16];
+				const Record& rTestStep = recs[17];
+
+				double gPrevMax = 0.0, gTestMax = 0.0;
+				double gP[kGridH][kGridW], gT[kGridH][kGridW];
+				LoadGridCodes(rPrevStep.cells, gP);
+				LoadGridCodes(rTestStep.cells, gT);
 				for (int y = R; y < kGridH - R; ++y)
 					for (int x = R; x < kGridW - R; ++x)
-						if (g0[y][x] > gMax)
-							gMax = g0[y][x];
-				Assert::IsTrue(gMax < kStudioPeakWhiteCodes - double(kFadeMinSpread),
-					L"precondition: unclipped flat-top ceiling (180 codes) sits strictly below 234 studio-white guard");
+					{
+						if (gP[y][x] > gPrevMax)
+							gPrevMax = gP[y][x];
+						if (gT[y][x] > gTestMax)
+							gTestMax = gT[y][x];
+					}
+				Assert::IsTrue(gPrevMax < kStudioPeakWhiteCodes - double(kFadeMinSpread),
+					L"precondition: unclipped flat-top ceiling (~173 codes) sits strictly below 234 studio-white guard");
+				Assert::IsTrue(std::fabs(gPrevMax - gTestMax) <= kFadeCellStepEps,
+					L"precondition: |pMax - cMax| <= 0.50 so removing >= 234 guard WOULD trigger topPinned");
 
-				const auto res = Play(recs);
-				Assert::AreEqual(0, Count(res, 1, 4), L"0 fades on pre-fade static unclipped flat-top");
-				Assert::IsTrue(Count(res, 4, recs.size()) >= 30,
-					L"gentle fade of unclipped 180-code flat-top must be detected cleanly without stripping its ceiling");
+				// Break-it Negative Control (Rule 3): Full392StepSlope < 1.0, StrippedTopStepSlope >= 1.0!
+				const double fullSlope = Full392StepSlope(rPrevStep, rTestStep);
+				const double strippedSlope = StrippedTopStepSlope(rPrevStep, rTestStep);
+				Assert::IsTrue(fullSlope < 1.0,
+					L"Negative control: keeping unclipped 180-code top plateau preserves Full392StepSlope < 1.0");
+				Assert::IsTrue(strippedSlope >= 1.0,
+					L"Negative control: stripping the unclipped 180-code plateau flips StrippedTopStepSlope >= 1.0 (would reject!)");
+
+				FadeRun run;
+				bool activeBefore = false;
+				for (size_t i = 1; i <= 16u; ++i)
+				{
+					const Events e = ClassifyEvents(recs[i - 1], recs[i], false, false);
+					activeBefore = FoldFadeRun(recs[i - 1], recs[i], e, run);
+				}
+				Assert::IsTrue(activeBefore && run.direction < 0,
+					L"precondition: fade-out run is active before unclipped flat-top test step");
+				const Events eStep = ClassifyEvents(rPrevStep, rTestStep, false, false);
+				Assert::IsFalse(eStep.cut, L"precondition: unclipped flat-top gentle step must not trip e.cut");
+				Assert::IsTrue(FoldFadeRun(rPrevStep, rTestStep, eStep, run),
+					L"studio-white >= 234 guard must NOT strip unclipped 180-code flat-top ceiling, letting FoldFadeRun continue cleanly");
 			}
 		}
 
@@ -3546,31 +3633,71 @@ namespace CutFadeJudgeFadeRunTestsNs
 						L"active fade step with |stepMean| > 0.5 and sSameEps > sOppEps must continue despite sub-LSB jitter");
 				}
 
-				// Negative control: near-zero plateau (|stepMean| < 0.05) with 10 bright cells dropping -0.65 code
-				// and 180 dim cells jittering +0.02 code -> sSameEps = 10 > 0 yet sSameZero = 10 < sOppZero = 180 -> REJECTED!
+				// Negative control: near-zero plateau (|stepMean| < 0.05) with 2 drops of -0.65 (at brightest column x0+6)
+				// and 25 jitters of +0.02 (at dimmer columns) in EVERY ONE of the 8 7x7 macro-tiles:
+				// -> tileSameZero == 8 && tileOppZero == 0 (Fix #4 macro-tile filter PASSES!),
+				// -> sSameEps == 16 > sOppEps == 0 (above-LSB check PASSES!), stepAQ < 1.0 (stepSlopeOk PASSES!),
+				// -> ONLY sSameZero < sOppZero (16 < 200) rejects it!
 				double plateauG[kGridH][kGridW];
 				for (int y = 0; y < kGridH; ++y)
 					for (int x = 0; x < kGridW; ++x)
 						plateauG[y][x] = prevG[y][x];
-				int dropped = 0;
-				for (int y = R; y < kGridH - R && dropped < 10; ++y)
-				{
-					plateauG[y][kGridW - R - 1] -= 0.65;
-					++dropped;
-				}
-				int jittered = 0;
-				for (int y = R; y < kGridH - R; ++y)
-					for (int x = R; x < 19 && jittered < 180; ++x)
+				for (int tr = 0; tr < 2; ++tr)
+					for (int tc = 0; tc < 4; ++tc)
 					{
-						plateauG[y][x] += 0.02;
-						++jittered;
+						const int y0 = R + tr * 7;
+						const int x0 = R + tc * 7;
+						plateauG[y0][x0 + 6] -= 0.65;
+						plateauG[y0 + 1][x0 + 6] -= 0.65;
+						int cnt = 0;
+						for (int dx = 0; dx < 5 && cnt < 25; ++dx)
+							for (int dy = 0; dy < 7 && cnt < 25; ++dy)
+							{
+								plateauG[y0 + dy][x0 + dx] += 0.02;
+								++cnt;
+							}
 					}
 				const Record rPlateau = MakeGridRecord(plateauG);
 				{
+					// Explicitly verify unshadowed preconditions directly on the encoded P4 grids:
+					int pSameEps = 0, pOppEps = 0, pSameZero = 0, pOppZero = 0;
+					int pTileSameZero = 0, pTileOppZero = 0;
+					for (int tr = 0; tr < 2; ++tr)
+						for (int tc = 0; tc < 4; ++tc)
+						{
+							double tDelta = 0.0;
+							const int y0 = R + tr * 7;
+							const int x0 = R + tc * 7;
+							for (int dy = 0; dy < 7; ++dy)
+								for (int dx = 0; dx < 7; ++dx)
+								{
+									const double d = (double(rPlateau.cells[(y0 + dy) * kGridW + (x0 + dx)]) -
+										double(rPrev.cells[(y0 + dy) * kGridW + (x0 + dx)])) * kGridScale;
+									tDelta += d;
+									if (-d > kFadeCellStepEps)
+										++pSameEps;
+									else if (d > kFadeCellStepEps)
+										++pOppEps;
+									if (-d > 0.0)
+										++pSameZero;
+									else if (d > 0.0)
+										++pOppZero;
+								}
+							if (tDelta < 0.0)
+								++pTileSameZero;
+							else if (tDelta > 0.0)
+								++pTileOppZero;
+						}
+					Assert::AreEqual(8, pTileSameZero, L"precondition: all 8/8 macro-tiles darken so Fix #4 tile filter does NOT shadow sSameZero");
+					Assert::AreEqual(0, pTileOppZero, L"precondition: 0 opposing macro-tiles");
+					Assert::AreEqual(16, pSameEps, L"precondition: 16 above-LSB darkening cells (sSameEps > sOppEps passes)");
+					Assert::AreEqual(0, pOppEps, L"precondition: 0 above-LSB opposing cells");
+					Assert::IsTrue(pSameZero < pOppZero, L"precondition: sSameZero < sOppZero is the sole guard rejecting rPlateau");
+
 					FadeRun run = PrimeDarkRun();
 					const Events ePlat = ClassifyEvents(rPrev, rPlateau, false, false);
 					Assert::IsFalse(FoldFadeRun(rPrev, rPlateau, ePlat, run),
-						L"Negative control: near-zero plateau (|stepMean| < 0.05) with sSameZero < sOppZero must be rejected");
+						L"Negative control: near-zero plateau (|stepMean| < 0.05) with sSameZero < sOppZero must be rejected even when 8/8 macro-tiles darken");
 				}
 			}
 
@@ -3611,28 +3738,37 @@ namespace CutFadeJudgeFadeRunTestsNs
 				const Record& rPrev = rampRecs.back();
 				const Record rDark = MakeGridRecord(darkG);
 
-				// Active fade-out run -> nearBlackFall == true -> FoldFadeRun continues!
+				FadeRun primedRun;
+				bool activeBefore = false;
+				for (size_t i = 1; i < rampRecs.size(); ++i)
 				{
-					FadeRun run;
-					bool activeBefore = false;
-					for (size_t i = 1; i < rampRecs.size(); ++i)
-					{
-						const Events e = ClassifyEvents(rampRecs[i - 1], rampRecs[i], false, false);
-						activeBefore = FoldFadeRun(rampRecs[i - 1], rampRecs[i], e, run);
-					}
-					Assert::IsTrue(activeBefore && run.direction < 0 && run.fadePairs >= 1u,
-						L"precondition: fade-out run is active before near-black collapse");
+					const Events e = ClassifyEvents(rampRecs[i - 1], rampRecs[i], false, false);
+					activeBefore = FoldFadeRun(rampRecs[i - 1], rampRecs[i], e, primedRun);
+				}
+				Assert::IsTrue(activeBefore && primedRun.direction < 0 && primedRun.fadePairs >= 1u && primedRun.pairs >= 2u,
+					L"precondition: fade-out run is active before near-black collapse");
+
+				// Active fade-out run -> nearBlackFall == true (fadePairs >= 1) -> FoldFadeRun continues!
+				{
+					FadeRun activeRun = primedRun;
 					const Events eCol = ClassifyEvents(rPrev, rDark, false, false);
-					Assert::IsTrue(FoldFadeRun(rPrev, rDark, eCol, run),
+					Assert::IsTrue(FoldFadeRun(rPrev, rDark, eCol, activeRun),
 						L"active near-black fade-out collapse must continue in FoldFadeRun");
 				}
 
-				// Negative control: cold-start (activeFade == false) transition into noisy dark frame -> runFade == false!
+				// Unshadowed Negative Control: identical primed run (pairs >= 2, direction == -1, baseGridValid == true)
+				// but with fadePairs == 0 && keep == 1.0 -> does NOT exit early on pairs < kFadeRunMinPairs,
+				// reaches FitMotionTolerantFade(..., nearBlackFall=false), and is rejected solely by fadePairs >= 1u!
 				{
-					FadeRun coldRun;
+					FadeRun coldRun = primedRun;
+					coldRun.fadePairs = 0u;
+					coldRun.keep = 1.0;
 					const Events eCold = ClassifyEvents(rPrev, rDark, false, false);
-					Assert::IsFalse(FoldFadeRun(rPrev, rDark, eCold, coldRun),
-						L"Negative control: cold-start (activeFade == false) transition into noisy dark frame must NOT fire runFade");
+					const bool coldFade = FoldFadeRun(rPrev, rDark, eCold, coldRun);
+					Assert::IsFalse(coldFade,
+						L"Negative control: unconfirmed run (fadePairs == 0) must NOT receive nearBlackFall Part C exemption");
+					Assert::IsTrue(coldRun.pairs >= 3u,
+						L"Negative control: coldRun continued past pairs < kFadeRunMinPairs into FitMotionTolerantFade");
 				}
 			}
 		}
