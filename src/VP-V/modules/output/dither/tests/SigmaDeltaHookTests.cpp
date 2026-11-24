@@ -1457,10 +1457,22 @@ void hook()
 			for (auto& e : flat.e) { e.V = 0.01; e.Sout = 1.0; }
 			flat.fingerprint = "flat";
 			Assert::IsFalse(DitherNeed::NeededAnywhere(flat, 4.0, p), L"tiny V: the link step is invisible");
-			// a visible step only below code 64 (BTB) does not count
-			LightLevel::Lut btbOnly = flat;
-			for (int c = 0; c < 64; ++c) btbOnly.e[static_cast<size_t>(c)].V = 5.0;
-			Assert::IsFalse(DitherNeed::NeededAnywhere(btbOnly, 4.0, p), L"codes below 64 are not counted");
+			// GEM-021: full-range dark codes (1..63) with visible V MUST count in Gate/NeededAnywhere.
+			LightLevel::Lut fullRangeDark = flat;
+			for (int c = 1; c < 64; ++c) fullRangeDark.e[static_cast<size_t>(c)].V = 5.0;
+			// Same-input negative control (Rule 3): pre-fix loop starting at c = 64 misses dark codes completely.
+			double naiveFrom64Max = 0.0;
+			for (int c = 64; c < LightLevel::kLutSize; ++c)
+				naiveFrom64Max = (std::max)(naiveFrom64Max, DitherNeed::GateVis<double>(p, fullRangeDark.e[static_cast<size_t>(c)].V, fullRangeDark.e[static_cast<size_t>(c)].Sout, 4.0));
+			Assert::AreEqual(0.0, naiveFrom64Max, 0.0, L"Negative control: c >= 64 scan sees zero visibility on dark-only full-range LUT");
+			Assert::IsTrue(DitherNeed::NeededAnywhere(fullRangeDark, 4.0, p), L"GEM-021: full-range dark codes 1..63 with visible V must count");
+			const DitherNeed::LutGate darkGate = DitherNeed::Gate(fullRangeDark, 4.0, p);
+			Assert::IsTrue(darkGate.needed && darkGate.worstCode >= 1 && darkGate.worstCode < 64, L"GEM-021: Gate worstCode must be < 64");
+			// Limited-range LUT: BTB codes 0..63 have V == 0.0 (and 0 elsewhere) -> still returns false.
+			LightLevel::Lut limitedBtbZero;
+			for (auto& e : limitedBtbZero.e) { e.V = 0.0; e.Sout = 1.0; }
+			limitedBtbZero.fingerprint = "limited-btb-zero";
+			Assert::IsFalse(DitherNeed::NeededAnywhere(limitedBtbZero, 4.0, p), L"limited-range LUT with V == 0 in 0..63 and 0 elsewhere is not needed");
 			LightLevel::Lut one = flat;
 			one.e[600].V = 5.0;
 			Assert::IsTrue(DitherNeed::NeededAnywhere(one, 4.0, p), L"one visible code is enough");
@@ -2914,6 +2926,100 @@ if (g.y == 0 && g.x < DN_N) {
 
 			finish.ReleaseGpu(gpu);
 			Assert::AreEqual(size_t{ 0 }, finish.DitherNeedVramBytes(), L"ReleaseGpu frees all VRAM");
+			ft.Destroy(gpu);
+			pl_tex_destroy(gpu, &lutTex);
+			pl_tex_destroy(gpu, &lutOutTex);
+			pl_dispatch_destroy(&dispatch);
+		}
+
+		// GEM-030 adversarial WARP test: BlockPass::Step MUST reject fa.grid.B != a.blockPx with
+		// DitherNeed::kGrainGridMismatch (Result::Unavailable) even when all texture dimensions and gw/gh match,
+		// and BlockPass::VramBytes() MUST remain > 0 after Invalidate() until Release(gpu) frees the ping-pong textures.
+		BEGIN_TEST_METHOD_ATTRIBUTE(DitherNeedWarpBlockPassRejectsBlockSizeMismatchAndKeepsVramAcrossInvalidate)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(DitherNeedWarpBlockPassRejectsBlockSizeMismatchAndKeepsVramAcrossInvalidate)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			pl_dispatch dispatch = pl_dispatch_create(fixture.Log(), gpu);
+			Assert::IsNotNull(dispatch);
+
+			DnFixture fx;
+			fx.Make(0);
+			DwFrameTex ft;
+			ft.Make(gpu, fx);
+			const LightLevel::Lut lut = DnFixture::GoldenLut();
+			const std::vector<float> lt = LightLevel::PackTexels(lut), ot = LightLevel::PackOutputTexels(lut);
+			pl_tex lutTex = DwRgba32f(gpu, LightLevel::kLutSize, 1, lt.data());
+			pl_tex lutOutTex = DwRgba32f(gpu, LightLevel::kLutSize, 1, ot.data());
+
+			DitherNeed::Gpu::BlockPass pass;
+			Assert::AreEqual(size_t{ 0 }, pass.VramBytes(), L"fresh BlockPass holds 0 VRAM");
+
+			// Positive control: exact same healthy inputs with matching fa.grid.B == a.blockPx succeed and allocate ping-pong state.
+			DitherNeed::FrameArgs fa = DnArgs(fx.grid, 1.0 / 60.0, false, "gem030-fp");
+			fa.needed = true;
+			const DitherNeed::Gpu::Args good = DwArgs(ft, fx, lutTex, lutOutTex, fa);
+			const DitherNeed::Gpu::BlockPass::StepResult ok = pass.Step(gpu, dispatch, good, fa, false);
+			DwCheck(ok.ran && ok.decision.result == DitherNeed::Result::On && ok.missing == 0u && pass.Current() != nullptr,
+				"matching fa.grid / Args must run: " + pass.LastError());
+			const size_t expectedBytes = static_cast<size_t>(2) * fx.grid.Count() * 16u;
+			Assert::IsTrue(pass.VramBytes() > 0 && pass.VramBytes() == expectedBytes,
+				L"BlockPass::VramBytes() must report both allocated rgba32f ping-pong textures");
+
+			// GEM-030 part 1: mismatch ONLY fa.grid.B != a.blockPx on the exact same healthy textures & gw/gh.
+			// Same-input negative control (Rule 3): Validate(good) == 0 and gw/gh match, proving a pre-fix check
+			// omitting fa.grid.B != a.blockPx would wrongly accept this mismatched block size and execute the pass.
+			DitherNeed::FrameArgs badB = fa;
+			badB.grid.B = good.blockPx * 2;
+			Assert::AreEqual(0u, DitherNeed::Gpu::BlockPass::Validate(good),
+				L"Negative control: texture dimensions are valid so only fa.grid.B != a.blockPx differs");
+			Assert::IsTrue(badB.grid.gw == good.gridW && badB.grid.gh == good.gridH && badB.grid.B != good.blockPx,
+				L"Negative control: gw/gh agree while block size B disagrees");
+
+			const DitherNeed::Gpu::BlockPass::StepResult bad = pass.Step(gpu, dispatch, good, badB, false);
+			Assert::IsFalse(bad.ran, L"GEM-030: fa.grid.B != a.blockPx must not run the pass");
+			Assert::IsTrue(bad.decision.result == DitherNeed::Result::Unavailable && bad.decision.off,
+				L"GEM-030: fa.grid.B != a.blockPx must yield Result::Unavailable");
+			Assert::AreEqual(static_cast<unsigned>(DitherNeed::kGrainGridMismatch), bad.missing,
+				L"GEM-030: fa.grid.B != a.blockPx must set DitherNeed::kGrainGridMismatch");
+			Assert::IsTrue(bad.decision.status.find(DitherNeed::MissingText(DitherNeed::kGrainGridMismatch)) != std::string::npos,
+				L"GEM-030: status must name the grain grid mismatch");
+			Assert::IsNull(pass.Current(), L"GEM-030: rejected Step must invalidate Current()");
+			Assert::IsTrue(pass.VramBytes() > 0 && pass.VramBytes() == expectedBytes,
+				L"GEM-030: VramBytes() must remain > 0 while ping-pong textures remain allocated after rejected Step");
+
+			// Also rejected as Unavailable (not NotNeeded) when needed == false and Args.blockPx differs in the other direction.
+			DitherNeed::FrameArgs notNeededFa = fa;
+			notNeededFa.needed = false;
+			DitherNeed::Gpu::Args badArgsBlock = good;
+			badArgsBlock.blockPx = fa.grid.B * 2;
+			const DitherNeed::Gpu::BlockPass::StepResult badNotNeeded = pass.Step(gpu, dispatch, badArgsBlock, notNeededFa, false);
+			Assert::IsFalse(badNotNeeded.ran);
+			Assert::IsTrue(badNotNeeded.decision.result == DitherNeed::Result::Unavailable,
+				L"GEM-030: block size mismatch must stay Unavailable even when needed == false");
+			Assert::AreEqual(static_cast<unsigned>(DitherNeed::kGrainGridMismatch), badNotNeeded.missing);
+
+			// Recover on the next healthy frame (resets temporal state), then verify explicit Invalidate() vs Release(gpu).
+			const DitherNeed::Gpu::BlockPass::StepResult rec = pass.Step(gpu, dispatch, good, fa, false);
+			DwCheck(rec.ran && rec.decision.result == DitherNeed::Result::On && rec.decision.reset && pass.Current() != nullptr,
+				"recovery after GEM-030 mismatch must succeed with reset: " + pass.LastError());
+			Assert::AreEqual(expectedBytes, pass.VramBytes());
+
+			// GEM-030 part 2: explicit Invalidate() clears Current() (m_valid == false) while textures remain live in VRAM.
+			pass.Invalidate();
+			Assert::IsNull(pass.Current(), L"Invalidate() must hide Current()");
+			Assert::IsTrue(pass.VramBytes() > 0, L"GEM-030: VramBytes() must remain > 0 after Invalidate()");
+			Assert::AreEqual(expectedBytes, pass.VramBytes(),
+				L"GEM-030: VramBytes() must report exact allocated ping-pong bytes after Invalidate()");
+
+			// Release(gpu) destroys the textures and drops VramBytes() to 0.
+			pass.Release(gpu);
+			Assert::IsNull(pass.Current());
+			Assert::AreEqual(size_t{ 0 }, pass.VramBytes(), L"GEM-030: VramBytes() must equal 0 after Release(gpu)");
+
 			ft.Destroy(gpu);
 			pl_tex_destroy(gpu, &lutTex);
 			pl_tex_destroy(gpu, &lutOutTex);
