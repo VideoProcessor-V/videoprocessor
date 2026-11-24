@@ -1750,7 +1750,35 @@ namespace TdV2
 					double totalDelta = 0.0;
 					for (int b = 0; b < 3; ++b)
 					{
-						const double curV = bandPlaneOf(curBands, b).at(x, y);
+						const TdV2Plane& curBandPlane = bandPlaneOf(curBands, b);
+						const double curV = curBandPlane.at(x, y);
+
+						// SOTA #5: Optional 3x3 grain-free neighborhood 3-sigma C^1 soft clamp on M/H bands (b >= 1).
+						double nbrMean = curV;
+						double nbrSigma = 0.0;
+						const bool applyNbrClamp = cfg_.enableNeighborhoodSoftClamp && (b >= 1);
+						if (applyNbrClamp)
+						{
+							double sumS = 0.0;
+							double sumSq = 0.0;
+							const int xMaxA = active.x1 - 1;
+							const int yMaxA = active.y1 - 1;
+							for (int dy = -1; dy <= 1; ++dy)
+							{
+								const int sy = (std::max)(active.y0, (std::min)(yMaxA, y + dy));
+								for (int dx = -1; dx <= 1; ++dx)
+								{
+									const int sx = (std::max)(active.x0, (std::min)(xMaxA, x + dx));
+									const double s = curBandPlane.at(sx, sy) - curV;
+									sumS += s;
+									sumSq += s * s;
+								}
+							}
+							const double meanS = sumS / 9.0;
+							nbrMean = curV + meanS;
+							nbrSigma = std::sqrt((std::max)(0.0, (sumSq / 9.0) - meanS * meanS));
+						}
+
 						double bandDelta = 0.0;
 						for (int k = 0; k < K; ++k)
 						{
@@ -1765,7 +1793,10 @@ namespace TdV2
 							// Spatial-only interpolation (ZERO temporal weight ramps):
 							// - Optional SOTA #4 clean-luma-guided edge-aware bilinear (cfg_.enableEdgeAwareWeightUpsample)
 							// - Default spatial bilinear with optional per-corner 3-sigma Huber taper (cfg_.enablePerCornerHuber).
-							const double diff = curV - bandPlaneOf(refs[k].bands, b).at(x, y);
+							double refV = bandPlaneOf(refs[k].bands, b).at(x, y);
+							if (applyNbrClamp)
+								refV = SoftClampToNeighborhood3Sigma(refV, nbrMean, nbrSigma);
+							const double diff = curV - refV;
 							double wEff = 0.0;
 							if (cfg_.enableEdgeAwareWeightUpsample)
 							{

@@ -2671,6 +2671,7 @@ namespace Gpu
 			const float uEnableHuber = cfg_.enablePerCornerHuber ? 1.0f : 0.0f;
 			const float uEnableSubpixelHDebias = cfg_.enableSubpixelHAttenuationDebias ? 1.0f : 0.0f;
 			const float uEnableEdgeAwareUpsample = cfg_.enableEdgeAwareWeightUpsample ? 1.0f : 0.0f;
+			const float uEnableNbrSoftClamp = cfg_.enableNeighborhoodSoftClamp ? 1.0f : 0.0f;
 			const float uStepNoiseVar = static_cast<float>(stepNoiseVar);
 			const float uStructureFloor = static_cast<float>(structureFloor);
 			const float uA2Valid = a2Stats.valid ? 1.0f : 0.0f;
@@ -3060,7 +3061,7 @@ namespace Gpu
 					bHdr += Shaders::kHalfBandSamplerHelper;
 				bHdr += Shaders::kPass3BlendHeader;
 
-				pl_shader_var bv[19] = {
+				pl_shader_var bv[20] = {
 					VpvGpu::Var("u_k", &uK),
 					VpvGpu::Var("u_ax0", &uAx0),
 					VpvGpu::Var("u_ay0", &uAy0),
@@ -3079,9 +3080,11 @@ namespace Gpu
 					VpvGpu::Var("u_a2_total_var", &uA2TotalVar),
 					VpvGpu::Var("u_enable_per_corner_huber", &uEnableHuber),
 					VpvGpu::Var("u_cell_prior_has_step_scale", &uCellPriorHasStepScale),
-					VpvGpu::Var("u_enable_edge_aware_upsample", &uEnableEdgeAwareUpsample)
+					VpvGpu::Var("u_enable_edge_aware_upsample", &uEnableEdgeAwareUpsample),
+					VpvGpu::Var("u_enable_nbr_soft_clamp", &uEnableNbrSoftClamp)
 				};
 
+				const size_t shmemP3a = (18u * 18u * 2u) * sizeof(float);
 				pl_tex deltaTarget = runDctPocs ? sc.deltaScratch : dstOutDelta;
 				bool ok3a = false;
 				if (!compactBands)
@@ -3097,7 +3100,7 @@ namespace Gpu
 						VpvGpu::Sampled("cell_prior", cellPriorTex),
 						VpvGpu::Storage("delta_out", deltaTarget)
 					};
-					ok3a = runPass("td_v2_p3_blend_bound", bHdr, Shaders::kPass3BlendAndBound, db, 9, bv, 19, fullGx, fullGy);
+					ok3a = runPass("td_v2_p3_blend_bound", bHdr, Shaders::kPass3BlendAndBound, db, 9, bv, 20, fullGx, fullGy, 16, 16, shmemP3a);
 				}
 				else
 				{
@@ -3116,7 +3119,7 @@ namespace Gpu
 						VpvGpu::Sampled("cell_prior", cellPriorTex),
 						VpvGpu::Storage("delta_out", deltaTarget)
 					};
-					ok3a = runPass("td_v2_p3_blend_bound", bHdr, Shaders::kPass3BlendAndBound, db, 13, bv, 19, fullGx, fullGy);
+					ok3a = runPass("td_v2_p3_blend_bound", bHdr, Shaders::kPass3BlendAndBound, db, 13, bv, 20, fullGx, fullGy, 16, 16, shmemP3a);
 				}
 				if (!ok3a)
 				{

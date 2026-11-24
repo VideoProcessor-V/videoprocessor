@@ -473,6 +473,34 @@ namespace TdV2
 		return kHuberKneeSq / r;
 	}
 
+	// ---- SOTA #5: Grain-Free 3x3 Neighborhood C^1 Soft Clamp on M/H Bands (Rule 1: Zero Invented Constants) ----
+	// Clamps warped reference band value `refVal` smoothly into [mean - gamma*sigma, mean + gamma*sigma]
+	// where gamma = sqrt(kHuberKneeSq) = 3.0 (derived 3-sigma Gaussian bound).
+	// By Samuelson's inequality for N = 9 samples in a 3x3 neighborhood, every current neighborhood pixel satisfies
+	//   |v_i - mean| <= sqrt(N - 1) * sigma = sqrt(8) * sigma < 3 * sigma.
+	// Keeping exact identity for |d| <= sqrt(8) * sigma and C^1 rational saturation across the remaining
+	// (3 - sqrt(8)) * sigma shoulder guarantees:
+	//   1) Exact bit-identity on 100% of valid static/rigid detail (refVal == curVal never biased),
+	//   2) C^1 continuity (value and slope == 1.0 at |d| = sqrt(8) * sigma),
+	//   3) Strict containment inside [mean - 3*sigma, mean + 3*sigma] for all unmasked micro-motion outliers.
+	inline double SoftClampToNeighborhood3Sigma(double refVal, double mean, double sigma)
+	{
+		if (!std::isfinite(refVal) || !std::isfinite(mean) || !std::isfinite(sigma))
+			return std::isfinite(mean) ? mean : 0.0;
+		if (!(sigma > kSolveNumericalFloor))
+			return mean;
+		const double gamma = std::sqrt(kHuberKneeSq);  // 3.0 (derived 3-sigma Gaussian bound)
+		const double r0 = std::sqrt(8.0) * sigma;      // Exact Samuelson bound sqrt(9 - 1) * sigma for 3x3 patch
+		const double d = refVal - mean;
+		const double absD = std::fabs(d);
+		if (absD <= r0)
+			return refVal;
+		const double shoulder = (gamma - std::sqrt(8.0)) * sigma;
+		const double excess = absD - r0;
+		const double clampedMag = r0 + shoulder * (excess / (excess + shoulder));
+		return mean + (d >= 0.0 ? clampedMag : -clampedMag);
+	}
+
 	// ---- Spatial-Only Weight Interpolation (99 s2.1 M2, refs/111:212: ZERO temporal weight ramps) ----
 	inline double SpatialBilinearWeight(
 		const double* cellWeights,

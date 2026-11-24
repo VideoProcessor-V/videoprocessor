@@ -2038,6 +2038,8 @@ imageStore(cell_diag_flags, cell, vec4(
 	// Inputs: curBands, refBands[0..2], packed ref_flags (R16), cell_weights, cell_diag_c.
 	// Output: delta_out (w x h RG32F: .x = delta, .y = 1.0 when pixel-domain bound engaged).
 	constexpr const char* kPass3BlendHeader = R"GLSL(
+shared vec2 td_sh_mh[18][18];
+
 vec4 td_fetch_cur_band(ivec2 p, ivec4 halfActive)
 {
 #if TD_COMPACT_BANDS
@@ -2097,17 +2099,70 @@ float td_huber_taper(float diffSq, float diagC)
     float r = diffSq / denom;
     return (r <= TD_HUBER_KNEE_SQ) ? 1.0 : (TD_HUBER_KNEE_SQ / r);
 }
+
+// SOTA #5: Grain-free 3x3 neighborhood 3-sigma C^1 soft clamp (matches CPU SoftClampToNeighborhood3Sigma 1:1).
+float td_soft_clamp_nbr_3sigma(float refVal, float mu, float sig)
+{
+    if (td_is_bad(refVal) || td_is_bad(mu) || td_is_bad(sig))
+        return td_is_bad(mu) ? 0.0 : mu;
+    if (!(sig > TD_NUM_FLOOR))
+        return mu;
+    float gamma = sqrt(TD_HUBER_KNEE_SQ);
+    float r0 = sqrt(8.0) * sig;
+    float d = refVal - mu;
+    float absD = abs(d);
+    if (absD <= r0)
+        return refVal;
+    float shoulder = (gamma - sqrt(8.0)) * sig;
+    float excess = absD - r0;
+    float clampedMag = r0 + shoulder * (excess / (excess + shoulder));
+    return mu + ((d >= 0.0) ? clampedMag : -clampedMag);
+}
 )GLSL";
 
 	constexpr const char* kPass3BlendAndBound = R"GLSL(
-ivec2 p = ivec2(gl_GlobalInvocationID.xy);
-if (p.x >= TD_W || p.y >= TD_H)
-    return;
+int baseX = int(gl_WorkGroupID.x) * 16;
+int baseY = int(gl_WorkGroupID.y) * 16;
+int lx = int(gl_LocalInvocationID.x);
+int ly = int(gl_LocalInvocationID.y);
+ivec2 p = ivec2(baseX + lx, baseY + ly);
 
 int ax0 = int(round(u_ax0));
 int ay0 = int(round(u_ay0));
 int ax1 = int(round(u_ax1));
 int ay1 = int(round(u_ay1));
+bool validRect = (ax1 > ax0) && (ay1 > ay0);
+bool enableNbrClamp = (u_enable_nbr_soft_clamp > 0.5);
+
+// Workgroup-uniform cooperative 18x18 LDS tile load of curBands (M, H) BEFORE any early return (FXC cs_5_0 barrier safe!).
+if (enableNbrClamp)
+{
+    int xMin = ax0;
+    int xMax = max(ax0, ax1 - 1);
+    int yMin = ay0;
+    int yMax = max(ay0, ay1 - 1);
+    int tid = ly * 16 + lx;
+    for (int idx = tid; idx < 324; idx += 256)
+    {
+        int ty = idx / 18;
+        int tx = idx % 18;
+        int gx = baseX - 1 + tx;
+        int gy = baseY - 1 + ty;
+        int sx = validRect ? clamp(gx, xMin, xMax) : clamp(gx, 0, TD_W - 1);
+        int sy = validRect ? clamp(gy, yMin, yMax) : clamp(gy, 0, TD_H - 1);
+#if TD_COMPACT_BANDS
+        td_sh_mh[ty][tx] = texelFetch(cur_bands_mh, ivec2(sx, sy), 0).xy;
+#else
+        td_sh_mh[ty][tx] = texelFetch(cur_bands, ivec2(sx, sy), 0).yz;
+#endif
+    }
+}
+memoryBarrierShared();
+barrier();
+
+if (p.x >= TD_W || p.y >= TD_H)
+    return;
+
 if (p.x < ax0 || p.x >= ax1 || p.y < ay0 || p.y >= ay1)
 {
     imageStore(delta_out, p, vec4(0.0));
@@ -2194,6 +2249,28 @@ float boundEngaged = 0.0;
 for (int b = 0; b < 3; ++b)
 {
     float curV = td_band_comp(curB, b);
+    float nbrMean = curV;
+    float nbrSigma = 0.0;
+    bool applyNbrClamp = enableNbrClamp && (b >= 1);
+    if (applyNbrClamp)
+    {
+        float sumS = 0.0;
+        float sumSq = 0.0;
+        for (int dy = 0; dy <= 2; ++dy)
+        {
+            for (int dx = 0; dx <= 2; ++dx)
+            {
+                vec2 mv = td_sh_mh[ly + dy][lx + dx];
+                float v = (b == 1) ? mv.x : mv.y;
+                float s = v - curV;
+                sumS += s;
+                sumSq += s * s;
+            }
+        }
+        float meanS = sumS / 9.0;
+        nbrMean = curV + meanS;
+        nbrSigma = sqrt(max(0.0, (sumSq / 9.0) - meanS * meanS));
+    }
     vec4 ownW = texelFetch(cell_weights, ivec2(b * TD_CW + cx, cy), 0);
     vec4 w00 = texelFetch(cell_weights, ivec2(b * TD_CW + x0, y0), 0);
     vec4 w10 = texelFetch(cell_weights, ivec2(b * TD_CW + x1, y0), 0);
@@ -2213,7 +2290,10 @@ for (int b = 0; b < 3; ++b)
         if (td_vec_comp(ownW, k) <= 0.0)
             continue;
 
-        float diff = curV - td_band_comp(refB[k], b);
+        float refV = td_band_comp(refB[k], b);
+        if (applyNbrClamp)
+            refV = td_soft_clamp_nbr_3sigma(refV, nbrMean, nbrSigma);
+        float diff = curV - refV;
         if (td_is_bad(diff))
             continue;
 

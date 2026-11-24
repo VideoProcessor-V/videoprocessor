@@ -170,6 +170,9 @@ namespace TdV2
 		// Clean-luma-guided edge-aware weight upsampling in Pass 3A (SOTA #4 / SC-04; default false for baseline parity).
 		bool enableEdgeAwareWeightUpsample = false;
 
+		// Grain-free 3x3 LDS neighborhood 3-sigma soft clamp on warped reference M/H bands (SOTA #5; default false).
+		bool enableNeighborhoodSoftClamp = false;
+
 		// Measured source rate in Hz (used to express any temporal horizon in seconds, never hardcoded frame counts).
 		double sourceHz = kDefaultSourceHz;
 
