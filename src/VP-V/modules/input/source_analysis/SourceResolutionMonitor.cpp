@@ -3113,23 +3113,26 @@ if (tile < int(tiles) && g.y < ts) {
 
 				const SourceResolution::FrameReading axisH = SourceResolution::AxisFrame(snap->frame, false);
 				const SourceResolution::FrameReading axisV = SourceResolution::AxisFrame(snap->frame, true);
+				// NEW-HIGH-1: active-coherence guard. When this frame's own mirror coherence already confirmed an
+				// upscale at or below the queried ratio, do NOT fire detail_above (sub-harmonics strictly below
+				// the frame's coherent ratio, e.g. 0.25 when frameH == 0.5, remain checked).
+				const double frameH = (snap->frame.ratioH < 1.0) ? snap->frame.ratioH : snap->frame.ratio;
+				const double frameV = (snap->frame.ratioV < 1.0) ? snap->frame.ratioV : snap->frame.ratio;
 
 				bool hasRefX = false;
-				if (std::isfinite(rx) && rx > 0.0 && rx < 1.0)
+				if (std::isfinite(rx) && rx > 0.0 && rx < 1.0 && !(frameH < 1.0 && frameH <= rx + tol))
 				{
 					double refHx = 0.0, refVx = 0.0, refCx = 0.0;
 					const bool found = findRef(rx, refHx, refVx, refCx);
 					hasRefX = found && (std::isfinite(refHx) || std::isfinite(refCx));
 					if (hasRefX)
 					{
-						const double dH = SourceResolution::DetailAbove(axisH, rx);
-						if (std::isfinite(dH))
-						{
-							if (std::isfinite(refHx) && dH >= refHx + detailMargin)
-								return true;
-							if (std::isfinite(refCx) && dH >= refCx + detailMargin)
-								return true;
-						}
+						if (std::isfinite(refHx) &&
+							SourceResolution::PositiveDetailAboveWithRef(axisH, rx, refHx, detailMargin, nativeFloor))
+							return true;
+						if (std::isfinite(refCx) &&
+							SourceResolution::PositiveDetailAboveWithRef(axisH, rx, refCx, detailMargin, nativeFloor))
+							return true;
 					}
 					else if (SourceResolution::PositiveDetailAboveNoRef(axisH, rx, detailMargin, nativeFloor))
 					{
@@ -3138,21 +3141,19 @@ if (tile < int(tiles) && g.y < ts) {
 				}
 
 				bool hasRefY = false;
-				if (std::isfinite(ry) && ry > 0.0 && ry < 1.0)
+				if (std::isfinite(ry) && ry > 0.0 && ry < 1.0 && !(frameV < 1.0 && frameV <= ry + tol))
 				{
 					double refHy = 0.0, refVy = 0.0, refCy = 0.0;
 					const bool found = findRef(ry, refHy, refVy, refCy);
 					hasRefY = found && (std::isfinite(refVy) || std::isfinite(refCy));
 					if (hasRefY)
 					{
-						const double dV = SourceResolution::DetailAbove(axisV, ry);
-						if (std::isfinite(dV))
-						{
-							if (std::isfinite(refVy) && dV >= refVy + detailMargin)
-								return true;
-							if (std::isfinite(refCy) && dV >= refCy + detailMargin)
-								return true;
-						}
+						if (std::isfinite(refVy) &&
+							SourceResolution::PositiveDetailAboveWithRef(axisV, ry, refVy, detailMargin, nativeFloor))
+							return true;
+						if (std::isfinite(refCy) &&
+							SourceResolution::PositiveDetailAboveWithRef(axisV, ry, refCy, detailMargin, nativeFloor))
+							return true;
 					}
 					else if (SourceResolution::PositiveDetailAboveNoRef(axisV, ry, detailMargin, nativeFloor))
 					{
@@ -3164,18 +3165,20 @@ if (tile < int(tiles) && g.y < ts) {
 					std::fabs(rx - ry) <= tol)
 				{
 					const double rMid = 0.5 * (rx + ry);
-					double refHc = 0.0, refVc = 0.0, refComb = 0.0;
-					const bool found = findRef(rMid, refHc, refVc, refComb);
-					if (found && std::isfinite(refComb))
+					if (!(snap->frame.ratio < 1.0 && snap->frame.ratio <= rMid + tol))
 					{
-						const double dComb = SourceResolution::DetailAbove(snap->frame, rMid);
-						if (std::isfinite(dComb) && dComb >= refComb + detailMargin)
+						double refHc = 0.0, refVc = 0.0, refComb = 0.0;
+						const bool found = findRef(rMid, refHc, refVc, refComb);
+						if (found && std::isfinite(refComb))
+						{
+							if (SourceResolution::PositiveDetailAboveWithRef(snap->frame, rMid, refComb, detailMargin, nativeFloor))
+								return true;
+						}
+						else if (!hasRefX && !hasRefY &&
+							SourceResolution::PositiveDetailAboveNoRef(snap->frame, rMid, detailMargin, nativeFloor))
+						{
 							return true;
-					}
-					else if (!hasRefX && !hasRefY &&
-						SourceResolution::PositiveDetailAboveNoRef(snap->frame, rMid, detailMargin, nativeFloor))
-					{
-						return true;
+						}
 					}
 				}
 

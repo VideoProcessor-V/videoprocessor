@@ -357,6 +357,15 @@ namespace SourceResolution
 		double ratio,
 		double detailMarginDecades = 0.07,
 		double nativeFloorDecades = 0.5);
+	// Physics-derived positive above-band detail check when Tracker::ReferenceDetail(ratio) is finite:
+	// requires DetailAbove >= refDetail + detailMarginDecades, level >= quantisationFloor + nativeFloorDecades,
+	// and above-band power cleanly clearing max(uniform, measured TPDF tail) floor.
+	bool PositiveDetailAboveWithRef(
+		const FrameReading& frame,
+		double ratio,
+		double refDetail,
+		double detailMarginDecades = 0.07,
+		double nativeFloorDecades = 0.5);
 	// The frame's averaged mirror coherence at `ratio`, the weaker axis (0 when unknown).
 	double CoherenceAtRate(const FrameReading& frame, double ratio);
 	// The same measure on one tile's spectra (the mixed-screen guard). `axes`: 1 vertical,

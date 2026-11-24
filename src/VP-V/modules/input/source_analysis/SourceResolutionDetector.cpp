@@ -1137,6 +1137,35 @@ namespace SourceResolution
 		return rawD >= expectedNaturalDrop - detailMarginDecades;
 	}
 
+	bool PositiveDetailAboveWithRef(
+		const FrameReading& frame,
+		double ratio,
+		double refDetail,
+		double detailMarginDecades,
+		double nativeFloorDecades)
+	{
+		if (!std::isfinite(ratio) || !(ratio > 0.0) || !(ratio < 1.0) ||
+			std::isinf(refDetail) || !std::isfinite(refDetail) ||
+			!std::isfinite(detailMarginDecades) || detailMarginDecades < 0.0 ||
+			!std::isfinite(nativeFloorDecades) || nativeFloorDecades < 0.0)
+		{
+			return false;
+		}
+		double level = 0.0;
+		const double rawD = DetailAbove(frame, ratio, &level);
+		if (std::isinf(rawD) || !std::isfinite(rawD) || !std::isfinite(level))
+			return false;
+		if (rawD < refDetail + detailMarginDecades)
+			return false;
+		if (std::isfinite(frame.quantisationFloor) && level < frame.quantisationFloor + nativeFloorDecades)
+			return false;
+
+		const double measuredFloor = MeasureTpdfTailFloor(frame, ratio);
+		DitherDetailAboveInfo dinfo;
+		(void)DitherAwareDetailAbove(frame, ratio, false, &dinfo, measuredFloor);
+		return dinfo.valid && !dinfo.atDitherFloor && dinfo.hasRealDetailAbove;
+	}
+
 	double CoherenceAtRate(const FrameReading& frame, double ratio)
 	{
 		const int n = static_cast<int>(frame.verticalCurve.size());

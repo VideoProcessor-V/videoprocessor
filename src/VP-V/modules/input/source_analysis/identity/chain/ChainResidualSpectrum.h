@@ -926,10 +926,10 @@ namespace SourceIdentity
 
 			// 2a. NativeCodedStudioUpscale (H4 / fake-4K film-grain boundary): flat far-stopband energy EXCEEDING the
 			//     physical TPDF dither upper bound tpdfUpperP = gateMult * 2 * (step^2 / 12) is genuine native-coded
-			//     high-frequency grain/texture (never re-base), NOT dither.
+			//     high-frequency grain/texture (never re-base), NOT dither — even if USM sharpening is also present
+			//     in the halo band (USM leaves the far stopband near floorP).
 			if (resFar > tpdfUpperP &&
-				resFarFlat >= kFlatnessWhiteThresh &&
-				resHalo < gateMult * resFar)
+				resFarFlat >= kFlatnessWhiteThresh)
 			{
 				res.valid = true;
 				res.classification = ResidualClass::NativeCodedStudioUpscale;

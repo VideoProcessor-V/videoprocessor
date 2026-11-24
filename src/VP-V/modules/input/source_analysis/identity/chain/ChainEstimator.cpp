@@ -1834,6 +1834,9 @@ namespace SourceIdentity
 				jIn.mixedContent = cf.mixed;
 				jIn.subtitleOverlay = cf.subtitle;
 				jIn.inFade = cf.inFade || ((flags & kEvFade) != 0u);
+				// NEW-MED-1 (M2): classical witness A is void during menu/mixed/subtitle/fade; gate R1 on !classicalVoid
+				// while keeping jIn.classicalValid/classicalDetailAbove intact so ChainJointLatch counts c_.classicalVoided visibly.
+				const bool classicalVoid = jIn.menuHold || jIn.mixedContent || jIn.subtitleOverlay || jIn.inFade;
 				jIn.stepMarkPending = stepMarkOn && stepMark.BlocksEntryOrMove();
 				jIn.abrStepImmediateRelease = stepMarkImmediateReleasePending;
 				stepMarkImmediateReleasePending = false;
@@ -1919,12 +1922,12 @@ namespace SourceIdentity
 							hc.creditY = dy.open;
 							const double rx = static_cast<double>(nx) / static_cast<double>(Nx);
 							const double ry = static_cast<double>(ny) / static_cast<double>(Ny);
-							const bool aAgrees = classicalHasUpscale &&
+							const bool aAgrees = !classicalVoid && classicalHasUpscale &&
 								Scaling::GeometrySet::Near(cf.ratioH, rx) && Scaling::GeometrySet::Near(cf.ratioV, ry);
-							const bool aSeesHigher = classicalHasUpscale &&
+							const bool aSeesHigher = !classicalVoid && classicalHasUpscale &&
 								(cf.ratioH > rx * (1.0 + Scaling::GeometrySet::kConventionTolerance) ||
 								 cf.ratioV > ry * (1.0 + Scaling::GeometrySet::kConventionTolerance));
-							const bool candDetailAbove = cf.valid
+							const bool candDetailAbove = (!classicalVoid && cf.valid)
 								? (cf.detailAboveAtRatio ? cf.detailAboveAtRatio(rx, ry) : cf.detailAbove)
 								: false;
 							hc.classicalRollOffConfirmed = aAgrees && !candDetailAbove;
@@ -2000,7 +2003,7 @@ namespace SourceIdentity
 							const double classRy = static_cast<double>(jIn.classicalNy) / static_cast<double>(jIn.classicalNyDenom);
 							if (cf.detailAboveAtRatio(classRx, classRy))
 							{
-								if (jIn.haveChainPair)
+								if (!classicalVoid && jIn.haveChainPair)
 									jIn.classicalValid = false;
 								else
 									jIn.classicalDetailAbove = true;

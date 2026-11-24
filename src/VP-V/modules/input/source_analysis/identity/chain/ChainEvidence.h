@@ -1184,7 +1184,7 @@ namespace SourceIdentity
 					ce.reason |= kReasonNullTableMismatch;
 					return;
 				}
-				if (ce.edgeStatsFallback && !nulls_.placeholder && nulls_.statKind != NullStatKind::WholeLineLogRatio)
+				if (!ce.edgeStatsUsed && !nulls_.placeholder && nulls_.statKind != NullStatKind::WholeLineLogRatio)
 				{
 					ce.edgeStatsNullMismatch = true;
 					ce.informative = false;
