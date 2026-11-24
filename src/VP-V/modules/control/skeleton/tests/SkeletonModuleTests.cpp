@@ -3639,6 +3639,10 @@ namespace SkeletonModuleTestsNs
 				L"max rebuild us must never decrease");
 			Assert::IsTrue(c2.fadeRunRebuildUsTotal >= c2.fadeRunRebuildUsMax,
 				L"cumulative rebuild total us must be >= max single rebuild us");
+			Assert::IsTrue(c2.fadeRunRebuildUsTotal > uint64_t(0),
+				L"7-pair ring-miss rebuild must record non-zero elapsed microseconds (catches broken/zeroed timer)");
+			Assert::IsTrue(c2.fadeRunRebuildUsMax > uint64_t(0),
+				L"7-pair ring-miss rebuild must record non-zero max microseconds");
 
 			std::string status2;
 			Assert::IsTrue(rig.sk.OnCommand(ctx, "skeleton", "status", status2), L"skeleton status command must succeed after gap 2");
