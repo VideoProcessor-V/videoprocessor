@@ -513,11 +513,15 @@ bool carried(ivec2 from, vec3 x, float gate_scale, float amp, out vec3 r)
     r = vec3(0.0);
     vec4 rs = write_a_ ? imageLoad(RESID_NEXT, from) : imageLoad(RESID, from);
     vec4 ps = write_a_ ? imageLoad(PREV_NEXT, from) : imageLoad(PREV, from);
-    if (abs(rs.a - VALID_TAG) >= 1e-3 || any(isnan(rs.rgb)) || any(isnan(ps.rgb)))
+    // NaN-safe tag check and finite-state guard: uninitialised rgba16f VRAM can hold
+    // NaN or Inf, and `abs(NaN - VALID_TAG) >= 1e-3` evaluates to false.
+    if (!(abs(rs.a - VALID_TAG) < 1e-3) || any(isnan(rs)) || any(isinf(rs.rgb)) ||
+        any(isnan(ps.rgb)) || any(isinf(ps.rgb)))
         return false;
     // motion_threshold is in 8-bit codes; x is in output codes.
+    // Negated <= so NaN in x, ps.rgb, or the gate threshold cannot pass as valid.
     float units = color_bits > 9.0 ? 4.0 : 1.0;
-    if (any(greaterThan(abs(x - ps.rgb), vec3(motion_threshold * units * gate_scale))))
+    if (!all(lessThanEqual(abs(x - ps.rgb), vec3(motion_threshold * units * gate_scale))))
         return false;
     r = clamp(rs.rgb, -resid_bound(amp), resid_bound(amp));
     return true;
