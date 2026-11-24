@@ -268,7 +268,8 @@ namespace GrainUnitGpuTestsNs
 			// text) -> new 0x8949becef0aab5c9 = FNV-1a 64 of the ten v3 GLSL literals (carriage returns skipped), recomputed offline.
 			// WAIVER-P10V4-01 (refs/116b, unit 4: LEVEL pass, NLF cap, depth scale): 0x8949becef0aab5c9 -> 0x7fe213d86466cc12, recomputed offline.
 			// WAIVER-P10V5-01 (refs/127 A1, unit 5: STATS per 16x16 chunk + REDUCE): 0x7fe213d86466cc12 -> 0xf33e0215cda77a66, recomputed offline.
-			Assert::AreEqual(uint64_t(0xf33e0215cda77a66ull), GrainSplit::Gpu::FullShaderFingerprint(), L"pass shader texts are the unit-5 text");
+			// WAIVER-GS-155 (L#3, commit 6bfb1d462: LEVEL_BODY boundary-bin zero-energy exclusion q <= 1/12 code^2, BTB/WTW preserved): 0xf33e0215cda77a66 -> 0x63b5ed5b2aa6ca3b, recomputed offline.
+			Assert::AreEqual(uint64_t(0x63b5ed5b2aa6ca3bull), GrainSplit::Gpu::FullShaderFingerprint(), L"pass shader texts are the unit-5 + GS-155 text");
 			const std::string full = GrainSplit::Gpu::ViewGlsl(Storage::Full, kCu10in16);
 			const std::string compact = GrainSplit::Gpu::ViewGlsl(Storage::Compact, kCu10in16);
 			const std::string define = "#define GS_UNIT_VERSION " + std::to_string(GrainSplit::kUnitVersion);
@@ -928,6 +929,236 @@ namespace GrainUnitGpuTestsNs
 				device.FlushReleases();
 				device.Release();
 			}
+		}
+
+		// GS-155 (L#3): CPU-vs-GPU parity for boundary-bin zero-energy exclusion (q <= 1/12 code^2) with BTB/WTW preserved.
+		// Synthetic 10-bit plane (256x384, B=16 -> 16x24 blocks) with four bands:
+		//   by =  0.. 4: crushed zero-energy black (luma = 0.0, flat, quiet == 0 <= 1/12) -> bin 0
+		//   by =  5..11: grainy BTB (luma = 32.0 < 64, sigma = 2.0, quiet ~ 4.0 > 1/12)   -> bin 0
+		//   by = 12..18: grainy WTW (luma = 980.0 > 940, sigma = 2.0, quiet ~ 4.0 > 1/12) -> top bin (levelBins - 1)
+		//   by = 19..23: clipped zero-energy white (luma = 1023.0, flat, quiet <= 1/12)   -> top bin (levelBins - 1)
+		// Same-input negative control (Rule 3): pre-fix naive percentile over ALL bin-0 / top-bin blocks collapses both
+		// boundary levels to ~2^-6 (< 0.05) and crushes interior BTB/WTW block N; protected CPU and GPU both exclude only
+		// zero-energy boundary blocks, recover bin 0 and top-bin levels (> 1.0), preserve interior BTB/WTW N (> 1.0), and match.
+		BEGIN_TEST_METHOD_ATTRIBUTE(Gs155ZeroEnergyBoundaryExclusionMatchesCpuAndPreservesBtbWtw)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(Gs155ZeroEnergyBoundaryExclusionMatchesCpuAndPreservesBtbWtw)
+		{
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = dev.Gpu();
+
+			const int w = 256, h = 384, B = 16;
+			const int bw = w / B, bh = h / B;   // 16 x 24 blocks
+			const GrainSplit::Params params = GrainSplit::DefaultParams();
+			const int topBin = params.levelBins - 1;
+
+			// Build exact 1/64-code-quantized 10-bit plane so CPU and GPU receive bit-identical code values.
+			std::vector<double> rawCodes(static_cast<size_t>(w) * h, 0.0);
+			GrainSplit::Plane y(w, h, 0.0);
+			std::mt19937 rng(155u);
+			std::normal_distribution<double> grain(0.0, 2.0);
+			for (int py = 0; py < h; ++py)
+			{
+				const int by = py / B;
+				for (int px = 0; px < w; ++px)
+				{
+					double v = 0.0;
+					if (by <= 4)
+						v = 0.0;   // crushed zero-energy black
+					else if (by <= 11)
+						v = (std::min)(63.0, (std::max)(1.0, 32.0 + grain(rng)));     // grainy BTB (< 64)
+					else if (by <= 18)
+						v = (std::min)(1022.0, (std::max)(941.0, 980.0 + grain(rng))); // grainy WTW (> 940)
+					else
+						v = 1023.0;   // clipped zero-energy white
+					const long q16 = (std::min)(65535L, (std::max)(0L, std::lround(v * 64.0)));
+					const double exactCode = static_cast<double>(q16) / 64.0;
+					const size_t idx = static_cast<size_t>(py) * w + px;
+					rawCodes[idx] = exactCode;
+					y.v[idx] = exactCode;
+				}
+			}
+
+			// Independent CPU reference: full Compute plus per-block quiet / blockLuma to inspect CPU NLF table and run
+			// the same-input pre-fix naive negative control.
+			const GrainSplit::Split cpuSplit = GrainSplit::Compute(y, 1.0, B, params);
+			const size_t nb = static_cast<size_t>(bw) * bh;
+			std::vector<double> cpuQuiet(nb, 0.0), cpuBlockLuma(nb, 0.0);
+			{
+				const GrainSplit::Plane g1 = GrainSplit::Gauss(y, params.sigmaFine);
+				const GrainSplit::Plane yh = GrainSplit::V3Half(y);
+				const GrainSplit::Plane gbh = GrainSplit::V3HalfBlur(yh, params.sigmaBase);
+				GrainSplit::Plane d(w, h);
+				for (int py = 0; py < h; ++py)
+					for (int px = 0; px < w; ++px)
+					{
+						const double gb = GrainSplit::V3LowAt(gbh, px, py);
+						const double d1 = y.at(px, py) - g1.at(px, py);
+						const double d2 = g1.at(px, py) - gb;
+						d.at(px, py) = d1 + d2;
+					}
+				for (int by = 0; by < bh; ++by)
+					for (int bx = 0; bx < bw; ++bx)
+					{
+						std::vector<double> e;
+						for (int sj = 0; sj < params.subBlocks; ++sj)
+							for (int si = 0; si < params.subBlocks; ++si)
+							{
+								const int x0 = bx * B + si * B / params.subBlocks, x1 = (std::min)(w, bx * B + (si + 1) * B / params.subBlocks);
+								const int y0 = by * B + sj * B / params.subBlocks, y1 = (std::min)(h, by * B + (sj + 1) * B / params.subBlocks);
+								if (x1 <= x0 || y1 <= y0) continue;
+								double sum = 0.0;
+								for (int yy = y0; yy < y1; ++yy)
+									for (int xx = x0; xx < x1; ++xx) sum += d.at(xx, yy) * d.at(xx, yy);
+								e.push_back(sum / static_cast<double>((x1 - x0) * (y1 - y0)));
+							}
+						std::sort(e.begin(), e.end());
+						const size_t nq = (std::min)(e.size(), static_cast<size_t>((std::max)(1, params.quietSubBlocks)));
+						double m = 0.0;
+						for (size_t i = 0; i < nq; ++i) m += e[i];
+						const size_t bi = static_cast<size_t>(by) * bw + bx;
+						cpuQuiet[bi] = nq ? params.grainCal * m / static_cast<double>(nq) : 0.0;
+						cpuBlockLuma[bi] = GrainSplit::V3LowAt(gbh, (std::min)(bx * B + B / 2, w - 1), (std::min)(by * B + B / 2, h - 1));
+					}
+			}
+
+			// Same-input negative control (Rule 3): pre-fix naive 10th percentile WITHOUT GS-155 boundary zero-energy exclusion.
+			std::vector<double> naiveLevel(static_cast<size_t>(params.levelBins), 0.0);
+			std::vector<bool> naiveValid(static_cast<size_t>(params.levelBins), false);
+			{
+				const double cs = GrainSplit::DepthScale(params.sourceBits), es = cs * cs;
+				std::vector<std::vector<int>> keys(static_cast<size_t>(params.levelBins));
+				for (size_t i = 0; i < cpuQuiet.size(); ++i)
+				{
+					const int bin = GrainSplit::LevelBin(cpuBlockLuma[i] / cs, params);
+					keys[static_cast<size_t>(bin)].push_back(GrainSplit::LevelKey(cpuQuiet[i] / es));
+				}
+				for (int j = 0; j < params.levelBins; ++j)
+				{
+					std::vector<int>& k = keys[static_cast<size_t>(j)];
+					const int n = static_cast<int>(k.size());
+					naiveValid[static_cast<size_t>(j)] = n >= params.levelMinBlocks && n > 0;
+					if (!naiveValid[static_cast<size_t>(j)]) continue;
+					std::sort(k.begin(), k.end());
+					const int r = (params.levelPercentile * n + 99) / 100;
+					naiveLevel[static_cast<size_t>(j)] = GrainSplit::LevelOfKey(k[static_cast<size_t>((std::max)(1, r) - 1)]);
+				}
+			}
+			Assert::IsTrue(naiveValid[0] && naiveLevel[0] < 0.05,
+				L"negative control: pre-fix naive bin-0 percentile collapses toward zero under crushed black blocks");
+			Assert::IsTrue(naiveValid[static_cast<size_t>(topBin)] && naiveLevel[static_cast<size_t>(topBin)] < 0.05,
+				L"negative control: pre-fix naive top-bin percentile collapses toward zero under clipped white blocks");
+
+			// Protected CPU NLF table on the exact same plane.
+			std::vector<double> cpuLevel(static_cast<size_t>(params.levelBins), 0.0);
+			std::unique_ptr<bool[]> cpuValid(new bool[static_cast<size_t>(params.levelBins)]);
+			GrainSplit::GrainLevelTable(cpuQuiet, cpuBlockLuma, params, cpuLevel.data(), cpuValid.get());
+			Assert::IsTrue(cpuValid[0] && cpuLevel[0] > 1.0,
+				L"CPU GS-155: bin 0 recovers grainy BTB level (> 1.0) despite crushed flat black blocks");
+			Assert::IsTrue(cpuValid[topBin] && cpuLevel[static_cast<size_t>(topBin)] > 1.0,
+				L"CPU GS-155: top bin recovers grainy WTW level (> 1.0) despite clipped flat white blocks");
+
+			// GPU execution with caller-supplied scratch textures (including `level`) so we inspect the GPU NLF table directly.
+			struct GpuGuard
+			{
+				pl_gpu gpu = nullptr;
+				pl_tex plane = nullptr;
+				GrainSplit::Gpu::Splitter splitter;
+				GrainSplit::Gpu::Scratch scratch;
+				explicit GpuGuard(pl_gpu devGpu) : gpu(devGpu) {}
+				~GpuGuard()
+				{
+					splitter.Release(gpu);
+					for (pl_tex* t : { &scratch.tmp, &scratch.low, &scratch.part, &scratch.quiet, &scratch.level, &plane })
+						if (gpu && *t) { pl_tex_destroy(gpu, t); *t = nullptr; }
+				}
+			};
+			GpuGuard g(gpu);
+
+			g.plane = UploadR16(gpu, rawCodes, w, h, 64.0);
+			Assert::IsNotNull(g.plane, L"upload synthetic GS-155 10-bit plane");
+			const GrainSplit::Gpu::ContextShapes shapes = GrainSplit::Gpu::ContextShapesOf(w, h, B, params);
+			Assert::IsTrue(shapes.Valid(), L"valid scratch shapes");
+			VpSkeleton::PlTexBackend backend(gpu);
+			g.scratch.tmp = backend.Create(shapes.tmp);
+			g.scratch.low = backend.Create(shapes.low);
+			g.scratch.part = backend.Create(shapes.part);
+			g.scratch.quiet = backend.Create(shapes.quiet);
+			g.scratch.level = backend.Create(shapes.level);
+			Assert::IsTrue(g.scratch.All(), L"allocated GPU scratch textures including level table");
+
+			GrainSplit::Gpu::Options opts;
+			opts.storage = Storage::Full;
+			opts.scratch = g.scratch;
+			Assert::IsTrue(g.splitter.Compute(gpu, dev.dispatch, g.plane, 0, kCu10in16, 1.0, B, params, opts),
+				Wide(g.splitter.LastError()).c_str());
+
+			const std::vector<float> gpuLevel = DownloadRGBA(gpu, dev.dispatch, g.scratch.level);
+			const std::vector<float> gpuBlocks = DownloadRGBA(gpu, dev.dispatch, g.splitter.Out().blocks);
+			const std::vector<float> gpuSplit = DownloadRGBA(gpu, dev.dispatch, g.splitter.Out().split);
+			Assert::AreEqual(static_cast<size_t>(params.levelBins) * 4u, gpuLevel.size(), L"downloaded GPU level table");
+			Assert::AreEqual(nb * 4u, gpuBlocks.size(), L"downloaded GPU blocks");
+			Assert::AreEqual(static_cast<size_t>(w) * h * 4u, gpuSplit.size(), L"downloaded GPU split");
+
+			char msg[320];
+			std::snprintf(msg, sizeof msg,
+				"GS-155 bin0: naive %.4f | CPU %.4f (valid %d) | GPU %.4f (valid %.0f) || topBin(%d): naive %.4f | CPU %.4f (valid %d) | GPU %.4f (valid %.0f)",
+				naiveLevel[0], cpuLevel[0], cpuValid[0] ? 1 : 0, gpuLevel[0], gpuLevel[1],
+				topBin, naiveLevel[static_cast<size_t>(topBin)], cpuLevel[static_cast<size_t>(topBin)], cpuValid[topBin] ? 1 : 0,
+				gpuLevel[static_cast<size_t>(topBin) * 4u], gpuLevel[static_cast<size_t>(topBin) * 4u + 1u]);
+			Logger::WriteMessage(msg);
+
+			// Verify GPU boundary-bin NLF recovery and full-table parity with CPU.
+			const auto relErr = [](double got, double ref) { return std::fabs(got - ref) / (std::max)(std::fabs(ref), 1e-2); };
+			Assert::IsTrue(gpuLevel[1] > 0.5f && gpuLevel[0] > 1.0f,
+				L"GPU GS-155: bin 0 is valid and recovers grainy BTB level (> 1.0, not collapsed by crushed black)");
+			Assert::IsTrue(gpuLevel[static_cast<size_t>(topBin) * 4u + 1u] > 0.5f && gpuLevel[static_cast<size_t>(topBin) * 4u] > 1.0f,
+				L"GPU GS-155: top bin is valid and recovers grainy WTW level (> 1.0, not collapsed by clipped white)");
+			for (int j = 0; j < params.levelBins; ++j)
+			{
+				const bool gpuVal = gpuLevel[static_cast<size_t>(j) * 4u + 1u] > 0.5f;
+				Assert::AreEqual(cpuValid[j], gpuVal, (L"bin " + std::to_wstring(j) + L": GPU and CPU valid flags agree").c_str());
+				if (cpuValid[j])
+					Assert::IsTrue(relErr(gpuLevel[static_cast<size_t>(j) * 4u], cpuLevel[static_cast<size_t>(j)]) <= 1e-3,
+						(L"bin " + std::to_wstring(j) + L": GPU and CPU NLF level agree within 1e-3 rel").c_str());
+			}
+
+			// Verify interior grainy BTB (by = 8, >= 3 blocks from flat black and WTW) and interior grainy WTW (by = 15)
+			// retain non-collapsed block grain level N (> 1.0) on both CPU and GPU.
+			for (int bx = 0; bx < bw; ++bx)
+			{
+				const size_t iBtb = static_cast<size_t>(8) * bw + bx;
+				const size_t iWtw = static_cast<size_t>(15) * bw + bx;
+				Assert::IsTrue(cpuSplit.N[iBtb] > 1.0 && gpuBlocks[iBtb * 4u] > 1.0f,
+					L"interior grainy BTB block retains grain level N > 1.0 on both CPU and GPU");
+				Assert::IsTrue(cpuSplit.N[iWtw] > 1.0 && gpuBlocks[iWtw * 4u] > 1.0f,
+					L"interior grainy WTW block retains grain level N > 1.0 on both CPU and GPU");
+			}
+
+			// Full-plane CPU-vs-GPU parity across all blocks and pixels (GrainSplitV3GpuTests contract tolerances).
+			double worstN = 0.0, worstS = 0.0, worstSrel = 0.0, worstBase = 0.0, worstF = 0.0;
+			for (size_t i = 0; i < nb; ++i)
+				worstN = (std::max)(worstN, relErr(gpuBlocks[i * 4u], cpuSplit.N[i]));
+			for (size_t i = 0; i < y.v.size(); ++i)
+			{
+				const double r1 = cpuSplit.s1.v[i], r2 = cpuSplit.s2.v[i];
+				const double e1 = std::fabs(gpuSplit[i * 4u] - r1), e2 = std::fabs(gpuSplit[i * 4u + 1u] - r2);
+				if (std::fabs(r1) <= 64.0) worstS = (std::max)(worstS, e1); else worstSrel = (std::max)(worstSrel, e1 / std::fabs(r1));
+				if (std::fabs(r2) <= 64.0) worstS = (std::max)(worstS, e2); else worstSrel = (std::max)(worstSrel, e2 / std::fabs(r2));
+				worstF = (std::max)(worstF, std::fabs(gpuSplit[i * 4u + 2u] - cpuSplit.f.v[i]));
+				worstBase = (std::max)(worstBase, std::fabs(gpuSplit[i * 4u + 3u] - cpuSplit.base.v[i]));
+			}
+			std::snprintf(msg, sizeof msg,
+				"GS-155 CPU-vs-GPU parity: worst N rel %.2e, |s1,s2| %.5f (rel %.2e), |base| %.5f, |f| %.6f",
+				worstN, worstS, worstSrel, worstBase, worstF);
+			Logger::WriteMessage(msg);
+			Assert::IsTrue(worstN <= 1e-3, L"GS-155: block N CPU-vs-GPU relative error <= 1e-3");
+			Assert::IsTrue(worstS <= 0.05, L"GS-155: |s1|,|s2| CPU-vs-GPU error <= 0.05 code for |s| <= 64");
+			Assert::IsTrue(worstSrel <= 1.0 / 1024.0, L"GS-155: |s1|,|s2| CPU-vs-GPU relative error <= 2^-10 for |s| > 64");
+			Assert::IsTrue(worstBase <= 0.05, L"GS-155: |base| CPU-vs-GPU error <= 0.05 code");
+			Assert::IsTrue(worstF <= 1.0 / 255.0, L"GS-155: |f| CPU-vs-GPU error <= 1/255");
 		}
 	};
 }
