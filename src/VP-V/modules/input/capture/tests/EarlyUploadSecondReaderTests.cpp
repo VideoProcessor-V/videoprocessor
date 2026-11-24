@@ -113,14 +113,14 @@ namespace VideoProcessorTest
 			TargetLutGpuFixture fixture;
 			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
 			EarlyUpload early;
-			Assert::IsTrue(early.Open(fixture.Device(), fixture.Gpu(), 1),
-				std::wstring(early.LastError().begin(), early.LastError().end()).c_str());
+			auto wide = [&early]() { const std::string err = early.LastError(); return std::wstring(err.begin(), err.end()); };
+			Assert::IsTrue(early.Open(fixture.Device(), fixture.Gpu(), 1), wide().c_str());
 			CComPtr<ID3D11Device> reader = ReaderDeviceOn(fixture.Device());
 			Assert::IsNotNull(reader.p, L"no reader device on the fixture adapter");
 			CComPtr<ID3D11DeviceContext> readerContext;
 			reader->GetImmediateContext(&readerContext);
 			Assert::IsFalse(early.HasReader());
-			Assert::IsTrue(early.AttachReader(reader), std::wstring(early.LastError().begin(), early.LastError().end()).c_str());
+			Assert::IsTrue(early.AttachReader(reader), wide().c_str());
 			Assert::IsTrue(early.HasReader());
 
 			uint32_t seed = 0x2ead3e5u;
@@ -130,7 +130,6 @@ namespace VideoProcessorTest
 			std::vector<uint8_t> frames[4];
 			for (auto& f : frames) { f.resize(rowBytes * height); for (uint8_t& b : f) b = static_cast<uint8_t>(next()); }
 
-			auto wide = [&early]() { return std::wstring(early.LastError().begin(), early.LastError().end()); };
 			// 1. Both readers use the slot. The payload goes while the reader still holds its copy of the handle: not
 			//    reused; the reader releases (UsedReader) and lets go: the slot comes back.
 			EarlyUpload::SlotHandle a = early.Upload(frames[0].data(), rowBytes, height);
