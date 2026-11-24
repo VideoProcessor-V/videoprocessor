@@ -988,7 +988,8 @@ float td_band_comp(vec4 v, int b)
 }
 )GLSL";
 
-	constexpr const char* kPass2CellStats = R"GLSL(
+	// Split into Part1 + Part2 to stay well below MSVC's 16,380-byte raw string literal limit (C2026).
+	constexpr const char* kPass2CellStatsPart1 = R"GLSL(
 ivec2 cell = ivec2(gl_WorkGroupID.xy);
 if (cell.x >= TD_CW || cell.y >= TD_CH)
     return;
@@ -1022,6 +1023,9 @@ float curM2 = 0.0;
 float curD3_2 = 0.0;
 float curH2 = 0.0;
 float curOg2 = 0.0;
+float sumCleanY = 0.0;
+float singleCleanY = 0.0;
+bool singleHasCleanY = false;
 float activeCnt = 0.0;
 bool hasCleanSplit = (u_has_clean_split > 0.5);
 bool sameCleanRec = (u_same_clean_rec > 0.5);
@@ -1061,6 +1065,13 @@ for (int sy = 0; sy < subN; ++sy)
 
         ivec2 p = ivec2(px, py);
         vec4 cb = td_fetch_cur_band(p, halfActive);
+        float cleanYVal = cb.x + cb.y + cb.z;
+        sumCleanY += cleanYVal;
+        if (TD_CELL_PX <= 16)
+        {
+            singleCleanY = cleanYVal;
+            singleHasCleanY = true;
+        }
         curM2 += cb.y * cb.y;
         curD3_2 += cb.w * cb.w;
         curH2 += cb.z * cb.z;
@@ -1152,18 +1163,29 @@ uint totBadMask = td_sh_mask[0];
 memoryBarrierShared();
 barrier();
 
-// Reduction B: ref2 M2/D3_2 + borderBilinCnt + curOg2 (cell own-grain variance for Layer 2/3 grain-leak budget).
+// Reduction B: ref2 M2/D3_2 + borderBilinCnt + curOg2 + sumCleanY (for SOTA #4 SC-04 edge-aware guidance).
 td_sh_red4[tid] = vec4(refM2[2], refD3_2[2], borderCnt, curOg2);
+td_sh_red4b[tid] = vec4(sumCleanY, 0.0, 0.0, 0.0);
 memoryBarrierShared();
 barrier();
 for (int stride = 128; stride > 0; stride >>= 1)
 {
     if (tid < stride)
-        td_sh_red4[tid] += td_sh_red4[tid + stride];
+    {
+        td_sh_red4[tid]  += td_sh_red4[tid + stride];
+        td_sh_red4b[tid] += td_sh_red4b[tid + stride];
+    }
     memoryBarrierShared();
     barrier();
 }
 
+float cellMeanCleanY = 0.0;
+float cellStdCleanY = 0.0;
+if (tid == 0)
+{
+    cellMeanCleanY = (totCur.w > 0.5) ? (td_sh_red4b[0].x / totCur.w) : 0.0;
+    td_sh_nc = cellMeanCleanY;
+}
 if (tid == 0)
 {
     float totRefM2[3];
@@ -1234,6 +1256,56 @@ if (tid == 0)
 memoryBarrierShared();
 barrier();
 
+// Centered clean-luma std-dev per cell for SOTA #4 SC-04 edge-aware weight upsampling (zero extra passes/textures).
+{
+    float meanY = td_sh_nc;
+    float varAcc = 0.0;
+    if (TD_CELL_PX <= 16)
+    {
+        if (singleHasCleanY)
+        {
+            float dY = singleCleanY - meanY;
+            varAcc = dY * dY;
+        }
+    }
+    else
+    {
+        for (int sy = 0; sy < subN; ++sy)
+        {
+            int oy = sy * 16 + ly;
+            if (oy >= TD_CELL_PX) continue;
+            int py = cell.y * TD_CELL_PX + oy;
+            if (py < y0 || py >= y1) continue;
+            for (int sx = 0; sx < subN; ++sx)
+            {
+                int ox = sx * 16 + lx;
+                if (ox >= TD_CELL_PX) continue;
+                int px = cell.x * TD_CELL_PX + ox;
+                if (px < x0 || px >= x1) continue;
+                vec4 cb2 = td_fetch_cur_band(ivec2(px, py), halfActive);
+                float dY = (cb2.x + cb2.y + cb2.z) - meanY;
+                varAcc += dY * dY;
+            }
+        }
+    }
+    td_sh_red4[tid] = vec4(varAcc, 0.0, 0.0, 0.0);
+    memoryBarrierShared();
+    barrier();
+    for (int stride = 128; stride > 0; stride >>= 1)
+    {
+        if (tid < stride)
+            td_sh_red4[tid] += td_sh_red4[tid + stride];
+        memoryBarrierShared();
+        barrier();
+    }
+    if (tid == 0)
+        cellStdCleanY = (totCur.w > 0.5) ? sqrt(max(0.0, td_sh_red4[0].x / totCur.w)) : 0.0;
+    memoryBarrierShared();
+    barrier();
+}
+)GLSL";
+
+	constexpr const char* kPass2CellStatsPart2 = R"GLSL(
 // Face cells and vetoed focus/bokeh cells are excluded from affected 3x3 band moment pools
 // (focusChange: all bands; isDefocused: M/H always, L only when BokehMode::Untouched). No early return before barriers for FXC cs_5_0 safety.
 uint cellMaskFlags = td_sh_mask[0];
@@ -1369,19 +1441,26 @@ for (int b = 0; b < 3; ++b)
         {
             imageStore(cell_stats, ivec2(b * TD_CW + cell.x, cell.y), vec4(0.0));
             imageStore(cell_stats, ivec2(b * TD_CW + cell.x, TD_CH + cell.y), vec4(0.0));
-            imageStore(cell_stats, ivec2(b * TD_CW + cell.x, 2 * TD_CH + cell.y), vec4(0.0));
+            imageStore(cell_stats, ivec2(b * TD_CW + cell.x, 2 * TD_CH + cell.y),
+                       (b == 0) ? vec4(0.0, 0.0, cellMeanCleanY, cellStdCleanY) : vec4(0.0));
         }
         else
         {
             imageStore(cell_stats, ivec2(b * TD_CW + cell.x, cell.y), vec4(ncCell, mu.x, mu.y, mu.z));
             imageStore(cell_stats, ivec2(b * TD_CW + cell.x, TD_CH + cell.y), td_sh_red4[0]);
-            imageStore(cell_stats, ivec2(b * TD_CW + cell.x, 2 * TD_CH + cell.y), vec4(td_sh_red4b[0].xy, 0.0, 0.0));
+            imageStore(cell_stats, ivec2(b * TD_CW + cell.x, 2 * TD_CH + cell.y),
+                       (b == 0) ? vec4(td_sh_red4b[0].xy, cellMeanCleanY, cellStdCleanY) : vec4(td_sh_red4b[0].xy, 0.0, 0.0));
         }
     }
     memoryBarrierShared();
     barrier();
 }
 )GLSL";
+
+	inline std::string BuildPass2CellStatsBody()
+	{
+		return std::string(kPass2CellStatsPart1) + kPass2CellStatsPart2;
+	}
 
 	// ---- PASS 2B (Speedup 2): Exact Chan-Pebay 3x3 Moment Merge + Blind A1/A2/A3 + KxK Solve + TdMaps ----
 	// Dispatch: ceil(TD_CW / 8) x ceil(TD_CH / 8), group 8x8.
@@ -1694,6 +1773,10 @@ else
 }
 float cellStepScaleSq = cellStepScale * cellStepScale;
 
+vec2 cellLumaStat = texelFetch(cell_stats, ivec2(cell.x, 2 * TD_CH + cell.y), 0).zw;
+float cellMeanCleanY = cellLumaStat.x;
+float cellStdCleanY = cellLumaStat.y;
+
 float cellWeightSumAll = 0.0;
 float midWeightSum = 0.0;
 float cellResEnergy = 0.0;
@@ -1871,6 +1954,8 @@ for (int b = 0; b < 3; ++b)
     }
 
     bandW[b] = wOut;
+    if (b == 0)
+        diagOut.w = cellStdCleanY;
     imageStore(cell_diag_c, ivec2(b * TD_CW + cell.x, cell.y), diagOut);
 }
 
@@ -1908,7 +1993,7 @@ if (!isFace && estMode != 1 && cellRetGVar > TD_NUM_FLOOR)
                 if (bandWSum > maxBandW)
                 {
                     float scale = (maxBandW > 0.0) ? (maxBandW / bandWSum) : 0.0;
-                    bandW[b] *= scale;
+                    bandW[b].xyz *= scale;
                     bandWSum *= scale;
                 }
                 remGrainBudget = max(0.0, remGrainBudget - bandLossPerUnitW * bandWSum);
@@ -1921,6 +2006,7 @@ if (!isFace && estMode != 1 && cellRetGVar > TD_NUM_FLOOR)
 }
 
 midWeightSum = bandW[1].x + bandW[1].y + bandW[1].z;
+bandW[0].w = cellMeanCleanY;
 for (int b = 0; b < 3; ++b)
     imageStore(cell_weights, ivec2(b * TD_CW + cell.x, cell.y), bandW[b]);
 
@@ -2064,6 +2150,44 @@ for (int k = 0; k < K; ++k)
     refFl[k] = td_unpack_ref_flags(packedFl, k);
 }
 
+// Compute spatial (or SOTA #4 clean-luma-guided edge-aware) 2x2 corner interpolation weights once per pixel.
+float a00 = (1.0 - tx) * (1.0 - ty);
+float a10 = tx * (1.0 - ty);
+float a01 = (1.0 - tx) * ty;
+float a11 = tx * ty;
+if (u_enable_edge_aware_upsample > 0.5)
+{
+    float curCleanY = curB.x + curB.y + curB.z;
+    float baseQVar = 1.0 / 12.0;
+    float a2PxVar = (u_a2_valid > 0.5) ? (u_a2_total_var * cellStepScaleSq) : 0.0;
+    float effNoiseFloor = sqrt(max(baseQVar, a2PxVar));
+    float m00 = texelFetch(cell_weights, ivec2(x0, y0), 0).w;
+    float m10 = texelFetch(cell_weights, ivec2(x1, y0), 0).w;
+    float m01 = texelFetch(cell_weights, ivec2(x0, y1), 0).w;
+    float m11 = texelFetch(cell_weights, ivec2(x1, y1), 0).w;
+    float s00 = max(texelFetch(cell_diag_c, ivec2(x0, y0), 0).w, effNoiseFloor);
+    float s10 = max(texelFetch(cell_diag_c, ivec2(x1, y0), 0).w, effNoiseFloor);
+    float s01 = max(texelFetch(cell_diag_c, ivec2(x0, y1), 0).w, effNoiseFloor);
+    float s11 = max(texelFetch(cell_diag_c, ivec2(x1, y1), 0).w, effNoiseFloor);
+    float dL00 = curCleanY - m00;
+    float dL10 = curCleanY - m10;
+    float dL01 = curCleanY - m01;
+    float dL11 = curCleanY - m11;
+    float sw00 = a00 * exp(-(dL00 * dL00) / (2.0 * s00 * s00));
+    float sw10 = a10 * exp(-(dL10 * dL10) / (2.0 * s10 * s10));
+    float sw01 = a01 * exp(-(dL01 * dL01) / (2.0 * s01 * s01));
+    float sw11 = a11 * exp(-(dL11 * dL11) / (2.0 * s11 * s11));
+    float swSum = sw00 + sw10 + sw01 + sw11;
+    if (swSum > TD_NUM_FLOOR)
+    {
+        float invSw = 1.0 / swSum;
+        a00 = sw00 * invSw;
+        a10 = sw10 * invSw;
+        a01 = sw01 * invSw;
+        a11 = sw11 * invSw;
+    }
+}
+
 float totalDelta = 0.0;
 float boundedDelta = 0.0;
 float boundEngaged = 0.0;
@@ -2119,9 +2243,7 @@ for (int b = 0; b < 3; ++b)
             t01 *= td_huber_taper(diffSq, q01);
             t11 *= td_huber_taper(diffSq, q11);
         }
-        float top = t00 + (t10 - t00) * tx;
-        float bot = t01 + (t11 - t01) * tx;
-        float wEff = top + (bot - top) * ty;
+        float wEff = a00 * t00 + a10 * t10 + a01 * t01 + a11 * t11;
         if (wEff <= 0.0)
             continue;
         bandDelta -= wEff * diff;

@@ -2670,6 +2670,7 @@ namespace Gpu
 			const float uBokehMode = (cfg_.bokehMode == BokehMode::LowBandCellOnly) ? 1.0f : 0.0f;
 			const float uEnableHuber = cfg_.enablePerCornerHuber ? 1.0f : 0.0f;
 			const float uEnableSubpixelHDebias = cfg_.enableSubpixelHAttenuationDebias ? 1.0f : 0.0f;
+			const float uEnableEdgeAwareUpsample = cfg_.enableEdgeAwareWeightUpsample ? 1.0f : 0.0f;
 			const float uStepNoiseVar = static_cast<float>(stepNoiseVar);
 			const float uStructureFloor = static_cast<float>(structureFloor);
 			const float uA2Valid = a2Stats.valid ? 1.0f : 0.0f;
@@ -2925,6 +2926,7 @@ namespace Gpu
 				pl_tex p2aCurCleanBind = sameCleanRec ? sc.cellWeights : p.curCleanTex;
 
 				bool ok2a = false;
+				const std::string p2aBody = Shaders::BuildPass2CellStatsBody();
 				if (!compactBands)
 				{
 					pl_shader_desc d2a[13] = {
@@ -2942,7 +2944,7 @@ namespace Gpu
 						VpvGpu::Storage("warp_diag", dstWarpDiag),
 						VpvGpu::Storage("cell_stats", sc.cellStats)
 					};
-					ok2a = runPass("td_v2_p2a_cell_stats", p2aHdr, Shaders::kPass2CellStats, d2a, 13, v2a, 15, cw, ch, 16, 16, shmemP2a);
+					ok2a = runPass("td_v2_p2a_cell_stats", p2aHdr, p2aBody.c_str(), d2a, 13, v2a, 15, cw, ch, 16, 16, shmemP2a);
 				}
 				else
 				{
@@ -2965,7 +2967,7 @@ namespace Gpu
 						VpvGpu::Storage("warp_diag", dstWarpDiag),
 						VpvGpu::Storage("cell_stats", sc.cellStats)
 					};
-					ok2a = runPass("td_v2_p2a_cell_stats", p2aHdr, Shaders::kPass2CellStats, d2a, 17, v2a, 15, cw, ch, 16, 16, shmemP2a);
+					ok2a = runPass("td_v2_p2a_cell_stats", p2aHdr, p2aBody.c_str(), d2a, 17, v2a, 15, cw, ch, 16, 16, shmemP2a);
 				}
 				if (!ok2a)
 				{
@@ -3058,7 +3060,7 @@ namespace Gpu
 					bHdr += Shaders::kHalfBandSamplerHelper;
 				bHdr += Shaders::kPass3BlendHeader;
 
-				pl_shader_var bv[18] = {
+				pl_shader_var bv[19] = {
 					VpvGpu::Var("u_k", &uK),
 					VpvGpu::Var("u_ax0", &uAx0),
 					VpvGpu::Var("u_ay0", &uAy0),
@@ -3076,7 +3078,8 @@ namespace Gpu
 					VpvGpu::Var("u_a2_valid", &uA2Valid),
 					VpvGpu::Var("u_a2_total_var", &uA2TotalVar),
 					VpvGpu::Var("u_enable_per_corner_huber", &uEnableHuber),
-					VpvGpu::Var("u_cell_prior_has_step_scale", &uCellPriorHasStepScale)
+					VpvGpu::Var("u_cell_prior_has_step_scale", &uCellPriorHasStepScale),
+					VpvGpu::Var("u_enable_edge_aware_upsample", &uEnableEdgeAwareUpsample)
 				};
 
 				pl_tex deltaTarget = runDctPocs ? sc.deltaScratch : dstOutDelta;
@@ -3094,7 +3097,7 @@ namespace Gpu
 						VpvGpu::Sampled("cell_prior", cellPriorTex),
 						VpvGpu::Storage("delta_out", deltaTarget)
 					};
-					ok3a = runPass("td_v2_p3_blend_bound", bHdr, Shaders::kPass3BlendAndBound, db, 9, bv, 18, fullGx, fullGy);
+					ok3a = runPass("td_v2_p3_blend_bound", bHdr, Shaders::kPass3BlendAndBound, db, 9, bv, 19, fullGx, fullGy);
 				}
 				else
 				{
@@ -3113,7 +3116,7 @@ namespace Gpu
 						VpvGpu::Sampled("cell_prior", cellPriorTex),
 						VpvGpu::Storage("delta_out", deltaTarget)
 					};
-					ok3a = runPass("td_v2_p3_blend_bound", bHdr, Shaders::kPass3BlendAndBound, db, 13, bv, 18, fullGx, fullGy);
+					ok3a = runPass("td_v2_p3_blend_bound", bHdr, Shaders::kPass3BlendAndBound, db, 13, bv, 19, fullGx, fullGy);
 				}
 				if (!ok3a)
 				{

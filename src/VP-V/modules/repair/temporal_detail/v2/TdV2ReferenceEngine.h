@@ -749,6 +749,99 @@ namespace TdV2
 		return top + (bot - top) * ty;
 	}
 
+	// ---- Clean-Luma-Guided Edge-Aware Weight Upsampling (SOTA #4 / SC-04, Rule 1) ----
+	// Modulates the 4 spatial bilinear corner weights s_q by a luminance-range affinity
+	//   g_q = exp(-(cleanY(p) - cellMeanY(q))^2 / (2 * sigma_L(q)^2))
+	// where sigma_L(q) = max(cellStdY(q), noiseSigmaFloor, sqrt(1/12)) is derived directly from local cell
+	// luminance std-dev and quantization noise floor (zero invented constants), snapping 16-px cell weights
+	// tightly to sharp object silhouettes even below the 3-sigma Huber knee. Falls back cleanly to pure spatial
+	// weights s_q when sum_q (s_q * g_q) <= kEngineNumFloor. Identical to bilinear on uniform luminance.
+	inline double SpatialGuidedBilinearWeight(
+		const double* cellWeights,
+		const double* cellDiagC,
+		const double* cellMeanY,
+		const double* cellStdY,
+		int cellsW,
+		int cellsH,
+		double pxX,
+		double pxY,
+		int cellPx,
+		double diff,
+		double cleanY,
+		double noiseSigmaFloor,
+		bool enableHuber)
+	{
+		if (cellWeights == nullptr || cellMeanY == nullptr || cellStdY == nullptr ||
+		    (enableHuber && cellDiagC == nullptr) ||
+		    cellsW <= 0 || cellsH <= 0 || cellPx <= 0 ||
+		    !std::isfinite(pxX) || !std::isfinite(pxY) || !std::isfinite(diff) || !std::isfinite(cleanY))
+		{
+			return 0.0;
+		}
+		const double gx = (pxX + 0.5) / static_cast<double>(cellPx) - 0.5;
+		const double gy = (pxY + 0.5) / static_cast<double>(cellPx) - 0.5;
+		const int x0 = (std::max)(0, (std::min)(cellsW - 1, static_cast<int>(std::floor(gx))));
+		const int y0 = (std::max)(0, (std::min)(cellsH - 1, static_cast<int>(std::floor(gy))));
+		const int x1 = (std::min)(cellsW - 1, x0 + 1);
+		const int y1 = (std::min)(cellsH - 1, y0 + 1);
+		const double tx = RampMath::Clamp01(gx - static_cast<double>(x0));
+		const double ty = RampMath::Clamp01(gy - static_cast<double>(y0));
+
+		const size_t i00 = static_cast<size_t>(y0) * cellsW + x0;
+		const size_t i10 = static_cast<size_t>(y0) * cellsW + x1;
+		const size_t i01 = static_cast<size_t>(y1) * cellsW + x0;
+		const size_t i11 = static_cast<size_t>(y1) * cellsW + x1;
+
+		const double w00 = cellWeights[i00], w10 = cellWeights[i10], w01 = cellWeights[i01], w11 = cellWeights[i11];
+		if (!std::isfinite(w00) || !std::isfinite(w10) || !std::isfinite(w01) || !std::isfinite(w11))
+			return 0.0;
+
+		double t00 = w00, t10 = w10, t01 = w01, t11 = w11;
+		if (enableHuber)
+		{
+			const double d00 = cellDiagC[i00], d10 = cellDiagC[i10], d01 = cellDiagC[i01], d11 = cellDiagC[i11];
+			if (!std::isfinite(d00) || !std::isfinite(d10) || !std::isfinite(d01) || !std::isfinite(d11))
+				return 0.0;
+			t00 *= HuberPixelTaper(diff, d00);
+			t10 *= HuberPixelTaper(diff, d10);
+			t01 *= HuberPixelTaper(diff, d01);
+			t11 *= HuberPixelTaper(diff, d11);
+		}
+
+		const double s00 = (1.0 - tx) * (1.0 - ty);
+		const double s10 = tx * (1.0 - ty);
+		const double s01 = (1.0 - tx) * ty;
+		const double s11 = tx * ty;
+
+		const double baseQuantSigma = std::sqrt((kDefaultStepPriorLsb * kDefaultStepPriorLsb) / 12.0);
+		const double effNoiseFloor = (std::isfinite(noiseSigmaFloor) && noiseSigmaFloor > baseQuantSigma)
+			? noiseSigmaFloor
+			: baseQuantSigma;
+
+		auto rangeAffinity = [&](size_t idx) -> double
+		{
+			const double m = cellMeanY[idx];
+			const double sd = cellStdY[idx];
+			if (!std::isfinite(m) || !std::isfinite(sd))
+				return 1.0;
+			const double sigL = sd > effNoiseFloor ? sd : effNoiseFloor;
+			const double dL = cleanY - m;
+			return std::exp(-(dL * dL) / (2.0 * sigL * sigL));
+		};
+
+		const double sw00 = s00 * rangeAffinity(i00);
+		const double sw10 = s10 * rangeAffinity(i10);
+		const double sw01 = s01 * rangeAffinity(i01);
+		const double sw11 = s11 * rangeAffinity(i11);
+		const double swSum = sw00 + sw10 + sw01 + sw11;
+		if (swSum > kEngineNumFloor)
+		{
+			const double invSum = 1.0 / swSum;
+			return (sw00 * t00 + sw10 * t10 + sw01 * t01 + sw11 * t11) * invSum;
+		}
+		return s00 * t00 + s10 * t10 + s01 * t01 + s11 * t11;
+	}
+
 	// ---- Full CPU Reference Fusion Engine (Stage TD-S3) ----
 	class TdV2ReferenceEngine
 	{
@@ -1118,6 +1211,8 @@ namespace TdV2
 			const int poolR = cfg_.momentPoolRadiusCells > 0 ? cfg_.momentPoolRadiusCells : 0;
 			const int gW = (w + grainCellPx - 1) / grainCellPx;
 			std::vector<double> cellRetainedGrain(numCells, 0.0);
+			std::vector<double> cellMeanCleanY(numCells, 0.0);
+			std::vector<double> cellStdCleanY(numCells, 0.0);
 			std::vector<double> cellStepScales(numCells, 1.0);
 			if (!in.cellStepScale.empty())
 			{
@@ -1250,10 +1345,12 @@ namespace TdV2
 					}
 					cellRetainedGrain[cIdx] = cellRetainedGrainVar;
 
-					// Compute spatial fine-band detail RMS for TdMapsView::kRealDetail (MEDIUM-3: spatial detail, NOT temporal noise)
-					// and cell own-grain variance (used by Layer-3 leaked-grain transfer ceiling when retainedGrainVar > 0).
+					// Compute spatial fine-band detail RMS for TdMapsView::kRealDetail (MEDIUM-3: spatial detail, NOT temporal noise),
+					// cell own-grain variance (Layer-3 leaked-grain transfer ceiling), and cell clean-luma mean/std (SOTA #4 SC-04).
 					double spatialFineEnergy = 0.0;
 					double cellOwnGrainEnergy = 0.0;
+					double cleanYMean = 0.0;
+					double cleanYM2 = 0.0;
 					size_t spatialPxCnt = 0;
 					{
 						const int sy0 = (std::max)(active.y0, cy * cellPx);
@@ -1272,9 +1369,17 @@ namespace TdV2
 									cellOwnGrainEnergy += og * og;
 								}
 								++spatialPxCnt;
+								const double cyv = curClean.at(x, y);
+								const double dY = cyv - cleanYMean;
+								cleanYMean += dY / static_cast<double>(spatialPxCnt);
+								cleanYM2 += dY * (cyv - cleanYMean);
 							}
 						}
 					}
+					cellMeanCleanY[cIdx] = cleanYMean;
+					cellStdCleanY[cIdx] = spatialPxCnt > 0
+						? std::sqrt((std::max)(0.0, cleanYM2 / static_cast<double>(spatialPxCnt)))
+						: 0.0;
 					const double spatialDetailRms = spatialPxCnt > 0
 						? std::sqrt(spatialFineEnergy / static_cast<double>(spatialPxCnt))
 						: 0.0;
@@ -1657,18 +1762,34 @@ namespace TdV2
 							if (cellW[b][k][cIdx] <= 0.0)
 								continue;
 
-							// Corner-tapered spatial-only interpolation (ZERO temporal weight ramps):
-							// when cfg_.enablePerCornerHuber is true (default), applies 3-sigma Huber pixel taper
-							// per bilinear corner q using that corner's OWN variance C_q; when false, uses plain
-							// spatial bilinear interpolation (exact same engine negative control).
+							// Spatial-only interpolation (ZERO temporal weight ramps):
+							// - Optional SOTA #4 clean-luma-guided edge-aware bilinear (cfg_.enableEdgeAwareWeightUpsample)
+							// - Default spatial bilinear with optional per-corner 3-sigma Huber taper (cfg_.enablePerCornerHuber).
 							const double diff = curV - bandPlaneOf(refs[k].bands, b).at(x, y);
-							const double wEff = cfg_.enablePerCornerHuber
-								? SpatialBilinearHuberWeight(
+							double wEff = 0.0;
+							if (cfg_.enableEdgeAwareWeightUpsample)
+							{
+								const double pxStepScale = cellStepScales[cIdx];
+								const double pxNoiseSigma = std::sqrt((std::max)(0.0, a2Stats.totalVar * pxStepScale * pxStepScale));
+								wEff = SpatialGuidedBilinearWeight(
+									cellW[b][k].data(), cellDiagC[b][k].data(),
+									cellMeanCleanY.data(), cellStdCleanY.data(),
+									res.cellsW, res.cellsH,
+									static_cast<double>(x), static_cast<double>(y), cellPx,
+									diff, curClean.at(x, y), pxNoiseSigma, cfg_.enablePerCornerHuber);
+							}
+							else if (cfg_.enablePerCornerHuber)
+							{
+								wEff = SpatialBilinearHuberWeight(
 									cellW[b][k].data(), cellDiagC[b][k].data(), res.cellsW, res.cellsH,
-									static_cast<double>(x), static_cast<double>(y), cellPx, diff)
-								: SpatialBilinearWeight(
+									static_cast<double>(x), static_cast<double>(y), cellPx, diff);
+							}
+							else
+							{
+								wEff = SpatialBilinearWeight(
 									cellW[b][k].data(), res.cellsW, res.cellsH,
 									static_cast<double>(x), static_cast<double>(y), cellPx);
+							}
 							if (wEff <= 0.0)
 								continue;
 							bandDelta -= wEff * diff;

@@ -125,7 +125,7 @@ namespace TdV2
 			{ "SC-01", "Moment pooling radius: 3x3 cells (Reference) vs 1x1 cell (RealTime optional)", false, true },
 			{ "SC-02", "Long-reach I-anchor y_4: enabled when drift-audited (Reference) vs local peaks+carry only (RealTime)", false, true },
 			{ "SC-03", "Cell projection iterations: 2 POCS steps (Reference) vs 1 POCS step (RealTime)", false, true },
-			{ "SC-04", "Weight upsampling: edge-aware guided (Reference) vs spatial bilinear (RealTime)", false, true },
+			{ "SC-04", "Weight upsampling: optional clean-luma-guided edge-aware bilinear (enableEdgeAwareWeightUpsample) vs spatial bilinear with per-corner 3-sigma Huber taper (default)", false, true },
 			{ "SC-05", "GPU band split: full-res FP32 L/D3/M/H (Reference) vs half-res FP32 (L, D3) band split with full-res FP32 (M, H) (RealTime)", false, true }
 		};
 		count = sizeof(kLedger) / sizeof(kLedger[0]);
@@ -166,6 +166,9 @@ namespace TdV2
 
 		// Sub-pixel bicubic H-band attenuation debiasing in EstimateC_A1 (SOTA #2; default false for baseline parity).
 		bool enableSubpixelHAttenuationDebias = false;
+
+		// Clean-luma-guided edge-aware weight upsampling in Pass 3A (SOTA #4 / SC-04; default false for baseline parity).
+		bool enableEdgeAwareWeightUpsample = false;
 
 		// Measured source rate in Hz (used to express any temporal horizon in seconds, never hardcoded frame counts).
 		double sourceHz = kDefaultSourceHz;
