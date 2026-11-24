@@ -704,7 +704,7 @@ namespace TdV2
 		const TdV2Plane* codecModelPb = nullptr; // Field B CodecModel prediction P_B (null when transformIdentified8x8 engages CodecModelPbStandIn)
 
 		bool isCutOrSpanInvalid = false;      // Resets recurrent carry state immediately
-		double fadeKeep = 1.0;                // U7 CutFadeJudge gradual fade keep in [0, 1] (default 1.0 = bit-identical; <=0 or NaN resets carry)
+		double fadeKeep = 1.0;                // Upstream U7 gradual retention keep in [0, 1] (default 1.0 = bit-identical; <=0 or NaN resets carry)
 		const std::vector<uint8_t>* explicitFocusChangeCells = nullptr;
 		const std::vector<uint8_t>* explicitDefocusedCells = nullptr; // Upstream kFocusMap (id 32) matched-focus optical bokeh mask (Plan s1.4 L140)
 		const std::vector<uint8_t>* faceMask = nullptr; // Pass-1 per-cell (cellsW * cellsH) face/non-rigid mask (non-zero => delta == 0)

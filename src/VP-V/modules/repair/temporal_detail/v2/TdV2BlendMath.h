@@ -968,7 +968,7 @@ namespace TdV2
 		return (std::max)(-bound, (std::min)(bound, rawDelta));
 	}
 
-	// Resolve U7 CutFadeJudge gradual fadeKeep in [0, 1] (Rule 1 + Rule 4):
+	// Resolve upstream U7 gradual fadeKeep in [0, 1] (Rule 1 + Rule 4):
 	// Non-finite fails closed to 0.0 (sets outNonFinite = true); finite values clamp to [0.0, 1.0].
 	inline double ResolveFadeKeep(double rawFadeKeep, bool& outNonFinite)
 	{

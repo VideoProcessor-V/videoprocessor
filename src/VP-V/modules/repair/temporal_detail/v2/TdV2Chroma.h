@@ -1821,7 +1821,7 @@ namespace TdV2
 		bool transformIdentified8x8 = false;
 
 		bool isCutOrSpanInvalid = false;              // Resets 4:4:4 anchor canvas cleanly
-		double fadeKeep = 1.0;                        // U7 CutFadeJudge gradual fade keep in [0, 1] (default 1.0 = bit-identical; <=0 or NaN resets anchor)
+		double fadeKeep = 1.0;                        // Upstream U7 gradual retention keep in [0, 1] (default 1.0 = bit-identical; <=0 or NaN resets anchor)
 
 		// Optional Pass-1 face / non-rigid cell mask (cellsW * cellsH luma-cell layout matching FrameProcessInput::faceMask;
 		// non-zero forces delta == 0 on all masked pixels and excludes masked cells from 3x3 covariance pooling; H13).

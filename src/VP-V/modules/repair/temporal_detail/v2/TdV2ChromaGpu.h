@@ -1739,7 +1739,7 @@ else
 		double deadZonePhi = kDeadZonePhiInter;
 		double zeroCoeffFraction = 0.0;
 		bool isCutOrSpanInvalid = false;
-		double fadeKeep = 1.0;                   // U7 CutFadeJudge gradual fade keep in [0, 1] (default 1.0 = bit-identical; <=0 or NaN closes delta to 0)
+		double fadeKeep = 1.0;                   // Upstream U7 gradual retention keep in [0, 1] (default 1.0 = bit-identical; <=0 or NaN closes delta to 0)
 		PsdShape psdShape;                       // Optional P10g grain PSD shape multipliers (default 1.0 white-noise identity)
 	};
 
