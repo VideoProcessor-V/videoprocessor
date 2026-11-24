@@ -7,6 +7,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
+#include <VP-V/core/ComputeOnce.h>
 #include <VP-V/modules/input/source_analysis/regions/CodingEvidence.h>
 #include <VP-V/modules/input/source_analysis/SourceResolutionDetector.h>
 #include <VP-V/modules/input/source_analysis/SourceResolutionMonitor.h>
@@ -105,6 +106,27 @@ namespace VideoProcessorTest
 		struct ProviderGuard
 		{
 			~ProviderGuard() { CE::Hub::Instance().SetMemoProvider(nullptr); }
+		};
+		struct ComputeOnceScope
+		{
+			bool prevEnabled = false;
+			ComputeOnce::ThreadFrame prevFrame;
+			ComputeOnceScope()
+				: prevEnabled(ComputeOnce::Enabled())
+				, prevFrame(ComputeOnce::Current())
+			{
+				ComputeOnce::SetEnabled(true);
+				ComputeOnce::Global().Reset();
+				ComputeOnce::Current() = ComputeOnce::ThreadFrame();
+			}
+			~ComputeOnceScope()
+			{
+				ComputeOnce::Global().Reset();
+				ComputeOnce::Current() = prevFrame;
+				ComputeOnce::SetEnabled(prevEnabled);
+			}
+			ComputeOnceScope(const ComputeOnceScope&) = delete;
+			ComputeOnceScope& operator=(const ComputeOnceScope&) = delete;
 		};
 	}
 
@@ -413,6 +435,111 @@ namespace VideoProcessorTest
 			std::vector<CE::TileMeasure> got;
 			std::string why;
 			Assert::IsFalse(hub.AcquireTiles(this, 6, pack, got, why), L"no call after the clear");
+		}
+
+		// 15d J2 / L#8: P16 CodingEvidence owner fill records ComputeOnce "U13" once per computed frame,
+		// does not recount on memo reuse or declined fills, and catches real duplicates when memo is bypassed.
+		TEST_METHOD(OwnerFillRecordsComputeOnceU13OncePerFrameAndNotOnReuseOrDecline)
+		{
+			ComputeOnceScope computeOnceScope;
+			CE::Hub hub;
+			auto memo = std::make_shared<VpSkeleton::SkeletonMemo>();
+			const VpSkeleton::OwnerFill fill = CE::MakeOwnerFill(hub, 0);
+			Assert::IsTrue(
+				memo->RegisterOwnerFill(VpSkeleton::kCodingEvidence, VpSkeleton::AcquireForm::Cpu, CE::kUnitPath, fill)
+					== VpSkeleton::SkeletonMemo::Registration::Registered,
+				L"owner registered");
+			hub.SetMemoProvider([memo](const void*) { return memo; });
+
+			const std::string expectedVariant = ComputeOnce::detail::HexVariant(ComputeOnce::Variant(0));
+			auto checkU13 = [&](uint64_t expectedCalls, uint64_t expectedFrames, uint64_t expectedDupFrames, uint32_t expectedMaxPerFrame, const wchar_t* phase) {
+				const std::vector<ComputeOnce::UnitRow> rows = ComputeOnce::Global().Rows();
+				const std::vector<ComputeOnce::GapRow> gaps = ComputeOnce::Global().Gaps();
+				Assert::AreEqual<size_t>(0, gaps.size(), phase);
+				size_t u13Rows = 0;
+				const ComputeOnce::UnitRow* u13 = nullptr;
+				for (const ComputeOnce::UnitRow& r : rows)
+				{
+					if (r.unit == "U13")
+					{
+						++u13Rows;
+						if (r.variant == expectedVariant)
+							u13 = &r;
+					}
+				}
+				Assert::AreEqual<size_t>(1, u13Rows, phase);
+				Assert::IsNotNull(u13, phase);
+				Assert::AreEqual<uint64_t>(expectedCalls, u13->calls, phase);
+				Assert::AreEqual<uint64_t>(expectedFrames, u13->frames, phase);
+				Assert::AreEqual<uint64_t>(expectedDupFrames, u13->dupFrames, phase);
+				Assert::AreEqual<uint32_t>(expectedMaxPerFrame, u13->maxPerFrame, phase);
+				if (expectedDupFrames > 0)
+					Assert::IsFalse(u13->dupCallers.empty(), phase);
+				else
+					Assert::IsTrue(u13->dupCallers.empty(), phase);
+			};
+
+			// 1) First acquire for frame seq = 10 computes once through SkeletonMemo -> U13 calls=1, frames=1, dupFrames=0, gaps=0.
+			const std::shared_ptr<CE::TilePack> pack10 = PackOf({ Clean(30), Blocked(31) });
+			std::vector<CE::TileMeasure> got10;
+			std::string why;
+			Assert::IsTrue(hub.AcquireTiles(this, 10, pack10, got10, why), L"first acquire for seq=10 succeeds");
+			Assert::AreEqual<size_t>(2, got10.size(), L"seq=10 measured both tiles");
+			{
+				const VpSkeleton::AcquireCounters c = memo->CountersOf(VpSkeleton::kCodingEvidence);
+				Assert::IsTrue(c.ownerFillCalls == 1 && c.reusedMemo == 0, L"seq=10 ran owner fill once");
+			}
+			checkU13(1, 1, 0, 1, L"after first acquire of seq=10");
+
+			// 2) Second acquire for the SAME frame seq = 10 hits the memo cache -> U13 stays calls=1 (zero double-compute).
+			std::vector<CE::TileMeasure> again10;
+			Assert::IsTrue(hub.AcquireTiles(this, 10, pack10, again10, why), L"second acquire for seq=10 reuses memo");
+			Assert::AreEqual<size_t>(2, again10.size(), L"seq=10 reused tiles");
+			{
+				const VpSkeleton::AcquireCounters c = memo->CountersOf(VpSkeleton::kCodingEvidence);
+				Assert::IsTrue(c.ownerFillCalls == 1 && c.reusedMemo == 1, L"seq=10 second acquire was a memo reuse");
+			}
+			checkU13(1, 1, 0, 1, L"after memo cache hit on seq=10");
+
+			// 3) Distinct frame seq = 11 computes once -> U13 advances to calls=2, frames=2, dupFrames=0.
+			const std::shared_ptr<CE::TilePack> pack11 = PackOf({ Clean(32), Blocked(33) });
+			std::vector<CE::TileMeasure> got11;
+			Assert::IsTrue(hub.AcquireTiles(this, 11, pack11, got11, why), L"acquire for distinct seq=11 succeeds");
+			Assert::AreEqual<size_t>(2, got11.size(), L"seq=11 measured both tiles");
+			{
+				const VpSkeleton::AcquireCounters c = memo->CountersOf(VpSkeleton::kCodingEvidence);
+				Assert::IsTrue(c.ownerFillCalls == 2 && c.reusedMemo == 1, L"seq=11 ran owner fill once");
+			}
+			checkU13(2, 2, 0, 1, L"after acquire of distinct frame seq=11");
+
+			// 4) Rule 3 negative control A (declined fills): unstaged seq = 12 and malformed seq = 13 decline visibly and do NOT count U13.
+			Assert::IsTrue(hub.Staged(12) == nullptr, L"precondition: nothing staged for seq=12");
+			const VpSkeleton::AcquireResult declined = memo->Acquire(VpSkeleton::kCodingEvidence, 12, VpSkeleton::AcquireForm::Cpu);
+			Assert::IsFalse(declined.Ok(), L"seq=12 with no staged pack is unavailable");
+			Assert::IsTrue(declined.status == VpSkeleton::AcquireStatus::Unavailable && declined.cause == VpSkeleton::AcquireCause::OwnerDeclined,
+				L"seq=12 declined visibly as OwnerDeclined");
+			checkU13(2, 2, 0, 1, L"after declined fill on unstaged seq=12");
+
+			auto badPack = std::make_shared<CE::TilePack>();
+			badPack->tiles = 2;
+			badPack->tileSize = kN;   // missing pixels: MeasurePack refuses
+			std::vector<CE::TileMeasure> gotBad;
+			Assert::IsFalse(hub.AcquireTiles(this, 13, badPack, gotBad, why), L"malformed pack for seq=13 declines");
+			Assert::IsTrue(why == VpSkeleton::Token(VpSkeleton::AcquireCause::OwnerDeclined), L"malformed pack declines visibly as OwnerDeclined");
+			checkU13(2, 2, 0, 1, L"after declined fill on malformed seq=13");
+
+			// 5) Rule 3 negative control B (memo bypass on exact same seq=10 input): direct second fill call triggers U13 duplicate detection.
+			hub.Stage(10, pack10);
+			VpSkeleton::OwnerFillRequest dupReq;
+			dupReq.id = VpSkeleton::kCodingEvidence;
+			dupReq.seq = 10;
+			dupReq.form = VpSkeleton::AcquireForm::Cpu;
+			VpSkeleton::OwnerFillOutput dupOut;
+			const bool dupFilled = fill.fill(dupReq, *memo, dupOut);
+			hub.Unstage(10);
+			Assert::IsTrue(dupFilled, L"direct bypass fill for staged seq=10 succeeded");
+			Assert::IsFalse(dupOut.bytes.empty(), L"direct bypass fill produced bytes");
+			checkU13(3, 2, 1, 2, L"after memo-bypass duplicate fill on seq=10");
 		}
 	};
 }
