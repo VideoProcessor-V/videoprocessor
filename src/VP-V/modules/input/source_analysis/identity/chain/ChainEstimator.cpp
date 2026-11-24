@@ -50,6 +50,7 @@ namespace SourceIdentity
 			struct Job
 			{
 				std::shared_ptr<const LineSnapshot> snap;
+				std::shared_ptr<const LineSnapshot> staticSnap; // HIGH-3: co-located un-jittered lines for StaticPatchRankProbe (null when OFF)
 				FrameRef frame;
 				uint64_t gen = 0;
 			};
@@ -145,6 +146,9 @@ namespace SourceIdentity
 			std::atomic<bool> sync{ false };
 			std::atomic<bool> stopped{ false };
 			std::atomic<bool> wantFrames{ false };
+			std::atomic<bool> wantInterlacedA{ false };   // HIGH-1: Deliver() attaches job.frame when interlaced forensics is ON (false in Original)
+			std::atomic<bool> wantEwaJincA{ false };      // HIGH-1: Deliver() attaches job.frame when EWA-Jinc witness is ON (false in Original)
+			std::atomic<bool> wantStaticRankA{ false };   // HIGH-3: Deliver() captures co-located un-jittered staticSnap when StaticPatchRankProbe is ON (false in Original)
 			std::atomic<bool> latchedPower{ false };
 			std::atomic<bool> paused{ false };
 			std::atomic<bool> safetyA{ false };   // SID r2: events MenuHold / AbrStep are taken only while the rules are requested
@@ -304,6 +308,9 @@ namespace SourceIdentity
 				reqInterlaced = cfg.interlaced;
 				reqStaticPatchRank = cfg.staticPatchRank;
 				reqEwaJinc = cfg.ewaJinc;
+				wantInterlacedA.store(reqInterlaced.enabled && !reqOriginal, std::memory_order_release);
+				wantEwaJincA.store(reqEwaJinc.enabled && !reqOriginal, std::memory_order_release);
+				wantStaticRankA.store(reqStaticPatchRank.enabled && !reqOriginal, std::memory_order_release);
 				if (cfg.hdrNoise.enabled)
 					cfg.verifier.hdrNoise = cfg.hdrNoise;
 				safetyA.store(reqSafety || reqJointLatch.enabled, std::memory_order_release);
@@ -583,6 +590,7 @@ namespace SourceIdentity
 				{
 					std::lock_guard<std::mutex> lk(m);
 					reqInterlaced = s;
+					wantInterlacedA.store(s.enabled && !reqOriginal, std::memory_order_release);
 					cfgDirty = true;
 					++runEpoch;
 				}
@@ -594,6 +602,7 @@ namespace SourceIdentity
 				{
 					std::lock_guard<std::mutex> lk(m);
 					reqStaticPatchRank = s;
+					wantStaticRankA.store(s.enabled && !reqOriginal, std::memory_order_release);
 					cfgDirty = true;
 					++runEpoch;
 				}
@@ -605,6 +614,7 @@ namespace SourceIdentity
 				{
 					std::lock_guard<std::mutex> lk(m);
 					reqEwaJinc = s;
+					wantEwaJincA.store(s.enabled && !reqOriginal, std::memory_order_release);
 					cfgDirty = true;
 					++runEpoch;
 				}
@@ -618,6 +628,9 @@ namespace SourceIdentity
 					reqOriginal = original;
 					cfgDirty = true;
 					originalA.store(original, std::memory_order_release);
+					wantInterlacedA.store(!original && reqInterlaced.enabled, std::memory_order_release);
+					wantEwaJincA.store(!original && reqEwaJinc.enabled, std::memory_order_release);
+					wantStaticRankA.store(!original && reqStaticPatchRank.enabled, std::memory_order_release);
 					RecomputeRunningLocked();
 				}
 				UpdateTap();
@@ -1013,7 +1026,10 @@ namespace SourceIdentity
 				snap->streamKey = key;
 				Job job;
 				job.gen = g;
-				if (wantFrames.load(std::memory_order_acquire))
+				// HIGH-1: attach source plane when disk frame logging OR live 2-D forensics (interlaced weave / EWA-Jinc) is enabled.
+				if (wantFrames.load(std::memory_order_acquire) ||
+					wantInterlacedA.load(std::memory_order_acquire) ||
+					wantEwaJincA.load(std::memory_order_acquire))
 				{
 					job.frame.keepAlive = v.keepAlive;
 					job.frame.luma = v.luma;
@@ -1022,6 +1038,25 @@ namespace SourceIdentity
 					job.frame.strideSamples = v.strideSamples;
 					job.frame.msbShift = v.msbShift;
 					job.frame.seq = v.seq;
+				}
+				// HIGH-3: when StaticPatchRankProbe is enabled, capture co-located un-jittered lines (fixed seed 0,
+				// keyed strictly by rect, never v.seq) so multi-frame cross-covariance compares identical pixels.
+				if (wantStaticRankA.load(std::memory_order_acquire))
+				{
+					const LinePlan staticPlan = LineSampler::Plan(rect, 0ull, cfg.sampler);
+					if (staticPlan.valid)
+					{
+						std::shared_ptr<LineSnapshot> sSnap = std::make_shared<LineSnapshot>();
+						if (CaptureLines<uint16_t>(staticPlan, v.luma, static_cast<std::ptrdiff_t>(v.strideSamples), scale, *sSnap))
+						{
+							sSnap->seq = v.seq;
+							sSnap->rasterW = static_cast<int32_t>(v.width);
+							sSnap->rasterH = static_cast<int32_t>(v.height);
+							sSnap->timeUs = snap->timeUs;
+							sSnap->streamKey = key;
+							job.staticSnap = std::move(sSnap);
+						}
+					}
 				}
 				{
 					std::lock_guard<std::mutex> lk(m);
@@ -2850,13 +2885,16 @@ namespace SourceIdentity
 					}
 					if (!interlacedRes.interlacedDetected && job.frame.Valid())
 					{
+						// HIGH-2: scale raw tap plane samples by 2^(msbShift - 6) into 10-bit code units (handles P010 msbShift==0 and LSB 10-bit msbShift==6 identically).
+						const double weaveScale = std::ldexp(1.0, job.frame.msbShift - 6);
 						const InterlacedResult weaveRes = AnalyzeWeaveComb(
 							job.frame.luma,
 							static_cast<int>(job.frame.width),
 							static_cast<int>(job.frame.height),
 							static_cast<int>(job.frame.strideSamples),
 							floorCodes,
-							cfg.interlaced);
+							cfg.interlaced,
+							weaveScale);
 						if (weaveRes.interlacedDetected)
 							interlacedRes = weaveRes;
 					}
@@ -2883,9 +2921,15 @@ namespace SourceIdentity
 					}
 					for (int a = 0; a < 2; ++a)
 					{
-						if (!run[a].have)
+						LineSet staticLs;
+						const LineSet* lsForRank = nullptr;
+						if (job.staticSnap && ToLineSet(*job.staticSnap, a, staticLs))
+							lsForRank = &staticLs;
+						else if (run[a].have)
+							lsForRank = &run[a].ls;
+						if (lsForRank == nullptr)
 							continue;
-						staticRankRes[a] = SubmitFrame(run[a].ls, floorCodes, cfg.staticPatchRank, staticRankWs[a]);
+						staticRankRes[a] = SubmitFrame(*lsForRank, floorCodes, cfg.staticPatchRank, staticRankWs[a]);
 						cStaticRankEvals.fetch_add(1, std::memory_order_relaxed);
 						if (staticRankRes[a].rankCliffDetected)
 							cStaticRankCliffsDetected.fetch_add(1, std::memory_order_relaxed);
@@ -3357,7 +3401,7 @@ namespace SourceIdentity
 				le.queueDropped = cDropped.load(std::memory_order_relaxed);
 				le.evalCount = cEvaluations.load(std::memory_order_relaxed);
 				le.lines = job.snap;
-				log.OnEvaluation(le, job.frame.Valid() ? &job.frame : nullptr);
+				log.OnEvaluation(le, (wantFrames.load(std::memory_order_acquire) && job.frame.Valid()) ? &job.frame : nullptr);
 				{
 					std::lock_guard<std::mutex> lk(statusMutex);
 					statusEval = le;

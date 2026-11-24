@@ -261,6 +261,7 @@ namespace SourceIdentity
 				int s,
 				double floorCodes,
 				const InterlacedSettings& cfg,
+				double sampleScale,
 				WeaveStrideEval& out)
 			{
 				out = WeaveStrideEval();
@@ -303,19 +304,19 @@ namespace SourceIdentity
 							return false;
 						}
 
-						const double cur = static_cast<double>(rowCur[x]);
-						const double prev = static_cast<double>(rowPrev[x]);
-						const double next = static_cast<double>(rowNext[x]);
-						const double prev2 = static_cast<double>(rowPrev2[x]);
-						const double next2 = static_cast<double>(rowNext2[x]);
+						const double cur = static_cast<double>(rowCur[x]) * sampleScale;
+						const double prev = static_cast<double>(rowPrev[x]) * sampleScale;
+						const double next = static_cast<double>(rowNext[x]) * sampleScale;
+						const double prev2 = static_cast<double>(rowPrev2[x]) * sampleScale;
+						const double next2 = static_cast<double>(rowNext2[x]) * sampleScale;
 
 						// Strictly intra-row horizontal gradients (invariant to vertical field shift / horizontal gratings,
 						// and excluding center column x so white noise has zero selection bias with cComb / cSame).
 						// Taking the max magnitude over {y - s, y, y + s} preserves moving vertical extrema / 1-px lines
 						// shifted between adjacent fields while remaining identically 0 on pure horizontal gratings.
-						const double gxCur = std::fabs(0.5 * (static_cast<double>(rowCur[x + 1]) - static_cast<double>(rowCur[x - 1])));
-						const double gxPrev = std::fabs(0.5 * (static_cast<double>(rowPrev[x + 1]) - static_cast<double>(rowPrev[x - 1])));
-						const double gxNext = std::fabs(0.5 * (static_cast<double>(rowNext[x + 1]) - static_cast<double>(rowNext[x - 1])));
+						const double gxCur = std::fabs(0.5 * (static_cast<double>(rowCur[x + 1]) - static_cast<double>(rowCur[x - 1])) * sampleScale);
+						const double gxPrev = std::fabs(0.5 * (static_cast<double>(rowPrev[x + 1]) - static_cast<double>(rowPrev[x - 1])) * sampleScale);
+						const double gxNext = std::fabs(0.5 * (static_cast<double>(rowNext[x + 1]) - static_cast<double>(rowNext[x - 1])) * sampleScale);
 						const double gxLocal = (std::max)(gxCur, (std::max)(gxPrev, gxNext));
 
 						const double cComb = prev - 2.0 * cur + next;
@@ -412,7 +413,8 @@ namespace SourceIdentity
 				int height,
 				int stride,
 				double floorCodes,
-				const InterlacedSettings& cfg)
+				const InterlacedSettings& cfg,
+				double sampleScale)
 			{
 				InterlacedResult res;
 				if (!cfg.enabled)
@@ -423,7 +425,8 @@ namespace SourceIdentity
 				}
 
 				if (plane == nullptr || width < 5 || height < 9 || stride < width ||
-					!std::isfinite(floorCodes) || !(floorCodes > 0.0) || !ValidSettings(cfg))
+					!std::isfinite(floorCodes) || !(floorCodes > 0.0) ||
+					!std::isfinite(sampleScale) || !(sampleScale > 0.0) || !ValidSettings(cfg))
 				{
 					res.kind = InterlacedKind::Abstain;
 					res.reason = InterlacedReason::InvalidInput;
@@ -432,8 +435,8 @@ namespace SourceIdentity
 
 				WeaveStrideEval eval1;
 				WeaveStrideEval eval2;
-				if (!EvaluateWeaveStride(plane, width, height, stride, 1, floorCodes, cfg, eval1) ||
-					!EvaluateWeaveStride(plane, width, height, stride, 2, floorCodes, cfg, eval2))
+				if (!EvaluateWeaveStride(plane, width, height, stride, 1, floorCodes, cfg, sampleScale, eval1) ||
+					!EvaluateWeaveStride(plane, width, height, stride, 2, floorCodes, cfg, sampleScale, eval2))
 				{
 					res.kind = InterlacedKind::Abstain;
 					res.reason = InterlacedReason::InvalidInput;
@@ -575,7 +578,7 @@ namespace SourceIdentity
 			}
 		}
 
-		// Part A — 2-D Weave-Comb Forensics (double plane overload, 10-bit code units).
+		// Part A — 2-D Weave-Comb Forensics (double plane overload, 10-bit code units after `sampleScale`).
 		// Automatically evaluates field strides s = 1 (native 1080i weave) and s = 2 (2x upscaled 1080i -> 2160p weave).
 		inline InterlacedResult AnalyzeWeaveComb(
 			const double* plane,
@@ -583,21 +586,23 @@ namespace SourceIdentity
 			int height,
 			int stride,
 			double floorCodes,
-			const InterlacedSettings& cfg = InterlacedSettings())
+			const InterlacedSettings& cfg = InterlacedSettings(),
+			double sampleScale = 1.0)
 		{
-			return detail_interlaced::AnalyzeWeaveCombImpl(plane, width, height, stride, floorCodes, cfg);
+			return detail_interlaced::AnalyzeWeaveCombImpl(plane, width, height, stride, floorCodes, cfg, sampleScale);
 		}
 
-		// Part A — 2-D Weave-Comb Forensics (uint16_t plane overload, converts inline with zero frame allocation).
+		// Part A — 2-D Weave-Comb Forensics (uint16_t plane overload, scales inline by `sampleScale` = 2^(msbShift - 6) into 10-bit codes).
 		inline InterlacedResult AnalyzeWeaveComb(
 			const uint16_t* plane,
 			int width,
 			int height,
 			int stride,
 			double floorCodes,
-			const InterlacedSettings& cfg = InterlacedSettings())
+			const InterlacedSettings& cfg = InterlacedSettings(),
+			double sampleScale = 1.0)
 		{
-			return detail_interlaced::AnalyzeWeaveCombImpl(plane, width, height, stride, floorCodes, cfg);
+			return detail_interlaced::AnalyzeWeaveCombImpl(plane, width, height, stride, floorCodes, cfg, sampleScale);
 		}
 
 		// Part B helper — Hann-windowed segment FFT (up to 256-pt) measuring mean per-bin horizontal power in

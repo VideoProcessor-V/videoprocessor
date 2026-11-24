@@ -320,12 +320,13 @@ namespace SourceIdentity
 
 		struct StaticPatchWorkspace
 		{
-			// Geometry fingerprint: any change triggers an automatic clean reset.
+			// Geometry fingerprint: any change (including cross-axis line coordinates) triggers an automatic clean reset.
 			int axis = -1;
 			int axisLen = 0;
 			int length = 0;
 			int count = 0;
 			int origin = 0;
+			std::vector<int> prevCross;
 
 			// Fixed spatial patch coordinates (<= kStaticPatchMaxSlots) for current geometry.
 			std::vector<StaticPatchSlot> slots;
@@ -385,6 +386,7 @@ namespace SourceIdentity
 				length = 0;
 				count = 0;
 				origin = 0;
+				prevCross.clear();
 				slots.clear();
 				hasPrevFrame = false;
 				prevRawPatches.clear();
@@ -791,14 +793,19 @@ namespace SourceIdentity
 				return res;
 			}
 
-			// Detect geometry change against workspace fingerprint.
+			// Detect geometry change against workspace fingerprint (including cross-axis coordinates so
+			// jittered line plans trigger an explicit geometry reset instead of false MotionRejected).
+			const bool crossMatches =
+				(ws.prevCross.size() == ls.cross.size()) &&
+				(ls.cross.empty() || std::equal(ws.prevCross.begin(), ws.prevCross.end(), ls.cross.begin()));
 			const bool geometryMatches =
 				(ws.framesObserved > 0) &&
 				(ws.axis == ls.axis) &&
 				(ws.axisLen == ls.axisLen) &&
 				(ws.length == ls.length) &&
 				(ws.count == ls.count) &&
-				(ws.origin == ls.origin);
+				(ws.origin == ls.origin) &&
+				crossMatches;
 
 			if (ws.framesObserved > 0 && !geometryMatches)
 			{
@@ -815,6 +822,7 @@ namespace SourceIdentity
 				ws.length = ls.length;
 				ws.count = ls.count;
 				ws.origin = ls.origin;
+				ws.prevCross = ls.cross;
 				ws.activeRingCap = desiredRingCap;
 				Detail::BuildPatchSlots(ls, ws.slots);
 				if (ws.slots.empty())

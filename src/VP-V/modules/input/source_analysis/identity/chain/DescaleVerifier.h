@@ -1116,18 +1116,75 @@ namespace SourceIdentity
 				cr.baselineMedian = FastMedianSmall(cr.lineBase.data(), nl);
 				if (s_.hdrNoise.enabled && s_.hdrNoise.transfer != HdrTransfer::Sdr && s_.hdrNoise.linearizeForDescale && !screenOnly)
 				{
-					const HdrVerifyResult hr = VerifyLinearizedHeteroscedastic(ls, cr.n, s_.hdrNoise, hdrWs_);
-					cr.hdrDarkToeClampedSamples = hr.darkToeClampedSamples;
-					if (hr.valid)
+					// HIGH-4: evaluate the integer neighborhood (plus cr.nProposed in case code-space CoarseScan
+					// drifted on high-contrast PQ/HLG edges) in linearized Gauss-Markov WLS space, and populate
+					// per-line cr.lineStat / cr.lineBase / cr.lineRms + per-segment cr.segStat / cr.segBase so
+					// ChainEvidence::Judge consumes the true linearized WLS residuals.
+					std::vector<int> hdrNs = ns;
+					if (cr.nProposed >= s_.minLatent && cr.nProposed <= maxN &&
+						std::find(hdrNs.begin(), hdrNs.end(), cr.nProposed) == hdrNs.end())
 					{
-						cr.hdrLinearizedUsed = true;
-						cr.hdrWhitenedStat = hr.stat;
-						cr.hdrWhitenedRms = hr.whitenedRms;
-						cr.stat = hr.stat;
-						if (hr.bestKernel >= 0 && hr.bestKernel < kKernelCount)
+						hdrNs.push_back(cr.nProposed);
+					}
+					bool haveHdr = false;
+					int bestHdrN = cr.n;
+					HdrVerifyResult bestHr;
+					for (size_t hi = 0; hi < hdrNs.size(); ++hi)
+					{
+						const int candN = hdrNs[hi];
+						const HdrVerifyResult hr = VerifyLinearizedHeteroscedastic(
+							ls, candN, s_.hdrNoise, hdrWs_, idxScratch_.data(), nl);
+						if (!hr.valid)
+							continue;
+						const bool better = !haveHdr || hr.stat < bestHr.stat ||
+							(hr.stat == bestHr.stat && std::abs(candN - cr.nProposed) < std::abs(bestHdrN - cr.nProposed));
+						if (better)
 						{
-							cr.kernel = hr.bestKernel;
+							haveHdr = true;
+							bestHdrN = candN;
+							bestHr = hr;
+						}
+					}
+					cr.hdrDarkToeClampedSamples = haveHdr ? bestHr.darkToeClampedSamples : 0;
+					if (haveHdr)
+					{
+						cr.n = bestHdrN;
+						cr.hdrLinearizedUsed = true;
+						cr.hdrWhitenedStat = bestHr.stat;
+						cr.hdrWhitenedRms = bestHr.whitenedRms;
+						cr.stat = bestHr.stat;
+						if (bestHr.bestKernel >= 0 && bestHr.bestKernel < kKernelCount)
+						{
+							cr.kernel = bestHr.bestKernel;
 							cr.family = static_cast<int>(Kernel(cr.kernel).family);
+						}
+						// Map dimensionless whitened SNR units (1.0 = quantization floor) back to 10-bit code floor
+						// scale (1 / sqrt(12)) so ChainEvidence::Judge's lineGateFactor * floorC gate stays calibrated.
+						const double unitFloor10 = 1.0 / std::sqrt(12.0);
+						if (static_cast<int>(bestHr.lineStat.size()) == nl &&
+							static_cast<int>(bestHr.lineBaseWhitened.size()) == nl &&
+							static_cast<int>(bestHr.lineRmsWhitened.size()) == nl)
+						{
+							for (int i = 0; i < nl; ++i)
+							{
+								cr.lineStat[static_cast<size_t>(i)] = bestHr.lineStat[static_cast<size_t>(i)];
+								cr.lineBase[static_cast<size_t>(i)] = bestHr.lineBaseWhitened[static_cast<size_t>(i)] * unitFloor10;
+								cr.lineRms[static_cast<size_t>(i)] = bestHr.lineRmsWhitened[static_cast<size_t>(i)] * unitFloor10;
+							}
+							cr.floorCodes = FastTrimmedMeanSmall(cr.lineRms.data(), nl, s_.trimFraction);
+							cr.baselineMedian = FastMedianSmall(cr.lineBase.data(), nl);
+						}
+						if (bestHr.segCount == segCount &&
+							bestHr.segStat.size() == cells &&
+							bestHr.segBaseWhitened.size() == cells &&
+							bestHr.segRows.size() == cells)
+						{
+							for (size_t cell = 0; cell < cells; ++cell)
+							{
+								cr.segStat[cell] = bestHr.segStat[cell];
+								cr.segBase[cell] = bestHr.segBaseWhitened[cell] * unitFloor10;
+								cr.segRows[cell] = bestHr.segRows[cell];
+							}
 						}
 					}
 				}
