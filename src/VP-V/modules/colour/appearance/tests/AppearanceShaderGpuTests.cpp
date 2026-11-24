@@ -1,7 +1,7 @@
 // Copyright(C) 2026 VP-V contributors
 // SPDX-License-Identifier: GPL-3.0-only
 //
-// Red-Team GPU hook verification for shaders/vp_cam16_appearance.glsl (S2-B1, S2-H1, CT-H6):
+// Red-Team GPU hook verification for shaders/vp_cam16_appearance.glsl (S2-B1, S2-H1, S2-H2, CT-H6):
 // compiles and dispatches the real bundled PREOUTPUT shader through libplacebo (pl_mpv_user_shader_parse
 // + pl_render_image into RGBA32F on WARP unless VP_TEST_GPU=hardware) and checks it against an
 // independent CPU CAM16 reference with same-input negative controls.
@@ -11,6 +11,7 @@
 #include <VP-V/modules/colour/appearance/Cam16.h>
 #include <VP-V/modules/colour/appearance/Cam16Uniforms.h>
 #include <VP-V/modules/colour/display_mapping/DvMath.h>
+#include <VP-V/modules/colour/extended_range/ExtendedRange.h>
 
 #include <algorithm>
 #include <array>
@@ -232,10 +233,16 @@ namespace VideoProcessorTest
 			const double screenNits = in.screenWhiteNits > 0.0 ? in.screenWhiteNits : refNits;
 			const double veil = veilOverride >= 0.0 ? veilOverride : static_cast<double>(d.uniforms.veil);
 
+			ExtendedRange::Transfer trc;
+			trc.kind = static_cast<ExtendedRange::TransferKind>(in.transferKind);
+			trc.param = static_cast<float>(in.transferParam);
+
 			auto toRel = [&](double v) -> double
 			{
 				if (in.signalPq)
 					return DvMath::NitsFromPq(v) / (std::max)(refNits, 1e-6);
+				if (in.transferKind > 0)
+					return ExtendedRange::ToLinear(trc, v);
 				return std::pow(v, in.outputGamma);
 			};
 			auto fromRel = [&](double r) -> double
@@ -243,6 +250,8 @@ namespace VideoProcessorTest
 				r = (std::max)(r, 0.0);
 				if (in.signalPq)
 					return DvMath::PqFromNits(r * screenNits);
+				if (in.transferKind > 0)
+					return ExtendedRange::FromLinear(trc, r);
 				return std::pow(r, 1.0 / in.outputGamma);
 			};
 
@@ -999,6 +1008,222 @@ namespace VideoProcessorTest
 					Assert::IsTrue(negatedInRange(oneNan), L"Negated in-range conjunction must catch single-NaN as out-of-range");
 					Assert::IsFalse(negatedInRange(inRangePx), L"Negated in-range conjunction must accept valid in-range pixels");
 				}
+			}
+
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLogExceptPreOutputBug(cleanLog);
+		}
+
+		// S2-H2: real compiled shaders/vp_cam16_appearance.glsl on WARP GPU must execute the
+		// piecewise BT.1886 (apx_trc_kind = 1, apx_trc_param = b) and sRGB (apx_trc_kind = 2)
+		// output transfers in ap_to_rel / ap_from_rel, matching the independent CPU CAM16 +
+		// ExtendedRange::ToLinear/FromLinear reference within 2e-3 and diverging measurably
+		// from pure power-law gamma 2.4 (transferKind = 0) on the exact same inputs.
+		BEGIN_TEST_METHOD_ATTRIBUTE(Bt1886AndSrgbPiecewiseTransfersMatchCpuReferenceOnGpu)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(Bt1886AndSrgbPiecewiseTransfersMatchCpuReferenceOnGpu)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			std::string cleanLog;
+			fixture.CaptureLog(&cleanLog);
+			AppearanceHook apHook(fixture);
+
+			// Sub-case A: BT.1886 (1000:1 contrast target -> black offset b ~ 0.0596 > 0.05).
+			{
+				pl_color_space bt1886Target{};
+				bt1886Target.primaries = PL_COLOR_PRIM_BT_709;
+				bt1886Target.transfer = PL_COLOR_TRC_BT_1886;
+				bt1886Target.hdr.min_luma = 0.1f;
+				bt1886Target.hdr.max_luma = 100.0f;
+
+				const ExtendedRange::OutputTransfer bt1886Trc = ExtendedRange::DescribeOutputTransfer(bt1886Target);
+				Assert::IsTrue(bt1886Trc.supported, L"BT.1886 1000:1 output transfer must be supported");
+				Assert::IsFalse(bt1886Trc.pq, L"BT.1886 output transfer must not set pq=true");
+				Assert::AreEqual(static_cast<int>(ExtendedRange::TransferKind::Bt1886), bt1886Trc.kind,
+					L"BT.1886 output transfer must report TransferKind::Bt1886 (1)");
+				Assert::IsTrue(bt1886Trc.param > 0.05,
+					L"1000:1 BT.1886 target must produce black offset b > 0.05");
+
+				AppearanceStage::Inputs inBt;
+				inBt.on = true;
+				inBt.strength = 1.0;
+				inBt.sourceSdr = true;
+				inBt.signalPq = false;
+				inBt.outputGamma = 2.4;
+				inBt.screenWhiteNits = 48.0;
+				inBt.room.room = RoomLight::Room::Cinema;
+				inBt.transferSupported = bt1886Trc.supported;
+				inBt.transferKind = bt1886Trc.kind;
+				inBt.transferParam = bt1886Trc.param;
+
+				RoomLight::Smoother smootherBt;
+				const AppearanceStage::Decision dBt = AppearanceStage::Decide(inBt, smootherBt);
+				Assert::IsTrue(dBt.active, L"BT.1886 appearance decision must be active");
+				Assert::IsFalse(dBt.transferUnsupported);
+				ApplyParameters(apHook.hook, dBt.parameters);
+
+				const std::vector<std::array<float, 3>> btPixels = {
+					{ { 0.02f, 0.02f, 0.02f } },
+					{ { 0.05f, 0.05f, 0.05f } },
+					{ { 0.08f, 0.08f, 0.08f } },
+					{ { 0.12f, 0.12f, 0.12f } },
+					{ { 0.25f, 0.25f, 0.25f } },
+					{ { 0.50f, 0.50f, 0.50f } },
+					{ { 0.08f, 0.04f, 0.02f } },
+					{ { 0.70f, 0.22f, 0.14f } }
+				};
+				constexpr size_t kBtShadowCount = 7;
+
+				const auto gpuBt = RenderFloatPixels(fixture, apHook.hook, PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_BT_1886, btPixels);
+				AssertAllFinite(gpuBt, L"BT.1886 piecewise GPU pass");
+
+				for (size_t i = 0; i < btPixels.size(); ++i)
+				{
+					const std::array<double, 3> ref = CpuReferenceAppearancePixel(
+						inBt, dBt, { { btPixels[i][0], btPixels[i][1], btPixels[i][2] } });
+					for (int c = 0; c < 3; ++c)
+					{
+						Assert::AreEqual(ref[c], static_cast<double>(gpuBt[i][c]), 2e-3,
+							(L"BT.1886 GPU vs CPU mismatch at pixel " + std::to_wstring(i) +
+								L" ch " + std::to_wstring(c)).c_str());
+					}
+				}
+
+				// Mandatory in-test negative control (exact same inputs rendered with transferKind = 0,
+				// pure power-law gamma = 2.4): proves ap_to_rel / ap_from_rel actually execute the
+				// BT.1886 piecewise curve on GPU rather than falling back to pure power-law gamma 2.4.
+				AppearanceStage::Inputs inPow = inBt;
+				inPow.transferKind = static_cast<int>(ExtendedRange::TransferKind::Power);
+				inPow.transferParam = 0.0;
+				RoomLight::Smoother smootherPow;
+				const AppearanceStage::Decision dPow = AppearanceStage::Decide(inPow, smootherPow);
+				Assert::IsTrue(dPow.active);
+				ApplyParameters(apHook.hook, dPow.parameters);
+
+				const auto gpuPow = RenderFloatPixels(fixture, apHook.hook, PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_GAMMA24, btPixels);
+				AssertAllFinite(gpuPow, L"BT.1886 negative-control pure power-2.4 GPU pass");
+
+				double maxDelta = 0.0;
+				double maxShadowDelta = 0.0;
+				for (size_t i = 0; i < btPixels.size(); ++i)
+				{
+					const std::array<double, 3> refPow = CpuReferenceAppearancePixel(
+						inPow, dPow, { { btPixels[i][0], btPixels[i][1], btPixels[i][2] } });
+					for (int c = 0; c < 3; ++c)
+					{
+						Assert::AreEqual(refPow[c], static_cast<double>(gpuPow[i][c]), 2e-3,
+							(L"BT.1886 negative-control power-2.4 GPU vs CPU mismatch at pixel " + std::to_wstring(i) +
+								L" ch " + std::to_wstring(c)).c_str());
+						const double delta = std::fabs(static_cast<double>(gpuBt[i][c]) - static_cast<double>(gpuPow[i][c]));
+						maxDelta = (std::max)(maxDelta, delta);
+						if (i < kBtShadowCount)
+							maxShadowDelta = (std::max)(maxShadowDelta, delta);
+					}
+				}
+				Assert::IsTrue(maxShadowDelta > 0.004,
+					(L"Negative control: BT.1886 GPU output must diverge from pure power-2.4 on shadow pixels (maxShadowDelta=" +
+						std::to_wstring(maxShadowDelta) + L")").c_str());
+				Assert::IsTrue(maxDelta > 0.015,
+					(L"Negative control: BT.1886 GPU output must diverge measurably from pure power-2.4 (maxDelta=" +
+						std::to_wstring(maxDelta) + L")").c_str());
+			}
+
+			// Sub-case B: sRGB (IEC 61966-2-1 piecewise transfer, linear toe below 0.04045).
+			{
+				pl_color_space srgbTarget{};
+				srgbTarget.primaries = PL_COLOR_PRIM_BT_709;
+				srgbTarget.transfer = PL_COLOR_TRC_SRGB;
+
+				const ExtendedRange::OutputTransfer srgbTrc = ExtendedRange::DescribeOutputTransfer(srgbTarget);
+				Assert::IsTrue(srgbTrc.supported, L"sRGB output transfer must be supported");
+				Assert::IsFalse(srgbTrc.pq, L"sRGB output transfer must not set pq=true");
+				Assert::AreEqual(static_cast<int>(ExtendedRange::TransferKind::Srgb), srgbTrc.kind,
+					L"sRGB output transfer must report TransferKind::Srgb (2)");
+				Assert::AreEqual(0.0, srgbTrc.param, 0.0, L"sRGB output transfer param must be 0");
+
+				AppearanceStage::Inputs inSrgb;
+				inSrgb.on = true;
+				inSrgb.strength = 1.0;
+				inSrgb.sourceSdr = true;
+				inSrgb.signalPq = false;
+				inSrgb.outputGamma = 2.4;
+				inSrgb.screenWhiteNits = 48.0;
+				inSrgb.room.room = RoomLight::Room::Cinema;
+				inSrgb.transferSupported = srgbTrc.supported;
+				inSrgb.transferKind = srgbTrc.kind;
+				inSrgb.transferParam = srgbTrc.param;
+
+				RoomLight::Smoother smootherSrgb;
+				const AppearanceStage::Decision dSrgb = AppearanceStage::Decide(inSrgb, smootherSrgb);
+				Assert::IsTrue(dSrgb.active, L"sRGB appearance decision must be active");
+				Assert::IsFalse(dSrgb.transferUnsupported);
+				ApplyParameters(apHook.hook, dSrgb.parameters);
+
+				const std::vector<std::array<float, 3>> srgbPixels = {
+					{ { 0.015f, 0.015f, 0.015f } },
+					{ { 0.03f, 0.03f, 0.03f } },
+					{ { 0.04045f, 0.04045f, 0.04045f } },
+					{ { 0.06f, 0.06f, 0.06f } },
+					{ { 0.12f, 0.12f, 0.12f } },
+					{ { 0.50f, 0.50f, 0.50f } },
+					{ { 0.05f, 0.02f, 0.01f } },
+					{ { 0.70f, 0.22f, 0.14f } }
+				};
+				constexpr size_t kSrgbToeShadowCount = 7;
+
+				const auto gpuSrgb = RenderFloatPixels(fixture, apHook.hook, PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_SRGB, srgbPixels);
+				AssertAllFinite(gpuSrgb, L"sRGB piecewise GPU pass");
+
+				for (size_t i = 0; i < srgbPixels.size(); ++i)
+				{
+					const std::array<double, 3> ref = CpuReferenceAppearancePixel(
+						inSrgb, dSrgb, { { srgbPixels[i][0], srgbPixels[i][1], srgbPixels[i][2] } });
+					for (int c = 0; c < 3; ++c)
+					{
+						Assert::AreEqual(ref[c], static_cast<double>(gpuSrgb[i][c]), 2e-3,
+							(L"sRGB GPU vs CPU mismatch at pixel " + std::to_wstring(i) +
+								L" ch " + std::to_wstring(c)).c_str());
+					}
+				}
+
+				// Mandatory in-test negative control (exact same inputs rendered with transferKind = 0,
+				// pure power-law gamma = 2.4): proves the sRGB piecewise curve genuinely ran on GPU.
+				AppearanceStage::Inputs inPow = inSrgb;
+				inPow.transferKind = static_cast<int>(ExtendedRange::TransferKind::Power);
+				inPow.transferParam = 0.0;
+				RoomLight::Smoother smootherPow;
+				const AppearanceStage::Decision dPow = AppearanceStage::Decide(inPow, smootherPow);
+				Assert::IsTrue(dPow.active);
+				ApplyParameters(apHook.hook, dPow.parameters);
+
+				const auto gpuPow = RenderFloatPixels(fixture, apHook.hook, PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_GAMMA24, srgbPixels);
+				AssertAllFinite(gpuPow, L"sRGB negative-control pure power-2.4 GPU pass");
+
+				double maxDelta = 0.0;
+				double maxToeShadowDelta = 0.0;
+				for (size_t i = 0; i < srgbPixels.size(); ++i)
+				{
+					const std::array<double, 3> refPow = CpuReferenceAppearancePixel(
+						inPow, dPow, { { srgbPixels[i][0], srgbPixels[i][1], srgbPixels[i][2] } });
+					for (int c = 0; c < 3; ++c)
+					{
+						Assert::AreEqual(refPow[c], static_cast<double>(gpuPow[i][c]), 2e-3,
+							(L"sRGB negative-control power-2.4 GPU vs CPU mismatch at pixel " + std::to_wstring(i) +
+								L" ch " + std::to_wstring(c)).c_str());
+						const double delta = std::fabs(static_cast<double>(gpuSrgb[i][c]) - static_cast<double>(gpuPow[i][c]));
+						maxDelta = (std::max)(maxDelta, delta);
+						if (i < kSrgbToeShadowCount)
+							maxToeShadowDelta = (std::max)(maxToeShadowDelta, delta);
+					}
+				}
+				Assert::IsTrue(maxToeShadowDelta > 0.007,
+					(L"Negative control: sRGB GPU output must diverge from pure power-2.4 across the linear toe/shadows (maxToeShadowDelta=" +
+						std::to_wstring(maxToeShadowDelta) + L")").c_str());
+				Assert::IsTrue(maxDelta > 0.015,
+					(L"Negative control: sRGB GPU output must diverge measurably from pure power-2.4 (maxDelta=" +
+						std::to_wstring(maxDelta) + L")").c_str());
 			}
 
 			fixture.CaptureLog(nullptr);
