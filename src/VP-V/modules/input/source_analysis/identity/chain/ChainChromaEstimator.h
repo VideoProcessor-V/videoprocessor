@@ -1058,6 +1058,7 @@ namespace SourceIdentity
 				bool sitingKnown = false;
 				bool cosited = false; // true = cosited ([1,2,1]/4), false = centered ([3,1]/4)
 				double sitingMargin = 0.0;
+				bool negativeLobeRinging = false; // true when centered [3,1]/4 tied Bicubic(0,C) in col-space & step overshoot confirmed negative lobes
 			};
 
 			inline BoxMpegProbeResult ProbeAxisBoxAndMpeg(
@@ -1264,8 +1265,16 @@ namespace SourceIdentity
 				if (bestPi < 0 || !(bestDip <= s.dipConfirmThreshold))
 					return out;
 
-				// Require MPEG linear (bilinear family) to beat every higher-order kernel (Bicubic/Lanczos/Spline)
-				// by at least kernelMarginMin so higher-order Lanczos/Bicubic chroma never misclassifies as MpegLinear.
+				// Require MPEG linear (bilinear family) to beat higher-order kernels by at least kernelMarginMin.
+				// Exact algebraic identity at centered 2:1 (phi = 0.0, bestPi == 0):
+				//   U_{Catmull-Rom, phi=0} == U_{[3,1]/4} * Toeplitz(-3/32, 19/16, -3/32),
+				// so bicubic(0, 0.5) shares the exact column space of [3,1]/4 (and 4-tap Keys/Lanczos2 lie within ~3%).
+				// When [3,1]/4 beats column-space-distinct higher-order kernels (Lanczos3/4, Spline36/64) but ties
+				// the 4-tap negative-lobe band at phi = 0.0, disambiguate via exact step-edge overshoot on the solved
+				// [3,1]/4 latent z_lin = U_{[3,1]/4}^+ y:
+				//   - Monotonic [3,1]/4 produces 0.0 overshoot across isolated steps.
+				//   - Catmull-Rom produces exact +3/38 (+0.07895) flanking overshoot across isolated steps.
+				// Midpoint threshold = 3/76 (half of exact Catmull-Rom negative-lobe overshoot; zero magic numbers).
 				double bestHigherOrderRms = 1e300;
 				for (int k = 1; k < kKernelCount; ++k)
 				{
@@ -1277,30 +1286,147 @@ namespace SourceIdentity
 					}
 				}
 
-				if (bestHigherOrderRms < 1e299)
+				if (!(bestHigherOrderRms < 1e299))
+					return out;
+
+				// If any higher-order kernel strictly beats [3,1]/4 by kernelMarginMin, do not classify as MpegLinear.
+				if (bestHigherOrderRms < bestRms * (1.0 - s.kernelMarginMin))
+					return out;
+
+				const double marginAll = ClampD((bestHigherOrderRms - bestRms) / (std::max)(bestHigherOrderRms, 1e-12), 0.0, 1.0);
+				bool mpegConfirmed = (marginAll >= s.kernelMarginMin);
+				double confirmedMargin = marginAll;
+
+				if (!mpegConfirmed && bestPi == 0)
 				{
-					const double margin = ClampD((bestHigherOrderRms - bestRms) / (std::max)(bestHigherOrderRms, 1e-12), 0.0, 1.0);
-					if (margin >= s.kernelMarginMin)
+					// Column-space-distinct kernels at phi = 0.0: lanczos3 (5), lanczos4 (6), spline36 (8), spline64 (9).
+					static const int kDistinctKernels[4] = { 5, 6, 8, 9 };
+					double bestDistinctRms = 1e300;
+					for (int di = 0; di < 4; ++di)
 					{
-						out.detected = true;
-						out.family = ChromaUpsamplerFamily::MpegLinear;
-						out.dip = bestDip;
-						out.rms = bestRms;
-						out.margin = margin;
-						if ((bestPi == 0 || bestPi == 1) && phaseDip[0] < 1e299 && phaseDip[1] < 1e299)
+						const int k = kDistinctKernels[di];
+						for (int pi = 0; pi < 2; ++pi)
 						{
-							const double sep = std::fabs(phaseDip[0] - phaseDip[1]);
-							out.sitingMargin = sep;
-							if (sep >= s.sitingMarginMin)
+							const double rk = axHalf.kernelRms[k][pi];
+							if (rk > 0.0 && rk < bestDistinctRms)
+								bestDistinctRms = rk;
+						}
+					}
+					const double marginDistinct = (bestDistinctRms < 1e299)
+						? ClampD((bestDistinctRms - bestRms) / (std::max)(bestDistinctRms, 1e-12), 0.0, 1.0)
+						: 0.0;
+
+					if (marginDistinct >= s.kernelMarginMin)
+					{
+						constexpr double kCatmullStepOvershoot = 3.0 / 38.0;     // exact Catmull-Rom negative-lobe overshoot
+						constexpr double kCatmullStepOvershootMid = 3.0 / 76.0;  // exact midpoint between 0 ([3,1]/4) and 3/38
+						const double edgeGate = 4.0 * std::sqrt(2.0) * floorCodes;
+
+						std::vector<double> zBuf;
+						std::vector<double> rings;
+						for (size_t li = 0; li < allLines.size(); ++li)
+						{
+							ops.halfOps[0][0].SolveLatent(allLines[li], zBuf);
+							const int zn = static_cast<int>(zBuf.size());
+							if (zn < 12)
+								continue;
+							const int dzN = zn - 1;
+							int m = 4;
+							while (m < dzN - 4)
 							{
-								out.sitingKnown = true;
-								out.cosited = (bestPi == 1);
+								const double dzm = zBuf[static_cast<size_t>(m + 1)] - zBuf[static_cast<size_t>(m)];
+								const double a = std::fabs(dzm);
+								if (a < edgeGate)
+								{
+									++m;
+									continue;
+								}
+								const double dzPrev = zBuf[static_cast<size_t>(m)] - zBuf[static_cast<size_t>(m - 1)];
+								const double dzNext = zBuf[static_cast<size_t>(m + 2)] - zBuf[static_cast<size_t>(m + 1)];
+								if (a < std::fabs(dzPrev) || a < std::fabs(dzNext))
+								{
+									++m;
+									continue;
+								}
+								const double sgn = dzm > 0.0 ? 1.0 : -1.0;
+								int L = m;
+								int R = m;
+								while (L > 3 && (R - L) < 2)
+								{
+									const double dL = zBuf[static_cast<size_t>(L)] - zBuf[static_cast<size_t>(L - 1)];
+									if (dL * sgn > 0.25 * a)
+										--L;
+									else
+										break;
+								}
+								while (R + 1 < dzN - 3 && (R - L) < 2)
+								{
+									const double dR = zBuf[static_cast<size_t>(R + 2)] - zBuf[static_cast<size_t>(R + 1)];
+									if (dR * sgn > 0.25 * a)
+										++R;
+									else
+										break;
+								}
+								const double H = std::fabs(zBuf[static_cast<size_t>(R + 1)] - zBuf[static_cast<size_t>(L)]);
+								const double dLm1 = zBuf[static_cast<size_t>(L)] - zBuf[static_cast<size_t>(L - 1)];
+								const double dLm2 = zBuf[static_cast<size_t>(L - 1)] - zBuf[static_cast<size_t>(L - 2)];
+								const double dRp1 = zBuf[static_cast<size_t>(R + 2)] - zBuf[static_cast<size_t>(R + 1)];
+								const double dRp2 = zBuf[static_cast<size_t>(R + 3)] - zBuf[static_cast<size_t>(R + 2)];
+								if (H > 0.0 &&
+									std::fabs(dLm2) <= 0.20 * H && std::fabs(dRp2) <= 0.20 * H &&
+									std::fabs(dLm1) <= 0.25 * H && std::fabs(dRp1) <= 0.25 * H)
+								{
+									const double ring = -sgn * 0.5 * (dLm1 + dRp1) / a;
+									rings.push_back(ring);
+								}
+								m = R + 2;
 							}
 						}
-						else
+
+						if (rings.size() >= 6u)
 						{
-							out.sitingKnown = false;
+							std::sort(rings.begin(), rings.end());
+							const size_t mid = rings.size() / 2u;
+							const double medRing = (rings.size() % 2u == 1u)
+								? rings[mid]
+								: 0.5 * (rings[mid - 1u] + rings[mid]);
+							if (medRing < kCatmullStepOvershootMid)
+							{
+								const double ringMargin = ClampD(
+									(kCatmullStepOvershoot - (std::max)(medRing, 0.0)) / kCatmullStepOvershoot,
+									0.0, 1.0);
+								mpegConfirmed = true;
+								confirmedMargin = (std::min)(marginDistinct, ringMargin);
+							}
+							else
+							{
+								// Confirmed negative-lobe step overshoot: physically excludes non-negative [3,1]/4.
+								out.negativeLobeRinging = true;
+							}
 						}
+					}
+				}
+
+				if (mpegConfirmed)
+				{
+					out.detected = true;
+					out.family = ChromaUpsamplerFamily::MpegLinear;
+					out.dip = bestDip;
+					out.rms = bestRms;
+					out.margin = confirmedMargin;
+					if ((bestPi == 0 || bestPi == 1) && phaseDip[0] < 1e299 && phaseDip[1] < 1e299)
+					{
+						const double sep = std::fabs(phaseDip[0] - phaseDip[1]);
+						out.sitingMargin = sep;
+						if (sep >= s.sitingMarginMin)
+						{
+							out.sitingKnown = true;
+							out.cosited = (bestPi == 1);
+						}
+					}
+					else
+					{
+						out.sitingKnown = false;
 					}
 				}
 				return out;
@@ -1727,36 +1853,98 @@ namespace SourceIdentity
 			const LineSet* lumaH = nullptr;
 			if (in.lumaH.count > 0 || !in.lumaH.data.empty())
 			{
-				if (!cbHOk ||
-					!detail_chroma_estimator::ValidLineSet(in.lumaH, 32) ||
-					!detail_chroma_estimator::AllFinite(in.lumaH) ||
-					in.lumaH.count != in.cbH.count ||
-					in.lumaH.length != in.cbH.length ||
-					in.lumaH.origin != in.cbH.origin)
+				if (!detail_chroma_estimator::ValidLineSet(in.lumaH, 32) ||
+					!detail_chroma_estimator::AllFinite(in.lumaH))
 				{
 					est.reason = ChromaEstimatorReason::InvalidInput;
 					est.quarter.reason = ChromaEstimatorReason::InvalidInput;
 					est.lumaCoupled.reason = ChromaEstimatorReason::InvalidInput;
 					return est;
 				}
-				lumaH = &in.lumaH;
+				if (!is422 && !is420)
+				{
+					if (!cbHOk ||
+						in.lumaH.count != in.cbH.count ||
+						in.lumaH.length != in.cbH.length ||
+						in.lumaH.origin != in.cbH.origin)
+					{
+						est.reason = ChromaEstimatorReason::InvalidInput;
+						est.quarter.reason = ChromaEstimatorReason::InvalidInput;
+						est.lumaCoupled.reason = ChromaEstimatorReason::InvalidInput;
+						return est;
+					}
+					lumaH = &in.lumaH;
+				}
+				else
+				{
+					// SOTA6-MED-1: On physical W x H Yuv422/Yuv420, horizontal chroma is (W/2) or omitted;
+					// accept valid full-res W (2:1) or pre-decimated (1:1) lumaH cleanly without InvalidInput.
+					if (cbHOk &&
+						in.lumaH.axisLen != in.cbH.axisLen &&
+						(in.lumaH.axisLen / 2) != in.cbH.axisLen)
+					{
+						est.reason = ChromaEstimatorReason::InvalidInput;
+						est.quarter.reason = ChromaEstimatorReason::InvalidInput;
+						est.lumaCoupled.reason = ChromaEstimatorReason::InvalidInput;
+						return est;
+					}
+				}
 			}
 			const LineSet* lumaV = nullptr;
 			if (in.lumaV.count > 0 || !in.lumaV.data.empty())
 			{
-				if (!cbVOk ||
-					!detail_chroma_estimator::ValidLineSet(in.lumaV, 32) ||
-					!detail_chroma_estimator::AllFinite(in.lumaV) ||
-					in.lumaV.count != in.cbV.count ||
-					in.lumaV.length != in.cbV.length ||
-					in.lumaV.origin != in.cbV.origin)
+				if (!detail_chroma_estimator::ValidLineSet(in.lumaV, 32) ||
+					!detail_chroma_estimator::AllFinite(in.lumaV))
 				{
 					est.reason = ChromaEstimatorReason::InvalidInput;
 					est.quarter.reason = ChromaEstimatorReason::InvalidInput;
 					est.lumaCoupled.reason = ChromaEstimatorReason::InvalidInput;
 					return est;
 				}
-				lumaV = &in.lumaV;
+				if (!is422 && !is420)
+				{
+					if (!cbVOk ||
+						in.lumaV.count != in.cbV.count ||
+						in.lumaV.length != in.cbV.length ||
+						in.lumaV.origin != in.cbV.origin)
+					{
+						est.reason = ChromaEstimatorReason::InvalidInput;
+						est.quarter.reason = ChromaEstimatorReason::InvalidInput;
+						est.lumaCoupled.reason = ChromaEstimatorReason::InvalidInput;
+						return est;
+					}
+					lumaV = &in.lumaV;
+				}
+				else if (is422)
+				{
+					// On physical W x H Yuv422, vertical axis is full-res H; enable edge-weighting when co-located.
+					if (!cbVOk || in.lumaV.axisLen != in.cbV.axisLen)
+					{
+						est.reason = ChromaEstimatorReason::InvalidInput;
+						est.quarter.reason = ChromaEstimatorReason::InvalidInput;
+						est.lumaCoupled.reason = ChromaEstimatorReason::InvalidInput;
+						return est;
+					}
+					if (in.lumaV.count == in.cbV.count &&
+						in.lumaV.length == in.cbV.length &&
+						in.lumaV.origin == in.cbV.origin)
+					{
+						lumaV = &in.lumaV;
+					}
+				}
+				else
+				{
+					// On physical W x H Yuv420, vertical chroma is (H/2) or omitted; accept 2:1 or 1:1 lumaV cleanly.
+					if (cbVOk &&
+						in.lumaV.axisLen != in.cbV.axisLen &&
+						(in.lumaV.axisLen / 2) != in.cbV.axisLen)
+					{
+						est.reason = ChromaEstimatorReason::InvalidInput;
+						est.quarter.reason = ChromaEstimatorReason::InvalidInput;
+						est.lumaCoupled.reason = ChromaEstimatorReason::InvalidInput;
+						return est;
+					}
+				}
 			}
 
 			// Helper: arbitrary luma-coupled 4:2:0 chroma grid corroboration (SID-SOTA-6, opt-in via knownLumaNH/NV > 0).
@@ -1996,6 +2184,8 @@ namespace SourceIdentity
 						pooledRms[k] = phaseIdxV >= 0 ? axV.kernelRms[k][phaseIdxV]
 							: (std::min)(axV.kernelRms[k][0], axV.kernelRms[k][1]);
 					}
+					if (s.detectBoxAndMpegChroma && bmV.negativeLobeRinging)
+						pooledRms[0] = 0.0; // Negative-lobe overshoot physically excludes non-negative [3,1]/4 bilinear.
 					selectKernel(pooledRms);
 
 					est.confidence = ClampD(1.0 - std::exp(axV.bestDip), 0.0, 1.0);
@@ -2248,6 +2438,8 @@ namespace SourceIdentity
 						: (std::min)(axV.kernelRms[k][0], axV.kernelRms[k][1]);
 					pooledRms[k] = 0.5 * (rH + rV);
 				}
+				if (s.detectBoxAndMpegChroma && (bmH.negativeLobeRinging || bmV.negativeLobeRinging))
+					pooledRms[0] = 0.0; // Negative-lobe overshoot physically excludes non-negative [3,1]/4 bilinear.
 				selectKernel(pooledRms);
 
 				// Confidence derived from worst-axis residual reduction 1 - exp(max(dipH, dipV)).
@@ -2310,6 +2502,8 @@ namespace SourceIdentity
 					pooledRms[k] = phaseIdxH >= 0 ? axH.kernelRms[k][phaseIdxH]
 						: (std::min)(axH.kernelRms[k][0], axH.kernelRms[k][1]);
 				}
+				if (s.detectBoxAndMpegChroma && bmH.negativeLobeRinging)
+					pooledRms[0] = 0.0; // Negative-lobe overshoot physically excludes non-negative [3,1]/4 bilinear.
 				selectKernel(pooledRms);
 
 				est.confidence = ClampD(1.0 - std::exp(axH.bestDip), 0.0, 1.0);
