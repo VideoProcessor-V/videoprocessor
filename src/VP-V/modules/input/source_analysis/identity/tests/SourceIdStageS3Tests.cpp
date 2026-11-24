@@ -48,6 +48,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <limits>
 #include <string>
@@ -513,6 +514,631 @@ namespace Tests
 			std::string prevEnv_;
 			std::string dir_;
 		};
+
+		// Verbatim frozen W1 (bfd055d1f) reference implementations for H2 bit-exact memcmp == 0 verification
+		// (NEVER calling optimized production code as its own oracle!).
+		namespace W1Ref
+		{
+			constexpr double kPi = 3.14159265358979323846;
+
+			inline bool PowerOfTwo(int n) { return n >= 64 && n <= 1024 && (n & (n - 1)) == 0; }
+
+			inline void Fft(std::vector<std::complex<double>>& a)
+			{
+				const size_t n = a.size();
+				for (size_t i = 1, j = 0; i < n; ++i)
+				{
+					size_t bit = n >> 1;
+					for (; j & bit; bit >>= 1) j ^= bit;
+					j ^= bit;
+					if (i < j) std::swap(a[i], a[j]);
+				}
+				for (size_t len = 2; len <= n; len <<= 1)
+				{
+					const double angle = -2.0 * kPi / static_cast<double>(len);
+					const std::complex<double> wl(std::cos(angle), std::sin(angle));
+					for (size_t i = 0; i < n; i += len)
+					{
+						std::complex<double> w(1.0, 0.0);
+						for (size_t k = 0; k < len / 2; ++k)
+						{
+							const std::complex<double> u = a[i + k], v = a[i + k + len / 2] * w;
+							a[i + k] = u + v;
+							a[i + k + len / 2] = u - v;
+							w *= wl;
+						}
+					}
+				}
+			}
+
+			inline bool BlockHarmonic(int bin, int n)
+			{
+				const int period = n / 16;
+				if (period < 2) return false;
+				const int r = bin % period;
+				return r == 0 || r == 1 || r == period - 1;
+			}
+
+			inline double TextBand(const float* luma, int stride, int n, int* lines = nullptr,
+				double* sharpAcross = nullptr, double* sharpDown = nullptr)
+			{
+				std::vector<int> rows(static_cast<size_t>(n), 0), columns(static_cast<size_t>(n), 0);
+				long acrossTotal = 0, downTotal = 0;
+				for (int y = 0; y < n; ++y)
+				{
+					const float* row = luma + static_cast<size_t>(y) * stride;
+					const float* above = y > 0 ? row - stride : nullptr;
+					int count = 0;
+					for (int x = 0; x < n; ++x)
+					{
+						if (x > 0 && std::fabs(row[x] - row[x - 1]) >= 1.0f / 3.0f) ++count;
+						if (above && std::fabs(row[x] - above[x]) >= 1.0f / 3.0f) { ++columns[static_cast<size_t>(x)]; ++downTotal; }
+					}
+					rows[static_cast<size_t>(y)] = count;
+					acrossTotal += count;
+				}
+				const int band = n / 4;
+				auto densest = [band, n](const std::vector<int>& linesCnt, long total) {
+					if (total < static_cast<long>(n) * n / 500) return 0.0;
+					long sum = 0, best = 0;
+					for (int i = 0; i < n; ++i)
+					{
+						sum += linesCnt[static_cast<size_t>(i)];
+						if (i >= band) sum -= linesCnt[static_cast<size_t>(i - band)];
+						best = (std::max)(best, sum);
+					}
+					return static_cast<double>(best) / total;
+				};
+				auto runs = [n](const std::vector<int>& counts, long total) {
+					if (total < static_cast<long>(n) * n / 500) return 0;
+					int found = 0, start = -1, last = -1;
+					long sum = 0;
+					auto close = [&]() {
+						if (start >= 0 && last - start + 1 >= 6 && sum * 50 >= total) ++found;
+						start = -1;
+						sum = 0;
+					};
+					for (int i = 0; i < n; ++i)
+					{
+						if (counts[static_cast<size_t>(i)] < 2) continue;
+						if (start >= 0 && i - last > 4) close();
+						if (start < 0) start = i;
+						last = i;
+						sum += counts[static_cast<size_t>(i)];
+					}
+					close();
+					return found;
+				};
+				if (sharpAcross) *sharpAcross = static_cast<double>(acrossTotal) / (static_cast<double>(n) * (n - 1));
+				if (sharpDown) *sharpDown = static_cast<double>(downTotal) / (static_cast<double>(n) * (n - 1));
+				const double acrossShare = densest(rows, acrossTotal), downShare = densest(columns, downTotal);
+				if (lines) *lines = acrossShare >= downShare ? runs(rows, acrossTotal) : runs(columns, downTotal);
+				return (std::max)(acrossShare, downShare);
+			}
+
+			// Verbatim bfd055d1f:SourceResolutionDetector.cpp::Analyse
+			inline bool Analyse(const float* luma, int stride, int n, SR::Spectrum& out, int codeMaximum,
+				bool driftNegControl = false)
+			{
+				if (!luma || !PowerOfTwo(n) || stride < n) return false;
+				out.n = n;
+				out.textBand = TextBand(luma, stride, n, &out.textLines, &out.sharpStepsH, &out.sharpStepsV);
+				out.sharpSteps = 0.5 * (out.sharpStepsH + out.sharpStepsV);
+				out.vertical.assign(static_cast<size_t>(n / 2 + 1), 0.0);
+				out.horizontal.assign(static_cast<size_t>(n / 2 + 1), 0.0);
+				std::vector<double> window(static_cast<size_t>(n));
+				double windowEnergy = 0.0;
+				for (int i = 0; i < n; ++i)
+				{
+					window[static_cast<size_t>(i)] = 0.5 - 0.5 * std::cos(2.0 * kPi * (i + 0.5) / n);
+					windowEnergy += window[static_cast<size_t>(i)] * window[static_cast<size_t>(i)];
+				}
+				double total = 0.0;
+				std::vector<std::complex<double>> line(static_cast<size_t>(n));
+				const int bins = n / 2 + 1;
+				std::vector<std::complex<double>> lines(static_cast<size_t>(n) * static_cast<size_t>(bins));
+				for (int pass = 0; pass < 2; ++pass)
+				{
+					std::vector<double>& power = pass == 0 ? out.vertical : out.horizontal;
+					std::vector<double>& mirror = pass == 0 ? out.mirrorVertical : out.mirrorHorizontal;
+					for (int l = 0; l < n; ++l)
+					{
+						double mean = 0.0;
+						for (int i = 0; i < n; ++i)
+							mean += pass == 0 ? luma[static_cast<size_t>(i) * stride + l] : luma[static_cast<size_t>(l) * stride + i];
+						mean /= n;
+						if (pass == 0) total += mean;
+						for (int i = 0; i < n; ++i)
+						{
+							const double v = pass == 0 ? luma[static_cast<size_t>(i) * stride + l] : luma[static_cast<size_t>(l) * stride + i];
+							line[static_cast<size_t>(i)] = std::complex<double>((v - mean) * window[static_cast<size_t>(i)], 0.0);
+						}
+						Fft(line);
+						for (int k = 0; k <= n / 2; ++k)
+						{
+							power[static_cast<size_t>(k)] += std::norm(line[static_cast<size_t>(k)]) * (k == 0 || k == n / 2 ? 1.0 : 2.0);
+							lines[static_cast<size_t>(l) * bins + k] = line[static_cast<size_t>(k)];
+						}
+					}
+					for (double& p : power) p /= static_cast<double>(n) * windowEnergy * 2.0;
+
+					mirror.assign(static_cast<size_t>(n), 0.0);
+					for (int m = n / 8; m < n; ++m)
+					{
+						const int half = m / 2;
+						const int band = (std::max)(4, static_cast<int>(std::lround(0.3 * half)));
+						const int kFrom = (std::max)({ 2, half - band, m - n / 2 });
+						const int kTo = (m - 5) / 2;
+						if (kTo - kFrom < 2) continue;
+						int kept = 0;
+						for (int k = kFrom; k <= kTo; ++k) if (!BlockHarmonic(k, n) && !BlockHarmonic(m - k, n)) ++kept;
+						const bool exactOnly = kept < 3 && m < 7 * n / 8 - 2;
+						const int period = n / 16;
+						auto excluded = [&](int bin) { return exactOnly ? period >= 2 && bin % period == 0 : BlockHarmonic(bin, n); };
+						std::complex<double> sum(0.0, 0.0);
+						double magnitude = 0.0;
+						for (int k = kFrom; k <= kTo; ++k)
+						{
+							if (excluded(k) || excluded(m - k)) continue;
+							for (int l = 0; l < n; ++l)
+							{
+								const std::complex<double> a = lines[static_cast<size_t>(l) * bins + k];
+								const std::complex<double> b = lines[static_cast<size_t>(l) * bins + (m - k)];
+								if (!driftNegControl)
+								{
+									const std::complex<double> product = a * b;
+									sum += product;
+									magnitude += std::abs(product);
+								}
+								else
+								{
+									// Drifted SID-OPT arithmetic (caught by Opus H2): |a|*|b| via sqrt(norm) & std::hypot.
+									sum += std::complex<double>(a.real() * b.real() - a.imag() * b.imag(),
+										a.real() * b.imag() + a.imag() * b.real());
+									magnitude += std::sqrt(a.real() * a.real() + a.imag() * a.imag())
+										* std::sqrt(b.real() * b.real() + b.imag() * b.imag());
+								}
+							}
+						}
+						if (!driftNegControl)
+							mirror[static_cast<size_t>(m)] = magnitude > 0.0 ? std::abs(sum) / magnitude : 0.0;
+						else
+							mirror[static_cast<size_t>(m)] = magnitude > 0.0 ? std::hypot(sum.real(), sum.imag()) / magnitude : 0.0;
+					}
+				}
+				{
+					const int maxLag = n / 4;
+					std::vector<double> windowAuto(static_cast<size_t>(maxLag) + 2, 0.0);
+					for (int lag = 0; lag <= maxLag + 1; ++lag)
+					{
+						double s = 0.0;
+						for (int i = 0; i + lag < n; ++i)
+							s += window[static_cast<size_t>(i)] * window[static_cast<size_t>(i + lag)];
+						windowAuto[static_cast<size_t>(lag)] = s / windowEnergy;
+					}
+					std::vector<double> cosTable(static_cast<size_t>(n));
+					const int nMask = n - 1;
+					for (int m = 0; m < n; ++m)
+						cosTable[static_cast<size_t>(m)] = std::cos(2.0 * kPi * static_cast<double>(m) / static_cast<double>(n));
+					auto repeat = [&](const std::vector<double>& power) {
+						std::vector<double> r(static_cast<size_t>(maxLag) + 2, 0.0);
+						for (int lag = 0; lag <= maxLag + 1; ++lag)
+						{
+							double s = 0.0;
+							for (int k = 1; k <= n / 2; ++k)
+								s += power[static_cast<size_t>(k)] * (driftNegControl
+									? cosTable[static_cast<size_t>((k * lag) & nMask)]
+									: std::cos(2.0 * kPi * k * lag / n));
+							r[static_cast<size_t>(lag)] = s;
+						}
+						if (r[0] <= 0.0) return 0.0;
+						std::vector<double> v(r.size(), 0.0);
+						for (size_t lag = 0; lag < r.size(); ++lag)
+							v[lag] = windowAuto[lag] > 0.05 ? r[lag] / r[0] / windowAuto[lag] : 0.0;
+						double lowest = v[1], peak = 0.0;
+						for (int lag = 2; lag <= maxLag; ++lag)
+						{
+							const double here = v[static_cast<size_t>(lag)];
+							if (lag >= 3 && here >= v[static_cast<size_t>(lag - 1)] && here >= v[static_cast<size_t>(lag + 1)] && here - lowest >= 0.2)
+								peak = (std::max)(peak, here);
+							lowest = (std::min)(lowest, here);
+						}
+						return peak;
+					};
+					out.periodicPeak = (std::max)(repeat(out.vertical), repeat(out.horizontal));
+				}
+				out.mean = total / n;
+				{
+					double q[4] = {}, sq = 0.0;
+					const int h = n / 2;
+					for (int y = 0; y < n; ++y)
+					{
+						const float* row = luma + static_cast<size_t>(y) * stride;
+						for (int x = 0; x < n; ++x)
+						{
+							const double v = row[x];
+							q[(y >= h ? 2 : 0) + (x >= h ? 1 : 0)] += v;
+							sq += (v - out.mean) * (v - out.mean);
+						}
+					}
+					for (int i = 0; i < 4; ++i) out.quadrants[i] = q[i] / (static_cast<double>(h) * h);
+					out.spread = std::sqrt(sq / (static_cast<double>(n) * n));
+					const double flat = 2.0 / (std::max)(1, codeMaximum), dark = 0.1;
+					auto column = [&](int x) {
+						double lo = 1e9, hi = -1e9;
+						for (int y = 0; y < n; ++y) { const double v = luma[static_cast<size_t>(y) * stride + x]; lo = (std::min)(lo, v); hi = (std::max)(hi, v); }
+						return hi - lo <= flat && hi <= dark;
+					};
+					auto rowFn = [&](int y) {
+						double lo = 1e9, hi = -1e9;
+						const float* r = luma + static_cast<size_t>(y) * stride;
+						for (int x = 0; x < n; ++x) { lo = (std::min)(lo, static_cast<double>(r[x])); hi = (std::max)(hi, static_cast<double>(r[x])); }
+						return hi - lo <= flat && hi <= dark;
+					};
+					out.barLeft = out.barRight = out.barTop = out.barBottom = 0;
+					while (out.barLeft < n && column(out.barLeft)) ++out.barLeft;
+					while (out.barRight < n - out.barLeft && column(n - 1 - out.barRight)) ++out.barRight;
+					while (out.barTop < n && rowFn(out.barTop)) ++out.barTop;
+					while (out.barBottom < n - out.barTop && rowFn(n - 1 - out.barBottom)) ++out.barBottom;
+				}
+				return true;
+			}
+
+			// Verbatim bfd055d1f:FrameQuality.h::MeasureNoise
+			inline SourceIdentity::FrameQuality::TileNoise MeasureNoise(const float* luma, int T)
+			{
+				SourceIdentity::FrameQuality::TileNoise out;
+				if (!luma || T < 32)
+					return out;
+				const size_t n = static_cast<size_t>(T) * static_cast<size_t>(T);
+				std::vector<float> u(n), g1, g2;
+				for (size_t i = 0; i < n; ++i)
+					u[i] = luma[i] * 255.0f;
+				const std::vector<float> t1 = SourceIdentity::FrameQuality::detail::GaussTaps(1.0);
+				const std::vector<float> t2 = SourceIdentity::FrameQuality::detail::GaussTaps(2.0);
+				SourceIdentity::FrameQuality::detail::Blur(u, g1, T, T, t1);
+				SourceIdentity::FrameQuality::detail::Blur(u, g2, T, T, t2);
+				std::vector<float> hp(n), e(n);
+				for (size_t i = 0; i < n; ++i)
+					hp[i] = u[i] - g1[i];
+				for (int y = 0; y < T; ++y)
+					for (int x = 0; x < T; ++x)
+					{
+						double s = 0.0;
+						for (int dy = -3; dy <= 3; ++dy)
+							for (int dx = -3; dx <= 3; ++dx)
+							{
+								const float v = hp[static_cast<size_t>(SourceIdentity::FrameQuality::detail::Reflect(y + dy, T)) * T
+									+ SourceIdentity::FrameQuality::detail::Reflect(x + dx, T)];
+								s += static_cast<double>(v) * v;
+							}
+						e[static_cast<size_t>(y) * T + x] = static_cast<float>(s / 49.0);
+					}
+				std::vector<double> okEnergy;
+				std::vector<char> ok(n, 0);
+				for (int y = 0; y < T; ++y)
+					for (int x = 0; x < T; ++x)
+					{
+						const int xm = SourceIdentity::FrameQuality::detail::Reflect(x - 1, T);
+						const int xp = SourceIdentity::FrameQuality::detail::Reflect(x + 1, T);
+						const int ym = SourceIdentity::FrameQuality::detail::Reflect(y - 1, T);
+						const int yp = SourceIdentity::FrameQuality::detail::Reflect(y + 1, T);
+						const double gx = 0.5 * (g2[static_cast<size_t>(y) * T + xp] - g2[static_cast<size_t>(y) * T + xm]);
+						const double gy = 0.5 * (g2[static_cast<size_t>(yp) * T + x] - g2[static_cast<size_t>(ym) * T + x]);
+						if (std::sqrt(gx * gx + gy * gy) < 3.0)
+						{
+							ok[static_cast<size_t>(y) * T + x] = 1;
+							okEnergy.push_back(e[static_cast<size_t>(y) * T + x]);
+						}
+					}
+				if (okEnergy.size() < 64)
+					return out;
+				const double thr = RobustStats::Quantile(okEnergy, 0.3, RobustStats::RankRule::FloorIndex);
+				std::vector<double> residual;
+				for (size_t i = 0; i < n; ++i)
+					if (ok[i] && e[i] <= thr)
+						residual.push_back(hp[i]);
+				if (residual.size() < 64)
+					return out;
+				const double med = RobustStats::Median(residual, RobustStats::MedianRule::Upper);
+				out.sigma = RobustStats::MadSigma(RobustStats::MadAbout(residual, med, RobustStats::MedianRule::Upper));
+				out.coverage = static_cast<double>(residual.size()) / static_cast<double>(n);
+				out.valid = true;
+				return out;
+			}
+
+			// Verbatim bfd055d1f:PolyphaseProposer.h
+			class PolyphaseProposerW1
+			{
+			public:
+				explicit PolyphaseProposerW1(const C::ProposerSettings& s = C::ProposerSettings()) : s_(s)
+				{
+					if (s_.qMax < 2) s_.qMax = 2;
+					if (s_.qMax > 32) s_.qMax = 32;
+					int total = 0;
+					for (int q = 2; q <= s_.qMax; ++q)
+					{
+						off_[q] = total;
+						total += q;
+					}
+					slots_ = total;
+					Reset();
+				}
+
+				void Reset()
+				{
+					stats_.assign(static_cast<size_t>(slots_) * kTerms, 0.0);
+					evals_ = 0;
+					axisLen_ = 0;
+					origin_ = 0;
+				}
+
+				bool AddEvaluation(const C::LineSet& ls)
+				{
+					if (ls.count < 1 || ls.length < 64 || ls.axisLen < 64)
+						return false;
+					if (axisLen_ != 0 && (axisLen_ != ls.axisLen || origin_ != ls.origin))
+						Reset();
+					axisLen_ = ls.axisLen;
+					origin_ = ls.origin;
+					const int nl = (std::min)(ls.count, (std::max)(1, s_.maxLines));
+					std::vector<double> v(static_cast<size_t>(ls.length), 0.0);
+					double tm[kTerms];
+					for (int li = 0; li < nl; ++li)
+					{
+						const double* y = ls.Line((li * ls.count) / nl);
+						double mean = 0.0;
+						for (int k = 0; k < ls.length; ++k) mean += y[k];
+						mean /= static_cast<double>(ls.length);
+						for (int k = 0; k < ls.length; ++k) v[static_cast<size_t>(k)] = y[k] - mean;
+						int ph[33];
+						for (int q = 2; q <= s_.qMax; ++q) ph[q] = (origin_ + 3) % q;
+						for (int k = 3; k <= ls.length - 3; ++k)
+						{
+							const double f[kTaps] = { v[static_cast<size_t>(k - 3)], v[static_cast<size_t>(k - 2)],
+								v[static_cast<size_t>(k - 1)], v[static_cast<size_t>(k + 1)], v[static_cast<size_t>(k + 2)] };
+							const double t = v[static_cast<size_t>(k)];
+							int idx = 0;
+							for (int i = 0; i < kTaps; ++i)
+								for (int j = 0; j <= i; ++j)
+									tm[idx++] = f[i] * f[j];
+							for (int i = 0; i < kTaps; ++i) tm[15 + i] = f[i] * t;
+							tm[20] = t * t;
+							tm[21] = 1.0;
+							for (int q = 2; q <= s_.qMax; ++q)
+							{
+								double* dst = &stats_[(static_cast<size_t>(off_[q]) + static_cast<size_t>(ph[q])) * kTerms];
+								for (int e = 0; e < kTerms; ++e) dst[e] += tm[e];
+								if (++ph[q] == q) ph[q] = 0;
+							}
+						}
+					}
+					++evals_;
+					if (evals_ > s_.windowEvaluations)
+					{
+						for (size_t e = 0; e < stats_.size(); ++e) stats_[e] *= 0.5;
+						evals_ = s_.windowEvaluations / 2;
+					}
+					return true;
+				}
+
+				int AllScores(C::PeriodScore* out, int cap, bool foldedNegControl = false) const
+				{
+					std::vector<C::PeriodScore> all;
+					Scores(all, foldedNegControl);
+					int n = 0;
+					for (size_t i = 0; i < all.size() && n < cap; ++i) out[n++] = all[i];
+					return n;
+				}
+
+				int Periods(C::PeriodScore* out, int cap) const
+				{
+					std::vector<C::PeriodScore> all;
+					Scores(all, false);
+					std::sort(all.begin(), all.end(), [](const C::PeriodScore& a, const C::PeriodScore& b) {
+						if (a.dBic != b.dBic) return a.dBic > b.dBic;
+						return a.q < b.q;
+					});
+					int n = 0;
+					for (size_t i = 0; i < all.size() && n < cap && n < s_.maxPeriods; ++i)
+					{
+						if (all[i].ratio < s_.ratioMin) continue;
+						bool multiple = false;
+						for (int a = 0; a < n; ++a)
+							if (all[i].q % out[a].q == 0) multiple = true;
+						if (multiple) continue;
+						out[n++] = all[i];
+					}
+					return n;
+				}
+
+				int Propose(int N, const int* callerN, int callerCount, C::ProposedCandidate* out, int cap) const
+				{
+					if (cap > C::kMaxCandidates) cap = C::kMaxCandidates;
+					int n = 0;
+					const int maxN = static_cast<int>(std::floor(s_.maxNRatio * static_cast<double>(N)));
+					int taken = 0;
+					for (int i = 0; i < callerCount && n < cap && taken < s_.callerSlots; ++i)
+					{
+						if (callerN[i] < s_.minLatent || callerN[i] > maxN || Has(out, n, callerN[i], 0)) continue;
+						C::ProposedCandidate c;
+						c.n = callerN[i];
+						c.source = C::kSourceCaller;
+						out[n++] = c;
+						++taken;
+					}
+					C::PeriodScore per[C::kMaxCandidates];
+					const int np = Periods(per, C::kMaxCandidates);
+					std::vector<std::vector<int>> sizes(static_cast<size_t>(np));
+					size_t longest = 0;
+					for (int p = 0; p < np; ++p)
+					{
+						const int q = per[p].q;
+						std::vector<int>& ms = sizes[static_cast<size_t>(p)];
+						for (int m = 1; m < q; ++m)
+						{
+							const double r = static_cast<double>(m) / static_cast<double>(q);
+							if (C::GcdInt(m, q) == 1 && r >= s_.minNRatio && r <= s_.maxNRatio) ms.push_back(m);
+						}
+						std::sort(ms.begin(), ms.end(), [q](int a, int b) {
+							const double da = std::abs(static_cast<double>(a) / q - 0.5);
+							const double db = std::abs(static_cast<double>(b) / q - 0.5);
+							if (da != db) return da < db;
+							return a < b;
+						});
+						if (ms.size() > longest) longest = ms.size();
+					}
+					for (size_t rank = 0; rank < longest && n < cap; ++rank)
+						for (int p = 0; p < np && n < cap; ++p)
+						{
+							const std::vector<int>& ms = sizes[static_cast<size_t>(p)];
+							if (rank >= ms.size()) continue;
+							const int q = per[p].q;
+							const int cn = C::RoundToInt(static_cast<double>(N) * static_cast<double>(ms[rank]) / static_cast<double>(q));
+							if (cn < s_.minLatent || cn > maxN || Has(out, n, cn, 1)) continue;
+							C::ProposedCandidate c;
+							c.n = cn; c.q = q; c.m = ms[rank];
+							c.source = C::kSourcePolyphase;
+							c.score = per[p].dBic;
+							out[n++] = c;
+						}
+					return n;
+				}
+
+			private:
+				enum { kTaps = 5, kTerms = 22 };
+				static bool Has(const C::ProposedCandidate* c, int n, int v, int tol)
+				{
+					for (int i = 0; i < n; ++i)
+					{
+						const int d = c[i].n > v ? c[i].n - v : v - c[i].n;
+						if (d <= tol) return true;
+					}
+					return false;
+				}
+				static bool Fit(const double* st, double& rss, double& cnt)
+				{
+					cnt = st[21];
+					if (cnt < static_cast<double>(4 * kTaps)) return false;
+					double A[kTaps][kTaps];
+					int idx = 0;
+					for (int i = 0; i < kTaps; ++i)
+						for (int j = 0; j <= i; ++j)
+						{
+							A[i][j] = st[idx];
+							A[j][i] = st[idx];
+							++idx;
+						}
+					double tr = 0.0;
+					for (int i = 0; i < kTaps; ++i) tr += A[i][i];
+					const double ridge = 1e-9 * tr / static_cast<double>(kTaps) + 1e-12;
+					for (int i = 0; i < kTaps; ++i) A[i][i] += ridge;
+					for (int j = 0; j < kTaps; ++j)
+					{
+						double s = A[j][j];
+						for (int k = 0; k < j; ++k) s -= A[j][k] * A[j][k];
+						if (!(s > 1e-300)) return false;
+						const double d = std::sqrt(s);
+						A[j][j] = d;
+						for (int i = j + 1; i < kTaps; ++i)
+						{
+							double v = A[i][j];
+							for (int k = 0; k < j; ++k) v -= A[i][k] * A[j][k];
+							A[i][j] = v / d;
+						}
+					}
+					double b[kTaps];
+					for (int i = 0; i < kTaps; ++i) b[i] = st[15 + i];
+					double z[kTaps];
+					for (int i = 0; i < kTaps; ++i)
+					{
+						double v = b[i];
+						for (int k = 0; k < i; ++k) v -= A[i][k] * z[k];
+						z[i] = v / A[i][i];
+					}
+					double w[kTaps];
+					for (int i = kTaps - 1; i >= 0; --i)
+					{
+						double v = z[i];
+						for (int k = i + 1; k < kTaps; ++k) v -= A[k][i] * w[k];
+						w[i] = v / A[i][i];
+					}
+					double fit = 0.0;
+					for (int i = 0; i < kTaps; ++i) fit += b[i] * w[i];
+					rss = st[20] - fit;
+					if (rss < 0.0) rss = 0.0;
+					return true;
+				}
+				void Scores(std::vector<C::PeriodScore>& out, bool foldedNegControl) const
+				{
+					out.clear();
+					if (evals_ <= 0) return;
+					double pooled[kTerms] = {};
+					if (!foldedNegControl)
+					{
+						for (int e = 0; e < kTerms; ++e)
+							pooled[e] = stats_[static_cast<size_t>(off_[2]) * kTerms + e]
+								+ stats_[(static_cast<size_t>(off_[2]) + 1) * kTerms + e];
+					}
+					else
+					{
+						for (int c = 0; c < s_.qMax; ++c)
+							for (int e = 0; e < kTerms; ++e)
+								pooled[e] += stats_[(static_cast<size_t>(off_[s_.qMax]) + static_cast<size_t>(c)) * kTerms + e];
+					}
+					double rssPooled = 0.0, total = 0.0;
+					if (!Fit(pooled, rssPooled, total) || total < static_cast<double>(s_.minSamples) || !(rssPooled > 0.0))
+						return;
+					const double lnN = std::log(total);
+					const int qMinMaximal = (s_.qMax / 2) + 1;
+					double folded[kTerms];
+					for (int q = 2; q <= s_.qMax; ++q)
+					{
+						double rssQ = 0.0;
+						bool ok = true;
+						int low = 0;
+						double lowVar = 0.0;
+						const int multM = (s_.qMax / q) * q;
+						for (int c = 0; c < q; ++c)
+						{
+							const double* stPtr = nullptr;
+							if (!foldedNegControl || q >= qMinMaximal)
+							{
+								stPtr = &stats_[(static_cast<size_t>(off_[q]) + static_cast<size_t>(c)) * kTerms];
+							}
+							else
+							{
+								for (int e = 0; e < kTerms; ++e) folded[e] = 0.0;
+								for (int cm = c; cm < multM; cm += q)
+									for (int e = 0; e < kTerms; ++e)
+										folded[e] += stats_[(static_cast<size_t>(off_[multM]) + static_cast<size_t>(cm)) * kTerms + e];
+								stPtr = folded;
+							}
+							double r = 0.0, cn = 0.0;
+							if (!Fit(stPtr, r, cn)) { ok = false; break; }
+							rssQ += r;
+							const double var = r / cn;
+							if (c == 0 || var < lowVar) { lowVar = var; low = c; }
+						}
+						if (!ok || !(rssQ > 0.0)) continue;
+						C::PeriodScore p;
+						p.q = q;
+						p.gain = total * std::log(rssPooled / rssQ);
+						if (p.gain < 0.0) p.gain = 0.0;
+						const double dof = static_cast<double>(kTaps * (q - 1));
+						p.ratio = p.gain / dof;
+						p.dBic = p.gain - dof * lnN;
+						p.lowVarPhase = low;
+						out.push_back(p);
+					}
+				}
+				C::ProposerSettings s_;
+				int off_[33] = {};
+				int slots_ = 0;
+				std::vector<double> stats_;
+				int evals_ = 0, axisLen_ = 0, origin_ = 0;
+			};
+		}
 	}
 
 	TEST_CLASS(SourceIdStageS3Tests)
@@ -2038,7 +2664,9 @@ namespace Tests
 				return true;
 			};
 
-			// Independent direct all-period accumulator (accumulates EVERY q = 2..qMax directly, zero folding).
+			// Independent direct all-period reference (accumulates EVERY q = 2..qMax directly, solves normal
+			// equations via independent Gaussian elimination vs Cholesky, and forms pooled = q=2 phase 0 + phase 1
+			// matching the W1 bfd055d1f pooled definition restored by H2 when maximal-period folding was retired).
 			auto directPolyphaseReference = [&](const std::vector<C::LineSet>& evals, const C::ProposerSettings& ps,
 				std::vector<C::PeriodScore>& outScores, std::vector<std::vector<double>>& outPerQStats) {
 				constexpr int kT = 5;
@@ -2046,7 +2674,6 @@ namespace Tests
 				outPerQStats.assign(static_cast<size_t>(ps.qMax + 1), std::vector<double>());
 				for (int q = 2; q <= ps.qMax; ++q)
 					outPerQStats[static_cast<size_t>(q)].assign(static_cast<size_t>(q) * kTerms, 0.0);
-				double pooled[kTerms] = {};
 
 				for (size_t ei = 0; ei < evals.size(); ++ei)
 				{
@@ -2079,8 +2706,6 @@ namespace Tests
 								tm[15 + i] = f[i] * t;
 							tm[20] = t * t;
 							tm[21] = 1.0;
-							for (int e = 0; e < kTerms; ++e)
-								pooled[e] += tm[e];
 							for (int q = 2; q <= ps.qMax; ++q)
 							{
 								const int ph = (ls.origin + k) % q;
@@ -2091,6 +2716,10 @@ namespace Tests
 						}
 					}
 				}
+
+				double pooled[kTerms] = {};
+				for (int e = 0; e < kTerms; ++e)
+					pooled[e] = outPerQStats[2][static_cast<size_t>(e)] + outPerQStats[2][static_cast<size_t>(kTerms + e)];
 
 				outScores.clear();
 				double rssPooled = 0.0, total = 0.0;
@@ -3156,6 +3785,565 @@ namespace Tests
 				Assert::IsTrue(crTwo.floorCodes < crSkip.floorCodes * 0.5,
 					L"negative control: off-by-1 without Pass 2 leaves > 2x higher raw RMS residual than recovered n0");
 			}
+		}
+
+		// 14. H2 (HIGH): Genuine bit-exact (std::memcmp == 0, ZERO tolerance slack) verification of live
+		//     SourceResolution::Analyse + ReadFrame, FrameQuality::MeasureNoise, and Chain::PolyphaseProposer
+		//     against verbatim frozen W1 (bfd055d1f) reference implementations copied directly from W1,
+		//     with same-input ULP-drift negative controls proving that |a|*|b| / std::hypot / cosTable /
+		//     reordered summation BREAK memcmp == 0 on these exact synthetic frames!
+		TEST_METHOD(H2FrozenW1BitExactMemcmpClassicalFrameQualityAndPolyphaseProposer)
+		{
+			using namespace S3Fx;
+
+			auto bitExactD = [](double a, double b) -> bool {
+				return std::memcmp(&a, &b, sizeof(double)) == 0;
+			};
+
+			// Build 3 rich non-trivial synthetic 256x256 tiles: (0) 4K upscaled 1080p, (1) native 4K texture + noise,
+			// (2) dithered + periodic frame.
+			const TileScene upScene(0xF101ull, 0.0, 150, 0.013);
+			const std::vector<double> upCont = RenderContinuousTile(upScene, 0.5, 920, 640);
+			std::vector<float> upTile(static_cast<size_t>(kTile) * kTile);
+			for (size_t i = 0; i < upTile.size(); ++i)
+			{
+				const double v = (std::max)(0.0, (std::min)(1.0, upCont[i]));
+				upTile[i] = static_cast<float>(std::floor(v * 1023.0 + 0.5) / 1023.0);
+			}
+
+			const TileScene natScene(0xF202ull, 1.4, 120, 0.008);
+			const std::vector<double> natCont = RenderContinuousTile(natScene, 1.0, 480, 520);
+			SplitMix64 rngNat(0xF203ull);
+			std::vector<float> natTile(static_cast<size_t>(kTile) * kTile);
+			for (size_t i = 0; i < natTile.size(); ++i)
+			{
+				const double v = (std::max)(0.0, (std::min)(1.0, natCont[i] + (2.5 / 255.0) * rngNat.Normal01()));
+				natTile[i] = static_cast<float>(std::floor(v * 1023.0 + 0.5) / 1023.0);
+			}
+
+			SplitMix64 rngDith(0xF304ull);
+			std::vector<float> dithPerTile(static_cast<size_t>(kTile) * kTile);
+			for (int y = 0; y < kTile; ++y)
+				for (int x = 0; x < kTile; ++x)
+				{
+					const double v = 0.49 + 0.18 * std::cos(2.0 * C::kPi * x / 16.0)
+						+ 0.14 * std::sin(2.0 * C::kPi * y / 12.0)
+						+ (4.0 / 1023.0) * rngDith.TpdfUnit();
+					const double cl = (std::max)(0.0, (std::min)(1.0, v));
+					dithPerTile[static_cast<size_t>(y) * kTile + x] = static_cast<float>(std::floor(cl * 1023.0 + 0.5) / 1023.0);
+				}
+
+			// (a) SourceResolution::Analyse + ReadFrame bit-exact memcmp == 0 vs verbatim W1 (bfd055d1f):
+			const std::vector<float>* tiles[3] = { &upTile, &natTile, &dithPerTile };
+			int driftedMirrorBitDiffs = 0;
+			int driftedPeriodBitDiffs = 0;
+			for (int ti = 0; ti < 3; ++ti)
+			{
+				SR::Spectrum liveSpec, w1Spec, driftedSpec;
+				Assert::IsTrue(SR::Analyse(tiles[ti]->data(), kTile, kTile, liveSpec, 1023));
+				Assert::IsTrue(W1Ref::Analyse(tiles[ti]->data(), kTile, kTile, w1Spec, 1023, false));
+				Assert::IsTrue(W1Ref::Analyse(tiles[ti]->data(), kTile, kTile, driftedSpec, 1023, true));
+
+				Assert::AreEqual(w1Spec.vertical.size(), liveSpec.vertical.size());
+				Assert::AreEqual(w1Spec.horizontal.size(), liveSpec.horizontal.size());
+				Assert::AreEqual(w1Spec.mirrorVertical.size(), liveSpec.mirrorVertical.size());
+				Assert::AreEqual(w1Spec.mirrorHorizontal.size(), liveSpec.mirrorHorizontal.size());
+
+				for (size_t k = 0; k < w1Spec.vertical.size(); ++k)
+				{
+					Assert::IsTrue(bitExactD(liveSpec.vertical[k], w1Spec.vertical[k]),
+						L"H2: vertical power bin must match W1 bfd055d1f bit-for-bit (memcmp == 0)");
+					Assert::IsTrue(bitExactD(liveSpec.horizontal[k], w1Spec.horizontal[k]),
+						L"H2: horizontal power bin must match W1 bfd055d1f bit-for-bit (memcmp == 0)");
+				}
+				for (size_t m = 0; m < w1Spec.mirrorVertical.size(); ++m)
+				{
+					Assert::IsTrue(bitExactD(liveSpec.mirrorVertical[m], w1Spec.mirrorVertical[m]),
+						L"H2: mirrorVertical bin must match W1 bfd055d1f bit-for-bit (memcmp == 0)");
+					Assert::IsTrue(bitExactD(liveSpec.mirrorHorizontal[m], w1Spec.mirrorHorizontal[m]),
+						L"H2: mirrorHorizontal bin must match W1 bfd055d1f bit-for-bit (memcmp == 0)");
+					if (!bitExactD(driftedSpec.mirrorVertical[m], w1Spec.mirrorVertical[m]) ||
+						!bitExactD(driftedSpec.mirrorHorizontal[m], w1Spec.mirrorHorizontal[m]))
+						++driftedMirrorBitDiffs;
+				}
+				Assert::IsTrue(bitExactD(liveSpec.periodicPeak, w1Spec.periodicPeak),
+					L"H2: periodicPeak must match W1 bfd055d1f bit-for-bit (memcmp == 0)");
+				if (!bitExactD(driftedSpec.periodicPeak, w1Spec.periodicPeak))
+					++driftedPeriodBitDiffs;
+				Assert::IsTrue(bitExactD(liveSpec.mean, w1Spec.mean));
+				Assert::IsTrue(bitExactD(liveSpec.spread, w1Spec.spread));
+				for (int qi = 0; qi < 4; ++qi)
+					Assert::IsTrue(bitExactD(liveSpec.quadrants[qi], w1Spec.quadrants[qi]));
+				Assert::IsTrue(bitExactD(liveSpec.textBand, w1Spec.textBand));
+				Assert::IsTrue(bitExactD(liveSpec.sharpSteps, w1Spec.sharpSteps));
+				Assert::IsTrue(bitExactD(liveSpec.sharpStepsH, w1Spec.sharpStepsH));
+				Assert::IsTrue(bitExactD(liveSpec.sharpStepsV, w1Spec.sharpStepsV));
+
+				// ReadFrame bit-exact check on live vs W1 spectra:
+				const SR::FrameReading frLive = SR::ReadFrame({ liveSpec });
+				const SR::FrameReading frW1 = SR::ReadFrame({ w1Spec });
+				Assert::IsTrue(bitExactD(frLive.ratio, frW1.ratio), L"H2: ReadFrame ratio bit-exact vs W1");
+				Assert::IsTrue(bitExactD(frLive.ratioH, frW1.ratioH));
+				Assert::IsTrue(bitExactD(frLive.ratioV, frW1.ratioV));
+				Assert::IsTrue(bitExactD(frLive.vertical.coherence, frW1.vertical.coherence));
+				Assert::IsTrue(bitExactD(frLive.horizontal.coherence, frW1.horizontal.coherence));
+				Assert::IsTrue(bitExactD(frLive.vertical.ratio, frW1.vertical.ratio));
+				Assert::IsTrue(bitExactD(frLive.horizontal.ratio, frW1.horizontal.ratio));
+				Assert::IsTrue(bitExactD(frLive.vertical.runnerUp, frW1.vertical.runnerUp));
+				Assert::IsTrue(bitExactD(frLive.horizontal.runnerUp, frW1.horizontal.runnerUp));
+				Assert::IsTrue(bitExactD(frLive.quantisationFloor, frW1.quantisationFloor));
+				Assert::IsTrue(bitExactD(frLive.contrast, frW1.contrast));
+			}
+
+			// Mandatory Rule 3 Negative Control on EXACT SAME synthetic frames:
+			// |a|*|b| + std::hypot + cosTable drift MUST break memcmp == 0 on these exact tiles!
+			Assert::IsTrue(driftedMirrorBitDiffs > 0,
+				L"negative control: |a|*|b| + std::hypot breaks bit-exact memcmp == 0 on mirror coherence");
+			Assert::IsTrue(driftedPeriodBitDiffs > 0,
+				L"negative control: cosTable[(k*lag)&mask] breaks bit-exact memcmp == 0 on periodicPeak");
+
+			// (b) FrameQuality::MeasureNoise bit-exact memcmp == 0 vs verbatim W1 (bfd055d1f):
+			for (int ti = 0; ti < 3; ++ti)
+			{
+				const auto liveNoise = SourceIdentity::FrameQuality::MeasureNoise(tiles[ti]->data(), kTile);
+				const auto w1Noise = W1Ref::MeasureNoise(tiles[ti]->data(), kTile);
+				Assert::AreEqual(w1Noise.valid, liveNoise.valid);
+				Assert::IsTrue(bitExactD(liveNoise.sigma, w1Noise.sigma),
+					L"H2: FrameQuality::MeasureNoise sigma must match W1 bfd055d1f bit-for-bit (memcmp == 0)");
+				Assert::IsTrue(bitExactD(liveNoise.coverage, w1Noise.coverage),
+					L"H2: FrameQuality::MeasureNoise coverage must match W1 bfd055d1f bit-for-bit (memcmp == 0)");
+			}
+			// Negative control for FrameQuality 7x7 summation order: separable row-then-col double sum differs in ULP vs 49-term order!
+			{
+				const size_t nPix = static_cast<size_t>(kTile) * kTile;
+				std::vector<float> u(nPix), g1;
+				for (size_t i = 0; i < nPix; ++i) u[i] = natTile[i] * 255.0f;
+				SourceIdentity::FrameQuality::detail::Blur(u, g1, kTile, kTile, SourceIdentity::FrameQuality::detail::GaussTaps(1.0));
+				std::vector<float> hp(nPix);
+				for (size_t i = 0; i < nPix; ++i) hp[i] = u[i] - g1[i];
+				int boxOrderDiffs = 0;
+				for (int y = 0; y < kTile; ++y)
+					for (int x = 0; x < kTile; ++x)
+					{
+						double sDirect = 0.0;
+						double sSep = 0.0;
+						for (int dy = -3; dy <= 3; ++dy)
+						{
+							const int ry = SourceIdentity::FrameQuality::detail::Reflect(y + dy, kTile);
+							double rowS = 0.0;
+							for (int dx = -3; dx <= 3; ++dx)
+							{
+								const float v = hp[static_cast<size_t>(ry) * kTile + SourceIdentity::FrameQuality::detail::Reflect(x + dx, kTile)];
+								const double sq = static_cast<double>(v) * v;
+								sDirect += sq;
+								rowS += sq;
+							}
+							sSep += rowS;
+						}
+						if (!bitExactD(sDirect, sSep))
+							++boxOrderDiffs;
+					}
+				Assert::IsTrue(boxOrderDiffs > 0,
+					L"negative control: separable 7x7 row-then-col summation breaks bit-exact memcmp == 0 vs W1 49-term order");
+			}
+
+			// (c) PolyphaseProposer bit-exact memcmp == 0 vs verbatim W1 (bfd055d1f) on 2:1 and 3:1 synthetic streams:
+			int foldedScoreBitDiffs = 0;
+			const int latentList[2] = { 1920, 1280 };
+			for (int mode = 0; mode < 2; ++mode)
+			{
+				C::ProposerSettings ps;
+				ps.qMax = 16;
+				C::PolyphaseProposer liveProp(ps);
+				W1Ref::PolyphaseProposerW1 w1Prop(ps);
+
+				for (int e = 0; e < 3; ++e)
+				{
+					const C::LineSnapshot snap = MakeSynthSnapshot(kUhdW, kUhdH, latentList[mode], (mode == 0 ? 1080 : 720),
+						kLanczos3, 1, static_cast<uint64_t>(200 + mode * 10 + e), static_cast<int64_t>(e + 1) * 1000000,
+						0xF400ull + static_cast<uint64_t>(mode * 100 + e), e == 0);
+					C::LineSet ls;
+					Assert::IsTrue(C::ToLineSet(snap, 0, ls));
+					Assert::IsTrue(liveProp.AddEvaluation(ls));
+					Assert::IsTrue(w1Prop.AddEvaluation(ls));
+				}
+
+				C::PeriodScore liveScores[32], w1Scores[32], foldedScores[32];
+				const int nLive = liveProp.AllScores(liveScores, 32);
+				const int nW1 = w1Prop.AllScores(w1Scores, 32, false);
+				const int nFold = w1Prop.AllScores(foldedScores, 32, true);
+				Assert::AreEqual(nW1, nLive);
+				Assert::AreEqual(nW1, nFold);
+				Assert::IsTrue(nLive == 15);
+				for (int i = 0; i < nLive; ++i)
+				{
+					Assert::AreEqual(w1Scores[i].q, liveScores[i].q);
+					Assert::AreEqual(w1Scores[i].lowVarPhase, liveScores[i].lowVarPhase);
+					Assert::IsTrue(bitExactD(liveScores[i].gain, w1Scores[i].gain),
+						L"H2: PolyphaseProposer gain must match W1 bfd055d1f bit-for-bit (memcmp == 0)");
+					Assert::IsTrue(bitExactD(liveScores[i].ratio, w1Scores[i].ratio),
+						L"H2: PolyphaseProposer ratio must match W1 bfd055d1f bit-for-bit (memcmp == 0)");
+					Assert::IsTrue(bitExactD(liveScores[i].dBic, w1Scores[i].dBic),
+						L"H2: PolyphaseProposer dBic must match W1 bfd055d1f bit-for-bit (memcmp == 0)");
+
+					if (!bitExactD(foldedScores[i].gain, w1Scores[i].gain) ||
+						!bitExactD(foldedScores[i].dBic, w1Scores[i].dBic))
+						++foldedScoreBitDiffs;
+				}
+
+				C::ProposedCandidate liveCands[C::kMaxCandidates], w1Cands[C::kMaxCandidates];
+				const int pcLive = liveProp.Propose(kUhdW, nullptr, 0, liveCands, C::kMaxCandidates);
+				const int pcW1 = w1Prop.Propose(kUhdW, nullptr, 0, w1Cands, C::kMaxCandidates);
+				Assert::AreEqual(pcW1, pcLive);
+				for (int i = 0; i < pcLive; ++i)
+				{
+					Assert::AreEqual(w1Cands[i].n, liveCands[i].n);
+					Assert::AreEqual(w1Cands[i].q, liveCands[i].q);
+					Assert::AreEqual(w1Cands[i].m, liveCands[i].m);
+					Assert::AreEqual(w1Cands[i].source, liveCands[i].source);
+					Assert::IsTrue(bitExactD(liveCands[i].score, w1Cands[i].score),
+						L"H2: PolyphaseProposer candidate score must match W1 bfd055d1f bit-for-bit (memcmp == 0)");
+				}
+			}
+			Assert::IsTrue(foldedScoreBitDiffs > 0,
+				L"negative control: folded/re-pooled PolyphaseProposer summation breaks bit-exact memcmp == 0 vs W1");
+		}
+
+		// 15. M3 (MEDIUM): DescaleVerifier P3 two-pass (p3TwoPass = true) MUST tag non-promoted screen-only
+		//     candidates with kReasonScreenOnly, set exactDone == false (so ChainEvidence excludes them from LLR),
+		//     and inside ChainEstimator increment EstimatorCounters::p3ScreenOnlyCandidates & set CandidateDetail::screenOnly!
+		TEST_METHOD(M3P3TwoPassTagsScreenOnlyCandidatesAndExcludesFromEvidenceLlr)
+		{
+			using namespace S3Fx;
+
+			const C::LineSnapshot snap = MakeSynthSnapshot(kUhdW, kUhdH, 1920, 1080, kLanczos3, 1,
+				501u, 1000000, 0xE301ull, true);
+			C::LineSet lsX;
+			Assert::IsTrue(C::ToLineSet(snap, 0, lsX));
+
+			const int cands[6] = { 1280, 1440, 1600, 1920, 2560, 2880 };
+
+			// (a) Direct DescaleVerifier with p3TwoPass = true, keepTop = 1:
+			C::VerifyOptions optTwo;
+			optTwo.exactOnly = true;
+			optTwo.p3TwoPass = true;
+			optTwo.p3ScreenKeepTop = 1;
+			C::DescaleVerifier vTwo;
+			C::VerifyResult vrTwo;
+			Assert::IsTrue(vTwo.Evaluate(lsX, cands, 6, optTwo, vrTwo));
+
+			int screenOnlyCount = 0;
+			int fullExactCount = 0;
+			bool true1920Promoted = false;
+			for (size_t i = 0; i < vrTwo.candidates.size(); ++i)
+			{
+				const C::CandidateResult& cr = vrTwo.candidates[i];
+				if ((cr.reason & C::kReasonScreenOnly) != 0u)
+				{
+					++screenOnlyCount;
+					Assert::IsFalse(cr.exactDone,
+						L"M3: non-promoted P3 screen-only candidate must have exactDone == false");
+				}
+				else if (cr.valid && cr.exactDone)
+				{
+					++fullExactCount;
+					if (cr.n == 1920)
+						true1920Promoted = true;
+				}
+			}
+			Assert::IsTrue(screenOnlyCount > 0, L"M3: P3 two-pass produces non-promoted screen-only candidates tagged with kReasonScreenOnly");
+			Assert::IsTrue(fullExactCount >= 1 && true1920Promoted, L"M3: dipping true candidate 1920 is still promoted to full exact");
+			Assert::IsTrue((vrTwo.reason & C::kReasonScreenOnly) != 0u, L"M3: VerifyResult::reason surfaces kReasonScreenOnly");
+
+			// Verify ChainEvidence excludes all screen-only candidates from LLR:
+			C::ChainEvidence ev;
+			C::AxisObservation obs;
+			obs.verify = &vrTwo;
+			obs.axisLen = kUhdW;
+			obs.floorCodes = C::QuantizationFloorCodes(1.0);
+			obs.probeRan = true;
+			obs.probeSeen = true;
+			obs.shotId = 1;
+			obs.timeUs = -1;
+			obs.rasterW = kUhdW;
+			obs.rasterH = kUhdH;
+			C::EvidenceUpdate up;
+			Assert::IsTrue(ev.Submit(0, obs, up));
+			for (int i = 0; i < up.candidateCount; ++i)
+			{
+				for (size_t j = 0; j < vrTwo.candidates.size(); ++j)
+				{
+					if ((vrTwo.candidates[j].reason & C::kReasonScreenOnly) != 0u)
+					{
+						Assert::AreNotEqual(vrTwo.candidates[j].n, up.cand[i].n,
+							L"M3: screen-only candidate must be excluded from ChainEvidence LLR");
+					}
+				}
+			}
+
+			// Same-input negative control: p3TwoPass = false promotes ALL 6 candidates to full exact (0 screen-only):
+			C::VerifyOptions optOne;
+			optOne.exactOnly = true;
+			optOne.p3TwoPass = false;
+			C::DescaleVerifier vOne;
+			C::VerifyResult vrOne;
+			Assert::IsTrue(vOne.Evaluate(lsX, cands, 6, optOne, vrOne));
+			for (size_t i = 0; i < vrOne.candidates.size(); ++i)
+			{
+				Assert::IsTrue((vrOne.candidates[i].reason & C::kReasonScreenOnly) == 0u,
+					L"negative control: single-pass exact sets zero kReasonScreenOnly bits");
+				Assert::IsTrue(vrOne.candidates[i].exactDone);
+			}
+
+			// (b) End-to-end ChainEstimator with conventionDrivenProposals = true, safetyRules = true:
+			//     increments p3ScreenOnlyCandidates and sets CandidateDetail::screenOnly == true!
+			{
+				ChainFx::ManualClock clk;
+				C::EstimatorSettings cfg;
+				cfg.safetyRules = true;
+				cfg.conventionDrivenProposals = true;
+				cfg.outputStepOverride = 1;
+				C::ChainEstimator est(cfg, clk.Fn());
+				est.SetSynchronous(true);
+				C::EvaluationDetail captured;
+				est.SetEvaluationObserver([&](const C::EvaluationDetail& d) { captured = d; });
+				est.SetMode(C::EstimatorMode::On);
+
+				clk.Set(1000.0);
+				Assert::IsTrue(est.SubmitLines(snap));
+				Assert::IsTrue(est.GetCounters().p3ScreenOnlyCandidates > 0,
+					L"M3: ChainEstimator must visibly increment EstimatorCounters::p3ScreenOnlyCandidates");
+
+				int detailScreenOnly = 0;
+				for (int a = 0; a < 2; ++a)
+					for (const auto& cd : captured.axis[a].cands)
+						if (cd.screenOnly)
+						{
+							++detailScreenOnly;
+							Assert::IsFalse(cd.exact, L"M3: CandidateDetail::screenOnly implies exact == false");
+							Assert::IsFalse(cd.informative, L"M3: screen-only candidate is not informative for LLR");
+						}
+				Assert::IsTrue(detailScreenOnly > 0, L"M3: EvaluationDetail surfaces CandidateDetail::screenOnly == true");
+			}
+		}
+
+		// 16. M5 (MEDIUM): ClassifyBitDepthFromStep(step=1, outputBits=10, empFloorCodes >= 4/sqrt(12)*(1-0.03))
+		//     MUST classify an 8-bit-in-10-bit HDMI loop as BitDepthClass::N8 (NOT N10!), with negative controls
+		//     at empFloorCodes = 0.0 / 0.289 -> N10, plus end-to-end ChainEstimator EvaluationDetail verification!
+		TEST_METHOD(M5ClassifyBitDepthFromStepUsesEmpiricalFloorFor8In10HdmiLoop)
+		{
+			using namespace S3Fx;
+
+			// (a) Direct ClassifyBitDepthFromStep contract + negative controls:
+			Assert::IsTrue(C::ClassifyBitDepthFromStep(1, 10, 1.30) == C::BitDepthClass::N8,
+				L"M5: step=1, outputBits=10, empFloor=1.30 (8-in-10 HDMI loop) must classify as N8");
+			Assert::IsTrue(C::ClassifyBitDepthFromStep(1, 10, 1.155) == C::BitDepthClass::N8,
+				L"M5: empFloor right at 8-bit uniform floor (4/sqrt(12) ~= 1.155) classifies as N8");
+
+			// Same-input negative controls: without elevated empirical floor, step=1 outputBits=10 classifies as N10!
+			Assert::IsTrue(C::ClassifyBitDepthFromStep(1, 10, 0.0) == C::BitDepthClass::N10,
+				L"negative control: step=1, outputBits=10, empFloor=0.0 classifies as N10");
+			Assert::IsTrue(C::ClassifyBitDepthFromStep(1, 10, 0.289) == C::BitDepthClass::N10,
+				L"negative control: step=1, outputBits=10, empFloor=0.289 (true 10-bit floor) classifies as N10");
+
+			// (b) End-to-end ChainEstimator on synthetic 8-in-10 HDMI loop snapshot (step==1, sigma=1.30):
+			//     EvaluationDetail::nullTableDepthClass MUST resolve to BitDepthClass::N8!
+			const C::LineSnapshot loopSnap = MakeSynthSnapshot(kUhdW, kUhdH, 1920, 1080, kBilinear, 1,
+				10, 1000000, 0xE501ull, true, 1.30, false, 0.75);
+			const C::LineSnapshot clean10Snap = MakeSynthSnapshot(kUhdW, kUhdH, 1920, 1080, kBilinear, 1,
+				20, 2000000, 0xE502ull, true, 0.0, false, 0.75);
+			Assert::AreEqual(1, C::DetectStepCodes(loopSnap), L"fixture: 8-in-10 loop reads step==1 to bit-mask");
+			Assert::AreEqual(1, C::DetectStepCodes(clean10Snap), L"fixture: clean 10-bit reads step==1");
+
+			ChainFx::ManualClock clk;
+			C::EstimatorSettings cfg;
+			cfg.useDepthNullTables = true;
+			cfg.empiricalFloorMode = C::EmpiricalFloorMode::Live;
+			C::ChainEstimator est(cfg, clk.Fn());
+			est.SetSynchronous(true);
+			est.SetDiagnosticDepths(10, 10); // 10-bit HDMI output link
+			C::EvaluationDetail det;
+			est.SetEvaluationObserver([&](const C::EvaluationDetail& d) { det = d; });
+			est.SetMode(C::EstimatorMode::On);
+
+			clk.Set(1000.0);
+			Assert::IsTrue(est.SubmitLines(loopSnap));
+			Assert::IsTrue(det.empiricalFloorValid[0] && det.empiricalFloorCodes[0] > 1.12,
+				L"fixture: empirical floor measured 8-bit-scale noise on 8-in-10 loop");
+			Assert::IsTrue(det.nullTableDepthClass == C::BitDepthClass::N8,
+				L"M5: ChainEstimator must classify 8-in-10 HDMI loop snapshot as BitDepthClass::N8");
+
+			// Same-input negative control: clean 10-bit snapshot on the same 10-bit link classifies as N10!
+			clk.Set(2500.0);
+			Assert::IsTrue(est.SubmitLines(clean10Snap));
+			Assert::IsTrue(det.nullTableDepthClass == C::BitDepthClass::N10,
+				L"negative control: clean 10-bit snapshot classifies as BitDepthClass::N10");
+		}
+
+		// 17. M8 (MEDIUM): Tracker::Settings::ditherFloorDetailAbove = true MUST NOT starve an UNDITHERED low-level
+		//     native 4K frame whose above-band power sits between 2.25 * uniformFloor and 4.5 * uniformFloor
+		//     (DitherFloorStarved() == 0 and native detail clears the 0.5 upscale lock!), with a same-input negative
+		//     control proving DitherAwareDetailAbove(frame, ratio, /*tpdfDither=*/true) WOULD falsely starve it!
+		TEST_METHOD(M8UnditheredLowLevelNative4KNotStarvedByDitherFloorDetailAbove)
+		{
+			using namespace S3Fx;
+
+			SR::Tracker::Settings cfg;
+			cfg.ditherFloorDetailAbove = true;
+			SR::Tracker tracker(cfg);
+
+			constexpr double kStep8 = 4.0 / 1023.0;
+			const double uniformFloor = (kStep8 * kStep8) / 12.0; // 1.274e-6
+			const double qFloorLog10 = std::log10(uniformFloor);
+
+			// Phase 1: Establish a clean 0.5 upscale lock across 3 shots (24 sharp 1080p->4K frames, 0..11.5 s).
+			constexpr int kTilesPerFrame = 4;
+			std::vector<std::vector<double>> shotTiles[3];
+			for (int shot = 0; shot < 3; ++shot)
+			{
+				shotTiles[shot].resize(kTilesPerFrame);
+				for (int ti = 0; ti < kTilesPerFrame; ++ti)
+				{
+					const TileScene sc(0xE80000ull + static_cast<uint64_t>(shot * 100 + ti * 7), 0.0, 160, 0.012);
+					shotTiles[shot][static_cast<size_t>(ti)] = RenderContinuousTile(sc, 0.5, 800 + ti * 320, 500 + shot * 256);
+				}
+			}
+
+			double tSec = 0.0;
+			for (int f = 0; f < 24; ++f, tSec += 0.5)
+			{
+				const int shot = f / 8;
+				const int inShot = f % 8;
+				const double shift = 0.004 * static_cast<double>(inShot) - 0.014;
+				std::vector<std::vector<float>> frameTiles(kTilesPerFrame);
+				for (int ti = 0; ti < kTilesPerFrame; ++ti)
+				{
+					// Plain undithered 8-bit-in-10-bit quantization (no TPDF dither).
+					const std::vector<double>& cont = shotTiles[shot][static_cast<size_t>(ti)];
+					std::vector<float> q(cont.size());
+					for (size_t i = 0; i < cont.size(); ++i)
+					{
+						const double cl = (std::max)(0.0, (std::min)(1.0, cont[i] + shift));
+						const int c8 = static_cast<int>(std::floor(cl * 255.0 + 0.5));
+						q[i] = static_cast<float>((c8 * 4) / 1023.0);
+					}
+					frameTiles[static_cast<size_t>(ti)] = std::move(q);
+				}
+				const SR::FrameReading fr = BuildFrameFromTiles(frameTiles, 1023);
+				tracker.Update(fr, tSec);
+			}
+			Assert::IsTrue(std::fabs(tracker.Ratio() - 0.5) < 0.05, L"fixture: tracker locked at ~0.5 on 1080p->4K");
+			Assert::AreEqual(0ULL, tracker.DitherFloorStarved());
+
+			// Phase 2: Construct an UNDITHERED low-level native 4K FrameReading with realistic 1/f high-frequency decay:
+			//   - below-0.5 band: 30 * uniformFloor
+			//   - above-0.5 detail band [a0..a1]: 3.2 * uniformFloor (strictly between 2.25 * uniformFloor and 4.5 * uniformFloor!)
+			//   - far Nyquist tail [0.80*half..0.97*half]: 1.0 * uniformFloor (undithered uniform rounding floor, NOT TPDF!)
+			//   - normal contrast (>= 0.04, NOT dark) and DetailAbove clearly above ReferenceDetail(0.5) + detailMarginDecades!
+			SR::FrameReading unditheredNative;
+			unditheredNative.informativeTiles = kTilesPerFrame;
+			unditheredNative.ratio = 1.0;
+			unditheredNative.ratioH = 1.0;
+			unditheredNative.ratioV = 1.0;
+			unditheredNative.mixed = false;
+			unditheredNative.contrast = 0.20;
+			unditheredNative.quantisationFloor = qFloorLog10;
+			unditheredNative.mean = 0.50;
+			unditheredNative.signature = 0.123456; // distinct from previous frame so not treated as repeat
+			unditheredNative.verticalPower.assign(129, 30.0 * uniformFloor);
+			unditheredNative.horizontalPower.assign(129, 30.0 * uniformFloor);
+			for (size_t k = 64; k < 102; ++k)
+			{
+				unditheredNative.verticalPower[k] = 3.2 * uniformFloor;
+				unditheredNative.horizontalPower[k] = 3.2 * uniformFloor;
+			}
+			for (size_t k = 102; k < 129; ++k)
+			{
+				unditheredNative.verticalPower[k] = 1.0 * uniformFloor;
+				unditheredNative.horizontalPower[k] = 1.0 * uniformFloor;
+			}
+
+			// Mandatory Rule 3 Negative Control on EXACT SAME frame:
+			// Unconditional DitherAwareDetailAbove(frame, 0.5, /*tpdfDither=*/true) WOULD falsely starve this frame!
+			SR::DitherDetailAboveInfo tpdfInfo, unifInfo;
+			(void)SR::DitherAwareDetailAbove(unditheredNative, 0.5, true, &tpdfInfo);
+			(void)SR::DitherAwareDetailAbove(unditheredNative, 0.5, false, &unifInfo);
+			Assert::IsTrue(tpdfInfo.valid && unifInfo.valid);
+			Assert::IsTrue(tpdfInfo.maxAbovePower > 2.25 * uniformFloor && tpdfInfo.maxAbovePower < 4.5 * uniformFloor,
+				L"fixture: above-band power sits strictly in (2.25 * uniformFloor, 4.5 * uniformFloor)");
+			Assert::IsTrue(tpdfInfo.atDitherFloor && !tpdfInfo.hasRealDetailAbove,
+				L"negative control: unconditional tpdfDither=true WOULD falsely starve this undithered low-level native 4K frame");
+			Assert::IsFalse(unifInfo.atDitherFloor);
+			Assert::IsTrue(unifInfo.hasRealDetailAbove);
+
+			// Protected Tracker with ditherFloorDetailAbove = true MUST NOT starve this undithered native 4K frame
+			// and MUST clear the 0.5 upscale lock back to 1.0 (native)!
+			tracker.Update(unditheredNative, tSec);
+			Assert::AreEqual(0ULL, tracker.DitherFloorStarved(),
+				L"M8: undithered low-level native 4K frame must NOT be starved as dither");
+			Assert::AreEqual(1.0, tracker.Ratio(), 1e-9,
+				L"M8: undithered low-level native 4K detail must clear the 0.5 upscale lock back to native");
+		}
+
+		// 18. L3 (LOW): SetEmpiricalFloorMode MUST NOT silently clear configured floor behavior across mode
+		//     transitions (Shadow / Live / Off interleaved with SetEdgeStatsSettings).
+		TEST_METHOD(L3SetEmpiricalFloorModePreservesConfiguredFloorBehaviorAcrossTransitions)
+		{
+			using namespace S3Fx;
+
+			const C::LineSnapshot loopSnap1 = MakeSynthSnapshot(kUhdW, kUhdH, 1920, 1080, kBilinear, 1,
+				10, 1000000, 0xE901ull, true, 1.30, false, 0.75);
+			const C::LineSnapshot loopSnap2 = MakeSynthSnapshot(kUhdW, kUhdH, 1920, 1080, kBilinear, 1,
+				20, 2000000, 0xE902ull, false, 1.30, false, 0.75);
+			const C::LineSnapshot loopSnap3 = MakeSynthSnapshot(kUhdW, kUhdH, 1920, 1080, kBilinear, 1,
+				30, 3000000, 0xE903ull, false, 1.30, false, 0.75);
+			const C::LineSnapshot loopSnap4 = MakeSynthSnapshot(kUhdW, kUhdH, 1920, 1080, kBilinear, 1,
+				40, 4000000, 0xE904ull, false, 1.30, false, 0.75);
+
+			ChainFx::ManualClock clk;
+			C::EstimatorSettings cfg;
+			cfg.outputStepOverride = 1;
+			C::ChainEstimator est(cfg, clk.Fn());
+			est.SetSynchronous(true);
+			C::EvaluationDetail det;
+			est.SetEvaluationObserver([&](const C::EvaluationDetail& d) { det = d; });
+			est.SetMode(C::EstimatorMode::On);
+
+			// 1. Set explicit Shadow mode, then call SetEdgeStatsSettings(es, false): MUST preserve Shadow (not clobber to Off!).
+			C::EdgeStatsSettings es;
+			es.enabled = false;
+			est.SetEmpiricalFloorMode(C::EmpiricalFloorMode::Shadow);
+			est.SetEdgeStatsSettings(es, false);
+			clk.Set(1000.0);
+			Assert::IsTrue(est.SubmitLines(loopSnap1));
+			Assert::IsTrue(det.empiricalFloorMode == C::EmpiricalFloorMode::Shadow,
+				L"L3: SetEdgeStatsSettings(es, false) must not silently clobber explicit Shadow mode");
+			Assert::IsTrue(det.empiricalFloorValid[0] && det.empiricalFloorCodes[0] > 0.95);
+			Assert::IsTrue(det.axis[0].floorCodes < 0.35, L"Shadow does not mutate decision floorCodes");
+
+			// 2. Set explicit Live mode, then call SetEdgeStatsSettings(es, false): MUST preserve Live (not clobber to Off!).
+			est.SetEmpiricalFloorMode(C::EmpiricalFloorMode::Live);
+			est.SetEdgeStatsSettings(es, false);
+			clk.Set(2500.0);
+			Assert::IsTrue(est.SubmitLines(loopSnap2));
+			Assert::IsTrue(det.empiricalFloorMode == C::EmpiricalFloorMode::Live,
+				L"L3: SetEdgeStatsSettings(es, false) must not silently clobber explicit Live mode");
+			Assert::IsTrue(det.axis[0].floorCodes > 0.95, L"Live adapts axis floorCodes to ~1.30 loop noise");
+
+			// 3. Explicit Off mode cleanly disables empirical floor:
+			est.SetEmpiricalFloorMode(C::EmpiricalFloorMode::Off);
+			clk.Set(4000.0);
+			Assert::IsTrue(est.SubmitLines(loopSnap3));
+			Assert::IsTrue(det.empiricalFloorMode == C::EmpiricalFloorMode::Off);
+			Assert::IsTrue(det.axis[0].floorCodes < 0.35);
+
+			// 4. Re-enabling via SetEdgeStatsSettings(es, true) activates Live cleanly:
+			est.SetEdgeStatsSettings(es, true);
+			clk.Set(5500.0);
+			Assert::IsTrue(est.SubmitLines(loopSnap4));
+			Assert::IsTrue(det.empiricalFloorMode == C::EmpiricalFloorMode::Live,
+				L"L3: SetEdgeStatsSettings(es, true) transitions cleanly to Live");
+			Assert::IsTrue(det.axis[0].floorCodes > 0.95);
 		}
 	};
 }

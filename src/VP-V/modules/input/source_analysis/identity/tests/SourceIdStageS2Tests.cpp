@@ -28,6 +28,7 @@
 #include "ChainEstimatorFixtures.h"
 #include "GeometryFixtures.h"
 
+#include <VP-V/modules/input/source_analysis/SourceResolutionDetector.h>
 #include <VP-V/modules/input/source_analysis/SourceResolutionMonitor.h>
 #include <VP-V/modules/input/source_analysis/identity/SourceIdConsensus.h>
 #include <VP-V/modules/input/source_analysis/identity/SourceIdPipeline.h>
@@ -323,6 +324,33 @@ namespace Tests
 			v.evidenceSeq = evSeq;
 			v.safetyVeto = veto;
 			return v;
+		}
+
+		inline C::NullTables MakeCalibratedEdgeStatsNulls()
+		{
+			C::NullTables t = C::NullTables::Placeholder();
+			t.placeholder = false;
+			t.statKind = C::NullStatKind::SegmentExcessVariance;
+			return t;
+		}
+
+		inline C::ClassicalFreshInput MakeClassicalFresh(
+			bool valid, double ratioH, double ratioV, bool detailAbove,
+			uint64_t frameSeq, int64_t timeUs, double analysisIntervalSec = 1.0,
+			bool mixed = false, bool subtitle = false, bool inFade = false)
+		{
+			C::ClassicalFreshInput cf;
+			cf.valid = valid;
+			cf.ratioH = ratioH;
+			cf.ratioV = ratioV;
+			cf.detailAbove = detailAbove;
+			cf.mixed = mixed;
+			cf.subtitle = subtitle;
+			cf.inFade = inFade;
+			cf.frameSeq = frameSeq;
+			cf.timeUs = timeUs;
+			cf.analysisIntervalSec = analysisIntervalSec;
+			return cf;
 		}
 
 		inline G::Record MakeConfidentGeomRecord(uint64_t seq, int64_t timeUs, int nx, int Nx, int ny, int Ny, uint64_t streamKey = 1)
@@ -1121,15 +1149,17 @@ namespace Tests
 					// ABR step-up at t0 = s seconds to larger 1920x1080 (0.5x0.5):
 					const int64_t t0Us = static_cast<int64_t>(s) * 1000000;
 					est.NoteAbrStepEvent(t0Us, +0.25, seq);
-					est.SetClassicalFresh(true, 0.5, 0.5, false);
 
-					// 2 post-t0 evaluations with uninformative flat chain lines so Classical A's 2-frame confirmation
-					// streak is isolated cleanly (Chain-only 1-eval confirmation is tested separately in High1...):
+					// 2 post-t0 evaluations with uninformative flat chain lines and 2 distinct fresh classical frames
+					// so Classical A's 2-frame confirmation streak is isolated cleanly (Chain-only 1-eval confirmation
+					// is tested separately in High1...):
 					for (int k = 0; k < 2; ++k, ++s, ++seq)
 					{
+						const int64_t evalTimeUs = static_cast<int64_t>(s) * 1000000;
+						est.SetClassicalFresh(MakeClassicalFresh(true, 0.5, 0.5, false, seq, evalTimeUs, 1.0));
 						clk.Set(static_cast<double>(s) * 1500.0);
 						const C::LineSnapshot flatPost = MakeFlatSnapshot(kUhdW, kUhdH, 512, seq,
-							static_cast<int64_t>(s) * 1000000, false);
+							evalTimeUs, false);
 						Assert::IsTrue(est.SubmitLines(flatPost));
 					}
 					latchAfter = est.StatusInput().latchNx;
@@ -1229,10 +1259,12 @@ namespace Tests
 				Assert::IsTrue((upOff.cand[0].reason & C::kReasonLowDetail) != 0u);
 				Assert::IsFalse(upOff.cand[0].edgeStatsUsed);
 
-				// With edgeStats ON on the EXACT SAME VerifyResult: recovers clean evidence & isolates 1/2 notch!
+				// With edgeStats ON on the EXACT SAME VerifyResult (with calibrated SegmentExcessVariance null tables):
+				// recovers clean evidence & isolates 1/2 notch!
+				const C::NullTables calEdgeNulls = MakeCalibratedEdgeStatsNulls();
 				C::EvidenceSettings onCfg;
 				onCfg.edgeStats.enabled = true;
-				C::ChainEvidence evOn(onCfg);
+				C::ChainEvidence evOn(onCfg, calEdgeNulls);
 				C::EvidenceUpdate upOn;
 				Assert::IsTrue(evOn.Submit(0, obs, upOn));
 				Assert::IsTrue(upOn.cand[0].informative, L"wired ChainEdgeStats recovers 80%-flat 8-bit signal");
@@ -1253,7 +1285,7 @@ namespace Tests
 				vrComb.candidates.push_back(MakeSyntheticCandidate(3360, 2.0, -0.018, 16, 15, 7.0, 4.00, 1.70, 1.65, 0.875, 3));
 				C::AxisObservation obsComb = obs;
 				obsComb.verify = &vrComb;
-				C::ChainEvidence evComb(onCfg);
+				C::ChainEvidence evComb(onCfg, calEdgeNulls);
 				C::EvidenceUpdate upComb;
 				Assert::IsTrue(evComb.Submit(0, obsComb, upComb));
 				Assert::AreEqual(C::kClassK8, upComb.cand[0].cls, L"80%-flat 8x8 codec-grid comb kept safely in K8 via segment-gated comb probes");
@@ -1891,7 +1923,8 @@ namespace Tests
 			obsMixed.rasterW = kUhdW;
 			obsMixed.rasterH = kUhdH;
 
-			C::ChainEvidence evMixed(onCfg);
+			const C::NullTables calEdgeNulls = MakeCalibratedEdgeStatsNulls();
+			C::ChainEvidence evMixed(onCfg, calEdgeNulls);
 			C::EvidenceUpdate upMixed;
 			Assert::IsTrue(evMixed.Submit(0, obsMixed, upMixed));
 			Assert::AreEqual(1, upMixed.candidateCount);
@@ -1908,7 +1941,7 @@ namespace Tests
 			vrUniform.candidates.push_back(MakeSyntheticCandidate(1920, 2.0, -0.08, 16, 15, 7.0, 1.85, 1.70, 1.65, 0.5, 3));
 			C::AxisObservation obsUniform = obsMixed;
 			obsUniform.verify = &vrUniform;
-			C::ChainEvidence evUniform(onCfg);
+			C::ChainEvidence evUniform(onCfg, calEdgeNulls);
 			C::EvidenceUpdate upUniform;
 			Assert::IsTrue(evUniform.Submit(0, obsUniform, upUniform));
 			Assert::IsFalse(upUniform.cand[0].mixed, L"uniform upscaled segments are not mixed");
@@ -2132,15 +2165,16 @@ namespace Tests
 					Assert::AreEqual(uint64_t(1), est.GetCounters().stepMark.unconfirmedTimeouts);
 
 					// Real ABR step-up to 0.5 x 0.5 (1920 x 804 inside active 3840 x 1608): submit flat/uninformative
-					// letterboxed frames preserving letterboxActive so Chain stays neutral on Eval #1 and Classical A's
-					// 2-frame streak confirms cleanly via active-dimension Ny=1608!
+					// letterboxed frames preserving letterboxActive and 2 distinct fresh classical frames so Chain stays
+					// neutral on Eval #1 and Classical A's 2-frame streak confirms cleanly via active-dimension Ny=1608!
 					est.NoteAbrStepEvent(static_cast<int64_t>(s) * 1000000, +0.25, seq);
-					est.SetClassicalFresh(true, 0.5, 0.5, false);
 					for (int k = 0; k < 2; ++k, ++s, ++seq)
 					{
+						const int64_t evalTimeUs = static_cast<int64_t>(s) * 1000000;
+						est.SetClassicalFresh(MakeClassicalFresh(true, 0.5, 0.5, false, seq, evalTimeUs, 1.0));
 						clk.Set(static_cast<double>(s) * 1500.0);
 						const C::LineSnapshot lbFlat = MakeLetterboxedFlatSnapshot(
-							kUhdW, kUhdH, letterboxActive, 512, seq, static_cast<int64_t>(s) * 1000000, false);
+							kUhdW, kUhdH, letterboxActive, 512, seq, evalTimeUs, false);
 						Assert::IsTrue(est.SubmitLines(lbFlat));
 					}
 					Assert::AreEqual(0, est.StatusInput().latchNx, L"letterbox step-up confirmed cleanly with active-dimension Ny=1608");
@@ -2292,6 +2326,722 @@ namespace Tests
 			Assert::IsTrue(recRestored.ratioH < 0.6f && recRestored.ratioV < 0.6f,
 				L"restoring SetSourceIdBlockClassicalAlone(false) cleanly re-enables classical-alone entry");
 			Assert::IsTrue(engagedRestored > 0);
+		}
+
+		// 15. B1 (BLOCKER): Blind-classical upscaled 1080p->4K signal (valid=true, ratio=1.0, trackerNative=true,
+		//     perFrameDetailAbove=false) MUST allow Chain-Alone entry (1920x1080) and hold continuously > 60 s with
+		//     0 releases / 0 flapping, carrying kReasonChainAloneEntry — with same-input negative controls proving
+		//     sticky detailAbove=true blocks entry AND releases within ~3 s. Also proves per-candidate R1 Nyquist
+		//     filtering via ClassicalFreshInput::detailAboveAtRatio rejects 960x540 while latching 1920x1080!
+		TEST_METHOD(B1BlindClassicalNativeChainAloneHoldsOver60sAndPerCandidateNyquist)
+		{
+			using namespace S2Fx;
+			namespace SR = SourceResolution;
+
+			// Part A: Real SourceResolution::Tracker + FrameReading wired to ChainEstimator on blind-classical 1080p->4K.
+			{
+				// Construct a realistic blind-classical FrameReading on 1080p->4K: mirror coherence was lost (ratio == 1.0),
+				// while the power spectrum has strong below-0.5 detail and quiet above-0.5 roll-off (no positive detail_above).
+				auto makeBlindClassicalFrame = [](double belowPow, double abovePow) {
+					SR::FrameReading fr;
+					fr.informativeTiles = 8;
+					fr.ratio = 1.0;
+					fr.ratioH = 1.0;
+					fr.ratioV = 1.0;
+					fr.contrast = 0.25;
+					fr.quantisationFloor = -7.1;
+					fr.verticalPower.assign(129, belowPow);
+					fr.horizontalPower.assign(129, belowPow);
+					for (size_t k = 64; k < 129; ++k)
+					{
+						fr.verticalPower[k] = abovePow;
+						fr.horizontalPower[k] = abovePow;
+					}
+					return fr;
+				};
+
+				// Run Tracker to confirm the monitor's sticky native state (tracker.Ratio() >= 1.0 && tracker.Candidate() >= 1.0)
+				// is genuinely TRUE on this blind-classical upscaled stream while actual per-frame DetailAbove is strongly negative.
+				SR::Tracker tracker;
+				const SR::FrameReading blindFr = makeBlindClassicalFrame(1e-3, 1e-5);
+				for (int i = 0; i < 6; ++i)
+					tracker.Update(blindFr, 0.5 * static_cast<double>(i));
+				const bool trackerNative = blindFr.informative() && tracker.Ratio() >= 1.0 && tracker.Candidate() >= 1.0;
+				Assert::IsTrue(trackerNative, L"fixture: blind-classical tracker reads sticky native (Ratio >= 1 && Candidate >= 1)");
+				const double daAtHalf = SR::DetailAbove(blindFr, 0.5);
+				Assert::IsTrue(std::isfinite(daAtHalf) && daAtHalf < -1.5,
+					L"fixture: actual per-frame DetailAbove(0.5) is strongly negative (no above-band 4K detail)");
+				const bool perFrameDetailAbove = false;
+
+				// Pre-generate 56 deterministic 1080p->4K snapshots over t = 0..82.5 s (1.5 s cadence, cuts every 12 s)
+				// so protected run and both negative controls execute on the EXACT SAME frames!
+				constexpr int kTotalEvals = 56;
+				std::vector<C::LineSnapshot> stream;
+				stream.reserve(kTotalEvals);
+				for (int i = 0; i < kTotalEvals; ++i)
+				{
+					const int64_t tUs = static_cast<int64_t>(i) * 1500000;
+					const bool cut = (i % 8) == 0;
+					stream.push_back(MakeSynthSnapshot(kUhdW, kUhdH, 1920, 1080, kBilinear, 1,
+						static_cast<uint64_t>(10 + i), tUs, 96001u + static_cast<uint64_t>(i), cut));
+				}
+
+				// (a1) Honest per-frame wiring (detailAbove = perFrameDetailAbove = false, ratio = 1.0, valid = true):
+				//      MUST enter 1920x1080 via Chain-alone and hold continuously for > 60 s with 0 releases / 0 flapping!
+				{
+					ChainFx::ManualClock clk;
+					C::EstimatorSettings cfg;
+					cfg.safetyRules = true;
+					cfg.jointLatch.enabled = true;
+					cfg.conventionDrivenProposals = true;
+					C::ChainEstimator est(cfg, clk.Fn());
+					est.SetSynchronous(true);
+					est.SetMode(C::EstimatorMode::On);
+
+					int64_t firstLatchUs = -1;
+					int64_t lastLatchUs = -1;
+					int dropsAfterLatch = 0;
+					G::Record latchedRec;
+
+					for (int i = 0; i < kTotalEvals; ++i)
+					{
+						const int64_t tUs = stream[static_cast<size_t>(i)].timeUs;
+						clk.Set(static_cast<double>(tUs) / 1000.0);
+						est.SetClassicalFresh(MakeClassicalFresh(
+							true, 1.0, 1.0, perFrameDetailAbove, stream[static_cast<size_t>(i)].seq, tUs, 1.5));
+						Assert::IsTrue(est.SubmitLines(stream[static_cast<size_t>(i)]));
+
+						const int nx = est.StatusInput().latchNx;
+						const int ny = est.StatusInput().latchNy;
+						if (nx == 1920 && ny == 1080)
+						{
+							if (firstLatchUs < 0)
+							{
+								firstLatchUs = tUs;
+								Assert::IsTrue(est.Held().ReadLatest(0, latchedRec));
+							}
+							lastLatchUs = tUs;
+						}
+						else if (firstLatchUs >= 0)
+						{
+							++dropsAfterLatch;
+						}
+					}
+
+					Assert::IsTrue(firstLatchUs >= 0, L"B1: Chain-alone must enter 1920x1080 when classical is blind native");
+					const double holdSec = static_cast<double>(lastLatchUs - firstLatchUs) / 1e6;
+					Assert::IsTrue(holdSec > 60.0, L"B1: Chain-alone latch must hold continuously for > 60 seconds");
+					Assert::AreEqual(0, dropsAfterLatch, L"B1: zero drops / zero flapping during > 60 s hold");
+
+					const C::EstimatorCounters cnt = est.GetCounters();
+					Assert::AreEqual(uint64_t(1), cnt.jointLatch.entriesChainAlone, L"B1: entered cleanly once via Chain-alone");
+					Assert::AreEqual(uint64_t(0), cnt.jointLatch.entriesJoint, L"B1: blind classical native does not enter via Joint");
+					Assert::AreEqual(uint64_t(0), cnt.jointLatch.releases, L"B1: zero total releases during > 60 s hold");
+					Assert::AreEqual(uint64_t(0), cnt.jointLatch.releasesDetailAbove, L"B1: zero false detailAbove releases");
+
+					Assert::AreEqual(1920, latchedRec.applied[0].n);
+					Assert::AreEqual(1080, latchedRec.applied[1].n);
+					Assert::IsTrue((latchedRec.applied[0].reasonBits & C::kReasonChainAloneEntry) != 0u,
+						L"L1/B1: published H AxisGeom carries kReasonChainAloneEntry");
+					Assert::IsTrue((latchedRec.applied[1].reasonBits & C::kReasonChainAloneEntry) != 0u,
+						L"L1/B1: published V AxisGeom carries kReasonChainAloneEntry");
+					Assert::IsTrue(latchedRec.applied[0].conf > 0.0f && latchedRec.applied[0].conf <= 1.0f);
+				}
+
+				// (a2) Same-input Negative Control #1 (Rule 3): old broken sticky-native wiring (detailAbove = trackerNative = true)
+				//      from t = 0 on the EXACT SAME 1080p->4K stream BLOCKS Chain-alone entry completely!
+				{
+					ChainFx::ManualClock clk;
+					C::EstimatorSettings cfg;
+					cfg.safetyRules = true;
+					cfg.jointLatch.enabled = true;
+					cfg.conventionDrivenProposals = true;
+					C::ChainEstimator est(cfg, clk.Fn());
+					est.SetSynchronous(true);
+					est.SetMode(C::EstimatorMode::On);
+
+					for (int i = 0; i < kTotalEvals; ++i)
+					{
+						const int64_t tUs = stream[static_cast<size_t>(i)].timeUs;
+						clk.Set(static_cast<double>(tUs) / 1000.0);
+						est.SetClassicalFresh(MakeClassicalFresh(
+							true, 1.0, 1.0, trackerNative /* true = old sticky wiring */, stream[static_cast<size_t>(i)].seq, tUs, 1.5));
+						Assert::IsTrue(est.SubmitLines(stream[static_cast<size_t>(i)]));
+					}
+					Assert::AreEqual(0, est.StatusInput().latchNx,
+						L"negative control: sticky detailAbove=true blocks Chain-alone entry on the exact same stream");
+					Assert::AreEqual(uint64_t(0), est.GetCounters().jointLatch.entriesChainAlone);
+				}
+
+				// (a3) Same-input Negative Control #2 (Rule 3): if already latched via Chain-alone and old sticky
+				//      detailAbove=true arrives on the EXACT SAME stream, latch releases within ~3 s (detailAboveDebounceSec)!
+				{
+					ChainFx::ManualClock clk;
+					C::EstimatorSettings cfg;
+					cfg.safetyRules = true;
+					cfg.jointLatch.enabled = true;
+					cfg.conventionDrivenProposals = true;
+					C::ChainEstimator est(cfg, clk.Fn());
+					est.SetSynchronous(true);
+					est.SetMode(C::EstimatorMode::On);
+
+					int64_t stickyStartUs = -1;
+					int64_t releaseUs = -1;
+					for (int i = 0; i < kTotalEvals; ++i)
+					{
+						const int64_t tUs = stream[static_cast<size_t>(i)].timeUs;
+						clk.Set(static_cast<double>(tUs) / 1000.0);
+						const bool feedSticky = (stickyStartUs >= 0);
+						est.SetClassicalFresh(MakeClassicalFresh(
+							true, 1.0, 1.0, feedSticky ? trackerNative : false, stream[static_cast<size_t>(i)].seq, tUs, 1.5));
+						Assert::IsTrue(est.SubmitLines(stream[static_cast<size_t>(i)]));
+
+						if (stickyStartUs < 0 && est.StatusInput().latchNx == 1920)
+							stickyStartUs = tUs;
+						else if (stickyStartUs >= 0 && releaseUs < 0 && est.StatusInput().latchNx == 0)
+						{
+							releaseUs = tUs;
+							break;
+						}
+					}
+					Assert::IsTrue(stickyStartUs >= 0, L"fixture: latched before turning on sticky detailAbove");
+					Assert::IsTrue(releaseUs >= 0, L"negative control: sticky detailAbove=true releases Chain-alone latch");
+					const double releaseDelaySec = static_cast<double>(releaseUs - stickyStartUs) / 1e6;
+					Assert::IsTrue(releaseDelaySec <= 6.0,
+						L"negative control: sticky detailAbove=true releases within ~3 s debounce window");
+					Assert::IsTrue(est.GetCounters().jointLatch.releasesDetailAbove >= 1);
+				}
+			}
+
+			// Part B: Per-candidate R1 Nyquist check via ClassicalFreshInput::detailAboveAtRatio.
+			//         Supply detailAboveAtRatio(rx, ry) returning true for 960x540 (0.25) and false for 1920x1080 (0.50):
+			//         ApplyJointLatch MUST reject 960x540 and select/latch 1920x1080!
+			//         Same-input negative control: uniform detailAbove = true blocks BOTH!
+			{
+				auto runPerCandidateR1 = [](bool usePerCandidateCb, int& outLatchNx, int& outLatchNy, int& outCbCalls) {
+					ChainFx::ManualClock clk;
+					C::EstimatorSettings cfg;
+					cfg.safetyRules = true;
+					cfg.jointLatch.enabled = true;
+					cfg.conventionDrivenProposals = true;
+					C::ChainEstimator est(cfg, clk.Fn());
+					est.SetSynchronous(true);
+					est.SetMode(C::EstimatorMode::On);
+
+					outCbCalls = 0;
+					uint64_t seq = 100;
+					int s = 0;
+					// 2 shots, each with 3 evals of 960x540 Lanczos3 (dips BOTH 960x540 and 2x harmonic 1920x1080)
+					// followed by 2 evals of 1920x1080 bilinear (boosts 1920x1080 above any other candidate while keeping
+					// 960x540 above jNeed). Hold entry until the final evaluation via uniform detailAbove = true.
+					for (int shot = 0; shot < 2; ++shot)
+					{
+						for (int k = 0; k < 5; ++k, ++s, ++seq)
+						{
+							const int64_t tUs = static_cast<int64_t>(s) * 1000000;
+							clk.Set(static_cast<double>(s) * 1500.0);
+							const bool isFinal = (shot == 1 && k == 4);
+							C::ClassicalFreshInput cf = MakeClassicalFresh(true, 1.0, 1.0, true, seq, tUs, 1.5);
+							if (isFinal && usePerCandidateCb)
+							{
+								cf.detailAbove = false;
+								cf.detailAboveAtRatio = [&outCbCalls](double rx, double ry) -> bool {
+									++outCbCalls;
+									// True above-band detail exists above 960x540 (0.25), NOT above 1920x1080 (0.50).
+									return rx < 0.35 && ry < 0.35;
+								};
+							}
+							est.SetClassicalFresh(cf);
+							const int srcW = (k < 3) ? 960 : 1920;
+							const int srcH = (k < 3) ? 540 : 1080;
+							const int kern = (k < 3) ? kLanczos3 : kBilinear;
+							const C::LineSnapshot snap = MakeSynthSnapshot(kUhdW, kUhdH, srcW, srcH, kern, 1,
+								seq, tUs, 97001u + seq, k == 0);
+							Assert::IsTrue(est.SubmitLines(snap));
+						}
+					}
+					outLatchNx = est.StatusInput().latchNx;
+					outLatchNy = est.StatusInput().latchNy;
+				};
+
+				int cbNx = -1, cbNy = -1, cbCalls = 0;
+				runPerCandidateR1(true, cbNx, cbNy, cbCalls);
+				Assert::IsTrue(cbCalls > 0, L"B1: detailAboveAtRatio callback must be queried per candidate in ApplyJointLatch");
+				Assert::AreEqual(1920, cbNx, L"B1: per-candidate Nyquist rejects 960x540 and selects/latches 1920x1080");
+				Assert::AreEqual(1080, cbNy);
+
+				// Same-input negative control (Rule 3): uniform detailAbove = true blocks BOTH 960x540 and 1920x1080!
+				int unifNx = -1, unifNy = -1, unifCalls = 0;
+				runPerCandidateR1(false, unifNx, unifNy, unifCalls);
+				Assert::AreEqual(0, unifNx, L"negative control: uniform detailAbove=true blocks both 960x540 and 1920x1080");
+				Assert::AreEqual(0, unifNy);
+			}
+		}
+
+		// 16. H1 + M1 (HIGH/MEDIUM):
+		//     - Latched chain-alone 1080p->4K + steady blind-classical native (ratio=1.0, detailAbove=false) + 10 spurious
+		//       ABR marks -> 0 false releases (with direct ChainStepMark positiveDetailAbove=true negative control);
+		//     - Single classical snapshot (same frameSeq / single SetClassicalFresh call) MUST NOT double-count as
+		//       2 consecutive classical frames (with 2 distinct frameSeq contrast control);
+		//     - M1 staleness drop: ClassicalFreshInput with age > 2 * analysisIntervalSec increments
+		//       classicalFreshStaleDrops and is ignored (with fresh contrast control).
+		TEST_METHOD(H1M1BlindClassicalAbrSentinelStaleSnapshotAndStalenessDrop)
+		{
+			using namespace S2Fx;
+
+			// Part A (H1): Latched chain-alone 1080p->4K + steady blind-classical native + 10 spurious ABR marks -> 0 releases!
+			{
+				ChainFx::ManualClock clk;
+				C::EstimatorSettings cfg;
+				cfg.safetyRules = true;
+				cfg.jointLatch.enabled = true;
+				cfg.stepMark.enabled = true;
+				cfg.conventionDrivenProposals = true;
+				C::ChainEstimator est(cfg, clk.Fn());
+				est.SetSynchronous(true);
+				est.SetMode(C::EstimatorMode::On);
+
+				uint64_t seq = 10;
+				uint64_t cfSeq = 1;
+				int s = 0;
+				// Acquire 1920x1080 via Chain-alone (2 shots, blind classical native throughout).
+				for (int shot = 0; shot < 2; ++shot)
+				{
+					for (int k = 0; k < 5; ++k, ++s, ++seq)
+					{
+						const int64_t tUs = static_cast<int64_t>(s) * 1000000;
+						clk.Set(static_cast<double>(s) * 1500.0);
+						est.SetClassicalFresh(MakeClassicalFresh(true, 1.0, 1.0, false, ++cfSeq, tUs, 1.5));
+						const C::LineSnapshot up = MakeSynthSnapshot(kUhdW, kUhdH, 1920, 1080, kBilinear, 1,
+							seq, tUs, 98001u + seq, k == 0);
+						Assert::IsTrue(est.SubmitLines(up));
+					}
+				}
+				Assert::AreEqual(1920, est.StatusInput().latchNx, L"fixture: latched 1920x1080 via Chain-alone");
+				Assert::AreEqual(1080, est.StatusInput().latchNy);
+
+				// Fire 10 spurious ABR marks while steady 1080p->4K continues and blind classical keeps reporting native (detailAbove=false).
+				for (int m = 0; m < 10; ++m)
+				{
+					const int64_t tMarkUs = static_cast<int64_t>(s) * 1000000;
+					est.NoteAbrStepEvent(tMarkUs, +0.25, seq);
+					for (int k = 0; k < 2; ++k, ++s, ++seq)
+					{
+						const int64_t tUs = static_cast<int64_t>(s) * 1000000;
+						clk.Set(static_cast<double>(s) * 1500.0);
+						est.SetClassicalFresh(MakeClassicalFresh(true, 1.0, 1.0, false, ++cfSeq, tUs, 1.5));
+						const C::LineSnapshot up = MakeSynthSnapshot(kUhdW, kUhdH, 1920, 1080, kBilinear, 1,
+							seq, tUs, 98200u + seq, false);
+						Assert::IsTrue(est.SubmitLines(up));
+					}
+					Assert::AreEqual(1920, est.StatusInput().latchNx, L"H1: spurious ABR mark with blind-classical native must NOT release");
+				}
+
+				const C::EstimatorCounters cnt = est.GetCounters();
+				Assert::AreEqual(uint64_t(10), cnt.stepMark.marksRaised);
+				Assert::AreEqual(uint64_t(10), cnt.stepMark.unconfirmedTimeouts);
+				Assert::AreEqual(uint64_t(0), cnt.stepMark.confirmedByClassical, L"H1: blind-classical native never confirms ABR mark");
+				Assert::AreEqual(uint64_t(0), cnt.stepMark.immediateReleases, L"H1: 0 false immediate releases across 10 spurious marks");
+				Assert::AreEqual(uint64_t(0), cnt.jointLatch.releasesAbr);
+				Assert::AreEqual(uint64_t(0), cnt.jointLatch.releases);
+
+				// Same-input negative control (a): direct ChainStepMark with positiveDetailAbove = true on 2 fresh frames DOES confirm!
+				C::StepMarkSettings smCfg;
+				smCfg.enabled = true;
+				C::ChainStepMark smDirect(smCfg);
+				C::StepMarkLatchContext lctx;
+				lctx.latched = true;
+				lctx.nx = 1920; lctx.Nx = kUhdW;
+				lctx.ny = 1080; lctx.Ny = kUhdH;
+				Assert::IsTrue(smDirect.OnAbrStep(10 * 1000000, +0.50).action == C::StepMarkAction::MarkPending);
+
+				C::StepMarkClassicalFrame f1;
+				f1.timeUs = 11 * 1000000;
+				f1.informative = true;
+				f1.nativeReading = true;
+				f1.positiveDetailAbove = true;
+				f1.rasterW = kUhdW; f1.rasterH = kUhdH;
+				Assert::IsTrue(smDirect.OnClassicalFrame(f1, lctx).action == C::StepMarkAction::None);
+
+				C::StepMarkClassicalFrame f2 = f1;
+				f2.timeUs = 12 * 1000000;
+				const auto oPos = smDirect.OnClassicalFrame(f2, lctx);
+				Assert::IsTrue(oPos.action == C::StepMarkAction::ConfirmVoidAndRelease,
+					L"negative control (a): genuine positiveDetailAbove=true on 2 fresh frames confirms and releases promptly");
+				Assert::AreEqual(uint64_t(1), smDirect.Counters().confirmedByClassical);
+				Assert::AreEqual(uint64_t(1), smDirect.Counters().immediateReleases);
+			}
+
+			// Part B (H1): Single classical snapshot (same frameSeq / single SetClassicalFresh call) across 2+ chain evals
+			//              MUST NOT double-count as 2 consecutive frames (0 false confirmations); 2 distinct frameSeqs DO confirm!
+			{
+				ChainFx::ManualClock clk;
+				C::EstimatorSettings cfg;
+				cfg.safetyRules = true;
+				cfg.jointLatch.enabled = true;
+				cfg.stepMark.enabled = true;
+				cfg.conventionDrivenProposals = true;
+				C::ChainEstimator est(cfg, clk.Fn());
+				est.SetSynchronous(true);
+				est.SetMode(C::EstimatorMode::On);
+
+				uint64_t seq = 10;
+				uint64_t cfSeq = 100;
+				int s = 0;
+				// Latch 960x540 in 1 shot via Joint.
+				for (; s <= 8 && est.StatusInput().latchNx == 0; ++s, ++seq)
+				{
+					const int64_t tUs = static_cast<int64_t>(s) * 1000000;
+					clk.Set(static_cast<double>(s) * 1500.0);
+					est.SetClassicalFresh(MakeClassicalFresh(true, 0.25, 0.25, false, ++cfSeq, tUs, 2.0));
+					const C::LineSnapshot up540 = MakeSynthSnapshot(kUhdW, kUhdH, 960, 540, kBilinear, 1,
+						seq, tUs, 98400u + seq, s == 0);
+					Assert::IsTrue(est.SubmitLines(up540));
+				}
+				Assert::AreEqual(960, est.StatusInput().latchNx, L"fixture: latched 960x540");
+
+				// Raise ABR mark and post ONLY ONE classical snapshot (frameSeq = 500) at 1920x1080 across 2 flat chain evals:
+				const int64_t t0Us = static_cast<int64_t>(s) * 1000000;
+				est.NoteAbrStepEvent(t0Us, +0.25, seq);
+				est.SetClassicalFresh(MakeClassicalFresh(true, 0.5, 0.5, false, 500, t0Us + 500000, 3.0));
+				for (int k = 0; k < 2; ++k, ++s, ++seq)
+				{
+					const int64_t tUs = static_cast<int64_t>(s) * 1000000;
+					clk.Set(static_cast<double>(s) * 1500.0);
+					const C::LineSnapshot flatPost = MakeFlatSnapshot(kUhdW, kUhdH, 512, seq, tUs, false);
+					Assert::IsTrue(est.SubmitLines(flatPost));
+				}
+				Assert::AreEqual(960, est.StatusInput().latchNx,
+					L"H1: ONE single classical snapshot must NOT double-count as 2 consecutive frames");
+				Assert::AreEqual(uint64_t(0), est.GetCounters().stepMark.confirmedByClassical);
+				Assert::AreEqual(uint64_t(0), est.GetCounters().stepMark.immediateReleases);
+				Assert::AreEqual(uint64_t(1), est.GetCounters().stepMark.unconfirmedTimeouts);
+
+				// Same-input contrast control (b): now feed 2 genuinely DISTINCT frameSeqs (601, 602) across 2 flat evals -> DOES confirm!
+				const int64_t t1Us = static_cast<int64_t>(s) * 1000000;
+				est.NoteAbrStepEvent(t1Us, +0.25, seq);
+				for (int k = 0; k < 2; ++k, ++s, ++seq)
+				{
+					const int64_t tUs = static_cast<int64_t>(s) * 1000000;
+					clk.Set(static_cast<double>(s) * 1500.0);
+					est.SetClassicalFresh(MakeClassicalFresh(true, 0.5, 0.5, false, static_cast<uint64_t>(601 + k), tUs, 3.0));
+					const C::LineSnapshot flatPost = MakeFlatSnapshot(kUhdW, kUhdH, 512, seq, tUs, false);
+					Assert::IsTrue(est.SubmitLines(flatPost));
+				}
+				Assert::AreEqual(0, est.StatusInput().latchNx,
+					L"contrast control (b): 2 distinct classical frameSeqs confirm and release immediately");
+				Assert::AreEqual(uint64_t(1), est.GetCounters().stepMark.confirmedByClassical);
+				Assert::AreEqual(uint64_t(1), est.GetCounters().stepMark.immediateReleases);
+			}
+
+			// Part C (M1): ClassicalFreshInput staleness check (age > 2 * analysisIntervalSec -> drop & count visibly).
+			{
+				auto runStaleness = [](int64_t classicalTimeUs, int& outLatchNx, C::EstimatorCounters& outCnt) {
+					ChainFx::ManualClock clk;
+					C::EstimatorSettings cfg;
+					cfg.safetyRules = true;
+					cfg.jointLatch.enabled = true;
+					cfg.conventionDrivenProposals = true;
+					C::ChainEstimator est(cfg, clk.Fn());
+					est.SetSynchronous(true);
+					est.SetMode(C::EstimatorMode::On);
+
+					// 1-shot 1080p->4K from t = 8..11 s with classical silent (builds 1-shot credit >= jNeed, dwell = 3 s).
+					est.SetClassicalFresh(false, 1.0, 1.0, false);
+					for (int sec = 8; sec <= 11; ++sec)
+					{
+						clk.Set(static_cast<double>(sec) * 1500.0);
+						const C::LineSnapshot up = MakeSynthSnapshot(kUhdW, kUhdH, 1920, 1080, kBilinear, 1,
+							static_cast<uint64_t>(sec), static_cast<int64_t>(sec) * 1000000, 98600u + static_cast<uint64_t>(sec), sec == 8);
+						Assert::IsTrue(est.SubmitLines(up));
+					}
+					Assert::AreEqual(0, est.StatusInput().latchNx, L"fixture: 1-shot chain alone has not latched yet");
+
+					// At t = 12 s (dwell = 4.0 s >= 3.0 s), feed ClassicalFreshInput with analysisIntervalSec = 0.5 s:
+					//   - Stale (timeUs = 10 s -> age = 2.0 s > 2 * 0.5 s = 1.0 s): dropped & ignored!
+					//   - Fresh (timeUs = 11.7 s -> age = 0.3 s <= 1.0 s): triggers 1-shot Joint entry!
+					clk.Set(12.0 * 1500.0);
+					est.SetClassicalFresh(MakeClassicalFresh(true, 0.5, 0.5, false, 700, classicalTimeUs, 0.5));
+					const C::LineSnapshot up12 = MakeSynthSnapshot(kUhdW, kUhdH, 1920, 1080, kBilinear, 1,
+						12, 12 * 1000000, 98612u, false);
+					Assert::IsTrue(est.SubmitLines(up12));
+					outLatchNx = est.StatusInput().latchNx;
+					outCnt = est.GetCounters();
+				};
+
+				// Stale classical witness (timeUs = 10 s at eval t = 12 s, age = 2.0 s > 2 * 0.5 s = 1.0 s):
+				int staleNx = -1;
+				C::EstimatorCounters staleCnt;
+				runStaleness(10 * 1000000, staleNx, staleCnt);
+				Assert::IsTrue(staleCnt.classicalFreshStaleDrops >= 1,
+					L"M1: stale classical witness (age 2.0s > 2 * 0.5s) must increment classicalFreshStaleDrops");
+				Assert::AreEqual(0, staleNx, L"M1: stale classical witness must be ignored (no 1-shot Joint entry)");
+				Assert::AreEqual(uint64_t(0), staleCnt.jointLatch.entriesJoint);
+
+				// Same-input contrast control (fresh timeUs = 11.7 s, age = 0.3 s <= 1.0 s): enters Joint cleanly!
+				int freshNx = -1;
+				C::EstimatorCounters freshCnt;
+				runStaleness(11700000, freshNx, freshCnt);
+				Assert::AreEqual(uint64_t(0), freshCnt.classicalFreshStaleDrops, L"contrast control: fresh witness is not dropped");
+				Assert::AreEqual(1920, freshNx, L"contrast control: fresh classical witness triggers 1-shot Joint entry");
+				Assert::AreEqual(uint64_t(1), freshCnt.jointLatch.entriesJoint);
+			}
+		}
+
+		// 17. M4 (MEDIUM): ChainEvidence edgeStats MUST abstain visibly (edgeStatsNullMismatch == true,
+		//     kReasonNullTableMismatch, !informative, increment == 0) when given NullTables::Placeholder() OR a
+		//     calibrated WholeLineLogRatio table, and ChainEstimator with eightBitPromotion = true + PlaceholderOnly()
+		//     MUST increment EstimatorCounters::edgeStatsNullTableAbstains > 0!
+		TEST_METHOD(M4EdgeStatsRejectsUnmatchedOrPlaceholderNullTablesVisibly)
+		{
+			using namespace S2Fx;
+
+			// Part A: Direct ChainEvidence stat-kind & placeholder guard with same-input positive control.
+			{
+				const double floor8Tpdf = C::TpdfDitherFloorCodes(4.0);
+				C::VerifyResult vr;
+				vr.candidates.push_back(MakeSyntheticCandidate(1920, 2.0, -0.10, 16, 15, 7.0, 1.85, 1.70, 1.65, 0.5, 3));
+				vr.candidates.push_back(MakeSyntheticCandidate(1440, 2.0, 0.00, 16, 15, 7.0, 7.0, 1.70, 1.65, 0.375, 3));
+				vr.candidates.push_back(MakeSyntheticCandidate(2400, 2.0, 0.01, 16, 15, 7.0, 7.0, 1.70, 1.65, 0.625, 3));
+				vr.candidates.push_back(MakeSyntheticCandidate(3360, 2.0, -0.01, 16, 15, 7.0, 7.0, 1.70, 1.65, 0.875, 3));
+
+				C::AxisObservation obs;
+				obs.verify = &vr;
+				obs.axisLen = kUhdW;
+				obs.floorCodes = floor8Tpdf;
+				obs.probeRan = true;
+				obs.probeSeen = true;
+				obs.shotId = 1;
+				obs.timeUs = -1;
+				obs.rasterW = kUhdW;
+				obs.rasterH = kUhdH;
+
+				C::EvidenceSettings onCfg;
+				onCfg.edgeStats.enabled = true;
+
+				// (1) NullTables::Placeholder() (placeholder=true, statKind=WholeLineLogRatio) -> MUST abstain visibly!
+				{
+					C::ChainEvidence evPh(onCfg, C::NullTables::Placeholder());
+					C::EvidenceUpdate upPh;
+					Assert::IsTrue(evPh.Submit(0, obs, upPh));
+					Assert::IsFalse(upPh.cand[0].informative, L"M4: Placeholder null table must abstain under edgeStats");
+					Assert::AreEqual(0.0, upPh.cand[0].increment, 1e-12, L"M4: abstained candidate earns 0.0 increment");
+					Assert::IsTrue(upPh.cand[0].edgeStatsNullMismatch, L"M4: edgeStatsNullMismatch visibly set on Placeholder");
+					Assert::IsTrue((upPh.cand[0].reason & C::kReasonNullTableMismatch) != 0u,
+						L"M4: kReasonNullTableMismatch reason bit visibly set on Placeholder");
+				}
+
+				// (2) Calibrated WholeLineLogRatio table (placeholder=false, statKind=WholeLineLogRatio) -> STILL MUST abstain!
+				{
+					C::NullTables calWholeLine = C::NullTables::Placeholder();
+					calWholeLine.placeholder = false;
+					calWholeLine.statKind = C::NullStatKind::WholeLineLogRatio;
+					C::ChainEvidence evWl(onCfg, calWholeLine);
+					C::EvidenceUpdate upWl;
+					Assert::IsTrue(evWl.Submit(0, obs, upWl));
+					Assert::IsFalse(upWl.cand[0].informative, L"M4: WholeLineLogRatio table must abstain for SegmentExcessVariance stat");
+					Assert::AreEqual(0.0, upWl.cand[0].increment, 1e-12);
+					Assert::IsTrue(upWl.cand[0].edgeStatsNullMismatch, L"M4: edgeStatsNullMismatch visibly set on WholeLineLogRatio");
+					Assert::IsTrue((upWl.cand[0].reason & C::kReasonNullTableMismatch) != 0u,
+						L"M4: kReasonNullTableMismatch reason bit visibly set on WholeLineLogRatio");
+				}
+
+				// (3) Same-input positive control: calibrated SegmentExcessVariance table on the EXACT SAME VerifyResult succeeds!
+				{
+					C::ChainEvidence evCal(onCfg, MakeCalibratedEdgeStatsNulls());
+					C::EvidenceUpdate upCal;
+					Assert::IsTrue(evCal.Submit(0, obs, upCal));
+					Assert::IsTrue(upCal.cand[0].informative, L"positive control: calibrated SegmentExcessVariance table is accepted");
+					Assert::IsTrue(upCal.cand[0].increment > 0.0);
+					Assert::IsFalse(upCal.cand[0].edgeStatsNullMismatch);
+					Assert::IsTrue((upCal.cand[0].reason & C::kReasonNullTableMismatch) == 0u);
+				}
+			}
+
+			// Part B: End-to-end ChainEstimator with eightBitPromotion = true and DepthNullTableSet::PlaceholderOnly()
+			//         on a sparse 80%-flat 8-bit TPDF-dithered 1080p->4K frame -> edgeStatsNullTableAbstains > 0!
+			{
+				ChainFx::ManualClock clk;
+				C::EstimatorSettings cfg;
+				cfg.eightBitPromotion = true;
+				cfg.depthNullTables = C::DepthNullTableSet::PlaceholderOnly();
+				cfg.safetyRules = true;
+				cfg.conventionDrivenProposals = true;
+				C::ChainEstimator est(cfg, clk.Fn());
+				est.SetSynchronous(true);
+				est.SetMode(C::EstimatorMode::On);
+
+				// 80%-flat 8-bit TPDF-dithered 1080p->4K snapshot (step = 4): whole-line baseline is diluted by 80% flat
+				// dither so sparse edgeStats activates, hitting PlaceholderOnly() -> edgeStatsNullTableAbstains > 0!
+				for (int i = 0; i < 3; ++i)
+				{
+					clk.Set(static_cast<double>(i + 1) * 1500.0);
+					const C::LineSnapshot sparse8 = MakeSynthSnapshot(kUhdW, kUhdH, 1920, 1080, kBilinear, 4,
+						static_cast<uint64_t>(10 + i), static_cast<int64_t>(i + 1) * 1000000,
+						98800u + static_cast<uint64_t>(i), i == 0, 0.0, true, 0.80);
+					Assert::IsTrue(est.SubmitLines(sparse8));
+				}
+				Assert::IsTrue(est.GetCounters().edgeStatsNullTableAbstains > 0,
+					L"M4: eightBitPromotion + PlaceholderOnly must visibly increment edgeStatsNullTableAbstains");
+			}
+		}
+
+		// 18. L1 + L2 (LOW):
+		//     - L1: Joint entry sets kReasonJointEntry + derived conf (< 1.0f when LLR < c1, NOT hardcoded 1.0f),
+		//       Chain-Alone entry sets kReasonChainAloneEntry, and ChainJointLatch exposes JointLatchOrigin cleanly;
+		//     - L2: Pushing > eventCap ABR step events before evaluation visibly increments abrStepEventsEvicted!
+		TEST_METHOD(L1JointOriginReasonBitsAndDerivedConfAndL2AbrEventEvictionCounter)
+		{
+			using namespace S2Fx;
+			const double c1 = C::ComputeThresholds(C::EvidenceSettings()).c1;
+
+			// L1 (a): Direct ChainJointLatch::Origin() & JointLatchOutput::origin contract.
+			{
+				C::JointLatchSettings js;
+				js.enabled = true;
+				C::ChainJointLatch latch(js);
+				Assert::IsTrue(latch.Origin() == C::JointLatchOrigin::None, L"L1: unlatched origin is None");
+
+				C::JointLatchInput in;
+				in.timeUs = 5 * 1000000;
+				in.c1 = c1;
+				in.rasterW = kUhdW; in.rasterH = kUhdH;
+				in.chainInformative = true;
+				in.classicalValid = true;
+				in.classicalNx = 1920; in.classicalNxDenom = kUhdW;
+				in.classicalNy = 1080; in.classicalNyDenom = kUhdH;
+				in.currentShotDwellSec = 4.0;
+				in.currentShotCreditX = 0.6 * c1;
+				in.currentShotCreditY = 0.6 * c1;
+				const C::JointLatchOutput oJoint = latch.Step(in);
+				Assert::IsTrue(oJoint.latched && oJoint.event == C::JointLatchEvent::EnteredJoint);
+				Assert::IsTrue(oJoint.origin == C::JointLatchOrigin::Joint, L"L1: Joint output origin == Joint");
+				Assert::IsTrue(latch.Origin() == C::JointLatchOrigin::Joint, L"L1: latch.Origin() == Joint");
+
+				// Chain-Alone origin on fresh latch:
+				C::ChainJointLatch latchCa(js);
+				C::JointLatchInput inCa;
+				inCa.timeUs = 10 * 1000000;
+				inCa.c1 = c1;
+				inCa.rasterW = kUhdW; inCa.rasterH = kUhdH;
+				inCa.chainInformative = true;
+				inCa.haveChainPair = true;
+				inCa.chainNx = 1920; inCa.chainNxDenom = kUhdW;
+				inCa.chainNy = 1080; inCa.chainNyDenom = kUhdH;
+				inCa.chainLlrX = c1 + 2.0;
+				inCa.chainLlrY = c1 + 2.0;
+				inCa.chainShots = 2;
+				const C::JointLatchOutput oCa = latchCa.Step(inCa);
+				Assert::IsTrue(oCa.latched && oCa.event == C::JointLatchEvent::EnteredChainAlone);
+				Assert::IsTrue(oCa.origin == C::JointLatchOrigin::ChainAlone, L"L1: ChainAlone output origin == ChainAlone");
+				Assert::IsTrue(latchCa.Origin() == C::JointLatchOrigin::ChainAlone, L"L1: latch.Origin() == ChainAlone");
+			}
+
+			// L1 (b): End-to-end ChainEstimator 1-shot Joint entry -> kReasonJointEntry + derived conf (NOT hardcoded 1.0f when LLR < c1).
+			{
+				ChainFx::ManualClock clk;
+				C::EstimatorSettings cfg;
+				cfg.safetyRules = true;
+				cfg.jointLatch.enabled = true;
+				cfg.conventionDrivenProposals = true;
+				C::ChainEstimator est(cfg, clk.Fn());
+				est.SetSynchronous(true);
+				est.SetMode(C::EstimatorMode::On);
+
+				for (int s = 0; s <= 5; ++s)
+				{
+					const int64_t tUs = static_cast<int64_t>(s) * 1000000;
+					clk.Set(static_cast<double>(s) * 1500.0);
+					est.SetClassicalFresh(MakeClassicalFresh(true, 0.5, 0.5, false, static_cast<uint64_t>(10 + s), tUs, 1.5));
+					const C::LineSnapshot up = MakeSynthSnapshot(kUhdW, kUhdH, 1920, 1080, kBilinear, 1,
+						static_cast<uint64_t>(10 + s), tUs, 99001u + static_cast<uint64_t>(s), s == 0);
+					Assert::IsTrue(est.SubmitLines(up));
+					if (est.StatusInput().latchNx == 1920)
+						break;
+				}
+				Assert::AreEqual(1920, est.StatusInput().latchNx, L"fixture: 1-shot Joint latched 1920x1080");
+				Assert::AreEqual(uint64_t(1), est.GetCounters().jointLatch.entriesJoint);
+
+				G::Record rec;
+				Assert::IsTrue(est.Held().ReadLatest(0, rec));
+				for (int a = 0; a < 2; ++a)
+				{
+					Assert::IsTrue((rec.applied[a].reasonBits & C::kReasonJointEntry) != 0u,
+						L"L1: Joint entry published AxisGeom must set kReasonJointEntry");
+					Assert::IsTrue((rec.applied[a].reasonBits & C::kReasonChainAloneEntry) == 0u,
+						L"L1: Joint entry must not set kReasonChainAloneEntry");
+					Assert::IsTrue(rec.applied[a].llr > 0.0f && rec.applied[a].llr < static_cast<float>(c1),
+						L"fixture: 1-shot Joint LLR is strictly below c1");
+					// Derived confidence (ConfFromLlr / ConfidenceOfLlr), NEVER hardcoded 1.0f when LLR < c1!
+					Assert::IsTrue(rec.applied[a].conf > 0.0f && rec.applied[a].conf < 1.0f,
+						L"L1: Joint entry conf must be derived (< 1.0f when LLR < c1), never hardcoded 1.0f");
+					const float confSigmoid = static_cast<float>(C::ConfFromLlr(rec.applied[a].llr));
+					const float confLinear = static_cast<float>(C::ConfidenceOfLlr(rec.applied[a].llr, c1));
+					const bool matchesDerived =
+						(std::fabs(rec.applied[a].conf - confSigmoid) < 1e-3f) ||
+						(std::fabs(rec.applied[a].conf - confLinear) < 1e-3f);
+					Assert::IsTrue(matchesDerived, L"L1: Joint entry conf matches derived ConfFromLlr / ConfidenceOfLlr");
+				}
+			}
+
+			// L1 (c): End-to-end ChainEstimator 2-shot Chain-Alone entry -> kReasonChainAloneEntry (NOT kReasonJointEntry).
+			{
+				ChainFx::ManualClock clk;
+				C::EstimatorSettings cfg;
+				cfg.safetyRules = true;
+				cfg.jointLatch.enabled = true;
+				cfg.conventionDrivenProposals = true;
+				C::ChainEstimator est(cfg, clk.Fn());
+				est.SetSynchronous(true);
+				est.SetMode(C::EstimatorMode::On);
+				est.SetClassicalFresh(false, 1.0, 1.0, false);
+
+				uint64_t seq = 10;
+				int s = 0;
+				for (int shot = 0; shot < 2; ++shot)
+				{
+					for (int k = 0; k < 5; ++k, ++s, ++seq)
+					{
+						clk.Set(static_cast<double>(s) * 1500.0);
+						const C::LineSnapshot up = MakeSynthSnapshot(kUhdW, kUhdH, 1920, 1080, kBilinear, 1,
+							seq, static_cast<int64_t>(s) * 1000000, 99100u + seq, k == 0);
+						Assert::IsTrue(est.SubmitLines(up));
+					}
+				}
+				Assert::AreEqual(1920, est.StatusInput().latchNx);
+				G::Record rec;
+				Assert::IsTrue(est.Held().ReadLatest(0, rec));
+				for (int a = 0; a < 2; ++a)
+				{
+					Assert::IsTrue((rec.applied[a].reasonBits & C::kReasonChainAloneEntry) != 0u,
+						L"L1: Chain-Alone entry must set kReasonChainAloneEntry");
+					Assert::IsTrue((rec.applied[a].reasonBits & C::kReasonJointEntry) == 0u,
+						L"L1: Chain-Alone entry must not set kReasonJointEntry");
+				}
+			}
+
+			// L2: Pushing > eventCap ABR step events before evaluation visibly increments abrStepEventsEvicted!
+			{
+				ChainFx::ManualClock clk;
+				C::EstimatorSettings cfg;
+				cfg.stepMark.enabled = true;
+				cfg.eventCap = 4;
+				C::ChainEstimator est(cfg, clk.Fn());
+				est.SetSynchronous(true);
+				est.SetMode(C::EstimatorMode::On);
+
+				// Within cap (4 events <= eventCap = 4): 0 evictions.
+				for (int i = 0; i < 4; ++i)
+					est.NoteAbrStepEvent(static_cast<int64_t>(i + 1) * 1000000, +0.25, static_cast<uint64_t>(i + 1));
+				Assert::AreEqual(uint64_t(0), est.GetCounters().abrStepEventsEvicted,
+					L"contrast control: <= eventCap ABR step events cause 0 evictions");
+
+				// Push 6 more events (total 10 > eventCap = 4) before any evaluation -> 6 evicted visibly!
+				for (int i = 4; i < 10; ++i)
+					est.NoteAbrStepEvent(static_cast<int64_t>(i + 1) * 1000000, +0.25, static_cast<uint64_t>(i + 1));
+				Assert::AreEqual(uint64_t(6), est.GetCounters().abrStepEventsEvicted,
+					L"L2: pushing 10 ABR step events into eventCap=4 queue must visibly count 6 evictions");
+			}
 		}
 	};
 }

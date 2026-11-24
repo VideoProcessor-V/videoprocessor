@@ -559,5 +559,94 @@ namespace Tests
 				Assert::AreEqual(uint64_t(2), sm.Counters().bucketOverflowDrops);
 			}
 		}
+
+		// H1 Red-Team proving test: blind-classical native reading (nativeReading == true, positiveDetailAbove == false)
+		// MUST NEVER confirm a pending ABR step mark (0 false releases across 10 spurious marks while latched),
+		// with a same-input negative control proving genuine positiveDetailAbove == true on 2 consecutive fresh frames
+		// DOES confirm and immediately release!
+		TEST_METHOD(H1BlindClassicalNativeWithoutPositiveDetailAboveNeverConfirmsStepMark)
+		{
+			using namespace StepMarkFx;
+
+			// Contract default check: StepMarkClassicalFrame::positiveDetailAbove defaults to false.
+			const StepMarkClassicalFrame defFrame;
+			Assert::IsFalse(defFrame.positiveDetailAbove, L"H1: StepMarkClassicalFrame::positiveDetailAbove must default to false");
+
+			// 1. Latched 1920x1080 + 10 spurious ABR marks + steady blind-classical native (positiveDetailAbove = false):
+			//    MUST produce 0 confirmations and 0 false releases!
+			{
+				ChainStepMark sm(Enabled());
+				const StepMarkLatchContext ctx = Latched1080();
+				uint64_t seq = 1;
+				for (int m = 0; m < 10; ++m)
+				{
+					const int64_t t0 = static_cast<int64_t>(10 + m * 20);
+					const auto raised = sm.OnAbrStep(t0 * 1000000, +0.50);
+					Assert::IsTrue(raised.action == StepMarkAction::MarkPending);
+
+					for (int f = 1; f <= 2; ++f)
+					{
+						StepMarkClassicalFrame blindNative = ClassicalFrame(t0 + f, 0, 0, true, false, true);
+						blindNative.positiveDetailAbove = false; // blind classical reading native with NO positive above-band detail
+						const auto oCf = sm.OnClassicalFrame(blindNative, ctx);
+						Assert::IsTrue(oCf.action == StepMarkAction::None,
+							L"H1: blind-classical native (positiveDetailAbove=false) must never confirm pending ABR mark");
+						Assert::IsTrue(sm.IsPending());
+					}
+
+					// Two steady non-contradicting chain evals at 1920x1080 -> unconfirmed timeout, bucket merged!
+					Assert::IsTrue(sm.OnChainEvaluation(EvalRec(t0 + 1, seq++, 1920, 1080, 1.5, false, false), ctx).action == StepMarkAction::None);
+					const auto oEnd = sm.OnChainEvaluation(EvalRec(t0 + 2, seq++, 1920, 1080, 1.5, false, false), ctx);
+					Assert::IsTrue(oEnd.action == StepMarkAction::CancelAndMergeBucket);
+					Assert::IsTrue(oEnd.reason == StepMarkReason::UnconfirmedTimeout);
+				}
+
+				Assert::AreEqual(uint64_t(10), sm.Counters().marksRaised);
+				Assert::AreEqual(uint64_t(10), sm.Counters().unconfirmedTimeouts);
+				Assert::AreEqual(uint64_t(0), sm.Counters().confirmedByClassical);
+				Assert::AreEqual(uint64_t(0), sm.Counters().immediateReleases);
+			}
+
+			// 2. Mandatory Rule 3 Negative Control on EXACT SAME latched context & native frames:
+			//    setting positiveDetailAbove = true (genuine above-band detail measured) on 2 consecutive fresh frames
+			//    DOES confirm via ConfirmedByClassicalPair and immediately releases!
+			{
+				ChainStepMark sm(Enabled());
+				const StepMarkLatchContext ctx = Latched1080();
+				Assert::IsTrue(sm.OnAbrStep(10 * 1000000, +0.50).action == StepMarkAction::MarkPending);
+
+				StepMarkClassicalFrame det1 = ClassicalFrame(11, 0, 0, true, false, true);
+				det1.positiveDetailAbove = true;
+				const auto o1 = sm.OnClassicalFrame(det1, ctx);
+				Assert::IsTrue(o1.action == StepMarkAction::None, L"1st positiveDetailAbove native frame waits for 2nd consecutive frame");
+				Assert::IsTrue(sm.IsPending());
+
+				StepMarkClassicalFrame det2 = ClassicalFrame(12, 0, 0, true, false, true);
+				det2.positiveDetailAbove = true;
+				const auto o2 = sm.OnClassicalFrame(det2, ctx);
+				Assert::IsTrue(o2.action == StepMarkAction::ConfirmVoidAndRelease,
+					L"negative control: 2 consecutive native frames WITH positiveDetailAbove=true confirm and release immediately");
+				Assert::IsTrue(o2.reason == StepMarkReason::ConfirmedByClassicalPair);
+				Assert::AreEqual(uint64_t(1), sm.Counters().confirmedByClassical);
+				Assert::AreEqual(uint64_t(1), sm.Counters().immediateReleases);
+				Assert::IsFalse(sm.IsPending());
+			}
+
+			// 3. Unlatched context (!ctx.latched): even nativeReading=true + positiveDetailAbove=true does NOT falsely confirm.
+			{
+				ChainStepMark sm(Enabled());
+				StepMarkLatchContext unlatched;
+				Assert::IsTrue(sm.OnAbrStep(50 * 1000000, +0.50).action == StepMarkAction::MarkPending);
+
+				StepMarkClassicalFrame det1 = ClassicalFrame(51, 0, 0, true, false, true);
+				det1.positiveDetailAbove = true;
+				StepMarkClassicalFrame det2 = ClassicalFrame(52, 0, 0, true, false, true);
+				det2.positiveDetailAbove = true;
+				Assert::IsTrue(sm.OnClassicalFrame(det1, unlatched).action == StepMarkAction::None);
+				Assert::IsTrue(sm.OnClassicalFrame(det2, unlatched).action == StepMarkAction::None);
+				Assert::IsTrue(sm.IsPending());
+				Assert::AreEqual(uint64_t(0), sm.Counters().confirmedByClassical);
+			}
+		}
 	};
 }

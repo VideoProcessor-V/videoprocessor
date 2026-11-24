@@ -635,11 +635,13 @@ namespace Tests
 					usm[static_cast<size_t>(i)] = upClean[static_cast<size_t>(i)] + 0.6 * (upClean[static_cast<size_t>(i)] - blurred[static_cast<size_t>(i)]);
 				const std::vector<double> qUsm = Quantize10Bit(usm);
 
-				// (c) Exact same 2:1 upscale + strong flat white TPDF dither (sigma = 2.0 codes, nominal floor = 0.289).
-				std::vector<double> dithered(static_cast<size_t>(kN), 0.0);
-				const double tpdfAmp = 2.0 * std::sqrt(6.0);
+				// (c) Exact same 2:1 upscale + TRUE 10-bit TPDF dither (1-LSB TPDF, sigma = sqrt(2/12) ~= 0.408 codes;
+				//     with 10-bit rounding total white error variance = 3/12 = 0.25 -> sigma ~= 0.50 codes, resFar ~= 3.0 * floorP
+				//     strictly inside (gateP = 2.25 * floorP, tpdfUpperP = 4.5 * floorP]).
+				std::vector<double> ditheredRaw(static_cast<size_t>(kN), 0.0);
 				for (int i = 0; i < kN; ++i)
-					dithered[static_cast<size_t>(i)] = ClampD(upClean[static_cast<size_t>(i)] + tpdfAmp * rng.TpdfUnit(), 0.0, 1023.0);
+					ditheredRaw[static_cast<size_t>(i)] = upClean[static_cast<size_t>(i)] + rng.TpdfUnit();
+				const std::vector<double> dithered = Quantize10Bit(ditheredRaw);
 
 				// (d) Studio fake 4K (C8): same 2:1 upscale + genuine coded 4K high-frequency texture & 8-px block structure above Nyquist.
 				std::vector<double> studio(static_cast<size_t>(kN), 0.0);
@@ -695,12 +697,19 @@ namespace Tests
 			Assert::IsTrue(sg.radius > 0.3f && sg.radius < 3.0f);
 			Assert::IsTrue(sg.conf > 0.0f);
 
-			// (c) Strong flat white TPDF dither -> DitherDominated, highBandFlatness >= 0.5, NOT USM or NativeCodedStudioUpscale.
+			// (c) True 10-bit TPDF dither (sigma ~= 0.41..0.50 codes) -> DitherDominated, neverRebase == false,
+			//     highBandFlatness >= 0.5, NOT USM or NativeCodedStudioUpscale.
+			const double floorP10 = kFloor10Bit * kFloor10Bit;
+			const double gateP10 = 2.25 * floorP10;
+			const double tpdfUpperP10 = 2.25 * 2.0 * floorP10;
 			const double ditherResidRms = MeanInnerRms(resDither, margin);
-			Assert::IsTrue(ditherResidRms > 3.0 * kFloor10Bit); // Negative control: naive RMS threshold also trips on dither!
+			Assert::IsTrue(ditherResidRms > kFloor10Bit, L"fixture: true 10-bit TPDF dither exceeds uniform rounding floor");
 			const ResidualSpectrumResult outDither = ClassifyResidualSpectrum(sigDither, resDither, kLatentN, kFloor10Bit, on);
 			Assert::IsTrue(outDither.valid);
+			Assert::IsTrue(outDither.highBandPower > gateP10 && outDither.highBandPower <= tpdfUpperP10,
+				L"true 10-bit TPDF dither sits inside physical (gateP, tpdfUpperP] band");
 			Assert::IsTrue(outDither.classification == ResidualClass::DitherDominated);
+			Assert::IsFalse(outDither.neverRebase);
 			Assert::IsTrue(outDither.highBandFlatness >= 0.5);
 			Assert::IsFalse(outDither.classification == ResidualClass::UsmSharpened);
 			Assert::IsFalse(outDither.classification == ResidualClass::NativeCodedStudioUpscale);
@@ -721,6 +730,93 @@ namespace Tests
 			Assert::IsTrue(outStudio.classification == ResidualClass::NativeCodedStudioUpscale);
 			Assert::IsTrue(outStudio.codedRaster == SourceIdentity::Geometry::CodedRaster::NativeCoded);
 			Assert::IsTrue(outStudio.neverRebase);
+		}
+
+		// H4 Red-Team proving test: Real 4K / 2K-DI film grain (sigma ~= 2.0 codes at 10-bit, flat white far-band)
+		// MUST classify as NativeCodedStudioUpscale with neverRebase == true and codedRaster == NativeCoded,
+		// NEVER as DitherDominated! Contrasted against true 10-bit TPDF dither (sigma ~= 0.41..0.50 codes) on the
+		// exact same base upscale, with a same-input negative control proving an unbounded resFar > gateP rule
+		// without the physical TPDF upper bound (gateMult * 2.0 * floorP) WOULD misclassify this exact grain!
+		TEST_METHOD(Real4kFilmGrainClassifiesNativeCodedNeverRebaseNotDither)
+		{
+			using namespace ResidualSpectrumFx;
+			const ResidualSpectrumSettings on = Enabled();
+
+			constexpr int kN = 1024;
+			constexpr int kLatentN = 512;
+			constexpr int kLines = 32;
+			constexpr int kLanczos3 = 5;
+
+			DetRng rng(2026112344ull);
+
+			LineSet sigGrain, sigTrueTpdf;
+			sigGrain.axisLen = kN;    sigGrain.Resize(kLines, kN);
+			sigTrueTpdf.axisLen = kN; sigTrueTpdf.Resize(kLines, kN);
+
+			for (int li = 0; li < kLines; ++li)
+			{
+				const std::vector<double> latent = MakeBroadbandLatent(kLatentN, rng);
+				const std::vector<double> upClean = Upscale1DBank(latent, kN, kLanczos3, 0.0);
+
+				// Real 4K / 2K-DI film grain: sigma = 2.0 codes white Gaussian grain at 10-bit (~5x stronger than TPDF dither).
+				std::vector<double> grainRaw(static_cast<size_t>(kN), 0.0);
+				// True 10-bit TPDF dither: 1-LSB TPDF (sigma_tpdf = 1/sqrt(6) ~= 0.408 codes; quantized error sigma ~= 0.50 codes).
+				std::vector<double> tpdfRaw(static_cast<size_t>(kN), 0.0);
+				for (int i = 0; i < kN; ++i)
+				{
+					grainRaw[static_cast<size_t>(i)] = upClean[static_cast<size_t>(i)] + 2.0 * rng.Normal01();
+					tpdfRaw[static_cast<size_t>(i)] = upClean[static_cast<size_t>(i)] + rng.TpdfUnit();
+				}
+				const std::vector<double> qGrain = Quantize10Bit(grainRaw);
+				const std::vector<double> qTpdf = Quantize10Bit(tpdfRaw);
+				std::copy(qGrain.begin(), qGrain.end(), sigGrain.Line(li));
+				std::copy(qTpdf.begin(), qTpdf.end(), sigTrueTpdf.Line(li));
+			}
+
+			const LineSet resGrain = ComputeRealDescaleResiduals(sigGrain, kLatentN, kLanczos3, 0.0);
+			const LineSet resTrueTpdf = ComputeRealDescaleResiduals(sigTrueTpdf, kLatentN, kLanczos3, 0.0);
+
+			const double floorP = kFloor10Bit * kFloor10Bit;               // 1/12 ~= 0.08333
+			const double gateMult = on.lineGateFactor * on.lineGateFactor; // 2.25
+			const double gateP = gateMult * floorP;                        // 2.25 * floorP ~= 0.1875
+			const double tpdfUpperP = gateMult * 2.0 * floorP;             // 4.50 * floorP ~= 0.3750
+
+			const ResidualSpectrumResult outGrain = ClassifyResidualSpectrum(sigGrain, resGrain, kLatentN, kFloor10Bit, on);
+			Assert::IsTrue(outGrain.valid, L"real 4K film grain produces a valid residual spectrum classification");
+			Assert::IsTrue(outGrain.highBandFlatness >= 0.5, L"fixture: 4K film grain is genuinely flat white in the far stopband");
+			Assert::IsTrue(outGrain.midBandPower < gateMult * outGrain.highBandPower, L"fixture: 4K film grain has no USM halo peak");
+
+			// Mandatory Rule 3 Negative Control on EXACT SAME 4K film grain input:
+			// An unbounded resFar > gateP rule (missing the physical TPDF upper bound gateMult * 2.0 * floorP)
+			// satisfies all three old DitherDominated conditions and WOULD falsely label this grain as DitherDominated (neverRebase == false)!
+			const bool naiveUnboundedDitherTrigger =
+				(outGrain.highBandPower > gateP) &&
+				(outGrain.highBandFlatness >= 0.5) &&
+				(outGrain.midBandPower < gateMult * outGrain.highBandPower);
+			Assert::IsTrue(naiveUnboundedDitherTrigger,
+				L"negative control: unbounded resFar > gateP rule WOULD misclassify real 4K film grain as DitherDominated (neverRebase=false)");
+			Assert::IsTrue(outGrain.highBandPower > tpdfUpperP,
+				L"negative control: 2-code 4K film grain far-band power exceeds physical TPDF upper bound gateMult * 2.0 * floorP");
+			Assert::IsTrue(outGrain.highBandPower > 5.0 * tpdfUpperP,
+				L"fixture: 2-code film grain far-band power is far above 10-bit TPDF dither");
+
+			// Protected H4 classifier MUST protect real 4K film grain with neverRebase == true and NativeCoded!
+			Assert::IsTrue(outGrain.classification == ResidualClass::NativeCodedStudioUpscale,
+				L"H4: real 4K / 2K-DI film grain must classify as NativeCodedStudioUpscale, not DitherDominated");
+			Assert::IsTrue(outGrain.codedRaster == SourceIdentity::Geometry::CodedRaster::NativeCoded,
+				L"H4: real 4K film grain must report codedRaster == NativeCoded");
+			Assert::IsTrue(outGrain.neverRebase,
+				L"H4: real 4K film grain must set neverRebase == true");
+
+			// Contrast control on EXACT SAME base upscale: genuine 10-bit TPDF dither stays DitherDominated (neverRebase == false).
+			const ResidualSpectrumResult outTpdf = ClassifyResidualSpectrum(sigTrueTpdf, resTrueTpdf, kLatentN, kFloor10Bit, on);
+			Assert::IsTrue(outTpdf.valid);
+			Assert::IsTrue(outTpdf.highBandPower > gateP && outTpdf.highBandPower <= tpdfUpperP,
+				L"contrast control: true 10-bit TPDF dither sits inside (gateP, gateMult * 2.0 * floorP]");
+			Assert::IsTrue(outTpdf.classification == ResidualClass::DitherDominated,
+				L"contrast control: true 10-bit TPDF dither classifies as DitherDominated");
+			Assert::IsFalse(outTpdf.neverRebase,
+				L"contrast control: true 10-bit TPDF dither allows re-basing (neverRebase == false)");
 		}
 
 		TEST_METHOD(DoubleScaleReportsLastStageAndSurfacesFirstStageSignal)

@@ -358,5 +358,106 @@ namespace Tests
 			using namespace SourceIdCons;
 			Assert::IsTrue(RunScript(false) == RunScript(true));
 		}
+
+		// M2 Red-Team proving test: blockClassicalAloneEntry = true MUST also block classical-only steps
+		// LOWER from an already-latched upscaled state (e.g. 0.5 -> 0.25, the harmful re-base direction),
+		// while NEVER blocking classical-only steps HIGHER / releases (0.5 -> 0.75 -> 1.0), and ALWAYS
+		// allowing 0.5 -> 0.25 when corroborated by a Chain witness — with a same-input negative control
+		// (blockClassicalAloneEntry = false) proving the exact same vote sequence DOES step 0.5 -> 0.25!
+		TEST_METHOD(M2BlockClassicalAloneAlsoHoldsStepLowerAndAllowsStepHigherOrChainWitness)
+		{
+			using namespace SourceIdCons;
+
+			auto runLatchThenTarget = [](bool blockClassicalAlone, double targetRatio, bool includeChainOnSecondLeg,
+				double& outRatioH, double& outRatioV, uint64_t& outBlocked, Result& outLast) {
+				SourceIdentity::Settings s;
+				s.blockClassicalAloneEntry = blockClassicalAlone;
+				Consensus c(s);
+				MockPort port;
+				uint64_t seq = 0;
+
+				// Leg 1 (t = 0..4.0 s): Joint Classical + Chain establishes latched 0.5 x 0.5.
+				for (int64_t t = 0; t <= 4000000; t += 500000)
+				{
+					c.Submit(AxisVote(VoterId::ClassicalResolution, 0.5, 0.5, 0.9, t));
+					c.Submit(AxisVote(VoterId::Chain, 0.5, 0.5, 0.9, t));
+					c.Evaluate(++seq, t, &port);
+				}
+				Assert::AreEqual(0.5, c.Current().ratioH, 1e-9, L"fixture: leg 1 latched H=0.5");
+				Assert::AreEqual(0.5, c.Current().ratioV, 1e-9, L"fixture: leg 1 latched V=0.5");
+
+				// Capture cumulative counter after Leg 1 (tick 0 of Leg 1 legitimately blocks classical-only while
+				// Chain builds its N4 chainMinDistinctEvaluations = 2 streak) so Leg 2 counts are isolated cleanly.
+				const uint64_t blockedBeforeLeg2 = c.GetStats().classicalOnlyBlocked;
+
+				// When Chain corroborates Leg 2, prime its 1st distinct evaluation at t = 14.5 s so its 2nd distinct
+				// evaluation at t = 15.0 s satisfies N4 (chainMinDistinctEvaluations = 2) on the first Leg 2 tick.
+				if (includeChainOnSecondLeg)
+				{
+					c.Submit(AxisVote(VoterId::Chain, targetRatio, targetRatio, 0.9, 14500000));
+					c.Evaluate(++seq, 14500000, &port);
+				}
+
+				// Leg 2 (t = 15.0..22.0 s): past minHoldAfterChangeUs (10 s) and past old Chain maxEvidenceAgeUs (10 s).
+				for (int64_t t = 15000000; t <= 22000000; t += 500000)
+				{
+					c.Submit(AxisVote(VoterId::ClassicalResolution, targetRatio, targetRatio, 0.9, t));
+					if (includeChainOnSecondLeg)
+						c.Submit(AxisVote(VoterId::Chain, targetRatio, targetRatio, 0.9, t));
+					outLast = c.Evaluate(++seq, t, &port);
+				}
+				outRatioH = c.Current().ratioH;
+				outRatioV = c.Current().ratioV;
+				outBlocked = c.GetStats().classicalOnlyBlocked - blockedBeforeLeg2;
+			};
+
+			// 1. Protected (blockClassicalAloneEntry = true): classical-only step LOWER (0.5 -> 0.25) MUST BE HELD!
+			double protH = 0.0, protV = 0.0;
+			uint64_t protBlocked = 0;
+			Result protLast;
+			runLatchThenTarget(true, 0.25, false, protH, protV, protBlocked, protLast);
+			Assert::AreEqual(0.5, protH, 1e-9, L"M2: classical-only step lower 0.5 -> 0.25 must stay held at 0.5 on H");
+			Assert::AreEqual(0.5, protV, 1e-9, L"M2: classical-only step lower 0.5 -> 0.25 must stay held at 0.5 on V");
+			Assert::IsTrue(protBlocked > 0, L"M2: classicalOnlyBlocked counter incremented visibly");
+			Assert::IsTrue(protLast.field[0].held, L"M2: H field explicitly marked held");
+			Assert::IsTrue(Has(protLast.field[0].reason, "classical only"), L"M2: reason visibly reports classical only");
+
+			// 2. Mandatory Rule 3 Negative Control on EXACT SAME vote sequence (blockClassicalAloneEntry = false):
+			//    classical-only DOES step lower from 0.5 to 0.25!
+			double naiveH = 0.0, naiveV = 0.0;
+			uint64_t naiveBlocked = 0;
+			Result naiveLast;
+			runLatchThenTarget(false, 0.25, false, naiveH, naiveV, naiveBlocked, naiveLast);
+			Assert::AreEqual(0.25, naiveH, 1e-9, L"negative control: unprotected consensus steps lower 0.5 -> 0.25 on classical-only");
+			Assert::AreEqual(0.25, naiveV, 1e-9, L"negative control: unprotected consensus steps lower 0.5 -> 0.25 on V");
+			Assert::AreEqual(uint64_t(0), naiveBlocked);
+
+			// 3. Contrast control (a): classical-only step HIGHER (0.5 -> 0.75) and release to native (0.5 -> 1.0)
+			//    are NEVER blocked even when blockClassicalAloneEntry = true!
+			double upH = 0.0, upV = 0.0;
+			uint64_t upBlocked = 0;
+			Result upLast;
+			runLatchThenTarget(true, 0.75, false, upH, upV, upBlocked, upLast);
+			Assert::AreEqual(0.75, upH, 1e-9, L"contrast control: classical-only step higher 0.5 -> 0.75 is never blocked");
+			Assert::AreEqual(0.75, upV, 1e-9);
+			Assert::AreEqual(uint64_t(0), upBlocked);
+
+			double natH = 0.0, natV = 0.0;
+			uint64_t natBlocked = 0;
+			Result natLast;
+			runLatchThenTarget(true, 1.0, false, natH, natV, natBlocked, natLast);
+			Assert::AreEqual(1.0, natH, 1e-9, L"contrast control: classical-only release to native 0.5 -> 1.0 is never blocked");
+			Assert::AreEqual(1.0, natV, 1e-9);
+			Assert::AreEqual(uint64_t(0), natBlocked);
+
+			// 4. Contrast control (b): stepping LOWER (0.5 -> 0.25) WITH a Chain witness IS allowed!
+			double chainH = 0.0, chainV = 0.0;
+			uint64_t chainBlocked = 0;
+			Result chainLast;
+			runLatchThenTarget(true, 0.25, true, chainH, chainV, chainBlocked, chainLast);
+			Assert::AreEqual(0.25, chainH, 1e-9, L"contrast control: 0.5 -> 0.25 WITH Chain witness is allowed");
+			Assert::AreEqual(0.25, chainV, 1e-9);
+			Assert::AreEqual(uint64_t(0), chainBlocked);
+		}
 	};
 }
