@@ -68,18 +68,30 @@ namespace
 		const int vpv = window.pageIndex(QStringLiteral("VP-V"));
 		require(drive >= 0 && calibration == drive + 1 && vpv == calibration + 1,
 			"the stack order is not Dynamic Drive, Calibration, VP-V");
-		// Owner 2026-11-07: a left-hand entry under the VP-V group as well as the Drive unit's button.
+		// Owner 2026-11-07 + Unit 2 (Phase 1): Dynamic Drive has a left-hand entry under the VP-V group and its
+		// launch button sits on VP-V > Overview (redundant vpv.drive stub tab removed); black_protection (intent_black)
+		// lives directly on Dynamic Drive > Advanced.
 		QPushButton* leaf = nullptr;
 		for (QPushButton* button : window.findChildren<QPushButton*>())
 			if (button->property("nav").toBool() && button->property("pageName").toString() == QStringLiteral("Dynamic Drive")) leaf = button;
 		require(leaf != nullptr && leaf->property("vpvChild").toBool() && leaf->property("vpvParent").toString() == QStringLiteral("VP-V"),
 			"Dynamic Drive has no navigation child under the VP-V group");
+		require(window.findChild<QWidget*>(QStringLiteral("vpv.drive")) == nullptr,
+			"redundant VP-V > Dynamic Drive stub tab (vpv.drive) should be removed");
+		auto* overview = window.findChild<QWidget*>(QStringLiteral("vpv.overview"));
 		auto* open = window.findChild<QPushButton*>(QStringLiteral("vpv.drive.subpage.Dynamic Drive"));
-		require(open != nullptr, "the Drive unit of the VP-V page has no button for the Dynamic Drive page");
+		require(overview != nullptr && open != nullptr && overview->isAncestorOf(open),
+			"the Dynamic Drive launch button (vpv.drive.subpage.Dynamic Drive) must live on VP-V > Overview");
+		auto* driveAdv = window.findChild<QWidget*>(QStringLiteral("vpv.drivepage.advanced"));
+		auto* blackProt = window.findChild<QWidget*>(QStringLiteral("vpv.drive.card.black_protection.body"));
+		auto* intentBlack = window.findChild<QWidget*>(QStringLiteral("config.vprenderer.intent_black"));
+		require(driveAdv != nullptr && blackProt != nullptr && intentBlack != nullptr &&
+			driveAdv->isAncestorOf(blackProt) && blackProt->isAncestorOf(intentBlack),
+			"black_protection card (intent_black) must live inside Dynamic Drive > Advanced");
 		window.selectPage(QStringLiteral("General"));
 		open->click();
 		QCoreApplication::processEvents();
-		require(pages->currentIndex() == drive, "the Drive unit's button opened another page");
+		require(pages->currentIndex() == drive, "the Overview launch button opened another page");
 		require(leaf->isChecked(), "opening the page from the button did not light its navigation child");
 		window.selectPage(QStringLiteral("General"));
 		leaf->click();

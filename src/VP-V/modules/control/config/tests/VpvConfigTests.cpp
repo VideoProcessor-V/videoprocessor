@@ -178,11 +178,9 @@ namespace
 		const Vpv::Table& t = Vpv::TierTable();
 		Profile p;   // nothing set: VP's built-in defaults
 		require(UnitTier(p, "motion") == 2, "defaults are motion Mid (NVOF + matcher, 4 ahead)");
-		// WAIVER DPTR-W1 (rule 9, option B approved by the coordinator via lead 4, 2026-11-11; decision doc 91 :106 + decision log
-		// refs\owner-decisions-2026-11-07.md 11-11 evening): Repair keys {deband_vp, detail_pulse_stabilise, texture_restore}.
-		// Before: defaults {off,on,off} = Low {off,on,off}, Classic {off,off,off} differed. After: defaults {off,off,off} = Classic = Low
-		// (identical key sets); MatchTier reports the lowest match, so the default Repair tier is Classic (0), not Low (1).
-		require(UnitTier(p, "repair") == 0, "defaults are repair Classic (== Low since DPTR-OFF: libplacebo deband only)");
+		// WAIVER DPTR-W1 + Unit 2 (Phase 1): Repair keys {deband_vp, detail_pulse_stabilise, texture_restore}.
+		// Defaults {off,off,off} match Classic (0). Repair Low now sets deband_vp=auto (distinct from Classic=off and Mid=on).
+		require(UnitTier(p, "repair") == 0, "defaults are repair Classic (deband_vp=off: libplacebo deband only)");
 		// Logic audit 2026-10-24 (HIGH 1): the shipped values are a tier of every unit.
 		require(UnitTier(p, "scaling") == 1, "defaults are scaling Low (re-base auto, no SSIM blend)");
 		require(UnitTier(p, "output") == 1, "defaults are output Low (temporal dither as shipped)");
@@ -195,13 +193,13 @@ namespace
 		// keys whose effective value changes) no longer writes it: Upper presets now show as deband_vp=on (the Repair change)
 		// plus dejudder_est_split=on, and texture_restore is NOT statistical.
 		require(p.values["deband_vp"] == "on" && p.values["texture_restore"] != "statistical" && p.values["dejudder_est_split"] == "on", "Upper presets written");
-		// DPTR-OFF: a saved Low reads back Classic (identical keys), a saved Upper reads back Mid for Repair (lowest match);
-		// the global Upper stays reachable (MatchGlobal treats identical presets as equal).
+		// Repair Upper is planned (uses Mid), while Repair Low (deband_vp=auto) is distinct from Classic (off) and Mid (on).
 		require(UnitTier(p, "repair") == 2, "saved Repair Upper keys read back as Mid (lowest identical tier)");
 		{
 			Profile low;
 			low.Apply(Vpv::ApplyTier(t, *t.FindUnit("repair"), 1, low.Get()));
-			require(UnitTier(low, "repair") == 0, "saved Repair Low keys read back as Classic (lowest identical tier)");
+			require(low.values["deband_vp"] == "auto" && UnitTier(low, "repair") == 1,
+				"saved Repair Low writes deband_vp=auto and reads back as Low (distinct from Classic)");
 			Profile valuesOnly;   // only values, no stored tier: the lowest match
 			valuesOnly.values["deband_vp"] = "on";
 			require(UnitTier(valuesOnly, "repair") == 2, "a cfg with only values reads back the lowest match (Mid)");
@@ -598,7 +596,7 @@ namespace
 			auto* upstream = control<QWidget>(window, QStringLiteral("config.vprenderer.adaptive_upscale"));
 			require(!upstream->isEnabled() && upstream->toolTip().startsWith(QStringLiteral("Managed by VP-V")),
 				"the upstream control of a new toggle is managed by VP-V");
-			for (const char* unit : { "input", "motion", "repair", "scaling", "colour", "drive", "output" })
+			for (const char* unit : { "input", "motion", "repair", "scaling", "colour", "output" })
 				require(!control<QLabel>(window, Vpv::ObjectName(QString::fromLatin1(unit) + QStringLiteral(".more")))->text().isEmpty(),
 					(std::string("each unit names where the rest of its settings are: ") + unit).c_str());
 			require(!window.findChild<QCheckBox*>(Vpv::ObjectName("output.planned.calibration_lut_stage")),
@@ -660,6 +658,7 @@ namespace
 	// profile picker follows the Rendering page's list; a VP-V write reloads the moved rows.
 	void testOrganisation()
 	{
+		Vpv::RegisterConfigProviders();
 		QTemporaryDir dir;
 		const QString path = WriteFixture(dir,
 			"[vprenderer]\nquality: high\ntexture_restore_cap: 1.5\n"
@@ -684,6 +683,8 @@ namespace
 					w = window.findChild<QWidget*>(Vpv::ObjectName(QString::fromLatin1(card.unit) + QLatin1Char('.') + QString::fromLatin1(item.id)));
 				else if (item.kind == Vpv::ItemKind::Text)
 					w = window.findChild<QLineEdit*>(Vpv::ObjectName(QString::fromLatin1(card.unit) + QLatin1Char('.') + QString::fromLatin1(item.id)));
+				else if (item.kind != Vpv::ItemKind::Hide && item.kind != Vpv::ItemKind::Note && item.kind != Vpv::ItemKind::Elsewhere)
+					w = window.findChild<QWidget*>(Vpv::ObjectName(QString::fromLatin1(card.unit) + QLatin1Char('.') + QString::fromLatin1(item.id)));
 				else
 					continue;
 				require(w && body->isAncestorOf(w), (std::string("in its card: ") + card.unit + "/" + card.id + " " + item.id).c_str());
@@ -763,15 +764,15 @@ namespace
 			const std::string where = std::string(card.unit) + "/" + card.id;
 			for (const Vpv::CardItem& item : card.items)
 			{
-				if (item.kind == Vpv::ItemKind::Row || item.kind == Vpv::ItemKind::Toggle || item.kind == Vpv::ItemKind::Text)
-				{
-					const auto inserted = keyCard.emplace(item.id, where);
-					require(inserted.second, ("a key is on one card only: " + std::string(item.id) + " (" + inserted.first->second + " and " + where + ")").c_str());
-				}
-				else if (item.kind == Vpv::ItemKind::Section)
+				if (item.kind == Vpv::ItemKind::Section)
 				{
 					const auto inserted = sectionCard.emplace(item.id, where);
 					require(inserted.second, ("a section is on one card only: " + std::string(item.id)).c_str());
+				}
+				else if (item.kind != Vpv::ItemKind::Hide && item.kind != Vpv::ItemKind::Note && item.kind != Vpv::ItemKind::Elsewhere)
+				{
+					const auto inserted = keyCard.emplace(item.id, where);
+					require(inserted.second, ("a key is on one card only: " + std::string(item.id) + " (" + inserted.first->second + " and " + where + ")").c_str());
 				}
 			}
 		}
@@ -804,10 +805,19 @@ namespace
 			require(found != keyCard.end() && found->second.compare(0, 8, "scaling/") == 0,
 				(std::string("a source-resolution key is on a Scaling card: ") + key).c_str());
 		}
-		const char* const kFixesContainerStays[] = { "optical_flow_fb_check", "optical_flow_global",
-			"optical_flow_global_fallback", "source_class", "ssim_bitrate_floor" };
-		for (const char* key : kFixesContainerStays)
-			require(keyCard.find(key) == keyCard.end(), (std::string("a Fixes under test key that stays in the container is on no card: ") + key).c_str());
+		// Unit 2 (Phase 1): all 5 previously stranded Fixes-under-test keys are now placed on their proper cards
+		// (FIXES_CONTAINER_STAYS is empty).
+		for (const char* key : { "optical_flow_fb_check", "optical_flow_global", "optical_flow_global_fallback", "source_class" })
+		{
+			const auto found = keyCard.find(key);
+			require(found != keyCard.end() && found->second.compare(0, 7, "motion/") == 0,
+				(std::string("previously stranded motion key is now on a Motion card: ") + key).c_str());
+		}
+		{
+			const auto found = keyCard.find("ssim_bitrate_floor");
+			require(found != keyCard.end() && found->second.compare(0, 8, "scaling/") == 0,
+				"previously stranded ssim_bitrate_floor is now on a Scaling card");
+		}
 		// P8-5 (2026-11-11): the dither, grain-split and adaptive scaler rows are on their own units' cards. The adaptive_*
 		// keys (adaptive_motion* among them, built by the adaptive sections of Bill's page since 81c38abe0) resolve
 		// through the two adaptive Sections, which sit on a Scaling card.
@@ -1336,8 +1346,9 @@ namespace
 			const QString id = QString::fromLatin1(u.id);
 			if (!u.Tiered())
 			{
-				require(window.findChild<QLabel*>(Vpv::ObjectName(id + QStringLiteral(".untiered"))) != nullptr,
-					(std::string("an untiered unit keeps its explanation: ") + u.id).c_str());
+				if (id != QStringLiteral("drive"))   // Dynamic Drive has its own page; redundant stub tab removed (Unit 2)
+					require(window.findChild<QLabel*>(Vpv::ObjectName(id + QStringLiteral(".untiered"))) != nullptr,
+						(std::string("an untiered unit keeps its explanation: ") + u.id).c_str());
 				require(!window.findChild<QSlider*>(Vpv::ObjectName(id + QStringLiteral(".tier"))), (std::string("no slider on an untiered unit: ") + u.id).c_str());
 				continue;
 			}
@@ -1828,8 +1839,9 @@ namespace
 	// so Apply refuses such a file before and after row c; Auto is saved as an absent key.) Opening and saving
 	// untouched keeps every stored value (Bill's displayed 0 is never written back); the two controls follow each
 	// other both ways; an explicit 0 shows the notice.
-	// SID r2: source_geometry_detect is a VP-V text row on the Scaling > Re-base card (built by the VP-V page, rule 32: no
-	// row on Bill's pages). It shows the picked profile's own value, writes that profile's key, and empty removes it.
+	// SID r2 + Unit 2 (Phase 1): source_geometry_detect lives on Scaling > Advanced > Re-base timing as a mode
+	// dropdown (vpv.scaling.source_geometry_detect.mode) plus a conditional custom IDs QLineEdit
+	// (vpv.scaling.source_geometry_detect, rule 32: no row on Bill's pages).
 	void testSourceGeometryDetectRowOnRebaseCard()
 	{
 		QTemporaryDir dir;
@@ -1837,28 +1849,47 @@ namespace
 			"[vprenderer.Main]\nsource_geometry_detect: conventional\n"
 			"[vprenderer.Cinema]\nquality: high\n");
 		const QString name = Vpv::ObjectName(QStringLiteral("scaling.source_geometry_detect"));
+		const QString modeName = Vpv::ObjectName(QStringLiteral("scaling.source_geometry_detect.mode"));
 		{
 			ConfigEditorWindow window(path, 0, true);
-			auto* card = control<QWidget>(window, Vpv::ObjectName(QStringLiteral("scaling.card.rebase.body")));
+			auto* card = control<QWidget>(window, Vpv::ObjectName(QStringLiteral("scaling.card.rebase_timing.body")));
+			auto* scalingMain = control<QWidget>(window, Vpv::ObjectName(QStringLiteral("scaling.main")));
+			auto* scalingAdv = control<QWidget>(window, Vpv::ObjectName(QStringLiteral("scaling.advanced")));
+			auto* mode = control<QComboBox>(window, modeName);
 			auto* edit = control<QLineEdit>(window, name);
-			require(window.findChildren<QLineEdit*>(name).size() == 1, "the source_geometry_detect row is not there exactly once");
-			require(card->isAncestorOf(edit), "the source_geometry_detect row is not on the VP-V Re-base card");
+			require(window.findChildren<QLineEdit*>(name).size() == 1, "the source_geometry_detect custom edit is not there exactly once");
+			require(scalingAdv->isAncestorOf(card) && card->isAncestorOf(mode) && card->isAncestorOf(edit),
+				"source_geometry_detect mode + custom edit must sit on Scaling > Advanced > Re-base timing");
+			require(!scalingMain->isAncestorOf(mode) && !scalingMain->isAncestorOf(edit),
+				"source_geometry_detect must not sit on Scaling > Main");
 			require(window.findChild<QWidget*>(QStringLiteral("config.vprenderer.source_geometry_detect")) == nullptr,
 				"a source_geometry_detect row is on Bill's Rendering page");
-			require(edit->placeholderText() == QStringLiteral("Default: all"), "the row does not show its default");
+			const int conventionalIdx = mode->findData(QStringLiteral("conventional"));
+			const int customIdx = mode->findData(QStringLiteral("custom"));
+			const int unsetIdx = mode->findData(QString());
+			const int allIdx = mode->findData(QStringLiteral("all"));
+			require(conventionalIdx >= 0 && customIdx >= 0 && (unsetIdx >= 0 || allIdx >= 0),
+				"source_geometry_detect mode combo must offer default/all, conventional, and custom");
 			auto* profile = control<QComboBox>(window, Vpv::ObjectName("profile"));
 			profile->setCurrentIndex(profile->findData(QStringLiteral("vprenderer.Main")));
 			QCoreApplication::processEvents();
-			require(edit->text() == QStringLiteral("conventional"), "the row does not load the profile's value");
+			require(mode->currentData().toString() == QStringLiteral("conventional") && edit->isHidden(),
+				"conventional profile selects conventional mode and hides custom edit");
 			profile->setCurrentIndex(profile->findData(QStringLiteral("vprenderer.Cinema")));
 			QCoreApplication::processEvents();
-			require(edit->text().isEmpty(), "the row does not show the picked profile's own (unset) value");
+			require((mode->currentData().toString().isEmpty() || mode->currentData().toString() == QStringLiteral("all")) && edit->isHidden(),
+				"unset profile selects default/all mode and hides custom edit");
+			mode->setCurrentIndex(customIdx);
+			QCoreApplication::processEvents();
+			require(!edit->isHidden() && edit->isEnabled(), "custom mode shows and enables the custom IDs edit");
 			edit->setText(QStringLiteral("hdv_1440x1080, 1920x1080"));
 			emit edit->editingFinished();
+			QCoreApplication::processEvents();
 			profile->setCurrentIndex(profile->findData(QStringLiteral("vprenderer.Main")));
 			QCoreApplication::processEvents();
-			edit->setText(QString());
-			emit edit->editingFinished();
+			mode->setCurrentIndex(unsetIdx >= 0 ? unsetIdx : allIdx);
+			QCoreApplication::processEvents();
+			require(edit->isHidden(), "switching back to default/all hides the custom IDs edit");
 			save(window);
 		}
 		ConfigFile config;
@@ -1866,7 +1897,7 @@ namespace
 		std::string v;
 		require(config.TryGetString("vprenderer.cinema", "source_geometry_detect", v) && v == "hdv_1440x1080, 1920x1080",
 			("the row does not save the picked profile's key\n" + FileText(path)).c_str());
-		require(!config.TryGetString("vprenderer.main", "source_geometry_detect", v), "clearing the row does not remove the key");
+		require(!config.TryGetString("vprenderer.main", "source_geometry_detect", v), "resetting mode to default/all does not remove the key");
 		require(!config.TryGetString("vprenderer", "source_geometry_detect", v), "the row wrote the base section");
 		requireVpReads(path);
 		{
@@ -1874,7 +1905,11 @@ namespace
 			auto* profile = control<QComboBox>(window, Vpv::ObjectName("profile"));
 			profile->setCurrentIndex(profile->findData(QStringLiteral("vprenderer.Cinema")));
 			QCoreApplication::processEvents();
-			require(control<QLineEdit>(window, name)->text() == QStringLiteral("hdv_1440x1080, 1920x1080"), "the saved value does not reopen");
+			auto* mode = control<QComboBox>(window, modeName);
+			auto* edit = control<QLineEdit>(window, name);
+			require(mode->currentData().toString() == QStringLiteral("custom") && !edit->isHidden() &&
+				edit->text() == QStringLiteral("hdv_1440x1080, 1920x1080"),
+				"saved custom source_geometry_detect value does not reopen in custom mode");
 		}
 	}
 
@@ -2489,7 +2524,7 @@ namespace
 			const QList<QWidget*> found = window.findChildren<QWidget*>(name);
 			require(found.size() == 1 && bothTab->isAncestorOf(found.front()),
 				(std::string("GEM-058: both-pathway card not solely on Both pathways tab: ") + id).c_str());
-			for (const char* u : { "input", "motion", "repair", "scaling", "colour", "drive", "output" })
+			for (const char* u : { "input", "motion", "repair", "scaling", "colour", "output" })
 			{
 				auto* unitPage = control<QWidget>(window, Vpv::ObjectName(QString::fromLatin1(u)));
 				require(!unitPage->isAncestorOf(found.front()),
@@ -4679,6 +4714,452 @@ namespace
 		QCoreApplication::processEvents();
 		checkManagedState(true, "back to VP-V Default");
 	}
+
+	// Unit 2 (Phase 1) Red-Team adversarial test 1: CAM16 appearance validated widgets (combo + spinboxes,
+	// never free-text QLineEdits) and mutual exclusion against legacy room-light adaptation (ambient_adapt).
+	void testCam16AppearanceWidgetsAndMutualExclusion()
+	{
+		QTemporaryDir dir;
+		const QString path = WriteFixture(dir,
+			"[vprenderer]\nappearance: off\nambient_adapt: on\n"
+			"[queue]\ntarget_latency_ms: 250\n");
+		{
+			ConfigEditorWindow window(path, 0, true);
+			QCoreApplication::processEvents();
+
+			// Validated widgets only: appearance_room is a QComboBox, strength & screen_white_nits are QDoubleSpinBoxes.
+			require(window.findChild<QLineEdit*>(Vpv::ObjectName("colour.appearance_room")) == nullptr,
+				"Unit 2: vpv.colour.appearance_room must be a QComboBox, not a QLineEdit");
+			require(window.findChild<QLineEdit*>(Vpv::ObjectName("colour.appearance_strength")) == nullptr,
+				"Unit 2: vpv.colour.appearance_strength must be a QDoubleSpinBox, not a QLineEdit");
+			require(window.findChild<QLineEdit*>(Vpv::ObjectName("colour.appearance_screen_white_nits")) == nullptr,
+				"Unit 2: vpv.colour.appearance_screen_white_nits must be a QDoubleSpinBox, not a QLineEdit");
+
+			auto* appearance = control<QComboBox>(window, Vpv::ObjectName("colour.appearance"));
+			auto* room = control<QComboBox>(window, Vpv::ObjectName("colour.appearance_room"));
+			for (const char* val : { "cinema", "living_low", "living_lit", "auto" })
+				require(room->findData(QString::fromLatin1(val)) >= 0,
+					(std::string("Unit 2: appearance_room QComboBox missing option: ") + val).c_str());
+
+			auto* strength = control<QDoubleSpinBox>(window, Vpv::ObjectName("colour.appearance_strength"));
+			require(std::abs(strength->minimum() - 0.0) < 1e-6 && std::abs(strength->maximum() - 1.0) < 1e-6,
+				"Unit 2: appearance_strength QDoubleSpinBox must have range 0.0..1.0");
+			auto* whiteNits = control<QDoubleSpinBox>(window, Vpv::ObjectName("colour.appearance_screen_white_nits"));
+			require(std::abs(whiteNits->minimum() - 1.0) < 1e-6 && std::abs(whiteNits->maximum() - 1000.0) < 1e-6,
+				"Unit 2: appearance_screen_white_nits QDoubleSpinBox must have range 1.0..1000.0");
+
+			auto* appearanceTuningBody = control<QWidget>(window, Vpv::ObjectName("colour.card.appearance_tuning.body"));
+			auto* ambientAdapt = control<QComboBox>(window, Vpv::ObjectName("colour.ambient_adapt"));
+			auto* roomTuningBody = control<QWidget>(window, Vpv::ObjectName("colour.card.room_tuning.body"));
+			auto* replacedNote = control<QLabel>(window, Vpv::ObjectName("colour.room.replaced_note"));
+
+			// Negative control (appearance=off, ambient_adapt=on): CAM16 controls disabled, legacy room-light enabled, replaced note hidden.
+			require(!room->isEnabled() && !strength->isEnabled() && !whiteNits->isEnabled() && !appearanceTuningBody->isEnabled(),
+				"Unit 2 negative control (appearance=off): CAM16 room/strength/white_nits/tuning must be disabled");
+			require(appearance->isEnabled() && ambientAdapt->isEnabled() && roomTuningBody->isEnabled(),
+				"Unit 2 negative control (appearance=off): appearance switch, ambient_adapt, and room_tuning must be enabled");
+			require(replacedNote->isHidden(),
+				"Unit 2 negative control (appearance=off): vpv.colour.room.replaced_note must be hidden");
+
+			// Switch CAM16 appearance ON: CAM16 controls enable, legacy room-light adaptation disables & shows replaced note.
+			const int onIdx = appearance->findData(QStringLiteral("on"));
+			const int offIdx = appearance->findData(QStringLiteral("off"));
+			require(onIdx >= 0 && offIdx >= 0, "Unit 2: appearance combo must offer on and off");
+			appearance->setCurrentIndex(onIdx);
+			QCoreApplication::processEvents();
+			require(room->isEnabled() && strength->isEnabled() && whiteNits->isEnabled() && appearanceTuningBody->isEnabled(),
+				"Unit 2 (appearance=on): CAM16 room/strength/white_nits/tuning must become enabled");
+			require(!ambientAdapt->isEnabled() && !roomTuningBody->isEnabled(),
+				"Unit 2 (appearance=on): legacy ambient_adapt and room_tuning must become disabled");
+			require(!replacedNote->isHidden() && replacedNote->text().contains(QStringLiteral("Replaced by CAM16 Appearance")),
+				("Unit 2 (appearance=on): vpv.colour.room.replaced_note must be visible with 'Replaced by CAM16 Appearance', got: " +
+					S(replacedNote->text())).c_str());
+
+			// Toggle back OFF to prove mutual exclusion reverses cleanly (not sticky).
+			appearance->setCurrentIndex(offIdx);
+			QCoreApplication::processEvents();
+			require(!room->isEnabled() && !strength->isEnabled() && !whiteNits->isEnabled() && !appearanceTuningBody->isEnabled(),
+				"Unit 2 (back to off): CAM16 controls must disable again");
+			require(ambientAdapt->isEnabled() && roomTuningBody->isEnabled() && replacedNote->isHidden(),
+				"Unit 2 (back to off): legacy ambient_adapt/room_tuning must re-enable and replaced_note must hide again");
+
+			// Switch back ON, set validated CAM16 values, and save.
+			appearance->setCurrentIndex(onIdx);
+			QCoreApplication::processEvents();
+			room->setCurrentIndex(room->findData(QStringLiteral("living_lit")));
+			strength->setValue(0.75);
+			QMetaObject::invokeMethod(strength, "editingFinished", Qt::DirectConnection);
+			whiteNits->setValue(100.0);
+			QMetaObject::invokeMethod(whiteNits, "editingFinished", Qt::DirectConnection);
+			QCoreApplication::processEvents();
+			save(window);
+		}
+
+		ConfigFile config;
+		require(config.Load(path.toStdString()), "Unit 2: saved CAM16 config reloads");
+		const std::string prof = DefaultProfile(path);
+		std::string v;
+		require(config.TryGetString(prof, "appearance", v) && Vpv::SameValue(v, "on"),
+			"Unit 2: appearance=on saved");
+		require(config.TryGetString(prof, "appearance_room", v) && Vpv::SameValue(v, "living_lit"),
+			("Unit 2: appearance_room=living_lit saved, got: " + v).c_str());
+		require(config.TryGetString(prof, "appearance_strength", v) && Vpv::SameValue(v, "0.75"),
+			("Unit 2: appearance_strength=0.75 saved, got: " + v).c_str());
+		require(config.TryGetString(prof, "appearance_screen_white_nits", v) && Vpv::SameValue(v, "100"),
+			("Unit 2: appearance_screen_white_nits=100 saved, got: " + v).c_str());
+		requireVpReads(path);
+
+		// Reopen: exact round-trip AND mutual exclusion active on initial load.
+		{
+			ConfigEditorWindow reopened(path, 0, true);
+			QCoreApplication::processEvents();
+			auto* room = control<QComboBox>(reopened, Vpv::ObjectName("colour.appearance_room"));
+			auto* strength = control<QDoubleSpinBox>(reopened, Vpv::ObjectName("colour.appearance_strength"));
+			auto* whiteNits = control<QDoubleSpinBox>(reopened, Vpv::ObjectName("colour.appearance_screen_white_nits"));
+			require(room->currentData().toString() == QStringLiteral("living_lit"),
+				"Unit 2 reload: appearance_room round-tripped");
+			require(std::abs(strength->value() - 0.75) < 1e-4,
+				"Unit 2 reload: appearance_strength round-tripped");
+			require(std::abs(whiteNits->value() - 100.0) < 1e-4,
+				"Unit 2 reload: appearance_screen_white_nits round-tripped");
+			require(!control<QComboBox>(reopened, Vpv::ObjectName("colour.ambient_adapt"))->isEnabled() &&
+				!control<QWidget>(reopened, Vpv::ObjectName("colour.card.room_tuning.body"))->isEnabled(),
+				"Unit 2 reload: mutual exclusion disables ambient_adapt and room_tuning on initial open");
+			auto* replacedNote = control<QLabel>(reopened, Vpv::ObjectName("colour.room.replaced_note"));
+			require(!replacedNote->isHidden() && replacedNote->text().contains(QStringLiteral("Replaced by CAM16 Appearance")),
+				"Unit 2 reload: replaced_note visible on initial open when appearance=on");
+		}
+	}
+
+	// Unit 2 (Phase 1) Red-Team adversarial test 2: Repair Low tier sticks with zero bounce (deband_vp=auto,
+	// distinct from Classic=off and Mid=on) and Owner #3 clarity summaries exist & update meaningfully on all tiered units + Overview.
+	void testRepairTierNoBounceAndAllTiersClaritySummary()
+	{
+		QTemporaryDir dir;
+		const QString path = WriteFixture(dir);
+		{
+			ConfigEditorWindow window(path, 0, true);
+			QCoreApplication::processEvents();
+
+			auto* repairSlider = control<QSlider>(window, Vpv::ObjectName("repair.tier"));
+			auto* repairName = control<QLabel>(window, Vpv::ObjectName("repair.tier.name"));
+			auto* debandVp = control<QComboBox>(window, QStringLiteral("config.vprenderer.deband_vp"));
+			auto effectiveDeband = [debandVp]()
+			{
+				const QString data = debandVp->currentData().toString();
+				return data.isEmpty() ? debandVp->property("effectiveValue").toString() : data;
+			};
+
+			// Drag Repair slider to Low (1): must stick at 1 (no bounce to 0) and write deband_vp=auto.
+			repairSlider->setValue(1);
+			QCoreApplication::processEvents();
+			require(repairSlider->value() == 1,
+				"Unit 2: Repair Low (1) bounced back instead of sticking");
+			require(repairName->text().contains(QStringLiteral("Low")),
+				("Unit 2: Repair Low name label should contain 'Low', got: " + S(repairName->text())).c_str());
+			const QString lowDeband = effectiveDeband();
+			require(lowDeband.compare(QStringLiteral("auto"), Qt::CaseInsensitive) == 0,
+				("Unit 2: Repair Low must set deband_vp=auto, got: " + S(lowDeband)).c_str());
+
+			// Compare against Classic (0 -> off) and Mid (2 -> on): all 3 distinct.
+			repairSlider->setValue(0);
+			QCoreApplication::processEvents();
+			require(repairSlider->value() == 0 && repairName->text().contains(QStringLiteral("Classic")),
+				"Unit 2: Repair Classic (0) did not stick");
+			const QString classicDeband = effectiveDeband();
+			require(classicDeband.compare(QStringLiteral("off"), Qt::CaseInsensitive) == 0,
+				("Unit 2: Repair Classic must set deband_vp=off, got: " + S(classicDeband)).c_str());
+
+			repairSlider->setValue(2);
+			QCoreApplication::processEvents();
+			require(repairSlider->value() == 2 && repairName->text().contains(QStringLiteral("Mid")),
+				"Unit 2: Repair Mid (2) did not stick");
+			const QString midDeband = effectiveDeband();
+			require(midDeband.compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0,
+				("Unit 2: Repair Mid must set deband_vp=on, got: " + S(midDeband)).c_str());
+			require(classicDeband != lowDeband && lowDeband != midDeband && classicDeband != midDeband,
+				"Unit 2: Repair Classic / Low / Mid deband_vp values must all be distinct");
+
+			// Owner #3 Clarity Mandate across ALL tiered units + Overview.
+			auto* motionSummary = control<QLabel>(window, Vpv::ObjectName("motion.tier.summary"));
+			auto* repairSummary = control<QLabel>(window, Vpv::ObjectName("repair.tier.summary"));
+			auto* scalingSummary = control<QLabel>(window, Vpv::ObjectName("scaling.tier.summary"));
+			auto* outputSummary = control<QLabel>(window, Vpv::ObjectName("output.tier.summary"));
+			auto* globalSummary = control<QLabel>(window, Vpv::ObjectName("global_tier.summary"));
+
+			auto checkDistinctNonEmpty = [](const char* unitName, const QStringList& texts)
+			{
+				for (int i = 0; i < texts.size(); ++i)
+				{
+					require(!texts[i].trimmed().isEmpty(),
+						(std::string("Unit 2 clarity summary empty for ") + unitName + " step " + std::to_string(i)).c_str());
+					for (int j = i + 1; j < texts.size(); ++j)
+						require(texts[i] != texts[j],
+							(std::string("Unit 2 clarity summary did not change between steps ") +
+								std::to_string(i) + " and " + std::to_string(j) + " on " + unitName +
+								": " + S(texts[i])).c_str());
+				}
+			};
+			auto hasCI = [](const QString& text, const char* needle)
+			{
+				return text.contains(QString::fromLatin1(needle), Qt::CaseInsensitive);
+			};
+
+			// Repair clarity summaries (Classic 0, Low 1, Mid 2).
+			QStringList repairTexts;
+			for (int step = 0; step <= 2; ++step)
+			{
+				repairSlider->setValue(step);
+				QCoreApplication::processEvents();
+				repairTexts << repairSummary->text();
+			}
+			checkDistinctNonEmpty("repair", repairTexts);
+			require(hasCI(repairTexts[0], "deband") && hasCI(repairTexts[0], "off"),
+				("Unit 2: Repair Classic summary must mention deband + off, got: " + S(repairTexts[0])).c_str());
+			require(hasCI(repairTexts[1], "deband") && hasCI(repairTexts[1], "auto"),
+				("Unit 2: Repair Low summary must mention deband + auto/automatic, got: " + S(repairTexts[1])).c_str());
+			require(hasCI(repairTexts[2], "deband") && hasCI(repairTexts[2], "on"),
+				("Unit 2: Repair Mid summary must mention deband + on, got: " + S(repairTexts[2])).c_str());
+
+			// Motion clarity summaries (Classic 0, Low 1, Mid 2, Upper 3 — all 4 built).
+			auto* motionSlider = control<QSlider>(window, Vpv::ObjectName("motion.tier"));
+			QStringList motionTexts;
+			for (int step = 0; step <= 3; ++step)
+			{
+				motionSlider->setValue(step);
+				QCoreApplication::processEvents();
+				motionTexts << motionSummary->text();
+			}
+			checkDistinctNonEmpty("motion", motionTexts);
+			require((hasCI(motionTexts[0], "optical flow") || hasCI(motionTexts[0], "motion") || hasCI(motionTexts[0], "matcher")) &&
+				hasCI(motionTexts[0], "off"),
+				("Unit 2: Motion Classic summary must explicitly state what is off, got: " + S(motionTexts[0])).c_str());
+			require((hasCI(motionTexts[2], "optical flow") || hasCI(motionTexts[2], "motion")) && hasCI(motionTexts[2], "on"),
+				("Unit 2: Motion Mid summary must explicitly state what is on, got: " + S(motionTexts[2])).c_str());
+			require(hasCI(motionTexts[3], "on"),
+				("Unit 2: Motion Upper summary must explicitly state what is on, got: " + S(motionTexts[3])).c_str());
+
+			// Scaling clarity summaries (Classic 0, Low 1, Mid 2).
+			auto* scalingSlider = control<QSlider>(window, Vpv::ObjectName("scaling.tier"));
+			QStringList scalingTexts;
+			for (int step = 0; step <= 2; ++step)
+			{
+				scalingSlider->setValue(step);
+				QCoreApplication::processEvents();
+				scalingTexts << scalingSummary->text();
+			}
+			checkDistinctNonEmpty("scaling", scalingTexts);
+			require((hasCI(scalingTexts[0], "re-base") || hasCI(scalingTexts[0], "rebase") || hasCI(scalingTexts[0], "downscale")) &&
+				hasCI(scalingTexts[0], "off"),
+				("Unit 2: Scaling Classic summary must explicitly state what is off, got: " + S(scalingTexts[0])).c_str());
+			require((hasCI(scalingTexts[2], "re-base") || hasCI(scalingTexts[2], "rebase") || hasCI(scalingTexts[2], "downscale")) &&
+				hasCI(scalingTexts[2], "on"),
+				("Unit 2: Scaling Mid summary must explicitly state what is on, got: " + S(scalingTexts[2])).c_str());
+
+			// Output clarity summaries (Classic 0, Low 1, Mid 2).
+			auto* outputSlider = control<QSlider>(window, Vpv::ObjectName("output.tier"));
+			QStringList outputTexts;
+			for (int step = 0; step <= 2; ++step)
+			{
+				outputSlider->setValue(step);
+				QCoreApplication::processEvents();
+				outputTexts << outputSummary->text();
+			}
+			checkDistinctNonEmpty("output", outputTexts);
+			for (int step = 0; step <= 2; ++step)
+				require(hasCI(outputTexts[step], "dither"),
+					("Unit 2: Output tier summary must name dither, got: " + S(outputTexts[step])).c_str());
+			require(hasCI(outputTexts[0], "libplacebo") || hasCI(outputTexts[0], "off"),
+				("Unit 2: Output Classic summary must state libplacebo/off, got: " + S(outputTexts[0])).c_str());
+			require(hasCI(outputTexts[2], "vp") || hasCI(outputTexts[2], "sigma") || hasCI(outputTexts[2], "on"),
+				("Unit 2: Output Mid summary must state VP/sigma-delta/on, got: " + S(outputTexts[2])).c_str());
+
+			// Overview global tier summary (Classic 0 -> Low 1 -> Mid 2 -> Upper 3).
+			auto* globalSlider = control<QSlider>(window, Vpv::ObjectName("global_tier"));
+			QStringList globalTexts;
+			for (int step = 0; step <= 3; ++step)
+			{
+				globalSlider->setValue(step);
+				QCoreApplication::processEvents();
+				globalTexts << globalSummary->text();
+			}
+			checkDistinctNonEmpty("global_tier", globalTexts);
+
+			// Save at Repair Low (1) and prove round-trip reload sticks at 1 without bounce.
+			repairSlider->setValue(1);
+			QCoreApplication::processEvents();
+			save(window);
+		}
+		requireVpReads(path);
+		{
+			ConfigEditorWindow reopened(path, 0, true);
+			QCoreApplication::processEvents();
+			require(control<QSlider>(reopened, Vpv::ObjectName("repair.tier"))->value() == 1 &&
+				control<QLabel>(reopened, Vpv::ObjectName("repair.tier.name"))->text().contains(QStringLiteral("Low")),
+				"Unit 2 reload: saved Repair Low (deband_vp=auto) reopens cleanly at step 1 without bouncing");
+		}
+	}
+
+	// Unit 2 (Phase 1) Red-Team adversarial test 3: all 5 stranded Fixes-under-test keys placed (allRaw hidden),
+	// Scaling/Motion Advanced demotions, Motion engine lock on render_ahead + intent_motion, Output moves for
+	// dither_need + calibration_lut_stage, Dynamic Drive stub tab removal + black_protection on LedDrivePage > Advanced,
+	// and input.delay wording pointing to Input > Main instead of Queue page.
+	void testPhase1PlacementsAndAllRawHidden()
+	{
+		Vpv::RegisterConfigProviders();
+		QTemporaryDir dir;
+		const QString path = WriteFixture(dir,
+			"[general]\nrenderer: VP Renderer\n"
+			"[vprenderer]\nsdr_target_nits: 100\n"
+			"[queue]\ntarget_latency_ms: 250\n"
+			"[led_drive.Default]\nenabled: true\ncommand_source: compensate\n"
+			"[projector.Default]\nprotocol: barco_ascii\nport: COM1\n");
+		{
+			ConfigEditorWindow window(path, 0, true);
+			QCoreApplication::processEvents();
+
+			// 1. rendererSection.allRawGroup is hidden and ZERO of the 5 stranded keys remain in allRawGroup.
+			auto* allRawGroup = control<QWidget>(window, QStringLiteral("rendererSection.allRawGroup"));
+			require(allRawGroup->isHidden(),
+				"Unit 2: rendererSection.allRawGroup must be hidden once all stranded keys are placed");
+			auto* motionAdv = control<QWidget>(window, Vpv::ObjectName("motion.advanced"));
+			auto* motionMain = control<QWidget>(window, Vpv::ObjectName("motion.main"));
+			auto* motionShapingBody = control<QWidget>(window, Vpv::ObjectName("motion.card.shaping.body"));
+			for (const char* key : { "optical_flow_global", "optical_flow_global_fallback", "optical_flow_fb_check", "source_class" })
+			{
+				auto* w = control<QWidget>(window, QStringLiteral("config.vprenderer.") + QString::fromLatin1(key));
+				require(!allRawGroup->isAncestorOf(w),
+					(std::string("Unit 2: stranded key still in allRawGroup: ") + key).c_str());
+				require(motionAdv->isAncestorOf(w) && motionShapingBody->isAncestorOf(w),
+					(std::string("Unit 2: key must live inside motion.advanced / motion.card.shaping.body: ") + key).c_str());
+			}
+			auto* scalingAdv = control<QWidget>(window, Vpv::ObjectName("scaling.advanced"));
+			auto* scalingMain = control<QWidget>(window, Vpv::ObjectName("scaling.main"));
+			auto* scalingSteadinessBody = control<QWidget>(window, Vpv::ObjectName("scaling.card.steadiness.body"));
+			auto* ssimFloor = control<QWidget>(window, QStringLiteral("config.vprenderer.ssim_bitrate_floor"));
+			require(!allRawGroup->isAncestorOf(ssimFloor) && scalingAdv->isAncestorOf(ssimFloor) && scalingSteadinessBody->isAncestorOf(ssimFloor),
+				"Unit 2: ssim_bitrate_floor must live inside scaling.advanced / scaling.card.steadiness.body, not allRawGroup");
+
+			// 2. source_geometry_detect (mode combo + conditional custom QLineEdit) and rebase_kernel_match live on Scaling > Advanced.
+			auto* sgdMode = control<QComboBox>(window, Vpv::ObjectName("scaling.source_geometry_detect.mode"));
+			auto* sgdEdit = control<QLineEdit>(window, Vpv::ObjectName("scaling.source_geometry_detect"));
+			auto* kernelMatch = control<QWidget>(window, Vpv::ObjectName("scaling.rebase_kernel_match"));
+			require(scalingAdv->isAncestorOf(sgdMode) && scalingAdv->isAncestorOf(sgdEdit) && scalingAdv->isAncestorOf(kernelMatch),
+				"Unit 2: source_geometry_detect and rebase_kernel_match must live inside vpv.scaling.advanced");
+			require(!scalingMain->isAncestorOf(sgdMode) && !scalingMain->isAncestorOf(sgdEdit) && !scalingMain->isAncestorOf(kernelMatch),
+				"Unit 2: source_geometry_detect and rebase_kernel_match must NOT live inside vpv.scaling.main");
+
+			const int allIdx = sgdMode->findData(QStringLiteral("all"));
+			const int unsetIdx = sgdMode->findData(QString());
+			const int convIdx = sgdMode->findData(QStringLiteral("conventional"));
+			const int customIdx = sgdMode->findData(QStringLiteral("custom"));
+			require((allIdx >= 0 || unsetIdx >= 0) && convIdx >= 0 && customIdx >= 0,
+				"Unit 2: source_geometry_detect.mode must offer all/default, conventional, and custom");
+			if (allIdx >= 0)
+			{
+				sgdMode->setCurrentIndex(allIdx);
+				QCoreApplication::processEvents();
+				require(sgdEdit->isHidden(), "Unit 2: source_geometry_detect mode 'all' must hide custom QLineEdit");
+			}
+			if (unsetIdx >= 0)
+			{
+				sgdMode->setCurrentIndex(unsetIdx);
+				QCoreApplication::processEvents();
+				require(sgdEdit->isHidden(), "Unit 2: source_geometry_detect default mode must hide custom QLineEdit");
+			}
+			sgdMode->setCurrentIndex(convIdx);
+			QCoreApplication::processEvents();
+			require(sgdEdit->isHidden(), "Unit 2: source_geometry_detect mode 'conventional' must hide custom QLineEdit");
+			sgdMode->setCurrentIndex(customIdx);
+			QCoreApplication::processEvents();
+			require(!sgdEdit->isHidden() && sgdEdit->isEnabled(),
+				"Unit 2: source_geometry_detect mode 'custom' must show and enable custom QLineEdit");
+			sgdEdit->setText(QStringLiteral("1920x1080, 1280x720"));
+			emit sgdEdit->editingFinished();
+			QCoreApplication::processEvents();
+
+			// 3. dejudder_estimate_ahead lives on Motion > Advanced (NOT Motion > Main).
+			auto* estAhead = control<QWidget>(window, Vpv::ObjectName("motion.dejudder_estimate_ahead"));
+			require(motionAdv->isAncestorOf(estAhead) && !motionMain->isAncestorOf(estAhead),
+				"Unit 2: dejudder_estimate_ahead must live inside vpv.motion.advanced, not vpv.motion.main");
+
+			// 4. render_ahead and intent_motion lock to vector_demand (negative control: enabled when on, disabled when off, re-enabled when on).
+			auto* vectorDemand = control<QComboBox>(window, Vpv::ObjectName("motion.vector_demand"));
+			auto* renderAhead = control<QWidget>(window, Vpv::ObjectName("motion.render_ahead"));
+			auto* intentMotion = control<QWidget>(window, Vpv::ObjectName("motion.intent_motion"));
+			require(renderAhead->isEnabled() && intentMotion->isEnabled(),
+				"Unit 2 negative control (vector_demand=on): render_ahead and intent_motion must start enabled");
+			vectorDemand->setCurrentIndex(vectorDemand->findData(QStringLiteral("off")));
+			QCoreApplication::processEvents();
+			require(!renderAhead->isEnabled() && !intentMotion->isEnabled(),
+				"Unit 2 (vector_demand=off): render_ahead and intent_motion must disable when motion engine is off");
+			vectorDemand->setCurrentIndex(vectorDemand->findData(QStringLiteral("on")));
+			QCoreApplication::processEvents();
+			require(renderAhead->isEnabled() && intentMotion->isEnabled(),
+				"Unit 2 (vector_demand=on again): render_ahead and intent_motion must re-enable");
+
+			// 5. dither_need lives inside Output > Main (output.card.dither_need) and calibration_lut_stage inside Output > Advanced (output.card.calibration_lut_stage), NOT vpv.expert.
+			auto* outputMain = control<QWidget>(window, Vpv::ObjectName("output.main"));
+			auto* outputAdv = control<QWidget>(window, Vpv::ObjectName("output.advanced"));
+			auto* expertTab = control<QWidget>(window, Vpv::ObjectName("expert"));
+			auto* ditherNeedCard = control<QWidget>(window, Vpv::ObjectName("output.card.dither_need"));
+			auto* ditherNeed = control<QComboBox>(window, Vpv::ObjectName("expert.dither_need"));
+			auto* lutStageCard = control<QWidget>(window, Vpv::ObjectName("output.card.calibration_lut_stage"));
+			auto* lutStage = control<QComboBox>(window, Vpv::ObjectName("expert.calibration_lut_stage"));
+			require(outputMain->isAncestorOf(ditherNeedCard) && ditherNeedCard->isAncestorOf(ditherNeed) && !expertTab->isAncestorOf(ditherNeed),
+				"Unit 2: vpv.expert.dither_need must live inside vpv.output.main (vpv.output.card.dither_need), not vpv.expert");
+			require(outputAdv->isAncestorOf(lutStageCard) && lutStageCard->isAncestorOf(lutStage) && !expertTab->isAncestorOf(lutStage),
+				"Unit 2: vpv.expert.calibration_lut_stage must live inside vpv.output.advanced (vpv.output.card.calibration_lut_stage), not vpv.expert");
+
+			// 6. black_protection (holding intent_black) lives inside vpv.drivepage.advanced, and redundant Dynamic Drive stub tab is removed from vpv.units.
+			auto* drivePageAdv = control<QWidget>(window, Vpv::ObjectName("drivepage.advanced"));
+			auto* blackProtBody = control<QWidget>(window, Vpv::ObjectName("drive.card.black_protection.body"));
+			auto* intentBlack = control<QWidget>(window, QStringLiteral("config.vprenderer.intent_black"));
+			require(drivePageAdv->isAncestorOf(blackProtBody) && blackProtBody->isAncestorOf(intentBlack),
+				"Unit 2: vpv.drive.card.black_protection.body (with intent_black) must live inside vpv.drivepage.advanced");
+			require(window.findChild<QWidget*>(Vpv::ObjectName("drive")) == nullptr,
+				"Unit 2: redundant vpv.drive stub tab must not exist");
+			auto* units = control<QTabWidget>(window, Vpv::ObjectName("units"));
+			for (int i = 0; i < units->count(); ++i)
+				require(units->tabText(i) != QStringLiteral("Dynamic Drive"),
+					"Unit 2: vpv.units must not contain a redundant 'Dynamic Drive' stub tab");
+
+			// 7. vpv.input.delay wording points to Input > Main (not stale Queue page wording).
+			const QString delayWithTarget = control<QLabel>(window, Vpv::ObjectName("input.delay"))->text();
+			require(!delayWithTarget.contains(QStringLiteral("Not set on the Queue page")) &&
+				!delayWithTarget.contains(QStringLiteral("Queue page Target delay")),
+				("Unit 2: vpv.input.delay retains stale Queue page wording: " + S(delayWithTarget)).c_str());
+			require(delayWithTarget.contains(QStringLiteral("Input")) && delayWithTarget.contains(QStringLiteral("250 ms")),
+				("Unit 2: vpv.input.delay must point to Input > Main and show 250 ms: " + S(delayWithTarget)).c_str());
+
+			save(window);
+		}
+
+		// Verify custom source_geometry_detect saved cleanly and reloads.
+		ConfigFile config;
+		std::string v;
+		require(config.Load(path.toStdString()) && config.TryGetString(DefaultProfile(path), "source_geometry_detect", v) &&
+			v == "1920x1080, 1280x720",
+			("Unit 2: custom source_geometry_detect IDs did not save cleanly, got: " + v).c_str());
+		requireVpReads(path);
+
+		// Secondary fixture (no target_latency_ms): verify unset delay wording also avoids "Not set on the Queue page".
+		{
+			QTemporaryDir dir2;
+			const QString noTargetPath = WriteFixture(dir2,
+				"[general]\nrenderer: VP Renderer\n"
+				"[vprenderer]\nsdr_target_nits: 100\n"
+				"[queue]\ntarget_frames: 4\n");
+			ConfigEditorWindow window(noTargetPath, 0, true);
+			QCoreApplication::processEvents();
+			const QString delayUnset = control<QLabel>(window, Vpv::ObjectName("input.delay"))->text();
+			require(!delayUnset.contains(QStringLiteral("Not set on the Queue page")) &&
+				!delayUnset.contains(QStringLiteral("Queue page Target delay")),
+				("Unit 2: unset vpv.input.delay retains stale Queue page wording: " + S(delayUnset)).c_str());
+			require(delayUnset.contains(QStringLiteral("Input")),
+				("Unit 2: unset vpv.input.delay must point to Input > Main: " + S(delayUnset)).c_str());
+		}
+	}
 }
 
 int RunVpvConfigTests(const std::function<int(const char*, const std::function<void()>&)>& run,
@@ -4737,5 +5218,8 @@ int RunVpvConfigTests(const std::function<int(const char*, const std::function<v
 	failures += run("VP-V: S4-L2 appearance status case-insensitive evaluation", testAppearanceStatusCaseInsensitive);
 	failures += run("VP-V: legacy queue and refresh-key migrations preserve UTF-8 and backup", testLegacyQueueMigrationPreservesUtf8);
 	failures += run("VP-V: managed upstream controls stay disabled across profile switch without derivedSetting (GEM-040)", testManagedWidgetsStayDisabledAcrossProfileSwitch);
+	failures += run("VP-V: Unit 2 CAM16 appearance validated widgets and ambient_adapt mutual exclusion", testCam16AppearanceWidgetsAndMutualExclusion);
+	failures += run("VP-V: Unit 2 Repair Low no-bounce and all tiers clarity summaries", testRepairTierNoBounceAndAllTiersClaritySummary);
+	failures += run("VP-V: Unit 2 Phase 1 placements, allRaw hidden, and Dynamic Drive stub removal", testPhase1PlacementsAndAllRawHidden);
 	return failures;
 }

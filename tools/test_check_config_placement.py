@@ -302,8 +302,12 @@ class RepositoryTests(unittest.TestCase):
             self.assertIn(unit, chk.ENFORCED_UNITS)
         an, cards, placement, issues = chk.analyse(ROOT)
         self.assertEqual(issues["error"], [])
+        self.assertEqual(chk.FIXES_CONTAINER_STAYS, ())
         for key in chk.FIXES_CONTAINER_STAYS:
             self.assertNotIn(key, placement, key)
+        for key in ("optical_flow_fb_check", "optical_flow_global", "optical_flow_global_fallback", "source_class"):
+            self.assertEqual(placement[key]["unit"], "motion", key)
+        self.assertEqual(placement["ssim_bitrate_floor"]["unit"], "scaling")
         # the source-resolution rows are owned by input.source_analysis on their Scaling picture-slider cards
         for key in ("source_resolution", "source_resolution_crossfade_s"):
             self.assertEqual(chk.CROSS_UNIT_OWNER[key], "input.source_analysis")
