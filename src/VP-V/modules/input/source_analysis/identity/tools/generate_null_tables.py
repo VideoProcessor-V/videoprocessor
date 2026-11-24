@@ -86,6 +86,7 @@ RATE_SMOOTHING = 0.25          # ChainEvidence.h: EvidenceSettings::rateSmoothin
 MIN_SHOT_DWELL_SEC = 3.0       # ChainEvidence.h: kMinShotDwellSec
 AGREE_TOL = 0.015              # ChainEvidence.h: EvidenceSettings::agreementTolerance
 AGREE_BONUS = 2.0              # ChainEvidence.h: EvidenceSettings::agreementBonus
+CONVENTION_TOLERANCE = 0.006   # scaling/geometry/SourceGeometrySet.h: kConventionTolerance
 
 DEFAULT_CV_SEED = "sid-cal"    # Exact default seed from tools/eval/source_id/calibrate_nulls.py:722
 
@@ -192,6 +193,13 @@ def verify_cpp_contract_constants(chain_dir=None):
     checks.append(("PLACEHOLDER.alt.sd", PLACEHOLDER["alt"][0][1], nt_txt,
                    r"t\.alt\[c\]\.sd\s*=\s*" + num_re + r"\s*;"))
 
+    geom_path = os.path.normpath(os.path.join(chain_dir, "..", "..", "..", "..", "scaling", "geometry", "SourceGeometrySet.h"))
+    if os.path.isfile(geom_path):
+        with open(geom_path, "r", encoding="utf-8") as fh:
+            geom_txt = fh.read()
+        checks.append(("CONVENTION_TOLERANCE", CONVENTION_TOLERANCE, geom_txt,
+                       r"constexpr\s+double\s+kConventionTolerance\s*=\s*" + num_re + r"\s*;"))
+
     verified = {}
     drifts = []
     for name, py_val, txt, pat in checks:
@@ -235,11 +243,22 @@ def classify_latent(n, N, rational_q_max=6, tol=2.0):
     return 3
 
 
-def classify_bit_depth_from_step(step_codes, output_bits=0):
-    """Exact port of NullTables.h::ClassifyBitDepthFromStep."""
+def classify_bit_depth_from_step(step_codes, output_bits=0, emp_floor_codes=0.0):
+    """Exact port of NullTables.h::ClassifyBitDepthFromStep (including M5/FM-2 empirical floor rule)."""
     if step_codes >= 4:
         return "N8"
     if output_bits == 8:
+        return "N8"
+    eight_bit_lsb_codes = 4.0
+    eight_bit_uniform_floor = eight_bit_lsb_codes / math.sqrt(12.0)
+    tol = 5.0 * CONVENTION_TOLERANCE
+    if (
+        emp_floor_codes is not None
+        and math.isfinite(emp_floor_codes)
+        and emp_floor_codes > 0.0
+        and emp_floor_codes >= eight_bit_uniform_floor * (1.0 - tol)
+        and emp_floor_codes < eight_bit_lsb_codes
+    ):
         return "N8"
     if output_bits >= 12:
         return "N12"
@@ -493,7 +512,27 @@ def _load_dump_v4_pair(evals_path, sizes_path, tag, manifest):
             out_bits = _parse_int(rec.get("output_bits"), 0)
             if seq is None or t_s is None:
                 continue
-            depth = forced_depth if forced_depth in DEPTHS else classify_bit_depth_from_step(step_codes, out_bits)
+            emp_x = _parse_float(rec.get("emp_floor_x"))
+            emp_y = _parse_float(rec.get("emp_floor_y"))
+            emp_vx = _parse_int(rec.get("emp_floor_valid_x") if "emp_floor_valid_x" in rec else rec.get("emp_valid_x"), 0)
+            emp_vy = _parse_int(rec.get("emp_floor_valid_y") if "emp_floor_valid_y" in rec else rec.get("emp_valid_y"), 0)
+            valid_emp = []
+            if emp_vx == 1 and emp_x is not None and emp_x > 0.0:
+                valid_emp.append(emp_x)
+            if emp_vy == 1 and emp_y is not None and emp_y > 0.0:
+                valid_emp.append(emp_y)
+            emp_floor_codes = min(valid_emp) if valid_emp else 0.0
+            null_depth_raw = (rec.get("null_depth_class") or "").strip()
+            if forced_depth in DEPTHS:
+                depth = forced_depth
+            else:
+                classified = classify_bit_depth_from_step(step_codes, out_bits, emp_floor_codes)
+                if emp_floor_codes > 0.0:
+                    depth = classified
+                elif null_depth_raw in DEPTHS:
+                    depth = null_depth_raw
+                else:
+                    depth = classified
             eval_meta[seq] = {
                 "seq": seq,
                 "time_s": t_s,
@@ -1937,7 +1976,74 @@ def run_selftest():
         assert "DepthNullTable::PlaceholderFor(BitDepthClass::N8)" in sm_hdr
         assert "NullTableSourceKind::Calibrated" not in sm_hdr
 
-    print("generate_null_tables.py --selftest: PASS (2-fold held-out CV, H3 overfit & single-master negative controls, C++ contract drift guard, v4+v3 stratification, G-PhaseA, G-8bit verified)")
+        # Negative control 9 (NEW-M2 Red-Team): Dump v4 empirical floor depth classification (8-in-10 HDMI loop)
+        # with same-input clean 10-bit (0.29) and textured 10-bit (12.0) negative controls.
+        m2_dir = os.path.join(tmp, "new_m2_emp_floor")
+        os.makedirs(m2_dir)
+
+        def _write_v4_emp_floor(tag, emp_x, emp_y, vx, vy):
+            ev_p = os.path.join(m2_dir, tag + ".b_evals.csv")
+            sz_p = os.path.join(m2_dir, tag + ".b_sizes.csv")
+            cols = list(REQUIRED_V4_EVAL_COLS) + [
+                "emp_floor_x", "emp_floor_y", "emp_floor_valid_x", "emp_floor_valid_y"
+            ]
+            with open(ev_p, "w", encoding="utf-8", newline="") as fe, \
+                 open(sz_p, "w", encoding="utf-8", newline="") as fs:
+                ew = csv.writer(fe)
+                sw = csv.writer(fs)
+                ew.writerow(cols)
+                sw.writerow(list(REQUIRED_V4_SIZE_COLS))
+                for s_i in (1, 2):
+                    ew.writerow([s_i, "%.3f" % (s_i * 2.0), 1, 1, 10, 10, 1, 1, 0, 0,
+                                 "%.4f" % emp_x, "%.4f" % emp_y, vx, vy])
+                    sw.writerow([s_i, "%.3f" % (s_i * 2.0), 1, "x", 1920, 960, 1, "-0.020000", 32])
+                    sw.writerow([s_i, "%.3f" % (s_i * 2.0), 1, "y", 1080, 540, 1, "-0.020000", 32])
+            return _load_dump_v4_pair(ev_p, sz_p, tag, {})
+
+        loop_items, loop_segs = _write_v4_emp_floor("loop_8in10", 1.30, 1.35, 1, 1)
+        assert len(loop_items) > 0 and all(it.depth == "N8" for it in loop_items), \
+            "NEW-M2: step=1, output_bits=10, emp_floor=(1.30, 1.35) MUST classify as N8: %r" % ([it.depth for it in loop_items],)
+        assert len(loop_segs) == 1 and loop_segs[0]["depth"] == "N8"
+
+        # Same-input negative controls: clean 10-bit floor (0.29) and textured 10-bit (12.0 >= 4.0) stay N10!
+        clean10_items, clean10_segs = _write_v4_emp_floor("clean_10bit", 0.29, 0.29, 1, 1)
+        assert len(clean10_items) > 0 and all(it.depth == "N10" for it in clean10_items), \
+            "NEW-M2 negative control: emp_floor=0.29 must classify as N10"
+        assert len(clean10_segs) == 1 and clean10_segs[0]["depth"] == "N10"
+
+        tex10_items, tex10_segs = _write_v4_emp_floor("tex_10bit", 12.0, 12.0, 1, 1)
+        assert len(tex10_items) > 0 and all(it.depth == "N10" for it in tex10_items), \
+            "NEW-M2 negative control: high-texture emp_floor=12.0 must classify as N10, not N8"
+        assert len(tex10_segs) == 1 and tex10_segs[0]["depth"] == "N10"
+
+        # Negative control 10 (TEST-L4 Red-Team): L4 C++ contract constant drift guard MUST raise AssertionError
+        # when a C++ header constant drifts from Python's copy!
+        real_chain_dir = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "chain"))
+        drift_dir = os.path.join(tmp, "l4_drift_chain")
+        os.makedirs(drift_dir)
+        for hdr_name in ("ChainCommon.h", "ChainEvidence.h", "KernelBank.h", "ChainNullTables.h"):
+            with open(os.path.join(real_chain_dir, hdr_name), "r", encoding="utf-8") as src_fh:
+                hdr_body = src_fh.read()
+            with open(os.path.join(drift_dir, hdr_name), "w", encoding="utf-8", newline="\n") as dst_fh:
+                dst_fh.write(hdr_body)
+        # Unmodified copy passes cleanly:
+        assert verify_cpp_contract_constants(drift_dir) is not None
+        # Mutate one constant (kMaxCandidates: 8 -> 9) in ChainCommon.h -> MUST raise AssertionError!
+        cm_copy = os.path.join(drift_dir, "ChainCommon.h")
+        with open(cm_copy, "r", encoding="utf-8") as fh:
+            cm_orig = fh.read()
+        cm_mut = re.sub(r"(constexpr\s+int\s+kMaxCandidates\s*=\s*)\d+(\s*;)", r"\g<1>99\g<2>", cm_orig, count=1)
+        assert cm_mut != cm_orig, "TEST-L4 fixture: kMaxCandidates mutation must alter ChainCommon.h"
+        with open(cm_copy, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(cm_mut)
+        drift_caught = False
+        try:
+            verify_cpp_contract_constants(drift_dir)
+        except AssertionError as exc:
+            drift_caught = "CANDIDATE_COUNT" in str(exc) and "drift" in str(exc).lower()
+        assert drift_caught, "TEST-L4: verify_cpp_contract_constants MUST raise AssertionError on drifted C++ constant"
+
+    print("generate_null_tables.py --selftest: PASS (2-fold held-out CV, H3 overfit & single-master, NEW-M2 emp_floor, TEST-L4 drift negative controls, v4+v3 stratification, G-PhaseA, G-8bit verified)")
     return 0
 
 
@@ -1957,6 +2063,8 @@ def main(argv=None):
 
     if args.selftest:
         return run_selftest()
+
+    verify_cpp_contract_constants()
 
     if not args.dump_dir:
         parser.error("provide at least one --dump-dir or run --selftest")

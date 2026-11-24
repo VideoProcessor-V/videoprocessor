@@ -348,6 +348,15 @@ namespace SourceResolution
 		bool tpdfDither = false,
 		DitherDetailAboveInfo* info = nullptr,
 		double measuredFloorPowerPerBin = 0.0);
+	// Physics-derived positive above-band detail check when Tracker::ReferenceDetail(ratio) is +infinity
+	// (e.g., chain-alone blind classical, Shadow after window clear, expired window, or R1 sub-harmonic).
+	// Requires above-band power to clear max(uniform, measured TPDF tail) floor, exceed quantisationFloor +
+	// nativeFloorDecades, and meet the exact 1/f^2 natural-image spectral slope -2*log10(fAbove/fBelow) - detailMarginDecades.
+	bool PositiveDetailAboveNoRef(
+		const FrameReading& frame,
+		double ratio,
+		double detailMarginDecades = 0.07,
+		double nativeFloorDecades = 0.5);
 	// The frame's averaged mirror coherence at `ratio`, the weaker axis (0 when unknown).
 	double CoherenceAtRate(const FrameReading& frame, double ratio);
 	// The same measure on one tile's spectra (the mixed-screen guard). `axes`: 1 vertical,

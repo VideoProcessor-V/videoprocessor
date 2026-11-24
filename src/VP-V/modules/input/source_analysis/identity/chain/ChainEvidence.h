@@ -1173,9 +1173,18 @@ namespace SourceIdentity
 					ce.combReason = comb.reason;
 				}
 				ce.statValid = true;
-				// M4 (Rule 4): segment-gated excess-variance stat requires a calibrated, stat-matched
-				// NullStatKind::SegmentExcessVariance table; abstain visibly on Placeholder or mismatch.
+				// M4 / NEW-L2 (Rule 4): enforce stat-kind match in both directions:
+				//   - segment-gated excess-variance stat requires a calibrated SegmentExcessVariance table;
+				//   - fallback to whole-line ln(s/base) requires a WholeLineLogRatio (or Placeholder) table.
 				if (ce.edgeStatsUsed && (nulls_.placeholder || nulls_.statKind != NullStatKind::SegmentExcessVariance))
+				{
+					ce.edgeStatsNullMismatch = true;
+					ce.informative = false;
+					ce.increment = 0.0;
+					ce.reason |= kReasonNullTableMismatch;
+					return;
+				}
+				if (ce.edgeStatsFallback && !nulls_.placeholder && nulls_.statKind != NullStatKind::WholeLineLogRatio)
 				{
 					ce.edgeStatsNullMismatch = true;
 					ce.informative = false;

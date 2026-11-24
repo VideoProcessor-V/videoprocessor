@@ -173,7 +173,7 @@ All Stage S2/S3 extensions default to OFF/Off so baseline W1 behaviour is preser
 | `useDepthNullTables` | `Chain::EstimatorSettings::useDepthNullTables` | bool | `false` | Strict bit-depth-stratified null table selection (`NullTables.h`: `N8` / `N10` / `N12`) with visible fallback to `PlaceholderFor(...)` when uncalibrated. |
 | `blockClassicalAloneEntry` | `SourceIdentity::Consensus::Settings::blockClassicalAloneEntry` | bool | `false` | OD-1 consensus gate preventing classical-only native->upscaled entry (or downward re-base) without a corroborating chain witness. |
 | `ditherFloorDetailAbove` | `SourceResolution::Tracker::Settings::ditherFloorDetailAbove` | bool | `false` | Dither-floor-aware `DetailAbove` starvation guard (`SourceResolutionDetector.cpp`); uses `max(uniform floor, measured white TPDF tail floor)` rather than assuming TPDF unconditionally. |
-| `p3TwoPass` | `Chain::VerifierSettings::p3TwoPass` | bool | `false` | Two-pass exact verification (`DescaleVerifier.h`): coarse screen at `hw=0` followed by full expansion on dipping/protected candidates; unpromoted screen-only candidates are visibly tagged (`kReasonScreenOnly`). |
+| `p3TwoPass` | `Chain::VerifyOptions::p3TwoPass` | bool | `false` | Two-pass exact verification (`DescaleVerifier.h`): coarse screen at `hw=0` followed by full expansion on dipping/protected candidates; unpromoted screen-only candidates are visibly tagged (`kReasonScreenOnly`). |
 
 ## Status and fallbacks
 

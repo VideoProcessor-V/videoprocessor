@@ -20,12 +20,13 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
-namespace SourceIdentity { namespace Chain { class ChainEstimator; struct JointLatchSettings; struct StepMarkSettings; struct EdgeStatsSettings; } }
+namespace SourceIdentity { namespace Chain { class ChainEstimator; struct ClassicalFreshInput; struct JointLatchSettings; struct StepMarkSettings; struct EdgeStatsSettings; } }
 
 // Stage 12 step B in the renderer (owner 2026-10-15): the effective
 // resolution, bitrate quality and effective bit depth of every source, and
@@ -119,6 +120,41 @@ namespace SourceResolutionMonitor
 		unsigned long long submitSkipped = 0; // frame-bound: frames not copied because both readback slots were still in flight
 		unsigned long long engagedReactive = 0; // frame-bound: engages made by the reactive trigger because the look-ahead was unavailable or stale (visible fallback)
 	};
+
+	// NEW-H1: value-captured snapshot of classical tracker ReferenceDetail readings used by BuildClassicalFreshForChain.
+	struct ClassicalRefDetailSnapshot
+	{
+		struct Entry
+		{
+			double ratio = 1.0;
+			double refH = std::numeric_limits<double>::infinity();
+			double refV = std::numeric_limits<double>::infinity();
+			double refComb = std::numeric_limits<double>::infinity();
+		};
+		std::vector<Entry> entries;
+		double tolerance = 0.03;
+		double detailMarginDecades = 0.07;
+		double nativeFloorDecades = 0.5;
+	};
+
+	// Captured BEFORE tracker.Update() runs; merges into `retained` while chainLatched is true so Shadow mode's
+	// window.clear() and 120 s window expiration never wipe the observed upscale reference while latched.
+	ClassicalRefDetailSnapshot CaptureTrackerReferenceDetails(
+		const SourceResolution::Tracker& tracker,
+		const SourceResolution::Tracker& trackerH,
+		const SourceResolution::Tracker& trackerV,
+		int rasterW, int rasterH,
+		bool chainLatched,
+		ClassicalRefDetailSnapshot* retained = nullptr);
+
+	// Exact production builder called verbatim by Monitor's worker loop to feed ChainEstimator::SetClassicalFresh.
+	SourceIdentity::Chain::ClassicalFreshInput BuildClassicalFreshForChain(
+		const SourceResolution::FrameReading& frame,
+		const ClassicalRefDetailSnapshot& refs,
+		bool mixedNow,
+		uint64_t frameSeq,
+		int64_t timeUs,
+		double analysisIntervalSec);
 
 	class Monitor
 	{
@@ -735,6 +771,7 @@ namespace SourceResolutionMonitor
 		std::atomic<bool> chainTapExplicit{ false };   // SetChainTap(owner) was called (any thread): no auto-discovery (render thread reads it)
 		bool chainWasBlank = false;         // worker: the previous analysed frame was non-informative (the Blank event fires on the rising edge only)
 		SourceIdentity::Chain::WindowClearPolicy chainWindowPolicy;   // worker: the end of a mixed episode / the first cut after one asks the estimator to clear its window
+		ClassicalRefDetailSnapshot lastUpscaleRefTable;               // worker (NEW-H1): retained upscale ReferenceDetail snapshot while chain is latched
 		std::atomic<bool> mixedForTest{ false };
 		std::atomic<bool> cutForTest{ false };
 		unsigned chainProbe = 0;             // render thread: frames since the last owner probe

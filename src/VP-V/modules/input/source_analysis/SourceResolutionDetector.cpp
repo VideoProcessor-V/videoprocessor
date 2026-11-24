@@ -1092,6 +1092,51 @@ namespace SourceResolution
 		return floorSubDecades;
 	}
 
+	bool PositiveDetailAboveNoRef(
+		const FrameReading& frame,
+		double ratio,
+		double detailMarginDecades,
+		double nativeFloorDecades)
+	{
+		const size_t bins = frame.verticalPower.size();
+		if (!std::isfinite(ratio) || !(ratio > 0.0) || !(ratio < 1.0) ||
+			!std::isfinite(detailMarginDecades) || detailMarginDecades < 0.0 ||
+			!std::isfinite(nativeFloorDecades) || nativeFloorDecades < 0.0 ||
+			bins < 33 || frame.horizontalPower.size() != bins)
+		{
+			return false;
+		}
+		const int half = static_cast<int>(bins) - 1;
+		const double cut = ratio * static_cast<double>(half);
+		const int b0 = static_cast<int>(std::ceil(0.55 * cut));
+		const int b1 = static_cast<int>(std::floor(0.9 * cut));
+		const int a0 = static_cast<int>(std::ceil(1.15 * cut));
+		const int a1 = (std::min)(static_cast<int>(std::floor(0.97 * static_cast<double>(half))), a0 + (std::max)(4, b1 - b0));
+		if (a1 - a0 < 3 || b1 - b0 < 3 || b0 < 1 || a1 > half)
+			return false;
+
+		const double measuredFloor = MeasureTpdfTailFloor(frame, ratio);
+		DitherDetailAboveInfo dinfo;
+		(void)DitherAwareDetailAbove(frame, ratio, false, &dinfo, measuredFloor);
+		if (!dinfo.valid || dinfo.atDitherFloor || !dinfo.hasRealDetailAbove)
+			return false;
+
+		double level = 0.0;
+		const double rawD = DetailAbove(frame, ratio, &level);
+		if (std::isinf(rawD) || !std::isfinite(rawD) || !std::isfinite(level))
+			return false;
+		if (std::isfinite(frame.quantisationFloor) && level < frame.quantisationFloor + nativeFloorDecades)
+			return false;
+
+		// Rule 1 exact 1/f^2 natural-image spectral-slope gate between geometric band centers.
+		const double fBelow = std::sqrt(static_cast<double>(b0) * static_cast<double>(b1));
+		const double fAbove = std::sqrt(static_cast<double>(a0) * static_cast<double>(a1));
+		if (!(fBelow > 0.0) || !(fAbove > fBelow))
+			return false;
+		const double expectedNaturalDrop = -2.0 * std::log10(fAbove / fBelow);
+		return rawD >= expectedNaturalDrop - detailMarginDecades;
+	}
+
 	double CoherenceAtRate(const FrameReading& frame, double ratio)
 	{
 		const int n = static_cast<int>(frame.verticalCurve.size());

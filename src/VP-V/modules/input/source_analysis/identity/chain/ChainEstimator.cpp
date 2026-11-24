@@ -1340,6 +1340,11 @@ namespace SourceIdentity
 				}
 				lastStepMarkClassicalSeq = 0;
 				lastStepMarkClassicalGen = 0;
+				{
+					// NEW-L1: clear stale fresh-classical witness state across discontinuities/resets.
+					std::lock_guard<std::mutex> lk(m);
+					classicalFresh = ClassicalFreshState();
+				}
 				if (jointLatchOn)
 				{
 					const JointLatchOutput jlo = jointLatch.Reset();
@@ -2052,10 +2057,13 @@ namespace SourceIdentity
 				FoldJointLatchCounters();
 				NoteJointLatchEvent(jlo, timeUs);
 
-				// Discredit stale evidence window on starvation releases (matching UpscaleLatch M1 rule).
+				// Discredit stale evidence window on starvation releases (matching UpscaleLatch M1 rule)
+				// and on sustained detail_above release (NEW-M1: prevents immediate re-entry on a single
+				// soft/flat native frame after 3 s detail_above already disproved the upscale).
 				if (jlo.event == JointLatchEvent::ReleasedStarvation ||
 					jlo.event == JointLatchEvent::ReleasedHardBound ||
-					jlo.event == JointLatchEvent::ReleasedCeiling)
+					jlo.event == JointLatchEvent::ReleasedCeiling ||
+					jlo.event == JointLatchEvent::ReleasedDetailAbove)
 				{
 					evidence.Reset();
 				}
@@ -2242,14 +2250,18 @@ namespace SourceIdentity
 				}
 				log.SetFormatInfo(fmt);
 
-				// M1: bound the age of the "fresh" classical witness (2x analysis interval cutoff, Rule 1/Rule 4).
+				// M1 / NEW-L1: bound the age of the "fresh" classical witness symmetrically across forward
+				// stalls AND backward seeks (2x analysis interval cutoff, Rule 1/Rule 4; unsigned diff avoids overflow).
 				if (cf.valid && cf.timeUs >= 0 && s.timeUs >= 0)
 				{
 					const double baseIntervalSec = (std::isfinite(cf.analysisIntervalSec) && cf.analysisIntervalSec > 0.0)
 						? cf.analysisIntervalSec
 						: (std::max)(gov.Plan(false).intervalSec, 0.5);
 					const double maxAgeUs = 2.0 * baseIntervalSec * 1e6;
-					if (s.timeUs > cf.timeUs && static_cast<double>(s.timeUs - cf.timeUs) > maxAgeUs)
+					const uint64_t ageUs = (s.timeUs >= cf.timeUs)
+						? (static_cast<uint64_t>(s.timeUs) - static_cast<uint64_t>(cf.timeUs))
+						: (static_cast<uint64_t>(cf.timeUs) - static_cast<uint64_t>(s.timeUs));
+					if (static_cast<double>(ageUs) > maxAgeUs)
 					{
 						cf.valid = false;
 						cf.detailAbove = false;
