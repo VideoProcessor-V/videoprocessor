@@ -557,5 +557,331 @@ namespace VideoProcessorTest
 			Assert::IsFalse(warp.OpticalFlowUsed(), L"negative control: null ahead pair must not mark OpticalFlowUsed");
 			pl_gpu_finish(gpu);
 		}
+
+		// GEM-114 (I#3 VE-MATCHER-FIXES + Pass-A MED-2 0315bb8d1): on lowRes frames (SearchHalvings() == 1,
+		// lowResAll == false), FadeMatch runs inside `inner` while FRAME_TRUST runs on the outer MotionWarp.
+		// Outer FRAME_TRUST must bind inner->FadeStateTexture() both on a fresh tall instance (where outer
+		// fadeState is nullptr) and after an in-place non-halved -> lowRes resize (where outer fadeState
+		// remains allocated with stale non-fading z == 0 from the 256p estimate).
+		BEGIN_TEST_METHOD_ATTRIBUTE(LowResFadePropagatesInnerFadeStateToOuterFrameTrustAndAfterResize)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(LowResFadePropagatesInnerFadeStateToOuterFrameTrustAndAfterResize)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			struct LogScope
+			{
+				TargetLutGpuFixture& f;
+				LogScope(TargetLutGpuFixture& fx, std::string* s) : f(fx) { f.CaptureLog(s); }
+				~LogScope() { f.CaptureLog(nullptr); }
+			} logScope(fixture, &log);
+
+			constexpr int kFadeW = 128;
+			constexpr int kSmallH = 256;    // 256^2 < 2 * 1080^2 -> SearchHalvings() == 0
+			constexpr int kTallH = 1536;    // 1536^2 >= 2 * 1080^2 -> SearchHalvings() == 1
+			constexpr float kFadeFloor = 0.25f;
+
+			// Uniform multiplicative dimming about limited-range black (16 codes = 4096 in 16-bit):
+			// -6% per frame keeps |d| ~ 6.5 codes in (0.75, 24), |1 - g| ~ 0.06 > 0.01, and implied black ~ 16 in (-12, 48).
+			auto makeDimFrame = [](int w, int h, double level) -> DejudderFrame
+			{
+				return MakeDejudderFrame(w, h,
+					[level](int x, int y) -> uint16_t {
+						const double v = 4096.0 + (static_cast<double>(DejudderTexture(x, y, 13)) - 4096.0) * level;
+						return static_cast<uint16_t>(std::lround((std::min)(65535.0, (std::max)(0.0, v))));
+					},
+					[](int, int, int c) -> uint16_t { return static_cast<uint16_t>(32768 + c); });
+			};
+
+			DejudderGpuPlanes tall0, tall1, tall2, smallA, smallB;
+			UploadDejudderFrame(gpu, makeDimFrame(kFadeW, kTallH, 1.00), tall0);
+			UploadDejudderFrame(gpu, makeDimFrame(kFadeW, kTallH, 0.94), tall1);
+			UploadDejudderFrame(gpu, makeDimFrame(kFadeW, kTallH, 0.88), tall2);
+			UploadDejudderFrame(gpu, makeDimFrame(kFadeW, kSmallH, 1.00), smallA);
+			UploadDejudderFrame(gpu, makeDimFrame(kFadeW, kSmallH, 1.00), smallB);
+
+			auto makeSettings = [kFadeFloor](bool fadeMatch) -> Dejudder::Settings
+			{
+				Dejudder::Settings s = DejudderTestSettings();
+				s.lowRes = true;
+				s.lowResAll = false;        // FadeMatch runs on inner; FRAME_TRUST runs on outer
+				s.fadeMatch = fadeMatch;
+				s.fadeFloor = kFadeFloor;
+				s.strengthRate = 1.0f;      // settle to fadeFloor on the first confirmed fade pair
+				s.motionScaleHi = 0.0f;     // disable D2 ramp so ONLY fade_floor drives FrameTrust().g
+				s.trustScaleFull = 0.0f;    // disable D4 ramp so ONLY fade_floor drives FrameTrust().g
+				s.motionRolloff = false;    // disable R-A roll-off so ONLY fade_floor drives FrameTrust().g
+				s.hostReadable = true;
+				return s;
+			};
+
+			// 1. Fresh lowRes MotionWarp (outer fadeState == nullptr): inner FadeMatch must propagate to outer FRAME_TRUST.
+			{
+				Dejudder::MotionWarp warp(fixture.Log(), gpu, makeSettings(true));
+				Assert::IsTrue(warp.Estimate(tall0.planes, tall1.planes), L"fresh lowRes dimming pair 0->1");
+				Assert::AreEqual(1, warp.SearchHalvings(), L"128x1536 lowRes must run with SearchHalvings() == 1");
+				Assert::IsTrue(warp.Estimate(tall1.planes, tall2.planes), L"fresh lowRes dimming pair 1->2");
+				pl_gpu_finish(gpu);
+				Assert::AreEqual(1, warp.SearchHalvings(), L"128x1536 lowRes must stay at SearchHalvings() == 1");
+				const std::array<float, 3> ft = DownloadFrameTrust(gpu, warp);
+				Assert::IsTrue(ft[0] >= 0.9f,
+					(L"GEM-114 fresh lowRes: fade-corrected pair 1->2 must not hold as a cut (share=" +
+						std::to_wstring(ft[0]) + L")").c_str());
+				Assert::IsTrue(ft[1] >= kFadeFloor - 0.05f && ft[1] <= kFadeFloor + 0.05f,
+					(L"GEM-114 fresh lowRes: outer FrameTrust().g must be attenuated to fadeFloor=0.25 (got " +
+						std::to_wstring(ft[1]) + L")").c_str());
+			}
+
+			// 2. In-place resize from 128x256 (SearchHalvings() == 0, allocates outer fadeState with z == 0)
+			// to 128x1536 (SearchHalvings() == 1): outer FRAME_TRUST must prefer inner->FadeStateTexture()
+			// over the stale outer fadeState (Pass-A MED-2 fix 0315bb8d1).
+			{
+				Dejudder::MotionWarp warp(fixture.Log(), gpu, makeSettings(true));
+				Assert::IsTrue(warp.Estimate(smallA.planes, smallB.planes), L"256p non-fading pre-resize estimate");
+				pl_gpu_finish(gpu);
+				Assert::AreEqual(0, warp.SearchHalvings(), L"128x256 pre-resize must run with SearchHalvings() == 0");
+				const std::array<float, 3> ftSmall = DownloadFrameTrust(gpu, warp);
+				Assert::IsTrue(ftSmall[0] >= 0.9f, L"256p identical pair must have high trusted share");
+				Assert::IsTrue(ftSmall[1] > 0.9f,
+					(L"256p non-fading pair must keep unattenuated FrameTrust().g > 0.9 (got " +
+						std::to_wstring(ftSmall[1]) + L")").c_str());
+
+				Assert::IsTrue(warp.Estimate(tall0.planes, tall1.planes), L"post-resize lowRes dimming pair 0->1");
+				Assert::AreEqual(1, warp.SearchHalvings(), L"post-resize 128x1536 must switch to SearchHalvings() == 1");
+				Assert::IsTrue(warp.Estimate(tall1.planes, tall2.planes), L"post-resize lowRes dimming pair 1->2");
+				pl_gpu_finish(gpu);
+				Assert::AreEqual(1, warp.SearchHalvings(), L"post-resize 128x1536 must remain at SearchHalvings() == 1");
+				const std::array<float, 3> ftTall = DownloadFrameTrust(gpu, warp);
+				Assert::IsTrue(ftTall[0] >= 0.9f,
+					(L"GEM-114 post-resize lowRes: fade-corrected pair 1->2 must not hold as a cut (share=" +
+						std::to_wstring(ftTall[0]) + L")").c_str());
+				Assert::IsTrue(ftTall[1] >= kFadeFloor - 0.05f && ftTall[1] <= kFadeFloor + 0.05f,
+					(L"GEM-114 post-resize lowRes: stale outer fadeState shadowed inner->FadeStateTexture() (FrameTrust().g=" +
+						std::to_wstring(ftTall[1]) + L")").c_str());
+			}
+
+			// 3. Mandatory same-input negative control (Rule 3): run the EXACT SAME 3-frame 128x1536 dimming
+			// sequence with fadeMatch = false and verify FrameTrust().g stays > 0.9, proving fadeFloor attenuation
+			// in (1) and (2) was genuinely driven by inner->FadeStateTexture().
+			{
+				Dejudder::MotionWarp negWarp(fixture.Log(), gpu, makeSettings(false));
+				Assert::IsTrue(negWarp.Estimate(tall0.planes, tall1.planes), L"negative control dimming pair 0->1");
+				Assert::IsTrue(negWarp.Estimate(tall1.planes, tall2.planes), L"negative control dimming pair 1->2");
+				pl_gpu_finish(gpu);
+				Assert::AreEqual(1, negWarp.SearchHalvings(), L"negative control must also run at SearchHalvings() == 1");
+				const std::array<float, 3> ftNeg = DownloadFrameTrust(gpu, negWarp);
+				Assert::IsTrue(ftNeg[1] > 0.9f,
+					(L"negative control (fadeMatch=false): FrameTrust().g must remain > 0.9 (got " +
+						std::to_wstring(ftNeg[1]) + L")").c_str());
+			}
+
+			AssertCleanLibplaceboLog(log, "LowResFadePropagatesInnerFadeStateToOuterFrameTrustAndAfterResize");
+		}
+
+		// GEM-121 (I#6 VE-MATCHER-PERF): when both occlusionFill and dither occlusionSlot (0/1) are active
+		// with matching SPLIT defines (subOk == settings.estSplit), Estimate dispatches OCCLUSION_BODY once
+		// into occlusion[occlusionSlot] and aliases activeFillOcclusion to it. Verifies single-dispatch reuse,
+		// bit-for-bit parity against standalone dither occlusion (occlusionFill=false) and standalone fillOcclusion
+		// Warp (occlusionSlot=-1) across both alternating slots, preservation of Occlusion(0) when writing
+		// Occlusion(1), and same-input negative controls proving non-trivial occlusion and active D5 fill.
+		BEGIN_TEST_METHOD_ATTRIBUTE(OcclusionFillSingleDispatchReuseMatchesSeparateDispatchAndPreservesAlternatingSlot)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(OcclusionFillSingleDispatchReuseMatchesSeparateDispatchAndPreservesAlternatingSlot)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			struct LogScope
+			{
+				TargetLutGpuFixture& f;
+				LogScope(TargetLutGpuFixture& fx, std::string* s) : f(fx) { f.CaptureLog(s); }
+				~LogScope() { f.CaptureLog(nullptr); }
+			} logScope(fixture, &log);
+
+			constexpr int kOccW = 256, kOccH = 128;
+			constexpr int kDx1 = 8;
+			constexpr int kDx2 = -8;
+			auto inObj1 = [](int x, int y) { return x >= 96 && x < 144 && y >= 32 && y < 80; };
+			auto inObj2 = [](int x, int y) { return x >= 32 && x < 80 && y >= 48 && y < 96; };
+
+			// Pair 1 (slot 0): dx = +8, dy = 0 pan with a 48x48 occluding object removed in B -> genuine occluded
+			// blocks in Occlusion(0) and genuine D5 fill pixels in Warp(a1, 0.5f, out).
+			const DejudderFrame fa1 = MakeDejudderFrame(kOccW, kOccH,
+				[&](int x, int y) { return inObj1(x, y) ? DejudderTexture(x, y, 55) : DejudderTexture(x, y); },
+				[&](int x, int y, int c) { return inObj1(x * 2, y) ? DejudderTexture(x * 2, y, 57 + c) : DejudderTexture(x * 2, y, 7 + c); });
+			const DejudderFrame fb1 = MakeDejudderFrame(kOccW, kOccH,
+				[kDx1](int x, int y) { return DejudderTexture(x - kDx1, y); },
+				[kDx1](int x, int y, int c) { return DejudderTexture((x - kDx1 / 2) * 2, y, 7 + c); });
+
+			// Pair 2 (slot 1): opposite pan dx = -8, dy = 0 and a disjoint 48x48 occluded region so Occlusion(1)
+			// is strictly distinct from Occlusion(0).
+			const DejudderFrame fa2 = MakeDejudderFrame(kOccW, kOccH,
+				[&](int x, int y) { return inObj2(x, y) ? DejudderTexture(x, y, 77) : DejudderTexture(x, y, 21); },
+				[&](int x, int y, int c) { return inObj2(x * 2, y) ? DejudderTexture(x * 2, y, 79 + c) : DejudderTexture(x * 2, y, 27 + c); });
+			const DejudderFrame fb2 = MakeDejudderFrame(kOccW, kOccH,
+				[kDx2](int x, int y) { return DejudderTexture(x - kDx2, y, 21); },
+				[kDx2](int x, int y, int c) { return DejudderTexture((x - kDx2 / 2) * 2, y, 27 + c); });
+
+			DejudderGpuPlanes a1, b1, a2, b2;
+			UploadDejudderFrame(gpu, fa1, a1);
+			UploadDejudderFrame(gpu, fb1, b1);
+			UploadDejudderFrame(gpu, fa2, a2);
+			UploadDejudderFrame(gpu, fb2, b2);
+
+			auto downloadOcclusionRaw = [gpu](const Dejudder::MotionWarp& warp, int slot) -> std::vector<uint16_t>
+			{
+				pl_tex occ = warp.Occlusion(slot);
+				Assert::IsNotNull(occ, L"MotionWarp::Occlusion(slot) must be allocated");
+				Assert::AreEqual(warp.BlocksX(), occ->params.w, L"Occlusion width must match BlocksX");
+				Assert::AreEqual(warp.BlocksY(), occ->params.h, L"Occlusion height must match BlocksY");
+				std::vector<uint16_t> raw(static_cast<size_t>(occ->params.w) * occ->params.h * 4u);
+				pl_tex_transfer_params download{};
+				download.tex = occ;
+				download.ptr = raw.data();
+				Assert::IsTrue(pl_tex_download(gpu, &download), L"Occlusion texture is not host-readable");
+				return raw;
+			};
+
+			auto countOcclusion = [](const std::vector<uint16_t>& raw, int& occluded, int& visible)
+			{
+				occluded = 0;
+				visible = 0;
+				for (size_t i = 0; i + 3 < raw.size(); i += 4)
+				{
+					if (HalfBits(raw[i]) < 0.5f)
+						++occluded;
+					else
+						++visible;
+				}
+			};
+
+			auto makeSettings = [](bool occlusionFill) -> Dejudder::Settings
+			{
+				Dejudder::Settings s = DejudderTestSettings();
+				s.occlusionFill = occlusionFill;
+				s.estSplit = true;
+				s.hostReadable = true;
+				return s;
+			};
+
+			// 1. Shared single-dispatch path (occlusionFill = true, estSplit = true, alternating slots 0 -> 1).
+			Dejudder::MotionWarp sharedWarp(fixture.Log(), gpu, makeSettings(true));
+			sharedWarp.SetPassTiming(true, true);
+			Assert::IsTrue(sharedWarp.Estimate(a1.planes, b1.planes, 0), L"GEM-121 shared Estimate #1 (slot 0)");
+			Assert::AreEqual(size_t(1), sharedWarp.PassMs().count("VideoProcessor de-judder: occlusion for the dither"),
+				L"GEM-121: shared Estimate #1 must dispatch the unified occlusion pass once");
+			Assert::AreEqual(size_t(0), sharedWarp.PassMs().count("VideoProcessor de-judder: occlusion for the fill (D5)"),
+				L"GEM-121: shared Estimate #1 must not dispatch a redundant standalone fill occlusion pass");
+			pl_gpu_finish(gpu);
+
+			const std::vector<uint16_t> sharedOcc0Before = downloadOcclusionRaw(sharedWarp, 0);
+			int occ0Occluded = 0, occ0Visible = 0;
+			countOcclusion(sharedOcc0Before, occ0Occluded, occ0Visible);
+			Assert::IsTrue(occ0Occluded > 0 && occ0Visible > 0,
+				(L"negative control: Occlusion(0) must be non-trivial (occluded=" + std::to_wstring(occ0Occluded) +
+					L", visible=" + std::to_wstring(occ0Visible) + L")").c_str());
+
+			Dejudder::Planes sharedWarped1;
+			Assert::IsTrue(sharedWarp.Warp(a1.planes, 0.5f, sharedWarped1), L"GEM-121 shared Warp #1 (slot 0)");
+			pl_gpu_finish(gpu);
+			const std::vector<uint16_t> sharedLuma1 = DownloadPlane(gpu, sharedWarped1.luma);
+			const std::vector<uint16_t> sharedChroma1 = DownloadPlane(gpu, sharedWarped1.chroma);
+
+			// Estimate #2 into slot 1: must preserve Occlusion(0) bit-for-bit while writing distinct Occlusion(1).
+			Assert::IsTrue(sharedWarp.Estimate(a2.planes, b2.planes, 1), L"GEM-121 shared Estimate #2 (slot 1)");
+			Assert::AreEqual(size_t(0), sharedWarp.PassMs().count("VideoProcessor de-judder: occlusion for the fill (D5)"),
+				L"GEM-121: shared Estimate #2 (slot 1) must not dispatch a redundant standalone fill occlusion pass");
+			pl_gpu_finish(gpu);
+
+			const std::vector<uint16_t> sharedOcc0After = downloadOcclusionRaw(sharedWarp, 0);
+			const std::vector<uint16_t> sharedOcc1After = downloadOcclusionRaw(sharedWarp, 1);
+			Assert::AreEqual(sharedOcc0Before.size(), sharedOcc0After.size());
+			Assert::AreEqual(0, std::memcmp(sharedOcc0Before.data(), sharedOcc0After.data(),
+				sharedOcc0Before.size() * sizeof(uint16_t)),
+				L"GEM-121: Estimate #2 into slot 1 must preserve Occlusion(0) bit-for-bit");
+			int occ1Occluded = 0, occ1Visible = 0;
+			countOcclusion(sharedOcc1After, occ1Occluded, occ1Visible);
+			Assert::IsTrue(occ1Occluded > 0 && occ1Visible > 0,
+				(L"GEM-121: Occlusion(1) must be non-trivial (occluded=" + std::to_wstring(occ1Occluded) +
+					L", visible=" + std::to_wstring(occ1Visible) + L")").c_str());
+			Assert::IsTrue(std::memcmp(sharedOcc0After.data(), sharedOcc1After.data(),
+				sharedOcc0After.size() * sizeof(uint16_t)) != 0,
+				L"GEM-121: Occlusion(1) from distinct pair 2 must differ from preserved Occlusion(0)");
+
+			Dejudder::Planes sharedWarped2;
+			Assert::IsTrue(sharedWarp.Warp(a2.planes, 0.5f, sharedWarped2), L"GEM-121 shared Warp #2 (slot 1)");
+			pl_gpu_finish(gpu);
+			const std::vector<uint16_t> sharedLuma2 = DownloadPlane(gpu, sharedWarped2.luma);
+			const std::vector<uint16_t> sharedChroma2 = DownloadPlane(gpu, sharedWarped2.chroma);
+
+			// 2. Reference standalone dither occlusion (occlusionFill = false, occlusionSlot = 0):
+			// Occlusion(0) must match GEM-121 bit-for-bit, and Warp without occlusionFill serves as a same-input
+			// negative control proving activeFillOcclusion genuinely drove D5 fill in luma and chroma.
+			Dejudder::MotionWarp ditherRef(fixture.Log(), gpu, makeSettings(false));
+			Assert::IsTrue(ditherRef.Estimate(a1.planes, b1.planes, 0), L"standalone dither occlusion Estimate #1");
+			pl_gpu_finish(gpu);
+			const std::vector<uint16_t> refOcc0 = downloadOcclusionRaw(ditherRef, 0);
+			Assert::AreEqual(refOcc0.size(), sharedOcc0Before.size());
+			Assert::AreEqual(0, std::memcmp(refOcc0.data(), sharedOcc0Before.data(),
+				refOcc0.size() * sizeof(uint16_t)),
+				L"GEM-121: shared Occlusion(0) must match standalone occlusionFill=false Occlusion(0) bit-for-bit");
+
+			Dejudder::Planes noFillWarped1;
+			Assert::IsTrue(ditherRef.Warp(a1.planes, 0.5f, noFillWarped1), L"negative control Warp without occlusionFill");
+			pl_gpu_finish(gpu);
+			const std::vector<uint16_t> noFillLuma1 = DownloadPlane(gpu, noFillWarped1.luma);
+			const std::vector<uint16_t> noFillChroma1 = DownloadPlane(gpu, noFillWarped1.chroma);
+			Assert::IsTrue(sharedLuma1.size() == noFillLuma1.size() &&
+				std::memcmp(sharedLuma1.data(), noFillLuma1.data(), sharedLuma1.size() * sizeof(uint16_t)) != 0,
+				L"negative control: activeFillOcclusion D5 fill must alter warped luma vs occlusionFill=false");
+			Assert::IsTrue(sharedChroma1.size() == noFillChroma1.size() &&
+				std::memcmp(sharedChroma1.data(), noFillChroma1.data(), sharedChroma1.size() * sizeof(uint16_t)) != 0,
+				L"negative control: activeFillOcclusion D5 fill must alter warped chroma vs occlusionFill=false");
+
+			// 3. Reference non-reused fillOcclusion path (occlusionFill = true, occlusionSlot = -1):
+			// warped luma and chroma for both pairs must match GEM-121 aliased activeFillOcclusion bit-for-bit.
+			Dejudder::MotionWarp separateFillRef(fixture.Log(), gpu, makeSettings(true));
+			separateFillRef.SetPassTiming(true, true);
+			Assert::IsTrue(separateFillRef.Estimate(a1.planes, b1.planes, -1), L"non-reused fillOcclusion Estimate #1");
+			Assert::AreEqual(size_t(1), separateFillRef.PassMs().count("VideoProcessor de-judder: occlusion for the fill (D5)"),
+				L"non-dither occlusionSlot=-1 must dispatch dedicated fill occlusion pass");
+			Assert::AreEqual(size_t(0), separateFillRef.PassMs().count("VideoProcessor de-judder: occlusion for the dither"),
+				L"non-dither occlusionSlot=-1 must not dispatch dither occlusion pass");
+			Dejudder::Planes sepWarped1;
+			Assert::IsTrue(separateFillRef.Warp(a1.planes, 0.5f, sepWarped1), L"non-reused fillOcclusion Warp #1");
+			pl_gpu_finish(gpu);
+			const std::vector<uint16_t> sepLuma1 = DownloadPlane(gpu, sepWarped1.luma);
+			const std::vector<uint16_t> sepChroma1 = DownloadPlane(gpu, sepWarped1.chroma);
+			Assert::AreEqual(sepLuma1.size(), sharedLuma1.size());
+			Assert::AreEqual(0, std::memcmp(sepLuma1.data(), sharedLuma1.data(),
+				sepLuma1.size() * sizeof(uint16_t)),
+				L"GEM-121: Warp #1 luma via aliased Occlusion(0) must match non-reused fillOcclusion bit-for-bit");
+			Assert::AreEqual(sepChroma1.size(), sharedChroma1.size());
+			Assert::AreEqual(0, std::memcmp(sepChroma1.data(), sharedChroma1.data(),
+				sepChroma1.size() * sizeof(uint16_t)),
+				L"GEM-121: Warp #1 chroma via aliased Occlusion(0) must match non-reused fillOcclusion bit-for-bit");
+
+			Assert::IsTrue(separateFillRef.Estimate(a2.planes, b2.planes, -1), L"non-reused fillOcclusion Estimate #2");
+			Dejudder::Planes sepWarped2;
+			Assert::IsTrue(separateFillRef.Warp(a2.planes, 0.5f, sepWarped2), L"non-reused fillOcclusion Warp #2");
+			pl_gpu_finish(gpu);
+			const std::vector<uint16_t> sepLuma2 = DownloadPlane(gpu, sepWarped2.luma);
+			const std::vector<uint16_t> sepChroma2 = DownloadPlane(gpu, sepWarped2.chroma);
+			Assert::AreEqual(sepLuma2.size(), sharedLuma2.size());
+			Assert::AreEqual(0, std::memcmp(sepLuma2.data(), sharedLuma2.data(),
+				sepLuma2.size() * sizeof(uint16_t)),
+				L"GEM-121: Warp #2 luma via aliased Occlusion(1) must match non-reused fillOcclusion bit-for-bit");
+			Assert::AreEqual(sepChroma2.size(), sharedChroma2.size());
+			Assert::AreEqual(0, std::memcmp(sepChroma2.data(), sharedChroma2.data(),
+				sepChroma2.size() * sizeof(uint16_t)),
+				L"GEM-121: Warp #2 chroma via aliased Occlusion(1) must match non-reused fillOcclusion bit-for-bit");
+
+			AssertCleanLibplaceboLog(log, "OcclusionFillSingleDispatchReuseMatchesSeparateDispatchAndPreservesAlternatingSlot");
+		}
 	};
 }
