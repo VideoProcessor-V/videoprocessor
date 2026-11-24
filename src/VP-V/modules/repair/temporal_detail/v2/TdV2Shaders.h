@@ -1422,6 +1422,71 @@ int td_ref_role(int k)
     return int(round(u_ref_role_2));
 }
 
+int td_p2b_motion_slot(int rk)
+{
+    if (rk == 0) return int(round(u_ref_motion_slot_0));
+    if (rk == 1) return int(round(u_ref_motion_slot_1));
+    return int(round(u_ref_motion_slot_2));
+}
+
+void td_hp_warp_axis(float v, out float outWW, out float outUU, out float outWU, out float outGG, out float outG0)
+{
+    float f = v - floor(v);
+    vec4 w = td_cubic_weights(f);
+    outWW = dot(w, w);
+    int gLen = 2 * TD_RAD_FINE + 1;
+    outGG = 0.0;
+    for (int j = 0; j < gLen; ++j)
+    {
+        float gj = TD_TAP_FINE[j];
+        outGG += gj * gj;
+    }
+    outG0 = TD_TAP_FINE[TD_RAD_FINE];
+    outUU = 0.0;
+    outWU = 0.0;
+    for (int m = -TD_RAD_FINE - 1; m <= TD_RAD_FINE + 2; ++m)
+    {
+        float u = 0.0;
+        for (int i = 0; i < 4; ++i)
+        {
+            int idx = (m - (i - 1)) + TD_RAD_FINE;
+            if (idx >= 0 && idx < gLen)
+                u += w[i] * TD_TAP_FINE[idx];
+        }
+        outUU += u * u;
+        if (m >= -1 && m <= 2)
+            outWU += w[m + 1] * u;
+    }
+}
+
+float td_fine_hp_warp_gain(vec2 mv)
+{
+    if (td_is_bad(mv.x) || td_is_bad(mv.y))
+        return 1.0;
+    float wwX = 0.0, uuX = 0.0, wuX = 0.0, ggX = 0.0, g0X = 0.0;
+    float wwY = 0.0, uuY = 0.0, wuY = 0.0, ggY = 0.0, g0Y = 0.0;
+    td_hp_warp_axis(mv.x, wwX, uuX, wuX, ggX, g0X);
+    td_hp_warp_axis(mv.y, wwY, uuY, wuY, ggY, g0Y);
+    float den = 1.0 - 2.0 * g0X * g0Y + ggX * ggY;
+    if (!(den > TD_NUM_FLOOR))
+        return clamp(wwX * wwY, 0.0, 1.0);
+    float num = wwX * wwY - 2.0 * wuX * wuY + uuX * uuY;
+    float ratio = num / den;
+    return td_is_bad(ratio) ? clamp(wwX * wwY, 0.0, 1.0) : clamp(ratio, 0.0, 1.0);
+}
+
+float td_subpixel_h_atten_bias(vec2 mvP, vec2 mvQ, float curHVar, float grainHVar)
+{
+    if (td_is_bad(mvP.x) || td_is_bad(mvP.y) || td_is_bad(mvQ.x) || td_is_bad(mvQ.y) ||
+        td_is_bad(curHVar) || td_is_bad(grainHVar))
+        return 0.0;
+    float alphaP = sqrt(max(0.0, td_fine_hp_warp_gain(mvP)));
+    float alphaQ = sqrt(max(0.0, td_fine_hp_warp_gain(mvQ)));
+    float texHVar = max(0.0, curHVar - max(0.0, grainHVar));
+    float bias = (1.0 - alphaP) * (1.0 - alphaQ) * texHVar;
+    return (!td_is_bad(bias) && bias > 0.0) ? bias : 0.0;
+}
+
 // Mirrors TdV2ReferenceEngine::findIndependentA1Partner (plan s1.1 L70):
 // Roles: 0=PrevPeak, 1=NextPeak, 2=Carry, 3=PrevPeak2.
 // Carry (role == 2) NEVER instruments another reference in A1 (shares recursive past error).
@@ -1458,13 +1523,14 @@ int td_find_independent_a1_partner(int K, int k)
     return (primary >= 0) ? primary : secondary;
 }
 
-float td_est_c_a1(float crossPN, float cPP, float cNN, float retGVar, float bandShare)
+float td_est_c_a1(float crossPN, float cPP, float cNN, float retGVar, float bandShare, float subpixelBias)
 {
-    if (td_is_bad(crossPN) || td_is_bad(cPP) || td_is_bad(cNN) || td_is_bad(retGVar) || td_is_bad(bandShare))
+    if (td_is_bad(crossPN) || td_is_bad(cPP) || td_is_bad(cNN) || td_is_bad(retGVar) ||
+        td_is_bad(bandShare) || td_is_bad(subpixelBias))
         return 0.0;
     float upper = max(0.0, min(cPP, cNN));
     float gTerm = max(0.0, retGVar) * max(0.0, bandShare);
-    float raw = crossPN - gTerm;
+    float raw = crossPN - gTerm - max(0.0, subpixelBias);
     if (raw <= 0.0) return 0.0;
     return min(raw, upper);
 }
@@ -1717,6 +1783,18 @@ for (int b = 0; b < 3; ++b)
         diagOut.z = (K > 2) ? (hasOwnStats ? min(ownDiag.z, C[2][2]) : C[2][2]) : 0.0;
 
         float bGain = td_band_gain(b);
+        float curHVar = spatialDetailRms * spatialDetailRms;
+        bool useSubpixelH = (u_enable_subpixel_h_debias > 0.5) && (b == 2);
+        vec2 refMv[3];
+        refMv[0] = vec2(0.0); refMv[1] = vec2(0.0); refMv[2] = vec2(0.0);
+        if (useSubpixelH)
+        {
+            for (int kk = 0; kk < K; ++kk)
+            {
+                int slot = clamp(td_p2b_motion_slot(kk), 0, 2);
+                refMv[kk] = texelFetch(motion_vec, ivec2(slot * TD_CW + cell.x, cell.y), 0).xy;
+            }
+        }
         float cVec[3];
         cVec[0] = 0.0; cVec[1] = 0.0; cVec[2] = 0.0;
         for (int k = 0; k < K; ++k)
@@ -1731,7 +1809,10 @@ for (int b = 0; b < 3; ++b)
             int partner = td_find_independent_a1_partner(K, k);
             if (partner >= 0)
             {
-                cA1 = td_est_c_a1(C[k][partner], C[k][k], C[partner][partner], cellRetGVar, bGain);
+                float subBias = useSubpixelH
+                    ? td_subpixel_h_atten_bias(refMv[k], refMv[partner], curHVar, cellRetGVar * bGain)
+                    : 0.0;
+                cA1 = td_est_c_a1(C[k][partner], C[k][k], C[partner][partner], cellRetGVar, bGain, subBias);
             }
             else if (estMode != 1)
             {
@@ -1743,7 +1824,10 @@ for (int b = 0; b < 3; ++b)
                 for (int j = 0; j < K; ++j)
                 {
                     if (j == k || td_is_exact_copy(j)) continue;
-                    float cCap = td_est_c_a1(C[k][j], C[k][k], C[j][j], cellRetGVar, bGain);
+                    float capBias = useSubpixelH
+                        ? td_subpixel_h_atten_bias(refMv[k], refMv[j], curHVar, cellRetGVar * bGain)
+                        : 0.0;
+                    float cCap = td_est_c_a1(C[k][j], C[k][k], C[j][j], cellRetGVar, bGain, capBias);
                     cVec[k] = min(cVec[k], cCap);
                 }
             }

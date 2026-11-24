@@ -16,6 +16,7 @@
 #pragma once
 
 #include <VP-V/core/Ramp.h>
+#include <VP-V/modules/motion/estimation/composed/WarpSampler.h>
 #include <VP-V/modules/repair/grain_split/shared/BandFromBase.h>
 #include <VP-V/modules/repair/temporal_detail/v2/TdV2Config.h>
 #include <VP-V/modules/repair/temporal_detail/v2/TdV2StandIns.h>
@@ -508,8 +509,88 @@ namespace TdV2
 		return top + (bot - top) * ty;
 	}
 
-	// ---- Blind Estimator A1: Grain-Corrected Three-Cornered Hat (refs/111 s3.2) ----
-	// c_A1,j = clip(E_b[d_p d_n] - kappa_g * N_g,j, 0, min(C_pp, C_nn))
+	// ---- SOTA #2: Exact Parseval Fine-Band (H = I - G_fine) Bicubic Warp Variance Transfer Gain ----
+	// Computes beta_HP(vx, vy) = ||H * W(vx, vy)||_2^2 / ||H||_2^2 using shared VpComposed::CubicWeights
+	// and U2 VpUnit::BandFromBase::kSigmaFine taps (Rule 1: zero invented constants; exact 1.0 at integer shifts).
+	inline double FineBandBicubicWarpVarianceGain(double vx, double vy)
+	{
+		if (!std::isfinite(vx) || !std::isfinite(vy))
+			return 1.0;
+		const auto g = VpUnit::BandFromBase::Taps<double>(VpUnit::BandFromBase::kSigmaFine, 3.0, true, 0.0);
+		if (g.empty())
+			return 1.0;
+		const int gLen = static_cast<int>(g.size());
+		const int r = gLen / 2;
+
+		auto axisFactors = [&](double v, double& outWW, double& outUU, double& outWU, double& outGG, double& outG0)
+		{
+			const double f = v - std::floor(v);
+			double w[4] = {};
+			VpComposed::CubicWeights(f, w);
+			outWW = 0.0;
+			for (int i = 0; i < 4; ++i)
+				outWW += w[i] * w[i];
+			outGG = 0.0;
+			for (int j = 0; j < gLen; ++j)
+				outGG += g[static_cast<size_t>(j)] * g[static_cast<size_t>(j)];
+			outG0 = g[static_cast<size_t>(r)];
+			outUU = 0.0;
+			outWU = 0.0;
+			const int mMin = -r - 1;
+			const int mMax = (gLen - 1 - r) + 2;
+			for (int m = mMin; m <= mMax; ++m)
+			{
+				double u = 0.0;
+				for (int i = 0; i < 4; ++i)
+				{
+					const int idx = (m - (i - 1)) + r;
+					if (idx >= 0 && idx < gLen)
+						u += w[i] * g[static_cast<size_t>(idx)];
+				}
+				outUU += u * u;
+				if (m >= -1 && m <= 2)
+					outWU += w[m + 1] * u;
+			}
+		};
+
+		double wwX = 0.0, uuX = 0.0, wuX = 0.0, ggX = 0.0, g0X = 0.0;
+		double wwY = 0.0, uuY = 0.0, wuY = 0.0, ggY = 0.0, g0Y = 0.0;
+		axisFactors(vx, wwX, uuX, wuX, ggX, g0X);
+		axisFactors(vy, wwY, uuY, wuY, ggY, g0Y);
+
+		const double den = 1.0 - 2.0 * g0X * g0Y + ggX * ggY;
+		if (!(den > kSolveNumericalFloor))
+			return RampMath::Clamp01(wwX * wwY);
+		const double num = wwX * wwY - 2.0 * wuX * wuY + uuX * uuY;
+		const double ratio = num / den;
+		if (!std::isfinite(ratio))
+			return RampMath::Clamp01(wwX * wwY);
+		return RampMath::Clamp01(ratio);
+	}
+
+	// Shared sub-pixel bicubic H-band attenuation bias in E[d_p d_q] for partner pair (p, q):
+	//   alpha_p = sqrt(FineBandBicubicWarpVarianceGain(vx_p, vy_p)),  alpha_q = sqrt(FineBandBicubicWarpVarianceGain(vx_q, vy_q)),
+	//   bias    = (1 - alpha_p) * (1 - alpha_q) * max(0, curHVar - max(0, grainHVar)).
+	// Identically 0.0 whenever either partner is integer-shifted (alpha == 1.0).
+	inline double ComputeSubpixelHAttenuationBias(
+		double vxP, double vyP,
+		double vxQ, double vyQ,
+		double curHVar, double grainHVar)
+	{
+		if (!std::isfinite(vxP) || !std::isfinite(vyP) || !std::isfinite(vxQ) || !std::isfinite(vyQ) ||
+		    !std::isfinite(curHVar) || !std::isfinite(grainHVar))
+		{
+			return 0.0;
+		}
+		const double alphaP = std::sqrt(FineBandBicubicWarpVarianceGain(vxP, vyP));
+		const double alphaQ = std::sqrt(FineBandBicubicWarpVarianceGain(vxQ, vyQ));
+		const double cleanTexHVar = (std::max)(0.0, curHVar - (std::max)(0.0, grainHVar));
+		const double bias = (1.0 - alphaP) * (1.0 - alphaQ) * cleanTexHVar;
+		return (std::isfinite(bias) && bias > 0.0) ? bias : 0.0;
+	}
+
+	// ---- Blind Estimator A1: Grain-Corrected Three-Cornered Hat (refs/111 s3.2 + SOTA #2 H-band debias) ----
+	// c_A1,j = clip(E_b[d_p d_n] - kappa_g * N_g,j - subpixelAttenBias, 0, min(C_pp, C_nn))
 	// where N_g,j = retainedGrainVar * bandShare * psdScale (retainedGrainVar = mean(f'^2) * N_b from P10g).
 	inline double EstimateC_A1(
 		double crossPrevNext,
@@ -518,18 +599,20 @@ namespace TdV2
 		double retainedGrainVar,
 		double bandShare,
 		double kappaG = 1.0,
-		double psdScale = 1.0)
+		double psdScale = 1.0,
+		double subpixelAttenBias = 0.0)
 	{
 		if (!std::isfinite(crossPrevNext) || !std::isfinite(cPrevPrev) || !std::isfinite(cNextNext) ||
 		    !std::isfinite(retainedGrainVar) || !std::isfinite(bandShare) ||
-		    !std::isfinite(kappaG) || !std::isfinite(psdScale))
+		    !std::isfinite(kappaG) || !std::isfinite(psdScale) || !std::isfinite(subpixelAttenBias))
 		{
 			return 0.0;
 		}
 		const double upper = (std::max)(0.0, (std::min)(cPrevPrev, cNextNext));
 		const double grainTerm = (std::max)(0.0, retainedGrainVar) * (std::max)(0.0, bandShare) *
 		                         (std::max)(0.0, kappaG) * (std::max)(0.0, psdScale);
-		const double raw = crossPrevNext - grainTerm;
+		const double biasTerm = (std::max)(0.0, subpixelAttenBias);
+		const double raw = crossPrevNext - grainTerm - biasTerm;
 		if (raw <= 0.0)
 			return 0.0;
 		return raw < upper ? raw : upper;

@@ -164,6 +164,9 @@ namespace TdV2
 		// Default true; setting false disables per-corner Huber taper on the exact same engine (negative control).
 		bool enablePerCornerHuber = true;
 
+		// Sub-pixel bicubic H-band attenuation debiasing in EstimateC_A1 (SOTA #2; default false for baseline parity).
+		bool enableSubpixelHAttenuationDebias = false;
+
 		// Measured source rate in Hz (used to express any temporal horizon in seconds, never hardcoded frame counts).
 		double sourceHz = kDefaultSourceHz;
 

@@ -1024,6 +1024,8 @@ namespace TdV2
 				ThreeBandPlanes bands;
 				std::vector<uint8_t> validPx;
 				MotionGateResult motionGate;
+				std::vector<double> motionVx;
+				std::vector<double> motionVy;
 				bool isExactCopy = false;
 				RefRole role = RefRole::PrevPeak;
 			};
@@ -1036,6 +1038,8 @@ namespace TdV2
 				WarpedRef wr;
 				wr.isExactCopy = spec.isExactCopy;
 				wr.role = spec.role;
+				wr.motionVx = spec.motion->vx;
+				wr.motionVy = spec.motion->vy;
 				const WarpDiagnostics wDiag = WarpCleanReference(
 					*spec.cleanPlane, curClean, active, spec.motion->vx, spec.motion->vy,
 					res.cellsW, res.cellsH, cellPx, wr.clean, wr.validPx, standIns, &spec.motion->valid);
@@ -1274,6 +1278,7 @@ namespace TdV2
 					const double spatialDetailRms = spatialPxCnt > 0
 						? std::sqrt(spatialFineEnergy / static_cast<double>(spatialPxCnt))
 						: 0.0;
+					const double curHVar = spatialDetailRms * spatialDetailRms;
 					const double cellOwnGrainVar = (splitActive && spatialPxCnt > 0)
 						? (cellOwnGrainEnergy / static_cast<double>(spatialPxCnt))
 						: 0.0;
@@ -1415,13 +1420,23 @@ namespace TdV2
 							// and per-cell AQ/PQ step scale (homogeneous of degree 2 in stepDelta), capped to [0, C[k][k]].
 							const double cA2 = (std::min)(EstimateC_A2(a2Stats, refs[k].isExactCopy) * cellStepScaleSq * a2BandPeakSq[b], C[k][k]);
 
-							// A1 grain-corrected Three-Cornered Hat using an independent peak partner (NEVER Carry <-> Peak).
+							// A1 grain-corrected Three-Cornered Hat using an independent peak partner (NEVER Carry <-> Peak),
+							// with optional SOTA #2 sub-pixel bicubic H-band attenuation debiasing.
 							double cA1 = cA2;
 							const int partner = findIndependentA1Partner(k);
 							if (partner >= 0)
 							{
+								double subpixelBias = 0.0;
+								if (cfg_.enableSubpixelHAttenuationDebias && b == 2 &&
+								    cIdx < refs[k].motionVx.size() && cIdx < refs[partner].motionVx.size())
+								{
+									subpixelBias = ComputeSubpixelHAttenuationBias(
+										refs[k].motionVx[cIdx], refs[k].motionVy[cIdx],
+										refs[partner].motionVx[cIdx], refs[partner].motionVy[cIdx],
+										curHVar, cellRetainedGrainVar * bandTransfer[2]);
+								}
 								cA1 = EstimateC_A1(C[k][partner], C[k][k], C[partner][partner],
-								                   cellRetainedGrainVar, bandTransfer[b]);
+								                   cellRetainedGrainVar, bandTransfer[b], 1.0, 1.0, subpixelBias);
 							}
 							else if (cfg_.estimator != VarianceEstimator::A2_RoundingCells)
 							{
@@ -1434,8 +1449,17 @@ namespace TdV2
 								{
 									if (j == k || refs[j].isExactCopy)
 										continue;
+									double capBias = 0.0;
+									if (cfg_.enableSubpixelHAttenuationDebias && b == 2 &&
+									    cIdx < refs[k].motionVx.size() && cIdx < refs[j].motionVx.size())
+									{
+										capBias = ComputeSubpixelHAttenuationBias(
+											refs[k].motionVx[cIdx], refs[k].motionVy[cIdx],
+											refs[j].motionVx[cIdx], refs[j].motionVy[cIdx],
+											curHVar, cellRetainedGrainVar * bandTransfer[2]);
+									}
 									const double cap = EstimateC_A1(C[k][j], C[k][k], C[j][j],
-									                                cellRetainedGrainVar, bandTransfer[b]);
+									                                cellRetainedGrainVar, bandTransfer[b], 1.0, 1.0, capBias);
 									if (cap < cA1)
 										cA1 = cap;
 								}

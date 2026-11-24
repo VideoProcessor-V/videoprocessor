@@ -2669,6 +2669,7 @@ namespace Gpu
 			const float uShadowMode = cfg_.ModifiesPixels() ? 0.0f : 1.0f;
 			const float uBokehMode = (cfg_.bokehMode == BokehMode::LowBandCellOnly) ? 1.0f : 0.0f;
 			const float uEnableHuber = cfg_.enablePerCornerHuber ? 1.0f : 0.0f;
+			const float uEnableSubpixelHDebias = cfg_.enableSubpixelHAttenuationDebias ? 1.0f : 0.0f;
 			const float uStepNoiseVar = static_cast<float>(stepNoiseVar);
 			const float uStructureFloor = static_cast<float>(structureFloor);
 			const float uA2Valid = a2Stats.valid ? 1.0f : 0.0f;
@@ -2996,26 +2997,31 @@ namespace Gpu
 				p2bHdr += VpvGpu::Define("TD_PIVOT_FLOOR", kSolvePivotFloor);
 				p2bHdr += VpvGpu::Define("TD_STEP_SCALE_MIN", kCellStepScaleMin);
 				p2bHdr += VpvGpu::Define("TD_STEP_SCALE_MAX", kCellStepScaleMax);
+				p2bHdr += Shaders::BuildFineTapHeader();
 				p2bHdr += Shaders::kCoreHelpers;
 				p2bHdr += Shaders::kPass2MergeSolveHeader;
 
-				pl_shader_desc d2b[8] = {
+				pl_shader_desc d2b[9] = {
 					VpvGpu::Sampled("cell_stats", sc.cellStats),
 					VpvGpu::Sampled("cell_focus", sc.cellFocus),
 					VpvGpu::Sampled("motion_gate", sc.motionGate),
+					VpvGpu::Sampled("motion_vec", motionVecTex),
 					VpvGpu::Sampled("cell_prior", cellPriorTex),
 					VpvGpu::Storage("cell_weights", sc.cellWeights),
 					VpvGpu::Storage("cell_diag_c", sc.cellDiagC),
 					VpvGpu::Storage("td_maps", dstTdMaps),
 					VpvGpu::Storage("cell_diag_flags", dstDiagFlags)
 				};
-				pl_shader_var v2b[16] = {
+				pl_shader_var v2b[20] = {
 					VpvGpu::Var("u_k", &uK),
 					VpvGpu::Var("u_pool_r", &uPoolR),
 					VpvGpu::Var("u_estimator", &uEstimator),
 					VpvGpu::Var("u_ref_role_0", &uRefRole0),
 					VpvGpu::Var("u_ref_role_1", &uRefRole1),
 					VpvGpu::Var("u_ref_role_2", &uRefRole2),
+					VpvGpu::Var("u_ref_motion_slot_0", &uRefMotionSlot0),
+					VpvGpu::Var("u_ref_motion_slot_1", &uRefMotionSlot1),
+					VpvGpu::Var("u_ref_motion_slot_2", &uRefMotionSlot2),
 					VpvGpu::Var("u_exact_copy_0", &uExactCopy0),
 					VpvGpu::Var("u_exact_copy_1", &uExactCopy1),
 					VpvGpu::Var("u_exact_copy_2", &uExactCopy2),
@@ -3025,9 +3031,10 @@ namespace Gpu
 					VpvGpu::Var("u_a2_total_var", &uA2TotalVar),
 					VpvGpu::Var("u_has_clean_split", &uHasCleanSplit),
 					VpvGpu::Var("u_bokeh_mode", &uBokehMode),
-					VpvGpu::Var("u_cell_prior_has_step_scale", &uCellPriorHasStepScale)
+					VpvGpu::Var("u_cell_prior_has_step_scale", &uCellPriorHasStepScale),
+					VpvGpu::Var("u_enable_subpixel_h_debias", &uEnableSubpixelHDebias)
 				};
-				if (!runPass("td_v2_p2b_merge_solve", p2bHdr, Shaders::kPass2MergeAndSolve, d2b, 8, v2b, 16, cellGx8, cellGy8, 8, 8))
+				if (!runPass("td_v2_p2b_merge_solve", p2bHdr, Shaders::kPass2MergeAndSolve, d2b, 9, v2b, 20, cellGx8, cellGy8, 8, 8))
 				{
 					resetCarryIfActive();
 					return failCore("td_v2_p2b_merge_solve dispatch failed", StandInKind::GpuDispatchFailed);
