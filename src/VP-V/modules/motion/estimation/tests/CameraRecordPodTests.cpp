@@ -14,6 +14,7 @@
 #include <VP-V/core/Products.h>
 #include "CppUnitTest.h"
 
+#include <cstring>
 #include <vector>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
@@ -171,6 +172,221 @@ namespace VideoProcessorTest
 				bad[offsets[k]] = lasts[k];
 				Assert::IsTrue(CameraLink::DecodeRecordPod(bad.data(), n, b), L"the last enumerator is accepted");
 				Assert::AreEqual<uint64_t>(21u, b.seq);
+			}
+		}
+
+		// GEM-137 (AB1#1): CRD2 carries verdictFlags, layerFlags, finalRefineCells, dyn/water/static/two-layer
+		// signals, layerRisk, haveObjectLayer and objectLayer while still decoding legacy 366-byte CRD1 payloads
+		// and refusing corrupt magic, truncated CRD2 tails, or out-of-range objectLayer.type without touching target.
+		TEST_METHOD(Crd2PreservesVerdictFlagsSignalsAndDecodesLegacyCrd1)
+		{
+			constexpr size_t kCrd1Bytes = 366;
+			constexpr size_t kCrd2Bytes = 547;
+			constexpr size_t kObjectLayerTypeOffset = 454;
+
+			CameraMotion a = PodRec(108);
+			a.reason = Reason::Ambiguous;
+			a.verdictFlags = static_cast<uint8_t>(kVerdictDynamicTexture | kVerdictStaticCamera);
+			a.layerFlags = 0x57u;
+			a.finalRefineCells = 14400u;
+			a.signals.dynShare = 0.625;
+			a.signals.dynTemporal = 0.7125;
+			a.signals.dynSpatial = 0.8375;
+			a.signals.dynField = 0.4375;
+			a.signals.waterExcludedShare = 0.3125;
+			a.signals.staticRing = 0.775;
+			a.signals.staticFit = 0.225;
+			a.signals.border = 0.825;
+			a.signals.continuity = 0.9125;
+			a.layerRisk = 0.6875;
+			a.haveObjectLayer = true;
+			a.objectLayer.id = 7u;
+			a.objectLayer.type = ModelType::Affine;
+			const double objH[9] = { 1.02, -0.015, 18.5, 0.012, 0.985, -9.25, 0.0, 0.0, 1.0 };
+			for (int i = 0; i < 9; ++i) a.objectLayer.h[i] = objH[i];
+			a.objectLayer.blocks = 312u;
+			a.objectLayer.cx = -142.5;
+			a.objectLayer.cy = 88.25;
+
+			std::vector<uint8_t> buf;
+			const size_t n = PodEncode(a, buf);
+			Assert::AreEqual(kCrd2Bytes, n, L"CRD2 encoded byte length");
+			Assert::IsTrue(n <= CameraLink::kRecordPodMaxBytes, L"CRD2 fits the 1 KB P7 slot");
+			uint32_t magic = 0;
+			std::memcpy(&magic, buf.data(), sizeof(magic));
+			Assert::AreEqual<uint32_t>(CameraLink::kRecordPodMagic, magic, L"EncodeRecordPod writes CRD2 magic");
+			Assert::AreEqual<uint32_t>(0x43524432u, magic, L"CRD2 magic value");
+
+			// Encode must refuse buffers shorter than CRD2 (including exact CRD1 size: never silently downgrade).
+			std::vector<uint8_t> shortOut(kCrd2Bytes - 1, 0);
+			Assert::AreEqual(size_t(0), CameraLink::EncodeRecordPod(a, shortOut.data(), shortOut.size()), L"1 byte short of CRD2 encodes nothing");
+			Assert::AreEqual(size_t(0), CameraLink::EncodeRecordPod(a, shortOut.data(), kCrd1Bytes), L"CRD1-sized buffer must not silently truncate CRD2");
+
+			// (a) Full CRD2 round-trip into a pre-dirtied target preserves every v2 field and v1 prefix.
+			CameraMotion b;
+			b.seq = 55555u;
+			b.verdictFlags = 0u;
+			b.signals.border = 0.1;
+			b.haveObjectLayer = false;
+			Assert::IsTrue(CameraLink::DecodeRecordPod(buf.data(), n, b), L"CRD2 decode succeeds");
+			Assert::AreEqual(a.seq, b.seq);
+			Assert::IsTrue(a.reason == b.reason);
+			Assert::AreEqual(a.confidence, b.confidence);
+			Assert::AreEqual(a.verdictFlags, b.verdictFlags);
+			Assert::AreEqual(a.layerFlags, b.layerFlags);
+			Assert::AreEqual(a.finalRefineCells, b.finalRefineCells);
+			Assert::AreEqual(a.signals.dynShare, b.signals.dynShare);
+			Assert::AreEqual(a.signals.dynTemporal, b.signals.dynTemporal);
+			Assert::AreEqual(a.signals.dynSpatial, b.signals.dynSpatial);
+			Assert::AreEqual(a.signals.dynField, b.signals.dynField);
+			Assert::AreEqual(a.signals.waterExcludedShare, b.signals.waterExcludedShare);
+			Assert::AreEqual(a.signals.staticRing, b.signals.staticRing);
+			Assert::AreEqual(a.signals.staticFit, b.signals.staticFit);
+			Assert::AreEqual(a.signals.border, b.signals.border);
+			Assert::AreEqual(a.signals.continuity, b.signals.continuity);
+			Assert::AreEqual(a.layerRisk, b.layerRisk);
+			Assert::AreEqual(a.haveObjectLayer, b.haveObjectLayer);
+			Assert::AreEqual(a.objectLayer.id, b.objectLayer.id);
+			Assert::IsTrue(a.objectLayer.type == b.objectLayer.type);
+			for (int i = 0; i < 9; ++i)
+				Assert::AreEqual(a.objectLayer.h[i], b.objectLayer.h[i]);
+			Assert::AreEqual(a.objectLayer.blocks, b.objectLayer.blocks);
+			Assert::AreEqual(a.objectLayer.cx, b.objectLayer.cx);
+			Assert::AreEqual(a.objectLayer.cy, b.objectLayer.cy);
+
+			// (b) Backward compatibility: legacy 366-byte CRD1 payload decodes cleanly with v1 fields intact
+			// and v2 fields reset to CameraMotion defaults (even when decoding into a target pre-populated with v2 data).
+			std::vector<uint8_t> legacyBuf(buf.begin(), buf.begin() + kCrd1Bytes);
+			const uint32_t crd1Magic = CameraLink::kRecordPodMagicV1;
+			Assert::AreEqual<uint32_t>(0x43524431u, crd1Magic, L"CRD1 magic value");
+			std::memcpy(legacyBuf.data(), &crd1Magic, sizeof(crd1Magic));
+
+			CameraMotion legacy = a;   // pre-dirty every v2 field to ensure CRD1 resets them to defaults
+			Assert::IsTrue(CameraLink::DecodeRecordPod(legacyBuf.data(), legacyBuf.size(), legacy), L"legacy CRD1 payload decodes cleanly");
+			Assert::AreEqual(a.seq, legacy.seq);
+			Assert::AreEqual(a.pairFrom, legacy.pairFrom);
+			Assert::AreEqual(a.pairTo, legacy.pairTo);
+			Assert::AreEqual(a.pairSeconds, legacy.pairSeconds);
+			Assert::AreEqual(a.resyncGeneration, legacy.resyncGeneration);
+			Assert::AreEqual(a.rebaseGeneration, legacy.rebaseGeneration);
+			Assert::AreEqual(a.valid, legacy.valid);
+			Assert::IsTrue(a.params.type == legacy.params.type);
+			Assert::IsTrue(a.reason == legacy.reason);
+			for (int i = 0; i < 9; ++i) Assert::AreEqual(a.params.h[i], legacy.params.h[i]);
+			Assert::IsTrue(a.smoothedParams.type == legacy.smoothedParams.type);
+			for (int i = 0; i < 9; ++i) Assert::AreEqual(a.smoothedParams.h[i], legacy.smoothedParams.h[i]);
+			Assert::AreEqual(a.confidence, legacy.confidence);
+			Assert::AreEqual(a.signals.inlierShare, legacy.signals.inlierShare);
+			Assert::AreEqual(a.signals.logit, legacy.signals.logit);
+			Assert::AreEqual(a.samples, legacy.samples);
+			Assert::AreEqual(a.costMicros, legacy.costMicros);
+			Assert::AreEqual(a.picture.bottom, legacy.picture.bottom);
+
+			const CameraMotion defaults;
+			Assert::AreEqual(defaults.verdictFlags, legacy.verdictFlags);
+			Assert::AreEqual(defaults.layerFlags, legacy.layerFlags);
+			Assert::AreEqual(defaults.finalRefineCells, legacy.finalRefineCells);
+			Assert::AreEqual(defaults.signals.dynShare, legacy.signals.dynShare);
+			Assert::AreEqual(defaults.signals.dynTemporal, legacy.signals.dynTemporal);
+			Assert::AreEqual(defaults.signals.dynSpatial, legacy.signals.dynSpatial);
+			Assert::AreEqual(defaults.signals.dynField, legacy.signals.dynField);
+			Assert::AreEqual(defaults.signals.waterExcludedShare, legacy.signals.waterExcludedShare);
+			Assert::AreEqual(defaults.signals.staticRing, legacy.signals.staticRing);
+			Assert::AreEqual(defaults.signals.staticFit, legacy.signals.staticFit);
+			Assert::AreEqual(defaults.signals.border, legacy.signals.border);
+			Assert::AreEqual(defaults.signals.continuity, legacy.signals.continuity);
+			Assert::AreEqual(defaults.layerRisk, legacy.layerRisk);
+			Assert::AreEqual(defaults.haveObjectLayer, legacy.haveObjectLayer);
+			Assert::AreEqual(defaults.objectLayer.id, legacy.objectLayer.id);
+			Assert::IsTrue(defaults.objectLayer.type == legacy.objectLayer.type);
+			for (int i = 0; i < 9; ++i)
+				Assert::AreEqual(defaults.objectLayer.h[i], legacy.objectLayer.h[i]);
+			Assert::AreEqual(defaults.objectLayer.blocks, legacy.objectLayer.blocks);
+			Assert::AreEqual(defaults.objectLayer.cx, legacy.objectLayer.cx);
+			Assert::AreEqual(defaults.objectLayer.cy, legacy.objectLayer.cy);
+
+			// Same-input negative control (Rule 3): prove legacy CRD1 loses v2 state that CRD2 preserves.
+			Assert::AreNotEqual(a.verdictFlags, legacy.verdictFlags, L"CRD1 drops verdictFlags");
+			Assert::AreNotEqual(a.signals.waterExcludedShare, legacy.signals.waterExcludedShare, L"CRD1 drops waterExcludedShare");
+			Assert::AreNotEqual(a.haveObjectLayer, legacy.haveObjectLayer, L"CRD1 drops objectLayer");
+
+			// (c) Negative controls: corrupt magic, truncated CRD2/CRD1 payloads, and out-of-range objectLayer.type
+			// must all return false and leave the target CameraMotion completely untouched.
+			auto makeSentinel = []() {
+				CameraMotion s;
+				s.seq = 77777u;
+				s.confidence = 0.125;
+				s.verdictFlags = kVerdictStaticCamera;
+				s.layerFlags = 0xAAu;
+				s.finalRefineCells = 999u;
+				s.signals.waterExcludedShare = 0.99;
+				s.signals.border = 0.125;
+				s.layerRisk = 0.77;
+				s.haveObjectLayer = true;
+				s.objectLayer.id = 42u;
+				s.objectLayer.type = ModelType::Similarity;
+				s.objectLayer.blocks = 88u;
+				return s;
+			};
+			auto assertSentinelUntouched = [](const CameraMotion& m) {
+				Assert::AreEqual<uint64_t>(77777u, m.seq, L"sentinel seq untouched");
+				Assert::AreEqual(0.125, m.confidence, L"sentinel confidence untouched");
+				Assert::AreEqual<uint8_t>(kVerdictStaticCamera, m.verdictFlags, L"sentinel verdictFlags untouched");
+				Assert::AreEqual<uint8_t>(0xAAu, m.layerFlags, L"sentinel layerFlags untouched");
+				Assert::AreEqual<uint32_t>(999u, m.finalRefineCells, L"sentinel finalRefineCells untouched");
+				Assert::AreEqual(0.99, m.signals.waterExcludedShare, L"sentinel waterExcludedShare untouched");
+				Assert::AreEqual(0.125, m.signals.border, L"sentinel border untouched");
+				Assert::AreEqual(0.77, m.layerRisk, L"sentinel layerRisk untouched");
+				Assert::IsTrue(m.haveObjectLayer, L"sentinel haveObjectLayer untouched");
+				Assert::AreEqual<uint8_t>(42u, m.objectLayer.id, L"sentinel objectLayer.id untouched");
+				Assert::IsTrue(m.objectLayer.type == ModelType::Similarity, L"sentinel objectLayer.type untouched");
+				Assert::AreEqual<uint32_t>(88u, m.objectLayer.blocks, L"sentinel objectLayer.blocks untouched");
+			};
+
+			// Corrupt magic ("CRD3" and "CRD0")
+			for (uint32_t badMagic : { 0x43524433u, 0x43524430u })
+			{
+				std::vector<uint8_t> bad = buf;
+				std::memcpy(bad.data(), &badMagic, sizeof(badMagic));
+				CameraMotion target = makeSentinel();
+				Assert::IsFalse(CameraLink::DecodeRecordPod(bad.data(), n, target), L"corrupt magic refused");
+				assertSentinelUntouched(target);
+			}
+
+			// Truncated CRD2: 1 byte short (546 B) AND exact CRD1 length (366 B) with CRD2 magic
+			for (size_t truncLen : { kCrd2Bytes - 1, kCrd1Bytes })
+			{
+				CameraMotion target = makeSentinel();
+				Assert::IsFalse(CameraLink::DecodeRecordPod(buf.data(), truncLen, target), L"truncated CRD2 refused");
+				assertSentinelUntouched(target);
+			}
+
+			// Truncated legacy CRD1: 1 byte short (365 B)
+			{
+				CameraMotion target = makeSentinel();
+				Assert::IsFalse(CameraLink::DecodeRecordPod(legacyBuf.data(), kCrd1Bytes - 1, target), L"truncated CRD1 refused");
+				assertSentinelUntouched(target);
+			}
+
+			// Out-of-range objectLayer.type in CRD2 tail (byte offset 454)
+			Assert::AreEqual<uint8_t>(uint8_t(a.objectLayer.type), buf[kObjectLayerTypeOffset], L"offset of objectLayer.type");
+			for (uint8_t badType : { uint8_t(uint8_t(ModelType::Homography) + 1), uint8_t(0xFFu) })
+			{
+				std::vector<uint8_t> bad = buf;
+				bad[kObjectLayerTypeOffset] = badType;
+				CameraMotion target = makeSentinel();
+				Assert::IsFalse(CameraLink::DecodeRecordPod(bad.data(), n, target), L"out-of-range objectLayer.type refused");
+				assertSentinelUntouched(target);
+			}
+
+			// Boundary positive control: last valid ModelType enumerator is accepted for objectLayer.type
+			{
+				std::vector<uint8_t> edge = buf;
+				edge[kObjectLayerTypeOffset] = uint8_t(ModelType::Homography);
+				CameraMotion target = makeSentinel();
+				Assert::IsTrue(CameraLink::DecodeRecordPod(edge.data(), n, target), L"last valid ModelType accepted for objectLayer.type");
+				Assert::AreEqual(a.seq, target.seq);
+				Assert::IsTrue(target.objectLayer.type == ModelType::Homography);
 			}
 		}
 	};
