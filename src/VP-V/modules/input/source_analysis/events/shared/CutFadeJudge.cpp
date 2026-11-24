@@ -627,11 +627,12 @@ bool HighlightScalingConsistent(uint32_t refP99P4, uint32_t curP99P4, double gai
     if (dir < 0 && cp <= rp + double(kFadeMinSpread) && (1.0 - gain) >= 1.0 / double(kFadeMaxDiv))
         return true;
     const double aP99 = (cp - black) / (rp - black);
-    // For brightening (dir > 0), enforce symmetric +-50% (kFadeResidualReduction) consistency around gain
+    // For brightening (dir > 0), enforce exact multiplicative reciprocal [0.5, 2.0] consistency around (gain - 1)
     // to reject both pinned highlights (ambient flicker) and localized bright surges / flashes (aP99 >> gain).
     // For darkening (dir < 0), enforce lower bound on highlight drop so fast-unclipping fade-outs are preserved.
     if (dir > 0)
-        return std::fabs(aP99 - gain) <= kFadeResidualReduction * std::fabs(1.0 - gain);
+        return kFadeResidualReduction * (gain - 1.0) <= (aP99 - 1.0) &&
+            (aP99 - 1.0) <= (1.0 / kFadeResidualReduction) * (gain - 1.0);
     return double(dir) * (aP99 - 1.0) >= kFadeResidualReduction * std::fabs(1.0 - gain);
 }
 
@@ -804,6 +805,14 @@ EventSignals ClassifyEvents(const SourceStats::Record& prev, const SourceStats::
             GridOf(prev, &gp);
             GridOf(cur, &gc);
             if (Flatness(gp) >= kFlatF && Flatness(gc) >= kFlatF) {
+                auto AlignedMeanStep = [](const double a[kGridH][kGridW], const double b[kGridH][kGridW]) -> double {
+                    constexpr int kIntN = (kGridH - 2 * kLocalRadius) * (kGridW - 2 * kLocalRadius);
+                    double s = 0.0;
+                    for (int y = kLocalRadius; y < kGridH - kLocalRadius; ++y)
+                        for (int x = kLocalRadius; x < kGridW - kLocalRadius; ++x)
+                            s += b[y][x] - a[y][x];
+                    return s / double(kIntN);
+                };
                 if (outCache) {
                     AlignGridGuarded(gp.g, gc.g, kShiftRadius, outCache->prevAligned, outCache->curAligned,
                                      &outCache->vx, &outCache->vy);
@@ -811,7 +820,9 @@ EventSignals ClassifyEvents(const SourceStats::Record& prev, const SourceStats::
                                                           outCache->vx, outCache->vy);
                     outCache->valid = true;
                     outCache->adjFitValid = true;
+                    const double stepMean = AlignedMeanStep(outCache->prevAligned, outCache->curAligned);
                     e.fade = outCache->adjFit.valid &&
+                        stepMean * double(outCache->adjFit.dir) > 0.0 &&
                         FootprintPreserved(outCache->prevAligned, outCache->curAligned, outCache->adjFit) &&
                         std::fabs(1.0 - outCache->adjFit.gain) < 1.0 / double(kFadeMaxDiv) &&
                         HighlightScalingConsistent(prev.p99, cur.p99, outCache->adjFit.gain, outCache->adjFit.black, outCache->adjFit.dir);
@@ -820,7 +831,9 @@ EventSignals ClassifyEvents(const SourceStats::Record& prev, const SourceStats::
                     double vx = 0.0, vy = 0.0;
                     AlignGridGuarded(gp.g, gc.g, kShiftRadius, prevA, curA, &vx, &vy);
                     const GridFadeFit fit = FitGridFadeAligned(prevA, curA, vx, vy);
-                    e.fade = fit.valid && FootprintPreserved(prevA, curA, fit) &&
+                    const double stepMean = AlignedMeanStep(prevA, curA);
+                    e.fade = fit.valid && stepMean * double(fit.dir) > 0.0 &&
+                        FootprintPreserved(prevA, curA, fit) &&
                         std::fabs(1.0 - fit.gain) < 1.0 / double(kFadeMaxDiv) &&
                         HighlightScalingConsistent(prev.p99, cur.p99, fit.gain, fit.black, fit.dir);
                 }
@@ -1346,38 +1359,40 @@ bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur
             if (!(sSameZero > sOppZero))
                 return false;
 
-            // Fix #4: Exact 4x2 (7x7) macro-tile step consensus — cancels internal motion dipoles during
-            // constant-gain holds while boosting slow-fade SNR by sqrt(49) = 7x.
-            constexpr int kTileCols = 4;
-            constexpr int kTileRows = 2;
-            constexpr int kTileSize = 7;
-            constexpr int kNumTiles = kTileCols * kTileRows;
-            constexpr double kTileArea = double(kTileSize * kTileSize);
-            int tileSameZero = 0, tileOppZero = 0;
-            for (int tr = 0; tr < kTileRows; ++tr) {
-                for (int tc = 0; tc < kTileCols; ++tc) {
-                    double sumP = 0.0, sumC = 0.0;
-                    const int y0 = kLocalRadius + tr * kTileSize;
-                    const int x0 = kLocalRadius + tc * kTileSize;
-                    for (int dy = 0; dy < kTileSize; ++dy)
-                        for (int dx = 0; dx < kTileSize; ++dx) {
-                            sumP += prevAligned[y0 + dy][x0 + dx];
-                            sumC += curAligned[y0 + dy][x0 + dx];
+            // Fix #4: Exact 4x2 (7x7) macro-tile step consensus scoped to sub-half-LSB steps (|stepMean| <= kFadeCellStepEps) —
+            // cancels internal motion dipoles during constant-gain holds while never blocking multi-code fade steps with local object motion.
+            if (std::fabs(stepMean) <= kFadeCellStepEps) {
+                constexpr int kTileCols = 4;
+                constexpr int kTileRows = 2;
+                constexpr int kTileSize = 7;
+                constexpr int kNumTiles = kTileCols * kTileRows;
+                constexpr double kTileArea = double(kTileSize * kTileSize);
+                int tileSameZero = 0, tileOppZero = 0;
+                for (int tr = 0; tr < kTileRows; ++tr) {
+                    for (int tc = 0; tc < kTileCols; ++tc) {
+                        double sumP = 0.0, sumC = 0.0;
+                        const int y0 = kLocalRadius + tr * kTileSize;
+                        const int x0 = kLocalRadius + tc * kTileSize;
+                        for (int dy = 0; dy < kTileSize; ++dy)
+                            for (int dx = 0; dx < kTileSize; ++dx) {
+                                sumP += prevAligned[y0 + dy][x0 + dx];
+                                sumC += curAligned[y0 + dy][x0 + dx];
+                            }
+                        const double prevTile = sumP / kTileArea;
+                        const double curTile = sumC / kTileArea;
+                        if ((std::max)(prevTile, curTile) > floor + double(kFadeMinSpread)) {
+                            const double delta = curTile - prevTile;
+                            if (double(run.direction) * delta > 0.0)
+                                ++tileSameZero;
+                            else if (-double(run.direction) * delta > 0.0)
+                                ++tileOppZero;
                         }
-                    const double prevTile = sumP / kTileArea;
-                    const double curTile = sumC / kTileArea;
-                    if ((std::max)(prevTile, curTile) > floor + double(kFadeMinSpread)) {
-                        const double delta = curTile - prevTile;
-                        if (double(run.direction) * delta > 0.0)
-                            ++tileSameZero;
-                        else if (-double(run.direction) * delta > 0.0)
-                            ++tileOppZero;
                     }
                 }
+                if (tileSameZero + tileOppZero >= int(kFadeSpatialCoverage * double(kNumTiles)) &&
+                    double(tileSameZero) < kFadeSpatialConsensus * double(tileSameZero + tileOppZero))
+                    return false;
             }
-            if (tileSameZero + tileOppZero >= int(kFadeSpatialCoverage * double(kNumTiles)) &&
-                double(tileSameZero) < kFadeSpatialConsensus * double(tileSameZero + tileOppZero))
-                return false;
 
             if (sSameEps + sOppEps > 0)
                 return sSameEps > sOppEps;
