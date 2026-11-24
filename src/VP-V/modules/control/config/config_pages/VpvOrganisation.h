@@ -44,22 +44,25 @@ namespace Vpv
 	// Elsewhere: a toggle of this unit shown in another place (named in the note), not on this card.
 	// Text: a VP-V text row of a renderer-profile key, built by the VP-V page itself (VpvSection.cpp TextRowSpec; no
 	// row on Bill's pages), bound to the profile the VP-V picker shows.
-	enum class ItemKind { Toggle, Section, Row, Hide, Note, Elsewhere, Text };
+	// Number: a validated VP-V numeric spin-box row of a renderer-profile key (VpvSection.cpp NumberRowSpec).
+	enum class ItemKind { Toggle, Section, Row, Hide, Note, Elsewhere, Text, Number };
 	struct CardItem { ItemKind kind; const char* id; };
-	enum class LockKind { None, Tier, Slider, Feature, Defaults };
+	enum class LockKind { None, Tier, Slider, Feature, Defaults, ReplacedBy };
 	struct Lock
 	{
-		LockKind kind;                      // None when the card has no lock (value-initialised)
-		const char* master;       // plain name of the master, for "Set by ..." / "Used only when ... is on"
-		const char* masterKey;    // Slider: the slider's name label part; Feature: the renderer key
-		const char* resetKey;     // Slider: the slider's reset button part
-		const char* offValues;    // Feature: values that mean off
-		const char* fallback;     // Feature: the built-in value when unset
+		LockKind kind = LockKind::None;     // None when the card has no lock (value-initialised)
+		const char* master = nullptr;       // plain name of the master, for "Set by ..." / "Used only when ... is on"
+		const char* masterKey = nullptr;    // Slider: the slider's name label part; Feature/ReplacedBy: the renderer key
+		const char* resetKey = nullptr;     // Slider: the slider's reset button part
+		const char* offValues = nullptr;    // Feature: values that mean off; ReplacedBy: values that mean active/replacing
+		const char* fallback = nullptr;     // Feature/ReplacedBy: the built-in value when unset
 		std::vector<const char*> lockKeys;  // lock only these keys' controls (empty: the whole card)
+		const char* replacedByKey = nullptr;  // optional secondary ReplacedBy master key (locks when active)
+		const char* replacedByName = nullptr; // plain name of the replacing feature
 	};
 	struct Card
 	{
-		const char* unit;          // unit id (vpv-tiers.json), or "retirement"
+		const char* unit;          // unit id (vpv-tiers.json), "retirement", or "developer"
 		const char* id;            // object name part: vpv.<unit>.card.<id>
 		const char* title;
 		const char* help;          // may be nullptr
@@ -84,14 +87,12 @@ namespace Vpv
 			{ "input", "content_tuning", "Content labels: tuning", "How long a label (film, video, sports) is held before it may change.", true, false, {
 				{ K::Row, "intent_content_hold_seconds" } },
 				{ L::Feature, "Content labels", "intent_content", nullptr, "off", "off" } },
-			{ "input", "diagnostics", "Readouts (diagnostics)", "Shown in the stats overlay; they change nothing in the picture.", true, true, {
-				{ K::Row, "intent_display" }, { K::Row, "dv_compare_capture_folder" } } },
 
 			// ---- Motion ----
 			{ "motion", "engine", "Motion engine",
 				"One switch for all motion work (de-judder, hiccup repair, motion-aware scaling and dither). On: motion is "
 				"measured when something needs it. Off: those features use their non-motion path.", false, false, {
-				{ K::Toggle, "vector_demand" }, { K::Toggle, "dejudder_estimate_ahead" } } },
+				{ K::Toggle, "vector_demand" } } },
 			{ "motion", "taste", "De-judder amount (your taste)",
 				"How much film judder is smoothed: your taste. The tier above chooses how motion is measured; it never "
 				"changes the amount (As shot = no motion processing).", false, false, {
@@ -103,9 +104,11 @@ namespace Vpv
 				{ L::Feature, "the motion engine", "vector_demand", nullptr, "off", "on",
 					{ "interpolation_fill_gaps", "interpolation", "interpolation_fallback" } } },
 			{ "motion", "render_ahead", "Render ahead (under test)", "Draws de-judder frames early to absorb timing hiccups.", false, false, {
-				{ K::Toggle, "render_ahead" } } },
+				{ K::Toggle, "render_ahead" } },
+				{ L::Feature, "the motion engine", "vector_demand", nullptr, "off", "on", { "render_ahead" } } },
 			{ "motion", "easing", "Per-shot easing", "Lowers the de-judder on shots that need less (never raises it).", false, false, {
-				{ K::Toggle, "intent_motion" } } },
+				{ K::Toggle, "intent_motion" } },
+				{ L::Feature, "the motion engine", "vector_demand", nullptr, "off", "on", { "intent_motion" } } },
 			{ "motion", "tier_keys", "Set by the Motion tier", "The motion features the Motion tier chooses: where the motion vectors come from, how far ahead they look, finer block splitting.", true, false, {
 				{ K::Row, "optical_flow" }, { K::Row, "motion_ahead_frames" }, { K::Row, "dejudder_est_split" },
 				{ K::Row, "dejudder_est_qpel" },
@@ -119,7 +122,9 @@ namespace Vpv
 				{ L::Slider, "the de-judder amount", "motion_preset_name", "motion_preset_reset" } },
 			{ "motion", "shaping", "De-judder shaping (yours; the slider does not set these)",
 				"Fade matching, pulldown handling and the motion-vector options: independent of the amount.", true, false, {
-				{ K::Section, "dejudder" }, { K::Toggle, "optical_flow_on_demand" } } },
+				{ K::Section, "dejudder" }, { K::Toggle, "dejudder_estimate_ahead" }, { K::Toggle, "optical_flow_on_demand" },
+				{ K::Row, "optical_flow_global" }, { K::Row, "optical_flow_global_fallback" }, { K::Row, "optical_flow_fb_check" },
+				{ K::Row, "source_class" } } },
 			{ "motion", "render_ahead_tuning", "Render ahead: tuning", "How render ahead budgets its early frames. Used only while render ahead is on.", true, false, {
 				{ K::Row, "dejudder_gate" }, { K::Row, "render_ahead_utilisation" }, { K::Row, "render_ahead_queue_credit" } },
 				{ L::Feature, "Render ahead", "render_ahead", nullptr, "off", "off" } },
@@ -127,9 +132,6 @@ namespace Vpv
 				{ K::Row, "intent_motion_policy" }, { K::Row, "intent_motion_min" }, { K::Row, "intent_motion_min_shot_s" },
 				{ K::Row, "intent_ease_s" } },
 				{ L::Feature, "Per-shot easing", "intent_motion", nullptr, "off", "off" } },
-			{ "motion", "internals", "Motion estimator (measured, leave alone)",
-				"The estimator's measured internals. Normal viewing never needs these.", true, true, {
-				{ K::Section, "dejudderEstimation" } } },
 
 			// ---- Repair ----
 			{ "repair", "deband", "Deband",
@@ -137,7 +139,7 @@ namespace Vpv
 				{ K::Toggle, "deband_vp_grain_guard" }, { K::Toggle, "deband_vp_exclusive" }, { K::Toggle, "low_bitrate_handling" },
 				{ K::Note, "libplacebo's own debander (Deband strength) is Bill's: VP Renderer > Scaling / Quality. "
 					"With VP's debander on it is replaced (the switch above)." } },
-				{ L::Feature, "VP's debander (the Repair tier, Mid or above)", "deband_vp", nullptr, "off", "off" } },
+				{ L::Feature, "VP's debander (the Repair tier, Low or above)", "deband_vp", nullptr, "off", "off" } },
 			{ "repair", "tier_keys", "Set by the Repair tier", "The repair stages the Repair tier switches on: VP's debander, the detail-pulse steadier and texture restore.", true, false, {
 				{ K::Row, "deband_vp" }, { K::Row, "detail_pulse_stabilise" }, { K::Row, "texture_restore" } },
 				{ L::Tier, "the Repair tier" } },
@@ -157,8 +159,8 @@ namespace Vpv
 			{ "scaling", "rebase", "Re-base (your picture slider)",
 				"Finds a picture that was upscaled before VP (a 1080p film sent at 4K) and works from its real size. The tier "
 				"turns re-base on (Low and above); the slider sets how much evidence it needs.", false, false, {
-				{ K::Row, "picture_preset_box" }, { K::Toggle, "rebase_kernel_match" }, { K::Toggle, "source_resolution_text_guard" },
-				{ K::Toggle, "source_resolution_mixed_guard" }, { K::Text, "source_geometry_detect" } },
+				{ K::Row, "picture_preset_box" }, { K::Toggle, "source_resolution_text_guard" },
+				{ K::Toggle, "source_resolution_mixed_guard" } },
 				{ L::Feature, "re-base (the Scaling tier, Low or above)", "source_resolution", nullptr, "!auto", "auto" } },
 			{ "scaling", "grain", "Grain-aware downscale", "VP's downscale blend that keeps film grain true.", false, false, {
 				{ K::Toggle, "adaptive_faithful" }, { K::Toggle, "adaptive_grain_map" }, { K::Toggle, "ssim_bitrate_aware" } },
@@ -173,37 +175,43 @@ namespace Vpv
 				{ K::Row, "source_resolution_auto_min_confidence" }, { K::Row, "source_resolution_evidence_seconds" },
 				{ K::Row, "source_resolution_evidence_shots" } },
 				{ L::Slider, "the picture slider", "picture_preset_name", "picture_preset_reset" } },
-			{ "scaling", "rebase_timing", "Re-base timing", "How quickly re-base engages and fades.", true, false, {
+			{ "scaling", "rebase_timing", "Re-base timing", "How quickly re-base engages and fades, plus kernel matching and size recognition.", true, false, {
 				{ K::Row, "source_resolution_engage_max_wait_s" }, { K::Row, "source_resolution_crossfade_s" },
-				{ K::Row, "source_resolution_release_fade_s" }, { K::Toggle, "source_resolution_frame_bound" } },
+				{ K::Row, "source_resolution_release_fade_s" }, { K::Toggle, "source_resolution_frame_bound" },
+				{ K::Toggle, "rebase_kernel_match" }, { K::Text, "source_geometry_detect" } },
 				{ L::Feature, "re-base (the Scaling tier, Low or above)", "source_resolution", nullptr, "!auto", "auto" } },
+			{ "scaling", "adaptive_motion", "Motion-adapted scaling",
+				"Keeps the sharper scaler on steady, confidently tracked areas and eases toward the faithful scaler on fast or uncertain motion.", true, false, {
+				{ K::Row, "adaptive_motion" }, { K::Row, "adaptive_motion_speed_lo" },
+				{ K::Row, "adaptive_motion_speed_hi" }, { K::Row, "adaptive_motion_floor" },
+				{ K::Row, "adaptive_motion_smooth_ms" } } },
 			{ "scaling", "steadiness", "Scaler steadiness (expert)",
 				"Keeps the SSIM and CNN scalers' added detail steady along motion. Normal viewing never needs these.", true, false, {
-				{ K::Toggle, "ssim_residual_stabilise" }, { K::Toggle, "cnn_residual_stabilise" } } },
-			{ "scaling", "internals", "Grain-aware scaler thresholds (measured, leave alone)",
-				"Measured thresholds and weights. Normal viewing never needs these.", true, true, {
-				{ K::Section, "adaptiveDownscale" }, { K::Section, "adaptiveUpscale" }, { K::Hide, "upscale_light" } } },
+				{ K::Toggle, "ssim_residual_stabilise" }, { K::Toggle, "cnn_residual_stabilise" },
+				{ K::Row, "ssim_bitrate_floor" } } },
 
 			// ---- Colour ----
 			{ "colour", "dv", "Display mapping", "How Dolby Vision pictures are mapped to your display. VP's mapping is an approximation of Dolby's, not certified; Original uses libplacebo's own mapping.", false, false, {
-				{ K::Row, "dv_display_mapping" }, { K::Toggle, "dv_trims" }, { K::Row, "dv_tone_mapping" } } },
+				{ K::Toggle, "dv_display_mapping" }, { K::Toggle, "dv_trims" }, { K::Row, "dv_tone_mapping" } } },
 			{ "colour", "range", "Range and precision", "Keeps every value the source carries.", false, false, {
 				{ K::Toggle, "preserve_extended_range" }, { K::Elsewhere, "fbo_float32" },
-				{ K::Note, "Full precision (32-bit float intermediates) is chosen once for every tier, under the global tier at the top of this page." } } },
+				{ K::Note, "Full precision (32-bit float intermediates) is chosen once for every tier, on the Overview tab." } } },
 			{ "colour", "sdr", "SDR tone shape", "A gentle highlight knee for SDR sources.", false, false, {
 				{ K::Toggle, "sdr_tone_shape" } } },
 			{ "colour", "room", "Room-light adaptation (experimental)",
 				"Adjusts black and contrast to the room light the sensor measures. The room and the light sensor are set on "
-				"this page's Room lights card (On both pathways, below the unit tabs).", false, false, {
-				{ K::Toggle, "ambient_adapt" } } },
+				"this page's System > Room Light Sensor card.", false, false, {
+				{ K::Toggle, "ambient_adapt" } },
+				{ L::ReplacedBy, "CAM16 Appearance", "appearance", nullptr, "on", "off", { "ambient_adapt" } } },
 			{ "colour", "appearance", "Room and appearance (experimental)",
 				"Adapts the picture to the room and to the screen white (CAM16). While on it replaces the gamma boost and the saturation steps and takes over from room-light adaptation.", false, false, {
-				{ K::Toggle, "appearance" }, { K::Text, "appearance_room" }, { K::Text, "appearance_strength" }, { K::Text, "appearance_screen_white_nits" },
-				{ K::Toggle, "appearance_screen_white_measured" }, { K::Toggle, "appearance_honour_l11" },
-				{ K::Note, "@appearance_status" } } },
+				{ K::Toggle, "appearance" }, { K::Toggle, "appearance_room" }, { K::Number, "appearance_strength" }, { K::Number, "appearance_screen_white_nits" },
+				{ K::Note, "@appearance_status" } },
+				{ L::Feature, "CAM16 Appearance", "appearance", nullptr, "off", "off",
+					{ "appearance_room", "appearance_strength", "appearance_screen_white_nits" } } },
 			{ "colour", "upstream", "Tone mapping and display (Bill's pages)", "Where the colour settings that are not VP-V's live.", false, false, {
 				{ K::Note, "Tone mapping, HDR target, gamut and output gamma: VP Renderer > Tone Mapping and "
-					"VP Renderer > Color / Output. The calibration LUT file: Color / Output; where it runs: the Pipeline (expert) tab." },
+					"VP Renderer > Color / Output. The calibration LUT file: Color / Output; where it runs: Output > Advanced." },
 				{ K::Note, "Colour space, HDR luminance and video conversion of the INPUT are set once on General > Input "
 					"processing. The VP Renderer and DirectShow pages can override them for one renderer; they say "
 					"\"Inherited\" while they follow General." } } },
@@ -213,14 +221,12 @@ namespace Vpv
 			{ "colour", "room_tuning", "Room-light adaptation: values", "How strongly and how fast the picture follows the room light. Used only while room-light adaptation is on.", true, false, {
 				{ K::Row, "ambient_adapt_strength" }, { K::Row, "ambient_screen_reflect" }, { K::Row, "ambient_max_black_nits" },
 				{ K::Row, "ambient_tau_up_s" }, { K::Row, "ambient_tau_down_s" } },
-				{ L::Feature, "Room-light adaptation", "ambient_adapt", nullptr, "off", "off" } },
+				{ L::Feature, "Room-light adaptation", "ambient_adapt", nullptr, "off", "off", {}, "appearance", "CAM16 Appearance" } },
+			{ "colour", "appearance_tuning", "Room and appearance: tuning", "Measurement and reference-mode options for CAM16 appearance. Used only while CAM16 Appearance is on.", true, false, {
+				{ K::Toggle, "appearance_screen_white_measured" }, { K::Toggle, "appearance_honour_l11" } },
+				{ L::Feature, "CAM16 Appearance", "appearance", nullptr, "off", "off" } },
 
 			// ---- Dynamic Drive ----
-			{ "drive", "pages", "Dynamic Drive (its own page)", "The projector LED dimming has its own page, opened from the Drive tab.", false, false, {
-				{ K::Note, "Everything Dynamic Drive does is on the Dynamic Drive page. Its master is the command source "
-					"(your script, VP's compensate, or none): each card appears only when that source uses it. The "
-					"Advanced LED card has two more masters: \"Advanced LED values\" (your script's values, or Custom) "
-					"and \"LED fixes under test\" (all on, or Custom); their settings are greyed until Custom." } } },
 			{ "drive", "black_protection", "Black protection", "Protects near-black detail (report or LED shadow cap).", true, false, {
 				{ K::Row, "intent_black" } } },
 
@@ -238,7 +244,17 @@ namespace Vpv
 				{ K::Row, "dither_grain_tolerance_scale" },
 				{ K::Note, "It also follows the grain map (Scaling > Grain-aware downscale)." } },
 				{ L::Feature, "VP's sigma-delta dither (the Output tier)", "temporal_dither", nullptr, "off,libplacebo", "auto" } },
-			{ "output", "draft", "Draft (no effect yet)", "Reserved draft switch; not yet wired in the renderer.", true, true, {
+
+			// ---- Developer: diagnostics, measured internals and drafts ----
+			{ "developer", "input_diagnostics", "Readouts (diagnostics)", "Shown in the stats overlay; they change nothing in the picture.", true, true, {
+				{ K::Row, "intent_display" }, { K::Row, "dv_compare_capture_folder" } } },
+			{ "developer", "motion_internals", "Motion estimator (measured, leave alone)",
+				"The estimator's measured internals. Normal viewing never needs these.", true, true, {
+				{ K::Section, "dejudderEstimation" } } },
+			{ "developer", "scaling_internals", "Grain-aware scaler thresholds (measured, leave alone)",
+				"Measured thresholds and weights. Normal viewing never needs these.", true, true, {
+				{ K::Section, "adaptiveDownscale" }, { K::Section, "adaptiveUpscale" }, { K::Hide, "upscale_light" } } },
+			{ "developer", "output_draft", "Draft (no effect yet)", "Reserved draft switch; not yet wired in the renderer.", true, true, {
 				{ K::Row, "repeat_render_reuse" } } },
 
 			// ---- Proposed retirement: the candidates' controls (they still work until approved) ----

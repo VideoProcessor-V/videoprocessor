@@ -18,24 +18,44 @@
 
 namespace Vpv
 {
+	namespace
+	{
+		// Decode config value bytes as UTF-8 when valid, falling back to local8Bit for legacy non-UTF-8 files.
+		QString DecodeConfigValue(const std::string& raw)
+		{
+			const QByteArray bytes(raw.data(), static_cast<int>(raw.size()));
+			const QString utf8 = QString::fromUtf8(bytes);
+			if (utf8.toUtf8() == bytes)
+				return utf8;
+			return QString::fromLocal8Bit(bytes);
+		}
+	}
+
 	void ConfigEditorAccess::BindFormApi(ConfigEditorWindow& window)
 	{
 		EnsureSectionStyleSheet();   // install VP-V's property-scoped rules on qApp once before any widget exists
 		QPointer<ConfigEditorWindow> self(&window);
+		auto readValue = [self](const QString& section, const QString& key, const QString& fallback) -> QString
+		{
+			if (!self || !self->configurationLoaded_ || !self->document_)
+				return fallback;
+			const std::string result = self->document_->Get(section.toStdString().c_str(), key.toStdString().c_str());
+			return result.empty() ? fallback : DecodeConfigValue(result);
+		};
 		FunctionFormApi& formApi = self->formApi_;
-		formApi.valueFn = [self](const QString& section, const QString& key) { return self ? self->value(section, key) : QString(); };
+		formApi.valueFn = [readValue](const QString& section, const QString& key) { return readValue(section, key, QString()); };
 		formApi.setValueFn = [self](const QString& section, const QString& key, const QString& text)
 		{
 			if (!self || !self->document_) return;
 			if (text.isEmpty()) self->document_->RemoveKnown(section.toStdString(), key.toStdString().c_str());
-			else self->document_->SetKnown(section.toStdString(), key.toStdString().c_str(), text.toLocal8Bit().constData());
+			else self->document_->SetKnown(section.toStdString(), key.toStdString().c_str(), text.toUtf8().constData());
 			if (self->centralWidget()) self->markDirty();
 		};
 		formApi.markDirtyFn = [self] { if (self) self->markDirty(); };
 		formApi.profileSectionsFn = [self](const QString& root) { return self ? self->profileSections(root) : QStringList(); };
 		// The editor's own field helpers and services for provider pages (ConfigPageHost::EditorKit).
 		FunctionEditorKit& kit = formApi.kit;
-		kit.valueFn = [self](const QString& s, const QString& k, const QString& fallback) { return self ? self->value(s, k, fallback) : fallback; };
+		kit.valueFn = readValue;
 		kit.bindTextFn = [self](const QString& s, const QString& k, const QString& fallback) { return self ? self->bindTextField(s, k, fallback) : nullptr; };
 		kit.bindChoiceFn = [self](const QString& s, const QString& k, const QStringList& values, const QStringList& labels) { return self ? self->bindChoiceField(s, k, values, labels) : nullptr; };
 		kit.bindCheckFn = [self](const QString& label, const QString& s, const QString& k, bool on) { return self ? self->bindCheckField(label, s, k, on) : nullptr; };
@@ -48,10 +68,11 @@ namespace Vpv
 		kit.setKnownFn = [self](const QString& s, const QString& k, const QString& text)
 		{
 			if (!self || !self->document_) return;
-			if (!self->document_->SetKnown(s.toStdString(), k.toStdString().c_str(), text.toLocal8Bit().constData()))
+			const std::string bytes = text.toUtf8().toStdString();
+			if (!self->document_->SetKnown(s.toStdString(), k.toStdString().c_str(), bytes))
 			{
 				self->document_->AddSection(s.toStdString());
-				self->document_->SetKnown(s.toStdString(), k.toStdString().c_str(), text.toLocal8Bit().constData());
+				self->document_->SetKnown(s.toStdString(), k.toStdString().c_str(), bytes);
 			}
 		};
 		kit.removeKnownFn = [self](const QString& s, const QString& k) { if (self && self->document_) self->document_->RemoveKnown(s.toStdString(), k.toStdString().c_str()); };
@@ -82,12 +103,18 @@ namespace Vpv
 		// VP-V section (owner 2026-10-24; src/VP-V/config/README.md). The whole VP-V section lives in src/VP-V/config/;
 		// this and the "VP-V" navigation leaf are its only footprint in the editor.
 		Host vpvHost;
-		vpvHost.value = [self](const QString& section, const QString& key) { return self ? self->value(section, key) : QString(); };
+		vpvHost.value = [self](const QString& section, const QString& key) -> QString
+		{
+			if (!self || !self->configurationLoaded_ || !self->document_)
+				return QString();
+			const std::string result = self->document_->Get(section.toStdString().c_str(), key.toStdString().c_str());
+			return result.empty() ? QString() : DecodeConfigValue(result);
+		};
 		vpvHost.setValue = [self](const QString& section, const QString& key, const QString& text)
 		{
 			if (!self || !self->document_) return;
 			if (text.isEmpty()) self->document_->RemoveKnown(section.toStdString(), key.toStdString().c_str());
-			else self->document_->SetKnown(section.toStdString(), key.toStdString().c_str(), text.toLocal8Bit().constData());
+			else self->document_->SetKnown(section.toStdString(), key.toStdString().c_str(), text.toUtf8().constData());
 			self->markDirty();
 			// The pathway decides which Dithering choices the Scaling page offers.
 			if (key == QStringLiteral("pipeline_original_pathway"))

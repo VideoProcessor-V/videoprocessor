@@ -50,6 +50,7 @@ inline bool IsVpvOnlyKey(const QString& key)
         "adaptive_grain_smooth_ms",
         "adaptive_motion",
         "adaptive_motion_floor",
+        "adaptive_motion_refresh",
         "adaptive_motion_smooth_ms",
         "adaptive_motion_speed_hi",
         "adaptive_motion_speed_lo",

@@ -449,7 +449,7 @@ The P15/P15c layout reserve is declared by QualityPatternRecord.h (r2/p15-decl-b
 
 | Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|
-| `source_geometry_detect` | profile ([vprenderer.Default] and matching profiles) | string | `all`, `conventional` or a list of SourceGeometrySet ids (hdv_1440x1080, dvcprohd_1280x1080, dvcprohd_960x720, 2560x1440, 1920x1080, 1280x720, 960x540, dci_2048x1080, dci_1998x1080, sd_720x576, sd_720x480) | `all` | VP-V > Scaling > Main > Re-base (your picture slider) | n/a (VP-only; the Original pathway recognises nothing) | `source geometry detect`: unknown ids ignored and shown; named holds: `held: <name>` note, log line and `convention_held` history row | not tiered |
+| `source_geometry_detect` | profile ([vprenderer.Default] and matching profiles) | string | `all`, `conventional` or a list of SourceGeometrySet ids (hdv_1440x1080, dvcprohd_1280x1080, dvcprohd_960x720, 2560x1440, 1920x1080, 1280x720, 960x540, dci_2048x1080, dci_1998x1080, sd_720x576, sd_720x480) | `all` | VP-V > Scaling > Advanced > Re-base timing | n/a (VP-only; the Original pathway recognises nothing) | `source geometry detect`: unknown ids ignored and shown; named holds: `held: <name>` note, log line and `convention_held` history row | not tiered |
 
 - Tiers: not tiered; label-detector net optional.
 - VP-V page, Input tab: not tiered (Always on: capture and timing have no quality steps, only paths (the toggles below).).

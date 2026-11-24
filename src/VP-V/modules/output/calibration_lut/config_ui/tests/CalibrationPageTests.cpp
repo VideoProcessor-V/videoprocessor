@@ -14,11 +14,16 @@
 #include <QAbstractButton>
 #include <QCoreApplication>
 #include <QFile>
+#include <QFontDatabase>
 #include <QLabel>
 #include <QPushButton>
+#include <QScrollArea>
+#include <QScrollBar>
 #include <QSpinBox>
 #include <QStackedWidget>
+#include <QTabWidget>
 #include <QTemporaryDir>
+#include <QToolButton>
 
 #include <functional>
 
@@ -121,6 +126,120 @@ namespace
 		}
 		require(provider->StateCountForTesting() == before, "the provider kept state after its editor closed");
 	}
+
+	// Unit 3 (Phase 2) Red-Team adversarial test: Calibration splits into Setup & Wizard (calibration.setup) and
+	// Advanced (calibration.advanced) tabs inside calibration.pages; everyday setup + wizard stay on Setup & Wizard
+	// without advanced/transcript clutter (negative control); Advanced holds settle_ms, led_flux_step, and a collapsed
+	// calibration.card.transcripts card; both tabs fit 1040x700 with zero horizontal scroll.
+	void testCalibrationSetupAndAdvancedTabsAndCollapsedTranscripts()
+	{
+		Vpv::RegisterConfigProviders();
+		QTemporaryDir dir;
+		ConfigEditorWindow window(writeFixture(dir), 0, true);
+		QCoreApplication::processEvents();
+
+		auto* calTabs = window.findChild<QTabWidget*>(QStringLiteral("calibration.pages"));
+		require(calTabs != nullptr && calTabs->count() == 2,
+			"Unit 3: calibration.pages QTabWidget must exist with exactly 2 tabs");
+		require(calTabs->tabText(0) == QStringLiteral("Setup & Wizard") &&
+			calTabs->widget(0) != nullptr && calTabs->widget(0)->objectName() == QStringLiteral("calibration.setup"),
+			"Unit 3: calibration.pages tab 0 must be 'Setup & Wizard' (calibration.setup)");
+		require(calTabs->tabText(1) == QStringLiteral("Advanced") &&
+			calTabs->widget(1) != nullptr && calTabs->widget(1)->objectName() == QStringLiteral("calibration.advanced"),
+			"Unit 3: calibration.pages tab 1 must be 'Advanced' (calibration.advanced)");
+
+		QWidget* setupTab = calTabs->widget(0);
+		QWidget* advancedTab = calTabs->widget(1);
+
+		// Everyday setup & wizard live on calibration.setup.
+		for (const char* name : {
+			"config.calibration.argyll_path",
+			"config.calibration.meter_model",
+			"config.calibration.plan",
+			"config.calibration.target_transfer",
+			"config.calibration.lut_size",
+			"calibration.wizard.start",
+			"calibration.original_note" })
+		{
+			auto* w = window.findChild<QWidget*>(QString::fromLatin1(name));
+			require(w != nullptr && setupTab->isAncestorOf(w),
+				(std::string("Unit 3: everyday calibration control must live on calibration.setup: ") + name).c_str());
+		}
+
+		// Negative control: advanced timing, LED sweep, and transcript controls must NOT live on calibration.setup.
+		for (const char* name : {
+			"config.calibration.record_transcripts",
+			"config.calibration.transcript_folder",
+			"config.calibration.settle_ms",
+			"config.calibration.led_flux_step" })
+		{
+			auto* w = window.findChild<QWidget*>(QString::fromLatin1(name));
+			require(w != nullptr && !setupTab->isAncestorOf(w),
+				(std::string("Unit 3 negative control: advanced control leaked onto calibration.setup: ") + name).c_str());
+		}
+
+		// Advanced tab holds settle_ms, led_flux_step, and collapsed calibration.card.transcripts.
+		for (const char* name : { "config.calibration.settle_ms", "config.calibration.led_flux_step" })
+		{
+			auto* w = window.findChild<QWidget*>(QString::fromLatin1(name));
+			require(w != nullptr && advancedTab->isAncestorOf(w),
+				(std::string("Unit 3: advanced calibration control must live on calibration.advanced: ") + name).c_str());
+		}
+
+		auto* transcriptsCard = window.findChild<QWidget*>(QStringLiteral("calibration.card.transcripts"));
+		auto* transcriptsToggle = window.findChild<QToolButton*>(QStringLiteral("calibration.card.transcripts.toggle"));
+		auto* recordTranscripts = window.findChild<QWidget*>(QStringLiteral("config.calibration.record_transcripts"));
+		auto* transcriptFolder = window.findChild<QWidget*>(QStringLiteral("config.calibration.transcript_folder"));
+		require(transcriptsCard != nullptr && advancedTab->isAncestorOf(transcriptsCard),
+			"Unit 3: calibration.card.transcripts must live inside calibration.advanced");
+		require(recordTranscripts != nullptr && transcriptsCard->isAncestorOf(recordTranscripts) &&
+			transcriptFolder != nullptr && transcriptsCard->isAncestorOf(transcriptFolder),
+			"Unit 3: calibration.card.transcripts must hold record_transcripts and transcript_folder");
+		require(transcriptsToggle != nullptr && advancedTab->isAncestorOf(transcriptsToggle) &&
+			transcriptsToggle->isCheckable() && !transcriptsToggle->isChecked(),
+			"Unit 3: calibration.card.transcripts.toggle must exist and start collapsed (!isChecked())");
+		require(!recordTranscripts->isVisibleTo(transcriptsCard) && !transcriptFolder->isVisibleTo(transcriptsCard),
+			"Unit 3 negative control: transcript controls must be hidden while calibration.card.transcripts is collapsed");
+
+		transcriptsToggle->click();
+		QCoreApplication::processEvents();
+		require(transcriptsToggle->isChecked() &&
+			recordTranscripts->isVisibleTo(transcriptsCard) && transcriptFolder->isVisibleTo(transcriptsCard),
+			"Unit 3: clicking calibration.card.transcripts.toggle must reveal record_transcripts and transcript_folder");
+		transcriptsToggle->click();
+		QCoreApplication::processEvents();
+		require(!transcriptsToggle->isChecked() && !recordTranscripts->isVisibleTo(transcriptsCard),
+			"Unit 3 negative control: clicking calibration.card.transcripts.toggle again must re-collapse it");
+
+		// 1040x700 horizontal-scroll fit on both Calibration tabs.
+		if (!QFontDatabase::families().isEmpty())
+		{
+			window.resize(1040, 700);
+			window.show();
+			window.selectPage(QStringLiteral("Calibration"));
+			QCoreApplication::processEvents();
+			QScrollArea* scroll = nullptr;
+			for (QWidget* p = calTabs; p && !scroll; p = p->parentWidget())
+				scroll = qobject_cast<QScrollArea*>(p);
+			require(scroll != nullptr, "Unit 3: Calibration page QScrollArea not found");
+			for (int t = 0; t < calTabs->count(); ++t)
+			{
+				calTabs->setCurrentIndex(t);
+				QCoreApplication::processEvents();
+				require(scroll->horizontalScrollBar()->maximum() == 0,
+					(QStringLiteral("Unit 3 fit (1040x700): Calibration tab '%1' scrolls sideways (%2 px)")
+						.arg(calTabs->tabText(t)).arg(scroll->horizontalScrollBar()->maximum())).toStdString().c_str());
+			}
+			// Also verify Advanced tab still fits when transcripts card is expanded.
+			calTabs->setCurrentIndex(1);
+			transcriptsToggle->setChecked(true);
+			QCoreApplication::processEvents();
+			require(scroll->horizontalScrollBar()->maximum() == 0,
+				(QStringLiteral("Unit 3 fit (1040x700): Calibration Advanced tab scrolls sideways with transcripts expanded (%1 px)")
+					.arg(scroll->horizontalScrollBar()->maximum())).toStdString().c_str());
+			window.hide();
+		}
+	}
 }
 
 int RunCalibrationPageTests(const std::function<int(const char*, const std::function<void()>&)>& run,
@@ -133,5 +252,6 @@ int RunCalibrationPageTests(const std::function<int(const char*, const std::func
 	failures += run("CalibrationPageTests: controls keep names and write path", testCalibrationControlsKeepNamesAndWritePath);
 	failures += run("CalibrationPageTests: a status reply reaches the page through the seam", testStatusReplyReachesThePageThroughTheSeam);
 	failures += run("CalibrationPageTests: state goes with the editor", testStateGoesWithTheEditor);
+	failures += run("CalibrationPageTests: Unit 3 Setup & Wizard and Advanced tabs with collapsed transcripts", testCalibrationSetupAndAdvancedTabsAndCollapsedTranscripts);
 	return failures;
 }

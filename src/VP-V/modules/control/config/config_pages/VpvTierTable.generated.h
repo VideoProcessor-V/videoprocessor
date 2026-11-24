@@ -65,6 +65,7 @@ namespace Vpv
             t.defaults.push_back({ "fbo_float32", "auto" });
             t.defaults.push_back({ "ambient_adapt", "off" });
             t.defaults.push_back({ "appearance", "off" });
+            t.defaults.push_back({ "appearance_room", "cinema" });
             t.defaults.push_back({ "appearance_honour_l11", "on" });
             t.defaults.push_back({ "appearance_screen_white_measured", "off" });
             t.defaults.push_back({ "occlusion_mask", "off" });
@@ -108,7 +109,7 @@ namespace Vpv
                 Unit u;
                 u.id = "input"; u.name = "Input"; u.summary = "Takes the picture from the capture card at full precision, works out the signal type and holds it for the fixed delay.";
                 u.untieredReason = "Always on: capture and timing have no quality steps, only paths (the toggles below).";
-                u.more = "Total delay and queue profiles: Queue page. Signal detection (DV tunnel hand-off, new LLDV): DV page. Capture card and packing: General page.";
+                u.more = "Target delay: Input > Main (queue profiles and Target frames: Queue page). Signal detection (DV tunnel hand-off, new LLDV): System tab (also on DV page). Capture card and packing: General page.";
                 u.slotIds.push_back("input.capture");
                 u.slotIds.push_back("input.signal");
                 u.slotIds.push_back("input.queue_timing");
@@ -134,6 +135,7 @@ namespace Vpv
                     Preset p; p.tier = "Classic"; p.description = "VP's basic motion search only: whole-pixel matching, no NVIDIA engine, nothing computed ahead. Your de-judder amount still applies (choose As shot for no motion processing). With the Motion engine ON this is the degraded mode: VP's matcher does the work."; p.cost = "low";
                     p.set.push_back({ "optical_flow", "off" });
                     p.set.push_back({ "motion_ahead_frames", "0" });
+                    p.set.push_back({ "dejudder_est_split", "off" });
                     p.set.push_back({ "dejudder_est_qpel", "off" });
                     u.presets.push_back(p);
                 }
@@ -191,8 +193,8 @@ namespace Vpv
                     u.presets.push_back(p);
                 }
                 {
-                    Preset p; p.tier = "Low"; p.description = "libplacebo deband only (currently matches Classic until Low differs; detail pulse stabilise and texture restore stay off unless chosen explicitly)."; p.cost = "low";
-                    p.set.push_back({ "deband_vp", "off" });
+                    Preset p; p.tier = "Low"; p.description = "VP's grain-safe debander runs automatically when banding is detected; detail pulse stabilise and texture restore stay off (explicit choice only)."; p.cost = "low";
+                    p.set.push_back({ "deband_vp", "auto" });
                     p.set.push_back({ "detail_pulse_stabilise", "off" });
                     p.set.push_back({ "texture_restore", "off" });
                     u.presets.push_back(p);
@@ -279,6 +281,7 @@ namespace Vpv
                 u.toggles.push_back({ "fbo_float32", "Full precision for every tier (32-bit float intermediates)", { "auto", "on", "off" }, "colour.tone_gamut" });
                 u.toggles.push_back({ "ambient_adapt", "Room-light adaptation (experimental)", { "on", "off" }, "colour.appearance" });
                 u.toggles.push_back({ "appearance", "Room and appearance (CAM16, experimental)", { "on", "off" }, "colour.appearance" });
+                u.toggles.push_back({ "appearance_room", "Room lighting", { "cinema", "living_low", "living_lit", "auto" }, "colour.appearance" });
                 u.toggles.push_back({ "appearance_screen_white_measured", "Appearance: screen white measured", { "on", "off" }, "colour.appearance" });
                 u.toggles.push_back({ "appearance_honour_l11", "Appearance: honour the L11 reference mode", { "on", "off" }, "colour.appearance" });
                 u.planned.push_back({ "combined_hdr_lut", "Combined HDR->SDR LUT (low-end cards)", "colour.tone_gamut" });
@@ -300,7 +303,7 @@ namespace Vpv
                 Unit u;
                 u.id = "output"; u.name = "Output"; u.summary = "The calibration LUT, the dither for the 8-bit link and the presentation.";
                 u.untieredReason = nullptr;
-                u.more = "Display bit depth: VP Renderer > Color / Output. libplacebo's dithering: VP Renderer > Scaling / Quality. Where the calibration LUT runs: the Pipeline (expert) tab.";
+                u.more = "Display bit depth: VP Renderer > Color / Output. libplacebo's dithering: VP Renderer > Scaling / Quality. Where the calibration LUT runs: Output > Advanced.";
                 u.slotIds.push_back("output.calibration_lut");
                 u.slotIds.push_back("output.dither");
                 u.slotIds.push_back("output.presentation");

@@ -64,7 +64,10 @@ def section_source_spans(root):
 
 RETIREMENT_UNIT = "retirement"
 RETIREMENT_NAME = "Proposed retirement"
-ENFORCED_UNITS = ("motion", "input", "colour", "repair", "scaling", "output", RETIREMENT_UNIT)
+DEVELOPER_UNIT = "developer"
+DEVELOPER_NAME = "Developer"
+EXEMPT_OWNER_UNITS = (RETIREMENT_UNIT, DEVELOPER_UNIT)
+ENFORCED_UNITS = ("motion", "input", "colour", "repair", "scaling", "output", RETIREMENT_UNIT, DEVELOPER_UNIT)
 # A card may sit in another unit's tab than the module that owns the key (the viewer finds the
 # control where it is used; the module that reads it owns it). Every such case is listed here, with
 # the owner's slot; the owner's MANIFEST.json config_keys must list the key.
@@ -102,18 +105,11 @@ MANIFEST_EXEMPT = ("dejudder_pulldown",)
 UPSTREAM_NO_ROW = ("peak_detection",)
 # Elsewhere: a key of the card's unit that the card only names (the control stays on Bill's page); it is placed
 # on that card for the placement text and the owner checks.
-KEY_ITEMS = ("Row", "Toggle", "Text", "Elsewhere")
+KEY_ITEMS = ("Row", "Toggle", "Text", "Number", "Elsewhere")
 # P8-4: the "Fixes under test" container on Bill's Rendering page (section id fixesUnderTest) holds VP keys.
-# Every VP key built inside it is on an Organisation() card (a Row item, so the row moves to its unit's card),
-# except these, which have no card yet and stay in the container (their placement text says so):
+# Every VP key built inside it is on an Organisation() card (a Row item, so the row moves to its unit's card).
 FIXES_CONTAINER_ID = "fixesUnderTest"
-FIXES_CONTAINER_STAYS = (
-    "optical_flow_fb_check",
-    "optical_flow_global",
-    "optical_flow_global_fallback",
-    "source_class",
-    "ssim_bitrate_floor",
-)
+FIXES_CONTAINER_STAYS = ()
 
 
 def read(root, rel):
@@ -133,7 +129,7 @@ def parse_organisation(text):
         chunk = body[s:e]
         flags = re.search(r',\s*(true|false)\s*,\s*(true|false)\s*,\s*\{', chunk)
         items = [(m.group(1), m.group(2))
-                 for m in re.finditer(r'\{\s*K::(Row|Toggle|Text|Section|Elsewhere)\s*,\s*"([^"]+)"', chunk)]
+                 for m in re.finditer(r'\{\s*K::(Row|Toggle|Text|Number|Section|Elsewhere)\s*,\s*"([^"]+)"', chunk)]
         cards.append({"unit": unit, "id": cid, "title": title,
                       "advanced": bool(flags and flags.group(1) == "true"), "items": items})
     return cards
@@ -145,6 +141,7 @@ def unit_names(root):
     for u in tiers.get("units", []):
         names[u["id"]] = u.get("name", u["id"])
     names[RETIREMENT_UNIT] = RETIREMENT_NAME
+    names[DEVELOPER_UNIT] = DEVELOPER_NAME
     return names
 
 
@@ -174,6 +171,10 @@ def build_table(root, known_keys):
         card["name"] = names.get(card["unit"], card["unit"])
         if card["unit"] == RETIREMENT_UNIT:
             card["text"] = "VP-V > %s > %s" % (RETIREMENT_NAME, card["title"])
+        elif card["unit"] == DEVELOPER_UNIT:
+            card["text"] = "VP-V > %s > %s" % (DEVELOPER_NAME, card["title"])
+        elif card["unit"] == "drive":
+            card["text"] = "%s > %s > %s" % (card["name"], "Advanced" if card["advanced"] else "Main", card["title"])
         else:
             card["text"] = "VP-V > %s > %s > %s" % (card["name"], "Advanced" if card["advanced"] else "Main", card["title"])
         for kind, ident in card["items"]:
@@ -269,7 +270,7 @@ def analyse(root):
             if r["slot"] != CROSS_UNIT_OWNER[r["key"]] and r["slot"] not in PRESENTATION_ROWS.get(r["key"], ()):
                 flag((r["unit"], card["unit"]), "%s: %s is owned by %s (CROSS_UNIT_OWNER), its row is in %s" % (
                     where, r["key"], CROSS_UNIT_OWNER[r["key"]], r["slot"]))
-        elif card["unit"] != RETIREMENT_UNIT and r["unit"] != card["unit"]:
+        elif card["unit"] not in EXEMPT_OWNER_UNITS and r["unit"] != card["unit"]:
             flag((r["unit"], card["unit"]),
                  "%s: %s sits on a %s card but its owner row is in %s (%s)" % (
                      where, r["key"], card["unit"], r["unit"], r["slot"]))
@@ -287,7 +288,7 @@ def analyse(root):
         owner.setdefault(r["key"], []).append(r)
     code = set(an["code"])
     for key, card in sorted(placement.items()):
-        if card["unit"] not in ENFORCED_UNITS or card["unit"] == RETIREMENT_UNIT or key not in code:
+        if card["unit"] not in ENFORCED_UNITS or card["unit"] in EXEMPT_OWNER_UNITS or key not in code:
             continue
         if key in UPSTREAM_NO_ROW:
             continue

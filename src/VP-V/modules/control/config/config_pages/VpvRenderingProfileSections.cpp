@@ -10,6 +10,7 @@
 #include <QButtonGroup>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QDoubleSpinBox>
 #include <QDoubleValidator>
 #include <QFont>
 #include <QFormLayout>
@@ -2308,14 +2309,43 @@ namespace Vpv
         adaptiveMapSmooth->setToolTip(QStringLiteral(
             "Time constant of the per-block grain map (it follows the content along the vectors); a cut resets it."));
         // VP-V scaling.output (owner 2026-10-31): the motion-adapted blend, a candidate (off by default).
-        auto* adaptiveMotion = addChoice(QStringLiteral("Motion-adapted blend (candidate)"),
-            QStringLiteral("adaptive_motion"), { QStringLiteral("off"), QStringLiteral("on") });
-        adaptiveMotion->setToolTip(QStringLiteral(
-            "On: the sharper scaler (SSIM down, the CNN up) is kept on steady, confidently tracked areas and eased "
-            "toward the faithful scaler on fast or uncertain motion, smoothed over time so motion edges do not "
-            "flicker. Uses the de-judder's motion vectors (asks for them like the grain map); without vectors the "
-            "plain blend runs and the status says so. Applies to the downscale and the upscale blend."));
-        MarkGpuCost(form, adaptiveMotion, 1);
+        // Continuum 0.0..1.0 (off | on | [0.0, 1.0]): hidden text control holds the saved value while the
+        // visible composite control offers Off / On (1.0) / Custom strength (0.0-1.0).
+        auto* adaptiveMotion = addText(QStringLiteral("Motion-adapted blend (candidate)"),
+            QStringLiteral("adaptive_motion"));
+        const QString adaptiveMotionTip = QStringLiteral(
+            "On (1.0) or custom strength (0.0 to 1.0): the sharper scaler (SSIM down, the CNN up) is kept on steady, "
+            "confidently tracked areas and eased toward the faithful scaler on fast or uncertain motion, smoothed over "
+            "time so motion edges do not flicker. Uses the de-judder's motion vectors (asks for them like the grain map); "
+            "without vectors the plain blend runs and the status says so. Applies to the downscale and the upscale blend.");
+        adaptiveMotion->setToolTip(adaptiveMotionTip);
+        auto* adaptiveMotionControls = new QWidget;
+        adaptiveMotionControls->setObjectName(controlName(sectionPrefix, QStringLiteral("adaptive_motion.controls")));
+        adaptiveMotionControls->setToolTip(adaptiveMotionTip);
+        auto* adaptiveMotionLayout = new QHBoxLayout(adaptiveMotionControls);
+        adaptiveMotionLayout->setContentsMargins(0, 0, 0, 0);
+        auto* adaptiveMotionMode = new QComboBox(adaptiveMotionControls);
+        adaptiveMotionMode->setObjectName(controlName(sectionPrefix, QStringLiteral("adaptive_motion.mode")));
+        adaptiveMotionMode->addItem(QStringLiteral("Default (off)"), QString());
+        adaptiveMotionMode->addItem(QStringLiteral("Off"), QStringLiteral("off"));
+        adaptiveMotionMode->addItem(QStringLiteral("On (1.0)"), QStringLiteral("on"));
+        adaptiveMotionMode->addItem(QStringLiteral("Custom strength (0.0\u20131.0)"), QStringLiteral("custom"));
+        adaptiveMotionMode->setToolTip(adaptiveMotionTip);
+        auto* adaptiveMotionStrength = new QDoubleSpinBox(adaptiveMotionControls);
+        adaptiveMotionStrength->setObjectName(controlName(sectionPrefix, QStringLiteral("adaptive_motion.strength")));
+        adaptiveMotionStrength->setKeyboardTracking(false);
+        adaptiveMotionStrength->setRange(0.0, 1.0);
+        adaptiveMotionStrength->setDecimals(2);
+        adaptiveMotionStrength->setSingleStep(0.05);
+        adaptiveMotionStrength->setValue(0.50);
+        adaptiveMotionStrength->setToolTip(QStringLiteral(
+            "Continuous motion-adapted blend strength from 0.0 (off) to 1.0 (full)."));
+        adaptiveMotionLayout->addWidget(adaptiveMotionMode);
+        adaptiveMotionLayout->addWidget(adaptiveMotionStrength);
+        adaptiveMotionLayout->addStretch(1);
+        form->addRow(QStringLiteral("Motion-adapted blend (candidate)"), adaptiveMotionControls);
+        form->setRowVisible(adaptiveMotion, false);
+        MarkGpuCost(form, adaptiveMotionControls, 1);
         const AdaptiveField motionFields[] = {
             { "Motion: full sharp below (heights/s)", "adaptive_motion_speed_lo", 0.0, 10.0, "0.1", "Motion slower than this (picture heights per second) keeps the sharper scaler's full weight." },
             { "Motion: safe above (heights/s)", "adaptive_motion_speed_hi", 0.0, 10.0, "0.4", "Motion faster than this uses the floor below." },
@@ -2331,13 +2361,111 @@ namespace Vpv
             edit->setToolTip(QString::fromLatin1(field.tip));
         }
         {
-            auto greyMotion = [adaptiveMotion, motionRows]()
+            auto parseStrength = [](const QString& raw, double& out) -> bool
             {
-                const bool on = adaptiveMotion->currentData().toString() == QStringLiteral("on");
-                for (QWidget* row : motionRows) { row->setProperty("greyedOff", !on); row->setEnabled(on); }
+                bool ok = false;
+                const double v = QLocale::c().toDouble(raw, &ok);
+                if (!ok || !std::isfinite(v) || v < 0.0 || v > 1.0)
+                    return false;
+                out = v;
+                return true;
             };
-            QObject::connect(adaptiveMotion, qOverload<int>(&QComboBox::currentIndexChanged), receiver, [greyMotion](int) { greyMotion(); });
-            greyMotion();
+            auto syncAdaptiveMotion = [adaptiveMotion, adaptiveMotionMode, adaptiveMotionStrength, motionRows, parseStrength]()
+            {
+                const QSignalBlocker blockMode(adaptiveMotionMode);
+                const QSignalBlocker blockStrength(adaptiveMotionStrength);
+                const QString raw = adaptiveMotion->text().trimmed().toLower();
+                bool active = false;
+                double strengthValue = 0.0;
+                if (raw.isEmpty())
+                {
+                    adaptiveMotionMode->setCurrentIndex(adaptiveMotionMode->findData(QString()));
+                    adaptiveMotionStrength->setVisible(false);
+                    adaptiveMotionStrength->setEnabled(false);
+                    active = false;
+                }
+                else if (raw == QStringLiteral("on"))
+                {
+                    adaptiveMotionMode->setCurrentIndex(adaptiveMotionMode->findData(QStringLiteral("on")));
+                    adaptiveMotionStrength->setVisible(false);
+                    adaptiveMotionStrength->setEnabled(false);
+                    active = true;
+                }
+                else if (raw == QStringLiteral("off"))
+                {
+                    adaptiveMotionMode->setCurrentIndex(adaptiveMotionMode->findData(QStringLiteral("off")));
+                    adaptiveMotionStrength->setVisible(false);
+                    adaptiveMotionStrength->setEnabled(false);
+                    active = false;
+                }
+                else if (parseStrength(raw, strengthValue))
+                {
+                    adaptiveMotionMode->setCurrentIndex(adaptiveMotionMode->findData(QStringLiteral("custom")));
+                    adaptiveMotionStrength->setVisible(true);
+                    adaptiveMotionStrength->setEnabled(true);
+                    if (std::abs(adaptiveMotionStrength->value() - strengthValue) >= 1e-6 && !adaptiveMotionStrength->hasFocus())
+                        adaptiveMotionStrength->setValue(strengthValue);
+                    active = strengthValue > 0.0;
+                }
+                else
+                {
+                    adaptiveMotionMode->setCurrentIndex(adaptiveMotionMode->findData(QStringLiteral("off")));
+                    adaptiveMotionStrength->setVisible(false);
+                    adaptiveMotionStrength->setEnabled(false);
+                    active = false;
+                }
+                for (QWidget* row : motionRows)
+                {
+                    row->setProperty("greyedOff", !active);
+                    row->setEnabled(active);
+                }
+            };
+            QObject::connect(adaptiveMotion, &QLineEdit::textChanged, receiver, [syncAdaptiveMotion](const QString&) {
+                syncAdaptiveMotion();
+            });
+            QObject::connect(adaptiveMotionMode, qOverload<int>(&QComboBox::currentIndexChanged), receiver,
+                [adaptiveMotion, adaptiveMotionMode, adaptiveMotionStrength, parseStrength, syncAdaptiveMotion](int)
+            {
+                const QString chosen = adaptiveMotionMode->currentData().toString();
+                if (chosen.isEmpty() || chosen == QStringLiteral("off") || chosen == QStringLiteral("on"))
+                {
+                    if (adaptiveMotion->text() != chosen)
+                        adaptiveMotion->setText(chosen);
+                    else
+                        syncAdaptiveMotion();
+                }
+                else if (chosen == QStringLiteral("custom"))
+                {
+                    const QString raw = adaptiveMotion->text().trimmed().toLower();
+                    double existing = 0.0;
+                    if (!parseStrength(raw, existing))
+                    {
+                        const double initial = (raw == QStringLiteral("on")) ? 1.0 : 0.5;
+                        {
+                            const QSignalBlocker blockStrength(adaptiveMotionStrength);
+                            adaptiveMotionStrength->setValue(initial);
+                        }
+                        adaptiveMotion->setText(QString::number(adaptiveMotionStrength->value(), 'g', 4));
+                    }
+                    else
+                        syncAdaptiveMotion();
+                }
+            });
+            QObject::connect(adaptiveMotionStrength, qOverload<double>(&QDoubleSpinBox::valueChanged), receiver,
+                [adaptiveMotion, adaptiveMotionMode](double val)
+            {
+                if (adaptiveMotionMode->currentData().toString() != QStringLiteral("custom"))
+                    return;
+                const QString formatted = QString::number(val, 'g', 4);
+                if (adaptiveMotion->text() != formatted)
+                    adaptiveMotion->setText(formatted);
+            });
+            auto* adaptiveMotionRefresh = new QAction(adaptiveMotionControls);
+            adaptiveMotionRefresh->setObjectName(controlName(sectionPrefix, QStringLiteral("adaptive_motion_refresh")));
+            QObject::connect(adaptiveMotionRefresh, &QAction::triggered, receiver, [syncAdaptiveMotion]() {
+                syncAdaptiveMotion();
+            });
+            syncAdaptiveMotion();
         }
         MarkGpuCost(form, adaptiveOn, 2);
         MarkGpuCost(form, adaptiveMap, 1);
@@ -2663,7 +2791,7 @@ namespace Vpv
                     widget->setToolTip(widget->property("contentGateTooltip").toString());
                 }
         for (const char* name : { "motion_preset_refresh", "picture_preset_refresh",
-                "adaptive_faithful_refresh", "optical_flow_refresh", "interpolation_refresh",
+                "adaptive_faithful_refresh", "adaptive_motion_refresh", "optical_flow_refresh", "interpolation_refresh",
                 "temporal_dither_refresh", "intent_content_refresh", "detail_restore_refresh",
                 "intent_adaptive_refresh", "greyed_state_refresh" })
             if (auto* refresh = findProfileAction(controlName(sectionPrefix, QString::fromLatin1(name))))

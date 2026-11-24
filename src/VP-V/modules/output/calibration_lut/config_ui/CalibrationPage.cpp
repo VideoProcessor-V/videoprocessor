@@ -20,6 +20,7 @@
 #include <QDoubleSpinBox>
 #include <QFileDialog>
 #include <QFormLayout>
+#include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
@@ -29,8 +30,11 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QSpinBox>
+#include <QTabBar>
+#include <QTabWidget>
 #include <QThread>
 #include <QTimer>
+#include <QToolButton>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -140,7 +144,30 @@ QWidget* CalibrationPage::Build(State& st)
     auto bindCheckField = [k](const QString& label, const QString& s, const QString& key, bool defaultValue = false)
     { return k->bindCheckField(label, s, key, defaultValue); };
     const QString section = QStringLiteral("calibration");
-    QWidget* cards = k->createCardGrid();
+    auto* pages = new QTabWidget;
+    pages->setObjectName(QStringLiteral("calibration.pages"));
+    pages->setDocumentMode(true);
+    pages->setUsesScrollButtons(true);
+    pages->tabBar()->setExpanding(false);
+    pages->setProperty("vpvSection", true);
+    pages->setProperty("vpvSubTabs", true);
+
+    auto* setupPage = new QWidget;
+    setupPage->setObjectName(QStringLiteral("calibration.setup"));
+    auto* setupLayout = new QVBoxLayout(setupPage);
+    setupLayout->setContentsMargins(0, 8, 0, 0);
+    setupLayout->setSpacing(12);
+
+    auto* advancedPage = new QWidget;
+    advancedPage->setObjectName(QStringLiteral("calibration.advanced"));
+    auto* advancedLayout = new QVBoxLayout(advancedPage);
+    advancedLayout->setContentsMargins(0, 8, 0, 0);
+    advancedLayout->setSpacing(12);
+
+    pages->addTab(setupPage, QStringLiteral("Setup & Wizard"));
+    pages->addTab(advancedPage, QStringLiteral("Advanced"));
+    pages->setTabToolTip(0, QStringLiteral("Meter setup, target plan, and the calibration wizard."));
+    pages->setTabToolTip(1, QStringLiteral("Meter and patch timing, Dynamic Drive / room-light / HDR runs, and developer transcripts."));
 
     auto setValue = [k, section](const QString& key, const QString& text, QObject* edited)
     {
@@ -199,11 +226,13 @@ QWidget* CalibrationPage::Build(State& st)
         return row;
     };
 
-    // ------------------------------------------------------------- meter
-    auto* meter = new QWidget;
-    auto* meterForm = new QFormLayout(meter);
+    // ------------------------------------------------- Tab 0: Setup & Wizard
+    // Card 1: Meter & Display
+    auto* meterDisplay = new QWidget;
+    auto* meterForm = new QFormLayout(meterDisplay);
     meterForm->setContentsMargins(0, 0, 0, 0);
     meterForm->setVerticalSpacing(8);
+    meterForm->setRowWrapPolicy(QFormLayout::WrapLongRows);
     auto* argyll = bindTextField(section, QStringLiteral("argyll_path"));
     argyll->setPlaceholderText(QStringLiteral("Search PATH and the usual install folders"));
     argyll->setToolTip(QStringLiteral(
@@ -239,85 +268,38 @@ QWidget* CalibrationPage::Build(State& st)
         "calibration prompts (spectros), the low-light floor for near-black averaging, CCSS or CCMX corrections."));
     Vpv::MakeComboShrinkable(model);   // FX-CFG14 (ported at the cal landing)
     meterForm->addRow(QStringLiteral("Meter"), model);
-    auto* port = integer(QStringLiteral("meter_port"), 0, 64, 0, QString());
-    port->setSpecialValueText(QStringLiteral("First found"));
-    port->setToolTip(QStringLiteral("spotread's -c number from Detect's list; First found uses the first meter."));
-    meterForm->addRow(QStringLiteral("Meter number"), port);
-    auto* displayType = bindTextField(section, QStringLiteral("display_type"));
-    displayType->setPlaceholderText(QStringLiteral("The meter's default"));
-    displayType->setMaximumWidth(140);
-    displayType->setToolTip(QStringLiteral("spotread's -y display type selector (Detect lists the meter's choices). "
-        "For a colorimeter pick the type closest to your display's light source."));
-    meterForm->addRow(QStringLiteral("Display type"), displayType);
     auto* correction = bindTextField(section, QStringLiteral("spectral_correction"));
     correction->setPlaceholderText(QStringLiteral("None"));
     correction->setToolTip(QStringLiteral("A .ccss spectral sample set (i1Display / Spyder family) or a .ccmx matrix "
         "for your display's light source; strongly advised for laser and LED projectors and wide-gamut screens."));
     meterForm->addRow(QStringLiteral("Spectral correction"),
         browseRow(correction, false, QStringLiteral("Corrections (*.ccss *.ccmx);;All files (*)")));
-    auto* refresh = bindChoiceField(section, QStringLiteral("refresh_mode"),
-        { QStringLiteral("auto"), QStringLiteral("refresh"), QStringLiteral("non_refresh") },
-        { QStringLiteral("Meter decides"), QStringLiteral("Refresh display"), QStringLiteral("Non-refresh display") });
-    refresh->setToolTip(QStringLiteral("Whether the meter synchronises to the display's refresh (spotread -Y r / -Y n). "
-        "Meter decides measures it."));
-    meterForm->addRow(QStringLiteral("Refresh mode"), refresh);
-    meterForm->addRow(QStringLiteral("Reading time limit"),
-        integer(QStringLiteral("read_timeout_s"), 5, 600, 60, QStringLiteral("s")));
-    k->addCard(cards, createCard(QStringLiteral("Meter"), QStringLiteral(
-        "ArgyllCMS's spotread drives the meter; install ArgyllCMS yourself from argyllcms.com."), meter));
-
-    // ----------------------------------------------------- display / patches
-    auto* display = new QWidget;
-    auto* displayForm = new QFormLayout(display);
-    displayForm->setContentsMargins(0, 0, 0, 0);
-    displayForm->setVerticalSpacing(8);
     auto* kind = bindChoiceField(section, QStringLiteral("display_kind"),
         { QStringLiteral("projector"), QStringLiteral("lcd"), QStringLiteral("oled"), QStringLiteral("other") },
         { QStringLiteral("Projector"), QStringLiteral("LCD TV / monitor"), QStringLiteral("OLED TV / monitor"),
             QStringLiteral("Other") });
     kind->setToolTip(QStringLiteral("Sets the patch window and settle time when those are left at automatic: "
         "projectors full field, LCD 18% window, OLED 10% window (keeps ABL out of the measurement)."));
-    displayForm->addRow(QStringLiteral("Display"), kind);
+    Vpv::MakeComboShrinkable(kind);
+    meterForm->addRow(QStringLiteral("Display"), kind);
     auto* name = bindTextField(section, QStringLiteral("display_name"));
     name->setPlaceholderText(QStringLiteral("The output monitor's name"));
-    displayForm->addRow(QStringLiteral("Display name"), name);
-    auto* window = number(QStringLiteral("patch_window_percent"), 0.0, 100.0, 0.0, 1, QStringLiteral("% of the screen"));
-    window->setSpecialValueText(QStringLiteral("Automatic"));
-    displayForm->addRow(QStringLiteral("Patch window"), window);
-    displayForm->addRow(QStringLiteral("Window surround"),
-        number(QStringLiteral("background_percent"), 0.0, 100.0, 0.0, 1, QStringLiteral("% grey")));
-    auto* settle = integer(QStringLiteral("settle_ms"), 0, 30000, 0, QStringLiteral("ms"));
-    settle->setSpecialValueText(QStringLiteral("Automatic"));
-    settle->setToolTip(QStringLiteral("The wait after each patch change before reading. Automatic: 0.5 s for "
-        "projectors, 0.8 s OLED, 1 s LCD, plus more after a large drop to dark."));
-    displayForm->addRow(QStringLiteral("Settle time"), settle);
-    auto* reads = integer(QStringLiteral("near_black_max_reads"), 1, 16, 4, QStringLiteral("readings"));
-    reads->setToolTip(QStringLiteral("Near black a colorimeter's count is noisy: VP averages up to this many readings "
-        "(stopping early when two agree) and marks patches below the meter's floor."));
-    displayForm->addRow(QStringLiteral("Near-black readings"), reads);
-    displayForm->addRow(QStringLiteral("Agreement"),
-        number(QStringLiteral("repeat_tolerance_percent"), 0.1, 20.0, 1.0, 1, QStringLiteral("%")));
-    auto* warm = integer(QStringLiteral("warmup_minutes"), 0, 180, 30, QStringLiteral("min"));
-    warm->setToolTip(QStringLiteral("Displays drift as they warm up; the wizard can skip it when the display has "
-        "been on long enough."));
-    displayForm->addRow(QStringLiteral("Warm-up"), warm);
-    auto* drift = integer(QStringLiteral("drift_interval"), 0, 1000, 50, QStringLiteral("patches"));
-    drift->setToolTip(QStringLiteral("White is measured again every this many patches; VP corrects slow drift."));
-    displayForm->addRow(QStringLiteral("Drift check every"), drift);
-    k->addCard(cards, createCard(QStringLiteral("Display and patches"), QStringLiteral(
-        "Patches are exact codes in VP's active output (BTB / WTW included); the sigma-delta and dither are "
-        "bypassed for the patch only."), display));
+    meterForm->addRow(QStringLiteral("Display name"), name);
+    setupLayout->addWidget(createCard(QStringLiteral("Meter & Display"), QStringLiteral(
+        "ArgyllCMS's spotread drives the meter; install ArgyllCMS yourself from argyllcms.com."), meterDisplay));
 
-    // ------------------------------------------------------------ target
+    // Card 2: Target & Plan
     auto* target = new QWidget;
     auto* targetForm = new QFormLayout(target);
     targetForm->setContentsMargins(0, 0, 0, 0);
     targetForm->setVerticalSpacing(8);
+    targetForm->setRowWrapPolicy(QFormLayout::WrapLongRows);
     auto* plan = bindChoiceField(section, QStringLiteral("plan"),
         { QStringLiteral("quick"), QStringLiteral("cube5"), QStringLiteral("standard"), QStringLiteral("cube13"),
             QStringLiteral("thorough") },
         { QStringLiteral("Quick (greyscale + colours)"), QStringLiteral("5³ cube"), QStringLiteral("Standard (9³ cube)"),
             QStringLiteral("13³ cube"), QStringLiteral("Thorough (17³ cube)") });
+    Vpv::MakeComboShrinkable(plan);
     targetForm->addRow(QStringLiteral("Measurements"), plan);
     auto* estimate = helpLabel(QString());
     estimate->setObjectName(QStringLiteral("calibration.plan_estimate"));
@@ -334,74 +316,25 @@ QWidget* CalibrationPage::Build(State& st)
     };
     QObject::connect(plan, qOverload<int>(&QComboBox::currentIndexChanged), plan, [showEstimate](int) { showEstimate(); });
     showEstimate();
-    targetForm->addRow(QStringLiteral("Target response"), bindChoiceField(section, QStringLiteral("target_transfer"),
+    auto* targetTransfer = bindChoiceField(section, QStringLiteral("target_transfer"),
         { QStringLiteral("bt1886"), QStringLiteral("gamma") },
-        { QStringLiteral("BT.1886 (with the measured black)"), QStringLiteral("Pure gamma") }));
+        { QStringLiteral("BT.1886 (with the measured black)"), QStringLiteral("Pure gamma") });
+    Vpv::MakeComboShrinkable(targetTransfer);
+    targetForm->addRow(QStringLiteral("Target response"), targetTransfer);
     targetForm->addRow(QStringLiteral("Gamma"), number(QStringLiteral("target_gamma"), 1.6, 3.0, 2.4, 2, QString()));
-    targetForm->addRow(QStringLiteral("White level"),
-        number(QStringLiteral("target_white_percent"), 25.0, 100.0, 100.0, 0, QStringLiteral("% of the brightest D65 white")));
-    targetForm->addRow(QStringLiteral("LUT size"), bindChoiceField(section, QStringLiteral("lut_size"),
+    auto* lutSize = bindChoiceField(section, QStringLiteral("lut_size"),
         { QStringLiteral("17"), QStringLiteral("33"), QStringLiteral("65") },
-        { QStringLiteral("17³"), QStringLiteral("33³ (recommended)"), QStringLiteral("65³") }));
+        { QStringLiteral("17³"), QStringLiteral("33³ (recommended)"), QStringLiteral("65³") });
+    Vpv::MakeComboShrinkable(lutSize);
+    targetForm->addRow(QStringLiteral("LUT size"), lutSize);
     auto* verify = bindCheckField(QStringLiteral("Verify through the new LUT (about 60 patches)"), section,
         QStringLiteral("verify_after"), true);
     targetForm->addRow(QString(), verify);
-    k->addCard(cards, createCard(QStringLiteral("Target and LUT"), QStringLiteral(
+    setupLayout->addWidget(createCard(QStringLiteral("Target & Plan"), QStringLiteral(
         "One run writes the BT.709, P3-D65 and BT.2020 LUTs; Apply attaches them to the live Color / Output profile."),
         target));
 
-    // ------------------------------------------- phase 2: the other runs
-    auto* runs = new QWidget;
-    auto* runsForm = new QFormLayout(runs);
-    runsForm->setContentsMargins(0, 0, 0, 0);
-    runsForm->setVerticalSpacing(8);
-    auto* fluxStep = integer(QStringLiteral("led_flux_step"), 1, 50, 5, QStringLiteral("LPW1 steps"));
-    fluxStep->setToolTip(QStringLiteral("Dynamic Drive run: the flux sweep's LPW1 step, from full light down to the "
-        "lowest level VP drives and back up (both directions show the hysteresis)."));
-    runsForm->addRow(QStringLiteral("Flux sweep step"), fluxStep);
-    auto* dwell = integer(QStringLiteral("led_dwell_ms"), 500, 20000, 3000, QStringLiteral("ms"));
-    dwell->setToolTip(QStringLiteral("Wait after each LPW1 change before the meter reads (the LED settling plus margin)."));
-    runsForm->addRow(QStringLiteral("LED dwell"), dwell);
-    runsForm->addRow(QStringLiteral("Readings per level"),
-        integer(QStringLiteral("led_reads_per_level"), 1, 8, 2, QStringLiteral("readings")));
-    auto* cntrMax = integer(QStringLiteral("led_cntr_sweep_max"), 50, 100, 74, QString());
-    cntrMax->setToolTip(QStringLiteral("The highest CNTR the run sets (from 50 up). Find where code 235 stops gaining "
-        "(dmd_clip_cntr) and where light stops rising (cntr_max_usable). CNTR goes back to 50 at the end or on Cancel."));
-    runsForm->addRow(QStringLiteral("CNTR sweep up to"), cntrMax);
-    runsForm->addRow(QStringLiteral("CNTR dwell"),
-        integer(QStringLiteral("led_cntr_dwell_ms"), 200, 20000, 1500, QStringLiteral("ms")));
-    auto* sensorPort = bindTextField(section, QStringLiteral("led_sensor_port"));
-    sensorPort->setPlaceholderText(QStringLiteral("None (latency not measured)"));
-    sensorPort->setMaximumWidth(160);
-    sensorPort->setToolTip(QStringLiteral("A fast light sensor (photodiode or VEML7700 in a fast mode on a "
-        "microcontroller, one reading per line: value, or device microseconds and value) on its own COM port. A "
-        "colorimeter is too slow for the LED's response time; without this sensor latency and settle are not measured."));
-    runsForm->addRow(QStringLiteral("Fast light sensor port"), sensorPort);
-    runsForm->addRow(QStringLiteral("Fast sensor speed"),
-        integer(QStringLiteral("led_sensor_baud"), 1200, 2000000, 115200, QStringLiteral("baud")));
-    runsForm->addRow(QStringLiteral("Steps per direction"),
-        integer(QStringLiteral("led_step_repeats"), 1, 10, 3, QString()));
-    auto* hdrCurve = bindChoiceField(section, QStringLiteral("hdr_verify_tone_curve"),
-        { QStringLiteral("vp"), QStringLiteral("bt2390"), QStringLiteral("none") },
-        { QStringLiteral("VP's own tone mapping"), QStringLiteral("BT.2390 model"), QStringLiteral("None (PQ as sent)") });
-    hdrCurve->setToolTip(QStringLiteral("HDR verify: the target for each PQ patch. VP's own = the tone curve VP uses for "
-        "the playing HDR source (falls back to BT.2390 before the first HDR frame)."));
-    runsForm->addRow(QStringLiteral("HDR verify target"), hdrCurve);
-    runsForm->addRow(QStringLiteral("HDR source peak (model)"),
-        number(QStringLiteral("hdr_verify_source_peak"), 100.0, 10000.0, 1000.0, 0, QStringLiteral("cd/m²")));
-    auto* record = bindCheckField(QStringLiteral("Record real meter transcripts (test-data format)"), section,
-        QStringLiteral("record_transcripts"), false);
-    record->setToolTip(QStringLiteral("Saves every spotread session as a script for VP's tests "
-        "(recorded_<meter>_<time>.txt): commit one to src\\VideoProcessor-Test\\data\\spotread."));
-    runsForm->addRow(QString(), record);
-    auto* transcripts = bindTextField(section, QStringLiteral("transcript_folder"));
-    transcripts->setPlaceholderText(QStringLiteral("luts\\calibration\\transcripts"));
-    runsForm->addRow(QStringLiteral("Transcript folder"), browseRow(transcripts, true, QString()));
-    k->addCard(cards, createCard(QStringLiteral("Dynamic Drive, room light and HDR runs"), QStringLiteral(
-        "Choose the run in Calibrate. The Dynamic Drive run steps the projector's LED and CNTR within its ranges and "
-        "always restores full light and CNTR 50."), runs));
-
-    // ------------------------------------------------------------ wizard
+    // Card 3: Calibrate (wizard)
     auto* wizard = new QWidget;
     auto* wizardLayout = new QVBoxLayout(wizard);
     wizardLayout->setContentsMargins(0, 0, 0, 0);
@@ -505,9 +438,158 @@ QWidget* CalibrationPage::Build(State& st)
         for (QPushButton* button : buttons->findChildren<QPushButton*>()) button->setEnabled(false);
         detect->setEnabled(false);
     }
-    k->addCard(cards, createCard(QStringLiteral("Calibrate"), QStringLiteral(
+    setupLayout->addWidget(createCard(QStringLiteral("Calibrate"), QStringLiteral(
         "Cancel at any step returns the display to video; nothing changes until you Apply, and Apply backs up the "
         "configuration first."), wizard));
+    setupLayout->addStretch();
+
+    // ------------------------------------------------------- Tab 1: Advanced
+    // Card 1: Meter & Patch Timing
+    auto* timing = new QWidget;
+    auto* timingForm = new QFormLayout(timing);
+    timingForm->setContentsMargins(0, 0, 0, 0);
+    timingForm->setVerticalSpacing(8);
+    timingForm->setRowWrapPolicy(QFormLayout::WrapLongRows);
+    auto* port = integer(QStringLiteral("meter_port"), 0, 64, 0, QString());
+    port->setSpecialValueText(QStringLiteral("First found"));
+    port->setToolTip(QStringLiteral("spotread's -c number from Detect's list; First found uses the first meter."));
+    timingForm->addRow(QStringLiteral("Meter number"), port);
+    auto* displayType = bindTextField(section, QStringLiteral("display_type"));
+    displayType->setPlaceholderText(QStringLiteral("The meter's default"));
+    displayType->setMaximumWidth(140);
+    displayType->setToolTip(QStringLiteral("spotread's -y display type selector (Detect lists the meter's choices). "
+        "For a colorimeter pick the type closest to your display's light source."));
+    timingForm->addRow(QStringLiteral("Display type"), displayType);
+    auto* refresh = bindChoiceField(section, QStringLiteral("refresh_mode"),
+        { QStringLiteral("auto"), QStringLiteral("refresh"), QStringLiteral("non_refresh") },
+        { QStringLiteral("Meter decides"), QStringLiteral("Refresh display"), QStringLiteral("Non-refresh display") });
+    refresh->setToolTip(QStringLiteral("Whether the meter synchronises to the display's refresh (spotread -Y r / -Y n). "
+        "Meter decides measures it."));
+    Vpv::MakeComboShrinkable(refresh);
+    timingForm->addRow(QStringLiteral("Refresh mode"), refresh);
+    timingForm->addRow(QStringLiteral("Reading time limit"),
+        integer(QStringLiteral("read_timeout_s"), 5, 600, 60, QStringLiteral("s")));
+    auto* window = number(QStringLiteral("patch_window_percent"), 0.0, 100.0, 0.0, 1, QStringLiteral("% of the screen"));
+    window->setSpecialValueText(QStringLiteral("Automatic"));
+    timingForm->addRow(QStringLiteral("Patch window"), window);
+    timingForm->addRow(QStringLiteral("Window surround"),
+        number(QStringLiteral("background_percent"), 0.0, 100.0, 0.0, 1, QStringLiteral("% grey")));
+    auto* settle = integer(QStringLiteral("settle_ms"), 0, 30000, 0, QStringLiteral("ms"));
+    settle->setSpecialValueText(QStringLiteral("Automatic"));
+    settle->setToolTip(QStringLiteral("The wait after each patch change before reading. Automatic: 0.5 s for "
+        "projectors, 0.8 s OLED, 1 s LCD, plus more after a large drop to dark."));
+    timingForm->addRow(QStringLiteral("Settle time"), settle);
+    auto* reads = integer(QStringLiteral("near_black_max_reads"), 1, 16, 4, QStringLiteral("readings"));
+    reads->setToolTip(QStringLiteral("Near black a colorimeter's count is noisy: VP averages up to this many readings "
+        "(stopping early when two agree) and marks patches below the meter's floor."));
+    timingForm->addRow(QStringLiteral("Near-black readings"), reads);
+    timingForm->addRow(QStringLiteral("Agreement"),
+        number(QStringLiteral("repeat_tolerance_percent"), 0.1, 20.0, 1.0, 1, QStringLiteral("%")));
+    auto* warm = integer(QStringLiteral("warmup_minutes"), 0, 180, 30, QStringLiteral("min"));
+    warm->setToolTip(QStringLiteral("Displays drift as they warm up; the wizard can skip it when the display has "
+        "been on long enough."));
+    timingForm->addRow(QStringLiteral("Warm-up"), warm);
+    auto* drift = integer(QStringLiteral("drift_interval"), 0, 1000, 50, QStringLiteral("patches"));
+    drift->setToolTip(QStringLiteral("White is measured again every this many patches; VP corrects slow drift."));
+    timingForm->addRow(QStringLiteral("Drift check every"), drift);
+    timingForm->addRow(QStringLiteral("White level"),
+        number(QStringLiteral("target_white_percent"), 25.0, 100.0, 100.0, 0, QStringLiteral("% of the brightest D65 white")));
+    advancedLayout->addWidget(createCard(QStringLiteral("Meter & Patch Timing"), QStringLiteral(
+        "Patches are exact codes in VP's active output (BTB / WTW included); the sigma-delta and dither are "
+        "bypassed for the patch only."), timing));
+
+    // Card 2: Dynamic Drive, Room Light & HDR Runs
+    auto* runs = new QWidget;
+    auto* runsForm = new QFormLayout(runs);
+    runsForm->setContentsMargins(0, 0, 0, 0);
+    runsForm->setVerticalSpacing(8);
+    runsForm->setRowWrapPolicy(QFormLayout::WrapLongRows);
+    auto* fluxStep = integer(QStringLiteral("led_flux_step"), 1, 50, 5, QStringLiteral("LPW1 steps"));
+    fluxStep->setToolTip(QStringLiteral("Dynamic Drive run: the flux sweep's LPW1 step, from full light down to the "
+        "lowest level VP drives and back up (both directions show the hysteresis)."));
+    runsForm->addRow(QStringLiteral("Flux sweep step"), fluxStep);
+    auto* dwell = integer(QStringLiteral("led_dwell_ms"), 500, 20000, 3000, QStringLiteral("ms"));
+    dwell->setToolTip(QStringLiteral("Wait after each LPW1 change before the meter reads (the LED settling plus margin)."));
+    runsForm->addRow(QStringLiteral("LED dwell"), dwell);
+    runsForm->addRow(QStringLiteral("Readings per level"),
+        integer(QStringLiteral("led_reads_per_level"), 1, 8, 2, QStringLiteral("readings")));
+    auto* cntrMax = integer(QStringLiteral("led_cntr_sweep_max"), 50, 100, 74, QString());
+    cntrMax->setToolTip(QStringLiteral("The highest CNTR the run sets (from 50 up). Find where code 235 stops gaining "
+        "(dmd_clip_cntr) and where light stops rising (cntr_max_usable). CNTR goes back to 50 at the end or on Cancel."));
+    runsForm->addRow(QStringLiteral("CNTR sweep up to"), cntrMax);
+    runsForm->addRow(QStringLiteral("CNTR dwell"),
+        integer(QStringLiteral("led_cntr_dwell_ms"), 200, 20000, 1500, QStringLiteral("ms")));
+    auto* sensorPort = bindTextField(section, QStringLiteral("led_sensor_port"));
+    sensorPort->setPlaceholderText(QStringLiteral("None (latency not measured)"));
+    sensorPort->setMaximumWidth(160);
+    sensorPort->setToolTip(QStringLiteral("A fast light sensor (photodiode or VEML7700 in a fast mode on a "
+        "microcontroller, one reading per line: value, or device microseconds and value) on its own COM port. A "
+        "colorimeter is too slow for the LED's response time; without this sensor latency and settle are not measured."));
+    runsForm->addRow(QStringLiteral("Fast light sensor port"), sensorPort);
+    runsForm->addRow(QStringLiteral("Fast sensor speed"),
+        integer(QStringLiteral("led_sensor_baud"), 1200, 2000000, 115200, QStringLiteral("baud")));
+    runsForm->addRow(QStringLiteral("Steps per direction"),
+        integer(QStringLiteral("led_step_repeats"), 1, 10, 3, QString()));
+    auto* hdrCurve = bindChoiceField(section, QStringLiteral("hdr_verify_tone_curve"),
+        { QStringLiteral("vp"), QStringLiteral("bt2390"), QStringLiteral("none") },
+        { QStringLiteral("VP's own tone mapping"), QStringLiteral("BT.2390 model"), QStringLiteral("None (PQ as sent)") });
+    hdrCurve->setToolTip(QStringLiteral("HDR verify: the target for each PQ patch. VP's own = the tone curve VP uses for "
+        "the playing HDR source (falls back to BT.2390 before the first HDR frame)."));
+    Vpv::MakeComboShrinkable(hdrCurve);
+    runsForm->addRow(QStringLiteral("HDR verify target"), hdrCurve);
+    runsForm->addRow(QStringLiteral("HDR source peak (model)"),
+        number(QStringLiteral("hdr_verify_source_peak"), 100.0, 10000.0, 1000.0, 0, QStringLiteral("cd/m²")));
+    advancedLayout->addWidget(createCard(QStringLiteral("Dynamic Drive, Room Light & HDR Runs"), QStringLiteral(
+        "Choose the run in Calibrate. The Dynamic Drive run steps the projector's LED and CNTR within its ranges and "
+        "always restores full light and CNTR 50."), runs));
+
+    // Card 3: Developer Transcripts (collapsible, collapsed by default)
+    auto* transcriptsCard = new QFrame;
+    transcriptsCard->setObjectName(QStringLiteral("calibration.card.transcripts"));
+    transcriptsCard->setProperty("card", true);
+    auto* transcriptsOuter = new QVBoxLayout(transcriptsCard);
+    transcriptsOuter->setContentsMargins(10, 8, 10, 10);
+    transcriptsOuter->setSpacing(6);
+    auto* transcriptsToggle = new QToolButton;
+    transcriptsToggle->setObjectName(QStringLiteral("calibration.card.transcripts.toggle"));
+    transcriptsToggle->setText(QStringLiteral("Developer Transcripts"));
+    transcriptsToggle->setProperty("profileSection", true);
+    transcriptsToggle->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    transcriptsToggle->setArrowType(Qt::RightArrow);
+    transcriptsToggle->setCheckable(true);
+    transcriptsToggle->setChecked(false);
+    transcriptsToggle->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    transcriptsToggle->setAccessibleDescription(QStringLiteral("Expand or collapse Developer Transcripts."));
+    transcriptsOuter->addWidget(transcriptsToggle);
+    auto* transcriptsBody = new QWidget(transcriptsCard);
+    transcriptsBody->setObjectName(QStringLiteral("calibration.card.transcripts.body"));
+    auto* transcriptsLayout = new QVBoxLayout(transcriptsBody);
+    transcriptsLayout->setContentsMargins(8, 0, 0, 0);
+    transcriptsLayout->setSpacing(8);
+    transcriptsLayout->addWidget(helpLabel(QStringLiteral(
+        "Optional test-fixture capture of raw spotread sessions. Normal calibration does not need this.")));
+    auto* transcriptsForm = new QFormLayout;
+    transcriptsForm->setContentsMargins(0, 0, 0, 0);
+    transcriptsForm->setVerticalSpacing(8);
+    transcriptsForm->setRowWrapPolicy(QFormLayout::WrapLongRows);
+    auto* record = bindCheckField(QStringLiteral("Record real meter transcripts (test-data format)"), section,
+        QStringLiteral("record_transcripts"), false);
+    record->setToolTip(QStringLiteral("Saves every spotread session as a script for VP's tests "
+        "(recorded_<meter>_<time>.txt): commit one to src\\VideoProcessor-Test\\data\\spotread."));
+    transcriptsForm->addRow(QString(), record);
+    auto* transcripts = bindTextField(section, QStringLiteral("transcript_folder"));
+    transcripts->setPlaceholderText(QStringLiteral("luts\\calibration\\transcripts"));
+    transcriptsForm->addRow(QStringLiteral("Transcript folder"), browseRow(transcripts, true, QString()));
+    transcriptsLayout->addLayout(transcriptsForm);
+    transcriptsOuter->addWidget(transcriptsBody);
+    transcriptsBody->setVisible(false);
+    QObject::connect(transcriptsToggle, &QToolButton::toggled, transcriptsToggle, [transcriptsToggle, transcriptsBody](bool open)
+    {
+        transcriptsBody->setVisible(open);
+        transcriptsToggle->setArrowType(open ? Qt::DownArrow : Qt::RightArrow);
+    });
+    advancedLayout->addWidget(transcriptsCard);
+    advancedLayout->addStretch();
 
     if (!st.timer)
     {
@@ -527,7 +609,7 @@ QWidget* CalibrationPage::Build(State& st)
     }
     QWidget* page = k->createPage(QStringLiteral("Calibration"),
         QStringLiteral("Automatic display calibration with a meter: VP measures its own patches and writes 3D LUTs."),
-        cards);
+        pages);
     st.page = page;
     return page;
 }

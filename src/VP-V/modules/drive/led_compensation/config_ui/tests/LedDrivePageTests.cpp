@@ -18,9 +18,11 @@
 #include <QDoubleSpinBox>
 #include <QFile>
 #include <QLabel>
+#include <QLineEdit>
 #include <QPushButton>
 #include <QSpinBox>
 #include <QStackedWidget>
+#include <QTabWidget>
 #include <QTemporaryDir>
 #include <QThread>
 #include <QToolButton>
@@ -67,18 +69,30 @@ namespace
 		const int vpv = window.pageIndex(QStringLiteral("VP-V"));
 		require(drive >= 0 && calibration == drive + 1 && vpv == calibration + 1,
 			"the stack order is not Dynamic Drive, Calibration, VP-V");
-		// Owner 2026-11-07: a left-hand entry under the VP-V group as well as the Drive unit's button.
+		// Owner 2026-11-07 + Unit 2 (Phase 1): Dynamic Drive has a left-hand entry under the VP-V group and its
+		// launch button sits on VP-V > Overview (redundant vpv.drive stub tab removed); black_protection (intent_black)
+		// lives directly on Dynamic Drive > Advanced.
 		QPushButton* leaf = nullptr;
 		for (QPushButton* button : window.findChildren<QPushButton*>())
 			if (button->property("nav").toBool() && button->property("pageName").toString() == QStringLiteral("Dynamic Drive")) leaf = button;
 		require(leaf != nullptr && leaf->property("vpvChild").toBool() && leaf->property("vpvParent").toString() == QStringLiteral("VP-V"),
 			"Dynamic Drive has no navigation child under the VP-V group");
+		require(window.findChild<QWidget*>(QStringLiteral("vpv.drive")) == nullptr,
+			"redundant VP-V > Dynamic Drive stub tab (vpv.drive) should be removed");
+		auto* overview = window.findChild<QWidget*>(QStringLiteral("vpv.overview"));
 		auto* open = window.findChild<QPushButton*>(QStringLiteral("vpv.drive.subpage.Dynamic Drive"));
-		require(open != nullptr, "the Drive unit of the VP-V page has no button for the Dynamic Drive page");
+		require(overview != nullptr && open != nullptr && overview->isAncestorOf(open),
+			"the Dynamic Drive launch button (vpv.drive.subpage.Dynamic Drive) must live on VP-V > Overview");
+		auto* driveAdv = window.findChild<QWidget*>(QStringLiteral("vpv.drivepage.advanced"));
+		auto* blackProt = window.findChild<QWidget*>(QStringLiteral("vpv.drive.card.black_protection.body"));
+		auto* intentBlack = window.findChild<QWidget*>(QStringLiteral("config.vprenderer.intent_black"));
+		require(driveAdv != nullptr && blackProt != nullptr && intentBlack != nullptr &&
+			driveAdv->isAncestorOf(blackProt) && blackProt->isAncestorOf(intentBlack),
+			"black_protection card (intent_black) must live inside Dynamic Drive > Advanced");
 		window.selectPage(QStringLiteral("General"));
 		open->click();
 		QCoreApplication::processEvents();
-		require(pages->currentIndex() == drive, "the Drive unit's button opened another page");
+		require(pages->currentIndex() == drive, "the Overview launch button opened another page");
 		require(leaf->isChecked(), "opening the page from the button did not light its navigation child");
 		window.selectPage(QStringLiteral("General"));
 		leaf->click();
@@ -273,6 +287,128 @@ namespace
 		require(gammaBoost != nullptr && gammaBoost->isEnabled(),
 			"GEM-050: gamma_boost remains enabled when Dynamic Drive is off");
 	}
+
+	// UTF-8 hygiene: LED drive profile_file and advanced table fields must persist UTF-8 bytes
+	// intact without CP1252/toLocal8Bit() corruption.
+	void testLedDriveSavesUtf8WithoutLocal8BitCorruption()
+	{
+		Vpv::RegisterConfigProviders();
+		QTemporaryDir dir;
+		const QString path = writeFixture(dir);
+		const QString utf8ProfilePath = QString::fromUtf8("C:/profiles/Caf\xC3\xA9_\xE6\x97\xA5\xE6\x9C\xAC.cfg");
+		const QString customCurve = QStringLiteral("0:95, 50:180, 100:255");
+		{
+			ConfigEditorWindow window(path, 0, true);
+			auto* profileField = window.findChild<QLineEdit*>(QStringLiteral("config.led_drive.default.profile_file"));
+			require(profileField != nullptr, "UTF-8 test: missing config.led_drive.default.profile_file");
+			profileField->setText(utf8ProfilePath);
+
+			auto* curveField = window.findChild<QLineEdit*>(QStringLiteral("config.led_drive.default.curve"));
+			require(curveField != nullptr, "UTF-8 test: missing config.led_drive.default.curve");
+			curveField->setText(customCurve);
+			QMetaObject::invokeMethod(curveField, "textEdited", Qt::DirectConnection, Q_ARG(QString, customCurve));
+
+			QCoreApplication::processEvents();
+			g_save(window);
+		}
+		QFile rawFile(path);
+		require(rawFile.open(QIODevice::ReadOnly), "UTF-8 test: cannot read saved config bytes");
+		const QByteArray rawBytes = rawFile.readAll();
+		const QByteArray expectedUtf8Bytes = QByteArray("profile_file: ") + utf8ProfilePath.toUtf8();
+		require(rawBytes.contains(expectedUtf8Bytes),
+			"UTF-8 test: saved file bytes corrupted non-ASCII profile_file path (toLocal8Bit regression)");
+		const QString decoded = QString::fromUtf8(rawBytes);
+		require(decoded.contains(QStringLiteral("profile_file: ") + utf8ProfilePath),
+			"UTF-8 test: UTF-8 decoded saved config did not preserve profile_file path");
+		require(decoded.contains(QStringLiteral("curve: ") + customCurve),
+			"UTF-8 test: saved config did not preserve advanced curve edit");
+		// Round-trip reload: reopening the editor must show the exact UTF-8 string intact.
+		{
+			ConfigEditorWindow reopened(path, 0, true);
+			auto* profileField = reopened.findChild<QLineEdit*>(QStringLiteral("config.led_drive.default.profile_file"));
+			require(profileField != nullptr && profileField->text() == utf8ProfilePath,
+				"UTF-8 test: reopened editor did not round-trip non-ASCII UTF-8 profile_file intact");
+		}
+	}
+
+	// Unit 3 (Phase 2) Red-Team adversarial test: all 5 Dynamic Drive Advanced LED groups and the Advanced projector
+	// section start collapsed (!isChecked()), and expanding vpv.drive.group.tables.toggle reveals vpv.drive.group.tables.body
+	// holding the 5 script tables (curve, steps_up_dark, steps_up_bright, steps_down, apl_weights).
+	void testAdvancedScriptTablesAndProjectorStartCollapsed()
+	{
+		Vpv::RegisterConfigProviders();
+		QTemporaryDir dir;
+		ConfigEditorWindow window(writeFixture(dir), 0, true);
+		QCoreApplication::processEvents();
+
+		for (const char* group : { "tables", "highlights", "cuts", "script", "compensate" })
+		{
+			const QString base = QStringLiteral("vpv.drive.group.") + QString::fromLatin1(group);
+			auto* toggle = window.findChild<QToolButton*>(base + QStringLiteral(".toggle"));
+			auto* body = window.findChild<QWidget*>(base + QStringLiteral(".body"));
+			require(toggle != nullptr && toggle->isCheckable() && !toggle->isChecked(),
+				(std::string("Unit 3: Dynamic Drive advanced group toggle missing or not collapsed by default: ") + group).c_str());
+			require(body != nullptr && body->isHidden(),
+				(std::string("Unit 3 negative control: Dynamic Drive advanced group body must start hidden: ") + group).c_str());
+		}
+
+		auto* projToggle = window.findChild<QToolButton*>(QStringLiteral("config.projector.default.advanced_toggle"));
+		require(projToggle != nullptr && projToggle->isCheckable() && !projToggle->isChecked(),
+			"Unit 3: config.projector.default.advanced_toggle must exist and start collapsed (!isChecked())");
+
+		// MED-3: select Dynamic Drive > Advanced so isVisibleTo(&window) tests the projector collapsible body directly
+		// (not an unselected page/tab). Verify collapsed initially, expanded after 1st click, re-collapsed after 2nd click.
+		window.selectPage(QStringLiteral("Dynamic Drive"));
+		auto* drivePages = window.findChild<QTabWidget*>(QStringLiteral("vpv.drivepage.pages"));
+		auto* driveAdv = window.findChild<QWidget*>(QStringLiteral("vpv.drivepage.advanced"));
+		require(drivePages != nullptr && driveAdv != nullptr,
+			"MED-3: Dynamic Drive vpv.drivepage.pages or vpv.drivepage.advanced missing");
+		drivePages->setCurrentWidget(driveAdv);
+		QCoreApplication::processEvents();
+		require(projToggle->isVisibleTo(&window),
+			"MED-3: config.projector.default.advanced_toggle must be visible to window on Dynamic Drive > Advanced");
+
+		auto* projBaud = window.findChild<QWidget*>(QStringLiteral("config.projector.default.baud"));
+		auto* projFlux = window.findChild<QWidget*>(QStringLiteral("config.projector.default.flux_table"));
+		require(projBaud != nullptr && projFlux != nullptr,
+			"MED-3: projector advanced controls (baud, flux_table) missing");
+		require(!projBaud->isVisibleTo(&window) && !projFlux->isVisibleTo(&window),
+			"MED-3 negative control: projector advanced controls (baud, flux_table) must start hidden/collapsed (!isVisibleTo(&window))");
+
+		projToggle->click();
+		QCoreApplication::processEvents();
+		require(projToggle->isChecked() && projBaud->isVisibleTo(&window) && projFlux->isVisibleTo(&window),
+			"MED-3: clicking config.projector.default.advanced_toggle must expand projector advanced controls (isVisibleTo(&window))");
+
+		projToggle->click();
+		QCoreApplication::processEvents();
+		require(!projToggle->isChecked() && !projBaud->isVisibleTo(&window) && !projFlux->isVisibleTo(&window),
+			"MED-3 negative control: clicking config.projector.default.advanced_toggle a second time must re-collapse projector advanced controls");
+
+		auto* tablesCard = window.findChild<QWidget*>(QStringLiteral("vpv.drive.group.tables"));
+		auto* tablesToggle = window.findChild<QToolButton*>(QStringLiteral("vpv.drive.group.tables.toggle"));
+		auto* tablesBody = window.findChild<QWidget*>(QStringLiteral("vpv.drive.group.tables.body"));
+		require(tablesCard != nullptr && tablesToggle != nullptr && tablesBody != nullptr,
+			"Unit 3: vpv.drive.group.tables card, toggle, or body missing");
+
+		tablesToggle->click();
+		QCoreApplication::processEvents();
+		require(tablesToggle->isChecked() && !tablesBody->isHidden() && tablesBody->isVisibleTo(tablesCard),
+			"Unit 3: clicking vpv.drive.group.tables.toggle must expand vpv.drive.group.tables.body");
+
+		for (const char* key : { "curve", "steps_up_dark", "steps_up_bright", "steps_down", "apl_weights" })
+		{
+			auto* field = window.findChild<QWidget*>(QStringLiteral("config.led_drive.default.") + QString::fromLatin1(key));
+			require(field != nullptr && tablesBody->isAncestorOf(field),
+				(std::string("Unit 3: script table control missing from vpv.drive.group.tables.body: ") + key).c_str());
+		}
+
+		// Negative control: clicking toggle a second time collapses the body again.
+		tablesToggle->click();
+		QCoreApplication::processEvents();
+		require(!tablesToggle->isChecked() && tablesBody->isHidden(),
+			"Unit 3 negative control: clicking vpv.drive.group.tables.toggle again must re-collapse the body");
+	}
 }
 
 int RunLedDrivePageTests(const std::function<int(const char*, const std::function<void()>&)>& run,
@@ -290,5 +426,7 @@ int RunLedDrivePageTests(const std::function<int(const char*, const std::functio
 	failures += run("LedDrivePageTests: an RS-232 test survives a rebuild and is joined on close", testRs232TestSurvivesARebuildAndIsJoinedOnClose);
 	failures += run("LedDrivePageTests: state goes with the editor", testStateGoesWithTheEditor);
 	failures += run("LedDrivePageTests: Dynamic Drive off greys visible drive controls except gamma_boost", testOnOffGreysVisibleDriveControlsExceptGammaBoost);
+	failures += run("LedDrivePageTests: saves UTF-8 profile_file without toLocal8Bit corruption", testLedDriveSavesUtf8WithoutLocal8BitCorruption);
+	failures += run("LedDrivePageTests: Unit 3 advanced script tables and projector start collapsed", testAdvancedScriptTablesAndProjectorStartCollapsed);
 	return failures;
 }

@@ -44,6 +44,7 @@ void ConfigEditorWindow::migrateRefreshKeys()
     {
         dirty_ = true;
         hasPendingMigrations_ = true;
+        document_->requiresMigrationBackup = document_->existedAtLoad;
     }
 }
 
@@ -75,7 +76,7 @@ void ConfigEditorWindow::migrateLegacyQueueOwnership()
         if (legacy.isEmpty()) return;
         if (value(baseline, newKey).isEmpty())
             document_->SetKnown(baseline.toStdString(),
-                newKey.toStdString().c_str(), legacy.toLocal8Bit().constData());
+                newKey.toStdString().c_str(), legacy.toUtf8().constData());
         document_->RemoveKnown(oldSection.toStdString(),
             oldKey.toStdString().c_str());
         migrated = true;
@@ -101,7 +102,7 @@ void ConfigEditorWindow::migrateLegacyQueueOwnership()
         if (legacy.isEmpty()) continue;
         if (value(queueSection, QStringLiteral("target_frames")).isEmpty())
             document_->SetKnown(queueSection.toStdString(), "target_frames",
-                legacy.toLocal8Bit().constData());
+                legacy.toUtf8().constData());
         document_->RemoveKnown(queueSection.toStdString(),
             "steady_reserve_frames");
         migrated = true;
