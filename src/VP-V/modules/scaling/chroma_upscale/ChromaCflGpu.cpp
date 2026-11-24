@@ -373,7 +373,7 @@ if (p.x < CFL_W && p.y < CFL_H) {
 				++m_failures;
 				return false;
 			};
-			if (!gpu || !dispatch || source.num_planes < 2) return fail("a luma plane and chroma plane(s) are needed");
+			if (!gpu || !dispatch || source.num_planes < 2 || source.num_planes > PL_MAX_PLANES) return fail("a luma plane and chroma plane(s) are needed");
 			if (!pl_color_system_is_ycbcr_like(source.repr.sys)) return fail("the frame is not YCbCr");
 			const pl_plane& lp = source.planes[0];
 			const pl_tex luma = lp.texture;
@@ -406,6 +406,7 @@ if (p.x < CFL_W && p.y < CFL_H) {
 			if (cw == W && ch == H)
 			{
 				m_status = "4:4:4: nothing to upsample";
+				m_grainStatus = GrainSplit::GrainStatus::Ring;   // not reading the grain: no fallback to show
 				result = source;
 				return true;
 			}
@@ -640,9 +641,8 @@ if (p.x < CFL_W && p.y < CFL_H) {
 					return fail("upsample pass failed");
 			}
 
-			// --- The frame for libplacebo: luma unchanged, full-size CbCr, shifts 0 ---
+			// --- The frame for libplacebo: luma unchanged, full-size CbCr (shifts 0), extra non-Cb/Cr planes preserved ---
 			pl_frame frame = source;
-			frame.num_planes = 2;
 			for (int i = 1; i < PL_MAX_PLANES; ++i) frame.planes[i] = pl_plane{};
 			pl_plane up{};
 			up.texture = m.out;
@@ -654,6 +654,33 @@ if (p.x < CFL_W && p.y < CFL_H) {
 			up.shift_x = 0.0f;
 			up.shift_y = 0.0f;
 			frame.planes[1] = up;
+			int outIdx = 2;
+			for (int i = 1; i < source.num_planes; ++i)
+			{
+				const pl_plane& sp = source.planes[i];
+				bool hasExtra = false;
+				bool hasChromaOrLuma = false;
+				for (int c = 0; c < sp.components && c < 4; ++c)
+				{
+					const int cm = sp.component_mapping[c];
+					if (cm == PL_CHANNEL_CB || cm == PL_CHANNEL_CR || cm == PL_CHANNEL_Y) hasChromaOrLuma = true;
+					else if (cm != PL_CHANNEL_NONE) hasExtra = true;
+				}
+				if (!hasExtra) continue;
+				if (outIdx >= PL_MAX_PLANES) return fail("too many planes to preserve extra channels");
+				pl_plane extra = sp;
+				if (hasChromaOrLuma)
+				{
+					for (int c = 0; c < extra.components && c < 4; ++c)
+					{
+						const int cm = extra.component_mapping[c];
+						if (cm == PL_CHANNEL_CB || cm == PL_CHANNEL_CR || cm == PL_CHANNEL_Y)
+							extra.component_mapping[c] = PL_CHANNEL_NONE;
+					}
+				}
+				frame.planes[outIdx++] = extra;
+			}
+			frame.num_planes = outIdx;
 			result = frame;
 			m_status = !ownSplit ? "ok" : (misfit ? "ok; own grain split (the shared product does not fit)" : "ok; own grain split");
 			return true;
