@@ -11,6 +11,7 @@
 // the lane is mid-chunk, the ancestry cascade, stamp last, late never overwrites, release fences
 // (N4), lane input pins, discard, overrun, determinism, and a 10^7 seal/publish stress. CPU only.
 
+#include <VP-V/core/LaneInterfaces.h>
 #include <VP-V/core/ProductSlots.h>
 
 #include <atomic>
@@ -1352,29 +1353,124 @@ namespace ProductSlotsTestsNs
 			Assert::IsTrue(s.Abandon(t1));
 			Assert::IsTrue(s.StateOf(1) == SlotState::Live, L"Abandon acknowledges Rejected/LiveLaneOwned buffer");
 
-			// 3. In-test negative control: on the exact same pre-Begin Seal preemption race, a naive lane that
-			// ignores StartWriting() enters Begin after render already live-filled frame 1 -> 2 computes (duplicate!).
+			// 3. CT-M1 in-test negative control: drive a real ILaneProducer through SlotSet::Claim / Seal / BeginLive /
+			// StartWriting / Publish / Abandon on the exact same pre-Begin Seal preemption race.
+			// Skipping StartWriting(tn) runs ILaneProducer::Begin/RunChunk twice (render live fill + wasted lane compute -> 2);
+			// gating Begin on StartWriting(tn) prevents the duplicate compute (total == 1).
 			{
-				SlotSet neg(kA, 8, 4);
-				LaneTicket tn;
-				Assert::IsTrue(neg.Claim(1, Provenance::AheadLane, kNoFence, &tn) == ClaimResult::Claimed);
-				Assert::IsTrue(neg.Seal(1, acceptAll).outcome == SealOutcome::NeedsLive);
-				Assert::IsTrue(neg.BeginLive(1) >= 0 && neg.CommitLive(1, Header()));
-				int renderComputes = 1;
-				int naiveLaneBegins = 0;
-				int protectedLaneBegins = 0;
-				const bool startOk = neg.StartWriting(tn);
-				Assert::IsFalse(startOk, L"StartWriting rejects preempted Claimed slot");
-				// Unprotected naive lane ignores startOk and runs Begin anyway:
-				++naiveLaneBegins;
-				Assert::IsTrue(renderComputes + naiveLaneBegins > 1,
-					L"negative control: ignoring StartWriting allows duplicate Begin + Live compute on the same frame");
-				// Protected two-phase lane gates Begin on StartWriting(ticket):
-				if (startOk)
-					++protectedLaneBegins;
-				Assert::AreEqual(1, renderComputes + protectedLaneBegins,
-					L"two-phase StartWriting gate yields exactly 1 compute on the preempted frame");
-				Assert::IsTrue(neg.Abandon(tn));
+				class CountingProducer : public ILaneProducer {
+				public:
+					int beginCalls = 0;
+					int runChunkCalls = 0;
+					ProductId Product() const override { return kA; }
+					bool Begin(const LaneJobContext& job) override
+					{
+						++beginCalls;
+						return job.ringSlot >= 0;
+					}
+					ChunkResult RunChunk(const LaneJobContext&, uint32_t) override
+					{
+						++runChunkCalls;
+						return ChunkResult::Done;
+					}
+				};
+
+				struct PreemptionRun {
+					int beginCalls = 0;
+					int runChunkCalls = 0;
+					bool startWritingAllowed = false;
+					PublishResult publishResult = PublishResult::Published;
+					SlotState finalState = SlotState::Empty;
+				};
+
+				auto drivePreempted = [&](bool enforceStartWritingGate) -> PreemptionRun {
+					SlotSet neg(kA, 8, 4);
+					CountingProducer producer;
+					LaneTicket tn;
+					Assert::IsTrue(neg.Claim(1, Provenance::AheadLane, kNoFence, &tn) == ClaimResult::Claimed);
+					Assert::IsTrue(neg.StateOf(1) == SlotState::Claimed);
+
+					// Render thread preempts the Claimed slot before the lane calls StartWriting/Begin and live-fills frame 1.
+					Assert::IsTrue(neg.Seal(1, acceptAll).outcome == SealOutcome::NeedsLive);
+					const int liveSlot = neg.BeginLive(1);
+					Assert::IsTrue(liveSlot >= 0);
+					LaneJobContext liveJob;
+					liveJob.seq = 1;
+					liveJob.ringSlot = liveSlot;
+					Assert::IsTrue(producer.Begin(liveJob));
+					Assert::IsTrue(producer.RunChunk(liveJob, 100) == ChunkResult::Done);
+					Assert::IsTrue(neg.CommitLive(1, Header()));
+
+					// Lane worker wakes up with its phase-1 ticket and prepares to execute Begin/RunChunk.
+					PreemptionRun out;
+					LaneJobContext laneJob;
+					laneJob.seq = 1;
+					laneJob.ticket = tn;
+					laneJob.ringSlot = static_cast<int>(tn.slot);
+					if (enforceStartWritingGate)
+					{
+						out.startWritingAllowed = neg.StartWriting(tn);
+						if (out.startWritingAllowed)
+						{
+							if (producer.Begin(laneJob))
+								(void)producer.RunChunk(laneJob, 100);
+							out.publishResult = neg.Publish(tn);
+						}
+						else
+						{
+							Assert::IsTrue(neg.Abandon(tn));
+						}
+						Assert::AreEqual(uint64_t(0), neg.Counters().lateDiscards.load(),
+							L"gated lane never wastes a late Publish discard");
+					}
+					else
+					{
+						// Unprotected naive lane skips StartWriting(tn) and invokes ILaneProducer::Begin directly.
+						if (producer.Begin(laneJob))
+							(void)producer.RunChunk(laneJob, 100);
+						out.publishResult = neg.Publish(tn);
+						Assert::IsTrue(out.publishResult == PublishResult::Late,
+							L"naive lane's late Publish is rejected after preemption (work was already wasted)");
+						Assert::AreEqual(uint64_t(1), neg.Counters().lateDiscards.load(),
+							L"naive lane recorded a late Publish discard after duplicate compute");
+						Assert::IsTrue(neg.Abandon(tn));
+					}
+					out.beginCalls = producer.beginCalls;
+					out.runChunkCalls = producer.runChunkCalls;
+					out.finalState = neg.StateOf(1);
+					return out;
+				};
+
+				const PreemptionRun naive = drivePreempted(false);
+				Assert::AreEqual(2, naive.beginCalls,
+					L"negative control: skipping StartWriting(tn) invokes ILaneProducer::Begin twice on the preempted frame");
+				Assert::AreEqual(2, naive.runChunkCalls,
+					L"negative control: skipping StartWriting(tn) runs ILaneProducer::RunChunk twice");
+				Assert::IsTrue(naive.finalState == SlotState::Live);
+
+				const PreemptionRun gated = drivePreempted(true);
+				Assert::IsFalse(gated.startWritingAllowed, L"StartWriting rejects preempted Claimed slot");
+				Assert::AreEqual(1, gated.beginCalls,
+					L"two-phase StartWriting(tn) gate keeps ILaneProducer::Begin at exactly 1 on the preempted frame");
+				Assert::AreEqual(1, gated.runChunkCalls,
+					L"two-phase StartWriting(tn) gate keeps ILaneProducer::RunChunk at exactly 1");
+				Assert::IsTrue(gated.finalState == SlotState::Live);
+
+				// Liveness control: without Seal preemption, StartWriting(tn) admits the producer and Publish succeeds.
+				SlotSet liveCtrl(kA, 8, 4);
+				CountingProducer ctrlProducer;
+				LaneTicket tc;
+				Assert::IsTrue(liveCtrl.Claim(1, Provenance::AheadLane, kNoFence, &tc) == ClaimResult::Claimed);
+				Assert::IsTrue(liveCtrl.StartWriting(tc), L"unpreempted Claimed slot admits StartWriting");
+				LaneJobContext ctrlJob;
+				ctrlJob.seq = 1;
+				ctrlJob.ticket = tc;
+				ctrlJob.ringSlot = static_cast<int>(tc.slot);
+				Assert::IsTrue(ctrlProducer.Begin(ctrlJob));
+				Assert::IsTrue(ctrlProducer.RunChunk(ctrlJob, 100) == ChunkResult::Done);
+				Assert::IsTrue(liveCtrl.Publish(tc) == PublishResult::Published);
+				Assert::AreEqual(1, ctrlProducer.beginCalls);
+				Assert::AreEqual(1, ctrlProducer.runChunkCalls);
 			}
 
 			// 4. ReleaseThrough preserves Claimed; Discard preempts Claimed -> ReleasedLaneOwned so StartWriting fails.
