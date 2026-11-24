@@ -577,6 +577,7 @@ namespace SourceIdentity
 				double totalCrestGH2 = 0.0;
 				double totalCrestGL2 = 0.0;
 				double totalEdgeYH2 = 0.0;
+				double totalEdgeYBelow2 = 0.0;
 				double totalIntYH2 = 0.0;
 				double totalIntYBelow2 = 0.0;
 				double totalActiveYH2 = 0.0;
@@ -728,6 +729,7 @@ namespace SourceIdentity
 					double lineCrestGH2 = 0.0;
 					double lineCrestGL2 = 0.0;
 					double lineEdgeYH2 = 0.0;
+					double lineEdgeYBelow2 = 0.0;
 					double lineIntYH2 = 0.0;
 					double lineIntYBelow2 = 0.0;
 					int lineEdgeCount = 0;
@@ -741,7 +743,9 @@ namespace SourceIdentity
 
 						if ((m & detail_neural_sr::kMaskEdge) != 0u)
 						{
+							const double yb = ws.yBelow[idx];
 							lineEdgeYH2 += yh2;
+							lineEdgeYBelow2 += yb * yb;
 							++lineEdgeCount;
 						}
 						if ((m & detail_neural_sr::kMaskCrest) != 0u)
@@ -771,6 +775,7 @@ namespace SourceIdentity
 					totalCrestGH2 += lineCrestGH2;
 					totalCrestGL2 += lineCrestGL2;
 					totalEdgeYH2 += lineEdgeYH2;
+					totalEdgeYBelow2 += lineEdgeYBelow2;
 					totalIntYH2 += lineIntYH2;
 					totalIntYBelow2 += lineIntYBelow2;
 					totalEdgeSamples += lineEdgeCount;
@@ -840,6 +845,9 @@ namespace SourceIdentity
 				const double edgeHfEnergy = totalEdgeSamples > 0
 					? (totalEdgeYH2 / static_cast<double>(totalEdgeSamples))
 					: 0.0;
+				const double edgeBelowEnergy = totalEdgeSamples > 0
+					? (totalEdgeYBelow2 / static_cast<double>(totalEdgeSamples))
+					: 0.0;
 				const double interiorHfEnergy = totalInteriorSamples > 0
 					? (totalIntYH2 / static_cast<double>(totalInteriorSamples))
 					: 0.0;
@@ -848,14 +856,18 @@ namespace SourceIdentity
 					: 0.0;
 
 				const double pHighEdge = edgeHfEnergy / bandFracHigh;
+				const double pBelowEdge = edgeBelowEnergy / bandFracBelow;
 				const double pHighInterior = interiorHfEnergy / bandFracHigh;
 				const double pBelowInterior = interiorBelowEnergy / bandFracBelow;
 
+				double edgeDropExcessDecades = 0.0;
 				if (totalEdgeSamples > 0 && totalInteriorSamples > 0)
 				{
 					res.edgeToInteriorHfRatio = pHighEdge / (std::max)(pHighInterior, floorP);
 
-					// Pillar 3: Interior PSD step discontinuity across f_c relative to natural -2*log10(fAbove/fBelow).
+					// Pillar 3: Interior PSD step discontinuity across f_c relative to natural -2*log10(fAbove/fBelow),
+					// paired with edge spectral continuity across f_c so classical bandlimited LTI edges (whose own
+					// spectrum collapses across f_c) never fire even if Pillar 1 LTI veto is bypassed.
 					const double fc = 0.5 * ratio;
 					const double fBelow = 0.5 * (0.55 + 0.90) * fc;
 					const double fAbove = 0.5 * (1.05 * fc + 0.95 * 0.5);
@@ -863,6 +875,9 @@ namespace SourceIdentity
 					const double actualInteriorDecades = std::log10(
 						(std::max)(pHighInterior, floorP) / (std::max)(pBelowInterior, floorP));
 					res.interiorSpectralDropExcessDecades = expectedDrop - actualInteriorDecades;
+					const double actualEdgeDecades = std::log10(
+						(std::max)(pHighEdge, floorP) / (std::max)(pBelowEdge, floorP));
+					edgeDropExcessDecades = expectedDrop - actualEdgeDecades;
 				}
 
 				// Decision Rule (strict sample/consensus gates + 3-pillar joint detection):
@@ -903,10 +918,12 @@ namespace SourceIdentity
 				const bool hasEdgePhaseLock = res.edgePhaseBicoherence >= cfg.minBicoherence;
 				const bool hasEdgeHfLocalization = res.edgeToInteriorHfRatio >= cfg.minEdgeToInteriorHfRatio;
 				const bool hasInteriorPsdDrop = res.interiorSpectralDropExcessDecades >= cfg.interiorDropDecadesMargin;
+				// Genuine neural/shock-sharpened edges synthesize broadband energy across f_c rather than dropping off
+				// like a bandlimited LTI upscaler (edgeDropExcessDecades < interiorDropDecadesMargin).
+				const bool hasEdgeBroadband = edgeDropExcessDecades < cfg.interiorDropDecadesMargin;
 
-				// Require genuine interior PSD collapse above f_c (never allow edge kurtosis alone to bypass
-				// natural 1/f^2 broadband interior texture on sharp native 4K photography/CG).
-				if (hasEdgePhaseLock && hasEdgeHfLocalization && hasInteriorPsdDrop)
+				// Require genuine interior PSD collapse above f_c AND broadband edge energy across f_c.
+				if (hasEdgePhaseLock && hasEdgeHfLocalization && hasInteriorPsdDrop && hasEdgeBroadband)
 				{
 					res.verdict = NeuralSrVerdict::NeuralSrDetected;
 					res.reason = NeuralSrReason::NeuralEdgeLockAndInteriorDrop;

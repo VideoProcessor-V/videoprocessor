@@ -494,6 +494,15 @@ namespace SourceIdentity
 								(static_cast<int64_t>(k) * static_cast<int64_t>(span)) /
 								static_cast<int64_t>(nPerLine - 1));
 						}
+						// Align patch start to even raster parity ((ls.origin + off) & 1) == 0 so 2x upscaled
+						// 8-pixel patches enclose exact complete 4-sample latent blocks without half-pixel edge split.
+						if ((((ls.origin + off) & 1) != 0))
+						{
+							if (off + 1 <= maxOffset)
+								++off;
+							else if (off - 1 >= minOffset)
+								--off;
+						}
 						StaticPatchSlot slot;
 						slot.lineIdx = li;
 						slot.offset = off;
@@ -571,8 +580,9 @@ namespace SourceIdentity
 				return true;
 			}
 
-			// Extracts raw 9-pixel patches and pre-whitened 8-tap first-difference patches dx[i] = x[i+1] - x[i].
-			// Returns false if any patch sample is non-finite.
+			// Extracts raw 9-pixel patches (for Stage 1 temporal diff gate) and line-demeaned 8-pixel patches
+			// u[i] = x[i] - lineMean (preserving flat passband gain across all 4 modes [0, 0.25] and 1x pixel
+			// grain variance instead of 2x first-difference variance). Returns false if any sample is non-finite.
 			inline bool ExtractPatches(
 				const LineSet& ls,
 				const std::vector<StaticPatchSlot>& slots,
@@ -583,9 +593,26 @@ namespace SourceIdentity
 				outRaw.resize(numSlots * static_cast<size_t>(kStaticPatchPixels));
 				outDiff.resize(numSlots * static_cast<size_t>(kStaticPatchTaps));
 
+				std::vector<double> lineMeans(static_cast<size_t>(ls.count), 0.0);
+				for (int li = 0; li < ls.count; ++li)
+				{
+					const double* line = ls.Line(li);
+					double sum = 0.0;
+					for (int x = 0; x < ls.length; ++x)
+					{
+						const double v = line[x];
+						if (!std::isfinite(v))
+							return false;
+						sum += v;
+					}
+					lineMeans[static_cast<size_t>(li)] = sum / static_cast<double>(ls.length);
+				}
+
 				for (size_t s = 0; s < numSlots; ++s)
 				{
-					const double* y = ls.Line(slots[s].lineIdx) + slots[s].offset;
+					const int li = slots[s].lineIdx;
+					const double mean = lineMeans[static_cast<size_t>(li)];
+					const double* y = ls.Line(li) + slots[s].offset;
 					double* rawDst = outRaw.data() + s * static_cast<size_t>(kStaticPatchPixels);
 					double* diffDst = outDiff.data() + s * static_cast<size_t>(kStaticPatchTaps);
 
@@ -598,7 +625,7 @@ namespace SourceIdentity
 					}
 					for (int i = 0; i < kStaticPatchTaps; ++i)
 					{
-						diffDst[i] = rawDst[i + 1] - rawDst[i];
+						diffDst[i] = rawDst[i] - mean;
 					}
 				}
 				return true;
@@ -875,11 +902,16 @@ namespace SourceIdentity
 			StaticPatchTransition trans;
 			double sumAsym = 0.0;
 			double sumAsymSq = 0.0;
+			double sumAllCrossDiag = 0.0;
 
 			for (int s = 0; s < numSlots; ++s)
 			{
 				const double* curRaw = ws.currRawPatches.data() + static_cast<size_t>(s) * static_cast<size_t>(kStaticPatchPixels);
 				const double* prvRaw = ws.prevRawPatches.data() + static_cast<size_t>(s) * static_cast<size_t>(kStaticPatchPixels);
+				const double* curDx = ws.currDiffPatches.data() + static_cast<size_t>(s) * static_cast<size_t>(kStaticPatchTaps);
+				const double* prvDx = ws.prevDiffPatches.data() + static_cast<size_t>(s) * static_cast<size_t>(kStaticPatchTaps);
+				for (int i = 0; i < kStaticPatchTaps; ++i)
+					sumAllCrossDiag += curDx[i] * prvDx[i];
 
 				double ms = 0.0;
 				for (int i = 0; i < kStaticPatchTaps; ++i)
@@ -896,8 +928,6 @@ namespace SourceIdentity
 				}
 
 				++trans.acceptedPairs;
-				const double* curDx = ws.currDiffPatches.data() + static_cast<size_t>(s) * static_cast<size_t>(kStaticPatchTaps);
-				const double* prvDx = ws.prevDiffPatches.data() + static_cast<size_t>(s) * static_cast<size_t>(kStaticPatchTaps);
 
 				for (int i = 0; i < kStaticPatchTaps; ++i)
 				{
@@ -924,13 +954,13 @@ namespace SourceIdentity
 			bool motionRejected =
 				(trans.acceptedPairs <= 0) || (staticFraction < cfg.minStaticPatchFraction);
 
-			// Stage 2: Directional shift & sub-pixel asymmetry gate on accepted transition cross-covariance.
-			// Catches slow 0.5..3 px camera pans even when dense spatial texture inflates sigmaSpatial.
+			// Stage 2: Directional shift, sub-pixel asymmetry, and large-displacement decorrelation gate on accepted
+			// transition cross-covariance. Catches both slow 0.5..3 px pans and large (>8 px) pans under heavy grain.
 			if (!motionRejected && trans.acceptedPairs >= kStaticPatchTaps)
 			{
 				const double invPairs = 1.0 / static_cast<double>(trans.acceptedPairs);
 				const double shiftNoiseSe =
-					(2.0 * sigmaSpatial * sigmaSpatial) / std::sqrt(static_cast<double>(trans.acceptedPairs));
+					(sigmaSpatial * sigmaSpatial) / std::sqrt(static_cast<double>(trans.acceptedPairs));
 
 				constexpr int kMaxCheckLag = 3;
 				for (int lag = 1; lag <= kMaxCheckLag; ++lag)
@@ -967,10 +997,22 @@ namespace SourceIdentity
 					const double asymVar = (std::max)(0.0, (sumAsymSq * invPairs) - asymMean * asymMean);
 					const double asymSe = (std::max)(shiftNoiseSe, std::sqrt(asymVar * invPairs));
 
-					// Elementary quarter (1/4) asymmetry share + 3-sigma SE threshold catches sub-pixel pans.
+					// Stage 2a: Elementary quarter (1/4) asymmetry share + 3-sigma SE threshold catches sub-pixel pans.
 					if (r0All > 0.0 &&
 					    std::fabs(asymMean) > 0.25 * r0All &&
 					    std::fabs(asymMean) > cfg.motionChiSigma * asymSe)
+					{
+						motionRejected = true;
+					}
+
+					// Stage 2b: Large-displacement decorrelation gate (unbiased across ALL slots, free of Stage 1
+					// selection bias): when >25% of patches failed Stage 1 (<1% on static frames) AND unconditioned
+					// lag-0 cross-correlation across all slots is statistically indistinguishable from zero, reject motion.
+					const double unbiasedR0 = sumAllCrossDiag / (static_cast<double>(numSlots) * static_cast<double>(kStaticPatchTaps));
+					const double allNoiseSe = (sigmaSpatial * sigmaSpatial) / std::sqrt(static_cast<double>(numSlots));
+					if (!motionRejected &&
+					    staticFraction < (1.0 - cfg.minStaticPatchFraction) &&
+					    unbiasedR0 <= cfg.motionChiSigma * allNoiseSe)
 					{
 						motionRejected = true;
 					}
@@ -1072,10 +1114,10 @@ namespace SourceIdentity
 					normCov[i][j] = ws.crossCov[i][j] * invTotalPairs;
 			}
 
-			// Exact standard error of sample cross-covariance of dx (noise variance = 2 * mean_sigma_spatial^2).
+			// Exact standard error of sample cross-covariance of line-demeaned patches (pixel noise variance = mean_sigma_spatial^2).
 			const double meanNoiseVar = sumNoiseVar / static_cast<double>(ws.transitionCount);
 			const double noiseEigFloor =
-				(2.0 * meanNoiseVar) / std::sqrt(static_cast<double>(ws.acceptedStaticPairs));
+				meanNoiseVar / std::sqrt(static_cast<double>(ws.acceptedStaticPairs));
 			Detail::EvaluateRankSpectrum(normCov, floorCodes, noiseEigFloor, cfg, res);
 			return res;
 		}
@@ -1161,7 +1203,7 @@ namespace SourceIdentity
 			}
 
 			const double noiseEigFloor =
-				(2.0 * floorCodes * floorCodes) / std::sqrt(static_cast<double>(numSlots));
+				(floorCodes * floorCodes) / std::sqrt(static_cast<double>(numSlots));
 			Detail::EvaluateRankSpectrum(cov, floorCodes, noiseEigFloor, cfg, res);
 			return res;
 		}

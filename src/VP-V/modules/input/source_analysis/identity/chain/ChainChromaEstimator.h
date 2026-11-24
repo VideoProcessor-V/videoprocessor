@@ -1046,6 +1046,106 @@ namespace SourceIdentity
 				}
 			}
 
+			// Exact analytical Catmull-Rom negative-lobe step overshoot when solved in [3,1]/4 latent space:
+			//   U_{Catmull-Rom, phi=0} == U_{[3,1]/4} * Toeplitz(-3/32, 19/16, -3/32) => exact flanking overshoot +3/38.
+			// Midpoint threshold 3/76 separates monotonic [3,1]/4 (0.0) from negative-lobe cubics (+3/38).
+			// Returns +1 (confirmed negative-lobe ringing), -1 (confirmed monotonic [3,1]/4), or 0 (insufficient steps).
+			inline int DetectCenteredStepOvershoot(
+				const LineSet& cb,
+				const LineSet* cr,
+				double floorCodes,
+				const ChromaAxisOperators& ops,
+				double& outMedRing)
+			{
+				outMedRing = 0.0;
+				if (!ops.halfOk)
+					return 0;
+
+				constexpr double kCatmullStepOvershootMid = 3.0 / 76.0;
+				const double edgeGate = 4.0 * std::sqrt(2.0) * floorCodes;
+
+				std::vector<const double*> allLines;
+				allLines.reserve(static_cast<size_t>(cb.count) + (cr != nullptr ? static_cast<size_t>(cr->count) : 0u));
+				for (int li = 0; li < cb.count; ++li)
+					allLines.push_back(cb.Line(li));
+				if (cr != nullptr && cr->axisLen == ops.N && cr->origin == cb.origin && cr->length == cb.length)
+				{
+					for (int li = 0; li < cr->count; ++li)
+						allLines.push_back(cr->Line(li));
+				}
+
+				std::vector<double> zBuf;
+				std::vector<double> rings;
+				for (size_t li = 0; li < allLines.size(); ++li)
+				{
+					ops.halfOps[0][0].SolveLatent(allLines[li], zBuf);
+					const int zn = static_cast<int>(zBuf.size());
+					if (zn < 12)
+						continue;
+					const int dzN = zn - 1;
+					int m = 4;
+					while (m < dzN - 4)
+					{
+						const double dzm = zBuf[static_cast<size_t>(m + 1)] - zBuf[static_cast<size_t>(m)];
+						const double a = std::fabs(dzm);
+						if (a < edgeGate)
+						{
+							++m;
+							continue;
+						}
+						const double dzPrev = zBuf[static_cast<size_t>(m)] - zBuf[static_cast<size_t>(m - 1)];
+						const double dzNext = zBuf[static_cast<size_t>(m + 2)] - zBuf[static_cast<size_t>(m + 1)];
+						if (a < std::fabs(dzPrev) || a < std::fabs(dzNext))
+						{
+							++m;
+							continue;
+						}
+						const double sgn = dzm > 0.0 ? 1.0 : -1.0;
+						int L = m;
+						int R = m;
+						while (L > 3 && (R - L) < 2)
+						{
+							const double dL = zBuf[static_cast<size_t>(L)] - zBuf[static_cast<size_t>(L - 1)];
+							if (dL * sgn > 0.25 * a)
+								--L;
+							else
+								break;
+						}
+						while (R + 1 < dzN - 3 && (R - L) < 2)
+						{
+							const double dR = zBuf[static_cast<size_t>(R + 2)] - zBuf[static_cast<size_t>(R + 1)];
+							if (dR * sgn > 0.25 * a)
+								++R;
+							else
+								break;
+						}
+						const double H = std::fabs(zBuf[static_cast<size_t>(R + 1)] - zBuf[static_cast<size_t>(L)]);
+						const double dLm1 = zBuf[static_cast<size_t>(L)] - zBuf[static_cast<size_t>(L - 1)];
+						const double dLm2 = zBuf[static_cast<size_t>(L - 1)] - zBuf[static_cast<size_t>(L - 2)];
+						const double dRp1 = zBuf[static_cast<size_t>(R + 2)] - zBuf[static_cast<size_t>(R + 1)];
+						const double dRp2 = zBuf[static_cast<size_t>(R + 3)] - zBuf[static_cast<size_t>(R + 2)];
+						if (H > 0.0 &&
+							std::fabs(dLm2) <= 0.20 * H && std::fabs(dRp2) <= 0.20 * H &&
+							std::fabs(dLm1) <= 0.25 * H && std::fabs(dRp1) <= 0.25 * H)
+						{
+							const double ring = -sgn * 0.5 * (dLm1 + dRp1) / a;
+							rings.push_back(ring);
+						}
+						m = R + 2;
+					}
+				}
+
+				if (rings.size() < 6u)
+					return 0;
+
+				std::sort(rings.begin(), rings.end());
+				const size_t mid = rings.size() / 2u;
+				outMedRing = (rings.size() % 2u == 1u)
+					? rings[mid]
+					: 0.5 * (rings[mid - 1u] + rings[mid]);
+				return (outMedRing >= kCatmullStepOvershootMid) ? 1 : -1;
+			}
+
 			// SID-SOTA-6: Algebraic Point/Nearest-Neighbor (zero-order hold) & MPEG-2/4 Linear FIR
 			// ([3,1]/4 centered / field-shifted, [1,2,1]/4 cosited) chroma upsampler probe.
 			struct BoxMpegProbeResult
@@ -1318,91 +1418,21 @@ namespace SourceIdentity
 
 					if (marginDistinct >= s.kernelMarginMin)
 					{
-						constexpr double kCatmullStepOvershoot = 3.0 / 38.0;     // exact Catmull-Rom negative-lobe overshoot
-						constexpr double kCatmullStepOvershootMid = 3.0 / 76.0;  // exact midpoint between 0 ([3,1]/4) and 3/38
-						const double edgeGate = 4.0 * std::sqrt(2.0) * floorCodes;
-
-						std::vector<double> zBuf;
-						std::vector<double> rings;
-						for (size_t li = 0; li < allLines.size(); ++li)
+						constexpr double kCatmullStepOvershoot = 3.0 / 38.0; // exact Catmull-Rom negative-lobe overshoot
+						double medRing = 0.0;
+						const int ringVerdict = DetectCenteredStepOvershoot(cb, cr, floorCodes, ops, medRing);
+						if (ringVerdict < 0)
 						{
-							ops.halfOps[0][0].SolveLatent(allLines[li], zBuf);
-							const int zn = static_cast<int>(zBuf.size());
-							if (zn < 12)
-								continue;
-							const int dzN = zn - 1;
-							int m = 4;
-							while (m < dzN - 4)
-							{
-								const double dzm = zBuf[static_cast<size_t>(m + 1)] - zBuf[static_cast<size_t>(m)];
-								const double a = std::fabs(dzm);
-								if (a < edgeGate)
-								{
-									++m;
-									continue;
-								}
-								const double dzPrev = zBuf[static_cast<size_t>(m)] - zBuf[static_cast<size_t>(m - 1)];
-								const double dzNext = zBuf[static_cast<size_t>(m + 2)] - zBuf[static_cast<size_t>(m + 1)];
-								if (a < std::fabs(dzPrev) || a < std::fabs(dzNext))
-								{
-									++m;
-									continue;
-								}
-								const double sgn = dzm > 0.0 ? 1.0 : -1.0;
-								int L = m;
-								int R = m;
-								while (L > 3 && (R - L) < 2)
-								{
-									const double dL = zBuf[static_cast<size_t>(L)] - zBuf[static_cast<size_t>(L - 1)];
-									if (dL * sgn > 0.25 * a)
-										--L;
-									else
-										break;
-								}
-								while (R + 1 < dzN - 3 && (R - L) < 2)
-								{
-									const double dR = zBuf[static_cast<size_t>(R + 2)] - zBuf[static_cast<size_t>(R + 1)];
-									if (dR * sgn > 0.25 * a)
-										++R;
-									else
-										break;
-								}
-								const double H = std::fabs(zBuf[static_cast<size_t>(R + 1)] - zBuf[static_cast<size_t>(L)]);
-								const double dLm1 = zBuf[static_cast<size_t>(L)] - zBuf[static_cast<size_t>(L - 1)];
-								const double dLm2 = zBuf[static_cast<size_t>(L - 1)] - zBuf[static_cast<size_t>(L - 2)];
-								const double dRp1 = zBuf[static_cast<size_t>(R + 2)] - zBuf[static_cast<size_t>(R + 1)];
-								const double dRp2 = zBuf[static_cast<size_t>(R + 3)] - zBuf[static_cast<size_t>(R + 2)];
-								if (H > 0.0 &&
-									std::fabs(dLm2) <= 0.20 * H && std::fabs(dRp2) <= 0.20 * H &&
-									std::fabs(dLm1) <= 0.25 * H && std::fabs(dRp1) <= 0.25 * H)
-								{
-									const double ring = -sgn * 0.5 * (dLm1 + dRp1) / a;
-									rings.push_back(ring);
-								}
-								m = R + 2;
-							}
+							const double ringMargin = ClampD(
+								(kCatmullStepOvershoot - (std::max)(medRing, 0.0)) / kCatmullStepOvershoot,
+								0.0, 1.0);
+							mpegConfirmed = true;
+							confirmedMargin = (std::min)(marginDistinct, ringMargin);
 						}
-
-						if (rings.size() >= 6u)
+						else if (ringVerdict > 0)
 						{
-							std::sort(rings.begin(), rings.end());
-							const size_t mid = rings.size() / 2u;
-							const double medRing = (rings.size() % 2u == 1u)
-								? rings[mid]
-								: 0.5 * (rings[mid - 1u] + rings[mid]);
-							if (medRing < kCatmullStepOvershootMid)
-							{
-								const double ringMargin = ClampD(
-									(kCatmullStepOvershoot - (std::max)(medRing, 0.0)) / kCatmullStepOvershoot,
-									0.0, 1.0);
-								mpegConfirmed = true;
-								confirmedMargin = (std::min)(marginDistinct, ringMargin);
-							}
-							else
-							{
-								// Confirmed negative-lobe step overshoot: physically excludes non-negative [3,1]/4.
-								out.negativeLobeRinging = true;
-							}
+							// Confirmed negative-lobe step overshoot: physically excludes non-negative [3,1]/4.
+							out.negativeLobeRinging = true;
 						}
 					}
 				}
@@ -2124,7 +2154,9 @@ namespace SourceIdentity
 				const bool mpegV = s.detectBoxAndMpegChroma && bmV.detected && (bmV.family == ChromaUpsamplerFamily::MpegLinear) && !highDomV;
 				const bool subV = pointV || mpegV || (axV.hasDetail && (axV.bestDip <= s.dipConfirmThreshold) && !highDomV);
 
-				if (est.lumaCoupled.valid && est.lumaCoupled.corroborated && !subV && !highDomV && !lumaCoupledHighDom)
+				const double lcWorstDip422 = (in.knownLumaNV > 0) ? est.lumaCoupled.dipV : est.lumaCoupled.dipH;
+				const bool lcBeatsHalf422 = !subV || (lcWorstDip422 < axV.bestDip - s.kernelMarginMin);
+				if (est.lumaCoupled.valid && est.lumaCoupled.corroborated && lcBeatsHalf422 && !highDomV && !lumaCoupledHighDom)
 				{
 					est.valid = true;
 					est.origin = ChromaOrigin::Subsampled420;
@@ -2184,7 +2216,20 @@ namespace SourceIdentity
 						pooledRms[k] = phaseIdxV >= 0 ? axV.kernelRms[k][phaseIdxV]
 							: (std::min)(axV.kernelRms[k][0], axV.kernelRms[k][1]);
 					}
-					if (s.detectBoxAndMpegChroma && bmV.negativeLobeRinging)
+					bool excludeNonNegLinearV = s.detectBoxAndMpegChroma && bmV.negativeLobeRinging;
+					if (!excludeNonNegLinearV && phaseIdxV == 0 && pooledRms[0] > 0.0 && pooledRms[1] > 0.0)
+					{
+						// Resolve exact U_{Catmull-Rom, phi=0} == U_{[3,1]/4} * H_{0.5} tie even when detectBoxAndMpegChroma == false:
+						// only exclude non-negative [3,1]/4 if confirmed negative-lobe step overshoot (>= 3/76) is present.
+						const double max01 = (std::max)(pooledRms[0], pooledRms[1]);
+						if (std::fabs(pooledRms[0] - pooledRms[1]) / (std::max)(max01, 1e-12) < s.kernelMarginMin)
+						{
+							double medRingV = 0.0;
+							if (detail_chroma_estimator::DetectCenteredStepOvershoot(in.cbV, crV, in.floorCodes, *opsV, medRingV) > 0)
+								excludeNonNegLinearV = true;
+						}
+					}
+					if (excludeNonNegLinearV)
 						pooledRms[0] = 0.0; // Negative-lobe overshoot physically excludes non-negative [3,1]/4 bilinear.
 					selectKernel(pooledRms);
 
@@ -2331,8 +2376,13 @@ namespace SourceIdentity
 				return est;
 			}
 
-			// SID-SOTA-6: arbitrary luma-coupled 4:2:0 chroma corroboration (e.g. 720p/1440p -> 2160p) when N/2 is quiet or non-dipping.
-			if (est.lumaCoupled.valid && est.lumaCoupled.corroborated && !(subH && subV) && !(highDomH || highDomV) && !lumaCoupledHighDom)
+			// SID-SOTA-6: arbitrary luma-coupled 4:2:0 chroma corroboration (e.g. 720p/1440p -> 2160p) when N/2 is quiet,
+			// non-dipping, or strictly weaker than the confirmed expected chroma grid dip (e.g. 1440p->2160p 1280x720 vs 1920x1080).
+			const double lcWorstDip = (in.knownLumaNH > 0 && in.knownLumaNV > 0)
+				? (std::max)(est.lumaCoupled.dipH, est.lumaCoupled.dipV)
+				: ((in.knownLumaNH > 0) ? est.lumaCoupled.dipH : est.lumaCoupled.dipV);
+			const bool lcBeatsHalf = !(subH && subV) || (lcWorstDip < (std::max)(axH.bestDip, axV.bestDip) - s.kernelMarginMin);
+			if (est.lumaCoupled.valid && est.lumaCoupled.corroborated && lcBeatsHalf && !(highDomH || highDomV) && !lumaCoupledHighDom)
 			{
 				est.valid = true;
 				est.origin = ChromaOrigin::Subsampled420;

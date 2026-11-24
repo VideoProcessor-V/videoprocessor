@@ -699,6 +699,14 @@ namespace SourceIdentity
 				}
 				const int maxN = static_cast<int>(std::floor(s_.maxLatentRatio * static_cast<double>(N)));
 				const int step = s_.coarseStep < 1 ? 1 : s_.coarseStep;
+				std::vector<double> cPhases;
+				cPhases.push_back(0.0);
+				for (int q = 1; q <= (s_.phaseCount - 1) / 2; ++q)
+				{
+					cPhases.push_back(static_cast<double>(q) * s_.phaseStep);
+					cPhases.push_back(-static_cast<double>(q) * s_.phaseStep);
+				}
+				const size_t cPhaseCount = cPhases.size();
 				valsScratch_.resize(static_cast<size_t>(nWin) * static_cast<size_t>(nl));
 				bool have = false;
 				const SolveBatch* bw[2][kFamilyCount];
@@ -706,36 +714,76 @@ namespace SourceIdentity
 					const int n = nC + d;
 					if (n < s_.minLatent || n > maxN)
 						return;
-					bool ok = true;
-					for (int w = 0; w < nWin && ok; ++w)
-						for (int q = 0; q < nrep; ++q)
-						{
-							bw[w][q] = SolveWindow(ls, 0, idxScratch_.data(), nl, winOff[w], Lc, n, reps[q], 0.0);
-							if (bw[w][q] == nullptr)
-							{
-								ok = false;
-								break;
-							}
-						}
-					if (!ok)
-						return;
-					for (int w = 0; w < nWin; ++w)
-						for (int i = 0; i < nl; ++i)
-						{
-							double best = 0.0;
-							bool h2 = false;
+					if (cPhaseCount == 1u)
+					{
+						bool ok = true;
+						for (int w = 0; w < nWin && ok; ++w)
 							for (int q = 0; q < nrep; ++q)
 							{
-								const double s = bw[w][q]->s[static_cast<size_t>(i)];
-								if (!h2 || s < best)
+								bw[w][q] = SolveWindow(ls, 0, idxScratch_.data(), nl, winOff[w], Lc, n, reps[q], 0.0);
+								if (bw[w][q] == nullptr)
 								{
-									best = s;
-									h2 = true;
+									ok = false;
+									break;
 								}
 							}
-							valsScratch_[static_cast<size_t>(w) * static_cast<size_t>(nl) + static_cast<size_t>(i)]
-								= std::log(best / baseScratch_[static_cast<size_t>(w) * static_cast<size_t>(nl) + static_cast<size_t>(i)]);
+						if (!ok)
+							return;
+						for (int w = 0; w < nWin; ++w)
+							for (int i = 0; i < nl; ++i)
+							{
+								double best = 0.0;
+								bool h2 = false;
+								for (int q = 0; q < nrep; ++q)
+								{
+									const double s = bw[w][q]->s[static_cast<size_t>(i)];
+									if (!h2 || s < best)
+									{
+										best = s;
+										h2 = true;
+									}
+								}
+								valsScratch_[static_cast<size_t>(w) * static_cast<size_t>(nl) + static_cast<size_t>(i)]
+									= std::log(best / baseScratch_[static_cast<size_t>(w) * static_cast<size_t>(nl) + static_cast<size_t>(i)]);
+							}
+					}
+					else
+					{
+						// When phaseCount > 1 (default 1 untouched for W1 bit-identity), evaluate configured phases
+						// so off-phase upscales (e.g. +-0.25 bob fields or sub-pixel shifts) never drift off true n.
+						double bestLine[2 * kMaxLines];
+						bool haveLine[2 * kMaxLines];
+						const int total = nWin * nl;
+						for (int idx = 0; idx < total; ++idx)
+						{
+							bestLine[idx] = 0.0;
+							haveLine[idx] = false;
 						}
+						for (size_t pi = 0; pi < cPhaseCount; ++pi)
+						{
+							for (int w = 0; w < nWin; ++w)
+							{
+								for (int q = 0; q < nrep; ++q)
+								{
+									const SolveBatch* sb = SolveWindow(ls, 0, idxScratch_.data(), nl, winOff[w], Lc, n, reps[q], cPhases[pi]);
+									if (sb == nullptr)
+										return;
+									for (int i = 0; i < nl; ++i)
+									{
+										const int idx = w * nl + i;
+										const double s = sb->s[static_cast<size_t>(i)];
+										if (!haveLine[idx] || s < bestLine[idx])
+										{
+											bestLine[idx] = s;
+											haveLine[idx] = true;
+										}
+									}
+								}
+							}
+						}
+						for (int idx = 0; idx < total; ++idx)
+							valsScratch_[static_cast<size_t>(idx)] = std::log(bestLine[idx] / baseScratch_[static_cast<size_t>(idx)]);
+					}
 					const double T = FastTrimmedMeanSmall(valsScratch_.data(), nWin * nl, s_.trimFraction);
 					const bool better = !have || T < tBest || (T == tBest && std::abs(d) < std::abs(nBest - nC));
 					if (better)
@@ -778,13 +826,31 @@ namespace SourceIdentity
 					return nref < 2 ? kReasonNoReference : kReasonShortLines;
 
 				// Integer scan with the representative kernels.
+				std::vector<double> phases;
+				phases.push_back(0.0);
+				if (!screenOnly)
+				{
+					for (int q = 1; q <= (s_.phaseCount - 1) / 2; ++q)
+					{
+						phases.push_back(static_cast<double>(q) * s_.phaseStep);
+						phases.push_back(-static_cast<double>(q) * s_.phaseStep);
+					}
+				}
+				const bool multiPhase = phases.size() > 1u;
+
 				const int maxN = static_cast<int>(std::floor(s_.maxLatentRatio * static_cast<double>(N)));
 				const int hw = screenOnly ? 0 : (opt.exactHalfWidth >= 0 ? opt.exactHalfWidth : s_.exactHalfWidth);
 				std::vector<int> ns;
-				ns.reserve(static_cast<size_t>(2 * hw + 1));
+				ns.reserve(static_cast<size_t>(2 * hw + 2));
 				for (int n = n0 - hw; n <= n0 + hw; ++n)
 					if (n >= s_.minLatent && n <= maxN)
 						ns.push_back(n);
+				if ((multiPhase || s_.gaussNewtonPhaseRefine) && !screenOnly &&
+					cr.nProposed >= s_.minLatent && cr.nProposed <= maxN &&
+					std::find(ns.begin(), ns.end(), cr.nProposed) == ns.end())
+				{
+					ns.push_back(cr.nProposed);
+				}
 				if (ns.empty())
 					return kReasonBadInput;
 				const size_t stride = static_cast<size_t>(nrep) * static_cast<size_t>(nl);
@@ -794,13 +860,42 @@ namespace SourceIdentity
 				double bestT = 0.0;
 				for (size_t ni = 0; ni < ns.size(); ++ni)
 				{
-					for (int q = 0; q < nrep; ++q)
+					if (!multiPhase)
 					{
-						const SolveBatch* sb = SolveWindow(ls, 1, idxScratch_.data(), nl, 0, L, ns[ni], reps[q], 0.0);
-						if (sb == nullptr)
-							return kReasonShortLines;
-						for (int i = 0; i < nl; ++i)
-							scanSScratch_[ni * stride + static_cast<size_t>(q) * static_cast<size_t>(nl) + static_cast<size_t>(i)] = sb->s[static_cast<size_t>(i)];
+						for (int q = 0; q < nrep; ++q)
+						{
+							const SolveBatch* sb = SolveWindow(ls, 1, idxScratch_.data(), nl, 0, L, ns[ni], reps[q], 0.0);
+							if (sb == nullptr)
+								return kReasonShortLines;
+							for (int i = 0; i < nl; ++i)
+								scanSScratch_[ni * stride + static_cast<size_t>(q) * static_cast<size_t>(nl) + static_cast<size_t>(i)] = sb->s[static_cast<size_t>(i)];
+						}
+					}
+					else
+					{
+						// When phaseCount > 1, evaluate each (ns[ni], reps[q]) over all configured phases so nStar
+						// and exactFamilies selection never lock onto the wrong integer or family on off-phase inputs.
+						for (int q = 0; q < nrep; ++q)
+						{
+							double bestPhaseT = 0.0;
+							const SolveBatch* bestSb = nullptr;
+							for (size_t pi = 0; pi < phases.size(); ++pi)
+							{
+								const SolveBatch* sb = SolveWindow(ls, 1, idxScratch_.data(), nl, 0, L, ns[ni], reps[q], phases[pi]);
+								if (sb == nullptr)
+									return kReasonShortLines;
+								for (int i = 0; i < nl; ++i)
+									valsScratch_[static_cast<size_t>(i)] = std::log(sb->s[static_cast<size_t>(i)] / baseScratch_[static_cast<size_t>(i)]);
+								const double Tp = FastTrimmedMeanSmall(valsScratch_.data(), nl, s_.trimFraction);
+								if (bestSb == nullptr || Tp < bestPhaseT)
+								{
+									bestPhaseT = Tp;
+									bestSb = sb;
+								}
+							}
+							for (int i = 0; i < nl; ++i)
+								scanSScratch_[ni * stride + static_cast<size_t>(q) * static_cast<size_t>(nl) + static_cast<size_t>(i)] = bestSb->s[static_cast<size_t>(i)];
+						}
 					}
 					for (int i = 0; i < nl; ++i)
 					{
@@ -863,16 +958,6 @@ namespace SourceIdentity
 								break;
 							}
 				}
-				std::vector<double> phases;
-				phases.push_back(0.0);
-				if (!screenOnly)
-				{
-					for (int q = 1; q <= (s_.phaseCount - 1) / 2; ++q)
-					{
-						phases.push_back(static_cast<double>(q) * s_.phaseStep);
-						phases.push_back(-static_cast<double>(q) * s_.phaseStep);
-					}
-				}
 
 				struct KernelScore { int kernel; double phase; double T; };
 				KernelScore scores[kKernelCount];
@@ -886,9 +971,10 @@ namespace SourceIdentity
 					bool have = false;
 					for (size_t pi = 0; pi < phases.size(); ++pi)
 					{
-						// Reuse the scan value when it is the same operator (phase 0, a representative kernel).
+						// Reuse the scan value when single-phase (phase 0, representative kernel; W1 bit-exact).
+						// When multiPhase is active, SolveWindow reads directly from memo_ with zero extra work.
 						int reusedQ = -1;
-						if (pi == 0)
+						if (!multiPhase && pi == 0)
 							for (int q = 0; q < nrep; ++q)
 								if (reps[q] == kernels[ki])
 								{
@@ -957,25 +1043,31 @@ namespace SourceIdentity
 				cr.stat = scores[bi].T;
 				cr.kernelMargin = haveSecond ? second - scores[bi].T : 0.0;
 				cr.familyMargin = haveOther ? otherFam - scores[bi].T : 0.0;
-				// SOTA #5 (opt-in, default OFF): 1-step analytical Golub-Pereyra variable-projection Gauss-Newton phase refinement.
+				// SOTA #5 (opt-in, default OFF): analytical Golub-Pereyra variable-projection Gauss-Newton phase refinement
+				// (up to 2 safeguarded iterations, total step clamped strictly to [-0.25, +0.25] from discrete grid winner).
 				if (s_.gaussNewtonPhaseRefine && !screenOnly)
 				{
-					OpKey gnKey;
-					gnKey.N = N;
-					gnKey.n = nStar;
-					gnKey.kernel = cr.kernel;
-					gnKey.phaseQ = PhaseQ(cr.phase);
-					gnKey.origin = ls.origin;
-					gnKey.length = L;
-					const double phi0 = static_cast<double>(gnKey.phaseQ) / 1024.0;
-					const DescaleOperator* op0 = Op(gnKey, phi0);
-					if (op0 == nullptr || !op0->Ok())
+					const double phiInit = static_cast<double>(PhaseQ(cr.phase)) / 1024.0;
+					for (int gnIter = 0; gnIter < 2; ++gnIter)
 					{
-						cr.phaseRefineFallback = true;
-						++phaseRefineFallbacks_;
-					}
-					else
-					{
+						OpKey gnKey;
+						gnKey.N = N;
+						gnKey.n = nStar;
+						gnKey.kernel = cr.kernel;
+						gnKey.phaseQ = PhaseQ(cr.phase);
+						gnKey.origin = ls.origin;
+						gnKey.length = L;
+						const double phi0 = static_cast<double>(gnKey.phaseQ) / 1024.0;
+						const DescaleOperator* op0 = Op(gnKey, phi0);
+						if (op0 == nullptr || !op0->Ok())
+						{
+							if (gnIter == 0)
+							{
+								cr.phaseRefineFallback = true;
+								++phaseRefineFallbacks_;
+							}
+							break;
+						}
 						const int taps = op0->Taps();
 						const int margin = op0->Margin();
 						const double ratio = static_cast<double>(nStar) / static_cast<double>(N);
@@ -1027,40 +1119,50 @@ namespace SourceIdentity
 						const double curvMin = 1e-9 * (std::max)(rssAcc, 1.0);
 						if (!(hessAcc > curvMin) || !std::isfinite(gradAcc) || !std::isfinite(hessAcc))
 						{
-							cr.phaseRefineFallback = true;
-							++phaseRefineFallbacks_;
-						}
-						else
-						{
-							const double dphi = ClampD(-gradAcc / (hessAcc + 1e-12), -0.25, 0.25);
-							const double phi1 = phi0 + dphi;
-							const SolveBatch* sb1 = SolveWindow(ls, 1, idxScratch_.data(), nl, 0, L, nStar, cr.kernel, phi1);
-							if (sb1 == nullptr)
+							if (gnIter == 0)
 							{
 								cr.phaseRefineFallback = true;
 								++phaseRefineFallbacks_;
 							}
-							else
+							break;
+						}
+						const double dphi = ClampD(-gradAcc / (hessAcc + 1e-12), -0.25, 0.25);
+						const double phi1 = ClampD(phi0 + dphi, phiInit - 0.25, phiInit + 0.25);
+						if (gnIter > 0 && std::fabs(phi1 - phi0) < 1e-4)
+							break;
+						const SolveBatch* sb1 = SolveWindow(ls, 1, idxScratch_.data(), nl, 0, L, nStar, cr.kernel, phi1);
+						if (sb1 == nullptr)
+						{
+							if (gnIter == 0)
 							{
-								for (int i = 0; i < nl; ++i)
-									valsScratch_[static_cast<size_t>(i)] = std::log(sb1->s[static_cast<size_t>(i)] / baseScratch_[static_cast<size_t>(i)]);
-								const double t1 = FastTrimmedMeanSmall(valsScratch_.data(), nl, s_.trimFraction);
-								if (std::isfinite(t1) && t1 < cr.stat)
-								{
-									cr.phase = static_cast<double>(PhaseQ(phi1)) / 1024.0;
-									cr.stat = t1;
-									cr.kernelT[cr.kernel] = t1;
-									cr.kernelMargin = haveSecond ? second - t1 : 0.0;
-									cr.familyMargin = haveOther ? otherFam - t1 : 0.0;
-									cr.phaseRefined = true;
-									cr.phaseRefineStep = cr.phase - phi0;
-								}
-								else
-								{
-									cr.phaseRefineFallback = true;
-									++phaseRefineFallbacks_;
-								}
+								cr.phaseRefineFallback = true;
+								++phaseRefineFallbacks_;
 							}
+							break;
+						}
+						for (int i = 0; i < nl; ++i)
+							valsScratch_[static_cast<size_t>(i)] = std::log(sb1->s[static_cast<size_t>(i)] / baseScratch_[static_cast<size_t>(i)]);
+						const double t1 = FastTrimmedMeanSmall(valsScratch_.data(), nl, s_.trimFraction);
+						if (std::isfinite(t1) && t1 < cr.stat)
+						{
+							cr.phase = static_cast<double>(PhaseQ(phi1)) / 1024.0;
+							cr.stat = t1;
+							cr.kernelT[cr.kernel] = t1;
+							cr.kernelMargin = haveSecond ? second - t1 : 0.0;
+							cr.familyMargin = haveOther ? otherFam - t1 : 0.0;
+							cr.phaseRefined = true;
+							cr.phaseRefineStep = cr.phase - phiInit;
+							if (std::fabs(cr.phaseRefineStep) >= 0.25 - 1e-6)
+								break;
+						}
+						else
+						{
+							if (gnIter == 0)
+							{
+								cr.phaseRefineFallback = true;
+								++phaseRefineFallbacks_;
+							}
+							break;
 						}
 					}
 				}

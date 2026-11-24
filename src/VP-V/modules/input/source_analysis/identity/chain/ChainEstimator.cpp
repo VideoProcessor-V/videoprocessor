@@ -2761,10 +2761,10 @@ namespace SourceIdentity
 					}
 					else
 					{
-						int caller[4];
+						int caller[5];
 						int cc = 0;
 						auto addCaller = [&caller, &cc](int n) {
-							if (n < 16 || cc >= 4)
+							if (n < 16 || cc >= 5)
 								return;
 							for (int i = 0; i < cc; ++i)
 								if (caller[i] == n)
@@ -2778,6 +2778,30 @@ namespace SourceIdentity
 							addCaller(prev.n);
 						addCaller(RoundToInt(static_cast<double>(N) * 0.5));
 						addCaller(RoundToInt(static_cast<double>(N) * 2.0 / 3.0));
+						// SOTA #3 (opt-in, default OFF): when interlaced motion-bob detection is enabled on V,
+						// seed the exact half-field height nV_bob = round(0.5 * rH * NV) (e.g. 540 on 1080i->2160p)
+						// so post-cut frames immediately verify the bobbed field height without waiting for proposer warmup.
+						if (cfg.interlaced.enabled && a == 1 && run[0].have && run[0].ls.axisLen > 0)
+						{
+							double rH = 1.0;
+							bool haveDipH = false;
+							int bestNH = run[0].ls.axisLen;
+							for (size_t ci = 0; ci < run[0].vr.candidates.size(); ++ci)
+							{
+								const CandidateResult& cr = run[0].vr.candidates[ci];
+								if (cr.valid && cr.exactDone && cr.stat < detail_interlaced::kBobVerticalDipThreshold)
+								{
+									if (!haveDipH || cr.n < bestNH)
+									{
+										haveDipH = true;
+										bestNH = cr.n;
+									}
+								}
+							}
+							if (haveDipH)
+								rH = static_cast<double>(bestNH) / static_cast<double>(run[0].ls.axisLen);
+							addCaller(RoundToInt(0.5 * rH * static_cast<double>(N)));
+						}
 						ProposedCandidate prop[kMaxCandidates];
 						pc = proposer[a].Propose(N, caller, cc, prop, kMaxCandidates);
 						for (int i = 0; i < pc; ++i)
@@ -2845,6 +2869,10 @@ namespace SourceIdentity
 						BobAxisInput bi;
 						for (int a = 0; a < 2; ++a)
 						{
+							// Prefer the smallest exact-verified dipping candidate (< kBobVerticalDipThreshold = -0.09)
+							// so a 2x super-grid harmonic overfit (e.g. 1080 over 540 on 1080i->2160p bob) never masks
+							// the true fundamental latent size; fall back to deepest stat when no candidate dips.
+							bool haveDip = false;
 							bool haveBest = false;
 							int bn = 0;
 							double bstat = 0.0;
@@ -2854,7 +2882,19 @@ namespace SourceIdentity
 								const CandidateResult& cr = run[a].vr.candidates[ci];
 								if (!cr.valid || !cr.exactDone)
 									continue;
-								if (!haveBest || cr.stat < bstat)
+								const bool isDip = cr.stat < detail_interlaced::kBobVerticalDipThreshold;
+								if (isDip)
+								{
+									if (!haveDip || cr.n < bn || (cr.n == bn && cr.stat < bstat))
+									{
+										haveDip = true;
+										haveBest = true;
+										bn = cr.n;
+										bstat = cr.stat;
+										bphase = cr.phase;
+									}
+								}
+								else if (!haveDip && (!haveBest || cr.stat < bstat))
 								{
 									haveBest = true;
 									bn = cr.n;
