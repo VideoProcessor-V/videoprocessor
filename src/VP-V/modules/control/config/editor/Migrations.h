@@ -16,6 +16,9 @@
 #include <RendererProfileConfig.h>
 #include "ConfigEditorWindow.h"
 
+#include <map>
+#include <set>
+
 void ConfigEditorWindow::migrateRefreshKeys()
 {
     if (!configurationLoaded_ || !document_) return;
@@ -221,17 +224,40 @@ bool ConfigEditorWindow::foldLegacyInputPolicy()
 	// ADR-0023 global [vpv] keys stored in legacy [vprenderer] must migrate to [vpv]
 	// BEFORE createProfilePage("vprenderer") renames [vprenderer] -> [vprenderer.profile_1].
 	// Preserve [vpv]-over-[vprenderer] precedence and leave non-global keys untouched.
+	std::map<std::string, std::string> initialVpvKeys;
+	for (const auto& entry : document_->SectionSettings("vpv"))
+		initialVpvKeys[ConfigFile::NormalizeName(entry.first)] = entry.second;
+	std::set<std::string> handledKeys;
 	for (const auto& setting : document_->SectionSettings("vprenderer"))
 	{
 		const std::string normalizedKey = ConfigFile::NormalizeName(setting.first);
 		if (!RendererProfileConfig::ProfileSchemaHooks::IsKnownGlobalKey("vpv", normalizedKey))
 			continue;
-		if (!setting.second.empty() && document_->Get("vpv", normalizedKey.c_str()).empty())
+		if (!handledKeys.insert(normalizedKey).second)
+			continue;
+		const auto existingIt = initialVpvKeys.find(normalizedKey);
+		const bool hasExplicitVpvKey = (existingIt != initialVpvKeys.end());
+		if (!hasExplicitVpvKey)
 		{
-			document_->AddSection("vpv");
-			document_->SetKnown("vpv", normalizedKey.c_str(), setting.second);
+			// Last-wins across duplicate legacy [vprenderer] entries, matching ConfigFile::Load.
+			std::string legacyValue;
+			for (const auto& candidate : document_->SectionSettings("vprenderer"))
+				if (ConfigFile::NormalizeName(candidate.first) == normalizedKey)
+					legacyValue = candidate.second;
+			if (!legacyValue.empty())
+			{
+				document_->AddSection("vpv");
+				document_->SetKnown("vpv", normalizedKey.c_str(), legacyValue);
+			}
 		}
-		document_->RemoveKnown("vprenderer", normalizedKey.c_str());
+		else if (existingIt->second.empty() &&
+			!RendererProfileConfig::ValidateBaseSetting(normalizedKey, existingIt->second))
+		{
+			// An explicit empty [vpv] choice key already overrode the legacy [vprenderer]
+			// value above; clear all empty invalid entries so Apply saves a schema-valid file.
+			while (document_->RemoveKnown("vpv", normalizedKey.c_str())) {}
+		}
+		while (document_->RemoveKnown("vprenderer", normalizedKey.c_str())) {}
 		migratedLegacyInputPolicy = true;
 	}
 	// Removing an empty header is a visible migration (hunt 2, L9): the
