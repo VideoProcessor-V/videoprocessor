@@ -3225,8 +3225,10 @@ namespace CutFadeJudgeFadeRunTestsNs
 			using namespace VpUnit::CutFadeJudge;
 
 			auto MakeNonRigidDiscs = [](int frameIdx, double gain) -> Record {
-				const double cx1 = 42.0 + 2.0 * double(frameIdx);
-				const double cx2 = 118.0 - 2.0 * double(frameIdx);
+				// Keep each disc strictly inside its own 4x2 macro-tile ([10..45]x[10..45] and [115..150]x[45..80])
+				// so opposite-moving discs defeat rigid cell-OLS without leaking boundary dipoles across 4/8 tiles.
+				const double cx1 = 22.0 + 2.0 * double(frameIdx);
+				const double cx2 = 138.0 - 2.0 * double(frameIdx);
 				std::vector<uint16_t> half(size_t(kW) * kH);
 				for (uint32_t y = 0; y < kH; ++y)
 					for (uint32_t x = 0; x < kW; ++x)
@@ -3234,11 +3236,11 @@ namespace CutFadeJudgeFadeRunTestsNs
 						double pat = 0.48
 							+ 0.24 * std::sin(double(x) * 0.18) * std::cos(double(y) * 0.14)
 							+ 0.14 * std::cos(double(y) * 0.09);
-						const double d1 = (double(x) - cx1) * (double(x) - cx1) + (double(y) - 30.0) * (double(y) - 30.0);
-						const double d2 = (double(x) - cx2) * (double(x) - cx2) + (double(y) - 60.0) * (double(y) - 60.0);
-						if (d1 <= 100.0)
+						const double d1 = (double(x) - cx1) * (double(x) - cx1) + (double(y) - 27.0) * (double(y) - 27.0);
+						const double d2 = (double(x) - cx2) * (double(x) - cx2) + (double(y) - 62.0) * (double(y) - 62.0);
+						if (d1 <= 81.0)
 							pat = 0.94;
-						if (d2 <= 100.0)
+						if (d2 <= 81.0)
 							pat = 0.04;
 						const double v = kBlack + gain * pat * 48000.0;
 						half[size_t(y) * kW + x] = static_cast<uint16_t>((std::min)(65535.0, (std::max)(0.0, std::floor(v + 0.5))));
@@ -3247,7 +3249,7 @@ namespace CutFadeJudgeFadeRunTestsNs
 			};
 
 			const Record rBase = MakeNonRigidDiscs(0, 1.00);
-			const Record rRipple3Pct = MakeNonRigidDiscs(3, 0.97);
+			const Record rRipple3Pct = MakeNonRigidDiscs(3, 0.975);
 			const Record rFade6p5Pct = MakeNonRigidDiscs(3, 0.935);
 
 			double gBase[kGridH][kGridW], gRip[kGridH][kGridW], gFade[kGridH][kGridW];
