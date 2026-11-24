@@ -4798,7 +4798,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			// The warped planes were made for the frame Estimate saw: refuse a
 			// different size or chroma layout (e.g. 4:2:2 -> 4:2:0) rather than
 			// write into the old one.
-			if (!a.chroma || !warpedLuma || !warpedChroma || a.luma->params.w != width || a.luma->params.h != height ||
+			if (!a.luma || !a.chroma || !warpedLuma || !warpedChroma || a.luma->params.w != width || a.luma->params.h != height ||
 				a.chroma->params.w != warpedChroma->params.w || a.chroma->params.h != warpedChroma->params.h ||
 				a.chroma->params.format != warpedChroma->params.format ||
 				a.luma->params.format != warpedLuma->params.format)
