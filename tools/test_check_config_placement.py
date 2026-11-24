@@ -144,7 +144,9 @@ class OrganisationParseTests(unittest.TestCase):
     def test_own_organisation_parses_to_the_motion_cards(self):
         text = chk.read(ROOT, chk.ORG_REL)
         ids = [(c["unit"], c["id"]) for c in chk.parse_organisation(text)]
-        for want in [("motion", "taste"), ("motion", "easing"), ("motion", "easing_tuning"), ("motion", "internals")]:
+        for want in [("motion", "taste"), ("motion", "easing"), ("motion", "easing_tuning"),
+                     ("developer", "motion_internals"), ("developer", "scaling_internals"),
+                     ("developer", "input_diagnostics"), ("developer", "output_draft")]:
             self.assertIn(want, ids)
 
 
@@ -285,6 +287,8 @@ class RepositoryTests(unittest.TestCase):
 
     def test_repository_p8_5_output_enforced_and_adaptive_motion_rows_are_scaling_owned(self):
         self.assertIn("output", chk.ENFORCED_UNITS)
+        self.assertEqual(getattr(chk, "DEVELOPER_UNIT", None), "developer")
+        self.assertIn("developer", chk.ENFORCED_UNITS)
         an, cards, placement, issues = chk.analyse(ROOT)
         self.assertEqual(issues["error"] + issues["advisory"], [])
         owners = {}
@@ -293,15 +297,20 @@ class RepositoryTests(unittest.TestCase):
         for key in ("adaptive_motion", "adaptive_motion_floor", "adaptive_motion_smooth_ms",
                     "adaptive_motion_speed_hi", "adaptive_motion_speed_lo"):
             self.assertEqual(owners.get(key), ["scaling.output"], key)
-            self.assertEqual(placement[key]["unit"], "scaling", key)
+            # Unit 3 (Phase 2): adaptiveDownscale/adaptiveUpscale moved to developer/scaling_internals
+            # while remaining owned by scaling.output.
+            self.assertEqual(placement[key]["unit"], "developer", key)
+        self.assertEqual(placement["repeat_render_reuse"]["unit"], "developer")
+        self.assertEqual(placement["intent_display"]["unit"], "developer")
         self.assertIn("output.dither", owners["occlusion_mask"])
         self.assertEqual(placement["occlusion_mask"]["unit"], "output")
 
     def test_repository_enforces_the_p8_4_units_and_the_fixes_container(self):
-        for unit in ("motion", "input", "colour", "repair", "scaling", "retirement"):
+        for unit in ("motion", "input", "colour", "repair", "scaling", "retirement", "developer"):
             self.assertIn(unit, chk.ENFORCED_UNITS)
         an, cards, placement, issues = chk.analyse(ROOT)
         self.assertEqual(issues["error"], [])
+        self.assertEqual(issues["advisory"], [])
         self.assertEqual(chk.FIXES_CONTAINER_STAYS, ())
         for key in chk.FIXES_CONTAINER_STAYS:
             self.assertNotIn(key, placement, key)

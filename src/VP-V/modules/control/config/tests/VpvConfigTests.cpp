@@ -294,7 +294,7 @@ namespace
 		const QString path = WriteFixture(dir);
 		{
 			ConfigEditorWindow window(path, 0, true);
-			control<QSlider>(window, Vpv::ObjectName("global_tier"))->setValue(3);
+			control<QPushButton>(window, Vpv::ObjectName("global_tier.btn.upper"))->click();
 			QCoreApplication::processEvents();
 			require(control<QLabel>(window, Vpv::ObjectName("global_tier.name"))->text() == QStringLiteral("Upper"),
 				"global tier shows Upper");
@@ -605,11 +605,12 @@ namespace
 			QString list;
 			for (const char* group : { "A", "B", "C", "D" })
 				list += control<QLabel>(window, Vpv::ObjectName(QStringLiteral("retirement.group.") + QString::fromLatin1(group) + QStringLiteral(".list")))->text();
-			// CC-GEM P2: the two [general] candidates (magewell_recover_faults, capture_display_fixes) left Bill's General
-			// page for the VP-V Input tab's Capture fixes card (capture_display_fixes) and, MUST-C, the both-pathway Magewell
-			// fault recovery card (magewell_recover_faults); the list names those cards for them.
-			require(list.contains(QStringLiteral("VP-V &gt; Proposed retirement")) && list.contains(QStringLiteral("Capture fixes (under test)")) &&
-				list.contains(QStringLiteral("Magewell fault recovery (under test)")) &&
+			// CC-GEM P2 + Unit 3 (Phase 2): capture_display_fixes sits on Capture fixes (under test) inside Developer,
+			// and magewell_recover_faults sits on System > Capture bridges; the list names those tabs/cards for them.
+			require(list.contains(QStringLiteral("VP-V &gt; Proposed retirement")) &&
+				list.contains(QStringLiteral("VP-V &gt; Developer")) &&
+				list.contains(QStringLiteral("Capture fixes (under test)")) &&
+				list.contains(QStringLiteral("VP-V &gt; System")) &&
 				list.contains(QStringLiteral("Queue page")),
 				"the Proposed retirement tab lists the candidates with their pages");
 			require(!list.contains(QStringLiteral("no control found")), "every retirement candidate's control is found");
@@ -786,12 +787,16 @@ namespace
 			require(found != keyCard.end() && found->second.compare(0, 7, "motion/") == 0,
 				(std::string("a motion key is on a Motion card: ") + key).c_str());
 		}
-		const char* const kMotionSections[] = { "dejudder", "dejudderEstimation" };
-		for (const char* section : kMotionSections)
 		{
-			const auto found = sectionCard.find(section);
+			const auto found = sectionCard.find("dejudder");
 			require(found != sectionCard.end() && found->second.compare(0, 7, "motion/") == 0,
-				(std::string("a motion section is on a Motion card: ") + section).c_str());
+				"a motion section is on a Motion card: dejudder");
+		}
+		{
+			// Unit 3 (Phase 2): measured estimator internals live under Developer.
+			const auto found = sectionCard.find("dejudderEstimation");
+			require(found != sectionCard.end() && found->second.compare(0, 10, "developer/") == 0,
+				"the dejudderEstimation internals section is on a Developer card");
 		}
 		// P8-4 (2026-11-11): the source-resolution picture-slider keys sit on Scaling cards; the Fixes under test
 		// keys that have no card yet (tools/check_config_placement.py FIXES_CONTAINER_STAYS) are on none.
@@ -818,15 +823,14 @@ namespace
 			require(found != keyCard.end() && found->second.compare(0, 8, "scaling/") == 0,
 				"previously stranded ssim_bitrate_floor is now on a Scaling card");
 		}
-		// P8-5 (2026-11-11): the dither, grain-split and adaptive scaler rows are on their own units' cards. The adaptive_*
-		// keys (adaptive_motion* among them, built by the adaptive sections of Bill's page since 81c38abe0) resolve
-		// through the two adaptive Sections, which sit on a Scaling card.
+		// P8-5 + Unit 3 (Phase 2): the adaptive scaler measured-threshold sections moved from Scaling > Advanced
+		// to Developer (developer/scaling_internals).
 		const char* const kAdaptiveSections[] = { "adaptiveDownscale", "adaptiveUpscale" };
 		for (const char* section : kAdaptiveSections)
 		{
 			const auto found = sectionCard.find(section);
-			require(found != sectionCard.end() && found->second.compare(0, 8, "scaling/") == 0,
-				(std::string("an adaptive scaler section is on a Scaling card: ") + section).c_str());
+			require(found != sectionCard.end() && found->second.compare(0, 10, "developer/") == 0,
+				(std::string("an adaptive scaler internals section is on a Developer card: ") + section).c_str());
 		}
 		const char* const kOutputKeys[] = { "temporal_dither", "dither_grain_tolerance_scale" };
 		for (const char* key : kOutputKeys)
@@ -1381,8 +1385,12 @@ namespace
 				planned.contains(QStringLiteral("Nothing was changed")), (std::string("the planned step explains itself: ") + u.id).c_str());
 		}
 		require(tiered == 4, "motion, repair, scaling and output are the tiered units");
-		// The global tier has the same four steps, Upper included.
-		require(control<QSlider>(window, Vpv::ObjectName("global_tier"))->maximum() == 3, "the global tier has four steps");
+		// Unit 3 (Phase 2): the global tier offers the same four clickable preset buttons (Classic / Low / Mid / Upper).
+		for (const char* step : { "classic", "low", "mid", "upper" })
+		{
+			auto* btn = control<QPushButton>(window, Vpv::ObjectName(QStringLiteral("global_tier.btn.") + QString::fromLatin1(step)));
+			require(btn->isCheckable(), (std::string("global tier preset button is not checkable: ") + step).c_str());
+		}
 		// A control the Original pathway greys says why (the frame analysis store).
 		control<QComboBox>(window, Vpv::ObjectName("pathway"))->setCurrentIndex(1);
 		QCoreApplication::processEvents();
@@ -1536,9 +1544,9 @@ namespace
 		QTemporaryDir dir;
 		const QString path = WriteFixture(dir, "[general]\nrenderer: VP Renderer\n[vpv]\npipeline_original_pathway: on\n");
 		ConfigEditorWindow window(path, 0, true);
-		for (const char* id : { "input", "reports", "keyboard", "bill" })
-			require(window.findChildren<QWidget*>(QStringLiteral("vpv.both.card.") + QString::fromLatin1(id)).size() == 1,
-				(std::string("both-pathway card not there exactly once: ") + id).c_str());
+		for (const char* id : { "capture_bridges", "shortcuts_reports" })
+			require(window.findChildren<QWidget*>(QStringLiteral("vpv.system.card.") + QString::fromLatin1(id)).size() == 1,
+				(std::string("System card not there exactly once: ") + id).c_str());
 		for (const char* name : { "config.decklink.ycbcr_12bit_capture", "config.general.dv_tunnel_handoff",
 				"config.general.newlldv_sdr_veto", "config.logging.auto_report", "config.logging.report_thumbnail",
 				"config.logging.open_reports", "config.shortcuts.global_hotkeys", "config.shortcuts.global_actions",
@@ -1630,9 +1638,9 @@ namespace
 			QStringLiteral("pageViewport"));
 		require(general != nullptr, "Bill's General page not found");
 		const char* const inputCard = "vpv.input.card.capture_fixes";
-		const char* const magewellCard = "vpv.both.card.magewell_recovery";
-		const char* const roomCard = "vpv.both.card.room_lights";
-		const char* const fileCard = "vpv.both.card.file_playback";
+		const char* const magewellCard = "vpv.system.card.capture_bridges";
+		const char* const roomCard = "vpv.system.card.room_lights";
+		const char* const fileCard = "vpv.system.card.file_playback";
 		const std::pair<const char*, const char*> moved[] = {
 			{ "config.general.magewell_recover_faults", magewellCard }, { "config.general.capture_display_fixes", inputCard },
 			{ "config.ambient.mode", roomCard }, { "config.ambient.room", roomCard }, { "config.ambient.lux_lit", roomCard },
@@ -1778,7 +1786,7 @@ namespace
 			"[vprenderer.scaling.Named]\nchroma_upscaler: bicubic\n");
 		ConfigEditorWindow window(path, 0, true);
 		auto* section = control<QWidget>(window, Vpv::ObjectName(QStringLiteral("section")));
-		auto* card = control<QWidget>(window, Vpv::ObjectName(QStringLiteral("both.card.profile_use_queue")));
+		auto* card = control<QWidget>(window, Vpv::ObjectName(QStringLiteral("system.card.profile_rules")));
 		require(section->isAncestorOf(card), "the queue Profile use card is not on the VP-V page");
 		require(section->isAncestorOf(control<QWidget>(window, QStringLiteral("config.queue.rate_rule"))), "the queue rate rule is not on the VP-V page");
 		auto* picker = control<QComboBox>(window, Vpv::ObjectName(QStringLiteral("both.queue.profile")));
@@ -2278,11 +2286,11 @@ namespace
 		auto* allRawGroup = window.findChild<QWidget*>(QStringLiteral("rendererSection.allRawGroup"));
 		require(allRawGroup && allRawGroup->isHidden(),
 			"allRawGroup auto-hides once repeat_render_reuse is placed");
-		auto* draftBody = control<QWidget>(window, Vpv::ObjectName("output.card.draft.body"));
+		auto* draftBody = control<QWidget>(window, Vpv::ObjectName("developer.card.output_draft.body"));
 		auto* reuse = control<QComboBox>(window, QStringLiteral("config.vprenderer.repeat_render_reuse"));
 		require(draftBody->isAncestorOf(reuse) && !draftBody->isEnabled() &&
 			draftBody->toolTip().contains(QStringLiteral("Draft, no effect yet")),
-			"repeat_render_reuse is placed under Output > Advanced > Draft (disabled, not a live control)");
+			"repeat_render_reuse is placed under Developer > Draft (disabled, not a live control)");
 
 		// GEM-048 + 223: click every <a href> link in vpv.<unit>.more and verify target page/tab.
 		const QRegularExpression hrefRe(QStringLiteral("href=\"([^\"]+)\""));
@@ -2514,21 +2522,21 @@ namespace
 		int bothIdx = -1;
 		for (int i = 0; i < units->count(); ++i)
 			if (units->widget(i) == bothTab) { bothIdx = i; break; }
-		require(bothIdx >= 0 && units->tabText(bothIdx) == QStringLiteral("Both pathways"),
-			"GEM-058: 'On both pathways' cards have their own tab on vpv.units");
+		require(bothIdx >= 0 && units->tabText(bothIdx) == QStringLiteral("System"),
+			"GEM-058 + Unit 3: 'On both pathways' cards live on the System tab of vpv.units");
 
-		// Both-pathway cards appear once inside Both pathways tab and never under any unit tab.
-		for (const char* id : { "input", "reports", "keyboard", "bill" })
+		// Consolidated System cards appear once inside System (vpv.both) and never under any unit tab.
+		for (const char* id : { "room_lights", "capture_bridges", "file_playback", "shortcuts_reports", "profile_rules" })
 		{
-			const QString name = QStringLiteral("vpv.both.card.") + QString::fromLatin1(id);
+			const QString name = QStringLiteral("vpv.system.card.") + QString::fromLatin1(id);
 			const QList<QWidget*> found = window.findChildren<QWidget*>(name);
 			require(found.size() == 1 && bothTab->isAncestorOf(found.front()),
-				(std::string("GEM-058: both-pathway card not solely on Both pathways tab: ") + id).c_str());
+				(std::string("GEM-058 + Unit 3: System card not solely on System tab: ") + id).c_str());
 			for (const char* u : { "input", "motion", "repair", "scaling", "colour", "output" })
 			{
 				auto* unitPage = control<QWidget>(window, Vpv::ObjectName(QString::fromLatin1(u)));
 				require(!unitPage->isAncestorOf(found.front()),
-					(std::string("GEM-058: both-pathway card leaked under unit tab ") + u).c_str());
+					(std::string("GEM-058 + Unit 3: System card leaked under unit tab ") + u).c_str());
 			}
 		}
 
@@ -2536,12 +2544,18 @@ namespace
 		auto* inputTab = control<QWidget>(window, Vpv::ObjectName("input"));
 		auto* queueCard = control<QWidget>(window, Vpv::ObjectName("input.card.queue_target"));
 		require(inputTab->isAncestorOf(queueCard) && !bothTab->isAncestorOf(queueCard),
-			"GEM-049: queue_target lives under Input, not Both pathways");
+			"GEM-049: queue_target lives under Input, not System");
 
-		// Proposed retirement decision cards stay intact (REPLACE collapse per owner Q7).
-		auto* overviewMore = control<QTabWidget>(window, Vpv::ObjectName("overview.more"));
-		require(overviewMore->count() >= 2 && overviewMore->tabText(0) == QStringLiteral("Proposed retirement"),
-			"GEM-058: Proposed retirement tab stays intact");
+		// Proposed retirement and Pipeline (expert) moved from Overview to Developer sub-tabs (Unit 3).
+		auto* devPages = control<QTabWidget>(window, Vpv::ObjectName("developer.pages"));
+		auto* retirementPage = control<QWidget>(window, Vpv::ObjectName("retirement"));
+		auto* expertPage = control<QWidget>(window, Vpv::ObjectName("expert"));
+		bool hasRetirementTab = false;
+		for (int i = 0; i < devPages->count(); ++i)
+			if (devPages->tabText(i) == QStringLiteral("Proposed retirement")) hasRetirementTab = true;
+		require(devPages->count() >= 2 && hasRetirementTab &&
+			devPages->isAncestorOf(retirementPage) && devPages->isAncestorOf(expertPage),
+			"GEM-058 + Unit 3: Developer sub-tabs (vpv.developer.pages) hold Proposed retirement and Expert");
 
 		// Original pathway disables Input + queue_target radios while keeping Both pathways tab unlocked.
 		control<QComboBox>(window, Vpv::ObjectName("pathway"))->setCurrentIndex(1);
@@ -4974,12 +4988,11 @@ namespace
 			require(hasCI(outputTexts[2], "vp") || hasCI(outputTexts[2], "sigma") || hasCI(outputTexts[2], "on"),
 				("Unit 2: Output Mid summary must state VP/sigma-delta/on, got: " + S(outputTexts[2])).c_str());
 
-			// Overview global tier summary (Classic 0 -> Low 1 -> Mid 2 -> Upper 3).
-			auto* globalSlider = control<QSlider>(window, Vpv::ObjectName("global_tier"));
+			// Overview global tier summary (Classic -> Low -> Mid -> Upper via Unit 3 preset buttons).
 			QStringList globalTexts;
-			for (int step = 0; step <= 3; ++step)
+			for (const char* step : { "classic", "low", "mid", "upper" })
 			{
-				globalSlider->setValue(step);
+				control<QPushButton>(window, Vpv::ObjectName(QStringLiteral("global_tier.btn.") + QString::fromLatin1(step)))->click();
 				QCoreApplication::processEvents();
 				globalTexts << globalSummary->text();
 			}
@@ -5160,6 +5173,423 @@ namespace
 				("Unit 2: unset vpv.input.delay must point to Input > Main: " + S(delayUnset)).c_str());
 		}
 	}
+
+	// Unit 3 (Phase 2) Red-Team adversarial test 1: Developer tab is hidden by default behind vpv.developer.toggle,
+	// holds expert/retirement/camera_debug(18)/internals/diagnostics/draft/capture_fixes/planned/stages, keeps everyday
+	// tabs clean (negative controls), falls back to Overview when hidden while active, and camera_model still enables/disables
+	// all 18 camera debug controls across the Motion -> Developer boundary.
+	void testDeveloperTabHiddenByDefaultAndToggleable()
+	{
+		Vpv::RegisterConfigProviders();
+		static const char* const kCameraBoolDebugKeys[] = {
+			"camera_labels_gpu", "camera_meas_model_global", "camera_meas_guided_candidate",
+			"camera_meas_narrow_window", "camera_meas_e1_skip", "camera_meas_static_gate", "camera_meas_cut_skip",
+			"camera_meas_fade_normalised", "camera_meas_flash_bridge", "camera_meas_temporal_seed", "camera_meas_tiny_mover_roi",
+			"camera_use_grain", "camera_use_detail", "camera_use_dither", "camera_use_deband", "camera_use_filler", "camera_use_dejudder"
+		};
+		QTemporaryDir dir;
+		const QString path = WriteFixture(dir,
+			"[general]\nrenderer: VP Renderer\n"
+			"[vprenderer]\nsdr_target_nits: 100\n"
+			"[queue]\ntarget_latency_ms: 250\n");
+		ConfigEditorWindow window(path, 0, true);
+		QCoreApplication::processEvents();
+
+		auto* units = control<QTabWidget>(window, Vpv::ObjectName("units"));
+		auto* devToggle = control<QCheckBox>(window, Vpv::ObjectName("developer.toggle"));
+		require(!devToggle->isChecked(), "Unit 3: vpv.developer.toggle must start unchecked by default");
+
+		auto* devTab = control<QWidget>(window, Vpv::ObjectName("developer"));
+		int devIdx = -1;
+		for (int i = 0; i < units->count(); ++i)
+			if (units->widget(i) == devTab) { devIdx = i; break; }
+		require(devIdx >= 0, "Unit 3: vpv.developer must exist as a tab on vpv.units");
+		require(!units->isTabVisible(devIdx), "Unit 3: vpv.developer tab must be hidden by default");
+
+		// Positive placement assertions: all developer/diagnostic/internal/planned/stages cards live under vpv.developer.
+		auto* expert = control<QWidget>(window, Vpv::ObjectName("expert"));
+		auto* retirement = control<QWidget>(window, Vpv::ObjectName("retirement"));
+		auto* cameraDebugCard = control<QWidget>(window, Vpv::ObjectName("developer.card.camera_debug"));
+		auto* motionInternalsCard = control<QWidget>(window, Vpv::ObjectName("developer.card.motion_internals"));
+		auto* scalingInternalsCard = control<QWidget>(window, Vpv::ObjectName("developer.card.scaling_internals"));
+		auto* inputDiagCard = control<QWidget>(window, Vpv::ObjectName("developer.card.input_diagnostics"));
+		auto* outputDraftCard = control<QWidget>(window, Vpv::ObjectName("developer.card.output_draft"));
+		auto* outputDraftBody = control<QWidget>(window, Vpv::ObjectName("developer.card.output_draft.body"));
+		auto* captureFixesCard = control<QWidget>(window, Vpv::ObjectName("input.card.capture_fixes"));
+		auto* repairPlannedCard = control<QWidget>(window, Vpv::ObjectName("repair.card.planned"));
+		auto* repairStagesCard = control<QWidget>(window, Vpv::ObjectName("repair.card.stages"));
+
+		require(devTab->isAncestorOf(expert) && devTab->isAncestorOf(retirement),
+			"Unit 3: vpv.developer must be an ancestor of vpv.expert and vpv.retirement");
+		require(devTab->isAncestorOf(cameraDebugCard),
+			"Unit 3: vpv.developer must be an ancestor of vpv.developer.card.camera_debug");
+		require(devTab->isAncestorOf(motionInternalsCard) &&
+			motionInternalsCard->isAncestorOf(control<QWidget>(window, QStringLiteral("rendererSection.dejudderEstimation"))),
+			"Unit 3: vpv.developer.card.motion_internals must hold rendererSection.dejudderEstimation");
+		require(devTab->isAncestorOf(scalingInternalsCard) &&
+			scalingInternalsCard->isAncestorOf(control<QWidget>(window, QStringLiteral("rendererSection.adaptiveDownscale"))) &&
+			scalingInternalsCard->isAncestorOf(control<QWidget>(window, QStringLiteral("rendererSection.adaptiveUpscale"))),
+			"Unit 3: vpv.developer.card.scaling_internals must hold adaptiveDownscale and adaptiveUpscale");
+		require(devTab->isAncestorOf(inputDiagCard) &&
+			inputDiagCard->isAncestorOf(control<QWidget>(window, QStringLiteral("config.vprenderer.intent_display"))),
+			"Unit 3: vpv.developer.card.input_diagnostics must hold config.vprenderer.intent_display");
+		auto* repeatReuse = control<QComboBox>(window, QStringLiteral("config.vprenderer.repeat_render_reuse"));
+		require(devTab->isAncestorOf(outputDraftCard) && outputDraftBody->isAncestorOf(repeatReuse) &&
+			!outputDraftBody->isEnabled() && !repeatReuse->isEnabled() &&
+			outputDraftBody->toolTip().contains(QStringLiteral("Draft, no effect yet")),
+			"Unit 3: vpv.developer.card.output_draft must hold repeat_render_reuse disabled with 'Draft, no effect yet'");
+		require(devTab->isAncestorOf(captureFixesCard) &&
+			captureFixesCard->isAncestorOf(control<QWidget>(window, QStringLiteral("config.general.capture_display_fixes"))),
+			"Unit 3: vpv.input.card.capture_fixes (capture_display_fixes) must live inside vpv.developer");
+		require(devTab->isAncestorOf(repairPlannedCard) && devTab->isAncestorOf(repairStagesCard),
+			"Unit 3: per-unit planned and stages cards (vpv.repair.card.planned/stages) must live inside vpv.developer");
+
+		// All 18 [vpv.camera] debug controls live inside vpv.developer.card.camera_debug (and NOT under vpv.motion).
+		auto* motionTab = control<QWidget>(window, Vpv::ObjectName("motion"));
+		auto* motionMain = control<QWidget>(window, Vpv::ObjectName("motion.main"));
+		auto* motionCameraCard = control<QWidget>(window, Vpv::ObjectName("motion.card.camera"));
+		auto* cameraModel = control<QCheckBox>(window, Vpv::ObjectName("camera.camera_model"));
+		auto* cameraOverlay = control<QComboBox>(window, Vpv::ObjectName("camera.camera_model_overlay"));
+		require(cameraDebugCard->isAncestorOf(cameraOverlay) && !motionTab->isAncestorOf(cameraOverlay),
+			"Unit 3: vpv.camera.camera_model_overlay must live inside vpv.developer.card.camera_debug, not vpv.motion");
+		for (const char* key : kCameraBoolDebugKeys)
+		{
+			auto* box = control<QCheckBox>(window, Vpv::ObjectName(QStringLiteral("camera.") + QString::fromLatin1(key)));
+			require(cameraDebugCard->isAncestorOf(box),
+				(std::string("Unit 3: camera debug switch must live inside vpv.developer.card.camera_debug: ") + key).c_str());
+			require(!motionTab->isAncestorOf(box),
+				(std::string("Unit 3 negative control: camera debug switch must NOT live inside vpv.motion: ") + key).c_str());
+		}
+
+		// Negative controls (everyday cleanliness): everyday tabs stay uncluttered.
+		auto* overview = control<QWidget>(window, Vpv::ObjectName("overview"));
+		auto* inputTab = control<QWidget>(window, Vpv::ObjectName("input"));
+		auto* inputMain = control<QWidget>(window, Vpv::ObjectName("input.main"));
+		auto* repairTab = control<QWidget>(window, Vpv::ObjectName("repair"));
+		require(!overview->isAncestorOf(retirement) && !overview->isAncestorOf(expert),
+			"Unit 3 negative control: vpv.overview must NOT be an ancestor of vpv.retirement or vpv.expert");
+		require(!inputMain->isAncestorOf(captureFixesCard) && !inputTab->isAncestorOf(captureFixesCard),
+			"Unit 3 negative control: vpv.input.main / vpv.input must NOT be an ancestor of vpv.input.card.capture_fixes");
+		require(motionMain->isAncestorOf(motionCameraCard) && motionCameraCard->isAncestorOf(cameraModel),
+			"Unit 3: vpv.motion.main must be an ancestor of vpv.motion.card.camera holding vpv.camera.camera_model");
+		require(!repairTab->isAncestorOf(repairPlannedCard) && !repairTab->isAncestorOf(repairStagesCard),
+			"Unit 3 negative control: vpv.repair must NOT be an ancestor of vpv.repair.card.planned or vpv.repair.card.stages");
+
+		// Toggling vpv.developer.toggle shows/hides Developer tab and falls back cleanly to Overview (index 0).
+		devToggle->setChecked(true);
+		QCoreApplication::processEvents();
+		require(units->isTabVisible(devIdx), "Unit 3: checking vpv.developer.toggle must show the Developer tab");
+		units->setCurrentIndex(devIdx);
+		QCoreApplication::processEvents();
+		require(units->currentIndex() == devIdx, "Unit 3: Developer tab must be selectable when visible");
+		devToggle->setChecked(false);
+		QCoreApplication::processEvents();
+		require(!units->isTabVisible(devIdx), "Unit 3: unchecking vpv.developer.toggle must hide the Developer tab");
+		require(units->currentIndex() == 0, "Unit 3: hiding active Developer tab must fall back cleanly to Overview (index 0)");
+
+		// Cross-tab master/derived lock: vpv.camera.camera_model on Motion > Main enables/disables all 18 debug controls in Developer.
+		require(!cameraModel->isChecked() && !cameraOverlay->isEnabled(),
+			"Unit 3 negative control: camera_model starts off and camera_model_overlay starts disabled");
+		for (const char* key : kCameraBoolDebugKeys)
+			require(!control<QCheckBox>(window, Vpv::ObjectName(QStringLiteral("camera.") + QString::fromLatin1(key)))->isEnabled(),
+				(std::string("Unit 3: camera debug switch must start disabled when camera_model is off: ") + key).c_str());
+
+		cameraModel->setChecked(true);
+		QCoreApplication::processEvents();
+		require(cameraOverlay->isEnabled(), "Unit 3: turning camera_model ON must enable camera_model_overlay in Developer");
+		for (const char* key : kCameraBoolDebugKeys)
+			require(control<QCheckBox>(window, Vpv::ObjectName(QStringLiteral("camera.") + QString::fromLatin1(key)))->isEnabled(),
+				(std::string("Unit 3: turning camera_model ON must enable camera debug switch in Developer: ") + key).c_str());
+
+		cameraModel->setChecked(false);
+		QCoreApplication::processEvents();
+		require(!cameraOverlay->isEnabled(), "Unit 3: turning camera_model OFF must disable camera_model_overlay in Developer");
+		for (const char* key : kCameraBoolDebugKeys)
+			require(!control<QCheckBox>(window, Vpv::ObjectName(QStringLiteral("camera.") + QString::fromLatin1(key)))->isEnabled(),
+				(std::string("Unit 3: turning camera_model OFF must disable camera debug switch in Developer: ") + key).c_str());
+	}
+
+	// Unit 3 (Phase 2) Red-Team adversarial test 2: Clean Overview dashboard — vpv.overview.more removed, status card
+	// holds pathway/chips/fallbacks (with 1000 ms QTimer direct child), 4 clickable global tier preset buttons + reset
+	// work end-to-end with clarity summary updates, precision card holds fbo_float32 + note, launch card holds both
+	// Dynamic Drive and Calibration buttons.
+	void testCleanOverviewDashboardAndPresetButtons()
+	{
+		Vpv::RegisterConfigProviders();
+		QTemporaryDir dir;
+		const QString path = WriteFixture(dir,
+			"[general]\nrenderer: VP Renderer\n"
+			"[vprenderer]\nsdr_target_nits: 100\n"
+			"[queue]\ntarget_latency_ms: 250\n"
+			"[led_drive.Default]\nenabled: true\ncommand_source: compensate\n"
+			"[projector.Default]\nprotocol: barco_ascii\nport: COM1\n");
+		ConfigEditorWindow window(path, 0, true);
+		QCoreApplication::processEvents();
+
+		auto* overview = control<QWidget>(window, Vpv::ObjectName("overview"));
+		// 1. Nested vpv.overview.more sub-tabs are completely gone.
+		require(window.findChild<QWidget*>(Vpv::ObjectName("overview.more")) == nullptr,
+			"Unit 3: nested vpv.overview.more sub-tabs must no longer exist");
+
+		// 2. Status card holds pathway status, global tier chips, and fallbacks (with its 1000 ms QTimer direct child).
+		auto* statusCard = control<QWidget>(window, Vpv::ObjectName("overview.card.status"));
+		auto* pathwayStatus = control<QLabel>(window, Vpv::ObjectName("overview.status.pathway"));
+		auto* chips = control<QLabel>(window, Vpv::ObjectName("global_tier.chips"));
+		auto* fallbacks = control<QLabel>(window, Vpv::ObjectName("fallbacks"));
+		require(overview->isAncestorOf(statusCard) &&
+			statusCard->isAncestorOf(pathwayStatus) && !pathwayStatus->text().trimmed().isEmpty() &&
+			statusCard->isAncestorOf(chips) && !chips->text().trimmed().isEmpty() &&
+			statusCard->isAncestorOf(fallbacks),
+			"Unit 3: vpv.overview.card.status must live in Overview and hold pathway, chips, and fallbacks");
+		bool has1000MsTimer = false;
+		for (QTimer* t : fallbacks->findChildren<QTimer*>(QString(), Qt::FindDirectChildrenOnly))
+			if (t->interval() == 1000) has1000MsTimer = true;
+		require(has1000MsTimer, "Unit 3: vpv.fallbacks must keep its 1000 ms QTimer as a direct child");
+
+		// 3. 4 clickable preset buttons + reset button + visible non-empty summary.
+		auto* btnClassic = control<QPushButton>(window, Vpv::ObjectName("global_tier.btn.classic"));
+		auto* btnLow = control<QPushButton>(window, Vpv::ObjectName("global_tier.btn.low"));
+		auto* btnMid = control<QPushButton>(window, Vpv::ObjectName("global_tier.btn.mid"));
+		auto* btnUpper = control<QPushButton>(window, Vpv::ObjectName("global_tier.btn.upper"));
+		auto* btnReset = control<QPushButton>(window, Vpv::ObjectName("global_tier.reset"));
+		auto* globalName = control<QLabel>(window, Vpv::ObjectName("global_tier.name"));
+		auto* globalSummary = control<QLabel>(window, Vpv::ObjectName("global_tier.summary"));
+		for (QPushButton* b : { btnClassic, btnLow, btnMid, btnUpper })
+			require(overview->isAncestorOf(b) && b->isCheckable(),
+				("Unit 3: global tier preset button must be checkable and on Overview: " + S(b->objectName())).c_str());
+		require(overview->isAncestorOf(btnReset), "Unit 3: vpv.global_tier.reset must live on Overview");
+		require(!globalSummary->isHidden() && !globalSummary->text().trimmed().isEmpty(),
+			"Unit 3: vpv.global_tier.summary must be visible and non-empty");
+
+		// Negative control: shipped default is Mixed, so none of the 4 uniform preset buttons start checked.
+		const QString initialSummary = globalSummary->text();
+		require(!btnClassic->isChecked() && !btnLow->isChecked() && !btnMid->isChecked() && !btnUpper->isChecked(),
+			"Unit 3 negative control: shipped Mixed default must leave all 4 uniform preset buttons unchecked");
+
+		auto* motionTier = control<QSlider>(window, Vpv::ObjectName("motion.tier"));
+		auto* repairTier = control<QSlider>(window, Vpv::ObjectName("repair.tier"));
+		auto* scalingTier = control<QSlider>(window, Vpv::ObjectName("scaling.tier"));
+		auto* outputTier = control<QSlider>(window, Vpv::ObjectName("output.tier"));
+		auto* debandVp = control<QComboBox>(window, QStringLiteral("config.vprenderer.deband_vp"));
+		auto effectiveValue = [](QComboBox* combo) -> QString
+		{
+			const QString d = combo->currentData().toString().trimmed();
+			return d.isEmpty() ? combo->property("effectiveValue").toString().trimmed() : d;
+		};
+
+		// Click Upper preset button.
+		btnUpper->click();
+		QCoreApplication::processEvents();
+		require(globalName->text() == QStringLiteral("Upper"),
+			("Unit 3: clicking Upper must set vpv.global_tier.name to Upper, got: " + S(globalName->text())).c_str());
+		require(motionTier->value() == 3, "Unit 3: Upper preset must set Motion tier to 3");
+		require(repairTier->value() == 2 || repairTier->value() == 3,
+			"Unit 3: Upper preset must set Repair tier to Mid (2) or Upper (3)");
+		require(scalingTier->value() == 2 && outputTier->value() == 2,
+			"Unit 3: Upper preset must set Scaling and Output to their nearest built tier (Mid = 2)");
+		const QString upperSummary = globalSummary->text();
+		require(!upperSummary.trimmed().isEmpty() && upperSummary != initialSummary,
+			"Unit 3: clicking Upper must update vpv.global_tier.summary");
+		require(btnUpper->isChecked() && !btnClassic->isChecked() && !btnLow->isChecked() && !btnMid->isChecked(),
+			"Unit 3: clicking Upper must check btn.upper exclusively");
+
+		// Click Low preset button.
+		btnLow->click();
+		QCoreApplication::processEvents();
+		require(motionTier->value() == 1 && repairTier->value() == 1 && scalingTier->value() == 1 && outputTier->value() == 1,
+			"Unit 3: clicking Low must move all 4 tiered units to Low (1)");
+		require(effectiveValue(debandVp).compare(QStringLiteral("auto"), Qt::CaseInsensitive) == 0,
+			("Unit 3: Low preset must set Repair deband_vp=auto, got: " + S(effectiveValue(debandVp))).c_str());
+		require(btnLow->isChecked() && !btnUpper->isChecked() && !btnClassic->isChecked() && !btnMid->isChecked(),
+			"Unit 3: clicking Low must check btn.low exclusively");
+		require(!globalSummary->text().trimmed().isEmpty() && globalSummary->text() != upperSummary,
+			"Unit 3: clicking Low must update vpv.global_tier.summary");
+
+		// Click Reset button -> shipped default mix returns (Motion: Mid, Repair: Classic, Scaling: Low, Output: Low).
+		btnReset->click();
+		QCoreApplication::processEvents();
+		require(motionTier->value() == 2 && repairTier->value() == 0 && scalingTier->value() == 1 && outputTier->value() == 1,
+			"Unit 3: clicking vpv.global_tier.reset must restore shipped default mix (Motion: Mid, Repair: Classic, Scaling: Low, Output: Low)");
+		require(!btnClassic->isChecked() && !btnLow->isChecked() && !btnMid->isChecked() && !btnUpper->isChecked(),
+			"Unit 3: after reset to shipped Mixed default, none of the 4 uniform preset buttons stay checked");
+
+		// 4. Precision card and Launch card.
+		auto* precisionCard = control<QWidget>(window, Vpv::ObjectName("overview.card.precision"));
+		require(overview->isAncestorOf(precisionCard) &&
+			precisionCard->isAncestorOf(control<QWidget>(window, Vpv::ObjectName("colour.fbo_float32"))) &&
+			precisionCard->isAncestorOf(control<QLabel>(window, Vpv::ObjectName("full_precision.note"))),
+			"Unit 3: vpv.overview.card.precision must hold vpv.colour.fbo_float32 and vpv.full_precision.note");
+
+		auto* launchCard = control<QWidget>(window, Vpv::ObjectName("overview.card.launch"));
+		auto* openDrive = control<QPushButton>(window, Vpv::ObjectName("drive.subpage.Dynamic Drive"));
+		auto* openCal = control<QPushButton>(window, Vpv::ObjectName("output.subpage.Calibration"));
+		require(overview->isAncestorOf(launchCard) && launchCard->isAncestorOf(openDrive) && launchCard->isAncestorOf(openCal),
+			"Unit 3: vpv.overview.card.launch must hold BOTH vpv.drive.subpage.Dynamic Drive and vpv.output.subpage.Calibration");
+	}
+
+	// Unit 3 (Phase 2) Red-Team adversarial test 3: System tab (vpv.both) renamed "System", holds the exact 5
+	// consolidated cards, stays unlocked & editable on Original pathway while VP-V unit tabs lock, and every page
+	// (Overview, unit tabs, System, Developer when shown, Dynamic Drive, Calibration) fits 1040x700 with 0 px horizontal scroll.
+	void testSystemTabFiveCardsAndOriginalUnlocked()
+	{
+		Vpv::RegisterConfigProviders();
+		QTemporaryDir dir;
+		const QString path = WriteFixture(dir,
+			"[general]\nrenderer: VP Renderer\n"
+			"[vprenderer]\nsdr_target_nits: 100\n"
+			"[vprenderer.Cinema]\nquality: high\n"
+			"[queue]\ntarget_latency_ms: 250\n"
+			"[led_drive.Default]\nenabled: true\ncommand_source: compensate\n"
+			"[projector.Default]\nprotocol: barco_ascii\nport: COM1\n");
+		ConfigEditorWindow window(path, 0, true);
+		QCoreApplication::processEvents();
+
+		auto* units = control<QTabWidget>(window, Vpv::ObjectName("units"));
+		auto* systemTab = control<QWidget>(window, Vpv::ObjectName("both"));
+		int bothIdx = -1;
+		for (int i = 0; i < units->count(); ++i)
+			if (units->widget(i) == systemTab) { bothIdx = i; break; }
+		require(bothIdx >= 0 && units->tabText(bothIdx) == QStringLiteral("System"),
+			("Unit 3: vpv.both tab must be titled 'System', got: " + (bothIdx >= 0 ? S(units->tabText(bothIdx)) : std::string("<missing>"))).c_str());
+
+		struct SystemCardSpec { const char* id; std::vector<const char*> controls; std::vector<const char*> notes; };
+		const std::vector<SystemCardSpec> expectedCards = {
+			{ "room_lights",
+				{ "config.ambient.mode", "config.ambient.room", "config.ambient.lux_lit", "config.ambient.lux_dark",
+				  "config.ambient.hold_s", "config.ambient.port", "config.ambient.baud" },
+				{ "vpv.both.room_lights.note" } },
+			{ "capture_bridges",
+				{ "config.decklink.ycbcr_12bit_capture", "config.general.dv_tunnel_handoff",
+				  "config.general.newlldv_sdr_veto", "config.general.bounded_invalid_capture_recovery",
+				  "config.general.magewell_recover_faults" },
+				{ "vpv.both.magewell_recovery.note" } },
+			{ "file_playback",
+				{ "config.general.file_av_offset_ms", "config.general.file_led_holdover_ms" },
+				{} },
+			{ "shortcuts_reports",
+				{ "config.shortcuts.global_hotkeys", "config.shortcuts.global_actions",
+				  "config.logging.auto_report", "config.logging.report_thumbnail", "config.logging.open_reports" },
+				{} },
+			{ "profile_rules",
+				{ "vpv.both.queue.profile", "vpv.both.vprenderer.profile" },
+				{} },
+		};
+
+		for (const SystemCardSpec& spec : expectedCards)
+		{
+			const QString cardName = QStringLiteral("vpv.system.card.") + QString::fromLatin1(spec.id);
+			const QList<QWidget*> found = window.findChildren<QWidget*>(cardName);
+			require(found.size() == 1 && systemTab->isAncestorOf(found.front()),
+				(std::string("Unit 3: System card missing or outside vpv.both: ") + spec.id).c_str());
+			QWidget* card = found.front();
+			for (const char* u : { "overview", "input", "motion", "repair", "scaling", "colour", "output" })
+				require(!control<QWidget>(window, Vpv::ObjectName(QString::fromLatin1(u)))->isAncestorOf(card),
+					(std::string("Unit 3 negative control: System card leaked under ") + u + ": " + spec.id).c_str());
+			for (const char* ctrl : spec.controls)
+				require(card->isAncestorOf(control<QWidget>(window, QString::fromLatin1(ctrl))),
+					(std::string("Unit 3: control not inside vpv.system.card.") + spec.id + ": " + ctrl).c_str());
+			for (const char* note : spec.notes)
+				require(card->isAncestorOf(control<QLabel>(window, QString::fromLatin1(note))),
+					(std::string("Unit 3: note not inside vpv.system.card.") + spec.id + ": " + note).c_str());
+		}
+
+		// Negative control: old fragmented vpv.both.card.* wrappers must be consolidated away.
+		for (const char* oldId : { "input", "reports", "keyboard", "bill", "room_lights", "file_playback",
+			"magewell_recovery", "profile_use_queue", "profile_use_vprenderer" })
+		{
+			require(window.findChild<QWidget*>(QStringLiteral("vpv.both.card.") + QString::fromLatin1(oldId)) == nullptr,
+				(std::string("Unit 3 negative control: stale fragmented card still exists: vpv.both.card.") + oldId).c_str());
+		}
+
+		// Switch to Original pathway (index 1): VP-V unit tabs disable, System stays enabled & clickable, and all controls in all 5 cards stay enabled.
+		auto* pathway = control<QComboBox>(window, Vpv::ObjectName("pathway"));
+		pathway->setCurrentIndex(1);
+		QCoreApplication::processEvents();
+		require(!control<QWidget>(window, Vpv::ObjectName("input"))->isEnabled() &&
+			!control<QWidget>(window, Vpv::ObjectName("motion"))->isEnabled(),
+			"Unit 3 negative control: Original pathway must disable VP-V unit tabs");
+		require(systemTab->isEnabled() && units->isTabEnabled(bothIdx),
+			"Unit 3: System tab must stay enabled on the Original pathway");
+		units->setCurrentIndex(bothIdx);
+		QCoreApplication::processEvents();
+		require(units->currentIndex() == bothIdx, "Unit 3: System tab must stay clickable on the Original pathway");
+		for (const SystemCardSpec& spec : expectedCards)
+			for (const char* ctrl : spec.controls)
+				require(control<QWidget>(window, QString::fromLatin1(ctrl))->isEnabled(),
+					(std::string("Unit 3: System card control disabled on Original pathway: ") + ctrl).c_str());
+
+		pathway->setCurrentIndex(0);
+		QCoreApplication::processEvents();
+
+		// Width/scroll fit at 1040x700 across Overview, every unit tab, System, Developer (when shown), Dynamic Drive, and Calibration.
+		if (QFontDatabase::families().isEmpty())
+			return;
+
+		control<QCheckBox>(window, Vpv::ObjectName("developer.toggle"))->setChecked(true);
+		QCoreApplication::processEvents();
+
+		window.resize(1040, 700);
+		window.show();
+		QCoreApplication::processEvents();
+
+		auto* pages = control<QStackedWidget>(window, QStringLiteral("settingsPages"));
+		auto findScrollFor = [](QWidget* w) -> QScrollArea*
+		{
+			for (QWidget* p = w; p; p = p->parentWidget())
+				if (auto* sa = qobject_cast<QScrollArea*>(p)) return sa;
+			return nullptr;
+		};
+
+		// 1. All tabs on vpv.units (Overview, Input..Output, System, Developer).
+		auto* section = control<QWidget>(window, Vpv::ObjectName("section"));
+		for (int i = 0; i < pages->count(); ++i)
+			if (pages->widget(i)->isAncestorOf(section)) window.selectPage(i);
+		QScrollArea* vpvScroll = findScrollFor(section);
+		for (int u = 0; u < units->count(); ++u)
+		{
+			units->setCurrentIndex(u);
+			QTabWidget* sub = units->widget(u)->findChild<QTabWidget*>();
+			for (int s2 = 0; s2 < (sub ? sub->count() : 1); ++s2)
+			{
+				if (sub) sub->setCurrentIndex(s2);
+				QCoreApplication::processEvents();
+				require(vpvScroll && vpvScroll->horizontalScrollBar()->maximum() == 0,
+					(QStringLiteral("Unit 3 fit (1040x700): VP-V scrolls sideways on %1 / %2 (%3 px)")
+						.arg(units->tabText(u), sub ? sub->tabText(s2) : QString())
+						.arg(vpvScroll ? vpvScroll->horizontalScrollBar()->maximum() : -1)).toStdString().c_str());
+			}
+		}
+
+		// 2. Dynamic Drive (Main & Advanced).
+		auto* drivePages = control<QTabWidget>(window, Vpv::ObjectName("drivepage.pages"));
+		for (int i = 0; i < pages->count(); ++i)
+			if (pages->widget(i)->isAncestorOf(drivePages)) window.selectPage(i);
+		QScrollArea* driveScroll = findScrollFor(drivePages);
+		for (int t = 0; t < drivePages->count(); ++t)
+		{
+			drivePages->setCurrentIndex(t);
+			QCoreApplication::processEvents();
+			require(driveScroll && driveScroll->horizontalScrollBar()->maximum() == 0,
+				(QStringLiteral("Unit 3 fit (1040x700): Dynamic Drive scrolls sideways on %1 (%2 px)")
+					.arg(drivePages->tabText(t)).arg(driveScroll ? driveScroll->horizontalScrollBar()->maximum() : -1)).toStdString().c_str());
+		}
+
+		// 3. Calibration (Setup & Wizard, Advanced).
+		auto* calPages = control<QTabWidget>(window, QStringLiteral("calibration.pages"));
+		for (int i = 0; i < pages->count(); ++i)
+			if (pages->widget(i)->isAncestorOf(calPages)) window.selectPage(i);
+		QScrollArea* calScroll = findScrollFor(calPages);
+		for (int t = 0; t < calPages->count(); ++t)
+		{
+			calPages->setCurrentIndex(t);
+			QCoreApplication::processEvents();
+			require(calScroll && calScroll->horizontalScrollBar()->maximum() == 0,
+				(QStringLiteral("Unit 3 fit (1040x700): Calibration scrolls sideways on %1 (%2 px)")
+					.arg(calPages->tabText(t)).arg(calScroll ? calScroll->horizontalScrollBar()->maximum() : -1)).toStdString().c_str());
+		}
+
+		window.hide();
+	}
 }
 
 int RunVpvConfigTests(const std::function<int(const char*, const std::function<void()>&)>& run,
@@ -5221,5 +5651,8 @@ int RunVpvConfigTests(const std::function<int(const char*, const std::function<v
 	failures += run("VP-V: Unit 2 CAM16 appearance validated widgets and ambient_adapt mutual exclusion", testCam16AppearanceWidgetsAndMutualExclusion);
 	failures += run("VP-V: Unit 2 Repair Low no-bounce and all tiers clarity summaries", testRepairTierNoBounceAndAllTiersClaritySummary);
 	failures += run("VP-V: Unit 2 Phase 1 placements, allRaw hidden, and Dynamic Drive stub removal", testPhase1PlacementsAndAllRawHidden);
+	failures += run("VP-V: Unit 3 Developer tab hidden by default, toggleable, and camera debug separation", testDeveloperTabHiddenByDefaultAndToggleable);
+	failures += run("VP-V: Unit 3 clean Overview dashboard, preset buttons, precision and launch cards", testCleanOverviewDashboardAndPresetButtons);
+	failures += run("VP-V: Unit 3 System tab 5 consolidated cards, Original unlocked, and 1040x700 fit", testSystemTabFiveCardsAndOriginalUnlocked);
 	return failures;
 }

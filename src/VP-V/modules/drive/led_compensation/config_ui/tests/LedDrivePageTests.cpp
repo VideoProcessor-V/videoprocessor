@@ -329,6 +329,56 @@ namespace
 				"UTF-8 test: reopened editor did not round-trip non-ASCII UTF-8 profile_file intact");
 		}
 	}
+
+	// Unit 3 (Phase 2) Red-Team adversarial test: all 5 Dynamic Drive Advanced LED groups and the Advanced projector
+	// section start collapsed (!isChecked()), and expanding vpv.drive.group.tables.toggle reveals vpv.drive.group.tables.body
+	// holding the 5 script tables (curve, steps_up_dark, steps_up_bright, steps_down, apl_weights).
+	void testAdvancedScriptTablesAndProjectorStartCollapsed()
+	{
+		Vpv::RegisterConfigProviders();
+		QTemporaryDir dir;
+		ConfigEditorWindow window(writeFixture(dir), 0, true);
+		QCoreApplication::processEvents();
+
+		for (const char* group : { "tables", "highlights", "cuts", "script", "compensate" })
+		{
+			const QString base = QStringLiteral("vpv.drive.group.") + QString::fromLatin1(group);
+			auto* toggle = window.findChild<QToolButton*>(base + QStringLiteral(".toggle"));
+			auto* body = window.findChild<QWidget*>(base + QStringLiteral(".body"));
+			require(toggle != nullptr && toggle->isCheckable() && !toggle->isChecked(),
+				(std::string("Unit 3: Dynamic Drive advanced group toggle missing or not collapsed by default: ") + group).c_str());
+			require(body != nullptr && body->isHidden(),
+				(std::string("Unit 3 negative control: Dynamic Drive advanced group body must start hidden: ") + group).c_str());
+		}
+
+		auto* projToggle = window.findChild<QToolButton*>(QStringLiteral("config.projector.default.advanced_toggle"));
+		require(projToggle != nullptr && projToggle->isCheckable() && !projToggle->isChecked(),
+			"Unit 3: config.projector.default.advanced_toggle must exist and start collapsed (!isChecked())");
+
+		auto* tablesCard = window.findChild<QWidget*>(QStringLiteral("vpv.drive.group.tables"));
+		auto* tablesToggle = window.findChild<QToolButton*>(QStringLiteral("vpv.drive.group.tables.toggle"));
+		auto* tablesBody = window.findChild<QWidget*>(QStringLiteral("vpv.drive.group.tables.body"));
+		require(tablesCard != nullptr && tablesToggle != nullptr && tablesBody != nullptr,
+			"Unit 3: vpv.drive.group.tables card, toggle, or body missing");
+
+		tablesToggle->click();
+		QCoreApplication::processEvents();
+		require(tablesToggle->isChecked() && !tablesBody->isHidden() && tablesBody->isVisibleTo(tablesCard),
+			"Unit 3: clicking vpv.drive.group.tables.toggle must expand vpv.drive.group.tables.body");
+
+		for (const char* key : { "curve", "steps_up_dark", "steps_up_bright", "steps_down", "apl_weights" })
+		{
+			auto* field = window.findChild<QWidget*>(QStringLiteral("config.led_drive.default.") + QString::fromLatin1(key));
+			require(field != nullptr && tablesBody->isAncestorOf(field),
+				(std::string("Unit 3: script table control missing from vpv.drive.group.tables.body: ") + key).c_str());
+		}
+
+		// Negative control: clicking toggle a second time collapses the body again.
+		tablesToggle->click();
+		QCoreApplication::processEvents();
+		require(!tablesToggle->isChecked() && tablesBody->isHidden(),
+			"Unit 3 negative control: clicking vpv.drive.group.tables.toggle again must re-collapse the body");
+	}
 }
 
 int RunLedDrivePageTests(const std::function<int(const char*, const std::function<void()>&)>& run,
@@ -347,5 +397,6 @@ int RunLedDrivePageTests(const std::function<int(const char*, const std::functio
 	failures += run("LedDrivePageTests: state goes with the editor", testStateGoesWithTheEditor);
 	failures += run("LedDrivePageTests: Dynamic Drive off greys visible drive controls except gamma_boost", testOnOffGreysVisibleDriveControlsExceptGammaBoost);
 	failures += run("LedDrivePageTests: saves UTF-8 profile_file without toLocal8Bit corruption", testLedDriveSavesUtf8WithoutLocal8BitCorruption);
+	failures += run("LedDrivePageTests: Unit 3 advanced script tables and projector start collapsed", testAdvancedScriptTablesAndProjectorStartCollapsed);
 	return failures;
 }
