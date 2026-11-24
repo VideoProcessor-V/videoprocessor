@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -787,6 +788,342 @@ namespace VideoProcessorTest
 			Assert::AreNotEqual(0, std::memcmp(probeClean->fbError.data(), probeCorrupt->fbError.data(),
 				probeClean->fbError.size() * sizeof(float)),
 				L"negative control: perturbed flow vector must produce distinct fbError");
+		}
+
+		TEST_METHOD(FlowGlobalBinOfMatchesLroundExhaustivelyOverAllInt16AndHistogramMatchesNthElement)
+		{
+			// 1. Exhaustive int16_t check (all 65,536 values in [-32768, 32767]):
+			//    FlowGlobalBinOf(v) must match std::lround(v / 64.0) bit-for-bit on every input.
+			int naiveShiftMismatches = 0;
+			for (int v = -32768; v <= 32767; ++v)
+			{
+				const int expected = static_cast<int>(std::lround(static_cast<double>(v) / 64.0));
+				const int actual = MotionAhead::FlowGlobalBinOf(static_cast<int16_t>(v));
+				Assert::AreEqual(expected, actual,
+					L"FlowGlobalBinOf must match std::lround(v / 64.0) across all 65,536 int16_t values");
+				const int naiveShift = (v + 32) >> 6;
+				if (naiveShift != expected)
+					++naiveShiftMismatches;
+			}
+
+			// Same-input negative control (Rule 3): naive truncating shift (v + 32) >> 6 without
+			// symmetric negative handling fails at every negative half-bin boundary (32768 / 64 = 512).
+			const int negHalfExpected = static_cast<int>(std::lround(-32.0 / 64.0));
+			const int negHalfActual = MotionAhead::FlowGlobalBinOf(static_cast<int16_t>(-32));
+			const int negHalfNaive = (-32 + 32) >> 6;
+			Assert::AreEqual(-1, negHalfExpected);
+			Assert::AreEqual(negHalfExpected, negHalfActual,
+				L"FlowGlobalBinOf(-32) must round half-away-from-zero to -1");
+			Assert::AreNotEqual(negHalfExpected, negHalfNaive,
+				L"negative control: naive (v + 32) >> 6 produces 0 instead of -1 at v = -32");
+			Assert::AreEqual(512, naiveShiftMismatches,
+				L"negative control: naive (v + 32) >> 6 must fail at all 512 negative half-bin boundaries");
+
+			// 2. Independent pre-J#5 reference FlowGlobal: std::nth_element on a fresh cost copy,
+			//    std::lround(v / 64.0) binning, and a fresh per-call std::vector<int> votes buffer.
+			auto refFlowGlobal = [](const std::vector<int16_t>& vectors, const std::vector<uint8_t>& costs,
+				int gridW, int gridH, float global[4], float second[4], bool general) {
+				const int kRange = MotionAhead::FlowVoteRange(gridH, general);
+				const int kBins = 4 * kRange + 1;
+				global[0] = global[1] = 0.0f; global[2] = 1.0f; global[3] = 1.0f;
+				second[0] = second[1] = second[2] = second[3] = 0.0f;
+				const size_t cells = static_cast<size_t>(gridW) * static_cast<size_t>(gridH);
+				if (gridW <= 0 || gridH <= 0 || vectors.size() < cells * 2 || costs.size() < cells)
+					return;
+				std::vector<uint8_t> sorted(costs.begin(), costs.begin() + static_cast<std::ptrdiff_t>(cells));
+				std::nth_element(sorted.begin(), sorted.begin() + static_cast<std::ptrdiff_t>(cells / 2), sorted.end());
+				const uint8_t costLimit = sorted[cells / 2];
+				std::vector<int> votes(static_cast<size_t>(kBins) * static_cast<size_t>(kBins), 0);
+				long confident = 0;
+				const int binOffset = 2 * kRange;
+				for (size_t i = 0; i < cells; ++i)
+				{
+					if (costs[i] > costLimit) continue;
+					const int bx = static_cast<int>(std::lround(static_cast<double>(vectors[i * 2]) / 64.0)) + binOffset;
+					const int by = static_cast<int>(std::lround(static_cast<double>(vectors[i * 2 + 1]) / 64.0)) + binOffset;
+					if (bx < 0 || by < 0 || bx >= kBins || by >= kBins) continue;
+					++votes[static_cast<size_t>(by) * static_cast<size_t>(kBins) + static_cast<size_t>(bx)];
+					++confident;
+				}
+				if (confident == 0 || confident < static_cast<long>(cells / 10))
+					return;
+				auto window = [&](int bx, int by) {
+					int s = 0;
+					for (int dy = -1; dy <= 1; ++dy)
+						for (int dx = -1; dx <= 1; ++dx)
+						{
+							const int x = bx + dx, y = by + dy;
+							if (x >= 0 && y >= 0 && x < kBins && y < kBins)
+								s += votes[static_cast<size_t>(y) * static_cast<size_t>(kBins) + static_cast<size_t>(x)];
+						}
+					return s;
+				};
+				int best = -1, bestX = 0, bestY = 0;
+				for (int y = 0; y < kBins; ++y)
+					for (int x = 0; x < kBins; ++x)
+					{
+						if (!votes[static_cast<size_t>(y) * static_cast<size_t>(kBins) + static_cast<size_t>(x)]) continue;
+						const int s = window(x, y);
+						if (s > best) { best = s; bestX = x; bestY = y; }
+					}
+				const double px = (bestX - binOffset) / 2.0, py = (bestY - binOffset) / 2.0;
+				double sx = 0.0, sy = 0.0;
+				long close = 0;
+				for (size_t i = 0; i < cells; ++i)
+				{
+					if (costs[i] > costLimit) continue;
+					const double vx = vectors[i * 2] / 32.0 / 4.0, vy = vectors[i * 2 + 1] / 32.0 / 4.0;
+					if (std::fabs(vx - px) <= 1.0 && std::fabs(vy - py) <= 1.0) { sx += vx; sy += vy; ++close; }
+				}
+				const double share = static_cast<double>(close) / confident;
+				global[0] = static_cast<float>(std::round((close ? sx / close : px) * 2.0) / 2.0);
+				global[1] = static_cast<float>(std::round((close ? sy / close : py) * 2.0) / 2.0);
+				global[2] = static_cast<float>((std::min)(1.0, (std::max)(0.05, 1.05 - share * 0.45 / 0.3)));
+				int secondBest = 0, sxBin = 0, syBin = 0;
+				for (int y = 0; y < kBins; ++y)
+					for (int x = 0; x < kBins; ++x)
+					{
+						if (!votes[static_cast<size_t>(y) * static_cast<size_t>(kBins) + static_cast<size_t>(x)]) continue;
+						if (std::abs(x - bestX) <= 2 && std::abs(y - bestY) <= 2) continue;
+						const int s = window(x, y);
+						if (s > secondBest) { secondBest = s; sxBin = x; syBin = y; }
+					}
+				if (secondBest > 0 && secondBest >= confident / 10)
+				{
+					second[0] = static_cast<float>((sxBin - binOffset) / 2.0);
+					second[1] = static_cast<float>((syBin - binOffset) / 2.0);
+					second[3] = 1.0f;
+				}
+			};
+
+			auto verifyFlow = [&](const MotionAhead::Flow& flow, bool general,
+				float prodGlobal[4], float prodSecond[4], const wchar_t* label) {
+				float refGlobal[4] = { 99.0f, 99.0f, 99.0f, 99.0f };
+				float refSecond[4] = { 99.0f, 99.0f, 99.0f, 99.0f };
+				prodGlobal[0] = prodGlobal[1] = prodGlobal[2] = prodGlobal[3] = -99.0f;
+				prodSecond[0] = prodSecond[1] = prodSecond[2] = prodSecond[3] = -99.0f;
+				MotionAhead::FlowGlobal(flow.forward, flow.forwardCost, flow.gridW, flow.gridH, prodGlobal, prodSecond, general);
+				refFlowGlobal(flow.forward, flow.forwardCost, flow.gridW, flow.gridH, refGlobal, refSecond, general);
+				Assert::AreEqual(0, std::memcmp(refGlobal, prodGlobal, sizeof(refGlobal)), label);
+				Assert::AreEqual(0, std::memcmp(refSecond, prodSecond, sizeof(refSecond)), label);
+			};
+
+			// Case A: Even cell count (10 x 360 = 3600), gridH > 270 so general=true expands kRange (> 40),
+			//         exact acc == cells/2 median boundary (catches >= vs > histogram off-by-one),
+			//         negative half-bin boundary vectors (-96), and two competing clusters.
+			Assert::IsTrue(MotionAhead::FlowVoteRange(360, true) > MotionAhead::FlowVoteRange(360, false),
+				L"gridH=360 must expand FlowVoteRange when general=true so shrinking kBins is genuinely exercised");
+			MotionAhead::Flow flowLargeEven;
+			flowLargeEven.gridW = 10;
+			flowLargeEven.gridH = 360;
+			flowLargeEven.halfW = flowLargeEven.gridW * 4;
+			flowLargeEven.halfH = flowLargeEven.gridH * 4;
+			const size_t nLarge = static_cast<size_t>(flowLargeEven.gridW) * static_cast<size_t>(flowLargeEven.gridH);
+			flowLargeEven.forward.assign(nLarge * 2, 0);
+			flowLargeEven.forwardCost.assign(nLarge, 0);
+			for (size_t i = 0; i < nLarge; ++i)
+			{
+				// Permute via coprime stride 997 (gcd(997, 3600) == 1) so costs are genuinely unsorted.
+				const size_t dst = (i * 997u) % nLarge;
+				if (i < 1500)
+				{
+					flowLargeEven.forwardCost[dst] = 12u;
+					flowLargeEven.forward[dst * 2] = -96;      // negative half-bin boundary (-1.5 bins -> -2)
+					flowLargeEven.forward[dst * 2 + 1] = 160;
+				}
+				else if (i < 1800)
+				{
+					flowLargeEven.forwardCost[dst] = 12u;      // cumulative 1800 == cells / 2 exactly
+					flowLargeEven.forward[dst * 2] = 1920;     // +15.0 texels (in-range for both general=true and false)
+					flowLargeEven.forward[dst * 2 + 1] = -1920;
+				}
+				else if (i < 2700)
+				{
+					flowLargeEven.forwardCost[dst] = 48u;      // true median (sorted[1800] == 48)
+					flowLargeEven.forward[dst * 2] = 5632;     // +44.0 texels (in-range for general=true, out-of-range for false)
+					flowLargeEven.forward[dst * 2 + 1] = -512;
+				}
+				else
+				{
+					flowLargeEven.forwardCost[dst] = 210u;     // above median: must be excluded
+					flowLargeEven.forward[dst * 2] = 640;
+					flowLargeEven.forward[dst * 2 + 1] = 640;
+				}
+			}
+
+			float largeGenTrueGlobal1[4] = {}, largeGenTrueSecond1[4] = {};
+			verifyFlow(flowLargeEven, true, largeGenTrueGlobal1, largeGenTrueSecond1,
+				L"Case A (even, expanded kBins, general=true, acc==target boundary) must match nth_element reference bit-exactly");
+			Assert::IsTrue(largeGenTrueGlobal1[2] < 0.9f, L"Case A must produce a usable primary global vector");
+			Assert::AreEqual(1.0f, largeGenTrueSecond1[3], L"Case A must populate second motion layer");
+			Assert::AreEqual(44.0f, largeGenTrueSecond1[0], L"Case A general=true must capture +44-texel second cluster");
+
+			// Case B: Same flow with general=false -> immediately shrinks thread_local votes (213x213 -> 161x161).
+			float largeGenFalseGlobal[4] = {}, largeGenFalseSecond[4] = {};
+			verifyFlow(flowLargeEven, false, largeGenFalseGlobal, largeGenFalseSecond,
+				L"Case B (same large flow, general=false, shrunk kBins) must match nth_element reference bit-exactly");
+			Assert::AreEqual(1.0f, largeGenFalseSecond[3], L"Case B must populate second motion layer from in-range cluster");
+			Assert::AreEqual(15.0f, largeGenFalseSecond[0], L"Case B general=false must clip +44-texel cluster and pick +15-texel cluster");
+
+			// Case C: Odd cell count (13 x 11 = 143), heavy ties straddling median index 71, two competing clusters,
+			//         and a decoy high-cost cluster placed at Case A's peak to catch any stale vote leak.
+			MotionAhead::Flow flowOddTies;
+			flowOddTies.gridW = 13;
+			flowOddTies.gridH = 11;
+			flowOddTies.halfW = flowOddTies.gridW * 4;
+			flowOddTies.halfH = flowOddTies.gridH * 4;
+			const size_t nOdd = static_cast<size_t>(flowOddTies.gridW) * static_cast<size_t>(flowOddTies.gridH);
+			flowOddTies.forward.assign(nOdd * 2, 0);
+			flowOddTies.forwardCost.assign(nOdd, 0);
+			size_t boundaryCellDst = 0;
+			for (size_t i = 0; i < nOdd; ++i)
+			{
+				// Coprime stride 37 (gcd(37, 143) == 1).
+				const size_t dst = (i * 37u) % nOdd;
+				if (i < 40)
+				{
+					flowOddTies.forwardCost[dst] = 15u;
+					flowOddTies.forward[dst * 2] = 384;       // +3.0 texels
+					flowOddTies.forward[dst * 2 + 1] = -256;  // -2.0 texels
+				}
+				else if (i < 59)
+				{
+					flowOddTies.forwardCost[dst] = 77u;       // heavy tie straddling median index 71
+					flowOddTies.forward[dst * 2] = 384;
+					flowOddTies.forward[dst * 2 + 1] = -256;
+				}
+				else if (i == 59)
+				{
+					flowOddTies.forwardCost[dst] = 77u;
+					flowOddTies.forward[dst * 2] = 480;       // +3.75 texels (within <= 1.0 texel of +3.0 peak)
+					flowOddTies.forward[dst * 2 + 1] = -256;
+					boundaryCellDst = dst;
+				}
+				else if (i < 100)
+				{
+					flowOddTies.forwardCost[dst] = 77u;       // heavy tie at median: second cluster (40 cells)
+					flowOddTies.forward[dst * 2] = -512;      // -4.0 texels
+					flowOddTies.forward[dst * 2 + 1] = 448;   // +3.5 texels
+				}
+				else
+				{
+					flowOddTies.forwardCost[dst] = 190u;      // above median: decoy at Case A's peak
+					flowOddTies.forward[dst * 2] = -96;
+					flowOddTies.forward[dst * 2 + 1] = 160;
+				}
+			}
+
+			float oddGlobal1[4] = {}, oddSecond1[4] = {};
+			verifyFlow(flowOddTies, true, oddGlobal1, oddSecond1,
+				L"Case C (odd cell count, heavy median ties, general=true) must match nth_element reference bit-exactly");
+			Assert::IsTrue(oddGlobal1[2] < 0.9f, L"Case C must produce a usable primary global vector");
+			Assert::AreEqual(1.0f, oddSecond1[3], L"Case C must populate second motion layer");
+
+			// Case D: All-0 costs (even 12 x 9 = 108, general=false) with negative half-bin (-32) dominant cluster.
+			MotionAhead::Flow flowAllZero;
+			flowAllZero.gridW = 12;
+			flowAllZero.gridH = 9;
+			flowAllZero.halfW = flowAllZero.gridW * 4;
+			flowAllZero.halfH = flowAllZero.gridH * 4;
+			const size_t nZero = static_cast<size_t>(flowAllZero.gridW) * static_cast<size_t>(flowAllZero.gridH);
+			flowAllZero.forward.assign(nZero * 2, 0);
+			flowAllZero.forwardCost.assign(nZero, 0u);
+			for (size_t i = 0; i < nZero; ++i)
+			{
+				if (i < 64)
+				{
+					flowAllZero.forward[i * 2] = -32;
+					flowAllZero.forward[i * 2 + 1] = 32;
+				}
+				else
+				{
+					flowAllZero.forward[i * 2] = 768;
+					flowAllZero.forward[i * 2 + 1] = -640;
+				}
+			}
+
+			float allZeroGlobal[4] = {}, allZeroSecond[4] = {};
+			verifyFlow(flowAllZero, false, allZeroGlobal, allZeroSecond,
+				L"Case D (all-0 costs, general=false) must match nth_element reference bit-exactly");
+			Assert::IsTrue(allZeroGlobal[2] < 0.9f, L"Case D must produce a usable primary global vector");
+			Assert::AreEqual(1.0f, allZeroSecond[3], L"Case D must populate second motion layer");
+
+			// Case E: All-255 costs (odd 9 x 9 = 81, general=true) + INT16_MIN/INT16_MAX out-of-range outliers.
+			MotionAhead::Flow flowAll255;
+			flowAll255.gridW = 9;
+			flowAll255.gridH = 9;
+			flowAll255.halfW = flowAll255.gridW * 4;
+			flowAll255.halfH = flowAll255.gridH * 4;
+			const size_t nMax = static_cast<size_t>(flowAll255.gridW) * static_cast<size_t>(flowAll255.gridH);
+			flowAll255.forward.assign(nMax * 2, 0);
+			flowAll255.forwardCost.assign(nMax, 255u);
+			for (size_t i = 0; i < nMax; ++i)
+			{
+				if (i < 48)
+				{
+					flowAll255.forward[i * 2] = -256;
+					flowAll255.forward[i * 2 + 1] = -320;
+				}
+				else if (i < 77)
+				{
+					flowAll255.forward[i * 2] = 512;
+					flowAll255.forward[i * 2 + 1] = 192;
+				}
+				else
+				{
+					flowAll255.forward[i * 2] = (i & 1u) ? static_cast<int16_t>(-32768) : static_cast<int16_t>(32767);
+					flowAll255.forward[i * 2 + 1] = (i & 1u) ? static_cast<int16_t>(32767) : static_cast<int16_t>(-32768);
+				}
+			}
+
+			float all255Global[4] = {}, all255Second[4] = {};
+			verifyFlow(flowAll255, true, all255Global, all255Second,
+				L"Case E (all-255 costs, INT16 extreme outliers, general=true) must match nth_element reference bit-exactly");
+			Assert::IsTrue(all255Global[2] < 0.9f, L"Case E must produce a usable primary global vector");
+			Assert::AreEqual(1.0f, all255Second[3], L"Case E must populate second motion layer");
+
+			// 3. Repeatability across growing and shrinking kBins on the same thread:
+			//    Re-run Case A (grows thread_local votes back to 213x213) and Case C (shrinks back to 161x161, general=false).
+			float largeGenTrueGlobal2[4] = {}, largeGenTrueSecond2[4] = {};
+			verifyFlow(flowLargeEven, true, largeGenTrueGlobal2, largeGenTrueSecond2,
+				L"Repeat Case A after smaller-grid calls must match nth_element reference bit-exactly");
+			Assert::AreEqual(0, std::memcmp(largeGenTrueGlobal1, largeGenTrueGlobal2, sizeof(largeGenTrueGlobal1)),
+				L"thread_local votes scratch must not leak stale counts across repeated Case A calls");
+			Assert::AreEqual(0, std::memcmp(largeGenTrueSecond1, largeGenTrueSecond2, sizeof(largeGenTrueSecond1)),
+				L"thread_local votes scratch must not leak stale second-layer counts across repeated Case A calls");
+
+			float oddGlobal2[4] = {}, oddSecond2[4] = {};
+			verifyFlow(flowOddTies, false, oddGlobal2, oddSecond2,
+				L"Repeat Case C (general=false) after shrinking kBins must match nth_element reference bit-exactly");
+			Assert::AreEqual(0, std::memcmp(oddGlobal1, oddGlobal2, sizeof(oddGlobal1)),
+				L"thread_local votes scratch must not leak stale counts when shrinking kBins");
+			Assert::AreEqual(0, std::memcmp(oddSecond1, oddSecond2, sizeof(oddSecond1)),
+				L"thread_local votes scratch must not leak stale second-layer counts when shrinking kBins");
+
+			// 4. Same-input negative controls on FlowGlobal comparator (Rule 3):
+			//    (a) Corrupt the dominant cluster vector by +64 raw units (1 half-texel bin) -> global[0] shifts by +0.5.
+			MotionAhead::Flow flowClusterShifted = flowOddTies;
+			for (size_t i = 0; i < nOdd; ++i)
+			{
+				if (flowClusterShifted.forward[i * 2] == 384 && flowClusterShifted.forward[i * 2 + 1] == -256)
+					flowClusterShifted.forward[i * 2] = static_cast<int16_t>(flowClusterShifted.forward[i * 2] + 64);
+			}
+			float shiftedClusterGlobal[4] = {}, shiftedClusterSecond[4] = {};
+			MotionAhead::FlowGlobal(flowClusterShifted.forward, flowClusterShifted.forwardCost,
+				flowClusterShifted.gridW, flowClusterShifted.gridH, shiftedClusterGlobal, shiftedClusterSecond, true);
+			Assert::AreNotEqual(0, std::memcmp(oddGlobal1, shiftedClusterGlobal, sizeof(oddGlobal1)),
+				L"negative control: shifting dominant cluster by +64 raw units (1 bin) must change FlowGlobal output");
+
+			//    (b) Corrupt a single confident dominant-cluster boundary cell by +64 raw units (1 bin) ->
+			//        moves it past the 1.0-texel refinement radius and changes share / global[2].
+			MotionAhead::Flow flowSingleCellShifted = flowOddTies;
+			flowSingleCellShifted.forward[boundaryCellDst * 2] =
+				static_cast<int16_t>(flowSingleCellShifted.forward[boundaryCellDst * 2] + 64);
+			float singleCellGlobal[4] = {}, singleCellSecond[4] = {};
+			MotionAhead::FlowGlobal(flowSingleCellShifted.forward, flowSingleCellShifted.forwardCost,
+				flowSingleCellShifted.gridW, flowSingleCellShifted.gridH, singleCellGlobal, singleCellSecond, true);
+			Assert::AreNotEqual(0, std::memcmp(oddGlobal1, singleCellGlobal, sizeof(oddGlobal1)),
+				L"negative control: perturbing a single dominant-cluster cell by +64 raw units (1 bin) must change FlowGlobal output");
 		}
 	};
 }
