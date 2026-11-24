@@ -109,7 +109,7 @@ namespace Vpv
                 Unit u;
                 u.id = "input"; u.name = "Input"; u.summary = "Takes the picture from the capture card at full precision, works out the signal type and holds it for the fixed delay.";
                 u.untieredReason = "Always on: capture and timing have no quality steps, only paths (the toggles below).";
-                u.more = "Target delay: Input > Main (queue profiles and Target frames: Queue page). Signal detection (DV tunnel hand-off, new LLDV): Both pathways tab (also on DV page). Capture card and packing: General page.";
+                u.more = "Target delay: Input > Main (queue profiles and Target frames: Queue page). Signal detection (DV tunnel hand-off, new LLDV): System tab (also on DV page). Capture card and packing: General page.";
                 u.slotIds.push_back("input.capture");
                 u.slotIds.push_back("input.signal");
                 u.slotIds.push_back("input.queue_timing");
@@ -135,6 +135,7 @@ namespace Vpv
                     Preset p; p.tier = "Classic"; p.description = "VP's basic motion search only: whole-pixel matching, no NVIDIA engine, nothing computed ahead. Your de-judder amount still applies (choose As shot for no motion processing). With the Motion engine ON this is the degraded mode: VP's matcher does the work."; p.cost = "low";
                     p.set.push_back({ "optical_flow", "off" });
                     p.set.push_back({ "motion_ahead_frames", "0" });
+                    p.set.push_back({ "dejudder_est_split", "off" });
                     p.set.push_back({ "dejudder_est_qpel", "off" });
                     u.presets.push_back(p);
                 }

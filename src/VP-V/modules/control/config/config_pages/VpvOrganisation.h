@@ -180,6 +180,11 @@ namespace Vpv
 				{ K::Row, "source_resolution_release_fade_s" }, { K::Toggle, "source_resolution_frame_bound" },
 				{ K::Toggle, "rebase_kernel_match" }, { K::Text, "source_geometry_detect" } },
 				{ L::Feature, "re-base (the Scaling tier, Low or above)", "source_resolution", nullptr, "!auto", "auto" } },
+			{ "scaling", "adaptive_motion", "Motion-adapted scaling",
+				"Keeps the sharper scaler on steady, confidently tracked areas and eases toward the faithful scaler on fast or uncertain motion.", true, false, {
+				{ K::Row, "adaptive_motion" }, { K::Row, "adaptive_motion_speed_lo" },
+				{ K::Row, "adaptive_motion_speed_hi" }, { K::Row, "adaptive_motion_floor" },
+				{ K::Row, "adaptive_motion_smooth_ms" } } },
 			{ "scaling", "steadiness", "Scaler steadiness (expert)",
 				"Keeps the SSIM and CNN scalers' added detail steady along motion. Normal viewing never needs these.", true, false, {
 				{ K::Toggle, "ssim_residual_stabilise" }, { K::Toggle, "cnn_residual_stabilise" },
@@ -190,12 +195,12 @@ namespace Vpv
 				{ K::Toggle, "dv_display_mapping" }, { K::Toggle, "dv_trims" }, { K::Row, "dv_tone_mapping" } } },
 			{ "colour", "range", "Range and precision", "Keeps every value the source carries.", false, false, {
 				{ K::Toggle, "preserve_extended_range" }, { K::Elsewhere, "fbo_float32" },
-				{ K::Note, "Full precision (32-bit float intermediates) is chosen once for every tier, under the global tier at the top of this page." } } },
+				{ K::Note, "Full precision (32-bit float intermediates) is chosen once for every tier, on the Overview tab." } } },
 			{ "colour", "sdr", "SDR tone shape", "A gentle highlight knee for SDR sources.", false, false, {
 				{ K::Toggle, "sdr_tone_shape" } } },
 			{ "colour", "room", "Room-light adaptation (experimental)",
 				"Adjusts black and contrast to the room light the sensor measures. The room and the light sensor are set on "
-				"this page's Room lights card (On both pathways, below the unit tabs).", false, false, {
+				"this page's System > Room Light Sensor card.", false, false, {
 				{ K::Toggle, "ambient_adapt" } },
 				{ L::ReplacedBy, "CAM16 Appearance", "appearance", nullptr, "on", "off", { "ambient_adapt" } } },
 			{ "colour", "appearance", "Room and appearance (experimental)",

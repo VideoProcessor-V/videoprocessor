@@ -2326,12 +2326,14 @@ namespace Vpv
         adaptiveMotionLayout->setContentsMargins(0, 0, 0, 0);
         auto* adaptiveMotionMode = new QComboBox(adaptiveMotionControls);
         adaptiveMotionMode->setObjectName(controlName(sectionPrefix, QStringLiteral("adaptive_motion.mode")));
+        adaptiveMotionMode->addItem(QStringLiteral("Default (off)"), QString());
         adaptiveMotionMode->addItem(QStringLiteral("Off"), QStringLiteral("off"));
         adaptiveMotionMode->addItem(QStringLiteral("On (1.0)"), QStringLiteral("on"));
         adaptiveMotionMode->addItem(QStringLiteral("Custom strength (0.0\u20131.0)"), QStringLiteral("custom"));
         adaptiveMotionMode->setToolTip(adaptiveMotionTip);
         auto* adaptiveMotionStrength = new QDoubleSpinBox(adaptiveMotionControls);
         adaptiveMotionStrength->setObjectName(controlName(sectionPrefix, QStringLiteral("adaptive_motion.strength")));
+        adaptiveMotionStrength->setKeyboardTracking(false);
         adaptiveMotionStrength->setRange(0.0, 1.0);
         adaptiveMotionStrength->setDecimals(2);
         adaptiveMotionStrength->setSingleStep(0.05);
@@ -2375,14 +2377,21 @@ namespace Vpv
                 const QString raw = adaptiveMotion->text().trimmed().toLower();
                 bool active = false;
                 double strengthValue = 0.0;
-                if (raw == QStringLiteral("on"))
+                if (raw.isEmpty())
+                {
+                    adaptiveMotionMode->setCurrentIndex(adaptiveMotionMode->findData(QString()));
+                    adaptiveMotionStrength->setVisible(false);
+                    adaptiveMotionStrength->setEnabled(false);
+                    active = false;
+                }
+                else if (raw == QStringLiteral("on"))
                 {
                     adaptiveMotionMode->setCurrentIndex(adaptiveMotionMode->findData(QStringLiteral("on")));
                     adaptiveMotionStrength->setVisible(false);
                     adaptiveMotionStrength->setEnabled(false);
                     active = true;
                 }
-                else if (raw.isEmpty() || raw == QStringLiteral("off"))
+                else if (raw == QStringLiteral("off"))
                 {
                     adaptiveMotionMode->setCurrentIndex(adaptiveMotionMode->findData(QStringLiteral("off")));
                     adaptiveMotionStrength->setVisible(false);
@@ -2394,7 +2403,8 @@ namespace Vpv
                     adaptiveMotionMode->setCurrentIndex(adaptiveMotionMode->findData(QStringLiteral("custom")));
                     adaptiveMotionStrength->setVisible(true);
                     adaptiveMotionStrength->setEnabled(true);
-                    adaptiveMotionStrength->setValue(strengthValue);
+                    if (std::abs(adaptiveMotionStrength->value() - strengthValue) >= 1e-6 && !adaptiveMotionStrength->hasFocus())
+                        adaptiveMotionStrength->setValue(strengthValue);
                     active = strengthValue > 0.0;
                 }
                 else
@@ -2417,7 +2427,7 @@ namespace Vpv
                 [adaptiveMotion, adaptiveMotionMode, adaptiveMotionStrength, parseStrength, syncAdaptiveMotion](int)
             {
                 const QString chosen = adaptiveMotionMode->currentData().toString();
-                if (chosen == QStringLiteral("off") || chosen == QStringLiteral("on"))
+                if (chosen.isEmpty() || chosen == QStringLiteral("off") || chosen == QStringLiteral("on"))
                 {
                     if (adaptiveMotion->text() != chosen)
                         adaptiveMotion->setText(chosen);

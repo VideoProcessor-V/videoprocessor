@@ -639,7 +639,7 @@ namespace Vpv
 		{
 			const QString caption = RetirementCaption(r);
 			return QStringLiteral("%1 (group %2, %3): %4 Nothing changes until you approve it and a later clean-up run is done; "
-				"see the VP-V page's Proposed retirement tab.")
+				"see the VP-V page's Developer > Proposed retirement tab.")
 				.arg(caption.left(1).toUpper() + caption.mid(1), Q(r.group), Q(table.RetirementGroupTitle(r.group)), Q(r.reason));
 		}
 
@@ -1336,7 +1336,17 @@ namespace Vpv
 					edit->setVisible(false);
 					edit->setEnabled(false);
 					if (!state->host.setValue) return;
-					state->host.setValue(state->profile, key, modeVal == QStringLiteral("all") ? QString() : modeVal);
+					QString toWrite = modeVal;
+					if (modeVal == QStringLiteral("all"))
+					{
+						const bool isNamedProfile = state->profile.compare(state->defaultProfile, Qt::CaseInsensitive) != 0;
+						const std::string defVal = (isNamedProfile && state->host.value)
+							? state->host.value(state->defaultProfile, key).trimmed().toStdString()
+							: std::string();
+						const bool needExplicitAll = isNamedProfile && !defVal.empty() && !SameValue(defVal, "all");
+						toWrite = needExplicitAll ? QStringLiteral("all") : QString();
+					}
+					state->host.setValue(state->profile, key, toWrite);
 					state->ReloadUpstream();
 					state->RefreshAll();
 				});
@@ -1447,6 +1457,7 @@ namespace Vpv
 			spin->setObjectName(ObjectName(unitId + QLatin1Char('.') + key));
 			AttachCoverageAlias(state, spin, key);
 			spin->setAccessibleName(Q(spec.label));
+			spin->setKeyboardTracking(false);
 			spin->setRange(spec.minValue, spec.maxValue);
 			spin->setDecimals(spec.decimals);
 			spin->setSingleStep(spec.step);
@@ -1472,8 +1483,11 @@ namespace Vpv
 				bool ok = false;
 				const double parsed = raw.toDouble(&ok);
 				const double target = (!raw.isEmpty() && ok) ? parsed : defaultVal;
-				const QSignalBlocker blocker(spin);
-				spin->setValue(target);
+				if (state->reloading || !spin->hasFocus())
+				{
+					const QSignalBlocker blocker(spin);
+					spin->setValue(target);
+				}
 			});
 			return spin;
 		}
@@ -1899,7 +1913,13 @@ namespace Vpv
 					bool moved = false;
 					for (QWidget* f : fields) moved = MoveRow(f, card.Form()) || moved;
 					if (!moved) state->missing << QStringLiteral("row %1").arg(id);
-					else AddFieldNote(state, fields.front(), id, itemLock(item.id));
+					else
+					{
+						QWidget* noteField = fields.front();
+						for (QWidget* f : fields)
+							if (!f->isHidden()) { noteField = f; break; }
+						AddFieldNote(state, noteField, id, itemLock(item.id));
+					}
 					lock->keys << id;
 					break;
 				}
@@ -2069,12 +2089,16 @@ namespace Vpv
 				};
 				const auto isOn = [](const QString& v) { return v.compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0; };
 				const bool original = isOn(get(Q(TierTable().section), QStringLiteral("pipeline_original_pathway")));
+				std::string vd = state->Get("vector_demand");
+				if (vd.empty()) vd = TierTable().Default("vector_demand");
+				const bool motionOff = SameValue(vd, "off");
 				const bool modelOn = isOn(get(camSection, QStringLiteral("camera_model")));
 				const QString originalReason = QStringLiteral("Greyed: the Original pathway is on (VP's additions are off).");
+				const QString motionOffReason = QStringLiteral("Used only when the motion engine is on.");
 				const QSignalBlocker blocker(model);
 				model->setChecked(modelOn);
-				model->setEnabled(!original);
-				SetGreyReason(model, original ? originalReason : QString());
+				model->setEnabled(!original && !motionOff);
+				SetGreyReason(model, original ? originalReason : motionOff ? motionOffReason : QString());
 			});
 			return card;
 		}
@@ -2161,9 +2185,15 @@ namespace Vpv
 				};
 				const auto isOn = [](const QString& v) { return v.compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0; };
 				const bool original = isOn(get(Q(TierTable().section), QStringLiteral("pipeline_original_pathway")));
+				std::string vd = state->Get("vector_demand");
+				if (vd.empty()) vd = TierTable().Default("vector_demand");
+				const bool motionOff = SameValue(vd, "off");
 				const bool modelOn = isOn(get(camSection, QStringLiteral("camera_model")));
 				const QString originalReason = QStringLiteral("Greyed: the Original pathway is on (VP's additions are off).");
+				const QString motionOffReason = QStringLiteral("Greyed: used only when the motion engine is on (the stored value is kept).");
 				const QString modelReason = QStringLiteral("Greyed: used only when Camera model is on (the stored value is kept).");
+				const bool enabled = !original && !motionOff && modelOn;
+				const QString reason = original ? originalReason : motionOff ? motionOffReason : !modelOn ? modelReason : QString();
 				{
 					const QSignalBlocker blocker(overlay);
 					const QString value = get(camSection, QStringLiteral("camera_model_overlay")).toLower();
@@ -2171,16 +2201,16 @@ namespace Vpv
 					for (int i = 0; i < overlay->count(); ++i)
 						if (overlay->itemData(i).toString() == value) index = i;
 					overlay->setCurrentIndex(index);
-					overlay->setEnabled(!original && modelOn);
-					SetGreyReason(overlay, original ? originalReason : !modelOn ? modelReason : QString());
+					overlay->setEnabled(enabled);
+					SetGreyReason(overlay, reason);
 				}
 				const int prefix = ObjectName(QStringLiteral("camera.")).size();
 				for (QCheckBox* box : boxes)
 				{
 					const QSignalBlocker blocker(box);
 					box->setChecked(isOn(get(camSection, box->objectName().mid(prefix))));
-					box->setEnabled(!original && modelOn);
-					SetGreyReason(box, original ? originalReason : !modelOn ? modelReason : QString());
+					box->setEnabled(enabled);
+					SetGreyReason(box, reason);
 				}
 			});
 			return card;

@@ -538,12 +538,13 @@ QWidget* LedDriveBuilder::createLedDrivePage()
     {
         if (!document_) return;
         const std::string section = led.toStdString();
-        if (text.trimmed().isEmpty())
+        const QString trimmed = text.trimmed();
+        if (trimmed.isEmpty())
             document_->RemoveKnown(section, "profile_file");
-        else if (!document_->SetKnown(section, "profile_file", text.toUtf8().constData()))
+        else if (!document_->SetKnown(section, "profile_file", trimmed.toUtf8().constData()))
         {
             document_->AddSection(section);
-            document_->SetKnown(section, "profile_file", text.toUtf8().constData());
+            document_->SetKnown(section, "profile_file", trimmed.toUtf8().constData());
         }
         markDirty();
     });
