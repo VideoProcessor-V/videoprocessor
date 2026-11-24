@@ -181,13 +181,13 @@ removed-energy grid) would drop the raw bands and make it ~0.
 
 ## Settings
 
-The three v2 profile keys (`temporal_detail`, `td_mode`, `td_overlay`) are wired in `VpvSchemaKeys.h`, `VpvRendererSettings.cpp`, and the VP-V master Config page (`VP-V > Repair > Main > Temporal detail`; default `off`, forced `off` on the Original pathway; validated strictly by `TdV2::ParseTdV2Settings`). The four legacy v1 keys (`temporal_detail_boost`, `temporal_detail_strength`, `temporal_detail_max_age`, `temporal_detail_boost_max`) remain declared-only (`TemporalDetail::ParseSettings`, not in Config). No key was added by the scratch-arena work (SA6): the arena is passed by the host in `Gpu::Params::arena`, not set by a key.
+The three v2 profile keys (`temporal_detail`, `td_mode`, `td_overlay`) are declared in `VpvSchemaKeys.h`, `VpvRendererSettings.cpp`, and the VP-V master Config page (`VP-V > Repair > Main > Temporal detail`; default `off`, forced `off` on the Original pathway; validated strictly by `TdV2::ParseTdV2Settings`). **Temporal detail v2: library ready (not wired to live renderer yet — connects at Wave 4–6 integration)**; toggling these keys today stores the profile value but does not yet run in the live renderer or auto-enable the analysis lane (`TdProducts::kEngineRequestedToday` remains `false`; dependency-plan helpers live in `TdV2Settings.h` for Wave 4–6 renderer hookup). The four legacy v1 keys (`temporal_detail_boost`, `temporal_detail_strength`, `temporal_detail_max_age`, `temporal_detail_boost_max`) remain declared-only (`TemporalDetail::ParseSettings`, not in Config). No key was added by the scratch-arena work (SA6): the arena is passed by the host in `Gpu::Params::arena`, not set by a key.
 
 | Key | Section | Type | Range / values | Default | Config placement | Original (Bill) | Fallbacks / status | Tiers |
 |---|---|---|---|---|---|---|---|---|
-| `temporal_detail` | profile | enum | off, shadow, on | off | VP-V > Repair > Main > Temporal detail | off (VP-only) | visible: Ctrl+I / Config status (`Temporal detail: ...`), `StandInRegistry` + `FallbackCatalog` (`product.temporal_detail`) | budget-governed: `OverloadArbiter` steps TD down before de-judder extras (`Full -> ReducedAnchor -> LocalPeaksOnly -> OffBudget`); preserves cell integrity |
-| `td_mode` | profile | enum | cell, strict | cell | VP-V > Repair > Main > Temporal detail | cell (VP-only) | shown in Ctrl+I status line (`mode=cell` / `mode=strict`); transform-unknown streams visibly show pixel-domain band bound | same as `temporal_detail` |
-| `td_overlay` | profile | enum | off, weights, maps, focus, motion | off | VP-V > Repair > Main > Temporal detail | off (VP-only) | diagnostic overlay only; off by default | same as `temporal_detail` |
+| `temporal_detail` | profile | enum | off, shadow, on | off | VP-V > Repair > Main > Temporal detail | off (VP-only) | Temporal detail v2: library ready (not wired to live renderer yet — connects at Wave 4–6 integration); toggling today stores the setting only and does not run in the live renderer or auto-enable the analysis lane (`TdV2Settings.h` holds Wave 4–6 dependency-plan and status helpers) | budget-governed at Wave 4–6 hookup: `OverloadArbiter` steps TD down before de-judder extras (`Full -> ReducedAnchor -> LocalPeaksOnly -> OffBudget`); preserves cell integrity |
+| `td_mode` | profile | enum | cell, strict | cell | VP-V > Repair > Main > Temporal detail | cell (VP-only) | Temporal detail v2: library ready (not wired to live renderer yet — connects at Wave 4–6 integration); transform-unknown streams visibly show pixel-domain band bound | same as `temporal_detail` |
+| `td_overlay` | profile | enum | off, weights, maps, focus, motion | off | VP-V > Repair > Main > Temporal detail | off (VP-only) | Temporal detail v2: library ready (not wired to live renderer yet — connects at Wave 4–6 integration); diagnostic overlay planned for Wave 4–6 hookup | same as `temporal_detail` |
 | `temporal_detail_boost` | profile | bool | on, off (the fallback boost) | off | not in Config (module not wired) | n/a (VP-only) | declared: off unless re-validated on real encodes (owner 2026-10-31) | same as `temporal_detail` |
 | `temporal_detail_strength` | profile | float | 0.0 .. 1.0 | 1.0 | not in Config (module not wired) | n/a (VP-only) | declared | same as `temporal_detail` |
 | `temporal_detail_max_age` | profile | float | 0.25 .. 4.0 (seconds) | 2.0 | not in Config (module not wired) | n/a (VP-only) | declared | same as `temporal_detail` |
@@ -213,9 +213,9 @@ identically in the model and the GPU passes (`TemporalDetailGpuBlockGatesFollowT
 For the four legacy v1 keys (`temporal_detail_boost`, `temporal_detail_strength`, `temporal_detail_max_age`,
 `temporal_detail_boost_max`), `TemporalDetail::ParseSettings` validates them (an invalid value keeps the previous one)
 and they are not in `VpvSchemaKeys.h`, `slots.json`, the tier table, or the Config editor. The three v2 profile keys
-(`temporal_detail`, `td_mode`, `td_overlay`) are wired into `VpvSchemaKeys.h`, `VpvRendererSettings.cpp`, and the
-`VP-V > Repair > Main > Temporal detail` Config card (while `repair.temporal_detail` remains a draft module outside
-`slots.json`).
+(`temporal_detail`, `td_mode`, `td_overlay`) are declared in `VpvSchemaKeys.h`, `VpvRendererSettings.cpp`, and the
+`VP-V > Repair > Main > Temporal detail` Config card, but Temporal detail v2 is library-ready only and NOT wired to the
+live renderer yet (connects at Wave 4–6 integration; `repair.temporal_detail` remains a draft module outside `slots.json`).
 
 ## Environment and diagnostics
 

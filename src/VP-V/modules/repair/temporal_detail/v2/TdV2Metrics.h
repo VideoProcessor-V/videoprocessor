@@ -450,6 +450,7 @@ namespace TdV2
 		double lag1Baseline = 0.0;   // baseline lag-1 correlation of pure independent grain
 		double lag1Rise = 0.0;
 		size_t nonFiniteCount = 0;
+		bool lag1Evaluated = false;  // True ONLY when prevOutputResidual & prevOwnGrain were supplied and finite lag-1 evaluated
 		bool valid = false;
 		bool passesAuthoritativeBar = false;
 	};
@@ -549,15 +550,21 @@ namespace TdV2
 				covBase += g0 * pg;
 				varPrevG += pg * pg;
 			}
-			if (varR > kMetricNumFloor && varPrevR > kMetricNumFloor)
+			if (varR > kMetricNumFloor && varPrevR > kMetricNumFloor &&
+			    s00 > kMetricNumFloor && varPrevG > kMetricNumFloor)
+			{
 				rep.lag1Corr = covOut / std::sqrt(varR * varPrevR);
-			if (s00 > kMetricNumFloor && varPrevG > kMetricNumFloor)
 				rep.lag1Baseline = covBase / std::sqrt(s00 * varPrevG);
-			rep.lag1Rise = rep.lag1Corr - rep.lag1Baseline;
+				rep.lag1Rise = rep.lag1Corr - rep.lag1Baseline;
+				rep.lag1Evaluated = std::isfinite(rep.lag1Corr)
+					&& std::isfinite(rep.lag1Baseline)
+					&& std::isfinite(rep.lag1Rise);
+			}
 		}
 
 		rep.valid = std::isfinite(rep.betaOwn) && std::isfinite(rep.betaForeign) && std::isfinite(rep.stdRatio);
 		rep.passesAuthoritativeBar = rep.valid
+			&& rep.lag1Evaluated
 			&& (rep.betaOwn >= kGrainBarMinBetaOwn)
 			&& (std::fabs(rep.betaForeign) <= kGrainBarMaxBetaForeign)
 			&& (std::fabs(rep.stdRatio - 1.0) <= kGrainBarMaxRmsError)

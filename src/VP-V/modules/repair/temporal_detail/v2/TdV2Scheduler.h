@@ -43,14 +43,17 @@ namespace TdV2
 {
 	// ---- Rule-1 Contract Constants ----
 
-	// Owner Q6a: standard queue delay budget in ms (matches AdmissionTable.h standard 250 ms latency tier).
-	constexpr double kDefaultQueueBudgetMs = 250.0;
+	// Owner Q6a: standard queue delay budget in ms, sourced directly from DelayBudget.h (included via AdmissionTable.h).
+	constexpr double kDefaultQueueBudgetMs = DelayBudget::Inputs().budgetMs;
 
-	// AdmissionTable.h AVR-safe latency ceiling in ms (200 ms ceiling, never a floor).
-	constexpr double kAvrSafeQueueCeilingMs = 200.0;
+	// AdmissionTable.h AVR-safe latency ceiling in ms (200 ms = 4/5 of standard 250 ms tier; ceiling, never a floor).
+	constexpr double kAvrSafeQueueCeilingMs = (4.0 / 5.0) * kDefaultQueueBudgetMs;
 
-	// Safe upper bound on derived queued frame count before int conversion (well above kAheadCeiling = 6, prevents FP-to-int UB).
-	constexpr double kMaxDerivedQueuedFrames = 1024.0;
+	// Upper queue horizon (350 ms = 7/5 of DelayBudget standard 250 ms) x HDMI 2.1 max video rate (240 Hz) = 84 frames:
+	// derived upper bound before FP-to-int conversion (well above kAheadCeiling = 6, prevents UB with zero arbitrary 1024).
+	constexpr double kMaxQueueHorizonMs = (7.0 / 5.0) * kDefaultQueueBudgetMs;
+	constexpr double kMaxSupportedSourceHz = 240.0;
+	constexpr double kMaxDerivedQueuedFrames = (kMaxQueueHorizonMs / 1000.0) * kMaxSupportedSourceHz;
 
 	// Owner Q7a: explicit 2-frame cap on late-frame carry before falling back cleanly to passthrough (0 delta).
 	constexpr int kMaxLateCarryFrames = 2;
@@ -428,13 +431,14 @@ namespace TdV2
 		return s;
 	}
 
-	// Applies tier cleanly to Config while strictly preserving STRICT/CELL residual integrity and NEVER enabling L3 for budget.
+	// Applies tier cleanly to Config as min(preset, tier) so Full tier NEVER overrides RealTime shortcuts SC-01/SC-02,
+	// while strictly preserving STRICT/CELL residual integrity and NEVER enabling L3 for budget.
 	inline TierSpec ApplyTierToConfig(Config& cfg, TdTier tier, StandInRegistry* standIns = nullptr)
 	{
 		const TierSpec spec = SpecForTier(tier);
-		cfg.momentPoolRadiusCells = spec.momentPoolRadiusCells;
-		cfg.enableLongAnchor = spec.enableLongAnchor;
-		cfg.enableCarryForward = spec.enableCarryForward;
+		cfg.momentPoolRadiusCells = (std::max)(0, (std::min)(cfg.momentPoolRadiusCells, spec.momentPoolRadiusCells));
+		cfg.enableLongAnchor = cfg.enableLongAnchor && spec.enableLongAnchor;
+		cfg.enableCarryForward = cfg.enableCarryForward && spec.enableCarryForward;
 		// ResidualMode (STRICT vs CELL) is NEVER weakened or substituted with L3 clamp under GPU budget pressure.
 		if (!spec.tdActive)
 			cfg.mode = Mode::Off;
@@ -603,13 +607,29 @@ namespace TdV2
 
 	// ---- 5. Owner Q7a Late-Frame Carry Controller (2-frame cap -> passthrough, NEVER L3 clamp) ----
 
+	// Optional active-bounds & residual context for late-frame carry (Q7a: checked against current frame's
+	// active STRICT/CELL or pixel-domain bounds AND residual consistency).
+	struct LateCarryContext
+	{
+		bool transformIdentified8x8 = false;
+		ResidualMode residualMode = ResidualMode::Cell;
+		double stepDelta = 0.0;                    // Codec quantization step Delta (used when transformIdentified8x8 == true)
+		double deadZonePhi = kDeadZonePhiInter;    // Dead-zone offset phi in (0, 1)
+		int sourceBits = 10;                       // Source bit depth for pixel code-range POCS
+		int cellProjIterations = 2;                // <= 2 POCS steps
+		const TdV2Plane* codecModelPb = nullptr;   // Field B P_B prediction (null engages CodecModelPbStandIn visibly)
+		const TdV2Plane* referenceClean = nullptr; // Optional aligned reference clean plane for residual consistency & P_B stand-in
+	};
+
 	struct LateCarryDecision
 	{
 		bool carried = false;
 		bool expired = false;
 		bool usesL3Clamp = false;               // Invariant: ALWAYS false (Owner Q7a)
+		bool usedTransformProjection = false;   // True when 8x8 DCT STRICT/CELL projection ran on carried delta
 		int lateStreak = 0;
 		double decayScale = 0.0;                // 2/3 on frame 1, 1/3 on frame 2, 0.0 when expired
+		size_t residualRejectedPixels = 0;      // Pixels where carried delta disagreed with current frame residual
 		TdV2Plane delta;                        // Carried & cell-bounded delta (zero plane when expired)
 		std::string statusText;
 		FallbackCatalog::Decision fallback;     // "product.temporal_detail"
@@ -618,10 +638,24 @@ namespace TdV2
 	class TdV2LateCarryController
 	{
 	public:
-		void OnOnTimeFrame(const TdV2Plane& delta, StandInRegistry* standIns = nullptr)
+		void OnOnTimeFrame(
+			const TdV2Plane& delta,
+			StandInRegistry* standIns = nullptr,
+			const TdV2Plane* onTimeClean = nullptr)
 		{
 			prevDelta_ = delta;
 			hasPrevDelta_ = !delta.Empty();
+			if (onTimeClean != nullptr && !onTimeClean->Empty() &&
+			    onTimeClean->w == delta.w && onTimeClean->h == delta.h)
+			{
+				prevClean_ = *onTimeClean;
+				hasPrevClean_ = true;
+			}
+			else
+			{
+				prevClean_ = TdV2Plane{};
+				hasPrevClean_ = false;
+			}
 			lateStreak_ = 0;
 			expired_ = false;
 			if (standIns != nullptr)
@@ -631,11 +665,13 @@ namespace TdV2
 			}
 		}
 
-		// Scene cut / geometry change / reset: clears stored delta so TD NEVER carries across cuts.
+		// Scene cut / geometry change / reset: clears stored delta & clean reference so TD NEVER carries across cuts.
 		void OnCutOrReset(StandInRegistry* standIns = nullptr)
 		{
 			prevDelta_ = TdV2Plane{};
 			hasPrevDelta_ = false;
+			prevClean_ = TdV2Plane{};
+			hasPrevClean_ = false;
 			lateStreak_ = 0;
 			expired_ = false;
 			if (standIns != nullptr)
@@ -657,7 +693,8 @@ namespace TdV2
 			int cellsW,
 			int cellsH,
 			int cellPx,
-			StandInRegistry* standIns = nullptr)
+			StandInRegistry* standIns = nullptr,
+			const LateCarryContext* ctx = nullptr)
 		{
 			LateCarryDecision dec;
 			dec.usesL3Clamp = false;
@@ -688,6 +725,25 @@ namespace TdV2
 					standIns->Engage(StandInKind::NonFiniteClosure, "TdV2LateCarryController invalid frame or stepTotalVar");
 				++lateStreak_;
 				return makeExpired("invalid frame or stepTotalVar");
+			}
+
+			// Validate STRICT/CELL context upfront when transform-identified projection is requested.
+			const bool useTransform8x8 = (ctx != nullptr && ctx->transformIdentified8x8);
+			if (useTransform8x8)
+			{
+				const bool ctxNonFinite = !std::isfinite(ctx->stepDelta) || !std::isfinite(ctx->deadZonePhi);
+				if (ctxNonFinite || ctx->stepDelta <= 0.0 || ctx->deadZonePhi <= 0.0 || ctx->deadZonePhi >= 1.0 ||
+				    !(PeakCodeForBits(ctx->sourceBits) > 0.0))
+				{
+					if (standIns != nullptr)
+					{
+						if (ctxNonFinite)
+							standIns->Engage(StandInKind::NonFiniteClosure, "TdV2LateCarryController non-finite STRICT/CELL context");
+						standIns->Engage(StandInKind::A2StatsInvalid, "TdV2LateCarryController invalid STRICT/CELL stepDelta/phi");
+					}
+					++lateStreak_;
+					return makeExpired("invalid STRICT/CELL context");
+				}
 			}
 
 			// Once any late frame expires (null motion, empty active rect, geometry mismatch, or cap reached),
@@ -743,27 +799,60 @@ namespace TdV2
 				prevDelta_, zeroFallback, ar,
 				carryMotion->vx, carryMotion->vy,
 				cellsW, cellsH, cellPx,
-				warpedDelta, validMask, standIns);
+				warpedDelta, validMask, standIns, &carryMotion->valid);
+
+			// Prepare aligned clean reference guide for residual consistency check (Q7a):
+			// prefer explicit ctx->referenceClean if supplied, else warp stored on-time prevClean_.
+			const TdV2Plane* refGuide = nullptr;
+			TdV2Plane warpedPrevClean;
+			std::vector<uint8_t> prevCleanValidMask;
+			const bool hasExplicitRef = (ctx != nullptr && ctx->referenceClean != nullptr &&
+			                             !ctx->referenceClean->Empty() &&
+			                             ctx->referenceClean->w == curClean.w && ctx->referenceClean->h == curClean.h);
+			if (hasExplicitRef)
+			{
+				refGuide = ctx->referenceClean;
+			}
+			else if (hasPrevClean_ && prevClean_.w == curClean.w && prevClean_.h == curClean.h)
+			{
+				WarpCleanReference(
+					prevClean_, curClean, ar,
+					carryMotion->vx, carryMotion->vy,
+					cellsW, cellsH, cellPx,
+					warpedPrevClean, prevCleanValidMask, nullptr, &carryMotion->valid);
+				refGuide = &warpedPrevClean;
+				prevClean_ = warpedPrevClean;
+			}
+
+			const int bxStart = ((ar.x0 + 7) / 8) * 8;
+			const int byStart = ((ar.y0 + 7) / 8) * 8;
+			const int bxEnd = (ar.x1 / 8) * 8;
+			const int byEnd = (ar.y1 / 8) * 8;
+			const bool hasInterior8x8 = useTransform8x8 && (bxStart < bxEnd) && (byStart < byEnd);
 
 			// Keep an un-decayed 1-hop warped delta so late frame 2 can advance accurately by another 1-hop carryMotion.
 			TdV2Plane nextPrevDelta(curClean.w, curClean.h, 0.0);
 			bool anyPixelBounded = false;
 			bool anyNonFinitePixel = false;
 
-			for (int y = ar.y0; y < ar.y1; ++y)
+			auto isMaskedPixel = [&](int x, int y) -> bool
 			{
 				const int cy = (std::min)(cellsH - 1, y / cellPx);
+				const int cx = (std::min)(cellsW - 1, x / cellPx);
+				const size_t cIdx = static_cast<size_t>(cy) * static_cast<size_t>(cellsW) + static_cast<size_t>(cx);
+				const size_t pIdx = static_cast<size_t>(y) * static_cast<size_t>(curClean.w) + static_cast<size_t>(x);
+				return validMask[pIdx] == 0u ||
+				       carryMotion->valid[cIdx] == 0u ||
+				       carryMotion->cls[cIdx] == RegionMotionClass::Overlay ||
+				       carryMotion->cls[cIdx] == RegionMotionClass::DynamicTexture;
+			};
+
+			for (int y = ar.y0; y < ar.y1; ++y)
+			{
 				for (int x = ar.x0; x < ar.x1; ++x)
 				{
-					const int cx = (std::min)(cellsW - 1, x / cellPx);
-					const size_t cIdx = static_cast<size_t>(cy) * static_cast<size_t>(cellsW) + static_cast<size_t>(cx);
-					const size_t pIdx = static_cast<size_t>(y) * static_cast<size_t>(curClean.w) + static_cast<size_t>(x);
-
 					// Mask out Overlay cells, DynamicTexture cells, invalid motion cells, and out-of-bounds/non-finite warp landings.
-					if (validMask[pIdx] == 0u ||
-					    carryMotion->valid[cIdx] == 0u ||
-					    carryMotion->cls[cIdx] == RegionMotionClass::Overlay ||
-					    carryMotion->cls[cIdx] == RegionMotionClass::DynamicTexture)
+					if (isMaskedPixel(x, y))
 					{
 						dec.delta.at(x, y) = 0.0;
 						continue;
@@ -779,17 +868,153 @@ namespace TdV2
 					}
 
 					nextPrevDelta.at(x, y) = wDelta;
-					const double scaled = wDelta * decay;
+					double scaled = wDelta * decay;
 					if (scaled == 0.0)
 					{
 						dec.delta.at(x, y) = 0.0;
 						continue;
 					}
 
-					// Bound each non-zero carried pixel via current frame's quantization cell bound without flooding StandInRegistry per pixel.
-					dec.delta.at(x, y) = ApplyTransformUnknownBound(scaled, stepTotalVar, nullptr);
-					anyPixelBounded = true;
+					// Residual consistency check (Q7a: "checked against current frame's bounds & residual"):
+					// reject carried delta that opposes the current frame's residual direction relative to the aligned
+					// reference, clamp to convex hull [cur, ref], and apply 3-sigma Huber taper on large discrepancies.
+					if (refGuide != nullptr)
+					{
+						const size_t pIdx = static_cast<size_t>(y) * static_cast<size_t>(curClean.w) + static_cast<size_t>(x);
+						const bool refValid = hasExplicitRef || (pIdx < prevCleanValidMask.size() && prevCleanValidMask[pIdx] != 0u);
+						if (refValid)
+						{
+							const double refVal = refGuide->at(x, y);
+							if (!std::isfinite(refVal))
+							{
+								anyNonFinitePixel = true;
+								dec.delta.at(x, y) = 0.0;
+								continue;
+							}
+							const double desiredDir = refVal - curVal;
+							if (scaled * desiredDir < 0.0)
+							{
+								++dec.residualRejectedPixels;
+								dec.delta.at(x, y) = 0.0;
+								continue;
+							}
+							if (std::fabs(scaled) > std::fabs(desiredDir))
+								scaled = desiredDir;
+							if (stepTotalVar > 0.0)
+								scaled *= HuberPixelTaper(curVal - refVal, stepTotalVar);
+						}
+					}
+
+					const bool inFull8x8 = hasInterior8x8 && (x >= bxStart) && (x < bxEnd) && (y >= byStart) && (y < byEnd);
+					if (inFull8x8)
+					{
+						dec.delta.at(x, y) = scaled;
+					}
+					else
+					{
+						// Bound each non-zero carried pixel via current frame's quantization cell bound without flooding StandInRegistry per pixel.
+						dec.delta.at(x, y) = ApplyTransformUnknownBound(scaled, stepTotalVar, nullptr);
+						anyPixelBounded = true;
+					}
 				}
+			}
+
+			// Transform-identified 8x8 DCT STRICT/CELL projection on carried delta when active (Q7a & H14).
+			if (hasInterior8x8)
+			{
+				const bool hasValidPb = (ctx->codecModelPb != nullptr && !ctx->codecModelPb->Empty() &&
+				                         ctx->codecModelPb->w == curClean.w && ctx->codecModelPb->h == curClean.h);
+				const TdV2Plane& predClean = hasValidPb ? *ctx->codecModelPb : (refGuide != nullptr ? *refGuide : curClean);
+				if (!hasValidPb && standIns != nullptr)
+				{
+					standIns->Engage(StandInKind::CodecModelPbStandIn,
+						ctx->codecModelPb == nullptr
+							? "TdV2LateCarryController Field B P_B absent; using stand-in prediction"
+							: "TdV2LateCarryController codecModelPb dimension mismatch; using stand-in");
+				}
+				const double peakCode = PeakCodeForBits(ctx->sourceBits);
+				const int iters = (std::max)(1, (std::min)(2, ctx->cellProjIterations));
+				for (int it = 0; it < iters; ++it)
+				{
+					for (int by = byStart; by < byEnd; by += 8)
+					{
+						for (int bx = bxStart; bx < bxEnd; bx += 8)
+						{
+							bool anyNonZero = false;
+							for (int j = 0; j < 8 && !anyNonZero; ++j)
+								for (int i = 0; i < 8; ++i)
+									if (dec.delta.at(bx + i, by + j) != 0.0) { anyNonZero = true; break; }
+							if (!anyNonZero)
+								continue;
+
+							double sentRes[64] = {}, blendRes[64] = {}, projRes[64] = {};
+							bool blockNonFinite = false;
+							for (int j = 0; j < 8; ++j)
+							{
+								for (int i = 0; i < 8; ++i)
+								{
+									const double cVal = curClean.at(bx + i, by + j);
+									const double pVal = predClean.at(bx + i, by + j);
+									if (!std::isfinite(cVal) || !std::isfinite(pVal))
+									{
+										blockNonFinite = true;
+										break;
+									}
+									sentRes[j * 8 + i] = cVal - pVal;
+									blendRes[j * 8 + i] = (cVal + dec.delta.at(bx + i, by + j)) - pVal;
+								}
+								if (blockNonFinite)
+									break;
+							}
+							if (blockNonFinite)
+							{
+								anyNonFinitePixel = true;
+								for (int j = 0; j < 8; ++j)
+									for (int i = 0; i < 8; ++i)
+										dec.delta.at(bx + i, by + j) = 0.0;
+								continue;
+							}
+							ProjectResidual8x8Dct(sentRes, blendRes, ctx->stepDelta, ctx->deadZonePhi, ctx->residualMode, projRes);
+							for (int j = 0; j < 8; ++j)
+							{
+								for (int i = 0; i < 8; ++i)
+								{
+									const double cVal = curClean.at(bx + i, by + j);
+									const double pVal = predClean.at(bx + i, by + j);
+									dec.delta.at(bx + i, by + j) = (pVal + projRes[j * 8 + i]) - cVal;
+								}
+							}
+						}
+					}
+
+					// Pixel-domain code range projection [0, peakCode] (2-set POCS).
+					if (peakCode > 0.0)
+					{
+						for (int y = byStart; y < byEnd; ++y)
+						{
+							for (int x = bxStart; x < bxEnd; ++x)
+							{
+								const double dVal = dec.delta.at(x, y);
+								if (dVal == 0.0)
+									continue;
+								const double cVal = curClean.at(x, y);
+								const double clamped = (std::max)(0.0, (std::min)(peakCode, cVal + dVal));
+								dec.delta.at(x, y) = clamped - cVal;
+							}
+						}
+					}
+				}
+
+				// Re-enforce strict 0.0 on masked cells (Overlay / DynamicTexture / invalid motion) after 8x8 DCT.
+				for (int y = byStart; y < byEnd; ++y)
+				{
+					for (int x = bxStart; x < bxEnd; ++x)
+					{
+						if (isMaskedPixel(x, y))
+							dec.delta.at(x, y) = 0.0;
+					}
+				}
+				dec.usedTransformProjection = true;
 			}
 
 			// Advance stored delta to the un-decayed warped delta for a subsequent 1-hop late frame.
@@ -821,6 +1046,8 @@ namespace TdV2
 	private:
 		TdV2Plane prevDelta_;
 		bool hasPrevDelta_ = false;
+		TdV2Plane prevClean_;
+		bool hasPrevClean_ = false;
 		int lateStreak_ = 0;
 		bool expired_ = false;
 	};

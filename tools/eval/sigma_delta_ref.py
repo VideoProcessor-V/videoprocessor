@@ -38,7 +38,14 @@ def quantise_step(x, r, d, lim, amplitude):
     # residual in and carries none out.
     exact = x == np.floor(x + 0.5)
     r = np.where(exact, 0.0, r)
-    k = np.minimum(np.maximum(np.floor(x + r + d + 0.5), lim[0]), lim[1])
+    # Owner Q9b (SD SHOULD-1, mirrors SigmaDeltaDomain.h:80): on limited-range targets, pixels at or
+    # above reference black (16 * unit) never dither into BTB; true BTB pixels (< 16 * unit) remain
+    # untouched down to lim[0]. Exact for 8..16 bit because lim[0] == 0.0 for full range and
+    # lim[0] == unit == 2^(bits-8) for limited range.
+    limited = lim[0] > 0.0
+    black = 16.0 * lim[0]
+    floor_code = np.where(limited & (x >= black), black, lim[0])
+    k = np.minimum(np.maximum(np.floor(x + r + d + 0.5), floor_code), lim[1])
     b = residual_bound(amplitude)
     return k, np.where(exact, 0.0, np.minimum(np.maximum(x + r - k, -b), b))
 

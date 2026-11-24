@@ -45,6 +45,13 @@ namespace TdV2
 	// Q8.8 fixed-point scale (2^8 = 256) matching QualityPattern::Record stepMean/stepP90/stepMax layout.
 	constexpr double kQ88Scale = 256.0;
 
+	// Exact squared coefficient of variation Var(|X|) / E[|X|]^2 = (pi / 2) - 1 of a half-normal random variable
+	// (used to derive the 3-sigma sampling-noise margin for P16 8-px boundary-ratio period detection).
+	constexpr double kHalfNormalCvSq = 0.5 * 3.14159265358979323846 - 1.0;
+
+	// 3-sigma Gaussian tail multiplier (P(z > 3) = 0.135% one-sided; consistent with TdV2BlendMath kPixelBoundSigma).
+	constexpr double kBlockingRatioSigma = 3.0;
+
 	// ---- Visible P16 Block-Grid Stand-In Interface (1-line swap when GPU kCodingEvidence grid lands) ----
 	struct CodingGridCell
 	{
@@ -126,10 +133,10 @@ namespace TdV2
 			double maxStep = 0.0;
 			size_t copy1Count = 0;
 			size_t copy2Count = 0;
-			double sumHorizBoundaryRatio = 0.0;
-			double sumVertBoundaryRatio = 0.0;
-			size_t ratioCellsX = 0;
-			size_t ratioCellsY = 0;
+			double totalBoundXSum = 0.0, totalInterXSum = 0.0;
+			size_t totalBoundXCnt = 0, totalInterXCnt = 0;
+			double totalBoundYSum = 0.0, totalInterYSum = 0.0;
+			size_t totalBoundYCnt = 0, totalInterYCnt = 0;
 
 			for (int cy = 0; cy < out.cellsH; ++cy)
 			{
@@ -239,15 +246,24 @@ namespace TdV2
 					const double rx = (boundXCnt > 0) ? (bx / (std::max)(ix, kRoleNumFloor)) : 1.0;
 					const double ry = (boundYCnt > 0) ? (by / (std::max)(iy, kRoleNumFloor)) : 1.0;
 					cell.boundaryRatio = 0.5 * (rx + ry);
-					if (boundXCnt > 0 && bx > copyTol)
+					// Exact cell-wide pair-average activity gate: every pair has equal weight 1/(N_B + N_I),
+					// so by exact exchangeability E[bx | cellMean > copyTol] == E[ix | cellMean > copyTol]
+					// with zero left-tail truncation bias on i.i.d. white noise while flat cells stay excluded.
+					if (boundXCnt > 0 && interXCnt > 0 &&
+					    (boundXSum + interXSum) / static_cast<double>(boundXCnt + interXCnt) > copyTol)
 					{
-						sumHorizBoundaryRatio += rx;
-						++ratioCellsX;
+						totalBoundXSum += boundXSum;
+						totalBoundXCnt += boundXCnt;
+						totalInterXSum += interXSum;
+						totalInterXCnt += interXCnt;
 					}
-					if (boundYCnt > 0 && by > copyTol)
+					if (boundYCnt > 0 && interYCnt > 0 &&
+					    (boundYSum + interYSum) / static_cast<double>(boundYCnt + interYCnt) > copyTol)
 					{
-						sumVertBoundaryRatio += ry;
-						++ratioCellsY;
+						totalBoundYSum += boundYSum;
+						totalBoundYCnt += boundYCnt;
+						totalInterYSum += interYSum;
+						totalInterYCnt += interYCnt;
 					}
 
 					if (pxCnt > 0)
@@ -281,10 +297,30 @@ namespace TdV2
 				out.exactCopyFracPrev2 = static_cast<double>(copy2Count) * invCells;
 				// Smooth monotonic quality score in (0, 1]: 1.0 when zero block-edge step, decreasing with step/depthScale.
 				out.pictureScore = RampMath::Clamp01(1.0 / (1.0 + out.stepMean / (std::max)(depthScale, kRoleNumFloor)));
-				if (ratioCellsX > 0 && (sumHorizBoundaryRatio / static_cast<double>(ratioCellsX)) > 1.0)
-					out.detectedPeriodX = static_cast<uint16_t>(kTransformSubCellPx);
-				if (ratioCellsY > 0 && (sumVertBoundaryRatio / static_cast<double>(ratioCellsY)) > 1.0)
-					out.detectedPeriodY = static_cast<uint16_t>(kTransformSubCellPx);
+				// Period detection with derived 3-sigma half-normal sampling-noise margin:
+				// Under stationary iid white noise (zero blocking), pooled mean ratio B_bar / I_bar has standard error
+				// sigma_R = sqrt((pi/2 - 1) * (1/N_B + 1/N_I)), so requiring ratio > 1 + 3*sigma_R suppresses false
+				// blocking triggers on pure flat noise while cleanly detecting genuine 8-px block discontinuities.
+				if (totalBoundXCnt > 0)
+				{
+					const double meanBx = totalBoundXSum / static_cast<double>(totalBoundXCnt);
+					const double meanIx = totalInterXCnt > 0 ? (totalInterXSum / static_cast<double>(totalInterXCnt)) : 0.0;
+					const double invNb = 1.0 / static_cast<double>(totalBoundXCnt);
+					const double invNi = totalInterXCnt > 0 ? (1.0 / static_cast<double>(totalInterXCnt)) : 0.0;
+					const double marginX = kBlockingRatioSigma * std::sqrt(kHalfNormalCvSq * (invNb + invNi));
+					if ((meanBx / (std::max)(meanIx, kRoleNumFloor)) > (1.0 + marginX))
+						out.detectedPeriodX = static_cast<uint16_t>(kTransformSubCellPx);
+				}
+				if (totalBoundYCnt > 0)
+				{
+					const double meanBy = totalBoundYSum / static_cast<double>(totalBoundYCnt);
+					const double meanIy = totalInterYCnt > 0 ? (totalInterYSum / static_cast<double>(totalInterYCnt)) : 0.0;
+					const double invNb = 1.0 / static_cast<double>(totalBoundYCnt);
+					const double invNi = totalInterYCnt > 0 ? (1.0 / static_cast<double>(totalInterYCnt)) : 0.0;
+					const double marginY = kBlockingRatioSigma * std::sqrt(kHalfNormalCvSq * (invNb + invNi));
+					if ((meanBy / (std::max)(meanIy, kRoleNumFloor)) > (1.0 + marginY))
+						out.detectedPeriodY = static_cast<uint16_t>(kTransformSubCellPx);
+				}
 				out.valid = true;
 			}
 			return out;
@@ -364,6 +400,8 @@ namespace TdV2
 		QualityPattern::Record record{};  // Exact 64-byte skeleton POD
 		AbstainReason abstain = AbstainReason::None;
 		bool produced = false;
+		// Pre-cut pending frames flushed in sequence order with available reduced lead (marked provisional; zero silent drops).
+		std::vector<FrameRoleDecision> flushedBeforeCut;
 	};
 
 	class TdV2FrameRoleDetector
@@ -387,6 +425,11 @@ namespace TdV2
 
 		void Reset()
 		{
+			for (const auto& entry : window_)
+			{
+				if (!entry.emitted)
+					++droppedCount_;
+			}
 			window_.clear();
 			hasEmittedSeq_ = false;
 			lastEmittedSeq_ = 0;
@@ -397,6 +440,9 @@ namespace TdV2
 			const size_t idx = static_cast<size_t>(r);
 			return idx < abstainCounts_.size() ? abstainCounts_[idx] : 0;
 		}
+
+		// Visible counter of un-emitted buffered frames dropped via Reset() or window eviction (Rule 4).
+		uint64_t DroppedRecordCount() const { return droppedCount_; }
 
 		size_t WindowSize() const { return window_.size(); }
 
@@ -421,25 +467,44 @@ namespace TdV2
 				return Abstain(dec, AbstainReason::NonFiniteEvidence, ev.seq, leadFrames_, /*emitRecord=*/true);
 			}
 
-			// Cut immediately flushes temporal window so peaks are NEVER bridged across cuts.
+			// Cut immediately flushes ALL un-emitted pre-cut frames in sequence order (with available reduced lead,
+			// marked provisional) into `dec.flushedBeforeCut` BEFORE clearing the temporal window so peaks are NEVER
+			// bridged across cuts and pending records are NEVER silently dropped!
 			// When leadFrames_ > 0, the cut frame stays buffered as the new post-cut anchor and is NOT
 			// emitted prematurely (produced = false), preventing duplicate seq emission when lead frames arrive.
 			if (ev.isCut)
 			{
+				std::vector<FrameRoleDecision> flushed;
+				for (size_t i = 0; i < window_.size(); ++i)
+				{
+					if (window_[i].emitted)
+						continue;
+					const size_t remAhead = window_.size() - 1 - i;
+					const uint8_t availLead = static_cast<uint8_t>((std::min)(static_cast<size_t>(kMaxLeadFrames), remAhead));
+					FrameRoleDecision fd = ClassifyTargetWithLead(i, window_[i].ev, availLead, /*forceProvisional=*/true);
+					window_[i].emitted = true;
+					flushed.push_back(std::move(fd));
+				}
 				window_.clear();
-				window_.push_back(ev);
 				const bool emitNow = (leadFrames_ == 0);
+				window_.push_back(WindowEntry{ ev, emitNow });
 				if (emitNow)
 				{
 					hasEmittedSeq_ = true;
 					lastEmittedSeq_ = ev.seq;
 				}
-				return Abstain(dec, AbstainReason::CutReset, ev.seq, leadFrames_, emitNow);
+				Abstain(dec, AbstainReason::CutReset, ev.seq, leadFrames_, emitNow);
+				dec.flushedBeforeCut = std::move(flushed);
+				return dec;
 			}
 
-			window_.push_back(ev);
+			window_.push_back(WindowEntry{ ev, false });
 			if (window_.size() > kMaxWindowFrames)
+			{
+				if (!window_.front().emitted)
+					++droppedCount_;
 				window_.pop_front();
+			}
 
 			// Need at least leadFrames_ + 1 frames in window to emit the target frame at index (size - 1 - lead).
 			// While warming up, produced = false so ev.seq is never emitted twice.
@@ -449,11 +514,33 @@ namespace TdV2
 			}
 
 			const size_t targetIdx = window_.size() - 1 - static_cast<size_t>(leadFrames_);
-			const FrameRoleEvidence& target = window_[targetIdx];
-			return ClassifyTarget(targetIdx, target);
+			FrameRoleDecision outDec = ClassifyTarget(targetIdx, window_[targetIdx].ev);
+			if (outDec.produced)
+				window_[targetIdx].emitted = true;
+			return outDec;
 		}
 
-		// Flush remaining buffered frames at stream end (using available reduced lead, marked provisional).
+		// Flush ALL remaining un-emitted buffered frames at stream end in sequence order (each with its available
+		// reduced lead, marked provisional, and marked emitted so repeated calls produce zero duplicates).
+		std::vector<FrameRoleDecision> FlushEndOfStream(StandInRegistry* standIns = nullptr)
+		{
+			if (standIns != nullptr)
+				standIns->Engage(StandInKind::P15FramePattern, "end-of-stream provisional flush");
+			std::vector<FrameRoleDecision> out;
+			for (size_t i = 0; i < window_.size(); ++i)
+			{
+				if (window_[i].emitted)
+					continue;
+				const size_t remAhead = window_.size() - 1 - i;
+				const uint8_t availLead = static_cast<uint8_t>((std::min)(static_cast<size_t>(kMaxLeadFrames), remAhead));
+				FrameRoleDecision fd = ClassifyTargetWithLead(i, window_[i].ev, availLead, /*forceProvisional=*/true);
+				window_[i].emitted = true;
+				out.push_back(std::move(fd));
+			}
+			return out;
+		}
+
+		// Flush the latest buffered frame causally (lead = 0, marked provisional, never duplicating an already-emitted frame).
 		FrameRoleDecision ClassifyLatestCausal(StandInRegistry* standIns = nullptr)
 		{
 			if (standIns != nullptr)
@@ -463,12 +550,21 @@ namespace TdV2
 			if (window_.empty())
 				return Abstain(dec, AbstainReason::InsufficientWindow, 0, 0, /*emitRecord=*/false);
 			const size_t idx = window_.size() - 1;
-			if (hasEmittedSeq_ && window_[idx].seq == lastEmittedSeq_)
-				return Abstain(dec, AbstainReason::InsufficientWindow, window_[idx].seq, 0, /*emitRecord=*/false);
-			return ClassifyTargetWithLead(idx, window_[idx], 0);
+			if (window_[idx].emitted || (hasEmittedSeq_ && window_[idx].ev.seq == lastEmittedSeq_))
+				return Abstain(dec, AbstainReason::InsufficientWindow, window_[idx].ev.seq, 0, /*emitRecord=*/false);
+			FrameRoleDecision fd = ClassifyTargetWithLead(idx, window_[idx].ev, 0, /*forceProvisional=*/true);
+			if (fd.produced)
+				window_[idx].emitted = true;
+			return fd;
 		}
 
 	private:
+		struct WindowEntry
+		{
+			FrameRoleEvidence ev;
+			bool emitted = false;
+		};
+
 		static uint16_t ToQ88(double v)
 		{
 			if (!std::isfinite(v) || v <= 0.0)
@@ -487,7 +583,13 @@ namespace TdV2
 			return outFlags != 0;
 		}
 
-		FrameRoleDecision Abstain(FrameRoleDecision& dec, AbstainReason reason, uint64_t seq, uint8_t leadUsed, bool emitRecord)
+		FrameRoleDecision Abstain(
+			FrameRoleDecision& dec,
+			AbstainReason reason,
+			uint64_t seq,
+			uint8_t leadUsed,
+			bool emitRecord,
+			bool forceProvisional = false)
 		{
 			const size_t idx = static_cast<size_t>(reason);
 			if (idx < abstainCounts_.size())
@@ -500,7 +602,7 @@ namespace TdV2
 			dec.record.peakValley = static_cast<uint8_t>(QualityPattern::PeakValley::None);
 			dec.record.leadUsed = leadUsed;
 			dec.record.causal = (leadUsed == 0) ? 1u : 0u;
-			if (leadUsed < kMaxLeadFrames)
+			if (forceProvisional || leadUsed < kMaxLeadFrames)
 				dec.record.validityBits |= QualityPattern::kProvisional;
 			if (emitRecord)
 			{
@@ -512,10 +614,14 @@ namespace TdV2
 
 		FrameRoleDecision ClassifyTarget(size_t targetIdx, const FrameRoleEvidence& target)
 		{
-			return ClassifyTargetWithLead(targetIdx, target, leadFrames_);
+			return ClassifyTargetWithLead(targetIdx, target, leadFrames_, false);
 		}
 
-		FrameRoleDecision ClassifyTargetWithLead(size_t targetIdx, const FrameRoleEvidence& target, uint8_t leadUsed)
+		FrameRoleDecision ClassifyTargetWithLead(
+			size_t targetIdx,
+			const FrameRoleEvidence& target,
+			uint8_t leadUsed,
+			bool forceProvisional = false)
 		{
 			FrameRoleDecision dec;
 			QualityPattern::Record& r = dec.record;
@@ -532,13 +638,13 @@ namespace TdV2
 			r.validityBits = QualityPattern::kValidScore | QualityPattern::kValidSteps | QualityPattern::kValidCopy;
 			if (target.periodX > 0 || target.periodY > 0)
 				r.validityBits |= QualityPattern::kValidGrid;
-			if (leadUsed < kMaxLeadFrames)
+			if (forceProvisional || leadUsed < kMaxLeadFrames)
 				r.validityBits |= QualityPattern::kProvisional;
 
 			// Fade active -> abstain visibly rather than guessing peaks during a ramp.
 			if (target.isFade)
 			{
-				return Abstain(dec, AbstainReason::FadeActive, target.seq, leadUsed, /*emitRecord=*/true);
+				return Abstain(dec, AbstainReason::FadeActive, target.seq, leadUsed, /*emitRecord=*/true, forceProvisional);
 			}
 
 			// Cadence repeat check (3:2 pulldown): ExactCopy MUST NEVER be promoted to Peak!
@@ -566,12 +672,13 @@ namespace TdV2
 
 			for (size_t i = 0; i < window_.size(); ++i)
 			{
-				if (window_[i].isFade)
+				const FrameRoleEvidence& we = window_[i].ev;
+				if (we.isFade)
 					continue;
 				uint8_t cf = 0;
-				if (i != targetIdx && IsExactCopy(window_[i], cf))
+				if (i != targetIdx && IsExactCopy(we, cf))
 					continue;
-				const double sc = RampMath::Clamp01(window_[i].qualityScore);
+				const double sc = RampMath::Clamp01(we.qualityScore);
 				uniqueScores.push_back(sc);
 				if (i < targetIdx)
 				{
@@ -589,7 +696,7 @@ namespace TdV2
 			const size_t minUnique = (leadUsed >= kMaxLeadFrames) ? 3u : 2u;
 			if (uniqueScores.size() < minUnique)
 			{
-				return Abstain(dec, AbstainReason::InsufficientWindow, target.seq, leadUsed, /*emitRecord=*/true);
+				return Abstain(dec, AbstainReason::InsufficientWindow, target.seq, leadUsed, /*emitRecord=*/true, forceProvisional);
 			}
 
 			// Compute rank (0 = highest score) and robust spread via U24 RobustStats.
@@ -607,25 +714,27 @@ namespace TdV2
 			r.windowFrames = static_cast<uint16_t>(uniqueScores.size());
 			r.validityBits |= QualityPattern::kValidRank;
 
-			// Quantization floor on quality score contrast: half a code step normalized by peak code.
-			// Fail closed on invalid sourceBits (zero silent fallback).
+			// Normalized quantization floor on dimensionless [0, 1] qualityScore:
+			// exact half-LSB rounding resolution of a [0, 1] signal quantized to `sourceBits` integer codes
+			// (PeakCodeForBits = 2^bits - 1; 0.5 / peakCode ~= 4.89e-4 at 10-bit). Fail closed on invalid sourceBits.
 			const double peakCode = PeakCodeForBits(target.sourceBits);
 			if (!(peakCode > 0.0))
 			{
-				return Abstain(dec, AbstainReason::NonFiniteEvidence, target.seq, leadUsed, /*emitRecord=*/true);
+				return Abstain(dec, AbstainReason::NonFiniteEvidence, target.seq, leadUsed, /*emitRecord=*/true, forceProvisional);
 			}
 			const double quantScoreFloor = 0.5 / peakCode;
 			const double spread = maxSc - minSc;
 			if (spread < 2.0 * quantScoreFloor)
 			{
-				return Abstain(dec, AbstainReason::LowRhythmContrast, target.seq, leadUsed, /*emitRecord=*/true);
+				return Abstain(dec, AbstainReason::LowRhythmContrast, target.seq, leadUsed, /*emitRecord=*/true, forceProvisional);
 			}
 
 			// Derive robust scale immune to bimodal/flat-bottom GOPs where MAD == 0 (e.g., I-B-B-P):
-			//   - madSigma = kMadToSigma * MAD (standard Gaussian MAD scale)
-			//   - iqrSigma = (Q75 - Q25) / (2 * Phi^-1(0.75)), 2 * Phi^-1(0.75) = 1.3489795003921634
-			//   - rangeSigma = spread / 4.0 (standard 4-sigma 95% range rule)
-			// Minimum margin = 0.25 * max(madSigma, iqrSigma, rangeSigma), floored by quantScoreFloor.
+			//   - madSigma   = kMadToSigma * MAD (standard Gaussian MAD scale)
+			//   - iqrSigma   = (Q75 - Q25) / (2 * Phi^-1(0.75)), 2 * Phi^-1(0.75) = 1.3489795003921634
+			//   - rangeSigma = spread / 4.0 (standard 4-sigma 95% normal range rule)
+			// Contrast margin = half standard error of the N-frame sliding window mean (0.5 * robustSigma / sqrt(N)),
+			// floored by the half-LSB normalized score quantization floor `quantScoreFloor`.
 			constexpr double kNormalIqrPerSigma = 1.3489795003921634;
 			const double medScore = RobustStats::Median(uniqueScores, RobustStats::MedianRule::MeanOfMiddle);
 			const double mad = RobustStats::MadAbout(uniqueScores, medScore, RobustStats::MedianRule::MeanOfMiddle);
@@ -635,7 +744,8 @@ namespace TdV2
 			const double iqrSigma = (q75 - q25) / kNormalIqrPerSigma;
 			const double rangeSigma = spread / 4.0;
 			const double robustSigma = (std::max)(madSigma, (std::max)(iqrSigma, rangeSigma));
-			const double margin = (std::max)(robustSigma / 4.0, quantScoreFloor);
+			const double windowStdErr = robustSigma / std::sqrt(static_cast<double>(uniqueScores.size()));
+			const double margin = (std::max)(0.5 * windowStdErr, quantScoreFloor);
 
 			bool isPeak = false;
 			bool isValley = false;
@@ -698,9 +808,10 @@ namespace TdV2
 		}
 
 		uint8_t leadFrames_ = kMaxLeadFrames;
-		std::deque<FrameRoleEvidence> window_;
+		std::deque<WindowEntry> window_;
 		std::array<uint64_t, static_cast<size_t>(AbstainReason::Count)> abstainCounts_{};
 		bool hasEmittedSeq_ = false;
 		uint64_t lastEmittedSeq_ = 0;
+		uint64_t droppedCount_ = 0;
 	};
 }

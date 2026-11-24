@@ -2,8 +2,14 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 // Temporal Detail v2 — Stage TD-S7 (2026-11-23_TD-consolidated-plan.md s3.2 TD-S7, s4.3 Q8):
-// Runtime settings parsing/validation, Original-pathway override, Owner Q8a dependency activation,
-// live TdProducts::Snapshot builder, and plain-English Ctrl+I / Config status formatting.
+// Runtime settings parsing/validation, Original-pathway override, Owner Q8a dependency-plan helpers
+// for Wave 4-6 renderer hookup (NOT wired to live renderer yet), TdProducts::Snapshot builder,
+// and plain-English Ctrl+I / Config status formatting.
+//
+// HONEST STATUS: Temporal detail v2 is library-ready and NOT wired to the live renderer yet
+// (connects at Wave 4-6 integration; TdProducts::kEngineRequestedToday remains false).
+// Dependency-plan helpers here compute what Wave 4-6 will activate; toggling temporal_detail
+// in Config today does NOT run TD in the live renderer or auto-enable the analysis lane yet.
 //
 // Keys:
 //   - temporal_detail = off (default) | shadow | on
@@ -137,8 +143,8 @@ namespace TdV2
 		return cfg;
 	}
 
-	// Owner Q8a: turning temporal_detail != off automatically enables the required analysis lane +
-	// full motion/camera group visibly; Original pathway or off leaves both disabled.
+	// Owner Q8a dependency-plan helper for Wave 4-6 renderer hookup (NOT wired to live renderer yet):
+	// computes which dependencies Wave 4-6 will activate when temporal_detail != off; Original pathway or off leaves both disabled.
 	struct TdDependencyActivation
 	{
 		bool enableAnalysisLane = false;
@@ -153,22 +159,22 @@ namespace TdV2
 		TdDependencyActivation dep;
 		if (originalPathway)
 		{
-			dep.visibleNote = "temporal detail: off (Original pathway)";
+			dep.visibleNote = "Temporal detail v2: off (Original pathway)";
 			return dep;
 		}
 		if (s.mode == Mode::Off)
 		{
-			dep.visibleNote = "temporal detail: off";
+			dep.visibleNote = "Temporal detail v2: off (library ready, not wired to live renderer yet)";
 			return dep;
 		}
 		dep.enableAnalysisLane = true;
 		dep.enableMotionCameraGroup = true;
-		dep.visibleNote = std::string("temporal detail (") + ModeToken(s.mode) +
-			"): auto-enabled analysis lane + motion/camera group";
+		dep.visibleNote = std::string("Temporal detail v2: library ready (not wired to live renderer yet - connects at Wave 4-6 integration); ") +
+			"Wave 4-6 plan for " + ModeToken(s.mode) + ": analysis lane + motion/camera group";
 		return dep;
 	}
 
-	// ---- Live TdProducts::Snapshot Builder ----
+	// ---- TdProducts::Snapshot Builder (Wave 4-6 renderer hookup; kEngineRequestedToday remains false today) ----
 
 	struct LiveTdProductInputs
 	{
@@ -258,7 +264,7 @@ namespace TdV2
 		else if (in.lateCarried)
 			out.statusText = MetaOf(StandInKind::LateCarryActive).statusText;
 		else
-			out.statusText = std::string("temporal detail: ") + ModeToken(in.settings.mode) + " (live snapshot)";
+			out.statusText = std::string("Temporal detail v2: library ready (not wired to live renderer yet - connects at Wave 4-6 integration); snapshot=") + ModeToken(in.settings.mode);
 
 		return out;
 	}
@@ -269,6 +275,7 @@ namespace TdV2
 	{
 		TdV2RuntimeSettings settings;
 		bool originalPathway = false;
+		bool wiredToLiveRenderer = false; // Honest default: library ready, not wired to live renderer yet (Wave 4-6 hookup)
 		TdTier tier = TdTier::Full;
 		int usableLeadE = VpMotion::LaneAhead::kDepthTarget;
 		bool lateCarried = false;
@@ -280,15 +287,19 @@ namespace TdV2
 	inline std::string FormatTdCtrlIStatus(const TdCtrlIStatusInput& in)
 	{
 		if (in.originalPathway)
-			return "Temporal detail: off (Original pathway)";
+			return "Temporal detail v2: off (Original pathway)";
 		if (in.settings.mode == Mode::Off)
-			return "Temporal detail: off";
+			return in.wiredToLiveRenderer
+				? "Temporal detail: off"
+				: "Temporal detail v2: off (library ready, not wired to live renderer yet - connects at Wave 4-6 integration)";
 
 		const int ceiling = static_cast<int>(VpSkeleton::kAheadCeiling);
 		const int target = VpMotion::LaneAhead::kDepthTarget;
 		const int clampedE = (std::max)(0, (std::min)(ceiling, in.usableLeadE));
 
-		std::string line = std::string("Temporal detail: ") + ModeToken(in.settings.mode);
+		std::string line = in.wiredToLiveRenderer
+			? (std::string("Temporal detail: ") + ModeToken(in.settings.mode))
+			: (std::string("Temporal detail v2: library ready (not wired to live renderer yet - connects at Wave 4-6 integration); requested=") + ModeToken(in.settings.mode));
 		line += ", mode=" + std::string(ResidualModeToken(in.settings.residualMode));
 		if (in.settings.overlay != OverlayMode::Off)
 			line += ", overlay=" + std::string(OverlayModeToken(in.settings.overlay));

@@ -52,10 +52,14 @@ namespace TdV2
 	// cross-covariance terms between overlapping filter bands; re-normalizing would over-subtract by +23.6%).
 	struct BandWhiteNoiseGains
 	{
-		double low = 0.0;   // ||G(2.5)||_2^2 ~= 0.0127
-		double mid = 0.0;   // ||G(1.0) - G(2.5)||_2^2 ~= 0.0485
-		double fine = 0.0;  // ||I - G(1.0)||_2^2 ~= 0.7613
-		double d3 = 0.0;    // ||G(2.5) - G(6.0)||_2^2 ~= 0.0074
+		double low = 0.0;        // ||G(2.5)||_2^2 ~= 0.0127
+		double mid = 0.0;        // ||G(1.0) - G(2.5)||_2^2 ~= 0.0485
+		double fine = 0.0;       // ||I - G(1.0)||_2^2 ~= 0.7613
+		double d3 = 0.0;         // ||G(2.5) - G(6.0)||_2^2 ~= 0.0074
+		// Exact 2D white-noise projection <H_b G, G> / Var(G) = h_b[0, 0] (partition of unity: sum == 1.0).
+		double originLow = 0.0;  // g2(0)^2 ~= 0.0255
+		double originMid = 0.0;  // g1(0)^2 - g2(0)^2 ~= 0.1338
+		double originFine = 0.0; // 1 - g1(0)^2 ~= 0.8408
 	};
 
 	inline BandWhiteNoiseGains ComputeBandWhiteNoiseGains()
@@ -85,6 +89,7 @@ namespace TdV2
 			dot23 += g2[static_cast<size_t>(k + r2)] * g3[static_cast<size_t>(k + r3)];
 
 		const double g1_0 = g1[static_cast<size_t>(r1)];
+		const double g2_0 = g2[static_cast<size_t>(r2)];
 		const double normG1Sq = sum1Sq * sum1Sq;
 		const double normG2Sq = sum2Sq * sum2Sq;
 		const double normG3Sq = sum3Sq * sum3Sq;
@@ -96,15 +101,24 @@ namespace TdV2
 		out.mid = normG1Sq - 2.0 * cross12Sq + normG2Sq;
 		out.fine = 1.0 - 2.0 * (g1_0 * g1_0) + normG1Sq;
 		out.d3 = normG2Sq - 2.0 * cross23Sq + normG3Sq;
+		out.originLow = g2_0 * g2_0;
+		out.originMid = g1_0 * g1_0 - g2_0 * g2_0;
+		out.originFine = 1.0 - g1_0 * g1_0;
 		return out;
 	}
 
-	// Nominal codec dead-zone rounding offsets phi (refs/111:180: standard x264 / HM / HEVC inter 1/6, intra 1/3).
+	// Nominal codec dead-zone rounding offsets phi (refs/111:180: standard x264 / HM / HEVC inter 1/6, intra 1/3)
+	// and unbiased uniform integer output rounding (phi = 1/2, exact 1-LSB code step = 1.0 at any bit depth).
 	constexpr double kDeadZonePhiInter = 1.0 / 6.0;
 	constexpr double kDeadZonePhiIntra = 1.0 / 3.0;
+	constexpr double kUniformRoundingPhi = 0.5;
+	constexpr double kDefaultStepPriorLsb = 1.0;
 
 	// Strictly numerical singularity & conditioning guards (Rule 1: never physical thresholds).
+	// Regularization floor (1e-9) and Gaussian-elimination pivot singularity floor (1e-12) are strictly separated
+	// so well-conditioned tiny-scale matrices never falsely trip pivot singularity and rank-deficient matrices do.
 	constexpr double kSolveNumericalFloor = 1e-9;
+	constexpr double kSolvePivotFloor = 1e-12;
 	constexpr double kDefaultTraceRegScale = 1e-2;   // refs/111:211 diagonal conditioning 0.01 * mean(diag C)
 	constexpr double kSmallArgTaylorCutoff = 1e-3;   // Switch to 4th-order Taylor series to prevent 0/0 cancellation
 	constexpr double kDctPi = 3.14159265358979323846;
@@ -282,6 +296,7 @@ namespace TdV2
 
 		const double meanDiag = diagSum / static_cast<double>(refCount);
 		const double reg = (std::max)(traceRegScale * meanDiag, kSolveNumericalFloor);
+		const double pivotFloor = (std::max)(kSolvePivotFloor, kSolvePivotFloor * meanDiag);
 
 		// Build augmented matrix [A | b] for exact Gaussian elimination with partial pivoting (K <= 4).
 		double a[kMaxBlendRefs][kMaxBlendRefs + 1] = {};
@@ -305,7 +320,7 @@ namespace TdV2
 					pivotRow = r;
 				}
 			}
-			if (pivotAbs <= kSolveNumericalFloor)
+			if (pivotAbs <= pivotFloor)
 			{
 				res.singular = true;
 				if (standIns != nullptr)
@@ -468,7 +483,7 @@ namespace TdV2
 	{
 		RoundingCellStats st;
 		if (!std::isfinite(stepDelta) || !std::isfinite(phi) || !std::isfinite(zeroFraction) ||
-		    stepDelta <= 0.0 || phi < 0.0 || phi >= 1.0)
+		    stepDelta <= 0.0 || phi <= 0.0 || phi >= 1.0 || zeroFraction < 0.0 || zeroFraction > 1.0)
 		{
 			return st;
 		}

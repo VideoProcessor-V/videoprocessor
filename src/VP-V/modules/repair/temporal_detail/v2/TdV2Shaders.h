@@ -2,19 +2,22 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 // Temporal Detail v2 — Stage TD-S5 + TD-S5-OPT (2026-11-23_TD-consolidated-plan.md s3.2 TD-S5):
-// Zero-fidelity-loss optimized GLSL compute shader sources for the 4-pass GPU fusion engine + chroma apply:
-//   - Speedup (1): LDS-tiled single-loop separable blurs (kPass1BandH / kPass1BandV: 62 -> 3.25 fetches/px, bit-exact FP32)
+// Optimized GLSL compute shader sources for the 4-pass GPU fusion engine + chroma apply:
+//   - Speedup (1): LDS-tiled single-loop separable blurs (kPass1BandH / kPass1BandV: 62 -> 3.25 fetches/px, FP32)
 //   - Speedup (2): 2-stage coalesced LDS cell-moment reduction + fused Focus Guard (kPass2CellStats -> kPass2MergeAndSolve
-//                  using exact Chan-Pebay parallel second-moment merge, zero atomics, zero cancellation)
-//   - Speedup (3): Compact Preset::RealTime band storage (full-res RG16F zero-mean (M,H) via fused 1-pass 2D LDS G_fine
-//                  + half-res RG32F FP32 (L,D3) using U2 VpUnit::BandFromBase::HalfSigma taps; Preset::Reference stays RGBA32F)
+//                  using exact Chan-Pebay parallel second-moment merge, zero atomics, zero cancellation, FP32)
+//   - Speedup (3): Compact Preset::RealTime band storage (SC-05 trade-off: half-res 2x2 area-reduced FP32 RG32F (L,D3)
+//                  using U2 VpUnit::BandFromBase::HalfSigma taps + full-res FP32 RG32F (M,H) via fused 1-pass 2D LDS
+//                  G_fine; ALL band storage and moment inputs stay strictly FP32 per plan L60, never FP16!
+//                  Preset::Reference retains full-res RGBA32F for <= 1e-3 10-bit CPU parity)
 //   - Speedup (4): Single-dispatch fused Pass 4 (kPass4FusedApplyGuard: 5 dispatches -> 1 via algebraic linearity
 //                  and 22x22 LDS halo; eliminates inOwnGrainTex_, candOutScratch, guardFineH/V; Shadow skips out_y store)
 //   - Speedup (5): Reused 1x warpedVal (R32F) + packed 3-ref x 3-bit flags in R16 UNORM (2 B/px read; drops unconditional
 //                  cur_clean fetch on valid interior pixels)
-//   - Speedup (6): 20x20 LDS-tiled bicubic warp (kPass1WarpAndGate: constant cell MV per 16x16 WG -> zero global 4x4 fetches)
+//   - Speedup (6): 20x20 LDS-tiled bicubic warp (kPass1WarpAndGate: constant cell MV per 16x16 WG -> zero global 4x4 fetches;
+//                  explicit per-ref motion slot uniform u_motion_slot for fixed prev=0/next=1/carry=2 prepacked layout)
 //   - Speedup (7): Per-frame dynamic parameters moved from #define to VpvGpu::Var float UBOs (zero mid-playback recompiles)
-//                  + empty-block DCT fetch skip in kPass3bDctPocs + zero-copy seed copy pass (kPassSeedCopy)
+//                  + empty-block DCT fetch skip in kPass3bDctPocs + zero-copy seed copy/zero passes (kPassSeedCopy/ZeroCells)
 //
 // Every shared-memory barrier is strictly workgroup-uniform and paired with memoryBarrierShared() (GLSL 450 s8.16).
 // Header-only, C++14/17, no Windows headers.
@@ -164,36 +167,71 @@ vec2 td_sample_half_ld3(sampler2D halfTex, ivec2 p, ivec4 halfActive)
 		});
 	}
 
-	// ---- PASS 0: Zero-Copy GPU Seed Copy (for ProcessFrameGpu on cut / first frame with no refs) ----
+	// ---- PASS 0: Zero-Copy GPU Seed Copy & Cell-Target Zero (for ProcessFrameGpu on cut / first frame with no refs) ----
 	// Dispatch: ceil(TD_W / 16) x ceil(TD_H / 16), group 16x16.
 	// Inputs: src_clean (R32F), src_rec (R32F; distinct dummy when u_same_clean_rec > 0.5).
-	// Outputs: dst_carry (R32F), dst_clean (R32F), dst_out_y (R32F, written only when u_copy_out_y > 0.5).
+	// Outputs: dst_carry (R32F), dst_clean (R32F), dst_out_y (R32F, written when u_copy_out_y > 0.5),
+	//          dst_delta (RG32F, zeroed when u_zero_delta > 0.5).
 	constexpr const char* kPassSeedCopy = R"GLSL(
 ivec2 p = ivec2(gl_GlobalInvocationID.xy);
 if (p.x >= TD_W || p.y >= TD_H)
     return;
 
-float cVal = texelFetch(src_clean, p, 0).x;
+float rawClean = texelFetch(src_clean, p, 0).x;
+float cVal = td_is_bad(rawClean) ? 0.0 : rawClean;
 imageStore(dst_carry, p, vec4(cVal, 0.0, 0.0, 0.0));
 if (u_copy_clean > 0.5)
     imageStore(dst_clean, p, vec4(cVal, 0.0, 0.0, 0.0));
 if (u_copy_out_y > 0.5)
 {
-    float rVal = (u_same_clean_rec > 0.5) ? cVal : texelFetch(src_rec, p, 0).x;
+    float rawRec = (u_same_clean_rec > 0.5) ? rawClean : texelFetch(src_rec, p, 0).x;
+    float rVal = td_is_bad(rawRec) ? 0.0 : rawRec;
     imageStore(dst_out_y, p, vec4(rVal, 0.0, 0.0, 0.0));
 }
+if (u_zero_delta > 0.5)
+    imageStore(dst_delta, p, vec4(0.0));
+)GLSL";
+
+	// Zero caller-supplied cell-grid output targets on seed/cut frames so stale GPU memory is never left behind.
+	// Dispatch: ceil(TD_CW / 8) x ceil(TD_CH / 8), group 8x8.
+	constexpr const char* kPassSeedZeroCells = R"GLSL(
+ivec2 cell = ivec2(gl_GlobalInvocationID.xy);
+if (cell.x >= TD_CW || cell.y >= TD_CH)
+    return;
+
+if (u_zero_maps > 0.5)
+{
+    imageStore(dst_td_maps, ivec2(cell.x, cell.y), vec4(0.0));
+    imageStore(dst_td_maps, ivec2(cell.x, TD_CH + cell.y), vec4(0.0));
+    imageStore(dst_td_maps, ivec2(cell.x, 2 * TD_CH + cell.y), vec4(u_maps_light_gain, 0.0, 0.0, 0.0));
+}
+if (u_zero_diag > 0.5)
+    imageStore(dst_diag, cell, vec4(0.0));
+if (u_zero_guard > 0.5)
+    imageStore(dst_guard, cell, vec4(0.0));
+if (u_zero_warp_diag > 0.5)
+    imageStore(dst_warp_diag, cell, vec4(0.0));
 )GLSL";
 
 	// ---- PASS 1A: Camera-Relative Motion Gate + Karis 3x3 Silhouette Dilation ----
 	// Dispatch: ceil((K * TD_CW) / 16) x ceil(TD_CH / 16), group 16x16.
-	// Inputs: motion_vec (3*cw x ch RGBA32F: vx, vy, camVx, camVy), motion_meta (3*cw x ch RG32F: cls, valid).
-	// Output: motion_gate (3*cw x ch RGBA32F: gateL, gateMH, nonFiniteCell, 0).
+	// Inputs: motion_vec (3*cw x ch RGBA32F: fixed slots prev=0, next=1, carry=2), motion_meta (3*cw x ch RG32F: cls, valid).
+	// Uniforms: u_k, u_ref_motion_slot_0/1/2 mapping compacted ref index rk -> fixed motion slot {0,1,2}.
+	// Output: motion_gate (3*cw x ch RGBA32F: compacted rk -> gateL, gateMH, nonFiniteCell, 0).
 	constexpr const char* kPass1MotionGateHeader = R"GLSL(
+int td_motion_slot(int rk)
+{
+    if (rk == 0) return int(round(u_ref_motion_slot_0));
+    if (rk == 1) return int(round(u_ref_motion_slot_1));
+    return int(round(u_ref_motion_slot_2));
+}
+
 bool td_cell_rel_speed(int rk, int cx, int cy, out float spd, out int clsOut, out bool wasNonFinite)
 {
     wasNonFinite = false;
-    vec4 mv = texelFetch(motion_vec, ivec2(rk * TD_CW + cx, cy), 0);
-    vec2 mm = texelFetch(motion_meta, ivec2(rk * TD_CW + cx, cy), 0).xy;
+    int slot = clamp(td_motion_slot(rk), 0, 2);
+    vec4 mv = texelFetch(motion_vec, ivec2(slot * TD_CW + cx, cy), 0);
+    vec2 mm = texelFetch(motion_meta, ivec2(slot * TD_CW + cx, cy), 0).xy;
     clsOut = int(round(mm.x));
     if (mm.y < 0.5)
     {
@@ -275,7 +313,8 @@ shared uint td_sh_bad[20][20];
 
 float td_fetch_cur_fallback(ivec2 gq)
 {
-    return (u_same_ref_cur > 0.5) ? texelFetch(ref_clean, gq, 0).x : texelFetch(cur_clean, gq, 0).x;
+    float v = (u_same_ref_cur > 0.5) ? texelFetch(ref_clean, gq, 0).x : texelFetch(cur_clean, gq, 0).x;
+    return td_is_bad(v) ? 0.0 : v;
 }
 
 float td_fetch_active_safe(ivec2 qLocal, ivec4 activeRect, out bool isBad)
@@ -386,13 +425,15 @@ int ay1 = int(round(u_ay1));
 ivec4 activeRect = ivec4(ax0, ay0, ax1, ay1);
 bool validRect = (ax1 > ax0) && (ay1 > ay0);
 int refIdx = int(round(u_ref_idx));
+int motionSlot = clamp(int(round(u_motion_slot)), 0, 2);
 bool flagsClear = (u_flags_clear > 0.5);
 
 // Workgroup-uniform 20x20 LDS tile fill for canonical TD_CELL_PX == 16 (constant cell MV across WG).
 int wgCx = min(TD_CW - 1, wg.x);
 int wgCy = min(TD_CH - 1, wg.y);
-vec2 wgMv = texelFetch(motion_vec, ivec2(refIdx * TD_CW + wgCx, wgCy), 0).xy;
-bool useLds = (TD_CELL_PX == 16) && validRect &&
+vec2 wgMv = texelFetch(motion_vec, ivec2(motionSlot * TD_CW + wgCx, wgCy), 0).xy;
+bool wgValid = (texelFetch(motion_meta, ivec2(motionSlot * TD_CW + wgCx, wgCy), 0).y >= 0.5);
+bool useLds = (TD_CELL_PX == 16) && validRect && wgValid &&
               (!td_is_bad(wgMv.x)) && (!td_is_bad(wgMv.y)) &&
               (abs(wgMv.x) <= float(TD_W)) && (abs(wgMv.y) <= float(TD_H));
 int tileBaseX = 0;
@@ -435,11 +476,13 @@ if (!validRect || p.x < ax0 || p.x >= ax1 || p.y < ay0 || p.y >= ay1)
 }
 
 vec2 mv = wgMv;
+bool mvValid = wgValid;
 if (TD_CELL_PX != 16)
 {
     int cx = min(TD_CW - 1, p.x / TD_CELL_PX);
     int cy = min(TD_CH - 1, p.y / TD_CELL_PX);
-    mv = texelFetch(motion_vec, ivec2(refIdx * TD_CW + cx, cy), 0).xy;
+    mv = texelFetch(motion_vec, ivec2(motionSlot * TD_CW + cx, cy), 0).xy;
+    mvValid = (texelFetch(motion_meta, ivec2(motionSlot * TD_CW + cx, cy), 0).y >= 0.5);
 }
 
 // Detect non-finite pixels at `p` in ref_clean even if motion shifts away from `p` (reuse LDS when in tile).
@@ -456,10 +499,23 @@ else
     extraBad = td_is_bad(selfRef) ? 4 : 0;
 }
 
+if (!mvValid)
+{
+    float fb = td_fetch_cur_fallback(p);
+    uint np = td_pack_ref_flags(prevPacked, refIdx, 0);
+    if (extraBad != 0)
+        np |= 512u;
+    imageStore(warped_val, p, vec4(fb, 0.0, 0.0, 0.0));
+    imageStore(ref_flags_out, p, vec4(float(np) / 65535.0, 0.0, 0.0, 0.0));
+    return;
+}
+
 if (td_is_bad(mv.x) || td_is_bad(mv.y))
 {
     float fb = td_fetch_cur_fallback(p);
     uint np = td_pack_ref_flags(prevPacked, refIdx, 4);
+    if (extraBad != 0)
+        np |= 512u;
     imageStore(warped_val, p, vec4(fb, 0.0, 0.0, 0.0));
     imageStore(ref_flags_out, p, vec4(float(np) / 65535.0, 0.0, 0.0, 0.0));
     return;
@@ -540,6 +596,8 @@ else
 
 outFlags = outFlags | extraBad;
 uint newPacked = td_pack_ref_flags(prevPacked, refIdx, outFlags);
+if (extraBad != 0)
+    newPacked |= 512u; // Bit 9: ref_clean itself is non-finite at pixel p (for unique-cell nonFiniteCells parity)
 imageStore(warped_val, p, vec4(outVal, 0.0, 0.0, 0.0));
 imageStore(ref_flags_out, p, vec4(float(newPacked) / 65535.0, 0.0, 0.0, 0.0));
 )GLSL";
@@ -573,7 +631,8 @@ for (int col = lx; col < tileW; col += 16)
 {
     int gx = baseX - TD_RAD_LOW + col;
     int sx = validRect ? clamp(gx, xMin, xMax) : clamp(gx, 0, TD_W - 1);
-    td_sh_h[ly][col] = texelFetch(src_tex, ivec2(sx, safeY), 0).x;
+    float sv = texelFetch(src_tex, ivec2(sx, safeY), 0).x;
+    td_sh_h[ly][col] = td_is_bad(sv) ? 0.0 : sv;
 }
 memoryBarrierShared();
 barrier();
@@ -666,7 +725,8 @@ float bD3 = bL - gLow;
 imageStore(bands_out, p, vec4(bL, bM, bH, bD3));
 )GLSL";
 
-	// ---- PASS 1C (RealTime Compact — Speedup 3): Half-Res FP32 (L, D3) + 1-Pass Fused 2D LDS Full-Res RG16F (M, H) ----
+	// ---- PASS 1C (RealTime Compact — SC-05): Half-Res FP32 (L, D3) + 1-Pass Fused 2D LDS Full-Res FP32 RG32F (M, H) ----
+	// Honest SC-05 trade-off: half-res 2x2 area-reduced (L, D3) with U2 HalfSigma taps; all band storage & moment inputs stay FP32 (plan L60).
 	// kPass1HalfH: reduces active-clamped 2x2 area into LDS + horizontal blur at half-res (wHalf x hHalf RG32F).
 	constexpr const char* kPass1HalfHHeader = R"GLSL(
 shared float td_sh_hh[16][16 + 2 * TD_RAD_HLOW];
@@ -713,6 +773,10 @@ for (int col = lx; col < tileW; col += 16)
     float s10 = texelFetch(src_tex, ivec2(fx1, fy0), 0).x;
     float s01 = texelFetch(src_tex, ivec2(fx0, fy1), 0).x;
     float s11 = texelFetch(src_tex, ivec2(fx1, fy1), 0).x;
+    if (td_is_bad(s00)) s00 = 0.0;
+    if (td_is_bad(s10)) s10 = 0.0;
+    if (td_is_bad(s01)) s01 = 0.0;
+    if (td_is_bad(s11)) s11 = 0.0;
     td_sh_hh[ly][col] = (s00 + s10 + s01 + s11) / 4.0;
 }
 memoryBarrierShared();
@@ -795,7 +859,7 @@ for (int k = -TD_RAD_HLOW; k <= TD_RAD_HLOW; ++k)
 imageStore(bands_ld3_out, hp, vec4(gBase, gBase - gLow, 0.0, 0.0));
 )GLSL";
 
-	// kPass1FullMH: 1-pass fused 2D LDS G_fine (22x22 halo, zero bandTmpH!) -> full-res RG16F zero-mean (M, H).
+	// kPass1FullMH: 1-pass fused 2D LDS G_fine (22x22 halo, zero bandTmpH!) -> full-res FP32 RG32F (M, H).
 	constexpr const char* kPass1FullMHHeader = R"GLSL(
 shared float td_sh_f0[16 + 2 * TD_RAD_FINE][16 + 2 * TD_RAD_FINE];
 shared float td_sh_f1[16 + 2 * TD_RAD_FINE][16];
@@ -830,7 +894,8 @@ for (int idx = tid; idx < tileN; idx += 256)
     int gy = baseY - TD_RAD_FINE + ty;
     int sx = validRect ? clamp(gx, xMin, xMax) : clamp(gx, 0, TD_W - 1);
     int sy = validRect ? clamp(gy, yMin, yMax) : clamp(gy, 0, TD_H - 1);
-    td_sh_f0[ty][tx] = texelFetch(src_tex, ivec2(sx, sy), 0).x;
+    float sv = texelFetch(src_tex, ivec2(sx, sy), 0).x;
+    td_sh_f0[ty][tx] = td_is_bad(sv) ? 0.0 : sv;
 }
 memoryBarrierShared();
 barrier();
@@ -873,7 +938,7 @@ imageStore(bands_mh_out, p, vec4(bM, bH, 0.0, 0.0));
 	// ---- PASS 2A (Speedup 2): Coalesced 16x16 LDS Cell-Moment Reduction + Fused Focus Guard ----
 	// Dispatch: TD_CW x TD_CH workgroups of 16x16 (1 WG per cell).
 	// Reads curBands, refBands[0..K-1], packed ref_flags (R16), motion_gate, cell_prior ONCE per pixel.
-	// Outputs: cell_focus (cw x ch RGBA32F: focusChange, isDefocused, spatialDetailRms, 0),
+	// Outputs: cell_focus (cw x ch RGBA32F: focusFlags[bit0=focusChange, bit1=isDefocused], cellOwnGrainVar, spatialDetailRms, isFace),
 	//          warp_diag  (cw x ch RG32F: borderBilinCount, warpBadRefMask),
 	//          cell_stats (3*cw x 3*ch RGBA32F: per band b, row0=(n,mu0,mu1,mu2), row1=(S00,S01,S02,S11), row2=(S12,S22,0,0)).
 	constexpr const char* kPass2CellStatsHeader = R"GLSL(
@@ -951,7 +1016,10 @@ for (int k = 0; k < K; ++k)
 float curM2 = 0.0;
 float curD3_2 = 0.0;
 float curH2 = 0.0;
+float curOg2 = 0.0;
 float activeCnt = 0.0;
+bool hasCleanSplit = (u_has_clean_split > 0.5);
+bool sameCleanRec = (u_same_clean_rec > 0.5);
 float refM2[3];
 float refD3_2[3];
 refM2[0] = 0.0; refM2[1] = 0.0; refM2[2] = 0.0;
@@ -991,9 +1059,21 @@ for (int sy = 0; sy < subN; ++sy)
         curM2 += cb.y * cb.y;
         curD3_2 += cb.w * cb.w;
         curH2 += cb.z * cb.z;
+        if (hasCleanSplit && !sameCleanRec)
+        {
+            float rv = texelFetch(rec_y, p, 0).x;
+            float cv = texelFetch(cur_clean, p, 0).x;
+            if (!td_is_bad(rv) && !td_is_bad(cv))
+            {
+                float og = rv - cv;
+                curOg2 += og * og;
+            }
+        }
         activeCnt += 1.0;
 
         uint packedFl = uint(round(texelFetch(ref_flags, p, 0).x * 65535.0));
+        if ((packedFl & 512u) != 0u)
+            badMask |= 16u; // Bit 4 (16u): at least one ref_clean pixel in this cell is non-finite
         bool allRefValid = true;
         vec4 rb[3];
         for (int k = 0; k < K; ++k)
@@ -1067,8 +1147,8 @@ uint totBadMask = td_sh_mask[0];
 memoryBarrierShared();
 barrier();
 
-// Reduction B: ref2 M2/D3_2 + borderBilinCnt.
-td_sh_red4[tid] = vec4(refM2[2], refD3_2[2], borderCnt, 0.0);
+// Reduction B: ref2 M2/D3_2 + borderBilinCnt + curOg2 (cell own-grain variance for Layer 2/3 grain-leak budget).
+td_sh_red4[tid] = vec4(refM2[2], refD3_2[2], borderCnt, curOg2);
 memoryBarrierShared();
 barrier();
 for (int stride = 128; stride > 0; stride >>= 1)
@@ -1087,6 +1167,7 @@ if (tid == 0)
     totRefM2[1] = totRef01.z; totRefD3[1] = totRef01.w;
     totRefM2[2] = td_sh_red4[0].x; totRefD3[2] = td_sh_red4[0].y;
     float totBorderCnt = td_sh_red4[0].z;
+    float cellOwnGrainVar = (hasCleanSplit && totCur.w > 0.5) ? (td_sh_red4[0].w / totCur.w) : 0.0;
 
     float curEnergy = 0.0;
     float cM2 = 0.0;
@@ -1105,17 +1186,17 @@ if (tid == 0)
     float cM3Val = max(0.0, curEnergy - cM2);
     float cleanM2 = max(0.0, cM2 - u_step_noise_var * TD_GAIN_MID);
     float cleanM3 = max(0.0, cM3Val - u_step_noise_var * TD_GAIN_D3);
-    float curFDebiased = cleanM2 / (cleanM2 + cleanM3 + TD_NUM_FLOOR);
+    float curFDebiased = (cleanM2 + cleanM3 > TD_NUM_FLOOR)
+        ? (cleanM2 / (cleanM2 + cleanM3 + TD_NUM_FLOOR))
+        : curF;
 
-    bool isDefocused = (curEnergy > u_structure_floor && curFDebiased <= TD_F_DEFOCUS);
     bool focusChange = false;
-
-    float explicitFc = texelFetch(cell_prior, cell, 0).y;
-    if (explicitFc > 0.5)
+    int expFocusBits = int(round(texelFetch(cell_prior, cell, 0).y));
+    if ((expFocusBits & 1) != 0)
     {
         focusChange = true;
     }
-    else if (totCur.w > 0.5)
+    else if (totCur.w > 0.5 && K > 0)
     {
         float invC = 1.0 / totCur.w;
         for (int k = 0; k < K; ++k)
@@ -1124,7 +1205,8 @@ if (tid == 0)
             float rM3 = totRefD3[k] * invC;
             float rEnergy = rM2 + rM3;
             float rF = (rEnergy > TD_NUM_FLOOR) ? (rM2 / (rEnergy + TD_NUM_FLOOR)) : 1.0;
-            if (rEnergy > u_structure_floor && cM2 < rM2 && curF < TD_F_SHARP && (rF - curF) > TD_F_SHIFT_DELTA)
+            if (rEnergy > u_structure_floor && cM2 < rM2 && curFDebiased < TD_F_SHARP &&
+                (rF - curF) > TD_F_SHIFT_DELTA)
             {
                 focusChange = true;
                 break;
@@ -1132,20 +1214,35 @@ if (tid == 0)
         }
     }
 
-    imageStore(cell_focus, cell, vec4(focusChange ? 1.0 : 0.0, isDefocused ? 1.0 : 0.0, spatialDetailRms, 0.0));
-    imageStore(warp_diag, cell, vec4(totBorderCnt, float(totBadMask), 0.0, 0.0));
-    td_sh_mask[0] = focusChange ? 1u : 0u;
+    // Matched-focus optical bokeh from upstream kFocusMap / explicitDefocusedCells (Plan s1.4 L140):
+    // bit 1 of cell_prior.y; zero false vetoes on smooth curved skies or 12-bit smooth Hermite BTB/WTW ramps.
+    bool isDefocused = ((expFocusBits & 2) != 0);
+
+    bool isFace = (u_has_face_mask > 0.5) && (texelFetch(face_mask, cell, 0).x > 0.5);
+    float focusFlags = (focusChange ? 1.0 : 0.0) + (isDefocused ? 2.0 : 0.0);
+
+    imageStore(cell_focus, cell, vec4(focusFlags, cellOwnGrainVar, spatialDetailRms, isFace ? 1.0 : 0.0));
+    uint diagMask = (totBadMask & 7u) | (isFace ? 8u : 0u) | (totBadMask & 16u);
+    imageStore(warp_diag, cell, vec4(totBorderCnt, float(diagMask), 0.0, 0.0));
+    td_sh_mask[0] = (focusChange ? 1u : 0u) | (isFace ? 2u : 0u) | (isDefocused ? 4u : 0u);
 }
 memoryBarrierShared();
 barrier();
 
-// Vetoed focusChange cells are excluded from all 3x3 moment pools (no early return before barriers for FXC cs_5_0 safety).
-bool skipMoments = (td_sh_mask[0] != 0u);
+// Face cells and vetoed focus/bokeh cells are excluded from affected 3x3 band moment pools
+// (focusChange: all bands; isDefocused: M/H always, L only when BokehMode::Untouched). No early return before barriers for FXC cs_5_0 safety.
+uint cellMaskFlags = td_sh_mask[0];
+bool cellFocusChange = (cellMaskFlags & 1u) != 0u;
+bool cellIsFace = (cellMaskFlags & 2u) != 0u;
+bool cellIsDefocused = (cellMaskFlags & 4u) != 0u;
+bool bokehAllowL = (u_bokeh_mode > 0.5);
 
 // Per-band 2-step exact centered sufficient stats (n_c, mu_c[3], S_c[6]).
 for (int b = 0; b < 3; ++b)
 {
-    // Step 2.1: Reduce sumD[b] and cntB[b] (zero when focusChange vetoed).
+    bool bandFocusVeto = cellFocusChange || (cellIsDefocused && (b >= 1 || !bokehAllowL));
+    bool skipMoments = cellIsFace || bandFocusVeto;
+    // Step 2.1: Reduce sumD[b] and cntB[b] (zero when masked/vetoed for this band).
     td_sh_red4[tid] = skipMoments ? vec4(0.0) : vec4(sumD[b], cntB[b]);
     memoryBarrierShared();
     barrier();
@@ -1294,11 +1391,66 @@ float td_band_gain(int b)
     return TD_GAIN_FINE;
 }
 
+float td_band_origin(int b)
+{
+    if (b == 0) return TD_ORIGIN_LOW;
+    if (b == 1) return TD_ORIGIN_MID;
+    return TD_ORIGIN_FINE;
+}
+
+float td_a2_band_peak_sq(int b)
+{
+    return (b == 1) ? TD_A2_PEAK_MID_SQ : 1.0;
+}
+
 bool td_is_exact_copy(int k)
 {
     if (k == 0) return u_exact_copy_0 > 0.5;
     if (k == 1) return u_exact_copy_1 > 0.5;
     return u_exact_copy_2 > 0.5;
+}
+
+int td_ref_role(int k)
+{
+    if (k == 0) return int(round(u_ref_role_0));
+    if (k == 1) return int(round(u_ref_role_1));
+    return int(round(u_ref_role_2));
+}
+
+// Mirrors TdV2ReferenceEngine::findIndependentA1Partner (plan s1.1 L70):
+// Roles: 0=PrevPeak, 1=NextPeak, 2=Carry, 3=PrevPeak2.
+// Carry (role == 2) NEVER instruments another reference in A1 (shares recursive past error).
+int td_find_independent_a1_partner(int K, int k)
+{
+    int myRole = td_ref_role(k);
+    int primary = -1;
+    int secondary = -1;
+    for (int j = 0; j < K; ++j)
+    {
+        if (j == k) continue;
+        int other = td_ref_role(j);
+        if (other == 2) continue;
+        if (myRole == 0)
+        {
+            if (other == 1) primary = j;
+            else if (other == 3) secondary = j;
+        }
+        else if (myRole == 1)
+        {
+            if (other == 0) primary = j;
+            else if (other == 3) secondary = j;
+        }
+        else if (myRole == 3)
+        {
+            if (other == 1) primary = j;
+            else if (other == 0) secondary = j;
+        }
+        else if (myRole == 2)
+        {
+            if (other == 1) primary = j;
+        }
+    }
+    return (primary >= 0) ? primary : secondary;
 }
 
 float td_est_c_a1(float crossPN, float cPP, float cNN, float retGVar, float bandShare)
@@ -1339,11 +1491,12 @@ int td_solve_convex(int K, float C[3][3], float cVec[3], out float outW[3])
         }
         diagSum += max(0.0, C[i][i]);
     }
-    if (diagSum <= TD_NUM_FLOOR)
+    if (diagSum <= TD_SOLVE_FLOOR)
         return 0;
 
     float meanDiag = diagSum / float(K);
-    float reg = max(TD_TRACE_REG * meanDiag, TD_NUM_FLOOR);
+    float reg = max(TD_TRACE_REG * meanDiag, TD_SOLVE_FLOOR);
+    float pivotFloor = max(TD_PIVOT_FLOOR, TD_PIVOT_FLOOR * meanDiag);
 
     float a[3][4];
     for (int i = 0; i < 3; ++i)
@@ -1370,7 +1523,7 @@ int td_solve_convex(int K, float C[3][3], float cVec[3], out float outW[3])
                 pivotRow = r;
             }
         }
-        if (pivotAbs <= TD_NUM_FLOOR)
+        if (pivotAbs <= pivotFloor)
             return 1;
         if (pivotRow != col)
         {
@@ -1426,27 +1579,31 @@ if (cell.x >= TD_CW || cell.y >= TD_CH)
 int K = int(round(u_k));
 int poolR = int(round(u_pool_r));
 int estMode = int(round(u_estimator));
-bool bokehLOnly = (u_bokeh_l_only > 0.5);
 
 vec4 fInfo = texelFetch(cell_focus, cell, 0);
-bool focusChange = (fInfo.x > 0.5);
-bool isDefocused = (fInfo.y > 0.5);
+int fFlags = int(round(fInfo.x));
+bool focusChange = ((fFlags & 1) != 0);
+bool isDefocused = ((fFlags & 2) != 0);
+bool bokehAllowL = (u_bokeh_mode > 0.5);
+float cellOwnGrainVar = max(0.0, fInfo.y);
 float spatialDetailRms = fInfo.z;
+bool isFace = (fInfo.w > 0.5);
 
-float diagNonFinite = 0.0;
-float diagSingular = 0.0;
-float diagSingleRefA2 = 0.0;
+bool cellNonFinite = false;
+bool cellSingular = false;
+bool cellSingleRefA2 = false;
 
 for (int k = 0; k < K; ++k)
 {
-    diagNonFinite += texelFetch(motion_gate, ivec2(k * TD_CW + cell.x, cell.y), 0).z;
+    if (texelFetch(motion_gate, ivec2(k * TD_CW + cell.x, cell.y), 0).z > 0.5)
+        cellNonFinite = true;
 }
 
 float rawGv = texelFetch(cell_prior, cell, 0).x;
 float cellRetGVar = 0.0;
 if (td_is_bad(rawGv) || rawGv < 0.0)
 {
-    diagNonFinite += 1.0;
+    cellNonFinite = true;
 }
 else
 {
@@ -1457,12 +1614,18 @@ float cellWeightSumAll = 0.0;
 float midWeightSum = 0.0;
 float cellResEnergy = 0.0;
 int activeBandBits = 0;
+vec4 bandW[3];
+bandW[0] = vec4(0.0);
+bandW[1] = vec4(0.0);
+bandW[2] = vec4(0.0);
 
 for (int b = 0; b < 3; ++b)
 {
     float nPool = 0.0;
     vec3 muPool = vec3(0.0);
     float s00 = 0.0, s01 = 0.0, s02 = 0.0, s11 = 0.0, s12 = 0.0, s22 = 0.0;
+    bool hasOwnStats = false;
+    vec3 ownDiag = vec3(0.0);
 
     for (int dy = -poolR; dy <= poolR; ++dy)
     {
@@ -1478,6 +1641,15 @@ for (int b = 0; b < 3; ++b)
             vec3 muc = t0.yzw;
             vec4 t1 = texelFetch(cell_stats, ivec2(b * TD_CW + ncx, TD_CH + ncy), 0);
             vec2 t2 = texelFetch(cell_stats, ivec2(b * TD_CW + ncx, 2 * TD_CH + ncy), 0).xy;
+            if (dx == 0 && dy == 0)
+            {
+                float invOwn = 1.0 / nc;
+                ownDiag = vec3(
+                    max(0.0, t1.x * invOwn + muc.x * muc.x),
+                    max(0.0, t1.w * invOwn + muc.y * muc.y),
+                    max(0.0, t2.y * invOwn + muc.z * muc.z));
+                hasOwnStats = true;
+            }
 
             // Exact Chan-Pebay parallel second-moment merge (zero catastrophic cancellation).
             if (nPool <= 0.5)
@@ -1507,7 +1679,8 @@ for (int b = 0; b < 3; ++b)
     vec4 wOut = vec4(0.0);
     vec4 diagOut = vec4(0.0);
 
-    if (nPool > 0.5)
+    // Pass-1 Face / Non-Rigid Mask (H13, plan Q2 / s1.3 L127): force w = 0 strictly on all bands (exact passthrough).
+    if (!isFace && nPool > 0.5)
     {
         float invN = 1.0 / nPool;
         float C[3][3];
@@ -1521,9 +1694,9 @@ for (int b = 0; b < 3; ++b)
         C[2][1] = C[1][2];
         C[2][2] = max(0.0, s22 * invN + muPool.z * muPool.z);
 
-        diagOut.x = (K > 0) ? C[0][0] : 0.0;
-        diagOut.y = (K > 1) ? C[1][1] : 0.0;
-        diagOut.z = (K > 2) ? C[2][2] : 0.0;
+        diagOut.x = (K > 0) ? (hasOwnStats ? min(ownDiag.x, C[0][0]) : C[0][0]) : 0.0;
+        diagOut.y = (K > 1) ? (hasOwnStats ? min(ownDiag.y, C[1][1]) : C[1][1]) : 0.0;
+        diagOut.z = (K > 2) ? (hasOwnStats ? min(ownDiag.z, C[2][2]) : C[2][2]) : 0.0;
 
         float bGain = td_band_gain(b);
         float cVec[3];
@@ -1532,38 +1705,50 @@ for (int b = 0; b < 3; ++b)
         {
             bool exactCopy = td_is_exact_copy(k);
             float cA2 = (u_a2_valid > 0.5)
-                ? ((u_a2_sigma_sent + (exactCopy ? 0.0 : u_a2_sigma_zero)) * bGain)
+                ? ((u_a2_sigma_sent + (exactCopy ? 0.0 : u_a2_sigma_zero)) * td_a2_band_peak_sq(b))
                 : 0.0;
+            // Plan L81 physical upper bound: c_k in [0, C_{k,k}].
+            cA2 = min(cA2, C[k][k]);
             float cA1 = cA2;
-            if (K >= 2)
+            int partner = td_find_independent_a1_partner(K, k);
+            if (partner >= 0)
             {
-                int partner = (k == 0 || k == 2) ? 1 : 0;
                 cA1 = td_est_c_a1(C[k][partner], C[k][k], C[partner][partner], cellRetGVar, bGain);
             }
             else if (estMode != 1)
             {
-                diagSingleRefA2 += 1.0;
+                cellSingleRefA2 = true;
             }
             cVec[k] = exactCopy ? 0.0 : td_select_blind_c(estMode, cA1, cA2);
+            if (!exactCopy && partner < 0 && estMode != 1)
+            {
+                for (int j = 0; j < K; ++j)
+                {
+                    if (j == k || td_is_exact_copy(j)) continue;
+                    float cCap = td_est_c_a1(C[k][j], C[k][k], C[j][j], cellRetGVar, bGain);
+                    cVec[k] = min(cVec[k], cCap);
+                }
+            }
         }
 
         float solvedW[3];
         int status = td_solve_convex(K, C, cVec, solvedW);
         if (status == 2)
         {
-            diagNonFinite += 1.0;
+            cellNonFinite = true;
         }
         else if (status == 1)
         {
-            diagSingular += 1.0;
+            cellSingular = true;
         }
         else
         {
-            float focusGate = 1.0;
-            if (focusChange)
-                focusGate = 0.0;
-            else if (isDefocused)
-                focusGate = (b == 0 && bokehLOnly) ? 1.0 : 0.0;
+            // Focus & Bokeh Rule (H8 & Q4):
+            // - focusChange == true: hard-veto ALL 3 bands (L, M, H).
+            // - !focusChange && isDefocused: hard-veto M/H always; L allowed ONLY in BokehMode::LowBandCellOnly.
+            // - !focusChange && !isDefocused (sharp or curved smooth sky): focusGate = 1.0 on all bands.
+            bool bandFocusVeto = focusChange || (isDefocused && (b >= 1 || !bokehAllowL));
+            float focusGate = bandFocusVeto ? 0.0 : 1.0;
 
             float bandWSum = 0.0;
             float wFinal[3];
@@ -1579,15 +1764,63 @@ for (int b = 0; b < 3; ++b)
             if (bandWSum > TD_NUM_FLOOR)
                 activeBandBits |= (1 << b);
             cellWeightSumAll += bandWSum;
-            if (b == 1)
-                midWeightSum = bandWSum;
             cellResEnergy += C[0][0];
         }
     }
 
-    imageStore(cell_weights, ivec2(b * TD_CW + cell.x, cell.y), wOut);
+    bandW[b] = wOut;
     imageStore(cell_diag_c, ivec2(b * TD_CW + cell.x, cell.y), diagOut);
 }
+
+// Layer 2/3 grain-leak transfer budget (refs/111 s7.3 & TdGuardPort::kMinVarianceRetention = 0.98^2):
+// Mirrors TdV2ReferenceEngine.h strictly coarse-to-fine (L -> M -> H) when estimator != A2_RoundingCells (1):
+// - Raw no-split path (u_has_clean_split < 0.5): alphaLeak = 1.0.
+// - Split path with minor leak (cellOwnGrainVar > cellRetGVar): alphaLeak = sigmaLeak / (sigmaOwn + sigmaLeak).
+// - Split path with dominant leak (cellRetGVar >= cellOwnGrainVar): alphaLeak = 0.0 (A1 + Layer 4 guard govern).
+if (!isFace && estMode != 1 && cellRetGVar > TD_NUM_FLOOR)
+{
+    float alphaLeak = 0.0;
+    if (u_has_clean_split < 0.5)
+    {
+        alphaLeak = 1.0;
+    }
+    else if (cellOwnGrainVar > cellRetGVar)
+    {
+        float sigmaLeak = sqrt(cellRetGVar);
+        float sigmaOwn = sqrt(cellOwnGrainVar);
+        float sigmaTotal = sigmaOwn + sigmaLeak;
+        alphaLeak = (sigmaTotal > TD_NUM_FLOOR) ? (sigmaLeak / sigmaTotal) : 0.0;
+    }
+    if (alphaLeak > TD_NUM_FLOOR)
+    {
+        float remGrainBudget = (1.0 - sqrt(TD_MIN_VAR_RETENTION)) / sqrt(2.0);
+        activeBandBits = 0;
+        cellWeightSumAll = 0.0;
+        for (int b = 0; b < 3; ++b)
+        {
+            float bandWSum = bandW[b].x + bandW[b].y + bandW[b].z;
+            float bandLossPerUnitW = alphaLeak * td_band_origin(b);
+            if (bandLossPerUnitW > TD_NUM_FLOOR && bandWSum > TD_NUM_FLOOR)
+            {
+                float maxBandW = remGrainBudget / bandLossPerUnitW;
+                if (bandWSum > maxBandW)
+                {
+                    float scale = (maxBandW > 0.0) ? (maxBandW / bandWSum) : 0.0;
+                    bandW[b] *= scale;
+                    bandWSum *= scale;
+                }
+                remGrainBudget = max(0.0, remGrainBudget - bandLossPerUnitW * bandWSum);
+            }
+            if (bandWSum > TD_NUM_FLOOR)
+                activeBandBits |= (1 << b);
+            cellWeightSumAll += bandWSum;
+        }
+    }
+}
+
+midWeightSum = bandW[1].x + bandW[1].y + bandW[1].z;
+for (int b = 0; b < 3; ++b)
+    imageStore(cell_weights, ivec2(b * TD_CW + cell.x, cell.y), bandW[b]);
 
 // Populate U19 TdMapsView 12 channels across 3 RGBA32F slices (plane p at y = p * TD_CH + cell.y).
 vec4 slice0 = vec4(
@@ -1605,7 +1838,11 @@ vec4 slice2 = vec4(1.0, 0.0, 0.0, float(activeBandBits));
 imageStore(td_maps, ivec2(cell.x, cell.y), slice0);
 imageStore(td_maps, ivec2(cell.x, TD_CH + cell.y), slice1);
 imageStore(td_maps, ivec2(cell.x, 2 * TD_CH + cell.y), slice2);
-imageStore(cell_diag_flags, cell, vec4(focusChange ? 1.0 : 0.0, diagNonFinite, diagSingular, diagSingleRefA2));
+imageStore(cell_diag_flags, cell, vec4(
+    (focusChange || isDefocused) ? 1.0 : 0.0,
+    cellNonFinite ? 1.0 : 0.0,
+    cellSingular ? 1.0 : 0.0,
+    cellSingleRefA2 ? 1.0 : 0.0));
 )GLSL";
 
 	// ---- PASS 3A: Spatial-Only Weight Interpolation + 3-Sigma Huber Taper + Pixel-Domain Bound ----
@@ -1654,6 +1891,11 @@ float td_band_gain(int b)
     return TD_GAIN_FINE;
 }
 
+float td_a2_band_peak_sq(int b)
+{
+    return (b == 1) ? TD_A2_PEAK_MID_SQ : 1.0;
+}
+
 float td_vec_comp(vec4 v, int k)
 {
     if (k == 0) return v.x;
@@ -1685,6 +1927,7 @@ if (p.x < ax0 || p.x >= ax1 || p.y < ay0 || p.y >= ay1)
 }
 
 int K = int(round(u_k));
+bool enableHuber = (u_enable_per_corner_huber > 0.5);
 int bx0 = int(round(u_bx0));
 int by0 = int(round(u_by0));
 int bx1 = int(round(u_bx1));
@@ -1717,6 +1960,7 @@ for (int k = 0; k < K; ++k)
 }
 
 float totalDelta = 0.0;
+float boundedDelta = 0.0;
 float boundEngaged = 0.0;
 for (int b = 0; b < 3; ++b)
 {
@@ -1752,16 +1996,24 @@ for (int b = 0; b < 3; ++b)
         float q10 = td_vec_comp(d10, k);
         float q01 = td_vec_comp(d01, k);
         float q11 = td_vec_comp(d11, k);
-        if (td_is_bad(c00) || td_is_bad(c10) || td_is_bad(c01) || td_is_bad(c11) ||
-            td_is_bad(q00) || td_is_bad(q10) || td_is_bad(q01) || td_is_bad(q11))
+        if (td_is_bad(c00) || td_is_bad(c10) || td_is_bad(c01) || td_is_bad(c11))
+            continue;
+        if (enableHuber && (td_is_bad(q00) || td_is_bad(q10) || td_is_bad(q01) || td_is_bad(q11)))
             continue;
 
-        // Per-corner 3-sigma Huber taper before bilinear combine (exact twin of CPU SpatialBilinearHuberWeight).
-        float diffSq = diff * diff;
-        float t00 = c00 * td_huber_taper(diffSq, q00);
-        float t10 = c10 * td_huber_taper(diffSq, q10);
-        float t01 = c01 * td_huber_taper(diffSq, q01);
-        float t11 = c11 * td_huber_taper(diffSq, q11);
+        // Per-corner 3-sigma Huber taper before bilinear combine when enabled (exact twin of CPU SpatialBilinear[Huber]Weight).
+        float t00 = c00;
+        float t10 = c10;
+        float t01 = c01;
+        float t11 = c11;
+        if (enableHuber)
+        {
+            float diffSq = diff * diff;
+            t00 *= td_huber_taper(diffSq, q00);
+            t10 *= td_huber_taper(diffSq, q10);
+            t01 *= td_huber_taper(diffSq, q01);
+            t11 *= td_huber_taper(diffSq, q11);
+        }
         float top = t00 + (t10 - t00) * tx;
         float bot = t01 + (t11 - t01) * tx;
         float wEff = top + (bot - top) * ty;
@@ -1770,20 +2022,25 @@ for (int b = 0; b < 3; ++b)
         bandDelta -= wEff * diff;
     }
 
-    if (!inFull8x8)
+    float bandVar = (u_a2_valid > 0.5) ? (u_a2_total_var * td_a2_band_peak_sq(b)) : 0.0;
+    float clampedBand = bandDelta;
+    if (abs(bandDelta) > 0.0)
     {
-        float bandVar = (u_a2_valid > 0.5) ? (u_a2_total_var * td_band_gain(b)) : 0.0;
-        if (abs(bandDelta) > 0.0)
+        float bound = TD_PIXEL_BOUND_SIGMA * sqrt(max(0.0, bandVar));
+        clampedBand = clamp(bandDelta, -bound, bound);
+        if (!inFull8x8)
         {
             boundEngaged = 1.0;
-            float bound = TD_PIXEL_BOUND_SIGMA * sqrt(max(0.0, bandVar));
-            bandDelta = clamp(bandDelta, -bound, bound);
+            bandDelta = clampedBand;
         }
     }
     totalDelta += bandDelta;
+    boundedDelta += clampedBand;
 }
 
-imageStore(delta_out, p, vec4(td_is_bad(totalDelta) ? 0.0 : totalDelta, boundEngaged, 0.0, 0.0));
+float outX = td_is_bad(totalDelta) ? 0.0 : totalDelta;
+float outY = inFull8x8 ? (td_is_bad(boundedDelta) ? 0.0 : boundedDelta) : boundEngaged;
+imageStore(delta_out, p, vec4(outX, outY, 0.0, 0.0));
 )GLSL";
 
 	// ---- PASS 3B: Optional Codec-Grid-Aligned 8x8 DCT-II STRICT/CELL POCS (Speedup 7: Empty-Block Fetch Skip) ----
@@ -1852,18 +2109,30 @@ bool blockInInterior = (bx0 < bx1) && (by0 < by1) &&
                        (bx >= bx0) && (bx + 8 <= bx1) &&
                        (by >= by0) && (by + 8 <= by1);
 
+int pCx = min(TD_CW - 1, max(0, p.x) / TD_CELL_PX);
+int pCy = min(TD_CH - 1, max(0, p.y) / TD_CELL_PX);
+bool isFacePx = (p.x < TD_W && p.y < TD_H) && (texelFetch(cell_focus, ivec2(pCx, pCy), 0).w > 0.5);
+
 if (!blockInInterior)
 {
     if (p.x < TD_W && p.y < TD_H)
     {
         vec2 d = texelFetch(delta_in, p, 0).xy;
+        if (td_is_bad(d.x))
+            d = vec2(0.0, 2.0);
+        else if (isFacePx)
+            d = vec2(0.0);
         imageStore(delta_out, p, vec4(d, 0.0, 0.0));
     }
     return;
 }
 
-float dVal = texelFetch(delta_in, p, 0).x;
-td_s_nz[tid] = (dVal != 0.0) ? 1u : 0u;
+vec2 dIn = texelFetch(delta_in, p, 0).xy;
+float rawDIn = dIn.x;
+float boundedDIn = (isFacePx || td_is_bad(dIn.y)) ? 0.0 : dIn.y;
+bool badDIn = td_is_bad(rawDIn);
+float dVal = (isFacePx || badDIn) ? 0.0 : rawDIn;
+td_s_nz[tid] = ((dVal != 0.0) ? 1u : 0u) | (badDIn ? 2u : 0u) | ((boundedDIn != 0.0) ? 4u : 0u);
 memoryBarrierShared();
 barrier();
 for (int stride = 32; stride > 0; stride >>= 1)
@@ -1874,32 +2143,74 @@ for (int stride = 32; stride > 0; stride >>= 1)
     barrier();
 }
 
-// Bit-exact skip for untouched / vetoed zero-delta 8x8 blocks (defers cur_clean & pred_clean fetches!).
-if (td_s_nz[0] == 0u)
+// Keep all barriers in workgroup-uniform flow control (FXC cs_5_0 X3663 safe: zero early returns after groupshared reads!).
+// Barrier after reading td_s_nz[0] prevents WAR data race before threads overwrite td_s_nz[tid] with cpBits below!
+uint nzFlags = td_s_nz[0];
+memoryBarrierShared();
+barrier();
+bool blkBadIn = ((nzFlags & 2u) != 0u);
+bool blkHasDelta = ((nzFlags & 1u) != 0u);
+bool blkActive = (blkHasDelta || ((nzFlags & 4u) != 0u)) && !blkBadIn;
+
+// Speedup 7 empty-block fetch skip: defer cur_clean & pred_clean fetches unless block has active non-zero delta.
+bool hasExplicitPb = (u_has_explicit_pb > 0.5);
+float rawC = 0.0;
+float rawP = 0.0;
+uint cpBits = 0u; // bit 0 (1u) = non-finite cur/pred, bit 1 (2u) = invalid ref0 validity when using stand-in P_B
+if (blkActive)
 {
-    imageStore(delta_out, p, vec4(0.0));
-    return;
+    rawC = texelFetch(cur_clean, p, 0).x;
+    rawP = texelFetch(pred_clean, p, 0).x;
+    if (td_is_bad(rawC) || td_is_bad(rawP))
+        cpBits |= 1u;
+    if (!hasExplicitPb)
+    {
+        uint fl = uint(round(texelFetch(ref_flags, p, 0).x * 65535.0));
+        if ((fl & 1u) == 0u)
+            cpBits |= 2u;
+    }
+}
+// MEDIUM-6 + M2: NEVER substitute 0.0 for non-finite pred_clean/cur_clean; skip POCS if stand-in ref0 pixel invalid.
+td_s_nz[tid] = cpBits;
+memoryBarrierShared();
+barrier();
+for (int stride = 32; stride > 0; stride >>= 1)
+{
+    if (tid < stride)
+        td_s_nz[tid] = td_s_nz[tid] | td_s_nz[tid + stride];
+    memoryBarrierShared();
+    barrier();
 }
 
-float cVal = texelFetch(cur_clean, p, 0).x;
-float pVal = texelFetch(pred_clean, p, 0).x;
-td_s_sent[tid] = cVal - pVal;
-td_s_blend[tid] = (cVal + dVal) - pVal;
+uint cpFlags = td_s_nz[0];
+bool blkBad = blkBadIn || ((cpFlags & 1u) != 0u);
+bool blkInvalidRef0 = ((cpFlags & 2u) != 0u);
+bool runPocs = blkHasDelta && !blkBad && !blkInvalidRef0;
+float cVal = runPocs ? rawC : 0.0;
+float pVal = runPocs ? rawP : 0.0;
+td_s_sent[tid] = runPocs ? (cVal - pVal) : 0.0;
+td_s_blend[tid] = runPocs ? ((cVal + dVal) - pVal) : 0.0;
 memoryBarrierShared();
 barrier();
 
-// Forward DCT-II of sent residual once (invariant across POCS iterations).
+// Forward DCT-II of sent residual once (invariant across POCS iterations; barriers unconditional for cs_5_0).
 {
     float rowSum = 0.0;
-    for (int x = 0; x < 8; ++x)
-        rowSum += td_s_sent[loc.y * 8 + x] * TD_DCT8_BASIS[loc.x * 8 + x];
+    if (runPocs)
+    {
+        for (int x = 0; x < 8; ++x)
+            rowSum += td_s_sent[loc.y * 8 + x] * TD_DCT8_BASIS[loc.x * 8 + x];
+    }
     td_s_tmp[tid] = rowSum;
     memoryBarrierShared();
     barrier();
 
     float colSum = 0.0;
-    for (int y = 0; y < 8; ++y)
-        colSum += td_s_tmp[y * 8 + loc.x] * TD_DCT8_BASIS[loc.y * 8 + y];
+    if (runPocs)
+    {
+        for (int y = 0; y < 8; ++y)
+            colSum += td_s_tmp[y * 8 + loc.x] * TD_DCT8_BASIS[loc.y * 8 + y];
+    }
     td_s_sent_dct[tid] = colSum;
     memoryBarrierShared();
     barrier();
@@ -1908,49 +2219,71 @@ barrier();
 for (int it = 0; it < pocsIters; ++it)
 {
     float rowSum = 0.0;
-    for (int x = 0; x < 8; ++x)
-        rowSum += td_s_blend[loc.y * 8 + x] * TD_DCT8_BASIS[loc.x * 8 + x];
+    if (runPocs)
+    {
+        for (int x = 0; x < 8; ++x)
+            rowSum += td_s_blend[loc.y * 8 + x] * TD_DCT8_BASIS[loc.x * 8 + x];
+    }
     td_s_tmp[tid] = rowSum;
     memoryBarrierShared();
     barrier();
 
-    float blendCoeff = 0.0;
-    for (int y = 0; y < 8; ++y)
-        blendCoeff += td_s_tmp[y * 8 + loc.x] * TD_DCT8_BASIS[loc.y * 8 + y];
-
-    // Set 1: Quantization-cell coefficient projection (STRICT / CELL).
-    float projCoeff = td_project_coeff(td_s_sent_dct[tid], blendCoeff, strictMode);
+    float projCoeff = 0.0;
+    if (runPocs)
+    {
+        float blendCoeff = 0.0;
+        for (int y = 0; y < 8; ++y)
+            blendCoeff += td_s_tmp[y * 8 + loc.x] * TD_DCT8_BASIS[loc.y * 8 + y];
+        // Set 1: Quantization-cell coefficient projection (STRICT / CELL).
+        projCoeff = td_project_coeff(td_s_sent_dct[tid], blendCoeff, strictMode);
+    }
     td_s_blend[tid] = projCoeff;
     memoryBarrierShared();
     barrier();
 
     // Inverse DCT-II of projected residual (transpose of orthonormal basis).
     float invRow = 0.0;
-    for (int u = 0; u < 8; ++u)
-        invRow += td_s_blend[loc.y * 8 + u] * TD_DCT8_BASIS[u * 8 + loc.x];
+    if (runPocs)
+    {
+        for (int u = 0; u < 8; ++u)
+            invRow += td_s_blend[loc.y * 8 + u] * TD_DCT8_BASIS[u * 8 + loc.x];
+    }
     td_s_tmp[tid] = invRow;
     memoryBarrierShared();
     barrier();
 
-    float projRes = 0.0;
-    for (int v = 0; v < 8; ++v)
-        projRes += td_s_tmp[v * 8 + loc.x] * TD_DCT8_BASIS[v * 8 + loc.y];
-
-    dVal = (pVal + projRes) - cVal;
-
-    // Set 2: Pixel-domain valid code-range projection [0, u_peak_code].
-    if (u_peak_code > 0.0 && dVal != 0.0)
+    if (runPocs)
     {
-        float cl = clamp(cVal + dVal, 0.0, u_peak_code);
-        dVal = cl - cVal;
+        float projRes = 0.0;
+        for (int v = 0; v < 8; ++v)
+            projRes += td_s_tmp[v * 8 + loc.x] * TD_DCT8_BASIS[v * 8 + loc.y];
+
+        dVal = (pVal + projRes) - cVal;
+
+        // Set 2: Pixel-domain valid code-range projection [0, u_peak_code].
+        if (u_peak_code > 0.0 && dVal != 0.0)
+        {
+            float cl = clamp(cVal + dVal, 0.0, u_peak_code);
+            dVal = cl - cVal;
+        }
     }
 
-    td_s_blend[tid] = (cVal + dVal) - pVal;
+    td_s_blend[tid] = runPocs ? ((cVal + dVal) - pVal) : 0.0;
     memoryBarrierShared();
     barrier();
 }
 
-imageStore(delta_out, p, vec4(td_is_bad(dVal) ? 0.0 : dVal, 0.0, 0.0, 0.0));
+if (blkBad || td_is_bad(dVal))
+    imageStore(delta_out, p, vec4(0.0, 2.0, 0.0, 0.0));
+else if (blkInvalidRef0)
+{
+    float bOut = isFacePx ? 0.0 : boundedDIn;
+    imageStore(delta_out, p, vec4(bOut, (abs(bOut) > 0.0) ? 1.0 : 0.0, 0.0, 0.0));
+}
+else if (!runPocs || isFacePx)
+    imageStore(delta_out, p, vec4(0.0));
+else
+    imageStore(delta_out, p, vec4(dVal, 0.0, 0.0, 0.0));
 )GLSL";
 
 	// ---- PASS 4 (Speedup 4): Fused Recompose + Layer-4 TdGuardPort + Apply in ONE Dispatch! ----
@@ -1959,7 +2292,7 @@ imageStore(delta_out, p, vec4(td_is_bad(dVal) ? 0.0 : dVal, 0.0, 0.0, 0.0));
 	//   ownGrain = recY - curClean;  newClean = curClean + delta;  candOut = newClean + ownGrain;
 	//   inFullH = recY - G_fine(recY);  outFullH = candOut - G_fine(candOut);  ownGrainH = ownGrain - G_fine(ownGrain);
 	//   addBack = cellAddBack * (inFullH - outFullH).
-	// Uses 22x22 LDS halo (TD_RAD_FINE = 3, 10,040 B shmem — reuses halo buffers for tree reduction!).
+	// Uses 22x22 LDS halo (TD_RAD_FINE = 3, 12,088 B shmem — reuses halo buffers for tree reduction!).
 	// Eliminates inOwnGrainTex_, candOutScratch, guardFineH/V textures and 4 dispatches completely!
 	// Mode::Shadow skips imageStore(out_y, ...) completely (caller retains bit-exact receivedY).
 	constexpr const char* kPass4FusedApplyGuardHeader = R"GLSL(
@@ -1969,10 +2302,13 @@ shared float td_sh_g[(16 + 2 * TD_RAD_FINE) * (16 + 2 * TD_RAD_FINE)];
 shared float td_sh_rh[(16 + 2 * TD_RAD_FINE) * 16];
 shared float td_sh_dh[(16 + 2 * TD_RAD_FINE) * 16];
 shared float td_sh_gh[(16 + 2 * TD_RAD_FINE) * 16];
+shared float td_sh_cov2[256];
+shared uint td_sh_gbits[256];
 shared float td_sh_gout[2];
 )GLSL";
 
-	constexpr const char* kPass4FusedApplyGuard = R"GLSL(
+	// Split into Part1 + Part2 to stay well below MSVC's 16,380-byte raw string literal limit (C2026).
+	constexpr const char* kPass4FusedApplyGuardPart1 = R"GLSL(
 ivec2 cell = ivec2(gl_WorkGroupID.xy);
 if (cell.x >= TD_CW || cell.y >= TD_CH)
     return;
@@ -1993,6 +2329,8 @@ int yMax = max(ay0, ay1 - 1);
 bool hasCleanSplit = (u_has_clean_split > 0.5);
 bool sameCleanRec = (u_same_clean_rec > 0.5);
 bool shadowMode = (u_shadow_mode > 0.5);
+// Workgroup-uniform Pass-1 face/non-rigid mask flag from cell_focus.w (H13: strict bit-exact passthrough).
+bool cellIsFace = (texelFetch(cell_focus, cell, 0).w > 0.5);
 
 int tileDim = 16 + 2 * TD_RAD_FINE;
 int tileN = tileDim * tileDim;
@@ -2003,7 +2341,10 @@ float sumOgE = 0.0;
 float sumOgFineE = 0.0;
 float sumInFineE = 0.0;
 float sumOutFineE = 0.0;
+float sumInCovOwn = 0.0;
+float sumOutCovOwn = 0.0;
 float sumCnt = 0.0;
+uint pxBits = 0u; // bit 2 (4u) = non-finite input pixel closed; bit 3 (8u) = TransformUnknownBound engaged
 
 // Cached per-pixel values for canonical TD_CELL_PX <= 16 (subTiles == 1, single iteration!).
 float regRecY = 0.0;
@@ -2022,6 +2363,7 @@ for (int subY = 0; subY < subTiles; ++subY)
         ivec2 p = ivec2(baseX + lx, baseY + ly);
 
         // Step 1: Cooperative load of 22x22 active-clamped (recY, candOut, ownGrain) into LDS.
+        // Sanitize non-finite samples upfront so a single NaN/Inf pixel NEVER spreads across the 7x7 fine halo!
         for (int idx = tid; idx < tileN; idx += 256)
         {
             int ty = idx / tileDim;
@@ -2034,6 +2376,9 @@ for (int subY = 0; subY < subTiles; ++subY)
             float rv = texelFetch(rec_y, sp, 0).x;
             float cv = sameCleanRec ? rv : texelFetch(cur_clean, sp, 0).x;
             float dv = texelFetch(delta_tex, sp, 0).x;
+            if (td_is_bad(rv)) rv = 0.0;
+            if (td_is_bad(cv)) cv = 0.0;
+            if (td_is_bad(dv)) dv = 0.0;
             float og = rv - cv;
             float candOut = (cv + dv) + og;
             td_sh_r[idx] = rv;
@@ -2073,11 +2418,16 @@ for (int subY = 0; subY < subTiles; ++subY)
 
         if (inCell)
         {
-            float recV = texelFetch(rec_y, p, 0).x;
-            float cleanV = sameCleanRec ? recV : texelFetch(cur_clean, p, 0).x;
-            if (!inAct)
+            float rawRec = texelFetch(rec_y, p, 0).x;
+            float rawClean = sameCleanRec ? rawRec : texelFetch(cur_clean, p, 0).x;
+            bool badRecOrClean = td_is_bad(rawRec) || td_is_bad(rawClean);
+            if (badRecOrClean)
+                pxBits |= 4u;
+            float recV = td_is_bad(rawRec) ? 0.0 : rawRec;
+            float cleanV = td_is_bad(rawClean) ? 0.0 : rawClean;
+            if (!inAct || cellIsFace)
             {
-                // Bars: bit-exact copy of cur_clean to out_clean/carry_clean and rec_y to out_y.
+                // Bars and Pass-1 face-masked cells: bit-exact copy of cur_clean to out_clean/carry_clean and rec_y to out_y.
                 imageStore(out_clean, p, vec4(cleanV, 0.0, 0.0, 0.0));
                 imageStore(carry_clean, p, vec4(cleanV, 0.0, 0.0, 0.0));
                 if (subTiles == 1)
@@ -2101,7 +2451,14 @@ for (int subY = 0; subY < subTiles; ++subY)
                 float rv = td_sh_r[centerIdx];
                 float candOut = td_sh_d[centerIdx];
                 float og = td_sh_g[centerIdx];
-                float dRaw = texelFetch(delta_tex, p, 0).x;
+                vec2 dTex = texelFetch(delta_tex, p, 0).xy;
+                int dFlags = int(round(dTex.y));
+                bool badD = td_is_bad(dTex.x) || ((dFlags & 2) != 0);
+                if (badD)
+                    pxBits |= 4u;
+                if ((dFlags & 1) != 0)
+                    pxBits |= 8u;
+                float dRaw = (badRecOrClean || badD) ? 0.0 : dTex.x;
                 float newClean = cleanV + dRaw;
 
                 // Write strictly grain-free out_clean & carry_clean NOW (BLOCKER-2: NEVER receives Layer-4 add-back!).
@@ -2127,7 +2484,11 @@ for (int subY = 0; subY < subTiles; ++subY)
 
                 sumOgE += og * og;
                 if (hasCleanSplit)
+                {
                     sumOgFineE += ogFineH * ogFineH;
+                    sumInCovOwn += inFullH * ogFineH;
+                    sumOutCovOwn += outFullH * ogFineH;
+                }
                 sumInFineE += inFullH * inFullH;
                 sumOutFineE += outFullH * outFullH;
                 sumCnt += 1.0;
@@ -2135,7 +2496,7 @@ for (int subY = 0; subY < subTiles; ++subY)
                 if (subTiles == 1)
                 {
                     regRecY = rv;
-                    regCandOut = candOut;
+                    regCandOut = (badRecOrClean || badD) ? rv : candOut;
                     regFineDiff = inFullH - outFullH;
                     regInCellPx = true;
                     regInActive = true;
@@ -2147,13 +2508,18 @@ for (int subY = 0; subY < subTiles; ++subY)
         barrier();
     }
 }
+)GLSL";
 
-// Step 4: LDS parallel tree reduction reusing halo arrays (zero extra shmem!).
-td_sh_r[tid]  = sumOgE;
-td_sh_d[tid]  = sumOgFineE;
-td_sh_g[tid]  = sumInFineE;
-td_sh_rh[tid] = sumOutFineE;
-td_sh_dh[tid] = sumCnt;
+	constexpr const char* kPass4FusedApplyGuardPart2 = R"GLSL(
+// Step 4: LDS parallel tree reduction reusing halo arrays + td_sh_cov2/td_sh_gbits for covariance and flags.
+td_sh_r[tid]    = sumOgE;
+td_sh_d[tid]    = sumOgFineE;
+td_sh_g[tid]    = sumInFineE;
+td_sh_rh[tid]   = sumOutFineE;
+td_sh_dh[tid]   = sumCnt;
+td_sh_gh[tid]   = sumInCovOwn;
+td_sh_cov2[tid] = sumOutCovOwn;
+td_sh_gbits[tid] = pxBits;
 memoryBarrierShared();
 barrier();
 
@@ -2161,11 +2527,14 @@ for (int stride = 128; stride > 0; stride >>= 1)
 {
     if (tid < stride)
     {
-        td_sh_r[tid]  += td_sh_r[tid + stride];
-        td_sh_d[tid]  += td_sh_d[tid + stride];
-        td_sh_g[tid]  += td_sh_g[tid + stride];
-        td_sh_rh[tid] += td_sh_rh[tid + stride];
-        td_sh_dh[tid] += td_sh_dh[tid + stride];
+        td_sh_r[tid]    += td_sh_r[tid + stride];
+        td_sh_d[tid]    += td_sh_d[tid + stride];
+        td_sh_g[tid]    += td_sh_g[tid + stride];
+        td_sh_rh[tid]   += td_sh_rh[tid + stride];
+        td_sh_dh[tid]   += td_sh_dh[tid + stride];
+        td_sh_gh[tid]   += td_sh_gh[tid + stride];
+        td_sh_cov2[tid] += td_sh_cov2[tid + stride];
+        td_sh_gbits[tid] |= td_sh_gbits[tid + stride];
     }
     memoryBarrierShared();
     barrier();
@@ -2179,25 +2548,47 @@ if (tid == 0)
     float totInFineE = td_sh_g[0];
     float totOutFineE = td_sh_rh[0];
     float totCnt = td_sh_dh[0];
+    float totInCovOwn = td_sh_gh[0];
+    float totOutCovOwn = td_sh_cov2[0];
 
     float addBack = 0.0;
-    int gFlags = 0;
+    int gFlags = int(td_sh_gbits[0] & 12u); // Preserve bit 2 (4 = non-finite) and bit 3 (8 = pixel bound engaged)
 
-    if (totCnt > 0.5)
+    if (!cellIsFace && totCnt > 0.5)
     {
         float rawGv = texelFetch(cell_prior, cell, 0).x;
         float cellRetGVar = (!td_is_bad(rawGv) && rawGv > 0.0) ? rawGv : 0.0;
         float invC = 1.0 / totCnt;
 
-        if (totOgE * invC > TD_NUM_FLOOR || cellRetGVar > TD_NUM_FLOOR)
+        // Mirrors TdV2ReferenceEngine.h Layer-4 guard:
+        // - In H2-luma no-split mode (!hasCleanSplit), ALWAYS evaluate guard against inFullH energy.
+        // - In split mode (hasCleanSplit), skip only when both ownGrain and retainedGrainVar are zero.
+        if (!hasCleanSplit || totOgE * invC > TD_NUM_FLOOR || cellRetGVar > TD_NUM_FLOOR)
         {
             float leakedFineE = cellRetGVar * TD_GAIN_FINE;
-            float targetFineE = hasCleanSplit
-                ? (totOgFineE * invC + leakedFineE)
-                : ((leakedFineE > TD_NUM_FLOOR) ? min(totInFineE * invC, leakedFineE) : (totInFineE * invC));
-            float curOutFineE = totOutFineE * invC;
+            float inFineMean = totInFineE * invC;
+            float ogFineMean = totOgFineE * invC;
+            float targetFineE = inFineMean;
+            if (hasCleanSplit)
+            {
+                // ownGrain and leaked own grain inside curClean are 100% positively correlated fractions
+                // of the same grain field G, so their fine-band std-devs add linearly (not in quadrature).
+                float targetStd = sqrt(max(0.0, ogFineMean)) + sqrt(max(0.0, leakedFineE));
+                targetFineE = min(inFineMean, targetStd * targetStd);
+            }
 
-            gFlags = 2; // evaluated
+            // Texture-immune own-grain fine-band covariance check when leaked grain is reported.
+            float curOutFineE = totOutFineE * invC;
+            if (hasCleanSplit && ogFineMean > TD_NUM_FLOOR && cellRetGVar > TD_NUM_FLOOR &&
+                totInCovOwn > TD_NUM_FLOOR)
+            {
+                float covRatio = (totOutCovOwn > 0.0) ? (totOutCovOwn / totInCovOwn) : 0.0;
+                float covImpliedOutE = targetFineE * covRatio * covRatio;
+                if (covImpliedOutE < curOutFineE)
+                    curOutFineE = covImpliedOutE;
+            }
+
+            gFlags |= 2; // evaluated
             if (td_is_bad(targetFineE) || td_is_bad(curOutFineE))
             {
                 gFlags |= 1;
@@ -2231,14 +2622,14 @@ if (shadowMode)
 
 float cellAddBack = td_sh_gout[0];
 int cellGFlags = int(round(td_sh_gout[1]));
-bool applyAddBack = ((cellGFlags & 1) != 0) && (cellAddBack > 0.0);
+bool applyAddBack = (!cellIsFace) && ((cellGFlags & 1) != 0) && (cellAddBack > 0.0);
 
 if (subTiles == 1)
 {
     if (regInCellPx)
     {
         float outVal = regRecY;
-        if (regInActive)
+        if (regInActive && !cellIsFace)
         {
             outVal = regCandOut;
             if (applyAddBack)
@@ -2274,6 +2665,9 @@ else
                     rVal = texelFetch(rec_y, sp, 0).x;
                     float cv = sameCleanRec ? rVal : texelFetch(cur_clean, sp, 0).x;
                     float dv = texelFetch(delta_tex, sp, 0).x;
+                    if (td_is_bad(rVal)) rVal = 0.0;
+                    if (td_is_bad(cv)) cv = 0.0;
+                    if (td_is_bad(dv)) dv = 0.0;
                     cOutVal = (cv + dv) + (rVal - cv);
                 }
                 td_sh_r[idx] = rVal;
@@ -2308,12 +2702,16 @@ else
             int localCellY = subY * 16 + ly;
             bool inCell = (localCellX < TD_CELL_PX) && (localCellY < TD_CELL_PX) && (p.x < TD_W) && (p.y < TD_H);
             bool inAct = inCell && validRect && (p.x >= ax0) && (p.x < ax1) && (p.y >= ay0) && (p.y < ay1);
-            if (inAct)
+            if (inAct && !cellIsFace)
             {
-                float rv = texelFetch(rec_y, p, 0).x;
-                float cv = sameCleanRec ? rv : texelFetch(cur_clean, p, 0).x;
-                float dv = texelFetch(delta_tex, p, 0).x;
-                float outVal = (cv + dv) + (rv - cv);
+                float rawR = texelFetch(rec_y, p, 0).x;
+                float rawC = sameCleanRec ? rawR : texelFetch(cur_clean, p, 0).x;
+                float rawD = texelFetch(delta_tex, p, 0).x;
+                bool badPx = td_is_bad(rawR) || td_is_bad(rawC) || td_is_bad(rawD);
+                float rv = td_is_bad(rawR) ? 0.0 : rawR;
+                float cv = td_is_bad(rawC) ? 0.0 : rawC;
+                float dv = badPx ? 0.0 : rawD;
+                float outVal = badPx ? rv : ((cv + dv) + (rv - cv));
                 if (applyAddBack)
                 {
                     float gr = 0.0;
@@ -2338,6 +2736,11 @@ else
     }
 }
 )GLSL";
+
+	inline std::string BuildPass4FusedApplyGuardBody()
+	{
+		return std::string(kPass4FusedApplyGuardPart1) + kPass4FusedApplyGuardPart2;
+	}
 
 	// ---- CHROMA GPU APPLY PASSES (TD-S4 GPU Twins: YUV sited upsample & unclipped RGB matrix) ----
 	// diagFlags bitmask: bit 0 (1) = non-finite/overflow closed, bit 1 (2) = border-bilinear fallback.

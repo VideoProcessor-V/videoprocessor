@@ -4,9 +4,11 @@
 // Temporal Detail v2 — Stage TD-S4 / Owner Q5(a) & Q5(b) Refinements
 // (2026-11-23_TD-consolidated-plan.md s1.6 #2, s3.2 TD-S4, s4.3 Q5):
 //   - Q5(a): Half-pixel pan innovation energy I_r comparison between cross form (I_cross = max(0, E - C))
-//            and projection form (I_proj = max(0, E - max(0, C)^2 / E_prev)), using VpComposed::SampleBicubic
-//            strictly inside ActiveRect. Adopts projection form when relative half-pixel pan bias exceeds
-//            Owner Q5's 5% acceptance threshold (kQ5PanBiasThreshold = 0.05).
+//            and exact bias-corrected projection form solving (E - I_proj)(E_prev - beta * I_proj) = max(0, C)^2
+//            (where beta = ||W||_2^2 is the exact Catmull-Rom bicubic variance transfer gain from
+//            VpComposed::CubicWeights), using VpComposed::SampleBicubic strictly inside ActiveRect.
+//            Adopts projection form when relative half-pixel pan bias exceeds Owner Q5's 5% threshold
+//            (kQ5PanBiasThreshold = 0.05).
 //   - Q5(b): Crushed-black zero-energy flat block exclusion from dark NLF accumulation strictly by
 //            measured block energy (NEVER by code value, preserving BTB/WTW), using the exact 1-pixel
 //            half-LSB quantization energy floor (lsbStep^2 / (4 * regionPixels)).
@@ -34,10 +36,33 @@ namespace TdV2
 	constexpr double kQ5NumericalFloor = 1e-9;
 
 	// Owner Q5(a) half-pixel pan relative bias adoption threshold (2026-11-23_TD-consolidated-plan.md s1.6 #2 & s4.3 Q5):
-	// adopt projection form I_proj = max(0, E - max(0, C)^2 / E_prev) when half-pixel pan relative bias > 5%.
+	// adopt bias-corrected projection form when half-pixel pan relative bias > 5%.
 	constexpr double kQ5PanBiasThreshold = 0.05;
 
-	// ---- Q5(a): Innovation Energy I_r Cross Form vs Projection Form ----
+	// ---- Q5(a): Innovation Energy I_r Cross Form vs Exact Bias-Corrected Projection Form ----
+
+	// Exact 2D separable Catmull-Rom bicubic white-variance transfer gain beta(vx, vy) = ||W_x||_2^2 * ||W_y||_2^2
+	// using shared VpComposed::CubicWeights (Rule 1 & D5: zero private cubic weight copies).
+	// Examples: integer shift (0, 0) -> beta = 1.0; half-pixel horizontal pan (0.5, 0) -> beta = 41/64 = 0.640625.
+	inline double BicubicWarpVarianceGain(double vx, double vy)
+	{
+		if (!std::isfinite(vx) || !std::isfinite(vy))
+			return 1.0;
+		const double fx = vx - std::floor(vx);
+		const double fy = vy - std::floor(vy);
+		double wx[4] = {};
+		double wy[4] = {};
+		VpComposed::CubicWeights(fx, wx);
+		VpComposed::CubicWeights(fy, wy);
+		double sx = 0.0;
+		double sy = 0.0;
+		for (int i = 0; i < 4; ++i)
+		{
+			sx += wx[i] * wx[i];
+			sy += wy[i] * wy[i];
+		}
+		return sx * sy;
+	}
 
 	// Cross form (GrainLevel v5 L1 baseline): I_cross = max(0, E - C).
 	// Non-finite inputs or negative E close visibly to 0.
@@ -53,15 +78,33 @@ namespace TdV2
 		return ir > 0.0 ? ir : 0.0;
 	}
 
-	// Projection form (Q5(a) half-pixel bicubic attenuation immune):
-	//   I_proj = max(0, E - max(0, C)^2 / E_prev)
-	// When warped previous band suffers multiplicative bicubic attenuation alpha (W T = alpha * T),
-	// C = alpha * ||T||^2 and E_prev = alpha^2 * ||T||^2 + beta_w * sigma_g^2, so C^2 / E_prev cancels
-	// alpha^2 and recovers sigma_g^2 without the (1 - alpha) * ||T||^2 texture bias of E - C.
-	// Strictly numerical floor kQ5NumericalFloor = 1e-9 guards E_prev -> 0; non-finite fails closed visibly.
-	inline double ComputeProjectionIr(double E, double C, double Eprev, StandInRegistry* standIns = nullptr)
+	// Exact bias-corrected projection form (Q5(a) half-pixel bicubic attenuation immune, Rule 1):
+	// Model under sub-pixel bicubic warp W with multiplicative texture attenuation alpha in (0, 1] and
+	// warp variance transfer gain beta = ||W||_2^2 in (0, 1]:
+	//   X = T + G_0,   W Y_prev = alpha * T + W G_1   (G_0, G_1 independent zero-mean variance sigma^2)
+	// Observable second moments (S = E[T^2] >= 0):
+	//   E = S + sigma^2,   C = alpha * S,   E_prev = alpha^2 * S + beta * sigma^2.
+	// The naive form E - C^2 / E_prev neglects the warped grain variance beta * sigma^2 in E_prev and therefore
+	// converges to (1 + beta / alpha^2) * sigma^2 (~2.36 * sigma^2 at 0.5-px pan) when S >> sigma^2.
+	// Subtracting beta * sigma^2 from E_prev yields the exact fixed-point identity:
+	//   I_proj = E - C_+^2 / (E_prev - beta * I_proj)   <=>   (E - I_proj) * (E_prev - beta * I_proj) = C_+^2
+	// whose unique physical root (0 <= I_proj <= min(E, E_prev / beta)) in cancellation-free rationalized form is:
+	//   I_proj = 2 * max(0, E * E_prev - C_+^2) / ((E_prev + beta * E) + sqrt((E_prev - beta * E)^2 + 4 * beta * C_+^2)).
+	// Exact limits:
+	//   - Texture + grain (any S >= 0, alpha > 0, beta > 0): I_proj == sigma^2 identically (0% bias).
+	//   - Pure grain (C <= 0): returns E == sigma^2 directly.
+	//   - Pure texture (sigma^2 == 0): E * E_prev - C_+^2 == 0 => I_proj == 0.
+	//   - Integer shift (alpha == 1, beta == 1, E == E_prev): reduces algebraically to E - C_+.
+	//   - beta -> 0+: reduces smoothly to max(0, E - C_+^2 / E_prev) without division by zero.
+	inline double ComputeProjectionIr(
+		double E,
+		double C,
+		double Eprev,
+		StandInRegistry* standIns = nullptr,
+		double warpGainBeta = 1.0)
 	{
-		if (!std::isfinite(E) || !std::isfinite(C) || !std::isfinite(Eprev) || E < 0.0 || Eprev < 0.0)
+		if (!std::isfinite(E) || !std::isfinite(C) || !std::isfinite(Eprev) || !std::isfinite(warpGainBeta) ||
+		    E < 0.0 || Eprev < 0.0 || warpGainBeta < 0.0)
 		{
 			if (standIns != nullptr)
 				standIns->Engage(StandInKind::NonFiniteClosure, "ComputeProjectionIr non-finite or negative energy");
@@ -69,23 +112,41 @@ namespace TdV2
 		}
 		if (Eprev <= kQ5NumericalFloor)
 			return E;
-		const double cPos = C > 0.0 ? C : 0.0;
-		const double ir = E - (cPos * cPos) / Eprev;
+		if (C <= 0.0)
+			return E;
+		const double det = E * Eprev - C * C;
+		if (det <= 0.0)
+			return 0.0;
+		const double bE = warpGainBeta * E;
+		const double diff = Eprev - bE;
+		const double disc = diff * diff + 4.0 * warpGainBeta * C * C;
+		const double denom = (Eprev + bE) + std::sqrt(disc);
+		if (!(denom > kQ5NumericalFloor * kQ5NumericalFloor))
+			return 0.0;
+		const double ir = (2.0 * det) / denom;
 		return ir > 0.0 ? ir : 0.0;
 	}
 
-	// Per-region innovation energy selector choosing projection form when Q5(a) adoption is active.
-	inline double SelectGrainIr(double E, double C, double Eprev, bool useProjection, StandInRegistry* standIns = nullptr)
+	// Per-region innovation energy selector choosing bias-corrected projection form when Q5(a) adoption is active.
+	inline double SelectGrainIr(
+		double E,
+		double C,
+		double Eprev,
+		bool useProjection,
+		StandInRegistry* standIns = nullptr,
+		double warpGainBeta = 1.0)
 	{
 		return useProjection
-			? ComputeProjectionIr(E, C, Eprev, standIns)
+			? ComputeProjectionIr(E, C, Eprev, standIns, warpGainBeta)
 			: ComputeCrossIr(E, C, standIns);
 	}
 
 	struct HalfPixelPanIrEval
 	{
 		size_t regionCount = 0;
+		size_t skippedBorderRegions = 0;
 		size_t nonFiniteRegions = 0;
+		double warpGainBeta = 1.0;
 		double meanCrossIr = 0.0;
 		double meanProjIr = 0.0;
 		double relativeBias = 0.0;
@@ -133,6 +194,9 @@ namespace TdV2
 		const int aw = active.Width();
 		const int ah = active.Height();
 		ActiveSubPlaneView prevView{ &prevD, active.x0, active.y0, aw, ah };
+
+		const double warpBeta = BicubicWarpVarianceGain(vx, vy);
+		out.warpGainBeta = warpBeta;
 
 		const int rw = (aw + regionPx - 1) / regionPx;
 		const int rh = (ah + regionPx - 1) / regionPx;
@@ -189,14 +253,17 @@ namespace TdV2
 					continue;
 				}
 				if (!allInFootprint || cnt == 0)
+				{
+					++out.skippedBorderRegions;
 					continue;
+				}
 
 				const double invCnt = 1.0 / static_cast<double>(cnt);
 				const double E = sumE * invCnt;
 				const double C = sumC * invCnt;
 				const double Eprev = sumEprev * invCnt;
 				const double ic = ComputeCrossIr(E, C, standIns);
-				const double ip = ComputeProjectionIr(E, C, Eprev, standIns);
+				const double ip = ComputeProjectionIr(E, C, Eprev, standIns, warpBeta);
 
 				out.regionE.push_back(E);
 				out.regionC.push_back(C);
@@ -312,5 +379,20 @@ namespace TdV2
 			res.valid = std::isfinite(res.nlfEstimate);
 		}
 		return res;
+	}
+
+	// Compose Q5(a) pan evaluation with Q5(b) zero-energy dark block exclusion using the selected Ir form.
+	inline DarkNlfResult AccumulatePanEvalDarkNlf(
+		const HalfPixelPanIrEval& eval,
+		int regionPx,
+		double lsbStep = 1.0,
+		double quantileP = 0.5,
+		StandInRegistry* standIns = nullptr)
+	{
+		if (!eval.valid || regionPx <= 0)
+			return DarkNlfResult{};
+		const size_t regionPixels = static_cast<size_t>(regionPx) * static_cast<size_t>(regionPx);
+		const std::vector<double>& chosenIr = eval.adoptProjection ? eval.regionProjIr : eval.regionCrossIr;
+		return AccumulateDarkNlfExcludingZeroEnergy(eval.regionE, chosenIr, regionPixels, lsbStep, quantileP, standIns);
 	}
 }

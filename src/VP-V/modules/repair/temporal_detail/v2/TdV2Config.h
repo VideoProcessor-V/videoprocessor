@@ -125,7 +125,8 @@ namespace TdV2
 			{ "SC-01", "Moment pooling radius: 3x3 cells (Reference) vs 1x1 cell (RealTime optional)", false, true },
 			{ "SC-02", "Long-reach I-anchor y_4: enabled when drift-audited (Reference) vs local peaks+carry only (RealTime)", false, true },
 			{ "SC-03", "Cell projection iterations: 2 POCS steps (Reference) vs 1 POCS step (RealTime)", false, true },
-			{ "SC-04", "Weight upsampling: edge-aware guided (Reference) vs spatial bilinear (RealTime)", false, true }
+			{ "SC-04", "Weight upsampling: edge-aware guided (Reference) vs spatial bilinear (RealTime)", false, true },
+			{ "SC-05", "GPU band split: full-res FP32 L/D3/M/H (Reference) vs half-res FP32 (L, D3) band split with full-res FP32 (M, H) (RealTime)", false, true }
 		};
 		count = sizeof(kLedger) / sizeof(kLedger[0]);
 		return kLedger;
@@ -158,6 +159,10 @@ namespace TdV2
 		// Reference vs RealTime switches aligned to ShortcutLedger().
 		int momentPoolRadiusCells = 1;  // 1 => 3x3 cells (48 px at 16 px cells, refs/111 s3.5); 0 => 1x1 cell
 		int cellProjIterations = 2;     // <= 2 POCS iterations per refs/111 s5
+
+		// Per-pixel 3-sigma per-corner Huber outlier taper psi(r) = min(1, 9/r) during spatial weight recomposition.
+		// Default true; setting false disables per-corner Huber taper on the exact same engine (negative control).
+		bool enablePerCornerHuber = true;
 
 		// Measured source rate in Hz (used to express any temporal horizon in seconds, never hardcoded frame counts).
 		double sourceHz = kDefaultSourceHz;

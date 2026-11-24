@@ -49,6 +49,13 @@ namespace TdV2
 		LateCarryExpired,
 		TierSteppedDown,
 		LeadReduced,
+		CodecModelPbStandIn,
+		ChromaCanvasGapFilled,
+		A2StatsInvalid,
+		GrainPriorOutOfRange,
+		GpuInputOutputAlias,
+		FaceNonRigidMask,
+		MissingMotionNoWholeBlend,
 		Count
 	};
 
@@ -120,7 +127,21 @@ namespace TdV2
 			{ StandInKind::TierSteppedDown, "td.sched.tier_stepdown",
 			  "temporal detail: tier stepped down under GPU load", "Full (tier 3) TD budget" },
 			{ StandInKind::LeadReduced, "td.sched.lead_reduced",
-			  "temporal detail: reduced look-ahead lead", "Full E>=4 look-ahead lead" }
+			  "temporal detail: reduced look-ahead lead", "Full E>=4 look-ahead lead" },
+			{ StandInKind::CodecModelPbStandIn, "td.standin.codec_model_pb",
+			  "STRICT/CELL P_B: warped-ref stand-in (CodecModel Field B absent)", "CodecModel Field B P_B" },
+			{ StandInKind::ChromaCanvasGapFilled, "td.chroma.canvas_gap_filled",
+			  "chroma canvas: sparse gap filled (marked invalid beyond footprint)", "Dense sub-pixel anchor observations" },
+			{ StandInKind::A2StatsInvalid, "td.fallback.a2_stats_invalid",
+			  "A2 cell stats invalid (delta closed to zero)", "Valid finite A2 dead-zone & step stats" },
+			{ StandInKind::GrainPriorOutOfRange, "td.fallback.grain_prior_oob",
+			  "chroma grain prior index out of range (clamped visibly)", "Matching retainedGrainVar grid" },
+			{ StandInKind::GpuInputOutputAlias, "td.gpu.io_alias",
+			  "GPU input/output texture alias rejected visibly", "Distinct input and output pl_tex bindings" },
+			{ StandInKind::FaceNonRigidMask, "td.mask.face_nonrigid",
+			  "Pass-1 face/non-rigid mask active (delta=0)", "Pass-2 TD-OB/TD-PX non-rigid tracking" },
+			{ StandInKind::MissingMotionNoWholeBlend, "td.fallback.no_motion_l4",
+			  "L4 missing motion field: restricted to exact-copy blocks or skipped", "Valid upstream P3/P3b motion field" }
 		};
 		const size_t idx = static_cast<size_t>(kind);
 		if (idx < static_cast<size_t>(StandInKind::Count))

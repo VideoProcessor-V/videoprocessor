@@ -12,12 +12,12 @@
 //     ActiveRect (NEVER accumulating chroma grain), and fits per-cell anchor CfL (a, b) from anchor
 //     clean luma sampled at sited coded coordinates and anchor clean chroma.
 //   - Carried CfL (H5): applies anchor-carried (a, b) STRICTLY to OUR reference-aligned prediction
-//     luma P_Y = Warp(anchorCleanY) — NEVER to current frame's luma curY! Rejects CfL visibly via
-//     StandInKind::ChromaCflFallback whenever per-cell chroma residual disagrees beyond 3-sigma
-//     (kHuberKneeSq * max(cellRefDiffVar, stepTotalVar)).
+//     luma P_Y = Warp(anchorCleanY) — NEVER to current frame's luma curY! Falls back visibly via
+//     StandInKind::ChromaCflFallback (emitting per-cell single-frame ChromaCfl fallback fits) whenever
+//     per-cell chroma residual disagrees beyond 3-sigma (kHuberKneeSq * max(cellRefDiffVar, stepTotalVar)).
 //   - Unidentified coded grid: visibly engages StandInKind::ChromaGridDetector and runs strictly
-//     coarse-band-only fusion (sigma = 0.5 * kCanonicalBlockPx = 8.0 luma px, M/H weights = 0,
-//     own chroma grain untouched).
+//     coarse-band-only fusion (sigma = 8.0 px on 1/4 luma grid = 32.0 full-res luma px = 16.0 4:2:0
+//     coded-chroma px, M/H weights = 0, own chroma grain untouched; plan s1.5 L168).
 //
 // Every constant is mathematically or physically derived and documented inline (Rule 1).
 // Every stand-in / fallback is visibly recorded in StandInRegistry and result counters (Rule 4).
@@ -25,11 +25,13 @@
 #pragma once
 
 #include <VP-V/core/LumaWeights.h>
+#include <VP-V/core/OnePole.h>
 #include <VP-V/core/Ramp.h>
 #include <VP-V/modules/motion/estimation/composed/WarpSampler.h>
 #include <VP-V/modules/repair/grain_split/shared/BandFromBase.h>
 #include <VP-V/modules/repair/temporal_detail/v2/TdV2BlendMath.h>
 #include <VP-V/modules/repair/temporal_detail/v2/TdV2Config.h>
+#include <VP-V/modules/repair/temporal_detail/v2/TdV2GrainQ5.h>
 #include <VP-V/modules/repair/temporal_detail/v2/TdV2ReferenceEngine.h>
 #include <VP-V/modules/repair/temporal_detail/v2/TdV2StandIns.h>
 
@@ -45,9 +47,22 @@ namespace TdV2
 {
 	// ---- Rule-1 Derived Chroma Constants ----
 
-	// Unidentified coded-grid coarse-band sigma in luma pixels: 0.5 * kCanonicalBlockPx = 8.0 luma px
-	// (half a canonical macroblock, strictly below any 4:2:0 / 4:2:2 chroma Nyquist; plan s1.5 #1).
-	constexpr double kUnidentifiedChromaSigmaLumaPx = 0.5 * static_cast<double>(kCanonicalBlockPx);
+	// Plan s1.5 #1 (L168): unidentified coded-grid coarse-band mode uses sigma = 8 px on the 1/4 luma grid
+	// (quarter-luma scale factor = 4), i.e., sigma = 8.0 * 4.0 = 32.0 full-resolution luma pixels
+	// (= 16.0 coded-chroma pixels on 4:2:0, strictly below any chroma Nyquist).
+	constexpr double kQuarterLumaGridScale = 4.0;
+	constexpr double kUnidentifiedChromaSigmaQuarterLumaPx = 0.5 * static_cast<double>(kCanonicalBlockPx);
+	constexpr double kUnidentifiedChromaSigmaLumaPx = kUnidentifiedChromaSigmaQuarterLumaPx * kQuarterLumaGridScale;
+
+	// Derived minimum 4:4:4 canvas accumulated footprint weight (Rule 1):
+	// Exact uniform weight share of a 4x4 bicubic sampling footprint = 1 / (4 * 4) = 1/16.
+	// Rejects near-zero grazing splat corners while accepting fresh and near-I decayed bilinear splats.
+	constexpr double kMinCanvasFootprintWeight = 1.0 / 16.0;
+
+	// Derived rate-aware near-I anchor canvas decay time constant in seconds (Rule 1 & U23 OnePole):
+	// Contract back-reference horizon kContractBackRefs (8 frames) at cinema kDefaultSourceHz (24000/1001 Hz).
+	// Applied via OnePole::AlphaFor(dtSec, kAnchorCanvasTauSec) so accumulation stays strictly bounded across time.
+	constexpr double kAnchorCanvasTauSec = static_cast<double>(kContractBackRefs) / kDefaultSourceHz;
 
 	// ---- Chroma Format & Siting Vocabulary ----
 
@@ -381,6 +396,8 @@ namespace TdV2
 
 		// Warp a grain-free chroma plane on its own (subX, subY) grid using luma-grid motion vectors
 		// scaled by (1/subX, 1/subY), honoring exact siting and hard ActiveRect boundaries.
+		// Invalid-motion, non-finite, and OOB pixels keep fallbackPlane (codedClean) so DecomposeActiveBands
+		// never bleeds 0.0-holes or mismatched edges into valid neighbours, while outValid stays 0.
 		inline WarpDiagnostics WarpChromaPlaneWithLumaMotion(
 			const TdV2Plane& refPlane,
 			const TdV2Plane& fallbackPlane,
@@ -395,7 +412,8 @@ namespace TdV2
 			int cellPx,
 			TdV2Plane& outWarped,
 			std::vector<uint8_t>& outValid,
-			StandInRegistry* standIns = nullptr)
+			StandInRegistry* standIns = nullptr,
+			const CellMotionField* lumaMf = nullptr)
 		{
 			WarpDiagnostics diag;
 			const int w = refPlane.w;
@@ -414,6 +432,7 @@ namespace TdV2
 					standIns->Engage(StandInKind::MotionFieldStandIn, "WarpChromaPlaneWithLumaMotion invalid dimensions");
 				return diag;
 			}
+			const bool hasCellValid = (lumaMf != nullptr && lumaMf->valid.size() == expectedCells);
 
 			// Sanitize non-finite reference pixels inside active rect before sampling.
 			TdV2Plane safeRef = refPlane;
@@ -462,6 +481,8 @@ namespace TdV2
 					const double lx = siting.CodedToLumaX(static_cast<double>(x), subX);
 					const int mcx = (std::max)(0, (std::min)(cellsW - 1, static_cast<int>(std::floor(lx)) / cellPx));
 					const size_t cIdx = static_cast<size_t>(mcy) * cellsW + mcx;
+					if (hasCellValid && lumaMf->valid[cIdx] == 0u)
+						continue;
 					const double vx = lumaCellVx[cIdx];
 					const double vy = lumaCellVy[cIdx];
 					if (!std::isfinite(vx) || !std::isfinite(vy))
@@ -495,8 +516,11 @@ namespace TdV2
 					}
 					else
 					{
-						// Out-of-bounds landing: fill with edge-clamped active sample (zero ringing), outValid = 0.
-						outWarped.at(x, y) = SampleBilinearClampedLocal(view, sxLocal, syLocal);
+						// Out-of-bounds landing: keep codedClean fallback (H3: zero 0.0-holes and zero mismatched edge bleed), outValid = 0.
+						const double fbVal = fallbackPlane.at(x, y);
+						outWarped.at(x, y) = std::isfinite(fbVal)
+							? fbVal
+							: SampleBilinearClampedLocal(view, sxLocal, syLocal);
 					}
 				}
 			}
@@ -678,6 +702,8 @@ namespace TdV2
 			cellsW_ = 0;
 			cellsH_ = 0;
 			cellPx_ = kCanonicalBlockPx;
+			codedSubX_ = 2;
+			codedSubY_ = 2;
 			active_ = {};
 			originOffX_ = 0.0;
 			originOffY_ = 0.0;
@@ -685,10 +711,23 @@ namespace TdV2
 			sumCr_ = TdV2Plane();
 			weight_ = TdV2Plane();
 			anchorCleanY_ = TdV2Plane();
+			anchorCleanYValid_.clear();
 			cflStats_.clear();
 			cflCells_.clear();
 			accumulatedFrames_ = 0;
+			lastAccumSeq_ = 0;
+			hasLastAccumSeq_ = false;
 			hasData_ = false;
+			hasCfl_ = false;
+		}
+
+		// Reset per-anchor CfL (a, b) and reference-aligned P_Y when starting a new anchor without a scene cut.
+		void ResetCfl()
+		{
+			anchorCleanY_ = TdV2Plane();
+			anchorCleanYValid_.clear();
+			cflStats_.assign(static_cast<size_t>(cellsW_) * static_cast<size_t>(cellsH_), CflAccum{});
+			cflCells_.assign(static_cast<size_t>(cellsW_) * static_cast<size_t>(cellsH_), AnchorCflCell{});
 			hasCfl_ = false;
 		}
 
@@ -705,10 +744,12 @@ namespace TdV2
 		const std::vector<AnchorCflCell>& CflCells() const { return cflCells_; }
 
 		// Accumulate one grain-free anchor frame's coded chroma (and optional anchor clean luma for CfL)
-		// into the full luma-resolution (lumaW x lumaH) 4:4:4 memory canvas.
+		// into the full luma-resolution (lumaW x lumaH) 4:4:4 memory canvas with rate-aware OnePole decay
+		// over the near-I horizon kAnchorCanvasTauSec (bounded weight, zero unbounded drift).
 		// Splat convention: `splatMotion` (vx, vy) gives the anchor frame's displacement from the canvas
 		// origin (x_frame = x_canvas + v), so coded sample at luma (x_luma, y_luma) splats onto canvas
-		// coordinate (x_luma - vx, y_luma - vy) strictly inside `lumaActive`. NEVER pass grainy chroma!
+		// coordinate (x_luma - vx, y_luma - vy) strictly inside `lumaActive`, and anchorCleanY_ is aligned
+		// into the exact same canvas coordinate frame. NEVER pass grainy chroma!
 		bool AccumulateAnchorFrame(
 			const TdV2Plane& codedCleanCb,
 			const TdV2Plane& codedCleanCr,
@@ -721,7 +762,10 @@ namespace TdV2
 			const CellMotionField* splatMotion,
 			int cellPx,
 			int sourceBits,
-			StandInRegistry* standIns = nullptr)
+			StandInRegistry* standIns = nullptr,
+			double sourceHz = kDefaultSourceHz,
+			uint64_t frameSeq = 0,
+			bool resetCflForNewAnchor = false)
 		{
 			if (codedCleanCb.Empty() || codedCleanCr.Empty() || lumaW <= 0 || lumaH <= 0 || cellPx <= 0)
 				return false;
@@ -763,10 +807,26 @@ namespace TdV2
 			const double offX = baseX - std::floor(baseX);
 			const double offY = baseY - std::floor(baseY);
 
-			// Re-initialize canvas if dimensions, cell grid, ActiveRect, or siting origin changed.
-			if (!hasData_ || w_ != lumaW || h_ != lumaH || cellsW_ != cw || cellsH_ != ch || cellPx_ != cellPx ||
-			    active_.x0 != ar.x0 || active_.y0 != ar.y0 || active_.x1 != ar.x1 || active_.y1 != ar.y1 ||
-			    std::fabs(originOffX_ - offX) > kEngineNumFloor || std::fabs(originOffY_ - offY) > kEngineNumFloor)
+			// Re-initialize canvas if dimensions, cell grid, ActiveRect, subsampling, or siting origin changed.
+			const bool needsReset = (!hasData_ || w_ != lumaW || h_ != lumaH || cellsW_ != cw || cellsH_ != ch || cellPx_ != cellPx ||
+			                         codedSubX_ != cSubX || codedSubY_ != cSubY ||
+			                         active_.x0 != ar.x0 || active_.y0 != ar.y0 || active_.x1 != ar.x1 || active_.y1 != ar.y1 ||
+			                         std::fabs(originOffX_ - offX) > kEngineNumFloor || std::fabs(originOffY_ - offY) > kEngineNumFloor);
+
+			// H9 (plan s1.2 L108): allow identity (0, 0) splat ONLY when seeding the first anchor (!HasData() / reset).
+			// On an already-populated canvas, refuse to fabricate whole-frame "Still" when splatMotion is null!
+			const bool useMotion = (splatMotion != nullptr);
+			if (!useMotion && !needsReset)
+			{
+				if (standIns != nullptr)
+				{
+					standIns->Engage(StandInKind::MotionFieldStandIn, "anchor splatMotion null on populated canvas; skipped per L4");
+					standIns->Engage(StandInKind::MissingMotionNoWholeBlend, "L4 missing anchor splatMotion: accumulation skipped (no Still assumption)");
+				}
+				return false;
+			}
+
+			if (needsReset)
 			{
 				Reset();
 				w_ = lumaW;
@@ -774,6 +834,8 @@ namespace TdV2
 				cellsW_ = cw;
 				cellsH_ = ch;
 				cellPx_ = cellPx;
+				codedSubX_ = cSubX;
+				codedSubY_ = cSubY;
 				active_ = ar;
 				originOffX_ = offX;
 				originOffY_ = offY;
@@ -784,9 +846,30 @@ namespace TdV2
 				cflCells_.assign(numCells, AnchorCflCell{});
 			}
 
-			const bool useMotion = (splatMotion != nullptr);
-			if (!useMotion && accumulatedFrames_ > 0 && standIns != nullptr)
-				standIns->Engage(StandInKind::MotionFieldStandIn, "anchor splatMotion null; assuming Still");
+			// Rate-aware exponential decay of prior accumulated weights via shared U23 OnePole::AlphaFor
+			// so accumulated weights stay strictly bounded <= 1 / alpha across arbitrary stream lengths.
+			// If elapsed time exceeds the near-I horizon or caller requests a new anchor CfL, reset per-anchor CfL.
+			if (hasData_)
+			{
+				const double effHz = (std::isfinite(sourceHz) && sourceHz > 0.0) ? sourceHz : kDefaultSourceHz;
+				const double dtFrames = (hasLastAccumSeq_ && frameSeq > lastAccumSeq_)
+					? static_cast<double>(frameSeq - lastAccumSeq_)
+					: 1.0;
+				const double dtSec = dtFrames / effHz;
+				if (resetCflForNewAnchor || dtSec > kAnchorCanvasTauSec)
+					ResetCfl();
+				const double decayAlpha = OnePole::AlphaFor(dtSec, kAnchorCanvasTauSec);
+				const double retain = RampMath::Clamp01(1.0 - decayAlpha);
+				for (int y = ar.y0; y < ar.y1; ++y)
+				{
+					for (int x = ar.x0; x < ar.x1; ++x)
+					{
+						sumCb_.at(x, y) *= retain;
+						sumCr_.at(x, y) *= retain;
+						weight_.at(x, y) *= retain;
+					}
+				}
+			}
 
 			const ActiveRect cActive = ChromaDetail::ToSubsampledActiveRect(ar, lumaW, lumaH, cSubX, cSubY, cW, cH);
 			const bool hasValidAnchorY = (anchorCleanY != nullptr && !anchorCleanY->Empty() &&
@@ -813,6 +896,10 @@ namespace TdV2
 					}
 				}
 			}
+
+			// Plan s1.5 #2: fit anchor CfL (a, b) ONCE per anchor (strictly locked to this anchor's P_Y so
+			// subsequent near-I splats never drift CfL away from anchorCleanY_).
+			const bool fitCflThisAnchor = anchorYCleanFinite && !hasCfl_;
 
 			size_t splattedSamples = 0;
 			for (int cy = cActive.y0; cy < cActive.y1; ++cy)
@@ -884,7 +971,7 @@ namespace TdV2
 
 						// Fit per-cell anchor CfL (a, b) from anchor clean luma sampled at exact sited coded coords
 						// and anchor clean chroma (strictly on the in-bounds anchor cell corresponding to (axAligned, ayAligned)).
-						if (anchorYCleanFinite)
+						if (fitCflThisAnchor)
 						{
 							double ySample = 0.0;
 							bool borderBilin = false;
@@ -910,29 +997,91 @@ namespace TdV2
 				}
 			}
 
+			if (splattedSamples > 0)
+			{
+				hasData_ = true;
+				++accumulatedFrames_;
+				lastAccumSeq_ = frameSeq;
+				hasLastAccumSeq_ = true;
+			}
+
+			// Capture and align anchor clean luma P_Y into the EXACT canvas coordinate system:
+			// since x_frame = x_canvas + vx, canvas pixel (x, y) samples anchorCleanY at (x + vx, y + vy).
+			// Eliminates P_Y coordinate offset whenever the anchor splat has non-zero motion (vx, vy) != (0, 0).
+			if (fitCflThisAnchor && anchorCleanY_.Empty())
+			{
+				anchorCleanY_ = *anchorCleanY;
+				anchorCleanYValid_.assign(static_cast<size_t>(w_) * static_cast<size_t>(h_), 1u);
+				if (useMotion)
+				{
+					bool anyNonZeroSplat = false;
+					for (size_t i = 0; i < numCells; ++i)
+					{
+						if (splatMotion->valid[i] == 0u ||
+						    splatMotion->vx[i] != 0.0 || splatMotion->vy[i] != 0.0)
+						{
+							anyNonZeroSplat = true;
+							break;
+						}
+					}
+					if (anyNonZeroSplat)
+					{
+						for (int y = ar.y0; y < ar.y1; ++y)
+						{
+							const int mcy = (std::max)(0, (std::min)(ch - 1, y / cellPx));
+							for (int x = ar.x0; x < ar.x1; ++x)
+							{
+								const int mcx = (std::max)(0, (std::min)(cw - 1, x / cellPx));
+								const size_t cIdx = static_cast<size_t>(mcy) * cw + mcx;
+								const size_t pIdx = static_cast<size_t>(y) * w_ + x;
+								if (splatMotion->valid[cIdx] == 0u)
+								{
+									anchorCleanYValid_[pIdx] = 0u;
+									continue;
+								}
+								const double vx = splatMotion->vx[cIdx];
+								const double vy = splatMotion->vy[cIdx];
+								if (!std::isfinite(vx) || !std::isfinite(vy))
+								{
+									anyNonFinite = true;
+									anchorCleanYValid_[pIdx] = 0u;
+									continue;
+								}
+								if (vx == 0.0 && vy == 0.0)
+									continue;
+								const double sxLocal = static_cast<double>(x - ar.x0) + vx;
+								const double syLocal = static_cast<double>(y - ar.y0) + vy;
+								double yVal = 0.0;
+								bool borderBilin = false;
+								if (ChromaDetail::SampleSitedActive(yView, sxLocal, syLocal, yVal, borderBilin, /*allowEdgeClampOutside=*/false))
+								{
+									anchorCleanY_.at(x, y) = yVal;
+									if (borderBilin)
+										anyBorderBilinear = true;
+								}
+								else
+								{
+									anchorCleanY_.at(x, y) = ChromaDetail::SampleBilinearClampedLocal(yView, sxLocal, syLocal);
+									anchorCleanYValid_[pIdx] = 0u;
+								}
+							}
+						}
+					}
+				}
+			}
+
 			if (anyNonFinite && standIns != nullptr)
 				standIns->Engage(StandInKind::NonFiniteClosure, "TdV2ChromaAnchorCanvas non-finite sample");
 			if (anyBorderBilinear && standIns != nullptr)
 				standIns->Engage(StandInKind::BorderBilinearFallback, "TdV2ChromaAnchorCanvas CfL luma border");
 
-			if (splattedSamples > 0)
+			// Fit per-cell OLS CfL (aCb, bCb, aCr, bCr) with derived uniform 1-LSB quantization variance ridge (Rule 1).
+			if (fitCflThisAnchor)
 			{
-				hasData_ = true;
-				++accumulatedFrames_;
-			}
-
-			// Store first valid anchor clean luma as the reference-aligned P_Y source for H5 carried CfL.
-			// (If subsequent near-I anchor frames arrive, retain the origin-aligned clean luma matching canvas coords.)
-			if (anchorYCleanFinite && anchorCleanY_.Empty())
-				anchorCleanY_ = *anchorCleanY;
-
-			// Refit per-cell OLS CfL (aCb, bCb, aCr, bCr) with derived half-LSB variance ridge floor (Rule 1).
-			if (anchorYCleanFinite)
-			{
-				const double depthScale = DepthScale(sourceBits);
-				// Exact half-LSB quantization variance: (0.5 * depthScale)^2 = (depthScale * depthScale) / 4.0.
-				const double halfLsbVar = (depthScale * depthScale) / 4.0;
-				const double ridgeFloor = (std::max)(halfLsbVar, kEngineNumFloor);
+				// Exact uniform 1-LSB quantization variance in native integer code units:
+				// Var(Uniform(-delta/2, +delta/2)) = delta^2 / 12.0 with delta = kDefaultStepPriorLsb = 1.0.
+				const double lsbQuantVar = (kDefaultStepPriorLsb * kDefaultStepPriorLsb) / 12.0;
+				const double ridgeFloor = (std::max)(lsbQuantVar, kEngineNumFloor);
 				bool anyValidCfl = false;
 				for (size_t i = 0; i < numCells; ++i)
 				{
@@ -968,29 +1117,48 @@ namespace TdV2
 		}
 
 		// Materialize normalized hole-free 4:4:4 Cb/Cr planes strictly inside active_.
-		// Populated pixels keep exact (sum / weight); any unpopulated gap pixels (e.g., before shifted
-		// sub-pixel frames fill odd 4:2:0 columns) are smoothly interpolated from populated neighbors so
-		// bicubic sampling never sees 0.0-holes while accumulated sub-pixel sites stay exact.
-		bool MaterializeCanvas(TdV2Plane& outCb, TdV2Plane& outCr) const
+		// Direct observations require weight >= kMinCanvasFootprintWeight (1/16, derived from 4x4 bicubic support).
+		// Unpopulated gaps are smoothly interpolated so bicubic sampling never rings on 0.0 holes, while:
+		//   - Any gap-fill increments *outGapFilled and visibly engages StandInKind::ChromaCanvasGapFilled (Rule 4 / H4).
+		//   - Pixels are marked trusted (outTrusted == 1) ONLY when directly supported (weight >= kMinCanvasFootprintWeight)
+		//     OR gap-filled across a span <= subsampling factor (<= maxValidGapX / <= maxValidGapY, e.g. <= 2 px for 4:2:0).
+		//     Any wider gap stays outTrusted == 0 so invented gap-fill is never fused as a real observation!
+		bool MaterializeCanvas(
+			TdV2Plane& outCb,
+			TdV2Plane& outCr,
+			uint64_t* outGapFilled = nullptr,
+			StandInRegistry* standIns = nullptr,
+			std::vector<uint8_t>* outTrusted = nullptr,
+			int maxValidGapX = 0,
+			int maxValidGapY = 0) const
 		{
 			if (!hasData_ || w_ <= 0 || h_ <= 0 || active_.Empty())
 				return false;
 			outCb = TdV2Plane(w_, h_, 0.0);
 			outCr = TdV2Plane(w_, h_, 0.0);
-			std::vector<uint8_t> populated(static_cast<size_t>(w_) * static_cast<size_t>(h_), 0u);
+			const size_t totalPx = static_cast<size_t>(w_) * static_cast<size_t>(h_);
+			std::vector<uint8_t> populated(totalPx, 0u);
+			std::vector<uint8_t> trusted(totalPx, 0u);
 
+			const int effMaxGapX = maxValidGapX > 0 ? maxValidGapX : codedSubX_;
+			const int effMaxGapY = maxValidGapY > 0 ? maxValidGapY : codedSubY_;
+
+			size_t directCount = 0;
 			size_t gapCount = 0;
 			for (int y = active_.y0; y < active_.y1; ++y)
 			{
 				for (int x = active_.x0; x < active_.x1; ++x)
 				{
 					const double wt = weight_.at(x, y);
-					if (wt > kEngineNumFloor)
+					if (wt >= kMinCanvasFootprintWeight)
 					{
 						const double invW = 1.0 / wt;
 						outCb.at(x, y) = sumCb_.at(x, y) * invW;
 						outCr.at(x, y) = sumCr_.at(x, y) * invW;
-						populated[static_cast<size_t>(y) * w_ + x] = 1u;
+						const size_t idx = static_cast<size_t>(y) * w_ + x;
+						populated[idx] = 1u;
+						trusted[idx] = 1u;
+						++directCount;
 					}
 					else
 					{
@@ -999,10 +1167,19 @@ namespace TdV2
 				}
 			}
 
-			if (gapCount == 0)
-				return true;
+			if (directCount == 0)
+				return false;
 
-			// Pass 1: Horizontal linear gap-fill along each active row between nearest populated columns.
+			if (gapCount == 0)
+			{
+				if (outTrusted != nullptr)
+					*outTrusted = std::move(trusted);
+				return true;
+			}
+
+			uint64_t filledPixels = 0;
+
+			// Pass 1: Horizontal linear gap-fill along each active row between nearest directly populated columns.
 			for (int y = active_.y0; y < active_.y1; ++y)
 			{
 				int lastPop = -1;
@@ -1012,15 +1189,22 @@ namespace TdV2
 						continue;
 					if (lastPop < 0)
 					{
+						const int edgeGap = x - active_.x0;
+						const uint8_t edgeTrust = (edgeGap <= effMaxGapX) ? 1u : 0u;
 						for (int gx = active_.x0; gx < x; ++gx)
 						{
 							outCb.at(gx, y) = outCb.at(x, y);
 							outCr.at(gx, y) = outCr.at(x, y);
-							populated[static_cast<size_t>(y) * w_ + gx] = 1u;
+							const size_t gIdx = static_cast<size_t>(y) * w_ + gx;
+							populated[gIdx] = 1u;
+							trusted[gIdx] = edgeTrust;
+							++filledPixels;
 						}
 					}
 					else if (x > lastPop + 1)
 					{
+						const int gapLen = x - lastPop - 1;
+						const uint8_t gapTrust = (gapLen <= effMaxGapX) ? 1u : 0u;
 						const double span = static_cast<double>(x - lastPop);
 						const double cb0 = outCb.at(lastPop, y), cb1 = outCb.at(x, y);
 						const double cr0 = outCr.at(lastPop, y), cr1 = outCr.at(x, y);
@@ -1029,23 +1213,32 @@ namespace TdV2
 							const double t = static_cast<double>(gx - lastPop) / span;
 							outCb.at(gx, y) = RampMath::Mix(cb0, cb1, t);
 							outCr.at(gx, y) = RampMath::Mix(cr0, cr1, t);
-							populated[static_cast<size_t>(y) * w_ + gx] = 1u;
+							const size_t gIdx = static_cast<size_t>(y) * w_ + gx;
+							populated[gIdx] = 1u;
+							trusted[gIdx] = gapTrust;
+							++filledPixels;
 						}
 					}
 					lastPop = x;
 				}
-				if (lastPop >= 0)
+				if (lastPop >= 0 && lastPop + 1 < active_.x1)
 				{
+					const int edgeGap = (active_.x1 - 1) - lastPop;
+					const uint8_t edgeTrust = (edgeGap <= effMaxGapX) ? 1u : 0u;
 					for (int gx = lastPop + 1; gx < active_.x1; ++gx)
 					{
 						outCb.at(gx, y) = outCb.at(lastPop, y);
 						outCr.at(gx, y) = outCr.at(lastPop, y);
-						populated[static_cast<size_t>(y) * w_ + gx] = 1u;
+						const size_t gIdx = static_cast<size_t>(y) * w_ + gx;
+						populated[gIdx] = 1u;
+						trusted[gIdx] = edgeTrust;
+						++filledPixels;
 					}
 				}
 			}
 
 			// Pass 2: Vertical linear gap-fill along each active column for any empty rows (e.g. odd rows on 1-frame Type2 4:2:0).
+			// Vertical fills inherit trust ONLY when both vertical endpoints are trusted AND gapLen <= effMaxGapY.
 			for (int x = active_.x0; x < active_.x1; ++x)
 			{
 				int lastPop = -1;
@@ -1055,15 +1248,25 @@ namespace TdV2
 						continue;
 					if (lastPop < 0)
 					{
+						const int edgeGap = y - active_.y0;
+						const uint8_t endTrust = trusted[static_cast<size_t>(y) * w_ + x];
+						const uint8_t edgeTrust = (edgeGap <= effMaxGapY && endTrust != 0u) ? 1u : 0u;
 						for (int gy = active_.y0; gy < y; ++gy)
 						{
 							outCb.at(x, gy) = outCb.at(x, y);
 							outCr.at(x, gy) = outCr.at(x, y);
-							populated[static_cast<size_t>(gy) * w_ + x] = 1u;
+							const size_t gIdx = static_cast<size_t>(gy) * w_ + x;
+							populated[gIdx] = 1u;
+							trusted[gIdx] = edgeTrust;
+							++filledPixels;
 						}
 					}
 					else if (y > lastPop + 1)
 					{
+						const int gapLen = y - lastPop - 1;
+						const uint8_t t0 = trusted[static_cast<size_t>(lastPop) * w_ + x];
+						const uint8_t t1 = trusted[static_cast<size_t>(y) * w_ + x];
+						const uint8_t gapTrust = (gapLen <= effMaxGapY && t0 != 0u && t1 != 0u) ? 1u : 0u;
 						const double span = static_cast<double>(y - lastPop);
 						const double cb0 = outCb.at(x, lastPop), cb1 = outCb.at(x, y);
 						const double cr0 = outCr.at(x, lastPop), cr1 = outCr.at(x, y);
@@ -1072,26 +1275,47 @@ namespace TdV2
 							const double t = static_cast<double>(gy - lastPop) / span;
 							outCb.at(x, gy) = RampMath::Mix(cb0, cb1, t);
 							outCr.at(x, gy) = RampMath::Mix(cr0, cr1, t);
-							populated[static_cast<size_t>(gy) * w_ + x] = 1u;
+							const size_t gIdx = static_cast<size_t>(gy) * w_ + x;
+							populated[gIdx] = 1u;
+							trusted[gIdx] = gapTrust;
+							++filledPixels;
 						}
 					}
 					lastPop = y;
 				}
-				if (lastPop >= 0)
+				if (lastPop >= 0 && lastPop + 1 < active_.y1)
 				{
+					const int edgeGap = (active_.y1 - 1) - lastPop;
+					const uint8_t endTrust = trusted[static_cast<size_t>(lastPop) * w_ + x];
+					const uint8_t edgeTrust = (edgeGap <= effMaxGapY && endTrust != 0u) ? 1u : 0u;
 					for (int gy = lastPop + 1; gy < active_.y1; ++gy)
 					{
 						outCb.at(x, gy) = outCb.at(x, lastPop);
 						outCr.at(x, gy) = outCr.at(x, lastPop);
-						populated[static_cast<size_t>(gy) * w_ + x] = 1u;
+						const size_t gIdx = static_cast<size_t>(gy) * w_ + x;
+						populated[gIdx] = 1u;
+						trusted[gIdx] = edgeTrust;
+						++filledPixels;
 					}
 				}
 			}
+
+			if (filledPixels > 0)
+			{
+				if (outGapFilled != nullptr)
+					*outGapFilled += filledPixels;
+				if (standIns != nullptr)
+					standIns->Engage(StandInKind::ChromaCanvasGapFilled);
+			}
+			if (outTrusted != nullptr)
+				*outTrusted = std::move(trusted);
 			return true;
 		}
 
 		// Sample the accumulated 4:4:4 canvas at coded-grid coordinates mapped to (x_luma(cx) + vx, y_luma(cy) + vy)
 		// strictly inside `lumaActive`. `lumaMotion` is the Current -> Anchor luma motion field (null => Still 0,0).
+		// Invalid-motion, non-finite, OOB, and untrusted wide-gap pixels keep fallbackCodedCb/Cr (H3: zero 0.0 holes)
+		// with outValid == 0.
 		bool SampleAtCodedGrid(
 			ChromaSubsampling codedSub,
 			const SitingSpec& siting,
@@ -1101,13 +1325,12 @@ namespace TdV2
 			TdV2Plane& outCb,
 			TdV2Plane& outCr,
 			std::vector<uint8_t>& outValid,
-			StandInRegistry* standIns = nullptr) const
+			StandInRegistry* standIns = nullptr,
+			const TdV2Plane* fallbackCodedCb = nullptr,
+			const TdV2Plane* fallbackCodedCr = nullptr,
+			uint64_t* outGapFilled = nullptr) const
 		{
 			if (!hasData_ || w_ <= 0 || h_ <= 0 || cellPx <= 0)
-				return false;
-
-			TdV2Plane canvasCb, canvasCr;
-			if (!MaterializeCanvas(canvasCb, canvasCr))
 				return false;
 
 			const ActiveRect ar = lumaActive.Empty() ? ActiveRect::Full(w_, h_) : lumaActive.ClampedTo(w_, h_);
@@ -1117,8 +1340,16 @@ namespace TdV2
 			const int cH = ChromaDetail::SubsampledDim(h_, cSubY);
 			const ActiveRect cActive = ChromaDetail::ToSubsampledActiveRect(ar, w_, h_, cSubX, cSubY, cW, cH);
 
-			outCb = TdV2Plane(cW, cH, 0.0);
-			outCr = TdV2Plane(cW, cH, 0.0);
+			TdV2Plane canvasCb, canvasCr;
+			std::vector<uint8_t> canvasTrusted;
+			if (!MaterializeCanvas(canvasCb, canvasCr, outGapFilled, standIns, &canvasTrusted, cSubX, cSubY))
+				return false;
+
+			const bool hasFallback = (fallbackCodedCb != nullptr && fallbackCodedCr != nullptr &&
+			                          fallbackCodedCb->w == cW && fallbackCodedCb->h == cH &&
+			                          fallbackCodedCr->w == cW && fallbackCodedCr->h == cH);
+			outCb = hasFallback ? *fallbackCodedCb : TdV2Plane(cW, cH, 0.0);
+			outCr = hasFallback ? *fallbackCodedCr : TdV2Plane(cW, cH, 0.0);
 			outValid.assign(static_cast<size_t>(cW) * static_cast<size_t>(cH), 0u);
 			if (ar.Empty() || cActive.Empty())
 				return false;
@@ -1134,6 +1365,46 @@ namespace TdV2
 			bool anyBorder = false;
 			bool anyNonFinite = false;
 
+			auto fillHole = [&](int cx, int cy, double sxLocal, double syLocal)
+			{
+				if (hasFallback)
+				{
+					const double fCb = fallbackCodedCb->at(cx, cy);
+					const double fCr = fallbackCodedCr->at(cx, cy);
+					if (std::isfinite(fCb) && std::isfinite(fCr))
+					{
+						outCb.at(cx, cy) = fCb;
+						outCr.at(cx, cy) = fCr;
+						return;
+					}
+				}
+				outCb.at(cx, cy) = ChromaDetail::SampleBilinearClampedLocal(cbView, sxLocal, syLocal);
+				outCr.at(cx, cy) = ChromaDetail::SampleBilinearClampedLocal(crView, sxLocal, syLocal);
+			};
+
+			auto footprintTrusted = [&](double sxLocal, double syLocal) -> bool
+			{
+				const double cxClamped = (std::max)(0.0, (std::min)(static_cast<double>(ar.Width() - 1), sxLocal));
+				const double cyClamped = (std::max)(0.0, (std::min)(static_cast<double>(ar.Height() - 1), syLocal));
+				const int ix0 = ar.x0 + static_cast<int>(std::floor(cxClamped));
+				const int iy0 = ar.y0 + static_cast<int>(std::floor(cyClamped));
+				const int ix1 = (std::min)(ar.x1 - 1, ix0 + 1);
+				const int iy1 = (std::min)(ar.y1 - 1, iy0 + 1);
+				const double fx = cxClamped - std::floor(cxClamped);
+				const double fy = cyClamped - std::floor(cyClamped);
+				const int xEnd = (fx > kEngineNumFloor) ? ix1 : ix0;
+				const int yEnd = (fy > kEngineNumFloor) ? iy1 : iy0;
+				for (int py = iy0; py <= yEnd; ++py)
+				{
+					for (int px = ix0; px <= xEnd; ++px)
+					{
+						if (canvasTrusted[static_cast<size_t>(py) * w_ + px] == 0u)
+							return false;
+					}
+				}
+				return true;
+			};
+
 			for (int cy = cActive.y0; cy < cActive.y1; ++cy)
 			{
 				const double ly = siting.CodedToLumaY(static_cast<double>(cy), cSubY);
@@ -1143,17 +1414,23 @@ namespace TdV2
 					const double lx = siting.CodedToLumaX(static_cast<double>(cx), cSubX);
 					const int mcx = (std::max)(0, (std::min)(cw - 1, static_cast<int>(std::floor(lx)) / cellPx));
 					const size_t cIdx = static_cast<size_t>(mcy) * cw + mcx;
+					const double sxBase = (lx - originOffX_) - static_cast<double>(ar.x0);
+					const double syBase = (ly - originOffY_) - static_cast<double>(ar.y0);
 
 					double vx = 0.0, vy = 0.0;
 					if (useMotion)
 					{
 						if (lumaMotion->valid[cIdx] == 0u)
+						{
+							fillHole(cx, cy, sxBase, syBase);
 							continue;
+						}
 						vx = lumaMotion->vx[cIdx];
 						vy = lumaMotion->vy[cIdx];
 						if (!std::isfinite(vx) || !std::isfinite(vy))
 						{
 							anyNonFinite = true;
+							fillHole(cx, cy, sxBase, syBase);
 							continue;
 						}
 					}
@@ -1163,7 +1440,8 @@ namespace TdV2
 					double cbVal = 0.0, crVal = 0.0;
 					bool bCb = false, bCr = false;
 					if (ChromaDetail::SampleSitedActive(cbView, sxLocal, syLocal, cbVal, bCb, /*allowEdgeClampOutside=*/false) &&
-					    ChromaDetail::SampleSitedActive(crView, sxLocal, syLocal, crVal, bCr, /*allowEdgeClampOutside=*/false))
+					    ChromaDetail::SampleSitedActive(crView, sxLocal, syLocal, crVal, bCr, /*allowEdgeClampOutside=*/false) &&
+					    footprintTrusted(sxLocal, syLocal))
 					{
 						outCb.at(cx, cy) = cbVal;
 						outCr.at(cx, cy) = crVal;
@@ -1173,9 +1451,8 @@ namespace TdV2
 					}
 					else
 					{
-						// Fill edge-clamped sample to prevent 0.0-hole ringing while keeping outValid == 0.
-						outCb.at(cx, cy) = ChromaDetail::SampleBilinearClampedLocal(cbView, sxLocal, syLocal);
-						outCr.at(cx, cy) = ChromaDetail::SampleBilinearClampedLocal(crView, sxLocal, syLocal);
+						// Fill with codedClean (or clamped canvas sample) to prevent 0.0-hole ringing while keeping outValid == 0.
+						fillHole(cx, cy, sxLocal, syLocal);
 					}
 				}
 			}
@@ -1189,6 +1466,8 @@ namespace TdV2
 
 		// Carried CfL (H5): applies anchor-carried (a, b) STRICTLY to OUR reference-aligned prediction luma
 		// P_Y = Warp(anchorCleanY) at (x_luma(cx) + vx, y_luma(cy) + vy). NEVER reads current frame's luma!
+		// Invalid-motion, non-finite, invalid-CfL, and OOB pixels keep fallbackCodedCb/Cr (H3: zero 0.0 holes)
+		// with outValid == 0.
 		bool PredictCarriedCflAtCodedGrid(
 			ChromaSubsampling codedSub,
 			const SitingSpec& siting,
@@ -1198,7 +1477,9 @@ namespace TdV2
 			TdV2Plane& outCb,
 			TdV2Plane& outCr,
 			std::vector<uint8_t>& outValid,
-			StandInRegistry* standIns = nullptr) const
+			StandInRegistry* standIns = nullptr,
+			const TdV2Plane* fallbackCodedCb = nullptr,
+			const TdV2Plane* fallbackCodedCr = nullptr) const
 		{
 			if (!hasCfl_ || anchorCleanY_.Empty() || w_ <= 0 || h_ <= 0 || cellPx <= 0)
 				return false;
@@ -1210,8 +1491,11 @@ namespace TdV2
 			const int cH = ChromaDetail::SubsampledDim(h_, cSubY);
 			const ActiveRect cActive = ChromaDetail::ToSubsampledActiveRect(ar, w_, h_, cSubX, cSubY, cW, cH);
 
-			outCb = TdV2Plane(cW, cH, 0.0);
-			outCr = TdV2Plane(cW, cH, 0.0);
+			const bool hasFallback = (fallbackCodedCb != nullptr && fallbackCodedCr != nullptr &&
+			                          fallbackCodedCb->w == cW && fallbackCodedCb->h == cH &&
+			                          fallbackCodedCr->w == cW && fallbackCodedCr->h == cH);
+			outCb = hasFallback ? *fallbackCodedCb : TdV2Plane(cW, cH, 0.0);
+			outCr = hasFallback ? *fallbackCodedCr : TdV2Plane(cW, cH, 0.0);
 			outValid.assign(static_cast<size_t>(cW) * static_cast<size_t>(cH), 0u);
 			if (ar.Empty() || cActive.Empty())
 				return false;
@@ -1223,8 +1507,61 @@ namespace TdV2
 				standIns->Engage(StandInKind::MotionFieldStandIn, "TdV2ChromaAnchorCanvas malformed CfL motion");
 
 			ActiveSubPlaneView yView{ &anchorCleanY_, ar.x0, ar.y0, ar.Width(), ar.Height() };
+			const bool hasYValidMask = (anchorCleanYValid_.size() == static_cast<size_t>(w_) * static_cast<size_t>(h_));
 			bool anyBorder = false;
 			bool anyNonFinite = false;
+
+			auto anchorYFootprintValid = [&](double sxLocal, double syLocal) -> bool
+			{
+				if (!hasYValidMask)
+					return true;
+				const double cxClamped = (std::max)(0.0, (std::min)(static_cast<double>(ar.Width() - 1), sxLocal));
+				const double cyClamped = (std::max)(0.0, (std::min)(static_cast<double>(ar.Height() - 1), syLocal));
+				const int ix0 = ar.x0 + static_cast<int>(std::floor(cxClamped));
+				const int iy0 = ar.y0 + static_cast<int>(std::floor(cyClamped));
+				const int ix1 = (std::min)(ar.x1 - 1, ix0 + 1);
+				const int iy1 = (std::min)(ar.y1 - 1, iy0 + 1);
+				const double fx = cxClamped - std::floor(cxClamped);
+				const double fy = cyClamped - std::floor(cyClamped);
+				const int xEnd = (fx > kEngineNumFloor) ? ix1 : ix0;
+				const int yEnd = (fy > kEngineNumFloor) ? iy1 : iy0;
+				for (int py = iy0; py <= yEnd; ++py)
+				{
+					for (int px = ix0; px <= xEnd; ++px)
+					{
+						if (anchorCleanYValid_[static_cast<size_t>(py) * w_ + px] == 0u)
+							return false;
+					}
+				}
+				return true;
+			};
+
+			auto fillCflHole = [&](int cx, int cy, double sxLocal, double syLocal, const AnchorCflCell* optCfl)
+			{
+				if (hasFallback)
+				{
+					const double fCb = fallbackCodedCb->at(cx, cy);
+					const double fCr = fallbackCodedCr->at(cx, cy);
+					if (std::isfinite(fCb) && std::isfinite(fCr))
+					{
+						outCb.at(cx, cy) = fCb;
+						outCr.at(cx, cy) = fCr;
+						return;
+					}
+				}
+				if (optCfl != nullptr && optCfl->valid)
+				{
+					const double edgePy = ChromaDetail::SampleBilinearClampedLocal(yView, sxLocal, syLocal);
+					const double cbF = optCfl->aCb * edgePy + optCfl->bCb;
+					const double crF = optCfl->aCr * edgePy + optCfl->bCr;
+					if (std::isfinite(cbF) && std::isfinite(crF))
+					{
+						outCb.at(cx, cy) = cbF;
+						outCr.at(cx, cy) = crF;
+						return;
+					}
+				}
+			};
 
 			for (int cy = cActive.y0; cy < cActive.y1; ++cy)
 			{
@@ -1235,17 +1572,27 @@ namespace TdV2
 					const double lx = siting.CodedToLumaX(static_cast<double>(cx), cSubX);
 					const int mcx = (std::max)(0, (std::min)(cw - 1, static_cast<int>(std::floor(lx)) / cellPx));
 					const size_t cIdx = static_cast<size_t>(mcy) * cw + mcx;
+					const double sxBase = lx - static_cast<double>(ar.x0);
+					const double syBase = ly - static_cast<double>(ar.y0);
 
 					double vx = 0.0, vy = 0.0;
 					if (useMotion)
 					{
 						if (lumaMotion->valid[cIdx] == 0u)
+						{
+							const int acx0 = (std::max)(0, (std::min)(cellsW_ - 1, static_cast<int>(std::floor(lx - originOffX_)) / cellPx_));
+							const int acy0 = (std::max)(0, (std::min)(cellsH_ - 1, static_cast<int>(std::floor(ly - originOffY_)) / cellPx_));
+							fillCflHole(cx, cy, sxBase, syBase, &cflCells_[static_cast<size_t>(acy0) * cellsW_ + acx0]);
 							continue;
+						}
 						vx = lumaMotion->vx[cIdx];
 						vy = lumaMotion->vy[cIdx];
 						if (!std::isfinite(vx) || !std::isfinite(vy))
 						{
 							anyNonFinite = true;
+							const int acx0 = (std::max)(0, (std::min)(cellsW_ - 1, static_cast<int>(std::floor(lx - originOffX_)) / cellPx_));
+							const int acy0 = (std::max)(0, (std::min)(cellsH_ - 1, static_cast<int>(std::floor(ly - originOffY_)) / cellPx_));
+							fillCflHole(cx, cy, sxBase, syBase, &cflCells_[static_cast<size_t>(acy0) * cellsW_ + acx0]);
 							continue;
 						}
 					}
@@ -1260,7 +1607,10 @@ namespace TdV2
 					const int acy = (std::max)(0, (std::min)(cellsH_ - 1, static_cast<int>(std::floor(ay - originOffY_)) / cellPx_));
 					const AnchorCflCell& cfl = cflCells_[static_cast<size_t>(acy) * cellsW_ + acx];
 					if (!cfl.valid)
+					{
+						fillCflHole(cx, cy, sxLocal, syLocal, nullptr);
 						continue;
+					}
 
 					// Allow exact <= 0.5 px siting margin on subsampled axes at active edges (clamped strictly inside ar,
 					// never crossing bar boundaries) so odd-dimension last coded chroma row/col is preserved.
@@ -1272,15 +1622,17 @@ namespace TdV2
 					double pyVal = 0.0;
 					bool borderBilin = false;
 					bool sampledOk = ChromaDetail::SampleSitedActive(yView, sxLocal, syLocal, pyVal, borderBilin, /*allowEdgeClampOutside=*/false);
+					double checkSx = sxLocal;
+					double checkSy = syLocal;
 					if (!sampledOk &&
 					    sxLocal >= -marginX && sxLocal <= maxLocalX + marginX &&
 					    syLocal >= -marginY && syLocal <= maxLocalY + marginY)
 					{
-						const double sxClamped = (std::max)(0.0, (std::min)(maxLocalX, sxLocal));
-						const double syClamped = (std::max)(0.0, (std::min)(maxLocalY, syLocal));
-						sampledOk = ChromaDetail::SampleSitedActive(yView, sxClamped, syClamped, pyVal, borderBilin, /*allowEdgeClampOutside=*/true);
+						checkSx = (std::max)(0.0, (std::min)(maxLocalX, sxLocal));
+						checkSy = (std::max)(0.0, (std::min)(maxLocalY, syLocal));
+						sampledOk = ChromaDetail::SampleSitedActive(yView, checkSx, checkSy, pyVal, borderBilin, /*allowEdgeClampOutside=*/true);
 					}
-					if (sampledOk)
+					if (sampledOk && anchorYFootprintValid(checkSx, checkSy))
 					{
 						const double predCb = cfl.aCb * pyVal + cfl.bCb;
 						const double predCr = cfl.aCr * pyVal + cfl.bCr;
@@ -1295,13 +1647,12 @@ namespace TdV2
 						else
 						{
 							anyNonFinite = true;
+							fillCflHole(cx, cy, sxLocal, syLocal, &cfl);
 						}
 					}
 					else
 					{
-						const double edgePy = ChromaDetail::SampleBilinearClampedLocal(yView, sxLocal, syLocal);
-						outCb.at(cx, cy) = cfl.aCb * edgePy + cfl.bCb;
-						outCr.at(cx, cy) = cfl.aCr * edgePy + cfl.bCr;
+						fillCflHole(cx, cy, sxLocal, syLocal, &cfl);
 					}
 				}
 			}
@@ -1330,6 +1681,8 @@ namespace TdV2
 		int cellsW_ = 0;
 		int cellsH_ = 0;
 		int cellPx_ = kCanonicalBlockPx;
+		int codedSubX_ = 2;
+		int codedSubY_ = 2;
 		ActiveRect active_{};
 		double originOffX_ = 0.0;
 		double originOffY_ = 0.0;
@@ -1337,9 +1690,12 @@ namespace TdV2
 		TdV2Plane sumCr_;
 		TdV2Plane weight_;
 		TdV2Plane anchorCleanY_;
+		std::vector<uint8_t> anchorCleanYValid_;
 		std::vector<CflAccum> cflStats_;
 		std::vector<AnchorCflCell> cflCells_;
 		size_t accumulatedFrames_ = 0;
+		uint64_t lastAccumSeq_ = 0;
+		bool hasLastAccumSeq_ = false;
 		bool hasData_ = false;
 		bool hasCfl_ = false;
 	};
@@ -1386,6 +1742,7 @@ namespace TdV2
 
 		// Anchor frame ingestion into 4:4:4 canvas + carried CfL fitting (grain-free only!).
 		bool isAnchorFrame = false;
+		bool resetAnchorCfl = false;                  // Explicitly refit per-anchor CfL (a, b) & P_Y on new anchor
 		TdV2Plane anchorCleanY;                       // Grain-free luma of anchor frame for CfL fitting & H5 P_Y
 		CellMotionField anchorSplatMotion;            // Frame displacement from canvas origin (empty => 0)
 		bool hasAnchorSplatMotion = false;
@@ -1397,6 +1754,11 @@ namespace TdV2
 		bool hasAnchorReadMotion = false;
 		bool enableAnchorCanvasRef = true;
 		bool enableCarriedCfl = true;
+
+		// Optional explicit CodecModel prediction P_B for transform-identified STRICT/CELL POCS (coded or delivered grid).
+		// When null, refs[0].clean is used as a visible stand-in (StandInKind::CodecModelPbStandIn, plan s1.2 L95).
+		const TdV2Plane* codecModelPbCb = nullptr;
+		const TdV2Plane* codecModelPbCr = nullptr;
 
 		// Coding step prior (P16): when false, derives 1-LSB default with visible StandInKind::StepPriorDefault.
 		bool hasStepPrior = false;
@@ -1432,8 +1794,17 @@ namespace TdV2
 		size_t nonFiniteCells = 0;
 		size_t singularCells = 0;
 		size_t singleRefA2Cells = 0;
+		size_t a2InvalidCells = 0;
 		size_t motionStandInRefs = 0;
 		size_t borderBilinearPixels = 0;
+		uint64_t canvasGapFilledPixels = 0;
+		uint64_t codecModelPbStandInCells = 0;
+		uint64_t grainPriorOobCells = 0;
+		uint64_t excludedZeroEnergyBlocks = 0;
+		double estimatedBlindNlfCb = 0.0;
+		double estimatedBlindNlfCr = 0.0;
+		std::vector<uint8_t> cflFallbackMask;
+		std::vector<AnchorCflCell> singleFrameCflFallback;
 		bool coarseBandOnly = false;
 		bool anchorReset = false;
 		bool anchorCanvasUsed = false;
@@ -1625,17 +1996,54 @@ namespace TdV2
 				delivCr = in.receivedCr;
 			}
 
-			// Coding step prior (shared by both Identified and Unidentified branches).
+			// Coding step prior (1:1 parity with TdV2ReferenceEngine.h):
+			// - When hasStepPrior == false: true 1-LSB uniform output rounding (delta = 1.0 code, phi = 0.5, pi0 = 0),
+			//   visibly tagged via StandInKind::StepPriorDefault.
+			// - When hasStepPrior == true: validate finite positive stepDelta, deadZonePhi strictly in (0, 1),
+			//   and zeroCoeffFraction in [0, 1]; invalid A2 stats fail closed visibly (delta == 0, StandInKind::A2StatsInvalid).
 			double effStepDelta = in.estimatedStepDelta;
+			double effPhi = in.deadZonePhi;
 			double effZeroFrac = in.zeroCoeffFraction;
-			if (!in.hasStepPrior || !std::isfinite(effStepDelta) || effStepDelta <= 0.0 || !std::isfinite(effZeroFrac))
+			bool a2InputNonFinite = !std::isfinite(effPhi) || !std::isfinite(effZeroFrac);
+			if (!in.hasStepPrior)
 			{
-				effStepDelta = DepthScale(cfg_.sourceBits);
-				effZeroFrac = 0.0;
-				if (standIns != nullptr)
-					standIns->Engage(StandInKind::StepPriorDefault);
+				if (!a2InputNonFinite)
+				{
+					effStepDelta = kDefaultStepPriorLsb; // True 1-LSB quantization step in native integer code units (1.0)
+					effPhi = kUniformRoundingPhi;        // Unbiased uniform output rounding (phi = 0.5 -> V1 = 1/12)
+					effZeroFrac = 0.0;                   // Uniform rounding cell without invented pi0
+					if (standIns != nullptr)
+						standIns->Engage(StandInKind::StepPriorDefault);
+				}
+				else
+				{
+					effStepDelta = -1.0;
+				}
 			}
-			const RoundingCellStats a2Stats = ComputeRoundingCellStats(effStepDelta, in.deadZonePhi, effZeroFrac);
+			else
+			{
+				if (!std::isfinite(effStepDelta))
+					a2InputNonFinite = true;
+				if (a2InputNonFinite || effStepDelta <= 0.0 || effPhi <= 0.0 || effPhi >= 1.0 ||
+				    effZeroFrac < 0.0 || effZeroFrac > 1.0)
+				{
+					effStepDelta = -1.0;
+				}
+			}
+			const RoundingCellStats a2Stats = ComputeRoundingCellStats(effStepDelta, effPhi, effZeroFrac);
+			if (!a2Stats.valid)
+			{
+				if (standIns != nullptr)
+				{
+					if (a2InputNonFinite)
+						standIns->Engage(StandInKind::NonFiniteClosure, "TdV2ChromaEngine non-finite A2 step/phi stats");
+					standIns->Engage(StandInKind::A2StatsInvalid, "invalid stepDelta/deadZonePhi/zeroFrac; delta closed to 0");
+				}
+				res.a2InvalidCells = numCells;
+				if (a2InputNonFinite)
+					res.nonFiniteCells = numCells;
+				return res;
+			}
 
 			// =========================================================================
 			// Branch A: Unidentified coded grid -> Visible coarse-band-only chroma mode
@@ -1658,6 +2066,7 @@ namespace TdV2
 				TdV2Plane curCleanCr = delivCr;
 				TdV2Plane ownGrainCb(dW, dH, 0.0);
 				TdV2Plane ownGrainCr(dW, dH, 0.0);
+				bool splitActive = false;
 				if (in.hasCleanSplit && !in.cleanCb.Empty() && !in.cleanCr.Empty())
 				{
 					if (in.cleanCb.w != dW || in.cleanCb.h != dH || in.cleanCr.w != dW || in.cleanCr.h != dH)
@@ -1681,11 +2090,15 @@ namespace TdV2
 						ownGrainCb.v[i] = delivCb.v[i] - curCleanCb.v[i];
 						ownGrainCr.v[i] = delivCr.v[i] - curCleanCr.v[i];
 					}
+					splitActive = true;
 				}
 				else
 				{
 					if (standIns != nullptr)
-						standIns->Engage(StandInKind::P10gGrainSeparator, "chroma coarse: no upstream chroma split");
+						standIns->Engage(StandInKind::P10gGrainSeparator,
+							in.hasCleanSplit
+								? "chroma coarse: hasCleanSplit set with empty clean planes; treating as unsplit"
+								: "chroma coarse: no upstream chroma split");
 				}
 
 				const double sigmaX = kUnidentifiedChromaSigmaLumaPx / static_cast<double>(dSubX);
@@ -1696,6 +2109,8 @@ namespace TdV2
 
 				struct CoarseRef
 				{
+					TdV2Plane warpedCb;
+					TdV2Plane warpedCr;
 					TdV2Plane coarseCb;
 					TdV2Plane coarseCr;
 					std::vector<uint8_t> validPx;
@@ -1704,6 +2119,27 @@ namespace TdV2
 				};
 				std::vector<CoarseRef> cRefs;
 				cRefs.reserve(2);
+				std::vector<uint8_t> nonFiniteCellFlag(numCells, 0u);
+				std::vector<uint8_t> singleRefA2CellFlag(numCells, 0u);
+				std::vector<uint8_t> singularCellFlag(numCells, 0u);
+
+				auto markNonFiniteRefCells = [&](const TdV2Plane& refP)
+				{
+					for (int y = delivActive.y0; y < delivActive.y1; ++y)
+					{
+						const double ly = in.siting.CodedToLumaY(static_cast<double>(y), dSubY);
+						const int cy = (std::max)(0, (std::min)(res.cellsH - 1, static_cast<int>(std::floor(ly)) / cellPx));
+						for (int x = delivActive.x0; x < delivActive.x1; ++x)
+						{
+							if (!std::isfinite(refP.at(x, y)))
+							{
+								const double lx = in.siting.CodedToLumaX(static_cast<double>(x), dSubX);
+								const int cx = (std::max)(0, (std::min)(res.cellsW - 1, static_cast<int>(std::floor(lx)) / cellPx));
+								nonFiniteCellFlag[static_cast<size_t>(cy) * res.cellsW + cx] = 1u;
+							}
+						}
+					}
+				};
 
 				auto tryAddCoarseRef = [&](const ChromaReferenceInput& rIn)
 				{
@@ -1712,17 +2148,19 @@ namespace TdV2
 					    rIn.cleanCr->w != dW || rIn.cleanCr->h != dH)
 						return;
 
-					CellMotionField fallbackMf;
 					const CellMotionField* useMf = rIn.lumaMotion;
 					if (useMf == nullptr)
 					{
+						// H9 (plan s1.2 L108): missing motion field MUST NEVER whole-frame blend as "Still".
 						++res.motionStandInRefs;
 						if (standIns != nullptr)
-							standIns->Engage(StandInKind::MotionFieldStandIn, "chroma coarse null motion; assuming Still");
-						fallbackMf = CellMotionField::Uniform(res.cellsW, res.cellsH, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
-						useMf = &fallbackMf;
+						{
+							standIns->Engage(StandInKind::MotionFieldStandIn, "chroma coarse null motion field; ref skipped per L4");
+							standIns->Engage(StandInKind::MissingMotionNoWholeBlend, "L4 missing motion field: chroma coarse ref skipped (no whole-frame Still blend)");
+						}
+						return;
 					}
-					else if (!useMf->IsWellFormed(res.cellsW, res.cellsH))
+					if (!useMf->IsWellFormed(res.cellsW, res.cellsH))
 					{
 						++res.motionStandInRefs;
 						if (standIns != nullptr)
@@ -1732,25 +2170,31 @@ namespace TdV2
 
 					CoarseRef cr;
 					cr.isExactCopy = rIn.isExactCopyOfCurrent;
-					TdV2Plane warpedCb, warpedCr;
 					std::vector<uint8_t> validCb, validCr;
 					const WarpDiagnostics dCb = ChromaDetail::WarpChromaPlaneWithLumaMotion(
 						*rIn.cleanCb, curCleanCb, delivActive, dSubX, dSubY, in.siting,
-						useMf->vx, useMf->vy, res.cellsW, res.cellsH, cellPx, warpedCb, validCb, standIns);
+						useMf->vx, useMf->vy, res.cellsW, res.cellsH, cellPx, cr.warpedCb, validCb, standIns, useMf);
 					const WarpDiagnostics dCr = ChromaDetail::WarpChromaPlaneWithLumaMotion(
 						*rIn.cleanCr, curCleanCr, delivActive, dSubX, dSubY, in.siting,
-						useMf->vx, useMf->vy, res.cellsW, res.cellsH, cellPx, warpedCr, validCr, standIns);
+						useMf->vx, useMf->vy, res.cellsW, res.cellsH, cellPx, cr.warpedCr, validCr, standIns, useMf);
 					res.borderBilinearPixels += dCb.borderBilinearPixels + dCr.borderBilinearPixels;
-					if (dCb.nonFinitePixels > 0 || dCr.nonFinitePixels > 0)
-						++res.nonFiniteCells;
+					if (dCb.nonFinitePixels > 0)
+						markNonFiniteRefCells(*rIn.cleanCb);
+					if (dCr.nonFinitePixels > 0)
+						markNonFiniteRefCells(*rIn.cleanCr);
 					cr.validPx.resize(validCb.size(), 0u);
 					for (size_t i = 0; i < validCb.size(); ++i)
 						cr.validPx[i] = (validCb[i] != 0u && validCr[i] != 0u) ? 1u : 0u;
 					double dummyGain = 1.0;
-					cr.coarseCb = ChromaDetail::BlurActiveAnisotropic(warpedCb, delivActive, sigmaX, sigmaY, dummyGain);
-					cr.coarseCr = ChromaDetail::BlurActiveAnisotropic(warpedCr, delivActive, sigmaX, sigmaY, dummyGain);
+					cr.coarseCb = ChromaDetail::BlurActiveAnisotropic(cr.warpedCb, delivActive, sigmaX, sigmaY, dummyGain);
+					cr.coarseCr = ChromaDetail::BlurActiveAnisotropic(cr.warpedCr, delivActive, sigmaX, sigmaY, dummyGain);
 					cr.motionGate = EvaluateCameraRelativeMotionGate(*useMf, standIns);
-					res.nonFiniteCells += cr.motionGate.nonFiniteCells;
+					if (cr.motionGate.nonFiniteCells > 0)
+					{
+						for (size_t ci = 0; ci < numCells && ci < cr.motionGate.nonFiniteCellMask.size(); ++ci)
+							if (cr.motionGate.nonFiniteCellMask[ci] != 0u)
+								nonFiniteCellFlag[ci] = 1u;
+					}
 					cRefs.push_back(std::move(cr));
 				};
 
@@ -1761,6 +2205,8 @@ namespace TdV2
 					return res;
 
 				auto fuseCoarseSinglePlane = [&](
+					const TdV2Plane& delivRec,
+					const TdV2Plane& curClean,
 					const TdV2Plane& curCoarse,
 					bool isCb,
 					const std::vector<double>& retainedGrainVar,
@@ -1783,6 +2229,7 @@ namespace TdV2
 						{
 							const size_t cIdx = static_cast<size_t>(cy) * res.cellsW + cx;
 							double cellGrainVar = 0.0;
+							bool hasCellGrainPrior = false;
 							if (!retainedGrainVar.empty())
 							{
 								const int gcx = MapCellToGrainGrid(cx, cellPx, grainCellPx);
@@ -1792,13 +2239,22 @@ namespace TdV2
 								{
 									const double gv = retainedGrainVar[gIdx];
 									if (std::isfinite(gv) && gv >= 0.0)
+									{
 										cellGrainVar = gv;
+										hasCellGrainPrior = true;
+									}
 									else
 									{
-										++res.nonFiniteCells;
+										nonFiniteCellFlag[cIdx] = 1u;
 										if (standIns != nullptr)
 											standIns->Engage(StandInKind::NonFiniteClosure, "chroma coarse non-finite retainedGrainVar");
 									}
+								}
+								else
+								{
+									++res.grainPriorOobCells;
+									if (standIns != nullptr)
+										standIns->Engage(StandInKind::GrainPriorOutOfRange, "chroma coarse retainedGrainVar index out of range");
 								}
 							}
 
@@ -1807,6 +2263,11 @@ namespace TdV2
 							const int py1 = (std::min)(delivActive.y1, ((cy + poolR + 1) * cellPx + dSubY - 1) / dSubY);
 							const int px0 = (std::max)(delivActive.x0, ((cx - poolR) * cellPx) / dSubX);
 							const int px1 = (std::min)(delivActive.x1, ((cx + poolR + 1) * cellPx + dSubX - 1) / dSubX);
+
+							double sumCurHi2 = 0.0;
+							double sumRefHi2[kMaxBlendRefs] = {};
+							double sumCrossHi[kMaxBlendRefs] = {};
+							size_t hiCount = 0;
 
 							for (int y = py0; y < py1; ++y)
 							{
@@ -1833,12 +2294,47 @@ namespace TdV2
 										diffs[k] = static_cast<float>(curV - refP.at(x, y));
 									}
 									if (allValid)
+									{
 										acc.AddSample(diffs);
+										if (!splitActive && !hasCellGrainPrior)
+										{
+											const double cHi = curClean.at(x, y) - curV;
+											sumCurHi2 += cHi * cHi;
+											for (int k = 0; k < K; ++k)
+											{
+												const TdV2Plane& rRaw = isCb ? cRefs[k].warpedCb : cRefs[k].warpedCr;
+												const TdV2Plane& rCoarse = isCb ? cRefs[k].coarseCb : cRefs[k].coarseCr;
+												const double rHi = rRaw.at(x, y) - rCoarse.at(x, y);
+												sumRefHi2[k] += rHi * rHi;
+												sumCrossHi[k] += cHi * rHi;
+											}
+											++hiCount;
+										}
+									}
 								}
 							}
 
 							if (acc.sampleCount == 0)
 								continue;
+
+							if (!splitActive && !hasCellGrainPrior && hiCount > 0)
+							{
+								const double invHi = 1.0 / static_cast<double>(hiCount);
+								const double meanCur = sumCurHi2 * invHi;
+								double sumICur = 0.0, sumIRef = 0.0;
+								for (int k = 0; k < K; ++k)
+								{
+									const double cross = sumCrossHi[k] * invHi;
+									const double ic = meanCur - cross;
+									const double ir = sumRefHi2[k] * invHi - cross;
+									sumICur += (ic > 0.0 ? ic : 0.0);
+									sumIRef += (ir > 0.0 ? ir : 0.0);
+								}
+								const double meanICur = sumICur / static_cast<double>(K);
+								const double meanIRef = sumIRef / static_cast<double>(K);
+								const double hiGain = (std::max)(kEngineNumFloor, 1.0 - coarseGain);
+								cellGrainVar = std::sqrt(meanICur * meanIRef) / hiGain;
+							}
 
 							double C[kMaxBlendRefs][kMaxBlendRefs] = {};
 							acc.SecondMoment(C);
@@ -1848,11 +2344,9 @@ namespace TdV2
 							double cVec[kMaxBlendRefs] = {};
 							for (int k = 0; k < K; ++k)
 							{
-								// Unit-sum low-pass DC transfer gain = (sum G_sigma)^2 = 1.0 (Rule 1):
-								// Spatially coherent low-frequency chroma banding / macroblock DC quantization passes
-								// through G(sigma) with DC gain 1.0, whereas spatially uncorrelated white grain passes
-								// with ||G(sigma)||_2^2 = coarseGain (used strictly in EstimateC_A1 below).
-								const double cA2 = EstimateC_A2(a2Stats, cRefs[k].isExactCopy);
+								// Unit-sum low-pass DC transfer gain = (sum G_sigma)^2 = 1.0 (Rule 1),
+								// capped to [0, C[k][k]] per Plan L81 (c_k <= E[(e_0 - e_k)^2] = C_kk).
+								const double cA2 = (std::min)(EstimateC_A2(a2Stats, cRefs[k].isExactCopy), C[k][k]);
 								double cA1 = cA2;
 								if (K >= 2)
 								{
@@ -1861,7 +2355,7 @@ namespace TdV2
 								}
 								else if (cfg_.estimator != VarianceEstimator::A2_RoundingCells)
 								{
-									++res.singleRefA2Cells;
+									singleRefA2CellFlag[cIdx] = 1u;
 									if (standIns != nullptr)
 										standIns->Engage(StandInKind::SingleRefA1ToA2Fallback);
 								}
@@ -1871,8 +2365,8 @@ namespace TdV2
 							}
 
 							const BlendSolveResult solved = SolveConvexWeights(C, cVec, K, kDefaultTraceRegScale, standIns);
-							if (solved.nonFiniteClosed) { ++res.nonFiniteCells; continue; }
-							if (solved.singular) { ++res.singularCells; continue; }
+							if (solved.nonFiniteClosed) { nonFiniteCellFlag[cIdx] = 1u; continue; }
+							if (solved.singular) { singularCellFlag[cIdx] = 1u; continue; }
 
 							for (int k = 0; k < K; ++k)
 								cellW[k][cIdx] = solved.weights[k] * cRefs[k].motionGate.gateL[cIdx];
@@ -1911,15 +2405,80 @@ namespace TdV2
 							outDelta.at(x, y) = (delta == 0.0) ? 0.0 : delta;
 						}
 					}
+
+					// H2: When !splitActive, ALWAYS evaluate Layer-4 TdGuardPort on every cell with target = inFineE.
+					if (!splitActive)
+					{
+						TdV2Plane candOut = delivRec;
+						for (int y = delivActive.y0; y < delivActive.y1; ++y)
+							for (int x = delivActive.x0; x < delivActive.x1; ++x)
+								candOut.at(x, y) = delivRec.at(x, y) + outDelta.at(x, y);
+						const ThreeBandPlanes inFullBands = DecomposeActiveBands(delivRec, delivActive, nullptr);
+						const ThreeBandPlanes outFullBands = DecomposeActiveBands(candOut, delivActive, nullptr);
+						for (int cy = 0; cy < res.cellsH; ++cy)
+						{
+							const int y0 = (std::max)(delivActive.y0, (cy * cellPx) / dSubY);
+							const int y1 = (std::min)(delivActive.y1, ((cy + 1) * cellPx + dSubY - 1) / dSubY);
+							if (y1 <= y0) continue;
+							for (int cx = 0; cx < res.cellsW; ++cx)
+							{
+								const int x0 = (std::max)(delivActive.x0, (cx * cellPx) / dSubX);
+								const int x1 = (std::min)(delivActive.x1, ((cx + 1) * cellPx + dSubX - 1) / dSubX);
+								if (x1 <= x0) continue;
+								double inFineE = 0.0, outFineE = 0.0;
+								size_t cnt = 0;
+								for (int y = y0; y < y1; ++y)
+								{
+									if ((std::min)(res.cellsH - 1, (y * dSubY) / cellPx) != cy)
+										continue;
+									for (int x = x0; x < x1; ++x)
+									{
+										if ((std::min)(res.cellsW - 1, (x * dSubX) / cellPx) != cx)
+											continue;
+										const double inf = inFullBands.H.at(x, y);
+										const double outf = outFullBands.H.at(x, y);
+										inFineE += inf * inf;
+										outFineE += outf * outf;
+										++cnt;
+									}
+								}
+								if (cnt == 0) continue;
+								const double invC = 1.0 / static_cast<double>(cnt);
+								const auto gDec = TdGuardPort::Evaluate(inFineE * invC, outFineE * invC, standIns);
+								if (gDec.violated && gDec.addBackFraction > 0.0)
+								{
+									++res.guardViolationCells;
+									for (int y = y0; y < y1; ++y)
+									{
+										if ((std::min)(res.cellsH - 1, (y * dSubY) / cellPx) != cy)
+											continue;
+										for (int x = x0; x < x1; ++x)
+										{
+											if ((std::min)(res.cellsW - 1, (x * dSubX) / cellPx) != cx)
+												continue;
+											outDelta.at(x, y) += gDec.addBackFraction * (inFullBands.H.at(x, y) - outFullBands.H.at(x, y));
+										}
+									}
+								}
+							}
+						}
+					}
 				};
 
-				fuseCoarseSinglePlane(curCoarseCb, true, in.retainedGrainVarCb, res.deliveredDeltaCb);
-				fuseCoarseSinglePlane(curCoarseCr, false, in.retainedGrainVarCr, res.deliveredDeltaCr);
+				fuseCoarseSinglePlane(delivCb, curCleanCb, curCoarseCb, true, in.retainedGrainVarCb, res.deliveredDeltaCb);
+				fuseCoarseSinglePlane(delivCr, curCleanCr, curCoarseCr, false, in.retainedGrainVarCr, res.deliveredDeltaCr);
 				res.codedDeltaCb = res.deliveredDeltaCb;
 				res.codedDeltaCr = res.deliveredDeltaCr;
 
 				if (cfg_.ModifiesPixels())
-					ApplyDeliveredDelta(in, delivActive, res.deliveredDeltaCb, res.deliveredDeltaCr, res, standIns);
+					ApplyDeliveredDelta(in, delivActive, res.deliveredDeltaCb, res.deliveredDeltaCr, res, standIns,
+					                    &nonFiniteCellFlag, res.cellsW, res.cellsH, cellPx);
+				for (size_t ci = 0; ci < numCells; ++ci)
+				{
+					if (nonFiniteCellFlag[ci] != 0u) ++res.nonFiniteCells;
+					if (singleRefA2CellFlag[ci] != 0u) ++res.singleRefA2Cells;
+					if (singularCellFlag[ci] != 0u) ++res.singularCells;
+				}
 				return res;
 			}
 
@@ -1950,6 +2509,7 @@ namespace TdV2
 			TdV2Plane codedCleanCr(cW, cH, 0.0);
 			TdV2Plane ownGrainCb(cW, cH, 0.0);
 			TdV2Plane ownGrainCr(cW, cH, 0.0);
+			bool splitActive = false;
 
 			if (in.hasCleanSplit && !in.cleanCb.Empty() && !in.cleanCr.Empty())
 			{
@@ -1986,41 +2546,51 @@ namespace TdV2
 					ownGrainCb.v[i] = codedRecCb.v[i] - codedCleanCb.v[i];
 					ownGrainCr.v[i] = codedRecCr.v[i] - codedCleanCr.v[i];
 				}
+				splitActive = true;
 			}
 			else
 			{
 				if (standIns != nullptr)
-					standIns->Engage(StandInKind::P10gGrainSeparator, "chroma: no upstream P10g chroma split supplied");
+					standIns->Engage(StandInKind::P10gGrainSeparator,
+						in.hasCleanSplit
+							? "chroma: hasCleanSplit set with empty clean planes; treating as unsplit"
+							: "chroma: no upstream P10g chroma split supplied");
 				codedCleanCb = codedRecCb;
 				codedCleanCr = codedRecCr;
 			}
 
-			// Helper to pick grain-free anchor luma for anchor ingestion (NEVER feed grainy luma when clean split active!).
+			// Helper to pick grain-free anchor luma for anchor ingestion (ONLY called when splitActive == true).
 			auto resolveAnchorCleanY = [&]() -> const TdV2Plane*
 			{
 				if (!in.anchorCleanY.Empty() && in.anchorCleanY.w == lumaW && in.anchorCleanY.h == lumaH)
 					return &in.anchorCleanY;
-				if (!in.hasCleanSplit)
-				{
-					if (!in.receivedY.Empty() && in.receivedY.w == lumaW && in.receivedY.h == lumaH)
-						return &in.receivedY;
-					if (isRgb && !rgbDerivedY.Empty())
-						return &rgbDerivedY;
-				}
 				return nullptr;
 			};
 
-			// On cut / span-invalid frames, never blend across the cut; seed new shot's anchor canvas if isAnchorFrame.
+			// Helper to ingest anchor into 4:4:4 canvas ONLY when grain-free splitActive is true (H2 / plan s1.5 #2:
+			// NEVER accumulate unsplit grainy chroma into the anchor canvas!).
+			auto ingestAnchorIfSplit = [&]()
+			{
+				if (!in.isAnchorFrame)
+					return;
+				if (!splitActive)
+				{
+					if (standIns != nullptr)
+						standIns->Engage(StandInKind::P10gGrainSeparator, "chroma anchor ingest skipped: no grain-free clean split");
+					return;
+				}
+				anchorCanvas_.AccumulateAnchorFrame(
+					codedCleanCb, codedCleanCr, resolveAnchorCleanY(),
+					lumaW, lumaH, in.codedSubsampling, in.siting, lumaActive,
+					in.hasAnchorSplatMotion ? &in.anchorSplatMotion : nullptr,
+					cellPx, cfg_.sourceBits, standIns,
+					cfg_.sourceHz, in.seq, in.resetAnchorCfl);
+			};
+
+			// On cut / span-invalid frames, never blend across the cut; seed new shot's anchor canvas if isAnchorFrame && splitActive.
 			if (in.isCutOrSpanInvalid)
 			{
-				if (in.isAnchorFrame)
-				{
-					anchorCanvas_.AccumulateAnchorFrame(
-						codedCleanCb, codedCleanCr, resolveAnchorCleanY(),
-						lumaW, lumaH, in.codedSubsampling, in.siting, lumaActive,
-						in.hasAnchorSplatMotion ? &in.anchorSplatMotion : nullptr,
-						cellPx, cfg_.sourceBits, standIns);
-				}
+				ingestAnchorIfSplit();
 				return res;
 			}
 
@@ -2044,6 +2614,36 @@ namespace TdV2
 			};
 			std::vector<WarpedChromaRef> refs;
 			refs.reserve(kMaxBlendRefs);
+			std::vector<uint8_t> nonFiniteCellFlag(numCells, 0u);
+			std::vector<uint8_t> singleRefA2CellFlag(numCells, 0u);
+			std::vector<uint8_t> singularCellFlag(numCells, 0u);
+
+			auto markNonFiniteCodedRefCells = [&](const TdV2Plane& refP)
+			{
+				for (int y = codedActive.y0; y < codedActive.y1; ++y)
+				{
+					const double ly = in.siting.CodedToLumaY(static_cast<double>(y), cSubY);
+					const int cy = (std::max)(0, (std::min)(res.cellsH - 1, static_cast<int>(std::floor(ly)) / cellPx));
+					for (int x = codedActive.x0; x < codedActive.x1; ++x)
+					{
+						if (!std::isfinite(refP.at(x, y)))
+						{
+							const double lx = in.siting.CodedToLumaX(static_cast<double>(x), cSubX);
+							const int cx = (std::max)(0, (std::min)(res.cellsW - 1, static_cast<int>(std::floor(lx)) / cellPx));
+							nonFiniteCellFlag[static_cast<size_t>(cy) * res.cellsW + cx] = 1u;
+						}
+					}
+				}
+			};
+
+			auto mergeMotionNonFinite = [&](const MotionGateResult& mg)
+			{
+				if (mg.nonFiniteCells == 0)
+					return;
+				for (size_t ci = 0; ci < numCells && ci < mg.nonFiniteCellMask.size(); ++ci)
+					if (mg.nonFiniteCellMask[ci] != 0u)
+						nonFiniteCellFlag[ci] = 1u;
+			};
 
 			auto prepareCodedRefPlane = [&](const TdV2Plane* src, TdV2Plane& tempOut) -> const TdV2Plane*
 			{
@@ -2070,17 +2670,19 @@ namespace TdV2
 				if (refCb == nullptr || refCr == nullptr)
 					return;
 
-				CellMotionField fallbackMf;
 				const CellMotionField* useMf = rIn.lumaMotion;
 				if (useMf == nullptr)
 				{
+					// H9 (plan s1.2 L108): missing motion field MUST NEVER whole-frame blend as "Still".
 					++res.motionStandInRefs;
 					if (standIns != nullptr)
-						standIns->Engage(StandInKind::MotionFieldStandIn, "chroma null motion field; assuming Still");
-					fallbackMf = CellMotionField::Uniform(res.cellsW, res.cellsH, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
-					useMf = &fallbackMf;
+					{
+						standIns->Engage(StandInKind::MotionFieldStandIn, "chroma null motion field; ref skipped per L4");
+						standIns->Engage(StandInKind::MissingMotionNoWholeBlend, "L4 missing motion field: chroma peak ref skipped (no whole-frame Still blend)");
+					}
+					return;
 				}
-				else if (!useMf->IsWellFormed(res.cellsW, res.cellsH))
+				if (!useMf->IsWellFormed(res.cellsW, res.cellsH))
 				{
 					++res.motionStandInRefs;
 					if (standIns != nullptr)
@@ -2093,28 +2695,29 @@ namespace TdV2
 				std::vector<uint8_t> validCb, validCr;
 				const WarpDiagnostics dCb = ChromaDetail::WarpChromaPlaneWithLumaMotion(
 					*refCb, codedCleanCb, codedActive, cSubX, cSubY, in.siting,
-					useMf->vx, useMf->vy, res.cellsW, res.cellsH, cellPx, wr.cleanCb, validCb, standIns);
+					useMf->vx, useMf->vy, res.cellsW, res.cellsH, cellPx, wr.cleanCb, validCb, standIns, useMf);
 				const WarpDiagnostics dCr = ChromaDetail::WarpChromaPlaneWithLumaMotion(
 					*refCr, codedCleanCr, codedActive, cSubX, cSubY, in.siting,
-					useMf->vx, useMf->vy, res.cellsW, res.cellsH, cellPx, wr.cleanCr, validCr, standIns);
+					useMf->vx, useMf->vy, res.cellsW, res.cellsH, cellPx, wr.cleanCr, validCr, standIns, useMf);
 				res.borderBilinearPixels += dCb.borderBilinearPixels + dCr.borderBilinearPixels;
-				if (dCb.nonFinitePixels > 0 || dCr.nonFinitePixels > 0)
-					++res.nonFiniteCells;
+				if (dCb.nonFinitePixels > 0)
+					markNonFiniteCodedRefCells(*refCb);
+				if (dCr.nonFinitePixels > 0)
+					markNonFiniteCodedRefCells(*refCr);
 				wr.validPx.resize(validCb.size(), 0u);
 				for (size_t i = 0; i < validCb.size(); ++i)
 					wr.validPx[i] = (validCb[i] != 0u && validCr[i] != 0u) ? 1u : 0u;
 				wr.bandsCb = DecomposeActiveBands(wr.cleanCb, codedActive, standIns);
 				wr.bandsCr = DecomposeActiveBands(wr.cleanCr, codedActive, standIns);
 				wr.motionGate = EvaluateCameraRelativeMotionGate(*useMf, standIns);
-				res.nonFiniteCells += wr.motionGate.nonFiniteCells;
+				mergeMotionNonFinite(wr.motionGate);
 				refs.push_back(std::move(wr));
 			};
 
 			tryAddPeakRef(in.prevPeak);
 			tryAddPeakRef(in.nextPeak);
 
-			// Anchor read motion field for 4:4:4 canvas and carried CfL (H5).
-			CellMotionField anchorReadFallback;
+			// Anchor read motion field for 4:4:4 canvas and carried CfL (H5 & H9).
 			const CellMotionField* anchorReadMf = nullptr;
 			bool anchorMotionRejected = false;
 			if (in.hasAnchorReadMotion)
@@ -2131,27 +2734,33 @@ namespace TdV2
 			}
 			else if ((in.enableAnchorCanvasRef && anchorCanvas_.HasData()) || (in.enableCarriedCfl && anchorCanvas_.HasCfl()))
 			{
+				// H9 (plan s1.2 L108): missing anchor read motion MUST NEVER fabricate whole-frame "Still".
+				anchorMotionRejected = true;
 				++res.motionStandInRefs;
 				if (standIns != nullptr)
-					standIns->Engage(StandInKind::MotionFieldStandIn, "chroma anchorReadMotion missing; assuming Still");
-				anchorReadFallback = CellMotionField::Uniform(res.cellsW, res.cellsH, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
-				anchorReadMf = &anchorReadFallback;
+				{
+					standIns->Engage(StandInKind::MotionFieldStandIn, "chroma anchorReadMotion missing; anchor ref skipped per L4");
+					standIns->Engage(StandInKind::MissingMotionNoWholeBlend, "L4 missing anchorReadMotion: anchor/CfL ref skipped (no whole-frame Still blend)");
+				}
 			}
 
-			// 4:4:4 Anchor Memory Canvas reference.
-			if (!anchorMotionRejected && in.enableAnchorCanvasRef && anchorCanvas_.HasData() &&
+			// 4:4:4 Anchor Memory Canvas reference (H3: codedClean fallback fills invalid pixels; H4: gap-fill visible).
+			if (!anchorMotionRejected && anchorReadMf != nullptr && in.enableAnchorCanvasRef && anchorCanvas_.HasData() &&
 			    refs.size() < static_cast<size_t>(kMaxBlendRefs))
 			{
 				WarpedChromaRef wr;
 				wr.isAnchorDerived = true;
+				uint64_t gapFilled = 0;
 				if (anchorCanvas_.SampleAtCodedGrid(
 						in.codedSubsampling, in.siting, lumaActive, anchorReadMf, cellPx,
-						wr.cleanCb, wr.cleanCr, wr.validPx, standIns))
+						wr.cleanCb, wr.cleanCr, wr.validPx, standIns,
+						&codedCleanCb, &codedCleanCr, &gapFilled))
 				{
+					res.canvasGapFilledPixels += gapFilled;
 					wr.bandsCb = DecomposeActiveBands(wr.cleanCb, codedActive, standIns);
 					wr.bandsCr = DecomposeActiveBands(wr.cleanCr, codedActive, standIns);
 					wr.motionGate = EvaluateCameraRelativeMotionGate(*anchorReadMf, standIns);
-					res.nonFiniteCells += wr.motionGate.nonFiniteCells;
+					mergeMotionNonFinite(wr.motionGate);
 					refs.push_back(std::move(wr));
 					res.anchorCanvasUsed = true;
 				}
@@ -2159,7 +2768,7 @@ namespace TdV2
 
 			// Carried CfL (H5) reference: strictly applied to P_Y = Warp(anchorCleanY), NEVER current luma!
 			int cflRefIdx = -1;
-			if (!anchorMotionRejected && in.enableCarriedCfl && anchorCanvas_.HasCfl() &&
+			if (!anchorMotionRejected && anchorReadMf != nullptr && in.enableCarriedCfl && anchorCanvas_.HasCfl() &&
 			    refs.size() < static_cast<size_t>(kMaxBlendRefs))
 			{
 				WarpedChromaRef wr;
@@ -2167,12 +2776,13 @@ namespace TdV2
 				wr.isAnchorDerived = true;
 				if (anchorCanvas_.PredictCarriedCflAtCodedGrid(
 						in.codedSubsampling, in.siting, lumaActive, anchorReadMf, cellPx,
-						wr.cleanCb, wr.cleanCr, wr.validPx, standIns))
+						wr.cleanCb, wr.cleanCr, wr.validPx, standIns,
+						&codedCleanCb, &codedCleanCr))
 				{
 					wr.bandsCb = DecomposeActiveBands(wr.cleanCb, codedActive, standIns);
 					wr.bandsCr = DecomposeActiveBands(wr.cleanCr, codedActive, standIns);
 					wr.motionGate = EvaluateCameraRelativeMotionGate(*anchorReadMf, standIns);
-					res.nonFiniteCells += wr.motionGate.nonFiniteCells;
+					mergeMotionNonFinite(wr.motionGate);
 					cflRefIdx = static_cast<int>(refs.size());
 					refs.push_back(std::move(wr));
 					res.carriedCflUsed = true;
@@ -2182,26 +2792,36 @@ namespace TdV2
 			res.activeRefCount = refs.size();
 			if (refs.empty())
 			{
-				// Still ingest anchor frame into 4:4:4 canvas if this is an anchor frame!
-				if (in.isAnchorFrame)
-				{
-					anchorCanvas_.AccumulateAnchorFrame(
-						codedCleanCb, codedCleanCr, resolveAnchorCleanY(),
-						lumaW, lumaH, in.codedSubsampling, in.siting, lumaActive,
-						in.hasAnchorSplatMotion ? &in.anchorSplatMotion : nullptr,
-						cellPx, cfg_.sourceBits, standIns);
-				}
+				// Still ingest grain-free anchor frame into 4:4:4 canvas if isAnchorFrame && splitActive!
+				ingestAnchorIfSplit();
 				return res;
 			}
 
 			// B5: Per-cell Carried CfL disagreement check (kHuberKneeSq = 9.0 * max(cellRefDiffVar, stepTotalVar)).
-			// If chroma residual disagrees with luma-derived CfL prediction on a cell, reject CfL on that cell visibly!
+			// Whenever chroma residual disagrees with luma-derived carried CfL on a cell, fall back visibly
+			// to single-frame ChromaCfl (engaging StandInKind::ChromaCflFallback, marking res.cflFallbackMask,
+			// and fitting single-frame per-cell OLS (a, b) into res.singleFrameCflFallback when current luma is available).
 			std::vector<uint8_t> cflRejectCb(numCells, 0u);
 			std::vector<uint8_t> cflRejectCr(numCells, 0u);
 			const double stepVar = a2Stats.valid ? a2Stats.totalVar : 0.0;
 
 			if (cflRefIdx >= 0)
 			{
+				res.cflFallbackMask.assign(numCells, 0u);
+				res.singleFrameCflFallback.assign(numCells, AnchorCflCell{});
+
+				const TdV2Plane* curLumaForSfCfl = nullptr;
+				if (!in.anchorCleanY.Empty() && in.anchorCleanY.w == lumaW && in.anchorCleanY.h == lumaH && planeAllFinite(in.anchorCleanY))
+					curLumaForSfCfl = &in.anchorCleanY;
+				else if (!in.receivedY.Empty() && in.receivedY.w == lumaW && in.receivedY.h == lumaH && planeAllFinite(in.receivedY))
+					curLumaForSfCfl = &in.receivedY;
+				else if (isRgb && !rgbDerivedY.Empty() && planeAllFinite(rgbDerivedY))
+					curLumaForSfCfl = &rgbDerivedY;
+
+				ActiveSubPlaneView curYView{ curLumaForSfCfl, lumaActive.x0, lumaActive.y0, lumaActive.Width(), lumaActive.Height() };
+				// Exact uniform 1-LSB quantization variance in native integer code units: delta^2 / 12.0 with delta = 1.0.
+				const double sfRidgeFloor = (std::max)((kDefaultStepPriorLsb * kDefaultStepPriorLsb) / 12.0, kEngineNumFloor);
+
 				const WarpedChromaRef& cflRef = refs[static_cast<size_t>(cflRefIdx)];
 				for (int cy = 0; cy < res.cellsH; ++cy)
 				{
@@ -2273,9 +2893,62 @@ namespace TdV2
 						}
 						if (cellFallback)
 						{
+							res.cflFallbackMask[cIdx] = 1u;
 							++res.cflFallbackCells;
 							if (standIns != nullptr)
 								standIns->Engage(StandInKind::ChromaCflFallback);
+
+							// Single-frame ChromaCfl fallback fit on current frame's luma & coded chroma for downstream ChromaCfl handoff.
+							if (curLumaForSfCfl != nullptr)
+							{
+								double sumY = 0.0, sumYY = 0.0, sumCb = 0.0, sumYCb = 0.0, sumCr = 0.0, sumYCr = 0.0;
+								size_t sfCnt = 0;
+								for (int y = py0; y < py1; ++y)
+								{
+									const double ly = in.siting.CodedToLumaY(static_cast<double>(y), cSubY);
+									const int pcy = (std::max)(0, (std::min)(res.cellsH - 1, static_cast<int>(std::floor(ly)) / cellPx));
+									if (pcy != cy) continue;
+									for (int x = px0; x < px1; ++x)
+									{
+										const double lx = in.siting.CodedToLumaX(static_cast<double>(x), cSubX);
+										const int pcx = (std::max)(0, (std::min)(res.cellsW - 1, static_cast<int>(std::floor(lx)) / cellPx));
+										if (pcx != cx) continue;
+										double yVal = 0.0;
+										bool bBilin = false;
+										if (ChromaDetail::SampleSitedActive(
+												curYView, lx - static_cast<double>(lumaActive.x0), ly - static_cast<double>(lumaActive.y0),
+												yVal, bBilin, /*allowEdgeClampOutside=*/true))
+										{
+											const double cbv = codedCleanCb.at(x, y);
+											const double crv = codedCleanCr.at(x, y);
+											sumY += yVal;
+											sumYY += yVal * yVal;
+											sumCb += cbv;
+											sumYCb += yVal * cbv;
+											sumCr += crv;
+											sumYCr += yVal * crv;
+											++sfCnt;
+										}
+									}
+								}
+								if (sfCnt >= 2)
+								{
+									const double invN = 1.0 / static_cast<double>(sfCnt);
+									const double mY = sumY * invN;
+									const double mCb = sumCb * invN;
+									const double mCr = sumCr * invN;
+									const double vY = (std::max)(0.0, sumYY * invN - mY * mY);
+									const double den = vY + sfRidgeFloor;
+									AnchorCflCell sf;
+									sf.aCb = (sumYCb * invN - mY * mCb) / den;
+									sf.bCb = mCb - sf.aCb * mY;
+									sf.aCr = (sumYCr * invN - mY * mCr) / den;
+									sf.bCr = mCr - sf.aCr * mY;
+									sf.valid = std::isfinite(sf.aCb) && std::isfinite(sf.bCb) &&
+									           std::isfinite(sf.aCr) && std::isfinite(sf.bCr);
+									res.singleFrameCflFallback[cIdx] = sf;
+								}
+							}
 						}
 					}
 				}
@@ -2284,6 +2957,14 @@ namespace TdV2
 			// B6: Per-band fusion on coded Cb and coded Cr independently using shared TdV2BlendMath + Layer-4 TdGuardPort.
 			const BandWhiteNoiseGains gains = ComputeBandWhiteNoiseGains();
 			const double bandTransfer[3] = { gains.low, gains.mid, gains.fine };
+
+			// Exact Parseval passband supremum ||H_b||_inf^2 for A2 rounding-cell variance upper bound
+			// (1:1 parity with TdV2ReferenceEngine.h): L=1.0, M=midPassbandPeak^2, H=1.0.
+			const double s1Sq = VpUnit::BandFromBase::kSigmaFine * VpUnit::BandFromBase::kSigmaFine;
+			const double s2Sq = VpUnit::BandFromBase::kSigmaBase * VpUnit::BandFromBase::kSigmaBase;
+			const double wStarSq = (2.0 * std::log(VpUnit::BandFromBase::kSigmaBase / VpUnit::BandFromBase::kSigmaFine)) / (s2Sq - s1Sq);
+			const double midPassbandPeak = std::exp(-(s1Sq * wStarSq) / 2.0) - std::exp(-(s2Sq * wStarSq) / 2.0);
+			const double a2BandPeakSq[3] = { 1.0, midPassbandPeak * midPassbandPeak, 1.0 };
 
 			auto bandPlaneOf = [](const ThreeBandPlanes& bp, int b) -> const TdV2Plane&
 			{
@@ -2316,6 +2997,16 @@ namespace TdV2
 				const int gW = (lumaW + grainCellPx - 1) / grainCellPx;
 				std::vector<double> cellRetainedGrain(numCells, 0.0);
 
+				// Collect per-cell fine-band energies & blind symmetric innovations for Q5(b) zero-energy dark block filter
+				// whenever !splitActive and no explicit retainedGrainVar prior covers the frame.
+				std::vector<double> blindCellEnergies;
+				std::vector<double> blindCellIrs;
+				if (!splitActive)
+				{
+					blindCellEnergies.reserve(numCells);
+					blindCellIrs.reserve(numCells);
+				}
+
 				for (int cy = 0; cy < res.cellsH; ++cy)
 				{
 					for (int cx = 0; cx < res.cellsW; ++cx)
@@ -2323,6 +3014,7 @@ namespace TdV2
 						const size_t cIdx = static_cast<size_t>(cy) * res.cellsW + cx;
 
 						double cellGrainVar = 0.0;
+						bool hasCellGrainPrior = false;
 						if (!retainedGrainVar.empty())
 						{
 							const int gcx = MapCellToGrainGrid(cx, cellPx, grainCellPx);
@@ -2332,16 +3024,24 @@ namespace TdV2
 							{
 								const double gv = retainedGrainVar[gIdx];
 								if (std::isfinite(gv) && gv >= 0.0)
+								{
 									cellGrainVar = gv;
+									hasCellGrainPrior = true;
+								}
 								else
 								{
-									++res.nonFiniteCells;
+									nonFiniteCellFlag[cIdx] = 1u;
 									if (standIns != nullptr)
 										standIns->Engage(StandInKind::NonFiniteClosure, "chroma non-finite retainedGrainVar");
 								}
 							}
+							else
+							{
+								++res.grainPriorOobCells;
+								if (standIns != nullptr)
+									standIns->Engage(StandInKind::GrainPriorOutOfRange, "chroma retainedGrainVar index out of range");
+							}
 						}
-						cellRetainedGrain[cIdx] = cellGrainVar;
 
 						// Active references for this cell (excluding CfL if rejected by disagreement check).
 						int activeIdx[kMaxBlendRefs] = {};
@@ -2353,12 +3053,120 @@ namespace TdV2
 							activeIdx[activeK++] = k;
 						}
 						if (activeK == 0)
+						{
+							cellRetainedGrain[cIdx] = cellGrainVar;
 							continue;
+						}
 
 						const int py0 = (std::max)(codedActive.y0, ((cy - poolR) * cellPx) / cSubY);
 						const int py1 = (std::min)(codedActive.y1, ((cy + poolR + 1) * cellPx + cSubY - 1) / cSubY);
 						const int px0 = (std::max)(codedActive.x0, ((cx - poolR) * cellPx) / cSubX);
 						const int px1 = (std::min)(codedActive.x1, ((cx + poolR + 1) * cellPx + cSubX - 1) / cSubX);
+
+						// H2 + Q5(b): When !splitActive and no explicit per-cell grain prior was supplied, derive
+						// symmetric temporal fine-band innovation sqrt(mean(I_{X->k}) * mean(I_{k->X})) / gains.fine
+						// over the exact same pooled window. Strictly 0 on clean W4 blurry edges or clean refs,
+						// and exact sigma^2 on multi-seed unsplit grainy frames so Layer-2 A1 protects L/M/H grain!
+						if (!splitActive && !hasCellGrainPrior)
+						{
+							double sumCurH2 = 0.0;
+							double sumRefH2[kMaxBlendRefs] = {};
+							double sumCrossH[kMaxBlendRefs] = {};
+							size_t hCnt = 0;
+							double ownCellH2 = 0.0;
+							size_t ownCellCnt = 0;
+
+							for (int y = py0; y < py1; ++y)
+							{
+								const double ly = in.siting.CodedToLumaY(static_cast<double>(y), cSubY);
+								const int pcy = (std::max)(0, (std::min)(res.cellsH - 1, static_cast<int>(std::floor(ly)) / cellPx));
+								for (int x = px0; x < px1; ++x)
+								{
+									const double lx = in.siting.CodedToLumaX(static_cast<double>(x), cSubX);
+									const int pcx = (std::max)(0, (std::min)(res.cellsW - 1, static_cast<int>(std::floor(lx)) / cellPx));
+									const size_t pCell = static_cast<size_t>(pcy) * res.cellsW + pcx;
+									const size_t pIdx = static_cast<size_t>(y) * cW + x;
+
+									const double hCur = curBands.H.at(x, y);
+									if (pcy == cy && pcx == cx)
+									{
+										ownCellH2 += hCur * hCur;
+										++ownCellCnt;
+									}
+
+									bool allValidH = true;
+									double hRefs[kMaxBlendRefs] = {};
+									for (int ai = 0; ai < activeK; ++ai)
+									{
+										const int k = activeIdx[ai];
+										const WarpedChromaRef& wr = refs[static_cast<size_t>(k)];
+										if (wr.validPx[pIdx] == 0u || wr.motionGate.gateMH[pCell] <= 0.0)
+										{
+											allValidH = false;
+											break;
+										}
+										const ThreeBandPlanes& rBands = isCb ? wr.bandsCb : wr.bandsCr;
+										hRefs[ai] = rBands.H.at(x, y);
+									}
+									if (allValidH)
+									{
+										sumCurH2 += hCur * hCur;
+										for (int ai = 0; ai < activeK; ++ai)
+										{
+											sumRefH2[ai] += hRefs[ai] * hRefs[ai];
+											sumCrossH[ai] += hCur * hRefs[ai];
+										}
+										++hCnt;
+									}
+								}
+							}
+
+							double cellInnov = 0.0;
+							if (hCnt > 0 && gains.fine > kEngineNumFloor)
+							{
+								const double invH = 1.0 / static_cast<double>(hCnt);
+								const double meanCur = sumCurH2 * invH;
+								double sumICur = 0.0, sumIRef = 0.0;
+								for (int ai = 0; ai < activeK; ++ai)
+								{
+									const double cross = sumCrossH[ai] * invH;
+									const double ic = meanCur - cross;
+									const double ir = sumRefH2[ai] * invH - cross;
+									sumICur += (ic > 0.0 ? ic : 0.0);
+									sumIRef += (ir > 0.0 ? ir : 0.0);
+								}
+								const double meanICur = sumICur / static_cast<double>(activeK);
+								const double meanIRef = sumIRef / static_cast<double>(activeK);
+								cellInnov = std::sqrt(meanICur * meanIRef) / gains.fine;
+								cellGrainVar = cellInnov;
+							}
+							if (ownCellCnt > 0)
+							{
+								blindCellEnergies.push_back(ownCellH2 / static_cast<double>(ownCellCnt));
+								blindCellIrs.push_back(cellInnov);
+							}
+						}
+						cellRetainedGrain[cIdx] = cellGrainVar;
+
+						// Compute pooled own-grain variance over the exact same [px0, px1) x [py0, py1) window as C
+						// when splitActive == true (eliminates 8x8 coded 4:2:0 cell variance inflation in alphaLeak).
+						double cellOwnGrainVar = 0.0;
+						if (splitActive)
+						{
+							double ogSumSq = 0.0;
+							size_t ogCnt = 0;
+							for (int y = py0; y < py1; ++y)
+							{
+								for (int x = px0; x < px1; ++x)
+								{
+									const double og = ownGrain.at(x, y);
+									ogSumSq += og * og;
+									++ogCnt;
+								}
+							}
+							if (ogCnt > 0)
+								cellOwnGrainVar = ogSumSq / static_cast<double>(ogCnt);
+						}
 
 						for (int b = 0; b < 3; ++b)
 						{
@@ -2409,35 +3217,58 @@ namespace TdV2
 							for (int ai = 0; ai < activeK; ++ai)
 							{
 								const int k = activeIdx[ai];
-								const double cA2 = EstimateC_A2(a2Stats, refs[static_cast<size_t>(k)].isExactCopy) * bandTransfer[b];
+								// A2 rounding-cell prior using Parseval passband supremum ||H_b||_inf^2,
+								// capped to [0, C[ai][ai]] per Plan L81 (c_k <= C_kk).
+								const double cA2 = (std::min)(EstimateC_A2(a2Stats, refs[static_cast<size_t>(k)].isExactCopy) * a2BandPeakSq[b], C[ai][ai]);
 								double cA1 = cA2;
-								if (activeK >= 2)
+
+								// Find an independent A1 instrument partner (LOW-7): NEVER allow two anchor-derived
+								// refs (e.g., anchorCanvas & carriedCfl) to instrument each other!
+								int partner = -1;
+								const bool selfAnchor = refs[static_cast<size_t>(k)].isAnchorDerived;
+								for (int cand = activeK - 1; cand >= 0; --cand)
 								{
-									// Prefer an independent partner ref: non-anchor peak ref (reverse scan prefers future peak),
-									// or opposite isAnchorDerived class so anchor canvas & carried CfL never pair with each other
-									// when an independent peak reference is available.
-									int partner = (ai == 0) ? 1 : 0;
-									const bool selfAnchor = refs[static_cast<size_t>(k)].isAnchorDerived;
-									for (int cand = activeK - 1; cand >= 0; --cand)
+									if (cand == ai) continue;
+									const bool candAnchor = refs[static_cast<size_t>(activeIdx[cand])].isAnchorDerived;
+									if (!candAnchor)
 									{
-										if (cand == ai) continue;
-										const bool candAnchor = refs[static_cast<size_t>(activeIdx[cand])].isAnchorDerived;
-										if (!candAnchor)
-										{
-											partner = cand;
-											break;
-										}
-										if (selfAnchor != candAnchor)
-											partner = cand;
+										partner = cand;
+										break;
 									}
+									if (!selfAnchor && candAnchor)
+										partner = cand;
+								}
+
+								if (partner >= 0)
+								{
 									cA1 = EstimateC_A1(C[ai][partner], C[ai][ai], C[partner][partner],
 									                   cellGrainVar, bandTransfer[b]);
 								}
 								else if (cfg_.estimator != VarianceEstimator::A2_RoundingCells)
 								{
-									++res.singleRefA2Cells;
+									singleRefA2CellFlag[cIdx] = 1u;
 									if (standIns != nullptr)
 										standIns->Engage(StandInKind::SingleRefA1ToA2Fallback);
+									if (activeK >= 2)
+									{
+										// Cap cA1 from above by non-copy cross-moments so C^-1 c never inverts weights.
+										for (int j = 0; j < activeK; ++j)
+										{
+											if (j == ai || refs[static_cast<size_t>(activeIdx[j])].isExactCopy)
+												continue;
+											const double cap = EstimateC_A1(C[ai][j], C[ai][ai], C[j][j],
+											                                cellGrainVar, bandTransfer[b]);
+											if (cap < cA1)
+												cA1 = cap;
+										}
+									}
+									// When unsplit grain is present in a single-ref cell, cap c by excess difference
+									// variance above independent two-frame grain variance 2 * cellGrainVar * bandTransfer[b].
+									if (!splitActive && cellGrainVar > kEngineNumFloor)
+									{
+										const double excess = C[ai][ai] - 2.0 * cellGrainVar * bandTransfer[b];
+										cA1 = (std::min)(cA1, excess > 0.0 ? excess : 0.0);
+									}
 								}
 								cVec[ai] = SelectBlindC(cfg_.estimator, cA1, cA2);
 								if (refs[static_cast<size_t>(k)].isExactCopy)
@@ -2445,8 +3276,8 @@ namespace TdV2
 							}
 
 							const BlendSolveResult solved = SolveConvexWeights(C, cVec, activeK, kDefaultTraceRegScale, standIns);
-							if (solved.nonFiniteClosed) { ++res.nonFiniteCells; continue; }
-							if (solved.singular) { ++res.singularCells; continue; }
+							if (solved.nonFiniteClosed) { nonFiniteCellFlag[cIdx] = 1u; continue; }
+							if (solved.singular) { singularCellFlag[cIdx] = 1u; continue; }
 
 							for (int ai = 0; ai < activeK; ++ai)
 							{
@@ -2456,6 +3287,69 @@ namespace TdV2
 								cellW[b][k][cIdx] = solved.weights[ai] * mGate;
 							}
 						}
+
+						// Layer 2/3 coarse-to-fine leaked-grain transfer budget (1:1 parity with TdV2ReferenceEngine.h;
+						// refs/111 s7.3 & TdGuardPort::kMinVarianceRetention = 0.98^2):
+						// Protects minor leaked grain in split chroma (e.g. 15% leak with retainedGrainVar supplied)
+						// and raw unsplit grain (!splitActive) while allowing full L/M compression repair.
+						const bool minorSplitLeak = splitActive && (cellOwnGrainVar > cellGrainVar);
+						const bool rawUnsplitGrain = !splitActive;
+						if (cfg_.estimator != VarianceEstimator::A2_RoundingCells &&
+						    cellGrainVar > kEngineNumFloor && (minorSplitLeak || rawUnsplitGrain))
+						{
+							double alphaLeak = 1.0;
+							if (minorSplitLeak)
+							{
+								const double sigmaLeak = std::sqrt(cellGrainVar);
+								const double sigmaOwn = std::sqrt(cellOwnGrainVar);
+								const double sigmaTotal = sigmaOwn + sigmaLeak;
+								alphaLeak = (sigmaTotal > kEngineNumFloor) ? (sigmaLeak / sigmaTotal) : 0.0;
+							}
+							if (alphaLeak > kEngineNumFloor)
+							{
+								const double bandOrigin[3] = { gains.originLow, gains.originMid, gains.originFine };
+								// Rule-1 quadrature split (1:1 parity with TdV2ReferenceEngine.h & TdV2Shaders.h):
+								// allocate tau / sqrt(2) = (1 - sqrt(kMinVarianceRetention)) / sqrt(2) to deterministic
+								// attenuation so deterministic + finite-sample variance stay strictly inside the 2% bar.
+								double remGrainBudget = (1.0 - std::sqrt(TdGuardPort::kMinVarianceRetention)) / std::sqrt(2.0);
+								for (int b = 0; b < 3; ++b)
+								{
+									double bandWSum = 0.0;
+									for (int k = 0; k < K; ++k)
+										bandWSum += cellW[b][k][cIdx];
+									const double bandLossPerUnitW = alphaLeak * bandOrigin[b];
+									if (bandLossPerUnitW > kEngineNumFloor && bandWSum > kEngineNumFloor)
+									{
+										const double maxBandW = remGrainBudget / bandLossPerUnitW;
+										if (bandWSum > maxBandW)
+										{
+											const double scale = (maxBandW > 0.0) ? (maxBandW / bandWSum) : 0.0;
+											for (int k = 0; k < K; ++k)
+												cellW[b][k][cIdx] *= scale;
+											bandWSum *= scale;
+										}
+										remGrainBudget = (std::max)(0.0, remGrainBudget - bandLossPerUnitW * bandWSum);
+									}
+								}
+							}
+						}
+					}
+				}
+
+				// Q5(b) integration: exclude crushed-black zero-energy flat blocks strictly by measured fine-band
+				// energy (never code value, preserving BTB/WTW) when aggregating blind unsplit NLF diagnostics.
+				if (!splitActive && !blindCellEnergies.empty())
+				{
+					const size_t codedCellPxW = static_cast<size_t>((std::max)(1, cellPx / cSubX));
+					const size_t codedCellPxH = static_cast<size_t>((std::max)(1, cellPx / cSubY));
+					const DarkNlfResult nlfRes = AccumulateDarkNlfExcludingZeroEnergy(
+						blindCellEnergies, blindCellIrs, codedCellPxW * codedCellPxH,
+						1.0, 0.5, standIns);
+					res.excludedZeroEnergyBlocks += nlfRes.excludedZeroEnergyBlocks;
+					if (nlfRes.valid)
+					{
+						if (isCb) res.estimatedBlindNlfCb = nlfRes.nlfEstimate;
+						else      res.estimatedBlindNlfCr = nlfRes.nlfEstimate;
 					}
 				}
 
@@ -2464,6 +3358,59 @@ namespace TdV2
 				const int byStart = ((codedActive.y0 + 7) / 8) * 8;
 				const int bxEnd = (codedActive.x1 / 8) * 8;
 				const int byEnd = (codedActive.y1 / 8) * 8;
+
+				// H14 + H3: Resolve CodecModel P_B (explicit in.codecModelPbCb/Cr if supplied, else refs[0].clean stand-in)
+				// and validate per-8x8-block prediction pixel validity BEFORE applying pixel-domain vs DCT bounds.
+				TdV2Plane explicitPbTmp;
+				const TdV2Plane* predCleanPtr = nullptr;
+				const std::vector<uint8_t>* predValidPtr = nullptr;
+				bool usingPbStandIn = false;
+				bool canRunPocs = in.transformIdentified8x8 && effStepDelta > 0.0 && (bxStart < bxEnd) && (byStart < byEnd);
+				if (canRunPocs)
+				{
+					const TdV2Plane* explicitPbSrc = isCb ? in.codecModelPbCb : in.codecModelPbCr;
+					if (explicitPbSrc != nullptr)
+					{
+						const TdV2Plane* resolved = prepareCodedRefPlane(explicitPbSrc, explicitPbTmp);
+						if (resolved != nullptr && planeAllFinite(*resolved))
+						{
+							predCleanPtr = resolved;
+							predValidPtr = nullptr;
+							usingPbStandIn = false;
+						}
+						else
+						{
+							canRunPocs = false;
+							nonFiniteCellFlag.assign(numCells, 1u);
+							if (standIns != nullptr)
+								standIns->Engage(StandInKind::NonFiniteClosure, "chroma explicit codecModelPb invalid or non-finite");
+						}
+					}
+					else
+					{
+						predCleanPtr = isCb ? &refs[0].cleanCb : &refs[0].cleanCr;
+						predValidPtr = &refs[0].validPx;
+						usingPbStandIn = true;
+					}
+				}
+
+				auto isBlockPredValid = [&](int bx, int by) -> bool
+				{
+					if (!canRunPocs || predCleanPtr == nullptr)
+						return false;
+					for (int j = 0; j < 8; ++j)
+					{
+						for (int i = 0; i < 8; ++i)
+						{
+							const size_t pIdx = static_cast<size_t>(by + j) * cW + static_cast<size_t>(bx + i);
+							if (predValidPtr != nullptr && (*predValidPtr)[pIdx] == 0u)
+								return false;
+							if (!std::isfinite(predCleanPtr->at(bx + i, by + j)))
+								return false;
+						}
+					}
+					return true;
+				};
 
 				for (int y = codedActive.y0; y < codedActive.y1; ++y)
 				{
@@ -2476,8 +3423,9 @@ namespace TdV2
 						const size_t cIdx = static_cast<size_t>(cy) * res.cellsW + cx;
 						const size_t pIdx = static_cast<size_t>(y) * cW + x;
 
-						const bool inFull8x8Block = in.transformIdentified8x8 && (bxStart < bxEnd) && (byStart < byEnd) &&
-						                            (x >= bxStart) && (x < bxEnd) && (y >= byStart) && (y < byEnd);
+						const bool inFull8x8Block = canRunPocs &&
+						                            (x >= bxStart) && (x < bxEnd) && (y >= byStart) && (y < byEnd) &&
+						                            isBlockPredValid((x / 8) * 8, (y / 8) * 8);
 
 						double totalDelta = 0.0;
 						for (int b = 0; b < 3; ++b)
@@ -2498,7 +3446,9 @@ namespace TdV2
 							}
 							if (!inFull8x8Block)
 							{
-								const double bandVar = a2Stats.valid ? (a2Stats.totalVar * bandTransfer[b]) : 0.0;
+								// Use exact Parseval passband supremum a2BandPeakSq[b] (consistent with cA2 and Branch A)
+								// so coherent L/M quantization wear is bounded at its true passband limit without over-clipping.
+								const double bandVar = a2Stats.valid ? (a2Stats.totalVar * a2BandPeakSq[b]) : 0.0;
 								if (std::fabs(bandDelta) > 0.0)
 									bandDelta = ApplyTransformUnknownBound(bandDelta, bandVar, standIns);
 							}
@@ -2509,9 +3459,11 @@ namespace TdV2
 				}
 
 				// Identified 8x8 DCT STRICT/CELL POCS projection on coded chroma plane (codec-grid-aligned).
-				if (in.transformIdentified8x8 && effStepDelta > 0.0 && (bxStart < bxEnd) && (byStart < byEnd))
+				// H3: Skips any 8x8 block containing an invalid prediction pixel (validPx == 0).
+				// H14: Engages StandInKind::CodecModelPbStandIn visibly whenever refs[0].clean stands in for P_B.
+				if (canRunPocs && predCleanPtr != nullptr)
 				{
-					const TdV2Plane& predClean = isCb ? refs[0].cleanCb : refs[0].cleanCr;
+					const TdV2Plane& predClean = *predCleanPtr;
 					const int iters = (std::max)(1, (std::min)(2, cfg_.cellProjIterations));
 					for (int it = 0; it < iters; ++it)
 					{
@@ -2519,6 +3471,10 @@ namespace TdV2
 						{
 							for (int bx = bxStart; bx < bxEnd; bx += 8)
 							{
+								// H3: Skip POCS on blocks where any prediction pixel is invalid (never project against garbage/0.0).
+								if (!isBlockPredValid(bx, by))
+									continue;
+
 								// Skip untouched / vetoed zero-delta 8x8 blocks so FP64 DCT round-trip stays bit-exact.
 								bool anyNonZeroDelta = false;
 								for (int j = 0; j < 8 && !anyNonZeroDelta; ++j)
@@ -2526,6 +3482,13 @@ namespace TdV2
 										if (outCodedDelta.at(bx + i, by + j) != 0.0) { anyNonZeroDelta = true; break; }
 								if (!anyNonZeroDelta)
 									continue;
+
+								if (it == 0 && usingPbStandIn)
+								{
+									++res.codecModelPbStandInCells;
+									if (standIns != nullptr)
+										standIns->Engage(StandInKind::CodecModelPbStandIn);
+								}
 
 								double sentRes[64] = {}, blendRes[64] = {}, projRes[64] = {};
 								for (int j = 0; j < 8; ++j)
@@ -2538,7 +3501,7 @@ namespace TdV2
 										blendRes[j * 8 + i] = (cVal + outCodedDelta.at(bx + i, by + j)) - pVal;
 									}
 								}
-								ProjectResidual8x8Dct(sentRes, blendRes, effStepDelta, in.deadZonePhi, cfg_.residualMode, projRes);
+								ProjectResidual8x8Dct(sentRes, blendRes, effStepDelta, effPhi, cfg_.residualMode, projRes);
 								for (int j = 0; j < 8; ++j)
 								{
 									for (int i = 0; i < 8; ++i)
@@ -2550,22 +3513,34 @@ namespace TdV2
 								}
 							}
 						}
-						for (int y = byStart; y < byEnd; ++y)
+						for (int by = byStart; by < byEnd; by += 8)
 						{
-							for (int x = bxStart; x < bxEnd; ++x)
+							for (int bx = bxStart; bx < bxEnd; bx += 8)
 							{
-								const double dVal = outCodedDelta.at(x, y);
-								if (dVal == 0.0)
+								if (!isBlockPredValid(bx, by))
 									continue;
-								const double cVal = codedClean.at(x, y);
-								const double clamped = (std::max)(0.0, (std::min)(peakCode, cVal + dVal));
-								outCodedDelta.at(x, y) = clamped - cVal;
+								for (int j = 0; j < 8; ++j)
+								{
+									for (int i = 0; i < 8; ++i)
+									{
+										const int x = bx + i;
+										const int y = by + j;
+										const double dVal = outCodedDelta.at(x, y);
+										if (dVal == 0.0)
+											continue;
+										const double cVal = codedClean.at(x, y);
+										const double clamped = (std::max)(0.0, (std::min)(peakCode, cVal + dVal));
+										outCodedDelta.at(x, y) = clamped - cVal;
+									}
+								}
 							}
 						}
 					}
 				}
 
 				// Layer 4: Shared Output Grain Guard (TdGuardPort) on output ONLY (never touching anchorCanvas_!).
+				// H2: Use `splitActive` consistently; when !splitActive, ALWAYS evaluate TdGuardPort on every cell
+				// using target = inFineE (NEVER skip past the guard when ownGrain == 0 && retainedGrainVar == 0!).
 				TdV2Plane candOut = codedRec;
 				for (int y = codedActive.y0; y < codedActive.y1; ++y)
 					for (int x = codedActive.x0; x < codedActive.x1; ++x)
@@ -2573,7 +3548,7 @@ namespace TdV2
 
 				const ThreeBandPlanes inFullBands = DecomposeActiveBands(codedRec, codedActive, nullptr);
 				const ThreeBandPlanes outFullBands = DecomposeActiveBands(candOut, codedActive, nullptr);
-				const ThreeBandPlanes ownGrainBands = in.hasCleanSplit
+				const ThreeBandPlanes ownGrainBands = splitActive
 					? DecomposeActiveBands(ownGrain, codedActive, nullptr)
 					: ThreeBandPlanes{};
 
@@ -2590,6 +3565,7 @@ namespace TdV2
 
 						const size_t cIdx = static_cast<size_t>(cy) * res.cellsW + cx;
 						double ownGrainE = 0.0, ownGrainFineE = 0.0, inFineE = 0.0, outFineE = 0.0;
+						double inCovOwn = 0.0, outCovOwn = 0.0;
 						size_t cnt = 0;
 						for (int y = y0; y < y1; ++y)
 						{
@@ -2603,10 +3579,12 @@ namespace TdV2
 								const double inf = inFullBands.H.at(x, y);
 								const double outf = outFullBands.H.at(x, y);
 								ownGrainE += og * og;
-								if (in.hasCleanSplit)
+								if (splitActive)
 								{
 									const double ogf = ownGrainBands.H.at(x, y);
 									ownGrainFineE += ogf * ogf;
+									inCovOwn += inf * ogf;
+									outCovOwn += outf * ogf;
 								}
 								inFineE += inf * inf;
 								outFineE += outf * outf;
@@ -2615,15 +3593,31 @@ namespace TdV2
 						}
 						if (cnt == 0) continue;
 						const double invC = 1.0 / static_cast<double>(cnt);
-						if (ownGrainE * invC <= kEngineNumFloor && cellRetainedGrain[cIdx] <= kEngineNumFloor)
+						if (splitActive && ownGrainE * invC <= kEngineNumFloor && cellRetainedGrain[cIdx] <= kEngineNumFloor)
 							continue;
 
 						const double leakedFineE = cellRetainedGrain[cIdx] * gains.fine;
-						const double targetFineE = in.hasCleanSplit
-							? (ownGrainFineE * invC + leakedFineE)
-							: (leakedFineE > kEngineNumFloor ? (std::min)(inFineE * invC, leakedFineE) : (inFineE * invC));
+						// Account for positive correlation between ownGrain and leaked own grain inside cleanCb/Cr:
+						// E[(H(own) + H(leaked))^2] = (sqrt(ownFineE) + sqrt(leakedFineE))^2, capped by inFineE.
+						const double targetStd = std::sqrt(ownGrainFineE * invC) + std::sqrt(leakedFineE > 0.0 ? leakedFineE : 0.0);
+						const double targetFineE = splitActive
+							? (std::min)(inFineE * invC, targetStd * targetStd)
+							: (inFineE * invC);
 
-						const auto gDec = TdGuardPort::Evaluate(targetFineE, outFineE * invC, standIns);
+						// Texture-immune own-grain fine-band covariance check when leaked grain is reported
+						// (1:1 parity with TdV2ReferenceEngine.h): fine scene texture cancels out of
+						// Cov(out_H, ownGrain_H) / Cov(in_H, ownGrain_H).
+						double effOutFineE = outFineE * invC;
+						if (splitActive && ownGrainFineE * invC > kEngineNumFloor && cellRetainedGrain[cIdx] > kEngineNumFloor &&
+						    inCovOwn > kEngineNumFloor)
+						{
+							const double covRatio = outCovOwn > 0.0 ? (outCovOwn / inCovOwn) : 0.0;
+							const double covImpliedOutE = targetFineE * covRatio * covRatio;
+							if (covImpliedOutE < effOutFineE)
+								effOutFineE = covImpliedOutE;
+						}
+
+						const auto gDec = TdGuardPort::Evaluate(targetFineE, effOutFineE, standIns);
 						if (gDec.violated && gDec.addBackFraction > 0.0)
 						{
 							++res.guardViolationCells;
@@ -2657,18 +3651,20 @@ namespace TdV2
 
 			// B8: Apply delivered signed delta strictly inside ActiveRect (Mode::On only; Shadow stays passthrough).
 			if (cfg_.ModifiesPixels())
-				ApplyDeliveredDelta(in, delivActive, res.deliveredDeltaCb, res.deliveredDeltaCr, res, standIns);
+				ApplyDeliveredDelta(in, delivActive, res.deliveredDeltaCb, res.deliveredDeltaCr, res, standIns,
+				                    &nonFiniteCellFlag, res.cellsW, res.cellsH, cellPx);
 
-			// B9: If this frame is an anchor frame, accumulate its grain-free coded chroma + clean luma into
-			// the 4:4:4 anchor memory canvas (strictly grain-free, NEVER contaminated by Layer-4 output add-back!).
-			if (in.isAnchorFrame)
+			// Tally harmonized unique-cell counters (LOW-5: unique cells across refs, bands, and Cb/Cr planes).
+			for (size_t ci = 0; ci < numCells; ++ci)
 			{
-				anchorCanvas_.AccumulateAnchorFrame(
-					codedCleanCb, codedCleanCr, resolveAnchorCleanY(),
-					lumaW, lumaH, in.codedSubsampling, in.siting, lumaActive,
-					in.hasAnchorSplatMotion ? &in.anchorSplatMotion : nullptr,
-					cellPx, cfg_.sourceBits, standIns);
+				if (nonFiniteCellFlag[ci] != 0u) ++res.nonFiniteCells;
+				if (singleRefA2CellFlag[ci] != 0u) ++res.singleRefA2Cells;
+				if (singularCellFlag[ci] != 0u) ++res.singularCells;
 			}
+
+			// B9: If this frame is an anchor frame AND splitActive is true, accumulate its grain-free coded chroma + clean luma
+			// into the 4:4:4 anchor memory canvas (strictly grain-free, NEVER contaminated by Layer-4 add-back or unsplit grain!).
+			ingestAnchorIfSplit();
 
 			return res;
 		}
@@ -2680,13 +3676,20 @@ namespace TdV2
 			const TdV2Plane& dCbPlane,
 			const TdV2Plane& dCrPlane,
 			ChromaProcessResult& res,
-			StandInRegistry* standIns)
+			StandInRegistry* standIns,
+			std::vector<uint8_t>* nonFiniteCellFlag = nullptr,
+			int cellsW = 0,
+			int cellsH = 0,
+			int cellPx = 0)
 		{
 			if (in.deliveredFormat == DeliveredChromaFormat::Rgb444)
 			{
+				const bool trackCells = (nonFiniteCellFlag != nullptr && cellsW > 0 && cellsH > 0 && cellPx > 0 &&
+				                         nonFiniteCellFlag->size() == static_cast<size_t>(cellsW) * static_cast<size_t>(cellsH));
 				bool anyRgbApplyFailed = false;
 				for (int y = delivActive.y0; y < delivActive.y1; ++y)
 				{
+					const int cy = trackCells ? (std::min)(cellsH - 1, y / cellPx) : 0;
 					for (int x = delivActive.x0; x < delivActive.x1; ++x)
 					{
 						if (!in.matrix.ApplySignedChromaDeltaToRgb(
@@ -2696,10 +3699,15 @@ namespace TdV2
 								standIns))
 						{
 							anyRgbApplyFailed = true;
+							if (trackCells)
+							{
+								const int cx = (std::min)(cellsW - 1, x / cellPx);
+								(*nonFiniteCellFlag)[static_cast<size_t>(cy) * cellsW + cx] = 1u;
+							}
 						}
 					}
 				}
-				if (anyRgbApplyFailed)
+				if (anyRgbApplyFailed && !trackCells)
 					++res.nonFiniteCells;
 			}
 			else

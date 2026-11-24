@@ -53,16 +53,21 @@ namespace DitherNeedSeam
 	// A shared product older than this (source seconds, measured by the caller) is not trusted: it counts as missing.
 	constexpr double kMaxProductAgeSeconds = 0.5;
 
-	// Owner Q9a (SD MUST-5): exact binary sub-step quantization loss fraction when a higher-bit-depth
+	// Owner Q9a (SD MUST-5): physics-derived quantization-error RMS ratio when a higher-bit-depth
 	// source (e.g., 10-bit or 12-bit, including TD-cleaned streams) is delivered over a narrower link
-	// (e.g., 8-bit). A source with d = sourceBits - colorBits extra bits has 2^d sub-levels per link step,
-	// so 1 - 2^(-d) of source levels fall between exact link codes (0.75 for 10->8 bit, 0.9375 for 12->8 bit,
-	// 0.0 for sourceBits <= colorBits). Derived strictly from binary quantization physics (Rule 1).
+	// (e.g., 8-bit). Uniform quantization noise variance of an n-bit link is Delta^2 / 12; a finer
+	// (n+d)-bit source (d = sourceBits - colorBits) has quantization variance (Delta * 2^-d)^2 / 12
+	// = 4^-d * (Delta^2 / 12). The additional quantization error variance introduced by truncating
+	// (n+d) -> n is (1 - 4^-d) * (Delta^2 / 12), whose RMS amplitude ratio relative to a full link
+	// quantization step is sqrt(1 - 4^-d) = sqrt(1 - 2^(-2d)) (sqrt(15/16) ~= 0.968246 for 10->8 bit,
+	// sqrt(255/256) ~= 0.998045 for 12->8 bit, 0.0 for d <= 0). Derived strictly from quantization
+	// error variance physics (Rule 1).
 	inline double BitDepthFloor(int sourceBits, int colorBits)
 	{
 		if (sourceBits <= 0 || colorBits <= 0 || sourceBits <= colorBits)
 			return 0.0;
-		return 1.0 - std::ldexp(1.0, -(sourceBits - colorBits));
+		const int extraBits = sourceBits - colorBits;
+		return std::sqrt(1.0 - std::ldexp(1.0, -2 * extraBits));
 	}
 
 	// What the host has this frame. Every pointer may be null (product absent). Ages are seconds since the product was
