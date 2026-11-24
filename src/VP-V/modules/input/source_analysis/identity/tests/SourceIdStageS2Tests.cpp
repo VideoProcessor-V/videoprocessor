@@ -27,6 +27,7 @@
 
 #include "ChainEstimatorFixtures.h"
 #include "GeometryFixtures.h"
+#include "W1DescaleRef.h"
 
 #include <VP-V/modules/input/source_analysis/SourceResolutionDetector.h>
 #include <VP-V/modules/input/source_analysis/SourceResolutionMonitor.h>
@@ -44,6 +45,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <memory>
 #include <string>
@@ -448,6 +450,20 @@ namespace Tests
 			plain.SetMode(C::EstimatorMode::On);
 			withS2Calls.SetMode(C::EstimatorMode::On);
 
+			// Opus MED-2: Genuine verbatim W1 (bfd055d1f) DescaleVerifier & PowerProbe reference verification
+			// on the exact test snapshots (proving default-OFF live code + SID-OPT scratch hoisting / workspace cache
+			// match verbatim bfd055d1f W1 byte-for-byte via std::memcmp == 0, NOT self-referenced live-vs-live only).
+			C::DescaleVerifier liveVerifier;
+			W1DescaleRef::DescaleVerifierW1 w1Verifier;
+			C::DescaleVerifier liveProbeVerifier;
+			W1DescaleRef::DescaleVerifierW1 w1ProbeVerifier;
+			C::PowerProbe::Workspace probeWs[2];
+			const C::VerifyOptions defVerifyOpt; // all S3/SID-OPT switches OFF by default
+			Assert::IsFalse(defVerifyOpt.p3TwoPass);
+			const C::ProbeSettings defProbeSet;
+			const int candsAxis[2][3] = { { 960, 1280, 1440 }, { 540, 720, 900 } };
+			bool checkedNegativeControl = false;
+
 			for (int i = 0; i < 6; ++i)
 			{
 				const uint64_t seq = static_cast<uint64_t>(10 + i * 10);
@@ -467,7 +483,110 @@ namespace Tests
 				Assert::IsTrue(withS2Calls.Held().ReadLatest(0, rB));
 				Assert::IsTrue(ChainFx::SameBytes(G::Pack(rA), G::Pack(rB)),
 					L"Stage S2 OFF must stay byte-identical to W1 even when S2 events are posted");
+
+				// Compare live DescaleVerifier & PowerProbe against verbatim bfd055d1f W1 on both axes:
+				const int step = C::DetectStepCodes(snap);
+				const double floorCodes = static_cast<double>(step) / std::sqrt(12.0);
+				for (int axis = 0; axis < 2; ++axis)
+				{
+					C::LineSet ls;
+					Assert::IsTrue(C::ToLineSet(snap, axis, ls));
+
+					C::VerifyResult vrLive, vrW1;
+					Assert::IsTrue(liveVerifier.Evaluate(ls, candsAxis[axis], 3, defVerifyOpt, vrLive));
+					Assert::IsTrue(w1Verifier.Evaluate(ls, candsAxis[axis], 3, defVerifyOpt, vrW1));
+					Assert::IsTrue(W1DescaleRef::MemEq(vrLive.reason, vrW1.reason),
+						L"MED-2: VerifyResult::reason must match verbatim bfd055d1f W1 byte-for-byte");
+					Assert::AreEqual(vrW1.candidates.size(), vrLive.candidates.size());
+
+					int exactCount = 0;
+					for (size_t ci = 0; ci < vrLive.candidates.size(); ++ci)
+					{
+						const C::CandidateResult& a = vrLive.candidates[ci];
+						const C::CandidateResult& b = vrW1.candidates[ci];
+						Assert::AreEqual(b.valid, a.valid);
+						Assert::AreEqual(b.exactDone, a.exactDone);
+						Assert::IsTrue(W1DescaleRef::MemEq(a.reason, b.reason));
+						Assert::IsTrue(W1DescaleRef::MemEq(a.nProposed, b.nProposed));
+						Assert::IsTrue(W1DescaleRef::MemEq(a.n, b.n));
+						Assert::IsTrue(W1DescaleRef::MemEq(a.kernel, b.kernel));
+						Assert::IsTrue(W1DescaleRef::MemEq(a.family, b.family));
+						Assert::IsTrue(W1DescaleRef::MemEq(a.phase, b.phase));
+						Assert::IsTrue(W1DescaleRef::MemEq(a.stat, b.stat));
+						Assert::IsTrue(W1DescaleRef::MemEq(a.coarseStat, b.coarseStat));
+						Assert::IsTrue(W1DescaleRef::MemEq(a.kernelMargin, b.kernelMargin));
+						Assert::IsTrue(W1DescaleRef::MemEq(a.familyMargin, b.familyMargin));
+						Assert::IsTrue(W1DescaleRef::MemEq(a.kernelMask, b.kernelMask));
+						for (int ki = 0; ki < C::kKernelCount; ++ki)
+							Assert::IsTrue(W1DescaleRef::MemEq(a.kernelT[ki], b.kernelT[ki]));
+						Assert::IsTrue(W1DescaleRef::MemEq(a.floorCodes, b.floorCodes));
+						Assert::IsTrue(W1DescaleRef::MemEq(a.baselineMedian, b.baselineMedian));
+						Assert::IsTrue(W1DescaleRef::MemEq(a.lineCount, b.lineCount));
+						Assert::IsTrue(W1DescaleRef::MemEq(a.segCount, b.segCount));
+						Assert::AreEqual(b.lineStat.size(), a.lineStat.size());
+						Assert::AreEqual(b.lineBase.size(), a.lineBase.size());
+						Assert::AreEqual(b.lineRms.size(), a.lineRms.size());
+						Assert::AreEqual(b.segSum.size(), a.segSum.size());
+						Assert::AreEqual(b.segRows.size(), a.segRows.size());
+						Assert::AreEqual(b.segStat.size(), a.segStat.size());
+						Assert::AreEqual(b.segBase.size(), a.segBase.size());
+						for (size_t li = 0; li < a.lineStat.size(); ++li)
+						{
+							Assert::IsTrue(W1DescaleRef::MemEq(a.lineStat[li], b.lineStat[li]));
+							Assert::IsTrue(W1DescaleRef::MemEq(a.lineBase[li], b.lineBase[li]));
+							Assert::IsTrue(W1DescaleRef::MemEq(a.lineRms[li], b.lineRms[li]));
+						}
+						for (size_t si = 0; si < a.segStat.size(); ++si)
+						{
+							Assert::IsTrue(W1DescaleRef::MemEq(a.segSum[si], b.segSum[si]));
+							Assert::IsTrue(W1DescaleRef::MemEq(a.segRows[si], b.segRows[si]));
+							Assert::IsTrue(W1DescaleRef::MemEq(a.segStat[si], b.segStat[si]));
+							Assert::IsTrue(W1DescaleRef::MemEq(a.segBase[si], b.segBase[si]));
+						}
+						if (a.exactDone)
+						{
+							++exactCount;
+							Assert::IsTrue(!a.lineStat.empty() && !a.segStat.empty());
+						}
+					}
+					Assert::IsTrue(exactCount >= 1, L"MED-2: at least one candidate must complete exact stage");
+
+					C::ProbeResult prLive, prW1;
+					Assert::IsTrue(C::PowerProbe::Run(liveProbeVerifier, ls, floorCodes, static_cast<double>(step), defProbeSet, prLive, &probeWs[axis]));
+					Assert::IsTrue(W1DescaleRef::PowerProbeW1::Run(w1ProbeVerifier, ls, floorCodes, static_cast<double>(step), defProbeSet, prW1));
+					Assert::AreEqual(prW1.ran, prLive.ran);
+					Assert::AreEqual(prW1.seen, prLive.seen);
+					Assert::IsTrue(W1DescaleRef::MemEq(prLive.stat, prW1.stat));
+					Assert::IsTrue(W1DescaleRef::MemEq(prLive.gatedLines, prW1.gatedLines));
+					Assert::IsTrue(W1DescaleRef::MemEq(prLive.reason, prW1.reason));
+					Assert::IsTrue(W1DescaleRef::MemEq(prLive.meanCode, prW1.meanCode));
+					Assert::IsTrue(W1DescaleRef::MemEq(prLive.medianLineStd, prW1.medianLineStd));
+					Assert::IsTrue(W1DescaleRef::MemEq(prLive.syntheticAxisLen, prW1.syntheticAxisLen));
+					Assert::IsTrue(W1DescaleRef::MemEq(prLive.syntheticLength, prW1.syntheticLength));
+
+					// Mandatory Rule 3 in-test negative control: 1-ULP perturbation on stat / floorCodes / probe.stat MUST fail memcmp == 0.
+					if (!checkedNegativeControl)
+					{
+						for (size_t ci = 0; ci < vrLive.candidates.size(); ++ci)
+						{
+							if (!vrLive.candidates[ci].exactDone)
+								continue;
+							const double statPerturbed = std::nextafter(vrLive.candidates[ci].stat, vrLive.candidates[ci].stat + 1.0);
+							const double floorPerturbed = std::nextafter(vrLive.candidates[ci].floorCodes, vrLive.candidates[ci].floorCodes + 1.0);
+							const double probePerturbed = std::nextafter(prLive.stat, prLive.stat + 1.0);
+							Assert::IsFalse(W1DescaleRef::MemEq(vrLive.candidates[ci].stat, statPerturbed),
+								L"negative control: 1-ULP perturbation on stat must fail memcmp == 0");
+							Assert::IsFalse(W1DescaleRef::MemEq(vrLive.candidates[ci].floorCodes, floorPerturbed),
+								L"negative control: 1-ULP perturbation on floorCodes must fail memcmp == 0");
+							Assert::IsFalse(W1DescaleRef::MemEq(prLive.stat, probePerturbed),
+								L"negative control: 1-ULP perturbation on PowerProbe stat must fail memcmp == 0");
+							checkedNegativeControl = true;
+							break;
+						}
+					}
+				}
 			}
+			Assert::IsTrue(checkedNegativeControl, L"MED-2: 1-ULP negative control must have executed");
 
 			const C::EstimatorCounters cnt = withS2Calls.GetCounters();
 			Assert::AreEqual(uint64_t(6), cnt.evaluations);

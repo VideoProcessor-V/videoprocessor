@@ -23,6 +23,7 @@
 #include "CppUnitTest.h"
 
 #include "ChainEstimatorFixtures.h"
+#include "W1DescaleRef.h"
 
 #include <VP-V/core/RobustStats.h>
 #include <VP-V/modules/input/source_analysis/SourceResolutionDetector.h>
@@ -2159,6 +2160,20 @@ namespace Tests
 			estDefault.SetMode(C::EstimatorMode::On);
 			estExplicit.SetMode(C::EstimatorMode::On);
 
+			// Opus MED-2: Genuine verbatim W1 (bfd055d1f) DescaleVerifier & PowerProbe reference verification
+			// on the exact 4K snapshots (upscaled 1080p->4K + native 4K), proving live default-OFF code +
+			// SID-OPT scratch hoisting / workspace cache match verbatim bfd055d1f W1 byte-for-byte via std::memcmp == 0.
+			C::DescaleVerifier liveVerifier;
+			W1DescaleRef::DescaleVerifierW1 w1Verifier;
+			C::DescaleVerifier liveProbeVerifier;
+			W1DescaleRef::DescaleVerifierW1 w1ProbeVerifier;
+			C::PowerProbe::Workspace probeWs[2];
+			const C::VerifyOptions defVerifyOpt;
+			Assert::IsFalse(defVerifyOpt.p3TwoPass);
+			const C::ProbeSettings defProbeSet;
+			const int candsAxis[2][3] = { { 960, 1280, 1920 }, { 540, 720, 1080 } };
+			bool checkedNegativeControl = false;
+
 			for (int i = 0; i < 6; ++i)
 			{
 				const uint64_t seq = static_cast<uint64_t>(10 + i * 10);
@@ -2180,7 +2195,110 @@ namespace Tests
 				Assert::IsTrue(ChainFx::SameBytes(G::Pack(rA), G::Pack(rB)),
 					L"default settings and explicit OFF S3 setters must be byte-identical");
 				Assert::AreEqual(estDefault.StatusLine(), estExplicit.StatusLine());
+
+				// Compare live DescaleVerifier & PowerProbe against verbatim bfd055d1f W1 on both axes:
+				const int step = C::DetectStepCodes(snap);
+				const double floorCodes = static_cast<double>(step) / std::sqrt(12.0);
+				for (int axis = 0; axis < 2; ++axis)
+				{
+					C::LineSet ls;
+					Assert::IsTrue(C::ToLineSet(snap, axis, ls));
+
+					C::VerifyResult vrLive, vrW1;
+					Assert::IsTrue(liveVerifier.Evaluate(ls, candsAxis[axis], 3, defVerifyOpt, vrLive));
+					Assert::IsTrue(w1Verifier.Evaluate(ls, candsAxis[axis], 3, defVerifyOpt, vrW1));
+					Assert::IsTrue(W1DescaleRef::MemEq(vrLive.reason, vrW1.reason),
+						L"MED-2: VerifyResult::reason must match verbatim bfd055d1f W1 byte-for-byte");
+					Assert::AreEqual(vrW1.candidates.size(), vrLive.candidates.size());
+
+					int exactCount = 0;
+					for (size_t ci = 0; ci < vrLive.candidates.size(); ++ci)
+					{
+						const C::CandidateResult& a = vrLive.candidates[ci];
+						const C::CandidateResult& b = vrW1.candidates[ci];
+						Assert::AreEqual(b.valid, a.valid);
+						Assert::AreEqual(b.exactDone, a.exactDone);
+						Assert::IsTrue(W1DescaleRef::MemEq(a.reason, b.reason));
+						Assert::IsTrue(W1DescaleRef::MemEq(a.nProposed, b.nProposed));
+						Assert::IsTrue(W1DescaleRef::MemEq(a.n, b.n));
+						Assert::IsTrue(W1DescaleRef::MemEq(a.kernel, b.kernel));
+						Assert::IsTrue(W1DescaleRef::MemEq(a.family, b.family));
+						Assert::IsTrue(W1DescaleRef::MemEq(a.phase, b.phase));
+						Assert::IsTrue(W1DescaleRef::MemEq(a.stat, b.stat));
+						Assert::IsTrue(W1DescaleRef::MemEq(a.coarseStat, b.coarseStat));
+						Assert::IsTrue(W1DescaleRef::MemEq(a.kernelMargin, b.kernelMargin));
+						Assert::IsTrue(W1DescaleRef::MemEq(a.familyMargin, b.familyMargin));
+						Assert::IsTrue(W1DescaleRef::MemEq(a.kernelMask, b.kernelMask));
+						for (int ki = 0; ki < C::kKernelCount; ++ki)
+							Assert::IsTrue(W1DescaleRef::MemEq(a.kernelT[ki], b.kernelT[ki]));
+						Assert::IsTrue(W1DescaleRef::MemEq(a.floorCodes, b.floorCodes));
+						Assert::IsTrue(W1DescaleRef::MemEq(a.baselineMedian, b.baselineMedian));
+						Assert::IsTrue(W1DescaleRef::MemEq(a.lineCount, b.lineCount));
+						Assert::IsTrue(W1DescaleRef::MemEq(a.segCount, b.segCount));
+						Assert::AreEqual(b.lineStat.size(), a.lineStat.size());
+						Assert::AreEqual(b.lineBase.size(), a.lineBase.size());
+						Assert::AreEqual(b.lineRms.size(), a.lineRms.size());
+						Assert::AreEqual(b.segSum.size(), a.segSum.size());
+						Assert::AreEqual(b.segRows.size(), a.segRows.size());
+						Assert::AreEqual(b.segStat.size(), a.segStat.size());
+						Assert::AreEqual(b.segBase.size(), a.segBase.size());
+						for (size_t li = 0; li < a.lineStat.size(); ++li)
+						{
+							Assert::IsTrue(W1DescaleRef::MemEq(a.lineStat[li], b.lineStat[li]));
+							Assert::IsTrue(W1DescaleRef::MemEq(a.lineBase[li], b.lineBase[li]));
+							Assert::IsTrue(W1DescaleRef::MemEq(a.lineRms[li], b.lineRms[li]));
+						}
+						for (size_t si = 0; si < a.segStat.size(); ++si)
+						{
+							Assert::IsTrue(W1DescaleRef::MemEq(a.segSum[si], b.segSum[si]));
+							Assert::IsTrue(W1DescaleRef::MemEq(a.segRows[si], b.segRows[si]));
+							Assert::IsTrue(W1DescaleRef::MemEq(a.segStat[si], b.segStat[si]));
+							Assert::IsTrue(W1DescaleRef::MemEq(a.segBase[si], b.segBase[si]));
+						}
+						if (a.exactDone)
+						{
+							++exactCount;
+							Assert::IsTrue(!a.lineStat.empty() && !a.segStat.empty());
+						}
+					}
+					Assert::IsTrue(exactCount >= 1, L"MED-2: at least one candidate must complete exact stage");
+
+					C::ProbeResult prLive, prW1;
+					Assert::IsTrue(C::PowerProbe::Run(liveProbeVerifier, ls, floorCodes, static_cast<double>(step), defProbeSet, prLive, &probeWs[axis]));
+					Assert::IsTrue(W1DescaleRef::PowerProbeW1::Run(w1ProbeVerifier, ls, floorCodes, static_cast<double>(step), defProbeSet, prW1));
+					Assert::AreEqual(prW1.ran, prLive.ran);
+					Assert::AreEqual(prW1.seen, prLive.seen);
+					Assert::IsTrue(W1DescaleRef::MemEq(prLive.stat, prW1.stat));
+					Assert::IsTrue(W1DescaleRef::MemEq(prLive.gatedLines, prW1.gatedLines));
+					Assert::IsTrue(W1DescaleRef::MemEq(prLive.reason, prW1.reason));
+					Assert::IsTrue(W1DescaleRef::MemEq(prLive.meanCode, prW1.meanCode));
+					Assert::IsTrue(W1DescaleRef::MemEq(prLive.medianLineStd, prW1.medianLineStd));
+					Assert::IsTrue(W1DescaleRef::MemEq(prLive.syntheticAxisLen, prW1.syntheticAxisLen));
+					Assert::IsTrue(W1DescaleRef::MemEq(prLive.syntheticLength, prW1.syntheticLength));
+
+					// Mandatory Rule 3 in-test negative control: 1-ULP perturbation on stat / floorCodes / probe.stat MUST fail memcmp == 0.
+					if (!checkedNegativeControl)
+					{
+						for (size_t ci = 0; ci < vrLive.candidates.size(); ++ci)
+						{
+							if (!vrLive.candidates[ci].exactDone)
+								continue;
+							const double statPerturbed = std::nextafter(vrLive.candidates[ci].stat, vrLive.candidates[ci].stat + 1.0);
+							const double floorPerturbed = std::nextafter(vrLive.candidates[ci].floorCodes, vrLive.candidates[ci].floorCodes + 1.0);
+							const double probePerturbed = std::nextafter(prLive.stat, prLive.stat + 1.0);
+							Assert::IsFalse(W1DescaleRef::MemEq(vrLive.candidates[ci].stat, statPerturbed),
+								L"negative control: 1-ULP perturbation on stat must fail memcmp == 0");
+							Assert::IsFalse(W1DescaleRef::MemEq(vrLive.candidates[ci].floorCodes, floorPerturbed),
+								L"negative control: 1-ULP perturbation on floorCodes must fail memcmp == 0");
+							Assert::IsFalse(W1DescaleRef::MemEq(prLive.stat, probePerturbed),
+								L"negative control: 1-ULP perturbation on PowerProbe stat must fail memcmp == 0");
+							checkedNegativeControl = true;
+							break;
+						}
+					}
+				}
 			}
+			Assert::IsTrue(checkedNegativeControl, L"MED-2: 1-ULP negative control must have executed");
 
 			Assert::AreEqual<size_t>(6, detA.size());
 			Assert::AreEqual<size_t>(6, detB.size());
@@ -4127,33 +4245,66 @@ namespace Tests
 			}
 		}
 
-		// 16. M5 (MEDIUM): ClassifyBitDepthFromStep(step=1, outputBits=10, empFloorCodes >= 4/sqrt(12)*(1-0.03))
-		//     MUST classify an 8-bit-in-10-bit HDMI loop as BitDepthClass::N8 (NOT N10!), with negative controls
-		//     at empFloorCodes = 0.0 / 0.289 -> N10, plus end-to-end ChainEstimator EvaluationDetail verification!
+		// 16. M5 / Opus MED-1: ClassifyBitDepthFromStep(step=1, outputBits=10, empFloorCodes in [4/sqrt(12)*(1-0.03), 4.0),
+		//     hasEightBitCodeLadder=true) MUST classify an 8-bit-in-10-bit bit-replicated HDMI loop as BitDepthClass::N8,
+		//     while clean 10-bit, grainy 10-bit (no code ladder), and 12-bit links preserve N10 / N12!
 		TEST_METHOD(M5ClassifyBitDepthFromStepUsesEmpiricalFloorFor8In10HdmiLoop)
 		{
 			using namespace S3Fx;
 
 			// (a) Direct ClassifyBitDepthFromStep contract + negative controls:
-			Assert::IsTrue(C::ClassifyBitDepthFromStep(1, 10, 1.30) == C::BitDepthClass::N8,
-				L"M5: step=1, outputBits=10, empFloor=1.30 (8-in-10 HDMI loop) must classify as N8");
-			Assert::IsTrue(C::ClassifyBitDepthFromStep(1, 10, 1.155) == C::BitDepthClass::N8,
-				L"M5: empFloor right at 8-bit uniform floor (4/sqrt(12) ~= 1.155) classifies as N8");
+			Assert::IsTrue(C::ClassifyBitDepthFromStep(1, 10, 1.30, true) == C::BitDepthClass::N8,
+				L"M5: step=1, outputBits=10, empFloor=1.30 with 8-bit code ladder (HDMI loop) must classify as N8");
+			Assert::IsTrue(C::ClassifyBitDepthFromStep(1, 10, 1.155, true) == C::BitDepthClass::N8,
+				L"M5: empFloor right at 8-bit uniform floor (4/sqrt(12) ~= 1.155) with 8-bit code ladder classifies as N8");
 
-			// Same-input negative controls: without elevated empirical floor, step=1 outputBits=10 classifies as N10!
-			Assert::IsTrue(C::ClassifyBitDepthFromStep(1, 10, 0.0) == C::BitDepthClass::N10,
-				L"negative control: step=1, outputBits=10, empFloor=0.0 classifies as N10");
-			Assert::IsTrue(C::ClassifyBitDepthFromStep(1, 10, 0.289) == C::BitDepthClass::N10,
-				L"negative control: step=1, outputBits=10, empFloor=0.289 (true 10-bit floor) classifies as N10");
+			// Same-input negative controls:
+			//   - without elevated empirical floor (with or without ladder), step=1 outputBits=10 classifies as N10;
+			//   - without 8-bit code ladder (grainy 10-bit), elevated empirical floor stays N10;
+			//   - 12-bit output link NEVER routes to N8 even with elevated floor and ladder flag.
+			Assert::IsTrue(C::ClassifyBitDepthFromStep(1, 10, 0.0, false) == C::BitDepthClass::N10,
+				L"negative control: step=1, outputBits=10, empFloor=0.0, ladder=false classifies as N10");
+			Assert::IsTrue(C::ClassifyBitDepthFromStep(1, 10, 0.0, true) == C::BitDepthClass::N10,
+				L"negative control: step=1, outputBits=10, empFloor=0.0, ladder=true classifies as N10");
+			Assert::IsTrue(C::ClassifyBitDepthFromStep(1, 10, 0.289, false) == C::BitDepthClass::N10,
+				L"negative control: step=1, outputBits=10, empFloor=0.289 (true 10-bit floor), ladder=false classifies as N10");
+			Assert::IsTrue(C::ClassifyBitDepthFromStep(1, 10, 0.289, true) == C::BitDepthClass::N10,
+				L"negative control: step=1, outputBits=10, empFloor=0.289 (true 10-bit floor), ladder=true classifies as N10");
+			Assert::IsTrue(C::ClassifyBitDepthFromStep(1, 10, 1.30, false) == C::BitDepthClass::N10,
+				L"negative control (MED-1): step=1, outputBits=10, empFloor=1.30 WITHOUT 8-bit code ladder stays N10");
+			Assert::IsTrue(C::ClassifyBitDepthFromStep(1, 12, 1.30, true) == C::BitDepthClass::N12,
+				L"negative control (MED-1): outputBits=12 NEVER routes to N8 even with empFloor=1.30 and ladder=true");
 
-			// (b) End-to-end ChainEstimator on synthetic 8-in-10 HDMI loop snapshot (step==1, sigma=1.30):
-			//     EvaluationDetail::nullTableDepthClass MUST resolve to BitDepthClass::N8!
-			const C::LineSnapshot loopSnap = MakeSynthSnapshot(kUhdW, kUhdH, 1920, 1080, kBilinear, 1,
-				10, 1000000, 0xE501ull, true, 1.30, false, 0.75);
+			// (b) End-to-end ChainEstimator on a genuine 8-bit-in-10-bit bit-replicated HDMI loop snapshot:
+			//     Start from 8-bit TPDF-dithered codes (step == 4, v8 in [16..235]) and apply HDMI bit-replication
+			//     v10 = (v8 << 2) | (v8 >> 6), so DetectStepCodes == 1 (lower 2 bits non-zero for v8 >= 64),
+			//     DetectEightBitCodeLadder == true (1 dominant rung per 4-code quartet across >= 16 quartets),
+			//     and empirical floor measures 8-bit TPDF noise in (1.12, 4.0) -> MUST resolve to BitDepthClass::N8!
+			C::LineSnapshot loopSnap = MakeSynthSnapshot(kUhdW, kUhdH, 1920, 1080, kBilinear, 4,
+				10, 1000000, 0xE501ull, true, 0.0, true, 0.75);
+			auto bitReplicate8To10 = [](std::vector<uint16_t>& codes) {
+				for (size_t i = 0; i < codes.size(); ++i)
+				{
+					int v8 = static_cast<int>(std::floor(static_cast<double>(codes[i]) / 4.0 + 0.5));
+					if (v8 < 16) v8 = 16;
+					if (v8 > 235) v8 = 235;
+					codes[i] = static_cast<uint16_t>((v8 << 2) | (v8 >> 6));
+				}
+			};
+			bitReplicate8To10(loopSnap.rows);
+			bitReplicate8To10(loopSnap.cols);
+
 			const C::LineSnapshot clean10Snap = MakeSynthSnapshot(kUhdW, kUhdH, 1920, 1080, kBilinear, 1,
 				20, 2000000, 0xE502ull, true, 0.0, false, 0.75);
-			Assert::AreEqual(1, C::DetectStepCodes(loopSnap), L"fixture: 8-in-10 loop reads step==1 to bit-mask");
+			const C::LineSnapshot grainy10Snap = MakeSynthSnapshot(kUhdW, kUhdH, 1920, 1080, kBilinear, 1,
+				30, 3000000, 0xE503ull, true, 1.50, false, 0.75);
+
+			Assert::AreEqual(1, C::DetectStepCodes(loopSnap), L"fixture: bit-replicated 8-in-10 HDMI loop reads step==1");
+			Assert::IsTrue(C::DetectEightBitCodeLadder(loopSnap), L"fixture: bit-replicated 8-in-10 HDMI loop has 8-bit code ladder");
 			Assert::AreEqual(1, C::DetectStepCodes(clean10Snap), L"fixture: clean 10-bit reads step==1");
+			Assert::IsFalse(C::DetectEightBitCodeLadder(clean10Snap), L"fixture: clean 10-bit has no 8-bit code ladder");
+			Assert::AreEqual(1, C::DetectStepCodes(grainy10Snap), L"fixture: grainy 10-bit reads step==1");
+			Assert::IsFalse(C::DetectEightBitCodeLadder(grainy10Snap), L"fixture: grainy 10-bit (sigma=1.5) has no 8-bit code ladder");
 
 			ChainFx::ManualClock clk;
 			C::EstimatorSettings cfg;
@@ -4168,16 +4319,25 @@ namespace Tests
 
 			clk.Set(1000.0);
 			Assert::IsTrue(est.SubmitLines(loopSnap));
-			Assert::IsTrue(det.empiricalFloorValid[0] && det.empiricalFloorCodes[0] > 1.12,
-				L"fixture: empirical floor measured 8-bit-scale noise on 8-in-10 loop");
+			Assert::IsTrue(det.empiricalFloorValid[0] && det.empiricalFloorCodes[0] > 1.12 && det.empiricalFloorCodes[0] < 4.0,
+				L"fixture: empirical floor measured 8-bit-scale noise in (1.12, 4.0) on bit-replicated 8-in-10 loop");
 			Assert::IsTrue(det.nullTableDepthClass == C::BitDepthClass::N8,
-				L"M5: ChainEstimator must classify 8-in-10 HDMI loop snapshot as BitDepthClass::N8");
+				L"M5: ChainEstimator must classify bit-replicated 8-in-10 HDMI loop snapshot as BitDepthClass::N8");
 
-			// Same-input negative control: clean 10-bit snapshot on the same 10-bit link classifies as N10!
+			// Same-input negative control 1: clean 10-bit snapshot on the same 10-bit link classifies as N10!
 			clk.Set(2500.0);
 			Assert::IsTrue(est.SubmitLines(clean10Snap));
 			Assert::IsTrue(det.nullTableDepthClass == C::BitDepthClass::N10,
 				L"negative control: clean 10-bit snapshot classifies as BitDepthClass::N10");
+
+			// Same-input negative control 2: grainy 10-bit snapshot (sigma=1.5, elevated empirical floor in (1.12, 4.0),
+			// NO 8-bit code ladder) on the same 10-bit link MUST stay N10!
+			clk.Set(4000.0);
+			Assert::IsTrue(est.SubmitLines(grainy10Snap));
+			Assert::IsTrue(det.empiricalFloorValid[0] && det.empiricalFloorCodes[0] > 1.12 && det.empiricalFloorCodes[0] < 4.0,
+				L"fixture: grainy 10-bit snapshot also has empirical floor in (1.12, 4.0)");
+			Assert::IsTrue(det.nullTableDepthClass == C::BitDepthClass::N10,
+				L"negative control (MED-1): grainy 10-bit snapshot without 8-bit code ladder must stay BitDepthClass::N10");
 		}
 
 		// 17. M8 (MEDIUM): Tracker::Settings::ditherFloorDetailAbove = true MUST NOT starve an UNDITHERED low-level
@@ -4344,6 +4504,232 @@ namespace Tests
 			Assert::IsTrue(det.empiricalFloorMode == C::EmpiricalFloorMode::Live,
 				L"L3: SetEdgeStatsSettings(es, true) transitions cleanly to Live");
 			Assert::IsTrue(det.axis[0].floorCodes > 0.95);
+		}
+
+		// 19. Opus MED-1 (Red-First): Grainy native 10-bit and 12-bit streams (continuous codes, step == 1,
+		//     empirical floor ~1.5-2.0 codes) MUST preserve BitDepthClass::N10 / BitDepthClass::N12 and NEVER
+		//     misroute to BitDepthClass::N8 (tested both directly on ClassifyBitDepthFromStep and end-to-end
+		//     through ChainEstimator::SubmitLines, with true 8-bit negative controls).
+		TEST_METHOD(OpusMed1Grainy10BitAnd12BitPreserveDepthClass)
+		{
+			using namespace S3Fx;
+
+			// (a) Direct ClassifyBitDepthFromStep contract (3-arg call: no 8-bit code ladder asserted):
+			Assert::IsTrue(C::ClassifyBitDepthFromStep(1, 10, 1.5) == C::BitDepthClass::N10,
+				L"MED-1: grainy 10-bit native (step==1, sigma==1.5) must classify as N10, not N8");
+			Assert::IsTrue(C::ClassifyBitDepthFromStep(1, 12, 1.5) == C::BitDepthClass::N12,
+				L"MED-1: grainy 12-bit native (step==1, sigma==1.5) must classify as N12, not N8");
+			Assert::IsTrue(C::ClassifyBitDepthFromStep(1, 12, 2.0) == C::BitDepthClass::N12,
+				L"MED-1: grainy 12-bit native (step==1, sigma==2.0) must classify as N12, not N8");
+
+			// Negative controls on ClassifyBitDepthFromStep: genuine 8-bit step or 8-bit output MUST stay N8.
+			Assert::IsTrue(C::ClassifyBitDepthFromStep(4, 10, 0.0) == C::BitDepthClass::N8,
+				L"negative control: step==4 on 10-bit link must classify as N8");
+			Assert::IsTrue(C::ClassifyBitDepthFromStep(1, 8, 0.0) == C::BitDepthClass::N8,
+				L"negative control: outputBits==8 with step==1 must classify as N8");
+			Assert::IsTrue(C::ClassifyBitDepthFromStep(4, 12, 0.0) == C::BitDepthClass::N8,
+				L"negative control: step==4 on 12-bit link must classify as N8");
+
+			// (b) End-to-end ChainEstimator path on continuous grainy native 4K snapshot (step == 1, sigma == 1.50):
+			const C::LineSnapshot grainy10Snap = MakeSynthSnapshot(kUhdW, kUhdH, kUhdW, kUhdH, kBilinear, 1,
+				10, 1000000, 0xF101ull, true, 1.50, false, 0.75);
+			Assert::AreEqual(1, C::DetectStepCodes(grainy10Snap),
+				L"fixture: continuous grainy 10-bit snapshot must have step==1");
+
+			C::EstimatorSettings cfg;
+			cfg.useDepthNullTables = true;
+			cfg.empiricalFloorMode = C::EmpiricalFloorMode::Live;
+
+			// 10-bit output link with grainy 10-bit native content -> MUST preserve BitDepthClass::N10:
+			{
+				ChainFx::ManualClock clk;
+				C::ChainEstimator est(cfg, clk.Fn());
+				est.SetSynchronous(true);
+				est.SetDiagnosticDepths(10, 10);
+				C::EvaluationDetail det;
+				est.SetEvaluationObserver([&](const C::EvaluationDetail& d) { det = d; });
+				est.SetMode(C::EstimatorMode::On);
+
+				clk.Set(1000.0);
+				Assert::IsTrue(est.SubmitLines(grainy10Snap));
+				Assert::IsTrue(det.empiricalFloorValid[0] && det.empiricalFloorCodes[0] > 1.15 && det.empiricalFloorCodes[0] < 4.0,
+					L"fixture: empirical floor on grainy 10-bit native sits in (1.15, 4.0) hazard range");
+				Assert::IsTrue(det.nullTableDepthClass == C::BitDepthClass::N10,
+					L"MED-1: ChainEstimator must preserve BitDepthClass::N10 on grainy 10-bit native content");
+			}
+
+			// 12-bit output link with grainy 12-bit native content -> MUST preserve BitDepthClass::N12:
+			{
+				ChainFx::ManualClock clk;
+				C::ChainEstimator est(cfg, clk.Fn());
+				est.SetSynchronous(true);
+				est.SetDiagnosticDepths(12, 12);
+				C::EvaluationDetail det;
+				est.SetEvaluationObserver([&](const C::EvaluationDetail& d) { det = d; });
+				est.SetMode(C::EstimatorMode::On);
+
+				clk.Set(1000.0);
+				Assert::IsTrue(est.SubmitLines(grainy10Snap));
+				Assert::IsTrue(det.empiricalFloorValid[0] && det.empiricalFloorCodes[0] > 1.15 && det.empiricalFloorCodes[0] < 4.0,
+					L"fixture: empirical floor on grainy 12-bit native sits in (1.15, 4.0) hazard range");
+				Assert::IsTrue(det.nullTableDepthClass == C::BitDepthClass::N12,
+					L"MED-1: ChainEstimator must preserve BitDepthClass::N12 on grainy 12-bit native content");
+			}
+
+			// End-to-end negative controls:
+			//   - Same grainy snapshot on an explicit 8-bit link (SetDiagnosticDepths(8, 8)) MUST classify as N8.
+			//   - True 8-bit quantized snapshot (step == 4) on a 10-bit link MUST classify as N8.
+			{
+				ChainFx::ManualClock clk;
+				C::ChainEstimator est(cfg, clk.Fn());
+				est.SetSynchronous(true);
+				est.SetDiagnosticDepths(8, 8);
+				C::EvaluationDetail det;
+				est.SetEvaluationObserver([&](const C::EvaluationDetail& d) { det = d; });
+				est.SetMode(C::EstimatorMode::On);
+
+				clk.Set(1000.0);
+				Assert::IsTrue(est.SubmitLines(grainy10Snap));
+				Assert::IsTrue(det.nullTableDepthClass == C::BitDepthClass::N8,
+					L"negative control: same snapshot on outputBits==8 link must classify as N8");
+			}
+			{
+				const C::LineSnapshot true8Snap = MakeSynthSnapshot(kUhdW, kUhdH, kUhdW, kUhdH, kBilinear, 4,
+					20, 2000000, 0xF102ull, true, 0.0, false, 0.75);
+				Assert::AreEqual(4, C::DetectStepCodes(true8Snap));
+				ChainFx::ManualClock clk;
+				C::ChainEstimator est(cfg, clk.Fn());
+				est.SetSynchronous(true);
+				est.SetDiagnosticDepths(10, 10);
+				C::EvaluationDetail det;
+				est.SetEvaluationObserver([&](const C::EvaluationDetail& d) { det = d; });
+				est.SetMode(C::EstimatorMode::On);
+
+				clk.Set(1000.0);
+				Assert::IsTrue(est.SubmitLines(true8Snap));
+				Assert::IsTrue(det.nullTableDepthClass == C::BitDepthClass::N8,
+					L"negative control: true 8-bit (step==4) snapshot on 10-bit link must classify as N8");
+			}
+		}
+
+		// 20. Opus LOW-2 (Red-First): MeasureTpdfTailFloor must enforce strict disjointness between the above
+		//     detail band [a0..a1] and the tail band [tail0..tail1] (rejecting overlap at ratio=0.75 and 5/6)
+		//     AND reject decaying 1/f native detail via log-log spectral slope, while still starving genuine
+		//     flat white TPDF dither at ratio=0.5 where the tail is disjoint.
+		TEST_METHOD(OpusLow2MeasureTpdfTailFloorDisjointAndLogSlopeRejects1OverF)
+		{
+			using namespace S3Fx;
+
+			constexpr double kStep8 = 4.0 / 1023.0;
+			const double uniformFloor = (kStep8 * kStep8) / 12.0;
+			const double qFloorLog10 = std::log10(uniformFloor);
+
+			auto makeBaseFrame = [&](size_t bins) -> SR::FrameReading {
+				SR::FrameReading fr;
+				fr.informativeTiles = 4;
+				fr.ratio = 1.0;
+				fr.ratioH = 1.0;
+				fr.ratioV = 1.0;
+				fr.mixed = false;
+				fr.contrast = 0.25;
+				fr.quantisationFloor = qFloorLog10;
+				fr.verticalPower.assign(bins, 0.0);
+				fr.horizontalPower.assign(bins, 0.0);
+				return fr;
+			};
+
+			// (1) Smooth 1/f native detail at ratio = 0.5 (bins = 129, half = 128):
+			//     P(k) = (3.8 * uniformFloor * 84.0) / k for k >= 1 (P[0] = P[1]).
+			//     meanA ~= 3.8 * uniformFloor (in [2.25, 4.5] * uniformFloor TPDF hazard zone, > 10^0.5 * uniformFloor),
+			//     meanT ~= 2.82 * uniformFloor (in [1.5, 4.5] * uniformFloor), meanA / meanT ~= 1.35 <= 1.5, SFM >= 0.99.
+			//     Log-log slope is -1.0 (decaying 1/f detail, NOT flat white dither) -> MUST return true!
+			SR::FrameReading smooth1OverF = makeBaseFrame(129);
+			for (size_t k = 1; k < 129; ++k)
+			{
+				const double p = (3.8 * uniformFloor * 84.0) / static_cast<double>(k);
+				smooth1OverF.verticalPower[k] = p;
+				smooth1OverF.horizontalPower[k] = p;
+			}
+			smooth1OverF.verticalPower[0] = smooth1OverF.verticalPower[1];
+			smooth1OverF.horizontalPower[0] = smooth1OverF.horizontalPower[1];
+
+			// Same-input hazard proof: unconditional tpdfDither=true WOULD starve this exact spectrum
+			// (proving it genuinely sits inside the [2.25, 4.5] * uniformFloor TPDF hazard zone!).
+			SR::DitherDetailAboveInfo tpdfCtrl;
+			(void)SR::DitherAwareDetailAbove(smooth1OverF, 0.5, true, &tpdfCtrl);
+			Assert::IsTrue(tpdfCtrl.valid, L"fixture: smooth 1/f spectrum valid for DitherAwareDetailAbove");
+			Assert::IsTrue(tpdfCtrl.atDitherFloor && !tpdfCtrl.hasRealDetailAbove,
+				L"negative control: smooth 1/f 3.8*uniformFloor spectrum sits inside unconditional TPDF starvation zone");
+
+			Assert::IsTrue(SR::PositiveDetailAboveNoRef(smooth1OverF, 0.5, 0.07, 0.5),
+				L"LOW-2: smooth 1/f native detail at ratio=0.5 must NOT be misclassified as flat white TPDF dither");
+
+			// (2a) Disjointness guard at ratio = 0.75 (bins = 129, half = 128):
+			//      a0 = ceil(1.15 * 96) = 111, a1 = 124; tail0 = max(111, 103) = 111 overlaps [a0..a1] completely!
+			SR::FrameReading ratio75Frame = makeBaseFrame(129);
+			for (size_t k = 0; k < 129; ++k)
+			{
+				const double p = (k < 111) ? (4.8 * uniformFloor) : (3.8 * uniformFloor);
+				ratio75Frame.verticalPower[k] = p;
+				ratio75Frame.horizontalPower[k] = p;
+			}
+			SR::DitherDetailAboveInfo tpdfCtrl75;
+			(void)SR::DitherAwareDetailAbove(ratio75Frame, 0.75, true, &tpdfCtrl75);
+			Assert::IsTrue(tpdfCtrl75.valid && tpdfCtrl75.atDitherFloor,
+				L"negative control: ratio=0.75 spectrum sits inside unconditional TPDF starvation zone");
+			Assert::IsTrue(SR::PositiveDetailAboveNoRef(ratio75Frame, 0.75, 0.07, 0.5),
+				L"LOW-2: overlapping tail at ratio=0.75 must NOT be treated as a disjoint TPDF tail");
+
+			// (2b) Disjointness guard at ratio = 5.0 / 6.0 (bins = 513, half = 512):
+			//      a0 = ceil(1.15 * 426.67) = 491, a1 = 496; tail0 = max(491, 410) = 491 overlaps [a0..a1] completely!
+			SR::FrameReading ratio56Frame = makeBaseFrame(513);
+			for (size_t k = 0; k < 513; ++k)
+			{
+				const double p = (k < 491) ? (4.8 * uniformFloor) : (3.8 * uniformFloor);
+				ratio56Frame.verticalPower[k] = p;
+				ratio56Frame.horizontalPower[k] = p;
+			}
+			SR::DitherDetailAboveInfo tpdfCtrl56;
+			(void)SR::DitherAwareDetailAbove(ratio56Frame, 5.0 / 6.0, true, &tpdfCtrl56);
+			Assert::IsTrue(tpdfCtrl56.valid && tpdfCtrl56.atDitherFloor,
+				L"negative control: ratio=5/6 spectrum sits inside unconditional TPDF starvation zone");
+			Assert::IsTrue(SR::PositiveDetailAboveNoRef(ratio56Frame, 5.0 / 6.0, 0.07, 0.5),
+				L"LOW-2: overlapping tail at ratio=5/6 must NOT be treated as a disjoint TPDF tail");
+
+			// (3) Same-input negative controls: genuine flat white TPDF dither at ratio = 0.5 (bins = 129),
+			//     where tail [103..124] IS strictly disjoint from above band [74..95] and log-log slope == 0.0,
+			//     MUST still be detected and starved!
+			SR::FrameReading whiteTpdfFrame = makeBaseFrame(129);
+			for (size_t k = 0; k < 129; ++k)
+			{
+				const double p = (k < 74) ? (4.0 * uniformFloor) : (2.5 * uniformFloor);
+				whiteTpdfFrame.verticalPower[k] = p;
+				whiteTpdfFrame.horizontalPower[k] = p;
+			}
+			SR::DitherDetailAboveInfo unifCtrl25;
+			(void)SR::DitherAwareDetailAbove(whiteTpdfFrame, 0.5, false, &unifCtrl25);
+			Assert::IsTrue(unifCtrl25.valid && !unifCtrl25.atDitherFloor && unifCtrl25.hasRealDetailAbove,
+				L"fixture: 2.5*uniformFloor clears uniform 2.25x gate without TPDF tail measurement");
+			Assert::IsFalse(SR::PositiveDetailAboveNoRef(whiteTpdfFrame, 0.5, 0.07, 0.5),
+				L"negative control: genuine flat white TPDF dither (2.5*uniformFloor) at ratio=0.5 must be starved");
+			Assert::IsFalse(SR::PositiveDetailAboveNoRef(whiteTpdfFrame, 0.5, 0.07, 0.3),
+				L"negative control: genuine flat white TPDF dither (2.5*uniformFloor) must be starved by MeasureTpdfTailFloor even when above nativeFloorDecades=0.3");
+
+			// Also verify flat white TPDF dither at 3.5*uniformFloor (clears nativeFloorDecades=0.5 since log10(3.5)=0.544 > 0.5,
+			// so ONLY MeasureTpdfTailFloor returning 2.0*uniformFloor can starve it — prevents trivially disabling MeasureTpdfTailFloor!):
+			SR::FrameReading whiteTpdf35Frame = makeBaseFrame(129);
+			for (size_t k = 0; k < 129; ++k)
+			{
+				const double p = (k < 74) ? (4.8 * uniformFloor) : (3.5 * uniformFloor);
+				whiteTpdf35Frame.verticalPower[k] = p;
+				whiteTpdf35Frame.horizontalPower[k] = p;
+			}
+			SR::DitherDetailAboveInfo unifCtrl35;
+			(void)SR::DitherAwareDetailAbove(whiteTpdf35Frame, 0.5, false, &unifCtrl35);
+			Assert::IsTrue(unifCtrl35.valid && !unifCtrl35.atDitherFloor && unifCtrl35.hasRealDetailAbove,
+				L"fixture: 3.5*uniformFloor clears uniform gate without TPDF tail measurement");
+			Assert::IsFalse(SR::PositiveDetailAboveNoRef(whiteTpdf35Frame, 0.5, 0.07, 0.5),
+				L"negative control: genuine flat white TPDF dither (3.5*uniformFloor, > 10^0.5) at ratio=0.5 must still be starved by MeasureTpdfTailFloor");
 		}
 	};
 }
