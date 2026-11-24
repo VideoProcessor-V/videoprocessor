@@ -19,6 +19,7 @@
 #include <VP-V/core/SkeletonAcquire.h>
 #include <VP-V/core/hub/ExtensionHub.h>
 #include <VP-V/modules/control/skeleton/SkeletonFacts.h>
+#include <VP-V/modules/control/skeleton/SkeletonModule.h>
 #include <VP-V/modules/input/source_analysis/P1AcquireSource.h>
 #include <VP-V/modules/input/source_analysis/VpFrameAnalysis.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h>
@@ -40,11 +41,9 @@ namespace P1AcquireSourceTestsNs
 	using namespace SyntheticAnalysisFrames;
 	using namespace VpSkeleton;
 
-	bool Identical(Kind k)
-	{
-		return k == Kind::P010 || k == Kind::P210 || k == Kind::DecodedDv422Full || k == Kind::V210 || k == Kind::Uyvy ||
-			k == Kind::SdrTunnel || k == Kind::PackedDvR210;
-	}
+	// MAP-RGB-LUMA-PROXY (796a239ea): P1AcquireSource serves EVERY capture format (including P010Full, V210Full,
+	// and all RGB formats) byte-identically to MotionAhead::HalfLuma8 (only non-10-bit tap shifts are refused;
+	// tested separately in AnotherTapShiftIsRefusedBeforeAcquire).
 
 	// The lane's P1 owner fill for one frame: the lane's own CPU law over the frame's tap view; counts its runs.
 	struct P1Owner
@@ -86,20 +85,12 @@ namespace P1AcquireSourceTestsNs
 				int gw = 0, gh = 0, ww = 0, wh = 0;
 				P1ReadKind how = P1ReadKind::None;
 				const bool read = reader.ReadEngine8(5, f.source, got, gw, gh, how);
-				if (Identical(kind))
-				{
-					Assert::IsTrue(read && how != P1ReadKind::None, KindName(kind));
-					Assert::IsTrue(MotionAhead::HalfLuma8(f.source, want, ww, wh), KindName(kind));
-					Assert::IsTrue(gw == ww && gh == wh && got == want, KindName(kind));
-					Assert::AreEqual<uint64_t>(1u, reader.Acquired(), KindName(kind));
-				}
-				else
-				{
-					Assert::IsFalse(read, KindName(kind));
-					Assert::IsTrue(how == P1ReadKind::None, KindName(kind));
-					Assert::AreEqual<uint64_t>(1u, reader.OwnDecode(), KindName(kind));
-					Assert::AreEqual(0, owner.fills.load(), L"a refused format never builds P1 for the producer");
-				}
+				Assert::IsTrue(read && how != P1ReadKind::None, KindName(kind));
+				Assert::IsTrue(MotionAhead::HalfLuma8(f.source, want, ww, wh), KindName(kind));
+				Assert::IsTrue(gw == ww && gh == wh && got == want, KindName(kind));
+				Assert::AreEqual<uint64_t>(1u, reader.Acquired(), KindName(kind));
+				Assert::AreEqual<uint64_t>(0u, reader.OwnDecode(), KindName(kind));
+				Assert::AreEqual(1, owner.fills.load(), KindName(kind));
 			}
 		}
 
@@ -370,6 +361,11 @@ namespace P1AcquireSourceTestsNs
 				Assert::AreEqual<uint64_t>(1u,
 					rig.memo.CountersOf(kP1HalfLuma).unavailable[size_t(AcquireCause::OwnerDeclined)],
 					L"negative control: missing source offer recorded visibly as OwnerDeclined");
+				const std::string noOfferCause = rig.memo.LastCause(kP1HalfLuma);
+				Assert::IsTrue(noOfferCause.find("p1_cpu: no source offered for frame") != std::string::npos,
+					L"negative control: missing source reports exact no-source decline reason");
+				Assert::IsTrue(noOfferCause.find("p1_cpu: original pathway") == std::string::npos,
+					L"negative control: non-original host never reports original pathway decline");
 			}
 
 			// ---- 2. Protected Path: OfferP1CpuSource serves Acquire on worker thread with 0 waits & 0 private U3 ----
@@ -448,9 +444,20 @@ namespace P1AcquireSourceTestsNs
 			Vpv::FrameAnalysis::NoteP1CpuDemand(&rig.host, false);
 			Assert::AreEqual<uint32_t>(0u, rig.demand->lastAheadDepth, L"stopping demand drops aheadDepth to 0");
 
-			// Original pathway host: OfferP1CpuSource ignored and owner fill visibly refuses.
-			Vpv::Hub::ExtensionHub::Instance().NoteOriginalPathway(&rig.origHost, true);
+			// S1-L1: Original pathway host refuses with the explicit "p1_cpu: original pathway" reason (even when a
+			// source offer was already present before switching to Original), and ignores new OfferP1CpuSource calls.
 			Vpv::FrameAnalysis::OfferP1CpuSource(&rig.origHost, 9, f.source);
+			Vpv::Hub::ExtensionHub::Instance().NoteOriginalPathway(&rig.origHost, true);
+			{
+				AnalysisLumaSource origTracked = f.source;
+				std::shared_ptr<int> origSentinel = std::make_shared<int>(77);
+				std::weak_ptr<int> weakOrig = origSentinel;
+				origTracked.backingOwner = origSentinel;
+				origSentinel.reset();
+				Vpv::FrameAnalysis::OfferP1CpuSource(&rig.origHost, 10, origTracked);
+				origTracked.backingOwner.reset();
+				Assert::IsTrue(weakOrig.expired(), L"Original pathway OfferP1CpuSource must not retain frame backingOwner");
+			}
 			SkeletonMemo origMemo;
 			origMemo.SetHost(&rig.origHost);
 			rig.demand->memo = &origMemo;
@@ -459,6 +466,269 @@ namespace P1AcquireSourceTestsNs
 			rig.demand->memo = &rig.memo;
 			Assert::IsTrue(origRes.status == AcquireStatus::Unavailable && origRes.cause == AcquireCause::OwnerDeclined,
 				L"Original pathway host declines P1CpuFill cleanly");
+			const std::string origCause = origMemo.LastCause(kP1HalfLuma);
+			Assert::IsTrue(origCause.find("p1_cpu: original pathway") != std::string::npos,
+				L"S1-L1: Original pathway refusal must explicitly report \"p1_cpu: original pathway\"");
+		}
+
+		// S1-H1: OfferP1CpuSource must preserve out-of-order (N+1, N) pair offers (matching MotionAheadProducer's
+		// (rq.to, rq.from) acquisition order) and multi-frame in-window reorders, while still resetting cleanly on
+		// a true large backwards seek (seq + kMaxSourceOffers < back.seq).
+		TEST_METHOD(OutOfOrderPairOffersPreserveBothFramesAndLargeBackSeekResets)
+		{
+			struct RealSkeletonRig {
+				int host = 0;
+				Vpv::Skeleton::SkeletonModule* sk = nullptr;
+				RealSkeletonRig()
+				{
+					Vpv::Hub::ExtensionHub::Instance().ResetModulesForTesting();
+					std::unique_ptr<Vpv::Skeleton::SkeletonModule> mod(
+						new Vpv::Skeleton::SkeletonModule([](ConfigFile&) { return false; }));
+					sk = mod.get();
+					Vpv::Hub::ExtensionHub::Instance().AddModule(std::move(mod));
+					Vpv::FrameAnalysis::RegisterP1CpuModule();
+				}
+				~RealSkeletonRig()
+				{
+					sk = nullptr;
+					Vpv::Hub::ExtensionHub::Instance().ResetModulesForTesting();
+				}
+			};
+
+			RealSkeletonRig rig;
+			Vpv::Skeleton::FrameMemo fm = rig.sk->MemoFor(&rig.host, 20);
+			Assert::IsTrue(fm.Valid(), L"real SkeletonModule MemoFor must provide a valid SkeletonMemo");
+			Vpv::FrameAnalysis::NoteP1CpuDemand(&rig.host, true);
+
+			// Distinct synthetic frames so any ring wipe or mis-indexing is immediately caught byte-for-byte.
+			const Frame f20 = Make(Kind::P010, 2);
+			const Frame f21 = Make(Kind::P010, 7);
+			const Frame f22 = Make(Kind::P010, 3);
+			const Frame f23 = Make(Kind::P010, 4);
+			const Frame f24 = Make(Kind::P010, 5);
+			const Frame f25 = Make(Kind::P010, 8);
+
+			auto truthOf = [](const Frame& fr) {
+				std::vector<uint8_t> want;
+				int w = 0, h = 0;
+				Assert::IsTrue(MotionAhead::HalfLuma8(fr.source, want, w, h));
+				return want;
+			};
+			const std::vector<uint8_t> want20 = truthOf(f20);
+			const std::vector<uint8_t> want21 = truthOf(f21);
+			const std::vector<uint8_t> want22 = truthOf(f22);
+			const std::vector<uint8_t> want23 = truthOf(f23);
+			const std::vector<uint8_t> want24 = truthOf(f24);
+			const std::vector<uint8_t> want25 = truthOf(f25);
+			Assert::IsTrue(want20 != want21, L"precondition: frames 20 and 21 must have distinct luma pixels");
+
+			// 1. Out-of-order (N+1, N) pair offers (exact MotionAheadProducer (rq.to, rq.from) order):
+			// Pre-fix P1CpuFill.cpp:127 wiped the entire ring when seq 20 < ring.back().seq (21), losing 21!
+			Vpv::FrameAnalysis::OfferP1CpuSource(&rig.host, 21, f21.source);
+			Vpv::FrameAnalysis::OfferP1CpuSource(&rig.host, 20, f20.source);
+
+			// Read without re-offering so BOTH 20 and 21 must still be present in P1CpuFill's source ring.
+			VpFrameAnalysis::P1AcquireSource reader(
+				[&fm](uint64_t seq) { return fm.memo->Acquire(kP1HalfLuma, seq, AcquireForm::Cpu); });
+			auto readAndCheck = [&](uint64_t seq, const Frame& fr, const std::vector<uint8_t>& want, const wchar_t* msg) {
+				std::vector<uint8_t> got;
+				int gw = 0, gh = 0;
+				P1ReadKind how = P1ReadKind::None;
+				Assert::IsTrue(reader.ReadEngine8(seq, fr.source, got, gw, gh, how), msg);
+				Assert::IsTrue(how == P1ReadKind::LiveFill, msg);
+				Assert::IsTrue(got == want, msg);
+			};
+			readAndCheck(20, f20, want20, L"S1-H1: frame N (20) must be acquirable after out-of-order (21, 20) offer");
+			readAndCheck(21, f21, want21, L"S1-H1: frame N+1 (21) must NOT be wiped when earlier frame N (20) is offered");
+
+			// 2. Multi-frame scrambled offers within kMaxSourceOffers (kAheadCeiling + 2): all 4 survive in order.
+			Vpv::FrameAnalysis::OfferP1CpuSource(&rig.host, 25, f25.source);
+			Vpv::FrameAnalysis::OfferP1CpuSource(&rig.host, 23, f23.source);
+			Vpv::FrameAnalysis::OfferP1CpuSource(&rig.host, 24, f24.source);
+			Vpv::FrameAnalysis::OfferP1CpuSource(&rig.host, 22, f22.source);
+			readAndCheck(22, f22, want22, L"S1-H1: scrambled in-window frame 22 preserved");
+			readAndCheck(23, f23, want23, L"S1-H1: scrambled in-window frame 23 preserved");
+			readAndCheck(24, f24, want24, L"S1-H1: scrambled in-window frame 24 preserved");
+			readAndCheck(25, f25, want25, L"S1-H1: scrambled in-window frame 25 preserved");
+
+			// 3. True large backwards seek (seq + kMaxSourceOffers < back.seq): stale ring MUST reset and release backingOwner.
+			const uint64_t backSeq = static_cast<uint64_t>(VpSkeleton::kAheadCeiling) + 100u;
+			const uint64_t seekSeq = 1u;   // seekSeq + (kAheadCeiling + 2) < backSeq
+			AnalysisLumaSource trackedBack = f21.source;
+			std::shared_ptr<int> sentinel = std::make_shared<int>(42);
+			std::weak_ptr<int> weakSentinel = sentinel;
+			trackedBack.backingOwner = sentinel;
+			sentinel.reset();
+			Vpv::FrameAnalysis::OfferP1CpuSource(&rig.host, backSeq, trackedBack);
+			trackedBack.backingOwner.reset();
+			Assert::IsFalse(weakSentinel.expired(), L"precondition: backSeq offer holds backingOwner before seek");
+
+			Vpv::FrameAnalysis::OfferP1CpuSource(&rig.host, seekSeq, f20.source);
+			Assert::IsTrue(weakSentinel.expired(), L"S1-H1: large backwards seek must purge stale pre-seek offers");
+			const AcquireResult staleRes = fm.memo->Acquire(kP1HalfLuma, backSeq, AcquireForm::Cpu);
+			Assert::IsTrue(staleRes.status == AcquireStatus::Unavailable && staleRes.cause == AcquireCause::OwnerDeclined,
+				L"S1-H1: purged pre-seek frame declines cleanly");
+			readAndCheck(seekSeq, f20, want20, L"S1-H1: post-seek frame 1 is acquirable cleanly");
+		}
+
+		// S1-H2: Concurrent NoteP1CpuDemand / SyncRegistration depth transitions (0 <-> kAheadCeiling) through the
+		// real SkeletonModule must NEVER leave a window where Acquire(kP1HalfLuma, Cpu) sees AcquireCause::NoOwnerFill
+		// or HasOwnerFill() drops to false.
+		TEST_METHOD(ConcurrentDepthTransitionsHaveZeroNoOwnerFillRace)
+		{
+			// In-test negative control: prove an unregistered memo genuinely produces AcquireCause::NoOwnerFill.
+			{
+				SkeletonMemo emptyMemo;
+				const AcquireResult neg = emptyMemo.Acquire(kP1HalfLuma, 1, AcquireForm::Cpu);
+				Assert::IsTrue(neg.status == AcquireStatus::Unavailable && neg.cause == AcquireCause::NoOwnerFill,
+					L"negative control: absent owner fill must report AcquireCause::NoOwnerFill");
+				Assert::IsFalse(emptyMemo.HasOwnerFill(kP1HalfLuma, AcquireForm::Cpu));
+			}
+
+			struct RealSkeletonRig {
+				int host = 0;
+				Vpv::Skeleton::SkeletonModule* sk = nullptr;
+				RealSkeletonRig()
+				{
+					Vpv::Hub::ExtensionHub::Instance().ResetModulesForTesting();
+					std::unique_ptr<Vpv::Skeleton::SkeletonModule> mod(
+						new Vpv::Skeleton::SkeletonModule([](ConfigFile&) { return false; }));
+					sk = mod.get();
+					Vpv::Hub::ExtensionHub::Instance().AddModule(std::move(mod));
+					Vpv::FrameAnalysis::RegisterP1CpuModule();
+				}
+				~RealSkeletonRig()
+				{
+					sk = nullptr;
+					Vpv::Hub::ExtensionHub::Instance().ResetModulesForTesting();
+				}
+			};
+
+			RealSkeletonRig rig;
+			Vpv::Skeleton::FrameMemo fm = rig.sk->MemoFor(&rig.host, 1);
+			Assert::IsTrue(fm.Valid());
+			const Frame f = Make(Kind::P010, 1);
+			Vpv::FrameAnalysis::NoteP1CpuDemand(&rig.host, true);
+			Vpv::FrameAnalysis::OfferP1CpuSource(&rig.host, 1, f.source);
+			Assert::IsTrue(fm.memo->HasOwnerFill(kP1HalfLuma, AcquireForm::Cpu),
+				L"precondition: P1CpuFill registered before concurrent transition test");
+			Assert::IsTrue(fm.memo->Acquire(kP1HalfLuma, 1, AcquireForm::Cpu).Ok(),
+				L"precondition: baseline Acquire succeeds");
+
+			std::atomic<bool> stop{ false };
+			std::atomic<uint64_t> noOwnerFillHits{ 0 };
+			std::atomic<uint64_t> missingOwnerProbes{ 0 };
+			std::atomic<uint64_t> totalProbes{ 0 };
+			std::atomic<uint64_t> totalAcquires{ 0 };
+
+			auto readerLoop = [&](uint64_t seqBase) {
+				uint64_t seq = seqBase;
+				uint64_t acquires = 0;
+				while (!stop.load(std::memory_order_acquire))
+				{
+					if (!fm.memo->HasOwnerFill(kP1HalfLuma, AcquireForm::Cpu))
+						missingOwnerProbes.fetch_add(1, std::memory_order_relaxed);
+					totalProbes.fetch_add(1, std::memory_order_relaxed);
+					if (acquires < 4000u)
+					{
+						const AcquireResult r = fm.memo->Acquire(kP1HalfLuma, seq++, AcquireForm::Cpu);
+						if (r.status == AcquireStatus::Unavailable && r.cause == AcquireCause::NoOwnerFill)
+							noOwnerFillHits.fetch_add(1, std::memory_order_relaxed);
+						++acquires;
+						totalAcquires.fetch_add(1, std::memory_order_relaxed);
+					}
+				}
+			};
+
+			std::thread readerA(readerLoop, 1000u);
+			std::thread readerB(readerLoop, 1000000u);
+
+			// Hammer 3,000 depth transitions (active -> inactive -> active) while readers probe continuously.
+			for (int i = 0; i < 1500; ++i)
+			{
+				Vpv::FrameAnalysis::NoteP1CpuDemand(&rig.host, false);
+				Vpv::FrameAnalysis::NoteP1CpuDemand(&rig.host, true);
+			}
+
+			stop.store(true, std::memory_order_release);
+			readerA.join();
+			readerB.join();
+
+			Assert::IsTrue(totalProbes.load() > 0u && totalAcquires.load() > 0u,
+				L"readers must execute concurrently during depth transitions");
+			Assert::AreEqual<uint64_t>(0u, noOwnerFillHits.load(),
+				L"S1-H2: concurrent depth transitions must produce ZERO AcquireCause::NoOwnerFill gaps");
+			Assert::AreEqual<uint64_t>(0u,
+				fm.memo->CountersOf(kP1HalfLuma).unavailable[size_t(AcquireCause::NoOwnerFill)],
+				L"S1-H2: SkeletonMemo NoOwnerFill counter must remain 0 across all transitions");
+			Assert::AreEqual<uint64_t>(0u, missingOwnerProbes.load(),
+				L"S1-H2: HasOwnerFill(kP1HalfLuma, Cpu) must NEVER drop to false during atomic ReplaceOwnerFill");
+		}
+
+		// S1-M3: Concurrent OfferP1CpuSource / NoteP1CpuDemand across GpuReleased / Shutdown lifecycle teardowns
+		// and post-module-destroy calls must stay crash-free and leak-free.
+		TEST_METHOD(ConcurrentLifecycleTeardownAndPostDestroyCallsAreSafe)
+		{
+			Vpv::Hub::ExtensionHub::Instance().ResetModulesForTesting();
+			{
+				std::unique_ptr<Vpv::Skeleton::SkeletonModule> mod(
+					new Vpv::Skeleton::SkeletonModule([](ConfigFile&) { return false; }));
+				Vpv::Hub::ExtensionHub::Instance().AddModule(std::move(mod));
+				Vpv::FrameAnalysis::RegisterP1CpuModule();
+			}
+
+			int host = 0;
+			const Frame f = Make(Kind::P010, 3);
+			std::atomic<bool> stop{ false };
+			std::atomic<uint64_t> offers{ 0 };
+			std::atomic<uint64_t> demands{ 0 };
+
+			std::thread offerWorker([&]() {
+				uint64_t seq = 1;
+				while (!stop.load(std::memory_order_acquire))
+				{
+					Vpv::FrameAnalysis::OfferP1CpuSource(&host, seq++, f.source);
+					offers.fetch_add(1, std::memory_order_relaxed);
+				}
+			});
+			std::thread demandWorker([&]() {
+				bool active = true;
+				while (!stop.load(std::memory_order_acquire))
+				{
+					Vpv::FrameAnalysis::NoteP1CpuDemand(&host, active);
+					active = !active;
+					demands.fetch_add(1, std::memory_order_relaxed);
+				}
+			});
+
+			for (int i = 0; i < 200; ++i)
+			{
+				RendererExtension::LifecycleFacts lf;
+				lf.host = &host;
+				lf.kind = (i & 1) == 0 ? RendererExtension::Lifecycle::GpuReleased
+					: RendererExtension::Lifecycle::Shutdown;
+				Vpv::Hub::ExtensionHub::Instance().OnLifecycle(lf);
+			}
+
+			stop.store(true, std::memory_order_release);
+			offerWorker.join();
+			demandWorker.join();
+
+			Assert::IsTrue(offers.load() > 0u && demands.load() > 0u,
+				L"workers must exercise OfferP1CpuSource and NoteP1CpuDemand concurrently with teardown");
+
+			// Destroy P1CpuModule and verify post-teardown calls are safe no-ops and do not retain backingOwner.
+			Vpv::Hub::ExtensionHub::Instance().ResetModulesForTesting();
+			Vpv::FrameAnalysis::NoteP1CpuDemand(&host, true);
+			AnalysisLumaSource afterDestroy = f.source;
+			std::shared_ptr<int> sentinel = std::make_shared<int>(55);
+			std::weak_ptr<int> weakSentinel = sentinel;
+			afterDestroy.backingOwner = sentinel;
+			sentinel.reset();
+			Vpv::FrameAnalysis::OfferP1CpuSource(&host, 999, afterDestroy);
+			afterDestroy.backingOwner.reset();
+			Assert::IsTrue(weakSentinel.expired(),
+				L"S1-M3: post-destroy OfferP1CpuSource must be a clean no-op that releases backingOwner");
 		}
 	};
 }
