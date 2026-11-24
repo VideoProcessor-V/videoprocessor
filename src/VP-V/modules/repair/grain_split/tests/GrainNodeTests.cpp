@@ -16,6 +16,7 @@
 
 #include "../../../../tests/SettingsTestSupport.h"
 #include <VP-V/modules/repair/grain_split/GrainNode.h>
+#include <VP-V/modules/repair/grain_split/GrainNodeGpu.h>
 #include <VP-V/modules/repair/grain_split/GrainSplitGpu.h>
 #include <VP-V/modules/repair/grain_split/GpuPassUtil.h>
 #include <VP-V/modules/repair/grain_split/shared/BandFromBase.h>
@@ -492,6 +493,139 @@ namespace GrainNodeTestsNs
 					// Requested Compact, granted Full (a float plane): the REQUESTED declaration would refuse the layout forever.
 					Assert::IsFalse(GrainLayout(Storage::Full, desc).MatchesDecl(GrainDecl(Storage::Compact), d), L"requested declaration refuses the downgrade");
 				}
+		}
+
+		// S2-H6: at <=720p (B = 8), GrainLayout emits a shift-3 block grid (ceil(w/8) x ceil(h/8)); GrainDecl(storage, B)
+		// and ChooseNodeLayout must declare the same shift-3 block grid so ProductTexLayout::MatchesDecl and ProductTextures::Allocate
+		// succeed for both Full and Compact storage (while >=1080p stays shift-4). Negative control: the un-parameterized legacy
+		// GrainDecl(storage) (default blockPx = 16, shift = 4) fails MatchesDecl and allocation on the exact same <=720p layouts.
+		TEST_METHOD(ChooseNodeLayoutAndGrainDeclMatchAt720pAndBelow)
+		{
+			struct Be
+			{
+				using Handle = int;
+				int n = 0;
+				Handle Create(const VpSkeleton::TexShape&) { return ++n; }
+				void Destroy(Handle& h) { h = 0; }
+			};
+			auto declHasShift = [](const VpSkeleton::ProductDecl& decl, uint8_t shift) -> bool {
+				const size_t n = decl.size.termCount < decl.size.terms.size() ? size_t(decl.size.termCount) : decl.size.terms.size();
+				for (size_t i = 0; i < n; ++i)
+					if (decl.size.terms[i].shift == shift)
+						return true;
+				return false;
+			};
+
+			pl_fmt_t unormFmt = {};
+			unormFmt.type = PL_FMT_UNORM;
+			pl_fmt_t floatFmt = {};
+			floatFmt.type = PL_FMT_FLOAT;
+			const double cu10 = 1.0 / 1023.0;
+
+			struct Case
+			{
+				uint32_t w, h;
+				int B;
+				uint8_t expectedShift;
+			};
+			const Case cases[] = {
+				{ 640, 480, 8, 3 },     // <=720p (SD, B = 8)
+				{ 854, 480, 8, 3 },     // <=720p non-multiple of 8 width (ceil(854/8) = 107)
+				{ 1280, 720, 8, 3 },    // <=720p boundary (B = 8)
+				{ 1920, 1080, 16, 4 },  // >=1080p (B = 16)
+				{ 3840, 2160, 32, 4 },  // 4K (B = 32, shift-4 upper bound)
+			};
+
+			VpSkeleton::Node node;
+			node.id = VpSkeleton::kP10GrainSplit;
+			node.ring = 0;
+			node.livePool = 2;
+
+			for (const Case& c : cases)
+			{
+				const VpSkeleton::Dims dims{ c.w, c.h };
+				GrainDesc desc;
+				desc.w = static_cast<int>(c.w);
+				desc.h = static_cast<int>(c.h);
+				desc.B = c.B;
+				desc.codeUnit = cu10;
+				desc.component = 0;
+
+				const uint32_t expectedBw = (c.w + static_cast<uint32_t>(c.B) - 1u) / static_cast<uint32_t>(c.B);
+				const uint32_t expectedBh = (c.h + static_cast<uint32_t>(c.B) - 1u) / static_cast<uint32_t>(c.B);
+
+				for (Storage storage : { Storage::Full, Storage::Compact })
+				{
+					// Direct GrainLayout + blockPx-aware GrainDecl(storage, desc.B).
+					const VpSkeleton::ProductTexLayout layout = GrainLayout(storage, desc);
+					const VpSkeleton::ProductDecl decl = GrainDecl(storage, desc.B);
+					Assert::IsFalse(layout.terms.empty(), L"layout has terms");
+					const VpSkeleton::TexTerm& blockTerm = layout.terms.back();
+					Assert::AreEqual(uint32_t(c.expectedShift), uint32_t(blockTerm.shift), L"GrainLayout block term shift");
+					Assert::AreEqual(expectedBw, blockTerm.absW, L"GrainLayout block width");
+					Assert::AreEqual(expectedBh, blockTerm.absH, L"GrainLayout block height");
+					Assert::IsTrue(declHasShift(decl, c.expectedShift), L"GrainDecl declares the matching block shift");
+					Assert::IsFalse(declHasShift(decl, c.expectedShift == 3u ? uint8_t(4) : uint8_t(3)),
+						L"GrainDecl does not leave the mismatched block shift");
+					Assert::IsTrue(layout.MatchesDecl(decl, dims), L"GrainLayout matches blockPx-aware GrainDecl");
+
+					// ChooseNodeLayout (production entry point) with a Compact-capable UNORM plane.
+					const GrainSplit::Gpu::NodeLayout nl = GrainSplit::Gpu::ChooseNodeLayout(storage, &unormFmt, cu10, desc);
+					Assert::IsTrue(nl.choice.storage == storage, L"UNORM 10-bit plane grants the requested storage");
+					Assert::IsFalse(nl.choice.downgraded, L"not downgraded on UNORM 10-bit plane");
+					Assert::IsTrue(declHasShift(nl.decl, c.expectedShift), L"ChooseNodeLayout decl carries the matching block shift");
+					Assert::IsTrue(nl.layout.MatchesDecl(nl.decl, dims), L"ChooseNodeLayout layout matches its own decl");
+
+					Be be;
+					VpSkeleton::ProductTextures<Be> tex(be);
+					Assert::IsTrue(tex.Allocate(node, nl.decl, nl.layout, dims, VpSkeleton::TierPlan()),
+						L"ProductTextures::Allocate succeeds with ChooseNodeLayout");
+					Assert::AreEqual(uint64_t(2) * nl.layout.BytesPerBuffer(dims), tex.Bytes(),
+						L"allocated bytes match 2 live buffers");
+					Assert::IsTrue(tex.Bytes() <= uint64_t(2) * VpSkeleton::BytesOf(nl.decl.size, dims),
+						L"allocated bytes fit within the declared SizeRule upper bound");
+
+					if (c.B <= 8)
+					{
+						// Mandatory negative control (Rule 3): on the exact same <=720p (B = 8) GrainLayout, the
+						// un-parameterized legacy GrainDecl(storage) (default blockPx = 16 -> shift = 4) MUST fail
+						// MatchesDecl and ProductTextures::Allocate — proving the shift-4 vs shift-3 hazard is real.
+						const VpSkeleton::ProductDecl legacyDecl = GrainDecl(storage);
+						Assert::IsTrue(declHasShift(legacyDecl, 4u), L"legacy 1-arg GrainDecl emits shift 4");
+						Assert::IsFalse(declHasShift(legacyDecl, 3u), L"legacy 1-arg GrainDecl does not emit shift 3");
+						Assert::IsFalse(layout.MatchesDecl(legacyDecl, dims),
+							L"negative control: <=720p B=8 layout MUST fail MatchesDecl against legacy shift-4 GrainDecl");
+						Assert::IsFalse(nl.layout.MatchesDecl(legacyDecl, dims),
+							L"negative control: ChooseNodeLayout <=720p layout MUST fail MatchesDecl against legacy shift-4 GrainDecl");
+
+						Be negBe;
+						VpSkeleton::ProductTextures<Be> negTex(negBe);
+						Assert::IsFalse(negTex.Allocate(node, legacyDecl, layout, dims, VpSkeleton::TierPlan()),
+							L"negative control: ProductTextures::Allocate MUST refuse <=720p layout under legacy shift-4 GrainDecl");
+						Assert::AreEqual(1u, negTex.Refusals(), L"refusal is counted");
+						Assert::IsFalse(negTex.LastRefusal().empty(), L"refusal reason is visible");
+					}
+					else
+					{
+						// Reverse mismatch control: a >=1080p (shift 4) layout must NOT match a shift-3 (B = 8) decl.
+						const VpSkeleton::ProductDecl shift3Decl = GrainDecl(storage, 8);
+						Assert::IsFalse(layout.MatchesDecl(shift3Decl, dims),
+							L"mismatch control: >=1080p shift-4 layout must not match shift-3 GrainDecl");
+					}
+				}
+
+				// Compact requested on a float plane at <=720p (and >=1080p): downgraded to Full, and still matches decl.
+				const GrainSplit::Gpu::NodeLayout downgraded = GrainSplit::Gpu::ChooseNodeLayout(Storage::Compact, &floatFmt, cu10, desc);
+				Assert::IsTrue(downgraded.choice.downgraded && downgraded.choice.storage == Storage::Full,
+					L"float plane downgrades Compact to Full");
+				Assert::IsTrue(declHasShift(downgraded.decl, c.expectedShift), L"downgraded decl keeps the matching block shift");
+				Assert::IsTrue(downgraded.layout.MatchesDecl(downgraded.decl, dims),
+					L"downgraded ChooseNodeLayout layout matches its own decl");
+				Be downBe;
+				VpSkeleton::ProductTextures<Be> downTex(downBe);
+				Assert::IsTrue(downTex.Allocate(node, downgraded.decl, downgraded.layout, dims, VpSkeleton::TierPlan()),
+					L"downgraded ChooseNodeLayout allocates cleanly");
+			}
 		}
 
 		TEST_METHOD(GrainLayoutNamesBaseAndModifiersWithTheirConsumers)
