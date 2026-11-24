@@ -2824,9 +2824,6 @@ namespace VideoProcessorTest
 				TargetLutGpuFixture& f;
 				~LogGuard() { f.CaptureLog(nullptr); }
 			};
-			std::string log;
-			fixture.CaptureLog(&log);
-			LogGuard logGuard{ fixture };
 
 			const int width = 256, height = 128;
 			static constexpr int dx = 8;
@@ -2885,6 +2882,10 @@ namespace VideoProcessorTest
 				}
 			}
 			Assert::IsNotNull(nonStorableChroma.tex, L"D3D11/WARP must expose a sampleable non-storable format");
+			// Start log capture AFTER the format-probing loop so rejected probe formats never pollute log.
+			std::string log;
+			fixture.CaptureLog(&log);
+			LogGuard logGuard{ fixture };
 			Dejudder::Planes lazyA = planesA.planes;
 			Dejudder::Planes lazyB = planesB.planes;
 			lazyA.chroma = nonStorableChroma.tex;
@@ -2997,6 +2998,8 @@ namespace VideoProcessorTest
 			const std::vector<RgbaPixel> own = downloadTarget();
 			Assert::AreEqual(1ULL, cache.Copies(), L"GEM-217: Cache::Apply must increment Copies() once");
 			Assert::AreEqual(0ULL, cache.Failed(), L"GEM-217: Cache::Apply must not fail");
+			Assert::AreEqual(0ULL, cache.Blits(),
+				L"GEM-217 negative control: rgba16f PRE_OUTPUT FBO must fall back to compute, not blit");
 			const pl_tex cachedTex = cache.Texture(7);
 			Assert::IsNotNull(cachedTex, L"cached texture for sequence 7 must be present");
 			Assert::AreEqual(width, cachedTex->params.w);
@@ -3004,6 +3007,155 @@ namespace VideoProcessorTest
 			if ((cachedTex->params.format->caps & PL_FMT_CAP_BLITTABLE) != 0)
 				Assert::IsTrue(cachedTex->params.blit_dst,
 					L"GEM-217: cache texture must enable blit_dst for pl_tex_blit fast path");
+
+			// Part 3b (GEM-217 runtime proof + same-input negative control): exercise Cache::Apply's
+			// pl_tex_blit fast path directly with a matching rgba32f blit_src texture (independent of
+			// libplacebo's output_fbo_float32 option), verify Blits() == 1 and bit-exact pixel parity,
+			// then feed the exact same pixels via a non-blittable (blit_src = false) rgba32f texture
+			// as a negative control proving fallback to compute leaves Blits() == 0 with bit-exact parity.
+			{
+				struct DispatchGuard
+				{
+					pl_dispatch dp = nullptr;
+					~DispatchGuard() { if (dp) pl_dispatch_destroy(&dp); }
+				};
+				DispatchGuard dispatchGuard{ pl_dispatch_create(fixture.Log(), gpu) };
+				Assert::IsNotNull(dispatchGuard.dp, L"pl_dispatch for Cache::Apply blit proof");
+
+				const pl_fmt f32Fmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, static_cast<enum pl_fmt_caps>(
+					PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE | PL_FMT_CAP_LINEAR |
+					PL_FMT_CAP_BLITTABLE | PL_FMT_CAP_HOST_READABLE));
+				Assert::IsNotNull(f32Fmt, L"WARP must expose blitable, storable, host-readable rgba32f");
+				Assert::IsTrue(f32Fmt == cachedTex->params.format,
+					L"rgba32f format must match Cache::Apply's StorageFormat");
+
+				const int bw = 64, bh = 32;
+				std::vector<float> srcPixels(static_cast<size_t>(bw) * bh * 4);
+				for (int y = 0; y < bh; ++y)
+					for (int x = 0; x < bw; ++x)
+					{
+						const size_t base = (static_cast<size_t>(y) * bw + x) * 4;
+						// Exact IEEE-754 float32 values including extended range (<0, >1) and sub-fp16 mantissa bit.
+						srcPixels[base + 0] = -0.25f + static_cast<float>(x) * 0.03125f + 1.0f / 65536.0f;
+						srcPixels[base + 1] = 0.125f + static_cast<float>(y) * 0.0625f;
+						srcPixels[base + 2] = static_cast<float>((x * 7 + y * 13) & 63) * 0.03125f;
+						srcPixels[base + 3] = 1.0f;
+					}
+
+				pl_tex_params srcParams{};
+				srcParams.w = bw;
+				srcParams.h = bh;
+				srcParams.format = f32Fmt;
+				srcParams.sampleable = true;
+				srcParams.blit_src = true;
+				srcParams.initial_data = srcPixels.data();
+				TexGuard blitSrc{ gpu, pl_tex_create(gpu, &srcParams) };
+				Assert::IsNotNull(blitSrc.tex, L"rgba32f blit_src source texture");
+
+				srcParams.blit_src = false;
+				TexGuard noBlitSrc{ gpu, pl_tex_create(gpu, &srcParams) };
+				Assert::IsNotNull(noBlitSrc.tex, L"rgba32f non-blitable negative-control source texture");
+
+				auto readbackFloatTex = [&](pl_tex srcTex) -> std::vector<float>
+				{
+					pl_tex_params dp{};
+					dp.w = srcTex->params.w;
+					dp.h = srcTex->params.h;
+					dp.format = f32Fmt;
+					dp.storable = true;
+					dp.host_readable = true;
+					TexGuard staging{ gpu, pl_tex_create(gpu, &dp) };
+					Assert::IsNotNull(staging.tex, L"float32 staging texture for bit-exact readback");
+
+					pl_shader_desc descs[2]{};
+					descs[0].desc.name = "src";
+					descs[0].desc.type = PL_DESC_SAMPLED_TEX;
+					descs[0].binding.object = srcTex;
+					descs[0].binding.address_mode = PL_TEX_ADDRESS_CLAMP;
+					descs[0].binding.sample_mode = PL_TEX_SAMPLE_NEAREST;
+					descs[1].desc.name = "dst";
+					descs[1].desc.type = PL_DESC_STORAGE_IMG;
+					descs[1].desc.access = PL_DESC_ACCESS_WRITEONLY;
+					descs[1].binding.object = staging.tex;
+
+					pl_custom_shader custom{};
+					custom.description = "test readback rgba32f";
+					custom.body =
+						"ivec2 q = ivec2(gl_GlobalInvocationID.xy);\n"
+						"if (q.x < imageSize(dst).x && q.y < imageSize(dst).y)\n"
+						"    imageStore(dst, q, texelFetch(src, q, 0));\n";
+					custom.input = PL_SHADER_SIG_NONE;
+					custom.output = PL_SHADER_SIG_NONE;
+					custom.descriptors = descs;
+					custom.num_descriptors = 2;
+					custom.compute = true;
+					custom.compute_group_size[0] = 16;
+					custom.compute_group_size[1] = 16;
+
+					pl_shader sh = pl_dispatch_begin(dispatchGuard.dp);
+					const bool built = pl_shader_custom(sh, &custom);
+					if (!built)
+						pl_dispatch_abort(dispatchGuard.dp, &sh);
+					Assert::IsTrue(built, L"readback compute shader build failed");
+					pl_dispatch_compute_params cp{};
+					cp.shader = &sh;
+					cp.dispatch_size[0] = (dp.w + 15) / 16;
+					cp.dispatch_size[1] = (dp.h + 15) / 16;
+					cp.dispatch_size[2] = 1;
+					Assert::IsTrue(pl_dispatch_compute(dispatchGuard.dp, &cp), L"readback compute dispatch failed");
+					pl_gpu_finish(gpu);
+
+					std::vector<float> out(static_cast<size_t>(dp.w) * dp.h * 4, 0.0f);
+					pl_tex_transfer_params dl{};
+					dl.tex = staging.tex;
+					dl.ptr = out.data();
+					Assert::IsTrue(pl_tex_download(gpu, &dl), L"readback staging download failed");
+					return out;
+				};
+
+				pl_hook_params hp{};
+				hp.gpu = gpu;
+				hp.dispatch = dispatchGuard.dp;
+				hp.tex = blitSrc.tex;
+				hp.repr.levels = PL_COLOR_LEVELS_FULL;
+				hp.color.transfer = PL_COLOR_TRC_BT_1886;
+
+				DejudderRendered::Cache blitCache;
+				blitCache.Arm(99);
+				const pl_hook_res blitRes = blitCache.Hook()->hook(blitCache.Hook()->priv, &hp);
+				Assert::IsFalse(blitRes.failed, L"GEM-217: blit-path Cache::Apply hook must succeed");
+				Assert::AreEqual(static_cast<int>(PL_HOOK_SIG_NONE), static_cast<int>(blitRes.output));
+				Assert::AreEqual(1ULL, blitCache.Copies(), L"GEM-217: blit-path Cache::Apply must increment Copies()");
+				Assert::AreEqual(1ULL, blitCache.Blits(), L"GEM-217: matching rgba32f blit_src must execute pl_tex_blit");
+				Assert::AreEqual(0ULL, blitCache.Failed(), L"GEM-217: blit-path Cache::Apply must not fail");
+				Assert::IsNotNull(blitCache.Texture(99), L"GEM-217: blit-path cached texture must be present");
+				Assert::IsTrue(blitCache.Repr().levels == PL_COLOR_LEVELS_FULL &&
+					blitCache.Color().transfer == PL_COLOR_TRC_BT_1886);
+				const std::vector<float> blitOut = readbackFloatTex(blitCache.Texture(99));
+				Assert::AreEqual(0, std::memcmp(blitOut.data(), srcPixels.data(), srcPixels.size() * sizeof(float)),
+					L"GEM-217: pl_tex_blit cached texture must match source rgba32f bit-for-bit");
+
+				// Same-input negative control: identical pixels & format, only blit_src = false -> compute fallback.
+				DejudderRendered::Cache noBlitCache;
+				noBlitCache.Arm(100);
+				hp.tex = noBlitSrc.tex;
+				const pl_hook_res noBlitRes = noBlitCache.Hook()->hook(noBlitCache.Hook()->priv, &hp);
+				Assert::IsFalse(noBlitRes.failed, L"GEM-217 negative control: compute-fallback Cache::Apply must succeed");
+				Assert::AreEqual(static_cast<int>(PL_HOOK_SIG_NONE), static_cast<int>(noBlitRes.output));
+				Assert::AreEqual(1ULL, noBlitCache.Copies(), L"GEM-217 negative control: compute fallback must increment Copies()");
+				Assert::AreEqual(0ULL, noBlitCache.Blits(),
+					L"GEM-217 negative control: blit_src = false must NOT take pl_tex_blit fast path");
+				Assert::AreEqual(0ULL, noBlitCache.Failed(), L"GEM-217 negative control: compute fallback must not fail");
+				Assert::IsNotNull(noBlitCache.Texture(100), L"GEM-217 negative control: fallback cached texture must be present");
+				const std::vector<float> computeOut = readbackFloatTex(noBlitCache.Texture(100));
+				Assert::AreEqual(0, std::memcmp(computeOut.data(), srcPixels.data(), srcPixels.size() * sizeof(float)),
+					L"GEM-217 negative control: compute fallback must also match source rgba32f bit-for-bit");
+
+				noBlitCache.Release();
+				Assert::IsNull(noBlitCache.Texture(100));
+				blitCache.Release();
+				Assert::IsNull(blitCache.Texture(99));
+			}
 
 			DejudderRendered::Geometry g;
 			g.sourceCrop = { 0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height) };
