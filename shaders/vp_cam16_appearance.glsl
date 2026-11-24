@@ -358,7 +358,8 @@ float ap_pq_from_nits(float nits)
 float ap_nits_from_pq(float pq)
 {
     float e = pow(max(pq, 0.0), 1.0 / AP_PQ_M2);
-    return 10000.0 * pow(max(e - AP_PQ_C1, 0.0) / (AP_PQ_C2 - AP_PQ_C3 * e), 1.0 / AP_PQ_M1);
+    float den = AP_PQ_C2 - AP_PQ_C3 * e;
+    return 10000.0 * pow(max(e - AP_PQ_C1, 0.0) / max(den, 1e-4), 1.0 / AP_PQ_M1);
 }
 
 // Encoded code -> linear light relative to the reference white (1 = white), codes inside 0..1 only.
@@ -398,7 +399,7 @@ float ap_uncompress(float fl, float ra)
     float d = ra - 0.1;
     float ad = abs(d);
     float p = pow(27.13 * ad / max(400.0 - ad, 1e-12), 1.0 / 0.42);
-    float v = 100.0 / fl * p;
+    float v = 100.0 / max(fl, 1e-12) * p;
     return d < 0.0 ? -v : v;
 }
 
@@ -414,7 +415,7 @@ vec3 ap_forward(vec3 xyz)
     float a = ra - 12.0 * ga / 11.0 + ba / 11.0;
     float b = (ra + ga - 2.0 * ba) / 9.0;
     float aa = (2.0 * ra + ga + 0.05 * ba - 0.305) * apr_nbb;
-    float h = atan(b, a);
+    float h = (a == 0.0 && b == 0.0) ? 0.0 : atan(b, a);
     if (h < 0.0)
         h += 2.0 * AP_PI;
     float J = 100.0 * pow(max(aa / apr_aw, 0.0), apr_cz);
@@ -462,18 +463,29 @@ vec3 ap_inverse(float J, float M, float h)
     return AP_M16_INV * rgb;
 }
 
-// Flare toe: g(o) = o (o + f) / (o + 2 f), normalised to g(1) = 1. Monotonic, no level crushed to 0, f = 0 identity.
+// Signal ceiling in screen-white-relative linear light: ST.2084 peaks at 10000 nits for PQ, 1.0 for SDR.
+float ap_upper()
+{
+    return apx_pq > 0.5 ? 10000.0 / max(apx_screen_nits, 1e-6) : 1.0;
+}
+
+// Flare toe: g(o) = o (o + f) / (o + 2 f), normalised to g(u) = u (u = ap_upper()). Monotonic, no level crushed to 0, f = 0 identity.
 float ap_flare(float o, float f)
 {
     if (f <= 0.0)
         return o;
     o = max(o, 0.0);
-    return (o * (o + f) / (o + 2.0 * f)) * ((1.0 + 2.0 * f) / (1.0 + f));
+    float u = ap_upper();
+    return (o * (o + f) / (o + 2.0 * f)) * ((u + 2.0 * f) / (u + f));
 }
 
+// Negated in-range test so any NaN channel evaluates as out-of-range (true).
 bool ap_out_of_range(vec3 c)
 {
-    return min(c.r, min(c.g, c.b)) < -1e-4 || max(c.r, max(c.g, c.b)) > 1.0 + 1e-4;
+    float upper = ap_upper();
+    return !(c.r >= -1e-4 && c.r <= upper + 1e-4 &&
+             c.g >= -1e-4 && c.g <= upper + 1e-4 &&
+             c.b >= -1e-4 && c.b <= upper + 1e-4);
 }
 
 vec4 hook()
