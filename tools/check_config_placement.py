@@ -102,18 +102,11 @@ MANIFEST_EXEMPT = ("dejudder_pulldown",)
 UPSTREAM_NO_ROW = ("peak_detection",)
 # Elsewhere: a key of the card's unit that the card only names (the control stays on Bill's page); it is placed
 # on that card for the placement text and the owner checks.
-KEY_ITEMS = ("Row", "Toggle", "Text", "Elsewhere")
+KEY_ITEMS = ("Row", "Toggle", "Text", "Number", "Elsewhere")
 # P8-4: the "Fixes under test" container on Bill's Rendering page (section id fixesUnderTest) holds VP keys.
-# Every VP key built inside it is on an Organisation() card (a Row item, so the row moves to its unit's card),
-# except these, which have no card yet and stay in the container (their placement text says so):
+# Every VP key built inside it is on an Organisation() card (a Row item, so the row moves to its unit's card).
 FIXES_CONTAINER_ID = "fixesUnderTest"
-FIXES_CONTAINER_STAYS = (
-    "optical_flow_fb_check",
-    "optical_flow_global",
-    "optical_flow_global_fallback",
-    "source_class",
-    "ssim_bitrate_floor",
-)
+FIXES_CONTAINER_STAYS = ()
 
 
 def read(root, rel):
@@ -133,7 +126,7 @@ def parse_organisation(text):
         chunk = body[s:e]
         flags = re.search(r',\s*(true|false)\s*,\s*(true|false)\s*,\s*\{', chunk)
         items = [(m.group(1), m.group(2))
-                 for m in re.finditer(r'\{\s*K::(Row|Toggle|Text|Section|Elsewhere)\s*,\s*"([^"]+)"', chunk)]
+                 for m in re.finditer(r'\{\s*K::(Row|Toggle|Text|Number|Section|Elsewhere)\s*,\s*"([^"]+)"', chunk)]
         cards.append({"unit": unit, "id": cid, "title": title,
                       "advanced": bool(flags and flags.group(1) == "true"), "items": items})
     return cards
@@ -174,6 +167,8 @@ def build_table(root, known_keys):
         card["name"] = names.get(card["unit"], card["unit"])
         if card["unit"] == RETIREMENT_UNIT:
             card["text"] = "VP-V > %s > %s" % (RETIREMENT_NAME, card["title"])
+        elif card["unit"] == "drive":
+            card["text"] = "%s > %s > %s" % (card["name"], "Advanced" if card["advanced"] else "Main", card["title"])
         else:
             card["text"] = "VP-V > %s > %s > %s" % (card["name"], "Advanced" if card["advanced"] else "Main", card["title"])
         for kind, ident in card["items"]:

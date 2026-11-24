@@ -949,6 +949,7 @@ namespace Vpv
 			QSlider* slider = nullptr;
 			QLabel* name = nullptr;
 			QLabel* description = nullptr;
+			QLabel* summary = nullptr;
 			QPushButton* reset = nullptr;
 			QPushButton* defaults = nullptr;
 		};
@@ -987,9 +988,129 @@ namespace Vpv
 			t.name = Bold(ObjectName(prefix + QStringLiteral(".name")));
 			t.description = Help(QString());
 			t.description->setObjectName(ObjectName(prefix + QStringLiteral(".description")));
+			t.summary = Help(QString());
+			t.summary->setObjectName(ObjectName(prefix + QStringLiteral(".summary")));
+			t.summary->setProperty("help", true);
 			layout->addWidget(t.name);
 			layout->addWidget(t.description);
+			layout->addWidget(t.summary);
 			return t;
+		}
+
+		// Plain-English ON/OFF summary of every key a unit's tier controls (Owner #3 clarity mandate):
+		// translates preset or active values into concrete statements so users never guess what a tier name enables.
+		QString FormatTierKeyState(const std::string& key, const std::string& rawVal, const std::string& companionVal = std::string())
+		{
+			const std::string v = Canonical(rawVal);
+			if (key == "optical_flow")
+				return v == "on" ? QStringLiteral("Optical flow on")
+					: v == "off" ? QStringLiteral("Optical flow off (VP matcher only)")
+					: QStringLiteral("Optical flow %1").arg(Q(rawVal.c_str()));
+			if (key == "motion_ahead_frames")
+				return SameValue(v, "0") ? QStringLiteral("Look-ahead off (0 frames)")
+					: QStringLiteral("Look-ahead %1 frames").arg(Q(rawVal.c_str()));
+			if (key == "dejudder_est_qpel")
+				return v == "on" ? QStringLiteral("Quarter-pel estimation on")
+					: QStringLiteral("Quarter-pel estimation off");
+			if (key == "dejudder_est_split")
+				return v == "on" ? QStringLiteral("Sub-block split on")
+					: QStringLiteral("Sub-block split off");
+			if (key == "deband_vp")
+				return v == "off" ? QStringLiteral("VP grain-safe deband off")
+					: v == "auto" ? QStringLiteral("VP grain-safe deband automatic when banding is detected")
+					: v == "on" ? QStringLiteral("VP grain-safe deband always on")
+					: QStringLiteral("VP grain-safe deband %1").arg(Q(rawVal.c_str()));
+			if (key == "detail_pulse_stabilise")
+				return v == "on" ? QStringLiteral("Detail pulse on") : QStringLiteral("Detail pulse off");
+			if (key == "texture_restore")
+				return v == "on" ? QStringLiteral("Texture restore on")
+					: v == "off" ? QStringLiteral("Texture restore off")
+					: QStringLiteral("Texture restore %1").arg(Q(rawVal.c_str()));
+			if (key == "source_resolution")
+				return v == "native" ? QStringLiteral("Source-resolution re-base off")
+					: v == "auto" ? QStringLiteral("Source-resolution re-base auto")
+					: QStringLiteral("Source-resolution re-base %1").arg(Q(rawVal.c_str()));
+			if (key == "adaptive_downscale")
+			{
+				if (v == "off") return QStringLiteral("Grain-aware downscale off");
+				if (v == "on")
+					return companionVal.empty() ? QStringLiteral("Grain-aware downscale on")
+						: QStringLiteral("Grain-aware downscale on (blend %1)").arg(Q(companionVal.c_str()));
+				return QStringLiteral("Grain-aware downscale %1").arg(Q(rawVal.c_str()));
+			}
+			if (key == "temporal_dither")
+				return v == "libplacebo" ? QStringLiteral("Temporal dither off (libplacebo dither only)")
+					: v == "off" ? QStringLiteral("Temporal dither off")
+					: v == "auto" ? QStringLiteral("Temporal dither auto (VP motion-aware on cinema shaders)")
+					: v == "sigma_delta" ? QStringLiteral("Temporal dither always on (VP motion-aware)")
+					: QStringLiteral("Temporal dither %1").arg(Q(rawVal.c_str()));
+			QString words = Q(key.c_str()).replace(QLatin1Char('_'), QLatin1Char(' '));
+			if (!words.isEmpty()) words[0] = words[0].toUpper();
+			return QStringLiteral("%1 %2").arg(words, Q(rawVal.c_str()));
+		}
+
+		QString FormatUnitTierClauses(const Unit& u, int tierIndex, const State& state)
+		{
+			const Table& table = TierTable();
+			const Vpv::Getter getter = state.MakeGetter();
+			std::vector<std::string> orderedKeys;
+			for (const Preset& p : u.presets)
+				for (const KeyValue& kv : p.set)
+					if (std::find(orderedKeys.begin(), orderedKeys.end(), kv.key) == orderedKeys.end())
+						orderedKeys.push_back(kv.key);
+			auto resolveValue = [&](const std::string& key) -> std::string
+			{
+				if (tierIndex >= 0 && tierIndex < static_cast<int>(u.presets.size()))
+					for (const KeyValue& kv : u.presets[static_cast<size_t>(tierIndex)].set)
+						if (key == kv.key) return kv.value;
+				return Effective(table, getter, key);
+			};
+			QStringList clauses;
+			for (const std::string& key : orderedKeys)
+			{
+				if (key == "adaptive_w_base") continue;   // reported inline with adaptive_downscale when on
+				std::string companion;
+				if (key == "adaptive_downscale") companion = resolveValue("adaptive_w_base");
+				clauses << FormatTierKeyState(key, resolveValue(key), companion);
+			}
+			return clauses.join(QStringLiteral("; "));
+		}
+
+		QString FormatTierSummary(const Unit& u, int tierIndex, const State& state)
+		{
+			if (!u.Tiered()) return QString();
+			if (tierIndex >= 0 && tierIndex < static_cast<int>(u.presets.size()))
+			{
+				const Preset& p = u.presets[static_cast<size_t>(tierIndex)];
+				return QStringLiteral("Selected (%1): %2.").arg(Q(p.tier), FormatUnitTierClauses(u, tierIndex, state));
+			}
+			const int plannedIdx = tierIndex - static_cast<int>(u.presets.size());
+			if (plannedIdx >= 0 && plannedIdx < static_cast<int>(u.plannedTiers.size()))
+			{
+				const PlannedTier& pt = u.plannedTiers[static_cast<size_t>(plannedIdx)];
+				const int highest = static_cast<int>(u.presets.size()) - 1;
+				return QStringLiteral("Selected (%1 \u2014 planned, runs %2 for now): %3 (%4).")
+					.arg(Q(pt.tier), Q(u.presets.back().tier), FormatUnitTierClauses(u, highest, state), Q(pt.note));
+			}
+			return QStringLiteral("Active (Custom): %1.").arg(FormatUnitTierClauses(u, -1, state));
+		}
+
+		QString FormatGlobalTierSummary(const Table& table, int globalIndex, bool shipped, const State& state)
+		{
+			const Vpv::Getter getter = state.MakeGetter();
+			QStringList lines;
+			if (globalIndex >= 0 && globalIndex < static_cast<int>(table.tiers.size()))
+				lines << QStringLiteral("Selected (%1):").arg(Q(table.tiers[static_cast<size_t>(globalIndex)]));
+			else
+				lines << (shipped ? QStringLiteral("Active (Mixed \u2014 shipped default):") : QStringLiteral("Active (Mixed):"));
+			for (const Unit& u : table.units)
+			{
+				if (!u.Tiered()) continue;
+				const int t = MatchTier(table, u, getter);
+				const QString tierLabel = t >= 0 ? Q(u.presets[static_cast<size_t>(t)].tier) : QStringLiteral("Custom");
+				lines << QStringLiteral("%1 (%2): %3.").arg(Q(u.name), tierLabel, FormatUnitTierClauses(u, t, state));
+			}
+			return lines.join(QLatin1Char('\n'));
 		}
 
 		QString SlotLine(const Table& table, const char* id)
@@ -1027,8 +1148,8 @@ namespace Vpv
 			bool ok = false;
 			const double budget = stored.toDouble(&ok);
 			if (!ok || budget <= 0.0)
-				return text + QStringLiteral("<br>Not set on the Queue page (it uses Target frames).");
-			text += QStringLiteral("<br>Queue page Target delay: <b>%1 ms</b>:").arg(budget, 0, 'f', 0);
+				return text + QStringLiteral("<br>Not set on Input > Main (uses Target frames on the Queue page).");
+			text += QStringLiteral("<br>Target delay (Input > Main): <b>%1 ms</b>:").arg(budget, 0, 'f', 0);
 			text += QStringLiteral("<table cellspacing=6><tr><th align=left>Rate</th><th>Frames</th><th>Padding</th>"
 				"<th align=left>Look-ahead</th></tr>");
 			for (double fps : rates)
@@ -1080,7 +1201,9 @@ namespace Vpv
 			const Retirement* retiring = table.FindRetirement(toggle.key, "vprenderer");
 			const QString label = retiring ? QStringLiteral("%1 (%2)").arg(Q(toggle.label), RetirementCaption(*retiring)) : Q(toggle.label);
 			combo->setAccessibleName(label);
-			const QString shownDefault = std::string(toggle.key) == "fbo_float32" ? QStringLiteral("on") : Q(table.Default(toggle.key));
+			const QString shownDefault = std::string(toggle.key) == "fbo_float32" ? QStringLiteral("on")
+				: std::string(toggle.key) == "appearance_room" ? QStringLiteral("Cinema (Dark)")
+				: Q(table.Default(toggle.key));
 			// One style for an empty value, as Config's own controls show it (usability audit 2026-10-24).
 			combo->addItem(QStringLiteral("Default: %1").arg(shownDefault.left(1).toUpper() + shownDefault.mid(1)), QString());
 			for (const char* v : toggle.values)
@@ -1090,6 +1213,14 @@ namespace Vpv
 				if (std::string(toggle.key) == "fbo_float32")
 					shown = std::string(v) == "auto" ? QStringLiteral("On (full precision)") : std::string(v) == "on" ?
 						QStringLiteral("On (always)") : QStringLiteral("Off (saves GPU time)");
+				else if (std::string(toggle.key) == "appearance_room")
+				{
+					const std::string sv(v);
+					shown = sv == "cinema" ? QStringLiteral("Cinema (Dark)")
+						: sv == "living_low" ? QStringLiteral("Living Room (Dim)")
+						: sv == "living_lit" ? QStringLiteral("Living Room (Lit)")
+						: sv == "auto" ? QStringLiteral("Auto (Light Sensor)") : Q(v);
+				}
 				combo->addItem(shown, Q(v));
 			}
 			const SlotInfo* slot = table.Slot(toggle.slot);
@@ -1101,7 +1232,12 @@ namespace Vpv
 					"A confirmed cut still starts over and a fade still shrinks the history, whatever this says. Off: no soft "
 					"reset (shown as \"soft reset: off\" on the detail pulse / texture restore status lines). It acts only on "
 					"confirmed verdicts: where they stay provisional (low latency) the lines read \"soft reset: on (inactive: "
-					"provisional verdicts only)\". The bar is provisional until the D8 truth run.\n\n") : QString();
+					"provisional verdicts only)\". The bar is provisional until the D8 truth run.\n\n")
+				: std::string(toggle.key) == "appearance_room" ?
+				QStringLiteral("Default Cinema (Dark). Living Room (Dim): a living room with low light. Living Room (Lit): a lit "
+					"living room. Auto (Light Sensor): follow the room light sensor (with no reading the room is taken as dark and "
+					"Fallbacks engaged says so).\n\n")
+				: QString();
 			combo->setToolTip(what + QStringLiteral("Key %1 (renderer profile). Slot: %2. See docs/settings/VP-settings-reference.md.")
 				.arg(key, slot ? Q(slot->name) : Q(toggle.slot)) +
 				(retiring ? QStringLiteral("\n\n") + RetirementTip(table, *retiring) : QString()));
@@ -1132,20 +1268,11 @@ namespace Vpv
 		{
 			static const TextRowSpec kRows[] = {
 				// SID r2 (owner 2026-11-11): the source sizes re-base RECOGNISES and names when it holds (never what it applies).
-				{ "source_geometry_detect", "Source resolution: sizes recognised (all | conventional | ids)", "all",
+				{ "source_geometry_detect", "Source resolution: sizes recognised", "all",
 					"Default all: every listed source size, including the anamorphic HD sizes (HDV 1440x1080, DVCPRO HD 1280x1080 "
 					"and 960x720) that are recognised and named in the hold note and log but never re-based. conventional: only the "
 					"sizes re-base may apply. Or a list of ids (hdv_1440x1080, dvcprohd_1280x1080, dvcprohd_960x720, 1920x1080, ...). "
 					"This changes what is named, never what is applied; unknown ids are ignored and shown as a status line." },
-				// CF-1 CAM-4 (colour.appearance): the room, the strength and the screen white of the CAM16 pass.
-				{ "appearance_room", "Room (cinema | living_low | living_lit | auto)", "cinema",
-					"Default cinema (a dark room). living_low: a living room with low light (dim). living_lit: a lit living room (average). "
-					"auto: follow the room light sensor (the Dynamic Drive ambient sensor); with no reading the room is taken as dark and the "
-					"Fallbacks line says so." },
-				{ "appearance_strength", "Appearance strength (0 to 1)", "1",
-					"Default 1: the full adaptation. 0 leaves the picture unchanged; values between blend the adaptation in." },
-				{ "appearance_screen_white_nits", "Screen white (nits, 1 to 1000)", "48",
-					"The luminance of the screen white the picture is adapted to. Used as given until the measured switch below is on."},
 			};
 			for (const TextRowSpec& r : kRows)
 				if (std::string(r.key) == key) return &r;
@@ -1154,10 +1281,114 @@ namespace Vpv
 
 		// A VP-V text row: empty = the key is not set in the profile (its default shows as the placeholder); it writes the
 		// key in the profile the VP-V picker shows, as the toggles do.
-		void AddTextRow(const std::shared_ptr<State>& state, const QString& unitId, const TextRowSpec& spec, QFormLayout* form)
+		// For source_geometry_detect, builds a mode dropdown + conditional custom-IDs line edit.
+		// Returns the field widget directly added to `form` (for AddFieldNote).
+		QWidget* AddTextRow(const std::shared_ptr<State>& state, const QString& unitId, const TextRowSpec& spec, QFormLayout* form)
 		{
-			auto* edit = new QLineEdit;
 			const QString key = Q(spec.key);
+			const std::string k = spec.key;
+			if (k == "source_geometry_detect")
+			{
+				auto* container = new QWidget;
+				auto* vbox = new QVBoxLayout(container);
+				vbox->setContentsMargins(0, 0, 0, 0);
+				vbox->setSpacing(4);
+
+				auto* mode = new QComboBox;
+				mode->setObjectName(ObjectName(unitId + QLatin1Char('.') + key + QStringLiteral(".mode")));
+				mode->setAccessibleName(Q(spec.label));
+				mode->addItem(QStringLiteral("All recognised sizes"), QStringLiteral("all"));
+				mode->addItem(QStringLiteral("Conventional sizes only"), QStringLiteral("conventional"));
+				mode->addItem(QStringLiteral("Custom IDs..."), QStringLiteral("custom"));
+				mode->setToolTip(Q(spec.tip) + QStringLiteral("\n\nKey %1 (renderer profile).").arg(key));
+				vbox->addWidget(mode);
+
+				auto* edit = new QLineEdit;
+				edit->setObjectName(ObjectName(unitId + QLatin1Char('.') + key));
+				AttachCoverageAlias(state, edit, key);
+				edit->setAccessibleName(Q(spec.label) + QStringLiteral(" (custom IDs)"));
+				edit->setPlaceholderText(QStringLiteral("e.g. hdv_1440x1080, 1920x1080"));
+				edit->setToolTip(Q(spec.tip) + QStringLiteral("\n\nKey %1 (renderer profile).").arg(key));
+				edit->setVisible(false);
+				edit->setEnabled(false);
+				vbox->addWidget(edit);
+
+				form->addRow(Q(spec.label), container);
+				state->own.push_back(container);
+
+				auto pendingCustom = std::make_shared<bool>(false);
+				auto lastProfile = std::make_shared<QString>(state->profile);
+
+				QObject::connect(mode, qOverload<int>(&QComboBox::currentIndexChanged), mode,
+					[state, mode, edit, key, pendingCustom](int index)
+				{
+					if (state->refreshing || index < 0) return;
+					const QString modeVal = mode->itemData(index).toString();
+					if (modeVal == QStringLiteral("custom"))
+					{
+						*pendingCustom = true;
+						edit->setVisible(true);
+						edit->setEnabled(true);
+						edit->setFocus();
+						return;
+					}
+					*pendingCustom = false;
+					edit->setVisible(false);
+					edit->setEnabled(false);
+					if (!state->host.setValue) return;
+					state->host.setValue(state->profile, key, modeVal);
+					state->ReloadUpstream();
+					state->RefreshAll();
+				});
+
+				QObject::connect(edit, &QLineEdit::editingFinished, edit, [state, edit, key, k, pendingCustom]()
+				{
+					if (state->refreshing || !state->host.setValue) return;
+					const QString text = edit->text().trimmed();
+					*pendingCustom = false;
+					if (QString::fromStdString(state->Own(k)) == text)
+					{
+						state->RefreshAll();
+						return;
+					}
+					state->host.setValue(state->profile, key, text);
+					state->ReloadUpstream();
+					state->RefreshAll();
+				});
+
+				state->refreshers.push_back([mode, edit, k, pendingCustom, lastProfile](const std::shared_ptr<State>& state)
+				{
+					if (*lastProfile != state->profile || state->reloading)
+					{
+						*pendingCustom = false;
+						*lastProfile = state->profile;
+					}
+					const QString stored = QString::fromStdString(state->Get(k));
+					const QString lower = stored.toLower();
+					const bool isAll = lower.isEmpty() || lower == QStringLiteral("all");
+					const bool isConv = lower == QStringLiteral("conventional");
+					const bool showCustom = (!isAll && !isConv) || *pendingCustom || (edit->isVisible() && edit->hasFocus());
+					const QSignalBlocker modeBlocker(mode);
+					const QSignalBlocker editBlocker(edit);
+					if (showCustom)
+					{
+						mode->setCurrentIndex(2);
+						edit->setVisible(true);
+						edit->setEnabled(true);
+						if (!edit->hasFocus() && !*pendingCustom) edit->setText(stored);
+					}
+					else
+					{
+						mode->setCurrentIndex(isConv ? 1 : 0);
+						edit->setVisible(false);
+						edit->setEnabled(false);
+						edit->setText(QString());
+					}
+				});
+				return container;
+			}
+
+			auto* edit = new QLineEdit;
 			edit->setObjectName(ObjectName(unitId + QLatin1Char('.') + key));
 			AttachCoverageAlias(state, edit, key);
 			edit->setAccessibleName(Q(spec.label));
@@ -1174,12 +1405,77 @@ namespace Vpv
 				state->ReloadUpstream();
 				state->RefreshAll();
 			});
-			const std::string k = spec.key;
 			state->refreshers.push_back([edit, k](const std::shared_ptr<State>& state)
 			{
 				const QSignalBlocker blocker(edit);
 				edit->setText(QString::fromStdString(state->Own(k)));
 			});
+			return edit;
+		}
+
+		// VP-V's validated numeric spin-box rows (ItemKind::Number): renderer-profile keys built here.
+		struct NumberRowSpec
+		{
+			const char* key;
+			const char* label;
+			double minValue;
+			double maxValue;
+			int decimals;
+			double step;
+			double defaultValue;
+			const char* suffix;
+			const char* tip;
+		};
+		const NumberRowSpec* FindNumberRow(const char* key)
+		{
+			static const NumberRowSpec kNumberRows[] = {
+				// CF-1 CAM-4 (colour.appearance): appearance strength and screen white luminance.
+				{ "appearance_strength", "Appearance strength", 0.0, 1.0, 2, 0.05, 1.0, nullptr,
+					"Default 1.0: the full adaptation. 0 leaves the picture unchanged; values between blend the adaptation in." },
+				{ "appearance_screen_white_nits", "Screen white", 1.0, 1000.0, 1, 1.0, 48.0, " nits",
+					"Default 48 nits: the luminance of the screen white the picture is adapted to. Used as given until the measured switch in Advanced is on." },
+			};
+			for (const NumberRowSpec& r : kNumberRows)
+				if (std::string(r.key) == key) return &r;
+			return nullptr;
+		}
+
+		QDoubleSpinBox* AddNumberRow(const std::shared_ptr<State>& state, const QString& unitId, const NumberRowSpec& spec, QFormLayout* form)
+		{
+			auto* spin = new QDoubleSpinBox;
+			const QString key = Q(spec.key);
+			spin->setObjectName(ObjectName(unitId + QLatin1Char('.') + key));
+			AttachCoverageAlias(state, spin, key);
+			spin->setAccessibleName(Q(spec.label));
+			spin->setRange(spec.minValue, spec.maxValue);
+			spin->setDecimals(spec.decimals);
+			spin->setSingleStep(spec.step);
+			if (spec.suffix && *spec.suffix) spin->setSuffix(Q(spec.suffix));
+			spin->setValue(spec.defaultValue);
+			spin->setToolTip(Q(spec.tip) + QStringLiteral("\n\nKey %1 (renderer profile).").arg(key));
+			form->addRow(Q(spec.label), spin);
+			state->own.push_back(spin);
+			const std::string k = spec.key;
+			const double defaultVal = spec.defaultValue;
+			QObject::connect(spin, qOverload<double>(&QDoubleSpinBox::valueChanged), spin, [state, key, k](double val)
+			{
+				if (state->refreshing || !state->host.setValue) return;
+				const QString formatted = QString::number(val, 'g', 4);
+				if (SameValue(state->Own(k), formatted.toStdString())) return;
+				state->host.setValue(state->profile, key, formatted);
+				state->ReloadUpstream();
+				state->RefreshAll();
+			});
+			state->refreshers.push_back([spin, k, defaultVal](const std::shared_ptr<State>& state)
+			{
+				const QString raw = QString::fromStdString(state->Get(k));
+				bool ok = false;
+				const double parsed = raw.toDouble(&ok);
+				const double target = (!raw.isEmpty() && ok) ? parsed : defaultVal;
+				const QSignalBlocker blocker(spin);
+				spin->setValue(target);
+			});
+			return spin;
 		}
 
 		const Toggle* FindToggle(const Unit& unit, const char* key)
@@ -1236,21 +1532,32 @@ namespace Vpv
 			return true;
 		}
 
+		bool IsReplacedByActive(const std::shared_ptr<State>& state, const char* key)
+		{
+			if (!key || !*key) return false;
+			std::string v = state->Get(key);
+			if (v.empty()) v = TierTable().Default(key);
+			return SameValue(v, "on");
+		}
+
 		QList<QWidget*> KeyControls(QWidget* root, const QString& key)
 		{
 			QList<QWidget*> found;
 			if (!root) return found;
 			const QRegularExpression name(QStringLiteral("^config\\.vprenderer\\.%1(\\.[^.]+)?$").arg(QRegularExpression::escape(key)));
 			for (QWidget* w : root->findChildren<QWidget*>(name)) found << w;
-			// A VP-V toggle (AddToggleRow) is named "vpv.<unit>.<key>", not "config.vprenderer.<key>".
+			// A VP-V toggle/number/text control is named "vpv.<unit>.<key>", not "config.vprenderer.<key>".
 			const QRegularExpression toggleName(QStringLiteral("^vpv\\.[^.]+\\.%1(\\.[^.]+)?$").arg(QRegularExpression::escape(key)));
 			for (QWidget* w : root->findChildren<QWidget*>(toggleName))
 				if (!found.contains(w)) found << w;
-			// The row's label goes with it.
-			for (QWidget* f : RowFields(root, key))
+			// The row's label goes with it (for both upstream config.vprenderer.* rows and VP-V vpv.<unit>.* rows).
+			for (QWidget* f : RowFieldsFromWidgets(root, found, false))
 				if (auto* form = qobject_cast<QFormLayout*>(f->parentWidget()->layout()))
-					if (QWidget* label = form->labelForField(f)) found << label;
-					else if (auto* stacked = qobject_cast<QWidget*>(f->property("vpvRowLabel").value<QObject*>())) found << stacked;
+				{
+					QWidget* label = form->labelForField(f);
+					if (!label) label = qobject_cast<QWidget*>(f->property("vpvRowLabel").value<QObject*>());
+					if (label && !found.contains(label)) found << label;
+				}
 			return found;
 		}
 
@@ -1311,17 +1618,33 @@ namespace Vpv
 					}
 				break;
 			case LockKind::Feature:
-				locked = EffectiveOff(state, spec);
-				// A Main card that locks only some of its keys stays visible with those keys greyed in place.
-				if (lock->onMain && !spec.lockKeys.empty())
-					why = QStringLiteral("Used only when %1 is on.").arg(Q(spec.master));
+				if (IsReplacedByActive(state, spec.replacedByKey))
+				{
+					const QString replacer = Q(spec.replacedByName ? spec.replacedByName : spec.replacedByKey);
+					locked = true;
+					why = QStringLiteral("Replaced by %1 while active.").arg(replacer);
+					lock->unusedBecause = QStringLiteral("replaced by %1 while active").arg(replacer);
+				}
 				else
-					why = lock->onMain ? TurnsOnLine(spec) : QStringLiteral("Used only when %1 is on (Main).").arg(Q(spec.master));
-				if (locked) lock->unusedBecause = QStringLiteral("%1 is off").arg(Q(spec.master));
+				{
+					locked = EffectiveOff(state, spec);
+					// A Main card that locks only some of its keys stays visible with those keys greyed in place.
+					if (lock->onMain && !spec.lockKeys.empty())
+						why = QStringLiteral("Used only when %1 is on.").arg(Q(spec.master));
+					else
+						why = lock->onMain ? TurnsOnLine(spec) : QStringLiteral("Used only when %1 is on (Main).").arg(Q(spec.master));
+					if (locked) lock->unusedBecause = QStringLiteral("%1 is off").arg(Q(spec.master));
+				}
+				break;
+			case LockKind::ReplacedBy:
+				locked = EffectiveOff(state, spec);
+				why = QStringLiteral("Replaced by %1 while active.").arg(Q(spec.master));
+				if (locked) lock->unusedBecause = QStringLiteral("replaced by %1 while active").arg(Q(spec.master));
 				break;
 			}
 			lock->locked = locked;
-			if (lock->note) lock->note->setText(locked ? why : (spec.kind == LockKind::Feature ? QString() :
+			const bool isFeatureOrReplaced = (spec.kind == LockKind::Feature || spec.kind == LockKind::ReplacedBy);
+			if (lock->note) lock->note->setText(locked ? why : (isFeatureOrReplaced ? QString() :
 				QStringLiteral("Custom: these are yours; unticking Custom puts back the values %1 sets.").arg(Q(spec.master))));
 			if (lock->note) lock->note->setVisible(!lock->note->text().isEmpty());
 			if (spec.lockKeys.empty())
@@ -1362,11 +1685,16 @@ namespace Vpv
 						w->setEnabled(false);
 						w->setToolTip(why);
 					}
+					else if (locked)
+					{
+						w->setEnabled(false);
+						w->setToolTip(why);
+					}
 					else if (!locked && w->property("vpvLocked").toBool())
 					{
 						w->setProperty("vpvLocked", false);
 						w->setProperty("derivedSetting", false);
-						w->setEnabled(true);
+						w->setEnabled(state->vpvOn);
 						w->setToolTip(w->property("vpvLockTip").toString());
 					}
 				}
@@ -1523,9 +1851,11 @@ namespace Vpv
 				lock->note = Help(QString());
 				lock->note->setProperty("help", true);
 				lock->note->setProperty("vpvLockControl", true);
-				lock->note->setObjectName(card.frame->objectName() + QStringLiteral(".lock"));
+				lock->note->setObjectName(spec.lock.kind == LockKind::ReplacedBy
+					? ObjectName(unitId + QLatin1Char('.') + Q(spec.id) + QStringLiteral(".replaced_note"))
+					: (card.frame->objectName() + QStringLiteral(".lock")));
 				card.Add(lock->note);
-				if (spec.lock.kind != LockKind::Feature)
+				if (spec.lock.kind != LockKind::Feature && spec.lock.kind != LockKind::ReplacedBy)
 				{
 					lock->custom = new QCheckBox(QStringLiteral("Custom (change these by hand)"));
 					lock->custom->setObjectName(card.frame->objectName() + QStringLiteral(".custom"));
@@ -1535,6 +1865,14 @@ namespace Vpv
 					card.Add(lock->custom);
 				}
 			}
+			auto itemLock = [&](const char* itemKey) -> std::shared_ptr<LockState>
+			{
+				if (spec.lock.kind == LockKind::None) return nullptr;
+				if (spec.lock.lockKeys.empty()) return lock;
+				for (const char* lk : spec.lock.lockKeys)
+					if (std::string(lk) == itemKey) return lock;
+				return nullptr;
+			};
 			int sections = 0;
 			for (const CardItem& item : spec.items) sections += item.kind == ItemKind::Section ? 1 : 0;
 			for (const CardItem& item : spec.items)
@@ -1550,7 +1888,7 @@ namespace Vpv
 					// Owner: retirement candidates only on the Proposed retirement tab.
 					if (table.FindRetirement(t->key, "vprenderer")) break;
 					AddToggleRow(state, unitId, *t, card.Form());
-					AddFieldNote(state, card.body->findChild<QComboBox*>(ObjectName(unitId + QLatin1Char('.') + Q(t->key))), Q(t->key), lock);
+					AddFieldNote(state, card.body->findChild<QComboBox*>(ObjectName(unitId + QLatin1Char('.') + Q(t->key))), Q(t->key), itemLock(t->key));
 					break;
 				}
 				case ItemKind::Row:
@@ -1561,7 +1899,7 @@ namespace Vpv
 					bool moved = false;
 					for (QWidget* f : fields) moved = MoveRow(f, card.Form()) || moved;
 					if (!moved) state->missing << QStringLiteral("row %1").arg(id);
-					else AddFieldNote(state, fields.front(), id, lock);
+					else AddFieldNote(state, fields.front(), id, itemLock(item.id));
 					lock->keys << id;
 					break;
 				}
@@ -1574,10 +1912,19 @@ namespace Vpv
 					break;
 				case ItemKind::Text:
 				{
-					const TextRowSpec* spec = FindTextRow(item.id);
-					if (!spec) { state->missing << QStringLiteral("text %1 (%2)").arg(id, unitId); break; }
-					AddTextRow(state, unitId, *spec, card.Form());
-					AddFieldNote(state, card.body->findChild<QLineEdit*>(ObjectName(unitId + QLatin1Char('.') + id)), id, lock);
+					const TextRowSpec* textSpec = FindTextRow(item.id);
+					if (!textSpec) { state->missing << QStringLiteral("text %1 (%2)").arg(id, unitId); break; }
+					QWidget* rowField = AddTextRow(state, unitId, *textSpec, card.Form());
+					AddFieldNote(state, rowField, id, itemLock(item.id));
+					lock->keys << id;
+					break;
+				}
+				case ItemKind::Number:
+				{
+					const NumberRowSpec* numSpec = FindNumberRow(item.id);
+					if (!numSpec) { state->missing << QStringLiteral("number %1 (%2)").arg(id, unitId); break; }
+					QDoubleSpinBox* spin = AddNumberRow(state, unitId, *numSpec, card.Form());
+					AddFieldNote(state, spin, id, itemLock(item.id));
 					lock->keys << id;
 					break;
 				}
@@ -1625,10 +1972,13 @@ namespace Vpv
 					state->RefreshAll();
 				});
 			// A feature's tuning follows its switch as soon as it changes (also through its upstream control).
-			if (spec.lock.kind == LockKind::Feature)
+			if (spec.lock.kind == LockKind::Feature || spec.lock.kind == LockKind::ReplacedBy)
 			{
 				QList<QComboBox*> connected;
-				for (const QString& masterKey : Q(spec.lock.masterKey).split(QLatin1Char('|'), Qt::SkipEmptyParts))
+				QStringList watchKeys = Q(spec.lock.masterKey).split(QLatin1Char('|'), Qt::SkipEmptyParts);
+				if (spec.lock.replacedByKey && *spec.lock.replacedByKey)
+					watchKeys << Q(spec.lock.replacedByKey);
+				for (const QString& masterKey : watchKeys)
 				{
 					const QString masterName = QStringLiteral("config.vprenderer.") + masterKey.trimmed();
 					for (QWidget* root : { state->host.upstreamRoot, state->root, scope, static_cast<QWidget*>(card.frame) })
@@ -1945,6 +2295,7 @@ namespace Vpv
 							QStringLiteral("The settings match no tier. Move the slider to choose one, or Default for the "
 								"shipped values."));
 					}
+					t.summary->setText(FormatTierSummary(*u, match, *state));
 					t.reset->setEnabled(match >= 0 || state->ChosenTier(u->id) >= 0);
 				});
 			}
@@ -1987,6 +2338,69 @@ namespace Vpv
 				delay->setTextFormat(Qt::RichText);
 				delayCard.Add(delay);
 				state->refreshers.push_back([delay](const std::shared_ptr<State>& state) { delay->setText(DelaySummary(state->host, TierTable())); });
+			}
+			if (unit.id == std::string("output"))
+			{
+				const QString vpvSec = Q(table.section);
+				// dither_need (output.dither, default off): global [vpv] setting placed on Output > Main.
+				CardBox ditherNeedCard = MakeCard(ObjectName(QStringLiteral("output.card.dither_need")),
+					QStringLiteral("Adaptive dither where banding shows (Q9)"),
+					QStringLiteral("Applies to all profiles."), false);
+				layout->addWidget(ditherNeedCard.frame);
+				auto* ditherNeed = new QComboBox;
+				ditherNeed->setObjectName(ObjectName(QStringLiteral("expert.dither_need")));
+				ditherNeed->addItem(QStringLiteral("Off (default)"), QString());
+				ditherNeed->addItem(QStringLiteral("Auto"), QStringLiteral("auto"));
+				ditherNeed->setToolTip(QStringLiteral("Key dither_need ([vpv]). Adds sigma-delta amplitude only in blocks where a link step "
+					"would be visible, from the source quality and the light level; judged by its own link-noise limit. A missing or "
+					"stale input is shown under 'engaged' and the amplitude stays as today. Off = today's picture exactly."));
+				ditherNeedCard.Form()->addRow(QStringLiteral("Dither where needed"), ditherNeed);
+				QObject::connect(ditherNeed, qOverload<int>(&QComboBox::currentIndexChanged), ditherNeed, [state, ditherNeed, vpvSec](int i)
+				{
+					if (state->refreshing || i < 0 || !state->host.setValue) return;
+					state->host.setValue(vpvSec, QStringLiteral("dither_need"), ditherNeed->itemData(i).toString());
+				});
+
+				// calibration_lut_stage (R1, default auto): global [vpv] setting placed on Output > Advanced.
+				CardBox lutStageCard = MakeCard(ObjectName(QStringLiteral("output.card.calibration_lut_stage")),
+					QStringLiteral("Calibration 3D LUT placement"),
+					QStringLiteral("Applies to all profiles."), false);
+				advanced->addWidget(lutStageCard.frame);
+				auto* lutStage = new QComboBox;
+				lutStage->setObjectName(ObjectName(QStringLiteral("expert.calibration_lut_stage")));
+				lutStage->addItem(QStringLiteral("Auto (VP on VP-V, libplacebo on Original)"), QStringLiteral("auto"));
+				lutStage->addItem(QStringLiteral("VP"), QStringLiteral("vp"));
+				lutStage->addItem(QStringLiteral("libplacebo"), QStringLiteral("libplacebo"));
+				lutStage->setToolTip(QStringLiteral("Key calibration_lut_stage ([vpv]). Auto uses VP's last colour step while "
+					"Dolby Vision trims or appearance run, else libplacebo. VP applies the LUT after Dynamic Drive, so LED "
+					"measurement sees target light instead of projector codes (design R1)."));
+				lutStageCard.Form()->addRow(QStringLiteral("Calibration LUT runs in"), lutStage);
+				QObject::connect(lutStage, qOverload<int>(&QComboBox::currentIndexChanged), lutStage, [state, lutStage, vpvSec](int i)
+				{
+					if (state->refreshing || i < 0 || !state->host.setValue) return;
+					state->host.setValue(vpvSec, QStringLiteral("calibration_lut_stage"), lutStage->itemData(i).toString());
+				});
+
+				state->refreshers.push_back([ditherNeed, lutStage, vpvSec](const std::shared_ptr<State>& state)
+				{
+					const auto get = [&](const char* key) { return state->host.value ? state->host.value(vpvSec, QString::fromLatin1(key)).trimmed() : QString(); };
+					const bool original = get("pipeline_original_pathway").compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0;
+					const QString origReason = original ? QStringLiteral("Greyed: the Original pathway is on (VP's additions are off).") : QString();
+					{
+						const QSignalBlocker blocker(ditherNeed);
+						ditherNeed->setCurrentIndex(get("dither_need").compare(QStringLiteral("auto"), Qt::CaseInsensitive) == 0 ? 1 : 0);
+						ditherNeed->setEnabled(!original);
+						SetGreyReason(ditherNeed, origReason);
+					}
+					{
+						const QSignalBlocker blocker(lutStage);
+						const QString val = get("calibration_lut_stage");
+						lutStage->setCurrentIndex(val.compare(QStringLiteral("vp"), Qt::CaseInsensitive) == 0 ? 1 :
+							val.compare(QStringLiteral("libplacebo"), Qt::CaseInsensitive) == 0 ? 2 : 0);
+						lutStage->setEnabled(!original);
+						SetGreyReason(lutStage, origReason);
+					}
+				});
 			}
 			if (unit.more && *unit.more)
 			{
@@ -2121,22 +2535,6 @@ namespace Vpv
 			auto* form = new QFormLayout;
 			layout->addLayout(form);
 
-			// Where the projector calibration LUT runs (R1). CF-1 FIX1 MUST 1: the default is auto (the LUT moves to VP's
-			// last step while Dolby Vision trims or appearance run, which must act before it); the item order is kept.
-			auto* lutStage = new QComboBox;
-			lutStage->setObjectName(ObjectName(QStringLiteral("expert.calibration_lut_stage")));
-			lutStage->addItem(QStringLiteral("libplacebo (before VP's output steps)"), QStringLiteral("libplacebo"));
-			lutStage->addItem(QStringLiteral("VP (the last colour step, after LED compensation)"), QStringLiteral("vp"));
-			lutStage->addItem(QStringLiteral("Auto (default; VP's step while Dolby Vision trims or appearance run, else libplacebo)"), QStringLiteral("auto"));
-			lutStage->setToolTip(QStringLiteral("Key calibration_lut_stage. VP applies the LUT after Dynamic Drive, so the LED "
-				"measurement sees target light instead of projector codes (design R1)."));
-			form->addRow(QStringLiteral("Calibration LUT runs in"), lutStage);
-			QObject::connect(lutStage, qOverload<int>(&QComboBox::currentIndexChanged), lutStage, [state, lutStage, section](int i)
-			{
-				if (state->refreshing || i < 0 || !state->host.setValue) return;
-				state->host.setValue(section, QStringLiteral("calibration_lut_stage"), lutStage->itemData(i).toString());
-			});
-
 			// F-8 (owner rule vp-either-or-overlaps): which HDR inference decides an unflagged BT.2020
 			// signal - VP's or Bill's original newlldv heuristic. The Original pathway selects Bill's.
 			auto* hdrInference = new QComboBox;
@@ -2192,22 +2590,6 @@ namespace Vpv
 			{
 				if (state->refreshing || i < 0 || !state->host.setValue) return;
 				state->host.setValue(section, QStringLiteral("entrance_gpu_drain"), drain->itemData(i).toString());
-			});
-
-			// dither_need (output.dither, default off): extra sigma-delta amplitude only in banding-prone blocks where a
-			// link step is visible, decided from the shared products (light level, region stats, source quality).
-			auto* ditherNeed = new QComboBox;
-			ditherNeed->setObjectName(ObjectName(QStringLiteral("expert.dither_need")));
-			ditherNeed->addItem(QStringLiteral("Off (default)"), QString());
-			ditherNeed->addItem(QStringLiteral("Auto (extra dither only where banding would show)"), QStringLiteral("auto"));
-			ditherNeed->setToolTip(QStringLiteral("Key dither_need. Adds sigma-delta amplitude only in blocks where a link step "
-				"would be visible, from the source quality and the light level; judged by its own link-noise limit. A missing or "
-				"stale input is shown under 'engaged' and the amplitude stays as today. Off = today's picture exactly."));
-			form->addRow(QStringLiteral("Dither where needed"), ditherNeed);
-			QObject::connect(ditherNeed, qOverload<int>(&QComboBox::currentIndexChanged), ditherNeed, [state, ditherNeed, section](int i)
-			{
-				if (state->refreshing || i < 0 || !state->host.setValue) return;
-				state->host.setValue(section, QStringLiteral("dither_need"), ditherNeed->itemData(i).toString());
 			});
 
 			// frame_analysis_store (WP-23): VP's per-source-frame analysis record and the one shared luma
@@ -2297,17 +2679,9 @@ namespace Vpv
 			});
 			layout->addStretch();
 
-			state->refreshers.push_back([lutStage, entranceOnce, merged, drain, ditherNeed, analysis, resync, hdrInference, order, slotsOff, section](const std::shared_ptr<State>& state)
+			state->refreshers.push_back([entranceOnce, merged, drain, analysis, resync, hdrInference, order, slotsOff, section](const std::shared_ptr<State>& state)
 			{
 				const auto get = [&](const char* key) { return state->host.value ? state->host.value(section, QString::fromLatin1(key)).trimmed() : QString(); };
-				{
-					const QSignalBlocker blocker(lutStage);
-					lutStage->setCurrentIndex(get("calibration_lut_stage").compare(QStringLiteral("vp"), Qt::CaseInsensitive) == 0 ? 1 :
-						get("calibration_lut_stage").compare(QStringLiteral("libplacebo"), Qt::CaseInsensitive) == 0 ? 0 : 2);
-					const bool original = get("pipeline_original_pathway").compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0;
-					lutStage->setEnabled(!original);
-					SetGreyReason(lutStage, original ? QStringLiteral("Greyed: the Original pathway is on (VP's additions are off).") : QString());
-				}
 				{
 					const QSignalBlocker blocker(entranceOnce);
 					const QString value = get("pipeline_entrance_once");
@@ -2327,13 +2701,6 @@ namespace Vpv
 					const QSignalBlocker blocker(drain);
 					const QString value = get("entrance_gpu_drain").toLower();
 					drain->setCurrentIndex(value == QStringLiteral("finish") ? 2 : value == QStringLiteral("flush") ? 1 : 0);
-				}
-				{
-					const QSignalBlocker blocker(ditherNeed);
-					ditherNeed->setCurrentIndex(get("dither_need").compare(QStringLiteral("auto"), Qt::CaseInsensitive) == 0 ? 1 : 0);
-					const bool original = get("pipeline_original_pathway").compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0;
-					ditherNeed->setEnabled(!original);
-					SetGreyReason(ditherNeed, original ? QStringLiteral("Greyed: the Original pathway is on (VP's additions are off).") : QString());
 				}
 				{
 					const QSignalBlocker blocker(resync);
@@ -3055,6 +3422,36 @@ namespace Vpv
 			for (const char* title : { "Projector response", "Advanced projector", "Experimental" })
 				place(Q(title), advancedLayout);
 			for (QWidget* card : cards) advancedLayout->addWidget(card);   // anything else, last (nothing is lost)
+			// Dynamic Drive cards from VpvOrganisation.h (e.g. Black protection / intent_black) live on Advanced here.
+			if (state)
+			{
+				std::set<std::string> placedDrive;
+				for (const Card& spec : Organisation())
+				{
+					if (std::string(spec.unit) != "drive") continue;
+					CardBox bpCard = MakeCard(ObjectName(QStringLiteral("drive.card.") + Q(spec.id)),
+						Q(spec.title), Q(spec.help), spec.collapsed);
+					(spec.advanced ? advancedLayout : mainLayout)->addWidget(bpCard.frame);
+					FillCard(state, nullptr, QStringLiteral("drive"), spec, bpCard, placedDrive, pages);
+					if (std::string(spec.id) == "black_protection")
+					{
+						auto* profileNote = Help(QString());
+						profileNote->setObjectName(ObjectName(QStringLiteral("drive.black_protection.profile_note")));
+						profileNote->setProperty("help", true);
+						bpCard.Add(profileNote);
+						QPointer<QLabel> profileNotePtr(profileNote);
+						state->refreshers.push_back([profileNotePtr](const std::shared_ptr<State>& s)
+						{
+							if (!profileNotePtr) return;
+							QString activeName = PlainProfileName(s);
+							if (activeName.compare(kDefaultProfile, Qt::CaseInsensitive) == 0)
+								activeName = QStringLiteral("Default (vprenderer)");
+							profileNotePtr->setText(QStringLiteral("Applies to Rendering profile: %1 (change profiles on VP-V or VP Renderer > Tone Mapping).")
+								.arg(activeName));
+						});
+					}
+				}
+			}
 			// Every card is out of the old grid now (a layout reparents its widgets and keeps a card the
 			// page hid hidden); delete the grid so it can never take them back on a resize.
 			delete grid;
@@ -3841,6 +4238,7 @@ namespace Vpv
 			}
 			if (g >= 0) state->globalChosen = g;
 			global.reset->setEnabled(state->globalChosen >= 0);
+			bool shipped = false;
 			if (g >= 0)
 			{
 				const QSignalBlocker blocker(global.slider);
@@ -3851,7 +4249,7 @@ namespace Vpv
 			else
 			{
 				// Every unit on its shipped tier (Motion Mid, the others Low) is the shipped state, not Custom.
-				bool shipped = true;
+				shipped = true;
 				for (const Unit& u : TierTable().units)
 					if (u.Tiered() && MatchTier(TierTable(), u, state->MakeGetter()) !=
 						MatchTier(TierTable(), u, [](const std::string&) { return std::string(); }))
@@ -3861,6 +4259,7 @@ namespace Vpv
 					QStringLiteral("Each unit is on the tier VP ships with (below). Click a step to put every unit on it.") :
 					QStringLiteral("The units are on different tiers (below); each tab shows its own. Click a step to put every unit on it."));
 			}
+			global.summary->setText(FormatGlobalTierSummary(TierTable(), g, shipped, *state));
 		});
 
 		// "Fallbacks engaged": mirrors the running renderer's heading (the r6 registry's footer
@@ -3900,8 +4299,34 @@ namespace Vpv
 		});
 		BindVisibilityTimer(root, timer);
 
+		// Dynamic Drive launch card on Overview (replaces the redundant Dynamic Drive stub tab in vpv.units).
+		if (host.subPages && host.openPage)
+		{
+			const std::vector<SubPage> driveSubs = host.subPages(QStringLiteral("drive"));
+			if (!driveSubs.empty())
+			{
+				CardBox driveCard = MakeCard(ObjectName(QStringLiteral("overview.card.drive")),
+					QStringLiteral("Dynamic Drive"),
+					QStringLiteral("Projector LED dimming and black protection live on the Dynamic Drive page."), false);
+				overviewLayout->addWidget(driveCard.frame);
+				for (const SubPage& sub : driveSubs)
+				{
+					auto* open = new QPushButton(QStringLiteral("Open %1").arg(sub.title));
+					open->setObjectName(ObjectName(QStringLiteral("drive.subpage.") + sub.pageName));
+					open->setToolTip(sub.description);
+					open->setMaximumWidth(260);
+					const QString pageName = sub.pageName;
+					QObject::connect(open, &QPushButton::clicked, open, [state, pageName]() { state->host.openPage(pageName); });
+					driveCard.Add(open);
+				}
+			}
+		}
+
 		for (const Unit& u : table.units)
+		{
+			if (std::string(u.id) == "drive") continue;
 			PopulateUnitPage(state, u, tabs);
+		}
 		// GEM-058 (owner Q7): "On both pathways" cards get their own unlocked tab instead of repeating
 		// beneath every unit tab. Not added to state->vpvOnlyTabs so it remains enabled on Original.
 		if (host.bothPathwayCards)
@@ -3939,11 +4364,11 @@ namespace Vpv
 			PopulateRetirementPage(state, more);
 			PopulateExpertPage(state, more);
 			more->setTabToolTip(0, QStringLiteral("Switches proposed for retirement (still working until you decide), with why and where each is."));
-			more->setTabToolTip(1, QStringLiteral("For testing and measurement: where the calibration LUT runs, the stage order, stages switched off."));
+			more->setTabToolTip(1, QStringLiteral("For testing and measurement: the stage order, stages switched off, and diagnostics."));
 			overviewLayout->addStretch();
 		}
-		OrganiseRendering(host, &state->upstreamIndex);
 		QWidget* drivePage = OrganiseDynamicDrive(host, state);
+		OrganiseRendering(host, &state->upstreamIndex);
 		NoteInputPolicy(host, &state->upstreamIndex);
 		// One control per unit (organisation pass 2): the tier decides whether the unit's taste
 		// slider applies. At the Classic Motion tier there is no de-judder, so the amount is greyed;

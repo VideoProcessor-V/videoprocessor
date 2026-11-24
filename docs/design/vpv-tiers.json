@@ -87,6 +87,7 @@
     "fbo_float32": "auto",
     "ambient_adapt": "off",
     "appearance": "off",
+    "appearance_room": "cinema",
     "appearance_honour_l11": "on",
     "appearance_screen_white_measured": "off",
     "occlusion_mask": "off",
@@ -172,7 +173,7 @@
           "slot": "input.source_analysis"
         }
       ],
-      "more_settings": "Total delay and queue profiles: Queue page. Signal detection (DV tunnel hand-off, new LLDV): DV page. Capture card and packing: General page."
+      "more_settings": "Target delay: Input > Main (queue profiles and Target frames: Queue page). Signal detection (DV tunnel hand-off, new LLDV): Both pathways tab (also on DV page). Capture card and packing: General page."
     },
     {
       "id": "motion",
@@ -356,10 +357,10 @@
           }
         },
         "Low": {
-          "description": "libplacebo deband only (currently matches Classic until Low differs; detail pulse stabilise and texture restore stay off unless chosen explicitly).",
+          "description": "VP's grain-safe debander runs automatically when banding is detected; detail pulse stabilise and texture restore stay off (explicit choice only).",
           "cost": "low",
           "set": {
-            "deband_vp": "off",
+            "deband_vp": "auto",
             "detail_pulse_stabilise": "off",
             "texture_restore": "off"
           }
@@ -673,6 +674,17 @@
           "slot": "colour.appearance"
         },
         {
+          "key": "appearance_room",
+          "label": "Room lighting",
+          "values": [
+            "cinema",
+            "living_low",
+            "living_lit",
+            "auto"
+          ],
+          "slot": "colour.appearance"
+        },
+        {
           "key": "appearance_screen_white_measured",
           "label": "Appearance: screen white measured",
           "values": [
@@ -775,7 +787,7 @@
         }
       ],
       "planned": [],
-      "more_settings": "Display bit depth: VP Renderer > Color / Output. libplacebo's dithering: VP Renderer > Scaling / Quality. Where the calibration LUT runs: the Pipeline (expert) tab."
+      "more_settings": "Display bit depth: VP Renderer > Color / Output. libplacebo's dithering: VP Renderer > Scaling / Quality. Where the calibration LUT runs: Output > Advanced."
     }
   ],
   "proposed_retirement": {
