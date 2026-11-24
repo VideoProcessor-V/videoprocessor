@@ -1015,5 +1015,31 @@ namespace TdV2
 			outSy = sy;
 			return true;
 		}
+
+		// Exact affine-extremum check for zero-copy (!readbackCellDiagnostics) paths:
+		// true iff valid && (!AllFinite() || w(x,y) vanishes/crosses zero anywhere inside [x0,x1)x[y0,y1)).
+		bool HasDegenerateProjection(int x0, int y0, int x1, int y1) const
+		{
+			if (!valid)
+				return false;
+			if (!AllFinite())
+				return true;
+			if (x1 <= x0 || y1 <= y0)
+				return false;
+			const double xs[3] = { static_cast<double>(x0), 0.5 * static_cast<double>(x0 + x1 - 1), static_cast<double>(x1 - 1) };
+			const double ys[3] = { static_cast<double>(y0), 0.5 * static_cast<double>(y0 + y1 - 1), static_cast<double>(y1 - 1) };
+			double sx = 0.0, sy = 0.0;
+			for (double y : ys)
+				for (double x : xs)
+					if (!Project(x, y, sx, sy))
+						return true;
+			const double w00 = h[6] * xs[0] + h[7] * ys[0] + h[8];
+			const double w10 = h[6] * xs[2] + h[7] * ys[0] + h[8];
+			const double w01 = h[6] * xs[0] + h[7] * ys[2] + h[8];
+			const double w11 = h[6] * xs[2] + h[7] * ys[2] + h[8];
+			const bool hasPos = (w00 > 0.0) || (w10 > 0.0) || (w01 > 0.0) || (w11 > 0.0);
+			const bool hasNeg = (w00 < 0.0) || (w10 < 0.0) || (w01 < 0.0) || (w11 < 0.0);
+			return hasPos && hasNeg;
+		}
 	};
 }

@@ -3448,6 +3448,21 @@ namespace Gpu
 					// 4. Pass-1 face / non-rigid mask visibility.
 					if (p.faceMaskTex != nullptr || cpuFaceMaskedCount > 0)
 						standIns->Engage(StandInKind::FaceNonRigidMask);
+
+					// 5. Degenerate or non-finite P7 cameraHomography visibility (Rule 4 / SOTA8-HIGH-1).
+					for (const ActiveRefSpec& rs : refSpecs)
+					{
+						if (!rs.cameraHomography.HasDegenerateProjection(ar.x0, ar.y0, ar.x1, ar.y1))
+							continue;
+						bool mayHaveCamera = rs.motion.cls.empty();
+						for (RegionMotionClass c : rs.motion.cls)
+							if (c == RegionMotionClass::Camera) { mayHaveCamera = true; break; }
+						if (mayHaveCamera)
+						{
+							standIns->Engage(StandInKind::NonFiniteClosure, "TdV2GpuEngine degenerate or non-finite cameraHomography");
+							break;
+						}
+					}
 				}
 				oc.faceMaskedCells = cpuFaceMaskedCount;
 				return true;

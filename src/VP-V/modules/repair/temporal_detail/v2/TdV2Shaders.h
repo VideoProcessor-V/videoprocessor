@@ -573,9 +573,7 @@ if (useH && mvCls == TD_CLS_CAMERA)
     if (hBad)
     {
         float fb = td_fetch_cur_fallback(p);
-        uint np = td_pack_ref_flags(prevPacked, refIdx, 4);
-        if (extraBad != 0)
-            np |= 512u;
+        uint np = td_pack_ref_flags(prevPacked, refIdx, 4) | 512u;
         imageStore(warped_val, p, vec4(fb, 0.0, 0.0, 0.0));
         imageStore(ref_flags_out, p, vec4(float(np) / 65535.0, 0.0, 0.0, 0.0));
         return;

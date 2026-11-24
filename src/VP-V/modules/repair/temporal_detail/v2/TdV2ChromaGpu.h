@@ -392,8 +392,7 @@ if (useH && mvCls == TD_CLS_CAMERA)
     if (hBad)
     {
         vec2 fb = td_ch_cur_fallback(p);
-        uint np = td_pack_ref_flags(prevPacked, refIdx, 4);
-        if (extraBad != 0) np |= 512u;
+        uint np = td_pack_ref_flags(prevPacked, refIdx, 4) | 512u;
         imageStore(warped_uv, p, vec4(fb, 0.0, 0.0));
         imageStore(ref_flags_out, p, vec4(float(np) / 65535.0, 0.0, 0.0, 0.0));
         return;
@@ -3007,6 +3006,22 @@ float td_huber_taper(float diffSq, float diagC)
 				if (hasFaceMask && standIns != nullptr) standIns->Engage(StandInKind::FaceNonRigidMask);
 				if (K == 1 && cfg_.estimator != VarianceEstimator::A2_RoundingCells && standIns != nullptr)
 					standIns->Engage(StandInKind::SingleRefA1ToA2Fallback);
+				if (standIns != nullptr)
+				{
+					for (const ChromaRefSpec& rs : refSpecs)
+					{
+						if (!rs.cameraHomography.HasDegenerateProjection(lumaActive.x0, lumaActive.y0, lumaActive.x1, lumaActive.y1))
+							continue;
+						bool mayHaveCamera = rs.motion.cls.empty();
+						for (RegionMotionClass c : rs.motion.cls)
+							if (c == RegionMotionClass::Camera) { mayHaveCamera = true; break; }
+						if (mayHaveCamera)
+						{
+							standIns->Engage(StandInKind::NonFiniteClosure, "TdV2ChromaGpuEngine degenerate or non-finite cameraHomography");
+							break;
+						}
+					}
+				}
 			}
 
 			out.succeeded = true;
