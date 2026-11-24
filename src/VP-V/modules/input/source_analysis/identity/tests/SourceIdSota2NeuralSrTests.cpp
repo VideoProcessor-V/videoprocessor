@@ -529,7 +529,7 @@ namespace Tests
 
 			// (d) Heavy native 4K film grain:
 			{
-				const C::LineSnapshot grainSnap = BuildSceneSnapshot(SceneKind::HeavyNativeFilmGrain, 50, 5000000, 0x3304ull);
+				const C::LineSnapshot grainSnap = BuildSceneSnapshot(SceneKind::HeavyNativeGrain, 50, 5000000, 0x3304ull);
 				C::LineSet lsH;
 				Assert::IsTrue(C::ToLineSet(grainSnap, 0, lsH));
 				C::VerifyResult vr;

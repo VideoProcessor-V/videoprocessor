@@ -409,7 +409,7 @@ namespace Tests
 					const C::LineSet upLs = BuildHdrLineSet(0, kUhdW, 1920, 16, 48, kLanczos3, tr, bd, true, seedBase);
 
 					// Synthesize native 3840x2160 high-contrast HDR scanlines with genuine 1-px native fine detail:
-					const C::LineSet natLs = BuildHdrLineSet(0, kUhdW, kUhdW, 16, 48, kLanczos3, tr, bd, seedBase + 999ull);
+					const C::LineSet natLs = BuildHdrLineSet(0, kUhdW, kUhdW, 16, 48, kLanczos3, tr, bd, true, seedBase + 999ull);
 
 					C::HdrNoiseSettings hdrCfg;
 					hdrCfg.enabled = true;
