@@ -517,7 +517,7 @@ GridFadeFit FitMotionTolerantFade(const double refAligned[kGridH][kGridW], const
     constexpr int kTileSize = 7;
     constexpr int kNumTiles = kTileCols * kTileRows;
     constexpr double kTileArea = double(kTileSize * kTileSize);
-    int tileLit = 0, tileSameEps = 0, tileOppEps = 0, tileConsistent = 0;
+    int tileLit = 0, tileSame = 0, tileOpp = 0, tileConsistent = 0;
     double vIdTile = 0.0, vFadeTile = 0.0;
     for (int tr = 0; tr < kTileRows; ++tr) {
         for (int tc = 0; tc < kTileCols; ++tc) {
@@ -537,10 +537,10 @@ GridFadeFit FitMotionTolerantFade(const double refAligned[kGridH][kGridW], const
                 const double dFade = curTile - (A * refTile + c);
                 vIdTile += dId * dId;
                 vFadeTile += dFade * dFade;
-                if (double(dir) * dId > kFadeCellStepEps)
-                    ++tileSameEps;
-                else if (-double(dir) * dId > kFadeCellStepEps)
-                    ++tileOppEps;
+                if (double(dir) * dId > double(kFadeMinSpread))
+                    ++tileSame;
+                else if (-double(dir) * dId > double(kFadeMinSpread))
+                    ++tileOpp;
                 if (dir < 0) {
                     if (refTile > b + double(kFadeMinSpread)) {
                         const double aTile = (curTile - b) / (refTile - b);
@@ -564,11 +564,11 @@ GridFadeFit FitMotionTolerantFade(const double refAligned[kGridH][kGridW], const
     }
     if (double(tileLit) < kFadeSpatialCoverage * double(kNumTiles))
         return fit;
-    if (tileSameEps <= 0)
+    if (tileSame <= 0)
         return fit;
-    if (double(tileSameEps) < kFadeSpatialConsensus * double(tileSameEps + tileOppEps))
+    if (double(tileSame) < kFadeSpatialConsensus * double(tileSame + tileOpp))
         return fit;
-    if (double(tileSameEps) < kFadeSpatialCoverage * double(tileLit))
+    if (double(tileSame) < kFadeSpatialConsensus * double(tileLit))
         return fit;
     if (!(vFadeTile < kFadeResidualReduction * vIdTile))
         return fit;
@@ -621,7 +621,17 @@ bool HighlightScalingConsistent(uint32_t refP99P4, uint32_t curP99P4, double gai
     const double cp = double(curP99P4) * kGridScale;
     if (!(rp > black + double(kFadeMinSpread) && cp > black + double(kFadeMinSpread)))
         return true;
+    // Clipped-white linear fade-out censorship: when a verified fade-out has dropped the unclipped
+    // scene by >= 1/kFadeMaxDiv (25%) while highlights are non-rising (curP99 <= refP99), p99 may be
+    // censored at Rec.709 peak white until the highlight unclips.
+    if (dir < 0 && curP99P4 <= refP99P4 && (1.0 - gain) >= 1.0 / double(kFadeMaxDiv))
+        return true;
     const double aP99 = (cp - black) / (rp - black);
+    // For brightening (dir > 0), enforce symmetric +-50% (kFadeResidualReduction) consistency around gain
+    // to reject both pinned highlights (ambient flicker) and localized bright surges / flashes (aP99 >> gain).
+    // For darkening (dir < 0), enforce lower bound on highlight drop so fast-unclipping fade-outs are preserved.
+    if (dir > 0)
+        return std::fabs(aP99 - gain) <= kFadeResidualReduction * std::fabs(1.0 - gain);
     return double(dir) * (aP99 - 1.0) >= kFadeResidualReduction * std::fabs(1.0 - gain);
 }
 
@@ -1150,20 +1160,55 @@ bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur
         const double stepMean = stepSum / kN;
         const int32_t stepDir = stepMean > 0.0 ? 1 : (stepMean < 0.0 ? -1 : (dMean > 0 ? 1 : (dMean < 0 ? -1 : 0)));
 
+        // Whole-frame order-statistic step gain (prev -> cur): immune to single-tail clipped-p99 unclipping while
+        // catching true abrupt whole-picture dips (>= 1/kFadeMaxDiv = 25%) and verifying step slope in StepStillMoving.
+        constexpr int kIntN = (kGridH - 2 * kLocalRadius) * (kGridW - 2 * kLocalRadius);
+        double pSorted[kIntN], cSorted[kIntN];
+        int sIdx = 0;
+        for (int y = R; y < kGridH - R; ++y)
+            for (int x = R; x < kGridW - R; ++x) {
+                pSorted[sIdx] = prevAligned[y][x];
+                cSorted[sIdx] = curAligned[y][x];
+                ++sIdx;
+            }
+        std::sort(pSorted, pSorted + kIntN);
+        std::sort(cSorted, cSorted + kIntN);
+        double sxQ = 0.0, syQ = 0.0;
+        for (int k = 0; k < kIntN; ++k) {
+            sxQ += pSorted[k];
+            syQ += cSorted[k];
+        }
+        const double mxQ = sxQ / kN;
+        const double myQ = syQ / kN;
+        double stepSxxQ = 0.0, stepSxyQ = 0.0;
+        for (int k = 0; k < kIntN; ++k) {
+            const double dx = pSorted[k] - mxQ;
+            stepSxxQ += dx * dx;
+            stepSxyQ += dx * (cSorted[k] - myQ);
+        }
+        const double stepAQ = stepSxxQ > 1e-6 ? stepSxyQ / stepSxxQ : 1.0;
+        const double stepGainDelta = std::fabs(1.0 - stepAQ);
+        const bool seedGainJump = stepSxxQ > 1e-6 && stepGainDelta >= 1.0 / double(kFadeMaxDiv);
+        // On an active fade-out (run.direction < 0), scale by run.keep (prev's level relative to run start) so
+        // linear fade-out tails approaching black (e.g. 2/N -> 1/N -> 0) stay proportional to 1/N instead of
+        // jumping relative to prev's tiny remaining contrast.
+        const double contGainStep = run.direction < 0 ? (run.keep * stepGainDelta) : stepGainDelta;
+        const bool contGainJump = stepSxxQ > 1e-6 && contGainStep >= 1.0 / double(kFadeMaxDiv);
+
         const bool fromBlack = spreadPrev <= kBlackSpreadP4 && prev.mean < kBlackMeanMaxP4 &&
             dMean > 0 && dP99 > 0 && aMean < kMaxFadeStepP4 && aSpread < kMaxFadeStepP4;
         // Bounded near-black fade-in rise (e.g. frames k = 1..3 of a linear ramp after a failed black-origin reset,
         // where spreadPrev > 1 code yet aSpread / spread = 1/(k+1) >= 1/kFadeMaxDiv): exempt from relative jump guard.
         const bool nearBlackRise = prev.mean < kBlackMeanMaxP4 && dMean > 0 && dP99 > 0 && dSpread > 0 &&
             aMean < kMaxFadeStepP4 && aSpread < kMaxFadeStepP4;
-        const bool jump = (aMean * kFadeMaxDiv >= contRef || aSpread * kFadeMaxDiv >= contRef) &&
+        const bool jump = (aMean * kFadeMaxDiv >= contRef || contGainJump) &&
             !(run.blackOrigin && dMean > 0 && aMean < kMaxFadeStepP4 && aSpread < kMaxFadeStepP4) && !nearBlackRise;
         const bool continues = run.direction != 0 && !jump && (stepDir == run.direction || stepDir == 0);
 
         if (!continues) {
             run = FadeRun();
             if (stepDir == 0 || (!(fromBlack || nearBlackRise) &&
-                                 (aMean * kFadeMaxDiv >= int64_t(spread) || aSpread * kFadeMaxDiv >= int64_t(spread)))) {
+                                 (aMean * kFadeMaxDiv >= int64_t(spread) || seedGainJump))) {
                 FadeRunEndAt(run, cur);
                 return false;
             }
@@ -1248,9 +1293,8 @@ bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur
 
         // Helper: verify that the current motion-aligned step (prev -> cur) is still moving in run.direction
         // (D4: symmetric-noise Bayes likelihood-ratio strict majority on above-LSB cells + all-lit majority;
-        //  D8: order-statistic OLS step slope must scale in run.direction).
-        bool stepSlopeChecked = false;
-        bool stepSlopeOk = true;
+        //  D8: hoisted order-statistic OLS step slope must scale in run.direction).
+        const bool stepSlopeOk = !(stepSxxQ > 1e-6) || (double(run.direction) * (stepAQ - 1.0) > 0.0);
         auto StepStillMoving = [&](double black) -> bool {
             const bool stationary = (stepVx == 0.0 && stepVy == 0.0);
             if (stationary) {
@@ -1259,37 +1303,6 @@ bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur
             } else {
                 if (stepMean * double(run.direction) <= 0.0)
                     return false;
-            }
-            if (!stepSlopeChecked) {
-                stepSlopeChecked = true;
-                constexpr int kIntN = (kGridH - 2 * kLocalRadius) * (kGridW - 2 * kLocalRadius);
-                double pSorted[kIntN], cSorted[kIntN];
-                int sIdx = 0;
-                for (int y = R; y < kGridH - R; ++y)
-                    for (int x = R; x < kGridW - R; ++x) {
-                        pSorted[sIdx] = prevAligned[y][x];
-                        cSorted[sIdx] = curAligned[y][x];
-                        ++sIdx;
-                    }
-                std::sort(pSorted, pSorted + kIntN);
-                std::sort(cSorted, cSorted + kIntN);
-                double sxQ = 0.0, syQ = 0.0;
-                for (int k = 0; k < kIntN; ++k) {
-                    sxQ += pSorted[k];
-                    syQ += cSorted[k];
-                }
-                const double mxQ = sxQ / kN;
-                const double myQ = syQ / kN;
-                double sxxQ = 0.0, sxyQ = 0.0;
-                for (int k = 0; k < kIntN; ++k) {
-                    const double dx = pSorted[k] - mxQ;
-                    sxxQ += dx * dx;
-                    sxyQ += dx * (cSorted[k] - myQ);
-                }
-                if (sxxQ > 1e-6) {
-                    const double stepAQ = sxyQ / sxxQ;
-                    stepSlopeOk = double(run.direction) * (stepAQ - 1.0) > 0.0;
-                }
             }
             if (!stepSlopeOk)
                 return false;
