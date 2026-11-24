@@ -106,6 +106,7 @@ namespace LedDrive
 		// a notify_one meant for the worker is never taken by a pre-wait.
 		std::condition_variable gapWake;
 		std::thread worker;
+		// Guarded by stateMutex.
 		bool stopping = false;
 		bool opened = false;
 		int pendingLight = -1;
@@ -156,8 +157,9 @@ namespace LedDrive
 		// over. The resync's target after script sends.
 		int scriptLight = -1;
 		int scriptContrast = -1;
-		// audit 2026-10-16 (guarded by portMutex): the exit restore's one
-		// Open attempt ahead of the reopen back-off was made.
+		// audit 2026-10-16 / GEM-205 (guarded by stateMutex): the exit restore's
+		// one Open attempt ahead of the reopen back-off was made for the current
+		// BeginShutdown() cycle.
 		bool shutdownOpenTried = false;
 		int reopensUnlogged = 0;
 		bool shuttingDown = false;

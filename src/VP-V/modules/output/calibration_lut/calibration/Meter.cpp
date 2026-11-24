@@ -272,6 +272,7 @@ namespace Calibration
 				return r;
 			case SpotreadEventKind::CalibrationPrompt:
 				state = State::Calibration;
+				lastCalibrationText = e.text;
 				r.status = MeterStatus::NeedsUserAction;
 				r.message = (note.empty() ? std::string() : note + "\n") + e.text;
 				return r;
@@ -296,30 +297,35 @@ namespace Calibration
 		if (state == State::WaitingPrompt)
 		{
 			// The prompt after the previous reading; normally already queued.
-			const SpotreadEvent e = WaitEvent(options.readTimeoutSeconds, false);
-			switch (e.kind)
+			const double promptDeadline = Now() + options.readTimeoutSeconds;
+			while (state == State::WaitingPrompt)
 			{
-			case SpotreadEventKind::ReadyPrompt:
-				state = State::Ready;
-				break;
-			case SpotreadEventKind::CalibrationPrompt:
-				state = State::Calibration;
-				r.status = MeterStatus::NeedsUserAction;
-				r.message = e.text;
-				return r;
-			case SpotreadEventKind::ReadFailed:
-				state = State::WaitingPrompt;
-				r.status = MeterStatus::ReadFailed;
-				r.error = e.error;
-				r.message = e.text;
-				return r;
-			case SpotreadEventKind::NeedsCalibration:
-			case SpotreadEventKind::CalibrationComplete:
-				return Read();
-			case SpotreadEventKind::Timeout:
-				return Fail(MeterStatus::Timeout, e);
-			default:
-				return Fail(MeterStatus::Fatal, e);
+				const SpotreadEvent e = WaitEvent(promptDeadline - Now(), false);
+				switch (e.kind)
+				{
+				case SpotreadEventKind::ReadyPrompt:
+					state = State::Ready;
+					break;
+				case SpotreadEventKind::CalibrationPrompt:
+					state = State::Calibration;
+					lastCalibrationText = e.text;
+					r.status = MeterStatus::NeedsUserAction;
+					r.message = e.text;
+					return r;
+				case SpotreadEventKind::ReadFailed:
+					state = State::WaitingPrompt;
+					r.status = MeterStatus::ReadFailed;
+					r.error = e.error;
+					r.message = e.text;
+					return r;
+				case SpotreadEventKind::NeedsCalibration:
+				case SpotreadEventKind::CalibrationComplete:
+					break;
+				case SpotreadEventKind::Timeout:
+					return Fail(MeterStatus::Timeout, e);
+				default:
+					return Fail(MeterStatus::Fatal, e);
+				}
 			}
 		}
 		if (state == State::Calibration)

@@ -188,6 +188,8 @@ namespace LedDrive
 		bool contrast = true;
 		bool Confirmed() const { return light && dimMode && contrast; }
 	};
+	// beginShutdown: false for a start-of-run neutral restore where the driver
+	// stays live for subsequent commands (GEM-189); true (default) for exit.
 	bool RestoreFullLight(IProjectorDriver& driver, int ledCeiling, bool resetDimMode = false,
-		bool restoreContrast = false, RestoreOutcome* outcome = nullptr);
+		bool restoreContrast = false, RestoreOutcome* outcome = nullptr, bool beginShutdown = true);
 }

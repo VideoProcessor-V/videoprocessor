@@ -336,6 +336,8 @@ namespace LedDrive
 			{
 				std::lock_guard<std::mutex> stateGuard(stateMutex);
 				force = shuttingDown && !shutdownOpenTried;
+				if (force)
+					shutdownOpenTried = true;
 			}
 			if (!force)
 			{
@@ -343,7 +345,6 @@ namespace LedDrive
 					std::to_string(duration_cast<milliseconds>(reopenAt - now).count()) + " ms";
 				return false;
 			}
-			shutdownOpenTried = true;
 			DebugLog::Log("Dynamic Drive: exit restore - trying to reopen %s ahead of its back-off", config.port.c_str());
 		}
 		std::string openError;
@@ -452,7 +453,11 @@ namespace LedDrive
 			writeFailures = 0;
 			reopenBackoffMs = 0;
 			reopenAt = std::chrono::steady_clock::time_point();
-			shutdownOpenTried = false;   // audit 2026-10-16
+			{
+				std::lock_guard<std::mutex> stateGuard(stateMutex);
+				shuttingDown = false;
+				shutdownOpenTried = false;   // audit 2026-10-16 / GEM-205
+			}
 			SelectFraming();
 			int minimum = 0, maximum = 0;
 			if (framing.acknowledged)
@@ -512,15 +517,28 @@ namespace LedDrive
 
 	ProjectorState BarcoAsciiDriver::ReadState()
 	{
-		if (opened && framing.acknowledged)
+		bool canQuery = false;
+		{
+			std::lock_guard<std::mutex> guard(stateMutex);
+			canQuery = opened && framing.acknowledged;
+		}
+		if (canQuery)
 		{
 			std::lock_guard<std::timed_mutex> guard(portMutex);
-			int light = 0, contrast = 0;
-			const bool haveLight = QueryLocked("LPW1", "?", light);
-			const bool haveContrast = QueryLocked("CNTR", "?", contrast);
-			std::lock_guard<std::mutex> stateGuard(stateMutex);
-			if (haveLight) { state.lightKnown = true; state.light = light; }
-			if (haveContrast) { state.contrastKnown = true; state.contrast = contrast; }
+			bool stillOpen = false;
+			{
+				std::lock_guard<std::mutex> stateGuard(stateMutex);
+				stillOpen = opened && framing.acknowledged;
+			}
+			if (stillOpen)
+			{
+				int light = 0, contrast = 0;
+				const bool haveLight = QueryLocked("LPW1", "?", light);
+				const bool haveContrast = QueryLocked("CNTR", "?", contrast);
+				std::lock_guard<std::mutex> stateGuard(stateMutex);
+				if (haveLight) { state.lightKnown = true; state.light = light; }
+				if (haveContrast) { state.contrastKnown = true; state.contrast = contrast; }
+			}
 		}
 		std::lock_guard<std::mutex> guard(stateMutex);
 		return state;
@@ -629,6 +647,10 @@ namespace LedDrive
 		}
 		else
 			lock.lock();
+		{
+			std::lock_guard<std::mutex> stateGuard(stateMutex);
+			if (!opened) return false;
+		}
 		const int left = timeoutMs > 0 ? std::max(0, timeoutMs -
 			static_cast<int>(duration_cast<milliseconds>(steady_clock::now() - start).count())) : 0;
 		const bool light = mnemonic == "LPW1";
@@ -637,7 +659,7 @@ namespace LedDrive
 			BoundedTransactLocked(Format(mnemonic.c_str(), std::to_string(value)), mnemonic.c_str(), nullptr,
 				left, light ? value : -1, contrast ? value : -1) :
 			Transact(Format(mnemonic.c_str(), std::to_string(value)), mnemonic.c_str(), nullptr,
-				config.ackTimeoutMs, -1);
+				config.ackTimeoutMs, -1, light ? value : -1, false, contrast ? value : -1);
 		if (ok && contrast)
 		{
 			std::lock_guard<std::mutex> stateGuard(stateMutex);
@@ -692,7 +714,7 @@ namespace LedDrive
 			// apart): no command gap or burst pause, like the custom-dim
 			// sequence. The exit restore may have begun while this waited.
 			std::lock_guard<std::mutex> guard(stateMutex);
-			if (shuttingDown) return false;
+			if (!opened || shuttingDown) return false;
 			// audit 2026-10-16: but Barco's 2 s after a missing reply stays.
 			nextSendAllowed = std::max(clock->Now(), replyBackoffUntil);
 			sinceBurst = 0;
@@ -733,6 +755,7 @@ namespace LedDrive
 	{
 		std::lock_guard<std::mutex> guard(stateMutex);
 		shuttingDown = true;
+		shutdownOpenTried = false;
 		pendingLight = -1;
 		pendingContrast = -1;
 		++lightGeneration;      // audit 2026-10-16
@@ -773,6 +796,10 @@ namespace LedDrive
 		}
 		else
 			lock.lock();
+		{
+			std::lock_guard<std::mutex> stateGuard(stateMutex);
+			if (!opened) return false;
+		}
 		int confirmed = -1;
 		const int left = timeoutMs > 0 ? std::max(0, timeoutMs -
 			static_cast<int>(duration_cast<milliseconds>(steady_clock::now() - start).count())) : 0;
@@ -787,12 +814,16 @@ namespace LedDrive
 
 	bool BarcoAsciiDriver::SetContrast(int value)
 	{
-		if (!opened) return false;
 		{
 			std::lock_guard<std::mutex> stateGuard(stateMutex);
+			if (!opened) return false;
 			scriptContrast = -1;   // audit 2026-10-16
 		}
 		std::lock_guard<std::timed_mutex> guard(portMutex);
+		{
+			std::lock_guard<std::mutex> stateGuard(stateMutex);
+			if (!opened) return false;
+		}
 		int confirmed = -1;
 		const bool ok = Transact(Format("CNTR", std::to_string(value)), "CNTR", &confirmed,
 			config.ackTimeoutMs, -1, -1, false, value);
