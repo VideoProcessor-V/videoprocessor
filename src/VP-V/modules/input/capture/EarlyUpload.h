@@ -97,7 +97,7 @@ public:
 		uint64_t readerDetachTimeouts = 0;   // DetachReader's bounded wait ran out (the reader's GPU work had not completed)
 		double copyCpuMsTotal = 0.0, copyCpuMsMax = 0.0; };
 	Stats GetStats() const;
-	const std::string& LastError() const { return error; }
+	std::string LastError() const;
 	size_t CapBytes() const { return budgetCap; }   // the pool's byte cap after the memory budget
 
 	struct Slot
@@ -125,6 +125,7 @@ private:
 		uint64_t readerGeneration = 0;
 		uint64_t readerReleaseValue = 0;       // the reader's last "released" value (kReaderPending while it holds it)
 	};
+	void CloseLocked();                      // lifecycle held
 	void DetachReaderLocked();               // lifecycle and lock held
 	void Return(int index);
 	bool MakeTexture(Entry& e, size_t rowBytes, int height);
@@ -148,10 +149,9 @@ private:
 	// Held by Upload while it uses the upload device, and by Close: the pool
 	// cannot go while the conversion thread is mid-upload.
 	std::mutex lifecycle;
-	uint64_t poolId = 0;
+	std::atomic<uint64_t> poolId{ 0 };
 	std::vector<Entry> entries;
-	size_t capBytes = 0;
-	size_t budgetCap = 0;
+	size_t capBytes = 0, budgetCap = 0;
 	// audit 2026-10-16: the last uploaded frame size (guarded by `lock`); a
 	// change frees the textures the new size will not reuse.
 	size_t lastRowBytes = 0;

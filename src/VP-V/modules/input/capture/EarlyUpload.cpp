@@ -14,14 +14,18 @@ EarlyUpload::~EarlyUpload()
 
 bool EarlyUpload::Open(ID3D11Device* renderDeviceIn, pl_gpu gpuIn, int slots, size_t capBytesIn)
 {
-	Close();
+	ready.store(false, std::memory_order_release);
 	std::lock_guard<std::mutex> life(lifecycle);
-	++poolId;
-	error.clear();
-	if (!renderDeviceIn || !gpuIn || slots <= 0)
+	CloseLocked();
+	poolId.fetch_add(1, std::memory_order_acq_rel);
 	{
-		error = "no render device";
-		return false;
+		std::lock_guard<std::mutex> guard(lock);
+		if (!renderDeviceIn || !gpuIn || slots <= 0)
+		{
+			error = "no render device";
+			return false;
+		}
+		error.clear();
 	}
 	gpu = gpuIn;
 	renderDevice = renderDeviceIn;
@@ -29,8 +33,11 @@ bool EarlyUpload::Open(ID3D11Device* renderDeviceIn, pl_gpu gpuIn, int slots, si
 	renderDevice->GetImmediateContext(&immediate);
 	if (!immediate || FAILED(immediate->QueryInterface(IID_PPV_ARGS(&renderContext))))
 	{
-		error = "the render context has no fences (D3D11.4)";
-		Close();
+		{
+			std::lock_guard<std::mutex> guard(lock);
+			error = "the render context has no fences (D3D11.4)";
+		}
+		CloseLocked();
 		return false;
 	}
 	// The upload device on the render device's adapter.
@@ -38,8 +45,11 @@ bool EarlyUpload::Open(ID3D11Device* renderDeviceIn, pl_gpu gpuIn, int slots, si
 	CComPtr<IDXGIAdapter> adapter;
 	if (FAILED(renderDevice->QueryInterface(IID_PPV_ARGS(&dxgiDevice))) || FAILED(dxgiDevice->GetAdapter(&adapter)))
 	{
-		error = "no adapter for the render device";
-		Close();
+		{
+			std::lock_guard<std::mutex> guard(lock);
+			error = "no adapter for the render device";
+		}
+		CloseLocked();
 		return false;
 	}
 	// The pool's bytes: the cap, and at most a quarter of the adapter's video
@@ -64,8 +74,11 @@ bool EarlyUpload::Open(ID3D11Device* renderDeviceIn, pl_gpu gpuIn, int slots, si
 		FAILED(device->QueryInterface(IID_PPV_ARGS(&uploadDevice))) ||
 		FAILED(context->QueryInterface(IID_PPV_ARGS(&uploadContext))))
 	{
-		error = "cannot create the upload device (D3D11.4)";
-		Close();
+		{
+			std::lock_guard<std::mutex> guard(lock);
+			error = "cannot create the upload device (D3D11.4)";
+		}
+		CloseLocked();
 		return false;
 	}
 	// The shared fences, made on the upload device and opened on the render one.
@@ -83,8 +96,11 @@ bool EarlyUpload::Open(ID3D11Device* renderDeviceIn, pl_gpu gpuIn, int slots, si
 	if (FAILED(renderDevice->QueryInterface(IID_PPV_ARGS(&render5))) ||
 		!openFence(uploadedFence, uploadedFenceR) || !openFence(releasedFence, releasedFenceR))
 	{
-		error = "cannot share fences between the devices";
-		Close();
+		{
+			std::lock_guard<std::mutex> guard(lock);
+			error = "cannot share fences between the devices";
+		}
+		CloseLocked();
 		return false;
 	}
 	{
@@ -110,6 +126,12 @@ void EarlyUpload::Close()
 {
 	ready.store(false, std::memory_order_release);
 	std::lock_guard<std::mutex> life(lifecycle);
+	CloseLocked();
+}
+
+void EarlyUpload::CloseLocked()
+{
+	ready.store(false, std::memory_order_release);
 	{
 		// Handles still held (payloads in a queue) find no owner from here on.
 		std::lock_guard<std::mutex> guard(control->m);
@@ -300,7 +322,7 @@ EarlyUpload::SlotHandle EarlyUpload::Upload(const void* data, size_t rowBytes, i
 			stats.copyCpuMsMax = copyMs;
 	}
 	std::shared_ptr<Control> c = control;
-	Slot* raw = new Slot{ this, poolId, index, value };
+	Slot* raw = new Slot{ this, poolId.load(std::memory_order_acquire), index, value };
 	return SlotHandle(raw, [c](Slot* s)
 	{
 		{
@@ -321,7 +343,7 @@ void EarlyUpload::Return(int index)
 
 pl_tex EarlyUpload::Acquire(Slot& slot)
 {
-	if (!ready.load(std::memory_order_acquire) || slot.owner != this || slot.pool != poolId || slot.index < 0 ||
+	if (!ready.load(std::memory_order_acquire) || slot.owner != this || slot.pool != poolId.load(std::memory_order_acquire) || slot.index < 0 ||
 		static_cast<size_t>(slot.index) >= entries.size())
 		return nullptr;
 	{
@@ -347,6 +369,7 @@ pl_tex EarlyUpload::Acquire(Slot& slot)
 		if (FAILED(renderDevice->QueryInterface(IID_PPV_ARGS(&render1))) ||
 			FAILED(render1->OpenSharedResource1(e.shared, IID_PPV_ARGS(&e.renderTex))))
 		{
+			std::lock_guard<std::mutex> guard(lock);
 			error = "cannot open the shared texture on the render device";
 			return nullptr;
 		}
@@ -355,6 +378,7 @@ pl_tex EarlyUpload::Acquire(Slot& slot)
 		e.wrapped = pl_d3d11_wrap(gpu, &wrap);
 		if (!e.wrapped)
 		{
+			std::lock_guard<std::mutex> guard(lock);
 			error = "cannot wrap the shared texture for libplacebo";
 			return nullptr;
 		}
@@ -367,7 +391,7 @@ pl_tex EarlyUpload::Acquire(Slot& slot)
 
 void EarlyUpload::Used(Slot& slot)
 {
-	if (!ready.load(std::memory_order_acquire) || slot.owner != this || slot.pool != poolId || slot.index < 0 ||
+	if (!ready.load(std::memory_order_acquire) || slot.owner != this || slot.pool != poolId.load(std::memory_order_acquire) || slot.index < 0 ||
 		static_cast<size_t>(slot.index) >= entries.size())
 		return;
 	const uint64_t value = ++nextReleaseValue;
@@ -471,10 +495,11 @@ bool EarlyUpload::HasReader() const
 
 ID3D11Texture2D* EarlyUpload::AcquireReader(Slot& slot)
 {
-	if (!ready.load(std::memory_order_acquire) || slot.owner != this || slot.pool != poolId || slot.index < 0)
+	if (!ready.load(std::memory_order_acquire) || slot.owner != this || slot.pool != poolId.load(std::memory_order_acquire) || slot.index < 0)
 		return nullptr;
 	std::lock_guard<std::mutex> guard(lock);
-	if (!readerDevice || static_cast<size_t>(slot.index) >= entries.size())
+	if (!ready.load(std::memory_order_acquire) || slot.pool != poolId.load(std::memory_order_acquire) ||
+		!readerDevice || static_cast<size_t>(slot.index) >= entries.size())
 		return nullptr;
 	// The reader's opened copies of freed slots go (they keep the shared memory alive), as in Acquire.
 	for (Entry& stale : entries)
@@ -501,10 +526,11 @@ ID3D11Texture2D* EarlyUpload::AcquireReader(Slot& slot)
 
 void EarlyUpload::UsedReader(Slot& slot)
 {
-	if (!ready.load(std::memory_order_acquire) || slot.owner != this || slot.pool != poolId || slot.index < 0)
+	if (!ready.load(std::memory_order_acquire) || slot.owner != this || slot.pool != poolId.load(std::memory_order_acquire) || slot.index < 0)
 		return;
 	std::lock_guard<std::mutex> guard(lock);
-	if (!readerContext || static_cast<size_t>(slot.index) >= entries.size())
+	if (!ready.load(std::memory_order_acquire) || slot.pool != poolId.load(std::memory_order_acquire) ||
+		!readerContext || static_cast<size_t>(slot.index) >= entries.size())
 		return;
 	const uint64_t value = ++nextReaderValue;
 	readerContext->Signal(readerReleasedFenceR, value);
@@ -516,4 +542,10 @@ EarlyUpload::Stats EarlyUpload::GetStats() const
 {
 	std::lock_guard<std::mutex> guard(lock);
 	return stats;
+}
+
+std::string EarlyUpload::LastError() const
+{
+	std::lock_guard<std::mutex> guard(lock);
+	return error;
 }
