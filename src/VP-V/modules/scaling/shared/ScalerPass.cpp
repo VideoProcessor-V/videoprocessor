@@ -233,8 +233,19 @@ namespace ScalerPass
 		else
 		{
 			const int bits = st.precision == Precision::F32 ? 32 : 16;
-			fmt = pl_find_fmt(gpu, PL_FMT_FLOAT, srcFmt->num_components, bits, bits, static_cast<enum pl_fmt_caps>(kRenderCaps));
-			if (st.precision == Precision::F16)
+			const int comps = srcFmt->num_components;
+			fmt = pl_find_fmt(gpu, PL_FMT_FLOAT, comps, bits, bits, static_cast<enum pl_fmt_caps>(kRenderCaps));
+			if (!fmt && comps == 3)
+				fmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, bits, bits, static_cast<enum pl_fmt_caps>(kRenderCaps));
+			if (!fmt && st.precision == Precision::F32)
+			{
+				fmt = pl_find_fmt(gpu, PL_FMT_FLOAT, comps, 16, 16, static_cast<enum pl_fmt_caps>(kRenderCaps));
+				if (!fmt && comps == 3)
+					fmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 16, 16, static_cast<enum pl_fmt_caps>(kRenderCaps));
+				if (fmt)
+					newNote = "scaler precision: half float (f32 not renderable)";
+			}
+			else if (st.precision == Precision::F16)
 				newNote = "scaler precision: half float (f16 requested)";
 		}
 		if (!fmt || !(fmt->caps & PL_FMT_CAP_RENDERABLE)) return fail("no renderable output format");
@@ -246,6 +257,7 @@ namespace ScalerPass
 			p.format = fmt;
 			p.sampleable = true;
 			p.renderable = true;
+			p.storable = (fmt->caps & PL_FMT_CAP_STORABLE) != 0;
 			p.blit_src = (fmt->caps & PL_FMT_CAP_BLITTABLE) != 0;
 			return pl_tex_recreate(gpu, &t, &p);
 		};
