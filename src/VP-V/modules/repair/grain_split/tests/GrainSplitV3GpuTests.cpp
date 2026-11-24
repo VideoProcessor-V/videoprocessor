@@ -30,6 +30,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <random>
 #include <string>
 #include <vector>
@@ -820,5 +821,136 @@ public:
 
 			Logger::WriteMessage("S2-H7: mid-step Release(nullptr) cleared active run + all 9 handles and recovered bit-identically on fresh WARP device");
 		}
+	}
+
+	// S2-M2: Splitter::Begin and StepOn must visibly reject non-finite (+Inf/-Inf/NaN and overflowing reciprocals/products)
+	// scale, codeUnit, and Params fields before any GPU pass or GaussRadius cast, clear Out(), report "non-finite" in
+	// LastError(), and recover cleanly on the same Splitter instance with valid finite arguments.
+	BEGIN_TEST_METHOD_ATTRIBUTE(SplitterRejectsInfiniteScaleCodeUnitAndSigmasVisibly)
+		TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+	END_TEST_METHOD_ATTRIBUTE()
+	TEST_METHOD(SplitterRejectsInfiniteScaleCodeUnitAndSigmasVisibly)
+	{
+		using namespace GrainSplitV3GpuTestsNs;
+		struct TexGuard
+		{
+			pl_gpu gpu = nullptr;
+			pl_tex tex = nullptr;
+			TexGuard(pl_gpu g, pl_tex t) : gpu(g), tex(t) {}
+			~TexGuard() { if (gpu && tex) pl_tex_destroy(gpu, &tex); }
+			TexGuard(const TexGuard&) = delete;
+			TexGuard& operator=(const TexGuard&) = delete;
+		};
+		struct SplitterGuard
+		{
+			pl_gpu gpu = nullptr;
+			GrainSplit::Gpu::Splitter* s = nullptr;
+			SplitterGuard(pl_gpu g, GrainSplit::Gpu::Splitter* sp) : gpu(g), s(sp) {}
+			~SplitterGuard() { if (gpu && s) s->Release(gpu); }
+			SplitterGuard(const SplitterGuard&) = delete;
+			SplitterGuard& operator=(const SplitterGuard&) = delete;
+		};
+
+		GpuDevice dev;
+		Assert::IsTrue(dev.Create(), L"Could not create the libplacebo WARP test device");
+		pl_gpu gpu = dev.Gpu();
+
+		const int w = 64, h = 64, B = 16;
+		const double validScale = 1.0;
+		const double validCodeUnit = 1.0 / 1023.0;
+		const GrainSplit::Params validParams{};
+		const Plane y = MakePlane(w, h, 823u);
+		TexGuard tex{ gpu, UploadLuma(gpu, y) };
+		Assert::IsNotNull(tex.tex, L"upload plane");
+
+		GrainSplit::Gpu::Splitter splitter;
+		SplitterGuard splitterGuard{ gpu, &splitter };
+
+		// (1) Positive control on the exact same texture: valid finite arguments succeed and populate Out().
+		Assert::IsTrue(splitter.Compute(gpu, dev.dispatch, tex.tex, 0, validCodeUnit, validScale, B, validParams),
+			Wide("positive control Compute failed: " + splitter.LastError()).c_str());
+		Assert::IsTrue(splitter.LastError().empty(),
+			Wide("positive control must clear LastError, got: " + splitter.LastError()).c_str());
+		Assert::IsNotNull(splitter.Out().split, L"positive control Out().split");
+		Assert::IsNotNull(splitter.Out().blocks, L"positive control Out().blocks");
+		Assert::AreEqual(w, splitter.Out().w, L"positive control Out().w");
+		Assert::AreEqual(h, splitter.Out().h, L"positive control Out().h");
+		Assert::AreEqual(GrainSplit::kUnitVersion, splitter.Out().version, L"positive control Out().version");
+		const std::vector<float> refSplit = DownloadRGBA(gpu, dev.dispatch, splitter.Out().split);
+		const std::vector<float> refBlocks = DownloadRGBA(gpu, dev.dispatch, splitter.Out().blocks);
+		Assert::IsTrue(!refSplit.empty() && !refBlocks.empty(), L"positive control download");
+
+		// (2) Non-finite adversarial inputs on the exact same texture and Splitter instance.
+		const double kInf = std::numeric_limits<double>::infinity();
+		const double kNan = std::numeric_limits<double>::quiet_NaN();
+		auto withParam = [&](auto mutator) {
+			GrainSplit::Params p = validParams;
+			mutator(p);
+			return p;
+		};
+		struct BadCase
+		{
+			const char* label;
+			double codeUnit;
+			double scale;
+			GrainSplit::Params params;
+		};
+		const BadCase badCases[] = {
+			{ "scale=+Inf", validCodeUnit, kInf, validParams },
+			{ "scale=-Inf", validCodeUnit, -kInf, validParams },
+			{ "scale=NaN", validCodeUnit, kNan, validParams },
+			{ "codeUnit=+Inf", kInf, validScale, validParams },
+			{ "codeUnit=1e-320 (1/codeUnit overflows to +Inf)", 1e-320, validScale, validParams },
+			{ "params.sigmaFine=+Inf", validCodeUnit, validScale, withParam([&](GrainSplit::Params& p) { p.sigmaFine = kInf; }) },
+			{ "params.sigmaBase=+Inf", validCodeUnit, validScale, withParam([&](GrainSplit::Params& p) { p.sigmaBase = kInf; }) },
+			{ "params.sigmaLow=+Inf", validCodeUnit, validScale, withParam([&](GrainSplit::Params& p) { p.sigmaLow = kInf; }) },
+			{ "params.grainCal=+Inf", validCodeUnit, validScale, withParam([&](GrainSplit::Params& p) { p.grainCal = kInf; }) },
+			{ "params.kappa=NaN", validCodeUnit, validScale, withParam([&](GrainSplit::Params& p) { p.kappa = kNan; }) },
+			{ "params.energyFloor=+Inf", validCodeUnit, validScale, withParam([&](GrainSplit::Params& p) { p.energyFloor = kInf; }) },
+			{ "params.sigmaFine=1e200 (s1*s1 overflows to +Inf)", validCodeUnit, validScale, withParam([&](GrainSplit::Params& p) { p.sigmaFine = 1e200; }) },
+		};
+		for (const BadCase& c : badCases)
+		{
+			const std::wstring tag = Wide(std::string(c.label));
+			const bool ok = splitter.Compute(gpu, dev.dispatch, tex.tex, 0, c.codeUnit, c.scale, B, c.params);
+			Assert::IsFalse(ok, (tag + L": non-finite input must be refused").c_str());
+			Assert::IsNull(splitter.Out().split, (tag + L": refused Compute must leave Out().split null").c_str());
+			Assert::IsNull(splitter.Out().splitB, (tag + L": refused Compute must leave Out().splitB null").c_str());
+			Assert::IsNull(splitter.Out().blocks, (tag + L": refused Compute must leave Out().blocks null").c_str());
+			Assert::AreEqual(static_cast<uint32_t>(0), splitter.Out().version, (tag + L": refused Compute must clear Out().version").c_str());
+			Assert::IsFalse(splitter.LastError().empty(), (tag + L": refused Compute must populate LastError()").c_str());
+			Assert::IsTrue(splitter.LastError().find("non-finite") != std::string::npos,
+				Wide(std::string(c.label) + ": expected LastError() to name 'non-finite', got: " + splitter.LastError()).c_str());
+		}
+
+		// Mid-step non-finite rejection: Step(0) succeeds validly, then Step(1) with scale=+Inf aborts the active run visibly.
+		const GrainSplit::Gpu::Options defaultOpts{};
+		Assert::IsTrue(splitter.Step(gpu, dev.dispatch, tex.tex, 0, validCodeUnit, validScale, B, validParams, defaultOpts, 0u),
+			Wide("mid-step setup Step(0) failed: " + splitter.LastError()).c_str());
+		Assert::IsFalse(splitter.Step(gpu, dev.dispatch, tex.tex, 0, validCodeUnit, kInf, B, validParams, defaultOpts, 1u),
+			L"mid-step Step(1) with scale=+Inf must be refused");
+		Assert::IsNull(splitter.Out().split, L"mid-step non-finite refusal leaves Out().split null");
+		Assert::IsNull(splitter.Out().blocks, L"mid-step non-finite refusal leaves Out().blocks null");
+		Assert::IsTrue(splitter.LastError().find("non-finite") != std::string::npos,
+			Wide("mid-step Step(1) with scale=+Inf expected 'non-finite', got: " + splitter.LastError()).c_str());
+		Assert::IsFalse(splitter.Step(gpu, dev.dispatch, tex.tex, 0, validCodeUnit, validScale, B, validParams, defaultOpts, 2u),
+			L"aborted stepped run must not allow Step(2) to continue");
+
+		// (3) Recovery check: the same Splitter instance succeeds cleanly on valid finite input and matches the baseline bit-for-bit.
+		Assert::IsTrue(splitter.Compute(gpu, dev.dispatch, tex.tex, 0, validCodeUnit, validScale, B, validParams),
+			Wide("recovery Compute after non-finite refusals failed: " + splitter.LastError()).c_str());
+		Assert::IsTrue(splitter.LastError().empty(),
+			Wide("recovery Compute must clear LastError, got: " + splitter.LastError()).c_str());
+		Assert::IsNotNull(splitter.Out().split, L"recovery Out().split");
+		Assert::IsNotNull(splitter.Out().blocks, L"recovery Out().blocks");
+		Assert::AreEqual(w, splitter.Out().w, L"recovery Out().w");
+		Assert::AreEqual(h, splitter.Out().h, L"recovery Out().h");
+		Assert::AreEqual(GrainSplit::kUnitVersion, splitter.Out().version, L"recovery Out().version");
+		const std::vector<float> recSplit = DownloadRGBA(gpu, dev.dispatch, splitter.Out().split);
+		const std::vector<float> recBlocks = DownloadRGBA(gpu, dev.dispatch, splitter.Out().blocks);
+		Assert::IsTrue(SameBits(refSplit, recSplit) && SameBits(refBlocks, recBlocks),
+			L"recovery Compute after non-finite refusals must match positive-control output bit-for-bit");
+
+		Logger::WriteMessage("S2-M2: Splitter visibly rejected all 12 non-finite Compute cases + mid-step +Inf and recovered bit-identically");
 	}
 };
