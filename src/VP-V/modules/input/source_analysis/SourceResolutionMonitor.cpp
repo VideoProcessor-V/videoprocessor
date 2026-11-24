@@ -1500,6 +1500,7 @@ if (tile < int(tiles) && g.y < ts) {
 		{
 			sourceId.Discontinuity(j.sequence != 0 ? j.sequence : snapshot.frames + 1, streamKey.load(std::memory_order_acquire));   // switched on: a clean start
 			chainWindowPolicy.Reset();
+			lastUpscaleRefTable.entries.clear();
 		}
 		sourceId.SetConsensusOn(idMode == SourceIdMode::On);
 		sourceId.SetShadow(idMode == SourceIdMode::Shadow);

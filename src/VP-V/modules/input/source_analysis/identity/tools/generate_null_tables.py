@@ -1041,9 +1041,18 @@ def _fit_tables_from_items(train_items, min_null_per_class, min_alt_per_class):
                 alt = (m1, s1)
                 c_status = "fitted"
             else:
+                all_classes_fitted = False
+                fit_reasons.append(
+                    "class %s alt not separated from null (m1=%.4f >= m0-sep=%.4f)"
+                    % (CLASSES[c], m1, m0 - MIN_ALT_SEPARATION_SIGMA * s0)
+                )
                 alt = nul
                 c_status = "alt_unseparated_zero_llr"
         else:
+            all_classes_fitted = False
+            fit_reasons.append(
+                "class %s insufficient alt (%d < %d)" % (CLASSES[c], len(ax), min_alt_per_class)
+            )
             alt = nul
             c_status = "no_alt_zero_llr"
 
@@ -1752,22 +1761,26 @@ def run_selftest():
             md_text = fh.read()
         assert "G-PhaseA" in md_text and "G-8bit" in md_text and "Held-Out 2-Fold" in md_text
 
-        # Also verify v3 cal-dump parser & strict depth stratification (multi-master per depth)
+        # Also verify v3 cal-dump parser & strict depth stratification (multi-master per depth,
+        # with upscaled alt reels covering all 4 classes in BOTH CV folds for N10 and N12).
         v3_dir = os.path.join(tmp, "v3")
         os.makedirs(v3_dir)
-        _write_synthetic_v3_csv(v3_dir, "cal_dump_10bit_a.csv", bit_depth=10, num_shots=30, truth_n=0, rng=rng,
-                                master_name="m_v3_10_a", reel_name="v3_reel_10_a")
-        _write_synthetic_v3_csv(v3_dir, "cal_dump_10bit_b.csv", bit_depth=10, num_shots=30, truth_n=0, rng=rng,
-                                master_name="m_v3_10_b", reel_name="v3_reel_10_b")
-        _write_synthetic_v3_csv(v3_dir, "cal_dump_12bit_a.csv", bit_depth=12, num_shots=30, truth_n=0, rng=rng,
-                                master_name="m_v3_12_a", reel_name="v3_reel_12_a")
-        _write_synthetic_v3_csv(v3_dir, "cal_dump_12bit_b.csv", bit_depth=12, num_shots=30, truth_n=0, rng=rng,
-                                master_name="m_v3_12_b", reel_name="v3_reel_12_b")
+        for bd in (10, 12):
+            for suf in ("a", "b"):
+                m_name = "m_v3_%d_%s" % (bd, suf)
+                _write_synthetic_v3_csv(v3_dir, "cal_dump_%dbit_%s.csv" % (bd, suf), bit_depth=bd, num_shots=30,
+                                        truth_n=0, rng=rng, master_name=m_name, reel_name="v3_reel_%d_%s" % (bd, suf))
+                for cls_tag, tn in (("half", 960), ("k16", 1320), ("rat", 1280), ("gen", 1100)):
+                    _write_synthetic_v3_csv(v3_dir, "cal_dump_%dbit_up_%s_%s.csv" % (bd, cls_tag, suf), bit_depth=bd,
+                                            num_shots=15, truth_n=tn, rng=rng, master_name=m_name,
+                                            reel_name="v3_up_%d_%s_%s" % (bd, cls_tag, suf))
         v3_items, v3_segs, v3_info = load_all_dumps([v3_dir])
-        assert v3_info["v3_files"] == 4
+        assert v3_info["v3_files"] == 20
         v3_report = calibrate_all_depths(v3_items, v3_segs, min_native_shots=50)
         assert v3_report["G-PhaseA"]["N10"]["calibrated"] is True
+        assert v3_report["G-PhaseA"]["N10"]["cv_passed"] is True
         assert v3_report["G-PhaseA"]["N12"]["calibrated"] is True
+        assert v3_report["G-PhaseA"]["N12"]["cv_passed"] is True
         assert v3_report["G-PhaseA"]["N8"]["calibrated"] is False
         assert v3_report["G-PhaseA"]["N8"]["native_shots"] == 0
 
@@ -1898,6 +1911,12 @@ def run_selftest():
         _write_custom_v4(ovf_dir, "ovf_nat_b", 200, 3, 0, 0, k8_null_mean=-0.18, k8_null_sd=0.020, alt_mean=-0.50, alt_sd=0.04)
         _write_custom_v4(ovf_dir, "ovf_up_a", 25, 2, 960, 540, k8_null_mean=-0.01, k8_null_sd=0.008, alt_mean=-0.50, alt_sd=0.04)
         _write_custom_v4(ovf_dir, "ovf_up_b", 25, 2, 960, 540, k8_null_mean=-0.18, k8_null_sd=0.020, alt_mean=-0.50, alt_sd=0.04)
+        _write_custom_v4(ovf_dir, "ovf_up_k16_a", 20, 2, 1320, 743, k8_null_mean=-0.01, k8_null_sd=0.008, alt_mean=-0.50, alt_sd=0.04)
+        _write_custom_v4(ovf_dir, "ovf_up_k16_b", 20, 2, 1320, 743, k8_null_mean=-0.18, k8_null_sd=0.020, alt_mean=-0.50, alt_sd=0.04)
+        _write_custom_v4(ovf_dir, "ovf_up_rat_a", 20, 2, 1280, 720, k8_null_mean=-0.01, k8_null_sd=0.008, alt_mean=-0.50, alt_sd=0.04)
+        _write_custom_v4(ovf_dir, "ovf_up_rat_b", 20, 2, 1280, 720, k8_null_mean=-0.18, k8_null_sd=0.020, alt_mean=-0.50, alt_sd=0.04)
+        _write_custom_v4(ovf_dir, "ovf_up_gen_a", 20, 2, 1100, 618, k8_null_mean=-0.01, k8_null_sd=0.008, alt_mean=-0.50, alt_sd=0.04)
+        _write_custom_v4(ovf_dir, "ovf_up_gen_b", 20, 2, 1100, 618, k8_null_mean=-0.18, k8_null_sd=0.020, alt_mean=-0.50, alt_sd=0.04)
         ovf_manifest = os.path.join(tmp, "ovf_manifest.json")
         with open(ovf_manifest, "w", encoding="utf-8") as fh:
             json.dump({
@@ -1905,6 +1924,12 @@ def run_selftest():
                 "ovf_nat_b": {"truth_nx": 0, "truth_ny": 0, "master": "m_ovf_b"},
                 "ovf_up_a": {"truth_nx": 960, "truth_ny": 540, "master": "m_ovf_a"},
                 "ovf_up_b": {"truth_nx": 960, "truth_ny": 540, "master": "m_ovf_b"},
+                "ovf_up_k16_a": {"truth_nx": 1320, "truth_ny": 743, "master": "m_ovf_a"},
+                "ovf_up_k16_b": {"truth_nx": 1320, "truth_ny": 743, "master": "m_ovf_b"},
+                "ovf_up_rat_a": {"truth_nx": 1280, "truth_ny": 720, "master": "m_ovf_a"},
+                "ovf_up_rat_b": {"truth_nx": 1280, "truth_ny": 720, "master": "m_ovf_b"},
+                "ovf_up_gen_a": {"truth_nx": 1100, "truth_ny": 618, "master": "m_ovf_a"},
+                "ovf_up_gen_b": {"truth_nx": 1100, "truth_ny": 618, "master": "m_ovf_b"},
             }, fh)
         ovf_items, ovf_segs, _ = load_all_dumps([ovf_dir], ovf_manifest)
 
@@ -2043,7 +2068,112 @@ def run_selftest():
             drift_caught = "CANDIDATE_COUNT" in str(exc) and "drift" in str(exc).lower()
         assert drift_caught, "TEST-L4: verify_cpp_contract_constants MUST raise AssertionError on drifted C++ constant"
 
-    print("generate_null_tables.py --selftest: PASS (2-fold held-out CV, H3 overfit & single-master, NEW-M2 emp_floor, TEST-L4 drift negative controls, v4+v3 stratification, G-PhaseA, G-8bit verified)")
+        # Negative control 11 (CARBON-MED-1 Red-Team: 1-master-alt overfit bypass check):
+        # Construct a 2-native-master dataset (>= 1500 native shots, 0 in-sample FPs) where ONLY 1 master
+        # has upscaled alt segments (covering all 4 classes so the full-stratum fit succeeds), while the
+        # second master has tight clean native ONLY (0 alt segments) — so one CV fold trains without alt.
+        # Without MED-1, the alt-less training fold silently collapses alt = nul (LLR == 0), masking held-out
+        # overfit FPs on the shifted master and falsely emitting NullTableSourceKind::Calibrated!
+        alt1_dir = os.path.join(tmp, "med1_one_master_alt")
+        os.makedirs(alt1_dir)
+        _write_custom_v4(alt1_dir, "alt1_nat_a", 760, 3, 0, 0, k8_null_mean=-0.18, k8_null_sd=0.020, alt_mean=-0.50, alt_sd=0.04)
+        _write_custom_v4(alt1_dir, "alt1_nat_b", 760, 3, 0, 0, k8_null_mean=-0.01, k8_null_sd=0.008, alt_mean=-0.50, alt_sd=0.04)
+        _write_custom_v4(alt1_dir, "alt1_up_half_a", 25, 2, 960, 540, k8_null_mean=-0.18, k8_null_sd=0.020, alt_mean=-0.50, alt_sd=0.04)
+        _write_custom_v4(alt1_dir, "alt1_up_k16_a", 20, 2, 1320, 743, k8_null_mean=-0.18, k8_null_sd=0.020, alt_mean=-0.50, alt_sd=0.04)
+        _write_custom_v4(alt1_dir, "alt1_up_rat_a", 20, 2, 1280, 720, k8_null_mean=-0.18, k8_null_sd=0.020, alt_mean=-0.50, alt_sd=0.04)
+        _write_custom_v4(alt1_dir, "alt1_up_gen_a", 20, 2, 1100, 618, k8_null_mean=-0.18, k8_null_sd=0.020, alt_mean=-0.50, alt_sd=0.04)
+        alt1_manifest = os.path.join(tmp, "alt1_manifest.json")
+        with open(alt1_manifest, "w", encoding="utf-8") as fh:
+            json.dump({
+                "alt1_nat_a": {"truth_nx": 0, "truth_ny": 0, "master": "m_alt1_a"},
+                "alt1_nat_b": {"truth_nx": 0, "truth_ny": 0, "master": "m_alt1_b"},
+                "alt1_up_half_a": {"truth_nx": 960, "truth_ny": 540, "master": "m_alt1_a"},
+                "alt1_up_k16_a": {"truth_nx": 1320, "truth_ny": 743, "master": "m_alt1_a"},
+                "alt1_up_rat_a": {"truth_nx": 1280, "truth_ny": 720, "master": "m_alt1_a"},
+                "alt1_up_gen_a": {"truth_nx": 1100, "truth_ny": 618, "master": "m_alt1_a"},
+            }, fh)
+        alt1_items, alt1_segs, _ = load_all_dumps([alt1_dir], alt1_manifest)
+
+        # Same-input negative control: full-stratum fit HAS valid separated alt across all 4 classes & 0 in-sample FPs!
+        alt1_full_tbls, alt1_full_diag, alt1_full_ok, _ = _fit_tables_from_items(
+            alt1_items, DEFAULT_MIN_NULL_PER_CLASS, DEFAULT_MIN_ALT_PER_CLASS
+        )
+        assert alt1_full_ok is True and all(d["status"] == "fitted" for d in alt1_full_diag), \
+            "MED-1 NC11 fixture: full-stratum fit must succeed across all 4 classes"
+        alt1_insample_ev = evaluate_heldout(alt1_items, alt1_segs, alt1_full_tbls, compute_c1())
+        assert alt1_insample_ev["native_fp"] == 0, \
+            "MED-1 NC11 negative control: combined full-stratum replay has 0 in-sample FPs"
+
+        # Protected 2-fold CV MUST reject the alt-less training fold and refuse calibration!
+        alt1_report = calibrate_all_depths(alt1_items, alt1_segs, min_native_shots=DEFAULT_MIN_NATIVE_SHOTS)
+        alt1_n8 = alt1_report["depths"]["N8"]
+        assert alt1_n8["native_shots"] >= DEFAULT_MIN_NATIVE_SHOTS, "MED-1 NC11 fixture: >= 1500 native shots"
+        assert alt1_n8["distinct_masters"] == 2
+        assert alt1_n8["insample_confident_wrong_count"] == 0
+        assert len(alt1_n8["cv_folds"]) == 2
+        assert sum(1 for f in alt1_n8["cv_folds"] if not f["fit_ok"]) == 1, \
+            "MED-1 NC11: exactly 1 CV fold (training on alt-less master) MUST fail fit_ok: %r" % (alt1_n8["cv_folds"],)
+        assert alt1_n8["cv_passed"] is False, "MED-1 NC11: 1-master-alt dataset MUST fail cv_passed"
+        assert alt1_n8["calibrated"] is False, "MED-1 NC11: 1-master-alt dataset MUST NOT calibrate"
+        assert alt1_n8["g_phase_a_passed"] is False
+        assert alt1_n8["source_kind"] == "placeholder"
+        alt1_hdr = render_cpp_header(alt1_report)
+        assert "DepthNullTable::PlaceholderFor(BitDepthClass::N8)" in alt1_hdr, \
+            "MED-1 NC11: must emit PlaceholderFor(BitDepthClass::N8)"
+        assert "NullTableSourceKind::Calibrated" not in alt1_hdr, \
+            "MED-1 NC11: must NEVER emit NullTableSourceKind::Calibrated"
+
+        # Negative control 12 (CARBON-MED-1 Red-Team: native-only dead LLR == 0 table check):
+        # Construct a 2-native-master N10 dataset with 0 upscaled alt items (>= 1500 native shots, 0 native FPs).
+        # Naive alt = nul gives LLR == 0 identically (dead detector, 0 FPs trivially). Protected fit_depth_stratum
+        # / calibrate_all_depths MUST reject calibration and emit PlaceholderFor(BitDepthClass::N10)!
+        natonly_dir = os.path.join(tmp, "med1_native_only_dead_llr")
+        os.makedirs(natonly_dir)
+        _write_synthetic_v4_pair(natonly_dir, "natonly_a", step_codes=1, output_bits=10, num_shots=760, evals_per_shot=2,
+                                 truth_nx=0, truth_ny=0, rng=rng)
+        _write_synthetic_v4_pair(natonly_dir, "natonly_b", step_codes=1, output_bits=10, num_shots=760, evals_per_shot=2,
+                                 truth_nx=0, truth_ny=0, rng=rng)
+        natonly_manifest = os.path.join(tmp, "natonly_manifest.json")
+        with open(natonly_manifest, "w", encoding="utf-8") as fh:
+            json.dump({
+                "natonly_a": {"truth_nx": 0, "truth_ny": 0, "master": "m_natonly_a"},
+                "natonly_b": {"truth_nx": 0, "truth_ny": 0, "master": "m_natonly_b"},
+            }, fh)
+        natonly_items, natonly_segs, _ = load_all_dumps([natonly_dir], natonly_manifest)
+        assert sum(1 for it in natonly_items if it.label == "alt") == 0, "MED-1 NC12 fixture: 0 alt items"
+
+        # Same-input negative control: naive alt = nul table produces dead LLR == 0 even on a strong -0.50 upscale
+        # while scoring 0 native FPs on natonly_segs!
+        dead_tbls, _, dead_all_fitted, dead_fit_reasons = _fit_tables_from_items(
+            natonly_items, DEFAULT_MIN_NULL_PER_CLASS, DEFAULT_MIN_ALT_PER_CLASS
+        )
+        naive_zero_llr_tbls = {"null": list(dead_tbls["null"]), "alt": list(dead_tbls["null"])}
+        assert all(llr(naive_zero_llr_tbls["null"][c], naive_zero_llr_tbls["alt"][c], -0.50) == 0.0 for c in range(4)), \
+            "MED-1 NC12 negative control: naive alt=nul yields dead LLR == 0.0 on strong -0.50 upscale"
+        assert evaluate_heldout(natonly_items, natonly_segs, naive_zero_llr_tbls, compute_c1())["native_fp"] == 0, \
+            "MED-1 NC12 negative control: naive dead LLR==0 table trivially achieves 0 native FPs"
+
+        # Protected _fit_tables_from_items / calibrate_all_depths MUST reject dead native-only tables!
+        assert dead_all_fitted is False, \
+            "MED-1 NC12: native-only dataset (0 alt items) MUST set all_classes_fitted = False"
+        assert len(dead_fit_reasons) > 0, "MED-1 NC12: must report explicit fit failure reasons"
+        natonly_report = calibrate_all_depths(natonly_items, natonly_segs, min_native_shots=DEFAULT_MIN_NATIVE_SHOTS)
+        natonly_n10 = natonly_report["depths"]["N10"]
+        assert natonly_n10["native_shots"] >= DEFAULT_MIN_NATIVE_SHOTS, "MED-1 NC12 fixture: >= 1500 native shots"
+        assert natonly_n10["distinct_masters"] == 2
+        assert natonly_n10["heldout_native_fp"] == 0
+        assert natonly_n10["insample_confident_wrong_count"] == 0
+        assert natonly_n10["cv_passed"] is False, "MED-1 NC12: native-only dataset MUST fail cv_passed"
+        assert natonly_n10["calibrated"] is False, "MED-1 NC12: native-only dataset MUST NOT calibrate"
+        assert natonly_n10["g_phase_a_passed"] is False
+        assert natonly_n10["source_kind"] == "placeholder"
+        natonly_hdr = render_cpp_header(natonly_report)
+        assert "DepthNullTable::PlaceholderFor(BitDepthClass::N10)" in natonly_hdr, \
+            "MED-1 NC12: must emit PlaceholderFor(BitDepthClass::N10)"
+        assert "NullTableSourceKind::Calibrated" not in natonly_hdr, \
+            "MED-1 NC12: must NEVER emit NullTableSourceKind::Calibrated"
+
+    print("generate_null_tables.py --selftest: PASS (2-fold held-out CV, H3 overfit & single-master, NEW-M2 emp_floor, TEST-L4 drift, CARBON-MED-1 1-master-alt & native-only dead-LLR negative controls, v4+v3 stratification, G-PhaseA, G-8bit verified)")
     return 0
 
 
