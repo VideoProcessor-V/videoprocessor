@@ -18,6 +18,7 @@
 #include <QDoubleSpinBox>
 #include <QFile>
 #include <QLabel>
+#include <QLineEdit>
 #include <QPushButton>
 #include <QSpinBox>
 #include <QStackedWidget>
@@ -273,6 +274,49 @@ namespace
 		require(gammaBoost != nullptr && gammaBoost->isEnabled(),
 			"GEM-050: gamma_boost remains enabled when Dynamic Drive is off");
 	}
+
+	// UTF-8 hygiene: LED drive profile_file and advanced table fields must persist UTF-8 bytes
+	// intact without CP1252/toLocal8Bit() corruption.
+	void testLedDriveSavesUtf8WithoutLocal8BitCorruption()
+	{
+		Vpv::RegisterConfigProviders();
+		QTemporaryDir dir;
+		const QString path = writeFixture(dir);
+		const QString utf8ProfilePath = QString::fromUtf8("C:/profiles/Caf\xC3\xA9_\xE6\x97\xA5\xE6\x9C\xAC.cfg");
+		const QString customCurve = QStringLiteral("0:95, 50:180, 100:255");
+		{
+			ConfigEditorWindow window(path, 0, true);
+			auto* profileField = window.findChild<QLineEdit*>(QStringLiteral("config.led_drive.default.profile_file"));
+			require(profileField != nullptr, "UTF-8 test: missing config.led_drive.default.profile_file");
+			profileField->setText(utf8ProfilePath);
+
+			auto* curveField = window.findChild<QLineEdit*>(QStringLiteral("config.led_drive.default.curve"));
+			require(curveField != nullptr, "UTF-8 test: missing config.led_drive.default.curve");
+			curveField->setText(customCurve);
+			QMetaObject::invokeMethod(curveField, "textEdited", Qt::DirectConnection, Q_ARG(QString, customCurve));
+
+			QCoreApplication::processEvents();
+			g_save(window);
+		}
+		QFile rawFile(path);
+		require(rawFile.open(QIODevice::ReadOnly), "UTF-8 test: cannot read saved config bytes");
+		const QByteArray rawBytes = rawFile.readAll();
+		const QByteArray expectedUtf8Bytes = QByteArray("profile_file: ") + utf8ProfilePath.toUtf8();
+		require(rawBytes.contains(expectedUtf8Bytes),
+			"UTF-8 test: saved file bytes corrupted non-ASCII profile_file path (toLocal8Bit regression)");
+		const QString decoded = QString::fromUtf8(rawBytes);
+		require(decoded.contains(QStringLiteral("profile_file: ") + utf8ProfilePath),
+			"UTF-8 test: UTF-8 decoded saved config did not preserve profile_file path");
+		require(decoded.contains(QStringLiteral("curve: ") + customCurve),
+			"UTF-8 test: saved config did not preserve advanced curve edit");
+		// Round-trip reload: reopening the editor must show the exact UTF-8 string intact.
+		{
+			ConfigEditorWindow reopened(path, 0, true);
+			auto* profileField = reopened.findChild<QLineEdit*>(QStringLiteral("config.led_drive.default.profile_file"));
+			require(profileField != nullptr && profileField->text() == utf8ProfilePath,
+				"UTF-8 test: reopened editor did not round-trip non-ASCII UTF-8 profile_file intact");
+		}
+	}
 }
 
 int RunLedDrivePageTests(const std::function<int(const char*, const std::function<void()>&)>& run,
@@ -290,5 +334,6 @@ int RunLedDrivePageTests(const std::function<int(const char*, const std::functio
 	failures += run("LedDrivePageTests: an RS-232 test survives a rebuild and is joined on close", testRs232TestSurvivesARebuildAndIsJoinedOnClose);
 	failures += run("LedDrivePageTests: state goes with the editor", testStateGoesWithTheEditor);
 	failures += run("LedDrivePageTests: Dynamic Drive off greys visible drive controls except gamma_boost", testOnOffGreysVisibleDriveControlsExceptGammaBoost);
+	failures += run("LedDrivePageTests: saves UTF-8 profile_file without toLocal8Bit corruption", testLedDriveSavesUtf8WithoutLocal8BitCorruption);
 	return failures;
 }

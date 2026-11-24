@@ -17,6 +17,8 @@
 
 #include <ConfigFile.h>
 #include <VP-V/core/DelayBudgetLadder.h>
+#include <VP-V/modules/colour/appearance/AppearanceStatus.h>
+#include <VP-V/modules/output/calibration_lut/CalibrationLutHostPolicy.h>
 #include <RendererProfileConfig.h>
 // CameraMotion.h has a member named `signals`, which Qt's keyword macro would rewrite: parse the header without it.
 #pragma push_macro("signals")
@@ -71,7 +73,8 @@ namespace
 #include <QPointer>
 #include <QToolButton>
 #include <QSlider>
-#include <QSpinBox>
+#include <QDir>
+#include <QDoubleSpinBox>
 #include <QSpinBox>
 #include <QTemporaryDir>
 #include <QTimer>
@@ -4146,8 +4149,535 @@ namespace
 			profileCombo->hidePopup();
 			QCoreApplication::processEvents();
 		}
+
+		// CT-M9 hardened show-sync proof + in-test negative control:
+		// Prime a 2-item popup under Qt::ScrollBarAsNeeded (using combobox-popup: 0 so VpStyle/Fusion
+		// honours ScrollBarAsNeeded instead of forcing ScrollBarAlwaysOff), add 60 items while closed,
+		// open WITHOUT any intermediate processEvents(), and assert bar->isVisible() && bar->maximum() > 0.
+		// Then run an identical QComboBox with a naive SwallowHiddenMetaCallOnlyFilter (swallows hidden
+		// MetaCalls, does nothing on QEvent::Show) at the cached 2-item popup geometry (no resize) to
+		// prove SyncPopupForShow is genuinely exercised and load-bearing.
+		{
+			auto* profileCombo = control<QComboBox>(window, Vpv::ObjectName(QStringLiteral("profile")));
+			QAbstractItemView* prodView = profileCombo->view();
+			require(prodView != nullptr, "CT-M9: vpv.profile has no popup view");
+
+			std::vector<std::pair<QString, QVariant>> savedItems;
+			savedItems.reserve(static_cast<size_t>(profileCombo->count()));
+			for (int i = 0; i < profileCombo->count(); ++i)
+				savedItems.emplace_back(profileCombo->itemText(i), profileCombo->itemData(i));
+			const int savedIdx = profileCombo->currentIndex();
+			const int savedMaxVisible = profileCombo->maxVisibleItems();
+			const QString savedStyle = profileCombo->styleSheet();
+			const Qt::ScrollBarPolicy savedPolicy = prodView->verticalScrollBarPolicy();
+			struct RestoreCtM9Combo
+			{
+				QComboBox* cb;
+				QAbstractItemView* view;
+				const std::vector<std::pair<QString, QVariant>>* items;
+				int idx;
+				int maxVisible;
+				QString style;
+				Qt::ScrollBarPolicy policy;
+				~RestoreCtM9Combo()
+				{
+					if (!cb) return;
+					if (view && view->parentWidget()) view->parentWidget()->hide();
+					cb->hidePopup();
+					cb->setStyleSheet(style);
+					cb->setMaxVisibleItems(maxVisible);
+					if (view) view->setVerticalScrollBarPolicy(policy);
+					const QSignalBlocker blocker(cb);
+					cb->clear();
+					for (const auto& it : *items) cb->addItem(it.first, it.second);
+					cb->setCurrentIndex(idx);
+				}
+			} restoreCtM9{ profileCombo, prodView, &savedItems, savedIdx, savedMaxVisible, savedStyle, savedPolicy };
+
+			auto primeTwoItems = [](QComboBox* cb, const char* label)
+			{
+				cb->setStyleSheet(QStringLiteral("QComboBox { combobox-popup: 0; }"));
+				cb->setMaxVisibleItems(8);
+				QAbstractItemView* v = cb->view();
+				require(v != nullptr, (std::string("CT-M9: missing view on ") + label).c_str());
+				v->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+				{
+					const QSignalBlocker blocker(cb);
+					cb->clear();
+					cb->addItem(QStringLiteral("Prime A"), QStringLiteral("prime_a"));
+					cb->addItem(QStringLiteral("Prime B"), QStringLiteral("prime_b"));
+				}
+				cb->showPopup();
+				QCoreApplication::processEvents();
+				QScrollBar* bar = v->verticalScrollBar();
+				require(v->verticalScrollBarPolicy() == Qt::ScrollBarAsNeeded,
+					(std::string("CT-M9: expected ScrollBarAsNeeded on ") + label).c_str());
+				require(bar != nullptr && !bar->isVisible() && bar->maximum() == 0,
+					(std::string("CT-M9: primed 2-item popup must cache hidden zero-range scrollbar on ") + label).c_str());
+				cb->hidePopup();
+				QCoreApplication::processEvents();
+			};
+
+			// Part A: real showPopup() WITHOUT any intermediate processEvents() after adding 60 items.
+			primeTwoItems(profileCombo, "vpv.profile (Part A)");
+			{
+				const std::uint64_t deferredBefore = Vpv::DeferredHiddenPopupEventCount();
+				bool armedDelivered = false;
+				QMetaObject::invokeMethod(prodView, [&armedDelivered]() { armedDelivered = true; }, Qt::QueuedConnection);
+				QCoreApplication::processEvents();
+				require(!armedDelivered && Vpv::DeferredHiddenPopupEventCount() > deferredBefore,
+					"CT-M9 Part A: hidden coalescer did not suppress closed MetaCall to arm show-sync");
+
+				{
+					const QSignalBlocker blocker(profileCombo);
+					for (int i = 0; i < 60; ++i)
+						profileCombo->addItem(QStringLiteral("CT-M9 item %1").arg(i), QStringLiteral("ctm9_%1").arg(i));
+				}
+				// Deliberately NO QCoreApplication::processEvents() before or after showPopup().
+				profileCombo->showPopup();
+				QScrollBar* bar = prodView->verticalScrollBar();
+				require(prodView->isVisible(),
+					"CT-M9 Part A: popup view did not become visible on showPopup() without processEvents()");
+				require(bar != nullptr && bar->isVisible() && bar->maximum() > 0,
+					"CT-M9 Part A: verticalScrollBar must be visible with maximum > 0 immediately on showPopup() without processEvents()");
+				profileCombo->hidePopup();
+				QCoreApplication::processEvents();
+			}
+
+			// Part B: same-input in-test negative control at cached 2-item geometry (no resize runs).
+			struct SwallowHiddenMetaCallOnlyFilter : QObject
+			{
+				int swallowedCount = 0;
+				bool eventFilter(QObject* obj, QEvent* ev) override
+				{
+					if (ev && ev->type() == QEvent::MetaCall)
+					{
+						if (auto* v = qobject_cast<QAbstractItemView*>(obj))
+						{
+							if (!v->isVisible())
+							{
+								++swallowedCount;
+								return true;
+							}
+						}
+					}
+					// Deliberately does NOTHING on QEvent::Show (naive unprotected baseline).
+					return false;
+				}
+			};
+
+			primeTwoItems(profileCombo, "vpv.profile (Part B)");
+
+			QComboBox naiveCombo(&window);
+			naiveCombo.setGeometry(profileCombo->geometry());
+			naiveCombo.show();
+			QCoreApplication::processEvents();
+			QAbstractItemView* naiveView = naiveCombo.view();
+			require(naiveView != nullptr, "CT-M9 negative control: naive combo has no view");
+			SwallowHiddenMetaCallOnlyFilter naiveFilter;
+			ObjectEventFilterGuard naiveFilterGuard(naiveView, &naiveFilter);
+			primeTwoItems(&naiveCombo, "naiveCombo (Part B)");
+
+			bool prodDelivered = false;
+			bool naiveDelivered = false;
+			QMetaObject::invokeMethod(prodView, [&prodDelivered]() { prodDelivered = true; }, Qt::QueuedConnection);
+			QMetaObject::invokeMethod(naiveView, [&naiveDelivered]() { naiveDelivered = true; }, Qt::QueuedConnection);
+			QCoreApplication::processEvents();
+			require(!prodDelivered && !naiveDelivered && naiveFilter.swallowedCount > 0,
+				"CT-M9 Part B: both production and naive filters must swallow hidden MetaCall");
+
+			// Mutate both combos with the exact same 60 items while closed, with NO intermediate processEvents().
+			{
+				const QSignalBlocker blockerA(profileCombo);
+				const QSignalBlocker blockerB(&naiveCombo);
+				for (int i = 0; i < 60; ++i)
+				{
+					const QString text = QStringLiteral("CT-M9 neg %1").arg(i);
+					const QString data = QStringLiteral("ctm9_neg_%1").arg(i);
+					profileCombo->addItem(text, data);
+					naiveCombo.addItem(text, data);
+				}
+			}
+
+			// Show both popup containers directly at their cached 2-item geometry (no resize, no processEvents()).
+			QWidget* prodContainer = prodView->parentWidget();
+			QWidget* naiveContainer = naiveView->parentWidget();
+			require(prodContainer != nullptr && naiveContainer != nullptr,
+				"CT-M9 Part B: primed popups have no container widget");
+			prodContainer->show();
+			naiveContainer->show();
+
+			QScrollBar* prodBar = prodView->verticalScrollBar();
+			QScrollBar* naiveBar = naiveView->verticalScrollBar();
+			require(prodBar != nullptr && prodBar->isVisible() && prodBar->maximum() > 0,
+				"CT-M9 Part B: production HiddenComboPopupCoalescer failed to sync scrollbar on cached-geometry show");
+			require(naiveBar != nullptr && !(naiveBar->isVisible() && naiveBar->maximum() > 0),
+				"CT-M9 negative control failed: naive SwallowHiddenMetaCallOnlyFilter unexpectedly synced scrollbar without SyncPopupForShow");
+
+			prodContainer->hide();
+			naiveContainer->hide();
+			QCoreApplication::processEvents();
+		}
 		window.hide();
 		QCoreApplication::processEvents();
+	}
+
+	// S4-M1: adaptive_motion continuum control (off / on / 0..1 strength) and greying of the 4 motion tuning rows.
+	void testAdaptiveMotionContinuumAndGreying()
+	{
+		QTemporaryDir dir;
+		const QString path = WriteFixture(dir,
+			"[vprenderer]\nsdr_target_nits: 100\nadaptive_motion: 0.5\n"
+			"[vprenderer.Cinema]\nquality: high\nadaptive_motion: off\n"
+			"[queue]\ntarget_latency_ms: 250\n");
+
+		static const char* kMotionRows[] = {
+			"config.vprenderer.adaptive_motion_speed_lo",
+			"config.vprenderer.adaptive_motion_speed_hi",
+			"config.vprenderer.adaptive_motion_floor",
+			"config.vprenderer.adaptive_motion_smooth_ms",
+		};
+		auto requireRowsEnabled = [](ConfigEditorWindow& win, bool expected, const char* context)
+		{
+			for (const char* name : kMotionRows)
+			{
+				auto* w = control<QWidget>(win, QString::fromLatin1(name));
+				require(w->isEnabled() == expected,
+					(std::string("S4-M1 (") + context + "): " + name +
+						(expected ? " must be enabled" : " must be disabled")).c_str());
+			}
+		};
+		auto selectMode = [](QComboBox* mode, const QString& token)
+		{
+			int idx = mode->findData(token);
+			if (idx < 0)
+			{
+				for (int i = 0; i < mode->count(); ++i)
+				{
+					if (mode->itemData(i).toString().compare(token, Qt::CaseInsensitive) == 0 ||
+						mode->itemText(i).compare(token, Qt::CaseInsensitive) == 0)
+					{
+						idx = i;
+						break;
+					}
+				}
+			}
+			require(idx >= 0, ("S4-M1: adaptive_motion.mode missing option '" + token.toStdString() + "'").c_str());
+			mode->setCurrentIndex(idx);
+			QCoreApplication::processEvents();
+		};
+		auto readBacking = [](QWidget* backing) -> QString
+		{
+			if (auto* le = qobject_cast<QLineEdit*>(backing)) return le->text().trimmed();
+			if (auto* cb = qobject_cast<QComboBox*>(backing))
+			{
+				const QString data = cb->currentData().toString().trimmed();
+				return data.isEmpty() ? cb->currentText().trimmed() : data;
+			}
+			return backing->property("effectiveValue").toString().trimmed();
+		};
+
+		ConfigEditorWindow window(path, 0, true);
+		QCoreApplication::processEvents();
+
+		// Initial load with adaptive_motion: 0.5 -> all 4 motion tuning rows enabled.
+		requireRowsEnabled(window, true, "loaded adaptive_motion: 0.5");
+
+		// Continuum controls exist and display 0.5.
+		auto* mode = window.findChild<QComboBox*>(QStringLiteral("config.vprenderer.adaptive_motion.mode"));
+		auto* strength = window.findChild<QDoubleSpinBox*>(QStringLiteral("config.vprenderer.adaptive_motion.strength"));
+		require(mode != nullptr, "S4-M1: missing config.vprenderer.adaptive_motion.mode QComboBox");
+		require(strength != nullptr, "S4-M1: missing config.vprenderer.adaptive_motion.strength QDoubleSpinBox");
+		require(!strength->isHidden() && strength->isEnabled(),
+			"S4-M1: adaptive_motion.strength must be visible and enabled for adaptive_motion: 0.5");
+		require(std::abs(strength->value() - 0.5) < 1e-4,
+			("S4-M1: expected adaptive_motion.strength == 0.5, got " + std::to_string(strength->value())).c_str());
+
+		// Change strength to 0.25 -> backing control updates, save & reload persists 0.25.
+		strength->setValue(0.25);
+		QCoreApplication::processEvents();
+		auto* backing = control<QWidget>(window, QStringLiteral("config.vprenderer.adaptive_motion"));
+		const QString backingStr = readBacking(backing);
+		bool okBacking = false;
+		const double backingVal = backingStr.toDouble(&okBacking);
+		require(okBacking && std::abs(backingVal - 0.25) < 1e-4,
+			("S4-M1: backing config.vprenderer.adaptive_motion did not reflect 0.25, got '" + backingStr.toStdString() + "'").c_str());
+		requireRowsEnabled(window, true, "strength 0.25");
+
+		save(window);
+		requireVpReads(path);
+		{
+			ConfigFile reloaded;
+			std::string stored;
+			require(reloaded.Load(path.toStdString(), ConfigFile::ReadPolicy::Fresh) &&
+				reloaded.TryGetString(DefaultProfile(path), "adaptive_motion", stored),
+				"S4-M1: adaptive_motion missing after save");
+			bool okStored = false;
+			const double storedVal = QString::fromStdString(stored).trimmed().toDouble(&okStored);
+			require(okStored && std::abs(storedVal - 0.25) < 1e-4,
+				("S4-M1: saved adaptive_motion expected 0.25, got '" + stored + "'").c_str());
+			const std::string fileText = FileText(path);
+			require(fileText.find("adaptive_motion: 0.25") != std::string::npos,
+				("S4-M1: saved file does not contain 'adaptive_motion: 0.25':\n" + fileText).c_str());
+		}
+
+		// Negative control: strength 0.0 (and mode "off") disables all 4 motion tuning rows.
+		if (strength->minimum() <= 0.0)
+		{
+			strength->setValue(0.0);
+			QCoreApplication::processEvents();
+			requireRowsEnabled(window, false, "negative control strength 0.0");
+		}
+		selectMode(mode, QStringLiteral("off"));
+		requireRowsEnabled(window, false, "negative control mode off");
+
+		// Re-enabling via mode "on" restores all 4 motion tuning rows.
+		selectMode(mode, QStringLiteral("on"));
+		requireRowsEnabled(window, true, "re-enabled mode on");
+
+		// Switching profiles updates enabled state cleanly: Cinema (off) -> disabled; Default -> enabled.
+		auto* profiles = control<QListWidget>(window, QStringLiteral("config.vprenderer.profiles"));
+		require(profiles->count() >= 2, "S4-M1: expected at least 2 rendering profiles");
+		profiles->setCurrentRow(1);
+		QCoreApplication::processEvents();
+		requireRowsEnabled(window, false, "profile switched to Cinema (adaptive_motion: off)");
+
+		profiles->setCurrentRow(0);
+		QCoreApplication::processEvents();
+		requireRowsEnabled(window, true, "profile switched back to Default");
+	}
+
+	// S4-L1: pipeline_slots_off / pipeline_order case-insensitive parsing, lowercase canonical storage,
+	// and exact-token matching (no substring false positives).
+	void testPipelineSlotsOffCaseInsensitiveAndExactTokens()
+	{
+		// 1. CalibrationLutHost::DisplayMappingStepsRun: mixed-case disable & substring negative controls.
+		require(!CalibrationLutHost::DisplayMappingStepsRun(false, "vp", false, true, "Colour.Appearance"),
+			"S4-L1: mixed-case 'Colour.Appearance' must disable appearance step");
+		require(CalibrationLutHost::DisplayMappingStepsRun(false, "vp", true, true, "Colour.Appearance"),
+			"S4-L1: disabling 'Colour.Appearance' must keep dv_trims step active");
+
+		require(!CalibrationLutHost::DisplayMappingStepsRun(false, "vp", true, false, "Colour.DM_Trims"),
+			"S4-L1: mixed-case 'Colour.DM_Trims' must disable dm_trims step");
+		require(CalibrationLutHost::DisplayMappingStepsRun(false, "vp", true, true, "Colour.DM_Trims"),
+			"S4-L1: disabling 'Colour.DM_Trims' must keep appearance step active");
+
+		require(!CalibrationLutHost::DisplayMappingStepsRun(false, "vp", true, true, "Colour.Appearance, Colour.DM_Trims"),
+			"S4-L1: mixed-case disabling both colour steps must return false");
+
+		// Negative control (substring trap): prefix/suffix lookalikes must NOT disable real slots.
+		require(CalibrationLutHost::DisplayMappingStepsRun(false, "vp", false, true, "colour.appearance_v2, my_colour.dm_trims_extra"),
+			"S4-L1 negative control: 'colour.appearance_v2' must NOT match 'colour.appearance'");
+		require(CalibrationLutHost::DisplayMappingStepsRun(false, "vp", true, false, "colour.appearance_v2, my_colour.dm_trims_extra"),
+			"S4-L1 negative control: 'my_colour.dm_trims_extra' must NOT match 'colour.dm_trims'");
+		require(CalibrationLutHost::DisplayMappingStepsRun(false, "vp", true, true, "colour.appearance_v2, my_colour.dm_trims_extra"),
+			"S4-L1 negative control: substring lookalikes must leave both colour steps active");
+
+		// 2. VpvSection expert pipeline_slots_off & pipeline_order inputs accept mixed case and store lowercase.
+		QTemporaryDir dir;
+		const QString path = WriteFixture(dir);
+		{
+			ConfigEditorWindow window(path, 0, true);
+			auto* slotsOff = control<QLineEdit>(window, Vpv::ObjectName("expert.pipeline_slots_off"));
+			auto* slotsStatus = control<QLabel>(window, Vpv::ObjectName("expert.pipeline_slots_off.status"));
+			auto* order = control<QLineEdit>(window, Vpv::ObjectName("expert.pipeline_order"));
+			auto* orderStatus = control<QLabel>(window, Vpv::ObjectName("expert.pipeline_order.status"));
+
+			// Negative control: unknown lookalike must still be rejected.
+			slotsOff->setText(QStringLiteral("Colour.Appearance_v2"));
+			QMetaObject::invokeMethod(slotsOff, "editingFinished", Qt::DirectConnection);
+			require(slotsStatus->text().startsWith(QStringLiteral("Not saved:")),
+				("S4-L1 negative control: unknown 'Colour.Appearance_v2' must be rejected, got: " +
+					slotsStatus->text().toStdString()).c_str());
+
+			// Valid mixed-case entries must be accepted without error/unknown.
+			slotsOff->setText(QStringLiteral("Colour.Appearance"));
+			QMetaObject::invokeMethod(slotsOff, "editingFinished", Qt::DirectConnection);
+			require(!slotsStatus->text().contains(QStringLiteral("unknown"), Qt::CaseInsensitive) &&
+				!slotsStatus->text().startsWith(QStringLiteral("Not saved:")),
+				("S4-L1: mixed-case 'Colour.Appearance' rejected: " + slotsStatus->text().toStdString()).c_str());
+
+			order->setText(QStringLiteral("Repair.Encoding"));
+			QMetaObject::invokeMethod(order, "editingFinished", Qt::DirectConnection);
+			require(!orderStatus->text().contains(QStringLiteral("unknown"), Qt::CaseInsensitive) &&
+				!orderStatus->text().startsWith(QStringLiteral("Not saved:")),
+				("S4-L1: mixed-case 'Repair.Encoding' rejected: " + orderStatus->text().toStdString()).c_str());
+
+			save(window);
+		}
+		ConfigFile saved;
+		std::string v;
+		require(saved.Load(path.toStdString(), ConfigFile::ReadPolicy::Fresh), "S4-L1: reload saved config");
+		require(saved.TryGetString("vpv", "pipeline_slots_off", v) && v == "colour.appearance",
+			("S4-L1: expected saved pipeline_slots_off == 'colour.appearance', got '" + v + "'").c_str());
+		require(saved.TryGetString("vpv", "pipeline_order", v) && v == "repair.encoding",
+			("S4-L1: expected saved pipeline_order == 'repair.encoding', got '" + v + "'").c_str());
+		requireVpReads(path);
+	}
+
+	// S4-L2: appearance status label evaluates appearance / appearance_screen_white_measured / ambient_adapt
+	// case-insensitively (e.g. ON / On).
+	void testAppearanceStatusCaseInsensitive()
+	{
+		// Mixed-case ON / On must report the active appearance status line (NOT the off line).
+		{
+			QTemporaryDir dir;
+			const QString path = WriteFixture(dir,
+				"[vprenderer]\nappearance: ON\nappearance_screen_white_measured: On\nambient_adapt: ON\n"
+				"[queue]\ntarget_latency_ms: 250\n");
+			ConfigEditorWindow window(path, 0, true);
+			auto* body = control<QWidget>(window, Vpv::ObjectName("colour.card.appearance.body"));
+			auto* status = body->findChild<QLabel*>(Vpv::ObjectName("colour.appearance.status"));
+			require(status != nullptr, "S4-L2: missing appearance status QLabel inside vpv.colour.card.appearance.body");
+			const QString expected = QString::fromStdString(AppearanceStatus::ConfigLine(true, true, true));
+			const QString offLine = QString::fromStdString(AppearanceStatus::ConfigLine(false, false, false));
+			require(status->text() != offLine && status->text() == expected,
+				("S4-L2: expected '" + expected.toStdString() + "', got '" + status->text().toStdString() + "'").c_str());
+		}
+
+		// Negative control: appearance: off must report ConfigLine(false, ...).
+		{
+			QTemporaryDir dir;
+			const QString path = WriteFixture(dir,
+				"[vprenderer]\nappearance: off\nappearance_screen_white_measured: On\nambient_adapt: ON\n"
+				"[queue]\ntarget_latency_ms: 250\n");
+			ConfigEditorWindow window(path, 0, true);
+			auto* body = control<QWidget>(window, Vpv::ObjectName("colour.card.appearance.body"));
+			auto* status = body->findChild<QLabel*>(Vpv::ObjectName("colour.appearance.status"));
+			require(status != nullptr, "S4-L2 negative control: missing appearance status QLabel");
+			const QString expectedOff = QString::fromStdString(AppearanceStatus::ConfigLine(false, true, true));
+			require(status->text() == expectedOff,
+				("S4-L2 negative control: expected '" + expectedOff.toStdString() + "', got '" +
+					status->text().toStdString() + "'").c_str());
+		}
+	}
+
+	// Migrations & UTF-8 hygiene: migrateLegacyQueueOwnership preserves surrounding UTF-8 bytes and folds
+	// legacy keys cleanly, and migrateRefreshKeys triggers a migration backup (.bak) of the original file.
+	void testLegacyQueueMigrationPreservesUtf8()
+	{
+		// 1. Legacy queue ownership migration alongside non-ASCII UTF-8 config content.
+		{
+			QTemporaryDir dir;
+			const QByteArray utf8Note = QByteArray("Caf\xC3\xA9_\xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\x9E");
+			const QByteArray fixture =
+				QByteArray("# UTF-8 note: ") + utf8Note + QByteArray("\n"
+				"[general]\nrenderer: VP Renderer\n"
+				"[queue_recovery]\nreset_after_render_restart_seconds: 9\nreset_queue_too_large_percent: 120\n"
+				"[queue.Normal]\nqueue_size: 32\nsteady_reserve_frames: 4\n"
+				"[vprenderer]\ndv_compare_capture_folder: C:/captures/") + utf8Note + QByteArray("\n");
+			const QString path = dir.filePath(QStringLiteral("VideoProcessor.cfg"));
+			{
+				QFile f(path);
+				require(f.open(QIODevice::WriteOnly | QIODevice::Truncate), "UTF-8 queue migration: cannot write fixture");
+				require(f.write(fixture) == fixture.size(), "UTF-8 queue migration: short fixture write");
+			}
+			{
+				ConfigEditorWindow window(path, 0, true);
+				save(window);
+			}
+			QFile savedFile(path);
+			require(savedFile.open(QIODevice::ReadOnly), "UTF-8 queue migration: cannot read saved file");
+			const QByteArray savedBytes = savedFile.readAll().replace("\r\n", "\n");
+			require(savedBytes.contains(QByteArray("# UTF-8 note: ") + utf8Note),
+				"UTF-8 queue migration: UTF-8 comment bytes were corrupted");
+			require(savedBytes.contains(QByteArray("dv_compare_capture_folder: C:/captures/") + utf8Note),
+				"UTF-8 queue migration: UTF-8 path value bytes were corrupted");
+			require(savedBytes.contains("reset_after_render_restart_seconds: 9") &&
+				savedBytes.contains("reset_queue_too_large_percent: 120") &&
+				savedBytes.contains("target_frames: 4") &&
+				!savedBytes.contains("steady_reserve_frames"),
+				"UTF-8 queue migration: legacy queue keys did not migrate into [queue.Normal]");
+		}
+
+		// 2. migrateRefreshKeys must produce a migration backup (.before-config-migration.*.bak)
+		//    holding the original un-migrated bytes when the config existed at load.
+		{
+			QTemporaryDir dir;
+			const char* original = "[general]\nrenderer: VP Renderer\n[ppm_correction]\n59: 12\n60: 3\n";
+			const QString path = WriteFixture(dir, original);
+			{
+				ConfigEditorWindow window(path, 0, true);
+				save(window);
+			}
+			const QStringList backups = QDir(dir.path()).entryList(
+				{ QStringLiteral("VideoProcessor.cfg.before-config-migration.*.bak") }, QDir::Files);
+			require(!backups.isEmpty(),
+				"migrateRefreshKeys: saving a refresh-key migration did not create a .before-config-migration.*.bak backup");
+			QFile backupFile(dir.filePath(backups.front()));
+			require(backupFile.open(QIODevice::ReadOnly), "migrateRefreshKeys: cannot read migration backup");
+			const QByteArray backupBytes = backupFile.readAll().replace("\r\n", "\n");
+			require(backupBytes.contains("59: 12") && !backupBytes.contains("59.94: 12"),
+				"migrateRefreshKeys: migration backup does not contain the original pre-migration bytes");
+		}
+	}
+
+	// GEM-040 Option A regression: managed upstream controls on Bill's Rendering page stay disabled
+	// across Rendering profile switches (via ManagedBillGrey::OnBillField without setting derivedSetting,
+	// preserving save-time freeze) and restore cleanly when switching to the Original pathway.
+	void testManagedWidgetsStayDisabledAcrossProfileSwitch()
+	{
+		Vpv::RegisterConfigProviders();
+		QTemporaryDir dir;
+		const QString path = WriteFixture(dir,
+			"[vprenderer]\nsdr_target_nits: 100\n"
+			"[vprenderer.Cinema]\nquality: high\n"
+			"[queue]\ntarget_latency_ms: 250\n");
+
+		ConfigEditorWindow window(path, 0, true);
+		QCoreApplication::processEvents();
+
+		static const char* kManagedNames[] = {
+			"config.vprenderer.adaptive_upscale",
+			"config.vprenderer.low_bitrate_handling",
+			"config.vprenderer.capture_path",
+		};
+		auto checkManagedState = [&](bool expectManaged, const char* phase)
+		{
+			for (const char* name : kManagedNames)
+			{
+				auto* w = control<QWidget>(window, QString::fromLatin1(name));
+				require(!w->property("derivedSetting").toBool(),
+					(std::string("GEM-040 (") + phase + "): " + name +
+						" must keep derivedSetting == false (preserves save-time freeze)").c_str());
+				if (expectManaged)
+				{
+					require(!w->isEnabled() && w->property("vpvManaged").toBool() &&
+						w->toolTip().startsWith(QStringLiteral("Managed by VP-V")),
+						(std::string("GEM-040 (") + phase + "): " + name +
+							" must remain disabled and marked Managed by VP-V").c_str());
+				}
+				else
+				{
+					require(w->isEnabled() && !w->property("vpvManaged").toBool(),
+						(std::string("GEM-040 (") + phase + "): " + name +
+							" must restore enabled with vpvManaged == false on Original pathway").c_str());
+				}
+			}
+		};
+
+		// Initial VP-V pathway load (Default profile).
+		checkManagedState(true, "initial VP-V Default");
+
+		// Switch Bill's Rendering profile list to row 1 (Cinema): managed widgets must stay disabled.
+		auto* profiles = control<QListWidget>(window, QStringLiteral("config.vprenderer.profiles"));
+		require(profiles->count() >= 2, "GEM-040: expected at least 2 rendering profiles");
+		profiles->setCurrentRow(1);
+		QCoreApplication::processEvents();
+		checkManagedState(true, "VP-V Cinema profile");
+
+		// Switch pathway to Original (index 1): managed widgets must restore enabled without derivedSetting.
+		auto* pathway = control<QComboBox>(window, Vpv::ObjectName("pathway"));
+		pathway->setCurrentIndex(1);
+		QCoreApplication::processEvents();
+		checkManagedState(false, "Original pathway on Cinema");
+
+		// Round-trip back to VP-V (index 0) and Default profile (row 0): managed greying re-engages without derivedSetting.
+		pathway->setCurrentIndex(0);
+		QCoreApplication::processEvents();
+		profiles->setCurrentRow(0);
+		QCoreApplication::processEvents();
+		checkManagedState(true, "back to VP-V Default");
 	}
 }
 
@@ -4202,5 +4732,10 @@ int RunVpvConfigTests(const std::function<int(const char*, const std::function<v
 	failures += run("VP-V: D3 refresh timers survive transient detach and re-attach without firing while hidden", testD3RefreshTimersSurviveTransientDetachWithoutFiringWhileHidden);
 	failures += run("VP-V: D4-D5 stylesheet cascade priority and zero per-widget VP-V styles", testD4D5StylesheetCascadePriorityAndZeroPerWidgetVpvStyles);
 	failures += run("VP-V: Item 5 hidden VP-V combo popups coalesce events and sync on show", testItem5HiddenVpvComboPopupsCoalesceEventsAndSyncOnShow);
+	failures += run("VP-V: S4-M1 adaptive_motion continuum control and motion row greying", testAdaptiveMotionContinuumAndGreying);
+	failures += run("VP-V: S4-L1 pipeline_slots_off and pipeline_order case-insensitive exact tokens", testPipelineSlotsOffCaseInsensitiveAndExactTokens);
+	failures += run("VP-V: S4-L2 appearance status case-insensitive evaluation", testAppearanceStatusCaseInsensitive);
+	failures += run("VP-V: legacy queue and refresh-key migrations preserve UTF-8 and backup", testLegacyQueueMigrationPreservesUtf8);
+	failures += run("VP-V: managed upstream controls stay disabled across profile switch without derivedSetting (GEM-040)", testManagedWidgetsStayDisabledAcrossProfileSwitch);
 	return failures;
 }
