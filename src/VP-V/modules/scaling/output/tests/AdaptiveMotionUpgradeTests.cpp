@@ -2519,5 +2519,446 @@ namespace VideoProcessorTest
 			rig.fixture.CaptureLog(nullptr);
 			AssertCleanLibplaceboLog(log);
 		}
+
+		// S4-H1 (WARP GPU): Cadence repeat / de-judder extra presentations of the same source frame (seq = 1)
+		// after ClearMotion() / ClearGrainField() (the exact behaviour of AdaptiveDownscaleStage::Register() when
+		// host.motion().live == false on a repeat/extra) MUST preserve BOTH the built map's sourceCrop (including
+		// non-zero origin) AND its valid NlsMaskMapping::Mapping so neither motion_map nor grain_map collapses to
+		// top-left (0, 0) or drops NLS on repeat presentations (zero strobing).
+		BEGIN_TEST_METHOD_ATTRIBUTE(RepeatFramePreservesMotionAndGrainMapCropAndNls)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(RepeatFramePreservesMotionAndGrainMapCropAndNls)
+		{
+			using namespace AdaptiveMotionUpgradeDetail;
+			WarpRig rig;
+			Assert::IsTrue(rig.Create(), L"Could not create WARP GPU test device");
+			std::string log;
+			rig.fixture.CaptureLog(&log);
+
+			pl_tex trust = rig.Trust(1.0f);
+			auto knownCut = [](uint64_t, uint64_t) {
+				AdaptiveDownscale::CutVerdict v;
+				v.state = AdaptiveDownscale::CutVerdict::State::Known;
+				return v;
+			};
+			auto maxRgbDiff = [](const std::vector<float>& a, const std::vector<float>& b,
+				int w, int x0, int x1, int y0, int y1) -> float
+			{
+				float worst = 0.0f;
+				for (int y = y0; y < y1; ++y)
+					for (int x = x0; x < x1; ++x)
+					{
+						const size_t idx = (static_cast<size_t>(y) * static_cast<size_t>(w) + static_cast<size_t>(x)) * 4;
+						for (int c = 0; c < 3; ++c)
+							worst = (std::max)(worst, std::fabs(a[idx + c] - b[idx + c]));
+					}
+				return worst;
+			};
+
+			// Proven valid NLS mapping: u = 0.75 maps to u_nls = 0.8125 (2 full 16-px blocks right of linear UV on a 512-px source).
+			const std::map<std::string, std::string> nlsParams = {
+				{ "curve", "2.0" }, { "geometry", "0" }, { "center_protection", "0.0" }, { "strength", "1.0" }
+			};
+			const NlsMaskMapping::Mapping validNls = NlsMaskMapping::FromParameters(nlsParams, 1.5, false, false);
+			Assert::IsTrue(validNls.valid && std::fabs(validNls.xScale - 1.5) < 1e-6,
+				L"valid NLS mapping precondition");
+			Assert::AreEqual(0.8125,
+				NlsMaskMapping::MapCoordinate(0.75, validNls.xScale, validNls.curve, validNls.geometry, validNls.xProtect), 1e-6,
+				L"NLS coordinate mapping precondition at u=0.75");
+
+			// -----------------------------------------------------------------------------------------
+			// 1A. Motion Map Repeat-Frame Parity (spatially distinct halves + non-zero-origin crop)
+			// -----------------------------------------------------------------------------------------
+			{
+				const int sw = 128, sh = 64, ow = 192, oh = 96;
+				// 10x6 block full-frame motion field (160x96 px) with non-zero active sourceCrop {16, 16, 144, 80}:
+				//   - bx = 0..3 (incl. top-left (0,0) and crop left half bx=1..3): static (0, 0), conf=1 -> motionMap.r = 1.0 (sharp)
+				//   - bx = 4: shear boundary adjacent to bx=5 -> motionMap.r = 0.0
+				//   - bx = 5..9 (crop right half bx=5..8): fast moving (24, 0), conf=1 (9.0 heights/s >> 4*0.4) -> motionMap.r = 0.0 (alias-safe)
+				const int bw = 10, bh = 6;
+				const pl_rect2df activeCrop = { 16.0f, 16.0f, 144.0f, 80.0f };
+				pl_tex src = rig.TexturedUnorm16(sw, sh);
+				pl_tex cleanGrain = rig.Field(sw / 16, sh / 16, [](int, int, float* c) { c[0] = 0.0f; });
+				pl_tex splitMotion = rig.Field(bw, bh, [](int x, int, float* c) {
+					c[0] = (x >= 5) ? 24.0f : 0.0f;
+					c[1] = 0.0f;
+					c[2] = 1.0f;
+					c[3] = 0.0f;
+				});
+				pl_tex staticOnlyMotion = rig.Field(bw, bh, [](int, int, float* c) {
+					c[0] = 0.0f; c[1] = 0.0f; c[2] = 1.0f; c[3] = 0.0f;
+				});
+
+				AdaptiveDownscale::Settings st;
+				st.float32Picture = true;
+				st.faithfulOrtho = false;
+				st.cnnResidualStabilise = false;
+				st.ssimResidualStabilise = false;
+				st.grainMap = false;
+				st.edgeLo = 1.0e6f; st.edgeHi = 2.0e6f;
+				st.motionSpeedLo = 0.10f; st.motionSpeedHi = 0.40f;
+				st.motionFloor = 0.0f;
+				SetMotionStrength(st, 1.0f);
+
+				AdaptiveDownscale::Upscale up;
+				up.on = true; up.wBase = 1.0f;
+				up.nativeWidth = static_cast<float>(sw); up.nativeHeight = static_cast<float>(sh);
+
+				AdaptiveDownscale::GrainLevelSource gl;
+				gl.level = cleanGrain;
+				gl.sourceCrop = { 0.0f, 0.0f, static_cast<float>(sw), static_cast<float>(sh) };
+
+				// Static-only reference (exact same weight that EVERY pixel receives if mw_crop collapses to {0,0,0,0} -> (0,0)).
+				std::vector<float> staticOnlyOut;
+				{
+					AdaptiveDownscale::Module refMod;
+					refMod.SetCutSource(knownCut);
+					refMod.SetFrame(st, 1, 1.0f / 24.0f);
+					refMod.SetUpscale(up);
+					refMod.SetGrainLevel(gl);
+					AdaptiveDownscale::Motion mRef;
+					mRef.field = staticOnlyMotion; mRef.frameTrust = trust;
+					mRef.sourceCrop = activeCrop;
+					refMod.SetMotion(mRef);
+					staticOnlyOut = rig.RenderFloat32(src, ow, oh, { refMod.Measure(), refMod.Blend() }, &pl_filter_bilinear);
+					Assert::IsTrue(refMod.Active() && refMod.Failures() == 0 &&
+						refMod.LastMotionState() == AdaptiveDownscale::MotionState::Used);
+					refMod.Release();
+				}
+
+				AdaptiveDownscale::Module module;
+				module.SetCutSource(knownCut);
+				// Presentation 1: live motion field with active non-zero-origin crop.
+				module.SetFrame(st, 1, 1.0f / 24.0f);
+				module.SetUpscale(up);
+				module.SetGrainLevel(gl);
+				AdaptiveDownscale::Motion m;
+				m.field = splitMotion; m.frameTrust = trust;
+				m.sourceCrop = activeCrop;
+				module.SetMotion(m);
+				const std::vector<float> firstOut = rig.RenderFloat32(src, ow, oh, { module.Measure(), module.Blend() }, &pl_filter_bilinear);
+				Assert::IsTrue(module.Active() && module.Failures() == 0 &&
+					module.LastMotionState() == AdaptiveDownscale::MotionState::Used && !module.MotionFloorUsed(),
+					L"S4-H1 (1A): presentation 1 must build and use the motion map");
+
+				// Presentation 2: cadence repeat / de-judder extra of the exact same source frame (seq = 1) after ClearMotion().
+				module.SetFrame(st, 1, 1.0f / 24.0f);
+				module.SetUpscale(up);
+				module.SetGrainLevel(gl);
+				module.ClearMotion();
+				const std::vector<float> repeatOut = rig.RenderFloat32(src, ow, oh, { module.Measure(), module.Blend() }, &pl_filter_bilinear);
+				Assert::IsTrue(module.Active() && module.Failures() == 0 &&
+					module.LastMotionState() == AdaptiveDownscale::MotionState::Used && !module.MotionFloorUsed(),
+					L"S4-H1 (1A): repeat presentation of seq=1 after ClearMotion() must keep MotionState::Used");
+				module.Release();
+
+				// Mandatory same-input negative control: static left half matches staticOnlyOut, while fast-moving right half
+				// strongly diverges from staticOnlyOut (> 0.02), proving that collapsing mw_crop to {0,0,0,0} (sampling (0,0) = static)
+				// causes a massive visible strobe on the right half!
+				const float leftVsStatic = maxRgbDiff(firstOut, staticOnlyOut, ow, 10, 56, 10, oh - 10);
+				const float rightVsStatic = maxRgbDiff(firstOut, staticOnlyOut, ow, 116, ow - 10, 10, oh - 10);
+				Assert::IsTrue(leftVsStatic <= 1e-5f,
+					(L"S4-H1 (1A) precondition: static left half must match staticOnlyOut, diff=" + std::to_wstring(leftVsStatic)).c_str());
+				Assert::IsTrue(rightVsStatic > 0.02f,
+					(L"S4-H1 (1A) negative control: moving right half must diverge strongly from staticOnlyOut (>0.02), diff=" +
+						std::to_wstring(rightVsStatic)).c_str());
+
+				// Positive repeat-frame parity across static left half, moving right half, AND full frame (catches origin loss at boundary!).
+				const float leftRepeatDiff = maxRgbDiff(repeatOut, firstOut, ow, 10, 56, 10, oh - 10);
+				const float rightRepeatDiff = maxRgbDiff(repeatOut, firstOut, ow, 116, ow - 10, 10, oh - 10);
+				const float fullRepeatDiff = maxRgbDiff(repeatOut, firstOut, ow, 0, ow, 0, oh);
+				Assert::IsTrue(leftRepeatDiff <= 1e-5f,
+					(L"S4-H1 (1A): repeat frame static left half diverged from first presentation, diff=" + std::to_wstring(leftRepeatDiff)).c_str());
+				Assert::IsTrue(rightRepeatDiff <= 1e-5f,
+					(L"S4-H1 (1A): repeat frame fast-moving right half strobed (mw_crop lost on ClearMotion), diff=" + std::to_wstring(rightRepeatDiff)).c_str());
+				Assert::IsTrue(fullRepeatDiff <= 1e-5f,
+					(L"S4-H1 (1A): repeat frame full-frame parity failed (crop origin/extent drift), diff=" + std::to_wstring(fullRepeatDiff)).c_str());
+			}
+
+			// -----------------------------------------------------------------------------------------
+			// 1B. Motion Map Repeat-Frame Parity under Active Valid NLS (catches caching crop without NLS!)
+			// -----------------------------------------------------------------------------------------
+			{
+				const int sw = 512, sh = 64, bw = sw / 16, bh = sh / 16, ow = 768, oh = 96;
+				pl_tex src = rig.TexturedUnorm16(sw, sh);
+				pl_tex cleanGrain = rig.Field(bw, bh, [](int, int, float* c) { c[0] = 0.0f; });
+				// Untrusted/alias-safe (0.0) ONLY at NLS-mapped blocks bx = 25..26 (u_nls = 0.8125 from u = 0.75 -> x_out = 576);
+				// sharp (1.0) everywhere else including top-left (0,0) and linear u=0.75 blocks bx = 23..24!
+				pl_tex nlsMotion = rig.Field(bw, bh, [](int x, int, float* c) {
+					c[0] = 0.0f; c[1] = 0.0f; c[2] = (x == 25 || x == 26) ? 0.0f : 1.0f; c[3] = 0.0f;
+				});
+
+				AdaptiveDownscale::Settings st;
+				st.float32Picture = true;
+				st.faithfulOrtho = false;
+				st.cnnResidualStabilise = false;
+				st.ssimResidualStabilise = false;
+				st.grainMap = false;
+				st.edgeLo = 1.0e6f; st.edgeHi = 2.0e6f;
+				st.motionFloor = 0.0f;
+				SetMotionStrength(st, 1.0f);
+
+				AdaptiveDownscale::Upscale up;
+				up.on = true; up.wBase = 1.0f;
+				up.nativeWidth = static_cast<float>(sw); up.nativeHeight = static_cast<float>(sh);
+
+				AdaptiveDownscale::GrainLevelSource gl;
+				gl.level = cleanGrain;
+				gl.sourceCrop = { 0.0f, 0.0f, static_cast<float>(sw), static_cast<float>(sh) };
+				gl.nls = validNls;
+
+				// Same-input negative control without NLS (linear UV): at x_out=576 (u=0.75) reads linear blocks 23..24 (sharp 1.0).
+				std::vector<float> linearMotionOut;
+				{
+					AdaptiveDownscale::Module linMod;
+					linMod.SetCutSource(knownCut);
+					linMod.SetFrame(st, 1, 1.0f / 24.0f);
+					linMod.SetUpscale(up);
+					linMod.SetGrainLevel(gl);
+					AdaptiveDownscale::Motion mLin;
+					mLin.field = nlsMotion; mLin.frameTrust = trust;
+					mLin.sourceCrop = { 0.0f, 0.0f, static_cast<float>(sw), static_cast<float>(sh) };
+					linMod.SetMotion(mLin);
+					linearMotionOut = rig.RenderFloat32(src, ow, oh, { linMod.Measure(), linMod.Blend() }, &pl_filter_bilinear);
+					Assert::IsTrue(linMod.Active() && linMod.Failures() == 0);
+					linMod.Release();
+				}
+
+				AdaptiveDownscale::Module module;
+				module.SetCutSource(knownCut);
+				// Presentation 1: valid NLS on motion map.
+				module.SetFrame(st, 1, 1.0f / 24.0f);
+				module.SetUpscale(up);
+				module.SetGrainLevel(gl);
+				AdaptiveDownscale::Motion mNls;
+				mNls.field = nlsMotion; mNls.frameTrust = trust;
+				mNls.sourceCrop = { 0.0f, 0.0f, static_cast<float>(sw), static_cast<float>(sh) };
+				mNls.nls = validNls;
+				module.SetMotion(mNls);
+				const std::vector<float> nlsFirstOut = rig.RenderFloat32(src, ow, oh, { module.Measure(), module.Blend() }, &pl_filter_bilinear);
+				Assert::IsTrue(module.Active() && module.Failures() == 0 &&
+					module.LastMotionState() == AdaptiveDownscale::MotionState::Used && !module.MotionFloorUsed(),
+					L"S4-H1 (1B): NLS motion presentation 1 must use motion map");
+
+				// Presentation 2: repeat seq = 1 after ClearMotion().
+				module.SetFrame(st, 1, 1.0f / 24.0f);
+				module.SetUpscale(up);
+				module.SetGrainLevel(gl);
+				module.ClearMotion();
+				const std::vector<float> nlsRepeatOut = rig.RenderFloat32(src, ow, oh, { module.Measure(), module.Blend() }, &pl_filter_bilinear);
+				Assert::IsTrue(module.Active() && module.Failures() == 0 &&
+					module.LastMotionState() == AdaptiveDownscale::MotionState::Used && !module.MotionFloorUsed(),
+					L"S4-H1 (1B): NLS motion repeat presentation must keep MotionState::Used");
+				module.Release();
+
+				// Negative control: valid NLS actively shifts x_out in [568, 584) onto blocks 25..26 (large diff vs linear UV).
+				const float nlsVsLinear = maxRgbDiff(nlsFirstOut, linearMotionOut, ow, 568, 584, 12, oh - 12);
+				Assert::IsTrue(nlsVsLinear > 0.02f,
+					(L"S4-H1 (1B) negative control: valid NLS must diverge strongly from linear UV at x_out=576 (>0.02), diff=" +
+						std::to_wstring(nlsVsLinear)).c_str());
+
+				// Positive repeat-frame parity: ClearMotion() must preserve BOTH crop AND valid NLS on repeat!
+				const float nlsBandRepeat = maxRgbDiff(nlsRepeatOut, nlsFirstOut, ow, 568, 584, 12, oh - 12);
+				const float nlsFullRepeat = maxRgbDiff(nlsRepeatOut, nlsFirstOut, ow, 0, ow, 0, oh);
+				Assert::IsTrue(nlsBandRepeat <= 1e-5f,
+					(L"S4-H1 (1B): repeat frame dropped motion.nls mapping at x_out=576, diff=" + std::to_wstring(nlsBandRepeat)).c_str());
+				Assert::IsTrue(nlsFullRepeat <= 1e-5f,
+					(L"S4-H1 (1B): repeat frame full-frame NLS motion parity failed, diff=" + std::to_wstring(nlsFullRepeat)).c_str());
+			}
+
+			// -----------------------------------------------------------------------------------------
+			// 2A. Grain Map Repeat-Frame Parity (downscale form with grainMap = true + non-zero-origin crop)
+			// -----------------------------------------------------------------------------------------
+			{
+				const int sw = 256, sh = 128, ow = 160, oh = 80;
+				// 18x10 block full-frame grain field (288x160 px) with non-zero active sourceCrop {16, 16, 272, 144}:
+				//   - bx = 0..8 (incl. top-left (0,0) and crop left half bx=1..8): clean ge.r = 0.0 -> grain_scale = 1.0 (sharp)
+				//   - bx = 9..17 (crop right half bx=9..16): heavy grain ge.r = 20.0 -> grain_scale = grainFloor = 0.0 (faithful)
+				const int bw = 18, bh = 10;
+				const pl_rect2df activeCrop = { 16.0f, 16.0f, 272.0f, 144.0f };
+				pl_tex src = rig.TexturedUnorm16(sw, sh);
+				pl_tex trustedField = rig.Field(bw, bh, [](int, int, float* c) {
+					c[0] = 0.0f; c[1] = 0.0f; c[2] = 1.0f; c[3] = 0.0f;
+				});
+				pl_tex splitGrainErr = rig.Field(bw, bh, [](int x, int, float* c) {
+					c[0] = (x >= 9) ? 20.0f : 0.0f;
+					c[1] = 127.5f;   // mid-grey luma -> shadow weight = 1.0
+					c[2] = 0.0f;
+					c[3] = 0.0f;
+				});
+				pl_tex cleanGrainErr = rig.Field(bw, bh, [](int, int, float* c) {
+					c[0] = 0.0f; c[1] = 127.5f; c[2] = 0.0f; c[3] = 0.0f;
+				});
+
+				AdaptiveDownscale::Settings st;
+				st.float32Picture = true;
+				st.faithfulOrtho = false;
+				st.wBase = 1.0f;
+				st.grainMap = true;
+				st.grainFloor = 0.0f;
+				st.grainLo = 2.0f; st.grainHi = 8.0f;
+				st.edgeLo = 1.0e6f; st.edgeHi = 2.0e6f;
+				st.cnnResidualStabilise = false;
+				st.ssimResidualStabilise = false;
+				SetMotionStrength(st, 0.0f);
+
+				// Clean-only reference (exact same weight EVERY pixel receives if grain crop collapses to {0,0,0,0} -> (0,0)).
+				std::vector<float> cleanOnlyOut;
+				{
+					AdaptiveDownscale::Module refMod;
+					refMod.SetCutSource(knownCut);
+					refMod.SetFrame(st, 1, 1.0f / 24.0f);
+					refMod.SetSourceDownscales(true);
+					AdaptiveDownscale::GrainField gfRef;
+					gfRef.error = cleanGrainErr; gfRef.field = trustedField; gfRef.frameTrust = trust;
+					gfRef.sourceCrop = activeCrop;
+					refMod.SetGrainField(gfRef);
+					cleanOnlyOut = rig.RenderFloat32(src, ow, oh, { refMod.Measure(), refMod.Blend() }, &pl_filter_bilinear);
+					Assert::IsTrue(refMod.Active() && refMod.Failures() == 0 &&
+						refMod.LastMapState() == AdaptiveDownscale::MapState::Used);
+					refMod.Release();
+				}
+
+				AdaptiveDownscale::Module module;
+				module.SetCutSource(knownCut);
+				// Presentation 1: live grainField with active non-zero-origin crop.
+				module.SetFrame(st, 1, 1.0f / 24.0f);
+				module.SetSourceDownscales(true);
+				AdaptiveDownscale::GrainField gf;
+				gf.error = splitGrainErr; gf.field = trustedField; gf.frameTrust = trust;
+				gf.sourceCrop = activeCrop;
+				module.SetGrainField(gf);
+				const std::vector<float> firstGrainOut = rig.RenderFloat32(src, ow, oh, { module.Measure(), module.Blend() }, &pl_filter_bilinear);
+				Assert::IsTrue(module.Active() && module.Failures() == 0 &&
+					module.LastMapState() == AdaptiveDownscale::MapState::Used,
+					L"S4-H1 (2A): downscale grain presentation 1 must use grain map");
+
+				// Presentation 2: repeat seq = 1 after ClearGrainField().
+				module.SetFrame(st, 1, 1.0f / 24.0f);
+				module.SetSourceDownscales(true);
+				module.ClearGrainField();
+				const std::vector<float> repeatGrainOut = rig.RenderFloat32(src, ow, oh, { module.Measure(), module.Blend() }, &pl_filter_bilinear);
+				Assert::IsTrue(module.Active() && module.Failures() == 0 &&
+					module.LastMapState() == AdaptiveDownscale::MapState::Used,
+					L"S4-H1 (2A): downscale repeat presentation of seq=1 after ClearGrainField() must keep MapState::Used");
+				module.Release();
+
+				// Mandatory same-input negative control: clean left half matches cleanOnlyOut while heavy-grain right half
+				// strongly diverges from cleanOnlyOut (> 0.02), proving spatial grain-map modulation is non-vacuous and that
+				// collapsing crop to {0,0,0,0} (sampling clean (0,0)) causes a large visible strobe on the right half!
+				const float grainLeftVsClean = maxRgbDiff(firstGrainOut, cleanOnlyOut, ow, 12, 68, 10, oh - 10);
+				const float grainRightVsClean = maxRgbDiff(firstGrainOut, cleanOnlyOut, ow, 92, ow - 12, 10, oh - 10);
+				Assert::IsTrue(grainLeftVsClean <= 1e-5f,
+					(L"S4-H1 (2A) precondition: clean left half must match cleanOnlyOut, diff=" + std::to_wstring(grainLeftVsClean)).c_str());
+				Assert::IsTrue(grainRightVsClean > 0.02f,
+					(L"S4-H1 (2A) negative control: heavy-grain right half must diverge strongly from cleanOnlyOut (>0.02), diff=" +
+						std::to_wstring(grainRightVsClean)).c_str());
+
+				// Positive repeat-frame parity across clean left half, heavy-grain right half, AND full frame.
+				const float grainLeftRepeat = maxRgbDiff(repeatGrainOut, firstGrainOut, ow, 12, 68, 10, oh - 10);
+				const float grainRightRepeat = maxRgbDiff(repeatGrainOut, firstGrainOut, ow, 92, ow - 12, 10, oh - 10);
+				const float grainFullRepeat = maxRgbDiff(repeatGrainOut, firstGrainOut, ow, 0, ow, 0, oh);
+				Assert::IsTrue(grainLeftRepeat <= 1e-5f,
+					(L"S4-H1 (2A): repeat frame clean left half diverged, diff=" + std::to_wstring(grainLeftRepeat)).c_str());
+				Assert::IsTrue(grainRightRepeat <= 1e-5f,
+					(L"S4-H1 (2A): repeat frame heavy-grain right half strobed (grainField.sourceCrop lost on ClearGrainField), diff=" +
+						std::to_wstring(grainRightRepeat)).c_str());
+				Assert::IsTrue(grainFullRepeat <= 1e-5f,
+					(L"S4-H1 (2A): repeat frame full-frame grain map parity failed (crop origin/extent drift), diff=" +
+						std::to_wstring(grainFullRepeat)).c_str());
+			}
+
+			// -----------------------------------------------------------------------------------------
+			// 2B. Grain Map Repeat-Frame Parity under Active Valid NLS (catches caching crop without NLS!)
+			// -----------------------------------------------------------------------------------------
+			{
+				const int sw = 512, sh = 128, bw = sw / 16, bh = sh / 16, ow = 320, oh = 80;
+				pl_tex src = rig.TexturedUnorm16(sw, sh);
+				pl_tex trustedField = rig.Field(bw, bh, [](int, int, float* c) {
+					c[0] = 0.0f; c[1] = 0.0f; c[2] = 1.0f; c[3] = 0.0f;
+				});
+				// Heavy grain ONLY at NLS-mapped blocks bx = 25..26 (u_nls = 0.8125 from u = 0.75 -> x_out = 240);
+				// clean everywhere else including top-left (0,0) and linear u=0.75 blocks bx = 23..24!
+				pl_tex nlsGrainErr = rig.Field(bw, bh, [](int x, int, float* c) {
+					c[0] = (x == 25 || x == 26) ? 20.0f : 0.0f;
+					c[1] = 127.5f;
+					c[2] = 0.0f;
+					c[3] = 0.0f;
+				});
+
+				AdaptiveDownscale::Settings st;
+				st.float32Picture = true;
+				st.faithfulOrtho = false;
+				st.wBase = 1.0f;
+				st.grainMap = true;
+				st.grainFloor = 0.0f;
+				st.grainLo = 2.0f; st.grainHi = 8.0f;
+				st.edgeLo = 1.0e6f; st.edgeHi = 2.0e6f;
+				st.cnnResidualStabilise = false;
+				st.ssimResidualStabilise = false;
+				SetMotionStrength(st, 0.0f);
+
+				// Same-input negative control without NLS (linear UV): x_out in [237, 244) reads linear blocks 23..24 (clean 1.0).
+				std::vector<float> linearGrainOut;
+				{
+					AdaptiveDownscale::Module linMod;
+					linMod.SetCutSource(knownCut);
+					linMod.SetFrame(st, 1, 1.0f / 24.0f);
+					linMod.SetSourceDownscales(true);
+					AdaptiveDownscale::GrainField gfLin;
+					gfLin.error = nlsGrainErr; gfLin.field = trustedField; gfLin.frameTrust = trust;
+					gfLin.sourceCrop = { 0.0f, 0.0f, static_cast<float>(sw), static_cast<float>(sh) };
+					linMod.SetGrainField(gfLin);
+					linearGrainOut = rig.RenderFloat32(src, ow, oh, { linMod.Measure(), linMod.Blend() }, &pl_filter_bilinear);
+					Assert::IsTrue(linMod.Active() && linMod.Failures() == 0);
+					linMod.Release();
+				}
+
+				AdaptiveDownscale::Module module;
+				module.SetCutSource(knownCut);
+				// Presentation 1: valid NLS on grain map.
+				module.SetFrame(st, 1, 1.0f / 24.0f);
+				module.SetSourceDownscales(true);
+				AdaptiveDownscale::GrainField gfNls;
+				gfNls.error = nlsGrainErr; gfNls.field = trustedField; gfNls.frameTrust = trust;
+				gfNls.sourceCrop = { 0.0f, 0.0f, static_cast<float>(sw), static_cast<float>(sh) };
+				gfNls.nls = validNls;
+				module.SetGrainField(gfNls);
+				const std::vector<float> grainNlsFirst = rig.RenderFloat32(src, ow, oh, { module.Measure(), module.Blend() }, &pl_filter_bilinear);
+				Assert::IsTrue(module.Active() && module.Failures() == 0 &&
+					module.LastMapState() == AdaptiveDownscale::MapState::Used,
+					L"S4-H1 (2B): NLS grain presentation 1 must use grain map");
+
+				// Presentation 2: repeat seq = 1 after ClearGrainField().
+				module.SetFrame(st, 1, 1.0f / 24.0f);
+				module.SetSourceDownscales(true);
+				module.ClearGrainField();
+				const std::vector<float> grainNlsRepeat = rig.RenderFloat32(src, ow, oh, { module.Measure(), module.Blend() }, &pl_filter_bilinear);
+				Assert::IsTrue(module.Active() && module.Failures() == 0 &&
+					module.LastMapState() == AdaptiveDownscale::MapState::Used,
+					L"S4-H1 (2B): NLS grain repeat presentation must keep MapState::Used");
+				module.Release();
+
+				// Negative control: valid NLS actively shifts x_out in [237, 244) onto heavy-grain blocks 25..26 (large diff vs linear UV).
+				const float grainNlsVsLinear = maxRgbDiff(grainNlsFirst, linearGrainOut, ow, 237, 244, 10, oh - 10);
+				Assert::IsTrue(grainNlsVsLinear > 0.02f,
+					(L"S4-H1 (2B) negative control: valid NLS grain map must diverge strongly from linear UV at x_out=240 (>0.02), diff=" +
+						std::to_wstring(grainNlsVsLinear)).c_str());
+
+				// Positive repeat-frame parity: ClearGrainField() must preserve BOTH crop AND valid NLS on repeat!
+				const float grainNlsBandRepeat = maxRgbDiff(grainNlsRepeat, grainNlsFirst, ow, 237, 244, 10, oh - 10);
+				const float grainNlsFullRepeat = maxRgbDiff(grainNlsRepeat, grainNlsFirst, ow, 0, ow, 0, oh);
+				Assert::IsTrue(grainNlsBandRepeat <= 1e-5f,
+					(L"S4-H1 (2B): repeat frame dropped grainField.nls mapping at x_out=240, diff=" +
+						std::to_wstring(grainNlsBandRepeat)).c_str());
+				Assert::IsTrue(grainNlsFullRepeat <= 1e-5f,
+					(L"S4-H1 (2B): repeat frame full-frame NLS grain map parity failed, diff=" +
+						std::to_wstring(grainNlsFullRepeat)).c_str());
+			}
+
+			rig.fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
+		}
 	};
 }
