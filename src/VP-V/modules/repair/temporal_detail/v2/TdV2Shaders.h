@@ -2266,13 +2266,17 @@ if (!isFace && estMode != 1 && cellRetGVar > TD_NUM_FLOOR)
             if (bandLossPerUnitW > TD_NUM_FLOOR && bandWSum > TD_NUM_FLOOR)
             {
                 float maxBandW = remGrainBudget / bandLossPerUnitW;
-                if (bandWSum > maxBandW)
+                if (bandWSum >= maxBandW)
                 {
                     float scale = (maxBandW > 0.0) ? (maxBandW / bandWSum) : 0.0;
                     bandW[b].xyz *= scale;
-                    bandWSum *= scale;
+                    bandWSum = (maxBandW > 0.0) ? maxBandW : 0.0;
+                    remGrainBudget = 0.0;
                 }
-                remGrainBudget = max(0.0, remGrainBudget - bandLossPerUnitW * bandWSum);
+                else
+                {
+                    remGrainBudget = max(0.0, remGrainBudget - bandLossPerUnitW * bandWSum);
+                }
             }
             if (bandWSum > TD_NUM_FLOOR)
                 activeBandBits |= (1 << b);

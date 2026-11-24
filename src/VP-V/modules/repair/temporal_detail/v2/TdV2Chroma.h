@@ -3620,14 +3620,18 @@ namespace TdV2
 									if (bandLossPerUnitW > kEngineNumFloor && bandWSum > kEngineNumFloor)
 									{
 										const double maxBandW = remGrainBudget / bandLossPerUnitW;
-										if (bandWSum > maxBandW)
+										if (bandWSum >= maxBandW)
 										{
 											const double scale = (maxBandW > 0.0) ? (maxBandW / bandWSum) : 0.0;
 											for (int k = 0; k < K; ++k)
 												cellW[b][k][cIdx] *= scale;
-											bandWSum *= scale;
+											bandWSum = (maxBandW > 0.0) ? maxBandW : 0.0;
+											remGrainBudget = 0.0;
 										}
-										remGrainBudget = (std::max)(0.0, remGrainBudget - bandLossPerUnitW * bandWSum);
+										else
+										{
+											remGrainBudget = (std::max)(0.0, remGrainBudget - bandLossPerUnitW * bandWSum);
+										}
 									}
 								}
 							}

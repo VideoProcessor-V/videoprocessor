@@ -1150,13 +1150,17 @@ for (int chIdx = 0; chIdx < 2; ++chIdx)
                 if (lossPerW > TD_NUM_FLOOR && bSum > TD_NUM_FLOOR)
                 {
                     float maxW = remBudget / lossPerW;
-                    if (bSum > maxW)
+                    if (bSum >= maxW)
                     {
                         float sc = (maxW > 0.0) ? (maxW / bSum) : 0.0;
                         bandW[b].xyz *= sc;
-                        bSum *= sc;
+                        bSum = (maxW > 0.0) ? maxW : 0.0;
+                        remBudget = 0.0;
                     }
-                    remBudget = max(0.0, remBudget - lossPerW * bSum);
+                    else
+                    {
+                        remBudget = max(0.0, remBudget - lossPerW * bSum);
+                    }
                 }
             }
         }
