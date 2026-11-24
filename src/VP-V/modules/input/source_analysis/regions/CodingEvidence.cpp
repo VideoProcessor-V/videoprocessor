@@ -137,7 +137,7 @@ namespace CodingEvidence
 			}
 		for (int x = 0; x + 1 < n; ++x) { stepsH[static_cast<size_t>(x)] /= n; stepsV[static_cast<size_t>(x)] /= n; }
 		double periodH = 0.0, periodV = 0.0;
-		const double gridH = GridBlockiness(stepsH, periodH), gridV = GridBlockiness(stepsV, periodV);
+		const double gridH = GridBlockiness(stepsH, periodH, axisScale), gridV = GridBlockiness(stepsV, periodV, axisScale);
 		// The stronger axis: a coded gradient shows its block edges only across the gradient
 		// (hunt 2 lead sweep; the minimum of both axes missed 2x-upscaled grids). The
 		// quantisation staircase of a slow gradient repeats at a fixed period too (a step every
@@ -160,7 +160,7 @@ namespace CodingEvidence
 		return out;
 	}
 
-	double GridBlockiness(const std::vector<double>& steps, double& period)
+	double GridBlockiness(const std::vector<double>& steps, double& period, int axisScale)
 	{
 		// A coding grid of block size b upscaled by 1 / r has its boundaries every b / r px
 		// (8 px native, 16 px for 1080 -> 2160, 24 px for 720 -> 2160, 12 px for 1440 -> 2160):
@@ -173,7 +173,8 @@ namespace CodingEvidence
 		// ~1.0-1.15, a coded picture far above (CPU model and tests).
 		period = 0.0;
 		const int n1 = static_cast<int>(steps.size());
-		const double floorCodes = 0.25;   // as the earlier measure: a near-flat tile is not 'blocked'
+		// S4-M4 / Rule 1: a quarter 10-bit axis code in native code units (0.25 at <= 10-bit, 1.0 at 12-bit), matching MeasureTile's floor.
+		const double floorCodes = 0.25 * (std::max)(1, axisScale);   // as the earlier measure: a near-flat tile is not 'blocked'
 		double best = 1.0;
 		std::vector<std::vector<double>> bins;
 		std::vector<double> m, ex;
