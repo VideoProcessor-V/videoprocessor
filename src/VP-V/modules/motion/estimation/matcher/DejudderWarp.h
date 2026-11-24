@@ -753,6 +753,8 @@ namespace Dejudder
 		pl_tex grainError = nullptr;
 		bool grainErrorValid = false;
 		pl_tex warpedLuma = nullptr, warpedChroma = nullptr;
+		int chromaW = 0, chromaH = 0;                       // GEM-141: Estimate's chroma size for lazy Warp guard
+		pl_fmt lumaFormat = nullptr, chromaFormat = nullptr; // GEM-141: Estimate's plane formats for lazy Warp guard
 		pl_tex processedLuma = nullptr, processedChroma = nullptr;   // B3: WarpProcessed's planes
 		bool WarpImpl(const Planes& a, float shift, Planes& out, bool trusted, bool processedTarget);
 		bool estimated = false;

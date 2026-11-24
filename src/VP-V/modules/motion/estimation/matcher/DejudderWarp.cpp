@@ -2022,6 +2022,14 @@ float hold_weight(vec2 lp, float feather)
 {
     ivec2 fsize = textureSize(field, 0);
     ivec2 own = clamp(ivec2(floor(lp / 16.0)), ivec2(0), fsize - ivec2(1));
+    float f = max(feather, 1e-3);
+    // GEM-145: hold_weight only inspects the 8 neighbours of `own` (dx, dy != 0, 0).
+    // Any pixel at distance >= f from all 4 edges of `own`'s 16x16 block has
+    // distance >= f to every 3x3 neighbour block (and every 8x8 sub-block inside
+    // one), so smoothstep(0.0, f, d) == 1.0 identically without fetching neighbours.
+    vec2 local = lp - vec2(own) * 16.0;
+    if (local.x >= f && 16.0 - local.x >= f && local.y >= f && 16.0 - local.y >= f)
+        return 1.0;
     float d = 1e9;
     for (int dy = -1; dy <= 1; dy++)
         for (int dx = -1; dx <= 1; dx++) {
@@ -2046,7 +2054,7 @@ float hold_weight(vec2 lp, float feather)
                 d = min(d, length(lp - clamp(lp, lo, lo + vec2(16.0))));
             }
         }
-    return smoothstep(0.0, max(feather, 1e-3), d);
+    return smoothstep(0.0, f, d);
 }
 #endif
 )GLSL";
@@ -2383,6 +2391,24 @@ if (q.x < size.x && q.y < size.y) {
 		if (!a.luma) { error = "missing planes"; return false; }
 		width = a.luma->params.w;
 		height = a.luma->params.h;
+		// GEM-141: record Estimate's plane layout and destroy stale warped output
+		// planes on dimension/format change or luma-only input; allocate
+		// warpedLuma / warpedChroma lazily in WarpImpl so estimation-only,
+		// rendered-warp, camera-only, and WarpProcessed paths never allocate them.
+		const bool hasWarpChroma = !innerOfLowRes && a.chroma != nullptr;
+		lumaFormat = hasWarpChroma ? a.luma->params.format : nullptr;
+		chromaW = hasWarpChroma ? a.chroma->params.w : 0;
+		chromaH = hasWarpChroma ? a.chroma->params.h : 0;
+		chromaFormat = hasWarpChroma ? a.chroma->params.format : nullptr;
+		const bool warpedLumaMismatch = warpedLuma && (!hasWarpChroma || warpedLuma->params.w != width ||
+			warpedLuma->params.h != height || warpedLuma->params.format != lumaFormat);
+		const bool warpedChromaMismatch = warpedChroma && (!hasWarpChroma || warpedChroma->params.w != chromaW ||
+			warpedChroma->params.h != chromaH || warpedChroma->params.format != chromaFormat);
+		if (warpedLumaMismatch || warpedChromaMismatch)
+		{
+			pl_tex_destroy(gpu, &warpedLuma);
+			pl_tex_destroy(gpu, &warpedChroma);
+		}
 		halfW = (width + 1) / 2;
 		halfH = (height + 1) / 2;
 		blocksX = (halfW + 7) / 8;
@@ -2524,24 +2550,6 @@ if (q.x < size.x && q.y < size.y) {
 			if (!strengthState)
 			{
 				error = "cannot create the strength state";
-				return false;
-			}
-		}
-		if (innerOfLowRes || !a.chroma)
-			return true;   // the lowRes inner never warps; a luma-only source has no source warp
-		// The warped planes keep A's formats, so the render sees the same
-		// representation.
-		for (const auto& plane : { std::make_pair(a.luma, &warpedLuma), std::make_pair(a.chroma, &warpedChroma) })
-		{
-			pl_fmt fmt = plane.first->params.format;
-			if (!(fmt->caps & PL_FMT_CAP_STORABLE))
-			{
-				error = std::string("plane format not storable: ") + fmt->name;
-				return false;
-			}
-			if (!make(plane.second, plane.first->params.w, plane.first->params.h, fmt, readable))
-			{
-				error = "cannot create the warped planes";
 				return false;
 			}
 		}
@@ -4791,21 +4799,47 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		out = a;
 		if (!trusted || !estimated || shift == 0.0f)
 			return true;   // hold: A itself
-		pl_tex dstLuma = warpedLuma, dstChroma = warpedChroma;
+		pl_tex dstLuma = nullptr, dstChroma = nullptr;
 		float lumaScale[2] = { 1.0f, 1.0f };
 		if (!processedTarget)
 		{
-			// The warped planes were made for the frame Estimate saw: refuse a
-			// different size or chroma layout (e.g. 4:2:2 -> 4:2:0) rather than
-			// write into the old one.
-			if (!a.luma || !a.chroma || !warpedLuma || !warpedChroma || a.luma->params.w != width || a.luma->params.h != height ||
-				a.chroma->params.w != warpedChroma->params.w || a.chroma->params.h != warpedChroma->params.h ||
-				a.chroma->params.format != warpedChroma->params.format ||
-				a.luma->params.format != warpedLuma->params.format)
+			// The warped planes match the frame Estimate saw: refuse a different
+			// size or chroma layout (e.g. 4:2:2 -> 4:2:0) or a luma-only estimate
+			// before lazily allocating warpedLuma / warpedChroma.
+			if (!a.luma || !a.chroma || innerOfLowRes || !lumaFormat || !chromaFormat ||
+				a.luma->params.w != width || a.luma->params.h != height ||
+				a.luma->params.format != lumaFormat ||
+				a.chroma->params.w != chromaW || a.chroma->params.h != chromaH ||
+				a.chroma->params.format != chromaFormat)
 			{
 				error = "Warp without a matching Estimate";
 				return false;
 			}
+			// GEM-141: lazily allocate warpedLuma / warpedChroma on first actual
+			// source-plane Warp so non-source-warp paths never allocate them.
+			for (const auto& plane : { std::make_pair(a.luma, &warpedLuma), std::make_pair(a.chroma, &warpedChroma) })
+			{
+				pl_fmt fmt = plane.first->params.format;
+				if (!fmt || !(fmt->caps & PL_FMT_CAP_STORABLE))
+				{
+					error = std::string("plane format not storable: ") + (fmt && fmt->name ? fmt->name : "unknown");
+					return false;
+				}
+				pl_tex_params params{};
+				params.w = plane.first->params.w;
+				params.h = plane.first->params.h;
+				params.format = fmt;
+				params.sampleable = true;
+				params.storable = true;
+				params.host_readable = settings.hostReadable && (fmt->caps & PL_FMT_CAP_HOST_READABLE);
+				if (!pl_tex_recreate(gpu, plane.second, &params))
+				{
+					error = "cannot create the warped planes";
+					return false;
+				}
+			}
+			dstLuma = warpedLuma;
+			dstChroma = warpedChroma;
 		}
 		else
 		{
