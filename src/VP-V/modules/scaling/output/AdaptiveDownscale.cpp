@@ -418,14 +418,22 @@ if (q.x < size.x && q.y < size.y) {
         vec2 lpos = gsp / max(grain_block_px, 1.0) - vec2(0.5);
         ivec2 l0 = ivec2(floor(lpos));
         vec2 lt = lpos - vec2(l0);
-        float gacc = 0.0;
-        for (int y = 0; y <= 1; y++)
-            for (int x = 0; x <= 1; x++) {
-                float nb = texelFetch(grain_level, clamp(l0 + ivec2(x, y), ivec2(0), lsize - ivec2(1)), 0).x;
-                float gtarget = mix(grain_floor, 1.0, 1.0 - smoothstep(grain_lo, grain_hi, sqrt(max(nb, 0.0)) * grain_level_scale));
-                gacc += (x == 1 ? lt.x : 1.0 - lt.x) * (y == 1 ? lt.y : 1.0 - lt.y) * (nb >= 0.0 ? gtarget : grain_floor);
-            }
-        g = gacc;
+        // Separable bilinear interpolation (a + t * (b - a)): exact when all four neighbours agree
+        // (e.g. clean gtarget == 1.0 -> exact 1.0f, avoiding 4-product sum drift to 0.99999988f).
+        float g00, g10, g01, g11;
+        {
+            float nb00 = texelFetch(grain_level, clamp(l0 + ivec2(0, 0), ivec2(0), lsize - ivec2(1)), 0).x;
+            float nb10 = texelFetch(grain_level, clamp(l0 + ivec2(1, 0), ivec2(0), lsize - ivec2(1)), 0).x;
+            float nb01 = texelFetch(grain_level, clamp(l0 + ivec2(0, 1), ivec2(0), lsize - ivec2(1)), 0).x;
+            float nb11 = texelFetch(grain_level, clamp(l0 + ivec2(1, 1), ivec2(0), lsize - ivec2(1)), 0).x;
+            g00 = nb00 >= 0.0 ? mix(grain_floor, 1.0, 1.0 - smoothstep(grain_lo, grain_hi, sqrt(max(nb00, 0.0)) * grain_level_scale)) : grain_floor;
+            g10 = nb10 >= 0.0 ? mix(grain_floor, 1.0, 1.0 - smoothstep(grain_lo, grain_hi, sqrt(max(nb10, 0.0)) * grain_level_scale)) : grain_floor;
+            g01 = nb01 >= 0.0 ? mix(grain_floor, 1.0, 1.0 - smoothstep(grain_lo, grain_hi, sqrt(max(nb01, 0.0)) * grain_level_scale)) : grain_floor;
+            g11 = nb11 >= 0.0 ? mix(grain_floor, 1.0, 1.0 - smoothstep(grain_lo, grain_hi, sqrt(max(nb11, 0.0)) * grain_level_scale)) : grain_floor;
+        }
+        float gx0 = g00 + lt.x * (g10 - g00);
+        float gx1 = g01 + lt.x * (g11 - g01);
+        g = gx0 + lt.y * (gx1 - gx0);
     }
 #else
     g = grain_floor;

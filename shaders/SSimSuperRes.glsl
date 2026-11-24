@@ -211,7 +211,8 @@ vec4 hook() {
     diff /= weightSum;
 
     if (vp_grain_strength > 0.5) {
-        c0.rgb = c0.rgb + clamp(c0.a, 0.0, 1.0) * diff;
+        float vp_s = clamp(c0.a, 0.0, 1.0);
+        c0.rgb = vp_s < 1.0 ? (c0.rgb + vp_s * diff) : ((c0.rgb) + diff);
         c0.a = 1.0;
     } else {
         c0.rgb = ((c0.rgb) + diff);
