@@ -446,6 +446,7 @@ namespace Vpv
 			std::string gpuMemoryNote;
 			uint64_t gpuMemorySizeKey = 0;
 			uint32_t gpuMemoryGen = 0;
+			bool oldBundleJobsJoined = true;   // K#12: true once any previous bundle's worker threads have been joined
 
 			// Any thread.
 			std::atomic<uint32_t> renderTid{ 0 };   // FIX3-D7: per-host Win32 render thread ID (0 = not yet observed)
@@ -834,6 +835,7 @@ namespace Vpv
 				if (old)
 				{
 					old->threads.Stop();   // joined here first: the workers call the lane's ahead sinks, so nothing may reassign them yet
+					st.oldBundleJobsJoined = true;
 					VpSkeleton::UnbindLaneFromMemo(old->lane, *old->memo);   // L-CORE: on the render thread, after the join
 				}
 			}
@@ -1419,7 +1421,7 @@ namespace Vpv
 				card = card_;
 			const bool known = need != 0 && (cardOverride_ || QueryCard(hosts_.Aux(host), card, why));
 			mh->cardWhy = known || need == 0 ? std::string() : why;
-			mh->grant = VpSkeleton::PlanMemoGpuGrantLevels(card, known, VpSkeleton::VramUsers::Instance().Take().heldBytes, levels);
+			mh->grant = VpSkeleton::PlanMemoGpuGrantLevels(card, known, VpSkeleton::VramUsers::Instance().Take().heldBytes, levels, memo.GpuBytes());
 			memo.SetGpuBudget(mh->grant.granted, mh->grant.bytes);
 			// The interim ahead plan (S-A / S-B only; S-C needs the delay budget feed): the first ladder step that fits the grant. Planning
 			// only: it constrains the NEXT acquires (NotPlannedAhead), never evicts what is attached.
@@ -3290,7 +3292,7 @@ namespace Vpv
 									e->dispatcher->FlushReleases();
 									if (const std::shared_ptr<VpSkeleton::LaneState> ls = b->lane.State())
 										if (ls->graph.valid)
-											e->dispatcher->Configure(ls->graph, b->registry, ls->plan, b->dims, b->configuredGen);
+											e->dispatcher->Configure(ls->graph, b->registry, ls->plan, b->dims, b->configuredGen, e->oldBundleJobsJoined);
 								}
 								const AnalysisLane::DeferredReport rep = b->lane.RunDeferredLive(static_cast<uint64_t>(c.seq));
 								const bool prevDriven = e->entranceLiveDriven.exchange(true, std::memory_order_acq_rel);
@@ -3456,6 +3458,27 @@ namespace Vpv
 				st.gpuMemorySizeKey = sizeKey;
 				st.gpuMemoryGen = st.settingsGen.load(std::memory_order_relaxed);
 			}
+			// K#11 (169 AMEND): pre-check private working memory BEFORE wiring/rebuild so a first-frame refusal builds
+			// the Bundle once without a dispatcher (zero second rebuild/flapping) and reuses the single QueryCard below.
+			bool preQueried = false;
+			bool preKnown = false;
+			CardProfile preCard;
+			std::string preWhy;
+			if (st.dispatcher != nullptr && st.gpuMemoryNote.empty() && !st.dispatcher->HoldsVideoMemory())
+			{
+				preQueried = true;
+				if (cardOverride_)
+					preCard = card_;
+				preKnown = cardOverride_ || QueryCard(hosts_.Aux(st.host), preCard, preWhy);
+				const bool wantGapAhead = st.settings.gpuGap == GpuGapMode::AfterRender;
+				const uint64_t priv = st.dispatcher->PrivateBytes(dims, wantGapAhead);
+				if (preKnown && priv > preCard.FreeVram())
+				{
+					st.gpuMemoryNote = "GPU products not made: private working memory " + std::to_string(priv >> 20) +
+						" MiB exceeds the free video memory " + std::to_string(preCard.FreeVram() >> 20) + " MiB (" +
+						Dimensions(dims) + ")";
+				}
+			}
 			wiring.dispatcher = st.gpuMemoryNote.empty() ? st.dispatcher.get() : nullptr;
 			if (st.dispatcher && wiring.dispatcher == nullptr)
 				st.dispatcher->SetLane(nullptr);   // the old lane is about to be replaced: no dangling pointer
@@ -3478,7 +3501,10 @@ namespace Vpv
 					return VpSkeleton::LaneLease();
 				};
 				if (current)
+				{
 					current->threads.Stop();   // GEM SK-LIFECYCLE: the current bundle's workers are joined before the replacement is built
+					st.oldBundleJobsJoined = true;
+				}
 				if (current)
 					hostMemo->Clear();   // G0 S4: a graph rebuild is a discontinuity: every memo spot of the old graph is released
 				b = std::make_shared<Bundle>(dims, seq, nowUs_, wiring, hostMemo, std::move(leaseOf),
@@ -3541,9 +3567,19 @@ namespace Vpv
 			{
 				CardProfile card;
 				std::string why;
-				if (cardOverride_)
-					card = card_;
-				const bool known = cardOverride_ || QueryCard(hosts_.Aux(st.host), card, why);
+				bool known = false;
+				if (preQueried)
+				{
+					card = preCard;
+					why = preWhy;
+					known = preKnown;
+				}
+				else
+				{
+					if (cardOverride_)
+						card = card_;
+					known = cardOverride_ || QueryCard(hosts_.Aux(st.host), card, why);
+				}
 				st.cardNote = known ? std::string() : why;
 				TierInput tier;
 				tier.framePeriodMs = st.periodMs;
@@ -3561,7 +3597,12 @@ namespace Vpv
 					if (memoNeed != 0)
 						tier.otherUsers.push_back(VpSkeleton::MakeMemoVramUser(memoLevels, "skeleton memo"));
 				}
-				tier.ownUsageBytes = declared.heldBytes;
+				// K#11 (162 AS-IS): include the skeleton's own held VRAM (memo GPU spots + dispatcher product/graveyard textures)
+				// so PlanVram does not double-count them as other-app usage. PrivateBytes stays outside ownUsageBytes.
+				uint64_t ownHeld = declared.heldBytes + b->memo->GpuBytes();
+				if (wiring.dispatcher != nullptr)
+					ownHeld += wiring.dispatcher->AllocatedBytes() + wiring.dispatcher->GraveyardBytes();
+				tier.ownUsageBytes = ownHeld;
 				tier.transientBytes = st.vramShortfall;
 				st.vramShortfallUsed = st.vramShortfall;
 				st.vramReplan = false;
@@ -3794,7 +3835,7 @@ namespace Vpv
 				st.dispatcher->FlushReleases();
 				if (const std::shared_ptr<VpSkeleton::LaneState> ls = b->lane.State())
 					if (ls->graph.valid)
-						st.dispatcher->Configure(ls->graph, b->registry, ls->plan, b->dims, b->configuredGen);
+						st.dispatcher->Configure(ls->graph, b->registry, ls->plan, b->dims, b->configuredGen, st.oldBundleJobsJoined);
 			}
 			else if (st.dispatcher && !st.gpuMemoryNote.empty() && st.dispatcher->HoldsVideoMemory())
 			{

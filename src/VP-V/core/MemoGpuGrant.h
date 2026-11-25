@@ -27,8 +27,9 @@ struct MemoGpuGrant {
 };
 
 // `need`: SkeletonMemo::GpuNeedBytes(); `othersHeld`: the bytes every declared VP-V VRAM user holds now (VramUsers::Take
-// heldBytes, inside the card's current usage). A need of 0 is "nothing to grant" (not granted, no refusal).
-inline MemoGpuGrant PlanMemoGpuGrant(const CardProfile& card, bool cardKnown, uint64_t othersHeld, uint64_t need)
+// heldBytes, inside the card's current usage); `memoHeld`: bytes this memo already holds (excluded from other-app usage).
+// A need of 0 is "nothing to grant" (not granted, no refusal).
+inline MemoGpuGrant PlanMemoGpuGrant(const CardProfile& card, bool cardKnown, uint64_t othersHeld, uint64_t need, uint64_t memoHeld = 0)
 {
     MemoGpuGrant g;
     g.need = need;
@@ -47,8 +48,8 @@ inline MemoGpuGrant PlanMemoGpuGrant(const CardProfile& card, bool cardKnown, ui
     memo.levelText.push_back("memo GPU spots off");
     GovernorInput in;
     in.card = card;
-    in.ownUsageBytes = othersHeld;     // VP's own usage inside the card's current usage ...
-    in.transientBytes = othersHeld;    // ... held as it is: the other users do not shed for the memo
+    in.ownUsageBytes = othersHeld + memoHeld;   // VP's own usage inside the card's current usage (other users + memo's own spots)
+    in.transientBytes = othersHeld;             // other users stay fixed as they are: they do not shed for the memo
     in.users.push_back(memo);
     const GovernorPlan plan = PlanVram(in);
     g.budget = plan.budgetBytes;
@@ -86,7 +87,7 @@ inline VramUser MakeMemoVramUser(const std::vector<uint64_t>& levels, const char
 // The same plan over LEVELS (amendment A5 / audit M6): `levels` = SkeletonMemo::GpuNeedLevels() (one per ahead-ladder step,
 // non-increasing). The governor sheds the memo user level by level, so a card that cannot hold the full window grants the largest
 // level that fits (never 0 while a level fits). `need` in the result is the top level, `bytes` the granted level.
-inline MemoGpuGrant PlanMemoGpuGrantLevels(const CardProfile& card, bool cardKnown, uint64_t othersHeld, const std::vector<uint64_t>& levels)
+inline MemoGpuGrant PlanMemoGpuGrantLevels(const CardProfile& card, bool cardKnown, uint64_t othersHeld, const std::vector<uint64_t>& levels, uint64_t memoHeld = 0)
 {
     MemoGpuGrant g;
     g.need = levels.empty() ? 0u : levels.front();
@@ -96,7 +97,7 @@ inline MemoGpuGrant PlanMemoGpuGrantLevels(const CardProfile& card, bool cardKno
     VramUser memo = MakeMemoVramUser(levels, "skeleton memo (no lane)");
     GovernorInput in;
     in.card = card;
-    in.ownUsageBytes = othersHeld;
+    in.ownUsageBytes = othersHeld + memoHeld;
     in.transientBytes = othersHeld;
     in.users.push_back(memo);
     const GovernorPlan plan = PlanVram(in);
