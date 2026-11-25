@@ -506,7 +506,10 @@ namespace AdaptiveDownscaleStage
 				(module.PublishedGrainDomainRefused() ? std::string("measure domain is linear / HDR") : std::string()));
 			in.edgeMapStatus = module.EdgeMapStatus();
 			in.motionExternalView = upscaleMotionExternalView;
-			return UpscaleScalingFallback(in);
+			const FallbackCatalog::Decision up = UpscaleScalingFallback(in);
+			if (!up.engaged && requested && module.HalfFloatPictureFallback())
+				return FallbackCatalog::Engaged("output scaling", "adaptive scaler: 16-bit float picture (32-bit float not available)");
+			return up;
 		}
 		const FallbackCatalog::Decision base = FallbackCatalog::OutputScaling(requested, failureHeld ? 1u : 0u, ssimMissing);
 		// FIX-X5-CUT-P4 / C5: no scene group (the skeleton's scene product) for this frame: no cut verdict this frame (also on StatusLines()).
