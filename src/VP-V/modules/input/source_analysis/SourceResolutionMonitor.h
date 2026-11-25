@@ -28,6 +28,7 @@
 #include <vector>
 
 namespace SourceIdentity { namespace Chain { class ChainEstimator; } }
+namespace VpSkeleton { class AnalysisLane; }
 
 // Stage 12 step B in the renderer (owner 2026-10-15): the effective
 // resolution, bitrate quality and effective bit depth of every source, and
@@ -45,6 +46,16 @@ namespace SourceIdentity { namespace Chain { class ChainEstimator; } }
 // source or format change, seek / live queue reset) or a confidence drop.
 namespace SourceResolutionMonitor
 {
+	// O#6 (SRM-FRAMEBOUND-WAIT): exact classification of frame-bound wait misses (Ctrl+I & Ctrl+Alt+D).
+	enum class WaitMissCause : uint8_t
+	{
+		None = 0,
+		LatePoll,
+		DropOrBacklog,
+		BoundedWaitTimeout
+	};
+	const char* WaitMissCauseText(WaitMissCause cause);
+
 	struct Snapshot
 	{
 		bool reading = false;          // at least one frame analysed since the last discontinuity
@@ -117,7 +128,13 @@ namespace SourceResolutionMonitor
 		unsigned long long heldDropped = 0;   // dropped oldest because the held queue was full
 		unsigned long long heldStale = 0;     // held / queued results of an era before a Discontinuity()
 		unsigned long long jobsDropped = 0;   // queued jobs dropped oldest because the job queue was full
-		unsigned long long waitsMissed = 0;   // NoteWaitMissed(): a deterministic wait ran out
+		unsigned long long waitsMissed = 0;   // NoteWaitMissed(): a deterministic wait ran out or a bound result arrived late
+		WaitMissCause lastWaitMissCause = WaitMissCause::None;
+		uint64_t lastWaitMissFramesLate = 0;
+		double lastWaitMissAnalyseMs = 0.0;
+		unsigned long long waitMissLatePoll = 0;
+		unsigned long long waitMissDropOrBacklog = 0;
+		unsigned long long waitMissTimeout = 0;
 		unsigned long long clockStepsBack = 0; // source seconds that went backwards (clamped)
 		unsigned long long submitSkipped = 0; // frame-bound: frames not copied because both readback slots were still in flight
 		unsigned long long engagedReactive = 0; // frame-bound: engages made by the reactive trigger because the look-ahead was unavailable or stale (visible fallback)
@@ -204,8 +221,18 @@ namespace SourceResolutionMonitor
 		bool ReadyFor(uint64_t s) const;
 		// The source sequence of the last analysed frame (0 = none yet). Any thread.
 		uint64_t AnalysedThrough() const { return analysedThrough.load(std::memory_order_acquire); }
-		// The lane's wait for ReadyFor ran out: counted, shown by Describe.
-		void NoteWaitMissed() { waitsMissed.fetch_add(1, std::memory_order_relaxed); }
+		// The lane's wait for ReadyFor ran out (or a bound analysis arrived late): counted with exact cause, shown by Describe.
+		void NoteWaitMissed() { NoteWaitMissed(WaitMissCause::BoundedWaitTimeout, 0); }
+		void NoteWaitMissed(WaitMissCause cause, uint64_t renderSequence, uint64_t framesLate = 0, double analyseMs = -1.0);
+		// O#6 (SRM-FRAMEBOUND-WAIT): wire Monitor::ReadyFor / NoteWaitMissed onto an AnalysisLane's deterministic wait probe.
+		void BindLaneReadyProbe(VpSkeleton::AnalysisLane& lane);
+		void UnbindLaneReadyProbe(VpSkeleton::AnalysisLane& lane);
+		// Deterministic-only bounded ready wait (default OFF: live mode never blocks on worker readiness).
+		void SetDeterministicWait(bool deterministic, uint32_t boundUs = 0);
+		bool DeterministicWait() const { return deterministicWait.load(std::memory_order_acquire); }
+		bool WaitForReadyDeterministic(uint64_t renderSequence, uint32_t presentSlackUs = 0, uint32_t guardUs = 0);
+		unsigned long long DeterministicWaitCalls() const { return deterministicWaitCalls.load(std::memory_order_relaxed); }
+		unsigned long long DeterministicWaitYields() const { return deterministicWaitYields.load(std::memory_order_relaxed); }
 		unsigned long long WaitsMissed() const { return waitsMissed.load(std::memory_order_relaxed); }
 		unsigned long long HeldDropped() const { return heldDropped.load(std::memory_order_relaxed); }
 		unsigned long long ClockStepsBack() const { return clockStepsBack.load(std::memory_order_relaxed); }
@@ -588,6 +615,7 @@ namespace SourceResolutionMonitor
 			uint64_t sequence = 0;       // the source frame copied (h3-latch: look-ahead evidence)
 			uint64_t streamKey = 0;      // R3: SetStreamKey's value when the copy was taken
 			uint64_t epoch = 0;          // frame-bound: Discontinuity() count when the copy was taken
+			bool hadBacklog = false;     // O#6: another frame-bound job was already queued behind this one when popped
 		};
 		// Frame-bound: one analysed result waiting for its render sequence.
 		struct Held
@@ -619,6 +647,7 @@ namespace SourceResolutionMonitor
 		struct FrameCarry { bool valid = false, bound = false; uint64_t sequence = 0; double raw = 0.0, seconds = 0.0; };
 		FrameCarry carry;   // FrameBegin -> FrameSubmit (render thread)
 		void PushHeld(const Job& j, bool reset);            // with `mutex` held
+		void RecordWaitMissLocked(WaitMissCause cause, uint64_t framesLate, double analyseMs);   // with `mutex` held
 		void ResetVisible();                                // with `mutex` held
 		void NoteSubmitted(uint64_t sequence);
 		void FinishSequence(uint64_t sequence);
@@ -650,12 +679,23 @@ namespace SourceResolutionMonitor
 		std::atomic<uint64_t> analysedThrough{ 0 };
 		std::atomic<uint64_t> releasedThrough{ 0 };   // the last release point (s - D) of ReleaseHeldFor; a result at or before it is late
 		std::atomic<unsigned long long> waitsMissed{ 0 }, heldDropped{ 0 }, heldStale{ 0 }, jobsDropped{ 0 }, clockStepsBack{ 0 }, submitSkipped{ 0 }, engagedReactive{ 0 };
+		std::atomic<unsigned long long> waitMissLatePollCount{ 0 }, waitMissDropOrBacklogCount{ 0 }, waitMissTimeoutCount{ 0 };
+		WaitMissCause lastWaitMissCause = WaitMissCause::None;   // guarded by `mutex`
+		uint64_t lastWaitMissFramesLate = 0;                     // guarded by `mutex`
+		double lastWaitMissAnalyseMs = 0.0;                      // guarded by `mutex`
+		std::atomic<bool> deterministicWait{ false };
+		std::atomic<uint32_t> deterministicWaitBoundUs{ 0 };
+		std::atomic<unsigned long long> deterministicWaitCalls{ 0 }, deterministicWaitYields{ 0 };
+		bool haveBoundWaitSeq = false;                           // render thread: avoids double wait across BeginBoundFrame + AutoFactor
+		uint64_t lastBoundWaitSeq = 0;
 		std::atomic<bool> denseGridApplied{ false };
 		Held held[kHeldCap];            // ring, guarded by `mutex`
 		size_t heldHead = 0, heldCount = 0;
 		Snapshot visible;               // what Read() returns when frame-bound (guarded by `mutex`)
 		std::deque<Job> jobQueue;       // frame-bound FIFO to the worker (guarded by `mutex`)
 		mutable std::mutex outMutex;    // leaf lock: the frames in flight
+		std::condition_variable outCv;  // notified on FinishSequence / SetFrameBound / ~Monitor
+		bool outStopping = false;       // guarded by `outMutex`
 		std::deque<uint64_t> outstanding;
 		SourceClock submitClock, decideClock;   // render thread
 

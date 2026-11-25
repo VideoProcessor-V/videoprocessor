@@ -1,7 +1,9 @@
 #include <pch.h>
 #include "SourceResolutionMonitor.h"
+#include <VP-V/core/AnalysisLane.h>
 #include <VP-V/core/LumaWeights.h>
 #include <VP-V/core/RobustStats.h>
+#include <VP-V/core/SealPoint.h>
 #include <VP-V/modules/control/skeleton/SceneRecordReader.h>
 #include <VP-V/modules/input/source_analysis/events/shared/CutFadeJudge.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/SourceStats.h>
@@ -25,6 +27,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <sstream>
 
 namespace SourceResolutionMonitor
@@ -73,6 +76,18 @@ if (tile < int(tiles) && g.y < ts) {
 		}
 	}
 
+	const char* WaitMissCauseText(WaitMissCause cause)
+	{
+		switch (cause)
+		{
+		case WaitMissCause::None: return "none";
+		case WaitMissCause::LatePoll: return "late poll";
+		case WaitMissCause::DropOrBacklog: return "drop/backlog";
+		case WaitMissCause::BoundedWaitTimeout: return "wait timeout";
+		}
+		return "unknown";
+	}
+
 	Monitor::Monitor()
 	{
 		chainEst.reset(new SourceIdentity::Chain::ChainEstimator());   // inert until SetChainEnabled(true): no thread, no tap
@@ -99,6 +114,11 @@ if (tile < int(tiles) && g.y < ts) {
 
 	Monitor::~Monitor()
 	{
+		{
+			std::lock_guard<std::mutex> lock(outMutex);
+			outStopping = true;
+		}
+		outCv.notify_all();
 		if (chainEst) chainEst->Stop();   // its worker never calls back into the monitor; stopped first
 		{
 			std::lock_guard<std::mutex> lock(mutex);
@@ -575,6 +595,13 @@ if (tile < int(tiles) && g.y < ts) {
 			plain.p4StatsShared = p4Shared;
 			plain.p4StatsFallback = p4Fallback;
 			plain.p4StatsFallbackWhy = p4Why;
+			plain.waitsMissed = waitsMissed.load(std::memory_order_relaxed);
+			plain.lastWaitMissCause = lastWaitMissCause;
+			plain.lastWaitMissFramesLate = lastWaitMissFramesLate;
+			plain.lastWaitMissAnalyseMs = lastWaitMissAnalyseMs;
+			plain.waitMissLatePoll = waitMissLatePollCount.load(std::memory_order_relaxed);
+			plain.waitMissDropOrBacklog = waitMissDropOrBacklogCount.load(std::memory_order_relaxed);
+			plain.waitMissTimeout = waitMissTimeoutCount.load(std::memory_order_relaxed);
 			return plain;
 		}
 		// Frame-bound: the released analysis; the GPU-side status and the counters are live.
@@ -598,6 +625,12 @@ if (tile < int(tiles) && g.y < ts) {
 		out.submitSkipped = submitSkipped.load(std::memory_order_relaxed);
 		out.engagedReactive = engagedReactive.load(std::memory_order_relaxed);
 		out.waitsMissed = waitsMissed.load(std::memory_order_relaxed);
+		out.lastWaitMissCause = lastWaitMissCause;
+		out.lastWaitMissFramesLate = lastWaitMissFramesLate;
+		out.lastWaitMissAnalyseMs = lastWaitMissAnalyseMs;
+		out.waitMissLatePoll = waitMissLatePollCount.load(std::memory_order_relaxed);
+		out.waitMissDropOrBacklog = waitMissDropOrBacklogCount.load(std::memory_order_relaxed);
+		out.waitMissTimeout = waitMissTimeoutCount.load(std::memory_order_relaxed);
 		out.clockStepsBack = clockStepsBack.load(std::memory_order_relaxed);
 		return out;
 	}
@@ -1472,6 +1505,7 @@ if (tile < int(tiles) && g.y < ts) {
 					have = true;
 					current = std::move(jobQueue.front());
 					jobQueue.pop_front();
+					current.hadBacklog = !jobQueue.empty();
 				}
 				else
 				{
@@ -2132,9 +2166,18 @@ if (tile < int(tiles) && g.y < ts) {
 		{
 			// Frame-bound: a result that reaches the held queue AFTER its release point (the frame it belongs to
 			// is already decided, D frames on) is applied late, so this run's decisions depended on the worker's
-			// timing: counted as a missed wait (no bounded wait runs in the renderer), never silent.
-			if (j.sequence != 0 && j.sequence <= releasedThrough.load(std::memory_order_acquire))
-				waitsMissed.fetch_add(1, std::memory_order_relaxed);
+			// timing: classify exact per-miss cause (LatePoll vs DropOrBacklog) and count, never silent.
+			const uint64_t rel = releasedThrough.load(std::memory_order_acquire);
+			if (j.sequence != 0 && j.sequence <= rel)
+			{
+				const uint64_t framesLate = (rel >= j.sequence) ? (rel - j.sequence + 1u) : 1u;
+				const bool backlogOrDrop = j.hadBacklog ||
+					jobsDropped.load(std::memory_order_relaxed) > 0 ||
+					heldDropped.load(std::memory_order_relaxed) > 0 ||
+					submitSkipped.load(std::memory_order_relaxed) > 0;
+				RecordWaitMissLocked(backlogOrDrop ? WaitMissCause::DropOrBacklog : WaitMissCause::LatePoll,
+					framesLate, snapshot.analyseMs);
+			}
 			PushHeld(j, workerReset);
 			analysedThrough.store(j.sequence, std::memory_order_release);
 			FinishSequence(j.sequence);
@@ -2196,6 +2239,14 @@ if (tile < int(tiles) && g.y < ts) {
 		bool boundReset = false;
 		if (bound)
 		{
+			if (deterministicWait.load(std::memory_order_acquire) &&
+				(!haveBoundWaitSeq || lastBoundWaitSeq != renderSequence) &&
+				!ReadyFor(renderSequence))
+			{
+				WaitForReadyDeterministic(renderSequence);
+				haveBoundWaitSeq = true;
+				lastBoundWaitSeq = renderSequence;
+			}
 			const bool released = ReleaseHeldFor(renderSequence);
 			const bool carried = pendingBoundReset.exchange(false, std::memory_order_acq_rel);
 			boundReset = released || carried;
@@ -2759,14 +2810,20 @@ if (tile < int(tiles) && g.y < ts) {
 			heldHead = heldCount = 0;
 			jobQueue.clear();
 			visible = snapshot;
+			lastWaitMissCause = WaitMissCause::None;
+			lastWaitMissFramesLate = 0;
+			lastWaitMissAnalyseMs = 0.0;
 		}
 		{
 			std::lock_guard<std::mutex> lock(outMutex);
 			outstanding.clear();
 		}
+		outCv.notify_all();
 		submitClock.Reset();
 		decideClock.Reset();
 		lastSubmit = -1e9;
+		haveBoundWaitSeq = false;
+		lastBoundWaitSeq = 0;
 		denseGridApplied.store(false, std::memory_order_release);
 		// A fresh era: a reset carried from the previous era is superseded by this one's (autoReset
 		// below), and reproducibility is judged per era (losses of the previous era are not this run's).
@@ -2777,6 +2834,11 @@ if (tile < int(tiles) && g.y < ts) {
 		submitSkipped.store(0, std::memory_order_relaxed);
 		engagedReactive.store(0, std::memory_order_relaxed);
 		waitsMissed.store(0, std::memory_order_relaxed);
+		waitMissLatePollCount.store(0, std::memory_order_relaxed);
+		waitMissDropOrBacklogCount.store(0, std::memory_order_relaxed);
+		waitMissTimeoutCount.store(0, std::memory_order_relaxed);
+		deterministicWaitCalls.store(0, std::memory_order_relaxed);
+		deterministicWaitYields.store(0, std::memory_order_relaxed);
 		frameLead.store(lead, std::memory_order_release);
 		frameBound.store(on, std::memory_order_release);
 		// A fresh era on the render side (the clocks changed domain): no worker-side reset, so the
@@ -2875,9 +2937,138 @@ if (tile < int(tiles) && g.y < ts) {
 
 	void Monitor::FinishSequence(uint64_t sequence)
 	{
-		std::lock_guard<std::mutex> lock(outMutex);
-		for (auto it = outstanding.begin(); it != outstanding.end(); ++it)
-			if (*it == sequence) { outstanding.erase(it); return; }
+		bool erased = false;
+		{
+			std::lock_guard<std::mutex> lock(outMutex);
+			for (auto it = outstanding.begin(); it != outstanding.end(); ++it)
+			{
+				if (*it == sequence)
+				{
+					outstanding.erase(it);
+					erased = true;
+					break;
+				}
+			}
+		}
+		if (erased)
+			outCv.notify_all();
+	}
+
+	void Monitor::RecordWaitMissLocked(WaitMissCause cause, uint64_t framesLate, double analyseMs)
+	{
+		waitsMissed.fetch_add(1, std::memory_order_relaxed);
+		switch (cause)
+		{
+		case WaitMissCause::LatePoll:
+			waitMissLatePollCount.fetch_add(1, std::memory_order_relaxed);
+			break;
+		case WaitMissCause::DropOrBacklog:
+			waitMissDropOrBacklogCount.fetch_add(1, std::memory_order_relaxed);
+			break;
+		case WaitMissCause::BoundedWaitTimeout:
+			waitMissTimeoutCount.fetch_add(1, std::memory_order_relaxed);
+			break;
+		case WaitMissCause::None:
+			break;
+		}
+		lastWaitMissCause = cause;
+		lastWaitMissFramesLate = framesLate;
+		lastWaitMissAnalyseMs = analyseMs >= 0.0 ? analyseMs : snapshot.analyseMs;
+	}
+
+	void Monitor::NoteWaitMissed(WaitMissCause cause, uint64_t renderSequence, uint64_t framesLate, double analyseMs)
+	{
+		uint64_t computedLate = framesLate;
+		if (computedLate == 0 && renderSequence != 0)
+		{
+			const uint64_t lead = frameLead.load(std::memory_order_acquire);
+			const uint64_t through = renderSequence >= lead ? renderSequence - lead : 0u;
+			const uint64_t done = analysedThrough.load(std::memory_order_acquire);
+			computedLate = through > done ? (through - done) : 1u;
+		}
+		std::lock_guard<std::mutex> lock(mutex);
+		RecordWaitMissLocked(cause, computedLate, analyseMs);
+	}
+
+	void Monitor::BindLaneReadyProbe(VpSkeleton::AnalysisLane& lane)
+	{
+		lane.SetReadyProbe(
+			[this](uint64_t s) { return ReadyFor(s); },
+			[this]() { NoteWaitMissed(WaitMissCause::BoundedWaitTimeout, 0); });
+	}
+
+	void Monitor::UnbindLaneReadyProbe(VpSkeleton::AnalysisLane& lane)
+	{
+		lane.SetReadyProbe(nullptr, nullptr);
+	}
+
+	void Monitor::SetDeterministicWait(bool deterministic, uint32_t boundUs)
+	{
+		deterministicWaitBoundUs.store(boundUs, std::memory_order_release);
+		deterministicWait.store(deterministic, std::memory_order_release);
+	}
+
+	bool Monitor::WaitForReadyDeterministic(uint64_t renderSequence, uint32_t presentSlackUs, uint32_t guardUs)
+	{
+		if (!frameBound.load(std::memory_order_acquire) || !deterministicWait.load(std::memory_order_acquire))
+			return ReadyFor(renderSequence);
+		deterministicWaitCalls.fetch_add(1, std::memory_order_relaxed);
+		if (ReadyFor(renderSequence))
+			return true;
+
+		const uint32_t configuredBoundUs = deterministicWaitBoundUs.load(std::memory_order_acquire);
+		VpSkeleton::WaitPolicy policy;
+		policy.deterministicRun = true;
+		if (configuredBoundUs > 0)
+		{
+			policy.explicitTestWait = true;
+			policy.testWaitUs = configuredBoundUs;
+		}
+		else
+		{
+			policy.explicitTestWait = false;
+			policy.presentSlackUs = presentSlackUs;
+			policy.guardUs = guardUs;
+		}
+
+		const auto start = std::chrono::steady_clock::now();
+		for (;;)
+		{
+			if (ReadyFor(renderSequence))
+				return true;
+			const long long elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+				std::chrono::steady_clock::now() - start).count();
+			const uint32_t waitedUs = elapsed > 0
+				? static_cast<uint32_t>((std::min)(elapsed, static_cast<long long>((std::numeric_limits<uint32_t>::max)())))
+				: 0u;
+			uint32_t waitMoreUs = 0;
+			const VpSkeleton::WaitDecision decision = VpSkeleton::DecideWait(
+				VpSkeleton::Variants::NonIdentical, true, VpSkeleton::SlotState::Writing, policy, waitedUs, &waitMoreUs);
+			if (decision == VpSkeleton::WaitDecision::SealNow)
+				return ReadyFor(renderSequence);
+			if (decision == VpSkeleton::WaitDecision::BoundMissed)
+			{
+				NoteWaitMissed(WaitMissCause::BoundedWaitTimeout, renderSequence);
+				return false;
+			}
+			deterministicWaitYields.fetch_add(1, std::memory_order_relaxed);
+			const uint64_t lead = frameLead.load(std::memory_order_acquire);
+			const uint64_t through = renderSequence >= lead ? renderSequence - lead : 0u;
+			std::unique_lock<std::mutex> lock(outMutex);
+			auto isReadyLocked = [&]() -> bool {
+				if (outStopping || renderSequence < lead)
+					return true;
+				for (const uint64_t o : outstanding)
+					if (o <= through)
+						return false;
+				return true;
+			};
+			if (isReadyLocked())
+				return !outStopping;
+			outCv.wait_for(lock, std::chrono::microseconds(waitMoreUs > 0 ? waitMoreUs : 1u), isReadyLocked);
+			if (outStopping)
+				return false;
+		}
 	}
 
 	bool Monitor::ReadyFor(uint64_t s) const
@@ -2925,6 +3116,13 @@ if (tile < int(tiles) && g.y < ts) {
 	double Monitor::BeginBoundFrame(uint64_t sourceSequence, double seconds)
 	{
 		const double mapped = submitClock.Advance(seconds, clockStepsBack);
+		// O#6: deterministic-only bounded ready wait (live mode returns immediately without sleeping).
+		if (deterministicWait.load(std::memory_order_acquire))
+		{
+			WaitForReadyDeterministic(sourceSequence);
+			haveBoundWaitSeq = true;
+			lastBoundWaitSeq = sourceSequence;
+		}
 		// The renderer's order is Discontinuity -> Frame -> AutoFactor(s): a reset this release
 		// consumed (the flagged discontinuity or a held worker reset) is carried to AutoFactor.
 		if (ReleaseHeldFor(sourceSequence))
@@ -3027,6 +3225,19 @@ if (tile < int(tiles) && g.y < ts) {
 		std::string out = text + bound;
 		if (s.engagedReactive != 0)
 			out += "; engaged " + std::to_string(s.engagedReactive) + "x without the look-ahead (reactive fallback: the cut could not be read ahead)";
+		if (s.waitsMissed != 0)
+		{
+			char miss[256];
+			snprintf(miss, sizeof(miss),
+				"; last wait miss: %s (%llu frames late, analyseMs %.1f; late poll %llu, drop/backlog %llu, wait timeout %llu)",
+				WaitMissCauseText(s.lastWaitMissCause),
+				static_cast<unsigned long long>(s.lastWaitMissFramesLate),
+				s.lastWaitMissAnalyseMs,
+				s.waitMissLatePoll,
+				s.waitMissDropOrBacklog,
+				s.waitMissTimeout);
+			out += miss;
+		}
 		if (s.heldDropped != 0 || s.jobsDropped != 0 || s.submitSkipped != 0 || s.waitsMissed != 0)
 			out += " (analyses were lost to timing: this run is not reproducible)";
 		return out;
