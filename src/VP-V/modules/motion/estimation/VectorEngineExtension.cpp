@@ -5,6 +5,7 @@
 #include "VectorEngineExtension.h"
 
 #include <VP-V/modules/motion/estimation/MotionValidity.h>
+#include <VP-V/modules/motion/estimation/P3FieldFill.h>
 #include <VP-V/modules/motion/estimation/VectorEngine.h>
 #include <VP-V/modules/motion/estimation/VectorEngineInterface.h>
 
@@ -56,6 +57,21 @@ namespace VpMotion
 		// and history from before it. Entering Original needs nothing (Bill's pathway reads no motion state).
 		if (f.kind == RE::Lifecycle::SettingsApplied && f.code == 0 && Vpv::Hub::ExtensionHub::Instance().OriginalPathway(f.host))
 			VectorEngine::RequestInvalidationFor(f.host, MotionValidity::Cause::Resync, nullptr);
+	}
+
+	bool VectorEngineExtension::OnFrame(RE::FrameContext& c)
+	{
+		if (c.phase != RE::FramePhase::Entrance || p3Registered_.load(std::memory_order_acquire)
+			|| Vpv::Hub::ExtensionHub::Instance().OriginalPathway(c.host))
+			return false;
+		if (TryRegisterP3FieldFill())
+			p3Registered_.store(true, std::memory_order_release);
+		return false;
+	}
+
+	bool VectorEngineExtension::P3FieldRegistered() const
+	{
+		return p3Registered_.load(std::memory_order_acquire);
 	}
 
 	void RegisterVectorEngineExtension()
