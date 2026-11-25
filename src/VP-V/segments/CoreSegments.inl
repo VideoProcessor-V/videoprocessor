@@ -7,6 +7,7 @@
 // LibplaceboVideoRenderer.cpp right after the Impl struct. It is not a stand-alone header and no other translation unit may include it.
 // Render thread (renderMutex held; Initialize and ApplyProfileSettingsLiveLocked), as before.
 #pragma once
+#include <VP-V/modules/scaling/chroma_upscale/CflHookOffsets.h>
 
 void LibplaceboVideoRenderer::Impl::UpdatePipelineSlots(const RendererSettings& settings)
 {
@@ -452,13 +453,12 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
         "a placeholder slot has a component but no output-segment stage yet (not run)") :
         FallbackCatalog::Released("S2 placeholder stage"));
     dynamicDrive.AfterCollect(led, colourCounts.ledCompensation, colourCounts.ledCompensationLoaded);
-    // A cadence repeat shows the previous picture again: the sigma-delta
-    // skips its motion search (zero motion; owner 2026-10-13 efficiency).
+    // A cadence repeat shows the previous picture again: the sigma-delta skips its motion search (zero motion; owner 2026-10-13 efficiency).
     for (const pl_hook* hook : frameHooks)
         CustomHookChain::SetHookParameter(hook, "static_refresh", cadenceRepeat ? 1.0 : 0.0);
-    // Stage 8-2 / 8b (scaling.output): the adaptive blend's measure and blend hooks, its
-    // bitrate weighting, residual motion and grain field (VP-V/modules/scaling/output/
-    // AdaptiveDownscaleStage.h; WP-13).
+    ChromaUpscale::ApplyCflHookOffsets(renderImage, frameHooks, requestedShaderSelection, pipelineSlots.OriginalPathway());
+    // Stage 8-2 / 8b (scaling.output): the adaptive blend's measure and blend hooks, its bitrate weighting,
+    // residual motion and grain field (VP-V/modules/scaling/output/AdaptiveDownscaleStage.h; WP-13).
     {
         AdaptiveDownscaleStage::Frame adaptiveFrame;
         adaptiveFrame.adaptiveDownscale = activeSettings.adaptiveDownscale;

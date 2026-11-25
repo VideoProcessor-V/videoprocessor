@@ -6,6 +6,8 @@
   "status": "placeholder",
   "code_location": "migrated",
   "live_files": [
+    "src/VP-V/modules/scaling/chroma_upscale/CflHookOffsets.h",
+    "src/VP-V/modules/scaling/chroma_upscale/CflHookOffsets.cpp",
     "src/VP-V/modules/scaling/chroma_upscale/ChromaCfl.h",
     "src/VP-V/modules/scaling/chroma_upscale/ChromaCflGpu.h",
     "src/VP-V/modules/scaling/chroma_upscale/ChromaCflGpu.cpp",
