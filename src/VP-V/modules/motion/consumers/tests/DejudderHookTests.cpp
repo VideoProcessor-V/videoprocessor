@@ -4,6 +4,7 @@
 // VP-V GPU hook tests (moved out of Bill's LibplaceboLutParserTests.cpp; test names unchanged).
 #include "pch.h"
 #include <VP-V/tests/VpLutGpuTestSupport.h>
+#include <VP-V/modules/motion/estimation/global_model/CameraGuidanceGpu.h>
 
 namespace VideoProcessorTest
 {
@@ -3386,6 +3387,208 @@ namespace VideoProcessorTest
 			Assert::IsNull(cache.Texture(7));
 			fixture.CaptureLog(nullptr);
 			AssertCleanLibplaceboLogExceptPreOutputBug(log);
+		}
+
+		// W23-Final J#7 (MC-CHURN GEM-147 / GEM-148):
+		// 1. Cached shader headers + dynamic land_a uniform across Dejudder::MotionWarp::Warp and DejudderRendered::Warp::Run
+		//    (landingCheck = 0.0f vs 0.5f vs 4.0f, repeated calls bit-exact, 0.5f actively rejects divergent seam landings).
+		// 2. GEM-148 CameraSkipSearches pl_tex_clear_ex overwrites live Forward()/Backward() with exact (0, 0, 1e4, 1) on every block.
+		TEST_METHOD(McChurnHeaderCacheLandAUniformAndCameraSkipClearParity)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+
+			const int width = 256, height = 128;
+			static constexpr int dxRight = 20;
+			// Diverging seam at x = 128: left half static (dx = 0), right half moves +20 px right.
+			// Between block col 7 (center 120, v = 0) and col 8 (center 136, v = +20), landing error reaches ~2.37 px at shift 0.5:
+			//   land_a = 0.5f rejects seam pixels (m = 0 -> held at A), while land_a = 4.0f and 0.0f accept them.
+			const DejudderFrame a = MakeDejudderFrame(width, height,
+				[](int x, int y) { return DejudderTexture(x, y); },
+				[](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); });
+			const DejudderFrame b = MakeDejudderFrame(width, height,
+				[](int x, int y) { return x >= 128 + dxRight ? DejudderTexture(x - dxRight, y) : DejudderTexture(x, y); },
+				[](int x, int y, int c) { return x >= 64 + dxRight / 2 ? DejudderTexture((x - dxRight / 2) * 2, y, 7 + c) : DejudderTexture(x * 2, y, 7 + c); });
+			DejudderGpuPlanes planesA, planesB;
+			UploadDejudderFrame(gpu, a, planesA);
+			UploadDejudderFrame(gpu, b, planesB);
+
+			// Part 1: MotionWarp::Warp + RenderedWarp::Run header cache & dynamic land_a uniform parity.
+			Dejudder::Settings base = DejudderTestSettings();
+			base.pixelTrust = true;
+			// Keep matchTolerance = 3.0f for normal block search, while keeping pix_mask ~1.0 across the seam so land_a is isolated.
+			base.pixelTrustLo = 40.0f;
+			base.pixelTrustHi = 80.0f;
+
+			// Upload cached RGB picture of A once for DejudderRendered::Warp::Run.
+			std::vector<float> cachedTexels(a.luma.size() * 4);
+			for (size_t i = 0; i < a.luma.size(); ++i)
+			{
+				const float v = a.luma[i] / 65535.0f;
+				cachedTexels[i * 4] = cachedTexels[i * 4 + 1] = cachedTexels[i * 4 + 2] = v;
+				cachedTexels[i * 4 + 3] = 1.0f;
+			}
+			pl_tex_params cp{};
+			cp.w = width;
+			cp.h = height;
+			cp.format = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, PL_FMT_CAP_SAMPLEABLE);
+			cp.sampleable = true;
+			cp.initial_data = cachedTexels.data();
+			pl_tex cachedTex = cp.format ? pl_tex_create(gpu, &cp) : nullptr;
+			Assert::IsNotNull(cachedTex, L"cached rgba32f texture for RenderedWarp");
+
+			DejudderRendered::Warp rendered(fixture.Log(), gpu, true);
+			DejudderRendered::Geometry geom;
+			geom.sourceCrop = { 0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height) };
+			geom.targetCrop = geom.sourceCrop;
+
+			auto downloadRendered = [&](pl_tex warpedTex) -> std::vector<float> {
+				Assert::IsNotNull(warpedTex);
+				const bool float32 = warpedTex->params.format->component_depth[0] == 32;
+				std::vector<float> full(float32 ? a.luma.size() * 4 : 0);
+				std::vector<uint16_t> half(float32 ? 0 : a.luma.size() * 4);
+				pl_tex_transfer_params d{};
+				d.tex = warpedTex;
+				d.ptr = float32 ? static_cast<void*>(full.data()) : static_cast<void*>(half.data());
+				Assert::IsTrue(pl_tex_download(gpu, &d), L"rendered warp output must be host-readable");
+				std::vector<float> out(a.luma.size());
+				for (size_t i = 0; i < a.luma.size(); ++i)
+					out[i] = (float32 ? full[i * 4] : HalfBits(half[i * 4])) * 65535.0f;
+				return out;
+			};
+
+			struct WarpOutputs
+			{
+				std::vector<uint16_t> src1, src2;
+				std::vector<float> ren1, ren2;
+			};
+			auto runForLanding = [&](float landingCheck) -> WarpOutputs {
+				Dejudder::Settings s = base;
+				s.landingCheck = landingCheck;
+				Dejudder::MotionWarp w(fixture.Log(), gpu, s);
+				Assert::IsTrue(w.Estimate(planesA.planes, planesB.planes),
+					ExtendedRangeGpuProbe::ToWide(w.LastError()).c_str());
+
+				WarpOutputs o;
+				Dejudder::Planes out1{}, out2{};
+				Assert::IsTrue(w.Warp(planesA.planes, 0.5f, out1), ExtendedRangeGpuProbe::ToWide(w.LastError()).c_str());
+				o.src1 = DownloadPlane(gpu, out1.luma);
+				Assert::IsTrue(w.Warp(planesA.planes, 0.5f, out2), ExtendedRangeGpuProbe::ToWide(w.LastError()).c_str());
+				o.src2 = DownloadPlane(gpu, out2.luma);
+
+				pl_tex rw1 = nullptr, rw2 = nullptr;
+				Assert::IsTrue(rendered.Run(cachedTex, w.Field(), w.FrameTrust(), s.minTrustedShare,
+					0.5f, geom, rw1, w.SubField(), &s, w.Camera(), w.PixelMask(), w.VectorOk()),
+					ExtendedRangeGpuProbe::ToWide(rendered.Error()).c_str());
+				pl_gpu_finish(gpu);
+				o.ren1 = downloadRendered(rw1);
+				Assert::IsTrue(rendered.Run(cachedTex, w.Field(), w.FrameTrust(), s.minTrustedShare,
+					0.5f, geom, rw2, w.SubField(), &s, w.Camera(), w.PixelMask(), w.VectorOk()),
+					ExtendedRangeGpuProbe::ToWide(rendered.Error()).c_str());
+				pl_gpu_finish(gpu);
+				o.ren2 = downloadRendered(rw2);
+				return o;
+			};
+
+			const WarpOutputs landOff = runForLanding(0.0f);
+			const WarpOutputs landStrict = runForLanding(0.5f);
+			const WarpOutputs landLoose = runForLanding(4.0f);
+			pl_tex_destroy(gpu, &cachedTex);
+
+			// Bit-exact repeatability across cached header hit paths (source + rendered).
+			Assert::IsTrue(landOff.src1 == landOff.src2, L"MotionWarp::Warp landingCheck=0.0 repeat must be bit-exact");
+			Assert::IsTrue(landStrict.src1 == landStrict.src2, L"MotionWarp::Warp landingCheck=0.5 repeat must be bit-exact");
+			Assert::IsTrue(landLoose.src1 == landLoose.src2, L"MotionWarp::Warp landingCheck=4.0 repeat must be bit-exact");
+			Assert::IsTrue(landOff.ren1 == landOff.ren2, L"RenderedWarp::Run landingCheck=0.0 repeat must be bit-exact");
+			Assert::IsTrue(landStrict.ren1 == landStrict.ren2, L"RenderedWarp::Run landingCheck=0.5 repeat must be bit-exact");
+			Assert::IsTrue(landLoose.ren1 == landLoose.ren2, L"RenderedWarp::Run landingCheck=4.0 repeat must be bit-exact");
+
+			// Seam band [120, 144) x [16, height-16): landingCheck = 0.5f rejects divergent landings (collapsing closer to A)
+			// relative to BOTH landingCheck = 0.0f (off) AND landingCheck = 4.0f (same cached #define LAND_A 1 header key!).
+			int srcDiff05vs00 = 0, srcDiff05vs40 = 0;
+			int renDiff05vs00 = 0, renDiff05vs40 = 0;
+			double srcErrToA00 = 0.0, srcErrToA05 = 0.0;
+			double renErrToA00 = 0.0, renErrToA05 = 0.0;
+			for (int y = 16; y < height - 16; ++y)
+				for (int x = 120; x < 144; ++x)
+				{
+					const size_t i = static_cast<size_t>(y) * width + x;
+					if (std::abs(static_cast<int>(landStrict.src1[i]) - static_cast<int>(landOff.src1[i])) > 256)
+						++srcDiff05vs00;
+					if (std::abs(static_cast<int>(landStrict.src1[i]) - static_cast<int>(landLoose.src1[i])) > 256)
+						++srcDiff05vs40;
+					srcErrToA00 += std::abs(static_cast<int>(landOff.src1[i]) - static_cast<int>(a.luma[i]));
+					srcErrToA05 += std::abs(static_cast<int>(landStrict.src1[i]) - static_cast<int>(a.luma[i]));
+
+					if (std::fabs(landStrict.ren1[i] - landOff.ren1[i]) > 256.0f)
+						++renDiff05vs00;
+					if (std::fabs(landStrict.ren1[i] - landLoose.ren1[i]) > 256.0f)
+						++renDiff05vs40;
+					renErrToA00 += std::fabs(landOff.ren1[i] - static_cast<float>(a.luma[i]));
+					renErrToA05 += std::fabs(landStrict.ren1[i] - static_cast<float>(a.luma[i]));
+				}
+			Assert::IsTrue(srcDiff05vs00 > 100 && srcErrToA05 < srcErrToA00,
+				L"MotionWarp negative control: land_a=0.5f actively rejects divergent seam pixels vs landingCheck=0.0f");
+			Assert::IsTrue(srcDiff05vs40 > 100,
+				L"MotionWarp GEM-147: land_a=0.5f and land_a=4.0f share cached LAND_A header yet produce distinct uniform-driven results");
+			Assert::IsTrue(renDiff05vs00 > 100 && renErrToA05 < renErrToA00,
+				L"RenderedWarp negative control: land_a=0.5f actively rejects divergent seam pixels vs landingCheck=0.0f");
+			Assert::IsTrue(renDiff05vs40 > 100,
+				L"RenderedWarp GEM-147: land_a=0.5f and land_a=4.0f share cached LAND_A header yet produce distinct uniform-driven results");
+
+			// Part 2 (GEM-148): CameraSkipSearches pl_tex_clear_ex overwrites live Forward()/Backward() with (0, 0, 1e4, 1).
+			{
+				Dejudder::MotionWarp skipWarp(fixture.Log(), gpu, DejudderTestSettings());
+				// Negative control: unskipped Estimate writes finite SAD < 100 into Forward() and Backward().
+				Assert::IsTrue(skipWarp.Estimate(planesA.planes, planesB.planes),
+					ExtendedRangeGpuProbe::ToWide(skipWarp.LastError()).c_str());
+				Assert::IsFalse(skipWarp.CameraGuidanceUsed().matcherSkipped, L"negative control: unskipped estimate");
+				const DejudderField fwdLive = DownloadField(gpu, skipWarp, skipWarp.Forward());
+				const DejudderField bwdLive = DownloadField(gpu, skipWarp, skipWarp.Backward());
+				float minLiveFwdSad = 1e9f, minLiveBwdSad = 1e9f;
+				for (int by = 1; by + 1 < fwdLive.blocksY; ++by)
+					for (int bx = 1; bx + 1 < fwdLive.blocksX; ++bx)
+					{
+						minLiveFwdSad = (std::min)(minLiveFwdSad, fwdLive.texels[(static_cast<size_t>(by) * fwdLive.blocksX + bx) * 4 + 2]);
+						minLiveBwdSad = (std::min)(minLiveBwdSad, bwdLive.texels[(static_cast<size_t>(by) * bwdLive.blocksX + bx) * 4 + 2]);
+					}
+				Assert::IsTrue(minLiveFwdSad < 100.0f && minLiveBwdSad < 100.0f,
+					L"negative control: live unskipped Estimate writes finite SAD < 100 before CameraSkipSearches");
+
+				// Now skip searches on the SAME MotionWarp instance so pl_tex_clear_ex must overwrite live search data.
+				auto skipGuidance = std::make_shared<CameraModel::GuidanceFrame>();
+				skipGuidance->active = true;
+				skipGuidance->skipMatcher = true;
+				skipWarp.SetCameraGuidance(skipGuidance);
+				Assert::IsTrue(skipWarp.Estimate(planesA.planes, planesB.planes),
+					ExtendedRangeGpuProbe::ToWide(skipWarp.LastError()).c_str());
+				Assert::IsTrue(skipWarp.CameraGuidanceUsed().matcherSkipped, L"CameraSkipSearches engaged");
+
+				const DejudderField fwdSkipped = DownloadField(gpu, skipWarp, skipWarp.Forward());
+				const DejudderField bwdSkipped = DownloadField(gpu, skipWarp, skipWarp.Backward());
+				const float expected[4] = { 0.0f, 0.0f, 1.0e4f, 1.0f };
+				float maxAbsErr = 0.0f;
+				for (const DejudderField* f : { &fwdSkipped, &bwdSkipped })
+				{
+					Assert::IsTrue(f->blocksX > 0 && f->blocksY > 0);
+					for (int by = 0; by < f->blocksY; ++by)
+						for (int bx = 0; bx < f->blocksX; ++bx)
+						{
+							const size_t baseIdx = (static_cast<size_t>(by) * f->blocksX + bx) * 4;
+							for (int c = 0; c < 4; ++c)
+								maxAbsErr = (std::max)(maxAbsErr, std::fabs(f->texels[baseIdx + c] - expected[c]));
+						}
+				}
+				Assert::IsTrue(maxAbsErr < 1e-2f,
+					(L"GEM-148 pl_tex_clear_ex must fill every Forward/Backward texel with (0, 0, 1e4, 1); maxAbsErr=" +
+						std::to_wstring(maxAbsErr)).c_str());
+			}
+
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
 		}
 	};
 }

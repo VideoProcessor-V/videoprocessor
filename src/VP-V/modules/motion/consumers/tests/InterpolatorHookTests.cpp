@@ -1037,5 +1037,102 @@ namespace VideoProcessorTest
 			}
 			AssertCleanLibplaceboLog(log);
 		}
+
+		// W23-Final J#7 (MC-CHURN GEM-147): FrameInterpolator stack descriptors + bitmask header cache parity across
+		// distinct A!=B (Blend), identical A==B (#define src_b src_a), and Grain::Preserve (LowBand stack descriptors + PRESERVE_HEADER).
+		TEST_METHOD(McChurnInterpolatorStackDescriptorsAndHeaderCacheParity)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+
+			const int width = 256, height = 128;
+			const double vx = 4.0, vy = 2.0;
+			const GrainFrames gf = MakeGrainFrames(width, height, 2, vx, vy, 2.0, false, 91u);
+			DejudderGpuPlanes planesA, planesB;
+			UploadDejudderFrame(gpu, gf.frames[0], planesA);
+			UploadDejudderFrame(gpu, gf.frames[1], planesB);
+
+			InterpolatorField field;
+			MakeInterpolatorField(gpu, width, height, 1.0f,
+				[vx, vy](int, int) { return std::array<float, 4>{ static_cast<float>(vx), static_cast<float>(vy), 1.0f, 0.0f }; }, field);
+
+			Interpolator::FrameInterpolator interp(fixture.Log(), gpu, true);
+			auto meanAbsDiffU16 = [](const std::vector<uint16_t>& u, const std::vector<uint16_t>& v) -> double {
+				Assert::AreEqual(u.size(), v.size());
+				double sum = 0.0;
+				for (size_t i = 0; i < u.size(); ++i)
+					sum += std::abs(static_cast<int>(u[i]) - static_cast<int>(v[i]));
+				return sum / static_cast<double>(u.size());
+			};
+
+			// (a) Distinct frames A != B, Blend mode (no grain bands, planeMask = 0), repeated calls bit-exact.
+			interp.SetGrain(InterpolationPolicy::Grain::Blend);
+			Dejudder::Planes outBlend1{}, outBlend2{};
+			Assert::IsTrue(interp.Run(planesA.planes, planesB.planes, InterpolatorMotion(field), 0.5f,
+				InterpolationPolicy::Fallback::Hold, outBlend1), InterpolatorError(interp, log).c_str());
+			const std::vector<uint16_t> blendLuma1 = DownloadPlane(gpu, outBlend1.luma);
+			const std::vector<uint16_t> blendChroma1 = DownloadPlane(gpu, outBlend1.chroma);
+			Assert::IsTrue(interp.Run(planesA.planes, planesB.planes, InterpolatorMotion(field), 0.5f,
+				InterpolationPolicy::Fallback::Hold, outBlend2), InterpolatorError(interp, log).c_str());
+			const std::vector<uint16_t> blendLuma2 = DownloadPlane(gpu, outBlend2.luma);
+			const std::vector<uint16_t> blendChroma2 = DownloadPlane(gpu, outBlend2.chroma);
+			Assert::IsTrue(blendLuma1 == blendLuma2 && blendChroma1 == blendChroma2,
+				L"Blend A!=B repeat must be bit-exact across cached header hit");
+
+			// (b) Identical frames A == B, Blend mode (#define src_b src_a bitmask cache entry), repeated calls bit-exact.
+			Dejudder::Planes outSame1{}, outSame2{};
+			Assert::IsTrue(interp.Run(planesA.planes, planesA.planes, InterpolatorMotion(field), 0.5f,
+				InterpolationPolicy::Fallback::Hold, outSame1), InterpolatorError(interp, log).c_str());
+			const std::vector<uint16_t> sameLuma1 = DownloadPlane(gpu, outSame1.luma);
+			Assert::IsTrue(interp.Run(planesA.planes, planesA.planes, InterpolatorMotion(field), 0.5f,
+				InterpolationPolicy::Fallback::Hold, outSame2), InterpolatorError(interp, log).c_str());
+			const std::vector<uint16_t> sameLuma2 = DownloadPlane(gpu, outSame2.luma);
+			Assert::IsTrue(sameLuma1 == sameLuma2,
+				L"Blend A==B (#define src_b src_a) repeat must be bit-exact");
+
+			// Negative control: A != B at t = 0.5 genuinely interpolates between A and B (distinct from A == B identity).
+			Assert::IsTrue(meanAbsDiffU16(blendLuma1, sameLuma1) > 200.0,
+				L"negative control: A!=B at t=0.5 differs substantially from A==B");
+			Assert::IsTrue(meanAbsDiffU16(blendLuma1, gf.frames[0].luma) > 200.0 &&
+				meanAbsDiffU16(blendLuma1, gf.frames[1].luma) > 200.0,
+				L"negative control: A!=B at t=0.5 genuinely interpolates between A and B (matches neither endpoint)");
+
+			// (c) Grain::Preserve (LowBand stack descriptors + PRESERVE_HEADER cache entries for A!=B and A==B).
+			interp.SetGrain(InterpolationPolicy::Grain::Preserve);
+			Dejudder::Planes outPres1{}, outPres2{};
+			Assert::IsTrue(interp.Run(planesA.planes, planesB.planes, InterpolatorMotion(field), 0.5f,
+				InterpolationPolicy::Fallback::Hold, outPres1), InterpolatorError(interp, log).c_str());
+			const std::vector<uint16_t> presLuma1 = DownloadPlane(gpu, outPres1.luma);
+			const std::vector<uint16_t> presChroma1 = DownloadPlane(gpu, outPres1.chroma);
+			Assert::IsTrue(interp.Run(planesA.planes, planesB.planes, InterpolatorMotion(field), 0.5f,
+				InterpolationPolicy::Fallback::Hold, outPres2), InterpolatorError(interp, log).c_str());
+			const std::vector<uint16_t> presLuma2 = DownloadPlane(gpu, outPres2.luma);
+			const std::vector<uint16_t> presChroma2 = DownloadPlane(gpu, outPres2.chroma);
+			Assert::IsTrue(presLuma1 == presLuma2 && presChroma1 == presChroma2,
+				L"Grain::Preserve A!=B repeat must be bit-exact");
+			Assert::IsTrue(interp.GrainPreservedRuns() >= 2ull, L"Grain::Preserve path actually executed");
+
+			Dejudder::Planes outPresSame1{}, outPresSame2{};
+			Assert::IsTrue(interp.Run(planesA.planes, planesA.planes, InterpolatorMotion(field), 0.5f,
+				InterpolationPolicy::Fallback::Hold, outPresSame1), InterpolatorError(interp, log).c_str());
+			const std::vector<uint16_t> presSame1 = DownloadPlane(gpu, outPresSame1.luma);
+			Assert::IsTrue(interp.Run(planesA.planes, planesA.planes, InterpolatorMotion(field), 0.5f,
+				InterpolationPolicy::Fallback::Hold, outPresSame2), InterpolatorError(interp, log).c_str());
+			const std::vector<uint16_t> presSame2 = DownloadPlane(gpu, outPresSame2.luma);
+			Assert::IsTrue(presSame1 == presSame2,
+				L"Grain::Preserve A==B (#define src_b src_a + low_b low_a) repeat must be bit-exact");
+
+			// Negative control: Grain::Preserve A!=B differs from both A==B and plain Blend on grainy moving frames.
+			Assert::IsTrue(meanAbsDiffU16(presLuma1, presSame1) > 200.0,
+				L"negative control: Grain::Preserve A!=B differs substantially from A==B");
+			Assert::IsTrue(presLuma1 != blendLuma1,
+				L"negative control: Grain::Preserve output differs from plain Blend on grainy frames");
+
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
+		}
 	};
 }

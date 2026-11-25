@@ -384,5 +384,201 @@ namespace VideoProcessorTest
 			fixture.CaptureLog(nullptr);
 			AssertCleanLibplaceboLog(log);
 		}
+
+		// W23-Final J#7 (MC-CHURN GEM-147): OcclusionMask::Hook cached kHeaders[4] table parity across all 3 active variants
+		// (key=1 mask-only, key=2 grain-only, key=3 mask+grain), bit-exact repeatability, and exact alpha encodings.
+		TEST_METHOD(McChurnOcclusionMaskCachedHeaderTableAllVariantsParity)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			std::string log;
+			fixture.CaptureLog(&log);
+			pl_gpu gpu = fixture.Gpu();
+
+			const int w = 32, h = 32;   // 2x2 blocks of 16x16 source pixels
+			const pl_fmt f32Fmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, static_cast<enum pl_fmt_caps>(
+				PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE | PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+			Assert::IsNotNull(f32Fmt, L"rgba32f format required on WARP");
+
+			std::vector<float> srcTexels(static_cast<size_t>(w) * h * 4);
+			for (size_t i = 0; i < static_cast<size_t>(w) * h; ++i)
+			{
+				srcTexels[i * 4 + 0] = 0.5f;
+				srcTexels[i * 4 + 1] = 0.5f;
+				srcTexels[i * 4 + 2] = 0.5f;
+				srcTexels[i * 4 + 3] = 1.0f;
+			}
+			pl_tex_params sp{};
+			sp.w = w; sp.h = h; sp.format = f32Fmt; sp.sampleable = true; sp.initial_data = srcTexels.data();
+			pl_tex source = pl_tex_create(gpu, &sp);
+			Assert::IsNotNull(source);
+
+			pl_tex_params tp{};
+			tp.w = w; tp.h = h; tp.format = f32Fmt; tp.renderable = true; tp.host_readable = true; tp.blit_dst = true;
+			pl_tex target = pl_tex_create(gpu, &tp);
+			Assert::IsNotNull(target);
+
+			pl_tex_params cp{};
+			cp.w = w; cp.h = h; cp.format = f32Fmt; cp.storable = true; cp.host_readable = true;
+			pl_tex capture = pl_tex_create(gpu, &cp);
+			Assert::IsNotNull(capture);
+
+			// 2x2 mask: col 0 = 0 (new), col 1 = 1 (seen).
+			pl_tex maskTex = MakeMaskTexture(gpu, 2, 2, { 0, 65535, 0, 65535 });
+			Assert::IsNotNull(maskTex);
+
+			// 2x2 grain map with grainFloor = 0.4f:
+			//   row 0: r = 1.0, g = 1.0 => grain amount g = (1.0 - 1.0) / 0.6 = 0.0
+			//   row 1: r = 0.7, g = 1.0 => grain amount g = (1.0 - 0.7) / 0.6 = 0.5
+			const float grainData[4 * 4] = {
+				1.0f, 1.0f, 0.0f, 1.0f,   1.0f, 1.0f, 0.0f, 1.0f,
+				0.7f, 1.0f, 0.0f, 1.0f,   0.7f, 1.0f, 0.0f, 1.0f,
+			};
+			pl_tex_params gp{};
+			gp.w = 2; gp.h = 2; gp.format = f32Fmt; gp.sampleable = true; gp.initial_data = grainData;
+			pl_tex grainTex = pl_tex_create(gpu, &gp);
+			Assert::IsNotNull(grainTex);
+
+			// Read-only PL_HOOK_OUTPUT tap right after OcclusionMask::Hook to capture its exact float RGBA output.
+			struct AlphaTap
+			{
+				pl_tex dst = nullptr;
+				bool captured = false;
+				static pl_hook_res Run(void* priv, const pl_hook_params* params)
+				{
+					auto* self = static_cast<AlphaTap*>(priv);
+					pl_hook_res none{};
+					none.output = PL_HOOK_SIG_NONE;
+					if (!params || !params->tex || !params->dispatch || !self->dst)
+						return none;
+					pl_shader_desc descs[2]{};
+					descs[0].desc.name = "src";
+					descs[0].desc.type = PL_DESC_SAMPLED_TEX;
+					descs[0].binding.object = params->tex;
+					descs[0].binding.sample_mode = PL_TEX_SAMPLE_NEAREST;
+					descs[1].desc.name = "dst";
+					descs[1].desc.type = PL_DESC_STORAGE_IMG;
+					descs[1].desc.access = PL_DESC_ACCESS_WRITEONLY;
+					descs[1].binding.object = self->dst;
+					pl_custom_shader custom{};
+					custom.description = "test occlusion mask alpha tap";
+					custom.body =
+						"ivec2 q = ivec2(gl_GlobalInvocationID.xy);\n"
+						"if (q.x < imageSize(dst).x && q.y < imageSize(dst).y)\n"
+						"    imageStore(dst, q, texelFetch(src, q, 0));\n";
+					custom.input = PL_SHADER_SIG_NONE;
+					custom.output = PL_SHADER_SIG_NONE;
+					custom.descriptors = descs;
+					custom.num_descriptors = 2;
+					custom.compute = true;
+					custom.compute_group_size[0] = 16;
+					custom.compute_group_size[1] = 16;
+					pl_shader sh = pl_dispatch_begin(params->dispatch);
+					if (pl_shader_custom(sh, &custom))
+					{
+						pl_dispatch_compute_params comp{};
+						comp.shader = &sh;
+						comp.dispatch_size[0] = (self->dst->params.w + 15) / 16;
+						comp.dispatch_size[1] = (self->dst->params.h + 15) / 16;
+						comp.dispatch_size[2] = 1;
+						self->captured = pl_dispatch_compute(params->dispatch, &comp);
+					}
+					else
+					{
+						pl_dispatch_abort(params->dispatch, &sh);
+					}
+					return none;
+				}
+			};
+			AlphaTap tap;
+			tap.dst = capture;
+			tap.captured = false;
+			pl_hook tapHook{};
+			tapHook.stages = PL_HOOK_OUTPUT;
+			tapHook.input = PL_HOOK_SIG_TEX;
+			tapHook.priv = &tap;
+			tapHook.hook = &AlphaTap::Run;
+			tapHook.signature = 0x5650414C50484154ull;
+
+			OcclusionMask::Hook maskHook;
+			const pl_rect2df whole{ 0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h) };
+			auto runOnce = [&]() -> std::vector<float> {
+				tap.captured = false;
+				pl_frame image = TargetLutGpuFixture::MakeRgbFrame(source);
+				image.crop = whole;
+				pl_frame output = TargetLutGpuFixture::MakeRgbFrame(target);
+				output.crop = whole;
+				pl_render_params params = pl_render_fast_params;
+				params.dither_params = nullptr;
+				params.error_diffusion = nullptr;
+				const pl_hook* hooks[2] = { maskHook.Get(), &tapHook };
+				params.hooks = hooks;
+				params.num_hooks = 2;
+				Assert::IsTrue(pl_render_image(fixture.Renderer(), &image, &output, &params));
+				pl_gpu_finish(gpu);
+				Assert::IsTrue(tap.captured, L"alpha tap hook must capture OcclusionMask output");
+				std::vector<float> rgba(static_cast<size_t>(w) * h * 4);
+				pl_tex_transfer_params d{};
+				d.tex = capture;
+				d.ptr = rgba.data();
+				Assert::IsTrue(pl_tex_download(gpu, &d));
+				return rgba;
+			};
+			auto alphaAt = [w](const std::vector<float>& rgba, int x, int y) -> float {
+				return rgba[(static_cast<size_t>(y) * w + x) * 4 + 3];
+			};
+
+			// Variant 1: mask-only (kHeaders[1]).
+			maskHook.SetFrame(maskTex, whole, whole);
+			maskHook.SetGrain(nullptr, 0.4f);
+			const std::vector<float> mOnly1 = runOnce();
+			const std::vector<float> mOnly2 = runOnce();
+			Assert::IsTrue(mOnly1 == mOnly2, L"mask-only (key=1) repeat must be bit-exact");
+			Assert::AreEqual(0.0f, alphaAt(mOnly1, 8, 8), 2e-3f, L"key=1 (m=0, row0) alpha == 0.0");
+			Assert::AreEqual(1.0f, alphaAt(mOnly1, 24, 8), 2e-3f, L"key=1 (m=1, row0) alpha == 1.0");
+			Assert::AreEqual(0.0f, alphaAt(mOnly1, 8, 24), 2e-3f, L"key=1 (m=0, row1) alpha == 0.0 (no grain)");
+			Assert::AreEqual(1.0f, alphaAt(mOnly1, 24, 24), 2e-3f, L"key=1 (m=1, row1) alpha == 1.0 (no grain)");
+
+			// Variant 2: grain-only (kHeaders[2]; mask dropped => m = 1 everywhere).
+			maskHook.DropMask();
+			maskHook.SetGrain(grainTex, 0.4f);
+			const std::vector<float> gOnly1 = runOnce();
+			const std::vector<float> gOnly2 = runOnce();
+			Assert::IsTrue(gOnly1 == gOnly2, L"grain-only (key=2) repeat must be bit-exact");
+			Assert::AreEqual(1.0f, alphaAt(gOnly1, 8, 8), 2e-3f, L"key=2 (g=0, col0) alpha == 1.0");
+			Assert::AreEqual(1.0f, alphaAt(gOnly1, 24, 8), 2e-3f, L"key=2 (g=0, col1) alpha == 1.0");
+			Assert::AreEqual(1.0f - 0.49f * 0.5f, alphaAt(gOnly1, 8, 24), 2e-3f, L"key=2 (g=0.5, col0) alpha == 1 - 0.49*g");
+			Assert::AreEqual(1.0f - 0.49f * 0.5f, alphaAt(gOnly1, 24, 24), 2e-3f, L"key=2 (g=0.5, col1) alpha == 1 - 0.49*g");
+
+			// Variant 3: mask + grain (kHeaders[3]; all 4 encodings simultaneously active).
+			maskHook.SetFrame(maskTex, whole, whole);
+			maskHook.SetGrain(grainTex, 0.4f);
+			const std::vector<float> both1 = runOnce();
+			const std::vector<float> both2 = runOnce();
+			Assert::IsTrue(both1 == both2, L"mask+grain (key=3) repeat must be bit-exact");
+			Assert::AreEqual(0.0f, alphaAt(both1, 8, 8), 2e-3f, L"key=3 (m=0, g=0) alpha == 0.0");
+			Assert::AreEqual(1.0f, alphaAt(both1, 24, 8), 2e-3f, L"key=3 (m=1, g=0) alpha == 1.0");
+			Assert::AreEqual(0.49f * 0.5f, alphaAt(both1, 8, 24), 2e-3f, L"key=3 (m=0, g=0.5) alpha == 0.49*g");
+			Assert::AreEqual(1.0f - 0.49f * 0.5f, alphaAt(both1, 24, 24), 2e-3f, L"key=3 (m=1, g=0.5) alpha == 1 - 0.49*g");
+
+			// Negative control: mask=0 vs mask=1 and grain=0 vs grain=0.5 produce strictly distinct encodings across variants.
+			Assert::IsTrue(std::fabs(alphaAt(mOnly1, 24, 8) - alphaAt(mOnly1, 8, 8)) > 0.9f,
+				L"negative control: mask=1 and mask=0 produce distinct alpha");
+			Assert::IsTrue(std::fabs(alphaAt(gOnly1, 8, 8) - alphaAt(gOnly1, 8, 24)) > 0.2f,
+				L"negative control: grain=0 and grain=0.5 produce distinct alpha");
+			Assert::IsTrue(std::fabs(alphaAt(both1, 8, 24) - alphaAt(mOnly1, 8, 24)) > 0.2f &&
+				std::fabs(alphaAt(both1, 8, 24) - alphaAt(gOnly1, 8, 24)) > 0.4f,
+				L"negative control: key=3 (mask+grain) produces distinct encoding from both key=1 and key=2");
+			Assert::AreEqual(6ull, maskHook.Applied(), L"all 3 variants x 2 runs applied cleanly");
+			Assert::AreEqual(0ull, maskHook.Failed(), L"zero hook failures across cached header table");
+
+			pl_tex_destroy(gpu, &grainTex);
+			pl_tex_destroy(gpu, &maskTex);
+			pl_tex_destroy(gpu, &capture);
+			pl_tex_destroy(gpu, &target);
+			pl_tex_destroy(gpu, &source);
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
+		}
 	};
 }
