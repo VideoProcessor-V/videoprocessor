@@ -1565,5 +1565,71 @@ namespace ScalerPassTestsNs
 				}
 			}
 		}
+
+		// POD2-M6 regression test (WARP): SelectFloatFormat must preserve F32 precision before
+		// keeping PL_FMT_CAP_STORABLE (F32+storable -> F32+renderable -> F16+storable -> F16+renderable).
+		BEGIN_TEST_METHOD_ATTRIBUTE(SelectFloatFormatPrefersF32RenderableOverF16Storable)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(SelectFloatFormatPrefersF32RenderableOverF16Storable)
+		{
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create libplacebo WARP test device");
+			pl_gpu gpu = dev.Gpu();
+
+			struct ScopedCapsMask
+			{
+				struct Saved { pl_fmt_t* fmt; enum pl_fmt_caps caps; };
+				std::vector<Saved> saved;
+				void ClearMask(pl_gpu g, int minDepth, enum pl_fmt_caps mask)
+				{
+					if (!g || !g->formats) return;
+					for (int i = 0; i < g->num_formats; ++i)
+					{
+						pl_fmt f = g->formats[i];
+						if (!f || f->type != PL_FMT_FLOAT || f->component_depth[0] < minDepth)
+							continue;
+						if ((static_cast<unsigned>(f->caps) & static_cast<unsigned>(mask)) == 0u)
+							continue;
+						pl_fmt_t* mut = const_cast<pl_fmt_t*>(f);
+						saved.push_back({ mut, mut->caps });
+						mut->caps = static_cast<enum pl_fmt_caps>(
+							static_cast<unsigned>(mut->caps) & ~static_cast<unsigned>(mask));
+					}
+				}
+				~ScopedCapsMask()
+				{
+					for (size_t i = saved.size(); i > 0; --i)
+						saved[i - 1].fmt->caps = saved[i - 1].caps;
+				}
+			};
+
+			// Baseline: F32+storable available -> picks F32+storable.
+			bool fell16 = false;
+			pl_fmt fBase = ScalerPass::Module::SelectFloatFormat(gpu, 4, ScalerPass::Precision::F32, true, fell16);
+			Assert::IsNotNull(fBase);
+			Assert::AreEqual(32, fBase->component_depth[0], L"baseline must pick F32");
+			Assert::IsFalse(fell16, L"baseline must not report F16 fallback");
+
+			// POD2-M6 core case: mask STORABLE on F32 only (F32 stays renderable, F16 stays storable+renderable).
+			{
+				ScopedCapsMask mask;
+				mask.ClearMask(gpu, 32, PL_FMT_CAP_STORABLE);
+				bool fell = false;
+				pl_fmt f = ScalerPass::Module::SelectFloatFormat(gpu, 4, ScalerPass::Precision::F32, true, fell);
+				Assert::IsNotNull(f, L"F32 renderable fallback must succeed");
+				Assert::AreEqual(32, f->component_depth[0],
+					L"POD2-M6: F32+renderable must beat F16+storable when F32 lacks STORABLE");
+				Assert::IsFalse(fell, L"POD2-M6: keeping F32+renderable must not mark fellBackTo16");
+
+				// Negative control: also mask RENDERABLE on F32 -> must fall back to F16+storable with fellBackTo16=true.
+				mask.ClearMask(gpu, 32, PL_FMT_CAP_RENDERABLE);
+				bool fellNeg = false;
+				pl_fmt fNeg = ScalerPass::Module::SelectFloatFormat(gpu, 4, ScalerPass::Precision::F32, true, fellNeg);
+				Assert::IsNotNull(fNeg, L"negative control: F16 fallback must succeed when F32 is unavailable");
+				Assert::AreEqual(16, fNeg->component_depth[0], L"negative control: must pick F16 when F32 is unavailable");
+				Assert::IsTrue(fellNeg, L"negative control: F16 fallback must set fellBackTo16=true");
+			}
+		}
 	};
 }
