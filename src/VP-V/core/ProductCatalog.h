@@ -630,10 +630,10 @@ inline const std::vector<ProductFlag>& ProductFlags()
 inline const std::vector<ConsumerFlag>& ConsumerFlags()
 {
     static const std::vector<ConsumerFlag> flags = {
-        // D4: DetailPulse / TextureRestore read P11 band energies (15c C3b); P10 bands (DP/TR) and P4 (DP) stay flagged NotRead.
+        // D4/O#7: DetailPulse / TextureRestore read P11 band energies (15c C3b) and P4 via shared U7 (D8); P10 bands stay flagged NotRead.
         { uint16_t(kCatalogConsumerIdBase + 0), kP10GrainSplit, FlagKind::NotRead, "C10",
           "private bands (DetailPulse.h)" },
-        { uint16_t(kCatalogConsumerIdBase + 0), kP4SourceStats, FlagKind::NotRead, "D10", "private cut / fade logic" },
+        { uint16_t(kCatalogConsumerIdBase + 0), kP4SourceStats, FlagKind::ViewIsActual, "D8", "P4 via the scene group (repair/texture_restore/SceneRestart.h SceneRestartOf; U7 over two P4 records, SkeletonModule.cpp ClassifyEvents)" },
         { uint16_t(kCatalogConsumerIdBase + 1), kP10GrainSplit, FlagKind::NotRead, "C10",
           "private bands (TextureRestore.h)" },
         { uint16_t(kCatalogConsumerIdBase + 1), kP4SourceStats, FlagKind::ViewIsActual, "D8",

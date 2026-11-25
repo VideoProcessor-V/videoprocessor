@@ -346,8 +346,8 @@ if (li == 0u) {
         if (ahead_valid > 0) {
             vec4 a = imageLoad(ring, ivec2(RING + 1, 0));
             float ra = (a.x + a.y) / max(e1 + e2, 1e-20);
-            if (abs(a.z - my) <= cut_codes && ra <= ahead_ratio && ra * ahead_ratio >= 1.0)
-                r = max(r, a.xy * decay * fade_keep2);   // a steady fade's step, one frame the other way (fade in: the brighter successor)
+            if (ra <= ahead_ratio && ra * ahead_ratio >= 1.0)
+                r = max(r, a.xy * decay * ahead_keep2);
         }
     }
     vec2 g = vec2(1.0);
@@ -1467,7 +1467,7 @@ for (int q = 0; q < 4; q++) {
 			pl_tex statsOut, pl_tex weightOut, pl_tex prevStats, pl_tex ring,
 			bool ahead, int cur, int nValid, int nUse, int sceneRestart, bool aheadValid, std::string& error, pl_tex lowTex = nullptr,
 			float historyKeep2 = 1.0f, bool lowPrecomputed = false, bool lowNormalised = false,
-			const VpLaneProducts::P11BandTextures* p11Tex = nullptr, int p11Block = 0)
+			const VpLaneProducts::P11BandTextures* p11Tex = nullptr, int p11Block = 0, float aheadKeep2 = 1.0f)
 		{
 			const bool fast = (params.fast || lowPrecomputed) && lowTex != nullptr;
 			if (fast && !lowPrecomputed && !LowPass(dispatch, luma, c, lowTex, !ahead, error))
@@ -1530,7 +1530,6 @@ for (int q = 0; q < 4; q++) {
 			{
 				const float floorEnergy = static_cast<float>(FloorEnergy(params.colorDepth));
 				const float winsorise = static_cast<float>(kWinsorise);
-				const float cutCodes = static_cast<float>(CutCodes(params.bitrateQuality, params.colorDepth));
 				const float decay = static_cast<float>(DecayPerFrame(params.sourceHz));
 				const float deadZone = static_cast<float>(kDeadZone);
 				const float cap = static_cast<float>(ClampCap(params.cap));
@@ -1542,7 +1541,7 @@ for (int q = 0; q < 4; q++) {
 				const pl_shader_var v[13] = {
 					{ pl_var_float("floor_energy"), &floorEnergy, true },
 					{ pl_var_float("winsorise"), &winsorise, true },
-					{ pl_var_float("cut_codes"), &cutCodes, true },
+					{ pl_var_float("ahead_keep2"), &aheadKeep2, true },
 					{ pl_var_float("decay"), &decay, true },
 					{ pl_var_float("dead_zone"), &deadZone, true },
 					{ pl_var_float("cap"), &cap, true },
@@ -1632,6 +1631,10 @@ for (int q = 0; q < 4; q++) {
 	unsigned long long Module::P11EnergyFallbacks() const { return p11EnergyFallbacks; }
 	const std::string& Module::LastP11EnergyFallback() const { return lastP11EnergyFallback; }
 	unsigned long long Module::SceneVectorVetoes() const { return sceneVectorVetoes; }
+	unsigned long long Module::AheadSceneHits() const { return aheadSceneHits; }
+	unsigned long long Module::AheadSceneRestarts() const { return aheadSceneRestarts; }
+	unsigned long long Module::AheadSceneFallbacks() const { return aheadSceneFallbacks; }
+	const std::string& Module::LastAheadSceneFallback() const { return lastAheadSceneFallback; }
 
 	void Module::Forget()
 	{
@@ -1640,6 +1643,7 @@ for (int q = 0; q < 4; q++) {
 		sceneUnavailable = false;
 		sceneWhy = nullptr;
 		lastHistoryKeep = 1.0f;
+		lastAheadSceneFallback.clear();
 		if (!impl) return;
 		impl->decided = false;
 		impl->behind = 0;
@@ -1768,6 +1772,35 @@ for (int q = 0; q < 4; q++) {
 				sceneWhy = nullptr;
 				lastHistoryKeep = 0.0f;
 			}
+			bool aheadAllowed = false;
+			float aheadKeep2 = historyKeep2;
+			if (aheadValid && nValid > 0 && sceneRestart == 0)
+			{
+				const VpDetailRestore::SceneRestartAnswer aheadScene = VpDetailRestore::SceneRestartOf(m.aheadSequence,
+					params.sceneReader, params.softReset, params.vectorVeto, params.vectorTrustReader, params.memo);
+				if (!aheadScene.fromRecord)
+				{
+					aheadAllowed = false;
+					++aheadSceneFallbacks;
+					const char* why = VpDetailRestore::SceneUnavailableWhy();
+					lastAheadSceneFallback = why ? why : "scene unavailable";
+				}
+				else if (aheadScene.restart)
+				{
+					aheadAllowed = false;
+					++aheadSceneRestarts;
+					lastAheadSceneFallback.clear();
+				}
+				else
+				{
+					aheadAllowed = true;
+					++aheadSceneHits;
+					lastAheadSceneFallback.clear();
+					aheadKeep2 = (aheadScene.fadePartial || aheadScene.softPartial)
+						? (std::min)(historyKeep2, aheadScene.historyKeep * aheadScene.historyKeep)
+						: historyKeep2;
+				}
+			}
 			VpSkeleton::AcquireResult memoP11;
 			VpLaneProducts::P11BandTextures p11Tex;
 			int p11Block = 0;
@@ -1786,8 +1819,8 @@ for (int q = 0; q < 4; q++) {
 			}
 			if (!MeasureAndReduce(dispatch, luma, params, c, m.stats[next], m.weight,
 				consecutive && m.stats[m.statsIndex] ? m.stats[m.statsIndex] : nullptr, m.ring,
-				false, slot, nValid, nUse, sceneRestart, aheadValid, error, activeLow, historyKeep2, lowFromMemo, lowFromMemo,
-				p11Tex.s2 ? &p11Tex : nullptr, p11Block))
+				false, slot, nValid, nUse, sceneRestart, aheadAllowed, error, activeLow, historyKeep2, lowFromMemo, lowFromMemo,
+				p11Tex.s2 ? &p11Tex : nullptr, p11Block, aheadKeep2))
 			{
 				++failures;
 				m.decided = false;
@@ -1799,7 +1832,7 @@ for (int q = 0; q < 4; q++) {
 			m.lastSequence = params.sequence;
 			m.geometry = c.geometry;
 			m.decided = true;
-			if (aheadValid) ++aheadUsed;
+			if (aheadAllowed) ++aheadUsed;
 		}
 		// detail_pulse_fast / kBandMemo: a new frame reads back the low band from kBandMemo or its measure pass;
 		// a repeat (another picture: hunt 3 F6) computes its own.

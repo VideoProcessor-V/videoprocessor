@@ -18,14 +18,10 @@
 
 namespace VpSkeleton { class SkeletonMemo; }
 
-// detail_pulse_stabilise (owner 2026-10-17; docs/VP-detail-restore.md): scales each frame's
-// own luma detail (two bands: fine D1 = Y - G(s1)Y, mid D2 = G(s1)Y - L, where wide L is
-// acquired via kBandMemo when available with visible BandMemo::GlslOf fallback) towards its
-// best-coded recent neighbour. Nothing is copied between frames (grain stays per-frame).
-// Runs after VpDebander; never touches the source-resolution monitor or starts the matcher.
-// Shared maths with DetailPulseModel.h: 32x32 tiles, winsorised frame energy, GPU history ring
-// with decay + optional look-ahead, dead-zone capped gain, vector/change tile veto, U7 scene
-// cut restart + fade/soft-reset partial keep, output Y' = Y + w((g1 - 1)D1 + (g2 - 1)D2).
+// detail_pulse_stabilise (owner 2026-10-17; docs/VP-detail-restore.md): scales each frame's own luma detail (D1 = Y - G(s1)Y,
+// D2 = G(s1)Y - L, wide L via kBandMemo with visible BandMemo::GlslOf fallback) towards its best-coded recent neighbour; runs after
+// VpDebander without touching the source-resolution monitor or matcher. Shared maths with DetailPulseModel.h: 32x32 tiles, winsorised
+// energy, GPU ring + U7-gated look-ahead, dead-zone capped gain, vector/change veto, U7 restart/partial keep, Y' = Y + w((g1-1)D1 + (g2-1)D2).
 namespace DetailPulse
 {
 	constexpr double kDefaultCap = 1.35;
@@ -232,19 +228,14 @@ namespace DetailPulse
 		// The last judged frame had no scene record and restarted (shown in Ctrl+I / Config status, never silent).
 		bool SceneJudgeUnavailable() const { return sceneUnavailable; }
 		const char* SceneJudgeWhy() const { return sceneWhy ? sceneWhy : VpDetailRestore::SceneUnavailableWhy(); }
-		// U7 v3 partial reset on fades (SceneRestart.h): fade frames whose history was reduced (no restart), fade frames restarted
-		// because their group had no keep (shown through SceneJudgeUnavailable / SceneJudgeWhy), and the last judged frame's keep
-		// (amplitude, 1 = no fade, 0 = restart).
+		// U7 v3 partial reset on fades (SceneRestart.h): partials, fade-without-keep restarts, and last history keep (1 = no fade, 0 = restart).
 		unsigned long long ScenePartials() const { return scenePartials; }
 		unsigned long long SceneFadeRestarts() const { return sceneFadeRestarts; }
 		float LastHistoryKeep() const { return lastHistoryKeep; }
-		// cut_soft_reset: frames whose history was reduced by a soft reset (no restart; 0 with Params::softReset off), and the
-		// sum of their strengths (the mean graded strength = SceneSoftStrengthSum() / SceneSoftResets()).
+		// cut_soft_reset: soft-reset frame count (0 with Params::softReset off) and strength sum.
 		unsigned long long SceneSoftResets() const { return sceneSoftResets; }
 		double SceneSoftStrengthSum() const { return sceneSoftStrengthSum; }
-		// cut_soft_reset, no silent fallbacks (M3): the scene groups read lately were all provisional, so the switch cannot act
-		// (VpDetailRestore::SoftResetWatch; the status line says "soft reset: on (inactive: provisional verdicts only)"), and the
-		// frames the rule would have fired on had their verdict been confirmed.
+		// cut_soft_reset M3: provisional-only inactivity status (SoftResetWatch) and waiting frame count.
 		bool SceneSoftResetInactive() const { return softWatch.Inactive(); }
 		unsigned long long SceneSoftWaiting() const { return softWatch.waiting; }
 		unsigned long long BandMemoHits() const;
@@ -254,13 +245,18 @@ namespace DetailPulse
 		unsigned long long P11EnergyFallbacks() const;
 		const std::string& LastP11EnergyFallback() const;
 		unsigned long long SceneVectorVetoes() const;
+		unsigned long long AheadSceneHits() const;
+		unsigned long long AheadSceneRestarts() const;
+		unsigned long long AheadSceneFallbacks() const;
+		const std::string& LastAheadSceneFallback() const;
 
 	private:
 		struct Impl;
 		Impl* impl = nullptr;
-		std::string error, lastBandMemoFallback, lastP11EnergyFallback;
+		std::string error, lastBandMemoFallback, lastP11EnergyFallback, lastAheadSceneFallback;
 		unsigned long long failures = 0, frames = 0, aheadUsed = 0, sceneMissing = 0, scenePartials = 0, sceneFadeRestarts = 0;
 		unsigned long long sceneSoftResets = 0, sceneVectorVetoes = 0, bandMemoHits = 0, bandMemoFallbacks = 0, p11EnergyHits = 0, p11EnergyFallbacks = 0;
+		unsigned long long aheadSceneHits = 0, aheadSceneRestarts = 0, aheadSceneFallbacks = 0;
 		double sceneSoftStrengthSum = 0.0;
 		VpDetailRestore::SoftResetWatch softWatch;
 		bool sceneUnavailable = false;
