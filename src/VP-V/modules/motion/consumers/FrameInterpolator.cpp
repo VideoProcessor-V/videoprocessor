@@ -54,26 +54,29 @@ if (q.x < size.x && q.y < size.y) {
             if (dot(v, v) < 0.00390625 || (dot(v, v) < 0.25 && all(equal(a0, b0))))
                 v = vec2(0.0);
             stillHere = dot(v, v) == 0.0 && all(equal(a0, b0));
-            vec2 la = lp - phase * v;
-            vec2 lb = lp + (1.0 - phase) * v;
-            vec4 sa = bilerp_a(la / plane_scale);
-            vec4 sb = bilerp_b(lb / plane_scale);
-            float wb = phase;
+            if (stillHere) {
+                outv = a0;
+            } else {
+                vec2 la = lp - phase * v;
+                vec2 lb = lp + (1.0 - phase) * v;
+                vec4 sa = bilerp_a(la / plane_scale);
+                vec4 sb = bilerp_b(lb / plane_scale);
+                float wb = phase;
 #ifdef OCCLUSION
-            // B's content where the B sample lands is new (not seen in A): not the
-            // same content as the A sample - the A sample alone.
-            ivec2 osize = textureSize(occ_b, 0);
-            if (texelFetch(occ_b, clamp(ivec2(floor(lb / 16.0)), ivec2(0), osize - ivec2(1)), 0).r < 0.5)
-                wb = 0.0;
+                // B's content where the B sample lands is new (not seen in A): not the
+                // same content as the A sample - the A sample alone.
+                ivec2 osize = textureSize(occ_b, 0);
+                if (texelFetch(occ_b, clamp(ivec2(floor(lb / 16.0)), ivec2(0), osize - ivec2(1)), 0).r < 0.5)
+                    wb = 0.0;
 #endif
-            outv = mix(sa, sb, wb);
+                outv = mix(sa, sb, wb);
 #ifdef EXACT_EQUAL
-            // B3 (ADR-0024 criterion 1): equal samples of A and B are that sample exactly - a still
-            // or locked picture is byte-identical to the plain processed frame (mix() of two equal
-            // fp16 values can round one code away).
-            if (all(equal(sa, sb))) outv = sa;
+                // B3 (ADR-0024 criterion 1): equal samples of A and B are that sample exactly - a still
+                // or locked picture is byte-identical to the plain processed frame (mix() of two equal
+                // fp16 values can round one code away).
+                if (all(equal(sa, sb))) outv = sa;
 #endif
-            if (stillHere) outv = a0;
+            }
         } else {
 #ifdef FALLBACK_BLEND
             outv = mix(a0, b0, phase);
@@ -222,40 +225,51 @@ if (inside) {
             if (dot(v, v) < 0.00390625 || (dot(v, v) < 0.25 && all(equal(a0, b0))))
                 v = vec2(0.0);
             stillHere = dot(v, v) == 0.0 && all(equal(a0, b0));
-            vec2 pa = (lp - phase * v) / plane_scale;
-            vec2 pb = (lp + (1.0 - phase) * v) / plane_scale;
-            float wb = phase;
-#ifdef OCCLUSION
-            vec2 lb = lp + (1.0 - phase) * v;
-            ivec2 osize = textureSize(occ_b, 0);
-            if (texelFetch(occ_b, clamp(ivec2(floor(lb / 16.0)), ivec2(0), osize - ivec2(1)), 0).r < 0.5)
-                wb = 0.0;
-#endif
-            vec4 la = LOW_A(pa);
-            vec4 lbv = LOW_B(pb);
-            lo = mix(la, lbv, wb);
-            if (wb >= 0.5) {
-                hf = cat_b(pb) - lbv;
-                tg = HF2_AT(src_b, LOW_B, pb);
+            if (stillHere) {
+                // A still pixel is written as itself and stays out of the group's grain gain (re-audit).
+                outv = a0;
+                synth = false;
             } else {
-                hf = cat_a(pa) - la;
-                tg = HF2_AT(src_a, LOW_A, pa);
-            }
-            // The grain the low-band blend loses (A's and B's are independent: the
-            // difference of the warped low bands is theirs; at most 4x the pixel's own
-            // high-band energy, so a vector error is not read as grain) is made up in
-            // the high band's target.
-#ifdef EXACT_EQUAL
-            {
-                vec4 ca = cat_a(pa), cb = cat_b(pb);
-                if (all(equal(ca, cb))) { exactSame = true; exactValue = ca; }
-            }
+                vec2 pa = (lp - phase * v) / plane_scale;
+                vec2 pb = (lp + (1.0 - phase) * v) / plane_scale;
+                float wb = phase;
+#ifdef OCCLUSION
+                vec2 lb = lp + (1.0 - phase) * v;
+                ivec2 osize = textureSize(occ_b, 0);
+                if (texelFetch(occ_b, clamp(ivec2(floor(lb / 16.0)), ivec2(0), osize - ivec2(1)), 0).r < 0.5)
+                    wb = 0.0;
 #endif
-            vec4 dl = la - lbv;
-            tg += wb * (1.0 - wb) * min(dl * dl, 4.0 * tg);
-            synth = true;
-            // A still pixel is written as itself and stays out of the group's grain gain (re-audit).
-            if (stillHere) { outv = a0; synth = false; }
+                vec4 la = LOW_A(pa);
+                vec4 lbv = LOW_B(pb);
+                lo = mix(la, lbv, wb);
+#ifdef EXACT_EQUAL
+                vec4 ca = cat_a(pa);
+                vec4 cb = cat_b(pb);
+                if (all(equal(ca, cb))) { exactSame = true; exactValue = ca; }
+                if (wb >= 0.5) {
+                    hf = cb - lbv;
+                    tg = HF2_AT(src_b, LOW_B, pb);
+                } else {
+                    hf = ca - la;
+                    tg = HF2_AT(src_a, LOW_A, pa);
+                }
+#else
+                if (wb >= 0.5) {
+                    hf = cat_b(pb) - lbv;
+                    tg = HF2_AT(src_b, LOW_B, pb);
+                } else {
+                    hf = cat_a(pa) - la;
+                    tg = HF2_AT(src_a, LOW_A, pa);
+                }
+#endif
+                // The grain the low-band blend loses (A's and B's are independent: the
+                // difference of the warped low bands is theirs; at most 4x the pixel's own
+                // high-band energy, so a vector error is not read as grain) is made up in
+                // the high band's target.
+                vec4 dl = la - lbv;
+                tg += wb * (1.0 - wb) * min(dl * dl, 4.0 * tg);
+                synth = true;
+            }
         } else {
 #ifdef FALLBACK_BLEND
             vec4 la = LOW_A(vec2(q) + vec2(0.5));
