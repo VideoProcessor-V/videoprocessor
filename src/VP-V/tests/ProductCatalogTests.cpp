@@ -731,7 +731,7 @@ namespace ProductCatalogTestsNs
 				for (const ProductFlag& f : ProductFlags())
 					Assert::IsFalse(f.product == kCameraFitField || f.input == kCameraFitField, L"the declared P8 -> fit field edge carries no flag");
 			}
-			Assert::AreEqual(size_t(1), reserved, L"P10c has no producer");
+			Assert::AreEqual(size_t(0), reserved, L"P10c now has a live GPU owner fill (15b A1); no product carries FlagKind::Reserved");
 
 			// 2. The P2 / P2m / P3 declarations of P1 are KEPT (graph order unchanged), flagged rather than deleted.
 			for (ProductId p : { kP2VectorPair, kP2mMatcherPair, kP3AnalysisField }) {
@@ -755,10 +755,11 @@ namespace ProductCatalogTestsNs
 						L"the named exceptions and the visible fallback row");
 				}
 
-			// 3. P10c: reserved, no producer: its catalog row says so and no consumer row other than chroma-from-luma reads it.
+			// 3. P10c (15b A1): live GPU owner fill (Acquire): its catalog row names the chroma owner fill.
 			const ProductRow* c = RowOf(kP10cGrainSplitChroma);
 			Assert::IsNotNull(c);
-			Assert::IsTrue(std::string(c->laneProducer).find("reserved") == 0, L"P10c is marked reserved / no producer in the product row");
+			Assert::AreEqual(std::string("grain split chroma owner fill (Acquire)"), std::string(c->laneProducer),
+				L"P10c is served by the grain split chroma owner fill (Acquire)");
 
 			// 4. Consumer-level flags: each names a catalog consumer row; NotRead / ViewIsActual name a DECLARED read of the row,
 			// ExternalView names a read the row does NOT declare (B3-Z Z-DECL, lead 2026-11-11; expectation change = WAIVER-B3Z-01, coordinator approved 2026-11-12).
@@ -860,7 +861,7 @@ namespace ProductCatalogTestsNs
 
 			// 4b. AUDIT-R2 F1 rule: a read of a product without a producer is never actual, and an unwired row reads nothing.
 			const Registry regF1 = SkeletonProducts();
-			Assert::IsNotNull(NoProducerReason(kP10cGrainSplitChroma), L"P10c: reserved");
+			Assert::IsNull(NoProducerReason(kP10cGrainSplitChroma), L"P10c has a live chroma owner fill (15b A1)");
 			Assert::IsNotNull(NoProducerReason(kP13SourceRing), L"P13: no producer");
 			Assert::IsNotNull(NoProducerReason(kTdMemory), L"td.memory: no producer");
 			Assert::IsNull(NoProducerReason(kP1HalfLuma), L"P1 has a producer");
