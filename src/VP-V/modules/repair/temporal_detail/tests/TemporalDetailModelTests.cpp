@@ -2033,5 +2033,464 @@ namespace VideoProcessorTest
 			}
 			Assert::IsTrue(compared > 1000, L"a dense grid of finite inputs was compared");
 		}
+
+		// W23-B3 M2#3 (U2 B5): compile-time static_assert pinning TD's band sigma constants to GrainSplit owner
+		// defaults (VpUnit::BandFromBase::kSigma*), plus runtime parity of TD's Analyse() vs GrainSplit::Compute()
+		// and a same-input negative control proving altered sigmas shift the band decomposition.
+		TEST_METHOD(TemporalDetailSigmaConstantsEqualGrainSplitOwnerDefaults)
+		{
+			constexpr GrainSplit::Params kOwner = GrainSplit::DefaultParams();
+			static_assert(kOwner.sigmaFine == VpUnit::BandFromBase::kSigmaFine,
+				"GrainSplit::DefaultParams().sigmaFine must equal VpUnit::BandFromBase::kSigmaFine");
+			static_assert(kOwner.sigmaBase == VpUnit::BandFromBase::kSigmaBase,
+				"GrainSplit::DefaultParams().sigmaBase must equal VpUnit::BandFromBase::kSigmaBase");
+			static_assert(kOwner.sigmaLow == VpUnit::BandFromBase::kSigmaLow,
+				"GrainSplit::DefaultParams().sigmaLow must equal VpUnit::BandFromBase::kSigmaLow");
+			static_assert(kOwner.sigmaFine == 1.0 && kOwner.sigmaBase == 2.5 && kOwner.sigmaLow == 6.0,
+				"owner band sigmas must remain the canonical U2 defaults (1.0, 2.5, 6.0)");
+			static_assert(TemporalDetail::kBlockPx == kOwner.blockPx,
+				"TemporalDetail::kBlockPx must equal GrainSplit::DefaultParams().blockPx");
+
+			const GrainSplit::Params tdParams = TemporalDetail::Detail::SplitParams();
+			Assert::AreEqual(kOwner.sigmaFine, tdParams.sigmaFine, 0.0, L"TD SplitParams().sigmaFine matches owner default");
+			Assert::AreEqual(kOwner.sigmaBase, tdParams.sigmaBase, 0.0, L"TD SplitParams().sigmaBase matches owner default");
+			Assert::AreEqual(kOwner.sigmaLow, tdParams.sigmaLow, 0.0, L"TD SplitParams().sigmaLow matches owner default");
+			Assert::AreEqual(kOwner.blockPx, tdParams.blockPx, 0.0, L"TD SplitParams().blockPx matches owner default");
+			Assert::AreEqual(kOwner.subBlocks, tdParams.subBlocks, L"TD SplitParams().subBlocks matches owner default");
+			Assert::AreEqual(kOwner.quietSubBlocks, tdParams.quietSubBlocks, L"TD SplitParams().quietSubBlocks matches owner default");
+			Assert::AreEqual(kOwner.neighbourhood, tdParams.neighbourhood, L"TD SplitParams().neighbourhood matches owner default");
+			Assert::AreEqual(kOwner.grainCal, tdParams.grainCal, 0.0, L"TD SplitParams().grainCal matches owner default");
+			Assert::AreEqual(kOwner.grainCal2, tdParams.grainCal2, 0.0, L"TD SplitParams().grainCal2 matches owner default");
+			Assert::AreEqual(kOwner.kappa, tdParams.kappa, 0.0, L"TD SplitParams().kappa matches owner default");
+
+			// Synthetic textured + edge + grain luma plane (10-bit codes).
+			const int w = 64, h = 48;
+			Plane y(w, h);
+			uint32_t rng = 0x7711aa33u;
+			for (int py = 0; py < h; ++py)
+				for (int px = 0; px < w; ++px)
+				{
+					rng = rng * 1664525u + 1013904223u;
+					const double grain = (static_cast<double>((rng >> 8) & 1023u) / 1023.0 - 0.5) * 16.0;
+					const double structure = 512.0 + 48.0 * std::sin(2.0 * kPi * px / 19.0) * std::cos(2.0 * kPi * py / 17.0)
+						+ ((px >= 20 && px < 44 && py >= 14 && py < 34) ? 60.0 : 0.0);
+					y.at(px, py) = structure + grain;
+				}
+
+			const TemporalDetail::Detail::Analysis tdAnalysis = TemporalDetail::Detail::Analyse(y, 1.0, 16);
+			const GrainSplit::Split ownerSplit = GrainSplit::Compute(y, 1.0, 16, kOwner);
+			Assert::AreEqual(ownerSplit.base.v.size(), tdAnalysis.base.v.size());
+			Assert::IsTrue(std::memcmp(tdAnalysis.base.v.data(), ownerSplit.base.v.data(), ownerSplit.base.v.size() * sizeof(double)) == 0,
+				L"TD Analyse().base matches GrainSplit::Compute(DefaultParams()).base bit-for-bit");
+			Assert::IsTrue(std::memcmp(tdAnalysis.s1.v.data(), ownerSplit.s1.v.data(), ownerSplit.s1.v.size() * sizeof(double)) == 0,
+				L"TD Analyse().s1 matches GrainSplit::Compute(DefaultParams()).s1 bit-for-bit");
+			Assert::IsTrue(std::memcmp(tdAnalysis.s2.v.data(), ownerSplit.s2.v.data(), ownerSplit.s2.v.size() * sizeof(double)) == 0,
+				L"TD Analyse().s2 matches GrainSplit::Compute(DefaultParams()).s2 bit-for-bit");
+			Assert::IsTrue(std::memcmp(tdAnalysis.grain.v.data(), ownerSplit.grain.v.data(), ownerSplit.grain.v.size() * sizeof(double)) == 0,
+				L"TD Analyse().grain matches GrainSplit::Compute(DefaultParams()).grain bit-for-bit");
+
+			// Same-input negative control (Rule 3): altering sigmaFine & sigmaBase measurably shifts band outputs.
+			GrainSplit::Params altered = kOwner;
+			altered.sigmaFine = kOwner.sigmaFine * 1.5;
+			altered.sigmaBase = kOwner.sigmaBase * 1.5;
+			const GrainSplit::Split shifted = GrainSplit::Compute(y, 1.0, 16, altered);
+			double maxBaseShift = 0.0, maxS1Shift = 0.0, maxS2Shift = 0.0;
+			for (size_t i = 0; i < y.v.size(); ++i)
+			{
+				maxBaseShift = (std::max)(maxBaseShift, std::fabs(shifted.base.v[i] - tdAnalysis.base.v[i]));
+				maxS1Shift = (std::max)(maxS1Shift, std::fabs(shifted.s1.v[i] - tdAnalysis.s1.v[i]));
+				maxS2Shift = (std::max)(maxS2Shift, std::fabs(shifted.s2.v[i] - tdAnalysis.s2.v[i]));
+			}
+			Assert::IsTrue(maxBaseShift > 1.0 && maxS1Shift > 1.0 && maxS2Shift > 1.0,
+				L"negative control: altering band sigmas shifts base, s1, and s2 by > 1 code");
+		}
+
+		// W23-B3 M2#7 (15b A4 rest): TemporalDetail lag-1 grain guard acquires shared kP10GrainSplit at seq - 1
+		// (AcquireForm::Cpu), accepts double and float payloads, genuinely feeds lag-1 guard sums from the acquired
+		// payload (no private m_prevGin), and visibly refuses when memo is null, unregistered, missing seq - 1, or
+		// has a corrupted payload size.
+		TEST_METHOD(TemporalDetailLag1AcquiresP10AndRefusesVisiblyWhenAbsent)
+		{
+			using Reg = VpSkeleton::SkeletonMemo::Registration;
+
+			// Synthetic moving + grainy 3-frame sequence (seq = 1, 2, 3) with exact uniform pan motion.
+			const std::vector<double> q = { 1.0, 0.3, 0.3 };
+			const Stream s = BuildPan(q, 2.0, 0.0, 4101u, 1.8);
+			FieldMotionSource motion;
+			for (uint64_t seq = 1u; seq <= 3u; ++seq)
+			{
+				motion.SetBackward(seq, MotionPair::Uniform(kW, kH, 16.0, -2.0, 0.0));
+				motion.SetForward(seq, MotionPair::Uniform(kW, kH, 16.0, 2.0, 0.0));
+			}
+
+			// Independent CPU grain planes packed via TemporalDetail::PackCpuGrainPlane for seq = 1, 2, 3.
+			std::map<uint64_t, std::vector<uint8_t>> packedBySeq;
+			for (uint64_t seq = 1u; seq <= 3u; ++seq)
+			{
+				const Detail::Analysis a = Detail::Analyse(s.frames[static_cast<size_t>(seq - 1u)], 1.0, 16);
+				packedBySeq[seq] = PackCpuGrainPlane(a.grain);
+			}
+
+			auto runSeq = [&](Model& model, std::vector<Diagnostics>& diags) {
+				diags.clear();
+				for (uint64_t seq = 1u; seq <= 3u; ++seq)
+				{
+					Model::FrameIn in;
+					in.luma = s.frames[static_cast<size_t>(seq - 1u)];
+					in.seq = seq;
+					in.contentHz = kHz;
+					in.planeLines = 1080.0;
+					in.motion = &motion;
+					model.Process(in);
+					diags.push_back(model.Diag());
+				}
+			};
+
+			// 1. Positive path: double-packed kP10GrainSplit published for seq = 1, 2, 3.
+			{
+				VpSkeleton::SkeletonMemo memo;
+				VpSkeleton::OwnerFill fill;
+				fill.fill = [&](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+					auto it = packedBySeq.find(req.seq);
+					if (it == packedBySeq.end())
+						return false;
+					out.bytes = it->second;
+					return true;
+				};
+				Assert::IsTrue(memo.RegisterOwnerFill(VpSkeleton::kP10GrainSplit, VpSkeleton::AcquireForm::Cpu,
+					VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP10GrainSplit), std::move(fill)) == Reg::Registered,
+					L"CPU kP10GrainSplit owner registered");
+
+				Model model(Steady());
+				model.SetMemo(&memo);
+				std::vector<Diagnostics> diags;
+				runSeq(model, diags);
+
+				Assert::IsFalse(diags[0].lag1Missing, L"seq=1 has no prior frame (lag-1 not attempted)");
+				Assert::IsFalse(diags[1].lag1Missing, L"seq=2 acquired lag-1 P10 (seq=1)");
+				Assert::IsFalse(diags[2].lag1Missing, L"seq=3 acquired lag-1 P10 (seq=2)");
+				Assert::AreEqual(uint64_t(2), model.Lag1Hits(), L"seq=2 and seq=3 both hit lag-1 kP10GrainSplit");
+				Assert::AreEqual(uint64_t(0), model.Lag1UnavailableCount(), L"zero lag-1 unavailable refusals when present");
+				Assert::IsTrue(diags[1].lag1UnavailableWhy.empty() && diags[2].lag1UnavailableWhy.empty(),
+					L"no refusal reason on lag-1 hits");
+			}
+
+			// 1b. Positive path (float32 wire format): float[w*h] payload is also cleanly accepted.
+			{
+				VpSkeleton::SkeletonMemo floatMemo;
+				VpSkeleton::OwnerFill fFill;
+				fFill.fill = [&](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+					if (req.seq < 1u || req.seq > 3u)
+						return false;
+					const Detail::Analysis a = Detail::Analyse(s.frames[static_cast<size_t>(req.seq - 1u)], 1.0, 16);
+					out.bytes.resize(a.grain.v.size() * sizeof(float));
+					for (size_t i = 0; i < a.grain.v.size(); ++i)
+					{
+						const float v = static_cast<float>(a.grain.v[i]);
+						std::memcpy(out.bytes.data() + i * sizeof(float), &v, sizeof(float));
+					}
+					return true;
+				};
+				Assert::IsTrue(floatMemo.RegisterOwnerFill(VpSkeleton::kP10GrainSplit, VpSkeleton::AcquireForm::Cpu,
+					VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP10GrainSplit), std::move(fFill)) == Reg::Registered);
+				Model fModel(Steady());
+				fModel.SetMemo(&floatMemo);
+				std::vector<Diagnostics> fDiags;
+				runSeq(fModel, fDiags);
+				Assert::AreEqual(uint64_t(2), fModel.Lag1Hits(), L"float-packed lag-1 P10 hits on seq=2 and seq=3");
+				Assert::AreEqual(uint64_t(0), fModel.Lag1UnavailableCount());
+			}
+
+			// 2. Negative control (a): absent lag-1 P10 (memo=nullptr, unregistered memo, and missing seq-1 frame)
+			//    visibly refuses (lag1Missing == true, Lag1UnavailableCount >= 1, non-empty lag1UnavailableWhy).
+			{
+				// (a1) memo == nullptr
+				Model nullModel(Steady());
+				std::vector<Diagnostics> nullDiags;
+				runSeq(nullModel, nullDiags);
+				Assert::AreEqual(uint64_t(0), nullModel.Lag1Hits(), L"memo=nullptr records 0 lag-1 hits");
+				Assert::AreEqual(uint64_t(2), nullModel.Lag1UnavailableCount(), L"memo=nullptr refuses on seq=2 and seq=3");
+				Assert::IsTrue(nullDiags[1].lag1Missing && nullDiags[2].lag1Missing, L"memo=nullptr flags lag1Missing");
+				Assert::IsFalse(nullDiags[1].lag1UnavailableWhy.empty(), L"memo=nullptr records visible reason");
+				Assert::IsFalse(nullModel.LastLag1UnavailableWhy().empty(), L"model exposes LastLag1UnavailableWhy");
+
+				// (a2) unregistered memo
+				VpSkeleton::SkeletonMemo emptyMemo;
+				Model unregModel(Steady());
+				unregModel.SetMemo(&emptyMemo);
+				std::vector<Diagnostics> unregDiags;
+				runSeq(unregModel, unregDiags);
+				Assert::AreEqual(uint64_t(0), unregModel.Lag1Hits());
+				Assert::AreEqual(uint64_t(2), unregModel.Lag1UnavailableCount());
+				Assert::IsTrue(unregDiags[1].lag1Missing && !unregDiags[1].lag1UnavailableWhy.empty(),
+					L"unregistered memo visibly refuses lag-1 P10");
+
+				// (a3) missing seq-1 frame: serve seq=1 only, decline seq=2 -> seq=2 hits, seq=3 refuses visibly.
+				VpSkeleton::SkeletonMemo partialMemo;
+				VpSkeleton::OwnerFill partialFill;
+				partialFill.fill = [&](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+					if (req.seq != 1u)
+						return false;
+					out.bytes = packedBySeq[1u];
+					return true;
+				};
+				Assert::IsTrue(partialMemo.RegisterOwnerFill(VpSkeleton::kP10GrainSplit, VpSkeleton::AcquireForm::Cpu,
+					VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP10GrainSplit), std::move(partialFill)) == Reg::Registered);
+				Model partialModel(Steady());
+				partialModel.SetMemo(&partialMemo);
+				std::vector<Diagnostics> partialDiags;
+				runSeq(partialModel, partialDiags);
+				Assert::AreEqual(uint64_t(1), partialModel.Lag1Hits(), L"seq=2 hits seq=1");
+				Assert::AreEqual(uint64_t(1), partialModel.Lag1UnavailableCount(), L"seq=3 visibly refuses missing seq=2");
+				Assert::IsFalse(partialDiags[1].lag1Missing, L"seq=2 not missing");
+				Assert::IsTrue(partialDiags[2].lag1Missing && !partialDiags[2].lag1UnavailableWhy.empty(),
+					L"seq=3 flags lag1Missing with non-empty reason when seq=2 absent");
+			}
+
+			// 3. Negative control (b): corrupted payload size in kP10GrainSplit CPU slot is visibly rejected.
+			{
+				VpSkeleton::SkeletonMemo badMemo;
+				VpSkeleton::OwnerFill badFill;
+				badFill.fill = [](const VpSkeleton::OwnerFillRequest&, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+					out.bytes.assign(17u, uint8_t(0x5A));   // invalid byte count: neither double[w*h] nor float[w*h]
+					return true;
+				};
+				Assert::IsTrue(badMemo.RegisterOwnerFill(VpSkeleton::kP10GrainSplit, VpSkeleton::AcquireForm::Cpu,
+					VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP10GrainSplit), std::move(badFill)) == Reg::Registered);
+				Model badModel(Steady());
+				badModel.SetMemo(&badMemo);
+				std::vector<Diagnostics> badDiags;
+				runSeq(badModel, badDiags);
+				Assert::AreEqual(uint64_t(0), badModel.Lag1Hits(), L"corrupted payload never counts as a hit");
+				Assert::AreEqual(uint64_t(2), badModel.Lag1UnavailableCount(), L"corrupted payload rejected on seq=2 and seq=3");
+				Assert::IsTrue(badDiags[1].lag1Missing, L"corrupted payload sets lag1Missing");
+				Assert::IsTrue(badDiags[1].lag1UnavailableWhy.find("size mismatch") != std::string::npos,
+					L"corrupted payload refusal reason explicitly states size mismatch");
+			}
+
+			// 4. Negative control (c): prove lag-1 guard sums genuinely consume acquired kP10GrainSplit (not a
+			//    stale/private buffer). Publishing negated frame-2 grain under seq=1 drives rho_in = -1 -> freeze = +1
+			//    -> huge guardViolation (> 10.0), whereas absent lag-1 P10 skips lag-1 sums (guardViolation < 1.0).
+			{
+				const Stream staticScene = KeepsGrainScene(4102u, 2.0, 3);
+				FieldMotionSource zeroMotion;
+				for (uint64_t seq = 1u; seq <= 3u; ++seq)
+				{
+					zeroMotion.SetBackward(seq, MotionPair::Uniform(kW, kH, 16.0, 0.0, 0.0));
+					zeroMotion.SetForward(seq, MotionPair::Uniform(kW, kH, 16.0, 0.0, 0.0));
+				}
+				const Detail::Analysis a2 = Detail::Analyse(staticScene.frames[1], 1.0, 16);
+				Plane negatedGrain(kW, kH);
+				for (size_t i = 0; i < a2.grain.v.size(); ++i)
+					negatedGrain.v[i] = -a2.grain.v[i];
+				const std::vector<uint8_t> poisonedBytes = PackCpuGrainPlane(negatedGrain);
+
+				VpSkeleton::SkeletonMemo poisonMemo;
+				VpSkeleton::OwnerFill poisonFill;
+				poisonFill.fill = [&](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+					if (req.seq != 1u) return false;
+					out.bytes = poisonedBytes;
+					return true;
+				};
+				Assert::IsTrue(poisonMemo.RegisterOwnerFill(VpSkeleton::kP10GrainSplit, VpSkeleton::AcquireForm::Cpu,
+					VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP10GrainSplit), std::move(poisonFill)) == Reg::Registered);
+
+				auto maxViolationAtSeq2 = [&](VpSkeleton::SkeletonMemo* m) -> double {
+					Model mod(Steady());
+					mod.SetMemo(m);
+					for (uint64_t seq = 1u; seq <= 2u; ++seq)
+					{
+						Model::FrameIn in;
+						in.luma = staticScene.frames[static_cast<size_t>(seq - 1u)];
+						in.seq = seq;
+						in.contentHz = kHz;
+						in.planeLines = 1080.0;
+						in.motion = &zeroMotion;
+						mod.Process(in);
+					}
+					double worst = 0.0;
+					for (double v : mod.Diag().guardViolation)
+						worst = (std::max)(worst, v);
+					return worst;
+				};
+
+				const double violWithPoisonP10 = maxViolationAtSeq2(&poisonMemo);
+				const double violWithAbsentP10 = maxViolationAtSeq2(nullptr);
+				Assert::IsTrue(violWithPoisonP10 > 10.0,
+					L"acquired lag-1 P10 feeds sb[3..6] directly (negated lag-1 grain trips freeze violation > 10)");
+				Assert::IsTrue(violWithAbsentP10 < 1.0,
+					L"absent lag-1 P10 skips lag-1 guard sums instead of silently reusing a private/stale buffer");
+			}
+		}
+
+		// W23-B3 M2#8 (15b A4b): TemporalDetail input monitor acquires shared kP10gGrainLevel (ProductId 35,
+		// AcquireForm::Cpu) via P10gCpu.h, reflects exact per-block (N_b, gate, retained, rho1) values, tracks
+		// value changes across runs, and visibly falls back when memo is null, unregistered, unkeyed (seq == 0),
+		// wrong-size, NaN, or negative.
+		TEST_METHOD(TemporalDetailInputMonitorReflectsAcquiredP10gLevel)
+		{
+			using Reg = VpSkeleton::SkeletonMemo::Registration;
+			static_assert(VpSkeleton::kP10gGrainLevel == 35, "kP10gGrainLevel fixed ProductId 35");
+
+			// Single synthetic grainy frame (kW=128, kH=96 -> 8x6 = 48 blocks of 16x16 px).
+			const Stream s = BuildPan({ 1.0 }, 0.0, 0.0, 4201u, 1.5);
+			const Plane& frame = s.frames[0];
+			const size_t kBlocks = static_cast<size_t>((kW + 15) / 16) * static_cast<size_t>((kH + 15) / 16);
+			Assert::AreEqual(size_t(48), kBlocks);
+
+			FieldMotionSource motion;
+			motion.SetBackward(7u, MotionPair::Uniform(kW, kH, 16.0, 0.0, 0.0));
+			motion.SetForward(7u, MotionPair::Uniform(kW, kH, 16.0, 0.0, 0.0));
+
+			auto runOne = [&](VpSkeleton::SkeletonMemo* memo, uint64_t seq, Model& model) -> Diagnostics {
+				model.SetMemo(memo);
+				Model::FrameIn in;
+				in.luma = frame;
+				in.seq = seq;
+				in.contentHz = kHz;
+				in.planeLines = 1080.0;
+				in.motion = &motion;
+				model.Process(in);
+				return model.Diag();
+			};
+
+			auto makeMemoWithBytes = [](const std::vector<uint8_t>& payload, uint64_t onlySeq, VpSkeleton::SkeletonMemo& memo) {
+				VpSkeleton::OwnerFill fill;
+				fill.fill = [payload, onlySeq](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+					if (req.seq != onlySeq)
+						return false;
+					out.bytes = payload;
+					return true;
+				};
+				Assert::IsTrue(memo.RegisterOwnerFill(VpSkeleton::kP10gGrainLevel, VpSkeleton::AcquireForm::Cpu,
+					VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP10gGrainLevel), std::move(fill)) == Reg::Registered,
+					L"CPU kP10gGrainLevel owner registered");
+			};
+
+			// 1. Positive path: publish synthetic per-block P10g levels (nb=12.5, gate=0.25, retained=6.25, rho1=0.4).
+			std::vector<P10gBlockLevel> blocksA(kBlocks);
+			for (size_t i = 0; i < kBlocks; ++i)
+			{
+				blocksA[i].nb = 12.5f + 0.25f * static_cast<float>(i % 4u);
+				blocksA[i].gate = 0.25f;
+				blocksA[i].retained = 6.25f;
+				blocksA[i].rho1 = 0.4f;
+			}
+			VpSkeleton::SkeletonMemo memoA;
+			makeMemoWithBytes(PackCpuP10g(blocksA), 7u, memoA);
+			Model modelA(Steady());
+			const Diagnostics diagA = runOne(&memoA, 7u, modelA);
+
+			Assert::IsTrue(diagA.usedP10gLevel, L"input monitor used acquired kP10gGrainLevel");
+			Assert::AreEqual(uint64_t(1), modelA.P10gHits(), L"P10gHits == 1");
+			Assert::AreEqual(uint64_t(0), modelA.P10gFallbacks(), L"P10gFallbacks == 0");
+			Assert::AreEqual(uint64_t(1), diagA.p10gHits);
+			Assert::AreEqual(uint64_t(0), diagA.p10gFallbacks);
+			Assert::IsTrue(diagA.p10gFallbackWhy.empty(), L"no fallback reason on P10g hit");
+			Assert::AreEqual(kBlocks, diagA.inputGrainNb.size());
+			Assert::AreEqual(kBlocks, diagA.inputGrainGate.size());
+			Assert::AreEqual(kBlocks, diagA.inputGrainRetained.size());
+			Assert::AreEqual(kBlocks, diagA.inputGrainRho1.size());
+			for (size_t i = 0; i < kBlocks; ++i)
+			{
+				Assert::AreEqual(static_cast<double>(blocksA[i].nb), diagA.inputGrainNb[i], 1e-6, L"inputGrainNb matches P10g");
+				Assert::AreEqual(static_cast<double>(blocksA[i].gate), diagA.inputGrainGate[i], 1e-6, L"inputGrainGate matches P10g");
+				Assert::AreEqual(static_cast<double>(blocksA[i].retained), diagA.inputGrainRetained[i], 1e-6, L"inputGrainRetained matches P10g");
+				Assert::AreEqual(static_cast<double>(blocksA[i].rho1), diagA.inputGrainRho1[i], 1e-6, L"inputGrainRho1 matches P10g");
+			}
+
+			// 2. Negative control (a): shifting published P10g nb (12.5 -> 48.0) on the EXACT SAME frame shifts
+			//    diag.inputGrainNb by the exact delta (+35.5), proving monitor reads P10g rather than a constant/local estimate.
+			std::vector<P10gBlockLevel> blocksB = blocksA;
+			for (size_t i = 0; i < kBlocks; ++i)
+			{
+				blocksB[i].nb += 35.5f;   // 12.5 -> 48.0 on i%4==0
+				blocksB[i].gate = 0.75f;
+				blocksB[i].retained = 24.0f;
+				blocksB[i].rho1 = 0.85f;
+			}
+			VpSkeleton::SkeletonMemo memoB;
+			makeMemoWithBytes(PackCpuP10g(blocksB), 7u, memoB);
+			Model modelB(Steady());
+			const Diagnostics diagB = runOne(&memoB, 7u, modelB);
+			Assert::IsTrue(diagB.usedP10gLevel);
+			Assert::AreEqual(uint64_t(1), modelB.P10gHits());
+			Assert::AreEqual(uint64_t(0), modelB.P10gFallbacks());
+			for (size_t i = 0; i < kBlocks; ++i)
+			{
+				Assert::AreEqual(35.5, diagB.inputGrainNb[i] - diagA.inputGrainNb[i], 1e-5,
+					L"negative control: shifting P10g nb shifts diag.inputGrainNb by exact delta");
+				Assert::AreEqual(0.75, diagB.inputGrainGate[i], 1e-6);
+				Assert::AreEqual(24.0, diagB.inputGrainRetained[i], 1e-6);
+				Assert::AreEqual(0.85, diagB.inputGrainRho1[i], 1e-6);
+			}
+
+			// 3. Negative control (b): absent, unregistered, unkeyed, wrong-size, NaN, and negative P10g payloads
+			//    all fall back visibly (usedP10gLevel == false, P10gFallbacks == 1, non-empty p10gFallbackWhy).
+			{
+				// (b1) memo == nullptr
+				Model mNull(Steady());
+				const Diagnostics dNull = runOne(nullptr, 7u, mNull);
+				Assert::IsFalse(dNull.usedP10gLevel, L"memo=nullptr falls back");
+				Assert::AreEqual(uint64_t(0), mNull.P10gHits());
+				Assert::AreEqual(uint64_t(1), mNull.P10gFallbacks());
+				Assert::IsFalse(dNull.p10gFallbackWhy.empty(), L"memo=nullptr records visible reason");
+				Assert::IsFalse(mNull.LastP10gFallbackWhy().empty());
+				Assert::AreEqual(0.0, dNull.inputGrainGate[0], 1e-9, L"single-frame fallback gate is 0");
+				Assert::AreEqual(-1.0, dNull.inputGrainRho1[0], 1e-9, L"single-frame fallback rho1 is -1");
+				Assert::IsTrue(std::fabs(dNull.inputGrainNb[0] - 12.5) > 1.0,
+					L"single-frame fallback computes local estimate distinct from synthetic 12.5 P10g value");
+
+				// (b2) unregistered memo
+				VpSkeleton::SkeletonMemo emptyMemo;
+				Model mEmpty(Steady());
+				const Diagnostics dEmpty = runOne(&emptyMemo, 7u, mEmpty);
+				Assert::IsFalse(dEmpty.usedP10gLevel);
+				Assert::AreEqual(uint64_t(1), mEmpty.P10gFallbacks());
+				Assert::IsFalse(dEmpty.p10gFallbackWhy.empty(), L"unregistered memo records visible reason");
+
+				// (b3) unkeyed seq == 0
+				Model mSeq0(Steady());
+				const Diagnostics dSeq0 = runOne(&memoA, 0u, mSeq0);
+				Assert::IsFalse(dSeq0.usedP10gLevel);
+				Assert::AreEqual(uint64_t(1), mSeq0.P10gFallbacks());
+				Assert::IsFalse(dSeq0.p10gFallbackWhy.empty(), L"seq == 0 records visible reason");
+
+				// (b4) wrong payload size (kBlocks - 1 blocks)
+				std::vector<P10gBlockLevel> shortBlocks(kBlocks - 1u, blocksA[0]);
+				VpSkeleton::SkeletonMemo shortMemo;
+				makeMemoWithBytes(PackCpuP10g(shortBlocks), 7u, shortMemo);
+				Model mShort(Steady());
+				const Diagnostics dShort = runOne(&shortMemo, 7u, mShort);
+				Assert::IsFalse(dShort.usedP10gLevel, L"wrong-size P10g rejected");
+				Assert::AreEqual(uint64_t(1), mShort.P10gFallbacks());
+				Assert::IsTrue(dShort.p10gFallbackWhy.find("size mismatch") != std::string::npos,
+					L"wrong-size fallback reason states size mismatch");
+
+				// (b5) NaN payload value
+				std::vector<P10gBlockLevel> nanBlocks = blocksA;
+				nanBlocks[3].nb = std::numeric_limits<float>::quiet_NaN();
+				VpSkeleton::SkeletonMemo nanMemo;
+				makeMemoWithBytes(PackCpuP10g(nanBlocks), 7u, nanMemo);
+				Model mNan(Steady());
+				const Diagnostics dNan = runOne(&nanMemo, 7u, mNan);
+				Assert::IsFalse(dNan.usedP10gLevel, L"NaN P10g payload rejected");
+				Assert::AreEqual(uint64_t(1), mNan.P10gFallbacks());
+				Assert::IsTrue(dNan.p10gFallbackWhy.find("non-finite") != std::string::npos,
+					L"NaN fallback reason names non-finite values");
+
+				// (b6) negative nb / retained payload value
+				std::vector<P10gBlockLevel> negBlocks = blocksA;
+				negBlocks[5].nb = -2.0f;
+				VpSkeleton::SkeletonMemo negMemo;
+				makeMemoWithBytes(PackCpuP10g(negBlocks), 7u, negMemo);
+				Model mNeg(Steady());
+				const Diagnostics dNeg = runOne(&negMemo, 7u, mNeg);
+				Assert::IsFalse(dNeg.usedP10gLevel, L"negative nb P10g payload rejected");
+				Assert::AreEqual(uint64_t(1), mNeg.P10gFallbacks());
+				Assert::IsTrue(dNeg.p10gFallbackWhy.find("negative") != std::string::npos,
+					L"negative fallback reason names negative values");
+			}
+		}
 	};
 }

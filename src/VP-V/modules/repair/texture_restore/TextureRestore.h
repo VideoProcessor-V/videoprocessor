@@ -14,47 +14,13 @@
 #include <string>
 #include <vector>
 
-// texture_restore: off | statistical (experimental; owner 2026-10-17; docs/VP-detail-restore.md).
-// Repair towards the original: per tile the luma detail is split into grain (unstructured,
-// spatially uncorrelated) and scene texture (structured). Grain is scaled towards the
-// best-coded recent frame's grain level (only the grain this frame already has: nothing is
-// synthesised); scene texture is scaled towards the reference texture energy only where local
-// focus evidence says the tile is in focus. References follow the vectors when valid and
-// restart where the picture changed without them. Runs after detail_pulse_stabilise; never
-// touches the source-resolution monitor's input; never starts the matcher.
-//
-// The algorithm (the shader in TextureRestore.cpp and the CPU model in
-// src/VideoProcessor-Test/TextureRestoreModel.h share the constants below):
-//  1. Three luma bands at the plane's resolution: D1 = Y - G(s1) Y (fine), D2 = G(s1) Y - L2
-//     (mid), D3 = L2 - L3 (low-mid); L2 / L3 = G(s2) / G(s3) held at half resolution (2x2 box,
-//     separable Gaussian, read back bilinearly at p / 2). s1, s2, s3 = 1, 2.5, 6 px x GrainScale.
-//  2. Per tile (16 px x GrainScale, 4 x 4 sub-blocks): band energies E1..E3, the low band's mean,
-//     and a robust grain level per band: the mean of the 4 quietest sub-blocks, the minimum over
-//     the 5 x 5 tiles around (grain sits on the film everywhere; texture is local), calibrated so
-//     that pure grain reads its own energy (kGrainCal*).
-//  3. Grain / texture split: texture energy is the energy above the grain level
-//     (T = E - kGrainExcess x N). Per pixel the fine band is split Wiener-like by its local
-//     (3 x 3) energy against the grain level: f = clamp(1 - kWienerKappa x N1 / e1, 0, 1) is
-//     texture (structure standing above the noise), 1 - f is grain (noise at the grain level).
-//  4. Focus evidence of the current frame: the mid band's share F = T2 / (T2 + E3), an acutance
-//     ratio: a step edge (natural, step-like content) of total blur sigma_t reads 0.28 at 1 px,
-//     0.18 at 2 px, 0.12 at 3 px. Coding removes the fine band (D1) and keeps edges (D2 0.83-0.94
-//     of the original on the real x265 clips, D3 0.95-0.99), so F barely moves with the bitrate,
-//     while optical defocus (wide edges, no fine band) lowers it.
-//  5. References per tile (grain level N1, texture energies T1 and T2, focus F): a peak-hold
-//     with a half-life in seconds (the measured content rate), carried along the de-judder's
-//     vectors where they are trusted; restarted where the low band (L2) changed since the
-//     previous frame (per pixel, along the vector when there is one) by more than the
-//     coding-noise allowance and the grain's share of it, on untrusted blocks, on a focus pull (F or the mid band's texture fell beyond what coding
-//     explains), on cuts / Forget / non-consecutive sequences. A fade (U7 v3, owner 2026-11-15) is no restart: the references
-//     energies are scaled by the frame's fade keep squared (one more decay step; the focus ratio F is not), so the history shrinks with the fading picture.
-//  6. Gains per tile, clamped to [1, cap], with dead zones for the estimators' noise:
-//     grain gG = sqrt((N1ref + fg) / ((N1 + fg)(1 + kGrainMargin))) on the grain part of D1;
-//     texture gTb = sqrt((Tb_ref + ft) / (Tb + kTextureMargin x Nb + ft)) on the texture parts of
-//     D1 and D2, only where the focus gate passes (current F, reference F, no pull, the current
-//     and the reference tile have mid-band texture well above their grain); else 1.
-//  7. Y' = Y + (gG - 1)(1 - f) D1 + (gT1 - 1) f D1 + (gT2 - 1) f D2, the tile gains bilinear
-//     between tile centres. Chroma untouched. Every frame keeps its own grain: nothing is copied.
+namespace VpSkeleton { class SkeletonMemo; }
+
+// texture_restore: off | statistical (owner 2026-10-17; docs/VP-detail-restore.md).
+// Splits luma detail into grain (Wiener-separated, scaled towards best-coded recent grain
+// level; never synthesised) and focus-gated scene texture, using three U2 bands (s1/s2/s3 =
+// 1/2.5/6 px x GrainScale), motion-carried peak-hold references, and U7 cut/fade handling.
+// Runs after detail_pulse_stabilise; chroma untouched; never starts the matcher.
 namespace TextureRestore
 {
 	constexpr double kDefaultCap = 1.5;
@@ -95,13 +61,23 @@ namespace TextureRestore
 		const int sub = (std::max)(1, static_cast<int>(std::lround(kTilePx * scale / kSubBlocks)));
 		return sub * kSubBlocks;
 	}
-	// The band Gaussians are the U2 unit's one band Gaussian (ND03: VpUnit::BandFromBase::BandRadius / BandWeight; FIX-B2-ND03).
-	inline int Radius1(double scale) { return VpUnit::BandFromBase::BandRadius(kSigma1 * scale); }
-	inline double Weight1(int k, double scale) { return VpUnit::BandFromBase::BandWeight(k, kSigma1 * scale); }
+	// Thin compatibility forwarders to U2 (VpUnit::BandFromBase) for existing tests/models.
+	inline int Radius1(double scale) { return VpUnit::BandFromBase::BandRadius(VpUnit::BandFromBase::kSigmaFine * scale); }
+	inline double Weight1(int k, double scale) { return VpUnit::BandFromBase::BandWeight(k, VpUnit::BandFromBase::kSigmaFine * scale); }
 	// The half-resolution sigma of a full-resolution split (the 2x2 box adds 0.25 px^2 per axis).
 	inline double HalfSigma(double sigma) { return VpUnit::BandFromBase::HalfSigma(sigma); }
 	inline int HalfRadius(double sigma) { return VpUnit::BandFromBase::Radius(VpUnit::BandFromBase::HalfSigma(sigma), 3.5, true, 1e-9); }
 	inline double HalfWeight(int k, double sigma) { return VpUnit::BandFromBase::Weight(k, VpUnit::BandFromBase::HalfSigma(sigma), HalfRadius(sigma)); }
+	struct CpuBandResult
+	{
+		std::vector<float> samples;
+		bool fromBandMemo = false;
+		std::string fallbackReason;
+	};
+	CpuBandResult AcquireFineCpuBand(const std::vector<float>& plane, int w, int h, double scale,
+		VpSkeleton::SkeletonMemo* memo = nullptr, uint64_t seq = 0);
+	CpuBandResult AcquireHalfCpuBand(const std::vector<float>& halfPlane, int hw, int hh, double fullSigmaPx,
+		VpSkeleton::SkeletonMemo* memo = nullptr, uint64_t seq = 0);
 	// One 8-bit code in the signal's codes.
 	inline double EightBitStep(int colorDepth) { return std::pow(2.0, (std::max)(0, colorDepth - 8)); }
 	// The expected coding-noise RMS in 8-bit codes (as GrainPreserve::CodingNoiseCodes).
@@ -137,9 +113,11 @@ namespace TextureRestore
 		VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend>* arena = nullptr;  // SA1: null = private textures as before
 		// The reader of the source frame's scene group (the shared cut / fade verdict, U7 via P4); null = the skeleton's store.
 		VpDetailRestore::SceneReaderFn sceneReader = nullptr;
-		// cut_soft_reset (default on): the soft reset on a high-confidence non-cut candidate (SceneRestart.h; the bar is
-		// CutFadeJudge::kSoftResetBar, provisional). Off = no soft reset; cuts restart and fades reduce exactly as before.
+		// cut_soft_reset (default on): soft reset on high-confidence non-cut candidate (SceneRestart.h).
 		bool softReset = VpDetailRestore::kDefaultCutSoftReset;
+		bool vectorVeto = true;  // B6-D8-VECTOR-VETO: veto false pan cuts when P7/P2 vectors are trusted
+		VpDetailRestore::VectorTrustReaderFn vectorTrustReader = nullptr;  // null = query memo P7/P2
+		VpSkeleton::SkeletonMemo* memo = nullptr;  // optional: acquire shared P11 band energies
 	};
 
 	// SA1: the scratch arena scopes (one per Apply / ApplyForeign call) and the temporaries they ask for.
@@ -157,18 +135,10 @@ namespace TextureRestore
 		Module(const Module&) = delete;
 		Module& operator=(const Module&) = delete;
 
-		// `source` with its luma plane restored into this module's texture (other planes pass
-		// through); false (and `out` untouched) on any failure: the caller renders the frame as
-		// it was. cap 1.0 returns `source` itself. A repeated sequence reuses its frame's gains
-		// and never advances the references; a non-consecutive one (or 0) restarts them.
-		// Hunt 3 F7: a repeat writes its own low bands (its picture may be another one: a Stage
-		// B phase picture, a gap fill, a de-judder extra), never the previous frame's set the
-		// next new frame compares against.
+		// Restores luma plane of `source` into this module's texture (other planes pass through); false on failure.
+		// cap 1.0 returns `source`; repeated sequence reuses gains with its own low bands (F7); non-consecutive restarts.
 		bool Apply(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, const Params& params, pl_frame& out);
-		// Hunt 3 (the crossfade's path being left): the current frame's gains (HistorySequence())
-		// on a picture of another plane geometry (another re-base factor): its own bands at its
-		// own scale, the tile gains read at the same picture position. Never advances or
-		// restarts the references; its own textures (the frame Apply returned stays valid).
+		// Applies current frame's gains (HistorySequence()) on a picture of another geometry without advancing references.
 		bool ApplyForeign(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, const Params& params, pl_frame& out);
 		// A discontinuity (MotionValidity invalidation, re-base change): references restart.
 		void Forget();
@@ -198,17 +168,18 @@ namespace TextureRestore
 		// frames the rule would have fired on had their verdict been confirmed.
 		bool SceneSoftResetInactive() const { return softWatch.Inactive(); }
 		unsigned long long SceneSoftWaiting() const { return softWatch.waiting; }
-		// The source frame the references last advanced on (0 = none or a restart pending): a
-		// caller may apply this frame's decision to another picture of it (a de-judder extra)
-		// as a repeat, without advancing.
 		uint64_t HistorySequence() const;
+		unsigned long long P11EnergyHits() const;
+		unsigned long long P11EnergyFallbacks() const;
+		const std::string& LastP11EnergyFallback() const;
+		unsigned long long SceneVectorVetoes() const;
 
 	private:
 		struct Impl;
 		Impl* impl = nullptr;
-		std::string error;
+		std::string error, lastP11EnergyFallback;
 		unsigned long long failures = 0, frames = 0, sceneMissing = 0, scenePartials = 0, sceneFadeRestarts = 0;
-		unsigned long long sceneSoftResets = 0;
+		unsigned long long sceneSoftResets = 0, sceneVectorVetoes = 0, p11EnergyHits = 0, p11EnergyFallbacks = 0;
 		double sceneSoftStrengthSum = 0.0;
 		VpDetailRestore::SoftResetWatch softWatch;
 		bool sceneUnavailable = false;

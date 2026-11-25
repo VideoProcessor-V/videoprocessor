@@ -1,7 +1,9 @@
 #include <pch.h>
 #include "FrameInterpolator.h"
+#include <VP-V/core/SkeletonAcquire.h>
 #include <VP-V/core/VramUsers.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h>
+#include <VP-V/modules/repair/grain_split/BandMemo.h>
 #include <VP-V/core/GpuAttributionPl.h>
 
 #include <vprenderer/GrainPreserve.h>
@@ -52,26 +54,29 @@ if (q.x < size.x && q.y < size.y) {
             if (dot(v, v) < 0.00390625 || (dot(v, v) < 0.25 && all(equal(a0, b0))))
                 v = vec2(0.0);
             stillHere = dot(v, v) == 0.0 && all(equal(a0, b0));
-            vec2 la = lp - phase * v;
-            vec2 lb = lp + (1.0 - phase) * v;
-            vec4 sa = bilerp_a(la / plane_scale);
-            vec4 sb = bilerp_b(lb / plane_scale);
-            float wb = phase;
+            if (stillHere) {
+                outv = a0;
+            } else {
+                vec2 la = lp - phase * v;
+                vec2 lb = lp + (1.0 - phase) * v;
+                vec4 sa = bilerp_a(la / plane_scale);
+                vec4 sb = bilerp_b(lb / plane_scale);
+                float wb = phase;
 #ifdef OCCLUSION
-            // B's content where the B sample lands is new (not seen in A): not the
-            // same content as the A sample - the A sample alone.
-            ivec2 osize = textureSize(occ_b, 0);
-            if (texelFetch(occ_b, clamp(ivec2(floor(lb / 16.0)), ivec2(0), osize - ivec2(1)), 0).r < 0.5)
-                wb = 0.0;
+                // B's content where the B sample lands is new (not seen in A): not the
+                // same content as the A sample - the A sample alone.
+                ivec2 osize = textureSize(occ_b, 0);
+                if (texelFetch(occ_b, clamp(ivec2(floor(lb / 16.0)), ivec2(0), osize - ivec2(1)), 0).r < 0.5)
+                    wb = 0.0;
 #endif
-            outv = mix(sa, sb, wb);
+                outv = mix(sa, sb, wb);
 #ifdef EXACT_EQUAL
-            // B3 (ADR-0024 criterion 1): equal samples of A and B are that sample exactly - a still
-            // or locked picture is byte-identical to the plain processed frame (mix() of two equal
-            // fp16 values can round one code away).
-            if (all(equal(sa, sb))) outv = sa;
+                // B3 (ADR-0024 criterion 1): equal samples of A and B are that sample exactly - a still
+                // or locked picture is byte-identical to the plain processed frame (mix() of two equal
+                // fp16 values can round one code away).
+                if (all(equal(sa, sb))) outv = sa;
 #endif
-            if (stillHere) outv = a0;
+            }
         } else {
 #ifdef FALLBACK_BLEND
             outv = mix(a0, b0, phase);
@@ -220,40 +225,51 @@ if (inside) {
             if (dot(v, v) < 0.00390625 || (dot(v, v) < 0.25 && all(equal(a0, b0))))
                 v = vec2(0.0);
             stillHere = dot(v, v) == 0.0 && all(equal(a0, b0));
-            vec2 pa = (lp - phase * v) / plane_scale;
-            vec2 pb = (lp + (1.0 - phase) * v) / plane_scale;
-            float wb = phase;
-#ifdef OCCLUSION
-            vec2 lb = lp + (1.0 - phase) * v;
-            ivec2 osize = textureSize(occ_b, 0);
-            if (texelFetch(occ_b, clamp(ivec2(floor(lb / 16.0)), ivec2(0), osize - ivec2(1)), 0).r < 0.5)
-                wb = 0.0;
-#endif
-            vec4 la = LOW_A(pa);
-            vec4 lbv = LOW_B(pb);
-            lo = mix(la, lbv, wb);
-            if (wb >= 0.5) {
-                hf = cat_b(pb) - lbv;
-                tg = HF2_AT(src_b, LOW_B, pb);
+            if (stillHere) {
+                // A still pixel is written as itself and stays out of the group's grain gain (re-audit).
+                outv = a0;
+                synth = false;
             } else {
-                hf = cat_a(pa) - la;
-                tg = HF2_AT(src_a, LOW_A, pa);
-            }
-            // The grain the low-band blend loses (A's and B's are independent: the
-            // difference of the warped low bands is theirs; at most 4x the pixel's own
-            // high-band energy, so a vector error is not read as grain) is made up in
-            // the high band's target.
-#ifdef EXACT_EQUAL
-            {
-                vec4 ca = cat_a(pa), cb = cat_b(pb);
-                if (all(equal(ca, cb))) { exactSame = true; exactValue = ca; }
-            }
+                vec2 pa = (lp - phase * v) / plane_scale;
+                vec2 pb = (lp + (1.0 - phase) * v) / plane_scale;
+                float wb = phase;
+#ifdef OCCLUSION
+                vec2 lb = lp + (1.0 - phase) * v;
+                ivec2 osize = textureSize(occ_b, 0);
+                if (texelFetch(occ_b, clamp(ivec2(floor(lb / 16.0)), ivec2(0), osize - ivec2(1)), 0).r < 0.5)
+                    wb = 0.0;
 #endif
-            vec4 dl = la - lbv;
-            tg += wb * (1.0 - wb) * min(dl * dl, 4.0 * tg);
-            synth = true;
-            // A still pixel is written as itself and stays out of the group's grain gain (re-audit).
-            if (stillHere) { outv = a0; synth = false; }
+                vec4 la = LOW_A(pa);
+                vec4 lbv = LOW_B(pb);
+                lo = mix(la, lbv, wb);
+#ifdef EXACT_EQUAL
+                vec4 ca = cat_a(pa);
+                vec4 cb = cat_b(pb);
+                if (all(equal(ca, cb))) { exactSame = true; exactValue = ca; }
+                if (wb >= 0.5) {
+                    hf = cb - lbv;
+                    tg = HF2_AT(src_b, LOW_B, pb);
+                } else {
+                    hf = ca - la;
+                    tg = HF2_AT(src_a, LOW_A, pa);
+                }
+#else
+                if (wb >= 0.5) {
+                    hf = cat_b(pb) - lbv;
+                    tg = HF2_AT(src_b, LOW_B, pb);
+                } else {
+                    hf = cat_a(pa) - la;
+                    tg = HF2_AT(src_a, LOW_A, pa);
+                }
+#endif
+                // The grain the low-band blend loses (A's and B's are independent: the
+                // difference of the warped low bands is theirs; at most 4x the pixel's own
+                // high-band energy, so a vector error is not read as grain) is made up in
+                // the high band's target.
+                vec4 dl = la - lbv;
+                tg += wb * (1.0 - wb) * min(dl * dl, 4.0 * tg);
+                synth = true;
+            }
         } else {
 #ifdef FALLBACK_BLEND
             vec4 la = LOW_A(vec2(q) + vec2(0.5));
@@ -337,25 +353,15 @@ if (q.x < size.x && q.y < size.y)
 		const char* const LOW_H_BODY = R"GLSL(
 ivec2 q = ivec2(gl_GlobalInvocationID.xy);
 ivec2 size = imageSize(dst);
-if (q.x < size.x && q.y < size.y) {
-    ivec2 hi = textureSize(src, 0) - ivec2(1);
-    vec4 acc = vec4(0.0);
-    for (int i = -GP_R; i <= GP_R; i++)
-        acc += gp_w(i) * texelFetch(src, clamp(q + ivec2(i, 0), ivec2(0), hi), 0);
-    imageStore(dst, q, acc);
-}
+if (q.x < size.x && q.y < size.y)
+    imageStore(dst, q, vpu_band_from_base_across(src, q));
 )GLSL";
 
 		const char* const LOW_V_BODY = R"GLSL(
 ivec2 q = ivec2(gl_GlobalInvocationID.xy);
 ivec2 size = imageSize(dst);
-if (q.x < size.x && q.y < size.y) {
-    ivec2 hi = textureSize(tmp, 0) - ivec2(1);
-    vec4 acc = vec4(0.0);
-    for (int i = -GP_R; i <= GP_R; i++)
-        acc += gp_w(i) * texelFetch(tmp, clamp(q + ivec2(0, i), ivec2(0), hi), 0);
-    imageStore(dst, q, acc);
-}
+if (q.x < size.x && q.y < size.y)
+    imageStore(dst, q, vpu_band_from_base_down(tmp, q));
 )GLSL";
 
 		pl_shader_desc Sampled(const char* name, pl_tex tex, bool linear)
@@ -385,10 +391,22 @@ if (q.x < size.x && q.y < size.y) {
 				a->params.format == b->params.format;
 		}
 
-		// gp_w(i), i in -GP_R..GP_R: GrainPreserve's low-band weights for the plane's
-		// height (kLowRadius = 5 taps each side at 2160 lines and below; wider above,
-		// GrainPreserve::GrainScale - hunt 2 C15, no fixed pixel split).
-		const std::string& LowWeightsGlsl(int planeLines)
+		VpUnit::BandMemo::BandKey LowBandKey(int planeLines, int halfW, int halfH)
+		{
+			VpUnit::BandMemo::BandKey k;
+			k.resolution = VpUnit::BandMemo::Stage::Half;
+			k.pipelineStage = 0;
+			k.plane = 0;
+			k.width = halfW > 0 ? static_cast<uint32_t>(halfW) : 0u;
+			k.height = halfH > 0 ? static_cast<uint32_t>(halfH) : 0u;
+			k.sigmaPx = GrainPreserve::LowSigmaFor(planeLines);
+			k.law = VpUnit::BandMemo::Law::Low;
+			k.edge = VpUnit::BandFromBase::EdgeMode::Replicate;
+			return k;
+		}
+
+		// Shared U2 emitter text for the fallback path when kBandMemo is unavailable/chroma.
+		const std::string& BandLowGlsl(int planeLines)
 		{
 			static std::mutex lock;
 			static std::map<int, std::string> cache;
@@ -396,8 +414,49 @@ if (q.x < size.x && q.y < size.y) {
 			const int key = planeLines > 2160 ? planeLines : 0;
 			auto it = cache.find(key);
 			if (it == cache.end())
-				it = cache.emplace(key, GrainPreserve::LowWeightsGlsl(GrainPreserve::LowSigmaFor(planeLines))).first;
+				it = cache.emplace(key, VpUnit::BandMemo::GlslOf(LowBandKey(planeLines, 0, 0))).first;
 			return it->second;
+		}
+
+		// Acquire shared kBandMemo GPU product for single-component luma plane; false = visible fallback reason in `why`.
+		bool TryAcquireBandMemo(VpSkeleton::SkeletonMemo* memo, uint64_t seq, int planeIndex, bool processed, pl_tex src,
+			VpSkeleton::AcquireResult& pin, pl_tex& texOut, std::string& why)
+		{
+			texOut = nullptr;
+			if (processed)
+			{
+				why = "processed plane (stage > 0)";
+				return false;
+			}
+			if (planeIndex != 0 || src->params.format->num_components != 1)
+			{
+				why = "chroma/multi-component plane (band_memo serves single-component luma only)";
+				return false;
+			}
+			if (memo == nullptr || seq == 0u)
+			{
+				why = memo == nullptr ? "no skeleton memo bound" : "frame sequence 0 (unkeyed)";
+				return false;
+			}
+			const int hw = (src->params.w + 1) / 2, hh = (src->params.h + 1) / 2;
+			const VpUnit::BandMemo::BandKey key = LowBandKey(src->params.h, hw, hh);
+			pin = memo->Acquire(VpSkeleton::kBandMemo, seq, VpSkeleton::AcquireForm::Gpu, VpUnit::BandMemo::ToVariant(key));
+			if (!pin.Ok() || !pin.gpu.Valid() || pin.gpu.resource == nullptr)
+			{
+				const std::string detail = memo->LastCause(VpSkeleton::kBandMemo);
+				why = std::string("kBandMemo unavailable (") + VpSkeleton::Token(pin.cause)
+					+ (detail.empty() ? ")" : ": " + detail + ")");
+				return false;
+			}
+			pl_tex t = static_cast<pl_tex>(pin.gpu.resource);
+			if (t->params.w != hw || t->params.h != hh || !t->params.sampleable)
+			{
+				why = "kBandMemo texture layout mismatch";
+				pin = VpSkeleton::AcquireResult();
+				return false;
+			}
+			texOut = t;
+			return true;
 		}
 
 		bool Compute(pl_dispatch dispatch, const char* description, const std::string& header, const char* body,
@@ -444,6 +503,10 @@ if (q.x < size.x && q.y < size.y) {
 		if (dispatch)
 			pl_dispatch_destroy(&dispatch);
 	}
+
+	unsigned long long FrameInterpolator::BandMemoHits() const { return bandMemoHits; }
+	unsigned long long FrameInterpolator::BandMemoFallbacks() const { return bandMemoFallbacks; }
+	const std::string& FrameInterpolator::LastBandMemoFallback() const { return lastBandMemoFallback; }
 
 	void FrameInterpolator::Release()
 	{
@@ -496,7 +559,7 @@ if (q.x < size.x && q.y < size.y) {
 	{
 		const int w = half->params.w, h = half->params.h;
 		const int gx = (w + 15) / 16, gy = (h + 15) / 16;
-		const std::string header = LowWeightsGlsl(src->params.h);
+		const std::string& header = BandLowGlsl(src->params.h);
 		static const std::string halfHeader = VpUnit::HalfLuma::GlslRgbaAt();
 		const std::vector<pl_shader_desc> passHalf = { Sampled("src", src, false), Storage("dst", half) };
 		if (!Compute(dispatch, description, halfHeader, LOW_HALF_BODY, passHalf, nullptr, 0, gx, gy))
@@ -519,16 +582,18 @@ if (q.x < size.x && q.y < size.y) {
 		return true;
 	}
 
-	bool FrameInterpolator::PrepareBands(int index, pl_tex srcA, pl_tex srcB)
+	bool FrameInterpolator::PrepareFallbackLow(int index, bool isB, pl_tex src, pl_tex& lowOut)
 	{
 		GrainBands& bands = grainBands[index];
-		const int w = (srcA->params.w + 1) / 2, h = (srcA->params.h + 1) / 2, n = srcA->params.format->num_components;
-		if (!EnsureFloat(bands.half, w, h, n) || !EnsureFloat(bands.tmp, w, h, n) || !EnsureFloat(bands.lowA, w, h, n) ||
-			(srcB != srcA && !EnsureFloat(bands.lowB, w, h, n)))
+		const int w = (src->params.w + 1) / 2, h = (src->params.h + 1) / 2, n = src->params.format->num_components;
+		pl_tex& target = isB ? bands.lowB : bands.lowA;
+		if (!EnsureFloat(bands.half, w, h, n) || !EnsureFloat(bands.tmp, w, h, n) || !EnsureFloat(target, w, h, n))
 			return false;
-		if (!LowBand("VideoProcessor interpolator: low band A", srcA, bands.half, bands.tmp, bands.lowA))
+		if (!LowBand(isB ? "VideoProcessor interpolator: low band B" : "VideoProcessor interpolator: low band A",
+			src, bands.half, bands.tmp, target))
 			return false;
-		return srcB == srcA || LowBand("VideoProcessor interpolator: low band B", srcB, bands.half, bands.tmp, bands.lowB);
+		lowOut = target;
+		return true;
 	}
 
 	bool FrameInterpolator::EnsureNoVectors()
@@ -582,12 +647,14 @@ if (q.x < size.x && q.y < size.y) {
 	}
 
 	bool FrameInterpolator::Plane(const char* description, pl_tex srcA, pl_tex srcB, pl_tex dst, const Motion& motion,
-		float t, const float planeScale[2], const std::string& header, const GrainBands* bands)
+		float t, const float planeScale[2], const std::string& header, pl_tex lowA, pl_tex lowB)
 	{
 		// One texture bound twice in a pass is rejected by libplacebo, which reports it
 		// only in its log (the pass then writes nothing): A and B the same texture (a
 		// repeated frame, the identity test) bind it once, src_b an alias of src_a.
 		const bool same = srcA == srcB;
+		const bool hasBands = lowA != nullptr;
+		const bool sameLow = hasBands && (same || lowA == lowB);
 		std::vector<pl_shader_desc> desc = { Sampled("src_a", srcA, false) };
 		if (!same)
 			desc.push_back(Sampled("src_b", srcB, false));
@@ -598,12 +665,12 @@ if (q.x < size.x && q.y < size.y) {
 			desc.push_back(Sampled("sub_field", motion.subField, false));
 		if (motion.occlusionB)
 			desc.push_back(Sampled("occ_b", motion.occlusionB, false));
-		// interpolation_grain preserve: the bands of A and B (aliased like the planes).
-		if (bands)
+		// interpolation_grain preserve: the bands of A and B (aliased when identical).
+		if (hasBands)
 		{
-			desc.push_back(Sampled("low_a", bands->lowA, false));
-			if (!same)
-				desc.push_back(Sampled("low_b", bands->lowB, false));
+			desc.push_back(Sampled("low_a", lowA, false));
+			if (!sameLow)
+				desc.push_back(Sampled("low_b", lowB, false));
 		}
 		const float minShare = motion.minTrustedShare;
 		const float gainLo = static_cast<float>(GrainPreserve::kGainMin);
@@ -619,16 +686,16 @@ if (q.x < size.x && q.y < size.y) {
 		pl_custom_shader custom{};
 		custom.description = description;
 		const std::string fullHeader = std::string(same ? "#define src_b src_a\n" : "") +
-			(bands && same ? "#define low_b low_a\n" : "") + header +
-			(bands ? std::string(GrainPreserve::CatmullGlsl()) + PRESERVE_HEADER : std::string());
+			(sameLow ? "#define low_b low_a\n" : "") + header +
+			(hasBands ? std::string(GrainPreserve::CatmullGlsl()) + PRESERVE_HEADER : std::string());
 		custom.header = fullHeader.c_str();
-		custom.body = bands ? PRESERVE_BODY : INTERPOLATE_BODY;
+		custom.body = hasBands ? PRESERVE_BODY : INTERPOLATE_BODY;
 		custom.input = PL_SHADER_SIG_NONE;
 		custom.output = PL_SHADER_SIG_NONE;
 		custom.descriptors = desc.data();
 		custom.num_descriptors = static_cast<int>(desc.size());
 		custom.variables = vars;
-		custom.num_variables = bands ? 6 : 3;
+		custom.num_variables = hasBands ? 6 : 3;
 		custom.compute = true;
 		custom.compute_group_size[0] = 16;
 		custom.compute_group_size[1] = 16;
@@ -653,7 +720,8 @@ if (q.x < size.x && q.y < size.y) {
 	}
 
 	bool FrameInterpolator::Run(const Dejudder::Planes& a, const Dejudder::Planes& b, const Motion& motion, float t,
-		InterpolationPolicy::Fallback fallback, Dejudder::Planes& out, int estimateWidth, int estimateHeight)
+		InterpolationPolicy::Fallback fallback, Dejudder::Planes& out, int estimateWidth, int estimateHeight,
+		VpSkeleton::SkeletonMemo* memo, uint64_t seqA, uint64_t seqB)
 	{
 		error.clear();
 		out = a;
@@ -699,14 +767,55 @@ if (q.x < size.x && q.y < size.y) {
 		// first (blend: today's pass alone, byte for byte).
 		const bool preserve = grain == InterpolationPolicy::Grain::Preserve;
 		const bool processed = estimateWidth > 0 && estimateHeight > 0;
+		auto resolvePlaneBands = [&](int planeIndex, pl_tex srcA, pl_tex srcB,
+			VpSkeleton::AcquireResult& pinA, VpSkeleton::AcquireResult& pinB, pl_tex& lowA, pl_tex& lowB) -> bool {
+			lowA = nullptr;
+			lowB = nullptr;
+			if (!preserve)
+				return true;
+			std::string why;
+			if (TryAcquireBandMemo(memo, seqA, planeIndex, processed, srcA, pinA, lowA, why))
+			{
+				++bandMemoHits;
+			}
+			else
+			{
+				++bandMemoFallbacks;
+				lastBandMemoFallback = why;
+				if (!PrepareFallbackLow(planeIndex, false, srcA, lowA))
+					return false;
+			}
+			if (srcB == srcA)
+			{
+				lowB = lowA;
+				return true;
+			}
+			why.clear();
+			if (TryAcquireBandMemo(memo, seqB, planeIndex, processed, srcB, pinB, lowB, why))
+			{
+				++bandMemoHits;
+			}
+			else
+			{
+				++bandMemoFallbacks;
+				lastBandMemoFallback = why;
+				if (!PrepareFallbackLow(planeIndex, true, srcB, lowB))
+					return false;
+			}
+			return true;
+		};
 		const float lumaScale[2] = {
 			processed ? static_cast<float>(estimateWidth) / static_cast<float>(a.luma->params.w) : 1.0f,
 			processed ? static_cast<float>(estimateHeight) / static_cast<float>(a.luma->params.h) : 1.0f };
-		if (preserve && !PrepareBands(0, a.luma, b.luma))
-			return false;
-		if (!Plane(preserve ? "VideoProcessor interpolator: luma (grain preserved)" : "VideoProcessor interpolator: luma",
-			a.luma, b.luma, outLuma, use, t, lumaScale, header, preserve ? &grainBands[0] : nullptr))
-			return false;
+		{
+			VpSkeleton::AcquireResult pinA, pinB;
+			pl_tex lowA = nullptr, lowB = nullptr;
+			if (!resolvePlaneBands(0, a.luma, b.luma, pinA, pinB, lowA, lowB))
+				return false;
+			if (!Plane(preserve ? "VideoProcessor interpolator: luma (grain preserved)" : "VideoProcessor interpolator: luma",
+				a.luma, b.luma, outLuma, use, t, lumaScale, header, lowA, lowB))
+				return false;
+		}
 		out.luma = outLuma;
 		if (a.chroma)
 		{
@@ -715,10 +824,12 @@ if (q.x < size.x && q.y < size.y) {
 			const float chromaScale[2] = {
 				processed ? static_cast<float>(estimateWidth) / static_cast<float>(a.chroma->params.w) : static_cast<float>(1 << a.chromaShiftX),
 				processed ? static_cast<float>(estimateHeight) / static_cast<float>(a.chroma->params.h) : static_cast<float>(1 << a.chromaShiftY) };
-			if (preserve && !PrepareBands(1, a.chroma, b.chroma))
+			VpSkeleton::AcquireResult pinA, pinB;
+			pl_tex lowA = nullptr, lowB = nullptr;
+			if (!resolvePlaneBands(1, a.chroma, b.chroma, pinA, pinB, lowA, lowB))
 				return false;
 			if (!Plane(preserve ? "VideoProcessor interpolator: chroma (grain preserved)" : "VideoProcessor interpolator: chroma",
-				a.chroma, b.chroma, outChroma, use, t, chromaScale, header, preserve ? &grainBands[1] : nullptr))
+				a.chroma, b.chroma, outChroma, use, t, chromaScale, header, lowA, lowB))
 				return false;
 			out.chroma = outChroma;
 		}

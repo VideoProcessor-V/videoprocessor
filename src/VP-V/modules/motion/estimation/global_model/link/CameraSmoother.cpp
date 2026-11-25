@@ -2,10 +2,14 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "CameraSmoother.h"
 
+#include <VP-V/core/SkeletonAcquire.h>
+#include <VP-V/core/hub/ExtensionHub.h>
+#include <VP-V/modules/control/skeleton/SkeletonFacts.h>
 #include <VP-V/modules/motion/estimation/global_model/GlobalModelGeometry.h>
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace CameraLink
 {
@@ -201,6 +205,15 @@ namespace CameraLink
 			*effectiveLeadOut = lead;
 		return true;
 	}
+
+	const char* const kP9OwnerUnit = "motion/estimation/global_model";
+
+	P9OwnerCounters::P9OwnerCounters() : fills(0), smoothed(0), causalFallback(0), declines(0) {}
+
+	VpSkeleton::OwnerFill MakeP9OwnerFill() { return MakeP9OwnerFill(int(VpSkeleton::kMaxCameraLead), nullptr); }
+	VpSkeleton::OwnerFill MakeP9OwnerFill(int laneLead) { return MakeP9OwnerFill(laneLead, nullptr); }
+	bool RegisterP9OwnerFill() { return RegisterP9OwnerFill(nullptr, int(VpSkeleton::kMaxCameraLead), nullptr); }
+	bool RegisterP9OwnerFill(Vpv::Skeleton::IExternalDemand* demand) { return RegisterP9OwnerFill(demand, int(VpSkeleton::kMaxCameraLead), nullptr); }
 
 	CameraSmoother::CameraSmoother(int laneLead)
 		: m_effectiveLead(EffectiveCameraLead(laneLead))
@@ -441,5 +454,185 @@ namespace CameraLink
 			return refuse();
 		m_counters.slotPublished.fetch_add(1, std::memory_order_relaxed);
 		return true;
+	}
+
+	VpSkeleton::OwnerFill MakeP9OwnerFill(int laneLead, P9OwnerCounters* counters)
+	{
+		const int effectiveLead = EffectiveCameraLead(laneLead);
+		VpSkeleton::OwnerFill f;
+		f.variantAxes = 0;
+		f.renderThreadOnly = false;
+		f.keepFrames = 1;
+		f.fill = [effectiveLead, counters](const VpSkeleton::OwnerFillRequest& req,
+			VpSkeleton::SkeletonMemo& memo, VpSkeleton::OwnerFillOutput& out) -> bool
+		{
+			auto decline = [&](const std::string& why) -> bool {
+				out.declineReason = why;
+				if (counters != nullptr)
+					counters->declines.fetch_add(1, std::memory_order_relaxed);
+				return false;
+			};
+			const VpSkeleton::AcquireResult centreRes = memo.Acquire(
+				VpSkeleton::kP7CameraFit, req.seq, VpSkeleton::AcquireForm::Cpu);
+			if (!centreRes.Ok() || centreRes.cpu == nullptr || centreRes.cpuBytes == 0)
+				return decline(std::string("p9_camera_smoothed: P7 unavailable (")
+					+ VpSkeleton::Token(centreRes.cause) + ")");
+			CameraModel::CameraMotion centre;
+			if (!DecodeRecordPod(centreRes.cpu, centreRes.cpuBytes, centre))
+				return decline("p9_camera_smoothed: P7 record decode failed");
+
+			CameraModel::CameraMotion result = centre;
+			result.smoothed = false;
+			uint8_t usedLead = 0;
+			if (effectiveLead > 0 && centre.valid && CameraModel::ReasonUsable(centre.reason))
+			{
+				CameraModel::FixedLagSmoother smoother(effectiveLead);
+				const uint64_t lag = static_cast<uint64_t>(effectiveLead);
+				const uint64_t lo = req.seq > lag ? (req.seq - lag) : 0u;
+				const uint64_t hi = req.seq <= ((std::numeric_limits<uint64_t>::max)() - lag)
+					? (req.seq + lag) : (std::numeric_limits<uint64_t>::max)();
+				for (uint64_t s = lo; s <= hi; ++s)
+				{
+					if (s == req.seq)
+					{
+						smoother.Push(centre);
+						if (s == hi) break;
+						continue;
+					}
+					const VpSkeleton::AcquireResult nr = memo.Acquire(
+						VpSkeleton::kP7CameraFit, s, VpSkeleton::AcquireForm::Cpu);
+					if (nr.Ok() && nr.cpu != nullptr && nr.cpuBytes > 0)
+					{
+						CameraModel::CameraMotion nrec;
+						if (DecodeRecordPod(nr.cpu, nr.cpuBytes, nrec))
+							smoother.Push(nrec);
+					}
+					if (s == hi) break;
+				}
+				CameraModel::Params smoothedParams;
+				if (smoother.Smoothed(req.seq, smoothedParams))
+				{
+					result.smoothed = true;
+					result.smoothedParams = smoothedParams;
+					usedLead = static_cast<uint8_t>(effectiveLead);
+				}
+			}
+
+			uint8_t buf[kSmoothedPodMaxBytes]{};
+			const size_t n = EncodeSmoothedPod(result, usedLead, buf, sizeof(buf));
+			if (n == 0)
+				return decline("p9_camera_smoothed: smoothed POD encode failed");
+			out.bytes.assign(buf, buf + n);
+			if (counters != nullptr)
+			{
+				counters->fills.fetch_add(1, std::memory_order_relaxed);
+				if (result.smoothed)
+					counters->smoothed.fetch_add(1, std::memory_order_relaxed);
+				else
+					counters->causalFallback.fetch_add(1, std::memory_order_relaxed);
+			}
+			return true;
+		};
+		return f;
+	}
+
+	bool RegisterP9OwnerFill(Vpv::Skeleton::IExternalDemand* demand, int laneLead, P9OwnerCounters* counters)
+	{
+		if (demand == nullptr)
+			demand = static_cast<Vpv::Skeleton::IExternalDemand*>(
+				Vpv::Hub::ExtensionHub::Instance().Query(Vpv::Skeleton::kExternalDemandQueryId));
+		if (demand == nullptr)
+			return false;
+		const VpSkeleton::SkeletonMemo::Registration r = demand->RegisterOwnerFill(
+			VpSkeleton::kP9CameraSmoothed, VpSkeleton::AcquireForm::Cpu, kP9OwnerUnit,
+			MakeP9OwnerFill(laneLead, counters));
+		return r == VpSkeleton::SkeletonMemo::Registration::Registered
+			|| r == VpSkeleton::SkeletonMemo::Registration::AlreadyRegistered;
+	}
+
+	namespace
+	{
+		std::string P9RegistrationText(VpSkeleton::SkeletonMemo::Registration r)
+		{
+			using R = VpSkeleton::SkeletonMemo::Registration;
+			switch (r)
+			{
+			case R::Registered: return "registered";
+			case R::Replaced: return "replaced";
+			case R::NotOwner: return "refused: not the catalog's owning unit";
+			case R::NotInCatalog: return "refused: not in the catalog";
+			case R::AlreadyRegistered: return "refused: another fill is already registered";
+			case R::BadDefaults: return "refused: bad defaults";
+			}
+			return "refused";
+		}
+
+		class P9OwnerModule : public Vpv::Hub::ISkeletonModule
+		{
+		public:
+			const char* Name() const override { return "motion.estimation.p9_camera_smoothed"; }
+			bool OnFrame(RendererExtension::FrameContext& c) override
+			{
+				if (c.phase != RendererExtension::FramePhase::Entrance
+					|| m_registered.load(std::memory_order_acquire)
+					|| Vpv::Hub::ExtensionHub::Instance().OriginalPathway(c.host))
+					return false;
+				auto* demand = static_cast<Vpv::Skeleton::IExternalDemand*>(
+					Vpv::Hub::ExtensionHub::Instance().Query(Vpv::Skeleton::kExternalDemandQueryId));
+				if (demand == nullptr)
+				{
+					std::lock_guard<std::mutex> lock(m_mutex);
+					m_problem = "no skeleton to register with (retried at next frame)";
+					return false;
+				}
+				const VpSkeleton::SkeletonMemo::Registration r = demand->RegisterOwnerFill(
+					VpSkeleton::kP9CameraSmoothed, VpSkeleton::AcquireForm::Cpu, kP9OwnerUnit,
+					MakeP9OwnerFill(int(VpSkeleton::kMaxCameraLead), &m_counters));
+				if (r == VpSkeleton::SkeletonMemo::Registration::Registered
+					|| r == VpSkeleton::SkeletonMemo::Registration::AlreadyRegistered)
+				{
+					m_registered.store(true, std::memory_order_release);
+					std::lock_guard<std::mutex> lock(m_mutex);
+					m_problem.clear();
+				}
+				else
+				{
+					std::lock_guard<std::mutex> lock(m_mutex);
+					m_problem = "P9 owner fill " + P9RegistrationText(r);
+				}
+				return false;
+			}
+			void OnStatus(const RendererExtension::Context&, RendererExtension::StatusKind kind,
+				std::vector<std::string>& lines, const char*, const char*) override
+			{
+				if (kind != RendererExtension::StatusKind::Fallbacks)
+					return;
+				std::string problem;
+				{
+					std::lock_guard<std::mutex> lock(m_mutex);
+					problem = m_problem;
+				}
+				if (!problem.empty())
+					lines.push_back("p9_camera_smoothed_unregistered: " + problem);
+				const uint64_t dec = m_counters.declines.load(std::memory_order_relaxed);
+				if (dec > 0)
+					lines.push_back("p9_camera_smoothed_declined: " + std::to_string(dec) + " owner fill declines");
+			}
+		private:
+			mutable std::mutex m_mutex;
+			std::string m_problem;
+			std::atomic<bool> m_registered{ false };
+			P9OwnerCounters m_counters;
+		};
+	}
+
+	void RegisterP9OwnerModule()
+	{
+		static bool registered = false;
+		if (registered)
+			return;
+		registered = true;
+		Vpv::Hub::ExtensionHub::Instance().AddModule(
+			std::unique_ptr<Vpv::Hub::ISkeletonModule>(new P9OwnerModule()));
 	}
 }

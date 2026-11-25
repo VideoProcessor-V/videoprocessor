@@ -2,6 +2,14 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Out-of-line non-template CPU bodies of VpUnit::CutFadeJudge (see CutFadeJudge.h).
 #include <VP-V/modules/input/source_analysis/events/shared/CutFadeJudge.h>
+#include <VP-V/core/SkeletonAcquire.h>
+#include <VP-V/modules/input/source_analysis/identity/FrameQuality.h>
+#include <VP-V/modules/motion/estimation/OpticalFlowTrust.h>
+#include <VP-V/modules/motion/estimation/P2PairRecord.h>
+#include <VP-V/modules/motion/estimation/global_model/CameraMotion.h>
+#include <VP-V/modules/motion/estimation/global_model/link/CameraRecordPool.h>
+#include <VP-V/modules/repair/grain_split/BandMemo.h>
+#include <cstring>
 
 namespace VpUnit
 {
@@ -1604,5 +1612,182 @@ BlankVerdict BlankOf(const SourceStats::Record& rec)
     return out;
 }
 
+const double kVectorVetoMinTrust = kCutHistFrac;
+
+bool ShouldVetoCut(const VectorVeto& v)
+{
+    return v.enabled && v.trusted && (v.trust < 0.0 || v.trust >= kVectorVetoMinTrust);
+}
+
+bool ApplyVectorVeto(bool cut, const VectorVeto& v)
+{
+    return ApplyVectorVeto(cut, v, nullptr);
+}
+
+bool ApplyVectorVeto(bool cut, const VectorVeto& v, bool* vetoedOut)
+{
+    const bool veto = cut && ShouldVetoCut(v);
+    if (vetoedOut)
+        *vetoedOut = veto;
+    return veto ? false : cut;
+}
+
+bool ReadMemoVectorTrust(VpSkeleton::SkeletonMemo* memo, uint64_t seq)
+{
+    return ReadMemoVectorTrust(memo, seq, nullptr);
+}
+
+bool ReadMemoVectorTrust(VpSkeleton::SkeletonMemo* memo, uint64_t seq, double* trustOut)
+{
+    if (trustOut)
+        *trustOut = 0.0;
+    if (memo == nullptr || seq == 0u)
+        return false;
+
+    // 1. Prefer P7 camera fit (kP7CameraFit, CPU POD): validate complete CRD1/CRD2 wire payload
+    // (derived from CameraRecordPool.h EncodeRecordPod field layout; CameraLinkCore.cpp is not in VideoProcessor-Lib).
+    const VpSkeleton::AcquireResult p7 = memo->Acquire(VpSkeleton::kP7CameraFit, seq, VpSkeleton::AcquireForm::Cpu);
+    if (p7.Ok() && p7.cpu != nullptr && p7.cpuBytes >= sizeof(uint32_t))
+    {
+        CameraLink::detail::Reader r(p7.cpu, p7.cpuBytes);
+        const uint32_t magic = r.Get<uint32_t>();
+        if (r.ok && (magic == CameraLink::kRecordPodMagic || magic == CameraLink::kRecordPodMagicV1))
+        {
+            (void)r.Get<uint64_t>(); (void)r.Get<uint64_t>(); (void)r.Get<uint64_t>(); (void)r.Get<double>();
+            (void)r.Get<uint64_t>(); (void)r.Get<uint64_t>();
+            const bool valid = r.Get<uint8_t>() != 0;
+            const uint8_t mtype = r.Get<uint8_t>();
+            const uint8_t reasonByte = r.Get<uint8_t>();
+            (void)r.Get<uint8_t>();
+            for (int i = 0; i < 9; ++i) (void)r.Get<double>();
+            const uint8_t smoothedType = r.Get<uint8_t>();
+            for (int i = 0; i < 9; ++i) (void)r.Get<double>();
+            for (int i = 0; i < 4; ++i) (void)r.Get<double>();
+            const double confidence = r.Get<double>();
+            // Remaining CRD1 fields (CameraRecordPool.h:76-82 -> full 366 B CRD1 layout).
+            for (int i = 0; i < 9; ++i) (void)r.Get<double>();
+            (void)r.Get<uint8_t>();
+            (void)r.Get<double>(); (void)r.Get<double>();
+            (void)r.Get<uint32_t>(); (void)r.Get<uint32_t>(); (void)r.Get<int64_t>();
+            for (int i = 0; i < 4; ++i) (void)r.Get<int32_t>();
+            (void)r.Get<uint32_t>();
+            bool enumsOk = mtype <= CameraLink::kRecordPodLastModelType
+                && reasonByte <= CameraLink::kRecordPodLastReason
+                && smoothedType <= CameraLink::kRecordPodLastModelType;
+            // Full CRD2 tail (CameraRecordPool.h:84-100 -> full 595 B CRD2 layout).
+            if (magic == CameraLink::kRecordPodMagic)
+            {
+                (void)r.Get<uint8_t>(); (void)r.Get<uint8_t>(); (void)r.Get<uint32_t>();
+                for (int i = 0; i < 10; ++i) (void)r.Get<double>();
+                (void)r.Get<uint8_t>(); (void)r.Get<uint8_t>();
+                const uint8_t objType = r.Get<uint8_t>();
+                enumsOk = enumsOk && (objType <= CameraLink::kRecordPodLastModelType);
+                for (int i = 0; i < 9; ++i) (void)r.Get<double>();
+                (void)r.Get<uint32_t>();
+                (void)r.Get<double>(); (void)r.Get<double>();
+                for (int i = 0; i < 6; ++i) (void)r.Get<double>();
+            }
+            if (r.ok && enumsOk)
+            {
+                const CameraModel::Reason reason = static_cast<CameraModel::Reason>(reasonByte);
+                const bool ok = valid && CameraModel::ReasonUsable(reason) && confidence >= kVectorVetoMinTrust;
+                if (trustOut)
+                    *trustOut = ok ? confidence : 0.0;
+                return ok;
+            }
+        }
+    }
+
+    // 2. Fallback when P7 is absent: P2 vector-engine pair CPU form (kP2VectorPair, P2PairRecord).
+    const VpSkeleton::AcquireResult p2 = memo->Acquire(VpSkeleton::kP2VectorPair, seq, VpSkeleton::AcquireForm::Cpu);
+    if (p2.Ok() && p2.cpu != nullptr && p2.cpuBytes == VpMotion::kP2PairRecordBytes)
+    {
+        VpMotion::P2PairRecord rec;
+        if (VpMotion::DecodeP2PairRecord(p2.cpu, p2.cpuBytes, rec) && rec.GlobalSet()
+            && OpticalFlowTrust::GlobalUsable(rec.global[0]))
+        {
+            const bool bwdOk = OpticalFlowTrust::GlobalUsable(rec.global[1]);
+            if (bwdOk)
+            {
+                const double w = static_cast<double>(rec.global[0][3]);
+                if (w >= kVectorVetoMinTrust)
+                {
+                    if (trustOut)
+                        *trustOut = w;
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+bool ResolveSceneVectorVeto(uint64_t seq, bool cut, bool (*trustReader)(uint64_t, double*),
+                            VpSkeleton::SkeletonMemo* memo, bool* vetoedOut)
+{
+    if (vetoedOut)
+        *vetoedOut = false;
+    if (!cut)
+        return false;
+    double trust = -1.0;
+    bool trusted = false;
+    if (trustReader != nullptr)
+        trusted = trustReader(seq, &trust);
+    else if (memo != nullptr)
+        trusted = ReadMemoVectorTrust(memo, seq, &trust);
+    VectorVeto vv;
+    vv.enabled = true;
+    vv.trusted = trusted;
+    vv.trust = trust;
+    return ApplyVectorVeto(cut, vv, vetoedOut);
+}
+
 } // namespace CutFadeJudge
 } // namespace VpUnit
+
+namespace SourceIdentity
+{
+namespace FrameQuality
+{
+namespace detail
+{
+bool TryAcquireTileBands(VpSkeleton::SkeletonMemo* memo, uint64_t seq, int T,
+                         std::vector<float>& g1, std::vector<float>& g2, std::string& fallbackWhy)
+{
+    if (memo == nullptr || seq == 0u || T <= 0)
+    {
+        fallbackWhy = memo == nullptr ? "no skeleton memo bound" : "frame sequence 0 (unkeyed)";
+        return false;
+    }
+    const size_t n = static_cast<size_t>(T) * static_cast<size_t>(T);
+    auto acquireOne = [&](double sigmaPx, std::vector<float>& dst) -> bool {
+        VpUnit::BandMemo::BandKey key;
+        key.resolution = VpUnit::BandMemo::Stage::Full;
+        key.width = static_cast<uint32_t>(T);
+        key.height = static_cast<uint32_t>(T);
+        key.sigmaPx = sigmaPx;
+        key.law = VpUnit::BandMemo::Law::Taps;
+        key.edge = VpUnit::BandFromBase::EdgeMode::Reflect;
+        key.factor = 3.0;
+        key.minOne = false;
+        key.eps = 0.0;
+        const VpSkeleton::AcquireResult res = memo->Acquire(
+            VpSkeleton::kBandMemo, seq, VpSkeleton::AcquireForm::Cpu, VpUnit::BandMemo::ToVariant(key));
+        if (res.Ok() && res.cpu != nullptr && res.cpuBytes == n * sizeof(float))
+        {
+            dst.resize(n);
+            std::memcpy(dst.data(), res.cpu, res.cpuBytes);
+            for (size_t i = 0; i < n; ++i)
+                dst[i] *= 255.0f;
+            return true;
+        }
+        const std::string detailMsg = memo->LastCause(VpSkeleton::kBandMemo);
+        fallbackWhy = std::string("kBandMemo CPU unavailable (") + VpSkeleton::Token(res.cause)
+            + (detailMsg.empty() ? ")" : ": " + detailMsg + ")");
+        return false;
+    };
+    return acquireOne(1.0, g1) && acquireOne(2.0, g2);
+}
+} // namespace detail
+} // namespace FrameQuality
+} // namespace SourceIdentity

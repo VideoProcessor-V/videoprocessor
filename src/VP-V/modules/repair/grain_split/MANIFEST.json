@@ -22,6 +22,7 @@
     "src/VP-V/modules/repair/grain_split/GrainSplitGpu.cpp",
     "src/VP-V/modules/repair/grain_split/GrainSplitVariantOwner.h",
     "src/VP-V/modules/repair/grain_split/GrainLevelGpu.h",
+    "src/VP-V/modules/repair/grain_split/P10gCpu.h",
     "src/VP-V/modules/repair/grain_split/tests/GrainLevelFillTests.cpp",
     "src/VP-V/modules/input/source_analysis/lane/LaneGpuGrainKernel.h",
     "src/VP-V/modules/input/source_analysis/lane/LaneGpuGrainKernel.cpp",

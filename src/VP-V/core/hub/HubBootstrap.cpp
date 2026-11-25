@@ -18,10 +18,13 @@
 #include <VP-V/modules/input/queue_timing/IngressPolicy.h>
 #include <VP-V/modules/input/signal/ResyncExtension.h>
 #include <VP-V/modules/motion/estimation/global_model/link/CameraExtension.h>
+#include <VP-V/modules/motion/estimation/global_model/link/CameraSmoother.h>
 #include <VP-V/modules/motion/estimation/P2CpuForm.h>
 #include <VP-V/modules/motion/estimation/VectorEngineExtension.h>
 #include <VP-V/modules/motion/consumers/DejudderExtension.h>
 #include <VP-V/modules/output/presentation/PresenterExtension.h>
+#include <VP-V/modules/repair/grain_split/BandMemoFill.h>
+#include <VP-V/modules/repair/grain_split/GrainSplitVariantOwner.h>
 #include <VP-V/modules/repair/grain_split/GrainLevelGpu.h>
 // Last: DiagnosticOverrides.h includes <windows.h> without NOMINMAX; the headers above use (std::min/max) forms that its macros break.
 #include <VP-V/modules/control/diagnostics/DiagnosticOverridesModule.h>
@@ -54,11 +57,14 @@ namespace
 		// L-CORE (P13 source-plane views): after the skeleton module, whose owner registration it uses; an observer of Begin / Entrance.
 		Vpv::Capture::RegisterSourcePlanesModule();
 		Vpv::Regions::RegisterEdgeMapModule();   // L-B5: kEdgeMap owner fill (rule 3; needs the skeleton + P13 views)
-		GrainSplit::LevelGpu::RegisterGrainLevelModule();   // P10g T3: kP10gGrainLevel + kP10GrainSplit variant owner fills (needs the skeleton + P13 views)
+		GrainSplit::Gpu::RegisterGrainSplitOwnerModule();   // 15b A1: kP10GrainSplit + kP10cGrainSplitChroma variant owner fills (before P10g)
+		GrainSplit::LevelGpu::RegisterGrainLevelModule();   // P10g T3: kP10gGrainLevel owner fill (sees P10 AlreadyRegistered from A1)
+		Vpv::GrainBand::RegisterBandMemoModule();   // M2#0 (U2 P30): kBandMemo GPU + CPU owner fills (needs the skeleton + P13/P1 views)
 		VpMotion::RegisterP2CpuFormModule();   // B-prereq (a): kP2VectorPair CPU form (pair + global); needs the skeleton + the vector engine
 		Vpv::FrameAnalysis::RegisterP1GpuModule();   // L-B4 (BBP-B B2): kP1HalfLuma GPU owner fill, the matcher pyramid variant
 		Vpv::FrameAnalysis::RegisterP1CpuModule();   // D3 / FIX3-D6: zero-wait no-lane kP1HalfLuma CPU owner fill (shadowed when analysis_lane is ON)
 		Vpv::Camera::RegisterCameraExtension();
+		CameraLink::RegisterP9OwnerModule();   // L-B4-P9-FILL: kP9CameraSmoothed CPU owner fill fed from P7 slots
 		// The de-judder / per-refresh timeline (M2 P5b): after the vector engine and the camera link, before the
 		// entrance and core segments (doc 59 2.2 list order); its views, PlanOutputs and the QueueFlush steering reset.
 		VpMotion::RegisterDejudderExtension();

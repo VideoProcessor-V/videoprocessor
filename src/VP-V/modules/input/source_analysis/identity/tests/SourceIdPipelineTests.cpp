@@ -8,17 +8,21 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
+#include <VP-V/core/SkeletonAcquire.h>
 #include <VP-V/modules/input/source_analysis/SourceResolutionMonitor.h>
 #include <VP-V/modules/input/source_analysis/identity/FrameQuality.h>
 #include <VP-V/modules/input/source_analysis/identity/SourceIdPipeline.h>
 #include <VP-V/modules/input/source_analysis/identity/SourceIdProduct.h>
 #include <VP-V/modules/input/source_analysis/identity/SourceQualityView.h>
+#include <VP-V/modules/repair/grain_split/BandMemoFill.h>
 
 #include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
+#include <cstring>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -624,6 +628,92 @@ namespace Tests
 			Assert::AreEqual(size_t(2), lines.size(), L"one line per changed axis, once");
 			Assert::IsTrue(lines[0].rfind("source_id would-be: ratioH 1.000 -> 0.500 (changed", 0) == 0, L"format: field from -> to (reason)");
 			Assert::IsTrue(lines[1].rfind("source_id would-be: ratioV 1.000 -> 0.500 (changed", 0) == 0);
+		}
+
+		// W23-B3 M2#2 (U2 B4 CPU BandMemo): FrameQuality::MeasureNoise acquires sigma 1 & 2 (Reflect) from CPU kBandMemo,
+		// matches independent memo=nullptr reference, reuses memo on repeat, visibly reports fallback when memo is absent or
+		// unregistered, and clearly separates synthetic noisy vs noiseless tiles.
+		TEST_METHOD(FrameQualityBandMemoIdentity)
+		{
+			namespace GB = Vpv::GrainBand;
+			using namespace SourceIdentity;
+			using Reg = VpSkeleton::SkeletonMemo::Registration;
+
+			const int T = 64;
+			std::vector<float> noisyTile = SidSynth::NoisyTile(T, 3.0, 4242u);
+			std::vector<float> cleanTile = SidSynth::NoisyTile(T, 0.0, 4242u);
+			// Plant a steep edge quadrant on both tiles so gradient masking (< 3.0) is genuinely exercised.
+			for (int y = 0; y < 16; ++y)
+				for (int x = 0; x < 16; ++x)
+				{
+					const float step = (x >= 8) ? (180.0f / 255.0f) : (40.0f / 255.0f);
+					noisyTile[static_cast<size_t>(y) * T + x] = step;
+					cleanTile[static_cast<size_t>(y) * T + x] = step;
+				}
+
+			VpSkeleton::SkeletonMemo memo;
+			const uint64_t kSeqNoisy = 77u;
+			const uint64_t kSeqClean = 78u;
+
+			VpSkeleton::OwnerFill p13Cpu;
+			p13Cpu.frameScoped = true;
+			p13Cpu.renderThreadOnly = false;
+			p13Cpu.fill = [&noisyTile, &cleanTile, kSeqNoisy, kSeqClean](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+				const std::vector<float>* src = (req.seq == kSeqNoisy) ? &noisyTile : (req.seq == kSeqClean ? &cleanTile : nullptr);
+				if (!src)
+					return false;
+				out.bytes.resize(src->size() * sizeof(float));
+				std::memcpy(out.bytes.data(), src->data(), out.bytes.size());
+				return true;
+			};
+			Assert::IsTrue(memo.RegisterOwnerFill(VpSkeleton::kP13SourceRing, VpSkeleton::AcquireForm::Cpu,
+				VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP13SourceRing), std::move(p13Cpu)) == Reg::Registered);
+
+			const std::shared_ptr<GB::Counters> counters = std::make_shared<GB::Counters>();
+			Assert::IsTrue(memo.RegisterOwnerFill(VpSkeleton::kBandMemo, VpSkeleton::AcquireForm::Cpu,
+				GB::kBandMemoUnit, GB::MakeBandMemoCpuOwnerFill(counters)) == Reg::Registered);
+
+			const FrameQuality::TileNoise res = FrameQuality::MeasureNoise(noisyTile.data(), T, &memo, kSeqNoisy);
+			Assert::IsTrue(res.valid, L"MeasureNoise with kBandMemo produces valid measurement");
+			Assert::IsTrue(res.usedBandMemo, L"MeasureNoise reports usedBandMemo == true");
+			Assert::IsTrue(res.bandMemoFallback.empty(), L"MeasureNoise has empty fallback reason on kBandMemo hit");
+			Assert::AreEqual(uint64_t(2), counters->fills.load(), L"MeasureNoise computes sigma 1 & 2 once each (fills == 2)");
+
+			// Repeated MeasureNoise for the same seq reuses both cached Reflect bands with zero extra fills.
+			const FrameQuality::TileNoise resRepeat = FrameQuality::MeasureNoise(noisyTile.data(), T, &memo, kSeqNoisy);
+			Assert::AreEqual(uint64_t(2), counters->fills.load(), L"repeat MeasureNoise reuses memo without extra fills");
+			Assert::IsTrue(resRepeat.usedBandMemo && resRepeat.bandMemoFallback.empty());
+			Assert::AreEqual(res.sigma, resRepeat.sigma, 0.0, L"repeat sigma is exact");
+			Assert::AreEqual(res.coverage, resRepeat.coverage, 0.0, L"repeat coverage is exact");
+
+			// Independent reference (memo = nullptr): verifies tight numeric identity + visible fallback.
+			const FrameQuality::TileNoise ref = FrameQuality::MeasureNoise(noisyTile.data(), T);
+			Assert::IsTrue(ref.valid, L"reference MeasureNoise is valid");
+			Assert::IsFalse(ref.usedBandMemo, L"negative control: memo=nullptr reports usedBandMemo == false");
+			Assert::IsFalse(ref.bandMemoFallback.empty(), L"negative control: memo=nullptr populates visible fallback reason");
+			Assert::AreEqual(ref.sigma, res.sigma, 1e-3, L"kBandMemo sigma matches independent reference within 1e-3 8-bit codes");
+			Assert::AreEqual(ref.coverage, res.coverage, 1e-3, L"kBandMemo coverage matches independent reference");
+
+			// Negative control: unregistered memo visibly reports fallback and still matches reference.
+			VpSkeleton::SkeletonMemo emptyMemo;
+			const FrameQuality::TileNoise unreg = FrameQuality::MeasureNoise(noisyTile.data(), T, &emptyMemo, kSeqNoisy);
+			Assert::IsTrue(unreg.valid, L"unregistered memo falls back gracefully");
+			Assert::IsFalse(unreg.usedBandMemo, L"unregistered memo reports usedBandMemo == false");
+			Assert::IsFalse(unreg.bandMemoFallback.empty(), L"unregistered memo populates visible fallback reason");
+			Assert::AreEqual(ref.sigma, unreg.sigma, 0.0, L"unregistered fallback sigma matches reference bit-for-bit");
+
+			// Negative control: seq = 0 with valid memo visibly reports unkeyed fallback.
+			const FrameQuality::TileNoise unkeyed = FrameQuality::MeasureNoise(noisyTile.data(), T, &memo, 0u);
+			Assert::IsTrue(unkeyed.valid);
+			Assert::IsFalse(unkeyed.usedBandMemo, L"seq=0 reports usedBandMemo == false");
+			Assert::IsFalse(unkeyed.bandMemoFallback.empty(), L"seq=0 populates visible fallback reason");
+
+			// Negative control: noiseless tile vs synthetic noisy tile clearly separate in measured sigma.
+			const FrameQuality::TileNoise cleanRes = FrameQuality::MeasureNoise(cleanTile.data(), T, &memo, kSeqClean);
+			Assert::IsTrue(cleanRes.valid && cleanRes.usedBandMemo && cleanRes.bandMemoFallback.empty(),
+				L"noiseless tile uses kBandMemo cleanly");
+			Assert::IsTrue(cleanRes.sigma < 0.05, L"noiseless flat+sloped tile reads near-zero sigma (< 0.05)");
+			Assert::IsTrue(res.sigma > 1.0, L"noisy tile reads real noise sigma (> 1.0 8-bit codes)");
 		}
 	};
 }

@@ -2,16 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
-// 70b G3: the GPU kernel of P11 (region block statistics) for the skeleton's render-thread dispatcher
-// (modules/control/skeleton/gpu/SkeletonGpuDispatcher.h). One compute pass, one thread per block, the tap form of the
-// stats shader (RegionEvidenceGlsl.h: StatsPassTapHeaderGlsl / StatsPassTapGlsl): the source is the dispatcher's EXTENDED
-// tap plane (exact 10-bit codes), the band energies come from P10's Compact block texel, the aux texel is zeros. The
-// product is 6 rgba32f grids (S0..S4 and aux) at the block edge RegionEvidence::BlockSizeFor(height); 96 B per cell, the
-// declaration of P11 (core/Products.h).
-//
-// Visible downgrades (Fallbacks(), never log-only): "P11 without bands" (P10 missing, stored Full, or another grid: the
-// pass runs with re_have_split = 0, so grain, texture, ringing and banding read as unknown) and "display facts:
-// defaults" (transfer, SDR white and display peak are the shown defaults until the light level unit supplies them).
+// 70b G3 / 15c C3: GPU kernel of P11 (region block statistics) for SkeletonGpuDispatcher: one compute pass over the extended
+// tap plane + P10 block energies (both Compact term 2 and Full term 1) -> 6 rgba32f grids (S0..S4, aux; 96 B/cell).
+// Visible downgrades (Fallbacks()): "P11 without bands" (re_have_split = 0) and "display facts: defaults".
 
 #include <VP-V/modules/input/source_analysis/lane/LaneGpuProducts.h>
 #include <VP-V/modules/input/source_analysis/regions/RegionEvidence.h>
@@ -20,11 +13,20 @@
 #include <string>
 #include <vector>
 
+namespace VpSkeleton { struct AcquireResult; }
+
 namespace VpLaneProducts
 {
+	constexpr size_t kP11TensorTerm = 1;       // re_s1 = (jxx, jyy, jxy, lap_e)
+	constexpr size_t kP11BandEnergyTerm = 2;   // re_s2 = (e1, e2, e3, off_lap)
+	constexpr size_t kP11CoverageTerm = 4;     // re_s4 = (in_pic, off_share, vis, N)
+	struct P11BandTextures { pl_tex s2 = nullptr; pl_tex s4 = nullptr; bool hasBands = false; };
+	P11BandTextures ExtractP11BandTextures(const VpSkeleton::AcquireResult& res);
+
 	class RegionStatsKernel : public IProductKernel
 	{
 	public:
+		~RegionStatsKernel() override;
 		VpSkeleton::ProductId Product() const override { return VpSkeleton::kP11RegionBlockStats; }
 		// 6 absolute rgba32f terms at shift 4 (bw x bh): the declaration's 96 B per cell (ProductTexLayout::MatchesDecl).
 		VpSkeleton::ProductTexLayout Layout(VpSkeleton::Dims dims) const override;
@@ -54,9 +56,11 @@ namespace VpLaneProducts
 	private:
 		bool Fail(KernelContext& c, const std::string& why);
 		bool EnsureDummy(pl_gpu gpu);
+		void ClearRecordedSlots();
 
 		pl_tex m_dummy = nullptr;           // the bands stand-in when P10 has none (1 x 1, never read); owned by the texture store
 		IStaticTextures* m_store = nullptr;
+		std::vector<const void*> m_recordedS2;   // P11 re_s2 slot handles tracked in the bands-validity registry
 		std::string m_header, m_body;
 		std::string m_error;
 		std::string m_bandsWhy;

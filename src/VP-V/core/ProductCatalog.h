@@ -134,9 +134,9 @@ inline const std::vector<ProductRow>& ProductRows()
         { kP8CameraLabels, "motion/estimation/global_model", kExpectedCameraUnit, "camera label pass" },
         { kP9CameraSmoothed, "motion/estimation/global_model", kExpectedCameraUnit, "camera smoothing (CPU)" },
         { kP10GrainSplit, "repair/grain_split", kExpectedGrainSplitUnit, "grain split pass" },
-        // P10c: RESERVED, NO PRODUCER (C17, doc 93 section 2 D4): declared, never registered as a lane job (modules/control/skeleton/SkeletonModule.cpp registers P10/P11/P12
-        // only) and never live-filled; made real by C10. A reader of P10c finds it absent and takes its classical form (visible).
-        { kP10cGrainSplitChroma, "repair/grain_split", kExpectedGrainSplitUnit, "reserved (no producer: built with C10)" },
+        // P10c (15b A1): chroma split owner fill (repair/grain_split/GrainSplitVariantOwner.h); acquired per chroma plane (Cb/Cr)
+        // and registered in production alongside kP10GrainSplit by GrainSplitOwnerModule.
+        { kP10cGrainSplitChroma, "repair/grain_split", kExpectedGrainSplitUnit, "grain split chroma owner fill (Acquire)" },
         { kP11RegionBlockStats, "input/source_analysis/regions", kExpectedRegionUnit, "region block statistics pass" },
         { kP12LightLevel, "input/source_analysis/light_level", kExpectedLightLevelUnit, "light level pass" },
         { kP13SourceRing, "input/capture (queue + early upload)", 0, "" },
@@ -594,8 +594,8 @@ inline const std::vector<ProductFlag>& ProductFlags()
         // D2: P10 declares P13 and reads the lane's extended TAP (the one GPU luma of the frame), not the ring planes.
         { kP10GrainSplit, kP13SourceRing, FlagKind::ViewIsActual, "C9b",
           "actual input = the lane tap view (modules/input/source_analysis/lane/LaneGpuProducts.cpp UploadTapRows: SourceFrameView luma uploaded to the tap texture)" },
-        // D4: P10c has no producer.
-        { kP10cGrainSplitChroma, kNoProduct, FlagKind::Reserved, "C10", "no lane job (modules/control/skeleton/SkeletonModule.cpp registers P10/P11/P12 only), no live fill" },
+        // D4 (15b A1): kP10cGrainSplitChroma now has a live GPU owner fill (repair/grain_split/GrainSplitVariantOwner.h),
+        // so it is no longer flagged FlagKind::Reserved here.
         // P14g: its producing evaluation takes its pixels from the source-frame tap sink, P5 is the monitor snapshot it declares.
         { kSourceGeometry, kP5MonitorTiles, FlagKind::ViewIsActual, "C9b",
           "pixel evidence = the SourceFrameTap view (modules/input/source_analysis/identity/chain/ChainEstimator.cpp UpdateTap); P5 stays the declared monitor snapshot" },
@@ -617,14 +617,12 @@ inline const std::vector<ProductFlag>& ProductFlags()
 inline const std::vector<ConsumerFlag>& ConsumerFlags()
 {
     static const std::vector<ConsumerFlag> flags = {
-        // D4: DetailPulse / TextureRestore are catalogued as P10 / P11 / P4 readers but read none (modules/repair/texture_restore/DetailPulse.cpp, TextureRestore.cpp:
-        // private bands / tiles and private cut-fade logic, host scalar params); the declarations stay, the code is made to read them by C10 / D10
-        // (doc 93 s2 D10 reader switch, rows 6/7; C7 landed without switching them, AUDIT-R2 F1).
-        { uint16_t(kCatalogConsumerIdBase + 0), kP10GrainSplit, FlagKind::NotRead, "C10", "private bands (DetailPulse.h)" },
-        { uint16_t(kCatalogConsumerIdBase + 0), kP11RegionBlockStats, FlagKind::NotRead, "C10", "private 32-px tiles" },
+        // D4: DetailPulse / TextureRestore read P11 band energies (15c C3b); P10 bands (DP/TR) and P4 (DP) stay flagged NotRead.
+        { uint16_t(kCatalogConsumerIdBase + 0), kP10GrainSplit, FlagKind::NotRead, "C10",
+          "private bands (DetailPulse.h)" },
         { uint16_t(kCatalogConsumerIdBase + 0), kP4SourceStats, FlagKind::NotRead, "D10", "private cut / fade logic" },
-        { uint16_t(kCatalogConsumerIdBase + 1), kP10GrainSplit, FlagKind::NotRead, "C10", "private bands (TextureRestore.h)" },
-        { uint16_t(kCatalogConsumerIdBase + 1), kP11RegionBlockStats, FlagKind::NotRead, "C10", "private 16-px tiles" },
+        { uint16_t(kCatalogConsumerIdBase + 1), kP10GrainSplit, FlagKind::NotRead, "C10",
+          "private bands (TextureRestore.h)" },
         { uint16_t(kCatalogConsumerIdBase + 1), kP4SourceStats, FlagKind::ViewIsActual, "D8",
           "P4 via the scene group (repair/texture_restore/SceneRestart.h SceneRestartOf; U7 over two P4 records, SkeletonModule.cpp ClassifyEvents)" },
         // AUDIT-R2 F1 (B3-Z Z2): the optical-flow producer, the matcher and source identification print their declared reads as actual

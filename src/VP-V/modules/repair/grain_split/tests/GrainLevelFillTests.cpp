@@ -1286,5 +1286,394 @@ namespace VideoProcessorTest
 					L"12-bit letterbox-cropped GPU N_b must track planted 12-bit grain variance");
 			}
 		}
+
+		// W23-B3 M2#5 (15b A1): CPU unit contract for kP10cGrainSplitChroma variant key/reserve encoding,
+		// GrainSplitOwnerModule dual P10 + P10c registration/atomic ReplaceOwnerFill resize/detach/refusal,
+		// and benign handoff with GrainLevelModule (SplitOwnerServedElsewhere() == true, zero false alarms).
+		BEGIN_TEST_METHOD_ATTRIBUTE(P10cChromaVariantOwnerContractAndModuleRegistration)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(P10cChromaVariantOwnerContractAndModuleRegistration)
+		{
+			using namespace VpSkeleton;
+			namespace G = GrainSplit::Gpu;
+			namespace L = GrainSplit::LevelGpu;
+			namespace RE = RendererExtension;
+
+			// 1. ChromaVariantFor & ChromaReserveFor positive + negative controls.
+			const VariantKey cbKey = G::ChromaVariantFor(1, 960, 540, 1.0, 10);
+			const VariantKey crKey = G::ChromaVariantFor(2, 960, 540, 1.0, 10);
+			Assert::AreEqual(uint8_t(1), cbKey.plane, L"plane 1 encodes Cb");
+			Assert::AreEqual(uint8_t(2), crKey.plane, L"plane 2 encodes Cr");
+			Assert::AreEqual(uint32_t(960), cbKey.width);
+			Assert::AreEqual(uint32_t(540), cbKey.height);
+			Assert::AreEqual(uint8_t(0), cbKey.scale, L"scale 1.0 encodes axis 0");
+			Assert::AreEqual(uint8_t(10), cbKey.codeUnit);
+			Assert::IsTrue((G::VariantOwner::ChromaServedAxes() & VariantKey::kAxisPlane) != 0u,
+				L"P10c served axes include plane");
+			Assert::IsTrue((G::VariantOwner::ServedAxes() & VariantKey::kAxisPlane) == 0u,
+				L"negative control: P10 luma served axes exclude plane");
+
+			const uint64_t cbReserve = G::VariantOwner::ChromaReserveFor(cbKey);
+			const uint64_t crReserve = G::VariantOwner::ChromaReserveFor(crKey);
+			const uint64_t lumaSameSizeReserve = G::VariantOwner::ReserveFor(G::VariantFor(960, 540, 1.0, 10));
+			Assert::IsTrue(cbReserve > uint64_t(0), L"ChromaReserveFor(plane 1) > 0");
+			Assert::AreEqual(cbReserve, crReserve, L"Cb and Cr at same dims share exact reserve");
+			Assert::AreEqual(lumaSameSizeReserve, cbReserve, L"chroma reserve equals single-plane ContextShapesOf reserve");
+
+			// Negative controls: plane 0, plane >= 3, negative plane, zero dims, and unrepresentable scale return 0.
+			const VariantKey negPlane = G::ChromaVariantFor(-1, 960, 540, 1.0, 10);
+			Assert::AreEqual(uint8_t(255), negPlane.plane, L"negative plane maps to sentinel 255, never wrapping into 1 or 2");
+			Assert::AreEqual(uint64_t(0), G::VariantOwner::ChromaReserveFor(G::ChromaVariantFor(0, 960, 540, 1.0, 10)),
+				L"negative control: plane 0 (luma) rejected with 0 reserve");
+			Assert::AreEqual(uint64_t(0), G::VariantOwner::ChromaReserveFor(G::ChromaVariantFor(3, 960, 540, 1.0, 10)),
+				L"negative control: plane >= 3 rejected with 0 reserve");
+			Assert::AreEqual(uint64_t(0), G::VariantOwner::ChromaReserveFor(negPlane),
+				L"negative control: negative plane rejected with 0 reserve");
+			Assert::AreEqual(uint64_t(0), G::VariantOwner::ChromaReserveFor(G::ChromaVariantFor(1, 0, 540, 1.0, 10)),
+				L"negative control: zero width rejected with 0 reserve");
+			Assert::AreEqual(uint64_t(0), G::VariantOwner::ChromaReserveFor(G::ChromaVariantFor(1, 960, 540, 1.3, 10)),
+				L"negative control: unrepresentable scale 1.3 rejected with 0 reserve");
+			Assert::AreEqual(G::kScaleAxisUnrepresentable, G::ChromaVariantFor(1, 960, 540, 1.3, 10).scale,
+				L"unrepresentable scale encodes kScaleAxisUnrepresentable");
+
+			// 2. GrainSplitOwnerModule lifecycle: dual P10 + P10c registration, atomic resize, detach/re-attach, refusal.
+			struct DualOwnerDemand : Vpv::Skeleton::IExternalDemand
+			{
+				SkeletonMemo* memo = nullptr;
+				int lumaRegisters = 0, lumaReplaces = 0, lumaUnregisters = 0;
+				int chromaRegisters = 0, chromaReplaces = 0, chromaUnregisters = 0;
+				bool refuseChroma = false;
+				bool refuseChromaReplace = false;
+
+				void SetExternalDemand(const void*, const void*, const std::vector<ConsumerDecl>&,
+					const std::vector<ProductId>&) override {}
+				void ClearExternalDemand(const void*, const void*) override {}
+
+				SkeletonMemo::Registration RegisterOwnerFill(ProductId id, AcquireForm form,
+					const std::string& unit, OwnerFill fill) override
+				{
+					if (id == kP10GrainSplit) ++lumaRegisters;
+					if (id == kP10cGrainSplitChroma)
+					{
+						++chromaRegisters;
+						if (refuseChroma)
+							return SkeletonMemo::Registration::NotOwner;
+					}
+					return memo->RegisterOwnerFill(id, form, unit, std::move(fill));
+				}
+
+				SkeletonMemo::Registration ReplaceOwnerFill(ProductId id, AcquireForm form,
+					const std::string& unit, OwnerFill fill) override
+				{
+					if (id == kP10GrainSplit) ++lumaReplaces;
+					if (id == kP10cGrainSplitChroma)
+					{
+						++chromaReplaces;
+						if (refuseChromaReplace)
+							return SkeletonMemo::Registration::BadDefaults;
+					}
+					return memo->ReplaceOwnerFill(id, form, unit, std::move(fill));
+				}
+
+				bool UnregisterOwnerFill(ProductId id, AcquireForm form, const std::string& unit) override
+				{
+					if (id == kP10GrainSplit) ++lumaUnregisters;
+					if (id == kP10cGrainSplitChroma) ++chromaUnregisters;
+					return memo->UnregisterOwnerFill(id, form, unit);
+				}
+			};
+
+			auto memoReserveOf = [](const SkeletonMemo& m, ProductId pid) -> uint64_t {
+				const AheadNeed need = m.MakeAheadNeed(QueueWindow{});
+				for (const AheadCost& c : need.costs)
+					if (c.id == uint16_t(pid) && c.form == uint8_t(AcquireForm::Gpu))
+						return c.bytesPerFrame;
+				return uint64_t(0);
+			};
+
+			SkeletonMemo memo;
+			DualOwnerDemand demand;
+			demand.memo = &memo;
+			G::GrainSplitOwnerModule ownerMod;
+			int host = 0;
+
+			const Dims l720 = GrainDims(1280, 720), c360 = GrainDims(640, 360);
+			const Dims l1080 = GrainDims(1920, 1080), c540 = GrainDims(960, 540);
+			const Dims l4k = GrainDims(3840, 2160), c2k = GrainDims(1920, 1080);
+
+			Assert::IsTrue(ownerMod.Observe(&host, l720, c360, &demand), L"Observe registers both P10 and P10c");
+			Assert::IsTrue(ownerMod.LumaRegistered(), L"P10 registered");
+			Assert::IsTrue(ownerMod.ChromaRegistered(), L"P10c registered");
+			Assert::IsTrue(memo.HasOwnerFill(kP10GrainSplit, AcquireForm::Gpu), L"memo has P10 fill");
+			Assert::IsTrue(memo.HasOwnerFill(kP10cGrainSplitChroma, AcquireForm::Gpu), L"memo has P10c fill");
+			Assert::AreEqual(G::LumaReserveBytes(l720), ownerMod.LumaRegisteredReserveBytes());
+			Assert::AreEqual(G::ChromaReserveBytes(c360), ownerMod.ChromaRegisteredReserveBytes());
+			Assert::AreEqual(G::LumaReserveBytes(l720), memoReserveOf(memo, kP10GrainSplit));
+			Assert::AreEqual(G::ChromaReserveBytes(c360), memoReserveOf(memo, kP10cGrainSplitChroma));
+			Assert::AreEqual(1, demand.lumaRegisters);
+			Assert::AreEqual(1, demand.chromaRegisters);
+			Assert::AreEqual(0, demand.lumaUnregisters);
+			Assert::AreEqual(0, demand.chromaUnregisters);
+			Assert::IsTrue(ownerMod.FallbackLines().empty(), L"healthy dual registration has empty FallbackLines");
+
+			// Negative control: naive duplicate RegisterChroma fails with AlreadyRegistered and leaves 360p reserve.
+			G::VariantOwner naiveOwner;
+			Assert::IsTrue(naiveOwner.RegisterChroma(memo, 1920, 1080) == SkeletonMemo::Registration::AlreadyRegistered,
+				L"negative control: naive RegisterChroma on active memo fails with AlreadyRegistered");
+			Assert::AreEqual(G::ChromaReserveBytes(c360), memoReserveOf(memo, kP10cGrainSplitChroma),
+				L"negative control: refused RegisterChroma leaves prior chroma reserve unchanged");
+
+			// Upward resize 720p/360p -> 4K/2K uses atomic ReplaceOwnerFill with zero unregister gap.
+			Assert::IsTrue(ownerMod.Observe(&host, l4k, c2k, &demand), L"resize growth succeeds");
+			Assert::AreEqual(1, demand.lumaRegisters, L"resize does not re-call RegisterOwnerFill for P10");
+			Assert::AreEqual(1, demand.chromaRegisters, L"resize does not re-call RegisterOwnerFill for P10c");
+			Assert::AreEqual(1, demand.lumaReplaces, L"resize calls ReplaceOwnerFill for P10");
+			Assert::AreEqual(1, demand.chromaReplaces, L"resize calls ReplaceOwnerFill for P10c");
+			Assert::AreEqual(0, demand.lumaUnregisters, L"zero unregister gap for P10");
+			Assert::AreEqual(0, demand.chromaUnregisters, L"zero unregister gap for P10c");
+			Assert::AreEqual(G::LumaReserveBytes(l4k), ownerMod.LumaRegisteredReserveBytes());
+			Assert::AreEqual(G::ChromaReserveBytes(c2k), ownerMod.ChromaRegisteredReserveBytes());
+			Assert::AreEqual(G::LumaReserveBytes(l4k), memoReserveOf(memo, kP10GrainSplit));
+			Assert::AreEqual(G::ChromaReserveBytes(c2k), memoReserveOf(memo, kP10cGrainSplitChroma));
+
+			// Detach (Forget) and re-attach at smaller 1080p/540p re-baselines atomically with zero gap.
+			ownerMod.Forget(&host, &demand);
+			Assert::IsTrue(ownerMod.LumaRegistered() && ownerMod.ChromaRegistered(), L"registrations stay live across detach");
+			Assert::AreEqual(0, demand.lumaUnregisters);
+			Assert::AreEqual(0, demand.chromaUnregisters);
+			Assert::IsTrue(ownerMod.Observe(&host, l1080, c540, &demand), L"re-attach at smaller size succeeds");
+			Assert::AreEqual(2, demand.lumaReplaces, L"re-baseline calls ReplaceOwnerFill for P10");
+			Assert::AreEqual(2, demand.chromaReplaces, L"re-baseline calls ReplaceOwnerFill for P10c");
+			Assert::AreEqual(0, demand.lumaUnregisters);
+			Assert::AreEqual(0, demand.chromaUnregisters);
+			Assert::AreEqual(G::LumaReserveBytes(l1080), ownerMod.LumaRegisteredReserveBytes());
+			Assert::AreEqual(G::ChromaReserveBytes(c540), ownerMod.ChromaRegisteredReserveBytes());
+			Assert::IsTrue(ownerMod.FallbackLines().empty());
+
+			// 3. Handoff: GrainSplitOwnerModule registered first, GrainLevelModule observes second.
+			{
+				L::GrainLevelModule levelMod;
+				Assert::IsTrue(levelMod.Observe(&host, l1080, &demand), L"GrainLevelModule registers P10g cleanly");
+				Assert::IsTrue(levelMod.Registered(), L"P10g registered");
+				Assert::IsFalse(levelMod.SplitOwnerRegistered(), L"P10 owned by GrainSplitOwnerModule, not GrainLevelModule");
+				Assert::IsTrue(levelMod.SplitOwnerServedElsewhere(), L"GrainLevelModule recognizes P10 served elsewhere");
+				Assert::IsTrue(levelMod.FallbackLines().empty(), L"benign handoff produces zero false alarms in GrainLevelModule");
+				Assert::IsTrue(ownerMod.FallbackLines().empty(), L"benign handoff produces zero false alarms in GrainSplitOwnerModule");
+
+				// Negative control: standalone GrainLevelModule without prior GrainSplitOwnerModule registers P10 itself.
+				SkeletonMemo soloMemo;
+				DualOwnerDemand soloDemand;
+				soloDemand.memo = &soloMemo;
+				L::GrainLevelModule soloLevel;
+				Assert::IsTrue(soloLevel.Observe(&host, l1080, &soloDemand));
+				Assert::IsTrue(soloLevel.SplitOwnerRegistered(), L"negative control: without ownerMod, GrainLevelModule owns P10");
+				Assert::IsFalse(soloLevel.SplitOwnerServedElsewhere(), L"negative control: SplitOwnerServedElsewhere is false standalone");
+			}
+
+			// 4. Negative control (Rule 4): refused P10c registration visibly reports in FallbackLines() and OnStatus(Fallbacks).
+			{
+				SkeletonMemo refMemo;
+				DualOwnerDemand refDemand;
+				refDemand.memo = &refMemo;
+				refDemand.refuseChroma = true;
+				G::GrainSplitOwnerModule refMod;
+				Assert::IsFalse(refMod.Observe(&host, l1080, c540, &refDemand), L"Observe returns false when P10c refuses");
+				Assert::IsTrue(refMod.LumaRegistered(), L"P10 luma still registered");
+				Assert::IsFalse(refMod.ChromaRegistered(), L"P10c chroma refused");
+				const std::vector<std::string> fb = refMod.FallbackLines();
+				Assert::AreEqual(size_t(1), fb.size(), L"exact single refusal line for P10c");
+				Assert::IsTrue(fb[0].find(G::kP10cUnregisteredId) != std::string::npos, L"refusal line carries kP10cUnregisteredId");
+				Assert::IsTrue(fb[0].find("not the catalog's owning unit") != std::string::npos, L"refusal line names NotOwner cause");
+				RE::Context ctx{};
+				ctx.host = &host;
+				std::vector<std::string> statusLines;
+				refMod.OnStatus(ctx, RE::StatusKind::Fallbacks, statusLines, nullptr, nullptr);
+				Assert::AreEqual(fb.size(), statusLines.size());
+				Assert::AreEqual(fb[0], statusLines[0], L"OnStatus(Fallbacks) surfaces exact refusal line");
+			}
+		}
+
+		// W23-B3 M2#5 (15b A1): WARP GPU test for kP10cGrainSplitChroma owner fill acquire, single-compute reuse,
+		// plane-axis separation (Cb vs Cr produce distinct grain statistics), and visible declines on invalid plane,
+		// mismatched dimensions, and RGB P13 frames.
+		BEGIN_TEST_METHOD_ATTRIBUTE(P10cChromaOwnerFillAcquireAndSingleCompute)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(P10cChromaOwnerFillAcquireAndSingleCompute)
+		{
+			using namespace VpSkeleton;
+			namespace G = GrainSplit::Gpu;
+
+			GrainLevelGpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create libplacebo D3D11 test device");
+			const pl_gpu gpu = dev.Gpu();
+
+			const int lw = 128, lh = 96;
+			const int cw = 64, ch = 48;   // 4:2:0 chroma planes (4x3 16-px blocks)
+
+			// Independent synthetic Y, Cb (quiet grain sigma=0.8), Cr (strong grain sigma=6.0) 10-bit planes.
+			const std::vector<uint16_t> yCodes = MakeSyntheticCodes(lw, lh, 10, 1.5, 5101u);
+			const std::vector<uint16_t> cbCodes = MakeSyntheticCodes(cw, ch, 10, 0.8, 5102u);
+			const std::vector<uint16_t> crCodes = MakeSyntheticCodes(cw, ch, 10, 6.0, 5103u);
+
+			PlTexGuard yTex(gpu, UploadLumaPlane(gpu, yCodes, lw, lh, 10));
+			PlTexGuard cbTex(gpu, UploadLumaPlane(gpu, cbCodes, cw, ch, 10));
+			PlTexGuard crTex(gpu, UploadLumaPlane(gpu, crCodes, cw, ch, 10));
+
+			struct ChromaMemoRig
+			{
+				ReadableOwnerDevice device;
+				SkeletonMemo memo;
+				G::VariantOwner owner;
+				explicit ChromaMemoRig(pl_gpu g) : device(g)
+				{
+					Assert::IsNotNull(device.dispatch, L"ReadableOwnerDevice pl_dispatch created");
+					memo.SetHost(this);
+					memo.SetRenderThread(std::this_thread::get_id());
+					memo.SetGpuDispatcherPresent(true);
+					memo.SetGpuBudget(true, uint64_t(1) << 30);
+					memo.SetGpuDevice(&device);
+					Assert::IsTrue(memo.RegisterOwnerFill(kP13SourceRing, AcquireForm::Gpu,
+						Vpv::Capture::SourcePlanes::kUnit, Vpv::Capture::SourcePlanes::MakeOwnerFill())
+						== SkeletonMemo::Registration::Registered, L"P13 registered");
+					Assert::IsTrue(owner.RegisterChroma(memo, 64, 48) == SkeletonMemo::Registration::Registered,
+						L"P10c chroma owner registered");
+				}
+				~ChromaMemoRig()
+				{
+					memo.ReleaseGpuSpots();
+					Vpv::Capture::SourcePlanes::Forget(this);
+				}
+				ChromaMemoRig(const ChromaMemoRig&) = delete;
+				ChromaMemoRig& operator=(const ChromaMemoRig&) = delete;
+			};
+
+			ChromaMemoRig rig(gpu);
+
+			// Offer 3-plane YCbCr P13 SourcePlaneSet for seq = 41.
+			const uint64_t seqYuv = 41u;
+			{
+				Vpv::Capture::SourcePlaneSet set;
+				set.seq = seqYuv;
+				set.planes = 3;
+				set.tex[0] = yTex.tex;
+				set.tex[1] = cbTex.tex;
+				set.tex[2] = crTex.tex;
+				set.components[0] = 1;
+				set.components[1] = 1;
+				set.components[2] = 1;
+				set.rgb = false;
+				set.repr.sys = PL_COLOR_SYSTEM_BT_709;
+				set.repr.levels = PL_COLOR_LEVELS_LIMITED;
+				set.repr.bits.sample_depth = 16;
+				set.repr.bits.color_depth = 10;
+				set.repr.bits.bit_shift = 6;
+				set.origin = "p10c chroma acquire test";
+				Assert::IsTrue(Vpv::Capture::SourcePlanes::Offer(&rig, set), L"3-plane YCbCr P13 offered");
+			}
+
+			auto meanBlockNb = [&](const G::Frame* f) -> double {
+				Assert::IsNotNull(f, L"valid GrainSplit::Gpu::Frame");
+				Assert::IsNotNull(f->blocks, L"frame->blocks texture");
+				const std::vector<float> blk = DownloadGrainLevel(gpu, f->blocks);
+				const size_t n = static_cast<size_t>(f->bw) * static_cast<size_t>(f->bh);
+				Assert::AreEqual(n * 4u, blk.size());
+				double sum = 0.0;
+				for (size_t i = 0; i < n; ++i)
+					sum += static_cast<double>(blk[i * 4u]);
+				return sum / static_cast<double>(n);
+			};
+
+			// 1. Acquire plane=1 (Cb) twice -> single compute (ChromaComputes() == 1), identical Frame*.
+			const VariantKey keyCb = G::ChromaVariantFor(1, cw, ch, 1.0, 10);
+			const AcquireResult cb1 = rig.memo.Acquire(kP10cGrainSplitChroma, seqYuv, AcquireForm::Gpu, keyCb);
+			const std::string cbErr = "Cb acquire failed: " + rig.memo.LastCause(kP10cGrainSplitChroma);
+			Assert::IsTrue(cb1.Ok(), std::wstring(cbErr.begin(), cbErr.end()).c_str());
+			const G::Frame* frameCb1 = G::FrameOf(cb1);
+			Assert::IsNotNull(frameCb1, L"Cb FrameOf non-null");
+			Assert::AreEqual(cw, frameCb1->w);
+			Assert::AreEqual(ch, frameCb1->h);
+			Assert::AreEqual(0, frameCb1->component);
+			Assert::AreEqual(seqYuv, frameCb1->seq);
+			Assert::AreEqual(uint64_t(1), rig.owner.ChromaComputes(), L"first Cb acquire runs one compute");
+
+			const AcquireResult cb2 = rig.memo.Acquire(kP10cGrainSplitChroma, seqYuv, AcquireForm::Gpu, keyCb);
+			Assert::IsTrue(cb2.Ok(), L"second Cb acquire hits memo");
+			Assert::IsTrue(G::FrameOf(cb2) == frameCb1, L"second Cb acquire reuses exact same Frame*");
+			Assert::AreEqual(uint64_t(1), rig.owner.ChromaComputes(), L"second Cb acquire does NOT recompute (single compute)");
+
+			// 2. Negative control (a): acquiring plane=2 (Cr) increments ChromaComputes() == 2 and produces a distinct split.
+			const VariantKey keyCr = G::ChromaVariantFor(2, cw, ch, 1.0, 10);
+			const AcquireResult cr1 = rig.memo.Acquire(kP10cGrainSplitChroma, seqYuv, AcquireForm::Gpu, keyCr);
+			const std::string crErr = "Cr acquire failed: " + rig.memo.LastCause(kP10cGrainSplitChroma);
+			Assert::IsTrue(cr1.Ok(), std::wstring(crErr.begin(), crErr.end()).c_str());
+			const G::Frame* frameCr1 = G::FrameOf(cr1);
+			Assert::IsNotNull(frameCr1, L"Cr FrameOf non-null");
+			Assert::IsTrue(frameCr1 != frameCb1, L"Cr split is distinct from Cb split");
+			Assert::AreEqual(uint64_t(2), rig.owner.ChromaComputes(), L"plane=2 (Cr) increments ChromaComputes to 2");
+
+			const double meanNbCb = meanBlockNb(frameCb1);
+			const double meanNbCr = meanBlockNb(frameCr1);
+			Assert::IsTrue(meanNbCr > meanNbCb * 4.0 && meanNbCr > 8.0,
+				L"Cr (sigma=6.0) N_b strictly exceeds Cb (sigma=0.8) N_b by >4x, proving plane axis reads distinct chroma planes");
+
+			// 3. Negative control (b): invalid plane (0 or 3) and mismatched size visibly decline with OwnerDeclined.
+			{
+				const AcquireResult rP0 = rig.memo.Acquire(kP10cGrainSplitChroma, seqYuv, AcquireForm::Gpu,
+					G::ChromaVariantFor(0, cw, ch, 1.0, 10));
+				Assert::IsFalse(rP0.Ok(), L"plane 0 must decline on P10c");
+				Assert::IsTrue(rP0.cause == AcquireCause::OwnerDeclined, L"plane 0 returns OwnerDeclined");
+				Assert::IsFalse(rig.owner.LastChromaError().empty(), L"plane 0 records non-empty LastChromaError()");
+
+				const AcquireResult rP3 = rig.memo.Acquire(kP10cGrainSplitChroma, seqYuv, AcquireForm::Gpu,
+					G::ChromaVariantFor(3, cw, ch, 1.0, 10));
+				Assert::IsFalse(rP3.Ok(), L"plane 3 must decline on P10c");
+				Assert::IsTrue(rP3.cause == AcquireCause::OwnerDeclined, L"plane 3 returns OwnerDeclined");
+				Assert::IsFalse(rig.owner.LastChromaError().empty(), L"plane 3 records non-empty LastChromaError()");
+
+				const AcquireResult rBadSize = rig.memo.Acquire(kP10cGrainSplitChroma, seqYuv, AcquireForm::Gpu,
+					G::ChromaVariantFor(1, cw + 16, ch, 1.0, 10));
+				Assert::IsFalse(rBadSize.Ok(), L"mismatched chroma size must decline");
+				Assert::IsTrue(rBadSize.cause == AcquireCause::OwnerDeclined, L"mismatched size returns OwnerDeclined");
+				Assert::IsTrue(rig.owner.LastChromaError().find("not the requested size") != std::string::npos,
+					L"mismatched size error explains geometry mismatch");
+			}
+
+			rig.memo.OnSeal(seqYuv);
+			Vpv::Capture::SourcePlanes::BeginFrame(&rig);
+
+			// 4. Negative control (c): RGB P13 frame visibly declines on P10c.
+			const uint64_t seqRgb = 42u;
+			{
+				Vpv::Capture::SourcePlaneSet rgbSet;
+				rgbSet.seq = seqRgb;
+				rgbSet.planes = 3;
+				rgbSet.tex[0] = yTex.tex;
+				rgbSet.tex[1] = cbTex.tex;
+				rgbSet.tex[2] = crTex.tex;
+				rgbSet.components[0] = 1;
+				rgbSet.components[1] = 1;
+				rgbSet.components[2] = 1;
+				rgbSet.rgb = true;
+				rgbSet.repr.sys = PL_COLOR_SYSTEM_RGB;
+				rgbSet.repr.levels = PL_COLOR_LEVELS_FULL;
+				rgbSet.repr.bits.sample_depth = 16;
+				rgbSet.repr.bits.color_depth = 10;
+				rgbSet.repr.bits.bit_shift = 6;
+				rgbSet.origin = "p10c rgb negative control";
+				Assert::IsTrue(Vpv::Capture::SourcePlanes::Offer(&rig, rgbSet), L"RGB P13 offered");
+
+				const AcquireResult rRgb = rig.memo.Acquire(kP10cGrainSplitChroma, seqRgb, AcquireForm::Gpu, keyCb);
+				Assert::IsFalse(rRgb.Ok(), L"RGB frame must decline on P10c");
+				Assert::IsTrue(rRgb.cause == AcquireCause::OwnerDeclined, L"RGB frame returns OwnerDeclined");
+				Assert::IsTrue(rig.owner.LastChromaError().find("RGB") != std::string::npos,
+					L"RGB decline reason names RGB source");
+				Assert::AreEqual(uint64_t(2), rig.owner.ChromaComputes(), L"declined acquires never increment ChromaComputes");
+
+				rig.memo.OnSeal(seqRgb);
+				Vpv::Capture::SourcePlanes::BeginFrame(&rig);
+			}
+		}
 	};
 }

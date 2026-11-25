@@ -445,5 +445,84 @@ namespace VideoProcessorTest
 			for (const Node& n : graph.nodes) splitNodes += n.id == ids.grainSplit ? 1 : 0;
 			Require(graph.valid && consumers.size() == 5 && splitNodes == 1, "one grain_split node for five readers");
 		}
+
+		// W23-B3 M2#10 (REGION-BANDTEXELBLOCK-SPAN): BandTexelBlock reads split.e1..e3 over the full frame block span
+		// on letterbox bar-straddling blocks (CPU/GPU parity with GrainSplitGpu.cpp), zeros pure-bar blocks, and falls
+		// back to the full frame-span sum (not clipped span) when e1..e3 are unpopulated.
+		TEST_METHOD(BandTexelBlockLetterboxBarStraddlingMatchesFrameSpan)
+		{
+			Plane y = Flat(kW, kH, 64.0);
+			// Letterbox picture: top = 26 straddles block row by = 1 (y in [16..31], B = 16); by = 0 (y in [0..15]) is pure bar.
+			const Rect picture = R(0, 26, kW, 118);
+			// Give by = 0 a non-zero artifact so the pure-bar zeroing assertion is non-vacuous.
+			for (int yy = 2; yy < 10; ++yy)
+				for (int xx = 0; xx < kW; ++xx)
+					y.at(xx, yy) = ((xx + yy) & 1) ? 120.0 : 64.0;
+			// Active picture: bright + strong fine checkerboard + mid-frequency wave so d1, d2, d3 are large inside [26..118),
+			// while y in [16..25] inside straddling block row by = 1 stays flat 64.0.
+			for (int yy = picture.top; yy < picture.bottom; ++yy)
+				for (int xx = picture.left; xx < picture.right; ++xx)
+				{
+					const double fine = ((xx + yy) & 1) ? 60.0 : -60.0;
+					const double mid = 45.0 * std::sin(6.283185307 * xx / 9.0) * std::cos(6.283185307 * yy / 11.0);
+					y.at(xx, yy) = 580.0 + fine + mid;
+				}
+
+			const GrainSplit::Split split = GrainSplit::Compute(y, 1.0, kB);
+			const int bx = 4, byStraddle = 1, byPureBar = 0;
+			const size_t idxStraddle = static_cast<size_t>(byStraddle) * split.bw + bx;
+			const size_t idxBar = static_cast<size_t>(byPureBar) * split.bw + bx;
+
+			// 1. Straddling block: BandTexelBlock matches split.e1..e3 (exact full-frame block span, GPU parity).
+			const BlockSpan span = SpanOf(split.w, split.h, split.B, picture, bx, byStraddle);
+			Assert::IsFalse(span.Empty(), L"straddling block overlaps active picture");
+			Assert::AreEqual(26, span.y0, L"clipped span starts at picture.top = 26");
+			Assert::AreEqual(32, span.y1, L"clipped span ends at block edge 32");
+
+			double out[4] = {};
+			BandTexelBlock(split, picture, bx, byStraddle, out);
+			Assert::AreEqual(split.e1[idxStraddle], out[0], 0.0, L"BandTexelBlock e1 equals split.e1 frame span");
+			Assert::AreEqual(split.e2[idxStraddle], out[1], 0.0, L"BandTexelBlock e2 equals split.e2 frame span");
+			Assert::AreEqual(split.e3[idxStraddle], out[2], 0.0, L"BandTexelBlock e3 equals split.e3 frame span");
+			Assert::AreEqual(split.N[idxStraddle], out[3], 0.0, L"BandTexelBlock N equals split.N");
+
+			// Same-input negative control: manually compute the old clipped-block average over SpanOf(...)
+			// and prove it diverges substantially from BandTexelBlock's full-frame span on this straddling block.
+			double clip1 = 0.0, clip2 = 0.0, clip3 = 0.0;
+			for (int yy = span.y0; yy < span.y1; ++yy)
+				for (int xx = span.x0; xx < span.x1; ++xx)
+				{
+					const double a = split.d1.at(xx, yy), b = split.d2.at(xx, yy), c = split.d3.at(xx, yy);
+					clip1 += a * a; clip2 += b * b; clip3 += c * c;
+				}
+			const double clipInv = 1.0 / double((span.x1 - span.x0) * (span.y1 - span.y0));
+			clip1 *= clipInv; clip2 *= clipInv; clip3 *= clipInv;
+			const double diff1 = std::fabs(clip1 - out[0]);
+			const double rel1 = diff1 / (std::max)(out[0], 1.0);
+			Assert::IsTrue(diff1 > 10.0 && rel1 > 0.15,
+				L"negative control: old clipped-span average diverges by > 15% and > 10 codes^2 from frame-span BandTexelBlock");
+
+			// 2. Pure-bar block outside picture: BandTexelBlock returns e1 = e2 = e3 = 0 even though split.e1 > 0.
+			Assert::IsTrue(SpanOf(split.w, split.h, split.B, picture, bx, byPureBar).Empty(), L"by=0 is outside picture");
+			Assert::IsTrue(split.e1[idxBar] > 1.0, L"non-vacuous: pure-bar block has non-zero split.e1");
+			double barOut[4] = { 99.0, 99.0, 99.0, 99.0 };
+			BandTexelBlock(split, picture, bx, byPureBar, barOut);
+			Assert::AreEqual(0.0, barOut[0], 0.0, L"pure-bar block e1 == 0");
+			Assert::AreEqual(0.0, barOut[1], 0.0, L"pure-bar block e2 == 0");
+			Assert::AreEqual(0.0, barOut[2], 0.0, L"pure-bar block e3 == 0");
+			Assert::AreEqual(split.N[idxBar], barOut[3], 0.0, L"pure-bar block preserves N");
+
+			// 3. Fallback path when split.e1..e3 are unpopulated: still sums full frame block span (not clipped span).
+			GrainSplit::Split unpop = split;
+			unpop.e1.clear();
+			unpop.e2.clear();
+			unpop.e3.clear();
+			double fbOut[4] = {};
+			BandTexelBlock(unpop, picture, bx, byStraddle, fbOut);
+			Assert::AreEqual(split.e1[idxStraddle], fbOut[0], 1e-9, L"fallback e1 matches full-frame span");
+			Assert::AreEqual(split.e2[idxStraddle], fbOut[1], 1e-9, L"fallback e2 matches full-frame span");
+			Assert::AreEqual(split.e3[idxStraddle], fbOut[2], 1e-9, L"fallback e3 matches full-frame span");
+			Assert::IsTrue(std::fabs(clip1 - fbOut[0]) > 10.0, L"fallback diverges from old clipped-span sum");
+		}
 	};
 }

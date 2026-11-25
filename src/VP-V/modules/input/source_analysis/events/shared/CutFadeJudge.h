@@ -1,20 +1,9 @@
 // Copyright(C) 2026 VP-V contributors
 // SPDX-License-Identifier: GPL-3.0-only
 //
-// Shared unit U7 "cut / fade / flash judge" (doc 62 section 1.2): the one decision of "the picture changed" derived from two
-// P4 records, and the veto detector's grid + histogram cut rule. Shared by the lane (ClassifyEvents), SkeletonModule, and
-// HdrVetoCutDetector::Observe so every consumer calls ONE implementation. Cut/fade/flash are never stored: every consumer derives them.
-//
-// First-principles 576-cell spatial affine fade law (v4/v5; zero fitted constants):
-//   - Decoupled global translation alignment (integer + symmetric sub-cell Gauss-Newton / Lucas-Kanade) over the 32x18 P4 cell grid
-//   - Rigid OLS affine fit cur ~= A * ref_aligned + c (FitGridFadeAligned) with implied black b = c / (1 - A) in (kFadeMinBlack, kFadeMaxBlack),
-//     L2 variance reduction V_fade < 0.5 * V_id, spatial consensus >= 75%, whole-picture coverage >= 50%, sparse-only FootprintPreserved, and
-//     HighlightScalingConsistent (with ITU-R BT.709-6 kStudioPeakWhiteCodes = 235.0 clipped-white censorship)
-//   - Motion-tolerant fallback (FitMotionTolerantFade): 392-cell order-statistic OLS with SNR-matched gain floor kFadeRunMinGain / kFadeResidualReduction,
-//     4x2 macro-tile affine uniformity & L2 reduction, and 14x7 2x2-pooled correlation >= kSameStructure
-//   - Gridless fallback preserves the M4 (mean, spread) pair/run laws for tiny planes (< 32x18) and synthetic gridless records.
-//
-// Pure C++14, no Windows or GPU headers. Heavy non-template CPU bodies live in CutFadeJudge.cpp (VideoProcessor-Lib).
+// Shared unit U7 "cut / fade / flash judge" (doc 62 section 1.2): one cut/fade/flash decision from two P4 records,
+// shared by ClassifyEvents, SkeletonModule, and HdrVetoCutDetector::Observe. v5: 576-cell affine fade law with motion
+// compensation + gridless fallback + reader-selectable vector-veto axis (default off). Pure C++14, bodies in CutFadeJudge.cpp.
 #pragma once
 
 #include <VP-V/core/ComputeOnce.h>
@@ -24,6 +13,11 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+
+namespace VpSkeleton
+{
+class SkeletonMemo;
+}
 
 namespace VpUnit
 {
@@ -272,41 +266,23 @@ struct HoistedBilinear {
     bool exactInt = true;
 };
 
-// Precomputes constant integer offsets and 4 scalar weights for uniform shift (shiftY, shiftX).
-// When |shiftY| <= kLocalRadius and |shiftX| <= kLocalRadius, y + oy1 in [0, kGridH - 1] and x + ox1 in [0, kGridW - 1]
-// for all interior cells (when shift == +R, fy == 0 so oy1 == oy0), so SampleHoisted reads strictly in-bounds.
+// Precomputed constant-offset bilinear stencil for uniform shift (shiftY, shiftX) (out-of-line in CutFadeJudge.cpp).
 HoistedBilinear MakeHoistedBilinear(double shiftY, double shiftX);
 double SampleHoisted(const double g[kGridH][kGridW], int y, int x, const HoistedBilinear& hb);
-
-// Clamped hoisted bilinear sampler for shifts that can step outside [0, kGridH - 1] x [0, kGridW - 1]
-// (e.g. Gauss-Newton +-0.5 finite differences at +-kLocalRadius): zero std::floor per cell and equivalent to BilinearGrid.
 double SampleHoistedClamped(const double g[kGridH][kGridW], int y, int x, const HoistedBilinear& hb);
-
 void EvalInteriorAffine(const double aligned[kGridH][kGridW], const double cur[kGridH][kGridW],
                         double* outA, double* outC, double* outSxx, double* outCorr, double* outEFade);
-
-// Precondition: |iy + 0.5 * fy| <= kLocalRadius, |ix + 0.5 * fx| <= kLocalRadius, |0.5 * fy| <= kLocalRadius, |0.5 * fx| <= kLocalRadius.
 void SampleInteriorPairShifted(const double ref[kGridH][kGridW], const double cur[kGridH][kGridW],
                                int iy, int ix, double fy, double fx,
                                double refS[kGridH][kGridW], double curS[kGridH][kGridW]);
-
-// Decoupled global translation alignment (integer Pearson correlation + sub-cell Lucas-Kanade).
-// Uses exact integer shift (iy, ix) plus symmetric fractional half-shifts (+0.5*f on ref, -0.5*f on cur)
-// so both grids experience identical bilinear frequency response with zero smoothing at integer shifts.
+// Decoupled global translation alignment (integer Pearson + symmetric sub-cell Gauss-Newton).
 void AlignGrid(const double ref[kGridH][kGridW], const double cur[kGridH][kGridW], int searchRadius,
                double refAligned[kGridH][kGridW], double curAligned[kGridH][kGridW],
                double* outVx, double* outVy);
-
 GridFadeFit FitGridFadeAligned(const double refAligned[kGridH][kGridW], const double curAligned[kGridH][kGridW],
                                double vx, double vy);
-
-// Motion-tolerant order-statistic OLS + exact 4x2 square macro-tile uniformity + 14x7 2x2-pooled structure continuity
-// fallback over the already-aligned 28x14 interior (zero extra AlignGrid calls, zero new constants, zero heap allocations).
 GridFadeFit FitMotionTolerantFade(const double refAligned[kGridH][kGridW], const double curAligned[kGridH][kGridW],
                                   double vx, double vy, bool allowNearBlackCollapse = false, bool activeFade = false);
-
-// Verifies raw-pixel highlight p99 scales consistently with the cell-OLS fade gain about implied black
-// (rejects midtone flicker with pinned highlights; near-black p99 <= black + kFadeMinSpread passes to black-boundary rules).
 bool HighlightScalingConsistent(uint32_t refP99P4, uint32_t curP99P4, double gain, double black, int dir,
                                 double clippedMinDrop = 1.0 / double(kFadeMaxDiv));
 
@@ -929,6 +905,21 @@ inline const char* MeanStepCutLine()
     return R"GLSL(    bool cut = prev.a < 0.5 || abs(luma_mean - prev.b) > 20.0;
 )GLSL";
 }
+
+// B6-D8-VECTOR-VETO: reader-selectable vector-veto axis (default OFF: preserves every existing U7 gate).
+// Trust threshold derived from the 1/2 majority bar (kCutHistFrac = 0.50; matches OpticalFlowTrust w > 0.5 & DetailPulse kTrustMin).
+extern const double kVectorVetoMinTrust;
+struct VectorVeto {
+    bool enabled = false;  // default OFF
+    bool trusted = false;  // true only when upstream motion vectors verify continuity
+    double trust = -1.0;   // < 0: boolean trusted mode; >= 0: requires trust >= kVectorVetoMinTrust (NaN fails closed)
+};
+bool ShouldVetoCut(const VectorVeto& v);
+bool ApplyVectorVeto(bool cut, const VectorVeto& v);
+bool ApplyVectorVeto(bool cut, const VectorVeto& v, bool* vetoedOut);
+bool ReadMemoVectorTrust(VpSkeleton::SkeletonMemo* memo, uint64_t seq);
+bool ReadMemoVectorTrust(VpSkeleton::SkeletonMemo* memo, uint64_t seq, double* trustOut);
+bool ResolveSceneVectorVeto(uint64_t seq, bool cut, bool (*trustReader)(uint64_t, double*), VpSkeleton::SkeletonMemo* memo, bool* vetoedOut);
 
 } // namespace CutFadeJudge
 } // namespace VpUnit

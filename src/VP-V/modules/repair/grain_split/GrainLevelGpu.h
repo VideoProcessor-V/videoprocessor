@@ -40,12 +40,10 @@
 // Acquire was a visible NoOwnerFill; this also means TD's P10 variant Acquires are now served). Both registrations go through
 // the skeleton's external demand (SkeletonModule::Query answers whenever the skeleton module is registered, on or off), so nothing
 // is registered before the skeleton module is, and nothing in the Original pathway.
-// MERGE NOTE (review-cb-p10g-r1 SHOULD-1): 15b A1 is the SINGLE P10 owner registration. Until it lands this module registers
-// it; an AlreadyRegistered answer (A1, or anyone, registered first) is benign: the P10 owner is served by that registration
-// and nothing is shown. When A1 lands, delete the split registration here (splitOwner_, splitTried_, the RegisterThrough call).
-// The module-wide RegisterOwnerFill already is the atomic "has an owner fill" check (it answers AlreadyRegistered under the
-// skeleton's owner-fill lock, before any memo is touched); a separate HasOwnerFill pre-check would need a memo (MemoFor
-// creates one) and could race with A1's registration, so there is none.
+// MERGE NOTE (15b A1 landed): GrainSplit::Gpu::GrainSplitOwnerModule (GrainSplitVariantOwner.h, registered ahead of this module
+// in HubBootstrap.cpp) is the primary production owner of BOTH kP10GrainSplit and kP10cGrainSplitChroma. In production this
+// module's fallback P10 registration receives AlreadyRegistered (benign: SplitOwnerServedElsewhere() == true, nothing shown, never
+// retried), while standalone GrainLevelModule unit tests continue to register P10 cleanly without requiring a second module.
 #include <VP-V/core/Products.h>
 #include <VP-V/core/SkeletonAcquire.h>
 #include <VP-V/core/hub/ExtensionHub.h>

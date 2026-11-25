@@ -9,15 +9,98 @@
 #include <VP-V/modules/input/source_analysis/regions/RegionEvidenceGlsl.h>
 #include <VP-V/modules/repair/grain_split/GpuPassUtil.h>
 #include <VP-V/core/ComputeOnce.h>
+#include <VP-V/core/SkeletonAcquire.h>
 
 #include <algorithm>
+#include <mutex>
+#include <unordered_map>
 
 namespace VpLaneProducts
 {
 	namespace
 	{
-		constexpr size_t kTerms = 6;      // S0..S4 and aux
-		constexpr size_t kBandsTerm = 2;  // P10 Compact: split A, split B, blocks (N, e3, e1, e2)
+		constexpr size_t kTerms = 6;             // S0..S4 and aux
+		constexpr size_t kBandsTermCompact = 2;  // P10 Compact: split A, split B, blocks (N, e3, e1, e2)
+		constexpr size_t kBandsTermFull = 1;     // P10 Full: split, blocks (N, e3, e1, e2)
+
+		// Per-slot bands-validity registry keyed by P11's re_s2 pl_tex handle so ExtractP11BandTextures
+		// knows whether RegionStatsKernel::Step ran with P10 bands bound (re_have_split == 1) or without
+		// (m_noBands == true -> re_s2.xyz == 0, re_s4.w == -1). Entries are cleared on Release / destruction.
+		std::mutex& SlotBandsMutex()
+		{
+			static std::mutex m;
+			return m;
+		}
+		std::unordered_map<const void*, bool>& SlotBandsRegistry()
+		{
+			static std::unordered_map<const void*, bool> reg;
+			return reg;
+		}
+		void RecordSlotBands(const void* s2Tex, bool hasBands, std::vector<const void*>& owned)
+		{
+			if (s2Tex == nullptr)
+				return;
+			{
+				std::lock_guard<std::mutex> lock(SlotBandsMutex());
+				SlotBandsRegistry()[s2Tex] = hasBands;
+			}
+			if (std::find(owned.begin(), owned.end(), s2Tex) == owned.end())
+				owned.push_back(s2Tex);
+		}
+		bool LookupSlotHasBands(const void* s2Tex)
+		{
+			if (s2Tex == nullptr)
+				return false;
+			std::lock_guard<std::mutex> lock(SlotBandsMutex());
+			const auto it = SlotBandsRegistry().find(s2Tex);
+			return it == SlotBandsRegistry().end() ? true : it->second;
+		}
+	}
+
+	P11BandTextures ExtractP11BandTextures(const VpSkeleton::AcquireResult& res)
+	{
+		P11BandTextures out;
+		if (!res.Ok() || !res.gpu.Valid())
+			return out;
+		if (res.gpu.textureSet != nullptr && res.gpu.index >= 0)
+		{
+			const auto* set11 = static_cast<const GpuProductTextures*>(res.gpu.textureSet);
+			const size_t idx = static_cast<size_t>(res.gpu.index);
+			out.s2 = res.gpu.ringSlot ? set11->Ring(idx, kP11BandEnergyTerm) : set11->Live(idx, kP11BandEnergyTerm);
+			out.s4 = res.gpu.ringSlot ? set11->Ring(idx, kP11CoverageTerm) : set11->Live(idx, kP11CoverageTerm);
+		}
+		else if (res.gpu.resource != nullptr || res.gpu.view != nullptr)
+		{
+			out.s2 = static_cast<pl_tex>(res.gpu.resource != nullptr ? res.gpu.resource : res.gpu.view);
+			out.s4 = (res.gpu.resource != nullptr && res.gpu.view != nullptr)
+				? static_cast<pl_tex>(res.gpu.view) : nullptr;
+		}
+		if (out.s2 != nullptr && (!out.s2->params.sampleable || out.s2->params.w <= 0 || out.s2->params.h <= 0
+			|| out.s2->params.format == nullptr || out.s2->params.format->num_components < 3))
+			out.s2 = nullptr;
+		if (out.s4 != nullptr && (!out.s4->params.sampleable || out.s4->params.w <= 0 || out.s4->params.h <= 0
+			|| out.s4->params.format == nullptr || out.s4->params.format->num_components < 4))
+			out.s4 = nullptr;
+		out.hasBands = out.s2 != nullptr && LookupSlotHasBands(out.s2);
+		return out;
+	}
+
+	RegionStatsKernel::~RegionStatsKernel()
+	{
+		ClearRecordedSlots();
+	}
+
+	void RegionStatsKernel::ClearRecordedSlots()
+	{
+		if (m_recordedS2.empty())
+			return;
+		{
+			std::lock_guard<std::mutex> lock(SlotBandsMutex());
+			auto& reg = SlotBandsRegistry();
+			for (const void* k : m_recordedS2)
+				reg.erase(k);
+		}
+		m_recordedS2.clear();
 	}
 
 	VpSkeleton::ProductTexLayout RegionStatsKernel::Layout(VpSkeleton::Dims dims) const
@@ -118,21 +201,25 @@ namespace VpLaneProducts
 			if (!c.out[t] || c.out[t]->params.w != g.gw || c.out[t]->params.h != g.gh)
 				return Fail(c, "P11: an output grid does not match the block grid");
 
-		// P10's blocks: usable only when present, Compact (e1, e2 stored) and on the same grid.
+		// P10's blocks: usable when present in either Compact (term 2) or Full (term 1) storage on the same block grid.
 		pl_tex bands = nullptr;
 		std::string why;
 		const GpuInput* p10 = c.Input(VpSkeleton::kP10GrainSplit);
 		if (p10 == nullptr || p10->missing)
 			why = "the grain split (P10) has no content for this frame";
-		else if (pl_tex b = p10->Term(kBandsTerm))
+		else
 		{
-			if (b->params.w == g.gw && b->params.h == g.gh)
+			pl_tex b = p10->Term(kBandsTermCompact);
+			if (b == nullptr)
+				b = p10->Term(kBandsTermFull);
+			if (b == nullptr)
+				why = "the grain split (P10) has no block energy texture";
+			else if (b->params.w == g.gw && b->params.h == g.gh
+				&& b->params.format != nullptr && b->params.format->num_components >= 4)
 				bands = b;
 			else
 				why = "the grain split (P10) is on another block grid";
 		}
-		else
-			why = "the grain split (P10) is stored Full (no band energies)";
 		m_noBands = bands == nullptr;
 		m_bandsWhy = why;
 		if (bands == nullptr)
@@ -156,13 +243,18 @@ namespace VpLaneProducts
 			VpvGpu::Storage("re_s3", c.out[3]), VpvGpu::Storage("re_s4", c.out[4]), VpvGpu::Storage("re_s5", c.out[5]) };
 		if (!VpvGpu::Pass(c.dispatch, "VideoProcessor P11 region block statistics", m_header, m_body.c_str(), desc, 8, vars, 8,
 				(g.gw + 7) / 8, (g.gh + 7) / 8, 0, 8, 8, c.timer))
+		{
+			RecordSlotBands(c.out[kP11BandEnergyTerm], false, m_recordedS2);
 			return Fail(c, "P11: the stats pass failed to build or dispatch");
+		}
+		RecordSlotBands(c.out[kP11BandEnergyTerm], !m_noBands, m_recordedS2);
 		return true;
 	}
 
 	void RegionStatsKernel::Release(pl_gpu gpu)
 	{
 		(void)gpu;
+		ClearRecordedSlots();
 		if (m_store != nullptr)
 			m_store->Forget(this);   // the store destroys the stand-in
 		m_dummy = nullptr;

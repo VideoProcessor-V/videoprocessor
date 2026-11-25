@@ -2,25 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
-// The restart decision of detail_pulse_stabilise and texture_restore (registered fix D8, WAIVER-B6-D8-MODELS): a cut starts the
-// references over; a fade (U7 v3, owner 2026-11-15) is a PARTIAL reset: the history is reduced by the frame's fade keep, never
-// restarted mid-fade. The judgement is the shared unit U7 (CutFadeJudge v3: the sequence law's delivered cut, the pair or multi-frame fade and its keep), read from
-// the skeleton's SCENE PRODUCT for the source frame through its get-or-compute-and-publish reader (SkeletonModule::SceneOf via
-// Vpv::Skeleton::SceneGroupOf; owner 2026-11-14 17:38 "Ask the skeleton for it same as everything else", C5): the store's scene
-// group when it is there, else the skeleton classifies the frame now and publishes it. With frame_analysis_store off a cut therefore
-// still restarts and a fade still reduces. Nothing here classifies; the modules' private tile-change judges (share of changed tiles,
-// two-step mean ramp) are gone.
-//
-// No private fallback: a frame the skeleton cannot answer (no skeleton module / Original pathway, no renderer frame on this thread,
-// no sealed pair of P4 records) is a RESTART (references start over, gain 1: the safe answer, the picture is never stabilised on an
-// unknown history) and is counted as missing (visible in the module's SceneMissing(), cause in SceneUnavailableWhy()). Tests inject
-// the reader through Params::sceneReader or DefaultSceneReader().
-//
-// Soft reset (cut_soft_reset, default on; owner 2026-11-15 08:35 U7 Q4 "the bar fairly high"): a high-confidence non-cut candidate
-// gets a PARTIAL reset through the same history-keep multiply as a fade (softPartial, historyKeep = CutFadeJudge::SoftResetKeep);
-// the rule and its PROVISIONAL bar are the shared unit's (CutFadeJudge::SoftResetStrength, kSoftResetBar). Below the bar: nothing.
-// The fade partial reset is not behind the switch.
-//
+// Restart decision of detail_pulse_stabilise and texture_restore (D8 / U7 v3 / B6-D8-VECTOR-VETO):
+// cuts restart, fades and high-bar soft-reset candidates apply partial historyKeep, missing records restart visibly.
+// Reader-selectable vectorVeto (default OFF) lets DP/TR veto false pan cuts when P7/P2 vectors verify continuity.
 // Header-only, C++14.
 
 #include <VP-V/core/FrameAnalysisStore.h>
@@ -32,10 +16,17 @@
 #include <atomic>
 #include <cstdint>
 
+namespace VpSkeleton
+{
+	class SkeletonMemo;
+}
+
 namespace VpDetailRestore
 {
 	// Reads the scene group of one source sequence. False = no readable record.
 	using SceneReaderFn = bool (*)(uint64_t sequence, FrameAnalysis::Scene& scene);
+	// Reads motion-vector continuity trust for `sequence` (false = absent or untrusted; fail-closed).
+	using VectorTrustReaderFn = bool (*)(uint64_t sequence, double* trustOut);
 
 	// The cause of the last unanswered read of the production reader (a string literal; shown by SceneUnavailableWhy()).
 	inline std::atomic<const char*>& LastSceneMissingWhy()
@@ -102,26 +93,21 @@ namespace VpDetailRestore
 		// would have fired had the verdict been confirmed (counted, never acted on).
 		bool provisional = false;
 		bool softWaiting = false;
+		bool vectorVetoed = false;       // B6-D8-VECTOR-VETO: true when trusted motion vectors vetoed a false pan cut (visible)
 	};
 
-	// U7 v2 (U7-accuracy): `cut` is the scene group's DELIVERED cut (once per confirmed cut; normally one frame late, later only when the
-	// frame after the cut had no scene group; FrameAnalysis::Scene). Consumers keep the HARD reset on it (owner ruling Q4). softReset
-	// (the consumers pass Params::softReset = cut_soft_reset, default on; the argument's default stays off for the CPU models and
-	// harnesses) adds the soft reset: on a frame that is no restart and no fade, CutFadeJudge::SoftResetStrength of its group (confirmed,
-	// candidate, not cut / cutHere / flash / fade, strength >= kSoftResetBar) > 0 gives softPartial with historyKeep =
-	// SoftResetKeep(strength); the consumer multiplies its history by it exactly as by a fade keep. The restart decision is unchanged.
-	// U7 v3: a fade no longer restarts. A fade group carries fadeKeep (the producer's FrameFadeKeep): the answer is no restart with
-	// historyKeep = fadeKeep (fadePartial). A fade group WITHOUT a keep (a producer before v3) restarts, flagged fadeWithoutKeep: the
-	// consumer shows it as its scene judge fallback (FallbackCatalog::SceneJudgeUnavailable, why = SceneFadeWithoutKeepWhy()).
-	inline SceneRestartAnswer SceneRestartOf(uint64_t sequence, SceneReaderFn reader, bool softReset = false)
+	// Resolves restart / fade-keep / soft-reset / optional vector-veto (vectorVeto defaults OFF) for `sequence`.
+	inline SceneRestartAnswer SceneRestartOf(uint64_t sequence, SceneReaderFn reader, bool softReset = false,
+		bool vectorVeto = false, VectorTrustReaderFn trustReader = nullptr, VpSkeleton::SkeletonMemo* memo = nullptr)
 	{
 		SceneRestartAnswer a;
 		FrameAnalysis::Scene scene;
 		const bool found = sequence != 0 && (reader ? reader : DefaultSceneReader())(sequence, scene);
 		a.fromRecord = found;
-		const bool keepGiven = scene.fadeKeep >= 0.0f;   // NaN is not given either
-		a.fadeWithoutKeep = found && !scene.cut && scene.fade && !keepGiven;
-		a.restart = !found || scene.cut || a.fadeWithoutKeep;
+		const bool cutDecision = (vectorVeto && found && scene.cut) ? VpUnit::CutFadeJudge::ResolveSceneVectorVeto(sequence, true, trustReader, memo, &a.vectorVetoed) : (found && scene.cut);
+		const bool keepGiven = scene.fadeKeep >= 0.0f;
+		a.fadeWithoutKeep = found && !cutDecision && scene.fade && !keepGiven;
+		a.restart = !found || cutDecision || a.fadeWithoutKeep;
 		a.fadePartial = found && !a.restart && scene.fade;
 		a.historyKeep = a.restart ? 0.0f : a.fadePartial ? (scene.fadeKeep < 1.0f ? scene.fadeKeep : 1.0f) : 1.0f;
 		const float soft = softReset && found && !a.restart && !a.fadePartial ?
@@ -132,9 +118,7 @@ namespace VpDetailRestore
 			a.historyKeep = VpUnit::CutFadeJudge::SoftResetKeep(soft);
 		a.strength = a.restart ? 1.0f : soft;
 		a.provisional = found && !scene.confirmed;
-		a.softWaiting = softReset && found && !scene.confirmed && !a.restart && !a.fadePartial &&
-			VpUnit::CutFadeJudge::SoftResetStrength(true, scene.cutPossible, scene.cut || scene.cutHere, scene.flash, scene.fade,
-				scene.cutStrength) > 0.0f;
+		a.softWaiting = softReset && found && !scene.confirmed && !a.restart && !a.fadePartial && VpUnit::CutFadeJudge::SoftResetStrength(true, scene.cutPossible, scene.cut || scene.cutHere, scene.flash, scene.fade, scene.cutStrength) > 0.0f;
 		return a;
 	}
 

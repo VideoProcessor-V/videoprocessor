@@ -7,7 +7,14 @@
 #include <VP-V/tests/support/HardwarePrerequisites.h>
 
 #include <VP-V/modules/repair/texture_restore/DetailPulse.h>
+#include <VP-V/modules/control/skeleton/gpu/OwnerGpuDevice.h>
+#include <VP-V/modules/input/source_analysis/regions/RegionEvidence.h>
+#include <VP-V/modules/motion/estimation/global_model/CameraMotion.h>
+#include <VP-V/modules/motion/estimation/global_model/link/CameraRecordPool.h>
+#include <VP-V/modules/repair/grain_split/BandMemo.h>
+#include <VP-V/modules/repair/grain_split/BandMemoFill.h>
 #include <VP-V/modules/repair/grain_split/GpuPassUtil.h>
+#include <VP-V/modules/repair/grain_split/GrainSplit.h>
 
 #include <libplacebo/d3d11.h>
 #include <libplacebo/dispatch.h>
@@ -17,8 +24,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
@@ -1662,6 +1671,604 @@ namespace DetailPulseTestsNs
 				}
 			}
 		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(DetailPulseGpuBandMemoOneComputeAndFallback)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(DetailPulseGpuBandMemoOneComputeAndFallback)
+		{
+			namespace GB = Vpv::GrainBand;
+			using Reg = VpSkeleton::SkeletonMemo::Registration;
+
+			struct LogGuard
+			{
+				pl_log log = nullptr;
+				explicit LogGuard(pl_log l) : log(l) {}
+				~LogGuard() { if (log) pl_log_destroy(&log); }
+				LogGuard(const LogGuard&) = delete;
+				LogGuard& operator=(const LogGuard&) = delete;
+			};
+			struct D3dGuard
+			{
+				pl_d3d11 d3d = nullptr;
+				explicit D3dGuard(pl_d3d11 d) : d3d(d) {}
+				~D3dGuard() { if (d3d) pl_d3d11_destroy(&d3d); }
+				D3dGuard(const D3dGuard&) = delete;
+				D3dGuard& operator=(const D3dGuard&) = delete;
+			};
+			struct DispatchGuard
+			{
+				pl_dispatch dispatch = nullptr;
+				explicit DispatchGuard(pl_dispatch d) : dispatch(d) {}
+				~DispatchGuard() { if (dispatch) pl_dispatch_destroy(&dispatch); }
+				DispatchGuard(const DispatchGuard&) = delete;
+				DispatchGuard& operator=(const DispatchGuard&) = delete;
+			};
+			struct TexGuard
+			{
+				pl_gpu gpu = nullptr;
+				pl_tex tex = nullptr;
+				TexGuard(pl_gpu g, pl_tex t) : gpu(g), tex(t) {}
+				~TexGuard() { if (gpu && tex) pl_tex_destroy(gpu, &tex); }
+				TexGuard(const TexGuard&) = delete;
+				TexGuard& operator=(const TexGuard&) = delete;
+			};
+			struct PulseGuard
+			{
+				pl_gpu gpu = nullptr;
+				DetailPulse::Module mod;
+				explicit PulseGuard(pl_gpu g) : gpu(g) {}
+				~PulseGuard() { mod.Release(gpu); }
+				PulseGuard(const PulseGuard&) = delete;
+				PulseGuard& operator=(const PulseGuard&) = delete;
+			};
+			struct MemoGpuGuard
+			{
+				Vpv::Skeleton::OwnerGpuDevice ownerDev;
+				VpSkeleton::SkeletonMemo memo;
+				explicit MemoGpuGuard(pl_gpu g) : ownerDev(g) {}
+				~MemoGpuGuard()
+				{
+					memo.ReleaseGpuSpots();
+					ownerDev.Release();
+				}
+				MemoGpuGuard(const MemoGpuGuard&) = delete;
+				MemoGpuGuard& operator=(const MemoGpuGuard&) = delete;
+			};
+
+			pl_log_params logParams{};
+			logParams.log_level = PL_LOG_NONE;
+			LogGuard logGuard(pl_log_create(PL_API_VER, &logParams));
+			std::string device;
+			const pl_d3d11_params deviceParams = ExtendedRangeGpuProbe::TestDeviceParams(&device);
+			D3dGuard d3dGuard(pl_d3d11_create(logGuard.log, &deviceParams));
+			Assert::IsNotNull(d3dGuard.d3d, L"Could not create the libplacebo test device");
+			pl_gpu gpu = d3dGuard.d3d->gpu;
+			DispatchGuard dispGuard(pl_dispatch_create(logGuard.log, gpu));
+			pl_dispatch dispatch = dispGuard.dispatch;
+			Assert::IsNotNull(dispatch, L"pl_dispatch_create succeeded");
+
+			const int w = 128, h = 96;
+			const int hw = (w + 1) / 2, hh = (h + 1) / 2;
+			// Frame 0 = sharp I-frame (step 4), Frame 1 = coarse B-frame (step 14): non-trivial g2 > 1 boost on frame 1.
+			const Coded c = MakeCoded(w, h, 2, 23.976, 4.0, false, 909u);
+
+			auto uploadFull = [&](const Image& img, std::vector<uint16_t>& rawOut) {
+				rawOut.resize(img.v.size());
+				for (size_t i = 0; i < rawOut.size(); ++i)
+					rawOut[i] = static_cast<uint16_t>(static_cast<int>(img.v[i]) << 6);
+				pl_tex_params p{};
+				p.w = w; p.h = h; p.format = pl_find_named_fmt(gpu, "r16"); p.sampleable = true; p.initial_data = rawOut.data();
+				return pl_tex_create(gpu, &p);
+			};
+			auto uploadHalf = [&](const std::vector<uint16_t>& raw) {
+				std::vector<float> half(static_cast<size_t>(hw) * hh, 0.0f);
+				for (int qy = 0; qy < hh; ++qy)
+					for (int qx = 0; qx < hw; ++qx)
+					{
+						const int x0 = (std::min)(2 * qx, w - 1), x1 = (std::min)(2 * qx + 1, w - 1);
+						const int y0 = (std::min)(2 * qy, h - 1), y1 = (std::min)(2 * qy + 1, h - 1);
+						const float a = static_cast<float>(raw[static_cast<size_t>(y0) * w + x0]) / 65535.0f;
+						const float b = static_cast<float>(raw[static_cast<size_t>(y0) * w + x1]) / 65535.0f;
+						const float cc = static_cast<float>(raw[static_cast<size_t>(y1) * w + x0]) / 65535.0f;
+						const float d = static_cast<float>(raw[static_cast<size_t>(y1) * w + x1]) / 65535.0f;
+						half[static_cast<size_t>(qy) * hw + qx] = 0.25f * (a + b + cc + d);
+					}
+				pl_tex_params p{};
+				p.w = hw; p.h = hh; p.format = pl_find_named_fmt(gpu, "r32f"); p.sampleable = true; p.initial_data = half.data();
+				return pl_tex_create(gpu, &p);
+			};
+			auto readbackCodes = [&](pl_tex tex) {
+				pl_tex_params rp{};
+				rp.w = w; rp.h = h; rp.format = tex->params.format; rp.host_readable = true; rp.blit_dst = true;
+				TexGuard readable(gpu, pl_tex_create(gpu, &rp));
+				Assert::IsNotNull(readable.tex);
+				pl_tex_blit_params bp{};
+				bp.src = tex;
+				bp.dst = readable.tex;
+				pl_tex_blit(gpu, &bp);
+				std::vector<uint16_t> raw(static_cast<size_t>(w) * h);
+				pl_tex_transfer_params dl{};
+				dl.tex = readable.tex;
+				dl.ptr = raw.data();
+				Assert::IsTrue(pl_tex_download(gpu, &dl));
+				Image out(w, h);
+				for (size_t i = 0; i < raw.size(); ++i)
+					out.v[i] = raw[i] / 64.0;
+				return out;
+			};
+			auto frameOf = [](pl_tex tex) {
+				pl_frame f{};
+				f.num_planes = 1;
+				f.planes[0].texture = tex;
+				f.planes[0].components = 1;
+				f.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+				f.repr.sys = PL_COLOR_SYSTEM_BT_709;
+				f.repr.levels = PL_COLOR_LEVELS_LIMITED;
+				f.repr.bits.sample_depth = 16;
+				f.repr.bits.color_depth = 10;
+				f.repr.bits.bit_shift = 6;
+				f.color = pl_color_space_bt709;
+				return f;
+			};
+
+			std::vector<uint16_t> raw0, raw1;
+			TexGuard tex0(gpu, uploadFull(c.frames[0], raw0));
+			TexGuard tex1(gpu, uploadFull(c.frames[1], raw1));
+			TexGuard half0(gpu, uploadHalf(raw0));
+			TexGuard half1(gpu, uploadHalf(raw1));
+			const std::vector<float> zeroHalf(static_cast<size_t>(hw) * hh, 0.0f);
+			pl_tex_params zp{};
+			zp.w = hw; zp.h = hh; zp.format = pl_find_named_fmt(gpu, "r32f"); zp.sampleable = true; zp.initial_data = zeroHalf.data();
+			TexGuard zeroTex(gpu, pl_tex_create(gpu, &zp));
+			Assert::IsTrue(tex0.tex && tex1.tex && half0.tex && half1.tex && zeroTex.tex);
+
+			MemoGpuGuard gpuMemo(gpu);
+			int hostTag = 0;
+			gpuMemo.memo.SetHost(&hostTag);
+			gpuMemo.memo.SetRenderThread(std::this_thread::get_id());
+			gpuMemo.memo.SetGpuDispatcherPresent(true);
+			gpuMemo.memo.SetGpuBudget(true, uint64_t(1) << 28);
+			gpuMemo.memo.SetGpuDevice(&gpuMemo.ownerDev);
+
+			pl_tex h0 = half0.tex, h1 = half1.tex;
+			VpSkeleton::OwnerFill p1Fill;
+			p1Fill.view = true;
+			p1Fill.frameScoped = true;
+			p1Fill.fill = [h0, h1, hw, hh](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+				if (req.seq < 1u || req.seq > 2u)
+					return false;
+				pl_tex chosen = (req.seq == 1u) ? h0 : h1;
+				out.gpu.resource = const_cast<void*>(static_cast<const void*>(chosen));
+				out.gpu.width = static_cast<uint32_t>(hw);
+				out.gpu.height = static_cast<uint32_t>(hh);
+				out.gpu.bytes = 0;
+				return true;
+			};
+			Assert::IsTrue(gpuMemo.memo.RegisterOwnerFill(VpSkeleton::kP1HalfLuma, VpSkeleton::AcquireForm::Gpu,
+				VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP1HalfLuma), std::move(p1Fill)) == Reg::Registered);
+
+			const std::shared_ptr<GB::Counters> counters = std::make_shared<GB::Counters>();
+			const uint64_t reserve = GB::BandMemoReserveBytes(VpSkeleton::Dims{ static_cast<uint32_t>(w), static_cast<uint32_t>(h) });
+			Assert::IsTrue(gpuMemo.memo.RegisterOwnerFill(VpSkeleton::kBandMemo, VpSkeleton::AcquireForm::Gpu,
+				GB::kBandMemoUnit, GB::MakeBandMemoOwnerFill(reserve, counters)) == Reg::Registered);
+
+			// Two independent DetailPulse readers share kBandMemo: 2 frames => exactly 2 fills (1 per frame), 4 hits total.
+			PulseGuard dpA(gpu), dpB(gpu), dpFallback(gpu), dpUnreg(gpu), dpZero(gpu);
+			pl_tex fullTexs[2] = { tex0.tex, tex1.tex };
+			pl_frame outA{}, outB{}, outFallback{}, outUnreg{}, outZero{};
+			VpSkeleton::SkeletonMemo unregMemo;
+
+			MemoGpuGuard zeroMemo(gpu);
+			zeroMemo.memo.SetHost(&hostTag);
+			zeroMemo.memo.SetRenderThread(std::this_thread::get_id());
+			zeroMemo.memo.SetGpuDispatcherPresent(true);
+			zeroMemo.memo.SetGpuBudget(true, uint64_t(1) << 28);
+			zeroMemo.memo.SetGpuDevice(&zeroMemo.ownerDev);
+			pl_tex zeroPtr = zeroTex.tex;
+			VpSkeleton::OwnerFill zeroFill;
+			using VK = VpSkeleton::VariantKey;
+			zeroFill.variantAxes = uint32_t(VK::kAxisPlane) | uint32_t(VK::kAxisSize) | uint32_t(VK::kAxisScale)
+				| uint32_t(VK::kAxisSigma) | uint32_t(VK::kAxisStage) | uint32_t(VK::kAxisParam0) | uint32_t(VK::kAxisParam1);
+			zeroFill.view = true;
+			zeroFill.frameScoped = true;
+			zeroFill.fill = [zeroPtr, hw, hh](const VpSkeleton::OwnerFillRequest&, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+				out.gpu.resource = const_cast<void*>(static_cast<const void*>(zeroPtr));
+				out.gpu.width = static_cast<uint32_t>(hw);
+				out.gpu.height = static_cast<uint32_t>(hh);
+				out.gpu.bytes = 0;
+				return true;
+			};
+			Assert::IsTrue(zeroMemo.memo.RegisterOwnerFill(VpSkeleton::kBandMemo, VpSkeleton::AcquireForm::Gpu,
+				GB::kBandMemoUnit, std::move(zeroFill)) == Reg::Registered);
+
+			for (int k = 0; k < 2; ++k)
+			{
+				DetailPulse::Params p;
+				p.sequence = static_cast<uint64_t>(k) + 1u;
+				p.sceneReader = &NoCutReader;
+				p.memo = &gpuMemo.memo;
+				Assert::IsTrue(dpA.mod.Apply(gpu, dispatch, frameOf(fullTexs[k]), p, outA), W(dpA.mod.LastError().c_str()).c_str());
+				Assert::IsTrue(dpB.mod.Apply(gpu, dispatch, frameOf(fullTexs[k]), p, outB), W(dpB.mod.LastError().c_str()).c_str());
+
+				DetailPulse::Params pf = p;
+				pf.memo = nullptr;
+				Assert::IsTrue(dpFallback.mod.Apply(gpu, dispatch, frameOf(fullTexs[k]), pf, outFallback), W(dpFallback.mod.LastError().c_str()).c_str());
+
+				DetailPulse::Params pu = p;
+				pu.memo = &unregMemo;
+				Assert::IsTrue(dpUnreg.mod.Apply(gpu, dispatch, frameOf(fullTexs[k]), pu, outUnreg), W(dpUnreg.mod.LastError().c_str()).c_str());
+
+				DetailPulse::Params pz = p;
+				pz.memo = &zeroMemo.memo;
+				Assert::IsTrue(dpZero.mod.Apply(gpu, dispatch, frameOf(fullTexs[k]), pz, outZero), W(dpZero.mod.LastError().c_str()).c_str());
+			}
+
+			Assert::AreEqual(uint64_t(2), counters->fills.load(), L"two frames across two readers compute kBandMemo once per frame (fills == 2)");
+			Assert::AreEqual(2ull, dpA.mod.BandMemoHits(), L"dpA hit kBandMemo on both frames");
+			Assert::AreEqual(2ull, dpB.mod.BandMemoHits(), L"dpB hit kBandMemo on both frames");
+			Assert::AreEqual(0ull, dpA.mod.BandMemoFallbacks(), L"dpA had zero fallbacks");
+			Assert::AreEqual(0ull, dpB.mod.BandMemoFallbacks(), L"dpB had zero fallbacks");
+			Assert::IsTrue(gpuMemo.memo.Counters(VpSkeleton::kBandMemo).reusedMemo >= 2u, L"memo recorded reuse for second reader");
+
+			Assert::AreEqual(0ull, dpFallback.mod.BandMemoHits(), L"memo=nullptr has zero hits");
+			Assert::AreEqual(2ull, dpFallback.mod.BandMemoFallbacks(), L"memo=nullptr increments BandMemoFallbacks on both frames");
+			Assert::IsFalse(dpFallback.mod.LastBandMemoFallback().empty(), L"memo=nullptr records visible fallback reason");
+			Assert::AreEqual(0ull, dpUnreg.mod.BandMemoHits(), L"unregistered memo has zero hits");
+			Assert::AreEqual(2ull, dpUnreg.mod.BandMemoFallbacks(), L"unregistered memo increments fallbacks");
+			Assert::IsFalse(dpUnreg.mod.LastBandMemoFallback().empty(), L"unregistered memo records visible fallback reason");
+
+			const Image imgA = readbackCodes(outA.planes[0].texture);
+			const Image imgB = readbackCodes(outB.planes[0].texture);
+			const Image imgFallback = readbackCodes(outFallback.planes[0].texture);
+			const Image imgZero = readbackCodes(outZero.planes[0].texture);
+
+			double maxAB = 0.0, maxMemoVsFallback = 0.0, maxBoostVsInput = 0.0, maxZeroVsMemo = 0.0;
+			for (size_t i = 0; i < imgA.v.size(); ++i)
+			{
+				maxAB = (std::max)(maxAB, std::fabs(imgA.v[i] - imgB.v[i]));
+				maxMemoVsFallback = (std::max)(maxMemoVsFallback, std::fabs(imgA.v[i] - imgFallback.v[i]));
+				maxBoostVsInput = (std::max)(maxBoostVsInput, std::fabs(imgA.v[i] - c.frames[1].v[i]));
+				maxZeroVsMemo = (std::max)(maxZeroVsMemo, std::fabs(imgZero.v[i] - imgA.v[i]));
+			}
+			Assert::AreEqual(0.0, maxAB, 0.0, L"second reader matches first reader bit-for-bit");
+			Assert::IsTrue(maxMemoVsFallback <= 0.05, L"kBandMemo path matches memo=nullptr fallback within 0.05 10-bit codes");
+			Assert::IsTrue(maxBoostVsInput > 1.0, L"DetailPulse actively boosted the coarse B-frame (non-vacuous)");
+			Assert::AreEqual(2ull, dpZero.mod.BandMemoHits(), L"dpZero consumed tampered kBandMemo");
+			Assert::IsTrue(maxZeroVsMemo > 0.5, L"negative control: zeroed low band alters DetailPulse output by > 0.5 10-bit codes");
+		}
+
+		// W23-B3 M2#9 (15c C3b): DetailPulse acquires shared P11 band energies (re_s2/re_s4) through SkeletonMemo,
+		// increments P11EnergyHits with zero fallbacks; absent/unregistered P11 increments P11EnergyFallbacks with a
+		// visible reason; swapping/poisoning P11 re_s2 energies shifts DetailPulse output on the exact same input.
+		BEGIN_TEST_METHOD_ATTRIBUTE(DetailPulseAcquiresP11BandEnergiesWithVisibleFallback)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(DetailPulseAcquiresP11BandEnergiesWithVisibleFallback)
+		{
+			using Reg = VpSkeleton::SkeletonMemo::Registration;
+			struct LogGuard { pl_log log = nullptr; explicit LogGuard(pl_log l) : log(l) {} ~LogGuard() { if (log) pl_log_destroy(&log); } };
+			struct D3dGuard { pl_d3d11 d3d = nullptr; explicit D3dGuard(pl_d3d11 d) : d3d(d) {} ~D3dGuard() { if (d3d) pl_d3d11_destroy(&d3d); } };
+			struct DispatchGuard { pl_dispatch d = nullptr; explicit DispatchGuard(pl_dispatch dp) : d(dp) {} ~DispatchGuard() { if (d) pl_dispatch_destroy(&d); } };
+			struct TexGuard { pl_gpu g = nullptr; pl_tex t = nullptr; TexGuard(pl_gpu gpu, pl_tex tex) : g(gpu), t(tex) {} ~TexGuard() { if (g && t) pl_tex_destroy(g, &t); } };
+			struct PulseGuard { pl_gpu g = nullptr; DetailPulse::Module mod; explicit PulseGuard(pl_gpu gpu) : g(gpu) {} ~PulseGuard() { mod.Release(g); } };
+			struct MemoGpuGuard
+			{
+				Vpv::Skeleton::OwnerGpuDevice ownerDev;
+				VpSkeleton::SkeletonMemo memo;
+				explicit MemoGpuGuard(pl_gpu g) : ownerDev(g) {}
+				~MemoGpuGuard() { memo.ReleaseGpuSpots(); ownerDev.Release(); }
+			};
+
+			pl_log_params logParams{};
+			logParams.log_level = PL_LOG_NONE;
+			LogGuard logGuard(pl_log_create(PL_API_VER, &logParams));
+			std::string device;
+			const pl_d3d11_params deviceParams = ExtendedRangeGpuProbe::TestDeviceParams(&device);
+			D3dGuard d3dGuard(pl_d3d11_create(logGuard.log, &deviceParams));
+			Assert::IsNotNull(d3dGuard.d3d, L"Could not create the libplacebo test device");
+			pl_gpu gpu = d3dGuard.d3d->gpu;
+			DispatchGuard dispGuard(pl_dispatch_create(logGuard.log, gpu));
+			pl_dispatch dispatch = dispGuard.d;
+			Assert::IsNotNull(dispatch, L"pl_dispatch_create succeeded");
+
+			const int w = 128, h = 96;
+			const Coded c = MakeCoded(w, h, 2, 23.976, 4.0, false, 909u);
+			const int p11B = RegionEvidence::BlockSizeFor(h);
+			const RegionEvidence::Grid g = RegionEvidence::MakeGrid(w, h, p11B);
+			const size_t nb = g.Count();
+
+			auto uploadFull = [&](const Image& img) {
+				std::vector<uint16_t> raw(img.v.size());
+				for (size_t i = 0; i < raw.size(); ++i)
+					raw[i] = static_cast<uint16_t>(static_cast<int>(img.v[i]) << 6);
+				pl_tex_params p{};
+				p.w = w; p.h = h; p.format = pl_find_named_fmt(gpu, "r16"); p.sampleable = true; p.initial_data = raw.data();
+				return pl_tex_create(gpu, &p);
+			};
+			auto uploadRgba = [&](const std::vector<float>& data) {
+				pl_tex_params p{};
+				p.w = g.gw; p.h = g.gh; p.format = pl_find_named_fmt(gpu, "rgba32f"); p.sampleable = true; p.initial_data = data.data();
+				return pl_tex_create(gpu, &p);
+			};
+			auto readbackCodes = [&](pl_tex tex) {
+				pl_tex_params rp{};
+				rp.w = w; rp.h = h; rp.format = tex->params.format; rp.host_readable = true; rp.blit_dst = true;
+				TexGuard readable(gpu, pl_tex_create(gpu, &rp));
+				Assert::IsNotNull(readable.t);
+				pl_tex_blit_params bp{}; bp.src = tex; bp.dst = readable.t;
+				pl_tex_blit(gpu, &bp);
+				std::vector<uint16_t> raw(static_cast<size_t>(w) * h);
+				pl_tex_transfer_params dl{}; dl.tex = readable.t; dl.ptr = raw.data();
+				Assert::IsTrue(pl_tex_download(gpu, &dl));
+				Image out(w, h);
+				for (size_t i = 0; i < raw.size(); ++i) out.v[i] = raw[i] / 64.0;
+				return out;
+			};
+			auto frameOf = [](pl_tex tex) {
+				pl_frame f{};
+				f.num_planes = 1;
+				f.planes[0].texture = tex; f.planes[0].components = 1; f.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+				f.repr.sys = PL_COLOR_SYSTEM_BT_709; f.repr.levels = PL_COLOR_LEVELS_LIMITED;
+				f.repr.bits.sample_depth = 16; f.repr.bits.color_depth = 10; f.repr.bits.bit_shift = 6;
+				f.color = pl_color_space_bt709;
+				return f;
+			};
+			auto makeP11 = [&](const Image& img, std::vector<float>& s2, std::vector<float>& s4) {
+				GrainSplit::Plane pl(w, h);
+				for (int y = 0; y < h; ++y)
+					for (int x = 0; x < w; ++x) pl.at(x, y) = img.at(x, y);
+				const GrainSplit::Split sp = GrainSplit::Compute(pl, double(p11B) / 16.0, p11B, GrainSplit::Params());
+				s2.assign(nb * 4u, 0.0f); s4.assign(nb * 4u, 0.0f);
+				for (size_t i = 0; i < nb; ++i)
+				{
+					s2[i * 4 + 0] = static_cast<float>(sp.e1[i]);
+					s2[i * 4 + 1] = static_cast<float>(sp.e2[i]);
+					s2[i * 4 + 2] = static_cast<float>(sp.e3[i]);
+					s4[i * 4 + 0] = 1.0f; s4[i * 4 + 2] = 1.0f;
+					s4[i * 4 + 3] = static_cast<float>(sp.N[i]);
+				}
+			};
+
+			TexGuard tex0(gpu, uploadFull(c.frames[0])), tex1(gpu, uploadFull(c.frames[1]));
+			std::vector<float> s20, s40, s21, s41;
+			makeP11(c.frames[0], s20, s40);
+			makeP11(c.frames[1], s21, s41);
+			TexGuard s2Tex0(gpu, uploadRgba(s20)), s4Tex0(gpu, uploadRgba(s40));
+			TexGuard s2Tex1(gpu, uploadRgba(s21)), s4Tex1(gpu, uploadRgba(s41));
+			// Negative control: reversed P11 band energies (frame 0 tiny, frame 1 huge) suppress DetailPulse's B-frame boost.
+			std::vector<float> pS20(nb * 4u, 0.0f), pS21(nb * 4u, 0.0f), pS4(nb * 4u, 0.0f);
+			for (size_t i = 0; i < nb; ++i)
+			{
+				pS20[i * 4 + 0] = 0.01f; pS20[i * 4 + 1] = 0.01f; pS20[i * 4 + 2] = 0.01f;
+				pS21[i * 4 + 0] = 2000.0f; pS21[i * 4 + 1] = 2000.0f; pS21[i * 4 + 2] = 500.0f;
+				pS4[i * 4 + 0] = 1.0f; pS4[i * 4 + 2] = 1.0f; pS4[i * 4 + 3] = 0.0f;
+			}
+			TexGuard ps2Tex0(gpu, uploadRgba(pS20)), ps2Tex1(gpu, uploadRgba(pS21)), ps4Tex(gpu, uploadRgba(pS4));
+			Assert::IsTrue(tex0.t && tex1.t && s2Tex0.t && s4Tex0.t && s2Tex1.t && s4Tex1.t && ps2Tex0.t && ps2Tex1.t && ps4Tex.t);
+
+			int hostTag = 0;
+			auto initMemo = [&](MemoGpuGuard& mg, pl_tex a2, pl_tex a4, pl_tex b2, pl_tex b4) {
+				mg.memo.SetHost(&hostTag);
+				mg.memo.SetRenderThread(std::this_thread::get_id());
+				mg.memo.SetGpuDispatcherPresent(true);
+				mg.memo.SetGpuBudget(true, uint64_t(1) << 28);
+				mg.memo.SetGpuDevice(&mg.ownerDev);
+				VpSkeleton::OwnerFill fill;
+				fill.view = true;
+				fill.frameScoped = true;
+				fill.fill = [a2, a4, b2, b4, g](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+					if (req.seq != 1u && req.seq != 2u) return false;
+					pl_tex s2 = (req.seq == 1u) ? a2 : b2;
+					pl_tex s4 = (req.seq == 1u) ? a4 : b4;
+					out.gpu.resource = const_cast<void*>(static_cast<const void*>(s2));
+					out.gpu.view = const_cast<void*>(static_cast<const void*>(s4));
+					out.gpu.width = uint32_t(g.gw);
+					out.gpu.height = uint32_t(g.gh);
+					out.gpu.bytes = 0;
+					return true;
+				};
+				Assert::IsTrue(mg.memo.RegisterOwnerFill(VpSkeleton::kP11RegionBlockStats, VpSkeleton::AcquireForm::Gpu,
+					VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP11RegionBlockStats), std::move(fill)) == Reg::Registered);
+			};
+
+			MemoGpuGuard p11Memo(gpu), poisonMemo(gpu);
+			initMemo(p11Memo, s2Tex0.t, s4Tex0.t, s2Tex1.t, s4Tex1.t);
+			initMemo(poisonMemo, ps2Tex0.t, ps4Tex.t, ps2Tex1.t, ps4Tex.t);
+			VpSkeleton::SkeletonMemo unregMemo;
+
+			PulseGuard dpP11(gpu), dpNull(gpu), dpUnreg(gpu), dpPoison(gpu);
+			pl_tex fullTexs[2] = { tex0.t, tex1.t };
+			pl_frame outP11{}, outNull{}, outUnreg{}, outPoison{};
+			for (int k = 0; k < 2; ++k)
+			{
+				DetailPulse::Params p;
+				p.sequence = static_cast<uint64_t>(k) + 1u;
+				p.sceneReader = &NoCutReader;
+				p.memo = &p11Memo.memo;
+				Assert::IsTrue(dpP11.mod.Apply(gpu, dispatch, frameOf(fullTexs[k]), p, outP11), W(dpP11.mod.LastError().c_str()).c_str());
+
+				DetailPulse::Params pn = p; pn.memo = nullptr;
+				Assert::IsTrue(dpNull.mod.Apply(gpu, dispatch, frameOf(fullTexs[k]), pn, outNull), W(dpNull.mod.LastError().c_str()).c_str());
+
+				DetailPulse::Params pu = p; pu.memo = &unregMemo;
+				Assert::IsTrue(dpUnreg.mod.Apply(gpu, dispatch, frameOf(fullTexs[k]), pu, outUnreg), W(dpUnreg.mod.LastError().c_str()).c_str());
+
+				DetailPulse::Params pp = p; pp.memo = &poisonMemo.memo;
+				Assert::IsTrue(dpPoison.mod.Apply(gpu, dispatch, frameOf(fullTexs[k]), pp, outPoison), W(dpPoison.mod.LastError().c_str()).c_str());
+			}
+
+			Assert::AreEqual(2ull, dpP11.mod.P11EnergyHits(), L"DP hit P11 on both frames");
+			Assert::AreEqual(0ull, dpP11.mod.P11EnergyFallbacks(), L"DP had zero P11 fallbacks when memo provided P11");
+			Assert::IsTrue(dpP11.mod.LastP11EnergyFallback().empty(), L"no fallback reason on P11 hit");
+
+			Assert::AreEqual(0ull, dpNull.mod.P11EnergyHits(), L"memo=nullptr has zero P11 hits");
+			Assert::AreEqual(2ull, dpNull.mod.P11EnergyFallbacks(), L"memo=nullptr increments P11EnergyFallbacks");
+			Assert::IsFalse(dpNull.mod.LastP11EnergyFallback().empty(), L"memo=nullptr records visible fallback reason");
+
+			Assert::AreEqual(0ull, dpUnreg.mod.P11EnergyHits(), L"unregistered memo has zero P11 hits");
+			Assert::AreEqual(2ull, dpUnreg.mod.P11EnergyFallbacks(), L"unregistered memo increments P11EnergyFallbacks");
+			Assert::IsFalse(dpUnreg.mod.LastP11EnergyFallback().empty(), L"unregistered memo records visible fallback reason");
+
+			Assert::AreEqual(2ull, dpPoison.mod.P11EnergyHits(), L"poisoned memo still hit P11");
+			const Image imgP11 = readbackCodes(outP11.planes[0].texture);
+			const Image imgNull = readbackCodes(outNull.planes[0].texture);
+			const Image imgPoison = readbackCodes(outPoison.planes[0].texture);
+			double maxBoostVsIn = 0.0, maxNullBoostVsIn = 0.0, maxNullDelta = 0.0, maxPoisonDelta = 0.0;
+			double sqNullDelta = 0.0, sqPoisonDelta = 0.0;
+			for (size_t i = 0; i < imgP11.v.size(); ++i)
+			{
+				const double dNull = imgP11.v[i] - imgNull.v[i];
+				const double dPoison = imgP11.v[i] - imgPoison.v[i];
+				maxBoostVsIn = (std::max)(maxBoostVsIn, std::fabs(imgP11.v[i] - c.frames[1].v[i]));
+				maxNullBoostVsIn = (std::max)(maxNullBoostVsIn, std::fabs(imgNull.v[i] - c.frames[1].v[i]));
+				maxNullDelta = (std::max)(maxNullDelta, std::fabs(dNull));
+				maxPoisonDelta = (std::max)(maxPoisonDelta, std::fabs(dPoison));
+				sqNullDelta += dNull * dNull;
+				sqPoisonDelta += dPoison * dPoison;
+			}
+			const double rmsNullDelta = std::sqrt(sqNullDelta / static_cast<double>(imgP11.v.size()));
+			const double rmsPoisonDelta = std::sqrt(sqPoisonDelta / static_cast<double>(imgP11.v.size()));
+			Assert::IsTrue(maxBoostVsIn > 0.5, L"non-vacuous: DP with real P11 actively boosts the coarse B-frame");
+			Assert::IsTrue(maxNullBoostVsIn > 0.5, L"non-vacuous: DP fallback (memo=nullptr) actively boosts the coarse B-frame");
+			Assert::IsTrue(maxPoisonDelta > 0.5, L"negative control: swapped/poisoned P11 re_s2 shifts DP output on the exact same input");
+			Assert::IsTrue(rmsNullDelta < 0.25 && maxNullDelta < 1.0,
+				L"DP P11 output matches memo=nullptr fallback quantitatively (accurate channel & code_scale2 ingest)");
+			Assert::IsTrue(maxNullDelta < 0.25 * maxPoisonDelta && rmsNullDelta < 0.25 * rmsPoisonDelta,
+				L"DP P11 parity vs memo=nullptr is strictly tighter than poisoned P11 divergence");
+		}
+
+		// W23-B3 M2#12 / HIGH #3: end-to-end DetailPulse::Module::Apply exercises vector-veto with trusted P7
+		// (Reason::Ok, confidence 0.85) on a pan-cut scene verdict: default params.vectorVeto=true suppresses
+		// restart (SceneVectorVetoes() >= 1, keeps history); negative control params.vectorVeto=false restarts.
+		BEGIN_TEST_METHOD_ATTRIBUTE(DetailPulseGpuVectorVetoSuppressesPanCutRestart)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(DetailPulseGpuVectorVetoSuppressesPanCutRestart)
+		{
+			using Reg = VpSkeleton::SkeletonMemo::Registration;
+			struct LogGuard { pl_log log = nullptr; explicit LogGuard(pl_log l) : log(l) {} ~LogGuard() { if (log) pl_log_destroy(&log); } };
+			struct D3dGuard { pl_d3d11 d3d = nullptr; explicit D3dGuard(pl_d3d11 d) : d3d(d) {} ~D3dGuard() { if (d3d) pl_d3d11_destroy(&d3d); } };
+			struct DispatchGuard { pl_dispatch d = nullptr; explicit DispatchGuard(pl_dispatch dp) : d(dp) {} ~DispatchGuard() { if (d) pl_dispatch_destroy(&d); } };
+			struct TexGuard { pl_gpu g = nullptr; pl_tex t = nullptr; TexGuard(pl_gpu gpu, pl_tex tex) : g(gpu), t(tex) {} ~TexGuard() { if (g && t) pl_tex_destroy(g, &t); } };
+			struct PulseGuard { pl_gpu g = nullptr; DetailPulse::Module mod; explicit PulseGuard(pl_gpu gpu) : g(gpu) {} ~PulseGuard() { mod.Release(g); } };
+
+			pl_log_params logParams{};
+			logParams.log_level = PL_LOG_NONE;
+			LogGuard logGuard(pl_log_create(PL_API_VER, &logParams));
+			std::string device;
+			const pl_d3d11_params deviceParams = ExtendedRangeGpuProbe::TestDeviceParams(&device);
+			D3dGuard d3dGuard(pl_d3d11_create(logGuard.log, &deviceParams));
+			Assert::IsNotNull(d3dGuard.d3d, L"Could not create the libplacebo test device");
+			pl_gpu gpu = d3dGuard.d3d->gpu;
+			DispatchGuard dispGuard(pl_dispatch_create(logGuard.log, gpu));
+			pl_dispatch dispatch = dispGuard.d;
+			Assert::IsNotNull(dispatch, L"pl_dispatch_create succeeded");
+
+			const int w = 128, h = 96;
+			const Coded c = MakeCoded(w, h, 2, 23.976, 4.0, false, 909u);
+			auto uploadFull = [&](const Image& img) {
+				std::vector<uint16_t> raw(img.v.size());
+				for (size_t i = 0; i < raw.size(); ++i)
+					raw[i] = static_cast<uint16_t>(static_cast<int>(img.v[i]) << 6);
+				pl_tex_params p{};
+				p.w = w; p.h = h; p.format = pl_find_named_fmt(gpu, "r16"); p.sampleable = true; p.initial_data = raw.data();
+				return pl_tex_create(gpu, &p);
+			};
+			auto readbackCodes = [&](pl_tex tex) {
+				pl_tex_params rp{};
+				rp.w = w; rp.h = h; rp.format = tex->params.format; rp.host_readable = true; rp.blit_dst = true;
+				TexGuard readable(gpu, pl_tex_create(gpu, &rp));
+				Assert::IsNotNull(readable.t);
+				pl_tex_blit_params bp{}; bp.src = tex; bp.dst = readable.t;
+				pl_tex_blit(gpu, &bp);
+				std::vector<uint16_t> raw(static_cast<size_t>(w) * h);
+				pl_tex_transfer_params dl{}; dl.tex = readable.t; dl.ptr = raw.data();
+				Assert::IsTrue(pl_tex_download(gpu, &dl));
+				Image out(w, h);
+				for (size_t i = 0; i < raw.size(); ++i) out.v[i] = raw[i] / 64.0;
+				return out;
+			};
+			auto frameOf = [](pl_tex tex) {
+				pl_frame f{};
+				f.num_planes = 1;
+				f.planes[0].texture = tex; f.planes[0].components = 1; f.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+				f.repr.sys = PL_COLOR_SYSTEM_BT_709; f.repr.levels = PL_COLOR_LEVELS_LIMITED;
+				f.repr.bits.sample_depth = 16; f.repr.bits.color_depth = 10; f.repr.bits.bit_shift = 6;
+				f.color = pl_color_space_bt709;
+				return f;
+			};
+
+			TexGuard tex0(gpu, uploadFull(c.frames[0])), tex1(gpu, uploadFull(c.frames[1]));
+			Assert::IsTrue(tex0.t != nullptr && tex1.t != nullptr);
+
+			VpSkeleton::SkeletonMemo memoP7;
+			CameraModel::CameraMotion cam;
+			cam.seq = 2u; cam.pairFrom = 1u; cam.pairTo = 2u;
+			cam.pairSeconds = 1.0 / 23.976;
+			cam.valid = true;
+			cam.reason = CameraModel::Reason::Ok;
+			cam.confidence = 0.85;
+			cam.params.type = CameraModel::ModelType::Translation;
+			cam.params.h[2] = 12.0; cam.params.h[5] = 0.0;
+			cam.picture.left = 0; cam.picture.top = 0; cam.picture.right = w; cam.picture.bottom = h;
+			VpSkeleton::OwnerFill p7Fill;
+			p7Fill.renderThreadOnly = false;
+			p7Fill.fill = [cam](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) -> bool {
+				if (req.seq != 2u) return false;
+				uint8_t buf[CameraLink::kRecordPodMaxBytes]{};
+				const size_t n = CameraLink::EncodeRecordPod(cam, buf, sizeof(buf));
+				if (n == 0u) return false;
+				out.bytes.assign(buf, buf + n);
+				return true;
+			};
+			Assert::IsTrue(memoP7.RegisterOwnerFill(VpSkeleton::kP7CameraFit, VpSkeleton::AcquireForm::Cpu,
+				VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP7CameraFit), std::move(p7Fill)) == Reg::Registered);
+
+			VpDetailRestore::SceneReaderFn panCutReader = [](uint64_t seq, FrameAnalysis::Scene& sc) -> bool {
+				sc = FrameAnalysis::Scene();
+				if (seq == 2u)
+				{
+					sc.cut = true;
+					sc.confirmed = true;
+					sc.cutStrength = 1.0f;
+				}
+				return true;
+			};
+
+			PulseGuard dpVeto(gpu), dpNoVeto(gpu);
+			pl_tex inputs[2] = { tex0.t, tex1.t };
+			pl_frame outVeto{}, outNoVeto{};
+			for (int k = 0; k < 2; ++k)
+			{
+				DetailPulse::Params pVeto;
+				Assert::IsTrue(pVeto.vectorVeto, L"DetailPulse::Params::vectorVeto defaults true");
+				pVeto.sequence = static_cast<uint64_t>(k) + 1u;
+				pVeto.sceneReader = panCutReader;
+				pVeto.memo = &memoP7;
+				Assert::IsTrue(dpVeto.mod.Apply(gpu, dispatch, frameOf(inputs[k]), pVeto, outVeto), W(dpVeto.mod.LastError().c_str()).c_str());
+
+				DetailPulse::Params pNoVeto = pVeto;
+				pNoVeto.vectorVeto = false;
+				Assert::IsTrue(dpNoVeto.mod.Apply(gpu, dispatch, frameOf(inputs[k]), pNoVeto, outNoVeto), W(dpNoVeto.mod.LastError().c_str()).c_str());
+			}
+
+			Assert::AreEqual(1ull, dpVeto.mod.SceneVectorVetoes(), L"DP with default vectorVeto=true vetoes pan-cut restart on trusted P7");
+			Assert::AreEqual(1.0f, dpVeto.mod.LastHistoryKeep(), 1e-6f, L"vetoed pan keeps full history");
+			Assert::AreEqual(0ull, dpNoVeto.mod.SceneVectorVetoes(), L"negative control: vectorVeto=false does NOT veto pan-cut restart");
+			Assert::AreEqual(0.0f, dpNoVeto.mod.LastHistoryKeep(), 1e-6f, L"negative control: unvetoed pan cut restarts history");
+
+			const Image imgVeto = readbackCodes(outVeto.planes[0].texture);
+			const Image imgNoVeto = readbackCodes(outNoVeto.planes[0].texture);
+			double maxVetoBoost = 0.0, maxVetoVsNoVeto = 0.0;
+			for (size_t i = 0; i < imgVeto.v.size(); ++i)
+			{
+				maxVetoBoost = (std::max)(maxVetoBoost, std::fabs(imgVeto.v[i] - c.frames[1].v[i]));
+				maxVetoVsNoVeto = (std::max)(maxVetoVsNoVeto, std::fabs(imgVeto.v[i] - imgNoVeto.v[i]));
+			}
+			Assert::IsTrue(maxVetoBoost > 0.5, L"vetoed DP retained frame 0 history and boosted coarse frame 1");
+			Assert::IsTrue(maxVetoVsNoVeto > 0.5, L"negative control: suppressing vs taking restart materially alters DP GPU output");
+		}
 	};
 }
 
@@ -1709,6 +2316,126 @@ namespace DetailPulseBandFromBaseNs
 					[&](int i) { return DetailPulse::FineWeight(i - DetailPulse::FineRadius(scale), scale); });
 				Assert::AreEqual(before, after, L"GLSL table text");
 			}
+		}
+
+		// W23-B3 M2#2 (U2 B4 CPU BandMemo): DetailPulse::AcquireFineCpuBand & AcquireWideCpuBand hit CPU kBandMemo
+		// once per key, match independent BandFromBase::BlurTaps bit-for-bit, and visibly report fallbacks.
+		TEST_METHOD(DetailPulseCpuBandAcquireAndVisibleFallback)
+		{
+			namespace BFB = VpUnit::BandFromBase;
+			namespace GB = Vpv::GrainBand;
+			using Reg = VpSkeleton::SkeletonMemo::Registration;
+
+			const int W = 64, H = 48;
+			const int HW = (W + 1) / 2, HH = (H + 1) / 2;
+			const size_t nFull = static_cast<size_t>(W) * H;
+			const size_t nHalf = static_cast<size_t>(HW) * HH;
+
+			std::vector<float> fullPlane(nFull, 0.0f);
+			uint32_t rng = 0x2468ace0u;
+			for (int y = 0; y < H; ++y)
+				for (int x = 0; x < W; ++x)
+				{
+					rng = rng * 1664525u + 1013904223u;
+					const float noise = (static_cast<float>((rng >> 8) & 1023u) / 1023.0f - 0.5f) * 0.2f;
+					const float edge = (x >= 24 && x < 40 && y >= 12 && y < 36) ? 0.4f : 0.15f;
+					fullPlane[static_cast<size_t>(y) * W + x] = (std::min)(1.0f, (std::max)(0.0f, edge + noise));
+				}
+
+			std::vector<uint16_t> halfU16(nHalf, 0u);
+			std::vector<float> halfFloat(nHalf, 0.0f);
+			constexpr float kInvU16Max = 1.0f / 65535.0f;
+			for (int y = 0; y < HH; ++y)
+				for (int x = 0; x < HW; ++x)
+				{
+					const float avg = 0.25f * (fullPlane[static_cast<size_t>(2 * y) * W + 2 * x]
+						+ fullPlane[static_cast<size_t>(2 * y) * W + 2 * x + 1]
+						+ fullPlane[static_cast<size_t>(2 * y + 1) * W + 2 * x]
+						+ fullPlane[static_cast<size_t>(2 * y + 1) * W + 2 * x + 1]);
+					const uint16_t u = static_cast<uint16_t>(std::lround(avg * 65535.0f));
+					halfU16[static_cast<size_t>(y) * HW + x] = u;
+					halfFloat[static_cast<size_t>(y) * HW + x] = static_cast<float>(u) * kInvU16Max;
+				}
+
+			VpSkeleton::SkeletonMemo memo;
+			const uint64_t kSeq = 50u;
+			VpSkeleton::OwnerFill p13Cpu;
+			p13Cpu.frameScoped = true;
+			p13Cpu.renderThreadOnly = false;
+			p13Cpu.fill = [&fullPlane, kSeq](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+				if (req.seq != kSeq) return false;
+				out.bytes.resize(fullPlane.size() * sizeof(float));
+				std::memcpy(out.bytes.data(), fullPlane.data(), out.bytes.size());
+				return true;
+			};
+			Assert::IsTrue(memo.RegisterOwnerFill(VpSkeleton::kP13SourceRing, VpSkeleton::AcquireForm::Cpu,
+				VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP13SourceRing), std::move(p13Cpu)) == Reg::Registered);
+
+			VpSkeleton::OwnerFill p1Cpu;
+			p1Cpu.frameScoped = true;
+			p1Cpu.renderThreadOnly = false;
+			p1Cpu.fill = [&halfU16, kSeq](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+				if (req.seq != kSeq) return false;
+				out.bytes.resize(halfU16.size() * sizeof(uint16_t));
+				std::memcpy(out.bytes.data(), halfU16.data(), out.bytes.size());
+				return true;
+			};
+			Assert::IsTrue(memo.RegisterOwnerFill(VpSkeleton::kP1HalfLuma, VpSkeleton::AcquireForm::Cpu,
+				VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP1HalfLuma), std::move(p1Cpu)) == Reg::Registered);
+
+			const std::shared_ptr<GB::Counters> counters = std::make_shared<GB::Counters>();
+			Assert::IsTrue(memo.RegisterOwnerFill(VpSkeleton::kBandMemo, VpSkeleton::AcquireForm::Cpu,
+				GB::kBandMemoUnit, GB::MakeBandMemoCpuOwnerFill(counters)) == Reg::Registered);
+
+			// Independent BlurTaps references.
+			std::vector<float> fineRef, wideRef;
+			const std::vector<float> fineTaps = BFB::Taps<float>(BFB::kSigmaFine, 3.0, true, 0.0);
+			BFB::BlurTaps<float>(fullPlane, fineRef, W, H, fineTaps, BFB::EdgeMode::Replicate);
+			const double wideSigma = DetailPulse::WideSigma(1.0);
+			const int wr = GrainPreserve::LowRadius(wideSigma);
+			std::vector<float> wideTaps(static_cast<size_t>(2 * wr + 1));
+			for (int i = -wr; i <= wr; ++i)
+				wideTaps[static_cast<size_t>(i + wr)] = static_cast<float>(GrainPreserve::LowWeight(i, wideSigma));
+			BFB::BlurTaps<float>(halfFloat, wideRef, HW, HH, wideTaps, BFB::EdgeMode::Replicate);
+
+			// Memo hits: 1 fine fill + 1 wide fill, reused on second acquire.
+			const DetailPulse::CpuBandResult fineMemo = DetailPulse::AcquireFineCpuBand(fullPlane, W, H, 1.0, &memo, kSeq);
+			const DetailPulse::CpuBandResult wideMemo = DetailPulse::AcquireWideCpuBand(halfFloat, HW, HH, 1.0, &memo, kSeq);
+			Assert::IsTrue(fineMemo.fromBandMemo && fineMemo.fallbackReason.empty(), L"AcquireFineCpuBand hits kBandMemo");
+			Assert::IsTrue(wideMemo.fromBandMemo && wideMemo.fallbackReason.empty(), L"AcquireWideCpuBand hits kBandMemo");
+			Assert::AreEqual(uint64_t(2), counters->fills.load(), L"1 fine fill + 1 wide fill");
+			Assert::AreEqual(fineRef.size(), fineMemo.samples.size());
+			Assert::AreEqual(wideRef.size(), wideMemo.samples.size());
+			Assert::IsTrue(std::memcmp(fineMemo.samples.data(), fineRef.data(), fineRef.size() * sizeof(float)) == 0,
+				L"AcquireFineCpuBand matches independent BlurTaps bit-for-bit");
+			Assert::IsTrue(std::memcmp(wideMemo.samples.data(), wideRef.data(), wideRef.size() * sizeof(float)) == 0,
+				L"AcquireWideCpuBand matches independent BlurTaps bit-for-bit");
+
+			const DetailPulse::CpuBandResult fineRepeat = DetailPulse::AcquireFineCpuBand(fullPlane, W, H, 1.0, &memo, kSeq);
+			const DetailPulse::CpuBandResult wideRepeat = DetailPulse::AcquireWideCpuBand(halfFloat, HW, HH, 1.0, &memo, kSeq);
+			Assert::AreEqual(uint64_t(2), counters->fills.load(), L"repeated CPU band acquires reuse memo without recompute");
+			Assert::IsTrue(fineRepeat.fromBandMemo && wideRepeat.fromBandMemo);
+
+			// Negative controls: memo=nullptr, seq=0, unregistered memo visibly report fallback while staying bit-exact.
+			VpSkeleton::SkeletonMemo emptyMemo;
+			const DetailPulse::CpuBandResult fineNull = DetailPulse::AcquireFineCpuBand(fullPlane, W, H, 1.0, nullptr, kSeq);
+			const DetailPulse::CpuBandResult wideNull = DetailPulse::AcquireWideCpuBand(halfFloat, HW, HH, 1.0, nullptr, kSeq);
+			const DetailPulse::CpuBandResult fineUnreg = DetailPulse::AcquireFineCpuBand(fullPlane, W, H, 1.0, &emptyMemo, kSeq);
+			const DetailPulse::CpuBandResult wideUnkeyed = DetailPulse::AcquireWideCpuBand(halfFloat, HW, HH, 1.0, &memo, 0u);
+			Assert::IsFalse(fineNull.fromBandMemo || fineNull.fallbackReason.empty(), L"fine memo=nullptr fallback visible");
+			Assert::IsFalse(wideNull.fromBandMemo || wideNull.fallbackReason.empty(), L"wide memo=nullptr fallback visible");
+			Assert::IsFalse(fineUnreg.fromBandMemo || fineUnreg.fallbackReason.empty(), L"fine unregistered fallback visible");
+			Assert::IsFalse(wideUnkeyed.fromBandMemo || wideUnkeyed.fallbackReason.empty(), L"wide seq=0 fallback visible");
+			Assert::IsTrue(std::memcmp(fineNull.samples.data(), fineRef.data(), fineRef.size() * sizeof(float)) == 0, L"fine fallback bit-exact");
+			Assert::IsTrue(std::memcmp(wideNull.samples.data(), wideRef.data(), wideRef.size() * sizeof(float)) == 0, L"wide fallback bit-exact");
+
+			// Non-vacuity negative control: unblurred planes diverge substantially from blurred bands.
+			float maxFineDiff = 0.0f, maxWideDiff = 0.0f;
+			for (size_t i = 0; i < nFull; ++i)
+				maxFineDiff = (std::max)(maxFineDiff, std::fabs(fineMemo.samples[i] - fullPlane[i]));
+			for (size_t i = 0; i < nHalf; ++i)
+				maxWideDiff = (std::max)(maxWideDiff, std::fabs(wideMemo.samples[i] - halfFloat[i]));
+			Assert::IsTrue(maxFineDiff > 0.05f && maxWideDiff > 0.05f, L"negative control: blur materially transforms input");
 		}
 	};
 }

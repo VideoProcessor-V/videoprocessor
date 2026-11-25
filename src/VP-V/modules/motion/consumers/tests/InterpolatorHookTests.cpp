@@ -4,6 +4,9 @@
 // VP-V GPU hook tests (moved out of Bill's LibplaceboLutParserTests.cpp; test names unchanged).
 #include "pch.h"
 #include <VP-V/tests/VpLutGpuTestSupport.h>
+#include <VP-V/modules/control/skeleton/gpu/OwnerGpuDevice.h>
+#include <VP-V/modules/repair/grain_split/BandMemo.h>
+#include <VP-V/modules/repair/grain_split/BandMemoFill.h>
 
 namespace VideoProcessorTest
 {
@@ -637,6 +640,401 @@ namespace VideoProcessorTest
 				}
 			}
 			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
+		}
+
+		// W23-B3 J#6 (MC-INTERP GEM-138 residual): stillHere short-circuit returns a0 bit-for-bit on
+		// stationary pixels without blanket-skipping moving regions; single cat_a/cat_b under EXACT_EQUAL
+		// preserves exact equal moving samples bit-for-bit and preserves grain RMS on moving grain regions.
+		BEGIN_TEST_METHOD_ATTRIBUTE(McInterpStillHereAndExactEqualBitExact)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(McInterpStillHereAndExactEqualBitExact)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+
+			struct LogCaptureGuard
+			{
+				TargetLutGpuFixture* f = nullptr;
+				LogCaptureGuard(TargetLutGpuFixture* fix, std::string* dst) : f(fix) { f->CaptureLog(dst); }
+				~LogCaptureGuard() { if (f) f->CaptureLog(nullptr); }
+				LogCaptureGuard(const LogCaptureGuard&) = delete;
+				LogCaptureGuard& operator=(const LogCaptureGuard&) = delete;
+			};
+
+			auto hashU16 = [](const std::vector<uint16_t>& v) -> uint64_t {
+				uint64_t h = 14695981039346656037ull;
+				const uint8_t* p = reinterpret_cast<const uint8_t*>(v.data());
+				const size_t n = v.size() * sizeof(uint16_t);
+				for (size_t i = 0; i < n; ++i)
+				{
+					h ^= p[i];
+					h *= 1099511628211ull;
+				}
+				return h;
+			};
+
+			const int width = 256, height = 128;
+			const int dx = 4;
+			auto baseSignal = [](double x, double y) -> double {
+				return 32000.0 + 7000.0 * std::sin(6.283185307 * x / 31.0)
+					+ 5000.0 * std::cos(6.283185307 * y / 29.0)
+					+ 2500.0 * std::sin(6.283185307 * (x + y) / 13.0);
+			};
+
+			std::mt19937 rngA(13801u), rngB(13802u);
+			std::normal_distribution<double> grainDist(0.0, 512.0);   // ~2.0 8-bit codes in 16-bit units
+
+			DejudderFrame frameA, frameB;
+			frameA.width = frameB.width = width;
+			frameA.height = frameB.height = height;
+			frameA.luma.resize(static_cast<size_t>(width) * height);
+			frameB.luma.resize(static_cast<size_t>(width) * height);
+			frameA.chroma.assign(static_cast<size_t>(width / 2) * height * 2, 32768u);
+			frameB.chroma.assign(static_cast<size_t>(width / 2) * height * 2, 32768u);
+
+			auto clampU16 = [](double v) -> uint16_t {
+				return static_cast<uint16_t>(std::lround((std::min)(65535.0, (std::max)(0.0, v))));
+			};
+
+			for (int y = 0; y < height; ++y)
+			{
+				for (int x = 0; x < width; ++x)
+				{
+					const size_t idx = static_cast<size_t>(y) * width + x;
+					if (x < 128)
+					{
+						// Left half: stationary region with grain, bit-identical between A and B.
+						const double g = grainDist(rngA);
+						const uint16_t px = clampU16(baseSignal(x, y) + g);
+						frameA.luma[idx] = px;
+						frameB.luma[idx] = px;
+					}
+					else if (y < 64)
+					{
+						// Right-top strip: noiseless moving structure shifted by exact integer dx = 4 (exercises EXACT_EQUAL).
+						frameA.luma[idx] = clampU16(baseSignal(x, y));
+						frameB.luma[idx] = clampU16(baseSignal(x - dx, y));
+					}
+					else
+					{
+						// Right-bottom strip: moving structure shifted by dx = 4 + independent per-frame grain.
+						const double gA = grainDist(rngA);
+						const double gB = grainDist(rngB);
+						frameA.luma[idx] = clampU16(baseSignal(x, y) + gA);
+						frameB.luma[idx] = clampU16(baseSignal(x - dx, y) + gB);
+					}
+				}
+			}
+
+			DejudderGpuPlanes planesA, planesB;
+			UploadDejudderFrame(gpu, frameA, planesA);
+			UploadDejudderFrame(gpu, frameB, planesB);
+
+			InterpolatorField field;
+			MakeInterpolatorField(gpu, width, height, 1.0f,
+				[dx](int bx, int) -> std::array<float, 4> {
+					if (bx < 4) return { 0.04f, -0.03f, 1.0f, 0.0f };   // dot(v,v) < 1/256 -> stillHere
+					if (bx < 8) return { 0.30f, 0.20f, 1.0f, 0.0f };    // dot(v,v) < 0.25 && a0==b0 -> stillHere
+					return { static_cast<float>(dx), 0.0f, 1.0f, 0.0f };
+				}, field);
+
+			std::string log;
+			{
+				LogCaptureGuard cap(&fixture, &log);
+				Interpolator::FrameInterpolator preserveDefault(fixture.Log(), gpu, true);
+				Interpolator::FrameInterpolator preserveExact(fixture.Log(), gpu, true);
+				Interpolator::FrameInterpolator preserveExactRepeat(fixture.Log(), gpu, true);
+				Interpolator::FrameInterpolator legacyBlend(fixture.Log(), gpu, true);
+				preserveDefault.SetGrain(InterpolationPolicy::Grain::Preserve);
+				preserveExact.SetGrain(InterpolationPolicy::Grain::Preserve);
+				preserveExactRepeat.SetGrain(InterpolationPolicy::Grain::Preserve);
+				legacyBlend.SetGrain(InterpolationPolicy::Grain::Blend);
+
+				// Independent source grain RMS in the moving grain strip interior.
+				auto stripGrainRms = [&](const std::vector<uint16_t>& img, double shiftX) -> double {
+					double sq = 0.0;
+					int n = 0;
+					for (int y = 72; y < 112; ++y)
+						for (int x = 148; x < 236; ++x)
+						{
+							const double d = static_cast<double>(img[static_cast<size_t>(y) * width + x])
+								- baseSignal(static_cast<double>(x) - shiftX, static_cast<double>(y));
+							sq += d * d;
+							++n;
+						}
+					return std::sqrt(sq / static_cast<double>(n));
+				};
+				const double sourceGrainRms = stripGrainRms(frameA.luma, 0.0);
+				Assert::IsTrue(sourceGrainRms > 350.0, L"synthetic moving strip carries real grain");
+
+				for (float t : { 0.4f, 0.5f, 0.6f })
+				{
+					Dejudder::Planes outDef{}, outEx{}, outEx2{};
+					Assert::IsTrue(preserveDefault.Run(planesA.planes, planesB.planes, InterpolatorMotion(field), t,
+						InterpolationPolicy::Fallback::Hold, outDef, 0, 0), InterpolatorError(preserveDefault, log).c_str());
+					Assert::IsTrue(preserveExact.Run(planesA.planes, planesB.planes, InterpolatorMotion(field), t,
+						InterpolationPolicy::Fallback::Hold, outEx, width, height), InterpolatorError(preserveExact, log).c_str());
+					Assert::IsTrue(preserveExactRepeat.Run(planesA.planes, planesB.planes, InterpolatorMotion(field), t,
+						InterpolationPolicy::Fallback::Hold, outEx2, width, height), InterpolatorError(preserveExactRepeat, log).c_str());
+
+					const std::vector<uint16_t> lumaDef = DownloadPlane(gpu, outDef.luma);
+					const std::vector<uint16_t> lumaEx = DownloadPlane(gpu, outEx.luma);
+					const std::vector<uint16_t> lumaEx2 = DownloadPlane(gpu, outEx2.luma);
+
+					// Deterministic capture-hash pin for EXACT_EQUAL path.
+					Assert::AreEqual(hashU16(lumaEx), hashU16(lumaEx2), L"EXACT_EQUAL output hash is deterministic across runs");
+					Assert::IsTrue(lumaEx == lumaEx2, L"EXACT_EQUAL output pixels are bit-identical across runs");
+
+					// 1. Stationary stillHere interior (both sub-regions bx < 4 and 4 <= bx < 8): exact bit-for-bit a0.
+					for (int y = 16; y < 112; ++y)
+						for (int x = 16; x < 112; ++x)
+						{
+							const size_t idx = static_cast<size_t>(y) * width + x;
+							Assert::AreEqual(static_cast<int>(frameA.luma[idx]), static_cast<int>(lumaDef[idx]),
+								L"default mode: stationary stillHere pixel must match a0 bit-for-bit");
+							Assert::AreEqual(static_cast<int>(frameA.luma[idx]), static_cast<int>(lumaEx[idx]),
+								L"EXACT_EQUAL mode: stationary stillHere pixel must match a0 bit-for-bit");
+						}
+
+					// 2. Negative control: moving region genuinely moves (differs substantially from a0).
+					double sumDiffDef = 0.0, sumDiffEx = 0.0;
+					int maxDiffDef = 0, maxDiffEx = 0, countMove = 0;
+					for (int y = 16; y < 112; ++y)
+						for (int x = 144; x < 240; ++x)
+						{
+							const size_t idx = static_cast<size_t>(y) * width + x;
+							const int dd = std::abs(static_cast<int>(lumaDef[idx]) - static_cast<int>(frameA.luma[idx]));
+							const int de = std::abs(static_cast<int>(lumaEx[idx]) - static_cast<int>(frameA.luma[idx]));
+							sumDiffDef += dd;
+							sumDiffEx += de;
+							if (dd > maxDiffDef) maxDiffDef = dd;
+							if (de > maxDiffEx) maxDiffEx = de;
+							++countMove;
+						}
+					Assert::IsTrue(sumDiffDef / countMove > 200.0 && maxDiffDef > 2000,
+						L"negative control (default): moving region must differ strongly from a0");
+					Assert::IsTrue(sumDiffEx / countMove > 200.0 && maxDiffEx > 2000,
+						L"negative control (EXACT_EQUAL): moving region must differ strongly from a0");
+
+					if (t == 0.5f)
+					{
+						// 3. EXACT_EQUAL exact sample pin on integer-shifted noiseless strip (pa = x-2, pb = x+2 -> ca == cb).
+						for (int y = 16; y < 48; ++y)
+							for (int x = 144; x < 240; ++x)
+							{
+								const uint16_t expected = frameA.luma[static_cast<size_t>(y) * width + (x - 2)];
+								const uint16_t got = lumaEx[static_cast<size_t>(y) * width + x];
+								Assert::AreEqual(static_cast<int>(expected), static_cast<int>(got),
+									L"EXACT_EQUAL: equal moving samples ca==cb must be bit-exact");
+							}
+
+						// 4. Grain preservation on moving grain strip + Blend negative control on exact same input.
+						Dejudder::Planes outBlend{};
+						Assert::IsTrue(legacyBlend.Run(planesA.planes, planesB.planes, InterpolatorMotion(field), t,
+							InterpolationPolicy::Fallback::Hold, outBlend, width, height),
+							InterpolatorError(legacyBlend, log).c_str());
+						const std::vector<uint16_t> lumaBlend = DownloadPlane(gpu, outBlend.luma);
+						const double ratioDef = stripGrainRms(lumaDef, 2.0) / sourceGrainRms;
+						const double ratioEx = stripGrainRms(lumaEx, 2.0) / sourceGrainRms;
+						const double ratioBlend = stripGrainRms(lumaBlend, 2.0) / sourceGrainRms;
+						Assert::IsTrue(ratioDef > 0.85 && ratioDef < 1.15, L"default preserve keeps moving grain RMS");
+						Assert::IsTrue(ratioEx > 0.85 && ratioEx < 1.15, L"EXACT_EQUAL preserve keeps moving grain RMS");
+						Assert::IsTrue(ratioBlend < 0.80, L"negative control: Grain::Blend attenuates moving grain RMS below 0.80");
+					}
+				}
+			}
+			AssertCleanLibplaceboLog(log);
+		}
+
+		// W23-B3 J#6 / M2#1: 24p->120Hz (5 phases t = 0.0, 0.2, 0.4, 0.6, 0.8) for one source pair (seqA, seqB)
+		// computes kBandMemo ONCE per source frame (fills == 2 total) and reuses cached bands across all interpolated
+		// phases, with bit-exact output identity vs memo=nullptr fallback (which falls back on every interpolated phase).
+		BEGIN_TEST_METHOD_ATTRIBUTE(McInterp24pTo120HzOneBandMemoComputePerFrame)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(McInterp24pTo120HzOneBandMemoComputePerFrame)
+		{
+			namespace GB = Vpv::GrainBand;
+			using Reg = VpSkeleton::SkeletonMemo::Registration;
+
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+
+			struct LogCaptureGuard
+			{
+				TargetLutGpuFixture* f = nullptr;
+				LogCaptureGuard(TargetLutGpuFixture* fix, std::string* dst) : f(fix) { f->CaptureLog(dst); }
+				~LogCaptureGuard() { if (f) f->CaptureLog(nullptr); }
+				LogCaptureGuard(const LogCaptureGuard&) = delete;
+				LogCaptureGuard& operator=(const LogCaptureGuard&) = delete;
+			};
+			struct TexGuard
+			{
+				pl_gpu gpu = nullptr;
+				pl_tex tex = nullptr;
+				TexGuard(pl_gpu g, pl_tex t) : gpu(g), tex(t) {}
+				~TexGuard() { if (gpu && tex) pl_tex_destroy(gpu, &tex); }
+				TexGuard(const TexGuard&) = delete;
+				TexGuard& operator=(const TexGuard&) = delete;
+			};
+			struct MemoGpuGuard
+			{
+				Vpv::Skeleton::OwnerGpuDevice ownerDev;
+				VpSkeleton::SkeletonMemo memo;
+				explicit MemoGpuGuard(pl_gpu g) : ownerDev(g) {}
+				~MemoGpuGuard()
+				{
+					memo.ReleaseGpuSpots();
+					ownerDev.Release();
+				}
+				MemoGpuGuard(const MemoGpuGuard&) = delete;
+				MemoGpuGuard& operator=(const MemoGpuGuard&) = delete;
+			};
+
+			auto hashU16 = [](const std::vector<uint16_t>& v) -> uint64_t {
+				uint64_t h = 14695981039346656037ull;
+				const uint8_t* p = reinterpret_cast<const uint8_t*>(v.data());
+				const size_t n = v.size() * sizeof(uint16_t);
+				for (size_t i = 0; i < n; ++i)
+				{
+					h ^= p[i];
+					h *= 1099511628211ull;
+				}
+				return h;
+			};
+
+			const int width = 256, height = 128;
+			const int hw = (width + 1) / 2, hh = (height + 1) / 2;
+			const double vx = 3.3, vy = 1.7;
+			const GrainFrames gf = MakeGrainFrames(width, height, 2, vx, vy, 2.0, false, 73u);
+			DejudderGpuPlanes planesA, planesB;
+			UploadDejudderFrame(gpu, gf.frames[0], planesA);
+			UploadDejudderFrame(gpu, gf.frames[1], planesB);
+
+			auto uploadHalfR32F = [&](const std::vector<uint16_t>& fullLuma) {
+				std::vector<float> half(static_cast<size_t>(hw) * hh, 0.0f);
+				for (int qy = 0; qy < hh; ++qy)
+					for (int qx = 0; qx < hw; ++qx)
+					{
+						const int x0 = (std::min)(2 * qx, width - 1), x1 = (std::min)(2 * qx + 1, width - 1);
+						const int y0 = (std::min)(2 * qy, height - 1), y1 = (std::min)(2 * qy + 1, height - 1);
+						const float a = static_cast<float>(fullLuma[static_cast<size_t>(y0) * width + x0]) / 65535.0f;
+						const float b = static_cast<float>(fullLuma[static_cast<size_t>(y0) * width + x1]) / 65535.0f;
+						const float c = static_cast<float>(fullLuma[static_cast<size_t>(y1) * width + x0]) / 65535.0f;
+						const float d = static_cast<float>(fullLuma[static_cast<size_t>(y1) * width + x1]) / 65535.0f;
+						half[static_cast<size_t>(qy) * hw + qx] = 0.25f * (a + b + c + d);
+					}
+				pl_tex_params p{};
+				p.w = hw; p.h = hh; p.format = pl_find_named_fmt(gpu, "r32f"); p.sampleable = true; p.initial_data = half.data();
+				return pl_tex_create(gpu, &p);
+			};
+
+			TexGuard halfA(gpu, uploadHalfR32F(gf.frames[0].luma));
+			TexGuard halfB(gpu, uploadHalfR32F(gf.frames[1].luma));
+			Assert::IsTrue(halfA.tex && halfB.tex, L"half-res P1 textures created");
+
+			InterpolatorField field;
+			MakeInterpolatorField(gpu, width, height, 1.0f,
+				[vx, vy](int, int) { return std::array<float, 4>{ static_cast<float>(vx), static_cast<float>(vy), 1.0f, 0.0f }; }, field);
+
+			MemoGpuGuard gpuMemo(gpu);
+			int hostTag = 0;
+			gpuMemo.memo.SetHost(&hostTag);
+			gpuMemo.memo.SetRenderThread(std::this_thread::get_id());
+			gpuMemo.memo.SetGpuDispatcherPresent(true);
+			gpuMemo.memo.SetGpuBudget(true, uint64_t(1) << 28);
+			gpuMemo.memo.SetGpuDevice(&gpuMemo.ownerDev);
+
+			const uint64_t seqA = 200u, seqB = 201u;
+			pl_tex halfAPtr = halfA.tex, halfBPtr = halfB.tex;
+			VpSkeleton::OwnerFill p1Fill;
+			p1Fill.view = true;
+			p1Fill.frameScoped = true;
+			p1Fill.fill = [halfAPtr, halfBPtr, hw, hh, seqA, seqB](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+				pl_tex chosen = (req.seq == seqA) ? halfAPtr : (req.seq == seqB ? halfBPtr : nullptr);
+				if (!chosen)
+					return false;
+				out.gpu.resource = const_cast<void*>(static_cast<const void*>(chosen));
+				out.gpu.width = static_cast<uint32_t>(hw);
+				out.gpu.height = static_cast<uint32_t>(hh);
+				out.gpu.bytes = 0;
+				return true;
+			};
+			Assert::IsTrue(gpuMemo.memo.RegisterOwnerFill(VpSkeleton::kP1HalfLuma, VpSkeleton::AcquireForm::Gpu,
+				VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP1HalfLuma), std::move(p1Fill)) == Reg::Registered);
+
+			const std::shared_ptr<GB::Counters> counters = std::make_shared<GB::Counters>();
+			const uint64_t reserve = GB::BandMemoReserveBytes(VpSkeleton::Dims{ static_cast<uint32_t>(width), static_cast<uint32_t>(height) });
+			Assert::IsTrue(gpuMemo.memo.RegisterOwnerFill(VpSkeleton::kBandMemo, VpSkeleton::AcquireForm::Gpu,
+				GB::kBandMemoUnit, GB::MakeBandMemoOwnerFill(reserve, counters)) == Reg::Registered);
+
+			// Luma-only local views (keep planesA/planesB intact for RAII teardown) so chroma fallback does not blur accounting.
+			Dejudder::Planes aLumaOnly = planesA.planes;
+			Dejudder::Planes bLumaOnly = planesB.planes;
+			aLumaOnly.chroma = nullptr;
+			bLumaOnly.chroma = nullptr;
+
+			std::string log;
+			{
+				LogCaptureGuard cap(&fixture, &log);
+				Interpolator::FrameInterpolator interpMemo(fixture.Log(), gpu, true);
+				Interpolator::FrameInterpolator interpFallback(fixture.Log(), gpu, true);
+				interpMemo.SetGrain(InterpolationPolicy::Grain::Preserve);
+				interpFallback.SetGrain(InterpolationPolicy::Grain::Preserve);
+
+				const float phases[5] = { 0.0f, 0.2f, 0.4f, 0.6f, 0.8f };
+				std::vector<uint16_t> phaseLuma[5];
+				for (int p = 0; p < 5; ++p)
+				{
+					Dejudder::Planes outMemo{}, outFb{};
+					Assert::IsTrue(interpMemo.Run(aLumaOnly, bLumaOnly, InterpolatorMotion(field), phases[p],
+						InterpolationPolicy::Fallback::Hold, outMemo, 0, 0, &gpuMemo.memo, seqA, seqB),
+						InterpolatorError(interpMemo, log).c_str());
+					Assert::IsTrue(interpFallback.Run(aLumaOnly, bLumaOnly, InterpolatorMotion(field), phases[p],
+						InterpolationPolicy::Fallback::Hold, outFb, 0, 0, nullptr, seqA, seqB),
+						InterpolatorError(interpFallback, log).c_str());
+
+					const std::vector<uint16_t> lumaMemo = DownloadPlane(gpu, outMemo.luma);
+					const std::vector<uint16_t> lumaFb = DownloadPlane(gpu, outFb.luma);
+					Assert::AreEqual(hashU16(lumaFb), hashU16(lumaMemo),
+						L"24p->120Hz phase output hash with kBandMemo must match memo=nullptr fallback");
+					Assert::IsTrue(lumaMemo == lumaFb,
+						L"24p->120Hz phase output pixels with kBandMemo must match memo=nullptr fallback bit-for-bit");
+					phaseLuma[p] = lumaMemo;
+				}
+
+				// 1 compute for seqA + 1 compute for seqB across all 5 phases (phase 0.0 is passthrough; phases 0.2..0.8 reuse).
+				Assert::AreEqual(uint64_t(2), counters->fills.load(),
+					L"24p->120Hz must compute kBandMemo exactly ONCE for seqA and ONCE for seqB (fills == 2)");
+				Assert::AreEqual(1ull, interpMemo.Passthroughs(), L"phase 0.0 is passthrough");
+				Assert::AreEqual(4ull, interpMemo.GrainPreservedRuns(), L"phases 0.2, 0.4, 0.6, 0.8 run grain-preserved path");
+				Assert::AreEqual(8ull, interpMemo.BandMemoHits(), L"all 4 interpolated phases hit kBandMemo for both seqA and seqB");
+				Assert::AreEqual(0ull, interpMemo.BandMemoFallbacks(), L"zero BandMemo fallbacks on luma with memo registered");
+				Assert::AreEqual(uint64_t(6), gpuMemo.memo.Counters(VpSkeleton::kBandMemo).reusedMemo,
+					L"8 acquires minus 2 fills == 6 memo reuses across the 24p->120Hz cadence");
+
+				// Negative control: without kBandMemo (memo=nullptr), every interpolated phase falls back (recomputes privately).
+				Assert::AreEqual(1ull, interpFallback.Passthroughs(), L"fallback phase 0.0 is passthrough");
+				Assert::AreEqual(4ull, interpFallback.GrainPreservedRuns(), L"fallback runs 4 interpolated phases");
+				Assert::AreEqual(0ull, interpFallback.BandMemoHits(), L"memo=nullptr has zero BandMemo hits");
+				Assert::AreEqual(8ull, interpFallback.BandMemoFallbacks(),
+					L"negative control: memo=nullptr falls back on every interpolated phase (4 phases x 2 frames == 8)");
+				Assert::IsFalse(interpFallback.LastBandMemoFallback().empty(),
+					L"negative control: memo=nullptr records visible fallback reason");
+
+				// Non-vacuity: interpolated phases 0.2 and 0.6 genuinely differ (not a frozen frame).
+				Assert::AreNotEqual(hashU16(phaseLuma[1]), hashU16(phaseLuma[3]),
+					L"phases t=0.2 and t=0.6 produce distinct interpolated frames");
+				double sumDiff = 0.0;
+				for (size_t i = 0; i < phaseLuma[1].size(); ++i)
+					sumDiff += std::abs(static_cast<int>(phaseLuma[1][i]) - static_cast<int>(phaseLuma[3][i]));
+				Assert::IsTrue(sumDiff / static_cast<double>(phaseLuma[1].size()) > 200.0,
+					L"phases t=0.2 and t=0.6 differ substantially in luma");
+			}
 			AssertCleanLibplaceboLog(log);
 		}
 	};

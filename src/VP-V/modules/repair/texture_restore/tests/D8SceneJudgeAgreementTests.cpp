@@ -58,8 +58,13 @@
 #include <VP-V/tests/support/TextureRestoreModel.h>
 
 #include <VP-V/core/FrameAnalysisStore.h>
+#include <VP-V/core/SkeletonAcquire.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h>
+#include <VP-V/modules/motion/estimation/OpticalFlowTrust.h>
+#include <VP-V/modules/motion/estimation/P2PairRecord.h>
+#include <VP-V/modules/motion/estimation/global_model/CameraMotion.h>
+#include <VP-V/modules/motion/estimation/global_model/link/CameraRecordPool.h>
 #include <VP-V/modules/repair/texture_restore/DetailPulse.h>
 #include <VP-V/modules/repair/texture_restore/SceneRestart.h>
 #include <VP-V/modules/repair/texture_restore/TextureRestore.h>
@@ -76,6 +81,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -1006,5 +1012,191 @@ namespace D8SceneJudgeAgreementNs
 		D8_ROW_METHOD(D8_Pan1440pxs5994p_Part3, "pan_1440pxs_5994p", Synthetic::None, "pan_1440pxs_5994p", 2, 3)
 		// pan_480pxs_fade_23976p (719 frames, fade during motion).
 		D8_ROW_METHOD(D8_Pan480pxsFade23976p, "pan_480pxs_fade_23976p", Synthetic::None, "pan_480pxs_fade_23976p", 0, 1)
+
+		// W23-B3 M2#12 (B6-D8-VECTOR-VETO): large-histogram pan cut is vetoed when DP/TR vector-veto is ON with
+		// trusted P7 (or P2 fallback) vectors, stays UNVETOED on default U7 (VectorVeto default off), and fails closed
+		// on P7 Reason::Cut (even with trusted P2), low/NaN trust, absent memo/vectors, missing scene, and fadeWithoutKeep.
+		TEST_METHOD(LargeHistogramPanTrustedVectorsVetoedOnDpTrUnvetoedOnDefaultU7)
+		{
+			using Reg = VpSkeleton::SkeletonMemo::Registration;
+			using namespace VpUnit::CutFadeJudge;
+			using namespace VpDetailRestore;
+
+			// 1. Verify contract defaults: U7 VectorVeto defaults OFF; DP/TR Params::vectorVeto default ON.
+			Assert::IsFalse(VectorVeto().enabled, L"default U7 VectorVeto must stay OFF");
+			Assert::IsTrue(DetailPulse::Params().vectorVeto, L"DetailPulse::Params::vectorVeto defaults ON");
+			Assert::IsTrue(TextureRestore::Params().vectorVeto, L"TextureRestore::Params::vectorVeto defaults ON");
+
+			// 2. Synthesize a large-histogram pan pair that triggers U7 CutFadeJudge::ClassifyEvents cut == true.
+			SourceStats::Record prevRec{}, curRec{};
+			prevRec.pixelCount = 10000u; prevRec.mean = 16000u; prevRec.p01 = 8000u; prevRec.p50 = 16000u; prevRec.p99 = 24000u;
+			curRec.pixelCount = 10000u; curRec.mean = 40000u; curRec.p01 = 32000u; curRec.p50 = 40000u; curRec.p99 = 48000u;
+			for (uint32_t i = 0; i < 100u; ++i)
+			{
+				prevRec.hist[200u + i] = 100u;
+				curRec.hist[600u + i] = 100u;
+			}
+			const EventSignals ev = ClassifyEvents(prevRec, curRec, false, false);
+			Assert::IsTrue(ev.cut, L"non-vacuous: large-histogram pan triggers U7 cut == true");
+
+			constexpr uint64_t kSeq = 42u;
+			static bool g_cutFlag = true;
+			g_cutFlag = ev.cut;
+			auto panCutReader = [](uint64_t seq, FrameAnalysis::Scene& sc) -> bool {
+				if (seq != kSeq) return false;
+				sc = FrameAnalysis::Scene();
+				sc.cut = g_cutFlag;
+				sc.confirmed = true;
+				sc.cutStrength = 1.0f;
+				return true;
+			};
+			auto missingReader = [](uint64_t, FrameAnalysis::Scene&) -> bool { return false; };
+			auto fadeNoKeepReader = [](uint64_t seq, FrameAnalysis::Scene& sc) -> bool {
+				if (seq != kSeq) return false;
+				sc = FrameAnalysis::Scene();
+				sc.cut = false;
+				sc.fade = true;
+				sc.fadeKeep = -1.0f;
+				sc.confirmed = true;
+				return true;
+			};
+			auto nanTrustReader = [](uint64_t, double* trustOut) -> bool {
+				if (trustOut) *trustOut = std::numeric_limits<double>::quiet_NaN();
+				return true;
+			};
+
+			auto registerP7 = [&](VpSkeleton::SkeletonMemo& memo, bool valid, CameraModel::Reason reason, double conf) {
+				CameraModel::CameraMotion m;
+				m.seq = kSeq; m.pairFrom = kSeq - 1u; m.pairTo = kSeq;
+				m.pairSeconds = 1.0 / 24.0;
+				m.valid = valid;
+				m.reason = reason;
+				m.confidence = conf;
+				m.params.type = CameraModel::ModelType::Translation;
+				m.params.h[2] = 12.0; m.params.h[5] = 0.0;
+				m.picture.left = 0; m.picture.top = 0; m.picture.right = 1920; m.picture.bottom = 1080;
+				VpSkeleton::OwnerFill f;
+				f.renderThreadOnly = false;
+				f.fill = [m](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) -> bool {
+					if (req.seq != kSeq) return false;
+					uint8_t buf[CameraLink::kRecordPodMaxBytes]{};
+					const size_t n = CameraLink::EncodeRecordPod(m, buf, sizeof(buf));
+					if (n == 0) return false;
+					out.bytes.assign(buf, buf + n);
+					return true;
+				};
+				Assert::IsTrue(memo.RegisterOwnerFill(VpSkeleton::kP7CameraFit, VpSkeleton::AcquireForm::Cpu,
+					VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP7CameraFit), std::move(f)) == Reg::Registered);
+			};
+
+			auto registerP2 = [&](VpSkeleton::SkeletonMemo& memo, float bwdWeight) {
+				const float global[2][4] = { { 4.0f, 0.0f, 0.1f, 0.85f }, { -4.0f, 0.0f, 0.1f, bwdWeight } };
+				const float second[2][4] = {};
+				const VpMotion::P2PairRecord rec = VpMotion::MakeP2PairRecord(kSeq - 1u, kSeq, 1u, global, second, true, false);
+				Assert::IsTrue(OpticalFlowTrust::GlobalUsable(rec.global[0]));
+				Assert::AreEqual(bwdWeight > 0.5f, OpticalFlowTrust::GlobalUsable(rec.global[1]));
+				VpSkeleton::OwnerFill f;
+				f.renderThreadOnly = false;
+				f.fill = [rec](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) -> bool {
+					if (req.seq != kSeq) return false;
+					uint8_t buf[VpMotion::kP2PairRecordBytes]{};
+					const size_t n = VpMotion::EncodeP2PairRecord(rec, buf, sizeof(buf));
+					if (n != VpMotion::kP2PairRecordBytes) return false;
+					out.bytes.assign(buf, buf + n);
+					return true;
+				};
+				Assert::IsTrue(memo.RegisterOwnerFill(VpSkeleton::kP2VectorPair, VpSkeleton::AcquireForm::Cpu,
+					VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP2VectorPair), std::move(f)) == Reg::Registered);
+			};
+			auto registerTrustedP2 = [&](VpSkeleton::SkeletonMemo& memo) {
+				registerP2(memo, 0.85f);
+			};
+
+			// 3. Trusted P7 pan (Reason::Ok, confidence = 0.85 >= 0.5):
+			VpSkeleton::SkeletonMemo memoP7;
+			registerP7(memoP7, true, CameraModel::Reason::Ok, 0.85);
+
+			// Default U7 (negative control: vectorVeto OFF): cut stays UNVETOED.
+			{
+				VectorVeto vDefault;
+				vDefault.trusted = true;
+				vDefault.trust = 0.85;
+				bool vetoed = true;
+				Assert::IsTrue(ApplyVectorVeto(ev.cut, vDefault, &vetoed), L"default VectorVeto keeps U7 cut");
+				Assert::IsFalse(vetoed, L"default VectorVeto reports vetoed == false");
+
+				const SceneRestartAnswer aDef = SceneRestartOf(kSeq, panCutReader, false, false, nullptr, &memoP7);
+				Assert::IsTrue(aDef.fromRecord && aDef.restart && !aDef.vectorVetoed, L"default U7 SceneRestartOf stays unvetoed");
+				Assert::AreEqual(0.0f, aDef.historyKeep, 1e-6f);
+			}
+
+			// DP/TR vector-veto ON: pan cut IS VETOED (restart == false, vectorVetoed == true, historyKeep == 1.0f).
+			{
+				const SceneRestartAnswer aVeto = SceneRestartOf(kSeq, panCutReader, false, true, nullptr, &memoP7);
+				Assert::IsTrue(aVeto.fromRecord, L"scene record read");
+				Assert::IsFalse(aVeto.restart, L"DP/TR vector-veto suppresses false pan cut");
+				Assert::IsTrue(aVeto.vectorVetoed, L"vectorVetoed is visibly reported");
+				Assert::AreEqual(1.0f, aVeto.historyKeep, 1e-6f, L"vetoed pan keeps full history");
+			}
+
+			// 4. P2 fallback when P7 is absent: trusted forward+backward P2 vetoes pan cut on DP/TR, unvetoed on default U7;
+			//    negative control (M3 bwdOk): when backward global flow fails trust (w <= 0.5f), pan cut is NOT vetoed.
+			{
+				VpSkeleton::SkeletonMemo memoP2;
+				registerTrustedP2(memoP2);
+				const SceneRestartAnswer aDefP2 = SceneRestartOf(kSeq, panCutReader, false, false, nullptr, &memoP2);
+				const SceneRestartAnswer aVetoP2 = SceneRestartOf(kSeq, panCutReader, false, true, nullptr, &memoP2);
+				Assert::IsTrue(aDefP2.restart && !aDefP2.vectorVetoed, L"default U7 unvetoed with P2");
+				Assert::IsFalse(aVetoP2.restart, L"DP/TR vector-veto uses P2 fallback when P7 absent");
+				Assert::IsTrue(aVetoP2.vectorVetoed);
+				Assert::AreEqual(1.0f, aVetoP2.historyKeep, 1e-6f);
+
+				for (float badBwdWeight : { 0.0f, 0.25f, 0.5f })
+				{
+					VpSkeleton::SkeletonMemo memoP2BadBwd;
+					registerP2(memoP2BadBwd, badBwdWeight);
+					const SceneRestartAnswer aBadBwd = SceneRestartOf(kSeq, panCutReader, false, true, nullptr, &memoP2BadBwd);
+					Assert::IsTrue(aBadBwd.restart && !aBadBwd.vectorVetoed,
+						L"negative control (M3): P2 backward global flow failing trust (w <= 0.5) must NOT veto cut");
+					Assert::AreEqual(0.0f, aBadBwd.historyKeep, 1e-6f);
+				}
+			}
+
+			// 5. Negative control (a): P7 Reason::Cut fails closed EVEN IF P2 is trusted (real cut still restarts!).
+			{
+				VpSkeleton::SkeletonMemo memoP7Cut;
+				registerP7(memoP7Cut, true, CameraModel::Reason::Cut, 0.95);
+				registerTrustedP2(memoP7Cut);
+				const SceneRestartAnswer aRealCut = SceneRestartOf(kSeq, panCutReader, false, true, nullptr, &memoP7Cut);
+				Assert::IsTrue(aRealCut.restart && !aRealCut.vectorVetoed,
+					L"negative control: P7 Reason::Cut fails closed even when P2 is trusted");
+				Assert::AreEqual(0.0f, aRealCut.historyKeep, 1e-6f);
+			}
+
+			// 6. Negative control (b): low trust (0.2 < 0.5), NaN trust, and absent memo/P7/P2 all fail closed.
+			{
+				VpSkeleton::SkeletonMemo memoLow, memoEmpty;
+				registerP7(memoLow, true, CameraModel::Reason::Ok, 0.20);
+				const SceneRestartAnswer aLow = SceneRestartOf(kSeq, panCutReader, false, true, nullptr, &memoLow);
+				const SceneRestartAnswer aNan = SceneRestartOf(kSeq, panCutReader, false, true, nanTrustReader, &memoP7);
+				const SceneRestartAnswer aNull = SceneRestartOf(kSeq, panCutReader, false, true, nullptr, nullptr);
+				const SceneRestartAnswer aEmpty = SceneRestartOf(kSeq, panCutReader, false, true, nullptr, &memoEmpty);
+				Assert::IsTrue(aLow.restart && !aLow.vectorVetoed, L"low trust < 0.5 fails closed");
+				Assert::IsTrue(aNan.restart && !aNan.vectorVetoed, L"NaN trust fails closed");
+				Assert::IsTrue(aNull.restart && !aNull.vectorVetoed, L"absent memo fails closed");
+				Assert::IsTrue(aEmpty.restart && !aEmpty.vectorVetoed, L"empty memo (no P7/P2) fails closed");
+			}
+
+			// 7. Negative control (c): missing scene (!fromRecord) and fadeWithoutKeep are NEVER vetoed even with trusted P7.
+			{
+				const SceneRestartAnswer aMiss = SceneRestartOf(kSeq, missingReader, false, true, nullptr, &memoP7);
+				Assert::IsFalse(aMiss.fromRecord, L"missing scene has !fromRecord");
+				Assert::IsTrue(aMiss.restart && !aMiss.vectorVetoed, L"missing scene is never vetoed");
+
+				const SceneRestartAnswer aFadeNoKeep = SceneRestartOf(kSeq, fadeNoKeepReader, false, true, nullptr, &memoP7);
+				Assert::IsTrue(aFadeNoKeep.fromRecord && aFadeNoKeep.fadeWithoutKeep, L"fadeWithoutKeep detected");
+				Assert::IsTrue(aFadeNoKeep.restart && !aFadeNoKeep.vectorVetoed, L"fadeWithoutKeep is never vetoed");
+			}
+		}
 	};
 }

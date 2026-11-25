@@ -24,6 +24,7 @@
 #include <VP-V/modules/repair/grain_split/shared/BandFromBase.h>
 #include "BandFromBaseGolden.generated.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -1352,6 +1353,283 @@ namespace GrainNodeTestsNs
 			Assert::AreEqual(r4k, demand.lastReserveBytes, L"replaced fill carries 4K reserve");
 			Assert::IsTrue(memo.HasOwnerFill(VpSkeleton::kBandMemo, VpSkeleton::AcquireForm::Gpu), L"skeleton holds updated kBandMemo fill");
 			Assert::IsTrue(module.FallbackLines().empty(), L"FallbackLines stays clear after 4K retry succeeds");
+		}
+
+		TEST_METHOD(BandMemoModuleCpuRegistrationLifecycle)
+		{
+			namespace GB = Vpv::GrainBand;
+			using R = VpSkeleton::SkeletonMemo::Registration;
+
+			struct CpuDemand : Vpv::Skeleton::IExternalDemand
+			{
+				VpSkeleton::SkeletonMemo* memo = nullptr;
+				bool refuse = false;
+				R refuseCode = R::NotOwner;
+				int registerCalls = 0;
+
+				void SetExternalDemand(const void*, const void*, const std::vector<VpSkeleton::ConsumerDecl>&,
+					const std::vector<VpSkeleton::ProductId>&) override {}
+				void ClearExternalDemand(const void*, const void*) override {}
+
+				R RegisterOwnerFill(VpSkeleton::ProductId id, VpSkeleton::AcquireForm form,
+					const std::string& unit, VpSkeleton::OwnerFill fill) override
+				{
+					++registerCalls;
+					if (refuse)
+						return refuseCode;
+					return memo->RegisterOwnerFill(id, form, unit, std::move(fill));
+				}
+
+				R ReplaceOwnerFill(VpSkeleton::ProductId id, VpSkeleton::AcquireForm form,
+					const std::string& unit, VpSkeleton::OwnerFill fill) override
+				{
+					return memo->ReplaceOwnerFill(id, form, unit, std::move(fill));
+				}
+
+				bool UnregisterOwnerFill(VpSkeleton::ProductId id, VpSkeleton::AcquireForm form, const std::string& unit) override
+				{
+					return memo->UnregisterOwnerFill(id, form, unit);
+				}
+			};
+
+			VpSkeleton::SkeletonMemo memo;
+			CpuDemand demand;
+			demand.memo = &memo;
+
+			GB::BandMemoModule module;
+			Assert::IsFalse(module.CpuRegistered(), L"CPU form is not registered initially");
+			Assert::IsTrue(module.FallbackLines().empty(), L"no fallback line initially");
+
+			// Negative control (Rule 3 & Rule 4): a refused CPU registration stays unregistered and surfaces visibly.
+			demand.refuse = true;
+			demand.refuseCode = R::NotOwner;
+			Assert::IsFalse(module.RegisterCpu(&demand), L"refused CPU registration returns false");
+			Assert::IsFalse(module.CpuRegistered(), L"CpuRegistered() stays false on refusal");
+			Assert::AreEqual(1, demand.registerCalls, L"one CPU registration attempt on refusal");
+			Assert::IsFalse(memo.HasOwnerFill(VpSkeleton::kBandMemo, VpSkeleton::AcquireForm::Cpu),
+				L"refused CPU fill is not registered on memo");
+			const std::vector<std::string> refusedFb = module.FallbackLines();
+			Assert::AreEqual(size_t(1), refusedFb.size(), L"refused CPU registration emits visible FallbackLine");
+			Assert::IsTrue(Contains(refusedFb[0], GB::kBandMemoFallbackId), L"fallback line names product.band_memo_unavailable");
+			Assert::IsTrue(Contains(refusedFb[0], "CPU owner fill") && Contains(refusedFb[0], "not the catalog"),
+				L"fallback line visibly describes CPU registration refusal");
+
+			// Accepting demand registers CPU owner fill, flips CpuRegistered(), and clears FallbackLines().
+			demand.refuse = false;
+			Assert::IsTrue(module.RegisterCpu(&demand), L"CPU registration succeeds once demand accepts");
+			Assert::IsTrue(module.CpuRegistered(), L"CpuRegistered() becomes true");
+			Assert::AreEqual(2, demand.registerCalls, L"retry calls RegisterOwnerFill once");
+			Assert::IsTrue(memo.HasOwnerFill(VpSkeleton::kBandMemo, VpSkeleton::AcquireForm::Cpu),
+				L"memo holds kBandMemo CPU owner fill");
+			Assert::IsTrue(module.FallbackLines().empty(), L"healthy CPU registration clears FallbackLines");
+
+			// Idempotent: a second call short-circuits without calling demand again.
+			Assert::IsTrue(module.RegisterCpu(&demand), L"repeated RegisterCpu returns true");
+			Assert::AreEqual(2, demand.registerCalls, L"repeated RegisterCpu does not re-register");
+
+			// Second module against the same memo accepts AlreadyRegistered cleanly.
+			GB::BandMemoModule peer;
+			Assert::IsFalse(peer.CpuRegistered(), L"peer starts unregistered");
+			Assert::IsTrue(peer.RegisterCpu(&demand), L"peer accepts AlreadyRegistered cleanly");
+			Assert::IsTrue(peer.CpuRegistered(), L"peer CpuRegistered() is true on AlreadyRegistered");
+			Assert::AreEqual(3, demand.registerCalls, L"peer attempts registration once");
+			Assert::IsTrue(peer.FallbackLines().empty(), L"peer has no fallback line after AlreadyRegistered");
+		}
+
+		// W23-B3 M2#2 (U2 B4 CPU BandMemo): MakeBandMemoCpuOwnerFill matches independent BandFromBase::BlurTaps
+		// bit-for-bit across Full (Replicate & Reflect) and Half (Law::Low & Law::Taps) keys, computes ONCE per
+		// (seq, BandKey), blurs non-trivially, and visibly declines invalid keys / wrong dims / missing upstream planes.
+		TEST_METHOD(BandMemoCpuMatchesBlurTaps)
+		{
+			namespace BM = VpUnit::BandMemo;
+			namespace BFB = VpUnit::BandFromBase;
+			namespace GB = Vpv::GrainBand;
+			using Reg = VpSkeleton::SkeletonMemo::Registration;
+
+			const int W = 64, H = 48;
+			const int HW = (W + 1) / 2, HH = (H + 1) / 2;
+			const int QW = (HW + 1) / 2, QH = (HH + 1) / 2;
+			const size_t nFull = static_cast<size_t>(W) * H;
+			const size_t nHalf = static_cast<size_t>(HW) * HH;
+			const size_t nQuarter = static_cast<size_t>(QW) * QH;
+
+			// Synthetic textured + sharp-edge + ramp + impulse plane (0..1 float32).
+			std::vector<float> fullPlane(nFull, 0.0f);
+			uint32_t rng = 0x12345678u;
+			for (int y = 0; y < H; ++y)
+				for (int x = 0; x < W; ++x)
+				{
+					rng = rng * 1664525u + 1013904223u;
+					const float noise = (static_cast<float>((rng >> 8) & 1023u) / 1023.0f - 0.5f) * 0.25f;
+					const float ramp = 0.2f + 0.3f * (static_cast<float>(x) / static_cast<float>(W));
+					const float step = (x >= 20 && x < 44 && y >= 14 && y < 34) ? 0.35f : 0.0f;
+					const float impulse = (x == 31 && y == 23) ? 0.4f : 0.0f;
+					fullPlane[static_cast<size_t>(y) * W + x] = (std::min)(1.0f, (std::max)(0.0f, ramp + step + noise + impulse));
+				}
+
+			std::vector<uint16_t> p1HalfAndQuarter(nHalf + nQuarter, 0u);
+			std::vector<float> halfPlane(nHalf, 0.0f);
+			constexpr float kInvU16Max = 1.0f / 65535.0f;
+			for (int y = 0; y < HH; ++y)
+				for (int x = 0; x < HW; ++x)
+				{
+					const int x0 = (std::min)(2 * x, W - 1), x1 = (std::min)(2 * x + 1, W - 1);
+					const int y0 = (std::min)(2 * y, H - 1), y1 = (std::min)(2 * y + 1, H - 1);
+					const float avg = 0.25f * (fullPlane[static_cast<size_t>(y0) * W + x0] + fullPlane[static_cast<size_t>(y0) * W + x1]
+						+ fullPlane[static_cast<size_t>(y1) * W + x0] + fullPlane[static_cast<size_t>(y1) * W + x1]);
+					const uint16_t u = static_cast<uint16_t>(std::lround((std::min)(1.0f, (std::max)(0.0f, avg)) * 65535.0f));
+					p1HalfAndQuarter[static_cast<size_t>(y) * HW + x] = u;
+					halfPlane[static_cast<size_t>(y) * HW + x] = static_cast<float>(u) * kInvU16Max;
+				}
+			const std::vector<uint16_t> p1HalfOnly(p1HalfAndQuarter.begin(), p1HalfAndQuarter.begin() + static_cast<std::ptrdiff_t>(nHalf));
+
+			VpSkeleton::SkeletonMemo memo;
+			const uint64_t kSeq = 42u;
+			const uint64_t kSeqHalfOnly = 43u;
+
+			VpSkeleton::OwnerFill p13Cpu;
+			p13Cpu.frameScoped = true;
+			p13Cpu.renderThreadOnly = false;
+			p13Cpu.fill = [&fullPlane, kSeq](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+				if (req.seq != kSeq)
+					return false;
+				out.bytes.resize(fullPlane.size() * sizeof(float));
+				std::memcpy(out.bytes.data(), fullPlane.data(), out.bytes.size());
+				return true;
+			};
+			Assert::IsTrue(memo.RegisterOwnerFill(VpSkeleton::kP13SourceRing, VpSkeleton::AcquireForm::Cpu,
+				VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP13SourceRing), std::move(p13Cpu)) == Reg::Registered);
+
+			VpSkeleton::OwnerFill p1Cpu;
+			p1Cpu.frameScoped = true;
+			p1Cpu.renderThreadOnly = false;
+			p1Cpu.fill = [&p1HalfAndQuarter, &p1HalfOnly, kSeq, kSeqHalfOnly](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+				if (req.seq == kSeq)
+				{
+					out.bytes.resize(p1HalfAndQuarter.size() * sizeof(uint16_t));
+					std::memcpy(out.bytes.data(), p1HalfAndQuarter.data(), out.bytes.size());
+					return true;
+				}
+				if (req.seq == kSeqHalfOnly)
+				{
+					out.bytes.resize(p1HalfOnly.size() * sizeof(uint16_t));
+					std::memcpy(out.bytes.data(), p1HalfOnly.data(), out.bytes.size());
+					return true;
+				}
+				return false;
+			};
+			Assert::IsTrue(memo.RegisterOwnerFill(VpSkeleton::kP1HalfLuma, VpSkeleton::AcquireForm::Cpu,
+				VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP1HalfLuma), std::move(p1Cpu)) == Reg::Registered);
+
+			const std::shared_ptr<GB::Counters> counters = std::make_shared<GB::Counters>();
+			Assert::IsTrue(memo.RegisterOwnerFill(VpSkeleton::kBandMemo, VpSkeleton::AcquireForm::Cpu,
+				GB::kBandMemoUnit, GB::MakeBandMemoCpuOwnerFill(counters)) == Reg::Registered);
+
+			// Independent reference blur (never calls BandMemo::CpuBand as truth).
+			auto independentRef = [](const std::vector<float>& src, int w, int h, const BM::BandKey& key) {
+				std::vector<float> taps;
+				if (key.law == BM::Law::Low)
+				{
+					const int r = GrainPreserve::LowRadius(key.sigmaPx);
+					taps.resize(static_cast<size_t>(2 * r + 1));
+					for (int i = -r; i <= r; ++i)
+						taps[static_cast<size_t>(i + r)] = static_cast<float>(GrainPreserve::LowWeight(i, key.sigmaPx));
+				}
+				else
+				{
+					taps = BFB::Taps<float>(key.sigmaPx, key.factor, key.minOne, key.eps);
+				}
+				std::vector<float> dst;
+				BFB::BlurTaps<float>(src, dst, w, h, taps, key.edge);
+				return dst;
+			};
+
+			auto verifyKey = [&](uint64_t seq, const BM::BandKey& key, const std::vector<float>& src, int w, int h, uint64_t expectedFillsAfter) {
+				const VpSkeleton::VariantKey vk = BM::ToVariant(key);
+				const VpSkeleton::AcquireResult r1 = memo.Acquire(VpSkeleton::kBandMemo, seq, VpSkeleton::AcquireForm::Cpu, vk);
+				Assert::IsTrue(r1.Ok() && r1.cpu != nullptr, L"CPU kBandMemo acquire succeeded");
+				Assert::AreEqual(src.size() * sizeof(float), r1.cpuBytes, L"CPU kBandMemo byte count matches w*h*sizeof(float)");
+				Assert::AreEqual(expectedFillsAfter, counters->fills.load(), L"first acquire of key runs exactly 1 fill");
+
+				const std::vector<float> ref = independentRef(src, w, h, key);
+				Assert::IsTrue(std::memcmp(r1.cpu, ref.data(), ref.size() * sizeof(float)) == 0,
+					L"CPU kBandMemo output is bit-identical to independent BandFromBase::BlurTaps");
+
+				// Negative control: raw unblurred input diverges significantly from blurred output (proving blur actually ran).
+				float maxRawDiff = 0.0f;
+				const float* got = reinterpret_cast<const float*>(r1.cpu);
+				for (size_t i = 0; i < src.size(); ++i)
+					maxRawDiff = (std::max)(maxRawDiff, std::fabs(got[i] - src[i]));
+				Assert::IsTrue(maxRawDiff > 0.05f, L"negative control: blurred output diverges strongly from raw input");
+
+				// Second acquire for exact same (seq, BandKey) reuses cached memo entry with zero extra fill.
+				const uint64_t reusedBefore = memo.Counters(VpSkeleton::kBandMemo).reusedMemo;
+				const VpSkeleton::AcquireResult r2 = memo.Acquire(VpSkeleton::kBandMemo, seq, VpSkeleton::AcquireForm::Cpu, vk);
+				Assert::IsTrue(r2.Ok() && r2.cpu != nullptr, L"repeated CPU kBandMemo acquire succeeded");
+				Assert::AreEqual(expectedFillsAfter, counters->fills.load(), L"repeated acquire does NOT recompute");
+				Assert::AreEqual(reusedBefore + 1u, memo.Counters(VpSkeleton::kBandMemo).reusedMemo, L"memo counter records reuse");
+				Assert::IsTrue(std::memcmp(r2.cpu, ref.data(), ref.size() * sizeof(float)) == 0, L"repeated acquire stays bit-identical");
+			};
+
+			// 1. Stage::Full, Law::Taps, EdgeMode::Replicate (sigma 1.0)
+			BM::BandKey kFullRep;
+			kFullRep.resolution = BM::Stage::Full; kFullRep.width = W; kFullRep.height = H;
+			kFullRep.sigmaPx = 1.0; kFullRep.law = BM::Law::Taps; kFullRep.edge = BFB::EdgeMode::Replicate;
+			verifyKey(kSeq, kFullRep, fullPlane, W, H, 1u);
+
+			// 2. Stage::Full, Law::Taps, EdgeMode::Reflect (sigma 1.0 & 2.0, minOne = false)
+			BM::BandKey kFullRef1 = kFullRep;
+			kFullRef1.edge = BFB::EdgeMode::Reflect; kFullRef1.minOne = false;
+			verifyKey(kSeq, kFullRef1, fullPlane, W, H, 2u);
+
+			BM::BandKey kFullRef2 = kFullRef1;
+			kFullRef2.sigmaPx = 2.0;
+			verifyKey(kSeq, kFullRef2, fullPlane, W, H, 3u);
+
+			// 3. Stage::Half, Law::Low (sigma 3.0 & 6.0)
+			BM::BandKey kHalfLow3;
+			kHalfLow3.resolution = BM::Stage::Half; kHalfLow3.width = HW; kHalfLow3.height = HH;
+			kHalfLow3.sigmaPx = 3.0; kHalfLow3.law = BM::Law::Low; kHalfLow3.edge = BFB::EdgeMode::Replicate;
+			verifyKey(kSeq, kHalfLow3, halfPlane, HW, HH, 4u);
+
+			BM::BandKey kHalfLow6 = kHalfLow3;
+			kHalfLow6.sigmaPx = 6.0;
+			verifyKey(kSeq, kHalfLow6, halfPlane, HW, HH, 5u);
+
+			// 4. Stage::Half, Law::Taps (sigma 1.25, Replicate) + half-only P1 buffer layout
+			BM::BandKey kHalfTaps;
+			kHalfTaps.resolution = BM::Stage::Half; kHalfTaps.width = HW; kHalfTaps.height = HH;
+			kHalfTaps.sigmaPx = 1.25; kHalfTaps.law = BM::Law::Taps; kHalfTaps.edge = BFB::EdgeMode::Replicate;
+			verifyKey(kSeq, kHalfTaps, halfPlane, HW, HH, 6u);
+			verifyKey(kSeqHalfOnly, kHalfLow3, halfPlane, HW, HH, 7u);
+
+			// Negative controls: invalid dims, plane != 0, pipelineStage != 0, missing upstream P1/P13 visibly decline.
+			auto expectDecline = [&](uint64_t seq, const BM::BandKey& badKey, const wchar_t* msg) {
+				const uint64_t decBefore = counters->declines.load();
+				const VpSkeleton::AcquireResult res = memo.Acquire(VpSkeleton::kBandMemo, seq, VpSkeleton::AcquireForm::Cpu, BM::ToVariant(badKey));
+				Assert::IsFalse(res.Ok(), msg);
+				Assert::IsTrue(res.cause == VpSkeleton::AcquireCause::OwnerDeclined, msg);
+				Assert::IsFalse(memo.LastCause(VpSkeleton::kBandMemo).empty(), msg);
+				Assert::AreEqual(decBefore + 1u, counters->declines.load(), msg);
+			};
+
+			BM::BandKey kNoDims = kFullRep; kNoDims.width = 0; kNoDims.height = 0;
+			expectDecline(kSeq, kNoDims, L"CPU form without explicit width/height must visibly decline");
+
+			BM::BandKey kWrongFullDims = kFullRep; kWrongFullDims.width = 32; kWrongFullDims.height = 32;
+			expectDecline(kSeq, kWrongFullDims, L"mismatched P13 CPU dimensions must visibly decline");
+
+			BM::BandKey kWrongHalfDims = kHalfLow3; kWrongHalfDims.width = 16; kWrongHalfDims.height = 12;
+			expectDecline(kSeq, kWrongHalfDims, L"mismatched P1 CPU dimensions must visibly decline");
+
+			BM::BandKey kChroma = kFullRep; kChroma.plane = 1;
+			expectDecline(kSeq, kChroma, L"plane != 0 must visibly decline");
+
+			BM::BandKey kStage1 = kFullRep; kStage1.pipelineStage = 1;
+			expectDecline(kSeq, kStage1, L"pipelineStage != 0 must visibly decline");
+
+			expectDecline(999u, kFullRep, L"missing upstream P13 CPU plane must visibly decline");
+			expectDecline(999u, kHalfLow3, L"missing upstream P1 CPU plane must visibly decline");
 		}
 	};
 }

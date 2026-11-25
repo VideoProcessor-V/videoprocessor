@@ -14,57 +14,25 @@
 #include <cmath>
 #include <cstdint>
 #include <string>
+#include <vector>
 
-// detail_pulse_stabilise (owner 2026-10-17; docs/VP-detail-restore.md, research option e in
-// docs/audit/detail-retrieval-research-2026-10-17.md): a starved encode codes I-frames finely
-// and B-frames coarsely, so fine detail and grain pulse with the GOP. Each frame's OWN luma
-// detail (two bands) is scaled up towards its best-coded recent neighbour's level; nothing is
-// copied between frames, so grain stays per-frame and is never averaged. Runs after the VP
-// debander on the plane libplacebo scales from; never touches the source-resolution monitor's
-// input; never starts the matcher.
-//
-// The maths (shared by the shader and the CPU model, src/VideoProcessor-Test/DetailPulseModel.h):
-//  - Bands, in codes of the signal: D1 = Y - G(s1) Y, D2 = G(s1) Y - L, where G(s1) is a
-//    separable Gaussian of kSigmaFine px and L the wide low band (kSigmaWide px) held at half
-//    resolution as GrainPreserve's (2x2 box, separable Gaussian, bilinear back at p / 2).
-//    Both sigmas grow with the plane's height above 2160 lines (Scale()).
-//  - Per tile (kTilePx x kTilePx plane px, the passes' work block): the mean of D1^2 and D2^2,
-//    and the mean and spread (standard deviation) of L over its half-resolution texels.
-//  - Frame energy per band: the mean over the measured tiles - D1^2 + D2^2 reaching the floor
-//    (FloorEnergy: not flat, not black bars), veto weight w >= 0.5 and band energy within a
-//    factor kTileEnergyJump of the tile's previous one (a changed tile's energy is new content,
-//    not coding) - winsorised at kWinsorise x that mean.
-//  - History: a GPU ring of (E1, E2, mean luma, flag) per source frame. Reference per band
-//    R = max(E, max over the run of E_j x DecayPerFrame^j) over the last WindowFrames() frames
-//    (seconds converted with the content rate), stopping at the frame that started the run
-//    (a cut or another restart). Optional look-ahead: the next source frame's energies when
-//    the caller measured them (MeasureAhead) and they are comparable (same mean luma within
-//    the cut level, energy ratio within kAheadMaxRatio).
-//  - Gain per band: Gain(R, E, cap) = 1 inside the dead zone (R / E <= 1 + kDeadZone),
-//    else sqrt(R / E / (1 + kDeadZone)), never above the cap. Never below 1.
-//  - Per tile veto weight w: with the de-judder's field, 1 - smoothstep(0, kVetoUntrustedShare,
-//    untrusted share of the tile's pixels); without it, 1 - smoothstep(v, 2v, change) where
-//    change = max(|d mean L|, |d spread L|) since the previous frame and v the coding-noise
-//    allowance (VetoCodes). The tile statistics are motion-tolerant: a small displacement
-//    hardly changes a tile's mean or spread, new content or a flash does. w is bilinear
-//    between tile centres.
-//  - Cut / fade: the shared unit U7's verdict for the source frame (CutFadeJudge over the P4
-//    records, read from the skeleton's scene group, SceneRestart.h; registered fix D8). A cut
-//    restarts the history (gain 1 on that frame); a fade (U7 v3, owner 2026-11-15) does NOT:
-//    every reference is scaled by the product of the fade keeps squared of the frames after it
-//    (ring row 1; the energy the faded picture still explains), so the gain law compares like with like through the
-//    fade and pre-fade detail is not carried. Restarts also come from Forget(), a non-consecutive sequence, a
-//    geometry change and a frame whose scene group is not readable (no private fallback; counted
-//    by SceneMissing()). CutCodes remains only the look-ahead agreement level.
-//  - Output Y' = Y + w ((g1 - 1) D1 + (g2 - 1) D2); chroma planes pass through.
+namespace VpSkeleton { class SkeletonMemo; }
+
+// detail_pulse_stabilise (owner 2026-10-17; docs/VP-detail-restore.md): scales each frame's
+// own luma detail (two bands: fine D1 = Y - G(s1)Y, mid D2 = G(s1)Y - L, where wide L is
+// acquired via kBandMemo when available with visible BandMemo::GlslOf fallback) towards its
+// best-coded recent neighbour. Nothing is copied between frames (grain stays per-frame).
+// Runs after VpDebander; never touches the source-resolution monitor or starts the matcher.
+// Shared maths with DetailPulseModel.h: 32x32 tiles, winsorised frame energy, GPU history ring
+// with decay + optional look-ahead, dead-zone capped gain, vector/change tile veto, U7 scene
+// cut restart + fade/soft-reset partial keep, output Y' = Y + w((g1 - 1)D1 + (g2 - 1)D2).
 namespace DetailPulse
 {
 	constexpr double kDefaultCap = 1.35;
 	constexpr double kCapMin = 1.0, kCapMax = 1.5;
 
-	// Band sigmas in plane px at 2160 lines and below (x Scale() above).
-	constexpr double kSigmaFine = VpUnit::BandFromBase::kSigmaFine;   // ND03: the U2 unit's fine sigma (the grain split law's)
-	constexpr double kSigmaWide = 2.5;
+	// Band sigmas in plane px at 2160 lines and below (x Scale() above), imported from shared unit U2.
+	using VpUnit::BandFromBase::kSigmaFine;
 	// The tile: the measure and apply passes' 32 x 32 work block (16 x 16 threads, 2 x 2 px each).
 	constexpr int kTilePx = 32;
 	constexpr bool kDefaultFast = true;   // detail_pulse_fast
@@ -98,9 +66,19 @@ namespace DetailPulse
 	inline double Scale(double planeLines) { return (std::min)(GrainPreserve::GrainScale(planeLines), kMaxScale); }
 	// The fine band's Gaussian is the U2 unit's one band Gaussian (ND03: VpUnit::BandFromBase::BandRadius, ceil(3 sigma), at
 	// least one tap; FIX-B2-ND03: the same radius as the old ceil(3 sigma - 1e-9), no minimum, at every scale this module runs).
-	inline int FineRadius(double scale) { return VpUnit::BandFromBase::BandRadius(kSigmaFine * scale); }
-	inline double FineWeight(int i, double scale) { return VpUnit::BandFromBase::BandWeight(i, kSigmaFine * scale); }
-	inline double WideSigma(double scale) { return kSigmaWide * scale; }
+	inline int FineRadius(double scale) { return VpUnit::BandFromBase::BandRadius(VpUnit::BandFromBase::kSigmaFine * scale); }
+	inline double FineWeight(int i, double scale) { return VpUnit::BandFromBase::BandWeight(i, VpUnit::BandFromBase::kSigmaFine * scale); }
+	inline double WideSigma(double scale) { return VpUnit::BandFromBase::kSigmaBase * scale; }
+	struct CpuBandResult
+	{
+		std::vector<float> samples;
+		bool fromBandMemo = false;
+		std::string fallbackReason;
+	};
+	CpuBandResult AcquireFineCpuBand(const std::vector<float>& plane, int w, int h, double scale,
+		VpSkeleton::SkeletonMemo* memo = nullptr, uint64_t seq = 0);
+	CpuBandResult AcquireWideCpuBand(const std::vector<float>& halfPlane, int hw, int hh, double scale,
+		VpSkeleton::SkeletonMemo* memo = nullptr, uint64_t seq = 0);
 	inline double ClampCap(double cap) { return (std::max)(kCapMin, (std::min)(kCapMax, cap)); }
 	inline double RateHz(double sourceHz) { return sourceHz > 0.0 ? sourceHz : kReferenceHz; }
 	inline int WindowFrames(double sourceHz)
@@ -174,9 +152,11 @@ namespace DetailPulse
 		pl_rect2df picture{};
 		// The reader of the source frame's scene group (the shared cut / fade verdict, U7 via P4); null = the skeleton's store.
 		VpDetailRestore::SceneReaderFn sceneReader = nullptr;
-		// cut_soft_reset (default on): the soft reset on a high-confidence non-cut candidate (SceneRestart.h; the bar is
-		// CutFadeJudge::kSoftResetBar, provisional). Off = no soft reset; cuts restart and fades reduce exactly as before.
+		// cut_soft_reset (default on): soft reset on high-confidence non-cut candidate (SceneRestart.h).
 		bool softReset = VpDetailRestore::kDefaultCutSoftReset;
+		bool vectorVeto = true;  // B6-D8-VECTOR-VETO: veto false pan cuts when P7/P2 vectors are trusted
+		VpDetailRestore::VectorTrustReaderFn vectorTrustReader = nullptr;  // null = query memo P7/P2
+		VpSkeleton::SkeletonMemo* memo = nullptr;   // optional: acquire shared kBandMemo GPU wide low band
 	};
 
 	// The active picture in plane px, inclusive (x0, y0, x1, y1): the pixels wholly inside the
@@ -222,18 +202,9 @@ namespace DetailPulse
 		Module& operator=(const Module&) = delete;
 		~Module();   // frees the CPU state only: call Release(gpu) first for the textures
 
-		// `source` with its luma plane stabilised into this module's texture (other planes
-		// pass through); false (and `out` untouched) on any failure: the caller renders the
-		// frame as it was.
-		// A repeat (the same sequence again) applies the stored decision to the picture given,
-		// with that picture's own bands (hunt 3 F6: a Stage B phase picture, a gap fill or a
-		// de-judder extra is another picture than A).
+		// Restores luma of `source` into this module's texture; repeated seq reapplies stored decision on picture's own bands.
 		bool Apply(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, const Params& params, pl_frame& out);
-		// Hunt 3 (the crossfade's path being left): the current decision (HistorySequence())
-		// on a picture of another plane geometry (another re-base factor). Its own bands at its
-		// own scale (params.planeLines), the tile weights read at the same picture position;
-		// never advances or restarts the history; its own output texture, so the frame Apply
-		// returned stays valid. False when no decision is held.
+		// Applies held decision (HistorySequence()) on a picture of another geometry without advancing history.
 		bool ApplyForeign(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, const Params& params, pl_frame& out);
 		// Optional look-ahead: measure the next source frame's band energies (its luma plane,
 		// in the same domain as Apply's: only when no re-base is engaged) so the reference
@@ -276,13 +247,20 @@ namespace DetailPulse
 		// frames the rule would have fired on had their verdict been confirmed.
 		bool SceneSoftResetInactive() const { return softWatch.Inactive(); }
 		unsigned long long SceneSoftWaiting() const { return softWatch.waiting; }
+		unsigned long long BandMemoHits() const;
+		unsigned long long BandMemoFallbacks() const;
+		const std::string& LastBandMemoFallback() const;
+		unsigned long long P11EnergyHits() const;
+		unsigned long long P11EnergyFallbacks() const;
+		const std::string& LastP11EnergyFallback() const;
+		unsigned long long SceneVectorVetoes() const;
 
 	private:
 		struct Impl;
 		Impl* impl = nullptr;
-		std::string error;
+		std::string error, lastBandMemoFallback, lastP11EnergyFallback;
 		unsigned long long failures = 0, frames = 0, aheadUsed = 0, sceneMissing = 0, scenePartials = 0, sceneFadeRestarts = 0;
-		unsigned long long sceneSoftResets = 0;
+		unsigned long long sceneSoftResets = 0, sceneVectorVetoes = 0, bandMemoHits = 0, bandMemoFallbacks = 0, p11EnergyHits = 0, p11EnergyFallbacks = 0;
 		double sceneSoftStrengthSum = 0.0;
 		VpDetailRestore::SoftResetWatch softWatch;
 		bool sceneUnavailable = false;
