@@ -19,19 +19,14 @@ namespace VpDebander
 {
 	struct Params
 	{
-		double thresholdCodes = 0.0; // threshold in signal codes (Strength())
-		int colorDepth = 10;         // signal code depth
-		double radiusScale = 1.0;    // sample radius: 16 px at 1080 lines, by height
-		pl_tex field = nullptr;      // optional: de-judder block field (null = per-frame)
-		pl_tex grainError = nullptr; // optional: grain error texture (r = 8-bit codes)
-		double fieldScale = 1.0;     // source px of field per px of plane's full-size luma
-		double fieldScaleX = 0.0;    // horizontal fieldScale when per-axis (0 = fieldScale)
-		uint64_t sequence = 0;       // source frame sequence (holds across consecutive frames)
-		double holdAlpha = 0.5;      // weight of this frame's decision where held
-		double grainCodes = 2.0;     // grain error (8-bit codes) above which a block is texture
-		bool grainGuard = true;      // deband_vp_grain_guard (default on)
-		bool grainSplit = true;      // deband_vp_grain_guard split (default on; false = spatial-share veto)
-		VpSkeleton::SkeletonMemo* memo = nullptr;   // optional: acquire shared kBandMemo GPU low band
+		double thresholdCodes = 0.0, radiusScale = 1.0;
+		int colorDepth = 10;
+		pl_tex field = nullptr, grainError = nullptr;
+		double fieldScale = 1.0, fieldScaleX = 0.0;
+		uint64_t sequence = 0;
+		double holdAlpha = 0.5, grainCodes = 2.0;
+		bool grainGuard = true, grainSplit = true;
+		VpSkeleton::SkeletonMemo* memo = nullptr;
 	};
 
 	// The threshold in codes from the readings (spec 2d / 2b): the content's

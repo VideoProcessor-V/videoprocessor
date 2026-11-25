@@ -13,29 +13,18 @@
 
 namespace DmPreDeband
 {
-	enum class Mode
-	{
-		Off,
-		Auto
-	};
-
+	enum class Mode { Off, Auto };
 	Mode ParseMode(const std::string& mode);
 	uint16_t TapCode12FromIntensity16(uint16_t intensity16);
 	uint16_t Tap16FromCode12(uint16_t code12);
 
 	struct Inputs
 	{
-		bool dolbyVisionPicture = false;
-		bool slotRuns = false;
-		bool originalPathway = false;
+		bool dolbyVisionPicture = false, slotRuns = false, originalPathway = false;
 		std::string mode = "off";
-		bool tapAvailable = false;
-		bool qualityAvailable = false;
-		double effectiveBits = 12.0;
-		double bitrateQuality = 1.0;
-		bool snapLevels = true;
-		bool grainGuard = true;
-		bool hasGrainProduct = false;
+		bool tapAvailable = false, qualityAvailable = false;
+		double effectiveBits = 12.0, bitrateQuality = 1.0;
+		bool snapLevels = true, grainGuard = true, hasGrainProduct = false;
 		double grainStrength = 0.0;
 	};
 
