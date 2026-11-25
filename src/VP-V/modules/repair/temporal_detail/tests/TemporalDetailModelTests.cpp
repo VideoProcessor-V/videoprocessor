@@ -2322,5 +2322,175 @@ namespace VideoProcessorTest
 					L"absent lag-1 P10 skips lag-1 guard sums instead of silently reusing a private/stale buffer");
 			}
 		}
+
+		// W23-B3 M2#8 (15b A4b): TemporalDetail input monitor acquires shared kP10gGrainLevel (ProductId 35,
+		// AcquireForm::Cpu) via P10gCpu.h, reflects exact per-block (N_b, gate, retained, rho1) values, tracks
+		// value changes across runs, and visibly falls back when memo is null, unregistered, unkeyed (seq == 0),
+		// wrong-size, NaN, or negative.
+		TEST_METHOD(TemporalDetailInputMonitorReflectsAcquiredP10gLevel)
+		{
+			using Reg = VpSkeleton::SkeletonMemo::Registration;
+			static_assert(VpSkeleton::kP10gGrainLevel == 35, "kP10gGrainLevel fixed ProductId 35");
+
+			// Single synthetic grainy frame (kW=128, kH=96 -> 8x6 = 48 blocks of 16x16 px).
+			const Stream s = BuildPan({ 1.0 }, 0.0, 0.0, 4201u, 1.5);
+			const Plane& frame = s.frames[0];
+			const size_t kBlocks = static_cast<size_t>((kW + 15) / 16) * static_cast<size_t>((kH + 15) / 16);
+			Assert::AreEqual(size_t(48), kBlocks);
+
+			FieldMotionSource motion;
+			motion.SetBackward(7u, MotionPair::Uniform(kW, kH, 16.0, 0.0, 0.0));
+			motion.SetForward(7u, MotionPair::Uniform(kW, kH, 16.0, 0.0, 0.0));
+
+			auto runOne = [&](VpSkeleton::SkeletonMemo* memo, uint64_t seq, Model& model) -> Diagnostics {
+				model.SetMemo(memo);
+				Model::FrameIn in;
+				in.luma = frame;
+				in.seq = seq;
+				in.contentHz = kHz;
+				in.planeLines = 1080.0;
+				in.motion = &motion;
+				model.Process(in);
+				return model.Diag();
+			};
+
+			auto makeMemoWithBytes = [](const std::vector<uint8_t>& payload, uint64_t onlySeq, VpSkeleton::SkeletonMemo& memo) {
+				VpSkeleton::OwnerFill fill;
+				fill.fill = [payload, onlySeq](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+					if (req.seq != onlySeq)
+						return false;
+					out.bytes = payload;
+					return true;
+				};
+				Assert::IsTrue(memo.RegisterOwnerFill(VpSkeleton::kP10gGrainLevel, VpSkeleton::AcquireForm::Cpu,
+					VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP10gGrainLevel), std::move(fill)) == Reg::Registered,
+					L"CPU kP10gGrainLevel owner registered");
+			};
+
+			// 1. Positive path: publish synthetic per-block P10g levels (nb=12.5, gate=0.25, retained=6.25, rho1=0.4).
+			std::vector<P10gBlockLevel> blocksA(kBlocks);
+			for (size_t i = 0; i < kBlocks; ++i)
+			{
+				blocksA[i].nb = 12.5f + 0.25f * static_cast<float>(i % 4u);
+				blocksA[i].gate = 0.25f;
+				blocksA[i].retained = 6.25f;
+				blocksA[i].rho1 = 0.4f;
+			}
+			VpSkeleton::SkeletonMemo memoA;
+			makeMemoWithBytes(PackCpuP10g(blocksA), 7u, memoA);
+			Model modelA(Steady());
+			const Diagnostics diagA = runOne(&memoA, 7u, modelA);
+
+			Assert::IsTrue(diagA.usedP10gLevel, L"input monitor used acquired kP10gGrainLevel");
+			Assert::AreEqual(uint64_t(1), modelA.P10gHits(), L"P10gHits == 1");
+			Assert::AreEqual(uint64_t(0), modelA.P10gFallbacks(), L"P10gFallbacks == 0");
+			Assert::AreEqual(uint64_t(1), diagA.p10gHits);
+			Assert::AreEqual(uint64_t(0), diagA.p10gFallbacks);
+			Assert::IsTrue(diagA.p10gFallbackWhy.empty(), L"no fallback reason on P10g hit");
+			Assert::AreEqual(kBlocks, diagA.inputGrainNb.size());
+			Assert::AreEqual(kBlocks, diagA.inputGrainGate.size());
+			Assert::AreEqual(kBlocks, diagA.inputGrainRetained.size());
+			Assert::AreEqual(kBlocks, diagA.inputGrainRho1.size());
+			for (size_t i = 0; i < kBlocks; ++i)
+			{
+				Assert::AreEqual(static_cast<double>(blocksA[i].nb), diagA.inputGrainNb[i], 1e-6, L"inputGrainNb matches P10g");
+				Assert::AreEqual(static_cast<double>(blocksA[i].gate), diagA.inputGrainGate[i], 1e-6, L"inputGrainGate matches P10g");
+				Assert::AreEqual(static_cast<double>(blocksA[i].retained), diagA.inputGrainRetained[i], 1e-6, L"inputGrainRetained matches P10g");
+				Assert::AreEqual(static_cast<double>(blocksA[i].rho1), diagA.inputGrainRho1[i], 1e-6, L"inputGrainRho1 matches P10g");
+			}
+
+			// 2. Negative control (a): shifting published P10g nb (12.5 -> 48.0) on the EXACT SAME frame shifts
+			//    diag.inputGrainNb by the exact delta (+35.5), proving monitor reads P10g rather than a constant/local estimate.
+			std::vector<P10gBlockLevel> blocksB = blocksA;
+			for (size_t i = 0; i < kBlocks; ++i)
+			{
+				blocksB[i].nb += 35.5f;   // 12.5 -> 48.0 on i%4==0
+				blocksB[i].gate = 0.75f;
+				blocksB[i].retained = 24.0f;
+				blocksB[i].rho1 = 0.85f;
+			}
+			VpSkeleton::SkeletonMemo memoB;
+			makeMemoWithBytes(PackCpuP10g(blocksB), 7u, memoB);
+			Model modelB(Steady());
+			const Diagnostics diagB = runOne(&memoB, 7u, modelB);
+			Assert::IsTrue(diagB.usedP10gLevel);
+			Assert::AreEqual(uint64_t(1), modelB.P10gHits());
+			Assert::AreEqual(uint64_t(0), modelB.P10gFallbacks());
+			for (size_t i = 0; i < kBlocks; ++i)
+			{
+				Assert::AreEqual(35.5, diagB.inputGrainNb[i] - diagA.inputGrainNb[i], 1e-5,
+					L"negative control: shifting P10g nb shifts diag.inputGrainNb by exact delta");
+				Assert::AreEqual(0.75, diagB.inputGrainGate[i], 1e-6);
+				Assert::AreEqual(24.0, diagB.inputGrainRetained[i], 1e-6);
+				Assert::AreEqual(0.85, diagB.inputGrainRho1[i], 1e-6);
+			}
+
+			// 3. Negative control (b): absent, unregistered, unkeyed, wrong-size, NaN, and negative P10g payloads
+			//    all fall back visibly (usedP10gLevel == false, P10gFallbacks == 1, non-empty p10gFallbackWhy).
+			{
+				// (b1) memo == nullptr
+				Model mNull(Steady());
+				const Diagnostics dNull = runOne(nullptr, 7u, mNull);
+				Assert::IsFalse(dNull.usedP10gLevel, L"memo=nullptr falls back");
+				Assert::AreEqual(uint64_t(0), mNull.P10gHits());
+				Assert::AreEqual(uint64_t(1), mNull.P10gFallbacks());
+				Assert::IsFalse(dNull.p10gFallbackWhy.empty(), L"memo=nullptr records visible reason");
+				Assert::IsFalse(mNull.LastP10gFallbackWhy().empty());
+				Assert::AreEqual(0.0, dNull.inputGrainGate[0], 1e-9, L"single-frame fallback gate is 0");
+				Assert::AreEqual(-1.0, dNull.inputGrainRho1[0], 1e-9, L"single-frame fallback rho1 is -1");
+				Assert::IsTrue(std::fabs(dNull.inputGrainNb[0] - 12.5) > 1.0,
+					L"single-frame fallback computes local estimate distinct from synthetic 12.5 P10g value");
+
+				// (b2) unregistered memo
+				VpSkeleton::SkeletonMemo emptyMemo;
+				Model mEmpty(Steady());
+				const Diagnostics dEmpty = runOne(&emptyMemo, 7u, mEmpty);
+				Assert::IsFalse(dEmpty.usedP10gLevel);
+				Assert::AreEqual(uint64_t(1), mEmpty.P10gFallbacks());
+				Assert::IsFalse(dEmpty.p10gFallbackWhy.empty(), L"unregistered memo records visible reason");
+
+				// (b3) unkeyed seq == 0
+				Model mSeq0(Steady());
+				const Diagnostics dSeq0 = runOne(&memoA, 0u, mSeq0);
+				Assert::IsFalse(dSeq0.usedP10gLevel);
+				Assert::AreEqual(uint64_t(1), mSeq0.P10gFallbacks());
+				Assert::IsFalse(dSeq0.p10gFallbackWhy.empty(), L"seq == 0 records visible reason");
+
+				// (b4) wrong payload size (kBlocks - 1 blocks)
+				std::vector<P10gBlockLevel> shortBlocks(kBlocks - 1u, blocksA[0]);
+				VpSkeleton::SkeletonMemo shortMemo;
+				makeMemoWithBytes(PackCpuP10g(shortBlocks), 7u, shortMemo);
+				Model mShort(Steady());
+				const Diagnostics dShort = runOne(&shortMemo, 7u, mShort);
+				Assert::IsFalse(dShort.usedP10gLevel, L"wrong-size P10g rejected");
+				Assert::AreEqual(uint64_t(1), mShort.P10gFallbacks());
+				Assert::IsTrue(dShort.p10gFallbackWhy.find("size mismatch") != std::string::npos,
+					L"wrong-size fallback reason states size mismatch");
+
+				// (b5) NaN payload value
+				std::vector<P10gBlockLevel> nanBlocks = blocksA;
+				nanBlocks[3].nb = std::numeric_limits<float>::quiet_NaN();
+				VpSkeleton::SkeletonMemo nanMemo;
+				makeMemoWithBytes(PackCpuP10g(nanBlocks), 7u, nanMemo);
+				Model mNan(Steady());
+				const Diagnostics dNan = runOne(&nanMemo, 7u, mNan);
+				Assert::IsFalse(dNan.usedP10gLevel, L"NaN P10g payload rejected");
+				Assert::AreEqual(uint64_t(1), mNan.P10gFallbacks());
+				Assert::IsTrue(dNan.p10gFallbackWhy.find("non-finite") != std::string::npos,
+					L"NaN fallback reason names non-finite values");
+
+				// (b6) negative nb / retained payload value
+				std::vector<P10gBlockLevel> negBlocks = blocksA;
+				negBlocks[5].nb = -2.0f;
+				VpSkeleton::SkeletonMemo negMemo;
+				makeMemoWithBytes(PackCpuP10g(negBlocks), 7u, negMemo);
+				Model mNeg(Steady());
+				const Diagnostics dNeg = runOne(&negMemo, 7u, mNeg);
+				Assert::IsFalse(dNeg.usedP10gLevel, L"negative nb P10g payload rejected");
+				Assert::AreEqual(uint64_t(1), mNeg.P10gFallbacks());
+				Assert::IsTrue(dNeg.p10gFallbackWhy.find("negative") != std::string::npos,
+					L"negative fallback reason names negative values");
+			}
+		}
 	};
 }
