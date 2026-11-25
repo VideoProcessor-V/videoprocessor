@@ -108,10 +108,9 @@ namespace AdaptiveDownscaleStage
 			}
 			pl_tex p3Field = static_cast<pl_tex>(r.gpu.resource);
 			const VpMotion::VerifiedField* facts = VpMotion::P3FieldFactsOf(r);
-			const bool haveAux = static_cast<bool>(host.motion);
-			const MotionSource aux = haveAux ? host.motion() : MotionSource();
+			const MotionSource aux = host.motion ? host.motion() : MotionSource();
 			pl_tex frameTrust = (facts && facts->trust) ? facts->trust : aux.frameTrust;
-			const float minTrustedShare = haveAux ? aux.minTrustedShare : 0.25f;
+			const float minTrustedShare = aux.minTrustedShare;
 			if (frameTrust == nullptr)
 			{
 				out.cause = "kP3AnalysisField has no frame trust";

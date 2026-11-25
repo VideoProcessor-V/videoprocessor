@@ -2574,7 +2574,7 @@ namespace Vpv
         handles.ssimStabilise = ssimStabilise;
         handles.bitrateAware = bitrateAware;
         handles.bitrateFloor = bitrateFloor;
-        handles.cnnStabilise = cnnStabilise;
+        handles.cnnStabilise = sharpStabilise;
         return handles;
     }
 

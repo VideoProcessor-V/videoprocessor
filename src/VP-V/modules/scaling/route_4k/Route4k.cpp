@@ -3,6 +3,7 @@
 #include <VP-V/modules/scaling/route_4k/Route4k.h>
 
 #include <VP-V/core/ChromaSiting.h>
+#include <VP-V/core/LumaWeights.h>
 #include <VP-V/modules/scaling/output/AdaptiveDownscale.h>
 
 #include <libplacebo/shaders/custom.h>
@@ -42,7 +43,8 @@ namespace Route4k
 
 		// Compute body for the hybrid luma blend. Uses hb_weight from HybridBlend::WeightGlsl()
 		// directly (single source of truth) and writes unclamped float output so BTB (< 0.0)
-		// and WTW (> 1.0) pass through untouched.
+		// and WTW (> 1.0) pass through untouched. On single-plane RGB/RGBA inputs (`rgb_luma_only != 0`),
+		// applies the exact HybridBlend::BlendRgb luma-only law with LumaCoeff::ForSystem weights.
 		const char* const HYBRID_BLEND_BODY = R"GLSL(
 ivec2 p = ivec2(gl_GlobalInvocationID.xy);
 ivec2 sz = imageSize(dst_img);
@@ -50,7 +52,15 @@ if (p.x < sz.x && p.y < sz.y) {
     vec4 s = texelFetch(sharp_tex, p, 0);
     vec4 f = texelFetch(safe_tex, p, 0);
     float w = hb_weight(w_base, 0.0, 1.0, 1.0);
-    vec4 o = vec4(s.rgb + (1.0 - w) * (f.rgb - s.rgb), s.a);
+    vec4 o;
+    if (rgb_luma_only != 0) {
+        float ys = dot(s.rgb, kw);
+        float yf = dot(f.rgb, kw);
+        float d = (1.0 - w) * (yf - ys);
+        o = vec4(s.rgb + vec3(d), s.a);
+    } else {
+        o = vec4(s.rgb + (1.0 - w) * (f.rgb - s.rgb), s.a);
+    }
     imageStore(dst_img, p, o);
 }
 )GLSL";
@@ -310,6 +320,7 @@ if (p.x < sz.x && p.y < sz.y) {
 		}
 		auto fail = [this](const std::string& why) {
 			error = why;
+			status = "4K route: off (" + why + ")";
 			++failures;
 			return false;
 		};
@@ -352,7 +363,9 @@ if (p.x < sz.x && p.y < sz.y) {
 		// Plane 0 (luma / RGB): sharp branch, alias-safe branch, or HybridBlend of both.
 		const float wBase = HybridBlend::SanitizeUnit(cfg.wBase);
 		const bool safeOnly = plan.oneAxis || wBase <= 0.0f;
-		const bool sharpOnly = !safeOnly && (wBase >= 1.0f || SameKernel(cfg.sharpFilter, cfg.safeFilter));
+		const bool sameBranch = SameKernel(cfg.sharpFilter, cfg.safeFilter) &&
+			std::fabs(cfg.sharpAntiring - cfg.safeAntiring) < 1e-6f;
+		const bool sharpOnly = !safeOnly && (wBase >= 1.0f || sameBranch);
 		const ScalerPass::Source lumaSrc = {
 			lumaIn, 0.0f, 0.0f, static_cast<float>(srcW), static_cast<float>(srcH)
 		};
@@ -447,8 +460,20 @@ if (p.x < sz.x && p.y < sz.y) {
 			desc[2].desc.access = PL_DESC_ACCESS_WRITEONLY;
 			desc[2].binding.object = blendTex[slot];
 
-			const pl_shader_var vars[1] = {
-				{ pl_var_float("w_base"), &wBase, false }
+			const int rgbLumaOnly = (lumaIn->params.format->num_components >= 3 &&
+				(source.num_planes == 1 || source.repr.sys == PL_COLOR_SYSTEM_RGB)) ? 1 : 0;
+			double kwD[3] = {};
+			LumaCoeff::ForSystem(source.repr.sys, source.color.primaries, kwD);
+			const float kw[3] = {
+				static_cast<float>(kwD[0]),
+				static_cast<float>(kwD[1]),
+				static_cast<float>(kwD[2])
+			};
+
+			const pl_shader_var vars[3] = {
+				{ pl_var_float("w_base"), &wBase, true },
+				{ pl_var_vec3("kw"), kw, true },
+				{ pl_var_int("rgb_luma_only"), &rgbLumaOnly, true }
 			};
 
 			pl_custom_shader custom{};
@@ -460,7 +485,7 @@ if (p.x < sz.x && p.y < sz.y) {
 			custom.descriptors = desc;
 			custom.num_descriptors = 3;
 			custom.variables = vars;
-			custom.num_variables = 1;
+			custom.num_variables = 3;
 			custom.compute = true;
 			custom.compute_group_size[0] = 16;
 			custom.compute_group_size[1] = 16;
