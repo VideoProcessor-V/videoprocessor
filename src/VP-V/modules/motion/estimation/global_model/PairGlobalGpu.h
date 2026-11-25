@@ -63,6 +63,7 @@ namespace VpMotion
 		pl_tex* bothSad2 = nullptr;     // caller-owned D1 scratch (parallel bidirectional)
 		pl_tex* bothSad1 = nullptr;
 		pl_tex* bothPick = nullptr;
+		pl_tex* gapSeedCheckTex = nullptr; // optional GPU-only 1x1 seed-vs-zero verdict texture (.w > 0.5 => seed holds; zero pl_tex_download)
 		MatcherGlobalD1::DispatchFn dispatch;
 		MatcherGlobalD1::DispatchPerBlockFn dispatchPerBlock;
 	};
@@ -96,68 +97,7 @@ namespace VpMotion
 			return true;
 		}
 
-		if (outOutcome.source == PairGlobalSource::CameraModel
-			|| outOutcome.source == PairGlobalSource::Engine
-			|| outOutcome.source == PairGlobalSource::GapSeed)
-		{
-			if (!ctx.dispatch || !ctx.globalVector || !ctx.globalVector[0] || !ctx.globalVector[1])
-			{
-				outError = !ctx.dispatch ? "global motion: missing dispatch callback"
-					: "global motion: missing output textures";
-				outFallback = FallbackCatalog::PairGlobalUnavailable(true, outError);
-				return false;
-			}
-			static const char* const kStoreOneBody =
-				"if (gl_GlobalInvocationID.x == 0u && gl_GlobalInvocationID.y == 0u) imageStore(dst, ivec2(0), gvec);\n";
-			const char* vecLabel = nullptr;
-			const char* secondLabel = nullptr;
-			if (outOutcome.source == PairGlobalSource::CameraModel)
-			{
-				vecLabel = "VideoProcessor de-judder: global motion (camera model)";
-				secondLabel = "VideoProcessor de-judder: global motion second (camera model)";
-			}
-			else if (outOutcome.source == PairGlobalSource::Engine)
-			{
-				vecLabel = "VideoProcessor de-judder: global motion (engine)";
-			}
-			else
-			{
-				vecLabel = "VideoProcessor de-judder: global motion (gap seed)";
-				secondLabel = "VideoProcessor de-judder: global motion second (gap seed)";
-			}
-			for (int d = 0; d < 2; ++d)
-			{
-				const float value[4] = { outRecord.vec[d][0], outRecord.vec[d][1], outRecord.vec[d][2], outRecord.vec[d][3] };
-				const pl_shader_desc out[1] = { MatcherGlobalD1::Storage("dst", ctx.globalVector[d]) };
-				const pl_shader_var var[1] = { { pl_var_vec4("gvec"), value, true } };
-				if (!ctx.dispatch(vecLabel, nullptr, kStoreOneBody, out, 1, var, 1, 1, 1, 1))
-				{
-					if (outError.empty())
-						outError = std::string("dispatch failed: ") + vecLabel;
-					outFallback = FallbackCatalog::PairGlobalUnavailable(true, outError);
-					return false;
-				}
-				if (ctx.twoCandidates && outOutcome.clearSecond && secondLabel != nullptr
-					&& ctx.globalSecond != nullptr && ctx.globalSecond[d] != nullptr)
-				{
-					const float none[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-					const pl_shader_desc out2[1] = { MatcherGlobalD1::Storage("dst", ctx.globalSecond[d]) };
-					const pl_shader_var var2[1] = { { pl_var_vec4("gvec"), none, true } };
-					if (!ctx.dispatch(secondLabel, nullptr, kStoreOneBody, out2, 1, var2, 1, 1, 1, 1))
-					{
-						if (outError.empty())
-							outError = std::string("dispatch failed: ") + secondLabel;
-						outFallback = FallbackCatalog::PairGlobalUnavailable(true, outError);
-						return false;
-					}
-				}
-			}
-			outFallback = FallbackCatalog::PairGlobalUnavailable(false);
-			return true;
-		}
-
-		if (outOutcome.needsD1Search)
-		{
+		auto runD1Search = [&]() -> bool {
 			if (!ctx.globalVector || !ctx.globalVector[0] || !ctx.globalVector[1])
 			{
 				outError = "global motion: missing output textures";
@@ -201,6 +141,110 @@ namespace VpMotion
 				outFallback = FallbackCatalog::PairGlobalUnavailable(true, outError);
 				return false;
 			}
+			return true;
+		};
+
+		if (outOutcome.source == PairGlobalSource::CameraModel
+			|| outOutcome.source == PairGlobalSource::Engine
+			|| outOutcome.source == PairGlobalSource::GapSeed)
+		{
+			if (!ctx.dispatch || !ctx.globalVector || !ctx.globalVector[0] || !ctx.globalVector[1])
+			{
+				outError = !ctx.dispatch ? "global motion: missing dispatch callback"
+					: "global motion: missing output textures";
+				outFallback = FallbackCatalog::PairGlobalUnavailable(true, outError);
+				return false;
+			}
+			const pl_tex gpuSeedCheck = (outOutcome.source == PairGlobalSource::GapSeed && ctx.gapSeedCheckTex != nullptr)
+				? *ctx.gapSeedCheckTex : nullptr;
+			if (gpuSeedCheck != nullptr)
+			{
+				// HIGH-1 / G6: GPU-only gap-seed mux (zero blocking pl_tex_download on the render thread).
+				// Run D1 first, then conditionally overwrite with the gap seed on GPU iff seedCheck.w > 0.5.
+				if (!runD1Search())
+					return false;
+			}
+			static const char* const kStoreOneBody =
+				"if (gl_GlobalInvocationID.x == 0u && gl_GlobalInvocationID.y == 0u) imageStore(dst, ivec2(0), gvec);\n";
+			static const char* const kStoreIfSeedHoldsBody =
+				"if (gl_GlobalInvocationID.x == 0u && gl_GlobalInvocationID.y == 0u && texelFetch(gs_check, ivec2(0), 0).w > 0.5) imageStore(dst, ivec2(0), gvec);\n";
+			const char* vecLabel = nullptr;
+			const char* secondLabel = nullptr;
+			if (outOutcome.source == PairGlobalSource::CameraModel)
+			{
+				vecLabel = "VideoProcessor de-judder: global motion (camera model)";
+				secondLabel = "VideoProcessor de-judder: global motion second (camera model)";
+			}
+			else if (outOutcome.source == PairGlobalSource::Engine)
+			{
+				vecLabel = "VideoProcessor de-judder: global motion (engine)";
+			}
+			else
+			{
+				vecLabel = "VideoProcessor de-judder: global motion (gap seed)";
+				secondLabel = "VideoProcessor de-judder: global motion second (gap seed)";
+			}
+			for (int d = 0; d < 2; ++d)
+			{
+				const float value[4] = { outRecord.vec[d][0], outRecord.vec[d][1], outRecord.vec[d][2], outRecord.vec[d][3] };
+				const pl_shader_var var[1] = { { pl_var_vec4("gvec"), value, true } };
+				bool dispatched = false;
+				if (gpuSeedCheck != nullptr)
+				{
+					const pl_shader_desc out[2] = {
+						MatcherGlobalD1::Sampled("gs_check", gpuSeedCheck, false),
+						MatcherGlobalD1::Storage("dst", ctx.globalVector[d])
+					};
+					dispatched = ctx.dispatch(vecLabel, nullptr, kStoreIfSeedHoldsBody, out, 2, var, 1, 1, 1, 1);
+				}
+				else
+				{
+					const pl_shader_desc out[1] = { MatcherGlobalD1::Storage("dst", ctx.globalVector[d]) };
+					dispatched = ctx.dispatch(vecLabel, nullptr, kStoreOneBody, out, 1, var, 1, 1, 1, 1);
+				}
+				if (!dispatched)
+				{
+					if (outError.empty())
+						outError = std::string("dispatch failed: ") + vecLabel;
+					outFallback = FallbackCatalog::PairGlobalUnavailable(true, outError);
+					return false;
+				}
+				if (ctx.twoCandidates && outOutcome.clearSecond && secondLabel != nullptr
+					&& ctx.globalSecond != nullptr && ctx.globalSecond[d] != nullptr)
+				{
+					const float none[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+					const pl_shader_var var2[1] = { { pl_var_vec4("gvec"), none, true } };
+					bool dispatched2 = false;
+					if (gpuSeedCheck != nullptr)
+					{
+						const pl_shader_desc out2[2] = {
+							MatcherGlobalD1::Sampled("gs_check", gpuSeedCheck, false),
+							MatcherGlobalD1::Storage("dst", ctx.globalSecond[d])
+						};
+						dispatched2 = ctx.dispatch(secondLabel, nullptr, kStoreIfSeedHoldsBody, out2, 2, var2, 1, 1, 1, 1);
+					}
+					else
+					{
+						const pl_shader_desc out2[1] = { MatcherGlobalD1::Storage("dst", ctx.globalSecond[d]) };
+						dispatched2 = ctx.dispatch(secondLabel, nullptr, kStoreOneBody, out2, 1, var2, 1, 1, 1, 1);
+					}
+					if (!dispatched2)
+					{
+						if (outError.empty())
+							outError = std::string("dispatch failed: ") + secondLabel;
+						outFallback = FallbackCatalog::PairGlobalUnavailable(true, outError);
+						return false;
+					}
+				}
+			}
+			outFallback = FallbackCatalog::PairGlobalUnavailable(false);
+			return true;
+		}
+
+		if (outOutcome.needsD1Search)
+		{
+			if (!runD1Search())
+				return false;
 			outRecord.valid = true;
 			outFallback = FallbackCatalog::PairGlobalUnavailable(false);
 			return true;
