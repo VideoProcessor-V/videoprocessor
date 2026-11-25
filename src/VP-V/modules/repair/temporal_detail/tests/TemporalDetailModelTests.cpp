@@ -2104,5 +2104,223 @@ namespace VideoProcessorTest
 			Assert::IsTrue(maxBaseShift > 1.0 && maxS1Shift > 1.0 && maxS2Shift > 1.0,
 				L"negative control: altering band sigmas shifts base, s1, and s2 by > 1 code");
 		}
+
+		// W23-B3 M2#7 (15b A4 rest): TemporalDetail lag-1 grain guard acquires shared kP10GrainSplit at seq - 1
+		// (AcquireForm::Cpu), accepts double and float payloads, genuinely feeds lag-1 guard sums from the acquired
+		// payload (no private m_prevGin), and visibly refuses when memo is null, unregistered, missing seq - 1, or
+		// has a corrupted payload size.
+		TEST_METHOD(TemporalDetailLag1AcquiresP10AndRefusesVisiblyWhenAbsent)
+		{
+			using Reg = VpSkeleton::SkeletonMemo::Registration;
+
+			// Synthetic moving + grainy 3-frame sequence (seq = 1, 2, 3) with exact uniform pan motion.
+			const std::vector<double> q = { 1.0, 0.3, 0.3 };
+			const Stream s = BuildPan(q, 2.0, 0.0, 4101u, 1.8);
+			FieldMotionSource motion;
+			for (uint64_t seq = 1u; seq <= 3u; ++seq)
+			{
+				motion.SetBackward(seq, MotionPair::Uniform(kW, kH, 16.0, -2.0, 0.0));
+				motion.SetForward(seq, MotionPair::Uniform(kW, kH, 16.0, 2.0, 0.0));
+			}
+
+			// Independent CPU grain planes packed via TemporalDetail::PackCpuGrainPlane for seq = 1, 2, 3.
+			std::map<uint64_t, std::vector<uint8_t>> packedBySeq;
+			for (uint64_t seq = 1u; seq <= 3u; ++seq)
+			{
+				const Detail::Analysis a = Detail::Analyse(s.frames[static_cast<size_t>(seq - 1u)], 1.0, 16);
+				packedBySeq[seq] = PackCpuGrainPlane(a.grain);
+			}
+
+			auto runSeq = [&](Model& model, std::vector<Diagnostics>& diags) {
+				diags.clear();
+				for (uint64_t seq = 1u; seq <= 3u; ++seq)
+				{
+					Model::FrameIn in;
+					in.luma = s.frames[static_cast<size_t>(seq - 1u)];
+					in.seq = seq;
+					in.contentHz = kHz;
+					in.planeLines = 1080.0;
+					in.motion = &motion;
+					model.Process(in);
+					diags.push_back(model.Diag());
+				}
+			};
+
+			// 1. Positive path: double-packed kP10GrainSplit published for seq = 1, 2, 3.
+			{
+				VpSkeleton::SkeletonMemo memo;
+				VpSkeleton::OwnerFill fill;
+				fill.fill = [&](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+					auto it = packedBySeq.find(req.seq);
+					if (it == packedBySeq.end())
+						return false;
+					out.bytes = it->second;
+					return true;
+				};
+				Assert::IsTrue(memo.RegisterOwnerFill(VpSkeleton::kP10GrainSplit, VpSkeleton::AcquireForm::Cpu,
+					VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP10GrainSplit), std::move(fill)) == Reg::Registered,
+					L"CPU kP10GrainSplit owner registered");
+
+				Model model(Steady());
+				model.SetMemo(&memo);
+				std::vector<Diagnostics> diags;
+				runSeq(model, diags);
+
+				Assert::IsFalse(diags[0].lag1Missing, L"seq=1 has no prior frame (lag-1 not attempted)");
+				Assert::IsFalse(diags[1].lag1Missing, L"seq=2 acquired lag-1 P10 (seq=1)");
+				Assert::IsFalse(diags[2].lag1Missing, L"seq=3 acquired lag-1 P10 (seq=2)");
+				Assert::AreEqual(uint64_t(2), model.Lag1Hits(), L"seq=2 and seq=3 both hit lag-1 kP10GrainSplit");
+				Assert::AreEqual(uint64_t(0), model.Lag1UnavailableCount(), L"zero lag-1 unavailable refusals when present");
+				Assert::IsTrue(diags[1].lag1UnavailableWhy.empty() && diags[2].lag1UnavailableWhy.empty(),
+					L"no refusal reason on lag-1 hits");
+			}
+
+			// 1b. Positive path (float32 wire format): float[w*h] payload is also cleanly accepted.
+			{
+				VpSkeleton::SkeletonMemo floatMemo;
+				VpSkeleton::OwnerFill fFill;
+				fFill.fill = [&](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+					if (req.seq < 1u || req.seq > 3u)
+						return false;
+					const Detail::Analysis a = Detail::Analyse(s.frames[static_cast<size_t>(req.seq - 1u)], 1.0, 16);
+					out.bytes.resize(a.grain.v.size() * sizeof(float));
+					for (size_t i = 0; i < a.grain.v.size(); ++i)
+					{
+						const float v = static_cast<float>(a.grain.v[i]);
+						std::memcpy(out.bytes.data() + i * sizeof(float), &v, sizeof(float));
+					}
+					return true;
+				};
+				Assert::IsTrue(floatMemo.RegisterOwnerFill(VpSkeleton::kP10GrainSplit, VpSkeleton::AcquireForm::Cpu,
+					VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP10GrainSplit), std::move(fFill)) == Reg::Registered);
+				Model fModel(Steady());
+				fModel.SetMemo(&floatMemo);
+				std::vector<Diagnostics> fDiags;
+				runSeq(fModel, fDiags);
+				Assert::AreEqual(uint64_t(2), fModel.Lag1Hits(), L"float-packed lag-1 P10 hits on seq=2 and seq=3");
+				Assert::AreEqual(uint64_t(0), fModel.Lag1UnavailableCount());
+			}
+
+			// 2. Negative control (a): absent lag-1 P10 (memo=nullptr, unregistered memo, and missing seq-1 frame)
+			//    visibly refuses (lag1Missing == true, Lag1UnavailableCount >= 1, non-empty lag1UnavailableWhy).
+			{
+				// (a1) memo == nullptr
+				Model nullModel(Steady());
+				std::vector<Diagnostics> nullDiags;
+				runSeq(nullModel, nullDiags);
+				Assert::AreEqual(uint64_t(0), nullModel.Lag1Hits(), L"memo=nullptr records 0 lag-1 hits");
+				Assert::AreEqual(uint64_t(2), nullModel.Lag1UnavailableCount(), L"memo=nullptr refuses on seq=2 and seq=3");
+				Assert::IsTrue(nullDiags[1].lag1Missing && nullDiags[2].lag1Missing, L"memo=nullptr flags lag1Missing");
+				Assert::IsFalse(nullDiags[1].lag1UnavailableWhy.empty(), L"memo=nullptr records visible reason");
+				Assert::IsFalse(nullModel.LastLag1UnavailableWhy().empty(), L"model exposes LastLag1UnavailableWhy");
+
+				// (a2) unregistered memo
+				VpSkeleton::SkeletonMemo emptyMemo;
+				Model unregModel(Steady());
+				unregModel.SetMemo(&emptyMemo);
+				std::vector<Diagnostics> unregDiags;
+				runSeq(unregModel, unregDiags);
+				Assert::AreEqual(uint64_t(0), unregModel.Lag1Hits());
+				Assert::AreEqual(uint64_t(2), unregModel.Lag1UnavailableCount());
+				Assert::IsTrue(unregDiags[1].lag1Missing && !unregDiags[1].lag1UnavailableWhy.empty(),
+					L"unregistered memo visibly refuses lag-1 P10");
+
+				// (a3) missing seq-1 frame: serve seq=1 only, decline seq=2 -> seq=2 hits, seq=3 refuses visibly.
+				VpSkeleton::SkeletonMemo partialMemo;
+				VpSkeleton::OwnerFill partialFill;
+				partialFill.fill = [&](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+					if (req.seq != 1u)
+						return false;
+					out.bytes = packedBySeq[1u];
+					return true;
+				};
+				Assert::IsTrue(partialMemo.RegisterOwnerFill(VpSkeleton::kP10GrainSplit, VpSkeleton::AcquireForm::Cpu,
+					VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP10GrainSplit), std::move(partialFill)) == Reg::Registered);
+				Model partialModel(Steady());
+				partialModel.SetMemo(&partialMemo);
+				std::vector<Diagnostics> partialDiags;
+				runSeq(partialModel, partialDiags);
+				Assert::AreEqual(uint64_t(1), partialModel.Lag1Hits(), L"seq=2 hits seq=1");
+				Assert::AreEqual(uint64_t(1), partialModel.Lag1UnavailableCount(), L"seq=3 visibly refuses missing seq=2");
+				Assert::IsFalse(partialDiags[1].lag1Missing, L"seq=2 not missing");
+				Assert::IsTrue(partialDiags[2].lag1Missing && !partialDiags[2].lag1UnavailableWhy.empty(),
+					L"seq=3 flags lag1Missing with non-empty reason when seq=2 absent");
+			}
+
+			// 3. Negative control (b): corrupted payload size in kP10GrainSplit CPU slot is visibly rejected.
+			{
+				VpSkeleton::SkeletonMemo badMemo;
+				VpSkeleton::OwnerFill badFill;
+				badFill.fill = [](const VpSkeleton::OwnerFillRequest&, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+					out.bytes.assign(17u, uint8_t(0x5A));   // invalid byte count: neither double[w*h] nor float[w*h]
+					return true;
+				};
+				Assert::IsTrue(badMemo.RegisterOwnerFill(VpSkeleton::kP10GrainSplit, VpSkeleton::AcquireForm::Cpu,
+					VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP10GrainSplit), std::move(badFill)) == Reg::Registered);
+				Model badModel(Steady());
+				badModel.SetMemo(&badMemo);
+				std::vector<Diagnostics> badDiags;
+				runSeq(badModel, badDiags);
+				Assert::AreEqual(uint64_t(0), badModel.Lag1Hits(), L"corrupted payload never counts as a hit");
+				Assert::AreEqual(uint64_t(2), badModel.Lag1UnavailableCount(), L"corrupted payload rejected on seq=2 and seq=3");
+				Assert::IsTrue(badDiags[1].lag1Missing, L"corrupted payload sets lag1Missing");
+				Assert::IsTrue(badDiags[1].lag1UnavailableWhy.find("size mismatch") != std::string::npos,
+					L"corrupted payload refusal reason explicitly states size mismatch");
+			}
+
+			// 4. Negative control (c): prove lag-1 guard sums genuinely consume acquired kP10GrainSplit (not a
+			//    stale/private buffer). Publishing negated frame-2 grain under seq=1 drives rho_in = -1 -> freeze = +1
+			//    -> huge guardViolation (> 10.0), whereas absent lag-1 P10 skips lag-1 sums (guardViolation < 1.0).
+			{
+				const Stream staticScene = KeepsGrainScene(4102u, 2.0, 3);
+				FieldMotionSource zeroMotion;
+				for (uint64_t seq = 1u; seq <= 3u; ++seq)
+				{
+					zeroMotion.SetBackward(seq, MotionPair::Uniform(kW, kH, 16.0, 0.0, 0.0));
+					zeroMotion.SetForward(seq, MotionPair::Uniform(kW, kH, 16.0, 0.0, 0.0));
+				}
+				const Detail::Analysis a2 = Detail::Analyse(staticScene.frames[1], 1.0, 16);
+				Plane negatedGrain(kW, kH);
+				for (size_t i = 0; i < a2.grain.v.size(); ++i)
+					negatedGrain.v[i] = -a2.grain.v[i];
+				const std::vector<uint8_t> poisonedBytes = PackCpuGrainPlane(negatedGrain);
+
+				VpSkeleton::SkeletonMemo poisonMemo;
+				VpSkeleton::OwnerFill poisonFill;
+				poisonFill.fill = [&](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+					if (req.seq != 1u) return false;
+					out.bytes = poisonedBytes;
+					return true;
+				};
+				Assert::IsTrue(poisonMemo.RegisterOwnerFill(VpSkeleton::kP10GrainSplit, VpSkeleton::AcquireForm::Cpu,
+					VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP10GrainSplit), std::move(poisonFill)) == Reg::Registered);
+
+				auto maxViolationAtSeq2 = [&](VpSkeleton::SkeletonMemo* m) -> double {
+					Model mod(Steady());
+					mod.SetMemo(m);
+					for (uint64_t seq = 1u; seq <= 2u; ++seq)
+					{
+						Model::FrameIn in;
+						in.luma = staticScene.frames[static_cast<size_t>(seq - 1u)];
+						in.seq = seq;
+						in.contentHz = kHz;
+						in.planeLines = 1080.0;
+						in.motion = &zeroMotion;
+						mod.Process(in);
+					}
+					double worst = 0.0;
+					for (double v : mod.Diag().guardViolation)
+						worst = (std::max)(worst, v);
+					return worst;
+				};
+
+				const double violWithPoisonP10 = maxViolationAtSeq2(&poisonMemo);
+				const double violWithAbsentP10 = maxViolationAtSeq2(nullptr);
+				Assert::IsTrue(violWithPoisonP10 > 10.0,
+					L"acquired lag-1 P10 feeds sb[3..6] directly (negated lag-1 grain trips freeze violation > 10)");
+				Assert::IsTrue(violWithAbsentP10 < 1.0,
+					L"absent lag-1 P10 skips lag-1 guard sums instead of silently reusing a private/stale buffer");
+			}
+		}
 	};
 }
