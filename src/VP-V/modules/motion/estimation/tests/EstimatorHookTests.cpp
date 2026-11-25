@@ -674,5 +674,108 @@ namespace VideoProcessorTest
 				std::to_wstring(rSplit) + L"; " + message).c_str());
 			AssertCleanLibplaceboLog(log);
 		}
+
+		// W23-Final M1#7: MotionWarp FrameTrust consumes shared U7 cut/fade verdicts, skips private FadeMatch when !u7Fade,
+		// and visibly counts fallback when no U7 verdict is bound.
+		TEST_METHOD(MotionWarpFrameTrustFollowsSharedU7SceneAndCountsFallback)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+
+			const int width = 256, height = 128;
+			static constexpr int dx = 8;
+			const DejudderFrame a = MakeDejudderFrame(width, height,
+				[](int x, int y) { return DejudderTexture(x, y); },
+				[](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); });
+			const DejudderFrame b = MakeDejudderFrame(width, height,
+				[](int x, int y) { return DejudderTexture(x - dx, y); },
+				[](int x, int y, int c) { return DejudderTexture((x - dx / 2) * 2, y, 7 + c); });
+			DejudderGpuPlanes planesA, planesB;
+			UploadDejudderFrame(gpu, a, planesA);
+			UploadDejudderFrame(gpu, b, planesB);
+
+			Dejudder::Settings settings = DejudderTestSettings();
+			settings.trustScaleFull = 0.5f;   // engages FrameTrust strength scale ramp
+			settings.fadeMatch = true;
+			settings.fadeFloor = 0.25f;
+			settings.strengthRate = 1.0f;
+
+			// 1. Negative Control (no U7 reader / skeletonSeq == 0): fallback counted visibly; matched pair is NOT a cut.
+			{
+				Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
+				Assert::IsTrue(warp.Estimate(planesA.planes, planesB.planes),
+					ExtendedRangeGpuProbe::ToWide(warp.LastError()).c_str());
+				Assert::AreEqual<uint64_t>(0, warp.U7SceneHits(), L"no U7 reader/seq => 0 U7 hits");
+				Assert::AreEqual<uint64_t>(1, warp.U7SceneFallbacks(), L"no U7 reader/seq => 1 visible fallback");
+				Assert::IsFalse(warp.LastU7SceneFallback().empty(), L"fallback reason is recorded visibly");
+				const std::array<float, 3> trust = DownloadFrameTrust(gpu, warp);
+				Assert::IsTrue(trust[0] >= settings.minTrustedShare,
+					L"negative control: matched shifted pair has high trusted share");
+				Assert::IsTrue(trust[1] > 0.5f,
+					L"negative control: non-cut matched pair has positive FrameTrust().g > 0.5");
+			}
+
+			// 2. Shared U7 cut {cut=true, fade=false} forces whole-frame hold (FrameTrust().g == 0.0) on exact same frames.
+			{
+				Dejudder::MotionWarp warp(fixture.Log(), gpu, settings);
+				warp.SetSkeletonMemo(nullptr, 2);
+				warp.SetSceneVerdictReader([](uint64_t, bool& cutOut, bool& fadeOut, const char**) -> bool {
+					cutOut = true;
+					fadeOut = false;
+					return true;
+				});
+				Assert::IsTrue(warp.Estimate(planesA.planes, planesB.planes),
+					ExtendedRangeGpuProbe::ToWide(warp.LastError()).c_str());
+				Assert::AreEqual<uint64_t>(1, warp.U7SceneHits(), L"U7 cut verdict consumed");
+				Assert::AreEqual<uint64_t>(0, warp.U7SceneFallbacks(), L"no fallback when U7 answers");
+				Assert::IsTrue(warp.LastU7SceneFallback().empty(), L"last fallback cleared on U7 hit");
+				Assert::IsNull(warp.FadeStateForTest(), L"private FadeMatch skipped when U7 says !fade");
+				const std::array<float, 3> trust = DownloadFrameTrust(gpu, warp);
+				Assert::AreEqual(0.0f, trust[1], 1e-4f,
+					L"shared U7 cut resets FrameTrust().g (strength scale) to 0.0 even on well-matched frames");
+			}
+
+			// 3. Shared U7 fade {cut=false, fade=true} engages fadeFloor (<= 0.25) vs {cut=false, fade=false} (> 0.5, skipping FadeMatch).
+			{
+				Dejudder::MotionWarp warpFade(fixture.Log(), gpu, settings);
+				warpFade.SetSkeletonMemo(nullptr, 3);
+				warpFade.SetSceneVerdictReader([](uint64_t, bool& cutOut, bool& fadeOut, const char**) -> bool {
+					cutOut = false;
+					fadeOut = true;
+					return true;
+				});
+				Assert::IsTrue(warpFade.Estimate(planesA.planes, planesB.planes),
+					ExtendedRangeGpuProbe::ToWide(warpFade.LastError()).c_str());
+				Assert::AreEqual<uint64_t>(1, warpFade.U7SceneHits(), L"U7 fade verdict consumed");
+				Assert::AreEqual<uint64_t>(0, warpFade.U7SceneFallbacks());
+				Assert::IsTrue(warpFade.LastU7SceneFallback().empty());
+				const std::array<float, 3> trustFade = DownloadFrameTrust(gpu, warpFade);
+				Assert::IsTrue(trustFade[1] > 0.0f && trustFade[1] <= settings.fadeFloor + 1e-4f,
+					L"shared U7 fade caps FrameTrust().g at fadeFloor (0.25)");
+
+				// Negative control on exact same frames: U7 {cut=false, fade=false} skips private FadeMatch and yields > 0.5.
+				Dejudder::MotionWarp warpNoFade(fixture.Log(), gpu, settings);
+				warpNoFade.SetSkeletonMemo(nullptr, 4);
+				warpNoFade.SetSceneVerdictReader([](uint64_t, bool& cutOut, bool& fadeOut, const char**) -> bool {
+					cutOut = false;
+					fadeOut = false;
+					return true;
+				});
+				Assert::IsTrue(warpNoFade.Estimate(planesA.planes, planesB.planes),
+					ExtendedRangeGpuProbe::ToWide(warpNoFade.LastError()).c_str());
+				Assert::AreEqual<uint64_t>(1, warpNoFade.U7SceneHits(), L"U7 non-fade verdict consumed");
+				Assert::AreEqual<uint64_t>(0, warpNoFade.U7SceneFallbacks());
+				Assert::IsNull(warpNoFade.FadeStateForTest(),
+					L"negative control: private FadeMatch is skipped when U7 says !fade");
+				const std::array<float, 3> trustNoFade = DownloadFrameTrust(gpu, warpNoFade);
+				Assert::IsTrue(trustNoFade[1] > 0.5f,
+					L"negative control: U7 {cut=false, fade=false} on exact same frames yields FrameTrust().g > 0.5");
+			}
+
+			AssertCleanLibplaceboLog(log);
+		}
 	};
 }

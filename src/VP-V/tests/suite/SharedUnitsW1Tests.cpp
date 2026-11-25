@@ -595,7 +595,7 @@ namespace SharedUnitsW1TestsNs2
 			Assert::AreEqual(0x1ae6594f0419f53bull, Fnv1a(VpUnit::SourceStats::CoarseHistBody()));
 			Assert::AreEqual(0x28b8a668c74cf3dbull, Fnv1a(VpUnit::CutFadeJudge::TrustCutRegionalLine()));
 			Assert::AreEqual(0x10da1f9152c0e32cull, Fnv1a(VpUnit::CutFadeJudge::TrustCutPlainLine()));
-			Assert::AreEqual(0x6b5eb81113219c2cull, Fnv1a(VpUnit::CutFadeJudge::MeanStepCutLine()));
+			// WAIVER-W23-M1-7-MEANSTEP-RETIRE: MeanStepCutLine() retired (0 prod callers since AdaptiveDownscale moved to U7).
 			// WAIVER-U7ACC-STATS-V2: the kernel pieces above are unchanged; version 2 is the T2 sequence law, not these texts.
 			// WAIVER-U7FADE-V3: version 3 is the CPU fade law and its keep; version 4 is the 576-cell spatial affine fade law; version 5 (WAIVER-W23-U7-V5) is the D4/D5/D6/D8 CPU fade & veto upgrades; the kernel pieces above are still unchanged.
 			Assert::AreEqual(5u, VpUnit::CutFadeJudge::kUnitVersion, L"kernel text byte-identical; 2 = T2 sequence law, 3 = CPU fade law + partial reset, 4 = 576-cell spatial affine fade law, 5 = D4/D5/D6/D8 CPU fade & veto rules");
@@ -690,13 +690,7 @@ namespace SharedUnitsW1TestsNs2
 			Assert::AreEqual(0.05f, kTrustCutShareAlone);
 			Assert::IsTrue(std::string(TrustCutRegionalLine()).find("share < 0.05") != std::string::npos);
 			Assert::IsTrue(std::string(TrustCutRegionalLine()).find("hist_d > cut_hist") != std::string::npos);
-			// the mean-step cut
-			Assert::AreEqual(20.0f, kMeanStepCutCodes);
-			Assert::IsTrue(MeanStepCut(0.0f, 100.0f, 100.0f), L"no state yet");
-			Assert::IsTrue(MeanStepCut(1.0f, 100.0f, 120.5f)); Assert::IsTrue(MeanStepCut(2.0f, 100.0f, 79.0f));
-			Assert::IsFalse(MeanStepCut(1.0f, 100.0f, 120.0f), L"exactly 20 codes is not more than 20");
-			Assert::IsFalse(MeanStepCut(1.0f, 100.0f, 90.0f));
-			Assert::IsTrue(std::string(MeanStepCutLine()).find("prev.a < 0.5 || abs(luma_mean - prev.b) > 20.0") != std::string::npos);
+			// WAIVER-W23-M1-7-MEANSTEP-RETIRE: kMeanStepCutCodes / MeanStepCut / MeanStepCutLine retired (0 prod callers).
 		}
 
 		// ---- U12 --------------------------------------------------------------------------------------------------------------

@@ -1021,5 +1021,81 @@ namespace Tests
 						L"SDR programme was not vetoed");
 			}
 		}
+
+		// W23-Final M1#7: HdrVetoCutDetector and HdrVetoCaptureGate prefer shared U7 cut verdicts with visible fallback diagnostics.
+		TEST_METHOD(HdrVetoCutDetectorPrefersSharedU7WithVisibleFallbackAndNegativeControl)
+		{
+			const HdrVetoFrameStats s1 = Measure(SdrGrid(SceneLinear(3, 1.0, 0.01)));
+			const HdrVetoFrameStats s2 = s1;   // identical stats: local GridHistCut returns false
+			const HdrVetoFrameStats sDiff = Measure(SdrGrid(SceneLinear(29, 2.0, 0.01)));   // distinct shot: local GridHistCut returns true
+
+			// 1. Shared U7 cut=true overrides identical local stats.
+			HdrVetoCutDetector u7Det;
+			u7Det.SetSceneReader([](uint64_t seq, bool& cutOut, const char**) -> bool {
+				cutOut = (seq == 2);
+				return true;
+			});
+			Assert::IsFalse(u7Det.Observe(s1, 1), L"first frame establishes previous stats");
+			Assert::IsTrue(u7Det.Observe(s2, 2), L"shared U7 cut=true overrides identical local stats");
+			Assert::AreEqual<uint64_t>(1, u7Det.SharedCutHits(), L"shared U7 hit counted");
+			Assert::AreEqual<uint64_t>(0, u7Det.FallbackCutCount(), L"no fallback when U7 answers");
+			Assert::IsFalse(u7Det.UsedFallbackOnLastObserve(), L"last observe used shared U7");
+			Assert::IsNull(u7Det.LastFallbackReason(), L"no fallback reason on shared U7 hit");
+
+			// Negative control on exact same (s1, s2): unkeyed sequence 0 falls back to local GridHistCut and returns false.
+			HdrVetoCutDetector unkeyedDet;
+			Assert::IsFalse(unkeyedDet.Observe(s1, 0));
+			Assert::IsFalse(unkeyedDet.Observe(s2, 0),
+				L"negative control: local GridHistCut without U7 returns false on identical (s1, s2)");
+			Assert::AreEqual<uint64_t>(0, unkeyedDet.SharedCutHits());
+			Assert::AreEqual<uint64_t>(1, unkeyedDet.FallbackCutCount(), L"unkeyed fallback counted visibly");
+			Assert::IsTrue(unkeyedDet.UsedFallbackOnLastObserve(), L"fallback flag set");
+			Assert::IsNotNull(unkeyedDet.LastFallbackReason(), L"fallback reason non-null");
+
+			// 2. Shared U7 cut=false suppresses false local cut on radically different stats (s2 -> sDiff).
+			Assert::IsFalse(u7Det.Observe(sDiff, 3), L"shared U7 cut=false overrides radically different local stats");
+			Assert::AreEqual<uint64_t>(2, u7Det.SharedCutHits(), L"second shared U7 hit counted");
+			Assert::AreEqual<uint64_t>(0, u7Det.FallbackCutCount());
+			Assert::IsFalse(u7Det.UsedFallbackOnLastObserve());
+			Assert::IsNull(u7Det.LastFallbackReason());
+
+			// Negative control on exact same (s1, sDiff): unavailable U7 reader falls back visibly and local GridHistCut detects cut.
+			HdrVetoCutDetector unavailDet;
+			unavailDet.SetSceneReader([](uint64_t, bool&, const char** whyOut) -> bool {
+				if (whyOut) *whyOut = "scene missing in test";
+				return false;
+			});
+			Assert::IsFalse(unavailDet.Observe(s1, 10));
+			Assert::IsTrue(unavailDet.Observe(sDiff, 11),
+				L"negative control: unavailable U7 falls back to local GridHistCut and returns true on s1 -> sDiff");
+			Assert::AreEqual<uint64_t>(0, unavailDet.SharedCutHits());
+			Assert::AreEqual<uint64_t>(1, unavailDet.FallbackCutCount(), L"unavailable reader fallback counted visibly");
+			Assert::IsTrue(unavailDet.UsedFallbackOnLastObserve());
+			Assert::IsNotNull(unavailDet.LastFallbackReason());
+			Assert::AreEqual(std::string("scene missing in test"), std::string(unavailDet.LastFallbackReason()),
+				L"exact fallback reason from unavailable reader is preserved");
+
+			// 3. HdrVetoCaptureGate forwarding: switches on U7-confirmed cut even when s1 == s2, and exposes diagnostics.
+			HdrVetoCaptureGate gate;
+			VideoStateComPtr sdr(new VideoState());
+			sdr->valid = true;
+			sdr->eotf = EOTF::SDR;
+			gate.SetSceneReader([](uint64_t seq, bool& cutOut, const char**) -> bool {
+				cutOut = (seq == 102);
+				return true;
+			});
+			Assert::IsTrue(gate.WantsSample(5, 1000));
+			Assert::IsFalse(gate.Observe(5, s1, 101).cut);
+			gate.Arm(5, sdr);
+			Assert::IsTrue(gate.WantsSample(5, 1016));
+			const HdrVetoCaptureGate::Observation observed = gate.Observe(5, s2, 102);
+			Assert::IsTrue(observed.cut, L"CaptureGate forwards shared U7 cut even for identical s1 == s2");
+			Assert::IsTrue(observed.switchState != nullptr && observed.switchState->eotf == EOTF::SDR,
+				L"armed CaptureGate switches to SDR on U7-confirmed cut");
+			Assert::AreEqual<uint64_t>(1, gate.SharedCutHits(), L"CaptureGate exposes SharedCutHits");
+			Assert::AreEqual<uint64_t>(0, gate.FallbackCutCount(), L"CaptureGate exposes FallbackCutCount");
+			Assert::IsFalse(gate.UsedFallbackOnLastObserve());
+			Assert::IsNull(gate.LastFallbackReason(), L"CaptureGate exposes null LastFallbackReason on U7 hit");
+		}
 	};
 }
