@@ -1323,5 +1323,990 @@ namespace VideoProcessorTest
 
 			AssertCleanLibplaceboLog(log, "McSearchParallelMatchesSerialSearchBitIdenticallyAcrossSingleAndTwoGlobal");
 		}
+
+		// GEM-144 & GEM-151 (J#2 MC-SEARCH-2): verifies bit-exact parity and independent CPU
+		// reference agreement across ALL J#2 matcher optimizations on a non-multiple-of-8
+		// half-resolution frame (130x138 -> halfW=65 [65%8==1], halfH=69 [69%8==5], blocks=9x9,
+		// subField=18x18):
+		//   1. GLOBAL_BOTH_L1 explicit textureLod(0.0), QPEL 64-thread WG vs QPEL_BODY_SERIAL,
+		//      VERIFY 10x10 vf_tile, CONSISTENCY TEXTURE_TOL & VECTOR_OK rolling 2-row from_half
+		//      cache, PIXEL_MASK 18x18 from_half + 6x6 field/vok tiles (incl. 4x4 ws<=0 fallback
+		//      hitting extreme corners [0][0] & [5][5]), GRAIN_ERROR 64-thread WG (estSplit=true
+		//      and estSplit=false), and SPLIT_SEARCH 10x10 sp_search + sp_fq_[16] + candidate dedup.
+		//   2. Bit-exact fast-vs-serial parity on Field, Forward, Backward, SubField, GrainError,
+		//      PixelMask, VectorOk, and GlobalVector (xy/w exact, z within 1 fp16 ULP for L2 tree sum).
+		//   3. Independent non-tautological CPU reference checks on downloaded halfA/halfB/field/subField
+		//      for VECTOR_OK, CONSISTENCY TEXTURE_TOL, GRAIN_ERROR (split & non-split), and PIXEL_MASK.
+		//   4. Mandatory same-input negative controls (Rule 3): QPEL on vs off, GRAIN_ERROR split vs
+		//      non-split, TEXTURE_TOL on vs off, VERIFY on vs off, and VECTOR_OK threshold high vs normal.
+		BEGIN_TEST_METHOD_ATTRIBUTE(McSearch2OptimizedPassesMatchSerialAndIndependentReferenceOnNonMultipleOf8Grid)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(McSearch2OptimizedPassesMatchSerialAndIndependentReferenceOnNonMultipleOf8Grid)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			struct LogScope
+			{
+				TargetLutGpuFixture& f;
+				LogScope(TargetLutGpuFixture& fx, std::string* s) : f(fx) { f.CaptureLog(s); }
+				~LogScope() { f.CaptureLog(nullptr); }
+			} logScope(fixture, &log);
+
+			constexpr int kJ2W = 130, kJ2H = 138;   // halfW=65 (65%8==1), halfH=69 (69%8==5), blocks=9x9
+			constexpr int kHalfW = (kJ2W + 1) / 2;
+			constexpr int kHalfH = (kJ2H + 1) / 2;
+			constexpr int kBlocksX = (kHalfW + 7) / 8;
+			constexpr int kBlocksY = (kHalfH + 7) / 8;
+			constexpr int kSplitY = 88;             // cuts middle of parent block row by=5 (y=80..95)
+			constexpr double kUpDx = -5.5, kUpDy = -4.0;     // half-res (-2.75, -2.0): exact quarter-pel X, clean even splitYB=84
+			constexpr double kLoDx = 4.5, kLoDy = -4.0;      // half-res (+2.25, -2.0): exact quarter-pel X, opposite X shear
+
+			// Multi-scale continuous band-limited luma in [6768, 58768]: low frequencies survive L1/L2
+			// (GlobalBoth D1), mid frequencies give sharp quarter-pel curvature (QPEL) and strong
+			// neighbor differences (TEXTURE_TOL, VECTOR_OK) while keeping half-pel split SAD < 3.0.
+			auto smoothMultiScale = [](double fx, double fy, double phase) -> double
+			{
+				return 32768.0
+					+ 7500.0 * std::sin(0.055 * fx + 0.041 * fy + phase)
+					+ 6500.0 * std::cos(0.047 * fx - 0.063 * fy - phase)
+					+ 5000.0 * std::sin(0.19 * fx + 0.14 * fy + 1.3 * phase)
+					+ 4500.0 * std::cos(0.16 * fx - 0.21 * fy + 0.7 * phase)
+					+ 2500.0 * std::sin(0.37 * fx + 0.29 * fy - 0.5 * phase);
+			};
+			auto clampU16 = [](double v) -> uint16_t
+			{
+				return static_cast<uint16_t>(std::lround((std::min)(60000.0, (std::max)(4000.0, v))));
+			};
+			// Deterministic zero-mean temporal grain (+-1.25 8-bit codes = +-320 16-bit codes) so
+			// GrainError().r is strictly positive on trusted blocks while keeping match SAD well under 3.0.
+			auto grainNoise = [](int x, int y) -> double
+			{
+				const unsigned h = (static_cast<unsigned>(x) * 73856093u) ^ (static_cast<unsigned>(y) * 19349663u);
+				return (((h * 2654435761u) >> 31) & 1u) ? 320.0 : -320.0;
+			};
+
+			const double splitYB = static_cast<double>(kSplitY) + kUpDy;   // 84.0 (even: exact half-res row 42, zero boundary mixing)
+			const DejudderFrame fa = MakeDejudderFrame(kJ2W, kJ2H,
+				[&](int x, int y) -> uint16_t
+				{
+					const double phase = y < kSplitY ? 0.0 : 2.1;
+					return clampU16(smoothMultiScale(static_cast<double>(x), static_cast<double>(y), phase));
+				},
+				[](int x, int y, int c) -> uint16_t { return DejudderTexture(x * 2, y, 7 + c); });
+
+			const DejudderFrame fb = MakeDejudderFrame(kJ2W, kJ2H,
+				[&](int x, int y) -> uint16_t
+				{
+					// Occluded 2x2 block patch: where blocks (1..2, 1..2) = [16,48)x[16,48) in A land in B
+					// under (-5.5, -4.0) -> [10,44)x[12,46). Forces f.z=0 and vectorOk=0 on all 4 blocks so
+					// PIXEL_MASK hits ws<=0 4x4 fallback at p=(15,15) [index 5] and p=(16,16) [index 0].
+					if (x >= 10 && x < 44 && y >= 12 && y < 46)
+						return DejudderTexture(x, y, 77);
+					double v = 0.0;
+					if (static_cast<double>(y) < splitYB)
+						v = smoothMultiScale(static_cast<double>(x) - kUpDx, static_cast<double>(y) - kUpDy, 0.0);
+					else
+						v = smoothMultiScale(static_cast<double>(x) - kLoDx, static_cast<double>(y) - kLoDy, 2.1);
+					// Localized +14-code outlier on ~25% of block (6,2) [96..111, 32..47] -> lands at
+					// [90..100)x[28..38) in B: passes CONSISTENCY (mean SAD < 3), fails VERIFY (>20% > 9 codes),
+					// then enters VECTOR_OK rolling-cache promotion (f.z==0, f.w <= own_error).
+					if (x >= 90 && x < 100 && y >= 28 && y < 38)
+						v += 3584.0;
+					v += grainNoise(x, y);
+					return clampU16(v);
+				},
+				[](int x, int y, int c) -> uint16_t { return DejudderTexture(x * 2, y, 7 + c); });
+
+			DejudderGpuPlanes a, b;
+			UploadDejudderFrame(gpu, fa, a);
+			UploadDejudderFrame(gpu, fb, b);
+
+			auto downloadHalfTex = [gpu](pl_tex tex, int expectW, int expectH, int expectComps, const wchar_t* label) -> std::vector<float>
+			{
+				Assert::IsNotNull(tex, (std::wstring(label) + L": null texture").c_str());
+				Assert::AreEqual(expectW, tex->params.w, (std::wstring(label) + L": unexpected width").c_str());
+				Assert::AreEqual(expectH, tex->params.h, (std::wstring(label) + L": unexpected height").c_str());
+				Assert::AreEqual(expectComps, tex->params.format->num_components, (std::wstring(label) + L": unexpected component count").c_str());
+				std::vector<uint16_t> raw(static_cast<size_t>(expectW) * expectH * expectComps);
+				pl_tex_transfer_params dl{};
+				dl.tex = tex;
+				dl.ptr = raw.data();
+				Assert::IsTrue(pl_tex_download(gpu, &dl), (std::wstring(label) + L": texture is not host-readable").c_str());
+				std::vector<float> out(raw.size());
+				for (size_t i = 0; i < raw.size(); ++i)
+					out[i] = HalfBits(raw[i]);
+				return out;
+			};
+
+			auto assertBitExactVec = [](const std::vector<float>& par, const std::vector<float>& ser, const wchar_t* label)
+			{
+				Assert::AreEqual(ser.size(), par.size(), (std::wstring(label) + L": size mismatch").c_str());
+				Assert::IsFalse(par.empty(), (std::wstring(label) + L": empty buffer").c_str());
+				float maxAbsDiff = 0.0f;
+				size_t firstBad = par.size();
+				for (size_t i = 0; i < par.size(); ++i)
+				{
+					Assert::IsTrue(std::isfinite(par[i]) && std::isfinite(ser[i]),
+						(std::wstring(label) + L": non-finite element at " + std::to_wstring(i)).c_str());
+					const float d = std::fabs(par[i] - ser[i]);
+					if (d > maxAbsDiff)
+						maxAbsDiff = d;
+					if (par[i] != ser[i] && firstBad == par.size())
+						firstBad = i;
+				}
+				if (firstBad != par.size() || maxAbsDiff != 0.0f)
+				{
+					Assert::Fail((std::wstring(label) + L": bit-exact mismatch (maxAbsDiff=" + std::to_wstring(maxAbsDiff) +
+						L", first index=" + std::to_wstring(firstBad) + L": par=" + std::to_wstring(par[firstBad]) +
+						L", ser=" + std::to_wstring(ser[firstBad]) + L")").c_str());
+				}
+				Assert::IsTrue(par == ser, (std::wstring(label) + L": vector inequality").c_str());
+			};
+
+			// Naive CPU bilinear sampler matching GLSL texture(to_half, (p + 0.5) / hs).r.
+			auto cpuToLin = [](const std::vector<float>& halfImg, int w, int h, float px, float py) -> float
+			{
+				const float ux = (std::min)(static_cast<float>(w - 1), (std::max)(0.0f, px));
+				const float uy = (std::min)(static_cast<float>(h - 1), (std::max)(0.0f, py));
+				const int x0 = static_cast<int>(std::floor(ux));
+				const int y0 = static_cast<int>(std::floor(uy));
+				const int x1 = (std::min)(x0 + 1, w - 1);
+				const int y1 = (std::min)(y0 + 1, h - 1);
+				const float fx = ux - static_cast<float>(x0);
+				const float fy = uy - static_cast<float>(y0);
+				const float v00 = halfImg[static_cast<size_t>(y0) * w + x0];
+				const float v10 = halfImg[static_cast<size_t>(y0) * w + x1];
+				const float v01 = halfImg[static_cast<size_t>(y1) * w + x0];
+				const float v11 = halfImg[static_cast<size_t>(y1) * w + x1];
+				const float top = v00 + (v10 - v00) * fx;
+				const float bot = v01 + (v11 - v01) * fx;
+				return top + (bot - top) * fy;
+			};
+
+			auto makeFullSettings = []() -> Dejudder::Settings
+			{
+				Dejudder::Settings s = DejudderTestSettings();
+				s.globalPrior = true;
+				s.globalTwo = false;          // serialSearchForTest runs single-global reference
+				s.estCandidates = true;
+				s.estQpel = true;
+				s.vectorSmooth = false;       // keep exact QPEL quarter-pel vectors visible into VERIFY & Field()
+				s.verifyPixels = true;
+				s.verifyFactor = 3.0f;
+				s.verifyShare = 0.20f;
+				s.textureTolerance = 0.25f;   // enables CONSISTENCY #define TEXTURE_TOL 1
+				s.estSplit = true;            // enables SPLIT_SEARCH + GRAIN_ERROR #define SPLIT 1
+				s.estStillZero = true;        // enables STILL_ZERO IN_PLACE
+				s.pictureArea = true;
+				s.pixelTrust = true;          // enables PIXEL_MASK shared tiles
+				s.pixelTrustedVectors = true;
+				s.pixelOwnTexture = 2.0f;     // enables VECTOR_OK rolling cache + PIXEL_OWN_VECTORS
+				s.pixelOwnError = 3.0f;
+				s.pixelFastFrom = 4.0f;       // enables PIXEL_FAST
+				s.pixelFastFloor = 0.4f;
+				s.opticalFlow = false;
+				s.hostReadable = true;
+				return s;
+			};
+
+			// ---- 1. Full J#2 pipeline: fast vs serial bit-exact parity + independent CPU references ----
+			const Dejudder::Settings fullSettings = makeFullSettings();
+			Dejudder::MotionWarp fast(fixture.Log(), gpu, fullSettings);
+			Dejudder::MotionWarp serial(fixture.Log(), gpu, fullSettings);
+			fast.SetSerialSearchForTest(false);
+			serial.SetSerialSearchForTest(true);
+			fast.SetPassTiming(true, true);
+			serial.SetPassTiming(true, true);
+
+			Assert::IsTrue(fast.Estimate(a.planes, b.planes, -1, true), L"J#2 fast Estimate failed");
+			Assert::IsTrue(serial.Estimate(a.planes, b.planes, -1, true), L"J#2 serial Estimate failed");
+			pl_gpu_finish(gpu);
+
+			// Verify every J#2 pass actually dispatched on the expected path.
+			Assert::AreEqual(size_t(1), fast.PassMs().count("VideoProcessor de-judder: global motion 1/8 (D1)"),
+				L"fast must dispatch GLOBAL_BOTH_L1");
+			Assert::AreEqual(size_t(1), fast.PassMs().count("VideoProcessor de-judder: quarter-pel (11a E3)"),
+				L"fast must dispatch 64-thread QPEL_BODY");
+			Assert::AreEqual(size_t(1), fast.PassMs().count("VideoProcessor de-judder: consistency"),
+				L"fast must dispatch CONSISTENCY_BODY");
+			Assert::AreEqual(size_t(1), fast.PassMs().count("VideoProcessor de-judder: pixel verification (M5)"),
+				L"fast must dispatch VERIFY_BODY");
+			Assert::AreEqual(size_t(1), fast.PassMs().count("VideoProcessor de-judder: identical blocks still"),
+				L"fast must dispatch STILL_ZERO_BODY");
+			Assert::AreEqual(size_t(1), fast.PassMs().count("VideoProcessor de-judder: block split (11a E2)"),
+				L"fast must dispatch SPLIT_SEARCH_BODY");
+			Assert::AreEqual(size_t(1), fast.PassMs().count("VideoProcessor de-judder: pixel trust vectors (M6)"),
+				L"fast must dispatch VECTOR_OK_BODY");
+			Assert::AreEqual(size_t(1), fast.PassMs().count("VideoProcessor de-judder: pixel trust (M6)"),
+				L"fast must dispatch PIXEL_MASK_BODY");
+			Assert::AreEqual(size_t(1), fast.PassMs().count("VideoProcessor de-judder: grain error (adaptive downscale)"),
+				L"fast must dispatch 64-thread GRAIN_ERROR_BODY");
+			if (fast.Field() && fast.Field()->params.format && (fast.Field()->params.format->caps & PL_FMT_CAP_READWRITE) != 0)
+			{
+				Assert::AreEqual(size_t(0), fast.PassMs().count("VideoProcessor de-judder: identical blocks still (copy back)"),
+					L"STILL_ZERO must run fused IN_PLACE without copy-back when PL_FMT_CAP_READWRITE is supported");
+			}
+			Assert::AreEqual(size_t(1), serial.PassMs().count("VideoProcessor de-judder: global motion (D1, serial reference)"),
+				L"serial must dispatch serial Global reference");
+			Assert::AreEqual(size_t(1), serial.PassMs().count("VideoProcessor de-judder: quarter-pel (11a E3, serial reference)"),
+				L"serial must dispatch QPEL_BODY_SERIAL");
+
+			Assert::AreEqual(kBlocksX, fast.BlocksX(), L"130px width must produce 9 blocks (halfW=65)");
+			Assert::AreEqual(kBlocksY, fast.BlocksY(), L"138px height must produce 9 blocks (halfH=69)");
+
+			const DejudderField fastField = DownloadField(gpu, fast);
+			const DejudderField serialField = DownloadField(gpu, serial);
+			const DejudderField fastFwd = DownloadField(gpu, fast, fast.Forward());
+			const DejudderField serialFwd = DownloadField(gpu, serial, serial.Forward());
+			const DejudderField fastBwd = DownloadField(gpu, fast, fast.Backward());
+			const DejudderField serialBwd = DownloadField(gpu, serial, serial.Backward());
+			const std::vector<float> fastSub = downloadHalfTex(fast.SubField(), kBlocksX * 2, kBlocksY * 2, 4, L"fast SubField");
+			const std::vector<float> serialSub = downloadHalfTex(serial.SubField(), kBlocksX * 2, kBlocksY * 2, 4, L"serial SubField");
+			const std::vector<float> fastGrain = downloadHalfTex(fast.GrainError(), kBlocksX, kBlocksY, 4, L"fast GrainError");
+			const std::vector<float> serialGrain = downloadHalfTex(serial.GrainError(), kBlocksX, kBlocksY, 4, L"serial GrainError");
+			const std::vector<float> fastMask = downloadHalfTex(fast.PixelMask(), kHalfW, kHalfH, 1, L"fast PixelMask");
+			const std::vector<float> serialMask = downloadHalfTex(serial.PixelMask(), kHalfW, kHalfH, 1, L"serial PixelMask");
+			const std::vector<float> fastVok = downloadHalfTex(fast.VectorOk(), kBlocksX, kBlocksY, 4, L"fast VectorOk");
+			const std::vector<float> serialVok = downloadHalfTex(serial.VectorOk(), kBlocksX, kBlocksY, 4, L"serial VectorOk");
+			const std::vector<float> fastGlobal = downloadHalfTex(fast.GlobalVector(), 1, 1, 4, L"fast GlobalVector");
+			const std::vector<float> serialGlobal = downloadHalfTex(serial.GlobalVector(), 1, 1, 4, L"serial GlobalVector");
+
+			assertBitExactVec(fastField.texels, serialField.texels, L"J#2 Field");
+			assertBitExactVec(fastFwd.texels, serialFwd.texels, L"J#2 Forward");
+			assertBitExactVec(fastBwd.texels, serialBwd.texels, L"J#2 Backward");
+			assertBitExactVec(fastSub, serialSub, L"J#2 SubField");
+			assertBitExactVec(fastGrain, serialGrain, L"J#2 GrainError (estSplit=true)");
+			assertBitExactVec(fastMask, serialMask, L"J#2 PixelMask");
+			assertBitExactVec(fastVok, serialVok, L"J#2 VectorOk");
+
+			// GlobalVector: xy (L1 winner via textureLod) and w must be exact; z (L2 ratio) within 1 fp16 ULP.
+			Assert::IsTrue(fastGlobal[0] == serialGlobal[0] && fastGlobal[1] == serialGlobal[1] && fastGlobal[3] == serialGlobal[3],
+				L"J#2 GlobalVector xy/w mismatch between GLOBAL_BOTH_L1 textureLod and serial Global");
+			Assert::IsTrue(std::fabs(fastGlobal[2] - serialGlobal[2]) <= 1e-3f,
+				L"J#2 GlobalVector confidence ratio diverged beyond 1 fp16 ULP");
+			Assert::IsTrue(fastGlobal[0] < -0.25f && fastGlobal[1] < -0.25f && fastGlobal[2] < 0.9f,
+				L"negative control: GlobalVector must confidently detect the non-zero dominant (-5.5, -4.0) shift");
+
+			// Non-trivial activation & physics ground-truth checks across all regions (including WG1 edge blocks).
+			int upperMatched = 0, lowerMatched = 0, qpelFractional = 0, edgeColMatched = 0, edgeRowMatched = 0;
+			for (int by = 0; by < kBlocksY; ++by)
+			{
+				for (int bx = 0; bx < kBlocksX; ++bx)
+				{
+					if (!fastField.trusted(bx, by))
+						continue;
+					const float vx = fastField.vx(bx, by), vy = fastField.vy(bx, by);
+					const bool hasQpel = std::fabs(vx - std::round(vx)) >= 0.25f || std::fabs(vy - std::round(vy)) >= 0.25f;
+					if (hasQpel)
+						++qpelFractional;
+					if (by >= 1 && by <= 4 && std::fabs(vx - static_cast<float>(kUpDx)) <= 0.5f &&
+						std::fabs(vy - static_cast<float>(kUpDy)) <= 0.5f)
+					{
+						++upperMatched;
+						if (bx == kBlocksX - 1)
+							++edgeColMatched;
+					}
+					if (by >= 6 && by <= 8 && std::fabs(vx - static_cast<float>(kLoDx)) <= 0.5f &&
+						std::fabs(vy - static_cast<float>(kLoDy)) <= 0.5f)
+					{
+						++lowerMatched;
+						if (by == kBlocksY - 1)
+							++edgeRowMatched;
+					}
+				}
+			}
+			Assert::IsTrue(upperMatched >= 16,
+				(L"negative control: expected >= 16 trusted upper (-5.5,-4.0) blocks, got " + std::to_wstring(upperMatched)).c_str());
+			Assert::IsTrue(lowerMatched >= 12,
+				(L"negative control: expected >= 12 trusted lower (+4.5,-4.0) blocks, got " + std::to_wstring(lowerMatched)).c_str());
+			Assert::IsTrue(qpelFractional >= 16,
+				(L"negative control: QPEL must produce >= 16 fractional quarter-pel vectors, got " + std::to_wstring(qpelFractional)).c_str());
+			Assert::IsTrue(edgeColMatched >= 2,
+				(L"edge stress (halfW%8==1): expected >= 2 trusted blocks on rightmost column bx=8, got " + std::to_wstring(edgeColMatched)).c_str());
+			Assert::IsTrue(edgeRowMatched >= 4,
+				(L"edge stress (halfH%8==5): expected >= 4 trusted blocks on bottom row by=8, got " + std::to_wstring(edgeRowMatched)).c_str());
+
+			// Occluded 2x2 patch (1..2, 1..2) must be untrusted & vectorOk==0 so PIXEL_MASK triggers 4x4 fallback.
+			for (int by = 1; by <= 2; ++by)
+				for (int bx = 1; bx <= 2; ++bx)
+				{
+					Assert::IsFalse(fastField.trusted(bx, by), L"occluded 2x2 patch block must be untrusted");
+					Assert::IsTrue(fastVok[(static_cast<size_t>(by) * kBlocksX + bx) * 4u] < 0.5f,
+						L"occluded 2x2 patch block must have vectorOk == 0 to force PIXEL_MASK 4x4 fallback");
+				}
+
+			// SPLIT_SEARCH verification on split row by=5 (sub-block rows sby=10 upper, sby=11 lower).
+			int splitUpperOk = 0, splitLowerOk = 0;
+			const int subW = kBlocksX * 2;
+			for (int sbx = 2; sbx < subW - 2; ++sbx)
+			{
+				const size_t iUp = (static_cast<size_t>(10) * subW + sbx) * 4u;
+				const size_t iLo = (static_cast<size_t>(11) * subW + sbx) * 4u;
+				if (fastSub[iUp + 3] > 0.5f && fastSub[iUp + 2] > 0.5f &&
+					std::fabs(fastSub[iUp] - static_cast<float>(kUpDx)) <= 1.0f &&
+					std::fabs(fastSub[iUp + 1] - static_cast<float>(kUpDy)) <= 1.0f)
+					++splitUpperOk;
+				if (fastSub[iLo + 3] > 0.5f && fastSub[iLo + 2] > 0.5f &&
+					std::fabs(fastSub[iLo] - static_cast<float>(kLoDx)) <= 1.0f &&
+					std::fabs(fastSub[iLo + 1] - static_cast<float>(kLoDy)) <= 1.0f)
+					++splitLowerOk;
+			}
+			Assert::IsTrue(splitUpperOk >= 8 && splitLowerOk >= 8,
+				(L"SPLIT_SEARCH must split row by=5 into upper/lower sub-blocks (up=" + std::to_wstring(splitUpperOk) +
+					L", lo=" + std::to_wstring(splitLowerOk) + L")").c_str());
+
+			// PixelMask non-triviality + GrainError positivity checks.
+			int maskHigh = 0, maskLow = 0;
+			for (float w : fastMask)
+			{
+				Assert::IsTrue(std::isfinite(w) && w >= -1e-4f && w <= 1.0001f, L"PixelMask weight out of [0, 1]");
+				if (w > 0.9f) ++maskHigh;
+				if (w < 0.1f) ++maskLow;
+			}
+			Assert::IsTrue(maskHigh >= 1500 && maskLow >= 100,
+				(L"negative control: PixelMask must have both high and low weights (high=" + std::to_wstring(maskHigh) +
+					L", low=" + std::to_wstring(maskLow) + L")").c_str());
+
+			int grainPosBlocks = 0;
+			for (int i = 0; i < kBlocksX * kBlocksY; ++i)
+			{
+				const float ge = fastGrain[static_cast<size_t>(i) * 4u];
+				const float gy = fastGrain[static_cast<size_t>(i) * 4u + 1u];
+				Assert::IsTrue(std::isfinite(ge) && ge >= 0.0f && std::isfinite(gy) && gy > 15.0f,
+					L"GrainError must be finite with positive mean luma");
+				if (ge > 0.2f)
+					++grainPosBlocks;
+			}
+			Assert::IsTrue(grainPosBlocks >= 40,
+				(L"negative control: GrainError must be strictly positive on noisy/divergent blocks, got " +
+					std::to_wstring(grainPosBlocks)).c_str());
+
+			// ---- Independent CPU reference checks on downloaded halfA & halfB (non-tautological!) ----
+			const std::vector<float> halfA = downloadHalfTex(fast.Level(0, false), kHalfW, kHalfH, 1, L"halfA");
+			const std::vector<float> halfB = downloadHalfTex(fast.Level(0, true), kHalfW, kHalfH, 1, L"halfB");
+
+			// 1a. Naive 3-fetch CPU reference for VECTOR_OK_BODY (rolling 2-row cache, ALL 81 blocks incl. edges).
+			const float ownError = fullSettings.pixelOwnError * fullSettings.matchTolerance;
+			const float ownTexture = fullSettings.pixelOwnTexture;
+			int promotedByVectorOk = 0;
+			for (int by = 0; by < kBlocksY; ++by)
+			{
+				for (int bx = 0; bx < kBlocksX; ++bx)
+				{
+					const size_t bi = (static_cast<size_t>(by) * kBlocksX + bx) * 4u;
+					const bool trusted = fastField.texels[bi + 2u] > 0.5f;
+					const float sad = fastField.texels[bi + 3u];
+					float cpuOk = trusted ? 1.0f : 0.0f;
+					if (cpuOk < 0.5f && sad <= ownError)
+					{
+						float t = 0.0f;
+						for (int y = 0; y < 8; ++y)
+							for (int x = 0; x < 8; ++x)
+							{
+								const int px = (std::min)(kHalfW - 2, (std::max)(0, bx * 8 + x));
+								const int py = (std::min)(kHalfH - 2, (std::max)(0, by * 8 + y));
+								const float c0 = halfA[static_cast<size_t>(py) * kHalfW + px];
+								const float cx = halfA[static_cast<size_t>(py) * kHalfW + (px + 1)];
+								const float cy = halfA[static_cast<size_t>(py + 1) * kHalfW + px];
+								t += std::fabs(cx - c0) + std::fabs(cy - c0);
+							}
+						cpuOk = (t / 128.0f >= ownTexture) ? 1.0f : 0.0f;
+						if (cpuOk > 0.5f)
+							++promotedByVectorOk;
+					}
+					const float gpuOk = fastVok[bi];
+					Assert::IsTrue(std::fabs(gpuOk - cpuOk) < 1e-4f,
+						(L"VECTOR_OK rolling-cache mismatch vs naive CPU ref at block (" + std::to_wstring(bx) + L"," +
+							std::to_wstring(by) + L"): gpu=" + std::to_wstring(gpuOk) + L", cpu=" + std::to_wstring(cpuOk)).c_str());
+				}
+			}
+			Assert::IsTrue(promotedByVectorOk >= 1,
+				L"negative control: VECTOR_OK rolling-cache branch must promote >= 1 untrusted block (block (6,2))");
+
+			// 1b. Naive CPU reference for GRAIN_ERROR_BODY (estSplit = true, ALL 81 blocks).
+			double grainErrMeanAbsDiff = 0.0;
+			for (int by = 0; by < kBlocksY; ++by)
+			{
+				for (int bx = 0; bx < kBlocksX; ++bx)
+				{
+					const size_t bi = (static_cast<size_t>(by) * kBlocksX + bx) * 4u;
+					const float v0x = fastField.texels[bi] * 0.5f;
+					const float v0y = fastField.texels[bi + 1u] * 0.5f;
+					float qvx[4], qvy[4];
+					for (int k = 0; k < 4; ++k)
+					{
+						const int sbx = bx * 2 + (k % 2);
+						const int sby = by * 2 + (k / 2);
+						const size_t si = (static_cast<size_t>(sby) * subW + sbx) * 4u;
+						qvx[k] = fastSub[si + 3u] > 0.5f ? fastSub[si] * 0.5f : v0x;
+						qvy[k] = fastSub[si + 3u] > 0.5f ? fastSub[si + 1u] * 0.5f : v0y;
+					}
+					float d[64];
+					float meanD = 0.0f, meanY = 0.0f;
+					for (int i = 0; i < 64; ++i)
+					{
+						const int px = bx * 8 + (i % 8);
+						const int py = by * 8 + (i / 8);
+						const int cx = (std::min)(kHalfW - 1, (std::max)(0, px));
+						const int cy = (std::min)(kHalfH - 1, (std::max)(0, py));
+						const float av = halfA[static_cast<size_t>(cy) * kHalfW + cx];
+						const int qk = (i % 8) / 4 + 2 * ((i / 8) / 4);
+						d[i] = av - cpuToLin(halfB, kHalfW, kHalfH, static_cast<float>(px) + qvx[qk], static_cast<float>(py) + qvy[qk]);
+						meanD += d[i];
+						meanY += av;
+					}
+					meanD /= 64.0f;
+					float e = 0.0f;
+					for (int i = 0; i < 64; ++i)
+						e += std::fabs(d[i] - meanD);
+					const float cpuErr = e / 64.0f;
+					const float cpuMeanY = meanY / 64.0f;
+					const float gpuErr = fastGrain[bi];
+					const float gpuMeanY = fastGrain[bi + 1u];
+					Assert::IsTrue(std::fabs(gpuMeanY - cpuMeanY) <= 0.125f,
+						(L"GRAIN_ERROR mean_y mismatch at (" + std::to_wstring(bx) + L"," + std::to_wstring(by) + L")").c_str());
+					Assert::IsTrue(std::fabs(gpuErr - cpuErr) <= 0.35f,
+						(L"GRAIN_ERROR residual mismatch (estSplit=true) at (" + std::to_wstring(bx) + L"," + std::to_wstring(by) +
+							L"): gpu=" + std::to_wstring(gpuErr) + L", cpu=" + std::to_wstring(cpuErr)).c_str());
+					grainErrMeanAbsDiff += std::fabs(gpuErr - cpuErr);
+				}
+			}
+			grainErrMeanAbsDiff /= static_cast<double>(kBlocksX * kBlocksY);
+			Assert::IsTrue(grainErrMeanAbsDiff < 0.10,
+				(L"GRAIN_ERROR (estSplit=true) mean abs diff vs CPU ref too large: " + std::to_wstring(grainErrMeanAbsDiff)).c_str());
+
+			// 1c. Naive unoptimized CPU reference for PIXEL_MASK_BODY (no shared tiles, incl. 4x4 fallback).
+			const float maskLo = fullSettings.pixelTrustLo * fullSettings.matchTolerance;
+			const float maskHi = (std::max)(maskLo + 0.01f, fullSettings.pixelTrustHi * fullSettings.matchTolerance);
+			const float fastFrom = fullSettings.pixelFastFrom;
+			const float fastFloor = fullSettings.pixelFastFloor;
+			auto smoothstep = [](float lo, float hi, float x) -> float
+			{
+				const float t = (std::min)(1.0f, (std::max)(0.0f, (x - lo) / (hi - lo)));
+				return t * t * (3.0f - 2.0f * t);
+			};
+			int fallback4x4Pixels = 0;
+			double maskMeanAbsDiff = 0.0;
+			int maskEdgeChecked = 0;
+			for (int py = 0; py < kHalfH; ++py)
+			{
+				for (int px = 0; px < kHalfW; ++px)
+				{
+					const float lpx = (static_cast<float>(px) + 0.5f) * 2.0f;
+					const float lpy = (static_cast<float>(py) + 0.5f) * 2.0f;
+					const float gx = lpx / 16.0f - 0.5f;
+					const float gy = lpy / 16.0f - 0.5f;
+					const int g0x = static_cast<int>(std::floor(gx));
+					const int g0y = static_cast<int>(std::floor(gy));
+					const float tx = gx - static_cast<float>(g0x);
+					const float ty = gy - static_cast<float>(g0y);
+					float vx = 0.0f, vy = 0.0f, ws = 0.0f;
+					for (int dy = 0; dy <= 1; ++dy)
+						for (int dx = 0; dx <= 1; ++dx)
+						{
+							const int fx = (std::min)(kBlocksX - 1, (std::max)(0, g0x + dx));
+							const int fy = (std::min)(kBlocksY - 1, (std::max)(0, g0y + dy));
+							const size_t fi = (static_cast<size_t>(fy) * kBlocksX + fx) * 4u;
+							float w = (dx == 1 ? tx : 1.0f - tx) * (dy == 1 ? ty : 1.0f - ty);
+							if (fastVok[fi] < 0.5f)
+								w = 0.0f;
+							vx += w * fastField.texels[fi];
+							vy += w * fastField.texels[fi + 1u];
+							ws += w;
+						}
+					if (ws <= 0.0f)
+					{
+						++fallback4x4Pixels;
+						for (int dy = -1; dy <= 2; ++dy)
+							for (int dx = -1; dx <= 2; ++dx)
+							{
+								const int fx = (std::min)(kBlocksX - 1, (std::max)(0, g0x + dx));
+								const int fy = (std::min)(kBlocksY - 1, (std::max)(0, g0y + dy));
+								const size_t fi = (static_cast<size_t>(fy) * kBlocksX + fx) * 4u;
+								if (fastVok[fi] > 0.5f)
+								{
+									vx += fastField.texels[fi];
+									vy += fastField.texels[fi + 1u];
+									ws += 1.0f;
+								}
+							}
+					}
+					const float hvx = (ws > 0.0f ? vx / ws : 0.0f) * 0.5f;
+					const float hvy = (ws > 0.0f ? vy / ws : 0.0f) * 0.5f;
+					float e = 0.0f;
+					for (int dy = -1; dy <= 1; ++dy)
+						for (int dx = -1; dx <= 1; ++dx)
+						{
+							const int qx = (std::min)(kHalfW - 1, (std::max)(0, px + dx));
+							const int qy = (std::min)(kHalfH - 1, (std::max)(0, py + dy));
+							e += std::fabs(halfA[static_cast<size_t>(qy) * kHalfW + qx] -
+								cpuToLin(halfB, kHalfW, kHalfH, static_cast<float>(qx) + hvx, static_cast<float>(qy) + hvy));
+						}
+					e /= 9.0f;
+					const float speed = std::sqrt(hvx * hvx + hvy * hvy) * 2.0f;
+					const float fastScale = 1.0f + (fastFloor - 1.0f) *
+						(std::min)(1.0f, (std::max)(0.0f, (speed - fastFrom) / (std::max)(3.0f * fastFrom, 1.0f)));
+					const float cpuW = 1.0f - smoothstep(maskLo * fastScale, maskHi * fastScale, e);
+					const float gpuW = fastMask[static_cast<size_t>(py) * kHalfW + px];
+					const float diff = std::fabs(gpuW - cpuW);
+					maskMeanAbsDiff += diff;
+					// Check extreme non-multiple-of-8 borders (x==64, y==68) away from split/occluded edges.
+					if ((px == kHalfW - 1 && py >= 12 && py <= 36) || (py == kHalfH - 1 && px >= 12 && px <= 52))
+					{
+						++maskEdgeChecked;
+						Assert::IsTrue(diff <= 0.08f,
+							(L"PIXEL_MASK shared-tile edge mismatch at (" + std::to_wstring(px) + L"," + std::to_wstring(py) +
+								L"): gpu=" + std::to_wstring(gpuW) + L", cpu=" + std::to_wstring(cpuW)).c_str());
+					}
+				}
+			}
+			maskMeanAbsDiff /= static_cast<double>(kHalfW * kHalfH);
+			Assert::IsTrue(fallback4x4Pixels >= 4,
+				(L"negative control: PIXEL_MASK 4x4 fallback (ws<=0) must activate inside untrusted patch, got " +
+					std::to_wstring(fallback4x4Pixels)).c_str());
+			Assert::IsTrue(maskEdgeChecked >= 50, L"must verify edge pixels at x=64 and y=68");
+			Assert::IsTrue(maskMeanAbsDiff < 0.02,
+				(L"PIXEL_MASK shared-tile mean abs diff vs naive CPU ref too large: " + std::to_wstring(maskMeanAbsDiff)).c_str());
+
+			// ---- 2. Same-input negative controls proving each J#2 pass genuinely drives its output ----
+
+			// 2a. GRAIN_ERROR with estSplit = false: bit-exact parity + independent CPU ref + negative control vs estSplit = true.
+			{
+				Dejudder::Settings sNoSplit = fullSettings;
+				sNoSplit.estSplit = false;
+				Dejudder::MotionWarp fastNoSplit(fixture.Log(), gpu, sNoSplit);
+				Dejudder::MotionWarp serialNoSplit(fixture.Log(), gpu, sNoSplit);
+				fastNoSplit.SetSerialSearchForTest(false);
+				serialNoSplit.SetSerialSearchForTest(true);
+				Assert::IsTrue(fastNoSplit.Estimate(a.planes, b.planes, -1, true), L"J#2 estSplit=false fast Estimate");
+				Assert::IsTrue(serialNoSplit.Estimate(a.planes, b.planes, -1, true), L"J#2 estSplit=false serial Estimate");
+				pl_gpu_finish(gpu);
+
+				const std::vector<float> geFastNoSplit = downloadHalfTex(fastNoSplit.GrainError(), kBlocksX, kBlocksY, 4, L"fast GrainError noSplit");
+				const std::vector<float> geSerNoSplit = downloadHalfTex(serialNoSplit.GrainError(), kBlocksX, kBlocksY, 4, L"serial GrainError noSplit");
+				assertBitExactVec(geFastNoSplit, geSerNoSplit, L"J#2 GrainError (estSplit=false)");
+
+				// Independent CPU check for estSplit=false GRAIN_ERROR_BODY (ge_v[0] = v0 path) across all 81 blocks.
+				const DejudderField noSplitField = DownloadField(gpu, fastNoSplit);
+				int splitRowDiffCount = 0;
+				for (int by = 0; by < kBlocksY; ++by)
+				{
+					for (int bx = 0; bx < kBlocksX; ++bx)
+					{
+						const size_t bi = (static_cast<size_t>(by) * kBlocksX + bx) * 4u;
+						const float vx = noSplitField.texels[bi] * 0.5f;
+						const float vy = noSplitField.texels[bi + 1u] * 0.5f;
+						float d[64];
+						float meanD = 0.0f, meanY = 0.0f;
+						for (int i = 0; i < 64; ++i)
+						{
+							const int px = bx * 8 + (i % 8);
+							const int py = by * 8 + (i / 8);
+							const int cx = (std::min)(kHalfW - 1, (std::max)(0, px));
+							const int cy = (std::min)(kHalfH - 1, (std::max)(0, py));
+							const float av = halfA[static_cast<size_t>(cy) * kHalfW + cx];
+							d[i] = av - cpuToLin(halfB, kHalfW, kHalfH, static_cast<float>(px) + vx, static_cast<float>(py) + vy);
+							meanD += d[i];
+							meanY += av;
+						}
+						meanD /= 64.0f;
+						float e = 0.0f;
+						for (int i = 0; i < 64; ++i)
+							e += std::fabs(d[i] - meanD);
+						Assert::IsTrue(std::fabs(geFastNoSplit[bi + 1u] - meanY / 64.0f) <= 0.125f,
+							L"GRAIN_ERROR (estSplit=false) mean_y mismatch vs CPU ref");
+						Assert::IsTrue(std::fabs(geFastNoSplit[bi] - e / 64.0f) <= 0.35f,
+							L"GRAIN_ERROR (estSplit=false) residual mismatch vs CPU ref");
+						if (by == 5 && std::fabs(fastGrain[bi] - geFastNoSplit[bi]) > 0.5f)
+							++splitRowDiffCount;
+					}
+				}
+				Assert::IsTrue(splitRowDiffCount >= 4,
+					(L"negative control: estSplit=true must alter GrainError on split row by=5 vs estSplit=false (changed=" +
+						std::to_wstring(splitRowDiffCount) + L")").c_str());
+			}
+
+			// 2b. QPEL same-input negative control (estQpel = false): zero fractional quarter-pel vectors.
+			{
+				Dejudder::Settings sNoQpel = fullSettings;
+				sNoQpel.estQpel = false;
+				Dejudder::MotionWarp noQpel(fixture.Log(), gpu, sNoQpel);
+				Assert::IsTrue(noQpel.Estimate(a.planes, b.planes), L"negative control estQpel=false");
+				pl_gpu_finish(gpu);
+				const DejudderField nqField = DownloadField(gpu, noQpel);
+				for (int by = 0; by < kBlocksY; ++by)
+					for (int bx = 0; bx < kBlocksX; ++bx)
+					{
+						const float vx = nqField.vx(bx, by), vy = nqField.vy(bx, by);
+						Assert::IsTrue(std::fabs(vx - std::round(vx)) < 1e-4f && std::fabs(vy - std::round(vy)) < 1e-4f,
+							L"negative control: estQpel=false must only emit whole source-pixel vectors");
+					}
+			}
+
+			// 2c. VERIFY_BODY same-input negative control (verifyPixels = false vs true) on block (6,2).
+			{
+				Assert::IsFalse(fastField.trusted(6, 2),
+					L"VERIFY_BODY (10x10 vf_tile) must withdraw trust from block (6,2) with 25% +14-code outlier");
+				Dejudder::Settings sNoVerify = fullSettings;
+				sNoVerify.verifyPixels = false;
+				Dejudder::MotionWarp noVerify(fixture.Log(), gpu, sNoVerify);
+				Assert::IsTrue(noVerify.Estimate(a.planes, b.planes), L"negative control verifyPixels=false");
+				pl_gpu_finish(gpu);
+				const DejudderField nvField = DownloadField(gpu, noVerify);
+				Assert::IsTrue(nvField.trusted(6, 2),
+					L"negative control: block (6,2) must pass CONSISTENCY when verifyPixels=false (proving VERIFY_BODY rejected it)");
+			}
+
+			// 2d. VECTOR_OK same-input negative control: raising pixelOwnTexture above block texture cancels promotion.
+			{
+				Assert::IsTrue(fastVok[(static_cast<size_t>(2) * kBlocksX + 6) * 4u] > 0.5f,
+					L"VECTOR_OK rolling cache must promote untrusted detailed block (6,2)");
+				Dejudder::Settings sHighTex = fullSettings;
+				sHighTex.pixelOwnTexture = 1000.0f;
+				Dejudder::MotionWarp highTex(fixture.Log(), gpu, sHighTex);
+				Assert::IsTrue(highTex.Estimate(a.planes, b.planes), L"negative control pixelOwnTexture=1000");
+				pl_gpu_finish(gpu);
+				const std::vector<float> highVok = downloadHalfTex(highTex.VectorOk(), kBlocksX, kBlocksY, 4, L"highTex VectorOk");
+				Assert::IsTrue(highVok[(static_cast<size_t>(2) * kBlocksX + 6) * 4u] < 0.5f,
+					L"negative control: unreachable pixelOwnTexture=1000 must leave block (6,2) unpromoted (vectorOk==0)");
+			}
+
+			// 2e. CONSISTENCY TEXTURE_TOL rolling 2-row cache: independent naive 3-fetch CPU reference across
+			// ALL 81 blocks (incl. edge blocks bx=8 [halfW%8==1] & by=8 [halfH%8==5]) + same-input textureTolerance=0 control.
+			{
+				const DejudderFrame texA = MakeDejudderFrame(kJ2W, kJ2H,
+					[&](int x, int y) -> uint16_t { return clampU16(smoothMultiScale(static_cast<double>(x), static_cast<double>(y), 0.3)); },
+					[](int x, int y, int c) -> uint16_t { return DejudderTexture(x * 2, y, 7 + c); });
+				const DejudderFrame texB = MakeDejudderFrame(kJ2W, kJ2H,
+					[&](int x, int y) -> uint16_t
+					{
+						// Exact (-4, -2) source shift (in-bounds at bx=8 & by=8) + 2x2-aligned +-4-code noise
+						// that survives 2x2 downsampling: fails matchTolerance=3.0 alone, passes with TEXTURE_TOL.
+						const double sign = (((x / 2) ^ (y / 2)) & 1) ? 1024.0 : -1024.0;
+						return clampU16(smoothMultiScale(static_cast<double>(x + 4), static_cast<double>(y + 2), 0.3) + sign);
+					},
+					[](int x, int y, int c) -> uint16_t { return DejudderTexture(x * 2, y, 7 + c); });
+				DejudderGpuPlanes ta, tb;
+				UploadDejudderFrame(gpu, texA, ta);
+				UploadDejudderFrame(gpu, texB, tb);
+
+				Dejudder::Settings sTex = DejudderTestSettings();
+				sTex.matchTolerance = 3.0f;
+				sTex.textureTolerance = 0.5f;
+				sTex.estQpel = false;
+				sTex.vectorSmooth = false;
+				sTex.verifyPixels = false;
+				sTex.estStillZero = false;
+				sTex.pictureArea = false;
+				sTex.hostReadable = true;
+
+				Dejudder::MotionWarp texOn(fixture.Log(), gpu, sTex);
+				Assert::IsTrue(texOn.Estimate(ta.planes, tb.planes), L"TEXTURE_TOL=0.5 estimate");
+				pl_gpu_finish(gpu);
+				const DejudderField fOn = DownloadField(gpu, texOn);
+				const DejudderField fwdOn = DownloadField(gpu, texOn, texOn.Forward());
+				const DejudderField bwdOn = DownloadField(gpu, texOn, texOn.Backward());
+				const std::vector<float> hA = downloadHalfTex(texOn.Level(0, false), kHalfW, kHalfH, 1, L"texOn halfA");
+
+				int trustedOn = 0, edgeTrustedOn = 0;
+				const float consPx = sTex.consistencyPixels;
+				for (int by = 0; by < kBlocksY; ++by)
+				{
+					for (int bx = 0; bx < kBlocksX; ++bx)
+					{
+						const size_t bi = (static_cast<size_t>(by) * kBlocksX + bx) * 4u;
+						const float fx = fwdOn.texels[bi], fy = fwdOn.texels[bi + 1u], fz = fwdOn.texels[bi + 2u];
+						const int btx = (std::min)(kBlocksX - 1, (std::max)(0, static_cast<int>(std::floor((bx * 8.0f + 4.0f + fx) / 8.0f))));
+						const int bty = (std::min)(kBlocksY - 1, (std::max)(0, static_cast<int>(std::floor((by * 8.0f + 4.0f + fy) / 8.0f))));
+						const size_t gi = (static_cast<size_t>(bty) * kBlocksX + btx) * 4u;
+						const float dx = fx + bwdOn.texels[gi], dy = fy + bwdOn.texels[gi + 1u];
+						const bool consistent = std::sqrt(dx * dx + dy * dy) <= consPx;
+						float tex = 0.0f;
+						for (int y = 0; y < 8; ++y)
+							for (int x = 0; x < 8; ++x)
+							{
+								const int px = (std::min)(kHalfW - 2, (std::max)(0, bx * 8 + x));
+								const int py = (std::min)(kHalfH - 2, (std::max)(0, by * 8 + y));
+								const float c0 = hA[static_cast<size_t>(py) * kHalfW + px];
+								tex += std::fabs(hA[static_cast<size_t>(py) * kHalfW + (px + 1)] - c0) +
+									std::fabs(hA[static_cast<size_t>(py + 1) * kHalfW + px] - c0);
+							}
+						const float extra = sTex.textureTolerance * tex / 128.0f;
+						const bool cpuTrust = consistent && (fz <= sTex.matchTolerance + extra);
+						Assert::AreEqual(cpuTrust, fOn.trusted(bx, by),
+							(L"CONSISTENCY TEXTURE_TOL rolling-cache mismatch vs naive CPU ref at (" +
+								std::to_wstring(bx) + L"," + std::to_wstring(by) + L")").c_str());
+						if (fOn.trusted(bx, by))
+						{
+							++trustedOn;
+							if (bx == kBlocksX - 1 || by == kBlocksY - 1)
+								++edgeTrustedOn;
+						}
+					}
+				}
+				Assert::IsTrue(trustedOn >= 50 && edgeTrustedOn >= 8,
+					(L"TEXTURE_TOL=0.5 must rescue noisy textured blocks incl. edges (trusted=" +
+						std::to_wstring(trustedOn) + L", edge=" + std::to_wstring(edgeTrustedOn) + L")").c_str());
+
+				// Same-input negative control: textureTolerance = 0.0f on exact same noisy planes.
+				sTex.textureTolerance = 0.0f;
+				Dejudder::MotionWarp texOff(fixture.Log(), gpu, sTex);
+				Assert::IsTrue(texOff.Estimate(ta.planes, tb.planes), L"negative control TEXTURE_TOL=0");
+				pl_gpu_finish(gpu);
+				const DejudderField fOff = DownloadField(gpu, texOff);
+				int trustedOff = 0;
+				for (int by = 0; by < kBlocksY; ++by)
+					for (int bx = 0; bx < kBlocksX; ++bx)
+						if (fOff.trusted(bx, by))
+							++trustedOff;
+				Assert::IsTrue(trustedOff < 10 && trustedOn - trustedOff >= 40,
+					(L"negative control: textureTolerance=0 must reject +-4-code noisy blocks (off=" +
+						std::to_wstring(trustedOff) + L" vs on=" + std::to_wstring(trustedOn) + L")").c_str());
+			}
+
+			AssertCleanLibplaceboLog(log, "McSearch2OptimizedPassesMatchSerialAndIndependentReferenceOnNonMultipleOf8Grid");
+		}
+
+		// GEM-144 (J#2 MC-SEARCH-2): verifies STILL_ZERO_BODY fused single-pass IN_PLACE path
+		// (PL_DESC_ACCESS_READWRITE) on a non-multiple-of-8 half-resolution frame (130x138 ->
+		// blocks=9x9, subField=18x18 where column bx=17 covers x=136..143 >= 130 so any_px==false):
+		//   1. Preserves Field() and SubField() texture pointer identity and eliminates copy-back dispatch
+		//      when PL_FMT_CAP_READWRITE is supported.
+		//   2. On A == A: stamps all in-bounds field & sub-field blocks to (0,0,1,0)/(0,0,1,1) while
+		//      preserving the I#3 any_px guard on out-of-bounds subField column bx == 17.
+		//   3. Same-input negative control (half-still / half-moving pair, plus estStillZero=false ref):
+		//      stamps identical top-half blocks to (0,0,1) while leaving moving bottom-half blocks
+		//      bit-identical to estStillZero=false (proving IN_PLACE does not wipe non-still blocks).
+		//   4. Preserves S3-H5 #ifdef PICTURE guard under IN_PLACE (out-of-picture identical blocks stay untrusted).
+		BEGIN_TEST_METHOD_ATTRIBUTE(StillZeroInPlacePreservesMovingHalfPictureAreaAndOobGuardOnNonMultipleOf8Grid)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(StillZeroInPlacePreservesMovingHalfPictureAreaAndOobGuardOnNonMultipleOf8Grid)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			struct LogScope
+			{
+				TargetLutGpuFixture& f;
+				LogScope(TargetLutGpuFixture& fx, std::string* s) : f(fx) { f.CaptureLog(s); }
+				~LogScope() { f.CaptureLog(nullptr); }
+			} logScope(fixture, &log);
+
+			constexpr int kSzW = 130, kSzH = 138;   // blocks=9x9, subField=18x18 (col bx=17 is OOB: x=136..143 >= 130)
+			constexpr int kSplitY = 64;             // by=0..3 identical, by=4..8 moving (-6, -2)
+			constexpr int kMoveDx = -6, kMoveDy = -2;
+
+			const DejudderFrame fa = MakeDejudderFrame(kSzW, kSzH,
+				[kSplitY](int x, int y) { return y < kSplitY ? DejudderTexture(x, y, 3) : DejudderTexture(x, y, 19); },
+				[](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); });
+			const DejudderFrame fMoveAll = MakeDejudderFrame(kSzW, kSzH,
+				[kSplitY, kMoveDx, kMoveDy](int x, int y)
+				{
+					const int sx = x - kMoveDx, sy = y - kMoveDy;
+					return y < kSplitY ? DejudderTexture(sx, sy, 3) : DejudderTexture(sx, sy, 19);
+				},
+				[](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); });
+			const DejudderFrame fHalfMove = MakeDejudderFrame(kSzW, kSzH,
+				[kSplitY, kMoveDx, kMoveDy](int x, int y)
+				{
+					return y < kSplitY ? DejudderTexture(x, y, 3) : DejudderTexture(x - kMoveDx, y - kMoveDy, 19);
+				},
+				[](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); });
+
+			DejudderGpuPlanes a, moveAll, halfMove;
+			UploadDejudderFrame(gpu, fa, a);
+			UploadDejudderFrame(gpu, fMoveAll, moveAll);
+			UploadDejudderFrame(gpu, fHalfMove, halfMove);
+
+			auto downloadSubField = [gpu](const Dejudder::MotionWarp& warp, int& sw, int& sh) -> std::vector<float>
+			{
+				pl_tex sf = warp.SubField();
+				Assert::IsNotNull(sf, L"SubField must exist when estSplit=true");
+				sw = sf->params.w;
+				sh = sf->params.h;
+				std::vector<uint16_t> raw(static_cast<size_t>(sw) * sh * 4u);
+				pl_tex_transfer_params dl{};
+				dl.tex = sf;
+				dl.ptr = raw.data();
+				Assert::IsTrue(pl_tex_download(gpu, &dl), L"SubField is not host-readable");
+				std::vector<float> out(raw.size());
+				for (size_t i = 0; i < raw.size(); ++i)
+					out[i] = HalfBits(raw[i]);
+				return out;
+			};
+
+			auto isSubStillStamp = [](float vx, float vy, float trust, float w) -> bool
+			{
+				return std::fabs(vx) < 1e-4f && std::fabs(vy) < 1e-4f && trust > 0.5f && w > 0.5f;
+			};
+
+			Dejudder::Settings s = DejudderTestSettings();
+			s.estStillZero = true;
+			s.estSplit = true;
+			s.verifyPixels = false;   // keep field pointer unswapped so pointer-identity assertion isolates StillZero
+			s.pictureArea = false;
+			s.hostReadable = true;
+
+			// 1. Warm up on moving pair to allocate field & subField, then verify IN_PLACE pointer identity
+			// and zero copy-back dispatch on identical A == A.
+			Dejudder::MotionWarp warp(fixture.Log(), gpu, s);
+			Assert::IsTrue(warp.Estimate(a.planes, moveAll.planes), L"initial moving estimate");
+			pl_gpu_finish(gpu);
+			const pl_tex fieldBefore = warp.Field();
+			const pl_tex subBefore = warp.SubField();
+			Assert::IsNotNull(fieldBefore, L"Field() must be allocated");
+			Assert::IsNotNull(subBefore, L"SubField() must be allocated");
+
+			warp.SetPassTiming(true, true);
+			Assert::IsTrue(warp.Estimate(a.planes, a.planes), L"identical A == A estimate");
+			pl_gpu_finish(gpu);
+
+			Assert::IsTrue(warp.Field() == fieldBefore, L"STILL_ZERO IN_PLACE must preserve Field() texture pointer identity");
+			Assert::IsTrue(warp.SubField() == subBefore, L"STILL_ZERO IN_PLACE must preserve SubField() texture pointer identity");
+			Assert::AreEqual(size_t(1), warp.PassMs().count("VideoProcessor de-judder: identical blocks still"),
+				L"STILL_ZERO must dispatch identical blocks still pass");
+			if (fieldBefore->params.format && (fieldBefore->params.format->caps & PL_FMT_CAP_READWRITE) != 0)
+			{
+				Assert::AreEqual(size_t(0), warp.PassMs().count("VideoProcessor de-judder: identical blocks still (copy back)"),
+					L"STILL_ZERO IN_PLACE must not dispatch copy-back pass when PL_FMT_CAP_READWRITE is set");
+			}
+
+			const DejudderField stillField = DownloadField(gpu, warp);
+			Assert::AreEqual(9, stillField.blocksX);
+			Assert::AreEqual(9, stillField.blocksY);
+			for (int by = 0; by < stillField.blocksY; ++by)
+				for (int bx = 0; bx < stillField.blocksX; ++bx)
+				{
+					const size_t i = (static_cast<size_t>(by) * stillField.blocksX + bx) * 4u;
+					Assert::IsTrue(std::fabs(stillField.texels[i]) < 1e-4f &&
+						std::fabs(stillField.texels[i + 1u]) < 1e-4f &&
+						stillField.texels[i + 2u] > 0.5f &&
+						std::fabs(stillField.texels[i + 3u]) < 1e-4f,
+						L"STILL_ZERO IN_PLACE on A==A must stamp every Field block to (0, 0, 1, 0)");
+				}
+
+			int sw = 0, sh = 0;
+			const std::vector<float> stillSub = downloadSubField(warp, sw, sh);
+			Assert::AreEqual(18, sw);
+			Assert::AreEqual(18, sh);
+			for (int sby = 0; sby < sh; ++sby)
+			{
+				for (int sbx = 0; sbx < sw - 1; ++sbx)
+				{
+					const size_t i = (static_cast<size_t>(sby) * sw + sbx) * 4u;
+					Assert::IsTrue(isSubStillStamp(stillSub[i], stillSub[i + 1u], stillSub[i + 2u], stillSub[i + 3u]),
+						L"STILL_ZERO IN_PLACE on A==A must stamp every in-bounds sub-block (sbx=0..16) to (0, 0, 1, 1)");
+				}
+				const size_t oob = (static_cast<size_t>(sby) * sw + (sw - 1)) * 4u;
+				Assert::IsFalse(isSubStillStamp(stillSub[oob], stillSub[oob + 1u], stillSub[oob + 2u], stillSub[oob + 3u]),
+					L"I#3 any_px guard: STILL_ZERO IN_PLACE must not stamp OOB subField column sbx=17 (x=136..143 >= 130)");
+				Assert::IsTrue(stillSub[oob + 3u] < 0.5f,
+					L"I#3 any_px guard: OOB subField column sbx=17 must preserve incoming split flag w=0");
+			}
+
+			// 2. Half-still / half-moving pair (mandatory same-input negative control proving IN_PLACE
+			// preserves non-still blocks without wiping the texture, and comparing against estStillZero=false).
+			Assert::IsTrue(warp.Estimate(a.planes, halfMove.planes), L"half-still / half-moving estimate");
+			pl_gpu_finish(gpu);
+			Assert::IsTrue(warp.Field() == fieldBefore, L"half-moving estimate must keep Field() pointer identity");
+			Assert::IsTrue(warp.SubField() == subBefore, L"half-moving estimate must keep SubField() pointer identity");
+			const DejudderField halfField = DownloadField(gpu, warp);
+			const std::vector<float> halfSub = downloadSubField(warp, sw, sh);
+
+			for (int by = 0; by < 4; ++by)
+				for (int bx = 0; bx < halfField.blocksX; ++bx)
+				{
+					Assert::IsTrue(halfField.trusted(bx, by) &&
+						std::fabs(halfField.vx(bx, by)) < 1e-4f && std::fabs(halfField.vy(bx, by)) < 1e-4f,
+						L"STILL_ZERO IN_PLACE must stamp identical top-half blocks (by=0..3) to (0, 0, 1)");
+				}
+			int bottomMovingMatched = 0;
+			for (int by = 5; by < halfField.blocksY; ++by)
+				for (int bx = 1; bx < halfField.blocksX; ++bx)
+				{
+					if (halfField.trusted(bx, by) &&
+						std::fabs(halfField.vx(bx, by) - static_cast<float>(kMoveDx)) <= 0.5f &&
+						std::fabs(halfField.vy(bx, by) - static_cast<float>(kMoveDy)) <= 0.5f)
+						++bottomMovingMatched;
+				}
+			Assert::IsTrue(bottomMovingMatched >= 28,
+				(L"negative control: STILL_ZERO IN_PLACE must preserve moving bottom-half (-6, -2) vectors (matched=" +
+					std::to_wstring(bottomMovingMatched) + L")").c_str());
+
+			// Reference without estStillZero on the exact same (a, halfMove) planes:
+			// (a) moving bottom-half Field blocks (by=5..8) must match bit-for-bit (IN_PLACE left them untouched),
+			// (b) identical top-half SubField blocks (sby=0..7, sbx=0..16) are stamped w=1 ONLY when estStillZero=true.
+			Dejudder::Settings sNoStill = s;
+			sNoStill.estStillZero = false;
+			Dejudder::MotionWarp noStillWarp(fixture.Log(), gpu, sNoStill);
+			Assert::IsTrue(noStillWarp.Estimate(a.planes, halfMove.planes), L"negative control estStillZero=false");
+			pl_gpu_finish(gpu);
+			const DejudderField noStillField = DownloadField(gpu, noStillWarp);
+			const std::vector<float> noStillSub = downloadSubField(noStillWarp, sw, sh);
+			for (int by = 5; by < halfField.blocksY; ++by)
+				for (int bx = 0; bx < halfField.blocksX; ++bx)
+				{
+					const size_t base = (static_cast<size_t>(by) * halfField.blocksX + bx) * 4u;
+					for (size_t ch = 0; ch < 4u; ++ch)
+					{
+						Assert::IsTrue(halfField.texels[base + ch] == noStillField.texels[base + ch],
+							L"STILL_ZERO IN_PLACE must leave non-identical bottom-half blocks bit-identical to estStillZero=false");
+					}
+				}
+			for (int sby = 0; sby < 8; ++sby)
+				for (int sbx = 0; sbx < sw - 1; ++sbx)
+				{
+					const size_t i = (static_cast<size_t>(sby) * sw + sbx) * 4u;
+					Assert::IsTrue(isSubStillStamp(halfSub[i], halfSub[i + 1u], halfSub[i + 2u], halfSub[i + 3u]),
+						L"STILL_ZERO IN_PLACE must stamp identical top-half sub-blocks (sby=0..7, sbx=0..16) to (0,0,1,1)");
+					if (sby < 6)
+					{
+						// Interior identical rows by=0..2 (sby=0..5) keep their 12x12 search margin strictly above y=64.
+						Assert::IsTrue(noStillSub[i + 3u] < 0.5f,
+							L"negative control: estStillZero=false must leave interior identical unsplit sub-blocks (sby=0..5) at w=0");
+					}
+				}
+
+			// 3. S3-H5 #ifdef PICTURE guard under IN_PLACE: top 32 lines (by=0..1, sby=0..3) lie outside
+			// SetPictureArea(0, 32, 130, 138) and must remain untrusted even though bit-identical.
+			Dejudder::Settings sPic = s;
+			sPic.pictureArea = true;
+			Dejudder::MotionWarp picWarp(fixture.Log(), gpu, sPic);
+			picWarp.SetPictureArea(0, 32, kSzW, kSzH);
+			Assert::IsTrue(picWarp.Estimate(a.planes, halfMove.planes), L"IN_PLACE PICTURE guard estimate");
+			pl_gpu_finish(gpu);
+			const DejudderField picField = DownloadField(gpu, picWarp);
+			const std::vector<float> picSub = downloadSubField(picWarp, sw, sh);
+			for (int by = 0; by < 2; ++by)
+				for (int bx = 0; bx < picField.blocksX; ++bx)
+					Assert::IsFalse(picField.trusted(bx, by),
+						L"S3-H5 PICTURE guard: STILL_ZERO IN_PLACE must not stamp out-of-picture identical blocks (by=0..1)");
+			for (int by = 2; by < 4; ++by)
+				for (int bx = 0; bx < picField.blocksX; ++bx)
+					Assert::IsTrue(picField.trusted(bx, by) &&
+						std::fabs(picField.vx(bx, by)) < 1e-4f && std::fabs(picField.vy(bx, by)) < 1e-4f,
+						L"S3-H5 PICTURE guard: STILL_ZERO IN_PLACE must still stamp in-picture identical blocks (by=2..3)");
+			for (int sby = 0; sby < 4; ++sby)
+				for (int sbx = 0; sbx < sw; ++sbx)
+				{
+					const size_t i = (static_cast<size_t>(sby) * sw + sbx) * 4u;
+					Assert::IsFalse(isSubStillStamp(picSub[i], picSub[i + 1u], picSub[i + 2u], picSub[i + 3u]),
+						L"S3-H5 PICTURE guard: STILL_ZERO IN_PLACE must not stamp out-of-picture sub-blocks (sby=0..3)");
+				}
+			for (int sby = 4; sby < 8; ++sby)
+				for (int sbx = 0; sbx < sw - 1; ++sbx)
+				{
+					const size_t i = (static_cast<size_t>(sby) * sw + sbx) * 4u;
+					Assert::IsTrue(isSubStillStamp(picSub[i], picSub[i + 1u], picSub[i + 2u], picSub[i + 3u]),
+						L"S3-H5 PICTURE guard: STILL_ZERO IN_PLACE must stamp in-picture identical sub-blocks (sby=4..7, sbx=0..16)");
+				}
+
+			AssertCleanLibplaceboLog(log, "StillZeroInPlacePreservesMovingHalfPictureAreaAndOobGuardOnNonMultipleOf8Grid");
+		}
 	};
 }
