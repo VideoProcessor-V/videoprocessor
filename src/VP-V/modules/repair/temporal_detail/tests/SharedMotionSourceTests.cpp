@@ -10,6 +10,7 @@
 #include <VP-V/modules/motion/estimation/OpticalFlowTrust.h>
 #include <VP-V/modules/motion/estimation/VectorEngine.h>
 #include <VP-V/modules/repair/temporal_detail/SharedMotionSource.h>
+#include <VP-V/modules/repair/temporal_detail/TemporalDetailModel.h>
 
 #include <chrono>
 #include <cmath>
@@ -535,6 +536,49 @@ namespace VideoProcessorTest
 				L"negative control: forward vy differs from naive isotropic scaleX by 3.0 source px");
 			Assert::IsTrue(std::fabs(static_cast<double>(bwd.vy[0]) - vyBwdNaive) >= 2.5,
 				L"negative control: backward vy differs from naive isotropic scaleX by 3.0 source px");
+		}
+
+		// MED-1: anisotropic engine grid populates blockPxY = 4 * scaleY and TemporalDetail::Detail::PairAt
+		// samples vertical grid coordinate using blockPxY instead of blockPx.
+		TEST_METHOD(AnisotropicBlockPxYPropagatesToPairAt)
+		{
+			EngineRig rig(256);
+			auto flow = std::make_shared<MotionAhead::Flow>();
+			flow->halfW = 64;   // scaleX = 256 / 64 = 4.0 -> blockPx = 16.0
+			flow->halfH = 64;   // scaleY = 128 / 64 = 2.0 -> blockPxY = 8.0
+			flow->gridW = 16;
+			flow->gridH = 16;
+			const size_t cells = static_cast<size_t>(flow->gridW) * flow->gridH;
+			flow->forward.assign(cells * 2, 0);
+			flow->backward.assign(cells * 2, 0);
+			flow->forwardCost.assign(cells, 0);
+			flow->backwardCost.assign(cells, 0);
+			// Put distinct vx ramp per row j so row mismatch is unmistakable.
+			for (int j = 0; j < flow->gridH; ++j)
+				for (int i = 0; i < flow->gridW; ++i)
+					flow->forward[(static_cast<size_t>(j) * flow->gridW + i) * 2] = static_cast<int16_t>(j * 32);
+			MotionAhead::FlowExtras(*flow);
+			Assert::IsTrue(rig.Publish(1, 2, flow));
+			rig.engine.motionValidity.NoteKept(1);
+			rig.engine.motionValidity.NoteKept(2);
+
+			TemporalDetail::SharedMotionSource source(rig.View(), &rig.engine.motionValidity, rig.FlowOf());
+			source.SetSourceSize(256, 128);
+			TemporalDetail::MotionPair fwd;
+			Assert::IsTrue(source.Forward(2, fwd));
+			Assert::AreEqual(16.0, fwd.blockPx, 1e-9, L"horizontal blockPx = 4 * scaleX");
+			Assert::AreEqual(8.0, fwd.blockPxY, 1e-9, L"vertical blockPxY = 4 * scaleY");
+
+			// Sample at y = 35.5 (centre of row j = 4 when blockPxY = 8.0 -> expected vx = 4 * scaleX = 16.0).
+			const double sampledAniso = TemporalDetail::Detail::PairAt(fwd, fwd.vx, 7.5, 35.5);
+			Assert::AreEqual(16.0, sampledAniso, 1e-6, L"PairAt uses blockPxY = 8.0 for row j = 4");
+
+			// Negative control on the exact same input: forcing isotropic blockPxY = 0 reads row ~1.75 (~7.0), off by >8 px!
+			TemporalDetail::MotionPair isoNc = fwd;
+			isoNc.blockPxY = 0.0;
+			const double sampledIsoNc = TemporalDetail::Detail::PairAt(isoNc, isoNc.vx, 7.5, 35.5);
+			Assert::IsTrue(std::fabs(sampledIsoNc - sampledAniso) > 6.0,
+				L"negative control: isotropic PairAt without blockPxY samples the wrong row");
 		}
 	};
 }

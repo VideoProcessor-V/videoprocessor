@@ -733,6 +733,10 @@ namespace VideoProcessorTest
 			Assert::IsTrue(patch.find("max_usable = 61") != std::string::npos);
 			Assert::IsTrue(patch.find("latency_ms = 82") != std::string::npos);
 			Assert::IsTrue(patch.find("# contrast_latency_ms") != std::string::npos);
+			Assert::IsTrue(patch.find("FL35") == std::string::npos && patch.find("barco-fl35") == std::string::npos,
+				L"POD1-L1: projector profile patch must use generic projector wording, not FL35");
+			Assert::IsTrue(patch.find("<projector>.vpprojector") != std::string::npos,
+				L"POD1-L1: projector profile patch names generic <projector>.vpprojector placeholder");
 			Assert::IsTrue(FormatLedCfg(r).find("[projector.default]\nflux_table: ") != std::string::npos);
 		}
 
