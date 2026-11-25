@@ -1874,7 +1874,10 @@ float hold_weight_xy(vec2 lp, vec2 feather)
                 d = min(d, length((lp - clamp(lp, lo, lo + vec2(16.0))) / f));
             }
         }
-    return smoothstep(0.0, 1.0, d);
+    // Explicit Hermite smoothstep on [0, 1]: avoids SPIRV-Cross/FXC miscompiling literal smoothstep(0.0, 1.0, d)
+    // as t*(3 - 2*t) (missing one *t factor, returning 1.09375 at d=0.875).
+    float t = clamp(d, 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
 }
 #endif
 )GLSL";

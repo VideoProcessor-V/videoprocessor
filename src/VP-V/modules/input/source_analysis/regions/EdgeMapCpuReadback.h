@@ -48,7 +48,7 @@ namespace Vpv
 		// GPU per-block (sum2, sum4) reduction readback device for kEdgeMap (HIGH-2 fix):
 		// Reduces full-res R32F |G| on GPU to one (sum2, sum4) pair per P11 block strictly inside the active picture
 		// rect, cutting CPU readback payload by ~510x (65 KB vs 33 MB at 4K) and staging VRAM by ~254x (783 KB vs 199 MB).
-		// Uses LedDrive::NativeTexReadback (zero pl_tex_create/pl_tex_recreate calls here). Render thread only.
+		// Uses LedDrive::NativeTexReadback (no private libplacebo texture allocations here). Render thread only.
 		class EdgeBlockSumsReadbackDevice : public VpSkeleton::IReadbackDevice
 		{
 		public:
