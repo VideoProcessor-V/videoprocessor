@@ -10,6 +10,8 @@
 #include <VP-V/core/SkeletonAcquire.h>
 #include <VP-V/modules/control/skeleton/gpu/OwnerGpuDevice.h>
 #include <VP-V/modules/input/source_analysis/regions/RegionEvidence.h>
+#include <VP-V/modules/motion/estimation/global_model/CameraMotion.h>
+#include <VP-V/modules/motion/estimation/global_model/link/CameraRecordPool.h>
 #include <VP-V/modules/repair/grain_split/BandMemo.h>
 #include <VP-V/modules/repair/grain_split/BandMemoFill.h>
 #include <VP-V/modules/repair/grain_split/GpuPassUtil.h>
@@ -1503,8 +1505,8 @@ namespace TextureRestoreTestsNs
 
 			std::mt19937 rng(409u);
 			const Image scene = Scene(kW, kH, rng);
-			const Image in0 = Quantised(Dctq(Sum(scene, Grain(kW, kH, 1.5 * kCode8, true, rng)), 4.0));
-			const Image in1 = Quantised(Dctq(Sum(scene, Grain(kW, kH, 1.5 * kCode8, true, rng)), 28.0));
+			const Image in0 = Quantised(Dctq(Sum(scene, Grain(kW, kH, 1.5 * kCode8, false, rng)), 4.0));
+			const Image in1 = Quantised(Dctq(Sum(scene, Grain(kW, kH, 1.5 * kCode8, false, rng)), 28.0));
 			TexGuard tex0(gpu, UploadLuma(gpu, in0));
 			TexGuard tex1(gpu, UploadLuma(gpu, in1));
 			Assert::IsTrue(tex0.tex != nullptr && tex1.tex != nullptr);
@@ -1617,11 +1619,130 @@ namespace TextureRestoreTestsNs
 
 			Assert::AreEqual(2ull, modPoison.mod.P11EnergyHits(), L"poisoned memo still hit P11");
 			const Image imgP11 = Download(gpu, outP11.planes[0].texture);
+			const Image imgNull = Download(gpu, outNull.planes[0].texture);
 			const Image imgPoison = Download(gpu, outPoison.planes[0].texture);
 			const double boostVsIn = MaxAbsDiff(imgP11, in1);
+			const double nullBoostVsIn = MaxAbsDiff(imgNull, in1);
+			const double nullDelta = MaxAbsDiff(imgP11, imgNull);
 			const double poisonDelta = MaxAbsDiff(imgP11, imgPoison);
+			double sqNull = 0.0, sqPoison = 0.0;
+			for (size_t i = 0; i < imgP11.v.size(); ++i)
+			{
+				const double dn = imgP11.v[i] - imgNull.v[i];
+				const double dp = imgP11.v[i] - imgPoison.v[i];
+				sqNull += dn * dn;
+				sqPoison += dp * dp;
+			}
+			const double rmsNullDelta = std::sqrt(sqNull / static_cast<double>(imgP11.v.size()));
+			const double rmsPoisonDelta = std::sqrt(sqPoison / static_cast<double>(imgP11.v.size()));
 			Assert::IsTrue(boostVsIn > 0.5, L"non-vacuous: TR with real P11 actively restores the coarse B-frame");
+			Assert::IsTrue(nullBoostVsIn > 0.5, L"non-vacuous: TR fallback (memo=nullptr) actively restores the coarse B-frame");
 			Assert::IsTrue(poisonDelta > 0.5, L"negative control: poisoned P11 re_s2/re_s4 shifts TR output on the exact same frame");
+			Assert::IsTrue(rmsNullDelta < 1.0,
+				L"TR P11 output matches memo=nullptr fallback quantitatively in RMS (accurate P11 re_s2/re_s4 ingest & scaling)");
+			Assert::IsTrue(rmsNullDelta < 0.5 * rmsPoisonDelta && nullDelta < 0.75 * poisonDelta,
+				L"TR P11 parity vs memo=nullptr is strictly tighter than poisoned P11 divergence");
+		}
+
+		// W23-B3 M2#12 / HIGH #3: end-to-end TextureRestore::Module::Apply exercises vector-veto with trusted P7
+		// (Reason::Ok, confidence 0.85) on a pan-cut scene verdict: default params.vectorVeto=true suppresses
+		// restart (SceneVectorVetoes() >= 1, keeps references); negative control params.vectorVeto=false restarts.
+		BEGIN_TEST_METHOD_ATTRIBUTE(TextureRestoreGpuVectorVetoSuppressesPanCutRestart)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(TextureRestoreGpuVectorVetoSuppressesPanCutRestart)
+		{
+			using Reg = VpSkeleton::SkeletonMemo::Registration;
+			struct TexGuard
+			{
+				pl_gpu gpu = nullptr;
+				pl_tex tex = nullptr;
+				TexGuard(pl_gpu g, pl_tex t) : gpu(g), tex(t) {}
+				~TexGuard() { if (gpu && tex) pl_tex_destroy(gpu, &tex); }
+				TexGuard(const TexGuard&) = delete;
+				TexGuard& operator=(const TexGuard&) = delete;
+			};
+			struct ModGuard
+			{
+				pl_gpu gpu = nullptr;
+				TextureRestore::Module mod;
+				explicit ModGuard(pl_gpu g) : gpu(g) {}
+				~ModGuard() { mod.Release(gpu); }
+				ModGuard(const ModGuard&) = delete;
+				ModGuard& operator=(const ModGuard&) = delete;
+			};
+
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = dev.Gpu();
+
+			std::mt19937 rng(609u);
+			const Image scene = Scene(kW, kH, rng);
+			const Image in0 = Quantised(Dctq(Sum(scene, Grain(kW, kH, 1.5 * kCode8, false, rng)), 4.0));
+			const Image in1 = Quantised(Dctq(Sum(scene, Grain(kW, kH, 1.5 * kCode8, false, rng)), 28.0));
+			TexGuard tex0(gpu, UploadLuma(gpu, in0));
+			TexGuard tex1(gpu, UploadLuma(gpu, in1));
+			Assert::IsTrue(tex0.tex != nullptr && tex1.tex != nullptr);
+
+			VpSkeleton::SkeletonMemo memoP7;
+			CameraModel::CameraMotion cam;
+			cam.seq = 602u; cam.pairFrom = 601u; cam.pairTo = 602u;
+			cam.pairSeconds = 1.0 / 24.0;
+			cam.valid = true;
+			cam.reason = CameraModel::Reason::Ok;
+			cam.confidence = 0.85;
+			cam.params.type = CameraModel::ModelType::Translation;
+			cam.params.h[2] = 12.0; cam.params.h[5] = 0.0;
+			cam.picture.left = 0; cam.picture.top = 0; cam.picture.right = kW; cam.picture.bottom = kH;
+			VpSkeleton::OwnerFill p7Fill;
+			p7Fill.renderThreadOnly = false;
+			p7Fill.fill = [cam](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) -> bool {
+				if (req.seq != 602u) return false;
+				uint8_t buf[CameraLink::kRecordPodMaxBytes]{};
+				const size_t n = CameraLink::EncodeRecordPod(cam, buf, sizeof(buf));
+				if (n == 0u) return false;
+				out.bytes.assign(buf, buf + n);
+				return true;
+			};
+			Assert::IsTrue(memoP7.RegisterOwnerFill(VpSkeleton::kP7CameraFit, VpSkeleton::AcquireForm::Cpu,
+				VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP7CameraFit), std::move(p7Fill)) == Reg::Registered);
+
+			VpDetailRestore::SceneReaderFn panCutReader = [](uint64_t seq, FrameAnalysis::Scene& sc) -> bool {
+				sc = FrameAnalysis::Scene();
+				if (seq == 602u)
+				{
+					sc.cut = true;
+					sc.confirmed = true;
+					sc.cutStrength = 1.0f;
+				}
+				return true;
+			};
+
+			ModGuard modVeto(gpu), modNoVeto(gpu);
+			pl_tex inputs[2] = { tex0.tex, tex1.tex };
+			pl_frame outVeto{}, outNoVeto{};
+			for (int k = 0; k < 2; ++k)
+			{
+				TextureRestore::Params pVeto = Frame(601u + static_cast<uint64_t>(k));
+				Assert::IsTrue(pVeto.vectorVeto, L"TextureRestore::Params::vectorVeto defaults true");
+				pVeto.sceneReader = panCutReader;
+				pVeto.memo = &memoP7;
+				Assert::IsTrue(modVeto.mod.Apply(gpu, dev.dispatch, LumaFrame(inputs[k]), pVeto, outVeto), Wide(modVeto.mod.LastError()).c_str());
+
+				TextureRestore::Params pNoVeto = pVeto;
+				pNoVeto.vectorVeto = false;
+				Assert::IsTrue(modNoVeto.mod.Apply(gpu, dev.dispatch, LumaFrame(inputs[k]), pNoVeto, outNoVeto), Wide(modNoVeto.mod.LastError()).c_str());
+			}
+
+			Assert::AreEqual(1ull, modVeto.mod.SceneVectorVetoes(), L"TR with default vectorVeto=true vetoes pan-cut restart on trusted P7");
+			Assert::AreEqual(1.0f, modVeto.mod.LastHistoryKeep(), 1e-6f, L"vetoed pan keeps full history");
+			Assert::AreEqual(0ull, modNoVeto.mod.SceneVectorVetoes(), L"negative control: vectorVeto=false does NOT veto pan-cut restart");
+			Assert::AreEqual(0.0f, modNoVeto.mod.LastHistoryKeep(), 1e-6f, L"negative control: unvetoed pan cut restarts references");
+
+			const Image imgVeto = Download(gpu, outVeto.planes[0].texture);
+			const Image imgNoVeto = Download(gpu, outNoVeto.planes[0].texture);
+			Assert::IsTrue(MaxAbsDiff(imgVeto, in1) > 0.5, L"vetoed TR retained frame 0 references and restored coarse frame 1");
+			Assert::IsTrue(MaxAbsDiff(imgVeto, imgNoVeto) > 0.5, L"negative control: suppressing vs taking restart materially alters TR GPU output");
 		}
 	};
 }
@@ -1704,9 +1825,9 @@ namespace TextureRestoreBandFromBaseNs
 			}
 		}
 
-		// W23-B3 M2#2 (U2 B4 CPU BandMemo): TextureRestore::AcquireFineCpuBand hits kBandMemo once per key and
-		// matches independent BlurTaps bit-for-bit; AcquireHalfCpuBand (factor=3.5, eps=1e-9 outside BandMemo codec)
-		// visibly reports its codec fallback without calling the owner fill while still matching BlurTaps bit-for-bit.
+		// W23-B3 M2#2 / M1 (U2 B4 CPU BandMemo): TextureRestore::AcquireFineCpuBand and AcquireHalfCpuBand
+		// (factor=3.5, eps=1e-9 via BandMemo bit 6) hit kBandMemo once per key, cache on repeat, and match
+		// independent BlurTaps bit-for-bit; unencodable factor=5.0 fails BandMemo::Encodable and declines visibly.
 		TEST_METHOD(TextureRestoreCpuBandAcquireAndFactor35VisibleFallback)
 		{
 			namespace BFB = VpUnit::BandFromBase;
@@ -1799,17 +1920,20 @@ namespace TextureRestoreBandFromBaseNs
 			Assert::IsFalse(fineUnreg.fromBandMemo || fineUnreg.fallbackReason.empty(), L"fine unregistered visible fallback");
 			Assert::IsTrue(std::memcmp(fineNull.samples.data(), fineRef.data(), fineRef.size() * sizeof(float)) == 0, L"fine fallback bit-exact");
 
-			// 2. AcquireHalfCpuBand (factor=3.5, eps=1e-9 outside BandMemo codec): visibly reports codec fallback
-			//    even with valid memo + seq, does NOT invoke owner fill, and matches independent BlurTaps bit-for-bit.
+			// 2. AcquireHalfCpuBand (factor=3.5, eps=1e-9, encoded in BandMemo bit 6): hits kBandMemo once per
+			//    sigma key, caches on repeat, matches independent BlurTaps bit-for-bit, and visibly falls back when memo=nullptr.
+			uint64_t expectedFills = 1u;
 			for (double fullSigma : { TextureRestore::kSigma2, TextureRestore::kSigma3 })
 			{
 				const TextureRestore::CpuBandResult halfRes = TextureRestore::AcquireHalfCpuBand(halfFloat, HW, HH, fullSigma, &memo, kSeq);
-				Assert::IsFalse(halfRes.fromBandMemo, L"factor=3.5 half band cannot come from BandMemo codec");
-				Assert::IsFalse(halfRes.fallbackReason.empty(), L"factor=3.5 fallback reason must be visible (Rule 4)");
-				Assert::IsTrue(halfRes.fallbackReason.find("codec") != std::string::npos
-					|| halfRes.fallbackReason.find("factor") != std::string::npos,
-					L"factor=3.5 fallback reason visibly names codec/factor");
-				Assert::AreEqual(uint64_t(1), counters->fills.load(), L"unencodable factor=3.5 never invokes BandMemo owner fill");
+				Assert::IsTrue(halfRes.fromBandMemo && halfRes.fallbackReason.empty(),
+					L"factor=3.5 half band hits kBandMemo via bit-6 codec extension");
+				++expectedFills;
+				Assert::AreEqual(expectedFills, counters->fills.load(), L"half band computed once per distinct sigma");
+
+				const TextureRestore::CpuBandResult halfRepeat = TextureRestore::AcquireHalfCpuBand(halfFloat, HW, HH, fullSigma, &memo, kSeq);
+				Assert::IsTrue(halfRepeat.fromBandMemo && halfRepeat.fallbackReason.empty(), L"repeat half band hits cached kBandMemo");
+				Assert::AreEqual(expectedFills, counters->fills.load(), L"repeat half band reuses memo without recompute");
 
 				const int rh = TextureRestore::HalfRadius(fullSigma);
 				std::vector<float> halfTaps(static_cast<size_t>(2 * rh + 1));
@@ -1819,13 +1943,53 @@ namespace TextureRestoreBandFromBaseNs
 				BFB::BlurTaps<float>(halfFloat, halfRef, HW, HH, halfTaps, BFB::EdgeMode::Replicate);
 				Assert::AreEqual(halfRef.size(), halfRes.samples.size());
 				Assert::IsTrue(std::memcmp(halfRes.samples.data(), halfRef.data(), halfRef.size() * sizeof(float)) == 0,
-					L"AcquireHalfCpuBand fallback matches independent BlurTaps bit-for-bit");
+					L"AcquireHalfCpuBand memo hit matches independent BlurTaps bit-for-bit");
+				Assert::IsTrue(std::memcmp(halfRepeat.samples.data(), halfRef.data(), halfRef.size() * sizeof(float)) == 0,
+					L"AcquireHalfCpuBand cached repeat matches independent BlurTaps bit-for-bit");
+
+				const TextureRestore::CpuBandResult halfNull = TextureRestore::AcquireHalfCpuBand(halfFloat, HW, HH, fullSigma, nullptr, kSeq);
+				Assert::IsFalse(halfNull.fromBandMemo || halfNull.fallbackReason.empty(), L"half memo=nullptr visible fallback");
+				Assert::IsTrue(std::memcmp(halfNull.samples.data(), halfRef.data(), halfRef.size() * sizeof(float)) == 0,
+					L"half memo=nullptr fallback matches independent BlurTaps bit-for-bit");
 
 				// Non-vacuity negative control: raw unblurred halfFloat diverges substantially from blurred band.
 				float maxHalfDiff = 0.0f;
 				for (size_t i = 0; i < nHalf; ++i)
 					maxHalfDiff = (std::max)(maxHalfDiff, std::fabs(halfRes.samples[i] - halfFloat[i]));
 				Assert::IsTrue(maxHalfDiff > 0.05f, L"negative control: half-res blur materially transforms input");
+			}
+
+			// 3. Negative control: unencodable factor=5.0 is rejected by BandMemo::Encodable and visibly declined on Acquire.
+			{
+				VpUnit::BandMemo::BandKey badKey;
+				badKey.resolution = VpUnit::BandMemo::Stage::Half;
+				badKey.width = static_cast<uint32_t>(HW);
+				badKey.height = static_cast<uint32_t>(HH);
+				badKey.sigmaPx = BFB::HalfSigma(TextureRestore::kSigma2);
+				badKey.law = VpUnit::BandMemo::Law::Taps;
+				badKey.edge = BFB::EdgeMode::Replicate;
+				badKey.factor = 5.0;
+				badKey.minOne = true;
+				badKey.eps = 1e-9;
+				Assert::IsFalse(VpUnit::BandMemo::Encodable(badKey), L"negative control: factor=5.0 is outside BandMemo codec");
+				const VpSkeleton::VariantKey badVar = VpUnit::BandMemo::ToVariant(badKey);
+				Assert::IsFalse(VpUnit::BandMemo::FromVariant(badVar, nullptr), L"unencodable ToVariant does not decode");
+				const VpSkeleton::AcquireResult badAcq = memo.Acquire(VpSkeleton::kBandMemo, kSeq, VpSkeleton::AcquireForm::Cpu, badVar);
+				Assert::IsFalse(badAcq.Ok(), L"Acquire on unencodable factor=5.0 key declines");
+				Assert::IsFalse(memo.LastCause(VpSkeleton::kBandMemo).empty(), L"unencodable Acquire decline reason is visible");
+				Assert::AreEqual(expectedFills, counters->fills.load(), L"declined key never increments BandMemo fills");
+
+				// Also verify an out-of-range encoded factor index (fi=5: bits 3..4 = 1, bit 6 = 1) is rejected on Acquire.
+				VpUnit::BandMemo::BandKey validKey = badKey;
+				validKey.factor = 3.5;
+				Assert::IsTrue(VpUnit::BandMemo::Encodable(validKey), L"factor=3.5 is encodable");
+				VpSkeleton::VariantKey badIdxVar = VpUnit::BandMemo::ToVariant(validKey);
+				badIdxVar.param1 = static_cast<uint16_t>((badIdxVar.param1 & ~uint16_t(0x58u)) | uint16_t((1u << 3) | 64u));
+				Assert::IsFalse(VpUnit::BandMemo::FromVariant(badIdxVar, nullptr), L"out-of-range factor index 5 fails FromVariant");
+				const VpSkeleton::AcquireResult badIdxAcq = memo.Acquire(VpSkeleton::kBandMemo, kSeq, VpSkeleton::AcquireForm::Cpu, badIdxVar);
+				Assert::IsFalse(badIdxAcq.Ok(), L"Acquire with out-of-range factor index visibly declines");
+				Assert::IsFalse(memo.LastCause(VpSkeleton::kBandMemo).empty(), L"out-of-range factor decline reason is visible");
+				Assert::AreEqual(expectedFills, counters->fills.load(), L"out-of-range factor never increments fills");
 			}
 		}
 	};

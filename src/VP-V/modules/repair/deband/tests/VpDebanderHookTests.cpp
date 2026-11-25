@@ -685,6 +685,9 @@ namespace VideoProcessorTest
 			Assert::IsTrue(withGrain == native, L"on: libplacebo's own default parameters byte for byte");
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(BandMemoOneComputePerKey)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(BandMemoOneComputePerKey)
 		{
 			namespace GB = Vpv::GrainBand;
@@ -869,7 +872,7 @@ namespace VideoProcessorTest
 			VpDebander::Params params;
 			params.thresholdCodes = 6.0;
 			params.colorDepth = 10;
-			params.radiusScale = 1080.0 / H;
+			params.radiusScale = 1.0;
 			params.grainGuard = true;
 			params.grainSplit = true;
 			params.sequence = kSeq;

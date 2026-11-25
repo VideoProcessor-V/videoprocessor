@@ -9,6 +9,8 @@
 #include <VP-V/modules/repair/texture_restore/DetailPulse.h>
 #include <VP-V/modules/control/skeleton/gpu/OwnerGpuDevice.h>
 #include <VP-V/modules/input/source_analysis/regions/RegionEvidence.h>
+#include <VP-V/modules/motion/estimation/global_model/CameraMotion.h>
+#include <VP-V/modules/motion/estimation/global_model/link/CameraRecordPool.h>
 #include <VP-V/modules/repair/grain_split/BandMemo.h>
 #include <VP-V/modules/repair/grain_split/BandMemoFill.h>
 #include <VP-V/modules/repair/grain_split/GpuPassUtil.h>
@@ -1670,6 +1672,9 @@ namespace DetailPulseTestsNs
 			}
 		}
 
+		BEGIN_TEST_METHOD_ATTRIBUTE(DetailPulseGpuBandMemoOneComputeAndFallback)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(DetailPulseGpuBandMemoOneComputeAndFallback)
 		{
 			namespace GB = Vpv::GrainBand;
@@ -2107,15 +2112,162 @@ namespace DetailPulseTestsNs
 
 			Assert::AreEqual(2ull, dpPoison.mod.P11EnergyHits(), L"poisoned memo still hit P11");
 			const Image imgP11 = readbackCodes(outP11.planes[0].texture);
+			const Image imgNull = readbackCodes(outNull.planes[0].texture);
 			const Image imgPoison = readbackCodes(outPoison.planes[0].texture);
-			double maxBoostVsIn = 0.0, maxPoisonDelta = 0.0;
+			double maxBoostVsIn = 0.0, maxNullBoostVsIn = 0.0, maxNullDelta = 0.0, maxPoisonDelta = 0.0;
+			double sqNullDelta = 0.0, sqPoisonDelta = 0.0;
 			for (size_t i = 0; i < imgP11.v.size(); ++i)
 			{
+				const double dNull = imgP11.v[i] - imgNull.v[i];
+				const double dPoison = imgP11.v[i] - imgPoison.v[i];
 				maxBoostVsIn = (std::max)(maxBoostVsIn, std::fabs(imgP11.v[i] - c.frames[1].v[i]));
-				maxPoisonDelta = (std::max)(maxPoisonDelta, std::fabs(imgP11.v[i] - imgPoison.v[i]));
+				maxNullBoostVsIn = (std::max)(maxNullBoostVsIn, std::fabs(imgNull.v[i] - c.frames[1].v[i]));
+				maxNullDelta = (std::max)(maxNullDelta, std::fabs(dNull));
+				maxPoisonDelta = (std::max)(maxPoisonDelta, std::fabs(dPoison));
+				sqNullDelta += dNull * dNull;
+				sqPoisonDelta += dPoison * dPoison;
 			}
+			const double rmsNullDelta = std::sqrt(sqNullDelta / static_cast<double>(imgP11.v.size()));
+			const double rmsPoisonDelta = std::sqrt(sqPoisonDelta / static_cast<double>(imgP11.v.size()));
 			Assert::IsTrue(maxBoostVsIn > 0.5, L"non-vacuous: DP with real P11 actively boosts the coarse B-frame");
+			Assert::IsTrue(maxNullBoostVsIn > 0.5, L"non-vacuous: DP fallback (memo=nullptr) actively boosts the coarse B-frame");
 			Assert::IsTrue(maxPoisonDelta > 0.5, L"negative control: swapped/poisoned P11 re_s2 shifts DP output on the exact same input");
+			Assert::IsTrue(rmsNullDelta < 0.25 && maxNullDelta < 1.0,
+				L"DP P11 output matches memo=nullptr fallback quantitatively (accurate channel & code_scale2 ingest)");
+			Assert::IsTrue(maxNullDelta < 0.25 * maxPoisonDelta && rmsNullDelta < 0.25 * rmsPoisonDelta,
+				L"DP P11 parity vs memo=nullptr is strictly tighter than poisoned P11 divergence");
+		}
+
+		// W23-B3 M2#12 / HIGH #3: end-to-end DetailPulse::Module::Apply exercises vector-veto with trusted P7
+		// (Reason::Ok, confidence 0.85) on a pan-cut scene verdict: default params.vectorVeto=true suppresses
+		// restart (SceneVectorVetoes() >= 1, keeps history); negative control params.vectorVeto=false restarts.
+		BEGIN_TEST_METHOD_ATTRIBUTE(DetailPulseGpuVectorVetoSuppressesPanCutRestart)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(DetailPulseGpuVectorVetoSuppressesPanCutRestart)
+		{
+			using Reg = VpSkeleton::SkeletonMemo::Registration;
+			struct LogGuard { pl_log log = nullptr; explicit LogGuard(pl_log l) : log(l) {} ~LogGuard() { if (log) pl_log_destroy(&log); } };
+			struct D3dGuard { pl_d3d11 d3d = nullptr; explicit D3dGuard(pl_d3d11 d) : d3d(d) {} ~D3dGuard() { if (d3d) pl_d3d11_destroy(&d3d); } };
+			struct DispatchGuard { pl_dispatch d = nullptr; explicit DispatchGuard(pl_dispatch dp) : d(dp) {} ~DispatchGuard() { if (d) pl_dispatch_destroy(&d); } };
+			struct TexGuard { pl_gpu g = nullptr; pl_tex t = nullptr; TexGuard(pl_gpu gpu, pl_tex tex) : g(gpu), t(tex) {} ~TexGuard() { if (g && t) pl_tex_destroy(g, &t); } };
+			struct PulseGuard { pl_gpu g = nullptr; DetailPulse::Module mod; explicit PulseGuard(pl_gpu gpu) : g(gpu) {} ~PulseGuard() { mod.Release(g); } };
+
+			pl_log_params logParams{};
+			logParams.log_level = PL_LOG_NONE;
+			LogGuard logGuard(pl_log_create(PL_API_VER, &logParams));
+			std::string device;
+			const pl_d3d11_params deviceParams = ExtendedRangeGpuProbe::TestDeviceParams(&device);
+			D3dGuard d3dGuard(pl_d3d11_create(logGuard.log, &deviceParams));
+			Assert::IsNotNull(d3dGuard.d3d, L"Could not create the libplacebo test device");
+			pl_gpu gpu = d3dGuard.d3d->gpu;
+			DispatchGuard dispGuard(pl_dispatch_create(logGuard.log, gpu));
+			pl_dispatch dispatch = dispGuard.d;
+			Assert::IsNotNull(dispatch, L"pl_dispatch_create succeeded");
+
+			const int w = 128, h = 96;
+			const Coded c = MakeCoded(w, h, 2, 23.976, 4.0, false, 909u);
+			auto uploadFull = [&](const Image& img) {
+				std::vector<uint16_t> raw(img.v.size());
+				for (size_t i = 0; i < raw.size(); ++i)
+					raw[i] = static_cast<uint16_t>(static_cast<int>(img.v[i]) << 6);
+				pl_tex_params p{};
+				p.w = w; p.h = h; p.format = pl_find_named_fmt(gpu, "r16"); p.sampleable = true; p.initial_data = raw.data();
+				return pl_tex_create(gpu, &p);
+			};
+			auto readbackCodes = [&](pl_tex tex) {
+				pl_tex_params rp{};
+				rp.w = w; rp.h = h; rp.format = tex->params.format; rp.host_readable = true; rp.blit_dst = true;
+				TexGuard readable(gpu, pl_tex_create(gpu, &rp));
+				Assert::IsNotNull(readable.t);
+				pl_tex_blit_params bp{}; bp.src = tex; bp.dst = readable.t;
+				pl_tex_blit(gpu, &bp);
+				std::vector<uint16_t> raw(static_cast<size_t>(w) * h);
+				pl_tex_transfer_params dl{}; dl.tex = readable.t; dl.ptr = raw.data();
+				Assert::IsTrue(pl_tex_download(gpu, &dl));
+				Image out(w, h);
+				for (size_t i = 0; i < raw.size(); ++i) out.v[i] = raw[i] / 64.0;
+				return out;
+			};
+			auto frameOf = [](pl_tex tex) {
+				pl_frame f{};
+				f.num_planes = 1;
+				f.planes[0].texture = tex; f.planes[0].components = 1; f.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+				f.repr.sys = PL_COLOR_SYSTEM_BT_709; f.repr.levels = PL_COLOR_LEVELS_LIMITED;
+				f.repr.bits.sample_depth = 16; f.repr.bits.color_depth = 10; f.repr.bits.bit_shift = 6;
+				f.color = pl_color_space_bt709;
+				return f;
+			};
+
+			TexGuard tex0(gpu, uploadFull(c.frames[0])), tex1(gpu, uploadFull(c.frames[1]));
+			Assert::IsTrue(tex0.t != nullptr && tex1.t != nullptr);
+
+			VpSkeleton::SkeletonMemo memoP7;
+			CameraModel::CameraMotion cam;
+			cam.seq = 2u; cam.pairFrom = 1u; cam.pairTo = 2u;
+			cam.pairSeconds = 1.0 / 23.976;
+			cam.valid = true;
+			cam.reason = CameraModel::Reason::Ok;
+			cam.confidence = 0.85;
+			cam.params.type = CameraModel::ModelType::Translation;
+			cam.params.h[2] = 12.0; cam.params.h[5] = 0.0;
+			cam.picture.left = 0; cam.picture.top = 0; cam.picture.right = w; cam.picture.bottom = h;
+			VpSkeleton::OwnerFill p7Fill;
+			p7Fill.renderThreadOnly = false;
+			p7Fill.fill = [cam](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) -> bool {
+				if (req.seq != 2u) return false;
+				uint8_t buf[CameraLink::kRecordPodMaxBytes]{};
+				const size_t n = CameraLink::EncodeRecordPod(cam, buf, sizeof(buf));
+				if (n == 0u) return false;
+				out.bytes.assign(buf, buf + n);
+				return true;
+			};
+			Assert::IsTrue(memoP7.RegisterOwnerFill(VpSkeleton::kP7CameraFit, VpSkeleton::AcquireForm::Cpu,
+				VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP7CameraFit), std::move(p7Fill)) == Reg::Registered);
+
+			VpDetailRestore::SceneReaderFn panCutReader = [](uint64_t seq, FrameAnalysis::Scene& sc) -> bool {
+				sc = FrameAnalysis::Scene();
+				if (seq == 2u)
+				{
+					sc.cut = true;
+					sc.confirmed = true;
+					sc.cutStrength = 1.0f;
+				}
+				return true;
+			};
+
+			PulseGuard dpVeto(gpu), dpNoVeto(gpu);
+			pl_tex inputs[2] = { tex0.t, tex1.t };
+			pl_frame outVeto{}, outNoVeto{};
+			for (int k = 0; k < 2; ++k)
+			{
+				DetailPulse::Params pVeto;
+				Assert::IsTrue(pVeto.vectorVeto, L"DetailPulse::Params::vectorVeto defaults true");
+				pVeto.sequence = static_cast<uint64_t>(k) + 1u;
+				pVeto.sceneReader = panCutReader;
+				pVeto.memo = &memoP7;
+				Assert::IsTrue(dpVeto.mod.Apply(gpu, dispatch, frameOf(inputs[k]), pVeto, outVeto), W(dpVeto.mod.LastError().c_str()).c_str());
+
+				DetailPulse::Params pNoVeto = pVeto;
+				pNoVeto.vectorVeto = false;
+				Assert::IsTrue(dpNoVeto.mod.Apply(gpu, dispatch, frameOf(inputs[k]), pNoVeto, outNoVeto), W(dpNoVeto.mod.LastError().c_str()).c_str());
+			}
+
+			Assert::AreEqual(1ull, dpVeto.mod.SceneVectorVetoes(), L"DP with default vectorVeto=true vetoes pan-cut restart on trusted P7");
+			Assert::AreEqual(1.0f, dpVeto.mod.LastHistoryKeep(), 1e-6f, L"vetoed pan keeps full history");
+			Assert::AreEqual(0ull, dpNoVeto.mod.SceneVectorVetoes(), L"negative control: vectorVeto=false does NOT veto pan-cut restart");
+			Assert::AreEqual(0.0f, dpNoVeto.mod.LastHistoryKeep(), 1e-6f, L"negative control: unvetoed pan cut restarts history");
+
+			const Image imgVeto = readbackCodes(outVeto.planes[0].texture);
+			const Image imgNoVeto = readbackCodes(outNoVeto.planes[0].texture);
+			double maxVetoBoost = 0.0, maxVetoVsNoVeto = 0.0;
+			for (size_t i = 0; i < imgVeto.v.size(); ++i)
+			{
+				maxVetoBoost = (std::max)(maxVetoBoost, std::fabs(imgVeto.v[i] - c.frames[1].v[i]));
+				maxVetoVsNoVeto = (std::max)(maxVetoVsNoVeto, std::fabs(imgVeto.v[i] - imgNoVeto.v[i]));
+			}
+			Assert::IsTrue(maxVetoBoost > 0.5, L"vetoed DP retained frame 0 history and boosted coarse frame 1");
+			Assert::IsTrue(maxVetoVsNoVeto > 0.5, L"negative control: suppressing vs taking restart materially alters DP GPU output");
 		}
 	};
 }

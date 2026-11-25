@@ -646,6 +646,9 @@ namespace VideoProcessorTest
 		// W23-B3 J#6 (MC-INTERP GEM-138 residual): stillHere short-circuit returns a0 bit-for-bit on
 		// stationary pixels without blanket-skipping moving regions; single cat_a/cat_b under EXACT_EQUAL
 		// preserves exact equal moving samples bit-for-bit and preserves grain RMS on moving grain regions.
+		BEGIN_TEST_METHOD_ATTRIBUTE(McInterpStillHereAndExactEqualBitExact)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(McInterpStillHereAndExactEqualBitExact)
 		{
 			TargetLutGpuFixture fixture;
@@ -849,6 +852,9 @@ namespace VideoProcessorTest
 		// W23-B3 J#6 / M2#1: 24p->120Hz (5 phases t = 0.0, 0.2, 0.4, 0.6, 0.8) for one source pair (seqA, seqB)
 		// computes kBandMemo ONCE per source frame (fills == 2 total) and reuses cached bands across all interpolated
 		// phases, with bit-exact output identity vs memo=nullptr fallback (which falls back on every interpolated phase).
+		BEGIN_TEST_METHOD_ATTRIBUTE(McInterp24pTo120HzOneBandMemoComputePerFrame)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(McInterp24pTo120HzOneBandMemoComputePerFrame)
 		{
 			namespace GB = Vpv::GrainBand;

@@ -1089,11 +1089,12 @@ namespace D8SceneJudgeAgreementNs
 					VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP7CameraFit), std::move(f)) == Reg::Registered);
 			};
 
-			auto registerTrustedP2 = [&](VpSkeleton::SkeletonMemo& memo) {
-				const float global[2][4] = { { 4.0f, 0.0f, 0.1f, 0.85f }, { -4.0f, 0.0f, 0.1f, 0.85f } };
+			auto registerP2 = [&](VpSkeleton::SkeletonMemo& memo, float bwdWeight) {
+				const float global[2][4] = { { 4.0f, 0.0f, 0.1f, 0.85f }, { -4.0f, 0.0f, 0.1f, bwdWeight } };
 				const float second[2][4] = {};
 				const VpMotion::P2PairRecord rec = VpMotion::MakeP2PairRecord(kSeq - 1u, kSeq, 1u, global, second, true, false);
-				Assert::IsTrue(OpticalFlowTrust::GlobalUsable(rec.global[0]) && OpticalFlowTrust::GlobalUsable(rec.global[1]));
+				Assert::IsTrue(OpticalFlowTrust::GlobalUsable(rec.global[0]));
+				Assert::AreEqual(bwdWeight > 0.5f, OpticalFlowTrust::GlobalUsable(rec.global[1]));
 				VpSkeleton::OwnerFill f;
 				f.renderThreadOnly = false;
 				f.fill = [rec](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) -> bool {
@@ -1106,6 +1107,9 @@ namespace D8SceneJudgeAgreementNs
 				};
 				Assert::IsTrue(memo.RegisterOwnerFill(VpSkeleton::kP2VectorPair, VpSkeleton::AcquireForm::Cpu,
 					VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP2VectorPair), std::move(f)) == Reg::Registered);
+			};
+			auto registerTrustedP2 = [&](VpSkeleton::SkeletonMemo& memo) {
+				registerP2(memo, 0.85f);
 			};
 
 			// 3. Trusted P7 pan (Reason::Ok, confidence = 0.85 >= 0.5):
@@ -1135,7 +1139,8 @@ namespace D8SceneJudgeAgreementNs
 				Assert::AreEqual(1.0f, aVeto.historyKeep, 1e-6f, L"vetoed pan keeps full history");
 			}
 
-			// 4. P2 fallback when P7 is absent: trusted P2 vetoes pan cut on DP/TR, unvetoed on default U7.
+			// 4. P2 fallback when P7 is absent: trusted forward+backward P2 vetoes pan cut on DP/TR, unvetoed on default U7;
+			//    negative control (M3 bwdOk): when backward global flow fails trust (w <= 0.5f), pan cut is NOT vetoed.
 			{
 				VpSkeleton::SkeletonMemo memoP2;
 				registerTrustedP2(memoP2);
@@ -1145,6 +1150,16 @@ namespace D8SceneJudgeAgreementNs
 				Assert::IsFalse(aVetoP2.restart, L"DP/TR vector-veto uses P2 fallback when P7 absent");
 				Assert::IsTrue(aVetoP2.vectorVetoed);
 				Assert::AreEqual(1.0f, aVetoP2.historyKeep, 1e-6f);
+
+				for (float badBwdWeight : { 0.0f, 0.25f, 0.5f })
+				{
+					VpSkeleton::SkeletonMemo memoP2BadBwd;
+					registerP2(memoP2BadBwd, badBwdWeight);
+					const SceneRestartAnswer aBadBwd = SceneRestartOf(kSeq, panCutReader, false, true, nullptr, &memoP2BadBwd);
+					Assert::IsTrue(aBadBwd.restart && !aBadBwd.vectorVetoed,
+						L"negative control (M3): P2 backward global flow failing trust (w <= 0.5) must NOT veto cut");
+					Assert::AreEqual(0.0f, aBadBwd.historyKeep, 1e-6f);
+				}
 			}
 
 			// 5. Negative control (a): P7 Reason::Cut fails closed EVEN IF P2 is trusted (real cut still restarts!).

@@ -914,13 +914,14 @@ namespace ProductCatalogTestsNs
 			// exactly those two names are exempt, every other GrainSplit:: reference still counts.
 			// WAIVER-15C-C3B-P11-TESTS: DP/TR now read kP11RegionBlockStats (15c C3b) using RegionEvidence grid sizing and
 			// VpLaneProducts::P11BandTextures / ExtractP11BandTextures; still-NotRead P10/P4 tokens and all other product refs still trip.
-			const std::regex reads("\\bk(P10|P4)\\w*|\\bGrainSplit::(?!DefaultParams\\b|Params\\b)|SourceStats\\.h|LaneGpuProducts|LaneCpuProducts|\\bLaneProducts\\b|VpLaneProducts::(?!P11BandTextures\\b|ExtractP11BandTextures\\b)|Products\\.h|FrameAnalysisStore|\\bProductId\\b");
+			const std::regex reads("\\bk(P10|P4)\\w*|\\bGrainSplit::(?!DefaultParams\\b|Params\\b)|SourceStats\\.h|LaneGpuProducts|LaneCpuProducts|\\bLaneProducts\\b|\\bVpLaneProducts\\b(?!::(?:P11BandTextures|ExtractP11BandTextures)\\b)|Products\\.h|FrameAnalysisStore|\\bProductId\\b");
 			// The teeth: a real P10/P4 product / accessor read in a declared-NotRead file still trips the scan; the law constants and live P11 reader alone do not.
 			Assert::IsTrue(std::regex_search(std::string("GrainSplit::Gpu::Splitter s; s.Compute(gpu);"), reads), L"a GrainSplit producer reference trips the scan");
 			Assert::IsTrue(std::regex_search(std::string("auto d = GrainSplit::ReaderFallback(\"x\", st);"), reads), L"a GrainSplit product accessor trips the scan");
 			Assert::IsTrue(std::regex_search(std::string("const auto& t = store.Get(kP10GrainSplit);"), reads), L"a P10 product alias trips the scan");
 			Assert::IsTrue(std::regex_search(std::string("const auto& t = store.Get(kP4SourceStats);"), reads), L"a P4 product alias trips the scan");
 			Assert::IsTrue(std::regex_search(std::string("VpLaneProducts::RegionStatsKernel k;"), reads), L"non-P11-band VpLaneProducts references still trip the scan");
+			Assert::IsTrue(std::regex_search(std::string("using namespace VpLaneProducts;"), reads), L"using-directive for VpLaneProducts trips the scan");
 			Assert::IsTrue(std::regex_search(std::string("GrainSplit::DefaultParams(); GrainSplit::ParamsView v;"), reads), L"only the exact law names are exempt");
 			Assert::IsFalse(std::regex_search(std::string("constexpr GrainSplit::Params kGrainLaw = GrainSplit::DefaultParams();"), reads), L"the U1 law constants are not a product read");
 			Assert::IsFalse(std::regex_search(std::string("auto bt = VpLaneProducts::ExtractP11BandTextures(pin);"), reads), L"live P11 band extraction is exempt");
