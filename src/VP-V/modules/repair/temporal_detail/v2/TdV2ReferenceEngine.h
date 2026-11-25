@@ -841,9 +841,9 @@ namespace TdV2
 		bool driftReducedSearchUsed = false;        // TD-U5: true when seeded local block search measured kDrift ("drift: reduced")
 		EmpiricalOwnErrorPrior empiricalOwnError;   // TD-U1 A2e per-band x activity-class own-error prior U_j(class)
 		AlignedSharpnessSummary alignedSharpness;   // TD-U1 motion-aligned relative sharpness r_t (abstaining focus cells)
-		// Plan 6.6 / CHR-HIGH-3: Exported post-gate luma cell weights [band][ref][cell] + explicit per-slot RefRole
-		// so chroma `reuse_luma` maps each ref slot strictly by matching RefRole (never blind index k).
-		std::vector<double> lumaCellWeights[3][kMaxBlendRefs];
+		// Plan 6.6 / CHR-HIGH-3 / RED-BUG-5: Exported post-gate luma cell weights [band][ref][cell] + explicit per-slot RefRole
+		// aligned directly with ChromaProcessInput::lumaCellWeights so callers pass `&lumaRes.lumaCellWeights` cleanly.
+		std::array<std::array<std::vector<double>, kMaxBlendRefs>, 3> lumaCellWeights;
 		RefRole lumaRefRoles[kMaxBlendRefs] = {};
 		int lumaActiveRefCount = 0;
 	};
@@ -1225,12 +1225,37 @@ namespace TdV2
 					tryAddRefSpec(in.nextPeak.cleanPlane, in.nextPeak.motion, in.nextPeak.isExactCopyOfCurrent, RefRole::NextPeak, in.nextPeak.cameraHomography);
 				if (in.prevPeak2.cleanPlane != nullptr)
 					tryAddRefSpec(in.prevPeak2.cleanPlane, in.prevPeak2.motion, in.prevPeak2.isExactCopyOfCurrent, RefRole::PrevPeak2, in.prevPeak2.cameraHomography);
-				// TD-U5 (H-4 / Owner D2 / UPG-HIGH-1): Single-resample anchored carry from last confirmed peak along composed vector,
-				// treated as a second past peak (PrevPeak2) for A1 (NEVER frame-to-frame chained resample).
-				// UPG-HIGH-1: NEVER inject anchorClean_ when in.prevPeak is the exact same peak (anchorAgeFrames_ <= 1),
-				// which would create self-instrumentation (d_prevPeak == d_anchor -> c_IV == C_00)!
-				const bool anchorDuplicatesPrevPeak = (in.prevPeak.cleanPlane != nullptr) && (anchorAgeFrames_ <= 1);
-				if (cfg_.enableAnchoredCarry && hasAnchor_ && !anchorDuplicatesPrevPeak &&
+				// TD-U5 (H-4 / Owner D2 / UPG-HIGH-1 / RED-BUG-7a): Single-resample anchored carry from last confirmed peak
+				// along composed vector, treated as a second past peak (PrevPeak2) for A1 (NEVER chained resample).
+				// RED-BUG-7a: Detect same-GOP duplicate peak across the ENTIRE GOP span (age >= 1, not just age <= 1!)
+				// by strided + exact plane equality so P_0 is NEVER self-instrumented against itself on valleys t=2..7!
+				auto planesMatchExact = [](const TdV2Plane& a, const TdV2Plane& b) -> bool
+				{
+					if (a.w != b.w || a.h != b.h || a.Empty())
+						return false;
+					if (&a == &b)
+						return true;
+					const size_t n = a.v.size();
+					const size_t stride = (std::max<size_t>)(1u, n / 64u);
+					for (size_t i = 0; i < n; i += stride)
+					{
+						if (!(std::fabs(a.v[i] - b.v[i]) <= 1e-6))
+							return false;
+					}
+					for (size_t i = 0; i < n; ++i)
+					{
+						if (!(std::fabs(a.v[i] - b.v[i]) <= 1e-6))
+							return false;
+					}
+					return true;
+				};
+				const bool anchorDuplicatesPrevPeak =
+					(in.prevPeak.cleanPlane != nullptr) &&
+					(anchorAgeFrames_ <= 1 || planesMatchExact(anchorClean_, *in.prevPeak.cleanPlane));
+				const bool anchorDuplicatesPrevPeak2 =
+					(in.prevPeak2.cleanPlane != nullptr) &&
+					planesMatchExact(anchorClean_, *in.prevPeak2.cleanPlane);
+				if (cfg_.enableAnchoredCarry && hasAnchor_ && !anchorDuplicatesPrevPeak && !anchorDuplicatesPrevPeak2 &&
 				    anchorClean_.w == w && anchorClean_.h == h &&
 				    anchorAgeFrames_ >= 1 && anchorAgeFrames_ <= maxAnchorAge)
 				{
@@ -1719,7 +1744,7 @@ namespace TdV2
 
 			// Role-based independent A1 instrument partner lookup (NEVER allows Carry <-> PrevPeak/PrevPeak2/NextPeak
 			// cross-instrumentation since Carry shares recursive past error; plan s1.1 L70 & MEDIUM audit).
-			auto findIndependentA1Partner = [&](int k) -> int
+			auto findIndependentA1Partner = [&](int k, size_t cIdx, int b) -> int
 			{
 				const RefRole myRole = refs[k].role;
 				int primary = -1;
@@ -1727,6 +1752,9 @@ namespace TdV2
 				for (int j = 0; j < K; ++j)
 				{
 					if (j == k) continue;
+					// RED-BUG-7b: Exclude any ref with motionGate <= 0 on this cell/band (drift-barred, held-out-rejected, or occluded).
+					const double jGate = (b == 0) ? refs[j].motionGate.gateL[cIdx] : refs[j].motionGate.gateMH[cIdx];
+					if (!(jGate > 0.0)) continue;
 					const RefRole other = refs[j].role;
 					if (other == RefRole::Carry)
 						continue; // Carry is NEVER a valid A1 instrument for any reference!
@@ -1953,6 +1981,19 @@ namespace TdV2
 						const int px0 = (std::max)(active.x0, (cx - bandPoolR) * cellPx);
 						const int px1 = (std::min)(active.x1, (cx + bandPoolR + 1) * cellPx);
 
+						// RED-BUG-7b: Only require validPx & gate > 0 for refs active on the center cell cIdx,
+						// so a drift-barred / held-out-rejected anchor (or occluded ref) NEVER zeroes out valid peers!
+						bool cellRefActive[kMaxBlendRefs] = {};
+						bool anyCellRefActive = false;
+						for (int k = 0; k < K; ++k)
+						{
+							const double cGate = (b == 0) ? refs[k].motionGate.gateL[cIdx] : refs[k].motionGate.gateMH[cIdx];
+							cellRefActive[k] = (cGate > 0.0);
+							if (cellRefActive[k]) anyCellRefActive = true;
+						}
+						if (!anyCellRefActive)
+							continue;
+
 						for (int y = py0; y < py1; ++y)
 						{
 							const int pcy = (std::min)(res.cellsH - 1, y / cellPx);
@@ -1969,6 +2010,11 @@ namespace TdV2
 								const double curV = curB.at(x, y);
 								for (int k = 0; k < K; ++k)
 								{
+									if (!cellRefActive[k])
+									{
+										diffs[k] = 0.0;
+										continue;
+									}
 									const double pGate = (b == 0) ? refs[k].motionGate.gateL[pCell] : refs[k].motionGate.gateMH[pCell];
 									if (refs[k].validPx[pIdx] == 0u || pGate <= 0.0)
 									{
@@ -2034,12 +2080,19 @@ namespace TdV2
 						}
 
 						// Precompute grain-corrected three-cornered-hat c_IV per ref for A2e frame prior pooling.
+						auto refsCollinear = [](double ckk, double cjj, double ckj) -> bool
+						{
+							const double mx = (std::max)(ckk, cjj);
+							return (mx > kEngineNumFloor) && ((ckk + cjj - 2.0 * ckj) <= 1e-4 * mx);
+						};
 						const double psdScale = in.psdShape.ForBand(b);
 						bool cellContributedA2e = false;
 						for (int k = 0; k < K; ++k)
 						{
-							const int partner = findIndependentA1Partner(k);
-							if (partner >= 0)
+							if (!cellRefActive[k])
+								continue;
+							const int partner = findIndependentA1Partner(k, cIdx, b);
+							if (partner >= 0 && !refsCollinear(cm.C[k][k], cm.C[partner][partner], cm.C[k][partner]))
 							{
 								cm.hasIndependentPartner[k] = true;
 								double subpixelBias = 0.0;
@@ -2204,7 +2257,7 @@ namespace TdV2
 							bool cellContributed = false;
 							for (int k = 0; k < K; ++k)
 							{
-								const int partner = findIndependentA1Partner(k);
+								const int partner = findIndependentA1Partner(k, ci, b);
 								if (partner >= 0 && cm.hasIndependentPartner[k] && pm.hasPartner[k])
 								{
 									cm.cIvRaw[k] = wCur * cm.cIvRaw[k] + wPrev * pm.cIvRaw[k];
@@ -2346,9 +2399,31 @@ namespace TdV2
 							continue;
 
 						const double (&C)[kMaxBlendRefs][kMaxBlendRefs] = cm.C;
+						// RED-BUG-7b: Determine per-ref active mask (motionGate > 0) BEFORE computing cVec / solving QP
+						// so drift-barred / held-out-rejected anchors or occluded refs NEVER crush peer cA1 or steal simplex budget!
+						bool refActive[kMaxBlendRefs] = {};
+						int subMap[kMaxBlendRefs] = {};
+						int subK = 0;
+						for (int k = 0; k < K; ++k)
+						{
+							const double mGate = (b == 0) ? refs[k].motionGate.gateL[cIdx] : refs[k].motionGate.gateMH[cIdx];
+							if (mGate > 0.0)
+							{
+								refActive[k] = true;
+								subMap[subK++] = k;
+							}
+						}
+						if (subK == 0)
+							continue;
+
 						double cVec[kMaxBlendRefs] = {};
 						for (int k = 0; k < K; ++k)
 						{
+							if (!refActive[k])
+							{
+								cVec[k] = 0.0;
+								continue;
+							}
 							// A2 prior for ref k on band b (TD-U3 / H-1 / UPG-HIGH-5):
 							// - On unidentified transforms when A2e empirical prior is active and no explicit codec step was supplied:
 							//   * Single-ref (no independent A1 partner): use conservative class median U_j(class) * cellStepScaleSq.
@@ -2394,7 +2469,10 @@ namespace TdV2
 								cellUsedSingleRefA2 = true;
 								for (int j = 0; j < K; ++j)
 								{
-									if (j == k || refs[j].isExactCopy)
+									if (j == k || refs[j].isExactCopy || !refActive[j])
+										continue;
+									const double mxKJ = (std::max)(C[k][k], C[j][j]);
+									if (mxKJ > kEngineNumFloor && (C[k][k] + C[j][j] - 2.0 * C[k][j]) <= 1e-4 * mxKJ)
 										continue;
 									double capBias = 0.0;
 									if (cfg_.enableSubpixelHAttenuationDebias && b == 2 &&
@@ -2426,7 +2504,7 @@ namespace TdV2
 							int nC = 0;
 							for (int k = 0; k < K; ++k)
 							{
-								if (!refs[k].isExactCopy)
+								if (refActive[k] && !refs[k].isExactCopy)
 								{
 									sumC += (cVec[k] > 0.0 ? cVec[k] : 0.0);
 									++nC;
@@ -2436,7 +2514,24 @@ namespace TdV2
 						}
 						cellOwnErrU[b][cIdx] = blockOwnU;
 
-						const BlendSolveResult solved = SolveConvexWeights(C, cVec, K, kDefaultTraceRegScale, standIns, cfg_.solverMode);
+						// Compact active subproblem before SolveConvexWeights so barred/occluded refs never distort C^-1 or simplex!
+						double subC[kMaxBlendRefs][kMaxBlendRefs] = {};
+						double subCVec[kMaxBlendRefs] = {};
+						for (int i = 0; i < subK; ++i)
+						{
+							subCVec[i] = cVec[subMap[i]];
+							for (int j = 0; j < subK; ++j)
+								subC[i][j] = C[subMap[i]][subMap[j]];
+						}
+						const BlendSolveResult subSolved = SolveConvexWeights(subC, subCVec, subK, kDefaultTraceRegScale, standIns, cfg_.solverMode);
+						BlendSolveResult solved{};
+						solved.nonFiniteClosed = subSolved.nonFiniteClosed;
+						solved.singular = subSolved.singular;
+						if (!solved.nonFiniteClosed && !solved.singular)
+						{
+							for (int i = 0; i < subK; ++i)
+								solved.weights[subMap[i]] = subSolved.weights[i];
+						}
 						if (solved.nonFiniteClosed)
 						{
 							nonFiniteCellFlag[cIdx] = 1u;

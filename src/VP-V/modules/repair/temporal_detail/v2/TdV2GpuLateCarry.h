@@ -82,8 +82,8 @@ vec2 mm = texelFetch(motion_meta, ivec2(cx, cy), 0).xy;
 int mCls = int(round(mm.x));
 float curC = texelFetch(cur_clean, p, 0).x;
 
-// UPG-HIGH-3: Strictly zero delta on Overlay (3), DynamicTexture (2), invalid motion, or non-finite values!
-if (mm.y < 0.5 || mCls == 2 || mCls == 3 || td_is_bad(mv.x) || td_is_bad(mv.y) || td_is_bad(curC))
+// UPG-HIGH-3 / RED-BUG-4: Strictly zero delta on Overlay (3), DynamicTexture (4), invalid motion, or non-finite values!
+if (mm.y < 0.5 || mCls == TD_CLS_OVERLAY || mCls == TD_CLS_DYN_TEX || td_is_bad(mv.x) || td_is_bad(mv.y) || td_is_bad(curC))
 {
     imageStore(out_delta, p, vec4(0.0));
     imageStore(next_delta, p, vec4(0.0));
@@ -530,7 +530,10 @@ imageStore(next_valid, p, vec4(outV, 0.0, 0.0, 0.0));
 			const float uStepVar = static_cast<float>(in.stepTotalVar);
 			const float uKappa = static_cast<float>(ClampPixelBoundKappa(in.pixelBoundKappa));
 
-			const std::string hdr = Detail::StaticGeomDefines(w, h, cw, ch, cellPx) + Shaders::kCoreHelpers;
+			std::string hdr = Detail::StaticGeomDefines(w, h, cw, ch, cellPx);
+			hdr += VpvGpu::DefineInt("TD_CLS_OVERLAY", static_cast<int>(RegionMotionClass::Overlay));
+			hdr += VpvGpu::DefineInt("TD_CLS_DYN_TEX", static_cast<int>(RegionMotionClass::DynamicTexture));
+			hdr += Shaders::kCoreHelpers;
 			pl_shader_desc d[10] = {
 				VpvGpu::Sampled("cur_clean", in.curCleanTex),
 				VpvGpu::Sampled("prev_delta", deltaTex_[curSlot_]),

@@ -1373,14 +1373,16 @@ int y0 = max(ay0, cell.y * TD_CELL_PX);
 int x1 = min(ax1, (cell.x + 1) * TD_CELL_PX);
 int y1 = min(ay1, (cell.y + 1) * TD_CELL_PX);
 
-bool cellGateL = true;
-bool cellGateMH = true;
+int cellGateMaskL = 0;
+int cellGateMaskMH = 0;
 for (int k = 0; k < K; ++k)
 {
     vec2 mg = texelFetch(motion_gate, ivec2(k * TD_CW + cell.x, cell.y), 0).xy;
-    if (mg.x <= 0.0) cellGateL = false;
-    if (mg.y <= 0.0) cellGateMH = false;
+    if (mg.x > 0.0) cellGateMaskL |= (1 << k);
+    if (mg.y > 0.0) cellGateMaskMH |= (1 << k);
 }
+bool cellGateL = (cellGateMaskL != 0);
+bool cellGateMH = (cellGateMaskMH != 0);
 
 float curM2 = 0.0;
 float curD3_2 = 0.0;
@@ -1453,7 +1455,7 @@ for (int sy = 0; sy < subN; ++sy)
         uint packedFl = uint(round(texelFetch(ref_flags, p, 0).x * 65535.0));
         if ((packedFl & 512u) != 0u)
             badMask |= 16u; // Bit 4 (16u): at least one ref_clean pixel in this cell is non-finite
-        bool allRefValid = true;
+        int refValidMask = 0;
         vec4 rb[3];
         for (int k = 0; k < K; ++k)
         {
@@ -1461,41 +1463,39 @@ for (int sy = 0; sy < subN; ++sy)
             refM2[k] += rb[k].y * rb[k].y;
             refD3_2[k] += rb[k].w * rb[k].w;
             int fl = td_unpack_ref_flags(packedFl, k);
-            if ((fl & 1) == 0) allRefValid = false;
+            if ((fl & 1) != 0) refValidMask |= (1 << k);
             if ((fl & 2) != 0) borderCnt += 1.0;
             if ((fl & 4) != 0) badMask |= (1u << uint(k));
         }
 
-        if (allRefValid)
+        for (int b = 0; b < 3; ++b)
         {
-            for (int b = 0; b < 3; ++b)
+            int gMask = (b == 0) ? cellGateMaskL : cellGateMaskMH;
+            if (gMask == 0 || (refValidMask & gMask) != gMask) continue;
+            float cv = td_band_comp(cb, b);
+            vec3 dv = vec3(0.0);
+            bool finiteOk = true;
+            for (int k = 0; k < K; ++k)
             {
-                bool gOk = (b == 0) ? cellGateL : cellGateMH;
-                if (!gOk) continue;
-                float cv = td_band_comp(cb, b);
-                vec3 dv = vec3(0.0);
-                bool finiteOk = true;
-                for (int k = 0; k < K; ++k)
+                if ((gMask & (1 << k)) == 0) continue;
+                float d = cv - td_band_comp(rb[k], b);
+                if (td_is_bad(d))
                 {
-                    float d = cv - td_band_comp(rb[k], b);
-                    if (td_is_bad(d))
-                    {
-                        finiteOk = false;
-                        break;
-                    }
-                    if (k == 0) dv.x = d;
-                    else if (k == 1) dv.y = d;
-                    else dv.z = d;
+                    finiteOk = false;
+                    break;
                 }
-                if (finiteOk)
+                if (k == 0) dv.x = d;
+                else if (k == 1) dv.y = d;
+                else dv.z = d;
+            }
+            if (finiteOk)
+            {
+                sumD[b] += dv;
+                cntB[b] += 1.0;
+                if (TD_CELL_PX <= 16)
                 {
-                    sumD[b] += dv;
-                    cntB[b] += 1.0;
-                    if (TD_CELL_PX <= 16)
-                    {
-                        singleValid[b] = true;
-                        singleD[b] = dv;
-                    }
+                    singleValid[b] = true;
+                    singleD[b] = dv;
                 }
             }
         }
@@ -1748,7 +1748,7 @@ for (int b = 0; b < 3; ++b)
         }
         else
         {
-            bool gOk = (b == 0) ? cellGateL : cellGateMH;
+            int gMask = (b == 0) ? cellGateMaskL : cellGateMaskMH;
             int totalSub = subN * subN;
             for (int subIdx = 0; subIdx < totalSub; ++subIdx)
             {
@@ -1758,14 +1758,14 @@ for (int b = 0; b < 3; ++b)
                 int ox = sx * 16 + lx;
                 int py = cell.y * TD_CELL_PX + oy;
                 int px = cell.x * TD_CELL_PX + ox;
-                if (gOk && oy < TD_CELL_PX && ox < TD_CELL_PX && py >= y0 && py < y1 && px >= x0 && px < x1)
+                if (gMask != 0 && oy < TD_CELL_PX && ox < TD_CELL_PX && py >= y0 && py < y1 && px >= x0 && px < x1)
                 {
                     ivec2 p = ivec2(px, py);
                     uint packedFl = uint(round(texelFetch(ref_flags, p, 0).x * 65535.0));
                     bool allOk = true;
                     float cv = td_band_comp(td_fetch_cur_band(p, halfActive), b);
                     vec3 dv = vec3(0.0);
-                    if (K > 0)
+                    if (K > 0 && (gMask & 1) != 0)
                     {
                         if ((td_unpack_ref_flags(packedFl, 0) & 1) == 0) allOk = false;
                         else
@@ -1775,7 +1775,7 @@ for (int b = 0; b < 3; ++b)
                             else dv.x = d0;
                         }
                     }
-                    if (allOk && K > 1)
+                    if (allOk && K > 1 && (gMask & 2) != 0)
                     {
                         if ((td_unpack_ref_flags(packedFl, 1) & 1) == 0) allOk = false;
                         else
@@ -1785,7 +1785,7 @@ for (int b = 0; b < 3; ++b)
                             else dv.y = d1;
                         }
                     }
-                    if (allOk && K > 2)
+                    if (allOk && K > 2 && (gMask & 4) != 0)
                     {
                         if ((td_unpack_ref_flags(packedFl, 2) & 1) == 0) allOk = false;
                         else
@@ -1955,10 +1955,11 @@ float td_subpixel_h_atten_bias(vec2 mvP, vec2 mvQ, float curHVar, float grainHVa
     return (!td_is_bad(bias) && bias > 0.0) ? bias : 0.0;
 }
 
-// Mirrors TdV2ReferenceEngine::findIndependentA1Partner (plan s1.1 L70):
-// Roles: 0=PrevPeak, 1=NextPeak, 2=Carry, 3=PrevPeak2.
-// Carry (role == 2) NEVER instruments another reference in A1 (shares recursive past error).
-int td_find_independent_a1_partner(int K, int k)
+// Mirrors TdV2ReferenceEngine::findIndependentA1Partner (plan s1.1 L70, RED-BUG-6/7b):
+// Canonical RefRole numbering matching TdV2Config.h: 0=PrevPeak, 1=NextPeak, 2=PrevPeak2, 3=Carry.
+// Carry (role == 3) NEVER instruments another reference in A1 (shares recursive past error).
+// Any reference cleared in activeMask (motionGate <= 0, drift-barred, or held-out-rejected) is strictly excluded.
+int td_find_independent_a1_partner_masked(int K, int k, int activeMask)
 {
     int myRole = td_ref_role(k);
     int primary = -1;
@@ -1966,29 +1967,44 @@ int td_find_independent_a1_partner(int K, int k)
     for (int j = 0; j < K; ++j)
     {
         if (j == k) continue;
+        if ((activeMask & (1 << j)) == 0) continue;
         int other = td_ref_role(j);
-        if (other == 2) continue;
+        if (other == 3) continue;
         if (myRole == 0)
         {
             if (other == 1) primary = j;
-            else if (other == 3) secondary = j;
+            else if (other == 2) secondary = j;
         }
         else if (myRole == 1)
         {
             if (other == 0) primary = j;
-            else if (other == 3) secondary = j;
+            else if (other == 2) secondary = j;
         }
-        else if (myRole == 3)
+        else if (myRole == 2)
         {
             if (other == 1) primary = j;
             else if (other == 0) secondary = j;
         }
-        else if (myRole == 2)
+        else if (myRole == 3)
         {
             if (other == 1) primary = j;
         }
     }
     return (primary >= 0) ? primary : secondary;
+}
+
+int td_find_independent_a1_partner(int K, int k)
+{
+    return td_find_independent_a1_partner_masked(K, k, 7);
+}
+
+// RED-BUG-7a: Detect collinear/duplicate references where E[(d_k - d_j)^2] = C_kk + C_jj - 2*C_kj ~ 0.
+bool td_refs_collinear(float ckk, float cjj, float ckj)
+{
+    float mx = max(ckk, cjj);
+    if (!(mx > TD_NUM_FLOOR))
+        return false;
+    return (ckk + cjj - 2.0 * ckj) <= 1e-4 * mx;
 }
 
 float td_psd_scale(int b)
@@ -2471,16 +2487,22 @@ for (int b = 0; b < 3; ++b)
             C[2][1] = C[1][2];
             C[2][2] = max(0.0, s22 * invN + muPool.z * muPool.z);
 
+            int ebActMask = 0;
+            int ebAncIdx = int(round(u_anchor_ref_idx));
+            bool ebAncBarred = (ebAncIdx >= 0) && (texelFetch(anchor_barred, cell, 0).x > 0.5);
+            for (int kk = 0; kk < K; ++kk)
+            {
+                vec2 mgK = texelFetch(motion_gate, ivec2(kk * TD_CW + cx, cy), 0).xy;
+                float mGK = (b == 0) ? mgK.x : mgK.y;
+                if (kk == ebAncIdx && ebAncBarred) mGK = 0.0;
+                if (mGK > 0.0) ebActMask |= (1 << kk);
+            }
             for (int k = 0; k < K; ++k)
             {
-                if (td_is_exact_copy(k)) continue;
-                int partner = td_find_independent_a1_partner(K, k);
+                if (td_is_exact_copy(k) || (ebActMask & (1 << k)) == 0) continue;
+                int partner = td_find_independent_a1_partner_masked(K, k, ebActMask);
                 if (partner < 0) continue;
-                vec2 mg = texelFetch(motion_gate, ivec2(k * TD_CW + cx, cy), 0).xy;
-                float mGate = (b == 0) ? mg.x : mg.y;
-                if (k == int(round(u_anchor_ref_idx)) && texelFetch(anchor_barred, cell, 0).x > 0.5)
-                    mGate = 0.0;
-                if (!(mGate > 0.0)) continue;
+                if (td_refs_collinear(C[k][k], C[partner][partner], C[k][partner])) continue;
                 float gTerm = retG * bGain * psdScale;
                 float cRaw = C[k][partner] - gTerm;
                 float cClip = clamp(cRaw, 0.0, max(0.0, min(C[k][k], C[partner][partner])));
@@ -2547,11 +2569,12 @@ for (int b = 0; b < 3; ++b)
         barrier();
 
         // Pass 2: robust trimmed estimate of U_j(class) (excludes right-tail outlier cells above trim cap).
+        // RED-BUG-1 (FXC X3663): Keep ALL memoryBarrierShared()/barrier() calls strictly OUTSIDE if (p1Cnt > 3.5)!
+        float tSum = 0.0;
+        float tCnt = 0.0;
         if (p1Cnt > 3.5)
         {
             float trimCap = td_eb_trim_cap;
-            float tSum = 0.0;
-            float tCnt = 0.0;
             for (int idx = tid; idx < totalCells; idx += 256)
             {
                 int cx = idx % TD_CW;
@@ -2584,16 +2607,22 @@ for (int b = 0; b < 3; ++b)
                 Cmat[0][0] = C00; Cmat[0][1] = C01; Cmat[0][2] = C02;
                 Cmat[1][0] = C01; Cmat[1][1] = C11; Cmat[1][2] = C12;
                 Cmat[2][0] = C02; Cmat[2][1] = C12; Cmat[2][2] = C22;
+                int ebActMask2 = 0;
+                int ebAncIdx2 = int(round(u_anchor_ref_idx));
+                bool ebAncBarred2 = (ebAncIdx2 >= 0) && (texelFetch(anchor_barred, cell, 0).x > 0.5);
+                for (int kk = 0; kk < K; ++kk)
+                {
+                    vec2 mgK = texelFetch(motion_gate, ivec2(kk * TD_CW + cx, cy), 0).xy;
+                    float mGK = (b == 0) ? mgK.x : mgK.y;
+                    if (kk == ebAncIdx2 && ebAncBarred2) mGK = 0.0;
+                    if (mGK > 0.0) ebActMask2 |= (1 << kk);
+                }
                 for (int k = 0; k < K; ++k)
                 {
-                    if (td_is_exact_copy(k)) continue;
-                    int partner = td_find_independent_a1_partner(K, k);
+                    if (td_is_exact_copy(k) || (ebActMask2 & (1 << k)) == 0) continue;
+                    int partner = td_find_independent_a1_partner_masked(K, k, ebActMask2);
                     if (partner < 0) continue;
-                    vec2 mg = texelFetch(motion_gate, ivec2(k * TD_CW + cx, cy), 0).xy;
-                    float mGate2 = (b == 0) ? mg.x : mg.y;
-                    if (k == int(round(u_anchor_ref_idx)) && texelFetch(anchor_barred, cell, 0).x > 0.5)
-                        mGate2 = 0.0;
-                    if (!(mGate2 > 0.0)) continue;
+                    if (td_refs_collinear(Cmat[k][k], Cmat[partner][partner], Cmat[k][partner])) continue;
                     float cClip = clamp(Cmat[k][partner] - retG * bGain * psdScale, 0.0, max(0.0, min(Cmat[k][k], Cmat[partner][partner])));
                     if (!td_is_bad(cClip) && cClip <= trimCap)
                     {
@@ -2603,20 +2632,20 @@ for (int b = 0; b < 3; ++b)
                     break;
                 }
             }
-            td_eb_acc[tid] = vec4(tSum, tCnt, 0.0, 0.0);
-            memoryBarrierShared();
-            barrier();
-            for (int s = 128; s > 0; s >>= 1)
-            {
-                if (tid < s) td_eb_acc[tid].xy += td_eb_acc[tid + s].xy;
-                memoryBarrierShared();
-                barrier();
-            }
-            if (tid == 0 && td_eb_acc[0].y > 0.5)
-                outU[b * 2 + ac] = max(0.0, td_eb_acc[0].x / td_eb_acc[0].y);
+        }
+        td_eb_acc[tid] = vec4(tSum, tCnt, 0.0, 0.0);
+        memoryBarrierShared();
+        barrier();
+        for (int s = 128; s > 0; s >>= 1)
+        {
+            if (tid < s) td_eb_acc[tid].xy += td_eb_acc[tid + s].xy;
             memoryBarrierShared();
             barrier();
         }
+        if (tid == 0 && p1Cnt > 3.5 && td_eb_acc[0].y > 0.5)
+            outU[b * 2 + ac] = max(0.0, td_eb_acc[0].x / td_eb_acc[0].y);
+        memoryBarrierShared();
+        barrier();
     }
 }
 
@@ -2887,12 +2916,37 @@ for (int b = 0; b < 3; ++b)
         bool useA2ePrior = (u_use_a2e_prior > 0.5) && ebValid;
         float nEff = td_effective_samples_for_band(b, nPool);
 
+        // RED-BUG-7b: Compute per-ref effective motion gate (including anchor drift/held-out bar) BEFORE A1/QP
+        // so barred or occluded refs NEVER instrument, cross-cap, or steal simplex weight from valid references!
+        int ancRefIdx = int(round(u_anchor_ref_idx));
+        bool ancBarred = (ancRefIdx >= 0) && (texelFetch(cell_drift, cell, 0).y > 0.5);
+        float cellMGate[3];
+        cellMGate[0] = 0.0; cellMGate[1] = 0.0; cellMGate[2] = 0.0;
+        int cellActMask = 0;
+        for (int k = 0; k < K; ++k)
+        {
+            vec2 mg = texelFetch(motion_gate, ivec2(k * TD_CW + cell.x, cell.y), 0).xy;
+            float mGate = (b == 0) ? mg.x : mg.y;
+            if (k == ancRefIdx && ancBarred)
+                mGate = 0.0;
+            cellMGate[k] = mGate;
+            if (mGate > 0.0)
+                cellActMask |= (1 << k);
+        }
+
         float cVec[3];
         cVec[0] = 0.0; cVec[1] = 0.0; cVec[2] = 0.0;
         for (int k = 0; k < K; ++k)
         {
+            if ((cellActMask & (1 << k)) == 0)
+            {
+                cVec[k] = 0.0;
+                continue;
+            }
             bool exactCopy = td_is_exact_copy(k);
-            int partner = td_find_independent_a1_partner(K, k);
+            int partner = td_find_independent_a1_partner_masked(K, k, cellActMask);
+            if (partner >= 0 && td_refs_collinear(C[k][k], C[partner][partner], C[k][partner]))
+                partner = -1;
             // UPG-BLKR-4 & UPG-HIGH-5: When A2e empirical prior is active on transform-unknown streams without explicit step prior,
             // use ebPriorU (with + 3*tau upper envelope when partner >= 0 so worst-5% damaged cells get repaired, and conservative
             // class prior ebPriorU on one-sided K = 1 cells!). Never starve HEVC/AV1 GPU repair to 1-LSB!
@@ -2938,7 +2992,8 @@ for (int b = 0; b < 3; ++b)
             {
                 for (int j = 0; j < K; ++j)
                 {
-                    if (j == k || td_is_exact_copy(j)) continue;
+                    if (j == k || td_is_exact_copy(j) || (cellActMask & (1 << j)) == 0) continue;
+                    if (td_refs_collinear(C[k][k], C[j][j], C[k][j])) continue;
                     float capBias = useSubpixelH
                         ? td_subpixel_h_atten_bias(refMv[k], refMv[j], curHVar, cellRetGVar * bGain * psdScale)
                         : 0.0;
@@ -2956,7 +3011,7 @@ for (int b = 0; b < 3; ++b)
             float nC = 0.0;
             for (int k = 0; k < K; ++k)
             {
-                if (!td_is_exact_copy(k))
+                if ((cellActMask & (1 << k)) != 0 && !td_is_exact_copy(k))
                 {
                     sumC += max(0.0, cVec[k]);
                     nC += 1.0;
@@ -2966,8 +3021,43 @@ for (int b = 0; b < 3; ++b)
         }
         bandU[b] = blockOwnU;
 
+        // Compact active subproblem so barred/occluded references NEVER distort C^-1 or steal simplex budget.
+        int subK = 0;
+        int subMap[3];
+        subMap[0] = 0; subMap[1] = 0; subMap[2] = 0;
+        for (int k = 0; k < K; ++k)
+        {
+            if ((cellActMask & (1 << k)) != 0)
+            {
+                subMap[subK] = k;
+                subK += 1;
+            }
+        }
         float solvedW[3];
-        int status = td_solve_convex(K, C, cVec, int(round(u_solver_mode)), solvedW);
+        solvedW[0] = 0.0; solvedW[1] = 0.0; solvedW[2] = 0.0;
+        int status = 0;
+        if (subK > 0)
+        {
+            float subC[3][3];
+            float subCVec[3];
+            subCVec[0] = 0.0; subCVec[1] = 0.0; subCVec[2] = 0.0;
+            for (int i = 0; i < 3; ++i)
+                for (int j = 0; j < 3; ++j)
+                    subC[i][j] = 0.0;
+            for (int i = 0; i < subK; ++i)
+            {
+                subCVec[i] = cVec[subMap[i]];
+                for (int j = 0; j < subK; ++j)
+                    subC[i][j] = C[subMap[i]][subMap[j]];
+            }
+            float subW[3];
+            status = td_solve_convex(subK, subC, subCVec, int(round(u_solver_mode)), subW);
+            if (status == 0)
+            {
+                for (int i = 0; i < subK; ++i)
+                    solvedW[subMap[i]] = subW[i];
+            }
+        }
         if (status == 2)
         {
             cellNonFinite = true;
@@ -2988,15 +3078,9 @@ for (int b = 0; b < 3; ++b)
             float bandWSum = 0.0;
             float wFinal[3];
             wFinal[0] = 0.0; wFinal[1] = 0.0; wFinal[2] = 0.0;
-            int ancRefIdx = int(round(u_anchor_ref_idx));
-            bool ancBarred = (ancRefIdx >= 0) && (texelFetch(cell_drift, cell, 0).y > 0.5);
             for (int k = 0; k < K; ++k)
             {
-                vec2 mg = texelFetch(motion_gate, ivec2(k * TD_CW + cell.x, cell.y), 0).xy;
-                float mGate = (b == 0) ? mg.x : mg.y;
-                if (k == ancRefIdx && ancBarred)
-                    mGate = 0.0;
-                wFinal[k] = solvedW[k] * mGate * focusGate;
+                wFinal[k] = solvedW[k] * cellMGate[k] * focusGate;
                 bandWSum += wFinal[k];
             }
             wOut = vec4(wFinal[0], wFinal[1], wFinal[2], 0.0);
@@ -3014,7 +3098,9 @@ for (int b = 0; b < 3; ++b)
         diagOut.w = bandU[2];
     imageStore(cell_diag_c, ivec2(b * TD_CW + cell.x, cell.y), diagOut);
 }
+)GLSL";
 
+	constexpr const char* kPass2MergeAndSolvePart3 = R"GLSL(
 // Layer 2/3 grain-leak transfer budget (refs/111 s7.3 & TdGuardPort::kMinVarianceRetention = 0.98^2):
 // Mirrors TdV2ReferenceEngine.h strictly coarse-to-fine (L -> M -> H) when estimator != A2_RoundingCells (1):
 // - Raw no-split path (u_has_clean_split < 0.5): alphaLeak = 1.0.
@@ -3117,7 +3203,7 @@ imageStore(cell_diag_flags, cell, vec4(
 
 	inline std::string BuildPass2MergeAndSolveBody()
 	{
-		return std::string(kPass2MergeAndSolvePart1) + kPass2MergeAndSolvePart2;
+		return std::string(kPass2MergeAndSolvePart1) + kPass2MergeAndSolvePart2 + kPass2MergeAndSolvePart3;
 	}
 
 	// ---- PASS 1-ANC (UPG-BLKR-3 / H-4): GPU Per-Cell Held-Out Structure Check on Anchored Carry ----

@@ -3540,13 +3540,13 @@ namespace TdV2
 									cellW[b][k][ci] = (std::isfinite(wv) && wv > 0.0) ? wv : 0.0;
 								}
 							}
-							if (in.lumaCellDiagC != nullptr && (*in.lumaCellDiagC)[b][lk].size() == numCells)
-								cellDiagC[b][k] = (*in.lumaCellDiagC)[b][lk];
 						}
 					}
 				}
 
-				// ---- Stage 2A (CHR-HIGH-1 / CHR-HIGH-2): Per-cell band-dependent moments, blind grain, & A2e samples ----
+				// ---- Stage 2A (CHR-HIGH-1 / CHR-HIGH-2 / RED-BUG-5): Per-cell band-dependent moments, chroma cellDiagC, & A2e samples ----
+				// Always compute chroma's own cellDiagC (C_kk) and cellOwnErrU even under reuseLumaW == true so Huber tapering
+				// and TD-U3 bounds use chroma's true residual variance (never zero-diag collapse!), skipping ONLY QP solve!
 				struct ChromaCellBandMom
 				{
 					double C[kMaxBlendRefs][kMaxBlendRefs] = {};
@@ -3561,7 +3561,6 @@ namespace TdV2
 				};
 				std::array<std::vector<ChromaCellBandMom>, 3> cellMom;
 				std::vector<double> a2eSamples[3][kA2eActivityClasses];
-				if (!reuseLumaW)
 				{
 					for (int b = 0; b < 3; ++b)
 						cellMom[b].resize(numCells);
@@ -4004,24 +4003,27 @@ namespace TdV2
 							}
 							cellOwnErrU[b][cIdx] = blockOwnU;
 
-							const BlendSolveResult solved = SolveConvexWeights(cm.C, cVec, cm.activeK, kDefaultTraceRegScale, standIns, cfg_.solverMode);
-							if (solved.nonFiniteClosed) { nonFiniteCellFlag[cIdx] = 1u; continue; }
-							if (solved.singular) { singularCellFlag[cIdx] = 1u; continue; }
-
-							const double focusGate = isFocusVetoedBand(cIdx, b) ? 0.0 : 1.0;
-							for (int ai = 0; ai < cm.activeK; ++ai)
+							if (!reuseLumaW)
 							{
-								const int k = cm.activeIdx[ai];
-								const WarpedChromaRef& wr = refs[static_cast<size_t>(k)];
-								const double mGate = (b == 0) ? wr.motionGate.gateL[cIdx] : wr.motionGate.gateMH[cIdx];
-								cellW[b][k][cIdx] = solved.weights[ai] * mGate * focusGate;
+								const BlendSolveResult solved = SolveConvexWeights(cm.C, cVec, cm.activeK, kDefaultTraceRegScale, standIns, cfg_.solverMode);
+								if (solved.nonFiniteClosed) { nonFiniteCellFlag[cIdx] = 1u; continue; }
+								if (solved.singular) { singularCellFlag[cIdx] = 1u; continue; }
+
+								const double focusGate = isFocusVetoedBand(cIdx, b) ? 0.0 : 1.0;
+								for (int ai = 0; ai < cm.activeK; ++ai)
+								{
+									const int k = cm.activeIdx[ai];
+									const WarpedChromaRef& wr = refs[static_cast<size_t>(k)];
+									const double mGate = (b == 0) ? wr.motionGate.gateL[cIdx] : wr.motionGate.gateMH[cIdx];
+									cellW[b][k][cIdx] = solved.weights[ai] * mGate * focusGate;
+								}
 							}
 						}
 
 						// Layer 2/3 coarse-to-fine leaked-grain transfer budget (1:1 parity with TdV2ReferenceEngine.h):
 						const bool minorSplitLeak = splitActive && (cellOwnGrainVar > cellGrainVar);
 						const bool rawUnsplitGrain = !splitActive;
-						if (cfg_.estimator != VarianceEstimator::A2_RoundingCells &&
+						if (!reuseLumaW && cfg_.estimator != VarianceEstimator::A2_RoundingCells &&
 						    cellGrainVar > kEngineNumFloor && (minorSplitLeak || rawUnsplitGrain))
 						{
 							double alphaLeak = 1.0;

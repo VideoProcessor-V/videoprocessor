@@ -85,6 +85,7 @@ namespace Gpu
 		size_t cellsLimited = 0;                 // M-9: live count of cells where statistical output limit engaged
 		bool carryUsed = false;
 		bool carryReset = false;
+		bool anchoredCarryUsed = false;          // TD-U5: true when single-resample GPU anchored carry served as a ref this frame
 		bool scratchShort = false;
 		bool usedExternalBandMemo = false;       // True when caller-supplied kBandMemo curLowBandTex skipped current-frame low-band blur
 		bool externalBandMemoRejected = false;   // True when non-null curLowBandTex failed dimension/format validation (visible fail-closed)
@@ -560,6 +561,11 @@ namespace Gpu
 			anchorH_ = 0;
 			anchorAgeFrames_ = 0;
 			ancBarSlot_ = 0;
+			anchorSourceTex_ = nullptr;
+			hasAnchorSampleSig_ = false;
+			anchorSampleSig_.clear();
+			anchorSampleW_ = 0;
+			anchorSampleH_ = 0;
 			hasLastSeq_ = false;
 			lastSeq_ = 0;
 			elapsedSec_ = 0.0;
@@ -599,6 +605,7 @@ namespace Gpu
 					&outYTex_, &outCleanTex_, &outDeltaTex_, &outTdMapsTex_,
 					&outDiagFlagsTex_, &outGuardCellTex_, &outWarpDiagTex_, &outLumaCellWeightsTex_,
 					&ebPriorTex_, &counterSummaryTex_, &prevRoleStatsTex_[0], &prevRoleStatsTex_[1], &prevRoleStatsTex_[2],
+					&dummySampledTex_[0], &dummySampledTex_[1], &dummySampledTex_[2],
 					&anchorCleanTex_, &anchorBarredTex_[0], &anchorBarredTex_[1], &cellDriftTex_,
 					&chromaCodedDeltaTex_, &chromaDelivUvTex_, &chromaDelivRgbTex_,
 					&chromaOutUvTex_, &chromaOutRgbTex_, &chromaOutDeltaTex_ })
@@ -617,6 +624,7 @@ namespace Gpu
 					&privDeltaScratch_,
 					&privMotionGate_, &privCellWeights_, &privCellDiagC_, &privCellStats_, &privCellFocus_,
 					&ebPriorTex_, &counterSummaryTex_, &prevRoleStatsTex_[0], &prevRoleStatsTex_[1], &prevRoleStatsTex_[2],
+					&dummySampledTex_[0], &dummySampledTex_[1], &dummySampledTex_[2],
 					&carryCleanTex_, &anchorCleanTex_, &anchorBarredTex_[0], &anchorBarredTex_[1], &cellDriftTex_,
 					&inRecYTex_, &inCleanYTex_, &inRefCleanTex_, &inCodecModelPbTex_,
 					&inMotionVecTex_, &inMotionMetaTex_, &inCellPriorTex_, &inFaceMaskTex_,
@@ -749,6 +757,7 @@ namespace Gpu
 			total += 2u * cells * bRG32;            // outGuardCellTex_, outWarpDiagTex_
 			total += cells * bR32;                  // inFaceMaskTex_
 			total += 6u * bRGBA32;                  // ebPriorTex_ (3x2 RGBA32F = 96 B)
+			total += 3u * bRGBA32;                  // dummySampledTex_[0..2] (3 x 1x1 RGBA32F = 48 B, RED-BUG-3)
 			if (compact)
 				total += 2u * bRGBA32;              // counterSummaryTex_ (2x1 RGBA32F = 32 B in zero-copy mode)
 			if (includeLumaWeightsExport)
@@ -873,7 +882,8 @@ namespace Gpu
 				inAnchorCompMvTex_, inDirectP2pMvTex_,
 				outYTex_, outCleanTex_, outDeltaTex_, outTdMapsTex_,
 				outDiagFlagsTex_, outGuardCellTex_, outWarpDiagTex_, outLumaCellWeightsTex_,
-				ebPriorTex_, counterSummaryTex_, prevRoleStatsTex_[0], prevRoleStatsTex_[1], prevRoleStatsTex_[2] })
+				ebPriorTex_, counterSummaryTex_, prevRoleStatsTex_[0], prevRoleStatsTex_[1], prevRoleStatsTex_[2],
+				dummySampledTex_[0], dummySampledTex_[1], dummySampledTex_[2] })
 			{
 				total += VpSkeleton::TexBytesOf(t);
 			}
@@ -1245,17 +1255,23 @@ namespace Gpu
 					else
 					{
 						const int p2Slot = pickUnusedSlot(1, 2, 0);
-						tryAddGpuRef(in.prevPeak2.cleanTex, false, p2Slot, 3, in.prevPeak2.motion, in.prevPeak2.isExactCopyOfCurrent, in.prevPeak2.cameraHomography);
+						tryAddGpuRef(in.prevPeak2.cleanTex, false, p2Slot, static_cast<int>(RefRole::PrevPeak2), in.prevPeak2.motion, in.prevPeak2.isExactCopyOfCurrent, in.prevPeak2.cameraHomography);
 					}
 				}
-				// UPG-BLKR-3 + UPG-HIGH-1: Single-resample GPU anchored carry from last confirmed peak (NEVER self-instrument age<=1 == prevPeak!).
-				const bool anchorDuplicatesPrevPeak = (in.prevPeak.cleanTex != nullptr) && (anchorAgeFrames_ <= 1);
-				if (cfg_.enableAnchoredCarry && hasAnchor_ && !anchorDuplicatesPrevPeak &&
+				// UPG-BLKR-3 + UPG-HIGH-1 + RED-BUG-6/7a: Single-resample GPU anchored carry from last confirmed peak
+				// using canonical RefRole::PrevPeak2 (2), NEVER self-instrumenting against the same-GOP prevPeak!
+				const bool anchorDuplicatesPrevPeak =
+					(in.prevPeak.cleanTex != nullptr) &&
+					(anchorAgeFrames_ <= 1 || in.prevPeak.cleanTex == anchorCleanTex_ || in.prevPeak.cleanTex == anchorSourceTex_);
+				const bool anchorDuplicatesPrevPeak2 =
+					(in.prevPeak2.cleanTex != nullptr) &&
+					(in.prevPeak2.cleanTex == anchorCleanTex_ || in.prevPeak2.cleanTex == anchorSourceTex_);
+				if (cfg_.enableAnchoredCarry && hasAnchor_ && !anchorDuplicatesPrevPeak && !anchorDuplicatesPrevPeak2 &&
 				    anchorCleanTex_ != nullptr && anchorW_ == w && anchorH_ == h &&
 				    anchorAgeFrames_ >= 1 && anchorAgeFrames_ <= maxAnchorAge)
 				{
 					const int aSlot = hasPrepackedMotion ? 2 : pickUnusedSlot(2, 1, 0);
-					if (tryAddGpuRef(anchorCleanTex_, false, aSlot, 3, in.hasAnchorComposedMotion ? &in.anchorComposedMotion : nullptr, false))
+					if (tryAddGpuRef(anchorCleanTex_, false, aSlot, static_cast<int>(RefRole::PrevPeak2), in.hasAnchorComposedMotion ? &in.anchorComposedMotion : nullptr, false))
 					{
 						anchoredCarryRefIdx = static_cast<int>(refSpecs.size()) - 1;
 						out.anchoredCarryUsed = true;
@@ -1265,7 +1281,7 @@ namespace Gpu
 				else if (cfg_.enableCarryForward && hasCarry_ && carryW_ == w && carryH_ == h)
 				{
 					const int cSlot = hasPrepackedMotion ? 2 : pickUnusedSlot(2, 1, 0);
-					if (tryAddGpuRef(nullptr, true, cSlot, 2, in.hasCarryMotion ? &in.carryMotion : nullptr, false))
+					if (tryAddGpuRef(nullptr, true, cSlot, static_cast<int>(RefRole::Carry), in.hasCarryMotion ? &in.carryMotion : nullptr, false))
 						out.carryUsed = true;
 				}
 			}
@@ -1401,6 +1417,7 @@ namespace Gpu
 							anchorH_ = h;
 							anchorAgeFrames_ = 1;
 							ancBarSlot_ = 0;
+							anchorSourceTex_ = curCleanTex;
 							if (Detail::EnsureTex(gpu, anchorBarredTex_[0], out.cellsW, out.cellsH, fmtR32, true, true, true, false))
 							{
 								std::vector<float> zBar(numCells, 0.0f);
@@ -1781,24 +1798,30 @@ namespace Gpu
 				if (in.prevPeak2.cleanPlane != nullptr)
 				{
 					const int p2Slot = pickUnusedSlot(1, 2, 0);
-					tryAddRefSpec(in.prevPeak2.cleanPlane, false, p2Slot, 3, in.prevPeak2.motion, in.prevPeak2.isExactCopyOfCurrent, in.prevPeak2.cameraHomography);
+					tryAddRefSpec(in.prevPeak2.cleanPlane, false, p2Slot, static_cast<int>(RefRole::PrevPeak2), in.prevPeak2.motion, in.prevPeak2.isExactCopyOfCurrent, in.prevPeak2.cameraHomography);
 				}
-				const bool anchorDuplicatesPrevPeak = (in.prevPeak.cleanPlane != nullptr) && (anchorAgeFrames_ <= 1);
-				if (cfg_.enableAnchoredCarry && hasAnchor_ && !anchorDuplicatesPrevPeak &&
+				const bool anchorDuplicatesPrevPeak =
+					(in.prevPeak.cleanPlane != nullptr) &&
+					(anchorAgeFrames_ <= 1 || MatchesAnchorSampleSig(*in.prevPeak.cleanPlane));
+				const bool anchorDuplicatesPrevPeak2 =
+					(in.prevPeak2.cleanPlane != nullptr) &&
+					MatchesAnchorSampleSig(*in.prevPeak2.cleanPlane);
+				if (cfg_.enableAnchoredCarry && hasAnchor_ && !anchorDuplicatesPrevPeak && !anchorDuplicatesPrevPeak2 &&
 				    anchorCleanTex_ != nullptr && anchorW_ == w && anchorH_ == h &&
 				    anchorAgeFrames_ >= 1 && anchorAgeFrames_ <= maxAnchorAge)
 				{
 					const int aSlot = pickUnusedSlot(2, 1, 0);
-					if (tryAddRefSpec(nullptr, false, aSlot, 3, in.hasAnchorComposedMotion ? &in.anchorComposedMotion : nullptr, false, Homography3x3{}, anchorCleanTex_))
+					if (tryAddRefSpec(nullptr, false, aSlot, static_cast<int>(RefRole::PrevPeak2), in.hasAnchorComposedMotion ? &in.anchorComposedMotion : nullptr, false, Homography3x3{}, anchorCleanTex_))
 					{
 						anchoredCarryRefIdx = static_cast<int>(refSpecs.size()) - 1;
+						res.anchoredCarryUsed = true;
 						res.carryUsed = true;
 					}
 				}
 				else if (cfg_.enableCarryForward && hasCarry_ && carryW_ == w && carryH_ == h)
 				{
 					const int cSlot = pickUnusedSlot(2, 1, 0);
-					if (tryAddRefSpec(nullptr, true, cSlot, 2, in.hasCarryMotion ? &in.carryMotion : nullptr, false))
+					if (tryAddRefSpec(nullptr, true, cSlot, static_cast<int>(RefRole::Carry), in.hasCarryMotion ? &in.carryMotion : nullptr, false))
 						res.carryUsed = true;
 				}
 			}
@@ -1845,7 +1868,9 @@ namespace Gpu
 						anchorW_ = w;
 						anchorH_ = h;
 						anchorAgeFrames_ = 1;
+						anchorSourceTex_ = nullptr;
 						ancBarSlot_ = 0;
+						RecordAnchorSampleSig(curCleanPlane);
 						if (Detail::EnsureTex(gpu, anchorBarredTex_[0], res.cellsW, res.cellsH, fmtR32, true, true, true, false))
 						{
 							std::vector<float> zBar(numCells, 0.0f);
@@ -1902,7 +1927,9 @@ namespace Gpu
 						anchorW_ = w;
 						anchorH_ = h;
 						anchorAgeFrames_ = 1;
+						anchorSourceTex_ = nullptr;
 						ancBarSlot_ = 0;
+						RecordAnchorSampleSig(curCleanPlane);
 						if (Detail::EnsureTex(gpu, anchorBarredTex_[0], res.cellsW, res.cellsH, fmtR32, true, true, true, false))
 						{
 							std::vector<float> zBar(numCells, 0.0f);
@@ -2061,6 +2088,9 @@ namespace Gpu
 				res.carryReset = res.carryReset || hadCarry;
 				return failVisible("TdV2GpuEngine outputClean/tdDelta download failed", StandInKind::GpuDispatchFailed);
 			}
+
+			if (in.isConfirmedPeak && cfg_.enableAnchoredCarry && hasAnchor_)
+				RecordAnchorSampleSig(res.outputClean);
 
 			if (anyBoundEngaged && standIns != nullptr)
 				standIns->Engage(StandInKind::TransformUnknownBound);
@@ -3450,12 +3480,17 @@ namespace Gpu
 				const int srcBarSlot = ancBarSlot_;
 				const int dstBarSlot = 1 - srcBarSlot;
 				const float uDriftMode = static_cast<float>(driftMode);
+				if (!EnsureDummySampledTex(gpu, fmtRGBA32))
+				{
+					resetCarryIfActive();
+					return failCore("TdV2GpuEngine dummySampledTex alloc failed", StandInKind::GpuDispatchFailed);
+				}
 				std::string drHdr = staticGeom + VpvGpu::Define("TD_ANCHOR_DRIFT_BAR_PX", kAnchorDriftBarPx) + Shaders::kCoreHelpers;
 				pl_shader_desc ddr[7] = {
-					VpvGpu::Sampled("anchor_comp_mv", inAnchorCompMvTex_ ? inAnchorCompMvTex_ : cellPriorTex),
-					VpvGpu::Sampled("direct_p2p_mv", inDirectP2pMvTex_ ? inDirectP2pMvTex_ : cellPriorTex),
+					VpvGpu::Sampled("anchor_comp_mv", inAnchorCompMvTex_ ? inAnchorCompMvTex_ : dummySampledTex_[0]),
+					VpvGpu::Sampled("direct_p2p_mv", inDirectP2pMvTex_ ? inDirectP2pMvTex_ : dummySampledTex_[1]),
 					VpvGpu::Sampled("cur_clean", p.curCleanTex),
-					VpvGpu::Sampled("anchor_clean", (anchorCleanTex_ != nullptr) ? anchorCleanTex_ : p.curCleanTex),
+					VpvGpu::Sampled("anchor_clean", (anchorCleanTex_ != nullptr) ? anchorCleanTex_ : dummySampledTex_[2]),
 					VpvGpu::Sampled("anchor_barred_in", anchorBarredTex_[srcBarSlot]),
 					VpvGpu::Storage("cell_drift_out", cellDriftTex_),
 					VpvGpu::Storage("anchor_barred_out", anchorBarredTex_[dstBarSlot])
@@ -3584,15 +3619,16 @@ namespace Gpu
 			// host_writable=true & host_readable=true on this tiny 3x2 (96-byte) texture guarantees:
 			//   1) ebPriorTex_ is ALWAYS initialized (zero-filled when disabled -> never uninitialized on legacy_1x1!).
 			//   2) GPU shares CPU's exact A2ePriorHistory (1-second rolling-median cap, cut/fade freeze, AND one-sided K=1 hold!).
-			if (!Detail::EnsureTex(gpu, ebPriorTex_, 3, 2, fmtRGBA32, true, true, true, true))
+			if (!Detail::EnsureTex(gpu, ebPriorTex_, 3, 2, fmtRGBA32, true, true, true, true) ||
+			    !EnsureDummySampledTex(gpu, fmtRGBA32))
 			{
 				resetCarryIfActive();
-				return failCore("TdV2GpuEngine ebPriorTex alloc failed", StandInKind::GpuDispatchFailed);
+				return failCore("TdV2GpuEngine ebPriorTex/dummySampledTex alloc failed", StandInKind::GpuDispatchFailed);
 			}
 			const float uAnchorRefIdx = static_cast<float>(p.anchoredCarryRefIdx);
 			const float uHasCellDrift = hasCellDriftTex ? 1.0f : 0.0f;
-			pl_tex anchorBarredBind = hasCellDriftTex ? anchorBarredTex_[ancBarSlot_] : cellPriorTex;
-			pl_tex cellDriftBind = hasCellDriftTex ? cellDriftTex_ : cellPriorTex;
+			pl_tex anchorBarredBind = hasCellDriftTex ? anchorBarredTex_[ancBarSlot_] : dummySampledTex_[0];
+			pl_tex cellDriftBind = hasCellDriftTex ? cellDriftTex_ : dummySampledTex_[1];
 			{
 				std::string p2bSharedHdr = staticGeom;
 				p2bSharedHdr += VpvGpu::Define("TD_GAIN_LOW", gains.low);
@@ -3735,7 +3771,7 @@ namespace Gpu
 				}
 				const bool canMergePrevRoleStats = roleSlotRolesMatch;
 				const float uMergePrevStats = canMergePrevRoleStats ? 1.0f : 0.0f;
-				pl_tex prevStatsBind = canMergePrevRoleStats ? prevRoleStatsTex_[roleSlot] : sc.cellStats;
+				pl_tex prevStatsBind = canMergePrevRoleStats ? prevRoleStatsTex_[roleSlot] : dummySampledTex_[0];
 
 				// ---- PASS 2B (Speedup 2 + TD-U2/U3/U4 + UPG-BLKR-3/4): Band-Dependent Merge + EB + Active-Set Solve + TdMaps ----
 				std::string p2bHdr = p2bSharedHdr + Shaders::BuildPass2SolverHeader();
@@ -4059,6 +4095,7 @@ namespace Gpu
 						anchorW_ = w;
 						anchorH_ = h;
 						anchorAgeFrames_ = 1;
+						anchorSourceTex_ = p.curCleanTex;
 					}
 				}
 			}
@@ -4446,6 +4483,13 @@ float td_fine_hp_warp_gain(vec2 mv)
 			hdr += Shaders::kPassQualityEvidenceHeader;
 
 			const bool hasPrev = (prevWarpedBandsTex != nullptr && motionVecTex != nullptr && motionMetaTex != nullptr);
+			const pl_fmt fmtRGBA32 = VpSkeleton::PlTexBackend::FindFormat(gpu, VpSkeleton::TexFormat::RGBA32F);
+			if (!fmtRGBA32 || !EnsureDummySampledTex(gpu, fmtRGBA32))
+			{
+				if (standIns != nullptr)
+					standIns->Engage(StandInKind::GpuDispatchFailed, "ComputeQualityEvidenceGpu dummySampledTex alloc failed");
+				return false;
+			}
 			float uAx0 = static_cast<float>(ar.x0), uAy0 = static_cast<float>(ar.y0);
 			float uAx1 = static_cast<float>(ar.x1), uAy1 = static_cast<float>(ar.y1);
 			float uHasPrev = hasPrev ? 1.0f : 0.0f;
@@ -4453,13 +4497,14 @@ float td_fine_hp_warp_gain(vec2 mv)
 			float uMinBandJump = static_cast<float>(1.5 * depthScale);
 			float uMaxBandJump = static_cast<float>(PeakCodeForBits(sourceBits) / 16.0);
 
+			// RED-BUG-3: Bind distinct 1x1 dummy textures when hasPrev == false (libplacebo forbids duplicate descriptor objects!).
 			pl_shader_desc descs[7] = {
 				VpvGpu::Sampled("cur_bands", curBandsTex),
-				VpvGpu::Sampled("prev_bands", hasPrev ? prevWarpedBandsTex : curBandsTex),
+				VpvGpu::Sampled("prev_bands", hasPrev ? prevWarpedBandsTex : dummySampledTex_[0]),
 				VpvGpu::Sampled("cur_clean", curCleanTex),
 				VpvGpu::Sampled("cell_prior", cellPriorTex),
-				VpvGpu::Sampled("motion_vec", hasPrev ? motionVecTex : cellPriorTex),
-				VpvGpu::Sampled("motion_meta", hasPrev ? motionMetaTex : cellPriorTex),
+				VpvGpu::Sampled("motion_vec", hasPrev ? motionVecTex : dummySampledTex_[1]),
+				VpvGpu::Sampled("motion_meta", hasPrev ? motionMetaTex : dummySampledTex_[2]),
 				VpvGpu::Storage("quality_cells", outQualityCellsTex)
 			};
 			pl_shader_var vars[8] = {
@@ -4542,6 +4587,55 @@ float td_fine_hp_warp_gain(vec2 mv)
 			}
 		}
 
+		bool EnsureDummySampledTex(pl_gpu gpu, pl_fmt fmtRGBA32)
+		{
+			if (!gpu || !fmtRGBA32)
+				return false;
+			static const float kZero4[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+			for (int i = 0; i < 3; ++i)
+			{
+				const bool wasNull = (dummySampledTex_[i] == nullptr);
+				if (!Detail::EnsureTex(gpu, dummySampledTex_[i], 1, 1, fmtRGBA32, true, false, true, false))
+					return false;
+				if (wasNull && !Detail::UploadFloats(gpu, dummySampledTex_[i], kZero4))
+					return false;
+			}
+			return true;
+		}
+
+		void RecordAnchorSampleSig(const TdV2Plane& plane)
+		{
+			anchorSampleSig_.clear();
+			hasAnchorSampleSig_ = false;
+			anchorSampleW_ = 0;
+			anchorSampleH_ = 0;
+			if (plane.Empty())
+				return;
+			const size_t n = plane.v.size();
+			const size_t stride = (std::max<size_t>)(1u, n / 64u);
+			anchorSampleSig_.reserve(65u);
+			for (size_t i = 0; i < n; i += stride)
+				anchorSampleSig_.push_back(plane.v[i]);
+			anchorSampleW_ = plane.w;
+			anchorSampleH_ = plane.h;
+			hasAnchorSampleSig_ = !anchorSampleSig_.empty();
+		}
+
+		bool MatchesAnchorSampleSig(const TdV2Plane& plane) const
+		{
+			if (!hasAnchorSampleSig_ || plane.Empty() || plane.w != anchorSampleW_ || plane.h != anchorSampleH_)
+				return false;
+			const size_t n = plane.v.size();
+			const size_t stride = (std::max<size_t>)(1u, n / 64u);
+			size_t idx = 0;
+			for (size_t i = 0; i < n && idx < anchorSampleSig_.size(); i += stride, ++idx)
+			{
+				if (!(std::fabs(plane.v[i] - anchorSampleSig_[idx]) <= 1e-6))
+					return false;
+			}
+			return idx == anchorSampleSig_.size();
+		}
+
 		Config cfg_;
 		bool hasCarry_ = false;
 		int carryW_ = 0;
@@ -4551,6 +4645,11 @@ float td_fine_hp_warp_gain(vec2 mv)
 		int anchorH_ = 0;
 		int anchorAgeFrames_ = 0;
 		int ancBarSlot_ = 0;
+		pl_tex anchorSourceTex_ = nullptr;
+		std::vector<double> anchorSampleSig_;
+		bool hasAnchorSampleSig_ = false;
+		int anchorSampleW_ = 0;
+		int anchorSampleH_ = 0;
 		bool hasLastSeq_ = false;
 		uint64_t lastSeq_ = 0;
 		double elapsedSec_ = 0.0;
@@ -4559,6 +4658,7 @@ float td_fine_hp_warp_gain(vec2 mv)
 		pl_tex anchorCleanTex_ = nullptr;
 		pl_tex anchorBarredTex_[2] = {};
 		pl_tex cellDriftTex_ = nullptr;
+		pl_tex dummySampledTex_[3] = {};
 
 		// Owned private scratch textures (used ONLY when arena == nullptr).
 		pl_tex privCurBands_ = nullptr;

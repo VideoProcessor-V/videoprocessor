@@ -1704,63 +1704,76 @@ for (int chIdx = 0; chIdx < 2; ++chIdx)
             diagOut.y = (K > 1) ? (hasOwnStats ? min(ownDiag.y, C[1][1]) : C[1][1]) : 0.0;
             diagOut.z = (K > 2) ? (hasOwnStats ? min(ownDiag.z, C[2][2]) : C[2][2]) : 0.0;
 
-            float nEff = td_effective_samples_for_band(b, nPool);
-            float cVec[3];
-            cVec[0] = 0.0; cVec[1] = 0.0; cVec[2] = 0.0;
-            for (int k = 0; k < K; ++k)
+            if (u_reuse_luma_weights < 0.5)
             {
-                bool exactCopy = td_is_exact_copy(k);
-                float cA2Step = (u_a2_valid > 0.5)
-                    ? ((u_a2_sigma_sent + (exactCopy ? 0.0 : u_a2_sigma_zero)) * cellStepScaleSq * bGain)
-                    : 0.0;
-                int partner = td_find_independent_a1_partner(K, k);
-                float cA2 = (useA2ePrior && ebValid)
-                    ? ((partner >= 0) ? (ebPriorU + 3.0 * sqrt(ebTauSq)) : ebPriorU)
-                    : cA2Step;
-                cA2 = min(cA2, C[k][k]);
-                float cA1 = cA2;
-                if (partner >= 0)
-                {
-                    float rawA1 = td_est_c_a1(C[k][partner], C[k][k], C[partner][partner], chRetGVar, bGain, psdScale, 0.0);
-                    cA1 = ebValid ? td_eb_shrink_c(rawA1, C[k][k], C[partner][partner], nEff, ebPriorU, ebTauSq) : rawA1;
-                }
-                else
-                {
-                    if (estMode != 1)
-                        cellSingleRefA2 = true;
-                    for (int j = 0; j < K; ++j)
-                    {
-                        if (j == k || td_is_exact_copy(j)) continue;
-                        float cCap = td_est_c_a1(C[k][j], C[k][k], C[j][j], chRetGVar, bGain, psdScale, 0.0);
-                        cA1 = min(cA1, cCap);
-                    }
-                    if (u_has_clean_split < 0.5 && chRetGVar > TD_NUM_FLOOR)
-                    {
-                        float excess = max(0.0, C[k][k] - 2.0 * chRetGVar * bGain * psdScale);
-                        cA1 = min(cA1, excess);
-                    }
-                }
-                cVec[k] = exactCopy ? 0.0 : td_select_blind_c(estMode, cA1, cA2);
-            }
-
-            float solvedW[3];
-            int status = td_solve_convex(K, C, cVec, int(round(u_solver_mode)), solvedW);
-            if (status == 2) cellNonFinite = true;
-            else if (status == 1) cellSingular = true;
-            else
-            {
-                bool bandVeto = focusChange || (isDefocused && (b >= 1 || !bokehAllowL)) ||
-                                (coarseOnly && b >= 1);
-                float focusGate = bandVeto ? 0.0 : 1.0;
-                float wFinal[3];
-                wFinal[0] = 0.0; wFinal[1] = 0.0; wFinal[2] = 0.0;
+                float nEff = td_effective_samples_for_band(b, nPool);
+                float cVec[3];
+                cVec[0] = 0.0; cVec[1] = 0.0; cVec[2] = 0.0;
                 for (int k = 0; k < K; ++k)
                 {
-                    vec2 mg = texelFetch(motion_gate, ivec2(k * TD_CW + cell.x, cell.y), 0).xy;
-                    float mGate = (b == 0) ? mg.x : mg.y;
-                    wFinal[k] = solvedW[k] * mGate * focusGate;
+                    bool exactCopy = td_is_exact_copy(k);
+                    float cA2Step = (u_a2_valid > 0.5)
+                        ? ((u_a2_sigma_sent + (exactCopy ? 0.0 : u_a2_sigma_zero)) * cellStepScaleSq * bGain)
+                        : 0.0;
+                    int partner = td_find_independent_a1_partner(K, k);
+                    float cA2 = (useA2ePrior && ebValid)
+                        ? ((partner >= 0) ? (ebPriorU + 3.0 * sqrt(ebTauSq)) : ebPriorU)
+                        : cA2Step;
+                    cA2 = min(cA2, C[k][k]);
+                    float cA1 = cA2;
+                    if (partner >= 0)
+                    {
+                        float rawA1 = td_est_c_a1(C[k][partner], C[k][k], C[partner][partner], chRetGVar, bGain, psdScale, 0.0);
+                        if (ebValid && !exactCopy)
+                        {
+                            float gTerm = max(0.0, chRetGVar) * max(0.0, bGain) * max(0.0, psdScale);
+                            float cRaw = C[k][partner] - gTerm;
+                            float seSq = td_sampling_var_cross_moment(C[k][k], C[partner][partner], C[k][partner], nEff);
+                            cA1 = td_eb_shrink_c(cRaw, seSq, ebPriorU, ebTauSq, min(C[k][k], C[partner][partner]));
+                        }
+                        else
+                        {
+                            cA1 = rawA1;
+                        }
+                    }
+                    else
+                    {
+                        if (estMode != 1)
+                            cellSingleRefA2 = true;
+                        for (int j = 0; j < K; ++j)
+                        {
+                            if (j == k || td_is_exact_copy(j)) continue;
+                            float cCap = td_est_c_a1(C[k][j], C[k][k], C[j][j], chRetGVar, bGain, psdScale, 0.0);
+                            cA1 = min(cA1, cCap);
+                        }
+                        if (u_has_clean_split < 0.5 && chRetGVar > TD_NUM_FLOOR)
+                        {
+                            float excess = max(0.0, C[k][k] - 2.0 * chRetGVar * bGain * psdScale);
+                            cA1 = min(cA1, excess);
+                        }
+                    }
+                    cVec[k] = exactCopy ? 0.0 : td_select_blind_c(estMode, cA1, cA2);
                 }
-                wOut = vec4(wFinal[0], wFinal[1], wFinal[2], 0.0);
+
+                float solvedW[3];
+                int status = td_solve_convex(K, C, cVec, int(round(u_solver_mode)), solvedW);
+                if (status == 2) cellNonFinite = true;
+                else if (status == 1) cellSingular = true;
+                else
+                {
+                    bool bandVeto = focusChange || (isDefocused && (b >= 1 || !bokehAllowL)) ||
+                                    (coarseOnly && b >= 1);
+                    float focusGate = bandVeto ? 0.0 : 1.0;
+                    float wFinal[3];
+                    wFinal[0] = 0.0; wFinal[1] = 0.0; wFinal[2] = 0.0;
+                    for (int k = 0; k < K; ++k)
+                    {
+                        vec2 mg = texelFetch(motion_gate, ivec2(k * TD_CW + cell.x, cell.y), 0).xy;
+                        float mGate = (b == 0) ? mg.x : mg.y;
+                        wFinal[k] = solvedW[k] * mGate * focusGate;
+                    }
+                    wOut = vec4(wFinal[0], wFinal[1], wFinal[2], 0.0);
+                }
             }
         }
         bandW[b] = wOut;
@@ -1768,7 +1781,7 @@ for (int chIdx = 0; chIdx < 2; ++chIdx)
         else            imageStore(cell_diag_cr, ivec2(b * TD_CW + cell.x, cell.y), diagOut);
     }
 
-    if (!isFace && estMode != 1 && chRetGVar > TD_NUM_FLOOR)
+    if (u_reuse_luma_weights < 0.5 && !isFace && estMode != 1 && chRetGVar > TD_NUM_FLOOR)
     {
         float alphaLeak = 0.0;
         if (u_has_clean_split < 0.5) alphaLeak = 1.0;
@@ -1917,20 +1930,21 @@ for (int b = 0; b < 3; ++b)
 
     for (int chIdx = 0; chIdx < 2; ++chIdx)
     {
-        vec4 ownW = (chIdx == 0) ? texelFetch(cell_weights_cb, ivec2(b * TD_CW + cx, cy), 0)
+        bool useCbWeights = (chIdx == 0) || reuseLumaW;
+        vec4 ownW = useCbWeights ? texelFetch(cell_weights_cb, ivec2(b * TD_CW + cx, cy), 0)
                                  : texelFetch(cell_weights_cr, ivec2(b * TD_CW + cx, cy), 0);
         vec4 ownD = (chIdx == 0) ? texelFetch(cell_diag_cb, ivec2(b * TD_CW + cx, cy), 0)
                                  : texelFetch(cell_diag_cr, ivec2(b * TD_CW + cx, cy), 0);
-        // CHR-HIGH-2: Honor A2e empirical cell own-error bound stored in cell_diag.w when available!
-        float bandVar = (!reuseLumaW && ownD.w > 0.0) ? ownD.w : fallbackBandVar;
+        // CHR-HIGH-2 / RED-BUG-6: Always honor chroma's own A2e/step blockOwnU stored in cell_diag_cb/cr.w!
+        float bandVar = (ownD.w > 0.0) ? ownD.w : fallbackBandVar;
         if (chIdx == 0) sumBandVar.x += bandVar;
         else            sumBandVar.y += bandVar;
         float bound = u_pixel_bound_kappa * sqrt(max(0.0, bandVar));
 
-        vec4 w00 = (chIdx == 0) ? texelFetch(cell_weights_cb, ivec2(b * TD_CW + x0, y0), 0) : texelFetch(cell_weights_cr, ivec2(b * TD_CW + x0, y0), 0);
-        vec4 w10 = (chIdx == 0) ? texelFetch(cell_weights_cb, ivec2(b * TD_CW + x1, y0), 0) : texelFetch(cell_weights_cr, ivec2(b * TD_CW + x1, y0), 0);
-        vec4 w01 = (chIdx == 0) ? texelFetch(cell_weights_cb, ivec2(b * TD_CW + x0, y1), 0) : texelFetch(cell_weights_cr, ivec2(b * TD_CW + x0, y1), 0);
-        vec4 w11 = (chIdx == 0) ? texelFetch(cell_weights_cb, ivec2(b * TD_CW + x1, y1), 0) : texelFetch(cell_weights_cr, ivec2(b * TD_CW + x1, y1), 0);
+        vec4 w00 = useCbWeights ? texelFetch(cell_weights_cb, ivec2(b * TD_CW + x0, y0), 0) : texelFetch(cell_weights_cr, ivec2(b * TD_CW + x0, y0), 0);
+        vec4 w10 = useCbWeights ? texelFetch(cell_weights_cb, ivec2(b * TD_CW + x1, y0), 0) : texelFetch(cell_weights_cr, ivec2(b * TD_CW + x1, y0), 0);
+        vec4 w01 = useCbWeights ? texelFetch(cell_weights_cb, ivec2(b * TD_CW + x0, y1), 0) : texelFetch(cell_weights_cr, ivec2(b * TD_CW + x0, y1), 0);
+        vec4 w11 = useCbWeights ? texelFetch(cell_weights_cb, ivec2(b * TD_CW + x1, y1), 0) : texelFetch(cell_weights_cr, ivec2(b * TD_CW + x1, y1), 0);
         vec4 d00 = (chIdx == 0) ? texelFetch(cell_diag_cb, ivec2(b * TD_CW + x0, y0), 0) : texelFetch(cell_diag_cr, ivec2(b * TD_CW + x0, y0), 0);
         vec4 d10 = (chIdx == 0) ? texelFetch(cell_diag_cb, ivec2(b * TD_CW + x1, y0), 0) : texelFetch(cell_diag_cr, ivec2(b * TD_CW + x1, y0), 0);
         vec4 d01 = (chIdx == 0) ? texelFetch(cell_diag_cb, ivec2(b * TD_CW + x0, y1), 0) : texelFetch(cell_diag_cr, ivec2(b * TD_CW + x0, y1), 0);
@@ -1942,8 +1956,8 @@ for (int b = 0; b < 3; ++b)
         for (int k = 0; k < K; ++k)
         {
             if ((refFl[k] & 1) == 0) continue;
-            // CHR-HIGH-3: Under reuseLumaW, map chroma ref k strictly to its matching luma RefRole slot
-            // and gate on valid motion_gate (NEVER ownW <= 0, which breaks convex-simplex corner transitions!).
+            // CHR-HIGH-3 / RED-BUG-6: Under reuseLumaW, map chroma ref k strictly to its matching luma RefRole slot
+            // for weights (wSlot), while ALWAYS using chroma's own residual variance (d00..d11 component k) for Huber!
             int wSlot = reuseLumaW ? td_luma_slot(k) : k;
             if (wSlot < 0) continue;
             if (reuseLumaW)
@@ -1967,10 +1981,10 @@ for (int b = 0; b < 3; ++b)
             if (enableHuber)
             {
                 float diffSq = diff * diff;
-                t00 *= td_huber_taper(diffSq, td_vec_comp(d00, wSlot));
-                t10 *= td_huber_taper(diffSq, td_vec_comp(d10, wSlot));
-                t01 *= td_huber_taper(diffSq, td_vec_comp(d01, wSlot));
-                t11 *= td_huber_taper(diffSq, td_vec_comp(d11, wSlot));
+                t00 *= td_huber_taper(diffSq, td_vec_comp(d00, k));
+                t10 *= td_huber_taper(diffSq, td_vec_comp(d10, k));
+                t01 *= td_huber_taper(diffSq, td_vec_comp(d01, k));
+                t11 *= td_huber_taper(diffSq, td_vec_comp(d11, k));
             }
             float top = t00 + (t10 - t00) * tx;
             float bot = t01 + (t11 - t01) * tx;
@@ -2794,7 +2808,7 @@ imageStore(warp_diag, cell, vec4(0.0));
 					&inRecUvTex_, &inRecRgbTex_, &inCleanUvTex_, &inRefUvTex_,
 					&inMotionVecTex_, &inMotionMetaTex_, &inCellPriorTex_, &inFaceMaskTex_,
 					&outCodedDeltaTex_, &outDelivUvTex_, &outDelivRgbTex_, &outDelivDeltaTex_,
-					&outDiagFlagsTex_, &outGuardCellTex_, &outWarpDiagTex_, &ebPriorTex_ })
+					&outDiagFlagsTex_, &outGuardCellTex_, &outWarpDiagTex_, &ebPriorTex_, &inLumaCellWeightsTex_ })
 				{
 					if (*t != nullptr)
 						pl_tex_destroy(gpu, t);
@@ -2812,7 +2826,7 @@ imageStore(warp_diag, cell, vec4(0.0));
 					&inRecUvTex_, &inRecRgbTex_, &inCleanUvTex_, &inRefUvTex_,
 					&inMotionVecTex_, &inMotionMetaTex_, &inCellPriorTex_, &inFaceMaskTex_,
 					&outCodedDeltaTex_, &outDelivUvTex_, &outDelivRgbTex_, &outDelivDeltaTex_,
-					&outDiagFlagsTex_, &outGuardCellTex_, &outWarpDiagTex_, &ebPriorTex_ })
+					&outDiagFlagsTex_, &outGuardCellTex_, &outWarpDiagTex_, &ebPriorTex_, &inLumaCellWeightsTex_ })
 				{
 					*t = nullptr;
 				}
@@ -2826,7 +2840,7 @@ imageStore(warp_diag, cell, vec4(0.0));
 				inRecUvTex_, inRecRgbTex_, inCleanUvTex_, inRefUvTex_,
 				inMotionVecTex_, inMotionMetaTex_, inCellPriorTex_, inFaceMaskTex_,
 				outCodedDeltaTex_, outDelivUvTex_, outDelivRgbTex_, outDelivDeltaTex_,
-				outDiagFlagsTex_, outGuardCellTex_, outWarpDiagTex_, ebPriorTex_ })
+				outDiagFlagsTex_, outGuardCellTex_, outWarpDiagTex_, ebPriorTex_, inLumaCellWeightsTex_ })
 			{
 				total += VpSkeleton::TexBytesOf(t);
 			}
@@ -3846,15 +3860,14 @@ imageStore(out_coded_delta, p, vec4(0.0));
 			}
 			pl_tex finalFlagsTex = sc.refFlags[curFlagsSlot];
 
-			// Plan 6.6 / CHR-HIGH-3 (`cfg_.chromaReuseLumaWeights`):
+			// Plan 6.6 / CHR-HIGH-3 / RED-BUG-6 (`cfg_.chromaReuseLumaWeights`):
 			// Never apply on Branch A (`coarseOnly == true`), strictly map chroma refs by RefRole,
-			// and zero-clear diagnostic textures when C2A/C2B are skipped!
+			// and ALWAYS compute chroma's own residual variance (sc.diagCb/Cr) & blockOwnU without requiring lumaCellDiagCTex!
 			const bool reuseLumaWeightsGpu =
 				!coarseOnly &&
 				cfg_.chromaReuseLumaWeights &&
-				in.lumaCellWeightsTex != nullptr && in.lumaCellDiagCTex != nullptr &&
-				in.lumaCellWeightsTex->params.w == 3 * cw && in.lumaCellWeightsTex->params.h == ch &&
-				in.lumaCellDiagCTex->params.w == 3 * cw && in.lumaCellDiagCTex->params.h == ch;
+				in.lumaCellWeightsTex != nullptr &&
+				in.lumaCellWeightsTex->params.w == 3 * cw && in.lumaCellWeightsTex->params.h == ch;
 			int lumaSlotForChroma[3] = { -1, -1, -1 };
 			if (reuseLumaWeightsGpu)
 			{
@@ -3882,6 +3895,7 @@ imageStore(out_coded_delta, p, vec4(0.0));
 					}
 				}
 			}
+			const float uReuseLumaWeights = reuseLumaWeightsGpu ? 1.0f : 0.0f;
 			const double maxAllowedStepScale = cfg_.enableAqStepScaling ? kCellStepScaleMax : 1.0;
 
 			// Derived physics for standalone chroma focus guard (CHR-MEDIUM-3) & M+H activity classification (CHR-HIGH-1).
@@ -3911,21 +3925,6 @@ imageStore(out_coded_delta, p, vec4(0.0));
 			// ---- PASS C2A: LDS Cell-Moment Reduction + Standalone Focus Fallback for Cb & Cr ----
 			const bool sameCleanRec = (codedCleanTex == codedRecTex);
 			const float uSameCleanRec = sameCleanRec ? 1.0f : 0.0f;
-			if (reuseLumaWeightsGpu)
-			{
-				// CHR-HIGH-3: Zero diagnostic textures cleanly so readbackCellDiagnostics never sees stale VRAM!
-				const std::vector<float> zeroEb(6u * 2u * 4u, 0.0f);
-				if (!Detail::UploadFloats(gpu, ebPriorTex_, zeroEb.data()))
-					return failVisible("TdV2ChromaGpuEngine ebPriorTex zero upload failed", StandInKind::GpuDispatchFailed);
-				pl_shader_desc dzd[2] = {
-					VpvGpu::Storage("cell_diag_flags", dstDiagFlags),
-					VpvGpu::Storage("warp_diag", dstWarpDiag)
-				};
-				if (!runPass("td_v2_c2_zero_diag", chromaGeom, ChromaShaders::kPassChromaZeroDiag, dzd, 2, nullptr, 0,
-				             Detail::GroupsFor(cw, 8), Detail::GroupsFor(ch, 8), 8, 8))
-					return failVisible("td_v2_c2_zero_diag dispatch failed", StandInKind::GpuDispatchFailed);
-			}
-			else
 			{
 				std::string c2aHdr = chromaGeom;
 				c2aHdr += VpvGpu::Define("TD_GAIN_MID", gains.mid);
@@ -4003,10 +4002,12 @@ imageStore(out_coded_delta, p, vec4(0.0));
 					VpvGpu::Sampled("cell_own_grain", sc.ownGrain),
 					VpvGpu::Storage("eb_prior", ebPriorTex_)
 				};
-				pl_shader_var v2eb[19] = {
+				// RED-BUG-2: Bind u_ref_motion_slot_0/1/2 required by Shaders::kPass2MergeSolveHeader!
+				pl_shader_var v2eb[22] = {
 					VpvGpu::Var("u_k", &uK),
 					VpvGpu::Var("u_pool_r_l", &uPoolRL), VpvGpu::Var("u_pool_r_m", &uPoolRM), VpvGpu::Var("u_pool_r_h", &uPoolRH),
 					VpvGpu::Var("u_ref_role_0", &uRefRole0), VpvGpu::Var("u_ref_role_1", &uRefRole1), VpvGpu::Var("u_ref_role_2", &uRefRole2),
+					VpvGpu::Var("u_ref_motion_slot_0", &uRefSlot0), VpvGpu::Var("u_ref_motion_slot_1", &uRefSlot1), VpvGpu::Var("u_ref_motion_slot_2", &uRefSlot2),
 					VpvGpu::Var("u_exact_copy_0", &uExact0), VpvGpu::Var("u_exact_copy_1", &uExact1), VpvGpu::Var("u_exact_copy_2", &uExact2),
 					VpvGpu::Var("u_has_clean_split", &uHasSplit), VpvGpu::Var("u_bokeh_mode", &uBokehMode),
 					VpvGpu::Var("u_has_face_mask", &uHasFaceMask),
@@ -4017,7 +4018,7 @@ imageStore(out_coded_delta, p, vec4(0.0));
 				};
 				const size_t sh2eb = (256u * 6u + 1u) * sizeof(float);
 				const std::string c2ebBody = ChromaShaders::BuildPassChromaEbPriorReduceBody();
-				if (!runPass("td_v2_c2eb_prior_reduce", c2ebHdr, c2ebBody.c_str(), d2eb, 7, v2eb, 19, 1, 1, 16, 16, sh2eb))
+				if (!runPass("td_v2_c2eb_prior_reduce", c2ebHdr, c2ebBody.c_str(), d2eb, 7, v2eb, 22, 1, 1, 16, 16, sh2eb))
 					return failVisible("td_v2_c2eb_prior_reduce dispatch failed", StandInKind::GpuDispatchFailed);
 
 				// Apply temporal rolling-median A2e cap & one-sided K=1 hold on host (192 bytes, 1:1 with CPU TdV2Chroma.h).
@@ -4066,8 +4067,7 @@ imageStore(out_coded_delta, p, vec4(0.0));
 					return failVisible("TdV2ChromaGpuEngine ebPriorTex capped upload failed", StandInKind::GpuDispatchFailed);
 			}
 
-			// ---- PASS C2B: Chan-Pebay Merge + A2e/EB Shrinkage + Active-Set Solve (Cb & Cr) ----
-			if (!reuseLumaWeightsGpu)
+			// ---- PASS C2B: Chan-Pebay Merge + Chroma cellDiagC/blockOwnU + Active-Set Solve (skipped when reuseLumaWeightsGpu) ----
 			{
 				std::string c2bHdr = chromaGeom;
 				c2bHdr += VpvGpu::Define("TD_GAIN_LOW", effLowGain);
@@ -4104,7 +4104,7 @@ imageStore(out_coded_delta, p, vec4(0.0));
 					VpvGpu::Storage("cell_diag_cr", sc.diagCr),
 					VpvGpu::Storage("cell_diag_flags", dstDiagFlags)
 				};
-				pl_shader_var v2b[31] = {
+				pl_shader_var v2b[32] = {
 					VpvGpu::Var("u_k", &uK),
 					VpvGpu::Var("u_pool_r_l", &uPoolRL), VpvGpu::Var("u_pool_r_m", &uPoolRM), VpvGpu::Var("u_pool_r_h", &uPoolRH),
 					VpvGpu::Var("u_estimator", &uEstimator),
@@ -4124,10 +4124,11 @@ imageStore(out_coded_delta, p, vec4(0.0));
 					VpvGpu::Var("u_coarse_only", &uCoarseOnly),
 					VpvGpu::Var("u_enable_eb", &uEnableEb),
 					VpvGpu::Var("u_use_a2e_prior", &uUseA2ePrior),
-					VpvGpu::Var("u_activity_tex_floor", &uActivityTexFloor)
+					VpvGpu::Var("u_activity_tex_floor", &uActivityTexFloor),
+					VpvGpu::Var("u_reuse_luma_weights", &uReuseLumaWeights)
 				};
 				const std::string c2bBody = ChromaShaders::BuildPassChromaMergeSolveBody();
-				if (!runPass("td_v2_c2b_merge_solve", c2bHdr, c2bBody.c_str(), d2b, 12, v2b, 31,
+				if (!runPass("td_v2_c2b_merge_solve", c2bHdr, c2bBody.c_str(), d2b, 12, v2b, 32,
 				             Detail::GroupsFor(cw, 8), Detail::GroupsFor(ch, 8), 8, 8))
 				{
 					return failVisible("td_v2_c2b_merge_solve dispatch failed", StandInKind::GpuDispatchFailed);
@@ -4163,11 +4164,12 @@ float td_huber_taper(float diffSq, float diagC)
 }
 )GLSL";
 
+				// RED-BUG-6 + libplacebo non-aliasing: bind in.lumaCellWeightsTex ONLY on cell_weights_cb (never duplicate
+				// on cell_weights_cr!) and ALWAYS bind chroma's own sc.diagCb / sc.diagCr for Huber & U3 bounds!
 				pl_tex bindWeightsCb = reuseLumaWeightsGpu ? in.lumaCellWeightsTex : sc.weightsCb;
-				pl_tex bindWeightsCr = reuseLumaWeightsGpu ? in.lumaCellWeightsTex : sc.weightsCr;
-				pl_tex bindDiagCb = reuseLumaWeightsGpu ? in.lumaCellDiagCTex : sc.diagCb;
-				pl_tex bindDiagCr = reuseLumaWeightsGpu ? in.lumaCellDiagCTex : sc.diagCr;
-				const float uReuseLumaWeights = reuseLumaWeightsGpu ? 1.0f : 0.0f;
+				pl_tex bindWeightsCr = sc.weightsCr;
+				pl_tex bindDiagCb = sc.diagCb;
+				pl_tex bindDiagCr = sc.diagCr;
 
 				pl_shader_desc d3[17] = {
 					VpvGpu::Sampled("cur_l", sc.curL), VpvGpu::Sampled("cur_mh", sc.curMH),
@@ -4217,12 +4219,14 @@ float td_huber_taper(float diffSq, float diagC)
 				c4Hdr += ChromaShaders::kSitedCoordHelpers;
 				c4Hdr += ChromaShaders::kPassChromaGuardHeader;
 
+				// Use sc.bandTmpCb (dead after C1) as dummy face_mask so Pass C4/C4B NEVER alias sc.warpedUv!
+				pl_tex c4FaceBind = hasFaceMask ? faceMaskTex : sc.bandTmpCb;
 				pl_shader_desc d4[7] = {
 					VpvGpu::Sampled("rec_uv", codedRecTex),
 					VpvGpu::Sampled("cur_uv", sameCleanRec ? sc.weightsCr : codedCleanTex),
 					VpvGpu::Sampled("coded_delta_raw", sc.codedDeltaRaw),
 					VpvGpu::Sampled("cell_prior", cellPriorTex),
-					VpvGpu::Sampled("face_mask", faceMaskBind),
+					VpvGpu::Sampled("face_mask", c4FaceBind),
 					VpvGpu::Storage("out_coded_delta", smoothGuard ? sc.warpedUv : out.outCodedDeltaTex),
 					VpvGpu::Storage("guard_cell", dstGuardCell)
 				};
@@ -4248,7 +4252,7 @@ float td_huber_taper(float diffSq, float diagC)
 						VpvGpu::Sampled("fine_diff", sc.warpedUv),
 						VpvGpu::Sampled("guard_cell", dstGuardCell),
 						VpvGpu::Sampled("cell_prior", cellPriorTex),
-						VpvGpu::Sampled("face_mask", faceMaskBind),
+						VpvGpu::Sampled("face_mask", c4FaceBind),
 						VpvGpu::Storage("out_coded_delta", out.outCodedDeltaTex)
 					};
 					pl_shader_var v4b[9] = {
@@ -4436,6 +4440,42 @@ float td_huber_taper(float diffSq, float diagC)
 			gIn.lumaRefRoles = in.lumaRefRoles;
 			gIn.lumaActiveRefCount = in.lumaActiveRefCount;
 			gIn.frameRole = in.frameRole;
+
+			// RED-BUG-6: Upload CPU lumaCellWeights into persistent inLumaCellWeightsTex_ (3*cw x ch RGBA32F) when supplied!
+			if (cfg_.chromaReuseLumaWeights && in.lumaCellWeights != nullptr)
+			{
+				const int cellPxUpload = cfg_.cellPx > 0 ? cfg_.cellPx : kCanonicalBlockPx;
+				const int uCw = (in.lumaW + cellPxUpload - 1) / cellPxUpload;
+				const int uCh = (in.lumaH + cellPxUpload - 1) / cellPxUpload;
+				const size_t nCells = static_cast<size_t>(uCw) * static_cast<size_t>(uCh);
+				if (uCw > 0 && uCh > 0)
+				{
+					if (!Detail::EnsureTex(gpu, inLumaCellWeightsTex_, 3 * uCw, uCh, fmtRGBA32, true, false, true, false))
+						return failRes("TdV2ChromaGpuEngine::ProcessChromaPlanes lumaCellWeights alloc failed", StandInKind::GpuDispatchFailed);
+					std::vector<float> lwBuf(static_cast<size_t>(3 * uCw) * static_cast<size_t>(uCh) * 4u, 0.0f);
+					for (int b = 0; b < 3; ++b)
+					{
+						for (int k = 0; k < 3 && k < kMaxBlendRefs; ++k)
+						{
+							const auto& srcW = (*in.lumaCellWeights)[b][k];
+							if (srcW.size() != nCells)
+								continue;
+							for (int cy = 0; cy < uCh; ++cy)
+							{
+								for (int cx = 0; cx < uCw; ++cx)
+								{
+									const size_t srcIdx = static_cast<size_t>(cy) * uCw + cx;
+									const size_t dst = static_cast<size_t>(cy) * (3 * uCw) + static_cast<size_t>(b * uCw + cx);
+									lwBuf[dst * 4u + static_cast<size_t>(k)] = static_cast<float>(srcW[srcIdx]);
+								}
+							}
+						}
+					}
+					if (!Detail::UploadFloats(gpu, inLumaCellWeightsTex_, lwBuf.data()))
+						return failRes("TdV2ChromaGpuEngine::ProcessChromaPlanes lumaCellWeights upload failed", StandInKind::GpuDispatchFailed);
+					gIn.lumaCellWeightsTex = inLumaCellWeightsTex_;
+				}
+			}
 
 			if (isRgb)
 			{
@@ -4779,6 +4819,7 @@ float td_huber_taper(float diffSq, float diagC)
 		pl_tex outGuardCellTex_ = nullptr;
 		pl_tex outWarpDiagTex_ = nullptr;
 		pl_tex ebPriorTex_ = nullptr;
+		pl_tex inLumaCellWeightsTex_ = nullptr;
 
 		A2ePriorHistory a2eHistoryCb_;
 		A2ePriorHistory a2eHistoryCr_;
