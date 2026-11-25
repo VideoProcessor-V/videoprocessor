@@ -41,7 +41,7 @@
 #include <utility>
 #include <vector>
 
-namespace VpSkeleton { class QueueWindowBoard; }   // core/QueueWindow.h (QKP E: the lease window's bound)
+namespace VpSkeleton { class QueueWindowBoard; class SkeletonMemo; }   // core/QueueWindow.h, core/SkeletonAcquire.h
 
 namespace VpMotion
 {
@@ -96,6 +96,34 @@ namespace VpMotion
 
 	private:
 		Matcher& matcher_;
+	};
+
+	// RAII pin + matcher binding for SkeletonMemo across one Estimate call (exception-safe; skips live memo on warm-up).
+	template<class Matcher>
+	class MatcherSkeletonMemoScope
+	{
+	public:
+		MatcherSkeletonMemoScope(Matcher& matcher, std::shared_ptr<VpSkeleton::SkeletonMemo> memo, uint64_t seq)
+			: matcher_(matcher), memo_(std::move(memo))
+		{
+			matcher_.SetSkeletonMemo(memo_.get(), memo_ ? seq : 0);
+		}
+		~MatcherSkeletonMemoScope() { Release(); }
+		void Release()
+		{
+			if (!active_)
+				return;
+			active_ = false;
+			matcher_.SetSkeletonMemo(nullptr, 0);
+			memo_.reset();
+		}
+		MatcherSkeletonMemoScope(const MatcherSkeletonMemoScope&) = delete;
+		MatcherSkeletonMemoScope& operator=(const MatcherSkeletonMemoScope&) = delete;
+
+	private:
+		Matcher& matcher_;
+		std::shared_ptr<VpSkeleton::SkeletonMemo> memo_;
+		bool active_ = true;
 	};
 
 	class VectorEngine : public VectorEngineState, public IVectorEngine
@@ -184,39 +212,24 @@ namespace VpMotion
 
 		// ---- W2-C1 (B9): the one engine state and its work counters ---------------------------------------------------
 		// State: derived at the end of UpdateVectorEngine and PlanProducer (render thread; VectorEngineState.h, the one-frame lag).
-		VectorDemand::MotionEngineStatus State() const override { return motionEngineStatus; }
+		VectorDemand::MotionEngineStatus State() const override;
 		// Work: the counters, with the producer's pairs (stopped producers' pairs kept in motionEnginePairsBase).
 		VectorDemand::MotionEngineWork Work() const override;
 		// B-prereq (a): the P2 slot's read-only view and the P2 CPU form's read counts (served / declined; atomics, any thread).
-		VpMotion::P2View P2Pairs() const override { return P2(); }
+		VpMotion::P2View P2Pairs() const override;
 		// The P2 CPU form's reader (VectorEngine.cpp: FindTo + the C2a-F 2 generation check + MakeP2PairRecord).
 		bool P2RecordEndingAt(uint64_t to, VpMotion::P2PairRecord& out, std::string& why) const override;
-		void NoteP2CpuFormRead(bool served) const override
-		{
-			(served ? p2CpuFormServed_ : p2CpuFormDeclined_).fetch_add(1, std::memory_order_relaxed);
-		}
+		void NoteP2CpuFormRead(bool served) const override;
 		// The fill's call: a decline also keeps its words for the status segment's "(last: ...)" (BBP-A-COUNTS-CTRLALTD).
-		void NoteP2CpuFormRead(bool served, const std::string& why) const override
-		{
-			if (!served)
-			{
-				std::lock_guard<std::mutex> lock(p2CpuFormWhyMutex_);
-				p2CpuFormLastWhy_ = why;
-			}
-			NoteP2CpuFormRead(served);
-		}
-		std::string P2CpuFormLastDecline() const
-		{
-			std::lock_guard<std::mutex> lock(p2CpuFormWhyMutex_);
-			return p2CpuFormLastWhy_;
-		}
-		unsigned long long P2CpuFormServed() const { return p2CpuFormServed_.load(std::memory_order_relaxed); }
-		unsigned long long P2CpuFormDeclined() const { return p2CpuFormDeclined_.load(std::memory_order_relaxed); }
-		unsigned long long ShallowBackwardPairs() const { return vectorShallowBackwardPairs.load(std::memory_order_relaxed); }
+		void NoteP2CpuFormRead(bool served, const std::string& why) const override;
+		std::string P2CpuFormLastDecline() const;
+		unsigned long long P2CpuFormServed() const;
+		unsigned long long P2CpuFormDeclined() const;
+		unsigned long long ShallowBackwardPairs() const;
 		// The VRAM governor's release of the motion engine (the de-judder's keeper feeds it; render thread).
-		void NoteVramRelease(bool released) { motionVramRelease = released; }
+		void NoteVramRelease(bool released);
 		// The keeper's counters (warm-ups, analysis estimates, matcher creates); render thread.
-		VectorDemand::MotionEngineWork& WorkCounters() { return motionEngineWork; }
+		VectorDemand::MotionEngineWork& WorkCounters();
 
 		struct ServeFacts
 		{
@@ -254,7 +267,7 @@ namespace VpMotion
 
 		// ---- P5a-5: the matcher estimate and its K4 pre-estimate hook (render thread) ---------------------------
 		// The estimate state binds itself as the engine's view of the matcher (null = unbound).
-		void BindMatcher(const IMatcherView* matcher) { matcher_ = matcher; }
+		void BindMatcher(const IMatcherView* matcher);
 		// Runs the matcher's estimate of the pair (aSequence, bSequence). With a pre-estimate hook registered and
 		// `hookable` (not the warm-up's dummy estimate): BeforeEstimate(ctx, sink) right before, AfterEstimate(pairSeq,
 		// EstimateOutcome) right after. With no hook it is `estimate()` and nothing else (no sink, no matcher
@@ -324,8 +337,9 @@ namespace VpMotion
 			NoteEstimated(done, aSequence, bSequence, epochAtChoice);
 			return done;
 		}
-		unsigned long long PreEstimateHookFailures() const { return hookFailures_.failures; }
-		bool PreEstimateHooked() const { return preEstimateHook_.load(std::memory_order_acquire) != nullptr; }
+		unsigned long long PreEstimateHookFailures() const;
+		bool PreEstimateHooked() const;
+		std::shared_ptr<VpSkeleton::SkeletonMemo> SkeletonMemoFor(uint64_t seq) const;
 		// The optical-flow engine's whole-frame motion of the pair the matcher took ahead (flow->global[0], D1 format:
 		// 1/8-size texels, z ambiguity, w written); null = no producer pair. CPU record for EngineGlobal only.
 		void NoteEngineGlobal(uint64_t from, uint64_t to, const float* global, int searchHalvings);
@@ -361,16 +375,20 @@ namespace VpMotion
 		// only a FlowOf call evicts, never another pair's FlowOf by itself. Without a board: until the next FlowOf of another pair.
 		// (The earlier text said "until the NEXT FlowOf call": that was the single lease.)
 		bool FlowOf(uint64_t seq, FlowView& out) const override;
-		// The source width the engine size derives from (the statistics service notes it each time it sizes the producer); until then
-		// FlowOf answers "size unknown" rather than guess a scale.
-		void NoteFlowSourceWidth(int width) { flowSourceWidth_.store(width, std::memory_order_relaxed); }
+		// The source raster size (and optionally the expected engine luma size from SizeFor) the producer was sized for, recorded
+		// atomically under flowMutex_ so a resolution switch (e.g. 1080p -> 4K) never exposes a torn (width, height) or (source, target)
+		// snapshot. Until a positive width is noted, FlowOf answers "size unknown" (unscaled) rather than guess a scale; when a positive
+		// target engine size is noted, FlowOf also refuses any stored pair whose (halfW, halfH) differs from that target as unscaled.
+		void NoteFlowSourceSize(int width, int height, int targetEngineW = 0, int targetEngineH = 0);
+		// Compatibility wrapper for width-only callers (tests): sets height and target size to 0 (FlowOf falls back to scaleX for Y).
+		void NoteFlowSourceWidth(int width);
 		struct FlowReadCounters
 		{
 			unsigned long long requests = 0, served = 0;
 			unsigned long long noProducer = 0;     // no producer (low latency, optical flow off, not started / dropped)
 			unsigned long long noPair = 0;         // the producer has no such pair (not computed yet, pruned, older generation)
 			unsigned long long invalidated = 0;    // the vectors-valid state does not hold the pair (resync, gap, format change)
-			unsigned long long unscaled = 0;       // the source size the engine size derives from is not known yet
+			unsigned long long unscaled = 0;       // the source size is not known yet, or the stored pair's engine size does not match the current target size
 			// W1-C3: the per-pair work (computed once per pair id, whatever the number of FlowOf calls): the lease builds (source-px
 			// conversion of the pair) and the cell-trust computations (FlowView::CellTrust, once per direction and tolerance while the pair is the current lease).
 			unsigned long long conversions = 0;
@@ -397,16 +415,16 @@ namespace VpMotion
 		LeaseCounters Leases() const;
 		std::string LeaseWindowLine() const;
 		// The host's window board (core/QueueWindow.h); null = not fed. Set and clear on the render thread; outlives the engine's use.
-		void SetQueueWindowBoard(const VpSkeleton::QueueWindowBoard* board) { queueBoard_.store(board, std::memory_order_release); }
+		void SetQueueWindowBoard(const VpSkeleton::QueueWindowBoard* board);
 		// Contract: set AND clear on the render thread or under renderMutex (an estimate reads the pointer once and
 		// calls it without a lock); the hook object may be destroyed only after the clear has returned.
-		void SetPreEstimateHook(IPreEstimateHook* hook) override { preEstimateHook_.store(hook, std::memory_order_release); }
-		void SetCameraFitWanted(bool wanted) override { cameraFitWanted_.store(wanted, std::memory_order_release); }
-		bool CameraFitWanted() const { return cameraFitWanted_.load(std::memory_order_acquire); }
+		void SetPreEstimateHook(IPreEstimateHook* hook) override;
+		void SetCameraFitWanted(bool wanted) override;
+		bool CameraFitWanted() const;
 		// W2-C1 (C1-4) TEST SEAM (rule 25; README "One motion-engine state"): every producer start fails with this reason, as NVOF
 		// does on an adapter or size it cannot serve, without a device (PlanProducer then treats the device as present). Empty (the
 		// default; nothing in the product sets it) = the real start. CPU tests only: EngineAbsentPipelineTests scenario 2.
-		void FailProducerStartsForTesting(const std::string& reason) { producerStartFailureForTesting_ = reason; }
+		void FailProducerStartsForTesting(const std::string& reason);
 		// Reservations (RefinedFieldOf, SubmitLongPair ...): IVectorEngine's "absent" defaults.
 
 		// ---- W2-C5b: the ON-DEMAND estimate entry (OnDemandEstimate.h; refs\93-prep-C5b.md); render thread --------------------
@@ -439,7 +457,7 @@ namespace VpMotion
 		OnDemandCounters OnDemandReads() const;
 		// The C1 state gate (C5b opus gate MUST 2): no request work while the engine's one state is Off (vector_demand off, no want,
 		// interlaced, smooth motion, VRAM release, ...). Render thread (State() is derived there, with its one-frame lag).
-		bool OnDemandStateOn() const { return motionEngineStatus.state != VectorDemand::MotionEngineState::Off; }
+		bool OnDemandStateOn() const;
 		// ---- W2-C5b commit 4: the dequeue issues, the estimate fills (OnDemandIssue.h; VectorEngineEstimate.inl) -----------
 		enum : unsigned { kConsumerIdleCycles = 4 };   // enum constant: ODR-safe in C++14
 		// The post (OnDemandIssue.h), once per staged pair (once per new A): the render-time sample (OnDemand::RenderSample) and the consumer clock.
@@ -451,9 +469,9 @@ namespace VpMotion
 		bool OnDemandConsumerActive();
 		// Rule 32: the renderer notes optical_flow_on_demand every frame from Impl::ResolveMotionEngine (PhaseTimeline.inl, render
 		// thread, before RenderLocked); once noted it replaces ProducerInputs::onDemand in PlanProducer. Render thread only.
-		void NoteHostOnDemandSetting(OnDemand::Setting s) { hostOnDemand_ = s; hostOnDemandKnown_ = true; }
+		void NoteHostOnDemandSetting(OnDemand::Setting s);
 		// The setting PlanProducer published (the host's noted value, else ProducerInputs::onDemand); the walk's stage reads it.
-		void SetOnDemandSetting(OnDemand::Setting s) { onDemandSetting_.store(static_cast<unsigned char>(s), std::memory_order_release); }
+		void SetOnDemandSetting(OnDemand::Setting s);
 		OnDemand::Setting OnDemandSettingNow() const { return static_cast<OnDemand::Setting>(onDemandSetting_.load(std::memory_order_acquire)); }
 		// Stall fix (W2-C5b re-check, MUST 3): the walk's stage only STAGES the predicted pair under the renderer's queue mutex
 		// (plain copies: the two frames' analysis caches as a peek closure, sequences, rate, wait); PostStagedOnDemand
@@ -470,14 +488,7 @@ namespace VpMotion
 		// Rule 32 (no new hook lines): the walk stages (StageOnDemandAtWalk, OnDemandIssue.h). True once per new A (the frame
 		// the dequeue takes next); false when the walk sees the same A again (the dequeue held it): no second request and no
 		// second cycle sample for it. Render thread only.
-		bool NoteOnDemandWalkFrame(uint64_t from)
-		{
-			if (onDemandWalkFromKnown_ && onDemandWalkFrom_ == from)
-				return false;
-			onDemandWalkFrom_ = from;
-			onDemandWalkFromKnown_ = true;
-			return true;
-		}
+		bool NoteOnDemandWalkFrame(uint64_t from);
 		bool TakeStagedOnDemand(OnDemandStaged& out);    // false: nothing staged since the last take
 		// Issues ONE request for the dequeue's selected pair (through RequestPair); an older one not yet claimed is abandoned.
 		void IssueOnDemand(OnDemand::PairRequest request);
@@ -544,18 +555,18 @@ namespace VpMotion
 		uint8_t p1AheadDepth_ = 0;
 		uint64_t p1AheadErasures_ = 0;
 		int p1AheadDemandOwner_ = 0;
-		// QKP slice E (design s9.3): FlowOf's leases are a MAP keyed (from, to, scale), bounded by the SAME derived queue window as the
+		// QKP slice E (design s9.3): FlowOf's leases are a MAP keyed (from, to, scaleX, scaleY), bounded by the SAME derived queue window as the
 		// frame memo (core/QueueWindow.h; the board is the host's one snapshot, fed by SetQueueWindowBoard). A lease is dropped when its
 		// frame is older than current - back, when its pair is no longer in the P2 slot (a lease never extends P2 retention), or when
 		// the vectors-valid epoch / the board's invalidation epoch moved. Without a board the behaviour is today's single lease. In production
 		// there is no board yet (slice E is dormant: no host wiring, LeaseWindowLine not displayed; 102b QKP-E-HOST-WIRING), so it is not shown.
-		// FlowOf's lease (one per pair): the shared pair and the converted planes the last returned view points into (render thread; the mutex only
+		// FlowOf's lease (one per pair and per-axis scale): the shared pair and the converted planes the last returned view points into (render thread; the mutex only
 		// makes a stray second reader safe, it does not extend a view's validity).
 		struct FlowLease : IFlowTrustMemo
 		{
 			MotionAhead::FlowPtr flow;
 			uint64_t from = 0, to = 0;
-			double scale = 0;
+			double scaleX = 0, scaleY = 0;
 			uint64_t validityEpoch = 0, boardEpoch = 0;   // QKP E: the epochs the lease was built in (a moved epoch drops it)
 			std::vector<float> x, y;
 			// W1-C3: the cell trust memo, one entry per tolerance asked for this pair (each computed once and counted). A std::list so a
@@ -577,7 +588,13 @@ namespace VpMotion
 			const float* Trust(float toleranceEnginePx, bool backward) const;
 		};
 		mutable std::mutex flowMutex_;
-		using LeaseKey = std::tuple<uint64_t, uint64_t, double>;   // (from, to, scale)
+		struct FlowSourceSize
+		{
+			int sourceW = 0, sourceH = 0;
+			int targetEngineW = 0, targetEngineH = 0;
+		};
+		FlowSourceSize flowSize_;   // under flowMutex_: atomic (sourceW, sourceH, targetEngineW, targetEngineH) snapshot (ServeStatistics / RunDejudderEstimate)
+		using LeaseKey = std::tuple<uint64_t, uint64_t, double, double>;   // (from, to, scaleX, scaleY)
 		mutable std::map<LeaseKey, std::shared_ptr<FlowLease>> flowLeases_;
 		std::atomic<const VpSkeleton::QueueWindowBoard*> queueBoard_{ nullptr };
 		mutable LeaseCounters leaseCounters_;
@@ -592,7 +609,6 @@ namespace VpMotion
 		bool p2CpuFormRecordedAny_ = false;          // the first read has been recorded (render thread)
 		unsigned long long motionAheadP1DeferredRecorded_ = 0;   // P1 deferrals at the last DiagnosticHistory record (render thread)
 		unsigned long long vectorShallowBackwardRecorded_ = 0;   // ForwardShallow backward pairs at the last DiagnosticHistory record (render thread)
-		std::atomic<int> flowSourceWidth_{ 0 };   // the source width the engine size was last made for (ServeStatistics)
 		InvalidateSink invalidateSink_ = nullptr;
 		const IMatcherView* matcher_ = nullptr;
 		std::atomic<IPreEstimateHook*> preEstimateHook_{ nullptr };

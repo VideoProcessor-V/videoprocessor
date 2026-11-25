@@ -297,8 +297,14 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 	sb.sequence = bSequence;
 	if (vectorEngine.motionProducer && vectorEngine.motionProducer->Running() && !vectorEstimate.motionEngineWarming)
 	{
-		int engineW = 0, engineH = 0;
-		if (dejudder->EngineInputSize(engineW, engineH))
+		int engineW = 0, engineH = 0, halvings = 0;
+		if (width > 0 && height > 0)
+		{
+			VpMotion::VectorEngine::SizeFor(dejudder->GetSettings().lowRes, width, height, engineW, engineH, halvings);
+			vectorEngine.NoteFlowSourceSize(width, height, engineW, engineH);
+			vectorEngine.motionProducer->SetTargetSize(engineW, engineH);
+		}
+		else if (dejudder->EngineInputSize(engineW, engineH))
 			vectorEngine.motionProducer->SetTargetSize(engineW, engineH);
 		// MotionValidity step 1 D: a stored pair only for adjacent frames of the current
 		// epoch (otherwise the matcher runs).
@@ -390,9 +396,12 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 	// and reads what it did right after. No hook registered (camera guidance off) = the matcher's Estimate only, as
 	// before: nothing bound, no extra GPU work. Never for the warm-up's dummy A -> A estimate.
 	dejudder->SetWarmUp(vectorEstimate.motionEngineWarming);
+	VpMotion::MatcherSkeletonMemoScope<Dejudder::MotionWarp> memoScope(*dejudder, vectorEstimate.motionEngineWarming ? std::shared_ptr<VpSkeleton::SkeletonMemo>() : vectorEngine.SkeletonMemoFor(bSequence), bSequence);
 	const bool motionEstimated = vectorEngine.Estimate(aSequence, bSequence, ahead, dejudderSourceHz, motionShadowEpoch,
 		!vectorEstimate.motionEngineWarming, *dejudder, [&]() { return dejudder->Estimate(sa, sb, maskSlot, adaptiveGrainMapWanted); },
 		[this](const FallbackCatalog::Decision& decision) { SyncFallback(decision); });
+	memoScope.Release();
+	SyncFallback(dejudder->LastPairGlobalFallback());
 	dejudder->SetWarmUp(false);
 	if (motionEstimated && !vectorEstimate.motionEngineWarming)
 		++vectorEngine.WorkCounters().matcherEstimates;   // W2-C1 (B9): the warm-up's dummy estimate is counted as a warm-up

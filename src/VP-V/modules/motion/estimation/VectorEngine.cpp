@@ -38,6 +38,34 @@ namespace VpMotion
 		// of a recovery, not a rate.
 		constexpr ULONGLONG kResyncWindowMs = 1000;
 
+		// GEM-112 (VE-LIFECYCLE): race-free snapshot of a producer's liveness against HandleEngineFailureLocked (which
+		// mutates `running` and `recovery` under the producer's mutex): reading Running() -> GetHealth() (locks mutex) ->
+		// re-reading Running() guarantees neither running->recovering nor recovering->running tears into (!running && !recovering).
+		struct ProducerSnapshot
+		{
+			bool exists = false;
+			bool running = false;
+			bool recovering = false;
+			bool dead = false;       // exists && !running && !recovering (e.g. async CreateDevice failure)
+			bool hasError = false;   // exists && dead && !Error().empty()
+		};
+
+		ProducerSnapshot SnapshotProducer(const std::shared_ptr<MotionAhead::Producer>& producer, bool readError = false)
+		{
+			ProducerSnapshot s;
+			if (!producer)
+				return s;
+			s.exists = true;
+			s.running = producer->Running();
+			s.recovering = producer->GetHealth().recovering;
+			if (!s.running && !s.recovering)
+				s.running = producer->Running();
+			s.dead = !s.running && !s.recovering;
+			if (readError && s.dead)
+				s.hasError = !producer->Error().empty();
+			return s;
+		}
+
 		// W2-C1: the producer part of the engine facts (as PlanProducer leaves it), then the state. Render thread.
 		void RefreshEngineStatus(VectorEngine& e, ULONGLONG nowMs)
 		{
@@ -45,9 +73,11 @@ namespace VpMotion
 			f.opticalFlow = e.motionOpticalFlow;
 			f.lowLatency = e.motionLowLatency;
 			f.lowLatencyNoVectors = e.motionLowLatencyNoVectors;
-			f.producerRunning = e.motionProducer && e.motionProducer->Running();
-			f.producerRecovering = e.motionProducer && e.motionProducer->GetHealth().recovering;
-			f.nvofStartError = e.motionProducerStartFailed;   // the last start failed (latched until one succeeds or the want ends)
+			const ProducerSnapshot producerSnap = SnapshotProducer(e.motionProducer);
+			f.producerRunning = producerSnap.running;
+			f.producerRecovering = producerSnap.recovering;
+			f.nvofStartError = e.motionProducerStartFailed || producerSnap.dead;   // sync start failure, or a live dead non-recovering producer (GEM-112)
+			f.producerNotRunning = producerSnap.dead;                              // GEM-112: non-zero reason bit while a dead producer object is held
 			f.vramRelease = e.motionVramRelease;
 			const uint64_t epoch = e.motionValidity.Epoch();
 			if (e.motionStatusEpoch == 0)
@@ -160,8 +190,11 @@ namespace VpMotion
 		motionOpticalFlow = in.opticalFlow;
 		motionLowLatency = life.lowLatency;
 		life.dejudderPresent = in.dejudderPresent;
-		life.producerExists = motionProducer != nullptr;
-		life.producerRunning = motionProducer && motionProducer->Running();
+		const ProducerSnapshot producerSnap = SnapshotProducer(motionProducer, /*readError=*/true);
+		life.producerExists = producerSnap.exists;
+		life.producerRunning = producerSnap.running;
+		life.producerRecovering = producerSnap.recovering;
+		life.producerHasError = producerSnap.hasError;
 		life.startFailedLatched = motionProducerStartFailed;
 		const ULONGLONG nowMs = GetTickCount64();
 		// W2-C1: a failed start is retried on the recovery back-off (5 s, then 60 s), not every frame and not only on a settings change.
@@ -234,10 +267,27 @@ namespace VpMotion
 		{
 			// Owner: the producer stays alive once wanted - kept while the settings still want it (a resync
 			// or format change can take longer than any timer); stopped when they change.
+			// GEM-112 (VE-LIFECYCLE): when act.latchStartFailed is true, an async start failure left a dead
+			// non-recovering producer alive: capture its error, stop/release it, latch start failure + error, and back off.
+			const std::string deadError = act.latchStartFailed
+				? (motionProducer->Error().empty() ? std::string("producer stopped before running") : motionProducer->Error())
+				: std::string();
 			motionEnginePairsBase += motionProducer->GetStats().pairs;   // W2-C1: Work().producerPairs keeps them
 			motionProducer->Stop();
 			PublishProducer(nullptr);   // hardening: a loop copy keeps the stopped producer alive until its use ends
+			NoteFlowSourceSize(0, 0, 0, 0);   // GEM-110 (VE-SCALE): never carry a stopped session's raster / target size into a new stream
 			Vpv::FrameAnalysis::NoteP1CpuDemand(host_, false);
+			if (act.latchStartFailed)
+			{
+				const bool logIt = !motionProducerStartFailed || deadError != motionProducerStartError;
+				motionProducerStartFailed = true;
+				motionProducerStartError = deadError;
+				motionProducerStopLogged = false;
+				const uint64_t retryMs = motionProducerStartRetry.OnStopped(nowMs);
+				if (logIt)
+					DebugLog::Log("Motion ahead: the producer did not start (%s); the de-judder takes the block searches (no optical-flow pair); retried in %llu s",
+						deadError.c_str(), static_cast<unsigned long long>(retryMs / 1000));
+			}
 		}
 		// Audit 2026-10-16: a failure is retried once the producer is wanted again (optical flow off and on,
 		// low latency and back), and the look-ahead re-engages only after the refill - never on a stale
@@ -406,8 +456,12 @@ namespace VpMotion
 		// Batch B (plan-motion-engine-switch.md (b)): optical-flow pairs are EXPECTED when the optical-flow producer is configured and
 		// has not failed to start (previous-frame facts: the planner's motion_ahead_frames, -1 = not planned yet = expected). With none
 		// expected the field consumers use the matcher fallback and the statistics consumers are named unserved (VectorDemand::DecideForHost).
+		// GEM-112 (VE-LIFECYCLE): a live dead non-recovering producer (e.g. async CreateDevice failure before PlanProducer releases it)
+		// also means pairs are not expected, so field consumers take the matcher fallback immediately rather than silently starving.
+		const ProducerSnapshot producerSnap = SnapshotProducer(motionProducer);
 		VectorDemand::Input decided = input;
-		decided.pairsExpected = facts.opticalFlow && !motionProducerStartFailed && !motionEngineFacts.producerRecovering &&
+		decided.pairsExpected = facts.opticalFlow && !motionProducerStartFailed &&
+			!motionEngineFacts.producerRecovering && !producerSnap.recovering && !producerSnap.dead &&
 			motionAheadSetting != 0;
 		decided.pairsDeliberatelyOff = !facts.opticalFlow || motionAheadSetting == 0;   // a setting, not a fault (M4)
 		if ((cameraWanted && !input.wants[cameraFit]) || (motionCameraGated && input.wants[cameraFit]))
@@ -610,7 +664,7 @@ namespace VpMotion
 		vectorStatsSequence = sequence;
 		int engineW = 0, engineH = 0, halvings = 0;
 		SizeFor(facts.lowResSearch, width, height, engineW, engineH, halvings);
-		NoteFlowSourceWidth(width);
+		NoteFlowSourceSize(width, height, engineW, engineH);
 		motionProducer->SetTargetSize(engineW, engineH);
 		MotionAhead::FlowPtr flow;
 		uint64_t from = sequence, to = nextSequence;
@@ -684,6 +738,10 @@ namespace VpMotion
 		if (!pending.changed)
 			return false;
 		motionInvalidations += pending.invalidations;
+		// GEM-110 (VE-SCALE): a source format or rebase change invalidates the remembered source / target raster size so FlowOf never
+		// applies a pre-switch size (e.g. 1080p) to a post-switch pair (e.g. 4K) even when both share the same engine size.
+		if (pending.cause == MotionValidity::Cause::SourceFormatChange || pending.cause == MotionValidity::Cause::RebaseChange)
+			NoteFlowSourceSize(0, 0, 0, 0);
 		return true;
 	}
 
@@ -899,6 +957,7 @@ namespace VpMotion
 				engine.motionProducerStartFailed = false;
 				engine.motionProducerStopLogged = false;
 				engine.motionProducerStartRetry = MotionAhead::ProducerRecovery();
+				engine.NoteFlowSourceSize(0, 0, 0, 0);
 				if (producer)
 					engine.motionEnginePairsBase += producer->GetStats().pairs;
 			});
@@ -939,6 +998,27 @@ namespace VpMotion
 		hookFailures_.engaged = false;
 		hookFailures_.goodSince = 0;
 		return FallbackCatalog::Released(hookFailures_.id);
+	}
+
+	unsigned long long VectorEngine::PreEstimateHookFailures() const
+	{
+		return hookFailures_.failures;
+	}
+
+	bool VectorEngine::PreEstimateHooked() const
+	{
+		return preEstimateHook_.load(std::memory_order_acquire) != nullptr;
+	}
+
+	bool VectorEngine::CameraFitWanted() const
+	{
+		return cameraFitWanted_.load(std::memory_order_acquire);
+	}
+
+	std::shared_ptr<VpSkeleton::SkeletonMemo> VectorEngine::SkeletonMemoFor(uint64_t seq) const
+	{
+		const Vpv::Skeleton::FrameMemo fm = Vpv::Skeleton::MemoForHost(host_, seq);
+		return fm.Valid() ? fm.memo : std::shared_ptr<VpSkeleton::SkeletonMemo>();
 	}
 
 	void VectorEngine::NoteEngineGlobal(uint64_t from, uint64_t to, const float* global, int searchHalvings)
@@ -1123,10 +1203,22 @@ namespace VpMotion
 		if (!flow || flow->gridW <= 0 || flow->gridH <= 0 || flow->halfW <= 0 ||
 			flow->forward.size() < static_cast<size_t>(flow->gridW) * static_cast<size_t>(flow->gridH) * 2)
 			return absent(flowReads_.noPair);
-		const int sourceWidth = flowSourceWidth_.load(std::memory_order_relaxed);
+		const int sourceWidth = flowSize_.sourceW;
+		const int sourceHeight = flowSize_.sourceH;
+		const int targetEngineW = flowSize_.targetEngineW;
+		const int targetEngineH = flowSize_.targetEngineH;
 		if (sourceWidth <= 0)
 			return absent(flowReads_.unscaled);
-		const double scale = static_cast<double>(sourceWidth) / flow->halfW;   // source px per engine px (a ratio, never a constant)
+		// GEM-110 (VE-SCALE): when an explicit target engine size was recorded (ServeStatistics / RunDejudderEstimate),
+		// never serve a stored pair whose engine dimensions do not match it (e.g. a stale 1080p pair across a 1080p -> 4K switch).
+		if (targetEngineW > 0 && targetEngineH > 0 &&
+			(flow->halfW != targetEngineW || flow->halfH != targetEngineH))
+			return absent(flowReads_.unscaled);
+		const double scaleX = static_cast<double>(sourceWidth) / flow->halfW;   // horizontal source px per engine px (a ratio, never a constant)
+		const double scaleY = (sourceHeight > 0 && flow->halfH > 0)
+			? static_cast<double>(sourceHeight) / flow->halfH
+			: scaleX;   // vertical source px per engine px; falls back to scaleX for legacy width-only callers
+		const LeaseKey key(from, to, scaleX, scaleY);
 		// ---- QKP slice E: the lease window (design s9.3) ----
 		const uint64_t validityEpoch = motionValidity.Epoch();
 		const VpSkeleton::QueueWindowBoard* const board = queueBoard_.load(std::memory_order_acquire);
@@ -1158,7 +1250,7 @@ namespace VpMotion
 		else
 			for (auto it = flowLeases_.begin(); it != flowLeases_.end();)
 			{
-				if (std::get<0>(it->first) != from || std::get<1>(it->first) != to)   // no board: the single lease (today's behaviour; not displayed yet, 102b QKP-E-HOST-WIRING)
+				if (it->first != key)   // no board: the single lease (today's behaviour; not displayed yet, 102b QKP-E-HOST-WIRING)
 				{
 					++leaseCounters_.droppedSingle;
 					it = flowLeases_.erase(it);
@@ -1177,7 +1269,7 @@ namespace VpMotion
 			else
 				++it;
 		}
-		std::shared_ptr<FlowLease>& slot = flowLeases_[LeaseKey(from, to, scale)];
+		std::shared_ptr<FlowLease>& slot = flowLeases_[key];
 		if (!slot || slot->flow != flow)
 		{
 			auto lease = std::make_shared<FlowLease>();
@@ -1188,7 +1280,8 @@ namespace VpMotion
 			lease->flow = flow;
 			lease->from = from;
 			lease->to = to;
-			lease->scale = scale;
+			lease->scaleX = scaleX;
+			lease->scaleY = scaleY;
 			lease->validityEpoch = validityEpoch;
 			lease->boardEpoch = boardEpoch;
 			const size_t cells = static_cast<size_t>(flow->gridW) * static_cast<size_t>(flow->gridH);
@@ -1196,8 +1289,8 @@ namespace VpMotion
 			lease->y.resize(cells);
 			for (size_t i = 0; i < cells; ++i)
 			{
-				lease->x[i] = static_cast<float>(flow->forward[i * 2] / 32.0 * scale);
-				lease->y[i] = static_cast<float>(flow->forward[i * 2 + 1] / 32.0 * scale);
+				lease->x[i] = static_cast<float>(flow->forward[i * 2] / 32.0 * scaleX);
+				lease->y[i] = static_cast<float>(flow->forward[i * 2 + 1] / 32.0 * scaleY);
 			}
 			slot = std::move(lease);
 		}
@@ -1206,7 +1299,8 @@ namespace VpMotion
 		out.y = flowLease_->y.data();
 		out.gridW = flow->gridW;
 		out.gridH = flow->gridH;
-		out.blockSize = 4.0 * scale;   // a cell is 4 x 4 engine px
+		out.blockSize = 4.0 * scaleX;   // a cell is 4 x 4 engine px
+		out.blockSizeY = 4.0 * scaleY;
 		// The original payload, not a copy: the lease keeps `flow` (and so these arrays) alive while the pair is inside the lease window
 		// (until it leaves it or an invalidation; no board: until the next FlowOf of another pair).
 		const size_t flowCells = static_cast<size_t>(flow->gridW) * static_cast<size_t>(flow->gridH);
@@ -1215,7 +1309,8 @@ namespace VpMotion
 		out.forwardCost = flow->forwardCost.size() >= flowCells ? flow->forwardCost.data() : nullptr;
 		out.backwardCost = flow->backwardCost.size() >= flowCells ? flow->backwardCost.data() : nullptr;
 		out.rawUnitsPerEnginePx = 32.0;
-		out.enginePxToSource = scale;
+		out.enginePxToSource = scaleX;
+		out.enginePxToSourceY = scaleY;
 		out.cellEnginePx = 4;
 		out.engineW = flow->halfW;
 		out.engineH = flow->halfH;
@@ -1805,5 +1900,126 @@ namespace VpMotion
 		if (shallowBack > 0)
 			append("ForwardShallow backward pairs served " + std::to_string(shallowBack));
 		return out;
+	}
+
+	void VectorEngine::NoteP2CpuFormRead(bool served) const
+	{
+		(served ? p2CpuFormServed_ : p2CpuFormDeclined_).fetch_add(1, std::memory_order_relaxed);
+	}
+
+	void VectorEngine::NoteP2CpuFormRead(bool served, const std::string& why) const
+	{
+		if (!served)
+		{
+			std::lock_guard<std::mutex> lock(p2CpuFormWhyMutex_);
+			p2CpuFormLastWhy_ = why;
+		}
+		NoteP2CpuFormRead(served);
+	}
+
+	std::string VectorEngine::P2CpuFormLastDecline() const
+	{
+		std::lock_guard<std::mutex> lock(p2CpuFormWhyMutex_);
+		return p2CpuFormLastWhy_;
+	}
+
+	unsigned long long VectorEngine::P2CpuFormServed() const
+	{
+		return p2CpuFormServed_.load(std::memory_order_relaxed);
+	}
+
+	void VectorEngine::NoteFlowSourceSize(int width, int height, int targetEngineW, int targetEngineH)
+	{
+		std::lock_guard<std::mutex> lock(flowMutex_);
+		flowSize_.sourceW = width > 0 ? width : 0;
+		flowSize_.sourceH = height > 0 ? height : 0;
+		const bool haveTarget = targetEngineW > 0 && targetEngineH > 0;
+		flowSize_.targetEngineW = haveTarget ? targetEngineW : 0;
+		flowSize_.targetEngineH = haveTarget ? targetEngineH : 0;
+	}
+
+	void VectorEngine::NoteFlowSourceWidth(int width)
+	{
+		NoteFlowSourceSize(width, 0, 0, 0);
+	}
+
+	bool VectorEngine::NoteOnDemandWalkFrame(uint64_t from)
+	{
+		if (onDemandWalkFromKnown_ && onDemandWalkFrom_ == from)
+			return false;
+		onDemandWalkFrom_ = from;
+		onDemandWalkFromKnown_ = true;
+		return true;
+	}
+
+	VectorDemand::MotionEngineStatus VectorEngine::State() const
+	{
+		return motionEngineStatus;
+	}
+
+	VpMotion::P2View VectorEngine::P2Pairs() const
+	{
+		return P2();
+	}
+
+	unsigned long long VectorEngine::P2CpuFormDeclined() const
+	{
+		return p2CpuFormDeclined_.load(std::memory_order_relaxed);
+	}
+
+	unsigned long long VectorEngine::ShallowBackwardPairs() const
+	{
+		return vectorShallowBackwardPairs.load(std::memory_order_relaxed);
+	}
+
+	void VectorEngine::NoteVramRelease(bool released)
+	{
+		motionVramRelease = released;
+	}
+
+	VectorDemand::MotionEngineWork& VectorEngine::WorkCounters()
+	{
+		return motionEngineWork;
+	}
+
+	void VectorEngine::BindMatcher(const IMatcherView* matcher)
+	{
+		matcher_ = matcher;
+	}
+
+	void VectorEngine::SetQueueWindowBoard(const VpSkeleton::QueueWindowBoard* board)
+	{
+		queueBoard_.store(board, std::memory_order_release);
+	}
+
+	void VectorEngine::SetPreEstimateHook(IPreEstimateHook* hook)
+	{
+		preEstimateHook_.store(hook, std::memory_order_release);
+	}
+
+	void VectorEngine::SetCameraFitWanted(bool wanted)
+	{
+		cameraFitWanted_.store(wanted, std::memory_order_release);
+	}
+
+	void VectorEngine::FailProducerStartsForTesting(const std::string& reason)
+	{
+		producerStartFailureForTesting_ = reason;
+	}
+
+	bool VectorEngine::OnDemandStateOn() const
+	{
+		return motionEngineStatus.state != VectorDemand::MotionEngineState::Off;
+	}
+
+	void VectorEngine::NoteHostOnDemandSetting(OnDemand::Setting s)
+	{
+		hostOnDemand_ = s;
+		hostOnDemandKnown_ = true;
+	}
+
+	void VectorEngine::SetOnDemandSetting(OnDemand::Setting s)
+	{
+		onDemandSetting_.store(static_cast<unsigned char>(s), std::memory_order_release);
 	}
 }

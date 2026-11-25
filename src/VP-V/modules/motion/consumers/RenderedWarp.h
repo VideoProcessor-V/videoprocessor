@@ -74,6 +74,7 @@ namespace DejudderRendered
 		const pl_color_space& Color() const { return color; }
 		unsigned long long Copies() const { return copies; }
 		unsigned long long Failed() const { return failed; }
+		uint64_t Blits() const;
 
 	private:
 		static pl_hook_res Run(void* priv, const pl_hook_params* params);
@@ -88,6 +89,7 @@ namespace DejudderRendered
 		uint64_t valid = 0;
 		unsigned long long copies = 0;
 		unsigned long long failed = 0;
+		uint64_t blits = 0;
 	};
 
 	class Warp

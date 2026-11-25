@@ -35,6 +35,8 @@
 
 namespace VpMotion
 {
+	constexpr const char* kDejudderCameraStandbyText = "camera P9 standby (stages not wired; uncompensated path used)";
+
 	enum class DejudderCameraStage : uint8_t
 	{
 		Hiccup = 0,
@@ -72,6 +74,47 @@ namespace VpMotion
 		bool lastSmoothed = false;
 		bool lastCausalFallback = false;
 		bool lastLate = false;
+		bool lastAnyStageApplied = false;
+	};
+
+	// Inputs for the canonical four-stage runner (1. Hiccup -> 2. RollOffRA -> 3. DejudderWarp -> 4. ObjectSplitRB).
+	struct DejudderCameraStageInputs
+	{
+		// Stage 1: Hiccup repair (picture-centred coordinates and measured gap vector).
+		double hiccupCx = 0.0;
+		double hiccupCy = 0.0;
+		float hiccupMeasuredVx = 0.0f;
+		float hiccupMeasuredVy = 0.0f;
+		// Stage 2: R-A motion roll-off (measured frame speed in source px/pair).
+		double rollOffMeasuredSpeedPx = 0.0;
+		// Stage 3: De-judder phase warp grid.
+		int gridW = 0;
+		int gridH = 0;
+		double blockSize = 0.0;
+		std::vector<float> gridMeasuredVx;
+		std::vector<float> gridMeasuredVy;
+		std::vector<uint8_t> gridTrusted;
+		// Stage 4: R-B camera/object split (picture-centred coordinates and measured object vector).
+		double objectSplitCx = 0.0;
+		double objectSplitCy = 0.0;
+		float objectSplitMeasuredVx = 0.0f;
+		float objectSplitMeasuredVy = 0.0f;
+	};
+
+	// Outputs produced by the canonical four-stage runner (every field is written unconditionally).
+	struct DejudderCameraStageOutputs
+	{
+		// Stage 1 output.
+		float hiccupOutVx = 0.0f;
+		float hiccupOutVy = 0.0f;
+		// Stage 2 output.
+		double rollOffScale = 1.0;
+		// Stage 3 output.
+		std::vector<float> gridOutVx;
+		std::vector<float> gridOutVy;
+		// Stage 4 output.
+		float objectSplitOutVx = 0.0f;
+		float objectSplitOutVy = 0.0f;
 	};
 
 	// Prepared per-frame camera phase context, built once from ICameraLink::SmoothedRecord(seq) and reused
@@ -148,6 +191,7 @@ namespace VpMotion
 			f.wanted = config.enabled;
 			f.phase = phase;
 			lastStageOrder.clear();
+			stats.lastAnyStageApplied = false;
 			if (!config.enabled)
 				return f;
 
@@ -208,7 +252,7 @@ namespace VpMotion
 		{
 			outVx = measuredVx;
 			outVy = measuredVy;
-			if (!f.active || !config.hiccup)
+			if (!config.enabled || !f.active || !config.hiccup)
 				return;
 			double cdx = 0.0, cdy = 0.0;
 			f.field.Displacement(cx, cy, cdx, cdy);
@@ -216,16 +260,18 @@ namespace VpMotion
 			outVx = static_cast<float>((1.0 - w) * measuredVx + w * cdx);
 			outVy = static_cast<float>((1.0 - w) * measuredVy + w * cdy);
 			++stats.hiccupApplied;
+			stats.lastAnyStageApplied = true;
 			lastStageOrder.push_back(DejudderCameraStage::Hiccup);
 		}
 
 		// Stage 2: R-A motion roll-off. Computes roll-off scale from camera speed blended with measured speed.
 		double ApplyRollOffRA(const DejudderCameraFrame& f, double measuredSpeedPx)
 		{
-			if (!f.active || !config.rolloffRA)
+			if (!config.enabled || !f.active || !config.rolloffRA)
 				return detail::RollOffScale(measuredSpeedPx, config.rollLo, config.rollHi, config.rollFloor);
 			const double speed = (1.0 - f.weight) * measuredSpeedPx + f.weight * f.cameraSpeedPx;
 			++stats.rolloffApplied;
+			stats.lastAnyStageApplied = true;
 			lastStageOrder.push_back(DejudderCameraStage::RollOffRA);
 			return detail::RollOffScale(speed, config.rollLo, config.rollHi, config.rollFloor);
 		}
@@ -240,7 +286,8 @@ namespace VpMotion
 			outVx = measVx;
 			outVy = measVy;
 			const size_t n = static_cast<size_t>(gridW > 0 ? gridW : 0) * static_cast<size_t>(gridH > 0 ? gridH : 0);
-			if (!f.active || !config.dejudderWarp || !f.record || measVx.size() < n || measVy.size() < n || trusted.size() < n)
+			if (!config.enabled || !f.active || !config.dejudderWarp || !f.record || n == 0 ||
+				measVx.size() < n || measVy.size() < n || trusted.size() < n)
 				return;
 			const CameraModel::BlockData* bd = f.record->blocks.get();
 			const bool hasLabels = bd && bd->gridW == gridW && bd->gridH == gridH && bd->label.size() >= n;
@@ -262,6 +309,7 @@ namespace VpMotion
 				}
 			}
 			++stats.warpApplied;
+			stats.lastAnyStageApplied = true;
 			lastStageOrder.push_back(DejudderCameraStage::DejudderWarp);
 		}
 
@@ -273,7 +321,7 @@ namespace VpMotion
 			outVx = measuredVx;
 			outVy = measuredVy;
 			const double os = RampMath::Clamp01NanToZero(config.objectStrength);
-			if (!f.active || !config.objectSplitRB || os >= 1.0)
+			if (!config.enabled || !f.active || !config.objectSplitRB || os >= 1.0)
 				return;
 			double cdx = 0.0, cdy = 0.0;
 			f.field.Displacement(cx, cy, cdx, cdy);
@@ -283,7 +331,42 @@ namespace VpMotion
 			outVx = static_cast<float>((1.0 - w) * measuredVx + w * splitVx);
 			outVy = static_cast<float>((1.0 - w) * measuredVy + w * splitVy);
 			++stats.objectSplitApplied;
+			stats.lastAnyStageApplied = true;
 			lastStageOrder.push_back(DejudderCameraStage::ObjectSplitRB);
+		}
+
+		// Canonical production stage runner: executes all four consumer stages in locked fixed ladder order:
+		//   1. ApplyHiccup -> 2. ApplyRollOffRA -> 3. ApplyDejudderPhaseGrid -> 4. ApplyObjectSplitRB.
+		// When config.enabled is false or `f` is inactive, leaves lastStageOrder empty and
+		// stats.lastAnyStageApplied == false, and writes exact uncompensated inputs to `out`.
+		void RunStages(const DejudderCameraFrame& f, const DejudderCameraStageInputs& in, DejudderCameraStageOutputs& out)
+		{
+			lastStageOrder.clear();
+			stats.lastAnyStageApplied = false;
+
+			// 1. Hiccup repair
+			ApplyHiccup(f, in.hiccupCx, in.hiccupCy, in.hiccupMeasuredVx, in.hiccupMeasuredVy,
+				out.hiccupOutVx, out.hiccupOutVy);
+			// 2. R-A motion roll-off
+			out.rollOffScale = ApplyRollOffRA(f, in.rollOffMeasuredSpeedPx);
+			// 3. De-judder phase warp grid
+			ApplyDejudderPhaseGrid(f, in.gridW, in.gridH, in.blockSize,
+				in.gridMeasuredVx, in.gridMeasuredVy, in.gridTrusted,
+				out.gridOutVx, out.gridOutVy);
+			// 4. R-B camera/object split
+			ApplyObjectSplitRB(f, in.objectSplitCx, in.objectSplitCy, in.objectSplitMeasuredVx, in.objectSplitMeasuredVy,
+				out.objectSplitOutVx, out.objectSplitOutVy);
+		}
+
+		// Single-call production frame runner: Prepare() followed by RunStages() in locked fixed ladder order.
+		// When config.enabled is false, never queries `link`, leaves lastStageOrder empty and
+		// stats.lastAnyStageApplied == false, writes exact uncompensated inputs to `out`, and emits empty StatusSuffix().
+		DejudderCameraFrame RunFrame(const CameraLink::ICameraLink* link, uint64_t seq, double phase,
+			const DejudderCameraStageInputs& in, DejudderCameraStageOutputs& out)
+		{
+			DejudderCameraFrame f = Prepare(link, seq, phase);
+			RunStages(f, in, out);
+			return f;
 		}
 
 		// Visible status line when camera_use_dejudder is active (empty when off -> byte-identical status).
@@ -302,6 +385,8 @@ namespace VpMotion
 				return std::string(", ") + CameraLink::kCausalShortQueueText;
 			if (stats.lastSmoothed)
 			{
+				if (!stats.lastAnyStageApplied)
+					return std::string(", ") + kDejudderCameraStandbyText;
 				char b[96];
 				std::snprintf(b, sizeof(b), ", camera P9 weight %.2f", stats.lastWeight);
 				return b;

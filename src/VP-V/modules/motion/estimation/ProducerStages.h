@@ -320,6 +320,9 @@ namespace MotionAhead
 			}
 
 			// Pop the next live item in FIFO order; skips any stale-generation/epoch entries.
+			// Sets busy_ = true under mutex_ before returning true so WaitIdle() cannot observe an
+			// empty-and-idle window between Pop() and consumer processing; callers must pair each
+			// true return with MarkBusy(false) once processing completes.
 			// Returns false only when closed and drained (or discarded).
 			bool Pop(Entry& out)
 			{
@@ -343,8 +346,11 @@ namespace MotionAhead
 							continue;
 						}
 						out = std::move(candidate);
+						busy_ = true;
 						return true;
 					}
+					if (!busy_)
+						idleCv_.notify_all();
 					if (closed_)
 						return false;
 				}
@@ -371,7 +377,11 @@ namespace MotionAhead
 					}
 				}
 				if (dropped)
+				{
 					spaceCv_.notify_all();
+					if (queue_.empty() && !busy_)
+						idleCv_.notify_all();
+				}
 				return dropped;
 			}
 
@@ -395,6 +405,8 @@ namespace MotionAhead
 				discarded_ += dropped;
 				queue_.clear();
 				spaceCv_.notify_all();
+				if (dropped && !busy_)
+					idleCv_.notify_all();
 				return dropped;
 			}
 

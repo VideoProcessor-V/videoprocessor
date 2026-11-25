@@ -7,10 +7,19 @@
 #include <map>
 #include <VP-V/modules/motion/estimation/NvOpticalFlow.h>
 #include <GeneralRate.h>
+#include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/modules/motion/estimation/matcher/MatcherPyramidSource.h>
 
 namespace MotionAhead { struct Flow; }
 namespace CameraModel { struct GuidanceFrame; }
+namespace VpSkeleton
+{
+	class SkeletonMemo;
+}
+namespace VpMotion
+{
+	struct P2PairRecord;
+}
 #include <memory>
 #include <string>
 #include <vector>
@@ -642,7 +651,7 @@ namespace Dejudder
 		{
 			return static_cast<float>(settings.consistencyPixels * GeneralScale::AboveReference(height, settings.generalRates));
 		}
-		pl_tex FadeStateTexture() const { return fadeState ? fadeState : inner ? inner->FadeStateTexture() : nullptr; }
+		pl_tex FadeStateTexture() const { return (HalvesForSearch() && inner) ? inner->FadeStateTexture() : fadeState; }
 		bool EnsureTextures(const Planes& a);
 		bool passTiming = false;
 		bool serialSearchForTest = false;
@@ -700,16 +709,11 @@ namespace Dejudder
 		bool Search(pl_tex fromHalf, pl_tex toHalf, pl_tex fromL1, pl_tex toL1,
 			pl_tex fromL2, pl_tex toL2, pl_tex global, pl_tex previous, pl_tex out, pl_tex globalTwo = nullptr,
 			pl_tex cameraKeep = nullptr, bool cameraStatic = false);
-		bool Global(pl_tex fromL1, pl_tex toL1, pl_tex fromL2, pl_tex toL2, pl_tex out, pl_tex second = nullptr);
 		// SK-MV gap seed validation: the seed must explain the half-size pair better than the zero vector does (GapSeed::Beats), else it is
 		// dropped and the estimate runs the unseeded global search exactly as without a seed. One sampled-block SAD pass and one 1x1 readback,
 		// only on a pair that carries a seed (a rare hiccup fill pair). False on any failure (no readable format): the seed is dropped.
 		bool GapSeedHolds();
 		pl_tex seedCheck = nullptr;
-		// Both directions (A to B into out[0], B to A into out[1]) in the same
-		// four dispatches instead of eight (2026-10-15; each direction's sums,
-		// order and picks as Global's).
-		bool GlobalBoth(pl_tex l1A, pl_tex l1B, pl_tex l2A, pl_tex l2B, pl_tex out[2], pl_tex second[2]);
 		// Two same-size copies in one dispatch (2026-10-15).
 		bool CopyPair(pl_tex src0, pl_tex dst0, pl_tex src1, pl_tex dst1);
 		bool Refine(pl_tex fromHalf, pl_tex toHalf, pl_tex sweep, pl_tex previous, pl_tex global, pl_tex out,
@@ -735,6 +739,7 @@ namespace Dejudder
 		pl_tex globalVector[2] = { nullptr, nullptr };      // D1: forward, backward
 		pl_tex strengthState = nullptr;                     // D2/D4: last scale (rgba32f)
 		pl_tex fillOcclusion = nullptr;                     // D5: B's occlusion
+		pl_tex activeFillOcclusion = nullptr;               // GEM-121: non-owning alias (occlusion[slot] when shared, else fillOcclusion)
 		pl_tex sweep[2] = { nullptr, nullptr };             // 11a E1: the first sweep (fwd, bwd)
 		pl_tex ofSearch[2] = { nullptr, nullptr };          // the engine's block vectors (candidate mode)
 		pl_tex ofNone = nullptr;                            // bound in their place when there are none
@@ -753,6 +758,8 @@ namespace Dejudder
 		pl_tex grainError = nullptr;
 		bool grainErrorValid = false;
 		pl_tex warpedLuma = nullptr, warpedChroma = nullptr;
+		int chromaW = 0, chromaH = 0;                       // GEM-141: Estimate's chroma size for lazy Warp guard
+		pl_fmt lumaFormat = nullptr, chromaFormat = nullptr; // GEM-141: Estimate's plane formats for lazy Warp guard
 		pl_tex processedLuma = nullptr, processedChroma = nullptr;   // B3: WarpProcessed's planes
 		bool WarpImpl(const Planes& a, float shift, Planes& out, bool trusted, bool processedTarget);
 		bool estimated = false;
@@ -793,7 +800,7 @@ namespace Dejudder
 		bool lumaInCodes = false;
 		bool LowResSearch(const Planes& a, const Planes& b);
 		// The optical flow source: forward / backward in the searches' format.
-		bool OpticalFlowSearch(pl_tex outForward, pl_tex outBackward);
+		bool OpticalFlowSearch(pl_tex outForward, pl_tex outBackward, VpMotion::P2PairRecord* outPairRecord = nullptr);
 		// The pair's trust weights (cost, the engine's own consistency) into ofWeight per
 		// block (ofWeighted); none when switched off, missing or not uploadable.
 		bool UploadEngineWeights(const MotionAhead::Flow& flow);
@@ -899,6 +906,10 @@ namespace Dejudder
 		unsigned long long GlobalFallbacks() const { return globalFallbacks + (inner ? inner->GlobalFallbacks() : 0ull); }
 		// The last Estimate applied the engine's trust weights (cost / consistency).
 		bool EngineWeightsUsed() const { return ofWeighted || (inner && HalvesForSearch() && inner->EngineWeightsUsed()); }
+		// U10 C3 (Ruling 2): visible fallback decision for pair-global unavailability ("motion.pair_global_unavailable").
+		const FallbackCatalog::Decision& LastPairGlobalFallback() const;
+		// U10 C3: optional skeleton memo + sequence for kP2VectorPair / kP7CameraFit PairGlobal Acquire (null = standalone).
+		void SetSkeletonMemo(VpSkeleton::SkeletonMemo* memo, uint64_t seq);
 		// F2 (camera fit input): the optical-flow engine's seed of the last Estimate, read-only, no GPU work. The seed
 		// is the searching instance's ofSearch pair (the engine's block vectors that stood in for the first sweep:
 		// the camera guidance never writes them; its E1 pass only samples them). Layout, explicitly: one texel per
@@ -971,8 +982,9 @@ namespace Dejudder
 		bool refineCarriesWeight = false; // Refine keeps the seed's weight with its own vector
 		pl_tex ofWeight = nullptr;        // the weights per block (r32f / r16f), uploaded per pair
 		std::vector<float> ofWeights, ofFbWeights;   // CPU scratch
-		float engineGlobal[2][4] = {};   // the engine's whole-frame motion (D1 format), this Estimate
-		bool engineGlobalValid = false;
+		FallbackCatalog::Decision lastPairGlobalFallback{};
+		VpSkeleton::SkeletonMemo* skeletonMemo = nullptr;
+		uint64_t skeletonSeq = 0;
 		std::string opticalFlowError;
 		bool opticalFlowUsed = false;
 		std::shared_ptr<const MotionAhead::Flow> externalFlow;

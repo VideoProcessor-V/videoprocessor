@@ -40,11 +40,13 @@ vec2 rw_source(vec2 p)
 // slope is exact (d / slope, as before). With NLS (owner 2026-10-14) two
 // Newton steps on the separable map make it exact near the sides, where the
 // slope changes across a large displacement.
-vec2 rw_moved(vec2 p, vec2 slope, vec2 d)
+vec2 rw_moved(vec2 p, vec2 sp, vec2 slope, vec2 d)
 {
+    if (all(equal(d, vec2(0.0))))
+        return vec2(0.0);
     vec2 q = p - d / slope;
     if (nls_active > 0.5) {
-        vec2 target = rw_source(p) - d;
+        vec2 target = sp - d;
         vec2 q0 = q;
         for (int k = 0; k < 2; k++) {
             vec2 sl = max(rw_source(q + vec2(0.5)) - rw_source(q - vec2(0.5)), vec2(1e-4));
@@ -108,7 +110,6 @@ if (q.x < size.x && q.y < size.y) {
     // M6: the vector where the pixel comes from (two fixed-point steps),
     // blended with the hold by A's pixel weight there; a cut holds.
     if (shift != 0.0 && texelFetch(frame_trust, ivec2(0), 0).r >= min_trusted_share) {
-        vec2 slope = max(rw_source(p + vec2(0.5)) - rw_source(p - vec2(0.5)), vec2(1e-4));
         vec2 sp = rw_source(p);
         float sc = shift * strength_scale();
         vec2 va = field_vector_all(sp);
@@ -124,6 +125,7 @@ if (q.x < size.x && q.y < size.y) {
         else
 #endif
         {
+            vec2 slope = max(rw_source(p + vec2(0.5)) - rw_source(p - vec2(0.5)), vec2(1e-4));
             float m = texture(pix_mask, (sp - d) / vec2(textureSize(pix_mask, 0) * 2)).r;
 #ifdef LAND_A
             {
@@ -137,11 +139,17 @@ if (q.x < size.x && q.y < size.y) {
             }
 #endif
 #ifdef PIXEL_MOTION
-            moved = rw_moved(p, slope, m * d);
-            o = rw_cubic(p - moved);   // the weight's share of the motion
+            moved = rw_moved(p, sp, slope, m * d);
+            // Zero displacement lands on exact pixel centre q + 0.5, where Catmull-Rom weights are (0, 1, 0, 0).
+            o = all(equal(moved, vec2(0.0))) ? texelFetch(cached, q, 0) : rw_cubic(p - moved);   // the weight's share of the motion
 #else
-            vec2 dm_ = rw_moved(p, slope, d);
-            o = mix(texelFetch(cached, q, 0), rw_cubic(p - dm_), m);
+            vec2 dm_ = rw_moved(p, sp, slope, d);
+            if (all(equal(dm_, vec2(0.0))) || m == 0.0) {
+                o = texelFetch(cached, q, 0);
+            } else {
+                vec4 w = rw_cubic(p - dm_);
+                o = m == 1.0 ? w : mix(texelFetch(cached, q, 0), w, m);
+            }
             moved = m > 0.5 ? dm_ : vec2(0.0);   // a crossfade: the dominant part
 #endif
         }
@@ -151,30 +159,46 @@ if (q.x < size.x && q.y < size.y) {
     STORE_DISP();
     return;
 #endif
-    if (shift != 0.0 && field_vector(rw_source(p), v)) {
-        // The source displacement in output pixels: the map's local slope
-        // per axis (the maps are separable).
-        vec2 slope = max(rw_source(p + vec2(0.5)) - rw_source(p - vec2(0.5)), vec2(1e-4));
+    bool has_vec = false;
+    if (shift != 0.0) {
         vec2 sp = rw_source(p);
-        vec2 d = shift * strength_scale() * block_strength(sp) * v;
+        if (field_vector(sp, v)) {
+            has_vec = true;
+            vec2 d = shift * strength_scale() * block_strength(sp) * v;
 #ifdef HOLDS
-        // A moved subtitle (and its fill) stays still, and nothing around it
-        // samples from it.
-        if (rw_held(sp) || rw_held(sp - d)) {
-            o = texelFetch(cached, q, 0);
-        } else
+            // A moved subtitle (and its fill) stays still, and nothing around it
+            // samples from it.
+            if (rw_held(sp) || rw_held(sp - d)) {
+                o = texelFetch(cached, q, 0);
+            } else
 #endif
-        {
-            moved = rw_moved(p, slope, d);
-            o = rw_cubic(p - moved);
+            {
+                // The source displacement in output pixels: the map's local slope
+                // per axis (the maps are separable).
+                vec2 slope = max(rw_source(p + vec2(0.5)) - rw_source(p - vec2(0.5)), vec2(1e-4));
+                moved = rw_moved(p, sp, slope, d);
+                if (all(equal(moved, vec2(0.0)))) {
+                    o = texelFetch(cached, q, 0);
+                } else {
 #ifdef FEATHER
-            // Delta 9 H1: the feather is in output pixels, the field in source.
-            float hw = hold_weight(sp, feather_px * max(slope.x, slope.y));
-            o = mix(texelFetch(cached, q, 0), o, hw);
-            moved = hw > 0.5 ? moved : vec2(0.0);   // a crossfade: the dominant part
+                    // Delta 9 H1: the feather is in output pixels, the field in source.
+                    float hw = hold_weight(sp, feather_px * max(slope.x, slope.y));
+                    if (hw == 0.0) {
+                        o = texelFetch(cached, q, 0);
+                    } else {
+                        o = rw_cubic(p - moved);
+                        if (hw != 1.0)
+                            o = mix(texelFetch(cached, q, 0), o, hw);
+                    }
+                    moved = hw > 0.5 ? moved : vec2(0.0);   // a crossfade: the dominant part
+#else
+                    o = rw_cubic(p - moved);
 #endif
+                }
+            }
         }
-    } else {
+    }
+    if (!has_vec) {
         o = texelFetch(cached, q, 0);   // hard hold of A
     }
     imageStore(dst, q, o);
@@ -190,22 +214,23 @@ if (b.x < size.x && b.y < size.y) {
     vec2 p = vec2(b * 16) + vec2(8.0);
     vec4 o = vec4(0.0, 0.0, 1.0, 0.0);   // held or outside the picture: no motion
     if (all(greaterThanEqual(p, crop_min)) && all(lessThan(p, crop_max))) {
+        vec2 sp = rw_source(p);
         vec2 v;
         bool held = false;
 #ifdef HOLDS
-        held = rw_held(rw_source(p));
+        held = rw_held(sp);
 #endif
 #ifdef TO_NEXT
         // B's first present: B is at the full vector, the last picture of A
         // was at shift x the strength scale.
-        if (!held && field_vector(rw_source(p), v)) {
+        if (!held && field_vector(sp, v)) {
             vec2 slope = max(rw_source(p + vec2(0.5)) - rw_source(p - vec2(0.5)), vec2(1e-4));
-            o.xy = rw_moved(p, slope, (1.0 - shift * strength_scale() * block_strength(rw_source(p))) * v);
+            o.xy = rw_moved(p, sp, slope, (1.0 - shift * strength_scale() * block_strength(sp)) * v);
         }
 #else
-        if (!held && shift != 0.0 && field_vector(rw_source(p), v)) {
+        if (!held && shift != 0.0 && field_vector(sp, v)) {
             vec2 slope = max(rw_source(p + vec2(0.5)) - rw_source(p - vec2(0.5)), vec2(1e-4));
-            o.xy = rw_moved(p, slope, shift * strength_scale() * block_strength(rw_source(p)) * v);
+            o.xy = rw_moved(p, sp, slope, shift * strength_scale() * block_strength(sp) * v);
         }
 #endif
     }
@@ -228,19 +253,22 @@ if (b.x < size.x && b.y < size.y) {
 			return pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 16, 16, caps);
 		}
 
-		bool Ensure(pl_gpu gpu, pl_tex& tex, int w, int h, bool hostReadable = false, bool picture = false)
+		bool Ensure(pl_gpu gpu, pl_tex& tex, int w, int h, bool hostReadable = false, bool picture = false, bool blitDst = false)
 		{
 			pl_fmt fmt = StorageFormat(gpu, picture);
-			if (tex && tex->params.w == w && tex->params.h == h && tex->params.format == fmt)
-				return true;
 			if (!fmt)
 				return false;
+			const bool wantBlitDst = blitDst && (fmt->caps & PL_FMT_CAP_BLITTABLE) != 0;
+			if (tex && tex->params.w == w && tex->params.h == h && tex->params.format == fmt &&
+				(!wantBlitDst || tex->params.blit_dst))
+				return true;
 			pl_tex_params params{};
 			params.w = w;
 			params.h = h;
 			params.format = fmt;
 			params.sampleable = true;
 			params.storable = true;
+			params.blit_dst = wantBlitDst;
 			params.host_readable = hostReadable && (fmt->caps & PL_FMT_CAP_HOST_READABLE);
 			return pl_tex_recreate(gpu, &tex, &params);
 		}
@@ -322,6 +350,11 @@ if (b.x < size.x && b.y < size.y) {
 		valid = 0;
 	}
 
+	uint64_t Cache::Blits() const
+	{
+		return blits;
+	}
+
 	Rects Rounded(const pl_rect2df& source, const pl_rect2df& target, float framebufferW, float framebufferH)
 	{
 		Rects r;
@@ -355,20 +388,39 @@ if (b.x < size.x && b.y < size.y) {
 		if (gpu && gpu != params->gpu && tex)
 			pl_tex_destroy(gpu, &tex);
 		gpu = params->gpu;
-		const int w = params->tex->params.w, h = params->tex->params.h;
-		if (!Ensure(gpu, tex, w, h, false, true))
+		const pl_tex src = params->tex;
+		const int w = src->params.w, h = src->params.h;
+		if (!Ensure(gpu, tex, w, h, false, true, true))
 		{
 			++failed;
 			armed = 0;
 			return none;
 		}
-		const pl_shader_desc all[2] = { Sampled("src", params->tex), Storage(tex) };
-		if (!Compute(params->dispatch, "VideoProcessor de-judder: cache A at PRE_OUTPUT", std::string(),
-			COPY_BODY, all, 2, nullptr, 0, w, h))
+		const bool canBlit = src->params.format && src->params.format == tex->params.format &&
+			(src->params.format->caps & PL_FMT_CAP_BLITTABLE) != 0 &&
+			src->params.blit_src && tex->params.blit_dst &&
+			src->params.d == 0 && tex->params.d == 0;
+		if (canBlit)
 		{
-			++failed;
-			armed = 0;
-			return none;
+			pl_tex_blit_params bp{};
+			bp.src = src;
+			bp.dst = tex;
+			bp.src_rc = { 0, 0, 0, w, h, 1 };
+			bp.dst_rc = bp.src_rc;
+			bp.sample_mode = PL_TEX_SAMPLE_NEAREST;
+			pl_tex_blit(gpu, &bp);
+			++blits;
+		}
+		else
+		{
+			const pl_shader_desc all[2] = { Sampled("src", src), Storage(tex) };
+			if (!Compute(params->dispatch, "VideoProcessor de-judder: cache A at PRE_OUTPUT", std::string(),
+				COPY_BODY, all, 2, nullptr, 0, w, h))
+			{
+				++failed;
+				armed = 0;
+				return none;
+			}
 		}
 		repr = params->repr;
 		color = params->color;

@@ -11,6 +11,8 @@
 #include <VP-V/modules/motion/estimation/GapSeed.h>
 #include <VP-V/modules/motion/consumers/DejudderPolicy.h>
 #include <VP-V/modules/motion/estimation/global_model/CameraGuidanceGpu.h>
+#include <VP-V/modules/motion/estimation/global_model/MatcherGlobalD1.h>
+#include <VP-V/modules/motion/estimation/global_model/PairGlobalFill.h>
 #include <VP-V/core/RobustStatsShaders.h>
 #include <VP-V/core/GpuAttributionPl.h>
 
@@ -321,40 +323,43 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		// search's (test: SetSerialSearchForTest). Every barrier is at the top
 		// level and reached by all threads (D3D11's HLSL compiler, X3663).
 		const char* const SEARCH_PARALLEL_HEADER = R"GLSL(
-shared float l1_sads_z[169];
-shared float l1_sads_c[169];
-shared float l1_sads_g[169];
 // The 1/8 level's bilinear samples of `to` around each start (2026-10-15):
 // every candidate's sample positions lie on the half-texel lattice
 // o1 + start + 0.5 m, m in [-8, 10]^2, so each block samples them once
 // (19 x 19 per start) instead of 16 per candidate. The positions are
 // multiples of 0.5 (exact in float) and the same texture() calls, so every
 // SAD is the same sum of the same values in the same order.
+// 4 * 361 = 1444 floats; also reused after L1 for parallel half-pel |diff|
+// (8 candidates * 144 pixels = 1152 <= 1444 floats).
 shared float l1_tab[4 * 361];
+// Cached source patches: 3x3 at 1/32 (L2), 4x4 at 1/8 (L1), 12x12 at 1/2.
+shared float l2_from[9];
+shared float l1_from[16];
+shared float from_win[144];
+// Cached target window: 18x18 = 324 floats, covering:
+// - L2 target window (2*coarse_range + 3)^2 when <= 18 (coarse_range <= 7, up to 4K+);
+// - Half-res 7x7 start window (12 + 7 - 1 = 18 -> 18x18) and 5x5 zero window (16x16 <= 18x18).
+shared float to_win[324];
 
-float sad_l1_tab(int k, ivec2 o1, int dx, int dy)
+float sad_l1_tab(int k, int dx, int dy)
 {
     float s = 0.0;
     for (int y = -1; y < 3; y++)
-        for (int x = -1; x < 3; x++) {
-            ivec2 p = o1 + ivec2(x, y);
-            s += abs(l1from(p) - l1_tab[k * 361 + (2 * y + dy + 8) * 19 + 2 * x + dx + 8]);
-        }
+        for (int x = -1; x < 3; x++)
+            s += abs(l1_from[(y + 1) * 4 + x + 1] - l1_tab[k * 361 + (2 * y + dy + 8) * 19 + 2 * x + dx + 8]);
     return s;
 }
-shared float from_win[144];
+
 // The start each candidate belongs to (1..5, 0 = the zero vector, ZGROUP =
 // the +-2 around zero) and the starts' centres: a candidate inside an earlier
 // start's window repeats an earlier one (owner 2026-10-13, shaky camera).
 #ifdef GLOBAL_TWO
 // M2: a sixth start, D1's second candidate.
+#define L1_NSTARTS 4
 #define ZGROUP 7
-#define NHALF 321
-shared float l1_sads_g2[169];
-shared vec2 s_v1g2;
 #else
+#define L1_NSTARTS 3
 #define ZGROUP 6
-#define NHALF 272
 #endif
 shared ivec2 s_centres[ZGROUP];
 
@@ -380,10 +385,6 @@ void half_cand(int i, out ivec2 v, out int start)
 
 shared float sub_sads[9];
 shared ivec2 s_v2;
-shared vec2 s_v1z;
-shared vec2 s_v1c;
-shared vec2 s_v1g;
-shared int s_half_count;
 shared ivec2 s_best;
 
 void sync_group()
@@ -393,34 +394,34 @@ void sync_group()
 }
 
 // Picks without one thread scanning every SAD: each thread keeps the best of
-// its own candidates, 16 threads reduce 16 of those each, thread 0 the last
-// 16. The serial pick (strictly smaller, in order, from a given first
-// candidate) is the minimum SAD with ties to the first candidate, then to the
-// lowest index; rank -1 marks the first candidate. That order is total, so
-// the result is exactly the serial pick in any reduction order.
+// its own candidates, 16 threads reduce SEARCH_NT/16 of those each in place
+// into their disjoint slice starts, and thread 0 reduces the last 16. The
+// serial pick (strictly smaller, in order, from a given first candidate) is
+// the minimum SAD with ties to the first candidate, then to the lowest index;
+// rank -1 marks the first candidate. That order is total, so the result is
+// exactly the serial pick in any reduction order.
 #define PK_EMPTY 0x7fffffff
-shared float pk_s[SEARCH_NT];
-shared int pk_r[SEARCH_NT];
-shared float pk2_s[16];
-shared int pk2_r[16];
+shared float pk_s[L1_NSTARTS * SEARCH_NT];
+shared int pk_r[L1_NSTARTS * SEARCH_NT];
 
 bool pk_better(float s, int r, float bs, int br)
 {
     return r != PK_EMPTY && (br == PK_EMPTY || s < bs || (s == bs && r < br));
 }
 
-// After pk_s/pk_r are written and the group synced: 16 partial picks.
+// After pk_s/pk_r [0..SEARCH_NT-1] are written and the group synced: 16 partial picks in place.
 void pk_reduce16(int li)
 {
     if (li < 16) {
+        int base = li * (SEARCH_NT / 16);
         float bs = 0.0;
         int br = PK_EMPTY;
         for (int k = 0; k < SEARCH_NT / 16; k++) {
-            int j = li * (SEARCH_NT / 16) + k;
+            int j = base + k;
             if (pk_better(pk_s[j], pk_r[j], bs, br)) { bs = pk_s[j]; br = pk_r[j]; }
         }
-        pk2_s[li] = bs;
-        pk2_r[li] = br;
+        pk_s[base] = bs;
+        pk_r[base] = br;
     }
 }
 
@@ -429,33 +430,25 @@ int pk_final(out float best)
 {
     float bs = 0.0;
     int br = PK_EMPTY;
-    for (int k = 0; k < 16; k++)
-        if (pk_better(pk2_s[k], pk2_r[k], bs, br)) { bs = pk2_s[k]; br = pk2_r[k]; }
+    for (int k = 0; k < 16; k++) {
+        int j = k * (SEARCH_NT / 16);
+        if (pk_better(pk_s[j], pk_r[j], bs, br)) { bs = pk_s[j]; br = pk_r[j]; }
+    }
     best = bs;
     return br;
 }
 
-// The block's 12x12 window of `from`, from shared memory (the same values
-// as from_at()).
-float sad_win(ivec2 o, ivec2 v)
+// 12x12 SAD from shared from_win[144] and shared to_win[324] (18x18 covering
+// o + centre + [-5..12]^2), for integer offset (dx, dy) in [-3, 3]^2.
+// Loop order (y = 0..11 outer, x = 0..11 inner) matches sad() bit-for-bit.
+float sad_win_cached(int dx, int dy)
 {
     float s = 0.0;
-    for (int y = -2; y < 10; y++)
-        for (int x = -2; x < 10; x++) {
-            ivec2 p = o + ivec2(x, y);
-            s += abs(from_win[(y + 2) * 12 + x + 2] - to_at(p + v));
-        }
-    return s;
-}
-
-float sad_sub_win(ivec2 o, vec2 v)
-{
-    float s = 0.0;
-    for (int y = -2; y < 10; y++)
-        for (int x = -2; x < 10; x++) {
-            ivec2 p = o + ivec2(x, y);
-            s += abs(from_win[(y + 2) * 12 + x + 2] - to_lin(vec2(p) + v));
-        }
+    int ox = dx + 3;
+    int oy = dy + 3;
+    for (int y = 0; y < 12; y++)
+        for (int x = 0; x < 12; x++)
+            s += abs(from_win[y * 12 + x] - to_win[(y + oy) * 18 + x + ox]);
     return s;
 }
 )GLSL";
@@ -489,8 +482,22 @@ l2_size_ = textureSize(from_l2, 0);
 ivec2 o = b * 8;
 
 // Level 2 (1/32 source): every vector within +-range texels.
+// Cache the 3x3 from_l2 patch and (2*range+3)^2 to_l2 window in shared memory
+// whenever the window fits inside to_win[324] (l2w <= 18, i.e. coarse_range <= 7).
 int side = 2 * coarse_range + 1;
 int n2 = side * side;
+int l2r = coarse_range + 1;
+int l2w = side + 2;
+bool l2_cached = coarse_range >= 0 && l2w <= 18;
+if (run && l2_cached) {
+    ivec2 c2 = b / 2;
+    if (li < 9)
+        l2_from[li] = l2from(c2 + ivec2(li % 3 - 1, li / 3 - 1));
+    int l2n = l2w * l2w;
+    for (int t = li; t < l2n; t += NT)
+        to_win[t] = l2to(c2 + ivec2(t % l2w - l2r, t / l2w - l2r));
+}
+sync_group();
 {
     // The serial pick starts from the zero vector (rank -1).
     int centre = coarse_range * side + coarse_range;
@@ -498,7 +505,17 @@ int n2 = side * side;
     int br = PK_EMPTY;
     if (run)
         for (int i = li; i < n2; i += NT) {
-            float s = sad_l2(b / 2, ivec2(i % side - coarse_range, i / side - coarse_range));
+            int dx = i % side - coarse_range;
+            int dy = i / side - coarse_range;
+            float s;
+            if (l2_cached) {
+                s = 0.0;
+                for (int y = -1; y <= 1; y++)
+                    for (int x = -1; x <= 1; x++)
+                        s += abs(l2_from[(y + 1) * 3 + x + 1] - to_win[(y + dy + l2r) * l2w + x + dx + l2r]);
+            } else {
+                s = sad_l2(b / 2, ivec2(dx, dy));
+            }
             int r = i == centre ? -1 : i;
             if (pk_better(s, r, bs, br)) { bs = s; br = r; }
         }
@@ -517,8 +534,8 @@ sync_group();
 ivec2 v2 = s_v2;
 
 // Level 1 (1/8 source), half-texel steps, +-3 around zero, around the level-2
-// result and (D1) around a confident global vector; one thread per candidate
-// of each search.
+// result and (D1) around a confident global vector; thread-local reduction
+// across each start's 169 candidates (zero per-candidate SAD arrays).
 bool have_g = false;
 vec2 vgf = vec2(0.0);
 if (use_global != 0) {
@@ -543,10 +560,12 @@ vec2 vg2 = vec2(0.0);
     }
 }
 #endif
-// The starts' sample tables (0 zero, 1 the 1/32 result, 2 the global
-// vector, 3 M2's second), then each candidate's SAD from them.
-if (run)
-    for (int e = li; e < 4 * 361; e += NT) {
+// The 4x4 from_l1 patch and each start's 19x19 to_l1 half-texel table
+// (0 zero, 1 the 1/32 result, 2 the global vector, 3 M2's second).
+if (run) {
+    if (li < 16)
+        l1_from[li] = l1from(b * 2 + ivec2(li % 4 - 1, li / 4 - 1));
+    for (int e = li; e < L1_NSTARTS * 361; e += NT) {
         int k = e / 361;
         bool wanted = k < 2 || (k == 2 && have_g);
 #ifdef GLOBAL_TWO
@@ -563,52 +582,65 @@ if (run)
 #endif
         l1_tab[e] = l1to(vec2(b * 2) + start + 0.5 * vec2(m % 19 - 8, m / 19 - 8));
     }
+}
 sync_group();
-if (run)
-    for (int i = li; i < 169; i += NT) {
-        int dx = i % 13 - 6, dy = i / 13 - 6;
-        l1_sads_z[i] = sad_l1_tab(0, b * 2, dx, dy);
-        l1_sads_c[i] = sad_l1_tab(1, b * 2, dx, dy);
-        if (have_g)
-            l1_sads_g[i] = sad_l1_tab(2, b * 2, dx, dy);
-#ifdef GLOBAL_TWO
-        if (have_g2)
-            l1_sads_g2[i] = sad_l1_tab(3, b * 2, dx, dy);
-#endif
-    }
-sync_group();
-if (run && li < 13) {
+{
     float bz = 0.0, bc = 0.0, bg = 0.0;
     int rz = PK_EMPTY, rc = PK_EMPTY, rg = PK_EMPTY;
 #ifdef GLOBAL_TWO
     float bg2 = 0.0;
     int rg2 = PK_EMPTY;
 #endif
-    for (int k = 0; k < 13; k++) {
-        int i = li * 13 + k;
-        int r = i == 84 ? -1 : i;
-        if (pk_better(l1_sads_z[i], r, bz, rz)) { bz = l1_sads_z[i]; rz = r; }
-        if (pk_better(l1_sads_c[i], r, bc, rc)) { bc = l1_sads_c[i]; rc = r; }
-        if (have_g && pk_better(l1_sads_g[i], r, bg, rg)) { bg = l1_sads_g[i]; rg = r; }
+    if (run)
+        for (int i = li; i < 169; i += NT) {
+            int dx = i % 13 - 6, dy = i / 13 - 6;
+            int r = i == 84 ? -1 : i;
+            float sz = sad_l1_tab(0, dx, dy);
+            if (pk_better(sz, r, bz, rz)) { bz = sz; rz = r; }
+            float sc = sad_l1_tab(1, dx, dy);
+            if (pk_better(sc, r, bc, rc)) { bc = sc; rc = r; }
+            if (have_g) {
+                float sg = sad_l1_tab(2, dx, dy);
+                if (pk_better(sg, r, bg, rg)) { bg = sg; rg = r; }
+            }
 #ifdef GLOBAL_TWO
-        if (have_g2 && pk_better(l1_sads_g2[i], r, bg2, rg2)) { bg2 = l1_sads_g2[i]; rg2 = r; }
+            if (have_g2) {
+                float sg2 = sad_l1_tab(3, dx, dy);
+                if (pk_better(sg2, r, bg2, rg2)) { bg2 = sg2; rg2 = r; }
+            }
 #endif
-    }
+        }
     pk_s[li] = bz; pk_r[li] = rz;
-    pk_s[13 + li] = bc; pk_r[13 + li] = rc;
-    pk_s[26 + li] = bg; pk_r[26 + li] = rg;
+    pk_s[NT + li] = bc; pk_r[NT + li] = rc;
+    pk_s[2 * NT + li] = bg; pk_r[2 * NT + li] = rg;
 #ifdef GLOBAL_TWO
-    pk_s[39 + li] = bg2; pk_r[39 + li] = rg2;
+    pk_s[3 * NT + li] = bg2; pk_r[3 * NT + li] = rg2;
 #endif
 }
 sync_group();
+if (li < L1_NSTARTS * 16) {
+    int j = li / 16;
+    int p = li % 16;
+    int base = j * NT + p * (NT / 16);
+    float bs = 0.0;
+    int br = PK_EMPTY;
+    for (int k = 0; k < NT / 16; k++) {
+        int idx = base + k;
+        if (pk_better(pk_s[idx], pk_r[idx], bs, br)) { bs = pk_s[idx]; br = pk_r[idx]; }
+    }
+    pk_s[base] = bs;
+    pk_r[base] = br;
+}
+sync_group();
 if (run && lead) {
-    int rr[4];
-    for (int j = 0; j < 4; j++) {
+    int rr[L1_NSTARTS];
+    for (int j = 0; j < L1_NSTARTS; j++) {
         float bs = 0.0;
         int br = PK_EMPTY;
-        for (int k = 0; k < 13; k++)
-            if (pk_better(pk_s[j * 13 + k], pk_r[j * 13 + k], bs, br)) { bs = pk_s[j * 13 + k]; br = pk_r[j * 13 + k]; }
+        for (int k = 0; k < 16; k++) {
+            int idx = j * NT + k * (NT / 16);
+            if (pk_better(pk_s[idx], pk_r[idx], bs, br)) { bs = pk_s[idx]; br = pk_r[idx]; }
+        }
         rr[j] = br;
     }
     // Rank -1 (the centre) and an empty list (no global start) keep the
@@ -620,9 +652,6 @@ if (run && lead) {
 #ifdef GLOBAL_TWO
     vec2 v1g2 = vg2 + (have_g2 ? L1_STEP(rr[3]) : vec2(0.0));
 #endif
-    s_v1z = v1z;
-    s_v1c = v1c;
-    s_v1g = have_g ? v1g : vec2(0.0);
 
     // Half resolution, whole pixels: the candidate list in the serial
     // order - zero first, +-3 around each start (zero-level, level-2,
@@ -649,33 +678,63 @@ if (run && lead) {
     }
 #endif
     s_centres[0] = ivec2(nstarts, 0);   // the number of starts
-    s_half_count = 1 + 49 * nstarts + 25;
 }
-if (run)
+if (run) {
     for (int i = li; i < 144; i += NT)
         from_win[i] = from_at(o + ivec2(i % 12 - 2, i / 12 - 2));
+    // Preload zero-centred 18x18 target window alongside from_win (zero extra barrier).
+    for (int t = li; t < 324; t += NT)
+        to_win[t] = to_at(o + ivec2(t % 18 - 5, t / 18 - 5));
+}
 sync_group();
-int nh = s_half_count;
+int ns = run ? s_centres[0].x : 0;
 {
-float bs = 0.0;
-int br = PK_EMPTY;
-if (run)
-    for (int i = li; i < nh; i += NT) {
-        // A repeat of an earlier candidate scores the same and comes later,
-        // so with the strict comparison it never wins: not scored (each
-        // thread checks its own; exactly the serial result).
-        ivec2 v;
-        int start;
-        half_cand(i, v, start);
-        bool repeat = i > 0 && v == ivec2(0);
-        int earlier = start == ZGROUP ? s_centres[0].x : start - 1;
-        for (int k = 1; k <= earlier; k++)
-            repeat = repeat || (abs(v.x - s_centres[k].x) <= 3 && abs(v.y - s_centres[k].y) <= 3);
-        float s = repeat ? 3.0e38 : sad_win(o, v);
-        if (pk_better(s, i, bs, br)) { bs = s; br = i; }
+    float bs = 0.0;
+    int br = PK_EMPTY;
+    // Candidate 0 (zero vector, rank 0) and the 5x5 around zero (ranks 1 + 49*ns + li, li != 12),
+    // scored from the zero-centred to_win[324] already loaded above.
+    if (run && li < 25) {
+        int dx = li % 5 - 2;
+        int dy = li / 5 - 2;
+        ivec2 v = ivec2(dx, dy);
+        int rank = li == 12 ? 0 : 1 + 49 * ns + li;
+        bool repeat = false;
+        if (li != 12) {
+            for (int k = 1; k <= ns; k++)
+                repeat = repeat || (abs(v.x - s_centres[k].x) <= 3 && abs(v.y - s_centres[k].y) <= 3);
+        }
+        if (!repeat) {
+            float s = sad_win_cached(dx, dy);
+            if (pk_better(s, rank, bs, br)) { bs = s; br = rank; }
+        }
     }
-pk_s[li] = bs;
-pk_r[li] = br;
+    // Each start k = 1..ns: load its 18x18 to_win[324] cooperatively across all NT threads,
+    // then score its 7x7 = 49 candidates from shared memory. Constant loop bound ZGROUP keeps
+    // both sync_group() calls in statically uniform control flow (D3D11 X3663 / SPIR-V).
+    for (int k = 1; k < ZGROUP; k++) {
+        sync_group();
+        if (run && k <= ns) {
+            ivec2 c = s_centres[k];
+            for (int t = li; t < 324; t += NT)
+                to_win[t] = to_at(o + c + ivec2(t % 18 - 5, t / 18 - 5));
+        }
+        sync_group();
+        if (run && k <= ns && li < 49) {
+            int dx = li % 7 - 3;
+            int dy = li / 7 - 3;
+            ivec2 v = s_centres[k] + ivec2(dx, dy);
+            bool repeat = v == ivec2(0);
+            for (int j = 1; j < k; j++)
+                repeat = repeat || (abs(v.x - s_centres[j].x) <= 3 && abs(v.y - s_centres[j].y) <= 3);
+            if (!repeat) {
+                int rank = 1 + (k - 1) * 49 + li;
+                float s = sad_win_cached(dx, dy);
+                if (pk_better(s, rank, bs, br)) { bs = s; br = rank; }
+            }
+        }
+    }
+    pk_s[li] = bs;
+    pk_r[li] = br;
 }
 sync_group();
 pk_reduce16(li);
@@ -689,9 +748,29 @@ if (run && lead) {
     s_best = best;
 }
 sync_group();
-// Half-pixel refinement (bilinear samples of `to`).
-if (run && li < 9 && li != 4)
-    sub_sads[li] = sad_sub_win(o, vec2(s_best) + 0.5 * vec2(li % 3 - 1, li / 3 - 1));
+// Half-pixel refinement (bilinear samples of `to`): all NT threads compute the
+// 8 * 144 = 1152 pixel |diff| values in parallel into l1_tab (dead after L1,
+// 1444 >= 1152 floats), then 8 threads sum each candidate serially in the exact
+// (y, x) order of SEARCH_BODY_SERIAL (100% bit-identical float summation order).
+if (run) {
+    vec2 fbase = vec2(s_best);
+    for (int e = li; e < 8 * 144; e += NT) {
+        int c = e / 144;
+        int p = e % 144;
+        int idx = c < 4 ? c : c + 1;
+        vec2 v = fbase + 0.5 * vec2(idx % 3 - 1, idx / 3 - 1);
+        ivec2 xy = o + ivec2(p % 12 - 2, p / 12 - 2);
+        l1_tab[e] = abs(from_win[p] - to_lin(vec2(xy) + v));
+    }
+}
+sync_group();
+if (run && li < 8) {
+    float s = 0.0;
+    int base = li * 144;
+    for (int p = 0; p < 144; p++)
+        s += l1_tab[base + p];
+    sub_sads[li < 4 ? li : li + 1] = s;
+}
 sync_group();
 if (run && lead) {
     vec2 fbest = vec2(best);
@@ -888,6 +967,10 @@ shared float rf_from[288];
 shared float rf_sads[32];
 shared vec2 rf_best[2];
 shared float rf_best_sad[2];
+shared vec2 rf_cand[2][12];
+shared vec2 rf_med[2];
+shared int rf_nc[2];
+shared int rf_dup[2][16];
 
 float rf_sad_sub(int sub, ivec2 o, vec2 v)
 {
@@ -925,54 +1008,70 @@ if (inside && !keep) {
 bool run = inside && !keep;
 half_size_ = textureSize(from_half, 0);
 ivec2 o = b * 8;
-// The candidate list and the neighbours' median, as the serial sweep (every
-// thread of the block builds the same list).
-vec2 cand[12];
-float xs[9];
-float ys[9];
-int nc = 0, nn = 0;
-cand[nc++] = inside ? texelFetch(sweep, b, 0).xy : vec2(0.0);
-for (int dy = -1; dy <= 1; dy++)
-    for (int dx = -1; dx <= 1; dx++) {
-        if (dx == 0 && dy == 0) continue;
-        ivec2 c = b + ivec2(dx, dy);
-        if (c.x < 0 || c.y < 0 || c.x >= blocks.x || c.y >= blocks.y) continue;
-        vec2 v = texelFetch(sweep, c, 0).xy;
-        cand[nc++] = v;
-        xs[nn] = v.x;
-        ys[nn] = v.y;
-        nn++;
+// Only lead (li == 0) per sub-block builds the candidate list, computes the
+// neighbours' median, and marks exact duplicates (first-occurrence index j < k,
+// else -1) so the other 15 threads skip duplicate fetches and duplicate 144-tap SADs.
+if (run && lead) {
+    float xs[9];
+    float ys[9];
+    int nc = 0, nn = 0;
+    rf_cand[sub][nc++] = texelFetch(sweep, b, 0).xy;
+    for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++) {
+            if (dx == 0 && dy == 0) continue;
+            ivec2 c = b + ivec2(dx, dy);
+            if (c.x < 0 || c.y < 0 || c.x >= blocks.x || c.y >= blocks.y) continue;
+            vec2 v = texelFetch(sweep, c, 0).xy;
+            rf_cand[sub][nc++] = v;
+            xs[nn] = v.x;
+            ys[nn] = v.y;
+            nn++;
+        }
+    if (use_temporal != 0)
+        rf_cand[sub][nc++] = texelFetch(previous, b, 0).xy;
+    vec4 gv = texelFetch(global_vec, ivec2(0), 0);
+    if (use_global != 0 && gv.w > 0.5 && gv.z < 0.9)
+        rf_cand[sub][nc++] = gv.xy * 4.0;
+    if (use_of != 0)
+        rf_cand[sub][nc++] = texelFetch(of_vec, b, 0).xy;
+    rf_med[sub] = nn > 0 ? vec2(vpu_median_upper(xs, nn), vpu_median_upper(ys, nn)) : rf_cand[sub][0];
+    rf_nc[sub] = nc;
+    for (int k = 0; k < nc; k++) {
+        int dup = -1;
+        for (int j = 0; j < k; j++) {
+            if (all(equal(rf_cand[sub][k], rf_cand[sub][j]))) {
+                dup = j;
+                break;
+            }
+        }
+        rf_dup[sub][k] = dup;
     }
-if (use_temporal != 0)
-    cand[nc++] = texelFetch(previous, b, 0).xy;
-vec4 gv = texelFetch(global_vec, ivec2(0), 0);
-if (use_global != 0 && gv.w > 0.5 && gv.z < 0.9)
-    cand[nc++] = gv.xy * 4.0;
-if (use_of != 0 && inside)
-    cand[nc++] = texelFetch(of_vec, b, 0).xy;
+}
 if (run)
     for (int i = li; i < 144; i += 16)
         rf_from[sub * 144 + i] = from_at(o + ivec2(i % 12 - 2, i / 12 - 2));
 pb_sync();
-if (run && li < nc)
-    rf_sads[sub * 16 + li] = rf_sad_sub(sub, o, cand[li]);
+if (run && li < rf_nc[sub] && rf_dup[sub][li] < 0)
+    rf_sads[sub * 16 + li] = rf_sad_sub(sub, o, rf_cand[sub][li]);
 pb_sync();
 if (run && lead) {
-    vec2 med = nn > 0 ? vec2(vpu_median_upper(xs, nn), vpu_median_upper(ys, nn)) : cand[0];
-    vec2 best = cand[0];
+    int nc = rf_nc[sub];
+    vec2 med = rf_med[sub];
+    vec2 best = rf_cand[sub][0];
     float best_sad = rf_sads[sub * 16];
     float best_score = best_sad / 144.0 + lambda * 2.0 * length(best - med);
     for (int k = 1; k < 12; k++) {
         if (k >= nc) break;
-        float s = rf_sads[sub * 16 + k];
-        float score = s / 144.0 + lambda * 2.0 * length(cand[k] - med);
-        if (score < best_score) { best_score = score; best_sad = s; best = cand[k]; }
+        int dup = rf_dup[sub][k];
+        float s = dup >= 0 ? rf_sads[sub * 16 + dup] : rf_sads[sub * 16 + k];
+        float score = s / 144.0 + lambda * 2.0 * length(rf_cand[sub][k] - med);
+        if (score < best_score) { best_score = score; best_sad = s; best = rf_cand[sub][k]; }
     }
     rf_best[sub] = best;
     rf_best_sad[sub] = best_sad;
 }
 pb_sync();
-vec2 best = rf_best[sub];
+vec2 best = run ? rf_best[sub] : vec2(0.0);
 if (run && li < 9 && li != 4)
     rf_sads[sub * 16 + li] = rf_sad_sub(sub, o, best + 0.5 * vec2(li % 3 - 1, li / 3 - 1));
 pb_sync();
@@ -987,12 +1086,22 @@ if (run && lead) {
         }
 #ifdef COST_W
     // The engine's trust weight stays with its own vector (within a half-size pixel).
-    float w_ = length(fbest - cand[0]) <= 1.0 ? texelFetch(sweep, b, 0).w : 1.0;
+    float w_ = length(fbest - rf_cand[sub][0]) <= 1.0 ? texelFetch(sweep, b, 0).w : 1.0;
 #else
     float w_ = 1.0;
 #endif
     imageStore(dst, b, vec4(fbest, best_sad / 144.0, w_));
 }
+)GLSL";
+
+		// GEM-144 (MC-SEARCH-2): 64-thread work group per block for quarter-pel refinement.
+		// All 64 threads compute the 9 * 144 = 1296 candidate pixel diffs in parallel (coalesced
+		// 2D texture reads of to_half), then 9 threads sum each candidate in the exact serial
+		// (y, x) order of QPEL_BODY_SERIAL (100% bit-identical, 5,796 B shared memory < 16 KB).
+		const char* const QPEL_HEADER = R"GLSL(
+shared float qp_from[144];
+shared float qp_diff[1296];
+shared float qp_sads[9];
 )GLSL";
 
 		const char* const QPEL_BODY = R"GLSL(
@@ -1006,19 +1115,40 @@ bool run = inside && f.z > 0.5;
 half_size_ = textureSize(from_half, 0);
 ivec2 o = b * 8;
 vec2 v0 = f.xy * 0.5;
-pb_load_from(o, li, run);
-pb_sync();
-if (run && li < 9)
-    pb_sads[li] = pb_sad_sub(o, v0 + 0.25 * vec2(li % 3 - 1, li / 3 - 1));
-pb_sync();
+if (run) {
+    for (int i = li; i < 144; i += 64)
+        qp_from[i] = from_at(o + ivec2(i % 12 - 2, i / 12 - 2));
+}
+memoryBarrierShared();
+barrier();
+if (run) {
+    for (int e = li; e < 1296; e += 64) {
+        int c = e / 144;
+        int p = e % 144;
+        vec2 v = c == 4 ? v0 : v0 + 0.25 * vec2(c % 3 - 1, c / 3 - 1);
+        ivec2 xy = o + ivec2(p % 12 - 2, p / 12 - 2);
+        qp_diff[e] = abs(qp_from[p] - to_lin(vec2(xy) + v));
+    }
+}
+memoryBarrierShared();
+barrier();
+if (run && li < 9) {
+    float s = 0.0;
+    int base = li * 144;
+    for (int p = 0; p < 144; p++)
+        s += qp_diff[base + p];
+    qp_sads[li] = s;
+}
+memoryBarrierShared();
+barrier();
 if (inside && lead) {
     if (run) {
         vec2 best = v0;
-        float best_sad = pb_sads[4];
+        float best_sad = qp_sads[4];
         for (int dy = -1; dy <= 1; dy++)
             for (int dx = -1; dx <= 1; dx++) {
                 if (dx == 0 && dy == 0) continue;
-                float s = pb_sads[(dy + 1) * 3 + dx + 1];
+                float s = qp_sads[(dy + 1) * 3 + dx + 1];
                 if (s < best_sad) { best_sad = s; best = v0 + 0.25 * vec2(dx, dy); }
             }
         f.xy = best * 2.0;
@@ -1060,28 +1190,73 @@ if (b.x < size.x && b.y < size.y) {
 		// pixels (the searches' 8 half-size texels: 16; 8 on the sub-field). On the sub-field w = 1
 		// (the sub-block's own vector; w = 0 would mean "the parent block's vector"); on the block
 		// field w is the SAD (0). dejudder_est_still_zero switches the pass (Original: off).
+		// S3-H5: blocks whose centre lies outside the active picture rect (black bars) keep their
+		// incoming vector/trust unchanged so StillZero never restores trust=1.0 on masked bars.
+		const char* const STILL_ZERO_HEADER = R"GLSL(
+#ifdef PICTURE
+bool in_picture_(vec2 c) { vec4 r = texelFetch(picture, ivec2(0), 0); return c.x >= r.x && c.y >= r.y && c.x < r.z && c.y < r.w; }
+#else
+bool in_picture_(vec2 c) { return true; }
+#endif
+)GLSL";
+
 		const char* const STILL_ZERO_BODY = R"GLSL(
+#ifdef IN_PLACE
+ivec2 b = ivec2(gl_GlobalInvocationID.xy);
+ivec2 size = imageSize(field_io);
+if (b.x < size.x && b.y < size.y) {
+    ivec2 bs = ivec2(block_px);
+    ivec2 o = b * bs;
+    if (in_picture_(vec2(o) + vec2(bs) * 0.5)) {
+        ivec2 psz = textureSize(luma_a, 0);
+        bool same = true;
+        bool any_px = false;
+        for (int y = 0; y < bs.y && same; y++)
+            for (int x = 0; x < bs.x; x++) {
+                ivec2 p = o + ivec2(x, y);
+                if (p.x >= psz.x || p.y >= psz.y)
+                    continue;
+                any_px = true;
+                if (texelFetch(luma_a, p, 0).r != texelFetch(luma_b, p, 0).r) { same = false; break; }
+            }
+        if (same && any_px) {
+#ifdef SUB_FIELD
+            imageStore(field_io, b, vec4(0.0, 0.0, 1.0, 1.0));
+#else
+            imageStore(field_io, b, vec4(0.0, 0.0, 1.0, 0.0));
+#endif
+        }
+    }
+}
+#else
 ivec2 b = ivec2(gl_GlobalInvocationID.xy);
 ivec2 size = imageSize(dst);
 if (b.x < size.x && b.y < size.y) {
     vec4 f = texelFetch(src_field, b, 0);
-    ivec2 psz = textureSize(luma_a, 0);
     ivec2 bs = ivec2(block_px);
     ivec2 o = b * bs;
-    bool same = true;
-    for (int y = 0; y < bs.y && same; y++)
-        for (int x = 0; x < bs.x; x++) {
-            ivec2 p = o + ivec2(x, y);
-            if (p.x >= psz.x || p.y >= psz.y)
-                continue;
-            if (texelFetch(luma_a, p, 0).r != texelFetch(luma_b, p, 0).r) { same = false; break; }
-        }
+    if (!in_picture_(vec2(o) + vec2(bs) * 0.5)) {
+        imageStore(dst, b, f);
+    } else {
+        ivec2 psz = textureSize(luma_a, 0);
+        bool same = true;
+        bool any_px = false;
+        for (int y = 0; y < bs.y && same; y++)
+            for (int x = 0; x < bs.x; x++) {
+                ivec2 p = o + ivec2(x, y);
+                if (p.x >= psz.x || p.y >= psz.y)
+                    continue;
+                any_px = true;
+                if (texelFetch(luma_a, p, 0).r != texelFetch(luma_b, p, 0).r) { same = false; break; }
+            }
 #ifdef SUB_FIELD
-    imageStore(dst, b, same ? vec4(0.0, 0.0, 1.0, 1.0) : f);
+        imageStore(dst, b, (same && any_px) ? vec4(0.0, 0.0, 1.0, 1.0) : f);
 #else
-    imageStore(dst, b, same ? vec4(0.0, 0.0, 1.0, 0.0) : f);
+        imageStore(dst, b, (same && any_px) ? vec4(0.0, 0.0, 1.0, 0.0) : f);
 #endif
+    }
 }
+#endif
 )GLSL";
 
 		const char* const COPY_BODY = R"GLSL(
@@ -1100,439 +1275,7 @@ if (b.x < size.x && b.y < size.y) {
 }
 )GLSL";
 
-		// D1: the whole frame's translation, by one 16x16 group. Every vector
-		// within +-8 texels at 1/32 resolution (the mean absolute difference
-		// over the overlap, strided to about 2048 samples), then +-2 texels in
-		// half steps at 1/8 around the winner. z = best / second best (outside
-		// +-1 of the best): near 1 on flat or ambiguous pictures.
-		const char* const GLOBAL_HEADER = R"GLSL(
-shared float g_sad_[256];
-shared int g_idx_[256];
-ivec2 l1s_;
-ivec2 l2s_;
-float g2from(ivec2 p) { return texelFetch(from_l2, p, 0).r; }
-float g2to(ivec2 p) { return texelFetch(to_l2, p, 0).r; }
-float g1from(ivec2 p) { return texelFetch(from_l1, p, 0).r; }
-float g1to(vec2 p) { return texture(to_l1, (p + vec2(0.5)) / vec2(l1s_)).r; }
-
-float frame_sad_l2(ivec2 v, int stride)
-{
-    float s = 0.0, n = 0.0, all_ = 0.0;
-    for (int y = 0; y < l2s_.y; y += stride)
-        for (int x = 0; x < l2s_.x; x += stride) {
-            all_ += 1.0;
-            ivec2 p = ivec2(x, y);
-            ivec2 q = p + v;
-            if (q.x < 0 || q.y < 0 || q.x >= l2s_.x || q.y >= l2s_.y)
-                continue;
-            s += abs(g2from(p) - g2to(q));
-            n += 1.0;
-        }
-    return n * 4.0 >= all_ && n > 0.0 ? s / n : 1e30;
-}
-
-float frame_sad_l1(vec2 v, int stride)
-{
-    float s = 0.0, n = 0.0, all_ = 0.0;
-    for (int y = 0; y < l1s_.y; y += stride)
-        for (int x = 0; x < l1s_.x; x += stride) {
-            all_ += 1.0;
-            vec2 q = vec2(x, y) + v;
-            if (q.x < 0.0 || q.y < 0.0 || q.x > float(l1s_.x - 1) || q.y > float(l1s_.y - 1))
-                continue;
-            s += abs(g1from(ivec2(x, y)) - g1to(q));
-            n += 1.0;
-        }
-    return n * 4.0 >= all_ && n > 0.0 ? s / n : 1e30;
-}
-
-void argmin_(uint i)
-{
-    for (uint stride = 128u; stride > 0u; stride >>= 1) {
-        if (i < stride && g_sad_[i + stride] < g_sad_[i]) {
-            g_sad_[i] = g_sad_[i + stride];
-            g_idx_[i] = g_idx_[i + stride];
-        }
-        barrier();
-    }
-}
-)GLSL";
-
-		const char* const GLOBAL_BODY = R"GLSL(
-uint i = gl_LocalInvocationIndex;
-l1s_ = textureSize(from_l1, 0);
-l2s_ = textureSize(from_l2, 0);
-int stride2 = max(1, int(ceil(sqrt(float(l2s_.x * l2s_.y) / 2048.0))));
-int stride1 = max(1, int(ceil(sqrt(float(l1s_.x * l1s_.y) / 4096.0))));
-// 17 x 17 candidates at 1/32: at most two per thread, kept for the second best.
-float mine[2] = float[2](1e30, 1e30);
-int mk[2] = int[2](-1, -1);
-for (int j = 0; j < 2; j++) {
-    int k = int(i) + j * 256;
-    if (k < 289) {
-        mk[j] = k;
-        mine[j] = frame_sad_l2(ivec2(k % 17 - 8, k / 17 - 8), stride2);
-    }
-}
-g_sad_[i] = mine[1] < mine[0] ? mine[1] : mine[0];
-g_idx_[i] = mine[1] < mine[0] ? mk[1] : mk[0];
-barrier();
-argmin_(i);
-int kb = g_idx_[0];
-float best = g_sad_[0];
-barrier();
-ivec2 vb = ivec2(kb % 17 - 8, kb / 17 - 8);
-float second = 1e30;
-for (int j = 0; j < 2; j++) {
-    if (mk[j] < 0) continue;
-    ivec2 v = ivec2(mk[j] % 17 - 8, mk[j] / 17 - 8);
-    if (max(abs(v.x - vb.x), abs(v.y - vb.y)) <= 1) continue;
-    second = min(second, mine[j]);
-}
-g_sad_[i] = second;
-g_idx_[i] = 0;
-barrier();
-argmin_(i);
-second = g_sad_[0];
-barrier();
-// 1/8 resolution: 9 x 9 half-texel steps around the winner.
-float s1 = 1e30;
-if (i < 81u && kb >= 0)
-    s1 = frame_sad_l1(vec2(vb * 4) + 0.5 * vec2(int(i) % 9 - 4, int(i) / 9 - 4), stride1);
-g_sad_[i] = s1;
-g_idx_[i] = int(i);
-barrier();
-argmin_(i);
-if (i == 0u) {
-    int k1 = g_idx_[0];
-    vec2 v = vec2(vb * 4) + 0.5 * vec2(k1 % 9 - 4, k1 / 9 - 4);
-    bool ok = kb >= 0 && best < 1e29;
-    float ratio = ok ? (best + 0.05) / (min(second, 1e6) + 0.05) : 1.0;
-    imageStore(dst, ivec2(0), vec4(ok ? v : vec2(0.0), ratio, 1.0));
-}
-)GLSL";
-
-		// D1 in parallel (owner 2026-10-13 efficiency): the serial body above
-		// ran on one work group. Here one work group per candidate sums its
-		// frame SAD (256 threads, a shared reduction), and single-group passes
-		// pick exactly as the serial body does (lowest SAD, lowest index on a
-		// tie). The sums' order differs from the serial loop (float rounding
-		// only).
-		const char* const GLOBAL_SUM_HEADER = R"GLSL(
-shared float gs_s_[256];
-shared float gs_n_[256];
-)GLSL";
-
-		const char* const GLOBAL_L2_BODY = R"GLSL(
-uint i = gl_LocalInvocationIndex;
-ivec2 l2s = textureSize(from_l2, 0);
-int stride2 = max(1, int(ceil(sqrt(float(l2s.x * l2s.y) / 2048.0))));
-ivec2 v = ivec2(gl_WorkGroupID.xy) - ivec2(8);
-int cols = (l2s.x + stride2 - 1) / stride2;
-int total = cols * ((l2s.y + stride2 - 1) / stride2);
-float s = 0.0, n = 0.0;
-for (int k = int(i); k < total; k += 256) {
-    ivec2 p = ivec2(k % cols, k / cols) * stride2;
-    ivec2 q = p + v;
-    if (q.x < 0 || q.y < 0 || q.x >= l2s.x || q.y >= l2s.y)
-        continue;
-    s += abs(texelFetch(from_l2, p, 0).r - texelFetch(to_l2, q, 0).r);
-    n += 1.0;
-}
-gs_s_[i] = s;
-gs_n_[i] = n;
-barrier();
-for (uint st = 128u; st > 0u; st >>= 1) {
-    if (i < st) {
-        gs_s_[i] += gs_s_[i + st];
-        gs_n_[i] += gs_n_[i + st];
-    }
-    barrier();
-}
-if (i == 0u) {
-    float r = gs_n_[0] * 4.0 >= float(total) && gs_n_[0] > 0.0 ? gs_s_[0] / gs_n_[0] : 1e30;
-    imageStore(dst, ivec2(gl_WorkGroupID.xy), vec4(r, 0.0, 0.0, 1.0));
-}
-)GLSL";
-
-		const char* const GLOBAL_PICK_HEADER = R"GLSL(
-shared float g_sad_[256];
-shared int g_idx_[256];
-void argmin_(uint i)
-{
-    for (uint stride = 128u; stride > 0u; stride >>= 1) {
-        if (i < stride && g_sad_[i + stride] < g_sad_[i]) {
-            g_sad_[i] = g_sad_[i + stride];
-            g_idx_[i] = g_idx_[i + stride];
-        }
-        barrier();
-    }
-}
-)GLSL";
-
-		// The 1/32 winner and the second best away from it (as the serial body).
-		const char* const GLOBAL_PICK2_BODY = R"GLSL(
-uint i = gl_LocalInvocationIndex;
-float mine[2] = float[2](1e30, 1e30);
-int mk[2] = int[2](-1, -1);
-for (int j = 0; j < 2; j++) {
-    int k = int(i) + j * 256;
-    if (k < 289) {
-        mk[j] = k;
-        mine[j] = texelFetch(sad2, ivec2(k % 17, k / 17), 0).r;
-    }
-}
-g_sad_[i] = mine[1] < mine[0] ? mine[1] : mine[0];
-g_idx_[i] = mine[1] < mine[0] ? mk[1] : mk[0];
-barrier();
-argmin_(i);
-int kb = g_idx_[0];
-float best = g_sad_[0];
-barrier();
-ivec2 vb = ivec2(kb % 17 - 8, kb / 17 - 8);
-float second = 1e30;
-int ks = -1;
-for (int j = 0; j < 2; j++) {
-    if (mk[j] < 0) continue;
-    ivec2 v = ivec2(mk[j] % 17 - 8, mk[j] / 17 - 8);
-    if (max(abs(v.x - vb.x), abs(v.y - vb.y)) <= 1) continue;
-    if (mine[j] < second) { second = mine[j]; ks = mk[j]; }
-}
-g_sad_[i] = second;
-g_idx_[i] = ks;
-barrier();
-argmin_(i);
-// w: 1 + the second's index (M2; 0 = none), >= 1 once written.
-if (i == 0u)
-    imageStore(dst, ivec2(0), vec4(float(kb), best, g_sad_[0], 1.0 + float(max(g_idx_[0], -1) + 1)));
-)GLSL";
-
-		// The 1/8 candidates around the winner, one work group each.
-		const char* const GLOBAL_L1_BODY = R"GLSL(
-uint i = gl_LocalInvocationIndex;
-ivec2 l1s = textureSize(from_l1, 0);
-int stride1 = max(1, int(ceil(sqrt(float(l1s.x * l1s.y) / 4096.0))));
-vec4 pick = texelFetch(global_pick, ivec2(0), 0);
-int kb = int(pick.x);
-ivec2 vb = ivec2(kb % 17 - 8, kb / 17 - 8);
-vec2 v = vec2(vb * 4) + 0.5 * vec2(ivec2(gl_WorkGroupID.xy) - ivec2(4));
-int cols = (l1s.x + stride1 - 1) / stride1;
-int total = cols * ((l1s.y + stride1 - 1) / stride1);
-float s = 0.0, n = 0.0;
-for (int k = int(i); k < total; k += 256) {
-    ivec2 p = ivec2(k % cols, k / cols) * stride1;
-    vec2 q = vec2(p) + v;
-    if (q.x < 0.0 || q.y < 0.0 || q.x > float(l1s.x - 1) || q.y > float(l1s.y - 1))
-        continue;
-    s += abs(texelFetch(from_l1, p, 0).r - texture(to_l1, (q + vec2(0.5)) / vec2(l1s)).r);
-    n += 1.0;
-}
-gs_s_[i] = s;
-gs_n_[i] = n;
-barrier();
-for (uint st = 128u; st > 0u; st >>= 1) {
-    if (i < st) {
-        gs_s_[i] += gs_s_[i + st];
-        gs_n_[i] += gs_n_[i + st];
-    }
-    barrier();
-}
-if (i == 0u) {
-    float r = kb >= 0 && gs_n_[0] * 4.0 >= float(total) && gs_n_[0] > 0.0 ? gs_s_[0] / gs_n_[0] : 1e30;
-    imageStore(dst, ivec2(gl_WorkGroupID.xy), vec4(r, 0.0, 0.0, 1.0));
-}
-)GLSL";
-
-		// The 1/8 winner and the global vector (as the serial body).
-		const char* const GLOBAL_PICK1_BODY = R"GLSL(
-uint i = gl_LocalInvocationIndex;
-vec4 pick = texelFetch(global_pick, ivec2(0), 0);
-int kb = int(pick.x);
-float best = pick.y, second = pick.z;
-ivec2 vb = ivec2(kb % 17 - 8, kb / 17 - 8);
-g_sad_[i] = i < 81u && kb >= 0 ? texelFetch(sad1, ivec2(int(i) % 9, int(i) / 9), 0).r : 1e30;
-g_idx_[i] = int(i);
-barrier();
-argmin_(i);
-if (i == 0u) {
-    int k1 = g_idx_[0];
-    vec2 v = vec2(vb * 4) + 0.5 * vec2(k1 % 9 - 4, k1 / 9 - 4);
-    bool ok = kb >= 0 && best < 1e29;
-    float ratio = ok ? (best + 0.05) / (min(second, 1e6) + 0.05) : 1.0;
-    imageStore(dst, ivec2(0), vec4(ok ? v : vec2(0.0), ratio, 1.0));
-#ifdef GLOBAL_TWO
-    // M2: the second candidate at 1/32 precision (in 1/8 texels); the
-    // block search refines it as it refines the first.
-    int k2 = int(pick.w + 0.5) - 2;
-    bool ok2 = ok && k2 >= 0 && second < 1e29;
-    vec2 v2nd = ok2 ? vec2(ivec2(k2 % 17 - 8, k2 / 17 - 8) * 4) : vec2(0.0);
-    imageStore(second_out, ivec2(0), vec4(v2nd, 0.0, ok2 ? 1.0 : 0.0));
-#endif
-}
-)GLSL";
-
-		// Both directions in one dispatch per stage (2026-10-15): work group x
-		// below the stage's width is A to B, from there B to A; each group's
-		// work is Global's for its direction (the same sums in the same order).
-		const char* const GLOBAL_BOTH_HEADER = R"GLSL(
-shared float gs_s_[256];
-shared float gs_n_[256];
-)GLSL";
-
-		// The 1/32 stage's reads (its own header: the 1/8 stage binds other textures).
-		const char* const GLOBAL_BOTH_L2_HEADER = R"GLSL(
-// Direction d: 0 = A to B (from A), 1 = B to A (from B).
-float from_l2_at(int d, ivec2 p) { return d == 0 ? texelFetch(l2_a, p, 0).r : texelFetch(l2_b, p, 0).r; }
-float to_l2_at(int d, ivec2 p) { return d == 0 ? texelFetch(l2_b, p, 0).r : texelFetch(l2_a, p, 0).r; }
-)GLSL";
-
-		const char* const GLOBAL_BOTH_L2_BODY = R"GLSL(
-uint i = gl_LocalInvocationIndex;
-int d = int(gl_WorkGroupID.x) / 17;
-ivec2 g = ivec2(int(gl_WorkGroupID.x) % 17, int(gl_WorkGroupID.y));
-ivec2 l2s = textureSize(l2_a, 0);
-int stride2 = max(1, int(ceil(sqrt(float(l2s.x * l2s.y) / 2048.0))));
-ivec2 v = g - ivec2(8);
-int cols = (l2s.x + stride2 - 1) / stride2;
-int total = cols * ((l2s.y + stride2 - 1) / stride2);
-float s = 0.0, n = 0.0;
-for (int k = int(i); k < total; k += 256) {
-    ivec2 p = ivec2(k % cols, k / cols) * stride2;
-    ivec2 q = p + v;
-    if (q.x < 0 || q.y < 0 || q.x >= l2s.x || q.y >= l2s.y)
-        continue;
-    s += abs(from_l2_at(d, p) - to_l2_at(d, q));
-    n += 1.0;
-}
-gs_s_[i] = s;
-gs_n_[i] = n;
-barrier();
-for (uint st = 128u; st > 0u; st >>= 1) {
-    if (i < st) {
-        gs_s_[i] += gs_s_[i + st];
-        gs_n_[i] += gs_n_[i + st];
-    }
-    barrier();
-}
-if (i == 0u) {
-    float r = gs_n_[0] * 4.0 >= float(total) && gs_n_[0] > 0.0 ? gs_s_[0] / gs_n_[0] : 1e30;
-    imageStore(dst, ivec2(gl_WorkGroupID.xy), vec4(r, 0.0, 0.0, 1.0));
-}
-)GLSL";
-
-		const char* const GLOBAL_BOTH_PICK2_BODY = R"GLSL(
-uint i = gl_LocalInvocationIndex;
-int d = int(gl_WorkGroupID.x);
-float mine[2] = float[2](1e30, 1e30);
-int mk[2] = int[2](-1, -1);
-for (int j = 0; j < 2; j++) {
-    int k = int(i) + j * 256;
-    if (k < 289) {
-        mk[j] = k;
-        mine[j] = texelFetch(sad2, ivec2(d * 17 + k % 17, k / 17), 0).r;
-    }
-}
-g_sad_[i] = mine[1] < mine[0] ? mine[1] : mine[0];
-g_idx_[i] = mine[1] < mine[0] ? mk[1] : mk[0];
-barrier();
-argmin_(i);
-int kb = g_idx_[0];
-float best = g_sad_[0];
-barrier();
-ivec2 vb = ivec2(kb % 17 - 8, kb / 17 - 8);
-float second = 1e30;
-int ks = -1;
-for (int j = 0; j < 2; j++) {
-    if (mk[j] < 0) continue;
-    ivec2 v = ivec2(mk[j] % 17 - 8, mk[j] / 17 - 8);
-    if (max(abs(v.x - vb.x), abs(v.y - vb.y)) <= 1) continue;
-    if (mine[j] < second) { second = mine[j]; ks = mk[j]; }
-}
-g_sad_[i] = second;
-g_idx_[i] = ks;
-barrier();
-argmin_(i);
-if (i == 0u)
-    imageStore(dst, ivec2(d, 0), vec4(float(kb), best, g_sad_[0], 1.0 + float(max(g_idx_[0], -1) + 1)));
-)GLSL";
-
-		const char* const GLOBAL_BOTH_L1_BODY = R"GLSL(
-uint i = gl_LocalInvocationIndex;
-int d = int(gl_WorkGroupID.x) / 9;
-ivec2 g = ivec2(int(gl_WorkGroupID.x) % 9, int(gl_WorkGroupID.y));
-ivec2 l1s = textureSize(l1_a, 0);
-int stride1 = max(1, int(ceil(sqrt(float(l1s.x * l1s.y) / 4096.0))));
-vec4 pick = texelFetch(global_pick, ivec2(d, 0), 0);
-int kb = int(pick.x);
-ivec2 vb = ivec2(kb % 17 - 8, kb / 17 - 8);
-vec2 v = vec2(vb * 4) + 0.5 * vec2(g - ivec2(4));
-int cols = (l1s.x + stride1 - 1) / stride1;
-int total = cols * ((l1s.y + stride1 - 1) / stride1);
-float s = 0.0, n = 0.0;
-for (int k = int(i); k < total; k += 256) {
-    ivec2 p = ivec2(k % cols, k / cols) * stride1;
-    vec2 q = vec2(p) + v;
-    if (q.x < 0.0 || q.y < 0.0 || q.x > float(l1s.x - 1) || q.y > float(l1s.y - 1))
-        continue;
-    vec2 t = (q + vec2(0.5)) / vec2(l1s);
-    // Both sampled, then chosen: an implicit-LOD sample may not sit in a
-    // branch (D3D11's HLSL compiler).
-    float fa = texelFetch(l1_a, p, 0).r, fb = texelFetch(l1_b, p, 0).r;
-    float ta = texture(l1_a, t).r, tb = texture(l1_b, t).r;
-    float a = d == 0 ? fa : fb;
-    float b = d == 0 ? tb : ta;
-    s += abs(a - b);
-    n += 1.0;
-}
-gs_s_[i] = s;
-gs_n_[i] = n;
-barrier();
-for (uint st = 128u; st > 0u; st >>= 1) {
-    if (i < st) {
-        gs_s_[i] += gs_s_[i + st];
-        gs_n_[i] += gs_n_[i + st];
-    }
-    barrier();
-}
-if (i == 0u) {
-    float r = kb >= 0 && gs_n_[0] * 4.0 >= float(total) && gs_n_[0] > 0.0 ? gs_s_[0] / gs_n_[0] : 1e30;
-    imageStore(dst, ivec2(gl_WorkGroupID.xy), vec4(r, 0.0, 0.0, 1.0));
-}
-)GLSL";
-
-		const char* const GLOBAL_BOTH_PICK1_BODY = R"GLSL(
-uint i = gl_LocalInvocationIndex;
-int d = int(gl_WorkGroupID.x);
-vec4 pick = texelFetch(global_pick, ivec2(d, 0), 0);
-int kb = int(pick.x);
-float best = pick.y, second = pick.z;
-ivec2 vb = ivec2(kb % 17 - 8, kb / 17 - 8);
-g_sad_[i] = i < 81u && kb >= 0 ? texelFetch(sad1, ivec2(d * 9 + int(i) % 9, int(i) / 9), 0).r : 1e30;
-g_idx_[i] = int(i);
-barrier();
-argmin_(i);
-if (i == 0u) {
-    int k1 = g_idx_[0];
-    vec2 v = vec2(vb * 4) + 0.5 * vec2(k1 % 9 - 4, k1 / 9 - 4);
-    bool ok = kb >= 0 && best < 1e29;
-    float ratio = ok ? (best + 0.05) / (min(second, 1e6) + 0.05) : 1.0;
-    vec4 r = vec4(ok ? v : vec2(0.0), ratio, 1.0);
-    if (d == 0)
-        imageStore(dst0, ivec2(0), r);
-    else
-        imageStore(dst1, ivec2(0), r);
-#ifdef GLOBAL_TWO
-    int k2 = int(pick.w + 0.5) - 2;
-    bool ok2 = ok && k2 >= 0 && second < 1e29;
-    vec2 v2nd = ok2 ? vec2(ivec2(k2 % 17 - 8, k2 / 17 - 8) * 4) : vec2(0.0);
-    vec4 r2 = vec4(v2nd, 0.0, ok2 ? 1.0 : 0.0);
-    if (d == 0)
-        imageStore(second0, ivec2(0), r2);
-    else
-        imageStore(second1, ivec2(0), r2);
-#endif
-}
-)GLSL";
+		// D1 whole-frame translation shaders (U10 C2): moved byte-identical to global_model/MatcherGlobalD1.h (VpMotion::MatcherGlobalD1).
 
 		// D3: median smoothing of the trusted field (see Settings).
 		const std::string SMOOTH_HEADER = std::string(R"GLSL(
@@ -1609,14 +1352,35 @@ if (b.x < blocks.x && b.y < blocks.y) {
 #ifdef TEXTURE_TOL
     // M1: the block's texture (mean absolute neighbour difference of A's
     // half-resolution luma) raises the error a correct match may have.
+    // Rolling 2-row cache fetches each from_half texel once (81 vs 192 fetches)
+    // with exact edge clamping and exact (y, x) float summation order.
     ivec2 hs_ = textureSize(from_half, 0);
+    ivec2 lim_ = hs_ - ivec2(2);
+    ivec2 o_ = clamp(b * 8, ivec2(0), lim_);
+    int py_cur_ = o_.y;
+    float cur_[9];
+    float nxt_[9];
+    for (int k_ = 0; k_ < 9; k_++) {
+        int px_ = min(o_.x + k_, hs_.x - 1);
+        cur_[k_] = texelFetch(from_half, ivec2(px_, py_cur_), 0).r;
+        nxt_[k_] = texelFetch(from_half, ivec2(px_, min(py_cur_ + 1, hs_.y - 1)), 0).r;
+    }
     float tex_ = 0.0;
-    for (int y = 0; y < 8; y++)
-        for (int x = 0; x < 8; x++) {
-            ivec2 p = clamp(b * 8 + ivec2(x, y), ivec2(0), hs_ - ivec2(2));
-            float c0 = texelFetch(from_half, p, 0).r;
-            tex_ += abs(texelFetch(from_half, p + ivec2(1, 0), 0).r - c0) + abs(texelFetch(from_half, p + ivec2(0, 1), 0).r - c0);
+    for (int y = 0; y < 8; y++) {
+        int py_ = clamp(b.y * 8 + y, 0, lim_.y);
+        if (py_ != py_cur_) {
+            for (int k_ = 0; k_ < 9; k_++) {
+                cur_[k_] = nxt_[k_];
+                nxt_[k_] = texelFetch(from_half, ivec2(min(o_.x + k_, hs_.x - 1), min(py_ + 1, hs_.y - 1)), 0).r;
+            }
+            py_cur_ = py_;
         }
+        for (int x = 0; x < 8; x++) {
+            int ix_ = clamp(b.x * 8 + x, 0, lim_.x) - o_.x;
+            float c0 = cur_[ix_];
+            tex_ += abs(cur_[ix_ + 1] - c0) + abs(nxt_[ix_] - c0);
+        }
+    }
     float extra_ = texture_tol * tex_ / 128.0;
 #else
     float extra_ = 0.0;
@@ -1680,43 +1444,59 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		// the differences over the block's 8x8, their mean removed (a fade, a
 		// lighting change), then the mean absolute residual. Temporal noise
 		// survives the motion compensation; static texture does not.
+		// GEM-144 (MC-SEARCH-2): 64-thread work group (8x8) per block replaces the 64-float
+		// per-thread register array d[64] and parallelizes all 128 texture fetches across the
+		// block (544 B shared memory < 16 KB), then thread 0 sums in exact i = 0..63 serial order.
 		const char* const GRAIN_ERROR_HEADER = R"GLSL(
+shared float ge_d[64];
+shared float ge_a[64];
+shared vec2 ge_v[4];
 ivec2 half_size_;
 float from_at(ivec2 p) { return texelFetch(from_half, clamp(p, ivec2(0), half_size_ - ivec2(1)), 0).r; }
 float to_lin(vec2 p) { return texture(to_half, (p + vec2(0.5)) / vec2(half_size_)).r; }
 )GLSL";
 
 		const char* const GRAIN_ERROR_BODY = R"GLSL(
-ivec2 b = ivec2(gl_GlobalInvocationID.xy);
-ivec2 blocks = imageSize(dst);
-if (b.x < blocks.x && b.y < blocks.y) {
-    half_size_ = textureSize(from_half, 0);
-    vec2 v = texelFetch(field, b, 0).xy * 0.5;
-    ivec2 o = b * 8;
+ivec2 b = ivec2(gl_WorkGroupID.xy);
+int li = int(gl_LocalInvocationIndex);
+half_size_ = textureSize(from_half, 0);
+if (li == 0) {
+    vec2 v0 = texelFetch(field, b, 0).xy * 0.5;
 #ifdef SPLIT
     // 11a E2: a split block's quadrants at their own sub-block vectors.
-    vec2 vq[4];
     for (int k = 0; k < 4; k++) {
         vec4 sf = texelFetch(sub_field, b * 2 + ivec2(k % 2, k / 2), 0);
-        vq[k] = sf.w > 0.5 ? sf.xy * 0.5 : v;
+        ge_v[k] = sf.w > 0.5 ? sf.xy * 0.5 : v0;
     }
+#else
+    ge_v[0] = v0;
 #endif
-    float d[64];
+}
+memoryBarrierShared();
+barrier();
+{
+    ivec2 p = b * 8 + ivec2(li % 8, li / 8);
+    float a = from_at(p);
+#ifdef SPLIT
+    vec2 v = ge_v[(li % 8) / 4 + 2 * ((li / 8) / 4)];
+#else
+    vec2 v = ge_v[0];
+#endif
+    ge_a[li] = a;
+    ge_d[li] = a - to_lin(vec2(p) + v);
+}
+memoryBarrierShared();
+barrier();
+if (li == 0) {
     float mean_d = 0.0, mean_y = 0.0;
     for (int i = 0; i < 64; i++) {
-        ivec2 p = o + ivec2(i % 8, i / 8);
-        float a = from_at(p);
-#ifdef SPLIT
-        v = vq[(i % 8) / 4 + 2 * ((i / 8) / 4)];
-#endif
-        d[i] = a - to_lin(vec2(p) + v);
-        mean_d += d[i];
-        mean_y += a;
+        mean_d += ge_d[i];
+        mean_y += ge_a[i];
     }
     mean_d /= 64.0;
     float e = 0.0;
     for (int i = 0; i < 64; i++)
-        e += abs(d[i] - mean_d);
+        e += abs(ge_d[i] - mean_d);
     imageStore(dst, b, vec4(e / 64.0, mean_y / 64.0, 0.0, 1.0));
 }
 )GLSL";
@@ -1801,7 +1581,10 @@ for (uint stride = 128u; stride > 0u; stride >>= 1) {
     vec2 gpx = gv.xy * 8.0;
     vec3 c = vec3(0.0);
     for (int k = int(i); k < count; k += 256) {
-        vec4 f = texelFetch(field, ivec2(k % blocks.x, k / blocks.x), 0);
+        ivec2 bk = ivec2(k % blocks.x, k / blocks.x);
+        if (!in_picture_(vec2(bk * 16) + vec2(8.0)))
+            continue;
+        vec4 f = texelFetch(field, bk, 0);
         if (reliable && f.z > 0.5 && length(f.xy - gpx) < camera_window) c += vec3(f.xy, 1.0);
     }
     partial_c_[i] = c;
@@ -2003,6 +1786,14 @@ float hold_weight(vec2 lp, float feather)
 {
     ivec2 fsize = textureSize(field, 0);
     ivec2 own = clamp(ivec2(floor(lp / 16.0)), ivec2(0), fsize - ivec2(1));
+    float f = max(feather, 1e-3);
+    // GEM-145: hold_weight only inspects the 8 neighbours of `own` (dx, dy != 0, 0).
+    // Any pixel at distance >= f from all 4 edges of `own`'s 16x16 block has
+    // distance >= f to every 3x3 neighbour block (and every 8x8 sub-block inside
+    // one), so smoothstep(0.0, f, d) == 1.0 identically without fetching neighbours.
+    vec2 local = lp - vec2(own) * 16.0;
+    if (local.x >= f && 16.0 - local.x >= f && local.y >= f && 16.0 - local.y >= f)
+        return 1.0;
     float d = 1e9;
     for (int dy = -1; dy <= 1; dy++)
         for (int dx = -1; dx <= 1; dx++) {
@@ -2027,7 +1818,7 @@ float hold_weight(vec2 lp, float feather)
                 d = min(d, length(lp - clamp(lp, lo, lo + vec2(16.0))));
             }
         }
-    return smoothstep(0.0, max(feather, 1e-3), d);
+    return smoothstep(0.0, f, d);
 }
 #endif
 )GLSL";
@@ -2040,48 +1831,84 @@ float hold_weight(vec2 lp, float feather)
 		// then whole half-resolution pixels +-1 (= +-2 source px) and half a
 		// pixel. Output per sub-block: (vector, SAD per sample, 1); other
 		// blocks repeat the parent search (vector, SAD, 0).
+		// GEM-151 (MC-SEARCH-2): cooperatively cache the 10x10 search neighborhood in shared
+		// memory (1,600 B < 16 KB, single uniform barrier), deduplicate parent+neighbor vectors
+		// once per split block, and cache each quadrant's 4x4 from_half patch once in registers
+		// (16 vs up to 416 fetches/quadrant). Exact tie-breaking and float summation order.
 		const char* const SPLIT_SEARCH_BODY = R"GLSL(
+shared vec4 sp_search[10][10];
+float sp_fq_[16];
+
 float sad_q(ivec2 o, vec2 v)
 {
     float s = 0.0;
     for (int y = 0; y < 4; y++)
         for (int x = 0; x < 4; x++) {
             ivec2 p = o + ivec2(x, y);
-            s += abs(from_at(p) - to_lin(vec2(p) + v));
+            s += abs(sp_fq_[y * 4 + x] - to_lin(vec2(p) + v));
         }
     return s;
 }
 
 void main_split()
 {
+    ivec2 wg0 = ivec2(gl_WorkGroupID.xy) * 8 - ivec2(1);
+    ivec2 loc = ivec2(gl_LocalInvocationID.xy);
     ivec2 b = ivec2(gl_GlobalInvocationID.xy);
     ivec2 blocks = textureSize(search, 0);
+    int li = int(gl_LocalInvocationIndex);
+    for (int i = li; i < 100; i += 64) {
+        int tx = i % 10;
+        int ty = i / 10;
+        sp_search[ty][tx] = texelFetch(search, clamp(wg0 + ivec2(tx, ty), ivec2(0), blocks - ivec2(1)), 0);
+    }
+    memoryBarrierShared();
+    barrier();
     if (b.x >= blocks.x || b.y >= blocks.y)
         return;
-    vec4 fs = texelFetch(search, b, 0);
-    bool split = fs.z > split_sad;
+    vec4 fs = sp_search[loc.y + 1][loc.x + 1];
+    if (fs.z <= split_sad) {
+        for (int q = 0; q < 4; q++)
+            imageStore(dst, b * 2 + ivec2(q % 2, q / 2), vec4(fs.xyz, 0.0));
+        return;
+    }
     half_size_ = textureSize(from_half, 0);
+    vec2 cand[9];
+    int nc = 0;
+    cand[nc++] = fs.xy;
+    for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++) {
+            if (dx == 0 && dy == 0) continue;
+            vec2 v = sp_search[loc.y + 1 + dy][loc.x + 1 + dx].xy;
+            bool dup = false;
+            for (int j = 0; j < nc; j++) {
+                if (all(equal(v, cand[j]))) { dup = true; break; }
+            }
+            if (!dup)
+                cand[nc++] = v;
+        }
     for (int q = 0; q < 4; q++) {
         ivec2 sb = b * 2 + ivec2(q % 2, q / 2);
-        if (!split) {
-            imageStore(dst, sb, vec4(fs.xyz, 0.0));
-            continue;
-        }
         ivec2 o = b * 8 + ivec2(q % 2, q / 2) * 4;
-        vec2 best = fs.xy;
+        for (int y = 0; y < 4; y++)
+            for (int x = 0; x < 4; x++)
+                sp_fq_[y * 4 + x] = from_at(o + ivec2(x, y));
+        vec2 best = cand[0];
         float best_sad = sad_q(o, best);
-        for (int dy = -1; dy <= 1; dy++)
-            for (int dx = -1; dx <= 1; dx++) {
-                if (dx == 0 && dy == 0) continue;
-                ivec2 c = clamp(b + ivec2(dx, dy), ivec2(0), blocks - ivec2(1));
-                vec2 v = texelFetch(search, c, 0).xy;
-                float s = sad_q(o, v);
-                if (s < best_sad) { best_sad = s; best = v; }
-            }
+        for (int k = 1; k < 9; k++) {
+            if (k >= nc) break;
+            float s = sad_q(o, cand[k]);
+            if (s < best_sad) { best_sad = s; best = cand[k]; }
+        }
         vec2 centre = round(best);
         for (int dy = -1; dy <= 1; dy++)
             for (int dx = -1; dx <= 1; dx++) {
                 vec2 v = centre + vec2(dx, dy);
+                bool seen = false;
+                for (int j = 0; j < nc; j++) {
+                    if (all(equal(v, cand[j]))) { seen = true; break; }
+                }
+                if (seen) continue;
                 float s = sad_q(o, v);
                 if (s < best_sad) { best_sad = s; best = v; }
             }
@@ -2090,6 +1917,13 @@ void main_split()
             for (int dx = -1; dx <= 1; dx++) {
                 if (dx == 0 && dy == 0) continue;
                 vec2 v = best + 0.5 * vec2(dx, dy);
+                vec2 d = clamp(round(v - centre), vec2(-1.0), vec2(1.0));
+                if (all(equal(v, centre + d))) continue;
+                bool seen = false;
+                for (int j = 0; j < nc; j++) {
+                    if (all(equal(v, cand[j]))) { seen = true; break; }
+                }
+                if (seen) continue;
                 float s = sad_q(o, v);
                 if (s < best_sad) { best_sad = s; fbest = v; }
             }
@@ -2303,10 +2137,24 @@ if (q.x < size.x && q.y < size.y) {
 	}
 
 	MotionWarp::MotionWarp(pl_log logIn, pl_gpu gpuIn, const Settings& settingsIn)
-		: log(logIn), gpu(gpuIn), settings(settingsIn), base(settingsIn)
+		: log(logIn), gpu(gpuIn), settings(settingsIn), base(settingsIn),
+		lastPairGlobalFallback(FallbackCatalog::PairGlobalUnavailable(false))
 	{
 		dispatch = pl_dispatch_create(log, gpu);
 		GpuAttribution::Watch(dispatch, "dejudder");
+	}
+
+	const FallbackCatalog::Decision& MotionWarp::LastPairGlobalFallback() const
+	{
+		return HalvesForSearch() && inner ? inner->LastPairGlobalFallback() : lastPairGlobalFallback;
+	}
+
+	void MotionWarp::SetSkeletonMemo(VpSkeleton::SkeletonMemo* memo, uint64_t seq)
+	{
+		skeletonMemo = memo;
+		skeletonSeq = seq;
+		if (inner)
+			inner->SetSkeletonMemo(memo, seq);
 	}
 
 	Settings MotionWarp::Scaled(const Settings& given, int inputHeight)
@@ -2364,6 +2212,24 @@ if (q.x < size.x && q.y < size.y) {
 		if (!a.luma) { error = "missing planes"; return false; }
 		width = a.luma->params.w;
 		height = a.luma->params.h;
+		// GEM-141: record Estimate's plane layout and destroy stale warped output
+		// planes on dimension/format change or luma-only input; allocate
+		// warpedLuma / warpedChroma lazily in WarpImpl so estimation-only,
+		// rendered-warp, camera-only, and WarpProcessed paths never allocate them.
+		const bool hasWarpChroma = !innerOfLowRes && a.chroma != nullptr;
+		lumaFormat = hasWarpChroma ? a.luma->params.format : nullptr;
+		chromaW = hasWarpChroma ? a.chroma->params.w : 0;
+		chromaH = hasWarpChroma ? a.chroma->params.h : 0;
+		chromaFormat = hasWarpChroma ? a.chroma->params.format : nullptr;
+		const bool warpedLumaMismatch = warpedLuma && (!hasWarpChroma || warpedLuma->params.w != width ||
+			warpedLuma->params.h != height || warpedLuma->params.format != lumaFormat);
+		const bool warpedChromaMismatch = warpedChroma && (!hasWarpChroma || warpedChroma->params.w != chromaW ||
+			warpedChroma->params.h != chromaH || warpedChroma->params.format != chromaFormat);
+		if (warpedLumaMismatch || warpedChromaMismatch)
+		{
+			pl_tex_destroy(gpu, &warpedLuma);
+			pl_tex_destroy(gpu, &warpedChroma);
+		}
 		halfW = (width + 1) / 2;
 		halfH = (height + 1) / 2;
 		blocksX = (halfW + 7) / 8;
@@ -2508,48 +2374,61 @@ if (q.x < size.x && q.y < size.y) {
 				return false;
 			}
 		}
-		if (innerOfLowRes || !a.chroma)
-			return true;   // the lowRes inner never warps; a luma-only source has no source warp
-		// The warped planes keep A's formats, so the render sees the same
-		// representation.
-		for (const auto& plane : { std::make_pair(a.luma, &warpedLuma), std::make_pair(a.chroma, &warpedChroma) })
-		{
-			pl_fmt fmt = plane.first->params.format;
-			if (!(fmt->caps & PL_FMT_CAP_STORABLE))
-			{
-				error = std::string("plane format not storable: ") + fmt->name;
-				return false;
-			}
-			if (!make(plane.second, plane.first->params.w, plane.first->params.h, fmt, readable))
-			{
-				error = "cannot create the warped planes";
-				return false;
-			}
-		}
 		return true;
 	}
 
-	// Identical blocks get the exact zero vector: `fieldTex` through `scratch`, copied back.
+	// Identical blocks get the exact zero vector: in-place via read-write storage image
+	// when supported (preserving fieldTex object identity without scratch/copy), else via scratch.
 	bool MotionWarp::StillZero(pl_tex& fieldTex, pl_tex& scratch, const Planes& a, const Planes& b, int w, int h, int blockPixels,
 		bool subField)
 	{
 		if (!fieldTex || !a.luma || !b.luma)
 			return true;
+		const bool same = a.luma == b.luma;   // one texture bound once (libplacebo rejects it twice)
+		const bool usePicture = settings.pictureArea && picture;
+		const bool inPlace = fieldTex->params.format && (fieldTex->params.format->caps & PL_FMT_CAP_READWRITE) != 0;
+		const int block = blockPixels;
+		const pl_shader_var vars[1] = { { pl_var_int("block_px"), &block, true } };
+		if (inPlace)
+		{
+			pl_shader_desc fieldDesc{};
+			fieldDesc.desc.name = "field_io";
+			fieldDesc.desc.type = PL_DESC_STORAGE_IMG;
+			fieldDesc.desc.access = PL_DESC_ACCESS_READWRITE;
+			fieldDesc.binding.object = fieldTex;
+			std::vector<pl_shader_desc> desc;
+			desc.reserve(4);
+			desc.push_back(fieldDesc);
+			desc.push_back(Sampled("luma_a", a.luma, false));
+			if (!same)
+				desc.push_back(Sampled("luma_b", b.luma, false));
+			if (usePicture)
+				desc.push_back(Sampled("picture", picture, false));
+			const std::string header = std::string("#define IN_PLACE 1\n") +
+				(subField ? "#define SUB_FIELD 1\n" : "") +
+				(same ? "#define luma_b luma_a\n" : "") + (usePicture ? "#define PICTURE 1\n" : "") + STILL_ZERO_HEADER;
+			return Dispatch("VideoProcessor de-judder: identical blocks still", header.c_str(), STILL_ZERO_BODY,
+				desc.data(), static_cast<int>(desc.size()), vars, 1, w, h, 8);
+		}
 		pl_tex_params params = fieldTex->params;
 		if (!pl_tex_recreate(gpu, &scratch, &params))
 		{
 			error = "cannot create the still-block field";
 			return false;
 		}
-		const bool same = a.luma == b.luma;   // one texture bound once (libplacebo rejects it twice)
-		const pl_shader_desc desc[4] = { Sampled("src_field", fieldTex, false), Sampled("luma_a", a.luma, false),
-			Sampled("luma_b", b.luma, false), Storage("dst", scratch) };
-		const pl_shader_desc descSame[3] = { desc[0], desc[1], desc[3] };
-		const int block = blockPixels;
-		const pl_shader_var vars[1] = { { pl_var_int("block_px"), &block, true } };
-		const std::string header = std::string(subField ? "#define SUB_FIELD 1\n" : "") + (same ? "#define luma_b luma_a\n" : "");
-		if (!Dispatch("VideoProcessor de-judder: identical blocks still", header.empty() ? nullptr : header.c_str(), STILL_ZERO_BODY,
-			same ? descSame : desc, same ? 3 : 4, vars, 1, w, h, 8))
+		std::vector<pl_shader_desc> desc;
+		desc.reserve(5);
+		desc.push_back(Sampled("src_field", fieldTex, false));
+		desc.push_back(Sampled("luma_a", a.luma, false));
+		if (!same)
+			desc.push_back(Sampled("luma_b", b.luma, false));
+		desc.push_back(Storage("dst", scratch));
+		if (usePicture)
+			desc.push_back(Sampled("picture", picture, false));
+		const std::string header = std::string(subField ? "#define SUB_FIELD 1\n" : "") +
+			(same ? "#define luma_b luma_a\n" : "") + (usePicture ? "#define PICTURE 1\n" : "") + STILL_ZERO_HEADER;
+		if (!Dispatch("VideoProcessor de-judder: identical blocks still", header.c_str(), STILL_ZERO_BODY,
+			desc.data(), static_cast<int>(desc.size()), vars, 1, w, h, 8))
 			return false;
 		// Copied back (not swapped): the published field / sub-field textures stay the same objects.
 		const pl_shader_desc copyDesc[2] = { Sampled("src", scratch, false), Storage("dst", fieldTex) };
@@ -2923,113 +2802,6 @@ if (q.x < size.x && q.y < size.y) {
 		keptInK = true;
 	}
 
-	bool MotionWarp::Global(pl_tex fromL1, pl_tex toL1, pl_tex fromL2, pl_tex toL2, pl_tex out, pl_tex second)
-	{
-		if (serialSearchForTest)
-		{
-			const pl_shader_desc descriptors[5] = {
-				Sampled("from_l1", fromL1, false), Sampled("to_l1", toL1, true),
-				Sampled("from_l2", fromL2, false), Sampled("to_l2", toL2, false), Storage("dst", out) };
-			return Dispatch("VideoProcessor de-judder: global motion (D1, serial reference)", GLOBAL_HEADER, GLOBAL_BODY,
-				descriptors, 5, nullptr, 0, 16, 16, 16);
-		}
-		// Parallel: candidate SADs, the pick, the 1/8 candidates, the vector.
-		if (!globalSad2)
-		{
-			const enum pl_fmt_caps caps = static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE);
-			pl_fmt r32 = pl_find_fmt(gpu, PL_FMT_FLOAT, 1, 32, 32, caps);
-			pl_fmt rgba32 = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, caps);
-			if (!r32 || !rgba32)
-			{
-				error = "global motion: no 32-bit float storage format";
-				return false;
-			}
-			auto make = [this](pl_tex* tex, int w, int h, pl_fmt fmt) -> bool
-			{
-				pl_tex_params params{};
-				params.w = w;
-				params.h = h;
-				params.format = fmt;
-				params.sampleable = true;
-				params.storable = true;
-				return pl_tex_recreate(gpu, tex, &params);
-			};
-			if (!make(&globalSad2, 17, 17, r32) || !make(&globalSad1, 9, 9, r32) || !make(&globalPick, 1, 1, rgba32))
-			{
-				error = "global motion: cannot create the candidate textures";
-				return false;
-			}
-		}
-		static const std::string pickHeader = std::string(GLOBAL_PICK_HEADER);
-		static const std::string pickTwoHeader = std::string("#define GLOBAL_TWO 1\n") + GLOBAL_PICK_HEADER;
-		const pl_shader_desc l2Desc[3] = {
-			Sampled("from_l2", fromL2, false), Sampled("to_l2", toL2, false), Storage("dst", globalSad2) };
-		const pl_shader_desc pick2Desc[2] = { Sampled("sad2", globalSad2, false), Storage("dst", globalPick) };
-		const pl_shader_desc l1Desc[4] = {
-			Sampled("from_l1", fromL1, false), Sampled("to_l1", toL1, true),
-			Sampled("global_pick", globalPick, false), Storage("dst", globalSad1) };
-		const pl_shader_desc pick1Desc[4] = {
-			Sampled("sad1", globalSad1, false), Sampled("global_pick", globalPick, false), Storage("dst", out),
-			Storage("second_out", second) };
-		return DispatchPerBlock("VideoProcessor de-judder: global motion (D1)", GLOBAL_SUM_HEADER, GLOBAL_L2_BODY,
-				l2Desc, 3, nullptr, 0, 17, 17, 16, 16) &&
-			DispatchPerBlock("VideoProcessor de-judder: global motion pick (D1)", pickHeader.c_str(), GLOBAL_PICK2_BODY,
-				pick2Desc, 2, nullptr, 0, 1, 1, 16, 16) &&
-			DispatchPerBlock("VideoProcessor de-judder: global motion 1/8 (D1)", GLOBAL_SUM_HEADER, GLOBAL_L1_BODY,
-				l1Desc, 4, nullptr, 0, 9, 9, 16, 16) &&
-			DispatchPerBlock("VideoProcessor de-judder: global motion vector (D1)", second ? pickTwoHeader.c_str() : pickHeader.c_str(),
-				GLOBAL_PICK1_BODY, pick1Desc, second ? 4 : 3, nullptr, 0, 1, 1, 16, 16);
-	}
-
-	bool MotionWarp::GlobalBoth(pl_tex l1A, pl_tex l1B, pl_tex l2A, pl_tex l2B, pl_tex out[2], pl_tex second[2])
-	{
-		if (!globalBothSad2)
-		{
-			const enum pl_fmt_caps caps = static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE);
-			pl_fmt r32 = pl_find_fmt(gpu, PL_FMT_FLOAT, 1, 32, 32, caps);
-			pl_fmt rgba32 = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, caps);
-			if (!r32 || !rgba32)
-			{
-				error = "global motion: no 32-bit float storage format";
-				return false;
-			}
-			auto make = [this](pl_tex* tex, int w, int h, pl_fmt fmt) -> bool
-			{
-				pl_tex_params params{};
-				params.w = w;
-				params.h = h;
-				params.format = fmt;
-				params.sampleable = true;
-				params.storable = true;
-				return pl_tex_recreate(gpu, tex, &params);
-			};
-			if (!make(&globalBothSad2, 34, 17, r32) || !make(&globalBothSad1, 18, 9, r32) || !make(&globalBothPick, 2, 1, rgba32))
-			{
-				error = "global motion: cannot create the candidate textures";
-				return false;
-			}
-		}
-		static const std::string pickHeader = std::string(GLOBAL_PICK_HEADER);
-		static const std::string pickTwoHeader = std::string("#define GLOBAL_TWO 1\n") + GLOBAL_PICK_HEADER;
-		const bool two = second && second[0] && second[1];
-		const pl_shader_desc l2Desc[3] = { Sampled("l2_a", l2A, false), Sampled("l2_b", l2B, false), Storage("dst", globalBothSad2) };
-		const pl_shader_desc pick2Desc[2] = { Sampled("sad2", globalBothSad2, false), Storage("dst", globalBothPick) };
-		const pl_shader_desc l1Desc[4] = { Sampled("l1_a", l1A, true), Sampled("l1_b", l1B, true),
-			Sampled("global_pick", globalBothPick, false), Storage("dst", globalBothSad1) };
-		const pl_shader_desc pick1Desc[6] = { Sampled("sad1", globalBothSad1, false), Sampled("global_pick", globalBothPick, false),
-			Storage("dst0", out[0]), Storage("dst1", out[1]), Storage("second0", two ? second[0] : nullptr),
-			Storage("second1", two ? second[1] : nullptr) };
-		static const std::string l2Header = std::string(GLOBAL_BOTH_HEADER) + GLOBAL_BOTH_L2_HEADER;
-		return DispatchPerBlock("VideoProcessor de-judder: global motion (D1)", l2Header.c_str(), GLOBAL_BOTH_L2_BODY,
-				l2Desc, 3, nullptr, 0, 34, 17, 16, 16) &&
-			DispatchPerBlock("VideoProcessor de-judder: global motion pick (D1)", pickHeader.c_str(), GLOBAL_BOTH_PICK2_BODY,
-				pick2Desc, 2, nullptr, 0, 2, 1, 16, 16) &&
-			DispatchPerBlock("VideoProcessor de-judder: global motion 1/8 (D1)", GLOBAL_BOTH_HEADER, GLOBAL_BOTH_L1_BODY,
-				l1Desc, 4, nullptr, 0, 18, 9, 16, 16) &&
-			DispatchPerBlock("VideoProcessor de-judder: global motion vector (D1)", two ? pickTwoHeader.c_str() : pickHeader.c_str(),
-				GLOBAL_BOTH_PICK1_BODY, pick1Desc, two ? 6 : 4, nullptr, 0, 2, 1, 16, 16);
-	}
-
 	bool MotionWarp::Search(pl_tex fromHalf, pl_tex toHalf, pl_tex fromL1, pl_tex toL1,
 		pl_tex fromL2, pl_tex toL2, pl_tex global, pl_tex previous, pl_tex out, pl_tex globalTwo,
 		pl_tex cameraKeep, bool cameraStatic)
@@ -3350,7 +3122,6 @@ if (li == 0) {
 		static const char* const fill = "ivec2 b = ivec2(gl_GlobalInvocationID.xy);\n"
 			"if (b.x < imageSize(dst).x && b.y < imageSize(dst).y) imageStore(dst, b, fillv);\n";
 		const float untrusted[4] = { 0.0f, 0.0f, 1.0e4f, 1.0f };
-		const float none[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 		for (pl_tex t : { forward, backward })
 		{
 			const pl_shader_desc out[1] = { Storage("dst", t) };
@@ -3359,15 +3130,19 @@ if (li == 0) {
 					blocksX, blocksY, 8))
 				return false;
 		}
-		for (pl_tex t : { globalVector[0], globalVector[1], globalSecond[0], globalSecond[1] })
+		const auto dispatchFn = [this](const char* description, const char* header, const char* body,
+			const pl_shader_desc* descriptors, int numDescriptors,
+			const pl_shader_var* variables, int numVariables, int w, int h, int group) -> bool
 		{
-			if (!t)
-				continue;
-			const pl_shader_desc out[1] = { Storage("dst", t) };
-			const pl_shader_var var[1] = { { pl_var_vec4("fillv"), none, true } };
-			if (!Dispatch("VideoProcessor de-judder: global motion cleared (camera model: cut / flash)", nullptr, fill, out, 1, var, 1, 1, 1, 1))
-				return false;
+			return Dispatch(description, header, body, descriptors, numDescriptors, variables, numVariables, w, h, group);
+		};
+		VpMotion::PairGlobal clearedRecord;
+		if (!VpMotion::ClearPairGlobalGpu(globalVector, globalSecond, dispatchFn, clearedRecord))
+		{
+			lastPairGlobalFallback = FallbackCatalog::PairGlobalUnavailable(true, error);
+			return false;
 		}
+		lastPairGlobalFallback = FallbackCatalog::PairGlobalUnavailable(false);
 		return true;
 	}
 
@@ -3439,11 +3214,25 @@ if (li == 0) {
 	namespace
 	{
 		// M5: the pixel check of each trusted block (see Settings).
+		// Cooperative 10x10 shared tile of src_field (1,600 B < 16 KB, single uniform barrier)
+		// replaces 257 src_field fetches per trusted block with 100 fetches per 8x8 work group.
+		const char* const VERIFY_HEADER = "shared vec4 vf_tile[10][10];\n";
+
 		const char* const VERIFY_BODY = R"GLSL(
+ivec2 wg0 = ivec2(gl_WorkGroupID.xy) * 8 - ivec2(1);
+ivec2 loc = ivec2(gl_LocalInvocationID.xy);
 ivec2 b = ivec2(gl_GlobalInvocationID.xy);
 ivec2 blocks = imageSize(dst);
+int li = int(gl_LocalInvocationIndex);
+for (int i = li; i < 100; i += 64) {
+    int tx = i % 10;
+    int ty = i / 10;
+    vf_tile[ty][tx] = texelFetch(src_field, clamp(wg0 + ivec2(tx, ty), ivec2(0), blocks - ivec2(1)), 0);
+}
+memoryBarrierShared();
+barrier();
 if (b.x < blocks.x && b.y < blocks.y) {
-    vec4 f = texelFetch(src_field, b, 0);
+    vec4 f = vf_tile[loc.y + 1][loc.x + 1];
     if (f.z > 0.5) {
         ivec2 hs = textureSize(from_half, 0);
         float bad = 0.0;
@@ -3458,7 +3247,8 @@ if (b.x < blocks.x && b.y < blocks.y) {
                 float ws = 0.0;
                 for (int yy = 0; yy <= 1; yy++)
                     for (int xx = 0; xx <= 1; xx++) {
-                        vec4 n = texelFetch(src_field, clamp(g0 + ivec2(xx, yy), ivec2(0), blocks - ivec2(1)), 0);
+                        ivec2 ti = g0 + ivec2(xx, yy) - wg0;
+                        vec4 n = vf_tile[ti.y][ti.x];
                         float w = (xx == 1 ? t.x : 1.0 - t.x) * (yy == 1 ? t.y : 1.0 - t.y);
                         if (n.z > 0.5) { v += w * n.xy; ws += w; }
                     }
@@ -3518,7 +3308,8 @@ vec2 field_vector_all(vec2 lp)
 )GLSL";
 
 		// M6: which blocks' vectors may be used: trusted, or detailed with a
-		// fair match.
+		// fair match. Rolling 2-row cache fetches each from_half texel once (81 vs 192
+		// fetches) with exact edge clamping and exact (y, x) float summation order.
 		const char* const VECTOR_OK_BODY = R"GLSL(
 ivec2 b = ivec2(gl_GlobalInvocationID.xy);
 ivec2 blocks = imageSize(dst);
@@ -3527,13 +3318,32 @@ if (b.x < blocks.x && b.y < blocks.y) {
     float ok = f.z > 0.5 ? 1.0 : 0.0;
     if (ok < 0.5 && f.w <= own_error) {
         ivec2 hs = textureSize(from_half, 0);
+        ivec2 lim = hs - ivec2(2);
+        ivec2 o = clamp(b * 8, ivec2(0), lim);
+        int py_cur = o.y;
+        float cur[9];
+        float nxt[9];
+        for (int k = 0; k < 9; k++) {
+            int px = min(o.x + k, hs.x - 1);
+            cur[k] = texelFetch(from_half, ivec2(px, py_cur), 0).r;
+            nxt[k] = texelFetch(from_half, ivec2(px, min(py_cur + 1, hs.y - 1)), 0).r;
+        }
         float t = 0.0;
-        for (int y = 0; y < 8; y++)
-            for (int x = 0; x < 8; x++) {
-                ivec2 p = clamp(b * 8 + ivec2(x, y), ivec2(0), hs - ivec2(2));
-                float c0 = texelFetch(from_half, p, 0).r;
-                t += abs(texelFetch(from_half, p + ivec2(1, 0), 0).r - c0) + abs(texelFetch(from_half, p + ivec2(0, 1), 0).r - c0);
+        for (int y = 0; y < 8; y++) {
+            int py = clamp(b.y * 8 + y, 0, lim.y);
+            if (py != py_cur) {
+                for (int k = 0; k < 9; k++) {
+                    cur[k] = nxt[k];
+                    nxt[k] = texelFetch(from_half, ivec2(min(o.x + k, hs.x - 1), min(py + 1, hs.y - 1)), 0).r;
+                }
+                py_cur = py;
             }
+            for (int x = 0; x < 8; x++) {
+                int ix = clamp(b.x * 8 + x, 0, lim.x) - o.x;
+                float c0 = cur[ix];
+                t += abs(cur[ix + 1] - c0) + abs(nxt[ix] - c0);
+            }
+        }
         ok = t / 128.0 >= own_texture ? 1.0 : 0.0;
     }
     imageStore(dst, b, vec4(ok, 0.0, 0.0, 1.0));
@@ -3541,21 +3351,92 @@ if (b.x < blocks.x && b.y < blocks.y) {
 )GLSL";
 
 		// M6: the weight of each half-resolution pixel of A.
+		// Cooperative 18x18 from_half tile (1,296 B) + 6x6 field tile (576 B) [+ 6x6 vector_ok
+		// tile (144 B)] = 2,016 B max (< 16 KB), single uniform barrier before bounds check.
+		const char* const PIXEL_MASK_HEADER = R"GLSL(
+shared float pm_from[18][18];
+shared vec4 pm_field[6][6];
+#ifdef PIXEL_OWN_VECTORS
+shared float pm_vok[6][6];
+#endif
+vec2 pm_field_vector_all(vec2 lp, ivec2 f0)
+{
+    vec2 g = lp / 16.0 - vec2(0.5);
+    ivec2 g0 = ivec2(floor(g));
+    vec2 t = g - vec2(g0);
+    vec2 v = vec2(0.0);
+    float ws = 0.0;
+    for (int y = 0; y <= 1; y++)
+        for (int x = 0; x <= 1; x++) {
+            ivec2 ti = g0 + ivec2(x, y) - f0;
+            vec4 f = pm_field[ti.y][ti.x];
+            float w = (x == 1 ? t.x : 1.0 - t.x) * (y == 1 ? t.y : 1.0 - t.y);
+#ifdef PIXEL_TRUSTED_VECTORS
+#ifdef PIXEL_OWN_VECTORS
+            if (pm_vok[ti.y][ti.x] < 0.5) w = 0.0;
+#else
+            if (f.z < 0.5) w = 0.0;
+#endif
+#endif
+            v += w * f.xy;
+            ws += w;
+        }
+#ifdef PIXEL_TRUSTED_VECTORS
+    if (ws <= 0.0) {
+        for (int y = -1; y <= 2; y++)
+            for (int x = -1; x <= 2; x++) {
+                ivec2 ti = g0 + ivec2(x, y) - f0;
+                vec4 f = pm_field[ti.y][ti.x];
+#ifdef PIXEL_OWN_VECTORS
+                f.z = pm_vok[ti.y][ti.x];
+#endif
+                if (f.z > 0.5) { v += f.xy; ws += 1.0; }
+            }
+    }
+    return ws > 0.0 ? v / ws : vec2(0.0);
+#else
+    return v;
+#endif
+}
+)GLSL";
+
 		const char* const PIXEL_MASK_BODY = R"GLSL(
+ivec2 wg0 = ivec2(gl_WorkGroupID.xy) * 16;
+ivec2 loc = ivec2(gl_LocalInvocationID.xy);
 ivec2 p = ivec2(gl_GlobalInvocationID.xy);
 ivec2 hs = imageSize(dst);
+ivec2 fs = textureSize(field, 0);
+ivec2 p0 = wg0 - ivec2(1);
+ivec2 f0 = ivec2(gl_WorkGroupID.xy) * 2 - ivec2(2);
+int li = int(gl_LocalInvocationIndex);
+for (int i = li; i < 324; i += 256) {
+    int tx = i % 18;
+    int ty = i / 18;
+    pm_from[ty][tx] = texelFetch(from_half, clamp(p0 + ivec2(tx, ty), ivec2(0), hs - ivec2(1)), 0).r;
+}
+if (li < 36) {
+    int fx = li % 6;
+    int fy = li / 6;
+    ivec2 fc = clamp(f0 + ivec2(fx, fy), ivec2(0), fs - ivec2(1));
+    pm_field[fy][fx] = texelFetch(field, fc, 0);
+#ifdef PIXEL_OWN_VECTORS
+    pm_vok[fy][fx] = texelFetch(vector_ok, fc, 0).r;
+#endif
+}
+memoryBarrierShared();
+barrier();
 if (p.x < hs.x && p.y < hs.y) {
-    vec2 v = field_vector_all((vec2(p) + vec2(0.5)) * 2.0) * 0.5;
+    vec2 v = pm_field_vector_all((vec2(p) + vec2(0.5)) * 2.0, f0) * 0.5;
     float e = 0.0;
     for (int y = -1; y <= 1; y++)
         for (int x = -1; x <= 1; x++) {
             ivec2 q = clamp(p + ivec2(x, y), ivec2(0), hs - ivec2(1));
-            e += abs(texelFetch(from_half, q, 0).r - texture(to_half, (vec2(q) + v + vec2(0.5)) / vec2(hs)).r);
+            e += abs(pm_from[loc.y + y + 1][loc.x + x + 1] - texture(to_half, (vec2(q) + v + vec2(0.5)) / vec2(hs)).r);
         }
     e /= 9.0;
     // Two tiers: the pixel's own block passed the block test or not.
-    ivec2 fs = textureSize(field, 0);
-    bool trusted = texelFetch(field, clamp(p / 8, ivec2(0), fs - ivec2(1)), 0).z > 0.5;
+    ivec2 bi = p / 8 - f0;
+    bool trusted = pm_field[bi.y][bi.x].z > 0.5;
     float lo = trusted ? mask_lo : mask_lo_u, hi = trusted ? mask_hi : mask_hi_u;
 #ifdef PIXEL_FAST
     // Fast motion must predict B more exactly (v in half-resolution pixels).
@@ -3765,11 +3646,14 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			searchSeedValid = false;
 		}
 		inner->SetWarmUp(warmUpEstimate);
+		inner->SetSkeletonMemo(skeletonMemo, skeletonSeq);
 		if (!inner->Estimate(la, lb, -1, false))
 		{
+			lastPairGlobalFallback = inner->LastPairGlobalFallback();
 			error = "lowRes: " + inner->LastError();
 			return false;
 		}
+		lastPairGlobalFallback = inner->LastPairGlobalFallback();
 		searchSeedUsed = inner->SearchSeedUsed();
 		searchSeedRejected = inner->SearchSeedRejected();
 		auto up = [&](pl_tex src, pl_tex dst) -> bool
@@ -3865,22 +3749,29 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		return true;
 	}
 
-	bool MotionWarp::OpticalFlowSearch(pl_tex outForward, pl_tex outBackward)
+	bool MotionWarp::OpticalFlowSearch(pl_tex outForward, pl_tex outBackward, VpMotion::P2PairRecord* outPairRecord)
 	{
 		// SK-MV (doc 83, MV2; owner decision 2026-11-08: ONE motion source). This matcher opens no NVOF engine: the look-ahead
 		// producer (MotionAhead::Producer) is the one NvOpticalFlow session per device, and the pair it published (P2, read through the
 		// engine's P2View and handed here by SetExternalFlow) is the only optical-flow input. With no pair that fits this estimate
 		// (no producer running: motion_ahead_frames off, low latency, a short queue, a miss) NOTHING runs here and the block searches
 		// take over (the P2m path); noPairAhead says so and the host shows it (FallbackCatalog::Motion), never silently.
+		if (outPairRecord != nullptr)
+			*outPairRecord = VpMotion::P2PairRecord();
 		const std::shared_ptr<const MotionAhead::Flow> ahead = std::move(externalFlow);
 		externalFlow.reset();
 		externalFlowUsed = false;
 		ofWeighted = false;
 		noPairAhead = false;
 		pairSizeMismatch = false;
-		const bool useAhead = ahead && ahead->halfW == halfW && ahead->halfH == halfH &&
+		const bool dimsOk = ahead && ahead->halfW == halfW && ahead->halfH == halfH &&
+			ahead->gridW > 0 && ahead->gridH > 0 &&
 			ahead->gridW == (halfW + 3) / 4 && ahead->gridH == (halfH + 3) / 4;
-		if (!useAhead)
+		const size_t expectedInts = dimsOk ?
+			static_cast<size_t>(ahead->gridW) * static_cast<size_t>(ahead->gridH) * 2u : 0u;
+		const bool dataOk = dimsOk && expectedInts > 0 &&
+			ahead->forward.size() >= expectedInts && ahead->backward.size() >= expectedInts;
+		if (!dataOk)
 		{
 			noPairAhead = true;
 			pairSizeMismatch = static_cast<bool>(ahead);   // a pair was handed over and did not fit: told apart from a missing pair
@@ -3898,13 +3789,18 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		d3d->device->GetImmediateContext(&context);
 		const int w = halfW, h = halfH;
 		// The flow textures of the half size's grid (the engine's grid: 4 x 4), written from the pair's CPU fields.
-		if (w != ofW || h != ofH)
+		if (w != ofW || h != ofH || !ofFlow[0] || !ofFlow[1] || !ofFlowTex[0] || !ofFlowTex[1])
 		{
-			for (int i = 0; i < 2; ++i)
-			{
-				pl_tex_destroy(gpu, &ofFlowTex[i]);
-				ofFlow[i].Release();
-			}
+			auto releaseFlow = [&]() {
+				for (int i = 0; i < 2; ++i)
+				{
+					pl_tex_destroy(gpu, &ofFlowTex[i]);
+					ofFlow[i].Release();
+				}
+				ofW = 0;
+				ofH = 0;
+			};
+			releaseFlow();
 			auto make = [&](int tw, int th, DXGI_FORMAT format, CComPtr<ID3D11Texture2D>& out) {
 				D3D11_TEXTURE2D_DESC desc{};
 				desc.Width = static_cast<UINT>(tw); desc.Height = static_cast<UINT>(th);
@@ -3917,11 +3813,17 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			for (int i = 0; i < 2; ++i)
 			{
 				if (!make(gw, gh, NvOpticalFlow::Engine::FlowFormat(), ofFlow[i]))
+				{
+					releaseFlow();
 					return fail("cannot create its textures");
+				}
 				pl_d3d11_wrap_params wrapFlow{}; wrapFlow.tex = ofFlow[i];
 				ofFlowTex[i] = pl_d3d11_wrap(gpu, &wrapFlow);
 				if (!ofFlowTex[i])
+				{
+					releaseFlow();
 					return fail("cannot share its textures with libplacebo");
+				}
 			}
 			ofW = w; ofH = h;
 		}
@@ -3929,9 +3831,6 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		context->UpdateSubresource(ofFlow[0], 0, nullptr, ahead->forward.data(), static_cast<UINT>(ahead->gridW * 4), 0);
 		context->UpdateSubresource(ofFlow[1], 0, nullptr, ahead->backward.data(), static_cast<UINT>(ahead->gridW * 4), 0);
 		externalFlowUsed = true;
-		for (int d = 0; d < 2; ++d)
-			for (int k = 0; k < 4; ++k) engineGlobal[d][k] = ahead->global[d][k];
-		engineGlobalValid = true;
 		// The engine's extras as trust weights per block (cost; its own consistency).
 		UploadEngineWeights(*ahead);   // none applied when it cannot (as without them)
 		const std::string header = std::string(RESCORE_HEADER);
@@ -3951,6 +3850,8 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			!Dispatch("VideoProcessor de-judder: optical flow to blocks (backward)", header.c_str(), OF_TO_SEARCH_BODY, bw, 4,
 				reachVar, 1, blocksX, blocksY, 8))
 			return fail("its block pass failed");
+		if (outPairRecord != nullptr)
+			*outPairRecord = VpMotion::MakeP2PairRecord(0, 0, 0, ahead->global, ahead->second, true, ahead->globalGeneral);
 		return true;
 	}
 
@@ -4042,20 +3943,21 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			std::shared_ptr<const CameraModel::GuidanceFrame>& g;
 			~GuidanceClear() { g.reset(); }
 		} guidanceClear{ cameraGuidance };
-		cameraGuidanceUse = CameraGuidanceUse();
-		if (inner)
-			inner->cameraGuidanceUse = CameraGuidanceUse();
+		VpSkeleton::AcquireResult pairGlobalPin;   // U10: keeps any acquired kP7CameraFit memo GPU pin alive across Search/Refine/FrameTrust
 		ReleaseBorrowed();   // B3: last pair's product levels go back; this pair's are bound after EnsureTextures
 		estimated = false;
-		// F2: cleared on EVERY Estimate, for this instance and its lowRes inners (an Estimate that fails before the inner
-		// runs must not leave the inner's last "seeded" standing); set below only where the seed stands in for the first sweep.
+		// F2 + U10: cleared on EVERY Estimate, for this instance and all lowRes inners (4K & 8K) so an Estimate that fails
+		// before an inner runs must not leave stale seeded / guidance / pair-global fallback state standing.
 		for (MotionWarp* w = this; w; w = w->inner.get())
 		{
+			w->cameraGuidanceUse = CameraGuidanceUse();
+			w->lastPairGlobalFallback = FallbackCatalog::PairGlobalUnavailable(false);
 			w->seedFed = false;
 			w->seedSkipped = false;
 		}
 		grainErrorValid = false;
 		fillReady = false;
+		activeFillOcclusion = nullptr;
 		searchSeedUsed = false;   // SK-MV gap seed: set again below only by the instance that searched with it (an early return reads false)
 		searchSeedRejected = false;
 		// Hunt 2 04 M1 (motion_history_fixes): the temporal state is the last estimated
@@ -4176,114 +4078,94 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			}
 			else
 			{
-			engineGlobalValid = false;
 			ofWeighted = false;
 			noPairAhead = false;   // set by OpticalFlowSearch when optical flow is wanted and no pair computed ahead fits
 			pairSizeMismatch = false;
+			VpMotion::P2PairRecord directPairRecord;
 			opticalFlowUsed = settings.opticalFlow && !serialSearchForTest &&
-				(candidateMode ? OpticalFlowSearch(ofSearch[0], ofSearch[1]) : OpticalFlowSearch(forward, backward));
+				(candidateMode ? OpticalFlowSearch(ofSearch[0], ofSearch[1], &directPairRecord)
+				               : OpticalFlowSearch(forward, backward, &directPairRecord));
 			const bool replaced = opticalFlowUsed && !candidateMode;
 			// Seed: the engine's vectors stand in for the first sweep (no searches).
 			const bool seeded = opticalFlowUsed && candidateMode && settings.opticalFlowSeed;
 			seedFed = seeded;   // F2: LastSeed (CPU record only)
-			// Planner Q1: the engine's whole-frame motion when its field is known here and it
-			// seeds the refinement (the searches, which read M2's second candidate, do not run).
 			globalFromEngine = false;
-			// ... when it is clear; otherwise the global search below (opticalFlowGlobalFallback).
-			const bool engineGlobalClear = !settings.opticalFlowGlobalFallback ||
-				(OpticalFlowTrust::GlobalUsable(engineGlobal[0]) && OpticalFlowTrust::GlobalUsable(engineGlobal[1]));
-			const bool modelGlobal = cg && cg->useModelGlobal && settings.globalPrior;
-			bool gapSeed = searchSeedValid && settings.globalPrior;   // SK-MV hiccup gap seed: used (or dropped) by THIS estimate only
-			searchSeedValid = false;
+
+			// U10 C3: pair-global selection law + GPU fill live in ONE owner (global_model/PairGlobalFill.h).
+			VpMotion::PairGlobalSelectionInput pgIn;
+			pgIn.cutOrFlash = false;
+			pgIn.globalPrior = settings.globalPrior;
+			pgIn.useModelGlobal = cg != nullptr && cg->useModelGlobal;
+			if (cg != nullptr)
+			{
+				pgIn.modelFwd[0] = cg->globalFwd[0];
+				pgIn.modelFwd[1] = cg->globalFwd[1];
+				pgIn.modelBwd[0] = cg->globalBwd[0];
+				pgIn.modelBwd[1] = cg->globalBwd[1];
+			}
+			pgIn.modelInputScale = cgInputScale;
+			pgIn.opticalFlowGlobal = settings.opticalFlowGlobal;
+			pgIn.opticalFlowGlobalFallback = settings.opticalFlowGlobalFallback;
+			pgIn.seeded = seeded;
+			const uint64_t pairSeq = skeletonSeq != 0 ? skeletonSeq : b.sequence;
+			pgIn.gapSeedCandidate = searchSeedValid;
+			searchSeedValid = false;   // SK-MV hiccup gap seed: used (or dropped) by THIS estimate only
 			searchSeedUsed = false;
 			searchSeedRejected = false;
-			// A gap seed that would reach D1 must first explain this pair better than the zero vector does (pre-approved SAD-vs-zero rejection):
-			// otherwise it is dropped and the global search below runs exactly as without a seed.
-			if (gapSeed && !modelGlobal &&
-				!(settings.globalPrior && settings.opticalFlowGlobal && seeded && engineGlobalValid && engineGlobalClear) && !GapSeedHolds())
-			{
-				gapSeed = false;
-				searchSeedRejected = true;   // counted and logged by the host (motionGapRejected), distinct from "unseeded"
-			}
-			if (!modelGlobal && settings.globalPrior && settings.opticalFlowGlobal && seeded && engineGlobalValid && !engineGlobalClear)
-				++globalFallbacks;
-			if (modelGlobal)
-			{
-				// Plan 19 phase 2: the camera model's centre translation as D1 (1/8 texels of this instance's
-				// input; z = 0.5: confident), the D1 search skipped. M2's second candidate is cleared.
-				for (int d = 0; d < 2; ++d)
-				{
-					const float* g = d == 0 ? cg->globalFwd : cg->globalBwd;
-					const float value[4] = { g[0] * cgInputScale / 8.0f, g[1] * cgInputScale / 8.0f, 0.5f, 1.0f };
-					const pl_shader_desc out[1] = { Storage("dst", globalVector[d]) };
-					const pl_shader_var var[1] = { { pl_var_vec4("gvec"), value, true } };
-					if (!Dispatch("VideoProcessor de-judder: global motion (camera model)", nullptr,
-							"if (gl_GlobalInvocationID.x == 0u && gl_GlobalInvocationID.y == 0u) imageStore(dst, ivec2(0), gvec);\n",
-							out, 1, var, 1, 1, 1, 1))
-						return false;
-					if (two && globalSecond[d])
-					{
-						const float none[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-						const pl_shader_desc out2[1] = { Storage("dst", globalSecond[d]) };
-						const pl_shader_var var2[1] = { { pl_var_vec4("gvec"), none, true } };
-						if (!Dispatch("VideoProcessor de-judder: global motion second (camera model)", nullptr,
-								"if (gl_GlobalInvocationID.x == 0u && gl_GlobalInvocationID.y == 0u) imageStore(dst, ivec2(0), gvec);\n",
-								out2, 1, var2, 1, 1, 1, 1))
-							return false;
-					}
-				}
-				cameraGuidanceUse.modelGlobal = true;
-			}
-			else if (settings.globalPrior && settings.opticalFlowGlobal && seeded && engineGlobalValid && engineGlobalClear)
+			if (pgIn.gapSeedCandidate)
 			{
 				for (int d = 0; d < 2; ++d)
-				{
-					const float* g = engineGlobal[d];
-					const float value[4] = { g[0], g[1], g[2], g[3] };
-					const pl_shader_desc out[1] = { Storage("dst", globalVector[d]) };
-					const pl_shader_var var[1] = { { pl_var_vec4("gvec"), value, true } };
-					if (!Dispatch("VideoProcessor de-judder: global motion (engine)", nullptr,
-							"if (gl_GlobalInvocationID.x == 0u && gl_GlobalInvocationID.y == 0u) imageStore(dst, ivec2(0), gvec);\n",
-							out, 1, var, 1, 1, 1, 1))
-						return false;
-				}
-				globalFromEngine = true;
+					for (int k = 0; k < 4; ++k)
+						pgIn.gapSeedVec[d][k] = searchSeed[d][k];
+				pgIn.gapSeedHolds = [this]() { return GapSeedHolds(); };
 			}
-			else if (gapSeed)
+
+			VpMotion::PairGlobalGpuContext pgCtx;
+			pgCtx.gpu = gpu;
+			pgCtx.serialReference = serialSearchForTest;
+			pgCtx.twoCandidates = two;
+			pgCtx.l1A = l1A;
+			pgCtx.l1B = l1B;
+			pgCtx.l2A = l2A;
+			pgCtx.l2B = l2B;
+			pgCtx.globalVector = globalVector;
+			pgCtx.globalSecond = globalSecond;
+			pgCtx.singleSad2 = &globalSad2;
+			pgCtx.singleSad1 = &globalSad1;
+			pgCtx.singlePick = &globalPick;
+			pgCtx.bothSad2 = &globalBothSad2;
+			pgCtx.bothSad1 = &globalBothSad1;
+			pgCtx.bothPick = &globalBothPick;
+			pgCtx.dispatch = [this](const char* description, const char* header, const char* body,
+				const pl_shader_desc* descriptors, int numDescriptors,
+				const pl_shader_var* variables, int numVariables, int w, int h, int group) -> bool
 			{
-				// SK-MV: D1 starts from the last valid shared pair's motion scaled by the gap (z = 0.5: confident enough to start from);
-				// M2's second candidate is cleared. A prior only: every block still searches and its own match decides.
-				for (int d = 0; d < 2; ++d)
-				{
-					const float value[4] = { searchSeed[d][0], searchSeed[d][1], searchSeed[d][2], searchSeed[d][3] };
-					const pl_shader_desc out[1] = { Storage("dst", globalVector[d]) };
-					const pl_shader_var var[1] = { { pl_var_vec4("gvec"), value, true } };
-					if (!Dispatch("VideoProcessor de-judder: global motion (gap seed)", nullptr,
-							"if (gl_GlobalInvocationID.x == 0u && gl_GlobalInvocationID.y == 0u) imageStore(dst, ivec2(0), gvec);\n",
-							out, 1, var, 1, 1, 1, 1))
-						return false;
-					if (two && globalSecond[d])
-					{
-						const float none[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-						const pl_shader_desc out2[1] = { Storage("dst", globalSecond[d]) };
-						const pl_shader_var var2[1] = { { pl_var_vec4("gvec"), none, true } };
-						if (!Dispatch("VideoProcessor de-judder: global motion second (gap seed)", nullptr,
-								"if (gl_GlobalInvocationID.x == 0u && gl_GlobalInvocationID.y == 0u) imageStore(dst, ivec2(0), gvec);\n",
-								out2, 1, var2, 1, 1, 1, 1))
-							return false;
-					}
-				}
-				searchSeedUsed = true;
-			}
-			else if (settings.globalPrior)
+				return Dispatch(description, header, body, descriptors, numDescriptors, variables, numVariables, w, h, group);
+			};
+			pgCtx.dispatchPerBlock = [this](const char* description, const char* header, const char* body,
+				const pl_shader_desc* descriptors, int numDescriptors,
+				const pl_shader_var* variables, int numVariables, int w, int h, int threadsX, int threadsY) -> bool
+			{
+				return DispatchPerBlock(description, header, body, descriptors, numDescriptors, variables, numVariables, w, h, threadsX, threadsY);
+			};
+
+			VpMotion::PairGlobal pgRecord;
+			VpMotion::PairGlobalSelectionOutcome pgOutcome;
+			bool pgOk = false;
 			{
 				const GpuAttribution::SuppressPrivateCopyScope warmUpD1(warmUpEstimate ? "U10" : nullptr);
-				if (serialSearchForTest ?
-					(!Global(l1A, l1B, l2A, l2B, globalVector[0], two ? globalSecond[0] : nullptr) ||
-					 !Global(l1B, l1A, l2B, l2A, globalVector[1], two ? globalSecond[1] : nullptr)) :
-					!GlobalBoth(l1A, l1B, l2A, l2B, globalVector, two ? globalSecond : nullptr))
-					return false;
+				pgOk = VpMotion::AcquireOrFillPairGlobalGpu(skeletonMemo, pairSeq,
+					opticalFlowUsed ? &directPairRecord : nullptr, pgIn, pgCtx,
+					pgRecord, pgOutcome, lastPairGlobalFallback, error, nullptr, &pairGlobalPin);
 			}
+			if (pgOutcome.engineGlobalFallback)
+				++globalFallbacks;
+			searchSeedRejected = pgOutcome.searchSeedRejected;
+			if (!pgOk)
+				return false;   // Ruling 2: abort Estimate on pair-global failure (lastPairGlobalFallback is engaged)
+			cameraGuidanceUse.modelGlobal = pgOutcome.modelGlobalUsed;
+			globalFromEngine = pgOutcome.globalFromEngine;
+			searchSeedUsed = pgOutcome.searchSeedUsed;
 			// 11a E1: the first sweep into `sweep`, the second into the searches.
 			const bool twoSweeps = settings.estCandidates && !replaced;
 			// Plan 19 phase 2: the guided passes (narrow before the search, E1 skip before the second sweep)
@@ -4403,12 +4285,12 @@ if (b.x < blocks.x && b.y < blocks.y) {
 				const pl_shader_desc qpelDesc[4] = {
 					Sampled("raw", rawField, false), Sampled("from_half", halfA, false),
 					Sampled("to_half", halfB, true), Storage("dst", settings.vectorSmooth ? qpelField : field) };
-				static const std::string qpelHeader = std::string(SUBPEL_HEADER) + PERBLOCK_HEADER;
+				static const std::string qpelHeader = std::string(SUBPEL_HEADER) + QPEL_HEADER;
 				if (serialSearchForTest ?
 					!Dispatch("VideoProcessor de-judder: quarter-pel (11a E3, serial reference)", SUBPEL_HEADER,
 						QPEL_BODY_SERIAL, qpelDesc, 4, nullptr, 0, blocksX, blocksY, 8) :
 					!DispatchPerBlock("VideoProcessor de-judder: quarter-pel (11a E3)", qpelHeader.c_str(), QPEL_BODY,
-						qpelDesc, 4, nullptr, 0, blocksX, blocksY, 8, 4))
+						qpelDesc, 4, nullptr, 0, blocksX, blocksY, 8, 8))
 					return false;
 			}
 			if (settings.vectorSmooth && !Smooth(settings.estQpel ? qpelField : rawField))
@@ -4428,13 +4310,18 @@ if (b.x < blocks.x && b.y < blocks.y) {
 					{ pl_var_float("verify_share"), &verifyShare, true } };
 				const pl_shader_desc verifyDesc[4] = { Sampled("src_field", field, false), Sampled("from_half", halfA, false),
 					Sampled("to_half", halfB, true), Storage("dst", verifyField) };
-				if (!Dispatch("VideoProcessor de-judder: pixel verification (M5)", nullptr, VERIFY_BODY, verifyDesc, 4, verifyVars, 2,
+				if (!Dispatch("VideoProcessor de-judder: pixel verification (M5)", VERIFY_HEADER, VERIFY_BODY, verifyDesc, 4, verifyVars, 2,
 						blocksX, blocksY, 8))
 					return false;
 				std::swap(field, verifyField);
 			}
 			// Identical blocks: exactly the zero vector (before the split and the frame trust).
-			if (settings.estStillZero && !StillZero(field, stillField, a, b, blocksX, blocksY, 16, false))
+			// S3-H5: skip StillZero when camera guidance skipped the matcher (cut / flash), including when a
+			// lowRes inner performed the skip, so bit-identical regions are not stamped with trust = 1.0.
+			bool matcherSkipped = cameraGuidanceUse.matcherSkipped;
+			for (const MotionWarp* w = this; !matcherSkipped && w->HalvesForSearch() && w->inner; w = w->inner.get())
+				matcherSkipped = w->inner->cameraGuidanceUse.matcherSkipped;
+			if (settings.estStillZero && !matcherSkipped && !StillZero(field, stillField, a, b, blocksX, blocksY, 16, false))
 				return false;
 			if (settings.estSplit)
 			{
@@ -4459,7 +4346,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 				if (!Dispatch("VideoProcessor de-judder: sub-block trust (11a E2)", nullptr, SUB_TRUST_BODY,
 					trustDesc2, 4, variables, 2, blocksX * 2, blocksY * 2, 8))
 					return false;
-				if (settings.estStillZero && !StillZero(subField, stillSub, a, b, blocksX * 2, blocksY * 2, 8, true))
+				if (settings.estStillZero && !matcherSkipped && !StillZero(subField, stillSub, a, b, blocksX * 2, blocksY * 2, 8, true))
 					return false;
 			}
 			const float motionLo = settings.motionScaleLo;
@@ -4504,9 +4391,10 @@ if (b.x < blocks.x && b.y < blocks.y) {
 				trustDescs.push_back(Sampled("hist_a", l2A, false));
 				trustDescs.push_back(Sampled("hist_b", l2B, false));
 			}
-			const bool fadeOn = settings.fadeMatch && fadeState;
+			const pl_tex activeFade = FadeStateTexture();
+			const bool fadeOn = settings.fadeMatch && activeFade != nullptr;
 			if (fadeOn)
-				trustDescs.push_back(Sampled("fade_state", fadeState, false));
+				trustDescs.push_back(Sampled("fade_state", activeFade, false));
 			if (rolloffGlobal || cameraOut)
 				trustDescs.push_back(Sampled("global_vec", globalVector[0], false));
 			if (cameraOut)
@@ -4569,17 +4457,30 @@ if (b.x < blocks.x && b.y < blocks.y) {
 				holdIndex = next;
 			}
 		}
+		const bool wantDitherOcclusion = (occlusionSlot == 0 || occlusionSlot == 1);
+		bool ditherOcclusionDone = false;
 		// D5's occlusion (also with the half-size matcher: its searches are at
 		// this grid by now).
 		if (settings.occlusionFill)
 		{
 			const bool subOk = settings.estSplit && subField;
+			// GEM-121: reuse a single OCCLUSION_BODY dispatch for both D5 fill and
+			// dither occlusion when both are requested and use identical shader
+			// defines (subOk == settings.estSplit); write directly into
+			// occlusion[occlusionSlot] and alias activeFillOcclusion to it (leaving
+			// the alternating dither slot and non-dither estimates untouched).
+			const bool shareWithDither = wantDitherOcclusion && (subOk == settings.estSplit);
+			pl_tex fillTarget = shareWithDither ? occlusion[occlusionSlot] : fillOcclusion;
 			const pl_shader_desc fillDesc[4] = {
-				Sampled("fwd", forward, false), Sampled("bwd", backward, false), Storage("dst", fillOcclusion),
+				Sampled("fwd", forward, false), Sampled("bwd", backward, false), Storage("dst", fillTarget),
 				Sampled("sub_field", subField, false) };
-			if (!Dispatch("VideoProcessor de-judder: occlusion for the fill (D5)", subOk ? splitDefine : nullptr, OCCLUSION_BODY,
+			if (!Dispatch(shareWithDither ? "VideoProcessor de-judder: occlusion for the dither"
+					: "VideoProcessor de-judder: occlusion for the fill (D5)",
+				subOk ? splitDefine : nullptr, OCCLUSION_BODY,
 				fillDesc, subOk ? 4 : 3, variables, 2, blocksX, blocksY, 8))
 				return false;
+			activeFillOcclusion = fillTarget;
+			ditherOcclusionDone = shareWithDither;
 			lastB = b;
 			fillReady = b.chroma && a.chroma && b.chroma->params.w == a.chroma->params.w &&
 				b.chroma->params.h == a.chroma->params.h;
@@ -4631,13 +4532,13 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			if (own)
 				maskDescs.push_back(Sampled("vector_ok", vectorOk, false));
 			const std::string maskHeader = std::string(settings.pixelTrustedVectors ? "#define PIXEL_TRUSTED_VECTORS 1\n" : "") +
-				(own ? "#define PIXEL_OWN_VECTORS 1\n" : "") + (fast ? "#define PIXEL_FAST 1\n" : "") + FIELD_ALL_GLSL;
+				(own ? "#define PIXEL_OWN_VECTORS 1\n" : "") + (fast ? "#define PIXEL_FAST 1\n" : "") + PIXEL_MASK_HEADER;
 			if (!Dispatch("VideoProcessor de-judder: pixel trust (M6)", maskHeader.c_str(), PIXEL_MASK_BODY, maskDescs.data(),
 					static_cast<int>(maskDescs.size()), maskVars, fast ? 6 : 4, halfW, halfH, 16))
 				return false;
 			pixelMaskReady = true;
 		}
-		if (occlusionSlot == 0 || occlusionSlot == 1)
+		if (wantDitherOcclusion && !ditherOcclusionDone)
 		{
 			const pl_shader_desc occlusionDesc[4] = {
 				Sampled("fwd", forward, false), Sampled("bwd", backward, false),
@@ -4670,9 +4571,9 @@ if (b.x < blocks.x && b.y < blocks.y) {
 				Sampled("from_half", halfA, false), Sampled("to_half", halfB, true),
 				Sampled("field", field, false), Storage("dst", grainError), Sampled("sub_field", subField, false) };
 			static const std::string grainSplitHeader = std::string("#define SPLIT 1\n") + GRAIN_ERROR_HEADER;
-			if (!Dispatch("VideoProcessor de-judder: grain error (adaptive downscale)",
+			if (!DispatchPerBlock("VideoProcessor de-judder: grain error (adaptive downscale)",
 				settings.estSplit ? grainSplitHeader.c_str() : GRAIN_ERROR_HEADER,
-				GRAIN_ERROR_BODY, grainDesc, settings.estSplit ? 5 : 4, nullptr, 0, blocksX, blocksY, 8))
+				GRAIN_ERROR_BODY, grainDesc, settings.estSplit ? 5 : 4, nullptr, 0, blocksX, blocksY, 8, 8))
 				return false;
 			grainErrorValid = true;
 		}
@@ -4742,21 +4643,47 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		out = a;
 		if (!trusted || !estimated || shift == 0.0f)
 			return true;   // hold: A itself
-		pl_tex dstLuma = warpedLuma, dstChroma = warpedChroma;
+		pl_tex dstLuma = nullptr, dstChroma = nullptr;
 		float lumaScale[2] = { 1.0f, 1.0f };
 		if (!processedTarget)
 		{
-			// The warped planes were made for the frame Estimate saw: refuse a
-			// different size or chroma layout (e.g. 4:2:2 -> 4:2:0) rather than
-			// write into the old one.
-			if (!a.chroma || !warpedLuma || !warpedChroma || a.luma->params.w != width || a.luma->params.h != height ||
-				a.chroma->params.w != warpedChroma->params.w || a.chroma->params.h != warpedChroma->params.h ||
-				a.chroma->params.format != warpedChroma->params.format ||
-				a.luma->params.format != warpedLuma->params.format)
+			// The warped planes match the frame Estimate saw: refuse a different
+			// size or chroma layout (e.g. 4:2:2 -> 4:2:0) or a luma-only estimate
+			// before lazily allocating warpedLuma / warpedChroma.
+			if (!a.luma || !a.chroma || innerOfLowRes || !lumaFormat || !chromaFormat ||
+				a.luma->params.w != width || a.luma->params.h != height ||
+				a.luma->params.format != lumaFormat ||
+				a.chroma->params.w != chromaW || a.chroma->params.h != chromaH ||
+				a.chroma->params.format != chromaFormat)
 			{
 				error = "Warp without a matching Estimate";
 				return false;
 			}
+			// GEM-141: lazily allocate warpedLuma / warpedChroma on first actual
+			// source-plane Warp so non-source-warp paths never allocate them.
+			for (const auto& plane : { std::make_pair(a.luma, &warpedLuma), std::make_pair(a.chroma, &warpedChroma) })
+			{
+				pl_fmt fmt = plane.first->params.format;
+				if (!fmt || !(fmt->caps & PL_FMT_CAP_STORABLE))
+				{
+					error = std::string("plane format not storable: ") + (fmt && fmt->name ? fmt->name : "unknown");
+					return false;
+				}
+				pl_tex_params params{};
+				params.w = plane.first->params.w;
+				params.h = plane.first->params.h;
+				params.format = fmt;
+				params.sampleable = true;
+				params.storable = true;
+				params.host_readable = settings.hostReadable && (fmt->caps & PL_FMT_CAP_HOST_READABLE);
+				if (!pl_tex_recreate(gpu, plane.second, &params))
+				{
+					error = "cannot create the warped planes";
+					return false;
+				}
+			}
+			dstLuma = warpedLuma;
+			dstChroma = warpedChroma;
 		}
 		else
 		{
@@ -4797,7 +4724,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		const float minShare = settings.minTrustedShare;
 		const float tolerance = settings.matchTolerance;
 		// D5: B, its backward vectors and its occlusion bound only when on.
-		const bool fill = settings.occlusionFill && fillReady && lastB.luma && lastB.chroma && !processedTarget;
+		const bool fill = settings.occlusionFill && fillReady && activeFillOcclusion && lastB.luma && lastB.chroma && !processedTarget;
 		// 11a E2: the sub-field bound (and read) only while the split is on.
 		const bool split = settings.estSplit && subField;
 		// Delta 14 R-B: the camera from D1 (when it runs).
@@ -4823,7 +4750,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		{
 			lumaDesc.push_back(Sampled("src_b", lastB.luma, true));
 			lumaDesc.push_back(Sampled("fill_bwd", backward, false));
-			lumaDesc.push_back(Sampled("fill_occ", fillOcclusion, false));
+			lumaDesc.push_back(Sampled("fill_occ", activeFillOcclusion, false));
 		}
 		if (split)
 			lumaDesc.push_back(Sampled("sub_field", subField, false));
@@ -4860,7 +4787,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		{
 			chromaDesc.push_back(Sampled("src_b", lastB.chroma, true));
 			chromaDesc.push_back(Sampled("fill_bwd", backward, false));
-			chromaDesc.push_back(Sampled("fill_occ", fillOcclusion, false));
+			chromaDesc.push_back(Sampled("fill_occ", activeFillOcclusion, false));
 		}
 		if (split)
 			chromaDesc.push_back(Sampled("sub_field", subField, false));

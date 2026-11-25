@@ -17,10 +17,13 @@
 // renderer projects' items props). A renderer built without it, or a test that clears the registry
 // (RendererExtension::ResetForTesting), raises the queue events into nothing: no motion invalidation at Reset,
 // ResetLiveQueue, gap, file discontinuity or format change.
-// No per-frame work. Registered by HubBootstrap right after ResyncExtension (doc 52 3.2 list order).
+// OnFrame registers the kP3AnalysisField GPU owner fill once on the first VP-V Entrance (one atomic load per frame thereafter;
+// inert on the Original pathway). Registered by HubBootstrap right after ResyncExtension (doc 52 3.2 list order).
 #pragma once
 
 #include <VP-V/core/hub/ExtensionHub.h>
+
+#include <atomic>
 
 namespace VpMotion
 {
@@ -35,6 +38,15 @@ namespace VpMotion
 		// PHASE 1: SettingsApplied leaving the Original pathway requests one Resync invalidation (never gated: teardown
 		// and the hand-over must run in both pathways).
 		void OnLifecycle(RendererExtension::LifecycleFacts& f) override;
+		// M1#1 (B0#2) & M1#2 (U10 C1): registers the kP3AnalysisField GPU owner fill and kP7CameraFit pair-global CPU owner fill
+		// on the first VP-V Entrance (observation only: always false).
+		bool OnFrame(RendererExtension::FrameContext& c) override;
+		bool P3FieldRegistered() const;
+		bool PairGlobalRegistered() const;
+
+	private:
+		std::atomic<bool> p3Registered_{ false };
+		std::atomic<bool> pairGlobalRegistered_{ false };
 	};
 
 	// Adds VectorEngineExtension to the hub. Start-up only; idempotent.

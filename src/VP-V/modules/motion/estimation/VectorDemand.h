@@ -376,9 +376,9 @@ namespace VectorDemand
 	enum class MotionEngineReason : uint8_t
 	{
 		None, NoStarter /* retired, never derived (batch B) */, OpticalFlowOff, LowLatency, ProducerRecovering, NvofUnavailable, SmoothMotion, VramRelease, Resync,
-		Interlaced, VectorDemandOff
+		Interlaced, VectorDemandOff, ProducerNotRunning
 	};
-	constexpr int kMotionEngineReasonCount = 11;
+	constexpr int kMotionEngineReasonCount = 12;
 
 	struct MotionEngineStatus
 	{
@@ -416,6 +416,7 @@ namespace VectorDemand
 		case MotionEngineReason::Resync: return "resync";
 		case MotionEngineReason::Interlaced: return "interlaced source";
 		case MotionEngineReason::VectorDemandOff: return "vector demand is off";
+		case MotionEngineReason::ProducerNotRunning: return "the optical-flow producer is not running";
 		}
 		return "?";
 	}
@@ -431,6 +432,7 @@ namespace VectorDemand
 		bool producerRunning = false;
 		bool producerRecovering = false;
 		bool nvofStartError = false;      // the producer's start failed (NVOF not available on this adapter / size)
+		bool producerNotRunning = false;  // GEM-112 (VE-LIFECYCLE): a producer exists but is neither running nor recovering (e.g. async start failure)
 		bool vramRelease = false;         // the idle keeper is pressured (MotionEngineIdle::Keeper::Pressured)
 		bool resyncWindow = false;        // inside a resync window (vectors invalid)
 		uint64_t frame = 0;
@@ -462,28 +464,27 @@ namespace VectorDemand
 		{
 			if (!f.opticalFlow)
 			{
-				r |= bit(MotionEngineReason::OpticalFlowOff);
-				degraded = true;
+				r |= bit(MotionEngineReason::OpticalFlowOff); degraded = true;
 			}
 			if (f.nvofStartError)
 			{
-				r |= bit(MotionEngineReason::NvofUnavailable);
-				degraded = true;
+				r |= bit(MotionEngineReason::NvofUnavailable); degraded = true;
 			}
 			if (f.producerRecovering)
 			{
-				r |= bit(MotionEngineReason::ProducerRecovering);
-				degraded = true;
+				r |= bit(MotionEngineReason::ProducerRecovering); degraded = true;
+			}
+			if (f.producerNotRunning)
+			{
+				r |= bit(MotionEngineReason::ProducerNotRunning); degraded = true;
 			}
 			if (d.reason == Reason::ForwardShallow)
 			{
-				r |= bit(MotionEngineReason::LowLatency);
-				degraded = true;
+				r |= bit(MotionEngineReason::LowLatency); degraded = true;
 			}
 			if (f.resyncWindow)
 			{
-				r |= bit(MotionEngineReason::Resync);
-				degraded = true;
+				r |= bit(MotionEngineReason::Resync); degraded = true;
 			}
 			if (!degraded && !f.producerRunning)
 				degraded = true;   // the matcher runs while the producer has not started yet (its first frame)

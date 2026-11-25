@@ -1234,5 +1234,90 @@ namespace VideoProcessorTest
 			Logger::WriteMessage(line);
 			VpSkeleton::VramUsers::Instance().ResetForTesting();
 		}
+
+		// GEM-123 (I#5): PostStagedOnDemand must use VectorEngine::FindCurrent(from, to), not bare P2().Find(from, to), so a
+		// stale-generation pair left in P2 before the producer's async SetGeneration re-keys the slot never suppresses a fresh
+		// on-demand request. Same-input negative control (Rule 3): once (from, to) is in P2 under the current stream generation,
+		// PostStagedOnDemand suppresses duplicate issuance before reaching the producer.
+		TEST_METHOD(StaleGenerationPairInP2DoesNotSuppressOnDemandRequest)
+		{
+			using FallbackCatalog::NoPairCause;
+			Trace trace;
+			std::atomic<uint64_t> seenRequestGen{ 0 };
+			FakeHost host;
+			host.vectorEngine.SetOnDemandSetting(Setting::On);
+			auto producer = std::make_shared<MotionAhead::Producer>();
+			struct ProducerStopGuard
+			{
+				std::shared_ptr<MotionAhead::Producer> p;
+				~ProducerStopGuard() { if (p) p->Stop(); }
+			} stopGuard{ producer };
+			auto seam = Seam(trace);
+			auto inner = seam->request;
+			seam->request = [inner, &seenRequestGen](const PairRequest& rq, Mode mode, MotionAhead::Flow& flow) {
+				seenRequestGen.store(rq.generation, std::memory_order_release);
+				return inner(rq, mode, flow);
+			};
+			producer->SetSlot(host.vectorEngine.p2Slot);
+			Assert::IsTrue(producer->StartForTest(seam));
+			host.vectorEngine.PublishProducer(producer);
+
+			const uint64_t from = 5, to = 6;
+			const int staleMarker = static_cast<int>(to) + 1;
+			const uint64_t oldGen = host.motionValidity.StreamGeneration();
+			host.vectorEngine.p2Slot->SetGeneration(oldGen);
+			auto staleFlow = std::make_shared<MotionAhead::Flow>();
+			staleFlow->halfW = staleMarker;   // distinct from the fresh seam flow (halfW == to)
+			Assert::IsTrue(host.vectorEngine.p2Slot->Publish(from, to, oldGen, staleFlow), L"setup: publish pair under old generation");
+
+			// Advance stream generation without re-keying P2 (the real async gap after Seek / Resync / QueueReset / FormatChange).
+			host.motionValidity.Invalidate(MotionValidity::Cause::Seek);
+			const uint64_t newGen = host.motionValidity.StreamGeneration();
+			Assert::IsTrue(newGen > oldGen, L"stream generation moved forward");
+			Assert::AreEqual<uint64_t>(0, producer->LastSubmitted(), L"walk did not submit `to`: early-out depends solely on FindCurrent");
+			Assert::IsTrue(host.vectorEngine.P2().Find(from, to) != nullptr, L"hazard precondition: bare P2().Find still sees the stale pair");
+			bool wasStale = false;
+			Assert::IsTrue(host.vectorEngine.FindCurrent(from, to, &wasStale) == nullptr, L"FindCurrent rejects the stale-generation pair");
+			Assert::IsTrue(wasStale, L"FindCurrent reports the stored pair as stale");
+
+			// Stale pair in P2 must NOT suppress issuing a fresh on-demand request (fails on pre-fix P2().Find early-out).
+			Dequeue(host, from, to);
+			const VpMotion::VectorEngine::OnDemandCounters issued = host.vectorEngine.OnDemandReads();
+			Assert::AreEqual(1ull, issued.issued, L"stale P2 pair must not suppress on-demand issuance");
+			Assert::AreEqual(1ull, issued.requests, L"request forwarded to VectorEngine::RequestPair");
+			Assert::AreEqual(1ull, producer->GetRequestStats().requests, L"request reached the producer");
+
+			NoPairCause cause = NoPairCause::OnDemandLate;
+			MotionAhead::FlowPtr flow = host.vectorEngine.OnDemandFill(nullptr, from, to, true, cause);
+			Assert::IsTrue(flow != nullptr, L"fresh on-demand request resolved");
+			Assert::IsTrue(cause == NoPairCause::None, L"no miss cause");
+			Assert::AreEqual(static_cast<int>(to), flow->halfW, L"served the freshly computed flow, not the stale sentinel");
+			Assert::IsTrue(flow.get() != staleFlow.get(), L"served flow is distinct from the stale P2 pair");
+			Assert::IsTrue(host.vectorEngine.OnDemandServed(from, to), L"OnDemandServed recorded the fresh pair");
+			Assert::AreEqual<uint64_t>(newGen, seenRequestGen.load(std::memory_order_acquire), L"issued request carried the current stream generation");
+
+			// Same-input negative control (Rule 3): with the exact same (from, to) now published in P2 under the current
+			// stream generation, PostStagedOnDemand MUST suppress duplicate issuance at FindCurrent before reaching the producer.
+			bool staleNow = true;
+			MotionAhead::FlowPtr currentFlow = host.vectorEngine.FindCurrent(from, to, &staleNow);
+			Assert::IsTrue(currentFlow != nullptr && currentFlow->halfW == static_cast<int>(to),
+				L"negative-control precondition: current-generation pair is present in P2");
+			Assert::IsFalse(staleNow, L"current-generation pair is not stale");
+			Assert::AreEqual<uint64_t>(newGen, host.vectorEngine.P2().Generation(), L"P2 slot is keyed at current stream generation");
+
+			Dequeue(host, from, to);
+			const VpMotion::VectorEngine::OnDemandCounters after = host.vectorEngine.OnDemandReads();
+			Assert::AreEqual(1ull, after.issued, L"negative control: current-generation P2 pair must suppress duplicate issuance");
+			Assert::AreEqual(1ull, after.requests, L"negative control: no duplicate VectorEngine::RequestPair call");
+			Assert::AreEqual(0ull, after.idleSkips, L"suppression came from FindCurrent, not consumer-idle skip");
+			Assert::AreEqual(0ull, after.uncached, L"suppression came from FindCurrent, not uncached skip");
+
+			producer->Stop();
+			const MotionAhead::Producer::RequestStats ps = producer->GetRequestStats();
+			Assert::AreEqual(1ull, ps.requests, L"negative control: no duplicate request reached the producer");
+			Assert::AreEqual(1ull, ps.ready, L"producer ran once and answered Ready");
+			Assert::AreEqual(0ull, ps.fromSlot, L"negative control: suppressed at PostStagedOnDemand FindCurrent before Producer::Request");
+			Assert::AreEqual(size_t(1), trace.Order().size(), L"negative control: no duplicate engine run");
+		}
 	};
 }

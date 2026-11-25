@@ -433,5 +433,238 @@ namespace EngineAbsentPipelineTest
 			Assert::IsTrue(r.state.state == S::Off, L"Off");
 			Assert::IsTrue(r.state.Has(R::LowLatency), L"the low-latency reason is shown");
 		}
+
+		// I#2 (VE-LIFECYCLE, GEM-112): a dead non-recovering producer with an error (e.g. async CreateDevice failure on the worker)
+		// must visibly report ProducerNotRunning + NvofUnavailable, engage fallbacks and matcherFallback immediately, be stopped and
+		// released by PlanProducer with start-failure latch + backoff, and retry only once backoff elapses -- without killing
+		// recovering (3-strike) or running producers.
+		TEST_METHOD(DeadProducerWithErrorSetsProducerNotRunningReleasesAndRetriesAfterBackoff)
+		{
+			// 1. ProducerPlan::Lifecycle: dead non-recovering producer with error -> Stop + latchStartFailed + disengage.
+			ProducerPlan::LifecycleInput deadLife;
+			deadLife.lowLatency = false;
+			deadLife.opticalFlow = true;
+			deadLife.motionAheadFrames = 4;
+			deadLife.vectorProducer = true;
+			deadLife.dejudderPresent = true;
+			deadLife.producerExists = true;
+			deadLife.producerRunning = false;
+			deadLife.producerRecovering = false;
+			deadLife.producerHasError = true;
+			deadLife.gpuAvailable = true;
+
+			const ProducerPlan::LifecycleOutput deadAct = ProducerPlan::Lifecycle(deadLife);
+			Assert::IsTrue(deadAct.wanted, L"dead producer with error is still wanted");
+			Assert::IsTrue(deadAct.action == ProducerPlan::Action::Stop, L"dead non-recovering producer with error must be stopped and released");
+			Assert::IsTrue(deadAct.latchStartFailed, L"dead producer stop must latch start failure and enter backoff");
+			Assert::IsTrue(deadAct.disengage, L"dead producer stop must disengage look-ahead");
+			Assert::IsFalse(deadAct.clearStartFailed, L"dead producer stop must not clear start failure latch");
+
+			// Same-input negative control (recovering): exact same inputs with producerRecovering=true must NOT stop (3-strike recovery protected).
+			ProducerPlan::LifecycleInput recoveringLife = deadLife;
+			recoveringLife.producerRecovering = true;
+			const ProducerPlan::LifecycleOutput recoveringAct = ProducerPlan::Lifecycle(recoveringLife);
+			Assert::IsTrue(recoveringAct.wanted, L"recovering producer is wanted");
+			Assert::IsTrue(recoveringAct.action == ProducerPlan::Action::None, L"recovering producer must be kept (not stopped prematurely)");
+			Assert::IsFalse(recoveringAct.latchStartFailed, L"recovering producer must not latch start failure");
+			Assert::IsFalse(recoveringAct.disengage, L"recovering producer must not force lifecycle disengage");
+
+			// Same-input negative control (running): exact same inputs with producerRunning=true must NOT stop.
+			ProducerPlan::LifecycleInput runningLife = deadLife;
+			runningLife.producerRunning = true;
+			const ProducerPlan::LifecycleOutput runningAct = ProducerPlan::Lifecycle(runningLife);
+			Assert::IsTrue(runningAct.wanted, L"running producer is wanted");
+			Assert::IsTrue(runningAct.action == ProducerPlan::Action::None, L"running producer must be kept");
+			Assert::IsFalse(runningAct.latchStartFailed, L"running producer must not latch start failure");
+
+			// Same-input negative control (no error): exact same inputs with producerHasError=false keeps neutral decision (no spurious latch).
+			ProducerPlan::LifecycleInput noErrorLife = deadLife;
+			noErrorLife.producerHasError = false;
+			const ProducerPlan::LifecycleOutput noErrorAct = ProducerPlan::Lifecycle(noErrorLife);
+			Assert::IsTrue(noErrorAct.action == ProducerPlan::Action::None, L"dead producer without recorded error does not trigger error-stop latch");
+			Assert::IsFalse(noErrorAct.latchStartFailed, L"no error -> no start failure latch");
+
+			// Backoff retry contract: once released & latched, retryDue=false (or backoffActive=true) keeps Action::None;
+			// once backoff elapses (retryDue=true && !backoffActive), Lifecycle returns Action::Start.
+			ProducerPlan::LifecycleInput backoffLife = deadLife;
+			backoffLife.producerExists = false;
+			backoffLife.producerHasError = false;
+			backoffLife.startFailedLatched = true;
+			backoffLife.backoffActive = true;
+			backoffLife.retryDue = false;
+			Assert::IsTrue(ProducerPlan::Lifecycle(backoffLife).action == ProducerPlan::Action::None, L"in backoff (retryDue=false): must not restart");
+			backoffLife.backoffActive = false;
+			Assert::IsTrue(ProducerPlan::Lifecycle(backoffLife).action == ProducerPlan::Action::None, L"latched with retryDue=false: must not restart");
+			backoffLife.backoffActive = true;
+			backoffLife.retryDue = true;
+			Assert::IsTrue(ProducerPlan::Lifecycle(backoffLife).action == ProducerPlan::Action::None, L"backoffActive=true blocks restart even if retryDue=true");
+			backoffLife.backoffActive = false;
+			backoffLife.retryDue = true;
+			Assert::IsTrue(ProducerPlan::Lifecycle(backoffLife).action == ProducerPlan::Action::Start, L"once backoff elapses (retryDue=true, !backoffActive): must retry Start");
+
+			// 2. VectorDemand::DeriveEngineStatus + FallbackCatalog::MotionEngine: ProducerNotRunning is visible & engages fallback.
+			VectorDemand::Input demandIn;
+			demandIn.enabled = true;
+			demandIn.slotsRun = true;
+			demandIn.lowLatency = false;
+			demandIn.queueAheadCapacity = 4;
+			demandIn.smoothMotion = false;
+			demandIn.pairsExpected = false;
+			demandIn.pairsDeliberatelyOff = false;
+			for (int i = 0; i < VectorDemand::kConsumerCount; ++i)
+				demandIn.wants[i] = AlwaysWanted(VectorDemand::ConsumerAt(i));
+			const VectorDemand::Decision degradedDecision = VectorDemand::DecideForHost(demandIn);
+			Assert::IsTrue(degradedDecision.matcherFallback, L"no pairs expected -> matcher fallback");
+			Assert::AreEqual(AlwaysWantedBits() & ~StatisticsBits(), degradedDecision.served, L"field consumers served by matcher");
+			Assert::AreEqual(StatisticsBits(), degradedDecision.noPairs, L"statistics consumers marked noPairs");
+
+			const unsigned notRunningBit = 1u << static_cast<int>(R::ProducerNotRunning);
+			const std::string notRunningWords = VectorDemand::ReasonWords(R::ProducerNotRunning);
+			Assert::IsFalse(notRunningWords.empty(), L"ReasonWords(ProducerNotRunning) must be non-empty");
+			Assert::AreNotEqual(std::string("?"), notRunningWords, L"ReasonWords(ProducerNotRunning) must have a real description");
+
+			VectorDemand::EngineFacts factsDead;
+			factsDead.vectorDemand = true;
+			factsDead.decision = degradedDecision;
+			factsDead.opticalFlow = true;
+			factsDead.producerRunning = false;
+			factsDead.producerRecovering = false;
+			factsDead.producerNotRunning = true;
+			factsDead.nvofStartError = true;
+			const VectorDemand::MotionEngineStatus stDead = VectorDemand::DeriveEngineStatus(factsDead);
+			Assert::IsTrue(stDead.state == S::Degraded, L"dead producer -> Degraded");
+			Assert::AreNotEqual(0u, stDead.reasons, L"dead producer must produce non-zero reasons");
+			Assert::AreNotEqual(0u, stDead.reasons & notRunningBit, L"reasons must include ProducerNotRunning bit");
+			Assert::IsTrue(stDead.Has(R::ProducerNotRunning), L"Has(ProducerNotRunning)");
+			Assert::IsTrue(stDead.Has(R::NvofUnavailable), L"Has(NvofUnavailable)");
+			const FallbackCatalog::Decision fbDead = FallbackCatalog::MotionEngine(stDead);
+			Assert::IsTrue(fbDead.engaged, L"FallbackCatalog::MotionEngine must engage for dead producer");
+			Assert::IsTrue(Contains(fbDead.reason, notRunningWords), W("reason names ProducerNotRunning: " + fbDead.reason).c_str());
+			Assert::IsTrue(Contains(fbDead.reason, "use the block searches without optical-flow pairs"), W(fbDead.reason).c_str());
+
+			// ProducerNotRunning alone (without nvofStartError) still engages FallbackCatalog::MotionEngine visibly.
+			VectorDemand::EngineFacts factsNotRunningOnly = factsDead;
+			factsNotRunningOnly.nvofStartError = false;
+			const VectorDemand::MotionEngineStatus stOnly = VectorDemand::DeriveEngineStatus(factsNotRunningOnly);
+			Assert::IsTrue(stOnly.state == S::Degraded && stOnly.reason == R::ProducerNotRunning, L"ProducerNotRunning alone leads as Degraded");
+			Assert::AreNotEqual(0u, stOnly.reasons & notRunningBit, L"ProducerNotRunning bit set alone");
+			const FallbackCatalog::Decision fbOnly = FallbackCatalog::MotionEngine(stOnly);
+			Assert::IsTrue(fbOnly.engaged, L"ProducerNotRunning alone must engage FallbackCatalog::MotionEngine");
+			Assert::IsTrue(Contains(fbOnly.reason, notRunningWords), W(fbOnly.reason).c_str());
+
+			// Same-input negative control: exact same EngineFacts with producerNotRunning=false, nvofStartError=false -> reasons == 0 & entry released.
+			VectorDemand::EngineFacts factsSilent = factsDead;
+			factsSilent.producerNotRunning = false;
+			factsSilent.nvofStartError = false;
+			const VectorDemand::MotionEngineStatus stSilent = VectorDemand::DeriveEngineStatus(factsSilent);
+			Assert::AreEqual(0u, stSilent.reasons, L"negative control: without producerNotRunning/nvofStartError, reasons == 0");
+			Assert::IsFalse(stSilent.Has(R::ProducerNotRunning), L"negative control: ProducerNotRunning bit clear");
+			Assert::IsFalse(FallbackCatalog::MotionEngine(stSilent).engaged, L"negative control: zero reasons leaves MotionEngine fallback released");
+
+			// 3. Real VpMotion::VectorEngine: dead non-recovering MotionAhead::Producer with error.
+			// Start(nullptr, ...) reproduces the exact post-async-CreateDevice-failure state on CPU (error="no render device", !Running, !recovering).
+			auto makeInput = []() {
+				VectorDemand::Input in;
+				in.enabled = true;
+				in.slotsRun = true;
+				in.lowLatency = false;
+				in.queueAheadCapacity = 4;
+				in.smoothMotion = false;
+				for (int i = 0; i < VectorDemand::kConsumerCount; ++i)
+					in.wants[i] = AlwaysWanted(VectorDemand::ConsumerAt(i));
+				return in;
+			};
+			VectorEngine::UpdateFacts uFacts;
+			uFacts.vectorDemandSetting = true;
+			uFacts.sigmaDeltaRanLast = true;
+			uFacts.opticalFlow = true;
+
+			// 3a. Same-input negative control on real VectorEngine: no dead producer held (initial first-frame state).
+			{
+				VectorEngine controlEngine;
+				FakeHost controlHost;
+				controlEngine.motionAheadSetting = 4;
+				controlEngine.UpdateVectorEngine(makeInput(), uFacts, controlHost);
+				Assert::IsFalse(controlEngine.vectorDemand.matcherFallback, L"negative control: without dead producer, pairs are expected (no matcher fallback)");
+				Assert::AreEqual(0u, controlEngine.State().reasons, L"negative control: without dead producer, reasons == 0");
+				Assert::IsFalse(controlEngine.State().Has(R::ProducerNotRunning), L"negative control: no ProducerNotRunning bit");
+				const auto it = controlHost.last.find("motion engine");
+				Assert::IsTrue(it != controlHost.last.end() && !it->second.engaged, L"negative control: motion engine fallback entry released");
+			}
+
+			// 3b. Dead non-recovering producer published on real VectorEngine: UpdateVectorEngine immediately sets
+			// ProducerNotRunning + NvofUnavailable, engages fallbacks, and flips to matcherFallback.
+			VectorEngine engine;
+			FakeHost host;
+			engine.motionAheadSetting = 4;
+			auto deadProducer = std::make_shared<MotionAhead::Producer>();
+			Assert::IsFalse(deadProducer->Start(nullptr, NvOpticalFlow::Preset::Slow), L"Start(nullptr) fails cleanly without GPU");
+			Assert::IsFalse(deadProducer->Running(), L"dead producer is not running");
+			Assert::IsFalse(deadProducer->GetHealth().recovering, L"dead producer is not in 3-strike recovery");
+			const std::string expectedDeadError = deadProducer->Error();
+			Assert::IsFalse(expectedDeadError.empty(), L"dead producer carries a real error string");
+			engine.PublishProducer(deadProducer);
+			engine.motionAheadEngaged.store(true, std::memory_order_release);   // stale engagement must be cleared on release
+
+			engine.UpdateVectorEngine(makeInput(), uFacts, host);
+			const VectorDemand::MotionEngineStatus stBeforeRelease = engine.State();
+			Assert::IsTrue(stBeforeRelease.state == S::Degraded, L"VectorEngine with dead producer must be Degraded");
+			Assert::AreNotEqual(0u, stBeforeRelease.reasons & notRunningBit, L"VectorEngine::State().reasons must include ProducerNotRunning");
+			Assert::IsTrue(stBeforeRelease.Has(R::ProducerNotRunning), L"VectorEngine::State().Has(ProducerNotRunning)");
+			Assert::IsTrue(stBeforeRelease.Has(R::NvofUnavailable), L"VectorEngine::State().Has(NvofUnavailable)");
+			Assert::IsTrue(engine.motionEngineFacts.nvofStartError, L"nvofStartError flipped true for dead producer");
+			Assert::IsTrue(engine.motionEngineFacts.producerNotRunning, L"producerNotRunning flipped true for dead producer");
+			Assert::IsTrue(engine.vectorDemand.matcherFallback && engine.vectorDemand.estimate, L"dead producer engages matcherFallback immediately");
+			Assert::AreEqual(StatisticsBits(), engine.vectorDemand.noPairs, L"statistics consumers visibly marked noPairs");
+			{
+				const auto meIt = host.last.find("motion engine");
+				Assert::IsTrue(meIt != host.last.end() && meIt->second.engaged, L"motion engine fallback entry engaged while dead producer is held");
+				Assert::IsTrue(Contains(meIt->second.reason, notRunningWords), W(meIt->second.reason).c_str());
+				const auto veIt = host.last.find("vector_engine");
+				Assert::IsTrue(veIt != host.last.end() && veIt->second.engaged, L"vector_engine fallback entry engaged (fault, not setting)");
+			}
+
+			// 3c. PlanProducer stops and releases the dead producer, latches start failure + error, disengages look-ahead, and enters backoff.
+			std::atomic<bool> lowLatencyFlag(false);
+			std::atomic<size_t> queuedAhead(4u);
+			VectorEngine::ProducerInputs pin;
+			pin.lowLatency = &lowLatencyFlag;
+			pin.queuedFutureFrames = &queuedAhead;
+			pin.opticalFlow = true;
+			pin.motionAheadFrames = 4;
+			pin.dejudderPresent = true;
+			pin.dejudderEstimating = true;
+			pin.dejudderCanEngage = true;
+			pin.sourceHz = 23.976;
+			pin.gpu = nullptr;
+			engine.PlanProducer(pin);
+
+			Assert::IsTrue(engine.LoopProducer() == nullptr, L"PlanProducer must release dead non-recovering producer");
+			Assert::IsTrue(engine.motionProducerStartFailed, L"PlanProducer must latch motionProducerStartFailed");
+			Assert::AreEqual(expectedDeadError, engine.motionProducerStartError, L"PlanProducer must preserve dead producer's exact error");
+			Assert::IsTrue(engine.motionProducerStartRetry.Recovering(), L"PlanProducer must enter recovery backoff");
+			Assert::AreEqual(1u, engine.motionProducerStartRetry.Stops(), L"first dead-producer release records stop #1");
+			Assert::IsFalse(engine.motionAheadEngaged.load(std::memory_order_acquire), L"PlanProducer must clear stale motionAheadEngaged");
+			Assert::IsTrue(engine.State().state == S::Degraded && engine.State().Has(R::NvofUnavailable), L"latched failure remains visibly Degraded/NvofUnavailable after release");
+			Assert::IsFalse(engine.State().Has(R::ProducerNotRunning), L"after dead producer is released, ProducerNotRunning clears while NvofUnavailable stays latched");
+
+			// 3d. Backoff gating on real VectorEngine::PlanProducer: while backoff is active, a retry probe MUST NOT run;
+			// once backoff expires, PlanProducer retries Start (proven by observing the new start attempt).
+			engine.FailProducerStartsForTesting("retry probe after backoff");
+			engine.PlanProducer(pin);
+			Assert::AreEqual(1u, engine.motionProducerStartRetry.Stops(), L"during active backoff, PlanProducer must not retry Start");
+			Assert::AreEqual(expectedDeadError, engine.motionProducerStartError, L"during active backoff, prior error is untouched");
+
+			// Advance backoff past kFirstDelayMs without wall-clock sleep: next PlanProducer must retry Start.
+			const ULONGLONG nowMs = GetTickCount64();
+			const ULONGLONG firstDelayMs = MotionAhead::ProducerRecovery::kFirstDelayMs;
+			const ULONGLONG expiredStartMs = nowMs > firstDelayMs ? nowMs - firstDelayMs : 0ull;
+			engine.motionProducerStartRetry = MotionAhead::ProducerRecovery();
+			engine.motionProducerStartRetry.OnStopped(expiredStartMs);
+			Assert::IsTrue(engine.motionProducerStartRetry.Recovering(), L"expired backoff still flagged recovering before retry");
+			engine.PlanProducer(pin);
+			Assert::AreEqual(2u, engine.motionProducerStartRetry.Stops(), L"once backoff elapses, PlanProducer retries Start (probe fails -> stop #2)");
+			Assert::AreEqual(std::string("retry probe after backoff"), engine.motionProducerStartError, L"retried Start ran and recorded the new start error");
+		}
 	};
 }

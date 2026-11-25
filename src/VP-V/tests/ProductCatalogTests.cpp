@@ -165,7 +165,7 @@ namespace ProductCatalogTestsNs
 				{ kP4SourceStats, "source resolution monitor" },
 				{ kP5MonitorTiles, "source resolution monitor" },
 				{ kP6EntranceAhead, "entrance stages" },
-				{ kP7CameraFit, "temporal detail" },        // camera TD (repair 12): measurement reads P7 at lag 1 only
+				{ kP7CameraFit, "camera measurement" },     // WAIVER-C810-P7-OWNER: row 29 "camera pair global (P7 owner fill)" at motion 15 owns live-fill for P7
 				{ kP8CameraLabels, "occlusion mask" },      // camera occlusion filler (motion 45) precedes the repair readers
 				{ kP9CameraSmoothed, "camera object split" },
 				{ kP10GrainSplit, "region evidence (derived maps)" },
@@ -234,7 +234,18 @@ namespace ProductCatalogTestsNs
 			for (const ConsumerRow& c : ConsumerRows())
 				if (c.decl.id != CameraLink::DeclarationOf(CameraLink::CameraConsumer::TemporalDetail).id)
 					active.push_back(c.decl.id);
-			Assert::AreEqual(std::string("detail pulse"), std::string(LiveFillOwner(kP7CameraFit, &active)->family));
+			// WAIVER-C810-P7-OWNER: row 29 "camera pair global (P7 owner fill)" at motion 15 is active when only TemporalDetail is off.
+			Assert::AreEqual(std::string("camera measurement"), std::string(LiveFillOwner(kP7CameraFit, &active)->family));
+			// Preserve prior fallback-owner invariant: with BOTH row 29 (kCatalogConsumerIdBase + 29) and TemporalDetail off,
+			// the next lag-0 reader of kP7CameraFit is still "detail pulse".
+			std::vector<uint16_t> activeNoP7OwnerNoTd;
+			for (const ConsumerRow& c : ConsumerRows())
+				if (c.decl.id != uint16_t(kCatalogConsumerIdBase + 29)
+					&& c.decl.id != CameraLink::DeclarationOf(CameraLink::CameraConsumer::TemporalDetail).id)
+					activeNoP7OwnerNoTd.push_back(c.decl.id);
+			const ConsumerRow* fallbackOwner = LiveFillOwner(kP7CameraFit, &activeNoP7OwnerNoTd);
+			Assert::IsNotNull(fallbackOwner, L"next lag-0 owner exists when row 29 and TemporalDetail are off");
+			Assert::AreEqual(std::string("detail pulse"), std::string(fallbackOwner->family));
 			// Only camera measurement active: it reads P7 at lag 1, so nothing can fill P7 live from it.
 			std::vector<uint16_t> only(1, CameraLink::DeclarationOf(CameraLink::CameraConsumer::Measurement).id);
 			Assert::IsNull(LiveFillOwner(kP7CameraFit, &only));

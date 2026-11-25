@@ -107,17 +107,25 @@ ivec2 cg_half_size;
 float cg_from(ivec2 p) { return texelFetch(from_half, clamp(p, ivec2(0), cg_half_size - ivec2(1)), 0).r; }
 float cg_to(vec2 p) { return texture(to_half, (p + vec2(0.5)) / vec2(cg_half_size)).r; }
 // The block's 8x8 plus a 2-pixel margin, per sample (the search's sad() / 144).
-float cg_cost(ivec2 o, vec2 v)
+#ifdef CG_FADE
+float cg_from_mean(ivec2 o)
+{
+    float mf = 0.0;
+    for (int y = -2; y < 10; y++)
+        for (int x = -2; x < 10; x++)
+            mf += cg_from(o + ivec2(x, y));
+    return mf / 144.0;
+}
+#endif
+float cg_cost(ivec2 o, vec2 v, float mf)
 {
 #ifdef CG_FADE
-    float mf = 0.0, mt = 0.0;
+    float mt = 0.0;
     for (int y = -2; y < 10; y++)
         for (int x = -2; x < 10; x++) {
             ivec2 p = o + ivec2(x, y);
-            mf += cg_from(p);
             mt += cg_to(vec2(p) + v);
         }
-    mf /= 144.0;
     mt /= 144.0;
 #endif
     float s = 0.0;
@@ -154,7 +162,11 @@ if (b.x < blocks.x && b.y < blocks.y) {
     vec4 sw = texelFetch(sweep, b, 0);
     vec2 pred = cg_sign * gd.zw * cg_scale;
     if (eligible == 1 && length(sw.xy - pred) <= cg_agree) {
-        float s = cg_cost(o, sw.xy);
+        float mf = 0.0;
+#ifdef CG_FADE
+        mf = cg_from_mean(o);
+#endif
+        float s = cg_cost(o, sw.xy, mf);
 #ifdef COST_W
         float w_ = sw.w;
 #else
@@ -165,13 +177,17 @@ if (b.x < blocks.x && b.y < blocks.y) {
     }
 #else
     if (hint == 1) {
+        float mf = 0.0;
+#ifdef CG_FADE
+        mf = cg_from_mean(o);
+#endif
         ivec2 c = ivec2(floor(cg_sign * gd.xy * cg_scale + vec2(0.5)));
         vec2 best = vec2(c - ivec2(cg_radius));
         float best_s = 3.0e38;
         for (int dy = -cg_radius; dy <= cg_radius; dy++)
             for (int dx = -cg_radius; dx <= cg_radius; dx++) {
                 vec2 v = vec2(c + ivec2(dx, dy));
-                float s = cg_cost(o, v);
+                float s = cg_cost(o, v, mf);
                 if (s < best_s) { best_s = s; best = v; }
             }
         vec2 base = best;
@@ -179,7 +195,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
             for (int dx = -1; dx <= 1; dx++) {
                 if (dx == 0 && dy == 0) continue;
                 vec2 v = base + 0.5 * vec2(dx, dy);
-                float s = cg_cost(o, v);
+                float s = cg_cost(o, v, mf);
                 if (s < best_s) { best_s = s; best = v; }
             }
         if (best_s <= cg_tol)

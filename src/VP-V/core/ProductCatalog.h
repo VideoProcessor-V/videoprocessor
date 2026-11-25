@@ -310,6 +310,8 @@ inline const std::vector<ConsumerRow>& ConsumerRows()
         // Motion
         r.push_back(MakeRow(14, "optical-flow producer", "VP-V/modules/motion/estimation/MotionAheadProducer",
                             PathwayUnit::Input, 5, { kP1HalfLuma, kP2VectorPair }, own, "product.nvof_producer"));
+        // U10 C1: P7 pair-global owner fill ahead of matcher (motion 20) so camera measurement is P7's LiveFillOwner.
+        r.push_back(MakeRow(29, "camera pair global (P7 owner fill)", "VP-V/modules/motion/estimation/global_model", PathwayUnit::Motion, 15, { kP7CameraFit, kP2VectorPair }, own, "product.camera")); r.back().family = "camera measurement";
         r.push_back(MakeRow(13, "matcher / motion warp", "VP-V/modules/motion/estimation/matcher/DejudderWarp", PathwayUnit::Motion,
                             20, { kP1HalfLuma, kP2VectorPair, kP4SourceStats }, own, "product.motion_warp"));
         r.push_back(MakeRow(9, "interpolator / hiccup repair", "VP-V/modules/motion/consumers", PathwayUnit::Motion, 40,

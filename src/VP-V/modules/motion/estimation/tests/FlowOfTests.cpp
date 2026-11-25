@@ -354,5 +354,266 @@ namespace VideoProcessorTest
 			noSize.NoteFlowSourceWidth(64);
 			Assert::IsTrue(noSize.FlowOf(11, view));
 		}
+
+		TEST_METHOD(PerAxisScaleHandlesNonUniformCropAspectAndRebuildsLeaseOnHeightChange)
+		{
+			auto absDiff = [](double a, double b) { return a > b ? a - b : b - a; };
+			auto makeFlow = [](int halfW, int halfH, int16_t rawX, int16_t rawY) {
+				auto flow = std::make_shared<MotionAhead::Flow>();
+				flow->halfW = halfW;
+				flow->halfH = halfH;
+				flow->gridW = (halfW + 3) / 4;
+				flow->gridH = (halfH + 3) / 4;
+				const size_t cells = static_cast<size_t>(flow->gridW) * static_cast<size_t>(flow->gridH);
+				flow->forward.reserve(cells * 2);
+				for (size_t i = 0; i < cells; ++i)
+				{
+					flow->forward.push_back(rawX);
+					flow->forward.push_back(rawY);
+				}
+				return flow;
+			};
+
+			// 1920x802 crop halved twice: 1920 -> 960 -> 480, 802 -> 401 -> 201 (genuine X != Y anisotropy).
+			const int sourceW = 1920, sourceH = 802;
+			const int engineW = 480, engineH = 201;
+			const int16_t rawX = 320;    // 10 engine px -> 40.0 source px
+			const int16_t rawY = 1600;   // 50 engine px -> 199.5025 source px (vs 200.0 width-only)
+			const auto cropFlow = makeFlow(engineW, engineH, rawX, rawY);
+			const size_t lastCell = static_cast<size_t>(cropFlow->gridW) * static_cast<size_t>(cropFlow->gridH) - 1;
+
+			VpMotion::VectorEngine engine;
+			engine.PublishProducer(std::make_shared<MotionAhead::Producer>());
+			engine.NoteFlowSourceSize(sourceW, sourceH, engineW, engineH);
+			engine.motionValidity.NoteKept(10);
+			engine.motionValidity.NoteKept(11);
+			Assert::IsTrue(engine.p2Slot->Publish(10, 11, engine.p2Slot->Generation(), cropFlow));
+
+			const double scaleX = static_cast<double>(sourceW) / engineW;
+			const double scaleY = static_cast<double>(sourceH) / engineH;
+			const double expectedX = static_cast<double>(rawX) / 32.0 * scaleX;
+			const double expectedY = static_cast<double>(rawY) / 32.0 * scaleY;
+
+			VpMotion::FlowView view;
+			Assert::IsTrue(engine.FlowOf(11, view));
+			Assert::AreEqual(scaleX, view.enginePxToSource, 1e-12);
+			Assert::AreEqual(scaleY, view.enginePxToSourceY, 1e-12);
+			Assert::AreEqual(4.0 * scaleX, view.blockSize, 1e-12);
+			Assert::AreEqual(4.0 * scaleY, view.blockSizeY, 1e-12);
+			Assert::AreEqual(static_cast<float>(expectedX), view.x[0], 0.0f);
+			Assert::AreEqual(static_cast<float>(expectedY), view.y[0], 0.0f);
+			Assert::AreEqual(static_cast<float>(expectedX), view.x[lastCell], 0.0f);
+			Assert::AreEqual(static_cast<float>(expectedY), view.y[lastCell], 0.0f);
+			Assert::AreEqual(1ull, engine.FlowReads().conversions);
+			Assert::AreEqual(1ull, engine.Leases().live);
+
+			// Same-input negative control: naive width-only scaling on the exact same vertical vector deviates by ~0.5 px (> 0.25 px).
+			const double naiveWidthOnlyY = static_cast<double>(rawY) / 32.0 * scaleX;
+			Assert::IsTrue(absDiff(naiveWidthOnlyY, static_cast<double>(view.y[0])) > 0.25,
+				L"anisotropy hazard must be real: width-only scaling deviates > 0.25 px from per-axis view.y");
+			Assert::IsTrue(absDiff(static_cast<double>(view.y[0]), expectedY) < 1e-4,
+				L"per-axis FlowOf matches true vertical displacement");
+
+			// Same-input unprotected engine path (width-only NoteFlowSourceWidth) confirms the legacy path exhibits that exact error.
+			VpMotion::VectorEngine widthOnlyEngine;
+			widthOnlyEngine.PublishProducer(std::make_shared<MotionAhead::Producer>());
+			widthOnlyEngine.NoteFlowSourceWidth(sourceW);
+			widthOnlyEngine.motionValidity.NoteKept(10);
+			widthOnlyEngine.motionValidity.NoteKept(11);
+			Assert::IsTrue(widthOnlyEngine.p2Slot->Publish(10, 11, widthOnlyEngine.p2Slot->Generation(), cropFlow));
+			VpMotion::FlowView widthOnlyView;
+			Assert::IsTrue(widthOnlyEngine.FlowOf(11, widthOnlyView));
+			Assert::AreEqual(scaleX, widthOnlyView.enginePxToSourceY, 1e-12);
+			Assert::IsTrue(absDiff(static_cast<double>(widthOnlyView.y[0]), expectedY) > 0.25,
+				L"unprotected width-only path violates vertical displacement accuracy on the exact same payload");
+
+			// Height-only change with same engine size (802 -> 804, engineH still 201): LeaseKey must include scaleY and rebuild the lease.
+			engine.NoteFlowSourceSize(1920, 804, 480, 201);
+			const double scaleY804 = 804.0 / 201.0;
+			const double expectedY804 = static_cast<double>(rawY) / 32.0 * scaleY804;
+			VpMotion::FlowView heightChanged;
+			Assert::IsTrue(engine.FlowOf(11, heightChanged));
+			Assert::AreEqual(scaleX, heightChanged.enginePxToSource, 1e-12);
+			Assert::AreEqual(scaleY804, heightChanged.enginePxToSourceY, 1e-12);
+			Assert::AreEqual(4.0 * scaleY804, heightChanged.blockSizeY, 1e-12);
+			Assert::AreEqual(static_cast<float>(expectedY804), heightChanged.y[0], 0.0f);
+			Assert::IsTrue(absDiff(static_cast<double>(heightChanged.y[0]), expectedY) > 0.25,
+				L"height-only change must update view.y instead of returning stale 802px lease data");
+			Assert::AreEqual(2ull, engine.FlowReads().conversions, L"scaleY change must trigger a new lease build");
+			Assert::IsTrue(engine.Leases().live <= 1ull, L"single-lease invariant holds without a queue board");
+			Assert::AreEqual(1ull, engine.Leases().live);
+			Assert::AreEqual(1ull, engine.Leases().droppedSingle);
+
+			// Changing to 1920x1080 (target engine 480x270) refuses the stale 480x201 pair as unscaled, then serves a matching 480x270 pair.
+			const auto beforeMismatch = engine.FlowReads();
+			engine.NoteFlowSourceSize(1920, 1080, 480, 270);
+			VpMotion::FlowView mismatched;
+			Assert::IsFalse(engine.FlowOf(11, mismatched), L"stale 480x201 pair must be refused once target engineH is 270");
+			Assert::IsNull(mismatched.x);
+			Assert::AreEqual(beforeMismatch.unscaled + 1ull, engine.FlowReads().unscaled);
+			Assert::IsTrue(engine.Leases().live <= 1ull);
+			Assert::AreEqual(0ull, engine.Leases().live);
+
+			const auto fullHeightFlow = makeFlow(480, 270, rawX, rawY);
+			engine.motionValidity.NoteKept(12);
+			Assert::IsTrue(engine.p2Slot->Publish(11, 12, engine.p2Slot->Generation(), fullHeightFlow));
+			VpMotion::FlowView view1080;
+			Assert::IsTrue(engine.FlowOf(12, view1080));
+			Assert::AreEqual(4.0, view1080.enginePxToSource, 1e-12);
+			Assert::AreEqual(4.0, view1080.enginePxToSourceY, 1e-12);
+			Assert::AreEqual(16.0, view1080.blockSize, 1e-12);
+			Assert::AreEqual(16.0, view1080.blockSizeY, 1e-12);
+			Assert::AreEqual(static_cast<float>(rawY / 32.0 * 4.0), view1080.y[0], 0.0f);
+			Assert::IsTrue(engine.Leases().live <= 1ull);
+			Assert::AreEqual(1ull, engine.Leases().live);
+		}
+
+		TEST_METHOD(ResolutionSwitch1080pTo4KNeverServesTwoXStaleVectors)
+		{
+			auto makeFlow = [](int halfW, int halfH, int16_t rawX, int16_t rawY) {
+				auto flow = std::make_shared<MotionAhead::Flow>();
+				flow->halfW = halfW;
+				flow->halfH = halfH;
+				flow->gridW = (halfW + 3) / 4;
+				flow->gridH = (halfH + 3) / 4;
+				const size_t cells = static_cast<size_t>(flow->gridW) * static_cast<size_t>(flow->gridH);
+				flow->forward.reserve(cells * 2);
+				for (size_t i = 0; i < cells; ++i)
+				{
+					flow->forward.push_back(rawX);
+					flow->forward.push_back(rawY);
+				}
+				return flow;
+			};
+
+			const int16_t rawX = 320;    // +10 engine px
+			const int16_t rawY = -160;   // -5 engine px
+			const auto flow1080p = makeFlow(960, 540, rawX, rawY);
+
+			// 1) Start on 1080p (960x540): FlowOf serves cleanly at scaleX = 2.0, scaleY = 2.0.
+			VpMotion::VectorEngine engine;
+			engine.PublishProducer(std::make_shared<MotionAhead::Producer>());
+			engine.NoteFlowSourceSize(1920, 1080, 960, 540);
+			engine.motionValidity.NoteKept(10);
+			engine.motionValidity.NoteKept(11);
+			Assert::IsTrue(engine.p2Slot->Publish(10, 11, engine.p2Slot->Generation(), flow1080p));
+
+			VpMotion::FlowView view1080;
+			Assert::IsTrue(engine.FlowOf(11, view1080));
+			Assert::AreEqual(2.0, view1080.enginePxToSource, 1e-12);
+			Assert::AreEqual(2.0, view1080.enginePxToSourceY, 1e-12);
+			Assert::AreEqual(8.0, view1080.blockSize, 1e-12);
+			Assert::AreEqual(8.0, view1080.blockSizeY, 1e-12);
+			Assert::AreEqual(20.0f, view1080.x[0], 1e-5f);
+			Assert::AreEqual(-10.0f, view1080.y[0], 1e-5f);
+
+			// Same-input negative control (hazard proof): an unprotected width-only engine switching to 3840 while the stale 960x540 pair
+			// sits in p2Slot silently serves 4x-scaled (2x-corrupted) vectors instead of refusing the mismatch.
+			VpMotion::VectorEngine unprotected;
+			unprotected.PublishProducer(std::make_shared<MotionAhead::Producer>());
+			unprotected.NoteFlowSourceWidth(3840);
+			unprotected.motionValidity.NoteKept(10);
+			unprotected.motionValidity.NoteKept(11);
+			Assert::IsTrue(unprotected.p2Slot->Publish(10, 11, unprotected.p2Slot->Generation(), flow1080p));
+			VpMotion::FlowView bogus4k;
+			Assert::IsTrue(unprotected.FlowOf(11, bogus4k), L"unprotected width-only path accepts mismatched 960x540 pair");
+			Assert::AreEqual(4.0, bogus4k.enginePxToSource, 1e-12, L"stale pair gets silently inflated by 2x (4.0 vs 2.0)");
+			Assert::AreEqual(40.0f, bogus4k.x[0], 1e-5f);
+
+			// 2) Protected switch to 4K full-res (1920x1080 engine) while the stale 960x540 pair is still in p2Slot: must refuse as unscaled.
+			const auto beforeSwitch = engine.FlowReads();
+			engine.NoteFlowSourceSize(3840, 2160, 1920, 1080);
+			VpMotion::FlowView staleAfterSwitch;
+			Assert::IsFalse(engine.FlowOf(11, staleAfterSwitch), L"stale 960x540 pair must never be served under 4K 1920x1080 target");
+			Assert::IsNull(staleAfterSwitch.x);
+			const auto afterSwitch = engine.FlowReads();
+			Assert::AreEqual(beforeSwitch.unscaled + 1ull, afterSwitch.unscaled);
+			Assert::AreEqual(beforeSwitch.noPair, afterSwitch.noPair);
+			Assert::AreEqual(beforeSwitch.invalidated, afterSwitch.invalidated);
+
+			// 3) Matching 4K full-res pair (1920x1080) succeeds cleanly at scaleX == 2.0, scaleY == 2.0.
+			const auto flow4kFull = makeFlow(1920, 1080, rawX, rawY);
+			engine.motionValidity.NoteKept(12);
+			Assert::IsTrue(engine.p2Slot->Publish(11, 12, engine.p2Slot->Generation(), flow4kFull));
+			VpMotion::FlowView view4kFull;
+			Assert::IsTrue(engine.FlowOf(12, view4kFull));
+			Assert::AreEqual(2.0, view4kFull.enginePxToSource, 1e-12);
+			Assert::AreEqual(2.0, view4kFull.enginePxToSourceY, 1e-12);
+			Assert::AreEqual(8.0, view4kFull.blockSize, 1e-12);
+			Assert::AreEqual(8.0, view4kFull.blockSizeY, 1e-12);
+			Assert::AreEqual(20.0f, view4kFull.x[0], 1e-5f);
+			Assert::AreEqual(-10.0f, view4kFull.y[0], 1e-5f);
+
+			// 4) lowRes=true same-engine-size switch: 1080p and 4K lowRes BOTH run at 960x540 engine size.
+			int ew1080 = 0, eh1080 = 0, h1080 = 0;
+			int ew4k = 0, eh4k = 0, h4k = 0;
+			VpMotion::VectorEngine::SizeFor(true, 1920, 1080, ew1080, eh1080, h1080);
+			VpMotion::VectorEngine::SizeFor(true, 3840, 2160, ew4k, eh4k, h4k);
+			Assert::AreEqual(960, ew1080);
+			Assert::AreEqual(540, eh1080);
+			Assert::AreEqual(ew1080, ew4k, L"1080p and 4K lowRes share identical engine width");
+			Assert::AreEqual(eh1080, eh4k, L"1080p and 4K lowRes share identical engine height");
+
+			VpMotion::VectorEngine lowResEngine;
+			lowResEngine.PublishProducer(std::make_shared<MotionAhead::Producer>());
+			lowResEngine.NoteFlowSourceSize(1920, 1080, ew1080, eh1080);
+			lowResEngine.motionValidity.NoteKept(10);
+			lowResEngine.motionValidity.NoteKept(11);
+			Assert::IsTrue(lowResEngine.p2Slot->Publish(10, 11, lowResEngine.p2Slot->Generation(), flow1080p));
+			VpMotion::FlowView lowResBefore;
+			Assert::IsTrue(lowResEngine.FlowOf(11, lowResBefore));
+			Assert::AreEqual(2.0, lowResBefore.enginePxToSource, 1e-12);
+			Assert::AreEqual(2.0, lowResBefore.enginePxToSourceY, 1e-12);
+
+			// Trigger SourceFormatChange through TakeInvalidation: remembered 1080p size must be cleared.
+			lowResEngine.motionValidity.Invalidate(::MotionValidity::Cause::SourceFormatChange);
+			::MotionValidity::Pending pending;
+			Assert::IsTrue(lowResEngine.TakeInvalidation(pending));
+			Assert::IsTrue(pending.cause == ::MotionValidity::Cause::SourceFormatChange);
+
+			// Publish a new-generation 4K lowRes pair (same 960x540 engine dims) BEFORE NoteFlowSourceSize is called for 4K.
+			const auto flow4kLowRes = makeFlow(ew4k, eh4k, rawX, rawY);
+			const uint64_t newGen = lowResEngine.motionValidity.StreamGeneration();
+			lowResEngine.p2Slot->SetGeneration(newGen);
+			Assert::IsTrue(lowResEngine.p2Slot->Publish(20, 21, newGen, flow4kLowRes));
+			lowResEngine.motionValidity.NoteKept(20);
+			lowResEngine.motionValidity.NoteKept(21);
+
+			// Same-input negative control: without SourceFormatChange clearing flowSize_, the exact same 960x540 4K pair would be
+			// served at the stale 1080p 2.0 scale (20 px instead of 40 px - 2x error).
+			VpMotion::VectorEngine unresetEngine;
+			unresetEngine.PublishProducer(std::make_shared<MotionAhead::Producer>());
+			unresetEngine.NoteFlowSourceSize(1920, 1080, ew1080, eh1080);
+			unresetEngine.motionValidity.NoteKept(20);
+			unresetEngine.motionValidity.NoteKept(21);
+			Assert::IsTrue(unresetEngine.p2Slot->Publish(20, 21, unresetEngine.p2Slot->Generation(), flow4kLowRes));
+			VpMotion::FlowView staleLowResScale;
+			Assert::IsTrue(unresetEngine.FlowOf(21, staleLowResScale));
+			Assert::AreEqual(2.0, staleLowResScale.enginePxToSource, 1e-12);
+			Assert::AreEqual(20.0f, staleLowResScale.x[0], 1e-5f, L"stale 1080p size halves true 4K lowRes displacement");
+
+			// Protected engine refuses FlowOf as unscaled until NoteFlowSourceSize(3840, 2160, 960, 540) is called.
+			const auto beforeFormatRead = lowResEngine.FlowReads();
+			VpMotion::FlowView unscaledAfterFormat;
+			Assert::IsFalse(lowResEngine.FlowOf(21, unscaledAfterFormat),
+				L"SourceFormatChange must clear flowSize_ so same-engine-size 4K lowRes is refused until re-sized");
+			Assert::IsNull(unscaledAfterFormat.x);
+			const auto afterFormatRead = lowResEngine.FlowReads();
+			Assert::AreEqual(beforeFormatRead.unscaled + 1ull, afterFormatRead.unscaled);
+			Assert::AreEqual(beforeFormatRead.noPair, afterFormatRead.noPair);
+			Assert::AreEqual(beforeFormatRead.invalidated, afterFormatRead.invalidated);
+
+			// Once NoteFlowSourceSize is called for 4K lowRes, FlowOf recovers with true 4.0 scale (2x stale 1080p scale).
+			lowResEngine.NoteFlowSourceSize(3840, 2160, ew4k, eh4k);
+			VpMotion::FlowView recovered4kLowRes;
+			Assert::IsTrue(lowResEngine.FlowOf(21, recovered4kLowRes));
+			Assert::AreEqual(4.0, recovered4kLowRes.enginePxToSource, 1e-12);
+			Assert::AreEqual(4.0, recovered4kLowRes.enginePxToSourceY, 1e-12);
+			Assert::AreEqual(16.0, recovered4kLowRes.blockSize, 1e-12);
+			Assert::AreEqual(16.0, recovered4kLowRes.blockSizeY, 1e-12);
+			Assert::AreEqual(40.0f, recovered4kLowRes.x[0], 1e-5f);
+			Assert::AreEqual(-20.0f, recovered4kLowRes.y[0], 1e-5f);
+			Assert::AreEqual(2.0f * staleLowResScale.x[0], recovered4kLowRes.x[0], 1e-5f);
+		}
 	};
 }
