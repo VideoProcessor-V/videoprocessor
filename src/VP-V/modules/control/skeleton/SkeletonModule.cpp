@@ -6,6 +6,7 @@
 
 #include <DebugLog.h>
 
+#include <VP-V/core/ComputeOnce.h>
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/core/GpuAllocator.h>
 #include <VP-V/core/PassTimerInbox.h>
@@ -592,6 +593,11 @@ namespace Vpv
 			struct SceneRunEntry
 			{
 				uint64_t seq = 0;
+				bool hasPair = false;
+				uint64_t prevPrint = 0;
+				uint64_t curPrint = 0;
+				VpLaneProducts::EventSignals events;
+				double fadeKeep = 1.0;
 				VpUnit::CutFadeJudge::FadeRun run;
 			};
 			std::mutex sceneRunMutex;
@@ -691,6 +697,23 @@ namespace Vpv
 					mix(v);
 				mix(r.gridFound);
 				mix(r.pixelCount);
+				return h;
+			}
+
+			// Extends RecordPrint with scalar luma summary fields used by ClassifyEvents / FoldFadeRun so cached pair-law
+			// entries in SceneRunEntry never alias synthetic or rescaled records.
+			uint64_t PairRecordPrint(const VpLaneProducts::SourceStatsRecord& r)
+			{
+				uint64_t h = RecordPrint(r);
+				const auto mix = [&h](uint32_t v) { h ^= v; h *= 1099511628211ull; };
+				mix(r.mean);
+				mix(r.p01);
+				mix(r.p99);
+				mix(r.rectFound);
+				mix(r.rectX0);
+				mix(r.rectY0);
+				mix(r.rectX1);
+				mix(r.rectY1);
 				return h;
 			}
 
@@ -2538,7 +2561,7 @@ namespace Vpv
 			// starts at most kSceneRunRing - 1 pairs back, so less gain has built up and a slow fade can be found later. That reduced-evidence
 			// path is counted (sceneRunReduced, SceneCounters::fadeRunReduced, the "Skeleton scene" status line, rule 5); an exact rebuild
 			// is counted as sceneRunRebuilt. Rebuild latency is measured only on the ring-miss rebuild path (zero clock overhead on ring hits).
-			VpUnit::CutFadeJudge::FadeRun SceneRunBefore(HostState& st, Bundle& b, uint64_t seq, const VpLaneProducts::SourceStatsRecord& prev)
+			VpUnit::CutFadeJudge::FadeRun SceneRunBefore(HostState& st, Bundle& b, uint64_t seq, const VpLaneProducts::SourceStatsRecord& prev, bool ahead)
 			{
 				using VpUnit::CutFadeJudge::FadeRun;
 				const auto entryEndingAt = [&st](uint64_t s, const VpLaneProducts::SourceStatsRecord& r, FadeRun& out) {
@@ -2583,8 +2606,23 @@ namespace Vpv
 				VpUnit::CutFadeJudge::AlignedPairCache cache;
 				for (size_t i = recs.size() - 1; i > 0; --i)
 				{
-					const VpLaneProducts::EventSignals e = VpUnit::CutFadeJudge::ClassifyEvents(recs[i], recs[i - 1], false, false, &cache);
-					VpUnit::CutFadeJudge::FoldFadeRun(recs[i], recs[i - 1], e, run, nullptr, &cache);
+					const uint64_t pairSeq = seq - static_cast<uint64_t>(i);
+					// Attribute each rebuilt pair's U7 call to its own sequence (pairSeq) and retain the folded entry in the
+					// ring so a subsequent SceneFactsFor(pairSeq) reuses it instead of recomputing ClassifyEvents.
+					const ::ComputeOnce::FrameScope pairScope(static_cast<int64_t>(pairSeq), "scene", 2);
+					VpLaneProducts::EventSignals e = VpUnit::CutFadeJudge::ClassifyEvents(recs[i], recs[i - 1], false, false, &cache);
+					double stepKeep = 1.0;
+					const bool stepFade = VpUnit::CutFadeJudge::FoldFadeRun(recs[i], recs[i - 1], e, run, &stepKeep, &cache);
+					const double pairFadeKeep = VpUnit::CutFadeJudge::FrameFadeKeep(recs[i], recs[i - 1], e.fade, stepFade, stepKeep);
+					e.fade = stepFade || e.fade;
+					HostState::SceneRunEntry& stepEntry = (ahead ? st.sceneRunsAhead : st.sceneRuns)[static_cast<size_t>(pairSeq % kSceneRunRing)];
+					stepEntry.seq = pairSeq;
+					stepEntry.hasPair = true;
+					stepEntry.prevPrint = PairRecordPrint(recs[i]);
+					stepEntry.curPrint = PairRecordPrint(recs[i - 1]);
+					stepEntry.events = e;
+					stepEntry.fadeKeep = pairFadeKeep;
+					stepEntry.run = run;
 				}
 				const auto elapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(
 					std::chrono::steady_clock::now() - rebuildT0).count();
@@ -2652,7 +2690,7 @@ namespace Vpv
 				// Intentionally retains the literal 4-argument VpLaneProducts::ClassifyEvents(a, c, false, false) call pinned by
 				// test_scene_facts_reads_no_validity_source; SceneRunBefore's 7-pair rebuild loop wires AlignedPairCache directly through
 				// VpUnit::CutFadeJudge::ClassifyEvents, and FoldFadeRun eliminates its internal redundant AlignGrid calls via FitGridFadeAligned.
-				VpLaneProducts::EventSignals e = VpLaneProducts::ClassifyEvents(a, c, false, false);
+				VpLaneProducts::EventSignals e;
 				double fadeKeep = 1.0;
 				{
 					// U7 v3: the multi-frame fade law folds this pair into the run that ends at P4(seq - 1); the run that ends here is kept for
@@ -2660,15 +2698,51 @@ namespace Vpv
 					// the sequence verdict's one-frame delivery); a sequence-law cut still restarts every consumer whatever the fade says.
 					// The frame's history keep (the partial reset, owner 2026-11-15) comes from the same fold: CutFadeJudge::FrameFadeKeep.
 					std::lock_guard<std::mutex> runLock(st.sceneRunMutex);
-					VpUnit::CutFadeJudge::FadeRun run = SceneRunBefore(st, bundle, seq, a);
-					double runKeep = 1.0;
-					const bool runFade = VpUnit::CutFadeJudge::FoldFadeRun(a, c, e, run, &runKeep);
-					fadeKeep = VpUnit::CutFadeJudge::FrameFadeKeep(a, c, e.fade, runFade, runKeep);
-					e.fade = runFade || e.fade;
-					// S2b C1: an ahead frame keeps its run in the ahead ring (the walk front chains exactly; render entries are never clobbered).
-					HostState::SceneRunEntry& kept = (ahead ? st.sceneRunsAhead : st.sceneRuns)[static_cast<size_t>(seq % kSceneRunRing)];
-					kept.seq = seq;
-					kept.run = run;
+					const uint64_t prevPrint = PairRecordPrint(a);
+					const uint64_t curPrint = PairRecordPrint(c);
+					const HostState::SceneRunEntry* hit = nullptr;
+					const HostState::SceneRunEntry* const rings[2] = { st.sceneRuns, st.sceneRunsAhead };
+					for (const HostState::SceneRunEntry* ring : rings)
+					{
+						const HostState::SceneRunEntry& en = ring[static_cast<size_t>(seq % kSceneRunRing)];
+						if (en.seq == seq && en.hasPair && en.prevPrint == prevPrint && en.curPrint == curPrint
+							&& VpUnit::CutFadeJudge::FadeRunEndsAt(en.run, c))
+						{
+							hit = &en;
+							break;
+						}
+					}
+					if (hit != nullptr)
+					{
+						e = hit->events;
+						fadeKeep = hit->fadeKeep;
+						if (!ahead && hit != &st.sceneRuns[static_cast<size_t>(seq % kSceneRunRing)])
+							st.sceneRuns[static_cast<size_t>(seq % kSceneRunRing)] = *hit;
+					}
+					else
+					{
+						// Attribute U7 ClassifyEvents to `seq` even when SceneOf/SceneFactsOf is called ahead of seal
+						// (e.g. SourceAheadWalk after AfterPresent of an earlier frame) or off the render thread.
+						const ::ComputeOnce::ThreadFrame tf = ::ComputeOnce::Current();
+						const bool sameFrame = tf.seq == static_cast<int64_t>(seq) && tf.context != nullptr;
+						const ::ComputeOnce::FrameScope u7Scope(static_cast<int64_t>(seq),
+							sameFrame ? tf.context : "scene", sameFrame ? tf.contextId : (ahead ? 1 : 0));
+						e = VpLaneProducts::ClassifyEvents(a, c, false, false);
+						VpUnit::CutFadeJudge::FadeRun run = SceneRunBefore(st, bundle, seq, a, ahead);
+						double runKeep = 1.0;
+						const bool runFade = VpUnit::CutFadeJudge::FoldFadeRun(a, c, e, run, &runKeep);
+						fadeKeep = VpUnit::CutFadeJudge::FrameFadeKeep(a, c, e.fade, runFade, runKeep);
+						e.fade = runFade || e.fade;
+						// S2b C1: an ahead frame keeps its run in the ahead ring (the walk front chains exactly; render entries are never clobbered).
+						HostState::SceneRunEntry& kept = (ahead ? st.sceneRunsAhead : st.sceneRuns)[static_cast<size_t>(seq % kSceneRunRing)];
+						kept.seq = seq;
+						kept.hasPair = true;
+						kept.prevPrint = prevPrint;
+						kept.curPrint = curPrint;
+						kept.events = e;
+						kept.fadeKeep = fadeKeep;
+						kept.run = run;
+					}
 				}
 				// U7 v2: cut / flash / cutPossible / strength from the sequence law (the renderer's tracker).
 				VpUnit::CutFadeJudge::CutVerdict v;
