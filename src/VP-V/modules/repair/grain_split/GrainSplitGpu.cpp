@@ -162,8 +162,8 @@ if (li < uint(NSUB)) {
         vec4 acc = vec4(0.0);
         for (int yy = y0; yy < y1; yy++)
             for (int xx = x0; xx < x1; xx++) {
-                vec4 v = s_px[(yy - cy) * CH + (xx - cx)];
-                if (v.x >= 0.0) acc += v;
+                if (blk.x * GS_B + xx < GS_W && blk.y * GS_B + yy < GS_H)
+                    acc += s_px[(yy - cy) * CH + (xx - cx)];
             }
         ivec2 o = kc - ivec2(sx0 / CH, sy0 / CH);
         imageStore(part_out, ivec2((blk.x * GS_SUB + si) * GS_S + o.x, (blk.y * GS_SUB + sj) * GS_S + o.y), acc);
@@ -181,6 +181,7 @@ if (blk.x < GS_BW && blk.y < GS_BH) {
     int n = 0;
     vec4 tot = vec4(0.0);
     float cnt = 0.0;
+    bool badBlock = false;
     ivec2 borg = blk * GS_B;
     for (int i = 0; i < NSUB; i++) {
         int si = i % GS_SUB, sj = i / GS_SUB;
@@ -194,6 +195,7 @@ if (blk.x < GS_BW && blk.y < GS_BH) {
                     s += texelFetch(part, ivec2((blk.x * GS_SUB + si) * GS_S + kx - x0 / CH, (blk.y * GS_SUB + sj) * GS_S + ky - y0 / CH), 0);
             c = float(max(0, min(borg.x + x1, GS_W) - (borg.x + x0)) * max(0, min(borg.y + y1, GS_H) - (borg.y + y0)));
         }
+        if ((floatBitsToUint(s.x) & 0x7f800000u) == 0x7f800000u) badBlock = true;
         if (c > 0.0) { e[n] = s.x / c; n++; }
         tot += s;
         cnt += c;
@@ -207,7 +209,7 @@ if (blk.x < GS_BW && blk.y < GS_BH) {
     int nq = min(n, max(1, GS_QUIET));
     float m = 0.0;
     for (int i = 0; i < nq; i++) m += e[i];
-    float quiet = n > 0 ? GS_CAL * m / float(nq) : 0.0;
+    float quiet = badBlock ? uintBitsToFloat(0x7fc00000u) : (n > 0 ? GS_CAL * m / float(nq) : 0.0);
     float c = max(cnt, 1.0);
     imageStore(quiet_out, blk, vec4(quiet, tot.w / c, tot.y / c, tot.z / c));
 }
@@ -252,7 +254,10 @@ for (uint i = li; i < uint(GS_BW * GS_BH); i += 256u) {
     ivec2 b = ivec2(int(i % uint(GS_BW)), int(i / uint(GS_BW)));
     float q = texelFetch(quiet, b, 0).x / (GS_CODE_SCALE * GS_CODE_SCALE);
     float lumaTen = gs_block_luma(b) / GS_CODE_SCALE;
-    if (!(q >= 0.0) || !(q < 1e30) || !(lumaTen >= -1e30) || !(lumaTen < 1e30)) continue;
+    // IEEE-754 bit check for NaN/Inf (immune to FXC fast-math eliding isnan()/isinf() without /Gis).
+    bool qBad = (floatBitsToUint(q) & 0x7f800000u) == 0x7f800000u || q < 0.0 || q >= 1e30;
+    bool lBad = (floatBitsToUint(lumaTen) & 0x7f800000u) == 0x7f800000u || lumaTen < -1e30 || lumaTen >= 1e30;
+    if (qBad || lBad) continue;
     int bin = gs_level_bin(lumaTen);
     if ((bin == 0 || bin == GS_LEVEL_BINS - 1) && !(q > GS_LEVEL_ZERO_FLOOR)) continue;
     int key = clamp(int(floatBitsToUint(max(q, 0.015625)) >> 20) - 968, 0, GS_KEYS - 1);

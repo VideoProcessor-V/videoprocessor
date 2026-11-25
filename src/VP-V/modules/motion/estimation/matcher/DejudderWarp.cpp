@@ -1852,7 +1852,7 @@ float hold_weight_xy(vec2 lp, vec2 feather)
     vec2 local = lp - vec2(own) * 16.0;
     if (local.x >= f.x && 16.0 - local.x >= f.x && local.y >= f.y && 16.0 - local.y >= f.y)
         return 1.0;
-    float d = 1e9;
+    float d2 = 1e9;
     for (int dy = -1; dy <= 1; dy++)
         for (int dx = -1; dx <= 1; dx++) {
             if (dx == 0 && dy == 0) continue;
@@ -1865,19 +1865,22 @@ float hold_weight_xy(vec2 lp, vec2 feather)
                 for (int k = 0; k < 4; k++)
                     if (texelFetch(sub_field, c * 2 + ivec2(k % 2, k / 2), 0).z < 0.5) {
                         vec2 slo = vec2(c * 2 + ivec2(k % 2, k / 2)) * 8.0;
-                        d = min(d, length((lp - clamp(lp, slo, slo + vec2(8.0))) / f));
+                        vec2 dv = (lp - clamp(lp, slo, slo + vec2(8.0))) / f;
+                        d2 = min(d2, dot(dv, dv));
                     }
             }
 #endif
             if (held) {
                 vec2 lo = vec2(c) * 16.0;
-                d = min(d, length((lp - clamp(lp, lo, lo + vec2(16.0))) / f));
+                vec2 dv = (lp - clamp(lp, lo, lo + vec2(16.0))) / f;
+                d2 = min(d2, dot(dv, dv));
             }
         }
-    // Explicit Hermite smoothstep on [0, 1]: avoids SPIRV-Cross/FXC miscompiling literal smoothstep(0.0, 1.0, d)
-    // as t*(3 - 2*t) (missing one *t factor, returning 1.09375 at d=0.875).
-    float t = clamp(d, 0.0, 1.0);
-    return t * t * (3.0 - 2.0 * t);
+    // Accumulate squared normalized distance d2 and evaluate u * (3 - 2 * sqrt(u)) with u = clamp(d2, 0, 1):
+    // avoids both per-neighbor sqrt and an FXC (d3dcompiler_47) optimizer bug that cancelled sqrt with t*t
+    // across min/saturate and miscompiled smoothstep(0, 1, d) as t * (3 - 2 * t).
+    float u = clamp(d2, 0.0, 1.0);
+    return u * (3.0 - 2.0 * sqrt(u));
 }
 #endif
 )GLSL";
