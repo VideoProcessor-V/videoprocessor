@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 // D3 / FIX3-D6 (102b CO-DEFAULT-MOTIONAHEAD-U3): zero-wait no-lane CPU owner fill for kP1HalfLuma.
-// Built without the precompiled header (pure CPU + VP-V headers only; zero pl_gpu / zero libplacebo).
+// Built without the precompiled header (pure CPU + VP-V headers only; zero GPU device / zero libplacebo).
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif

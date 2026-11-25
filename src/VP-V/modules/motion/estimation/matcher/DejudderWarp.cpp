@@ -12,7 +12,7 @@
 #include <VP-V/modules/motion/consumers/DejudderPolicy.h>
 #include <VP-V/modules/motion/estimation/global_model/CameraGuidanceGpu.h>
 #include <VP-V/modules/motion/estimation/global_model/MatcherGlobalD1.h>
-#include <VP-V/modules/motion/estimation/global_model/PairGlobalFill.h>
+#include <VP-V/modules/motion/estimation/global_model/PairGlobalGpu.h>
 #include <VP-V/modules/control/skeleton/SceneRecordReader.h>
 #include <VP-V/core/RobustStatsShaders.h>
 #include <VP-V/core/GpuAttributionPl.h>

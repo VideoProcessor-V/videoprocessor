@@ -125,8 +125,9 @@ namespace Vpv
 			}
 
 			// One compute pass: `body` over `in` (sampled, clamp, nearest) into `dst` (storage r32f).
-			inline bool BandPass(pl_dispatch dispatch, pl_tex in, pl_tex dst, const std::string& header, const char* body, const char* name)
+			inline bool BandPass(const VpSkeleton::OwnerFillRequest& req, pl_tex in, pl_tex dst, const std::string& header, const char* body, const char* name)
 			{
+				const pl_dispatch dispatch = static_cast<pl_dispatch>(req.gpu->Dispatch());
 				pl_shader_desc desc[2]{};
 				desc[0].desc.name = "bm_src";
 				desc[0].desc.type = PL_DESC_SAMPLED_TEX;
@@ -223,10 +224,9 @@ namespace Vpv
 					return Detail::Decline(out, c, why);
 				const pl_tex mid = static_cast<pl_tex>(scratch.resource);
 				const pl_tex dst = static_cast<pl_tex>(out.gpu.resource);
-				const pl_dispatch dispatch = static_cast<pl_dispatch>(req.gpu->Dispatch());
 				const std::string header = VpUnit::BandMemo::GlslOf(key);
-				if (!Detail::BandPass(dispatch, in, mid, header, VpUnit::BandMemo::AcrossBodyGlsl(), "VP-V band memo across")
-					|| !Detail::BandPass(dispatch, mid, dst, header, VpUnit::BandMemo::DownBodyGlsl(), "VP-V band memo down"))
+				if (!Detail::BandPass(req, in, mid, header, VpUnit::BandMemo::AcrossBodyGlsl(), "VP-V band memo across")
+					|| !Detail::BandPass(req, mid, dst, header, VpUnit::BandMemo::DownBodyGlsl(), "VP-V band memo down"))
 				{
 					out.gpu = VpSkeleton::GpuMemoHandle();
 					return Detail::Decline(out, c, "shader or dispatch failed");

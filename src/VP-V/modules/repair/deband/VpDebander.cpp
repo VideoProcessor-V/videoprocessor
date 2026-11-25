@@ -60,25 +60,50 @@ if (p.x < sz.x && p.y < sz.y) {
     // P11 re_s1 stores (jxx, jyy, jxy, lap_e) per block in codes^2.
     vec4 J = texture(p11_tensor, pos * p11_scale);
 #else
+    // Exact bilinear interpolation of the per-block low-band structure tensor (GrainPreserve::kSplitTensorBlock):
+    // matches GrainModel::DebandSplit without allocating a private split_tensor texture (15b A3 fallback when P11 absent).
     vec4 tmask = vec4(1.0, NCOMP > 1 ? 1.0 : 0.0, NCOMP > 2 ? 1.0 : 0.0, 0.0);
+    int tb = max(1, int(floor(0.5 * tensor_px + 0.5)));
     vec3 Jacc = vec3(0.0);
-    float hSpan = 0.25 * tensor_px;
-    for (int sy = -1; sy <= 1; sy += 2)
-        for (int sx = -1; sx <= 1; sx += 2) {
-            vec2 sp = pos + vec2(float(sx), float(sy)) * hSpan;
 #ifdef P10_GRAIN
-            vec4 gx = 0.5 * code_scale * tmask * (p10_base_at(sp + vec2(2.0, 0.0), hi, p10_cu) - p10_base_at(sp - vec2(2.0, 0.0), hi, p10_cu));
-            vec4 gy = 0.5 * code_scale * tmask * (p10_base_at(sp + vec2(0.0, 2.0), hi, p10_cu) - p10_base_at(sp - vec2(0.0, 2.0), hi, p10_cu));
+    ivec2 lsz = max(ivec2(1), (sz + ivec2(1)) / 2);
 #else
-            vec2 stepH = vec2(2.0, 0.0) * linv;
-            vec2 stepV = vec2(0.0, 2.0) * linv;
-            vec2 qpos = sp * linv;
-            vec4 gx = 0.5 * code_scale * tmask * (texture(split_low, qpos + stepH) - texture(split_low, qpos - stepH));
-            vec4 gy = 0.5 * code_scale * tmask * (texture(split_low, qpos + stepV) - texture(split_low, qpos - stepV));
+    ivec2 lsz = textureSize(split_low, 0);
 #endif
-            Jacc += vec3(dot(gx, gx), dot(gy, gy), dot(gx, gy));
+    ivec2 lhi = lsz - ivec2(1);
+    ivec2 ts = (lsz + ivec2(tb - 1)) / tb;
+    vec2 bc = pos / tensor_px - vec2(0.5);
+    ivec2 b0 = ivec2(floor(bc));
+    vec2 bf = bc - vec2(b0);
+    for (int dy = 0; dy <= 1; ++dy) {
+        float wy = dy == 0 ? (1.0 - bf.y) : bf.y;
+        for (int dx = 0; dx <= 1; ++dx) {
+            float bw = wy * (dx == 0 ? (1.0 - bf.x) : bf.x);
+            if (!(bw > 0.0)) continue;
+            ivec2 b = clamp(b0 + ivec2(dx, dy), ivec2(0), ts - ivec2(1));
+            ivec2 q0 = b * tb;
+            ivec2 q1 = min(lsz, q0 + ivec2(tb));
+            vec3 bacc = vec3(0.0);
+            float cnt = 0.0;
+            for (int qy = q0.y; qy < q1.y; ++qy)
+                for (int qx = q0.x; qx < q1.x; ++qx) {
+#ifdef P10_GRAIN
+                    vec2 sp = vec2(float(qx) * 2.0 + 1.0, float(qy) * 2.0 + 1.0);
+                    vec4 gx = 0.5 * code_scale * tmask * (p10_base_at(sp + vec2(2.0, 0.0), hi, p10_cu) - p10_base_at(sp - vec2(2.0, 0.0), hi, p10_cu));
+                    vec4 gy = 0.5 * code_scale * tmask * (p10_base_at(sp + vec2(0.0, 2.0), hi, p10_cu) - p10_base_at(sp - vec2(0.0, 2.0), hi, p10_cu));
+#else
+                    vec4 gx = 0.5 * code_scale * tmask * (texelFetch(split_low, clamp(ivec2(qx + 1, qy), ivec2(0), lhi), 0) -
+                                                          texelFetch(split_low, clamp(ivec2(qx - 1, qy), ivec2(0), lhi), 0));
+                    vec4 gy = 0.5 * code_scale * tmask * (texelFetch(split_low, clamp(ivec2(qx, qy + 1), ivec2(0), lhi), 0) -
+                                                          texelFetch(split_low, clamp(ivec2(qx, qy - 1), ivec2(0), lhi), 0));
+#endif
+                    bacc += vec3(dot(gx, gx), dot(gy, gy), dot(gx, gy));
+                    cnt += 1.0;
+                }
+            Jacc += bw * (bacc / max(cnt, 1.0));
         }
-    vec4 J = vec4(0.25 * Jacc, 0.0);
+    }
+    vec4 J = vec4(Jacc, 0.0);
 #endif
     float jd = J.x - J.y;
     float coh = sqrt(jd * jd + 4.0 * J.z * J.z) / (J.x + J.y + coh_eps);
