@@ -13,7 +13,7 @@
 // Passes (all compute, nothing read back, no atomics, no barriers):
 //   CROP    luma rect, chroma rect(s) into own textures, bit-exact (only when the active picture is not the whole plane)
 //   SPLIT   repair.grain_split x3 (luma, Cb, Cr)           (GrainSplitGpu)
-//   LO      chroma grid: tent luma at the sites; clean chroma; chroma grain          -> rgba32f (Ylo, CcB, CcR), rg32f (GcB, GcR)
+//   LO      chroma grid: tent luma at the sites; clean chroma                        -> rgba32f (Ylo, CcB, CcR)
 //   STATS   chroma grid: regression, rho2, neighbour range                            -> rgba32f (aB, bB, aR, bR), rg32f, rgba32f
 //   AVG     chroma grid: box average of a and b                                      -> rgba32f
 //   UP      every luma pixel: Catmull-Rom + CfL (picture) / bar-side Catmull-Rom (bars) -> the output texture
@@ -22,7 +22,7 @@
 // output untouched: the caller renders the original frame and shows "Chroma upscale: libplacebo (<reason>)".
 //
 // Memory (SA7): every texture between the passes is a per-frame temporary (the module keeps no state from frame to frame
-// but its output). With Params::arena the six chroma-grid temporaries (lo, gc, ab, rho, lohi, avg) and the own grain
+// but its output). With Params::arena the five chroma-grid temporaries (lo, ab, rho, lohi, avg) and the own grain
 // splits' intermediates come from the shared scratch arena (null = private textures, byte-identical to before). An arena
 // shortage is never silent: Apply fails for that frame (ScratchShort(), "scratch memory short (...)"), the caller shows the
 // libplacebo fallback line, and the arena's FrameDecision() is the catalog entry "scratch_arena"; the next frame retries.
@@ -105,7 +105,7 @@ namespace ChromaUpscale
 			// The scratch-arena requests of one Apply for an active picture of rw x rh luma pixels whose chroma crop is pcw x pch
 			// (the module's working sizes; lumaLines / chromaLines = the picture's lines in each plane, as Params::lumaLines and
 			// lumaLines / the vertical subsampling): scope kArenaScope, owner kArenaOwner, tier T1 (an optional upsampler: shed
-			// before the T0 temporaries): four rgba32f and two rg32f pcw x pch textures; plus, when ownSplit, the three own
+			// before the T0 temporaries): four rgba32f and one rg32f pcw x pch textures; plus, when ownSplit, the three own
 			// splits' intermediates (GrainSplit::Gpu::Splitter::ArenaRequests, T0; one request per distinct shape because the
 			// splits run one after the other). Empty when the formats do not map to arena formats.
 			static std::vector<VpSkeleton::ArenaRequest> ArenaRequests(pl_gpu gpu, int rw, int rh, int pcw, int pch, double lumaLines,
@@ -113,12 +113,12 @@ namespace ChromaUpscale
 
 			// The chroma-grid temporaries' requests alone for the given formats of the 4- and 2-component textures: equal
 			// (scope, owner, shape) requests are merged by SUMMING their counts (they are held at the same time), so a backend where the
-			// 2-component float format falls back to the 4-component one still reserves all six textures.
+			// 2-component float format falls back to the 4-component one still reserves all five textures.
 			static std::vector<VpSkeleton::ArenaRequest> GridRequests(VpSkeleton::TexFormat t4, VpSkeleton::TexFormat t2, int pcw, int pch);
 
 			// VRAM of the module's textures for a W x H luma plane and a cw x ch chroma plane (bytes; with the three splits').
 			// tempsInArena: the chroma-grid temporaries and the splits' bands are the arena's (counted in its plan, not here):
-			// 16 bytes per luma pixel and 112 per chroma pixel less. The default is the private-texture form, unchanged.
+			// 16 bytes per luma pixel and 104 per chroma pixel less. The default is the private-texture form, unchanged.
 			static uint64_t TextureBytes(int W, int H, int cw, int ch, bool tempsInArena = false);
 
 		private:
