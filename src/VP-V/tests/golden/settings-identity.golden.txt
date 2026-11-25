@@ -192,8 +192,19 @@ ambientAdapt=0
 ambientAdaptStrength=1
 ambientScreenReflect=0.01
 ambientMaxBlackNits=1
+ambientLuxDark=8
+ambientLuxLit=20
 ambientTauUpSeconds=15
 ambientTauDownSeconds=90
+appearance=0
+appearanceStrength=1
+appearanceRoom=cinema
+appearanceScreenWhiteNits=48
+appearanceScreenWhiteMeasured=0
+appearanceHonourL11=1
+ambientAdaptReplaced=0
+saturationReplaced=0
+saturationConfigured=0
 intentBlack=0
 intentDisplay=0
 interpolationGrain=0
@@ -205,13 +216,15 @@ detailPulseCap=1.3500000000000001
 detailPulseFast=1
 textureRestore=0
 textureRestoreCap=1.5
+cutSoftReset=1
 dejudderSourceWarpCatmull=1
 nlsSamplingCatmull=1
 temporalDither=auto
 pipelineOriginalPathway=0
 pipelineOrder=
 pipelineSlotsOff=
-calibrationLutStage=libplacebo
+calibrationLutStage=vp
+calibrationLutStageConfigured=auto
 hdrInference=vp
 pipelineEntranceOnce=1
 frameAnalysisStore=0
@@ -226,6 +239,7 @@ sourceCodingFixes=1
 sourceResolutionLatchFixes=1
 sourceResolutionCutFixes=1
 sourceGeometryDetect=all
+sourceResolutionFrameBound=1
 activePictureStartupHold=1
 sourceResolutionEngageMaxWait=20
 sourceResolutionCrossfade=1.5
@@ -235,6 +249,7 @@ timingContinuityFixes=1
 cadenceClassFixes=1
 motionHistoryFixes=1
 vectorDemand=1
+engineOffForced=
 queueTimingFixes=1
 generalRateFixes=1
 efficiencyFixes=1
@@ -4068,12 +4083,14 @@ fp live=g3 restart=g3
 + sigmoid=0
 + profileValues=
 ### calibration_lut_stage=libplacebo
-fp live=g10 restart=g0
+fp live=g10 restart=g8
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{calibration_lut_stage=libplacebo;contrast_recovery=0.3;peak_detection=high_quality;}vprenderer.default{calibration_lut_stage=libplacebo;contrast_recovery=0.3;peak_detection=high_quality;}
++ calibrationLutStage=libplacebo
++ calibrationLutStageConfigured=libplacebo
 ### calibration_lut_stage=vp
-fp live=g11 restart=g8
+fp live=g11 restart=g0
 + profileValues=vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.scaling.default{deband_strength=default;display_bit_depth=output;dithering=blue_noise;downscaler=hermite;sigmoid=on;upscaler=ewa_lanczossharp;}vprenderer.default{calibration_lut_stage=vp;contrast_recovery=0.3;peak_detection=high_quality;}vprenderer.default{calibration_lut_stage=vp;contrast_recovery=0.3;peak_detection=high_quality;}
-+ calibrationLutStage=vp
++ calibrationLutStageConfigured=vp
 ### calibration_lut_stage=zzz_invalid
 fp live=g3 restart=g3
 + rule=
@@ -4086,7 +4103,7 @@ fp live=g3 restart=g3
 + deband=0
 + sigmoid=0
 + profileValues=
-+ pipelineSettingsProblems=calibration_lut_stage 'zzz_invalid' (libplacebo|vp); 
++ pipelineSettingsProblems=calibration_lut_stage 'zzz_invalid' (libplacebo|vp|auto); 
 ### capture_path=standard
 fp live=g3 restart=g3
 + rule=
@@ -14858,11 +14875,14 @@ fp live=g32 restart=g24
 + nlsSamplingCatmull=0
 + temporalDither=libplacebo
 + pipelineOriginalPathway=1
++ calibrationLutStage=libplacebo
++ calibrationLutStageConfigured=libplacebo
 + hdrInference=original
 + pipelineEntranceOnce=0
 + sourceCodingFixes=0
 + sourceResolutionLatchFixes=0
 + sourceResolutionCutFixes=0
++ sourceResolutionFrameBound=0
 + activePictureStartupHold=0
 + pulldownFixes=0
 + timingContinuityFixes=0
@@ -20026,11 +20046,14 @@ fp live=g54 restart=g36
 + temporalDither=libplacebo
 + pipelineOriginalPathway=1
 + pipelineSlotsOff=on
++ calibrationLutStage=libplacebo
++ calibrationLutStageConfigured=libplacebo
 + hdrInference=original
 + pipelineEntranceOnce=0
 + sourceCodingFixes=0
 + sourceResolutionLatchFixes=0
 + sourceResolutionCutFixes=0
++ sourceResolutionFrameBound=0
 + activePictureStartupHold=0
 + pulldownFixes=0
 + timingContinuityFixes=0
@@ -20059,7 +20082,7 @@ fp live=g55 restart=g37
 + profileValues=
 + pipelineOrder=off
 + pipelineSlotsOff=off
-+ calibrationLutStage=vp
++ calibrationLutStageConfigured=vp
 + hdrInference=original
 + pipelineEntranceOnce=0
 + resyncEvent=shadow
@@ -20078,7 +20101,7 @@ fp live=g56 restart=g38
 + profileValues=
 + pipelineOrder=auto
 + pipelineSlotsOff=auto
-+ calibrationLutStage=vp
++ calibrationLutStageConfigured=vp
 + hdrInference=original
 + pipelineEntranceOnce=0
 + resyncEvent=on
@@ -20097,7 +20120,7 @@ fp live=g57 restart=g39
 + profileValues=
 + pipelineOrder=1
 + pipelineSlotsOff=1
-+ calibrationLutStage=vp
++ calibrationLutStageConfigured=vp
 + hdrInference=original
 + pipelineEntranceOnce=0
 + resyncEvent=on
