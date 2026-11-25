@@ -239,7 +239,8 @@ namespace CalibrationLutHostTests
 				});
 			}
 
-			while (consumersReady.load(std::memory_order_acquire) < 2)
+			while (consumersReady.load(std::memory_order_acquire) < 2 &&
+				!consumerThrew.load(std::memory_order_acquire))
 				std::this_thread::yield();
 
 			int currentEpoch = 0;
@@ -253,7 +254,8 @@ namespace CalibrationLutHostTests
 				++currentEpoch;
 				roundEpoch.store(currentEpoch, std::memory_order_release);
 				int spins = 0;
-				while (roundDone.load(std::memory_order_acquire) < 2)
+				while (roundDone.load(std::memory_order_acquire) < 2 &&
+					!consumerThrew.load(std::memory_order_acquire))
 				{
 					if (++spins >= 1024)
 					{

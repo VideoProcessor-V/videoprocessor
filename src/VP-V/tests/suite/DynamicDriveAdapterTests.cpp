@@ -6,6 +6,7 @@
 #include <VP-V/modules/drive/led_compensation/DynamicDriveFrame.h>
 #include <VP-V/modules/drive/led_compensation/DynamicDriveHost.h>
 #include <VP-V/modules/drive/led_compensation/LedDriveModule.h>
+#include <VP-V/modules/drive/projector_control/SerialPort.h>
 #include <ConfigFile.h>
 #include <MainConfigSchema.h>
 #include <VP-V/tests/support/LedDriveTestSupport.h>
@@ -18,6 +19,7 @@
 #include <atomic>
 #include <Windows.h>
 #include <chrono>
+#include <condition_variable>
 #include <fstream>
 #include <functional>
 #include <thread>
@@ -725,18 +727,23 @@ namespace VideoProcessorTest
 		}
 
 	private:
-		// RAII teardown for DynamicDriveHost tests that start a dry-run (log_only / protocol: none)
-		// module, ensuring worker threads and shared references are stopped even if an assertion fails.
+		// RAII teardown for DynamicDriveHost tests that start a module, ensuring worker threads
+		// and shared references are stopped even if an assertion fails. Call Dismiss() right before
+		// host destruction when a test explicitly verifies ~DynamicDriveHost() live teardown.
 		struct HostCleanupGuard
 		{
 			LedDrive::DynamicDriveHost& host;
 			LedDrive::DynamicDriveShared* shared;
+			bool active = true;
 			HostCleanupGuard(LedDrive::DynamicDriveHost& hostIn, LedDrive::DynamicDriveShared* sharedIn = nullptr)
 				: host(hostIn), shared(sharedIn)
 			{
 			}
+			void Dismiss() { active = false; }
 			~HostCleanupGuard()
 			{
+				if (!active)
+					return;
 				LedDrive::HostContext ctx;
 				ctx.frame = shared;
 				host.StopForShutdown(ctx);
@@ -938,7 +945,8 @@ namespace VideoProcessorTest
 		}
 
 		// GEM-188: StatusText() and Module() read concurrently from another thread while the host
-		// toggles ApplySnapshot() under stateMutex must never data-race, crash, throw, or return torn text.
+		// rotates enabled, rejected (statusRejection populated), and disabled snapshots under stateMutex
+		// must never data-race, crash, throw, or return torn text.
 		TEST_METHOD(ConcurrentStatusTextAndUpdateNeverRaceOrCrash)
 		{
 			struct ThreadJoinGuard
@@ -975,6 +983,13 @@ namespace VideoProcessorTest
 				"[led_drive.default]\n"
 				"enabled: on\n"
 				"mode: log_only\n");
+			AdapterConfig rejectedCfg(
+				"[projector.default]\n"
+				"protocol: none\n"
+				"[led_drive.default]\n"
+				"enabled: on\n"
+				"mode: log_only\n"
+				"gamma_boost: 9\n");
 			AdapterConfig disabledCfg(
 				"[projector.default]\n"
 				"protocol: none\n"
@@ -983,7 +998,7 @@ namespace VideoProcessorTest
 				"mode: log_only\n");
 
 			// Negative control / baseline on the exact same configs: verify StatusText() distinguishes
-			// "off" (disabled) from an active "source ..." line (enabled).
+			// "off" (disabled), an active "source ..." line (enabled), and "off: configuration rejected (" (rejected).
 			{
 				std::lock_guard<std::mutex> lock(state);
 				host.ApplySnapshot(disabledCfg.config, std::string(), context);
@@ -1002,6 +1017,16 @@ namespace VideoProcessorTest
 				L"baseline: enabled config StatusText() must not report \"off\"");
 			{
 				std::lock_guard<std::mutex> lock(state);
+				host.ApplySnapshot(rejectedCfg.config, std::string(), context);
+			}
+			Assert::IsNull(host.Module().get(), L"baseline: rejected config (gamma_boost: 9) must not start a module");
+			const std::string rejectedStatus = host.StatusText();
+			Assert::IsTrue(rejectedStatus.rfind("off: configuration rejected (", 0) == 0,
+				L"baseline: rejected config StatusText() must start with \"off: configuration rejected (\"");
+			Assert::AreNotEqual(std::string("off"), rejectedStatus,
+				L"baseline: rejected config StatusText() must surface rejection rather than plain \"off\"");
+			{
+				std::lock_guard<std::mutex> lock(state);
 				host.ApplySnapshot(disabledCfg.config, std::string(), context);
 			}
 			Assert::AreEqual(std::string("off"), host.StatusText(), L"baseline: re-disabled config must return to \"off\"");
@@ -1010,6 +1035,9 @@ namespace VideoProcessorTest
 			std::atomic<bool> readerReady{ false };
 			std::atomic<size_t> statusReads{ 0 };
 			std::atomic<size_t> invalidStatusReads{ 0 };
+			std::atomic<bool> sawOff{ false };
+			std::atomic<bool> sawActive{ false };
+			std::atomic<bool> sawRejected{ false };
 			std::atomic<bool> readerThrew{ false };
 
 			std::thread reader([&]()
@@ -1020,8 +1048,13 @@ namespace VideoProcessorTest
 					while (!stopReader.load(std::memory_order_acquire))
 					{
 						const std::string status = host.StatusText();
-						const bool valid = (status == "off") || (status.find("source ") != std::string::npos);
-						if (!valid)
+						if (status == "off")
+							sawOff.store(true, std::memory_order_relaxed);
+						else if (status.find("source ") != std::string::npos)
+							sawActive.store(true, std::memory_order_relaxed);
+						else if (status.rfind("off: configuration rejected (", 0) == 0)
+							sawRejected.store(true, std::memory_order_relaxed);
+						else
 							invalidStatusReads.fetch_add(1, std::memory_order_relaxed);
 						const std::shared_ptr<LedDrive::LedDriveModule> mod = host.Module();
 						if (mod)
@@ -1039,10 +1072,13 @@ namespace VideoProcessorTest
 			while (!readerReady.load(std::memory_order_acquire))
 				std::this_thread::yield();
 
-			constexpr int kToggleIterations = 60;
+			// 60 full 3-state cycles rotating enabledCfg -> rejectedCfg -> disabledCfg (exercises statusRejection).
+			constexpr int kToggleIterations = 180;
 			for (int i = 0; i < kToggleIterations; ++i)
 			{
-				const auto& cfg = (i % 2 == 0) ? enabledCfg.config : disabledCfg.config;
+				const int phase = i % 3;
+				const auto& cfg = (phase == 0) ? enabledCfg.config :
+					(phase == 1) ? rejectedCfg.config : disabledCfg.config;
 				{
 					std::lock_guard<std::mutex> lock(state);
 					host.ApplySnapshot(cfg, std::string(), context);
@@ -1058,17 +1094,24 @@ namespace VideoProcessorTest
 			Assert::IsTrue(statusReads.load(std::memory_order_acquire) > 0,
 				L"reader thread must observe StatusText()/Module() concurrently with ApplySnapshot() toggles");
 			Assert::AreEqual<size_t>(0, invalidStatusReads.load(std::memory_order_acquire),
-				L"every StatusText() observed concurrently must be either \"off\" or contain \"source \"");
+				L"every StatusText() observed concurrently must be \"off\", contain \"source \", or start with \"off: configuration rejected (\"");
+			const int distinctStatesObserved =
+				(sawOff.load(std::memory_order_acquire) ? 1 : 0) +
+				(sawActive.load(std::memory_order_acquire) ? 1 : 0) +
+				(sawRejected.load(std::memory_order_acquire) ? 1 : 0);
+			Assert::IsTrue(distinctStatesObserved >= 2,
+				L"concurrent reader must observe at least 2 distinct StatusText() states across enabled/rejected/disabled cycles");
 
-			// Final iteration (i = 59, odd) applied disabledCfg: verify final state matches.
+			// Final iteration (i = 179, phase == 2) applied disabledCfg: verify final state matches.
 			Assert::IsNull(host.Module().get(), L"final host.Module() must match final disabled snapshot");
 			Assert::IsNull(shared.Module().get(), L"final shared.Module() must match final disabled snapshot");
 			Assert::AreEqual(std::string("off"), host.StatusText(), L"final host.StatusText() must match final disabled snapshot");
 		}
 
-		// GEM-190: full module replacement in Update() must never unlock the caller's stateMutex,
-		// must stop/release the previous module and start a distinct live replacement module, and
-		// disabling / SuspendForTest / host destruction must cleanly stop and join without hanging.
+		// GEM-190: full module replacement in Update() must never block synchronously on previous->Stop()
+		// or unlock the caller's stateMutex, must strictly order port #1 Close()/Stop() completion before
+		// replacement port #2 Open()/Start(), and disabling / SuspendForTest / ~DynamicDriveHost() must
+		// cleanly stop, join, and release live modules without hanging.
 		TEST_METHOD(UpdateDoesNotBlockOnStopAndOrdersReplacementStartAfterPreviousStop)
 		{
 			struct ThreadJoinGuard
@@ -1089,55 +1132,255 @@ namespace VideoProcessorTest
 				}
 			};
 
+			struct SimpleThreadJoinGuard
+			{
+				std::thread& worker;
+				explicit SimpleThreadJoinGuard(std::thread& workerIn) : worker(workerIn) {}
+				SimpleThreadJoinGuard(const SimpleThreadJoinGuard&) = delete;
+				SimpleThreadJoinGuard& operator=(const SimpleThreadJoinGuard&) = delete;
+				~SimpleThreadJoinGuard()
+				{
+					if (worker.joinable())
+						worker.join();
+				}
+			};
+
+			struct PortAuditState
+			{
+				std::mutex mutex;
+				std::condition_variable cv;
+				std::atomic<int> nextPortIndex{ 0 };
+				std::atomic<int> eventSeq{ 0 };
+				std::atomic<int> port1Opens{ 0 };
+				std::atomic<int> port2Opens{ 0 };
+				bool gateStop = false;
+				bool releaseStop = false;
+				std::atomic<bool> port1CloseEntered{ false };
+				std::atomic<bool> port1CloseFinished{ false };
+				std::atomic<bool> port1CloseTimedOut{ false };
+				std::atomic<int> port1CloseEnteredOrder{ 0 };
+				std::atomic<int> port1CloseFinishedOrder{ 0 };
+				std::atomic<int> port2OpenOrder{ 0 };
+
+				void ReleaseGate()
+				{
+					{
+						std::lock_guard<std::mutex> lock(mutex);
+						releaseStop = true;
+					}
+					cv.notify_all();
+				}
+			};
+
+			struct GateReleaseGuard
+			{
+				std::shared_ptr<PortAuditState> state;
+				explicit GateReleaseGuard(std::shared_ptr<PortAuditState> stateIn) : state(std::move(stateIn)) {}
+				GateReleaseGuard(const GateReleaseGuard&) = delete;
+				GateReleaseGuard& operator=(const GateReleaseGuard&) = delete;
+				~GateReleaseGuard()
+				{
+					if (state)
+						state->ReleaseGate();
+				}
+			};
+
+			class BlockingStopSerialPort : public LedDrive::ISerialPort
+			{
+			public:
+				BlockingStopSerialPort(std::shared_ptr<PortAuditState> stateIn, int portIndexIn)
+					: state(std::move(stateIn)), portIndex(portIndexIn)
+				{
+				}
+
+				bool Open(const std::string&, int, std::string&) override
+				{
+					open = true;
+					{
+						std::lock_guard<std::mutex> lock(state->mutex);
+						const int order = state->eventSeq.fetch_add(1, std::memory_order_acq_rel) + 1;
+						if (portIndex == 1)
+						{
+							state->port1Opens.fetch_add(1, std::memory_order_acq_rel);
+						}
+						else if (portIndex == 2)
+						{
+							state->port2OpenOrder.store(order, std::memory_order_release);
+							state->port2Opens.fetch_add(1, std::memory_order_acq_rel);
+						}
+					}
+					state->cv.notify_all();
+					return true;
+				}
+
+				void Close() override
+				{
+					// BarcoAsciiDriver::Open() invokes Close() before opening, and ~BarcoAsciiDriver()
+					// invokes Close() again; only gate and record when closing an actually open port #1.
+					if (!open)
+						return;
+					open = false;
+					if (portIndex != 1)
+						return;
+					{
+						std::unique_lock<std::mutex> lock(state->mutex);
+						const int enterOrder = state->eventSeq.fetch_add(1, std::memory_order_acq_rel) + 1;
+						state->port1CloseEnteredOrder.store(enterOrder, std::memory_order_release);
+						state->port1CloseEntered.store(true, std::memory_order_release);
+						state->cv.notify_all();
+						if (state->gateStop)
+						{
+							const bool released = state->cv.wait_for(lock, std::chrono::seconds(5),
+								[&] { return state->releaseStop; });
+							if (!released)
+								state->port1CloseTimedOut.store(true, std::memory_order_release);
+						}
+						const int finishOrder = state->eventSeq.fetch_add(1, std::memory_order_acq_rel) + 1;
+						state->port1CloseFinishedOrder.store(finishOrder, std::memory_order_release);
+						state->port1CloseFinished.store(true, std::memory_order_release);
+					}
+					state->cv.notify_all();
+				}
+
+				bool IsOpen() const override { return open; }
+				void DiscardInput() override {}
+				bool Write(const std::string&, std::string&) override { return open; }
+				bool ReadLine(int, std::string& line) override { line.clear(); return false; }
+
+			private:
+				std::shared_ptr<PortAuditState> state;
+				int portIndex = 0;
+				bool open = false;
+			};
+
 			AdapterConfig initialCfg(
 				"[projector.default]\n"
-				"protocol: none\n"
-				"min_command_gap_ms: 200\n"
+				"protocol: barco_ascii\n"
+				"port: COM99\n"
+				"read_back: off\n"
+				"terminator: script\n"
+				"min_command_gap_ms: 0\n"
 				"[led_drive.default]\n"
 				"enabled: on\n"
-				"mode: log_only\n"
+				"mode: script\n"
+				"script_pacing: tick\n"
+				"script_lookahead: off\n"
 				"tick_ms: 50\n"
 				"knee: 0.08\n");
 			AdapterConfig reconfigCfg(
 				"[projector.default]\n"
-				"protocol: none\n"
-				"min_command_gap_ms: 200\n"
+				"protocol: barco_ascii\n"
+				"port: COM99\n"
+				"read_back: off\n"
+				"terminator: script\n"
+				"min_command_gap_ms: 0\n"
 				"[led_drive.default]\n"
 				"enabled: on\n"
-				"mode: log_only\n"
+				"mode: script\n"
+				"script_pacing: tick\n"
+				"script_lookahead: off\n"
 				"tick_ms: 50\n"
 				"knee: 0.12\n");
 			AdapterConfig replacedCfg(
 				"[projector.default]\n"
-				"protocol: none\n"
-				"min_command_gap_ms: 300\n"
+				"protocol: barco_ascii\n"
+				"port: COM99\n"
+				"read_back: off\n"
+				"terminator: script\n"
+				"min_command_gap_ms: 10\n"
 				"[led_drive.default]\n"
 				"enabled: on\n"
-				"mode: log_only\n"
+				"mode: script\n"
+				"script_pacing: tick\n"
+				"script_lookahead: off\n"
 				"tick_ms: 50\n"
 				"knee: 0.12\n");
 			AdapterConfig disabledCfg(
 				"[projector.default]\n"
-				"protocol: none\n"
-				"min_command_gap_ms: 300\n"
+				"protocol: barco_ascii\n"
+				"port: COM99\n"
+				"read_back: off\n"
+				"terminator: script\n"
+				"min_command_gap_ms: 10\n"
 				"[led_drive.default]\n"
 				"enabled: off\n"
-				"mode: log_only\n"
+				"mode: script\n"
+				"script_pacing: tick\n"
+				"script_lookahead: off\n"
 				"tick_ms: 50\n");
+
+			// 0. In-test Negative Control (proving stopGate genuinely blocks LedDriveModule::Stop()
+			// on the exact same config and BlockingStopSerialPort):
+			{
+				auto negState = std::make_shared<PortAuditState>();
+				LedDrive::LedDriveModule negMod(
+					LedDrive::ReadProjectorConfig(*initialCfg.config),
+					LedDrive::ReadLedDriveConfig(*initialCfg.config),
+					[negState]() -> std::unique_ptr<LedDrive::ISerialPort>
+					{
+						const int idx = negState->nextPortIndex.fetch_add(1, std::memory_order_acq_rel) + 1;
+						return std::make_unique<BlockingStopSerialPort>(negState, idx);
+					});
+				negMod.Start();
+				Assert::IsTrue(WaitFor([&]
+				{
+					return negState->port1Opens.load(std::memory_order_acquire) == 1 && negMod.DrivingProjector();
+				}), L"negative control: standalone module must open BlockingStopSerialPort");
+
+				{
+					std::lock_guard<std::mutex> lock(negState->mutex);
+					negState->gateStop = true;
+					negState->releaseStop = false;
+				}
+
+				std::atomic<bool> negStopFinished{ false };
+				std::thread negStopThread([&]()
+				{
+					negMod.Stop();
+					negStopFinished.store(true, std::memory_order_release);
+				});
+				SimpleThreadJoinGuard negJoinGuard(negStopThread);
+				GateReleaseGuard negGateGuard(negState);
+
+				Assert::IsTrue(WaitFor([&] { return negState->port1CloseEntered.load(std::memory_order_acquire); }),
+					L"negative control: standalone Stop() must enter BlockingStopSerialPort::Close()");
+				std::this_thread::sleep_for(std::chrono::milliseconds(25));
+				Assert::IsFalse(negStopFinished.load(std::memory_order_acquire),
+					L"negative control: standalone Stop() must remain blocked while stopGate is held");
+				Assert::IsFalse(negState->port1CloseFinished.load(std::memory_order_acquire),
+					L"negative control: Close() must not finish while stopGate is held");
+
+				negState->ReleaseGate();
+				Assert::IsTrue(WaitFor([&] { return negStopFinished.load(std::memory_order_acquire); }),
+					L"negative control: standalone Stop() must complete once stopGate is released");
+				negStopThread.join();
+				Assert::IsTrue(negState->port1CloseFinished.load(std::memory_order_acquire),
+					L"negative control: Close() must record completion after gate release");
+				Assert::IsFalse(negState->port1CloseTimedOut.load(std::memory_order_acquire),
+					L"negative control: Close() must unblock via gate release, not safety timeout");
+			}
 
 			std::weak_ptr<LedDrive::LedDriveModule> finalWeak;
 			{
+				auto portState = std::make_shared<PortAuditState>();
 				std::mutex state;
 				std::shared_ptr<QueuedFrameStatistics::IObserver> walkObserver;
 				LedDrive::DynamicDriveShared shared(walkObserver);
 				LedDrive::DynamicDriveHost host(state);
 				HostCleanupGuard cleanup(host, &shared);
+				GateReleaseGuard gateRelease(portState);
+
+				host.SetPortFactoryForTest([portState]() -> std::unique_ptr<LedDrive::ISerialPort>
+				{
+					const int idx = portState->nextPortIndex.fetch_add(1, std::memory_order_acq_rel) + 1;
+					return std::make_unique<BlockingStopSerialPort>(portState, idx);
+				});
 
 				LedDrive::HostContext context;
 				context.frame = &shared;
 				context.projectorAllowed = true;
 
-				// 1. Start the initial running module.
+				// 1. Start the initial running module on port #1.
 				{
 					std::lock_guard<std::mutex> lock(state);
 					host.ApplySnapshot(initialCfg.config, std::string(), context);
@@ -1146,9 +1389,13 @@ namespace VideoProcessorTest
 				Assert::IsNotNull(firstModule.get(), L"initial enabled snapshot must start a module");
 				Assert::IsTrue(shared.Module().get() == firstModule.get(), L"initial module must be published to DynamicDriveShared");
 				Assert::IsTrue(host.StatusText().find("source ") != std::string::npos, L"initial module must report active status");
+				Assert::IsTrue(WaitFor([&]
+				{
+					return portState->port1Opens.load(std::memory_order_acquire) == 1 && firstModule->DrivingProjector();
+				}), L"initial module must open test serial port #1 and become live");
 
-				// 2. Negative control: a reconfigurable tuning change (knee only, same connection params)
-				// must keep the exact same LedDriveModule pointer in-place.
+				// 2. In-place Reconfigure negative control: a reconfigurable tuning change (knee only,
+				// same connection params) must keep the exact same LedDriveModule pointer in-place.
 				{
 					std::lock_guard<std::mutex> lock(state);
 					host.ApplySnapshot(reconfigCfg.config, std::string(), context);
@@ -1161,10 +1408,19 @@ namespace VideoProcessorTest
 					L"negative control: DynamicDriveShared must keep the exact same LedDriveModule pointer");
 				Assert::AreEqual(0.12, host.Params().knee, 1e-12,
 					L"negative control: reconfigurable tuning change must update published params");
+				Assert::AreEqual(1, portState->port1Opens.load(std::memory_order_acquire),
+					L"negative control: in-place Reconfigure must not reopen port #1");
+				Assert::AreEqual(0, portState->port2Opens.load(std::memory_order_acquire),
+					L"negative control: in-place Reconfigure must not create port #2");
 
-				// 3. Full module replacement (non-reconfigurable connection parameter min_command_gap_ms changed):
-				// probe stateMutex from another thread while caller holds stateLock across ApplySnapshot()
-				// to prove Update() NEVER unlocks stateMutex.
+				// 3. Fix Proof A (Non-blocking Update() while holding stateMutex):
+				// Arm port #1's stop gate so previous->Stop() blocks until released, hold stateMutex with a
+				// concurrent try_lock probe, and apply replacedCfg (min_command_gap_ms 0 -> 10).
+				{
+					std::lock_guard<std::mutex> lock(portState->mutex);
+					portState->gateStop = true;
+					portState->releaseStop = false;
+				}
 				{
 					std::unique_lock<std::mutex> stateLock(state);
 					std::atomic<bool> stopProbe{ false };
@@ -1203,9 +1459,24 @@ namespace VideoProcessorTest
 						L"lock probe thread must have exercised stateMutex.try_lock() across ApplySnapshot()");
 					Assert::IsFalse(observedUnlock.load(std::memory_order_acquire),
 						L"Update() must NOT unlock the caller's stateMutex during module replacement");
+
+					// Immediately after ApplySnapshot() returns (BEFORE releasing stopGate):
+					// releaseStop is still false and port #1 has NOT finished closing (proving Update()
+					// returned asynchronously without blocking on previous->Stop()!).
+					bool gateStillHeld = false;
+					{
+						std::lock_guard<std::mutex> gateLock(portState->mutex);
+						gateStillHeld = !portState->releaseStop;
+					}
+					Assert::IsTrue(gateStillHeld,
+						L"ApplySnapshot() must return while port #1 stop gate is still held");
+					Assert::IsFalse(portState->port1CloseFinished.load(std::memory_order_acquire),
+						L"ApplySnapshot() must not wait for port #1 Close()/Stop() to finish");
+					Assert::IsFalse(portState->port1CloseTimedOut.load(std::memory_order_acquire),
+						L"port #1 Close() must not have hit the safety timeout during ApplySnapshot() (would prove synchronous blocking Stop())");
 				}
 
-				// 4. Verify replacement module is a distinct live instance and the previous module stops/releases.
+				// 4. Fix Proof B (Strict stop-before-start port handoff ordering):
 				std::shared_ptr<LedDrive::LedDriveModule> replacedModule = host.Module();
 				Assert::IsNotNull(replacedModule.get(), L"replacement snapshot must publish a live module");
 				Assert::IsTrue(replacedModule.get() != firstModule.get(),
@@ -1214,6 +1485,33 @@ namespace VideoProcessorTest
 					L"DynamicDriveShared must publish the replacement module");
 				Assert::IsTrue(host.StatusText().find("source ") != std::string::npos,
 					L"replacement module must report active status");
+
+				Assert::IsTrue(WaitFor([&] { return portState->port1CloseEntered.load(std::memory_order_acquire); }),
+					L"background lifecycle worker must enter port #1 Close() during asynchronous Stop()");
+				std::this_thread::sleep_for(std::chrono::milliseconds(30));
+				Assert::IsFalse(portState->port1CloseFinished.load(std::memory_order_acquire),
+					L"port #1 Close() must remain blocked while stop gate is held");
+				Assert::AreEqual(0, portState->port2Opens.load(std::memory_order_acquire),
+					L"replacement module must NOT open port #2 while port #1 is still stopping");
+
+				// Release port #1's stop gate and prove strict monotonic ordering:
+				// port1CloseEnteredOrder < port1CloseFinishedOrder < port2OpenOrder.
+				portState->ReleaseGate();
+				Assert::IsTrue(WaitFor([&]
+				{
+					return portState->port1CloseFinished.load(std::memory_order_acquire) &&
+						portState->port2Opens.load(std::memory_order_acquire) == 1;
+				}), L"releasing port #1 stop gate must let port #1 Close() finish and replacement open port #2");
+				Assert::IsFalse(portState->port1CloseTimedOut.load(std::memory_order_acquire),
+					L"port #1 Close() must complete via gate release, not safety timeout");
+				Assert::IsTrue(portState->port1CloseEnteredOrder.load(std::memory_order_acquire) > 0,
+					L"port #1 Close() entry sequence must be recorded");
+				Assert::IsTrue(portState->port1CloseEnteredOrder.load(std::memory_order_acquire) <
+					portState->port1CloseFinishedOrder.load(std::memory_order_acquire),
+					L"port #1 Close() entry must precede port #1 Close() completion");
+				Assert::IsTrue(portState->port1CloseFinishedOrder.load(std::memory_order_acquire) <
+					portState->port2OpenOrder.load(std::memory_order_acquire),
+					L"strict stop-before-start handoff: port #1 Close() must finish strictly before port #2 Open()");
 
 				const std::weak_ptr<LedDrive::LedDriveModule> firstWeak = firstModule;
 				afterReconfig.reset();
@@ -1243,7 +1541,8 @@ namespace VideoProcessorTest
 				Assert::IsTrue(WaitFor([&] { return replacedWeak.expired(); }),
 					L"disabling must cleanly stop and release the replacement module");
 
-				// 6. Re-enable, SuspendForTest, ResumeAfterTest, then verify destruction joins cleanly without hanging.
+				// 6. Re-enable, SuspendForTest, ResumeAfterTest, then dismiss HostCleanupGuard so
+				// ~DynamicDriveHost() itself exercises live module stop, join, and release.
 				{
 					std::lock_guard<std::mutex> lock(state);
 					host.ApplySnapshot(replacedCfg.config, std::string(), context);
@@ -1268,6 +1567,12 @@ namespace VideoProcessorTest
 				Assert::IsNotNull(resumedModule.get(), L"ResumeAfterTest must restart the module");
 				finalWeak = resumedModule;
 				resumedModule.reset();
+				// Release DynamicDriveShared's copy so DynamicDriveHost owns the sole remaining reference,
+				// then dismiss HostCleanupGuard so ~DynamicDriveHost() stops, joins, and releases it.
+				shared.Clear();
+				Assert::IsFalse(finalWeak.expired(),
+					L"DynamicDriveHost must still own the live resumed module prior to ~DynamicDriveHost()");
+				cleanup.Dismiss();
 			}
 
 			Assert::IsTrue(finalWeak.expired(),
