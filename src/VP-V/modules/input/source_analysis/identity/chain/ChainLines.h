@@ -13,7 +13,12 @@
 // Header-only, standard library only, C++14, no clock.
 #include "LineSampler.h"
 
+#include <VP-V/core/RobustStats.h>
+
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 namespace SourceIdentity
@@ -137,6 +142,53 @@ namespace SourceIdentity
 			if (s.rows.empty() && s.cols.empty())
 				return 1;
 			return (allMultiple(s.rows) && allMultiple(s.cols)) ? 4 : 1;
+		}
+
+		// Minimum interior second-difference count for a stable MAD floor estimate: matches SamplerSettings::minRun (64),
+		// where the asymptotic relative standard error of a Gaussian MAD (~1.167 / sqrt(N)) is ~15%.
+		constexpr size_t kMinFloorDiffs = 64u;
+
+		// Unit-agnostic measured floor in snapshot code units from interior 1-D second differences (GEM-083, shadow):
+		//   d2[i] = x[i - 1] - 2*x[i] + x[i + 1]   strictly within each row/col line (never across a line boundary).
+		// For i.i.d. zero-mean perturbations of std dev sigma, Var(d2) = (1^2 + (-2)^2 + 1^2) * sigma^2 = 6 * sigma^2,
+		// so sigma_hat = RobustStats::MadSigma(RobustStats::Mad(d2)) / sqrt(6). Floored by the uniform quantisation
+		// std dev stepCodes / sqrt(12). Returns quiet_NaN when fewer than kMinFloorDiffs (64) valid diffs exist.
+		inline double MeasuredFloorCodes(const LineSnapshot& s, double stepCodes)
+		{
+			const bool rowsOk = s.rowCount > 0 && s.inner.w >= 3 &&
+				s.rows.size() == static_cast<size_t>(s.rowCount) * static_cast<size_t>(s.inner.w);
+			const bool colsOk = s.colCount > 0 && s.inner.h >= 3 &&
+				s.cols.size() == static_cast<size_t>(s.colCount) * static_cast<size_t>(s.inner.h);
+			const size_t nRowDiffs = rowsOk ? static_cast<size_t>(s.rowCount) * static_cast<size_t>(s.inner.w - 2) : 0u;
+			const size_t nColDiffs = colsOk ? static_cast<size_t>(s.colCount) * static_cast<size_t>(s.inner.h - 2) : 0u;
+			if (nRowDiffs + nColDiffs < kMinFloorDiffs)
+				return std::numeric_limits<double>::quiet_NaN();
+			std::vector<int32_t> diffs;
+			diffs.reserve(nRowDiffs + nColDiffs);
+			if (rowsOk)
+			{
+				const size_t w = static_cast<size_t>(s.inner.w);
+				for (int j = 0; j < s.rowCount; ++j)
+				{
+					const uint16_t* row = &s.rows[static_cast<size_t>(j) * w];
+					for (size_t i = 1; i + 1 < w; ++i)
+						diffs.push_back(static_cast<int32_t>(row[i - 1]) - 2 * static_cast<int32_t>(row[i]) + static_cast<int32_t>(row[i + 1]));
+				}
+			}
+			if (colsOk)
+			{
+				const size_t h = static_cast<size_t>(s.inner.h);
+				for (int j = 0; j < s.colCount; ++j)
+				{
+					const uint16_t* col = &s.cols[static_cast<size_t>(j) * h];
+					for (size_t i = 1; i + 1 < h; ++i)
+						diffs.push_back(static_cast<int32_t>(col[i - 1]) - 2 * static_cast<int32_t>(col[i]) + static_cast<int32_t>(col[i + 1]));
+				}
+			}
+			const double raw = RobustStats::MadSigma(RobustStats::Mad(diffs)) / std::sqrt(6.0);
+			const double effStep = (std::isfinite(stepCodes) && stepCodes > 0.0) ? stepCodes : 1.0;
+			const double qFloor = effStep / std::sqrt(12.0);
+			return (std::max)(raw, qFloor);
 		}
 
 		// FNV-1a over the snapshot's content (tests; the dump's self-check).
