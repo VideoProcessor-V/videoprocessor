@@ -191,12 +191,18 @@ namespace Vpv
 			if (!rendererHost || !implHost)
 				return;
 			BindImplHost(rendererHost, implHost);
+			const std::shared_ptr<Entry> entry = Slots().Find(rendererHost);
+			uint64_t stateBefore = entry ? entry->pathwayState.load(std::memory_order_acquire) : 0u;
 			uint32_t fixBits = 0;
 			if (Hub::ExtensionHub::Instance().FixSwitchBits(implHost, fixBits))
 			{
 				const IngressState::FixSwitches switches = IngressState::FixSwitchesFromBits(fixBits);
 				state.SyncIngressSwitches(switches, queueTimingFixes, motionHistoryFixes);
-				NoteOriginalPathway(rendererHost, switches.originalPathway);
+				if (entry)
+				{
+					const uint64_t next = ((stateBefore & ~kOriginalBit) + kSeqStep) | (switches.originalPathway ? kOriginalBit : 0u);
+					entry->pathwayState.compare_exchange_strong(stateBefore, next, std::memory_order_acq_rel, std::memory_order_acquire);
+				}
 			}
 		}
 
