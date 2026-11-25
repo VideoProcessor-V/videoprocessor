@@ -448,25 +448,35 @@ namespace VideoProcessorTest
 			Assert::AreEqual(1.0f, wMax, L"the grid reaches w = 1 (the sharp branch alone)");
 		}
 
-		// CF-2 switch-over (WAIVER): the stage's one ask per upscale frame is now kP10gGrainLevel (the default key); the edge
-		// term is the module measure's own kEdgeMap stage variant (S18), so the stage asks no kEdgeMap. Name kept (rule 12).
+		// CF-2 switch-over + M1#1 (WAIVER): the stage acquires kP10gGrainLevel and kP3AnalysisField (each once per
+		// 2-axis upscale frame, default key); the edge term is the module measure's own kEdgeMap stage variant (S18),
+		// so the stage asks no kEdgeMap. Name kept (rule 12).
 		TEST_METHOD(HybridEdgeSeamAsksOncePerFrameForTheStageVariant)
 		{
 			OneAxisStageFixture x;
-			int asks = 0, edgeAsks = 0, motionReads = 0;
-			VpSkeleton::ProductId askedId = VpSkeleton::kNoProduct;
-			VpSkeleton::VariantKey askedKey;
-			uint64_t askedSeq = 0;
+			int p10gAsks = 0, p3Asks = 0, edgeAsks = 0, otherAsks = 0, motionReads = 0;
+			VpSkeleton::VariantKey p10gKey, p3Key;
+			uint64_t p10gSeq = 0, p3Seq = 0;
 			x.host.acquire = [&](VpSkeleton::ProductId id, uint64_t seq, const VpSkeleton::VariantKey& key)
 			{
-				++asks;
-				if (id == VpSkeleton::kEdgeMap)
+				if (id == VpSkeleton::kP10gGrainLevel)
+				{
+					++p10gAsks;
+					p10gKey = key;
+					p10gSeq = seq;
+				}
+				else if (id == VpSkeleton::kP3AnalysisField)
+				{
+					++p3Asks;
+					p3Key = key;
+					p3Seq = seq;
+				}
+				else if (id == VpSkeleton::kEdgeMap)
 					++edgeAsks;
-				askedId = id;
-				askedKey = key;
-				askedSeq = seq;
+				else
+					++otherAsks;
 				VpSkeleton::AcquireResult r;
-				r.cause = VpSkeleton::AcquireCause::VariantUndeclared;   // not served: the grain floor
+				r.cause = VpSkeleton::AcquireCause::VariantUndeclared;   // not served: the grain / motion floor
 				return r;
 			};
 			x.host.motion = [&]() { ++motionReads; return AdaptiveDownscaleStage::MotionSource(); };
@@ -474,12 +484,15 @@ namespace VideoProcessorTest
 			AdaptiveDownscaleStage::Frame f = x.Frame(1920, 1080, 2560, 1440);
 			f.adaptiveUpscale = true;
 			x.Run(f, hooks);
-			Assert::AreEqual(1, asks, L"one Acquire per frame per product");
+			Assert::AreEqual(1, p10gAsks, L"one Acquire per frame for kP10gGrainLevel");
+			Assert::AreEqual(1, p3Asks, L"one Acquire per frame for kP3AnalysisField");
 			Assert::AreEqual(0, edgeAsks, L"the stage asks no kEdgeMap (the module measure's stage variant, S18)");
-			Assert::AreEqual(1, motionReads, L"one motion read per frame");
-			Assert::IsTrue(askedId == VpSkeleton::kP10gGrainLevel);
-			Assert::IsTrue(askedKey.IsDefault(), L"the default key");
-			Assert::IsTrue(askedSeq == 3);
+			Assert::AreEqual(0, otherAsks, L"no other product Acquire calls");
+			Assert::AreEqual(0, motionReads, L"declined kP3AnalysisField does not fall back to host.motion");
+			Assert::IsTrue(p10gKey.IsDefault(), L"the default key for kP10gGrainLevel");
+			Assert::IsTrue(p3Key.IsDefault(), L"the default key for kP3AnalysisField");
+			Assert::IsTrue(p10gSeq == 3);
+			Assert::IsTrue(p3Seq == 3);
 			Assert::IsFalse(x.stage.GrainTerm().published);
 			Assert::IsTrue(x.stage.GrainTerm().cause.find("variant not served by the owner") != std::string::npos);
 			Assert::IsTrue(HasLine(x.stage.StatusLines(), "Adaptive upscale grain: no grain level (alias-safe weight; kP10gGrainLevel"),
@@ -488,14 +501,17 @@ namespace VideoProcessorTest
 			f.sourceSequence = 4;
 			hooks.clear();
 			x.Run(f, hooks);
-			Assert::AreEqual(2, asks);
-			Assert::AreEqual(2, motionReads);
+			Assert::AreEqual(2, p10gAsks);
+			Assert::AreEqual(2, p3Asks);
+			Assert::AreEqual(0, otherAsks);
+			Assert::AreEqual(0, motionReads);
 			// The downscale form never asks.
 			AdaptiveDownscaleStage::Frame d = x.Frame(3840, 2160, 2560, 1440);
 			d.adaptiveDownscale = true;
 			hooks.clear();
 			x.Run(d, hooks);
-			Assert::AreEqual(2, asks, L"the downscale form is unchanged: no grain-level ask");
+			Assert::AreEqual(2, p10gAsks, L"the downscale form is unchanged: no grain-level ask");
+			Assert::AreEqual(2, p3Asks, L"the downscale form is unchanged: no P3 upscale Acquire ask");
 			Assert::IsFalse(HasLine(x.stage.StatusLines(), "Adaptive upscale grain"));
 		}
 
@@ -550,6 +566,26 @@ namespace VideoProcessorTest
 			x.settings.motionStrength = 1.0f;
 			static int tex = 0;
 			bool live = false;
+			x.host.acquire = [&](VpSkeleton::ProductId id, uint64_t, const VpSkeleton::VariantKey&)
+			{
+				VpSkeleton::AcquireResult r;
+				if (id == VpSkeleton::kP10gGrainLevel)
+				{
+					r.status = VpSkeleton::AcquireStatus::Reused;
+					r.gpu.resource = &tex;
+				}
+				else if (id == VpSkeleton::kP3AnalysisField)
+				{
+					if (live)
+					{
+						r.status = VpSkeleton::AcquireStatus::Reused;
+						r.gpu.resource = &tex;
+					}
+					else
+						r.cause = VpSkeleton::AcquireCause::OwnerDeclined;
+				}
+				return r;
+			};
 			x.host.motion = [&]()
 			{
 				AdaptiveDownscaleStage::MotionSource m;
@@ -561,9 +597,9 @@ namespace VideoProcessorTest
 			AdaptiveDownscaleStage::Frame f = x.Frame(1920, 1080, 2560, 1440);
 			f.adaptiveUpscale = true;
 			x.Run(f, hooks);
-			Assert::IsTrue(HasLine(x.stage.StatusLines(), "Adaptive upscale motion: no vectors (alias-safe weight) (no live estimate)"));
+			Assert::IsTrue(HasLine(x.stage.StatusLines(), "Adaptive upscale motion: no vectors (alias-safe weight) (kP3AnalysisField owner fill declined)"));
 			const FallbackCatalog::Decision d = x.stage.Fallback();
-			Assert::IsTrue(d.engaged && d.reason.find("alias-safe weight (no live estimate)") != std::string::npos);
+			Assert::IsTrue(d.engaged && d.reason.find("alias-safe weight (kP3AnalysisField owner fill declined)") != std::string::npos);
 			live = true;
 			f.sourceSequence = 4;
 			hooks.clear();
@@ -1098,6 +1134,16 @@ namespace VideoProcessorTest
 				host.nlsMapping = []() { return NlsMaskMapping::Mapping(); };
 				host.ssimInChain = []() { return false; };
 				host.publishStatus = []() {};
+				host.acquire = [&](VpSkeleton::ProductId id, uint64_t, const VpSkeleton::VariantKey&)
+				{
+					VpSkeleton::AcquireResult r;
+					if (id == VpSkeleton::kP3AnalysisField)
+					{
+						r.status = VpSkeleton::AcquireStatus::Reused;
+						r.gpu.resource = const_cast<pl_tex_t*>(steady);
+					}
+					return r;
+				};
 				host.motion = [&]()
 				{
 					AdaptiveDownscaleStage::MotionSource m;
