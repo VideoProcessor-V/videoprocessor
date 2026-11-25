@@ -113,17 +113,14 @@ namespace VpMotion
 		}
 		else
 		{
-			const ::MotionValidity::State::ConfirmedCutFn confirmedCut =
-				::MotionValidity::State::ConfirmedCutReader().load(std::memory_order_acquire);
-			if (confirmedCut != nullptr)
-				for (uint64_t seq = from + 1u; seq <= to; ++seq)
-					if (confirmedCut(seq))
-					{
-						motionValidity.NoteConfirmedCutRefusal();   // GF-P4 S-2: counted as PairValidAt counts an adjacent refusal
-						why = "p2 cpu form: gap pair " + std::to_string(from) + " -> " + std::to_string(to) + " crosses a confirmed cut at "
-							+ std::to_string(seq);
-						return false;
-					}
+			for (uint64_t seq = from + 1u; seq <= to; ++seq)
+				if (motionValidity.IsConfirmedCut(seq))
+				{
+					motionValidity.NoteConfirmedCutRefusal();   // GF-P4 S-2: counted as PairValidAt counts an adjacent refusal
+					why = "p2 cpu form: gap pair " + std::to_string(from) + " -> " + std::to_string(to) + " crosses a confirmed cut at "
+						+ std::to_string(seq);
+					return false;
+				}
 		}
 		out = MakeP2PairRecord(from, to, pairGeneration, flow->global, flow->second, flow->globalSet, flow->globalGeneral);
 		return true;
@@ -785,12 +782,14 @@ namespace VpMotion
 
 	VectorEngine::VectorEngine(const void* host) : host_(host)
 	{
+		motionValidity.SetHost(host_);
 		if (host_)
 			Engines().Add(host_, this);
 	}
 
 	VectorEngine::VectorEngine(const void* host, InvalidateSink sink) : host_(host), invalidateSink_(sink)
 	{
+		motionValidity.SetHost(host_);
 		if (host_)
 			Engines().Add(host_, this);
 	}

@@ -246,34 +246,28 @@ namespace Vpv
 			};
 			QueueInUse QueueInUseOf(const void* host) const;
 			// The live feed's entry (any thread, e.g. a settings change on the UI thread or the renderer's gate): ONE atomic snapshot
-			// that the render thread reads once per frame in Begin(); terms not marked in `q.wired` are reset to their defaults.
-			void PublishQueue(const QueueShape& q) { queueBits_.store(Pack(q), std::memory_order_release); }
-			QueueShape CurrentQueue() const { return Unpack(queueBits_.load(std::memory_order_acquire)); }
+			// per host (K#9) that the render thread reads once per frame in Begin(); terms not marked in `q.wired` are reset to their defaults.
+			// 0-arg overloads remain backwards-compatible for standalone single-host tests.
+			void PublishQueue(const QueueShape& q);
+			void PublishQueue(const void* host, const QueueShape& q);
+			QueueShape CurrentQueue() const;
+			QueueShape CurrentQueue(const void* host) const;
 			// The three feeds below are shaped alike (FEED RULE, owner decision 2026-11-07): each one compare-and-swaps ITS term into the one
 			// snapshot and leaves the others as they are. A feed must never PublishQueue a fresh QueueShape: that would erase the terms the
 			// other feeds delivered. Any thread; a value equal to the published one does not touch the snapshot (change-only).
 			//
 			// The look-ahead walk term, delivered by the host's SettingsApplied lifecycle call (LifecycleFacts::value = the motion look-ahead
 			// depth in frames, 0 = off). Host thread.
-			void PublishLookAheadWalk(double frames)
-			{
-				const unsigned w = frames > 0.0 ? (frames < 65535.0 ? unsigned(frames) : 65535u) : 0u;   // NaN and negatives: 0
-				MergeTerm([w](QueueShape& q) { q.lookAheadWalk = uint16_t(w); q.wired = uint8_t(q.wired | QueueShape::kLookAhead); });
-			}
+			void PublishLookAheadWalk(double frames);
+			void PublishLookAheadWalk(const void* host, double frames);
 			// The render-ahead depth term: frames the renderer's render-ahead plan keeps ahead of the present (planned lead / source period; a
 			// partial frame holds a slot, so it rounds up). The host's one generic call at the render-ahead plan block delivers it.
-			void PublishRenderAhead(double frames)
-			{
-				const unsigned r = frames > 0.0 ? (frames < 255.0 ? unsigned(std::ceil(frames - 1e-9)) : 255u) : 0u;   // NaN and negatives: 0
-				MergeTerm([r](QueueShape& q) { q.renderAhead = uint8_t(r); q.wired = uint8_t(q.wired | QueueShape::kRenderAhead); });
-			}
+			void PublishRenderAhead(double frames);
+			void PublishRenderAhead(const void* host, double frames);
 			// The lane lead term: frames actually queued ahead of the render (the input queue's size at the CollectAhead phase). Stored as fed
 			// (0..255); the render thread caps it to the ring-slot budget when it builds the graph (LaneLeadCap, shown).
-			void PublishLaneLead(double frames)
-			{
-				const unsigned l = frames > 0.0 ? (frames < 255.0 ? unsigned(frames) : 255u) : 0u;
-				MergeTerm([l](QueueShape& q) { q.laneLead = uint8_t(l); q.wired = uint8_t(q.wired | QueueShape::kLaneLead); });
-			}
+			void PublishLaneLead(double frames);
+			void PublishLaneLead(const void* host, double frames);
 			// The ring-slot budget the queue terms share (Products.h kRingHeadroomFrames: a ring holds record history + 1 + R + L + the queue
 			// and span slots + the largest lead read, and a graph that needs more than 255 slots is rejected, so the lane would be lost): the
 			// room left for render-ahead + lane lead when the record histories sit at their cap.
@@ -282,10 +276,8 @@ namespace Vpv
 			static unsigned LaneLeadCap(unsigned renderAhead) { return RingSlotBudget() - CappedRenderAhead(renderAhead); }
 			// Withdraws the render-ahead term (not wired again: the depths fall back to their floors and the skeleton_queue entry names it): the plan
 			// stopped (render-ahead off), or the host had no source period to express the lead in frames.
-			void UnpublishRenderAhead()
-			{
-				MergeTerm([](QueueShape& q) { q.renderAhead = 0; q.wired = uint8_t(q.wired & ~QueueShape::kRenderAhead); });
-			}
+			void UnpublishRenderAhead();
+			void UnpublishRenderAhead(const void* host);
 			// Names of the undelivered terms ("" when all three are wired) and the Fallbacks decision for them.
 			static std::string QueueNotWiredNote(uint8_t wired)
 			{
@@ -297,7 +289,8 @@ namespace Vpv
 			}
 			static FallbackCatalog::Decision QueueDecision(uint8_t wired) { return FallbackCatalog::SkeletonQueueNotWired(QueueNotWiredNote(wired)); }
 			// Tests only, single-threaded (a test drives the module on one thread): sets all three terms as delivered. Not a feed.
-			void SetQueueForTesting(QueueShape q) { q.wired = QueueShape::kAll; PublishQueue(q); }
+			void SetQueueForTesting(QueueShape q);
+			void SetQueueForTesting(const void* host, QueueShape q);
 			// Tests: do not start the lane worker threads (the test drives AnalysisLane::StepWorker itself).
 			void SetWorkerThreadsForTesting(bool start) { startWorkers_ = start; }
 			// Tests: use this card profile instead of the device query (no render device exists in a unit test).
@@ -329,18 +322,11 @@ namespace Vpv
 			bool PublishEngineSlots(HostState& st, Bundle& b, EngineFieldFacts& facts, unsigned& doneMask);
 			bool CollectExternal(const void* host, std::vector<VpSkeleton::ConsumerDecl>& consumers, std::vector<VpSkeleton::ProductId>& products,
 				bool& wantsCameraFit, size_t& duplicates) const;
-			template<class F> void MergeTerm(F&& set)
-			{
-				uint64_t cur = queueBits_.load(std::memory_order_relaxed);
-				for (;;)
-				{
-					QueueShape q = Unpack(cur);
-					set(q);
-					const uint64_t next = Pack(q);
-					if (next == cur || queueBits_.compare_exchange_weak(cur, next, std::memory_order_release, std::memory_order_relaxed))
-						break;
-				}
-			}
+			static void MergeAtomicBits(std::atomic<uint64_t>& bits, const std::function<void(QueueShape&)>& set);
+			uint64_t QueueBitsOf(const void* host) const;
+			void EraseHostQueue(const void* host);
+			void MergeHostQueue(const void* host, const std::function<void(QueueShape&)>& set);
+			void MergeAllQueues(const std::function<void(QueueShape&)>& set);
 
 			Skeleton::ConfigLoader loader_;
 			std::function<uint64_t()> nowUs_;
@@ -359,7 +345,7 @@ namespace Vpv
 			void RecordRenderTid(const void* host);
 			uint32_t RenderTidOf(const void* host) const;
 			// QKP B: the queue window of this Begin (derived before the memo seal, published to the board); the board is read by any thread.
-			void DeriveMemoWindow(const void* host, const std::shared_ptr<VpSkeleton::SkeletonMemo>& memo, uint64_t seq, const std::shared_ptr<HostState>& st, bool sampleTiming = true);
+			void DeriveMemoWindow(const void* host, const std::shared_ptr<MemoHost>& mh, uint64_t seq, const std::shared_ptr<HostState>& st, bool sampleTiming = true);
 		public:
 			const VpSkeleton::QueueWindowBoard* WindowBoardOf(const void* host) const;
 		private:
@@ -418,7 +404,9 @@ namespace Vpv
 				q.wired = uint8_t((bits >> 32) & 0xFF);
 				return q;
 			}
-			std::atomic<uint64_t> queueBits_{ uint64_t(1) << 8 };   // the published queue snapshot (see PublishQueue); initial value = Pack of the default QueueShape (0 / 1 / 0, nothing wired)
+			std::atomic<uint64_t> queueBits_{ uint64_t(1) << 8 };   // legacy 0-arg fallback snapshot; initial value = Pack of default QueueShape (0 / 1 / 0, nothing wired)
+			mutable std::mutex hostQueueMutex_;                     // K#9: pre-creation per-host QueueShape storage (seeded into HostState / MemoHost on creation)
+			std::vector<std::pair<const void*, uint64_t>> hostQueues_;
 		};
 
 		// Adds SkeletonModule to the hub. Start-up only; idempotent. After RegisterResyncExtension.

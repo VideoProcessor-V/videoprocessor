@@ -10,6 +10,7 @@
 #include "QueueWindow.h"
 #include "VariantKey.h"
 
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <cstring>
@@ -421,7 +422,10 @@ public:
         std::lock_guard<std::mutex> g(mutex_);
         if (unit != OwnerUnitOf(id))
             return false;
-        return owners_.erase(OwnerKey(id, form)) != 0;
+        const bool removed = owners_.erase(OwnerKey(id, form)) != 0;
+        if (removed)
+            RefreshHasAheadDemandsLocked();
+        return removed;
     }
     bool HasOwnerFill(ProductId id, AcquireForm form) const { std::lock_guard<std::mutex> g(mutex_); return OwnerLocked(OwnerKey(id, form)) != nullptr; }
     // L-CORE: the lane BINDS the memo: its slots become the first G2 source and its fills (the lane's CPU live computes) take
@@ -436,6 +440,7 @@ public:
             if (!OwnerUnitOf(kv.first.first).empty())
                 laneOwners_[OwnerKey(kv.first.first, kv.first.second)] = std::move(kv.second);
         ++laneBinds_;
+        RefreshHasAheadDemandsLocked();
     }
     // The lane `token` ends: its source and fills are dropped, ONLY if it is still the bound one (a rebuild bound a newer lane
     // first: nothing happens). Module registrations stay. True = unbound. RENDER THREAD ONLY (like BindLane): the Acquire ahead
@@ -447,6 +452,7 @@ public:
             return false;
         lane_ = LaneSlotSource();
         laneOwners_.clear();
+        RefreshHasAheadDemandsLocked();
         return true;
     }
     bool LaneBound() const { std::lock_guard<std::mutex> g(mutex_); return bool(lane_.read) || bool(lane_.copyPublished); }
@@ -706,6 +712,8 @@ public:
         JobClass cls = JobClass::Core;
         const char* by = nullptr;   // the requester (OwnerFill::aheadBy), null = unnamed
     };
+    // Lock-free O(1) fast check (K#10): true iff ActiveAheadDemands() would be non-empty.
+    bool HasAheadDemands() const { return hasAheadDemands_.load(std::memory_order_acquire); }
     // The kAheadNeed term's input: every registered fill (lane fill shadowing a module's) declaring an ahead depth > 0, ordered
     // by owner key. Empty = no consumer (aheadCompute stays 0 / NoConsumer upstream).
     std::vector<AheadDemand> ActiveAheadDemands() const
@@ -1381,6 +1389,17 @@ private:
         return renderThread_ == std::thread::id() || renderThread_ == std::this_thread::get_id();
     }
 
+    void RefreshHasAheadDemandsLocked()
+    {
+        bool any = false;
+        for (const auto& kv : laneOwners_)
+            if (kv.second.aheadDepth > 0) { any = true; break; }
+        if (!any)
+            for (const auto& kv : owners_)
+                if (laneOwners_.find(kv.first) == laneOwners_.end() && kv.second.aheadDepth > 0) { any = true; break; }
+        hasAheadDemands_.store(any, std::memory_order_release);
+    }
+
     Registration Register(ProductId id, AcquireForm form, const std::string& unit, OwnerFill fill, bool replace)
     {
         std::lock_guard<std::mutex> g(mutex_);
@@ -1409,6 +1428,7 @@ private:
             return Registration::AlreadyRegistered;
         }
         owners_[k] = std::move(fill);
+        RefreshHasAheadDemandsLocked();
         return had ? Registration::Replaced : Registration::Registered;
     }
 
@@ -1500,6 +1520,7 @@ private:
     std::condition_variable cv_;
     std::map<uint32_t, OwnerFill> owners_;        // module registrations
     std::map<uint32_t, OwnerFill> laneOwners_;    // the bound lane's fills (precedence while bound)
+    std::atomic<bool> hasAheadDemands_{ false };  // K#10: mirrors ActiveAheadDemands() non-empty
     std::thread::id renderThread_;                // none = every thread counts as the render thread
     uint64_t laneBinds_ = 0;
     uint64_t seals_ = 0;
