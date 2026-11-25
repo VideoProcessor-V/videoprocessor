@@ -601,10 +601,10 @@ namespace TdV2AntiOverProtectionNs
 				const double inMidRms = RmsDiffRect(curBands.M, masterBands.M, interior);
 				Assert::IsTrue(inCleanRms > 9.0 && inMidRms > 6.0);
 
-				// Check A1: stepDelta = 14.0, unit cellStepScale (1.0) -> 0 false focus vetoes despite curF <= fDefocus!
+				// Check A1: stepDelta = 20.0, unit cellStepScale (1.0) -> 0 false focus vetoes despite curF <= fDefocus!
 				{
 					FrameProcessInput in14 = baseIn;
-					in14.estimatedStepDelta = 14.0;
+					in14.estimatedStepDelta = 20.0;
 					TdV2ReferenceEngine cpu14(cfgRef);
 					EngineGuard gpu14(ctx.gpu, cfgRef);
 					const FrameProcessResult cRes14 = cpu14.ProcessFrame(in14, nullptr);

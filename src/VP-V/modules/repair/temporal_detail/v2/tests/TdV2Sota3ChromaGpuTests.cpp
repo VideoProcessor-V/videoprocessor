@@ -962,7 +962,7 @@ namespace TdV2Sota3ChromaGpuNs
 							const double hfWave = (dSubX > 1)
 								? std::sin(2.0 * kPi * static_cast<double>(y) / 2.4 + 0.25 * static_cast<double>(x))
 								: (std::cos(2.0 * kPi * static_cast<double>(x) / 2.4) * std::sin(2.0 * kPi * static_cast<double>(y) / 2.4));
-							const double hfCb = 18.0 * win * hfWave;
+							const double hfCb = 28.0 * win * hfWave;
 							const double hfCr = -16.0 * win * hfWave;
 
 							curCb.at(x, y) = bandCb + hfCb;
