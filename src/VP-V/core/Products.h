@@ -96,7 +96,7 @@ enum : ProductId {
     // fill (repair/grain_split/BandMemoFill.h; R13-8, 102b B3-ID30-EXCLUSIONS, LB3-BAND-MEMO-GPU; C8 slice 8, coreplan-C8-8-U2).
     kBandMemo = 30,       // 30 band_memo (BandMemo: the per-frame low band of the grain unit; owner repair/grain_split)
     kEdgeMap = 31,        // 31 edge_map (C3 fixed id table; per-frame memo of the source-luma Sobel; readers: L-FOCUS focus map, L-B5 busy-edge; X5 AdaptiveDownscale acquires a stage/domain variant in CJ-3 (owner 11-14 16:43 (3); frozen 17:19; 102b X5-EDGEMAP-CJ3, KEDGEMAP-RULE3 UPDATE :523); later deband guard, occlusion, TD); lead 8 allocation 31, 05:2x 11-14
-    kFocusMap = 32,       // 32 focus_map (L-FOCUS; RESERVED until it lands)
+    kFocusMap = 32,       // 32 focus_map (P17, job #1 L-FOCUS, owner 11-12 22:16 / 22:18): per P11 block defocus level, focus change, confidence, flags; built ON kEdgeMap (owner 11-14 05:25); owner input/source_analysis/focus_map
     kRoomLight = 33,      // 33 room_light (CF-1 CAM-2: HELD STATE, the smoothed room light the LED intent publishes; read by the appearance stage)
     kComposedVectors = 34,// 34 composed_vectors (ECV: VpComposed::Product, modules/motion/estimation/composed; the code has landed, the id stays RESERVED until its registry decl + reader row land, lead ruling SHOULD S3)
     kP10gGrainLevel = 35, // 35 grain.level (P10g, refs/120 T3; coreplan-C10-15b-PC-grain.md:19): per-16-px-block grain level from P10, owner fill
@@ -112,7 +112,7 @@ static_assert(kSourceGeometry == 29 && kBandMemo == kSourceGeometry + 1 && kP10g
 // token, no inputs, no reader row, no catalog row), so ids stay indexes and Size() == kSkeletonProductEnd. Registry::Validate accepts an
 // absent slot ONLY at a listed id and rejects a real declaration at a listed id; Has() is false for an absent slot, so any input naming one
 // fails closed ("unknown input product"). The lane that lands a product declares it under its fixed number and deletes the number here.
-constexpr ProductId kReservedProductIds[] = { kFocusMap, kComposedVectors };
+constexpr ProductId kReservedProductIds[] = { kComposedVectors };
 constexpr size_t kReservedProductCount = sizeof(kReservedProductIds) / sizeof(kReservedProductIds[0]);
 constexpr bool IsReservedProduct(ProductId id)
 {
@@ -124,8 +124,7 @@ constexpr bool IsReservedProduct(ProductId id)
 // The planned token of a reserved id (shown in the product-graph doc and the Ctrl+Alt+D status line; "" for any other id).
 constexpr const char* ReservedProductName(ProductId id)
 {
-    return id == kFocusMap ? "focus_map"
-         : id == kComposedVectors ? "composed_vectors" : "";
+    return id == kComposedVectors ? "composed_vectors" : "";
 }
 
 // v1 names of ids 16-18 (kept so existing readers compile; the tokens and contracts are the v2 ones above).
@@ -1127,7 +1126,43 @@ inline void AppendRoomLightProduct(std::vector<ProductDecl>& decls)
     decls.push_back(p);
 }
 
-// Appends edge_map (31), pads 32, appends room_light (33), and pads 34; AppendGrainLevelProduct then appends
+// P17 focus_map (fixed id 32; owner 2026-11-12 22:16 / 22:18): a screen pass, cheap, before TD. Per P11 block: defocus level, focus-change
+// flag (defocus delta along the P2 motion, P7 camera translation where P2 is absent) and confidence. The SHARPNESS input is the shared edge
+// map (kEdgeMap 31; owner 11-14 05:25 "focus map built ON the edge map"; registered fix FOCUS-EDGEMAP-SWITCH, unit v2): the per-block
+// peak Sobel energy over the P11 band energy. While the edge map has no CPU form the fill uses the P11 band-energy law (the interim, v1)
+// and says so on every block (FocusMap::kSharpnessInterim) and on the Fallbacks list. Declared inputs: kEdgeMap (lag 0 and lag 1), P11 v2
+// (stats + E1/E2/E3/N; lag 0 and lag 1), P2 and P7. It owns no statistic: every input is read through Acquire by its OWNER'S fill; the owner
+// fill here obtains each prerequisite the same way (nested Acquire publishes it). HARD TD RULE (owner 22:16): never import detail sharper
+// than the current frame's focus state into a region whose focus changed; the TD consumer row is DECLARED only (no wiring).
+constexpr uint32_t kFocusMapBytesPerBlock = 8;   // u16 defocus, s16 delta, u16 confidence, u16 flags
+inline void AppendFocusMapProduct(std::vector<ProductDecl>& decls)
+{
+    using detail::AddInput;
+    using detail::AddTerm;
+    using detail::Make;
+    using namespace VpIndicator;
+    ProductDecl p = Make(kFocusMap, "focus_map", "focus map (defocus / focus change)", Backend::GpuCompute, 1, Tier::T1,
+                         Bit(kFull) | Bit(kContinuity), Bit(kSettingsAnalysis) | Bit(kSettingsMotion));
+    p.sourceFrame = true;
+    AddInput(p, kEdgeMap, 0);                // the sharpness input (owner 11-14 05:25): per-block Sobel energy, read through Acquire
+    AddInput(p, kEdgeMap, 1);                // ... and the previous frame's: the change reference under the same law (never mixed)
+    AddInput(p, kP11RegionBlockStats, 0);
+    AddInput(p, kP11RegionBlockStats, 1);    // the previous frame's block statistics: the focus-change reference (read, never copied)
+    // No P10 edge: the fill never reads the grain split itself (audit SHOULD 4); its N and band energies reach the focus map inside P11
+    // (which reads P10), and N = -1 there is kNoSplit. A declared read the code never makes would be a false declaration (X8).
+    AddInput(p, kP2VectorPair, 0);
+    AddInput(p, kP7CameraFit, 0);
+    AddTerm(p, 4, kFocusMapBytesPerBlock);   // the 16 px cell: exact at 1080p, an upper bound at 4K/8K (32/64 px blocks)
+    // No history of its own: the previous frame's defocus is a pure function of P11(seq - 1) and, under the edge law, kEdgeMap(seq - 1)
+    // (lag-1 edges above; one law per frame pair), so the map of a frame never depends on which frame was asked first (determinism),
+    // and no copy of the previous map exists.
+    p.missingInputForm = true;               // without P2 / P7 the change flag reads 0 motion and says so (flags), never absent
+    p.refRenderMs = 0.05f;                   // estimate only (a per-block screen pass); the measured bench replaces it
+    PadReservedUntil(decls, kFocusMap);
+    decls.push_back(p);
+}
+
+// Appends edge_map (31), focus_map (32), room_light (33), and pads 34; AppendGrainLevelProduct then appends
 // grain.level (35) and camera fit field (36), so EVERY caller that completes the skeleton set (SkeletonProducts,
 // RegionEvidence) calls AppendBandMemoProduct, AppendEdgeMapProduct, AppendGrainLevelProduct in that order and
 // gets Size() == kSkeletonProductEnd (37).
@@ -1147,7 +1182,8 @@ inline void AppendEdgeMapProduct(std::vector<ProductDecl>& decls)
     p.refRenderMs = 0.05f;
     PadReservedUntil(decls, kEdgeMap);
     decls.push_back(p);
-    AppendRoomLightProduct(decls);   // fixed id 33 (pads 32)
+    AppendFocusMapProduct(decls);    // fixed id 32 (L-FOCUS)
+    AppendRoomLightProduct(decls);   // fixed id 33
     PadReservedUntil(decls, kP10gGrainLevel);
 }
 

@@ -86,6 +86,7 @@ constexpr uint32_t kExpectedRebaseUnit = 1;
 constexpr uint32_t kExpectedHalfLumaUnit = 1;
 constexpr uint32_t kExpectedMonitorUnit = 1;
 constexpr uint32_t kExpectedSourceIdentityUnit = 1;
+constexpr uint32_t kExpectedFocusMapUnit = 2;         // FocusMap (P17 focus_map, job #1 L-FOCUS): input/source_analysis/focus_map/FocusMap.h (v2: the edge law, FOCUS-EDGEMAP-SWITCH)
 constexpr uint32_t kExpectedSourceGeometryUnit = 1;   // SourceGeometry (P14g source_geometry, doc 78 section 6): input/source_analysis/identity/SourceGeometryProduct.h
 // The temporal-detail engine products (doc 72; repair/temporal_detail/products states the same numbers in TdProducts and a test
 // compares them): U13 CodingEvidence, QualityPattern, U15 FieldRefine and U19 TdMapsView at 1.
@@ -165,6 +166,9 @@ inline const std::vector<ProductRow>& ProductRows()
         // C8 slice 8 (coreplan-C8-8-U2): the per-frame low band of the grain unit (shared unit U2), an owner fill (repair/grain_split/BandMemoFill.h).
         { kBandMemo, "repair/grain_split", kExpectedGrainSplitUnit, "band memo owner fill (Acquire); readers: interpolator, debander, detail pulse, texture restore, temporal detail" },
         { kEdgeMap, "input/source_analysis/regions", kExpectedRegionUnit, "edge map pass (per-frame memo); readers: focus map, busy-edge; X5 AdaptiveDownscale acquires a stage/domain variant in CJ-3 (owner 11-14 16:43 (3))" },
+        // P17 focus_map (L-FOCUS, fixed id 32): no lane producer; the OWNER FILL (focus_map/FocusMapFill.h, RegisterOwnerFill) makes it at the
+        // first Acquire and every later reader of the frame reuses it. Its prerequisites (kEdgeMap, P11 with the P10 bands, P2, P7) are obtained the same way.
+        { kFocusMap, "input/source_analysis/focus_map", kExpectedFocusMapUnit, "" },
         // P10g (T3): an owner fill from the acquired P10 variant; no lane job. Single-frame law (= the unit-4 law) until the temporal passes
         // are costed (GrainLevel.h), shown as the Fallbacks line "grain_level_temporal".
         { kP10gGrainLevel, "repair/grain_split", kExpectedGrainSplitUnit, "grain level pass (per-frame memo, owner fill; single-frame law until the temporal passes are costed); first reader: hybrid upscaler" },
@@ -408,6 +412,15 @@ inline const std::vector<ConsumerRow>& ConsumerRows()
         // room assumed, visibly (RoomLight::Resolve status "room: sensor (no reading; dark assumed)", "product.room_light").
         r.push_back(MakeRow(28, "appearance (room light)", "VP-V/modules/colour/appearance/AppearanceStage", PathwayUnit::Colour, 10, {}, own,
                             "product.room_light", false, { kRoomLight }));
+        // P17 focus_map (L-FOCUS, owner 2026-11-12 22:16 / 22:18): the screen pass reads the shared units only (kEdgeMap Sobel |G|, its
+        // sharpness input since FOCUS-EDGEMAP-SWITCH; P11 block stats and band energies; P2 pair; P7 camera fit). Placed at repair 23,
+        // after TD camera/engine rows (repair 12-14) and DetailPulse camera read (repair 20-22). The TD row below (row 31, repair 24)
+        // is DECLARED ONLY (listed in UnwiredConsumers).
+        r.push_back(MakeRow(30, "focus map (screen pass)", "VP-V/modules/input/source_analysis/focus_map", PathwayUnit::Repair, 23,
+                            { kEdgeMap, kP11RegionBlockStats, kP2VectorPair, kP7CameraFit }, own, "product.focus_map"));
+        r.push_back(MakeRow(31, "temporal detail (focus map)", "VP-V/modules/repair/temporal_detail", PathwayUnit::Repair, 24,
+                            { kFocusMap }, own, "product.focus_map"));
+        r.back().family = "temporal detail";
         // VectorDemand consumers: ids and reads from VectorDemandProducts.h
         for (int i = 0; i < VectorDemand::kConsumerCount; ++i) {
             const VectorDemand::Consumer c = VectorDemand::ConsumerAt(i);
@@ -698,6 +711,8 @@ inline const std::vector<UnwiredConsumer>& UnwiredConsumers()
         { uint16_t(kCatalogConsumerIdBase + 24), "TD", "no renderer call site (engine reserved)" },
         { uint16_t(kCatalogConsumerIdBase + 25), "TD", "no renderer call site (engine reserved)" },
         { uint16_t(kCatalogConsumerIdBase + 26), "TD", "no renderer call site" },
+        // L-FOCUS: the temporal-detail focus read path (row 31) is DECLARED ONLY. Wiring waits for the owner's focus rule review.
+        { uint16_t(kCatalogConsumerIdBase + 31), "TD focus rule", "no renderer call site (declared read path only)" },
     };
     return rows;
 }
