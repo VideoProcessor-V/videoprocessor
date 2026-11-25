@@ -446,7 +446,8 @@ namespace Vpv
 			std::string gpuMemoryNote;
 			uint64_t gpuMemorySizeKey = 0;
 			uint32_t gpuMemoryGen = 0;
-			bool oldBundleJobsJoined = true;   // K#12: true once any previous bundle's worker threads have been joined
+			// K#12: GPU jobs run strictly on the render thread; this tracks synchronous completion of prior bundle worker thread joins.
+			bool oldBundleJobsJoined = true;
 
 			// Any thread.
 			std::atomic<uint32_t> renderTid{ 0 };   // FIX3-D7: per-host Win32 render thread ID (0 = not yet observed)
@@ -1230,6 +1231,15 @@ namespace Vpv
 			if (!st && !mh)
 			{
 				std::lock_guard<std::mutex> lock(hostQueueMutex_);
+				// K#9 (Audit MEDIUM-1): re-check after acquiring hostQueueMutex_ in case a racing Put just inserted HostState/MemoHost.
+				const std::shared_ptr<HostState> st2 = hosts_.Find(host);
+				const std::shared_ptr<MemoHost> mh2 = memoHosts_.Find(host);
+				if (st2)
+					MergeAtomicBits(st2->queueBits, set);
+				if (mh2)
+					MergeAtomicBits(mh2->queueBits, set);
+				if (st2 || mh2)
+					return;
 				for (auto& kv : hostQueues_)
 					if (kv.first == host)
 					{
@@ -1283,6 +1293,15 @@ namespace Vpv
 			if (!st && !mh)
 			{
 				std::lock_guard<std::mutex> lock(hostQueueMutex_);
+				// K#9 (Audit MEDIUM-1): re-check after acquiring hostQueueMutex_ in case a racing Put just inserted HostState/MemoHost.
+				const std::shared_ptr<HostState> st2 = hosts_.Find(host);
+				const std::shared_ptr<MemoHost> mh2 = memoHosts_.Find(host);
+				if (st2)
+					st2->queueBits.store(bits, std::memory_order_release);
+				if (mh2)
+					mh2->queueBits.store(bits, std::memory_order_release);
+				if (st2 || mh2)
+					return;
 				for (auto& kv : hostQueues_)
 					if (kv.first == host)
 					{
@@ -1461,7 +1480,6 @@ namespace Vpv
 			if (const std::shared_ptr<MemoHost> m = memoHosts_.Find(host))
 				return m->memo;
 			std::shared_ptr<MemoHost> made = std::make_shared<MemoHost>(host);
-			made->queueBits.store(QueueBitsOf(host), std::memory_order_release);
 			VpSkeleton::SkeletonMemo& memo = *made->memo;
 			memo.SetHost(host);
 			memo.SetNames(&NameRegistry());
@@ -1471,12 +1489,28 @@ namespace Vpv
 			for (const auto& kv : ownerFills_)
 				memo.RegisterOwnerFill(kv.first.first, kv.first.second, kv.second.first, kv.second.second);
 			AttachMemoGpu(*made, gpuSlots_.Aux(host));   // R2: the sanctioned GPU context's device, when the pl_gpu is known
-			Hub::HostSlots<MemoHost>& slots = const_cast<Hub::HostSlots<MemoHost>&>(memoHosts_);
-			if (!slots.Put(host, made))
 			{
-				if (const std::shared_ptr<MemoHost> other = memoHosts_.Find(host))
-					return other->memo;   // another thread made it first
-				return nullptr;          // the table is full (sixteen renderers): no memo, the caller's "unavailable" shows it
+				// K#9 (Audit MEDIUM-1): serialize pre-creation hostQueues_ adoption with Put (lock order: ownerFillsMutex_ -> hostQueueMutex_).
+				std::lock_guard<std::mutex> qLock(hostQueueMutex_);
+				uint64_t seed = queueBits_.load(std::memory_order_acquire);
+				auto& hq = const_cast<std::vector<std::pair<const void*, uint64_t>>&>(hostQueues_);
+				auto qIt = hq.end();
+				for (auto it = hq.begin(); it != hq.end(); ++it)
+					if (it->first == host) { qIt = it; break; }
+				if (const std::shared_ptr<HostState> hs = hosts_.Find(host))
+					seed = hs->queueBits.load(std::memory_order_acquire);
+				else if (qIt != hq.end())
+					seed = qIt->second;
+				made->queueBits.store(seed, std::memory_order_release);
+				Hub::HostSlots<MemoHost>& slots = const_cast<Hub::HostSlots<MemoHost>&>(memoHosts_);
+				if (!slots.Put(host, made))
+				{
+					if (const std::shared_ptr<MemoHost> other = memoHosts_.Find(host))
+						return other->memo;   // another thread made it first
+					return nullptr;          // the table is full (sixteen renderers): no memo, the caller's "unavailable" shows it
+				}
+				if (qIt != hq.end())
+					hq.erase(qIt);
 			}
 			return made->memo;
 		}
@@ -1832,9 +1866,23 @@ namespace Vpv
 						st = std::make_shared<HostState>(host);
 						if (const uint32_t rtid = RenderTidOf(host))
 							st->renderTid.store(rtid, std::memory_order_release);
-						st->queueBits.store(QueueBitsOf(host), std::memory_order_release);
-						if (!hosts_.Put(host, st))
-							return;
+						{
+							// K#9 (Audit MEDIUM-1): serialize pre-creation hostQueues_ adoption with Put.
+							std::lock_guard<std::mutex> qLock(hostQueueMutex_);
+							uint64_t seed = queueBits_.load(std::memory_order_acquire);
+							auto qIt = hostQueues_.end();
+							for (auto it = hostQueues_.begin(); it != hostQueues_.end(); ++it)
+								if (it->first == host) { qIt = it; break; }
+							if (const std::shared_ptr<MemoHost> mh = memoHosts_.Find(host))
+								seed = mh->queueBits.load(std::memory_order_acquire);
+							else if (qIt != hostQueues_.end())
+								seed = qIt->second;
+							st->queueBits.store(seed, std::memory_order_release);
+							if (!hosts_.Put(host, st))
+								return;
+							if (qIt != hostQueues_.end())
+								hostQueues_.erase(qIt);
+						}
 					}
 					std::string problems;
 					for (const std::string& p : s.laneProblems)
@@ -1854,12 +1902,26 @@ namespace Vpv
 				st = std::make_shared<HostState>(host);
 				if (const uint32_t rtid = RenderTidOf(host))
 					st->renderTid.store(rtid, std::memory_order_release);
-				st->queueBits.store(QueueBitsOf(host), std::memory_order_release);
-				if (!hosts_.Put(host, st))
 				{
-					// The table holds sixteen renderers; without a slot there is no state to show this on.
-					DebugLog::Log("Skeleton: host table full; the analysis lane stays off for this renderer");
-					return;
+					// K#9 (Audit MEDIUM-1): serialize pre-creation hostQueues_ adoption with Put.
+					std::lock_guard<std::mutex> qLock(hostQueueMutex_);
+					uint64_t seed = queueBits_.load(std::memory_order_acquire);
+					auto qIt = hostQueues_.end();
+					for (auto it = hostQueues_.begin(); it != hostQueues_.end(); ++it)
+						if (it->first == host) { qIt = it; break; }
+					if (const std::shared_ptr<MemoHost> mh = memoHosts_.Find(host))
+						seed = mh->queueBits.load(std::memory_order_acquire);
+					else if (qIt != hostQueues_.end())
+						seed = qIt->second;
+					st->queueBits.store(seed, std::memory_order_release);
+					if (!hosts_.Put(host, st))
+					{
+						// The table holds sixteen renderers; without a slot there is no state to show this on.
+						DebugLog::Log("Skeleton: host table full; the analysis lane stays off for this renderer");
+						return;
+					}
+					if (qIt != hostQueues_.end())
+						hostQueues_.erase(qIt);
 				}
 			}
 			st->settings = s;
@@ -3458,19 +3520,24 @@ namespace Vpv
 				st.gpuMemorySizeKey = sizeKey;
 				st.gpuMemoryGen = st.settingsGen.load(std::memory_order_relaxed);
 			}
-			// K#11 (169 AMEND): pre-check private working memory BEFORE wiring/rebuild so a first-frame refusal builds
-			// the Bundle once without a dispatcher (zero second rebuild/flapping) and reuses the single QueryCard below.
+			// K#11 (169 AMEND) / Audit MEDIUM-2: pre-check private working memory BEFORE wiring/rebuild only when a
+			// bundle build/rewire is actually needed (never polls DXGI every frame when !needPreCheck), reusing the
+			// single QueryCard result inside the configure block below.
+			const std::shared_ptr<Bundle> current = std::atomic_load(&st.bundle);
+			const bool wantGapAhead = st.settings.gpuGap == GpuGapMode::AfterRender;
+			const bool needPreCheck = !current || !SameDims(current->dims, dims)
+				|| current->wiring.dispatcher == nullptr || current->wiring.gapAhead != wantGapAhead
+				|| current->wiring.compactGrain != st.dispatcherCompact;
 			bool preQueried = false;
 			bool preKnown = false;
 			CardProfile preCard;
 			std::string preWhy;
-			if (st.dispatcher != nullptr && st.gpuMemoryNote.empty() && !st.dispatcher->HoldsVideoMemory())
+			if (needPreCheck && st.dispatcher != nullptr && st.gpuMemoryNote.empty() && !st.dispatcher->HoldsVideoMemory())
 			{
 				preQueried = true;
 				if (cardOverride_)
 					preCard = card_;
 				preKnown = cardOverride_ || QueryCard(hosts_.Aux(st.host), preCard, preWhy);
-				const bool wantGapAhead = st.settings.gpuGap == GpuGapMode::AfterRender;
 				const uint64_t priv = st.dispatcher->PrivateBytes(dims, wantGapAhead);
 				if (preKnown && priv > preCard.FreeVram())
 				{
@@ -3482,9 +3549,8 @@ namespace Vpv
 			wiring.dispatcher = st.gpuMemoryNote.empty() ? st.dispatcher.get() : nullptr;
 			if (st.dispatcher && wiring.dispatcher == nullptr)
 				st.dispatcher->SetLane(nullptr);   // the old lane is about to be replaced: no dangling pointer
-			wiring.gapAhead = wiring.dispatcher != nullptr && st.settings.gpuGap == GpuGapMode::AfterRender;
+			wiring.gapAhead = wiring.dispatcher != nullptr && wantGapAhead;
 			wiring.compactGrain = wiring.dispatcher != nullptr && st.dispatcherCompact;
-			const std::shared_ptr<Bundle> current = std::atomic_load(&st.bundle);
 			const bool rebuild = !current || !SameDims(current->dims, dims) || !current->wiring.Same(wiring);
 			std::shared_ptr<Bundle> b = current;
 			if (rebuild)
@@ -3502,6 +3568,7 @@ namespace Vpv
 				};
 				if (current)
 				{
+					st.oldBundleJobsJoined = false;
 					current->threads.Stop();   // GEM SK-LIFECYCLE: the current bundle's workers are joined before the replacement is built
 					st.oldBundleJobsJoined = true;
 				}
