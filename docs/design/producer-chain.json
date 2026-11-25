@@ -1,10 +1,10 @@
 {
  "schema": 1,
  "counts": {
-  "R": 12,
+  "R": 20,
   "X": 7,
-  "N": 12,
-  "NP": 33
+  "N": 10,
+  "NP": 31
  },
  "products": [
   {
@@ -36,6 +36,7 @@
    "lane": "L-B4",
    "producer_files": [
     "input/source_analysis/lane/LaneCpuProducts.h",
+    "input/source_analysis/lane/P1CpuFill.cpp",
     "input/source_analysis/lane/P1GpuFill.cpp"
    ],
    "producer_text": "HalfLumaProducer",
@@ -80,12 +81,12 @@
       ],
       [
        "motion/estimation/MotionAheadProducer.cpp",
-       936,
+       1063,
        "if (!LumaAtTarget(job.sequence, job.luma, lumaBuffer, halfW, halfH, \"motion_ahead\"))"
       ],
       [
        "motion/estimation/MotionAheadProducer.cpp",
-       1061,
+       1188,
        "bool Producer::LumaAtTarget(uint64_t sequence, const AnalysisLumaSource& luma, std::vector<uint8_t>& buffer, i"
       ]
      ],
@@ -125,17 +126,17 @@
      "evidence": [
       [
        "motion/estimation/matcher/DejudderWarp.cpp",
-       2691,
+       2625,
        "bool MotionWarp::Downsample(pl_tex luma, pl_tex half, pl_tex l1, pl_tex l2, bool fullRange, pl_tex fade, int l"
       ],
       [
        "motion/estimation/matcher/DejudderWarp.cpp",
-       2709,
+       2647,
        "Pyramid(half, l1, l2, 0, levels);"
       ],
       [
        "motion/estimation/matcher/DejudderWarp.cpp",
-       2712,
+       2650,
        "bool MotionWarp::Pyramid(pl_tex half, pl_tex l1, pl_tex l2, int from, int levels)"
       ]
      ],
@@ -156,7 +157,8 @@
    "shortQueueSubstitute": null,
    "lane": "L-B4",
    "producer_files": [
-    "motion/estimation/matcher/DejudderWarp.cpp"
+    "motion/estimation/matcher/DejudderWarp.cpp",
+    "motion/estimation/P3FieldFill.h"
    ],
    "producer_text": "analysis field pass",
    "reserved": false,
@@ -175,17 +177,17 @@
      "evidence": [
       [
        "motion/estimation/matcher/DejudderWarp.cpp",
-       2691,
+       2625,
        "bool MotionWarp::Downsample(pl_tex luma, pl_tex half, pl_tex l1, pl_tex l2, bool fullRange, pl_tex fade, int l"
       ],
       [
        "motion/estimation/matcher/DejudderWarp.cpp",
-       2709,
+       2647,
        "Pyramid(half, l1, l2, 0, levels);"
       ],
       [
        "motion/estimation/matcher/DejudderWarp.cpp",
-       2712,
+       2650,
        "bool MotionWarp::Pyramid(pl_tex half, pl_tex l1, pl_tex l2, int from, int levels)"
       ]
      ],
@@ -327,7 +329,8 @@
    "lane": "L-B6",
    "producer_files": [
     "motion/estimation/global_model/link/CameraExtension.cpp",
-    "motion/estimation/global_model/link/CameraFitWorker.cpp"
+    "motion/estimation/global_model/link/CameraFitWorker.cpp",
+    "motion/estimation/global_model/PairGlobalFill.h"
    ],
    "producer_text": "camera fit (CPU worker)",
    "reserved": false,
@@ -473,7 +476,8 @@
    "shortQueueSubstitute": "kP7CameraFit",
    "lane": "L-B4",
    "producer_files": [
-    "motion/estimation/global_model/link/CameraLinkCore.cpp"
+    "motion/estimation/global_model/link/CameraLinkCore.cpp",
+    "motion/estimation/global_model/link/CameraSmoother.cpp"
    ],
    "producer_text": "camera smoothing (CPU)",
    "reserved": false,
@@ -493,17 +497,17 @@
      "evidence": [
       [
        "motion/estimation/global_model/link/CameraLinkCore.cpp",
-       362,
+       363,
        "const bool have = m_pool->Get(seq, e, true);"
       ],
       [
        "motion/estimation/global_model/link/CameraLinkCore.cpp",
-       484,
+       485,
        "if (m_pool->Get(f.seq, e, true))"
       ],
       [
        "motion/estimation/global_model/link/CameraLinkCore.cpp",
-       780,
+       781,
        "if (!m_pool->Get(seq, e))"
       ]
      ],
@@ -544,12 +548,12 @@
      "evidence": [
       [
        "control/skeleton/gpu/SkeletonGpuDispatcher.cpp",
-       499,
+       538,
        "const VpLaneProducts::GpuInput* p4 = c.Input(VpSkeleton::kP4SourceStats);"
       ],
       [
        "control/skeleton/gpu/SkeletonGpuDispatcher.cpp",
-       574,
+       613,
        "const VpLaneProducts::GpuInput* p4 = c.Input(VpSkeleton::kP4SourceStats);"
       ]
      ],
@@ -568,7 +572,12 @@
      "evidence": [
       [
        "repair/grain_split/GrainSplitVariantOwner.h",
-       165,
+       227,
+       "const VpSkeleton::AcquireResult src = memo.Acquire(VpSkeleton::kP13SourceRing, req.seq, VpSkeleton::AcquireFor"
+      ],
+      [
+       "repair/grain_split/GrainSplitVariantOwner.h",
+       269,
        "const VpSkeleton::AcquireResult src = memo.Acquire(VpSkeleton::kP13SourceRing, req.seq, VpSkeleton::AcquireFor"
       ]
      ],
@@ -588,10 +597,12 @@
    "noOfaSubstitute": null,
    "shortQueueSubstitute": null,
    "lane": "L-B2",
-   "producer_files": [],
-   "producer_text": "reserved (no producer: built with C10)",
-   "reserved": true,
-   "no_producer": true,
+   "producer_files": [
+    "repair/grain_split/GrainSplitVariantOwner.h"
+   ],
+   "producer_text": "grain split chroma owner fill (Acquire)",
+   "reserved": false,
+   "no_producer": false,
    "no_producer_owner": "L-B2; ProductCatalog flag Reserved, built with C10; 102b PRODUCER-NP-P10C (new row)",
    "edges": [
     {
@@ -601,10 +612,10 @@
      ],
      "leads": [],
      "declared": true,
-     "status": "NP",
+     "status": "N",
      "evidence": [],
      "kind": "",
-     "note": "no production producer",
+     "note": "",
      "interim": ""
     },
     {
@@ -614,10 +625,21 @@
      ],
      "leads": [],
      "declared": true,
-     "status": "NP",
-     "evidence": [],
+     "status": "R",
+     "evidence": [
+      [
+       "repair/grain_split/GrainSplitVariantOwner.h",
+       227,
+       "const VpSkeleton::AcquireResult src = memo.Acquire(VpSkeleton::kP13SourceRing, req.seq, VpSkeleton::AcquireFor"
+      ],
+      [
+       "repair/grain_split/GrainSplitVariantOwner.h",
+       269,
+       "const VpSkeleton::AcquireResult src = memo.Acquire(VpSkeleton::kP13SourceRing, req.seq, VpSkeleton::AcquireFor"
+      ]
+     ],
      "kind": "",
-     "note": "no production producer",
+     "note": "",
      "interim": ""
     }
    ]
@@ -653,7 +675,7 @@
      "evidence": [
       [
        "input/source_analysis/lane/LaneGpuRegionKernel.cpp",
-       122,
+       207,
        "const GpuInput* p10 = c.Input(VpSkeleton::kP10GrainSplit);"
       ]
      ],
@@ -672,7 +694,7 @@
      "evidence": [
       [
        "input/source_analysis/lane/LaneGpuRegionKernel.cpp",
-       143,
+       232,
        "const RegionEvidence::Rect pic = RegionEvidence::PictureOrFrame(c.picture, w, h);"
       ]
      ],
@@ -724,7 +746,7 @@
      "evidence": [
       [
        "input/source_analysis/lane/LaneGpuLightKernel.cpp",
-       176,
+       178,
        "const GpuInput* p11 = c.Input(VpSkeleton::kP11RegionBlockStats);"
       ]
      ],
@@ -743,7 +765,7 @@
      "evidence": [
       [
        "input/source_analysis/lane/LaneGpuLightKernel.cpp",
-       194,
+       196,
        "const GpuInput* p4 = c.Input(VpSkeleton::kP4SourceStats);"
       ]
      ],
@@ -1116,8 +1138,14 @@
      ],
      "leads": [],
      "declared": true,
-     "status": "N",
-     "evidence": [],
+     "status": "R",
+     "evidence": [
+      [
+       "repair/grain_split/BandMemoFill.h",
+       273,
+       "const VpSkeleton::AcquireResult src = memo.Acquire(VpSkeleton::kP1HalfLuma, req.seq, VpSkeleton::AcquireForm::"
+      ]
+     ],
      "kind": "",
      "note": "",
      "interim": ""
@@ -1142,6 +1170,114 @@
    "no_producer": false,
    "no_producer_owner": "",
    "edges": []
+  },
+  {
+   "id": "kFocusMap",
+   "label": "P17",
+   "token": "focus_map",
+   "name": "focus map (defocus / focus change)",
+   "backend": "GpuCompute",
+   "variants": "Identical",
+   "noOfaSubstitute": null,
+   "shortQueueSubstitute": null,
+   "lane": "L-FOCUS",
+   "producer_files": [
+    "input/source_analysis/focus_map/FocusMapFill.h"
+   ],
+   "producer_text": "",
+   "reserved": false,
+   "no_producer": false,
+   "no_producer_owner": "",
+   "edges": [
+    {
+     "input": "kEdgeMap",
+     "lags": [
+      1,
+      2
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "R",
+     "evidence": [
+      [
+       "input/source_analysis/focus_map/FocusMapFill.h",
+       128,
+       "const AcquireResult rp = havePrevSeq ? memo.Acquire(kEdgeMap, prevSeq, AcquireForm::Cpu) : AcquireResult();"
+      ],
+      [
+       "input/source_analysis/focus_map/FocusMapFill.h",
+       132,
+       "const AcquireResult re = memo.Acquire(kEdgeMap, sampleSeq, AcquireForm::Cpu);"
+      ]
+     ],
+     "kind": "",
+     "note": "",
+     "interim": ""
+    },
+    {
+     "input": "kP11RegionBlockStats",
+     "lags": [
+      1,
+      2
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "R",
+     "evidence": [
+      [
+       "input/source_analysis/focus_map/FocusMapFill.h",
+       165,
+       "const AcquireResult p11 = memo.Acquire(kP11RegionBlockStats, sampleSeq, AcquireForm::Cpu);"
+      ],
+      [
+       "input/source_analysis/focus_map/FocusMapFill.h",
+       193,
+       "const AcquireResult pp = memo.Acquire(kP11RegionBlockStats, prevSeq, AcquireForm::Cpu);"
+      ]
+     ],
+     "kind": "",
+     "note": "",
+     "interim": ""
+    },
+    {
+     "input": "kP2VectorPair",
+     "lags": [
+      1
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "R",
+     "evidence": [
+      [
+       "input/source_analysis/focus_map/FocusMapFill.h",
+       161,
+       "const AcquireResult r2 = memo.Acquire(kP2VectorPair, sampleSeq, AcquireForm::Cpu);"
+      ]
+     ],
+     "kind": "",
+     "note": "",
+     "interim": ""
+    },
+    {
+     "input": "kP7CameraFit",
+     "lags": [
+      1
+     ],
+     "leads": [],
+     "declared": true,
+     "status": "R",
+     "evidence": [
+      [
+       "input/source_analysis/focus_map/FocusMapFill.h",
+       221,
+       "const AcquireResult r7 = memo.Acquire(kP7CameraFit, sampleSeq, AcquireForm::Cpu);"
+      ]
+     ],
+     "kind": "",
+     "note": "",
+     "interim": ""
+    }
+   ]
   },
   {
    "id": "kEdgeMap",
@@ -1172,12 +1308,12 @@
      "evidence": [
       [
        "input/source_analysis/regions/EdgeMapFill.h",
-       98,
+       100,
        "const VpSkeleton::AcquireResult src = memo.Acquire(VpSkeleton::kP13SourceRing, req.seq, VpSkeleton::AcquireFor"
       ],
       [
        "input/source_analysis/regions/EdgeMapFill.h",
-       148,
+       150,
        "const VpSkeleton::AcquireResult src = memo.Acquire(VpSkeleton::kP13SourceRing, req.seq, VpSkeleton::AcquireFor"
       ]
      ],
@@ -1216,7 +1352,7 @@
      "evidence": [
       [
        "repair/grain_split/GrainLevelGpu.h",
-       205,
+       215,
        "const VpSkeleton::AcquireResult split = memo.Acquire(VpSkeleton::kP10GrainSplit, req.seq, VpSkeleton::AcquireF"
       ]
      ],
@@ -1235,7 +1371,7 @@
      "evidence": [
       [
        "repair/grain_split/GrainLevelGpu.h",
-       194,
+       204,
        "const VpSkeleton::AcquireResult src = memo.Acquire(VpSkeleton::kP13SourceRing, req.seq, VpSkeleton::AcquireFor"
       ]
      ],
@@ -1317,8 +1453,14 @@
      ],
      "leads": [],
      "declared": true,
-     "status": "N",
-     "evidence": [],
+     "status": "R",
+     "evidence": [
+      [
+       "control/skeleton/SkeletonModule.cpp",
+       2311,
+       "const AnalysisLane::ProductRead r10 = b->lane.ReadOf(VpSkeleton::kP10GrainSplit, seq);"
+      ]
+     ],
      "kind": "",
      "note": "",
      "interim": ""
@@ -1330,8 +1472,14 @@
      ],
      "leads": [],
      "declared": true,
-     "status": "N",
-     "evidence": [],
+     "status": "R",
+     "evidence": [
+      [
+       "control/skeleton/SkeletonModule.cpp",
+       2333,
+       "const AnalysisLane::ProductRead r11 = b->lane.ReadOf(VpSkeleton::kP11RegionBlockStats, seq);"
+      ]
+     ],
      "kind": "",
      "note": "",
      "interim": ""
@@ -2024,6 +2172,42 @@
     "n": 1
    },
    {
+    "from": "kEdgeMap",
+    "to": "kFocusMap",
+    "kind": "lag",
+    "n": 1
+   },
+   {
+    "from": "kEdgeMap",
+    "to": "kFocusMap",
+    "kind": "lag",
+    "n": 2
+   },
+   {
+    "from": "kP11RegionBlockStats",
+    "to": "kFocusMap",
+    "kind": "lag",
+    "n": 1
+   },
+   {
+    "from": "kP11RegionBlockStats",
+    "to": "kFocusMap",
+    "kind": "lag",
+    "n": 2
+   },
+   {
+    "from": "kP2VectorPair",
+    "to": "kFocusMap",
+    "kind": "lag",
+    "n": 1
+   },
+   {
+    "from": "kP7CameraFit",
+    "to": "kFocusMap",
+    "kind": "lag",
+    "n": 1
+   },
+   {
     "from": "kCodingEvidence",
     "to": "kQualityPattern",
     "kind": "lead",
@@ -2074,6 +2258,7 @@
   ],
   "topological_order": [
    "kCameraFitField",
+   "kFocusMap",
    "kP0RebaseDecision",
    "kP13SourceRing",
    "kEdgeMap",
@@ -2111,6 +2296,7 @@
   ],
   "levels": {
    "kCameraFitField": 0,
+   "kFocusMap": 0,
    "kP0RebaseDecision": 0,
    "kP13SourceRing": 0,
    "kEdgeMap": 1,

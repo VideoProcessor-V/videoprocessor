@@ -3,7 +3,7 @@
   "labels": {
     "kSourceIdentity": "P14", "kSourceGeometry": "P14g", "kCodingEvidence": "P16",
     "kQualityPattern": "P15", "kQualityPatternCausal": "P15c", "kRefinedField": "P3r",
-    "kP10gGrainLevel": "P10g", "kCameraFitField": "P7f"
+    "kP10gGrainLevel": "P10g", "kCameraFitField": "P7f", "kFocusMap": "P17"
   },
   "lanes": {
     "kP1HalfLuma": "L-B4", "kP2VectorPair": "L-B4", "kP2mMatcherPair": "L-B4", "kP3AnalysisField": "L-B4",
@@ -13,7 +13,7 @@
     "kTdAnchorPass": "L-B2", "kTdAnchorRefs": "L-B2", "kTdDelta": "L-B2", "kTdMaps": "L-B2", "kTdTrailSummary": "L-B2",
     "kP11RegionBlockStats": "L-B5", "kP12LightLevel": "L-B5",
     "kCodingEvidence": "L-B5", "kQualityPattern": "L-B5", "kQualityPatternCausal": "L-B5",
-    "kBandMemo": "L-B3", "kEdgeMap": "L-B5",
+    "kBandMemo": "L-B3", "kEdgeMap": "L-B5", "kFocusMap": "L-FOCUS",
     "kP10gGrainLevel": "L-B2"
   },
   "default_read": ["\\bInput\\(\\s*(VpSkeleton::)?{k}\\b", "\\bAcquire\\(\\s*(VpSkeleton::)?{k}\\b", "\\bReadOf\\(\\s*(VpSkeleton::)?{k}\\b", "\\bFind\\(\\s*(VpSkeleton::)?{k}\\b"],
@@ -38,6 +38,7 @@
     "kSourceGeometry": {"files": ["input/source_analysis/identity/SourceGeometryProduct.h"]},
     "kRoomLight": {"files": ["colour/appearance/RoomLight.h"]},
     "kCodingEvidence": {"files": ["input/source_analysis/regions/CodingEvidence.cpp"], "note": "P16 is a real producer since L-P16 (r2/job1-p16): CPU per-tile owner fill registered in SkeletonModule.cpp, measure in regions/CodingEvidence.cpp; no self read since 15d J5 (the fill reads no history; the GPU fused pass re-declares lag 1)"},
+    "kFocusMap": {"files": ["input/source_analysis/focus_map/FocusMapFill.h"], "note": "P17 focus_map owner fill (S18 F0..F5): acquires kEdgeMap, kP11RegionBlockStats, kP2VectorPair, kP7CameraFit through the memo"},
     "kTdBlocks": {"files": ["repair/temporal_detail/TemporalDetailGpu.cpp"], "ignore_reserved": true, "note": "catalog says reserved; the legacy TemporalDetailGpu pass is the only code that computes td.blocks today, so it is scanned"}
   },
   "edges": {

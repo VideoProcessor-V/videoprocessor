@@ -227,11 +227,10 @@
  {
   "id": "colour.dm_pre",
   "order": 85,
-  "status": "placeholder",
+  "status": "built",
   "hook_point": "HOST",
   "control": false,
   "required": [
-   "placeholder",
    "isolation",
    "contract",
    "chain"
@@ -241,15 +240,18 @@
     "byte-identical with the slot off",
     "zero hooks when off"
    ],
-   "isolation": [],
+   "isolation": [
+    "DmPreDeband CPU policy + tap law + shader parameter tests",
+    "vp_dm_pre_deband.glsl GPU I-only, grain-guard, and BTB/WTW tests"
+   ],
    "contract": [
-    "slot off: no pass and no hook, pipeline byte-identical"
+    "slot off: no pass and no hook, pipeline byte-identical",
+    "absent tap or quality engages DV deband fallback visibly (no private decode)"
    ],
    "chain": []
   },
-  "fallback_entry": "DV display mapping (pre): off (<reason>)",
+  "fallback_entry": "DV deband: off (<reason>)",
   "missing": [
-   "isolation",
    "chain"
   ]
  },
@@ -283,11 +285,10 @@
  {
   "id": "scaling.route_4k",
   "order": 100,
-  "status": "placeholder",
+  "status": "built",
   "hook_point": "prepass",
   "control": false,
   "required": [
-   "placeholder",
    "isolation",
    "contract",
    "chain"
@@ -543,11 +544,10 @@
  {
   "id": "colour.dm_curve",
   "order": 172,
-  "status": "placeholder",
+  "status": "built",
   "hook_point": "LIBPLACEBO",
   "control": false,
   "required": [
-   "placeholder",
    "isolation",
    "contract",
    "chain"
@@ -625,11 +625,10 @@
  {
   "id": "colour.dm_trims",
   "order": 205,
-  "status": "placeholder",
+  "status": "built",
   "hook_point": "PRE_OUTPUT",
   "control": false,
   "required": [
-   "placeholder",
    "isolation",
    "contract",
    "chain"
@@ -654,11 +653,10 @@
  {
   "id": "colour.appearance",
   "order": 210,
-  "status": "placeholder",
+  "status": "built",
   "hook_point": "PRE_OUTPUT",
   "control": false,
   "required": [
-   "placeholder",
    "isolation",
    "contract",
    "chain"
@@ -678,7 +676,7 @@
     "constant output across synthetic LED dimming with compensation on"
    ]
   },
-  "fallback_entry": "Appearance: off (shader failed)",
+  "fallback_entry": "Colour appearance (shader missing: shaders\\vp_cam16_appearance.glsl did not load)",
   "missing": []
  },
  {
