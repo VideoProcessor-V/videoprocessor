@@ -1039,7 +1039,8 @@ namespace GpuAllocatorTestsNs
 			// v3 (WAIVER-P10V3-01): compact 8N + 4 vs full 16N + 4 B/px (the same half-size scratch for both layouts).
 			const Dims d = MkDims(1920, 1080);
 			const uint64_t px = uint64_t(d.width) * d.height;
-			const uint64_t blocks = CellsAt(d, 4);
+			// WAIVER-K5-GS-LEDGER: before: CellsAt(d, 4) hardcoded shift 4; after: derived via LedgerBlockShiftFor(1080) == 4 (RegionEvidence::BlockSizeFor(1080) == 16). All existing assertions preserved.
+			const uint64_t blocks = CellsAt(d, GrainSplit::LedgerBlockShiftFor(static_cast<int>(d.height)));
 			const std::vector<std::string> two = GrainSplit::StorageLedgerLines(d, 2);
 			const std::vector<std::string> six = GrainSplit::StorageLedgerLines(d, 6);
 			Assert::AreEqual(size_t(2), two.size(), L"two lines");
@@ -1254,6 +1255,164 @@ namespace GpuAllocatorTestsNs
 			arena.EndScope();
 			Assert::AreEqual(uint64_t(1), arena.Exhausted(), L"negative control: Exhausted() == 1");
 			Assert::IsTrue(arena.FrameDecision().engaged, L"negative control: FrameDecision().engaged == true");
+		}
+
+		// K#5 (GS-LEDGER): GrainSplit::StorageLedgerLines derives its default block-grid shift from
+		// RegionEvidence::BlockSizeFor(d.height) via GrainSplit::LedgerBlockShiftFor across 720p/4K/8K,
+		// measurably diverging from the pre-fix hardcoded shift-4 baseline on the exact same inputs,
+		// while leaving P10's declaration shift law (GrainSplit::BlockShiftFor) untouched.
+		TEST_METHOD(GrainStorageLedgerDerivesBlockShiftFromBlockSizeForAt4KAnd720p)
+		{
+			auto computePeaks = [](Dims d, uint8_t shift, unsigned slots, uint64_t& fullPeak, uint64_t& compactPeak) {
+				const uint64_t px = uint64_t(d.width) * uint64_t(d.height);
+				const uint64_t blocks = CellsAt(d, shift);
+				const uint64_t fullSlot = px * 16 + blocks * 16;
+				const uint64_t compactSlot = px * 8 + blocks * 16;
+				const uint64_t scratch = px * 4 + blocks * 16;
+				fullPeak = fullSlot * slots + scratch;
+				compactPeak = compactSlot * slots + scratch;
+			};
+
+			constexpr unsigned kSlots = 6u;
+
+			// 1. 4K (3840 x 2160): BlockSizeFor(2160) == 32 -> LedgerBlockShiftFor(2160) == 5 (1u << 5 == 32).
+			{
+				const Dims d4k = MkDims(3840, 2160);
+				Assert::AreEqual(32, RegionEvidence::BlockSizeFor(2160), L"4K BlockSizeFor(2160) == 32");
+				const uint8_t shift4k = GrainSplit::LedgerBlockShiftFor(2160);
+				Assert::AreEqual(uint8_t(5), shift4k, L"4K LedgerBlockShiftFor(2160) == 5");
+				Assert::AreEqual(32u, 1u << shift4k, L"1u << LedgerBlockShiftFor(2160) == 32");
+
+				uint64_t fullPeak32 = 0, compactPeak32 = 0;
+				uint64_t fullPeak16 = 0, compactPeak16 = 0;
+				computePeaks(d4k, 5, kSlots, fullPeak32, compactPeak32);
+				computePeaks(d4k, 4, kSlots, fullPeak16, compactPeak16);
+
+				Assert::IsTrue(fullPeak32 < fullPeak16, L"4K 32x32 block grid uses strictly fewer peak bytes than hardcoded 16x16");
+				Assert::IsTrue(compactPeak32 < compactPeak16, L"4K compact peak also decreases with 32x32 block grid");
+				const std::string fullMb32 = FormatMB(fullPeak32);
+				const std::string compactMb32 = FormatMB(compactPeak32);
+				const std::string fullMb16 = FormatMB(fullPeak16);
+				const std::string compactMb16 = FormatMB(compactPeak16);
+				Assert::IsTrue(fullMb16 != fullMb32, L"4K bug measurably changes formatted full-peak MiB (794.5 vs 791.9 MiB)");
+				Assert::IsTrue(compactMb16 != compactMb32, L"4K bug measurably changes formatted compact-peak MiB (414.8 vs 412.2 MiB)");
+
+				const std::vector<std::string> linesDefault = GrainSplit::StorageLedgerLines(d4k, kSlots);
+				const std::vector<std::string> linesExplicit5 = GrainSplit::StorageLedgerLines(d4k, kSlots, 5);
+				// Mandatory same-input negative control: pre-fix naive baseline (hardcoded shift 4) on exact same d4k & slots.
+				const std::vector<std::string> linesHardcoded4 = GrainSplit::StorageLedgerLines(d4k, kSlots, 4);
+
+				Assert::AreEqual(size_t(2), linesDefault.size(), L"4K default ledger emits two lines");
+				Assert::AreEqual(size_t(2), linesHardcoded4.size(), L"4K hardcoded-4 negative control emits two lines");
+				Assert::AreEqual(linesExplicit5[0], linesDefault[0], L"4K default full line matches explicit shift 5");
+				Assert::AreEqual(linesExplicit5[1], linesDefault[1], L"4K default compact line matches explicit shift 5");
+
+				Assert::IsTrue(linesDefault[0].find(fullMb32) != std::string::npos, L"4K default full line reports 32x32 block peak");
+				Assert::IsTrue(linesDefault[1].find(compactMb32) != std::string::npos, L"4K default compact line reports 32x32 block peak");
+				Assert::IsTrue(linesDefault[0].find(fullMb16) == std::string::npos,
+					L"4K default full line must NOT report pre-fix hardcoded-shift-4 peak");
+				Assert::IsTrue(linesDefault[1].find(compactMb16) == std::string::npos,
+					L"4K default compact line must NOT report pre-fix hardcoded-shift-4 peak");
+				Assert::IsTrue(linesHardcoded4[0].find(fullMb16) != std::string::npos,
+					L"negative control: hardcoded shift 4 on exact same 4K input reports inflated shift-4 full peak");
+				Assert::IsTrue(linesHardcoded4[1].find(compactMb16) != std::string::npos,
+					L"negative control: hardcoded shift 4 on exact same 4K input reports inflated shift-4 compact peak");
+
+				// Explicit large shift clamps safely at 30 without shift UB.
+				const std::vector<std::string> linesClamped = GrainSplit::StorageLedgerLines(d4k, kSlots, 99);
+				const std::vector<std::string> linesShift30 = GrainSplit::StorageLedgerLines(d4k, kSlots, 30);
+				Assert::AreEqual(linesShift30[0], linesClamped[0], L"explicit blockShift > 30 clamps to 30");
+				Assert::AreEqual(linesShift30[1], linesClamped[1], L"explicit blockShift > 30 clamps to 30 (compact)");
+			}
+
+			// 2. 720p (1280 x 720): BlockSizeFor(720) == 8 -> LedgerBlockShiftFor(720) == 3 (1u << 3 == 8).
+			{
+				const Dims d720 = MkDims(1280, 720);
+				Assert::AreEqual(8, RegionEvidence::BlockSizeFor(720), L"720p BlockSizeFor(720) == 8");
+				const uint8_t shift720 = GrainSplit::LedgerBlockShiftFor(720);
+				Assert::AreEqual(uint8_t(3), shift720, L"720p LedgerBlockShiftFor(720) == 3");
+				Assert::AreEqual(8u, 1u << shift720, L"1u << LedgerBlockShiftFor(720) == 8");
+
+				uint64_t fullPeak8 = 0, compactPeak8 = 0;
+				uint64_t fullPeak16 = 0, compactPeak16 = 0;
+				computePeaks(d720, 3, kSlots, fullPeak8, compactPeak8);
+				computePeaks(d720, 4, kSlots, fullPeak16, compactPeak16);
+
+				Assert::IsTrue(fullPeak8 > fullPeak16, L"720p 8x8 block grid uses strictly MORE peak bytes than hardcoded 16x16");
+				const std::string fullMb8 = FormatMB(fullPeak8);
+				const std::string compactMb8 = FormatMB(compactPeak8);
+				const std::string fullMb16 = FormatMB(fullPeak16);
+				const std::string compactMb16 = FormatMB(compactPeak16);
+				Assert::IsTrue(fullMb8 != fullMb16, L"720p bug measurably changes formatted full-peak MiB (89.4 vs 88.3 MiB)");
+				Assert::IsTrue(compactMb8 != compactMb16, L"720p bug measurably changes formatted compact-peak MiB (47.2 vs 46.1 MiB)");
+
+				const std::vector<std::string> linesDefault = GrainSplit::StorageLedgerLines(d720, kSlots);
+				// Mandatory same-input negative control: hardcoded shift 4 under-reports 720p on the exact same Dims.
+				const std::vector<std::string> linesHardcoded4 = GrainSplit::StorageLedgerLines(d720, kSlots, 4);
+
+				Assert::AreEqual(size_t(2), linesDefault.size());
+				Assert::AreEqual(size_t(2), linesHardcoded4.size());
+				Assert::IsTrue(linesDefault[0].find(fullMb8) != std::string::npos, L"720p default full line reports 8x8 block peak");
+				Assert::IsTrue(linesDefault[1].find(compactMb8) != std::string::npos, L"720p default compact line reports 8x8 block peak");
+				Assert::IsTrue(linesDefault[0].find(fullMb16) == std::string::npos,
+					L"720p default full line must NOT report under-counted shift-4 peak");
+				Assert::IsTrue(linesDefault[1].find(compactMb16) == std::string::npos,
+					L"720p default compact line must NOT report under-counted shift-4 peak");
+				Assert::IsTrue(linesHardcoded4[0].find(fullMb16) != std::string::npos,
+					L"negative control: hardcoded shift 4 on exact same 720p input reports under-counted shift-4 full peak");
+				Assert::IsTrue(linesHardcoded4[1].find(compactMb16) != std::string::npos,
+					L"negative control: hardcoded shift 4 on exact same 720p input reports under-counted shift-4 compact peak");
+			}
+
+			// 3. 8K (7680 x 4320): BlockSizeFor(4320) == 64 -> LedgerBlockShiftFor(4320) == 6 (1u << 6 == 64).
+			{
+				const Dims d8k = MkDims(7680, 4320);
+				Assert::AreEqual(64, RegionEvidence::BlockSizeFor(4320), L"8K BlockSizeFor(4320) == 64");
+				const uint8_t shift8k = GrainSplit::LedgerBlockShiftFor(4320);
+				Assert::AreEqual(uint8_t(6), shift8k, L"8K LedgerBlockShiftFor(4320) == 6");
+				Assert::AreEqual(64u, 1u << shift8k, L"1u << LedgerBlockShiftFor(4320) == 64");
+
+				uint64_t fullPeak64 = 0, compactPeak64 = 0;
+				uint64_t fullPeak16 = 0, compactPeak16 = 0;
+				computePeaks(d8k, 6, kSlots, fullPeak64, compactPeak64);
+				computePeaks(d8k, 4, kSlots, fullPeak16, compactPeak16);
+
+				Assert::IsTrue(fullPeak64 < fullPeak16, L"8K 64x64 block grid uses strictly fewer peak bytes than hardcoded 16x16");
+				const std::string fullMb64 = FormatMB(fullPeak64);
+				const std::string compactMb64 = FormatMB(compactPeak64);
+				const std::string fullMb16 = FormatMB(fullPeak16);
+				const std::string compactMb16 = FormatMB(compactPeak16);
+				Assert::IsTrue(fullMb64 != fullMb16, L"8K bug measurably changes formatted full-peak MiB (3164.9 vs 3177.9 MiB)");
+				Assert::IsTrue(compactMb64 != compactMb16, L"8K bug measurably changes formatted compact-peak MiB (1646.2 vs 1659.2 MiB)");
+
+				const std::vector<std::string> linesDefault = GrainSplit::StorageLedgerLines(d8k, kSlots);
+				const std::vector<std::string> linesHardcoded4 = GrainSplit::StorageLedgerLines(d8k, kSlots, 4);
+
+				Assert::AreEqual(size_t(2), linesDefault.size());
+				Assert::AreEqual(size_t(2), linesHardcoded4.size());
+				Assert::IsTrue(linesDefault[0].find(fullMb64) != std::string::npos, L"8K default full line reports 64x64 block peak");
+				Assert::IsTrue(linesDefault[1].find(compactMb64) != std::string::npos, L"8K default compact line reports 64x64 block peak");
+				Assert::IsTrue(linesDefault[0].find(fullMb16) == std::string::npos,
+					L"8K default full line must NOT report inflated shift-4 peak");
+				Assert::IsTrue(linesDefault[1].find(compactMb16) == std::string::npos,
+					L"8K default compact line must NOT report inflated shift-4 peak");
+				Assert::IsTrue(linesHardcoded4[0].find(fullMb16) != std::string::npos,
+					L"negative control: hardcoded shift 4 on exact same 8K input reports inflated shift-4 full peak");
+				Assert::IsTrue(linesHardcoded4[1].find(compactMb16) != std::string::npos,
+					L"negative control: hardcoded shift 4 on exact same 8K input reports inflated shift-4 compact peak");
+			}
+
+			// 4. Scope guard: P10 declaration shift law (BlockShiftFor) was NOT unified/altered - ledger amended ONLY.
+			Assert::AreEqual(uint8_t(4), GrainSplit::BlockShiftFor(32),
+				L"scope guard: GrainSplit::BlockShiftFor(32) remains 4 (P10 declaration upper bound untouched)");
+			Assert::AreEqual(uint8_t(4), GrainSplit::BlockShiftFor(64),
+				L"scope guard: GrainSplit::BlockShiftFor(64) remains 4 (P10 declaration upper bound untouched)");
+			Assert::AreEqual(uint8_t(4), GrainSplit::BlockShiftFor(16),
+				L"scope guard: GrainSplit::BlockShiftFor(16) remains 4");
+			Assert::AreEqual(uint8_t(3), GrainSplit::BlockShiftFor(8),
+				L"scope guard: GrainSplit::BlockShiftFor(8) remains 3");
+			Assert::AreEqual(uint8_t(4), GrainSplit::LedgerBlockShiftFor(0),
+				L"non-positive height falls back to BlockSizeFor(0) == 16 -> shift 4");
 		}
 	};
 }
