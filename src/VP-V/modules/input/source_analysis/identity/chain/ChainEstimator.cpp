@@ -2979,6 +2979,10 @@ namespace SourceIdentity
 				}
 				// SOTA #3 (opt-in, default OFF): Broadcast interlaced motion-bob / weave-comb forensics.
 				InterlacedResult interlacedRes;
+				InterlacedResult bobRes;
+				InterlacedResult weaveRes;
+				bool ranBob = false;
+				bool ranWeave = false;
 				if (cfg.interlaced.enabled)
 				{
 					if (run[0].have && run[1].have)
@@ -3048,7 +3052,9 @@ namespace SourceIdentity
 								}
 							}
 						}
-						interlacedRes = AnalyzeMotionBob(bi, &run[0].ls, floorCodes, s.seq, cfg.interlaced, interlacedWs);
+						bobRes = AnalyzeMotionBob(bi, &run[0].ls, floorCodes, s.seq, cfg.interlaced, interlacedWs);
+						ranBob = true;
+						interlacedRes = bobRes;
 					}
 					if (!interlacedRes.interlacedDetected && job.frame.Valid())
 					{
@@ -3069,7 +3075,7 @@ namespace SourceIdentity
 						const uint16_t* weavePlane = job.frame.luma +
 							static_cast<std::ptrdiff_t>(ay) * static_cast<std::ptrdiff_t>(fStride) +
 							static_cast<std::ptrdiff_t>(ax);
-						const InterlacedResult weaveRes = AnalyzeWeaveComb(
+						weaveRes = AnalyzeWeaveComb(
 							weavePlane,
 							aw,
 							ah,
@@ -3077,6 +3083,7 @@ namespace SourceIdentity
 							floorCodes,
 							cfg.interlaced,
 							weaveScale);
+						ranWeave = true;
 						if (weaveRes.interlacedDetected)
 							interlacedRes = weaveRes;
 					}
@@ -3087,7 +3094,8 @@ namespace SourceIdentity
 						else
 							cInterlacedBobDetections.fetch_add(1, std::memory_order_relaxed);
 					}
-					else if (interlacedRes.kind == InterlacedKind::Abstain)
+					else if ((ranBob && bobRes.kind == InterlacedKind::Abstain) ||
+						(ranWeave && weaveRes.kind == InterlacedKind::Abstain))
 					{
 						cInterlacedAbstains.fetch_add(1, std::memory_order_relaxed);
 					}
@@ -3452,12 +3460,12 @@ namespace SourceIdentity
 					++discontinuities;
 					cDiscontinuities.fetch_add(1, std::memory_order_relaxed);
 				}
-				// M-1 & SOTA23-HIGH-2: maintain shot-scoped sticky SOTA #2/#3 protection (cleared on cut / discontinuity /
-				// area change / fade-shot OR after K = confirmShots consecutive explicit negative verdicts, NEVER on Abstain),
-				// release any held latch on first detection, demote applied geometry BEFORE ApplyJointLatch/ApplyLatch,
-				// block classical witness A entry while active, re-apply demotions after latch if needed, and compute
-				// appliedChanged ONCE against lastPublishedApplied[a] so appliedGen bumps strictly on real transitions.
-				if (anyReset || areaChanged || cutsNow > 0 || shotStartedNow)
+				// M-1 / M-1a / L-1a & SOTA23-HIGH-2: maintain shot-scoped sticky SOTA #2/#3 protection (cleared on cut / discontinuity /
+				// area change / blank / fade OR after K = round(deferDwellSec / acquiringIntervalSec) consecutive explicit negative
+				// verdicts matching the active kind, NEVER on Abstain / missing plane / flat uninformative frame), release any held latch
+				// on first detection, demote applied geometry BEFORE ApplyJointLatch/ApplyLatch, block classical witness A entry while active,
+				// re-apply demotions after latch if needed, and compute appliedChanged ONCE against lastPublishedApplied[a].
+				if (anyReset || areaChanged || cutsNow > 0 || shotStartedNow || (flags & (kEvBlank | kEvFade)) != 0u)
 					ClearShotSotaSticky();
 				const bool prevShotSotaActive =
 					shotNeuralSrSticky[0] || shotNeuralSrSticky[1] || (shotInterlacedSticky != InterlacedKind::None);
@@ -3498,10 +3506,22 @@ namespace SourceIdentity
 					}
 					else if (shotInterlacedSticky != InterlacedKind::None)
 					{
-						const bool explicitNegInterlaced =
-							interlacedRes.kind == InterlacedKind::None &&
-							interlacedRes.reason != InterlacedReason::Disabled &&
-							interlacedRes.reason != InterlacedReason::InvalidInput;
+						bool explicitNegInterlaced = false;
+						if (shotInterlacedSticky == InterlacedKind::WeaveComb)
+						{
+							explicitNegInterlaced = ranWeave &&
+								weaveRes.kind == InterlacedKind::None &&
+								weaveRes.reason != InterlacedReason::Disabled &&
+								weaveRes.reason != InterlacedReason::InvalidInput;
+						}
+						else if (shotInterlacedSticky == InterlacedKind::MotionBob)
+						{
+							explicitNegInterlaced = ranBob &&
+								run[1].up.informative &&
+								bobRes.kind == InterlacedKind::None &&
+								bobRes.reason != InterlacedReason::Disabled &&
+								bobRes.reason != InterlacedReason::InvalidInput;
+						}
 						if (explicitNegInterlaced)
 						{
 							if (++shotInterlacedNegStreak >= sotaClearNegTarget)
