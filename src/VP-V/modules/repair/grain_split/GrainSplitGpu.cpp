@@ -648,6 +648,29 @@ if (p.x < GS_W && p.y < GS_H) {
 			out.push_back(VpvGpu::Sampled("gblocks", f.blocks));
 		}
 
+		std::string ViewGlslCr(GrainSplit::Storage storage, double codeUnit)
+		{
+			if (storage != GrainSplit::Storage::Compact)
+				return "vec4 gs_fetch_cr(ivec2 p) { return texelFetch(split_cr, p, 0); }\n"
+					"vec2 gs_blocks_cr(ivec2 b) { return texelFetch(gblocks_cr, b, 0).xy; }\n";
+			return "const float gs_cu_cr = " + VpvGpu::Num(codeUnit) + ";\n"
+				"vec4 gs_fetch_cr(ivec2 p)\n{\n    vec2 a = texelFetch(gs_a_cr, p, 0).xy;\n    vec2 b = texelFetch(gs_b_cr, p, 0).xy;\n"
+				"    return vec4(a.x, a.y, b.x, b.y / gs_cu_cr);\n}\n"
+				"vec2 gs_blocks_cr(ivec2 b) { return texelFetch(gblocks_cr, b, 0).xy; }\n";
+		}
+
+		void BindViewCr(const Frame& f, std::vector<pl_shader_desc>& out)
+		{
+			if (Compact(&f))
+			{
+				out.push_back(VpvGpu::Sampled("gs_a_cr", f.split));
+				out.push_back(VpvGpu::Sampled("gs_b_cr", f.splitB));
+			}
+			else
+				out.push_back(VpvGpu::Sampled("split_cr", f.split));
+			out.push_back(VpvGpu::Sampled("gblocks_cr", f.blocks));
+		}
+
 		std::vector<VpSkeleton::ArenaRequest> Splitter::ArenaRequests(pl_gpu gpu, int w, int h, int B, GrainSplit::Storage storage)
 		{
 			(void)storage;   // v3: the same intermediates for both layouts
