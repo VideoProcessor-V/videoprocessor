@@ -29,27 +29,44 @@ namespace VpSkeleton
 {
 	namespace SceneRecordReader
 	{
-		inline bool CutOf(uint64_t seq, bool& cut)
+		struct SceneVerdict
 		{
-			cut = false;
+			bool cut = false;
+			bool fade = false;
+			float fadeKeep = -1.0f;
+		};
+
+		inline bool SceneOf(uint64_t seq, SceneVerdict& out)
+		{
+			out = SceneVerdict{};
 			FrameAnalysis::Store* store = VpFrameAnalysis::SourceFrameTap::SingleStore();
 			if (!store)
 				return false;
 			FrameAnalysis::Scene scene;
 			if (!store->PeekScene(seq, scene))
 				return false;
-			cut = scene.cut;
+			out.cut = scene.cut;
+			out.fade = scene.fade;
+			out.fadeKeep = scene.fadeKeep;
 			return true;
 		}
 
-		// GET-OR-COMPUTE reader (the LED's, measured frame AND look-ahead): the skeleton's scene product (SceneOf) for frame `seq`. It reads the
-		// store's group when present, else the two P4 records are acquired through the renderer's memo (made now for a frame ahead of the seal)
-		// and the verdict is published for the later seal (computed once). The renderer key is the ONE registered owner (the Host registers its
-		// store even with frame_analysis_store=off, so the key exists); more than one renderer is ambiguous and never guessed.
-		// False = genuine failure; `*why` (when given) names it, static text. cut is false then.
-		inline bool AcquireCut(uint64_t seq, bool& cut, const char** why)
+		inline bool CutOf(uint64_t seq, bool& cut)
 		{
-			cut = false;
+			SceneVerdict verdict;
+			const bool found = SceneOf(seq, verdict);
+			cut = found && verdict.cut;
+			return found;
+		}
+
+		// GET-OR-COMPUTE reader (the LED's, measured frame AND look-ahead, and SRM): the skeleton's scene product (SceneOf) for frame `seq`.
+		// It reads the store's group when present, else the two P4 records are acquired through the renderer's memo (made now for a frame ahead
+		// of the seal) and the verdict is published for the later seal (computed once). The renderer key is the ONE registered owner (the Host
+		// registers its store even with frame_analysis_store=off, so the key exists); more than one renderer is ambiguous and never guessed.
+		// False = genuine failure; `*why` (when given) names it, static text. `out` is reset to defaults then.
+		inline bool AcquireScene(uint64_t seq, SceneVerdict& out, const char** why)
+		{
+			out = SceneVerdict{};
 			const char* reason = "";
 			bool found = false;
 			const std::vector<const void*> owners = VpFrameAnalysis::SourceFrameTap::StoreOwners();
@@ -60,7 +77,9 @@ namespace VpSkeleton
 				const Vpv::Skeleton::SceneAnswer a = demand->SceneOf(owners[0], seq);
 				if (a.known)
 				{
-					cut = a.cut;
+					out.cut = a.cut;
+					out.fade = a.fade;
+					out.fadeKeep = a.fadeKeep;
 					found = true;
 				}
 				else
@@ -70,6 +89,14 @@ namespace VpSkeleton
 				reason = "no skeleton module";
 			if (why != nullptr)
 				*why = reason;
+			return found;
+		}
+
+		inline bool AcquireCut(uint64_t seq, bool& cut, const char** why)
+		{
+			SceneVerdict verdict;
+			const bool found = AcquireScene(seq, verdict, why);
+			cut = found && verdict.cut;
 			return found;
 		}
 	}

@@ -34,7 +34,9 @@ namespace LedDrive
 		// built from a frame never raise the fallback.
 		bool sceneKnown = true;
 		const char* sceneWhy = "";
+		// Shared U7 fade verdict from the skeleton scene product (O#2 L1); fadeKeep < 0 = not given.
 		bool fade = false;
+		float fadeKeep = -1.0f;
 		// Block-mean histogram in code units and the number of blocks measured.
 		std::array<uint32_t, 256> histogram{};
 		uint32_t blocks = 0;

@@ -594,8 +594,11 @@ namespace LedDrive
 		const double highlightFloor = protection *
 			flux.LevelFor(highlightLinear / std::pow(2.0, allowedStops) / contrastHeadroom, 0, ceiling);
 
+		// O#2 L1: shared U7 stats.fade is true for both fade-out (darkening) and fade-in (brightening);
+		// only a darkening fade dims toward ledFloorBlack and holds compensation gain.
+		const bool fadeToBlack = stats.fade && !(previousApl >= 0.0 && stats.apl > previousApl);
 		const bool cutToBlack = stats.cut && apl < 20;
-		const bool toBlack = stats.fade || cutToBlack;
+		const bool toBlack = fadeToBlack || cutToBlack;
 		const int base = toBlack ? config.ledFloorBlack :
 			std::max(CurveLevel(config, apl), floor);
 		out.lightTarget = std::max(config.ledFloorBlack, std::min(ceiling,
@@ -629,7 +632,7 @@ namespace LedDrive
 				// while truly black, so a visible fade-in is never carried at
 				// cut_cntr_level and released in one step; off = APL < 20.
 				if (config.blackPreliftMax < 255 && !stats.cut && stats.apl < 20.0 &&
-					(!stats.fade || IsTrueBlack(stats)) &&
+					(!fadeToBlack || IsTrueBlack(stats)) &&
 					(!config.prepositionBlackOnly || IsTrueBlack(stats)))
 				{
 					preposition = true;
@@ -733,7 +736,7 @@ namespace LedDrive
 			}
 			ramping = false;
 		}
-		else if (stats.fade && level > target)
+		else if (fadeToBlack && level > target)
 		{
 			// Follow the fade at its own rate (its APL ratio above black), never
 			// faster than rate_down.
@@ -767,14 +770,14 @@ namespace LedDrive
 		// the allowed stops into the knee; beyond that, CNTR (7c-1).
 		out.vpHeadroom = protection > 0.0 && highlightLinear > 0.0 ?
 			std::pow(2.0, allowedStops) / (highlightLinear * protection) : 1e9;
-		out.holdGain = stats.fade;
+		out.holdGain = fadeToBlack;
 		out.gain = CompensationGainFor(flux, ceiling, light, out);
 		lastLog.apl = apl;
 		lastLog.sustainedHighlight = static_cast<int>(stats.sustainedHighlight);
 		lastLog.target = target;
 		lastLog.early = early;
 		lastLog.cut = stats.cut;
-		lastLog.fade = stats.fade;
+		lastLog.fade = fadeToBlack;
 		lastLog.seenCut = seenCut;
 		lastLog.brightDump = brightDump;
 		lastLog.covered = covered;
