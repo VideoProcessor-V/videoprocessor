@@ -309,7 +309,7 @@ namespace VideoProcessorTest
 					}
 				}
 				const std::array<double, 3> bisected = invLin(lo);
-				if (foundInRange)
+				if (simulatePreFixSdrCeiling || foundInRange)
 				{
 					outLin = bisected;
 				}
