@@ -75,6 +75,7 @@ namespace FallbackPlainText
 			{ "source resolution look-ahead", "Some frames had their source resolution judged on arrival only" },
 			{ "skeleton_admission", "In this low-latency mode the temporal detail results are not made, so the steps that read them run without them" },
 			{ "motion.pair_global_unavailable", "Whole-frame motion could not be measured for this frame, so motion estimation was skipped" },
+			{ "nvof temporal hints", "Optical-flow temporal hints follow the active motion setting for all motion steps" }, { "vector producer behind", "The motion look-ahead is running behind the frame rate and may skip work" }, { "skeleton_tap_source", "Shared frame analysis is falling back to a simpler source tap" }, { "motion_field_ahead", "The motion look-ahead field ring dropped or overwrote ahead pairs" },
 		};
 		for (const Entry& e : table)
 			if (id == e.id)

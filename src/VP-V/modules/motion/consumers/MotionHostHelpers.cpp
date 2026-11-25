@@ -81,8 +81,8 @@ namespace Vpv
 		float AdaptiveFallbackFramePeriod(double customHookRefreshHz)
 		{
 			static GeneralRate::FallbackNotice fallback;   // fixed-constant batch B7 2026-10-18: logged
-			return GeneralRate::NoteFallback(fallback, customHookRefreshHz > 0.0, "custom hook frame time", 24.0) ?
-				static_cast<float>(1.0 / customHookRefreshHz) : 1.0f / 24.0f;
+			return GeneralRate::NoteFallback(fallback, customHookRefreshHz > 0.0, "custom hook frame time", 24.0) ? // GENERAL-REF: measured-rate fallback reported via GeneralRate::NoteFallback
+				static_cast<float>(1.0 / customHookRefreshHz) : 1.0f / 24.0f; // GENERAL-REF: measured-rate fallback reported via GeneralRate::NoteFallback
 		}
 
 		::Dejudder::Settings RenderedWarpSettings(const ::Dejudder::MotionWarp& dejudder, int outputHeight)

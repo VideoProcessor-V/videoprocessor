@@ -304,7 +304,7 @@ void CVideoProcessorDlg::ForceExitProcess(const char* reason, const char* blocki
 		bool skipped = false;
 		const bool restored = videoProcessorApp.RestoreDisplayTopologyBounded(
 			"forced-shutdown", ShutdownDeadline::TopologyLockTimeoutMs, &skipped);
-		DebugLog::Log("Forced shutdown topology restore: %s",
+		DebugLog::Log("Forced shutdown topology restore: %s", // VPV-FALLBACK forced-shutdown: watchdog process-termination path, no live renderer FallbackStatus
 			restored ? "done-or-not-needed" : skipped ? "skipped (restore mutex busy; kept for the next start)" :
 			"pending (kept for the next start)");
 	}

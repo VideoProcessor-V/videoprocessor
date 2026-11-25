@@ -418,8 +418,8 @@ if (tile < int(tiles) && g.y < ts) {
 				{
 					// Consecutive frames ahead: the motion level per frame interval (the frame rate measured).
 					static GeneralRate::FallbackNotice fallback;   // fixed-constant batch B7 2026-10-18: logged
-					const bool measured = GeneralRate::NoteFallback(fallback, secondsPerFrame > 0.0, "source-resolution cut judge", 24.0);
-					cut = aheadCutJudge.Judge(decorrelation, jump, measured ? secondsPerFrame : 1.0 / 24.0, ts);
+					const bool measured = GeneralRate::NoteFallback(fallback, secondsPerFrame > 0.0, "source-resolution cut judge", 24.0); // GENERAL-REF: measured-rate fallback reported via GeneralRate::NoteFallback
+					cut = aheadCutJudge.Judge(decorrelation, jump, measured ? secondsPerFrame : 1.0 / 24.0, ts); // GENERAL-REF: measured-rate fallback reported via GeneralRate::NoteFallback
 					aheadLastPattern = pattern;
 				}
 				else if (SourceResolution::PatternChange(pattern, none, pattern, none, blackLevelSeen, noise, decorrelation, share))

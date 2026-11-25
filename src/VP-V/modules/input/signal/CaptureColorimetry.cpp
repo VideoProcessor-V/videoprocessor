@@ -18,7 +18,7 @@ bool RateIs625Family(double frameRateHz)
 	if (std::fabs(frameRateHz - rounded) > 1e-3)
 		return false;   // 1000/1001 rates are the 525 family
 	const long long rate = static_cast<long long>(rounded);
-	return rate % 25 == 0 && rate % 24 != 0 && rate % 30 != 0;
+	return rate % 25 == 0 && rate % 24 != 0 && rate % 30 != 0; // GENERAL-REF: ITU BT.470BG PAL/50Hz integer-family standard check
 }
 
 

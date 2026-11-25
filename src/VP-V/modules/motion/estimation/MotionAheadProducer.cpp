@@ -111,7 +111,7 @@ namespace MotionAhead
 		fn_ = nullptr;
 	}
 
-	bool HalfLuma8(const AnalysisLumaSource& source, std::vector<uint8_t>& out, int& halfW, int& halfH, HalfLumaPool* pool)
+	bool HalfLuma8(const AnalysisLumaSource& source, std::vector<uint8_t>& out, int& halfW, int& halfH, HalfLumaPool* pool) // PRECISION-OK NVOF-8BIT: NVOF optical-flow 8-bit luma input contract
 	{
 		if (!source.IsValid()) return false;
 		const int w = source.width, h = source.height;
@@ -1107,9 +1107,9 @@ namespace MotionAhead
 		context->UpdateSubresource(lumaTex[texIndex], 0, nullptr, lumaBuffer.data(), static_cast<UINT>(halfW), 0);
 		// R3: this frame's engine luma is kept (one shared copy) only while the camera fit consumes the pair stream; the next pair takes it as
 		// its `from`. No copy otherwise.
-		std::shared_ptr<const std::vector<uint8_t>> currentLuma;
+		std::shared_ptr<const std::vector<uint8_t>> currentLuma; // PRECISION-OK NVOF-8BIT: NVOF optical-flow 8-bit luma input contract
 		if (CameraConsumes())
-			currentLuma = std::make_shared<const std::vector<uint8_t>>(lumaBuffer);
+			currentLuma = std::make_shared<const std::vector<uint8_t>>(lumaBuffer); // PRECISION-OK NVOF-8BIT: NVOF optical-flow 8-bit luma input contract
 		// Slice 16 D1 (refs/105 s3.4): if this core job is already past its deadline (frame already shown),
 		// skip the NVOF pair run (counted `late`), keep its luma in the ring so (N, N+1) survives, and reset
 		// temporal hints so the next pair runs non-continuous. Guarded by historyBehindRender (owner item 1).
@@ -1981,7 +1981,7 @@ namespace MotionAhead
 			NoteRingMiss(PairStartLostText());   // Process's FindPairStart(...).Lost() path: counted, named, no pair
 			pairs = false;
 		}
-		std::vector<uint8_t> curTestLuma;
+		std::vector<uint8_t> curTestLuma; // PRECISION-OK NVOF-8BIT: NVOF optical-flow 8-bit luma test buffer
 		int curHalfW = 0, curHalfH = 0;
 		const bool haveLuma = HalfLuma8(job.luma, curTestLuma, curHalfW, curHalfH);
 		const bool pastDeadline = !historyBehindRender.load(std::memory_order_acquire) &&

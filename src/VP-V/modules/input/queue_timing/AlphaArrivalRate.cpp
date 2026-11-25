@@ -22,8 +22,8 @@ void AlphaArrivalRateEstimator::Add(double arrivalSeconds, double rateHintHz)
 		return;
 	static GeneralRate::FallbackNotice fallback;   // fixed-constant batch B7 2026-10-18: logged
 	const bool hinted = GeneralRate::NoteFallback(fallback, CaptureRateBounds::Accepts(rateHintHz),
-		"arrival-rate estimator (no capture rate hint)", 60.0);
-	const double rate = hinted ? rateHintHz : 60.0;
+		"arrival-rate estimator (no capture rate hint)", 60.0); // GENERAL-REF: measured-rate fallback reported via GeneralRate::NoteFallback
+	const double rate = hinted ? rateHintHz : 60.0; // GENERAL-REF: measured-rate fallback reported via GeneralRate::NoteFallback
 	if (m_started && arrivalSeconds == m_last)
 		return;    // the same frame again (a film frame's update): no new period
 	if (m_started && arrivalSeconds < m_last)

@@ -276,7 +276,7 @@ LRESULT CVideoProcessorDlg::OnMessageHdrInferencePicture(WPARAM wParam, LPARAM)
 	{
 		if (m_hdrVetoUnsupportedLoggedGeneration != message->generation)
 		{
-			DebugLog::Log(
+			DebugLog::Log( // VPV-FALLBACK gui-hdr-veto: MFC dialog unsupported capture format diagnostic, no renderer FallbackStatus
 				"newlldv SDR veto: picture statistics unavailable for capture format %s; the veto cannot act",
 				CStringA(ToString(message->encoding)).GetString());
 			m_hdrVetoUnsupportedLoggedGeneration = message->generation;

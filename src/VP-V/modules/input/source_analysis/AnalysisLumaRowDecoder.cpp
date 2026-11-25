@@ -94,7 +94,7 @@ namespace
 			(static_cast<uint32_t>(value) * 1023U + 2047U) / 4095U);
 	}
 
-	bool ReadR12BPixel(const uint8_t* source, int x,
+	bool ReadR12BPixel(const uint8_t* source, int x, // PRECISION-OK WIRE-BYTES: raw packed R12B byte buffer input
 		uint16_t& red, uint16_t& green, uint16_t& blue)
 	{
 		const uint8_t* block = source + static_cast<size_t>(x / 8) * 36;
@@ -108,7 +108,7 @@ namespace
 		};
 		auto high = [&byte](int word, int index) noexcept
 		{
-			return static_cast<uint16_t>(byte(word, index) >> 4);
+			return static_cast<uint16_t>(byte(word, index) >> 4); // PRECISION-OK WIRE-BYTES: R12B nibble unpack into 12-bit sample
 		};
 		switch (x % 8)
 		{
@@ -163,7 +163,7 @@ namespace
 		uint16_t& red, uint16_t& green, uint16_t& blue)
 	{
 		const uint8_t* row = source.data + static_cast<size_t>(y) * source.rowBytes;
-		const uint8_t* pixel = row + static_cast<size_t>(x) * 4;
+		const uint8_t* pixel = row + static_cast<size_t>(x) * 4; // PRECISION-OK WIRE-BYTES: raw packed BGRA/RGBA byte buffer input
 		switch (source.encoding)
 		{
 		case VideoFrameEncoding::BGRA_8BIT:
@@ -189,7 +189,7 @@ namespace
 			const uint32_t word = ReadBigEndian32(pixel);
 			red = static_cast<uint16_t>((word >> 22) & 0x3ff);
 			green = static_cast<uint16_t>((word >> 12) & 0x3ff);
-			blue = static_cast<uint16_t>((word >> 2) & 0x3ff);
+			blue = static_cast<uint16_t>((word >> 2) & 0x3ff); // PRECISION-OK WIRE-BYTES: R210/10-bit packed blue channel bitfield extract
 			return true;
 		}
 		case VideoFrameEncoding::R10l:
@@ -197,7 +197,7 @@ namespace
 			const uint32_t word = ReadLittleEndian32(pixel);
 			red = static_cast<uint16_t>((word >> 22) & 0x3ff);
 			green = static_cast<uint16_t>((word >> 12) & 0x3ff);
-			blue = static_cast<uint16_t>((word >> 2) & 0x3ff);
+			blue = static_cast<uint16_t>((word >> 2) & 0x3ff); // PRECISION-OK WIRE-BYTES: R210/10-bit packed blue channel bitfield extract
 			return true;
 		}
 		case VideoFrameEncoding::R12L:
@@ -378,7 +378,7 @@ bool AnalysisLumaSource::SampleLumaRow(int x0, int y, int count, uint16_t* out) 
 				(bt601 ? (r210 ? BT601_R210 : BT601_R10) : (r210 ? BT709_R210 : BT709_R10));
 			// ReadRgb10's word layouts, decoded inline: r210 big-endian 2:10:10:10,
 			// R10b big-endian and R10l little-endian 10:10:10:2.
-			const uint8_t* pixel = data + static_cast<size_t>(y) * rowBytes + static_cast<size_t>(x0) * 4;
+			const uint8_t* pixel = data + static_cast<size_t>(y) * rowBytes + static_cast<size_t>(x0) * 4; // PRECISION-OK WIRE-BYTES: raw packed 4-byte pixel row pointer
 			const bool bigEndian = encoding != VideoFrameEncoding::R10l;
 			const int shift = r210 ? 0 : 2;
 			// |sum| <= (222927 + 749942 + 75707) x 1023 < 2^31: exact in 32 bits.
@@ -429,13 +429,13 @@ bool AnalysisLumaSource::SampleLumaRow(int x0, int y, int count, uint16_t* out) 
 		const bool high = rgbBitAlignment == 1;
 		auto channel = [high](uint32_t code)
 		{
-			return Expand8To10(static_cast<uint8_t>(high ? (code >> 2) : (code & 0xff)));
+			return Expand8To10(static_cast<uint8_t>(high ? (code >> 2) : (code & 0xff))); // PRECISION-OK WIRE-BYTES: 8-bit capture format byte unpack expanded to 10-bit
 		};
 		if (!tunnel && (encoding == VideoFrameEncoding::BGRA_8BIT || encoding == VideoFrameEncoding::ARGB_8BIT))
 		{
 			// 8-bit RGB: byte order as ReadRgb10.
 			const bool bgra = encoding == VideoFrameEncoding::BGRA_8BIT;
-			const uint8_t* pixel = row + static_cast<size_t>(x0) * 4;
+			const uint8_t* pixel = row + static_cast<size_t>(x0) * 4; // PRECISION-OK WIRE-BYTES: raw packed 4-byte pixel row pointer
 			for (int i = 0; i < count; ++i, pixel += 4)
 			{
 				red = Expand8To10(pixel[bgra ? 2 : 1]);

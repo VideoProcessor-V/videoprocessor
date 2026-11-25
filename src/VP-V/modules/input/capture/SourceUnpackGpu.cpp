@@ -67,7 +67,7 @@ if (g.x < frame_width && g.y < frame_height) {
 	const char* const DV_FULL_BODY = R"GLSL(
 ivec2 g = ivec2(gl_GlobalInvocationID.xy);
 if (g.x < frame_width && g.y < frame_height) {
-    uint code12 = dv_intensity(dv_word(g.x, g.y), uint(shift)) >> 4;
+    uint code12 = dv_intensity(dv_word(g.x, g.y), uint(shift)) >> 4; // PRECISION-OK DV-12BIT: unpack 16-bit container into full 12-bit code12
     uint t16 = uint(round(texelFetch(range_tab, ivec2(int(code12), 0), 0).r * 65535.0));
     imageStore(dst, g, vec4(dv_u16(t16), 0.0, 0.0, 1.0));
 }

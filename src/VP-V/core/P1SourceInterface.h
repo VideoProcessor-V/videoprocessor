@@ -36,7 +36,7 @@ using PublishedEngine8Fn = std::function<PublishedRead(uint64_t seq, uint32_t wi
 class IP1Source {
 public:
     virtual ~IP1Source() {}
-    virtual bool ReadEngine8(uint64_t seq, const AnalysisLumaSource& source, std::vector<uint8_t>& out, int& hw, int& hh,
+    virtual bool ReadEngine8(uint64_t seq, const AnalysisLumaSource& source, std::vector<uint8_t>& out, int& hw, int& hh, // PRECISION-OK NVOF-8BIT: NVOF engine 8-bit luma input contract
                              P1ReadKind& how) = 0;
 };
 

@@ -116,7 +116,7 @@ private:
 	// equivalent constant shift (+2). Only CRC-valid packets prove that the
 	// card stored the tunnel bytes untouched in these containers.
 	enum class WordLayout { R210, R10_BIG_ENDIAN, R10_LITTLE_ENDIAN, RGB8_ARGB, RGB8_BGRA };
-	uint32_t ReadTunnelWord(const uint8_t* source, size_t pixel) const;
+	uint32_t ReadTunnelWord(const uint8_t* source, size_t pixel) const; // PRECISION-OK WIRE-BYTES: raw packed DV tunnel byte buffer pointer
 	bool ReadPacketCopies(const uint8_t* source, size_t index, bool leftAligned,
 		uint8_t* packet);
 	bool LooksLikeTunnel(const uint8_t* source) const;

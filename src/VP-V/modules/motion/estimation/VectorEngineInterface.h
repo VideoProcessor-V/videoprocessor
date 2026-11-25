@@ -159,7 +159,7 @@ namespace VpMotion
 		// R3 (direct photometric refinement): the pair's engine-size 8-bit luma (engineW x engineH, tightly packed) for frame from and frame to, shared
 		// with the P2 slot's flow (the shared_ptrs keep the planes alive past the lease). Null when the producer kept none (the camera fit was not
 		// consuming the stream); enginePxToSource is then the luma step in source px.
-		std::shared_ptr<const std::vector<uint8_t>> lumaFrom, lumaTo;
+		std::shared_ptr<const std::vector<uint8_t>> lumaFrom, lumaTo; // PRECISION-OK NVOF-8BIT: NVOF optical-flow 8-bit luma input contract
 		const float* CellTrust(float toleranceEnginePx) const { return trustMemo ? trustMemo->CellTrust(toleranceEnginePx) : nullptr; }
 		const float* CellTrustBackward(float toleranceEnginePx) const { return trustMemo ? trustMemo->CellTrustBackward(toleranceEnginePx) : nullptr; }
 	};

@@ -848,7 +848,7 @@ void VpvDolbyVisionTunnelFormatter::OnVideoState(VideoStateComPtr& state)
 }
 
 uint32_t VpvDolbyVisionTunnelFormatter::ReadTunnelWord(
-	const uint8_t* source, size_t pixel) const
+	const uint8_t* source, size_t pixel) const // PRECISION-OK WIRE-BYTES: raw packed DV tunnel byte buffer pointer
 {
 	TunnelWordReader reader;
 	reader.source = source;

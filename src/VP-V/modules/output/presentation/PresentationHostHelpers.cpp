@@ -44,7 +44,7 @@ namespace Vpv
 		void ResetRenderAheadGate(RenderAhead::Presenter& presenter, const char* why)
 		{
 			const int level = presenter.ResetGate();
-			DebugLog::Log("Render-ahead gate: reset (%s; was %s)", why,
+			DebugLog::Log("Render-ahead gate: reset (%s; was %s)", why, // VPV-FALLBACK presentation: render-ahead gate reset recorded in DiagnosticHistory
 				level == 0 ? "full" : "degraded");
 			DiagnosticHistory::Global().RecordDecision("ra-gate-reset", why, level);
 		}

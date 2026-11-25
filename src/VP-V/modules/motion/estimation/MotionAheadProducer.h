@@ -88,7 +88,7 @@ namespace MotionAhead
 		// R3 (direct photometric refinement of the camera fit): the pair's engine-size 8-bit luma (halfW x halfH, tightly packed), frame
 		// N-1 and N, shared with the neighbouring pairs (one copy per frame). Filled only while the camera fit consumes the stream
 		// (Producer::CameraConsumes); null otherwise, and then every reader behaves exactly as before.
-		std::shared_ptr<const std::vector<uint8_t>> lumaFrom, lumaTo;
+		std::shared_ptr<const std::vector<uint8_t>> lumaFrom, lumaTo; // PRECISION-OK NVOF-8BIT: NVOF optical-flow 8-bit luma input contract
 	};
 	// FlowPtr (std::shared_ptr<const Flow>) is declared in VectorProducts.h.
 
@@ -242,7 +242,7 @@ namespace MotionAhead
 	// The half-size 8-bit luma of a frame ((w + 1) / 2 x (h + 1) / 2, 2 x 2
 	// averaged; 10-bit codes / 4): P010 / P210 planes read directly, other
 	// formats through the source's sampler. False when the source is not valid.
-	bool HalfLuma8(const AnalysisLumaSource& source, std::vector<uint8_t>& out, int& halfW, int& halfH, HalfLumaPool* pool = nullptr);
+	bool HalfLuma8(const AnalysisLumaSource& source, std::vector<uint8_t>& out, int& halfW, int& halfH, HalfLumaPool* pool = nullptr); // PRECISION-OK NVOF-8BIT: NVOF optical-flow 8-bit luma input contract
 
 	class Producer
 	{
@@ -496,7 +496,7 @@ namespace MotionAhead
 			bool forceOffChain = false;
 			bool generalRates = true;
 			bool hinted = false;
-			std::shared_ptr<const std::vector<uint8_t>> lumaFrom, lumaTo;
+			std::shared_ptr<const std::vector<uint8_t>> lumaFrom, lumaTo; // PRECISION-OK NVOF-8BIT: NVOF optical-flow 8-bit luma input contract
 			std::chrono::steady_clock::time_point submitTime{};
 			std::chrono::steady_clock::time_point workStartTime{};
 			double queueWaitMs = 0.0;
@@ -647,8 +647,8 @@ namespace MotionAhead
 		uint64_t previousSequence = 0, previousGeneration = 0;
 		uint64_t hintSequence = UINT64_MAX, hintGeneration = 0;   // the "to" frame of the engine's last pair
 		std::vector<uint8_t> lumaBuffer;
-		std::shared_ptr<const std::vector<uint8_t>> previousLuma;   // R3: frame previousSequence's engine luma (a copy, only while the camera consumes the stream)
-		std::vector<uint8_t> testPrevLuma;          // CPU test-seam previous half-luma for deterministic synthetic Flow
+		std::shared_ptr<const std::vector<uint8_t>> previousLuma;   // R3: frame previousSequence's engine luma (a copy, only while the camera consumes the stream) // PRECISION-OK NVOF-8BIT: NVOF optical-flow 8-bit luma input contract
+		std::vector<uint8_t> testPrevLuma;          // CPU test-seam previous half-luma for deterministic synthetic Flow // PRECISION-OK NVOF-8BIT: NVOF optical-flow 8-bit luma test buffer
 		int testPrevHalfW = 0, testPrevHalfH = 0;
 		std::vector<uint8_t> requestLumaBuffer;   // W2-C5b: a request's `from` frame (Adopt / OffChain)
 		CComPtr<ID3D11Texture2D> requestTex[2];   // W2-C5b: the off-chain pair (from, to); empty until an OffChain request

@@ -216,7 +216,7 @@ namespace MotionAhead
 	{
 		if (!(periodMs > 0.0) || !std::isfinite(periodMs))
 			return 0.0;
-		const int cappedLead = (std::max)(1, (std::min)(kMaxLead, lead));
+		const int cappedLead = (std::max)(1, (std::min)(kMaxLead, lead)); // VPV-FALLBACK motion_lookahead_capped: lead cap reported via FallbackCatalog::MotionLookaheadCapped
 		return static_cast<double>(cappedLead) * periodMs;
 	}
 

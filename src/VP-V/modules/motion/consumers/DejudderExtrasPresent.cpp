@@ -1306,7 +1306,7 @@ namespace Vpv
 			// After a second of frames, so the latency floor (and phi0) is settled.
 			// Hunt 2 13-timing L3: a second of frames at the source rate (was 24 frames).
 			if (dejudderPhaseLogPending && haveFirstVsync && dejudderLatencyFloor.Count() >=
-				AlphaQueuePolicy::FramesForSeconds(1.0, f.captureRateHz, 24, activeSettings.queueTimingFixes))
+				AlphaQueuePolicy::FramesForSeconds(1.0, f.captureRateHz, 24, activeSettings.queueTimingFixes)) // GENERAL-REF: AlphaQueuePolicy::FramesForSeconds fallback when captureRateHz unmeasured
 			{
 				dejudderPhaseLogPending = false;
 				DebugLog::Log("De-judder phase: cadence %.3f refreshes per source frame (source %.3f Hz, display %.3f Hz), phi0 %.3f, latency floor %.2f ms, this frame %d extras, stop %s",

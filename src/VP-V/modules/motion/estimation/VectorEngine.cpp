@@ -381,7 +381,7 @@ namespace VpMotion
 				? plan.ahead.configured
 				: (life.onDemandWanted ? VpMotion::kOnDemandMaxLookAhead : 0);
 			if (rawDemand > 0)
-				SyncP1AheadDemand(static_cast<uint8_t>((std::min)(MotionAhead::kMaxLead, rawDemand)));
+				SyncP1AheadDemand(static_cast<uint8_t>((std::min)(MotionAhead::kMaxLead, rawDemand))); // VPV-FALLBACK motion_lookahead_capped: P1 ahead lead cap reported via FallbackCatalog::MotionLookaheadCapped
 			else
 				ClearP1AheadDemand();
 		}

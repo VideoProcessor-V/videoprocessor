@@ -133,7 +133,7 @@ namespace DmPreDeband
 	{
 		const double height = static_cast<double>((std::max)(1, frameHeight));
 		const double scaledRadius = kBaseRadiusPx * height / kReferenceHeightLines;
-		const double radius = (std::max)(kMinRadiusPx, (std::min)(kMaxRadiusPx, scaledRadius));
+		const double radius = (std::max)(kMinRadiusPx, (std::min)(kMaxRadiusPx, scaledRadius)); // VPV-FALLBACK not-a-fallback: physical shader radius clamp [kMinRadiusPx, kMaxRadiusPx]
 		return {
 			{ "dm_deband_active", d.active ? 1.0 : 0.0 },
 			{ "dm_deband_thr", d.active ? d.thresholdNorm : 0.0 },

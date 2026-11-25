@@ -92,7 +92,7 @@ namespace TemporalDetail
 	};
 
 	// Serializes a CPU grain plane (double codes) into raw bytes for kP10GrainSplit AcquireForm::Cpu.
-	inline std::vector<uint8_t> PackCpuGrainPlane(const Plane& grain)
+	inline std::vector<uint8_t> PackCpuGrainPlane(const Plane& grain) // PRECISION-OK BYTE-SERIAL: raw byte serialization of 64-bit double Plane for SlotSet CPU blob
 	{
 		std::vector<uint8_t> bytes(grain.v.size() * sizeof(double));
 		if (!bytes.empty())
@@ -112,7 +112,7 @@ namespace TemporalDetail
 		using GrainSplit::Gauss;
 
 		// Decodes kP10GrainSplit AcquireForm::Cpu payload (either double[w*h] or float[w*h] grain codes).
-		inline bool UnpackCpuGrainPlane(const uint8_t* bytes, size_t len, int w, int h, Plane& out)
+		inline bool UnpackCpuGrainPlane(const uint8_t* bytes, size_t len, int w, int h, Plane& out) // PRECISION-OK BYTE-SERIAL: raw byte deserialization of 64-bit double Plane from SlotSet CPU blob
 		{
 			if (bytes == nullptr || w <= 0 || h <= 0)
 				return false;

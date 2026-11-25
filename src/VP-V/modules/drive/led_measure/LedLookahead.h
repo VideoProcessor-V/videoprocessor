@@ -98,7 +98,7 @@ namespace LedDrive
 	// held past it. Monotonic whenever the table is.
 	inline float TableValueQ6(const LumaValueTable& table, uint32_t q6)
 	{
-		const uint32_t whole = q6 >> Vpv::AnalysisDomain::kAxisFractionBits;
+		const uint32_t whole = q6 >> Vpv::AnalysisDomain::kAxisFractionBits; // PRECISION-OK HIST-BIN: 10-bit histogram bin index from Q6 analysis axis
 		if (whole >= static_cast<uint32_t>(LUMA_CODES - 1)) return table[LUMA_CODES - 1];
 		const uint32_t part = q6 & ((1u << Vpv::AnalysisDomain::kAxisFractionBits) - 1u);
 		if (part == 0) return table[whole];

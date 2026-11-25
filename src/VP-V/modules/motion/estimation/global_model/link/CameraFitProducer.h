@@ -53,7 +53,7 @@ namespace CameraLink
 		std::shared_ptr<const AheadCopy> aheadCopy;
 		// R3 (photometric refinement): the engine-size luma pair of the ahead pair (set by the worker from the AheadCopy; kept alive by the
 		// job for the whole Fit). Empty = no luma arrived: the fit counts SkippedNoLuma and keeps the vector model.
-		std::shared_ptr<const std::vector<uint8_t>> lumaFrom, lumaTo;
+		std::shared_ptr<const std::vector<uint8_t>> lumaFrom, lumaTo; // PRECISION-OK NVOF-8BIT: NVOF optical-flow 8-bit luma input contract
 		int lumaW = 0, lumaH = 0;
 		double lumaStep = 0;             // source px per luma px (AheadCopy::enginePxToSource)
 	};

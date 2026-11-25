@@ -863,7 +863,7 @@ float rs_slope(float y)
 		settings = value;
 		sequence = sourceSequence;
 		static GeneralRate::FallbackNotice fallback;   // fixed-constant batch B7 2026-10-18: logged
-		frameSeconds = GeneralRate::NoteFallback(fallback, std::isfinite(seconds) && seconds > 0.0f, "adaptive downscale frame time", 24.0) ?
+		frameSeconds = GeneralRate::NoteFallback(fallback, std::isfinite(seconds) && seconds > 0.0f, "adaptive downscale frame time", 24.0) ? // GENERAL-REF: measured-rate fallback reported via GeneralRate::NoteFallback
 			seconds : 1.0f / 24.0f;
 	}
 

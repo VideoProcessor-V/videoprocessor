@@ -205,6 +205,25 @@ namespace HalfLuma
 	{
 		return indent + "ivec2 local = ivec2(gl_LocalInvocationID.xy) * 4;\n" +
 			GlslBox4x4Sum(indent, "lq_tile_[(local.y + y) * 64 + local.x + x]");
+		// Fused planar-16 (P010/P210) 2x2 half-luma row decimation -> 8-bit NVOF engine luma (U3 owner law).
+	inline void FusedPlanar16HalfLuma8Row(const uint16_t* row0, const uint16_t* row1, int w, int halfW, uint8_t* dst) // PRECISION-OK NVOF-8BIT: NVOF engine 8-bit luma row output
+	{
+		if (!row0 || !row1 || !dst || w <= 0 || halfW <= 0)
+			return;
+		const int pairs = w / 2;
+		for (int x = 0; x < pairs; ++x)
+		{
+			const int x0 = x * 2;
+			const uint32_t sum = Box4(static_cast<uint32_t>(row0[x0] >> 6), static_cast<uint32_t>(row0[x0 + 1] >> 6), static_cast<uint32_t>(row1[x0] >> 6), static_cast<uint32_t>(row1[x0 + 1] >> 6)); // PRECISION-OK NVOF-8BIT: P010 top-10-bit code extract for NVOF 8-bit luma
+			dst[x] = FinishEngine8(sum);
+		}
+		if (pairs < halfW)
+		{
+			const int last = w - 1;
+			const uint32_t a = static_cast<uint32_t>(row0[last] >> 6), c = static_cast<uint32_t>(row1[last] >> 6); // PRECISION-OK NVOF-8BIT: P010 top-10-bit edge replicate for NVOF 8-bit luma
+			dst[pairs] = FinishEngine8(Box4(a, a, c, c));
+		}
 	}
+}
 }
 }

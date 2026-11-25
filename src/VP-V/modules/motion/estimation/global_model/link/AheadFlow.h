@@ -88,7 +88,7 @@ namespace CameraLink
 		std::vector<float> trust;
 		// R3 (photometric refinement): the pair's engine-size 8-bit luma (engineW x engineH) for frames pairFrom / pairTo, shared with the producer's
 		// flow (copying the shared_ptrs is the whole cost; the planes are immutable). Null = the producer kept none: the refine is skipped and counted.
-		std::shared_ptr<const std::vector<uint8_t>> lumaFrom, lumaTo;
+		std::shared_ptr<const std::vector<uint8_t>> lumaFrom, lumaTo; // PRECISION-OK NVOF-8BIT: NVOF optical-flow 8-bit luma input contract
 		size_t Cells() const { return static_cast<size_t>(gridW > 0 ? gridW : 0) * static_cast<size_t>(gridH > 0 ? gridH : 0); }
 		double CellSourcePx() const { return cellEnginePx * enginePxToSource; }
 	};

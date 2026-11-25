@@ -29,29 +29,9 @@ namespace MotionAhead
 		// Bit-identical fused 2x2 planar-16 (P010 / P210) row decimation -> 8-bit NVOF engine luma.
 		// Reads directly from the two source uint16 rows without intermediate row buffers, reproducing
 		// VpUnit::HalfLuma::FinishEngine8(Box4(r0[x0]>>6, r0[x1]>>6, r1[x0]>>6, r1[x1]>>6)) exactly.
-		inline void FusedPlanar16HalfLuma8Row(const uint16_t* row0, const uint16_t* row1, int w, int halfW, uint8_t* dst)
+		inline void FusedPlanar16HalfLuma8Row(const uint16_t* row0, const uint16_t* row1, int w, int halfW, uint8_t* dst) // PRECISION-OK NVOF-8BIT: NVOF engine 8-bit luma row output
 		{
-			if (!row0 || !row1 || !dst || w <= 0 || halfW <= 0)
-				return;
-			const int pairs = w / 2;
-			for (int x = 0; x < pairs; ++x)
-			{
-				const int x0 = x * 2;
-				const uint32_t sum = VpUnit::HalfLuma::Box4(
-					static_cast<uint32_t>(row0[x0] >> 6),
-					static_cast<uint32_t>(row0[x0 + 1] >> 6),
-					static_cast<uint32_t>(row1[x0] >> 6),
-					static_cast<uint32_t>(row1[x0 + 1] >> 6));
-				dst[x] = VpUnit::HalfLuma::FinishEngine8(sum);
-			}
-			// Odd trailing column replicates the last sample (Tap1(x, w) == w - 1).
-			if (pairs < halfW)
-			{
-				const int last = w - 1;
-				const uint32_t a = static_cast<uint32_t>(row0[last] >> 6);
-				const uint32_t c = static_cast<uint32_t>(row1[last] >> 6);
-				dst[pairs] = VpUnit::HalfLuma::FinishEngine8(VpUnit::HalfLuma::Box4(a, a, c, c));
-			}
+			VpUnit::HalfLuma::FusedPlanar16HalfLuma8Row(row0, row1, w, halfW, dst);
 		}
 
 		// Exact CPU mirror of the HLSL integer compute shader below (R16_UINT -> R8_UNORM byte):

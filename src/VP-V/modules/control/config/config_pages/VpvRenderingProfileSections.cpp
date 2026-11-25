@@ -248,7 +248,7 @@ namespace Vpv
             "Smooth, Max. "
             // audit 2026-10-16: the slider also moves the even-cadence (30p) strength and the 1000/1001 rates.
             "Each step moves only the de-judder strength, the strength on even cadences (30p doubled to 60p), whether "
-            "1000/1001 rates (23.976, 29.97) are included, the smoothing of motion within the frame and how much "
+            "1000/1001 rates (23.976, 29.97) are included, the smoothing of motion within the frame and how much " // GENERAL-REF: UI help/label string only (no hard-coded rate/size logic)
             "fast action keeps its strobing; the values appear in the fields below and can be edited (Custom). "
             "Each profile has its own position, so profile rules can give each frame rate its own level "
             "(e.g. a 24p profile at Cinema, a 30p profile at Natural). Film-like sources only; off for 50p/60p "
@@ -277,29 +277,29 @@ namespace Vpv
         motionBoxLayout->addWidget(motionName);
         motionBoxLayout->addWidget(motionDescription);
         form->addRow(QStringLiteral("Motion"), motionBox);
-        auto* dejudderStrength = addText(QStringLiteral("Strength (uneven cadences, e.g. 24p on 60 Hz)"),
+        auto* dejudderStrength = addText(QStringLiteral("Strength (uneven cadences, e.g. 24p on 60 Hz)"), // GENERAL-REF: UI help/label string only (no hard-coded rate/size logic)
             QStringLiteral("dejudder_strength"));
         dejudderStrength->setValidator(new QDoubleValidator(0.0, 1.0, 3, dejudderStrength));
         dejudderStrength->setPlaceholderText(QStringLiteral("0 = off; the slider sets it"));
         dejudderStrength->setToolTip(QStringLiteral(   // settings guide audit 2026-10-24
-            "How far the 3:2 hitch of film on a 60 Hz display is eased toward even motion: 0 = as shot, 1 = full "
+            "How far the 3:2 hitch of film on a 60 Hz display is eased toward even motion: 0 = as shot, 1 = full " // GENERAL-REF: UI help/label string only (no hard-coded rate/size logic)
             "frame-rate conversion. Normally set by the Motion slider above (Cinema = 0.25)."));
         // Delta 10: even cadences (a whole number of refreshes per film frame).
-        auto* strengthEven = addText(QStringLiteral("Strength (even cadences, e.g. 30p on 60 Hz)"),
+        auto* strengthEven = addText(QStringLiteral("Strength (even cadences, e.g. 30p on 60 Hz)"), // GENERAL-REF: UI help/label string only (no hard-coded rate/size logic)
             QStringLiteral("dejudder_strength_even"));
         strengthEven->setValidator(new QDoubleValidator(0.0, 1.0, 3, strengthEven));
         strengthEven->setPlaceholderText(QStringLiteral("0 = off"));
         strengthEven->setToolTip(QStringLiteral(
-            "When each film frame is shown for a whole number of refreshes (e.g. 30p on 60 Hz, 25p on 50 Hz), "
+            "When each film frame is shown for a whole number of refreshes (e.g. 30p on 60 Hz, 25p on 50 Hz), " // GENERAL-REF: UI help/label string only (no hard-coded rate/size logic)
             "the strobing on slow pans is what shows: the repeats become evenly spaced in-between pictures. "
             "1.0 is full frame-rate conversion. Held regions keep the source rate; landscapes do well, fast "
             "action holds more. 0 = off (uneven cadences use the strength above)."));
         auto* evenRates = addChoice(QStringLiteral("Even strength applies to"),
             QStringLiteral("dejudder_even_rates"), { QStringLiteral("whole"), QStringLiteral("whole_and_1001") });
         evenRates->setItemText(evenRates->findData(QStringLiteral("whole")),
-            QStringLiteral("Whole-number rates (24, 25, 30)"));
+            QStringLiteral("Whole-number rates (24, 25, 30)")); // GENERAL-REF: UI help/label string only (no hard-coded rate/size logic)
         evenRates->setItemText(evenRates->findData(QStringLiteral("whole_and_1001")),
-            QStringLiteral("Also 1000/1001 rates (23.976, 29.97)"));
+            QStringLiteral("Also 1000/1001 rates (23.976, 29.97)")); // GENERAL-REF: UI help/label string only (no hard-coded rate/size logic)
         evenRates->setToolTip(QStringLiteral(
             "1000/1001 rates mostly come from broadcast television, often video-look already, where "
             "smoothing is purely taste."));
@@ -308,7 +308,7 @@ namespace Vpv
         auto* pulldown = addChoice(QStringLiteral("Find film sent with repeated frames"),
             QStringLiteral("dejudder_pulldown"), { QStringLiteral("off"), QStringLiteral("on") });
         pulldown->setToolTip(QStringLiteral(
-            "Some sources send film inside a faster signal by repeating frames (e.g. 24p as 2:3 in 60 Hz). "
+            "Some sources send film inside a faster signal by repeating frames (e.g. 24p as 2:3 in 60 Hz). " // GENERAL-REF: UI help/label string only (no hard-coded rate/size logic)
             "On: the repeats are recognised, skipped and the film is shown at its own rate, so the de-judder "
             "above applies. Experimental; default off."));
         // Delta 14: two rules against the soap-opera look.
@@ -322,13 +322,13 @@ namespace Vpv
         rollLo->setPlaceholderText(QStringLiteral("8"));
         rollLo->setToolTip(QStringLiteral(
             "The camera speed where the strength starts to fall (8 is about a brisk pan). In pixels of a "
-            "2160-line picture; scaled for other sizes."));
+            "2160-line picture; scaled for other sizes.")); // GENERAL-REF: UI help/label string only (no hard-coded rate/size logic)
         auto* rollHi = addText(QStringLiteral("Floor reached at (px per frame)"), QStringLiteral("dejudder_roll_hi"));
         rollHi->setValidator(new QDoubleValidator(0.0, 400.0, 1, rollHi));
         rollHi->setPlaceholderText(QStringLiteral("24"));
         rollHi->setToolTip(QStringLiteral(
             "The camera speed where the strength reaches the floor (24 is about a whip pan). In pixels of a "
-            "2160-line picture; scaled for other sizes."));
+            "2160-line picture; scaled for other sizes.")); // GENERAL-REF: UI help/label string only (no hard-coded rate/size logic)
         auto* rollFloor = addText(QStringLiteral("Floor (share of the strength)"), QStringLiteral("dejudder_roll_floor"));
         rollFloor->setValidator(new QDoubleValidator(0.0, 1.0, 2, rollFloor));
         rollFloor->setPlaceholderText(QStringLiteral("0.25"));
@@ -557,7 +557,7 @@ namespace Vpv
         motionLo->setPlaceholderText(QStringLiteral("0.25"));
         motionLo->setToolTip(QStringLiteral(
             "Below this average movement per film frame the de-judder does nothing: near-still scenes have no "
-            "judder to fix. In pixels of a 2160-line picture; scaled for other sizes."));
+            "judder to fix. In pixels of a 2160-line picture; scaled for other sizes.")); // GENERAL-REF: UI help/label string only (no hard-coded rate/size logic)
         auto* motionHi = addText(QStringLiteral("Full strength at (pixels/frame)"),
             QStringLiteral("dejudder_motion_scale_hi"));
         motionHi->setValidator(new QDoubleValidator(0.0, 32.0, 2, motionHi));
@@ -808,9 +808,9 @@ namespace Vpv
             { QStringLiteral("native"), QStringLiteral("1440"), QStringLiteral("1080"), QStringLiteral("720"),
               QStringLiteral("auto") });
         sourceResolution->setItemText(sourceResolution->findData(QStringLiteral("native")), QStringLiteral("Native (as captured)"));
-        sourceResolution->setItemText(sourceResolution->findData(QStringLiteral("1440")), QStringLiteral("1440 lines"));
-        sourceResolution->setItemText(sourceResolution->findData(QStringLiteral("1080")), QStringLiteral("1080 lines"));
-        sourceResolution->setItemText(sourceResolution->findData(QStringLiteral("720")), QStringLiteral("720 lines"));
+        sourceResolution->setItemText(sourceResolution->findData(QStringLiteral("1440")), QStringLiteral("1440 lines")); // GENERAL-REF: UI help/label string only (no hard-coded rate/size logic)
+        sourceResolution->setItemText(sourceResolution->findData(QStringLiteral("1080")), QStringLiteral("1080 lines")); // GENERAL-REF: UI help/label string only (no hard-coded rate/size logic)
+        sourceResolution->setItemText(sourceResolution->findData(QStringLiteral("720")), QStringLiteral("720 lines")); // GENERAL-REF: UI help/label string only (no hard-coded rate/size logic)
         sourceResolution->setItemText(sourceResolution->findData(QStringLiteral("auto")), QStringLiteral("Auto (detected)"));
         sourceResolution->setToolTip(QStringLiteral(
             "For a stream upscaled before it reaches VP (many 4K streams are 1080p underneath): VP shrinks the picture "
@@ -1264,9 +1264,9 @@ namespace Vpv
         interpolation->setToolTip(QStringLiteral(
             "VP's own HDR-safe frame interpolation for video sources (50p / 60p and other video rates), from the "
             "motion vectors above. Off (default): today's picture. Auto: only where the source rate does not divide "
-            "the display rate (50p on 60 Hz, 60p on 50 Hz): every display refresh shows the picture at its true "
-            "time, instead of repeated or dropped frames. Always: also at whole ratios (30p video on 60 Hz). Film stays with the "
-            "de-judder; 50/60p at the display's own rate is never touched; the low-latency queue switches it off. "
+            "the display rate (50p on 60 Hz, 60p on 50 Hz): every display refresh shows the picture at its true " // GENERAL-REF: UI help/label string only (no hard-coded rate/size logic)
+            "time, instead of repeated or dropped frames. Always: also at whole ratios (30p video on 60 Hz). Film stays with the " // GENERAL-REF: UI help/label string only (no hard-coded rate/size logic)
+            "de-judder; 50/60p at the display's own rate is never touched; the low-latency queue switches it off. " // GENERAL-REF: UI help/label string only (no hard-coded rate/size logic)
             "Exclusive with libplacebo's smooth motion."));
         auto* interpolationFallback = addChoice(QStringLiteral("Where the motion is not trusted"),
             QStringLiteral("interpolation_fallback"), { QStringLiteral("hold"), QStringLiteral("blend") });
@@ -1276,20 +1276,20 @@ namespace Vpv
             "two frames by their time, as libplacebo's frame mixer does. A scene cut always holds."));
         auto* sourceClass = addChoice(QStringLiteral("Film or video"), QStringLiteral("source_class"),
             { QStringLiteral("legacy"), QStringLiteral("measured") });
-        sourceClass->setItemText(sourceClass->findData(QStringLiteral("legacy")), QStringLiteral("Fixed rates (up to 30 fps and 48p are film)"));
+        sourceClass->setItemText(sourceClass->findData(QStringLiteral("legacy")), QStringLiteral("Fixed rates (up to 30 fps and 48p are film)")); // GENERAL-REF: UI help/label string only (no hard-coded rate/size logic)
         sourceClass->setItemText(sourceClass->findData(QStringLiteral("measured")), QStringLiteral("Measured (film detected in the signal, or 2+ refreshes per frame)"));
         sourceClass->setToolTip(QStringLiteral(
             "Which sources count as film (the de-judder's) and which as video (the interpolator's). Fixed rates "
-            "(default): as before - measured rates up to about 30 fps and 48p are film. Measured: film found inside "
+            "(default): as before - measured rates up to about 30 fps and 48p are film. Measured: film found inside " // GENERAL-REF: UI help/label string only (no hard-coded rate/size logic)
             "the signal by pulldown detection, or a source that owns at least two display refreshes per frame; no "
-            "fixed rates (48p on 60 Hz then counts as video)."));
+            "fixed rates (48p on 60 Hz then counts as video).")); // GENERAL-REF: UI help/label string only (no hard-coded rate/size logic)
         {
             const auto syncMode = exclusiveButtons(interpolation, QStringLiteral("interpolation"), QStringLiteral("Interpolation"),
                 { { "off", QStringLiteral("Off"), QStringLiteral("Today's picture (the default).") },
                   { "auto", QStringLiteral("Auto (rate mismatch only)"), QStringLiteral(
-                      "Only where the source rate does not divide the display rate, e.g. 50p on 60 Hz or 60p on 50 Hz.") },
+                      "Only where the source rate does not divide the display rate, e.g. 50p on 60 Hz or 60p on 50 Hz.") }, // GENERAL-REF: UI help/label string only (no hard-coded rate/size logic)
                   { "always", QStringLiteral("Always (video sources)"), QStringLiteral(
-                      "Also at whole ratios (30p video on 60 Hz): smooth-motion parity. Film keeps the de-judder.") } },
+                      "Also at whole ratios (30p video on 60 Hz): smooth-motion parity. Film keeps the de-judder.") } }, // GENERAL-REF: UI help/label string only (no hard-coded rate/size logic)
                 QStringLiteral("off"), nullptr);
             QWidget* fallbackButtons = nullptr;
             const auto syncFallback = exclusiveButtons(interpolationFallback, QStringLiteral("interpolation_fallback"),
@@ -1354,7 +1354,7 @@ namespace Vpv
         timingContinuity->setToolTip(QStringLiteral(
             "Under test (default on). A jump in the capture's timestamps is treated as a break: no motion is carried "
             "across it. The film clock stays continuous when the measured capture rate replaces or resets the nominal one, "
-            "and the 50/60p timeline keeps the last measured display rate while it is re-measured. Off: the earlier behaviour."));
+            "and the 50/60p timeline keeps the last measured display rate while it is re-measured. Off: the earlier behaviour.")); // GENERAL-REF: UI help/label string only (no hard-coded rate/size logic)
         // Hunt 2 2026-10-17 (timing and motion).
         auto* cadenceClass = addChoice(QStringLiteral("Film / video classification fixes"), QStringLiteral("cadence_class_fixes"),
             { QStringLiteral("on"), QStringLiteral("off") });
@@ -1383,7 +1383,7 @@ namespace Vpv
             { QStringLiteral("on"), QStringLiteral("off") });
         queueTiming->setToolTip(QStringLiteral(
             "Under test (default on). The queue drops frames to catch up only when it is really behind (time beyond "
-            "its own target), so motion smoothing at 24-50 Hz no longer drops a frame every minute or two; the drift "
+            "its own target), so motion smoothing at 24-50 Hz no longer drops a frame every minute or two; the drift " // GENERAL-REF: UI help/label string only (no hard-coded rate/size logic)
             "correction's timings are in seconds at every frame rate and follow the real queue depth; a dropped frame's "
             "gap is kept; render ahead without frame statistics prefers the measured refresh over the whole-hertz mode. "
             "Off: the earlier behaviour."));
@@ -1392,13 +1392,13 @@ namespace Vpv
             { QStringLiteral("on"), QStringLiteral("off") });
         generalRates->setToolTip(QStringLiteral(
             "Under test (default on). Film / video is judged from the measured frame rate with no fixed list of rates: "
-            "everything slower than the 50 Hz television rate (below 49 fps) is film-like, 50 fps and faster is video. "
-            "24, 25, 30 and 48 fps are classed as before; odd rates between 31 and 47 fps are now film-like. "
+            "everything slower than the 50 Hz television rate (below 49 fps) is film-like, 50 fps and faster is video. " // GENERAL-REF: UI help/label string only (no hard-coded rate/size logic)
+            "24, 25, 30 and 48 fps are classed as before; odd rates between 31 and 47 fps are now film-like. " // GENERAL-REF: UI help/label string only (no hard-coded rate/size logic)
             "Repairing dropped frames pairs across a gap of up to about 1/6 second at any frame rate (1-3 missed frames "
-            "at 24p, up to 9 at 60p) instead of a fixed 1-3 frames. Above 60 fps the frame counts tuned at 60 fps keep "
-            "their time: motion vectors computed ahead (4 frames at 60 fps, 8 at 120), the queue's time-target ceiling, "
+            "at 24p, up to 9 at 60p) instead of a fixed 1-3 frames. Above 60 fps the frame counts tuned at 60 fps keep " // GENERAL-REF: UI help/label string only (no hard-coded rate/size logic)
+            "their time: motion vectors computed ahead (4 frames at 60 fps, 8 at 120), the queue's time-target ceiling, " // GENERAL-REF: UI help/label string only (no hard-coded rate/size logic)
             "the debander's hold and the DirectShow priming evidence. Up to 2160 lines nothing changes with the picture "
-            "height; taller pictures scale the matcher's tolerances. 24 and 60 fps at 1080 and 2160 lines are unchanged. "
+            "height; taller pictures scale the matcher's tolerances. 24 and 60 fps at 1080 and 2160 lines are unchanged. " // GENERAL-REF: UI help/label string only (no hard-coded rate/size logic)
             "Off: the earlier fixed rate bands and frame counts."));
         // Efficiency round 2026-10-18 (docs/agent-reports/efficiency.md).
         auto* efficiency = addChoice(QStringLiteral("Efficiency fixes"), QStringLiteral("efficiency_fixes"),
@@ -1416,7 +1416,7 @@ namespace Vpv
             "Under test (default off). On: a frame's de-judder in-between pictures are queued straight after the frame, "
             "without waiting for each refresh, so the next frame starts rendering at once. The GPU then has a whole "
             "source frame's time (41.7 ms at 24p) for a frame and its in-betweens, instead of one refresh (16.7 ms at "
-            "60 Hz): processing follows the source frame rate, not the display's. Cost: about the in-betweens' span "
+            "60 Hz): processing follows the source frame rate, not the display's. Cost: about the in-betweens' span " // GENERAL-REF: UI help/label string only (no hard-coded rate/size logic)
             "of extra display latency, reported so audio stays in step. Off: each in-between waits for the screen, as "
             "before."));
         auto* dejudderGate = addChoice(QStringLiteral("De-judder: GPU time budget (under test)"), QStringLiteral("dejudder_gate"),
@@ -2073,7 +2073,7 @@ namespace Vpv
         auto* repeatReuse = addChoice(QStringLiteral("Reuse the picture on captured repeats (draft)"),
             QStringLiteral("repeat_render_reuse"), { QStringLiteral("on"), QStringLiteral("off") });
         repeatReuse->setToolTip(QStringLiteral(
-            "Key repeat_render_reuse. When the capture repeats a frame (24p in 30, 30p in 60), draw the "
+            "Key repeat_render_reuse. When the capture repeats a frame (24p in 30, 30p in 60), draw the " // GENERAL-REF: UI help/label string only (no hard-coded rate/size logic)
             "repeat from the first present's cached picture and run only the output stage (dither keeps "
             "running), instead of rendering the whole chain again. Draft: off until its GPU check passes. "
             "Anything that would change the picture refuses the reuse (shown in Ctrl+I and Fallbacks "
@@ -2298,9 +2298,9 @@ namespace Vpv
             QStringLiteral("adaptive_grain_map"), { QStringLiteral("on"), QStringLiteral("off") });
         adaptiveMap->setToolTip(QStringLiteral(
             "On: grain is measured per block from frame-to-frame noise along the motion vectors, so grainy "
-            "areas lean faithful while clean texture keeps SSIM. Film rates (30 fps or less) with a next frame "
+            "areas lean faithful while clean texture keeps SSIM. Film rates (30 fps or less) with a next frame " // GENERAL-REF: UI help/label string only (no hard-coded rate/size logic)
             "queued, using the de-judder's motion vectors when they exist (it never starts the motion search on its "
-            "own). Otherwise (de-judder off, the low-latency queue, 50/60p) the per-frame measure is used. Off: the "
+            "own). Otherwise (de-judder off, the low-latency queue, 50/60p) the per-frame measure is used. Off: the " // GENERAL-REF: UI help/label string only (no hard-coded rate/size logic)
             "per-frame measure only."));
         auto* adaptiveMapSmooth = addText(QStringLiteral("Grain map smoothing (ms)"),
             QStringLiteral("adaptive_grain_map_smooth_ms"));
