@@ -2,18 +2,17 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
-// repair/grain_split: the OWNER FILL of kBandMemo (P30 "band_memo"; C8 slice 8, coreplan-C8-8-U2, shared unit U2), GPU form.
-// One separable Gaussian band per (frame, BandKey): two compute passes (across into an owner scratch R32F, down into the published R32F),
-// the taps and the GLSL text from BandMemo.h (the shared emitter, BandFromBase::GlslFromTaps). Gets its device, dispatch and both textures
-// ONLY from OwnerFillRequest::gpu (R2); the input plane through the memo (nested Acquire, no private upload).
-// Served keys: plane 0, pipeline stage 0, Replicate edge, Law::Taps or Law::Low. Full resolution reads the P13 source luma view; Half reads
-// P1 (kP1HalfLuma) as a GPU form. Not served, each a VISIBLE decline with its cause (product.band_memo_unavailable): a key outside the codec,
-// a Reflect edge (CPU-only form), plane > 0 or a pipeline stage > 0 (REBASE-ON-CA: the slot planes come with C6/C7), and a Half key while P1
-// has no GPU owner fill (the B0 lane). The CPU form is not registered (the declared backend is GpuCompute).
-// Output units: the sampled value of the input view (normalised), exactly what the private blurs of the consumers produced.
-// Reserve: two R32F textures of the largest luma size the P13 view shows (BandMemoReserveBytes; rule 6, derived, never fixed).
-// Registration: BandMemoModule below (observer of Entrance, as EdgeMapModule); NOT wired into HubBootstrap in this slice (hook-line delta
-// 0 rule): the lead decides the one call site (see the inbox).
+// repair/grain_split: the OWNER FILL of kBandMemo (P30 "band_memo"; C8 slice 8, coreplan-C8-8-U2, shared unit U2), GPU and CPU forms.
+// One separable Gaussian band per (frame, BandKey): GPU runs two compute passes (across into an owner scratch R32F, down into the published R32F),
+// CPU runs BandMemo::CpuBand<float> into tightly packed float32 bytes; taps and GLSL text come from BandMemo.h (BandFromBase::GlslFromTaps).
+// GPU gets its device, dispatch and both textures ONLY from OwnerFillRequest::gpu (R2); inputs come through the memo (nested Acquire, no private upload).
+// Served keys: plane 0, pipeline stage 0, Law::Taps or Law::Low. GPU serves Replicate edge (Full reads P13 source luma view; Half reads P1 GPU form).
+// CPU serves both Replicate and Reflect edges with explicit width x height (Half reads P1 CPU form uint16 normalised by 65535; Full reads P13 CPU float32).
+// Not served, each a VISIBLE decline with its cause (product.band_memo_unavailable): a key outside the codec, Reflect on GPU, plane > 0 or
+// pipeline stage > 0 (REBASE-ON-CA: slot planes come with C6/C7), missing dimensions on CPU, or absent/mismatched input plane.
+// Output units: the sampled value of the input view (normalised), matching what the private blurs of the consumers produced.
+// Reserve (GPU): two R32F textures of the largest luma size the P13 view shows (BandMemoReserveBytes; rule 6, derived, never fixed).
+// Registration: BandMemoModule below (observer of Entrance, wired in core/hub/HubBootstrap.cpp; GPU registered on Entrance size, CPU registered at load).
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/core/SkeletonAcquire.h>
 #include <VP-V/core/Products.h>
@@ -27,7 +26,10 @@
 #include <libplacebo/shaders/custom.h>
 
 #include <atomic>
+#include <climits>
 #include <cstddef>
+#include <cstdint>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -235,7 +237,95 @@ namespace Vpv
 			return f;
 		}
 
-		// Registers the kBandMemo GPU fill with the skeleton found by the hub; the reserve follows the largest source luma size seen at
+		// CPU owner fill of kBandMemo (AcquireForm::Cpu): computes BandMemo::CpuBand<float> into tightly packed float32 bytes
+		// (width * height * sizeof(float)). Serves both Replicate and Reflect edges on plane 0 / pipelineStage 0 with explicit
+		// width x height. Stage::Half reads kP1HalfLuma CPU form (uint16 normalised by 65535 = (1<<16)-1); Stage::Full reads
+		// kP13SourceRing CPU form (float32). Declines visibly on unsupported keys, missing dims, or absent/mismatched source planes.
+		inline VpSkeleton::OwnerFill MakeBandMemoCpuOwnerFill(std::shared_ptr<Counters> counters = nullptr)
+		{
+			using VK = VpSkeleton::VariantKey;
+			VpSkeleton::OwnerFill f;
+			f.variantAxes = uint32_t(VK::kAxisPlane) | uint32_t(VK::kAxisSize) | uint32_t(VK::kAxisScale) | uint32_t(VK::kAxisSigma)
+				| uint32_t(VK::kAxisStage) | uint32_t(VK::kAxisParam0) | uint32_t(VK::kAxisParam1);
+			f.reserveBytes = 0;
+			f.frameScoped = true;
+			f.renderThreadOnly = false;
+			f.fill = [counters](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo& memo, VpSkeleton::OwnerFillOutput& out) {
+				Counters* const c = counters.get();
+				VpUnit::BandMemo::BandKey key;
+				if (!VpUnit::BandMemo::FromVariant(req.variant, &key))
+					return Detail::Decline(out, c, "the key is not a band key (outside the codec)");
+				if (key.plane != 0 || key.pipelineStage != 0)
+					return Detail::Decline(out, c, "only the source luma plane is served (slot planes and chroma wait for the C6/C7 planes)");
+				if (key.width == 0u || key.height == 0u)
+					return Detail::Decline(out, c, "CPU form requires explicit plane dimensions (width x height)");
+				constexpr uint32_t kMaxDim = static_cast<uint32_t>(INT_MAX);
+				if (key.width > kMaxDim || key.height > kMaxDim)
+					return Detail::Decline(out, c, "CPU plane dimensions exceed INT_MAX");
+				const uint64_t totalSamples = uint64_t(key.width) * uint64_t(key.height);
+				if (totalSamples == 0u || totalSamples > uint64_t(SIZE_MAX / sizeof(float)))
+					return Detail::Decline(out, c, "CPU plane sample count overflow");
+				const size_t nSamples = static_cast<size_t>(totalSamples);
+				const bool half = key.resolution == VpUnit::BandMemo::Stage::Half;
+				std::vector<float> plane;
+				if (half)
+				{
+					const VpSkeleton::AcquireResult src = memo.Acquire(VpSkeleton::kP1HalfLuma, req.seq, VpSkeleton::AcquireForm::Cpu);
+					if (!src.Ok() || src.cpu == nullptr || src.cpuBytes == 0u)
+					{
+						const std::string cause = memo.LastCause(VpSkeleton::kP1HalfLuma);
+						return Detail::Decline(out, c,
+							std::string("no CPU P1 half-res plane") + (cause.empty() ? std::string() : " (" + cause + ")"));
+					}
+					const size_t halfBytes = nSamples * sizeof(uint16_t);
+					const uint64_t qw = (uint64_t(key.width) + 1u) / 2u;
+					const uint64_t qh = (uint64_t(key.height) + 1u) / 2u;
+					const size_t totalP1Bytes = halfBytes + static_cast<size_t>(qw * qh) * sizeof(uint16_t);
+					if (src.cpuBytes != totalP1Bytes && src.cpuBytes != halfBytes)
+					{
+						return Detail::Decline(out, c,
+							"P1 CPU plane size (" + std::to_string(src.cpuBytes) + " B) does not match requested "
+							+ std::to_string(key.width) + "x" + std::to_string(key.height));
+					}
+					std::vector<uint16_t> raw(nSamples);
+					std::memcpy(raw.data(), src.cpu, halfBytes);
+					plane.resize(nSamples);
+					// 16-bit UNORM full-scale denominator: (1 << 16) - 1 = 65535 (matches R16 UNORM GPU sampling).
+					constexpr float kInvU16Max = 1.0f / 65535.0f;
+					for (size_t i = 0; i < nSamples; ++i)
+						plane[i] = static_cast<float>(raw[i]) * kInvU16Max;
+				}
+				else
+				{
+					const VpSkeleton::AcquireResult src = memo.Acquire(VpSkeleton::kP13SourceRing, req.seq, VpSkeleton::AcquireForm::Cpu);
+					if (!src.Ok() || src.cpu == nullptr || src.cpuBytes == 0u)
+					{
+						const std::string cause = memo.LastCause(VpSkeleton::kP13SourceRing);
+						return Detail::Decline(out, c,
+							std::string("no CPU source luma plane") + (cause.empty() ? std::string() : " (" + cause + ")"));
+					}
+					const size_t expectedBytes = nSamples * sizeof(float);
+					if (src.cpuBytes != expectedBytes)
+					{
+						return Detail::Decline(out, c,
+							"P13 CPU plane size (" + std::to_string(src.cpuBytes) + " B) does not match requested "
+							+ std::to_string(key.width) + "x" + std::to_string(key.height) + " float32");
+					}
+					plane.resize(nSamples);
+					std::memcpy(plane.data(), src.cpu, expectedBytes);
+				}
+				const std::vector<float> band = VpUnit::BandMemo::CpuBand<float>(
+					plane, static_cast<int>(key.width), static_cast<int>(key.height), key);
+				out.bytes.resize(band.size() * sizeof(float));
+				if (!band.empty())
+					std::memcpy(out.bytes.data(), band.data(), out.bytes.size());
+				Detail::NoteFill(c);
+				return true;
+			};
+			return f;
+		}
+
+		// Registers the kBandMemo GPU and CPU fills with the skeleton found by the hub; the GPU reserve follows the largest source luma size seen at
 		// Entrance (as EdgeMapModule; re-registered only when it changes). Cost per frame: one short lock and a lookup.
 		class BandMemoModule : public Hub::ISkeletonModule
 		{
@@ -257,6 +347,8 @@ namespace Vpv
 				VpSkeleton::Dims luma;
 				luma.width = uint32_t(c.image->planes[0].texture->params.w);
 				luma.height = uint32_t(c.image->planes[0].texture->params.h);
+				if (!cpuRegistered_.load(std::memory_order_acquire))
+					RegisterCpu(nullptr);
 				Observe(c.host, luma);
 				return false;
 			}
@@ -275,6 +367,8 @@ namespace Vpv
 				{
 					std::lock_guard<std::mutex> g(mutex_);
 					regProblem = regProblem_;
+					if (!cpuRegProblem_.empty())
+						regProblem += (regProblem.empty() ? std::string() : "; ") + cpuRegProblem_;
 				}
 				const std::string line = FallbackLine(
 					regProblem,
@@ -286,6 +380,31 @@ namespace Vpv
 					out.push_back(line);
 				return out;
 			}
+			bool RegisterCpu(Skeleton::IExternalDemand* demand = nullptr)
+			{
+				std::lock_guard<std::mutex> g(mutex_);
+				if (cpuRegistered_.load(std::memory_order_acquire))
+					return true;
+				if (demand == nullptr)
+					demand = static_cast<Skeleton::IExternalDemand*>(Hub::ExtensionHub::Instance().Query(Skeleton::kExternalDemandQueryId));
+				if (demand == nullptr)
+				{
+					cpuRegProblem_ = "CPU owner fill: no skeleton to register with (the skeleton module is not registered yet); retried at the next frame";
+					return false;
+				}
+				using R = VpSkeleton::SkeletonMemo::Registration;
+				const R r = demand->RegisterOwnerFill(VpSkeleton::kBandMemo, VpSkeleton::AcquireForm::Cpu, kBandMemoUnit,
+					MakeBandMemoCpuOwnerFill(counters_));
+				if (r == R::Registered || r == R::Replaced || r == R::AlreadyRegistered)
+				{
+					cpuRegistered_.store(true, std::memory_order_release);
+					cpuRegProblem_.clear();
+					return true;
+				}
+				cpuRegProblem_ = "CPU owner fill " + RegistrationText(r);
+				return false;
+			}
+			bool CpuRegistered() const { return cpuRegistered_.load(std::memory_order_acquire); }
 			bool Observe(const void* host, VpSkeleton::Dims luma, Skeleton::IExternalDemand* demand = nullptr)
 			{
 				std::lock_guard<std::mutex> g(mutex_);
@@ -403,17 +522,21 @@ namespace Vpv
 			uint64_t reserve_ = 0;
 			uint64_t tried_ = 0;
 			std::string regProblem_;
+			std::string cpuRegProblem_;
 			std::atomic<bool> registered_{ false };
+			std::atomic<bool> cpuRegistered_{ false };
 		};
 
-		// Start-up only; idempotent. Not called in this slice (see the header note).
+		// Start-up only (core/hub/HubBootstrap.cpp, after the skeleton module); idempotent.
 		inline void RegisterBandMemoModule()
 		{
 			static bool registered = false;
 			if (registered)
 				return;
 			registered = true;
-			Hub::ExtensionHub::Instance().AddModule(std::unique_ptr<Hub::ISkeletonModule>(new BandMemoModule()));
+			std::unique_ptr<BandMemoModule> mod(new BandMemoModule());
+			mod->RegisterCpu();
+			Hub::ExtensionHub::Instance().AddModule(std::move(mod));
 		}
 	}
 }

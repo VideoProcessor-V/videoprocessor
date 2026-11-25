@@ -22,6 +22,7 @@
 #include <VP-V/modules/motion/estimation/VectorEngineExtension.h>
 #include <VP-V/modules/motion/consumers/DejudderExtension.h>
 #include <VP-V/modules/output/presentation/PresenterExtension.h>
+#include <VP-V/modules/repair/grain_split/BandMemoFill.h>
 #include <VP-V/modules/repair/grain_split/GrainLevelGpu.h>
 // Last: DiagnosticOverrides.h includes <windows.h> without NOMINMAX; the headers above use (std::min/max) forms that its macros break.
 #include <VP-V/modules/control/diagnostics/DiagnosticOverridesModule.h>
@@ -55,6 +56,7 @@ namespace
 		Vpv::Capture::RegisterSourcePlanesModule();
 		Vpv::Regions::RegisterEdgeMapModule();   // L-B5: kEdgeMap owner fill (rule 3; needs the skeleton + P13 views)
 		GrainSplit::LevelGpu::RegisterGrainLevelModule();   // P10g T3: kP10gGrainLevel + kP10GrainSplit variant owner fills (needs the skeleton + P13 views)
+		Vpv::GrainBand::RegisterBandMemoModule();   // M2#0 (U2 P30): kBandMemo GPU + CPU owner fills (needs the skeleton + P13/P1 views)
 		VpMotion::RegisterP2CpuFormModule();   // B-prereq (a): kP2VectorPair CPU form (pair + global); needs the skeleton + the vector engine
 		Vpv::FrameAnalysis::RegisterP1GpuModule();   // L-B4 (BBP-B B2): kP1HalfLuma GPU owner fill, the matcher pyramid variant
 		Vpv::FrameAnalysis::RegisterP1CpuModule();   // D3 / FIX3-D6: zero-wait no-lane kP1HalfLuma CPU owner fill (shadowed when analysis_lane is ON)
