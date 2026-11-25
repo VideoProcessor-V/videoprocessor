@@ -590,7 +590,7 @@ namespace
 			for (const char* name : { "input.source_range", "colour.dv_trims", "input.intent_content", "motion.interpolation_fallback",
 				"motion.intent_motion", "repair.low_bitrate_handling", "scaling.source_resolution_text_guard",
 				"scaling.source_resolution_mixed_guard", "scaling.adaptive_grain_map", "scaling.ssim_bitrate_aware",
-				"scaling.ssim_residual_stabilise", "scaling.cnn_residual_stabilise", "scaling.adaptive_upscale",
+				"scaling.ssim_residual_stabilise", "scaling.sharp_residual_stabilise", "scaling.adaptive_upscale",
 				"colour.fbo_float32", "colour.ambient_adapt", "output.occlusion_mask" })
 			{
 				auto* combo = control<QComboBox>(window, Vpv::ObjectName(QString::fromLatin1(name)));

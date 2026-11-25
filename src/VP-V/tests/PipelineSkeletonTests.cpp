@@ -147,7 +147,6 @@ namespace PipelineSkeletonTestsNs
 			int calls = 0;
 			// Placeholders wired with a callable still never run: no component.
 			list.Set(Id::RepairEncoding, Marker("A", &calls));
-			list.Set(Id::ScalingRoute4k, Marker("4", &calls));
 			list.Set(Id::ScalingRefine, Marker("R", &calls));
 			list.Set(Id::ScalingChromaUpscale, Marker("C", &calls));
 			const Frame in = Ramp();
@@ -157,9 +156,11 @@ namespace PipelineSkeletonTestsNs
 			Assert::AreEqual(0, result.applied);
 			Assert::IsTrue(out == in);
 
-			// A built slot disabled at slot level: skipped as well.
+			// Built slots disabled at slot level: skipped as well.
 			list.Set(Id::RepairDeband, Marker("D", &calls));
 			registry.SetEnabled(Id::RepairDeband, false);
+			list.Set(Id::ScalingRoute4k, Marker("4", &calls));
+			registry.SetEnabled(Id::ScalingRoute4k, false);
 			result = list.Run(registry, in, out);
 			Assert::AreEqual(0, calls);
 			Assert::IsTrue(out == in);

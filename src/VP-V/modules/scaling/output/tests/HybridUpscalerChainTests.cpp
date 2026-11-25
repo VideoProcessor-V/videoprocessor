@@ -368,6 +368,15 @@ namespace VideoProcessorTest
 			stage.ApplyLight(paramsCustom, light);
 			Assert::IsTrue(paramsCustom.downscaler == &pl_filter_mitchell,
 				L"explicit user downscaler choice must remain &pl_filter_mitchell");
+
+			// Slot switch off (pipeline_slots_off: scaling.output): even with vpvDefaultDownscaler == true,
+			// ApplyLight must respect slotRuns == false and keep upstream &pl_filter_hermite.
+			pl_render_params paramsSlotOff = pl_render_default_params;
+			light.slotRuns = false;
+			light.vpvDefaultDownscaler = true;
+			stage.ApplyLight(paramsSlotOff, light);
+			Assert::IsTrue(paramsSlotOff.downscaler == &pl_filter_hermite,
+				L"G12: slotRuns == false must leave downscaler as &pl_filter_hermite even when vpvDefaultDownscaler == true");
 		}
 
 		TEST_METHOD(B4EndToEndScalingChainRebaseRoute4kOutputNoDoubleUpscale)
