@@ -20,6 +20,7 @@
 
 #include <VP-V/core/hub/ExtensionHub.h>
 
+#include <atomic>
 #include <cstdint>
 
 namespace Vpv
@@ -59,9 +60,11 @@ namespace Vpv
 		// settings select, kept on its binding (the ingress host key is the renderer, not the Impl the hub's
 		// SettingsApplied fact is keyed by). Initialised from RunningPathway::Original() at binding creation and kept in
 		// sync via BindImplHost + OnLifecycle(SettingsApplied) as well as per-arrival NoteOriginalPathway.
+		struct IngressState;
 		void BindImplHost(const void* rendererHost, const void* implHost);
 		void NoteOriginalPathway(const void* host, bool original);
 		bool OriginalPathwayOf(const void* host);
+		void SyncHostFromImpl(const void* rendererHost, const void* implHost, IngressState& state, std::atomic<bool>& queueTimingFixes, std::atomic<bool>& motionHistoryFixes);
 
 		class IngressPolicy : public Hub::ISkeletonModule
 		{

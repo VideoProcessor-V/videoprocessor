@@ -185,6 +185,21 @@ namespace Vpv
 			return entry && (entry->pathwayState.load(std::memory_order_acquire) & kOriginalBit) != 0;
 		}
 
+		void SyncHostFromImpl(const void* rendererHost, const void* implHost, IngressState& state,
+			std::atomic<bool>& queueTimingFixes, std::atomic<bool>& motionHistoryFixes)
+		{
+			if (!rendererHost || !implHost)
+				return;
+			BindImplHost(rendererHost, implHost);
+			uint32_t fixBits = 0;
+			if (Hub::ExtensionHub::Instance().FixSwitchBits(implHost, fixBits))
+			{
+				const IngressState::FixSwitches switches = IngressState::FixSwitchesFromBits(fixBits);
+				state.SyncIngressSwitches(switches, queueTimingFixes, motionHistoryFixes);
+				NoteOriginalPathway(rendererHost, switches.originalPathway);
+			}
+		}
+
 		size_t BoundHosts() { return Slots().States(); }
 		size_t UnboundRenderers() { return Unbound().load(std::memory_order_relaxed); }
 		uint64_t IngressFaults()
