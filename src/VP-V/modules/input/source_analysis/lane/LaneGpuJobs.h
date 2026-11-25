@@ -102,6 +102,24 @@ inline uint32_t StepsFor(ProductId id, Dims d)
     }
 }
 
+// W21-4: GPU tap sourced directly from P13 on GPU (1 compute dispatch per frame, zero CPU row-band upload).
+constexpr uint32_t kP13TapSteps = 1u;
+
+// Steps (chunks) of a fixed-step product when the tap plane is built on GPU directly from P13:
+// P10 = 1 GPU tap pass + 1 extend pass + the splitter passes (independent of TapBands(d)); P11 and P12 = 1 pass each.
+// 0 = invalid dims or not fixed-step. Existing StepsFor() stays unchanged for CPU-tap callers.
+inline uint32_t StepsForP13Tap(ProductId id, Dims d)
+{
+    if (d.width == 0 || d.height == 0)
+        return 0;
+    switch (id) {
+    case VpSkeleton::kP10GrainSplit: return kP13TapSteps + 1u + kP10SplitterSteps;
+    case VpSkeleton::kP11RegionBlockStats: return 1;
+    case VpSkeleton::kP12LightLevel: return 1;
+    default: return 0;
+    }
+}
+
 // 70b section 3 / doc 70 section 6.2: until the source ring (P13, M2 P10) exists, P10 and P11 are computed from the TAP plane (the
 // lane's analysis luma), not from the queued source planes: the registry the lane is built on drops their P13 input.
 // The tap form has its own unit version and provenance tag (kTapFormUnitVersion, kTapProvenance); at the migration to
@@ -109,6 +127,7 @@ inline uint32_t StepsFor(ProductId id, Dims d)
 // The tap is the Q6 analysis axis for every source depth: codeUnit 64 / 65535 (a 10-bit code << 6; a 12-bit DV code << 4, msbShift 4).
 constexpr uint32_t kTapFormUnitVersion = 1;
 constexpr const char* kTapProvenance = "tap: analysis luma (studio codes, MsbAlign to the Q6 axis, R16 unorm: 10-bit at msbShift 6, packed DV 12-bit at msbShift 4)";
+constexpr const char* kP13TapProvenance = "p13-gpu-tap: P13 luma on GPU (Q6 axis, R16 unorm: DV 12-bit code12 << 4 via DvTunnelGlsl or unpacked P13 R16, 1 dispatch, zero CPU upload)";
 
 // `blockPx` is the runtime block edge RegionEvidence::BlockSizeFor(height) in {8, 16, 32, 64} (default 16 preserves
 // the static shift-4 declaration for >=768p and 1-arg callers). For <=720p content where BlockSizeFor(h) == 8 (2^3),
