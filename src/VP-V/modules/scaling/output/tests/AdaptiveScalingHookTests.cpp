@@ -5039,7 +5039,7 @@ if (q.x < size.x && q.y < size.y) {
 				st.grainHi = 6.0f;
 				st.grainFloor = 0.0f;   // non-finite blocks must fall cleanly to faithfulRef (w = 0)
 				st.motionStrength = 0.0f;
-				mod->SetCutSource([](uint64_t, bool& cut, std::string&) { cut = false; return true; });
+				mod->SetCutSource([](uint64_t, uint64_t) { AdaptiveDownscale::CutVerdict v; v.state = AdaptiveDownscale::CutVerdict::State::Known; v.cut = false; return v; });
 				mod->SetFrame(st, 1, 1.0f / 24.0f);
 				AdaptiveDownscale::Upscale up;
 				up.on = true; up.wBase = 1.0f; up.nativeWidth = static_cast<float>(sw); up.nativeHeight = static_cast<float>(sh);
@@ -5081,7 +5081,7 @@ if (q.x < size.x && q.y < size.y) {
 				-> std::vector<float>
 			{
 				ScopedModule mod;
-				mod->SetCutSource([](uint64_t, bool& cut, std::string&) { cut = false; return true; });
+				mod->SetCutSource([](uint64_t, uint64_t) { AdaptiveDownscale::CutVerdict v; v.state = AdaptiveDownscale::CutVerdict::State::Known; v.cut = false; return v; });
 				AdaptiveDownscaleStage::Stage stage{ *mod };
 				AdaptiveDownscaleStage::Host host;
 				host.fallbackFramePeriod = []() { return 1.0f / 24.0f; };
@@ -5123,7 +5123,7 @@ if (q.x < size.x && q.y < size.y) {
 						VpSkeleton::AcquireResult r;
 						if (id != VpSkeleton::kP10gGrainLevel)
 							return r;
-						r.status = VpSkeleton::AcquireStatus::Computed;
+						r.status = VpSkeleton::AcquireStatus::Reused;
 						r.gpu.resource = const_cast<void*>(static_cast<const void*>(lvl12Tex));
 						r.gpu.width = 4; r.gpu.height = 4;
 						if (bits > 0)
@@ -5181,7 +5181,7 @@ if (q.x < size.x && q.y < size.y) {
 						VpSkeleton::AcquireResult r;
 						if (id == VpSkeleton::kP10gGrainLevel)
 						{
-							r.status = VpSkeleton::AcquireStatus::Computed;
+							r.status = VpSkeleton::AcquireStatus::Reused;
 							r.gpu.resource = const_cast<void*>(static_cast<const void*>(cleanGrainTex));
 							r.gpu.width = 4; r.gpu.height = 4;
 							return r;
@@ -5194,7 +5194,7 @@ if (q.x < size.x && q.y < size.y) {
 							vf->gridW = 2; vf->gridH = 2;
 							vf->blockSize = 32;
 							vf->scaleToSourcePx = scaleToSourcePx;
-							r.status = VpSkeleton::AcquireStatus::Computed;
+							r.status = VpSkeleton::AcquireStatus::Reused;
 							r.gpu.resource = const_cast<void*>(static_cast<const void*>(fieldTex));
 							r.gpu.textureSet = VpMotion::P3FieldFactsTag();
 							r.gpu.width = 2; r.gpu.height = 2;

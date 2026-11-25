@@ -366,7 +366,7 @@ namespace VideoProcessorTest
 			};
 			Assert::IsTrue(memo.RegisterOwnerFill(kP11RegionBlockStats, AcquireForm::Cpu, kEdgeMapUnit, f11) == SkeletonMemo::Registration::Registered);
 			FocusMap::FillConfig fcfg;
-			fcfg.geometry = [](uint64_t, int& w, int& h) { w = kW; h = kH; return true; };
+			fcfg.geometry = [kW, kH](uint64_t, int& w, int& h) { w = kW; h = kH; return true; };
 			Assert::IsTrue(memo.RegisterOwnerFill(kFocusMap, AcquireForm::Cpu, FocusMap::kUnitPath, FocusMap::MakeOwnerFill(fcfg))
 				== SkeletonMemo::Registration::Registered);
 

@@ -1289,7 +1289,7 @@ namespace GrainUnitGpuTestsNs
 			// fill histogram bin 0 past the 25th percentile (96 >= 64), collapsing NLF to 0.015625 (>50x collapse).
 			const int totalBlocks = (w / B) * (h / B);
 			const int nanBlocks = 6 * (w / B);
-			const int rank25 = (params.levelPct * totalBlocks + 99) / 100;
+			const int rank25 = (params.levelPercentile * totalBlocks + 99) / 100;
 			Assert::IsTrue(nanBlocks >= rank25, L"negative control: 37.5% NaN blocks exceed 25th-percentile rank");
 			const float unguardedCollapse = 0.015625f;
 			Assert::IsTrue(cleanMidN / unguardedCollapse > 50.0f && nanMidN / unguardedCollapse > 50.0f,

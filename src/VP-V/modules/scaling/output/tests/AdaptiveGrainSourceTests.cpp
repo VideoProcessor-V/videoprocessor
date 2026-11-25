@@ -144,13 +144,13 @@ namespace VideoProcessorTest
 				L"out-of-range depth defaults to 10-bit");
 			for (int d : { 8, 10, 12 })
 			{
-				GrainSplit::P10g::Meta m;
+				GrainSplit::LevelCpu::Meta m;
 				m.sourceBits = d;
 				m.blockPx = 16;
-				Assert::IsTrue(std::fabs(GrainSplit::P10g::CodeToEightBitOf(d) - GrainSplit::LevelGpu::CodeToEightBitOf(d)) < 1e-12,
-					L"P10g::CodeToEightBitOf must match LevelGpu::CodeToEightBitOf");
+				Assert::IsTrue(std::fabs(GrainSplit::LevelCpu::CodeToEightBitOf(d) - GrainSplit::LevelGpu::CodeToEightBitOf(d)) < 1e-12,
+					L"LevelCpu::CodeToEightBitOf must match LevelGpu::CodeToEightBitOf");
 				Assert::IsTrue(std::fabs(m.CodeToEightBit() - GrainSplit::LevelGpu::CodeToEightBitOf(d)) < 1e-12,
-					L"P10g::Meta::CodeToEightBit() must match CodeToEightBitOf");
+					L"LevelCpu::Meta::CodeToEightBit() must match CodeToEightBitOf");
 			}
 
 			// Negative control (POD2-H1 4x bug): a 1.0 8-bit-code sigma in a 12-bit source has sigma_12 = 4095/255.
@@ -170,7 +170,7 @@ namespace VideoProcessorTest
 			facts->blockPx = 32;
 			facts->codeToEightBit = GrainSplit::LevelGpu::CodeToEightBitOf(12);
 			VpSkeleton::AcquireResult r;
-			r.status = VpSkeleton::AcquireStatus::Computed;
+			r.status = VpSkeleton::AcquireStatus::Reused;
 			r.gpu.textureSet = GrainSplit::LevelGpu::GrainLevelFactsTag();
 			r.gpu.keepAlive = facts;
 			const GrainSplit::LevelGpu::GrainLevelFacts* read = GrainSplit::LevelGpu::FactsOf(r);

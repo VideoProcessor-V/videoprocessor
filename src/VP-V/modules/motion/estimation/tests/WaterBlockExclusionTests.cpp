@@ -877,7 +877,7 @@ namespace VideoProcessorTest
 		{
 			SyntheticGrid g(20, 16);
 			// Active picture leaves a 2-block blanked letterbox/pillarbox border: valid bx in [2..17], by in [2..13].
-			g.pic = { 2 * 16.0, 2 * 16.0, 18 * 16.0, 14 * 16.0 };
+			g.pic = { 2 * 16, 2 * 16, 18 * 16, 14 * 16 };
 
 			// Build checkerboard +-8 px water inside active picture, then carve exact zero-curvature test islands:
 			//  1. (10, 8): 8/8 flagged neighbors -> MUST be filled.

@@ -1686,7 +1686,7 @@ namespace VideoProcessorTest
 			using namespace VpSkeleton;
 			namespace L = GrainSplit::LevelGpu;
 			namespace G = GrainSplit::Gpu;
-			namespace RE = Vpv::RendererExtension;
+			namespace RE = ::RendererExtension;
 
 			struct AtomicP10gDemand : Vpv::Skeleton::IExternalDemand
 			{
@@ -1697,9 +1697,9 @@ namespace VideoProcessorTest
 				bool refuseP10gReplace = false;
 				bool refuseChromaReg = false;
 
-				uint64_t Raise(const void*, const DemandSpec&) override { return 0; }
-				void Drop(const void*, uint64_t) override {}
-				uint64_t ActiveMask(const void*) const override { return 0; }
+				void SetExternalDemand(const void*, const void*, const std::vector<ConsumerDecl>&,
+					const std::vector<ProductId>&) override {}
+				void ClearExternalDemand(const void*, const void*) override {}
 				Vpv::Skeleton::SceneAnswer SceneOf(const void*, uint64_t) const override { return {}; }
 				SkeletonMemo::Registration RegisterOwnerFill(ProductId id, AcquireForm form,
 					const std::string& unit, OwnerFill fill) override
