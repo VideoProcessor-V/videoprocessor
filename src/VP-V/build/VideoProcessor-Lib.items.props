@@ -266,5 +266,9 @@
       <Link>shaders\CfL_Prediction-LICENSE.txt</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Include="..\..\shaders\vp_dm_pre_deband.glsl">
+      <Link>shaders\vp_dm_pre_deband.glsl</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 </Project>
