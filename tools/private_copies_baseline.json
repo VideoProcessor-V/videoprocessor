@@ -7,7 +7,7 @@
    "refs": "122 s9 D1",
    "reason": "TD private grain guard / EMA of the grain",
    "seed": true,
-   "max_hits": 7
+   "max_hits": 2
   },
   {
    "key": "a|D5|src/VP-V/modules/motion/estimation/MotionAheadProducer.cpp",
@@ -35,24 +35,6 @@
    "reason": "matcher D1 global search inside the motion owner folder (file-level scope)",
    "seed": true,
    "max_hits": 1
-  },
-  {
-   "key": "a|X3|src/VP-V/modules/repair/texture_restore/TextureRestore.cpp",
-   "rule": "a",
-   "site": "X3",
-   "refs": "126 s4 X3",
-   "reason": "TR STATS pass / DP tile energies recomputed (private block statistics)",
-   "seed": true,
-   "max_hits": 4
-  },
-  {
-   "key": "a|X4|src/VP-V/modules/repair/deband/VpDebander.cpp",
-   "rule": "a",
-   "site": "X4",
-   "refs": "126 s4 X4",
-   "reason": "debander own grain split (SPLIT_TENSOR_BODY)",
-   "seed": true,
-   "max_hits": 2
   },
   {
    "key": "a|X5|src/VP-V/modules/scaling/output/AdaptiveDownscale.cpp",
@@ -145,15 +127,6 @@
    "max_hits": 1
   },
   {
-   "key": "b|X8|src/VP-V/modules/repair/deband#kP11RegionBlockStats",
-   "rule": "b",
-   "site": "X8",
-   "refs": "126 s4 X8",
-   "reason": "declared product read never made, or owner compute without publish",
-   "seed": false,
-   "max_hits": 1
-  },
-  {
    "key": "b|X8|src/VP-V/modules/repair/detail_pulse#-",
    "rule": "b",
    "site": "X8",
@@ -164,15 +137,6 @@
   },
   {
    "key": "b|X8|src/VP-V/modules/repair/texture_restore#kP10GrainSplit",
-   "rule": "b",
-   "site": "X8",
-   "refs": "126 s4 X8",
-   "reason": "declared product read never made, or owner compute without publish",
-   "seed": false,
-   "max_hits": 1
-  },
-  {
-   "key": "b|X8|src/VP-V/modules/repair/texture_restore#kP11RegionBlockStats",
    "rule": "b",
    "site": "X8",
    "refs": "126 s4 X8",
