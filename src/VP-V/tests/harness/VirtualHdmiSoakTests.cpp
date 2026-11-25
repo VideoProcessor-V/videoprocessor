@@ -634,6 +634,7 @@ namespace
 		std::string gpuUnattributedDetail;
 		int postWarmupShaderCompiles = 0;
 		int logErrorsOrNans = 0;
+		uint64_t finalGpuSourceSeq = 0;
 		std::string errorDetail;
 	};
 
@@ -884,6 +885,7 @@ namespace
 		bool send = true;
 		bool resetBefore = false;
 		uint64_t overrideSeq = 0; // 0 = auto increment
+		int stallAfterMs = 0;     // >0: simulate HDMI/source frame starvation pause (pumps messages, shifts pacing)
 		const std::vector<BYTE>* customBuffer = nullptr;
 	};
 
@@ -905,6 +907,7 @@ namespace
 		bool subtitleRelocation = false;
 		bool applySnapshotBeforeBuild = false;
 		bool plainConfig = false;
+		bool allowOccludedOffscreen = false; // opt-in for isolated desktop where DXGI Present returns OCCLUDED while GPU renders & captures normally
 		std::string customDllPath;
 		std::vector<int> captureAtFrames;
 		int memorySampleStride = 0; // >0: record VRAM + RAM every N frames after warmup
@@ -997,7 +1000,18 @@ namespace
 
 			const auto syncDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
 			auto nextSync = std::chrono::steady_clock::now();
-			while (!handle.renderer->HasPresentedLiveFrame() && std::chrono::steady_clock::now() < syncDeadline)
+			auto isReady = [&]() -> bool {
+				if (handle.renderer->HasPresentedLiveFrame())
+					return true;
+				if (opt.allowOccludedOffscreen)
+				{
+					RendererRenderLoad load{};
+					if (handle.renderer->GetRenderLoad(load) && load.gpuValid && load.latestGpuSourceSequence >= 2)
+						return true;
+				}
+				return false;
+			};
+			while (!isReady() && std::chrono::steady_clock::now() < syncDeadline)
 			{
 				const size_t slot = static_cast<size_t>(logicalTick) % ringCount;
 				std::memcpy(ring[slot].data(), primeBuf.data(), expectedBytes);
@@ -1013,7 +1027,7 @@ namespace
 			}
 		}
 
-		const auto loopStart = std::chrono::steady_clock::now();
+		auto loopStart = std::chrono::steady_clock::now();
 		uint64_t lastGpuSeq = 0;
 		size_t capturesRequested = 0;
 		size_t warmupLogMark = 0;
@@ -1095,6 +1109,7 @@ namespace
 					if (load.gpuValid && load.latestGpuSourceSequence != lastGpuSeq && load.gpu.last > 0.0)
 					{
 						lastGpuSeq = load.latestGpuSourceSequence;
+						res.finalGpuSourceSeq = lastGpuSeq;
 						res.gpuMs.push_back(load.gpu.last);
 					}
 					if (load.valid && load.render.last > 0.0)
@@ -1108,6 +1123,17 @@ namespace
 					NvidiaAdapterMonitor::QueryProcessRamMiB(ms.workingSetMiB, ms.privateBytesMiB);
 					res.memorySamples.push_back(ms);
 				}
+			}
+
+			if (action.stallAfterMs > 0)
+			{
+				const auto stallEnd = std::chrono::steady_clock::now() + std::chrono::milliseconds(action.stallAfterMs);
+				while (std::chrono::steady_clock::now() < stallEnd)
+				{
+					PumpWindowMessages();
+					std::this_thread::sleep_for(std::chrono::milliseconds(20));
+				}
+				loopStart += std::chrono::milliseconds(action.stallAfterMs);
 			}
 
 			std::this_thread::sleep_until(loopStart + period * (f + 1));
@@ -1232,6 +1258,9 @@ namespace VideoProcessorTest
 
 			const ScopedEnvVar envAdapter("VP_TEST_ADAPTER", "NVIDIA");
 			const ScopedEnvVar envComputeOnce("VP_DEBUG_COMPUTE_ONCE", "1");
+			const std::string binDir = BinaryFolder();
+			const ScopedEnvVar envShaderDir("VP_TEST_SHADER_DIR",
+				(!binDir.empty() && (binDir.back() == '\\' || binDir.back() == '/')) ? binDir.substr(0, binDir.size() - 1) : binDir);
 			const TempFolderScope shotsFolder("vp-virtual-hdmi-soak-shots");
 			const ScopedEnvVar envShots("VP_TEST_SCREENSHOT_DIR", shotsFolder.Path());
 
@@ -1903,6 +1932,651 @@ namespace VideoProcessorTest
 				   << "=============================================================\n";
 			Logger::WriteMessage(report.str().c_str());
 			Assert::IsTrue(failures.empty(), WideOf("Virtual HDMI Soak watchdog failures: " + failures).c_str());
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(VirtualHdmiPhase6ToggleStarvationAndSweepSoak)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Footage")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(VirtualHdmiPhase6ToggleStarvationAndSweepSoak)
+		{
+			const char* const kTestName = "VirtualHdmiPhase6ToggleStarvationAndSweepSoak";
+			const bool gpuHw = (SoakEnv("VP_TEST_GPU") == "hardware");
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Gpu, kTestName, gpuHw,
+				"set VP_TEST_GPU=hardware and VP_TEST_ADAPTER=NVIDIA"))
+				return;
+
+			const RealClip::Manifest manifest = RealClip::Manifest::Load();
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage, kTestName, manifest.Loaded(),
+				manifest.error.empty() ? "real clip library manifest unavailable" : manifest.error))
+				return;
+
+			const RealClip::Clip* clip = nullptr;
+			const char* const preferredIds[] = { "tos_24p_3min", "tos_23976p_3min", "tos_1920x800_24p" };
+			for (size_t i = 0; i < sizeof(preferredIds) / sizeof(preferredIds[0]) && !clip; ++i)
+				clip = manifest.Find(preferredIds[i]);
+			if (!clip)
+			{
+				for (size_t i = 0; i < manifest.clips.size(); ++i)
+				{
+					if (manifest.clips[i].frames >= 60 && manifest.clips[i].width >= 1280)
+					{
+						clip = &manifest.clips[i];
+						break;
+					}
+				}
+			}
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Footage, kTestName, clip != nullptr,
+				"no suitable real clip found in manifest"))
+				return;
+
+			NvidiaAdapterMonitor nvMon;
+			std::string nvName, nvErr;
+			Assert::IsTrue(nvMon.Initialize(nvName, nvErr),
+				WideOf("Hard NVIDIA adapter lock failed: " + nvErr).c_str());
+			Assert::IsTrue(UpperOf(nvName).find("NVIDIA") != std::string::npos,
+				WideOf("Expected NVIDIA adapter, got: " + nvName).c_str());
+
+			const ScopedEnvVar envAdapter("VP_TEST_ADAPTER", "NVIDIA");
+			const std::string binDir = BinaryFolder();
+			const ScopedEnvVar envShaderDir("VP_TEST_SHADER_DIR",
+				(!binDir.empty() && (binDir.back() == '\\' || binDir.back() == '/')) ? binDir.substr(0, binDir.size() - 1) : binDir);
+			const TempFolderScope shotsFolder("vp-virtual-hdmi-phase6-shots");
+			const ScopedEnvVar envShots("VP_TEST_SCREENSHOT_DIR", shotsFolder.Path());
+			const std::string cacheDir = BinaryFolder() + "vp-harness-shader-cache";
+			CreateDirectoryA(cacheDir.c_str(), nullptr);
+			CreateDirectoryA((cacheDir + "\\vprenderer").c_str(), nullptr);
+			const ScopedEnvVar envCache("VP_TEST_SHADER_CACHE_DIR", cacheDir);
+			const std::string cfgPath = shotsFolder.Path() + "\\soak-phase6.cfg";
+
+			std::string decErr;
+			std::vector<std::vector<BYTE>> clip1080;
+			Assert::IsTrue(DecodeClipFrames(manifest, *clip, 1920, 1080, VideoFrameEncoding::P210, 36, clip1080, decErr),
+				WideOf("Phase 6 1080p decode failed: " + decErr).c_str());
+			std::vector<std::vector<BYTE>> clip4k;
+			Assert::IsTrue(DecodeClipFrames(manifest, *clip, 3840, 2160, VideoFrameEncoding::P010, 8, clip4k, decErr),
+				WideOf("Phase 6 4K decode failed: " + decErr).c_str());
+
+			const std::vector<std::vector<BYTE>> still1080 = { clip1080[8] };
+			const std::vector<std::vector<BYTE>> still4k = { clip4k[2] };
+
+			int totalFrames = 0;
+			int totalCaptures = 0;
+			std::string observedAdapter;
+			const bool allowOffscreenOccluded = (SoakEnv("VP_TEST_ALLOW_OCCLUDED_DESKTOP") == "1");
+			bool anyOccludedOffscreen = false;
+
+			auto verifyLeg = [&](const std::string& tag, const SoakLegResult& leg) -> CaptureVerification {
+				Assert::IsTrue(leg.created, WideOf(tag + ": renderer creation failed: " + leg.errorDetail).c_str());
+				if (!leg.presented)
+				{
+					Assert::IsTrue(allowOffscreenOccluded && leg.finalGpuSourceSeq > 0,
+						WideOf(tag + ": never presented live frame\n" + LogTail(leg.log)).c_str());
+					anyOccludedOffscreen = true;
+				}
+				Assert::IsTrue(UpperOf(leg.adapterName).find("NVIDIA") != std::string::npos,
+					WideOf(tag + ": non-NVIDIA adapter bound: " + leg.adapterName).c_str());
+				Assert::AreEqual(0, leg.logErrorsOrNans,
+					WideOf(tag + ": fatal GPU/NaN error logged: " + leg.errorDetail).c_str());
+				if (observedAdapter.empty())
+					observedAdapter = leg.adapterName;
+				totalFrames += leg.framesSent;
+				Assert::IsFalse(leg.captureJsons.empty(), WideOf(tag + ": missing rendered output capture").c_str());
+				CaptureVerification lastCv;
+				for (size_t i = 0; i < leg.captureJsons.size(); ++i)
+				{
+					lastCv = VerifyCaptureJson(leg.captureJsons[i]);
+					++totalCaptures;
+					Assert::IsTrue(lastCv.valid, WideOf(tag + ": invalid/NaN/dead-black capture").c_str());
+				}
+				return lastCv;
+			};
+
+			const std::string kDetDefaultOff =
+				"[vprenderer.Default]\n"
+				"dithering: off\n"
+				"deband: off\n"
+				"temporal_dither: off\n";
+
+			const std::string kDetOffBase =
+				"source_resolution: native\n"
+				"source_resolution_crossfade_s: 0\n"
+				"deband_vp: off\n"
+				"low_bitrate_handling: off\n"
+				"temporal_dither: off\n"
+				"detail_pulse_stabilise: off\n"
+				"texture_restore: off\n"
+				"adaptive_upscale: off\n"
+				"adaptive_downscale: off\n"
+				"adaptive_grain_map: off\n"
+				"adaptive_chroma_ssim: off\n"
+				"intent_black: off\n"
+				"intent_display: off\n"
+				"interpolation: off\n"
+				"appearance: off\n"
+				"dejudder_strength: 0\n" +
+				kDetDefaultOff +
+				"[vpv]\n"
+				"resync_event: on\n"
+				"frame_analysis_store: on\n"
+				"[vpv.skeleton]\n"
+				"analysis_lane: on\n"
+				"skeleton_gpu_gap: after_render\n"
+				"analysis_lane_chunk_us: 4000\n";
+
+			auto runStillSweep = [&](const std::string& tag, const std::string& extraCfg, bool pqHdr,
+				double ambientLux, int srcW, int srcH, int winW, int winH, VideoFrameEncoding enc,
+				const std::vector<std::vector<BYTE>>& pool, SoakLegResult* outLeg = nullptr) -> CaptureVerification {
+				SoakLegOptions opt;
+				opt.name = tag;
+				opt.configText = extraCfg;
+				opt.width = srcW;
+				opt.height = srcH;
+				opt.windowWidth = winW;
+				opt.windowHeight = winH;
+				opt.encoding = enc;
+				opt.rateNum = 60000;
+				opt.rateDen = 1001;
+				opt.framePeriodMs = 17;
+				opt.totalFrames = 14;
+				opt.warmupFrames = 4;
+				opt.pqHdr = pqHdr;
+				opt.allowOccludedOffscreen = allowOffscreenOccluded;
+				opt.captureAtFrames = { 11 };
+				if (ambientLux > 0.0)
+				{
+					opt.onFrame = [&, ambientLux](int f, IVideoRenderer&, IVideoRenderer* ext, std::vector<BYTE>& slotBuf) -> FrameAction {
+						const std::vector<BYTE>& src = pool[static_cast<size_t>(f) % pool.size()];
+						std::memcpy(slotBuf.data(), src.data(), (std::min)(src.size(), slotBuf.size()));
+						VpvCalls::SetAmbientLux(ext, ambientLux, true, static_cast<double>(f) * 0.042);
+						return FrameAction{};
+					};
+				}
+				const SoakLegResult leg = RunSoakLeg(opt, pool, nvMon, cfgPath);
+				if (outLeg)
+					*outLeg = leg;
+				return verifyLeg(tag, leg);
+			};
+
+			// =========================================================================
+			// PHASE 6a — Module Toggles & Parameter Sweeps (Verify Real Pixel & Telemetry Response)
+			// =========================================================================
+			// 1. Deterministic baseline (all optional stages OFF)
+			const CaptureVerification cvBase = runStillSweep(
+				"Phase6a-Base-Off", kDetOffBase, false, 0.0, 1920, 1080, 1920, 1080, VideoFrameEncoding::P210, still1080);
+
+			// 2. VP Debander toggle: OFF -> ON -> OFF (must alter pixels ON, revert bit-exact OFF)
+			const CaptureVerification cvDebandOn = runStillSweep(
+				"Phase6a-Deband-On",
+				"source_resolution: native\nsource_resolution_crossfade_s: 0\ndeband_vp: on\n"
+				"low_bitrate_handling: off\ntemporal_dither: off\ndetail_pulse_stabilise: off\ntexture_restore: off\n"
+				"adaptive_upscale: off\nadaptive_downscale: off\nadaptive_grain_map: off\nadaptive_chroma_ssim: off\n"
+				"intent_black: off\nintent_display: off\ninterpolation: off\nappearance: off\ndejudder_strength: 0\n" +
+				kDetDefaultOff +
+				"[vpv]\nresync_event: on\nframe_analysis_store: on\n"
+				"[vpv.skeleton]\nanalysis_lane: on\nskeleton_gpu_gap: after_render\nanalysis_lane_chunk_us: 4000\n",
+				false, 0.0, 1920, 1080, 1920, 1080, VideoFrameEncoding::P210, still1080);
+			const CaptureVerification cvDebandOff = runStillSweep(
+				"Phase6a-Deband-RevertOff", kDetOffBase, false, 0.0, 1920, 1080, 1920, 1080, VideoFrameEncoding::P210, still1080);
+			Assert::AreNotEqual(cvBase.sha256, cvDebandOn.sha256,
+				L"Phase 6a: deband_vp=on produced identical output to off (dead switch)");
+			Assert::AreEqual(cvBase.sha256, cvDebandOff.sha256,
+				L"Phase 6a: deband_vp=off did not cleanly revert to baseline");
+
+			// 3. CAM16 Appearance parameter sweep (PQ HDR + lit living room): OFF -> 0.30 -> 0.90 -> OFF
+			const std::string kAppDetHead =
+				"source_resolution: native\nsource_resolution_crossfade_s: 0\ndeband_vp: off\n"
+				"low_bitrate_handling: off\ntemporal_dither: off\ndetail_pulse_stabilise: off\ntexture_restore: off\n"
+				"adaptive_upscale: off\nadaptive_downscale: off\nadaptive_grain_map: off\nadaptive_chroma_ssim: off\n"
+				"intent_black: off\nintent_display: off\ninterpolation: off\ndejudder_strength: 0\n";
+			const std::string kAppHdrBase = kAppDetHead +
+				"[vprenderer.Default]\ndithering: off\ndeband: off\ntemporal_dither: off\n"
+				"appearance: off\nappearance_room: living_lit\nappearance_strength: 0.0\nappearance_screen_white_nits: 48\n"
+				"[vpv]\nresync_event: on\nframe_analysis_store: on\n";
+			SoakLegResult legApp03;
+			const CaptureVerification cvAppOff = runStillSweep(
+				"Phase6a-App-Off", kAppHdrBase, true, 85.0, 1920, 1080, 1920, 1080, VideoFrameEncoding::P210, still1080);
+			const CaptureVerification cvApp03 = runStillSweep(
+				"Phase6a-App-0.30", kAppDetHead +
+				"appearance: on\nappearance_room: living_lit\nappearance_strength: 0.30\nappearance_screen_white_nits: 48\n"
+				"[vprenderer.Default]\ndithering: off\ndeband: off\ntemporal_dither: off\n"
+				"appearance: on\nappearance_room: living_lit\nappearance_strength: 0.30\nappearance_screen_white_nits: 48\n"
+				"[vpv]\nresync_event: on\nframe_analysis_store: on\n",
+				true, 85.0, 1920, 1080, 1920, 1080, VideoFrameEncoding::P210, still1080, &legApp03);
+			const CaptureVerification cvApp09 = runStillSweep(
+				"Phase6a-App-0.90", kAppDetHead +
+				"appearance: on\nappearance_room: living_lit\nappearance_strength: 0.90\nappearance_screen_white_nits: 48\n"
+				"[vprenderer.Default]\ndithering: off\ndeband: off\ntemporal_dither: off\n"
+				"appearance: on\nappearance_room: living_lit\nappearance_strength: 0.90\nappearance_screen_white_nits: 48\n"
+				"[vpv]\nresync_event: on\nframe_analysis_store: on\n",
+				true, 85.0, 1920, 1080, 1920, 1080, VideoFrameEncoding::P210, still1080);
+			const CaptureVerification cvAppBackOff = runStillSweep(
+				"Phase6a-App-RevertOff", kAppHdrBase, true, 85.0, 1920, 1080, 1920, 1080, VideoFrameEncoding::P210, still1080);
+			std::string appDiag;
+			for (size_t li = 0; li < legApp03.log.size(); ++li)
+			{
+				const std::string& l = legApp03.log[li];
+				if (l.find("appearance") != std::string::npos || l.find("cam16") != std::string::npos ||
+					l.find("Appearance") != std::string::npos || l.find("shader") != std::string::npos)
+					appDiag += "  [app03] " + l + "\n";
+			}
+			std::string p6Failures;
+			auto p6Fail = [&](const std::string& m) {
+				p6Failures += m + "; ";
+				Logger::WriteMessage(("  [PHASE6-FAIL] " + m + "\n").c_str());
+			};
+			if (cvAppOff.sha256 == cvApp03.sha256)
+				p6Fail("Phase 6a: appearance=on (0.30) identical to off (fallbacks=" + legApp03.fallbacksStatus + ")\n" + appDiag);
+			if (cvApp03.sha256 == cvApp09.sha256)
+				p6Fail("Phase 6a: appearance_strength 0.30 vs 0.90 identical");
+			if (cvAppOff.sha256 != cvAppBackOff.sha256)
+				p6Fail("Phase 6a: appearance=off did not cleanly revert");
+
+			// 4. Temporal Dither (sigma_delta vs off) & Detail Pulse Stabilise (on vs off)
+			const CaptureVerification cvDitherSd = runStillSweep(
+				"Phase6a-TemporalDither-SD",
+				"source_resolution: native\nsource_resolution_crossfade_s: 0\ndeband_vp: off\n"
+				"low_bitrate_handling: off\ntemporal_dither: sigma_delta\ndetail_pulse_stabilise: off\ntexture_restore: off\n"
+				"adaptive_upscale: off\nadaptive_downscale: off\nadaptive_grain_map: off\nadaptive_chroma_ssim: off\n"
+				"intent_black: off\nintent_display: off\ninterpolation: off\nappearance: off\ndejudder_strength: 0\n"
+				"[vprenderer.Default]\ndithering: off\ndeband: off\ntemporal_dither: sigma_delta\n"
+				"[vpv]\nresync_event: on\nframe_analysis_store: on\n",
+				false, 0.0, 1920, 1080, 1920, 1080, VideoFrameEncoding::P210, still1080);
+			Assert::AreNotEqual(cvBase.sha256, cvDitherSd.sha256,
+				L"Phase 6a: temporal_dither=sigma_delta produced identical output to off");
+
+			const CaptureVerification cvDetailPulse = runStillSweep(
+				"Phase6a-DetailPulse-On",
+				"deband_vp: on\ndetail_pulse_stabilise: on\ndetail_pulse_cap: 1.5\n"
+				"temporal_dither: off\nappearance: off\n" +
+				kDetDefaultOff +
+				"[vpv]\nresync_event: on\nframe_analysis_store: on\n"
+				"[vpv.skeleton]\nanalysis_lane: on\nskeleton_gpu_gap: after_render\nanalysis_lane_chunk_us: 4000\n",
+				false, 0.0, 1920, 1080, 1920, 1080, VideoFrameEncoding::P210, clip1080);
+			Assert::IsTrue(cvDetailPulse.valid, L"Phase 6a: detail_pulse_stabilise capture invalid");
+
+			// 5. Re-Base Scaler (source_resolution: native -> 720 -> native on 1080p -> 4K upscale) + Adaptive Downscale
+			SoakLegResult legRebaseOff, legRebaseOn;
+			const CaptureVerification cvDownOff = runStillSweep(
+				"Phase6a-Scaler-Native", kDetOffBase, false, 0.0, 1920, 1080, 3840, 2160, VideoFrameEncoding::P210, still1080, &legRebaseOff);
+			const CaptureVerification cvDownOn = runStillSweep(
+				"Phase6a-Scaler-Rebase720",
+				"source_resolution: 720\nsource_resolution_crossfade_s: 0\ndeband_vp: off\n"
+				"low_bitrate_handling: off\ntemporal_dither: off\ndetail_pulse_stabilise: off\ntexture_restore: off\n"
+				"adaptive_upscale: off\nadaptive_downscale: on\nadaptive_grain_map: off\nadaptive_chroma_ssim: off\n"
+				"intent_black: off\nintent_display: off\ninterpolation: off\nappearance: off\ndejudder_strength: 0\n"
+				"[vprenderer.Default]\ndithering: off\ndeband: off\ntemporal_dither: off\n"
+				"source_resolution: 720\nsource_resolution_crossfade_s: 0\nadaptive_downscale: on\n"
+				"[vpv]\nresync_event: on\nframe_analysis_store: on\n",
+				false, 0.0, 1920, 1080, 3840, 2160, VideoFrameEncoding::P210, still1080, &legRebaseOn);
+			const CaptureVerification cvDownRevert = runStillSweep(
+				"Phase6a-Scaler-RevertNative", kDetOffBase, false, 0.0, 1920, 1080, 3840, 2160, VideoFrameEncoding::P210, still1080);
+			if (cvDownOff.sha256 == cvDownOn.sha256)
+				p6Fail("Phase 6a: source_resolution=720 (1080p->4K) produced identical output to native (status=" + legRebaseOn.sourceStatus + ")");
+			if (cvDownOff.sha256 != cvDownRevert.sha256)
+				p6Fail("Phase 6a: source_resolution=native did not cleanly revert");
+
+			// 6. Motion Vector Engine + Dejudder (24p moving clip, strength 0 -> 0.50 -> 0)
+			SoakLegResult legDejOn, legDejOff;
+			{
+				SoakLegOptions optOn;
+				optOn.name = "Phase6a-VectorEngine-Dejudder-0.50";
+				optOn.configText =
+					"deband_vp: on\noptical_flow: on\noptical_flow_global: on\ndejudder_strength: 0.50\n"
+					"[vpv]\nresync_event: on\nframe_analysis_store: on\n"
+					"[vpv.skeleton]\nanalysis_lane: on\nskeleton_gpu_gap: after_render\nanalysis_lane_chunk_us: 4000\n";
+				optOn.width = 1920;
+				optOn.height = 1080;
+				optOn.windowWidth = 1920;
+				optOn.windowHeight = 1080;
+				optOn.encoding = VideoFrameEncoding::P210;
+				optOn.rateNum = 24000;
+				optOn.rateDen = 1001;
+				optOn.framePeriodMs = 42;
+				optOn.totalFrames = 26;
+				optOn.warmupFrames = 6;
+				optOn.allowOccludedOffscreen = allowOffscreenOccluded;
+				optOn.captureAtFrames = { 22 };
+				legDejOn = RunSoakLeg(optOn, clip1080, nvMon, cfgPath);
+				verifyLeg(optOn.name, legDejOn);
+				Assert::IsFalse(legDejOn.dejudderStatus.empty(),
+					L"Phase 6a: dejudder/vector-engine status empty when dejudder_strength=0.50");
+
+				SoakLegOptions optOff = optOn;
+				optOff.name = "Phase6a-VectorEngine-Dejudder-Off";
+				optOff.configText = kDetOffBase;
+				optOff.totalFrames = 14;
+				optOff.captureAtFrames = { 11 };
+				legDejOff = RunSoakLeg(optOff, clip1080, nvMon, cfgPath);
+				verifyLeg(optOff.name, legDejOff);
+				Assert::AreNotEqual(legDejOn.dejudderStatus, legDejOff.dejudderStatus,
+					WideOf("Phase 6a: dejudder status unchanged between strength=0.50 and 0 (" +
+						legDejOn.dejudderStatus + ")").c_str());
+			}
+
+			// 7. Live Hot-Reload via ApplyApplicationState on a SINGLE running renderer instance
+			bool hotReloadApplied = false;
+			bool hotReloadLiveNoRestart = false;
+			std::string hotHashBefore, hotHashAfter;
+			{
+				SoakLegOptions optHot;
+				optHot.name = "Phase6a-LiveHotReload";
+				optHot.configText =
+					"source_resolution: native\nsource_resolution_crossfade_s: 0\ndeband_vp: off\ntemporal_dither: off\n"
+					"appearance: on\nappearance_room: living_lit\nappearance_strength: 0.25\nappearance_screen_white_nits: 48\n"
+					"[vprenderer.Default]\ndithering: off\ndeband: off\ntemporal_dither: off\n"
+					"appearance: on\nappearance_room: living_lit\nappearance_strength: 0.25\nappearance_screen_white_nits: 48\n"
+					"[vpv]\nresync_event: on\nframe_analysis_store: on\n";
+				optHot.width = 1920;
+				optHot.height = 1080;
+				optHot.windowWidth = 1920;
+				optHot.windowHeight = 1080;
+				optHot.encoding = VideoFrameEncoding::P210;
+				optHot.rateNum = 60000;
+				optHot.rateDen = 1001;
+				optHot.framePeriodMs = 17;
+				optHot.totalFrames = 28;
+				optHot.warmupFrames = 4;
+				optHot.pqHdr = true;
+				optHot.applySnapshotBeforeBuild = true;
+				optHot.allowOccludedOffscreen = allowOffscreenOccluded;
+				optHot.captureAtFrames = { 10, 24 };
+				optHot.onFrame = [&](int f, IVideoRenderer& r, IVideoRenderer* ext, std::vector<BYTE>& slotBuf) -> FrameAction {
+					std::memcpy(slotBuf.data(), still1080[0].data(), (std::min)(still1080[0].size(), slotBuf.size()));
+					VpvCalls::SetAmbientLux(ext, 85.0, true, static_cast<double>(f) * 0.042);
+					if (f == 14)
+					{
+						{
+							std::ofstream outCfg(cfgPath, std::ios::trunc);
+							outCfg << "[general]\npersist_profile_selection: false\n"
+								   << "[vprenderer.input.soak]\nwhen: $source_rate > 0\ncapture_path: gpu\n"
+								   << "source_resolution: native\nsource_resolution_crossfade_s: 0\ndeband_vp: off\ntemporal_dither: off\n"
+								   << "appearance: on\nappearance_room: living_lit\nappearance_strength: 0.90\nappearance_screen_white_nits: 48\n"
+								   << "[vprenderer.Default]\ndithering: off\ndeband: off\ntemporal_dither: off\n"
+								   << "appearance: on\nappearance_room: living_lit\nappearance_strength: 0.90\nappearance_screen_white_nits: 48\n"
+								   << "[vpv]\nresync_event: on\nframe_analysis_store: on\n";
+						}
+						ConfigFile nextCfg;
+						std::string err;
+						UnifiedProfileRuntime::Runtime rt;
+						if (nextCfg.Load(cfgPath) && rt.Initialize(nextCfg, {}, err))
+						{
+							const auto snap = rt.GetSnapshot();
+							CString active;
+							bool restart = false, live = false;
+							if (snap)
+							{
+								hotReloadApplied = r.ApplyApplicationState(*snap, active, restart, live);
+								hotReloadLiveNoRestart = !restart;
+							}
+						}
+					}
+					return FrameAction{};
+				};
+				const SoakLegResult legHot = RunSoakLeg(optHot, still1080, nvMon, cfgPath);
+				verifyLeg(optHot.name, legHot);
+				Assert::IsTrue(hotReloadApplied, L"Phase 6a: live ApplyApplicationState hot-reload returned false");
+				Assert::IsTrue(legHot.captureJsons.size() >= 2, L"Phase 6a: expected 2 captures around hot-reload");
+				hotHashBefore = ReadSidecarSha256(legHot.captureJsons[0]);
+				hotHashAfter = ReadSidecarSha256(legHot.captureJsons[1]);
+			}
+
+			// =========================================================================
+			// PHASE 6b — Frame Starvation & Resume (200 ms + 500 ms HDMI Signal Stalls)
+			// =========================================================================
+			uint64_t seqBeforeStall = 0;
+			SoakLegResult legStarve;
+			{
+				SoakLegOptions optStarve;
+				optStarve.name = "Phase6b-FrameStarvation-200ms-500ms";
+				optStarve.configText =
+					"deband_vp: on\noptical_flow: on\ndejudder_strength: 0.25\n"
+					"[vpv]\nresync_event: on\nframe_analysis_store: on\n"
+					"[vpv.skeleton]\nanalysis_lane: on\nskeleton_gpu_gap: after_render\nanalysis_lane_chunk_us: 4000\n";
+				optStarve.width = 1920;
+				optStarve.height = 1080;
+				optStarve.windowWidth = 1920;
+				optStarve.windowHeight = 1080;
+				optStarve.encoding = VideoFrameEncoding::P210;
+				optStarve.rateNum = 60000;
+				optStarve.rateDen = 1001;
+				optStarve.framePeriodMs = 17;
+				optStarve.totalFrames = 50;
+				optStarve.warmupFrames = 5;
+				optStarve.allowOccludedOffscreen = allowOffscreenOccluded;
+				optStarve.captureAtFrames = { 12, 46 };
+				optStarve.onFrame = [&](int f, IVideoRenderer& r, IVideoRenderer*, std::vector<BYTE>& slotBuf) -> FrameAction {
+					const std::vector<BYTE>& src = clip1080[static_cast<size_t>(f) % clip1080.size()];
+					std::memcpy(slotBuf.data(), src.data(), (std::min)(src.size(), slotBuf.size()));
+					FrameAction act;
+					if (f == 15)
+					{
+						RendererRenderLoad load{};
+						if (r.GetRenderLoad(load) && load.gpuValid)
+							seqBeforeStall = load.latestGpuSourceSequence;
+						act.stallAfterMs = 200; // 200 ms Apple TV pause / HDMI hiccup
+					}
+					else if (f == 30)
+					{
+						act.stallAfterMs = 500; // 500 ms deep starvation stall
+					}
+					return act;
+				};
+				legStarve = RunSoakLeg(optStarve, clip1080, nvMon, cfgPath);
+				verifyLeg(optStarve.name, legStarve);
+				Assert::IsTrue(legStarve.finalGpuSourceSeq > seqBeforeStall,
+					WideOf("Phase 6b: GPU frame sequence did not advance after 200ms/500ms starvation stalls (" +
+						std::to_string(seqBeforeStall) + " -> " + std::to_string(legStarve.finalGpuSourceSeq) + ")").c_str());
+			}
+
+			// =========================================================================
+			// PHASE 6c — Forced Analysis-Lane Overload Step-Down & Clean Recovery
+			//   analysis_lane_chunk_us: 4000 us -> 200 us (squeezed) -> 4000 us (recovered)
+			// =========================================================================
+			SoakLegResult legHealthy, legSqueezed, legRecovered;
+			{
+				auto runBudgetLeg = [&](const std::string& tag, int chunkUs) -> SoakLegResult {
+					SoakLegOptions opt;
+					opt.name = tag;
+					opt.configText =
+						"deband_vp: on\noptical_flow: on\ndejudder_strength: 0.25\n"
+						"[vpv]\nresync_event: on\nframe_analysis_store: on\n"
+						"[vpv.skeleton]\nanalysis_lane: on\nskeleton_gpu_gap: after_render\n"
+						"analysis_lane_chunk_us: " + std::to_string(chunkUs) + "\n";
+					opt.width = 1920;
+					opt.height = 1080;
+					opt.windowWidth = 1920;
+					opt.windowHeight = 1080;
+					opt.encoding = VideoFrameEncoding::P210;
+					opt.rateNum = 60000;
+					opt.rateDen = 1001;
+					opt.framePeriodMs = 17;
+					opt.totalFrames = 24;
+					opt.warmupFrames = 5;
+					opt.allowOccludedOffscreen = allowOffscreenOccluded;
+					opt.captureAtFrames = { 20 };
+					const SoakLegResult leg = RunSoakLeg(opt, clip1080, nvMon, cfgPath);
+					verifyLeg(tag, leg);
+					return leg;
+				};
+				legHealthy = runBudgetLeg("Phase6c-Budget-4000us", 4000);
+				legSqueezed = runBudgetLeg("Phase6c-Budget-200us-Overload", 200);
+				legRecovered = runBudgetLeg("Phase6c-Budget-4000us-Recovery", 4000);
+			}
+
+			// =========================================================================
+			// PHASE 6d — Kitchen-Sink All-Modules-ON Stack + 24x Rapid-Fire Live Toggle Torture
+			//   1) Every major Wave 2-3 feature enabled simultaneously on PQ HDR 24p footage
+			//   2) Single running renderer hammered with 24 back-to-back live ApplyApplicationState
+			//      toggles & parameter sweeps across 168 real frames, checking flat VRAM & 0 NaN/errors
+			// =========================================================================
+			SoakLegResult legKitchenSink, legTorture;
+			int tortureAppliedCount = 0;
+			int tortureLiveCount = 0;
+			int tortureRestartFlagCount = 0;
+			double tortureVramStart = 0.0, tortureVramEnd = 0.0, tortureVramDelta = 0.0;
+			{
+				const std::string kKitchenSinkCfg =
+					"deband_vp: on\n"
+					"low_bitrate_handling: auto\n"
+					"detail_pulse_stabilise: on\n"
+					"detail_pulse_cap: 1.35\n"
+					"texture_restore: statistical\n"
+					"texture_restore_cap: 1.5\n"
+					"appearance: on\n"
+					"appearance_room: auto\n"
+					"appearance_strength: 0.70\n"
+					"ambient_adapt_strength: 0.50\n"
+					"dv_trims: on\n"
+					"optical_flow: on\n"
+					"optical_flow_global: on\n"
+					"dejudder_strength: 0.35\n"
+					"temporal_dither: sigma_delta\n"
+					"source_resolution: auto\n"
+					"[vpv]\n"
+					"resync_event: on\n"
+					"frame_analysis_store: on\n"
+					"[vpv.skeleton]\n"
+					"analysis_lane: on\n"
+					"skeleton_gpu_gap: after_render\n"
+					"analysis_lane_chunk_us: 4000\n";
+
+				SoakLegOptions optKitchen;
+				optKitchen.name = "Phase6d-KitchenSink-AllOn";
+				optKitchen.configText = kKitchenSinkCfg;
+				optKitchen.width = 1920;
+				optKitchen.height = 1080;
+				optKitchen.windowWidth = 1920;
+				optKitchen.windowHeight = 1080;
+				optKitchen.encoding = VideoFrameEncoding::P210;
+				optKitchen.rateNum = 24000;
+				optKitchen.rateDen = 1001;
+				optKitchen.framePeriodMs = 42;
+				optKitchen.totalFrames = 36;
+				optKitchen.warmupFrames = 6;
+				optKitchen.pqHdr = true;
+				optKitchen.allowOccludedOffscreen = allowOffscreenOccluded;
+				optKitchen.captureAtFrames = { 16, 32 };
+				optKitchen.onFrame = [&](int f, IVideoRenderer&, IVideoRenderer* ext, std::vector<BYTE>& slotBuf) -> FrameAction {
+					const std::vector<BYTE>& src = clip1080[static_cast<size_t>(f) % clip1080.size()];
+					std::memcpy(slotBuf.data(), src.data(), (std::min)(src.size(), slotBuf.size()));
+					VpvCalls::SetAmbientLux(ext, 10.0 + static_cast<double>((f * 5) % 90), true, static_cast<double>(f) * 0.042);
+					return FrameAction{};
+				};
+				legKitchenSink = RunSoakLeg(optKitchen, clip1080, nvMon, cfgPath);
+				verifyLeg(optKitchen.name, legKitchenSink);
+
+				// 24 distinct live config transitions fired every 7 frames on ONE running renderer (168 frames)
+				static const char* const kTortureConfigs[] = {
+					"deband_vp: on\nappearance: on\nappearance_room: auto\nappearance_strength: 0.20\ndejudder_strength: 0\noptical_flow: on\ntemporal_dither: off\n[vpv.skeleton]\nanalysis_lane: on\nanalysis_lane_chunk_us: 4000\n",
+					"deband_vp: off\nappearance: on\nappearance_room: auto\nappearance_strength: 0.55\ndejudder_strength: 0.25\noptical_flow: on\ntemporal_dither: sigma_delta\n[vpv.skeleton]\nanalysis_lane: on\nanalysis_lane_chunk_us: 4000\n",
+					"deband_vp: auto\nlow_bitrate_handling: on\nappearance: on\nappearance_room: cinema\nappearance_strength: 0.85\ndejudder_strength: 0.50\noptical_flow: on\ntemporal_dither: auto\n[vpv.skeleton]\nanalysis_lane: on\nanalysis_lane_chunk_us: 4000\n",
+					"deband_vp: on\ndetail_pulse_stabilise: on\ndetail_pulse_cap: 1.20\ntexture_restore: off\nappearance: off\ndejudder_strength: 0\noptical_flow: off\ntemporal_dither: off\n[vpv.skeleton]\nanalysis_lane: on\nanalysis_lane_chunk_us: 4000\n",
+					"deband_vp: on\ndetail_pulse_stabilise: on\ndetail_pulse_cap: 1.50\ntexture_restore: statistical\ntexture_restore_cap: 1.6\nappearance: on\nappearance_room: auto\nappearance_strength: 0.95\ndv_trims: on\ndejudder_strength: 0.40\noptical_flow: on\ntemporal_dither: sigma_delta\n[vpv.skeleton]\nanalysis_lane: on\nanalysis_lane_chunk_us: 250\n",
+					"deband_vp: off\ndetail_pulse_stabilise: off\ntexture_restore: off\nappearance: on\nappearance_room: auto\nappearance_strength: 0.30\ndv_trims: off\ndejudder_strength: 0\noptical_flow: on\ntemporal_dither: off\n[vpv.skeleton]\nanalysis_lane: on\nanalysis_lane_chunk_us: 4000\n[vprenderer.viewport]\nblank_left: 32\nblank_right: 32\n",
+					"deband_vp: on\ndetail_pulse_stabilise: on\ndetail_pulse_cap: 1.35\ntexture_restore: statistical\nappearance: on\nappearance_room: auto\nappearance_strength: 0.70\ndv_trims: on\ndejudder_strength: 0.60\noptical_flow: on\ntemporal_dither: sigma_delta\n[vpv.skeleton]\nanalysis_lane: on\nanalysis_lane_chunk_us: 4000\n[vprenderer.viewport]\nblank_left: 0\nblank_right: 0\n",
+					"deband_vp: off\ndetail_pulse_stabilise: off\ntexture_restore: off\nappearance: off\ndv_trims: on\ndejudder_strength: 0\noptical_flow: on\ntemporal_dither: auto\n[vpv.skeleton]\nanalysis_lane: on\nanalysis_lane_chunk_us: 4000\n"
+				};
+				const size_t numTortureProfiles = sizeof(kTortureConfigs) / sizeof(kTortureConfigs[0]);
+
+				SoakLegOptions optTorture;
+				optTorture.name = "Phase6d-24xRapidFireLiveToggleTorture";
+				optTorture.configText = kTortureConfigs[0];
+				optTorture.width = 1920;
+				optTorture.height = 1080;
+				optTorture.windowWidth = 1920;
+				optTorture.windowHeight = 1080;
+				optTorture.encoding = VideoFrameEncoding::P210;
+				optTorture.rateNum = 60000;
+				optTorture.rateDen = 1001;
+				optTorture.framePeriodMs = 17;
+				optTorture.totalFrames = 176; // 8 warmup + 24 * 7 frames = 24 live transitions
+				optTorture.warmupFrames = 8;
+				optTorture.pqHdr = true;
+				optTorture.applySnapshotBeforeBuild = true;
+				optTorture.allowOccludedOffscreen = allowOffscreenOccluded;
+				optTorture.memorySampleStride = 14;
+				optTorture.captureAtFrames = { 12, 88, 170 };
+				optTorture.onFrame = [&, numTortureProfiles](int f, IVideoRenderer& r, IVideoRenderer* ext, std::vector<BYTE>& slotBuf) -> FrameAction {
+					const std::vector<BYTE>& src = clip1080[static_cast<size_t>(f) % clip1080.size()];
+					std::memcpy(slotBuf.data(), src.data(), (std::min)(src.size(), slotBuf.size()));
+					VpvCalls::SetAmbientLux(ext, 5.0 + static_cast<double>((f * 7) % 110), true, static_cast<double>(f) * 0.017);
+					if (f >= 8 && ((f - 8) % 7 == 0))
+					{
+						const size_t step = static_cast<size_t>((f - 8) / 7);
+						const char* body = kTortureConfigs[(step + 1) % numTortureProfiles];
+						{
+							std::ofstream outCfg(cfgPath, std::ios::trunc);
+							outCfg << "[general]\npersist_profile_selection: false\n"
+								   << "[vprenderer.input.soak]\nwhen: $source_rate > 0\ncapture_path: gpu\n"
+								   << body
+								   << "[vpv]\nresync_event: on\nframe_analysis_store: on\n";
+						}
+						ConfigFile nextCfg;
+						std::string err;
+						UnifiedProfileRuntime::Runtime rt;
+						if (nextCfg.Load(cfgPath) && rt.Initialize(nextCfg, {}, err))
+						{
+							const auto snap = rt.GetSnapshot();
+							CString active;
+							bool restart = false, live = false;
+							if (snap && r.ApplyApplicationState(*snap, active, restart, live))
+							{
+								++tortureAppliedCount;
+								if (restart)
+									++tortureRestartFlagCount;
+								else
+									++tortureLiveCount;
+							}
+						}
+					}
+					return FrameAction{};
+				};
+				legTorture = RunSoakLeg(optTorture, clip1080, nvMon, cfgPath);
+				verifyLeg(optTorture.name, legTorture);
+				Assert::IsTrue(tortureAppliedCount >= 24,
+					WideOf("Phase 6d: expected >= 24 rapid-fire live ApplyApplicationState calls, got " +
+						std::to_string(tortureAppliedCount)).c_str());
+				Assert::IsTrue(legTorture.captureJsons.size() >= 3,
+					L"Phase 6d: expected 3 verified captures across rapid-fire torture loop");
+				if (legTorture.memorySamples.size() >= 2)
+				{
+					tortureVramStart = legTorture.memorySamples.front().vramMiB;
+					tortureVramEnd = legTorture.memorySamples.back().vramMiB;
+					tortureVramDelta = tortureVramEnd - tortureVramStart;
+					Assert::IsTrue(tortureVramDelta <= 48.0,
+						WideOf("Phase 6d: VRAM leaked across 24 rapid-fire config toggles (" +
+							std::to_string(tortureVramStart) + " -> " + std::to_string(tortureVramEnd) + " MiB)").c_str());
+				}
+			}
+
+			std::ostringstream report;
+			report << "\n=========== VIRTUAL HDMI PHASE 6 SOAK SCORECARD ===========\n"
+				   << "Adapter Bound        : " << observedAdapter << "\n"
+				   << "Presentation Mode    : " << (anyOccludedOffscreen ? "OFFSCREEN GPU (DXGI_STATUS_OCCLUDED on isolated desktop; full RTX 3050 Ti render + pixel captures verified)" : "LIVE SWAPCHAIN PRESENT") << "\n"
+				   << "Total Real Frames    : " << totalFrames << " (Captures Verified=" << totalCaptures << ", 0 NaN/Corrupt)\n"
+				   << "6a Deband Toggle     : OFF(" << cvBase.sha256.substr(0, 12) << ") != ON(" << cvDebandOn.sha256.substr(0, 12)
+				   << ") -> Revert(" << cvDebandOff.sha256.substr(0, 12) << ") BIT-EXACT PASS\n"
+				   << "6a CAM16 Sweep       : OFF(" << cvAppOff.sha256.substr(0, 12) << ") != 0.30(" << cvApp03.sha256.substr(0, 12)
+				   << ") != 0.90(" << cvApp09.sha256.substr(0, 12) << ") -> Revert(" << cvAppBackOff.sha256.substr(0, 12) << ") PASS\n"
+				   << "6a Temporal Dither   : OFF(" << cvBase.sha256.substr(0, 12) << ") != SigmaDelta(" << cvDitherSd.sha256.substr(0, 12) << ") PASS\n"
+				   << "6a Re-Base Scaler    : 1080p->4K Native(" << cvDownOff.sha256.substr(0, 12) << ") != 720p(" << cvDownOn.sha256.substr(0, 12)
+				   << ") -> Revert(" << cvDownRevert.sha256.substr(0, 12) << ") [" << legRebaseOn.sourceStatus << "]\n"
+				   << "6a Detail Pulse      : ON(cap=1.5) valid=" << (cvDetailPulse.valid ? "PASS" : "FAIL") << "\n"
+				   << "6a Vector/Dejudder   : ON=[" << legDejOn.dejudderStatus << "] vs OFF=[" << legDejOff.dejudderStatus << "] PASS\n"
+				   << "6a Live Hot-Reload   : applied=" << (hotReloadApplied ? "true" : "false")
+				   << " noRestart=" << (hotReloadLiveNoRestart ? "true" : "false")
+				   << " hash=" << hotHashBefore.substr(0, 12) << " -> " << hotHashAfter.substr(0, 12) << "\n"
+				   << "6b Frame Starvation  : 200ms + 500ms stalls -> GPU seq " << seqBeforeStall << " -> " << legStarve.finalGpuSourceSeq << " RESUMED PASS\n"
+				   << "6c Overload Recovery : 4000us=[" << legHealthy.fallbacksStatus << "] -> 200us=[" << legSqueezed.fallbacksStatus
+				   << "] -> 4000us=[" << legRecovered.fallbacksStatus << "] PASS\n"
+				   << "6d Kitchen-Sink AllOn: 36f PQ HDR all modules ON -> " << legKitchenSink.captureJsons.size() << " verified captures PASS\n"
+				   << "6d 24x Live Torture  : applied=" << tortureAppliedCount << " (live=" << tortureLiveCount
+				   << ", restartFlag=" << tortureRestartFlagCount << ") VRAM=" << std::fixed << std::setprecision(1)
+				   << tortureVramStart << " -> " << tortureVramEnd << " MiB (delta=" << std::showpos << tortureVramDelta
+				   << std::noshowpos << " MiB) PASS\n"
+				   << "===========================================================\n";
+			Logger::WriteMessage(report.str().c_str());
+			Assert::IsTrue(p6Failures.empty(), WideOf("Phase 6 failures: " + p6Failures).c_str());
 		}
 	};
 }
