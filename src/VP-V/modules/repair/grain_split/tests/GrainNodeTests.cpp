@@ -1353,6 +1353,87 @@ namespace GrainNodeTestsNs
 			Assert::IsTrue(memo.HasOwnerFill(VpSkeleton::kBandMemo, VpSkeleton::AcquireForm::Gpu), L"skeleton holds updated kBandMemo fill");
 			Assert::IsTrue(module.FallbackLines().empty(), L"FallbackLines stays clear after 4K retry succeeds");
 		}
+
+		TEST_METHOD(BandMemoModuleCpuRegistrationLifecycle)
+		{
+			namespace GB = Vpv::GrainBand;
+			using R = VpSkeleton::SkeletonMemo::Registration;
+
+			struct CpuDemand : Vpv::Skeleton::IExternalDemand
+			{
+				VpSkeleton::SkeletonMemo* memo = nullptr;
+				bool refuse = false;
+				R refuseCode = R::NotOwner;
+				int registerCalls = 0;
+
+				void SetExternalDemand(const void*, const void*, const std::vector<VpSkeleton::ConsumerDecl>&,
+					const std::vector<VpSkeleton::ProductId>&) override {}
+				void ClearExternalDemand(const void*, const void*) override {}
+
+				R RegisterOwnerFill(VpSkeleton::ProductId id, VpSkeleton::AcquireForm form,
+					const std::string& unit, VpSkeleton::OwnerFill fill) override
+				{
+					++registerCalls;
+					if (refuse)
+						return refuseCode;
+					return memo->RegisterOwnerFill(id, form, unit, std::move(fill));
+				}
+
+				R ReplaceOwnerFill(VpSkeleton::ProductId id, VpSkeleton::AcquireForm form,
+					const std::string& unit, VpSkeleton::OwnerFill fill) override
+				{
+					return memo->ReplaceOwnerFill(id, form, unit, std::move(fill));
+				}
+
+				bool UnregisterOwnerFill(VpSkeleton::ProductId id, VpSkeleton::AcquireForm form, const std::string& unit) override
+				{
+					return memo->UnregisterOwnerFill(id, form, unit);
+				}
+			};
+
+			VpSkeleton::SkeletonMemo memo;
+			CpuDemand demand;
+			demand.memo = &memo;
+
+			GB::BandMemoModule module;
+			Assert::IsFalse(module.CpuRegistered(), L"CPU form is not registered initially");
+			Assert::IsTrue(module.FallbackLines().empty(), L"no fallback line initially");
+
+			// Negative control (Rule 3 & Rule 4): a refused CPU registration stays unregistered and surfaces visibly.
+			demand.refuse = true;
+			demand.refuseCode = R::NotOwner;
+			Assert::IsFalse(module.RegisterCpu(&demand), L"refused CPU registration returns false");
+			Assert::IsFalse(module.CpuRegistered(), L"CpuRegistered() stays false on refusal");
+			Assert::AreEqual(1, demand.registerCalls, L"one CPU registration attempt on refusal");
+			Assert::IsFalse(memo.HasOwnerFill(VpSkeleton::kBandMemo, VpSkeleton::AcquireForm::Cpu),
+				L"refused CPU fill is not registered on memo");
+			const std::vector<std::string> refusedFb = module.FallbackLines();
+			Assert::AreEqual(size_t(1), refusedFb.size(), L"refused CPU registration emits visible FallbackLine");
+			Assert::IsTrue(Contains(refusedFb[0], GB::kBandMemoFallbackId), L"fallback line names product.band_memo_unavailable");
+			Assert::IsTrue(Contains(refusedFb[0], "CPU owner fill") && Contains(refusedFb[0], "not the catalog"),
+				L"fallback line visibly describes CPU registration refusal");
+
+			// Accepting demand registers CPU owner fill, flips CpuRegistered(), and clears FallbackLines().
+			demand.refuse = false;
+			Assert::IsTrue(module.RegisterCpu(&demand), L"CPU registration succeeds once demand accepts");
+			Assert::IsTrue(module.CpuRegistered(), L"CpuRegistered() becomes true");
+			Assert::AreEqual(2, demand.registerCalls, L"retry calls RegisterOwnerFill once");
+			Assert::IsTrue(memo.HasOwnerFill(VpSkeleton::kBandMemo, VpSkeleton::AcquireForm::Cpu),
+				L"memo holds kBandMemo CPU owner fill");
+			Assert::IsTrue(module.FallbackLines().empty(), L"healthy CPU registration clears FallbackLines");
+
+			// Idempotent: a second call short-circuits without calling demand again.
+			Assert::IsTrue(module.RegisterCpu(&demand), L"repeated RegisterCpu returns true");
+			Assert::AreEqual(2, demand.registerCalls, L"repeated RegisterCpu does not re-register");
+
+			// Second module against the same memo accepts AlreadyRegistered cleanly.
+			GB::BandMemoModule peer;
+			Assert::IsFalse(peer.CpuRegistered(), L"peer starts unregistered");
+			Assert::IsTrue(peer.RegisterCpu(&demand), L"peer accepts AlreadyRegistered cleanly");
+			Assert::IsTrue(peer.CpuRegistered(), L"peer CpuRegistered() is true on AlreadyRegistered");
+			Assert::AreEqual(3, demand.registerCalls, L"peer attempts registration once");
+			Assert::IsTrue(peer.FallbackLines().empty(), L"peer has no fallback line after AlreadyRegistered");
+		}
 	};
 }
 

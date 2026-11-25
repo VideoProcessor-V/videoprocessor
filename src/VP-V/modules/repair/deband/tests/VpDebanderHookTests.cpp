@@ -5,6 +5,9 @@
 #include "pch.h"
 #include <VP-V/tests/VpLutGpuTestSupport.h>
 #include <VP-V/modules/input/source_analysis/regions/BusyEdge.h>
+#include <VP-V/modules/control/skeleton/gpu/OwnerGpuDevice.h>
+#include <VP-V/modules/repair/grain_split/BandMemo.h>
+#include <VP-V/modules/repair/grain_split/BandMemoFill.h>
 #include <vprenderer/GrainPreserve.h>
 
 #include <cmath>
@@ -677,6 +680,320 @@ namespace VideoProcessorTest
 			Assert::AreEqual(0.0, rms(without), 1e-9, L"off: no added noise");
 			Assert::IsTrue(rms(withGrain) > 0.1, L"on: libplacebo's grain");
 			Assert::IsTrue(withGrain == native, L"on: libplacebo's own default parameters byte for byte");
+		}
+
+		TEST_METHOD(BandMemoOneComputePerKey)
+		{
+			namespace GB = Vpv::GrainBand;
+			using Reg = VpSkeleton::SkeletonMemo::Registration;
+
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+
+			struct DispatchGuard
+			{
+				pl_dispatch dispatch = nullptr;
+				explicit DispatchGuard(pl_dispatch d) : dispatch(d) {}
+				~DispatchGuard() { if (dispatch) pl_dispatch_destroy(&dispatch); }
+				DispatchGuard(const DispatchGuard&) = delete;
+				DispatchGuard& operator=(const DispatchGuard&) = delete;
+			};
+			struct TexGuard
+			{
+				pl_gpu gpu = nullptr;
+				pl_tex tex = nullptr;
+				TexGuard(pl_gpu g, pl_tex t) : gpu(g), tex(t) {}
+				~TexGuard() { if (gpu && tex) pl_tex_destroy(gpu, &tex); }
+				TexGuard(const TexGuard&) = delete;
+				TexGuard& operator=(const TexGuard&) = delete;
+			};
+			struct DebandGuard
+			{
+				pl_gpu gpu = nullptr;
+				VpDebander::Module mod;
+				explicit DebandGuard(pl_gpu g) : gpu(g) {}
+				~DebandGuard() { mod.Release(gpu); }
+				DebandGuard(const DebandGuard&) = delete;
+				DebandGuard& operator=(const DebandGuard&) = delete;
+			};
+			struct MemoGpuGuard
+			{
+				Vpv::Skeleton::OwnerGpuDevice ownerDev;
+				VpSkeleton::SkeletonMemo memo;
+				explicit MemoGpuGuard(pl_gpu g) : ownerDev(g) {}
+				~MemoGpuGuard()
+				{
+					memo.ReleaseGpuSpots();
+					ownerDev.Release();
+				}
+				MemoGpuGuard(const MemoGpuGuard&) = delete;
+				MemoGpuGuard& operator=(const MemoGpuGuard&) = delete;
+			};
+
+			auto hashU16 = [](const std::vector<uint16_t>& v) -> uint64_t {
+				uint64_t h = 14695981039346656037ull;
+				const uint8_t* p = reinterpret_cast<const uint8_t*>(v.data());
+				const size_t n = v.size() * sizeof(uint16_t);
+				for (size_t i = 0; i < n; ++i)
+				{
+					h ^= p[i];
+					h *= 1099511628211ull;
+				}
+				return h;
+			};
+
+			DispatchGuard dispGuard(pl_dispatch_create(fixture.Log(), gpu));
+			pl_dispatch dispatch = dispGuard.dispatch;
+			Assert::IsNotNull(dispatch, L"pl_dispatch_create succeeded");
+
+			const int W = 128, H = 96;
+			const int HW = (W + 1) / 2, HH = (H + 1) / 2;
+
+			// Synthetic structured + banded staircase + deterministic grain (10-bit codes in P010 r16 UNORM).
+			std::vector<uint16_t> srcData(static_cast<size_t>(W) * H);
+			uint32_t rng = 0x51a7c0deu;
+			for (int y = 0; y < H; ++y)
+			{
+				for (int x = 0; x < W; ++x)
+				{
+					rng = rng * 1664525u + 1013904223u;
+					const int grain = (y >= H / 2) ? (static_cast<int>((rng >> 20) % 5u) - 2) : 0;
+					const int band = 4 * (96 + x / 16);
+					const int edge = (y >= 64 && y < 80 && x >= 40 && x < 88) ? 32 : 0;
+					const int code10 = (std::min)(1023, (std::max)(0, band + edge + grain));
+					srcData[static_cast<size_t>(y) * W + x] = static_cast<uint16_t>(code10 << 6);
+				}
+			}
+
+			// Exact 2x2 float box mean matching HalfLuma / SPLIT_HALF_BODY in normalised 0..1 units.
+			std::vector<float> halfData(static_cast<size_t>(HW) * HH, 0.0f);
+			for (int qy = 0; qy < HH; ++qy)
+			{
+				for (int qx = 0; qx < HW; ++qx)
+				{
+					const int x0 = (std::min)(2 * qx, W - 1), x1 = (std::min)(2 * qx + 1, W - 1);
+					const int y0 = (std::min)(2 * qy, H - 1), y1 = (std::min)(2 * qy + 1, H - 1);
+					const float a = static_cast<float>(srcData[static_cast<size_t>(y0) * W + x0]) / 65535.0f;
+					const float b = static_cast<float>(srcData[static_cast<size_t>(y0) * W + x1]) / 65535.0f;
+					const float c = static_cast<float>(srcData[static_cast<size_t>(y1) * W + x0]) / 65535.0f;
+					const float d = static_cast<float>(srcData[static_cast<size_t>(y1) * W + x1]) / 65535.0f;
+					halfData[static_cast<size_t>(qy) * HW + qx] = 0.25f * (a + b + c + d);
+				}
+			}
+			const std::vector<float> zeroHalfData(static_cast<size_t>(HW) * HH, 0.0f);
+
+			pl_tex_params sp{};
+			sp.w = W; sp.h = H; sp.format = pl_find_named_fmt(gpu, "r16"); sp.sampleable = true; sp.initial_data = srcData.data();
+			TexGuard srcGuard(gpu, pl_tex_create(gpu, &sp));
+			Assert::IsNotNull(srcGuard.tex, L"source r16 texture created");
+
+			pl_tex_params hp{};
+			hp.w = HW; hp.h = HH; hp.format = pl_find_named_fmt(gpu, "r32f"); hp.sampleable = true; hp.initial_data = halfData.data();
+			TexGuard halfGuard(gpu, pl_tex_create(gpu, &hp));
+			Assert::IsNotNull(halfGuard.tex, L"half-res r32f texture created");
+
+			pl_tex_params zp = hp;
+			zp.initial_data = zeroHalfData.data();
+			TexGuard zeroGuard(gpu, pl_tex_create(gpu, &zp));
+			Assert::IsNotNull(zeroGuard.tex, L"zero half-res r32f texture created");
+
+			auto frameOf = [](pl_tex tex) {
+				pl_frame f{};
+				f.num_planes = 1;
+				f.planes[0].texture = tex;
+				f.planes[0].components = 1;
+				f.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+				f.repr.sys = PL_COLOR_SYSTEM_BT_709;
+				f.repr.levels = PL_COLOR_LEVELS_LIMITED;
+				f.repr.bits.sample_depth = 16;
+				f.repr.bits.color_depth = 10;
+				f.repr.bits.bit_shift = 6;
+				f.color = pl_color_space_bt709;
+				return f;
+			};
+
+			auto downloadR16 = [&](pl_tex tex) {
+				pl_tex_params rp{};
+				rp.w = W; rp.h = H; rp.format = tex->params.format; rp.host_readable = true; rp.blit_dst = true;
+				TexGuard readable(gpu, pl_tex_create(gpu, &rp));
+				Assert::IsNotNull(readable.tex, L"readable blit target created");
+				pl_tex_blit_params bp{};
+				bp.src = tex;
+				bp.dst = readable.tex;
+				pl_tex_blit(gpu, &bp);
+				std::vector<uint16_t> raw(static_cast<size_t>(W) * H);
+				pl_tex_transfer_params dl{};
+				dl.tex = readable.tex;
+				dl.ptr = raw.data();
+				Assert::IsTrue(pl_tex_download(gpu, &dl), L"pl_tex_download succeeded");
+				return raw;
+			};
+
+			// Wire real SkeletonMemo + OwnerGpuDevice + kP1HalfLuma view + kBandMemo GPU owner fill with Counters.
+			MemoGpuGuard gpuMemo(gpu);
+			int hostTag = 0;
+			gpuMemo.memo.SetHost(&hostTag);
+			gpuMemo.memo.SetRenderThread(std::this_thread::get_id());
+			gpuMemo.memo.SetGpuDispatcherPresent(true);
+			gpuMemo.memo.SetGpuBudget(true, uint64_t(1) << 28);
+			gpuMemo.memo.SetGpuDevice(&gpuMemo.ownerDev);
+
+			const uint64_t kSeq = 101;
+			pl_tex halfTexPtr = halfGuard.tex;
+			VpSkeleton::OwnerFill p1Fill;
+			p1Fill.view = true;
+			p1Fill.frameScoped = true;
+			p1Fill.fill = [halfTexPtr, HW, HH, kSeq](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+				if (req.seq != kSeq)
+					return false;
+				out.gpu.resource = const_cast<void*>(static_cast<const void*>(halfTexPtr));
+				out.gpu.width = static_cast<uint32_t>(HW);
+				out.gpu.height = static_cast<uint32_t>(HH);
+				out.gpu.bytes = 0;
+				return true;
+			};
+			Assert::IsTrue(gpuMemo.memo.RegisterOwnerFill(VpSkeleton::kP1HalfLuma, VpSkeleton::AcquireForm::Gpu,
+				VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP1HalfLuma), std::move(p1Fill)) == Reg::Registered,
+				L"kP1HalfLuma GPU view fill registered");
+
+			const std::shared_ptr<GB::Counters> counters = std::make_shared<GB::Counters>();
+			const uint64_t reserve = GB::BandMemoReserveBytes(VpSkeleton::Dims{ static_cast<uint32_t>(W), static_cast<uint32_t>(H) });
+			Assert::IsTrue(gpuMemo.memo.RegisterOwnerFill(VpSkeleton::kBandMemo, VpSkeleton::AcquireForm::Gpu,
+				GB::kBandMemoUnit, GB::MakeBandMemoOwnerFill(reserve, counters)) == Reg::Registered,
+				L"kBandMemo GPU fill registered");
+
+			VpDebander::Params params;
+			params.thresholdCodes = 6.0;
+			params.colorDepth = 10;
+			params.radiusScale = 1080.0 / H;
+			params.grainGuard = true;
+			params.grainSplit = true;
+			params.sequence = kSeq;
+			params.memo = &gpuMemo.memo;
+
+			// 1. Two independent VpDebander readers acquiring the exact same (seq, sigma=6.0) key compute BandMemo ONCE.
+			DebandGuard debandA(gpu), debandB(gpu);
+			pl_frame outA{}, outB{};
+			Assert::IsTrue(debandA.mod.Apply(gpu, dispatch, frameOf(srcGuard.tex), params, outA),
+				ExtendedRangeGpuProbe::ToWide(debandA.mod.LastError()).c_str());
+			Assert::IsTrue(debandB.mod.Apply(gpu, dispatch, frameOf(srcGuard.tex), params, outB),
+				ExtendedRangeGpuProbe::ToWide(debandB.mod.LastError()).c_str());
+			Assert::AreEqual(uint64_t(1), counters->fills.load(), L"kBandMemo computed ONCE for two readers of the same (seq, BandKey)");
+			Assert::AreEqual(1ull, debandA.mod.BandMemoHits(), L"debandA hit kBandMemo");
+			Assert::AreEqual(1ull, debandB.mod.BandMemoHits(), L"debandB hit kBandMemo");
+			Assert::AreEqual(0ull, debandA.mod.BandMemoFallbacks(), L"debandA had zero fallbacks");
+			Assert::AreEqual(0ull, debandB.mod.BandMemoFallbacks(), L"debandB had zero fallbacks");
+			Assert::IsTrue(gpuMemo.memo.Counters(VpSkeleton::kBandMemo).reusedMemo >= 1u, L"memo counter recorded reuse");
+
+			const std::vector<uint16_t> rawMemoA = downloadR16(outA.planes[0].texture);
+			const std::vector<uint16_t> rawMemoB = downloadR16(outB.planes[0].texture);
+			const uint64_t hashMemoA = hashU16(rawMemoA);
+			Assert::AreEqual(hashMemoA, hashU16(rawMemoB), L"second reader capture hash matches first reader");
+			Assert::IsTrue(rawMemoA == rawMemoB, L"second reader output pixels match first reader bit-for-bit");
+
+			// Confirm debander actually modified the banded staircase (not a vacuous no-op).
+			int rawDiffCount = 0;
+			for (size_t i = 0; i < rawMemoA.size(); ++i)
+				if (rawMemoA[i] != srcData[i]) ++rawDiffCount;
+			Assert::IsTrue(rawDiffCount > 100, L"debander actively smoothed the banded staircase");
+
+			// 2. Capture-hash identity vs memo=nullptr fallback + Rule 4 visible fallback accounting.
+			VpDebander::Params fallbackParams = params;
+			fallbackParams.memo = nullptr;
+			DebandGuard debandFallback(gpu);
+			pl_frame outFallback{};
+			Assert::IsTrue(debandFallback.mod.Apply(gpu, dispatch, frameOf(srcGuard.tex), fallbackParams, outFallback),
+				ExtendedRangeGpuProbe::ToWide(debandFallback.mod.LastError()).c_str());
+			Assert::AreEqual(0ull, debandFallback.mod.BandMemoHits(), L"memo=nullptr has zero BandMemo hits");
+			Assert::AreEqual(1ull, debandFallback.mod.BandMemoFallbacks(), L"memo=nullptr increments BandMemoFallbacks");
+			Assert::IsFalse(debandFallback.mod.LastBandMemoFallback().empty(), L"memo=nullptr records visible fallback reason");
+			const std::vector<uint16_t> rawFallback = downloadR16(outFallback.planes[0].texture);
+			Assert::AreEqual(hashU16(rawFallback), hashMemoA, L"GPU capture-hash identity: kBandMemo hit == memo=nullptr fallback");
+			Assert::IsTrue(rawMemoA == rawFallback, L"kBandMemo hit pixels match memo=nullptr fallback bit-for-bit");
+
+			// 3. Negative control (a): acquiring a DIFFERENT BandKey (sigmaPx=3.0 via FrameInterpolator vs 6.0 via VpDebander)
+			//    on the exact same seq MUST trigger a second fill (fills == 2), and a second interpolator reader reuses it (fills stays 2).
+			Dejudder::Planes lumaOnly{};
+			lumaOnly.luma = srcGuard.tex;
+			Dejudder::Planes interpOutA{}, interpOutB{};
+			Interpolator::FrameInterpolator interpA(fixture.Log(), gpu, true);
+			Interpolator::FrameInterpolator interpB(fixture.Log(), gpu, true);
+			interpA.SetGrain(InterpolationPolicy::Grain::Preserve);
+			interpB.SetGrain(InterpolationPolicy::Grain::Preserve);
+			Assert::IsTrue(interpA.Run(lumaOnly, lumaOnly, Interpolator::Motion(), 0.5f,
+				InterpolationPolicy::Fallback::Blend, interpOutA, 0, 0, &gpuMemo.memo, kSeq, kSeq),
+				ExtendedRangeGpuProbe::ToWide(interpA.LastError()).c_str());
+			Assert::AreEqual(uint64_t(2), counters->fills.load(),
+				L"negative control: different sigmaPx (3.0 vs 6.0) on same seq triggers a second BandMemo fill");
+			Assert::AreEqual(1ull, interpA.BandMemoHits(), L"interpA hit kBandMemo for sigmaPx=3.0");
+			Assert::AreEqual(0ull, interpA.BandMemoFallbacks(), L"interpA had zero fallbacks");
+			Assert::IsTrue(interpB.Run(lumaOnly, lumaOnly, Interpolator::Motion(), 0.5f,
+				InterpolationPolicy::Fallback::Blend, interpOutB, 0, 0, &gpuMemo.memo, kSeq, kSeq),
+				ExtendedRangeGpuProbe::ToWide(interpB.LastError()).c_str());
+			Assert::AreEqual(uint64_t(2), counters->fills.load(),
+				L"second interpolator reader of same (seq, sigmaPx=3.0) reuses memo without a third fill");
+			Assert::AreEqual(1ull, interpB.BandMemoHits(), L"interpB hit kBandMemo");
+
+			// 4. Negative control (b): unregistered kBandMemo visibly falls back and preserves output parity.
+			VpSkeleton::SkeletonMemo unregMemo;
+			VpDebander::Params unregParams = params;
+			unregParams.memo = &unregMemo;
+			DebandGuard debandUnreg(gpu);
+			pl_frame outUnreg{};
+			Assert::IsTrue(debandUnreg.mod.Apply(gpu, dispatch, frameOf(srcGuard.tex), unregParams, outUnreg),
+				ExtendedRangeGpuProbe::ToWide(debandUnreg.mod.LastError()).c_str());
+			Assert::AreEqual(0ull, debandUnreg.mod.BandMemoHits(), L"unregistered memo has zero hits");
+			Assert::AreEqual(1ull, debandUnreg.mod.BandMemoFallbacks(), L"unregistered memo increments fallbacks");
+			Assert::IsFalse(debandUnreg.mod.LastBandMemoFallback().empty(), L"unregistered memo records visible fallback reason");
+			Assert::AreEqual(hashMemoA, hashU16(downloadR16(outUnreg.planes[0].texture)),
+				L"unregistered fallback preserves exact capture hash");
+
+			// 5. Negative control (c): a tampered all-zero kBandMemo low band causes output to diverge substantially
+			//    from the real kBandMemo output (proving VpDebander genuinely consumes the low band, not bypassing it).
+			MemoGpuGuard zeroMemo(gpu);
+			zeroMemo.memo.SetHost(&hostTag);
+			zeroMemo.memo.SetRenderThread(std::this_thread::get_id());
+			zeroMemo.memo.SetGpuDispatcherPresent(true);
+			zeroMemo.memo.SetGpuBudget(true, uint64_t(1) << 28);
+			zeroMemo.memo.SetGpuDevice(&zeroMemo.ownerDev);
+			pl_tex zeroTexPtr = zeroGuard.tex;
+			VpSkeleton::OwnerFill zeroFill;
+			using VK = VpSkeleton::VariantKey;
+			zeroFill.variantAxes = uint32_t(VK::kAxisPlane) | uint32_t(VK::kAxisSize) | uint32_t(VK::kAxisScale)
+				| uint32_t(VK::kAxisSigma) | uint32_t(VK::kAxisStage) | uint32_t(VK::kAxisParam0) | uint32_t(VK::kAxisParam1);
+			zeroFill.view = true;
+			zeroFill.frameScoped = true;
+			zeroFill.fill = [zeroTexPtr, HW, HH](const VpSkeleton::OwnerFillRequest&, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+				out.gpu.resource = const_cast<void*>(static_cast<const void*>(zeroTexPtr));
+				out.gpu.width = static_cast<uint32_t>(HW);
+				out.gpu.height = static_cast<uint32_t>(HH);
+				out.gpu.bytes = 0;
+				return true;
+			};
+			Assert::IsTrue(zeroMemo.memo.RegisterOwnerFill(VpSkeleton::kBandMemo, VpSkeleton::AcquireForm::Gpu,
+				GB::kBandMemoUnit, std::move(zeroFill)) == Reg::Registered,
+				L"tampered zero kBandMemo fill registered");
+
+			VpDebander::Params zeroParams = params;
+			zeroParams.memo = &zeroMemo.memo;
+			DebandGuard debandZero(gpu);
+			pl_frame outZero{};
+			Assert::IsTrue(debandZero.mod.Apply(gpu, dispatch, frameOf(srcGuard.tex), zeroParams, outZero),
+				ExtendedRangeGpuProbe::ToWide(debandZero.mod.LastError()).c_str());
+			Assert::AreEqual(1ull, debandZero.mod.BandMemoHits(), L"debandZero consumed tampered kBandMemo");
+			const std::vector<uint16_t> rawZero = downloadR16(outZero.planes[0].texture);
+			Assert::AreNotEqual(hashMemoA, hashU16(rawZero), L"negative control: zeroed low band MUST alter capture hash");
+			int zeroDiffPixels = 0;
+			int maxZeroDiff = 0;
+			for (size_t i = 0; i < rawZero.size(); ++i)
+			{
+				const int d = std::abs(static_cast<int>(rawZero[i]) - static_cast<int>(rawMemoA[i]));
+				if (d > 0) ++zeroDiffPixels;
+				if (d > maxZeroDiff) maxZeroDiff = d;
+			}
+			Assert::IsTrue(zeroDiffPixels > 100 && maxZeroDiff >= 64,
+				L"negative control: zeroed low band diverges by >= 1 10-bit code across >100 pixels");
 		}
 	};
 }
