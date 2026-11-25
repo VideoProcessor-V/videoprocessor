@@ -5,6 +5,7 @@
 
 #include <DebugLog.h>
 #include <GeneralRateLog.h>
+#include <VP-V/core/SkeletonAcquire.h>
 #include <VP-V/core/hub/ExtensionHub.h>
 #include <VP-V/modules/input/queue_timing/PulldownDetector.h>
 #include <VP-V/modules/input/signal/ResyncCallSites.h>
@@ -88,8 +89,9 @@ namespace Vpv
 		::Dejudder::Settings RenderedWarpSettings(const ::Dejudder::MotionWarp& dejudder, int outputHeight)
 		{
 			::Dejudder::Settings s = dejudder.EffectiveSettings();
+			const float refH = dejudder.GetSettings().referenceHeight;
 			s.holdFeatherPx = dejudder.GetSettings().holdFeatherPx *
-				(outputHeight > 0 ? static_cast<float>(outputHeight) / 2160.0f : 1.0f);
+				(outputHeight > 0 && refH > 0.0f ? static_cast<float>(outputHeight) / refH : 1.0f);
 			return s;
 		}
 
@@ -263,6 +265,37 @@ namespace Vpv
 			// K9-3 (B4, default OFF): visible camera P9 weight / causal / late fallback suffix (empty when off).
 			if (cameraBindings.config.enabled)
 				text += cameraBindings.StatusSuffix();
+		}
+
+		bool RunVpPhaseInterpolationHost(std::unique_ptr<Interpolator::FrameInterpolator>& frameInterpolator,
+			pl_log log, pl_gpu gpu, const VpvRenderer::Fields& activeSettings,
+			const ::Dejudder::Planes& a, const ::Dejudder::Planes& b, const Interpolator::Motion& motion,
+			float t, ::Dejudder::Planes& out, VpMotion::VectorEngine& vectorEngine,
+			Dejudder::ExtrasState& dejudderExtras, uint64_t nowTickMs,
+			const std::function<void(const FallbackCatalog::Decision&)>& syncFallback)
+		{
+			if (!frameInterpolator)
+				frameInterpolator = std::make_unique<Interpolator::FrameInterpolator>(log, gpu);
+			frameInterpolator->SetGrain(activeSettings.interpolationGrain);
+			const std::shared_ptr<VpSkeleton::SkeletonMemo> memo = vectorEngine.SkeletonMemoFor(dejudderExtras.vpPhaseSeqA);
+			const bool ran = frameInterpolator->Run(a, b, motion, t, activeSettings.interpolationFallback, out,
+				0, 0, memo.get(), dejudderExtras.vpPhaseSeqA, dejudderExtras.vpPhaseSeqB);
+			if (syncFallback)
+			{
+				syncFallback(dejudderExtras.motionConsumerFailures.Note(nowTickMs, ran ? nullptr : "interpolation failed"));
+				const std::string& bmWhy = frameInterpolator->LastBandMemoFallback();
+				syncFallback(bmWhy.empty()
+					? FallbackCatalog::Released("product.interpolator")
+					: FallbackCatalog::ProductFallback("product.interpolator", bmWhy));
+			}
+			if (!ran)
+			{
+				if (++dejudderExtras.interpolationFailures == 1 || dejudderExtras.interpolationFailures % 2400 == 0)
+					DebugLog::Log("Interpolation: failed (%s; %llu failures); the source frame is shown",
+						frameInterpolator->LastError().c_str(), dejudderExtras.interpolationFailures);
+				return false;
+			}
+			return true;
 		}
 	}
 }

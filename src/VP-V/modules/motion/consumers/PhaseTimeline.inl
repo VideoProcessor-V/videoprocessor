@@ -16,20 +16,9 @@
 
 bool LibplaceboVideoRenderer::Impl::RunVpPhaseInterpolation()
 {
-	if (!frameInterpolator)
-		frameInterpolator = std::make_unique<Interpolator::FrameInterpolator>(log, d3d11->gpu);
-	frameInterpolator->SetGrain(activeSettings.interpolationGrain);
-	const bool ran = frameInterpolator->Run(vpPhaseA, vpPhaseB, vpPhaseMotion, vpPhaseT, activeSettings.interpolationFallback,
-		vpPhasePlanes);
-	SyncFallback(dejudderExtras.motionConsumerFailures.Note(GetTickCount64(), ran ? nullptr : "interpolation failed"));   // D3
-	if (!ran)
-	{
-		if (++dejudderExtras.interpolationFailures == 1 || dejudderExtras.interpolationFailures % 2400 == 0)
-			DebugLog::Log("Interpolation: failed (%s; %llu failures); the source frame is shown",
-				frameInterpolator->LastError().c_str(), dejudderExtras.interpolationFailures);
-		return false;
-	}
-	return true;
+	return Vpv::MotionHost::RunVpPhaseInterpolationHost(frameInterpolator, log, d3d11->gpu, activeSettings,
+		vpPhaseA, vpPhaseB, vpPhaseMotion, vpPhaseT, vpPhasePlanes, vectorEngine, dejudderExtras, GetTickCount64(),
+		[this](const FallbackCatalog::Decision& d) { SyncFallback(d); });
 }
 
 double LibplaceboVideoRenderer::Impl::TimelineDisplayHz() const
@@ -180,6 +169,8 @@ void LibplaceboVideoRenderer::Impl::PrepareVpPhasePicture(uint64_t sourceSequenc
 	// Bug hunt 3 F5: a standalone gap pair on an active de-judder at its strength.
 	vpPhaseA = a;
 	vpPhaseB = b;
+	dejudderExtras.vpPhaseSeqA = sourceSequence;
+	dejudderExtras.vpPhaseSeqB = nextSourceSequence;
 	vpPhaseMotion = motion;
 	vpPhaseT = static_cast<float>(vpOutputPhase) * (vpGapFillStandalone ? dejudderPolicy.vpGapPhaseScale : 1.0f);
 	Vpv::MotionHost::PrepareDejudderCamera(dejudderPolicy.cameraBindings, this, sourceSequence, vpPhaseT);

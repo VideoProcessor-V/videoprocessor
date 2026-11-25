@@ -101,6 +101,8 @@ namespace Vpv
 			uint64_t dejudderMaskEpoch[2] = { 0, 0 };   // the motion epoch each slot's mask was made in
 			// VP's 50/60p interpolation (Stage A): the extras' machinery with the interpolator in place of the warp.
 			unsigned long long interpolatedPresents = 0, interpolationFailures = 0;
+			// POD1-H1: live phase sequence pair for Stage B kBandMemo acquisition in RunVpPhaseInterpolation.
+			uint64_t vpPhaseSeqA = 0, vpPhaseSeqB = 0;
 
 			// ---- Stage 6d: A's PRE_OUTPUT picture for the extras, and its warp ----
 			DejudderRendered::Cache dejudderCache;
