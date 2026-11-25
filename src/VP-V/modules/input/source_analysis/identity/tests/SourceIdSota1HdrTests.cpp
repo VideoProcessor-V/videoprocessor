@@ -10,6 +10,7 @@
 //   1. Sota1PqAndHlgEotfOetfRoundTripDerivativesBitDepthAndDetectorFloor
 //   2. Sota1HighContrastPqAndHlg10BitAnd12BitUpscaledEdgesBeatNaiveAndNativeAbstains
 //   3. Sota1DarkToeClampHighlightCeilingNonFiniteWorkspaceReuseOriginalAndW1BitIdentity
+//   4. Sota1HighContrastNativeHdrPowerProbeSeenAndConfirmsNativeCoded
 #include "pch.h"
 #include "CppUnitTest.h"
 
@@ -489,6 +490,12 @@ namespace Tests
 					Assert::IsTrue(vrHdr.candidates[0].hdrLinearizedUsed);
 					Assert::AreEqual(1920, vrHdr.candidates[0].n,
 						L"DescaleVerifier with hdrNoise enabled must refine to exact n=1920 without code-space integer drift");
+					Assert::AreEqual(kLanczos3, vrHdr.candidates[0].kernel,
+						L"SOTA1-HIGH-1: DescaleVerifier hdrNoise=true must sync winning linear-light kernel to CandidateResult::kernel");
+					Assert::IsTrue((vrHdr.candidates[0].kernelMask & (1u << kLanczos3)) != 0u,
+						L"SOTA1-HIGH-1: CandidateResult::kernelMask must include winning linear-light kernel");
+					Assert::AreEqual(vrHdr.candidates[0].stat, vrHdr.candidates[0].kernelT[kLanczos3], 1e-12,
+						L"SOTA1-HIGH-1: CandidateResult::kernelT[bestKernel] must match linearized WLS cr.stat (never stale code-space T)");
 					Assert::IsTrue(vrHdr.candidates[0].stat < vrNaive.candidates[0].stat - 0.25,
 						L"DescaleVerifier hdrNoise=true must achieve markedly deeper dip than naive code-space verifier on identical HDR lines");
 					Assert::IsTrue(vrHdrNat.candidates[0].valid && vrHdrNat.candidates[0].stat > -0.05,
@@ -510,7 +517,7 @@ namespace Tests
 			}
 
 			auto runChain = [&](const std::vector<C::LineSnapshot>& stream, bool enableHdr,
-				G::Record& outRec, C::EvaluationDetail& outDet, C::EstimatorCounters& outCnt) {
+				G::Record& outRec, C::EvaluationDetail& outDet, C::EstimatorCounters& outCnt, std::string& outStatus) {
 				ChainFx::ManualClock clk;
 				C::EstimatorSettings cfg;
 				cfg.outputStepOverride = 1;
@@ -533,15 +540,17 @@ namespace Tests
 				}
 				Assert::IsTrue(est.Held().ReadLatest(0, outRec));
 				outCnt = est.GetCounters();
+				outStatus = est.StatusLine();
 				est.Stop();
 			};
 
 			G::Record recNaive, recHdr, recHdrNat;
 			C::EvaluationDetail detNaive, detHdr, detHdrNat;
 			C::EstimatorCounters cntNaive, cntHdr, cntHdrNat;
-			runChain(pqUpStream, false, recNaive, detNaive, cntNaive);
-			runChain(pqUpStream, true, recHdr, detHdr, cntHdr);
-			runChain(pqNatStream, true, recHdrNat, detHdrNat, cntHdrNat);
+			std::string stNaive, stHdr, stHdrNat;
+			runChain(pqUpStream, false, recNaive, detNaive, cntNaive, stNaive);
+			runChain(pqUpStream, true, recHdr, detHdr, cntHdr, stHdr);
+			runChain(pqNatStream, true, recHdrNat, detHdrNat, cntHdrNat, stHdrNat);
 
 			Assert::AreEqual(uint64_t(0), cntNaive.hdrLinearizedEvals, L"negative control: hdrLinearizedEvals == 0 when disabled");
 			Assert::IsTrue(cntHdr.hdrLinearizedEvals >= 9u, L"hdrLinearizedEvals must increment on HDR evaluations");
@@ -572,6 +581,23 @@ namespace Tests
 			Assert::IsTrue(recHdr.measured[0].llr > recNaive.measured[0].llr ||
 				(recHdr.applied[0].state == G::LatchState::Latched && recHdr.applied[0].n == 1920),
 				L"ChainEstimator hdrNoise=true must improve upscale LLR / confident latch over naive code-space path");
+			Assert::IsTrue(recHdr.applied[0].state == G::LatchState::Latched && recHdr.applied[0].n == 1920,
+				L"SOTA1-HIGH-1: ChainEstimator hdrNoise=true must latch confident applied[0].n == 1920 on 3-shot HDR10 PQ stream");
+			Assert::IsTrue(recHdr.applied[1].state == G::LatchState::Latched && recHdr.applied[1].n == 1080,
+				L"SOTA1-HIGH-1: ChainEstimator hdrNoise=true must latch confident applied[1].n == 1080 on 3-shot HDR10 PQ stream");
+			Assert::IsTrue(recHdr.applied[0].kernelIndex >= 0,
+				L"SOTA1-HIGH-1: synced linearized kernelT[] must preserve verified applied[0].kernelIndex >= 0 (never -1)");
+			Assert::IsTrue(C::Kernel(recHdr.applied[0].kernelIndex).family == C::Family::Lanczos,
+				L"SOTA1-HIGH-1: applied[0].kernelIndex must belong to verified Family::Lanczos");
+			Assert::AreEqual(static_cast<int>(C::Family::Lanczos), static_cast<int>(recHdr.applied[0].kernelFamily),
+				L"SOTA1-HIGH-1: applied[0].kernelFamily must record Family::Lanczos");
+			Assert::IsTrue(recHdr.applied[1].kernelIndex >= 0 &&
+				C::Kernel(recHdr.applied[1].kernelIndex).family == C::Family::Lanczos,
+				L"SOTA1-HIGH-1: applied[1].kernelIndex must also belong to verified Family::Lanczos");
+			Assert::IsTrue(stHdr.find("kernel unsure") == std::string::npos,
+				L"SOTA1-HIGH-1: StatusLine() must NOT contain 'kernel unsure' on linearized HDR upscale");
+			Assert::IsTrue(stHdr.find("lanczos-like, confident") != std::string::npos,
+				L"SOTA1-HIGH-1: StatusLine() must surface verified 'lanczos-like, confident' on linearized HDR upscale");
 
 			// Native HDR10 PQ stream MUST NOT false-latch an upscale:
 			const SourceGeometry::Delivered deliv{ kUhdW, kUhdH };

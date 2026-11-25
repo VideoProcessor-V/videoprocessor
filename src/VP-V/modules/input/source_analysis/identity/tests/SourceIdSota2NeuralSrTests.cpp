@@ -10,6 +10,8 @@
 //   1. Sota2ShockFilteredSuperResolutionFiresNeuralSrWitnessAndChainReasonBit
 //   2. Sota2AdversarialFalsePositiveTrapsAllRejectNeuralSr
 //   3. Sota2WorkspaceReuseNonFiniteInputsAndOriginalPathwayForcesOff
+//   4. Sota2MultiEvalSequenceDemotesConfidentNativeCodedBumpsAppliedGenAndPreservesStatus
+//   5. Sota2StateTransitionProgressiveToNeuralSrAndBackTracksExactAppliedGen
 #include "pch.h"
 #include "CppUnitTest.h"
 
@@ -695,6 +697,8 @@ namespace Tests
 				Assert::AreEqual(kUhdH, cgOff.axis[1].n);
 				Assert::IsTrue(recOff.codedRaster == G::CodedRaster::NativeCoded,
 					L"hazard proof (negative control): with neuralSr=false, multi-eval AI-upscaled stream falsely publishes NativeCoded");
+				Assert::AreEqual(uint64_t(1), recOff.appliedGen,
+					L"hazard proof (negative control): neuralSr=false latches NativeCoded and bumps appliedGen == 1u");
 				Assert::IsTrue(estOff.LatchedPowerForTest());
 				Assert::IsTrue(estOff.StatusLine().find("native, confident") != std::string::npos);
 				Assert::IsTrue(estOff.StatusLine().find("AI-upscaled") == std::string::npos);
@@ -702,7 +706,8 @@ namespace Tests
 			}
 
 			// (B) Protected ChainEstimator (neuralSr.enabled == true on the EXACT SAME srStream):
-			//     NEVER latches Confident on any evaluation, bumps appliedGen, and preserves StatusLine() reason!
+			//     NEVER latches Confident on any evaluation, keeps appliedGen == 0u on steady Unknown -> Unknown
+			//     evaluations (zero spurious per-frame appliedGen inflation!), and preserves StatusLine() reason!
 			{
 				ChainFx::ManualClock clk;
 				C::EstimatorSettings cfgOn;
@@ -731,6 +736,8 @@ namespace Tests
 						L"SOTA2-HIGH-3: neuralSr=true must NEVER latch Confident on any evaluation in a multi-eval AI-upscaled stream");
 					Assert::IsTrue(stepRec.codedRaster != G::CodedRaster::NativeCoded,
 						L"SOTA2-HIGH-3: neuralSr=true must NEVER publish CodedRaster::NativeCoded");
+					Assert::AreEqual(uint64_t(0), stepRec.appliedGen,
+						L"SOTA23-HIGH-2: steady Unknown -> Unknown AI-upscaled evaluations must NEVER inflate appliedGen");
 
 					const std::string stLine = estOn.StatusLine();
 					Assert::IsTrue(stLine.find("AI-upscaled (skip LTI inverse)") != std::string::npos,
@@ -745,12 +752,145 @@ namespace Tests
 				Assert::IsTrue(estOn.Held().ReadLatest(0, recOn));
 				const C::EstimatorCounters cntOn = estOn.GetCounters();
 				Assert::IsTrue(cntOn.neuralSrDetections >= 18u);
-				Assert::IsTrue(recOn.appliedGen >= 1u,
-					L"SOTA2-HIGH-3: UnsureLike demotion before ++appliedGen must bump appliedGen once AxisReader crosses c1");
+				Assert::AreEqual(uint64_t(0), recOn.appliedGen,
+					L"SOTA23-HIGH-2: appliedGen must stay 0u across steady Unknown -> Unknown AI-SR stream");
+				Assert::AreEqual(0, estOn.StatusInput().latchNx);
+				Assert::AreEqual(0, estOn.StatusInput().latchNy);
 				Assert::IsFalse(estOn.LatchedPowerForTest(),
 					L"SOTA2-HIGH-3: SOTA-demoted AI-upscaled stream must not enter confident latched cadence");
 				Assert::IsTrue((recOn.applied[0].reasonBits & C::kReasonNeuralSrDetected) != 0u);
 				Assert::IsTrue((recOn.applied[1].reasonBits & C::kReasonNeuralSrDetected) != 0u);
+				estOn.Stop();
+			}
+		}
+
+		// 5. SOTA23-HIGH-2 real state-transition regression (Progressive -> AI-SR -> Progressive):
+		//    Proves appliedGen tracks true published Record::applied state transitions with zero spurious inflation
+		//    and zero latch pollution:
+		//      - Phase 1 (Progressive 1080p->4K Lanczos3, 3 shots x 4 evals): latches Confident 1920x1080 (appliedGen: 0 -> 1,
+		//        then +0 across steady Latched frames);
+		//      - Phase 2 (AI-SR ShockNeuralSr2x, 1 shot x 4 evals): demotes applied to Unknown (appliedGen: 1 -> 2,
+		//        then +0 across repeated AI-SR frames even while AxisReader window stays above c1; latchNx/Ny == 0);
+		//      - Phase 3 (Progressive 1080p->4K Lanczos3, 1 shot x 4 evals): recovers Unknown -> Latched (appliedGen: 2 -> 3
+		//        even though AxisReader remained Latched across the boundary, then +0 while steady Latched);
+		//      - Same-input negative control (neuralSr.enabled == false on the exact same 20-frame sequence) fails to
+		//        demote during Phase 2, keeping appliedGen == 1 throughout.
+		TEST_METHOD(Sota2StateTransitionProgressiveToNeuralSrAndBackTracksExactAppliedGen)
+		{
+			using namespace Sota2NeuralFx;
+
+			// 20-evaluation schedule at constant 1.05 s cadence (window = 16.732 s; 4 evals/shot -> 3.15 s >= 3.0 s dwell):
+			//   f =  0..11 : 3 shots x 4 evals ClassicalLanczos2x (1920x1080 -> 3840x2160)
+			//   f = 12..15 : 1 shot  x 4 evals ShockNeuralSr2x    (AI-SR 1080p -> 4K)
+			//   f = 16..19 : 1 shot  x 4 evals ClassicalLanczos2x (1920x1080 -> 3840x2160)
+			std::vector<C::LineSnapshot> seqStream;
+			seqStream.reserve(20u);
+			for (int f = 0; f < 20; ++f)
+			{
+				const bool isAiSr = (f >= 12 && f < 16);
+				const SceneKind kind = isAiSr ? SceneKind::ShockNeuralSr2x : SceneKind::ClassicalLanczos2x;
+				const int64_t timeUs = static_cast<int64_t>(f) * 1050000;
+				const uint64_t seed = (isAiSr ? 0x6200ull : 0x5100ull) + static_cast<uint64_t>(f * 37);
+				C::LineSnapshot snap = BuildSceneSnapshot(kind, static_cast<uint64_t>(200 + f), timeUs, seed);
+				if ((f % 4) != 0)
+				{
+					snap.flags = 0u;
+					snap.cuts = 0;
+					snap.eventTimeUs = -1;
+				}
+				seqStream.push_back(snap);
+			}
+
+			const SourceGeometry::Delivered deliv{ kUhdW, kUhdH };
+
+			// (A) Mandatory Same-Input Negative Control (neuralSr.enabled == false on seqStream):
+			//     Phase 2 AI-SR frames are not detected, so applied stays Latched from f=7..19 (appliedGen == 1u)!
+			{
+				ChainFx::ManualClock clk;
+				C::EstimatorSettings cfgOff;
+				cfgOff.outputStepOverride = 1;
+				Assert::IsFalse(cfgOff.neuralSr.enabled);
+				C::ChainEstimator estOff(cfgOff, clk.Fn());
+				estOff.SetSynchronous(true);
+				estOff.SetMode(C::EstimatorMode::On);
+				for (size_t f = 0; f < seqStream.size(); ++f)
+				{
+					clk.Set(static_cast<double>(f) * 1050.0);
+					Assert::IsTrue(estOff.SubmitLines(seqStream[f]));
+					G::Record r;
+					Assert::IsTrue(estOff.Held().ReadLatest(0, r));
+					if (f >= 12 && f < 16)
+					{
+						Assert::IsTrue(SourceGeometry::ConfidentOf(r, deliv).AnyConfident(),
+							L"hazard proof (negative control): with neuralSr=false, Phase 2 AI-SR keeps stale progressive LTI latch");
+					}
+				}
+				G::Record recOffEnd;
+				Assert::IsTrue(estOff.Held().ReadLatest(0, recOffEnd));
+				Assert::AreEqual(uint64_t(1), recOffEnd.appliedGen,
+					L"negative control: without AI-SR demotion, appliedGen bumps only once (0 -> 1)");
+				estOff.Stop();
+			}
+
+			// (B) Protected ChainEstimator (neuralSr.enabled == true on the EXACT SAME seqStream):
+			//     Exact appliedGen transitions: 0 -> 1 (Phase 1 latch) -> 2 (Phase 2 AI-SR demote) -> 3 (Phase 3 re-latch)!
+			{
+				ChainFx::ManualClock clk;
+				C::EstimatorSettings cfgOn;
+				cfgOn.outputStepOverride = 1;
+				cfgOn.neuralSr.enabled = true;
+				C::ChainEstimator estOn(cfgOn, clk.Fn());
+				estOn.SetSynchronous(true);
+				estOn.SetMode(C::EstimatorMode::On);
+
+				for (size_t f = 0; f < seqStream.size(); ++f)
+				{
+					clk.Set(static_cast<double>(f) * 1050.0);
+					Assert::IsTrue(estOn.SubmitLines(seqStream[f]));
+
+					G::Record stepRec;
+					Assert::IsTrue(estOn.Held().ReadLatest(0, stepRec));
+					const SourceGeometry::ConfidentGeometry stepCg = SourceGeometry::ConfidentOf(stepRec, deliv);
+					const C::ChainStatusInput stIn = estOn.StatusInput();
+					Assert::AreEqual(0, stIn.latchNx, L"SOTA23-HIGH-2: zero latchNx pollution");
+					Assert::AreEqual(0, stIn.latchNy, L"SOTA23-HIGH-2: zero latchNy pollution");
+
+					if (f < 7)
+					{
+						Assert::IsFalse(stepCg.AnyConfident());
+						Assert::AreEqual(uint64_t(0), stepRec.appliedGen,
+							L"Phase 1 acquiring (f < 7): applied stays Unknown -> appliedGen == 0u");
+					}
+					else if (f < 12)
+					{
+						Assert::IsTrue(stepCg.axis[0].confident && stepCg.axis[0].n == 1920);
+						Assert::IsTrue(stepCg.axis[1].confident && stepCg.axis[1].n == 1080);
+						Assert::AreEqual(uint64_t(1), stepRec.appliedGen,
+							L"Phase 1 latched (f = 7..11): Unknown -> Latched bumps appliedGen to exact 1u and stays steady");
+						Assert::AreEqual(uint64_t(0), estOn.GetCounters().neuralSrDetections);
+					}
+					else if (f < 16)
+					{
+						Assert::IsFalse(stepCg.AnyConfident(),
+							L"Phase 2 AI-SR (f = 12..15): applied must demote to Unknown on every AI-SR evaluation");
+						Assert::AreEqual(uint64_t(2), stepRec.appliedGen,
+							L"Phase 2 AI-SR (f = 12..15): Latched -> Unknown bumps appliedGen to exact 2u with zero per-frame inflation");
+						Assert::IsFalse(estOn.LatchedPowerForTest());
+						Assert::IsTrue(estOn.StatusLine().find("AI-upscaled (skip LTI inverse)") != std::string::npos);
+					}
+					else
+					{
+						Assert::IsTrue(stepCg.axis[0].confident && stepCg.axis[0].n == 1920,
+							L"Phase 3 recovery (f = 16..19): H must re-latch Confident 1920");
+						Assert::IsTrue(stepCg.axis[1].confident && stepCg.axis[1].n == 1080,
+							L"Phase 3 recovery (f = 16..19): V must re-latch Confident 1080");
+						Assert::AreEqual(uint64_t(3), stepRec.appliedGen,
+							L"Phase 3 recovery (f = 16..19): Unknown -> Latched must bump appliedGen to exact 3u and stay steady");
+						Assert::IsTrue(estOn.StatusLine().find("1080 -> 2160 lanczos-like, confident") != std::string::npos);
+					}
+				}
+
+				Assert::IsTrue(estOn.GetCounters().neuralSrDetections >= 8u);
 				estOn.Stop();
 			}
 		}

@@ -10,6 +10,9 @@
 //   1. Sota3MotionBob1080iTo2160pFiresReasonAndSuppressesConfident540pVerticalLatch
 //   2. Sota3WeaveComb1080iAnd1080iTo2160pFiresDirectAndThroughChainEstimatorDeliver
 //   3. Sota3AdversarialFalsePositiveTrapsProgressive540p720pAndVenetianBlindsNeverFire
+//   4. Sota3NativeHoriz1920x1080MotionBobDetectsDemotesBumpsAppliedGenAndSurfacesStatus
+//   5. Sota3Letterboxed239ScopeWeaveCombDoesNotDiluteFlatCombVarAndSurfacesStatus
+//   6. Sota3StateTransitionAndSafetyRulesWeaveCombZeroLatchPollutionAndExactAppliedGen
 #include "pch.h"
 #include "CppUnitTest.h"
 
@@ -840,10 +843,28 @@ namespace Tests
 				C::ChainEstimator estOn(cfgOn, clk.Fn());
 				estOn.SetSynchronous(true);
 				estOn.SetMode(C::EstimatorMode::On);
+				G::LatchState prevHState = G::LatchState::Unknown;
+				uint64_t prevGen = 0u;
 				for (size_t i = 0; i < bob1080Stream.size(); ++i)
 				{
 					clk.Set(static_cast<double>(i) * 1200.0);
 					Assert::IsTrue(estOn.SubmitLines(bob1080Stream[i]));
+					G::Record stepRec;
+					Assert::IsTrue(estOn.Held().ReadLatest(0, stepRec));
+					Assert::IsTrue(stepRec.applied[1].state == G::LatchState::Unknown,
+						L"SOTA23-HIGH-2: MotionBob must keep V applied at Unknown on every frame");
+					if (stepRec.applied[0].state == prevHState)
+					{
+						Assert::AreEqual(prevGen, stepRec.appliedGen,
+							L"SOTA23-HIGH-2: steady Unknown->Unknown V demotion must NEVER inflate appliedGen per frame");
+					}
+					else
+					{
+						Assert::AreEqual(prevGen + 1u, stepRec.appliedGen,
+							L"SOTA23-HIGH-2: single H native latch transitions appliedGen by exact +1");
+					}
+					prevHState = stepRec.applied[0].state;
+					prevGen = stepRec.appliedGen;
 				}
 				G::Record recOn;
 				Assert::IsTrue(estOn.Held().ReadLatest(0, recOn));
@@ -856,11 +877,13 @@ namespace Tests
 				Assert::IsTrue((recOn.applied[1].reasonBits & C::kReasonInterlacedBob) != 0u);
 
 				const SourceGeometry::ConfidentGeometry cgOn = SourceGeometry::ConfidentOf(recOn, deliv);
+				Assert::IsTrue(cgOn.axis[0].confident && cgOn.axis[0].n == kFhdW,
+					L"fixture: native 1920 horizontal axis confirms confident native once");
 				Assert::IsFalse(cgOn.axis[1].confident,
 					L"SOTA3-HIGH-4: interlaced=true must demote V applied so progressive 540 -> 1080 never latches");
 				Assert::IsTrue(recOn.codedRaster != G::CodedRaster::PlayerUpscaled);
-				Assert::IsTrue(recOn.appliedGen >= 1u,
-					L"SOTA3-HIGH-4: demoting V applied before ++appliedGen must bump appliedGen");
+				Assert::AreEqual(uint64_t(1), recOn.appliedGen,
+					L"SOTA23-HIGH-2: appliedGen must equal exact 1u (single H native latch, zero spurious V per-frame inflation)");
 				Assert::IsFalse(estOn.LatchedPowerForTest());
 
 				const std::string stOn = estOn.StatusLine();
@@ -1000,13 +1023,16 @@ namespace Tests
 					const SourceGeometry::ConfidentGeometry cgOff = SourceGeometry::ConfidentOf(recOff, delivActive);
 					Assert::IsTrue(cgOff.AnyConfident(),
 						L"hazard proof (negative control): with interlaced=false, letterboxed 2x weave falsely latches Confident progressive upscale");
+					Assert::IsTrue(recOff.appliedGen >= 1u,
+						L"hazard proof (negative control): interlaced=false latches progressive upscale and bumps appliedGen");
 					Assert::IsTrue(estOff.StatusLine().find("confident") != std::string::npos);
 					Assert::IsTrue(estOff.StatusLine().find("interlaced broadcast") == std::string::npos);
 					estOff.Stop();
 				}
 
 				// Protected run (interlaced.enabled == true across the EXACT SAME 12 deliveries):
-				// Fires WeaveComb, demotes applied before ++appliedGen, and surfaces "interlaced broadcast" in StatusLine()!
+				// Fires WeaveComb, keeps applied at Unknown with appliedGen == 0u (zero inflation!), and surfaces
+				// "interlaced broadcast" in StatusLine()!
 				{
 					ChainFx::ManualClock clk;
 					C::EstimatorSettings cfgOn;
@@ -1023,6 +1049,11 @@ namespace Tests
 						if (i > 0 && (i % 3) == 0)
 							estOn.NoteEvent(C::EstimatorEvent::Cut, seq);
 						estOn.Deliver(ChainFx::View(lbWeave, seq));
+
+						G::Record stepRec;
+						Assert::IsTrue(estOn.Held().ReadLatest(0, stepRec));
+						Assert::AreEqual(uint64_t(0), stepRec.appliedGen,
+							L"SOTA23-HIGH-2: steady Unknown -> Unknown WeaveComb frames must NEVER inflate appliedGen");
 					}
 					const C::EstimatorCounters cntOn = estOn.GetCounters();
 					Assert::AreEqual(uint64_t(12), cntOn.evaluations);
@@ -1034,8 +1065,8 @@ namespace Tests
 					const SourceGeometry::ConfidentGeometry cgOn = SourceGeometry::ConfidentOf(recOn, delivActive);
 					Assert::IsFalse(cgOn.AnyConfident(),
 						L"SOTA3-HIGH-4: WeaveComb must demote applied axes so progressive upscale never latches Confident");
-					Assert::IsTrue(recOn.appliedGen >= 1u,
-						L"SOTA3-HIGH-4: WeaveComb demotion before ++appliedGen must bump appliedGen");
+					Assert::AreEqual(uint64_t(0), recOn.appliedGen,
+						L"SOTA23-HIGH-2: appliedGen must stay 0u across steady Unknown -> Unknown WeaveComb stream");
 					Assert::IsFalse(estOn.LatchedPowerForTest());
 					Assert::IsTrue((recOn.applied[0].reasonBits & C::kReasonInterlacedBob) != 0u);
 					Assert::IsTrue((recOn.applied[1].reasonBits & C::kReasonInterlacedBob) != 0u);
@@ -1045,6 +1076,276 @@ namespace Tests
 						L"SOTA3-HIGH-4: StatusLine() must surface 'interlaced broadcast' when letterboxed weave comb fires");
 					estOn.Stop();
 				}
+			}
+		}
+
+		// 6. SOTA23-HIGH-2 safetyRules weave-comb zero latch pollution & 3-phase state-transition regression:
+		//      (A) With safetyRules = true on 1080i -> 2160p weave-comb (1920x1080 -> 3840x2160):
+		//          - Same-input negative control (interlaced.enabled == false) falsely enters UpscaleLatch
+		//            (StatusInput().latchNx == 1920, latchNy == 1080, latch.entries == 1);
+		//          - Protected run (interlaced.enabled == true) demotes BEFORE ApplyLatch so UpscaleLatch NEVER
+		//            enters (latchNx == 0, latchNy == 0, latch.entries == 0, appliedGen == 0u, "; no upscale latch"),
+		//            and a subsequent calm low-detail frame where AnalyzeWeaveComb abstains does NOT leak heldApplied!
+		//      (B) Full 3-phase state transition (Progressive 1080p->2160p -> Interlaced WeaveComb 1080i->2160p ->
+		//          Progressive 1080p->2160p): proves appliedGen increments by exact +1 on Unknown -> Latched (0 -> 1),
+		//          exact +1 on Latched -> Unknown (1 -> 2, staying 2 across repeated WeaveComb evals), and exact +1 on
+		//          Unknown -> Latched recovery (2 -> 3 even though AxisReader stayed Latched across the boundary)!
+		TEST_METHOD(Sota3StateTransitionAndSafetyRulesWeaveCombZeroLatchPollutionAndExactAppliedGen)
+		{
+			using namespace Sota3InterlacedFx;
+
+			const double floorCodes = 1.0 / std::sqrt(12.0);
+			C::InterlacedSettings onCfg;
+			onCfg.enabled = true;
+
+			// Build 64x64-tiled (128x128 in 4K -> exact divisor of kSegPx = 256 so every interior 256-px segment has
+			// identical statistics and zero random segment outliers) progressive 1080p->2160p and weave 1080i->2160p planes:
+			ChainFx::Plane srcProg1080;
+			srcProg1080.w = kFhdW;
+			srcProg1080.h = kFhdH;
+			srcProg1080.luma.resize(static_cast<size_t>(kFhdW) * static_cast<size_t>(kFhdH));
+			{
+				SplitMix64 rng(0x5A17C301ull);
+				double tile[64][64];
+				for (int ty = 0; ty < 64; ++ty)
+					for (int tx = 0; tx < 64; ++tx)
+						tile[ty][tx] = 512.0 + 55.0 * rng.Normal01();
+				for (int y = 0; y < kFhdH; ++y)
+				{
+					uint16_t* row = &srcProg1080.luma[static_cast<size_t>(y) * static_cast<size_t>(kFhdW)];
+					for (int x = 0; x < kFhdW; ++x)
+						row[x] = Quantize10(tile[y & 63][x & 63]);
+				}
+			}
+			const ChainFx::Plane prog2160p = UpscalePlane2D(srcProg1080, kUhdW, kUhdH, kLanczos3);
+
+			ChainFx::Plane srcWeave1080;
+			srcWeave1080.w = kFhdW;
+			srcWeave1080.h = kFhdH;
+			srcWeave1080.luma.resize(static_cast<size_t>(kFhdW) * static_cast<size_t>(kFhdH));
+			{
+				SplitMix64 rng(0x7B29D413ull);
+				double phases[9];
+				for (int m = 0; m < 9; ++m)
+					phases[m] = 2.0 * C::kPi * rng.Uniform01();
+				double barEnv[64];
+				double texWave[64];
+				for (int u = 0; u < 64; ++u)
+				{
+					const double ud = static_cast<double>(u);
+					const double e1 = 0.5 * (1.0 + std::tanh((ud - 8.0) / 1.2));
+					const double e2 = 0.5 * (1.0 - std::tanh((ud - 30.0) / 1.2));
+					barEnv[u] = e1 * e2;
+					double tex = 0.0;
+					for (int m = 0; m < 9; ++m)
+					{
+						const int harm = 18 + m;
+						tex += 6.0 * std::sin(2.0 * C::kPi * static_cast<double>(harm) * ud / 64.0 + phases[m]);
+					}
+					texWave[u] = tex;
+				}
+				for (int y = 0; y < kFhdH; ++y)
+				{
+					const int shift = ((y & 1) != 0) ? 10 : 0;
+					const int fieldRow = y >> 1;
+					uint16_t* row = &srcWeave1080.luma[static_cast<size_t>(y) * static_cast<size_t>(kFhdW)];
+					for (int x = 0; x < kFhdW; ++x)
+					{
+						const int uBar = (x - shift + fieldRow + 64) & 63;
+						const int uTex = (x - shift + 64) & 63;
+						row[x] = Quantize10(240.0 + barEnv[uBar] * (420.0 + texWave[uTex]));
+					}
+				}
+			}
+			const ChainFx::Plane weave2160p = UpscalePlane2D(srcWeave1080, kUhdW, kUhdH, kLanczos3);
+
+			// Verify direct AnalyzeWeaveComb physics on both planes:
+			const C::InterlacedResult rProgDirect = C::AnalyzeWeaveComb(
+				prog2160p.luma.data(), kUhdW, kUhdH, kUhdW, floorCodes, onCfg);
+			Assert::IsFalse(rProgDirect.interlacedDetected,
+				L"fixture: 64x64-tiled progressive 1080p->2160p plane must NOT trigger AnalyzeWeaveComb");
+			Assert::IsTrue(rProgDirect.kind == C::InterlacedKind::None);
+			Assert::IsTrue(rProgDirect.reason == C::InterlacedReason::ProgressiveIsotropic);
+
+			const C::InterlacedResult rWeaveDirect = C::AnalyzeWeaveComb(
+				weave2160p.luma.data(), kUhdW, kUhdH, kUhdW, floorCodes, onCfg);
+			Assert::IsTrue(rWeaveDirect.interlacedDetected,
+				L"fixture: 64x64-tiled 1080i->2160p weave plane must confirm WeaveComb (s=2)");
+			Assert::IsTrue(rWeaveDirect.kind == C::InterlacedKind::WeaveComb);
+			Assert::IsTrue(rWeaveDirect.reason == C::InterlacedReason::WeaveCombConfirmed);
+			Assert::AreEqual(2, rWeaveDirect.weaveStride);
+
+			const SourceGeometry::Delivered delivUhd{ kUhdW, kUhdH };
+
+			// (A) safetyRules = true on 1080i -> 2160p weave-comb (3 shots x 4 evals = 12 frames at 1.05 s cadence):
+			//     (A1) Same-input negative control (interlaced.enabled == false): falsely enters UpscaleLatch 1920x1080!
+			{
+				ChainFx::ManualClock clk;
+				C::EstimatorSettings cfgOff;
+				cfgOff.outputStepOverride = 1;
+				cfgOff.safetyRules = true;
+				Assert::IsFalse(cfgOff.interlaced.enabled);
+				C::ChainEstimator estOff(cfgOff, clk.Fn());
+				estOff.SetSynchronous(true);
+				estOff.SetMode(C::EstimatorMode::On);
+				for (int i = 0; i < 12; ++i)
+				{
+					const uint64_t seq = static_cast<uint64_t>(1 + i);
+					clk.Set(1000.0 + static_cast<double>(i) * 6000.0);
+					estOff.NoteFrame(seq, static_cast<double>(i) * 1.05, 0, 0, kUhdW, kUhdH);
+					if (i > 0 && (i % 4) == 0)
+						estOff.NoteEvent(C::EstimatorEvent::Cut, seq);
+					estOff.Deliver(ChainFx::View(weave2160p, seq));
+				}
+				G::Record recOff;
+				Assert::IsTrue(estOff.Held().ReadLatest(0, recOff));
+				const C::ChainStatusInput stInOff = estOff.StatusInput();
+				Assert::IsTrue(stInOff.safetyRules);
+				Assert::AreEqual(1920, stInOff.latchNx,
+					L"hazard proof (negative control): with safetyRules=true & interlaced=false, 1080i->2160p weave enters UpscaleLatch 1920x1080");
+				Assert::AreEqual(1080, stInOff.latchNy);
+				Assert::AreEqual(uint64_t(1), estOff.GetCounters().latch.entries);
+				Assert::AreEqual(uint64_t(1), recOff.appliedGen);
+				Assert::IsTrue(estOff.StatusLine().find("upscale latch 1920x1080") != std::string::npos);
+				estOff.Stop();
+			}
+
+			//     (A2) Protected run (safetyRules = true && interlaced.enabled = true on the EXACT SAME 12 weave frames
+			//          + 1 calm low-detail frame where AnalyzeWeaveComb abstains):
+			//          latchNx == 0, latchNy == 0, latch.entries == 0, appliedGen == 0u, zero heldApplied leak!
+			{
+				ChainFx::ManualClock clk;
+				C::EstimatorSettings cfgOn;
+				cfgOn.outputStepOverride = 1;
+				cfgOn.safetyRules = true;
+				cfgOn.interlaced.enabled = true;
+				C::ChainEstimator estOn(cfgOn, clk.Fn());
+				estOn.SetSynchronous(true);
+				estOn.SetMode(C::EstimatorMode::On);
+				for (int i = 0; i < 12; ++i)
+				{
+					const uint64_t seq = static_cast<uint64_t>(1 + i);
+					clk.Set(1000.0 + static_cast<double>(i) * 6000.0);
+					estOn.NoteFrame(seq, static_cast<double>(i) * 1.05, 0, 0, kUhdW, kUhdH);
+					if (i > 0 && (i % 4) == 0)
+						estOn.NoteEvent(C::EstimatorEvent::Cut, seq);
+					estOn.Deliver(ChainFx::View(weave2160p, seq));
+
+					G::Record stepRec;
+					Assert::IsTrue(estOn.Held().ReadLatest(0, stepRec));
+					const C::ChainStatusInput stInOn = estOn.StatusInput();
+					Assert::IsTrue(stInOn.safetyRules);
+					Assert::AreEqual(0, stInOn.latchNx,
+						L"SOTA23-HIGH-2: WeaveComb demotion BEFORE ApplyLatch must prevent UpscaleLatch pollution (latchNx == 0)");
+					Assert::AreEqual(0, stInOn.latchNy,
+						L"SOTA23-HIGH-2: WeaveComb demotion BEFORE ApplyLatch must prevent UpscaleLatch pollution (latchNy == 0)");
+					Assert::AreEqual(uint64_t(0), stepRec.appliedGen,
+						L"SOTA23-HIGH-2: safetyRules=true steady Unknown->Unknown WeaveComb must keep appliedGen == 0u");
+					Assert::IsFalse(SourceGeometry::ConfidentOf(stepRec, delivUhd).AnyConfident());
+
+					const std::string stLine = estOn.StatusLine();
+					Assert::IsTrue(stLine.find("interlaced broadcast") != std::string::npos);
+					Assert::IsTrue(stLine.find("; no upscale latch") != std::string::npos);
+					Assert::IsTrue(stLine.find("upscale latch 1920x1080") == std::string::npos);
+				}
+				const C::EstimatorCounters cntOn = estOn.GetCounters();
+				Assert::AreEqual(uint64_t(12), cntOn.evaluations);
+				Assert::AreEqual(uint64_t(12), cntOn.interlacedWeaveDetections);
+				Assert::AreEqual(uint64_t(0), cntOn.latch.entries,
+					L"SOTA23-HIGH-2: UpscaleLatch must record 0 entries across WeaveComb stream");
+
+				// Follow-up calm frame where AnalyzeWeaveComb abstains (InsufficientEdgeActivity): must NOT leak heldApplied!
+				ChainFx::Plane calm2160p;
+				calm2160p.w = kUhdW;
+				calm2160p.h = kUhdH;
+				calm2160p.luma.assign(static_cast<size_t>(kUhdW) * static_cast<size_t>(kUhdH), 512u);
+				const C::InterlacedResult rCalm = C::AnalyzeWeaveComb(
+					calm2160p.luma.data(), kUhdW, kUhdH, kUhdW, floorCodes, onCfg);
+				Assert::IsFalse(rCalm.interlacedDetected);
+				Assert::IsTrue(rCalm.kind == C::InterlacedKind::Abstain);
+
+				clk.Set(1000.0 + 12.0 * 6000.0);
+				estOn.NoteFrame(13, 12.0 * 1.05, 0, 0, kUhdW, kUhdH);
+				estOn.Deliver(ChainFx::View(calm2160p, 13));
+				G::Record calmRec;
+				Assert::IsTrue(estOn.Held().ReadLatest(0, calmRec));
+				Assert::IsFalse(SourceGeometry::ConfidentOf(calmRec, delivUhd).AnyConfident(),
+					L"SOTA23-HIGH-2: calm abstain frame after WeaveComb must NOT leak stale heldApplied latch");
+				Assert::AreEqual(0, estOn.StatusInput().latchNx);
+				Assert::AreEqual(uint64_t(0), calmRec.appliedGen);
+				estOn.Stop();
+			}
+
+			// (B) Full 3-phase state-transition test (Progressive -> WeaveComb -> Progressive, 20 evaluations at 1.05 s):
+			//       i =  0..11 : 3 shots x 4 evals prog2160p  -> appliedGen: 0 (i=0..6) -> 1 (i=7..11, Unknown -> Latched)
+			//       i = 12..15 : 1 shot  x 4 evals weave2160p -> appliedGen: 2 (i=12..15, Latched -> Unknown, +0 steady)
+			//       i = 16..19 : 1 shot  x 4 evals prog2160p  -> appliedGen: 3 (i=16..19, Unknown -> Latched recovery, +0 steady)
+			{
+				ChainFx::ManualClock clk;
+				C::EstimatorSettings cfg;
+				cfg.outputStepOverride = 1;
+				cfg.interlaced.enabled = true;
+				C::ChainEstimator est(cfg, clk.Fn());
+				est.SetSynchronous(true);
+				est.SetMode(C::EstimatorMode::On);
+
+				for (int i = 0; i < 20; ++i)
+				{
+					const uint64_t seq = static_cast<uint64_t>(101 + i);
+					const bool isWeave = (i >= 12 && i < 16);
+					const ChainFx::Plane& frame = isWeave ? weave2160p : prog2160p;
+					clk.Set(1000.0 + static_cast<double>(i) * 6000.0);
+					est.NoteFrame(seq, static_cast<double>(i) * 1.05, 0, 0, kUhdW, kUhdH);
+					if (i > 0 && (i % 4) == 0)
+						est.NoteEvent(C::EstimatorEvent::Cut, seq);
+					est.Deliver(ChainFx::View(frame, seq));
+
+					G::Record stepRec;
+					Assert::IsTrue(est.Held().ReadLatest(0, stepRec));
+					const SourceGeometry::ConfidentGeometry stepCg = SourceGeometry::ConfidentOf(stepRec, delivUhd);
+					Assert::AreEqual(0, est.StatusInput().latchNx);
+					Assert::AreEqual(0, est.StatusInput().latchNy);
+
+					if (i < 7)
+					{
+						Assert::IsFalse(stepCg.AnyConfident());
+						Assert::AreEqual(uint64_t(0), stepRec.appliedGen,
+							L"Phase 1 acquiring (i < 7): applied stays Unknown -> appliedGen == 0u");
+					}
+					else if (i < 12)
+					{
+						Assert::IsTrue(stepCg.axis[0].confident && stepCg.axis[0].n == 1920);
+						Assert::IsTrue(stepCg.axis[1].confident && stepCg.axis[1].n == 1080);
+						Assert::AreEqual(uint64_t(1), stepRec.appliedGen,
+							L"Phase 1 latched (i = 7..11): Unknown -> Latched bumps appliedGen to exact 1u and stays steady");
+						Assert::AreEqual(uint64_t(0), est.GetCounters().interlacedWeaveDetections);
+					}
+					else if (i < 16)
+					{
+						Assert::IsFalse(stepCg.AnyConfident(),
+							L"Phase 2 WeaveComb (i = 12..15): applied must demote to Unknown on every interlaced frame");
+						Assert::AreEqual(uint64_t(2), stepRec.appliedGen,
+							L"Phase 2 WeaveComb (i = 12..15): Latched -> Unknown bumps appliedGen to exact 2u with zero per-frame inflation");
+						Assert::IsFalse(est.LatchedPowerForTest());
+						Assert::IsTrue(est.StatusLine().find("interlaced broadcast") != std::string::npos);
+					}
+					else
+					{
+						Assert::IsTrue(stepCg.axis[0].confident && stepCg.axis[0].n == 1920,
+							L"Phase 3 recovery (i = 16..19): H must re-latch Confident 1920");
+						Assert::IsTrue(stepCg.axis[1].confident && stepCg.axis[1].n == 1080,
+							L"Phase 3 recovery (i = 16..19): V must re-latch Confident 1080");
+						Assert::AreEqual(uint64_t(3), stepRec.appliedGen,
+							L"Phase 3 recovery (i = 16..19): Unknown -> Latched must bump appliedGen to exact 3u and stay steady");
+						Assert::IsTrue(est.StatusLine().find("1080 -> 2160 lanczos-like, confident") != std::string::npos);
+						Assert::IsTrue(est.StatusLine().find("interlaced broadcast") == std::string::npos);
+					}
+				}
+
+				const C::EstimatorCounters cntEnd = est.GetCounters();
+				Assert::AreEqual(uint64_t(20), cntEnd.evaluations);
+				Assert::AreEqual(uint64_t(4), cntEnd.interlacedWeaveDetections);
+				est.Stop();
 			}
 		}
 	};
