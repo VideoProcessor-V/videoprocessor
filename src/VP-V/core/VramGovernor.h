@@ -59,6 +59,9 @@ enum VramUserId : uint16_t {
     kUserProductBase = 0x100,  // + ProductId: skeleton lane products
 };
 
+// Derived VRAM user id for a skeleton product (uses the kUserProductBase + ProductId namespace).
+constexpr uint16_t ProductVramUserId(ProductId id) { return static_cast<uint16_t>(kUserProductBase + id); }
+
 struct VramUser {
     uint16_t id = 0;
     const char* name = "";

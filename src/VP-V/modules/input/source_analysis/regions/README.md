@@ -183,3 +183,17 @@ the fill hands in `static_cast<pl_dispatch>(req.gpu->Dispatch())`), one function
 (a host without a skeleton memo, e.g. the hook tests), so the fallback cannot drift from the product. X5 asks for the map under
 StageAfter(scaling.geometry), the measured base's size and a per-seq picture ordinal (scaling/output/EdgeMapStageOrdinal.h).
 The catalog's X5 row (row 3) does not yet declare the kEdgeMap read (left to the C5+A test run, see the CB-18 lane report).
+
+## kEdgeMap CPU owner fill (S18 R3)
+
+`EdgeMapCpuReadback.h` + `EdgeMapFill.h` provide the non-blocking CPU form of `kEdgeMap` (`MakeEdgeMapCpuOwnerFill`,
+`keepFrames = 2`, `frameScoped = false`, `renderThreadOnly = true`), backed by `LedDrive::NativeCopyReadbackDevice` (`CopyFormat::R32F`)
+and `VpLaneProducts::ReadbackRing` (3 staging slots = `kEdgeMapCpuKeepFrames + 1`).
+
+- **Demand-gated scheduling:** `EdgeMapModule::OnFrame(Entrance)` acquires `kEdgeMap` GPU and submits a copy ONLY when
+  `HasCpuDemand(host)` is true (0 submits, 0 staging allocation, 0 VRAM declared when inactive). Disabling demand or forgetting a host
+  (`GpuReleased` / `Shutdown` / destructor) releases staging textures and withdraws the VRAM declaration.
+- **VRAM accounting:** declared to `VpSkeleton::VramUsers` under `ProductVramUserId(kEdgeMap)` (`kUserProductBase + kEdgeMap`,
+  `Tier::T1`) without adding a new enum value.
+- **Non-latched pending:** while a frame's async readback is still in flight, the CPU owner fill returns `false` with
+  `out.pending = true`, surfacing non-latched `AcquireCause::ReadbackPending` so subsequent `Acquire` calls retry cleanly.
