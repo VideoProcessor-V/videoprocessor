@@ -5,19 +5,289 @@
 #include "pch.h"
 #include <VP-V/tests/VpLutGpuTestSupport.h>
 #include <VP-V/modules/scaling/output/AdaptiveDownscaleStage.h>
+#include <VP-V/modules/input/source_analysis/regions/BusyEdge.h>
 #include <VP-V/modules/input/source_analysis/regions/EdgeMapDispatch.h>
+#include <VP-V/modules/input/source_analysis/regions/EdgeMapFill.h>
+#include <VP-V/modules/input/capture/SourcePlanes.h>
+#include <VP-V/modules/control/skeleton/GpuProductTexBackend.h>
+#include <VP-V/modules/control/skeleton/SkeletonAccess.h>
+#include <VP-V/modules/control/skeleton/SkeletonFacts.h>
+#include <VP-V/core/GpuAllocator.h>
+#include <VP-V/core/SkeletonAcquire.h>
+#include <VP-V/core/hub/CurrentFrame.h>
+#include <VP-V/core/hub/HubQuery.h>
 #include <VP-V/tests/SettingsTestSupport.h>
+#include <libplacebo/dispatch.h>
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <cstring>
 #include <functional>
 #include <limits>
+#include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <set>
 
 namespace VideoProcessorTest
 {
+	namespace
+	{
+		// Counts real libplacebo shader dispatches inside a wrapped pl_hook via pl_dispatch_callback
+		// (RAII restore on scope exit) and records each dispatched pass's description/steps and signature.
+		struct HookDispatchRecord
+		{
+			int count = 0;
+			std::vector<std::string> descriptions;
+			std::vector<uint64_t> signatures;
+
+			void Reset()
+			{
+				count = 0;
+				descriptions.clear();
+				signatures.clear();
+			}
+
+			bool HasPassContaining(const char* needle) const
+			{
+				if (!needle || !needle[0])
+					return false;
+				std::string lowNeedle(needle);
+				for (char& ch : lowNeedle)
+					ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+				for (size_t i = 0; i < descriptions.size(); ++i)
+				{
+					std::string low = descriptions[i];
+					for (char& ch : low)
+						ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+					if (low.find(lowNeedle) != std::string::npos)
+						return true;
+				}
+				return false;
+			}
+		};
+
+		struct HookDispatchProxy
+		{
+			const pl_hook* inner = nullptr;
+			HookDispatchRecord* record = nullptr;
+			pl_hook hook{};
+
+			void Init(const pl_hook* target, HookDispatchRecord* rec)
+			{
+				inner = target;
+				record = rec;
+				hook = *target;
+				hook.priv = this;
+				hook.hook = &HookDispatchProxy::Run;
+				hook.reset = target->reset ? &HookDispatchProxy::ResetHook : nullptr;
+			}
+
+			static void OnDispatch(void* priv, const pl_dispatch_info* info)
+			{
+				HookDispatchRecord* rec = static_cast<HookDispatchRecord*>(priv);
+				if (!rec)
+					return;
+				++rec->count;
+				std::string desc;
+				if (info && info->shader)
+				{
+					if (info->shader->description)
+						desc = info->shader->description;
+					for (int i = 0; i < info->shader->num_steps; ++i)
+					{
+						if (info->shader->steps[i])
+						{
+							if (!desc.empty())
+								desc += " | ";
+							desc += info->shader->steps[i];
+						}
+					}
+				}
+				rec->descriptions.push_back(desc);
+				rec->signatures.push_back(info ? info->signature : 0ull);
+			}
+
+			static void ResetHook(void* priv)
+			{
+				HookDispatchProxy* self = static_cast<HookDispatchProxy*>(priv);
+				if (self && self->inner && self->inner->reset)
+					self->inner->reset(self->inner->priv);
+			}
+
+			static pl_hook_res Run(void* priv, const pl_hook_params* params)
+			{
+				HookDispatchProxy* self = static_cast<HookDispatchProxy*>(priv);
+				struct CallbackGuard
+				{
+					pl_dispatch dp;
+					CallbackGuard(pl_dispatch d, HookDispatchRecord* rec) : dp(d)
+					{
+						if (dp)
+							pl_dispatch_callback(dp, rec, &HookDispatchProxy::OnDispatch);
+					}
+					~CallbackGuard()
+					{
+						if (dp)
+							pl_dispatch_callback(dp, nullptr, nullptr);
+					}
+					CallbackGuard(const CallbackGuard&) = delete;
+					CallbackGuard& operator=(const CallbackGuard&) = delete;
+				} guard(params ? params->dispatch : nullptr, self->record);
+				return self->inner->hook(self->inner->priv, params);
+			}
+		};
+
+		// Owner-fill GPU device for skeleton memo kEdgeMap serving tests (owns its own pl_dispatch and product textures).
+		struct AdaptiveMemoOwnerDevice : VpSkeleton::IOwnerGpuDevice
+		{
+			explicit AdaptiveMemoOwnerDevice(pl_gpu g)
+				: gpu(g), backend(g, false), dispatch(pl_dispatch_create(g->log, g))
+			{}
+			~AdaptiveMemoOwnerDevice() override
+			{
+				for (pl_tex& t : made)
+					pl_tex_destroy(gpu, &t);
+				if (dispatch != nullptr)
+					pl_dispatch_destroy(&dispatch);
+			}
+			AdaptiveMemoOwnerDevice(const AdaptiveMemoOwnerDevice&) = delete;
+			AdaptiveMemoOwnerDevice& operator=(const AdaptiveMemoOwnerDevice&) = delete;
+
+			void* OwnerGpu() const override { return const_cast<void*>(static_cast<const void*>(gpu)); }
+			void* OwnerDispatch() const override { return static_cast<void*>(dispatch); }
+			bool CreateOwnerTexture(const VpSkeleton::TexShape& shape, VpSkeleton::GpuMemoHandle& out, std::string& why) override
+			{
+				out = VpSkeleton::GpuMemoHandle();
+				const pl_tex tex = backend.Create(shape);
+				if (tex == nullptr)
+				{
+					why = backend.lastError;
+					return false;
+				}
+				made.push_back(tex);
+				out.resource = const_cast<void*>(static_cast<const void*>(tex));
+				out.width = shape.w;
+				out.height = shape.h;
+				out.format = uint32_t(shape.fmt);
+				out.bytes = VpSkeleton::ShapeBytes(shape);
+				out.keepAlive = std::shared_ptr<void>(out.resource, [](void*) {});
+				return true;
+			}
+
+			pl_gpu gpu;
+			VpLaneProducts::GpuTexBackend backend;
+			pl_dispatch dispatch;
+			std::vector<pl_tex> made;
+		};
+
+		// RAII skeleton-memo host wiring Vpv::Hub::QuerySlot() + CurrentFrame without mutating ExtensionHub::modules_.
+		struct ScopedEdgeMapMemoHost
+		{
+			struct DemandImpl : Vpv::Skeleton::IExternalDemand
+			{
+				const void* expectedHost = nullptr;
+				std::shared_ptr<VpSkeleton::SkeletonMemo> memo;
+				const void* gpuPtr = nullptr;
+
+				void SetExternalDemand(const void*, const void*, const std::vector<VpSkeleton::ConsumerDecl>&,
+					const std::vector<VpSkeleton::ProductId>&) override {}
+				void ClearExternalDemand(const void*, const void*) override {}
+				Vpv::Skeleton::FrameMemo MemoFor(const void* h, uint64_t seq) override
+				{
+					Vpv::Skeleton::FrameMemo fm;
+					if (h == expectedHost && memo)
+					{
+						fm.memo = memo;
+						fm.host = h;
+						fm.seq = seq;
+						fm.gpu = gpuPtr;
+					}
+					return fm;
+				}
+			};
+
+			static Vpv::Skeleton::IExternalDemand*& ActiveDemandSlot()
+			{
+				static Vpv::Skeleton::IExternalDemand* ptr = nullptr;
+				return ptr;
+			}
+			static Vpv::Hub::QueryFn& PrevQuerySlot()
+			{
+				static Vpv::Hub::QueryFn prev = nullptr;
+				return prev;
+			}
+			static void* QueryDispatch(const char* iid)
+			{
+				if (iid != nullptr && std::strcmp(iid, Vpv::Skeleton::kExternalDemandQueryId) == 0 && ActiveDemandSlot() != nullptr)
+					return ActiveDemandSlot();
+				const Vpv::Hub::QueryFn prev = PrevQuerySlot();
+				return prev != nullptr ? prev(iid) : nullptr;
+			}
+
+			int hostTag = 0;
+			AdaptiveMemoOwnerDevice dev;
+			std::shared_ptr<VpSkeleton::SkeletonMemo> memo;
+			DemandImpl demand;
+			Vpv::Hub::QueryFn savedPrev = nullptr;
+
+			ScopedEdgeMapMemoHost(pl_gpu gpu, VpSkeleton::OwnerFill edgeMapFill)
+				: dev(gpu), memo(std::make_shared<VpSkeleton::SkeletonMemo>())
+			{
+				Vpv::Hub::ResetThisThreadFrameForTesting();
+				memo->SetHost(&hostTag);
+				memo->SetRenderThread(std::this_thread::get_id());
+				memo->SetGpuDispatcherPresent(true);
+				memo->SetGpuBudget(true, uint64_t(1) << 30);
+				memo->SetGpuDevice(&dev);
+				Assert::IsTrue(memo->RegisterOwnerFill(VpSkeleton::kP13SourceRing, VpSkeleton::AcquireForm::Gpu,
+					Vpv::Capture::SourcePlanes::kUnit, Vpv::Capture::SourcePlanes::MakeOwnerFill())
+					== VpSkeleton::SkeletonMemo::Registration::Registered,
+					L"ScopedEdgeMapMemoHost: kP13SourceRing registration failed");
+				Assert::IsTrue(memo->RegisterOwnerFill(VpSkeleton::kEdgeMap, VpSkeleton::AcquireForm::Gpu,
+					Vpv::Regions::kEdgeMapUnit, std::move(edgeMapFill))
+					== VpSkeleton::SkeletonMemo::Registration::Registered,
+					L"ScopedEdgeMapMemoHost: kEdgeMap registration failed");
+				demand.expectedHost = &hostTag;
+				demand.memo = memo;
+				demand.gpuPtr = gpu;
+				ActiveDemandSlot() = &demand;
+				savedPrev = Vpv::Hub::QuerySlot().exchange(&ScopedEdgeMapMemoHost::QueryDispatch, std::memory_order_acq_rel);
+				PrevQuerySlot() = savedPrev;
+			}
+
+			~ScopedEdgeMapMemoHost()
+			{
+				Vpv::Hub::QuerySlot().store(savedPrev, std::memory_order_release);
+				ActiveDemandSlot() = nullptr;
+				PrevQuerySlot() = nullptr;
+				Vpv::Capture::SourcePlanes::Forget(&hostTag);
+				Vpv::Hub::ForgetCurrentFrame(&hostTag);
+				Vpv::Hub::ResetThisThreadFrameForTesting();
+				if (memo)
+				{
+					memo->SetGpuDevice(nullptr);
+					memo->Clear();
+				}
+			}
+
+			ScopedEdgeMapMemoHost(const ScopedEdgeMapMemoHost&) = delete;
+			ScopedEdgeMapMemoHost& operator=(const ScopedEdgeMapMemoHost&) = delete;
+
+			void BeginFrame(uint64_t seq)
+			{
+				memo->OnSeal(seq);
+				RendererExtension::FrameContext fc;
+				fc.host = &hostTag;
+				fc.phase = RendererExtension::FramePhase::Begin;
+				fc.seq = static_cast<int64_t>(seq);
+				Vpv::Hub::RecordCurrentFrame(fc);
+			}
+		};
+	}
+
 	TEST_CLASS(AdaptiveScalingHookTests)
 	{
 	public:
@@ -3207,6 +3477,1328 @@ namespace VideoProcessorTest
 
 			for (pl_tex* t : { &srcTex, &fieldTex, &heavyErrorTex, &cleanErrorTex, &trustTex })
 				pl_tex_destroy(gpu, t);
+			pl_mpv_user_shader_destroy(&ssim);
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
+			Assert::AreEqual(0, pl_renderer_get_errors(fixture.Renderer()).num_disabled_hooks, L"A hook was disabled");
+		}
+
+		// Q#10 (GEM-077 / ADS-PERF, WARP GPU):
+		// Verify AdaptiveDownscale::Module's 18x18 shared-memory tiled MEASURE_BODY is bit-identical
+		// (<= 1e-6f) to an independent un-tiled direct-texelFetch reference AND matches an independent
+		// CPU reference across:
+		//  (A) Full 128x96 (8x6 16x16 workgroups) exercising every internal workgroup seam
+		//      (x = 15, 16, 31, 32, ..., 111, 112; y = 15, 16, ..., 79, 80) and all 4 texture borders
+		//      (x = 0, 127; y = 0, 95);
+		//  (B) Odd non-zero sub-crop {13, 11, 110, 84} (97x73 -> 48x36) exercising non-zero origin,
+		//      partial edge workgroups, and cross-crop halo reads into the full em texture.
+		// Mandatory in-test negative control (exact same 128x96 input): omitting the 1-pixel halo
+		// (clamping tile neighbor reads to local [0, 15] instead of [0, 17]) introduces workgroup-seam
+		// Laplacian errors (> 1e-3) and shifts grainScale, meanW, and blended output pixels (> 1e-3).
+		TEST_METHOD(MeasureTileIsBitIdentical)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+
+			const std::string ssimSource = LoadBundledShader("SSimDownscaler.glsl");
+			Assert::IsFalse(ssimSource.empty(), L"SSimDownscaler.glsl must load");
+			const pl_hook* ssim = pl_mpv_user_shader_parse(gpu, ssimSource.data(), ssimSource.size());
+			Assert::IsNotNull(ssim, L"SSimDownscaler.glsl must parse");
+
+			pl_fmt rgba32fSample = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR));
+			pl_fmt rgba32fTarget = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+			pl_fmt rgba32fStoreRead = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE | PL_FMT_CAP_HOST_READABLE));
+			pl_fmt rg32fStore = pl_find_fmt(gpu, PL_FMT_FLOAT, 2, 32, 32,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE));
+			pl_fmt r16fEdge = pl_find_fmt(gpu, PL_FMT_FLOAT, 1, 16, 16,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE | PL_FMT_CAP_LINEAR));
+			Assert::IsTrue(rgba32fSample && rgba32fTarget && rgba32fStoreRead && rg32fStore && r16fEdge,
+				L"WARP must provide float32/float16 formats for measure-tile parity test");
+
+			static constexpr int sw = 128, sh = 96;
+			// Deterministic 128x96 image exercising hard edges (left x < 32 and top/bottom borders y = 0, 95),
+			// flat/textured pixels with crisp 5-code steps across EVERY 16x16 workgroup boundary (x >= 32),
+			// fine per-pixel texture, and a vertical luma ramp exercising shadowBias = 0.5 and border clamping.
+			std::vector<float> srcRgba(static_cast<size_t>(sw) * sh * 4, 0.0f);
+			uint32_t rng = 0x51A7F00Du;
+			auto nextNoise = [&rng]() -> float
+			{
+				rng = rng * 1664525u + 1013904223u;
+				return (static_cast<float>(rng >> 8) / 16777216.0f - 0.5f) * 3.0f;   // [-1.5, +1.5] codes
+			};
+			for (int y = 0; y < sh; ++y)
+			{
+				for (int x = 0; x < sw; ++x)
+				{
+					float code = 128.0f;
+					if (x < 32)
+					{
+						// Hard vertical stripes crossing x = 0, 15/16, 31/32 plus sharp top/bottom border edges.
+						code = ((x / 12) % 2) != 0 ? 220.0f : 30.0f;
+						if (y == 0 || y == sh - 1)
+							code = (code > 128.0f) ? 40.0f : 220.0f;
+					}
+					else
+					{
+						// Alternating 5-code 16x16 tile checkerboard: Sobel grad ~5 < edgeLo (8), so flat_px == 1
+						// right on every workgroup seam (x = 31/32, 47/48, ..., 111/112; y = 15/16, ..., 79/80).
+						const float tileStep = (((x / 16) + (y / 16)) & 1) != 0 ? 129.0f : 124.0f;
+						const float vertRamp = -45.0f + 90.0f * (static_cast<float>(y) / static_cast<float>(sh - 1));
+						code = tileStep + vertRamp + nextNoise();
+					}
+					code = (std::max)(0.0f, (std::min)(255.0f, code));
+					const float norm = code / 255.0f;
+					float* px = &srcRgba[(static_cast<size_t>(y) * sw + x) * 4];
+					px[0] = px[1] = px[2] = norm;
+					px[3] = 1.0f;
+				}
+			}
+
+			pl_tex_params stp{};
+			stp.w = sw;
+			stp.h = sh;
+			stp.format = rgba32fSample;
+			stp.sampleable = true;
+			stp.initial_data = srcRgba.data();
+			pl_tex srcTex = pl_tex_create(gpu, &stp);
+			Assert::IsNotNull(srcTex, L"RGBA32F source texture creation failed");
+
+			AdaptiveDownscale::Settings st;
+			st.wBase = 1.0f;
+			st.edgeLo = 8.0f;
+			st.edgeHi = 40.0f;
+			st.grainLo = 2.0f;
+			st.grainHi = 8.0f;
+			st.grainFloor = 0.4f;
+			st.grainSmoothMs = 0.0f;
+			st.shadowBias = 0.5f;
+			st.grainMap = false;
+			st.ssimResidualStabilise = false;
+			st.float32Picture = true;
+
+			auto smoothstepCpu = [](float lo, float hi, float x) -> float
+			{
+				const float t = (std::max)(0.0f, (std::min)(1.0f, (x - lo) / (hi - lo)));
+				return t * t * (3.0f - 2.0f * t);
+			};
+
+			// Independent pure-C++ CPU reference of the measure pass (exact Sobel + un-tiled 4-neighbor Laplacian)
+			// plus a CPU workgroup-seam audit comparing true halo vs no-halo [0, 15] local clamping.
+			struct CpuMeasureRef
+			{
+				float grainScale = 1.0f;
+				float meanW = 0.0f;
+				float maxSeamLapErr = 0.0f;
+			};
+			auto computeCpuRef = [&](int ox, int oy, int rw, int rh) -> CpuMeasureRef
+			{
+				pl_color_space cs{};
+				cs.primaries = PL_COLOR_PRIM_BT_709;
+				cs.transfer = PL_COLOR_TRC_GAMMA22;
+				const VpMeasure::MeasureDomain dom = VpMeasure::MeasureDomainFor(cs, PL_COLOR_SYSTEM_BT_709, PL_COLOR_PRIM_BT_709);
+				std::vector<float> luma(static_cast<size_t>(sw) * sh, 0.0f);
+				for (int i = 0; i < sw * sh; ++i)
+				{
+					const double rgb[3] = { srcRgba[i * 4 + 0], srcRgba[i * 4 + 1], srcRgba[i * 4 + 2] };
+					luma[static_cast<size_t>(i)] = static_cast<float>(VpMeasure::MeasureLumaCode(dom, rgb));
+				}
+				const std::vector<float> sobel = RegionEvidence::BusyEdge::SobelMagnitude(luma.data(), sw, sh);
+				auto atClamped = [&](int x, int y) -> float
+				{
+					const int cx = (std::max)(0, (std::min)(sw - 1, x));
+					const int cy = (std::max)(0, (std::min)(sh - 1, y));
+					return luma[static_cast<size_t>(cy) * sw + cx];
+				};
+				double sumLap = 0.0, sumFlat = 0.0, sumFree = 0.0;
+				float maxSeamErr = 0.0f;
+				for (int qy = 0; qy < rh; ++qy)
+				{
+					for (int qx = 0; qx < rw; ++qx)
+					{
+						const int px = (std::max)(0, (std::min)(sw - 1, ox + qx));
+						const int py = (std::max)(0, (std::min)(sh - 1, oy + qy));
+						const float e = luma[static_cast<size_t>(py) * sw + px];
+						const float b = atClamped(ox + qx, oy + qy - 1);
+						const float d = atClamped(ox + qx - 1, oy + qy);
+						const float f = atClamped(ox + qx + 1, oy + qy);
+						const float h = atClamped(ox + qx, oy + qy + 1);
+						const float grad = 0.25f * sobel[static_cast<size_t>(py) * sw + px];
+						const float ed = smoothstepCpu(st.edgeLo, st.edgeHi, grad);
+						const float lap = std::fabs(4.0f * e - b - d - f - h);
+						const float flatPx = grad < st.edgeLo ? 1.0f : 0.0f;
+						const float eNorm = (std::max)(0.0f, (std::min)(1.0f, e / 255.0f));
+						const float wgt = (std::max)(1.0f + (2.0f * (1.0f - eNorm) - 1.0f) * st.shadowBias, 0.0f);
+						sumLap += static_cast<double>(lap * wgt * flatPx);
+						sumFlat += static_cast<double>(flatPx);
+						sumFree += static_cast<double>(1.0f - ed);
+
+						// Seam audit on internal 16x16 workgroup borders (x = 15, 16, 31, 32, ...).
+						const int lx = qx & 15;
+						const int ly = qy & 15;
+						if (flatPx > 0.5f && (lx == 0 || lx == 15) && qx > 0 && qx < rw - 1)
+						{
+							const int wgX = (qx / 16) * 16;
+							const int wgY = (qy / 16) * 16;
+							const float bNH = atClamped(ox + wgX + lx, oy + wgY + (std::max)(ly - 1, 0));
+							const float dNH = atClamped(ox + wgX + (std::max)(lx - 1, 0), oy + wgY + ly);
+							const float fNH = atClamped(ox + wgX + (std::min)(lx + 1, 15), oy + wgY + ly);
+							const float hNH = atClamped(ox + wgX + lx, oy + wgY + (std::min)(ly + 1, 15));
+							const float lapNH = std::fabs(4.0f * e - bNH - dNH - fNH - hNH);
+							maxSeamErr = (std::max)(maxSeamErr, std::fabs(lap - lapNH));
+						}
+					}
+				}
+				const float energy = static_cast<float>(sumLap / (std::max)(sumFlat, 1.0));
+				const float freeMean = static_cast<float>(sumFree / (std::max)(static_cast<double>(rw) * rh, 1.0));
+				const float gs = st.grainFloor + (1.0f - st.grainFloor) * (1.0f - smoothstepCpu(st.grainLo, st.grainHi, energy));
+				CpuMeasureRef out;
+				out.grainScale = gs;
+				out.meanW = st.wBase * freeMean * gs;
+				out.maxSeamLapErr = maxSeamErr;
+				return out;
+			};
+
+			// Independent GPU reference hook pair:
+			//  - omitHalo == false: pure un-tiled direct texelFetch measure pass (zero shared tile).
+			//  - omitHalo == true:  negative-control 16x16 shared tile omitting the 1-pixel halo (clamped to [0, 15]).
+			struct ReferenceMeasureHook
+			{
+				pl_gpu gpu = nullptr;
+				AdaptiveDownscale::Settings settings{};
+				bool omitHalo = false;
+				ScalerPass::Module faithfulScaler;
+				pl_tex faithful = nullptr;
+				pl_tex em = nullptr;
+				pl_tex edge = nullptr;
+				pl_tex partial = nullptr;
+				pl_tex state = nullptr;
+				pl_fmt rg32fFmt = nullptr;
+				pl_fmt r16fFmt = nullptr;
+				pl_fmt rgba32fFmt = nullptr;
+				pl_rect2df srcRect{};
+				pl_rect2d dstRect{};
+				float edgeOrigin[2] = {};
+				VpMeasure::MeasureDomain domain{};
+				pl_hook measureHook{};
+				pl_hook blendHook{};
+
+				void Init(pl_gpu g, const AdaptiveDownscale::Settings& s, bool noHalo,
+					pl_fmt rg32f, pl_fmt r16f, pl_fmt rgba32f, uint64_t sigBase)
+				{
+					gpu = g;
+					settings = s;
+					omitHalo = noHalo;
+					rg32fFmt = rg32f;
+					r16fFmt = r16f;
+					rgba32fFmt = rgba32f;
+					measureHook.stages = PL_HOOK_PRE_KERNEL;
+					measureHook.input = PL_HOOK_SIG_TEX;
+					measureHook.priv = this;
+					measureHook.hook = &ReferenceMeasureHook::RunMeasure;
+					measureHook.signature = sigBase;
+					blendHook.stages = PL_HOOK_POST_KERNEL;
+					blendHook.input = PL_HOOK_SIG_TEX;
+					blendHook.priv = this;
+					blendHook.hook = &ReferenceMeasureHook::RunBlend;
+					blendHook.signature = sigBase + 1ull;
+				}
+
+				void Release()
+				{
+					if (gpu)
+					{
+						for (pl_tex* t : { &em, &edge, &partial, &state })
+							if (*t) pl_tex_destroy(gpu, t);
+						faithfulScaler.Release(gpu);
+					}
+					faithful = em = edge = partial = state = nullptr;
+				}
+				~ReferenceMeasureHook() { Release(); }
+
+				static pl_shader_desc SampledDesc(const char* name, pl_tex tex, bool linear)
+				{
+					pl_shader_desc d{};
+					d.desc.name = name;
+					d.desc.type = PL_DESC_SAMPLED_TEX;
+					d.binding.object = tex;
+					d.binding.address_mode = PL_TEX_ADDRESS_CLAMP;
+					d.binding.sample_mode = linear ? PL_TEX_SAMPLE_LINEAR : PL_TEX_SAMPLE_NEAREST;
+					return d;
+				}
+				static pl_shader_desc StorageDesc(const char* name, pl_tex tex)
+				{
+					pl_shader_desc d{};
+					d.desc.name = name;
+					d.desc.type = PL_DESC_STORAGE_IMG;
+					d.desc.access = PL_DESC_ACCESS_WRITEONLY;
+					d.binding.object = tex;
+					return d;
+				}
+				static bool RunCompute(pl_dispatch dp, const char* desc, const char* hdr, const char* body,
+					const pl_shader_desc* descs, int nDescs, const pl_shader_var* vars, int nVars, int gx, int gy)
+				{
+					pl_custom_shader custom{};
+					custom.description = desc;
+					custom.header = hdr;
+					custom.body = body;
+					custom.input = PL_SHADER_SIG_NONE;
+					custom.output = PL_SHADER_SIG_NONE;
+					custom.descriptors = descs;
+					custom.num_descriptors = nDescs;
+					custom.variables = vars;
+					custom.num_variables = nVars;
+					custom.compute = true;
+					custom.compute_group_size[0] = 16;
+					custom.compute_group_size[1] = 16;
+					pl_shader sh = pl_dispatch_begin(dp);
+					if (!pl_shader_custom(sh, &custom))
+					{
+						pl_dispatch_abort(dp, &sh);
+						return false;
+					}
+					pl_dispatch_compute_params cp{};
+					cp.shader = &sh;
+					cp.dispatch_size[0] = gx;
+					cp.dispatch_size[1] = gy;
+					cp.dispatch_size[2] = 1;
+					return pl_dispatch_compute(dp, &cp);
+				}
+
+				static pl_hook_res RunMeasure(void* priv, const pl_hook_params* p)
+				{
+					ReferenceMeasureHook* self = static_cast<ReferenceMeasureHook*>(priv);
+					pl_hook_res unchanged{};
+					unchanged.output = PL_HOOK_SIG_NONE;
+					const float sx0 = std::fmin(p->src_rect.x0, p->src_rect.x1);
+					const float sx1 = std::fmax(p->src_rect.x0, p->src_rect.x1);
+					const float sy0 = std::fmin(p->src_rect.y0, p->src_rect.y1);
+					const float sy1 = std::fmax(p->src_rect.y0, p->src_rect.y1);
+					const int dw = std::abs(p->dst_rect.x1 - p->dst_rect.x0);
+					const int dh = std::abs(p->dst_rect.y1 - p->dst_rect.y0);
+					const int ox = static_cast<int>(std::floor(sx0));
+					const int oy = static_cast<int>(std::floor(sy0));
+					const int w = (std::max)(1, static_cast<int>(std::ceil(sx1)) - ox);
+					const int h = (std::max)(1, static_cast<int>(std::ceil(sy1)) - oy);
+					const int gx = (w + 15) / 16, gy = (h + 15) / 16;
+
+					auto ensureTex = [&](pl_tex& tex, int tw, int th, pl_fmt fmt, bool hostRead) -> bool
+					{
+						if (tex && tex->params.w == tw && tex->params.h == th)
+							return true;
+						pl_tex_params tp{};
+						tp.w = tw;
+						tp.h = th;
+						tp.format = fmt;
+						tp.sampleable = true;
+						tp.storable = true;
+						tp.host_readable = hostRead;
+						return pl_tex_recreate(self->gpu, &tex, &tp);
+					};
+					Assert::IsTrue(ensureTex(self->em, p->tex->params.w, p->tex->params.h, self->rg32fFmt, false) &&
+						ensureTex(self->edge, w, h, self->r16fFmt, false) &&
+						ensureTex(self->partial, gx, gy, self->rgba32fFmt, false) &&
+						ensureTex(self->state, 1, 1, self->rgba32fFmt, true),
+						L"reference measure texture creation failed");
+
+					// Faithful branch via ScalerPass (identical settings to AdaptiveDownscale::Module).
+					ScalerPass::Settings fs;
+					fs.axis = ScalerPass::Axis::Both;
+					fs.order = ScalerPass::Order::DownFirst;
+					fs.antiring = self->settings.antiring;
+					fs.precision = ScalerPass::Precision::F32;
+					fs.filter.kind = ScalerKernels::Kind::EwaLanczosSharp;
+					ScalerPass::Source fsrc;
+					fsrc.tex = p->tex;
+					fsrc.x0 = sx0; fsrc.y0 = sy0; fsrc.x1 = sx1; fsrc.y1 = sy1;
+					Assert::IsTrue(self->faithfulScaler.Apply(self->gpu, p->dispatch, fsrc, dw, dh, fs, self->faithful, 0),
+						L"reference faithful scaler failed");
+
+					const pl_color_system sys = p->orig_repr ? p->orig_repr->sys : p->repr.sys;
+					const pl_color_primaries prim = p->orig_color ? p->orig_color->primaries : p->color.primaries;
+					self->domain = VpMeasure::MeasureDomainFor(p->color, sys, prim);
+					std::string why;
+					Assert::IsTrue(Vpv::Regions::DispatchEdgeMapStage(p->dispatch, p->tex, p->color, sys, prim, self->em, why),
+						L"reference DispatchEdgeMapStage failed");
+
+					static const char* const kUntiledHeader = "shared vec4 ref_sum[256];\n";
+					static const char* const kUntiledBody = R"GLSL(
+ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+uint li = gl_LocalInvocationIndex;
+vec4 v = vec4(0.0);
+if (q.x < int(region.x) && q.y < int(region.y)) {
+    ivec2 p = ivec2(origin) + q;
+    ivec2 lim = textureSize(em, 0) - ivec2(1);
+    vec2 m = texelFetch(em, clamp(p, ivec2(0), lim), 0).xy;
+    float e = m.y;
+    float b = texelFetch(em, clamp(p + ivec2(0, -1), ivec2(0), lim), 0).y;
+    float d = texelFetch(em, clamp(p + ivec2(-1, 0), ivec2(0), lim), 0).y;
+    float f = texelFetch(em, clamp(p + ivec2(1, 0), ivec2(0), lim), 0).y;
+    float h = texelFetch(em, clamp(p + ivec2(0, 1), ivec2(0), lim), 0).y;
+    float grad = 0.25 * m.x;
+    float ed = smoothstep(edge_lo, edge_hi, grad);
+    imageStore(edge_out, q, vec4(ed));
+    float lap = abs(4.0 * e - b - d - f - h);
+    float flat_px = grad < edge_lo ? 1.0 : 0.0;
+    float wgt = max(mix(1.0, 2.0 * (1.0 - clamp(e / 255.0, 0.0, 1.0)), shadow_bias), 0.0);
+    v = vec4(lap * wgt * flat_px, flat_px, 1.0 - ed, 0.0);
+}
+ref_sum[li] = v;
+barrier();
+for (uint s = 128u; s > 0u; s >>= 1u) {
+    if (li < s)
+        ref_sum[li] += ref_sum[li + s];
+    barrier();
+}
+if (li == 0u)
+    imageStore(partial_out, ivec2(gl_WorkGroupID.xy), ref_sum[0]);
+)GLSL";
+
+					static const char* const kNoHaloHeader =
+						"shared float nh_tile[16][16];\n"
+						"shared vec4 ref_sum[256];\n";
+					static const char* const kNoHaloBody = R"GLSL(
+ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+ivec2 lid = ivec2(gl_LocalInvocationID.xy);
+uint li = gl_LocalInvocationIndex;
+ivec2 lim = textureSize(em, 0) - ivec2(1);
+ivec2 p = ivec2(origin) + q;
+vec2 m = texelFetch(em, clamp(p, ivec2(0), lim), 0).xy;
+nh_tile[lid.y][lid.x] = m.y;
+barrier();
+vec4 v = vec4(0.0);
+if (q.x < int(region.x) && q.y < int(region.y)) {
+    float e = nh_tile[lid.y][lid.x];
+    float b = nh_tile[max(lid.y - 1, 0)][lid.x];
+    float d = nh_tile[lid.y][max(lid.x - 1, 0)];
+    float f = nh_tile[lid.y][min(lid.x + 1, 15)];
+    float h = nh_tile[min(lid.y + 1, 15)][lid.x];
+    float grad = 0.25 * m.x;
+    float ed = smoothstep(edge_lo, edge_hi, grad);
+    imageStore(edge_out, q, vec4(ed));
+    float lap = abs(4.0 * e - b - d - f - h);
+    float flat_px = grad < edge_lo ? 1.0 : 0.0;
+    float wgt = max(mix(1.0, 2.0 * (1.0 - clamp(e / 255.0, 0.0, 1.0)), shadow_bias), 0.0);
+    v = vec4(lap * wgt * flat_px, flat_px, 1.0 - ed, 0.0);
+}
+ref_sum[li] = v;
+barrier();
+for (uint s = 128u; s > 0u; s >>= 1u) {
+    if (li < s)
+        ref_sum[li] += ref_sum[li + s];
+    barrier();
+}
+if (li == 0u)
+    imageStore(partial_out, ivec2(gl_WorkGroupID.xy), ref_sum[0]);
+)GLSL";
+
+					const float origin[2] = { static_cast<float>(ox), static_cast<float>(oy) };
+					const float region[2] = { static_cast<float>(w), static_cast<float>(h) };
+					const pl_shader_desc md[3] = {
+						SampledDesc("em", self->em, false),
+						StorageDesc("edge_out", self->edge),
+						StorageDesc("partial_out", self->partial) };
+					const pl_shader_var mv[5] = {
+						{ pl_var_vec2("origin"), origin, true },
+						{ pl_var_vec2("region"), region, true },
+						{ pl_var_float("edge_lo"), &self->settings.edgeLo, true },
+						{ pl_var_float("edge_hi"), &self->settings.edgeHi, true },
+						{ pl_var_float("shadow_bias"), &self->settings.shadowBias, true } };
+					Assert::IsTrue(RunCompute(p->dispatch,
+						self->omitHalo ? "ref measure (no halo negative control)" : "ref measure (untiled)",
+						self->omitHalo ? kNoHaloHeader : kUntiledHeader,
+						self->omitHalo ? kNoHaloBody : kUntiledBody,
+						md, 3, mv, 5, gx, gy),
+						L"reference measure compute dispatch failed");
+
+					static const char* const kFinalHeader = "shared vec4 ref_total[256];\n";
+					static const char* const kFinalBody = R"GLSL(
+uint li = gl_LocalInvocationIndex;
+ivec2 n = textureSize(partial_in, 0);
+vec4 acc = vec4(0.0);
+for (int idx = int(li); idx < n.x * n.y; idx += 256)
+    acc += texelFetch(partial_in, ivec2(idx % n.x, idx / n.x), 0);
+ref_total[li] = acc;
+barrier();
+for (uint s = 128u; s > 0u; s >>= 1u) {
+    if (li < s)
+        ref_total[li] += ref_total[li + s];
+    barrier();
+}
+if (li == 0u) {
+    vec4 t = ref_total[0];
+    float energy = t.x / max(t.y, 1.0);
+    float free_mean = t.z / max(total_pixels, 1.0);
+    float target = mix(grain_floor, 1.0, 1.0 - smoothstep(grain_lo, grain_hi, energy));
+    imageStore(state_out, ivec2(0), vec4(target, free_mean, 0.0, 2.0));
+}
+)GLSL";
+					const float totalPx = static_cast<float>(w) * static_cast<float>(h);
+					const pl_shader_desc fd[2] = {
+						SampledDesc("partial_in", self->partial, false),
+						StorageDesc("state_out", self->state) };
+					const pl_shader_var fv[4] = {
+						{ pl_var_float("total_pixels"), &totalPx, true },
+						{ pl_var_float("grain_lo"), &self->settings.grainLo, true },
+						{ pl_var_float("grain_hi"), &self->settings.grainHi, true },
+						{ pl_var_float("grain_floor"), &self->settings.grainFloor, true } };
+					Assert::IsTrue(RunCompute(p->dispatch, "ref grain final", kFinalHeader, kFinalBody,
+						fd, 2, fv, 4, 1, 1),
+						L"reference final compute dispatch failed");
+
+					self->srcRect = { sx0, sy0, sx1, sy1 };
+					self->dstRect = p->dst_rect;
+					self->edgeOrigin[0] = origin[0];
+					self->edgeOrigin[1] = origin[1];
+					return unchanged;
+				}
+
+				static pl_hook_res RunBlend(void* priv, const pl_hook_params* p)
+				{
+					ReferenceMeasureHook* self = static_cast<ReferenceMeasureHook*>(priv);
+					const int w = std::abs(p->dst_rect.x1 - p->dst_rect.x0);
+					const int h = std::abs(p->dst_rect.y1 - p->dst_rect.y0);
+					pl_tex out = p->get_tex(p->priv, w, h);
+					Assert::IsNotNull(out, L"reference blend get_tex failed");
+					const float dw = static_cast<float>(std::abs(self->dstRect.x1 - self->dstRect.x0));
+					const float dh = static_cast<float>(std::abs(self->dstRect.y1 - self->dstRect.y0));
+					const float srcOrigin[2] = { self->srcRect.x0, self->srcRect.y0 };
+					const float srcPerDst[2] = {
+						dw > 0.0f ? (self->srcRect.x1 - self->srcRect.x0) / dw : 1.0f,
+						dh > 0.0f ? (self->srcRect.y1 - self->srcRect.y0) / dh : 1.0f };
+					const std::string hdr = "#define REF_KW " + VpMeasure::LumaWeightsGlsl(self->domain) + "\n";
+					static const char* const kBlendBody = R"GLSL(
+ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+ivec2 size = imageSize(dst);
+if (q.x < size.x && q.y < size.y) {
+    vec4 fa = texelFetch(faithful, q, 0);
+    vec4 ss = texelFetch(hooked, q, 0);
+    vec2 s = src_origin + (vec2(q) + vec2(0.5)) * src_per_dst;
+    float e = texture(edge, (s - edge_origin) / vec2(textureSize(edge, 0))).r;
+    float g = texelFetch(state, ivec2(0), 0).r;
+    float w = clamp(w_base * (1.0 - e) * g, 0.0, 1.0);
+    const vec3 k = REF_KW;
+    vec4 o;
+    o.rgb = fa.rgb + vec3(w * (dot(ss.rgb, k) - dot(fa.rgb, k)));
+    o.a = fa.a;
+    imageStore(dst, q, o);
+}
+)GLSL";
+					const pl_shader_desc bd[5] = {
+						SampledDesc("hooked", p->tex, false),
+						SampledDesc("faithful", self->faithful, false),
+						SampledDesc("edge", self->edge, true),
+						SampledDesc("state", self->state, false),
+						StorageDesc("dst", out) };
+					const pl_shader_var bv[4] = {
+						{ pl_var_vec2("src_origin"), srcOrigin, true },
+						{ pl_var_vec2("src_per_dst"), srcPerDst, true },
+						{ pl_var_vec2("edge_origin"), self->edgeOrigin, true },
+						{ pl_var_float("w_base"), &self->settings.wBase, true } };
+					Assert::IsTrue(RunCompute(p->dispatch, "ref blend", hdr.c_str(), kBlendBody,
+						bd, 5, bv, 4, (w + 15) / 16, (h + 15) / 16),
+						L"reference blend compute dispatch failed");
+					pl_hook_res res{};
+					res.output = PL_HOOK_SIG_TEX;
+					res.tex = out;
+					res.repr = p->repr;
+					res.color = p->color;
+					res.components = p->components;
+					res.rect = p->rect;
+					return res;
+				}
+			};
+
+			auto renderHooks = [&](const pl_hook* h0, const pl_hook* h1, const pl_hook* h2,
+				const pl_rect2df& crop, int dw, int dh) -> std::vector<float>
+			{
+				pl_tex_params tp{};
+				tp.w = dw;
+				tp.h = dh;
+				tp.format = rgba32fTarget;
+				tp.renderable = true;
+				tp.host_readable = true;
+				pl_tex target = pl_tex_create(gpu, &tp);
+				Assert::IsNotNull(target, L"RGBA32F target creation failed");
+				pl_frame image = TargetLutGpuFixture::MakeRgbFrame(srcTex);
+				image.crop = crop;
+				pl_frame out = TargetLutGpuFixture::MakeRgbFrame(target);
+				image.color.transfer = out.color.transfer = PL_COLOR_TRC_GAMMA22;
+				image.color.primaries = out.color.primaries = PL_COLOR_PRIM_BT_709;
+				pl_render_params params = pl_render_default_params;
+				params.dither_params = nullptr;
+				params.error_diffusion = nullptr;
+				params.downscaler = &pl_filter_mitchell;
+				params.disable_linear_scaling = true;
+				const pl_hook* hooks[3] = { h0, h1, h2 };
+				params.hooks = hooks;
+				params.num_hooks = 3;
+				const bool ok = pl_render_image(fixture.Renderer(), &image, &out, &params);
+				pl_gpu_finish(gpu);
+				Assert::IsTrue(ok, L"pl_render_image failed on WARP");
+				std::vector<float> px(static_cast<size_t>(dw) * dh * 4, 0.0f);
+				pl_tex_transfer_params dl{};
+				dl.tex = target;
+				dl.ptr = px.data();
+				Assert::IsTrue(pl_tex_download(gpu, &dl), L"target download failed");
+				pl_tex_destroy(gpu, &target);
+				return px;
+			};
+
+			auto maxRgbAbsDiff = [](const std::vector<float>& a, const std::vector<float>& b) -> float
+			{
+				Assert::AreEqual(a.size(), b.size(), L"pixel buffer sizes must match");
+				float worst = 0.0f;
+				for (size_t i = 0; i < a.size(); ++i)
+				{
+					Assert::IsTrue(std::isfinite(a[i]) && std::isfinite(b[i]), L"pixels must remain finite");
+					if (i % 4 == 3) continue;
+					const float d = std::fabs(a[i] - b[i]);
+					if (d > worst) worst = d;
+				}
+				return worst;
+			};
+
+			auto noCutSource = [](uint64_t, uint64_t)
+			{
+				AdaptiveDownscale::CutVerdict v;
+				v.state = AdaptiveDownscale::CutVerdict::State::Known;
+				v.cut = false;
+				return v;
+			};
+
+			struct CropCase { const wchar_t* label; pl_rect2df crop; int ox, oy, rw, rh, dw, dh; };
+			const CropCase cases[2] = {
+				{ L"[full 128x96 (8x6 tiles)] ", { 0.0f, 0.0f, 128.0f, 96.0f }, 0, 0, 128, 96, 64, 48 },
+				{ L"[odd sub-crop 97x73 @ (13,11)] ", { 13.0f, 11.0f, 110.0f, 84.0f }, 13, 11, 97, 73, 48, 36 }
+			};
+
+			for (int ci = 0; ci < 2; ++ci)
+			{
+				const CropCase& cc = cases[ci];
+				const CpuMeasureRef cpuRef = computeCpuRef(cc.ox, cc.oy, cc.rw, cc.rh);
+				Assert::IsTrue(cpuRef.grainScale > 0.45f && cpuRef.grainScale < 0.95f,
+					(std::wstring(cc.label) + L"precondition: grainScale must sit in active ramp interior, got " +
+						std::to_wstring(cpuRef.grainScale)).c_str());
+
+				// Production AdaptiveDownscale::Module (tiled ad_tile[18][18] measure pass).
+				AdaptiveDownscale::Module mod;
+				mod.SetCutSource(noCutSource);
+				mod.SetFrame(st, 1, 1.0f / 24.0f);
+				const std::vector<float> modPx = renderHooks(mod.Measure(), ssim, mod.Blend(), cc.crop, cc.dw, cc.dh);
+				Assert::IsTrue(mod.Active() && mod.Failures() == 0,
+					(std::wstring(cc.label) + L"AdaptiveDownscale::Module must succeed").c_str());
+				// Poll stats on non-advancing repeats (seq stays 1 -> advance == 0).
+				for (int rep = 0; rep < 3; ++rep)
+					renderHooks(mod.Measure(), ssim, mod.Blend(), cc.crop, cc.dw, cc.dh);
+				const AdaptiveDownscale::Stats modStats = mod.LastStats();
+				Assert::IsTrue(modStats.valid, (std::wstring(cc.label) + L"LastStats must become valid").c_str());
+
+				// Independent un-tiled direct-texelFetch GPU reference on exact same input & crop.
+				ReferenceMeasureHook untiledRef;
+				untiledRef.Init(gpu, st, false, rg32fStore, r16fEdge, rgba32fStoreRead, 0x5650544553543100ull + uint64_t(ci) * 4ull);
+				const std::vector<float> refPx = renderHooks(&untiledRef.measureHook, ssim, &untiledRef.blendHook, cc.crop, cc.dw, cc.dh);
+				float refStateVals[4] = {};
+				pl_tex_transfer_params sdl{};
+				sdl.tex = untiledRef.state;
+				sdl.ptr = refStateVals;
+				Assert::IsTrue(pl_tex_download(gpu, &sdl), L"reference state download failed");
+				const float refGrainScale = refStateVals[0];
+				const float refMeanW = st.wBase * refStateVals[1] * refStateVals[0];
+
+				// 1. Cross-check against independent pure-C++ CPU reference (<= 1e-5f).
+				Assert::IsTrue(std::fabs(modStats.grainScale - cpuRef.grainScale) <= 1e-5f,
+					(std::wstring(cc.label) + L"grainScale vs CPU reference mismatch: mod=" +
+						std::to_wstring(modStats.grainScale) + L" cpu=" + std::to_wstring(cpuRef.grainScale)).c_str());
+				Assert::IsTrue(std::fabs(modStats.meanW - cpuRef.meanW) <= 1e-5f,
+					(std::wstring(cc.label) + L"meanW vs CPU reference mismatch: mod=" +
+						std::to_wstring(modStats.meanW) + L" cpu=" + std::to_wstring(cpuRef.meanW)).c_str());
+
+				// 2. Bit-identical parity (<= 1e-6f) against independent un-tiled GPU reference.
+				const float gsDiff = std::fabs(modStats.grainScale - refGrainScale);
+				const float mwDiff = std::fabs(modStats.meanW - refMeanW);
+				const float pxDiff = maxRgbAbsDiff(modPx, refPx);
+				Assert::IsTrue(gsDiff <= 1e-6f,
+					(std::wstring(cc.label) + L"grainScale vs un-tiled GPU ref must be bit-identical (<= 1e-6), got diff " +
+						std::to_wstring(gsDiff)).c_str());
+				Assert::IsTrue(mwDiff <= 1e-6f,
+					(std::wstring(cc.label) + L"meanW vs un-tiled GPU ref must be bit-identical (<= 1e-6), got diff " +
+						std::to_wstring(mwDiff)).c_str());
+				Assert::IsTrue(pxDiff <= 1e-6f,
+					(std::wstring(cc.label) + L"blended pixels vs un-tiled GPU ref must be bit-identical (<= 1e-6), got diff " +
+						std::to_wstring(pxDiff)).c_str());
+
+				// 3. MANDATORY IN-TEST NEGATIVE CONTROL (exact same input): omitting the 1-pixel halo
+				//    (clamping local tile reads to [0, 15] instead of [0, 17]) MUST introduce measurable
+				//    workgroup-seam errors at x = 15, 16, 31, 32, ... (> 1e-3) and shift grainScale & meanW (> 1e-3).
+				if (ci == 0)
+				{
+					Assert::IsTrue(cpuRef.maxSeamLapErr > 1e-3f,
+						(L"negative control: omitting halo must break workgroup-seam Laplacian (> 1e-3), got " +
+							std::to_wstring(cpuRef.maxSeamLapErr)).c_str());
+
+					ReferenceMeasureHook noHaloRef;
+					noHaloRef.Init(gpu, st, true, rg32fStore, r16fEdge, rgba32fStoreRead, 0x5650544553543200ull);
+					const std::vector<float> noHaloPx = renderHooks(&noHaloRef.measureHook, ssim, &noHaloRef.blendHook, cc.crop, cc.dw, cc.dh);
+					float nhStateVals[4] = {};
+					pl_tex_transfer_params nhdl{};
+					nhdl.tex = noHaloRef.state;
+					nhdl.ptr = nhStateVals;
+					Assert::IsTrue(pl_tex_download(gpu, &nhdl), L"no-halo negative control state download failed");
+					const float nhGrainScale = nhStateVals[0];
+					const float nhMeanW = st.wBase * nhStateVals[1] * nhStateVals[0];
+					const float nhGsErr = std::fabs(nhGrainScale - modStats.grainScale);
+					const float nhMwErr = std::fabs(nhMeanW - modStats.meanW);
+					const float nhPxErr = maxRgbAbsDiff(noHaloPx, modPx);
+					Assert::IsTrue(nhGsErr > 1e-3f,
+						(L"negative control (no-halo [0,15] clamp): grainScale error must exceed 1e-3, got " +
+							std::to_wstring(nhGsErr)).c_str());
+					Assert::IsTrue(nhMwErr > 1e-3f,
+						(L"negative control (no-halo [0,15] clamp): meanW error must exceed 1e-3, got " +
+							std::to_wstring(nhMwErr)).c_str());
+					Assert::IsTrue(nhPxErr > 1e-4f,
+						(L"negative control (no-halo [0,15] clamp): blended output error must exceed 1e-4 (100x parity tol), got " +
+							std::to_wstring(nhPxErr)).c_str());
+					noHaloRef.Release();
+				}
+
+				untiledRef.Release();
+				mod.Release();
+			}
+
+			pl_tex_destroy(gpu, &srcTex);
+			pl_mpv_user_shader_destroy(&ssim);
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
+			Assert::AreEqual(0, pl_renderer_get_errors(fixture.Renderer()).num_disabled_hooks, L"A hook was disabled");
+		}
+
+		// Q#10 (GEM-077 / ADS-PERF, WARP GPU):
+		// On a one-axis upscale (upscale.on = true, upscale.oneAxis = true, cnnResidualStabilise = false,
+		// 128x96 -> 192x96 with motionStrength = 1.0 & grainMap = true), AdaptiveDownscale::Module must NOT
+		// dispatch the measure/edge/state/grain-map/motion-map compute passes (zero measure/edge/state/motion
+		// dispatches; dispatch count drops by >= 4 vs two-axis negative control), keep Failures() == 0 &
+		// Active() == true, and match the faithful branch within <= 1e-5f.
+		// Mandatory in-test negative control: exact same module, settings, Motion, and GrainField with
+		// upscale.oneAxis = false (two-axis 128x96 -> 192x144) MUST dispatch those measure/edge/state/motion
+		// passes (twoAxisDispatches >= oneAxisDispatches + 4, strictly >= +3).
+		TEST_METHOD(OneAxisUpscaleRunsNoMeasurePasses)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+
+			pl_fmt rgba32fSample = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR));
+			pl_fmt rgba32fTarget = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+			pl_fmt gridFmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, PL_FMT_CAP_SAMPLEABLE);
+			pl_fmt trustFmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 1, 32, 32, PL_FMT_CAP_SAMPLEABLE);
+			Assert::IsTrue(rgba32fSample && rgba32fTarget && gridFmt && trustFmt,
+				L"WARP must provide float32 source, target, grid, and trust formats");
+
+			static constexpr int sw = 128, sh = 96;
+			static constexpr int bw = sw / 16, bh = sh / 16;
+
+			// Neutral-grey sharp stripes + fine oscillation so Lanczos3 faithful and bilinear main scaler differ strongly.
+			std::vector<float> srcData(static_cast<size_t>(sw) * sh * 4, 0.0f);
+			for (int y = 0; y < sh; ++y)
+			{
+				for (int x = 0; x < sw; ++x)
+				{
+					const float stripe = ((x / 4) % 2) != 0 ? 0.85f : 0.15f;
+					const float wave = 0.08f * std::sin(static_cast<float>(x) * 1.3f) * std::cos(static_cast<float>(y) * 0.9f);
+					const float v = (std::max)(0.0f, (std::min)(1.0f, stripe + wave));
+					float* p = &srcData[(static_cast<size_t>(y) * sw + x) * 4];
+					p[0] = p[1] = p[2] = v;
+					p[3] = 1.0f;
+				}
+			}
+			pl_tex_params stp{};
+			stp.w = sw;
+			stp.h = sh;
+			stp.format = rgba32fSample;
+			stp.sampleable = true;
+			stp.initial_data = srcData.data();
+			pl_tex srcTex = pl_tex_create(gpu, &stp);
+			Assert::IsNotNull(srcTex, L"source texture creation failed");
+
+			auto makeUniformGrid = [&](float r, float g, float b, float a) -> pl_tex
+			{
+				std::vector<float> data(static_cast<size_t>(bw) * bh * 4, 0.0f);
+				for (size_t i = 0; i < static_cast<size_t>(bw) * bh; ++i)
+				{
+					data[i * 4 + 0] = r;
+					data[i * 4 + 1] = g;
+					data[i * 4 + 2] = b;
+					data[i * 4 + 3] = a;
+				}
+				pl_tex_params gp{};
+				gp.w = bw;
+				gp.h = bh;
+				gp.format = gridFmt;
+				gp.sampleable = true;
+				gp.initial_data = data.data();
+				pl_tex tex = pl_tex_create(gpu, &gp);
+				Assert::IsNotNull(tex, L"grid texture creation failed");
+				return tex;
+			};
+			pl_tex fieldTex = makeUniformGrid(0.0f, 0.0f, 1.0f, 0.0f);
+			pl_tex errorTex = makeUniformGrid(10.0f, 127.5f, 0.0f, 1.0f);
+			const float trustVal = 1.0f;
+			pl_tex_params trp{};
+			trp.w = 1;
+			trp.h = 1;
+			trp.format = trustFmt;
+			trp.sampleable = true;
+			trp.initial_data = &trustVal;
+			pl_tex trustTex = pl_tex_create(gpu, &trp);
+			Assert::IsNotNull(trustTex, L"frame trust texture creation failed");
+
+			AdaptiveDownscale::Settings st;
+			st.motionStrength = 1.0f;
+			st.grainMap = true;
+			st.cnnResidualStabilise = false;
+			st.ssimResidualStabilise = false;
+			st.faithfulAuto = true;
+			st.float32Picture = true;
+			st.antiring = 0.5f;
+
+			auto noCutSource = [](uint64_t, uint64_t)
+			{
+				AdaptiveDownscale::CutVerdict v;
+				v.state = AdaptiveDownscale::CutVerdict::State::Known;
+				v.cut = false;
+				return v;
+			};
+
+			auto maxRgbAbsDiff = [](const std::vector<float>& a, const std::vector<float>& b) -> float
+			{
+				Assert::AreEqual(a.size(), b.size(), L"output sizes must match");
+				float worst = 0.0f;
+				for (size_t i = 0; i < a.size(); ++i)
+				{
+					Assert::IsTrue(std::isfinite(a[i]) && std::isfinite(b[i]), L"output pixels must remain finite");
+					if (i % 4 == 3) continue;
+					const float d = std::fabs(a[i] - b[i]);
+					if (d > worst) worst = d;
+				}
+				return worst;
+			};
+
+			auto renderUpscale = [&](AdaptiveDownscale::Module* mod, uint64_t seq, int ow, int oh,
+				bool oneAxis, float wBase, HookDispatchRecord* measureRec, HookDispatchRecord* blendRec) -> std::vector<float>
+			{
+				pl_tex_params tp{};
+				tp.w = ow;
+				tp.h = oh;
+				tp.format = rgba32fTarget;
+				tp.renderable = true;
+				tp.host_readable = true;
+				pl_tex target = pl_tex_create(gpu, &tp);
+				Assert::IsNotNull(target, L"RGBA32F target creation failed");
+
+				pl_frame image = TargetLutGpuFixture::MakeRgbFrame(srcTex);
+				pl_frame out = TargetLutGpuFixture::MakeRgbFrame(target);
+				image.color.transfer = out.color.transfer = PL_COLOR_TRC_GAMMA22;
+				image.color.primaries = out.color.primaries = PL_COLOR_PRIM_BT_709;
+
+				pl_render_params params = pl_render_default_params;
+				params.dither_params = nullptr;
+				params.error_diffusion = nullptr;
+				params.sigmoid_params = nullptr;
+				params.upscaler = &pl_filter_bilinear;
+				params.disable_linear_scaling = true;
+
+				HookDispatchProxy mProxy, bProxy;
+				const pl_hook* hooks[2] = {};
+				if (mod)
+				{
+					mod->SetFrame(st, seq, 1.0f / 24.0f);
+					mod->SetSourceDownscales(false);
+					AdaptiveDownscale::Upscale up;
+					up.on = true;
+					up.wBase = wBase;
+					up.nativeWidth = static_cast<float>(sw);
+					up.nativeHeight = static_cast<float>(sh);
+					up.oneAxis = oneAxis;
+					mod->SetUpscale(up);
+
+					AdaptiveDownscale::Motion mot;
+					mot.field = fieldTex;
+					mot.frameTrust = trustTex;
+					mot.minTrustedShare = 0.25f;
+					mot.sourceCrop = { 0.0f, 0.0f, static_cast<float>(sw), static_cast<float>(sh) };
+					mod->SetMotion(mot);
+
+					AdaptiveDownscale::GrainField gf;
+					gf.error = errorTex;
+					gf.field = fieldTex;
+					gf.frameTrust = trustTex;
+					gf.minTrustedShare = 0.25f;
+					gf.sourceCrop = { 0.0f, 0.0f, static_cast<float>(sw), static_cast<float>(sh) };
+					mod->SetGrainField(gf);
+
+					if (measureRec && blendRec)
+					{
+						measureRec->Reset();
+						blendRec->Reset();
+						mProxy.Init(mod->Measure(), measureRec);
+						bProxy.Init(mod->Blend(), blendRec);
+						hooks[0] = &mProxy.hook;
+						hooks[1] = &bProxy.hook;
+					}
+					else
+					{
+						hooks[0] = mod->Measure();
+						hooks[1] = mod->Blend();
+					}
+					params.hooks = hooks;
+					params.num_hooks = 2;
+				}
+
+				const bool ok = pl_render_image(fixture.Renderer(), &image, &out, &params);
+				pl_gpu_finish(gpu);
+				Assert::IsTrue(ok, L"pl_render_image failed on WARP");
+
+				std::vector<float> px(static_cast<size_t>(ow) * oh * 4, 0.0f);
+				pl_tex_transfer_params dl{};
+				dl.tex = target;
+				dl.ptr = px.data();
+				Assert::IsTrue(pl_tex_download(gpu, &dl), L"target download failed");
+				pl_tex_destroy(gpu, &target);
+				return px;
+			};
+
+			// Reference faithful-only output (oneAxis = false, wBase = 0.0f) and unblended bilinear baseline on 128x96 -> 192x96.
+			const std::vector<float> bilinearOnlyPx = renderUpscale(nullptr, 0, 192, 96, false, 0.0f, nullptr, nullptr);
+			std::vector<float> faithfulOnlyPx;
+			{
+				AdaptiveDownscale::Module refMod;
+				refMod.SetCutSource(noCutSource);
+				faithfulOnlyPx = renderUpscale(&refMod, 1, 192, 96, false, 0.0f, nullptr, nullptr);
+				Assert::IsTrue(refMod.Active() && refMod.Failures() == 0, L"faithful-only reference must succeed");
+				refMod.Release();
+			}
+
+			// 1. Fresh AdaptiveDownscale::Module on one-axis upscale (128x96 -> 192x96, oneAxis = true, cnnResidualStabilise = false):
+			//    MUST skip all measure/edge/state/grain-map/motion-map passes (only faithful ScalerPass in Measure() + Blend()).
+			AdaptiveDownscale::Module mod;
+			mod.SetCutSource(noCutSource);
+			HookDispatchRecord oneAxisMeasure, oneAxisBlend;
+			const std::vector<float> oneAxisPx = renderUpscale(&mod, 1, 192, 96, true, 1.0f, &oneAxisMeasure, &oneAxisBlend);
+			Assert::IsTrue(mod.Active() && mod.Failures() == 0,
+				L"one-axis upscale must remain active with zero failures");
+			Assert::AreEqual(1, mod.LastUpscaleRatio(), L"one-axis upscale must operate at 1x base ratio");
+			Assert::AreEqual(1, oneAxisMeasure.count,
+				(L"one-axis upscale Measure() must dispatch ONLY the faithful scaler pass (1), got " +
+					std::to_wstring(oneAxisMeasure.count)).c_str());
+			Assert::IsFalse(oneAxisMeasure.HasPassContaining("edge map") ||
+				oneAxisMeasure.HasPassContaining("upscale: edge") ||
+				oneAxisMeasure.HasPassContaining("measure") ||
+				oneAxisMeasure.HasPassContaining("cut state") ||
+				oneAxisMeasure.HasPassContaining("grain") ||
+				oneAxisMeasure.HasPassContaining("motion-adapted"),
+				L"one-axis upscale must not dispatch any edge/measure/state/grain/motion pass");
+
+			const float faithfulDiff = maxRgbAbsDiff(oneAxisPx, faithfulOnlyPx);
+			Assert::IsTrue(faithfulDiff <= 1e-5f,
+				(L"one-axis upscale output must match faithful branch within <= 1e-5, got " +
+					std::to_wstring(faithfulDiff)).c_str());
+			const float vsBilinearDiff = maxRgbAbsDiff(oneAxisPx, bilinearOnlyPx);
+			Assert::IsTrue(vsBilinearDiff > 0.01f,
+				(L"precondition: one-axis faithful output must visibly differ from bilinear main scaler (> 0.01), got " +
+					std::to_wstring(vsBilinearDiff)).c_str());
+
+			// 2. MANDATORY IN-TEST NEGATIVE CONTROL (exact same module, settings, Motion, and GrainField with
+			//    upscale.oneAxis = false, two-axis 128x96 -> 192x144): measure/edge/state/motion passes MUST dispatch.
+			HookDispatchRecord twoAxisMeasure, twoAxisBlend;
+			renderUpscale(&mod, 2, 192, 144, false, 1.0f, &twoAxisMeasure, &twoAxisBlend);
+			Assert::IsTrue(mod.Active() && mod.Failures() == 0,
+				L"two-axis negative control must remain active with zero failures");
+			Assert::IsTrue(mod.LastMotionState() == AdaptiveDownscale::MotionState::Used,
+				L"two-axis negative control must build and use the motion map");
+
+			const int oneAxisTotal = oneAxisMeasure.count + oneAxisBlend.count;
+			const int twoAxisTotal = twoAxisMeasure.count + twoAxisBlend.count;
+			Assert::IsTrue(twoAxisMeasure.count >= oneAxisMeasure.count + 4,
+				(L"negative control (two-axis vs one-axis): Measure() dispatches must drop by >= 4 on one-axis (twoAxis=" +
+					std::to_wstring(twoAxisMeasure.count) + L", oneAxis=" + std::to_wstring(oneAxisMeasure.count) + L")").c_str());
+			Assert::IsTrue(twoAxisTotal >= oneAxisTotal + 4,
+				(L"negative control (two-axis vs one-axis): total Measure()+Blend() dispatches must drop by >= 4 (twoAxis=" +
+					std::to_wstring(twoAxisTotal) + L", oneAxis=" + std::to_wstring(oneAxisTotal) + L")").c_str());
+			Assert::IsTrue(twoAxisMeasure.HasPassContaining("edge") &&
+				twoAxisMeasure.HasPassContaining("cut state") &&
+				twoAxisMeasure.HasPassContaining("motion-adapted"),
+				L"negative control (two-axis): Measure() must dispatch edge, cut state, and motion-adapted passes");
+
+			mod.Release();
+			for (pl_tex* t : { &srcTex, &fieldTex, &errorTex, &trustTex })
+				pl_tex_destroy(gpu, t);
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
+			Assert::AreEqual(0, pl_renderer_get_errors(fixture.Renderer()).num_disabled_hooks, L"A hook was disabled");
+		}
+
+		// Q#10 (GEM-077 / ADS-PERF, WARP GPU):
+		// Verify skeleton-memo kEdgeMap serving skips the private Sobel edge fill (DispatchEdgeMapStage / edgeLocal):
+		//  (a) With skeleton memo serving kEdgeMap: EdgeMapStatus().empty() is true, Failures() == 0,
+		//      memo kEdgeMap ownerFillCalls == 1, Measure() dispatches ZERO private "VP-V edge map" passes
+		//      on p->dispatch, blended output is bit-identical (<= 1e-6f) to the non-memo path, AND serving
+		//      a synthetic inverted kEdgeMap proves the blend strictly follows the served edge map.
+		//  (b) Mandatory in-test negative control — without skeleton memo: !EdgeMapStatus().empty()
+		//      ("no skeleton memo"), private "VP-V edge map" IS dispatched (+1 Measure() dispatch vs memo path),
+		//      and sharp stripe edges vs zero-Sobel texture produce distinct blend weights (maxEdgeDiff > 0.02f).
+		TEST_METHOD(ServedEdgeSkipsThePrivateEdge)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+
+			const std::string ssimSource = LoadBundledShader("SSimDownscaler.glsl");
+			Assert::IsFalse(ssimSource.empty(), L"SSimDownscaler.glsl must load");
+			const pl_hook* ssim = pl_mpv_user_shader_parse(gpu, ssimSource.data(), ssimSource.size());
+			Assert::IsNotNull(ssim, L"SSimDownscaler.glsl must parse");
+
+			pl_fmt rgba32fSample = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR));
+			pl_fmt rgba32fTarget = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+			pl_fmt rg32fSample = pl_find_fmt(gpu, PL_FMT_FLOAT, 2, 32, 32, PL_FMT_CAP_SAMPLEABLE);
+			Assert::IsTrue(rgba32fSample && rgba32fTarget && rg32fSample,
+				L"WARP must provide float32 source, target, and RG32F edge-map formats");
+
+			// 144x96 -> 96x64 (exact 1.5x downscale, 9x6 16x16 workgroups):
+			//  - Left half (x < 72): sharp vertical stripes (220 vs 30, period 12 px -> grad ~190 >> edgeHi = 100).
+			//  - Right half (x >= 72): period-3 sine texture (128 + 20*sin(2*pi*x/3) -> max grad ~34.6 < edgeLo = 50,
+			//    so ed == 0 everywhere, while 1.5x downscale maps period-3 source to period-2 destination where SSIM
+			//    and faithful EWA Lanczos differ strongly).
+			static constexpr int sw = 144, sh = 96, dw = 96, dh = 64;
+			std::vector<float> srcData(static_cast<size_t>(sw) * sh * 4, 0.0f);
+			constexpr float kTwoPiOver3 = 2.0943951023931953f;
+			for (int y = 0; y < sh; ++y)
+			{
+				for (int x = 0; x < sw; ++x)
+				{
+					const float code = (x < sw / 2)
+						? ((((x / 12) % 2) != 0) ? 220.0f : 30.0f)
+						: (128.0f + 20.0f * std::sin(kTwoPiOver3 * static_cast<float>(x)));
+					const float norm = code / 255.0f;
+					float* p = &srcData[(static_cast<size_t>(y) * sw + x) * 4];
+					p[0] = p[1] = p[2] = norm;
+					p[3] = 1.0f;
+				}
+			}
+			pl_tex_params stp{};
+			stp.w = sw;
+			stp.h = sh;
+			stp.format = rgba32fSample;
+			stp.sampleable = true;
+			stp.initial_data = srcData.data();
+			pl_tex srcTex = pl_tex_create(gpu, &stp);
+			Assert::IsNotNull(srcTex, L"source texture creation failed");
+
+			// High grain thresholds so grainScale == 1.0 (isolating the edge term w = 1 - e cleanly).
+			// edgeLo = 50, edgeHi = 100 cleanly separates right-half period-3 texture (grad <= 34.6 -> e = 0)
+			// from left-half hard stripes (grad ~ 190 -> e = 1).
+			AdaptiveDownscale::Settings st;
+			st.wBase = 1.0f;
+			st.edgeLo = 50.0f;
+			st.edgeHi = 100.0f;
+			st.grainLo = 400.0f;
+			st.grainHi = 500.0f;
+			st.grainSmoothMs = 0.0f;
+			st.grainMap = false;
+			st.ssimResidualStabilise = false;
+			st.float32Picture = true;
+
+			auto noCutSource = [](uint64_t, uint64_t)
+			{
+				AdaptiveDownscale::CutVerdict v;
+				v.state = AdaptiveDownscale::CutVerdict::State::Known;
+				v.cut = false;
+				return v;
+			};
+
+			auto renderDownscale = [&](AdaptiveDownscale::Module* mod, const AdaptiveDownscale::Settings& s,
+				uint64_t seq, HookDispatchRecord* measureRec, HookDispatchRecord* blendRec) -> std::vector<float>
+			{
+				pl_tex_params tp{};
+				tp.w = dw;
+				tp.h = dh;
+				tp.format = rgba32fTarget;
+				tp.renderable = true;
+				tp.host_readable = true;
+				pl_tex target = pl_tex_create(gpu, &tp);
+				Assert::IsNotNull(target, L"RGBA32F target creation failed");
+
+				pl_frame image = TargetLutGpuFixture::MakeRgbFrame(srcTex);
+				pl_frame out = TargetLutGpuFixture::MakeRgbFrame(target);
+				image.color.transfer = out.color.transfer = PL_COLOR_TRC_GAMMA22;
+				image.color.primaries = out.color.primaries = PL_COLOR_PRIM_BT_709;
+
+				pl_render_params params = pl_render_default_params;
+				params.dither_params = nullptr;
+				params.error_diffusion = nullptr;
+				params.downscaler = &pl_filter_mitchell;
+				params.disable_linear_scaling = true;
+
+				HookDispatchProxy mProxy, bProxy;
+				std::vector<const pl_hook*> hooks;
+				if (mod)
+				{
+					mod->SetFrame(s, seq, 1.0f / 24.0f);
+					mod->SetSourceDownscales(true);
+					if (measureRec && blendRec)
+					{
+						measureRec->Reset();
+						blendRec->Reset();
+						mProxy.Init(mod->Measure(), measureRec);
+						bProxy.Init(mod->Blend(), blendRec);
+						hooks.push_back(&mProxy.hook);
+						hooks.push_back(ssim);
+						hooks.push_back(&bProxy.hook);
+					}
+					else
+					{
+						hooks.push_back(mod->Measure());
+						hooks.push_back(ssim);
+						hooks.push_back(mod->Blend());
+					}
+				}
+				else
+				{
+					hooks.push_back(ssim);
+				}
+				params.hooks = hooks.data();
+				params.num_hooks = static_cast<int>(hooks.size());
+
+				const bool ok = pl_render_image(fixture.Renderer(), &image, &out, &params);
+				pl_gpu_finish(gpu);
+				Assert::IsTrue(ok, L"pl_render_image failed on WARP");
+
+				std::vector<float> px(static_cast<size_t>(dw) * dh * 4, 0.0f);
+				pl_tex_transfer_params dl{};
+				dl.tex = target;
+				dl.ptr = px.data();
+				Assert::IsTrue(pl_tex_download(gpu, &dl), L"target download failed");
+				pl_tex_destroy(gpu, &target);
+				return px;
+			};
+
+			auto maxRgbAbsDiff = [](const std::vector<float>& a, const std::vector<float>& b) -> float
+			{
+				Assert::AreEqual(a.size(), b.size(), L"output sizes must match");
+				float worst = 0.0f;
+				for (size_t i = 0; i < a.size(); ++i)
+				{
+					Assert::IsTrue(std::isfinite(a[i]) && std::isfinite(b[i]), L"output pixels must remain finite");
+					if (i % 4 == 3) continue;
+					const float d = std::fabs(a[i] - b[i]);
+					if (d > worst) worst = d;
+				}
+				return worst;
+			};
+
+			// Ensure no stale thread-local frame memo before starting.
+			Vpv::Hub::ResetThisThreadFrameForTesting();
+			Assert::IsFalse(Vpv::Skeleton::CurrentFrameMemo().Valid(), L"precondition: no active frame memo initially");
+
+			const std::vector<float> ssimOnlyPx = renderDownscale(nullptr, st, 0, nullptr, nullptr);
+			std::vector<float> faithfulOnlyPx;
+			{
+				AdaptiveDownscale::Settings faithfulSt = st;
+				faithfulSt.wBase = 0.0f;
+				AdaptiveDownscale::Module refMod;
+				refMod.SetCutSource(noCutSource);
+				faithfulOnlyPx = renderDownscale(&refMod, faithfulSt, 1, nullptr, nullptr);
+				Assert::IsTrue(refMod.Active() && refMod.Failures() == 0, L"faithful-only baseline must succeed");
+				refMod.Release();
+			}
+
+			VpSkeleton::Dims dims;
+			dims.width = static_cast<uint32_t>(sw);
+			dims.height = static_cast<uint32_t>(sh);
+			const uint64_t reserve = Vpv::Regions::EdgeMapFillReserveBytes(dims);
+
+			// (a1) With skeleton memo serving real kEdgeMap (MakeEdgeMapOwnerFill):
+			//      EdgeMapStatus().empty() is true, Failures() == 0, ownerFillCalls == 1,
+			//      and private "VP-V edge map" is NOT dispatched on p->dispatch.
+			HookDispatchRecord memoMeasureRec, memoBlendRec;
+			std::vector<float> memoBlendedPx;
+			{
+				ScopedEdgeMapMemoHost memoHost(gpu, Vpv::Regions::MakeEdgeMapOwnerFill(reserve));
+				memoHost.BeginFrame(1);
+				Assert::IsTrue(Vpv::Skeleton::CurrentFrameMemo().Valid(),
+					L"precondition: skeleton memo must be active for memo-served test");
+
+				AdaptiveDownscale::Module memoMod;
+				memoMod.SetCutSource(noCutSource);
+				memoBlendedPx = renderDownscale(&memoMod, st, 1, &memoMeasureRec, &memoBlendRec);
+				Assert::IsTrue(memoMod.Active() && memoMod.Failures() == 0,
+					L"memo-served kEdgeMap frame must succeed with zero failures");
+				Assert::IsTrue(memoMod.EdgeMapStatus().empty(),
+					(L"memo-served kEdgeMap must clear EdgeMapStatus(), got: " +
+						ExtendedRangeGpuProbe::ToWide(memoMod.EdgeMapStatus())).c_str());
+				Assert::AreEqual(uint64_t(1), memoHost.memo->CountersOf(VpSkeleton::kEdgeMap).ownerFillCalls,
+					L"skeleton memo kEdgeMap owner fill must run once");
+				Assert::IsFalse(memoMeasureRec.HasPassContaining("VP-V edge map"),
+					L"memo-served kEdgeMap must skip the module's private DispatchEdgeMapStage pass");
+				memoMod.Release();
+			}
+
+			// (a2) Synthetic inverted kEdgeMap served via skeleton memo:
+			//      left half (hard stripes) served as em.r = 0 -> e = 0 -> w = 1 (SSIM);
+			//      right half (period-3 texture) served as em.r = 600 -> 0.25*600 = 150 > edgeHi (100) -> e = 1 -> w = 0 (faithful).
+			//      Proves blended output strictly obeys the served edge map, not a recomputed private map.
+			{
+				std::vector<float> synthEm(static_cast<size_t>(sw) * sh * 2, 0.0f);
+				for (int y = 0; y < sh; ++y)
+				{
+					for (int x = 0; x < sw; ++x)
+					{
+						const size_t idx = (static_cast<size_t>(y) * sw + x) * 2;
+						synthEm[idx + 0] = (x < sw / 2) ? 0.0f : 600.0f;
+						synthEm[idx + 1] = 128.0f;
+					}
+				}
+				pl_tex_params ep{};
+				ep.w = sw;
+				ep.h = sh;
+				ep.format = rg32fSample;
+				ep.sampleable = true;
+				ep.initial_data = synthEm.data();
+				pl_tex synthEmTex = pl_tex_create(gpu, &ep);
+				Assert::IsNotNull(synthEmTex, L"synthetic RG32F edge map creation failed");
+
+				VpSkeleton::OwnerFill synthFill = Vpv::Regions::MakeEdgeMapOwnerFill(reserve);
+				synthFill.fill = [synthEmTex, reserve](const VpSkeleton::OwnerFillRequest&, VpSkeleton::SkeletonMemo&,
+					VpSkeleton::OwnerFillOutput& out) {
+					out.gpu.resource = const_cast<void*>(static_cast<const void*>(synthEmTex));
+					out.gpu.width = static_cast<uint32_t>(synthEmTex->params.w);
+					out.gpu.height = static_cast<uint32_t>(synthEmTex->params.h);
+					out.gpu.format = static_cast<uint32_t>(VpSkeleton::TexFormat::RG32F);
+					out.gpu.bytes = reserve;
+					out.gpu.keepAlive = std::shared_ptr<void>(out.gpu.resource, [](void*) {});
+					return true;
+				};
+
+				std::vector<float> synthBlendedPx;
+				{
+					ScopedEdgeMapMemoHost synthHost(gpu, std::move(synthFill));
+					synthHost.BeginFrame(1);
+					AdaptiveDownscale::Module synthMod;
+					synthMod.SetCutSource(noCutSource);
+					HookDispatchRecord sMeasure, sBlend;
+					synthBlendedPx = renderDownscale(&synthMod, st, 1, &sMeasure, &sBlend);
+					Assert::IsTrue(synthMod.Active() && synthMod.Failures() == 0,
+						L"synthetic served kEdgeMap frame must succeed");
+					Assert::IsTrue(synthMod.EdgeMapStatus().empty(),
+						L"synthetic served kEdgeMap must report empty EdgeMapStatus()");
+					Assert::AreEqual(uint64_t(1), synthHost.memo->CountersOf(VpSkeleton::kEdgeMap).ownerFillCalls,
+						L"synthetic kEdgeMap fill must be served through the skeleton memo");
+					Assert::IsFalse(sMeasure.HasPassContaining("VP-V edge map"),
+						L"synthetic served kEdgeMap must not dispatch private VP-V edge map");
+					synthMod.Release();
+				}
+				pl_tex_destroy(gpu, &synthEmTex);
+
+				float leftVsSsim = 0.0f, leftVsFaithful = 0.0f;
+				float rightVsFaithful = 0.0f, rightVsSsim = 0.0f;
+				for (int y = 8; y < dh - 8; ++y)
+				{
+					for (int x = 4; x < dw / 2 - 6; ++x)
+					{
+						const size_t i = (static_cast<size_t>(y) * dw + x) * 4 + 1;
+						leftVsSsim = (std::max)(leftVsSsim, std::fabs(synthBlendedPx[i] - ssimOnlyPx[i]));
+						leftVsFaithful = (std::max)(leftVsFaithful, std::fabs(synthBlendedPx[i] - faithfulOnlyPx[i]));
+					}
+					for (int x = dw / 2 + 6; x < dw - 4; ++x)
+					{
+						const size_t i = (static_cast<size_t>(y) * dw + x) * 4 + 1;
+						rightVsFaithful = (std::max)(rightVsFaithful, std::fabs(synthBlendedPx[i] - faithfulOnlyPx[i]));
+						rightVsSsim = (std::max)(rightVsSsim, std::fabs(synthBlendedPx[i] - ssimOnlyPx[i]));
+					}
+				}
+				Assert::IsTrue(leftVsSsim <= 1e-3f && leftVsFaithful > 0.02f,
+					(L"served kEdgeMap (left em.r=0 -> SSIM): leftVsSsim=" + std::to_wstring(leftVsSsim) +
+						L", leftVsFaithful=" + std::to_wstring(leftVsFaithful)).c_str());
+				Assert::IsTrue(rightVsFaithful <= 1e-3f && rightVsSsim > 0.02f,
+					(L"served kEdgeMap (right em.r=600 -> faithful): rightVsFaithful=" + std::to_wstring(rightVsFaithful) +
+						L", rightVsSsim=" + std::to_wstring(rightVsSsim)).c_str());
+			}
+
+			// (b) MANDATORY IN-TEST NEGATIVE CONTROL — without skeleton memo (!EdgeMapStatus().empty()):
+			//     private edge map IS computed (+1 Measure() dispatch), matches memo-served output bit-for-bit,
+			//     and sharp edges vs sub-threshold texture produce distinct blend weights (maxEdgeDiff > 0.02).
+			Assert::IsFalse(Vpv::Skeleton::CurrentFrameMemo().Valid(),
+				L"negative control precondition: skeleton memo must be inactive after RAII scope exit");
+			HookDispatchRecord noMemoMeasureRec, noMemoBlendRec;
+			std::vector<float> noMemoBlendedPx;
+			{
+				AdaptiveDownscale::Module noMemoMod;
+				noMemoMod.SetCutSource(noCutSource);
+				noMemoBlendedPx = renderDownscale(&noMemoMod, st, 1, &noMemoMeasureRec, &noMemoBlendRec);
+				Assert::IsTrue(noMemoMod.Active() && noMemoMod.Failures() == 0,
+					L"no-memo negative control frame must succeed with zero failures");
+				Assert::IsFalse(noMemoMod.EdgeMapStatus().empty(),
+					L"negative control (no skeleton memo): EdgeMapStatus() must be non-empty");
+				Assert::IsTrue(noMemoMod.EdgeMapStatus().find("no skeleton memo") != std::string::npos,
+					(L"negative control (no skeleton memo): unexpected EdgeMapStatus: " +
+						ExtendedRangeGpuProbe::ToWide(noMemoMod.EdgeMapStatus())).c_str());
+				Assert::IsTrue(noMemoMeasureRec.HasPassContaining("VP-V edge map"),
+					L"negative control (no skeleton memo): private DispatchEdgeMapStage pass must dispatch");
+				Assert::AreEqual(memoMeasureRec.count + 1, noMemoMeasureRec.count,
+					(L"no-memo Measure() must dispatch exactly 1 more pass (private edge map) than memo-served (memo=" +
+						std::to_wstring(memoMeasureRec.count) + L", noMemo=" + std::to_wstring(noMemoMeasureRec.count) + L")").c_str());
+				noMemoMod.Release();
+			}
+
+			// Real memo-served kEdgeMap output vs private no-memo edge-map output must be bit-identical (<= 1e-6f).
+			const float parityDiff = maxRgbAbsDiff(memoBlendedPx, noMemoBlendedPx);
+			Assert::IsTrue(parityDiff <= 1e-6f,
+				(L"memo-served kEdgeMap and private no-memo blended output must be bit-identical (<= 1e-6), got " +
+					std::to_wstring(parityDiff)).c_str());
+
+			// Sharp stripe edges vs sub-threshold period-3 texture must produce distinct blend weights on the non-memo path.
+			float maxEdgeDiff = 0.0f, maxEdgeVsFaithful = 0.0f;
+			float maxTexVsSsim = 0.0f, maxTexVsFaithful = 0.0f;
+			for (int y = 8; y < dh - 8; ++y)
+			{
+				for (int x = 4; x < dw / 2 - 4; ++x)
+				{
+					const int sx = static_cast<int>((x + 0.5) * 1.5);
+					if (sx % 12 == 0 || sx % 12 == 11)
+					{
+						const size_t i = (static_cast<size_t>(y) * dw + x) * 4 + 1;
+						maxEdgeDiff = (std::max)(maxEdgeDiff, std::fabs(noMemoBlendedPx[i] - ssimOnlyPx[i]));
+						maxEdgeVsFaithful = (std::max)(maxEdgeVsFaithful, std::fabs(noMemoBlendedPx[i] - faithfulOnlyPx[i]));
+					}
+				}
+				for (int x = dw / 2 + 6; x < dw - 4; ++x)
+				{
+					const size_t i = (static_cast<size_t>(y) * dw + x) * 4 + 1;
+					maxTexVsSsim = (std::max)(maxTexVsSsim, std::fabs(noMemoBlendedPx[i] - ssimOnlyPx[i]));
+					maxTexVsFaithful = (std::max)(maxTexVsFaithful, std::fabs(noMemoBlendedPx[i] - faithfulOnlyPx[i]));
+				}
+			}
+			Assert::IsTrue(maxEdgeDiff > 0.02f && maxEdgeVsFaithful <= 0.02f,
+				(L"negative control (no memo): sharp edges must select faithful over SSIM (maxEdgeDiff=" +
+					std::to_wstring(maxEdgeDiff) + L", maxEdgeVsFaithful=" + std::to_wstring(maxEdgeVsFaithful) + L")").c_str());
+			Assert::IsTrue(maxTexVsSsim <= 0.005f && maxTexVsFaithful > 0.02f,
+				(L"negative control (no memo): sub-threshold texture must select SSIM over faithful (maxTexVsSsim=" +
+					std::to_wstring(maxTexVsSsim) + L", maxTexVsFaithful=" + std::to_wstring(maxTexVsFaithful) + L")").c_str());
+
+			pl_tex_destroy(gpu, &srcTex);
 			pl_mpv_user_shader_destroy(&ssim);
 			fixture.CaptureLog(nullptr);
 			AssertCleanLibplaceboLog(log);
