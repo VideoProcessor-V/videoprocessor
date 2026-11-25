@@ -140,25 +140,25 @@ $$\left|\Delta I_{\text{store}}\right| \le \Lambda_y \cdot \frac{1}{2}\operatorn
 
 Crucially, because Catmull-Rom overshoots into **$[1.0, 1.125]$** on bright edges, the floating-point binary exponent increments by $+1$ relative to $[0.5, 1.0)$, **doubling** $\operatorname{ulp}_{\text{fmt}}$!
 
-Using exact IEEE-754 significand widths ($p_{16} = 11$ bits, $p_{32} = 24$ bits) and full-range display code LSBs:
+Using exact IEEE-754 significand widths ($p_{16} = 11$ bits, $p_{32} = 24$ bits) — where a normal binade $[2^e, 2^{e+1})$ has $\operatorname{ulp}_p = 2^{e-(p-1)}$ and $\frac{1}{2}\operatorname{ulp}_p = 2^{e-p}$ — and full-range display code LSBs:
 - **10-bit full range:** $\Delta_{10,\text{full}} = \frac{1}{2^{10}-1} = \frac{1}{1023} \approx 9.775 \times 10^{-4}$ *(limited range $64\dots 940$: $\Delta_{10,\text{lim}} = \frac{1}{876} \approx 1.142 \times 10^{-3}$)*
 - **12-bit full range:** $\Delta_{12,\text{full}} = \frac{1}{2^{12}-1} = \frac{1}{4095} \approx 2.442 \times 10^{-4}$ *(limited range $256\dots 3760$: $\Delta_{12,\text{lim}} = \frac{1}{3504} \approx 2.854 \times 10^{-4}$)*
 
-Combining intermediate storage rounding ($\Lambda_y \cdot \frac{1}{2}\operatorname{ulp}_{\text{fmt}}$) with the worst-case 1-pass vs. 2-pass fp32 summation/normalization reassociation bound $|\delta_{\text{fp32}}| \le (n_x + n_y + 2)\Lambda_1^2 u_{32} \le 20 \times 1.5625 \times 2^{-24} \approx 1.86 \times 10^{-6}$ (and RMS rounding noise $\sigma_{\text{out}} = \|w_y\|_2 \cdot \operatorname{ulp}_{\text{fmt}}/\sqrt{12}$ with $\|w_y\|_2 \in [0.8004, 1.0]$):
+Combining intermediate storage rounding ($\Lambda_y \cdot \frac{1}{2}\operatorname{ulp}_{\text{fmt}}$) with the worst-case 1-pass vs. 2-pass fp32 summation/normalization reassociation bound $|\delta_{\text{fp32}}| \le (n_x + n_y + 2)\Lambda_1^2 u_{32} \le 20 \times 1.5625 \times 2^{-24} \approx 1.86 \times 10^{-6}$ (and intermediate-storage RMS rounding noise $\sigma_{\text{store}} = \|w_y\|_2 \cdot \operatorname{ulp}_{\text{fmt}}/\sqrt{12}$ with $\|w_y\|_2 \in [0.8004, 1.0]$):
 
-| Intermediate Format | Signal Band of $T$ | $\frac{1}{2}\operatorname{ulp}_{\text{fmt}}$ | Worst-Case $|\Delta I_{\text{out}}|$ (vs. 1-pass fp32) | Error in **10-bit full LSB** ($\Delta_{10}$) | Error in **12-bit full LSB** ($\Delta_{12}$) | RMS Error ($\Delta_{10}$ / $\Delta_{12}$) |
+| Intermediate Format | Signal Band of $T$ | $\frac{1}{2}\operatorname{ulp}_{\text{fmt}}$ | Worst-Case $|\Delta I_{\text{out}}|$ (vs. 1-pass fp32) | Error in **10-bit full LSB** ($\Delta_{10}$) | Error in **12-bit full LSB** ($\Delta_{12}$) | Storage RMS Error ($\Delta_{10}$ / $\Delta_{12}$) |
 |---|---|---:|---:|---:|---:|---:|
-| **`rgba32f` (fp32)** | $[0.5, 1.0)$ | $2^{-24} \approx 5.96 \times 10^{-8}$ | $\le 1.94 \times 10^{-6}$ | **$0.0020\text{ LSB}$** | **$0.0079\text{ LSB}$** | $< 0.0001$ / $< 0.0003\text{ LSB}$ |
-| **`rgba32f` (fp32)** | $[1.0, 1.125]$ (overshoot) | $2^{-23} \approx 1.19 \times 10^{-7}$ | $\le 2.01 \times 10^{-6}$ | **$0.0021\text{ LSB}$** | **$0.0082\text{ LSB}$** | $< 0.0001$ / $< 0.0005\text{ LSB}$ |
-| **`rgba16f` (fp16)** | $[0.5, 1.0)$ | $2^{-11} \approx 4.88 \times 10^{-4}$ | $\le 6.12 \times 10^{-4}$ | **$0.63\text{ LSB}$** | **$2.51\text{ LSB}$** | $0.23\text{–}0.29$ / $0.92\text{–}1.15\text{ LSB}$ |
-| **`rgba16f` (fp16)** | $[1.0, 1.125]$ (overshoot) | $2^{-10} \approx 9.77 \times 10^{-4}$ | $\le 1.22 \times 10^{-3}$ | **$1.25\text{ LSB}$** | **$5.01\text{ LSB}$** | $0.46\text{–}0.58$ / $1.85\text{–}2.31\text{ LSB}$ |
+| **`rgba32f` (fp32)** | $[0.5, 1.0)$ | $2^{-25} \approx 2.98 \times 10^{-8}$ | $\le 1.90 \times 10^{-6}$ | **$0.0019\text{ LSB}$** | **$0.0078\text{ LSB}$** | $< 0.0001$ / $< 0.0001\text{ LSB}$ |
+| **`rgba32f` (fp32)** | $[1.0, 1.125]$ (overshoot) | $2^{-24} \approx 5.96 \times 10^{-8}$ | $\le 1.94 \times 10^{-6}$ | **$0.0020\text{ LSB}$** | **$0.0079\text{ LSB}$** | $< 0.0001$ / $< 0.0002\text{ LSB}$ |
+| **`rgba16f` (fp16)** | $[0.5, 1.0)$ | $2^{-12} \approx 2.44 \times 10^{-4}$ | $\le 3.07 \times 10^{-4}$ | **$0.31\text{ LSB}$** | **$1.26\text{ LSB}$** | $0.115\text{–}0.144$ / $0.46\text{–}0.58\text{ LSB}$ |
+| **`rgba16f` (fp16)** | $[1.0, 1.125]$ (overshoot) | $2^{-11} \approx 4.88 \times 10^{-4}$ | $\le 6.12 \times 10^{-4}$ | **$0.63\text{ LSB}$** | **$2.51\text{ LSB}$** | $0.23\text{–}0.29$ / $0.92\text{–}1.15\text{ LSB}$ |
 | `rgba16` (UNORM, invalid) | $[-0.125, 1.125]$ | clamps at $0, 1$ | $\le 1.25 \times 10^{-1}$ | **$128\text{ LSB}$** | **$512\text{ LSB}$** | — (breaks linearity) |
 
-*(For limited-range 10-bit/12-bit, divide the full-range LSB counts by $1023/876 \approx 1.168$: `rgba16f` still reaches $1.07\text{ LSB}_{10,\text{lim}}$ and $4.28\text{ LSB}_{12,\text{lim}}$ on overshoot edges, while `rgba32f` stays below $0.007\text{ LSB}_{12,\text{lim}}$.)*
+*(For limited-range 10-bit/12-bit, divide the full-range LSB counts by $1023/876 \approx 1.168$ (10-bit) and $4095/3504 \approx 1.169$ (12-bit): `rgba16f` still reaches $0.54\text{ LSB}_{10,\text{lim}}$ and $2.15\text{ LSB}_{12,\text{lim}}$ on overshoot edges — and $1.08\text{ LSB}_{12,\text{lim}}$ even on $[0.5, 1.0)$ — while `rgba32f` stays below $0.007\text{ LSB}_{12,\text{lim}}$.)*
 
 **Precision Conclusion & libplacebo `//!SAVE` Note:**
-1. **`rgba32f` achieves strict sub-LSB parity** ($\le 0.002\text{ LSB}_{10}$, $\le 0.008\text{ LSB}_{12}$, over two orders of magnitude below 1 LSB).
-2. **`rgba16f` does NOT guarantee sub-LSB parity** at either 10-bit (exceeds $0.5\text{ LSB}_{10}$ on $[0.5, 1.0)$ and exceeds $1\text{ LSB}_{10}$ on bright-edge ringing) or 12-bit (up to $2.5\text{–}5.0\text{ LSB}_{12}$).
+1. **`rgba32f` achieves strict sub-LSB parity** ($\le 0.0020\text{ LSB}_{10}$, $\le 0.0079\text{ LSB}_{12}$, over two orders of magnitude below 1 LSB).
+2. **`rgba16f` does NOT guarantee sub-LSB parity** at either 10-bit (exceeds $0.5\text{ LSB}_{10}$ on bright-edge ringing up to $0.63\text{ LSB}_{10}$, $0.54\text{ LSB}_{10,\text{lim}}$) or 12-bit (exceeds $1\text{ LSB}_{12}$ across both $[0.5, 1.0)$ and $[1.0, 1.125]$ at $1.26\text{–}2.51\text{ LSB}_{12}$, $1.08\text{–}2.15\text{ LSB}_{12,\text{lim}}$).
 3. **Important libplacebo constraint:** In mpv/libplacebo user shaders, `//!SAVE` intermediate passes inherit the renderer's FBO format (`//!FORMAT` applies only to `//!TEXTURE`/`//!STORAGE` declarations, not `//!SAVE` passes). VP-V defaults to `fbo_float32` (`rgba32f`, `LibplaceboVideoRenderer.cpp:5485`), whereas stock mpv/libplacebo configurations often default to `rgba16f`. An upstream PR should therefore **document the `rgba32f` FBO requirement explicitly** and never silently claim bit/sub-LSB parity when running on an `rgba16f` FBO (Rule 4).
 
 ### 3.4 Where Non-Linear Horizontal/Vertical Warp Curvature Breaks Strict Separability
@@ -198,7 +198,7 @@ Cover all shader branches (`shaders/NLSPlus.glsl:38-69, 151-206`):
 ### 4.3 Mandatory Negative Controls
 
 To prove the verification harness catches real defects rather than passing vacuously:
-1. **FP16 intermediate control:** Force the `//!SAVE` intermediate FBO to `rgba16f` on the step + ramp patterns and verify max absolute error rises into the predicted $[4.8 \times 10^{-4},\, 1.22 \times 10^{-3}]$ band ($0.6\text{–}1.25\text{ LSB}_{10}$, $2.5\text{–}5.0\text{ LSB}_{12}$), failing the strict `rgba32f` gate.
+1. **FP16 intermediate control:** Force the `//!SAVE` intermediate FBO to `rgba16f` on the step + ramp patterns and verify max absolute error rises into the predicted $[2.44 \times 10^{-4},\, 6.12 \times 10^{-4}]$ band (up to $0.31\text{ LSB}_{10}$ / $1.26\text{ LSB}_{12}$ on $[0.5, 1.0)$ ramps and exceeding $0.5\text{ LSB}_{10}$ on bright-edge ringing up to $0.63\text{ LSB}_{10}$ / $2.51\text{ LSB}_{12}$, failing sub-LSB 12-bit parity across both $[0.5, 1.0)$ and $[1.0, 1.125]$ and failing the strict `rgba32f` gate).
 2. **Clamped intermediate control:** Clamp Pass 1 output to $[0, 1]$ on the step pattern and verify error spikes to $\approx 0.125$ ($\approx 128\text{ LSB}_{10}$), failing the gate.
 3. **Bilinear baseline control:** Run `sampling = 0.0` on the white-noise grain field and verify grain RMS drops to $\approx 0.5\times$ at half-pixel offsets, confirming the harness distinguishes Catmull-Rom ($\ge 0.8\times$) from bilinear.
 
@@ -208,9 +208,9 @@ To prove the verification harness catches real defects rather than passing vacuo
   1. **WARP software rasterizer (`rgba32f` FBO)** — deterministic CI regression gate (mirroring VP's `TargetLutGpuFixture` / `BundledNlsHooksLogCleanly` pattern in `WholeHookChainHookTests.cpp:667-690`), asserting zero libplacebo warnings/errors.
   2. **Hardware GPU (`rgba32f` FBO, 3840×2160)** — parity check plus GPU timestamp benchmark verifying a net frame-time reduction after accounting for the added full-resolution `rgba32f` intermediate write + read bandwidth (checking both narrow $4 \times 4$ and wide $6 \times 6\text{–}9 \times 9$ regimes).
 - **Derived parity pass criteria (on `rgba32f`, from §3.3):**
-  - Max absolute error across all pixels and RGB channels: $|\Delta|_\infty \le 2.01 \times 10^{-6}$ ($\le 0.0021\text{ LSB}_{10}$, $\le 0.0082\text{ LSB}_{12}$).
-  - Channel RMSE: $\le 5.0 \times 10^{-7}$.
-  - Quantized 10-bit and 12-bit code parity: **0 code differences** on all synthetic pixels outside a $2.01 \times 10^{-6}$ neighborhood of a half-integer quantization boundary, and at most $1$ code on boundary ties.
+  - Max absolute error across all pixels and RGB channels: $|\Delta|_\infty \le 1.94 \times 10^{-6}$ ($\le 0.0020\text{ LSB}_{10}$, $\le 0.0079\text{ LSB}_{12}$).
+  - Channel RMSE: $\le 4.2 \times 10^{-7}$ (quadrature of fp32 reassociation RMS $\sqrt{20}\,\Lambda_1^2 u_{32} \approx 4.17 \times 10^{-7}$ and `rgba32f` storage RMS $\le 3.44 \times 10^{-8}$).
+  - Quantized 10-bit and 12-bit code parity: **0 code differences** on all synthetic pixels outside a $1.94 \times 10^{-6}$ neighborhood of a half-integer quantization boundary, and at most $1$ code on boundary ties.
 
 ---
 
