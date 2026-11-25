@@ -7,6 +7,7 @@
 // LibplaceboVideoRenderer.cpp right after the Impl struct. It is not a stand-alone header and no other translation unit may include it.
 // Render thread (renderMutex held; Initialize and ApplyProfileSettingsLiveLocked), as before.
 #pragma once
+#include <VP-V/modules/scaling/chroma_upscale/CflHookOffsets.h>
 
 void LibplaceboVideoRenderer::Impl::UpdatePipelineSlots(const RendererSettings& settings)
 {
@@ -351,11 +352,13 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
             appearance.now = static_cast<double>(GetTickCount64()) / 1000.0;
             appearance.screenWhiteNits = activeSettings.appearanceScreenWhiteNits;
             appearance.screenWhiteMeasured = activeSettings.appearanceScreenWhiteMeasured;
-            appearance.trimApplied = colourFrame.dvTrims;
+            appearance.trimApplied = dvStage.TrimsWillRun();
             appearance.trimTargetNits = dvStage.TrimsTargetNits();
             appearance.trimSaturationGain = dvStage.TrimsSaturationGain();   // FIX1 SHOULD 2: the trim x Hunt cap
             appearance.toeKnee = dynamicDrive.PublishedParams().boostKnee;   // FIX1 SHOULD 3: gamma_boost_knee, not a fixed 0
-            appearance.signalPq = target.color.transfer == PL_COLOR_TRC_PQ;
+            const ExtendedRange::OutputTransfer appTrc = ExtendedRange::DescribeOutputTransfer(target.color);
+            appearance.transferSupported = appTrc.supported; appearance.signalPq = appTrc.pq;
+            appearance.transferKind = appTrc.kind; appearance.transferParam = appTrc.param;
             appearance.outputGamma = LedDisplayGamma(target.color.transfer);
             appearance.honourL11 = activeSettings.appearanceHonourL11;
             appearance.calibrationLutBefore = target.lut != nullptr;   // FIX1 MUST 2 (null when VP's stage took the LUT)
@@ -452,13 +455,12 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
         "a placeholder slot has a component but no output-segment stage yet (not run)") :
         FallbackCatalog::Released("S2 placeholder stage"));
     dynamicDrive.AfterCollect(led, colourCounts.ledCompensation, colourCounts.ledCompensationLoaded);
-    // A cadence repeat shows the previous picture again: the sigma-delta
-    // skips its motion search (zero motion; owner 2026-10-13 efficiency).
+    // A cadence repeat shows the previous picture again: the sigma-delta skips its motion search (zero motion; owner 2026-10-13 efficiency).
     for (const pl_hook* hook : frameHooks)
         CustomHookChain::SetHookParameter(hook, "static_refresh", cadenceRepeat ? 1.0 : 0.0);
-    // Stage 8-2 / 8b (scaling.output): the adaptive blend's measure and blend hooks, its
-    // bitrate weighting, residual motion and grain field (VP-V/modules/scaling/output/
-    // AdaptiveDownscaleStage.h; WP-13).
+    ChromaUpscale::ApplyCflHookOffsets(renderImage, frameHooks, requestedShaderSelection, pipelineSlots.OriginalPathway());
+    // Stage 8-2 / 8b (scaling.output): the adaptive blend's measure and blend hooks, its bitrate weighting,
+    // residual motion and grain field (VP-V/modules/scaling/output/AdaptiveDownscaleStage.h; WP-13).
     {
         AdaptiveDownscaleStage::Frame adaptiveFrame;
         adaptiveFrame.adaptiveDownscale = activeSettings.adaptiveDownscale;
@@ -752,6 +754,38 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
     if (dvStage.SkipPlaneDeband(activeSettings.dvTunnelFixes, renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION,
         frameParams.deband_params != nullptr))
         frameParams.deband_params = nullptr;
+    {   // CF-DV P5 (colour.dm_pre): post-decode I-only DV debander (shaders/vp_dm_pre_deband.glsl at MAIN; zero hooks when off).
+        DmPreDeband::Inputs dmIn;
+        dmIn.dolbyVisionPicture = renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION;
+        dmIn.slotRuns = pipelineSlots.Runs(PipelineSlots::Id::ColourDmPre);
+        dmIn.originalPathway = pipelineSlots.OriginalPathway();
+        dmIn.mode = activeSettings.dvPostDecodeDeband;
+        if (dmIn.dolbyVisionPicture && dmIn.slotRuns && !dmIn.originalPathway && DmPreDeband::ParseMode(dmIn.mode) == DmPreDeband::Mode::Auto)
+        {
+            const SourceResolutionMonitor::Snapshot dmSnap = vpv.sourceAnalysis.sourceMonitor.Read();
+            dmIn.tapAvailable = renderImage.num_planes > 0 && renderImage.planes[0].texture != nullptr && renderImage.repr.bits.color_depth >= 12;
+            dmIn.qualityAvailable = dmSnap.reading && !dmSnap.codingUnavailable;
+            dmIn.effectiveBits = dmSnap.reading ? dmSnap.effectiveBits : 12.0;
+            dmIn.bitrateQuality = dmSnap.reading ? vpv.sourceAnalysis.sourceMonitor.SharedQuality(dmSnap, SourceIdentity::QualityConsumer::Deband) : 1.0;   // U12
+            dmIn.snapLevels = activeSettings.sourceCodingFixes;
+            dmIn.grainGuard = activeSettings.debandVpGrainGuard;
+        }
+        const DmPreDeband::Decision& dmDec = dvStage.PrepareDmPreDeband(dmIn, hookTemplates);
+        size_t dmCollected = 0;
+        if (dmDec.active)
+        {
+            const size_t start = frameHooks.size();
+            dvStage.DmPreDebandHook().Collect(false, frameHooks);
+            dmCollected = frameHooks.size() - start;
+            if (dmCollected > 0) {
+                TagSlotHooks(start, PipelineSlots::Id::ColourDmPre);
+                const auto dmParams = DmPreDeband::ShaderParameters(dmDec, height);
+                for (size_t i = start; i < frameHooks.size(); ++i)
+                    for (const auto& kv : dmParams) CustomHookChain::SetHookParameter(frameHooks[i], kv.first, kv.second);
+            }
+        }
+        dvStage.FinishDmPreDeband(dmCollected);
+    }
     // Stage 8-1: a downscaling frame in gamma light when chosen (the de-
     // judder extras reuse these parameters).
     // 8b: both branches in one light domain (AdaptiveDownscaleStage::ApplyLight; WP-13).

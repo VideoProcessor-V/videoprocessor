@@ -88,6 +88,13 @@
    "note": "Motion-adapted blend and Stage 8b one-axis hook tests; WARP unless VP_TEST_GPU=hardware (TargetLutGpuFixture). The CPU class in the same file is AdaptiveScalingOneAxisMotionTests."
   },
   {
+   "kind": "class",
+   "value": "AppearanceShaderGpuTests",
+   "category": "GpuWarp",
+   "file": "src/VP-V/modules/colour/appearance/tests/AppearanceShaderGpuTests.cpp",
+   "note": "CAM16 appearance PRE_OUTPUT shader tests; WARP unless VP_TEST_GPU=hardware (TargetLutGpuFixture)."
+  },
+  {
    "kind": "method",
    "value": "TemporalDetailGpuTests::TemporalDetailGpuTiming",
    "category": "GpuHardware",

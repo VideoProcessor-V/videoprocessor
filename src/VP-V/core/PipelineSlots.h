@@ -103,7 +103,7 @@ namespace PipelineSlots
 		{ Id::ControlNetRuntime, "control.net_runtime", Side::Control, 910, HookPoint::Host, Status::Placeholder, Origin::Vp },
 		{ Id::ControlDiagnostics, "control.diagnostics", Side::Control, 920, HookPoint::Host, Status::Partial, Origin::Mixed },
 		{ Id::ControlConfig, "control.config", Side::Control, 930, HookPoint::Host, Status::Partial, Origin::Mixed },
-		{ Id::ColourDmPre, "colour.dm_pre", Side::Input, 85, HookPoint::Host, Status::Placeholder, Origin::Vp },
+		{ Id::ColourDmPre, "colour.dm_pre", Side::Input, 85, HookPoint::Host, Status::Built, Origin::Vp },
 		{ Id::ColourDmCurve, "colour.dm_curve", Side::Processing, 172, HookPoint::Libplacebo, Status::Built, Origin::Vp },
 		{ Id::ColourDmTrims, "colour.dm_trims", Side::Output, 205, HookPoint::PreOutput, Status::Built, Origin::Vp },
 		{ Id::ScalingShared, "scaling.shared", Side::Input, 125, HookPoint::Host, Status::Placeholder, Origin::Vp },

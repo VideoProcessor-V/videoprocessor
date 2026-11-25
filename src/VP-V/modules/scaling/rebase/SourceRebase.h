@@ -98,7 +98,7 @@ namespace SourceRebase
 		int kernel = -1;
 		bool kernelUsed = false;
 		bool InversePlane(pl_gpu gpu, pl_dispatch dispatch, pl_tex in, int w, int h, bool acrossInverse, bool downInverse,
-			pl_tex out, int slot);
+			pl_tex out, int slot, std::string& note);
 		pl_shader_obj luts[kSlots][PL_MAX_PLANES] = {};
 		std::string error;
 		std::string formatNote;

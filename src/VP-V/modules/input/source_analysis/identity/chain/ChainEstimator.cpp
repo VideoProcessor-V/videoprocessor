@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <deque>
 #include <fstream>
+#include <limits>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -120,7 +121,7 @@ namespace SourceIdentity
 			std::atomic<uint64_t> streamKeyA{ 0 };
 			std::atomic<bool> haveKeyA{ false };
 			std::atomic<uint64_t> cEvaluations{ 0 }, cDelivered{ 0 }, cDropped{ 0 }, cRepeats{ 0 }, cNoClock{ 0 }, cUnusable{ 0 },
-				cStale{ 0 }, cDiscontinuities{ 0 }, cWindowClears{ 0 }, cFadeShots{ 0 };
+				cStale{ 0 }, cDiscontinuities{ 0 }, cWindowClears{ 0 }, cFadeShots{ 0 }, cFloorMeasured{ 0 };
 			std::atomic<uint64_t> cLatchEntries{ 0 }, cLatchMoves{ 0 }, cLatchReleases{ 0 }, cLatchRelBound{ 0 }, cLatchRelNative{ 0 }, cLatchRelMenu{ 0 },
 				cLatchRelAbr{ 0 }, cLatchRelReset{ 0 }, cLatchHeldBack{ 0 }, cLatchNonConv{ 0 }, cLatchConfirms{ 0 }, cLatchRelHard{ 0 },
 				cLatchDeferred{ 0 }, cLatchDeferCancelled{ 0 }, cLatchRelAtCut{ 0 }, cLatchRelCeiling{ 0 };
@@ -681,8 +682,8 @@ namespace SourceIdentity
 					return;
 				}
 				std::shared_ptr<LineSnapshot> snap = std::make_shared<LineSnapshot>();
-				const double scale = std::pow(2.0, static_cast<double>(v.msbShift) - 6.0);   // codes of the tap's plane -> 10-bit codes
-				if (!CaptureLines<uint16_t>(plan, v.luma, static_cast<std::ptrdiff_t>(v.strideSamples), scale, *snap))
+				const double scale = std::pow(2.0, static_cast<double>(v.msbShift));   // tap plane -> 16-bit Q6 axis (10-bit << kSnapshotFracBits)
+				if (!CaptureLines<uint16_t>(plan, v.luma, static_cast<std::ptrdiff_t>(v.strideSamples), scale, *snap, kSnapshotFracBits))
 				{
 					cUnusable.fetch_add(1, std::memory_order_relaxed);
 					nextDueMs.store(now + interval, std::memory_order_release);
@@ -1238,7 +1239,7 @@ namespace SourceIdentity
 			// evaluation x axis x conventional size of the published set (scaling.geometry SourceGeometrySet.h; parked sizes too). Reads the
 			// decision state through const accessors only; the exact statistic of every size comes from a verifier of its own.
 			void DumpV4(const AxisRun run[2], const ReadingOutput out[2], uint32_t flags, bool windowCleared, uint64_t seq, int64_t timeUs,
-				int rasterW, int rasterH, int step, double floorCodes, bool classicalOk, const double classical[2], double costMs)
+				int rasterW, int rasterH, int step, double floorCodes, double floorMeasured, bool classicalOk, const double classical[2], double costMs)
 			{
 				std::ofstream& f = diagEvals.Out();
 				const int coded = diagCodedBits.load(std::memory_order_acquire), outBits = diagOutputBits.load(std::memory_order_acquire);
@@ -1267,7 +1268,7 @@ namespace SourceIdentity
 					<< Diag::Num(static_cast<double>(latch.NewestCreditUs(0)) / 1e6) << ','
 					<< Diag::Num(static_cast<double>(latch.NewestCreditUs(1)) / 1e6) << ',' << Diag::Num(latch.AccumulatedCredit(0)) << ','
 					<< Diag::Num(latch.AccumulatedCredit(1)) << ',' << Diag::Num(latch.Bar(timeUs, thr.c1)) << ',' << Diag::Num(thr.c1) << ','
-					<< Diag::Num(costMs) << '\n';
+					<< Diag::Num(costMs) << ',' << Diag::Num(floorMeasured) << '\n';
 				diagEvals.EndRow();
 				if (!diagSizes.Ready(diagTag, "b_sizes", Diag::SizesHeaderV4()))
 					return;
@@ -1598,8 +1599,15 @@ namespace SourceIdentity
 					obs.rasterH = rasterH;
 					evidence.Submit(a, obs, run[a].up);
 				}
+				// GEM-083 (shadow only): compute MeasuredFloorCodes only when an observer or Dump v4 b_evals is active;
+				// floorCodes passed to PowerProbe and ChainEvidence above stays 100% unchanged.
+				double floorMeasured = std::numeric_limits<double>::quiet_NaN();
+				bool floorMeasuredComputed = false;
 				if (observer)
 				{
+					floorMeasured = MeasuredFloorCodes(s, static_cast<double>(step));
+					floorMeasuredComputed = true;
+					cFloorMeasured.fetch_add(1, std::memory_order_relaxed);
 					EvaluationDetail d;
 					d.seq = s.seq;
 					d.timeUs = s.timeUs;
@@ -1607,6 +1615,8 @@ namespace SourceIdentity
 					d.shotId = shotId;   // the estimator's own detected shot (obs.shotId above)
 					d.stepCodes = step;
 					d.cachedMB = static_cast<double>(verifier->CachedBytes() + probeVerifier->CachedBytes()) / 1048576.0;
+					d.floorCodes = floorCodes;
+					d.floorMeasured = floorMeasured;
 					for (int a = 0; a < 2; ++a)
 					{
 						AxisDetail& ad = d.axis[a];
@@ -1767,7 +1777,15 @@ namespace SourceIdentity
 				// Dump v4 (VP_SID_DUMP_V4_DIR): LAST, after the cost, the schedule, the published record and the status (audit M2: its I/O and
 				// verifier delay nothing the decision or its timing reads); reads only (its verifier and its files are its own).
 				if (diagEvals.Ready(diagTag, "b_evals", Diag::EvalsHeaderV4()))
-					DumpV4(run, out, flags, windowCleared, s.seq, s.timeUs, rasterW, rasterH, step, floorCodes, classicalOk, classical, cost);
+				{
+					if (!floorMeasuredComputed)
+					{
+						floorMeasured = MeasuredFloorCodes(s, static_cast<double>(step));
+						floorMeasuredComputed = true;
+						cFloorMeasured.fetch_add(1, std::memory_order_relaxed);
+					}
+					DumpV4(run, out, flags, windowCleared, s.seq, s.timeUs, rasterW, rasterH, step, floorCodes, floorMeasured, classicalOk, classical, cost);
+				}
 			}
 
 			// ---- status ---------------------------------------------------------------------------------------------------
@@ -1861,6 +1879,7 @@ namespace SourceIdentity
 				c.latch.releasesAtCut = cLatchRelAtCut.load(std::memory_order_relaxed);
 				c.latch.releasesCeiling = cLatchRelCeiling.load(std::memory_order_relaxed);
 				c.fadeShots = cFadeShots.load(std::memory_order_relaxed);
+				c.floorMeasured = cFloorMeasured.load(std::memory_order_relaxed);
 				return c;
 			}
 

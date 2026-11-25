@@ -143,6 +143,32 @@ namespace ScalerPass
 			static const bool exact = ExactTapsTaken(cfg);
 			return exact;
 		}
+
+		// Sub-LSB floating-point identity guard for bypassing an unscaled separable axis:
+		// 1e-5f < 1/65536 (16-bit LSB ~= 1.53e-5) and << 1/256 (libplacebo's 256-entry LUT phase step ~= 3.91e-3),
+		// so any coordinate within this tolerance of an integer texel grid has sub-LSB shift even on a full-scale
+		// step edge, while any real subpixel siting phase or non-unit ratio is rejected.
+		constexpr float kAxisIdentityEps = 1e-5f;
+
+		// True when [a0, a1] is an exact integer-aligned 1:1 span completely inside [0, srcDim] (zero fractional
+		// offset, exact unit scale, and no out-of-bounds clamping), returning its integer start index in `originOut`.
+		bool IsExactIdentityAxis(float a0, float a1, int outDim, int srcDim, int& originOut)
+		{
+			if (!std::isfinite(a0) || !std::isfinite(a1) || outDim < 1 || outDim > srcDim)
+				return false;
+			const float r0 = std::round(a0);
+			if (std::fabs(a0 - r0) > kAxisIdentityEps)
+				return false;
+			if (std::fabs((static_cast<double>(a1) - static_cast<double>(a0)) - static_cast<double>(outDim)) > static_cast<double>(kAxisIdentityEps))
+				return false;
+			if (a0 < 0.0f || a1 > static_cast<float>(srcDim))
+				return false;
+			const int i0 = static_cast<int>(r0);
+			if (i0 < 0 || i0 > srcDim - outDim)
+				return false;
+			originOut = i0;
+			return true;
+		}
 	}
 
 	pl_filter_config FilterConfig(const ScalerKernels::Spec& spec)
@@ -189,6 +215,23 @@ namespace ScalerPass
 			pl_shader_obj_destroy(&luts[s][0]);
 			pl_shader_obj_destroy(&luts[s][1]);
 		}
+	}
+
+	size_t Module::TextureBytes() const
+	{
+		size_t total = 0;
+		auto add = [&](pl_tex t) {
+			if (!t || !t->params.format || t->params.w <= 0 || t->params.h <= 0)
+				return;
+			const size_t bpp = t->params.format->texel_size ? t->params.format->texel_size : t->params.format->internal_size;
+			total += static_cast<size_t>(t->params.w) * static_cast<size_t>(t->params.h) * bpp;
+		};
+		for (int s = 0; s < kSlots; ++s)
+		{
+			add(textures[s]);
+			add(temps[s]);
+		}
+		return total;
 	}
 
 	bool Module::Apply(pl_gpu gpu, pl_dispatch dispatch, const Source& src, int dstW, int dstH, const Settings& st, pl_tex& out, int slot)
@@ -286,6 +329,7 @@ namespace ScalerPass
 			p.renderable = true;
 			p.storable = (fmt->caps & PL_FMT_CAP_STORABLE) != 0;
 			p.blit_src = (fmt->caps & PL_FMT_CAP_BLITTABLE) != 0;
+			p.blit_dst = (fmt->caps & PL_FMT_CAP_BLITTABLE) != 0;
 			return pl_tex_recreate(gpu, &t, &p);
 		};
 		if (!ensure(textures[slot], outW, outH)) return fail("texture allocation failed");
@@ -295,43 +339,107 @@ namespace ScalerPass
 			return fail("Hermite did not take the exact-tap ortho path (hardware-bilinear half fetches would cost ~1 code)");
 		if (st.filter.kind == ScalerKernels::Kind::Bilinear && !BilinearTakesExactTaps(cfg))
 			return fail("Bilinear did not take the exact-tap ortho path (hardware-bilinear half fetches would cost ~1 code)");
+
+		auto dropTemp = [&]() {
+			if (temps[slot])
+			{
+				pl_tex_destroy(gpu, &temps[slot]);
+				temps[slot] = nullptr;
+			}
+		};
+
 		bool ok = true;
+		const char* pathTag = "";
 		if (polar)
+		{
+			dropTemp();
 			ok = Polar(dispatch, src.tex, textures[slot], ax0, ay0, ax1, ay1, outW, outH, cfg, st.antiring, &luts[slot][0]);
+		}
 		else if (st.axis == Axis::X)
+		{
+			dropTemp();
 			ok = Ortho(dispatch, src.tex, textures[slot], ax0, static_cast<float>(wy.origin), ax1, static_cast<float>(wy.origin + wy.size),
 				outW, wy.size, cfg, st.antiring, &luts[slot][0]);
+		}
 		else if (st.axis == Axis::Y)
+		{
+			dropTemp();
 			ok = Ortho(dispatch, src.tex, textures[slot], static_cast<float>(wx.origin), ay0, static_cast<float>(wx.origin + wx.size), ay1,
 				wx.size, outH, cfg, st.antiring, &luts[slot][0]);
-		else if (st.order == Order::AcrossFirst)
-		{
-			// Across into a temporary (rows of the integer window), then down.
-			const ScalerGeometry::Window w = ScalerGeometry::IntegerWindow(ay0, ay1);
-			if (!ensure(temps[slot], outW, w.size)) return fail("texture allocation failed");
-			ok = Ortho(dispatch, src.tex, temps[slot], ax0, static_cast<float>(w.origin), ax1, static_cast<float>(w.origin + w.size),
-					outW, w.size, cfg, st.antiring, &luts[slot][0]) &&
-				Ortho(dispatch, temps[slot], textures[slot], 0.0f, ay0 - w.origin, static_cast<float>(outW), ay1 - w.origin,
-					outW, outH, cfg, st.antiring, &luts[slot][1]);
 		}
 		else
 		{
-			// Down into a temporary (columns of the integer window), then across.
-			const ScalerGeometry::Window w = ScalerGeometry::IntegerWindow(ax0, ax1);
-			if (!ensure(temps[slot], w.size, outH)) return fail("texture allocation failed");
-			ok = Ortho(dispatch, src.tex, temps[slot], static_cast<float>(w.origin), ay0, static_cast<float>(w.origin + w.size), ay1,
-					w.size, outH, cfg, st.antiring, &luts[slot][0]) &&
-				Ortho(dispatch, temps[slot], textures[slot], ax0 - w.origin, 0.0f, ax1 - w.origin, static_cast<float>(outH),
-					outW, outH, cfg, st.antiring, &luts[slot][1]);
+			int ix0 = 0, iy0 = 0;
+			const bool idX = IsExactIdentityAxis(ax0, ax1, outW, src.tex->params.w, ix0);
+			const bool idY = IsExactIdentityAxis(ay0, ay1, outH, src.tex->params.h, iy0);
+			if (idX && idY)
+			{
+				dropTemp();
+				const bool canBlit = srcFmt == fmt && src.tex != textures[slot] && src.tex->params.d == 0 &&
+					src.tex->params.blit_src && textures[slot]->params.blit_dst &&
+					(srcFmt->caps & PL_FMT_CAP_BLITTABLE) != 0 && (fmt->caps & PL_FMT_CAP_BLITTABLE) != 0;
+				if (canBlit)
+				{
+					pl_tex_blit_params bp{};
+					bp.src = src.tex;
+					bp.dst = textures[slot];
+					bp.src_rc = { ix0, iy0, 0, ix0 + outW, iy0 + outH, 1 };
+					bp.dst_rc = { 0, 0, 0, outW, outH, 1 };
+					bp.sample_mode = PL_TEX_SAMPLE_NEAREST;
+					pl_tex_blit(gpu, &bp);
+					pathTag = " [1:1 blit]";
+				}
+				else
+				{
+					ok = Ortho(dispatch, src.tex, textures[slot], static_cast<float>(ix0), static_cast<float>(iy0),
+						static_cast<float>(ix0 + outW), static_cast<float>(iy0 + outH), outW, outH, cfg, st.antiring, &luts[slot][0]);
+					pathTag = " [1:1 single-pass]";
+				}
+			}
+			else if (idX)
+			{
+				dropTemp();
+				ok = Ortho(dispatch, src.tex, textures[slot], static_cast<float>(ix0), ay0, static_cast<float>(ix0 + outW), ay1,
+					outW, outH, cfg, st.antiring, &luts[slot][0]);
+				pathTag = " [y-only bypass]";
+			}
+			else if (idY)
+			{
+				dropTemp();
+				ok = Ortho(dispatch, src.tex, textures[slot], ax0, static_cast<float>(iy0), ax1, static_cast<float>(iy0 + outH),
+					outW, outH, cfg, st.antiring, &luts[slot][0]);
+				pathTag = " [x-only bypass]";
+			}
+			else if (st.order == Order::AcrossFirst)
+			{
+				// Across into a temporary (rows of the integer window), then down.
+				const ScalerGeometry::Window w = ScalerGeometry::IntegerWindow(ay0, ay1);
+				if (!ensure(temps[slot], outW, w.size)) return fail("texture allocation failed");
+				ok = Ortho(dispatch, src.tex, temps[slot], ax0, static_cast<float>(w.origin), ax1, static_cast<float>(w.origin + w.size),
+						outW, w.size, cfg, st.antiring, &luts[slot][0]) &&
+					Ortho(dispatch, temps[slot], textures[slot], 0.0f, ay0 - w.origin, static_cast<float>(outW), ay1 - w.origin,
+						outW, outH, cfg, st.antiring, &luts[slot][1]);
+			}
+			else
+			{
+				// Down into a temporary (columns of the integer window), then across.
+				const ScalerGeometry::Window w = ScalerGeometry::IntegerWindow(ax0, ax1);
+				if (!ensure(temps[slot], w.size, outH)) return fail("texture allocation failed");
+				ok = Ortho(dispatch, src.tex, temps[slot], static_cast<float>(w.origin), ay0, static_cast<float>(w.origin + w.size), ay1,
+						w.size, outH, cfg, st.antiring, &luts[slot][0]) &&
+					Ortho(dispatch, temps[slot], textures[slot], ax0 - w.origin, 0.0f, ax1 - w.origin, static_cast<float>(outH),
+						outW, outH, cfg, st.antiring, &luts[slot][1]);
+			}
 		}
 		if (!ok) return fail("sampling pass failed");
 
 		out = textures[slot];
 		note = newNote;
-		char line[200];
-		std::snprintf(line, sizeof line, "ScalerPass: %s %s %s, %.4gx%.4g (derived ratios), %dx%d -> %dx%d, %s", KindName(st.filter.kind),
+		char line[256];
+		std::snprintf(line, sizeof line, "ScalerPass: %s %s %s, %.4gx%.4g (derived ratios), %dx%d -> %dx%d, %s%s", KindName(st.filter.kind),
 			Name(st.axis), st.plane == Plane::Chroma ? "chroma" : "luma", scaleX ? (static_cast<double>(sx1) - sx0) / outW : 1.0,
-			scaleY ? (static_cast<double>(sy1) - sy0) / outH : 1.0, src.tex->params.w, src.tex->params.h, outW, outH, fmt->name ? fmt->name : "?");
+			scaleY ? (static_cast<double>(sy1) - sy0) / outH : 1.0, src.tex->params.w, src.tex->params.h, outW, outH,
+			fmt->name ? fmt->name : "?", pathTag);
 		status = line;
 		return true;
 	}

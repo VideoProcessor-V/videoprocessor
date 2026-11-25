@@ -92,7 +92,7 @@ namespace VpMeasure
 		if (t.mode < 1.5)
 		{
 			const double e = std::pow(c, 1.0 / 78.84375);
-			const double n = (std::max)(e - 0.8359375, 0.0) / (18.8515625 - 18.6875 * e);
+			const double n = (std::max)(e - 0.8359375, 0.0) / (std::max)(18.8515625 - 18.6875 * e, 1e-6);
 			return std::pow(n, 1.0 / 0.1593017578125) * (10000.0 / 203.0);
 		}
 		const double x = (1.0 - t.b) * c + t.b;

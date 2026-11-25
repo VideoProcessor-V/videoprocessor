@@ -3,7 +3,7 @@
 //
 // scaling.chroma_upscale GPU passes (ChromaCflGpu.h). Mirrors ChromaUpscale::Upsample (ChromaCfl.h) pass by pass; the model's
 // steps are named in the comments (A grain guard, B luma at the sites, C regression, D upsample, E bars).
-// SA7: with Params::arena the chroma-grid temporaries (lo, gc, ab, rho, lohi, avg) and the own splits' intermediates are
+// SA7: with Params::arena the chroma-grid temporaries (lo, ab, rho, lohi, avg) and the own splits' intermediates are
 // arena temporaries (one scope per Apply, opened after the own splits, whose scope is their own).
 #include <pch.h>
 
@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -23,108 +24,143 @@ namespace ChromaUpscale
 	{
 		namespace
 		{
+			// Compute workgroup edge (16 x 16 invocations) and Catmull-Rom 4-tap footprint (taps floor(u)-1 .. floor(u)+2).
+			constexpr int kWg = 16;
+			constexpr int kCrTaps = 4;
+
 			// A bit-exact copy of a rectangle of a plane (so every pass treats the picture's border as the plane edge).
 			const char* const CROP_BODY = R"GLSL(
 ivec2 p = ivec2(gl_GlobalInvocationID.xy);
-if (p.x < CFL_CROP_W && p.y < CFL_CROP_H) imageStore(crop_out, p, texelFetch(src, p + ivec2(CFL_OX, CFL_OY), 0));
+if (p.x < cfl_crop_size.x && p.y < cfl_crop_size.y) imageStore(crop_out, p, texelFetch(src, p + cfl_crop_org, 0));
 )GLSL";
 
-			// B: luma at the chroma sites (separable tent, rows inner then columns); A: the clean chroma and its grain.
+			// B: luma at the chroma sites (separable tent, rows inner then columns); A: the clean chroma.
+			// GEM-074: chroma grain (raw - cc) is computed inline in UP_BODY instead of writing/storing an intermediate gc texture.
 			const char* const LO_BODY = R"GLSL(
 ivec2 j = ivec2(gl_GlobalInvocationID.xy);
-if (j.x < CFL_CW && j.y < CFL_CH) {
-    float px = (float(j.x + CFL_CX0) + 0.5) * CFL_FX + CFL_SX - 0.5;
-    float py = (float(j.y + CFL_CY0) + 0.5) * CFL_FY + CFL_SY - 0.5;
-    int x0 = int(ceil(px - CFL_FX)), x1 = int(floor(px + CFL_FX));
-    int y0 = int(ceil(py - CFL_FY)), y1 = int(floor(py + CFL_FY));
+if (j.x < cfl_csize.x && j.y < cfl_csize.y) {
+    float px = (float(j.x + cfl_corg.x) + 0.5) * cfl_scale.x + cfl_shift.x - 0.5;
+    float py = (float(j.y + cfl_corg.y) + 0.5) * cfl_scale.y + cfl_shift.y - 0.5;
+    int x0 = int(ceil(px - cfl_scale.x)), x1 = int(floor(px + cfl_scale.x));
+    int y0 = int(ceil(py - cfl_scale.y)), y1 = int(floor(py + cfl_scale.y));
     float wsx = 0.0, wsy = 0.0;
-    for (int x = x0; x <= x1; x++) wsx += max(0.0, 1.0 - abs(float(x) - px) / CFL_FX);
-    for (int y = y0; y <= y1; y++) wsy += max(0.0, 1.0 - abs(float(y) - py) / CFL_FY);
+    for (int x = x0; x <= x1; x++) wsx += max(0.0, 1.0 - abs(float(x) - px) / cfl_scale.x);
+    for (int y = y0; y <= y1; y++) wsy += max(0.0, 1.0 - abs(float(y) - py) / cfl_scale.y);
     float acc = 0.0;
     for (int y = y0; y <= y1; y++) {
-        float wy = max(0.0, 1.0 - abs(float(y) - py) / CFL_FY);
+        float wy = max(0.0, 1.0 - abs(float(y) - py) / cfl_scale.y);
         float rs = 0.0;
         for (int x = x0; x <= x1; x++) {
-            float wx = max(0.0, 1.0 - abs(float(x) - px) / CFL_FX);
-            rs += wx * cfl_yc(ivec2(clamp(x - CFL_LEFT, 0, CFL_RW - 1), clamp(y - CFL_TOP, 0, CFL_RH - 1)));
+            float wx = max(0.0, 1.0 - abs(float(x) - px) / cfl_scale.x);
+            rs += wx * cfl_yc(ivec2(clamp(x - cfl_lrect.x, 0, cfl_lrect.z - 1), clamp(y - cfl_lrect.y, 0, cfl_lrect.w - 1)));
         }
         acc += (wy / wsy) * (rs / wsx);
     }
-    vec2 raw = cfl_craw(j);
     vec2 cc = cfl_cc(j);
     imageStore(o_lo, j, vec4(acc, cc.x, cc.y, 0.0));
-    imageStore(o_gc, j, vec4(raw - cc, 0.0, 0.0));
 }
 )GLSL";
 
-			// C: the regression of one channel (c = 0: Cb, 1: Cr) in the box (2r + 1)^2, centred two-pass moments.
-			const char* const STATS_FUNCS = R"GLSL(
-vec4 cfl_reg(ivec2 j, int c)
-{
-    float sy = 0.0, sc = 0.0;
-    for (int jj = -CFL_R; jj <= CFL_R; jj++)
-        for (int ii = -CFL_R; ii <= CFL_R; ii++) {
-            vec4 t = texelFetch(t_lo, ivec2(clamp(j.x + ii, 0, CFL_CW - 1), clamp(j.y + jj, 0, CFL_CH - 1)), 0);
-            sy += t.x;
-            sc += (c == 0 ? t.y : t.z);
-        }
-    float n = float((2 * CFL_R + 1) * (2 * CFL_R + 1));
-    float mY = sy / n, mC = sc / n;
-    float syy = 0.0, scc = 0.0, syc = 0.0;
-    for (int jj = -CFL_R; jj <= CFL_R; jj++)
-        for (int ii = -CFL_R; ii <= CFL_R; ii++) {
-            vec4 t = texelFetch(t_lo, ivec2(clamp(j.x + ii, 0, CFL_CW - 1), clamp(j.y + jj, 0, CFL_CH - 1)), 0);
-            float dy = t.x - mY, dc = (c == 0 ? t.y : t.z) - mC;
-            syy += dy * dy;
-            scc += dc * dc;
-            syc += dy * dc;
-        }
-    float vY = max(syy / n, 0.0), vC = max(scc / n, 0.0), cov = syc / n;
-    float a = cov / (vY + CFL_EPS);
-    float b = mC - a * mY;
-    float rho2 = clamp(cov * cov / ((vY + CFL_EPS) * (vC + CFL_EPS)), 0.0, 1.0);
-    return vec4(a, b, rho2, 0.0);
-}
-
-vec2 cfl_range(ivec2 j, int c)
-{
-    float mn = 1e30, mx = -1e30;
-    for (int jj = -CFL_CLAMPR; jj <= CFL_CLAMPR; jj++)
-        for (int ii = -CFL_CLAMPR; ii <= CFL_CLAMPR; ii++) {
-            vec4 t = texelFetch(t_lo, ivec2(clamp(j.x + ii, 0, CFL_CW - 1), clamp(j.y + jj, 0, CFL_CH - 1)), 0);
-            float v = (c == 0 ? t.y : t.z);
-            mn = min(mn, v);
-            mx = max(mx, v);
-        }
-    return vec2(mn, mx);
-}
+			// C: fused Cb/Cr regression in (2*CFL_R + 1)^2 (centred two-pass moments, shared mY/vY) and neighbour range in
+			// (2*CFL_CLAMPR + 1)^2, tiled into shared memory sh_lo[CFL_ST_T][CFL_ST_T] (20x20 for CFL_R=2, CFL_CLAMPR=1).
+			const char* const STATS_HEADER = R"GLSL(
+shared vec4 sh_lo[CFL_ST_T][CFL_ST_T];
 )GLSL";
 
 			const char* const STATS_BODY = R"GLSL(
-ivec2 j = ivec2(gl_GlobalInvocationID.xy);
-if (j.x < CFL_CW && j.y < CFL_CH) {
-    vec4 rb = cfl_reg(j, 0), rr = cfl_reg(j, 1);
-    vec2 gb = cfl_range(j, 0), gr = cfl_range(j, 1);
-    imageStore(o_ab, j, vec4(rb.x, rb.y, rr.x, rr.y));
-    imageStore(o_rho, j, vec4(rb.z, rr.z, 0.0, 0.0));
-    imageStore(o_lohi, j, vec4(gb.x, gb.y, gr.x, gr.y));
+uint li = gl_LocalInvocationIndex;
+ivec2 lid = ivec2(gl_LocalInvocationID.xy);
+ivec2 org = ivec2(gl_WorkGroupID.xy) * CFL_WG;
+for (uint idx = li; idx < uint(CFL_ST_T * CFL_ST_T); idx += uint(CFL_WG * CFL_WG)) {
+    int ty = int(idx / uint(CFL_ST_T));
+    int tx = int(idx % uint(CFL_ST_T));
+    ivec2 q = ivec2(clamp(org.x - CFL_ST_H + tx, 0, cfl_csize.x - 1), clamp(org.y - CFL_ST_H + ty, 0, cfl_csize.y - 1));
+    sh_lo[ty][tx] = texelFetch(t_lo, q, 0);
+}
+barrier();
+ivec2 j = org + lid;
+if (j.x < cfl_csize.x && j.y < cfl_csize.y) {
+    int cx = lid.x + CFL_ST_H;
+    int cy = lid.y + CFL_ST_H;
+    float sy = 0.0, scB = 0.0, scR = 0.0;
+    for (int jj = -CFL_R; jj <= CFL_R; jj++)
+        for (int ii = -CFL_R; ii <= CFL_R; ii++) {
+            vec4 t = sh_lo[cy + jj][cx + ii];
+            sy += t.x;
+            scB += t.y;
+            scR += t.z;
+        }
+    float n = float((2 * CFL_R + 1) * (2 * CFL_R + 1));
+    float mY = sy / n, mCB = scB / n, mCR = scR / n;
+    float syy = 0.0, sccB = 0.0, sycB = 0.0, sccR = 0.0, sycR = 0.0;
+    for (int jj = -CFL_R; jj <= CFL_R; jj++)
+        for (int ii = -CFL_R; ii <= CFL_R; ii++) {
+            vec4 t = sh_lo[cy + jj][cx + ii];
+            float dy = t.x - mY;
+            float dcB = t.y - mCB, dcR = t.z - mCR;
+            syy += dy * dy;
+            sccB += dcB * dcB;
+            sycB += dy * dcB;
+            sccR += dcR * dcR;
+            sycR += dy * dcR;
+        }
+    float vY = max(syy / n, 0.0);
+    float vCB = max(sccB / n, 0.0), covB = sycB / n;
+    float vCR = max(sccR / n, 0.0), covR = sycR / n;
+    float aB = covB / (vY + cfl_eps), bB = mCB - aB * mY;
+    float aR = covR / (vY + cfl_eps), bR = mCR - aR * mY;
+    float rho2B = clamp(covB * covB / ((vY + cfl_eps) * (vCB + cfl_eps)), 0.0, 1.0);
+    float rho2R = clamp(covR * covR / ((vY + cfl_eps) * (vCR + cfl_eps)), 0.0, 1.0);
+    float mnB = 1e30, mxB = -1e30, mnR = 1e30, mxR = -1e30;
+    for (int jj = -CFL_CLAMPR; jj <= CFL_CLAMPR; jj++)
+        for (int ii = -CFL_CLAMPR; ii <= CFL_CLAMPR; ii++) {
+            vec4 t = sh_lo[cy + jj][cx + ii];
+            mnB = min(mnB, t.y);
+            mxB = max(mxB, t.y);
+            mnR = min(mnR, t.z);
+            mxR = max(mxR, t.z);
+        }
+    imageStore(o_ab, j, vec4(aB, bB, aR, bR));
+    imageStore(o_rho, j, vec4(rho2B, rho2R, 0.0, 0.0));
+    imageStore(o_lohi, j, vec4(mnB, mxB, mnR, mxR));
 }
 )GLSL";
 
-			// The guided filter's second box average of a and b.
+			// The guided filter's second box average of a and b, tiled into sh_ab[CFL_AVG_T][CFL_AVG_T] (20x20 for CFL_R=2).
+			const char* const AVG_HEADER = R"GLSL(
+shared vec4 sh_ab[CFL_AVG_T][CFL_AVG_T];
+)GLSL";
+
 			const char* const AVG_BODY = R"GLSL(
-ivec2 j = ivec2(gl_GlobalInvocationID.xy);
-if (j.x < CFL_CW && j.y < CFL_CH) {
+uint li = gl_LocalInvocationIndex;
+ivec2 lid = ivec2(gl_LocalInvocationID.xy);
+ivec2 org = ivec2(gl_WorkGroupID.xy) * CFL_WG;
+for (uint idx = li; idx < uint(CFL_AVG_T * CFL_AVG_T); idx += uint(CFL_WG * CFL_WG)) {
+    int ty = int(idx / uint(CFL_AVG_T));
+    int tx = int(idx % uint(CFL_AVG_T));
+    ivec2 q = ivec2(clamp(org.x - CFL_AVG_H + tx, 0, cfl_csize.x - 1), clamp(org.y - CFL_AVG_H + ty, 0, cfl_csize.y - 1));
+    sh_ab[ty][tx] = texelFetch(t_ab, q, 0);
+}
+barrier();
+ivec2 j = org + lid;
+if (j.x < cfl_csize.x && j.y < cfl_csize.y) {
+    int cx = lid.x + CFL_AVG_H;
+    int cy = lid.y + CFL_AVG_H;
     vec4 s = vec4(0.0);
     for (int jj = -CFL_R; jj <= CFL_R; jj++)
         for (int ii = -CFL_R; ii <= CFL_R; ii++)
-            s += texelFetch(t_ab, ivec2(clamp(j.x + ii, 0, CFL_CW - 1), clamp(j.y + jj, 0, CFL_CH - 1)), 0);
+            s += sh_ab[cy + jj][cx + ii];
     float n = float((2 * CFL_R + 1) * (2 * CFL_R + 1));
     imageStore(o_avg, j, s / n);
 }
 )GLSL";
 
 			const char* const UP_FUNCS = R"GLSL(
+shared vec4 sh_avg[CFL_UP_TH][CFL_UP_TW];
+shared vec4 sh_lohi[CFL_UP_TH][CFL_UP_TW];
+shared vec4 sh_rp[CFL_UP_TH][CFL_UP_TW];
+shared vec4 sh_bg[CFL_UP_TH][CFL_UP_TW];
+
 vec4 cfl_cr(float t)
 {
     float t2 = t * t, t3 = t2 * t;
@@ -132,37 +168,69 @@ vec4 cfl_cr(float t)
 }
 )GLSL";
 
-			// D inside the active picture (CfL on the crop grid), E outside (bar-side Catmull-Rom of the raw chroma).
+			// D inside the active picture (CfL on the crop grid, tiled into shared memory), E outside (bar-side Catmull-Rom of raw chroma).
 			const char* const UP_BODY = R"GLSL(
-ivec2 p = ivec2(gl_GlobalInvocationID.xy);
-if (p.x < CFL_W && p.y < CFL_H) {
-    float pu = (float(p.x) + 0.5 - CFL_SX) / CFL_FX - 0.5;
-    float pv = (float(p.y) + 0.5 - CFL_SY) / CFL_FY - 0.5;
+uint li = gl_LocalInvocationIndex;
+ivec2 lid = ivec2(gl_LocalInvocationID.xy);
+ivec2 org = ivec2(gl_WorkGroupID.xy) * CFL_WG;
+float pu0 = (float(org.x) + 0.5 - cfl_shift.x) / cfl_scale.x - 0.5;
+float pv0 = (float(org.y) + 0.5 - cfl_shift.y) / cfl_scale.y - 0.5;
+ivec2 tileOrg = ivec2(int(floor(pu0 - float(cfl_crect.x))) - 1, int(floor(pv0 - float(cfl_crect.y))) - 1);
+bool wgInside = org.x < cfl_active.z && (org.x + CFL_WG) > cfl_active.x && org.y < cfl_active.w && (org.y + CFL_WG) > cfl_active.y;
+if (wgInside) {
+    for (uint idx = li; idx < uint(CFL_UP_TW * CFL_UP_TH); idx += uint(CFL_WG * CFL_WG)) {
+        int ty = int(idx / uint(CFL_UP_TW));
+        int tx = int(idx % uint(CFL_UP_TW));
+        ivec2 q = ivec2(clamp(tileOrg.x + tx, 0, cfl_csize.x - 1), clamp(tileOrg.y + ty, 0, cfl_csize.y - 1));
+        vec4 av = texelFetch(t_avg, q, 0);
+        vec4 lo = texelFetch(t_lo, q, 0);
+        vec2 rho = texelFetch(t_rho, q, 0).xy;
+        vec4 lohi = texelFetch(t_lohi, q, 0);
+        vec2 pred = vec2(av.x * lo.x + av.y, av.z * lo.x + av.w);
+#if CFL_GUARD
+        vec2 gc = cfl_csrc(q + cfl_crect.xy) - lo.yz;
+#else
+        vec2 gc = vec2(0.0);
+#endif
+        sh_avg[ty][tx] = av;
+        sh_lohi[ty][tx] = lohi;
+        sh_rp[ty][tx] = vec4(rho, pred);
+        sh_bg[ty][tx] = vec4(lo.yz, gc);
+    }
+}
+barrier();
+ivec2 p = org + lid;
+if (p.x < cfl_size.x && p.y < cfl_size.y) {
+    float pu = (float(p.x) + 0.5 - cfl_shift.x) / cfl_scale.x - 0.5;
+    float pv = (float(p.y) + 0.5 - cfl_shift.y) / cfl_scale.y - 0.5;
     vec2 res = vec2(0.0);
-    bool inside = p.x >= CFL_LEFT && p.x < CFL_RIGHT && p.y >= CFL_TOP && p.y < CFL_BOTTOM;
+    bool inside = p.x >= cfl_active.x && p.x < cfl_active.z && p.y >= cfl_active.y && p.y < cfl_active.w;
     if (inside) {
-        float u = pu - float(CFL_CX0), v = pv - float(CFL_CY0);
+        float u = pu - float(cfl_crect.x), v = pv - float(cfl_crect.y);
         int iu = int(floor(u)), iv = int(floor(v));
         vec4 wu4 = cfl_cr(u - float(iu)), wv4 = cfl_cr(v - float(iv));
         float wu[4] = float[4](wu4.x, wu4.y, wu4.z, wu4.w);
         float wv[4] = float[4](wv4.x, wv4.y, wv4.z, wv4.w);
+        int bx = iu - 1 - tileOrg.x;
+        int by = iv - 1 - tileOrg.y;
         vec4 sA = vec4(0.0), sL = vec4(0.0);
         vec2 sR = vec2(0.0), sG = vec2(0.0), sB = vec2(0.0), sP = vec2(0.0);
         for (int m = 0; m < 4; m++) {
-            int yy = clamp(iv - 1 + m, 0, CFL_CH - 1);
+            int ty = by + m;
             vec4 rA = vec4(0.0), rL = vec4(0.0);
             vec2 rR = vec2(0.0), rG = vec2(0.0), rB = vec2(0.0), rP = vec2(0.0);
             for (int n = 0; n < 4; n++) {
-                int xx = clamp(iu - 1 + n, 0, CFL_CW - 1);
-                ivec2 q = ivec2(xx, yy);
-                vec4 av = texelFetch(t_avg, q, 0);
-                float ylo = texelFetch(t_lo, q, 0).x;
+                int tx = bx + n;
+                vec4 av = sh_avg[ty][tx];
+                vec4 lh = sh_lohi[ty][tx];
+                vec4 rp = sh_rp[ty][tx];
+                vec4 bg = sh_bg[ty][tx];
                 rA += wu[n] * av;
-                rP += wu[n] * vec2(av.x * ylo + av.y, av.z * ylo + av.w);
-                rR += wu[n] * texelFetch(t_rho, q, 0).xy;
-                rL += wu[n] * texelFetch(t_lohi, q, 0);
-                rB += wu[n] * texelFetch(t_lo, q, 0).yz;
-                rG += wu[n] * texelFetch(t_gc, q, 0).xy;
+                rP += wu[n] * rp.zw;
+                rR += wu[n] * rp.xy;
+                rL += wu[n] * lh;
+                rB += wu[n] * bg.xy;
+                rG += wu[n] * bg.zw;
             }
             sA += wv[m] * rA;
             sL += wv[m] * rL;
@@ -173,16 +241,16 @@ if (p.x < CFL_W && p.y < CFL_H) {
         }
         vec2 am = vec2(sA.x, sA.z), bm = vec2(sA.y, sA.w);
         vec2 mm = clamp(sR, 0.0, 1.0);
-        float yv = cfl_yc(p - ivec2(CFL_LEFT, CFL_TOP));
+        float yv = cfl_yc(p - cfl_active.xy);
         vec2 lo2 = min(vec2(sL.x, sL.z), vec2(sL.y, sL.w));
         vec2 hi2 = max(vec2(sL.x, sL.z), vec2(sL.y, sL.w));
         res = sB + mm * (clamp(am * yv + bm, lo2, hi2) - sP) + sG;
     } else {
-        int xlo = 0, xhi = CFL_PCW - 1, ylo = 0, yhi = CFL_PCH - 1;
-        if (p.x < CFL_LEFT) xhi = max(CFL_CX0 - 1, 0);
-        else if (p.x >= CFL_RIGHT) xlo = min(CFL_CX1, CFL_PCW - 1);
-        if (p.y < CFL_TOP) yhi = max(CFL_CY0 - 1, 0);
-        else if (p.y >= CFL_BOTTOM) ylo = min(CFL_CY1, CFL_PCH - 1);
+        int xlo = 0, xhi = cfl_psize.x - 1, ylo = 0, yhi = cfl_psize.y - 1;
+        if (p.x < cfl_active.x) xhi = max(cfl_crect.x - 1, 0);
+        else if (p.x >= cfl_active.z) xlo = min(cfl_crect.z, cfl_psize.x - 1);
+        if (p.y < cfl_active.y) yhi = max(cfl_crect.y - 1, 0);
+        else if (p.y >= cfl_active.w) ylo = min(cfl_crect.w, cfl_psize.y - 1);
         int iu = int(floor(pu)), iv = int(floor(pv));
         vec4 wu4 = cfl_cr(pu - float(iu)), wv4 = cfl_cr(pv - float(iv));
         float wu[4] = float[4](wu4.x, wu4.y, wu4.z, wu4.w);
@@ -196,22 +264,38 @@ if (p.x < CFL_W && p.y < CFL_H) {
         }
         res = sr;
     }
-    imageStore(o_up, p, vec4(res * CFL_CU_OUT, 0.0, 0.0));
+    imageStore(o_up, p, vec4(res * cfl_cu_out, 0.0, 0.0));
 }
 )GLSL";
-
-			// A float constant in parentheses (negative values stay safe inside any expression).
-			std::string DefineP(const char* name, double v) { return std::string("#define ") + name + " (" + VpvGpu::Num(v) + ")\n"; }
 
 			// vec2 fn(ivec2 p): (Cb, Cr) in codes from the descriptor(s) d0 / d1 (d1 unused when one texture holds both).
 			std::string RawReader(const char* fn, const char* d0, const char* d1, bool same, int comp0, int comp1)
 			{
 				static const char* const kComp = "xyzw";
 				return std::string("vec2 ") + fn + "(ivec2 p)\n{\n    return vec2(texelFetch(" + d0 + ", p, 0)." + kComp[comp0] + ", texelFetch(" +
-					(same ? d0 : d1) + ", p, 0)." + kComp[comp1] + ") * CFL_INV_CU_C;\n}\n";
+					(same ? d0 : d1) + ", p, 0)." + kComp[comp1] + ") * cfl_inv_cu_c;\n}\n";
 			}
 
-			int Groups(int n) { return (n + 15) / 16; }
+			int Groups(int n) { return (n + kWg - 1) / kWg; }
+
+			// Derived worst-case chroma-site tile edge for a kWg-pixel workgroup under 4-tap Catmull-Rom, independent of siting
+			// shift and active crop so varying siting, crop, or same-class plane size compiles zero new shaders.
+			// Over lid in [0, kWg - 1], exact u(lid) - u(0) = span = (kWg - 1) / ratio. With arbitrary phase f0 in [0, 1) and
+			// float32 rounding across at most 4 coordinate ops at GPU texture dimensions <= 32768 (2^15 px, >= D3D11 16384 max),
+			// the endpoint difference error is bounded by eta = 2 * 4 * 0.5 * 32768 * FLT_EPSILON = 2^-6. Because f0 < 1:
+			//   floor(u(lid)) - floor(u(0)) = floor(f0 + span + err) <= ceil(span + eta),
+			// so bx + (kCrTaps - 1) < ceil(span + eta) + kCrTaps unconditionally:
+			//   ratio = 2.0 (4:2:0): ceil( 7.5 + 2^-6) + 4 = 12  (12 x 12 x 64 B =  9,216 B < 16 KB)
+			//   ratio = 1.0 (4:2:2): ceil(15.0 + 2^-6) + 4 = 20  (12 x 20 x 64 B = 15,360 B < 16 KB)
+			//   ratio = 4.0 (4:1:0): ceil( 3.75 + 2^-6) + 4 = 8  ( 8 x  8 x 64 B =  4,096 B < 16 KB)
+			int UpTileDim(double ratio)
+			{
+				constexpr double kMaxCoord = 32768.0; // 2^15 px (>= D3D11 16384 max texture edge)
+				constexpr double kCoordOps = 4.0;     // +0.5, -shift, /ratio, -0.5-cx0 (both endpoints -> 2 * 4 * 0.5 ULP)
+				const double eta = kCoordOps * kMaxCoord * static_cast<double>(std::numeric_limits<float>::epsilon());
+				const double span = static_cast<double>(kWg - 1) / ratio;
+				return static_cast<int>(std::ceil(span + eta)) + kCrTaps;
+			}
 
 			// SA7: opens the arena scope of one Apply and closes it on every exit path. A refused (nested) scope is not ours to close;
 			// its Acquires then fail visibly (the arena counts it).
@@ -227,15 +311,18 @@ if (p.x < CFL_W && p.y < CFL_H) {
 
 			// One plane's grain accessor under its own names (the luma, Cb and Cr frames may differ in layout, and one shader
 			// binds several). The ONE read accessor (GrainSplit::Gpu::ViewGlsl / BindView) with every name prefixed per plane:
-			// plane 0 "gsL_", 1 "gsB_", 2 "gsR_" (not "gl_": reserved in GLSL). Appends the prelude to `glsl` and the
-			// plane's sampled descriptors to `descs`. The prelude defines gs<P>_fetch(ivec2) -> (s1, s2, f, base) in codes.
-			void AddGrainView(const GrainSplit::Gpu::Frame& f, int plane, std::string& glsl, std::vector<pl_shader_desc>& descs)
+			// plane 0 "gsL_", 1 "gsB_", 2 "gsR_" (not "gl_": reserved in GLSL). Appends the prelude to `glsl`, the plane's
+			// sampled descriptors to `descs`, and (for Compact storage) replaces the baked `const float gs<P>_cu = ...;`
+			// declaration with a dynamic pl_shader_var backed by `cuStorage` so code-unit changes compile zero new shaders.
+			void AddGrainView(const GrainSplit::Gpu::Frame& f, int plane, std::string& glsl, std::vector<pl_shader_desc>& descs,
+				std::vector<pl_shader_var>& vars, float& cuStorage)
 			{
 				static const char* const kNames[3][4] = {
 					{ "gsL_split", "gsL_gblocks", "gsL_a", "gsL_b" },
 					{ "gsB_split", "gsB_gblocks", "gsB_a", "gsB_b" },
 					{ "gsR_split", "gsR_gblocks", "gsR_a", "gsR_b" } };
 				static const char* const kPfx[3] = { "gsL_", "gsB_", "gsR_" };
+				static const char* const kCuNames[3] = { "gsL_cu", "gsB_cu", "gsR_cu" };
 				auto replaceAll = [](std::string& t, const std::string& from, const std::string& to) {
 					for (size_t at = t.find(from); at != std::string::npos; at = t.find(from, at + to.size()))
 						t.replace(at, from.size(), to);
@@ -244,6 +331,18 @@ if (p.x < CFL_W && p.y < CFL_H) {
 				replaceAll(v, "gs_", kPfx[plane]);                                        // gs_fetch, gs_blocks, gs_a, gs_b, gs_cu
 				replaceAll(v, "texelFetch(split,", std::string("texelFetch(") + kNames[plane][0] + ",");   // Full: the sampler names
 				replaceAll(v, "texelFetch(gblocks,", std::string("texelFetch(") + kNames[plane][1] + ",");
+				if (f.storage == GrainSplit::Storage::Compact)
+				{
+					const std::string cuDecl = std::string("const float ") + kCuNames[plane] + " = ";
+					const size_t pos = v.find(cuDecl);
+					const size_t end = pos != std::string::npos ? v.find(";\n", pos) : std::string::npos;
+					if (pos != std::string::npos && end != std::string::npos)
+					{
+						v.erase(pos, end - pos + 2);
+						cuStorage = static_cast<float>(f.codeUnit);
+						vars.push_back({ pl_var_float(kCuNames[plane]), &cuStorage, true });
+					}
+				}
 				glsl += v;
 				std::vector<pl_shader_desc> bound;
 				GrainSplit::Gpu::BindView(f, bound);
@@ -263,7 +362,7 @@ if (p.x < CFL_W && p.y < CFL_H) {
 		{
 			GrainSplit::Gpu::Splitter splitL, splitB, splitR;
 			pl_tex cropL = nullptr, cropB = nullptr, cropR = nullptr;
-			pl_tex lo = nullptr, gc = nullptr, ab = nullptr, rho = nullptr, lohi = nullptr, avg = nullptr, out = nullptr;
+			pl_tex lo = nullptr, ab = nullptr, rho = nullptr, lohi = nullptr, avg = nullptr, out = nullptr;
 		};
 
 		CflModule::~CflModule() { delete m_impl; }
@@ -276,7 +375,7 @@ if (p.x < CFL_W && p.y < CFL_H) {
 				m.splitL.Release(gpu);
 				m.splitB.Release(gpu);
 				m.splitR.Release(gpu);
-				for (pl_tex* t : { &m.cropL, &m.cropB, &m.cropR, &m.lo, &m.gc, &m.ab, &m.rho, &m.lohi, &m.avg, &m.out })
+				for (pl_tex* t : { &m.cropL, &m.cropB, &m.cropR, &m.lo, &m.ab, &m.rho, &m.lohi, &m.avg, &m.out })
 					if (*t) pl_tex_destroy(gpu, t);
 			}
 			delete m_impl;
@@ -294,9 +393,9 @@ if (p.x < CFL_W && p.y < CFL_H) {
 			b += nbL * 32;                                // luma split block grids (2 x rgba32f)
 			b += cpx * (4 + 2 * 32);                      // chroma crop (rg16), two chroma splits
 			b += nbC * 2 * 32;                            // chroma split block grids
-			b += cpx * (16 + 8 + 16 + 8 + 16 + 16);       // lo, gc, ab, rho, lohi, avg
-			// SA7: lo..avg (80 B per chroma pixel) and the splits' bands (16 per luma pixel, 2 x 16 per chroma pixel) are the arena's.
-			if (tempsInArena) b -= 16 * px + 112 * cpx;
+			b += cpx * (16 + 16 + 8 + 16 + 16);           // lo, ab, rho, lohi, avg (GEM-074: gc removed -> -8 B/cpx)
+			// SA7 + GEM-074: lo..avg (72 B per chroma pixel) and the splits' bands (16 per luma pixel, 2 x 16 per chroma pixel) are the arena's.
+			if (tempsInArena) b -= 16 * px + 104 * cpx;
 			return b;
 		}
 
@@ -321,7 +420,7 @@ if (p.x < CFL_W && p.y < CFL_H) {
 				r.push_back(q);
 			};
 			add(t4, 4);   // lo, ab, lohi, avg
-			add(t2, 2);   // gc, rho
+			add(t2, 1);   // rho (GEM-074: gc removed, grain computed inline as raw - cc in UP_BODY)
 			return r;
 		}
 
@@ -373,7 +472,7 @@ if (p.x < CFL_W && p.y < CFL_H) {
 				++m_failures;
 				return false;
 			};
-			if (!gpu || !dispatch || source.num_planes < 2) return fail("a luma plane and chroma plane(s) are needed");
+			if (!gpu || !dispatch || source.num_planes < 2 || source.num_planes > PL_MAX_PLANES) return fail("a luma plane and chroma plane(s) are needed");
 			if (!pl_color_system_is_ycbcr_like(source.repr.sys)) return fail("the frame is not YCbCr");
 			const pl_plane& lp = source.planes[0];
 			const pl_tex luma = lp.texture;
@@ -406,6 +505,7 @@ if (p.x < CFL_W && p.y < CFL_H) {
 			if (cw == W && ch == H)
 			{
 				m_status = "4:4:4: nothing to upsample";
+				m_grainStatus = GrainSplit::GrainStatus::Ring;   // not reading the grain: no fallback to show
 				result = source;
 				return true;
 			}
@@ -427,66 +527,14 @@ if (p.x < CFL_W && p.y < CFL_H) {
 			const pl_fmt f4 = FloatFormat(gpu, 4), f2 = FloatFormat(gpu, 2), outFmt = StorableLike(gpu, cbTex->params.format, 2);
 			if (!f4 || !f2) return fail("no float storage texture");
 			if (!outFmt) return fail("no 16-bit two-component output format");
-			const bool useArena = params.arena != nullptr;   // SA7: lo, gc, ab, rho, lohi, avg and the own splits' intermediates
-			if (!(useArena || (Ensure(gpu, m.lo, pcw, pch, f4) && Ensure(gpu, m.gc, pcw, pch, f2) && Ensure(gpu, m.ab, pcw, pch, f4) &&
+			const bool useArena = params.arena != nullptr;   // SA7 + GEM-074: lo, ab, rho, lohi, avg and the own splits' intermediates
+			if (!(useArena || (Ensure(gpu, m.lo, pcw, pch, f4) && Ensure(gpu, m.ab, pcw, pch, f4) &&
 				Ensure(gpu, m.rho, pcw, pch, f2) && Ensure(gpu, m.lohi, pcw, pch, f4) && Ensure(gpu, m.avg, pcw, pch, f4))) ||
 				!Ensure(gpu, m.out, W, H, outFmt, true))
 				return fail("no storage texture for the module");
 			if (useArena)
-				for (pl_tex* t : { &m.lo, &m.gc, &m.ab, &m.rho, &m.lohi, &m.avg })   // the private temporaries of the non-arena path: free them
+				for (pl_tex* t : { &m.lo, &m.ab, &m.rho, &m.lohi, &m.avg })   // the private temporaries of the non-arena path: free them
 					if (*t) pl_tex_destroy(gpu, t);
-
-			// --- The active picture, bit-exact in the planes' own formats ---
-			auto crop = [&](pl_tex src, pl_tex& dst, int x0, int y0, int w, int h, const char* what) -> bool {
-				if (!(src->params.format->caps & PL_FMT_CAP_STORABLE))
-				{
-					fail(std::string("the ") + what + " format is not storable (active-picture crop)");
-					return false;
-				}
-				if (!Ensure(gpu, dst, w, h, src->params.format))
-				{
-					fail(std::string("no texture for the ") + what + " crop");
-					return false;
-				}
-				const std::string hdr = DefineInt("CFL_CROP_W", w) + DefineInt("CFL_CROP_H", h) + DefineInt("CFL_OX", x0) + DefineInt("CFL_OY", y0);
-				const pl_shader_desc cd[2] = { Sampled("src", src), Storage("crop_out", dst) };
-				if (!Pass(dispatch, "VideoProcessor chroma upscale: crop", hdr, CROP_BODY, cd, 2, nullptr, 0, Groups(w), Groups(h), 0))
-				{
-					fail(std::string(what) + " crop pass failed");
-					return false;
-				}
-				return true;
-			};
-			pl_tex lumaIn = luma, cbIn = cbTex, crIn = crTex;
-			if (whole)
-			{
-				if (m.cropL) pl_tex_destroy(gpu, &m.cropL);
-			}
-			else
-			{
-				if (!crop(luma, m.cropL, r.left, r.top, rw, rh, "luma")) return false;
-				lumaIn = m.cropL;
-			}
-			if (chromaWhole)
-			{
-				if (m.cropB) pl_tex_destroy(gpu, &m.cropB);
-				if (m.cropR) pl_tex_destroy(gpu, &m.cropR);
-			}
-			else
-			{
-				if (!crop(cbTex, m.cropB, cRect.x0, cRect.y0, pcw, pch, "chroma")) return false;
-				cbIn = m.cropB;
-				if (sameTex)
-				{
-					crIn = m.cropB;
-					if (m.cropR) pl_tex_destroy(gpu, &m.cropR);
-				}
-				else
-				{
-					if (!crop(crTex, m.cropR, cRect.x0, cRect.y0, pcw, pch, "chroma")) return false;
-					crIn = m.cropR;
-				}
-			}
 
 			// --- A: the grain guard (the shared grain split, three planes) ---
 			const double cuL = CodeUnit(luma, source.repr.bits, params.colorDepth);
@@ -502,13 +550,40 @@ if (p.x < CFL_W && p.y < CFL_H) {
 			const GrainSplit::Gpu::Frame* gB = nullptr;
 			const GrainSplit::Gpu::Frame* gR = nullptr;
 			bool ownSplit = false, misfit = false;
+			bool usedCropL = false, usedCropB = false, usedCropR = false;
 			m_grainStatus = GrainSplit::GrainStatus::Ring;   // recomputed every frame: a fitting product is read again at once
 			if (guard)
 			{
+				// Active-picture crop into a plane's own format, lazily dispatched ONLY when an own-split fallback runs on a cropped plane.
+				auto crop = [&](pl_tex src, pl_tex& dst, int x0, int y0, int w, int h, const char* what) -> bool {
+					if (!(src->params.format->caps & PL_FMT_CAP_STORABLE))
+					{
+						fail(std::string("the ") + what + " format is not storable (active-picture crop)");
+						return false;
+					}
+					if (!Ensure(gpu, dst, w, h, src->params.format))
+					{
+						fail(std::string("no texture for the ") + what + " crop");
+						return false;
+					}
+					const int cropSize[2] = { w, h };
+					const int cropOrg[2] = { x0, y0 };
+					const pl_shader_desc cd[2] = { Sampled("src", src), Storage("crop_out", dst) };
+					const pl_shader_var cv[2] = {
+						{ pl_var_ivec2("cfl_crop_size"), cropSize, true },
+						{ pl_var_ivec2("cfl_crop_org"), cropOrg, true } };
+					if (!Pass(dispatch, "VideoProcessor chroma upscale: crop", "", CROP_BODY, cd, 2, cv, 2, Groups(w), Groups(h), 0))
+					{
+						fail(std::string(what) + " crop pass failed");
+						return false;
+					}
+					return true;
+				};
 				bool stale = false, shedNow = false;
-				auto pick = [&](const GrainSplit::Gpu::Frame* shared, GrainSplit::Gpu::Splitter& own, pl_tex tex, int comp, double cu, double ln,
-					const GrainSplit::Gpu::Frame*& outF) {
-					const GrainSplit::Gpu::FitResult fit = GrainSplit::Gpu::CheckFit(shared, tex->params.w, tex->params.h, BlockPx(ln), Scale(ln), cu, comp,
+				auto pick = [&](const GrainSplit::Gpu::Frame* shared, GrainSplit::Gpu::Splitter& own, pl_tex srcTex, pl_tex& cropDst,
+					bool& usedCrop, bool isWhole, int x0, int y0, int tw, int th, const char* what, int comp, double cu, double ln,
+					const GrainSplit::Gpu::Frame*& outF) -> bool {
+					const GrainSplit::Gpu::FitResult fit = GrainSplit::Gpu::CheckFit(shared, tw, th, BlockPx(ln), Scale(ln), cu, comp,
 						params.grainSeq);
 					if (fit == GrainSplit::Gpu::FitResult::Fits && !params.grainShed) { outF = shared; return true; }
 					ownSplit = true;
@@ -516,6 +591,16 @@ if (p.x < CFL_W && p.y < CFL_H) {
 					if (shared && !params.grainShed) misfit = true;
 					if (fit == GrainSplit::Gpu::FitResult::Stale) stale = true;
 					m_grainStatus = shedNow ? GrainSplit::GrainStatus::Shed : stale ? GrainSplit::GrainStatus::Stale : (misfit ? GrainSplit::GrainStatus::WrongSize : GrainSplit::GrainStatus::Missing);
+					pl_tex tex = srcTex;
+					if (!isWhole)
+					{
+						if (!usedCrop)
+						{
+							if (!crop(srcTex, cropDst, x0, y0, tw, th, what)) return false;
+							usedCrop = true;
+						}
+						tex = cropDst;
+					}
 					// With an arena the split's intermediates come from it (its own scope, closed before ours opens); without, the call is
 					// the one without options, byte for byte.
 					GrainSplit::Gpu::Options splitOptions;
@@ -525,124 +610,182 @@ if (p.x < CFL_W && p.y < CFL_H) {
 					if (!splitOk)
 					{
 						if (own.ScratchShort()) m_scratchShort = true;
-						return false;
+						return fail(own.LastError());
 					}
 					outF = &own.Out();
 					return true;
 				};
 				using RegionEvidence::GrainPlane;
-				if (!pick(params.grain.Gpu(GrainPlane::Luma), m.splitL, lumaIn, 0, cuL, lines, gL)) return fail(m.splitL.LastError());
-				if (!pick(params.grain.Gpu(GrainPlane::Cb), m.splitB, cbIn, cbComp, cuC, linesC, gB)) return fail(m.splitB.LastError());
-				if (!pick(params.grain.Gpu(GrainPlane::Cr), m.splitR, crIn, crComp, cuC, linesC, gR)) return fail(m.splitR.LastError());
+				if (!pick(params.grain.Gpu(GrainPlane::Luma), m.splitL, luma, m.cropL, usedCropL, whole, r.left, r.top, rw, rh, "luma", 0, cuL, lines, gL)) return false;
+				if (!pick(params.grain.Gpu(GrainPlane::Cb), m.splitB, cbTex, m.cropB, usedCropB, chromaWhole, cRect.x0, cRect.y0, pcw, pch, "chroma", cbComp, cuC, linesC, gB)) return false;
+				if (!pick(params.grain.Gpu(GrainPlane::Cr), m.splitR, crTex, sameTex ? m.cropB : m.cropR, sameTex ? usedCropB : usedCropR, chromaWhole, cRect.x0, cRect.y0, pcw, pch, "chroma", crComp, cuC, linesC, gR)) return false;
 			}
+			if (!usedCropL && m.cropL) pl_tex_destroy(gpu, &m.cropL);
+			if (!usedCropB && m.cropB) pl_tex_destroy(gpu, &m.cropB);
+			if (!usedCropR && m.cropR) pl_tex_destroy(gpu, &m.cropR);
 
 			// --- The per-frame temporaries: the arena's (SA7) or this module's own ---
 			// One scope for the rest of the Apply, opened only now: the own splits' scope above is closed, so they never nest.
 			ArenaScopeGuard arenaScope(params.arena, kArenaScope);
-			pl_tex loTex = m.lo, gcTex = m.gc, abTex = m.ab, rhoTex = m.rho, lohiTex = m.lohi, avgTex = m.avg;
+			pl_tex loTex = m.lo, abTex = m.ab, rhoTex = m.rho, lohiTex = m.lohi, avgTex = m.avg;
 			if (useArena)
 			{
-				loTex = gcTex = abTex = rhoTex = lohiTex = avgTex = nullptr;
+				loTex = abTex = rhoTex = lohiTex = avgTex = nullptr;
 				VpSkeleton::TexFormat t4{}, t2{};
 				if (VpSkeleton::PlTexBackend::FormatOf(f4, &t4) && VpSkeleton::PlTexBackend::FormatOf(f2, &t2))
 				{
 					const VpSkeleton::TexShape s4{ static_cast<uint32_t>(pcw), static_cast<uint32_t>(pch), t4 };
 					const VpSkeleton::TexShape s2{ static_cast<uint32_t>(pcw), static_cast<uint32_t>(pch), t2 };
-					loTex = params.arena->Acquire(kArenaOwner, s4);   // fixed order per shape: lo, ab, lohi, avg / gc, rho
+					loTex = params.arena->Acquire(kArenaOwner, s4);   // fixed order per shape: lo, ab, lohi, avg / rho
 					abTex = params.arena->Acquire(kArenaOwner, s4);
 					lohiTex = params.arena->Acquire(kArenaOwner, s4);
 					avgTex = params.arena->Acquire(kArenaOwner, s4);
-					gcTex = params.arena->Acquire(kArenaOwner, s2);
 					rhoTex = params.arena->Acquire(kArenaOwner, s2);
 				}
-				if (!loTex || !abTex || !lohiTex || !avgTex || !gcTex || !rhoTex)
+				if (!loTex || !abTex || !lohiTex || !avgTex || !rhoTex)
 				{
 					m_scratchShort = true;
 					return fail("scratch memory short (the chroma-grid temporaries)");
 				}
 			}
 
-			// --- Headers ---
+			// --- Headers & dynamic uniforms (GEM-076: per-frame geometry/crop/siting/eps/scale are pl_shader_var uniforms) ---
 			double peak = 1.0;
 			for (int i = 0; i < params.colorDepth; ++i) peak *= 2.0;
 			const double eps = (params.cfl.epsFrac * (peak - 1.0)) * (params.cfl.epsFrac * (peak - 1.0));
-			std::string geo;
-			geo += DefineInt("CFL_W", W) + DefineInt("CFL_H", H) + DefineInt("CFL_PCW", cw) + DefineInt("CFL_PCH", ch);
-			geo += DefineInt("CFL_LEFT", r.left) + DefineInt("CFL_TOP", r.top) + DefineInt("CFL_RIGHT", r.right) + DefineInt("CFL_BOTTOM", r.bottom);
-			geo += DefineInt("CFL_RW", rw) + DefineInt("CFL_RH", rh);
-			geo += DefineInt("CFL_CX0", cRect.x0) + DefineInt("CFL_CY0", cRect.y0) + DefineInt("CFL_CX1", cRect.x1) + DefineInt("CFL_CY1", cRect.y1);
-			geo += DefineInt("CFL_CW", pcw) + DefineInt("CFL_CH", pch);
-			geo += DefineP("CFL_FX", fx) + DefineP("CFL_FY", fy) + DefineP("CFL_SX", sx) + DefineP("CFL_SY", sy);
-			geo += DefineInt("CFL_R", params.cfl.radius) + DefineInt("CFL_CLAMPR", params.cfl.clampR) + Define("CFL_EPS", eps);
-			geo += Define("CFL_INV_CU_L", 1.0 / cuL) + Define("CFL_INV_CU_C", 1.0 / cuC) + Define("CFL_CU_OUT", cuOut);
+			const int stHalo = (std::max)(0, (std::max)(params.cfl.radius, params.cfl.clampR));
+			const int stTile = kWg + 2 * stHalo;
+			const int avgHalo = (std::max)(0, params.cfl.radius);
+			const int avgTile = kWg + 2 * avgHalo;
+			const int upTileW = UpTileDim(fx);
+			const int upTileH = UpTileDim(fy);
+			const size_t stShmem = static_cast<size_t>(stTile) * static_cast<size_t>(stTile) * 4u * sizeof(float);
+			const size_t avgShmem = static_cast<size_t>(avgTile) * static_cast<size_t>(avgTile) * 4u * sizeof(float);
+			const size_t upShmem = static_cast<size_t>(upTileW) * static_cast<size_t>(upTileH) * 4u * 4u * sizeof(float);
+			const int uSize[2] = { W, H };
+			const int uPsize[2] = { cw, ch };
+			const int uActive[4] = { r.left, r.top, r.right, r.bottom };
+			const int uLrect[4] = { r.left, r.top, rw, rh };
+			const int uCrect[4] = { cRect.x0, cRect.y0, cRect.x1, cRect.y1 };
+			const int uLorg[2] = { r.left, r.top };
+			const int uCorg[2] = { cRect.x0, cRect.y0 };
+			const int uCsize[2] = { pcw, pch };
+			const float uScale[2] = { static_cast<float>(fx), static_cast<float>(fy) };
+			const float uShift[2] = { static_cast<float>(sx), static_cast<float>(sy) };
+			const float uEps = static_cast<float>(eps);
+			const float uInvCuL = static_cast<float>(1.0 / cuL);
+			const float uInvCuC = static_cast<float>(1.0 / cuC);
+			const float uCuOut = static_cast<float>(cuOut);
+			float uGsCu[3] = { 0.0f, 0.0f, 0.0f };
 			// With the guard every grain read goes through the accessor of its plane's frame (prelude + BindView, per-plane names).
 			std::string lumaView, chromaView;
 			std::vector<pl_shader_desc> lumaDescs, chromaDescs;
+			std::vector<pl_shader_var> lumaVars, chromaVars;
 			if (guard)
 			{
-				AddGrainView(*gL, 0, lumaView, lumaDescs);
-				AddGrainView(*gB, 1, chromaView, chromaDescs);
-				AddGrainView(*gR, 2, chromaView, chromaDescs);
+				AddGrainView(*gL, 0, lumaView, lumaDescs, lumaVars, uGsCu[0]);
+				AddGrainView(*gB, 1, chromaView, chromaDescs, chromaVars, uGsCu[1]);
+				AddGrainView(*gR, 2, chromaView, chromaDescs, chromaVars, uGsCu[2]);
 			}
 			const std::string lumaReader = guard ?
 				lumaView + "float cfl_yc(ivec2 p)\n{\n    vec4 s = gsL_fetch(p);\n    return s.w + s.x + s.y;\n}\n" :
-				"float cfl_yc(ivec2 p)\n{\n    return texelFetch(ysrc, p, 0).x * CFL_INV_CU_L;\n}\n";
+				"float cfl_yc(ivec2 p)\n{\n    return texelFetch(ysrc, p + cfl_lorg, 0).x * cfl_inv_cu_l;\n}\n";
 
 			const int cgx = Groups(pcw), cgy = Groups(pch);
 
-			// --- B + A (chroma): luma at the sites, clean chroma, chroma grain ---
+			// --- B + A (chroma): luma at the sites, clean chroma ---
 			{
-				std::string hdr = geo + lumaReader + RawReader("cfl_craw", "craw0", "craw1", sameTex, cbComp, crComp);
-				hdr += guard ?
-					chromaView + "vec2 cfl_cc(ivec2 j)\n{\n    vec4 b = gsB_fetch(j), r = gsR_fetch(j);\n    return vec2(b.w + b.x + b.y, r.w + r.x + r.y);\n}\n" :
-					"vec2 cfl_cc(ivec2 j)\n{\n    return cfl_craw(j);\n}\n";
+				std::string hdr = lumaReader;
 				std::vector<pl_shader_desc> d;
+				std::vector<pl_shader_var> v = {
+					{ pl_var_ivec2("cfl_csize"), uCsize, true },
+					{ pl_var_ivec2("cfl_corg"), uCorg, true },
+					{ pl_var_ivec4("cfl_lrect"), uLrect, true },
+					{ pl_var_vec2("cfl_scale"), uScale, true },
+					{ pl_var_vec2("cfl_shift"), uShift, true } };
+				if (guard)
+				{
+					hdr += chromaView + "vec2 cfl_cc(ivec2 j)\n{\n    vec4 b = gsB_fetch(j), r = gsR_fetch(j);\n    return vec2(b.w + b.x + b.y, r.w + r.x + r.y);\n}\n";
+					d.insert(d.end(), lumaDescs.begin(), lumaDescs.end());
+					d.insert(d.end(), chromaDescs.begin(), chromaDescs.end());
+					v.insert(v.end(), lumaVars.begin(), lumaVars.end());
+					v.insert(v.end(), chromaVars.begin(), chromaVars.end());
+				}
+				else
+				{
+					hdr += RawReader("cfl_craw", "craw0", "craw1", sameTex, cbComp, crComp) + "vec2 cfl_cc(ivec2 j)\n{\n    return cfl_craw(j + cfl_corg);\n}\n";
+					d.push_back(Sampled("ysrc", luma));
+					d.push_back(Sampled("craw0", cbTex));
+					if (!sameTex) d.push_back(Sampled("craw1", crTex));
+					v.push_back({ pl_var_ivec2("cfl_lorg"), uLorg, true });
+					v.push_back({ pl_var_float("cfl_inv_cu_l"), &uInvCuL, true });
+					v.push_back({ pl_var_float("cfl_inv_cu_c"), &uInvCuC, true });
+				}
+				d.push_back(Storage("o_lo", loTex));
+				if (!Pass(dispatch, "VideoProcessor chroma upscale: luma at the sites", hdr, LO_BODY, d.data(), static_cast<int>(d.size()),
+					v.data(), static_cast<int>(v.size()), cgx, cgy, 0, kWg, kWg))
+					return fail("luma-at-sites pass failed");
+			}
+			// --- C: fused regression and neighbour range (tiled sh_lo[CFL_ST_T][CFL_ST_T]) ---
+			{
+				const std::string hdr = DefineInt("CFL_WG", kWg) + DefineInt("CFL_R", params.cfl.radius) +
+					DefineInt("CFL_CLAMPR", params.cfl.clampR) + DefineInt("CFL_ST_H", stHalo) + DefineInt("CFL_ST_T", stTile) + STATS_HEADER;
+				const pl_shader_desc d[4] = { Sampled("t_lo", loTex), Storage("o_ab", abTex), Storage("o_rho", rhoTex), Storage("o_lohi", lohiTex) };
+				const pl_shader_var v[2] = {
+					{ pl_var_ivec2("cfl_csize"), uCsize, true },
+					{ pl_var_float("cfl_eps"), &uEps, true } };
+				if (!Pass(dispatch, "VideoProcessor chroma upscale: regression", hdr, STATS_BODY, d, 4, v, 2, cgx, cgy, stShmem, kWg, kWg))
+					return fail("regression pass failed");
+			}
+			// --- C2: box average of a and b (tiled sh_ab[CFL_AVG_T][CFL_AVG_T]) ---
+			{
+				const std::string hdr = DefineInt("CFL_WG", kWg) + DefineInt("CFL_R", params.cfl.radius) +
+					DefineInt("CFL_AVG_H", avgHalo) + DefineInt("CFL_AVG_T", avgTile) + AVG_HEADER;
+				const pl_shader_desc d[2] = { Sampled("t_ab", abTex), Storage("o_avg", avgTex) };
+				const pl_shader_var v[1] = { { pl_var_ivec2("cfl_csize"), uCsize, true } };
+				if (!Pass(dispatch, "VideoProcessor chroma upscale: averaging", hdr, AVG_BODY, d, 2, v, 1, cgx, cgy, avgShmem, kWg, kWg))
+					return fail("averaging pass failed");
+			}
+			// --- D + E: the upsample (tiled active-picture chroma neighborhood + inline grain raw - cc) ---
+			{
+				std::string hdr = DefineInt("CFL_WG", kWg) + DefineInt("CFL_UP_TW", upTileW) + DefineInt("CFL_UP_TH", upTileH) +
+					DefineInt("CFL_GUARD", guard ? 1 : 0) + lumaReader + UP_FUNCS + RawReader("cfl_csrc", "csrc0", "csrc1", sameTex, cbComp, crComp);
+				std::vector<pl_shader_desc> d;
+				std::vector<pl_shader_var> v = {
+					{ pl_var_ivec2("cfl_size"), uSize, true },
+					{ pl_var_ivec2("cfl_psize"), uPsize, true },
+					{ pl_var_ivec4("cfl_active"), uActive, true },
+					{ pl_var_ivec4("cfl_crect"), uCrect, true },
+					{ pl_var_ivec2("cfl_csize"), uCsize, true },
+					{ pl_var_vec2("cfl_scale"), uScale, true },
+					{ pl_var_vec2("cfl_shift"), uShift, true },
+					{ pl_var_float("cfl_inv_cu_c"), &uInvCuC, true },
+					{ pl_var_float("cfl_cu_out"), &uCuOut, true } };
 				if (guard)
 				{
 					d.insert(d.end(), lumaDescs.begin(), lumaDescs.end());
-					d.insert(d.end(), chromaDescs.begin(), chromaDescs.end());
+					v.insert(v.end(), lumaVars.begin(), lumaVars.end());
 				}
 				else
-					d.push_back(Sampled("ysrc", lumaIn));
-				d.push_back(Sampled("craw0", cbIn));
-				if (!sameTex) d.push_back(Sampled("craw1", crIn));
-				d.push_back(Storage("o_lo", loTex));
-				d.push_back(Storage("o_gc", gcTex));
-				if (!Pass(dispatch, "VideoProcessor chroma upscale: luma at the sites", hdr, LO_BODY, d.data(), static_cast<int>(d.size()), nullptr, 0, cgx, cgy, 0))
-					return fail("luma-at-sites pass failed");
-			}
-			// --- C: regression and neighbour range ---
-			{
-				const pl_shader_desc d[4] = { Sampled("t_lo", loTex), Storage("o_ab", abTex), Storage("o_rho", rhoTex), Storage("o_lohi", lohiTex) };
-				if (!Pass(dispatch, "VideoProcessor chroma upscale: regression", geo + STATS_FUNCS, STATS_BODY, d, 4, nullptr, 0, cgx, cgy, 0))
-					return fail("regression pass failed");
-			}
-			{
-				const pl_shader_desc d[2] = { Sampled("t_ab", abTex), Storage("o_avg", avgTex) };
-				if (!Pass(dispatch, "VideoProcessor chroma upscale: averaging", geo, AVG_BODY, d, 2, nullptr, 0, cgx, cgy, 0))
-					return fail("averaging pass failed");
-			}
-			// --- D + E: the upsample ---
-			{
-				std::string hdr = geo + lumaReader + UP_FUNCS + RawReader("cfl_csrc", "csrc0", "csrc1", sameTex, cbComp, crComp);
-				std::vector<pl_shader_desc> d;
-				if (guard) d.insert(d.end(), lumaDescs.begin(), lumaDescs.end());
-				else d.push_back(Sampled("ysrc", lumaIn));
+				{
+					d.push_back(Sampled("ysrc", luma));
+					v.push_back({ pl_var_ivec2("cfl_lorg"), uLorg, true });
+					v.push_back({ pl_var_float("cfl_inv_cu_l"), &uInvCuL, true });
+				}
 				d.push_back(Sampled("t_avg", avgTex));
 				d.push_back(Sampled("t_rho", rhoTex));
 				d.push_back(Sampled("t_lohi", lohiTex));
 				d.push_back(Sampled("t_lo", loTex));
-				d.push_back(Sampled("t_gc", gcTex));
 				d.push_back(Sampled("csrc0", cbTex));
 				if (!sameTex) d.push_back(Sampled("csrc1", crTex));
 				d.push_back(Storage("o_up", m.out));
-				if (!Pass(dispatch, "VideoProcessor chroma upscale: upsample", hdr, UP_BODY, d.data(), static_cast<int>(d.size()), nullptr, 0, Groups(W), Groups(H), 0))
+				if (!Pass(dispatch, "VideoProcessor chroma upscale: upsample", hdr, UP_BODY, d.data(), static_cast<int>(d.size()),
+					v.data(), static_cast<int>(v.size()), Groups(W), Groups(H), upShmem, kWg, kWg))
 					return fail("upsample pass failed");
 			}
 
-			// --- The frame for libplacebo: luma unchanged, full-size CbCr, shifts 0 ---
+			// --- The frame for libplacebo: luma unchanged, full-size CbCr (shifts 0), extra non-Cb/Cr planes preserved ---
 			pl_frame frame = source;
-			frame.num_planes = 2;
 			for (int i = 1; i < PL_MAX_PLANES; ++i) frame.planes[i] = pl_plane{};
 			pl_plane up{};
 			up.texture = m.out;
@@ -654,6 +797,33 @@ if (p.x < CFL_W && p.y < CFL_H) {
 			up.shift_x = 0.0f;
 			up.shift_y = 0.0f;
 			frame.planes[1] = up;
+			int outIdx = 2;
+			for (int i = 1; i < source.num_planes; ++i)
+			{
+				const pl_plane& sp = source.planes[i];
+				bool hasExtra = false;
+				bool hasChromaOrLuma = false;
+				for (int c = 0; c < sp.components && c < 4; ++c)
+				{
+					const int cm = sp.component_mapping[c];
+					if (cm == PL_CHANNEL_CB || cm == PL_CHANNEL_CR || cm == PL_CHANNEL_Y) hasChromaOrLuma = true;
+					else if (cm != PL_CHANNEL_NONE) hasExtra = true;
+				}
+				if (!hasExtra) continue;
+				if (outIdx >= PL_MAX_PLANES) return fail("too many planes to preserve extra channels");
+				pl_plane extra = sp;
+				if (hasChromaOrLuma)
+				{
+					for (int c = 0; c < extra.components && c < 4; ++c)
+					{
+						const int cm = extra.component_mapping[c];
+						if (cm == PL_CHANNEL_CB || cm == PL_CHANNEL_CR || cm == PL_CHANNEL_Y)
+							extra.component_mapping[c] = PL_CHANNEL_NONE;
+					}
+				}
+				frame.planes[outIdx++] = extra;
+			}
+			frame.num_planes = outIdx;
 			result = frame;
 			m_status = !ownSplit ? "ok" : (misfit ? "ok; own grain split (the shared product does not fit)" : "ok; own grain split");
 			return true;

@@ -172,4 +172,24 @@ namespace VpLaneProducts
 
 	// The GLSL of the extend pass (pinned by the tests).
 	const char* ExtendBodyGlsl();
+
+	// ---- W21-4: P13 GPU tap passes (zero CPU upload) ------------------------------------------------------------------
+
+	// Unpacks a P13 raw DV tunnel rgba8 texture directly into the R16 unorm lane tap (code12 << 4 == Q6) in one GPU
+	// compute dispatch via the shared DvTunnelGlsl::kHeader (HDMI 1.4a 6.5.4). `bitShift` is the container shift
+	// (DolbyVisionTunnelUnpackReference::ContainerShift: 0..4). Returns false visibly on invalid handles, format,
+	// capability, dimension mismatch, aliasing, or out-of-range shift.
+	bool BuildDvTapFromP13Raw(pl_dispatch dispatch, pl_tex p13RawRgba8, pl_tex tapR16, bool bigEndian, uint32_t bitShift,
+		pl_timer timer = nullptr);
+
+	// Copies or MSB-aligns an unpacked P13 R16 unorm luma plane into the R16 unorm lane tap in one GPU compute dispatch.
+	// `msbShift` follows SourceFrameView::MsbAlign (`(raw << msbShift) & 0xFFFF`, valid 0..15): 0 when P13 is already
+	// MSB-aligned (SourceUnpackGpu output: DV 12-bit code12 << 4 == Q6, exact 0-texel-diff identity copy), or 1..15 to
+	// left-shift unshifted codes into the Q6 lane axis. Returns false visibly on invalid inputs or aliasing.
+	bool BuildTapFromP13Luma(pl_dispatch dispatch, pl_tex p13LumaR16, pl_tex tapR16, uint32_t msbShift,
+		pl_timer timer = nullptr);
+
+	// The GLSL bodies of the P13 GPU tap passes (pinned by the tests).
+	const char* DvTapFromP13RawBodyGlsl();
+	const char* TapFromP13LumaBodyGlsl();
 }

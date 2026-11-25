@@ -772,6 +772,689 @@ namespace VideoProcessorTest
 			pl_dispatch_destroy(&dispatch);
 			Assert::AreEqual(0, failures, L"no re-base variant rings into the bars or below black inside the crop");
 		}
+
+		TEST_METHOD(KernelInverseIntermediateKeepsNegativeLobes)
+		{
+			// GEM-065 (Q#4): the 2-pass kernel-inverse re-base (H into inverseTemp, then V into out)
+			// must use a floating-point pass-1 intermediate so negative lobes (< 0.0) and overshoot
+			// (> 1.0) produced by pass 1 survive into pass 2 instead of being clipped by UNORM [0, 1].
+			//
+			// Construction: even rows carry a sharp 0.0 -> 1.0 step at column kStepX = 63 (aligned to
+			// the negative/overshoot lobes of the 2:1 Lanczos-3 inverse); odd rows are constant ~0.5.
+			// Because the symmetric 2:1 inverse weights sum to 0.5 on even rows and 0.5 on odd rows,
+			// pass 2 maps pass-1 T(x) linearly to O(x, y) = 0.5 * T(x) + 0.5 * kOddLevel inside
+			// [0.20, 0.80] - avoiding any clipping at the final output texture regardless of whether
+			// the output plane is r16 UNORM or float, while T_recovered(x) = 2 * O(x, y) - kOddLevel
+			// recovers the exact pass-1 intermediate value.
+			const int N = 128, M = 64, kStepX = 63, kMargin = 16;
+			const uint16_t kOddCode = 32768u;
+			const float kOddLevel = kOddCode / 65535.0f;
+			// Derived tolerance: 1 IEEE-754 binary16 ULP at unity (2^-10), covering either r32f or r16f
+			// intermediates plus r16 output quantization; ~48x tighter than the ~0.047 UNORM clip error.
+			const double kFloatTol = 1.0 / 1024.0;
+
+			const int k = KernelInverse::Find("lanczos3");
+			Assert::IsTrue(k >= 0, L"lanczos3 kernel-inverse candidate must exist");
+			const KernelInverse::Candidate& cand = KernelInverse::Candidates()[static_cast<size_t>(k)];
+
+			std::vector<uint16_t> lumaRaw(static_cast<size_t>(N) * N, 0u);
+			std::vector<float> inFloat(static_cast<size_t>(N) * N, 0.0f);
+			for (int y = 0; y < N; ++y)
+				for (int x = 0; x < N; ++x)
+				{
+					const uint16_t code = (y % 2 == 0) ? (x < kStepX ? 0u : 65535u) : kOddCode;
+					const size_t idx = static_cast<size_t>(y) * N + x;
+					lumaRaw[idx] = code;
+					inFloat[idx] = code / 65535.0f;
+				}
+
+			// Independent CPU 2-pass reference (unclipped float pass 1) and mandatory in-test
+			// negative control (pass 1 clamped to [0, 1] as UNORM does on the exact same input).
+			std::vector<float> pass1Float(static_cast<size_t>(N) * M, 0.0f);
+			for (int y = 0; y < N; ++y)
+				KernelInverse::InverseLine(cand, &inFloat[static_cast<size_t>(y) * N], N, &pass1Float[static_cast<size_t>(y) * M]);
+
+			double refMinPass1 = 1e9, refMaxPass1 = -1e9;
+			for (int x = kMargin; x < M - kMargin; ++x)
+			{
+				const double v = pass1Float[static_cast<size_t>(x)]; // row 0 (even)
+				refMinPass1 = (std::min)(refMinPass1, v);
+				refMaxPass1 = (std::max)(refMaxPass1, v);
+			}
+			Assert::IsTrue(refMinPass1 < -0.05 && refMaxPass1 > 1.05,
+				L"step input must excite measurable pass-1 negative lobes (< -0.05) and overshoot (> 1.05)");
+
+			std::vector<float> pass1Clamped(pass1Float.size(), 0.0f);
+			for (size_t i = 0; i < pass1Float.size(); ++i)
+				pass1Clamped[i] = (std::min)(1.0f, (std::max)(0.0f, pass1Float[i]));
+
+			auto verticalInverse = [&](const std::vector<float>& temp, std::vector<float>& out) {
+				out.assign(static_cast<size_t>(M) * M, 0.0f);
+				std::vector<float> colIn(static_cast<size_t>(N)), colOut(static_cast<size_t>(M));
+				for (int x = 0; x < M; ++x)
+				{
+					for (int y = 0; y < N; ++y)
+						colIn[static_cast<size_t>(y)] = temp[static_cast<size_t>(y) * M + x];
+					KernelInverse::InverseLine(cand, colIn.data(), N, colOut.data());
+					for (int y = 0; y < M; ++y)
+						out[static_cast<size_t>(y) * M + x] = colOut[static_cast<size_t>(y)];
+				}
+			};
+			std::vector<float> refFloat, refClamped;
+			verticalInverse(pass1Float, refFloat);
+			verticalInverse(pass1Clamped, refClamped);
+
+			double clampedMaxDiff = 0.0;
+			double clampedMinRecovered = 1e9, clampedMaxRecovered = -1e9;
+			for (int y = kMargin; y < M - kMargin; ++y)
+				for (int x = kMargin; x < M - kMargin; ++x)
+				{
+					const size_t idx = static_cast<size_t>(y) * M + x;
+					clampedMaxDiff = (std::max)(clampedMaxDiff, std::fabs(static_cast<double>(refFloat[idx]) - refClamped[idx]));
+					const double rec = 2.0 * refClamped[idx] - kOddLevel;
+					clampedMinRecovered = (std::min)(clampedMinRecovered, rec);
+					clampedMaxRecovered = (std::max)(clampedMaxRecovered, rec);
+				}
+			// Mandatory negative control: prove pass-1 UNORM clipping destroys lobes and causes > 1e-3 error.
+			Assert::IsTrue(clampedMaxDiff > 1e-3,
+				L"negative control: UNORM clamping of inverseTemp must introduce measurable error (> 1e-3)");
+			Assert::IsTrue(clampedMinRecovered >= -1e-5 && clampedMaxRecovered <= 1.0 + 1e-5,
+				L"negative control: UNORM clamping must clip recovered pass-1 values to [0, 1]");
+
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			pl_dispatch dispatch = pl_dispatch_create(fixture.Log(), gpu);
+
+			pl_tex_params lp{};
+			lp.w = N; lp.h = N;
+			lp.format = pl_find_named_fmt(gpu, "r16");
+			lp.sampleable = true;
+			lp.initial_data = lumaRaw.data();
+			Assert::IsNotNull(lp.format, L"r16 source format must be available");
+			pl_tex lumaTex = pl_tex_create(gpu, &lp);
+			Assert::IsNotNull(lumaTex, L"r16 source texture creation");
+
+			pl_frame source{};
+			source.num_planes = 1;
+			source.planes[0].texture = lumaTex;
+			source.planes[0].components = 1;
+			source.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+			source.crop = { 0.0f, 0.0f, static_cast<float>(N), static_cast<float>(N) };
+
+			SourceRebase::Module rebase;
+			rebase.SetKernel(k);
+			pl_frame out{};
+			const bool applied = rebase.Apply(gpu, dispatch, source, 0.5, out);
+			const std::string applyErr = rebase.LastError();
+			const bool kernelUsed = rebase.KernelUsed();
+			std::vector<float> gpuOut;
+			std::string outFmtName = "?";
+			bool outPlane0Is16Unorm = false;
+			if (applied && out.planes[0].texture)
+			{
+				if (out.planes[0].texture->params.format)
+				{
+					const pl_fmt outFmt = out.planes[0].texture->params.format;
+					if (outFmt->name)
+						outFmtName = outFmt->name;
+					outPlane0Is16Unorm = (outFmt->type == PL_FMT_UNORM && outFmt->component_depth[0] == 16);
+				}
+				DownloadRebasedPlane(gpu, out.planes[0].texture, 1, gpuOut);
+			}
+			pl_tex_destroy(gpu, &lumaTex);
+			rebase.Release(gpu);
+			pl_dispatch_destroy(&dispatch);
+
+			Assert::IsTrue(applied, ExtendedRangeGpuProbe::ToWide(applyErr).c_str());
+			Assert::IsTrue(kernelUsed, L"kernel-inverse 2-pass path must execute");
+			Assert::IsTrue(rebase.FormatNote().empty(),
+				(L"32-bit float intermediate happy path must not emit a precision-fallback note: " +
+					ExtendedRangeGpuProbe::ToWide(rebase.FormatNote())).c_str());
+			Assert::IsTrue(outPlane0Is16Unorm,
+				(L"Q#4 output-format compatibility: kernel-inverse output plane 0 must remain 16-bit UNORM (got " +
+					ExtendedRangeGpuProbe::ToWide(outFmtName) + L")").c_str());
+			Assert::AreEqual(static_cast<size_t>(M) * M, gpuOut.size(), L"re-based luma size");
+
+			double gpuErrFloat = 0.0, gpuDiffClamped = 0.0;
+			double gpuMinPass1 = 1e9, gpuMaxPass1 = -1e9;
+			for (int y = kMargin; y < M - kMargin; ++y)
+				for (int x = kMargin; x < M - kMargin; ++x)
+				{
+					const size_t idx = static_cast<size_t>(y) * M + x;
+					const double v = gpuOut[idx];
+					gpuErrFloat = (std::max)(gpuErrFloat, std::fabs(v - refFloat[idx]));
+					gpuDiffClamped = (std::max)(gpuDiffClamped, std::fabs(v - refClamped[idx]));
+					const double rec = 2.0 * v - kOddLevel;
+					gpuMinPass1 = (std::min)(gpuMinPass1, rec);
+					gpuMaxPass1 = (std::max)(gpuMaxPass1, rec);
+				}
+
+			char line[256];
+			snprintf(line, sizeof(line),
+				"KernelInverse intermediate (out=%s): maxErrVsFloat=%.6f (tol %.6f), negCtrlClampedErr=%.6f, recovered pass1=[%.5f, %.5f] (ref [%.5f, %.5f])\n",
+				outFmtName.c_str(), gpuErrFloat, kFloatTol, clampedMaxDiff, gpuMinPass1, gpuMaxPass1, refMinPass1, refMaxPass1);
+			Logger::WriteMessage(line);
+
+			Assert::IsTrue(gpuErrFloat < kFloatTol,
+				L"kernel-inverse GPU output must match unclipped float 2-pass reference (inverseTemp must not clip to UNORM [0, 1])");
+			Assert::IsTrue(gpuMinPass1 < refMinPass1 * 0.5,
+				L"kernel-inverse pass-1 intermediate must preserve negative-lobe undershoot (< 0.0)");
+			Assert::IsTrue(gpuMaxPass1 > 1.0 + (refMaxPass1 - 1.0) * 0.5,
+				L"kernel-inverse pass-1 intermediate must preserve positive overshoot (> 1.0)");
+			Assert::IsTrue(gpuDiffClamped > clampedMaxDiff * 0.5,
+				L"kernel-inverse GPU output must diverge from the UNORM-clamped pass-1 negative control");
+		}
+
+		TEST_METHOD(SeparableChromaIntermediateKeepsOvershoot)
+		{
+			// GEM-065 (Q#4): the 2-pass separable chroma path (H into separableTemp, then V into out)
+			// must use a floating-point pass-1 intermediate so Lanczos-3 ringing undershoot (< 0.0)
+			// and overshoot (> 1.0) after pass 1 are preserved into pass 2 instead of clipped by rg16 UNORM.
+			//
+			// Uses the exact same even-row step / odd-row mid-grey construction on both Cb (0 -> 1)
+			// and Cr (1 -> 0) channels of a 4:2:0 rg16 chroma plane, verified against an independent
+			// pure-CPU analytical 2-pass Lanczos-3 reference and an in-test UNORM-clamped pass-1
+			// negative control on the exact same input.
+			const int N = 128, M = 64, kStepX = 63, kMargin = 16;
+			const uint16_t kOddCode = 32768u;
+			const float kOddLevel = kOddCode / 65535.0f;
+			// Derived tolerance: 1 IEEE-754 binary16 ULP at unity (2^-10), covering rg32f/rg16f
+			// intermediate + 256-entry LUT phase interpolation (< 2e-5) + rg16 output quantization;
+			// ~42x tighter than the ~0.041 UNORM pass-1 clip error.
+			const double kFloatTol = 1.0 / 1024.0;
+			const double kPi = 3.14159265358979323846;
+
+			auto lanczos3Down2 = [&](const float* in, int len, float* out) {
+				auto sinc = [&](double x) {
+					return std::fabs(x) < 1e-12 ? 1.0 : std::sin(kPi * x) / (kPi * x);
+				};
+				const int outLen = len / 2;
+				for (int i = 0; i < outLen; ++i)
+				{
+					const double center = 2.0 * i + 1.0;
+					double num = 0.0, den = 0.0;
+					for (int j = 2 * i - 5; j <= 2 * i + 6; ++j)
+					{
+						const double d = (j + 0.5) - center;
+						if (std::fabs(d) < 6.0)
+						{
+							const double w = sinc(d * 0.5) * sinc(d / 6.0);
+							const int jc = (std::min)(len - 1, (std::max)(0, j));
+							num += w * in[jc];
+							den += w;
+						}
+					}
+					out[i] = static_cast<float>(num / den);
+				}
+			};
+
+			std::vector<uint16_t> lumaRaw(static_cast<size_t>(2 * N) * (2 * N), kOddCode);
+			std::vector<uint16_t> chromaRaw(static_cast<size_t>(N) * N * 2, 0u);
+			std::vector<float> inFloat[2];
+			inFloat[0].resize(static_cast<size_t>(N) * N, 0.0f);
+			inFloat[1].resize(static_cast<size_t>(N) * N, 0.0f);
+			for (int y = 0; y < N; ++y)
+				for (int x = 0; x < N; ++x)
+				{
+					const uint16_t cb = (y % 2 == 0) ? (x < kStepX ? 0u : 65535u) : kOddCode;
+					const uint16_t cr = (y % 2 == 0) ? (x < kStepX ? 65535u : 0u) : kOddCode;
+					const size_t idx = static_cast<size_t>(y) * N + x;
+					chromaRaw[idx * 2] = cb;
+					chromaRaw[idx * 2 + 1] = cr;
+					inFloat[0][idx] = cb / 65535.0f;
+					inFloat[1][idx] = cr / 65535.0f;
+				}
+
+			std::vector<float> refFloat[2], refClamped[2];
+			double refMinPass1[2] = { 1e9, 1e9 }, refMaxPass1[2] = { -1e9, -1e9 };
+			double clampedMaxDiff[2] = { 0.0, 0.0 };
+			for (int ch = 0; ch < 2; ++ch)
+			{
+				std::vector<float> pass1Float(static_cast<size_t>(N) * M, 0.0f);
+				for (int y = 0; y < N; ++y)
+					lanczos3Down2(&inFloat[ch][static_cast<size_t>(y) * N], N, &pass1Float[static_cast<size_t>(y) * M]);
+				for (int x = kMargin; x < M - kMargin; ++x)
+				{
+					const double v = pass1Float[static_cast<size_t>(x)];
+					refMinPass1[ch] = (std::min)(refMinPass1[ch], v);
+					refMaxPass1[ch] = (std::max)(refMaxPass1[ch], v);
+				}
+				Assert::IsTrue(refMinPass1[ch] < -0.05 && refMaxPass1[ch] > 1.05,
+					L"chroma step must excite measurable Lanczos-3 pass-1 negative lobes (< -0.05) and overshoot (> 1.05)");
+
+				std::vector<float> pass1Clamped(pass1Float.size(), 0.0f);
+				for (size_t i = 0; i < pass1Float.size(); ++i)
+					pass1Clamped[i] = (std::min)(1.0f, (std::max)(0.0f, pass1Float[i]));
+
+				auto verticalPass = [&](const std::vector<float>& temp, std::vector<float>& dst) {
+					dst.assign(static_cast<size_t>(M) * M, 0.0f);
+					std::vector<float> colIn(static_cast<size_t>(N)), colOut(static_cast<size_t>(M));
+					for (int x = 0; x < M; ++x)
+					{
+						for (int y = 0; y < N; ++y)
+							colIn[static_cast<size_t>(y)] = temp[static_cast<size_t>(y) * M + x];
+						lanczos3Down2(colIn.data(), N, colOut.data());
+						for (int y = 0; y < M; ++y)
+							dst[static_cast<size_t>(y) * M + x] = colOut[static_cast<size_t>(y)];
+					}
+				};
+				verticalPass(pass1Float, refFloat[ch]);
+				verticalPass(pass1Clamped, refClamped[ch]);
+
+				double clampedMinRec = 1e9, clampedMaxRec = -1e9;
+				for (int y = kMargin; y < M - kMargin; ++y)
+					for (int x = kMargin; x < M - kMargin; ++x)
+					{
+						const size_t idx = static_cast<size_t>(y) * M + x;
+						clampedMaxDiff[ch] = (std::max)(clampedMaxDiff[ch],
+							std::fabs(static_cast<double>(refFloat[ch][idx]) - refClamped[ch][idx]));
+						const double rec = 2.0 * refClamped[ch][idx] - kOddLevel;
+						clampedMinRec = (std::min)(clampedMinRec, rec);
+						clampedMaxRec = (std::max)(clampedMaxRec, rec);
+					}
+				// Mandatory negative control: prove pass-1 UNORM clipping introduces > 1e-3 error.
+				Assert::IsTrue(clampedMaxDiff[ch] > 1e-3,
+					L"negative control: UNORM clamping of separableTemp must introduce measurable error (> 1e-3)");
+				Assert::IsTrue(clampedMinRec >= -1e-5 && clampedMaxRec <= 1.0 + 1e-5,
+					L"negative control: UNORM clamping must clip recovered pass-1 chroma values to [0, 1]");
+			}
+
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			pl_dispatch dispatch = pl_dispatch_create(fixture.Log(), gpu);
+
+			pl_tex_params lp{};
+			lp.w = 2 * N; lp.h = 2 * N;
+			lp.format = pl_find_named_fmt(gpu, "r16");
+			lp.sampleable = true;
+			lp.initial_data = lumaRaw.data();
+			pl_tex_params cp{};
+			cp.w = N; cp.h = N;
+			cp.format = pl_find_named_fmt(gpu, "rg16");
+			cp.sampleable = true;
+			cp.initial_data = chromaRaw.data();
+			Assert::IsTrue(lp.format != nullptr && cp.format != nullptr, L"r16/rg16 source formats must be available");
+			pl_tex lumaTex = pl_tex_create(gpu, &lp);
+			pl_tex chromaTex = pl_tex_create(gpu, &cp);
+			Assert::IsTrue(lumaTex != nullptr && chromaTex != nullptr, L"source planes creation");
+
+			pl_frame source{};
+			source.num_planes = 2;
+			source.planes[0].texture = lumaTex;
+			source.planes[0].components = 1;
+			source.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+			source.planes[1].texture = chromaTex;
+			source.planes[1].components = 2;
+			source.planes[1].component_mapping[0] = PL_CHANNEL_CB;
+			source.planes[1].component_mapping[1] = PL_CHANNEL_CR;
+			source.crop = { 0.0f, 0.0f, static_cast<float>(2 * N), static_cast<float>(2 * N) };
+
+			SourceRebase::Module rebase;
+			rebase.separable = true; // explicit: exercises the 2-pass separableTemp path on plane 1
+			pl_frame out{};
+			const bool applied = rebase.Apply(gpu, dispatch, source, 0.5, out);
+			const std::string applyErr = rebase.LastError();
+			int outW = 0, outH = 0;
+			std::string outFmt0Name = "?";
+			std::string outFmtName = "?";
+			bool outPlane0Is16Unorm = false;
+			bool outPlane1Is16Unorm = false;
+			std::vector<float> gpuChroma;
+			if (applied && out.planes[0].texture && out.planes[0].texture->params.format)
+			{
+				const pl_fmt outFmt0 = out.planes[0].texture->params.format;
+				if (outFmt0->name)
+					outFmt0Name = outFmt0->name;
+				outPlane0Is16Unorm = (outFmt0->type == PL_FMT_UNORM && outFmt0->component_depth[0] == 16);
+			}
+			if (applied && out.planes[1].texture)
+			{
+				outW = out.planes[1].texture->params.w;
+				outH = out.planes[1].texture->params.h;
+				if (out.planes[1].texture->params.format)
+				{
+					const pl_fmt outFmt1 = out.planes[1].texture->params.format;
+					if (outFmt1->name)
+						outFmtName = outFmt1->name;
+					outPlane1Is16Unorm = (outFmt1->type == PL_FMT_UNORM &&
+						outFmt1->component_depth[0] == 16 && outFmt1->component_depth[1] == 16);
+				}
+				DownloadRebasedPlane(gpu, out.planes[1].texture, 2, gpuChroma);
+			}
+			pl_tex_destroy(gpu, &lumaTex);
+			pl_tex_destroy(gpu, &chromaTex);
+			rebase.Release(gpu);
+			pl_dispatch_destroy(&dispatch);
+
+			Assert::IsTrue(applied, ExtendedRangeGpuProbe::ToWide(applyErr).c_str());
+			Assert::IsTrue(rebase.FormatNote().empty(),
+				(L"32-bit float intermediate happy path must not emit a precision-fallback note: " +
+					ExtendedRangeGpuProbe::ToWide(rebase.FormatNote())).c_str());
+			Assert::IsTrue(outPlane0Is16Unorm,
+				(L"Q#4 output-format compatibility: re-based luma plane 0 must remain 16-bit UNORM (got " +
+					ExtendedRangeGpuProbe::ToWide(outFmt0Name) + L")").c_str());
+			Assert::IsTrue(outPlane1Is16Unorm,
+				(L"Q#4 output-format compatibility: re-based chroma plane 1 must remain 16-bit UNORM (got " +
+					ExtendedRangeGpuProbe::ToWide(outFmtName) + L")").c_str());
+			Assert::AreEqual(M, outW, L"re-based chroma width");
+			Assert::AreEqual(M, outH, L"re-based chroma height");
+			Assert::AreEqual(static_cast<size_t>(M) * M * 2, gpuChroma.size(), L"re-based chroma buffer size");
+
+			for (int ch = 0; ch < 2; ++ch)
+			{
+				double gpuErrFloat = 0.0, gpuDiffClamped = 0.0;
+				double gpuMinPass1 = 1e9, gpuMaxPass1 = -1e9;
+				for (int y = kMargin; y < M - kMargin; ++y)
+					for (int x = kMargin; x < M - kMargin; ++x)
+					{
+						const size_t idx = static_cast<size_t>(y) * M + x;
+						const double v = gpuChroma[idx * 2 + ch];
+						gpuErrFloat = (std::max)(gpuErrFloat, std::fabs(v - refFloat[ch][idx]));
+						gpuDiffClamped = (std::max)(gpuDiffClamped, std::fabs(v - refClamped[ch][idx]));
+						const double rec = 2.0 * v - kOddLevel;
+						gpuMinPass1 = (std::min)(gpuMinPass1, rec);
+						gpuMaxPass1 = (std::max)(gpuMaxPass1, rec);
+					}
+				char line[256];
+				snprintf(line, sizeof(line),
+					"SeparableChroma ch=%d (out=%s): maxErrVsFloat=%.6f (tol %.6f), negCtrlClampedErr=%.6f, recovered pass1=[%.5f, %.5f] (ref [%.5f, %.5f])\n",
+					ch, outFmtName.c_str(), gpuErrFloat, kFloatTol, clampedMaxDiff[ch], gpuMinPass1, gpuMaxPass1, refMinPass1[ch], refMaxPass1[ch]);
+				Logger::WriteMessage(line);
+
+				Assert::IsTrue(gpuErrFloat < kFloatTol,
+					L"separable chroma GPU output must match unclipped Lanczos-3 2-pass reference (separableTemp must not clip to UNORM [0, 1])");
+				Assert::IsTrue(gpuMinPass1 < refMinPass1[ch] * 0.5,
+					L"separable chroma pass-1 intermediate must preserve negative-lobe undershoot (< 0.0)");
+				Assert::IsTrue(gpuMaxPass1 > 1.0 + (refMaxPass1[ch] - 1.0) * 0.5,
+					L"separable chroma pass-1 intermediate must preserve positive overshoot (> 1.0)");
+				Assert::IsTrue(gpuDiffClamped > clampedMaxDiff[ch] * 0.5,
+					L"separable chroma GPU output must diverge from the UNORM-clamped pass-1 negative control");
+			}
+		}
+
+		TEST_METHOD(EveryPlaneFallbackIsNamedInTheFormatNote)
+		{
+			// GEM-072 (Q#5): SourceRebase::Module::FormatNote() must preserve EVERY plane's
+			// fallback entry separated by "; " (never letting plane 1 overwrite plane 0),
+			// start fresh on every Apply call, and clear back to "" once full precision is
+			// restored on the exact same module instance.
+			const int k = KernelInverse::Find("lanczos3");
+			Assert::IsTrue(k >= 0, L"lanczos3 kernel-inverse candidate must exist");
+
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+
+			struct ScopedFmtCapsMask
+			{
+				struct SavedCaps
+				{
+					pl_fmt_t* fmt;
+					enum pl_fmt_caps caps;
+				};
+				std::vector<SavedCaps> saved;
+
+				ScopedFmtCapsMask() = default;
+				ScopedFmtCapsMask(const ScopedFmtCapsMask&) = delete;
+				ScopedFmtCapsMask& operator=(const ScopedFmtCapsMask&) = delete;
+
+				void MaskMatching(pl_gpu targetGpu, enum pl_fmt_type fmtType, int minDepth,
+					enum pl_fmt_caps clearMask)
+				{
+					if (!targetGpu || !targetGpu->formats)
+						return;
+					for (int i = 0; i < targetGpu->num_formats; ++i)
+					{
+						pl_fmt f = targetGpu->formats[i];
+						if (!f || f->type != fmtType || f->component_depth[0] < minDepth)
+							continue;
+						if ((static_cast<unsigned>(f->caps) & static_cast<unsigned>(clearMask)) == 0u)
+							continue;
+						pl_fmt_t* mut = const_cast<pl_fmt_t*>(f);
+						SavedCaps entry{};
+						entry.fmt = mut;
+						entry.caps = mut->caps;
+						saved.push_back(entry);
+						mut->caps = static_cast<enum pl_fmt_caps>(
+							static_cast<unsigned>(mut->caps) & ~static_cast<unsigned>(clearMask));
+					}
+				}
+
+				~ScopedFmtCapsMask()
+				{
+					// Restore in reverse order so even overlapping masks unwind cleanly
+					// on both normal exit and assertion failure.
+					for (size_t i = saved.size(); i > 0; --i)
+						saved[i - 1].fmt->caps = saved[i - 1].caps;
+				}
+			};
+
+			struct ScopedRebaseResources
+			{
+				pl_gpu gpu = nullptr;
+				pl_dispatch dispatch = nullptr;
+				pl_tex lumaTex = nullptr;
+				pl_tex chromaTex = nullptr;
+				SourceRebase::Module rebase;
+
+				ScopedRebaseResources() = default;
+				ScopedRebaseResources(const ScopedRebaseResources&) = delete;
+				ScopedRebaseResources& operator=(const ScopedRebaseResources&) = delete;
+
+				~ScopedRebaseResources()
+				{
+					if (gpu)
+					{
+						rebase.Release(gpu);
+						if (lumaTex) pl_tex_destroy(gpu, &lumaTex);
+						if (chromaTex) pl_tex_destroy(gpu, &chromaTex);
+					}
+					if (dispatch)
+						pl_dispatch_destroy(&dispatch);
+				}
+			};
+
+			ScopedRebaseResources res;
+			res.gpu = gpu;
+			res.dispatch = pl_dispatch_create(fixture.Log(), gpu);
+			Assert::IsNotNull(res.dispatch, L"pl_dispatch creation");
+
+			const int W = 64, H = 64;
+			std::vector<uint16_t> lumaData(static_cast<size_t>(W) * H, 32768u);
+			std::vector<uint16_t> chromaData(static_cast<size_t>(W / 2) * (H / 2) * 2, 32768u);
+
+			pl_tex_params lp{};
+			lp.w = W;
+			lp.h = H;
+			lp.format = pl_find_named_fmt(gpu, "r16");
+			lp.sampleable = true;
+			lp.initial_data = lumaData.data();
+
+			pl_tex_params cp{};
+			cp.w = W / 2;
+			cp.h = H / 2;
+			cp.format = pl_find_named_fmt(gpu, "rg16");
+			cp.sampleable = true;
+			cp.initial_data = chromaData.data();
+
+			Assert::IsTrue(lp.format != nullptr && cp.format != nullptr, L"r16/rg16 source formats must exist");
+			res.lumaTex = pl_tex_create(gpu, &lp);
+			res.chromaTex = pl_tex_create(gpu, &cp);
+			Assert::IsTrue(res.lumaTex != nullptr && res.chromaTex != nullptr, L"source planes creation");
+
+			pl_frame source{};
+			source.num_planes = 2;
+			source.planes[0].texture = res.lumaTex;
+			source.planes[0].components = 1;
+			source.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+			source.planes[1].texture = res.chromaTex;
+			source.planes[1].components = 2;
+			source.planes[1].component_mapping[0] = PL_CHANNEL_CB;
+			source.planes[1].component_mapping[1] = PL_CHANNEL_CR;
+			source.crop = { 0.0f, 0.0f, static_cast<float>(W), static_cast<float>(H) };
+
+			res.rebase.SetKernel(k);
+			res.rebase.separable = true;
+
+			auto assertTwoPlaneNote = [](const std::string& note, const char* expectPlane0,
+				const char* expectPlane1, const char* expectDetail, const wchar_t* context) {
+				const std::wstring wnote = ExtendedRangeGpuProbe::ToWide(note);
+				const size_t sep = note.find("; ");
+				Assert::IsTrue(sep != std::string::npos,
+					(std::wstring(context) + L": expected '; ' separator between plane fallback notes, got: " + wnote).c_str());
+				Assert::IsTrue(note.find("; ", sep + 2) == std::string::npos,
+					(std::wstring(context) + L": expected exactly two '; '-separated entries (no stale note leak), got: " + wnote).c_str());
+				const std::string firstEntry = note.substr(0, sep);
+				const std::string secondEntry = note.substr(sep + 2);
+				Assert::IsTrue(firstEntry.find(expectPlane0) != std::string::npos,
+					(std::wstring(context) + L": plane 0 fallback missing before '; ', got: " + wnote).c_str());
+				Assert::IsTrue(secondEntry.find(expectPlane1) != std::string::npos,
+					(std::wstring(context) + L": plane 1 fallback missing after '; ', got: " + wnote).c_str());
+				Assert::IsTrue(firstEntry.find(expectDetail) != std::string::npos,
+					(std::wstring(context) + L": plane 0 entry missing expected fallback reason, got: " + wnote).c_str());
+				Assert::IsTrue(secondEntry.find(expectDetail) != std::string::npos,
+					(std::wstring(context) + L": plane 1 entry missing expected fallback reason, got: " + wnote).c_str());
+			};
+
+			const auto intermediateWriteCaps = static_cast<enum pl_fmt_caps>(
+				PL_FMT_CAP_STORABLE | PL_FMT_CAP_RENDERABLE);
+
+			// 1. Mask 32-bit float (storable + renderable): both plane 0 (inverse temp) and
+			//    plane 1 (separable temp) must fall back to half float and both must appear
+			//    in FormatNote() separated by "; ".
+			{
+				ScopedFmtCapsMask maskF32;
+				maskF32.MaskMatching(gpu, PL_FMT_FLOAT, 32, intermediateWriteCaps);
+				Assert::IsTrue(!maskF32.saved.empty(), L"32-bit float formats must be present to mask");
+
+				pl_frame out{};
+				Assert::IsTrue(res.rebase.Apply(gpu, res.dispatch, source, 0.5, out),
+					ExtendedRangeGpuProbe::ToWide(res.rebase.LastError()).c_str());
+				Assert::IsTrue(res.rebase.KernelUsed(), L"plane 0 must run the 2-pass kernel inverse");
+
+				const std::string noteF16 = res.rebase.FormatNote();
+				Logger::WriteMessage(("FormatNote (32-bit float masked): " + noteF16 + "\n").c_str());
+				assertTwoPlaneNote(noteF16, "plane 0 (inverse temp)", "plane 1 (separable temp)",
+					"half float: 32-bit float unavailable", L"32-bit float masked");
+			}
+
+			// 2. Mask BOTH 32-bit float AND 16-bit float (storable + renderable): both plane 0
+			//    (inverse temp) and plane 1 (separable temp) must fall back to UNORM and both
+			//    must be named in FormatNote() separated by "; ".
+			{
+				ScopedFmtCapsMask maskAllFloat;
+				maskAllFloat.MaskMatching(gpu, PL_FMT_FLOAT, 16, intermediateWriteCaps);
+				Assert::IsTrue(!maskAllFloat.saved.empty(), L"float formats must be present to mask");
+
+				pl_frame out{};
+				Assert::IsTrue(res.rebase.Apply(gpu, res.dispatch, source, 0.5, out),
+					ExtendedRangeGpuProbe::ToWide(res.rebase.LastError()).c_str());
+				Assert::IsTrue(res.rebase.KernelUsed(), L"plane 0 must run the 2-pass kernel inverse on UNORM fallback");
+
+				const std::string noteUnorm = res.rebase.FormatNote();
+				Logger::WriteMessage(("FormatNote (32-bit + 16-bit float masked): " + noteUnorm + "\n").c_str());
+				assertTwoPlaneNote(noteUnorm, "plane 0 (inverse temp)", "plane 1 (separable temp)",
+					"UNORM fallback: 32-bit and 16-bit float unavailable", L"32-bit + 16-bit float masked");
+			}
+
+			// 3. Mask PL_FMT_CAP_RENDERABLE on 16-bit UNORM formats (r16/rg16): exercises the
+			//    per-plane non-renderable float-fallback path on both planes 0 and 1, ensuring
+			//    plane 1 does not overwrite plane 0's note.
+			{
+				ScopedFmtCapsMask maskUnormRender;
+				maskUnormRender.MaskMatching(gpu, PL_FMT_UNORM, 16, PL_FMT_CAP_RENDERABLE);
+				Assert::IsTrue(!maskUnormRender.saved.empty(), L"16-bit UNORM renderable formats must be present to mask");
+
+				pl_frame out{};
+				Assert::IsTrue(res.rebase.Apply(gpu, res.dispatch, source, 0.5, out),
+					ExtendedRangeGpuProbe::ToWide(res.rebase.LastError()).c_str());
+
+				const std::string noteNonRenderable = res.rebase.FormatNote();
+				Logger::WriteMessage(("FormatNote (16-bit UNORM non-renderable): " + noteNonRenderable + "\n").c_str());
+				assertTwoPlaneNote(noteNonRenderable, "plane 0:", "plane 1:",
+					"not renderable", L"16-bit UNORM non-renderable");
+			}
+
+			// 4. In-test negative control: with all format caps restored by RAII, re-running
+			//    Apply on the EXACT SAME SourceRebase::Module and frame must take the full
+			//    32-bit float intermediate / native 16-bit UNORM plane path and clear
+			//    FormatNote() back to "" (proving the note reflects live per-call fallbacks
+			//    and never leaks stale fallback text).
+			Assert::IsFalse(res.rebase.FormatNote().empty(),
+				L"negative control precondition: FormatNote must be non-empty before full-precision restore");
+			{
+				pl_frame out{};
+				Assert::IsTrue(res.rebase.Apply(gpu, res.dispatch, source, 0.5, out),
+					ExtendedRangeGpuProbe::ToWide(res.rebase.LastError()).c_str());
+				Assert::IsTrue(res.rebase.KernelUsed(), L"restored full-precision path must run kernel inverse");
+				Assert::IsTrue(res.rebase.FormatNote().empty(),
+					(L"negative control: restoring 32-bit float and UNORM caps must clear FormatNote to empty, got: " +
+						ExtendedRangeGpuProbe::ToWide(res.rebase.FormatNote())).c_str());
+			}
+		}
+
+	private:
+		static void DownloadRebasedPlane(pl_gpu gpu, pl_tex tex, int components, std::vector<float>& values)
+		{
+			Assert::IsNotNull(tex, L"re-based plane texture must be non-null");
+			Assert::IsNotNull(tex->params.format, L"re-based plane format must be non-null");
+			pl_tex_params rp{};
+			rp.w = tex->params.w;
+			rp.h = tex->params.h;
+			rp.format = tex->params.format;
+			rp.host_readable = true;
+			rp.blit_dst = true;
+			pl_tex readable = pl_tex_create(gpu, &rp);
+			Assert::IsNotNull(readable, L"readable copy texture");
+			pl_tex_blit_params bp{};
+			bp.src = tex;
+			bp.dst = readable;
+			pl_tex_blit(gpu, &bp);
+			pl_gpu_finish(gpu);
+
+			const size_t n = static_cast<size_t>(rp.w) * rp.h * components;
+			values.resize(n);
+			const pl_fmt fmt = readable->params.format;
+			bool downloaded = false;
+			if (fmt->type == PL_FMT_FLOAT && fmt->component_depth[0] == 32)
+			{
+				pl_tex_transfer_params d{};
+				d.tex = readable;
+				d.ptr = values.data();
+				downloaded = pl_tex_download(gpu, &d);
+			}
+			else if (fmt->type == PL_FMT_FLOAT && fmt->component_depth[0] == 16)
+			{
+				std::vector<uint16_t> raw(n);
+				pl_tex_transfer_params d{};
+				d.tex = readable;
+				d.ptr = raw.data();
+				downloaded = pl_tex_download(gpu, &d);
+				if (downloaded)
+					for (size_t i = 0; i < n; ++i)
+						values[i] = HalfBits(raw[i]);
+			}
+			else if (fmt->type == PL_FMT_UNORM && fmt->component_depth[0] == 16)
+			{
+				std::vector<uint16_t> raw(n);
+				pl_tex_transfer_params d{};
+				d.tex = readable;
+				d.ptr = raw.data();
+				downloaded = pl_tex_download(gpu, &d);
+				if (downloaded)
+					for (size_t i = 0; i < n; ++i)
+						values[i] = raw[i] / 65535.0f;
+			}
+			else
+			{
+				pl_tex_destroy(gpu, &readable);
+				Assert::Fail(L"unexpected re-based plane texture format");
+			}
+			pl_tex_destroy(gpu, &readable);
+			Assert::IsTrue(downloaded, L"download re-based plane");
+		}
 	};
 
 	// Bill v1.4.02 merge (2026-10-31, worker geo): pure CPU, no GPU. Pins the geometry authority

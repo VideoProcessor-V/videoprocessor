@@ -12,9 +12,9 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Count | Value |
 |---|---|
 | Modules | 48 |
-| Documented rows | 403 |
-| VP-V keys in code (outside Bill's schema lists) | 399 |
-| of which documented | 398 |
+| Documented rows | 404 |
+| VP-V keys in code (outside Bill's schema lists) | 400 |
+| of which documented | 399 |
 | of which undocumented (appendix A) | 1 |
 | Documented keys with no code entry (appendix B) | 0 |
 
@@ -51,7 +51,7 @@ Checked against the code by `tools/check_master_settings.py` (see `docs/settings
 | Scaling | `scaling.shared` | placeholder | [README](../../src/VP-V/modules/scaling/shared/README.md) | 0 | 0 | 0/0 |
 | Scaling | `scaling.geometry` | built | [README](../../src/VP-V/modules/scaling/geometry/README.md) | 5 | 8 | 1/8 |
 | Scaling | `scaling.output` | partial | [README](../../src/VP-V/modules/scaling/output/README.md) | 29 | 30 | 29/30 |
-| Colour | `colour.dm_pre` | placeholder | [README](../../src/VP-V/modules/colour/dm_pre/README.md) | 0 | 0 | 0/0 |
+| Colour | `colour.dm_pre` | built | [README](../../src/VP-V/modules/colour/dm_pre/README.md) | 1 | 1 | 1/1 |
 | Colour | `colour.tone_gamut` | built | [README](../../src/VP-V/modules/colour/tone_gamut/README.md) | 1 | 5 | 0/5 |
 | Colour | `colour.dm_curve` | built | [README](../../src/VP-V/modules/colour/dm_curve/README.md) | 1 | 2 | 1/2 |
 | Colour | `colour.extended_range` | built | [README](../../src/VP-V/modules/colour/extended_range/README.md) | 2 | 2 | 2/2 |
@@ -314,6 +314,7 @@ Modules: `colour.dm_pre`, `colour.tone_gamut`, `colour.dm_curve`, `colour.extend
 | `appearance_screen_white_nits` | `colour.appearance` | profile ([vprenderer.Default] and matching profiles) | float | 1 - 1000 | 48 |  | VP-V > Colour > Main > Room and appearance (experimental) | n/a (VP-only): unchanged by the Original pathway | The screen white the picture is adapted to, used as given until the measured switch is on | same on all (not tiered) |
 | `appearance_strength` | `colour.appearance` | profile ([vprenderer.Default] and matching profiles) | float | 0.0 - 1.0 | 1 |  | VP-V > Colour > Main > Room and appearance (experimental) | n/a (VP-only): unchanged by the Original pathway | How much of the adaptation is applied (0 leaves the picture unchanged) | same on all (not tiered) |
 | `dv_display_mapping` | `colour.dm_curve` | profile ([vprenderer.Default] and matching profiles) | enum | vp, original | vp | vp | VP-V > Colour > Main > Display mapping | Original pathway sets `original` (ADR-0019) | DV display mapping: container; calibration LUT: display mapping | - |
+| `dv_post_decode_deband` | `colour.dm_pre` | profile ([vprenderer.Default] and matching profiles) | enum | auto, off | off |  | none yet (profile key, not yet on a Config card) | Original pathway sets `off` (ADR-0019) | Post-decode I-only Dolby Vision debander (`shaders\vp_dm_pre_deband.glsl`); `DV deband: off (<reason>)` when D5 12-bit tap, P14 coding quality, or shader is absent | same on all (not tiered) |
 | `dv_tone_mapping` | `colour.sdr_tone_shape` | profile ([vprenderer.Default] and matching profiles) | enum | libplacebo, dolby_style | libplacebo | libplacebo | VP-V > Colour > Main > Display mapping | Original pathway sets `libplacebo` (ADR-0019) | Dolby Vision tone mapping: libplacebo's curve, or dolby_style (approximate: a Dolby-style curve from the scene metadata with the trims in ICtCp; not certified) | same on all (not tiered) |
 | `dv_trims` | `colour.sdr_tone_shape` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | on | 1 | VP-V > Colour > Main > Display mapping | Original pathway sets `off` (ADR-0019) | VP applies the Dolby Vision L2 trims for the display's peak after libplacebo's tone mapping (shaders\DV trims.glsl; a non-certified reimplementation). status line: DV tone mapping: <why>: bt2390[ + trims] | same on all (not tiered) |
 | `extended_range_more_cases` | `colour.extended_range` | profile ([vprenderer.Default] and matching profiles) | bool | on, off | `on` |  | VP-V > Proposed retirement > Proven fixes (all on by default); built beside Bill's Processing rows; moved to Proven fixes | n/a (VP-only) | fix under test, proposed for retirement (group A); `off` = the Stage 10 eligibility; the Original pathway sets it `off` | same on all (not tiered) |

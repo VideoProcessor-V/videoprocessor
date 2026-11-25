@@ -8,10 +8,12 @@
 #include <VP-V/core/StatusText.h>
 #include <VP-V/modules/colour/appearance/AppearanceStage.h>
 #include <VP-V/modules/colour/display_mapping/DvHostStage.h>
+#include <VP-V/modules/colour/extended_range/ExtendedRange.h>
 #include <VP-V/modules/drive/led_compensation/LedDriveConfig.h>
 #include <VP-V/modules/output/calibration_lut/CalibrationLutHostPolicy.h>
 #include "../../../../tests/SettingsTestSupport.h"
 
+#include <cmath>
 #include <fstream>
 #include <map>
 #include <sstream>
@@ -49,6 +51,38 @@ namespace Tests
 				[](const std::string&, std::string&, std::string& reason) { reason = "not found (test)"; return false; },
 				[](const std::string&) -> const pl_hook* { return nullptr; },
 				[](const pl_hook*& hook) { hook = nullptr; } };
+		}
+
+		// C++14 overload probe so the PQ flare test compiles and genuinely FAILS at runtime against
+		// pre-fix 2-arg Cam16::FlareToDisplayed(o, f), and invokes the real 3-arg
+		// Cam16::FlareToDisplayed(o, f, upper) unambiguously once added.
+		namespace Flare3ArgFallback
+		{
+			struct FallbackResult { double value; };
+			inline FallbackResult FlareToDisplayed(double o, double f, ...)
+			{
+				return { Cam16::FlareToDisplayed(o, f) };
+			}
+		}
+
+		namespace Flare3ArgProbe
+		{
+			inline double Unwrap(double value, bool& usedThreeArg)
+			{
+				usedThreeArg = true;
+				return value;
+			}
+			inline double Unwrap(Flare3ArgFallback::FallbackResult r, bool& usedThreeArg)
+			{
+				usedThreeArg = false;
+				return r.value;
+			}
+			inline double CallCam16Flare(double o, double f, double upper, bool& usedThreeArg)
+			{
+				using Cam16::FlareToDisplayed;
+				using Flare3ArgFallback::FlareToDisplayed;
+				return Unwrap(FlareToDisplayed(o, f, upper), usedThreeArg);
+			}
 		}
 	}
 
@@ -258,6 +292,52 @@ namespace Tests
 			Assert::IsTrue(Fix1Has(glsl, "float ap_flare(float o, float f)"));
 			Assert::IsFalse(Fix1Has(glsl, "(outLin - vec3(apx_veil))"), L"the subtract-and-clip is gone");
 		}
+
+		// S2-B1 (pure CPU): PQ flare must normalise at the PQ ceiling (upper = 10000 / screenWhiteNits),
+		// never at SDR 1.0, so HDR highlights above diffuse white (o > 1) are never boosted above o.
+		TEST_METHOD(PqFlareNormalisesAtPeakAndNeverBoostsHighlights)
+		{
+			const double f = 0.05;
+			const double upper = 10000.0 / 100.0;   // 100-nit screen white on 10,000-nit PQ ceiling
+			bool usedThreeArg = false;
+
+			// Boundary anchors: 0 maps to 0 and upper maps to upper; zero veil is identity.
+			Assert::AreEqual(0.0, Flare3ArgProbe::CallCam16Flare(0.0, f, upper, usedThreeArg), 0.0);
+			Assert::AreEqual(upper, Flare3ArgProbe::CallCam16Flare(upper, f, upper, usedThreeArg), 1e-9,
+				L"PQ flare must anchor at the PQ peak ceiling (g(upper) == upper)");
+			Assert::AreEqual(10.0, Flare3ArgProbe::CallCam16Flare(10.0, 0.0, upper, usedThreeArg), 0.0,
+				L"zero veil must remain the identity on PQ highlights");
+
+			// Strictly monotonic from shadows through diffuse white up to 10,000 nits;
+			// every interior PQ highlight (0 < o < upper) stays strictly <= o (never boosted)
+			// while displayed + flare stays above the intended luminance.
+			const double samples[] = { 0.0, 1e-4, 0.01, 0.05, 0.25, 1.0, 2.0, 5.0, 10.0, 40.0, 80.0, upper };
+			double prev = -1.0;
+			for (const double o : samples)
+			{
+				const double g = Flare3ArgProbe::CallCam16Flare(o, f, upper, usedThreeArg);
+				Assert::IsTrue(g > prev, L"PQ flare must be strictly monotonic across [0, upper]");
+				if (o > 0.0 && o < upper)
+				{
+					Assert::IsTrue(g < o,
+						(L"PQ flare must NEVER boost highlights above o (o=" + std::to_wstring(o) +
+							L", g=" + std::to_wstring(g) + L")").c_str());
+					Assert::IsTrue(g + f > o, L"seen light (displayed + flare) must not fall below intent");
+				}
+				prev = g;
+			}
+			Assert::IsTrue(usedThreeArg, L"Cam16::FlareToDisplayed must accept the PQ upper ceiling parameter");
+
+			// Mandatory in-test negative control (exact same PQ highlight inputs):
+			// SDR-normalised FlareToDisplayed(o, f) (upper = 1.0) strictly BOOSTS PQ highlights above o!
+			for (const double o : { 5.0, 10.0, 40.0, 80.0 })
+			{
+				const double sdrNormalised = Cam16::FlareToDisplayed(o, f);
+				Assert::IsTrue(sdrNormalised > o * 1.02,
+					(L"Negative control: SDR-normalised flare (upper=1.0) must boost PQ highlight o=" +
+						std::to_wstring(o) + L" above o (got " + std::to_wstring(sdrNormalised) + L")").c_str());
+			}
+		}
 	};
 	// MUST 6: appearance replaces the gamma boost and the saturation step (doc 115 B15), visibly.
 	TEST_CLASS(AppearanceReplacesFix1Tests)
@@ -437,6 +517,152 @@ namespace Tests
 			const std::string glsl = Fix1ReadUp("shaders\\vp_cam16_appearance.glsl");
 			Assert::IsFalse(Fix1Has(glsl, "inverse(toXyz)"));
 			Assert::IsTrue(Fix1Has(glsl, "a hard 6-step bisection"), L"NIT 2: the comment says what the compression is");
+		}
+
+		// S2-H2: CAM16 appearance gates unsupported output transfers visibly (fallback + status),
+		// describes PQ / pure-power / BT.1886 / sRGB piecewise curves accurately, and wires both
+		// the host (CoreSegments.inl) and shader (vp_cam16_appearance.glsl).
+		TEST_METHOD(AppearanceGatesUnsupportedOutputTransfersAndDescribesPiecewiseCurves)
+		{
+			auto makeSpace = [](enum pl_color_primaries p, enum pl_color_transfer t)
+			{
+				pl_color_space c{};
+				c.primaries = p;
+				c.transfer = t;
+				return c;
+			};
+
+			// 1. Supported transfers: PQ, pure-power GAMMA18..28, BT.1886 (kind=1, param=b), sRGB (kind=2, param=0).
+			{
+				const ExtendedRange::OutputTransfer pq = ExtendedRange::DescribeOutputTransfer(makeSpace(PL_COLOR_PRIM_BT_2020, PL_COLOR_TRC_PQ));
+				Assert::IsTrue(pq.supported, L"PQ output transfer must be supported");
+				Assert::IsTrue(pq.pq, L"PQ output transfer must set pq=true");
+				Assert::AreEqual(0, pq.kind, L"PQ output transfer kind must be 0");
+
+				const enum pl_color_transfer gammas[] = {
+					PL_COLOR_TRC_GAMMA18, PL_COLOR_TRC_GAMMA20, PL_COLOR_TRC_GAMMA22,
+					PL_COLOR_TRC_GAMMA24, PL_COLOR_TRC_GAMMA26, PL_COLOR_TRC_GAMMA28
+				};
+				for (const enum pl_color_transfer gTrc : gammas)
+				{
+					const ExtendedRange::OutputTransfer g = ExtendedRange::DescribeOutputTransfer(makeSpace(PL_COLOR_PRIM_BT_709, gTrc));
+					Assert::IsTrue(g.supported, L"pure-power gamma output transfer must be supported");
+					Assert::IsFalse(g.pq, L"pure-power gamma must set pq=false");
+					Assert::AreEqual(0, g.kind, L"pure-power gamma kind must be 0");
+				}
+
+				// BT.1886: explicit 1000:1 SDR contrast -> b = q / (1 - q), q = (1/1000)^(1/2.4).
+				pl_color_space bt1886Space = makeSpace(PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_BT_1886);
+				bt1886Space.hdr.min_luma = PL_COLOR_SDR_WHITE / 1000.0f;
+				bt1886Space.hdr.max_luma = PL_COLOR_SDR_WHITE;
+				const ExtendedRange::OutputTransfer bt1886 = ExtendedRange::DescribeOutputTransfer(bt1886Space);
+				Assert::IsTrue(bt1886.supported, L"BT.1886 output transfer must be supported");
+				Assert::IsFalse(bt1886.pq, L"BT.1886 must set pq=false");
+				Assert::AreEqual(1, bt1886.kind, L"BT.1886 kind must be 1");
+				const double q1000 = std::pow(1.0 / 1000.0, 1.0 / 2.4);
+				const double expectedB1000 = q1000 / (1.0 - q1000);
+				Assert::AreEqual(expectedB1000, bt1886.param, 1e-4, L"BT.1886 param must match ITU-R BT.1886 black offset b");
+
+				// Adversarial check: a higher-contrast BT.1886 display (2000:1) must yield a strictly smaller b (not hard-coded).
+				pl_color_space bt1886HiContrast = makeSpace(PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_BT_1886);
+				bt1886HiContrast.hdr.min_luma = PL_COLOR_SDR_WHITE / 2000.0f;
+				bt1886HiContrast.hdr.max_luma = PL_COLOR_SDR_WHITE;
+				const ExtendedRange::OutputTransfer bt1886Hi = ExtendedRange::DescribeOutputTransfer(bt1886HiContrast);
+				Assert::IsTrue(bt1886Hi.supported && !bt1886Hi.pq && bt1886Hi.kind == 1);
+				Assert::IsTrue(bt1886Hi.param > 0.0 && bt1886Hi.param < bt1886.param,
+					L"BT.1886 black offset b must track the target display's black level");
+
+				// Default-inferred BT.1886 (min_luma/max_luma unset = 0) must also succeed cleanly.
+				const ExtendedRange::OutputTransfer bt1886Default = ExtendedRange::DescribeOutputTransfer(makeSpace(PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_BT_1886));
+				Assert::IsTrue(bt1886Default.supported && !bt1886Default.pq && bt1886Default.kind == 1 && bt1886Default.param >= 0.0,
+					L"default-inferred BT.1886 output transfer must be supported");
+
+				const ExtendedRange::OutputTransfer srgb = ExtendedRange::DescribeOutputTransfer(makeSpace(PL_COLOR_PRIM_BT_709, PL_COLOR_TRC_SRGB));
+				Assert::IsTrue(srgb.supported, L"sRGB output transfer must be supported");
+				Assert::IsFalse(srgb.pq, L"sRGB must set pq=false");
+				Assert::AreEqual(2, srgb.kind, L"sRGB kind must be 2");
+				Assert::AreEqual(0.0, srgb.param, 0.0, L"sRGB param must be 0");
+			}
+
+			// 2. Negative controls: unsupported output transfers MUST be rejected (supported == false, pq == false).
+			{
+				const enum pl_color_transfer unsupported[] = {
+					PL_COLOR_TRC_HLG, PL_COLOR_TRC_LINEAR, PL_COLOR_TRC_V_LOG,
+					PL_COLOR_TRC_S_LOG1, PL_COLOR_TRC_S_LOG2, PL_COLOR_TRC_PRO_PHOTO,
+					PL_COLOR_TRC_ST428, PL_COLOR_TRC_UNKNOWN
+				};
+				for (const enum pl_color_transfer uTrc : unsupported)
+				{
+					const pl_color_primaries prim = (uTrc == PL_COLOR_TRC_HLG || uTrc == PL_COLOR_TRC_V_LOG) ? PL_COLOR_PRIM_BT_2020 : PL_COLOR_PRIM_BT_709;
+					const ExtendedRange::OutputTransfer trc = ExtendedRange::DescribeOutputTransfer(makeSpace(prim, uTrc));
+					Assert::IsFalse(trc.supported, L"negative control: unsupported output transfer must be rejected");
+					Assert::IsFalse(trc.pq, L"negative control: unsupported output transfer must not claim PQ");
+				}
+			}
+
+			// 3. FallbackCatalog entry + plain-text notice sentence.
+			{
+				const FallbackCatalog::Decision engaged = FallbackCatalog::AppearanceOutputTransfer(true);
+				Assert::IsTrue(engaged.engaged);
+				Assert::AreEqual(std::string("appearance: output transfer"), engaged.id);
+				Assert::IsFalse(engaged.reason.empty());
+				Assert::IsTrue(std::string(FallbackPlainText::Sentence(engaged.id)).size() > 0,
+					L"FallbackPlainText::Sentence must have a plain sentence for appearance: output transfer");
+				Assert::IsFalse(FallbackCatalog::AppearanceOutputTransfer(false).engaged);
+			}
+
+			// 4. Real DvHostStage::PrepareAppearance + FinishAppearance sync and clean release.
+			{
+				Fix1Registry reg;
+				DvHostStage stage(Fix1NoShaders(), reg.Engage(), reg.Release());
+				CustomHookChain::TemplateValues hookTemplates;
+				AppearanceStage::Inputs in;
+				in.on = true;
+				in.transferSupported = false;
+
+				const AppearanceStage::Decision& off = stage.PrepareAppearance(in, hookTemplates, 0);
+				stage.FinishAppearance(0);
+				Assert::IsFalse(off.active, L"unsupported output transfer must keep appearance inactive");
+				Assert::IsTrue(off.transferUnsupported);
+				Assert::IsTrue(reg.Has("appearance: output transfer"), L"output transfer gate must engage fallback registry entry");
+				Assert::IsFalse(reg.Has("Colour appearance"), L"gated transfer must not be reported as a missing shader");
+				Assert::IsTrue(Fix1Has(stage.AppearanceStatus(), "output transfer"), L"render-thread status must mention output transfer");
+				Assert::IsTrue(Fix1Has(stage.AppearanceStatusShown(), "output transfer"), L"Ctrl+I status must mention output transfer");
+
+				// Negative control / clean release on the exact same stage & inputs once transfer is supported.
+				in.transferSupported = true;
+				in.transferKind = 1;
+				in.transferParam = 0.05;
+				const AppearanceStage::Decision& on = stage.PrepareAppearance(in, hookTemplates, 0);
+				stage.FinishAppearance(1);
+				Assert::IsTrue(on.active, L"supported transfer must re-enable appearance");
+				Assert::IsFalse(on.transferUnsupported);
+				Assert::IsFalse(reg.Has("appearance: output transfer"), L"fallback entry must release cleanly once transfer is supported");
+				Assert::IsFalse(Fix1Has(stage.AppearanceStatus(), "off for this output transfer"));
+
+				// Off by user choice on an unsupported transfer must NOT engage the fallback.
+				in.on = false;
+				in.transferSupported = false;
+				stage.PrepareAppearance(in, hookTemplates, 0);
+				stage.FinishAppearance(0);
+				Assert::IsFalse(reg.Has("appearance: output transfer"), L"appearance off by choice must not engage output transfer fallback");
+			}
+
+			// 5. Production wiring (CoreSegments.inl) and shader piecewise transfer implementation (vp_cam16_appearance.glsl).
+			{
+				const std::string core = Fix1ReadUp("src\\VP-V\\segments\\CoreSegments.inl");
+				Assert::IsTrue(Fix1Has(core, "ExtendedRange::DescribeOutputTransfer(target.color)"),
+					L"CoreSegments.inl must describe target.color via ExtendedRange::DescribeOutputTransfer");
+				Assert::IsTrue(Fix1Has(core, "appearance.transferSupported"), L"CoreSegments.inl must wire appearance.transferSupported");
+				Assert::IsTrue(Fix1Has(core, "appearance.transferKind"), L"CoreSegments.inl must wire appearance.transferKind");
+				Assert::IsTrue(Fix1Has(core, "appearance.transferParam"), L"CoreSegments.inl must wire appearance.transferParam");
+
+				const std::string glsl = Fix1ReadUp("shaders\\vp_cam16_appearance.glsl");
+				Assert::IsTrue(Fix1Has(glsl, "apx_trc_kind"), L"shader must declare apx_trc_kind");
+				Assert::IsTrue(Fix1Has(glsl, "apx_trc_param"), L"shader must declare apx_trc_param");
+				Assert::IsTrue(Fix1Has(glsl, "ap_trc_lin"), L"shader must implement ap_trc_lin for piecewise transfers");
+				Assert::IsTrue(Fix1Has(glsl, "ap_trc_enc"), L"shader must implement ap_trc_enc for piecewise transfers");
+			}
 		}
 	};
 

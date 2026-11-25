@@ -777,18 +777,18 @@ namespace PipelineSkeletonTestsNs
 			Assert::AreEqual(-0.375f, ChromaSiting::ShiftAfterResample(-0.5f, 0.75));   // 1440 -> 1080 class
 		}
 
-		// DVDM: the remaining DV display mapping placeholder (dm_pre; dm_curve and dm_trims are built since CF-1 P3) changes nothing and may sit anywhere in their zone,
-		// so they never constrain an order (OrderValidator rules 2 and 3b).
+		// DVDM / CF-DV P5: all three DV display mapping slots are now Built (dm_pre landed in CF-DV P5 as a fixed modifying stage in its zone;
+		// dm_curve and dm_trims landed in CF-1 P3). Verify dm_pre's Built/modifying/non-movable contract and valid pipeline ordering.
 		TEST_METHOD(DvDisplayMappingPlaceholderIsMovableAndNonModifying)
 		{
 			for (PipelineSlots::Id id : { PipelineSlots::Id::ColourDmPre })
 			{
 				const PipelineSlots::Contract c = PipelineSlots::ContractOf(id);
-				Assert::IsTrue(c.movable);
-				Assert::IsFalse(c.modifies);
+				Assert::IsFalse(c.movable);
+				Assert::IsTrue(c.modifies);
 				Assert::IsFalse(c.needsVectors);
 				Assert::IsFalse(c.needsOriginal);
-				Assert::IsTrue(PipelineSlots::Get(id).status == PipelineSlots::Status::Placeholder);
+				Assert::IsTrue(PipelineSlots::Get(id).status == PipelineSlots::Status::Built);
 			}
 			std::string reason;
 			Assert::IsTrue(PipelineSlots::Validate(PipelineSlots::DefaultOrder(), &reason), W(reason).c_str());

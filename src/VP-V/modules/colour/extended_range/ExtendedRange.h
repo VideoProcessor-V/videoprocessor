@@ -172,6 +172,8 @@ namespace ExtendedRange
 	double ToLinear(const Transfer& t, double v);
 	double FromLinear(const Transfer& t, double l);
 	const char* TransferName(const Transfer& t);
+	struct OutputTransfer { bool supported = false; bool pq = false; int kind = 0; double param = 0.0; };
+	OutputTransfer DescribeOutputTransfer(const pl_color_space& targetColor);
 
 	// Audit 2026-10-16: CPU mirror of the late restore's LUT extrapolation
 	// (the GLSL in ExtendedRange.cpp computes the same). data: RGB triplets,

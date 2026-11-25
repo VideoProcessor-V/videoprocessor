@@ -20,7 +20,7 @@ float ad_lin(float c)
     c = max(c, 0.0);
     if (ad_trc < 1.5) {
         float e = pow(c, 1.0 / 78.84375);
-        float n = max(e - 0.8359375, 0.0) / (18.8515625 - 18.6875 * e);
+        float n = max(e - 0.8359375, 0.0) / max(18.8515625 - 18.6875 * e, 1e-6);
         return pow(n, 1.0 / 0.1593017578125) * (10000.0 / 203.0);
     }
     float x = (1.0 - ad_b) * c + ad_b;

@@ -155,9 +155,10 @@ namespace SourceIdentity
 			bool Valid() const { return luma != nullptr && width > 0 && height > 0 && strideSamples >= width; }
 		};
 
-		// The dump of a ring: "SIDL", u32 version (2), u32 header length, the JSON header, u32 count, then per evaluation
-		// u64 seq, i64 timeUs, u64 streamKey, u32 flags, i32 cuts, i64 eventTimeUs, i32 active x y w h, i32 inner x y w h, u32 rowCount, u32 colCount,
-		// i32 rowY[rowCount], i32 colX[colCount], u16 rows[rowCount x inner.w], u16 cols[colCount x inner.h]; little endian.
+		// The dump of a ring: "SIDL", u32 version (3; ParseDump also accepts legacy v2 with fracBits = 0), u32 header length,
+		// the JSON header, u32 count, then per evaluation u64 seq, i64 timeUs, u64 streamKey, u32 flags, i32 cuts, i64 eventTimeUs,
+		// i32 active x y w h, i32 inner x y w h, u32 rowCount, u32 colCount, [v3: u32 fracBits,] i32 rowY[rowCount],
+		// i32 colX[colCount], u16 rows[rowCount x inner.w], u16 cols[colCount x inner.h]; little endian.
 		std::string SerializeDump(const std::string& headerJson, const std::vector<std::shared_ptr<const LineSnapshot>>& evals);
 		// False on a bad magic / version or a truncated body (never guesses).
 		bool ParseDump(const std::string& bytes, std::string& headerJson, std::vector<LineSnapshot>& evals);

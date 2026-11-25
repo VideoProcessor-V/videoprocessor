@@ -6,7 +6,7 @@ Usage: python -I tools/run_compliance.py [--root P] [--out FILE] [--since REF] [
 
 Each checker runs as its own process (python -I, cwd = root, 600 s limit). A checker whose file is absent in this
 tree is reported SKIP (absent), never a pass, and does not change the exit code; the summary lists it so a missing
-checker is visible. --since REF is passed to the checkers that take it (N2, N3, N4, check_hook_gating). The summary
+checker is visible. --since REF is passed to the checkers that take it (N2, N3, N4, N5, check_hook_gating). The summary
 file (default tools/../compliance.txt under the root's scratch: --out) holds one line per checker plus the last
 lines of each non-zero one. Exit: 0 all present checkers clean, 1 at least one violation, 2 a checker error or
 timeout (the worst code wins).
@@ -38,7 +38,10 @@ TOOLS = [
     ("N2_precision", "check_precision.py", ["--strict"], True),
     ("N3_fallback", "check_fallback_coverage.py", ["--strict"], True),
     ("N4_general", "check_general_not_fixed.py", ["--strict"], True),
+    ("N5_public_hygiene", "check_public_hygiene.py", ["--strict"], True),
     ("N6_launchers", "check_launcher_workarounds.py", ["--strict"], False),
+    # N7 (check_records.py) is intentionally skipped here: it targets private external drive-D records outside this repo.
+    ("N8_readme_vs_code", "check_readme_vs_code.py", ["--strict"], False),
     ("ctlscan", "ctlscan.py", [], True),
 ]
 

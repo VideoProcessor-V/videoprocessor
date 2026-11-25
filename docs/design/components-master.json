@@ -765,12 +765,18 @@
     {
       "slot": "colour.dm_pre",
       "order": 85,
-      "status": "placeholder",
-      "code_location": "placeholder (no component; the slot registers no pass and no hook)",
-      "live_files": [],
+      "status": "built",
+      "code_location": "built in CF-DV P5; policy and shader parameters live in colour/display_mapping/DmPreDeband.{h,cpp}, shader in shaders/vp_dm_pre_deband.glsl, host glue in DvHostStage.h + segments/CoreSegments.inl",
+      "live_files": [
+        "src/VP-V/modules/colour/display_mapping/DmPreDeband.h",
+        "src/VP-V/modules/colour/display_mapping/DmPreDeband.cpp",
+        "shaders/vp_dm_pre_deband.glsl"
+      ],
       "components": {
         "files": {
-          "required": [],
+          "required": [
+            "shaders/vp_dm_pre_deband.glsl"
+          ],
           "optional": []
         },
         "hardware": {
@@ -778,12 +784,14 @@
           "optional": []
         },
         "tools": [],
-        "config_keys": [],
+        "config_keys": [
+          "dv_post_decode_deband"
+        ],
         "upstream_modules": [
           "input.source_analysis"
         ]
       },
-      "fallback_when_missing": "Placeholder: registers no pass and no hook; nothing to fall back from."
+      "fallback_when_missing": "Off by default (zero hooks); absent D5 12-bit tap, absent P14 coding quality, or missing shaders/vp_dm_pre_deband.glsl leaves the picture untouched and engages Fallbacks engaged: DV deband (no private decode)."
     },
     {
       "slot": "repair.texture_restore",
@@ -888,6 +896,8 @@
       "status": "placeholder",
       "code_location": "migrated",
       "live_files": [
+        "src/VP-V/modules/scaling/chroma_upscale/CflHookOffsets.h",
+        "src/VP-V/modules/scaling/chroma_upscale/CflHookOffsets.cpp",
         "src/VP-V/modules/scaling/chroma_upscale/ChromaCfl.h",
         "src/VP-V/modules/scaling/chroma_upscale/ChromaCflGpu.h",
         "src/VP-V/modules/scaling/chroma_upscale/ChromaCflGpu.cpp",
@@ -1902,7 +1912,8 @@
         "src/VP-V/modules/control/config/config_pages/VpvTierTable.generated.h",
         "src/VP-V/modules/control/config/editor/ApplyEffects.h",
         "src/VP-V/modules/control/config/editor/Helpers.h",
-        "src/VP-V/modules/control/config/editor/Migrations.h"
+        "src/VP-V/modules/control/config/editor/Migrations.h",
+        "src/VP-V/modules/control/config/editor/Migrations.cpp"
       ],
       "components": {
         "files": {

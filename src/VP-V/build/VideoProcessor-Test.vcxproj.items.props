@@ -12,8 +12,14 @@
     <ClCompile Include="..\VP-V\modules\colour\display_mapping\tests\DvMathTests.cpp" />
     <ClCompile Include="..\VP-V\modules\colour\display_mapping\tests\DvDisplayMappingSlotTests.cpp" />
     <ClCompile Include="..\VP-V\modules\colour\display_mapping\tests\DmCurveTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\colour\display_mapping\tests\DmPreDebandTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="..\VP-V\modules\colour\appearance\tests\Cam16ModelTests.cpp" />
     <ClCompile Include="..\VP-V\modules\colour\appearance\tests\RoomLightTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\colour\appearance\tests\AppearanceShaderGpuTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="..\VP-V\modules\colour\appearance\tests\AppearanceStageTests.cpp" />
     <ClCompile Include="..\VP-V\modules\colour\appearance\tests\AppearanceStatusTests.cpp" />
     <ClCompile Include="..\VP-V\modules\colour\appearance\tests\CamFix1Tests.cpp" />
@@ -636,6 +642,7 @@
     <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\SourceIdChainVoterTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\SourceIdChainGateTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\ChainEstimatorTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\ChainMeasuredFloorTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\ChainEvidenceLogTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\ChainGovernorStatusTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\ChainEvalRegistrationTests.cpp" />
@@ -828,6 +835,14 @@
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="..\VP-V\modules\scaling\chroma_upscale\ChromaCflGpu.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\scaling\chroma_upscale\CflHookOffsets.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\colour\display_mapping\DmPreDeband.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>

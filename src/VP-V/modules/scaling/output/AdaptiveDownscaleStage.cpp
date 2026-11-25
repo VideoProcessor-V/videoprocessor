@@ -275,7 +275,8 @@ namespace AdaptiveDownscaleStage
 			// Switch-over: the upscale form's grain term is kP10gGrainLevel (ReadGrain), so no private grain map here; the
 			// estimate is still wanted for the residual hold and the motion-adapted blend.
 			module.ClearGrainField();
-			grainOffered = SetSharedGrain(module, host);
+			// S4-H2: upscale uses kP10gGrainLevel via ReadGrain(), never the downscale scalar P10/P11 grainSource.
+			module.ClearGrainSource();
 			SetResidualMotion(module, frame, m, nlsMap, nlsUnknown);
 			state.grainMapWanted = (AdaptiveDownscale::MotionSanitizeUnit(adaptive.motionStrength) > 0.0f) && module.Active() && frame.vectorsRun;
 			hooks.insert(hooks.begin(), module.Measure());
@@ -442,7 +443,7 @@ namespace AdaptiveDownscaleStage
 			lines.push_back(module.EdgeMapStatus());
 		// X5-GRAIN-P10 (no silent fallbacks): which grain estimate the last scalar pass used.
 		// Gate cb-u1 r1 MUST 5: "shared" only when the read-back stats tag says the frame's energy came from P10 / P11.
-		if (module.Active())
+		if (!upscaleThisFrame && module.Active())
 			lines.push_back(GrainStatusLine(module.LastGrainSourceUse()));
 		const std::string td = TdProducts::StatusLine(TdProducts::Consumer::AdaptiveScaler, tdRead);
 		if (!td.empty())
@@ -481,5 +482,60 @@ namespace AdaptiveDownscaleStage
 			DebugLog::Log("Downscale light: %s", logged == 2 ? "gamma (downscaling frame)" :
 				logged == 1 ? "gamma chosen; linear on this frame (not downscaling)" : "linear");
 		}
+	}
+
+	FallbackCatalog::Decision Stage::Fallback() const
+	{
+		// CF-2 B1 / FIX1: the upscale form's own entry (the alias-safe ScalerPass failed: the main scaler alone; no vectors,
+		// by the stage's verdict or the module's own floor: the floor; no cut verdict; no grain level: the grain floor).
+		if (upscaleThisFrame)
+		{
+			UpscaleFallbackInputs in;
+			in.requested = requested;
+			in.failureHeld = failureHeld;
+			in.scalerError = module.ScalerError();
+			in.motionAdaptiveOn = motionAdaptiveOn;
+			in.oneAxis = oneAxisThisFrame;
+			in.stageMotionCause = upscaleMotionCause;
+			in.moduleFloorUsed = module.MotionFloorUsed();
+			in.moduleFloorCause = module.MotionFloorCauseText();
+			in.cutAvailable = module.CutAvailable();
+			in.cutCause = in.cutAvailable ? std::string() : module.CutCause();
+			in.grainCause = oneAxisThisFrame ? std::string() :
+				(!grainTerm.published ? grainTerm.cause :
+				(module.PublishedGrainDomainRefused() ? std::string("measure domain is linear / HDR") : std::string()));
+			in.edgeMapStatus = module.EdgeMapStatus();
+			in.motionExternalView = upscaleMotionExternalView;
+			const FallbackCatalog::Decision up = UpscaleScalingFallback(in);
+			if (!up.engaged && requested && module.HalfFloatPictureFallback())
+				return FallbackCatalog::Engaged("output scaling", "adaptive scaler: 16-bit float picture (32-bit float not available)");
+			return up;
+		}
+		const FallbackCatalog::Decision base = FallbackCatalog::OutputScaling(requested, failureHeld ? 1u : 0u, ssimMissing);
+		// FIX-X5-CUT-P4 / C5: no scene group (the skeleton's scene product) for this frame: no cut verdict this frame (also on StatusLines()).
+		if (!base.engaged && requested && !module.CutAvailable())
+			return FallbackCatalog::Engaged("output scaling", "adaptive downscale: no cut verdict this frame (" + module.CutCause() + ")");
+		// GEM-W1B V3 MUST-6 (audit-W1B SHOULD-1): the 32 -> 16-bit float picture fallback reaches Config status and the
+		// problem report too, not only StatusLines().
+		if (!base.engaged && requested && module.HalfFloatPictureFallback())
+			return FallbackCatalog::Engaged("output scaling", "adaptive scaler: 16-bit float picture (32-bit float not available)");
+		return base;
+	}
+
+	FallbackCatalog::Decision Stage::GrainSourceFallback() const
+	{
+		const char* id = "product.adaptive_downscale";
+		if (upscaleThisFrame || !grainOffered || !module.Active())
+			return FallbackCatalog::Released(id);
+		switch (module.LastGrainSourceUse())
+		{
+		case AdaptiveDownscale::GrainSourceUse::Shared: return FallbackCatalog::Released(id);
+		case AdaptiveDownscale::GrainSourceUse::NoUsableBlock: return FallbackCatalog::Engaged(id, "grain: no usable shared block");
+		case AdaptiveDownscale::GrainSourceUse::MeasureDomain: return FallbackCatalog::Engaged(id, "grain: measure domain is linear / HDR");
+		// r2 NIT: bound, outcome not read back yet; nothing has been dropped, so no downgrade is claimed (the status line says pending).
+		case AdaptiveDownscale::GrainSourceUse::Pending: return FallbackCatalog::Released(id);
+		case AdaptiveDownscale::GrainSourceUse::NotSupplied: break;
+		}
+		return FallbackCatalog::Engaged(id, "grain: the offered shared products are invalid (missing or grid mismatch)");
 	}
 }

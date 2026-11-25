@@ -24,11 +24,11 @@
 // columns), and VP passes no shader parameters, so the bundled default is -0.5 (synthetic edge
 // dE 2.17 -> 0.88). 0.0 would treat the chroma as centre-sited.
 //!PARAM chroma_offset_x
-//!TYPE float
+//!TYPE DYNAMIC float
 -0.5
 
 //!PARAM chroma_offset_y
-//!TYPE float
+//!TYPE DYNAMIC float
 0.0
 
 //!HOOK CHROMA

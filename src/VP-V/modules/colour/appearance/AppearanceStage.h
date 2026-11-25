@@ -52,6 +52,7 @@ namespace AppearanceStage
 		bool honourL11 = true;                 // appearance_honour_l11
 		double rgbToXyz[9] = {};               // output primaries, white Y = 1 (row-major); BT.709 / D65 until set
 		bool calibrationLutBefore = false;     // FIX1 MUST 2: libplacebo applies a calibration LUT before this pass (target.lut)
+		bool transferSupported = true; int transferKind = 0; double transferParam = 0.0;   // S2-H2: ExtendedRange::OutputTransfer
 
 		// CF1-FIN MUST 1: the default matrix comes from DvMath (the one home of the primaries maths), not a literal.
 		Inputs() { DvMath::RgbToXyz(DvMath::kBt709Red, DvMath::kBt709Green, DvMath::kBt709Blue, DvMath::kD65, rgbToXyz); }
@@ -62,6 +63,7 @@ namespace AppearanceStage
 		bool active = false;                   // the hook runs this frame
 		bool l11Ignored = false;               // CAM-4: the L11 reference-mode flag held the room back this frame
 		bool lutConflict = false;              // FIX1 MUST 2: off because a calibration LUT runs before it (listed, never silent)
+		bool transferUnsupported = false;      // S2-H2: off for unsupported output transfer (listed, never silent)
 		double referenceWhiteNits = 100.0;
 		double huntGain = 1.0;                 // FIX1 SHOULD 2: the model's own saturation gain this frame
 		double huntScale = 1.0;                // the factor on M that keeps trim x Hunt within the cap (1 without a trim)
@@ -151,6 +153,8 @@ namespace AppearanceStage
 		p.push_back({ "apx_ref_nits", u.referenceWhiteNits });
 		p.push_back({ "apx_pq", in.signalPq ? 1.0 : 0.0 });
 		p.push_back({ "apx_gamma", in.outputGamma });
+		p.push_back({ "apx_trc_kind", static_cast<double>(in.transferKind) });
+		p.push_back({ "apx_trc_param", in.transferParam });
 		p.push_back({ "apx_knee", std::min(0.5, std::max(0.0, in.toeKnee)) });   // FIX1 SHOULD 3: gamma_boost_knee, not a fixed 0
 		for (int i = 0; i < 9; ++i)
 			p.push_back({ mat[i], in.rgbToXyz[i] });
@@ -200,6 +204,13 @@ namespace AppearanceStage
 			smoother.Reset();
 			d.lutConflict = true;
 			d.status = "appearance: off with a calibration LUT (it would act after the LUT)";
+			return d;
+		}
+		if (!in.transferSupported)
+		{
+			smoother.Reset();
+			d.transferUnsupported = true;
+			d.status = "appearance: off for this output transfer (PQ, gamma, BT.1886 or sRGB outputs only)";
 			return d;
 		}
 		if (in.l11ReferenceMode && in.honourL11)

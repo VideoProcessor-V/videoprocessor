@@ -106,18 +106,21 @@ namespace Cam16
 
 	// FIX1 MUST 5 (refs/125 s4: the veil enters the SCREEN side as flare on the inverse). The flare is part of the screen
 	// viewing conditions (the eye adapts to the screen light plus the reflected room light), and the displayed light is
-	// brought down by a flare TOE, never a subtract-and-clip: g(o) = o (o + f) / (o + 2 f), normalised so g(1) = 1.
+	// brought down by a flare TOE, never a subtract-and-clip: g(o) = o (o + f) / (o + 2 f), normalised so g(u) = u
+	// (u = upper: 1.0 for SDR, 10000 / screenWhiteNits for ST.2084 PQ).
 	// For o >> f, g(o) + f ~ o (the seen light keeps the intended contrast); near black g has slope 1/2 and reaches 0 only
-	// at 0, so every displayed level stays distinct (no shadow crush, low-level grain kept). Monotonic on [0, 1];
-	// f = 0 is the identity. The shader's ap_flare (shaders/vp_cam16_appearance.glsl) is this function, per channel.
-	inline double FlareToDisplayed(double o, double f)
+	// at 0, so every displayed level stays distinct (no shadow crush, low-level grain kept). Monotonic on [0, u] with
+	// 0 < g(o) < o < g(o) + f on (0, u); f = 0 is the identity. The shader's ap_flare (shaders/vp_cam16_appearance.glsl) is
+	// this function, per channel.
+	inline double FlareToDisplayed(double o, double f, double upper = 1.0)
 	{
 		if (!(f > 0.0))
 			return o;
 		o = std::max(0.0, o);
+		const double u = upper > 0.0 ? upper : 1.0;
 		const double g = o * (o + f) / (o + 2.0 * f);
-		const double g1 = (1.0 + f) / (1.0 + 2.0 * f);
-		return g / g1;
+		const double gu = (u + f) / (u + 2.0 * f);
+		return g / gu;
 	}
 
 	inline Cam16Uniforms PackUniforms(const UniformInputs& in)

@@ -3,32 +3,10 @@
  * Copyright(C) 2026 VP-V contributors
  * SPDX-License-Identifier: GPL-3.0-only
  */
-// WP-14 (integration batch 1, M2 steps 6 and 14): the renderer host's Dolby Vision glue, moved out
-// of LibplaceboVideoRenderer.cpp (Bill's host) into one VP-V adapter. The host keeps one call per
-// hook point (docs/design/m2-dv-callsites.md); the logic, its per-renderer state and its log lines
-// live here, unchanged (a behaviour-free move: commit 1 of the two-commit rule).
-//
-// Hook points, all on the render thread (RenderLocked):
-//   OnTunnelState   - the DV metadata hold / corrupt-packet fallback entries, per picture
-//                     (DvMetadataHold.h), and the tunnel's fallbacks released outside a tunnel;
-//   IngressSuffix   - the "; DV trims ...; DV tone mapping ...; DV metadata ...; deband ..." tail of
-//                     the Ctrl+I ingress line for a DV tunnel picture;
-//   SkipVpDeband    - VP's debander skipped on the raw tunnel planes (DvTunnelPolicy.h), visibly;
-//   PrepareToneAndTrims / FinishTrims - phase 1 / phase 2 around the S2 output segment, which is
-//                     the ONE emitter of the trims hook (TrimsHook(); it tags and parameterises it).
-//   (phase 1:)       the Dolby-style curve hook (dv_tone_mapping; DvDolbyStyle.h), the L8 / L2
-//                     trims at PRE_OUTPUT (dv_trims; DvTrimSelection.h, shaders/DV trims.glsl), the
-//                     reference conditions of the last DV picture (for the CAM16 stage, Stage 13),
-//                     and the trim choice the DV comparison capture reads (TakeTrimsSelection;
-//                     the capture itself is the WP-17 diagnostics adapter's, in the host);
-//   SkipPlaneDeband - libplacebo's plane deband dropped on the raw tunnel planes, logged once;
-//   ReleaseHooks    - the trims hook released with the device;
-//   (the dv_compare_capture shortcut: the host's RenderedFrameCaptures::Invoke, WP-17).
-// Fallbacks go through the host's registry (the two callbacks), so every entry stays under
-// "Fallbacks engaged" exactly as before (ADR-0001, vp-no-silent-fallbacks).
-//
-// libplacebo's headers come first: DvDolbyStyle.h only defines its libplacebo part (the curve,
-// CannotRun, ShaderParameters, ToneSwitch) when they are already included.
+// WP-14: the renderer host's Dolby Vision glue (OnTunnelState, SyncContainer, SyncCalibrationLut,
+// IngressSuffix, SkipVpDeband, SkipPlaneDeband, PrepareDmPreDeband/FinishDmPreDeband, PrepareToneAndTrims/FinishTrims,
+// PrepareAppearance/FinishAppearance, ReleaseHooks). Render thread only; fallbacks go through the host's registry
+// (ADR-0001, vp-no-silent-fallbacks). libplacebo headers precede DvDolbyStyle.h so its libplacebo section is enabled.
 #pragma warning(push)
 #pragma warning(disable: 4244) // conversion warning in an upstream inline helper (as in the renderer)
 #include <libplacebo/colorspace.h>
@@ -47,6 +25,7 @@
 #include <VP-V/modules/colour/display_mapping/DvDolbyStyle.h>
 #include <VP-V/modules/colour/display_mapping/DmCurve.h>
 #include <VP-V/modules/colour/display_mapping/DmContainer.h>
+#include <VP-V/modules/colour/display_mapping/DmPreDeband.h>
 #include <VP-V/modules/colour/appearance/AppearanceStage.h>
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/modules/colour/display_mapping/DvTrimSelection.h>
@@ -89,9 +68,7 @@ public:
 	};
 
 	DvHostStage(CustomHookChain::Loader loader, Engage engage, Release release)
-		: m_trimsHook(loader), m_appearanceHook(std::move(loader)), m_engage(std::move(engage)), m_release(std::move(release))
-	{
-	}
+		: m_trimsHook(loader), m_dmPreHook(loader), m_appearanceHook(std::move(loader)), m_engage(std::move(engage)), m_release(std::move(release)) {}
 
 	// Per picture, once the tunnel state is known: test/dv-synthetic 2026-10-24 (owner rule: no
 	// silent fallbacks): the tunnel's automatic degradations are listed under "Fallbacks engaged"
@@ -175,14 +152,26 @@ public:
 		return m_debandSkipped;
 	}
 
-	// The trims hook goes with the device.
-	void ReleaseHooks()
+	// The hooks go with the device.
+	void ReleaseHooks() { m_trimsHook.Clear(); m_trimsConfigured = false; m_dmPreHook.Clear(); m_dmPreConfigured = false; m_appearanceHook.Clear(); m_appearanceConfigured = false; m_trimsShaderMissing = false; }
+
+	// CF-DV P5 (colour.dm_pre): post-decode I-only DV debander (DmPreDeband.h, shaders/vp_dm_pre_deband.glsl).
+	CustomHookChain::Chain& DmPreDebandHook() { return m_dmPreHook; }
+	const std::string& DmPreDebandStatus() const { return m_dmPreStatus; }
+	const DmPreDeband::Decision& DmPreDebandDecision() const { return m_dmPreDecision; }
+	const DmPreDeband::Decision& PrepareDmPreDeband(const DmPreDeband::Inputs& in, const CustomHookChain::TemplateValues& hookTemplates)
 	{
-		m_trimsHook.Clear();
-		m_trimsConfigured = false;
-		m_appearanceHook.Clear();
-		m_appearanceConfigured = false;
-		m_trimsShaderMissing = false;   // GEM-009 (Gemini SHOULD-4, as written): the new device loads the shader afresh
+		m_dmPreDecision = DmPreDeband::Decide(in);
+		if (m_dmPreDecision.active) { if (!m_dmPreConfigured) { ConfiguredShaderRule r; r.name = "vp_dm_pre_deband"; r.filename = "vp_dm_pre_deband.glsl"; m_dmPreHook.Configure({ r }); m_dmPreConfigured = true; } m_dmPreHook.Ensure(hookTemplates); }
+		return m_dmPreDecision;
+	}
+	void FinishDmPreDeband(size_t collected)
+	{
+		const bool missing = m_dmPreDecision.active && collected == 0;
+		const FallbackCatalog::Decision fb = FallbackCatalog::DvPostDecodeDeband(m_dmPreDecision.fallbackEngaged || missing, missing ? "shaders\\vp_dm_pre_deband.glsl did not load" : m_dmPreDecision.reason);
+		if (fb.engaged) m_engage(fb.id.c_str(), fb.reason); else m_release(fb.id.c_str());   // VPV-FALLBACK DV deband
+		m_dmPreStatus = missing ? "DV deband: off (shaders\\vp_dm_pre_deband.glsl did not load)" : m_dmPreDecision.status;
+		if (m_dmPreStatus != m_dmPreLogged) { m_dmPreLogged = m_dmPreStatus; DebugLog::Log("%s", m_dmPreStatus.c_str()); }
 	}
 
 	// The DV comparison capture (dv_compare_capture) is the WP-17 diagnostics adapter's
@@ -194,8 +183,8 @@ public:
 		return std::exchange(m_trimsEvaluated, false) ? &m_trimsSelection : nullptr;
 	}
 	double TrimsTargetNits() const { return m_trimsTargetNits; }
-	// FIX1 SHOULD 2: the trim's largest saturation gain this frame (1 = none), for colour.appearance's trim x Hunt cap.
-	double TrimsSaturationGain() const { return m_trimsSaturationGain; }
+	// FIX1 SHOULD 2 / S2-M1: the trim's largest saturation gain this frame (1 = none) and whether the shader will run.
+	double TrimsSaturationGain() const { return m_trimsSaturationGain; } bool TrimsWillRun() const { return m_trimsWillRun; }
 
 	// The reference viewing conditions of the last DV picture (for the later CAM16 stage).
 	const std::string& ContrastRecoveryStatus() const { return m_recoveryStatus; }
@@ -233,14 +222,7 @@ public:
 		m_appearanceDecision = AppearanceStage::Decide(in, m_roomSmoother);
 		if (m_appearanceDecision.active)
 		{
-			if (!m_appearanceConfigured)
-			{
-				ConfiguredShaderRule rule;
-				rule.name = "vp_cam16_appearance";
-				rule.filename = "vp_cam16_appearance.glsl";
-				m_appearanceHook.Configure({ rule });
-				m_appearanceConfigured = true;
-			}
+			if (!m_appearanceConfigured) { ConfiguredShaderRule rule; rule.name = "vp_cam16_appearance"; rule.filename = "vp_cam16_appearance.glsl"; m_appearanceHook.Configure({ rule }); m_appearanceConfigured = true; }
 			m_appearanceHook.Ensure(hookTemplates);
 		}
 		m_appearanceWanted = in.on;
@@ -249,13 +231,7 @@ public:
 	void FinishAppearance(size_t collected)
 	{
 		const bool shaderMissing = m_appearanceDecision.active && collected == 0;
-		auto sync = [this](const FallbackCatalog::Decision& d)
-		{
-			if (d.engaged)
-				m_engage(d.id.c_str(), d.reason);
-			else
-				m_release(d.id.c_str());
-		};
+		auto sync = [this](const FallbackCatalog::Decision& d) { if (d.engaged) m_engage(d.id.c_str(), d.reason); else m_release(d.id.c_str()); };
 		const bool live = m_appearanceDecision.active && !shaderMissing;
 		const RoomLight::Resolved& room = m_appearanceDecision.room;
 		// VPV-FALLBACK Colour appearance
@@ -266,16 +242,11 @@ public:
 		sync(FallbackCatalog::AppearanceL11Reference(m_appearanceWanted && m_appearanceDecision.l11Ignored));
 		// VPV-FALLBACK appearance: calibration LUT
 		sync(FallbackCatalog::AppearanceCalibrationLut(m_appearanceWanted && m_appearanceDecision.lutConflict));
-		if (shaderMissing)
-			m_appearanceStatus = "appearance: shader missing (shaders\\vp_cam16_appearance.glsl did not load)";
-		else
-			m_appearanceStatus = m_appearanceWanted ? m_appearanceDecision.status : std::string("appearance: off");
+		sync(FallbackCatalog::AppearanceOutputTransfer(m_appearanceWanted && m_appearanceDecision.transferUnsupported));   // VPV-FALLBACK appearance: output transfer
+		m_appearanceStatus = shaderMissing ? "appearance: shader missing (shaders\\vp_cam16_appearance.glsl did not load)" : (m_appearanceWanted ? m_appearanceDecision.status : std::string("appearance: off"));
 		if (m_appearanceStatus != m_appearanceLogged)   // on change only
 		{
-			{
-				std::lock_guard<std::mutex> guard(m_appearanceShownMutex);
-				m_appearanceShown = m_appearanceStatus;
-			}
+			{ std::lock_guard<std::mutex> guard(m_appearanceShownMutex); m_appearanceShown = m_appearanceStatus; }
 			m_appearanceLogged = m_appearanceStatus;
 			DebugLog::Log("%s%s", m_appearanceStatus.c_str(), m_appearanceWanted ? " (replaces the gamma boost and saturation steps)" : "");
 		}
@@ -294,8 +265,8 @@ public:
 	void PrepareToneAndTrims(const Frame& f, pl_color_map_params& colorMapParams,
 		const CustomHookChain::TemplateValues& hookTemplates, bool& trimsWanted, ParameterList& trimsParams)
 	{
-		m_pending = Pending();
-		trimsParams.clear();   // GEM-016: the caller may hand in last frame's buffer (TrimsParameterBuffer)
+		m_pending = Pending(); m_trimsWillRun = false; m_trimsSaturationGain = 1.0;
+		trimsWanted = false; trimsParams.clear();   // GEM-016: the caller may hand in last frame's buffer (TrimsParameterBuffer)
 		m_pending.trims = f.trims;
 		m_pending.trimsStageRuns = f.trimsStageRuns;   // GEM-004 part 2 (AMEND: the dm_trims slot, CF-1 P3)
 		if (!f.trims)
@@ -381,21 +352,9 @@ public:
 			std::string state;
 			const bool dvPicture = state.empty() && renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION &&
 				f.dm && f.dm->valid;
-			pl_color_space display = target.color;
-			pl_color_space_infer(&display);
-			const bool pq = target.color.transfer == PL_COLOR_TRC_PQ;
-			// Review C5: only transfers that are a pure power law (or BT.1886 / sRGB,
-			// which LedDisplayGamma maps to 2.4 / 2.2); linear, HLG and others: off.
-			const enum pl_color_transfer trc = target.color.transfer;
-			// GEM-008 (Gemini colour-dv-hdr SHOULD-3, AMEND): BT.1886 and sRGB use their own curve, described by
-			// ExtendedRange::DescribeTransfer with piecewise = true (BT.1886 b from libplacebo's linearize of the inferred
-			// display). It cannot describe one (false): the existing visible state "off for this output transfer".
-			ExtendedRange::Transfer trimsTransfer = { ExtendedRange::TransferKind::Power, 0.0f };
-			const bool piecewiseTransfer = trc == PL_COLOR_TRC_BT_1886 || trc == PL_COLOR_TRC_SRGB;
-			const bool transferDescribed = !piecewiseTransfer || ExtendedRange::DescribeTransfer(display, true, trimsTransfer);
-			const bool gammaSignal = (trc == PL_COLOR_TRC_GAMMA18 || trc == PL_COLOR_TRC_GAMMA20 ||
-				trc == PL_COLOR_TRC_GAMMA22 || trc == PL_COLOR_TRC_GAMMA24 || trc == PL_COLOR_TRC_GAMMA26 ||
-				trc == PL_COLOR_TRC_GAMMA28 || piecewiseTransfer) && transferDescribed;
+			pl_color_space display = target.color; pl_color_space_infer(&display);
+			const ExtendedRange::OutputTransfer trimsTrc = ExtendedRange::DescribeOutputTransfer(target.color);
+			const bool pq = trimsTrc.pq, gammaSignal = trimsTrc.supported && !trimsTrc.pq;
 			std::string params;
 			DvTrimSelection::Selection selection;   // feat/dv-l8: L8, else L2, else none
 			if (!f.trims || !f.trimsStageRuns)
@@ -409,23 +368,16 @@ public:
 			else
 			{
 				selection = DvTrimSelection::Select(*f.dm, display.hdr.max_luma);
-				m_trimsSelection = selection;
-				m_trimsEvaluated = true;
+				m_trimsSelection = selection; m_trimsEvaluated = true;
 				m_trimsTargetNits = display.hdr.max_luma;
-				m_trimsSaturationGain = selection.apply ? DvTrimSelection::PeakSaturationGain(selection.params) : 1.0;   // FIX1 SHOULD 2
 				if (!selection.apply)
 					state = std::string("neutral: ") + selection.reason;
 				else
 				{
-					if (!m_trimsConfigured)
-					{
-						ConfiguredShaderRule rule;
-						rule.name = "dv_trims";
-						rule.filename = "DV trims.glsl";
-						m_trimsHook.Configure({ rule });
-						m_trimsConfigured = true;
-					}
+					if (!m_trimsConfigured) { ConfiguredShaderRule rule; rule.name = "dv_trims"; rule.filename = "DV trims.glsl"; m_trimsHook.Configure({ rule }); m_trimsConfigured = true; }
 					m_trimsHook.Ensure(hookTemplates);
+					const bool trimsLoaded = m_trimsHook.SubmittedCount(false) > 0;
+					m_trimsWillRun = trimsLoaded; m_trimsSaturationGain = trimsLoaded ? DvTrimSelection::PeakSaturationGain(selection.params) : 1.0;   // S2-M1 / FIX1 SHOULD 2
 					// Review C4: the luminance coefficients of the output's own primaries.
 					// GEM-016 (Gemini colour-dv-hdr PERF-6, as written): kr / kg / kb and the toLms / fromLms parameters
 					// cached, keyed by display.primaries (and the ICtCp switch), instead of recomputed (a matrix inversion) per frame.
@@ -455,9 +407,8 @@ public:
 					trimsParams.insert(trimsParams.end(), ictcp.begin(), ictcp.end());
 					trimsParams.push_back({ "dv_signal_pq", pq ? 1.0 : 0.0 });
 					trimsParams.push_back({ "dv_gamma", f.outputGamma });
-					// GEM-008: the output transfer kind (0 power: dv_gamma; 1 BT.1886; 2 sRGB) and its parameter (BT.1886 b).
-					trimsParams.push_back({ "dv_trc_kind", piecewiseTransfer ? static_cast<double>(static_cast<int>(trimsTransfer.kind)) : 0.0 });
-					trimsParams.push_back({ "dv_trc_param", piecewiseTransfer ? static_cast<double>(trimsTransfer.param) : 0.0 });
+					trimsParams.push_back({ "dv_trc_kind", static_cast<double>(trimsTrc.kind) });   // GEM-008: 0 power, 1 BT.1886, 2 sRGB
+					trimsParams.push_back({ "dv_trc_param", trimsTrc.param });                      // GEM-008: BT.1886 black offset b
 					trimsParams.push_back({ "dv_peak_nits", display.hdr.max_luma });
 					// GEM-012 (AMEND): the per-pixel constants once per frame on the CPU, from the CPU reference's own maths.
 					trimsParams.push_back({ "dv_peak_pq", DvMath::PqFromNits(display.hdr.max_luma) });
@@ -486,10 +437,10 @@ public:
 		// Audit M-3 (2026-10-25): the reference conditions (curve, L6 / L0 mastering, L9, L11, the
 		// trims when they ran) for EVERY DV picture with DM - the CAM16 stage needs them with or
 		// without dv_trims.
-		if (p.dvTonePicture)
+		if (p.dvTonePicture) {
 			m_referenceConditions = DvDolbyStyle::Conditions(*p.dm, p.selection, m_toneDolbyRunning, p.libplaceboCurve);
-		else
-			m_referenceConditions = DvDolbyStyle::ReferenceConditions(); // no DV reference after DV -> HDR10 (bug hunt 37 S10)
+			if (!m_trimsWillRun || (p.collect && collected == 0)) m_referenceConditions.trimApplied = false;
+		} else m_referenceConditions = DvDolbyStyle::ReferenceConditions(); // no DV reference after DV -> HDR10 (bug hunt 37 S10)
 		if (!p.ran)
 			return;
 		std::string state = p.state;
@@ -564,6 +515,10 @@ private:
 	PrimariesCache m_primariesCache;
 	ParameterList m_trimsParameterBuffer;   // GEM-016: TrimsParameterBuffer
 	CustomHookChain::Chain m_trimsHook;      // DV L2 trims (dv_trims)
+	CustomHookChain::Chain m_dmPreHook;      // CF-DV P5: post-decode I-only DV debander (colour.dm_pre)
+	DmPreDeband::Decision m_dmPreDecision;
+	std::string m_dmPreStatus = "DV deband: off (setting off)", m_dmPreLogged;
+	bool m_dmPreConfigured = false;
 	CustomHookChain::Chain m_appearanceHook; // CAM-3: the CAM16 appearance pass
 	RoomLight::Smoother m_roomSmoother;      // CAM-3: the appearance path's own minutes-scale room adaptation
 	AppearanceStage::Decision m_appearanceDecision;
@@ -585,7 +540,7 @@ private:
 	// DV comparison capture (off unless VP_DV_COMPARE_PATH; DvCompareCapture.h).
 	std::string m_trimsStatus = "DV trims: off";
 	DvTrimSelection::Selection m_trimsSelection;
-	bool m_trimsEvaluated = false;
+	bool m_trimsEvaluated = false, m_trimsWillRun = false;
 	double m_trimsTargetNits = 0.0;
 	double m_trimsSaturationGain = 1.0;
 	// feat/dv-l8 task 5: the Dolby-style DV tone mapping (dv_tone_mapping), its status, and the

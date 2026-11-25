@@ -53,6 +53,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -113,6 +114,7 @@ namespace SourceIdentity
 			uint64_t discontinuities = 0;    // resets
 			uint64_t windowClears = 0;       // evidence-window clears (ClearWindow events consumed, first cut after a HOLD): no reset record
 			uint64_t fadeShots = 0;          // SID r2 N2 (F1): evidence shots started by a black / fade without a cut (safety rules on only)
+			uint64_t floorMeasured = 0;      // GEM-083 (shadow): evaluations where MeasuredFloorCodes was computed (observer or dump v4 active)
 			LatchCounters latch;             // SID r2: latch entries / moves / releases by cause, held back, non-conventional (zero while the rules are off)
 		};
 
@@ -154,6 +156,8 @@ namespace SourceIdentity
 			int stepCodes = 1;           // 4 = an 8-bit picture, 1 = 10-bit
 			double cachedMB = 0.0;       // operator caches (main + power probe) plus tap memos after this evaluation, MiB
 			AxisDetail axis[2];
+			double floorCodes = 0.0;     // active rounding floor passed to PowerProbe and ChainEvidence (unchanged)
+			double floorMeasured = std::numeric_limits<double>::quiet_NaN();   // GEM-083 (shadow): MeasuredFloorCodes; NaN when not computed or < 64 diffs
 		};
 		// Called on the thread that processes the evaluation (the worker; the caller in synchronous mode), after the evidence stage.
 		typedef std::function<void(const EvaluationDetail&)> EvaluationObserver;

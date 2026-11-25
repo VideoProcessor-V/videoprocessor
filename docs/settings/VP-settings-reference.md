@@ -155,6 +155,7 @@ GPU unpack failed and VP fell back to the CPU path.
 | `dv_tunnel_fixes` (under test) | Tunnel menu/letterbox probe, metadata-loss counting, L2 before L8. | on |
 | `dv_trims` (under test) | VP applies the DV Level 2 trims for your display's peak after its tone mapping. | on |
 | `dv_tone_mapping` (under test) | Dolby Vision pictures: libplacebo's curve, or `dolby_style` (approx.): a Dolby-style curve from the scene metadata (L1) with the trims in ICtCp. Not certified; shown as "Dolby-style (approx.)". Colour unit, Dolby Vision card. | libplacebo |
+| `dv_post_decode_deband` (under test) | Post-decode I-only Dolby Vision debander (`colour.dm_pre`): `auto` or `off`. Smooths luminance banding in the decoded ICtCp picture before display mapping without touching chroma; the Original pathway forces `off`. | off |
 | `dv_compare_capture_folder` (diagnostic) | A folder on a large drive; the DV comparison capture shortcut (Ctrl+Alt+Shift+W) records a short labelled clip there. Empty = off; the Original pathway clears it. Input unit, Readouts (diagnostics). | empty (off) |
 | `newlldv`, `newlldv_sdr_veto` | BT.2020 without an HDR flag is treated as HDR after 1.5 s; real SDR returns to SDR. | off / on |
 

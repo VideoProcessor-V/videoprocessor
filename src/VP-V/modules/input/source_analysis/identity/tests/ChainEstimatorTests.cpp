@@ -15,8 +15,10 @@
 
 #include <VP-V/modules/input/source_analysis/SourceResolutionMonitor.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -691,6 +693,277 @@ namespace Tests
 			Assert::IsFalse(est.StatusInput().tapAttached);
 			Assert::IsTrue(est.StatusLine().find("frame tap lost") != std::string::npos);
 			est.DetachTap();
+		}
+
+		// ---- U#2 (Slice 21 L4): LineSnapshot Q6 fixed-point precision (1/64 of a 10-bit code) ----------------------------------
+		TEST_METHOD(LineSnapshotQ6IsBitIdenticalForTenBit)
+		{
+			Plane plane = MakePlane(400, 300, 17, 1);   // true 10-bit textured plane (step 1)
+			C::LineRect active;
+			active.x = 0; active.y = 0; active.w = plane.w; active.h = plane.h;
+			const uint64_t seq = 100u;
+			const C::LinePlan plan = C::LineSampler::Plan(active, seq);
+			Assert::IsTrue(plan.valid);
+			// Exercise full 10-bit dynamic range [0..1023] on both axes (including 1023 << 6 = 65472, no uint16 overflow).
+			// Place row extremes on rowY[0] (top stratum) and col extremes at the bottom of colX[0] so the two patches never intersect.
+			const uint16_t extremes[4] = { 0u, 1u, 1022u, 1023u };
+			const int colBottomOffset = plan.inner.h - 4;
+			for (int k = 0; k < 4; ++k)
+			{
+				plane.luma[static_cast<size_t>(plan.rowY[0]) * static_cast<size_t>(plane.w) + static_cast<size_t>(plan.inner.x + k)] = extremes[k];
+				plane.luma[static_cast<size_t>(plan.inner.y + colBottomOffset + k) * static_cast<size_t>(plane.w) + static_cast<size_t>(plan.colX[0])] = extremes[k];
+			}
+
+			C::LineSnapshot legacy, q6;
+			Assert::IsTrue(C::CaptureLines<uint16_t>(plan, plane.luma.data(), plane.w, 1.0, legacy));
+			Assert::IsTrue(C::CaptureLines<uint16_t>(plan, plane.luma.data(), plane.w, 64.0, q6, static_cast<uint8_t>(6)));
+			Assert::AreEqual(0, static_cast<int>(legacy.fracBits), L"default CaptureLines keeps legacy fracBits == 0");
+			Assert::AreEqual(6, static_cast<int>(q6.fracBits), L"Q6 CaptureLines stamps fracBits == 6");
+			Assert::AreEqual<size_t>(legacy.rows.size(), q6.rows.size());
+			Assert::AreEqual<size_t>(legacy.cols.size(), q6.cols.size());
+			Assert::AreEqual<uint32_t>(0u, static_cast<uint32_t>(q6.rows[0]));
+			Assert::AreEqual<uint32_t>(1023u << 6, static_cast<uint32_t>(q6.rows[3]), L"full-scale 10-bit code 1023 fits cleanly in Q6 uint16");
+			Assert::AreEqual<uint32_t>(0u, static_cast<uint32_t>(q6.cols[static_cast<size_t>(colBottomOffset)]));
+			Assert::AreEqual<uint32_t>(1023u << 6, static_cast<uint32_t>(q6.cols[static_cast<size_t>(colBottomOffset + 3)]));
+			for (size_t i = 0; i < legacy.rows.size(); ++i)
+				Assert::AreEqual<uint32_t>(static_cast<uint32_t>(legacy.rows[i]) << 6, static_cast<uint32_t>(q6.rows[i]));
+			for (size_t i = 0; i < legacy.cols.size(); ++i)
+				Assert::AreEqual<uint32_t>(static_cast<uint32_t>(legacy.cols[i]) << 6, static_cast<uint32_t>(q6.cols[i]));
+
+			for (int axis = 0; axis < 2; ++axis)
+			{
+				C::LineSet lsLegacy, lsQ6;
+				Assert::IsTrue(C::ToLineSet(legacy, axis, lsLegacy));
+				Assert::IsTrue(C::ToLineSet(q6, axis, lsQ6));
+				Assert::AreEqual(lsLegacy.axis, lsQ6.axis);
+				Assert::AreEqual(lsLegacy.axisLen, lsQ6.axisLen);
+				Assert::AreEqual(lsLegacy.origin, lsQ6.origin);
+				Assert::AreEqual(lsLegacy.length, lsQ6.length);
+				Assert::AreEqual(lsLegacy.count, lsQ6.count);
+				Assert::IsTrue(lsLegacy.cross == lsQ6.cross);
+				Assert::AreEqual<size_t>(lsLegacy.data.size(), lsQ6.data.size());
+				for (size_t i = 0; i < lsLegacy.data.size(); ++i)
+				{
+					Assert::IsTrue(lsQ6.data[i] == lsLegacy.data[i], L"ToLineSet on Q6 10-bit is value-exact with legacy 10-bit");
+					Assert::AreEqual(0, std::memcmp(&lsQ6.data[i], &lsLegacy.data[i], sizeof(double)),
+						L"ToLineSet on Q6 10-bit is IEEE-754 bit-identical to legacy 10-bit");
+				}
+			}
+
+			Assert::AreEqual(1, C::DetectStepCodes(legacy), L"legacy 10-bit step detection");
+			Assert::AreEqual(1, C::DetectStepCodes(q6), L"Q6 10-bit step detection stays 1 (not fooled by << 6 low zero bits)");
+			const Plane plane8 = MakePlane(400, 300, 17, 4);   // 8-bit carried in 10-bit codes
+			C::LineSnapshot legacy8, q6_8;
+			Assert::IsTrue(C::CaptureLines<uint16_t>(plan, plane8.luma.data(), plane8.w, 1.0, legacy8));
+			Assert::IsTrue(C::CaptureLines<uint16_t>(plan, plane8.luma.data(), plane8.w, 64.0, q6_8, static_cast<uint8_t>(6)));
+			Assert::AreEqual(4, C::DetectStepCodes(legacy8));
+			Assert::AreEqual(4, C::DetectStepCodes(q6_8), L"Q6 8-bit-in-10-bit step detection stays 4");
+
+			const double floorLegacy = C::MeasuredFloorCodes(legacy, 1.0);
+			const double floorQ6 = C::MeasuredFloorCodes(q6, 1.0);
+			Assert::IsTrue(std::isfinite(floorLegacy) && std::isfinite(floorQ6));
+			Assert::IsTrue(floorLegacy > 1.0 / std::sqrt(12.0) + 0.5, L"fixture: textured plane floor sits well above quantization floor");
+			Assert::IsTrue(floorQ6 == floorLegacy, L"MeasuredFloorCodes on Q6 10-bit is bit-exact with legacy 10-bit");
+			Assert::AreEqual(0, std::memcmp(&floorQ6, &floorLegacy, sizeof(double)),
+				L"MeasuredFloorCodes on Q6 10-bit is IEEE-754 bit-identical to legacy 10-bit");
+
+			// Mandatory in-test negative control on the EXACT SAME Q6 snapshot: zeroing fracBits (simulating pre-U#2
+			// ToLineSet / MeasuredFloorCodes that ignore fracBits) inflates both line samples and MeasuredFloorCodes by 64x.
+			C::LineSnapshot unscaledQ6 = q6;
+			unscaledQ6.fracBits = static_cast<uint8_t>(0);
+			C::LineSet lsLegacyRow, lsUnscaledRow;
+			Assert::IsTrue(C::ToLineSet(legacy, 0, lsLegacyRow));
+			Assert::IsTrue(C::ToLineSet(unscaledQ6, 0, lsUnscaledRow));
+			Assert::IsTrue(lsUnscaledRow.data[3] == 64.0 * lsLegacyRow.data[3] && lsUnscaledRow.data[3] != lsLegacyRow.data[3],
+				L"negative control: ignoring fracBits inflates Q6 samples by 64x");
+			const double floorUnscaled = C::MeasuredFloorCodes(unscaledQ6, 1.0);
+			Assert::AreEqual(64.0 * floorLegacy, floorUnscaled, 1e-9,
+				L"negative control: ignoring fracBits inflates MeasuredFloorCodes by 64x");
+
+			// Feed the same 10-bit plane (msbShift = 6) through ChainEstimator's live Q6 tap vs legacy fracBits = 0 SubmitLines.
+			C::EvaluationDetail detailLive, detailLegacy;
+			bool sawLive = false, sawLegacy = false;
+			G::Packed recLive, recLegacy;
+			{
+				ManualClock clk;
+				C::ChainEstimator estLive(C::EstimatorSettings(), clk.Fn());
+				estLive.SetEvaluationObserver([&](const C::EvaluationDetail& d) { detailLive = d; sawLive = true; });
+				StartShadow(estLive);
+				Feed(estLive, plane, seq, 1.0);   // View() sets msbShift = 6 (10-bit)
+				Assert::AreEqual<uint64_t>(1, estLive.GetCounters().evaluations);
+				recLive = G::Pack(Newest(estLive));
+			}
+			{
+				legacy.seq = seq;
+				legacy.timeUs = 1000000;
+				legacy.rasterW = plane.w;
+				legacy.rasterH = plane.h;
+				ManualClock clk;
+				C::ChainEstimator estLegacy(C::EstimatorSettings(), clk.Fn());
+				estLegacy.SetEvaluationObserver([&](const C::EvaluationDetail& d) { detailLegacy = d; sawLegacy = true; });
+				StartShadow(estLegacy);
+				Assert::IsTrue(estLegacy.SubmitLines(legacy));
+				Assert::AreEqual<uint64_t>(1, estLegacy.GetCounters().evaluations);
+				recLegacy = G::Pack(Newest(estLegacy));
+			}
+			Assert::IsTrue(sawLive && sawLegacy);
+			Assert::AreEqual(1, detailLive.stepCodes, L"live Q6 tap preserves 10-bit stepCodes == 1");
+			Assert::AreEqual(1, detailLegacy.stepCodes);
+			Assert::IsTrue(detailLive.floorCodes == detailLegacy.floorCodes);
+			Assert::IsTrue(detailLive.floorMeasured == detailLegacy.floorMeasured,
+				L"live Q6 tap MeasuredFloorCodes matches legacy 10-bit bit-for-bit");
+			Assert::IsTrue(SameBytes(recLive, recLegacy),
+				L"live Q6 tap on 10-bit plane produces byte-identical SourceGeometry::Record to legacy 10-bit");
+		}
+
+		TEST_METHOD(LineSnapshotQ6PreservesAll4096TwelveBitLevels)
+		{
+			// 12-bit ramp plane whose inner row extent spans ALL 4096 consecutive 12-bit codes [0..4095].
+			const C::SamplerSettings sampler;
+			const int rampW = 4096 + 2 * sampler.margin;   // inner.w == 4096
+			const int rampH = 256;                         // inner.h == 160 (>= 64 and >= 32 rows)
+			Plane ramp;
+			ramp.w = rampW;
+			ramp.h = rampH;
+			ramp.luma.resize(static_cast<size_t>(rampW) * static_cast<size_t>(rampH), 0u);
+			for (int y = 0; y < rampH; ++y)
+			{
+				uint16_t* row = &ramp.luma[static_cast<size_t>(y) * static_cast<size_t>(rampW)];
+				for (int x = 0; x < rampW; ++x)
+				{
+					const int c = x < sampler.margin ? 0 : (x - sampler.margin >= 4096 ? 4095 : (x - sampler.margin));
+					row[x] = static_cast<uint16_t>(c);
+				}
+			}
+			C::LineRect rampActive;
+			rampActive.x = 0; rampActive.y = 0; rampActive.w = rampW; rampActive.h = rampH;
+			const C::LinePlan rampPlan = C::LineSampler::Plan(rampActive, 1u, sampler);
+			Assert::IsTrue(rampPlan.valid);
+			Assert::AreEqual(4096, rampPlan.inner.w);
+
+			// Q6 capture of 12-bit codes (msbShift = 4 -> scale = 2^4 = 16.0, fracBits = 6 -> stored code12 << 4).
+			C::LineSnapshot snapQ6;
+			Assert::IsTrue(C::CaptureLines<uint16_t>(rampPlan, ramp.luma.data(), ramp.w, 16.0, snapQ6, static_cast<uint8_t>(6)));
+			Assert::AreEqual(6, static_cast<int>(snapQ6.fracBits));
+			Assert::AreEqual<uint32_t>(0u, static_cast<uint32_t>(snapQ6.rows[0]));
+			Assert::AreEqual<uint32_t>(4095u << 4, static_cast<uint32_t>(snapQ6.rows[4095]),
+				L"max 12-bit code 4095 << 4 == 65520 fits in Q6 uint16 without clipping");
+
+			C::LineSet lsQ6Row, lsQ6Col;
+			Assert::IsTrue(C::ToLineSet(snapQ6, 0, lsQ6Row));
+			Assert::IsTrue(C::ToLineSet(snapQ6, 1, lsQ6Col));
+			Assert::AreEqual(4096, lsQ6Row.length);
+			const double* rowQ6 = lsQ6Row.Line(0);
+			std::vector<double> sortedQ6(rowQ6, rowQ6 + 4096);
+			for (int c = 0; c < 4096; ++c)
+				Assert::IsTrue(rowQ6[c] == static_cast<double>(c) * 0.25,
+					L"every 12-bit code c in [0..4095] converts exactly to c * 0.25");
+			for (int c = 0; c < 4095; ++c)
+				Assert::IsTrue(rowQ6[c + 1] - rowQ6[c] == 0.25,
+					L"every consecutive 12-bit step has exact 0.25 spacing (zero merging)");
+			std::sort(sortedQ6.begin(), sortedQ6.end());
+			const size_t distinctQ6 = static_cast<size_t>(std::unique(sortedQ6.begin(), sortedQ6.end()) - sortedQ6.begin());
+			Assert::AreEqual<size_t>(4096u, distinctQ6, L"Q6 preserves all 4096 distinct 12-bit levels");
+			// Verify column axis (axis 1) also preserves exact 12-bit fractional codes (c * 0.25).
+			for (int j = 0; j < lsQ6Col.count; ++j)
+			{
+				const double expected = static_cast<double>(rampPlan.colX[j] - sampler.margin) * 0.25;
+				Assert::IsTrue(lsQ6Col.Line(j)[0] == expected, L"axis 1 ToLineSet preserves exact 12-bit c * 0.25");
+			}
+
+			// Mandatory in-test negative control (EXACT SAME 12-bit ramp): legacy 10-bit capture
+			// (scale = pow(2, 4 - 6) = 0.25, fracBits = 0) collapses 4096 levels to <= 1025 and merges adjacent steps.
+			C::LineSnapshot snapLegacyRamp;
+			Assert::IsTrue(C::CaptureLines<uint16_t>(rampPlan, ramp.luma.data(), ramp.w, 0.25, snapLegacyRamp, static_cast<uint8_t>(0)));
+			Assert::AreEqual(0, static_cast<int>(snapLegacyRamp.fracBits));
+			C::LineSet lsLegacyRamp;
+			Assert::IsTrue(C::ToLineSet(snapLegacyRamp, 0, lsLegacyRamp));
+			const double* rowLegacy = lsLegacyRamp.Line(0);
+			std::vector<double> sortedLegacy(rowLegacy, rowLegacy + 4096);
+			std::sort(sortedLegacy.begin(), sortedLegacy.end());
+			const size_t distinctLegacy = static_cast<size_t>(std::unique(sortedLegacy.begin(), sortedLegacy.end()) - sortedLegacy.begin());
+			size_t mergedLegacy = 0;
+			for (int c = 0; c < 4095; ++c)
+				if (rowLegacy[c + 1] - rowLegacy[c] == 0.0)
+					++mergedLegacy;
+			Assert::IsTrue(distinctLegacy <= 1025u,
+				L"negative control: legacy 10-bit capture collapses 4096 12-bit levels down to <= 1025");
+			Assert::IsTrue(mergedLegacy >= 3000u,
+				L"negative control: legacy 10-bit capture merges adjacent 12-bit steps (diff == 0.0)");
+
+			// Live ChainEstimator sink (SourceFrameView, msbShift = 4) with a sub-10-bit 12-bit noise signal
+			// (+-1 12-bit code = +-0.25 10-bit code around base 2052 == 513 * 4):
+			// Every row and column alternates 2051 / 2053, so 10-bit second difference is +-1.0 (MAD = 1.0,
+			// raw sigma = kMadToSigma / sqrt(6) ~= 0.6053), well above 10-bit qFloor = 1 / sqrt(12) ~= 0.2887.
+			// Under legacy 10-bit rounding (floor(v * 0.25 + 0.5)), BOTH 2051 and 2053 collapse to 513 (d2 == 0).
+			Plane noise12;
+			noise12.w = kW;
+			noise12.h = kH;
+			noise12.luma.resize(static_cast<size_t>(kW) * static_cast<size_t>(kH), 0u);
+			const uint16_t kBase12 = 2052u;   // 513.0 in 10-bit codes (513 & 3 == 1 -> stepCodes == 1 unambiguously)
+			for (int y = 0; y < kH; ++y)
+				for (int x = 0; x < kW; ++x)
+					noise12.luma[static_cast<size_t>(y) * static_cast<size_t>(kW) + static_cast<size_t>(x)] =
+						static_cast<uint16_t>((((x + y) & 1) != 0) ? (kBase12 + 1u) : (kBase12 - 1u));
+
+			const double kExpectedRaw12 = RobustStats::kMadToSigma * 1.0 / std::sqrt(6.0);
+			const double kQFloor10 = 1.0 / std::sqrt(12.0);
+			const uint64_t noiseSeq = 200u;
+
+			C::EvaluationDetail detailLive12;
+			bool sawLive12 = false;
+			{
+				ManualClock clk;
+				C::ChainEstimator est12(C::EstimatorSettings(), clk.Fn());
+				est12.SetEvaluationObserver([&](const C::EvaluationDetail& d) { detailLive12 = d; sawLive12 = true; });
+				StartShadow(est12);
+				VpSkeleton::SourceFrameView v12;
+				v12.seq = noiseSeq;
+				v12.luma = noise12.luma.data();
+				v12.width = static_cast<uint32_t>(noise12.w);
+				v12.height = static_cast<uint32_t>(noise12.h);
+				v12.strideSamples = static_cast<uint32_t>(noise12.w);
+				v12.msbShift = 4;   // 12-bit DV
+				est12.NoteFrame(noiseSeq, 1.0, 0, 0, 0, 0);
+				est12.Deliver(v12);
+				Assert::AreEqual<uint64_t>(1, est12.GetCounters().evaluations);
+				Assert::AreEqual<uint64_t>(1, est12.GetCounters().floorMeasured);
+			}
+			Assert::IsTrue(sawLive12, L"observer received the 12-bit live evaluation");
+			Assert::AreEqual(1, detailLive12.stepCodes, L"12-bit DV live tap detects stepCodes == 1");
+			Assert::IsTrue(std::isfinite(detailLive12.floorMeasured));
+			Assert::AreEqual(kExpectedRaw12, detailLive12.floorMeasured, 1e-12,
+				L"live 12-bit Q6 tap resolves exact +-1 12-bit-code signal in detail.floorMeasured");
+
+			// Mandatory in-test negative control (EXACT SAME 12-bit noise plane): legacy 10-bit capture collapses
+			// both 2051 and 2053 to integer 513, quantizing the +-1 12-bit signal completely to zero (hitting qFloor).
+			C::LineRect noiseActive;
+			noiseActive.x = 0; noiseActive.y = 0; noiseActive.w = kW; noiseActive.h = kH;
+			const C::LinePlan noisePlan = C::LineSampler::Plan(noiseActive, noiseSeq);
+			Assert::IsTrue(noisePlan.valid);
+			C::LineSnapshot snapLegacyNoise;
+			Assert::IsTrue(C::CaptureLines<uint16_t>(noisePlan, noise12.luma.data(), noise12.w, 0.25, snapLegacyNoise, static_cast<uint8_t>(0)));
+			Assert::AreEqual<uint32_t>(513u, static_cast<uint32_t>(snapLegacyNoise.rows[0]));
+			snapLegacyNoise.seq = noiseSeq;
+			snapLegacyNoise.timeUs = 1000000;
+			snapLegacyNoise.rasterW = kW;
+			snapLegacyNoise.rasterH = kH;
+			C::EvaluationDetail detailLegacyNoise;
+			bool sawLegacyNoise = false;
+			{
+				ManualClock clk;
+				C::ChainEstimator estLegacy(C::EstimatorSettings(), clk.Fn());
+				estLegacy.SetEvaluationObserver([&](const C::EvaluationDetail& d) { detailLegacyNoise = d; sawLegacyNoise = true; });
+				StartShadow(estLegacy);
+				Assert::IsTrue(estLegacy.SubmitLines(snapLegacyNoise));
+				Assert::AreEqual<uint64_t>(1, estLegacy.GetCounters().evaluations);
+			}
+			Assert::IsTrue(sawLegacyNoise);
+			Assert::AreEqual(1, detailLegacyNoise.stepCodes);
+			Assert::AreEqual(kQFloor10, detailLegacyNoise.floorMeasured, 1e-12,
+				L"negative control: legacy 10-bit capture quantizes +-1 12-bit noise to zero (collapses to 10-bit qFloor)");
+			Assert::IsTrue(detailLive12.floorMeasured > detailLegacyNoise.floorMeasured * 2.0,
+				L"Q6 live 12-bit tap resolves >2x higher floor than collapsed legacy 10-bit capture on the exact same plane");
 		}
 	};
 

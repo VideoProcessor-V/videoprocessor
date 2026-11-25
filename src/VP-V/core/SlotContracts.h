@@ -75,9 +75,9 @@ namespace PipelineSlots
 			c.needLight = Light::Target;
 			c.modifies = id != Id::DriveLedMeasure;
 			break;
-		// DV display mapping: dm_pre is still a placeholder (no pass, changes nothing, may sit anywhere in its zone).
+		// DV display mapping: dm_pre is built (CF-DV P5: post-decode I-only DV debander, fixed in its zone).
 		// dm_curve and dm_trims are built (CF-1 P3): they work on target light and change the picture.
-		case Id::ColourDmPre: break;
+		case Id::ColourDmPre: c.modifies = true; c.movable = false; break;
 		case Id::ColourDmCurve: case Id::ColourDmTrims: c.needLight = Light::Target; c.modifies = true; break;
 		case Id::OutputCalibrationLut: c.needLight = Light::Target; c.giveLight = Light::Codes; c.modifies = true; break;
 		default:

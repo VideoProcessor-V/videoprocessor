@@ -349,6 +349,9 @@ if (tile < int(tiles) && g.y < ts) {
 			for (int i = 0; i < count; ++i)
 				SourceResolution::Analyse(&tiles[static_cast<size_t>(i) * size * size], size, size, spectra[static_cast<size_t>(i)], codeMaximum);
 			SourceResolution::Thresholds thresholds;
+			thresholds.codeMaximum = codeMaximum;
+			// Limited-range black for the queued tiles' depth: 16 << (bits - 8) / codeMaximum (matches SubmitTiles; 64/1023 at 10-bit, 256/4095 at 12-bit).
+			thresholds.blackLevel = 16.0 * (static_cast<double>(codeMaximum) + 1.0) / 256.0 / static_cast<double>((std::max)(1, codeMaximum));
 			thresholds.latchFixes = LatchFixes();
 			thresholds.codingUnavailable = true;   // the look-ahead reads the ratio only: no P16 acquire, coding neutral, no distribution
 			aheadRan.store(true, std::memory_order_release);
