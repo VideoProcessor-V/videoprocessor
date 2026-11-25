@@ -3796,6 +3796,520 @@ namespace SkeletonModuleTestsNs
 					L"Negative control: status line must report 0 provisional cuts withdrawn");
 			}
 		}
+
+		// Prod MED-1 regression: per-host renderTid isolates two no-lane hosts initialized on distinct render
+		// threads and survives off-thread Shutdown of hostA without locking out hostB's render thread or allowing
+		// the Shutdown thread to trigger PlanNoLaneGpu on hostB.
+		BEGIN_TEST_METHOD_ATTRIBUTE(PerHostRenderTidIsolatesTwoHostsAndSurvivesOffThreadShutdown)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(PerHostRenderTidIsolatesTwoHostsAndSurvivesOffThreadShutdown)
+		{
+			struct VramUsersGuard
+			{
+				VramUsersGuard() { VpSkeleton::VramUsers::Instance().ResetForTesting(); }
+				~VramUsersGuard() { VpSkeleton::VramUsers::Instance().ResetForTesting(); }
+			} vramGuard;
+
+			const unsigned long long faultsBefore = SkeletonModule::ContainedFaults();
+			SkeletonModule sk([](ConfigFile&) { return false; });   // analysis_lane off (no-lane memo path)
+			VpSkeleton::CardProfile ample;
+			ample.vramBudgetBytes = 1ull << 30;
+			ample.vramUsageBytes = 0;
+			sk.SetCardForTesting(ample);
+
+			VpSkeleton::OwnerFill gpuFill;
+			gpuFill.reserveBytes = 1u << 20;
+			gpuFill.fill = [](const VpSkeleton::OwnerFillRequest&, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+				static int tex = 0;
+				out.gpu.resource = &tex;
+				out.gpu.bytes = 1u << 20;
+				return true;
+			};
+			Assert::IsTrue(
+				sk.RegisterOwnerFill(VpSkeleton::kP10GrainSplit, VpSkeleton::AcquireForm::Gpu, "repair/grain_split", gpuFill)
+					== VpSkeleton::SkeletonMemo::Registration::Registered,
+				L"P10 GPU owner fill registered");
+
+			int hostA = 0;
+			int hostB = 0;
+			pl_gpu_t fakeGpuA{};
+			pl_gpu_t fakeGpuB{};
+
+			auto sendLifecycle = [&sk](const void* host, RE::Lifecycle kind, pl_gpu gpu) {
+				RE::LifecycleFacts f;
+				f.host = host;
+				f.kind = kind;
+				f.gpu = gpu;
+				sk.OnLifecycle(f);
+			};
+
+			// Keep all three threads alive simultaneously behind explicit startup barriers and RAII join guards
+			// so Windows cannot reuse a thread ID across phases and early assertion failures never leak threads.
+			struct StepThread
+			{
+				std::atomic<bool> ready{ false };
+				std::atomic<uint32_t> tid{ 0 };
+				std::atomic<int> cmd{ 0 };
+				std::atomic<int> done{ 0 };
+				std::thread t;
+
+				explicit StepThread(std::function<void(int)> fn)
+				{
+					t = std::thread([this, fn]() mutable {
+						tid.store(static_cast<uint32_t>(GetCurrentThreadId()), std::memory_order_release);
+						ready.store(true, std::memory_order_release);
+						for (;;)
+						{
+							const int c = cmd.load(std::memory_order_acquire);
+							if (c < 0)
+								return;
+							if (c == 0)
+							{
+								std::this_thread::yield();
+								continue;
+							}
+							cmd.store(0, std::memory_order_release);
+							fn(c);
+							done.store(c, std::memory_order_release);
+						}
+					});
+					while (!ready.load(std::memory_order_acquire))
+						std::this_thread::yield();
+				}
+
+				~StepThread()
+				{
+					cmd.store(-1, std::memory_order_release);
+					if (t.joinable())
+						t.join();
+				}
+
+				void RunStep(int step)
+				{
+					cmd.store(step, std::memory_order_release);
+					while (done.load(std::memory_order_acquire) != step)
+						std::this_thread::yield();
+				}
+			};
+
+			Vpv::Skeleton::FrameMemo fmA_onA;
+			Vpv::Skeleton::FrameMemo fmB_onA;
+			VpSkeleton::AcquireResult rB_onA;
+			Vpv::Skeleton::FrameMemo fmB_onB;
+			VpSkeleton::AcquireResult rB_onB;
+			Vpv::Skeleton::FrameMemo fmB_onC;
+			Vpv::Skeleton::FrameMemo fmB_onB_tight;
+			Vpv::Skeleton::FrameMemo fmB_onB_restored;
+
+			StepThread threadA([&](int step) {
+				if (step == 1)
+				{
+					sendLifecycle(&hostA, RE::Lifecycle::GpuCreated, &fakeGpuA);
+				}
+				else if (step == 2)
+				{
+					fmA_onA = sk.MemoFor(&hostA, 1);
+					fmB_onA = sk.MemoFor(&hostB, 1);   // negative control: threadA is wrong thread for hostB
+					if (fmB_onA.Valid())
+						rB_onA = fmB_onA.memo->Acquire(VpSkeleton::kP10GrainSplit, 1, VpSkeleton::AcquireForm::Gpu);
+				}
+			});
+
+			StepThread threadB([&](int step) {
+				if (step == 1)
+				{
+					sendLifecycle(&hostB, RE::Lifecycle::GpuCreated, &fakeGpuB);
+				}
+				else if (step == 2)
+				{
+					fmB_onB = sk.MemoFor(&hostB, 1);
+					if (fmB_onB.Valid())
+						rB_onB = fmB_onB.memo->Acquire(VpSkeleton::kP10GrainSplit, 1, VpSkeleton::AcquireForm::Gpu);
+				}
+				else if (step == 3)
+				{
+					fmB_onB_tight = sk.MemoFor(&hostB, 2);
+				}
+				else if (step == 4)
+				{
+					fmB_onB_restored = sk.MemoFor(&hostB, 3);
+				}
+				else if (step == 5)
+				{
+					sendLifecycle(&hostB, RE::Lifecycle::Shutdown, nullptr);
+				}
+			});
+
+			StepThread threadC([&](int step) {
+				if (step == 1)
+				{
+					sendLifecycle(&hostA, RE::Lifecycle::Shutdown, nullptr);
+				}
+				else if (step == 2)
+				{
+					fmB_onC = sk.MemoFor(&hostB, 2);
+				}
+			});
+
+			const uint32_t tidA = threadA.tid.load(std::memory_order_acquire);
+			const uint32_t tidB = threadB.tid.load(std::memory_order_acquire);
+			const uint32_t tidC = threadC.tid.load(std::memory_order_acquire);
+			Assert::IsTrue(tidA != tidB && tidB != tidC && tidA != tidC, L"three distinct Win32 thread IDs");
+
+			// Step 1 & 2: hostA gets GpuCreated on threadA, then hostB gets GpuCreated on threadB.
+			threadA.RunStep(1);
+			threadB.RunStep(1);
+
+			// Step 3: threadA plans hostA (must succeed despite hostB's GpuCreated on threadB) and probes hostB (negative control).
+			threadA.RunStep(2);
+			Assert::IsTrue(fmA_onA.Valid() && fmA_onA.memo->GpuGranted(),
+				L"threadA (hostA's render thread) must grant GPU on hostA even after hostB registered on threadB");
+			Assert::IsTrue(fmB_onA.Valid(), L"threadA lazily created hostB memo");
+			Assert::IsFalse(fmB_onA.memo->GpuGranted(),
+				L"negative control: threadA (wrong thread for hostB) MUST NOT grant GPU on hostB");
+			Assert::IsTrue(
+				rB_onA.status == VpSkeleton::AcquireStatus::Unavailable && rB_onA.cause == VpSkeleton::AcquireCause::NoGpuDispatcher,
+				L"negative control: off-thread MemoFor on hostB must leave GPU dispatcher ungranted");
+
+			// Step 4: threadB plans hostB and succeeds.
+			threadB.RunStep(2);
+			Assert::IsTrue(fmB_onB.Valid() && fmB_onB.memo->GpuGranted(),
+				L"threadB (hostB's render thread) must grant GPU on hostB");
+			Assert::IsTrue(rB_onB.status == VpSkeleton::AcquireStatus::FilledAtRead && rB_onB.gpu.Valid(),
+				L"hostB GPU fill succeeds on threadB");
+
+			// Step 5: threadC runs Shutdown(&hostA). Then force a pending replan (tight card + second GPU owner fill)
+			// to prove threadC STILL cannot trigger PlanNoLaneGpu(&hostB) while threadB STILL owns hostB.
+			threadC.RunStep(1);
+			Assert::IsNull(sk.MemoOf(&hostA), L"Shutdown cleaned up hostA");
+
+			VpSkeleton::CardProfile tight;
+			tight.vramBudgetBytes = 1ull << 20;
+			tight.vramUsageBytes = 1ull << 20;   // 0 free VRAM -> replan must revoke GpuGranted
+			sk.SetCardForTesting(tight);
+
+			VpSkeleton::OwnerFill secondGpuFill;
+			secondGpuFill.reserveBytes = 2u << 20;
+			secondGpuFill.fill = gpuFill.fill;
+			Assert::IsTrue(
+				sk.RegisterOwnerFill(VpSkeleton::kP1HalfLuma, VpSkeleton::AcquireForm::Gpu, "input/source_analysis/lane", secondGpuFill)
+					== VpSkeleton::SkeletonMemo::Registration::Registered,
+				L"second GPU fill registered to move hostB's plannedNeed");
+
+			threadC.RunStep(2);
+			Assert::IsTrue(fmB_onC.Valid() && fmB_onC.memo->GpuGranted(),
+				L"negative control: threadC (after hostA Shutdown) MUST NOT trigger PlanNoLaneGpu(&hostB)");
+
+			threadB.RunStep(3);
+			Assert::IsTrue(fmB_onB_tight.Valid() && !fmB_onB_tight.memo->GpuGranted(),
+				L"hostB still recognizes threadB as its render thread and replans against tight card");
+
+			sk.SetCardForTesting(ample);
+			Assert::IsTrue(sk.UnregisterOwnerFill(VpSkeleton::kP1HalfLuma, VpSkeleton::AcquireForm::Gpu, "input/source_analysis/lane"));
+			threadB.RunStep(4);
+			Assert::IsTrue(fmB_onB_restored.Valid() && fmB_onB_restored.memo->GpuGranted(),
+				L"threadB continues to grant GPU on hostB after ample card restored");
+
+			threadB.RunStep(5);
+			Assert::IsNull(sk.MemoOf(&hostB), L"Shutdown cleaned up hostB");
+			Assert::AreEqual(faultsBefore, SkeletonModule::ContainedFaults(), L"zero contained faults");
+		}
+
+		// Part 2 AC#4 (N2 + Skeleton MUST-2/3/8): live worker threads join cleanly on source-size rebuild, explicit Shutdown,
+		// and direct ~SkeletonModule() without GpuReleased; lane-bound memo GPU presence follows attached device vs lane
+		// dispatcher (MUST-3); concurrent ahead vs render SceneOf preserves monotonic confirmation with a pre-successor
+		// provisional negative control (MUST-8).
+		BEGIN_TEST_METHOD_ATTRIBUTE(BundleDestructorAndRebuildJoinWorkersBeforeUnbind)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(BundleDestructorAndRebuildJoinWorkersBeforeUnbind)
+		{
+			struct VramUsersGuard
+			{
+				VramUsersGuard() { VpSkeleton::VramUsers::Instance().ResetForTesting(); }
+				~VramUsersGuard() { VpSkeleton::VramUsers::Instance().ResetForTesting(); }
+			} vramGuard;
+
+			const unsigned long long faultsBefore = SkeletonModule::ContainedFaults();
+
+			// ---- 1. N2 / MUST-2: live worker threads across dims rebuild, Shutdown, and direct ~SkeletonModule() ----
+			{
+				Rig rig(Lane("on"));
+				rig.sk.SetWorkerThreadsForTesting(true);
+				rig.ResyncApply("on");
+				rig.Life(RE::Lifecycle::GpuCreated);
+				for (int64_t s = 1; s <= 6; ++s)
+					rig.Frame(s);
+
+				Assert::IsTrue(rig.sk.WorkersRunning(rig.Host()), L"MUST-2: lane worker threads actively running");
+				Assert::AreEqual<uint32_t>(kW, rig.sk.DimsOf(rig.Host()).width);
+				Assert::AreEqual<uint32_t>(kH, rig.sk.DimsOf(rig.Host()).height);
+				const std::shared_ptr<VpSkeleton::SkeletonMemo> heldMemo = rig.sk.MemoFor(rig.Host(), 6).memo;
+				Assert::IsTrue(heldMemo != nullptr && heldMemo->LaneBound(), L"memo lane-bound before rebuild");
+				const uint64_t bindsBefore = heldMemo->LaneBinds();
+
+				// Trigger a source-size rebuild (new dims 96x64) while workers are running.
+				constexpr uint32_t kW2 = 96;
+				constexpr uint32_t kH2 = 64;
+				std::vector<uint16_t> bigPlane(size_t(kW2) * kH2);
+				for (uint32_t y = 0; y < kH2; ++y)
+					for (uint32_t x = 0; x < kW2; ++x)
+						bigPlane[size_t(y) * kW2 + x] = static_cast<uint16_t>(64u + ((x * 7u + y * 11u) % 700u));
+
+				auto makeView2 = [&](uint64_t seq) {
+					SourceFrameView v;
+					v.seq = seq;
+					v.luma = bigPlane.data();
+					v.width = kW2;
+					v.height = kH2;
+					v.strideSamples = kW2;
+					v.msbShift = 6;
+					return v;
+				};
+
+				for (int64_t s = 7; s <= 10; ++s)
+				{
+					rig.Ingress(s);
+					Tap::Deliver(rig.Host(), makeView2(uint64_t(s)));
+					Tap::Deliver(rig.Host(), makeView2(uint64_t(s) + 1u));
+					rig.Begin(s);
+					rig.After(s);
+				}
+
+				Assert::AreEqual<uint32_t>(kW2, rig.sk.DimsOf(rig.Host()).width, L"rebuild updated width to 96");
+				Assert::AreEqual<uint32_t>(kH2, rig.sk.DimsOf(rig.Host()).height, L"rebuild updated height to 64");
+				Assert::IsTrue(rig.sk.WorkersRunning(rig.Host()), L"rebuilt bundle started its worker threads");
+				Assert::IsTrue(heldMemo->LaneBound() && heldMemo->LaneBinds() > bindsBefore,
+					L"dims rebuild joined old workers and rebound memo to new lane");
+				std::vector<uint8_t> expectedHalf2(VpLaneProducts::HalfLumaBytes(Dims{ kW2, kH2 }));
+				Assert::IsTrue(VpLaneProducts::ComputeHalfLuma(makeView2(10), expectedHalf2.data(), expectedHalf2.size()));
+				Assert::IsTrue(rig.Bytes(VpSkeleton::kP1HalfLuma, 10) == expectedHalf2,
+					L"rebuilt lane produces bit-identical P1 for new dims");
+
+				// Explicit Shutdown while workers are running joins workers and unbinds memo.
+				rig.Life(RE::Lifecycle::Shutdown);
+				Assert::IsFalse(rig.sk.WorkersRunning(rig.Host()), L"Shutdown joined worker threads");
+				Assert::IsNull(rig.sk.LaneOf(rig.Host()), L"Shutdown dropped lane bundle");
+				Assert::IsNull(rig.sk.MemoOf(rig.Host()), L"Shutdown removed host memo");
+				Assert::IsFalse(heldMemo->LaneBound(), L"Shutdown cleanly unbound memo from old lane");
+			}
+
+			// Direct ~SkeletonModule() destruction WITHOUT explicit GpuReleased / Shutdown while workers are running.
+			{
+				FakeRenderer directHost;
+				ResyncExtension directResync;
+				TempCfg directCfg(Lane("on"));
+				struct TapCleanupGuard
+				{
+					const void* host;
+					~TapCleanupGuard()
+					{
+						Tap::SetStore(host, nullptr);
+						Tap::Unregister(host);
+					}
+				} tapGuard{ &directHost };
+
+				std::vector<uint16_t> directPixels(size_t(kW) * kH, 320u);
+				std::shared_ptr<VpSkeleton::SkeletonMemo> directMemo;
+				{
+					SkeletonModule skDirect(directCfg.Loader());
+					skDirect.SetWorkerThreadsForTesting(true);
+					{
+						RE::LifecycleFacts rf;
+						rf.host = &directHost;
+						rf.kind = RE::Lifecycle::SettingsApplied;
+						rf.subject = "on";
+						directResync.OnLifecycle(rf);
+					}
+					{
+						RE::LifecycleFacts gf;
+						gf.host = &directHost;
+						gf.kind = RE::Lifecycle::GpuCreated;
+						skDirect.OnLifecycle(gf);
+					}
+					for (int64_t s = 1; s <= 6; ++s)
+					{
+						RE::IngressContext ic;
+						ic.host = &directHost;
+						ic.seq = s;
+						ic.queueGeneration = 1;
+						ic.stateKey = 0x1000;
+						ic.formatKey = 7;
+						ic.frameCounter = s;
+						ic.timestamp = s * 1000;
+						ic.ticksPerSecond = 24000;
+						ic.measuredRateHz = 24.0;
+						directResync.OnIngress(ic);
+
+						auto deliverSeq = [&](uint64_t seq) {
+							SourceFrameView v;
+							v.seq = seq;
+							v.luma = directPixels.data();
+							v.width = kW;
+							v.height = kH;
+							v.strideSamples = kW;
+							v.msbShift = 6;
+							Tap::Deliver(&directHost, v);
+						};
+						if (s == 1)
+							deliverSeq(1);
+						deliverSeq(uint64_t(s) + 1u);
+
+						RE::FrameContext fc;
+						fc.host = &directHost;
+						fc.phase = RE::FramePhase::Begin;
+						fc.seq = s;
+						directResync.OnFrame(fc);
+						Assert::IsFalse(skDirect.OnFrame(fc));
+						fc.phase = RE::FramePhase::AfterRender;
+						Assert::IsFalse(skDirect.OnFrame(fc));
+					}
+					Assert::IsTrue(skDirect.WorkersRunning(&directHost),
+						L"workers actively running immediately prior to direct ~SkeletonModule()");
+					directMemo = skDirect.MemoFor(&directHost, 6).memo;
+					Assert::IsTrue(directMemo != nullptr && directMemo->LaneBound(),
+						L"memo lane-bound immediately prior to direct ~SkeletonModule()");
+				}
+				Assert::IsFalse(directMemo->LaneBound(),
+					L"direct ~SkeletonModule() joined workers and unbound memo without explicit GpuReleased");
+				Assert::IsFalse(Tap::Wants(&directHost),
+					L"direct ~SkeletonModule() unregistered SourceFrameTap cleanly");
+			}
+
+			// ---- 2. MUST-3: lane-bound memo GPU presence follows attached device vs lane dispatcher ----
+			{
+				Rig rig(Lane("shadow"));
+				pl_gpu_t fakeGpu{};
+				rig.ResyncApply("on");
+				rig.Life(RE::Lifecycle::GpuCreated);   // null pl_gpu: shadow lane has no lane GPU dispatcher and no attached device
+				for (int64_t s = 1; s <= 3; ++s)
+					rig.Frame(s);
+
+				VpSkeleton::SkeletonMemo* memo = rig.sk.MemoOf(rig.Host());
+				Assert::IsTrue(memo != nullptr && memo->LaneBound(), L"shadow lane bound to memo");
+				RegisterGpuOwnerFill(rig);
+
+				// Negative control: no attached device AND no lane GPU dispatcher -> NoGpuDispatcher.
+				Assert::IsFalse(memo->HasGpuDevice(), L"MUST-3 negative control: no owner GPU device attached");
+				Assert::IsNull(rig.sk.GpuDispatcherFor(rig.Host()), L"MUST-3 negative control: shadow lane has no lane GPU dispatcher");
+				Assert::IsTrue(GpuOwnerFillCause(rig, 3) == VpSkeleton::AcquireCause::NoGpuDispatcher,
+					L"MUST-3 negative control: absent device + absent lane dispatcher returns NoGpuDispatcher");
+
+				// Attach owner GPU device after bind -> GPU presence becomes true despite shadow lane having no lane dispatcher.
+				GpuCreatedWithDevice(rig, &fakeGpu);
+				Assert::IsTrue(memo->LaneBound() && memo->HasGpuDevice(), L"device attached to bound shadow lane");
+				Assert::IsNull(rig.sk.GpuDispatcherFor(rig.Host()), L"shadow lane still has no lane GPU dispatcher");
+				Assert::IsTrue(GpuOwnerFillCause(rig, 3) != VpSkeleton::AcquireCause::NoGpuDispatcher,
+					L"MUST-3: attached owner GPU device grants GPU presence on shadow lane without a lane dispatcher");
+
+				// Detach device via null-pl_gpu GpuCreated -> falls back to lane dispatcher (none) -> NoGpuDispatcher.
+				RE::LifecycleFacts detach;
+				detach.host = rig.Host();
+				detach.kind = RE::Lifecycle::GpuCreated;
+				detach.gpu = nullptr;
+				rig.sk.OnLifecycle(detach);
+				rig.Frame(4);
+				Assert::IsFalse(memo->HasGpuDevice(), L"owner GPU device detached");
+				Assert::IsTrue(GpuOwnerFillCause(rig, 4) == VpSkeleton::AcquireCause::NoGpuDispatcher,
+					L"MUST-3: detaching owner GPU device drops presence back to NoGpuDispatcher when no lane dispatcher exists");
+			}
+
+			// ---- 3. MUST-8: concurrent SceneOf preserves monotonic confirmation + pre-successor provisional negative control ----
+			{
+				Rig rig(Lane("on"), 128);
+				FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));
+				Tap::SetStore(rig.Host(), &store);
+				SceneStoreGuard storeGuard(rig.Host());
+				FeedAheadWindow(rig, 8);
+				rig.ResyncApply("on");
+				rig.Life(RE::Lifecycle::GpuCreated);
+				for (int64_t s = 1; s <= 3; ++s)
+					rig.Frame(s);
+
+				// In-test negative control: frame 4 sealed BEFORE frame 5 is delivered/sealed MUST be provisional.
+				rig.Ingress(4);
+				store.Begin(SceneTestId(4), FrameAnalysis::kScene);
+				rig.Begin(4);
+				rig.After(4);
+				const Vpv::Skeleton::SceneAnswer preSucc = rig.sk.SceneOf(rig.Host(), 4);
+				Assert::IsTrue(preSucc.known, L"MUST-8 negative control: frame 4 scene is known");
+				Assert::IsFalse(preSucc.confirmed,
+					L"MUST-8 negative control: pre-successor query of frame 4 MUST be provisional before frame 5 seals");
+
+				// Delivering and sealing frame 5 transitions frame 4 to confirmed.
+				rig.Deliver(5);
+				rig.Ingress(5);
+				store.Begin(SceneTestId(5), FrameAnalysis::kScene);
+				rig.Begin(5);
+				rig.After(5);
+				const Vpv::Skeleton::SceneAnswer postSucc = rig.sk.SceneOf(rig.Host(), 4);
+				Assert::IsTrue(postSucc.known && postSucc.confirmed,
+					L"frame 4 transitions from provisional to confirmed once frame 5 seals");
+
+				// Concurrent SceneOf(s) on worker thread vs ahead SceneOf(s + 1) on render thread across 48 iterations:
+				// once confirmed, frame s MUST NEVER downgrade to provisional.
+				constexpr int kIter = 48;
+				uint64_t delivered = 5;
+				int confirmedGroups = 0;
+				for (int i = 0; i < kIter; ++i)
+				{
+					const int64_t s = 7 + i;
+					while (delivered < uint64_t(s) + 1u)
+						rig.Deliver(++delivered);
+					rig.Ingress(s - 1);
+					rig.Begin(s - 1);
+					rig.After(s - 1);
+					store.Begin(SceneTestId(uint64_t(s)), FrameAnalysis::kScene);
+					WalkP4(rig, uint64_t(s));
+					WalkP4(rig, uint64_t(s) + 1u);
+
+					std::atomic<bool> workerReady{ false };
+					std::atomic<bool> go{ false };
+					Vpv::Skeleton::SceneAnswer workerAns;
+					struct JoinGuard
+					{
+						std::atomic<bool>& goFlag;
+						std::thread t;
+						~JoinGuard()
+						{
+							goFlag.store(true, std::memory_order_release);
+							if (t.joinable())
+								t.join();
+						}
+					} worker{ go, std::thread([&]() {
+						workerReady.store(true, std::memory_order_release);
+						while (!go.load(std::memory_order_acquire))
+							std::this_thread::yield();
+						workerAns = rig.sk.SceneOf(rig.Host(), uint64_t(s));
+					}) };
+					while (!workerReady.load(std::memory_order_acquire))
+						std::this_thread::yield();
+					go.store(true, std::memory_order_release);
+					const Vpv::Skeleton::SceneAnswer aheadAns = rig.sk.SceneOf(rig.Host(), uint64_t(s) + 1u);
+					if (worker.t.joinable())
+						worker.t.join();
+
+					Assert::IsTrue(aheadAns.known,
+						(L"MUST-8 iter " + std::to_wstring(i) + L": render-thread ahead SceneOf(s+1) answered").c_str());
+					FrameAnalysis::Scene group;
+					if (store.PeekScene(uint64_t(s), group))
+					{
+						Assert::IsTrue(group.confirmed,
+							(L"MUST-8 iter " + std::to_wstring(i) + L": confirmed frame s group must never downgrade to provisional").c_str());
+						const Vpv::Skeleton::SceneAnswer monotonic = rig.sk.SceneOf(rig.Host(), uint64_t(s));
+						Assert::IsTrue(monotonic.known && monotonic.confirmed,
+							(L"MUST-8 iter " + std::to_wstring(i) + L": subsequent SceneOf(s) preserves monotonic confirmation").c_str());
+						++confirmedGroups;
+					}
+				}
+				Assert::IsTrue(confirmedGroups >= kIter / 2,
+					L"MUST-8: concurrent SceneOf exercised real store confirmation rewrites (not vacuous)");
+			}
+
+			Assert::AreEqual(faultsBefore, SkeletonModule::ContainedFaults(),
+				L"zero contained faults across N2 / MUST-2 / MUST-3 / MUST-8");
+		}
 	};
 
 	TEST_CLASS(SkeletonGpuStatusTexts)

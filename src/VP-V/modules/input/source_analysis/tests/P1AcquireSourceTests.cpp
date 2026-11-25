@@ -679,6 +679,13 @@ namespace P1AcquireSourceTestsNs
 		// and post-module-destroy calls must stay crash-free and leak-free.
 		TEST_METHOD(ConcurrentLifecycleTeardownAndPostDestroyCallsAreSafe)
 		{
+			struct HubResetGuard
+			{
+				~HubResetGuard()
+				{
+					Vpv::Hub::ExtensionHub::Instance().ResetModulesForTesting();
+				}
+			} hubGuard;
 			Vpv::Hub::ExtensionHub::Instance().ResetModulesForTesting();
 			{
 				std::unique_ptr<Vpv::Skeleton::SkeletonModule> mod(
@@ -694,7 +701,23 @@ namespace P1AcquireSourceTestsNs
 			std::atomic<uint64_t> offers{ 0 };
 			std::atomic<uint64_t> demands{ 0 };
 
-			std::thread offerWorker([&]() {
+			struct ThreadJoinGuard
+			{
+				std::atomic<bool>& stopFlag;
+				std::thread offerWorker;
+				std::thread demandWorker;
+				explicit ThreadJoinGuard(std::atomic<bool>& s) : stopFlag(s) {}
+				~ThreadJoinGuard()
+				{
+					stopFlag.store(true, std::memory_order_release);
+					if (offerWorker.joinable())
+						offerWorker.join();
+					if (demandWorker.joinable())
+						demandWorker.join();
+				}
+			} workers(stop);
+
+			workers.offerWorker = std::thread([&]() {
 				uint64_t seq = 1;
 				ready.fetch_add(1, std::memory_order_release);
 				while (!stop.load(std::memory_order_acquire))
@@ -703,7 +726,7 @@ namespace P1AcquireSourceTestsNs
 					offers.fetch_add(1, std::memory_order_relaxed);
 				}
 			});
-			std::thread demandWorker([&]() {
+			workers.demandWorker = std::thread([&]() {
 				bool active = true;
 				ready.fetch_add(1, std::memory_order_release);
 				while (!stop.load(std::memory_order_acquire))
@@ -726,8 +749,10 @@ namespace P1AcquireSourceTestsNs
 			}
 
 			stop.store(true, std::memory_order_release);
-			offerWorker.join();
-			demandWorker.join();
+			if (workers.offerWorker.joinable())
+				workers.offerWorker.join();
+			if (workers.demandWorker.joinable())
+				workers.demandWorker.join();
 
 			Assert::IsTrue(offers.load() > 0u && demands.load() > 0u,
 				L"workers must exercise OfferP1CpuSource and NoteP1CpuDemand concurrently with teardown");

@@ -842,6 +842,7 @@ namespace SkeletonAcquireTestsNs
 			//         Thread 2 concurrently hammers MemoFor(host, 1) ----
 			int stressHost = 0;
 			std::atomic<bool> stop{ false };
+			std::atomic<bool> workerReady{ false };
 			std::atomic<uint64_t> workerCalls{ 0 };
 			std::atomic<uint64_t> workerOffThreadNoDispatcher{ 0 };
 			struct ThreadJoinGuard {
@@ -854,7 +855,9 @@ namespace SkeletonAcquireTestsNs
 						t.join();
 				}
 			} worker{ stop, std::thread([&]() {
-				while (!stop.load(std::memory_order_acquire)) {
+				// Run at least one pre-GpuCreated MemoFor iteration before releasing the startup barrier
+				// so concurrency is guaranteed from iter 0 and workerOffThreadNoDispatcher is deterministic.
+				do {
 					const Vpv::Skeleton::FrameMemo fm = sk.MemoFor(&stressHost, 1);
 					workerCalls.fetch_add(1, std::memory_order_relaxed);
 					if (fm.Valid()) {
@@ -864,9 +867,13 @@ namespace SkeletonAcquireTestsNs
 						if (!fm.memo->GpuGranted())
 							workerOffThreadNoDispatcher.fetch_add(1, std::memory_order_relaxed);
 					}
+					if (!workerReady.load(std::memory_order_relaxed))
+						workerReady.store(true, std::memory_order_release);
 					std::this_thread::yield();
-				}
+				} while (!stop.load(std::memory_order_acquire));
 			}) };
+			while (!workerReady.load(std::memory_order_acquire))
+				std::this_thread::yield();
 
 			for (int iter = 0; iter < 24; ++iter) {
 				sendLifecycle(&stressHost, RE::Lifecycle::GpuCreated, true);
@@ -886,6 +893,8 @@ namespace SkeletonAcquireTestsNs
 				worker.t.join();
 
 			Assert::IsTrue(workerCalls.load() > 0, L"concurrent worker thread actively hammered MemoFor during stress");
+			Assert::IsTrue(workerOffThreadNoDispatcher.load(std::memory_order_relaxed) > 0u,
+				L"off-thread worker observed ungranted/no-dispatcher memo without triggering render-thread PlanNoLaneGpu");
 			sendLifecycle(&stressHost, RE::Lifecycle::Shutdown, false);
 			sendLifecycle(&negHost, RE::Lifecycle::Shutdown, false);
 			Assert::IsNull(sk.MemoOf(&stressHost), L"Shutdown cleaned up stressHost");

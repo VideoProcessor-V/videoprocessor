@@ -1642,5 +1642,76 @@ namespace ProductSlotsTestsNs
 			Assert::AreEqual(uint64_t(0), s.Counters().orderErrors.load());
 			Assert::AreEqual(uint64_t(0), s.Counters().overruns.load());
 		}
+
+		// Prod MED-2 regression: out-of-range upToSeq (> kSlotSeqMask - ring) must return 0 early,
+		// count releaseThroughExactOrderErrors, leave held slots untouched, and never poison releasedThrough_.
+		TEST_METHOD(ReleaseThroughOutOfRangeReturnsEarlyWithoutPoisoningCursor)
+		{
+			const auto acceptAll = [](const Header&) { return SealReason::Accepted; };
+			auto publishAndSeal = [&](SlotSet& set, uint64_t seq) {
+				LaneTicket t;
+				Assert::IsTrue(set.Claim(seq, Provenance::AheadLane, kNoFence, &t) == ClaimResult::Claimed);
+				Assert::IsTrue(set.StartWriting(t));
+				Assert::IsTrue(set.Publish(t) == PublishResult::Published);
+				Assert::IsTrue(set.Seal(seq, acceptAll).outcome == SealOutcome::Sealed);
+			};
+
+			constexpr uint16_t kRing = 8;
+			SlotSet s(kA, kRing, 4);
+			publishAndSeal(s, 1u);
+			publishAndSeal(s, 2u);
+			publishAndSeal(s, 3u);
+
+			// 1. In-test negative control: valid ReleaseThrough(1, 10) succeeds with 0 exact-order errors.
+			Assert::AreEqual(uint32_t(1), s.ReleaseThrough(1u, 10u),
+				L"negative control: valid ReleaseThrough(1, 10) releases frame 1");
+			Assert::AreEqual(uint64_t(0), s.Counters().releaseThroughExactOrderErrors.load(),
+				L"negative control: valid ReleaseThrough(1, 10) records 0 releaseThroughExactOrderErrors");
+			Assert::IsTrue(s.StateOf(1u) == SlotState::Released);
+			Assert::IsTrue(s.StateOf(2u) == SlotState::Sealed && s.StateOf(3u) == SlotState::Sealed);
+
+			// 2. Out-of-range fault A: UINT64_MAX returns 0, increments error count, leaves held slots Sealed.
+			Assert::AreEqual(uint32_t(0), s.ReleaseThrough(UINT64_MAX, 20u),
+				L"UINT64_MAX out-of-range ReleaseThrough must return 0 early without releasing held slots");
+			Assert::AreEqual(uint64_t(1), s.Counters().releaseThroughExactOrderErrors.load(),
+				L"UINT64_MAX out-of-range must increment releaseThroughExactOrderErrors by 1");
+			Assert::IsTrue(s.StateOf(2u) == SlotState::Sealed && s.StateOf(3u) == SlotState::Sealed,
+				L"UINT64_MAX out-of-range must leave held slots 2 and 3 untouched (Sealed)");
+
+			// 3. Out-of-range fault B: exact boundary kSlotSeqMask - ring + 1 returns 0, increments error count, leaves slots Sealed.
+			const uint64_t boundaryOutOfRange = kSlotSeqMask - uint64_t(kRing) + 1u;
+			Assert::AreEqual(uint32_t(0), s.ReleaseThrough(boundaryOutOfRange, 20u),
+				L"kSlotSeqMask - ring + 1 out-of-range ReleaseThrough must return 0 early");
+			Assert::AreEqual(uint64_t(2), s.Counters().releaseThroughExactOrderErrors.load(),
+				L"kSlotSeqMask - ring + 1 out-of-range must increment releaseThroughExactOrderErrors by 1");
+			Assert::IsTrue(s.StateOf(2u) == SlotState::Sealed && s.StateOf(3u) == SlotState::Sealed,
+				L"boundary out-of-range must leave held slots 2 and 3 untouched (Sealed)");
+
+			// 4. Cursor non-poisoning proof: subsequent valid ReleaseThrough(2, 30) succeeds with 0 additional errors.
+			Assert::AreEqual(uint32_t(1), s.ReleaseThrough(2u, 30u),
+				L"subsequent valid ReleaseThrough(2, 30) must succeed returning 1 (releasedThrough_ not poisoned)");
+			Assert::AreEqual(uint64_t(2), s.Counters().releaseThroughExactOrderErrors.load(),
+				L"subsequent valid ReleaseThrough(2, 30) must record 0 additional exact-order errors");
+			Assert::IsTrue(s.StateOf(2u) == SlotState::Released, L"slot 2 released cleanly");
+			Assert::IsTrue(s.StateOf(3u) == SlotState::Sealed, L"slot 3 remains Sealed until explicitly released");
+			Assert::IsTrue(s.Claim(2u + uint64_t(kRing), Provenance::AheadLane, 29u, nullptr) == ClaimResult::ReleasePending,
+				L"fence 30 from valid ReleaseThrough(2, 30) gates reuse");
+			Assert::IsTrue(s.Claim(2u + uint64_t(kRing), Provenance::AheadLane, 30u, nullptr) == ClaimResult::Claimed);
+			Assert::AreEqual(uint32_t(1), s.ReleaseThrough(3u, 31u));
+			Assert::AreEqual(uint64_t(2), s.Counters().releaseThroughExactOrderErrors.load());
+			Assert::AreEqual(uint64_t(0), s.Counters().orderErrors.load());
+
+			// 5. Initial-state boundary: out-of-range before any valid ReleaseThrough must not set hasReleasedThrough_.
+			SlotSet fresh(kA, kRing, 4);
+			publishAndSeal(fresh, 0u);
+			Assert::AreEqual(uint32_t(0), fresh.ReleaseThrough(UINT64_MAX, 20u),
+				L"out-of-range on fresh SlotSet must return 0 early");
+			Assert::AreEqual(uint64_t(1), fresh.Counters().releaseThroughExactOrderErrors.load());
+			Assert::IsTrue(fresh.StateOf(0u) == SlotState::Sealed);
+			Assert::AreEqual(uint32_t(1), fresh.ReleaseThrough(0u, 25u),
+				L"first valid ReleaseThrough(0) after initial out-of-range fault succeeds");
+			Assert::AreEqual(uint64_t(1), fresh.Counters().releaseThroughExactOrderErrors.load());
+			Assert::AreEqual(uint64_t(0), fresh.Counters().orderErrors.load());
+		}
 	};
 }
