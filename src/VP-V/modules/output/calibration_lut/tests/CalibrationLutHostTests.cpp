@@ -6,6 +6,8 @@
 #include <VP-V/modules/output/calibration_lut/CalibrationLutHostPolicy.h>
 
 #include <atomic>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <thread>
 #include <vector>
@@ -377,6 +379,354 @@ namespace CalibrationLutHostTests
 				L"heading must return to \"Fallbacks engaged: none\" after release");
 			Assert::IsFalse(FallbackCatalog::Sync(registry, SlopeFallbackDecision(0)),
 				L"releasing twice changes nothing");
+		}
+
+		// AD#2 (Pass-A BLOCKER #1 & HIGH #2): verify that CoreSegments.inl wires
+		// CalibrationLutHost::Adapter::SlopeFallbackDecision() into SyncFallback (never log-only),
+		// releases the exact "calibration LUT BTB/WTW" fallback on Original-pathway transitions,
+		// and that Adapter / CalibrationLutStage::Hook gate on per-frame SlopeFallbackActive()
+		// (reset on LUT clear/change/Release, without an unconditional pre-wipe in TakeLut)
+		// rather than the lifetime monotonic SlopeFallbacks() counter.
+		TEST_METHOD(RendererCoreSegmentsWiresSlopeFallbackAndReleasesOnOriginalPathway)
+		{
+			auto readRepoSource = [](const char* relativePath) -> std::string
+			{
+				std::string root = __FILE__;
+				for (char& ch : root)
+				{
+					if (ch == '/')
+						ch = '\\';
+				}
+				const size_t srcPos = root.rfind("\\src\\");
+				Assert::IsTrue(srcPos != std::string::npos,
+					L"__FILE__ must resolve inside the repository \\src\\ tree");
+				root.resize(srcPos + 1);
+				const std::string fullPath = root + relativePath;
+				std::ifstream file(fullPath, std::ios::binary);
+				Assert::IsTrue(file.is_open(),
+					L"repository source file must be readable");
+				const std::string raw((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+				Assert::IsFalse(raw.empty(),
+					L"repository source file must not be empty");
+				std::string normalized;
+				normalized.reserve(raw.size());
+				for (const char ch : raw)
+				{
+					if (ch != '\r')
+						normalized.push_back(ch);
+				}
+				return normalized;
+			};
+
+			auto extractBraceBlockAt = [](const std::string& text, size_t openBrace) -> std::string
+			{
+				Assert::IsTrue(openBrace < text.size() && text[openBrace] == '{',
+					L"expected opening brace for code block");
+				int depth = 0;
+				bool inString = false;
+				bool inChar = false;
+				bool escaped = false;
+				bool inLineComment = false;
+				bool inBlockComment = false;
+				for (size_t i = openBrace; i < text.size(); ++i)
+				{
+					const char c = text[i];
+					const char next = (i + 1 < text.size()) ? text[i + 1] : '\0';
+					if (inLineComment)
+					{
+						if (c == '\n')
+							inLineComment = false;
+						continue;
+					}
+					if (inBlockComment)
+					{
+						if (c == '*' && next == '/')
+						{
+							inBlockComment = false;
+							++i;
+						}
+						continue;
+					}
+					if (inString)
+					{
+						if (escaped)
+							escaped = false;
+						else if (c == '\\')
+							escaped = true;
+						else if (c == '"')
+							inString = false;
+						continue;
+					}
+					if (inChar)
+					{
+						if (escaped)
+							escaped = false;
+						else if (c == '\\')
+							escaped = true;
+						else if (c == '\'')
+							inChar = false;
+						continue;
+					}
+					if (c == '/' && next == '/')
+					{
+						inLineComment = true;
+						++i;
+						continue;
+					}
+					if (c == '/' && next == '*')
+					{
+						inBlockComment = true;
+						++i;
+						continue;
+					}
+					if (c == '"')
+					{
+						inString = true;
+						continue;
+					}
+					if (c == '\'')
+					{
+						inChar = true;
+						continue;
+					}
+					if (c == '{')
+					{
+						++depth;
+					}
+					else if (c == '}')
+					{
+						--depth;
+						if (depth == 0)
+							return text.substr(openBrace, i - openBrace + 1);
+					}
+				}
+				return std::string();
+			};
+
+			auto extractFunctionBody = [&](const std::string& text, const char* signatureAnchor) -> std::string
+			{
+				const size_t pos = text.find(signatureAnchor);
+				Assert::IsTrue(pos != std::string::npos,
+					L"expected function signature anchor in source file");
+				const size_t openBrace = text.find('{', pos);
+				Assert::IsTrue(openBrace != std::string::npos,
+					L"expected opening brace after function signature");
+				const std::string body = extractBraceBlockAt(text, openBrace);
+				Assert::IsFalse(body.empty(),
+					L"expected balanced closing brace for function body");
+				return body;
+			};
+
+			auto stripComments = [](const std::string& code) -> std::string
+			{
+				std::string out;
+				out.reserve(code.size());
+				bool inString = false;
+				bool inChar = false;
+				bool escaped = false;
+				bool inLineComment = false;
+				bool inBlockComment = false;
+				for (size_t i = 0; i < code.size(); ++i)
+				{
+					const char c = code[i];
+					const char next = (i + 1 < code.size()) ? code[i + 1] : '\0';
+					if (inLineComment)
+					{
+						if (c == '\n')
+						{
+							inLineComment = false;
+							out.push_back('\n');
+						}
+						continue;
+					}
+					if (inBlockComment)
+					{
+						if (c == '*' && next == '/')
+						{
+							inBlockComment = false;
+							++i;
+						}
+						continue;
+					}
+					if (inString)
+					{
+						out.push_back(c);
+						if (escaped)
+							escaped = false;
+						else if (c == '\\')
+							escaped = true;
+						else if (c == '"')
+							inString = false;
+						continue;
+					}
+					if (inChar)
+					{
+						out.push_back(c);
+						if (escaped)
+							escaped = false;
+						else if (c == '\\')
+							escaped = true;
+						else if (c == '\'')
+							inChar = false;
+						continue;
+					}
+					if (c == '/' && next == '/')
+					{
+						inLineComment = true;
+						++i;
+						continue;
+					}
+					if (c == '/' && next == '*')
+					{
+						inBlockComment = true;
+						++i;
+						continue;
+					}
+					if (c == '"')
+						inString = true;
+					else if (c == '\'')
+						inChar = true;
+					out.push_back(c);
+				}
+				return out;
+			};
+
+			auto extractBracedIfBody = [&](const std::string& code, const std::string& condition) -> std::string
+			{
+				size_t searchFrom = 0;
+				while (searchFrom < code.size())
+				{
+					const size_t pos = code.find(condition, searchFrom);
+					if (pos == std::string::npos)
+						break;
+					size_t cursor = pos + condition.size();
+					while (cursor < code.size() &&
+						(code[cursor] == ' ' || code[cursor] == '\t' || code[cursor] == '\n'))
+					{
+						++cursor;
+					}
+					if (cursor < code.size() && code[cursor] == '{')
+						return extractBraceBlockAt(code, cursor);
+					searchFrom = pos + condition.size();
+				}
+				return std::string();
+			};
+
+			// Negative control (Rule 3): prove the exact fallback id returned by
+			// CalibrationLutHost::SlopeFallbackDecision(1) stays stuck in FallbackStatus::Registry
+			// when driven by a lifetime monotonic counter (> 0) or left unreleased on pathway switch,
+			// and clears only on active-gated 0 or explicit Release(engagedDecision.id).
+			const FallbackCatalog::Decision engagedDecision = SlopeFallbackDecision(1);
+			Assert::IsTrue(engagedDecision.engaged,
+				L"negative control: SlopeFallbackDecision(1) must be engaged");
+			Assert::AreEqual(std::string("calibration LUT BTB/WTW"), engagedDecision.id,
+				L"negative control: SlopeFallbackDecision(1).id must be \"calibration LUT BTB/WTW\"");
+			{
+				FallbackStatus::Registry registry;
+				Assert::IsTrue(FallbackCatalog::Sync(registry, engagedDecision),
+					L"negative control: engaging slope fallback must surface in registry");
+				Assert::IsTrue(registry.Engaged(engagedDecision.id.c_str()),
+					L"negative control: engaged slope fallback remains stuck until released");
+
+				const FallbackCatalog::Decision staleLifetime = SlopeFallbackDecision(7);
+				Assert::IsTrue(staleLifetime.engaged,
+					L"negative control: lifetime monotonic count > 0 keeps SlopeFallbackDecision engaged");
+				(void)FallbackCatalog::Sync(registry, staleLifetime);
+				Assert::IsTrue(registry.Engaged(engagedDecision.id.c_str()),
+					L"negative control: syncing lifetime count > 0 fails to clear fallback after recovery");
+
+				Assert::IsTrue(FallbackCatalog::Sync(registry, SlopeFallbackDecision(0)),
+					L"active-gated 0 must release the slope fallback");
+				Assert::IsFalse(registry.Engaged(engagedDecision.id.c_str()),
+					L"registry must be clear after active-gated release");
+
+				Assert::IsTrue(FallbackCatalog::Sync(registry, engagedDecision),
+					L"re-engaging slope fallback before Original-pathway release check");
+				Assert::IsTrue(registry.Release(engagedDecision.id.c_str()),
+					L"explicit Release(engagedDecision.id) on Original-pathway switch must clear the fallback");
+				Assert::IsFalse(registry.Engaged(engagedDecision.id.c_str()),
+					L"registry must not retain calibration LUT BTB/WTW after Original-pathway release");
+			}
+
+			// Contract 1 (Pass-A BLOCKER #1): CoreSegments.inl::ReportRenderErrors() must wire
+			// SyncFallback(calibrationHost.SlopeFallbackDecision()); (never left log-only).
+			const std::string coreSegments = readRepoSource("src\\VP-V\\segments\\CoreSegments.inl");
+			const std::string reportRenderErrorsCode = stripComments(
+				extractFunctionBody(coreSegments, "void LibplaceboVideoRenderer::Impl::ReportRenderErrors()"));
+			Assert::IsTrue(
+				reportRenderErrorsCode.find("SyncFallback(calibrationHost.SlopeFallbackDecision());") != std::string::npos,
+				L"Pass-A BLOCKER #1: CoreSegments.inl::ReportRenderErrors() must call SyncFallback(calibrationHost.SlopeFallbackDecision());");
+
+			// Contract 2 (Pass-A BLOCKER #1): CoreSegments.inl::UpdatePipelineSlots() must release
+			// the exact fallback id inside if (settings.pipelineOriginalPathway).
+			const std::string updatePipelineSlotsCode = stripComments(
+				extractFunctionBody(coreSegments, "void LibplaceboVideoRenderer::Impl::UpdatePipelineSlots("));
+			const std::string originalPathwayBlock = extractBracedIfBody(
+				updatePipelineSlotsCode, "if (settings.pipelineOriginalPathway)");
+			Assert::IsFalse(originalPathwayBlock.empty(),
+				L"CoreSegments.inl::UpdatePipelineSlots() must have a braced if (settings.pipelineOriginalPathway) block");
+			const std::string expectedOriginalRelease = std::string("ReleaseFallback(\"") + engagedDecision.id + "\");";
+			Assert::IsTrue(originalPathwayBlock.find(expectedOriginalRelease) != std::string::npos,
+				L"Pass-A BLOCKER #1: CoreSegments.inl::UpdatePipelineSlots() must release \"calibration LUT BTB/WTW\" inside if (settings.pipelineOriginalPathway)");
+
+			// Contract 3 (Pass-A HIGH #2): CalibrationLutHost.cpp::Adapter::SlopeFallbackDecision()
+			// must gate on per-frame stage.SlopeFallbackActive() (NOT lifetime monotonic stage.SlopeFallbacks()),
+			// Adapter::TakeLut() must not unconditionally wipe stage.SetLut(nullptr) before stage.SetLut(lut),
+			// and CalibrationLutStage.cpp::Hook::SetLut / Release / Apply must maintain & reset slopeFallbackActive.
+			const std::string hostSource = readRepoSource("src\\VP-V\\modules\\output\\calibration_lut\\CalibrationLutHost.cpp");
+			const std::string adapterDecisionCode = stripComments(
+				extractFunctionBody(hostSource, "FallbackCatalog::Decision Adapter::SlopeFallbackDecision()"));
+			Assert::IsTrue(adapterDecisionCode.find("stage.SlopeFallbackActive()") != std::string::npos,
+				L"Pass-A HIGH #2: Adapter::SlopeFallbackDecision() must gate on stage.SlopeFallbackActive()");
+			Assert::IsTrue(adapterDecisionCode.find("stage.Lut()") != std::string::npos,
+				L"Pass-A HIGH #2: Adapter::SlopeFallbackDecision() must require stage.Lut() != nullptr");
+			Assert::IsTrue(adapterDecisionCode.find("!stageFailed") != std::string::npos,
+				L"Pass-A HIGH #2: Adapter::SlopeFallbackDecision() must require !stageFailed");
+			Assert::IsTrue(adapterDecisionCode.find("stage.SlopeFallbacks()") == std::string::npos,
+				L"Pass-A HIGH #2: Adapter::SlopeFallbackDecision() must NOT gate on lifetime monotonic stage.SlopeFallbacks()");
+
+			const std::string noteLoggedCode = stripComments(
+				extractFunctionBody(hostSource, "void Adapter::NoteSlopeFallbackLogged()"));
+			Assert::IsTrue(noteLoggedCode.find("stage.SlopeFallbackActive()") != std::string::npos,
+				L"Pass-A HIGH #2: Adapter::NoteSlopeFallbackLogged() must gate on stage.SlopeFallbackActive()");
+			Assert::IsTrue(noteLoggedCode.find("stage.SlopeFallbacks()") == std::string::npos,
+				L"Pass-A HIGH #2: Adapter::NoteSlopeFallbackLogged() must NOT latch on lifetime monotonic stage.SlopeFallbacks()");
+
+			const std::string takeLutCode = stripComments(
+				extractFunctionBody(hostSource, "TakeResult Adapter::TakeLut("));
+			const size_t nullCheckPos = takeLutCode.find("if (!lut)");
+			const size_t setLutValuePos = takeLutCode.find("stage.SetLut(lut);");
+			Assert::IsTrue(nullCheckPos != std::string::npos && setLutValuePos != std::string::npos && nullCheckPos < setLutValuePos,
+				L"Adapter::TakeLut() must check if (!lut) before stage.SetLut(lut)");
+			Assert::IsTrue(takeLutCode.substr(0, nullCheckPos).find("stage.SetLut(nullptr)") == std::string::npos,
+				L"Pass-A HIGH #2: Adapter::TakeLut() must NOT unconditionally call stage.SetLut(nullptr) before stage.SetLut(lut)");
+			const std::string nullBranchBlock = extractBracedIfBody(takeLutCode, "if (!lut)");
+			Assert::IsTrue(nullBranchBlock.find("stage.SetLut(nullptr);") != std::string::npos,
+				L"Adapter::TakeLut() must clear stage.SetLut(nullptr) when lut is null");
+			Assert::IsTrue(takeLutCode.find("stage.SetLut(nullptr);", setLutValuePos) != std::string::npos,
+				L"Adapter::TakeLut() must clear stage.SetLut(nullptr) on the non-VP-stage path");
+
+			const std::string stageSource = readRepoSource("src\\VP-V\\modules\\output\\calibration_lut\\CalibrationLutStage.cpp");
+			const std::string setLutCode = stripComments(
+				extractFunctionBody(stageSource, "void Hook::SetLut("));
+			const size_t resetActivePos = setLutCode.find("slopeFallbackActive = false;");
+			const size_t assignLutPos = setLutCode.find("lut = value;");
+			Assert::IsTrue(resetActivePos != std::string::npos,
+				L"Pass-A HIGH #2: CalibrationLutStage::Hook::SetLut() must reset slopeFallbackActive = false");
+			Assert::IsTrue(assignLutPos != std::string::npos && resetActivePos < assignLutPos,
+				L"Pass-A HIGH #2: CalibrationLutStage::Hook::SetLut() must reset slopeFallbackActive before overwriting lut");
+			Assert::IsTrue(setLutCode.find("value != lut") != std::string::npos,
+				L"Pass-A HIGH #2: CalibrationLutStage::Hook::SetLut() must detect LUT pointer change");
+
+			const std::string releaseCode = stripComments(
+				extractFunctionBody(stageSource, "void Hook::Release()"));
+			Assert::IsTrue(releaseCode.find("slopeFallbackActive = false;") != std::string::npos,
+				L"Pass-A HIGH #2: CalibrationLutStage::Hook::Release() must reset slopeFallbackActive = false");
+
+			const std::string applyCode = stripComments(
+				extractFunctionBody(stageSource, "pl_hook_res Hook::Apply("));
+			Assert::IsTrue(applyCode.find("slopeFallbackActive = !slope;") != std::string::npos,
+				L"Pass-A HIGH #2: CalibrationLutStage::Hook::Apply() must update slopeFallbackActive = !slope per frame");
 		}
 	};
 }
