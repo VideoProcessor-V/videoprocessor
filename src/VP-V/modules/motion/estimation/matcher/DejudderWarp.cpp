@@ -1663,9 +1663,18 @@ if (i == 0u) {
         scale = cut ? 0.0 : clamp(m, p - rate, p + rate);
         imageStore(state_io, ivec2(0), vec4(scale, mean_v, share, 1.0));
     }
+#ifdef U7_SCENE
+    else if (u7_cut > 0) {
+        scale = 0.0;
+        imageStore(state_io, ivec2(0), vec4(0.0, mean_v, 0.0, 1.0));
+    }
+    float trust_out = cut ? ((u7_cut > 0) ? 0.0 : share) : max(share, min_share);
+#else
+    float trust_out = cut ? share : max(share, min_share);
+#endif
     // M3: a hard-motion frame that is not a cut reports at least min_share,
     // so the holds (warps, hysteresis, adaptive downscale) stay per block.
-    imageStore(dst, ivec2(0), vec4(cut ? share : max(share, min_share), scale, mean_v, 1.0));
+    imageStore(dst, ivec2(0), vec4(trust_out, scale, mean_v, 1.0));
 }
 #ifdef CAMERA_OUT
 // Delta 14 R-B: the refined camera (computed above).
@@ -4054,6 +4063,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			w->lastPairGlobalFallback = FallbackCatalog::PairGlobalUnavailable(false);
 			w->seedFed = false;
 			w->seedSkipped = false;
+			w->fadeMatchApplied = false;
 		}
 		grainErrorValid = false;
 		fillReady = false;
@@ -4162,8 +4172,12 @@ if (b.x < blocks.x && b.y < blocks.y) {
 						: (sceneVerdictReader != nullptr ? "u7 reader unavailable" : "no skeleton memo bound"));
 			}
 		}
-		if (settings.fadeMatch && !outerOfLowRes && (!u7Known || u7Fade) && !FadeMatch(b))
-			return false;
+		if (settings.fadeMatch && !outerOfLowRes && (!u7Known || u7Fade))
+		{
+			if (!FadeMatch(b))
+				return false;
+			fadeMatchApplied = true;
+		}
 		if (HalvesForSearch())
 		{
 			if (!LowResSearch(a, b))
@@ -4172,7 +4186,10 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			// The inner tested the fade on these planes: B here gets the same
 			// gain and offset, so M6's mask and the grain map see it (audit
 			// 2026-10-14: at 4K the weights fell towards the hold in a fade).
-			if (settings.fadeMatch && (!u7Known || u7Fade) && inner && inner->FadeStateTexture())
+			bool innerFadeApplied = false;
+			for (const MotionWarp* w = inner.get(); w; w = w->HalvesForSearch() ? w->inner.get() : nullptr)
+				innerFadeApplied = w->fadeMatchApplied;
+			if (settings.fadeMatch && innerFadeApplied && inner && inner->FadeStateTexture())
 			{
 				if (!RebuildBWithFade(b, inner->FadeStateTexture(), levelsB))   // KeepPlainBInK() without the product (B3)
 					return false;
@@ -4539,7 +4556,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 				trustDescs[numTrustDescs++] = Sampled("hist_b", l2B, false);
 			}
 			const pl_tex activeFade = FadeStateTexture();
-			const bool fadeOn = settings.fadeMatch && activeFade != nullptr;
+			const bool fadeOn = !u7Known && settings.fadeMatch && activeFade != nullptr;
 			if (fadeOn)
 				trustDescs[numTrustDescs++] = Sampled("fade_state", activeFade, false);
 			if (rolloffGlobal || cameraOut)
@@ -4560,7 +4577,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			if (fadeOn || u7Known)
 				trustVarList[numTrustVars++] = { pl_var_float("fade_floor"), &fadeFloor, true };
 			const int u7CutVar = u7Cut ? 1 : 0;
-			const int u7FadeVar = u7Fade ? 1 : 0;
+			const int u7FadeVar = (settings.fadeMatch && u7Fade) ? 1 : 0;
 			if (u7Known)
 			{
 				trustVarList[numTrustVars++] = { pl_var_int("u7_cut"), &u7CutVar, true };

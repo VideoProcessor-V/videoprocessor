@@ -996,6 +996,6 @@ namespace Dejudder
 		bool CameraGuidedPass(const CameraModel::GuidanceFrame& g, int dir, bool e1, pl_tex fromHalf, pl_tex toHalf, pl_tex sweepIn);
 		bool CameraSkipSearches();
 		bool externalFlowUsed = false;
-		bool warmUpEstimate = false;
+		bool warmUpEstimate = false, fadeMatchApplied = false;
 	};
 }
