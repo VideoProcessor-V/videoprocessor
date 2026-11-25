@@ -78,6 +78,7 @@ namespace Vpv
 
 			const char* Name() const override { return kName; }
 			void OnLifecycle(RE::LifecycleFacts&) override;
+			void OnIngress(RE::IngressContext&) override;
 			void OnQueue(const RE::QueueFacts&) override;
 			bool OnFrame(RE::FrameContext&) override;
 			// R12 AfterPresent (refs/107 S5): the one post-present seam drives this renderer's spare slot (B3-Z Z2). Inert without an active lane.

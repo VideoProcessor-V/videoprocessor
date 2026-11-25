@@ -52,6 +52,13 @@ namespace VpSkeleton
 		bool AcquireScene(uint64_t seq, SceneVerdict& out, const char** why);
 		bool AcquireSourceStats(uint64_t seq, VpUnit::SourceStats::Record& out, const char** why);
 
+		// Capture-counter -> renderer sourceSequence alignment (BLOCKER-2): recorded at RendererExtension::Ingress
+		// and cleared on queue flush / renderer teardown so capture-thread readers (e.g. HDR SDR veto) never
+		// pass a raw capture driver counter into a renderer-sequence-keyed U7 store.
+		void RecordCaptureSequence(const void* owner, uint64_t captureCounter, int64_t timestampTicks, uint64_t sourceSeq);
+		void ClearCaptureSequences(const void* owner);
+		bool ResolveCaptureSequence(uint64_t captureCounter, int64_t timestampTicks, uint64_t& sourceSeqOut);
+
 		// GET-OR-COMPUTE reader (the LED's, measured frame AND look-ahead): the skeleton's scene product (SceneOf) for frame `seq`. It reads the
 		// store's group when present, else the two P4 records are acquired through the renderer's memo (made now for a frame ahead of the seal)
 		// and the verdict is published for the later seal (computed once). The renderer key is the ONE registered owner (the Host registers its

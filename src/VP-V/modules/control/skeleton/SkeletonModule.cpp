@@ -24,6 +24,7 @@
 #include <VP-V/modules/input/source_analysis/lane/shared/TapSource.h>
 #include <VP-V/core/FrameAnalysisStore.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
+#include <VP-V/modules/control/skeleton/SceneRecordReader.h>
 #include <VP-V/modules/input/source_analysis/VpFrameAnalysis.h>
 #include <VP-V/modules/control/skeleton/gpu/OwnerGpuDevice.h>
 #include <VP-V/modules/input/source_analysis/FrameQuiet.h>
@@ -1844,6 +1845,7 @@ namespace Vpv
 				EraseExternal(f.host);   // a renderer recreated at this address never inherits the old one's external demand
 				// 15c-c8: with the demand goes its raise of the store; version 0 = the next Begin looks again (a later declaration raises anew).
 				VpFrameAnalysis::SourceFrameTap::SetStoreDemand(f.host, false, std::string());
+				VpSkeleton::SceneRecordReader::ClearCaptureSequences(f.host);
 				NoteRaiseApplied(f.host, 0, std::string(), false);
 				break;
 			}
@@ -3317,8 +3319,20 @@ namespace Vpv
 
 
 		// ---- queue (capture / queue threads) ----------------------------------------------------------
+		void SkeletonModule::OnIngress(RE::IngressContext& c)
+		{
+			if (!c.host || c.fromFile || c.seq <= 0 || c.frameCounter <= 0)
+				return;
+			if (Hub::ExtensionHub::Instance().OriginalPathway(c.host) || RecordedPathway(c.host) == 1)
+				return;
+			VpSkeleton::SceneRecordReader::RecordCaptureSequence(
+				c.host, static_cast<uint64_t>(c.frameCounter), c.timestamp, static_cast<uint64_t>(c.seq));
+		}
+
 		void SkeletonModule::OnQueue(const RE::QueueFacts& f)
 		{
+			if (f.host && f.kind != RE::QueueEvent::Drop && f.kind != RE::QueueEvent::BacklogFlush)
+				VpSkeleton::SceneRecordReader::ClearCaptureSequences(f.host);
 			// QKP B (design s3 / amendment M5): the memo's epoch moves AT the call (any thread, coalesced per Begin interval); a Drop discards
 			// its frames' spots. BacklogFlush is a timing restart, not a generation: nothing is released. Memo-only hosts included.
 			if (const std::shared_ptr<MemoHost> mhq = memoHosts_.Find(f.host))

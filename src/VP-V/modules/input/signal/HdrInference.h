@@ -233,16 +233,10 @@ public:
 	using SceneReaderFn = HdrVetoSceneReaderFn;
 	void SetSceneReader(SceneReaderFn reader) { m_sceneReader = reader; }
 	bool Observe(const HdrVetoFrameStats& stats);
-	bool Observe(const HdrVetoFrameStats& stats, uint64_t sequence) { m_pendingSequence = sequence; return Observe(stats); }
-	bool Observe(const HdrVetoFrameStats& stats, uint64_t sequence, SceneReaderFn reader, HdrVetoCutDiag* diagOut)
-	{
-		m_sceneReader = reader;
-		m_pendingSequence = sequence;
-		const bool c = Observe(stats);
-		if (diagOut) { diagOut->sharedHits = m_sharedCutHits; diagOut->fallbackCount = m_fallbackCutCount; diagOut->lastFallbackReason = m_lastFallbackWhy; diagOut->usedFallback = m_lastUsedFallback; }
-		return c;
-	}
-	void Reset() { m_havePrevious = false; m_pendingSequence = 0; m_sharedCutHits = 0; m_fallbackCutCount = 0; m_lastFallbackWhy = nullptr; m_lastUsedFallback = false; }
+	bool Observe(const HdrVetoFrameStats& stats, uint64_t sequence);
+	bool Observe(const HdrVetoFrameStats& stats, uint64_t sequence, SceneReaderFn reader, HdrVetoCutDiag* diagOut,
+		const char* unkeyedReason = nullptr);
+	void Reset();
 
 	static constexpr float GRID_DIFFERENCE = VpUnit::CutFadeJudge::kGridDifference;
 	static constexpr float HISTOGRAM_DISTANCE = VpUnit::CutFadeJudge::kHistogramDistance;
@@ -261,6 +255,7 @@ private:
 	float m_lastGrid = 0.0f;
 	float m_lastHistogram = 0.0f;
 	SceneReaderFn m_sceneReader = nullptr;
-	uint64_t m_pendingSequence = 0, m_sharedCutHits = 0, m_fallbackCutCount = 0;
+	uint64_t m_previousSequence = 0, m_pendingSequence = 0, m_sharedCutHits = 0, m_fallbackCutCount = 0;
+	const char* m_pendingUnkeyedReason = nullptr;
 	const char* m_lastFallbackWhy = nullptr;
 };

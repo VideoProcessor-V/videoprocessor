@@ -7,6 +7,9 @@
 #include <VP-V/core/AnalysisLane.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/SourceStats.h>
 
+#include <array>
+#include <map>
+#include <mutex>
 #include <vector>
 
 namespace VpSkeleton
@@ -17,6 +20,32 @@ namespace VpSkeleton
 		{
 			// Matches SkeletonModule::SceneFactsFor's ahead prime span (ref 4 + context 3 + 1; SkeletonModule.cpp:599).
 			constexpr uint64_t kScenePrimeFrames = 8;
+
+			// Fixed-size per-owner capture-counter -> renderer sourceSequence ring (zero per-frame heap alloc).
+			constexpr size_t kCaptureSeqRingSize = 64;
+			struct CaptureSeqEntry
+			{
+				uint64_t captureCounter = 0;
+				int64_t timestampTicks = 0;
+				uint64_t sourceSeq = 0;
+				uint64_t storeGeneration = 0;
+				bool valid = false;
+			};
+			struct CaptureSeqOwnerRing
+			{
+				std::array<CaptureSeqEntry, kCaptureSeqRingSize> entries{};
+				size_t next = 0;
+			};
+			struct CaptureSeqTable
+			{
+				std::mutex mutex;
+				std::map<const void*, CaptureSeqOwnerRing> owners;
+			};
+			CaptureSeqTable& CaptureSeqs()
+			{
+				static CaptureSeqTable table;
+				return table;
+			}
 
 			// Non-mutating check: is P4(s) already published in the lane slot (ring, or live on the render thread,
 			// matching AnalysisLane::ReadOf's allowPublished = AheadOfSeal(s) rule) or in the memo?
@@ -280,6 +309,62 @@ namespace VpSkeleton
 			if (why != nullptr)
 				*why = reason;
 			return found;
+		}
+
+		void RecordCaptureSequence(const void* owner, uint64_t captureCounter, int64_t timestampTicks, uint64_t sourceSeq)
+		{
+			if (!owner || captureCounter == 0 || sourceSeq == 0)
+				return;
+			const uint64_t gen = VpFrameAnalysis::SourceFrameTap::Generation(owner);
+			CaptureSeqTable& t = CaptureSeqs();
+			std::lock_guard<std::mutex> lock(t.mutex);
+			CaptureSeqOwnerRing& ring = t.owners[owner];
+			CaptureSeqEntry& slot = ring.entries[ring.next];
+			slot.captureCounter = captureCounter;
+			slot.timestampTicks = timestampTicks;
+			slot.sourceSeq = sourceSeq;
+			slot.storeGeneration = gen;
+			slot.valid = true;
+			ring.next = (ring.next + 1) % kCaptureSeqRingSize;
+		}
+
+		void ClearCaptureSequences(const void* owner)
+		{
+			if (!owner)
+				return;
+			CaptureSeqTable& t = CaptureSeqs();
+			std::lock_guard<std::mutex> lock(t.mutex);
+			t.owners.erase(owner);
+		}
+
+		bool ResolveCaptureSequence(uint64_t captureCounter, int64_t timestampTicks, uint64_t& sourceSeqOut)
+		{
+			sourceSeqOut = 0;
+			if (captureCounter == 0)
+				return false;
+			const std::vector<const void*> owners = VpFrameAnalysis::SourceFrameTap::StoreOwners();
+			if (owners.size() != 1)
+				return false;
+			const void* owner = owners[0];
+			const uint64_t gen = VpFrameAnalysis::SourceFrameTap::Generation(owner);
+			CaptureSeqTable& t = CaptureSeqs();
+			std::lock_guard<std::mutex> lock(t.mutex);
+			const auto it = t.owners.find(owner);
+			if (it == t.owners.end())
+				return false;
+			const CaptureSeqOwnerRing& ring = it->second;
+			for (size_t i = 0; i < kCaptureSeqRingSize; ++i)
+			{
+				const size_t idx = (ring.next + kCaptureSeqRingSize - 1 - i) % kCaptureSeqRingSize;
+				const CaptureSeqEntry& e = ring.entries[idx];
+				if (!e.valid || e.captureCounter != captureCounter || e.storeGeneration != gen)
+					continue;
+				if (timestampTicks != 0 && e.timestampTicks != 0 && e.timestampTicks != timestampTicks)
+					continue;
+				sourceSeqOut = e.sourceSeq;
+				return true;
+			}
+			return false;
 		}
 	}
 }

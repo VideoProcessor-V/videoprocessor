@@ -14,6 +14,7 @@
 #include <HdrInferenceSignalBuilder.h>
 #include <HdrVetoCaptureGate.h>
 #include <RendererId.h>
+#include <VP-V/modules/control/skeleton/SceneRecordReader.h>
 #include <VP-V/modules/input/signal/HdrInferenceChoice.h>
 bool CVideoProcessorDlg::HdrModesPermitInference()
 {
@@ -201,12 +202,20 @@ VideoStateComPtr CVideoProcessorDlg::MeasureHdrVetoPicture(const VideoStateComPt
 		message->observation.sdrEvidence = stats.sdrEvidence;
 		message->observation.fractionAt880 = stats.fractionAtHigh;
 		message->observation.p999 = stats.p999;
-		const HdrVetoCaptureGate::Observation observed = m_hdrVetoGate.Observe(generation, stats, frame.GetCounter());
+		// BLOCKER-2: NEVER pass raw capture driver frame.GetCounter() as renderer sourceSequence.
+		// When armed, MeasureHdrVetoPicture runs BEFORE renderer->OnVideoFrame(), so U7 cannot be
+		// sealed yet (pass 0 -> visible GridHistCut fallback). When unarmed (after OnVideoFrame),
+		// translate (counter, timestamp) to the renderer-local sourceSequence recorded at Ingress.
+		uint64_t rendererSequence = 0;
+		if (!m_hdrVetoGate.Armed(generation))
+			VpSkeleton::SceneRecordReader::ResolveCaptureSequence(
+				frame.GetCounter(), static_cast<int64_t>(frame.GetTimingTimestamp()), rendererSequence);
+		const HdrVetoCaptureGate::Observation observed = m_hdrVetoGate.Observe(generation, stats, rendererSequence);
 		message->observation.cut = observed.cut;
-		message->gridDifference = m_hdrVetoGate.LastGridDifference();
-		message->histogramDistance = m_hdrVetoGate.LastHistogramDistance();
-		message->cutUsedFallback = m_hdrVetoGate.UsedFallbackOnLastObserve();
-		message->cutFallbackReason = m_hdrVetoGate.LastFallbackReason();
+		message->gridDifference = observed.gridDifference;
+		message->histogramDistance = observed.histogramDistance;
+		message->cutUsedFallback = observed.usedFallback;
+		message->cutFallbackReason = observed.fallbackReason;
 		switchState = observed.switchState;
 		message->switchedAtCut = switchState != nullptr;
 	}
