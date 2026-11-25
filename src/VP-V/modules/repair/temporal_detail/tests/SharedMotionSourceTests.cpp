@@ -12,6 +12,7 @@
 #include <VP-V/modules/repair/temporal_detail/SharedMotionSource.h>
 
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <memory>
 
@@ -466,6 +467,74 @@ namespace VideoProcessorTest
 			Assert::IsTrue(unbound.reason.find("no vector engine") != std::string::npos,
 				L"unbound view fallback must name 'no vector engine'");
 			Assert::IsFalse(noEngine.Forward(0, out), L"sequence 0 has no previous frame");
+		}
+
+		TEST_METHOD(VerticalVectorsUsePerAxisHeightRatioUnderAnisotropicScaling)
+		{
+			// Anisotropic scaling: source 384x300 over engine 96x100 => scaleX = 4.0, scaleY = 3.0 (distinct axes).
+			const int sourceW = 384;
+			const int sourceH = 300;
+			const int halfW = 96;
+			const int halfH = 100;
+			EngineRig rig(sourceW);
+			rig.engine.NoteFlowSourceSize(sourceW, sourceH);
+
+			auto flow = std::make_shared<MotionAhead::Flow>();
+			flow->halfW = halfW;
+			flow->halfH = halfH;
+			flow->gridW = (halfW + 3) / 4;
+			flow->gridH = (halfH + 3) / 4;
+			const size_t cells = static_cast<size_t>(flow->gridW) * static_cast<size_t>(flow->gridH);
+			flow->forward.resize(cells * 2);
+			flow->backward.resize(cells * 2);
+			flow->forwardCost.assign(cells, 10);
+			flow->backwardCost.assign(cells, 10);
+			for (size_t i = 0; i < cells; ++i)
+			{
+				flow->forward[i * 2] = static_cast<int16_t>(64);      // +2.0 engine px -> +8.0 source px
+				flow->forward[i * 2 + 1] = static_cast<int16_t>(-96); // -3.0 engine px -> -9.0 source px (naive scaleX = -12.0)
+				flow->backward[i * 2] = static_cast<int16_t>(-64);    // -2.0 engine px -> -8.0 source px
+				flow->backward[i * 2 + 1] = static_cast<int16_t>(96); // +3.0 engine px -> +9.0 source px (naive scaleX = +12.0)
+			}
+			MotionAhead::FlowExtras(*flow);
+			Assert::IsTrue(rig.Publish(4, 5, flow));
+			rig.engine.motionValidity.NoteKept(4);
+			rig.engine.motionValidity.NoteKept(5);
+
+			VpMotion::FlowView view;
+			Assert::IsTrue(rig.engine.FlowOf(5, view), L"engine serves FlowView for anisotropic pair");
+			Assert::AreEqual(4.0, view.enginePxToSource, 1e-9, L"horizontal scaleX = 384 / 96 = 4.0");
+			Assert::AreEqual(3.0, view.enginePxToSourceY, 1e-9, L"vertical scaleY = 300 / 100 = 3.0");
+
+			TemporalDetail::SharedMotionSource source(rig.View(), &rig.engine.motionValidity, rig.FlowOf());
+			source.SetSourceSize(sourceW, sourceH);
+			TemporalDetail::MotionPair fwd, bwd;
+			Assert::IsTrue(source.Forward(5, fwd), L"Forward(5) served");
+			Assert::IsTrue(source.Backward(5, bwd), L"Backward(5) served");
+			Assert::AreEqual(cells, fwd.vx.size());
+			Assert::AreEqual(cells, fwd.vy.size());
+			Assert::AreEqual(cells, bwd.vx.size());
+			Assert::AreEqual(cells, bwd.vy.size());
+
+			for (size_t i = 0; i < cells; ++i)
+			{
+				const double expectedFwdX = flow->forward[i * 2] / 32.0 * view.enginePxToSource;
+				const double expectedFwdY = flow->forward[i * 2 + 1] / 32.0 * view.enginePxToSourceY;
+				const double expectedBwdX = flow->backward[i * 2] / 32.0 * view.enginePxToSource;
+				const double expectedBwdY = flow->backward[i * 2 + 1] / 32.0 * view.enginePxToSourceY;
+				Assert::AreEqual(expectedFwdX, static_cast<double>(fwd.vx[i]), 1e-4, L"forward vx uses scaleX");
+				Assert::AreEqual(expectedFwdY, static_cast<double>(fwd.vy[i]), 1e-4, L"forward vy uses per-axis scaleY");
+				Assert::AreEqual(expectedBwdX, static_cast<double>(bwd.vx[i]), 1e-4, L"backward vx uses scaleX");
+				Assert::AreEqual(expectedBwdY, static_cast<double>(bwd.vy[i]), 1e-4, L"backward vy uses per-axis scaleY");
+			}
+
+			// In-test negative control on the exact same cell: pre-fix isotropic bug scaled vy by scaleX (-12.0 / +12.0 vs -9.0 / +9.0).
+			const double vyFwdNaive = flow->forward[1] / 32.0 * view.enginePxToSource;
+			const double vyBwdNaive = flow->backward[1] / 32.0 * view.enginePxToSource;
+			Assert::IsTrue(std::fabs(static_cast<double>(fwd.vy[0]) - vyFwdNaive) >= 2.5,
+				L"negative control: forward vy differs from naive isotropic scaleX by 3.0 source px");
+			Assert::IsTrue(std::fabs(static_cast<double>(bwd.vy[0]) - vyBwdNaive) >= 2.5,
+				L"negative control: backward vy differs from naive isotropic scaleX by 3.0 source px");
 		}
 	};
 }

@@ -389,5 +389,39 @@ namespace ComputeOnceTestsNs
 			Assert::AreEqual<size_t>(0, ComputeOnce::Global().Rows().size());
 			Assert::IsTrue(best - bestEmpty < 3.0, L"off cost under 3 ns per entry point");
 		}
+
+		TEST_METHOD(U13IsNotInNotInstrumentedWhileU14Remains)
+		{
+			const auto& uncounted = ComputeOnceReport::NotInstrumented();
+			bool foundU13 = false;
+			bool foundU14 = false;
+			for (const ComputeOnceReport::Uncounted& u : uncounted)
+			{
+				if (u.unit && std::string(u.unit) == "U13")
+					foundU13 = true;
+				if (u.unit && std::string(u.unit) == "U14")
+				{
+					foundU14 = true;
+					Assert::IsNotNull(u.name);
+					Assert::AreEqual(std::string("trail_compose"), std::string(u.name), L"U14 entry names trail_compose");
+				}
+			}
+			Assert::IsFalse(foundU13, L"U13 has its own VPV_COMPUTE_ONCE counter and must not be listed in NotInstrumented()");
+			// In-test negative control: uninstrumented U14 must still be reported so absence of U13 is not vacuous.
+			Assert::IsTrue(foundU14, L"negative control: U14 (trail_compose) remains in NotInstrumented()");
+
+			EnabledScope on;
+			const std::vector<std::string> lines = ComputeOnceReport::Lines();
+			Assert::IsFalse(AnyLineStarts(lines, "Compute-once not-instrumented U13"),
+				L"ComputeOnceReport::Lines() must not emit a not-instrumented row for U13");
+			Assert::IsTrue(AnyLineStarts(lines, "Compute-once not-instrumented U14 "),
+				L"negative control: ComputeOnceReport::Lines() still emits the not-instrumented row for U14");
+			const std::string expectedToken = "not-instrumented " + std::to_string(uncounted.size());
+			bool summaryMatches = false;
+			for (const std::string& l : lines)
+				if (l.compare(0, 21, "Compute-once summary ") == 0 && l.find(expectedToken) != std::string::npos)
+					summaryMatches = true;
+			Assert::IsTrue(summaryMatches, L"summary line carries exact not-instrumented count");
+		}
 	};
 }
