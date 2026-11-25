@@ -28,12 +28,7 @@ public:
 		m_sdrState = sdrState;
 	}
 
-	void Disarm()
-	{
-		std::lock_guard<std::mutex> guard(m_mutex);
-		m_armed = false;
-		m_sdrState = nullptr;
-	}
+	void Disarm() { std::lock_guard<std::mutex> guard(m_mutex); m_armed = false; m_sdrState = nullptr; }
 
 	bool Armed(uint64_t generation) const
 	{
@@ -53,8 +48,7 @@ public:
 			m_lastSampleMs = 0;
 			m_haveSample = false;
 		}
-		if (!Armed(generation) && m_haveSample && nowMs - m_lastSampleMs < UNARMED_INTERVAL_MS)
-			return false;
+		if (!Armed(generation) && m_haveSample && nowMs - m_lastSampleMs < UNARMED_INTERVAL_MS) return false;
 		m_lastSampleMs = nowMs;
 		m_haveSample = true;
 		return true;

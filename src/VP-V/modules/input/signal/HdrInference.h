@@ -62,8 +62,7 @@ struct HdrInferenceEligibility
 // Precedence: explicit settings > profile > newlldv inference. This decides
 // only whether the EOTF may be inferred; explicit metadata settings still win
 // for the fields they set (the caller applies them).
-HdrInferenceEligibility EvaluateHdrInferenceEligibility(
-	const HdrInferenceSignal& signal);
+HdrInferenceEligibility EvaluateHdrInferenceEligibility(const HdrInferenceSignal& signal);
 
 struct HdrInferenceOptions
 {
@@ -144,10 +143,7 @@ public:
 			m_state == HdrInferenceState::VetoedSdr;
 	}
 	// The capture path computes picture statistics only while this is true.
-	bool WantsPictureStatistics() const
-	{
-		return m_state == HdrInferenceState::InferredPq && VetoOn();
-	}
+	bool WantsPictureStatistics() const { return m_state == HdrInferenceState::InferredPq && VetoOn(); }
 	uint64_t Epoch() const { return m_epoch; }
 	uint32_t ShotsWithEvidence() const { return m_shotsWithEvidence; }
 	bool VetoArmed() const { return m_vetoArmed; }
