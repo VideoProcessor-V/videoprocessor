@@ -245,6 +245,21 @@ namespace SourceIdentity
 			Geometry::AxisGeom heldApplied[2];          // the applied geometry the latch carries (updated by every confident reading of the latched size)
 			Geometry::AxisGeom lastFiltered[2];         // the last latch-filtered applied geometry
 			Geometry::AxisGeom lastPublishedApplied[2]; // SOTA23-HIGH-2: last published Record::applied geometry (for true appliedChanged / appliedGen)
+			// M-1: shot-scoped sticky SOTA #2/#3 protection so a mid-shot abstain frame cannot leak a held progressive latch.
+			bool shotNeuralSrSticky[2] = { false, false };
+			int shotNeuralSrNegStreak[2] = { 0, 0 };
+			InterlacedKind shotInterlacedSticky = InterlacedKind::None;
+			int shotInterlacedNegStreak = 0;
+
+			void ClearShotSotaSticky()
+			{
+				shotNeuralSrSticky[0] = false;
+				shotNeuralSrSticky[1] = false;
+				shotNeuralSrNegStreak[0] = 0;
+				shotNeuralSrNegStreak[1] = 0;
+				shotInterlacedSticky = InterlacedKind::None;
+				shotInterlacedNegStreak = 0;
+			}
 			LatchCounters latchBase;                  // counters of the latch already folded into the atomics
 			std::string dumpPath;                     // R4: VP_SID_R4_DUMP_PATH (empty = off)
 			std::unique_ptr<DescaleVerifier> dumpVerifier;
@@ -341,9 +356,10 @@ namespace SourceIdentity
 				vs.clockCtx = this;
 				verifier.reset(new DescaleVerifier(vs));
 				// The probe's operators are 1.64x longer but only a handful (one kernel, five sizes per axis): an eighth of the byte budget holds them.
-				// SOTA1-HIGH-1: PowerProbe synthesizes a code-space 0.61x upscale and must NEVER inherit HDR linearization.
+				// SOTA1-HIGH-1 & L-2: PowerProbe synthesizes a code-space 0.61x upscale at phase 0 and must NEVER inherit HDR linearization or GN phase refine.
 				VerifierSettings pvs = vs;
 				pvs.hdrNoise = HdrNoiseSettings();
+				pvs.gaussNewtonPhaseRefine = false;
 				pvs.cacheBytes = vs.cacheBytes / 8;
 				probeVerifier.reset(new DescaleVerifier(pvs));
 			}
@@ -1263,7 +1279,7 @@ namespace SourceIdentity
 						cStale.fetch_add(1, std::memory_order_relaxed);
 					else
 						Process(job);
-					if (job.staticSnap && job.staticSnap.unique())
+					if (job.staticSnap && job.staticSnap.use_count() == 1)
 					{
 						std::lock_guard<std::mutex> lk(m);
 						if (static_cast<int>(staticSnapPool.size()) < cfg.queueDepth + 2)
@@ -1412,6 +1428,7 @@ namespace SourceIdentity
 					}
 					ConfigureR4Dump();
 				}
+				ClearShotSotaSticky();
 				evidence = ChainEvidence(cfg.evidence);
 				verifier->ClearCache();
 				probeVerifier->ClearCache();
@@ -1566,6 +1583,7 @@ namespace SourceIdentity
 						(cur.state == Geometry::LatchState::Latched && cur.N != prev.N);
 					lastPublishedApplied[a] = Geometry::AxisGeom();
 				}
+				ClearShotSotaSticky();
 				haveArea = false;
 				latchedPower.store(false, std::memory_order_release);
 				if (out[0].measuredChanged || out[1].measuredChanged)
@@ -2873,6 +2891,7 @@ namespace SourceIdentity
 				}
 				// SOTA #2 (opt-in, default OFF): AI / Neural SR witness (strictly inert unless cfg.neuralSr.enabled).
 				bool neuralSrHit[2] = { false, false };
+				bool neuralSrExplicitNeg[2] = { false, false };
 				if (cfg.neuralSr.enabled)
 				{
 					for (int a = 0; a < 2; ++a)
@@ -2895,15 +2914,24 @@ namespace SourceIdentity
 								minLtiStat = cr.stat;
 							}
 						}
-						// On a nonlinear neural SR image, sharp 1-px edges break EVERY classical LTI kernel subspace,
-						// so ExactStage's top-2 LTI candidates may not include the true latent grid (e.g. 0.5x).
-						// When NO classical LTI candidate dips below ltiDipVeto, evaluate the bounded deduplicated set
-						// of exact-verified, canonical (0.5x, 2/3x matching lines 2779-2780), and proposed cutoffs
-						// against the global axis minLtiStat Pillar-1 veto; stop on first positive detection.
-						int nsrCands[kMaxCandidates + 2] = {};
+						// L-3: without an exact-verified candidate, Pillar-1 LTI veto cannot be evaluated; abstain visibly.
+						if (!haveExact || !std::isfinite(minLtiStat))
+						{
+							cNeuralSrAbstains.fetch_add(1, std::memory_order_relaxed);
+							continue;
+						}
+						// Pillar-1 fast path: skip forward FFT preparation entirely when classical LTI dip vetoes Neural SR.
+						if (minLtiStat <= cfg.neuralSr.ltiDipVeto)
+						{
+							neuralSrExplicitNeg[a] = true;
+							continue;
+						}
+						// M-2: cap Neural SR candidate set to {bestExact, N/2, 2N/3} (deduplicated, max 3 per axis)
+						// and hoist forward FFT/PSD computation ONCE per axis into neuralSrWs[a].
+						int nsrCands[3] = {};
 						int nsrCount = 0;
 						auto addNsrCand = [&](int n) {
-							if (n < 16 || n >= axisN || nsrCount >= kMaxCandidates + 2)
+							if (n < 16 || n >= axisN || nsrCount >= 3)
 								return;
 							for (int k = 0; k < nsrCount; ++k)
 							{
@@ -2912,22 +2940,21 @@ namespace SourceIdentity
 							}
 							nsrCands[nsrCount++] = n;
 						};
-						if (haveExact)
-							addNsrCand(bestExactN);
+						addNsrCand(bestExactN);
 						addNsrCand(RoundToInt(static_cast<double>(axisN) * 0.5));
 						addNsrCand(RoundToInt(static_cast<double>(axisN) * 2.0 / 3.0));
-						for (size_t ci = 0; ci < run[a].vr.candidates.size(); ++ci)
+						if (nsrCount <= 0)
 						{
-							const CandidateResult& cr = run[a].vr.candidates[ci];
-							if (cr.valid)
-								addNsrCand(cr.n);
+							cNeuralSrAbstains.fetch_add(1, std::memory_order_relaxed);
+							continue;
 						}
+						const bool nsrPrepared = NeuralSrWitness::PrepareLineSet(run[a].ls, cfg.neuralSr, neuralSrWs[a]);
 						bool anyNotNeural = false;
 						bool anyAbstain = false;
 						for (int ni = 0; ni < nsrCount; ++ni)
 						{
 							const NeuralSrResult nsr = NeuralSrWitness::Evaluate(
-								run[a].ls, nsrCands[ni], minLtiStat, floorCodes, cfg.neuralSr, neuralSrWs[a]);
+								run[a].ls, nsrCands[ni], minLtiStat, floorCodes, cfg.neuralSr, neuralSrWs[a], nsrPrepared);
 							if (nsr.neuralUpscaled)
 							{
 								neuralSrHit[a] = true;
@@ -2944,10 +2971,10 @@ namespace SourceIdentity
 							else if (nsr.verdict == NeuralSrVerdict::Abstain)
 								anyAbstain = true;
 						}
-						if (!neuralSrHit[a] && !anyNotNeural && anyAbstain)
-						{
+						if (!neuralSrHit[a] && anyNotNeural)
+							neuralSrExplicitNeg[a] = true;
+						else if (!neuralSrHit[a] && anyAbstain)
 							cNeuralSrAbstains.fetch_add(1, std::memory_order_relaxed);
-						}
 					}
 				}
 				// SOTA #3 (opt-in, default OFF): Broadcast interlaced motion-bob / weave-comb forensics.
@@ -3425,20 +3452,89 @@ namespace SourceIdentity
 					++discontinuities;
 					cDiscontinuities.fetch_add(1, std::memory_order_relaxed);
 				}
-				// SOTA23-HIGH-2: demote Neural SR / Interlaced applied geometry BEFORE ApplyJointLatch/ApplyLatch
-				// (so weave-comb / AI-SR cannot pollute latchNxA/NyA or heldApplied), gate classical witness A,
-				// re-apply demotions after latch in case an earlier latch was already held, and compute appliedChanged
-				// ONCE against lastPublishedApplied[a] so appliedGen bumps ONLY on true applied transitions.
+				// M-1 & SOTA23-HIGH-2: maintain shot-scoped sticky SOTA #2/#3 protection (cleared on cut / discontinuity /
+				// area change / fade-shot OR after K = confirmShots consecutive explicit negative verdicts, NEVER on Abstain),
+				// release any held latch on first detection, demote applied geometry BEFORE ApplyJointLatch/ApplyLatch,
+				// block classical witness A entry while active, re-apply demotions after latch if needed, and compute
+				// appliedChanged ONCE against lastPublishedApplied[a] so appliedGen bumps strictly on real transitions.
+				if (anyReset || areaChanged || cutsNow > 0 || shotStartedNow)
+					ClearShotSotaSticky();
+				const bool prevShotSotaActive =
+					shotNeuralSrSticky[0] || shotNeuralSrSticky[1] || (shotInterlacedSticky != InterlacedKind::None);
+				const int sotaClearNegTarget = (std::max)(2, RoundToInt(
+					cfg.latch.deferDwellSec / (std::max)(0.25, cfg.governor.acquiringIntervalSec)));
+				if (cfg.neuralSr.enabled)
+				{
+					for (int a = 0; a < 2; ++a)
+					{
+						if (neuralSrHit[a])
+						{
+							shotNeuralSrSticky[a] = true;
+							shotNeuralSrNegStreak[a] = 0;
+						}
+						else if (shotNeuralSrSticky[a] && neuralSrExplicitNeg[a])
+						{
+							if (++shotNeuralSrNegStreak[a] >= sotaClearNegTarget)
+							{
+								shotNeuralSrSticky[a] = false;
+								shotNeuralSrNegStreak[a] = 0;
+							}
+						}
+					}
+				}
+				else
+				{
+					shotNeuralSrSticky[0] = false;
+					shotNeuralSrSticky[1] = false;
+					shotNeuralSrNegStreak[0] = 0;
+					shotNeuralSrNegStreak[1] = 0;
+				}
+				if (cfg.interlaced.enabled)
+				{
+					if (interlacedRes.interlacedDetected)
+					{
+						shotInterlacedSticky = interlacedRes.kind;
+						shotInterlacedNegStreak = 0;
+					}
+					else if (shotInterlacedSticky != InterlacedKind::None)
+					{
+						const bool explicitNegInterlaced =
+							interlacedRes.kind == InterlacedKind::None &&
+							interlacedRes.reason != InterlacedReason::Disabled &&
+							interlacedRes.reason != InterlacedReason::InvalidInput;
+						if (explicitNegInterlaced)
+						{
+							if (++shotInterlacedNegStreak >= sotaClearNegTarget)
+							{
+								shotInterlacedSticky = InterlacedKind::None;
+								shotInterlacedNegStreak = 0;
+							}
+						}
+					}
+				}
+				else
+				{
+					shotInterlacedSticky = InterlacedKind::None;
+					shotInterlacedNegStreak = 0;
+				}
+				const bool effNeuralSr[2] = {
+					cfg.neuralSr.enabled && (neuralSrHit[0] || shotNeuralSrSticky[0]),
+					cfg.neuralSr.enabled && (neuralSrHit[1] || shotNeuralSrSticky[1])
+				};
+				const InterlacedKind effInterlacedKind = cfg.interlaced.enabled
+					? (interlacedRes.interlacedDetected ? interlacedRes.kind : shotInterlacedSticky)
+					: InterlacedKind::None;
+				const bool effInterlaced = (effInterlacedKind != InterlacedKind::None);
+				const bool sotaBlockClassical = effNeuralSr[0] || effNeuralSr[1] || effInterlaced;
+				const bool sotaFirstDetectRelease = !prevShotSotaActive && sotaBlockClassical;
+
 				bool sotaDemotedApplied = false;
-				const bool sotaBlockClassical =
-					(cfg.neuralSr.enabled && (neuralSrHit[0] || neuralSrHit[1])) ||
-					(cfg.interlaced.enabled && interlacedRes.interlacedDetected);
 				auto applySotaDemotions = [&]() {
 					if (cfg.neuralSr.enabled)
 					{
 						for (int a = 0; a < 2; ++a)
 						{
-							if (neuralSrHit[a])
+							if (effNeuralSr[a])
 							{
 								out[a].measured.reasonBits |= kReasonNeuralSrDetected;
 								out[a].applied = UnsureLike(out[a].applied, out[a].applied.reasonBits | kReasonNeuralSrDetected);
@@ -3446,7 +3542,7 @@ namespace SourceIdentity
 							}
 						}
 					}
-					if (cfg.interlaced.enabled && interlacedRes.interlacedDetected)
+					if (effInterlaced)
 					{
 						for (int a = 0; a < 2; ++a)
 						{
@@ -3455,14 +3551,14 @@ namespace SourceIdentity
 						}
 						// Never misreport motion-bobbed 1080i->2160p as confident progressive 540p on the vertical axis,
 						// nor weave-combed interlaced frames as confident progressive output.
-						if (interlacedRes.kind == InterlacedKind::MotionBob &&
+						if (effInterlacedKind == InterlacedKind::MotionBob &&
 							out[1].applied.state == Geometry::LatchState::Latched &&
 							out[1].applied.n < out[1].applied.N)
 						{
 							out[1].applied = UnsureLike(out[1].applied, out[1].applied.reasonBits | kReasonInterlacedBob);
 							sotaDemotedApplied = true;
 						}
-						else if (interlacedRes.kind == InterlacedKind::WeaveComb)
+						else if (effInterlacedKind == InterlacedKind::WeaveComb)
 						{
 							for (int a = 0; a < 2; ++a)
 							{
@@ -3475,7 +3571,7 @@ namespace SourceIdentity
 				applySotaDemotions();
 				if (jointLatchOn)
 				{
-					if (anyReset || areaChanged)
+					if (anyReset || areaChanged || sotaFirstDetectRelease)
 					{
 						const JointLatchOutput jlo = jointLatch.Reset();
 						FoldJointLatchCounters();
@@ -3487,9 +3583,9 @@ namespace SourceIdentity
 				}
 				else if (safetyOn)
 				{
-					if (anyReset || areaChanged)
+					if (anyReset || areaChanged || sotaFirstDetectRelease)
 					{
-						const LatchOutput lo = latch.Reset();   // a discontinuity / active-area change: the latch goes (counted, noticed: M4)
+						const LatchOutput lo = latch.Reset();   // a discontinuity / active-area change / SOTA #2/#3 detection: the latch goes
 						diagResetEvent = lo.event;   // dump v4 (read only)
 						FoldLatchCounters();
 						NoteLatchEvent(lo, s.timeUs);

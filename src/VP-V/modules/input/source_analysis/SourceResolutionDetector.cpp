@@ -782,7 +782,8 @@ namespace SourceResolution
 			if (bits > 0.0 && bits < signalBits) step *= std::pow(2.0, signalBits - bits);
 			frame.quantisationFloor = std::log10(step * step / 12.0);
 			// SOTA #1 (opt-in, default OFF): heteroscedastic HDR PQ/HLG quantization floor scaled by
-			// exact ST 2084 / HLG local-vs-midtone EOTF derivative ratio and bit-depth step.
+			// exact ST 2084 / HLG local-vs-midtone EOTF derivative ratio and bit-depth step while preserving
+			// the effective-bits multiplier (L-1: consistent normalized code-step domain).
 			if (t.hdrPerceptualNoiseFloor && t.hdrTransfer != 0)
 			{
 				const SourceIdentity::Chain::HdrTransfer tr = (t.hdrTransfer == 1)
@@ -790,7 +791,8 @@ namespace SourceResolution
 					: SourceIdentity::Chain::HdrTransfer::Hlg;
 				const double code10 = frame.mean * 1023.0;
 				const double stepRatio = SourceIdentity::Chain::PerceptualCodeStepRatio(tr, code10, t.hdrLimitedRange);
-				const double hdrStep = SourceIdentity::Chain::QuantStepNorm(t.hdrBitDepth, t.hdrLimitedRange);
+				const double effMult = (codeStep > 0.0) ? (step / codeStep) : 1.0;
+				const double hdrStep = SourceIdentity::Chain::QuantStepNorm(t.hdrBitDepth, t.hdrLimitedRange) * effMult;
 				const double floorPower = (hdrStep * hdrStep / 12.0) * (stepRatio * stepRatio);
 				if (floorPower > 0.0 && std::isfinite(floorPower))
 					frame.quantisationFloor = std::log10(floorPower);

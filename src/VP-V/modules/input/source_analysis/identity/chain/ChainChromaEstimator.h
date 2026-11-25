@@ -713,7 +713,7 @@ namespace SourceIdentity
 				DescaleOperator baseHiQ[kFamilyCount];
 				DescaleOperator qOps[kFamilyCount][4];
 
-				void Build(int axisLen, int orig, int len, TapMemo& memo)
+				void Build(int axisLen, int orig, int len, TapMemo& memo, bool buildMpegFieldOps = false)
 				{
 					N = axisLen;
 					origin = orig;
@@ -721,6 +721,8 @@ namespace SourceIdentity
 					halfOk = false;
 					mpegFieldOk = false;
 					quarterOk = false;
+					halfBilinearFieldOps[0] = DescaleOperator();
+					halfBilinearFieldOps[1] = DescaleOperator();
 
 					int repCount = 0;
 					const int* reps = RepresentativeKernels(repCount);
@@ -750,12 +752,8 @@ namespace SourceIdentity
 							}
 						}
 						halfOk = ok;
-						if (halfOk)
-						{
-							mpegFieldOk =
-								halfBilinearFieldOps[0].Build(N, nHalf, 0, 0.125, origin, length, &memo) &&
-								halfBilinearFieldOps[1].Build(N, nHalf, 0, -0.125, origin, length, &memo);
-						}
+						if (halfOk && buildMpegFieldOps)
+							EnsureMpegFieldOps(memo);
 					}
 
 					// Quarter-resolution (n = N / 4) operators.
@@ -786,6 +784,15 @@ namespace SourceIdentity
 					}
 				}
 
+				void EnsureMpegFieldOps(TapMemo& memo)
+				{
+					if (mpegFieldOk || !halfOk)
+						return;
+					mpegFieldOk =
+						halfBilinearFieldOps[0].Build(N, nHalf, 0, 0.125, origin, length, &memo) &&
+						halfBilinearFieldOps[1].Build(N, nHalf, 0, -0.125, origin, length, &memo);
+				}
+
 				size_t Bytes() const
 				{
 					size_t total = sizeof(ChromaAxisOperators);
@@ -799,7 +806,8 @@ namespace SourceIdentity
 					for (int k = 0; k < kKernelCount; ++k)
 						for (int pi = 0; pi < 2; ++pi)
 							total += halfOps[k][pi].Bytes();
-					total += halfBilinearFieldOps[0].Bytes() + halfBilinearFieldOps[1].Bytes();
+					if (mpegFieldOk)
+						total += halfBilinearFieldOps[0].Bytes() + halfBilinearFieldOps[1].Bytes();
 					return total;
 				}
 			};
@@ -1506,12 +1514,12 @@ namespace SourceIdentity
 
 				if (!mpegConfirmed && bestPi == 0)
 				{
-					// Column-space-distinct kernels at phi = 0.0: lanczos3 (5), lanczos4 (6), spline36 (8), spline64 (9).
-					static const int kDistinctKernels[4] = { 5, 6, 8, 9 };
+					// L-4: derive column-space-distinct higher-order kernels (radius >= 3: lanczos3/4, spline36/64) directly from KernelBank.
 					double bestDistinctRms = 1e300;
-					for (int di = 0; di < 4; ++di)
+					for (int k = 0; k < kKernelCount; ++k)
 					{
-						const int k = kDistinctKernels[di];
+						if (Kernel(k).radius < 3)
+							continue;
 						for (int pi = 0; pi < 2; ++pi)
 						{
 							const double rk = axHalf.kernelRms[k][pi];
@@ -1882,12 +1890,17 @@ namespace SourceIdentity
 
 			ChromaWorkspace& Workspace() { return ws_; }
 
-			const detail_chroma_estimator::ChromaAxisOperators& GetOrBuild(int N, int origin, int length)
+			const detail_chroma_estimator::ChromaAxisOperators& GetOrBuild(int N, int origin, int length, bool needMpegFieldOps = false)
 			{
 				for (size_t i = 0; i < entries_.size(); ++i)
 				{
 					if (entries_[i].N == N && entries_[i].origin == origin && entries_[i].length == length)
 					{
+						if (needMpegFieldOps && !entries_[i].mpegFieldOk && entries_[i].halfOk)
+						{
+							entries_[i].EnsureMpegFieldOps(memo_);
+							UpdateAccounting();
+						}
 						entries_[i].lastUsedTick = ++accessTick_;
 						++stats_.hits;
 						return entries_[i];
@@ -1912,7 +1925,7 @@ namespace SourceIdentity
 					entries_.emplace_back();
 				}
 
-				entries_[slot].Build(N, origin, length, memo_);
+				entries_[slot].Build(N, origin, length, memo_, needMpegFieldOps);
 				entries_[slot].lastUsedTick = ++accessTick_;
 				UpdateAccounting();
 				return entries_[slot];
@@ -2272,11 +2285,11 @@ namespace SourceIdentity
 				const detail_chroma_estimator::ChromaAxisOperators* opsV = nullptr;
 				if (cache != nullptr)
 				{
-					opsV = &cache->GetOrBuild(in.cbV.axisLen, in.cbV.origin, in.cbV.length);
+					opsV = &cache->GetOrBuild(in.cbV.axisLen, in.cbV.origin, in.cbV.length, s.detectBoxAndMpegChroma);
 				}
 				else
 				{
-					localOpsV.Build(in.cbV.axisLen, in.cbV.origin, in.cbV.length, localMemo);
+					localOpsV.Build(in.cbV.axisLen, in.cbV.origin, in.cbV.length, localMemo, s.detectBoxAndMpegChroma);
 					opsV = &localOpsV;
 				}
 
@@ -2433,11 +2446,11 @@ namespace SourceIdentity
 			const detail_chroma_estimator::ChromaAxisOperators* opsH = nullptr;
 			if (cache != nullptr)
 			{
-				opsH = &cache->GetOrBuild(in.cbH.axisLen, in.cbH.origin, in.cbH.length);
+				opsH = &cache->GetOrBuild(in.cbH.axisLen, in.cbH.origin, in.cbH.length, s.detectBoxAndMpegChroma);
 			}
 			else
 			{
-				localOps.Build(in.cbH.axisLen, in.cbH.origin, in.cbH.length, localMemo);
+				localOps.Build(in.cbH.axisLen, in.cbH.origin, in.cbH.length, localMemo, s.detectBoxAndMpegChroma);
 				opsH = &localOps;
 			}
 			double qDipH = 0.0;
@@ -2451,11 +2464,11 @@ namespace SourceIdentity
 			const detail_chroma_estimator::ChromaAxisOperators* opsV = nullptr;
 			if (cache != nullptr)
 			{
-				opsV = &cache->GetOrBuild(in.cbV.axisLen, in.cbV.origin, in.cbV.length);
+				opsV = &cache->GetOrBuild(in.cbV.axisLen, in.cbV.origin, in.cbV.length, s.detectBoxAndMpegChroma);
 			}
 			else
 			{
-				localOps.Build(in.cbV.axisLen, in.cbV.origin, in.cbV.length, localMemo);
+				localOps.Build(in.cbV.axisLen, in.cbV.origin, in.cbV.length, localMemo, s.detectBoxAndMpegChroma);
 				opsV = &localOps;
 			}
 			double qDipV = 0.0;

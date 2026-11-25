@@ -180,6 +180,16 @@ namespace SourceIdentity
 			std::vector<double> lineBi;
 			std::vector<double> lineRatio;
 
+			// M-2: candidate-independent cached forward FFT spectra & per-line PSDs for one (ls, fftN) preparation.
+			int preparedLineCount = 0;
+			int preparedLineLen = 0;
+			int preparedFftN = 0;
+			int preparedSegsPerLine = 0;
+			std::vector<int> preparedSegStarts;
+			std::vector<double> preparedSpecRe;
+			std::vector<double> preparedSpecIm;
+			std::vector<double> preparedLinePsd;
+
 			void Reset()
 			{
 				fftN = 0;
@@ -209,6 +219,14 @@ namespace SourceIdentity
 				psdInterior.clear();
 				lineBi.clear();
 				lineRatio.clear();
+				preparedLineCount = 0;
+				preparedLineLen = 0;
+				preparedFftN = 0;
+				preparedSegsPerLine = 0;
+				preparedSegStarts.clear();
+				preparedSpecRe.clear();
+				preparedSpecIm.clear();
+				preparedLinePsd.clear();
 			}
 		};
 
@@ -464,6 +482,112 @@ namespace SourceIdentity
 		class NeuralSrWitness
 		{
 		public:
+			// M-2: precompute candidate-independent forward FFT spectra and per-line PSDs ONCE per axis per eval
+			// inside ws so multi-candidate checks ({bestExact, N/2, 2N/3}) reuse the forward FFT with zero redundant work.
+			static bool PrepareLineSet(
+				const LineSet& ls,
+				const NeuralSrSettings& cfg,
+				NeuralSrWorkspace& ws)
+			{
+				ws.preparedLineCount = 0;
+				ws.preparedLineLen = 0;
+				ws.preparedFftN = 0;
+				ws.preparedSegsPerLine = 0;
+				if (!cfg.enabled ||
+					!detail_neural_sr::ValidateSettings(cfg) ||
+					!detail_neural_sr::ValidateLineSet(ls, cfg.fftSize))
+				{
+					return false;
+				}
+				const int fftN = cfg.fftSize;
+				const int half = fftN / 2;
+				const int margin = fftN / 8;
+				const int innerLen = fftN - 2 * margin;
+				const int evalTotal = ls.length - 2 * margin;
+				if (innerLen <= 0 || evalTotal <= 0)
+					return false;
+
+				detail_neural_sr::EnsureWorkspaceFft(ws, fftN);
+				const size_t nFft = static_cast<size_t>(fftN);
+				const size_t nHalfPlus1 = static_cast<size_t>(half + 1);
+				ws.re.resize(nFft);
+				ws.im.resize(nFft);
+
+				ws.preparedSegStarts.clear();
+				{
+					int coveredEnd = margin;
+					for (int segStart = 0; ; )
+					{
+						ws.preparedSegStarts.push_back(segStart);
+						coveredEnd = segStart + (fftN - margin);
+						if (coveredEnd >= ls.length - margin)
+							break;
+						const int nextStart = segStart + innerLen;
+						segStart = (nextStart + fftN <= ls.length) ? nextStart : (ls.length - fftN);
+					}
+				}
+				const int segsPerLine = static_cast<int>(ws.preparedSegStarts.size());
+				if (segsPerLine <= 0)
+					return false;
+
+				const size_t totalSegs = static_cast<size_t>(ls.count) * static_cast<size_t>(segsPerLine);
+				ws.preparedSpecRe.resize(totalSegs * nFft);
+				ws.preparedSpecIm.resize(totalSegs * nFft);
+				ws.preparedLinePsd.assign(static_cast<size_t>(ls.count) * nHalfPlus1, 0.0);
+
+				const double psdNormDenom = static_cast<double>(fftN) * ws.winEnergy;
+				const double invDen = (psdNormDenom > 0.0) ? (1.0 / psdNormDenom) : 0.0;
+				const double invSegs = 1.0 / static_cast<double>(segsPerLine);
+
+				for (int lineIdx = 0; lineIdx < ls.count; ++lineIdx)
+				{
+					const double* line = ls.Line(lineIdx);
+					double* linePsdDst = &ws.preparedLinePsd[static_cast<size_t>(lineIdx) * nHalfPlus1];
+					for (int segIdx = 0; segIdx < segsPerLine; ++segIdx)
+					{
+						const int segStart = ws.preparedSegStarts[static_cast<size_t>(segIdx)];
+						double segMean = 0.0;
+						for (int s = 0; s < fftN; ++s)
+							segMean += line[segStart + s];
+						segMean /= static_cast<double>(fftN);
+
+						for (int s = 0; s < fftN; ++s)
+						{
+							ws.re[static_cast<size_t>(s)] = (line[segStart + s] - segMean) * ws.taperWin[static_cast<size_t>(s)];
+							ws.im[static_cast<size_t>(s)] = 0.0;
+						}
+						detail_neural_sr::FftRadix2(ws.re, ws.im, ws, false);
+
+						const size_t baseOff = (static_cast<size_t>(lineIdx) * static_cast<size_t>(segsPerLine) + static_cast<size_t>(segIdx)) * nFft;
+						double* dstRe = &ws.preparedSpecRe[baseOff];
+						double* dstIm = &ws.preparedSpecIm[baseOff];
+						for (size_t k = 0; k < nFft; ++k)
+						{
+							dstRe[k] = ws.re[k];
+							dstIm[k] = ws.im[k];
+						}
+						if (invDen > 0.0)
+						{
+							linePsdDst[0] += (dstRe[0] * dstRe[0] + dstIm[0] * dstIm[0]) * invDen;
+							for (int k = 1; k < half; ++k)
+							{
+								const size_t ku = static_cast<size_t>(k);
+								linePsdDst[ku] += 2.0 * (dstRe[ku] * dstRe[ku] + dstIm[ku] * dstIm[ku]) * invDen;
+							}
+							const size_t kh = static_cast<size_t>(half);
+							linePsdDst[kh] += (dstRe[kh] * dstRe[kh] + dstIm[kh] * dstIm[kh]) * invDen;
+						}
+					}
+					for (size_t k = 0; k < nHalfPlus1; ++k)
+						linePsdDst[k] *= invSegs;
+				}
+				ws.preparedLineCount = ls.count;
+				ws.preparedLineLen = ls.length;
+				ws.preparedFftN = fftN;
+				ws.preparedSegsPerLine = segsPerLine;
+				return true;
+			}
+
 			// Exact 3-Pillar Neural SR Witness:
 			//   Pillar 1: Classical LTI Veto (bestLtiStat <= ltiDipVeto => NotNeural / ClassicalLtiConfirmed).
 			//   Pillar 2: Disjoint spectral split + cross-scale edge-crest phase bicoherence + edge-vs-interior HF localization + active-pixel HF kurtosis.
@@ -474,7 +598,8 @@ namespace SourceIdentity
 				double bestLtiStat,
 				double floorCodes,
 				const NeuralSrSettings& cfg,
-				NeuralSrWorkspace& ws)
+				NeuralSrWorkspace& ws,
+				bool alreadyPrepared = false)
 			{
 				NeuralSrResult res;
 				if (!cfg.enabled)
@@ -587,81 +712,128 @@ namespace SourceIdentity
 				int totalActiveSamples = 0;
 				int validLines = 0;
 
+				const bool usePrepared = alreadyPrepared &&
+					ws.preparedFftN == fftN &&
+					ws.preparedLineCount == ls.count &&
+					ws.preparedLineLen == ls.length &&
+					ws.preparedSegsPerLine > 0;
+
 				for (int lineIdx = 0; lineIdx < ls.count; ++lineIdx)
 				{
 					const double* line = ls.Line(lineIdx);
-					ws.linePsd.assign(nHalfPlus1, 0.0);
-					int segCount = 0;
-
-					// Tile [margin, ls.length - margin) strictly once per pixel using fftN-sample segments
-					// with margin = fftN / 8 context on both ends so circular boundary effects never leak.
-					int coveredEnd = margin;
-					for (int segStart = 0; ; )
+					if (usePrepared)
 					{
-						double segMean = 0.0;
-						for (int s = 0; s < fftN; ++s)
-							segMean += line[segStart + s];
-						segMean /= static_cast<double>(fftN);
-
-						for (int s = 0; s < fftN; ++s)
-						{
-							ws.re[static_cast<size_t>(s)] = (line[segStart + s] - segMean) * ws.taperWin[static_cast<size_t>(s)];
-							ws.im[static_cast<size_t>(s)] = 0.0;
-						}
-
-						detail_neural_sr::FftRadix2(ws.re, ws.im, ws, false);
-						for (size_t k = 0; k < nFft; ++k)
-						{
-							ws.specRe[k] = ws.re[k];
-							ws.specIm[k] = ws.im[k];
-						}
-
-						if (psdNormDenom > 0.0)
-						{
-							const double invDen = 1.0 / psdNormDenom;
-							ws.linePsd[0] += (ws.specRe[0] * ws.specRe[0] + ws.specIm[0] * ws.specIm[0]) * invDen;
-							for (int k = 1; k < half; ++k)
-							{
-								const size_t ku = static_cast<size_t>(k);
-								ws.linePsd[ku] += 2.0 * (ws.specRe[ku] * ws.specRe[ku] + ws.specIm[ku] * ws.specIm[ku]) * invDen;
-							}
-							const size_t kh = static_cast<size_t>(half);
-							ws.linePsd[kh] += (ws.specRe[kh] * ws.specRe[kh] + ws.specIm[kh] * ws.specIm[kh]) * invDen;
-						}
-						++segCount;
-
-						detail_neural_sr::InverseBandSignal(ws, lowLo, lowHi, ws.lowWeights, ws.segLow);
-						detail_neural_sr::InverseBandSignal(ws, highLo, highHi, ws.highWeights, ws.segHigh);
-						detail_neural_sr::InverseBandSignal(ws, belowLo, belowHi, ws.belowWeights, ws.segBelow);
-
-						const int evalLo = (std::max)(margin, coveredEnd - segStart);
-						const int evalHi = fftN - margin;
-						for (int s = evalLo; s < evalHi; ++s)
-						{
-							const size_t su = static_cast<size_t>(s);
-							const size_t outIdx = static_cast<size_t>((segStart + s) - margin);
-							ws.yLow[outIdx] = ws.segLow[su];
-							ws.yHigh[outIdx] = ws.segHigh[su];
-							ws.yBelow[outIdx] = ws.segBelow[su];
-							ws.gradLow[outIdx] = 0.5 * (ws.segLow[su + 1u] - ws.segLow[su - 1u]);
-							ws.gradHigh[outIdx] = 0.5 * (ws.segHigh[su + 1u] - ws.segHigh[su - 1u]);
-						}
-						coveredEnd = segStart + evalHi;
-
-						if (coveredEnd >= ls.length - margin)
-							break;
-						const int nextStart = segStart + innerLen;
-						if (nextStart + fftN <= ls.length)
-							segStart = nextStart;
-						else
-							segStart = ls.length - fftN;
-					}
-
-					if (segCount > 0)
-					{
-						const double invSegs = 1.0 / static_cast<double>(segCount);
+						const double* srcPsd = &ws.preparedLinePsd[static_cast<size_t>(lineIdx) * nHalfPlus1];
 						for (size_t k = 0; k < nHalfPlus1; ++k)
-							ws.linePsd[k] *= invSegs;
+							ws.linePsd[k] = srcPsd[k];
+
+						int coveredEnd = margin;
+						for (int segIdx = 0; segIdx < ws.preparedSegsPerLine; ++segIdx)
+						{
+							const int segStart = ws.preparedSegStarts[static_cast<size_t>(segIdx)];
+							const size_t baseOff = (static_cast<size_t>(lineIdx) * static_cast<size_t>(ws.preparedSegsPerLine) + static_cast<size_t>(segIdx)) * nFft;
+							const double* srcRe = &ws.preparedSpecRe[baseOff];
+							const double* srcIm = &ws.preparedSpecIm[baseOff];
+							for (size_t k = 0; k < nFft; ++k)
+							{
+								ws.specRe[k] = srcRe[k];
+								ws.specIm[k] = srcIm[k];
+							}
+
+							detail_neural_sr::InverseBandSignal(ws, lowLo, lowHi, ws.lowWeights, ws.segLow);
+							detail_neural_sr::InverseBandSignal(ws, highLo, highHi, ws.highWeights, ws.segHigh);
+							detail_neural_sr::InverseBandSignal(ws, belowLo, belowHi, ws.belowWeights, ws.segBelow);
+
+							const int evalLo = (std::max)(margin, coveredEnd - segStart);
+							const int evalHi = fftN - margin;
+							for (int s = evalLo; s < evalHi; ++s)
+							{
+								const size_t su = static_cast<size_t>(s);
+								const size_t outIdx = static_cast<size_t>((segStart + s) - margin);
+								ws.yLow[outIdx] = ws.segLow[su];
+								ws.yHigh[outIdx] = ws.segHigh[su];
+								ws.yBelow[outIdx] = ws.segBelow[su];
+								ws.gradLow[outIdx] = 0.5 * (ws.segLow[su + 1u] - ws.segLow[su - 1u]);
+								ws.gradHigh[outIdx] = 0.5 * (ws.segHigh[su + 1u] - ws.segHigh[su - 1u]);
+							}
+							coveredEnd = segStart + evalHi;
+						}
+					}
+					else
+					{
+						ws.linePsd.assign(nHalfPlus1, 0.0);
+						int segCount = 0;
+
+						// Tile [margin, ls.length - margin) strictly once per pixel using fftN-sample segments
+						// with margin = fftN / 8 context on both ends so circular boundary effects never leak.
+						int coveredEnd = margin;
+						for (int segStart = 0; ; )
+						{
+							double segMean = 0.0;
+							for (int s = 0; s < fftN; ++s)
+								segMean += line[segStart + s];
+							segMean /= static_cast<double>(fftN);
+
+							for (int s = 0; s < fftN; ++s)
+							{
+								ws.re[static_cast<size_t>(s)] = (line[segStart + s] - segMean) * ws.taperWin[static_cast<size_t>(s)];
+								ws.im[static_cast<size_t>(s)] = 0.0;
+							}
+
+							detail_neural_sr::FftRadix2(ws.re, ws.im, ws, false);
+							for (size_t k = 0; k < nFft; ++k)
+							{
+								ws.specRe[k] = ws.re[k];
+								ws.specIm[k] = ws.im[k];
+							}
+
+							if (psdNormDenom > 0.0)
+							{
+								const double invDen = 1.0 / psdNormDenom;
+								ws.linePsd[0] += (ws.specRe[0] * ws.specRe[0] + ws.specIm[0] * ws.specIm[0]) * invDen;
+								for (int k = 1; k < half; ++k)
+								{
+									const size_t ku = static_cast<size_t>(k);
+									ws.linePsd[ku] += 2.0 * (ws.specRe[ku] * ws.specRe[ku] + ws.specIm[ku] * ws.specIm[ku]) * invDen;
+								}
+								const size_t kh = static_cast<size_t>(half);
+								ws.linePsd[kh] += (ws.specRe[kh] * ws.specRe[kh] + ws.specIm[kh] * ws.specIm[kh]) * invDen;
+							}
+							++segCount;
+
+							detail_neural_sr::InverseBandSignal(ws, lowLo, lowHi, ws.lowWeights, ws.segLow);
+							detail_neural_sr::InverseBandSignal(ws, highLo, highHi, ws.highWeights, ws.segHigh);
+							detail_neural_sr::InverseBandSignal(ws, belowLo, belowHi, ws.belowWeights, ws.segBelow);
+
+							const int evalLo = (std::max)(margin, coveredEnd - segStart);
+							const int evalHi = fftN - margin;
+							for (int s = evalLo; s < evalHi; ++s)
+							{
+								const size_t su = static_cast<size_t>(s);
+								const size_t outIdx = static_cast<size_t>((segStart + s) - margin);
+								ws.yLow[outIdx] = ws.segLow[su];
+								ws.yHigh[outIdx] = ws.segHigh[su];
+								ws.yBelow[outIdx] = ws.segBelow[su];
+								ws.gradLow[outIdx] = 0.5 * (ws.segLow[su + 1u] - ws.segLow[su - 1u]);
+								ws.gradHigh[outIdx] = 0.5 * (ws.segHigh[su + 1u] - ws.segHigh[su - 1u]);
+							}
+							coveredEnd = segStart + evalHi;
+
+							if (coveredEnd >= ls.length - margin)
+								break;
+							const int nextStart = segStart + innerLen;
+							if (nextStart + fftN <= ls.length)
+								segStart = nextStart;
+							else
+								segStart = ls.length - fftN;
+						}
+
+						if (segCount > 0)
+						{
+							const double invSegs = 1.0 / static_cast<double>(segCount);
+							for (size_t k = 0; k < nHalfPlus1; ++k)
+								ws.linePsd[k] *= invSegs;
+						}
 					}
 
 					// Pillar 2: Strong edge mask, edge-crest phase lock, +-2 px edge dilation, and textured interior mask.

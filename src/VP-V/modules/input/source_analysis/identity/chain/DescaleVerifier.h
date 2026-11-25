@@ -1099,7 +1099,9 @@ namespace SourceIdentity
 				cr.familyMargin = haveOther ? otherFam - scores[bi].T : 0.0;
 				// SOTA #5 (opt-in, default OFF): analytical Golub-Pereyra variable-projection Gauss-Newton phase refinement
 				// (up to 2 safeguarded iterations, total step clamped strictly to [-0.25, +0.25] from discrete grid winner).
-				if (s_.gaussNewtonPhaseRefine && !screenOnly)
+				// L-2: skip GN phase refinement when HDR linearized WLS will replace the candidate and reset phase.
+				const bool hdrWillReplace = s_.hdrNoise.enabled && s_.hdrNoise.transfer != HdrTransfer::Sdr && s_.hdrNoise.linearizeForDescale;
+				if (s_.gaussNewtonPhaseRefine && !screenOnly && !hdrWillReplace)
 				{
 					const double phiInit = static_cast<double>(PhaseQ(cr.phase)) / 1024.0;
 					for (int gnIter = 0; gnIter < 2; ++gnIter)
