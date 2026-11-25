@@ -1,11 +1,15 @@
 #include <pch.h>
 #include "TextureRestore.h"
 
+#include <VP-V/core/SkeletonAcquire.h>
+#include <VP-V/modules/repair/grain_split/BandMemo.h>
+
 #include <libplacebo/dispatch.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 // texture_restore (docs/VP-detail-restore.md; the algorithm and the shared constants:
@@ -671,9 +675,10 @@ if (p.x < sz.x && p.y < sz.y) {
 		const double cu = luma->params.format->type == PL_FMT_FLOAT ?
 			1.0 / (std::pow(2.0, params.colorDepth) - 1.0) :
 			std::pow(2.0, source.repr.bits.bit_shift) / (std::pow(2.0, sampleDepth) - 1.0);
-		const int r1 = Radius1(scale);
-		const std::string w1 = WeightsGlsl("w1", "R1", r1, [&](int k) { return Weight1(k, scale); });
-		const double s2 = kSigma2 * scale, s3 = kSigma3 * scale;
+		const double fineSigma = VpUnit::BandFromBase::kSigmaFine * scale;
+		const int r1 = VpUnit::BandFromBase::BandRadius(fineSigma);
+		const std::string w1 = WeightsGlsl("w1", "R1", r1, [&](int k) { return VpUnit::BandFromBase::BandWeight(k, fineSigma); });
+		const double s2 = VpUnit::BandFromBase::kSigmaBase * scale, s3 = VpUnit::BandFromBase::kSigmaLow * scale;
 		const std::string w23 = WeightsGlsl("w2", "R2", HalfRadius(s2), [&](int k) { return HalfWeight(k, s2); }) +
 			WeightsGlsl("w3", "R3", HalfRadius(s3), [&](int k) { return HalfWeight(k, s3); });
 		{
@@ -801,9 +806,10 @@ if (p.x < sz.x && p.y < sz.y) {
 			1.0 / (std::pow(2.0, params.colorDepth) - 1.0) :
 			std::pow(2.0, source.repr.bits.bit_shift) / (std::pow(2.0, sampleDepth) - 1.0);
 
-		const int r1 = Radius1(scale);
-		const std::string w1 = WeightsGlsl("w1", "R1", r1, [&](int k) { return Weight1(k, scale); });
-		const double s2 = kSigma2 * scale, s3 = kSigma3 * scale;
+		const double fineSigma = VpUnit::BandFromBase::kSigmaFine * scale;
+		const int r1 = VpUnit::BandFromBase::BandRadius(fineSigma);
+		const std::string w1 = WeightsGlsl("w1", "R1", r1, [&](int k) { return VpUnit::BandFromBase::BandWeight(k, fineSigma); });
+		const double s2 = VpUnit::BandFromBase::kSigmaBase * scale, s3 = VpUnit::BandFromBase::kSigmaLow * scale;
 		const std::string w23 = WeightsGlsl("w2", "R2", HalfRadius(s2), [&](int k) { return HalfWeight(k, s2); }) +
 			WeightsGlsl("w3", "R3", HalfRadius(s3), [&](int k) { return HalfWeight(k, s3); });
 		const std::string tileDef = "#define TPX " + std::to_string(T) + "\n";
@@ -983,5 +989,81 @@ if (p.x < sz.x && p.y < sz.y) {
 		frame.planes[0].texture = m.out;
 		result = frame;
 		return true;
+	}
+
+	namespace
+	{
+		CpuBandResult AcquireCpuBandForKey(const std::vector<float>& plane, int w, int h, const VpUnit::BandMemo::BandKey& key,
+			VpSkeleton::SkeletonMemo* memo, uint64_t seq)
+		{
+			CpuBandResult out;
+			if (w <= 0 || h <= 0)
+			{
+				out.fallbackReason = "empty plane dimensions";
+				return out;
+			}
+			const size_t expected = static_cast<size_t>(w) * static_cast<size_t>(h);
+			if (memo != nullptr && seq != 0u)
+			{
+				if (!VpUnit::BandMemo::Encodable(key))
+				{
+					out.fallbackReason = "band key outside BandMemo codec (factor/eps)";
+				}
+				else
+				{
+					const VpSkeleton::AcquireResult res = memo->Acquire(
+						VpSkeleton::kBandMemo, seq, VpSkeleton::AcquireForm::Cpu, VpUnit::BandMemo::ToVariant(key));
+					if (res.Ok() && res.cpu != nullptr && res.cpuBytes == expected * sizeof(float))
+					{
+						out.samples.resize(expected);
+						std::memcpy(out.samples.data(), res.cpu, res.cpuBytes);
+						out.fromBandMemo = true;
+						return out;
+					}
+					const std::string detail = memo->LastCause(VpSkeleton::kBandMemo);
+					out.fallbackReason = std::string("kBandMemo CPU unavailable (") + VpSkeleton::Token(res.cause)
+						+ (detail.empty() ? ")" : ": " + detail + ")");
+				}
+			}
+			else
+			{
+				out.fallbackReason = memo == nullptr ? "no skeleton memo bound" : "frame sequence 0 (unkeyed)";
+			}
+			if (plane.size() == expected)
+				out.samples = VpUnit::BandMemo::CpuBand<float>(plane, w, h, key);
+			return out;
+		}
+	}
+
+	CpuBandResult AcquireFineCpuBand(const std::vector<float>& plane, int w, int h, double scale,
+		VpSkeleton::SkeletonMemo* memo, uint64_t seq)
+	{
+		VpUnit::BandMemo::BandKey key;
+		key.resolution = VpUnit::BandMemo::Stage::Full;
+		key.width = w > 0 ? static_cast<uint32_t>(w) : 0u;
+		key.height = h > 0 ? static_cast<uint32_t>(h) : 0u;
+		key.sigmaPx = VpUnit::BandFromBase::kSigmaFine * scale;
+		key.law = VpUnit::BandMemo::Law::Taps;
+		key.edge = VpUnit::BandFromBase::EdgeMode::Replicate;
+		key.factor = 3.0;
+		key.minOne = true;
+		key.eps = 0.0;
+		return AcquireCpuBandForKey(plane, w, h, key, memo, seq);
+	}
+
+	CpuBandResult AcquireHalfCpuBand(const std::vector<float>& halfPlane, int hw, int hh, double fullSigmaPx,
+		VpSkeleton::SkeletonMemo* memo, uint64_t seq)
+	{
+		VpUnit::BandMemo::BandKey key;
+		key.resolution = VpUnit::BandMemo::Stage::Half;
+		key.width = hw > 0 ? static_cast<uint32_t>(hw) : 0u;
+		key.height = hh > 0 ? static_cast<uint32_t>(hh) : 0u;
+		key.sigmaPx = VpUnit::BandFromBase::HalfSigma(fullSigmaPx);
+		key.law = VpUnit::BandMemo::Law::Taps;
+		key.edge = VpUnit::BandFromBase::EdgeMode::Replicate;
+		key.factor = 3.5;
+		key.minOne = true;
+		key.eps = 1e-9;
+		return AcquireCpuBandForKey(halfPlane, hw, hh, key, memo, seq);
 	}
 }

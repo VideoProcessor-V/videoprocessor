@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 // detail_pulse_stabilise (DetailPulse.h has the maths). Three compute passes per new source
@@ -1717,5 +1718,71 @@ for (int q = 0; q < 4; q++) {
 		m.aheadSequence = sequence;
 		m.aheadGeometry = c.geometry;
 		return true;
+	}
+
+	namespace
+	{
+		CpuBandResult AcquireCpuBandForKey(const std::vector<float>& plane, int w, int h, const VpUnit::BandMemo::BandKey& key,
+			VpSkeleton::SkeletonMemo* memo, uint64_t seq)
+		{
+			CpuBandResult out;
+			if (w <= 0 || h <= 0)
+			{
+				out.fallbackReason = "empty plane dimensions";
+				return out;
+			}
+			const size_t expected = static_cast<size_t>(w) * static_cast<size_t>(h);
+			if (memo != nullptr && seq != 0u)
+			{
+				const VpSkeleton::AcquireResult res = memo->Acquire(
+					VpSkeleton::kBandMemo, seq, VpSkeleton::AcquireForm::Cpu, VpUnit::BandMemo::ToVariant(key));
+				if (res.Ok() && res.cpu != nullptr && res.cpuBytes == expected * sizeof(float))
+				{
+					out.samples.resize(expected);
+					std::memcpy(out.samples.data(), res.cpu, res.cpuBytes);
+					out.fromBandMemo = true;
+					return out;
+				}
+				const std::string detail = memo->LastCause(VpSkeleton::kBandMemo);
+				out.fallbackReason = std::string("kBandMemo CPU unavailable (") + VpSkeleton::Token(res.cause)
+					+ (detail.empty() ? ")" : ": " + detail + ")");
+			}
+			else
+			{
+				out.fallbackReason = memo == nullptr ? "no skeleton memo bound" : "frame sequence 0 (unkeyed)";
+			}
+			if (plane.size() == expected)
+				out.samples = VpUnit::BandMemo::CpuBand<float>(plane, w, h, key);
+			return out;
+		}
+	}
+
+	CpuBandResult AcquireFineCpuBand(const std::vector<float>& plane, int w, int h, double scale,
+		VpSkeleton::SkeletonMemo* memo, uint64_t seq)
+	{
+		VpUnit::BandMemo::BandKey key;
+		key.resolution = VpUnit::BandMemo::Stage::Full;
+		key.width = w > 0 ? static_cast<uint32_t>(w) : 0u;
+		key.height = h > 0 ? static_cast<uint32_t>(h) : 0u;
+		key.sigmaPx = VpUnit::BandFromBase::kSigmaFine * scale;
+		key.law = VpUnit::BandMemo::Law::Taps;
+		key.edge = VpUnit::BandFromBase::EdgeMode::Replicate;
+		key.factor = 3.0;
+		key.minOne = true;
+		key.eps = 0.0;
+		return AcquireCpuBandForKey(plane, w, h, key, memo, seq);
+	}
+
+	CpuBandResult AcquireWideCpuBand(const std::vector<float>& halfPlane, int hw, int hh, double scale,
+		VpSkeleton::SkeletonMemo* memo, uint64_t seq)
+	{
+		VpUnit::BandMemo::BandKey key;
+		key.resolution = VpUnit::BandMemo::Stage::Half;
+		key.width = hw > 0 ? static_cast<uint32_t>(hw) : 0u;
+		key.height = hh > 0 ? static_cast<uint32_t>(hh) : 0u;
+		key.sigmaPx = WideSigma(scale);
+		key.law = VpUnit::BandMemo::Law::Low;
+		key.edge = VpUnit::BandFromBase::EdgeMode::Replicate;
+		return AcquireCpuBandForKey(halfPlane, hw, hh, key, memo, seq);
 	}
 }

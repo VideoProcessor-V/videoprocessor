@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace VpSkeleton { class SkeletonMemo; }
 
@@ -30,9 +31,8 @@ namespace DetailPulse
 	constexpr double kDefaultCap = 1.35;
 	constexpr double kCapMin = 1.0, kCapMax = 1.5;
 
-	// Band sigmas in plane px at 2160 lines and below (x Scale() above).
-	constexpr double kSigmaFine = VpUnit::BandFromBase::kSigmaFine;   // ND03: the U2 unit's fine sigma (the grain split law's)
-	constexpr double kSigmaWide = 2.5;
+	// Band sigmas in plane px at 2160 lines and below (x Scale() above), imported from shared unit U2.
+	using VpUnit::BandFromBase::kSigmaFine;
 	// The tile: the measure and apply passes' 32 x 32 work block (16 x 16 threads, 2 x 2 px each).
 	constexpr int kTilePx = 32;
 	constexpr bool kDefaultFast = true;   // detail_pulse_fast
@@ -66,9 +66,14 @@ namespace DetailPulse
 	inline double Scale(double planeLines) { return (std::min)(GrainPreserve::GrainScale(planeLines), kMaxScale); }
 	// The fine band's Gaussian is the U2 unit's one band Gaussian (ND03: VpUnit::BandFromBase::BandRadius, ceil(3 sigma), at
 	// least one tap; FIX-B2-ND03: the same radius as the old ceil(3 sigma - 1e-9), no minimum, at every scale this module runs).
-	inline int FineRadius(double scale) { return VpUnit::BandFromBase::BandRadius(kSigmaFine * scale); }
-	inline double FineWeight(int i, double scale) { return VpUnit::BandFromBase::BandWeight(i, kSigmaFine * scale); }
-	inline double WideSigma(double scale) { return kSigmaWide * scale; }
+	inline int FineRadius(double scale) { return VpUnit::BandFromBase::BandRadius(VpUnit::BandFromBase::kSigmaFine * scale); }
+	inline double FineWeight(int i, double scale) { return VpUnit::BandFromBase::BandWeight(i, VpUnit::BandFromBase::kSigmaFine * scale); }
+	inline double WideSigma(double scale) { return VpUnit::BandFromBase::kSigmaBase * scale; }
+	struct CpuBandResult { std::vector<float> samples; bool fromBandMemo = false; std::string fallbackReason; };
+	CpuBandResult AcquireFineCpuBand(const std::vector<float>& plane, int w, int h, double scale,
+		VpSkeleton::SkeletonMemo* memo = nullptr, uint64_t seq = 0);
+	CpuBandResult AcquireWideCpuBand(const std::vector<float>& halfPlane, int hw, int hh, double scale,
+		VpSkeleton::SkeletonMemo* memo = nullptr, uint64_t seq = 0);
 	inline double ClampCap(double cap) { return (std::max)(kCapMin, (std::min)(kCapMax, cap)); }
 	inline double RateHz(double sourceHz) { return sourceHz > 0.0 ? sourceHz : kReferenceHz; }
 	inline int WindowFrames(double sourceHz)
