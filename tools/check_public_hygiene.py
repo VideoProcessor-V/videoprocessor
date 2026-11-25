@@ -52,7 +52,7 @@ SELF = {
 }
 PATTERNS = (
     ("drive-d", re.compile(r"(?<![A-Za-z0-9_])[Dd]:[\\/]")),
-    ("users-path", re.compile(r"(?:[Cc]:[\\/]|[\\/])Users[\\/]")),
+    ("users-path", re.compile(r"(?:[Cc]:[\\/]|[\\/])[Uu]sers[\\/]")),
     ("owner-display", re.compile(r"fl\s*-?\s*35", re.I)),   # mirrors tools/master_settings_common.py FL35
 )
 CLASSES = tuple(pid for pid, _ in PATTERNS)
