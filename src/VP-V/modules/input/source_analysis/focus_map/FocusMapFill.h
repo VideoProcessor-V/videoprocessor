@@ -32,8 +32,13 @@ namespace FocusMap
 	{
 		// The source frame size of `seq` (false = unknown: the fill declines).
 		std::function<bool(uint64_t seq, int& width, int& height)> geometry;
+		// Optional active picture rect [x0, x1) x [y0, y1) of `seq` in source pixels (false / null = full frame).
+		std::function<bool(uint64_t seq, int& x0, int& y0, int& x1, int& y1)> activeRect;
 		Params params;
 		int p2CellPx = 8;
+		int p2CellPy = 0;         // 0 = isotropic (= p2CellPx); non-zero = vertical P2 cell size (A-lens / anisotropic)
+		double p2ScaleX = 0.0;    // 0 = derive from p2Cell / 4.0
+		double p2ScaleY = 0.0;    // 0 = derive from p2CellY / 4.0
 		// Counters for tests and the status line (atomic: written on asking thread, read by status).
 		// fills / noPreviousRetained / edgeLaw / edgePending / edgeUnavailable count FILLS; flag counters count BLOCKS.
 		struct Stats
@@ -100,12 +105,6 @@ namespace FocusMap
 				out.declineReason = "focus_map: requires CPU form and frame geometry";
 				return false;
 			}
-			int w = 0, h = 0;
-			if (!cfg.geometry(req.seq, w, h) || w <= 0 || h <= 0)
-			{
-				out.declineReason = "focus_map: unknown frame geometry";
-				return false;
-			}
 			// S18 F1: kEdgeMap CPU readback is ALWAYS read at lag >= 1 (NEVER lag 0).
 			if (req.seq == 0)
 			{
@@ -123,13 +122,20 @@ namespace FocusMap
 			const bool havePrevSeq = sampleSeq > 0;
 			const uint64_t prevSeq = havePrevSeq ? sampleSeq - 1 : uint64_t(0);
 
+			// Validate lag-1 frame geometry using sampleSeq (req.seq - 1), NOT req.seq.
+			int w = 0, h = 0;
+			if (!cfg.geometry(sampleSeq, w, h) || w <= 0 || h <= 0)
+			{
+				out.declineReason = "focus_map: unknown frame geometry";
+				return false;
+			}
+
 			// Acquire lag-2 (prevSeq) BEFORE lag-1 (sampleSeq) so taking sampleSeq never stale-drops an
 			// unconsumed prevSeq in any ReadbackRing (ascending seq order; defense-in-depth with keepOlder).
 			const AcquireResult rp = havePrevSeq ? memo.Acquire(kEdgeMap, prevSeq, AcquireForm::Cpu) : AcquireResult();
-
-			// Edge-map-only law (v2, zero v1 interim fallback): validate kEdgeMap CPU at lag 1 (sampleSeq).
-			const size_t edgeNeed = static_cast<size_t>(w) * static_cast<size_t>(h) * sizeof(float);
 			const AcquireResult re = memo.Acquire(kEdgeMap, sampleSeq, AcquireForm::Cpu);
+
+			// Check ReadbackPending on BOTH lag-1 and lag-2 BEFORE any P11 copy or edge-map reduction.
 			if (!re.Ok() && re.cause == AcquireCause::ReadbackPending)
 			{
 				out.pending = true;
@@ -141,7 +147,21 @@ namespace FocusMap
 				}
 				return false;
 			}
-			if (!re.Ok() || re.cpu == nullptr || re.cpuBytes != edgeNeed)
+			if (havePrevSeq && !rp.Ok() && rp.cause == AcquireCause::ReadbackPending)
+			{
+				out.pending = true;
+				out.declineReason = "focus_map: edge_map lag-2 CPU readback pending";
+				if (cfg.stats)
+				{
+					++cfg.stats->edgePending;
+					cfg.stats->lastPendingCause.store(static_cast<uint8_t>(AcquireCause::ReadbackPending));
+				}
+				return false;
+			}
+
+			// Edge-map-only law (v2, zero v1 interim fallback): accept either GPU-reduced EMBS block sums or full-res R32F.
+			const Geometry gBase = Geometry::Make(w, h, cfg.p2CellPx, cfg.p2CellPy, cfg.p2ScaleX, cfg.p2ScaleY);
+			if (!re.Ok() || !IsValidEdgePayload(gBase, re.cpu, re.cpuBytes))
 			{
 				out.pending = false;
 				const AcquireCause c = re.Ok() ? AcquireCause::None : re.cause;
@@ -159,7 +179,14 @@ namespace FocusMap
 
 			// Frame-aligned P2 and P11 at sampleSeq (lag 1).
 			const AcquireResult r2 = memo.Acquire(kP2VectorPair, sampleSeq, AcquireForm::Cpu);
-			const Geometry g = Geometry::Make(w, h, r2.Ok() ? P2CellOf(r2.cpuBytes, w, h, cfg.p2CellPx) : cfg.p2CellPx);
+			const int p2CellX = (r2.Ok() && cfg.p2CellPy == 0) ? P2CellOf(r2.cpuBytes, w, h, cfg.p2CellPx) : cfg.p2CellPx;
+			Geometry g = Geometry::Make(w, h, p2CellX, cfg.p2CellPy, cfg.p2ScaleX, cfg.p2ScaleY);
+			if (cfg.activeRect)
+			{
+				int ax0 = 0, ay0 = 0, ax1 = w, ay1 = h;
+				if (cfg.activeRect(sampleSeq, ax0, ay0, ax1, ay1))
+					g.SetActiveRect(ax0, ay0, ax1, ay1);
+			}
 
 			std::vector<float> cur, prev;
 			const AcquireResult p11 = memo.Acquire(kP11RegionBlockStats, sampleSeq, AcquireForm::Cpu);
@@ -171,36 +198,34 @@ namespace FocusMap
 
 			std::vector<float> e2, e4, pe2, pe4;
 			EdgeInput edge, prevEdge;
-			EdgeSums(g, re.cpu, e2, e4);
+			DecodeEdgePayload(g, re.cpu, re.cpuBytes, e2, e4);
 			edge.sum2 = e2.data();
 			edge.sum4 = e4.data();
 
-			// Previous-frame delta reference at prevSeq (lag 2, when req.seq >= 2).
+			// Previous-frame delta reference at prevSeq (lag 2, when req.seq >= 2 and same frame geometry).
 			bool havePrev = false, prevReleased = false;
 			if (havePrevSeq)
 			{
-				if (!rp.Ok() && rp.cause == AcquireCause::ReadbackPending)
+				int pw = 0, ph = 0;
+				const bool prevGeomSame = cfg.geometry(prevSeq, pw, ph) && pw == w && ph == h;
+				const AcquireResult pp = prevGeomSame ? memo.Acquire(kP11RegionBlockStats, prevSeq, AcquireForm::Cpu) : AcquireResult();
+				Geometry gPrev = g;
+				if (prevGeomSame && cfg.activeRect)
 				{
-					out.pending = true;
-					out.declineReason = "focus_map: edge_map lag-2 CPU readback pending";
-					if (cfg.stats)
-					{
-						++cfg.stats->edgePending;
-						cfg.stats->lastPendingCause.store(static_cast<uint8_t>(AcquireCause::ReadbackPending));
-					}
-					return false;
+					int pax0 = 0, pay0 = 0, pax1 = pw, pay1 = ph;
+					if (cfg.activeRect(prevSeq, pax0, pay0, pax1, pay1))
+						gPrev.SetActiveRect(pax0, pay0, pax1, pay1);
 				}
-				const AcquireResult pp = memo.Acquire(kP11RegionBlockStats, prevSeq, AcquireForm::Cpu);
-				const bool havePrevEdge = rp.Ok() && rp.cpu != nullptr && rp.cpuBytes == edgeNeed;
-				const bool havePrevP11 = CopyP11(pp, g.Blocks(), prev);
+				const bool havePrevEdge = prevGeomSame && rp.Ok() && IsValidEdgePayload(gPrev, rp.cpu, rp.cpuBytes);
+				const bool havePrevP11 = prevGeomSame && CopyP11(pp, g.Blocks(), prev);
 				if (havePrevEdge && havePrevP11)
 				{
-					EdgeSums(g, rp.cpu, pe2, pe4);
+					DecodeEdgePayload(gPrev, rp.cpu, rp.cpuBytes, pe2, pe4);
 					prevEdge.sum2 = pe2.data();
 					prevEdge.sum4 = pe4.data();
 					havePrev = true;
 				}
-				else
+				else if (prevGeomSame)
 				{
 					prevReleased = PreviousReleased(rp) || PreviousReleased(pp);
 				}
