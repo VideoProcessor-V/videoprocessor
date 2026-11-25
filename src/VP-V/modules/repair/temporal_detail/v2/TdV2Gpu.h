@@ -4471,20 +4471,8 @@ float td_fine_hp_warp_gain(vec2 mv)
 				VpvGpu::Var("u_max_band_jump", &uMaxBandJump)
 			};
 
-			pl_shader sh = pl_dispatch_begin(dp);
-			if (!sh)
-				return false;
-			if (!VpvGpu::AddCompute(sh, hdr.c_str(), Shaders::kPassQualityEvidenceReduce, descs, 7, vars, 8, 16, 16, 8u * 256u * sizeof(float)))
-			{
-				pl_dispatch_abort(dp, &sh);
-				return false;
-			}
-			pl_dispatch_compute_params cp{};
-			cp.shader = &sh;
-			cp.dispatch_size[0] = cw;
-			cp.dispatch_size[1] = ch;
-			cp.dispatch_size[2] = 1;
-			if (!pl_dispatch_compute(dp, &cp))
+			if (!VpvGpu::Pass(dp, "td_v2_quality_evidence", hdr, Shaders::kPassQualityEvidenceReduce,
+			                  descs, 7, vars, 8, cw, ch, 8u * 256u * sizeof(float), 16, 16))
 				return false;
 
 			if (outSharpness != nullptr || outMeanGridFreeStep != nullptr)

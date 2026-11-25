@@ -3937,7 +3937,9 @@ imageStore(out_coded_delta, p, vec4(0.0));
 				c2aHdr += VpvGpu::Define("TD_BASE_QUANT_VAR", baseQuantVarCh);
 				c2aHdr += VpvGpu::Define("TD_STEP_SCALE_MIN", kCellStepScaleMin);
 				c2aHdr += VpvGpu::Define("TD_STEP_SCALE_MAX", maxAllowedStepScale);
-				c2aHdr += Shaders::kCoreHelpers + ChromaShaders::kSitedCoordHelpers + ChromaShaders::kPassChromaCellStatsHeader;
+				c2aHdr += Shaders::kCoreHelpers;
+				c2aHdr += ChromaShaders::kSitedCoordHelpers;
+				c2aHdr += ChromaShaders::kPassChromaCellStatsHeader;
 				pl_shader_desc d2a[18] = {
 					VpvGpu::Sampled("cur_l", sc.curL), VpvGpu::Sampled("cur_mh", sc.curMH),
 					VpvGpu::Sampled("ref_l_0", sc.refL[0]), VpvGpu::Sampled("ref_l_1", sc.refL[1]), VpvGpu::Sampled("ref_l_2", sc.refL[2]),
@@ -4026,20 +4028,36 @@ imageStore(out_coded_delta, p, vec4(0.0));
 				{
 					A2ePriorHistory& hist = (chIdx == 0) ? a2eHistoryCb_ : a2eHistoryCr_;
 					const float savedUnsplitG = ebBuf[static_cast<size_t>(chIdx * 6) * 4u + 3u];
+					EmpiricalOwnErrorPrior rawA2e;
+					bool anyV = false;
 					for (int b = 0; b < 3; ++b)
 					{
 						for (int ac = 0; ac < 2; ++ac)
 						{
 							const size_t idx = static_cast<size_t>(chIdx * 6 + b * 2 + ac) * 4u;
-							A2ePriorStats st{};
-							st.priorU = static_cast<double>(ebBuf[idx + 0u]);
-							st.tauSq = static_cast<double>(ebBuf[idx + 1u]);
-							st.validCount = static_cast<size_t>(Detail::NonNegRoundToSize(ebBuf[idx + 2u]));
-							st.valid = (st.validCount > 0 && std::isfinite(st.priorU) && st.priorU > 0.0);
-							hist.ApplyCapAndRecord(in.frameRole, b, ac, st);
-							ebBuf[idx + 0u] = st.valid ? static_cast<float>(st.priorU) : 0.0f;
-							ebBuf[idx + 1u] = st.valid ? static_cast<float>(st.tauSq) : 0.0f;
-							ebBuf[idx + 2u] = st.valid ? static_cast<float>(st.validCount > 0 ? st.validCount : 1u) : 0.0f;
+							const float uVal = ebBuf[idx + 0u];
+							const float cVal = ebBuf[idx + 2u];
+							if (cVal > 0.5f && std::isfinite(uVal) && uVal >= 0.0f)
+							{
+								rawA2e.U[b][ac] = static_cast<double>(uVal);
+								rawA2e.cellCount[b][ac] = static_cast<uint32_t>(Detail::NonNegRoundToSize(cVal));
+								anyV = true;
+							}
+						}
+					}
+					rawA2e.valid = anyV;
+					const EmpiricalOwnErrorPrior effA2e = hist.ApplyCapAndRecord(
+						rawA2e, in.frameRole, cfg_.sourceHz, (effFadeKeep < 1.0), false);
+					for (int b = 0; b < 3; ++b)
+					{
+						for (int ac = 0; ac < 2; ++ac)
+						{
+							const size_t idx = static_cast<size_t>(chIdx * 6 + b * 2 + ac) * 4u;
+							const double effU = effA2e.valid ? effA2e.ForBandClass(b, ac) : 0.0;
+							const bool cellOk = effA2e.valid && std::isfinite(effU) && effU > 0.0;
+							ebBuf[idx + 0u] = cellOk ? static_cast<float>(effU) : 0.0f;
+							ebBuf[idx + 1u] = cellOk ? ebBuf[idx + 1u] : 0.0f;
+							ebBuf[idx + 2u] = cellOk ? static_cast<float>((std::max<uint32_t>)(1u, effA2e.cellCount[b][ac])) : 0.0f;
 							ebBuf[idx + 3u] = (b == 0 && ac == 0) ? savedUnsplitG : 0.0f;
 						}
 					}

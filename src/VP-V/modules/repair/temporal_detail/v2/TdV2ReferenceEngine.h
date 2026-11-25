@@ -1163,13 +1163,6 @@ namespace TdV2
 			// Assemble available grain-free reference specifications (prevPeak, nextPeak, optional prevPeak2, recurrent carry)
 			// and validate coding step prior BEFORE band-splitting or warping references (exact 1:1 parity with TdV2Gpu.h:
 			// zero wasted work and borderBilinearPixels == 0 when refs are empty or !a2Stats.valid).
-			enum class RefRole : uint8_t
-			{
-				PrevPeak = 0,
-				NextPeak = 1,
-				PrevPeak2 = 2,
-				Carry = 3
-			};
 			struct RefSpec
 			{
 				const TdV2Plane* cleanPlane = nullptr;

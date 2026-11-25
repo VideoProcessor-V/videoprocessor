@@ -988,6 +988,46 @@ namespace TdV2
 		return out;
 	}
 
+	// Picture-only evidence supplied per unique frame (ZERO bitstream/encoder side data).
+	struct FrameRoleEvidence
+	{
+		uint64_t seq = 0;
+		double qualityScore = 0.0;        // 0..1 (1 = sharpest/cleanest)
+		double stepMean = 0.0;            // Q8.8-encoded into QualityPattern::Record
+		double stepP90 = 0.0;
+		double stepMax = 0.0;
+		uint16_t periodX = 0;
+		uint16_t periodY = 0;
+		double exactCopyFracPrev1 = 0.0;  // Fraction of cells matching N-1
+		double exactCopyFracPrev2 = 0.0;  // Fraction of cells matching N-2
+		bool isCut = false;               // External P4 / MotionValidity transition flag
+		bool isFade = false;              // External P4 fade flag
+		int sourceBits = 10;
+
+		static FrameRoleEvidence FromCodingGrid(
+			uint64_t seqId,
+			const CodingGridSummary& grid,
+			bool cutFlag = false,
+			bool fadeFlag = false,
+			int bits = 10)
+		{
+			FrameRoleEvidence ev;
+			ev.seq = seqId;
+			ev.qualityScore = grid.pictureScore;
+			ev.stepMean = grid.stepMean;
+			ev.stepP90 = grid.stepP90;
+			ev.stepMax = grid.stepMax;
+			ev.periodX = grid.detectedPeriodX;
+			ev.periodY = grid.detectedPeriodY;
+			ev.exactCopyFracPrev1 = grid.exactCopyFracPrev1;
+			ev.exactCopyFracPrev2 = grid.exactCopyFracPrev2;
+			ev.isCut = cutFlag;
+			ev.isFade = fadeFlag;
+			ev.sourceBits = bits;
+			return ev;
+		}
+	};
+
 	// Maintains running log-sharpness sum S_t = sum r_k with sliding-window median removed (Plan Phase 1)
 	// and converts into FrameRoleEvidence for TdV2FrameRoleDetector (preserving exact-copy & cut/fade handling).
 	class AlignedSharpnessTracker
@@ -1103,46 +1143,6 @@ namespace TdV2
 		}
 		return "unknown";
 	}
-
-	// Picture-only evidence supplied per unique frame (ZERO bitstream/encoder side data).
-	struct FrameRoleEvidence
-	{
-		uint64_t seq = 0;
-		double qualityScore = 0.0;        // 0..1 (1 = sharpest/cleanest)
-		double stepMean = 0.0;            // Q8.8-encoded into QualityPattern::Record
-		double stepP90 = 0.0;
-		double stepMax = 0.0;
-		uint16_t periodX = 0;
-		uint16_t periodY = 0;
-		double exactCopyFracPrev1 = 0.0;  // Fraction of cells matching N-1
-		double exactCopyFracPrev2 = 0.0;  // Fraction of cells matching N-2
-		bool isCut = false;               // External P4 / MotionValidity transition flag
-		bool isFade = false;              // External P4 fade flag
-		int sourceBits = 10;
-
-		static FrameRoleEvidence FromCodingGrid(
-			uint64_t seqId,
-			const CodingGridSummary& grid,
-			bool cutFlag = false,
-			bool fadeFlag = false,
-			int bits = 10)
-		{
-			FrameRoleEvidence ev;
-			ev.seq = seqId;
-			ev.qualityScore = grid.pictureScore;
-			ev.stepMean = grid.stepMean;
-			ev.stepP90 = grid.stepP90;
-			ev.stepMax = grid.stepMax;
-			ev.periodX = grid.detectedPeriodX;
-			ev.periodY = grid.detectedPeriodY;
-			ev.exactCopyFracPrev1 = grid.exactCopyFracPrev1;
-			ev.exactCopyFracPrev2 = grid.exactCopyFracPrev2;
-			ev.isCut = cutFlag;
-			ev.isFade = fadeFlag;
-			ev.sourceBits = bits;
-			return ev;
-		}
-	};
 
 	struct FrameRoleDecision
 	{

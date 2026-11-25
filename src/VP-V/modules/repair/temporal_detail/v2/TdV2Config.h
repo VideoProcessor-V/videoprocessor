@@ -75,6 +75,15 @@ namespace TdV2
 		return m == ResidualMode::Strict ? "strict" : "cell";
 	}
 
+	// Canonical reference slot role across luma/chroma CPU & GPU blend engines (CHR-HIGH-3 / UPG-HIGH-6).
+	enum class RefRole : uint8_t
+	{
+		PrevPeak = 0,
+		NextPeak = 1,
+		PrevPeak2 = 2,
+		Carry = 3
+	};
+
 	// Blind error-covariance estimator for c_j (refs/111 s3.2-3.4).
 	enum class VarianceEstimator : uint8_t
 	{

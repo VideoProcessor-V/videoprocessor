@@ -15,7 +15,7 @@
 #pragma once
 
 #include <VP-V/core/FallbackCatalog.h>
-#include <VP-V/core/VpvGpuPass.h>
+#include <VP-V/modules/repair/grain_split/GpuPassUtil.h>
 #include <VP-V/modules/repair/temporal_detail/v2/TdV2BlendMath.h>
 #include <VP-V/modules/repair/temporal_detail/v2/TdV2Gpu.h>
 #include <VP-V/modules/repair/temporal_detail/v2/TdV2Scheduler.h>
