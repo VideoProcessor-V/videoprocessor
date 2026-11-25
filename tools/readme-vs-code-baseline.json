@@ -1,0 +1,8 @@
+{
+ "drifts": [
+  "colour.appearance|readme-status|README status='placeholder' differs from MANIFEST status='built'",
+  "scaling.shared|readme-status|README status='draft' differs from MANIFEST status='placeholder'"
+ ],
+ "tool": "N8 readme-vs-code",
+ "total": 2
+}
