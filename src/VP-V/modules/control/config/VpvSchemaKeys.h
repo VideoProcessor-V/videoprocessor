@@ -233,7 +233,8 @@ namespace ProfileSchemaHooks
 			// Stage 8-2 / Q2-B3: adaptive downscale and hybrid upscaler keys.
 			if (key == "adaptive_downscale" || key == "adaptive_chroma_ssim" || key == "adaptive_grain_map" || key == "adaptive_upscale" || key == "adaptive_upscale_superres_scale") return V(IsChoice(value, { "on", "off" }));
 			if (key == "adaptive_upscale_w_base" || key == "upscale_sharp_antiring") return V(IsNumberInRange(value, 0.0, 1.0));
-			if (key == "upscale_route") return V(IsChoice(value, { "off", "rebased_only", "always_4k" })); if (key == "upscale_sharp") return V(IsChoice(value, { "lanczos3", "ewa_lanczossharp", "catmull_rom", "lanczos2", "lanczos4", "bicubic" })); if (key == "upscale_safe") return V(IsChoice(value, { "hermite", "lanczos3", "catmull_rom", "ewa_lanczossharp", "bicubic", "bilinear" }));
+			if (key == "upscale_route") return V(IsChoice(value, { "off", "rebased_only", "always_4k" }));
+			if (key == "upscale_sharp") return V(IsChoice(value, { "lanczos3", "ewa_lanczossharp", "catmull_rom", "lanczos2", "lanczos4", "bicubic" })); if (key == "upscale_safe") return V(IsChoice(value, { "hermite", "lanczos3", "catmull_rom", "ewa_lanczossharp", "bicubic", "bilinear" }));
 			// "polar": retired 2026-10-17 (runs as auto), still loaded.
 			if (key == "adaptive_faithful") return V(IsChoice(value, { "polar", "ortho", "auto" }));
 			if (key == "adaptive_w_base" || key == "adaptive_grain_floor" || key == "adaptive_grain_shadow_bias")

@@ -529,9 +529,9 @@ namespace AdaptiveDownscaleStage
 		const bool gamma = downscaleGamma && DownscaleLight::Downscales(sampled, light.targetCrop);
 		if (gamma)
 			params.disable_linear_scaling = true;
-		// G12: VP-V pathway default downscaler is Lanczos when downscaler=auto and quality!=fast
-		// (Original pathway leaves upstream hermite untouched).
-		if (light.vpvDefaultDownscaler)
+		// G12: VP-V pathway default downscaler is Lanczos when scaling.output runs, downscaler=auto,
+		// and quality!=fast (Original pathway or slot-off leaves upstream hermite untouched).
+		if (light.slotRuns && light.vpvDefaultDownscaler)
 			params.downscaler = &pl_filter_lanczos;
 		// 8b: both branches in one light domain: linear (no sigmoid) or gamma.
 		if (upscaleThisFrame && light.slotRuns)

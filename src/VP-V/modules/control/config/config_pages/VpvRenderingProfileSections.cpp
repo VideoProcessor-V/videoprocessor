@@ -2521,6 +2521,27 @@ namespace Vpv
             "the picture is scaled down from 2x in linear light; without a CNN the plain upscale is in gamma light "
             "(libplacebo upscales in linear light only through sigmoid, which is kept off because it clips "
             "above-white). Gamma: gamma light everywhere, like madVR."));
+        auto* upscaleRoute = addChoice(QStringLiteral("4K route pre-render upscale"),
+            QStringLiteral("upscale_route"), { QStringLiteral("off"), QStringLiteral("rebased_only"), QStringLiteral("always_4k") });
+        upscaleRoute->setToolTip(QStringLiteral(
+            "Pre-render 4K route upscaling (scaling.route_4k): off = bypassed straight to output scaling, "
+            "rebased_only = upscale only rebased frames, always_4k = upscale whenever target exceeds input."));
+        auto* upscaleSharp = addChoice(QStringLiteral("Sharp upscaler branch"),
+            QStringLiteral("upscale_sharp"), { QStringLiteral("lanczos3"), QStringLiteral("ewa_lanczossharp"),
+            QStringLiteral("catmull_rom"), QStringLiteral("lanczos2"), QStringLiteral("lanczos4"), QStringLiteral("bicubic") });
+        upscaleSharp->setToolTip(QStringLiteral(
+            "Resampling kernel for the sharp branch of the hybrid upscaler (default: lanczos3)."));
+        auto* upscaleSafe = addChoice(QStringLiteral("Alias-safe upscaler branch"),
+            QStringLiteral("upscale_safe"), { QStringLiteral("hermite"), QStringLiteral("lanczos3"),
+            QStringLiteral("catmull_rom"), QStringLiteral("ewa_lanczossharp"), QStringLiteral("bicubic"), QStringLiteral("bilinear") });
+        upscaleSafe->setToolTip(QStringLiteral(
+            "Resampling kernel for the alias-safe branch of the hybrid upscaler (default: hermite)."));
+        auto* upscaleSharpAntiring = addText(QStringLiteral("Sharp branch anti-ringing (0 to 1)"),
+            QStringLiteral("upscale_sharp_antiring"));
+        upscaleSharpAntiring->setValidator(new QDoubleValidator(0.0, 1.0, 2, upscaleSharpAntiring));
+        upscaleSharpAntiring->setPlaceholderText(QStringLiteral("0.5"));
+        upscaleSharpAntiring->setToolTip(QStringLiteral(
+            "Anti-ringing clamp strength for the sharp upscaler branch (default 0.5; 0 = off, 1 = full clamp)."));
         MarkGpuCost(form, upscaleOn, 2);
         {
             auto greyUpscale = [upscaleOn, upscaleWBase, upscaleSuperres, upscaleLight]()
