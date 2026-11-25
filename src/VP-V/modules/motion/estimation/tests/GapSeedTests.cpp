@@ -7,9 +7,12 @@
 #include "pch.h"
 #include <VP-V/tests/VpLutGpuTestSupport.h>
 #include <VP-V/modules/motion/estimation/GapSeed.h>
+#include <VP-V/modules/motion/estimation/global_model/MatcherGlobalD1.h>
 
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -227,6 +230,420 @@ namespace VideoProcessorTest
 			Assert::IsTrue(seeded.Estimate(pa.planes, pb.planes));
 			r.spentSeedUsedAgain = seeded.SearchSeedUsed();
 			return r;
+		}
+	};
+
+	TEST_CLASS(MatcherGlobalD1TextPinTests)
+	{
+	public:
+		TEST_METHOD(AllFourteenD1ShadersMatchPinnedFnv1aHashesAndInvariants)
+		{
+			using namespace VpMotion::MatcherGlobalD1;
+
+			// Anchor the FNV-1a 64-bit helper against standard reference vectors before pinning any shader text.
+			Assert::AreEqual(static_cast<uint64_t>(0xcbf29ce484222325ull), Fnv1a64(""), L"FNV-1a empty vector");
+			Assert::AreEqual(static_cast<uint64_t>(0xaf63dc4c8601ec8cull), Fnv1a64("a"), L"FNV-1a 'a' vector");
+			Assert::AreEqual(static_cast<uint64_t>(0x85944171f73967e8ull), Fnv1a64("foobar"), L"FNV-1a 'foobar' vector");
+
+			struct ShaderPin
+			{
+				const wchar_t* name;
+				const char* text;
+				size_t expectedBytes;
+				uint64_t expectedFnv1a;
+			};
+
+			// Pinned exact LF byte lengths and 64-bit FNV-1a hashes of all 14 D1 shaders moved in U10 C2
+			// (100% byte-identical to pre-move GLOBAL_* literals in DejudderWarp.cpp, including J#2 textureLod).
+			const ShaderPin kPins[] = {
+				{ L"kGlobalHeader",        kGlobalHeader,        1598u, 0x17a501efed77eb72ull },
+				{ L"kGlobalBody",          kGlobalBody,          1645u, 0x0b8c0d479fc80432ull },
+				{ L"kGlobalSumHeader",     kGlobalSumHeader,       51u, 0x2f3a2ec48067b836ull },
+				{ L"kGlobalL2Body",        kGlobalL2Body,         965u, 0x7ee2c658db228c76ull },
+				{ L"kGlobalPickHeader",    kGlobalPickHeader,     317u, 0xd01ff3eeb6fe373eull },
+				{ L"kGlobalPick2Body",     kGlobalPick2Body,      999u, 0xf5f131cbb976fe82ull },
+				{ L"kGlobalL1Body",        kGlobalL1Body,        1167u, 0xe371fc529cc369e2ull },
+				{ L"kGlobalPick1Body",     kGlobalPick1Body,      994u, 0xb67b5a8137f2bcc8ull },
+				{ L"kGlobalBothHeader",    kGlobalBothHeader,      51u, 0x2f3a2ec48067b836ull },
+				{ L"kGlobalBothL2Header",  kGlobalBothL2Header,   269u, 0x436464375b44a2d7ull },
+				{ L"kGlobalBothL2Body",    kGlobalBothL2Body,    1021u, 0x40870b534356f715ull },
+				{ L"kGlobalBothPick2Body", kGlobalBothPick2Body,  978u, 0x4200a76b88e38f73ull },
+				{ L"kGlobalBothL1Body",    kGlobalBothL1Body,    1600u, 0x74b446fe0fac90d0ull },
+				{ L"kGlobalBothPick1Body", kGlobalBothPick1Body, 1081u, 0xf54a48013e59081cull },
+			};
+			Assert::AreEqual(static_cast<size_t>(14u), sizeof(kPins) / sizeof(kPins[0]), L"all 14 D1 shader constants must be pinned");
+
+			for (const ShaderPin& pin : kPins)
+			{
+				Assert::IsNotNull(pin.text, pin.name);
+				Assert::IsNull(std::strchr(pin.text, '\r'), pin.name);
+				Assert::AreEqual(pin.expectedBytes, std::strlen(pin.text), pin.name);
+				Assert::AreEqual(pin.expectedFnv1a, Fnv1a64(pin.text), pin.name);
+			}
+
+			// Key structural invariants: J#2 explicit textureLod optimization in kGlobalBothL1Body
+			// and M2 second-candidate #ifdef GLOBAL_TWO guards in both pick-1 kernels.
+			const std::string bothL1(kGlobalBothL1Body);
+			Assert::IsTrue(bothL1.find("textureLod(l1_b, t, 0.0)") != std::string::npos,
+				L"kGlobalBothL1Body must preserve J#2 textureLod(l1_b, t, 0.0)");
+			Assert::IsTrue(bothL1.find("textureLod(l1_a, t, 0.0)") != std::string::npos,
+				L"kGlobalBothL1Body must preserve J#2 textureLod(l1_a, t, 0.0)");
+			Assert::IsTrue(bothL1.find("float fa = texelFetch(l1_a, p, 0).r") == std::string::npos,
+				L"kGlobalBothL1Body must not contain removed pre-J#2 unconditional texelFetch");
+			Assert::IsTrue(std::string(kGlobalPick1Body).find("#ifdef GLOBAL_TWO") != std::string::npos,
+				L"kGlobalPick1Body must preserve #ifdef GLOBAL_TWO");
+			Assert::IsTrue(std::string(kGlobalBothPick1Body).find("#ifdef GLOBAL_TWO") != std::string::npos,
+				L"kGlobalBothPick1Body must preserve #ifdef GLOBAL_TWO");
+
+			// Derived D1 search grid dimensions.
+			Assert::AreEqual(8, kL2RadiusTexels, L"kL2RadiusTexels");
+			Assert::AreEqual(17, kL2Candidates, L"kL2Candidates");
+			Assert::AreEqual(2 * kL2RadiusTexels + 1, kL2Candidates, L"kL2Candidates derivation");
+			Assert::AreEqual(4, kL1HalfStepRadius, L"kL1HalfStepRadius");
+			Assert::AreEqual(9, kL1Candidates, L"kL1Candidates");
+			Assert::AreEqual(2 * kL1HalfStepRadius + 1, kL1Candidates, L"kL1Candidates derivation");
+			Assert::AreEqual(16, kWorkgroupSide, L"kWorkgroupSide");
+
+			// Same-input negative control: mutating 1 single byte in a local copy of kGlobalBothL1Body
+			// ('0' -> '1' in textureLod(..., 0.0)) keeps byte length identical (defeating a length-only check)
+			// while strictly changing the FNV-1a hash (proving 1-byte shader drift is always detected).
+			std::string mutatedBothL1(kGlobalBothL1Body);
+			const size_t lodPos = mutatedBothL1.find("textureLod(l1_b, t, 0.0)");
+			Assert::IsTrue(lodPos != std::string::npos, L"locate textureLod(l1_b, t, 0.0)");
+			const size_t zeroPos = mutatedBothL1.find("0.0", lodPos);
+			Assert::IsTrue(zeroPos != std::string::npos && mutatedBothL1[zeroPos] == '0', L"locate '0' in 0.0");
+			mutatedBothL1[zeroPos] = '1';
+			Assert::AreEqual(static_cast<size_t>(1600u), mutatedBothL1.size(),
+				L"negative control keeps exact byte length so only FNV-1a detects the 1-byte drift");
+			const uint64_t mutatedHash = Fnv1a64(mutatedBothL1.c_str());
+			Assert::IsTrue(mutatedHash != 0x74b446fe0fac90d0ull,
+				L"1-byte mutation of kGlobalBothL1Body must change the FNV-1a hash");
+			Assert::AreEqual(static_cast<uint64_t>(0xe05e37492e792165ull), mutatedHash,
+				L"1-byte mutated hash matches independent offline computation");
+		}
+
+		TEST_METHOD(RunSingleAndRunBothRejectInvalidInputsVisiblyWithoutDispatching)
+		{
+			using namespace VpMotion::MatcherGlobalD1;
+
+			// Distinct non-null sentinel addresses (never dereferenced in CPU-only dispatch tests).
+			static const unsigned char kSentinelStorage[16] = {};
+			const pl_gpu sentinelGpu = reinterpret_cast<pl_gpu>(&kSentinelStorage[0]);
+			const pl_tex texFromL1 = reinterpret_cast<pl_tex>(&kSentinelStorage[1]);
+			const pl_tex texToL1 = reinterpret_cast<pl_tex>(&kSentinelStorage[2]);
+			const pl_tex texFromL2 = reinterpret_cast<pl_tex>(&kSentinelStorage[3]);
+			const pl_tex texToL2 = reinterpret_cast<pl_tex>(&kSentinelStorage[4]);
+			const pl_tex texOut0 = reinterpret_cast<pl_tex>(&kSentinelStorage[5]);
+			const pl_tex texOut1 = reinterpret_cast<pl_tex>(&kSentinelStorage[6]);
+			const pl_tex texSecond0 = reinterpret_cast<pl_tex>(&kSentinelStorage[7]);
+			const pl_tex texSecond1 = reinterpret_cast<pl_tex>(&kSentinelStorage[8]);
+			const pl_tex texSad2 = reinterpret_cast<pl_tex>(&kSentinelStorage[9]);
+			const pl_tex texSad1 = reinterpret_cast<pl_tex>(&kSentinelStorage[10]);
+			const pl_tex texPick = reinterpret_cast<pl_tex>(&kSentinelStorage[11]);
+
+			struct DispatchRecord
+			{
+				std::string description;
+				const char* header = nullptr;
+				const char* body = nullptr;
+				int numDescriptors = 0;
+				std::vector<std::string> descNames;
+				std::vector<pl_tex> descObjects;
+				std::vector<enum pl_desc_type> descTypes;
+				std::vector<enum pl_tex_sample_mode> descSampleModes;
+				int w = 0;
+				int h = 0;
+				int threadsX = 0;
+				int threadsY = 0;
+			};
+
+			int dispatchCount = 0;
+			std::vector<DispatchRecord> records;
+			int failOnCall = 0;   // 0 = never fail, N >= 1 = return false on Nth dispatch call
+
+			auto resetMock = [&](int failCall)
+			{
+				dispatchCount = 0;
+				records.clear();
+				failOnCall = failCall;
+			};
+
+			auto recordDescriptors = [](DispatchRecord& rec, const pl_shader_desc* descriptors, int numDescriptors)
+			{
+				rec.numDescriptors = numDescriptors;
+				for (int i = 0; i < numDescriptors; ++i)
+				{
+					rec.descNames.push_back(descriptors && descriptors[i].desc.name ? descriptors[i].desc.name : "");
+					rec.descObjects.push_back(descriptors ? static_cast<pl_tex>(descriptors[i].binding.object) : nullptr);
+					rec.descTypes.push_back(descriptors ? descriptors[i].desc.type : PL_DESC_INVALID);
+					rec.descSampleModes.push_back(descriptors ? descriptors[i].binding.sample_mode : PL_TEX_SAMPLE_NEAREST);
+				}
+			};
+
+			const DispatchFn countingDispatch = [&](const char* description, const char* header, const char* body,
+				const pl_shader_desc* descriptors, int numDescriptors,
+				const pl_shader_var*, int, int w, int h, int group) -> bool
+			{
+				++dispatchCount;
+				DispatchRecord rec;
+				rec.description = description ? description : "";
+				rec.header = header;
+				rec.body = body;
+				rec.w = w;
+				rec.h = h;
+				rec.threadsX = group;
+				rec.threadsY = group;
+				recordDescriptors(rec, descriptors, numDescriptors);
+				records.push_back(rec);
+				return failOnCall == 0 || dispatchCount != failOnCall;
+			};
+
+			const DispatchPerBlockFn countingPerBlock = [&](const char* description, const char* header, const char* body,
+				const pl_shader_desc* descriptors, int numDescriptors,
+				const pl_shader_var*, int, int w, int h, int threadsX, int threadsY) -> bool
+			{
+				++dispatchCount;
+				DispatchRecord rec;
+				rec.description = description ? description : "";
+				rec.header = header;
+				rec.body = body;
+				rec.w = w;
+				rec.h = h;
+				rec.threadsX = threadsX;
+				rec.threadsY = threadsY;
+				recordDescriptors(rec, descriptors, numDescriptors);
+				records.push_back(rec);
+				return failOnCall == 0 || dispatchCount != failOnCall;
+			};
+
+			// ScratchTextures default-initializes all caller-owned scratch pointers to nullptr.
+			const ScratchTextures defaultScratch{};
+			Assert::IsNull(defaultScratch.sad2, L"ScratchTextures::sad2 default nullptr");
+			Assert::IsNull(defaultScratch.sad1, L"ScratchTextures::sad1 default nullptr");
+			Assert::IsNull(defaultScratch.pick, L"ScratchTextures::pick default nullptr");
+
+			auto expectSingleReject = [&](const wchar_t* label, pl_gpu gpu, bool serialReference,
+				pl_tex fromL1, pl_tex toL1, pl_tex fromL2, pl_tex toL2, pl_tex out,
+				pl_tex sad2Init, pl_tex sad1Init, pl_tex pickInit,
+				const DispatchFn& disp, const DispatchPerBlockFn& dispBlock)
+			{
+				resetMock(0);
+				pl_tex sad2 = sad2Init, sad1 = sad1Init, pick = pickInit;
+				std::string error;
+				const bool ok = RunSingle(gpu, serialReference, fromL1, toL1, fromL2, toL2, out, nullptr,
+					sad2, sad1, pick, disp, dispBlock, error);
+				Assert::IsFalse(ok, label);
+				Assert::IsFalse(error.empty(), label);
+				Assert::AreEqual(0, dispatchCount, label);
+			};
+
+			auto expectBothReject = [&](const wchar_t* label, pl_gpu gpu,
+				pl_tex l1A, pl_tex l1B, pl_tex l2A, pl_tex l2B, pl_tex* outPtr,
+				pl_tex sad2Init, pl_tex sad1Init, pl_tex pickInit,
+				const DispatchPerBlockFn& dispBlock)
+			{
+				resetMock(0);
+				pl_tex sad2 = sad2Init, sad1 = sad1Init, pick = pickInit;
+				std::string error;
+				const bool ok = RunBoth(gpu, l1A, l1B, l2A, l2B, outPtr, nullptr,
+					sad2, sad1, pick, dispBlock, error);
+				Assert::IsFalse(ok, label);
+				Assert::IsFalse(error.empty(), label);
+				Assert::AreEqual(0, dispatchCount, label);
+			};
+
+			// ---- RunSingle negative controls (serial + parallel) ----
+			expectSingleReject(L"RunSingle serial: missing dispatch callback",
+				sentinelGpu, true, texFromL1, texToL1, texFromL2, texToL2, texOut0,
+				texSad2, texSad1, texPick, DispatchFn{}, countingPerBlock);
+			expectSingleReject(L"RunSingle serial: null fromL1",
+				sentinelGpu, true, nullptr, texToL1, texFromL2, texToL2, texOut0,
+				texSad2, texSad1, texPick, countingDispatch, countingPerBlock);
+			expectSingleReject(L"RunSingle serial: null toL1",
+				sentinelGpu, true, texFromL1, nullptr, texFromL2, texToL2, texOut0,
+				texSad2, texSad1, texPick, countingDispatch, countingPerBlock);
+			expectSingleReject(L"RunSingle serial: null fromL2",
+				sentinelGpu, true, texFromL1, texToL1, nullptr, texToL2, texOut0,
+				texSad2, texSad1, texPick, countingDispatch, countingPerBlock);
+			expectSingleReject(L"RunSingle serial: null toL2",
+				sentinelGpu, true, texFromL1, texToL1, texFromL2, nullptr, texOut0,
+				texSad2, texSad1, texPick, countingDispatch, countingPerBlock);
+			expectSingleReject(L"RunSingle serial: null out",
+				sentinelGpu, true, texFromL1, texToL1, texFromL2, texToL2, nullptr,
+				texSad2, texSad1, texPick, countingDispatch, countingPerBlock);
+
+			expectSingleReject(L"RunSingle parallel: missing dispatchPerBlock callback",
+				sentinelGpu, false, texFromL1, texToL1, texFromL2, texToL2, texOut0,
+				texSad2, texSad1, texPick, countingDispatch, DispatchPerBlockFn{});
+			expectSingleReject(L"RunSingle parallel: null gpu with all scratch textures null",
+				nullptr, false, texFromL1, texToL1, texFromL2, texToL2, texOut0,
+				nullptr, nullptr, nullptr, countingDispatch, countingPerBlock);
+			expectSingleReject(L"RunSingle parallel: null gpu with null sad2 scratch",
+				nullptr, false, texFromL1, texToL1, texFromL2, texToL2, texOut0,
+				nullptr, texSad1, texPick, countingDispatch, countingPerBlock);
+			expectSingleReject(L"RunSingle parallel: null gpu with null sad1 scratch",
+				nullptr, false, texFromL1, texToL1, texFromL2, texToL2, texOut0,
+				texSad2, nullptr, texPick, countingDispatch, countingPerBlock);
+			expectSingleReject(L"RunSingle parallel: null gpu with null pick scratch",
+				nullptr, false, texFromL1, texToL1, texFromL2, texToL2, texOut0,
+				texSad2, texSad1, nullptr, countingDispatch, countingPerBlock);
+			expectSingleReject(L"RunSingle parallel: null fromL1",
+				sentinelGpu, false, nullptr, texToL1, texFromL2, texToL2, texOut0,
+				texSad2, texSad1, texPick, countingDispatch, countingPerBlock);
+			expectSingleReject(L"RunSingle parallel: null toL1",
+				sentinelGpu, false, texFromL1, nullptr, texFromL2, texToL2, texOut0,
+				texSad2, texSad1, texPick, countingDispatch, countingPerBlock);
+			expectSingleReject(L"RunSingle parallel: null fromL2",
+				sentinelGpu, false, texFromL1, texToL1, nullptr, texToL2, texOut0,
+				texSad2, texSad1, texPick, countingDispatch, countingPerBlock);
+			expectSingleReject(L"RunSingle parallel: null toL2",
+				sentinelGpu, false, texFromL1, texToL1, texFromL2, nullptr, texOut0,
+				texSad2, texSad1, texPick, countingDispatch, countingPerBlock);
+			expectSingleReject(L"RunSingle parallel: null out",
+				sentinelGpu, false, texFromL1, texToL1, texFromL2, texToL2, nullptr,
+				texSad2, texSad1, texPick, countingDispatch, countingPerBlock);
+
+			// ---- RunBoth negative controls ----
+			pl_tex validOut[2] = { texOut0, texOut1 };
+			pl_tex nullOut0[2] = { nullptr, texOut1 };
+			pl_tex nullOut1[2] = { texOut0, nullptr };
+
+			expectBothReject(L"RunBoth: missing dispatchPerBlock callback",
+				sentinelGpu, texFromL1, texToL1, texFromL2, texToL2, validOut,
+				texSad2, texSad1, texPick, DispatchPerBlockFn{});
+			expectBothReject(L"RunBoth: null out array pointer",
+				sentinelGpu, texFromL1, texToL1, texFromL2, texToL2, nullptr,
+				texSad2, texSad1, texPick, countingPerBlock);
+			expectBothReject(L"RunBoth: null out[0]",
+				sentinelGpu, texFromL1, texToL1, texFromL2, texToL2, nullOut0,
+				texSad2, texSad1, texPick, countingPerBlock);
+			expectBothReject(L"RunBoth: null out[1]",
+				sentinelGpu, texFromL1, texToL1, texFromL2, texToL2, nullOut1,
+				texSad2, texSad1, texPick, countingPerBlock);
+			expectBothReject(L"RunBoth: null l1A",
+				sentinelGpu, nullptr, texToL1, texFromL2, texToL2, validOut,
+				texSad2, texSad1, texPick, countingPerBlock);
+			expectBothReject(L"RunBoth: null l1B",
+				sentinelGpu, texFromL1, nullptr, texFromL2, texToL2, validOut,
+				texSad2, texSad1, texPick, countingPerBlock);
+			expectBothReject(L"RunBoth: null l2A",
+				sentinelGpu, texFromL1, texToL1, nullptr, texToL2, validOut,
+				texSad2, texSad1, texPick, countingPerBlock);
+			expectBothReject(L"RunBoth: null l2B",
+				sentinelGpu, texFromL1, texToL1, texFromL2, nullptr, validOut,
+				texSad2, texSad1, texPick, countingPerBlock);
+			expectBothReject(L"RunBoth: null gpu with all scratch textures null",
+				nullptr, texFromL1, texToL1, texFromL2, texToL2, validOut,
+				nullptr, nullptr, nullptr, countingPerBlock);
+			expectBothReject(L"RunBoth: null gpu with null bothSad2 scratch",
+				nullptr, texFromL1, texToL1, texFromL2, texToL2, validOut,
+				nullptr, texSad1, texPick, countingPerBlock);
+			expectBothReject(L"RunBoth: null gpu with null bothSad1 scratch",
+				nullptr, texFromL1, texToL1, texFromL2, texToL2, validOut,
+				texSad2, nullptr, texPick, countingPerBlock);
+			expectBothReject(L"RunBoth: null gpu with null bothPick scratch",
+				nullptr, texFromL1, texToL1, texFromL2, texToL2, validOut,
+				texSad2, texSad1, nullptr, countingPerBlock);
+
+			// ---- RunSingle serial reference positive control + failure propagation ----
+			{
+				resetMock(0);
+				pl_tex sad2 = nullptr, sad1 = nullptr, pick = nullptr;
+				std::string error;
+				const bool ok = RunSingle(sentinelGpu, true, texFromL1, texToL1, texFromL2, texToL2, texOut0, nullptr,
+					sad2, sad1, pick, countingDispatch, DispatchPerBlockFn{}, error);
+				Assert::IsTrue(ok, L"RunSingle serial reference succeeds with valid sentinels and mock DispatchFn");
+				Assert::AreEqual(1, dispatchCount, L"serial reference dispatches exactly once");
+				Assert::AreEqual(static_cast<size_t>(1u), records.size());
+				const DispatchRecord& rec = records[0];
+				Assert::AreEqual(std::string("VideoProcessor de-judder: global motion (D1, serial reference)"),
+					rec.description, L"serial reference pass label");
+				Assert::IsTrue(rec.header == kGlobalHeader, L"serial reference dispatches exact kGlobalHeader pointer");
+				Assert::IsTrue(rec.body == kGlobalBody, L"serial reference dispatches exact kGlobalBody pointer");
+				Assert::AreEqual(5, rec.numDescriptors, L"serial reference binds 5 descriptors");
+				Assert::AreEqual(std::string("from_l1"), rec.descNames[0]);
+				Assert::AreEqual(std::string("to_l1"), rec.descNames[1]);
+				Assert::AreEqual(std::string("from_l2"), rec.descNames[2]);
+				Assert::AreEqual(std::string("to_l2"), rec.descNames[3]);
+				Assert::AreEqual(std::string("dst"), rec.descNames[4]);
+				Assert::IsTrue(rec.descObjects[0] == texFromL1, L"descriptor 0 object == fromL1");
+				Assert::IsTrue(rec.descObjects[1] == texToL1, L"descriptor 1 object == toL1");
+				Assert::IsTrue(rec.descObjects[2] == texFromL2, L"descriptor 2 object == fromL2");
+				Assert::IsTrue(rec.descObjects[3] == texToL2, L"descriptor 3 object == toL2");
+				Assert::IsTrue(rec.descObjects[4] == texOut0, L"descriptor 4 object == out");
+				Assert::IsTrue(rec.descTypes[0] == PL_DESC_SAMPLED_TEX && rec.descSampleModes[0] == PL_TEX_SAMPLE_NEAREST);
+				Assert::IsTrue(rec.descTypes[1] == PL_DESC_SAMPLED_TEX && rec.descSampleModes[1] == PL_TEX_SAMPLE_LINEAR);
+				Assert::IsTrue(rec.descTypes[2] == PL_DESC_SAMPLED_TEX && rec.descSampleModes[2] == PL_TEX_SAMPLE_NEAREST);
+				Assert::IsTrue(rec.descTypes[3] == PL_DESC_SAMPLED_TEX && rec.descSampleModes[3] == PL_TEX_SAMPLE_NEAREST);
+				Assert::IsTrue(rec.descTypes[4] == PL_DESC_STORAGE_IMG);
+				Assert::AreEqual(kWorkgroupSide, rec.w);
+				Assert::AreEqual(kWorkgroupSide, rec.h);
+				Assert::AreEqual(kWorkgroupSide, rec.threadsX);
+
+				// Failure propagation when DispatchFn returns false.
+				resetMock(1);
+				error.clear();
+				const bool failOk = RunSingle(sentinelGpu, true, texFromL1, texToL1, texFromL2, texToL2, texOut0, nullptr,
+					sad2, sad1, pick, countingDispatch, DispatchPerBlockFn{}, error);
+				Assert::IsFalse(failOk, L"RunSingle serial reference must propagate false from DispatchFn");
+				Assert::AreEqual(1, dispatchCount, L"failed DispatchFn was invoked exactly once");
+			}
+
+			// ---- RunSingle parallel & RunBoth positive dispatch wiring + mid-chain failure propagation ----
+			{
+				resetMock(0);
+				pl_tex sad2 = texSad2, sad1 = texSad1, pick = texPick;
+				std::string error;
+				const bool okSingle = RunSingle(sentinelGpu, false, texFromL1, texToL1, texFromL2, texToL2, texOut0, texSecond0,
+					sad2, sad1, pick, DispatchFn{}, countingPerBlock, error);
+				Assert::IsTrue(okSingle, L"RunSingle parallel succeeds with pre-populated scratch sentinels");
+				Assert::AreEqual(4, dispatchCount, L"RunSingle parallel dispatches all 4 D1 stages");
+				Assert::IsTrue(records[0].body == kGlobalL2Body && records[0].w == kL2Candidates && records[0].h == kL2Candidates);
+				Assert::IsTrue(records[1].body == kGlobalPick2Body && records[1].w == 1 && records[1].h == 1);
+				Assert::IsTrue(records[2].body == kGlobalL1Body && records[2].w == kL1Candidates && records[2].h == kL1Candidates);
+				Assert::IsTrue(records[3].body == kGlobalPick1Body && records[3].numDescriptors == 4);
+				Assert::IsTrue(std::string(records[3].header).find("#define GLOBAL_TWO 1") != std::string::npos,
+					L"RunSingle parallel enables GLOBAL_TWO when second != nullptr");
+
+				resetMock(2);
+				const bool failSingleMid = RunSingle(sentinelGpu, false, texFromL1, texToL1, texFromL2, texToL2, texOut0, nullptr,
+					sad2, sad1, pick, DispatchFn{}, countingPerBlock, error);
+				Assert::IsFalse(failSingleMid, L"RunSingle parallel propagates stage-2 dispatch failure");
+				Assert::AreEqual(2, dispatchCount, L"RunSingle parallel stops dispatching after stage-2 failure");
+
+				resetMock(0);
+				pl_tex secondBoth[2] = { texSecond0, texSecond1 };
+				const bool okBoth = RunBoth(sentinelGpu, texFromL1, texToL1, texFromL2, texToL2, validOut, secondBoth,
+					sad2, sad1, pick, countingPerBlock, error);
+				Assert::IsTrue(okBoth, L"RunBoth succeeds with pre-populated scratch sentinels");
+				Assert::AreEqual(4, dispatchCount, L"RunBoth dispatches all 4 bidirectional D1 stages");
+				Assert::IsTrue(records[0].body == kGlobalBothL2Body && records[0].w == 2 * kL2Candidates && records[0].h == kL2Candidates);
+				Assert::IsTrue(records[1].body == kGlobalBothPick2Body && records[1].w == 2 && records[1].h == 1);
+				Assert::IsTrue(records[2].body == kGlobalBothL1Body && records[2].w == 2 * kL1Candidates && records[2].h == kL1Candidates);
+				Assert::IsTrue(records[3].body == kGlobalBothPick1Body && records[3].numDescriptors == 6);
+				Assert::IsTrue(std::string(records[3].header).find("#define GLOBAL_TWO 1") != std::string::npos,
+					L"RunBoth enables GLOBAL_TWO when second[0] and second[1] are non-null");
+
+				resetMock(2);
+				const bool failBothMid = RunBoth(sentinelGpu, texFromL1, texToL1, texFromL2, texToL2, validOut, nullptr,
+					sad2, sad1, pick, countingPerBlock, error);
+				Assert::IsFalse(failBothMid, L"RunBoth propagates stage-2 dispatch failure");
+				Assert::AreEqual(2, dispatchCount, L"RunBoth stops dispatching after stage-2 failure");
+			}
+		}
+
+	private:
+		static uint64_t Fnv1a64(const char* text)
+		{
+			uint64_t h = 0xcbf29ce484222325ull;
+			for (const unsigned char* p = reinterpret_cast<const unsigned char*>(text); *p != 0; ++p)
+			{
+				if (*p == '\r')
+					continue;
+				h ^= static_cast<uint64_t>(*p);
+				h *= 0x100000001b3ull;
+			}
+			return h;
 		}
 	};
 }
