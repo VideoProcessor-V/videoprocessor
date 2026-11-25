@@ -363,8 +363,7 @@ namespace Vpv
 				column->addWidget(magewellRecover);
 			}
 			auto* magewellNote = Note(kit, QStringLiteral(
-				"Original pathway: switching this off is PENDING (it sits inside Bill's Magewell capture code; the change "
-				"waits on the owner), so for now it still applies on Original too. Read when VideoProcessor starts."));
+				"Original pathway: forced off (Original matches Bill's Magewell capture behaviour). Read when VideoProcessor starts."));
 			magewellNote->setObjectName(QStringLiteral("vpv.both.magewell_recovery.note"));
 			column->addWidget(magewellNote);
 			addCard(cards, kit, QStringLiteral("capture_bridges"), QStringLiteral("Capture & Signal Bridges"),
