@@ -1,18 +1,10 @@
 // Copyright(C) 2026 VP-V contributors
 // SPDX-License-Identifier: GPL-3.0-only
 //
-// Camera link (K9-1, B3): the P9 producer (kP9CameraSmoothed). Smooths P7 camera records over a symmetric
-// window N +- k where k = min(kMaxCameraLead, laneLead) is derived from the measured queue depth / lane lead
-// (never a fixed rate or depth literal).
-//   * At effective lead 0 (queue depth / lane lead 0), consumers receive the causal P7 record with
-//     smoothed = false and the visible status line "camera: causal (queue short)".
-//   * When effective lead > 0 but the look-ahead neighbours N+1..N+k have not arrived yet (window short),
-//     consumers also receive the causal P7 record visibly (never blocks, never invents future frames).
-//   * Cuts, flashes, and resync / rebase generation boundaries break the smoothing window cleanly
-//     (CameraModel::FixedLagSmoother).
-//   * Also provides the 256-byte POD codec (EncodeSmoothedPod / DecodeSmoothedPod) and slot publish helper
-//     for the declared skeleton product kP9CameraSmoothed (core/Products.h: p9.size.fixedBytes = 256).
-// Pure C++14, deterministic, thread-safe (internal mutex guards the smoother window and record ring).
+// Camera link (K9-1, B3 / L-B4-P9-FILL): P9 producer (kP9CameraSmoothed). Smooths P7 camera records over
+// N +- k (k = min(kMaxCameraLead, laneLead)) via FixedLagSmoother; causal P7 fallback when queue/window is short.
+// Provides 256-byte POD codec (EncodeSmoothedPod/DecodeSmoothedPod), SlotTable publisher, and kP9CameraSmoothed CPU owner fill.
+// Pure C++14, deterministic, thread-safe.
 #pragma once
 
 #include "CameraRecordPool.h"
@@ -34,8 +26,37 @@
 #include <string>
 #include <vector>
 
+namespace VpSkeleton
+{
+	struct OwnerFill;
+}
+namespace Vpv
+{
+	namespace Skeleton
+	{
+		class IExternalDemand;
+	}
+}
+
 namespace CameraLink
 {
+	extern const char* const kP9OwnerUnit;
+	struct P9OwnerCounters
+	{
+		std::atomic<uint64_t> fills;
+		std::atomic<uint64_t> smoothed;
+		std::atomic<uint64_t> causalFallback;
+		std::atomic<uint64_t> declines;
+		P9OwnerCounters();
+	};
+	VpSkeleton::OwnerFill MakeP9OwnerFill();
+	VpSkeleton::OwnerFill MakeP9OwnerFill(int laneLead);
+	VpSkeleton::OwnerFill MakeP9OwnerFill(int laneLead, P9OwnerCounters* counters);
+	bool RegisterP9OwnerFill();
+	bool RegisterP9OwnerFill(Vpv::Skeleton::IExternalDemand* demand);
+	bool RegisterP9OwnerFill(Vpv::Skeleton::IExternalDemand* demand, int laneLead, P9OwnerCounters* counters);
+	void RegisterP9OwnerModule();
+
 	// Visible reduced-mode status line and FallbackCatalog id when P9 runs causally because the queue is short.
 	constexpr const char* kCausalShortQueueText = "camera: causal (queue short)";
 	constexpr const char* kIdSmoothedCausal = "camera.smoothed.causal";

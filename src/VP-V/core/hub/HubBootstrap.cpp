@@ -18,6 +18,7 @@
 #include <VP-V/modules/input/queue_timing/IngressPolicy.h>
 #include <VP-V/modules/input/signal/ResyncExtension.h>
 #include <VP-V/modules/motion/estimation/global_model/link/CameraExtension.h>
+#include <VP-V/modules/motion/estimation/global_model/link/CameraSmoother.h>
 #include <VP-V/modules/motion/estimation/P2CpuForm.h>
 #include <VP-V/modules/motion/estimation/VectorEngineExtension.h>
 #include <VP-V/modules/motion/consumers/DejudderExtension.h>
@@ -63,6 +64,7 @@ namespace
 		Vpv::FrameAnalysis::RegisterP1GpuModule();   // L-B4 (BBP-B B2): kP1HalfLuma GPU owner fill, the matcher pyramid variant
 		Vpv::FrameAnalysis::RegisterP1CpuModule();   // D3 / FIX3-D6: zero-wait no-lane kP1HalfLuma CPU owner fill (shadowed when analysis_lane is ON)
 		Vpv::Camera::RegisterCameraExtension();
+		CameraLink::RegisterP9OwnerModule();   // L-B4-P9-FILL: kP9CameraSmoothed CPU owner fill fed from P7 slots
 		// The de-judder / per-refresh timeline (M2 P5b): after the vector engine and the camera link, before the
 		// entrance and core segments (doc 59 2.2 list order); its views, PlanOutputs and the QueueFlush steering reset.
 		VpMotion::RegisterDejudderExtension();
