@@ -1167,8 +1167,7 @@ namespace FallbackCatalog
 			// this frame (an input product was unavailable): readers act as without a focus map (temporal detail keeps its classical form).
 			{ "product.focus_map", "focus map unavailable for this frame (an input product was not served): readers act as without a focus map" },
 		};
-		if (count)
-			*count = sizeof(kEntries) / sizeof(kEntries[0]);
+		if (count) *count = sizeof(kEntries) / sizeof(kEntries[0]);
 		return kEntries;
 	}
 	inline const ProductEntry* FindProductEntry(const char* id)
@@ -1176,8 +1175,7 @@ namespace FallbackCatalog
 		size_t n = 0;
 		const ProductEntry* e = ProductEntries(&n);
 		for (size_t i = 0; i < n; ++i)
-			if (std::string(e[i].id) == id)
-				return &e[i];
+			if (std::string(e[i].id) == id) return &e[i];
 		return nullptr;
 	}
 	// ---- input.capture: the capture extension's renderer binding (M2 P10) ------------------------
@@ -1186,8 +1184,7 @@ namespace FallbackCatalog
 	// CPU formatters and the render upload run instead.
 	inline Decision CaptureUnbound(bool unbound)
 	{
-		if (!unbound)
-			return Released("capture extension");
+		if (!unbound) return Released("capture extension");
 		return Engaged("capture extension", "capture routes off for this renderer (no extension slot): the CPU formatters "
 			"and the render upload");
 	}
