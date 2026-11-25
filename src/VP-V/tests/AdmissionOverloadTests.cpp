@@ -1096,5 +1096,35 @@ namespace AdmissionOverloadTest
 			Assert::IsTrue(back.back() == OverloadStep::None);
 			Assert::AreEqual(uint8_t(2), a.State().tdTier, L"TD back at its full tier");
 		}
+
+		// N3 catalog coverage: every W2-3 FallbackCatalog entry has a non-empty plain-text notice sentence and engages/releases cleanly.
+		TEST_METHOD(FallbackCatalogW23EntriesHavePlainTextAndSync)
+		{
+			FallbackStatus::Registry reg;
+			const char* ids[] = { "DV deband", "nvof temporal hints", "skeleton_tap_source", "motion_field_ahead", "vector producer behind" };
+			for (const char* id : ids)
+				Assert::IsFalse(std::string(FallbackPlainText::Sentence(id)).empty(), L"plain-text notice sentence must exist");
+
+			Assert::IsTrue(FallbackCatalog::Sync(reg, FallbackCatalog::DvPostDecodeDeband(true, "test-reason")));
+			Assert::IsTrue(reg.Heading().find("DV deband") != std::string::npos);
+			Assert::IsTrue(FallbackCatalog::Sync(reg, FallbackCatalog::DvPostDecodeDeband(false)));
+
+			Assert::IsTrue(FallbackCatalog::Sync(reg, FallbackCatalog::NvofTemporalHints(true, false, false, true)));
+			Assert::IsTrue(reg.Heading().find("nvof temporal hints") != std::string::npos);
+			Assert::IsTrue(FallbackCatalog::Sync(reg, FallbackCatalog::NvofTemporalHints(false, true, false, true)));
+
+			Assert::IsTrue(FallbackCatalog::Sync(reg, FallbackCatalog::SkeletonTapSource("tap-fallback")));
+			Assert::IsTrue(reg.Heading().find("skeleton_tap_source") != std::string::npos);
+			Assert::IsTrue(FallbackCatalog::Sync(reg, FallbackCatalog::SkeletonTapSource("")));
+
+			Assert::IsTrue(FallbackCatalog::Sync(reg, FallbackCatalog::MotionFieldAhead(true, "overwritten")));
+			Assert::IsTrue(reg.Heading().find("motion_field_ahead") != std::string::npos);
+			Assert::IsTrue(FallbackCatalog::Sync(reg, FallbackCatalog::MotionFieldAhead(false)));
+
+			Assert::IsTrue(FallbackCatalog::Sync(reg, FallbackCatalog::VectorProducerBehind(true, true, 25.0, 16.6, 2)));
+			Assert::IsTrue(reg.Heading().find("vector producer behind") != std::string::npos);
+			Assert::IsTrue(FallbackCatalog::Sync(reg, FallbackCatalog::VectorProducerBehind(true, false, 10.0, 16.6, 0)));
+			Assert::AreEqual(std::string("Fallbacks engaged: none"), reg.Heading());
+		}
 	};
 }
