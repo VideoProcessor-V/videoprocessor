@@ -78,6 +78,14 @@ namespace VideoProcessorTest
 			~CachesResetGuard() { CoreSegmentCaches::Instance().ResetForTesting(); }
 		};
 
+		// RAII reset scope for ExtensionHub modules/hosts (entry + exit) so stack-allocated fake
+		// GPU tags are never fanned out to leftover GPU-aware modules from earlier tests.
+		struct HubModulesResetGuard
+		{
+			HubModulesResetGuard() { Vpv::Hub::ExtensionHub::Instance().ResetModulesForTesting(); }
+			~HubModulesResetGuard() { Vpv::Hub::ExtensionHub::Instance().ResetModulesForTesting(); }
+		};
+
 		// RAII scope ensuring a host notified via ExtensionHub::OnLifecycle(GpuCreated) is cleanly released.
 		struct HubHostReleaseGuard
 		{
@@ -257,22 +265,27 @@ namespace VideoProcessorTest
 				L"Float32 FBO probe must run exactly once per GPU lifecycle");
 			Assert::IsTrue(g_lastProbedGpu.load(std::memory_order_relaxed) == gpuA);
 
-			// In-test negative control: uncached direct probe invoked 5 times on the exact same gpuA runs 5 times.
-			int uncachedCalls = 0;
+			// In-test negative control: flip probe result mid-lifecycle and query uncached null-host path
+			// across 5 frames on the exact same gpuA -> probe runs all 5 times and observes false, while
+			// cached (host, gpuA) continues returning true with 0 extra probe calls.
+			g_f32ProbeResult.store(false, std::memory_order_relaxed);
 			for (int i = 0; i < 5; ++i)
-			{
-				const bool r = g_f32ProbeResult.load(std::memory_order_relaxed);
-				++uncachedCalls;
-				Assert::IsTrue(r);
-			}
-			Assert::AreEqual(5, uncachedCalls, L"negative control: uncached direct probe executes on every frame");
+				Assert::IsFalse(caches.GpuSupportsFloat32Fbo(nullptr, gpuA, &CountingMockFloat32Probe),
+					L"negative control: uncached null-host path must re-probe and observe mid-lifecycle false");
+			Assert::AreEqual(6, g_f32ProbeCalls.load(std::memory_order_relaxed),
+				L"negative control: uncached null-host path must invoke probe on every frame (1 cached + 5 uncached = 6)");
+			Assert::IsTrue(caches.GpuSupportsFloat32Fbo(host, gpuA, &CountingMockFloat32Probe),
+				L"cached (host, gpuA) entry must still return true after mid-lifecycle probe flip");
+			Assert::AreEqual(6, g_f32ProbeCalls.load(std::memory_order_relaxed),
+				L"cached (host, gpuA) query must incur 0 additional probe calls");
+			g_f32ProbeResult.store(true, std::memory_order_relaxed);
 
 			// gpu == nullptr returns false without invoking probe and without poisoning cached gpuA state.
 			Assert::IsFalse(caches.GpuSupportsFloat32Fbo(host, nullptr, &CountingMockFloat32Probe));
-			Assert::AreEqual(1, g_f32ProbeCalls.load(std::memory_order_relaxed));
+			Assert::AreEqual(6, g_f32ProbeCalls.load(std::memory_order_relaxed));
 			Assert::IsTrue(caches.GpuSupportsFloat32Fbo(host, gpuA, &CountingMockFloat32Probe),
 				L"nullptr query must not poison cached gpuA entry");
-			Assert::AreEqual(1, g_f32ProbeCalls.load(std::memory_order_relaxed));
+			Assert::AreEqual(6, g_f32ProbeCalls.load(std::memory_order_relaxed));
 
 			// Destroy and recreate device at the EXACT SAME pointer address gpuA with flipped capability (true -> false).
 			caches.OnGpuReleased(host);
@@ -283,7 +296,7 @@ namespace VideoProcessorTest
 			caches.OnGpuCreated(host, gpuA);
 			Assert::IsFalse(caches.GpuSupportsFloat32Fbo(host, gpuA, &CountingMockFloat32Probe),
 				L"recreated device at same pointer address must re-probe and never leak stale true");
-			Assert::AreEqual(2, g_f32ProbeCalls.load(std::memory_order_relaxed));
+			Assert::AreEqual(7, g_f32ProbeCalls.load(std::memory_order_relaxed));
 
 			// In-place OnGpuCreated without OnGpuReleased (same address) also bumps epoch and invalidates cache.
 			g_f32ProbeResult.store(true, std::memory_order_relaxed);
@@ -292,39 +305,43 @@ namespace VideoProcessorTest
 			Assert::IsTrue(caches.GpuEpochForTesting(host) > epochBefore);
 			Assert::IsTrue(caches.GpuSupportsFloat32Fbo(host, gpuA, &CountingMockFloat32Probe),
 				L"epoch bump on same-address OnGpuCreated must re-probe");
-			Assert::AreEqual(3, g_f32ProbeCalls.load(std::memory_order_relaxed));
+			Assert::AreEqual(8, g_f32ProbeCalls.load(std::memory_order_relaxed));
 
 			// End-to-end ExtensionHub::OnLifecycle driving CoreSegmentCaches::Instance() (GpuCreated -> GpuReleased -> GpuCreated).
-			const int hubHostTag = 2;
-			const int gpuTagB = 3;
-			const void* const hubHost = &hubHostTag;
-			const void* const gpuB = &gpuTagB;
-			HubHostReleaseGuard hubGuard(hubHost);
+			// Reset ExtensionHub modules on entry and exit so &gpuTagB (stack tag) is never fanned out to leftover GPU-aware modules.
+			{
+				HubModulesResetGuard hubModulesGuard;
+				const int hubHostTag = 2;
+				const int gpuTagB = 3;
+				const void* const hubHost = &hubHostTag;
+				const void* const gpuB = &gpuTagB;
+				HubHostReleaseGuard hubGuard(hubHost);
 
-			g_f32ProbeResult.store(true, std::memory_order_relaxed);
-			RE::LifecycleFacts created;
-			created.kind = RE::Lifecycle::GpuCreated;
-			created.host = hubHost;
-			created.gpu = const_cast<void*>(gpuB);
-			Vpv::Hub::ExtensionHub::Instance().OnLifecycle(created);
+				g_f32ProbeResult.store(true, std::memory_order_relaxed);
+				RE::LifecycleFacts created;
+				created.kind = RE::Lifecycle::GpuCreated;
+				created.host = hubHost;
+				created.gpu = const_cast<void*>(gpuB);
+				Vpv::Hub::ExtensionHub::Instance().OnLifecycle(created);
 
-			Assert::IsTrue(caches.GpuSupportsFloat32Fbo(hubHost, gpuB, &CountingMockFloat32Probe));
-			Assert::AreEqual(4, g_f32ProbeCalls.load(std::memory_order_relaxed));
-			g_f32ProbeResult.store(false, std::memory_order_relaxed);
-			Assert::IsTrue(caches.GpuSupportsFloat32Fbo(hubHost, gpuB, &CountingMockFloat32Probe),
-				L"cached true holds while ExtensionHub GPU lifecycle is active");
-			Assert::AreEqual(4, g_f32ProbeCalls.load(std::memory_order_relaxed));
+				Assert::IsTrue(caches.GpuSupportsFloat32Fbo(hubHost, gpuB, &CountingMockFloat32Probe));
+				Assert::AreEqual(9, g_f32ProbeCalls.load(std::memory_order_relaxed));
+				g_f32ProbeResult.store(false, std::memory_order_relaxed);
+				Assert::IsTrue(caches.GpuSupportsFloat32Fbo(hubHost, gpuB, &CountingMockFloat32Probe),
+					L"cached true holds while ExtensionHub GPU lifecycle is active");
+				Assert::AreEqual(9, g_f32ProbeCalls.load(std::memory_order_relaxed));
 
-			RE::LifecycleFacts released;
-			released.kind = RE::Lifecycle::GpuReleased;
-			released.host = hubHost;
-			Vpv::Hub::ExtensionHub::Instance().OnLifecycle(released);
-			Assert::AreEqual(uint64_t(0), caches.GpuEpochForTesting(hubHost));
+				RE::LifecycleFacts released;
+				released.kind = RE::Lifecycle::GpuReleased;
+				released.host = hubHost;
+				Vpv::Hub::ExtensionHub::Instance().OnLifecycle(released);
+				Assert::AreEqual(uint64_t(0), caches.GpuEpochForTesting(hubHost));
 
-			Vpv::Hub::ExtensionHub::Instance().OnLifecycle(created);
-			Assert::IsFalse(caches.GpuSupportsFloat32Fbo(hubHost, gpuB, &CountingMockFloat32Probe),
-				L"ExtensionHub GpuReleased + GpuCreated must reset CoreSegmentCaches and re-probe");
-			Assert::AreEqual(5, g_f32ProbeCalls.load(std::memory_order_relaxed));
+				Vpv::Hub::ExtensionHub::Instance().OnLifecycle(created);
+				Assert::IsFalse(caches.GpuSupportsFloat32Fbo(hubHost, gpuB, &CountingMockFloat32Probe),
+					L"ExtensionHub GpuReleased + GpuCreated must reset CoreSegmentCaches and re-probe");
+				Assert::AreEqual(10, g_f32ProbeCalls.load(std::memory_order_relaxed));
+			}
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(WarpGpuFloat32FboMatchesDirectProbeAcrossDeviceRecreate)
@@ -353,14 +370,14 @@ namespace VideoProcessorTest
 			Assert::AreEqual(1, g_warpProbeCalls.load(std::memory_order_relaxed),
 				L"WARP float32 FBO probe must execute exactly once across 4 frames");
 
-			// In-test negative control: direct uncached pl_find_fmt probe across 4 frames executes 4 probes.
-			int directProbes = 0;
+			// In-test negative control: uncached null-host bypass through CoreSegmentCaches across 4 frames on the exact same gpu1 runs 4 probes.
 			for (int frame = 0; frame < 4; ++frame)
 			{
-				Assert::AreEqual(expected1, DirectFloat32FboQuery(gpu1));
-				++directProbes;
+				const bool got = caches.GpuSupportsFloat32Fbo(nullptr, gpu1, &CountingWarpFloat32Probe);
+				Assert::AreEqual(expected1, got, L"negative control: uncached null-host bypass must match direct pl_find_fmt");
 			}
-			Assert::AreEqual(4, directProbes, L"negative control: uncached pl_find_fmt runs on every frame");
+			Assert::AreEqual(5, g_warpProbeCalls.load(std::memory_order_relaxed),
+				L"negative control: uncached null-host bypass runs probe on every frame (1 cached + 4 uncached = 5)");
 
 			// Destroy and cleanly recreate the WARP device with OnGpuReleased -> OnGpuCreated.
 			caches.OnGpuReleased(host);
@@ -376,8 +393,8 @@ namespace VideoProcessorTest
 				const bool got = caches.GpuSupportsFloat32Fbo(host, gpu2, &CountingWarpFloat32Probe);
 				Assert::AreEqual(expected2, got, L"recreated WARP device must match fresh direct pl_find_fmt");
 			}
-			Assert::AreEqual(2, g_warpProbeCalls.load(std::memory_order_relaxed),
-				L"recreated WARP device must re-probe exactly once");
+			Assert::AreEqual(6, g_warpProbeCalls.load(std::memory_order_relaxed),
+				L"recreated WARP device must re-probe exactly once (1 cached + 4 uncached + 1 recreated = 6)");
 
 			caches.OnGpuReleased(host);
 			dev.Destroy();

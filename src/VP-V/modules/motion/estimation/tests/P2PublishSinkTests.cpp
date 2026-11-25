@@ -134,7 +134,37 @@ namespace P2PublishSinkTestsNs
 				bool allowObserverExit = false;
 				bool observerFinished = false;
 				std::atomic<bool> clearReturned{ false };
+				std::atomic<bool> publishOk{ false };
 				std::atomic<int> callCount{ 0 };
+				std::thread backThread;
+				std::thread teardownThread;
+
+				// RAII unwind guard: unblocks the observer and joins both worker threads on any assertion failure
+				// so a thrown CppUnitTest assert never triggers std::terminate() on joinable std::thread objects.
+				struct ThreadDrainGuard
+				{
+					std::mutex& mu;
+					std::condition_variable& cv;
+					bool& allowExit;
+					std::thread& teardown;
+					std::thread& back;
+
+					ThreadDrainGuard(std::mutex& m, std::condition_variable& c, bool& allow, std::thread& td, std::thread& bk)
+						: mu(m), cv(c), allowExit(allow), teardown(td), back(bk) {}
+
+					~ThreadDrainGuard()
+					{
+						{
+							std::lock_guard<std::mutex> lock(mu);
+							allowExit = true;
+						}
+						cv.notify_all();
+						if (teardown.joinable())
+							teardown.join();
+						if (back.joinable())
+							back.join();
+					}
+				} drainGuard(mu, cv, allowObserverExit, teardownThread, backThread);
 
 				engine.SetP2PublishSink([&](const VpMotion::P2Published&) {
 					callCount.fetch_add(1, std::memory_order_relaxed);
@@ -149,8 +179,9 @@ namespace P2PublishSinkTestsNs
 				});
 
 				const uint64_t gen = engine.p2Slot->Generation();
-				std::thread backThread([&]() {
-					Assert::IsTrue(engine.p2Slot->Publish(1, 2, gen, FlowWithGlobal(true, 0.1f, 1.0f)));
+				backThread = std::thread([&]() {
+					publishOk.store(engine.p2Slot->Publish(1, 2, gen, FlowWithGlobal(true, 0.1f, 1.0f)),
+						std::memory_order_release);
 				});
 
 				// Wait until BACK thread is genuinely inside the sink observer.
@@ -161,7 +192,7 @@ namespace P2PublishSinkTestsNs
 				}
 
 				// Launch teardown thread calling SetP2PublishSink({}) while observer is blocked in flight.
-				std::thread teardownThread([&]() {
+				teardownThread = std::thread([&]() {
 					engine.SetP2PublishSink({});
 					clearReturned.store(true, std::memory_order_release);
 				});
@@ -180,6 +211,8 @@ namespace P2PublishSinkTestsNs
 
 				backThread.join();
 				teardownThread.join();
+				Assert::IsTrue(publishOk.load(std::memory_order_acquire),
+					L"BACK-thread Publish must succeed");
 				Assert::IsTrue(observerFinished);
 				Assert::IsTrue(clearReturned.load(std::memory_order_acquire));
 

@@ -309,5 +309,70 @@ namespace FieldOfAheadPairTestsNs
 			Assert::AreEqual(size_t(1), f.engine.AheadFieldSeqs(seqs, 16));
 			Assert::AreEqual(uint64_t(22), seqs[0]);
 		}
+
+		TEST_METHOD(FieldOfResolvesValidAheadSlotWhenLiveSlotHasStaleDuplicateTo)
+		{
+			FieldFixture f;
+			const uint64_t epoch = f.engine.motionValidity.Epoch();
+
+			// fields_[0] holds live pair (10, 11), and NoteAheadField also records (10, 11) in matcher slot 1.
+			Assert::IsTrue(RunEstimate(f.engine, 10, 11));
+			f.engine.NoteAheadField(10, 11, epoch, 1);
+
+			// Live slot becomes stale (liveFrom = 99 != 10) while matcher slot 1 still validly holds from = 10.
+			f.view.live = &f.liveTex;
+			f.view.liveFrom = 99;
+			f.view.snapTex[1] = &f.snapTexStorage[1];
+			f.view.snapFrom[1] = 10;
+
+			uint64_t seqs[8] = {};
+			Assert::AreEqual(size_t(1), f.engine.AheadFieldSeqs(seqs, 8),
+				L"AheadFieldSeqs must advertise 11 from valid matcher slot 1");
+			Assert::AreEqual(uint64_t(11), seqs[0]);
+
+			VerifiedField vf;
+			Assert::IsTrue(f.engine.FieldOf(11, vf),
+				L"FieldOf(11) must skip stale live slot 0 and resolve valid ahead slot 1 (matching AheadFieldSeqs)");
+			Assert::AreEqual(uint64_t(10), vf.pairFrom);
+			Assert::AreEqual(uint64_t(11), vf.pairTo);
+			Assert::IsTrue(vf.fwd == &f.snapTexStorage[1], L"FieldOf(11) must serve ahead slot 1 texture");
+			Assert::AreEqual(64, vf.gridW);
+
+			// In-test negative control: once slot 1 also mismatches, BOTH FieldOf(11) and AheadFieldSeqs withdraw 11.
+			f.view.snapFrom[1] = 999;
+			Assert::IsFalse(f.engine.FieldOf(11, vf),
+				L"negative control: when both live slot and ahead slot 1 mismatch, FieldOf(11) must return false");
+			Assert::AreEqual(size_t(0), f.engine.AheadFieldSeqs(seqs, 8),
+				L"negative control: AheadFieldSeqs must return 0 when no matching slot remains");
+		}
+
+		TEST_METHOD(NoteAheadFieldOnFreshEpochSeedsEraForPairSpansSlipAndSurvivesLaterEstimate)
+		{
+			FieldFixture f;
+			const uint64_t epoch = f.engine.motionValidity.Epoch();
+
+			// In-test negative control: before any field is recorded in the fresh epoch, PairSpansSlip is conservative true.
+			Assert::IsTrue(f.engine.PairSpansSlip(10, 11),
+				L"negative control: unseeded fresh epoch must conservatively report PairSpansSlip == true");
+
+			// Record (10, 11) via NoteAheadField on a fresh epoch BEFORE any NoteEstimated.
+			f.engine.NoteAheadField(10, 11, epoch, 0);
+			Assert::IsFalse(f.engine.PairSpansSlip(10, 11),
+				L"NoteAheadField(10, 11) on fresh epoch must seed era so PairSpansSlip(10, 11) == false");
+			Assert::IsTrue(f.engine.PairSpansSlip(9, 10),
+				L"negative control: pair starting before first recorded seq 10 still spans slip");
+
+			// Subsequent NoteEstimated(true, 11, 12, epoch) in the same epoch must preserve the earlier era start 10.
+			Assert::IsTrue(RunEstimate(f.engine, 11, 12));
+			Assert::IsFalse(f.engine.PairSpansSlip(10, 11),
+				L"PairSpansSlip(10, 11) must remain false after NoteEstimated(11, 12) in the same epoch");
+			Assert::IsFalse(f.engine.PairSpansSlip(10, 12),
+				L"contiguous span [10, 12] in the same epoch must report PairSpansSlip == false");
+
+			// Negative control: invalidating the epoch returns PairSpansSlip(10, 11) to conservative true.
+			f.engine.motionValidity.Invalidate(MotionValidity::Cause::Gap);
+			Assert::IsTrue(f.engine.PairSpansSlip(10, 11),
+				L"negative control: epoch invalidation must make PairSpansSlip(10, 11) true again");
+		}
 	};
 }

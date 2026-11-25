@@ -18,6 +18,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import math
 import sys
 import tempfile
 import unittest
@@ -319,6 +320,123 @@ class Run5060pCostTests(unittest.TestCase):
                 with self.assertRaises(SystemExit) as ctx_unpaired:
                     runner.main(["--mode", "parse", "--baseline-50p", str(b50)])
             self.assertNotEqual(ctx_unpaired.exception.code, 0)
+
+    def test_negative_control_non_finite_json_render_ms_mean_fails_gate_explicitly(self):
+        # Positive control on the exact same summary-style JSON schema: finite render_ms_mean passes.
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            b50, c50 = d / "b50.json", d / "c50.json"
+            b60, c60 = d / "b60.json", d / "c60.json"
+            ok_out = d / "ok.json"
+            b50.write_text('{"render_ms_mean": 14.0, "late_presents": 0}', encoding="utf-8")
+            c50.write_text('{"render_ms_mean": 12.0, "late_presents": 0}', encoding="utf-8")
+            b60.write_text('{"render_ms_mean": 13.5, "late_presents": 0}', encoding="utf-8")
+            c60.write_text('{"render_ms_mean": 11.5, "late_presents": 0}', encoding="utf-8")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc_ok = runner.main(
+                    [
+                        "--mode",
+                        "parse",
+                        "--baseline-50p",
+                        str(b50),
+                        "--candidate-50p",
+                        str(c50),
+                        "--baseline-60p",
+                        str(b60),
+                        "--candidate-60p",
+                        str(c60),
+                        "--json-out",
+                        str(ok_out),
+                        "--strict",
+                    ]
+                )
+            self.assertEqual(rc_ok, 0)
+            self.assertIs(json.loads(ok_out.read_text(encoding="utf-8"))["overall_passed"], True)
+
+        # Negative controls: Infinity, -Infinity, and NaN render_ms_mean must fail explicitly and NEVER falsely pass.
+        cases = (
+            ("baseline_pos_inf", '{"render_ms_mean": Infinity, "late_presents": 0}', '{"render_ms_mean": 12.0, "late_presents": 0}'),
+            ("candidate_neg_inf", '{"render_ms_mean": 14.0, "late_presents": 0}', '{"render_ms_mean": -Infinity, "sample_count": 1, "late_presents": 0}'),
+            ("baseline_nan", '{"render_ms_mean": NaN, "sample_count": 1, "late_presents": 0}', '{"render_ms_mean": 12.0, "late_presents": 0}'),
+        )
+        for label, b60_text, c60_text in cases:
+            with self.subTest(case=label):
+                with tempfile.TemporaryDirectory() as tmp:
+                    d = Path(tmp)
+                    b50, c50 = d / "b50.json", d / "c50.json"
+                    b60, c60 = d / "b60.json", d / "c60.json"
+                    out_json = d / "out.json"
+
+                    b50.write_text('{"render_ms_mean": 14.0, "late_presents": 0}', encoding="utf-8")
+                    c50.write_text('{"render_ms_mean": 12.0, "late_presents": 0}', encoding="utf-8")
+                    b60.write_text(b60_text, encoding="utf-8")
+                    c60.write_text(c60_text, encoding="utf-8")
+
+                    buf = io.StringIO()
+                    try:
+                        with contextlib.redirect_stdout(buf):
+                            rc = runner.main(
+                                [
+                                    "--mode",
+                                    "parse",
+                                    "--baseline-50p",
+                                    str(b50),
+                                    "--candidate-50p",
+                                    str(c50),
+                                    "--baseline-60p",
+                                    str(b60),
+                                    "--candidate-60p",
+                                    str(c60),
+                                    "--json-out",
+                                    str(out_json),
+                                    "--strict",
+                                ]
+                            )
+                    except ValueError:
+                        # Explicit parse-time rejection of non-finite JSON constants is valid.
+                        continue
+
+                    self.assertEqual(rc, 2, f"{label}: non-finite JSON render_ms_mean must fail strict gate with exit 2")
+                    summary = json.loads(out_json.read_text(encoding="utf-8"))
+                    self.assertIs(summary["overall_passed"], False)
+                    self.assertIs(summary["rates"]["60p"]["passed"], False)
+                    self.assertEqual(summary["recommendation"], "KEEP_AUTO_OFF")
+                    self.assertTrue(summary["rates"]["60p"]["reasons"])
+                    self.assertTrue(math.isfinite(summary["rates"]["60p"]["render_ms_saved"]))
+                    self.assertTrue(math.isfinite(summary["rates"]["60p"]["baseline"]["render_ms_mean"]))
+                    self.assertTrue(math.isfinite(summary["rates"]["60p"]["candidate"]["render_ms_mean"]))
+
+    def test_csv_motion_field_ahead_note_extracts_slots_and_renders(self):
+        csv_status = (
+            "frame,render_ms,late_presents,status\n"
+            '1,12.000,0,"motion field ahead (slots=4, renders=1)"\n'
+            '2,12.200,0,"steady"\n'
+        )
+        m_status = runner.parse_csv_text(csv_status)
+        self.assertEqual(m_status.sample_count, 2)
+        self.assertEqual(m_status.ahead_slots, 4)
+        self.assertEqual(m_status.ahead_renders, 1)
+        self.assertEqual(len(m_status.ahead_lines), 1)
+
+        csv_col = (
+            "frame,render_ms,late_presents,motion_field_ahead\n"
+            '1,11.800,0,"motion field ahead (slots=4, renders=1)"\n'
+        )
+        m_col = runner.parse_csv_text(csv_col)
+        self.assertEqual(m_col.ahead_slots, 4)
+        self.assertEqual(m_col.ahead_renders, 1)
+        self.assertEqual(len(m_col.ahead_lines), 1)
+
+        # In-test negative control: CSV status without a motion field ahead note reports 0 slots / 0 renders.
+        csv_none = (
+            "frame,render_ms,late_presents,status\n"
+            '1,12.000,0,"steady"\n'
+        )
+        m_none = runner.parse_csv_text(csv_none)
+        self.assertEqual(m_none.ahead_slots, 0)
+        self.assertEqual(m_none.ahead_renders, 0)
+        self.assertEqual(m_none.ahead_lines, [])
 
 
 if __name__ == "__main__":

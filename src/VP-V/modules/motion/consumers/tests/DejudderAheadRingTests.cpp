@@ -274,5 +274,72 @@ namespace DejudderAheadRingTestsNs
 				Assert::AreEqual(0, sched.Held());
 			}
 		}
+
+		TEST_METHOD(TwoArgConsumePopsPassedSlotsAsDropAndLegacyToSlotTransitionCountsMiss)
+		{
+			// 1. Multi-slot [(2, 3), (3, 4)] with 2-arg Consume(3, 4) pops passed (2, 3) as Drop and hits (3, 4).
+			{
+				AheadSchedule sched;
+				sched.SetCapacity(3);
+				sched.NoteEpoch(10);
+				StepRecorder rec;
+				int slot0 = -1, slot1 = -1;
+
+				Assert::IsTrue(sched.TryAheadSlot(Cond(1, 2, 3, 1), rec.Steps(), &slot0));
+				Assert::IsTrue(sched.TryAheadSlot(Cond(1, 3, 4, 2), rec.Steps(), &slot1));
+				Assert::AreEqual(2, sched.Held());
+
+				Assert::IsTrue(sched.Consume(3, 4),
+					L"2-arg Consume(3, 4) over [(2, 3), (3, 4)] must pop passed (2, 3) as Drop and hit (3, 4)");
+				Assert::AreEqual(1ull, sched.Hits());
+				Assert::AreEqual(0ull, sched.Misses());
+				Assert::AreEqual(1ull, sched.Discarded(DiscardCause::Drop),
+					L"passed entry (2, 3) must be counted as DiscardCause::Drop");
+				Assert::AreEqual(0ull, sched.Discarded(DiscardCause::NextDiffers),
+					L"hitting (3, 4) must not wipe the ring as DiscardCause::NextDiffers");
+				Assert::AreEqual(0, sched.Held());
+
+				// In-test negative control: non-matching next on front (10, 12) over [(10, 11), (11, 12)]
+				// still wipes the ring as DiscardCause::NextDiffers and counts a miss.
+				Assert::IsTrue(sched.TryAheadSlot(Cond(9, 10, 11, 9), rec.Steps(), &slot0));
+				Assert::IsTrue(sched.TryAheadSlot(Cond(9, 11, 12, 10), rec.Steps(), &slot1));
+				Assert::IsFalse(sched.Consume(10, 12),
+					L"negative control: mismatched next on front must miss");
+				Assert::AreEqual(1ull, sched.Misses());
+				Assert::AreEqual(1ull, sched.Discarded(DiscardCause::Drop));
+				Assert::AreEqual(2ull, sched.Discarded(DiscardCause::NextDiffers),
+					L"negative control: mismatched next must discard the chain as NextDiffers");
+				Assert::AreEqual(0, sched.Held());
+			}
+
+			// 2. Transitioning from un-epoched legacy TryAhead into TryAheadSlot visibly increments Misses().
+			{
+				AheadSchedule sched;
+				StepRecorder rec;
+
+				// Un-epoched legacy TryAhead stores entry in legacyFrom_.
+				Assert::IsTrue(sched.TryAhead(Cond(10, 11, 12, 10), rec.Steps()));
+				Assert::IsTrue(sched.Pending());
+				Assert::AreEqual(1, sched.Held());
+				Assert::AreEqual(0ull, sched.Misses());
+
+				// Enabling epoch and scheduling via TryAheadSlot supersedes legacyFrom_ visibly (never silently).
+				sched.NoteEpoch(5);
+				int slot = -1;
+				Assert::IsTrue(sched.TryAheadSlot(Cond(11, 12, 13, 11), rec.Steps(), &slot));
+				Assert::AreEqual(0, slot);
+				Assert::AreEqual(1ull, sched.Misses(),
+					L"dropping pending legacyFrom_ during transition into TryAheadSlot must visibly increment Misses()");
+				Assert::AreEqual(1, sched.Held());
+				Assert::AreEqual(uint64_t(12), sched.EntryAt(0).from);
+				Assert::AreEqual(uint64_t(13), sched.EntryAt(0).to);
+
+				// Contrast control: clean TryAheadSlot with no pending legacy entry does not increment Misses().
+				Assert::IsTrue(sched.Consume(12, 13, 5, &slot));
+				Assert::IsTrue(sched.TryAheadSlot(Cond(12, 13, 14, 12), rec.Steps(), &slot));
+				Assert::AreEqual(1ull, sched.Misses(),
+					L"TryAheadSlot without a pending legacy entry must not increment Misses()");
+			}
+		}
 	};
 }
