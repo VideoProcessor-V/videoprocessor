@@ -1064,8 +1064,8 @@ inline void PadReservedUntil(std::vector<ProductDecl>& decls, ProductId upTo)
 // the same publish as P7(N) with P7's stamp (hdr.honoured copied from P7's claim). The slot's CPU buffer IS the storage of the field the labels
 // read (grid, block size, forward vector and trust planes; link/CameraFitFieldPod.h): written once by the camera worker BEFORE it publishes P7,
 // read only by P8 through the product, with no pool copy. Its one reader is P8. No declared input: it is written before P7's publish and P8
-// compares its stamp with P7's, so a field without a sealed P7 is never used. Size: 12 B per 16x16 block (the three float planes) plus a
-// margin for a grid one block row / column larger than ceil(dims / 16); a field that does not fit is not published (P8 then has no labels).
+// compares its stamp with P7's, so a field without a sealed P7 is never used. Size: 12 B per 8x8 cell (the three float planes) plus a
+// margin for a grid one block row / column larger than ceil(dims / 8); a field that does not fit is not published (P8 then has no labels).
 inline void AppendCameraFitFieldProduct(std::vector<ProductDecl>& decls)
 {
     using detail::AddTerm;

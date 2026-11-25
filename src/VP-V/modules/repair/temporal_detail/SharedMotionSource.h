@@ -8,8 +8,8 @@
 //
 //  * Forward(seq)  = pair (seq - 1 -> seq) on frame seq - 1's grid: the pair's forward vectors.
 //  * Backward(seq) = pair (seq -> seq - 1) on frame seq's grid: the pair's backward vectors.
-//  Vectors are in SOURCE pixels of the frame the producer saw (the engine's grid cell is 4 pixels of the producer's input, which is the
-//  source scaled by sourceWidth / flow.halfW); the host scales them to the re-based plane as for any source (the module never rescales).
+//  Vectors are in SOURCE pixels of the frame the producer saw (the engine's grid cell is 4 pixels of the producer's input, scaled per-axis by
+//  sourceWidth / flow.halfW horizontally and sourceHeight / flow.halfH vertically); the host scales them to the re-based plane as for any source (the module never rescales).
 //  Trust per cell is the ENGINE's memo (FlowView::CellTrust / CellTrustBackward, computed once per direction and tolerance while the pair is the engine's current FlowOf lease;
 //  this adapter holds no trust arithmetic, L-B6 WAIVER-B6-TD-TRUST). Both are in [0, 1]; a pair without a trust plane is not guessed at (absent:
 //  "the pair has no vectors or costs"). Camera() stays false (the camera model reaches TD through its own adapter).
@@ -112,19 +112,20 @@ namespace TemporalDetail
 			const float* trustPlane = forward ? view.CellTrust(m_consistencyPx) : view.CellTrustBackward(m_consistencyPx);
 			if (!trustPlane || view.gridW != flow->gridW || view.gridH != flow->gridH)
 				return Absent(m_stats.unfit, "the pair has no vectors or costs");
-			const double scale = static_cast<double>(m_srcW) / flow->halfW;   // producer pixels -> source pixels
+			const double scaleX = static_cast<double>(m_srcW) / flow->halfW;   // horizontal producer pixels -> source pixels
+			const double scaleY = static_cast<double>(m_srcH) / flow->halfH;   // vertical producer pixels -> source pixels (GEM-110, matches FlowView::enginePxToSourceY)
 			MotionPair pair;
 			pair.valid = true;
 			pair.gridW = flow->gridW;
 			pair.gridH = flow->gridH;
-			pair.blockPx = 4.0 * scale;   // the engine's cell is 4 producer pixels
+			pair.blockPx = 4.0 * scaleX;   // the engine's cell is 4 producer pixels
 			pair.vx.resize(cells);
 			pair.vy.resize(cells);
 			pair.trust.resize(cells);
 			for (size_t i = 0; i < cells; ++i)
 			{
-				pair.vx[i] = static_cast<float>(vec[i * 2] / 32.0 * scale);       // S10.5 producer pixels -> source pixels
-				pair.vy[i] = static_cast<float>(vec[i * 2 + 1] / 32.0 * scale);
+				pair.vx[i] = static_cast<float>(vec[i * 2] / 32.0 * scaleX);       // S10.5 producer pixels -> source pixels
+				pair.vy[i] = static_cast<float>(vec[i * 2 + 1] / 32.0 * scaleY);
 				pair.trust[i] = trustPlane[i];
 			}
 			out = std::move(pair);
