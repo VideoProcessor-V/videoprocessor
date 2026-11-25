@@ -2381,9 +2381,178 @@ int td_solve_convex(int K, float C[3][3], float cVec[3], int solverMode, out flo
 	// Uses a 2-pass robust trimmed mean (rejecting outlier cells > mean + 1.5*std) so worst-5% spikes never distort U_j(class).
 	// Output: eb_prior_out (3 x 2 RGBA32F: (b, actClass) -> vec4(U_prior, tauSq, validFlag, cellCount)).
 	constexpr const char* kPass2EbPriorReduceHeader = R"GLSL(
+#define TD_EB_TILES ((TD_CW * TD_CH + 255) / 256)
 shared vec4 td_eb_acc[256];
 shared float td_eb_cnt[256];
 shared float td_eb_trim_cap;
+
+// TD-U-FXC-TILES: Helper functions keep all continue/break/varying exits strictly outside
+// the main compute body so every barrier() sits in 100% uniform constant-trip-count control flow (FXC X3663).
+void td_eb_cell_p1(int idx, int K, int b, int ac, int bandPoolR, float bGain, float psdScale,
+                   inout vec4 locAcc, inout float locCnt, inout float locClipSq)
+{
+    int cx = idx % TD_CW;
+    int cy = idx / TD_CW;
+    ivec2 cell = ivec2(cx, cy);
+    vec4 fInfo = texelFetch(cell_focus, cell, 0);
+    int fFlags = int(round(fInfo.x));
+    bool focusChange = ((fFlags & 1) != 0);
+    bool isDefocused = ((fFlags & 2) != 0);
+    bool isFace = (fInfo.w > 0.5);
+    if (isFace || focusChange || (isDefocused && (b >= 1 || u_bokeh_mode < 0.5)))
+        return;
+
+    float retG = max(0.0, texelFetch(cell_prior, cell, 0).x);
+    float mVar = max(0.0, texelFetch(cell_stats, ivec2(TD_CW + cx, 2 * TD_CH + cy), 0).z);
+    float hVar = fInfo.z * fInfo.z;
+    float cleanTexMH = max(0.0, mVar - retG * TD_GAIN_MID * u_psd_mid) +
+                       max(0.0, hVar - retG * TD_GAIN_FINE * u_psd_fine);
+    int cellAc = (cleanTexMH > u_activity_tex_floor) ? 1 : 0;
+    if (cellAc != ac)
+        return;
+
+    float nPool = 0.0;
+    vec3 muPool = vec3(0.0);
+    float s00 = 0.0, s01 = 0.0, s02 = 0.0, s11 = 0.0, s12 = 0.0, s22 = 0.0;
+    for (int dy = -bandPoolR; dy <= bandPoolR; ++dy)
+    {
+        int ncy = cy + dy;
+        if (ncy < 0 || ncy >= TD_CH) continue;
+        for (int dx = -bandPoolR; dx <= bandPoolR; ++dx)
+        {
+            int ncx = cx + dx;
+            if (ncx < 0 || ncx >= TD_CW) continue;
+            vec4 t0 = texelFetch(cell_stats, ivec2(b * TD_CW + ncx, ncy), 0);
+            float nc = t0.x;
+            if (nc <= 0.5) continue;
+            vec3 muc = t0.yzw;
+            vec4 t1 = texelFetch(cell_stats, ivec2(b * TD_CW + ncx, TD_CH + ncy), 0);
+            vec2 t2 = texelFetch(cell_stats, ivec2(b * TD_CW + ncx, 2 * TD_CH + ncy), 0).xy;
+            if (nPool <= 0.5)
+            {
+                nPool = nc; muPool = muc;
+                s00 = t1.x; s01 = t1.y; s02 = t1.z; s11 = t1.w; s12 = t2.x; s22 = t2.y;
+            }
+            else
+            {
+                float nNew = nPool + nc;
+                vec3 d = muc - muPool;
+                float w = (nPool * nc) / nNew;
+                muPool += d * (nc / nNew);
+                s00 += t1.x + d.x * d.x * w;
+                s01 += t1.y + d.x * d.y * w;
+                s02 += t1.z + d.x * d.z * w;
+                s11 += t1.w + d.y * d.y * w;
+                s12 += t2.x + d.y * d.z * w;
+                s22 += t2.y + d.z * d.z * w;
+                nPool = nNew;
+            }
+        }
+    }
+    if (nPool <= 0.5)
+        return;
+
+    float invN = 1.0 / nPool;
+    float C[3][3];
+    C[0][0] = max(0.0, s00 * invN + muPool.x * muPool.x);
+    C[0][1] = s01 * invN + muPool.x * muPool.y;
+    C[0][2] = s02 * invN + muPool.x * muPool.z;
+    C[1][0] = C[0][1];
+    C[1][1] = max(0.0, s11 * invN + muPool.y * muPool.y);
+    C[1][2] = s12 * invN + muPool.y * muPool.z;
+    C[2][0] = C[0][2];
+    C[2][1] = C[1][2];
+    C[2][2] = max(0.0, s22 * invN + muPool.z * muPool.z);
+
+    int ebActMask = 0;
+    int ebAncIdx = int(round(u_anchor_ref_idx));
+    bool ebAncBarred = (ebAncIdx >= 0) && (texelFetch(anchor_barred, cell, 0).x > 0.5);
+    for (int kk = 0; kk < K; ++kk)
+    {
+        vec2 mgK = texelFetch(motion_gate, ivec2(kk * TD_CW + cx, cy), 0).xy;
+        float mGK = (b == 0) ? mgK.x : mgK.y;
+        if (kk == ebAncIdx && ebAncBarred) mGK = 0.0;
+        if (mGK > 0.0) ebActMask |= (1 << kk);
+    }
+    for (int k = 0; k < K; ++k)
+    {
+        if (td_is_exact_copy(k) || (ebActMask & (1 << k)) == 0) continue;
+        int partner = td_find_independent_a1_partner_masked(K, k, ebActMask);
+        if (partner < 0) continue;
+        if (td_refs_collinear(C[k][k], C[partner][partner], C[k][partner])) continue;
+        float gTerm = retG * bGain * psdScale;
+        float cRaw = C[k][partner] - gTerm;
+        float cClip = clamp(cRaw, 0.0, max(0.0, min(C[k][k], C[partner][partner])));
+        float nEff = td_effective_samples_for_band(b, nPool);
+        float seSq = td_sampling_var_cross_moment(C[k][k], C[partner][partner], C[k][partner], nEff);
+        if (!td_is_bad(cRaw) && !td_is_bad(seSq))
+        {
+            locAcc += vec4(cClip, cRaw, cRaw * cRaw, seSq);
+            locClipSq += cClip * cClip;
+            locCnt += 1.0;
+        }
+        return;
+    }
+}
+
+void td_eb_cell_p2(int idx, int K, int b, int ac, float bGain, float psdScale, float trimCap,
+                   inout float tSum, inout float tCnt)
+{
+    int cx = idx % TD_CW;
+    int cy = idx / TD_CW;
+    ivec2 cell = ivec2(cx, cy);
+    vec4 fInfo = texelFetch(cell_focus, cell, 0);
+    int fFlags = int(round(fInfo.x));
+    if (fInfo.w > 0.5 || ((fFlags & 1) != 0) || (((fFlags & 2) != 0) && (b >= 1 || u_bokeh_mode < 0.5)))
+        return;
+    float retG = max(0.0, texelFetch(cell_prior, cell, 0).x);
+    float mVar = max(0.0, texelFetch(cell_stats, ivec2(TD_CW + cx, 2 * TD_CH + cy), 0).z);
+    float hVar = fInfo.z * fInfo.z;
+    float cleanTexMH = max(0.0, mVar - retG * TD_GAIN_MID * u_psd_mid) +
+                       max(0.0, hVar - retG * TD_GAIN_FINE * u_psd_fine);
+    if (((cleanTexMH > u_activity_tex_floor) ? 1 : 0) != ac)
+        return;
+    vec4 t0 = texelFetch(cell_stats, ivec2(b * TD_CW + cx, cy), 0);
+    if (t0.x <= 0.5) return;
+    float invN = 1.0 / t0.x;
+    vec3 muc = t0.yzw;
+    vec4 t1 = texelFetch(cell_stats, ivec2(b * TD_CW + cx, TD_CH + cy), 0);
+    vec2 t2 = texelFetch(cell_stats, ivec2(b * TD_CW + cx, 2 * TD_CH + cy), 0).xy;
+    float C00 = max(0.0, t1.x * invN + muc.x * muc.x);
+    float C01 = t1.y * invN + muc.x * muc.y;
+    float C02 = t1.z * invN + muc.x * muc.z;
+    float C11 = max(0.0, t1.w * invN + muc.y * muc.y);
+    float C12 = t2.x * invN + muc.y * muc.z;
+    float C22 = max(0.0, t2.y * invN + muc.z * muc.z);
+    float Cmat[3][3];
+    Cmat[0][0] = C00; Cmat[0][1] = C01; Cmat[0][2] = C02;
+    Cmat[1][0] = C01; Cmat[1][1] = C11; Cmat[1][2] = C12;
+    Cmat[2][0] = C02; Cmat[2][1] = C12; Cmat[2][2] = C22;
+    int ebActMask2 = 0;
+    int ebAncIdx2 = int(round(u_anchor_ref_idx));
+    bool ebAncBarred2 = (ebAncIdx2 >= 0) && (texelFetch(anchor_barred, cell, 0).x > 0.5);
+    for (int kk = 0; kk < K; ++kk)
+    {
+        vec2 mgK = texelFetch(motion_gate, ivec2(kk * TD_CW + cx, cy), 0).xy;
+        float mGK = (b == 0) ? mgK.x : mgK.y;
+        if (kk == ebAncIdx2 && ebAncBarred2) mGK = 0.0;
+        if (mGK > 0.0) ebActMask2 |= (1 << kk);
+    }
+    for (int k = 0; k < K; ++k)
+    {
+        if (td_is_exact_copy(k) || (ebActMask2 & (1 << k)) == 0) continue;
+        int partner = td_find_independent_a1_partner_masked(K, k, ebActMask2);
+        if (partner < 0) continue;
+        if (td_refs_collinear(Cmat[k][k], Cmat[partner][partner], Cmat[k][partner])) continue;
+        float cClip = clamp(Cmat[k][partner] - retG * bGain * psdScale, 0.0, max(0.0, min(Cmat[k][k], Cmat[partner][partner])));
+        if (!td_is_bad(cClip) && cClip <= trimCap)
+        {
+            tSum += cClip;
+            tCnt += 1.0;
+        }
+        return;
+    }
+}
 )GLSL";
 
 	constexpr const char* kPass2EbPriorReduce = R"GLSL(
@@ -2408,114 +2577,15 @@ for (int b = 0; b < 3; ++b)
     int bandPoolR = (b == 0) ? int(round(u_pool_r_l)) : ((b == 1) ? int(round(u_pool_r_m)) : int(round(u_pool_r_h)));
     for (int ac = 0; ac < 2; ++ac)
     {
-        // Pass 1: accumulate raw & clipped moments to compute mean, variance, tau^2, and 1.5-sigma robust trim ceiling.
+        // Pass 1: constant-trip-count tile loop (FXC X3663 safe: zero varying exits or continue/break around barriers).
         vec4 locAcc = vec4(0.0);
         float locCnt = 0.0;
         float locClipSq = 0.0;
-        for (int idx = tid; idx < totalCells; idx += 256)
+        for (int tile = 0; tile < TD_EB_TILES; ++tile)
         {
-            int cx = idx % TD_CW;
-            int cy = idx / TD_CW;
-            ivec2 cell = ivec2(cx, cy);
-            vec4 fInfo = texelFetch(cell_focus, cell, 0);
-            int fFlags = int(round(fInfo.x));
-            bool focusChange = ((fFlags & 1) != 0);
-            bool isDefocused = ((fFlags & 2) != 0);
-            bool isFace = (fInfo.w > 0.5);
-            if (isFace || focusChange || (isDefocused && (b >= 1 || u_bokeh_mode < 0.5)))
-                continue;
-
-            float retG = max(0.0, texelFetch(cell_prior, cell, 0).x);
-            float mVar = max(0.0, texelFetch(cell_stats, ivec2(TD_CW + cx, 2 * TD_CH + cy), 0).z);
-            float hVar = fInfo.z * fInfo.z;
-            float cleanTexMH = max(0.0, mVar - retG * TD_GAIN_MID * u_psd_mid) +
-                               max(0.0, hVar - retG * TD_GAIN_FINE * u_psd_fine);
-            int cellAc = (cleanTexMH > u_activity_tex_floor) ? 1 : 0;
-            if (cellAc != ac)
-                continue;
-
-            float nPool = 0.0;
-            vec3 muPool = vec3(0.0);
-            float s00 = 0.0, s01 = 0.0, s02 = 0.0, s11 = 0.0, s12 = 0.0, s22 = 0.0;
-            for (int dy = -bandPoolR; dy <= bandPoolR; ++dy)
-            {
-                int ncy = cy + dy;
-                if (ncy < 0 || ncy >= TD_CH) continue;
-                for (int dx = -bandPoolR; dx <= bandPoolR; ++dx)
-                {
-                    int ncx = cx + dx;
-                    if (ncx < 0 || ncx >= TD_CW) continue;
-                    vec4 t0 = texelFetch(cell_stats, ivec2(b * TD_CW + ncx, ncy), 0);
-                    float nc = t0.x;
-                    if (nc <= 0.5) continue;
-                    vec3 muc = t0.yzw;
-                    vec4 t1 = texelFetch(cell_stats, ivec2(b * TD_CW + ncx, TD_CH + ncy), 0);
-                    vec2 t2 = texelFetch(cell_stats, ivec2(b * TD_CW + ncx, 2 * TD_CH + ncy), 0).xy;
-                    if (nPool <= 0.5)
-                    {
-                        nPool = nc; muPool = muc;
-                        s00 = t1.x; s01 = t1.y; s02 = t1.z; s11 = t1.w; s12 = t2.x; s22 = t2.y;
-                    }
-                    else
-                    {
-                        float nNew = nPool + nc;
-                        vec3 d = muc - muPool;
-                        float w = (nPool * nc) / nNew;
-                        muPool += d * (nc / nNew);
-                        s00 += t1.x + d.x * d.x * w;
-                        s01 += t1.y + d.x * d.y * w;
-                        s02 += t1.z + d.x * d.z * w;
-                        s11 += t1.w + d.y * d.y * w;
-                        s12 += t2.x + d.y * d.z * w;
-                        s22 += t2.y + d.z * d.z * w;
-                        nPool = nNew;
-                    }
-                }
-            }
-            if (nPool <= 0.5)
-                continue;
-
-            float invN = 1.0 / nPool;
-            float C[3][3];
-            C[0][0] = max(0.0, s00 * invN + muPool.x * muPool.x);
-            C[0][1] = s01 * invN + muPool.x * muPool.y;
-            C[0][2] = s02 * invN + muPool.x * muPool.z;
-            C[1][0] = C[0][1];
-            C[1][1] = max(0.0, s11 * invN + muPool.y * muPool.y);
-            C[1][2] = s12 * invN + muPool.y * muPool.z;
-            C[2][0] = C[0][2];
-            C[2][1] = C[1][2];
-            C[2][2] = max(0.0, s22 * invN + muPool.z * muPool.z);
-
-            int ebActMask = 0;
-            int ebAncIdx = int(round(u_anchor_ref_idx));
-            bool ebAncBarred = (ebAncIdx >= 0) && (texelFetch(anchor_barred, cell, 0).x > 0.5);
-            for (int kk = 0; kk < K; ++kk)
-            {
-                vec2 mgK = texelFetch(motion_gate, ivec2(kk * TD_CW + cx, cy), 0).xy;
-                float mGK = (b == 0) ? mgK.x : mgK.y;
-                if (kk == ebAncIdx && ebAncBarred) mGK = 0.0;
-                if (mGK > 0.0) ebActMask |= (1 << kk);
-            }
-            for (int k = 0; k < K; ++k)
-            {
-                if (td_is_exact_copy(k) || (ebActMask & (1 << k)) == 0) continue;
-                int partner = td_find_independent_a1_partner_masked(K, k, ebActMask);
-                if (partner < 0) continue;
-                if (td_refs_collinear(C[k][k], C[partner][partner], C[k][partner])) continue;
-                float gTerm = retG * bGain * psdScale;
-                float cRaw = C[k][partner] - gTerm;
-                float cClip = clamp(cRaw, 0.0, max(0.0, min(C[k][k], C[partner][partner])));
-                float nEff = td_effective_samples_for_band(b, nPool);
-                float seSq = td_sampling_var_cross_moment(C[k][k], C[partner][partner], C[k][partner], nEff);
-                if (!td_is_bad(cRaw) && !td_is_bad(seSq))
-                {
-                    locAcc += vec4(cClip, cRaw, cRaw * cRaw, seSq);
-                    locClipSq += cClip * cClip;
-                    locCnt += 1.0;
-                }
-                break;
-            }
+            int idx = tile * 256 + tid;
+            if (idx < totalCells)
+                td_eb_cell_p1(idx, K, b, ac, bandPoolR, bGain, psdScale, locAcc, locCnt, locClipSq);
         }
 
         td_eb_acc[tid] = locAcc;
@@ -2568,70 +2638,15 @@ for (int b = 0; b < 3; ++b)
         memoryBarrierShared();
         barrier();
 
-        // Pass 2: robust trimmed estimate of U_j(class) (excludes right-tail outlier cells above trim cap).
-        // RED-BUG-1 (FXC X3663): Keep ALL memoryBarrierShared()/barrier() calls strictly OUTSIDE if (p1Cnt > 3.5)!
+        // Pass 2: robust trimmed estimate of U_j(class) inside constant-trip-count tile loop (p1Cnt check inside tile!).
+        float trimCap = td_eb_trim_cap;
         float tSum = 0.0;
         float tCnt = 0.0;
-        if (p1Cnt > 3.5)
+        for (int tile = 0; tile < TD_EB_TILES; ++tile)
         {
-            float trimCap = td_eb_trim_cap;
-            for (int idx = tid; idx < totalCells; idx += 256)
-            {
-                int cx = idx % TD_CW;
-                int cy = idx / TD_CW;
-                ivec2 cell = ivec2(cx, cy);
-                vec4 fInfo = texelFetch(cell_focus, cell, 0);
-                int fFlags = int(round(fInfo.x));
-                if (fInfo.w > 0.5 || ((fFlags & 1) != 0) || (((fFlags & 2) != 0) && (b >= 1 || u_bokeh_mode < 0.5)))
-                    continue;
-                float retG = max(0.0, texelFetch(cell_prior, cell, 0).x);
-                float mVar = max(0.0, texelFetch(cell_stats, ivec2(TD_CW + cx, 2 * TD_CH + cy), 0).z);
-                float hVar = fInfo.z * fInfo.z;
-                float cleanTexMH = max(0.0, mVar - retG * TD_GAIN_MID * u_psd_mid) +
-                                   max(0.0, hVar - retG * TD_GAIN_FINE * u_psd_fine);
-                if (((cleanTexMH > u_activity_tex_floor) ? 1 : 0) != ac)
-                    continue;
-                vec4 t0 = texelFetch(cell_stats, ivec2(b * TD_CW + cx, cy), 0);
-                if (t0.x <= 0.5) continue;
-                float invN = 1.0 / t0.x;
-                vec3 muc = t0.yzw;
-                vec4 t1 = texelFetch(cell_stats, ivec2(b * TD_CW + cx, TD_CH + cy), 0);
-                vec2 t2 = texelFetch(cell_stats, ivec2(b * TD_CW + cx, 2 * TD_CH + cy), 0).xy;
-                float C00 = max(0.0, t1.x * invN + muc.x * muc.x);
-                float C01 = t1.y * invN + muc.x * muc.y;
-                float C02 = t1.z * invN + muc.x * muc.z;
-                float C11 = max(0.0, t1.w * invN + muc.y * muc.y);
-                float C12 = t2.x * invN + muc.y * muc.z;
-                float C22 = max(0.0, t2.y * invN + muc.z * muc.z);
-                float Cmat[3][3];
-                Cmat[0][0] = C00; Cmat[0][1] = C01; Cmat[0][2] = C02;
-                Cmat[1][0] = C01; Cmat[1][1] = C11; Cmat[1][2] = C12;
-                Cmat[2][0] = C02; Cmat[2][1] = C12; Cmat[2][2] = C22;
-                int ebActMask2 = 0;
-                int ebAncIdx2 = int(round(u_anchor_ref_idx));
-                bool ebAncBarred2 = (ebAncIdx2 >= 0) && (texelFetch(anchor_barred, cell, 0).x > 0.5);
-                for (int kk = 0; kk < K; ++kk)
-                {
-                    vec2 mgK = texelFetch(motion_gate, ivec2(kk * TD_CW + cx, cy), 0).xy;
-                    float mGK = (b == 0) ? mgK.x : mgK.y;
-                    if (kk == ebAncIdx2 && ebAncBarred2) mGK = 0.0;
-                    if (mGK > 0.0) ebActMask2 |= (1 << kk);
-                }
-                for (int k = 0; k < K; ++k)
-                {
-                    if (td_is_exact_copy(k) || (ebActMask2 & (1 << k)) == 0) continue;
-                    int partner = td_find_independent_a1_partner_masked(K, k, ebActMask2);
-                    if (partner < 0) continue;
-                    if (td_refs_collinear(Cmat[k][k], Cmat[partner][partner], Cmat[k][partner])) continue;
-                    float cClip = clamp(Cmat[k][partner] - retG * bGain * psdScale, 0.0, max(0.0, min(Cmat[k][k], Cmat[partner][partner])));
-                    if (!td_is_bad(cClip) && cClip <= trimCap)
-                    {
-                        tSum += cClip;
-                        tCnt += 1.0;
-                    }
-                    break;
-                }
-            }
+            int idx = tile * 256 + tid;
+            if (idx < totalCells && p1Cnt > 3.5)
+                td_eb_cell_p2(idx, K, b, ac, bGain, psdScale, trimCap, tSum, tCnt);
         }
         td_eb_acc[tid] = vec4(tSum, tCnt, 0.0, 0.0);
         memoryBarrierShared();

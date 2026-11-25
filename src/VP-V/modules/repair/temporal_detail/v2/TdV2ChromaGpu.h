@@ -1179,10 +1179,144 @@ for (int chIdx = 0; chIdx < 2; ++chIdx)
 
 		// ---- PASS C2EB: 1-WG 16x16 Robust Trimmed Empirical-Bayes & A2e Prior Reduction + Unsplit Grain Floor (Cb & Cr) ----
 		// Output: eb_prior (6 x 2 RGBA32F): x = b*2 + ac, y = chIdx (0=Cb, 1=Cr); .x = U_j, .y = tau^2, .z = validCnt, .w = unsplitGrainVar (at x==0).
+		// TD-U-FXC-TILES: Helper functions keep all continue/break/varying exits strictly outside the main body
+		// so every barrier() sits in 100% uniform constant-trip-count control flow (FXC X3663).
 		constexpr const char* kPassChromaEbPriorHeader = R"GLSL(
+#define TD_EB_TILES ((TD_CW * TD_CH + 255) / 256)
 shared vec4 td_ceb_red4[256];
 shared vec2 td_ceb_red2[256];
 shared float td_ceb_trim_hi;
+
+void td_ceb_cell_flat(int idx, int chIdx, bool coarseOnly,
+                      inout float flatHSum, inout float flatHCnt, inout float anyMinH, inout float anyHCnt)
+{
+    if (coarseOnly) return;
+    int cx = idx % TD_CW;
+    int cy = idx / TD_CW;
+    ivec2 cell = ivec2(cx, cy);
+    if (u_has_face_mask > 0.5 && texelFetch(face_mask, cell, 0).x > 0.5) return;
+    vec4 pT = texelFetch(cell_prior, cell, 0);
+    int fBits = int(round(pT.y));
+    bool focusChange = ((fBits & 1) != 0) || (texelFetch(cell_own_grain, cell, 0).w > 0.5);
+    bool isDefoc = ((fBits & 2) != 0);
+    if (focusChange || isDefoc) return;
+    float retG = (chIdx == 0) ? max(0.0, pT.x) : max(0.0, (u_cell_prior_has_cr_grain > 0.5) ? pT.w : pT.x);
+    float mVar = (chIdx == 0) ? max(0.0, texelFetch(cell_stats_cb, ivec2(TD_CW + cx, 2 * TD_CH + cy), 0).z)
+                              : max(0.0, texelFetch(cell_stats_cr, ivec2(TD_CW + cx, 2 * TD_CH + cy), 0).z);
+    float hVar = (chIdx == 0) ? max(0.0, texelFetch(cell_stats_cb, ivec2(2 * TD_CW + cx, 2 * TD_CH + cy), 0).z)
+                              : max(0.0, texelFetch(cell_stats_cr, ivec2(2 * TD_CW + cx, 2 * TD_CH + cy), 0).z);
+    float cleanTexMH = max(0.0, mVar - retG * TD_GAIN_MID * u_psd_mid) +
+                       max(0.0, hVar - retG * TD_GAIN_FINE * u_psd_fine);
+    if (cleanTexMH <= u_activity_tex_floor)
+    {
+        flatHSum += hVar;
+        flatHCnt += 1.0;
+    }
+    anyMinH = min(anyMinH, hVar);
+    anyHCnt += 1.0;
+}
+
+bool td_ceb_eval_cell(int idx, int chIdx, int K, int b, int ac, int bandPoolR,
+                      float bGain, float psdScale, bool bokehAllowL, bool coarseOnly, float unsplitGrainVar,
+                      out float outRawC, out float outClipC, out float outVSamp)
+{
+    outRawC = 0.0; outClipC = 0.0; outVSamp = 0.0;
+    int cx = idx % TD_CW;
+    int cy = idx / TD_CW;
+    ivec2 cell = ivec2(cx, cy);
+    if (u_has_face_mask > 0.5 && texelFetch(face_mask, cell, 0).x > 0.5) return false;
+    vec4 pT = texelFetch(cell_prior, cell, 0);
+    int fBits = int(round(pT.y));
+    bool focusChange = ((fBits & 1) != 0) || (texelFetch(cell_own_grain, cell, 0).w > 0.5);
+    bool isDefoc = ((fBits & 2) != 0);
+    if (focusChange || (isDefoc && (b >= 1 || !bokehAllowL))) return false;
+
+    float retG = (chIdx == 0) ? max(0.0, pT.x) : max(0.0, (u_cell_prior_has_cr_grain > 0.5) ? pT.w : pT.x);
+    if (u_has_clean_split < 0.5 && retG <= TD_NUM_FLOOR && !coarseOnly)
+        retG = unsplitGrainVar;
+    float mVar = (chIdx == 0) ? max(0.0, texelFetch(cell_stats_cb, ivec2(TD_CW + cx, 2 * TD_CH + cy), 0).z)
+                              : max(0.0, texelFetch(cell_stats_cr, ivec2(TD_CW + cx, 2 * TD_CH + cy), 0).z);
+    float hVar = (chIdx == 0) ? max(0.0, texelFetch(cell_stats_cb, ivec2(2 * TD_CW + cx, 2 * TD_CH + cy), 0).z)
+                              : max(0.0, texelFetch(cell_stats_cr, ivec2(2 * TD_CW + cx, 2 * TD_CH + cy), 0).z);
+    float cleanTexMH = max(0.0, mVar - retG * TD_GAIN_MID * u_psd_mid) +
+                       max(0.0, hVar - retG * TD_GAIN_FINE * u_psd_fine);
+    if (((cleanTexMH > u_activity_tex_floor) ? 1 : 0) != ac) return false;
+
+    float nPool = 0.0;
+    vec3 muPool = vec3(0.0);
+    float s00 = 0.0, s01 = 0.0, s02 = 0.0, s11 = 0.0, s12 = 0.0, s22 = 0.0;
+    for (int dy = -bandPoolR; dy <= bandPoolR; ++dy)
+    {
+        int ncy = cy + dy;
+        if (ncy < 0 || ncy >= TD_CH) continue;
+        for (int dx = -bandPoolR; dx <= bandPoolR; ++dx)
+        {
+            int ncx = cx + dx;
+            if (ncx < 0 || ncx >= TD_CW) continue;
+            vec4 t0 = (chIdx == 0) ? texelFetch(cell_stats_cb, ivec2(b * TD_CW + ncx, ncy), 0)
+                                   : texelFetch(cell_stats_cr, ivec2(b * TD_CW + ncx, ncy), 0);
+            float nc = t0.x;
+            if (nc <= 0.5) continue;
+            vec3 muc = t0.yzw;
+            vec4 t1 = (chIdx == 0) ? texelFetch(cell_stats_cb, ivec2(b * TD_CW + ncx, TD_CH + ncy), 0)
+                                   : texelFetch(cell_stats_cr, ivec2(b * TD_CW + ncx, TD_CH + ncy), 0);
+            vec2 t2 = (chIdx == 0) ? texelFetch(cell_stats_cb, ivec2(b * TD_CW + ncx, 2 * TD_CH + ncy), 0).xy
+                                   : texelFetch(cell_stats_cr, ivec2(b * TD_CW + ncx, 2 * TD_CH + ncy), 0).xy;
+            if (nPool <= 0.5)
+            {
+                nPool = nc; muPool = muc;
+                s00 = t1.x; s01 = t1.y; s02 = t1.z; s11 = t1.w; s12 = t2.x; s22 = t2.y;
+            }
+            else
+            {
+                float nNew = nPool + nc;
+                vec3 d = muc - muPool;
+                float w = (nPool * nc) / nNew;
+                muPool += d * (nc / nNew);
+                s00 += t1.x + d.x * d.x * w;
+                s01 += t1.y + d.x * d.y * w;
+                s02 += t1.z + d.x * d.z * w;
+                s11 += t1.w + d.y * d.y * w;
+                s12 += t2.x + d.y * d.z * w;
+                s22 += t2.y + d.z * d.z * w;
+                nPool = nNew;
+            }
+        }
+    }
+    if (nPool <= 0.5) return false;
+    float invN = 1.0 / nPool;
+    float C[3][3];
+    C[0][0] = max(0.0, s00 * invN + muPool.x * muPool.x);
+    C[0][1] = s01 * invN + muPool.x * muPool.y;
+    C[0][2] = s02 * invN + muPool.x * muPool.z;
+    C[1][0] = C[0][1];
+    C[1][1] = max(0.0, s11 * invN + muPool.y * muPool.y);
+    C[1][2] = s12 * invN + muPool.y * muPool.z;
+    C[2][0] = C[0][2];
+    C[2][1] = C[1][2];
+    C[2][2] = max(0.0, s22 * invN + muPool.z * muPool.z);
+
+    for (int k = 0; k < K; ++k)
+    {
+        if (td_is_exact_copy(k)) continue;
+        int partner = td_find_independent_a1_partner(K, k);
+        if (partner < 0) continue;
+        vec2 mg = texelFetch(motion_gate, ivec2(k * TD_CW + cx, cy), 0).xy;
+        float mGate = (b == 0) ? mg.x : mg.y;
+        vec2 mgP = texelFetch(motion_gate, ivec2(partner * TD_CW + cx, cy), 0).xy;
+        float mGateP = (b == 0) ? mgP.x : mgP.y;
+        if (mGate <= 0.0 || mGateP <= 0.0) continue;
+        float rawC = C[k][partner] - retG * bGain * psdScale;
+        float clipC = clamp(rawC, 0.0, min(C[k][k], C[partner][partner]));
+        float nEff = td_effective_samples_for_band(b, nPool);
+        float vSample = max(0.0, (C[k][k] * C[partner][partner] + rawC * rawC) / max(nEff, 1.0));
+        outRawC = rawC;
+        outClipC = clipC;
+        outVSamp = vSample;
+        return true;
+    }
+    return false;
+}
 )GLSL";
 
 		constexpr const char* kPassChromaEbPriorReducePart1 = R"GLSL(
@@ -1194,37 +1328,16 @@ bool coarseOnly = (u_coarse_only > 0.5);
 
 for (int chIdx = 0; chIdx < 2; ++chIdx)
 {
-    // CHR-LOW-1: Accumulate flat-cell fine-band energy (and min-cell fallback) for unsplit grain protection when retainedGrainVar == 0.
+    // CHR-LOW-1: Constant-trip-count flat-cell fine-band energy reduction (FXC X3663 safe).
     float flatHSum = 0.0;
     float flatHCnt = 0.0;
     float anyMinH = 1e30;
     float anyHCnt = 0.0;
-    for (int idx = tid; idx < totalCells; idx += 256)
+    for (int tile = 0; tile < TD_EB_TILES; ++tile)
     {
-        int cx = idx % TD_CW;
-        int cy = idx / TD_CW;
-        ivec2 cell = ivec2(cx, cy);
-        bool isFace = (u_has_face_mask > 0.5) && (texelFetch(face_mask, cell, 0).x > 0.5);
-        if (isFace || coarseOnly) continue;
-        vec4 pT = texelFetch(cell_prior, cell, 0);
-        int fBits = int(round(pT.y));
-        bool focusChange = ((fBits & 1) != 0) || (texelFetch(cell_own_grain, cell, 0).w > 0.5);
-        bool isDefoc = ((fBits & 2) != 0);
-        if (focusChange || isDefoc) continue;
-        float retG = (chIdx == 0) ? max(0.0, pT.x) : max(0.0, (u_cell_prior_has_cr_grain > 0.5) ? pT.w : pT.x);
-        float mVar = (chIdx == 0) ? max(0.0, texelFetch(cell_stats_cb, ivec2(TD_CW + cx, 2 * TD_CH + cy), 0).z)
-                                  : max(0.0, texelFetch(cell_stats_cr, ivec2(TD_CW + cx, 2 * TD_CH + cy), 0).z);
-        float hVar = (chIdx == 0) ? max(0.0, texelFetch(cell_stats_cb, ivec2(2 * TD_CW + cx, 2 * TD_CH + cy), 0).z)
-                                  : max(0.0, texelFetch(cell_stats_cr, ivec2(2 * TD_CW + cx, 2 * TD_CH + cy), 0).z);
-        float cleanTexMH = max(0.0, mVar - retG * TD_GAIN_MID * u_psd_mid) +
-                           max(0.0, hVar - retG * TD_GAIN_FINE * u_psd_fine);
-        if (cleanTexMH <= u_activity_tex_floor)
-        {
-            flatHSum += hVar;
-            flatHCnt += 1.0;
-        }
-        anyMinH = min(anyMinH, hVar);
-        anyHCnt += 1.0;
+        int idx = tile * 256 + tid;
+        if (idx < totalCells)
+            td_ceb_cell_flat(idx, chIdx, coarseOnly, flatHSum, flatHCnt, anyMinH, anyHCnt);
     }
     td_ceb_red4[tid] = vec4(flatHSum, flatHCnt, anyMinH, anyHCnt);
     memoryBarrierShared();
@@ -1257,109 +1370,23 @@ for (int chIdx = 0; chIdx < 2; ++chIdx)
         float bGain = td_band_gain(b);
         float psdScale = td_psd_scale(b);
         int bandPoolR = (b == 0) ? int(round(u_pool_r_l)) : ((b == 1) ? int(round(u_pool_r_m)) : int(round(u_pool_r_h)));
+        bool bandActive = !(coarseOnly && b >= 1);
         for (int ac = 0; ac < 2; ++ac)
         {
             vec4 locAcc = vec4(0.0);
             float locCnt = 0.0;
             float locClipSq = 0.0;
-            if (!(coarseOnly && b >= 1))
+            for (int tile = 0; tile < TD_EB_TILES; ++tile)
             {
-                for (int idx = tid; idx < totalCells; idx += 256)
+                int idx = tile * 256 + tid;
+                if (idx < totalCells && bandActive)
                 {
-                    int cx = idx % TD_CW;
-                    int cy = idx / TD_CW;
-                    ivec2 cell = ivec2(cx, cy);
-                    if (u_has_face_mask > 0.5 && texelFetch(face_mask, cell, 0).x > 0.5) continue;
-                    vec4 pT = texelFetch(cell_prior, cell, 0);
-                    int fBits = int(round(pT.y));
-                    bool focusChange = ((fBits & 1) != 0) || (texelFetch(cell_own_grain, cell, 0).w > 0.5);
-                    bool isDefoc = ((fBits & 2) != 0);
-                    if (focusChange || (isDefoc && (b >= 1 || !bokehAllowL))) continue;
-
-                    float retG = (chIdx == 0) ? max(0.0, pT.x) : max(0.0, (u_cell_prior_has_cr_grain > 0.5) ? pT.w : pT.x);
-                    if (u_has_clean_split < 0.5 && retG <= TD_NUM_FLOOR && !coarseOnly)
-                        retG = unsplitGrainVar;
-                    float mVar = (chIdx == 0) ? max(0.0, texelFetch(cell_stats_cb, ivec2(TD_CW + cx, 2 * TD_CH + cy), 0).z)
-                                              : max(0.0, texelFetch(cell_stats_cr, ivec2(TD_CW + cx, 2 * TD_CH + cy), 0).z);
-                    float hVar = (chIdx == 0) ? max(0.0, texelFetch(cell_stats_cb, ivec2(2 * TD_CW + cx, 2 * TD_CH + cy), 0).z)
-                                              : max(0.0, texelFetch(cell_stats_cr, ivec2(2 * TD_CW + cx, 2 * TD_CH + cy), 0).z);
-                    float cleanTexMH = max(0.0, mVar - retG * TD_GAIN_MID * u_psd_mid) +
-                                       max(0.0, hVar - retG * TD_GAIN_FINE * u_psd_fine);
-                    int cellAc = (cleanTexMH > u_activity_tex_floor) ? 1 : 0;
-                    if (cellAc != ac) continue;
-
-                    float nPool = 0.0;
-                    vec3 muPool = vec3(0.0);
-                    float s00 = 0.0, s01 = 0.0, s02 = 0.0, s11 = 0.0, s12 = 0.0, s22 = 0.0;
-                    for (int dy = -bandPoolR; dy <= bandPoolR; ++dy)
+                    float rawC = 0.0, clipC = 0.0, vSample = 0.0;
+                    if (td_ceb_eval_cell(idx, chIdx, K, b, ac, bandPoolR, bGain, psdScale, bokehAllowL, coarseOnly, unsplitGrainVar, rawC, clipC, vSample))
                     {
-                        int ncy = cy + dy;
-                        if (ncy < 0 || ncy >= TD_CH) continue;
-                        for (int dx = -bandPoolR; dx <= bandPoolR; ++dx)
-                        {
-                            int ncx = cx + dx;
-                            if (ncx < 0 || ncx >= TD_CW) continue;
-                            vec4 t0 = (chIdx == 0) ? texelFetch(cell_stats_cb, ivec2(b * TD_CW + ncx, ncy), 0)
-                                                   : texelFetch(cell_stats_cr, ivec2(b * TD_CW + ncx, ncy), 0);
-                            float nc = t0.x;
-                            if (nc <= 0.5) continue;
-                            vec3 muc = t0.yzw;
-                            vec4 t1 = (chIdx == 0) ? texelFetch(cell_stats_cb, ivec2(b * TD_CW + ncx, TD_CH + ncy), 0)
-                                                   : texelFetch(cell_stats_cr, ivec2(b * TD_CW + ncx, TD_CH + ncy), 0);
-                            vec2 t2 = (chIdx == 0) ? texelFetch(cell_stats_cb, ivec2(b * TD_CW + ncx, 2 * TD_CH + ncy), 0).xy
-                                                   : texelFetch(cell_stats_cr, ivec2(b * TD_CW + ncx, 2 * TD_CH + ncy), 0).xy;
-                            if (nPool <= 0.5)
-                            {
-                                nPool = nc; muPool = muc;
-                                s00 = t1.x; s01 = t1.y; s02 = t1.z; s11 = t1.w; s12 = t2.x; s22 = t2.y;
-                            }
-                            else
-                            {
-                                float nNew = nPool + nc;
-                                vec3 d = muc - muPool;
-                                float w = (nPool * nc) / nNew;
-                                muPool += d * (nc / nNew);
-                                s00 += t1.x + d.x * d.x * w;
-                                s01 += t1.y + d.x * d.y * w;
-                                s02 += t1.z + d.x * d.z * w;
-                                s11 += t1.w + d.y * d.y * w;
-                                s12 += t2.x + d.y * d.z * w;
-                                s22 += t2.y + d.z * d.z * w;
-                                nPool = nNew;
-                            }
-                        }
-                    }
-                    if (nPool <= 0.5) continue;
-                    float invN = 1.0 / nPool;
-                    float C[3][3];
-                    C[0][0] = max(0.0, s00 * invN + muPool.x * muPool.x);
-                    C[0][1] = s01 * invN + muPool.x * muPool.y;
-                    C[0][2] = s02 * invN + muPool.x * muPool.z;
-                    C[1][0] = C[0][1];
-                    C[1][1] = max(0.0, s11 * invN + muPool.y * muPool.y);
-                    C[1][2] = s12 * invN + muPool.y * muPool.z;
-                    C[2][0] = C[0][2];
-                    C[2][1] = C[1][2];
-                    C[2][2] = max(0.0, s22 * invN + muPool.z * muPool.z);
-
-                    for (int k = 0; k < K; ++k)
-                    {
-                        if (td_is_exact_copy(k)) continue;
-                        int partner = td_find_independent_a1_partner(K, k);
-                        if (partner < 0) continue;
-                        vec2 mg = texelFetch(motion_gate, ivec2(k * TD_CW + cx, cy), 0).xy;
-                        float mGate = (b == 0) ? mg.x : mg.y;
-                        vec2 mgP = texelFetch(motion_gate, ivec2(partner * TD_CW + cx, cy), 0).xy;
-                        float mGateP = (b == 0) ? mgP.x : mgP.y;
-                        if (mGate <= 0.0 || mGateP <= 0.0) continue;
-                        float rawC = C[k][partner] - retG * bGain * psdScale;
-                        float clipC = clamp(rawC, 0.0, min(C[k][k], C[partner][partner]));
-                        float nEff = td_effective_samples_for_band(b, nPool);
-                        float vSample = max(0.0, (C[k][k] * C[partner][partner] + rawC * rawC) / max(nEff, 1.0));
                         locAcc += vec4(rawC, rawC * rawC, clipC, vSample);
                         locCnt += 1.0;
                         locClipSq += clipC * clipC;
-                        break;
                     }
                 }
             }
@@ -1393,107 +1420,23 @@ for (int chIdx = 0; chIdx < 2; ++chIdx)
 )GLSL";
 
 		constexpr const char* kPassChromaEbPriorReducePart2 = R"GLSL(
-            // Pass 2: robust 1.5-sigma upper-trimmed mean for outlier-resistant U_j.
+            // Pass 2: robust 1.5-sigma upper-trimmed mean inside constant-trip-count tile loop (p1Cnt check inside tile!).
             float trimHi = td_ceb_trim_hi;
             float locTrimSum = 0.0;
             float locTrimCnt = 0.0;
-            if (p1Cnt > 1.5 && !(coarseOnly && b >= 1))
+            for (int tile = 0; tile < TD_EB_TILES; ++tile)
             {
-                for (int idx = tid; idx < totalCells; idx += 256)
+                int idx = tile * 256 + tid;
+                if (idx < totalCells && p1Cnt > 1.5 && bandActive)
                 {
-                    int cx = idx % TD_CW;
-                    int cy = idx / TD_CW;
-                    ivec2 cell = ivec2(cx, cy);
-                    if (u_has_face_mask > 0.5 && texelFetch(face_mask, cell, 0).x > 0.5) continue;
-                    vec4 pT = texelFetch(cell_prior, cell, 0);
-                    int fBits = int(round(pT.y));
-                    bool focusChange = ((fBits & 1) != 0) || (texelFetch(cell_own_grain, cell, 0).w > 0.5);
-                    bool isDefoc = ((fBits & 2) != 0);
-                    if (focusChange || (isDefoc && (b >= 1 || !bokehAllowL))) continue;
-
-                    float retG = (chIdx == 0) ? max(0.0, pT.x) : max(0.0, (u_cell_prior_has_cr_grain > 0.5) ? pT.w : pT.x);
-                    if (u_has_clean_split < 0.5 && retG <= TD_NUM_FLOOR && !coarseOnly)
-                        retG = unsplitGrainVar;
-                    float mVar = (chIdx == 0) ? max(0.0, texelFetch(cell_stats_cb, ivec2(TD_CW + cx, 2 * TD_CH + cy), 0).z)
-                                              : max(0.0, texelFetch(cell_stats_cr, ivec2(TD_CW + cx, 2 * TD_CH + cy), 0).z);
-                    float hVar = (chIdx == 0) ? max(0.0, texelFetch(cell_stats_cb, ivec2(2 * TD_CW + cx, 2 * TD_CH + cy), 0).z)
-                                              : max(0.0, texelFetch(cell_stats_cr, ivec2(2 * TD_CW + cx, 2 * TD_CH + cy), 0).z);
-                    float cleanTexMH = max(0.0, mVar - retG * TD_GAIN_MID * u_psd_mid) +
-                                       max(0.0, hVar - retG * TD_GAIN_FINE * u_psd_fine);
-                    if (((cleanTexMH > u_activity_tex_floor) ? 1 : 0) != ac) continue;
-
-                    float nPool = 0.0;
-                    vec3 muPool = vec3(0.0);
-                    float s00 = 0.0, s01 = 0.0, s02 = 0.0, s11 = 0.0, s12 = 0.0, s22 = 0.0;
-                    for (int dy = -bandPoolR; dy <= bandPoolR; ++dy)
+                    float rawC = 0.0, clipC = 0.0, vSample = 0.0;
+                    if (td_ceb_eval_cell(idx, chIdx, K, b, ac, bandPoolR, bGain, psdScale, bokehAllowL, coarseOnly, unsplitGrainVar, rawC, clipC, vSample))
                     {
-                        int ncy = cy + dy;
-                        if (ncy < 0 || ncy >= TD_CH) continue;
-                        for (int dx = -bandPoolR; dx <= bandPoolR; ++dx)
-                        {
-                            int ncx = cx + dx;
-                            if (ncx < 0 || ncx >= TD_CW) continue;
-                            vec4 t0 = (chIdx == 0) ? texelFetch(cell_stats_cb, ivec2(b * TD_CW + ncx, ncy), 0)
-                                                   : texelFetch(cell_stats_cr, ivec2(b * TD_CW + ncx, ncy), 0);
-                            float nc = t0.x;
-                            if (nc <= 0.5) continue;
-                            vec3 muc = t0.yzw;
-                            vec4 t1 = (chIdx == 0) ? texelFetch(cell_stats_cb, ivec2(b * TD_CW + ncx, TD_CH + ncy), 0)
-                                                   : texelFetch(cell_stats_cr, ivec2(b * TD_CW + ncx, TD_CH + ncy), 0);
-                            vec2 t2 = (chIdx == 0) ? texelFetch(cell_stats_cb, ivec2(b * TD_CW + ncx, 2 * TD_CH + ncy), 0).xy
-                                                   : texelFetch(cell_stats_cr, ivec2(b * TD_CW + ncx, 2 * TD_CH + ncy), 0).xy;
-                            if (nPool <= 0.5)
-                            {
-                                nPool = nc; muPool = muc;
-                                s00 = t1.x; s01 = t1.y; s02 = t1.z; s11 = t1.w; s12 = t2.x; s22 = t2.y;
-                            }
-                            else
-                            {
-                                float nNew = nPool + nc;
-                                vec3 d = muc - muPool;
-                                float w = (nPool * nc) / nNew;
-                                muPool += d * (nc / nNew);
-                                s00 += t1.x + d.x * d.x * w;
-                                s01 += t1.y + d.x * d.y * w;
-                                s02 += t1.z + d.x * d.z * w;
-                                s11 += t1.w + d.y * d.y * w;
-                                s12 += t2.x + d.y * d.z * w;
-                                s22 += t2.y + d.z * d.z * w;
-                                nPool = nNew;
-                            }
-                        }
-                    }
-                    if (nPool <= 0.5) continue;
-                    float invN = 1.0 / nPool;
-                    float C[3][3];
-                    C[0][0] = max(0.0, s00 * invN + muPool.x * muPool.x);
-                    C[0][1] = s01 * invN + muPool.x * muPool.y;
-                    C[0][2] = s02 * invN + muPool.x * muPool.z;
-                    C[1][0] = C[0][1];
-                    C[1][1] = max(0.0, s11 * invN + muPool.y * muPool.y);
-                    C[1][2] = s12 * invN + muPool.y * muPool.z;
-                    C[2][0] = C[0][2];
-                    C[2][1] = C[1][2];
-                    C[2][2] = max(0.0, s22 * invN + muPool.z * muPool.z);
-
-                    for (int k = 0; k < K; ++k)
-                    {
-                        if (td_is_exact_copy(k)) continue;
-                        int partner = td_find_independent_a1_partner(K, k);
-                        if (partner < 0) continue;
-                        vec2 mg = texelFetch(motion_gate, ivec2(k * TD_CW + cx, cy), 0).xy;
-                        float mGate = (b == 0) ? mg.x : mg.y;
-                        vec2 mgP = texelFetch(motion_gate, ivec2(partner * TD_CW + cx, cy), 0).xy;
-                        float mGateP = (b == 0) ? mgP.x : mgP.y;
-                        if (mGate <= 0.0 || mGateP <= 0.0) continue;
-                        float rawC = C[k][partner] - retG * bGain * psdScale;
-                        float clipC = clamp(rawC, 0.0, min(C[k][k], C[partner][partner]));
                         if (clipC <= trimHi)
                         {
                             locTrimSum += clipC;
                             locTrimCnt += 1.0;
                         }
-                        break;
                     }
                 }
             }
