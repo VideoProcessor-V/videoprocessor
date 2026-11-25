@@ -23,6 +23,7 @@
 #include <VP-V/modules/output/dither/VpShaderInclude.h>
 
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <iterator>
 #include <string>
@@ -35,10 +36,11 @@ namespace VideoProcessorTest
 	{
 		// FNV-1a 64 of `git show b5ae6eda5:"shaders/Temporal sigma-delta.glsl"` with the 9db725b55 quantiser hunk
 		// (`git diff dbbef8c07 9db725b55`), the W23-A3 S2-H3 NaN/Inf-safe tag & motion-gate hunk (72d94a734),
-		// the W23-A3 S2-H4 exact-code dither-noise zeroing hunk (4619d3552), and the W23-A3 AC#2 / GEM-026
-		// near-black BTB clamp hunk (1519996c2) applied (LF line ends, 47949 bytes; re-pinned under WAIVER-GEM-026).
-		constexpr uint64_t kOriginalFnv1a64 = 0x87ec256ae3caf978ull;
-		constexpr size_t kOriginalBytes = 47949;
+		// the W23-A3 S2-H4 exact-code dither-noise zeroing hunk (4619d3552), the W23-A3 AC#2 / GEM-026
+		// near-black BTB clamp hunk (1519996c2), and the W23-Audit-Fix1 POD1-H4 //!TYPE DYNAMIC float hunk
+		// (+176 bytes across 22 params) applied (LF line ends, 48125 bytes; re-pinned under WAIVER-AUDIT-DYNAMIC-SHADERS).
+		constexpr uint64_t kOriginalFnv1a64 = 0x37a0fcadff5c59a0ull;
+		constexpr size_t kOriginalBytes = 48125;
 
 		uint64_t Fnv1a64(const std::string& text)
 		{
@@ -146,6 +148,63 @@ namespace VideoProcessorTest
 			std::string last = "a\n// VP_INCLUDE motion.output_domain_search  ";
 			Assert::IsTrue(CustomHookChain::ExpandVpIncludes(last, reason));
 			Assert::AreEqual("a\n" + VpMotion::OutputDomainSearch::Glsl(), last);
+		}
+
+		// W23-Audit-Fix1 POD1-H4 / HIGH-4 / POD2-L11: all 5 per-frame mutated shaders declare //!TYPE DYNAMIC float
+		// (zero static //!TYPE float shader-recompile hazards), and vp_cam16_appearance.glsl uses an FXC-safe finite guard.
+		TEST_METHOD(AllFivePerFrameMutatedShadersUseDynamicParamsAndFxcSafeFiniteGuard)
+		{
+			auto countStaticAndDynamic = [](const std::string& lf, int& staticCount, int& dynamicCount) {
+				staticCount = 0;
+				dynamicCount = 0;
+				size_t pos = 0;
+				while (pos < lf.size())
+				{
+					size_t end = lf.find('\n', pos);
+					if (end == std::string::npos) end = lf.size();
+					const std::string line = lf.substr(pos, end - pos);
+					if (line == "//!TYPE float") ++staticCount;
+					else if (line == "//!TYPE DYNAMIC float") ++dynamicCount;
+					pos = end + 1;
+				}
+			};
+			struct ShaderSpec { const char* file; int expectedDynamic; };
+			const ShaderSpec specs[] = {
+				{ "vp_cam16_appearance.glsl", 48 },
+				{ "DV trims.glsl", 49 },
+				{ "LED compensation.glsl", 13 },
+				{ "SDR tone shape.glsl", 5 },
+				{ "Temporal sigma-delta.glsl", 22 },
+			};
+			for (const ShaderSpec& s : specs)
+			{
+				const std::string lf = ToLf(ReadRepoShader(s.file));
+				Assert::IsFalse(lf.empty(), std::wstring(s.file, s.file + std::strlen(s.file)).c_str());
+				int st = 0, dyn = 0;
+				countStaticAndDynamic(lf, st, dyn);
+				Assert::AreEqual(0, st, L"POD1-H4/HIGH-4: zero static //!TYPE float declarations allowed");
+				Assert::AreEqual(s.expectedDynamic, dyn, L"all per-frame params must be //!TYPE DYNAMIC float");
+			}
+
+			// Negative control: reverting one //!TYPE DYNAMIC float -> //!TYPE float in a local copy is immediately caught.
+			std::string mutated = ToLf(ReadRepoShader("SDR tone shape.glsl"));
+			const size_t at = mutated.find("//!TYPE DYNAMIC float");
+			Assert::AreNotEqual(std::string::npos, at);
+			mutated.replace(at, std::strlen("//!TYPE DYNAMIC float"), "//!TYPE float");
+			int mutSt = 0, mutDyn = 0;
+			countStaticAndDynamic(mutated, mutSt, mutDyn);
+			Assert::AreEqual(1, mutSt, L"negative control: static //!TYPE float regression is caught");
+
+			// POD2-L11: vp_cam16_appearance.glsl origFinite uses FXC-safe bounded range comparison (not isnan/isinf).
+			const std::string cam16 = ToLf(ReadRepoShader("vp_cam16_appearance.glsl"));
+			const size_t finPos = cam16.find("bool origFinite =");
+			Assert::AreNotEqual(std::string::npos, finPos, L"locate origFinite in vp_cam16_appearance.glsl");
+			const size_t finEnd = cam16.find('\n', finPos);
+			const std::string finLine = cam16.substr(finPos, finEnd - finPos);
+			Assert::IsTrue(finLine.find("isnan") == std::string::npos && finLine.find("isinf") == std::string::npos,
+				L"POD2-L11: origFinite must not rely on FXC-fragile isnan/isinf");
+			Assert::IsTrue(finLine.find("greaterThanEqual") != std::string::npos && finLine.find("lessThanEqual") != std::string::npos,
+				L"POD2-L11: origFinite must use FXC-safe bounded range comparisons");
 		}
 	};
 }
