@@ -900,6 +900,254 @@ namespace SkeletonAcquireTestsNs
 			Assert::IsNull(sk.MemoOf(&stressHost), L"Shutdown cleaned up stressHost");
 			Assert::IsNull(sk.MemoOf(&negHost), L"Shutdown cleaned up negHost");
 		}
+
+		// K#1 Test 1: CopyPublished MUST reject stale-epoch entries immediately after BumpEpoch (before OnSeal)
+		// and resume serving once re-filled in the new epoch.
+		BEGIN_TEST_METHOD_ATTRIBUTE(CopyPublishedRejectsStaleEpochEntryAfterBumpEpoch)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(CopyPublishedRejectsStaleEpochEntryAfterBumpEpoch)
+		{
+			SkeletonMemo m;
+			std::atomic<uint8_t> fillByte{ 0xA1u };
+			OwnerFill f;
+			f.fill = [&fillByte](const OwnerFillRequest&, SkeletonMemo&, OwnerFillOutput& out) {
+				out.bytes.assign(64, fillByte.load(std::memory_order_acquire));
+				return true;
+			};
+			Assert::IsTrue(m.RegisterOwnerFill(kP1HalfLuma, AcquireForm::Cpu, kLaneUnit, f)
+				== SkeletonMemo::Registration::Registered);
+
+			const AcquireResult r1 = m.Acquire(kP1HalfLuma, 10u, AcquireForm::Cpu);
+			Assert::IsTrue(r1.Ok() && r1.status == AcquireStatus::FilledAtRead && r1.cpuBytes == 64u && r1.cpu[0] == 0xA1u,
+				L"initial fill published 0xA1 for seq 10");
+
+			// In-test negative control: before BumpEpoch, CopyPublished succeeds and copies 0xA1.
+			std::vector<uint8_t> beforeBuf(64, 0x00u);
+			Assert::IsTrue(m.CopyPublished(kP1HalfLuma, 10u, beforeBuf.data(), beforeBuf.size()),
+				L"negative control: CopyPublished succeeds before BumpEpoch");
+			for (uint8_t b : beforeBuf)
+				Assert::AreEqual<uint8_t>(0xA1u, b);
+
+			// BumpEpoch WITHOUT OnSeal: stale-epoch entry stays in memo_ until OnSeal, but CopyPublished must refuse it.
+			m.BumpEpoch(SkeletonMemo::InvalidateCause::Flush);
+			std::vector<uint8_t> staleBuf(64, 0x5Au);
+			Assert::IsFalse(m.CopyPublished(kP1HalfLuma, 10u, staleBuf.data(), staleBuf.size()),
+				L"K#1: CopyPublished MUST reject stale-epoch entry after BumpEpoch before OnSeal");
+			for (uint8_t b : staleBuf)
+				Assert::AreEqual<uint8_t>(0x5Au, b, L"rejected CopyPublished must leave caller buffer untouched");
+
+			// Re-acquire in new epoch produces 0xB2 and CopyPublished serves 0xB2.
+			fillByte.store(0xB2u, std::memory_order_release);
+			const AcquireResult r2 = m.Acquire(kP1HalfLuma, 10u, AcquireForm::Cpu);
+			Assert::IsTrue(r2.Ok() && r2.status == AcquireStatus::FilledAtRead && r2.cpuBytes == 64u && r2.cpu[0] == 0xB2u,
+				L"re-acquire in new epoch produces 0xB2");
+
+			std::vector<uint8_t> freshBuf(64, 0x00u);
+			Assert::IsTrue(m.CopyPublished(kP1HalfLuma, 10u, freshBuf.data(), freshBuf.size()),
+				L"CopyPublished succeeds in new epoch");
+			for (uint8_t b : freshBuf)
+				Assert::AreEqual<uint8_t>(0xB2u, b);
+
+			Assert::AreEqual<uint64_t>(2u, m.CountersOf(kP1HalfLuma).ownerFillCalls);
+			Assert::AreEqual<uint64_t>(1u, m.CountersOf(kP1HalfLuma).invalidatedRecompute);
+		}
+
+		// K#1 Test 2: a waiter blocked in cv_.wait on an in-flight Filling entry from an older epoch MUST NOT receive
+		// the stale payload once BumpEpoch advances the epoch; it moves the stale entry to stale_, retries in the new
+		// epoch, and leaves CpuBytes/GpuBytes accounting exact (zero underflow or double-subtract).
+		BEGIN_TEST_METHOD_ATTRIBUTE(WaiterOnInFlightFillRetriesInNewEpochAfterBumpEpoch)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(WaiterOnInFlightFillRetriesInNewEpochAfterBumpEpoch)
+		{
+			SkeletonMemo m;
+			std::atomic<int> fillCalls{ 0 };
+			std::atomic<bool> inFill1{ false };
+			std::atomic<bool> releaseFill1{ false };
+			std::atomic<bool> t2Ready{ false };
+
+			OwnerFill f;
+			f.fill = [&](const OwnerFillRequest&, SkeletonMemo&, OwnerFillOutput& out) {
+				const int call = fillCalls.fetch_add(1, std::memory_order_acq_rel) + 1;
+				if (call == 1) {
+					inFill1.store(true, std::memory_order_release);
+					while (!releaseFill1.load(std::memory_order_acquire))
+						std::this_thread::yield();
+					out.bytes.assign(64, 0x11u);
+					return true;
+				}
+				out.bytes.assign(64, 0x22u);
+				return true;
+			};
+			Assert::IsTrue(m.RegisterOwnerFill(kP1HalfLuma, AcquireForm::Cpu, kLaneUnit, f)
+				== SkeletonMemo::Registration::Registered);
+
+			AcquireResult r1;
+			AcquireResult r2;
+
+			struct ThreadJoinGuard {
+				std::atomic<bool>& releaseFlag;
+				std::thread t1;
+				std::thread t2;
+				explicit ThreadJoinGuard(std::atomic<bool>& rf) : releaseFlag(rf) {}
+				~ThreadJoinGuard()
+				{
+					releaseFlag.store(true, std::memory_order_release);
+					if (t1.joinable())
+						t1.join();
+					if (t2.joinable())
+						t2.join();
+				}
+			} threads(releaseFill1);
+
+			threads.t1 = std::thread([&]() {
+				r1 = m.Acquire(kP1HalfLuma, 7u, AcquireForm::Cpu);
+			});
+			while (!inFill1.load(std::memory_order_acquire))
+				std::this_thread::yield();
+
+			threads.t2 = std::thread([&]() {
+				t2Ready.store(true, std::memory_order_release);
+				r2 = m.Acquire(kP1HalfLuma, 7u, AcquireForm::Cpu);
+			});
+			while (!t2Ready.load(std::memory_order_acquire))
+				std::this_thread::yield();
+			// Give Thread 2 a brief window to park inside cv_.wait on fill #1's Filling entry before BumpEpoch.
+			std::this_thread::sleep_for(std::chrono::milliseconds(15));
+
+			m.BumpEpoch(SkeletonMemo::InvalidateCause::Reset);
+			releaseFill1.store(true, std::memory_order_release);
+
+			if (threads.t1.joinable())
+				threads.t1.join();
+			if (threads.t2.joinable())
+				threads.t2.join();
+
+			// Negative control: fill #1 genuinely ran and returned stale payload 0x11.
+			Assert::IsTrue(r1.Ok() && r1.cpuBytes == 64u && r1.cpu[0] == 0x11u,
+				L"negative control: Thread 1 fill #1 produced stale payload 0x11");
+
+			// K#1 protection: Thread 2 woke from cv_.wait, rejected stale 0x11, and filled 0x22 in the new epoch.
+			Assert::IsTrue(r2.Ok() && r2.status == AcquireStatus::FilledAtRead && r2.cpuBytes == 64u,
+				L"K#1: waiter retried and filled in new epoch instead of reusing stale 0x11");
+			for (size_t i = 0; i < r2.cpuBytes; ++i)
+				Assert::AreEqual<uint8_t>(0x22u, r2.cpu[i], L"K#1: waiter received fresh new-epoch 0x22 payload");
+
+			Assert::AreEqual(2, fillCalls.load(), L"owner fill ran twice (once in old epoch, once in new epoch)");
+			Assert::AreEqual<uint64_t>(2u, m.CountersOf(kP1HalfLuma).ownerFillCalls);
+			Assert::AreEqual<size_t>(1u, m.MemoCount(), L"memo holds only the single new-epoch entry");
+			Assert::AreEqual<uint64_t>(64u, m.CpuBytes(),
+				L"CpuBytes accounts ONLY for the new-epoch 64-byte entry (no stale leak or double-subtract)");
+			Assert::AreEqual<uint64_t>(0u, m.GpuBytes());
+
+			std::vector<uint8_t> pub(64, 0x00u);
+			Assert::IsTrue(m.CopyPublished(kP1HalfLuma, 7u, pub.data(), pub.size()));
+			Assert::AreEqual<uint8_t>(0x22u, pub[0]);
+
+			// OnSeal drains stale_ and releases the new-epoch entry cleanly without byte underflow.
+			m.OnSeal(8u);
+			Assert::AreEqual<size_t>(0u, m.MemoCount());
+			Assert::AreEqual<uint64_t>(0u, m.CpuBytes());
+			Assert::AreEqual<uint64_t>(0u, m.GpuBytes());
+		}
+
+		// K#2 parity test: single-pass OnSeal(10) matches all three predicates (frameScoped, epoch != ep,
+		// seq < EdgeLocked(seq, e.keep)), retires fence-guarded GPU entries, and preserves exact bytes/counters.
+		BEGIN_TEST_METHOD_ATTRIBUTE(OnSealSinglePassMatchesAllThreePredicates)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(OnSealSinglePassMatchesAllThreePredicates)
+		{
+			SkeletonMemo m;
+			m.SetKeepFrames(2u);   // back = 2 -> EdgeLocked(10, 0) = 8; EdgeLocked(10, 6) = 4
+			m.SetGpuDispatcherPresent(true);
+			m.SetGpuBudget(true, 1u << 20);
+			std::atomic<uint64_t> completedFence{ 10u };
+			m.SetFenceCompleted([&completedFence]() { return completedFence.load(std::memory_order_acquire); });
+
+			auto makeCpuFill = [](size_t bytes, uint8_t pat, bool frameScoped, uint8_t keepFrames) {
+				OwnerFill f;
+				f.frameScoped = frameScoped;
+				f.keepFrames = keepFrames;
+				f.fill = [bytes, pat](const OwnerFillRequest&, SkeletonMemo&, OwnerFillOutput& out) {
+					out.bytes.assign(bytes, pat);
+					return true;
+				};
+				return f;
+			};
+
+			// Entry 2: stale-epoch CPU entry at seq = 10 (32 bytes, 0xE2) — filled BEFORE BumpEpoch.
+			Assert::IsTrue(m.RegisterOwnerFill(kP4SourceStats, AcquireForm::Cpu, kLaneUnit,
+				makeCpuFill(32u, 0xE2u, false, 0u)) == SkeletonMemo::Registration::Registered);
+			Assert::IsTrue(m.Acquire(kP4SourceStats, 10u, AcquireForm::Cpu).Ok());
+			m.BumpEpoch(SkeletonMemo::InvalidateCause::Flush);
+
+			// Entry 1: frameScoped CPU entry at seq = 10 (16 bytes, 0xF1) — current epoch.
+			Assert::IsTrue(m.RegisterOwnerFill(kP1HalfLuma, AcquireForm::Cpu, kLaneUnit,
+				makeCpuFill(16u, 0xF1u, true, 0u)) == SkeletonMemo::Registration::Registered);
+			Assert::IsTrue(m.Acquire(kP1HalfLuma, 10u, AcquireForm::Cpu).Ok());
+
+			// Entry 3 (seq = 5, below edge 8 -> released) and Entry 6 (seq = 9, >= edge 8 -> survives): 64 bytes, 0xA3.
+			Assert::IsTrue(m.RegisterOwnerFill(kP10GrainSplit, AcquireForm::Cpu, kGrainUnit,
+				makeCpuFill(64u, 0xA3u, false, 0u)) == SkeletonMemo::Registration::Registered);
+			Assert::IsTrue(m.Acquire(kP10GrainSplit, 5u, AcquireForm::Cpu).Ok());
+			Assert::IsTrue(m.Acquire(kP10GrainSplit, 9u, AcquireForm::Cpu).Ok());
+
+			// Entry 4: current-epoch CPU entry at seq = 5 with keep = 6 (EdgeLocked(10, 6) = 4, 5 >= 4 -> survives): 48 bytes, 0xB4.
+			Assert::IsTrue(m.RegisterOwnerFill(kP11RegionBlockStats, AcquireForm::Cpu, kRegionUnit,
+				makeCpuFill(48u, 0xB4u, false, 6u)) == SkeletonMemo::Registration::Registered);
+			Assert::IsTrue(m.Acquire(kP11RegionBlockStats, 5u, AcquireForm::Cpu).Ok());
+
+			// Entry 5: current-epoch GPU entry at seq = 5 with keep = 0 and incomplete read fence 99 > 10 -> moves to retired_.
+			int gpuCalls = 0;
+			Assert::IsTrue(m.RegisterOwnerFill(kP10GrainSplit, AcquireForm::Gpu, kGrainUnit,
+				GpuFill(&gpuCalls, 4096u, 4096u)) == SkeletonMemo::Registration::Registered);
+			const AcquireResult rGpu5 = m.Acquire(kP10GrainSplit, 5u, AcquireForm::Gpu);
+			Assert::IsTrue(rGpu5.Ok() && rGpu5.gpu.Valid());
+			m.NoteGpuRead(rGpu5, 99u);
+
+			// Pre-seal inventory check.
+			Assert::AreEqual<size_t>(6u, m.MemoCount());
+			Assert::AreEqual<uint64_t>(32u + 16u + 64u + 64u + 48u, m.CpuBytes());
+			Assert::AreEqual<uint64_t>(4096u, m.GpuBytes());
+			Assert::AreEqual<size_t>(0u, m.RetiredPending());
+
+			// Single-pass OnSeal(10).
+			m.OnSeal(10u);
+
+			// Exact surviving set: ONLY Entry 4 (kP11 seq 5, 48B) and Entry 6 (kP10 seq 9, 64B).
+			Assert::AreEqual<size_t>(2u, m.MemoCount(), L"only keep=6 seq=5 and keep=0 seq=9 survive OnSeal(10)");
+			Assert::AreEqual<uint64_t>(48u + 64u, m.CpuBytes(), L"exact surviving CpuBytes == 112");
+			Assert::AreEqual<uint64_t>(0u, m.GpuBytes(), L"released GPU entry subtracted from GpuBytes");
+			Assert::AreEqual<size_t>(1u, m.RetiredPending(), L"GPU entry with incomplete fence 99 > 10 queued in retired_");
+
+			// Per-key CopyPublished verification.
+			std::vector<uint8_t> b16(16, 0u), b32(32, 0u), b48(48, 0u), b64(64, 0u);
+			Assert::IsFalse(m.CopyPublished(kP1HalfLuma, 10u, b16.data(), b16.size()),
+				L"frameScoped entry at seq 10 released");
+			Assert::IsFalse(m.CopyPublished(kP4SourceStats, 10u, b32.data(), b32.size()),
+				L"stale-epoch entry at seq 10 released");
+			Assert::IsFalse(m.CopyPublished(kP10GrainSplit, 5u, b64.data(), b64.size()),
+				L"keep=0 seq=5 below edge 8 released");
+			Assert::IsTrue(m.CopyPublished(kP11RegionBlockStats, 5u, b48.data(), b48.size()) && b48[0] == 0xB4u,
+				L"keep=6 seq=5 >= EdgeLocked(10, 6)=4 survived");
+			Assert::IsTrue(m.CopyPublished(kP10GrainSplit, 9u, b64.data(), b64.size()) && b64[0] == 0xA3u,
+				L"keep=0 seq=9 >= edge 8 survived");
+
+			// Exact released counters per product.
+			Assert::AreEqual<uint64_t>(1u, m.CountersOf(kP1HalfLuma).released);
+			Assert::AreEqual<uint64_t>(1u, m.CountersOf(kP4SourceStats).released);
+			Assert::AreEqual<uint64_t>(2u, m.CountersOf(kP10GrainSplit).released);   // seq 5 CPU + seq 5 GPU
+			Assert::AreEqual<uint64_t>(0u, m.CountersOf(kP11RegionBlockStats).released);
+
+			// Once fence completes (100 >= 99), OnSeal(11) retires the pending GPU spot while keeping both survivors.
+			completedFence.store(100u, std::memory_order_release);
+			m.OnSeal(11u);
+			Assert::AreEqual<size_t>(0u, m.RetiredPending(), L"retired GPU spot drains once fence 100 completes");
+			Assert::AreEqual<size_t>(2u, m.MemoCount());
+			Assert::AreEqual<uint64_t>(112u, m.CpuBytes());
+		}
 	};
 
 	// G0 gate (owner rule 2026-11-13, refs/129 COMMON RULE): RECURSIVE get-or-compute-and-publish. A fill that needs a
