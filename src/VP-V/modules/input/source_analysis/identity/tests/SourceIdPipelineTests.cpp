@@ -715,5 +715,98 @@ namespace Tests
 			Assert::IsTrue(cleanRes.sigma < 0.05, L"noiseless flat+sloped tile reads near-zero sigma (< 0.05)");
 			Assert::IsTrue(res.sigma > 1.0, L"noisy tile reads real noise sigma (> 1.0 8-bit codes)");
 		}
+
+		// W23-Fix2 Carbon HIGH-1 / MED-4 regression:
+		// Two distinct T x T tiles on the EXACT SAME (memo, seq) inside a full W x H CPU frame
+		// key kBandMemo by (frameW, frameH, cropX, cropY, T, T) so Tile A and Tile B NEVER alias
+		// and each matches its independent memo=nullptr computation.
+		TEST_METHOD(FrameQualityBandMemoDistinctTilesSameSeqNeverAlias)
+		{
+			namespace BM = VpUnit::BandMemo;
+			namespace GB = Vpv::GrainBand;
+			using namespace SourceIdentity;
+			using Reg = VpSkeleton::SkeletonMemo::Registration;
+
+			const int T = 64;
+			const int W = 2 * T, H = T;
+			const std::vector<float> tileA = SidSynth::NoisyTile(T, 3.5, 1111u);
+			const std::vector<float> tileB = SidSynth::NoisyTile(T, 0.25, 2222u);
+
+			// Pack Tile A at (0, 0) and Tile B at (T, 0) inside a single real W x H frame.
+			std::vector<float> fullFrame(static_cast<size_t>(W) * H, 0.0f);
+			for (int y = 0; y < T; ++y)
+			{
+				std::memcpy(fullFrame.data() + static_cast<size_t>(y) * W, tileA.data() + static_cast<size_t>(y) * T, size_t(T) * sizeof(float));
+				std::memcpy(fullFrame.data() + static_cast<size_t>(y) * W + T, tileB.data() + static_cast<size_t>(y) * T, size_t(T) * sizeof(float));
+			}
+
+			VpSkeleton::SkeletonMemo memo;
+			const uint64_t kSeq = 88u;
+			VpSkeleton::OwnerFill p13Cpu;
+			p13Cpu.frameScoped = true;
+			p13Cpu.renderThreadOnly = false;
+			p13Cpu.fill = [&fullFrame, kSeq](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+				if (req.seq != kSeq)
+					return false;
+				out.bytes.resize(fullFrame.size() * sizeof(float));
+				std::memcpy(out.bytes.data(), fullFrame.data(), out.bytes.size());
+				return true;
+			};
+			Assert::IsTrue(memo.RegisterOwnerFill(VpSkeleton::kP13SourceRing, VpSkeleton::AcquireForm::Cpu,
+				VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP13SourceRing), std::move(p13Cpu)) == Reg::Registered);
+
+			const std::shared_ptr<GB::Counters> counters = std::make_shared<GB::Counters>();
+			Assert::IsTrue(memo.RegisterOwnerFill(VpSkeleton::kBandMemo, VpSkeleton::AcquireForm::Cpu,
+				GB::kBandMemoUnit, GB::MakeBandMemoCpuOwnerFill(counters)) == Reg::Registered);
+
+			FrameQuality::TileOrigin originA{ 0u, 0u, static_cast<uint32_t>(W), static_cast<uint32_t>(H) };
+			FrameQuality::TileOrigin originB{ static_cast<uint32_t>(T), 0u, static_cast<uint32_t>(W), static_cast<uint32_t>(H) };
+
+			const FrameQuality::TileNoise resA = FrameQuality::MeasureNoise(tileA.data(), T, &memo, kSeq, originA);
+			const FrameQuality::TileNoise resB = FrameQuality::MeasureNoise(tileB.data(), T, &memo, kSeq, originB);
+			const FrameQuality::TileNoise refA = FrameQuality::MeasureNoise(tileA.data(), T);
+			const FrameQuality::TileNoise refB = FrameQuality::MeasureNoise(tileB.data(), T);
+
+			Assert::IsTrue(resA.valid && resA.usedBandMemo && resA.bandMemoFallback.empty(), L"Tile A hit crop-keyed kBandMemo");
+			Assert::IsTrue(resB.valid && resB.usedBandMemo && resB.bandMemoFallback.empty(), L"Tile B hit crop-keyed kBandMemo");
+			Assert::AreEqual(uint64_t(4), counters->fills.load(), L"two distinct tiles x two sigmas execute 4 fills on same seq");
+			Assert::AreEqual(refA.sigma, resA.sigma, 1e-3, L"Tile A sigma matches independent tile computation");
+			Assert::AreEqual(refB.sigma, resB.sigma, 1e-3, L"Tile B sigma matches independent tile computation");
+			Assert::IsTrue(resA.sigma > 2.0 && resB.sigma < 0.6, L"Tile A (noisy) and Tile B (quiet) stay cleanly separated on same seq");
+
+			// Repeat Tile B reuses cached bands without a 5th fill.
+			const FrameQuality::TileNoise resB2 = FrameQuality::MeasureNoise(tileB.data(), T, &memo, kSeq, originB);
+			Assert::AreEqual(uint64_t(4), counters->fills.load(), L"repeat Tile B reuses cached kBandMemo bands");
+			Assert::AreEqual(resB.sigma, resB2.sigma, 0.0, L"repeat Tile B sigma is exact");
+
+			// Negative control (Rule 3): prove the unkeyed aliasing hazard is real — omitting crop origin maps both
+			// tiles onto one identical VariantKey, whereas crop-keyed variants are strictly distinct, and passing a
+			// non-zero origin without frame dimensions visibly declines rather than aliasing onto (0, 0).
+			BM::BandKey naiveKey;
+			naiveKey.resolution = BM::Stage::Full;
+			naiveKey.width = static_cast<uint32_t>(T);
+			naiveKey.height = static_cast<uint32_t>(T);
+			naiveKey.sigmaPx = 1.0;
+			naiveKey.law = BM::Law::Taps;
+			naiveKey.edge = VpUnit::BandFromBase::EdgeMode::Reflect;
+			naiveKey.minOne = false;
+
+			BM::BandKey keyA = naiveKey;
+			keyA.width = static_cast<uint32_t>(W);
+			keyA.height = static_cast<uint32_t>(H);
+			keyA.cropX = 0u; keyA.cropY = 0u; keyA.cropW = static_cast<uint32_t>(T); keyA.cropH = static_cast<uint32_t>(T);
+			BM::BandKey keyB = keyA;
+			keyB.cropX = static_cast<uint32_t>(T);
+
+			Assert::IsTrue(BM::ToVariant(keyA) != BM::ToVariant(keyB), L"crop-keyed VariantKeys for Tile A and Tile B are distinct");
+			Assert::AreNotEqual(BM::ToVariant(keyA).Hash(), BM::ToVariant(keyB).Hash(), L"crop-keyed hashes for Tile A and Tile B are distinct");
+
+			FrameQuality::TileOrigin missingFrameOrigin{ static_cast<uint32_t>(T), 0u, 0u, 0u };
+			const FrameQuality::TileNoise declined = FrameQuality::MeasureNoise(tileB.data(), T, &memo, kSeq, missingFrameOrigin);
+			Assert::IsTrue(declined.valid, L"declined tile still falls back cleanly to U2 CPU blur");
+			Assert::IsFalse(declined.usedBandMemo, L"non-zero tile origin without frame dims refuses kBandMemo rather than aliasing (0,0)");
+			Assert::IsFalse(declined.bandMemoFallback.empty(), L"declined tile records visible fallback reason");
+			Assert::AreEqual(refB.sigma, declined.sigma, 1e-3, L"fallback sigma still matches Tile B reference");
+		}
 	};
 }
