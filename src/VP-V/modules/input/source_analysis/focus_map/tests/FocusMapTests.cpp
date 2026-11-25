@@ -6,9 +6,13 @@
 // and the lag >= 1 owner fill (ZERO lag-0 kEdgeMap CPU requests, ZERO v1 interim fallback, non-latched
 // ReadbackPending propagation, lag-2 retention vs FrameReleased, kHasGpuMirror == false). CPU only.
 #include "pch.h"
+#include "CppUnitTest.h"
+using namespace Microsoft::VisualStudio::CppUnitTestFramework;
+
 #include <VP-V/modules/input/source_analysis/focus_map/FocusMapFill.h>
 #include <VP-V/modules/input/source_analysis/focus_map/FocusMapGlsl.h>
 #include <VP-V/modules/input/source_analysis/regions/BusyEdge.h>
+#include <VP-V/modules/input/source_analysis/regions/EdgeMapFill.h>
 
 #include <atomic>
 #include <chrono>
@@ -16,19 +20,21 @@
 #include <cstring>
 #include <functional>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace VideoProcessorTest
 {
+	using namespace FocusMap;
+	using RegionEvidence::kPrecursorChannels;
+	using RegionEvidence::kCoverage;
+	using RegionEvidence::kE1;
+	using RegionEvidence::kE2;
+	using RegionEvidence::kE3;
+	using RegionEvidence::kStatN;
+
 	namespace
 	{
-		using namespace FocusMap;
-		using RegionEvidence::kPrecursorChannels;
-		using RegionEvidence::kCoverage;
-		using RegionEvidence::kE1;
-		using RegionEvidence::kE2;
-		using RegionEvidence::kE3;
-		using RegionEvidence::kStatN;
 
 		constexpr int kW = 128, kH = 96;   // block 8: a 16 x 12 grid; the P2 cell is 8 px too
 
@@ -128,9 +134,10 @@ namespace VideoProcessorTest
 		}
 
 		bool Contains(const std::string& s, const char* what) { return s.find(what) != std::string::npos; }
+	}
 
-		TEST_CLASS(FocusMapTests)
-		{
+	TEST_CLASS(FocusMapTests)
+	{
 		public:
 			// WAIVER-FOCUS-EDGEMAP-ONLY: migrated from deleted v1 DefocusBlock to v2 DefocusBlockEdge.
 			// Synthetic edge-gradient ramp: peak |G| rising monotonically drives defocus monotonically from 1 to 0;
@@ -798,6 +805,142 @@ namespace VideoProcessorTest
 					g.gw, g.gh, isolatedMs, liveMs / reps);
 				Logger::WriteMessage(msg);
 			}
-		};
-	}
+
+			// Pass A HIGH-2 regression: when kEdgeMap(seq-2) and kEdgeMap(seq-1) are BOTH Ready in EdgeMapCpuReadback /
+			// ReadbackRing (NOT yet cached in SkeletonMemo), Acquire(kFocusMap, seq, Cpu) retrieves BOTH seq-2 and seq-1
+			// without stale-dropping seq-2. Same-input negative control proves pre-fix keepOlder=0 taking seq-1 first drops seq-2.
+			TEST_METHOD(AcquireRetrievesLagTwoAndLagOneFromReadbackRingWithoutStaleDrop)
+			{
+				using namespace VpSkeleton;
+				using namespace Vpv::Regions;
+
+				struct VramResetScope
+				{
+					VramResetScope() { VramUsers::Instance().ResetForTesting(); }
+					~VramResetScope() { VramUsers::Instance().ResetForTesting(); }
+				} vramScope;
+
+				const Geometry g = Geometry::Make(kW, kH);
+				const std::vector<float> p11 = ConfidentP11Scene(g);
+				const std::vector<uint8_t> crispBytes = EdgeScene(g, [](int, int) { return true; });
+				const std::vector<uint8_t> softLeftBytes = EdgeScene(g, [](int bx, int) { return bx >= 8; });
+
+				class FakeEdgeReadbackDevice : public IReadbackDevice
+				{
+				public:
+					std::vector<char> done;
+					std::vector<std::vector<uint8_t>> payloads;
+					std::vector<uint64_t> slotSeq;
+					std::vector<uint64_t> mappedOrder;
+					const std::vector<uint8_t>* crisp = nullptr;
+					const std::vector<uint8_t>* softLeft = nullptr;
+					int discards = 0;
+
+					FakeEdgeReadbackDevice(size_t slots, const std::vector<uint8_t>* c, const std::vector<uint8_t>* s)
+						: done(slots, 0), payloads(slots), slotSeq(slots, 0), crisp(c), softLeft(s) {}
+
+					bool CopyToStaging(ProductId id, uint64_t seq, int slot) override
+					{
+						if (id != kEdgeMap || slot < 0 || size_t(slot) >= payloads.size())
+							return false;
+						done[size_t(slot)] = 0;
+						slotSeq[size_t(slot)] = seq;
+						payloads[size_t(slot)] = (seq == 4u) ? *softLeft : *crisp;
+						return true;
+					}
+					bool QueryDone(int slot) override
+					{
+						return slot >= 0 && size_t(slot) < done.size() && done[size_t(slot)] != 0;
+					}
+					void Discard(int slot) override
+					{
+						++discards;
+						if (slot >= 0 && size_t(slot) < done.size())
+							done[size_t(slot)] = 0;
+					}
+					const void* MapNoWait(int slot, size_t* bytes) override
+					{
+						if (slot < 0 || size_t(slot) >= payloads.size())
+							return nullptr;
+						mappedOrder.push_back(slotSeq[size_t(slot)]);
+						*bytes = payloads[size_t(slot)].size();
+						return payloads[size_t(slot)].data();
+					}
+					void Unmap(int) override {}
+				};
+
+				// Mandatory same-input negative control: naive ReadbackRing with pre-fix keepOlder=0 taking seq-1 (4)
+				// BEFORE seq-2 (3) stale-drops seq-2 so the lag-2 readback is permanently lost.
+				{
+					FakeEdgeReadbackDevice naiveDev(kEdgeMapReadbackSlots, &crispBytes, &softLeftBytes);
+					VpLaneProducts::ReadbackRing naiveRing(&naiveDev, kEdgeMapReadbackSlots);
+					Assert::IsTrue(naiveRing.Submit(kEdgeMap, 3u));
+					Assert::IsTrue(naiveRing.Submit(kEdgeMap, 4u));
+					naiveDev.done[0] = 1;
+					naiveDev.done[1] = 1;
+					naiveRing.Poll();
+					Assert::IsTrue(naiveRing.HasReady(3u) && naiveRing.HasReady(4u));
+
+					size_t got4 = 0, got3 = 0;
+					Assert::IsTrue(naiveRing.Take(4u, [&](const void*, size_t n) { got4 = n; }, 0u),
+						L"negative control: naive Take(4, keepOlder=0) succeeds");
+					Assert::AreEqual(softLeftBytes.size(), got4);
+					Assert::AreEqual(uint64_t(1), naiveRing.Counters().staleDropped,
+						L"negative control: naive Take(4, keepOlder=0) stale-drops Ready frame 3");
+					Assert::IsFalse(naiveRing.Take(3u, [&](const void*, size_t n) { got3 = n; }, 0u),
+						L"negative control: frame 3 is lost after naive Take(4, keepOlder=0)");
+					Assert::AreEqual(size_t(0), got3);
+				}
+
+				// Production path: EdgeMapCpuReadback + FocusMapFill through SkeletonMemo when BOTH seq 3 and seq 4
+				// are Ready in the ring and NOT yet cached in SkeletonMemo.
+				FakeEdgeReadbackDevice dev(kEdgeMapReadbackSlots, &crispBytes, &softLeftBytes);
+				EdgeMapCpuReadback rb;
+				rb.AttachExternalDevice(&dev, kEdgeMapReadbackSlots, 0u);
+				rb.SetDemand(true);
+
+				Assert::IsTrue(rb.ScheduleExternal(3u));
+				dev.done[0] = 1;
+				Assert::IsTrue(rb.ScheduleExternal(4u));
+				dev.done[1] = 1;
+				rb.Poll();
+				Assert::IsTrue(rb.HasReady(3u) && rb.HasReady(4u),
+					L"precondition: both lag-2 (3) and lag-1 (4) are Ready in ReadbackRing");
+
+				SkeletonMemo m;
+				m.SetRenderThread(std::this_thread::get_id());
+				OwnerFill f11;
+				f11.keepFrames = 2;
+				f11.fill = [&](const OwnerFillRequest&, SkeletonMemo&, OwnerFillOutput& o) {
+					o.bytes = FloatBytes(p11);
+					return true;
+				};
+				Assert::IsTrue(m.RegisterOwnerFill(kEdgeMap, AcquireForm::Cpu, kEdgeMapUnit, MakeEdgeMapCpuOwnerFill(&rb))
+					== SkeletonMemo::Registration::Registered);
+				Assert::IsTrue(m.RegisterOwnerFill(kP11RegionBlockStats, AcquireForm::Cpu, "input/source_analysis/regions", f11)
+					== SkeletonMemo::Registration::Registered);
+				FillConfig cfg;
+				cfg.geometry = [](uint64_t, int& w, int& h) { w = kW; h = kH; return true; };
+				Assert::IsTrue(m.RegisterOwnerFill(kFocusMap, AcquireForm::Cpu, kUnitPath, MakeOwnerFill(cfg))
+					== SkeletonMemo::Registration::Registered);
+
+				Assert::AreEqual(uint64_t(0), m.CountersOf(kEdgeMap).ownerFillCalls,
+					L"precondition: neither kEdgeMap(3) nor kEdgeMap(4) is cached in SkeletonMemo yet");
+
+				const AcquireResult r5 = m.Acquire(kFocusMap, 5u, AcquireForm::Cpu);
+				Assert::IsTrue(r5.Ok() && r5.status == AcquireStatus::FilledAtRead,
+					L"Acquire(kFocusMap, 5) succeeds when both lag-2 (3) and lag-1 (4) start uncached in ReadbackRing");
+				Assert::AreEqual(0, CountPacked(r5, g.Blocks(), kNoPrevious),
+					L"lag-2 kEdgeMap(3) was NOT stale-dropped: zero kNoPrevious blocks");
+				Assert::AreEqual(8 * 12, CountPacked(r5, g.Blocks(), kChanged),
+					L"rack-focus delta between seq 3 (crisp) and seq 4 (soft left) flags exact 8x12 left half");
+				Assert::AreEqual(uint64_t(2), rb.Counters().taken, L"both seq 3 and seq 4 taken from ReadbackRing");
+				Assert::AreEqual(uint64_t(0), rb.Counters().staleDropped, L"zero stale drops");
+				Assert::AreEqual(size_t(2), dev.mappedOrder.size(), L"exactly two ring mappings");
+				Assert::AreEqual(uint64_t(3), dev.mappedOrder[0], L"FocusMapFill acquires lag-2 (3) before lag-1 (4)");
+				Assert::AreEqual(uint64_t(4), dev.mappedOrder[1], L"FocusMapFill acquires lag-1 (4) second");
+
+				rb.SetDemand(false);
+			}
+	};
 }

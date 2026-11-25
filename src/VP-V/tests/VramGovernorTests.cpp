@@ -327,6 +327,114 @@ namespace VramGovernorTestsNs
 				Assert::AreEqual(a.governor.grants[i].level, b.governor.grants[i].level);
 			Assert::AreEqual(a.notice, b.notice);
 		}
+
+		// Pass A MED-5 regression: when TierInput::otherUsers contains an entry whose id equals ProductVramUserId(kEdgeMap)
+		// (e.g. EdgeMapCpuReadback's staging declaration) on a graph where kEdgeMap is active, PlanTiers merges both into
+		// EXACTLY ONE UserGrant with bytes == productBytes + readbackBytes (never duplicate grants with the same id).
+		TEST_METHOD(PlanTiersMergesOtherUserWithSameProductVramUserIdWithoutDuplicate)
+		{
+			const Registry reg = SkeletonProducts();
+			ConsumerDecl c;
+			c.id = 1;
+			AddConsume(c, kEdgeMap);
+			GraphSettings gs;
+			gs.dims.width = 1920;
+			gs.dims.height = 1080;
+			gs.renderAhead = 2;
+			gs.laneLead = 1;
+			const Graph g = BuildGraph(reg, { c }, gs);
+			Assert::IsTrue(g.valid, L"graph with active kEdgeMap is valid");
+			Assert::IsNotNull(g.Find(kEdgeMap), L"kEdgeMap node is active in graph");
+
+			CardProfile big = Card4GB();
+			big.vramBudgetBytes = 23000 * kMB;
+			const uint16_t edgeUserId = ProductVramUserId(kEdgeMap);
+			const uint64_t readbackBytes = 3ull * 1920ull * 1080ull * 4ull * 2ull;   // 3 R32F staging + GPU copy slots at 1080p
+
+			// Mandatory same-input negative control #1: without otherUsers, kEdgeMap grant is strictly smaller by readbackBytes.
+			const TierPlan baseline = PlanTiers(reg, g, big, TierInput());
+			size_t baselineCount = 0;
+			const UserGrant* baselineGrant = nullptr;
+			for (const UserGrant& gr : baseline.governor.grants) {
+				if (gr.id == edgeUserId) {
+					++baselineCount;
+					baselineGrant = &gr;
+				}
+			}
+			Assert::AreEqual(size_t(1), baselineCount, L"negative control: baseline has exactly one kEdgeMap grant");
+			Assert::IsNotNull(baselineGrant);
+			const uint64_t productBytes = baselineGrant->bytes;
+			Assert::IsTrue(productBytes > 0u, L"kEdgeMap product VRAM grant is positive");
+
+			VramUser rbUser;
+			rbUser.id = edgeUserId;
+			rbUser.name = "edge_map CPU readback";
+			rbUser.tier = Tier::T1;
+			rbUser.lossless = false;
+			rbUser.levels = { readbackBytes };
+			rbUser.levelText = { nullptr };
+
+			// Mandatory same-input negative control #2: raw PlanVram without PlanTiers's id-merge emits 2 duplicate grants.
+			GovernorInput dupIn;
+			dupIn.card = big;
+			dupIn.users.push_back(rbUser);
+			VramUser prodOnly = rbUser;
+			prodOnly.name = "edge_map";
+			prodOnly.levels = { productBytes };
+			dupIn.users.push_back(prodOnly);
+			const GovernorPlan dupPlan = PlanVram(dupIn);
+			size_t dupCount = 0;
+			for (const UserGrant& gr : dupPlan.grants)
+				if (gr.id == edgeUserId)
+					++dupCount;
+			Assert::AreEqual(size_t(2), dupCount,
+				L"negative control: unmerged duplicate ProductVramUserId(kEdgeMap) entries produce 2 grants in PlanVram");
+
+			// Production PlanTiers with otherUsers entry sharing ProductVramUserId(kEdgeMap): merged into EXACTLY ONE grant.
+			TierInput withReadback;
+			withReadback.otherUsers.push_back(rbUser);
+			const TierPlan merged = PlanTiers(reg, g, big, withReadback);
+			size_t mergedCount = 0;
+			const UserGrant* mergedGrant = nullptr;
+			for (const UserGrant& gr : merged.governor.grants) {
+				if (gr.id == edgeUserId) {
+					++mergedCount;
+					mergedGrant = &gr;
+				}
+			}
+			Assert::AreEqual(size_t(1), mergedCount,
+				L"MED-5: PlanTiers produces EXACTLY ONE grant with id == ProductVramUserId(kEdgeMap)");
+			Assert::IsNotNull(mergedGrant);
+			Assert::AreEqual(productBytes + readbackBytes, mergedGrant->bytes,
+				L"MED-5: merged grant bytes == productBytes + readbackBytes");
+			Assert::IsTrue(baselineGrant->bytes < mergedGrant->bytes
+				&& (mergedGrant->bytes - baselineGrant->bytes) == readbackBytes,
+				L"negative control: without otherUsers, grant bytes are strictly smaller by exact readbackBytes");
+			Assert::AreEqual(baseline.governor.totalBytes + readbackBytes, merged.governor.totalBytes,
+				L"MED-5: governor totalBytes increases by exact readbackBytes");
+
+			// Tight-budget check: when kEdgeMap drops to its minimum level, readbackBytes remains added with still 1 grant.
+			CardProfile tight = Card4GB();
+			tight.vramUsageBytes = 0;
+			tight.vramBudgetBytes = 10 * kMB;
+			const TierPlan baseTight = PlanTiers(reg, g, tight, TierInput());
+			const TierPlan mergedTight = PlanTiers(reg, g, tight, withReadback);
+			size_t mergedTightCount = 0;
+			const UserGrant* mergedTightGrant = nullptr;
+			for (const UserGrant& gr : mergedTight.governor.grants) {
+				if (gr.id == edgeUserId) {
+					++mergedTightCount;
+					mergedTightGrant = &gr;
+				}
+			}
+			const UserGrant* baseTightGrant = baseTight.governor.Find(edgeUserId);
+			Assert::IsNotNull(baseTightGrant);
+			Assert::AreEqual(size_t(1), mergedTightCount,
+				L"MED-5: tight-budget PlanTiers still produces EXACTLY ONE grant for ProductVramUserId(kEdgeMap)");
+			Assert::IsNotNull(mergedTightGrant);
+			Assert::AreEqual(baseTightGrant->bytes + readbackBytes, mergedTightGrant->bytes,
+				L"MED-5: shed level bytes still include merged readbackBytes");
+		}
 	};
 
 	// MV7: the VRAM users outside the product catalog are declared to the governor (core/VramUsers.h). CPU only.

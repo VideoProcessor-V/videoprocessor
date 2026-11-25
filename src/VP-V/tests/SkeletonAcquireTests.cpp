@@ -1766,6 +1766,7 @@ namespace SkeletonAcquireTestsNs
 				t2.join();
 			}, 10000);
 			Assert::IsTrue(ran, L"concurrent ReadbackPending waiters wake promptly without deadlock");
+			Assert::AreEqual(1, st->calls.load(), L"concurrent waiter woke from t1's fill rather than running a second fill");
 			Assert::IsTrue(st->t1Res.status == AcquireStatus::Unavailable && st->t1Res.cause == AcquireCause::ReadbackPending,
 				L"caller thread finishes with ReadbackPending");
 			Assert::IsTrue(st->t2Res.status == AcquireStatus::Unavailable && st->t2Res.cause == AcquireCause::ReadbackPending,
@@ -1775,6 +1776,7 @@ namespace SkeletonAcquireTestsNs
 			const AcquireResult rRetry = st->memo.Acquire(kP10GrainSplit, 20u, AcquireForm::Cpu);
 			Assert::IsTrue(rRetry.status == AcquireStatus::FilledAtRead && rRetry.Ok(),
 				L"subsequent Acquire on the same key succeeds with FilledAtRead after waiters woke");
+			Assert::AreEqual(2, st->calls.load(), L"retry invokes fill once");
 			Assert::AreEqual(size_t(12), rRetry.cpuBytes);
 			Assert::AreEqual(uint8_t(0x7B), rRetry.cpu[0]);
 		}

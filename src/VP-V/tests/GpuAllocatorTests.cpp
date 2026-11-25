@@ -1039,8 +1039,7 @@ namespace GpuAllocatorTestsNs
 			// v3 (WAIVER-P10V3-01): compact 8N + 4 vs full 16N + 4 B/px (the same half-size scratch for both layouts).
 			const Dims d = MkDims(1920, 1080);
 			const uint64_t px = uint64_t(d.width) * d.height;
-			// WAIVER-K5-GS-LEDGER: before: CellsAt(d, 4) hardcoded shift 4; after: derived via LedgerBlockShiftFor(1080) == 4 (RegionEvidence::BlockSizeFor(1080) == 16). All existing assertions preserved.
-			const uint64_t blocks = CellsAt(d, GrainSplit::LedgerBlockShiftFor(static_cast<int>(d.height)));
+			const uint64_t blocks = CellsAt(d, 4);
 			const std::vector<std::string> two = GrainSplit::StorageLedgerLines(d, 2);
 			const std::vector<std::string> six = GrainSplit::StorageLedgerLines(d, 6);
 			Assert::AreEqual(size_t(2), two.size(), L"two lines");
@@ -1401,6 +1400,11 @@ namespace GpuAllocatorTestsNs
 				Assert::IsTrue(linesHardcoded4[1].find(compactMb16) != std::string::npos,
 					L"negative control: hardcoded shift 4 on exact same 8K input reports inflated shift-4 compact peak");
 			}
+
+			// 3b. 1080p (1920 x 1080): BlockSizeFor(1080) == 16 -> LedgerBlockShiftFor(1080) == 4 (1u << 4 == 16).
+			Assert::AreEqual(16, RegionEvidence::BlockSizeFor(1080), L"1080p BlockSizeFor(1080) == 16");
+			Assert::AreEqual(uint8_t(4), GrainSplit::LedgerBlockShiftFor(1080), L"1080p B=16 -> shift 4");
+			Assert::AreEqual(16u, 1u << GrainSplit::LedgerBlockShiftFor(1080), L"1u << LedgerBlockShiftFor(1080) == 16");
 
 			// 4. Scope guard: P10 declaration shift law (BlockShiftFor) was NOT unified/altered - ledger amended ONLY.
 			Assert::AreEqual(uint8_t(4), GrainSplit::BlockShiftFor(32),
