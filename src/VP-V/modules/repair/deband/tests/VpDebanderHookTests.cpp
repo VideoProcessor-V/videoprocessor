@@ -4,10 +4,13 @@
 // VP-V GPU hook tests (moved out of Bill's LibplaceboLutParserTests.cpp; test names unchanged).
 #include "pch.h"
 #include <VP-V/tests/VpLutGpuTestSupport.h>
+#include <VP-V/modules/input/capture/SourcePlanes.h>
 #include <VP-V/modules/input/source_analysis/regions/BusyEdge.h>
+#include <VP-V/modules/input/source_analysis/regions/RegionEvidence.h>
 #include <VP-V/modules/control/skeleton/gpu/OwnerGpuDevice.h>
 #include <VP-V/modules/repair/grain_split/BandMemo.h>
 #include <VP-V/modules/repair/grain_split/BandMemoFill.h>
+#include <VP-V/modules/repair/grain_split/GrainSplitVariantOwner.h>
 #include <vprenderer/GrainPreserve.h>
 
 #include <cmath>
@@ -994,6 +997,424 @@ namespace VideoProcessorTest
 			}
 			Assert::IsTrue(zeroDiffPixels > 100 && maxZeroDiff >= 64,
 				L"negative control: zeroed low band diverges by >= 1 10-bit code across >100 pixels");
+		}
+
+		// W23-B3 M2#6 (15b A3): VpDebander grain guard acquires shared kP10GrainSplit (luma),
+		// kP10cGrainSplitChroma (Cb/Cr), and kP11RegionBlockStats (re_s1 structure tensor); preserves
+		// luma & chroma grain, smooths banding ramp, uses P11 directional contour tensor, preserves
+		// unclamped BTB (< 0.0) and WTW (> 1.0) on float planes, and visibly reports fallbacks when
+		// P10/P11 are absent.
+		BEGIN_TEST_METHOD_ATTRIBUTE(VpDebanderGrainGuardReadsP10AndP11TensorAndPreservesBtbWtw)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(VpDebanderGrainGuardReadsP10AndP11TensorAndPreservesBtbWtw)
+		{
+			using Reg = VpSkeleton::SkeletonMemo::Registration;
+			namespace G = GrainSplit::Gpu;
+
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+
+			struct DispatchGuard
+			{
+				pl_dispatch dispatch = nullptr;
+				explicit DispatchGuard(pl_dispatch d) : dispatch(d) {}
+				~DispatchGuard() { if (dispatch) pl_dispatch_destroy(&dispatch); }
+				DispatchGuard(const DispatchGuard&) = delete;
+				DispatchGuard& operator=(const DispatchGuard&) = delete;
+			};
+			struct TexGuard
+			{
+				pl_gpu gpu = nullptr;
+				pl_tex tex = nullptr;
+				TexGuard(pl_gpu g, pl_tex t) : gpu(g), tex(t) {}
+				~TexGuard() { if (gpu && tex) pl_tex_destroy(gpu, &tex); }
+				TexGuard(const TexGuard&) = delete;
+				TexGuard& operator=(const TexGuard&) = delete;
+			};
+			struct DebandGuard
+			{
+				pl_gpu gpu = nullptr;
+				VpDebander::Module mod;
+				explicit DebandGuard(pl_gpu g) : gpu(g) {}
+				~DebandGuard() { mod.Release(gpu); }
+				DebandGuard(const DebandGuard&) = delete;
+				DebandGuard& operator=(const DebandGuard&) = delete;
+			};
+			struct P10P11Rig
+			{
+				Vpv::Skeleton::OwnerGpuDevice ownerDev;
+				VpSkeleton::SkeletonMemo memo;
+				G::VariantOwner grainOwner;
+				explicit P10P11Rig(pl_gpu g) : ownerDev(g)
+				{
+					memo.SetHost(this);
+					memo.SetRenderThread(std::this_thread::get_id());
+					memo.SetGpuDispatcherPresent(true);
+					memo.SetGpuBudget(true, uint64_t(1) << 29);
+					memo.SetGpuDevice(&ownerDev);
+				}
+				~P10P11Rig()
+				{
+					memo.ReleaseGpuSpots();
+					Vpv::Capture::SourcePlanes::Forget(this);
+					ownerDev.Release();
+				}
+				P10P11Rig(const P10P11Rig&) = delete;
+				P10P11Rig& operator=(const P10P11Rig&) = delete;
+			};
+
+			DispatchGuard dispGuard(pl_dispatch_create(fixture.Log(), gpu));
+			pl_dispatch dispatch = dispGuard.dispatch;
+			Assert::IsNotNull(dispatch, L"pl_dispatch_create succeeded");
+
+			const int W = 384, H = 128;
+			const int CW = 192, CH = 64;
+			const float kCodeUnit = 1.0f / 1023.0f;
+
+			// Build independent synthetic 3-plane YCbCr float (r32f) picture with 4 distinct 96-px horizontal zones
+			// (well beyond the 16-px luma / 8-px chroma deband radius so every interior ROI is cross-zone isolated):
+			//   Zone 0 [0..96):     4-code banding ramp (every 16 px) -> must be smoothed by deband
+			//   Zone 1 [96..192):   flat pedestal + sigma=3.0 codes grain -> must be preserved by P10/P10c grain guard
+			//   Zone 2 [192..288):  sharp vertical contour step (+28 codes at x=240) -> protected by P11 re_s1 tensor
+			//   Zone 3 [288..384):  BTB (-0.15f, top half) & WTW (+1.18f, bottom half) -> must stay unclamped
+			std::vector<float> yData(static_cast<size_t>(W) * H, 0.0f);
+			std::vector<float> cbData(static_cast<size_t>(CW) * CH, 0.0f);
+			std::vector<float> crData(static_cast<size_t>(CW) * CH, 0.0f);
+
+			std::mt19937 rngY(15031u), rngCb(15032u), rngCr(15033u);
+			std::normal_distribution<float> grainDist(0.0f, 3.0f);
+
+			for (int y = 0; y < H; ++y)
+			{
+				for (int x = 0; x < W; ++x)
+				{
+					float v = 0.0f;
+					if (x < 96)
+						v = (300.0f + 4.0f * static_cast<float>(x / 16)) * kCodeUnit;
+					else if (x < 192)
+						v = (500.0f + grainDist(rngY)) * kCodeUnit;
+					else if (x < 288)
+						v = (x < 240 ? 450.0f : 478.0f) * kCodeUnit;
+					else
+						v = (y < H / 2) ? -0.15f : 1.18f;
+					yData[static_cast<size_t>(y) * W + x] = v;
+				}
+			}
+			for (int y = 0; y < CH; ++y)
+			{
+				for (int x = 0; x < CW; ++x)
+				{
+					float cb = 0.0f, cr = 0.0f;
+					if (x < 48)
+					{
+						cb = (480.0f + 4.0f * static_cast<float>(x / 8)) * kCodeUnit;
+						cr = (520.0f + 4.0f * static_cast<float>(x / 8)) * kCodeUnit;
+					}
+					else if (x < 96)
+					{
+						cb = (512.0f + grainDist(rngCb)) * kCodeUnit;
+						cr = (512.0f + grainDist(rngCr)) * kCodeUnit;
+					}
+					else if (x < 144)
+					{
+						cb = (x < 120 ? 480.0f : 508.0f) * kCodeUnit;
+						cr = (x < 120 ? 500.0f : 528.0f) * kCodeUnit;
+					}
+					else
+					{
+						cb = (y < CH / 2) ? -0.12f : 1.15f;
+						cr = (y < CH / 2) ? -0.11f : 1.14f;
+					}
+					cbData[static_cast<size_t>(y) * CW + x] = cb;
+					crData[static_cast<size_t>(y) * CW + x] = cr;
+				}
+			}
+
+			pl_fmt r32fFmt = pl_find_named_fmt(gpu, "r32f");
+			pl_fmt rgba32fFmt = pl_find_named_fmt(gpu, "rgba32f");
+			Assert::IsNotNull(r32fFmt, L"r32f format available");
+			Assert::IsNotNull(rgba32fFmt, L"rgba32f format available");
+
+			auto uploadR32f = [&](int w, int h, const std::vector<float>& data) {
+				pl_tex_params p{};
+				p.w = w; p.h = h; p.format = r32fFmt; p.sampleable = true; p.initial_data = data.data();
+				pl_tex t = pl_tex_create(gpu, &p);
+				Assert::IsNotNull(t, L"r32f upload texture created");
+				return t;
+			};
+			auto downloadR32f = [&](pl_tex tex, int w, int h) {
+				pl_tex_params rp{};
+				rp.w = w; rp.h = h; rp.format = tex->params.format; rp.host_readable = true; rp.blit_dst = true;
+				TexGuard readable(gpu, pl_tex_create(gpu, &rp));
+				Assert::IsNotNull(readable.tex, L"readable float blit target created");
+				pl_tex_blit_params bp{};
+				bp.src = tex;
+				bp.dst = readable.tex;
+				pl_tex_blit(gpu, &bp);
+				pl_gpu_finish(gpu);
+				std::vector<float> out(static_cast<size_t>(w) * h, 0.0f);
+				pl_tex_transfer_params dl{};
+				dl.tex = readable.tex;
+				dl.ptr = out.data();
+				Assert::IsTrue(pl_tex_download(gpu, &dl), L"r32f download succeeded");
+				return out;
+			};
+
+			TexGuard yTex(gpu, uploadR32f(W, H, yData));
+			TexGuard cbTex(gpu, uploadR32f(CW, CH, cbData));
+			TexGuard crTex(gpu, uploadR32f(CW, CH, crData));
+
+			// Build two synthetic P11 re_s1 (jxx, jyy, jxy, lap_e) textures:
+			//   (i)  strong vertical-contour tensor (jxx=1000, jyy=0, jxy=0, lap_e=100),
+			//   (ii) zero tensor (0, 0, 0, 0) for same-input negative control proving P11 is genuinely consumed.
+			const int p11Block = RegionEvidence::BlockSizeFor(H);
+			const int p11W = (W + p11Block - 1) / p11Block;
+			const int p11H = (H + p11Block - 1) / p11Block;
+			std::vector<float> strongTensor(static_cast<size_t>(p11W) * p11H * 4u, 0.0f);
+			for (size_t i = 0; i < static_cast<size_t>(p11W) * p11H; ++i)
+			{
+				strongTensor[i * 4u + 0u] = 1000.0f;   // jxx: strong horizontal gradient -> vertical contour (along = +/-y)
+				strongTensor[i * 4u + 1u] = 0.0f;      // jyy
+				strongTensor[i * 4u + 2u] = 0.0f;      // jxy
+				strongTensor[i * 4u + 3u] = 100.0f;    // lap_e
+			}
+			const std::vector<float> zeroTensor(static_cast<size_t>(p11W) * p11H * 4u, 0.0f);
+			auto uploadTensor = [&](const std::vector<float>& tdata) {
+				pl_tex_params tp{};
+				tp.w = p11W; tp.h = p11H; tp.format = rgba32fFmt; tp.sampleable = true; tp.initial_data = tdata.data();
+				pl_tex t = pl_tex_create(gpu, &tp);
+				Assert::IsNotNull(t, L"P11 re_s1 rgba32f texture created");
+				return t;
+			};
+			TexGuard p11StrongTex(gpu, uploadTensor(strongTensor));
+			TexGuard p11ZeroTex(gpu, uploadTensor(zeroTensor));
+
+			pl_frame srcFrame{};
+			srcFrame.num_planes = 3;
+			srcFrame.planes[0].texture = yTex.tex;  srcFrame.planes[0].components = 1; srcFrame.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+			srcFrame.planes[1].texture = cbTex.tex; srcFrame.planes[1].components = 1; srcFrame.planes[1].component_mapping[0] = PL_CHANNEL_CB;
+			srcFrame.planes[2].texture = crTex.tex; srcFrame.planes[2].components = 1; srcFrame.planes[2].component_mapping[0] = PL_CHANNEL_CR;
+			srcFrame.repr.sys = PL_COLOR_SYSTEM_BT_709;
+			srcFrame.repr.levels = PL_COLOR_LEVELS_LIMITED;
+			srcFrame.repr.bits.sample_depth = 32;
+			srcFrame.repr.bits.color_depth = 10;
+			srcFrame.repr.bits.bit_shift = 0;
+			srcFrame.color = pl_color_space_bt709;
+
+			auto setupRig = [&](P10P11Rig& rig, pl_tex p11Tex, uint64_t seq) {
+				Assert::IsTrue(rig.memo.RegisterOwnerFill(VpSkeleton::kP13SourceRing, VpSkeleton::AcquireForm::Gpu,
+					Vpv::Capture::SourcePlanes::kUnit, Vpv::Capture::SourcePlanes::MakeOwnerFill()) == Reg::Registered,
+					L"P13 registered");
+				Assert::IsTrue(rig.grainOwner.Register(rig.memo, W, H) == Reg::Registered, L"P10 registered");
+				Assert::IsTrue(rig.grainOwner.RegisterChroma(rig.memo, CW, CH) == Reg::Registered, L"P10c registered");
+				VpSkeleton::OwnerFill p11Fill;
+				p11Fill.view = true;
+				p11Fill.frameScoped = true;
+				p11Fill.fill = [p11Tex, p11W, p11H, seq](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+					if (req.seq != seq) return false;
+					out.gpu.resource = const_cast<void*>(static_cast<const void*>(p11Tex));
+					out.gpu.width = static_cast<uint32_t>(p11W);
+					out.gpu.height = static_cast<uint32_t>(p11H);
+					out.gpu.bytes = 0;
+					return true;
+				};
+				Assert::IsTrue(rig.memo.RegisterOwnerFill(VpSkeleton::kP11RegionBlockStats, VpSkeleton::AcquireForm::Gpu,
+					VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP11RegionBlockStats), std::move(p11Fill)) == Reg::Registered,
+					L"P11 registered");
+				Vpv::Capture::SourcePlaneSet set;
+				set.seq = seq;
+				set.planes = 3;
+				set.tex[0] = yTex.tex; set.components[0] = 1;
+				set.tex[1] = cbTex.tex; set.components[1] = 1;
+				set.tex[2] = crTex.tex; set.components[2] = 1;
+				set.rgb = false;
+				set.repr = srcFrame.repr;
+				set.origin = "vpdebander p10/p10c/p11 test";
+				Assert::IsTrue(Vpv::Capture::SourcePlanes::Offer(&rig, set), L"3-plane float P13 offered");
+			};
+
+			auto zoneRms = [](const std::vector<float>& img, int w, int x0, int x1, int y0, int y1, float pedestal) -> double {
+				double sum = 0.0;
+				int n = 0;
+				for (int y = y0; y < y1; ++y)
+					for (int x = x0; x < x1; ++x)
+					{
+						const double d = static_cast<double>(img[static_cast<size_t>(y) * w + x] - pedestal);
+						sum += d * d;
+						++n;
+					}
+				return std::sqrt(sum / static_cast<double>(n));
+			};
+			auto rampStaircaseRms = [&](const std::vector<float>& img) -> double {
+				std::vector<double> col;
+				for (int x = 20; x < 76; ++x)
+				{
+					double m = 0.0;
+					for (int y = 20; y < H - 20; ++y)
+						m += static_cast<double>(img[static_cast<size_t>(y) * W + x]) / kCodeUnit;
+					col.push_back(m / static_cast<double>(H - 40));
+				}
+				double sx = 0, sy = 0, sxx = 0, sxy = 0;
+				const double k = static_cast<double>(col.size());
+				for (size_t i = 0; i < col.size(); ++i) { sx += i; sy += col[i]; sxx += double(i) * i; sxy += i * col[i]; }
+				const double b = (k * sxy - sx * sy) / (k * sxx - sx * sx), a = (sy - b * sx) / k;
+				double e = 0.0;
+				for (size_t i = 0; i < col.size(); ++i) e += (col[i] - a - b * i) * (col[i] - a - b * i);
+				return std::sqrt(e / k);
+			};
+
+			VpDebander::Params params;
+			params.thresholdCodes = 12.0;
+			params.colorDepth = 10;
+			params.radiusScale = 1.0;   // 16-px luma / 8-px chroma radius; splitScale == 1.0 for all planes
+			params.grainGuard = true;
+			params.grainSplit = true;
+			params.sequence = 201u;
+
+			// 1. Protected path: P10 (luma) + P10c (Cb/Cr) + strong P11 tensor.
+			P10P11Rig strongRig(gpu);
+			setupRig(strongRig, p11StrongTex.tex, params.sequence);
+			params.memo = &strongRig.memo;
+
+			DebandGuard debandStrong(gpu);
+			pl_frame outStrong{};
+			Assert::IsTrue(debandStrong.mod.Apply(gpu, dispatch, srcFrame, params, outStrong),
+				ExtendedRangeGpuProbe::ToWide(debandStrong.mod.LastError()).c_str());
+			Assert::AreEqual(3ull, debandStrong.mod.GrainGuardHits(), L"all 3 planes (Y, Cb, Cr) hit shared P10/P10c + P11 grain guard");
+			Assert::AreEqual(0ull, debandStrong.mod.GrainGuardFallbacks(), L"zero grain-guard fallbacks when P10/P10c/P11 registered");
+			Assert::AreEqual(uint64_t(1), strongRig.grainOwner.Computes(), L"P10 luma computed once");
+			Assert::AreEqual(uint64_t(2), strongRig.grainOwner.ChromaComputes(), L"P10c chroma computed once per plane (Cb, Cr)");
+
+			const std::vector<float> yStrong = downloadR32f(outStrong.planes[0].texture, W, H);
+			const std::vector<float> cbStrong = downloadR32f(outStrong.planes[1].texture, CW, CH);
+			const std::vector<float> crStrong = downloadR32f(outStrong.planes[2].texture, CW, CH);
+
+			// 1a. Banding ramp in Zone 0 is smoothed.
+			const double rampInRms = rampStaircaseRms(yData);
+			const double rampOutRms = rampStaircaseRms(yStrong);
+			Assert::IsTrue(rampInRms > 0.8 && rampOutRms < 0.55 * rampInRms,
+				L"Zone 0 banding staircase is smoothed by >45% under P10+P11 grain guard");
+
+			// 1b. Grain in Zone 1 is preserved on BOTH luma (P10) and chroma (P10c).
+			const double yGrainIn = zoneRms(yData, W, 116, 172, 20, 108, 500.0f * kCodeUnit);
+			const double yGrainStrong = zoneRms(yStrong, W, 116, 172, 20, 108, 500.0f * kCodeUnit);
+			const double cbGrainIn = zoneRms(cbData, CW, 58, 86, 12, 52, 512.0f * kCodeUnit);
+			const double cbGrainStrong = zoneRms(cbStrong, CW, 58, 86, 12, 52, 512.0f * kCodeUnit);
+			const double crGrainIn = zoneRms(crData, CW, 58, 86, 12, 52, 512.0f * kCodeUnit);
+			const double crGrainStrong = zoneRms(crStrong, CW, 58, 86, 12, 52, 512.0f * kCodeUnit);
+			Assert::IsTrue(yGrainStrong > 0.90 * yGrainIn, L"P10 grain guard preserves >90% of luma grain RMS");
+			Assert::IsTrue(cbGrainStrong > 0.88 * cbGrainIn, L"P10c grain guard preserves >88% of Cb grain RMS");
+			Assert::IsTrue(crGrainStrong > 0.88 * crGrainIn, L"P10c grain guard preserves >88% of Cr grain RMS");
+
+			// 1c. Extended-range BTB (< 0.0) and WTW (> 1.0) in Zone 3 stay strictly unclamped on luma and chroma!
+			float maxBtbY = -1e9f, minWtwY = 1e9f;
+			for (int y = 12; y < 44; ++y)
+				for (int x = 308; x < 364; ++x)
+					maxBtbY = (std::max)(maxBtbY, yStrong[static_cast<size_t>(y) * W + x]);
+			for (int y = 84; y < 116; ++y)
+				for (int x = 308; x < 364; ++x)
+					minWtwY = (std::min)(minWtwY, yStrong[static_cast<size_t>(y) * W + x]);
+			Assert::IsTrue(maxBtbY < -0.10f, L"luma BTB (-0.15) stays strictly below 0.0 (unclamped)");
+			Assert::IsTrue(minWtwY > 1.12f, L"luma WTW (+1.18) stays strictly above 1.0 (unclamped)");
+
+			float maxBtbCb = -1e9f, minWtwCb = 1e9f;
+			for (int y = 6; y < 22; ++y)
+				for (int x = 154; x < 182; ++x)
+					maxBtbCb = (std::max)(maxBtbCb, cbStrong[static_cast<size_t>(y) * CW + x]);
+			for (int y = 42; y < 58; ++y)
+				for (int x = 154; x < 182; ++x)
+					minWtwCb = (std::min)(minWtwCb, cbStrong[static_cast<size_t>(y) * CW + x]);
+			Assert::IsTrue(maxBtbCb < -0.08f, L"chroma Cb BTB (-0.12) stays strictly below 0.0 (unclamped)");
+			Assert::IsTrue(minWtwCb > 1.10f, L"chroma Cb WTW (+1.15) stays strictly above 1.0 (unclamped)");
+
+			// 2. Negative control (a1): zero-tensor P11 vs strong-tensor P11 on the EXACT SAME input & P10/P10c split
+			//    proves P11 re_s1 tensor genuinely drives directional contour protection in Zone 2 (x = 238..241).
+			P10P11Rig zeroP11Rig(gpu);
+			VpDebander::Params zeroP11Params = params;
+			zeroP11Params.sequence = 202u;
+			setupRig(zeroP11Rig, p11ZeroTex.tex, zeroP11Params.sequence);
+			zeroP11Params.memo = &zeroP11Rig.memo;
+
+			DebandGuard debandZeroP11(gpu);
+			pl_frame outZeroP11{};
+			Assert::IsTrue(debandZeroP11.mod.Apply(gpu, dispatch, srcFrame, zeroP11Params, outZeroP11),
+				ExtendedRangeGpuProbe::ToWide(debandZeroP11.mod.LastError()).c_str());
+			Assert::AreEqual(3ull, debandZeroP11.mod.GrainGuardHits(), L"zero-tensor P11 still hits P10+P11 path");
+			Assert::AreEqual(0ull, debandZeroP11.mod.GrainGuardFallbacks(), L"zero-tensor P11 has zero fallbacks");
+
+			const std::vector<float> yZeroP11 = downloadR32f(outZeroP11.planes[0].texture, W, H);
+			double strongEdgeErr = 0.0, zeroEdgeErr = 0.0, maxP11Delta = 0.0;
+			int edgeCount = 0;
+			for (int y = 24; y < H - 24; ++y)
+			{
+				for (int x = 238; x <= 241; ++x)
+				{
+					const size_t idx = static_cast<size_t>(y) * W + x;
+					const double orig = static_cast<double>(yData[idx]) / kCodeUnit;
+					const double sVal = static_cast<double>(yStrong[idx]) / kCodeUnit;
+					const double zVal = static_cast<double>(yZeroP11[idx]) / kCodeUnit;
+					strongEdgeErr += std::fabs(sVal - orig);
+					zeroEdgeErr += std::fabs(zVal - orig);
+					maxP11Delta = (std::max)(maxP11Delta, std::fabs(sVal - zVal));
+					++edgeCount;
+				}
+			}
+			strongEdgeErr /= static_cast<double>(edgeCount);
+			zeroEdgeErr /= static_cast<double>(edgeCount);
+			Assert::IsTrue(maxP11Delta > 0.5,
+				L"negative control: changing P11 re_s1 tensor from strong contour to zero measurably shifts contour pixels (>0.5 code)");
+			Assert::IsTrue(strongEdgeErr < zeroEdgeErr,
+				L"strong P11 directional tensor preserves the vertical contour strictly tighter than zero P11 tensor");
+
+			// 3. Negative control (a2): absent products (memo=nullptr and unregistered memo) increment GrainGuardFallbacks()
+			//    and populate non-empty LastGrainGuardFallback() (Rule 4 visible fallback).
+			{
+				VpDebander::Params nullParams = params;
+				nullParams.memo = nullptr;
+				DebandGuard debandNull(gpu);
+				pl_frame outNull{};
+				Assert::IsTrue(debandNull.mod.Apply(gpu, dispatch, srcFrame, nullParams, outNull),
+					ExtendedRangeGpuProbe::ToWide(debandNull.mod.LastError()).c_str());
+				Assert::AreEqual(0ull, debandNull.mod.GrainGuardHits(), L"memo=nullptr has 0 grain-guard hits");
+				Assert::AreEqual(3ull, debandNull.mod.GrainGuardFallbacks(), L"memo=nullptr records 3 grain-guard fallbacks (Y, Cb, Cr)");
+				Assert::IsFalse(debandNull.mod.LastGrainGuardFallback().empty(), L"memo=nullptr records visible fallback reason");
+
+				VpSkeleton::SkeletonMemo emptyMemo;
+				VpDebander::Params emptyParams = params;
+				emptyParams.memo = &emptyMemo;
+				DebandGuard debandEmpty(gpu);
+				pl_frame outEmpty{};
+				Assert::IsTrue(debandEmpty.mod.Apply(gpu, dispatch, srcFrame, emptyParams, outEmpty),
+					ExtendedRangeGpuProbe::ToWide(debandEmpty.mod.LastError()).c_str());
+				Assert::AreEqual(0ull, debandEmpty.mod.GrainGuardHits(), L"unregistered P10/P11 memo has 0 hits");
+				Assert::AreEqual(3ull, debandEmpty.mod.GrainGuardFallbacks(), L"unregistered P10/P11 memo records 3 fallbacks");
+				Assert::IsFalse(debandEmpty.mod.LastGrainGuardFallback().empty(), L"unregistered memo records visible fallback reason");
+			}
+
+			// 4. Negative control (b): unguarded deband (grainGuard=false) on the EXACT SAME grainy input
+			//    loses significantly more luma & chroma grain RMS than P10/P10c+P11 grain-guarded deband.
+			{
+				VpDebander::Params unguardedParams = params;
+				unguardedParams.grainGuard = false;
+				unguardedParams.memo = nullptr;
+				DebandGuard debandUnguarded(gpu);
+				pl_frame outUnguarded{};
+				Assert::IsTrue(debandUnguarded.mod.Apply(gpu, dispatch, srcFrame, unguardedParams, outUnguarded),
+					ExtendedRangeGpuProbe::ToWide(debandUnguarded.mod.LastError()).c_str());
+				const std::vector<float> yUnguarded = downloadR32f(outUnguarded.planes[0].texture, W, H);
+				const std::vector<float> cbUnguarded = downloadR32f(outUnguarded.planes[1].texture, CW, CH);
+				const double yGrainUnguarded = zoneRms(yUnguarded, W, 116, 172, 20, 108, 500.0f * kCodeUnit);
+				const double cbGrainUnguarded = zoneRms(cbUnguarded, CW, 58, 86, 12, 52, 512.0f * kCodeUnit);
+				Assert::IsTrue(yGrainUnguarded < 0.75 * yGrainIn && yGrainStrong > yGrainUnguarded * 1.25,
+					L"negative control: unguarded deband crushes luma grain (<75%) while P10 grain guard preserves it");
+				Assert::IsTrue(cbGrainUnguarded < 0.78 * cbGrainIn && cbGrainStrong > cbGrainUnguarded * 1.15,
+					L"negative control: unguarded deband crushes chroma grain (<78%) while P10c grain guard preserves it");
+			}
+
+			strongRig.memo.OnSeal(params.sequence);
+			zeroP11Rig.memo.OnSeal(zeroP11Params.sequence);
 		}
 	};
 }
