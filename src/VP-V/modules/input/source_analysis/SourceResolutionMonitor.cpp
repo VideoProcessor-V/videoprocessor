@@ -35,6 +35,9 @@ namespace SourceResolutionMonitor
 	namespace
 	{
 		constexpr int kPixels = Monitor::kTile * Monitor::kTile;
+		// Derived from FrameCutJudge::Seen's 4096-frame retention contract (SourceResolutionDetector.cpp:1484,
+		// ~1 minute at 60 Hz) so shared U7 look-ahead coverage matches the fallback FrameCutJudge window.
+		static constexpr size_t kU7AheadHistoryCap = 4096u;
 
 		// One invocation per tile pixel: the native luma (or Rec. 709 luma of
 		// an RGB plane) at the tile's origin, written as a float. Tiles of
@@ -448,7 +451,7 @@ if (tile < int(tiles) && g.y < ts) {
 			if (!u7AheadHistory.empty() && sequence <= u7AheadHistory.back().seq)
 				u7AheadHistory.clear();
 			u7AheadHistory.push_back(U7AheadEntry{ sequence, cut });
-			while (u7AheadHistory.size() > 256u)
+			while (u7AheadHistory.size() > kU7AheadHistoryCap)
 				u7AheadHistory.pop_front();
 		}
 		const bool pending = disengagePending || std::fabs(autoPending - autoApplied) > 0.01;
@@ -2292,16 +2295,30 @@ if (tile < int(tiles) && g.y < ts) {
 		if (bound)
 		{
 			if (deterministicWait.load(std::memory_order_acquire) &&
-				(!haveBoundWaitSeq || lastBoundWaitSeq != renderSequence) &&
+				(autoReset.load(std::memory_order_acquire) || !haveBoundWaitSeq || lastBoundWaitSeq != renderSequence) &&
 				!ReadyFor(renderSequence))
 			{
-				WaitForReadyDeterministic(renderSequence);
+				const bool waitedOk = WaitForReadyDeterministic(renderSequence);
+				const bool released = ReleaseHeldFor(renderSequence);
 				haveBoundWaitSeq = true;
 				lastBoundWaitSeq = renderSequence;
+				if (!waitedOk)
+				{
+					const uint64_t lead = frameLead.load(std::memory_order_acquire);
+					const uint64_t through = renderSequence >= lead ? renderSequence - lead : 0u;
+					std::lock_guard<std::mutex> lock(mutex);
+					if (through > timedOutThrough)
+						timedOutThrough = through;
+				}
+				const bool carried = pendingBoundReset.exchange(false, std::memory_order_acq_rel);
+				boundReset = released || carried;
 			}
-			const bool released = ReleaseHeldFor(renderSequence);
-			const bool carried = pendingBoundReset.exchange(false, std::memory_order_acq_rel);
-			boundReset = released || carried;
+			else
+			{
+				const bool released = ReleaseHeldFor(renderSequence);
+				const bool carried = pendingBoundReset.exchange(false, std::memory_order_acq_rel);
+				boundReset = released || carried;
+			}
 		}
 		const Snapshot s = Read();
 		const double before = autoApplied;
@@ -3214,16 +3231,27 @@ if (tile < int(tiles) && g.y < ts) {
 	{
 		const double mapped = submitClock.Advance(seconds, clockStepsBack);
 		// O#6: deterministic-only bounded ready wait (live mode returns immediately without sleeping).
-		if (deterministicWait.load(std::memory_order_acquire))
-		{
-			WaitForReadyDeterministic(sourceSequence);
-			haveBoundWaitSeq = true;
-			lastBoundWaitSeq = sourceSequence;
-		}
+		const bool detWait = deterministicWait.load(std::memory_order_acquire);
+		bool waitedOk = true;
+		if (detWait)
+			waitedOk = WaitForReadyDeterministic(sourceSequence);
 		// The renderer's order is Discontinuity -> Frame -> AutoFactor(s): a reset this release
 		// consumed (the flagged discontinuity or a held worker reset) is carried to AutoFactor.
 		if (ReleaseHeldFor(sourceSequence))
 			pendingBoundReset.store(true, std::memory_order_release);
+		if (detWait)
+		{
+			haveBoundWaitSeq = true;
+			lastBoundWaitSeq = sourceSequence;
+			if (!waitedOk)
+			{
+				const uint64_t lead = frameLead.load(std::memory_order_acquire);
+				const uint64_t through = sourceSequence >= lead ? sourceSequence - lead : 0u;
+				std::lock_guard<std::mutex> lock(mutex);
+				if (through > timedOutThrough)
+					timedOutThrough = through;
+			}
+		}
 		return mapped;
 	}
 
@@ -3241,6 +3269,9 @@ if (tile < int(tiles) && g.y < ts) {
 			ResetVisible();
 			denseGridApplied.store(false, std::memory_order_release);
 			releasedThrough.store(0, std::memory_order_release);   // a new stretch: earlier release points mean nothing
+			timedOutThrough = 0;
+			haveBoundWaitSeq = false;
+			lastBoundWaitSeq = 0;
 			reset = true;
 		}
 		if (through > releasedThrough.load(std::memory_order_relaxed))

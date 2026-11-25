@@ -38,16 +38,38 @@ namespace VpSkeleton
 				reason = owners.empty() ? "no store owner" : "renderer ambiguous";
 			else if (Vpv::Skeleton::IExternalDemand* demand = Vpv::Skeleton::Demand())
 			{
-				const Vpv::Skeleton::SceneAnswer a = demand->SceneOf(owners[0], seq);
-				if (a.known)
+				// MUST-9: try non-mutating store peek first (safe on any thread, never touches SkeletonMemo).
+				if (FrameAnalysis::Store* store = VpFrameAnalysis::SourceFrameTap::StoreFor(owners[0]))
 				{
-					out.cut = a.cut;
-					out.fade = a.fade;
-					out.fadeKeep = a.fadeKeep;
-					found = true;
+					FrameAnalysis::Scene scene;
+					if (store->PeekScene(seq, scene))
+					{
+						out.cut = scene.cut;
+						out.fade = scene.fade;
+						out.fadeKeep = scene.fadeKeep;
+						if (why != nullptr)
+							*why = "";
+						return true;
+					}
 				}
+				// MUST-9: off the render thread, never enter SceneOf's live FillScene -> memo->Acquire(P4) path,
+				// which would raise a spurious WrongThread / FrameReleased fallback on the global SkeletonMemo.
+				const Vpv::Skeleton::FrameMemo fm = demand->MemoFor(owners[0], seq);
+				if (fm.Valid() && !fm.memo->OnRenderThread())
+					reason = "scene not published (off render thread)";
 				else
-					reason = (a.why != nullptr && a.why[0] != 0) ? a.why : "scene unknown";
+				{
+					const Vpv::Skeleton::SceneAnswer a = demand->SceneOf(owners[0], seq);
+					if (a.known)
+					{
+						out.cut = a.cut;
+						out.fade = a.fade;
+						out.fadeKeep = a.fadeKeep;
+						found = true;
+					}
+					else
+						reason = (a.why != nullptr && a.why[0] != 0) ? a.why : "scene unknown";
+				}
 			}
 			else
 				reason = "no skeleton module";
