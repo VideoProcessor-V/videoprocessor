@@ -1216,6 +1216,9 @@
     <ClCompile Include="..\VP-V\modules\repair\RepairStackOrderTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
+    <ClCompile Include="..\VP-V\modules\repair\CameraPassFailSeamTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\SourceIdChainEvalTests.cpp" />
     <ClCompile Include="..\VP-V\modules\motion\estimation\global_model\link\CameraFitProducer.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>

@@ -87,6 +87,14 @@ namespace VideoProcessorTest
 			b.resize(n);
 			return b;
 		}
+
+		std::wstring OutcomeWide(PhotometricOutcome o)
+		{
+			const char* text = CameraModel::PhotometricOutcomeText(o);
+			if (text != nullptr && *text != '\0')
+				return std::wstring(text, text + std::strlen(text));
+			return std::to_wstring(static_cast<int>(o));
+		}
 	}
 
 	TEST_CLASS(CameraPhotometricWiringTests)
@@ -131,7 +139,7 @@ namespace VideoProcessorTest
 				photo.luma = lp.View();
 				const CameraMotion r = FitOnce(f, &photo);
 				Assert::IsTrue(photo.outcome == PhotometricOutcome::Refined,
-					(L"quarter form at 2160 must refine biased vectors, outcome " + std::wstring(1, L'0' + int(photo.outcome))).c_str());
+					(L"quarter form at 2160 must refine biased vectors, outcome " + OutcomeWide(photo.outcome)).c_str());
 				Assert::IsTrue(photo.result.status == RefineStatus::Refined,
 					L"quarter form at 2160 must report RefineStatus::Refined");
 				Assert::IsTrue(r.valid && (r.verdictFlags & kVerdictPhotometricDisagreement) == 0,
@@ -149,7 +157,7 @@ namespace VideoProcessorTest
 				photo.luma = lp.View();
 				const CameraMotion r = FitOnce(f, &photo);
 				Assert::IsTrue(photo.outcome == PhotometricOutcome::Refined,
-					(L"half form at 1080 must refine biased vectors, outcome " + std::wstring(1, L'0' + int(photo.outcome))).c_str());
+					(L"half form at 1080 must refine biased vectors, outcome " + OutcomeWide(photo.outcome)).c_str());
 				Assert::IsTrue(photo.result.status == RefineStatus::Refined,
 					L"half form at 1080 must report RefineStatus::Refined");
 				Assert::IsTrue(r.valid && (r.verdictFlags & kVerdictPhotometricDisagreement) == 0,
@@ -196,7 +204,7 @@ namespace VideoProcessorTest
 			PhotometricInput photo;
 			photo.luma = lp.View();
 			const CameraMotion r = FitOnce(f, &photo);
-			Assert::IsTrue(photo.outcome == PhotometricOutcome::FellBack, (L"the refine fell back, outcome " + std::wstring(1, L'0' + int(photo.outcome))).c_str());
+			Assert::IsTrue(photo.outcome == PhotometricOutcome::FellBack, (L"the refine fell back, outcome " + OutcomeWide(photo.outcome)).c_str());
 			Assert::IsTrue(photo.result.status != RefineStatus::Refined, L"its own status says why (not refined)");
 			Assert::IsTrue(vectorOnly.params.type == r.params.type, L"the vector model type is kept");
 			for (int k = 0; k < 9; ++k)
