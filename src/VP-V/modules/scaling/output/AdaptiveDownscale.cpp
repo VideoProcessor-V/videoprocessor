@@ -801,6 +801,8 @@ float rs_slope(float y)
 		mapState = MapState::Off;
 		grainField = GrainField();
 		grainSource = GrainSource();
+		grainLevel = GrainLevelSource();
+		motion = Motion();
 		grainFromShared = false;
 		grainDomainRefused = false;
 		readback = nullptr;

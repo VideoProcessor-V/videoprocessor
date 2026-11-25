@@ -4,6 +4,7 @@
 #include <DebugLog.h>
 #include <VP-V/core/Products.h>
 #include <VP-V/modules/control/skeleton/SkeletonAccess.h>
+#include <VP-V/modules/motion/estimation/P3FieldFill.h>
 #include <VP-V/modules/output/dither/CustomHookChain.h>
 #include <VP-V/modules/scaling/output/DownscaleLight.h>
 #include <vprenderer/GrainPreserve.h>
@@ -57,7 +58,7 @@ namespace AdaptiveDownscaleStage
 		// (vectors of this source frame only; carries known NLS mapping when NLS is active so the motion-adapted
 		// blend warps through nls_coordinate while residual hold stays off; never starts the matcher).
 		void SetResidualMotion(AdaptiveDownscale::Module& module, const Frame& frame, const MotionSource& m,
-			const NlsMaskMapping::Mapping& nlsMap, bool nlsUnknown)
+			const std::shared_ptr<const void>& pin, const NlsMaskMapping::Mapping& nlsMap, bool nlsUnknown)
 		{
 			module.ClearMotion();
 			if (!nlsUnknown && m.live && m.field && m.frameTrust)
@@ -65,11 +66,62 @@ namespace AdaptiveDownscaleStage
 				AdaptiveDownscale::Motion motion;
 				motion.field = m.field;
 				motion.frameTrust = m.frameTrust;
+				motion.pin = pin;
 				motion.minTrustedShare = m.minTrustedShare;
 				motion.sourceCrop = frame.sourceCrop;
 				motion.nls = frame.nlsSubmitted ? nlsMap : NlsMaskMapping::Mapping{};
 				module.SetMotion(motion);
 			}
+		}
+
+		// M1#1: upscale motion term via Acquire(kP3AnalysisField, AcquireForm::Gpu), symmetric with ReadGrain.
+		// Never silently falls back to host.motion().field; host.motion is consulted ONLY for auxiliary
+		// frameTrust (when P3FieldFactsOf(r)->trust is absent) and minTrustedShare.
+		struct UpscaleMotionRead
+		{
+			MotionSource motion;
+			std::shared_ptr<const void> pin;
+			std::string cause;   // empty when kP3AnalysisField + frameTrust are live
+		};
+
+		UpscaleMotionRead ReadUpscaleMotion(const Frame& frame, const Host& host)
+		{
+			UpscaleMotionRead out;
+			VpSkeleton::AcquireResult r;
+			if (host.acquire)
+				r = host.acquire(VpSkeleton::kP3AnalysisField, frame.sourceSequence, VpSkeleton::VariantKey());
+			else
+			{
+				const Vpv::Skeleton::FrameMemo fm = Vpv::Skeleton::CurrentFrameMemo();
+				if (!fm.Valid())
+				{
+					out.cause = "no skeleton memo for this renderer";
+					return out;
+				}
+				r = fm.memo->Acquire(VpSkeleton::kP3AnalysisField, fm.seq, VpSkeleton::AcquireForm::Gpu);
+			}
+			if (!r.Ok() || !r.gpu.Valid() || r.gpu.resource == nullptr)
+			{
+				out.cause = std::string("kP3AnalysisField ") + (r.Ok() ? "has no GPU texture" : VpSkeleton::Token(r.cause));
+				return out;
+			}
+			pl_tex p3Field = static_cast<pl_tex>(r.gpu.resource);
+			const VpMotion::VerifiedField* facts = VpMotion::P3FieldFactsOf(r);
+			const bool haveAux = static_cast<bool>(host.motion);
+			const MotionSource aux = haveAux ? host.motion() : MotionSource();
+			pl_tex frameTrust = (facts && facts->trust) ? facts->trust : aux.frameTrust;
+			const float minTrustedShare = haveAux ? aux.minTrustedShare : 0.25f;
+			if (frameTrust == nullptr)
+			{
+				out.cause = "kP3AnalysisField has no frame trust";
+				return out;
+			}
+			out.motion.live = true;
+			out.motion.field = p3Field;
+			out.motion.frameTrust = frameTrust;
+			out.motion.minTrustedShare = minTrustedShare;
+			out.pin = r.pin;
+			return out;
 		}
 
 		// CF-2 switch-over: the grain term's single seam. kP10gGrainLevel (id 35, "grain.level", the repair.grain_split owner
@@ -173,6 +225,7 @@ namespace AdaptiveDownscaleStage
 		if (!upscaleBlend)
 		{
 			module.ClearGrainLevel();   // the pin is not held past the upscale form
+			module.ClearMotion();       // M1#1: do not hold an upscale P3 motion pin past the upscale form
 			grainTerm = TermSource();
 			upscaleMotionCause.clear();
 			upscaleMotionExternalView = false;
@@ -249,16 +302,24 @@ namespace AdaptiveDownscaleStage
 			up.nativeHeight = sourceCropH;
 			up.nativeWidth = sourceCropW;
 			up.oneAxis = oneAxis;
-			// CF-2 B1: the motion read (the ExternalView of P3, the live estimate: once per frame) and its verdict (N1.4). A
-			// repeat of the last sequence keeps the first presentation's verdict (no flicker on a repeated frame). Not an Acquire:
-			// P3 has no GPU Acquire publication at this tip (MotionSource).
-			const MotionSource m = host.motion();
-			upscaleMotionExternalView = !oneAxis && frame.vectorsRun && !nlsUnknown && m.live && m.field && m.frameTrust;
+			// M1#1: upscale motion comes through Acquire(kP3AnalysisField, AcquireForm::Gpu) once per upscale frame
+			// when !oneAxis && vectorsRun && !nlsUnknown (never falling back to host.motion().field). Discontinuity
+			// verdicts (motion vectors off, NLS active, resync, dropped source frames) and repeated-frame persistence
+			// stay intact; unavailability surfaces the Acquire cause visibly in status & Fallback().
+			UpscaleMotionRead um;
+			if (!oneAxis && frame.vectorsRun && !nlsUnknown)
+				um = ReadUpscaleMotion(frame, host);
+			upscaleMotionExternalView = false;
+			const bool motionLive = um.motion.live && um.motion.field && um.motion.frameTrust;
 			if (!(haveMotionSequence && frame.sourceSequence == motionSequenceSeen))
 			{
-				const char* why = MotionDiscontinuity(frame.vectorsRun, nlsUnknown, m.live && m.field && m.frameTrust,
+				const char* why = MotionDiscontinuity(frame.vectorsRun, nlsUnknown, motionLive,
 					haveMotionSequence, motionSequenceSeen, frame.sourceSequence);
-				upscaleMotionCause = why ? why : "";
+				if (why != nullptr)
+					upscaleMotionCause = (!motionLive && !um.cause.empty() && std::string(why) == "no live estimate")
+						? um.cause : std::string(why);
+				else
+					upscaleMotionCause.clear();
 				haveMotionSequence = true;
 				motionSequenceSeen = frame.sourceSequence;
 			}
@@ -277,7 +338,7 @@ namespace AdaptiveDownscaleStage
 			module.ClearGrainField();
 			// S4-H2: upscale uses kP10gGrainLevel via ReadGrain(), never the downscale scalar P10/P11 grainSource.
 			module.ClearGrainSource();
-			SetResidualMotion(module, frame, m, nlsMap, nlsUnknown);
+			SetResidualMotion(module, frame, um.motion, um.pin, nlsMap, nlsUnknown);
 			state.grainMapWanted = (AdaptiveDownscale::MotionSanitizeUnit(adaptive.motionStrength) > 0.0f) && module.Active() && frame.vectorsRun;
 			hooks.insert(hooks.begin(), module.Measure());
 			// The blend before SSimSuperRes (both POST_KERNEL): SuperRes refines the blended picture
@@ -317,8 +378,8 @@ namespace AdaptiveDownscaleStage
 				vectorUser = frame.vectorsRun;   // batch B Q1: the hybrid downscaler reads the motion (residual hold, grain map, motion-adapted blend)
 				module.ClearGrainField();
 				grainOffered = SetSharedGrain(module, host);
-				const MotionSource m = host.motion();
-				SetResidualMotion(module, frame, m, nlsMap, nlsUnknown);
+				const MotionSource m = host.motion ? host.motion() : MotionSource();
+				SetResidualMotion(module, frame, m, std::shared_ptr<const void>(), nlsMap, nlsUnknown);
 				if (adaptive.grainMap && m.live && m.grainError)
 				{
 					AdaptiveDownscale::GrainField field;

@@ -28,9 +28,9 @@ namespace AdaptiveDownscaleStage
 {
 	// The de-judder outputs for this source frame (host: DejudderLiveFieldFor(sequence) &&
 	// !VpPhaseDrawn(renderImage); the textures only when live).
-	// CF-2 switch-over: motion stays on this read (the ExternalView of P3) until P3 has a GPU Acquire publication: at this tip
-	// kP3AnalysisField has no dispatcher texture set and no owner fill (SkeletonModule::gpuHandleOf answers NoGpuHandle), and
-	// frameTrust / grainError are in no product. The switch is an Acquire in Register when that lands.
+	// M1#1: the upscale form acquires kP3AnalysisField (AcquireForm::Gpu) through the skeleton (ReadUpscaleMotion) and
+	// uses Host::motion only as an auxiliary fallback for frameTrust / minTrustedShare (never field). The downscale form
+	// still reads grainError and its field through Host::motion.
 	struct MotionSource
 	{
 		bool live = false;
