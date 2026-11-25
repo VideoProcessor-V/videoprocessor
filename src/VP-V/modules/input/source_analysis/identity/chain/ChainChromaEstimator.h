@@ -267,10 +267,24 @@ namespace SourceIdentity
 			}
 		};
 
-		// Caller-owned reusable scratch workspace for EstimateChromaChain (Rule 2 & EFF-MED-1: zero steady-state
-		// per-frame heap allocations; zero static/thread_local mutable state).
+		// Caller-owned reusable scratch workspace for EstimateChromaChain (Rule 2, EFF-MED-1 & SOTA6-LOW-3:
+		// zero steady-state per-frame heap allocations across all settings; zero static/thread_local mutable state).
 		struct ChromaWorkspace
 		{
+			struct CachedTargetOps
+			{
+				bool valid = false;
+				int N = 0;
+				int targetN = 0;
+				int origin = 0;
+				int length = 0;
+				int nLo = 0;
+				int nHi = 0;
+				DescaleOperator baseLo[kFamilyCount];
+				DescaleOperator baseHi[kFamilyCount];
+				DescaleOperator targetOps[kFamilyCount][4];
+			};
+
 			std::vector<const double*> allLines;
 			std::vector<double> scratch;
 			std::vector<double> lineDips[kKernelCount][2];
@@ -280,6 +294,50 @@ namespace SourceIdentity
 			std::vector<double> mpegLogRms[4];
 			std::vector<double> zBuf;
 			std::vector<double> rings;
+
+			// SOTA6-LOW-3: hoisted FFT scratch + twiddle cache + reusable tap memo + 2-slot target operator cache (H & V).
+			size_t fftN = 0;
+			std::vector<size_t> fftBitRev;
+			std::vector<double> fftTwRe;
+			std::vector<double> fftTwIm;
+			std::vector<double> fftWin;
+			std::vector<double> fftPsd;
+			std::vector<double> fftRe;
+			std::vector<double> fftIm;
+			std::vector<int> fftSegStarts;
+			TapMemo tapMemo{ 4096 };
+			CachedTargetOps targetCache[2];
+			int targetNextSlot = 0;
+
+			void EnsureFftTwiddles(size_t n)
+			{
+				if (fftN == n && fftBitRev.size() == n && fftTwRe.size() == (n > 0 ? n - 1 : 0))
+					return;
+				fftN = n;
+				fftBitRev.assign(n, 0u);
+				for (size_t i = 1, j = 0; i < n; ++i)
+				{
+					size_t bit = n >> 1;
+					for (; (j & bit) != 0u; bit >>= 1)
+						j ^= bit;
+					j ^= bit;
+					fftBitRev[i] = j;
+				}
+				fftTwRe.assign(n > 0 ? n - 1 : 0, 0.0);
+				fftTwIm.assign(n > 0 ? n - 1 : 0, 0.0);
+				for (size_t len = 2; len <= n; len <<= 1)
+				{
+					const size_t halfLen = len >> 1;
+					const size_t offset = halfLen - 1;
+					const double angStep = -2.0 * kPi / static_cast<double>(len);
+					for (size_t j = 0; j < halfLen; ++j)
+					{
+						const double ang = angStep * static_cast<double>(j);
+						fftTwRe[offset + j] = std::cos(ang);
+						fftTwIm[offset + j] = std::sin(ang);
+					}
+				}
+			}
 
 			void Reset()
 			{
@@ -302,6 +360,19 @@ namespace SourceIdentity
 				}
 				zBuf.clear();
 				rings.clear();
+				fftN = 0;
+				fftBitRev.clear();
+				fftTwRe.clear();
+				fftTwIm.clear();
+				fftWin.clear();
+				fftPsd.clear();
+				fftRe.clear();
+				fftIm.clear();
+				fftSegStarts.clear();
+				tapMemo = TapMemo(4096);
+				targetCache[0] = CachedTargetOps();
+				targetCache[1] = CachedTargetOps();
+				targetNextSlot = 0;
 			}
 		};
 
@@ -364,48 +435,12 @@ namespace SourceIdentity
 				return std::sqrt(sumSq / static_cast<double>(totalSamples));
 			}
 
-			struct FftTwiddles
-			{
-				size_t fftN = 0;
-				std::vector<size_t> bitRev;
-				std::vector<double> re; // size fftN - 1: stage offset = halfLen - 1
-				std::vector<double> im;
-
-				void Build(size_t n)
-				{
-					fftN = n;
-					bitRev.assign(n, 0u);
-					for (size_t i = 1, j = 0; i < n; ++i)
-					{
-						size_t bit = n >> 1;
-						for (; (j & bit) != 0u; bit >>= 1)
-							j ^= bit;
-						j ^= bit;
-						bitRev[i] = j;
-					}
-					re.assign(n > 0 ? n - 1 : 0, 0.0);
-					im.assign(n > 0 ? n - 1 : 0, 0.0);
-					for (size_t len = 2; len <= n; len <<= 1)
-					{
-						const size_t halfLen = len >> 1;
-						const size_t offset = halfLen - 1;
-						const double angStep = -2.0 * kPi / static_cast<double>(len);
-						for (size_t j = 0; j < halfLen; ++j)
-						{
-							const double ang = angStep * static_cast<double>(j);
-							re[offset + j] = std::cos(ang);
-							im[offset + j] = std::sin(ang);
-						}
-					}
-				}
-			};
-
-			inline void FftRadix2(std::vector<double>& re, std::vector<double>& im, const FftTwiddles& tw)
+			inline void FftRadix2(std::vector<double>& re, std::vector<double>& im, const ChromaWorkspace& ws)
 			{
 				const size_t n = re.size();
 				for (size_t i = 1; i < n; ++i)
 				{
-					const size_t j = tw.bitRev[i];
+					const size_t j = ws.fftBitRev[i];
 					if (i < j)
 					{
 						std::swap(re[i], re[j]);
@@ -416,8 +451,8 @@ namespace SourceIdentity
 				{
 					const size_t halfLen = len >> 1;
 					const size_t offset = halfLen - 1;
-					const double* twRe = &tw.re[offset];
-					const double* twIm = &tw.im[offset];
+					const double* twRe = &ws.fftTwRe[offset];
+					const double* twIm = &ws.fftTwIm[offset];
 					for (size_t start = 0; start < n; start += len)
 					{
 						for (size_t j = 0; j < halfLen; ++j)
@@ -445,7 +480,8 @@ namespace SourceIdentity
 				const LineSet& cb,
 				const LineSet* cr,
 				double& outBelowPower,
-				double& outAbovePower)
+				double& outAbovePower,
+				ChromaWorkspace& ws)
 			{
 				outBelowPower = 0.0;
 				outAbovePower = 0.0;
@@ -455,7 +491,8 @@ namespace SourceIdentity
 				if (cb.length < 32)
 					return false;
 				const int winLen = cb.length < fftN ? cb.length : fftN;
-				std::vector<double> win(static_cast<size_t>(winLen), 0.0);
+				std::vector<double>& win = ws.fftWin;
+				win.assign(static_cast<size_t>(winLen), 0.0);
 				double winEnergy = 0.0;
 				for (int i = 0; i < winLen; ++i)
 				{
@@ -466,17 +503,20 @@ namespace SourceIdentity
 				if (!(winEnergy > 0.0))
 					return false;
 
-				FftTwiddles tw;
-				tw.Build(static_cast<size_t>(fftN));
+				ws.EnsureFftTwiddles(static_cast<size_t>(fftN));
 
 				const int half = fftN / 2;
-				std::vector<double> psd(static_cast<size_t>(half + 1), 0.0);
-				std::vector<double> re(static_cast<size_t>(fftN), 0.0);
-				std::vector<double> im(static_cast<size_t>(fftN), 0.0);
+				std::vector<double>& psd = ws.fftPsd;
+				std::vector<double>& re = ws.fftRe;
+				std::vector<double>& im = ws.fftIm;
+				psd.assign(static_cast<size_t>(half + 1), 0.0);
+				re.assign(static_cast<size_t>(fftN), 0.0);
+				im.assign(static_cast<size_t>(fftN), 0.0);
 				int totalSegs = 0;
 
 				auto accumPlane = [&](const LineSet& ls) {
-					std::vector<int> segStarts;
+					std::vector<int>& segStarts = ws.fftSegStarts;
+					segStarts.clear();
 					if (ls.length <= fftN)
 					{
 						segStarts.push_back(0);
@@ -505,7 +545,7 @@ namespace SourceIdentity
 								re[static_cast<size_t>(i)] = (i < curWinLen) ? (line[start + i] - mean) * win[static_cast<size_t>(i)] : 0.0;
 								im[static_cast<size_t>(i)] = 0.0;
 							}
-							FftRadix2(re, im, tw);
+							FftRadix2(re, im, ws);
 							for (int k = 0; k <= half; ++k)
 							{
 								const double rk = re[static_cast<size_t>(k)];
@@ -908,7 +948,7 @@ namespace SourceIdentity
 				}
 
 				out.valid = true;
-				ComputeChromaBandPowers(cb, cr, out.belowPower, out.abovePower);
+				ComputeChromaBandPowers(cb, cr, out.belowPower, out.abovePower, ws);
 
 				if (out.informativeLines <= 0)
 				{
@@ -1538,7 +1578,7 @@ namespace SourceIdentity
 				int targetN,
 				double floorCodes,
 				const ChromaEstimatorSettings& s,
-				TapMemo& memo,
+				ChromaWorkspace& ws,
 				double& outDip,
 				bool& outHighDom)
 			{
@@ -1555,24 +1595,49 @@ namespace SourceIdentity
 
 				int repCount = 0;
 				const int* reps = RepresentativeKernels(repCount);
-				DescaleOperator baseLo[kFamilyCount];
-				DescaleOperator baseHi[kFamilyCount];
-				DescaleOperator targetOps[kFamilyCount][4];
-				const double phases[4] = { 0.0, 0.125, 0.25, 0.375 };
-
-				for (int ri = 0; ri < repCount; ++ri)
+				// SOTA6-LOW-3: reuse 2-slot cached target operators keyed by (N, targetN, origin, length) inside ws.
+				ChromaWorkspace::CachedTargetOps* tOps = nullptr;
+				for (int slot = 0; slot < 2; ++slot)
 				{
-					if (!baseLo[ri].Build(N, nLo, reps[ri], 0.0, cb.origin, cb.length, &memo) ||
-						!baseHi[ri].Build(N, nHi, reps[ri], 0.0, cb.origin, cb.length, &memo))
+					ChromaWorkspace::CachedTargetOps& c = ws.targetCache[slot];
+					if (c.valid && c.N == N && c.targetN == targetN && c.origin == cb.origin && c.length == cb.length)
 					{
-						return false;
-					}
-					for (int pi = 0; pi < 4; ++pi)
-					{
-						if (!targetOps[ri][pi].Build(N, targetN, reps[ri], phases[pi], cb.origin, cb.length, &memo))
-							return false;
+						tOps = &c;
+						break;
 					}
 				}
+				if (tOps == nullptr)
+				{
+					const int slot = ws.targetNextSlot & 1;
+					ws.targetNextSlot ^= 1;
+					ChromaWorkspace::CachedTargetOps& c = ws.targetCache[slot];
+					c.valid = false;
+					c.N = N;
+					c.targetN = targetN;
+					c.origin = cb.origin;
+					c.length = cb.length;
+					c.nLo = nLo;
+					c.nHi = nHi;
+					const double phases[4] = { 0.0, 0.125, 0.25, 0.375 };
+					for (int ri = 0; ri < repCount; ++ri)
+					{
+						if (!c.baseLo[ri].Build(N, nLo, reps[ri], 0.0, cb.origin, cb.length, &ws.tapMemo) ||
+							!c.baseHi[ri].Build(N, nHi, reps[ri], 0.0, cb.origin, cb.length, &ws.tapMemo))
+						{
+							return false;
+						}
+						for (int pi = 0; pi < 4; ++pi)
+						{
+							if (!c.targetOps[ri][pi].Build(N, targetN, reps[ri], phases[pi], cb.origin, cb.length, &ws.tapMemo))
+								return false;
+						}
+					}
+					c.valid = true;
+					tOps = &c;
+				}
+				const DescaleOperator* baseLo = tOps->baseLo;
+				const DescaleOperator* baseHi = tOps->baseHi;
+				const auto& targetOps = tOps->targetOps;
 
 				// Check above-targetRatio spectral dominance so native broadband chroma never falsely corroborates.
 				const double ratio = static_cast<double>(targetN) / static_cast<double>(N);
@@ -1583,7 +1648,8 @@ namespace SourceIdentity
 				if (cb.length >= 32)
 				{
 					const int winLen = cb.length < fftN ? cb.length : fftN;
-					std::vector<double> win(static_cast<size_t>(winLen), 0.0);
+					std::vector<double>& win = ws.fftWin;
+					win.assign(static_cast<size_t>(winLen), 0.0);
 					double winEnergy = 0.0;
 					for (int i = 0; i < winLen; ++i)
 					{
@@ -1593,12 +1659,14 @@ namespace SourceIdentity
 					}
 					if (winEnergy > 0.0)
 					{
-						FftTwiddles tw;
-						tw.Build(static_cast<size_t>(fftN));
+						ws.EnsureFftTwiddles(static_cast<size_t>(fftN));
 						const int half = fftN / 2;
-						std::vector<double> psd(static_cast<size_t>(half + 1), 0.0);
-						std::vector<double> re(static_cast<size_t>(fftN), 0.0);
-						std::vector<double> im(static_cast<size_t>(fftN), 0.0);
+						std::vector<double>& psd = ws.fftPsd;
+						std::vector<double>& re = ws.fftRe;
+						std::vector<double>& im = ws.fftIm;
+						psd.assign(static_cast<size_t>(half + 1), 0.0);
+						re.assign(static_cast<size_t>(fftN), 0.0);
+						im.assign(static_cast<size_t>(fftN), 0.0);
 						int totalSegs = 0;
 						auto accumPlane = [&](const LineSet& ls) {
 							const int curWinLen = ls.length < fftN ? ls.length : fftN;
@@ -1616,7 +1684,7 @@ namespace SourceIdentity
 										re[static_cast<size_t>(i)] = (i < curWinLen) ? (line[start + i] - mean) * win[static_cast<size_t>(i)] : 0.0;
 										im[static_cast<size_t>(i)] = 0.0;
 									}
-									FftRadix2(re, im, tw);
+									FftRadix2(re, im, ws);
 									for (int k = 0; k <= half; ++k)
 									{
 										const double rk = re[static_cast<size_t>(k)];
@@ -1661,7 +1729,8 @@ namespace SourceIdentity
 				const double gateCodes = s.lineGateFactor * floorCodes;
 				const double eps = (std::max)(floorCodes / kFloorGuardDiv, 1e-6);
 
-				std::vector<const double*> allLines;
+				std::vector<const double*>& allLines = ws.allLines;
+				allLines.clear();
 				allLines.reserve(static_cast<size_t>(cb.count) + (cr != nullptr ? static_cast<size_t>(cr->count) : 0u));
 				for (int li = 0; li < cb.count; ++li)
 					allLines.push_back(cb.Line(li));
@@ -1671,8 +1740,11 @@ namespace SourceIdentity
 						allLines.push_back(cr->Line(li));
 				}
 
-				std::vector<double> dips[kFamilyCount][4];
-				std::vector<double> scratch;
+				for (int f = 0; f < kFamilyCount; ++f)
+					for (int p = 0; p < 4; ++p)
+						ws.qDips[f][p].clear();
+				auto& dips = ws.qDips;
+				std::vector<double>& scratch = ws.scratch;
 				double rssBatch[kResidualBatch];
 				double segSumBatch[kResidualBatch * kMaxSegs];
 				int segRows[kMaxSegs];
@@ -2052,7 +2124,7 @@ namespace SourceIdentity
 			}
 
 			// Helper: arbitrary luma-coupled 4:2:0 chroma grid corroboration (SID-SOTA-6, opt-in via knownLumaNH/NV > 0).
-			TapMemo localMemo(4096);
+			TapMemo& localMemo = work.tapMemo;
 			const double sigStdGate = s.lineGateFactor * in.floorCodes;
 			const double sigStdH = cbHOk ? detail_chroma_estimator::ComputeAxisSignalStd(in.cbH, crH) : 0.0;
 			const double sigStdV = cbVOk ? detail_chroma_estimator::ComputeAxisSignalStd(in.cbV, crV) : 0.0;
@@ -2076,9 +2148,9 @@ namespace SourceIdentity
 				double dH = 0.0, dV = 0.0;
 				bool hdH = false, hdV = false;
 				if (wantH && sigStdH > sigStdGate)
-					okH = detail_chroma_estimator::EvaluateAxisTargetDip(in.cbH, crH, targetH, in.floorCodes, s, localMemo, dH, hdH);
+					okH = detail_chroma_estimator::EvaluateAxisTargetDip(in.cbH, crH, targetH, in.floorCodes, s, work, dH, hdH);
 				if (wantV && sigStdV > sigStdGate)
-					okV = detail_chroma_estimator::EvaluateAxisTargetDip(in.cbV, crV, targetV, in.floorCodes, s, localMemo, dV, hdV);
+					okV = detail_chroma_estimator::EvaluateAxisTargetDip(in.cbV, crV, targetV, in.floorCodes, s, work, dV, hdV);
 				outHighDomAny = hdH || hdV;
 
 				if (okH && okV)

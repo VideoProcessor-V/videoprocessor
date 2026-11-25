@@ -68,7 +68,7 @@ namespace SourceIdentity
 {
 	namespace Chain
 	{
-		// Exact m = 8 1-D first-difference taps (covering m + 1 = 9 adjacent pixels):
+		// Exact m = 8 even-parity-aligned line-demeaned 1-D pixel taps (covering 8 adjacent pixels):
 		// resolves canonical k/8 ratios (1/4, 3/8, 1/2, 5/8, 3/4, 7/8) and matches 8-px codec block width.
 		constexpr int kStaticPatchTaps = 8;
 		constexpr int kStaticPatchPixels = kStaticPatchTaps;
@@ -463,9 +463,11 @@ namespace SourceIdentity
 
 				if (ls.count >= kStaticPatchMaxSlots)
 				{
-					// Select kStaticPatchMaxSlots evenly spaced lines with 1 centered slot each.
+					// Select kStaticPatchMaxSlots evenly spaced lines with 1 even-parity-aligned centered slot each.
 					outSlots.reserve(static_cast<size_t>(kStaticPatchMaxSlots));
-					const int centerOffset = minOffset + span / 2;
+					int centerOffset = minOffset + span / 2;
+					if (((ls.origin + centerOffset) & 1) != 0 && centerOffset + 1 <= maxOffset)
+						++centerOffset;
 					for (int k = 0; k < kStaticPatchMaxSlots; ++k)
 					{
 						const int lineIdx = static_cast<int>(

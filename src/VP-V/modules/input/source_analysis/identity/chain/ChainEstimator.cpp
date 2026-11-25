@@ -242,8 +242,9 @@ namespace SourceIdentity
 			bool stepMarkImmediateReleasePending = false;
 			uint64_t lastStepMarkClassicalSeq = 0;
 			uint64_t lastStepMarkClassicalGen = 0;
-			Geometry::AxisGeom heldApplied[2];        // the applied geometry the latch carries (updated by every confident reading of the latched size)
-			Geometry::AxisGeom lastFiltered[2];       // the last published applied geometry (for appliedChanged)
+			Geometry::AxisGeom heldApplied[2];          // the applied geometry the latch carries (updated by every confident reading of the latched size)
+			Geometry::AxisGeom lastFiltered[2];         // the last latch-filtered applied geometry
+			Geometry::AxisGeom lastPublishedApplied[2]; // SOTA23-HIGH-2: last published Record::applied geometry (for true appliedChanged / appliedGen)
 			LatchCounters latchBase;                  // counters of the latch already folded into the atomics
 			std::string dumpPath;                     // R4: VP_SID_R4_DUMP_PATH (empty = off)
 			std::unique_ptr<DescaleVerifier> dumpVerifier;
@@ -304,6 +305,9 @@ namespace SourceIdentity
 				reqEightBitPromotion = cfg.eightBitPromotion;
 				reqUseDepthNullTables = cfg.useDepthNullTables;
 				reqDepthNullTables = cfg.depthNullTables;
+				// CFG-LOW-1: if caller configured hdrNoise directly on cfg.verifier.hdrNoise, reconcile into cfg.hdrNoise before copying.
+				if (!cfg.hdrNoise.enabled && cfg.verifier.hdrNoise.enabled)
+					cfg.hdrNoise = cfg.verifier.hdrNoise;
 				reqHdrNoise = cfg.hdrNoise;
 				reqNeuralSr = cfg.neuralSr;
 				reqInterlaced = cfg.interlaced;
@@ -1404,6 +1408,7 @@ namespace SourceIdentity
 					{
 						heldApplied[a] = Geometry::AxisGeom();
 						lastFiltered[a] = Geometry::AxisGeom();
+						lastPublishedApplied[a] = Geometry::AxisGeom();
 					}
 					ConfigureR4Dump();
 				}
@@ -1551,6 +1556,15 @@ namespace SourceIdentity
 						heldApplied[a] = Geometry::AxisGeom();
 						lastFiltered[a] = Geometry::AxisGeom();
 					}
+				}
+				for (int a = 0; a < 2; ++a)
+				{
+					const Geometry::AxisGeom& prev = lastPublishedApplied[a];
+					const Geometry::AxisGeom& cur = out[a].applied;
+					out[a].appliedChanged = cur.state != prev.state || cur.n != prev.n ||
+						cur.kernelIndex != prev.kernelIndex ||
+						(cur.state == Geometry::LatchState::Latched && cur.N != prev.N);
+					lastPublishedApplied[a] = Geometry::AxisGeom();
 				}
 				haveArea = false;
 				latchedPower.store(false, std::memory_order_release);
@@ -1993,7 +2007,7 @@ namespace SourceIdentity
 			// Stage S2: R1 fundamental-harmonic order selection (SelectFundamentalHarmonic, ChainJointLatch.h) +
 			// two-witness ChainJointLatch (Owner-approved OD-1 & OD-2). Replaces legacy TODO(SID r2 R1) when jointLatchOn.
 			void ApplyJointLatch(ReadingOutput out[2], const AxisRun run[2], uint32_t flags, int64_t timeUs,
-				int rasterW, int rasterH, const ClassicalFreshState& cf)
+				int rasterW, int rasterH, const ClassicalFreshState& cf, bool sotaBlockClassical = false)
 			{
 				bool conf[2], nat[2];
 				for (int a = 0; a < 2; ++a)
@@ -2024,8 +2038,9 @@ namespace SourceIdentity
 				jIn.chainInformative = (run[0].have && run[0].up.informative) || (run[1].have && run[1].up.informative);
 
 				// Fresh per-frame classical witness A (never sticky tracker state).
+				// SOTA23-HIGH-2: block classical witness A entry while SOTA #2 (AI/Neural SR) or SOTA #3 (interlaced) is active.
 				const bool cfRatiosFinite = std::isfinite(cf.ratioH) && std::isfinite(cf.ratioV) && cf.ratioH > 0.0 && cf.ratioV > 0.0;
-				const bool classicalHasUpscale = cf.valid && cfRatiosFinite &&
+				const bool classicalHasUpscale = !sotaBlockClassical && cf.valid && cfRatiosFinite &&
 					cf.ratioH < 1.0 && cf.ratioV < 1.0 && Nx > 0 && Ny > 0;
 				if (classicalHasUpscale)
 				{
@@ -3410,6 +3425,54 @@ namespace SourceIdentity
 					++discontinuities;
 					cDiscontinuities.fetch_add(1, std::memory_order_relaxed);
 				}
+				// SOTA23-HIGH-2: demote Neural SR / Interlaced applied geometry BEFORE ApplyJointLatch/ApplyLatch
+				// (so weave-comb / AI-SR cannot pollute latchNxA/NyA or heldApplied), gate classical witness A,
+				// re-apply demotions after latch in case an earlier latch was already held, and compute appliedChanged
+				// ONCE against lastPublishedApplied[a] so appliedGen bumps ONLY on true applied transitions.
+				bool sotaDemotedApplied = false;
+				const bool sotaBlockClassical =
+					(cfg.neuralSr.enabled && (neuralSrHit[0] || neuralSrHit[1])) ||
+					(cfg.interlaced.enabled && interlacedRes.interlacedDetected);
+				auto applySotaDemotions = [&]() {
+					if (cfg.neuralSr.enabled)
+					{
+						for (int a = 0; a < 2; ++a)
+						{
+							if (neuralSrHit[a])
+							{
+								out[a].measured.reasonBits |= kReasonNeuralSrDetected;
+								out[a].applied = UnsureLike(out[a].applied, out[a].applied.reasonBits | kReasonNeuralSrDetected);
+								sotaDemotedApplied = true;
+							}
+						}
+					}
+					if (cfg.interlaced.enabled && interlacedRes.interlacedDetected)
+					{
+						for (int a = 0; a < 2; ++a)
+						{
+							out[a].measured.reasonBits |= kReasonInterlacedBob;
+							out[a].applied.reasonBits |= kReasonInterlacedBob;
+						}
+						// Never misreport motion-bobbed 1080i->2160p as confident progressive 540p on the vertical axis,
+						// nor weave-combed interlaced frames as confident progressive output.
+						if (interlacedRes.kind == InterlacedKind::MotionBob &&
+							out[1].applied.state == Geometry::LatchState::Latched &&
+							out[1].applied.n < out[1].applied.N)
+						{
+							out[1].applied = UnsureLike(out[1].applied, out[1].applied.reasonBits | kReasonInterlacedBob);
+							sotaDemotedApplied = true;
+						}
+						else if (interlacedRes.kind == InterlacedKind::WeaveComb)
+						{
+							for (int a = 0; a < 2; ++a)
+							{
+								out[a].applied = UnsureLike(out[a].applied, out[a].applied.reasonBits | kReasonInterlacedBob);
+								sotaDemotedApplied = true;
+							}
+						}
+					}
+				};
+				applySotaDemotions();
 				if (jointLatchOn)
 				{
 					if (anyReset || areaChanged)
@@ -3420,7 +3483,7 @@ namespace SourceIdentity
 						heldApplied[0] = Geometry::AxisGeom();
 						heldApplied[1] = Geometry::AxisGeom();
 					}
-					ApplyJointLatch(out, run, flags, s.timeUs, rasterW, rasterH, cf);
+					ApplyJointLatch(out, run, flags, s.timeUs, rasterW, rasterH, cf, sotaBlockClassical);
 				}
 				else if (safetyOn)
 				{
@@ -3439,65 +3502,24 @@ namespace SourceIdentity
 				{
 					stepMarkImmediateReleasePending = false;
 				}
-				// SOTA2-HIGH-3 & SOTA3-HIGH-4(c): apply Neural SR and Interlaced applied-state overrides BEFORE
-				// geometryGen/appliedGen bumps so multi-eval AI-upscaled or interlaced streams never falsely latch as
-				// confident NativeCoded/progressive, appliedGen increments cleanly, and StatusLine() renders the reason.
-				bool sotaDemotedApplied = false;
-				if (cfg.neuralSr.enabled)
+				// Re-apply SOTA #2/#3 demotions after latch in case an earlier latch was already held.
+				if (sotaBlockClassical)
 				{
-					for (int a = 0; a < 2; ++a)
+					applySotaDemotions();
+					if (jointLatchOn || safetyOn)
 					{
-						if (neuralSrHit[a])
-						{
-							out[a].measured.reasonBits |= kReasonNeuralSrDetected;
-							const Geometry::AxisGeom prevApp = out[a].applied;
-							out[a].applied = UnsureLike(out[a].applied, out[a].applied.reasonBits | kReasonNeuralSrDetected);
-							sotaDemotedApplied = true;
-							if (out[a].applied.state != prevApp.state || out[a].applied.n != prevApp.n ||
-								out[a].applied.kernelIndex != prevApp.kernelIndex)
-							{
-								out[a].appliedChanged = true;
-							}
-							if (jointLatchOn || safetyOn)
-								lastFiltered[a] = out[a].applied;
-						}
+						lastFiltered[0] = out[0].applied;
+						lastFiltered[1] = out[1].applied;
 					}
 				}
-				if (cfg.interlaced.enabled && interlacedRes.interlacedDetected)
+				for (int a = 0; a < 2; ++a)
 				{
-					for (int a = 0; a < 2; ++a)
-					{
-						out[a].measured.reasonBits |= kReasonInterlacedBob;
-						out[a].applied.reasonBits |= kReasonInterlacedBob;
-					}
-					// Never misreport motion-bobbed 1080i->2160p as confident progressive 540p on the vertical axis,
-					// nor weave-combed interlaced frames as confident progressive output.
-					if (interlacedRes.kind == InterlacedKind::MotionBob &&
-						out[1].applied.state == Geometry::LatchState::Latched &&
-						out[1].applied.n < out[1].applied.N)
-					{
-						out[1].applied = UnsureLike(out[1].applied, out[1].applied.reasonBits | kReasonInterlacedBob);
-						out[1].appliedChanged = true;
-						sotaDemotedApplied = true;
-						if (jointLatchOn || safetyOn)
-							lastFiltered[1] = out[1].applied;
-					}
-					else if (interlacedRes.kind == InterlacedKind::WeaveComb)
-					{
-						for (int a = 0; a < 2; ++a)
-						{
-							const Geometry::AxisGeom prevApp = out[a].applied;
-							out[a].applied = UnsureLike(out[a].applied, out[a].applied.reasonBits | kReasonInterlacedBob);
-							if (out[a].applied.state != prevApp.state || out[a].applied.n != prevApp.n ||
-								out[a].applied.kernelIndex != prevApp.kernelIndex)
-							{
-								out[a].appliedChanged = true;
-								sotaDemotedApplied = true;
-							}
-							if (jointLatchOn || safetyOn)
-								lastFiltered[a] = out[a].applied;
-						}
-					}
+					const Geometry::AxisGeom& prev = lastPublishedApplied[a];
+					const Geometry::AxisGeom& cur = out[a].applied;
+					out[a].appliedChanged = cur.state != prev.state || cur.n != prev.n ||
+						cur.kernelIndex != prev.kernelIndex ||
+						(cur.state == Geometry::LatchState::Latched && cur.N != prev.N);
+					lastPublishedApplied[a] = cur;
 				}
 				if (out[0].measuredChanged || out[1].measuredChanged)
 					++geometryGen;

@@ -546,6 +546,10 @@ namespace SourceIdentity
 			bool valid = false;
 			HdrNoiseReason reason = HdrNoiseReason::Disabled;
 			int bestKernel = -1;
+			uint32_t kernelMask = 0;               // SOTA1-HIGH-1: bitmask of evaluated kernels in linear-light WLS
+			double kernelT[kKernelCount] = {};     // SOTA1-HIGH-1: linear-light WLS stat per evaluated kernel
+			double kernelMargin = 0.0;             // SOTA1-HIGH-1: margin to runner-up kernel in linear-light WLS
+			double familyMargin = 0.0;             // SOTA1-HIGH-1: margin to runner-up family in linear-light WLS
 			double stat = 0.0;
 			double whitenedRms = 0.0;
 			double uniformLinearStat = 0.0;
@@ -842,11 +846,17 @@ namespace SourceIdentity
 			bool computeUniformDiagnostic = true,
 			int onlyKernel = -1,
 			bool alreadyLinearized = false,
-			int preClampedCount = 0)
+			int preClampedCount = 0,
+			bool expandWinningFamily = false)
 		{
 			res.valid = false;
 			res.reason = HdrNoiseReason::Disabled;
 			res.bestKernel = -1;
+			res.kernelMask = 0;
+			for (int k = 0; k < kKernelCount; ++k)
+				res.kernelT[k] = 0.0;
+			res.kernelMargin = 0.0;
+			res.familyMargin = 0.0;
 			res.stat = 0.0;
 			res.whitenedRms = 0.0;
 			res.uniformLinearStat = 0.0;
@@ -1162,15 +1172,15 @@ namespace SourceIdentity
 			double bestDofW = 1.0;
 			bool haveBestU = false;
 			double bestStatU = 0.0;
+			uint32_t evaluatedMask = 0u;
+			double kernelStats[kKernelCount] = {};
 
-			for (int q = 0; q < nEvalK; ++q)
-			{
-				const int k = evalKernels[q];
+			auto evalOneKernel = [&](int k) -> bool {
 				Detail::WlsOperatorMeta meta;
 				if (!Detail::BuildWlsTapGeometry(N, candidateN, k, ws.linearLines.origin, L, ws, meta))
 				{
 					res.reason = HdrNoiseReason::InsufficientSamples;
-					return;
+					return false;
 				}
 				double unifDof = 1.0;
 				if (computeUniformDiagnostic)
@@ -1178,7 +1188,7 @@ namespace SourceIdentity
 					if (!unifOp.Build(N, candidateN, k, 0.0, ws.linearLines.origin, L, &ws.tapMemo))
 					{
 						res.reason = HdrNoiseReason::SingularOperator;
-						return;
+						return false;
 					}
 					const double unifRawDof = 1.0 - static_cast<double>(unifOp.Nodes()) / static_cast<double>(unifOp.Length());
 					unifDof = unifRawDof < 0.02 ? 0.02 : unifRawDof;
@@ -1195,7 +1205,7 @@ namespace SourceIdentity
 					if (!Detail::SolveLineWls(yRow, sigRow, meta, epsW, ws, levelW, rawRmsW, segSumW, segRowsW))
 					{
 						res.reason = HdrNoiseReason::SingularOperator;
-						return;
+						return false;
 					}
 					ws.lineVals[static_cast<size_t>(j)] = std::log(levelW / ws.baseLineW[static_cast<size_t>(j)]);
 					ws.lineWhitenedRms[static_cast<size_t>(j)] = rawRmsW;
@@ -1213,7 +1223,7 @@ namespace SourceIdentity
 						if (rowsU <= 0 || !std::isfinite(rssU))
 						{
 							res.reason = HdrNoiseReason::SingularOperator;
-							return;
+							return false;
 						}
 						const double epsU = ws.lineSigmaRms[static_cast<size_t>(j)] / cfg.floorGuardDivisor;
 						const double msU = rssU / static_cast<double>(rowsU);
@@ -1221,7 +1231,7 @@ namespace SourceIdentity
 						if (!std::isfinite(levelU) || !(levelU > 0.0))
 						{
 							res.reason = HdrNoiseReason::SingularOperator;
-							return;
+							return false;
 						}
 						ws.lineValsUnif[static_cast<size_t>(j)] = std::log(levelU / ws.baseLineU[static_cast<size_t>(j)]);
 					}
@@ -1232,8 +1242,10 @@ namespace SourceIdentity
 				if (!std::isfinite(statW) || !std::isfinite(rmsW))
 				{
 					res.reason = HdrNoiseReason::SingularOperator;
-					return;
+					return false;
 				}
+				evaluatedMask |= (1u << k);
+				kernelStats[k] = statW;
 				if (!haveBestW || statW < bestStatW)
 				{
 					haveBestW = true;
@@ -1253,7 +1265,7 @@ namespace SourceIdentity
 					if (!std::isfinite(statU))
 					{
 						res.reason = HdrNoiseReason::SingularOperator;
-						return;
+						return false;
 					}
 					if (!haveBestU || statU < bestStatU)
 					{
@@ -1261,11 +1273,65 @@ namespace SourceIdentity
 						bestStatU = statU;
 					}
 				}
+				return true;
+			};
+
+			for (int q = 0; q < nEvalK; ++q)
+			{
+				if (!evalOneKernel(evalKernels[q]))
+					return;
+			}
+			// SOTA1-HIGH-1: when requested on the winning candidate (onlyKernel < 0), also evaluate siblings
+			// in the winning linear-light family so kernelMask/kernelT/kernelMargin cover within-family choices
+			// (e.g. lanczos2/3/4, bicubic B/C variants, spline16/36/64) at <= 2 extra solves.
+			if (expandWinningFamily && onlyKernel < 0 && bestKernel >= 0 && bestKernel < kKernelCount)
+			{
+				const auto winFam = Kernel(bestKernel).family;
+				for (int k = 0; k < kKernelCount; ++k)
+				{
+					if ((evaluatedMask & (1u << k)) != 0u)
+						continue;
+					if (Kernel(k).family == winFam)
+					{
+						if (!evalOneKernel(k))
+							return;
+					}
+				}
+			}
+
+			double secondT = 0.0;
+			bool haveSecond = false;
+			double otherFamT = 0.0;
+			bool haveOtherFam = false;
+			if (haveBestW && bestKernel >= 0 && bestKernel < kKernelCount)
+			{
+				const auto bestFam = Kernel(bestKernel).family;
+				for (int k = 0; k < kKernelCount; ++k)
+				{
+					if ((evaluatedMask & (1u << k)) == 0u || k == bestKernel)
+						continue;
+					const double kt = kernelStats[k];
+					if (!haveSecond || kt < secondT)
+					{
+						secondT = kt;
+						haveSecond = true;
+					}
+					if (Kernel(k).family != bestFam && (!haveOtherFam || kt < otherFamT))
+					{
+						otherFamT = kt;
+						haveOtherFam = true;
+					}
+				}
 			}
 
 			res.valid = haveBestW;
 			res.reason = clampedCount > 0 ? HdrNoiseReason::DarkToeClamped : HdrNoiseReason::Ok;
 			res.bestKernel = bestKernel;
+			res.kernelMask = evaluatedMask;
+			for (int k = 0; k < kKernelCount; ++k)
+				res.kernelT[k] = kernelStats[k];
+			res.kernelMargin = haveSecond ? (secondT - bestStatW) : 0.0;
+			res.familyMargin = haveOtherFam ? (otherFamT - bestStatW) : 0.0;
 			res.stat = bestStatW;
 			res.whitenedRms = bestWhitenedRms;
 			res.uniformLinearStat = computeUniformDiagnostic ? bestStatU : 0.0;

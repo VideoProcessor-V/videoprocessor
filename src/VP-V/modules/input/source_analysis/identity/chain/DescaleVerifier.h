@@ -1298,7 +1298,7 @@ namespace SourceIdentity
 							{
 								VerifyLinearizedHeteroscedasticInPlace(
 									ls, bestScreenN, s_.hdrNoise, hdrWs_, hdrBestRes_, idxScratch_.data(), nl,
-									false, -1, true, hdrPreClamped_);
+									false, -1, true, hdrPreClamped_, true);
 								if (hdrBestRes_.valid)
 								{
 									haveHdr = true;
@@ -1313,7 +1313,7 @@ namespace SourceIdentity
 								const int candN = hdrNsBuf[hi];
 								VerifyLinearizedHeteroscedasticInPlace(
 									ls, candN, s_.hdrNoise, hdrWs_, hdrTmpRes_, idxScratch_.data(), nl,
-									false, onlyK, true, hdrPreClamped_);
+									false, onlyK, true, hdrPreClamped_, onlyK < 0);
 								if (!hdrTmpRes_.valid)
 									continue;
 								const bool better = !haveHdr || hdrTmpRes_.stat < hdrBestRes_.stat ||
@@ -1336,6 +1336,16 @@ namespace SourceIdentity
 						cr.hdrWhitenedStat = bestHr.stat;
 						cr.hdrWhitenedRms = bestHr.whitenedRms;
 						cr.stat = bestHr.stat;
+						// SOTA1-HIGH-1: sync kernelMask, kernelT, margins, and phase to linearized WLS so
+						// ChainReading::MakeFieldEvidence never compares stale code-space kernelT against cr.stat.
+						cr.kernelMask = bestHr.kernelMask;
+						for (int k = 0; k < kKernelCount; ++k)
+							cr.kernelT[k] = bestHr.kernelT[k];
+						cr.kernelMargin = bestHr.kernelMargin;
+						cr.familyMargin = bestHr.familyMargin;
+						cr.phase = 0.0;
+						cr.phaseRefined = false;
+						cr.phaseRefineStep = 0.0;
 						if (bestHr.bestKernel >= 0 && bestHr.bestKernel < kKernelCount)
 						{
 							cr.kernel = bestHr.bestKernel;
