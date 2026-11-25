@@ -301,6 +301,15 @@ namespace VideoProcessorTest
 			TargetLutGpuFixture fixture;
 			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
 			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			struct LogScope
+			{
+				TargetLutGpuFixture& f;
+				LogScope(TargetLutGpuFixture& fx, std::string* s) : f(fx) { f.CaptureLog(s); }
+				LogScope(const LogScope&) = delete;
+				LogScope& operator=(const LogScope&) = delete;
+				~LogScope() { f.CaptureLog(nullptr); }
+			} logScope(fixture, &log);
 
 			struct DispatchGuard
 			{
@@ -770,6 +779,7 @@ namespace VideoProcessorTest
 				narrowFadeAcc, narrowFadeBorderAcc, narrowFadeDiff, narrowPlainAcc,
 				e1FadeWAcc, e1FadeWBorderAcc, e1FadeWDiff, e1FadeNoWAcc, e1FadeNoWDiff, e1PlainAcc);
 			Logger::WriteMessage(summary);
+			AssertCleanLibplaceboLog(log, "GuidedNarrowAndE1FadeHoistedFromMeanMatchesCpuReferenceBitExactly");
 		}
 	};
 }
