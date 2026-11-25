@@ -98,6 +98,34 @@ namespace VpMotion
 		Matcher& matcher_;
 	};
 
+	// RAII pin + matcher binding for SkeletonMemo across one Estimate call (exception-safe; skips live memo on warm-up).
+	template<class Matcher>
+	class MatcherSkeletonMemoScope
+	{
+	public:
+		MatcherSkeletonMemoScope(Matcher& matcher, std::shared_ptr<VpSkeleton::SkeletonMemo> memo, uint64_t seq)
+			: matcher_(matcher), memo_(std::move(memo))
+		{
+			matcher_.SetSkeletonMemo(memo_.get(), memo_ ? seq : 0);
+		}
+		~MatcherSkeletonMemoScope() { Release(); }
+		void Release()
+		{
+			if (!active_)
+				return;
+			active_ = false;
+			matcher_.SetSkeletonMemo(nullptr, 0);
+			memo_.reset();
+		}
+		MatcherSkeletonMemoScope(const MatcherSkeletonMemoScope&) = delete;
+		MatcherSkeletonMemoScope& operator=(const MatcherSkeletonMemoScope&) = delete;
+
+	private:
+		Matcher& matcher_;
+		std::shared_ptr<VpSkeleton::SkeletonMemo> memo_;
+		bool active_ = true;
+	};
+
 	class VectorEngine : public VectorEngineState, public IVectorEngine
 	{
 	public:
@@ -184,11 +212,11 @@ namespace VpMotion
 
 		// ---- W2-C1 (B9): the one engine state and its work counters ---------------------------------------------------
 		// State: derived at the end of UpdateVectorEngine and PlanProducer (render thread; VectorEngineState.h, the one-frame lag).
-		VectorDemand::MotionEngineStatus State() const override { return motionEngineStatus; }
+		VectorDemand::MotionEngineStatus State() const override;
 		// Work: the counters, with the producer's pairs (stopped producers' pairs kept in motionEnginePairsBase).
 		VectorDemand::MotionEngineWork Work() const override;
 		// B-prereq (a): the P2 slot's read-only view and the P2 CPU form's read counts (served / declined; atomics, any thread).
-		VpMotion::P2View P2Pairs() const override { return P2(); }
+		VpMotion::P2View P2Pairs() const override;
 		// The P2 CPU form's reader (VectorEngine.cpp: FindTo + the C2a-F 2 generation check + MakeP2PairRecord).
 		bool P2RecordEndingAt(uint64_t to, VpMotion::P2PairRecord& out, std::string& why) const override;
 		void NoteP2CpuFormRead(bool served) const override;
@@ -196,12 +224,12 @@ namespace VpMotion
 		void NoteP2CpuFormRead(bool served, const std::string& why) const override;
 		std::string P2CpuFormLastDecline() const;
 		unsigned long long P2CpuFormServed() const;
-		unsigned long long P2CpuFormDeclined() const { return p2CpuFormDeclined_.load(std::memory_order_relaxed); }
-		unsigned long long ShallowBackwardPairs() const { return vectorShallowBackwardPairs.load(std::memory_order_relaxed); }
+		unsigned long long P2CpuFormDeclined() const;
+		unsigned long long ShallowBackwardPairs() const;
 		// The VRAM governor's release of the motion engine (the de-judder's keeper feeds it; render thread).
-		void NoteVramRelease(bool released) { motionVramRelease = released; }
+		void NoteVramRelease(bool released);
 		// The keeper's counters (warm-ups, analysis estimates, matcher creates); render thread.
-		VectorDemand::MotionEngineWork& WorkCounters() { return motionEngineWork; }
+		VectorDemand::MotionEngineWork& WorkCounters();
 
 		struct ServeFacts
 		{
@@ -239,7 +267,7 @@ namespace VpMotion
 
 		// ---- P5a-5: the matcher estimate and its K4 pre-estimate hook (render thread) ---------------------------
 		// The estimate state binds itself as the engine's view of the matcher (null = unbound).
-		void BindMatcher(const IMatcherView* matcher) { matcher_ = matcher; }
+		void BindMatcher(const IMatcherView* matcher);
 		// Runs the matcher's estimate of the pair (aSequence, bSequence). With a pre-estimate hook registered and
 		// `hookable` (not the warm-up's dummy estimate): BeforeEstimate(ctx, sink) right before, AfterEstimate(pairSeq,
 		// EstimateOutcome) right after. With no hook it is `estimate()` and nothing else (no sink, no matcher
@@ -311,7 +339,7 @@ namespace VpMotion
 		}
 		unsigned long long PreEstimateHookFailures() const;
 		bool PreEstimateHooked() const;
-		VpSkeleton::SkeletonMemo* SkeletonMemoFor(uint64_t seq) const;
+		std::shared_ptr<VpSkeleton::SkeletonMemo> SkeletonMemoFor(uint64_t seq) const;
 		// The optical-flow engine's whole-frame motion of the pair the matcher took ahead (flow->global[0], D1 format:
 		// 1/8-size texels, z ambiguity, w written); null = no producer pair. CPU record for EngineGlobal only.
 		void NoteEngineGlobal(uint64_t from, uint64_t to, const float* global, int searchHalvings);
@@ -387,16 +415,16 @@ namespace VpMotion
 		LeaseCounters Leases() const;
 		std::string LeaseWindowLine() const;
 		// The host's window board (core/QueueWindow.h); null = not fed. Set and clear on the render thread; outlives the engine's use.
-		void SetQueueWindowBoard(const VpSkeleton::QueueWindowBoard* board) { queueBoard_.store(board, std::memory_order_release); }
+		void SetQueueWindowBoard(const VpSkeleton::QueueWindowBoard* board);
 		// Contract: set AND clear on the render thread or under renderMutex (an estimate reads the pointer once and
 		// calls it without a lock); the hook object may be destroyed only after the clear has returned.
-		void SetPreEstimateHook(IPreEstimateHook* hook) override { preEstimateHook_.store(hook, std::memory_order_release); }
-		void SetCameraFitWanted(bool wanted) override { cameraFitWanted_.store(wanted, std::memory_order_release); }
+		void SetPreEstimateHook(IPreEstimateHook* hook) override;
+		void SetCameraFitWanted(bool wanted) override;
 		bool CameraFitWanted() const;
 		// W2-C1 (C1-4) TEST SEAM (rule 25; README "One motion-engine state"): every producer start fails with this reason, as NVOF
 		// does on an adapter or size it cannot serve, without a device (PlanProducer then treats the device as present). Empty (the
 		// default; nothing in the product sets it) = the real start. CPU tests only: EngineAbsentPipelineTests scenario 2.
-		void FailProducerStartsForTesting(const std::string& reason) { producerStartFailureForTesting_ = reason; }
+		void FailProducerStartsForTesting(const std::string& reason);
 		// Reservations (RefinedFieldOf, SubmitLongPair ...): IVectorEngine's "absent" defaults.
 
 		// ---- W2-C5b: the ON-DEMAND estimate entry (OnDemandEstimate.h; refs\93-prep-C5b.md); render thread --------------------
@@ -429,7 +457,7 @@ namespace VpMotion
 		OnDemandCounters OnDemandReads() const;
 		// The C1 state gate (C5b opus gate MUST 2): no request work while the engine's one state is Off (vector_demand off, no want,
 		// interlaced, smooth motion, VRAM release, ...). Render thread (State() is derived there, with its one-frame lag).
-		bool OnDemandStateOn() const { return motionEngineStatus.state != VectorDemand::MotionEngineState::Off; }
+		bool OnDemandStateOn() const;
 		// ---- W2-C5b commit 4: the dequeue issues, the estimate fills (OnDemandIssue.h; VectorEngineEstimate.inl) -----------
 		enum : unsigned { kConsumerIdleCycles = 4 };   // enum constant: ODR-safe in C++14
 		// The post (OnDemandIssue.h), once per staged pair (once per new A): the render-time sample (OnDemand::RenderSample) and the consumer clock.
@@ -441,9 +469,9 @@ namespace VpMotion
 		bool OnDemandConsumerActive();
 		// Rule 32: the renderer notes optical_flow_on_demand every frame from Impl::ResolveMotionEngine (PhaseTimeline.inl, render
 		// thread, before RenderLocked); once noted it replaces ProducerInputs::onDemand in PlanProducer. Render thread only.
-		void NoteHostOnDemandSetting(OnDemand::Setting s) { hostOnDemand_ = s; hostOnDemandKnown_ = true; }
+		void NoteHostOnDemandSetting(OnDemand::Setting s);
 		// The setting PlanProducer published (the host's noted value, else ProducerInputs::onDemand); the walk's stage reads it.
-		void SetOnDemandSetting(OnDemand::Setting s) { onDemandSetting_.store(static_cast<unsigned char>(s), std::memory_order_release); }
+		void SetOnDemandSetting(OnDemand::Setting s);
 		OnDemand::Setting OnDemandSettingNow() const { return static_cast<OnDemand::Setting>(onDemandSetting_.load(std::memory_order_acquire)); }
 		// Stall fix (W2-C5b re-check, MUST 3): the walk's stage only STAGES the predicted pair under the renderer's queue mutex
 		// (plain copies: the two frames' analysis caches as a peek closure, sequences, rate, wait); PostStagedOnDemand

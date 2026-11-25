@@ -38,7 +38,7 @@ namespace VpMotion
 		// PHASE 1: SettingsApplied leaving the Original pathway requests one Resync invalidation (never gated: teardown
 		// and the hand-over must run in both pathways).
 		void OnLifecycle(RendererExtension::LifecycleFacts& f) override;
-		// M1#1 (B0#2) & M1#2 (U10 C1): registers the kP3AnalysisField GPU owner fill and kP7CameraFit pair-global owner fills
+		// M1#1 (B0#2) & M1#2 (U10 C1): registers the kP3AnalysisField GPU owner fill and kP7CameraFit pair-global CPU owner fill
 		// on the first VP-V Entrance (observation only: always false).
 		bool OnFrame(RendererExtension::FrameContext& c) override;
 		bool P3FieldRegistered() const;

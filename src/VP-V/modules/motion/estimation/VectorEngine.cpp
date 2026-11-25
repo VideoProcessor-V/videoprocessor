@@ -1015,10 +1015,10 @@ namespace VpMotion
 		return cameraFitWanted_.load(std::memory_order_acquire);
 	}
 
-	VpSkeleton::SkeletonMemo* VectorEngine::SkeletonMemoFor(uint64_t seq) const
+	std::shared_ptr<VpSkeleton::SkeletonMemo> VectorEngine::SkeletonMemoFor(uint64_t seq) const
 	{
 		const Vpv::Skeleton::FrameMemo fm = Vpv::Skeleton::MemoForHost(host_, seq);
-		return fm.Valid() ? fm.memo.get() : nullptr;
+		return fm.Valid() ? fm.memo : std::shared_ptr<VpSkeleton::SkeletonMemo>();
 	}
 
 	void VectorEngine::NoteEngineGlobal(uint64_t from, uint64_t to, const float* global, int searchHalvings)
@@ -1950,5 +1950,76 @@ namespace VpMotion
 		onDemandWalkFrom_ = from;
 		onDemandWalkFromKnown_ = true;
 		return true;
+	}
+
+	VectorDemand::MotionEngineStatus VectorEngine::State() const
+	{
+		return motionEngineStatus;
+	}
+
+	VpMotion::P2View VectorEngine::P2Pairs() const
+	{
+		return P2();
+	}
+
+	unsigned long long VectorEngine::P2CpuFormDeclined() const
+	{
+		return p2CpuFormDeclined_.load(std::memory_order_relaxed);
+	}
+
+	unsigned long long VectorEngine::ShallowBackwardPairs() const
+	{
+		return vectorShallowBackwardPairs.load(std::memory_order_relaxed);
+	}
+
+	void VectorEngine::NoteVramRelease(bool released)
+	{
+		motionVramRelease = released;
+	}
+
+	VectorDemand::MotionEngineWork& VectorEngine::WorkCounters()
+	{
+		return motionEngineWork;
+	}
+
+	void VectorEngine::BindMatcher(const IMatcherView* matcher)
+	{
+		matcher_ = matcher;
+	}
+
+	void VectorEngine::SetQueueWindowBoard(const VpSkeleton::QueueWindowBoard* board)
+	{
+		queueBoard_.store(board, std::memory_order_release);
+	}
+
+	void VectorEngine::SetPreEstimateHook(IPreEstimateHook* hook)
+	{
+		preEstimateHook_.store(hook, std::memory_order_release);
+	}
+
+	void VectorEngine::SetCameraFitWanted(bool wanted)
+	{
+		cameraFitWanted_.store(wanted, std::memory_order_release);
+	}
+
+	void VectorEngine::FailProducerStartsForTesting(const std::string& reason)
+	{
+		producerStartFailureForTesting_ = reason;
+	}
+
+	bool VectorEngine::OnDemandStateOn() const
+	{
+		return motionEngineStatus.state != VectorDemand::MotionEngineState::Off;
+	}
+
+	void VectorEngine::NoteHostOnDemandSetting(OnDemand::Setting s)
+	{
+		hostOnDemand_ = s;
+		hostOnDemandKnown_ = true;
+	}
+
+	void VectorEngine::SetOnDemandSetting(OnDemand::Setting s)
+	{
+		onDemandSetting_.store(static_cast<unsigned char>(s), std::memory_order_release);
 	}
 }
