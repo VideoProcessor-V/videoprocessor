@@ -3203,6 +3203,9 @@ namespace Gpu
 				p2bHdr += Shaders::BuildFineTapHeader();
 				p2bHdr += Shaders::kCoreHelpers;
 				p2bHdr += Shaders::kPass2MergeSolveHeader;
+				p2bHdr += Shaders::kPass2SolverHeader;
+
+				float uSolverMode = (cfg_.solverMode == SolverMode::LegacyClipRescale) ? 1.0f : 0.0f;
 
 				pl_shader_desc d2b[9] = {
 					VpvGpu::Sampled("cell_stats", sc.cellStats),
@@ -3215,10 +3218,11 @@ namespace Gpu
 					VpvGpu::Storage("td_maps", dstTdMaps),
 					VpvGpu::Storage("cell_diag_flags", dstDiagFlags)
 				};
-				pl_shader_var v2b[24] = {
+				pl_shader_var v2b[25] = {
 					VpvGpu::Var("u_k", &uK),
 					VpvGpu::Var("u_pool_r", &uPoolR),
 					VpvGpu::Var("u_estimator", &uEstimator),
+					VpvGpu::Var("u_solver_mode", &uSolverMode),
 					VpvGpu::Var("u_ref_role_0", &uRefRole0),
 					VpvGpu::Var("u_ref_role_1", &uRefRole1),
 					VpvGpu::Var("u_ref_role_2", &uRefRole2),
@@ -3241,7 +3245,7 @@ namespace Gpu
 					VpvGpu::Var("u_psd_fine", &uPsdFine),
 					VpvGpu::Var("u_fade_keep", &uFadeKeep)
 				};
-				if (!runPass("td_v2_p2b_merge_solve", p2bHdr, Shaders::kPass2MergeAndSolve, d2b, 9, v2b, 24, cellGx8, cellGy8, 8, 8))
+				if (!runPass("td_v2_p2b_merge_solve", p2bHdr, Shaders::kPass2MergeAndSolve, d2b, 9, v2b, 25, cellGx8, cellGy8, 8, 8))
 				{
 					resetCarryIfActive();
 					return failCore("td_v2_p2b_merge_solve dispatch failed", StandInKind::GpuDispatchFailed);

@@ -1200,7 +1200,7 @@ for (int chIdx = 0; chIdx < 2; ++chIdx)
             }
 
             float solvedW[3];
-            int status = td_solve_convex(K, C, cVec, solvedW);
+            int status = td_solve_convex(K, C, cVec, int(round(u_solver_mode)), solvedW);
             if (status == 2) cellNonFinite = true;
             else if (status == 1) cellSingular = true;
             else
@@ -3193,6 +3193,9 @@ imageStore(out_coded_delta, p, vec4(0.0));
 				c2bHdr += Shaders::BuildFineTapHeader();
 				c2bHdr += Shaders::kCoreHelpers;
 				c2bHdr += Shaders::kPass2MergeSolveHeader;
+				c2bHdr += Shaders::kPass2SolverHeader;
+
+				float uSolverMode = (cfg_.solverMode == SolverMode::LegacyClipRescale) ? 1.0f : 0.0f;
 
 				pl_shader_desc d2b[11] = {
 					VpvGpu::Sampled("cell_stats_cb", sc.statsCb),
@@ -3207,8 +3210,9 @@ imageStore(out_coded_delta, p, vec4(0.0));
 					VpvGpu::Storage("cell_diag_cr", sc.diagCr),
 					VpvGpu::Storage("cell_diag_flags", dstDiagFlags)
 				};
-				pl_shader_var v2b[24] = {
+				pl_shader_var v2b[25] = {
 					VpvGpu::Var("u_k", &uK), VpvGpu::Var("u_pool_r", &uPoolR), VpvGpu::Var("u_estimator", &uEstimator),
+					VpvGpu::Var("u_solver_mode", &uSolverMode),
 					VpvGpu::Var("u_ref_role_0", &uRefRole0), VpvGpu::Var("u_ref_role_1", &uRefRole1), VpvGpu::Var("u_ref_role_2", &uRefRole2),
 					VpvGpu::Var("u_ref_motion_slot_0", &uRefSlot0), VpvGpu::Var("u_ref_motion_slot_1", &uRefSlot1), VpvGpu::Var("u_ref_motion_slot_2", &uRefSlot2),
 					VpvGpu::Var("u_exact_copy_0", &uExact0), VpvGpu::Var("u_exact_copy_1", &uExact1), VpvGpu::Var("u_exact_copy_2", &uExact2),
@@ -3222,7 +3226,7 @@ imageStore(out_coded_delta, p, vec4(0.0));
 					VpvGpu::Var("u_psd_fine", &uPsdFine),
 					VpvGpu::Var("u_coarse_only", &uCoarseOnly)
 				};
-				if (!runPass("td_v2_c2b_merge_solve", c2bHdr, ChromaShaders::kPassChromaMergeSolve, d2b, 11, v2b, 24,
+				if (!runPass("td_v2_c2b_merge_solve", c2bHdr, ChromaShaders::kPassChromaMergeSolve, d2b, 11, v2b, 25,
 				             Detail::GroupsFor(cw, 8), Detail::GroupsFor(ch, 8), 8, 8))
 				{
 					return failVisible("td_v2_c2b_merge_solve dispatch failed", StandInKind::GpuDispatchFailed);

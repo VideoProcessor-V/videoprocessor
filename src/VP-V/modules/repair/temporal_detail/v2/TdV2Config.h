@@ -86,6 +86,20 @@ namespace TdV2
 		return "?";
 	}
 
+	// Constrained convex blend solver mode (TD-U2 / H-2):
+	//   - ActiveSetExact (default): solves exact QP min w'Cw - 2 w'c s.t. w_k >= 0, sum w_k <= 1 by subset enumeration
+	//   - LegacyClipRescale: original refs/111 s3.5 unconstrained solve + clip-then-rescale (retained strictly for ablation)
+	enum class SolverMode : uint8_t
+	{
+		ActiveSetExact = 0,
+		LegacyClipRescale = 1
+	};
+
+	inline const char* SolverModeToken(SolverMode s)
+	{
+		return s == SolverMode::LegacyClipRescale ? "legacy-clip-rescale" : "active-set-exact";
+	}
+
 	// Single-codebase preset selector (99 s2B: Reference vs RealTime, every shortcut explicitly named SC-*).
 	enum class Preset : uint8_t
 	{
@@ -137,6 +151,7 @@ namespace TdV2
 		Mode mode = Mode::Off;
 		ResidualMode residualMode = ResidualMode::Cell;
 		VarianceEstimator estimator = VarianceEstimator::A3_ConservativeMin;
+		SolverMode solverMode = SolverMode::ActiveSetExact;
 		Preset preset = Preset::Reference;
 		BokehMode bokehMode = BokehMode::Untouched;
 

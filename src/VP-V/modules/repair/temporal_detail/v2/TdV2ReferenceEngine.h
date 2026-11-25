@@ -1668,7 +1668,7 @@ namespace TdV2
 								cVec[k] = 0.0;
 						}
 
-						const BlendSolveResult solved = SolveConvexWeights(C, cVec, K, kDefaultTraceRegScale, standIns);
+						const BlendSolveResult solved = SolveConvexWeights(C, cVec, K, kDefaultTraceRegScale, standIns, cfg_.solverMode);
 						if (solved.nonFiniteClosed)
 						{
 							nonFiniteCellFlag[cIdx] = 1u;

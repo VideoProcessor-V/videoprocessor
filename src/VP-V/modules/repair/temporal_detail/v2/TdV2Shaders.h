@@ -1967,9 +1967,39 @@ float td_select_blind_c(int estMode, float cA1, float cA2)
         return 0.0;
     return max(0.0, min(cA1, cA2));
 }
+)GLSL";
 
+	// Split out solver header to stay strictly below MSVC's 16,380-byte raw string literal limit (C2026).
+	constexpr const char* kPass2SolverHeader = R"GLSL(
+bool td_cholesky_solve_3(float L[3][3], float rhs[3], int sz, out float outX[3])
+{
+    outX[0] = 0.0; outX[1] = 0.0; outX[2] = 0.0;
+    float y[3];
+    y[0] = 0.0; y[1] = 0.0; y[2] = 0.0;
+    for (int i = 0; i < sz; ++i)
+    {
+        float s = rhs[i];
+        for (int p = 0; p < i; ++p)
+            s -= L[i][p] * y[p];
+        y[i] = s / L[i][i];
+        if (td_is_bad(y[i]))
+            return false;
+    }
+    for (int i = sz - 1; i >= 0; --i)
+    {
+        float s = y[i];
+        for (int p = i + 1; p < sz; ++p)
+            s -= L[p][i] * outX[p];
+        outX[i] = s / L[i][i];
+        if (td_is_bad(outX[i]))
+            return false;
+    }
+    return true;
+}
+
+// TD-U2 (H-2): Constrained convex QP solver (solverMode 0 = ActiveSetExact, 1 = LegacyClipRescale).
 // Returns 0 = ok, 1 = singular, 2 = non-finite.
-int td_solve_convex(int K, float C[3][3], float cVec[3], out float outW[3])
+int td_solve_convex(int K, float C[3][3], float cVec[3], int solverMode, out float outW[3])
 {
     outW[0] = 0.0; outW[1] = 0.0; outW[2] = 0.0;
     float diagSum = 0.0;
@@ -1991,75 +2021,242 @@ int td_solve_convex(int K, float C[3][3], float cVec[3], out float outW[3])
     float reg = max(TD_TRACE_REG * meanDiag, TD_SOLVE_FLOOR);
     float pivotFloor = max(TD_PIVOT_FLOOR, TD_PIVOT_FLOOR * meanDiag);
 
-    float a[3][4];
-    for (int i = 0; i < 3; ++i)
-        for (int j = 0; j < 4; ++j)
-            a[i][j] = 0.0;
-
-    for (int i = 0; i < K; ++i)
+    if (solverMode == 1)
     {
-        for (int j = 0; j < K; ++j)
-            a[i][j] = C[i][j] + ((i == j) ? reg : 0.0);
-        a[i][K] = cVec[i];
-    }
-
-    for (int col = 0; col < K; ++col)
-    {
-        int pivotRow = col;
-        float pivotAbs = abs(a[col][col]);
-        for (int r = col + 1; r < K; ++r)
-        {
-            float cand = abs(a[r][col]);
-            if (cand > pivotAbs)
-            {
-                pivotAbs = cand;
-                pivotRow = r;
-            }
-        }
-        if (pivotAbs <= pivotFloor)
-            return 1;
-        if (pivotRow != col)
-        {
-            for (int j = col; j <= K; ++j)
-            {
-                float tmp = a[col][j];
-                a[col][j] = a[pivotRow][j];
-                a[pivotRow][j] = tmp;
-            }
-        }
-        float invPivot = 1.0 / a[col][col];
-        for (int r = col + 1; r < K; ++r)
-        {
-            float factor = a[r][col] * invPivot;
-            for (int j = col; j <= K; ++j)
-                a[r][j] -= factor * a[col][j];
-        }
-    }
-
-    float w[3];
-    w[0] = 0.0; w[1] = 0.0; w[2] = 0.0;
-    for (int i = K - 1; i >= 0; --i)
-    {
-        float rhs = a[i][K];
-        for (int j = i + 1; j < K; ++j)
-            rhs -= a[i][j] * w[j];
-        w[i] = rhs / a[i][i];
-        if (td_is_bad(w[i]))
-            return 2;
-    }
-
-    float sumW = 0.0;
-    for (int i = 0; i < K; ++i)
-    {
-        outW[i] = max(0.0, w[i]);
-        sumW += outW[i];
-    }
-    if (sumW > 1.0)
-    {
-        float invSum = 1.0 / sumW;
+        float a[3][4];
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 4; ++j)
+                a[i][j] = 0.0;
         for (int i = 0; i < K; ++i)
-            outW[i] *= invSum;
+        {
+            for (int j = 0; j < K; ++j)
+                a[i][j] = C[i][j] + ((i == j) ? reg : 0.0);
+            a[i][K] = cVec[i];
+        }
+        for (int col = 0; col < K; ++col)
+        {
+            int pivotRow = col;
+            float pivotAbs = abs(a[col][col]);
+            for (int r = col + 1; r < K; ++r)
+            {
+                float cand = abs(a[r][col]);
+                if (cand > pivotAbs)
+                {
+                    pivotAbs = cand;
+                    pivotRow = r;
+                }
+            }
+            if (pivotAbs <= pivotFloor)
+                return 1;
+            if (pivotRow != col)
+            {
+                for (int j = col; j <= K; ++j)
+                {
+                    float tmp = a[col][j];
+                    a[col][j] = a[pivotRow][j];
+                    a[pivotRow][j] = tmp;
+                }
+            }
+            float invPivot = 1.0 / a[col][col];
+            for (int r = col + 1; r < K; ++r)
+            {
+                float factor = a[r][col] * invPivot;
+                for (int j = col; j <= K; ++j)
+                    a[r][j] -= factor * a[col][j];
+            }
+        }
+        float w[3];
+        w[0] = 0.0; w[1] = 0.0; w[2] = 0.0;
+        for (int i = K - 1; i >= 0; --i)
+        {
+            float rhs = a[i][K];
+            for (int j = i + 1; j < K; ++j)
+                rhs -= a[i][j] * w[j];
+            w[i] = rhs / a[i][i];
+            if (td_is_bad(w[i]))
+                return 2;
+        }
+        float sumW = 0.0;
+        for (int i = 0; i < K; ++i)
+        {
+            outW[i] = max(0.0, w[i]);
+            sumW += outW[i];
+        }
+        if (sumW > 1.0)
+        {
+            float invSum = 1.0 / sumW;
+            for (int i = 0; i < K; ++i)
+                outW[i] *= invSum;
+        }
+        return 0;
     }
+
+    // ActiveSetExact: symmetrize regularized A = 0.5*(C + C') + reg*I and verify full SPD via Cholesky.
+    float A[3][3];
+    float Lf[3][3];
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+        {
+            A[i][j] = 0.0;
+            Lf[i][j] = 0.0;
+        }
+    for (int i = 0; i < K; ++i)
+        for (int j = 0; j < K; ++j)
+            A[i][j] = 0.5 * (C[i][j] + C[j][i]) + ((i == j) ? reg : 0.0);
+
+    for (int i = 0; i < K; ++i)
+    {
+        for (int j = 0; j < i; ++j)
+        {
+            float s = A[i][j];
+            for (int p = 0; p < j; ++p)
+                s -= Lf[i][p] * Lf[j][p];
+            Lf[i][j] = s / Lf[j][j];
+        }
+        float d = A[i][i];
+        for (int p = 0; p < i; ++p)
+            d -= Lf[i][p] * Lf[i][p];
+        if (td_is_bad(d) || d <= pivotFloor)
+            return 1;
+        Lf[i][i] = sqrt(d);
+    }
+
+    float bestW[3];
+    bestW[0] = 0.0; bestW[1] = 0.0; bestW[2] = 0.0;
+    float bestObj = 0.0;
+
+    int totalMasks = 1 << K;
+    for (int mask = 1; mask < totalMasks; ++mask)
+    {
+        int idx[3];
+        idx[0] = 0; idx[1] = 0; idx[2] = 0;
+        int sz = 0;
+        for (int i = 0; i < K; ++i)
+        {
+            if ((mask & (1 << i)) != 0)
+            {
+                idx[sz] = i;
+                sz += 1;
+            }
+        }
+
+        float Ls[3][3];
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j)
+                Ls[i][j] = 0.0;
+        bool subOk = true;
+        for (int i = 0; i < sz && subOk; ++i)
+        {
+            for (int j = 0; j < i; ++j)
+            {
+                float s = A[idx[i]][idx[j]];
+                for (int p = 0; p < j; ++p)
+                    s -= Ls[i][p] * Ls[j][p];
+                Ls[i][j] = s / Ls[j][j];
+            }
+            float d = A[idx[i]][idx[i]];
+            for (int p = 0; p < i; ++p)
+                d -= Ls[i][p] * Ls[i][p];
+            if (td_is_bad(d) || d <= pivotFloor)
+                subOk = false;
+            else
+                Ls[i][i] = sqrt(d);
+        }
+        if (!subOk)
+            continue;
+
+        float cSub[3];
+        cSub[0] = 0.0; cSub[1] = 0.0; cSub[2] = 0.0;
+        for (int i = 0; i < sz; ++i)
+            cSub[i] = cVec[idx[i]];
+
+        float uSub[3];
+        if (!td_cholesky_solve_3(Ls, cSub, sz, uSub))
+            continue;
+
+        // Candidate A: unconstrained on subset S; Candidate B: simplex sum==1 KKT border on S.
+        float sumU = 0.0;
+        for (int i = 0; i < sz; ++i)
+            sumU += uSub[i];
+
+        for (int pass = 0; pass < 2; ++pass)
+        {
+            float cand[3];
+            cand[0] = 0.0; cand[1] = 0.0; cand[2] = 0.0;
+            bool hasCand = false;
+            if (pass == 0)
+            {
+                for (int i = 0; i < sz; ++i)
+                    cand[idx[i]] = uSub[i];
+                hasCand = true;
+            }
+            else if (sz == 1)
+            {
+                cand[idx[0]] = 1.0;
+                hasCand = true;
+            }
+            else if (sumU > 1.0 - 1e-5)
+            {
+                float onesSub[3];
+                onesSub[0] = 1.0; onesSub[1] = 1.0; onesSub[2] = 1.0;
+                float vSub[3];
+                if (td_cholesky_solve_3(Ls, onesSub, sz, vSub))
+                {
+                    float sumV = 0.0;
+                    for (int i = 0; i < sz; ++i)
+                        sumV += vSub[i];
+                    if (!td_is_bad(sumV) && sumV > pivotFloor)
+                    {
+                        float mu = (sumU - 1.0) / sumV;
+                        for (int i = 0; i < sz; ++i)
+                            cand[idx[i]] = uSub[i] - mu * vSub[i];
+                        hasCand = true;
+                    }
+                }
+            }
+            if (!hasCand)
+                continue;
+
+            bool feas = true;
+            float sumC = 0.0;
+            for (int i = 0; i < K; ++i)
+            {
+                if (td_is_bad(cand[i]) || cand[i] < -1e-6)
+                {
+                    feas = false;
+                    break;
+                }
+                cand[i] = max(0.0, cand[i]);
+                sumC += cand[i];
+            }
+            if (!feas || sumC > 1.0 + 1e-5)
+                continue;
+            if (sumC > 1.0)
+            {
+                float invS = 1.0 / sumC;
+                for (int i = 0; i < K; ++i)
+                    cand[i] *= invS;
+            }
+            float quad = 0.0;
+            float lin = 0.0;
+            for (int i = 0; i < K; ++i)
+            {
+                lin += cand[i] * cVec[i];
+                for (int j = 0; j < K; ++j)
+                    quad += cand[i] * A[i][j] * cand[j];
+            }
+            float obj = quad - 2.0 * lin;
+            if (!td_is_bad(obj) && obj < bestObj)
+            {
+                bestObj = obj;
+                for (int i = 0; i < K; ++i)
+                    bestW[i] = cand[i];
+            }
+        }
+    }
+
+    for (int i = 0; i < K; ++i)
+        outW[i] = bestW[i];
     return 0;
 }
 )GLSL";
@@ -2261,7 +2458,7 @@ for (int b = 0; b < 3; ++b)
         }
 
         float solvedW[3];
-        int status = td_solve_convex(K, C, cVec, solvedW);
+        int status = td_solve_convex(K, C, cVec, int(round(u_solver_mode)), solvedW);
         if (status == 2)
         {
             cellNonFinite = true;

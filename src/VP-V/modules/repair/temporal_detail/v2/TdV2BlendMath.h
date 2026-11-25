@@ -337,7 +337,8 @@ namespace TdV2
 		const double c[kMaxBlendRefs],
 		int refCount,
 		double traceRegScale = kDefaultTraceRegScale,
-		StandInRegistry* standIns = nullptr)
+		StandInRegistry* standIns = nullptr,
+		SolverMode solverMode = SolverMode::ActiveSetExact)
 	{
 		BlendSolveResult res;
 		if (refCount <= 0 || refCount > kMaxBlendRefs || !std::isfinite(traceRegScale) || traceRegScale < 0.0)
@@ -382,81 +383,275 @@ namespace TdV2
 		const double reg = (std::max)(traceRegScale * meanDiag, kSolveNumericalFloor);
 		const double pivotFloor = (std::max)(kSolvePivotFloor, kSolvePivotFloor * meanDiag);
 
-		// Build augmented matrix [A | b] for exact Gaussian elimination with partial pivoting (K <= 4).
-		double a[kMaxBlendRefs][kMaxBlendRefs + 1] = {};
+		if (solverMode == SolverMode::LegacyClipRescale)
+		{
+			// Legacy refs/111 s3.5 unconstrained solve + clip-then-rescale (retained strictly for ablation).
+			double a[kMaxBlendRefs][kMaxBlendRefs + 1] = {};
+			for (int i = 0; i < refCount; ++i)
+			{
+				for (int j = 0; j < refCount; ++j)
+					a[i][j] = C[i][j] + (i == j ? reg : 0.0);
+				a[i][refCount] = c[i];
+			}
+
+			for (int col = 0; col < refCount; ++col)
+			{
+				int pivotRow = col;
+				double pivotAbs = std::fabs(a[col][col]);
+				for (int r = col + 1; r < refCount; ++r)
+				{
+					const double cand = std::fabs(a[r][col]);
+					if (cand > pivotAbs)
+					{
+						pivotAbs = cand;
+						pivotRow = r;
+					}
+				}
+				if (pivotAbs <= pivotFloor)
+				{
+					res.singular = true;
+					if (standIns != nullptr)
+						standIns->Engage(StandInKind::SingularSolveClosure, "SolveConvexWeights singular pivot");
+					return res;
+				}
+				if (pivotRow != col)
+				{
+					for (int j = col; j <= refCount; ++j)
+						std::swap(a[col][j], a[pivotRow][j]);
+				}
+				const double invPivot = 1.0 / a[col][col];
+				for (int r = col + 1; r < refCount; ++r)
+				{
+					const double factor = a[r][col] * invPivot;
+					for (int j = col; j <= refCount; ++j)
+						a[r][j] -= factor * a[col][j];
+				}
+			}
+
+			double w[kMaxBlendRefs] = {};
+			for (int i = refCount - 1; i >= 0; --i)
+			{
+				double rhs = a[i][refCount];
+				for (int j = i + 1; j < refCount; ++j)
+					rhs -= a[i][j] * w[j];
+				w[i] = rhs / a[i][i];
+				if (!std::isfinite(w[i]))
+				{
+					res.nonFiniteClosed = true;
+					if (standIns != nullptr)
+						standIns->Engage(StandInKind::NonFiniteClosure, "SolveConvexWeights non-finite solution");
+					return res;
+				}
+			}
+
+			double sumW = 0.0;
+			for (int i = 0; i < refCount; ++i)
+			{
+				res.weights[i] = w[i] > 0.0 ? w[i] : 0.0;
+				sumW += res.weights[i];
+			}
+			if (sumW > 1.0)
+			{
+				const double invSum = 1.0 / sumW;
+				for (int i = 0; i < refCount; ++i)
+					res.weights[i] *= invSum;
+				sumW = 1.0;
+			}
+			res.weightSum = sumW;
+			return res;
+		}
+
+		// ---- TD-U2 (H-2): Exact Active-Set Constrained QP Solver ----
+		// Minimize Q(w) = w' A w - 2 w' c  subject to  w_k >= 0, sum_k w_k <= 1,
+		// where A = 0.5 * (C + C') + reg * I (K <= 4 -> at most 15 non-empty subsets + w = 0).
+		double A[kMaxBlendRefs][kMaxBlendRefs] = {};
 		for (int i = 0; i < refCount; ++i)
 		{
 			for (int j = 0; j < refCount; ++j)
-				a[i][j] = C[i][j] + (i == j ? reg : 0.0);
-			a[i][refCount] = c[i];
+				A[i][j] = 0.5 * (C[i][j] + C[j][i]) + (i == j ? reg : 0.0);
 		}
 
-		for (int col = 0; col < refCount; ++col)
+		// Verify full regularized matrix A is strictly SPD via Cholesky; singular or indefinite matrices fail closed visibly.
 		{
-			int pivotRow = col;
-			double pivotAbs = std::fabs(a[col][col]);
-			for (int r = col + 1; r < refCount; ++r)
+			double Lfull[kMaxBlendRefs][kMaxBlendRefs] = {};
+			for (int i = 0; i < refCount; ++i)
 			{
-				const double cand = std::fabs(a[r][col]);
-				if (cand > pivotAbs)
+				for (int j = 0; j < i; ++j)
 				{
-					pivotAbs = cand;
-					pivotRow = r;
+					double s = A[i][j];
+					for (int p = 0; p < j; ++p)
+						s -= Lfull[i][p] * Lfull[j][p];
+					Lfull[i][j] = s / Lfull[j][j];
+				}
+				double d = A[i][i];
+				for (int p = 0; p < i; ++p)
+					d -= Lfull[i][p] * Lfull[i][p];
+				if (!std::isfinite(d) || d <= pivotFloor)
+				{
+					res.singular = true;
+					if (standIns != nullptr)
+						standIns->Engage(StandInKind::SingularSolveClosure, "SolveConvexWeights singular/non-PSD regularized covariance");
+					return res;
+				}
+				Lfull[i][i] = std::sqrt(d);
+			}
+		}
+
+		// Helper: solve L L^T x = rhs for SPD Cholesky factor L of size sz <= 4.
+		auto choleskySolve = [](const double L[kMaxBlendRefs][kMaxBlendRefs], const double rhs[kMaxBlendRefs],
+		                        int sz, double outX[kMaxBlendRefs]) -> bool
+		{
+			double y[kMaxBlendRefs] = {};
+			for (int i = 0; i < sz; ++i)
+			{
+				double s = rhs[i];
+				for (int p = 0; p < i; ++p)
+					s -= L[i][p] * y[p];
+				y[i] = s / L[i][i];
+				if (!std::isfinite(y[i]))
+					return false;
+			}
+			for (int i = sz - 1; i >= 0; --i)
+			{
+				double s = y[i];
+				for (int p = i + 1; p < sz; ++p)
+					s -= L[p][i] * outX[p];
+				outX[i] = s / L[i][i];
+				if (!std::isfinite(outX[i]))
+					return false;
+			}
+			return true;
+		};
+
+		// Candidate w = 0 is ALWAYS feasible with Q(0) = 0.0.
+		std::array<double, kMaxBlendRefs> bestW{};
+		double bestObj = 0.0;
+		double bestSum = 0.0;
+
+		auto tryCandidate = [&](const double cand[kMaxBlendRefs])
+		{
+			double w[kMaxBlendRefs] = {};
+			double sumW = 0.0;
+			for (int i = 0; i < refCount; ++i)
+			{
+				if (!std::isfinite(cand[i]) || cand[i] < -kSolvePivotFloor)
+					return;
+				w[i] = cand[i] > 0.0 ? cand[i] : 0.0;
+				sumW += w[i];
+			}
+			if (sumW > 1.0 + kSolveNumericalFloor)
+				return;
+			if (sumW > 1.0)
+			{
+				const double invSum = 1.0 / sumW;
+				for (int i = 0; i < refCount; ++i)
+					w[i] *= invSum;
+				sumW = 1.0;
+			}
+			double quad = 0.0;
+			double lin = 0.0;
+			for (int i = 0; i < refCount; ++i)
+			{
+				lin += w[i] * c[i];
+				for (int j = 0; j < refCount; ++j)
+					quad += w[i] * A[i][j] * w[j];
+			}
+			const double obj = quad - 2.0 * lin;
+			if (std::isfinite(obj) && obj < bestObj)
+			{
+				bestObj = obj;
+				bestSum = sumW;
+				for (int i = 0; i < refCount; ++i)
+					bestW[i] = w[i];
+			}
+		};
+
+		const int totalMasks = (1 << refCount);
+		for (int mask = 1; mask < totalMasks; ++mask)
+		{
+			int idx[kMaxBlendRefs] = {};
+			int sz = 0;
+			for (int i = 0; i < refCount; ++i)
+			{
+				if ((mask & (1 << i)) != 0)
+					idx[sz++] = i;
+			}
+
+			// Cholesky factor of active submatrix A_SS.
+			double Ls[kMaxBlendRefs][kMaxBlendRefs] = {};
+			bool subOk = true;
+			for (int i = 0; i < sz && subOk; ++i)
+			{
+				for (int j = 0; j < i; ++j)
+				{
+					double s = A[idx[i]][idx[j]];
+					for (int p = 0; p < j; ++p)
+						s -= Ls[i][p] * Ls[j][p];
+					Ls[i][j] = s / Ls[j][j];
+				}
+				double d = A[idx[i]][idx[i]];
+				for (int p = 0; p < i; ++p)
+					d -= Ls[i][p] * Ls[i][p];
+				if (!std::isfinite(d) || d <= pivotFloor)
+				{
+					subOk = false;
+					break;
+				}
+				Ls[i][i] = std::sqrt(d);
+			}
+			if (!subOk)
+				continue;
+
+			double cSub[kMaxBlendRefs] = {};
+			for (int i = 0; i < sz; ++i)
+				cSub[i] = c[idx[i]];
+
+			double uSub[kMaxBlendRefs] = {};
+			if (!choleskySolve(Ls, cSub, sz, uSub))
+				continue;
+
+			// Candidate A: unconstrained optimum on active subset S (feasible if u >= 0 and sum(u) <= 1).
+			double candU[kMaxBlendRefs] = {};
+			double sumU = 0.0;
+			for (int i = 0; i < sz; ++i)
+			{
+				candU[idx[i]] = uSub[i];
+				sumU += uSub[i];
+			}
+			tryCandidate(candU);
+
+			// Candidate B: sum == 1 KKT simplex border on active subset S (needed when sumU > 1 or boundary optimal).
+			if (sz == 1)
+			{
+				double candB[kMaxBlendRefs] = {};
+				candB[idx[0]] = 1.0;
+				tryCandidate(candB);
+			}
+			else if (sumU > 1.0 - kSolveNumericalFloor)
+			{
+				double onesSub[kMaxBlendRefs] = {};
+				for (int i = 0; i < sz; ++i)
+					onesSub[i] = 1.0;
+				double vSub[kMaxBlendRefs] = {};
+				if (choleskySolve(Ls, onesSub, sz, vSub))
+				{
+					double sumV = 0.0;
+					for (int i = 0; i < sz; ++i)
+						sumV += vSub[i];
+					if (std::isfinite(sumV) && sumV > pivotFloor)
+					{
+						const double mu = (sumU - 1.0) / sumV;
+						double candB[kMaxBlendRefs] = {};
+						for (int i = 0; i < sz; ++i)
+							candB[idx[i]] = uSub[i] - mu * vSub[i];
+						tryCandidate(candB);
+					}
 				}
 			}
-			if (pivotAbs <= pivotFloor)
-			{
-				res.singular = true;
-				if (standIns != nullptr)
-					standIns->Engage(StandInKind::SingularSolveClosure, "SolveConvexWeights singular pivot");
-				return res;
-			}
-			if (pivotRow != col)
-			{
-				for (int j = col; j <= refCount; ++j)
-					std::swap(a[col][j], a[pivotRow][j]);
-			}
-			const double invPivot = 1.0 / a[col][col];
-			for (int r = col + 1; r < refCount; ++r)
-			{
-				const double factor = a[r][col] * invPivot;
-				for (int j = col; j <= refCount; ++j)
-					a[r][j] -= factor * a[col][j];
-			}
 		}
 
-		double w[kMaxBlendRefs] = {};
-		for (int i = refCount - 1; i >= 0; --i)
-		{
-			double rhs = a[i][refCount];
-			for (int j = i + 1; j < refCount; ++j)
-				rhs -= a[i][j] * w[j];
-			w[i] = rhs / a[i][i];
-			if (!std::isfinite(w[i]))
-			{
-				res.nonFiniteClosed = true;
-				if (standIns != nullptr)
-					standIns->Engage(StandInKind::NonFiniteClosure, "SolveConvexWeights non-finite solution");
-				return res;
-			}
-		}
-
-		// Convex clip (refs/111 s3.5): w_k >= 0, and if sum(w_k) > 1 scale w_k /= sum(w_k).
-		// Note: current frame weight is w_0 = 1 - sum_{k>=1} w_k >= 0, guaranteeing affine convex hull.
-		double sumW = 0.0;
-		for (int i = 0; i < refCount; ++i)
-		{
-			res.weights[i] = w[i] > 0.0 ? w[i] : 0.0;
-			sumW += res.weights[i];
-		}
-		if (sumW > 1.0)
-		{
-			const double invSum = 1.0 / sumW;
-			for (int i = 0; i < refCount; ++i)
-				res.weights[i] *= invSum;
-			sumW = 1.0;
-		}
-		res.weightSum = sumW;
+		res.weights = bestW;
+		res.weightSum = bestSum;
 		return res;
 	}
 
