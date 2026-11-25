@@ -11,57 +11,17 @@
 #include <VP-V/modules/drive/led_compensation/config_ui/LedDrivePage.h>
 #include <VP-V/modules/output/calibration_lut/config_ui/CalibrationPage.h>
 #include <VP-V/modules/control/config/config_pages/VpvQueueBillGrey.h>
-#include <VP-V/modules/control/config/config_pages/VpvTierTable.generated.h>
 
 namespace Vpv
 {
 	// GEM-040: re-applies VP-V's managed-control greying after every Rendering profile load/reload
 	// through OnBillField (without setting derivedSetting, so save-time freeze keeps working).
+	// Implemented in VpvSection.cpp.
 	class ManagedBillGrey final : public ConfigPageHost::IConfigPageProvider
 	{
 	public:
 		void OnBillField(const QString& sectionPrefix, const QString& key, QWidget* widget,
-			ConfigPageHost::ConfigFormApi& api) override
-		{
-			if (!widget || sectionPrefix != QStringLiteral("vprenderer")) return;
-			if (widget->objectName().startsWith(QStringLiteral("vpv."))) return;
-			for (QWidget* p = widget; p; p = p->parentWidget())
-				if (p->property("vpvKeyHome").toBool()) return;
-			// Tier keys move into vpv.<unit>.card.tier_keys (vpvKeyHome) where LockKind::Tier owns their
-			// enabled state; never grey them here (initial load runs before VpvSection moves them).
-			static const std::set<std::string> kManagedToggles = []()
-			{
-				const Table& table = TierTable();
-				std::set<std::string> keys = ManagedKeys(table);
-				for (const Unit& u : table.units)
-					for (const Preset& p : u.presets)
-						for (const KeyValue& kv : p.set)
-							keys.erase(kv.key);
-				return keys;
-			}();
-			if (!kManagedToggles.count(key.toStdString())) return;
-			const bool vpvOn = !ConfigOriginalPathwayOn(
-				[&api](const QString& s, const QString& k) { return api.value(s, k); });
-			if (!vpvOn) return;
-			const QString prefix = QStringLiteral("Managed by VP-V: change it on the VP-V page (or switch VP-V to the "
-				"Original pathway).");
-			if (!widget->property("vpvManaged").toBool())
-			{
-				widget->setProperty("vpvWasEnabled", widget->isEnabled());
-				widget->setProperty("vpvToolTip", widget->toolTip());
-				widget->setProperty("vpvManaged", true);
-			}
-			else
-			{
-				// Profile reload rebuilt settingHelp tooltip; keep the refreshed base tooltip for Original restore.
-				const QString curTip = widget->toolTip();
-				if (!curTip.startsWith(prefix))
-					widget->setProperty("vpvToolTip", curTip);
-			}
-			widget->setEnabled(false);
-			const QString baseTip = widget->property("vpvToolTip").toString();
-			widget->setToolTip(prefix + (baseTip.isEmpty() ? QString() : QStringLiteral("\n\n") + baseTip));
-		}
+			ConfigPageHost::ConfigFormApi& api) override;
 	};
 
 	inline ManagedBillGrey& ManagedBillGreyInstance()

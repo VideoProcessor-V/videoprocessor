@@ -387,8 +387,29 @@ namespace LedDrive
 		return std::string();
 	}
 
+	void LedDriveModule::SyncDriverFallbacks(bool framingDowngraded) const
+	{
+		if (framingDowngraded)
+			fallbacks.Engage(kFramingFallbackId,
+				"projector did not answer auto framing; downgraded to unacknowledged script bytes");
+		else
+			fallbacks.Release(kFramingFallbackId);
+	}
+
 	std::vector<FallbackStatus::Entry> LedDriveModule::FallbackEntries() const
 	{
+		bool hasDriver = false;
+		bool framingDowngraded = false;
+		{
+			std::lock_guard<std::mutex> guard(mutex);
+			if (driver)
+			{
+				hasDriver = true;
+				framingDowngraded = driver->Status().framingDowngraded;
+			}
+		}
+		if (hasDriver)
+			SyncDriverFallbacks(framingDowngraded);
 		return fallbacks.Entries();
 	}
 
@@ -864,9 +885,12 @@ namespace LedDrive
 		if (predicted != predictions.end() && predicted->second.apl > 20.0 && stats.apl > 17.0)
 		{
 			const double ratio = std::max(0.25, std::min((stats.apl - 16.0) / (predicted->second.apl - 16.0), 4.0));
-			// audit 2026-10-16: weighted by the time since the last update (it
-			// runs once per new source frame, not per output frame): the output
-			// frames rendered since, at least one, at most 250 ms. Behind
+			// audit 2026-10-16: weighted by the output frames rendered since the
+			// last correction update (frameIndex advances once per BeginFrame;
+			// SubmitMeasurement runs per distinct measured sequence and updates
+			// here only when a prediction matches above the dark APL floor),
+			// clamped to at least 1 output frame (e.g. batched readbacks on one
+			// frame) and at most 250 ms of framePeriodMs. Behind
 			// correction_weight_by_time (default on); off = one output frame
 			// period per update, as before.
 			const uint64_t frames = std::max<uint64_t>(1, frameIndex - std::min(frameIndex, lastCorrectionFrame));
@@ -1609,6 +1633,8 @@ namespace LedDrive
 			opened->Open(error);
 			driving = false;
 		}
+		// GEM-192: surface auto-framing downgrade to unacknowledged script bytes immediately after Open().
+		SyncDriverFallbacks(opened->Status().framingDowngraded);
 		// audit 2026-10-16: LDMM 0 at every start on a driven projector (one
 		// command), not only while the custom dim is configured: a crash during
 		// the custom dim with the setting later switched off left the
@@ -1622,10 +1648,13 @@ namespace LedDrive
 		if (startFlux.Linear())
 			DebugLog::Log("Dynamic Drive: no flux_table; assuming flux proportional to LPW1 (lpw_max=%d%s)",
 				range.known ? range.maximum : startLed.ledCeiling, range.known ? "" : ", from led_ceiling");
+		bool framingDowngraded = false;
 		{
 			std::lock_guard<std::mutex> guard(mutex);
 			driver = std::move(opened);
-			seenSends = driver->Status().lightSends;
+			const DriverStatus driverStatus = driver->Status();
+			seenSends = driverStatus.lightSends;
+			framingDowngraded = driverStatus.framingDowngraded;
 			live = driving;
 			// The settings now in force (a Reconfigure during the start-up
 			// found no driver and only stored them).
@@ -1634,6 +1663,7 @@ namespace LedDrive
 			// is really being driven; a dry run never changes the picture.
 			applyGain = driving && led.mode != Mode::LogOnly && led.mode != Mode::PictureOnly;
 		}
+		SyncDriverFallbacks(framingDowngraded);
 
 		LedDriveConfig current;
 		uint64_t generation = 0;

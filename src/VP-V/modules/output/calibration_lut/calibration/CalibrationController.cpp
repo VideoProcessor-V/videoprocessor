@@ -9,6 +9,7 @@
 #include "TranscriptRecorder.h"
 
 #include <VP-V/modules/colour/appearance/AmbientConfig.h>
+#include <VP-V/modules/drive/projector_control/LedDriveArbiter.h>
 #include <VP-V/modules/drive/projector_control/SerialPort.h>
 
 #include <ConfigFile.h>
@@ -461,7 +462,7 @@ namespace Calibration
 			if (hooks.projectorFactory)
 				projector = hooks.projectorFactory(pending.projectorConfig, error);
 			else
-				projector.reset(new DriverProjectorControl(pending.projectorConfig, [] { return LedDrive::CreateWin32SerialPort(); }));
+				projector.reset(new DriverProjectorControl(pending.projectorConfig, LedDrive::ArbitratedSerialPortFactory()));
 			if (!projector)
 			{
 				fail(error.empty() ? "the projector connection could not be opened" : error);

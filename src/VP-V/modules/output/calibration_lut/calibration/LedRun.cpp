@@ -56,6 +56,11 @@ namespace Calibration
 
 	// ------------------------------------------------------------ projector
 
+	bool IProjectorControl::RestoreForRun(int ceiling, std::string& report)
+	{
+		return Restore(ceiling, report);
+	}
+
 	DriverProjectorControl::DriverProjectorControl(const LedDrive::ProjectorConfig& p, LedDrive::SerialPortFactory f)
 		: projector(p), portFactory(std::move(f))
 	{
@@ -108,15 +113,25 @@ namespace Calibration
 		return ok;
 	}
 
-	bool DriverProjectorControl::Restore(int ceiling, std::string& report)
+	bool DriverProjectorControl::RestoreInternal(int ceiling, std::string& report, bool beginShutdown)
 	{
 		if (!driver) { report = "the projector connection is closed"; return false; }
 		LedDrive::RestoreOutcome outcome;
-		const bool light = LedDrive::RestoreFullLight(*driver, ceiling, true, true, &outcome);
+		const bool light = LedDrive::RestoreFullLight(*driver, ceiling, true, true, &outcome, beginShutdown);
 		report = std::string("LPW1 ") + std::to_string(ceiling) + (outcome.light ? " sent" : " NOT confirmed") +
 			", LDMM 0 " + (outcome.dimMode ? "sent" : "NOT confirmed") + ", CNTR 50 " +
 			(outcome.contrast ? "sent" : "NOT confirmed");
 		return light && outcome.Confirmed();
+	}
+
+	bool DriverProjectorControl::Restore(int ceiling, std::string& report)
+	{
+		return RestoreInternal(ceiling, report, true);
+	}
+
+	bool DriverProjectorControl::RestoreForRun(int ceiling, std::string& report)
+	{
+		return RestoreInternal(ceiling, report, false);
 	}
 
 	void DriverProjectorControl::Close()
@@ -645,7 +660,7 @@ namespace Calibration
 			status.patchCount = plan.Units();
 		}
 		std::string report;
-		if (!projector->Restore(limits.ceiling, report))
+		if (!projector->RestoreForRun(limits.ceiling, report))
 			Note("Start: bringing the projector to full light / CNTR 50 was not confirmed (" + report + ").");
 		currentLight = limits.ceiling;
 		currentContrast = limits.contrastNeutral;

@@ -2,9 +2,12 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
+#include <VP-V/core/FallbackCatalog.h>
+
 #include <dxgiformat.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <string>
 
@@ -12,7 +15,7 @@
 // cover them (tests/CalibrationLutHostTests.cpp). WP-12 (integration batch): the calibration glue
 // moved out of LibplaceboVideoRenderer.cpp; the renderer keeps one call per hook point.
 //
-// Header-only, C++14, no libplacebo, no Windows beyond the DXGI format enum.
+// Pure policy decisions, C++14, no libplacebo, no Windows beyond the DXGI format enum.
 namespace CalibrationLutHost
 {
 	// ---- the VP stage (output.calibration_lut, calibration_lut_stage = vp; R1) ------------------
@@ -50,26 +53,15 @@ namespace CalibrationLutHost
 	// takes the VP stage while one of them runs, and libplacebo's LUT otherwise. The Original pathway
 	// always keeps libplacebo's (the caller passes dmStepsRun = false there). "libplacebo" and "vp"
 	// pass through; anything else reads as libplacebo.
-	inline std::string ResolveStage(const std::string& configured, bool dmStepsRun)
-	{
-		if (configured == "auto")
-			return dmStepsRun ? "vp" : "libplacebo";
-		return configured == "vp" ? "vp" : "libplacebo";
-	}
+	std::string ResolveStage(const std::string& configured, bool dmStepsRun);
+
+	// Exact ASCII-case-insensitive token lookup in pipeline_slots_off (tokens separated by ',', ' ', ';', '\t').
+	bool ContainsSlotToken(const std::string& slotsOff, const char* targetLower);
 
 	// CF-1 FIX1 MUST 2: does a VP colour step that must follow the LUT run? dm_trims (dv_trims on, dv_display_mapping
 	// not original, colour.dm_trims not in pipeline_slots_off) or colour.appearance (appearance on, the slot not off).
 	// Never on the Original pathway. The ResolveStage input for auto.
-	inline bool DisplayMappingStepsRun(bool originalPathway, const std::string& dvDisplayMapping, bool dvTrims,
-		bool appearance, const std::string& slotsOff)
-	{
-		if (originalPathway)
-			return false;
-		const bool trimsRun = dvDisplayMapping != "original" && dvTrims &&
-			slotsOff.find("colour.dm_trims") == std::string::npos;
-		const bool appearanceRuns = appearance && slotsOff.find("colour.appearance") == std::string::npos;
-		return trimsRun || appearanceRuns;
-	}
+	bool DisplayMappingStepsRun(bool originalPathway, const std::string& dvDisplayMapping, bool dvTrims, bool appearance, const std::string& slotsOff);
 
 	constexpr const char* kVpStagePrefix = "Active (VP stage): ";
 	// The renderer's LoadDisplayLut writes this when a changed file fails to reload and the last good
@@ -88,32 +80,14 @@ namespace CalibrationLutHost
 	// per-frame allocation once set). A rejected reload stays visible ("Active (VP stage; reload
 	// rejected: <reason>)") until the next successful load replaces the status. Returns true when it
 	// changed.
-	inline bool VpStageStatus(std::string& status, const std::string& fileName)
-	{
-		if (StartsWith(status, kVpReloadRejectedPrefix))
-			return false;
-		if (StartsWith(status, kReloadRejectedPrefix))
-		{
-			status = kVpReloadRejectedPrefix + status.substr(std::char_traits<char>::length(kReloadRejectedPrefix));
-			return true;
-		}
-		const std::string::size_type prefix = std::char_traits<char>::length(kVpStagePrefix);
-		if (status.size() == prefix + fileName.size() && StartsWith(status, kVpStagePrefix) &&
-			status.compare(prefix, std::string::npos, fileName) == 0)
-			return false;
-		status = kVpStagePrefix + fileName;
-		return true;
-	}
+	bool VpStageStatus(std::string& status, const std::string& fileName);
 
 	// Back on libplacebo's target LUT (stage switched, failed, Original pathway): a rejection shown
 	// for the VP stage goes back to Bill's text, which his libplacebo branch keeps.
-	inline bool LibplaceboStageStatus(std::string& status)
-	{
-		if (!StartsWith(status, kVpReloadRejectedPrefix))
-			return false;
-		status = kReloadRejectedPrefix + status.substr(std::char_traits<char>::length(kVpReloadRejectedPrefix));
-		return true;
-	}
+	bool LibplaceboStageStatus(std::string& status);
+
+	// GEM-197: BTB/WTW edge-slope extrapolation fallback decision (engaged while slopeFallbacks > 0).
+	FallbackCatalog::Decision SlopeFallbackDecision(unsigned long long slopeFallbacks);
 
 	// The status "calibration LUT attached" (Ctrl+I limited-range text, "(inactive: calibration LUT)",
 	// ActiveProfileStatus, Config's usable-LUT check).
@@ -183,14 +157,9 @@ namespace CalibrationLutHost
 		}
 
 		// VP's calibration applied a finished LUT (any thread).
-		void RequestCalibrationReload() { calibrationReload = true; }
+		void RequestCalibrationReload() { calibrationReload.store(true, std::memory_order_release); }
 		// Render thread: take the request (true once per request).
-		bool TakeCalibrationReload()
-		{
-			const bool wanted = calibrationReload;
-			calibrationReload = false;
-			return wanted;
-		}
+		bool TakeCalibrationReload() { return calibrationReload.exchange(false, std::memory_order_acq_rel); }
 		static const char* CalibrationReloadNotice()
 		{
 			return "Calibration LUT loaded from the calibration run (no Config Apply)";
@@ -202,7 +171,7 @@ namespace CalibrationLutHost
 		uint64_t observedBytes = 0;
 		uint64_t observedWriteTime = 0;
 		uint64_t nextProbeMs = 0;
-		bool calibrationReload = false;
+		std::atomic<bool> calibrationReload{ false };
 	};
 
 	// ---- the calibration patterns: output facts for GetCalibrationOutput ------------------------

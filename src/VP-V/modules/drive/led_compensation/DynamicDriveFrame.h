@@ -183,6 +183,6 @@ namespace LedDrive
 		double frameBoostExponent = 1.0;
 		bool frameCompensationIdentity = false;
 		bool frameBlock = false;             // the gamma boost entry is engaged (audit N1)
-		bool moduleEntriesEngaged = false;     // a module entry was engaged last frame (audit N1)
+		std::vector<std::string> mergedModuleFallbackIds; // module entry ids engaged last frame (audit N1; GEM-185)
 	};
 }

@@ -108,6 +108,99 @@ namespace
 	{
 		return Wide(std::string(ToString(r.status)) + ": " + r.message);
 	}
+
+	// Deterministic in-process ITerminal that emits one scripted chunk per
+	// Read() after its configured virtual delay, advancing *clock without
+	// wall-clock sleeps.
+	class SteppedTerminal final : public ITerminal
+	{
+	public:
+		struct Step
+		{
+			double delaySeconds;
+			std::string chunk;
+			bool requireKey;
+		};
+
+		SteppedTerminal(std::vector<Step> stepsIn, double* clockIn)
+			: steps(std::move(stepsIn)), clock(clockIn)
+		{
+		}
+
+		bool Start(const std::wstring& program, const std::wstring&, const std::wstring&, std::string& error) override
+		{
+			if (program.empty()) { error = "no program"; return false; }
+			return true;
+		}
+
+		bool Write(const std::string& bytes) override
+		{
+			if (exited) return false;
+			for (char c : bytes)
+			{
+				if (c == 'q' || c == 'Q' || c == 27)
+				{
+					exited = true;
+					exitCode = 0;
+				}
+				else
+					++pendingKeys;
+			}
+			return true;
+		}
+
+		bool Read(std::string& output, int timeoutMs) override
+		{
+			const double dt = timeoutMs > 0 ? timeoutMs / 1000.0 : 0.0;
+			if (exited || cursor >= steps.size())
+			{
+				if (clock) *clock += dt;
+				return false;
+			}
+			Step& step = steps[cursor];
+			if (step.requireKey)
+			{
+				if (pendingKeys == 0)
+				{
+					if (clock) *clock += dt;
+					return false;
+				}
+				--pendingKeys;
+				step.requireKey = false;
+			}
+			if (step.delaySeconds > dt + 1e-12)
+			{
+				step.delaySeconds -= dt;
+				if (clock) *clock += dt;
+				return false;
+			}
+			if (clock && step.delaySeconds > 0.0) *clock += step.delaySeconds;
+			step.delaySeconds = 0.0;
+			output += step.chunk;
+			++cursor;
+			return true;
+		}
+
+		bool Exited(unsigned long& code) override
+		{
+			code = exitCode;
+			return exited;
+		}
+
+		void Terminate() override
+		{
+			exited = true;
+			exitCode = 1;
+		}
+
+	private:
+		std::vector<Step> steps;
+		size_t cursor = 0;
+		double* clock = nullptr;
+		int pendingKeys = 0;
+		bool exited = false;
+		unsigned long exitCode = 0;
+	};
 }
 
 namespace VideoProcessorTest
@@ -303,6 +396,144 @@ namespace VideoProcessorTest
 			all.Set("1");
 			Assert::IsTrue(HardwarePrerequisites::Required(HP::Meter));
 			Assert::IsTrue(HardwarePrerequisites::Required(HP::Projector));
+		}
+
+		// GEM-196: SpotreadMeter::Read() while in State::WaitingPrompt must loop
+		// iteratively over NeedsCalibration / CalibrationComplete under one shared
+		// readTimeoutSeconds deadline (never recursing and resetting the deadline),
+		// and must save lastCalibrationText on WaitingPrompt -> CalibrationPrompt.
+		TEST_METHOD(WaitingPromptNeedsCalibrationLoopIsIterativeAndRespectsSingleDeadline)
+		{
+			const std::string readyPrompt =
+				"Place instrument on spot to be measured,\r\n"
+				"Hit ESC or Q to exit, any other key to take a reading: ";
+			const std::string needsCal = "Instrument needs a calibration\r\n";
+			const std::string calDone = "Calibration complete\r\n";
+
+			// 1) Single shared deadline enforcement: each individual event takes 0.8 s
+			// (< readTimeoutSeconds == 2.0 s), so recursive Read() that resets its
+			// deadline on every event never times out and eventually succeeds at 3.5 s.
+			// Under a single shared deadline (0.1 + 2.0 = 2.1 s), Read() must time out.
+			{
+				double now = 0.0;
+				std::vector<SteppedTerminal::Step> steps = {
+					{ 0.0, readyPrompt, false },
+					{ 0.1, ResultBlock("50.0 50.0 50.0"), true },
+					{ 0.8, needsCal, false },
+					{ 0.8, calDone, false },
+					{ 0.8, needsCal, false },
+					{ 0.8, calDone, false },
+					{ 0.1, readyPrompt, false },
+					{ 0.1, ResultBlock("12.0 13.0 14.0"), true }
+				};
+				SpotreadMeterOptions o;
+				o.spotread = L"C:\\Argyll\\bin\\spotread.exe";
+				o.readTimeoutSeconds = 2.0;
+				o.openTimeoutSeconds = 5.0;
+				o.closeTimeoutSeconds = 1.0;
+				SpotreadMeter meter(o,
+					[&steps, &now]() { return std::unique_ptr<ITerminal>(new SteppedTerminal(steps, &now)); },
+					[&now]() { return now; });
+
+				MeterResult r = meter.Open();
+				Assert::IsTrue(r.status == MeterStatus::Ok, Message(r).c_str());
+				r = meter.Read();
+				Assert::IsTrue(r.status == MeterStatus::Ok, Message(r).c_str());
+				Assert::AreEqual(50.0, r.xyz[1], 1e-6);
+
+				// Meter is now in State::WaitingPrompt at t = 0.1 s.
+				const double beforeWait = now;
+				r = meter.Read();
+				Assert::IsTrue(r.status == MeterStatus::Timeout,
+					(L"WaitingPrompt must share one readTimeoutSeconds deadline, got " + Message(r)).c_str());
+				Assert::IsFalse(meter.IsOpen(), L"Timeout must close the meter");
+				const double elapsed = now - beforeWait;
+				Assert::IsTrue(elapsed >= o.readTimeoutSeconds - 1e-6 && elapsed <= o.readTimeoutSeconds + 0.5,
+					(L"Timeout elapsed " + std::to_wstring(elapsed) + L" s (expected ~2.0 s)").c_str());
+				meter.Close();
+			}
+
+			// 2) Iterative burst within one shared deadline: 60 NeedsCalibration +
+			// 60 CalibrationComplete events (120 iterations, 1.2 s < 5.0 s) succeed
+			// without recursion overflow or spurious timeout.
+			{
+				double now = 0.0;
+				std::vector<SteppedTerminal::Step> steps;
+				steps.push_back({ 0.0, readyPrompt, false });
+				steps.push_back({ 0.05, ResultBlock("40.0 40.0 40.0"), true });
+				for (int i = 0; i < 60; ++i)
+				{
+					steps.push_back({ 0.01, needsCal, false });
+					steps.push_back({ 0.01, calDone, false });
+				}
+				steps.push_back({ 0.05, readyPrompt, false });
+				steps.push_back({ 0.05, ResultBlock("21.0 22.0 23.0"), true });
+
+				SpotreadMeterOptions o;
+				o.spotread = L"C:\\Argyll\\bin\\spotread.exe";
+				o.readTimeoutSeconds = 5.0;
+				o.openTimeoutSeconds = 5.0;
+				o.closeTimeoutSeconds = 1.0;
+				SpotreadMeter meter(o,
+					[&steps, &now]() { return std::unique_ptr<ITerminal>(new SteppedTerminal(steps, &now)); },
+					[&now]() { return now; });
+
+				Assert::IsTrue(meter.Open().status == MeterStatus::Ok);
+				Assert::IsTrue(meter.Read().status == MeterStatus::Ok);
+				const MeterResult r = meter.Read();
+				Assert::IsTrue(r.status == MeterStatus::Ok, Message(r).c_str());
+				Assert::AreEqual(21.0, r.xyz[0], 1e-6);
+				Assert::AreEqual(22.0, r.xyz[1], 1e-6);
+				Assert::AreEqual(23.0, r.xyz[2], 1e-6);
+				meter.Close();
+			}
+
+			// 3) Negative control: CalibrationPrompt received while in WaitingPrompt
+			// transitions to State::Calibration AND populates lastCalibrationText so a
+			// subsequent Read() before Continue() still returns that exact message
+			// (pre-fix left lastCalibrationText empty on WaitingPrompt -> CalibrationPrompt).
+			{
+				double now = 0.0;
+				std::vector<SteppedTerminal::Step> steps = {
+					{ 0.0, readyPrompt, false },
+					{ 0.05, ResultBlock("60.0 60.0 60.0"), true },
+					{ 0.05, needsCal, false },
+					{ 0.05, "Place instrument on white calibration tile,\r\nHit any key to continue: ", false },
+					{ 0.05, calDone, true },
+					{ 0.05, readyPrompt, false },
+					{ 0.05, ResultBlock("71.0 72.0 73.0"), true }
+				};
+				SpotreadMeterOptions o;
+				o.spotread = L"C:\\Argyll\\bin\\spotread.exe";
+				o.readTimeoutSeconds = 5.0;
+				o.openTimeoutSeconds = 5.0;
+				o.closeTimeoutSeconds = 1.0;
+				SpotreadMeter meter(o,
+					[&steps, &now]() { return std::unique_ptr<ITerminal>(new SteppedTerminal(steps, &now)); },
+					[&now]() { return now; });
+
+				Assert::IsTrue(meter.Open().status == MeterStatus::Ok);
+				Assert::IsTrue(meter.Read().status == MeterStatus::Ok);
+
+				const MeterResult firstPrompt = meter.Read();
+				Assert::IsTrue(firstPrompt.status == MeterStatus::NeedsUserAction, Message(firstPrompt).c_str());
+				Assert::IsTrue(firstPrompt.message.find("white calibration tile") != std::string::npos,
+					Message(firstPrompt).c_str());
+
+				const MeterResult repeatedPrompt = meter.Read();
+				Assert::IsTrue(repeatedPrompt.status == MeterStatus::NeedsUserAction, Message(repeatedPrompt).c_str());
+				Assert::IsFalse(repeatedPrompt.message.empty(),
+					L"Subsequent Read() in State::Calibration must preserve lastCalibrationText");
+				Assert::AreEqual(firstPrompt.message, repeatedPrompt.message,
+					L"WaitingPrompt -> CalibrationPrompt must populate lastCalibrationText");
+
+				const MeterResult cont = meter.Continue();
+				Assert::IsTrue(cont.status == MeterStatus::Ok, Message(cont).c_str());
+				const MeterResult afterCal = meter.Read();
+				Assert::IsTrue(afterCal.status == MeterStatus::Ok, Message(afterCal).c_str());
+				Assert::AreEqual(72.0, afterCal.xyz[1], 1e-6);
+				meter.Close();
+			}
 		}
 	};
 

@@ -153,6 +153,9 @@ namespace CalibrationLutHost
 		bool LutAttached(bool rendered, bool targetLutApplied) const;
 
 		bool StageFailed() const { return stageFailed; }
+		// GEM-197: frames whose BTB/WTW fell back to slope 1 (edge-slope extrapolation unavailable).
+		unsigned long long SlopeFallbacks() const;
+		FallbackCatalog::Decision SlopeFallbackDecision();
 
 		// ---- LUT file reload policy (VP's auto reload vs Bill's explicit Apply; ReloadPolicy) ----
 
@@ -201,6 +204,7 @@ namespace CalibrationLutHost
 		bool FillOutputInfo(Calibration::PatternOutputInfo& info, bool fresh) const;
 
 	private:
+		void NoteSlopeFallbackLogged();
 		bool FillPattern(pl_gpu gpu, pl_tex fbo, DXGI_FORMAT format, const Calibration::PatternRequest& pattern,
 			bool& windowFallback, std::string& why);
 		void ReadBack(const Surface& surface, ID3D11Texture2D* backbuffer, uint64_t generation);
@@ -209,6 +213,7 @@ namespace CalibrationLutHost
 		CalibrationLutStage::Hook stage;
 		bool stageLogged = false;
 		bool stageFailed = false;   // the VP stage failed once: libplacebo's target LUT for the instance
+		bool slopeFallbackLogged = false;   // GEM-197: logged once when stage.SlopeFallbacks() > 0
 		bool autoConfigured = true;    // CF1-FIN SHOULD A (SetAutoNeed; CF1-G7a: NoteConfiguredStage when settings apply)
 		bool autoStepWants = false;
 		ReloadPolicy reload;

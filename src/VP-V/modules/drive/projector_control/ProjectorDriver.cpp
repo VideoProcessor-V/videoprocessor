@@ -152,11 +152,12 @@ namespace LedDrive
 	}
 
 	bool RestoreFullLight(IProjectorDriver& driver, int ledCeiling, bool resetDimMode, bool restoreContrast,
-		RestoreOutcome* outcome)
+		RestoreOutcome* outcome, bool beginShutdown)
 	{
 		RestoreOutcome result;
 		using namespace std::chrono;
-		driver.BeginShutdown();
+		if (beginShutdown)
+			driver.BeginShutdown();
 		// Standard dim mode first, then (after mode: script or the CNTR
 		// assist) contrast back to 50, then full light - only the commands needed.
 		// audit 2026-10-16: CNTR is skipped when 50 was the last value sent

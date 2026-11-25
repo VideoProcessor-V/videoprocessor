@@ -15,8 +15,11 @@
 #include <VP-V/modules/input/queue_timing/QueueLookahead.h>
 #include <CaptureDisplayFixes.h>
 
+#include <atomic>
 #include <fstream>
 #include <string>
+#include <thread>
+#include <vector>
 #include <windows.h>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
@@ -161,6 +164,106 @@ namespace VideoProcessorTest
 			Vpv::RunningPathway::SetForTesting(Vpv::RunningPathway::kUnknown);
 			StartupFolder original(kOriginalFile);
 			Assert::IsFalse(CaptureDisplayFixes::Enabled(), L"before the first snapshot an Original process ran the capture / display fixes");
+		}
+
+		// S1-M2: concurrent cold-startup callers of Original() must serialize on the one-time start-up file read so
+		// losing threads never observe false (VP-V) while the winning thread is loading VideoProcessor.cfg.
+		TEST_METHOD(ConcurrentColdStartupOriginalCallsNeverObserveVpvOnOriginalConfig)
+		{
+			constexpr size_t kThreadCount = 8;
+			constexpr int kOriginalRounds = 20;
+
+			LatchReset reset;
+			StartupFolder folder(kVpFile);
+
+			auto runConcurrentColdStart = [&]() -> std::vector<int>
+			{
+				Vpv::RunningPathway::SetForTesting(Vpv::RunningPathway::kUnknown);
+				std::vector<int> observed(kThreadCount, 0);
+				std::atomic<size_t> ready{ 0 };
+				std::atomic<bool> go{ false };
+				struct WorkerGroup
+				{
+					std::atomic<bool>& releaseFlag;
+					std::vector<std::thread> threads;
+					WorkerGroup(std::atomic<bool>& flag, size_t count) : releaseFlag(flag)
+					{
+						threads.reserve(count);
+					}
+					~WorkerGroup()
+					{
+						releaseFlag.store(true, std::memory_order_release);
+						for (auto& worker : threads)
+						{
+							if (worker.joinable())
+								worker.join();
+						}
+					}
+				};
+				WorkerGroup workers(go, kThreadCount);
+				for (size_t i = 0; i < kThreadCount; ++i)
+				{
+					workers.threads.emplace_back([&, i]()
+					{
+						ready.fetch_add(1, std::memory_order_acq_rel);
+						while (!go.load(std::memory_order_acquire))
+							std::this_thread::yield();
+						observed[i] = Vpv::RunningPathway::Original() ? 1 : 0;
+					});
+				}
+				while (ready.load(std::memory_order_acquire) < kThreadCount)
+					std::this_thread::yield();
+				go.store(true, std::memory_order_release);
+				for (auto& worker : workers.threads)
+					worker.join();
+				return observed;
+			};
+
+			// Negative control (same concurrent barrier harness with pipeline_original_pathway: off): every thread
+			// must observe false and the latch must record kVpv, proving VideoProcessor.cfg is genuinely loaded and
+			// Original() is not hardcoded to true.
+			{
+				const std::vector<int> vpObserved = runConcurrentColdStart();
+				size_t trueObservations = 0;
+				for (const int value : vpObserved)
+				{
+					if (value != 0)
+						++trueObservations;
+				}
+				Assert::AreEqual(size_t(0), trueObservations,
+					L"negative control (pipeline_original_pathway = off): concurrent cold-startup Original() returned true");
+				Assert::AreEqual(int(Vpv::RunningPathway::kVpv), Vpv::RunningPathway::Value().load(),
+					L"negative control (pipeline_original_pathway = off): start-up config did not latch VP-V");
+			}
+
+			// Fix proof: repeat 20 cold-startup rounds against an Original config. Each round writes a distinct
+			// trailing comment length so ConfigFile's revision cache misses and performs a real disk read, exposing
+			// the full pre-fix race window where losing threads skipped loading and returned Latched() == false.
+			for (int round = 0; round < kOriginalRounds; ++round)
+			{
+				{
+					std::ofstream out(folder.file, std::ios::trunc);
+					Assert::IsTrue(out.good(), L"failed to open VideoProcessor.cfg for Original round");
+					out << kOriginalFile << "# round " << round << " "
+						<< std::string(static_cast<size_t>(round + 1), 'x') << "\n";
+					out.flush();
+					Assert::IsTrue(out.good(), L"failed to write VideoProcessor.cfg for Original round");
+				}
+
+				const std::vector<int> originalObserved = runConcurrentColdStart();
+				size_t falseObservations = 0;
+				for (const int value : originalObserved)
+				{
+					if (value == 0)
+						++falseObservations;
+				}
+				const std::wstring message = L"round " + std::to_wstring(round) +
+					L": concurrent cold-startup Original() observed false (VP-V) on " +
+					std::to_wstring(falseObservations) + L" of " + std::to_wstring(kThreadCount) + L" threads";
+				Assert::AreEqual(size_t(0), falseObservations, message.c_str());
+				Assert::AreEqual(int(Vpv::RunningPathway::kOriginal), Vpv::RunningPathway::Value().load(),
+					L"concurrent cold-startup on Original config did not latch kOriginal");
+			}
 		}
 	};
 }

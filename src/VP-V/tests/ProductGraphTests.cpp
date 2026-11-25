@@ -341,5 +341,105 @@ namespace ProductGraphTestsNs
 			Assert::AreEqual(ProductId(kP1HalfLuma), a.nodes[1].id);
 			Assert::AreEqual(ConsumerFingerprint(cs), ConsumerFingerprint(cs));
 		}
+
+		TEST_METHOD(LaneVisibleViewInputsDoNotInflateLivePoolOrCauseOverflow)
+		{
+			// 1. Real-catalog check on SkeletonProducts() (kP13SourceRing is laneVisible = true, read by lane readers P10 and P11).
+			const Registry catalog = SkeletonProducts();
+			Assert::IsTrue(catalog.Has(kP13SourceRing) && catalog.Get(kP13SourceRing).laneVisible,
+				L"P13 source ring is a lane-visible zero-copy view in the real catalog");
+			const std::vector<ConsumerDecl> catalogConsumers{
+				Consumer(1, kP10GrainSplit),
+				Consumer(2, kP11RegionBlockStats)
+			};
+			GraphSettings gs8 = Settings(1, 1);
+			gs8.laneJobsInFlight = 8;
+			const Graph g8 = BuildGraph(catalog, catalogConsumers, gs8);
+			Assert::IsTrue(g8.valid, L"real-catalog graph with multiple P13 lane readers builds cleanly");
+			const Node* p13_8 = g8.Find(kP13SourceRing);
+			Assert::IsNotNull(p13_8);
+			Assert::IsTrue(p13_8->laneVisible);
+			const uint8_t expectedP13Live = uint8_t(p13_8->history + 1u + gs8.renderAhead
+				+ (p13_8->holdsSpan ? 1u : 0u) + g8.maxSealLag);
+			Assert::AreEqual(int(expectedP13Live), int(p13_8->livePool),
+				L"lane-visible P13 livePool must not be inflated by laneReaders * laneJobsInFlight");
+
+			GraphSettings gs1 = Settings(1, 1);
+			gs1.laneJobsInFlight = 1;
+			const Graph g1 = BuildGraph(catalog, catalogConsumers, gs1);
+			Assert::IsTrue(g1.valid);
+			const Node* p13_1 = g1.Find(kP13SourceRing);
+			Assert::IsNotNull(p13_1);
+			Assert::AreEqual(int(p13_1->livePool), int(p13_8->livePool),
+				L"lane-visible P13 livePool must be identical at laneJobsInFlight = 1 and 8");
+			// Contrast in the same real-catalog graph: buffer-backed P4 (laneVisible = false, also read by P10 and P11) still scales.
+			const Node* p4_1 = g1.Find(kP4SourceStats);
+			const Node* p4_8 = g8.Find(kP4SourceStats);
+			Assert::IsNotNull(p4_1);
+			Assert::IsNotNull(p4_8);
+			Assert::IsFalse(p4_8->laneVisible);
+			Assert::AreEqual(int(p4_1->livePool) + 2 * (8 - 1), int(p4_8->livePool),
+				L"non-view P4 still reserves laneReadRefs * laneJobsInFlight live-pool spares");
+
+			// 2. Same-topology negative control vs. laneVisible = true fix proof.
+			auto makeTopology = [](uint8_t baseHistory, bool laneVisible, unsigned readerCount) {
+				std::vector<ProductDecl> d;
+				ProductDecl base = detail::Make(0, "base_view", "base product", Backend::RenderOnly, baseHistory,
+					Tier::T0, Bit(VpIndicator::kFull), 0);
+				base.size.fixedBytes = 64;
+				base.laneVisible = laneVisible;
+				d.push_back(base);
+				for (unsigned i = 0; i < readerCount; ++i) {
+					const ProductId id = ProductId(1u + i);
+					ProductDecl reader = detail::Make(id, i == 0 ? "lane_reader_0" : "lane_reader_1", "lane reader",
+						Backend::Cpu, 0, Tier::T0, Bit(VpIndicator::kFull), 0);
+					detail::AddInput(reader, 0, 0);
+					reader.size.fixedBytes = 64;
+					d.push_back(reader);
+				}
+				return Registry(d);
+			};
+
+			GraphSettings gsOverflow = Settings(0, 0);
+			gsOverflow.laneJobsInFlight = 8;
+			const std::vector<ConsumerDecl> oneReader{ Consumer(1, 1) };
+
+			// Negative control: laneVisible = false (real buffer-backed input) overflows livePool (250 + 1 + 1*8 = 259 > 255).
+			const Graph negOverflow = BuildGraph(makeTopology(250, false, 1), oneReader, gsOverflow);
+			Assert::IsFalse(negOverflow.valid, L"negative control: non-view input must overflow livePool at 259 > 255");
+			Assert::IsTrue(std::string(negOverflow.error).find("live-pool buffers") != std::string::npos,
+				L"negative control must report live-pool buffers overflow");
+			Assert::IsTrue(negOverflow.nodes.empty() && negOverflow.errorProduct == 0);
+			Assert::IsTrue(negOverflow.ErrorText().find("(base_view)") != std::string::npos);
+
+			// Fix proof: exact same topology with laneVisible = true succeeds with livePool == 251 (250 + 1 + 0, not 259).
+			const Graph posView = BuildGraph(makeTopology(250, true, 1), oneReader, gsOverflow);
+			Assert::IsTrue(posView.valid, L"laneVisible = true view input must not overflow livePool");
+			Assert::IsNotNull(posView.Find(0));
+			Assert::AreEqual(251, int(posView.Find(0)->livePool), L"250 + 1 + 0 (no +1*8 inflation)");
+
+			// Adding a second lane reader: laneVisible = true stays at livePool == 251.
+			const std::vector<ConsumerDecl> twoReaders{ Consumer(1, 1), Consumer(2, 2) };
+			const Graph posViewTwo = BuildGraph(makeTopology(250, true, 2), twoReaders, gsOverflow);
+			Assert::IsTrue(posViewTwo.valid, L"second lane reader on laneVisible view still does not overflow");
+			Assert::IsNotNull(posViewTwo.Find(0));
+			Assert::AreEqual(251, int(posViewTwo.Find(0)->livePool), L"still 250 + 1 + 0 with two lane readers");
+
+			// Same two-reader topology at history = 10, laneJobsInFlight = 2:
+			// laneVisible = false grows by 2 * 2 = 4 -> 15; laneVisible = true stays at 11.
+			GraphSettings gsTwo = Settings(0, 0);
+			gsTwo.laneJobsInFlight = 2;
+			const Graph negTwo = BuildGraph(makeTopology(10, false, 2), twoReaders, gsTwo);
+			Assert::IsTrue(negTwo.valid);
+			Assert::IsNotNull(negTwo.Find(0));
+			Assert::AreEqual(10 + 1 + 2 * 2, int(negTwo.Find(0)->livePool),
+				L"negative control: non-view input with 2 lane readers x 2 jobs grows to 15");
+
+			const Graph posTwo = BuildGraph(makeTopology(10, true, 2), twoReaders, gsTwo);
+			Assert::IsTrue(posTwo.valid);
+			Assert::IsNotNull(posTwo.Find(0));
+			Assert::AreEqual(10 + 1, int(posTwo.Find(0)->livePool),
+				L"laneVisible = true view with 2 lane readers x 2 jobs stays at 11");
+		}
 	};
 }

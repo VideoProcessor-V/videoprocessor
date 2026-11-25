@@ -69,6 +69,9 @@ namespace Calibration
 		// Full light (the ceiling), CNTR 50, standard dim mode; bounded.
 		// True when every command went out (confirmed with read-back on).
 		virtual bool Restore(int ceiling, std::string& report) = 0;
+		// Start-of-run neutral restore (GEM-189): sets the same neutral state
+		// without shutting down the driver, so the run can keep driving it.
+		virtual bool RestoreForRun(int ceiling, std::string& report);
 		virtual void Close() = 0;
 		virtual bool IsOpen() const = 0;
 		// The projector's own light range when it reports one (read-back on).
@@ -87,11 +90,13 @@ namespace Calibration
 		bool SetLight(int level, double& sentAt) override;
 		bool SetContrast(int value, double& sentAt) override;
 		bool Restore(int ceiling, std::string& report) override;
+		bool RestoreForRun(int ceiling, std::string& report) override;
 		void Close() override;
 		bool IsOpen() const override { return driver != nullptr; }
 		LedDrive::LightRange ReportedRange() override;
 
 	private:
+		bool RestoreInternal(int ceiling, std::string& report, bool beginShutdown);
 		LedDrive::ProjectorConfig projector;
 		LedDrive::SerialPortFactory portFactory;
 		std::unique_ptr<LedDrive::IProjectorDriver> driver;

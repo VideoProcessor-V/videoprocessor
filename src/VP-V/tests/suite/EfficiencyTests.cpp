@@ -286,6 +286,94 @@ namespace VideoProcessorTest
 			Assert::IsFalse(quietObserver.WantsFrame(1), L"no predictions wanted");
 		}
 
+		// S4-M2: WantsFrame must mirror ObserveFrame's stream-epoch check so a restarted
+		// sequence (e.g. back to 1 after 500) is accepted immediately after LookaheadEpoch bumps.
+		TEST_METHOD(WantsFrameAcceptsRestartedSequenceImmediatelyAfterLookaheadEpochBump)
+		{
+			P010Picture picture(256, 144);
+			picture.Paint(0);
+			QueuedFrameStatistics::PictureRect rect;
+			rect.right = picture.width;
+			rect.bottom = picture.height;
+
+			// 1. Primary path: OnSourceRestart bumps LookaheadEpoch after observing sequence 500.
+			{
+				LedDrive::LedDriveConfig config;
+				config.mode = LedDrive::Mode::Compensate;
+				LedDrive::LedDriveModule module(LedDrive::ProjectorConfig(), config);
+				LedDrive::LookaheadObserver observer(module);
+				Assert::IsTrue(module.WantsPredictions(), L"compensate look-ahead must want predictions");
+
+				const uint64_t initialEpoch = module.LookaheadEpoch();
+				Assert::IsTrue(observer.WantsFrame(500), L"before first frame: wants sequence 500");
+				observer.ObserveFrame(500, 0, picture.Source(), rect);
+				LedDrive::FrameStats predicted;
+				Assert::IsTrue(module.PredictionFor(500, predicted), L"ObserveFrame(500) must record prediction");
+
+				// In-test negative control (same epoch, no restart): older and duplicate sequences within
+				// the < 1000 backward window are genuinely suppressed while LookaheadEpoch() is unchanged.
+				Assert::AreEqual(initialEpoch, module.LookaheadEpoch(), L"negative control: epoch unchanged");
+				Assert::IsFalse(observer.WantsFrame(1), L"negative control: older sequence suppressed in same epoch");
+				Assert::IsFalse(observer.WantsFrame(500), L"negative control: duplicate sequence suppressed in same epoch");
+				Assert::IsTrue(observer.WantsFrame(501), L"same epoch: next sequence still wanted");
+
+				// Trigger lookahead epoch bump via OnSourceRestart (full resync to restarted sequence 1).
+				module.OnSourceRestart(1, 24000.0 / 1001.0);
+				Assert::IsTrue(module.LookaheadEpoch() > initialEpoch, L"OnSourceRestart must bump LookaheadEpoch");
+
+				// Fix proof: immediately after epoch bump (before any ObserveFrame in the new epoch),
+				// WantsFrame must accept restarted sequences (1 and 500) and stay idempotent across const calls.
+				Assert::IsTrue(observer.WantsFrame(1), L"after epoch bump: restarted sequence 1 wanted immediately");
+				Assert::IsTrue(observer.WantsFrame(500), L"after epoch bump: sequence 500 wanted immediately");
+				Assert::IsTrue(observer.WantsFrame(1), L"after epoch bump: repeated WantsFrame(1) before ObserveFrame stays true");
+
+				// Observe sequence 1 in the new epoch: prediction recorded and duplicate suppression re-engaged.
+				observer.ObserveFrame(1, 0, picture.Source(), rect);
+				Assert::IsTrue(module.PredictionFor(1, predicted), L"new epoch ObserveFrame(1) must record prediction");
+				Assert::IsFalse(observer.WantsFrame(1), L"within new epoch: already-measured sequence 1 suppressed again");
+				Assert::IsTrue(observer.WantsFrame(2), L"within new epoch: next sequence 2 wanted");
+			}
+
+			// 2. Holdover-drive adoption path via module.Lookahead() + ResetLookahead().
+			{
+				LedDrive::LedDriveConfig config;
+				config.mode = LedDrive::Mode::Compensate;
+				LedDrive::LedDriveModule module(LedDrive::ProjectorConfig(), config);
+				QueuedFrameStatistics::IObserver& observer = module.Lookahead();
+				Assert::IsTrue(module.WantsPredictions());
+
+				const uint64_t initialEpoch = module.LookaheadEpoch();
+				observer.ObserveFrame(500, 0, picture.Source(), rect);
+				Assert::AreEqual(initialEpoch, module.LookaheadEpoch());
+				Assert::IsFalse(observer.WantsFrame(1), L"negative control (ResetLookahead): sequence 1 suppressed before reset");
+				Assert::IsFalse(observer.WantsFrame(500), L"negative control (ResetLookahead): sequence 500 suppressed before reset");
+
+				module.ResetLookahead();
+				Assert::IsTrue(module.LookaheadEpoch() > initialEpoch, L"ResetLookahead must bump LookaheadEpoch");
+				Assert::IsTrue(observer.WantsFrame(1), L"after ResetLookahead: sequence 1 wanted immediately");
+				Assert::IsTrue(observer.WantsFrame(500), L"after ResetLookahead: sequence 500 wanted immediately");
+
+				observer.ObserveFrame(5, 0, picture.Source(), rect);
+				Assert::IsFalse(observer.WantsFrame(5), L"new epoch: measured sequence 5 suppressed again");
+				Assert::IsFalse(observer.WantsFrame(4), L"new epoch: older sequence 4 suppressed again");
+				Assert::IsTrue(observer.WantsFrame(6), L"new epoch: next sequence 6 wanted");
+			}
+
+			// 3. Adversarial guard: predictions disabled must still return false even after an epoch bump.
+			{
+				LedDrive::LedDriveConfig off;
+				off.mode = LedDrive::Mode::Script;
+				off.scriptLookahead = false;
+				LedDrive::LedDriveModule quiet(LedDrive::ProjectorConfig(), off);
+				LedDrive::LookaheadObserver quietObserver(quiet);
+				Assert::IsFalse(quiet.WantsPredictions());
+				const uint64_t initialEpoch = quiet.LookaheadEpoch();
+				quiet.ResetLookahead();
+				Assert::IsTrue(quiet.LookaheadEpoch() > initialEpoch, L"ResetLookahead bumps epoch even when predictions off");
+				Assert::IsFalse(quietObserver.WantsFrame(1), L"predictions off must still return false after epoch bump");
+			}
+		}
+
 		// The walk with and without the fix on a sliding Normal queue (5 frames): the observers
 		// receive exactly the same calls (same frames, same order, same picture rectangles) and
 		// end in the same state, while each frame's active picture is measured once instead of

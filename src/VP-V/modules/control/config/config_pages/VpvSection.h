@@ -26,6 +26,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <string>
 #include <vector>
 
 class QWidget;
@@ -111,6 +112,9 @@ namespace Vpv
 
 	// Diagnostic count of hidden VP-V combo popup events deferred or purged before popup show.
 	std::uint64_t DeferredHiddenPopupEventCount();
+
+	// Decode config value bytes as UTF-8 when valid, falling back to local8Bit for legacy non-UTF-8 files.
+	QString DecodeConfigValue(const std::string& raw);
 
 	// Object names (tests and automation).
 	inline QString ObjectName(const QString& part) { return QStringLiteral("vpv.") + part; }

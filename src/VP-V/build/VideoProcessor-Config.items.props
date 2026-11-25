@@ -13,6 +13,10 @@
     <ClCompile Include="..\VP-V\modules\control\config\config_pages\VpvGeneralPageCards.cpp" />
     <ClCompile Include="..\VP-V\modules\control\config\editor\Migrations.cpp" />
     <ClCompile Include="..\VP-V\modules\control\config\config_pages\VpvConfigProvidersStatic.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>  <!-- S4A A4: static registration -->
+    <ClCompile Include="..\VP-V\modules\output\calibration_lut\CalibrationLutHostPolicy.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ObjectFileName>$(IntDir)CalibrationLutHostPolicyStandalone.obj</ObjectFileName>
+    </ClCompile>
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\config_ui\CalibrationPage.cpp" />
     <ClCompile Include="..\VP-V\modules\drive\led_compensation\config_ui\LedDrivePage.cpp" />
     <ClCompile Include="..\VP-V\modules\drive\projector_control\config_ui\DriveConfigBase.cpp" />
