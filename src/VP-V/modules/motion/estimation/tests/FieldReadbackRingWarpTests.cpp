@@ -14,7 +14,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <memory>
+#include <sstream>
 #include <thread>
 #include <vector>
 
@@ -874,6 +876,39 @@ namespace VideoProcessorTest
 				L"GEM-135: destructors must withdraw all kUserCameraModel VRAM back to exact baseline (Rule 2 zero leak)");
 			Assert::AreEqual(baselineUnpopulated, CameraModelIsUnpopulated(),
 				L"GEM-135: destructors must clear active marks cleanly");
+		}
+
+		// W23-Audit-Fix1 POD1-H5: CameraLinkCore::OnFrameStart() must call m_ring->OnFrameStart(), m_ring->Clear()
+		// on renumber/reset, and m_ring->FlushPending() after m_ring->Request(vf) so native D3D11 readbacks submit
+		// immediately instead of stalling until the next frame's Poll().
+		BEGIN_TEST_METHOD_ATTRIBUTE(CameraLinkCoreFlushesPendingReadbacksOnFrameStart)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(CameraLinkCoreFlushesPendingReadbacksOnFrameStart)
+		{
+			const std::string repoRoot = [&]() {
+				std::string dir = __FILE__;
+				const size_t pos = dir.find("\\src\\VP-V\\");
+				return pos != std::string::npos ? dir.substr(0, pos) : std::string(".");
+			}();
+			std::ifstream f(repoRoot + "\\src\\VP-V\\modules\\motion\\estimation\\global_model\\link\\CameraLinkCore.cpp");
+			Assert::IsTrue(f.is_open(), L"CameraLinkCore.cpp must be readable");
+			std::ostringstream ss;
+			ss << f.rdbuf();
+			const std::string src = ss.str();
+			const size_t start = src.find("void CameraLinkCore::OnFrameStart(");
+			Assert::IsTrue(start != std::string::npos, L"locate CameraLinkCore::OnFrameStart");
+			const size_t end = src.find("void CameraLinkCore::OnPostSubmitGap(", start);
+			Assert::IsTrue(end != std::string::npos && end > start);
+			const std::string body = src.substr(start, end - start);
+			const size_t clearPos = body.find("m_ring->Clear();");
+			const size_t onStartPos = body.find("m_ring->OnFrameStart();");
+			const size_t reqPos = body.find("m_ring->Request(vf)");
+			const size_t flushPos = body.find("m_ring->FlushPending();");
+			Assert::IsTrue(clearPos != std::string::npos, L"POD1-H5: OnFrameStart must Clear() ring on renumber/reset");
+			Assert::IsTrue(onStartPos != std::string::npos, L"POD1-H5: OnFrameStart must call m_ring->OnFrameStart()");
+			Assert::IsTrue(reqPos != std::string::npos && flushPos != std::string::npos && flushPos > reqPos,
+				L"POD1-H5: OnFrameStart must call m_ring->FlushPending() after Request(vf)");
 		}
 	};
 }
