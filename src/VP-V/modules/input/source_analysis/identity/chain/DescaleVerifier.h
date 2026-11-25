@@ -218,6 +218,25 @@ namespace SourceIdentity
 				const int maxN = static_cast<int>(std::floor(s_.maxLatentRatio * static_cast<double>(N)));
 				out.candidates.resize(static_cast<size_t>(count));
 				std::vector<double> coarseT(static_cast<size_t>(count), 0.0);
+				// SOTA1-COARSE: when HDR linear-light descale is active, screen each candidate with a single fast
+				// 4-tap linearized WLS call on coarseLines so PQ/HLG OETF distortion never evicts the true rung
+				// before ExactStage (reuses hdrWs_ linearized once per Evaluate; zero extra EOTF work).
+				const bool hdrCoarseScreen = !opt.exactOnly && s_.hdrNoise.enabled && s_.hdrNoise.linearizeForDescale &&
+					s_.hdrNoise.transfer != HdrTransfer::Sdr;
+				int hdrCoarseIdx[kMaxLines];
+				int hdrCoarseNl = 0;
+				if (hdrCoarseScreen)
+				{
+					hdrLinearizedReady_ = true;
+					HdrNoiseReason linReason = HdrNoiseReason::Ok;
+					hdrLinearizedOk_ = LinearizeLineSet(ls, s_.hdrNoise, hdrWs_, linReason, hdrPreClamped_);
+					if (hdrLinearizedOk_)
+					{
+						hdrCoarseNl = (std::min)(ls.count, (std::min)(kMaxLines, (std::max)(1, s_.coarseLines)));
+						for (int i = 0; i < hdrCoarseNl; ++i)
+							hdrCoarseIdx[i] = (i * ls.count) / hdrCoarseNl;
+					}
+				}
 				for (int c = 0; c < count; ++c)
 				{
 					CandidateResult& cr = out.candidates[static_cast<size_t>(c)];
@@ -240,6 +259,18 @@ namespace SourceIdentity
 					{
 						cr.reason |= why;
 						continue;
+					}
+					if (hdrCoarseScreen && hdrLinearizedOk_ && hdrCoarseNl >= 2)
+					{
+						const int screenK = (opt.onlyKernel >= 0 && opt.onlyKernel < kKernelCount) ? opt.onlyKernel : 1;
+						VerifyLinearizedHeteroscedasticInPlace(
+							ls, cand[c], s_.hdrNoise, hdrWs_, hdrTmpRes_, hdrCoarseIdx, hdrCoarseNl,
+							false, screenK, true, hdrPreClamped_, false);
+						if (hdrTmpRes_.valid && hdrTmpRes_.stat < tBest)
+						{
+							tBest = hdrTmpRes_.stat;
+							nBest = cand[c];
+						}
 					}
 					cr.valid = true;
 					cr.n = nBest;
@@ -1378,6 +1409,33 @@ namespace SourceIdentity
 								cr.segBase[cell] = bestHr.segBaseWhitened[cell] * unitFloor10;
 								cr.segRows[cell] = bestHr.segRows[cell];
 							}
+						}
+					}
+				}
+				else if (screenOnly && s_.hdrNoise.enabled && s_.hdrNoise.transfer != HdrTransfer::Sdr && s_.hdrNoise.linearizeForDescale)
+				{
+					// SOTA1-COARSE (p3TwoPass Pass-1): fast single-kernel linearized screen on coarseLines so Pass-1 ranking
+					// never drops the true HDR rung under nonlinear PQ/HLG distortion.
+					if (!hdrLinearizedReady_)
+					{
+						hdrLinearizedReady_ = true;
+						HdrNoiseReason linReason = HdrNoiseReason::Ok;
+						hdrLinearizedOk_ = LinearizeLineSet(ls, s_.hdrNoise, hdrWs_, linReason, hdrPreClamped_);
+					}
+					if (hdrLinearizedOk_ && nl >= 2)
+					{
+						int screenIdx[kMaxLines];
+						const int screenNl = (std::min)(nl, (std::min)(kMaxLines, (std::max)(2, s_.coarseLines)));
+						for (int i = 0; i < screenNl; ++i)
+							screenIdx[i] = idxScratch_[static_cast<size_t>((i * nl) / screenNl)];
+						const int screenK = (opt.onlyKernel >= 0 && opt.onlyKernel < kKernelCount) ? opt.onlyKernel : 1;
+						VerifyLinearizedHeteroscedasticInPlace(
+							ls, cr.nProposed, s_.hdrNoise, hdrWs_, hdrTmpRes_, screenIdx, screenNl,
+							false, screenK, true, hdrPreClamped_, false);
+						if (hdrTmpRes_.valid && hdrTmpRes_.stat < cr.stat)
+						{
+							cr.stat = hdrTmpRes_.stat;
+							cr.n = cr.nProposed;
 						}
 					}
 				}
