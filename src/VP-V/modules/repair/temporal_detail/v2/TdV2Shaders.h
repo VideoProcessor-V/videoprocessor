@@ -4624,6 +4624,7 @@ vec2 td_sample_coded_delta_sited(ivec2 dp, out int diagFlags)
         return vec2(0.0);
 
 #if defined(TD_CHROMA_APPLY_HAS_VETO) && TD_CHROMA_APPLY_HAS_VETO
+    bool vDefocLowOnly = false;
     if (u_has_face_mask > 0.5 || u_has_cell_prior > 0.5)
     {
         float vlx = (float(dp.x) + 0.5) * float(TD_DSUB_X) - 0.5 + u_dshift_x;
@@ -4640,6 +4641,8 @@ vec2 td_sample_coded_delta_sited(ivec2 dp, out int diagFlags)
             bool vDefoc = ((vBits & 2) != 0);
             if (vFocus || (vDefoc && u_bokeh_mode < 0.5))
                 return vec2(0.0);
+            if (vDefoc && u_bokeh_mode >= 0.5)
+                vDefocLowOnly = true;
         }
     }
 #endif
@@ -4667,7 +4670,74 @@ vec2 td_sample_coded_delta_sited(ivec2 dp, out int diagFlags)
     float cyLocal = (ly + 0.5 - u_cshift_y) / float(TD_CSUB_Y) - 0.5 - float(cay0);
 
     vec2 outD = vec2(0.0);
-    if (cxLocal >= 1.0 && cyLocal >= 1.0 && cxLocal < float(cAw) - 2.0 && cyLocal < float(cAh) - 2.0)
+    bool useCatmull = (cxLocal >= 1.0 && cyLocal >= 1.0 && cxLocal < float(cAw) - 2.0 && cyLocal < float(cAh) - 2.0);
+#if defined(TD_CHROMA_APPLY_HAS_VETO) && TD_CHROMA_APPLY_HAS_VETO
+    // CHR-MEDIUM-2: Under BokehMode::LowBandCellOnly, never let Catmull-Rom/bilinear upsample taps
+    // pull M/H coded deltas from adjacent sharp cells 1-2 px across a bokeh boundary.
+    if (vDefocLowOnly)
+    {
+        bool allDefoc = false;
+        if (useCatmull)
+        {
+            allDefoc = true;
+            ivec2 bi0 = ivec2(floor(vec2(cxLocal, cyLocal)));
+            for (int j = 0; j < 4 && allDefoc; ++j)
+            {
+                for (int i = 0; i < 4; ++i)
+                {
+                    ivec2 gq = ivec2(cax0 + bi0.x - 1 + i, cay0 + bi0.y - 1 + j);
+                    float tlx = (float(gq.x) + 0.5) * float(TD_CSUB_X) - 0.5 + u_cshift_x;
+                    float tly = (float(gq.y) + 0.5) * float(TD_CSUB_Y) - 0.5 + u_cshift_y;
+                    int tcx = clamp(max(0, int(floor(tlx))) / TD_CELL_PX, 0, TD_CW - 1);
+                    int tcy = clamp(max(0, int(floor(tly))) / TD_CELL_PX, 0, TD_CH - 1);
+                    int tBits = int(round(texelFetch(cell_prior, ivec2(tcx, tcy), 0).y));
+                    if ((tBits & 2) == 0 || (tBits & 1) != 0)
+                    {
+                        allDefoc = false;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!allDefoc)
+        {
+            vec2 cl = clamp(vec2(cxLocal, cyLocal), vec2(0.0), vec2(float(cAw - 1), float(cAh - 1)));
+            ivec2 i0 = ivec2(floor(cl));
+            ivec2 i1 = min(ivec2(cAw - 1, cAh - 1), i0 + ivec2(1));
+            vec2 f = cl - vec2(i0);
+            ivec2 pts[4];
+            pts[0] = ivec2(cax0 + i0.x, cay0 + i0.y);
+            pts[1] = ivec2(cax0 + i1.x, cay0 + i0.y);
+            pts[2] = ivec2(cax0 + i0.x, cay0 + i1.y);
+            pts[3] = ivec2(cax0 + i1.x, cay0 + i1.y);
+            float bw[4];
+            bw[0] = (1.0 - f.x) * (1.0 - f.y);
+            bw[1] = f.x * (1.0 - f.y);
+            bw[2] = (1.0 - f.x) * f.y;
+            bw[3] = f.x * f.y;
+            vec2 sumD = vec2(0.0);
+            float sumW = 0.0;
+            for (int t = 0; t < 4; ++t)
+            {
+                float tlx = (float(pts[t].x) + 0.5) * float(TD_CSUB_X) - 0.5 + u_cshift_x;
+                float tly = (float(pts[t].y) + 0.5) * float(TD_CSUB_Y) - 0.5 + u_cshift_y;
+                int tcx = clamp(max(0, int(floor(tlx))) / TD_CELL_PX, 0, TD_CW - 1);
+                int tcy = clamp(max(0, int(floor(tly))) / TD_CELL_PX, 0, TD_CH - 1);
+                int tBits = int(round(texelFetch(cell_prior, ivec2(tcx, tcy), 0).y));
+                if ((tBits & 2) != 0 && (tBits & 1) == 0)
+                {
+                    sumD += bw[t] * texelFetch(coded_delta, pts[t], 0).xy;
+                    sumW += bw[t];
+                }
+            }
+            outD = (sumW > TD_NUM_FLOOR) ? (sumD / sumW) : vec2(0.0);
+            if (td_is_bad(outD.x)) { outD.x = 0.0; diagFlags |= 1; }
+            if (td_is_bad(outD.y)) { outD.y = 0.0; diagFlags |= 1; }
+            return outD;
+        }
+    }
+#endif
+    if (useCatmull)
     {
         ivec2 i0 = ivec2(floor(vec2(cxLocal, cyLocal)));
         vec4 wx = td_cubic_weights(cxLocal - float(i0.x));

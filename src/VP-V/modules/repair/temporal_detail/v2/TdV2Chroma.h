@@ -416,7 +416,8 @@ namespace TdV2
 			StandInRegistry* standIns = nullptr,
 			const CellMotionField* lumaMf = nullptr,
 			const Homography3x3* cameraH = nullptr,
-			std::vector<uint8_t>* outNonFiniteCells = nullptr)
+			std::vector<uint8_t>* outNonFiniteCells = nullptr,
+			bool enableSmoothWarpVectors = false)
 		{
 			WarpDiagnostics diag;
 			const int w = refPlane.w;
@@ -506,14 +507,43 @@ namespace TdV2
 					}
 					else
 					{
-						const double vx = lumaCellVx[cIdx];
-						const double vy = lumaCellVy[cIdx];
+						double vx = lumaCellVx[cIdx];
+						double vy = lumaCellVy[cIdx];
 						if (!std::isfinite(vx) || !std::isfinite(vy))
 						{
 							++diag.nonFinitePixels;
 							if (outNonFiniteCells != nullptr && cIdx < outNonFiniteCells->size())
 								(*outNonFiniteCells)[cIdx] = 1u;
 							continue;
+						}
+						// Plan 6.1 / L-1 (CHR-MEDIUM-1): Bilinearly interpolate motion vectors across cell centres
+						// when all 4 corners are valid & finite (matching luma WarpPlaneWithMotion 1:1).
+						if (enableSmoothWarpVectors)
+						{
+							const double u = (lx + 0.5) / static_cast<double>(cellPx) - 0.5;
+							const double v = (ly + 0.5) / static_cast<double>(cellPx) - 0.5;
+							const int cx0 = (std::max)(0, (std::min)(cellsW - 1, static_cast<int>(std::floor(u))));
+							const int cy0 = (std::max)(0, (std::min)(cellsH - 1, static_cast<int>(std::floor(v))));
+							const int cx1 = (std::min)(cellsW - 1, cx0 + 1);
+							const int cy1 = (std::min)(cellsH - 1, cy0 + 1);
+							const double fx = (std::max)(0.0, (std::min)(1.0, u - static_cast<double>(cx0)));
+							const double fy = (std::max)(0.0, (std::min)(1.0, v - static_cast<double>(cy0)));
+							const size_t i00 = static_cast<size_t>(cy0) * cellsW + cx0;
+							const size_t i10 = static_cast<size_t>(cy0) * cellsW + cx1;
+							const size_t i01 = static_cast<size_t>(cy1) * cellsW + cx0;
+							const size_t i11 = static_cast<size_t>(cy1) * cellsW + cx1;
+							const bool ok4 = (!hasCellValid || (lumaMf->valid[i00] && lumaMf->valid[i10] && lumaMf->valid[i01] && lumaMf->valid[i11])) &&
+							                 std::isfinite(lumaCellVx[i00]) && std::isfinite(lumaCellVy[i00]) &&
+							                 std::isfinite(lumaCellVx[i10]) && std::isfinite(lumaCellVy[i10]) &&
+							                 std::isfinite(lumaCellVx[i01]) && std::isfinite(lumaCellVy[i01]) &&
+							                 std::isfinite(lumaCellVx[i11]) && std::isfinite(lumaCellVy[i11]);
+							if (ok4)
+							{
+								vx = (1.0 - fy) * ((1.0 - fx) * lumaCellVx[i00] + fx * lumaCellVx[i10]) +
+								     fy * ((1.0 - fx) * lumaCellVx[i01] + fx * lumaCellVx[i11]);
+								vy = (1.0 - fy) * ((1.0 - fx) * lumaCellVy[i00] + fx * lumaCellVy[i10]) +
+								     fy * ((1.0 - fx) * lumaCellVy[i01] + fx * lumaCellVy[i11]);
+							}
 						}
 						sxLocal = static_cast<double>(x - ar.x0) + vx * invSubX;
 						syLocal = static_cast<double>(y - ar.y0) + vy * invSubY;
@@ -818,7 +848,8 @@ namespace TdV2
 			StandInRegistry* standIns = nullptr,
 			double sourceHz = kDefaultSourceHz,
 			uint64_t frameSeq = 0,
-			bool resetCflForNewAnchor = false)
+			bool resetCflForNewAnchor = false,
+			double noiseRidgeVar = 0.0)
 		{
 			if (codedCleanCb.Empty() || codedCleanCr.Empty() || lumaW <= 0 || lumaH <= 0 || cellPx <= 0)
 				return false;
@@ -1128,13 +1159,15 @@ namespace TdV2
 			if (anyBorderBilinear && standIns != nullptr)
 				standIns->Engage(StandInKind::BorderBilinearFallback, "TdV2ChromaAnchorCanvas CfL luma border");
 
-			// Fit per-cell OLS CfL (aCb, bCb, aCr, bCr) with derived uniform 1-LSB quantization variance ridge (Rule 1).
+			// Fit per-cell OLS CfL (aCb, bCb, aCr, bCr) regularized by derived chroma noise variance (refs/99a:90 / CHR-HIGH-4),
+			// floored by exact uniform 1-LSB quantization variance delta^2 / 12.0.
 			if (fitCflThisAnchor)
 			{
-				// Exact uniform 1-LSB quantization variance in native integer code units:
-				// Var(Uniform(-delta/2, +delta/2)) = delta^2 / 12.0 with delta = kDefaultStepPriorLsb = 1.0.
 				const double lsbQuantVar = (kDefaultStepPriorLsb * kDefaultStepPriorLsb) / 12.0;
-				const double ridgeFloor = (std::max)(lsbQuantVar, kEngineNumFloor);
+				const double effNoiseVar = (std::isfinite(noiseRidgeVar) && noiseRidgeVar > lsbQuantVar)
+					? noiseRidgeVar
+					: lsbQuantVar;
+				const double ridgeFloor = (std::max)(effNoiseVar, kEngineNumFloor);
 				bool anyValidCfl = false;
 				for (size_t i = 0; i < numCells; ++i)
 				{
@@ -1806,11 +1839,11 @@ namespace TdV2
 		ChromaReferenceInput nextPeak;
 		CellMotionField anchorReadMotion;             // Luma-grid Current -> Anchor canvas motion field
 		bool hasAnchorReadMotion = false;
-		bool enableAnchorCanvasRef = true;
+		bool enableAnchorCanvasRef = false;           // Owner D2 / CHR-HIGH-4: default OFF (also gated on cfg_.enableAnchoredCarry)
 		bool enableCarriedCfl = true;
 
 		// Optional explicit CodecModel prediction P_B for transform-identified STRICT/CELL POCS (coded or delivered grid).
-		// When null, refs[0].clean is used as a visible stand-in (StandInKind::CodecModelPbStandIn, plan s1.2 L95).
+		// When null, absent P_B falls back visibly to the statistical pixel bound (TD-U3 / H-1).
 		const TdV2Plane* codecModelPbCb = nullptr;
 		const TdV2Plane* codecModelPbCr = nullptr;
 
@@ -1820,9 +1853,11 @@ namespace TdV2
 		double deadZonePhi = kDeadZonePhiInter;
 		double zeroCoeffFraction = 0.0;
 		bool transformIdentified8x8 = false;
+		std::vector<double> cellStepScale;            // CHR-HIGH-2: per-cell AQ step multiplier (1:1 parity with GPU chroma)
 
 		bool isCutOrSpanInvalid = false;              // Resets 4:4:4 anchor canvas cleanly
 		double fadeKeep = 1.0;                        // Upstream U7 gradual retention keep in [0, 1] (default 1.0 = bit-identical; <=0 or NaN resets anchor)
+		QualityPattern::FrameRole frameRole = QualityPattern::FrameRole::Unknown; // TD-U1/U4 role for A2e history & optional 2-frame stats pool
 
 		// Optional Pass-1 face / non-rigid cell mask (cellsW * cellsH luma-cell layout matching FrameProcessInput::faceMask;
 		// non-zero forces delta == 0 on all masked pixels and excludes masked cells from 3x3 covariance pooling; H13).
@@ -1837,10 +1872,12 @@ namespace TdV2
 		// Optional P10g spectral grain PSD shape multipliers (SOTA #6; default 1.0 = white-noise identity).
 		PsdShape psdShape;
 
-		// Optional precomputed luma cell weights & diagonal variance for Plan 6.6 (`cfg_.chromaReuseLumaWeights`):
-		// when enabled and non-null with matching cell count, skips chroma moment accumulation & QP solve cleanly.
+		// Optional precomputed luma cell weights, diagonal variance, & explicit RefRole mapping for Plan 6.6 (`cfg_.chromaReuseLumaWeights`):
+		// maps each chroma ref strictly to matching luma RefRole (CHR-HIGH-3: never blind index k!).
 		const std::array<std::array<std::vector<double>, kMaxBlendRefs>, 3>* lumaCellWeights = nullptr;
 		const std::array<std::array<std::vector<double>, kMaxBlendRefs>, 3>* lumaCellDiagC = nullptr;
+		const RefRole* lumaRefRoles = nullptr;
+		int lumaActiveRefCount = 0;
 	};
 
 	struct ChromaProcessResult
@@ -1903,7 +1940,13 @@ namespace TdV2
 		}
 		const Config& GetConfig() const { return cfg_; }
 
-		void ResetAnchor() { anchorCanvas_.Reset(); }
+		void ResetAnchor()
+		{
+			anchorCanvas_.Reset();
+			a2eHistoryCb_.Reset();
+			a2eHistoryCr_.Reset();
+			elapsedSec_ = 0.0;
+		}
 		TdV2ChromaAnchorCanvas& AnchorCanvas() { return anchorCanvas_; }
 		const TdV2ChromaAnchorCanvas& AnchorCanvas() const { return anchorCanvas_; }
 
@@ -2178,14 +2221,17 @@ namespace TdV2
 			if (res.faceMaskedCells > 0 && standIns != nullptr)
 				standIns->Engage(StandInKind::FaceNonRigidMask);
 
-			// Rack-focus & optical bokeh hard-veto parity with luma TdV2ReferenceEngine (LOW-3 & Owner Q4):
-			// - explicitFocusChangeCells != 0: vetoes ALL bands (L, M, H -> delta == 0).
+			// Rack-focus & optical bokeh hard-veto parity with luma TdV2ReferenceEngine (LOW-3, Owner Q4, & CHR-MEDIUM-3):
+			// - autoFocusChangeCells: populated in Branch B when explicitFocusChangeCells == nullptr via standalone band-energy focus shift!
+			// - focusChangeCell != 0: vetoes ALL bands (L, M, H -> delta == 0).
 			// - explicitDefocusedCells != 0: vetoes M & H always; L band allowed ONLY under BokehMode::LowBandCellOnly.
+			std::vector<uint8_t> autoFocusChangeCells;
 			auto isFocusChangeCell = [&](size_t cellIdx) -> bool
 			{
-				return in.explicitFocusChangeCells != nullptr &&
-				       cellIdx < in.explicitFocusChangeCells->size() &&
-				       (*in.explicitFocusChangeCells)[cellIdx] != 0u;
+				if (in.explicitFocusChangeCells != nullptr && cellIdx < in.explicitFocusChangeCells->size() &&
+				    (*in.explicitFocusChangeCells)[cellIdx] != 0u)
+					return true;
+				return cellIdx < autoFocusChangeCells.size() && autoFocusChangeCells[cellIdx] != 0u;
 			};
 			auto isDefocusedCell = [&](size_t cellIdx) -> bool
 			{
@@ -2209,6 +2255,19 @@ namespace TdV2
 			{
 				if (isFocusChangeCell(ci) || isDefocusedCell(ci))
 					++res.focusVetoCells;
+			}
+
+			// CHR-HIGH-2: Per-cell AQ step scale (1:1 parity with GPU chroma; gated behind cfg_.enableAqStepScaling per M-6).
+			const double maxAllowedStepScale = cfg_.enableAqStepScaling ? kCellStepScaleMax : 1.0;
+			std::vector<double> cellStepScales(numCells, 1.0);
+			if (!in.cellStepScale.empty())
+			{
+				for (size_t ci = 0; ci < numCells && ci < in.cellStepScale.size(); ++ci)
+				{
+					const double sc = in.cellStepScale[ci];
+					if (std::isfinite(sc) && sc > 0.0)
+						cellStepScales[ci] = (std::max)(kCellStepScaleMin, (std::min)(maxAllowedStepScale, sc));
+				}
 			}
 
 			// =========================================================================
@@ -2346,11 +2405,11 @@ namespace TdV2
 					const WarpDiagnostics dCb = ChromaDetail::WarpChromaPlaneWithLumaMotion(
 						*rIn.cleanCb, curCleanCb, delivActive, dSubX, dSubY, in.siting,
 						useMf->vx, useMf->vy, res.cellsW, res.cellsH, cellPx, cr.warpedCb, validCb, standIns, useMf,
-						&rIn.cameraHomography, &nonFiniteCellFlag);
+						&rIn.cameraHomography, &nonFiniteCellFlag, cfg_.enableSmoothWarpVectors);
 					const WarpDiagnostics dCr = ChromaDetail::WarpChromaPlaneWithLumaMotion(
 						*rIn.cleanCr, curCleanCr, delivActive, dSubX, dSubY, in.siting,
 						useMf->vx, useMf->vy, res.cellsW, res.cellsH, cellPx, cr.warpedCr, validCr, standIns, useMf,
-						&rIn.cameraHomography, &nonFiniteCellFlag);
+						&rIn.cameraHomography, &nonFiniteCellFlag, cfg_.enableSmoothWarpVectors);
 					res.borderBilinearPixels += dCb.borderBilinearPixels + dCr.borderBilinearPixels;
 					if (dCb.nonFinitePixels > 0)
 						markNonFiniteRefCells(*rIn.cleanCb);
@@ -2362,7 +2421,7 @@ namespace TdV2
 					double dummyGain = 1.0;
 					cr.coarseCb = ChromaDetail::BlurActiveAnisotropic(cr.warpedCb, delivActive, sigmaX, sigmaY, dummyGain);
 					cr.coarseCr = ChromaDetail::BlurActiveAnisotropic(cr.warpedCr, delivActive, sigmaX, sigmaY, dummyGain);
-					cr.motionGate = EvaluateCameraRelativeMotionGate(*useMf, standIns);
+					cr.motionGate = EvaluateCameraRelativeMotionGate(*useMf, standIns, cfg_.enableHardFbOcclusionGate);
 					if (cr.motionGate.nonFiniteCells > 0)
 					{
 						for (size_t ci = 0; ci < numCells && ci < cr.motionGate.nonFiniteCellMask.size(); ++ci)
@@ -2394,7 +2453,7 @@ namespace TdV2
 						cellW[k].assign(numCells, 0.0);
 						cellDiagC[k].assign(numCells, 0.0);
 					}
-					const int poolR = cfg_.momentPoolRadiusCells > 0 ? cfg_.momentPoolRadiusCells : 0;
+					const int poolR = cfg_.PoolRadiusForBand(0); // CHR-HIGH-1: band-dependent pooling (5x5 on coarse band L!)
 					const int gW = (lumaW + grainCellPx - 1) / grainCellPx;
 					std::vector<double> blindCellEnergies;
 					std::vector<double> blindCellIrs;
@@ -2845,12 +2904,13 @@ namespace TdV2
 						standIns->Engage(StandInKind::P10gGrainSeparator, "chroma anchor ingest skipped: no grain-free clean split");
 					return;
 				}
+				const double cflNoiseRidge = a2Stats.valid ? a2Stats.totalVar : 0.0;
 				anchorCanvas_.AccumulateAnchorFrame(
 					codedCleanCb, codedCleanCr, resolveAnchorCleanY(),
 					lumaW, lumaH, in.codedSubsampling, in.siting, lumaActive,
 					in.hasAnchorSplatMotion ? &in.anchorSplatMotion : nullptr,
 					cellPx, cfg_.sourceBits, standIns,
-					cfg_.sourceHz, in.seq, in.resetAnchorCfl);
+					cfg_.sourceHz, in.seq, in.resetAnchorCfl, cflNoiseRidge);
 			};
 
 			// On cut / span-invalid / fadeKeep <= 0 frames, never blend across the cut; seed new shot's anchor canvas if isAnchorFrame && splitActive.
@@ -2876,6 +2936,7 @@ namespace TdV2
 				std::vector<double> motionVx;
 				std::vector<double> motionVy;
 				MotionGateResult motionGate;
+				RefRole role = RefRole::PrevPeak;
 				bool isExactCopy = false;
 				bool isCfl = false;
 				bool isAnchorDerived = false;
@@ -2928,7 +2989,7 @@ namespace TdV2
 				return nullptr;
 			};
 
-			auto tryAddPeakRef = [&](const ChromaReferenceInput& rIn)
+			auto tryAddPeakRef = [&](const ChromaReferenceInput& rIn, RefRole refRole)
 			{
 				if (refs.size() >= static_cast<size_t>(kMaxBlendRefs))
 					return;
@@ -2959,6 +3020,7 @@ namespace TdV2
 				}
 
 				WarpedChromaRef wr;
+				wr.role = refRole;
 				wr.isExactCopy = rIn.isExactCopyOfCurrent;
 				wr.motionVx = useMf->vx;
 				wr.motionVy = useMf->vy;
@@ -2966,11 +3028,11 @@ namespace TdV2
 				const WarpDiagnostics dCb = ChromaDetail::WarpChromaPlaneWithLumaMotion(
 					*refCb, codedCleanCb, codedActive, cSubX, cSubY, in.siting,
 					useMf->vx, useMf->vy, res.cellsW, res.cellsH, cellPx, wr.cleanCb, validCb, standIns, useMf,
-					&rIn.cameraHomography, &nonFiniteCellFlag);
+					&rIn.cameraHomography, &nonFiniteCellFlag, cfg_.enableSmoothWarpVectors);
 				const WarpDiagnostics dCr = ChromaDetail::WarpChromaPlaneWithLumaMotion(
 					*refCr, codedCleanCr, codedActive, cSubX, cSubY, in.siting,
 					useMf->vx, useMf->vy, res.cellsW, res.cellsH, cellPx, wr.cleanCr, validCr, standIns, useMf,
-					&rIn.cameraHomography, &nonFiniteCellFlag);
+					&rIn.cameraHomography, &nonFiniteCellFlag, cfg_.enableSmoothWarpVectors);
 				res.borderBilinearPixels += dCb.borderBilinearPixels + dCr.borderBilinearPixels;
 				if (dCb.nonFinitePixels > 0)
 					markNonFiniteCodedRefCells(*refCb);
@@ -2981,15 +3043,16 @@ namespace TdV2
 					wr.validPx[i] = (validCb[i] != 0u && validCr[i] != 0u) ? 1u : 0u;
 				wr.bandsCb = DecomposeActiveBands(wr.cleanCb, codedActive, standIns);
 				wr.bandsCr = DecomposeActiveBands(wr.cleanCr, codedActive, standIns);
-				wr.motionGate = EvaluateCameraRelativeMotionGate(*useMf, standIns);
+				wr.motionGate = EvaluateCameraRelativeMotionGate(*useMf, standIns, cfg_.enableHardFbOcclusionGate);
 				mergeMotionNonFinite(wr.motionGate);
 				refs.push_back(std::move(wr));
 			};
 
-			tryAddPeakRef(in.prevPeak);
-			tryAddPeakRef(in.nextPeak);
+			tryAddPeakRef(in.prevPeak, RefRole::PrevPeak);
+			tryAddPeakRef(in.nextPeak, RefRole::NextPeak);
 
-			// Anchor read motion field for 4:4:4 canvas and carried CfL (H5 & H9).
+			// CHR-HIGH-4 (Owner D2): Gate 4:4:4 anchor canvas ref strictly on cfg_.enableAnchoredCarry && in.enableAnchorCanvasRef!
+			const bool allowAnchorCanvasRef = cfg_.enableAnchoredCarry && in.enableAnchorCanvasRef;
 			const CellMotionField* anchorReadMf = nullptr;
 			bool anchorMotionRejected = false;
 			if (in.hasAnchorReadMotion)
@@ -3004,7 +3067,7 @@ namespace TdV2
 						standIns->Engage(StandInKind::MotionFieldStandIn, "chroma anchorReadMotion malformed; anchor ref skipped");
 				}
 			}
-			else if ((in.enableAnchorCanvasRef && anchorCanvas_.HasData()) || (in.enableCarriedCfl && anchorCanvas_.HasCfl()))
+			else if ((allowAnchorCanvasRef && anchorCanvas_.HasData()) || (in.enableCarriedCfl && anchorCanvas_.HasCfl()))
 			{
 				// H9 (plan s1.2 L108): missing anchor read motion MUST NEVER fabricate whole-frame "Still".
 				anchorMotionRejected = true;
@@ -3016,11 +3079,12 @@ namespace TdV2
 				}
 			}
 
-			// 4:4:4 Anchor Memory Canvas reference (H3: codedClean fallback fills invalid pixels; H4: gap-fill visible).
-			if (!anchorMotionRejected && anchorReadMf != nullptr && in.enableAnchorCanvasRef && anchorCanvas_.HasData() &&
+			// 4:4:4 Anchor Memory Canvas reference (gated on cfg_.enableAnchoredCarry + per-cell held-out check per D2/CHR-HIGH-4!).
+			if (!anchorMotionRejected && anchorReadMf != nullptr && allowAnchorCanvasRef && anchorCanvas_.HasData() &&
 			    refs.size() < static_cast<size_t>(kMaxBlendRefs))
 			{
 				WarpedChromaRef wr;
+				wr.role = RefRole::PrevPeak2;
 				wr.isAnchorDerived = true;
 				wr.motionVx = anchorReadMf->vx;
 				wr.motionVy = anchorReadMf->vy;
@@ -3033,8 +3097,78 @@ namespace TdV2
 					res.canvasGapFilledPixels += gapFilled;
 					wr.bandsCb = DecomposeActiveBands(wr.cleanCb, codedActive, standIns);
 					wr.bandsCr = DecomposeActiveBands(wr.cleanCr, codedActive, standIns);
-					wr.motionGate = EvaluateCameraRelativeMotionGate(*anchorReadMf, standIns);
+					wr.motionGate = EvaluateCameraRelativeMotionGate(*anchorReadMf, standIns, cfg_.enableHardFbOcclusionGate);
 					mergeMotionNonFinite(wr.motionGate);
+
+					// CHR-HIGH-4: Per-cell held-out structure check on anchor canvas (mid-band NCC + coarse-band mean diff).
+					const BandWhiteNoiseGains hGains = ComputeBandWhiteNoiseGains();
+					const double dScaleH = DepthScale(cfg_.sourceBits);
+					const double bQuantH = (dScaleH * dScaleH) / 12.0;
+					const double midFloorH = 2.0 * hGains.mid * bQuantH;
+					const double effKH = ClampPixelBoundKappa(cfg_.pixelBoundKappa);
+					for (int cy = 0; cy < res.cellsH; ++cy)
+					{
+						const int y0 = (std::max)(codedActive.y0, (cy * cellPx) / cSubY);
+						const int y1 = (std::min)(codedActive.y1, ((cy + 1) * cellPx + cSubY - 1) / cSubY);
+						for (int cx = 0; cx < res.cellsW; ++cx)
+						{
+							const int x0 = (std::max)(codedActive.x0, (cx * cellPx) / cSubX);
+							const int x1 = (std::min)(codedActive.x1, ((cx + 1) * cellPx + cSubX - 1) / cSubX);
+							const size_t ci = static_cast<size_t>(cy) * res.cellsW + cx;
+							if (wr.motionGate.gateL[ci] <= 0.0 && wr.motionGate.gateMH[ci] <= 0.0)
+								continue;
+							double sCM = 0.0, sAM = 0.0, sCL = 0.0, sAL = 0.0;
+							size_t cnt = 0;
+							for (int y = y0; y < y1; ++y)
+							{
+								for (int x = x0; x < x1; ++x)
+								{
+									const size_t pIdx = static_cast<size_t>(y) * cW + x;
+									if (wr.validPx[pIdx] == 0u) continue;
+									sCM += curBandsCb.M.at(x, y);
+									sAM += wr.bandsCb.M.at(x, y);
+									sCL += curBandsCb.L.at(x, y);
+									sAL += wr.bandsCb.L.at(x, y);
+									++cnt;
+								}
+							}
+							bool ok = (cnt > 0);
+							if (ok)
+							{
+								const double invN = 1.0 / static_cast<double>(cnt);
+								const double muCM = sCM * invN, muAM = sAM * invN;
+								double vC = 0.0, vA = 0.0, cov = 0.0;
+								for (int y = y0; y < y1; ++y)
+								{
+									for (int x = x0; x < x1; ++x)
+									{
+										if (wr.validPx[static_cast<size_t>(y) * cW + x] == 0u) continue;
+										const double dc = curBandsCb.M.at(x, y) - muCM;
+										const double da = wr.bandsCb.M.at(x, y) - muAM;
+										vC += dc * dc; vA += da * da; cov += dc * da;
+									}
+								}
+								vC *= invN; vA *= invN; cov *= invN;
+								if (vC > midFloorH && vA > midFloorH)
+								{
+									const double ncc = cov / std::sqrt(vC * vA);
+									const double nEffM = EffectiveSamplesForBand(1, static_cast<double>(cnt));
+									const double nccMin = (std::min)(0.5, std::sqrt(kHuberKneeSq) / std::sqrt(nEffM));
+									if (!std::isfinite(ncc) || ncc < nccMin)
+										ok = false;
+								}
+								const double cLim = effKH * std::sqrt((std::max)(a2Stats.totalVar * cellStepScales[ci] * cellStepScales[ci], bQuantH) * hGains.low);
+								if (std::fabs((sAL - sCL) * invN) > cLim)
+									ok = false;
+							}
+							if (!ok)
+							{
+								wr.motionGate.gateL[ci] = 0.0;
+								wr.motionGate.gateMH[ci] = 0.0;
+							}
+						}
+					}
+
 					refs.push_back(std::move(wr));
 					res.anchorCanvasUsed = true;
 				}
@@ -3046,6 +3180,7 @@ namespace TdV2
 			    refs.size() < static_cast<size_t>(kMaxBlendRefs))
 			{
 				WarpedChromaRef wr;
+				wr.role = RefRole::Carry;
 				wr.isCfl = true;
 				wr.isAnchorDerived = true;
 				wr.motionVx = anchorReadMf->vx;
@@ -3057,12 +3192,46 @@ namespace TdV2
 				{
 					wr.bandsCb = DecomposeActiveBands(wr.cleanCb, codedActive, standIns);
 					wr.bandsCr = DecomposeActiveBands(wr.cleanCr, codedActive, standIns);
-					wr.motionGate = EvaluateCameraRelativeMotionGate(*anchorReadMf, standIns);
+					wr.motionGate = EvaluateCameraRelativeMotionGate(*anchorReadMf, standIns, cfg_.enableHardFbOcclusionGate);
 					mergeMotionNonFinite(wr.motionGate);
 					cflRefIdx = static_cast<int>(refs.size());
 					refs.push_back(std::move(wr));
 					res.carriedCflUsed = true;
 				}
+			}
+
+			// CHR-MEDIUM-3: Standalone chroma rack-focus fallback when explicitFocusChangeCells == nullptr!
+			// Uses shared EvaluateFocusGuardStandIn band-energy focus shift on coded Cb & Cr (zero magic numbers).
+			if (in.explicitFocusChangeCells == nullptr && !refs.empty())
+			{
+				const int cCellPx = (std::max)(1, cellPx / (std::max)(cSubX, cSubY));
+				std::vector<ThreeBandPlanes> refCbList, refCrList;
+				refCbList.reserve(refs.size());
+				refCrList.reserve(refs.size());
+				for (const auto& wr : refs)
+				{
+					refCbList.push_back(wr.bandsCb);
+					refCrList.push_back(wr.bandsCr);
+				}
+				const auto fcCb = EvaluateFocusGuardStandIn(
+					curBandsCb, refCbList, codedActive, res.cellsW, res.cellsH, cCellPx, cfg_.sourceBits,
+					a2Stats.valid ? a2Stats.totalVar : 0.0, nullptr, standIns, in.explicitDefocusedCells, &cellStepScales);
+				const auto fcCr = EvaluateFocusGuardStandIn(
+					curBandsCr, refCrList, codedActive, res.cellsW, res.cellsH, cCellPx, cfg_.sourceBits,
+					a2Stats.valid ? a2Stats.totalVar : 0.0, nullptr, standIns, in.explicitDefocusedCells, &cellStepScales);
+				autoFocusChangeCells.assign(numCells, 0u);
+				size_t newlyVetoed = 0;
+				for (size_t ci = 0; ci < numCells; ++ci)
+				{
+					const bool det = (ci < fcCb.size() && fcCb[ci].focusChange) || (ci < fcCr.size() && fcCr[ci].focusChange);
+					if (det)
+					{
+						autoFocusChangeCells[ci] = 1u;
+						if (!isDefocusedCell(ci))
+							++newlyVetoed;
+					}
+				}
+				res.focusVetoCells += newlyVetoed;
 			}
 
 			res.activeRefCount = refs.size();
@@ -3248,13 +3417,17 @@ namespace TdV2
 				const ThreeBandPlanes& curBands,
 				const std::vector<double>& retainedGrainVar,
 				const std::vector<uint8_t>& cflReject,
-				TdV2Plane& outCodedDelta)
+				A2ePriorHistory& a2eHist,
+				TdV2Plane& outCodedDelta,
+				TdV2Plane& outCodedDeltaLow)
 			{
 				const int K = static_cast<int>(refs.size());
 				std::array<std::array<std::vector<double>, kMaxBlendRefs>, 3> cellW;
 				std::array<std::array<std::vector<double>, kMaxBlendRefs>, 3> cellDiagC;
+				std::array<std::vector<double>, 3> cellOwnErrU;
 				for (int b = 0; b < 3; ++b)
 				{
+					cellOwnErrU[b].assign(numCells, a2Stats.valid ? (a2Stats.totalVar * bandTransfer[b]) : 0.0);
 					for (int k = 0; k < K; ++k)
 					{
 						cellW[b][k].assign(numCells, 0.0);
@@ -3262,59 +3435,21 @@ namespace TdV2
 					}
 				}
 
-				const int poolR = cfg_.momentPoolRadiusCells > 0 ? cfg_.momentPoolRadiusCells : 0;
 				const int gW = (lumaW + grainCellPx - 1) / grainCellPx;
 				std::vector<double> cellRetainedGrain(numCells, 0.0);
+				std::vector<uint8_t> cellHasGrainPrior(numCells, 0u);
+				std::vector<double> cellOwnGrainVarArr(numCells, 0.0);
+				std::vector<uint8_t> cellActivityClass(numCells, 0u);
 
-				// Collect per-cell fine-band energies & blind symmetric innovations for Q5(b) zero-energy dark block filter
-				// whenever !splitActive and no explicit retainedGrainVar prior covers the frame.
-				std::vector<double> blindCellEnergies;
-				std::vector<double> blindCellIrs;
-				if (!splitActive)
-				{
-					blindCellEnergies.reserve(numCells);
-					blindCellIrs.reserve(numCells);
-				}
-
-				const auto g1 = VpUnit::BandFromBase::Taps<double>(VpUnit::BandFromBase::kSigmaFine, 3.0, true, 0.0);
-
-				// Plan 6.6 (chromaReuseLumaWeights): when enabled and caller supplies precomputed luma cell weights,
-				// reuse luma weights directly and skip chroma moment accumulation & QP solve cleanly.
-				const bool reuseLumaW = cfg_.chromaReuseLumaWeights && in.lumaCellWeights != nullptr;
-				if (reuseLumaW)
-				{
-					for (int b = 0; b < 3; ++b)
-					{
-						for (int k = 0; k < K; ++k)
-						{
-							const auto& srcW = (*in.lumaCellWeights)[b][k];
-							if (srcW.size() == numCells)
-							{
-								for (size_t ci = 0; ci < numCells; ++ci)
-								{
-									if (isFaceMaskedCell(ci) || isFocusVetoedBand(ci, b))
-										continue;
-									const double wv = srcW[ci];
-									cellW[b][k][ci] = (std::isfinite(wv) && wv > 0.0) ? wv : 0.0;
-								}
-							}
-							if (in.lumaCellDiagC != nullptr && (*in.lumaCellDiagC)[b][k].size() == numCells)
-								cellDiagC[b][k] = (*in.lumaCellDiagC)[b][k];
-						}
-					}
-				}
-
-				for (int cy = 0; !reuseLumaW && cy < res.cellsH; ++cy)
+				// CHR-HIGH-3: ALWAYS populate cellRetainedGrain[cIdx] upfront (even when chromaReuseLumaWeights == true!)
+				// so Layer-4 TdGuardPort stays 100% active when reusing luma weights!
+				for (int cy = 0; cy < res.cellsH; ++cy)
 				{
 					for (int cx = 0; cx < res.cellsW; ++cx)
 					{
 						const size_t cIdx = static_cast<size_t>(cy) * res.cellsW + cx;
-						// Pass-1 face / non-rigid mask (H13): skip cell solve so cellW[b][k][cIdx] stays 0.0.
 						if (isFaceMaskedCell(cIdx))
 							continue;
-
-						double cellGrainVar = 0.0;
-						bool hasCellGrainPrior = false;
 						if (!retainedGrainVar.empty())
 						{
 							const int gcx = MapCellToGrainGrid(cx, cellPx, grainCellPx);
@@ -3325,8 +3460,8 @@ namespace TdV2
 								const double gv = retainedGrainVar[gIdx];
 								if (std::isfinite(gv) && gv >= 0.0)
 								{
-									cellGrainVar = gv;
-									hasCellGrainPrior = true;
+									cellRetainedGrain[cIdx] = gv;
+									cellHasGrainPrior[cIdx] = 1u;
 								}
 								else
 								{
@@ -3342,263 +3477,507 @@ namespace TdV2
 									standIns->Engage(StandInKind::GrainPriorOutOfRange, "chroma retainedGrainVar index out of range");
 							}
 						}
+					}
+				}
 
-						// Active references for this cell (excluding CfL if rejected by disagreement check).
-						int activeIdx[kMaxBlendRefs] = {};
-						int activeK = 0;
+				std::vector<double> blindCellEnergies;
+				std::vector<double> blindCellIrs;
+				if (!splitActive)
+				{
+					blindCellEnergies.reserve(numCells);
+					blindCellIrs.reserve(numCells);
+				}
+
+				const auto g1 = VpUnit::BandFromBase::Taps<double>(VpUnit::BandFromBase::kSigmaFine, 3.0, true, 0.0);
+				const double depthScaleC = DepthScale(cfg_.sourceBits);
+				const double baseQuantVarC = (depthScaleC * depthScaleC) / 12.0;
+				const double activityTexFloorC = 2.0 * (gains.mid + gains.fine) * baseQuantVarC;
+
+				// Plan 6.6 / CHR-HIGH-3 (`chromaReuseLumaWeights`):
+				// Strictly map each chroma ref k to the matching luma RefRole (never blind index k!).
+				const bool reuseLumaW = cfg_.chromaReuseLumaWeights && in.lumaCellWeights != nullptr;
+				if (reuseLumaW)
+				{
+					int lumaSlotForChroma[kMaxBlendRefs] = { -1, -1, -1, -1 };
+					const int lumaK = (in.lumaRefRoles != nullptr && in.lumaActiveRefCount > 0)
+						? (std::min)(in.lumaActiveRefCount, kMaxBlendRefs)
+						: kMaxBlendRefs;
+					for (int k = 0; k < K; ++k)
+					{
+						if (in.lumaRefRoles != nullptr && in.lumaActiveRefCount > 0)
+						{
+							for (int lk = 0; lk < lumaK; ++lk)
+							{
+								if (in.lumaRefRoles[lk] == refs[static_cast<size_t>(k)].role)
+								{
+									lumaSlotForChroma[k] = lk;
+									break;
+								}
+							}
+						}
+						else if (k < kMaxBlendRefs)
+						{
+							lumaSlotForChroma[k] = k;
+						}
+					}
+					for (int b = 0; b < 3; ++b)
+					{
 						for (int k = 0; k < K; ++k)
 						{
-							if (refs[static_cast<size_t>(k)].isCfl && cflReject[cIdx] != 0u)
+							const int lk = lumaSlotForChroma[k];
+							if (lk < 0 || lk >= kMaxBlendRefs)
 								continue;
-							activeIdx[activeK++] = k;
-						}
-						if (activeK == 0)
-						{
-							cellRetainedGrain[cIdx] = cellGrainVar;
-							continue;
-						}
-
-						const int py0 = (std::max)(codedActive.y0, ((cy - poolR) * cellPx) / cSubY);
-						const int py1 = (std::min)(codedActive.y1, ((cy + poolR + 1) * cellPx + cSubY - 1) / cSubY);
-						const int px0 = (std::max)(codedActive.x0, ((cx - poolR) * cellPx) / cSubX);
-						const int px1 = (std::min)(codedActive.x1, ((cx + poolR + 1) * cellPx + cSubX - 1) / cSubX);
-
-						// H2 + Q5(a) + Q5(b): When !splitActive and no explicit per-cell grain prior was supplied, derive
-						// bias-corrected projection innovation ComputeProjectionIr(..., HighPassBicubicWarpVarianceGain) / gains.fine
-						// over the exact same pooled window (immune to sub-pixel bicubic texture attenuation on coded chroma pans).
-						// Clean grain-free refs below the exact 1-LSB quantization floor contribute 0.0.
-						if (!splitActive && !hasCellGrainPrior)
-						{
-							double sumCurH2 = 0.0;
-							double sumRefH2[kMaxBlendRefs] = {};
-							double sumCrossH[kMaxBlendRefs] = {};
-							size_t hCnt = 0;
-							double ownCellH2 = 0.0;
-							size_t ownCellCnt = 0;
-
-							for (int y = py0; y < py1; ++y)
+							const auto& srcW = (*in.lumaCellWeights)[b][lk];
+							if (srcW.size() == numCells)
 							{
-								const double ly = in.siting.CodedToLumaY(static_cast<double>(y), cSubY);
-								const int pcy = (std::max)(0, (std::min)(res.cellsH - 1, static_cast<int>(std::floor(ly)) / cellPx));
-								for (int x = px0; x < px1; ++x)
+								for (size_t ci = 0; ci < numCells; ++ci)
 								{
-									const double lx = in.siting.CodedToLumaX(static_cast<double>(x), cSubX);
-									const int pcx = (std::max)(0, (std::min)(res.cellsW - 1, static_cast<int>(std::floor(lx)) / cellPx));
-									const size_t pCell = static_cast<size_t>(pcy) * res.cellsW + pcx;
-									if (isFaceMaskedCell(pCell) || isFocusVetoedBand(pCell, 2))
+									if (isFaceMaskedCell(ci) || isFocusVetoedBand(ci, b))
 										continue;
-									const size_t pIdx = static_cast<size_t>(y) * cW + x;
+									if (refs[static_cast<size_t>(k)].isCfl && cflReject[ci] != 0u)
+										continue;
+									const double wv = srcW[ci];
+									cellW[b][k][ci] = (std::isfinite(wv) && wv > 0.0) ? wv : 0.0;
+								}
+							}
+							if (in.lumaCellDiagC != nullptr && (*in.lumaCellDiagC)[b][lk].size() == numCells)
+								cellDiagC[b][k] = (*in.lumaCellDiagC)[b][lk];
+						}
+					}
+				}
 
-									const double hCur = curBands.H.at(x, y);
-									if (pcy == cy && pcx == cx)
+				// ---- Stage 2A (CHR-HIGH-1 / CHR-HIGH-2): Per-cell band-dependent moments, blind grain, & A2e samples ----
+				struct ChromaCellBandMom
+				{
+					double C[kMaxBlendRefs][kMaxBlendRefs] = {};
+					double cIvRaw[kMaxBlendRefs] = {};
+					double cIvSeSq[kMaxBlendRefs] = {};
+					double cIvUpperCap[kMaxBlendRefs] = {};
+					double cIvClipped[kMaxBlendRefs] = {};
+					int activeIdx[kMaxBlendRefs] = {};
+					int activeK = 0;
+					int partner[kMaxBlendRefs] = { -1, -1, -1, -1 };
+					size_t sampleCount = 0;
+				};
+				std::array<std::vector<ChromaCellBandMom>, 3> cellMom;
+				std::vector<double> a2eSamples[3][kA2eActivityClasses];
+				if (!reuseLumaW)
+				{
+					for (int b = 0; b < 3; ++b)
+						cellMom[b].resize(numCells);
+					for (int cy = 0; cy < res.cellsH; ++cy)
+					{
+						for (int cx = 0; cx < res.cellsW; ++cx)
+						{
+							const size_t cIdx = static_cast<size_t>(cy) * res.cellsW + cx;
+							if (isFaceMaskedCell(cIdx))
+								continue;
+
+							int activeIdx[kMaxBlendRefs] = {};
+							int activeK = 0;
+							for (int k = 0; k < K; ++k)
+							{
+								if (refs[static_cast<size_t>(k)].isCfl && cflReject[cIdx] != 0u)
+									continue;
+								activeIdx[activeK++] = k;
+							}
+							if (activeK == 0)
+								continue;
+
+							const int hPoolR = cfg_.PoolRadiusForBand(2);
+							const int hpy0 = (std::max)(codedActive.y0, ((cy - hPoolR) * cellPx) / cSubY);
+							const int hpy1 = (std::min)(codedActive.y1, ((cy + hPoolR + 1) * cellPx + cSubY - 1) / cSubY);
+							const int hpx0 = (std::max)(codedActive.x0, ((cx - hPoolR) * cellPx) / cSubX);
+							const int hpx1 = (std::min)(codedActive.x1, ((cx + hPoolR + 1) * cellPx + cSubX - 1) / cSubX);
+
+							double cellGrainVar = cellRetainedGrain[cIdx];
+							const bool hasCellGrainPrior = (cellHasGrainPrior[cIdx] != 0u);
+
+							// Measure own-cell M+H energy for A2e activity classification (flat vs textured).
+							{
+								const int cy0 = (std::max)(codedActive.y0, (cy * cellPx) / cSubY);
+								const int cy1 = (std::min)(codedActive.y1, ((cy + 1) * cellPx + cSubY - 1) / cSubY);
+								const int cx0 = (std::max)(codedActive.x0, (cx * cellPx) / cSubX);
+								const int cx1 = (std::min)(codedActive.x1, ((cx + 1) * cellPx + cSubX - 1) / cSubX);
+								double sM2 = 0.0, sH2 = 0.0;
+								size_t scnt = 0;
+								for (int y = cy0; y < cy1; ++y)
+								{
+									for (int x = cx0; x < cx1; ++x)
 									{
-										ownCellH2 += hCur * hCur;
-										++ownCellCnt;
+										const double mv = curBands.M.at(x, y);
+										const double hv = curBands.H.at(x, y);
+										sM2 += mv * mv;
+										sH2 += hv * hv;
+										++scnt;
 									}
+								}
+								const double invS = scnt > 0 ? (1.0 / static_cast<double>(scnt)) : 0.0;
+								const double cleanMH = (std::max)(0.0, sM2 * invS - cellGrainVar * gains.mid * in.psdShape.ForBand(1)) +
+								                       (std::max)(0.0, sH2 * invS - cellGrainVar * gains.fine * in.psdShape.ForBand(2));
+								cellActivityClass[cIdx] = (cleanMH > activityTexFloorC) ? 1u : 0u;
+							}
 
-									bool allValidH = true;
-									double hRefs[kMaxBlendRefs] = {};
-									for (int ai = 0; ai < activeK; ++ai)
+							if (!splitActive && !hasCellGrainPrior)
+							{
+								double sumCurH2 = 0.0;
+								double sumRefH2[kMaxBlendRefs] = {};
+								double sumCrossH[kMaxBlendRefs] = {};
+								size_t hCnt = 0;
+								double ownCellH2 = 0.0;
+								size_t ownCellCnt = 0;
+
+								for (int y = hpy0; y < hpy1; ++y)
+								{
+									const double ly = in.siting.CodedToLumaY(static_cast<double>(y), cSubY);
+									const int pcy = (std::max)(0, (std::min)(res.cellsH - 1, static_cast<int>(std::floor(ly)) / cellPx));
+									for (int x = hpx0; x < hpx1; ++x)
 									{
-										const int k = activeIdx[ai];
-										const WarpedChromaRef& wr = refs[static_cast<size_t>(k)];
-										if (wr.validPx[pIdx] == 0u || wr.motionGate.gateMH[pCell] <= 0.0)
+										const double lx = in.siting.CodedToLumaX(static_cast<double>(x), cSubX);
+										const int pcx = (std::max)(0, (std::min)(res.cellsW - 1, static_cast<int>(std::floor(lx)) / cellPx));
+										const size_t pCell = static_cast<size_t>(pcy) * res.cellsW + pcx;
+										if (isFaceMaskedCell(pCell) || isFocusVetoedBand(pCell, 2))
+											continue;
+										const size_t pIdx = static_cast<size_t>(y) * cW + x;
+
+										const double hCur = curBands.H.at(x, y);
+										if (pcy == cy && pcx == cx)
 										{
-											allValidH = false;
-											break;
+											ownCellH2 += hCur * hCur;
+											++ownCellCnt;
 										}
-										const ThreeBandPlanes& rBands = isCb ? wr.bandsCb : wr.bandsCr;
-										hRefs[ai] = rBands.H.at(x, y);
-									}
-									if (allValidH)
-									{
-										sumCurH2 += hCur * hCur;
+
+										bool allValidH = true;
+										double hRefs[kMaxBlendRefs] = {};
 										for (int ai = 0; ai < activeK; ++ai)
 										{
-											sumRefH2[ai] += hRefs[ai] * hRefs[ai];
-											sumCrossH[ai] += hCur * hRefs[ai];
+											const int k = activeIdx[ai];
+											const WarpedChromaRef& wr = refs[static_cast<size_t>(k)];
+											if (wr.validPx[pIdx] == 0u || wr.motionGate.gateMH[pCell] <= 0.0)
+											{
+												allValidH = false;
+												break;
+											}
+											const ThreeBandPlanes& rBands = isCb ? wr.bandsCb : wr.bandsCr;
+											hRefs[ai] = rBands.H.at(x, y);
 										}
-										++hCnt;
+										if (allValidH)
+										{
+											sumCurH2 += hCur * hCur;
+											for (int ai = 0; ai < activeK; ++ai)
+											{
+												sumRefH2[ai] += hRefs[ai] * hRefs[ai];
+												sumCrossH[ai] += hCur * hRefs[ai];
+											}
+											++hCnt;
+										}
 									}
 								}
-							}
 
-							double cellInnov = 0.0;
-							if (hCnt > 0 && gains.fine > kEngineNumFloor)
-							{
-								const double invH = 1.0 / static_cast<double>(hCnt);
-								const double meanCur = sumCurH2 * invH;
-								// Exact 1-LSB uniform quantization variance transferred through the fine band (Rule 1).
-								const double refQuantFloor = ((kDefaultStepPriorLsb * kDefaultStepPriorLsb) / 12.0) * gains.fine;
-								double sumProjIr = 0.0;
-								size_t validRefCnt = 0;
-								for (int ai = 0; ai < activeK; ++ai)
+								double cellInnov = 0.0;
+								if (hCnt > 0 && gains.fine > kEngineNumFloor)
 								{
-									const int k = activeIdx[ai];
-									const double meanRef = sumRefH2[ai] * invH;
-									const double cross = sumCrossH[ai] * invH;
-									const double vxC = (cIdx < refs[static_cast<size_t>(k)].motionVx.size())
-										? (refs[static_cast<size_t>(k)].motionVx[cIdx] / static_cast<double>(cSubX))
-										: 0.0;
-									const double vyC = (cIdx < refs[static_cast<size_t>(k)].motionVy.size())
-										? (refs[static_cast<size_t>(k)].motionVy[cIdx] / static_cast<double>(cSubY))
-										: 0.0;
-									const double warpBeta = HighPassBicubicWarpVarianceGain(vxC, vyC, g1, g1);
-									if (meanRef > refQuantFloor)
-									{
-										sumProjIr += ComputeProjectionIr(meanCur, cross, meanRef, standIns, warpBeta);
-										++validRefCnt;
-									}
-								}
-								cellInnov = (validRefCnt > 0) ? ((sumProjIr / static_cast<double>(validRefCnt)) / gains.fine) : 0.0;
-								cellGrainVar = cellInnov;
-							}
-							if (ownCellCnt > 0)
-							{
-								blindCellEnergies.push_back(ownCellH2 / static_cast<double>(ownCellCnt));
-								blindCellIrs.push_back(cellInnov);
-							}
-						}
-						cellRetainedGrain[cIdx] = cellGrainVar;
-
-						// Compute pooled own-grain variance over the exact same [px0, px1) x [py0, py1) window as C
-						// when splitActive == true (eliminates 8x8 coded 4:2:0 cell variance inflation in alphaLeak).
-						double cellOwnGrainVar = 0.0;
-						if (splitActive)
-						{
-							double ogSumSq = 0.0;
-							size_t ogCnt = 0;
-							for (int y = py0; y < py1; ++y)
-							{
-								for (int x = px0; x < px1; ++x)
-								{
-									const double og = ownGrain.at(x, y);
-									ogSumSq += og * og;
-									++ogCnt;
-								}
-							}
-							if (ogCnt > 0)
-								cellOwnGrainVar = ogSumSq / static_cast<double>(ogCnt);
-						}
-
-						for (int b = 0; b < 3; ++b)
-						{
-							const TdV2Plane& curB = bandPlaneOf(curBands, b);
-							MomentAccumulatorFp32 acc(activeK);
-							double ownSumSq[kMaxBlendRefs] = {};
-							size_t ownSampleCount = 0;
-
-							for (int y = py0; y < py1; ++y)
-							{
-								const double ly = in.siting.CodedToLumaY(static_cast<double>(y), cSubY);
-								const int pcy = (std::max)(0, (std::min)(res.cellsH - 1, static_cast<int>(std::floor(ly)) / cellPx));
-								for (int x = px0; x < px1; ++x)
-								{
-									const double lx = in.siting.CodedToLumaX(static_cast<double>(x), cSubX);
-									const int pcx = (std::max)(0, (std::min)(res.cellsW - 1, static_cast<int>(std::floor(lx)) / cellPx));
-									const size_t pCell = static_cast<size_t>(pcy) * res.cellsW + pcx;
-									if (isFaceMaskedCell(pCell) || isFocusVetoedBand(pCell, b))
-										continue;
-									const size_t pIdx = static_cast<size_t>(y) * cW + x;
-
-									bool allValid = true;
-									float diffs[kMaxBlendRefs] = {};
-									const double curV = curB.at(x, y);
+									const double invH = 1.0 / static_cast<double>(hCnt);
+									const double meanCur = sumCurH2 * invH;
+									const double refQuantFloor = ((kDefaultStepPriorLsb * kDefaultStepPriorLsb) / 12.0) * gains.fine;
+									double sumProjIr = 0.0;
+									size_t validRefCnt = 0;
 									for (int ai = 0; ai < activeK; ++ai)
 									{
 										const int k = activeIdx[ai];
-										const WarpedChromaRef& wr = refs[static_cast<size_t>(k)];
-										const double pGate = (b == 0) ? wr.motionGate.gateL[pCell] : wr.motionGate.gateMH[pCell];
-										if (wr.validPx[pIdx] == 0u || pGate <= 0.0)
+										const double meanRef = sumRefH2[ai] * invH;
+										const double cross = sumCrossH[ai] * invH;
+										const double vxC = (cIdx < refs[static_cast<size_t>(k)].motionVx.size())
+											? (refs[static_cast<size_t>(k)].motionVx[cIdx] / static_cast<double>(cSubX)) : 0.0;
+										const double vyC = (cIdx < refs[static_cast<size_t>(k)].motionVy.size())
+											? (refs[static_cast<size_t>(k)].motionVy[cIdx] / static_cast<double>(cSubY)) : 0.0;
+										const double warpBeta = HighPassBicubicWarpVarianceGain(vxC, vyC, g1, g1);
+										if (meanRef > refQuantFloor)
 										{
-											allValid = false;
-											break;
+											sumProjIr += ComputeProjectionIr(meanCur, cross, meanRef, standIns, warpBeta);
+											++validRefCnt;
 										}
-										const ThreeBandPlanes& rBands = isCb ? wr.bandsCb : wr.bandsCr;
-										diffs[ai] = static_cast<float>(curV - bandPlaneOf(rBands, b).at(x, y));
 									}
-									if (allValid)
+									cellInnov = (validRefCnt > 0) ? ((sumProjIr / static_cast<double>(validRefCnt)) / gains.fine) : 0.0;
+									cellGrainVar = cellInnov;
+								}
+								if (ownCellCnt > 0)
+								{
+									blindCellEnergies.push_back(ownCellH2 / static_cast<double>(ownCellCnt));
+									blindCellIrs.push_back(cellInnov);
+								}
+							}
+							cellRetainedGrain[cIdx] = cellGrainVar;
+
+							if (splitActive)
+							{
+								double ogSumSq = 0.0;
+								size_t ogCnt = 0;
+								for (int y = hpy0; y < hpy1; ++y)
+									for (int x = hpx0; x < hpx1; ++x)
 									{
-										acc.AddSample(diffs);
-										if (pCell == cIdx)
+										const double og = ownGrain.at(x, y);
+										ogSumSq += og * og;
+										++ogCnt;
+									}
+								if (ogCnt > 0)
+									cellOwnGrainVarArr[cIdx] = ogSumSq / static_cast<double>(ogCnt);
+							}
+
+							for (int b = 0; b < 3; ++b)
+							{
+								// CHR-HIGH-1: Band-dependent spatial pooling matching GPU chroma & luma (5x5 L, 3x3 M, 3x3/1x1 H)!
+								const int bandPoolR = cfg_.PoolRadiusForBand(b);
+								const int py0 = (std::max)(codedActive.y0, ((cy - bandPoolR) * cellPx) / cSubY);
+								const int py1 = (std::min)(codedActive.y1, ((cy + bandPoolR + 1) * cellPx + cSubY - 1) / cSubY);
+								const int px0 = (std::max)(codedActive.x0, ((cx - bandPoolR) * cellPx) / cSubX);
+								const int px1 = (std::min)(codedActive.x1, ((cx + bandPoolR + 1) * cellPx + cSubX - 1) / cSubX);
+
+								const TdV2Plane& curB = bandPlaneOf(curBands, b);
+								MomentAccumulatorFp32 acc(activeK);
+								double ownSumSq[kMaxBlendRefs] = {};
+								size_t ownSampleCount = 0;
+
+								for (int y = py0; y < py1; ++y)
+								{
+									const double ly = in.siting.CodedToLumaY(static_cast<double>(y), cSubY);
+									const int pcy = (std::max)(0, (std::min)(res.cellsH - 1, static_cast<int>(std::floor(ly)) / cellPx));
+									for (int x = px0; x < px1; ++x)
+									{
+										const double lx = in.siting.CodedToLumaX(static_cast<double>(x), cSubX);
+										const int pcx = (std::max)(0, (std::min)(res.cellsW - 1, static_cast<int>(std::floor(lx)) / cellPx));
+										const size_t pCell = static_cast<size_t>(pcy) * res.cellsW + pcx;
+										if (isFaceMaskedCell(pCell) || isFocusVetoedBand(pCell, b))
+											continue;
+										const size_t pIdx = static_cast<size_t>(y) * cW + x;
+
+										bool allValid = true;
+										float diffs[kMaxBlendRefs] = {};
+										const double curV = curB.at(x, y);
+										for (int ai = 0; ai < activeK; ++ai)
 										{
-											++ownSampleCount;
-											for (int ai = 0; ai < activeK; ++ai)
-												ownSumSq[ai] += static_cast<double>(diffs[ai]) * static_cast<double>(diffs[ai]);
+											const int k = activeIdx[ai];
+											const WarpedChromaRef& wr = refs[static_cast<size_t>(k)];
+											const double pGate = (b == 0) ? wr.motionGate.gateL[pCell] : wr.motionGate.gateMH[pCell];
+											if (wr.validPx[pIdx] == 0u || pGate <= 0.0)
+											{
+												allValid = false;
+												break;
+											}
+											const ThreeBandPlanes& rBands = isCb ? wr.bandsCb : wr.bandsCr;
+											diffs[ai] = static_cast<float>(curV - bandPlaneOf(rBands, b).at(x, y));
+										}
+										if (allValid)
+										{
+											acc.AddSample(diffs);
+											if (pCell == cIdx)
+											{
+												++ownSampleCount;
+												for (int ai = 0; ai < activeK; ++ai)
+													ownSumSq[ai] += static_cast<double>(diffs[ai]) * static_cast<double>(diffs[ai]);
+											}
 										}
 									}
 								}
-							}
 
-							if (acc.sampleCount == 0)
-								continue;
+								if (acc.sampleCount == 0)
+									continue;
 
-							double C[kMaxBlendRefs][kMaxBlendRefs] = {};
-							acc.SecondMoment(C);
-							// Store unpooled own-cell second moment capped by pooled C[ai][ai] (1:1 parity with TdV2ReferenceEngine.h).
-							for (int ai = 0; ai < activeK; ++ai)
-							{
-								const double ownDiag = (ownSampleCount > 0)
-									? (ownSumSq[ai] / static_cast<double>(ownSampleCount))
-									: C[ai][ai];
-								cellDiagC[b][activeIdx[ai]][cIdx] = (std::min)(ownDiag, C[ai][ai]);
-							}
+								ChromaCellBandMom& cm = cellMom[b][cIdx];
+								cm.sampleCount = acc.sampleCount;
+								cm.activeK = activeK;
+								for (int ai = 0; ai < activeK; ++ai)
+									cm.activeIdx[ai] = activeIdx[ai];
+								acc.SecondMoment(cm.C);
 
-							double cVec[kMaxBlendRefs] = {};
-							for (int ai = 0; ai < activeK; ++ai)
-							{
-								const int k = activeIdx[ai];
-								// A2 rounding-cell prior using exact bandTransfer[b] = ||H_b||_2^2,
-								// capped to [0, C[ai][ai]] per Plan L81 (c_k <= C_kk).
-								const double cA2 = (std::min)(EstimateC_A2(a2Stats, refs[static_cast<size_t>(k)].isExactCopy) * bandTransfer[b], C[ai][ai]);
-								double cA1 = cA2;
-
-								// Find an independent A1 instrument partner (LOW-7): NEVER allow two anchor-derived
-								// refs (e.g., anchorCanvas & carriedCfl) to instrument each other!
-								int partner = -1;
-								const bool selfAnchor = refs[static_cast<size_t>(k)].isAnchorDerived;
-								for (int cand = activeK - 1; cand >= 0; --cand)
+								for (int ai = 0; ai < activeK; ++ai)
 								{
-									if (cand == ai) continue;
-									const bool candAnchor = refs[static_cast<size_t>(activeIdx[cand])].isAnchorDerived;
-									if (!candAnchor)
-									{
-										partner = cand;
-										break;
-									}
-									if (!selfAnchor && candAnchor)
-										partner = cand;
+									const double ownDiag = (ownSampleCount > 0)
+										? (ownSumSq[ai] / static_cast<double>(ownSampleCount))
+										: cm.C[ai][ai];
+									cellDiagC[b][activeIdx[ai]][cIdx] = (std::min)(ownDiag, cm.C[ai][ai]);
 								}
 
 								const double psdScale = in.psdShape.ForBand(b);
+								const double nEff = EffectiveSamplesForBand(b, static_cast<double>(cm.sampleCount));
+								bool contributed = false;
+								for (int ai = 0; ai < activeK; ++ai)
+								{
+									const int k = activeIdx[ai];
+									int partner = -1;
+									const bool selfAnchor = refs[static_cast<size_t>(k)].isAnchorDerived;
+									for (int cand = activeK - 1; cand >= 0; --cand)
+									{
+										if (cand == ai) continue;
+										const bool candAnchor = refs[static_cast<size_t>(activeIdx[cand])].isAnchorDerived;
+										if (!candAnchor) { partner = cand; break; }
+										if (!selfAnchor && candAnchor) partner = cand;
+									}
+									cm.partner[ai] = partner;
+									if (partner >= 0)
+									{
+										const double gTerm = (std::max)(0.0, cellGrainVar) * bandTransfer[b] * (std::max)(0.0, psdScale);
+										const double rawIv = cm.C[ai][partner] - gTerm;
+										cm.cIvRaw[ai] = std::isfinite(rawIv) ? rawIv : 0.0;
+										cm.cIvUpperCap[ai] = (std::max)(0.0, (std::min)(cm.C[ai][ai], cm.C[partner][partner]));
+										cm.cIvSeSq[ai] = SamplingVarianceOfCrossMoment(cm.C[ai][ai], cm.C[partner][partner], cm.C[ai][partner], nEff);
+										cm.cIvClipped[ai] = EstimateC_A1(cm.C[ai][partner], cm.C[ai][ai], cm.C[partner][partner],
+										                                 cellGrainVar, bandTransfer[b], 1.0, psdScale);
+										if (!contributed && !refs[static_cast<size_t>(k)].isExactCopy && !isFocusVetoedBand(cIdx, b))
+										{
+											const double mGate = (b == 0) ? refs[static_cast<size_t>(k)].motionGate.gateL[cIdx]
+											                              : refs[static_cast<size_t>(k)].motionGate.gateMH[cIdx];
+											if (mGate > 0.0 && std::isfinite(cm.cIvClipped[ai]))
+											{
+												a2eSamples[b][cellActivityClass[cIdx]].push_back(cm.cIvClipped[ai]);
+												contributed = true;
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+
+					// ---- Frame-Level Chroma A2e Empirical Prior & EB Cross-Cell Spread tau^2 (CHR-HIGH-1 / CHR-HIGH-2) ----
+					EmpiricalOwnErrorPrior rawA2e;
+					bool anyA2e = false;
+					for (int b = 0; b < 3; ++b)
+					{
+						for (int ac = 0; ac < kA2eActivityClasses; ++ac)
+						{
+							if (!a2eSamples[b][ac].empty())
+							{
+								rawA2e.U[b][ac] = (std::max)(0.0, RobustStats::Median(a2eSamples[b][ac], RobustStats::MedianRule::MeanOfMiddle));
+								rawA2e.cellCount[b][ac] = static_cast<uint32_t>(a2eSamples[b][ac].size());
+								anyA2e = true;
+							}
+						}
+						if (rawA2e.cellCount[b][0] == 0 && rawA2e.cellCount[b][1] > 0) rawA2e.U[b][0] = rawA2e.U[b][1];
+						else if (rawA2e.cellCount[b][1] == 0 && rawA2e.cellCount[b][0] > 0) rawA2e.U[b][1] = rawA2e.U[b][0];
+					}
+					rawA2e.valid = anyA2e;
+					const EmpiricalOwnErrorPrior effA2e = a2eHist.ApplyCapAndRecord(
+						rawA2e, in.frameRole, cfg_.sourceHz, (effFadeKeep < 1.0), false);
+
+					double ebTauSq[3][kA2eActivityClasses] = {};
+					if (cfg_.enableEmpiricalBayesShrinkage && effA2e.valid)
+					{
+						for (int b = 0; b < 3; ++b)
+						{
+							double meanR[kA2eActivityClasses] = {}, m2R[kA2eActivityClasses] = {}, sumSe[kA2eActivityClasses] = {};
+							size_t cnt[kA2eActivityClasses] = {};
+							for (size_t ci = 0; ci < numCells; ++ci)
+							{
+								if (isFaceMaskedCell(ci) || isFocusVetoedBand(ci, b)) continue;
+								const ChromaCellBandMom& cm = cellMom[b][ci];
+								if (cm.sampleCount == 0) continue;
+								const int ac = static_cast<int>(cellActivityClass[ci]);
+								for (int ai = 0; ai < cm.activeK; ++ai)
+								{
+									const int k = cm.activeIdx[ai];
+									if (cm.partner[ai] < 0 || refs[static_cast<size_t>(k)].isExactCopy) continue;
+									const double mGate = (b == 0) ? refs[static_cast<size_t>(k)].motionGate.gateL[ci]
+									                              : refs[static_cast<size_t>(k)].motionGate.gateMH[ci];
+									if (!(mGate > 0.0) || !std::isfinite(cm.cIvRaw[ai]) || !std::isfinite(cm.cIvSeSq[ai])) continue;
+									++cnt[ac];
+									const double d = cm.cIvRaw[ai] - meanR[ac];
+									meanR[ac] += d / static_cast<double>(cnt[ac]);
+									m2R[ac] += d * (cm.cIvRaw[ai] - meanR[ac]);
+									sumSe[ac] += cm.cIvSeSq[ai];
+									break;
+								}
+							}
+							for (int ac = 0; ac < kA2eActivityClasses; ++ac)
+							{
+								if (cnt[ac] >= 2)
+								{
+									const double vR = m2R[ac] / static_cast<double>(cnt[ac] - 1);
+									const double mSe = sumSe[ac] / static_cast<double>(cnt[ac]);
+									ebTauSq[b][ac] = (std::max)(0.0, vR - mSe);
+								}
+							}
+							if (cnt[0] < 2 && cnt[1] >= 2) ebTauSq[b][0] = ebTauSq[b][1];
+							else if (cnt[1] < 2 && cnt[0] >= 2) ebTauSq[b][1] = ebTauSq[b][0];
+						}
+					}
+
+					// ---- Stage 2B: Per-cell EB-shrunk c selection, Active-Set QP solve, & Layer 2/3 grain budget ----
+					for (size_t cIdx = 0; cIdx < numCells; ++cIdx)
+					{
+						if (isFaceMaskedCell(cIdx))
+							continue;
+						const double cellGrainVar = cellRetainedGrain[cIdx];
+						const double cellOwnGrainVar = cellOwnGrainVarArr[cIdx];
+						const double cellStepScaleVal = cellStepScales[cIdx];
+						const double cellStepScaleSq = cellStepScaleVal * cellStepScaleVal;
+						const int actClass = static_cast<int>(cellActivityClass[cIdx]);
+
+						for (int b = 0; b < 3; ++b)
+						{
+							const ChromaCellBandMom& cm = cellMom[b][cIdx];
+							if (cm.sampleCount == 0 || cm.activeK == 0)
+								continue;
+
+							const bool useA2ePrior = cfg_.enableA2eEmpiricalPrior && !in.transformIdentified8x8 &&
+							                         !in.hasStepPrior && effA2e.valid;
+							const double psdScale = in.psdShape.ForBand(b);
+							double cVec[kMaxBlendRefs] = {};
+							for (int ai = 0; ai < cm.activeK; ++ai)
+							{
+								const int k = cm.activeIdx[ai];
+								const int partner = cm.partner[ai];
+								double rawA2 = 0.0;
+								if (useA2ePrior)
+								{
+									if (!refs[static_cast<size_t>(k)].isExactCopy)
+									{
+										const double priorU = effA2e.ForBandClass(b, actClass);
+										const double upperEnv = (partner >= 0)
+											? (priorU + std::sqrt(kHuberKneeSq * (std::max)(0.0, ebTauSq[b][actClass])))
+											: priorU;
+										rawA2 = upperEnv * cellStepScaleSq;
+									}
+								}
+								else
+								{
+									rawA2 = EstimateC_A2(a2Stats, refs[static_cast<size_t>(k)].isExactCopy) * cellStepScaleSq * bandTransfer[b];
+								}
+								const double cA2 = (std::min)(rawA2, cm.C[ai][ai]);
+								double cA1 = cA2;
 								if (partner >= 0)
 								{
-									cA1 = EstimateC_A1(C[ai][partner], C[ai][ai], C[partner][partner],
-									                   cellGrainVar, bandTransfer[b], 1.0, psdScale);
+									if (cfg_.enableEmpiricalBayesShrinkage && !refs[static_cast<size_t>(k)].isExactCopy && effA2e.valid)
+									{
+										const double priorU = effA2e.ForBandClass(b, actClass);
+										cA1 = EmpiricalBayesShrinkC(
+											cm.cIvRaw[ai], cm.cIvSeSq[ai], priorU, ebTauSq[b][actClass], cm.cIvUpperCap[ai]);
+									}
+									else
+									{
+										cA1 = cm.cIvClipped[ai];
+									}
 								}
 								else if (cfg_.estimator != VarianceEstimator::A2_RoundingCells)
 								{
 									singleRefA2CellFlag[cIdx] = 1u;
 									if (standIns != nullptr)
 										standIns->Engage(StandInKind::SingleRefA1ToA2Fallback);
-									if (activeK >= 2)
+									if (cm.activeK >= 2)
 									{
-										// Cap cA1 from above by non-copy cross-moments so C^-1 c never inverts weights.
-										for (int j = 0; j < activeK; ++j)
+										for (int j = 0; j < cm.activeK; ++j)
 										{
-											if (j == ai || refs[static_cast<size_t>(activeIdx[j])].isExactCopy)
+											if (j == ai || refs[static_cast<size_t>(cm.activeIdx[j])].isExactCopy)
 												continue;
-											const double cap = EstimateC_A1(C[ai][j], C[ai][ai], C[j][j],
+											const double cap = EstimateC_A1(cm.C[ai][j], cm.C[ai][ai], cm.C[j][j],
 											                                cellGrainVar, bandTransfer[b], 1.0, psdScale);
 											if (cap < cA1)
 												cA1 = cap;
 										}
 									}
-									// When unsplit grain is present in a single-ref cell, cap c by excess difference
-									// variance above independent two-frame grain variance 2 * cellGrainVar * bandTransfer[b] * psdScale.
 									if (!splitActive && cellGrainVar > kEngineNumFloor)
 									{
-										const double excess = C[ai][ai] - 2.0 * cellGrainVar * bandTransfer[b] * psdScale;
+										const double excess = cm.C[ai][ai] - 2.0 * cellGrainVar * bandTransfer[b] * psdScale;
 										cA1 = (std::min)(cA1, excess > 0.0 ? excess : 0.0);
 									}
 								}
@@ -3607,24 +3986,39 @@ namespace TdV2
 									cVec[ai] = 0.0;
 							}
 
-							const BlendSolveResult solved = SolveConvexWeights(C, cVec, activeK, kDefaultTraceRegScale, standIns, cfg_.solverMode);
+							// TD-U3 + CHR-HIGH-2: Per-block own-error variance U_j(block) for honest statistical limit.
+							double blockOwnU = a2Stats.totalVar * cellStepScaleSq * bandTransfer[b];
+							if (cfg_.enableA2eEmpiricalPrior && !in.transformIdentified8x8 && effA2e.valid)
+							{
+								double sumC = 0.0;
+								int nC = 0;
+								for (int ai = 0; ai < cm.activeK; ++ai)
+								{
+									if (!refs[static_cast<size_t>(cm.activeIdx[ai])].isExactCopy)
+									{
+										sumC += (cVec[ai] > 0.0 ? cVec[ai] : 0.0);
+										++nC;
+									}
+								}
+								blockOwnU = (nC > 0) ? (sumC / static_cast<double>(nC)) : 0.0;
+							}
+							cellOwnErrU[b][cIdx] = blockOwnU;
+
+							const BlendSolveResult solved = SolveConvexWeights(cm.C, cVec, cm.activeK, kDefaultTraceRegScale, standIns, cfg_.solverMode);
 							if (solved.nonFiniteClosed) { nonFiniteCellFlag[cIdx] = 1u; continue; }
 							if (solved.singular) { singularCellFlag[cIdx] = 1u; continue; }
 
 							const double focusGate = isFocusVetoedBand(cIdx, b) ? 0.0 : 1.0;
-							for (int ai = 0; ai < activeK; ++ai)
+							for (int ai = 0; ai < cm.activeK; ++ai)
 							{
-								const int k = activeIdx[ai];
+								const int k = cm.activeIdx[ai];
 								const WarpedChromaRef& wr = refs[static_cast<size_t>(k)];
 								const double mGate = (b == 0) ? wr.motionGate.gateL[cIdx] : wr.motionGate.gateMH[cIdx];
 								cellW[b][k][cIdx] = solved.weights[ai] * mGate * focusGate;
 							}
 						}
 
-						// Layer 2/3 coarse-to-fine leaked-grain transfer budget (1:1 parity with TdV2ReferenceEngine.h;
-						// refs/111 s7.3 & TdGuardPort::kMinVarianceRetention = 0.98^2):
-						// Protects minor leaked grain in split chroma (e.g. 15% leak with retainedGrainVar supplied)
-						// and raw unsplit grain (!splitActive) while allowing full L/M compression repair.
+						// Layer 2/3 coarse-to-fine leaked-grain transfer budget (1:1 parity with TdV2ReferenceEngine.h):
 						const bool minorSplitLeak = splitActive && (cellOwnGrainVar > cellGrainVar);
 						const bool rawUnsplitGrain = !splitActive;
 						if (cfg_.estimator != VarianceEstimator::A2_RoundingCells &&
@@ -3641,9 +4035,6 @@ namespace TdV2
 							if (alphaLeak > kEngineNumFloor)
 							{
 								const double bandOrigin[3] = { gains.originLow, gains.originMid, gains.originFine };
-								// Rule-1 quadrature split (1:1 parity with TdV2ReferenceEngine.h & TdV2Shaders.h):
-								// allocate tau / sqrt(2) = (1 - sqrt(kMinVarianceRetention)) / sqrt(2) to deterministic
-								// attenuation so deterministic + finite-sample variance stay strictly inside the 2% bar.
 								double remGrainBudget = (1.0 - std::sqrt(TdGuardPort::kMinVarianceRetention)) / std::sqrt(2.0);
 								for (int b = 0; b < 3; ++b)
 								{
@@ -3806,16 +4197,23 @@ namespace TdV2
 							}
 							if (!inFull8x8Block)
 							{
-								// TD-U3 (H-1 / Owner D3): Exact bandTransfer[b] = ||H_b||_2^2 + adjustable kappa.
-								const double bandVar = a2Stats.valid ? (a2Stats.totalVar * bandTransfer[b]) : 0.0;
+								// TD-U3 + CHR-HIGH-2: Per-block own-error variance U_j(block) (A2e or scaled A2) + adjustable kappa.
+								const double bandVar = cellOwnErrU[b][cIdx];
 								sumBandVar += bandVar;
 								if (std::fabs(bandDelta) > 0.0)
 									bandDelta = ApplyTransformUnknownBound(bandDelta, bandVar, standIns, effKappa);
 							}
+							if (b == 0)
+								outCodedDeltaLow.at(x, y) = (bandDelta == 0.0) ? 0.0 : bandDelta;
 							totalDelta += bandDelta;
 						}
 						if (!inFull8x8Block && cfg_.enableJointCrossBandBound && std::fabs(totalDelta) > 0.0)
+						{
+							const double prevTot = totalDelta;
 							totalDelta = ApplyJointCrossBandBound(totalDelta, sumBandVar, standIns, effKappa);
+							if (std::fabs(prevTot) > kEngineNumFloor && std::fabs(totalDelta) < std::fabs(prevTot))
+								outCodedDeltaLow.at(x, y) *= (totalDelta / prevTot);
+						}
 						outCodedDelta.at(x, y) = (totalDelta == 0.0) ? 0.0 : totalDelta;
 					}
 				}
@@ -3927,6 +4325,8 @@ namespace TdV2
 
 				const int guardPadX = (cSubX > 1) ? (static_cast<int>(std::ceil(std::fabs(static_cast<double>(in.siting.shiftX)) / static_cast<double>(cSubX))) + 1) : 0;
 				const int guardPadY = (cSubY > 1) ? (static_cast<int>(std::ceil(std::fabs(static_cast<double>(in.siting.shiftY)) / static_cast<double>(cSubY))) + 1) : 0;
+				std::vector<double> cellAddBackFrac(numCells, 0.0);
+				bool anyGuardViolated = false;
 				for (int cy = 0; cy < res.cellsH; ++cy)
 				{
 					const int y0 = (std::max)(codedActive.y0, (cy * cellPx) / cSubY - guardPadY);
@@ -3977,16 +4377,11 @@ namespace TdV2
 							continue;
 
 						const double leakedFineE = cellRetainedGrain[cIdx] * gains.fine;
-						// Account for positive correlation between ownGrain and leaked own grain inside cleanCb/Cr:
-						// E[(H(own) + H(leaked))^2] = (sqrt(ownFineE) + sqrt(leakedFineE))^2, capped by inFineE.
 						const double targetStd = std::sqrt(ownGrainFineE * invC) + std::sqrt(leakedFineE > 0.0 ? leakedFineE : 0.0);
 						const double targetFineE = splitActive
 							? (std::min)(inFineE * invC, targetStd * targetStd)
 							: (inFineE * invC);
 
-						// Texture-immune own-grain fine-band covariance check when leaked grain is reported
-						// (1:1 parity with TdV2ReferenceEngine.h): fine scene texture cancels out of
-						// Cov(out_H, ownGrain_H) / Cov(in_H, ownGrain_H).
 						double effOutFineE = outFineE * invC;
 						if (splitActive && ownGrainFineE * invC > kEngineNumFloor && cellRetainedGrain[cIdx] > kEngineNumFloor &&
 						    inCovOwn > kEngineNumFloor)
@@ -4001,33 +4396,51 @@ namespace TdV2
 						if (gDec.violated && gDec.addBackFraction > 0.0)
 						{
 							++res.guardViolationCells;
-							for (int y = y0; y < y1; ++y)
+							cellAddBackFrac[cIdx] = gDec.addBackFraction;
+							anyGuardViolated = true;
+						}
+					}
+				}
+				if (anyGuardViolated)
+				{
+					// Fable L-3 / CHR-MEDIUM-1: Bilinearly interpolate Layer-4 add-back across cell centres when enableSmoothLayer4Guard == true!
+					for (int y = codedActive.y0; y < codedActive.y1; ++y)
+					{
+						const double ly = in.siting.CodedToLumaY(static_cast<double>(y), cSubY);
+						const int cy = (std::max)(0, (std::min)(res.cellsH - 1, static_cast<int>(std::floor(ly)) / cellPx));
+						for (int x = codedActive.x0; x < codedActive.x1; ++x)
+						{
+							const double lx = in.siting.CodedToLumaX(static_cast<double>(x), cSubX);
+							const int cx = (std::max)(0, (std::min)(res.cellsW - 1, static_cast<int>(std::floor(lx)) / cellPx));
+							const size_t cIdx = static_cast<size_t>(cy) * res.cellsW + cx;
+							if (isFaceMaskedCell(cIdx) || isFocusChangeCell(cIdx) ||
+							    (isDefocusedCell(cIdx) && cfg_.bokehMode != BokehMode::LowBandCellOnly))
+								continue;
+							const double frac = cfg_.enableSmoothLayer4Guard
+								? SpatialBilinearWeight(cellAddBackFrac.data(), res.cellsW, res.cellsH, lx, ly, cellPx)
+								: cellAddBackFrac[cIdx];
+							if (frac > 0.0)
 							{
-								const double ly = in.siting.CodedToLumaY(static_cast<double>(y), cSubY);
-								if ((std::max)(0, (std::min)(res.cellsH - 1, static_cast<int>(std::floor(ly)) / cellPx)) != cy)
-									continue;
-								for (int x = x0; x < x1; ++x)
-								{
-									const double lx = in.siting.CodedToLumaX(static_cast<double>(x), cSubX);
-									if ((std::max)(0, (std::min)(res.cellsW - 1, static_cast<int>(std::floor(lx)) / cellPx)) != cx)
-										continue;
-									const double addBack = gDec.addBackFraction * (inFullBands.H.at(x, y) - outFullBands.H.at(x, y));
-									outCodedDelta.at(x, y) += addBack;
-								}
+								const double addBack = frac * (inFullBands.H.at(x, y) - outFullBands.H.at(x, y));
+								outCodedDelta.at(x, y) += addBack;
 							}
 						}
 					}
 				}
 			};
 
+			TdV2Plane codedDeltaLowCb(cW, cH, 0.0);
+			TdV2Plane codedDeltaLowCr(cW, cH, 0.0);
 			fuseCodedPlane(true, codedRecCb, codedCleanCb, ownGrainCb, curBandsCb,
-			               in.retainedGrainVarCb, cflRejectCb, res.codedDeltaCb);
+			               in.retainedGrainVarCb, cflRejectCb, a2eHistoryCb_, res.codedDeltaCb, codedDeltaLowCb);
 			fuseCodedPlane(false, codedRecCr, codedCleanCr, ownGrainCr, curBandsCr,
-			               in.retainedGrainVarCr, cflRejectCr, res.codedDeltaCr);
+			               in.retainedGrainVarCr, cflRejectCr, a2eHistoryCr_, res.codedDeltaCr, codedDeltaLowCr);
 			if (effFadeKeep < 1.0)
 			{
 				for (double& v : res.codedDeltaCb.v) v *= effFadeKeep;
 				for (double& v : res.codedDeltaCr.v) v *= effFadeKeep;
+				for (double& v : codedDeltaLowCb.v) v *= effFadeKeep;
+				for (double& v : codedDeltaLowCr.v) v *= effFadeKeep;
 			}
 
 			// B7: Upsample ONLY the signed coded delta back to the delivered chroma grid.
@@ -4036,9 +4449,26 @@ namespace TdV2
 			res.deliveredDeltaCr = UpsampleDeltaToDelivered(
 				res.codedDeltaCr, lumaW, lumaH, in.codedSubsampling, in.deliveredFormat, in.siting, lumaActive, standIns);
 
-			// Keep delivered delta strictly 0.0 at every Pass-1 face-masked or rack-focus-vetoed pixel
-			// (even when coded->delivered upsampling straddles a mask edge).
-			if (res.faceMaskedCells > 0 || res.focusVetoCells > 0)
+			// CHR-MEDIUM-2: Under BokehMode::LowBandCellOnly, upsample L-only delta for defocused pixels so adjacent
+			// sharp cells' 4-tap Catmull-Rom M/H coded deltas NEVER bleed 1-2 px into bokeh cells!
+			bool anyDefocusedCells = false;
+			if (cfg_.bokehMode == BokehMode::LowBandCellOnly && in.explicitDefocusedCells != nullptr)
+			{
+				for (size_t ci = 0; ci < numCells && ci < in.explicitDefocusedCells->size(); ++ci)
+					if ((*in.explicitDefocusedCells)[ci] != 0u) { anyDefocusedCells = true; break; }
+			}
+			TdV2Plane delivDeltaLowCb, delivDeltaLowCr;
+			if (anyDefocusedCells)
+			{
+				delivDeltaLowCb = UpsampleDeltaToDelivered(
+					codedDeltaLowCb, lumaW, lumaH, in.codedSubsampling, in.deliveredFormat, in.siting, lumaActive, standIns);
+				delivDeltaLowCr = UpsampleDeltaToDelivered(
+					codedDeltaLowCr, lumaW, lumaH, in.codedSubsampling, in.deliveredFormat, in.siting, lumaActive, standIns);
+			}
+
+			// Keep delivered delta strictly 0.0 at every Pass-1 face-masked or rack-focus-vetoed pixel,
+			// and strictly L-only at every BokehMode::LowBandCellOnly defocused pixel (zero adjacent sharp M/H bleed!).
+			if (res.faceMaskedCells > 0 || res.focusVetoCells > 0 || anyDefocusedCells)
 			{
 				for (int y = delivActive.y0; y < delivActive.y1; ++y)
 				{
@@ -4054,6 +4484,11 @@ namespace TdV2
 						{
 							res.deliveredDeltaCb.at(x, y) = 0.0;
 							res.deliveredDeltaCr.at(x, y) = 0.0;
+						}
+						else if (anyDefocusedCells && isDefocusedCell(dCellIdx))
+						{
+							res.deliveredDeltaCb.at(x, y) = delivDeltaLowCb.at(x, y);
+							res.deliveredDeltaCr.at(x, y) = delivDeltaLowCr.at(x, y);
 						}
 					}
 				}
@@ -4139,5 +4574,8 @@ namespace TdV2
 
 		Config cfg_;
 		TdV2ChromaAnchorCanvas anchorCanvas_;
+		A2ePriorHistory a2eHistoryCb_;
+		A2ePriorHistory a2eHistoryCr_;
+		double elapsedSec_ = 0.0;
 	};
 }
