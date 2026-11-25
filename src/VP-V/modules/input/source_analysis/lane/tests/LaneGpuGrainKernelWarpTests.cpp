@@ -274,8 +274,8 @@ namespace VideoProcessorTest
 		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(PassTextFingerprintIsPinned)
 		{
-			// WAIVER-P10V3-01: 0x41cef8707edf809d (v2) -> 0x8949becef0aab5c9 (v3). WAIVER-P10V4-01 (refs/116b): -> 0x7fe213d86466cc12 (unit 4: LEVEL pass, NLF cap, depth scale). WAIVER-P10V5-01 (refs/127 A1): -> 0xf33e0215cda77a66 (unit 5: STATS per 16x16 chunk + REDUCE). WAIVER-W23-P2M9 (GS-155 + POD2-M9 LEVEL_BODY NaN/+Inf guard): -> 0x25867c1fa10f515b.
-			constexpr uint64_t kPinned = 0x25867c1fa10f515bull;
+			// WAIVER-P10V3-01: 0x41cef8707edf809d (v2) -> 0x8949becef0aab5c9 (v3). WAIVER-P10V4-01 (refs/116b): -> 0x7fe213d86466cc12 (unit 4: LEVEL pass, NLF cap, depth scale). WAIVER-P10V5-01 (refs/127 A1): -> 0xf33e0215cda77a66 (unit 5: STATS per 16x16 chunk + REDUCE). WAIVER-W23-P2M9 (GS-155 + POD2-M9 LEVEL_BODY NaN/+Inf guard): -> 0x25867c1fa10f515b. WAIVER-W23-P2M9-NAN-BITS (commit 19d10c929: STATS integer bounds + REDUCE/LEVEL bit-exact IEEE-754 NaN/Inf propagation immune to FXC fast-math): 0x25867c1fa10f515b -> 0xc36376ebb10388d7.
+			constexpr uint64_t kPinned = 0xc36376ebb10388d7ull;
 			Assert::IsTrue(GrainSplit::Gpu::FullShaderFingerprint() == kPinned, L"Full pass GLSL fingerprint");
 		}
 	};
