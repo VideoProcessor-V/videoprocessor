@@ -1,17 +1,8 @@
 #pragma once
 
-// Owner decision 2026-10-17 (newlldv repurposed): with [general] newlldv on, a
-// BT.2020, 10/12-bit signal that carries no HDR (DRM) InfoFrame is treated as
-// PQ / BT.2020. This covers LLDV and ordinary HDR10 behind a device that drops
-// only the DRM InfoFrame (HDFury Integral 2 with its HDR toggle off: the AVI
-// InfoFrame still reports BT.2020). Static metadata then comes from the active
-// [lldv.*] profile, and VP's peak detection handles the scene levels.
-//
-// Real SDR sent as BT.2020 must survive: a picture-statistics veto returns the
-// signal to SDR, only at a cut, after SDR evidence in two shots, at most once
-// per signal epoch. With no cut for about 20 s after the veto arms, it switches
-// without one.
-//
+// Owner decision 2026-10-17 (newlldv repurposed): BT.2020 10/12-bit without DRM InfoFrame is treated as PQ/BT.2020
+// (static metadata from [lldv.*], scene levels from VP peak detect). Real SDR sent as BT.2020 survives via a
+// picture-statistics veto returning to SDR at a cut after SDR evidence in two shots (or after ~20 s without one).
 // Pure policy (no renderer, capture or UI state) so the CPU tests own it.
 
 #include <AnalysisLumaSource.h>
@@ -32,20 +23,13 @@ enum class HdrInferenceState
 	Waiting,      // qualifying signal, stabilising before PQ is inferred
 	InferredPq,   // PQ / BT.2020 is inferred for this epoch
 	VetoedSdr,    // the SDR veto returned this epoch to SDR (final for the epoch)
-	// Bug hunt 37 S1: a PQ epoch whose capture signal went invalid (an HDMI re-sync, e.g. an
-	// Apple TV match-frame-rate switch). Not PQ while the signal is absent; an eligible signal
-	// back within HdrInferenceOptions::resumeWindowMs resumes PQ at once in a new epoch instead
-	// of stabilising again from SDR. Past the window (or an ineligible return) it ends.
+	// Bug hunt 37 S1: PQ epoch suspended across an HDMI re-sync; resumes immediately within resumeWindowMs.
 	Suspended,
 };
 
 const char* ToString(HdrInferenceState state);
 
-// Explicit owner settings that allow the inference: an hdr_colorspace of
-// Rec.709 contradicts a BT.2020 HDR reading, and so (bug hunt 3 C6) does a
-// container colorspace override to anything but BT.2020 - the owner then says
-// the signal is not a BT.2020 container, which the inference requires.
-// containerOverride: the container override (UNKNOWN = follow the input).
+// Explicit owner settings permitting inference: Rec.709 hdr_colorspace or non-BT.2020 containerOverride forbid it.
 inline bool HdrSettingsPermitInference(bool hdrColorspaceRec709, ColorSpace containerOverride)
 {
 	return !hdrColorspaceRec709 &&
@@ -61,18 +45,12 @@ struct HdrInferenceSignal
 	bool hdrInfoFrame = false;          // the source sent static HDR metadata
 	int bitDepth = 0;                   // source bit depth; 0 = unknown
 	bool dolbyVisionTunnel = false;     // the DV tunnel owns this signal
-	// DV input fixes 2026-10-18: an explicit LLDV indication lets an 8-bit
-	// signal qualify (LLDV dithered to RGB 8-bit is still source-mapped PQ):
-	// the Dolby VSIF says low-latency, or the DV tunnel hand-off probe proved
-	// a BT.2020 signal on a DV input (tunnel switch on) is not a tunnel.
+	// DV input fixes 2026-10-18: explicit LLDV indication (Dolby VSIF or DV tunnel hand-off) lets 8-bit qualify.
 	bool lldvIndicated = false;
 	bool dvTunnelHandedOff = false;
-	// Explicit owner settings that force a non-HDR10 reading. hdr_colorspace
-	// REC709 declares the source's primaries as Rec.709.
+	// Explicit owner settings (e.g. hdr_colorspace REC709) that forbid HDR10 inference.
 	bool explicitSettingsForbid = false;
-	// Identity of the signal contract (mode, rate, encoding). A change starts
-	// a new epoch even while the signal stays eligible.
-	uint64_t signalKey = 0;
+	uint64_t signalKey = 0;             // signal contract identity; change starts a new epoch
 };
 
 struct HdrInferenceEligibility
@@ -204,13 +182,8 @@ private:
 	bool m_resumedAfterGap = false;
 };
 
-// Picture statistics for the veto, from a sparse luma grid in the limited
-// 10-bit code domain (AnalysisLumaSource::Sample emits that domain for every
-// format). A frame is SDR evidence when, over the active (letterbox-cropped)
-// picture, >= 0.2% of samples are at code >= 880 or the 99.9th percentile is
-// >= 870. Real PQ material rarely reaches those codes (as PQ, code 870 is about 4,700 nits
-// and 880 about 5,200; 3000 nits is about code 827);
-// SDR peak white sits at 940.
+// Picture statistics for the veto (sparse limited 10-bit luma grid): SDR evidence when active
+// picture has >= 0.2% samples >= 880 or p99.9 >= 870 (SDR peak white = 940; PQ 3000 nits ~ 827).
 struct HdrVetoThresholds
 {
 	uint16_t highCode = 880;
@@ -248,15 +221,32 @@ HdrVetoFrameStats MeasureHdrVetoGrid(const uint16_t* grid, int columns, int rows
 bool SampleHdrVetoGrid(const AnalysisLumaSource& source, int columns, int rows,
 	std::vector<uint16_t>& grid);
 
-// Shot boundaries between successive analysed pictures (about 20 Hz). Tuned on
-// the D:\hfr clips sampled at 10-20 Hz: within-shot motion stays below a 0.15
-// histogram distance; cuts between different shots exceed it with a large
-// grid difference, or exceed 0.35 alone. Entering or leaving black is a cut.
+using HdrVetoSceneReaderFn = bool (*)(uint64_t sequence, bool& cutOut, const char** whyOut);
+struct HdrVetoCutDiag
+{
+	uint64_t sharedHits = 0, fallbackCount = 0;
+	const char* lastFallbackReason = nullptr;
+	bool usedFallback = false;
+};
+
+// Shot boundaries between successive analysed pictures: consumes shared U7 when sealed for `sequence`,
+// with visible GridHistCut + entering/leaving-black fallback when unkeyed or not yet sealed.
 class HdrVetoCutDetector
 {
 public:
+	using SceneReaderFn = HdrVetoSceneReaderFn;
+	void SetSceneReader(SceneReaderFn reader) { m_sceneReader = reader; }
 	bool Observe(const HdrVetoFrameStats& stats);
-	void Reset() { m_havePrevious = false; }
+	bool Observe(const HdrVetoFrameStats& stats, uint64_t sequence) { m_pendingSequence = sequence; return Observe(stats); }
+	bool Observe(const HdrVetoFrameStats& stats, uint64_t sequence, SceneReaderFn reader, HdrVetoCutDiag* diagOut)
+	{
+		m_sceneReader = reader;
+		m_pendingSequence = sequence;
+		const bool c = Observe(stats);
+		if (diagOut) { diagOut->sharedHits = m_sharedCutHits; diagOut->fallbackCount = m_fallbackCutCount; diagOut->lastFallbackReason = m_lastFallbackWhy; diagOut->usedFallback = m_lastUsedFallback; }
+		return c;
+	}
+	void Reset() { m_havePrevious = false; m_pendingSequence = 0; m_sharedCutHits = 0; m_fallbackCutCount = 0; m_lastFallbackWhy = nullptr; m_lastUsedFallback = false; }
 
 	static constexpr float GRID_DIFFERENCE = VpUnit::CutFadeJudge::kGridDifference;
 	static constexpr float HISTOGRAM_DISTANCE = VpUnit::CutFadeJudge::kHistogramDistance;
@@ -264,11 +254,17 @@ public:
 
 	float LastGridDifference() const { return m_lastGrid; }
 	float LastHistogramDistance() const { return m_lastHistogram; }
+	uint64_t SharedCutHits() const { return m_sharedCutHits; }
+	uint64_t FallbackCutCount() const { return m_fallbackCutCount; }
+	const char* LastFallbackReason() const { return m_lastFallbackWhy; }
+	bool UsedFallbackOnLastObserve() const { return m_lastUsedFallback; }
 
 private:
-	bool m_havePrevious = false;
-	bool m_previousActive = false;
+	bool m_havePrevious = false, m_previousActive = false, m_lastUsedFallback = false;
 	HdrVetoFrameStats m_previous;
 	float m_lastGrid = 0.0f;
 	float m_lastHistogram = 0.0f;
+	SceneReaderFn m_sceneReader = nullptr;
+	uint64_t m_pendingSequence = 0, m_sharedCutHits = 0, m_fallbackCutCount = 0;
+	const char* m_lastFallbackWhy = nullptr;
 };

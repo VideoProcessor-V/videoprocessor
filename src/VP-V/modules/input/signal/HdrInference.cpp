@@ -1,4 +1,5 @@
 #include "pch.h"
+#include <VP-V/modules/control/skeleton/SceneRecordReader.h>
 #include <VP-V/modules/input/signal/HdrInference.h>
 #include <VP-V/modules/input/source_analysis/events/shared/CutFadeJudge.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/SourceStats.h>
@@ -426,29 +427,62 @@ bool SampleHdrVetoGrid(const AnalysisLumaSource& source, int columns, int rows,
 
 bool HdrVetoCutDetector::Observe(const HdrVetoFrameStats& stats)
 {
+	const uint64_t sequence = m_pendingSequence;
+	m_pendingSequence = 0;
 	if (!stats.measured)
 		return false;
 	bool cut = false;
 	m_lastGrid = 0.0f;
 	m_lastHistogram = 0.0f;
+	m_lastUsedFallback = false;
 	if (m_havePrevious)
 	{
-		if (m_previousActive != stats.activePicture)
-			cut = true;   // entering or leaving black
-		else if (stats.activePicture)
+		bool answered = false;
+		const char* why = nullptr;
+		if (sequence != 0)
 		{
-			// U7 / U6: the mean cell difference and the half-L1 histogram distance (the signature histograms are
-			// already fractions: total 1), judged by the unit's grid + histogram rule with this detector's thresholds.
-			const float grid = VpUnit::CutFadeJudge::MeanAbsDifference(stats.grid.data(), m_previous.grid.data(), stats.grid.size());
-			const float distance = VpUnit::SourceStats::HalfL1Distance<float>(stats.histogram.data(), m_previous.histogram.data(),
-				stats.histogram.size(), 1.0f, 1.0f);
-			m_lastGrid = grid;
-			m_lastHistogram = distance;
-			VpUnit::CutFadeJudge::GridHistThresholds limits;
-			limits.gridDifference = GRID_DIFFERENCE;
-			limits.histogramDistance = HISTOGRAM_DISTANCE;
-			limits.histogramDistanceAlone = HISTOGRAM_DISTANCE_ALONE;
-			cut = VpUnit::CutFadeJudge::GridHistCut(grid, distance, limits);
+			if (m_sceneReader)
+				answered = m_sceneReader(sequence, cut, &why);
+			else
+				answered = VpSkeleton::SceneRecordReader::CutOf(sequence, cut);
+			if (answered)
+			{
+				++m_sharedCutHits;
+				m_lastFallbackWhy = nullptr;
+				m_lastUsedFallback = false;
+			}
+			else
+			{
+				++m_fallbackCutCount;
+				m_lastFallbackWhy = why ? why : "u7 scene not sealed for frame";
+				m_lastUsedFallback = true;
+			}
+		}
+		else
+		{
+			++m_fallbackCutCount;
+			m_lastFallbackWhy = "unkeyed capture frame (sequence 0)";
+			m_lastUsedFallback = true;
+		}
+		if (!answered)
+		{
+			if (m_previousActive != stats.activePicture)
+				cut = true;   // entering or leaving black
+			else if (stats.activePicture)
+			{
+				// U7 / U6: the mean cell difference and the half-L1 histogram distance (the signature histograms are
+				// already fractions: total 1), judged by the unit's grid + histogram rule with this detector's thresholds.
+				const float grid = VpUnit::CutFadeJudge::MeanAbsDifference(stats.grid.data(), m_previous.grid.data(), stats.grid.size());
+				const float distance = VpUnit::SourceStats::HalfL1Distance<float>(stats.histogram.data(), m_previous.histogram.data(),
+					stats.histogram.size(), 1.0f, 1.0f);
+				m_lastGrid = grid;
+				m_lastHistogram = distance;
+				VpUnit::CutFadeJudge::GridHistThresholds limits;
+				limits.gridDifference = GRID_DIFFERENCE;
+				limits.histogramDistance = HISTOGRAM_DISTANCE;
+				limits.histogramDistanceAlone = HISTOGRAM_DISTANCE_ALONE;
+				cut = VpUnit::CutFadeJudge::GridHistCut(grid, distance, limits);
+			}
 		}
 	}
 	m_previous = stats;

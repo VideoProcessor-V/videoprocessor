@@ -910,24 +910,20 @@ namespace Dejudder
 		const FallbackCatalog::Decision& LastPairGlobalFallback() const;
 		// U10 C3: optional skeleton memo + sequence for kP2VectorPair / kP7CameraFit PairGlobal Acquire (null = standalone).
 		void SetSkeletonMemo(VpSkeleton::SkeletonMemo* memo, uint64_t seq);
-		// F2 (camera fit input): the optical-flow engine's seed of the last Estimate, read-only, no GPU work. The seed
-		// is the searching instance's ofSearch pair (the engine's block vectors that stood in for the first sweep:
-		// the camera guidance never writes them; its E1 pass only samples them). Layout, explicitly: one texel per
-		// 8x8 block of the SEARCHING instance's half size, rgba = (vx, vy) in that half size's px, the block SAD
-		// (8-bit codes per px; 1e4 = beyond the searches' reach), the engine weight (1 = none). The searching
-		// instance is the lowRes inner when this one halves (recursively), so one texel covers 16 x 2^halvings
-		// source px and a vector times 2 x 2^halvings is source px. False when the last Estimate was not seeded by
-		// the engine (engine off or failed, candidate / replace mode, a skipped pair) or before any Estimate. The
-		// textures are valid until the next Estimate (the caller copies, never keeps them).
+		// U7ACC: shared U7 scene verdict reader seam + diagnostics (propagated to lowRes inner).
+		using SceneVerdictFn = bool (*)(uint64_t seq, bool& cutOut, bool& fadeOut, const char** whyOut);
+		void SetSceneVerdictReader(SceneVerdictFn reader);
+		uint64_t U7SceneHits() const;
+		uint64_t U7SceneFallbacks() const;
+		const std::string& LastU7SceneFallback() const;
+		// F2: searching instance's optical-flow seed of last Estimate (8x8 blocks of searching half size, rgba = vx, vy, SAD, weight;
+		// one texel covers 16*2^halvings source px; false when unseeded/skipped/before Estimate; valid until next Estimate).
 		struct SeedState
 		{
 			pl_tex fwd = nullptr, bwd = nullptr;
 			int gridW = 0, gridH = 0;        // seed texels
 			int halvings = 0;                // how often the search input was halved (lowRes)
-			// The live consistency pass's SAD rule (this instance's, the one that makes Field()): a block is good when
-			// SAD + (1 - weight) x weightPenalty <= tolerance. tolerance = taper_sad with block_taper on, else
-			// match_tolerance; weightPenalty = 2 x that limit when the engine's trust weights are applied (cost trust /
-			// fb check), else 0 (the weight is not read).
+			// Live consistency SAD rule: good when SAD + (1 - weight) * weightPenalty <= tolerance.
 			float tolerance = 0.0f;
 			float weightPenalty = 0.0f;
 			float consistencyPx = 0.0f;      // the searching instance's forward/backward agreement, in seed px
@@ -985,6 +981,9 @@ namespace Dejudder
 		FallbackCatalog::Decision lastPairGlobalFallback{};
 		VpSkeleton::SkeletonMemo* skeletonMemo = nullptr;
 		uint64_t skeletonSeq = 0;
+		SceneVerdictFn sceneVerdictReader = nullptr;
+		uint64_t u7SceneHits = 0, u7SceneFallbacks = 0;
+		std::string lastU7SceneFallback;
 		std::string opticalFlowError;
 		bool opticalFlowUsed = false;
 		std::shared_ptr<const MotionAhead::Flow> externalFlow;

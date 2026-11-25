@@ -1,21 +1,9 @@
 #pragma once
 
-// Bug hunt 3 (C2): the newlldv SDR veto returned to SDR 1-5 frames after the
-// cut it waited for. Its picture statistics were taken after the frame had
-// gone to the renderer, at most every 50 ms, and the switch was made on the UI
-// thread after a posted message, so the cut frame and the few after it were
-// queued with the PQ state.
-//
-// The gate moves the switch onto the capture thread and onto the cut frame:
-//   - the UI thread arms it (with the effective SDR state the veto returns to)
-//     once the veto is armed, and disarms it when the epoch, the settings or
-//     the measurement change;
-//   - while armed, every frame is measured before it goes to the renderer (no
-//     50 ms sub-sampling), and the frame on which the cut detector fires is
-//     the first one queued with the SDR state.
-// The UI thread still commits the veto (HdrInferenceTracker::OnPicture sees
-// the same cut flag) and pushes the same state again, which the renderer
-// takes as unchanged. Pure apart from the state pointer: unit tested.
+// Bug hunt 3 (C2): moves the armed newlldv SDR veto switch onto the capture thread and cut frame.
+// UI thread arms/disarms with the effective SDR state; while armed every frame is measured before
+// reaching the renderer so the cut frame itself queues with SDR. UI thread still commits the veto.
+// Pure apart from the state pointer: unit tested.
 
 #include <VP-V/modules/input/signal/HdrInference.h>
 #include "VideoState.h"
@@ -53,9 +41,7 @@ public:
 		return m_armed && m_generation == generation;
 	}
 
-	// Capture thread: whether to measure this frame. A new measurement
-	// generation starts the cut detector afresh. Armed: every frame, so the cut
-	// is seen on its own frame.
+	// Capture thread: whether to measure this frame (armed = every frame; new generation resets detector).
 	bool WantsSample(uint64_t generation, uint64_t nowMs)
 	{
 		if (generation != m_captureGeneration || !m_captureGenerationKnown)
@@ -63,6 +49,7 @@ public:
 			m_captureGeneration = generation;
 			m_captureGenerationKnown = true;
 			m_cutDetector.Reset();
+			m_diag = HdrVetoCutDiag();
 			m_lastSampleMs = 0;
 			m_haveSample = false;
 		}
@@ -76,16 +63,14 @@ public:
 	struct Observation
 	{
 		bool cut = false;
-		// Set (once) on the cut frame while armed: queue this frame and the
-		// rest of the epoch with this state.
-		VideoStateComPtr switchState;
+		VideoStateComPtr switchState;   // set once on the cut frame while armed
 	};
 
 	// Capture thread: one measured picture (before it goes to the renderer).
-	Observation Observe(uint64_t generation, const HdrVetoFrameStats& stats)
+	Observation Observe(uint64_t generation, const HdrVetoFrameStats& stats, uint64_t sequence = 0)
 	{
 		Observation result;
-		result.cut = m_cutDetector.Observe(stats);
+		result.cut = m_cutDetector.Observe(stats, sequence, m_sceneReader, &m_diag);
 		if (result.cut)
 		{
 			std::lock_guard<std::mutex> guard(m_mutex);
@@ -99,8 +84,13 @@ public:
 		return result;
 	}
 
+	void SetSceneReader(HdrVetoSceneReaderFn reader) { m_sceneReader = reader; }
 	float LastGridDifference() const { return m_cutDetector.LastGridDifference(); }
 	float LastHistogramDistance() const { return m_cutDetector.LastHistogramDistance(); }
+	uint64_t SharedCutHits() const { return m_diag.sharedHits; }
+	uint64_t FallbackCutCount() const { return m_diag.fallbackCount; }
+	const char* LastFallbackReason() const { return m_diag.lastFallbackReason; }
+	bool UsedFallbackOnLastObserve() const { return m_diag.usedFallback; }
 
 private:
 	mutable std::mutex m_mutex;
@@ -113,5 +103,7 @@ private:
 	uint64_t m_captureGeneration = 0;
 	uint64_t m_lastSampleMs = 0;
 	bool m_haveSample = false;
+	HdrVetoSceneReaderFn m_sceneReader = nullptr;
+	HdrVetoCutDiag m_diag;
 	HdrVetoCutDetector m_cutDetector;
 };

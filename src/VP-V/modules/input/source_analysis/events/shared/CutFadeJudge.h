@@ -812,18 +812,12 @@ inline double FrameFadeKeep(const SourceStats::Record& prev, const SourceStats::
     return k < 0.0 ? 0.0 : k;
 }
 
-// ---- the matcher's trust cut (M3) and AdaptiveDownscale's mean-step cut -------------------------------------------------------
+// ---- the matcher's trust cut (M3) ---------------------------------------------------------------------------------------------
 constexpr float kTrustCutShareAlone = 0.05f;
-constexpr float kMeanStepCutCodes = 20.0f;
 
 inline bool TrustCut(float share, float minShare, float histDistance, float cutHistogram, bool regional)
 {
     return regional ? (share < minShare && (histDistance > cutHistogram || share < kTrustCutShareAlone)) : share < minShare;
-}
-
-inline bool MeanStepCut(float previousInitialised, float previousMean, float mean)
-{
-    return previousInitialised < 0.5f || std::fabs(mean - previousMean) > kMeanStepCutCodes;
 }
 
 // ---- GLSL -----------------------------------------------------------------------------------------------------------------
@@ -897,12 +891,6 @@ inline const char* TrustCutRegionalLine()
 inline const char* TrustCutPlainLine()
 {
     return R"GLSL(    bool cut = share < min_share;
-)GLSL";
-}
-
-inline const char* MeanStepCutLine()
-{
-    return R"GLSL(    bool cut = prev.a < 0.5 || abs(luma_mean - prev.b) > 20.0;
 )GLSL";
 }
 

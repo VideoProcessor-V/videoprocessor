@@ -151,6 +151,8 @@ namespace
 		uint32_t measureUs = 0;
 		// Bug hunt 3 (C2): the capture thread queued this (cut) frame as SDR.
 		bool switchedAtCut = false;
+		bool cutUsedFallback = false;
+		const char* cutFallbackReason = nullptr;
 	};
 }
 
@@ -199,10 +201,12 @@ VideoStateComPtr CVideoProcessorDlg::MeasureHdrVetoPicture(const VideoStateComPt
 		message->observation.sdrEvidence = stats.sdrEvidence;
 		message->observation.fractionAt880 = stats.fractionAtHigh;
 		message->observation.p999 = stats.p999;
-		const HdrVetoCaptureGate::Observation observed = m_hdrVetoGate.Observe(generation, stats);
+		const HdrVetoCaptureGate::Observation observed = m_hdrVetoGate.Observe(generation, stats, frame.GetCounter());
 		message->observation.cut = observed.cut;
 		message->gridDifference = m_hdrVetoGate.LastGridDifference();
 		message->histogramDistance = m_hdrVetoGate.LastHistogramDistance();
+		message->cutUsedFallback = m_hdrVetoGate.UsedFallbackOnLastObserve();
+		message->cutFallbackReason = m_hdrVetoGate.LastFallbackReason();
 		switchState = observed.switchState;
 		message->switchedAtCut = switchState != nullptr;
 	}
@@ -282,10 +286,13 @@ LRESULT CVideoProcessorDlg::OnMessageHdrInferencePicture(WPARAM wParam, LPARAM)
 	const HdrPictureObservation& picture = message->observation;
 	if (picture.cut && DebugLog::IsEnhancedLoggingEnabled())
 	{
+		const char* src = message->cutUsedFallback
+			? (message->cutFallbackReason ? message->cutFallbackReason : "fallback")
+			: "shared U7";
 		DebugLog::Log(
-			"newlldv SDR veto: cut grid=%.1f histogram=%.3f measure_us=%u",
+			"newlldv SDR veto: cut grid=%.1f histogram=%.3f measure_us=%u source=%s",
 			message->gridDifference, message->histogramDistance,
-			message->measureUs);
+			message->measureUs, src);
 	}
 	const HdrInferenceUpdate update =
 		m_hdrInference.OnPicture(picture, message->tickMs);

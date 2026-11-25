@@ -13,6 +13,7 @@
 #include <VP-V/modules/motion/estimation/global_model/CameraGuidanceGpu.h>
 #include <VP-V/modules/motion/estimation/global_model/MatcherGlobalD1.h>
 #include <VP-V/modules/motion/estimation/global_model/PairGlobalFill.h>
+#include <VP-V/modules/control/skeleton/SceneRecordReader.h>
 #include <VP-V/core/RobustStatsShaders.h>
 #include <VP-V/core/GpuAttributionPl.h>
 
@@ -1602,6 +1603,14 @@ for (uint stride = 128u; stride > 0u; stride >>= 1) {
 		const char* const FRAME_TRUST_BODY_B = R"GLSL(#endif
 if (i == 0u) {
     float share = partial_[0] / max(partial_n_[0], 1.0);
+#ifdef U7_SCENE
+    bool cut = (u7_cut > 0) || (share < 0.05);
+#ifdef REGIONAL
+    float ramp_lo = 0.0;
+#else
+    float ramp_lo = min_share;
+#endif
+#else
 #ifdef REGIONAL
 )GLSL";
 
@@ -1611,6 +1620,7 @@ if (i == 0u) {
 
 		const char* const FRAME_TRUST_BODY_D = R"GLSL(    float ramp_lo = min_share;
 #endif
+#endif
     float mean_v = partial_[0] > 0.0 ? partial_v_[0] / partial_[0] : 0.0;
     float scale = 1.0;
 #ifdef ROLLOFF
@@ -1618,14 +1628,16 @@ if (i == 0u) {
 #else
     const bool rolloff = false;
 #endif
-#ifdef FADE
+#ifdef U7_SCENE
+    bool fading = (u7_fade > 0);
+#elif defined(FADE)
     bool fading = texelFetch(fade_state, ivec2(0), 0).z > 0.5;
 #else
     const bool fading = false;
 #endif
     if (motion_hi > 0.0 || trust_full > 0.0 || rolloff || fading) {
         float m = 1.0;
-#ifdef FADE
+#if defined(FADE) || defined(U7_SCENE)
         if (fading)
             m *= fade_floor;   // M4: a fade warps at most at the floor
 #endif
@@ -2155,6 +2167,28 @@ if (q.x < size.x && q.y < size.y) {
 		skeletonSeq = seq;
 		if (inner)
 			inner->SetSkeletonMemo(memo, seq);
+	}
+
+	void MotionWarp::SetSceneVerdictReader(SceneVerdictFn reader)
+	{
+		sceneVerdictReader = reader;
+		if (inner)
+			inner->SetSceneVerdictReader(reader);
+	}
+
+	uint64_t MotionWarp::U7SceneHits() const
+	{
+		return HalvesForSearch() && settings.lowResAll && inner ? inner->U7SceneHits() : u7SceneHits;
+	}
+
+	uint64_t MotionWarp::U7SceneFallbacks() const
+	{
+		return HalvesForSearch() && settings.lowResAll && inner ? inner->U7SceneFallbacks() : u7SceneFallbacks;
+	}
+
+	const std::string& MotionWarp::LastU7SceneFallback() const
+	{
+		return HalvesForSearch() && settings.lowResAll && inner ? inner->LastU7SceneFallback() : lastU7SceneFallback;
 	}
 
 	Settings MotionWarp::Scaled(const Settings& given, int inputHeight)
@@ -3647,6 +3681,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		}
 		inner->SetWarmUp(warmUpEstimate);
 		inner->SetSkeletonMemo(skeletonMemo, skeletonSeq);
+		inner->SetSceneVerdictReader(sceneVerdictReader);
 		if (!inner->Estimate(la, lb, -1, false))
 		{
 			lastPairGlobalFallback = inner->LastPairGlobalFallback();
@@ -4029,7 +4064,40 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		pictureFullRange = a.fullRange;
 		if (settings.pictureArea && !PictureArea())
 			return false;
-		if (settings.fadeMatch && !outerOfLowRes && !FadeMatch(b))
+		bool u7Known = false;
+		bool u7Cut = false;
+		bool u7Fade = false;
+		if (!(outerOfLowRes && settings.lowResAll))
+		{
+			const char* why = nullptr;
+			if (sceneVerdictReader != nullptr && skeletonSeq != 0)
+			{
+				u7Known = sceneVerdictReader(skeletonSeq, u7Cut, u7Fade, &why);
+			}
+			else if (skeletonMemo != nullptr && skeletonSeq != 0)
+			{
+				VpSkeleton::SceneRecordReader::SceneVerdict sv;
+				u7Known = VpSkeleton::SceneRecordReader::AcquireScene(skeletonSeq, sv, &why);
+				if (u7Known)
+				{
+					u7Cut = sv.cut;
+					u7Fade = sv.fade;
+				}
+			}
+			if (u7Known)
+			{
+				++u7SceneHits;
+				lastU7SceneFallback.clear();
+			}
+			else
+			{
+				++u7SceneFallbacks;
+				lastU7SceneFallback = (why && why[0]) ? why
+					: (skeletonSeq == 0 ? "no skeleton sequence bound"
+						: (sceneVerdictReader != nullptr ? "u7 reader unavailable" : "no skeleton memo bound"));
+			}
+		}
+		if (settings.fadeMatch && !outerOfLowRes && (!u7Known || u7Fade) && !FadeMatch(b))
 			return false;
 		if (HalvesForSearch())
 		{
@@ -4039,7 +4107,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			// The inner tested the fade on these planes: B here gets the same
 			// gain and offset, so M6's mask and the grain map see it (audit
 			// 2026-10-14: at 4K the weights fell towards the hold in a fade).
-			if (settings.fadeMatch && inner && inner->FadeStateTexture())
+			if (settings.fadeMatch && (!u7Known || u7Fade) && inner && inner->FadeStateTexture())
 			{
 				if (!RebuildBWithFade(b, inner->FadeStateTexture(), levelsB))   // KeepPlainBInK() without the product (B3)
 					return false;
@@ -4408,8 +4476,15 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			if (settings.regionalHold)
 				trustVarList.push_back({ pl_var_float("cut_hist"), &cutHist, true });
 			const float fadeFloor = std::min(1.0f, std::max(0.0f, settings.fadeFloor));
-			if (fadeOn)
+			if (fadeOn || u7Known)
 				trustVarList.push_back({ pl_var_float("fade_floor"), &fadeFloor, true });
+			const int u7CutVar = u7Cut ? 1 : 0;
+			const int u7FadeVar = u7Fade ? 1 : 0;
+			if (u7Known)
+			{
+				trustVarList.push_back({ pl_var_int("u7_cut"), &u7CutVar, true });
+				trustVarList.push_back({ pl_var_int("u7_fade"), &u7FadeVar, true });
+			}
 			// The refinement's window: the global moves in half-texel steps (4 px at full size,
 			// 8 px when the low-resolution matcher searched); wider than half a step, 6 px minimum.
 			// Hunt 2 04 L5: one step for every halving (an 8K input's 16 px step got 8 px).
@@ -4426,6 +4501,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			const std::string trustHeader = std::string(settings.motionRolloff ? "#define ROLLOFF 1\n" : "") +
 				(rolloffGlobal ? "#define ROLLOFF_GLOBAL 1\n" : "") + (cameraOut ? "#define CAMERA_OUT 1\n" : "") +
 				(settings.regionalHold ? "#define REGIONAL 1\n" : "") + (fadeOn ? "#define FADE 1\n" : "") +
+				(u7Known ? "#define U7_SCENE 1\n" : "") +
 				(trustPicture ? "#define PICTURE 1\n" : "") + FrameTrustHeader();
 			const pl_shader_desc* trustDesc = trustDescs.data();
 			if (!Dispatch("VideoProcessor de-judder: frame trust", trustHeader.c_str(), FrameTrustBody().c_str(),
