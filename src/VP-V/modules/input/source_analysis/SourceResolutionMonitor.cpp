@@ -1503,10 +1503,14 @@ if (tile < int(tiles) && g.y < ts) {
 		meta.baseTiles = (std::min)(baseTiles, tiles);
 		meta.tileX.clear();
 		meta.tileY.clear();
+		meta.tileOriginX.clear();
+		meta.tileOriginY.clear();
 		for (int i = 0; i < tiles; ++i)
 		{
 			meta.tileX.push_back(places[static_cast<size_t>(i)].centreX);
 			meta.tileY.push_back(places[static_cast<size_t>(i)].centreY);
+			meta.tileOriginX.push_back(static_cast<uint32_t>((std::max)(0, places[static_cast<size_t>(i)].x0)));
+			meta.tileOriginY.push_back(static_cast<uint32_t>((std::max)(0, places[static_cast<size_t>(i)].y0)));
 		}
 		const int sampleDepth = source.repr.bits.sample_depth > 0 ? source.repr.bits.sample_depth : luma->params.format->component_depth[0];
 		const int colorDepth = source.repr.bits.color_depth > 0 ? source.repr.bits.color_depth : sampleDepth;
@@ -1755,9 +1759,24 @@ if (tile < int(tiles) && g.y < ts) {
 		if (idOn)
 		{
 			constexpr size_t kMaxNoiseTiles = 4;   // bounded cost: the first informative tiles in tile order (deterministic)
+			VpSkeleton::SkeletonMemo* const memoPtr = bandMemo.load(std::memory_order_acquire);
+			const bool haveOrigins = (j.tileOriginX.size() == static_cast<size_t>(j.tiles)
+				&& j.tileOriginY.size() == static_cast<size_t>(j.tiles)
+				&& j.nativeWidth > 0 && j.nativeHeight > 0);
 			for (int t = 0; t < j.tiles && idNoise.size() < kMaxNoiseTiles; ++t)
 				if (SourceResolution::Informative(spectra[static_cast<size_t>(t)], thresholds))
-					idNoise.push_back(SourceIdentity::FrameQuality::MeasureNoise(codeTiles[static_cast<size_t>(t)].data(), T));
+				{
+					SourceIdentity::FrameQuality::TileOrigin origin;
+					if (haveOrigins)
+					{
+						origin.x = j.tileOriginX[static_cast<size_t>(t)];
+						origin.y = j.tileOriginY[static_cast<size_t>(t)];
+						origin.frameW = static_cast<uint32_t>(j.nativeWidth);
+						origin.frameH = static_cast<uint32_t>(j.nativeHeight);
+					}
+					idNoise.push_back(SourceIdentity::FrameQuality::MeasureNoise(
+						codeTiles[static_cast<size_t>(t)].data(), T, haveOrigins ? memoPtr : nullptr, j.sequence, origin));
+				}
 		}
 
 		// Efficiency 2026-10-24: a unique_lock so the kernel fit (below) runs unlocked.

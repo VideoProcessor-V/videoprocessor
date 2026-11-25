@@ -44,6 +44,7 @@ namespace BandMemo
 		uint8_t pipelineStage = 0;        // VariantKey::stage (0 = source planes)
 		uint8_t plane = 0;                // VariantKey::plane (0 = luma)
 		uint32_t width = 0, height = 0;   // VariantKey size axis: the plane's own dims in samples (the CPU form needs them; 0 = the product's own)
+		uint32_t cropX = 0, cropY = 0, cropW = 0, cropH = 0; // optional CPU sub-tile rect inside width x height (all 0 = full plane)
 		double sigmaPx = 0.0;             // in the pixels of `resolution` for Law::Taps; the FULL-resolution sigma for Law::Low (as GrainPreserve takes it)
 		Law law = Law::Taps;
 		BandFromBase::EdgeMode edge = BandFromBase::EdgeMode::Replicate;
@@ -82,6 +83,15 @@ namespace BandMemo
 	{
 		if (!(k.sigmaPx >= kMinSigmaPx) || !(k.sigmaPx <= kMaxSigmaPx))
 			return false;
+		const bool anyCrop = (k.cropX != 0u || k.cropY != 0u || k.cropW != 0u || k.cropH != 0u);
+		if (anyCrop)
+		{
+			if (k.cropW == 0u || k.cropH == 0u || k.width == 0u || k.height == 0u)
+				return false;
+			if (uint64_t(k.cropX) + uint64_t(k.cropW) > uint64_t(k.width)
+				|| uint64_t(k.cropY) + uint64_t(k.cropH) > uint64_t(k.height))
+				return false;
+		}
 		if (k.law == Law::Low)
 			return k.factor == 3.0 && k.minOne && k.eps == 0.0;
 		return FactorIndex(k.factor) >= 0 && EpsIsEncodable(k.eps);
@@ -104,6 +114,13 @@ namespace BandMemo
 			v.width = k.width;
 			v.height = k.height;
 		}
+		if (k.cropW != 0u && k.cropH != 0u)
+		{
+			v.cropX = k.cropX;
+			v.cropY = k.cropY;
+			v.cropW = k.cropW;
+			v.cropH = k.cropH;
+		}
 		v.sigmaMilli = static_cast<uint32_t>(micro / kMicroPerMilli);
 		v.param0 = static_cast<uint16_t>(micro % kMicroPerMilli);
 		uint16_t p1 = 0;
@@ -119,7 +136,8 @@ namespace BandMemo
 	}
 
 	// The key of a canonical VariantKey (its defaults are the zero fields: sigma 0 is not a band; param0 must lie in
-	// 0..kMicroPerMilli-1 so non-canonical param0 >= 1000 aliases cannot split memo slots; width/height are both or none).
+	// 0..kMicroPerMilli-1 so non-canonical param0 >= 1000 aliases cannot split memo slots; width/height are both or none;
+	// a sub-tile crop requires explicit width/height and must stay within bounds).
 	// False = not a band key.
 	inline bool FromVariant(const VpSkeleton::VariantKey& v, BandKey* out)
 	{
@@ -129,9 +147,19 @@ namespace BandMemo
 			return false;
 		if ((v.width == 0u) != (v.height == 0u))
 			return false;
-		if (v.scale > 1u || v.precision != 0 || v.codeUnit != 0 || v.HasCrop()
-			|| v.cropX != 0u || v.cropY != 0u || v.cropW != 0u || v.cropH != 0u || v.param1 >= 128u)
+		if (v.scale > 1u || v.precision != 0 || v.codeUnit != 0 || v.param1 >= 128u)
 			return false;
+		if (v.HasCrop())
+		{
+			if (v.width == 0u || v.height == 0u
+				|| uint64_t(v.cropX) + uint64_t(v.cropW) > uint64_t(v.width)
+				|| uint64_t(v.cropY) + uint64_t(v.cropH) > uint64_t(v.height))
+				return false;
+		}
+		else if (v.cropX != 0u || v.cropY != 0u || v.cropW != 0u || v.cropH != 0u)
+		{
+			return false;
+		}
 		const uint32_t fi = ((v.param1 >> 3) & 3u) | ((v.param1 & 64u) ? 4u : 0u);
 		if (fi >= kFactorCount)
 			return false;
@@ -141,6 +169,13 @@ namespace BandMemo
 		k.plane = v.plane;
 		k.width = v.width;
 		k.height = v.height;
+		if (v.HasCrop())
+		{
+			k.cropX = v.cropX;
+			k.cropY = v.cropY;
+			k.cropW = v.cropW;
+			k.cropH = v.cropH;
+		}
 		k.sigmaPx = (double(v.sigmaMilli) * double(kMicroPerMilli) + double(v.param0)) / double(kMicroPerPx);
 		k.edge = (v.param1 & 1u) ? BandFromBase::EdgeMode::Reflect : BandFromBase::EdgeMode::Replicate;
 		k.law = (v.param1 & 2u) ? Law::Low : Law::Taps;

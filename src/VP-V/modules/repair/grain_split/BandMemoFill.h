@@ -177,6 +177,8 @@ namespace Vpv
 				VpUnit::BandMemo::BandKey key;
 				if (!VpUnit::BandMemo::FromVariant(req.variant, &key))
 					return Detail::Decline(out, c, "the key is not a band key (outside the codec)");
+				if (key.cropW != 0u || key.cropH != 0u)
+					return Detail::Decline(out, c, "GPU band memo serves full planes only (crop axis is CPU-only)");
 				if (key.edge != VpUnit::BandFromBase::EdgeMode::Replicate)
 					return Detail::Decline(out, c, "a Reflect edge has no GPU form");
 				if (key.plane != 0 || key.pipelineStage != 0)
@@ -246,7 +248,7 @@ namespace Vpv
 			using VK = VpSkeleton::VariantKey;
 			VpSkeleton::OwnerFill f;
 			f.variantAxes = uint32_t(VK::kAxisPlane) | uint32_t(VK::kAxisSize) | uint32_t(VK::kAxisScale) | uint32_t(VK::kAxisSigma)
-				| uint32_t(VK::kAxisStage) | uint32_t(VK::kAxisParam0) | uint32_t(VK::kAxisParam1);
+				| uint32_t(VK::kAxisStage) | uint32_t(VK::kAxisCrop) | uint32_t(VK::kAxisParam0) | uint32_t(VK::kAxisParam1);
 			f.reserveBytes = 0;
 			f.frameScoped = true;
 			f.renderThreadOnly = false;
@@ -314,8 +316,26 @@ namespace Vpv
 					plane.resize(nSamples);
 					std::memcpy(plane.data(), src.cpu, expectedBytes);
 				}
-				const std::vector<float> band = VpUnit::BandMemo::CpuBand<float>(
-					plane, static_cast<int>(key.width), static_cast<int>(key.height), key);
+				const bool hasCrop = (key.cropW != 0u && key.cropH != 0u);
+				std::vector<float> band;
+				if (hasCrop)
+				{
+					const size_t cw = static_cast<size_t>(key.cropW);
+					const size_t ch = static_cast<size_t>(key.cropH);
+					const size_t stride = static_cast<size_t>(key.width);
+					std::vector<float> tile(cw * ch);
+					for (size_t row = 0; row < ch; ++row)
+					{
+						const size_t srcOff = (static_cast<size_t>(key.cropY) + row) * stride + static_cast<size_t>(key.cropX);
+						std::memcpy(tile.data() + row * cw, plane.data() + srcOff, cw * sizeof(float));
+					}
+					band = VpUnit::BandMemo::CpuBand<float>(tile, static_cast<int>(key.cropW), static_cast<int>(key.cropH), key);
+				}
+				else
+				{
+					band = VpUnit::BandMemo::CpuBand<float>(
+						plane, static_cast<int>(key.width), static_cast<int>(key.height), key);
+				}
 				out.bytes.resize(band.size() * sizeof(float));
 				if (!band.empty())
 					std::memcpy(out.bytes.data(), band.data(), out.bytes.size());
