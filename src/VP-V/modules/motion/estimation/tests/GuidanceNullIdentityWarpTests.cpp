@@ -626,6 +626,8 @@ namespace VideoProcessorTest
 				Assert::IsTrue(warp.Estimate(tall1.planes, tall2.planes), L"fresh lowRes dimming pair 1->2");
 				pl_gpu_finish(gpu);
 				Assert::AreEqual(1, warp.SearchHalvings(), L"128x1536 lowRes must stay at SearchHalvings() == 1");
+				Assert::IsNotNull(warp.FadeStateForTest(),
+					L"GEM-114 fresh lowRes: FadeStateForTest() must expose inner->FadeStateTexture()");
 				const std::array<float, 3> ft = DownloadFrameTrust(gpu, warp);
 				Assert::IsTrue(ft[0] >= 0.9f,
 					(L"GEM-114 fresh lowRes: fade-corrected pair 1->2 must not hold as a cut (share=" +
@@ -643,6 +645,8 @@ namespace VideoProcessorTest
 				Assert::IsTrue(warp.Estimate(smallA.planes, smallB.planes), L"256p non-fading pre-resize estimate");
 				pl_gpu_finish(gpu);
 				Assert::AreEqual(0, warp.SearchHalvings(), L"128x256 pre-resize must run with SearchHalvings() == 0");
+				const pl_tex preResizeFade = warp.FadeStateForTest();
+				Assert::IsNotNull(preResizeFade, L"256p pre-resize fadeMatch=true must allocate outer fadeState");
 				const std::array<float, 3> ftSmall = DownloadFrameTrust(gpu, warp);
 				Assert::IsTrue(ftSmall[0] >= 0.9f, L"256p identical pair must have high trusted share");
 				Assert::IsTrue(ftSmall[1] > 0.9f,
@@ -654,6 +658,11 @@ namespace VideoProcessorTest
 				Assert::IsTrue(warp.Estimate(tall1.planes, tall2.planes), L"post-resize lowRes dimming pair 1->2");
 				pl_gpu_finish(gpu);
 				Assert::AreEqual(1, warp.SearchHalvings(), L"post-resize 128x1536 must remain at SearchHalvings() == 1");
+				const pl_tex postResizeFade = warp.FadeStateForTest();
+				Assert::IsNotNull(postResizeFade,
+					L"GEM-114 post-resize lowRes: FadeStateForTest() must remain non-null after in-place resize");
+				Assert::IsTrue(postResizeFade != preResizeFade,
+					L"GEM-114 post-resize lowRes: FadeStateForTest() must switch from stale outer fadeState to inner->FadeStateTexture()");
 				const std::array<float, 3> ftTall = DownloadFrameTrust(gpu, warp);
 				Assert::IsTrue(ftTall[0] >= 0.9f,
 					(L"GEM-114 post-resize lowRes: fade-corrected pair 1->2 must not hold as a cut (share=" +
@@ -664,8 +673,9 @@ namespace VideoProcessorTest
 			}
 
 			// 3. Mandatory same-input negative control (Rule 3): run the EXACT SAME 3-frame 128x1536 dimming
-			// sequence with fadeMatch = false and verify FrameTrust().g stays > 0.9, proving fadeFloor attenuation
-			// in (1) and (2) was genuinely driven by inner->FadeStateTexture().
+			// sequence with fadeMatch = false. Verifies (a) plain matching genuinely breaks under -6%/frame
+			// dimming (ftNeg[0] < 0.25 vs ft[0] >= 0.9 with fadeMatch = true), proving the hazard is real on
+			// these planes, and (b) FrameTrust().g stays > 0.9 without fadeMatch.
 			{
 				Dejudder::MotionWarp negWarp(fixture.Log(), gpu, makeSettings(false));
 				Assert::IsTrue(negWarp.Estimate(tall0.planes, tall1.planes), L"negative control dimming pair 0->1");
@@ -673,9 +683,34 @@ namespace VideoProcessorTest
 				pl_gpu_finish(gpu);
 				Assert::AreEqual(1, negWarp.SearchHalvings(), L"negative control must also run at SearchHalvings() == 1");
 				const std::array<float, 3> ftNeg = DownloadFrameTrust(gpu, negWarp);
+				Assert::IsTrue(ftNeg[0] < 0.25f,
+					(L"negative control (fadeMatch=false): -6%/frame dimming must break plain matching below minTrustedShare=0.25 (share=" +
+						std::to_wstring(ftNeg[0]) + L")").c_str());
 				Assert::IsTrue(ftNeg[1] > 0.9f,
 					(L"negative control (fadeMatch=false): FrameTrust().g must remain > 0.9 (got " +
 						std::to_wstring(ftNeg[1]) + L")").c_str());
+			}
+
+			// 4. Mandatory lowRes non-fading control with fadeMatch = true (exact same makeSettings(true), so
+			// #define FADE 1 is compiled into outer FRAME_TRUST and reads inner->FadeStateTexture()): verifies
+			// fadeFloor = 0.25 is genuinely gated on inner->FadeStateTexture().z > 0.5 and does not attenuate
+			// a non-fading 128x1536 (SearchHalvings() == 1) pair.
+			{
+				Dejudder::MotionWarp plainWarp(fixture.Log(), gpu, makeSettings(true));
+				Assert::IsTrue(plainWarp.Estimate(tall0.planes, tall0.planes), L"non-fading lowRes control pair 1");
+				Assert::AreEqual(1, plainWarp.SearchHalvings(), L"non-fading lowRes control must run at SearchHalvings() == 1");
+				Assert::IsTrue(plainWarp.Estimate(tall0.planes, tall0.planes), L"non-fading lowRes control pair 2");
+				pl_gpu_finish(gpu);
+				Assert::AreEqual(1, plainWarp.SearchHalvings(), L"non-fading lowRes control must remain at SearchHalvings() == 1");
+				Assert::IsNotNull(plainWarp.FadeStateForTest(),
+					L"non-fading lowRes control (fadeMatch=true): FadeStateForTest() must expose inner->FadeStateTexture()");
+				const std::array<float, 3> ftPlain = DownloadFrameTrust(gpu, plainWarp);
+				Assert::IsTrue(ftPlain[0] >= 0.9f,
+					(L"non-fading lowRes control (fadeMatch=true): trusted share must be >= 0.9 (got " +
+						std::to_wstring(ftPlain[0]) + L")").c_str());
+				Assert::IsTrue(ftPlain[1] > 0.9f,
+					(L"non-fading lowRes control (fadeMatch=true): non-fading FrameTrust().g must remain > 0.9 (got " +
+						std::to_wstring(ftPlain[1]) + L")").c_str());
 			}
 
 			AssertCleanLibplaceboLog(log, "LowResFadePropagatesInnerFadeStateToOuterFrameTrustAndAfterResize");
@@ -1105,9 +1140,22 @@ namespace VideoProcessorTest
 
 			// 2a. globalTwo = true (L1_NSTARTS = 4, ZGROUP = 7) seeded full-field bit-exactness vs serial reference:
 			// SEARCH_BODY_SERIAL has only one global candidate (two = settings.globalTwo && settings.globalPrior && !serialSearchForTest).
-			// Supplying the matching pan seed gives both paths the exact same globalVector while parallelWarp compiles and runs
-			// the #define GLOBAL_TWO 1 (L1_NSTARTS = 4, ZGROUP = 7) shader with globalSecond = 0 across pairs 1 and 2.
+			// Supplying the matching pan seed on a clean 100%-pan 3-frame 256x128 sequence (so GapSeedHolds() deterministically
+			// accepts panSeed with forwardSad, backwardSad << 0.25 * zeroSad) gives both paths the exact same globalVector while
+			// parallelWarp compiles and runs the #define GLOBAL_TWO 1 (L1_NSTARTS = 4, ZGROUP = 7) shader with globalSecond = 0
+			// across pairs 1 and 2. (f0, f1, f2 stay untouched for Sections 1, 2b, and 3.)
 			{
+				auto makePurePanFrame = [&](int t) -> DejudderFrame
+				{
+					return MakeDejudderFrame(kMcW, kMcH,
+						[&](int x, int y) -> uint16_t { return DejudderTexture(x - kPanX * t, y - kPanY * t, 1); },
+						[&](int x, int y, int c) -> uint16_t { return DejudderTexture(x * 2 - kPanX * t, y - kPanY * t, 7 + c); });
+				};
+				DejudderGpuPlanes seedF0, seedF1, seedF2;
+				UploadDejudderFrame(gpu, makePurePanFrame(0), seedF0);
+				UploadDejudderFrame(gpu, makePurePanFrame(1), seedF1);
+				UploadDejudderFrame(gpu, makePurePanFrame(2), seedF2);
+
 				const Dejudder::Settings sTwo = makeSettings(true);
 				Dejudder::MotionWarp parTwoSeeded(fixture.Log(), gpu, sTwo);
 				Dejudder::MotionWarp serSeeded(fixture.Log(), gpu, sTwo);
@@ -1120,22 +1168,37 @@ namespace VideoProcessorTest
 
 				for (int pair = 0; pair < 2; ++pair)
 				{
-					const Dejudder::Planes& pa = pair == 0 ? f0.planes : f1.planes;
-					const Dejudder::Planes& pb = pair == 0 ? f1.planes : f2.planes;
+					const Dejudder::Planes& pa = pair == 0 ? seedF0.planes : seedF1.planes;
+					const Dejudder::Planes& pb = pair == 0 ? seedF1.planes : seedF2.planes;
 					parTwoSeeded.SetSearchSeed(panSeed);
 					serSeeded.SetSearchSeed(panSeed);
 					Assert::IsTrue(parTwoSeeded.Estimate(pa, pb), L"GEM-139 globalTwo=true seeded parallel estimate");
 					Assert::IsTrue(serSeeded.Estimate(pa, pb), L"GEM-139 globalTwo=true seeded serial estimate");
 					Assert::IsTrue(parTwoSeeded.SearchSeedUsed(), L"seeded parallel GLOBAL_TWO must accept pan seed");
 					Assert::IsTrue(serSeeded.SearchSeedUsed(), L"seeded serial reference must accept pan seed");
+					Assert::IsFalse(parTwoSeeded.SearchSeedRejected(), L"seeded parallel GLOBAL_TWO must not reject clean pan seed");
+					Assert::IsFalse(serSeeded.SearchSeedRejected(), L"seeded serial reference must not reject clean pan seed");
 					pl_gpu_finish(gpu);
 
 					const std::wstring tag = pair == 0 ? L"GEM-139 globalTwo=true seeded pair 1" : L"GEM-139 globalTwo=true seeded pair 2 (temporal)";
-					assertBitExact(DownloadField(gpu, parTwoSeeded), DownloadField(gpu, serSeeded), (tag + L" Field").c_str());
+					const DejudderField parField = DownloadField(gpu, parTwoSeeded);
+					const DejudderField serField = DownloadField(gpu, serSeeded);
+					assertBitExact(parField, serField, (tag + L" Field").c_str());
 					assertBitExact(DownloadField(gpu, parTwoSeeded, parTwoSeeded.Forward()),
 						DownloadField(gpu, serSeeded, serSeeded.Forward()), (tag + L" Forward").c_str());
 					assertBitExact(DownloadField(gpu, parTwoSeeded, parTwoSeeded.Backward()),
 						DownloadField(gpu, serSeeded, serSeeded.Backward()), (tag + L" Backward").c_str());
+
+					int seededPanBlocks = 0;
+					for (int by = 0; by < parField.blocksY; ++by)
+						for (int bx = 0; bx < parField.blocksX; ++bx)
+							if (parField.trusted(bx, by) &&
+								std::fabs(parField.vx(bx, by) - static_cast<float>(kPanX)) <= 0.5f &&
+								std::fabs(parField.vy(bx, by) - static_cast<float>(kPanY)) <= 0.5f)
+								++seededPanBlocks;
+					Assert::IsTrue(seededPanBlocks >= 64,
+						(tag + L": expected >= 64 trusted pan (+10,+4) blocks on clean pan sequence, got " +
+							std::to_wstring(seededPanBlocks)).c_str());
 				}
 			}
 
