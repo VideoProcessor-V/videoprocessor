@@ -1675,5 +1675,128 @@ namespace VideoProcessorTest
 				Vpv::Capture::SourcePlanes::BeginFrame(&rig);
 			}
 		}
+
+		// POD2-M4 regression test:
+		//  1) GrainLevelModule::OnStatus and GrainSplitOwnerModule::OnStatus suppress VP-V fallback lines
+		//     when ctx.host is on the Original pathway, while surfacing them for VP-V hosts (negative control).
+		//  2) GrainLevelModule::Observe resizes kP10gGrainLevel via atomic ReplaceOwnerFill (0 UnregisterOwnerFill calls)
+		//     and preserves the previous active registration + surfaces levelProblem_ visibly if ReplaceOwnerFill fails.
+		TEST_METHOD(OriginalPathwaySuppressesGrainOnStatusAndP10gUsesAtomicReplace)
+		{
+			using namespace VpSkeleton;
+			namespace L = GrainSplit::LevelGpu;
+			namespace G = GrainSplit::Gpu;
+			namespace RE = Vpv::RendererExtension;
+
+			struct AtomicP10gDemand : Vpv::Skeleton::IExternalDemand
+			{
+				SkeletonMemo* memo = nullptr;
+				int p10gRegisters = 0;
+				int p10gReplaces = 0;
+				int p10gUnregisters = 0;
+				bool refuseP10gReplace = false;
+				bool refuseChromaReg = false;
+
+				uint64_t Raise(const void*, const DemandSpec&) override { return 0; }
+				void Drop(const void*, uint64_t) override {}
+				uint64_t ActiveMask(const void*) const override { return 0; }
+				Vpv::Skeleton::SceneAnswer SceneOf(const void*, uint64_t) const override { return {}; }
+				SkeletonMemo::Registration RegisterOwnerFill(ProductId id, AcquireForm form,
+					const std::string& unit, OwnerFill fill) override
+				{
+					if (id == kP10gGrainLevel) ++p10gRegisters;
+					if (id == kP10cGrainSplitChroma && refuseChromaReg)
+						return SkeletonMemo::Registration::NotOwner;
+					return memo->RegisterOwnerFill(id, form, unit, std::move(fill));
+				}
+				SkeletonMemo::Registration ReplaceOwnerFill(ProductId id, AcquireForm form,
+					const std::string& unit, OwnerFill fill) override
+				{
+					if (id == kP10gGrainLevel)
+					{
+						++p10gReplaces;
+						if (refuseP10gReplace)
+							return SkeletonMemo::Registration::BadDefaults;
+					}
+					return memo->ReplaceOwnerFill(id, form, unit, std::move(fill));
+				}
+				bool UnregisterOwnerFill(ProductId id, AcquireForm form, const std::string& unit) override
+				{
+					if (id == kP10gGrainLevel) ++p10gUnregisters;
+					return memo->UnregisterOwnerFill(id, form, unit);
+				}
+			};
+
+			// (1) Atomic ReplaceOwnerFill for kP10gGrainLevel on 1080p -> 4K growth + failed-replace resilience.
+			SkeletonMemo memo;
+			AtomicP10gDemand demand;
+			demand.memo = &memo;
+			int hostVpv = 0;
+			int hostOrig = 0;
+			L::GrainLevelModule lvlMod;
+			Assert::IsTrue(lvlMod.Observe(&hostVpv, GrainDims(1920, 1080), &demand), L"initial 1080p Observe succeeds");
+			Assert::AreEqual(1, demand.p10gRegisters, L"initial P10g registration uses RegisterOwnerFill");
+			Assert::AreEqual(0, demand.p10gReplaces, L"initial P10g registration does not call ReplaceOwnerFill");
+			Assert::AreEqual(0, demand.p10gUnregisters, L"initial P10g registration calls zero UnregisterOwnerFill");
+
+			Assert::IsTrue(lvlMod.Observe(&hostVpv, GrainDims(3840, 2160), &demand), L"4K growth Observe succeeds");
+			Assert::AreEqual(1, demand.p10gRegisters, L"POD2-M4: 4K resize must not re-call RegisterOwnerFill");
+			Assert::AreEqual(1, demand.p10gReplaces, L"POD2-M4: 4K resize must use atomic ReplaceOwnerFill");
+			Assert::AreEqual(0, demand.p10gUnregisters, L"POD2-M4: 4K resize must have zero UnregisterOwnerFill gap");
+			Assert::AreEqual(L::ReserveBytes(GrainDims(3840, 2160)), lvlMod.RegisteredReserveBytes());
+
+			// Failed ReplaceOwnerFill keeps previous 4K registration intact and surfaces levelProblem_ visibly.
+			demand.refuseP10gReplace = true;
+			Assert::IsTrue(lvlMod.Observe(&hostVpv, GrainDims(7680, 4320), &demand),
+				L"POD2-M4: failed ReplaceOwnerFill preserves previous active P10g registration");
+			Assert::AreEqual(2, demand.p10gReplaces, L"8K growth attempted ReplaceOwnerFill");
+			Assert::AreEqual(0, demand.p10gUnregisters, L"failed replace still has zero unregister gap");
+			Assert::IsTrue(lvlMod.Registered(), L"previous P10g registration stays active after failed replace");
+			Assert::AreEqual(L::ReserveBytes(GrainDims(3840, 2160)), lvlMod.RegisteredReserveBytes(),
+				L"previous 4K reserve stays intact after failed 8K replace");
+			Assert::IsFalse(lvlMod.FallbackLines().empty(), L"failed replace surfaces visible fallback line");
+
+			// (2) OriginalPathway guard on BOTH GrainLevelModule::OnStatus and GrainSplitOwnerModule::OnStatus.
+			SkeletonMemo splitMemo;
+			AtomicP10gDemand splitDemand;
+			splitDemand.memo = &splitMemo;
+			splitDemand.refuseChromaReg = true;
+			G::GrainSplitOwnerModule ownerMod;
+			Assert::IsFalse(ownerMod.Observe(&hostVpv, GrainDims(1920, 1080), GrainDims(960, 540), &splitDemand));
+			Assert::IsFalse(ownerMod.FallbackLines().empty(), L"precondition: GrainSplitOwnerModule has fallback line");
+
+			struct ScopedOriginalHost
+			{
+				const void* host;
+				explicit ScopedOriginalHost(const void* h) : host(h)
+				{
+					Vpv::Hub::ExtensionHub::Instance().NoteOriginalPathway(host, true);
+				}
+				~ScopedOriginalHost()
+				{
+					Vpv::Hub::ExtensionHub::Instance().NoteOriginalPathway(host, false);
+				}
+			} origGuard(&hostOrig);
+			Vpv::Hub::ExtensionHub::Instance().NoteOriginalPathway(&hostVpv, false);
+
+			RE::Context origCtx{}; origCtx.host = &hostOrig;
+			RE::Context vpvCtx{}; vpvCtx.host = &hostVpv;
+
+			std::vector<std::string> lvlOrigLines, lvlVpvLines;
+			lvlMod.OnStatus(origCtx, RE::StatusKind::Fallbacks, lvlOrigLines, nullptr, nullptr);
+			lvlMod.OnStatus(vpvCtx, RE::StatusKind::Fallbacks, lvlVpvLines, nullptr, nullptr);
+			Assert::IsTrue(lvlOrigLines.empty(),
+				L"POD2-M4: GrainLevelModule::OnStatus must emit 0 lines on Original pathway");
+			Assert::IsFalse(lvlVpvLines.empty(),
+				L"POD2-M4 negative control: GrainLevelModule::OnStatus must still emit fallback lines on VP-V pathway");
+
+			std::vector<std::string> ownerOrigLines, ownerVpvLines;
+			ownerMod.OnStatus(origCtx, RE::StatusKind::Fallbacks, ownerOrigLines, nullptr, nullptr);
+			ownerMod.OnStatus(vpvCtx, RE::StatusKind::Fallbacks, ownerVpvLines, nullptr, nullptr);
+			Assert::IsTrue(ownerOrigLines.empty(),
+				L"POD2-M4: GrainSplitOwnerModule::OnStatus must emit 0 lines on Original pathway");
+			Assert::IsFalse(ownerVpvLines.empty(),
+				L"POD2-M4 negative control: GrainSplitOwnerModule::OnStatus must still emit fallback lines on VP-V pathway");
+		}
 	};
 }
