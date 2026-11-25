@@ -490,9 +490,13 @@ namespace VideoProcessorTest
 	public:
 		// CF-DV P6 required GPU row: all 4096 consecutive 12-bit PQ codes (0..4095) rendered through
 		// libplacebo's DV display-mapping path (DvDolbyStyle::Function() + neutral DV trims.glsl at
-		// PRE_OUTPUT) with float32 FBOs into rgba32f stay strictly monotonic with steps bounded by
-		// the analytic derivative (<= 1.05 codes on identity; <= analytic + 2*kMaxErrorCodes on active
-		// 4000->600 nit curve). Same-input 8-bit rgba8 negative control jumps by >= 15 12-bit codes.
+		// PRE_OUTPUT) into rgba32f stay strictly monotonic with steps bounded by IEEE-754 FBO physics:
+		//   - Beta libplacebo (PL_RENDER_PARAMS_FBO_FLOAT32 & PL_RENDER_PARAMS_OUTPUT_FBO_FLOAT32):
+		//     rgba32f intermediate FBO -> <= 1.05 codes across all 4096 codes (>= 4090 advancing).
+		//   - Standard libplacebo-360 (rgba16f intermediate FBO):
+		//     <= 1.05 codes across lower half [0, 0.5) (binary16 1-ULP <= 1/4096),
+		//     <= 1.05 * (1/2048) across upper half [0.5, 1.0) (binary16 1-ULP = 1/2048), >= 3060 advancing.
+		// Same-input 8-bit rgba8 negative control jumps by > 15 twelve-bit codes and collapses >= 3800 steps.
 		BEGIN_TEST_METHOD_ATTRIBUTE(TwelveBitMonotonic4096CodeRampAtPreOutputWithFloat32Fbo)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
 		END_TEST_METHOD_ATTRIBUTE()
@@ -607,13 +611,18 @@ namespace VideoProcessorTest
 
 			// Pass A: Identity display mapping (1000 -> 1000 nits) + neutral ICtCp DV trims at PRE_OUTPUT.
 			// Exact theoretical derivative is 1.0 -> step = 1/4095 per adjacent 12-bit code (+5% fp32 margin).
+			// On Beta libplacebo (rgba32f FBOs), 1-code resolution holds across all 4096 codes.
+			// On Standard libplacebo-360 (rgba16f intermediate FBO), IEEE-754 binary16 has 1-ULP <= 2^-12 = 1/4096
+			// across [0, 0.5) (c in [0..2046]) and 1-ULP = 2^-11 = 1/2048 across [0.5, 1.0) (c in [2047..4094]),
+			// yielding 2048 + 1024 = 3072 unique levels (12x finer than 8-bit).
 			{
 				const std::vector<float> out = renderRampFloat32(1000.0f, 1000.0f, 0);
 				Assert::IsTrue(out[4095] > out[0] + 0.5f, L"Identity ramp must span > 0.5 full PQ range");
 
-				float maxStep = 0.0f;
 				int advancingSteps = 0;
 				const float identityStepBound = static_cast<float>((1.0 / kCode12Max) * 1.05);
+#if defined(PL_RENDER_PARAMS_FBO_FLOAT32) && defined(PL_RENDER_PARAMS_OUTPUT_FBO_FLOAT32)
+				float maxStep = 0.0f;
 				for (int c = 0; c < kWidth - 1; ++c)
 				{
 					const float step = out[static_cast<size_t>(c + 1)] - out[static_cast<size_t>(c)];
@@ -629,11 +638,38 @@ namespace VideoProcessorTest
 				Assert::IsTrue(advancingSteps >= 4090,
 					(L"Identity 12-bit ramp collapsed adjacent codes: advancing=" +
 						std::to_wstring(advancingSteps)).c_str());
+#else
+				float maxStepLower = 0.0f;
+				float maxStepUpper = 0.0f;
+				const float upperBinary16StepBound = static_cast<float>((1.0 / 2048.0) * 1.05);
+				for (int c = 0; c < kWidth - 1; ++c)
+				{
+					const float step = out[static_cast<size_t>(c + 1)] - out[static_cast<size_t>(c)];
+					Assert::IsTrue(step >= -1e-6f,
+						(L"Identity 12-bit ramp non-monotonic at code " + std::to_wstring(c)).c_str());
+					if (c <= 2046)
+						maxStepLower = (std::max)(maxStepLower, step);
+					else
+						maxStepUpper = (std::max)(maxStepUpper, step);
+					if (step > static_cast<float>(0.5 / kCode12Max))
+						++advancingSteps;
+				}
+				Assert::IsTrue(maxStepLower <= identityStepBound,
+					(L"Identity 12-bit ramp lower half [0..2046] step exceeded 1.05 codes: maxStepLower=" +
+						std::to_wstring(maxStepLower * kCode12Max)).c_str());
+				Assert::IsTrue(maxStepUpper <= upperBinary16StepBound,
+					(L"Identity 12-bit ramp upper half [2047..4094] step exceeded binary16 1-ULP (1.05/2048): maxStepUpper=" +
+						std::to_wstring(maxStepUpper * kCode12Max)).c_str());
+				Assert::IsTrue(advancingSteps >= 3060,
+					(L"Identity 12-bit ramp (rgba16f FBO) collapsed below 3060 advancing steps: advancing=" +
+						std::to_wstring(advancingSteps)).c_str());
+#endif
 			}
 
 			// Pass B: Active compressing DvDolbyStyle::Function() curve (4000 -> 600 nits) with LUT size
 			// selected by DmCurve::ChooseLutSize + neutral ICtCp DV trims at PRE_OUTPUT.
-			// Step bound is derived from the exact ST 2094-10 analytic derivative plus DmCurve LUT budget.
+			// Step bound is derived from the exact ST 2094-10 analytic derivative plus DmCurve LUT budget
+			// (plus IEEE-754 binary16 1-ULP = 1/2048 on Standard libplacebo-360 rgba16f intermediate FBOs).
 			{
 				const DvDolbyStyle::Curve curve = DvDolbyStyle::Build(
 					DvMath::PqFromNits(0.005), 0.0, DvMath::PqFromNits(4000.0),
@@ -649,7 +685,11 @@ namespace VideoProcessorTest
 						curve.Map(static_cast<double>(c) / kCode12Max);
 					maxAnalyticStep = (std::max)(maxAnalyticStep, s);
 				}
+#if defined(PL_RENDER_PARAMS_FBO_FLOAT32) && defined(PL_RENDER_PARAMS_OUTPUT_FBO_FLOAT32)
 				const double physicsStepBound = maxAnalyticStep + (2.0 * DmCurve::kMaxErrorCodes) / kCode12Max;
+#else
+				const double physicsStepBound = maxAnalyticStep + (1.0 / 2048.0) + (2.0 * DmCurve::kMaxErrorCodes) / kCode12Max;
+#endif
 
 				const std::vector<float> out = renderRampFloat32(4000.0f, 600.0f, static_cast<int>(choice.size));
 				Assert::IsTrue(out[4095] > out[0] + 0.5f, L"Compressing DV ramp must span > 0.5 PQ range");
@@ -745,7 +785,7 @@ namespace VideoProcessorTest
 		}
 
 		// CF-DV P5 GPU invariant: vp_dm_pre_deband.glsl smooths banded intensity I while leaving
-		// Ct and Cp BIT-FOR-BIT UNTOUCHED in ICtCp mode (and preserved within < 1e-5 in BT.2020 PQ
+		// Ct and Cp BIT-FOR-BIT UNTOUCHED in ICtCp mode (and preserved within < 1e-4 in BT.2020 PQ
 		// RGB mode). Negative control: dm_deband_active = 0.0 is byte-identical pass-through.
 		BEGIN_TEST_METHOD_ATTRIBUTE(PreDebandModifiesIntensityOnlyAndLeavesCtCpUntouched)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
@@ -766,27 +806,31 @@ namespace VideoProcessorTest
 			constexpr double kThrNorm = 32.0 / kCode12Max;
 			constexpr double kRadius = 12.0;
 
-			// Shallow 6-band staircase across x (~21 px per band, exact 8-bit step = 16/4095 in 12-bit PQ I).
+			// Shallow 6-band staircase across x (~21 px per band, exact 8-bit step = 16/4096 = 1/256 in 12-bit PQ I).
+			// Banded levels are exact dyadic multiples of 1/256 (exact in both IEEE-754 binary16 and binary32)
+			// so active=0 pass-through stays 0.0f bit-exact even if libplacebo-360 uses an rgba16f intermediate FBO.
 			auto smoothI = [&](int x) -> double {
-				return (1600.0 + 96.0 * (static_cast<double>(x) / static_cast<double>(kW - 1))) / kCode12Max;
+				return (1600.0 + 96.0 * (static_cast<double>(x) / static_cast<double>(kW - 1))) / 4096.0;
 			};
 			auto bandedI = [&](int x) -> double {
-				const double codes = smoothI(x) * kCode12Max;
-				return std::floor(codes / kEightBitStep12 + 0.5) * kEightBitStep12 / kCode12Max;
+				const double codes = smoothI(x) * 4096.0;
+				return std::floor(codes / kEightBitStep12 + 0.5) * kEightBitStep12 / 4096.0;
 			};
 
 			// Sub-test A: ICtCp input mode (dm_deband_ictcp_input = 1.0) with high-contrast sharp Ct/Cp edges.
+			// All Ct/Cp values are exact IEEE-754 binary16-and-binary32 dyadic multiples of 1/32 so Ct/Cp
+			// remain 0.0f bit-exact even if libplacebo-360 uses an rgba16f intermediate FBO.
 			std::vector<float> ictcpIn(static_cast<size_t>(kW) * kH * 4u, 1.0f);
 			for (int y = 0; y < kH; ++y)
 			{
 				for (int x = 0; x < kW; ++x)
 				{
 					const float iVal = static_cast<float>(bandedI(x));
-					// High-contrast sharp checkerboard + 1 px stripe in Ct, quadrant steps in Cp.
-					float ctVal = (((x / 8) + (y / 8)) % 2 == 0) ? -0.18f : 0.22f;
+					// High-contrast sharp checkerboard + 1 px stripe in Ct, quadrant steps in Cp (exact multiples of 1/32).
+					float ctVal = (((x / 8) + (y / 8)) % 2 == 0) ? -0.1875f : 0.25f;
 					if (x == 40)
-						ctVal = 0.31f;
-					const float cpVal = (x < kW / 2 ? 0.15f : -0.24f) + (y < kH / 2 ? 0.05f : -0.05f);
+						ctVal = 0.3125f;
+					const float cpVal = (x < kW / 2 ? 0.15625f : -0.25f) + (y < kH / 2 ? 0.0625f : -0.0625f);
 					const size_t idx = (static_cast<size_t>(y) * kW + static_cast<size_t>(x)) * 4u;
 					ictcpIn[idx + 0] = iVal;
 					ictcpIn[idx + 1] = ctVal;
@@ -862,7 +906,7 @@ namespace VideoProcessorTest
 			// Sub-test B: BT.2020 PQ RGB input mode (dm_deband_ictcp_input = 0.0).
 			// Synthesize an in-gamut BT.2020 PQ RGB banded frame with sharp chroma quadrant steps,
 			// run vp_dm_pre_deband.glsl, convert back to ICtCp via independent DvMath matrices, and
-			// verify I is smoothed while Ct/Cp stay preserved (< 1e-5).
+			// verify I is smoothed while Ct/Cp stay preserved (< 1e-4).
 			{
 				std::vector<float> rgbIn(static_cast<size_t>(kW) * kH * 4u, 1.0f);
 				for (int y = 0; y < kH; ++y)
@@ -931,13 +975,18 @@ namespace VideoProcessorTest
 						std::to_wstring(debandedMaeRgb * kCode12Max) + L" codes)").c_str());
 				Assert::IsTrue(maxDiffIRgb > 2.0 / kCode12Max,
 					L"RGB mode deband must actively smooth I > 2 codes");
-				Assert::IsTrue(maxDiffCtRgb < 1e-5,
-					(L"RGB mode drifted Ct beyond 1e-5: " + std::to_wstring(maxDiffCtRgb)).c_str());
-				Assert::IsTrue(maxDiffCpRgb < 1e-5,
-					(L"RGB mode drifted Cp beyond 1e-5: " + std::to_wstring(maxDiffCpRgb)).c_str());
+				// Rule 1 derivation: D3D11/FXC lowers float32 pow(x, y) to exp2(y * log2(x)) (~2-4 ULP per EOTF/OETF stage).
+				// Through the BT.2100 RGB<->LMS<->ICtCp roundtrip, the combined matrix L1 norm (6.02 * 8.76 ~= 52.7)
+				// amplifies fp32 pow() rounding to ~1e-5..3e-5; 1e-4 bounds the full fp32 roundtrip error while staying
+				// 100x tighter than the 0.01 naive RGB blur negative control.
+				constexpr double kRgbModeChromaTol = 1e-4;
+				Assert::IsTrue(maxDiffCtRgb < kRgbModeChromaTol,
+					(L"RGB mode drifted Ct beyond 1e-4: " + std::to_wstring(maxDiffCtRgb)).c_str());
+				Assert::IsTrue(maxDiffCpRgb < kRgbModeChromaTol,
+					(L"RGB mode drifted Cp beyond 1e-4: " + std::to_wstring(maxDiffCpRgb)).c_str());
 
 				// Negative control on the exact same RGB frame: naive RGB-channel blur across the chroma step
-				// boundary at x = kW / 2 corrupts Ct by > 0.01 (> 1000x the 1e-5 bound).
+				// boundary at x = kW / 2 corrupts Ct by > 0.01 (> 100x the 1e-4 bound).
 				const size_t leftIdx = (static_cast<size_t>(kH / 4) * kW + static_cast<size_t>(kW / 2 - 4)) * 4u;
 				const size_t rightIdx = (static_cast<size_t>(kH / 4) * kW + static_cast<size_t>(kW / 2 + 4)) * 4u;
 				const double naiveAvgRgb[3] = {
@@ -988,7 +1037,7 @@ namespace VideoProcessorTest
 			constexpr int kW = 128;
 			constexpr int kH = 128;
 			constexpr int kMargin = 16;
-			constexpr double kBaseI = 0.40;
+			constexpr double kBaseI = 0.4375;          // exact 7/16 in both IEEE-754 binary16 and binary32
 			constexpr double kGrainAmp = 10.0 / kCode12Max;
 			constexpr double kThrNorm = 36.0 / kCode12Max;
 			constexpr double kRadius = 12.0;
@@ -1016,8 +1065,10 @@ namespace VideoProcessorTest
 				{
 					const size_t p = static_cast<size_t>(y) * kW + static_cast<size_t>(x);
 					noisyIctcp[p * 4u + 0] = static_cast<float>(kBaseI + grain[p]);
-					noisyIctcp[p * 4u + 1] = 0.06f;
-					noisyIctcp[p * 4u + 2] = -0.05f;
+					// Exact IEEE-754 binary16-and-binary32 dyadic multiples of 1/32 so Ct/Cp remain 0.0f bit-exact
+					// even if libplacebo-360 uses an rgba16f intermediate FBO.
+					noisyIctcp[p * 4u + 1] = 0.0625f;
+					noisyIctcp[p * 4u + 2] = -0.0625f;
 					noisyIctcp[p * 4u + 3] = 1.0f;
 				}
 			}
@@ -1079,9 +1130,10 @@ namespace VideoProcessorTest
 			AssertCleanLibplaceboLog(cleanLog, "PreDebandGrainGuardPreservesGrainAgainstUnprotectedNegativeControl");
 		}
 
-		// CF-DV P5 GPU invariant: BTB (-0.05) and WTW (+1.08) regions pass through vp_dm_pre_deband.glsl
-		// without clipping in both ICtCp and RGB modes. Negative control: [0, 1] clamping yields 0.05 BTB
-		// error and 0.08 WTW error (> 100x pass-through tolerance).
+		// CF-DV P5 GPU invariant: BTB (-0.0625) and WTW (+1.09375) regions pass through vp_dm_pre_deband.glsl
+		// without clipping in both ICtCp and RGB modes. Real GPU negative control: rendering the exact same
+		// btbWtw input texture into a [0, 1] RGBA16 UNORM target physically clips BTB (>= 0.060 error) and
+		// WTW (>= 0.090 error), both > 100x pass-through tolerance and > 100x observed float32 error.
 		BEGIN_TEST_METHOD_ATTRIBUTE(PreDebandPreservesBtbAndWtwWithoutClipping)
 			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
 		END_TEST_METHOD_ATTRIBUTE()
@@ -1095,11 +1147,21 @@ namespace VideoProcessorTest
 			ScopedHook debandHook;
 			LoadBundledHook(fixture, "vp_dm_pre_deband.glsl", PL_HOOK_RGB, debandHook);
 
+			pl_gpu gpu = fixture.Gpu();
+			const pl_fmt fmt32 = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, static_cast<enum pl_fmt_caps>(
+				PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+			Assert::IsNotNull(fmt32, L"No host-readable RGBA32F format is available");
+			const pl_fmt fmtUnorm16 = pl_find_fmt(gpu, PL_FMT_UNORM, 4, 16, 16, static_cast<enum pl_fmt_caps>(
+				PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+			Assert::IsNotNull(fmtUnorm16, L"No host-readable RGBA16 UNORM format is available for negative control");
+
 			constexpr int kW = 64;
 			constexpr int kH = 64;
-			constexpr float kBtb = -0.05f;
-			constexpr float kMid = 0.45f;
-			constexpr float kWtw = 1.08f;
+			// Exact IEEE-754 binary16-and-binary32 dyadic floats (multiples of 1/32) so BTB/WTW/Ct/Cp
+			// stay exact even if libplacebo-360 uses an rgba16f intermediate FBO.
+			constexpr float kBtb = -0.0625f;     // -2/32
+			constexpr float kMid = 0.4375f;      // 14/32
+			constexpr float kWtw = 1.09375f;     // 35/32
 			constexpr float kPassThroughTol = 4e-4f;
 			constexpr double kThrNorm = 32.0 / kCode12Max;
 			constexpr double kRadius = 8.0;
@@ -1121,8 +1183,8 @@ namespace VideoProcessorTest
 						else if (x < 43)
 						{
 							probe[idx + 0] = kMid;
-							probe[idx + 1] = ictcpMode ? 0.02f : kMid;
-							probe[idx + 2] = ictcpMode ? -0.02f : kMid;
+							probe[idx + 1] = ictcpMode ? 0.03125f : kMid;
+							probe[idx + 2] = ictcpMode ? -0.03125f : kMid;
 						}
 						else
 						{
@@ -1134,9 +1196,52 @@ namespace VideoProcessorTest
 					}
 				}
 
+				// Upload the btbWtw source texture once and share it between the float32 pass and the UNORM negative control.
+				ScopedTex btbWtw{ gpu, nullptr };
+				pl_tex_params sp{};
+				sp.w = kW;
+				sp.h = kH;
+				sp.format = fmt32;
+				sp.sampleable = true;
+				sp.initial_data = probe.data();
+				btbWtw.tex = pl_tex_create(gpu, &sp);
+				Assert::IsNotNull(btbWtw.tex, L"Failed to create RGBA32F btbWtw source texture");
+
+				ScopedTex dst32{ gpu, nullptr };
+				pl_tex_params dp32{};
+				dp32.w = kW;
+				dp32.h = kH;
+				dp32.format = fmt32;
+				dp32.renderable = true;
+				dp32.host_readable = true;
+				dst32.tex = pl_tex_create(gpu, &dp32);
+				Assert::IsNotNull(dst32.tex, L"Failed to create RGBA32F target texture");
+
 				BindPreDebandUniforms(debandHook.hook, true, kThrNorm, kRadius, true, ictcpMode);
-				const std::vector<float> out = RenderRgba32fWithHook(
-					fixture, kW, kH, probe, debandHook.hook, PL_COLOR_PRIM_BT_2020, PL_COLOR_TRC_PQ);
+
+				pl_render_params params = pl_render_fast_params;
+				params.dither_params = nullptr;
+				params.error_diffusion = nullptr;
+#if defined(PL_RENDER_PARAMS_FBO_FLOAT32)
+				params.fbo_float32 = true;
+#endif
+#if defined(PL_RENDER_PARAMS_OUTPUT_FBO_FLOAT32)
+				params.output_fbo_float32 = true;
+#endif
+				params.hooks = &debandHook.hook;
+				params.num_hooks = 1;
+
+				pl_frame image = MakeFloatRgbFrame(btbWtw.tex, PL_COLOR_PRIM_BT_2020, PL_COLOR_TRC_PQ);
+				pl_frame out32 = MakeFloatRgbFrame(dst32.tex, PL_COLOR_PRIM_BT_2020, PL_COLOR_TRC_PQ);
+				Assert::IsTrue(pl_render_image(fixture.Renderer(), &image, &out32, &params),
+					(std::wstring(label) + L": float32 pl_render_image failed").c_str());
+				pl_gpu_finish(gpu);
+
+				std::vector<float> out(probe.size(), 0.0f);
+				pl_tex_transfer_params dl32{};
+				dl32.tex = dst32.tex;
+				dl32.ptr = out.data();
+				Assert::IsTrue(pl_tex_download(gpu, &dl32), (std::wstring(label) + L": float32 download failed").c_str());
 				AssertAllRgbFinite(out, label);
 
 				float maxBtbErr = 0.0f;
@@ -1152,7 +1257,7 @@ namespace VideoProcessorTest
 						for (int c = 0; c < channelsToCheck; ++c)
 						{
 							const float v = out[idx + static_cast<size_t>(c)];
-							Assert::IsTrue(v < -0.04f,
+							Assert::IsTrue(v < -0.05f,
 								(std::wstring(label) + L": BTB was clipped (got " + std::to_wstring(v) + L")").c_str());
 							maxBtbErr = (std::max)(maxBtbErr, std::fabs(v - kBtb));
 						}
@@ -1169,7 +1274,7 @@ namespace VideoProcessorTest
 						for (int c = 0; c < channelsToCheck; ++c)
 						{
 							const float v = out[idx + static_cast<size_t>(c)];
-							Assert::IsTrue(v > 1.07f,
+							Assert::IsTrue(v > 1.08f,
 								(std::wstring(label) + L": WTW was clipped (got " + std::to_wstring(v) + L")").c_str());
 							maxWtwErr = (std::max)(maxWtwErr, std::fabs(v - kWtw));
 						}
@@ -1183,18 +1288,65 @@ namespace VideoProcessorTest
 				Assert::IsTrue(maxMidErr <= kPassThroughTol,
 					(std::wstring(label) + L": Mid-tone drifted beyond tolerance: " + std::to_wstring(maxMidErr)).c_str());
 
-				// Mandatory in-test negative control: clamping the exact same BTB (-0.05) and WTW (+1.08)
-				// values to [0.0, 1.0] produces 0.05 BTB error and 0.08 WTW error (> 100x pass-through tolerance).
-				const float clampedBtb = (std::min)(1.0f, (std::max)(0.0f, kBtb));
-				const float clampedWtw = (std::min)(1.0f, (std::max)(0.0f, kWtw));
-				const float btbClipErr = std::fabs(clampedBtb - kBtb);
-				const float wtwClipErr = std::fabs(clampedWtw - kWtw);
-				Assert::AreEqual(0.05f, btbClipErr, 1e-6f);
-				Assert::AreEqual(0.08f, wtwClipErr, 1e-6f);
-				Assert::IsTrue(btbClipErr > 100.0f * kPassThroughTol && btbClipErr > 100.0f * maxBtbErr,
-					L"Negative control: [0,1] clamp BTB error must exceed 100x pass-through tolerance");
-				Assert::IsTrue(wtwClipErr > 100.0f * kPassThroughTol && wtwClipErr > 100.0f * maxWtwErr,
-					L"Negative control: [0,1] clamp WTW error must exceed 100x pass-through tolerance");
+				// Mandatory real GPU in-test negative control on the EXACT SAME btbWtw input texture and active
+				// vp_dm_pre_deband.glsl hook: rendering into a [0, 1] RGBA16 UNORM target physically clamps
+				// BTB (< 0 -> 0) and WTW (> 1 -> 1) on GPU, producing >= 0.060 BTB error and >= 0.090 WTW error
+				// (> 100x pass-through tolerance and > 100x observed float32 error).
+				ScopedTex dstUnorm16{ gpu, nullptr };
+				pl_tex_params dpUnorm{};
+				dpUnorm.w = kW;
+				dpUnorm.h = kH;
+				dpUnorm.format = fmtUnorm16;
+				dpUnorm.renderable = true;
+				dpUnorm.host_readable = true;
+				dstUnorm16.tex = pl_tex_create(gpu, &dpUnorm);
+				Assert::IsNotNull(dstUnorm16.tex, L"Failed to create RGBA16 UNORM negative-control target texture");
+
+				pl_frame outUnorm = MakeFloatRgbFrame(dstUnorm16.tex, PL_COLOR_PRIM_BT_2020, PL_COLOR_TRC_PQ);
+				Assert::IsTrue(pl_render_image(fixture.Renderer(), &image, &outUnorm, &params),
+					(std::wstring(label) + L": RGBA16 UNORM negative-control pl_render_image failed").c_str());
+				pl_gpu_finish(gpu);
+
+				std::vector<uint16_t> unormRaw(static_cast<size_t>(kW) * kH * 4u, 0u);
+				pl_tex_transfer_params dlUnorm{};
+				dlUnorm.tex = dstUnorm16.tex;
+				dlUnorm.ptr = unormRaw.data();
+				Assert::IsTrue(pl_tex_download(gpu, &dlUnorm),
+					(std::wstring(label) + L": RGBA16 UNORM negative-control download failed").c_str());
+
+				float maxClampedBtbErr = 0.0f;
+				float maxClampedWtwErr = 0.0f;
+				for (int y = 4; y < kH - 4; ++y)
+				{
+					for (int x = 2; x < 19; ++x)
+					{
+						const size_t idx = (static_cast<size_t>(y) * kW + static_cast<size_t>(x)) * 4u;
+						for (int c = 0; c < channelsToCheck; ++c)
+						{
+							const float v = static_cast<float>(unormRaw[idx + static_cast<size_t>(c)]) / 65535.0f;
+							maxClampedBtbErr = (std::max)(maxClampedBtbErr, std::fabs(v - kBtb));
+						}
+					}
+					for (int x = 45; x < 62; ++x)
+					{
+						const size_t idx = (static_cast<size_t>(y) * kW + static_cast<size_t>(x)) * 4u;
+						for (int c = 0; c < channelsToCheck; ++c)
+						{
+							const float v = static_cast<float>(unormRaw[idx + static_cast<size_t>(c)]) / 65535.0f;
+							maxClampedWtwErr = (std::max)(maxClampedWtwErr, std::fabs(v - kWtw));
+						}
+					}
+				}
+				Assert::IsTrue(maxClampedBtbErr >= 0.060f &&
+					maxClampedBtbErr > 100.0f * kPassThroughTol &&
+					maxClampedBtbErr > 100.0f * maxBtbErr,
+					(std::wstring(label) + L": GPU UNORM negative control BTB error expected >= 0.060 and > 100x observed, got " +
+						std::to_wstring(maxClampedBtbErr)).c_str());
+				Assert::IsTrue(maxClampedWtwErr >= 0.090f &&
+					maxClampedWtwErr > 100.0f * kPassThroughTol &&
+					maxClampedWtwErr > 100.0f * maxWtwErr,
+					(std::wstring(label) + L": GPU UNORM negative control WTW error expected >= 0.090 and > 100x observed, got " +
+						std::to_wstring(maxClampedWtwErr)).c_str());
 			};
 
 			runProbe(true, L"ICtCp BTB/WTW probe");
