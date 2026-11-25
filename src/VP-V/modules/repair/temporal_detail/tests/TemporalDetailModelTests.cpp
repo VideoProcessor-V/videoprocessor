@@ -2033,5 +2033,76 @@ namespace VideoProcessorTest
 			}
 			Assert::IsTrue(compared > 1000, L"a dense grid of finite inputs was compared");
 		}
+
+		// W23-B3 M2#3 (U2 B5): compile-time static_assert pinning TD's band sigma constants to GrainSplit owner
+		// defaults (VpUnit::BandFromBase::kSigma*), plus runtime parity of TD's Analyse() vs GrainSplit::Compute()
+		// and a same-input negative control proving altered sigmas shift the band decomposition.
+		TEST_METHOD(TemporalDetailSigmaConstantsEqualGrainSplitOwnerDefaults)
+		{
+			constexpr GrainSplit::Params kOwner = GrainSplit::DefaultParams();
+			static_assert(kOwner.sigmaFine == VpUnit::BandFromBase::kSigmaFine,
+				"GrainSplit::DefaultParams().sigmaFine must equal VpUnit::BandFromBase::kSigmaFine");
+			static_assert(kOwner.sigmaBase == VpUnit::BandFromBase::kSigmaBase,
+				"GrainSplit::DefaultParams().sigmaBase must equal VpUnit::BandFromBase::kSigmaBase");
+			static_assert(kOwner.sigmaLow == VpUnit::BandFromBase::kSigmaLow,
+				"GrainSplit::DefaultParams().sigmaLow must equal VpUnit::BandFromBase::kSigmaLow");
+			static_assert(kOwner.sigmaFine == 1.0 && kOwner.sigmaBase == 2.5 && kOwner.sigmaLow == 6.0,
+				"owner band sigmas must remain the canonical U2 defaults (1.0, 2.5, 6.0)");
+			static_assert(TemporalDetail::kBlockPx == kOwner.blockPx,
+				"TemporalDetail::kBlockPx must equal GrainSplit::DefaultParams().blockPx");
+
+			const GrainSplit::Params tdParams = TemporalDetail::Detail::SplitParams();
+			Assert::AreEqual(kOwner.sigmaFine, tdParams.sigmaFine, 0.0, L"TD SplitParams().sigmaFine matches owner default");
+			Assert::AreEqual(kOwner.sigmaBase, tdParams.sigmaBase, 0.0, L"TD SplitParams().sigmaBase matches owner default");
+			Assert::AreEqual(kOwner.sigmaLow, tdParams.sigmaLow, 0.0, L"TD SplitParams().sigmaLow matches owner default");
+			Assert::AreEqual(kOwner.blockPx, tdParams.blockPx, 0.0, L"TD SplitParams().blockPx matches owner default");
+			Assert::AreEqual(kOwner.subBlocks, tdParams.subBlocks, L"TD SplitParams().subBlocks matches owner default");
+			Assert::AreEqual(kOwner.quietSubBlocks, tdParams.quietSubBlocks, L"TD SplitParams().quietSubBlocks matches owner default");
+			Assert::AreEqual(kOwner.neighbourhood, tdParams.neighbourhood, L"TD SplitParams().neighbourhood matches owner default");
+			Assert::AreEqual(kOwner.grainCal, tdParams.grainCal, 0.0, L"TD SplitParams().grainCal matches owner default");
+			Assert::AreEqual(kOwner.grainCal2, tdParams.grainCal2, 0.0, L"TD SplitParams().grainCal2 matches owner default");
+			Assert::AreEqual(kOwner.kappa, tdParams.kappa, 0.0, L"TD SplitParams().kappa matches owner default");
+
+			// Synthetic textured + edge + grain luma plane (10-bit codes).
+			const int w = 64, h = 48;
+			Plane y(w, h);
+			uint32_t rng = 0x7711aa33u;
+			for (int py = 0; py < h; ++py)
+				for (int px = 0; px < w; ++px)
+				{
+					rng = rng * 1664525u + 1013904223u;
+					const double grain = (static_cast<double>((rng >> 8) & 1023u) / 1023.0 - 0.5) * 16.0;
+					const double structure = 512.0 + 48.0 * std::sin(2.0 * kPi * px / 19.0) * std::cos(2.0 * kPi * py / 17.0)
+						+ ((px >= 20 && px < 44 && py >= 14 && py < 34) ? 60.0 : 0.0);
+					y.at(px, py) = structure + grain;
+				}
+
+			const TemporalDetail::Detail::Analysis tdAnalysis = TemporalDetail::Detail::Analyse(y, 1.0, 16);
+			const GrainSplit::Split ownerSplit = GrainSplit::Compute(y, 1.0, 16, kOwner);
+			Assert::AreEqual(ownerSplit.base.v.size(), tdAnalysis.base.v.size());
+			Assert::IsTrue(std::memcmp(tdAnalysis.base.v.data(), ownerSplit.base.v.data(), ownerSplit.base.v.size() * sizeof(double)) == 0,
+				L"TD Analyse().base matches GrainSplit::Compute(DefaultParams()).base bit-for-bit");
+			Assert::IsTrue(std::memcmp(tdAnalysis.s1.v.data(), ownerSplit.s1.v.data(), ownerSplit.s1.v.size() * sizeof(double)) == 0,
+				L"TD Analyse().s1 matches GrainSplit::Compute(DefaultParams()).s1 bit-for-bit");
+			Assert::IsTrue(std::memcmp(tdAnalysis.s2.v.data(), ownerSplit.s2.v.data(), ownerSplit.s2.v.size() * sizeof(double)) == 0,
+				L"TD Analyse().s2 matches GrainSplit::Compute(DefaultParams()).s2 bit-for-bit");
+			Assert::IsTrue(std::memcmp(tdAnalysis.grain.v.data(), ownerSplit.grain.v.data(), ownerSplit.grain.v.size() * sizeof(double)) == 0,
+				L"TD Analyse().grain matches GrainSplit::Compute(DefaultParams()).grain bit-for-bit");
+
+			// Same-input negative control (Rule 3): altering sigmaFine & sigmaBase measurably shifts band outputs.
+			GrainSplit::Params altered = kOwner;
+			altered.sigmaFine = kOwner.sigmaFine * 1.5;
+			altered.sigmaBase = kOwner.sigmaBase * 1.5;
+			const GrainSplit::Split shifted = GrainSplit::Compute(y, 1.0, 16, altered);
+			double maxBaseShift = 0.0, maxS1Shift = 0.0, maxS2Shift = 0.0;
+			for (size_t i = 0; i < y.v.size(); ++i)
+			{
+				maxBaseShift = (std::max)(maxBaseShift, std::fabs(shifted.base.v[i] - tdAnalysis.base.v[i]));
+				maxS1Shift = (std::max)(maxS1Shift, std::fabs(shifted.s1.v[i] - tdAnalysis.s1.v[i]));
+				maxS2Shift = (std::max)(maxS2Shift, std::fabs(shifted.s2.v[i] - tdAnalysis.s2.v[i]));
+			}
+			Assert::IsTrue(maxBaseShift > 1.0 && maxS1Shift > 1.0 && maxS2Shift > 1.0,
+				L"negative control: altering band sigmas shifts base, s1, and s2 by > 1 code");
+		}
 	};
 }
