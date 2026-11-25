@@ -8,6 +8,8 @@
 // Render thread (renderMutex held; Initialize and ApplyProfileSettingsLiveLocked), as before.
 #pragma once
 #include <VP-V/modules/scaling/chroma_upscale/CflHookOffsets.h>
+#include <VP-V/segments/CoreSegmentCaches.h>
+static bool ReadHookListTraceEnv() { char f[4] = {}; return GetEnvironmentVariableA("VP_HOOK_LIST_TRACE", f, sizeof(f)) != 0 && f[0] == '1'; }
 
 void LibplaceboVideoRenderer::Impl::UpdatePipelineSlots(const RendererSettings& settings)
 {
@@ -111,6 +113,7 @@ void LibplaceboVideoRenderer::Impl::UpdatePipelineSlots(const RendererSettings& 
 		vpv.sourceAnalysis.sourceMonitor.ForgetConventionHold();
 	}
 	RendererExtension::NotifyLifecycle(RendererExtension::Lifecycle::SettingsApplied, this, nullptr, nullptr, settings.resyncEvent.c_str(), nullptr, settings.pipelineOriginalPathway ? 1 : 0, nullptr, static_cast<double>(settings.motionAheadFrames)); // VPV-HOOK
+	Vpv::Segments::CoreSegmentCaches::Instance().RefreshTraceFlag(this, &ReadHookListTraceEnv);
 	entrance.Invalidate();
 	std::string state = settings.pipelineOriginalPathway ? "Original pathway (every VP addition off)" :
 		pipelineSlots.IsDefaultOrder() ? "designed order" : "custom order";
@@ -214,16 +217,12 @@ void LibplaceboVideoRenderer::Impl::ReportRenderErrors()
     }
 }
 
-// P4 f test recorder (Q3, test-only): with VP_HOOK_LIST_TRACE=1 in the environment, logs the frame's hook list - every entry of
-// frameParams.hooks in order, tagged by its pipeline slot (frameSlotHooks), "nls" (the submitted anamorphic hook), "quantiser",
-// "prescaler" or "other" - whenever it changes for this renderer. Unset (production): one environment read per frame, nothing else.
+// P4 f test recorder (VP_HOOK_LIST_TRACE=1, cached per host/session in CoreSegmentCaches: zero steady-state env reads).
 static void TraceFrameHookList(const void* renderer, const pl_render_params& frameParams,
     const std::vector<std::pair<const pl_hook*, PipelineSlots::Id>>& frameSlotHooks, const CustomHookChain::Chain& customHooks,
     const pl_hook* submittedNls)
 {
-    char flag[4] = {};
-    if (GetEnvironmentVariableA("VP_HOOK_LIST_TRACE", flag, sizeof(flag)) == 0 || flag[0] != '1')
-        return;
+    if (!Vpv::Segments::CoreSegmentCaches::Instance().TraceHookListEnabled(renderer, &ReadHookListTraceEnv)) return;
     std::string list;
     for (int i = 0; i < frameParams.num_hooks; ++i)
     {
@@ -516,16 +515,10 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
     // depth and the colour depth it quantises to. A float or 16-bit
     // target is not an 8/10-bit code domain: the sigma-delta is left out
     // of that frame (audit delta5-beta.md).
-    // Audit 2026-10-16 (bit depth): the output pass in rgba32f (the Beta build's output_fbo_float32
-    // when the GPU has a renderable rgba32f): the sigma-delta's half-float snap would throw the
-    // extra precision away.
+    // Audit 2026-10-16 (bit depth): rgba32f output FBO support cached per (host, gpu, gpuEpoch) in CoreSegmentCaches.
     bool outputFloat32 = false;
 #if defined(PL_RENDER_PARAMS_OUTPUT_FBO_FLOAT32)
-    {
-        const pl_fmt f = pl_find_fmt(d3d11->gpu, PL_FMT_FLOAT, 4, 32, 0,
-            static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_SAMPLEABLE));
-        outputFloat32 = f && f->component_depth[0] >= 32 && renderParams.output_fbo_float32;
-    }
+    outputFloat32 = renderParams.output_fbo_float32 && d3d11 && Vpv::Segments::CoreSegmentCaches::Instance().GpuSupportsFloat32Fbo(this, d3d11->gpu, [](const void* g) { const pl_fmt f = pl_find_fmt(static_cast<pl_gpu>(g), PL_FMT_FLOAT, 4, 32, 0, static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_SAMPLEABLE)); return f != nullptr && f->component_depth[0] >= 32; });
 #endif
     SigmaDeltaDomain::Domain ditherDomain; OutputSegments::DitherPrep ditherPrep; bool ditherAny = false;
     {

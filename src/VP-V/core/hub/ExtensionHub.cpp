@@ -5,6 +5,7 @@
 #include "CurrentFrame.h"
 #include "HubQuery.h"
 #include <VP-V/core/ComputeOnce.h>
+#include <VP-V/segments/CoreSegmentCaches.h>
 
 #include <atomic>
 #include <thread>
@@ -152,6 +153,7 @@ namespace Vpv
 		{
 			if (f.kind == RE::Lifecycle::GpuCreated && f.host)
 			{
+				Vpv::Segments::CoreSegmentCaches::Instance().OnGpuCreated(f.host, f.gpu);
 				std::lock_guard<std::mutex> lock(hostsMutex_);
 				HostState& state = hosts_[f.host];
 				state.host = f.host;
@@ -176,6 +178,7 @@ namespace Vpv
 			// Released only for this host: a replacement renderer's state is untouched.
 			if ((f.kind == RE::Lifecycle::GpuReleased || f.kind == RE::Lifecycle::Shutdown) && f.host)
 			{
+				Vpv::Segments::CoreSegmentCaches::Instance().OnGpuReleased(f.host);
 				{
 					std::lock_guard<std::mutex> lock(hostsMutex_);
 					hosts_.erase(f.host);
@@ -382,6 +385,190 @@ namespace Vpv
 			registered = true;
 			ExtensionHub::Instance(); // construct before the registry owns the forwarder, so it is destroyed after it
 			RE::Register(std::unique_ptr<RE::IRendererExtension>(new Forwarder()));
+		}
+	}
+
+	namespace Segments
+	{
+		CoreSegmentCaches& CoreSegmentCaches::Instance()
+		{
+			static CoreSegmentCaches caches;
+			return caches;
+		}
+
+		void CoreSegmentCaches::OnGpuCreated(const void* host, const void* gpu)
+		{
+			if (!host)
+				return;
+			std::lock_guard<std::mutex> lock(mutex_);
+			Entry& e = FindOrAddLocked(host);
+			++e.gpuEpoch;
+			e.gpu = gpu;
+			e.float32Known = false;
+			e.float32Supported = false;
+		}
+
+		bool CoreSegmentCaches::OnGpuCreated(const void* host, const void* gpu, Float32FboProbeFn probe)
+		{
+			if (!host)
+				return (gpu && probe) ? probe(gpu) : false;
+			uint64_t epoch = 0;
+			{
+				std::lock_guard<std::mutex> lock(mutex_);
+				Entry& e = FindOrAddLocked(host);
+				++e.gpuEpoch;
+				e.gpu = gpu;
+				e.float32Known = false;
+				e.float32Supported = false;
+				epoch = e.gpuEpoch;
+			}
+			if (!gpu || !probe)
+				return false;
+			const bool supported = probe(gpu);
+			std::lock_guard<std::mutex> lock(mutex_);
+			if (Entry* e = FindLocked(host))
+			{
+				if (e->gpu == gpu && e->gpuEpoch == epoch)
+				{
+					e->float32Known = true;
+					e->float32Supported = supported;
+				}
+			}
+			return supported;
+		}
+
+		void CoreSegmentCaches::OnGpuReleased(const void* host)
+		{
+			if (!host)
+				return;
+			std::lock_guard<std::mutex> lock(mutex_);
+			for (size_t i = 0; i < entries_.size(); ++i)
+			{
+				if (entries_[i].host == host)
+				{
+					entries_.erase(entries_.begin() + static_cast<std::ptrdiff_t>(i));
+					return;
+				}
+			}
+		}
+
+		bool CoreSegmentCaches::GpuSupportsFloat32Fbo(const void* host, const void* gpu, Float32FboProbeFn probe)
+		{
+			if (!gpu)
+				return false;
+			if (!host)
+				return probe ? probe(gpu) : false;
+			uint64_t epoch = 0;
+			{
+				std::lock_guard<std::mutex> lock(mutex_);
+				Entry& e = FindOrAddLocked(host);
+				if (e.gpu == gpu && e.float32Known)
+					return e.float32Supported;
+				if (e.gpu != gpu || e.gpuEpoch == 0)
+				{
+					++e.gpuEpoch;
+					e.gpu = gpu;
+					e.float32Known = false;
+					e.float32Supported = false;
+				}
+				epoch = e.gpuEpoch;
+			}
+			if (!probe)
+				return false;
+			const bool supported = probe(gpu);
+			std::lock_guard<std::mutex> lock(mutex_);
+			if (Entry* e = FindLocked(host))
+			{
+				if (e->gpu == gpu && e->gpuEpoch == epoch)
+				{
+					e->float32Known = true;
+					e->float32Supported = supported;
+				}
+			}
+			return supported;
+		}
+
+		bool CoreSegmentCaches::RefreshTraceFlag(const void* host, EnvProbeFn probe)
+		{
+			const bool enabled = probe ? probe() : false;
+			if (host)
+			{
+				std::lock_guard<std::mutex> lock(mutex_);
+				Entry& e = FindOrAddLocked(host);
+				e.traceKnown = true;
+				e.traceEnabled = enabled;
+			}
+			return enabled;
+		}
+
+		bool CoreSegmentCaches::TraceHookListEnabled(const void* host, EnvProbeFn probe)
+		{
+			if (!host)
+				return probe ? probe() : false;
+			{
+				std::lock_guard<std::mutex> lock(mutex_);
+				if (const Entry* e = FindLocked(host))
+				{
+					if (e->traceKnown)
+						return e->traceEnabled;
+				}
+			}
+			const bool enabled = probe ? probe() : false;
+			std::lock_guard<std::mutex> lock(mutex_);
+			Entry& e = FindOrAddLocked(host);
+			if (!e.traceKnown)
+			{
+				e.traceKnown = true;
+				e.traceEnabled = enabled;
+			}
+			return e.traceEnabled;
+		}
+
+		void CoreSegmentCaches::ResetForTesting()
+		{
+			std::lock_guard<std::mutex> lock(mutex_);
+			entries_.clear();
+		}
+
+		size_t CoreSegmentCaches::HostCountForTesting() const
+		{
+			std::lock_guard<std::mutex> lock(mutex_);
+			return entries_.size();
+		}
+
+		uint64_t CoreSegmentCaches::GpuEpochForTesting(const void* host) const
+		{
+			if (!host)
+				return 0;
+			std::lock_guard<std::mutex> lock(mutex_);
+			const Entry* e = FindLocked(host);
+			return e ? e->gpuEpoch : 0;
+		}
+
+		CoreSegmentCaches::Entry* CoreSegmentCaches::FindLocked(const void* host)
+		{
+			for (Entry& e : entries_)
+				if (e.host == host)
+					return &e;
+			return nullptr;
+		}
+
+		const CoreSegmentCaches::Entry* CoreSegmentCaches::FindLocked(const void* host) const
+		{
+			for (const Entry& e : entries_)
+				if (e.host == host)
+					return &e;
+			return nullptr;
+		}
+
+		CoreSegmentCaches::Entry& CoreSegmentCaches::FindOrAddLocked(const void* host)
+		{
+			if (Entry* existing = FindLocked(host))
+				return *existing;
+			Entry e;
+			e.host = host;
+			entries_.push_back(e);
+			return entries_.back();
 		}
 	}
 }
