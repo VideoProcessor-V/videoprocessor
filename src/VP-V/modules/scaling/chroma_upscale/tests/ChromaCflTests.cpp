@@ -15,15 +15,22 @@
 #include <VP-V/modules/scaling/chroma_upscale/ChromaCfl.h>
 #include <VP-V/modules/scaling/chroma_upscale/ChromaCflGpu.h>
 
+#include <microsoft_directshow/MadVRShaderLoader.h>
+
 #include <libplacebo/d3d11.h>
 #include <libplacebo/dispatch.h>
+#include <libplacebo/renderer.h>
+#include <libplacebo/shaders/custom.h>
 
 #include <algorithm>
+#include <cfloat>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <iterator>
 #include <map>
 #include <random>
 #include <string>
@@ -465,6 +472,182 @@ namespace ChromaCflTestsNs
 		mseCfl = Mse(r.cb, truth);
 		msePlain = Mse(ChromaUpscale::PlainUpsample(c, w, h, sx, sy), truth);
 	}
+
+	// --- Q#7 (GEM-066): dynamic CfL_Prediction.glsl chroma siting offset helpers ---
+	struct DummyPlFrame
+	{
+		pl_tex_t lumaTex;
+		pl_tex_t chromaTex;
+		pl_tex_t crTex;
+		pl_frame frame;
+
+		DummyPlFrame()
+		{
+			std::memset(&lumaTex, 0, sizeof(lumaTex));
+			std::memset(&chromaTex, 0, sizeof(chromaTex));
+			std::memset(&crTex, 0, sizeof(crTex));
+			std::memset(&frame, 0, sizeof(frame));
+		}
+
+		DummyPlFrame(const DummyPlFrame&) = delete;
+		DummyPlFrame& operator=(const DummyPlFrame&) = delete;
+
+		void Init2Plane(int lw, int lh, int cw, int ch, float sx, float sy)
+		{
+			std::memset(&lumaTex, 0, sizeof(lumaTex));
+			std::memset(&chromaTex, 0, sizeof(chromaTex));
+			std::memset(&frame, 0, sizeof(frame));
+			lumaTex.params.w = lw;
+			lumaTex.params.h = lh;
+			chromaTex.params.w = cw;
+			chromaTex.params.h = ch;
+
+			frame.num_planes = 2;
+			frame.planes[0].texture = &lumaTex;
+			frame.planes[0].components = 1;
+			frame.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+			frame.planes[1].texture = &chromaTex;
+			frame.planes[1].components = 2;
+			frame.planes[1].component_mapping[0] = PL_CHANNEL_CB;
+			frame.planes[1].component_mapping[1] = PL_CHANNEL_CR;
+			frame.planes[1].shift_x = sx;
+			frame.planes[1].shift_y = sy;
+			SetRepr(frame);
+		}
+
+		void Init3Plane(int lw, int lh, int cw, int ch, float sx, float sy)
+		{
+			std::memset(&lumaTex, 0, sizeof(lumaTex));
+			std::memset(&chromaTex, 0, sizeof(chromaTex));
+			std::memset(&crTex, 0, sizeof(crTex));
+			std::memset(&frame, 0, sizeof(frame));
+			lumaTex.params.w = lw;
+			lumaTex.params.h = lh;
+			chromaTex.params.w = cw;
+			chromaTex.params.h = ch;
+			crTex.params.w = cw;
+			crTex.params.h = ch;
+
+			frame.num_planes = 3;
+			frame.planes[0].texture = &lumaTex;
+			frame.planes[0].components = 1;
+			frame.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+			frame.planes[1].texture = &chromaTex;
+			frame.planes[1].components = 1;
+			frame.planes[1].component_mapping[0] = PL_CHANNEL_CB;
+			frame.planes[1].shift_x = sx;
+			frame.planes[1].shift_y = sy;
+			frame.planes[2].texture = &crTex;
+			frame.planes[2].components = 1;
+			frame.planes[2].component_mapping[0] = PL_CHANNEL_CR;
+			frame.planes[2].shift_x = sx;
+			frame.planes[2].shift_y = sy;
+			SetRepr(frame);
+		}
+
+		void InitRgb1Plane(int w, int h)
+		{
+			std::memset(&lumaTex, 0, sizeof(lumaTex));
+			std::memset(&frame, 0, sizeof(frame));
+			lumaTex.params.w = w;
+			lumaTex.params.h = h;
+
+			frame.num_planes = 1;
+			frame.planes[0].texture = &lumaTex;
+			frame.planes[0].components = 3;
+			frame.planes[0].component_mapping[0] = PL_CHANNEL_R;
+			frame.planes[0].component_mapping[1] = PL_CHANNEL_G;
+			frame.planes[0].component_mapping[2] = PL_CHANNEL_B;
+			frame.repr.sys = PL_COLOR_SYSTEM_RGB;
+			frame.repr.levels = PL_COLOR_LEVELS_FULL;
+			frame.color = pl_color_space_bt709;
+		}
+	};
+
+	struct DummyCflHook
+	{
+		pl_var_data valX;
+		pl_var_data valY;
+		pl_hook_par pars[2];
+		pl_hook hook;
+
+		DummyCflHook(float initX, float initY)
+		{
+			std::memset(&valX, 0, sizeof(valX));
+			std::memset(&valY, 0, sizeof(valY));
+			std::memset(&pars, 0, sizeof(pars));
+			std::memset(&hook, 0, sizeof(hook));
+
+			valX.f = initX;
+			valY.f = initY;
+
+			pars[0].name = "chroma_offset_x";
+			pars[0].type = PL_VAR_FLOAT;
+			pars[0].mode = PL_HOOK_PAR_DYNAMIC;
+			pars[0].data = &valX;
+			pars[0].initial.f = -0.5f;
+			pars[0].minimum.f = -FLT_MAX;
+			pars[0].maximum.f = FLT_MAX;
+
+			pars[1].name = "chroma_offset_y";
+			pars[1].type = PL_VAR_FLOAT;
+			pars[1].mode = PL_HOOK_PAR_DYNAMIC;
+			pars[1].data = &valY;
+			pars[1].initial.f = 0.0f;
+			pars[1].minimum.f = -FLT_MAX;
+			pars[1].maximum.f = FLT_MAX;
+
+			hook.stages = PL_HOOK_CHROMA_INPUT;
+			hook.parameters = pars;
+			hook.num_parameters = 2;
+		}
+
+		DummyCflHook(const DummyCflHook&) = delete;
+		DummyCflHook& operator=(const DummyCflHook&) = delete;
+	};
+
+	std::string LoadBundledCflShader()
+	{
+		std::string dir = __FILE__;
+		for (int level = 0; level < 10; ++level)
+		{
+			const size_t sep = dir.find_last_of("\\/");
+			if (sep == std::string::npos)
+				break;
+			dir.resize(sep);
+			std::ifstream in(dir + "\\shaders\\CfL_Prediction.glsl", std::ios::binary);
+			if (in)
+				return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+		}
+		return {};
+	}
+
+	bool HasDynamicFloatParam(const std::string& src, const char* paramName)
+	{
+		const std::string needle = std::string("//!PARAM ") + paramName;
+		const size_t pos = src.find(needle);
+		if (pos == std::string::npos)
+			return false;
+		const size_t nextParam = src.find("//!PARAM ", pos + needle.size());
+		const size_t nextHook = src.find("//!HOOK ", pos + needle.size());
+		size_t blockEnd = src.size();
+		if (nextParam != std::string::npos) blockEnd = (std::min)(blockEnd, nextParam);
+		if (nextHook != std::string::npos) blockEnd = (std::min)(blockEnd, nextHook);
+		const std::string block = src.substr(pos, blockEnd - pos);
+		return block.find("//!TYPE DYNAMIC float") != std::string::npos;
+	}
+
+	const pl_hook_par* FindHookParam(const pl_hook* hook, const char* name)
+	{
+		if (!hook || !hook->parameters || !name)
+			return nullptr;
+		for (int i = 0; i < hook->num_parameters; ++i)
+		{
+			if (hook->parameters[i].name && std::strcmp(hook->parameters[i].name, name) == 0)
+				return &hook->parameters[i];
+		}
+		return nullptr;
+	}
 }
 
 namespace VideoProcessorTest
@@ -663,6 +846,169 @@ namespace VideoProcessorTest
 			Assert::IsTrue(s.mode == ChromaUpscale::Mode::Cfl, L"an invalid value keeps the previous mode");
 			Assert::IsTrue(errors.size() == 1, L"one error message");
 			Assert::IsTrue(ChromaUpscale::ParseSettings({ { "other_key", "x" } }, s, &errors), L"unknown keys are ignored");
+		}
+
+		TEST_METHOD(CflHookOffsetsFollowSubsampledFrameSiting)
+		{
+			// Q#7 (GEM-066): CflOffsetsFromFrame extracts exact chroma siting offsets for subsampled YCbCr
+			// frames (4:2:0 left, 4:2:0 top-left 2-plane & 3-plane, 4:2:0 center, 4:2:2 left) and rejects
+			// non-subsampled 4:4:4 and 1-plane RGB frames.
+			DummyPlFrame f;
+
+			// MPEG-2 4:2:0 left-sited (-0.5, 0.0).
+			f.Init2Plane(1920, 1080, 960, 540, -0.5f, 0.0f);
+			const ChromaUpscale::CflOffsets mpeg2Left = ChromaUpscale::CflOffsetsFromFrame(f.frame);
+			Assert::IsTrue(mpeg2Left.valid, L"4:2:0 MPEG-2 left must be valid");
+			Assert::AreEqual(-0.5, mpeg2Left.x, 1e-6, L"4:2:0 MPEG-2 left x offset");
+			Assert::AreEqual(0.0, mpeg2Left.y, 1e-6, L"4:2:0 MPEG-2 left y offset");
+
+			// BT.2020 / HDR10 4:2:0 top-left (-0.5, -0.5), 2-plane P010 layout.
+			f.Init2Plane(3840, 2160, 1920, 1080, -0.5f, -0.5f);
+			f.frame.repr.sys = PL_COLOR_SYSTEM_BT_2020_NC;
+			f.frame.color.primaries = PL_COLOR_PRIM_BT_2020;
+			f.frame.color.transfer = PL_COLOR_TRC_PQ;
+			const ChromaUpscale::CflOffsets hdr10TopLeft = ChromaUpscale::CflOffsetsFromFrame(f.frame);
+			Assert::IsTrue(hdr10TopLeft.valid, L"4:2:0 BT.2020/HDR10 top-left (2-plane) must be valid");
+			Assert::AreEqual(-0.5, hdr10TopLeft.x, 1e-6, L"4:2:0 top-left x offset");
+			Assert::AreEqual(-0.5, hdr10TopLeft.y, 1e-6, L"4:2:0 top-left y offset");
+
+			// BT.2020 / HDR10 4:2:0 top-left (-0.5, -0.5), 3-plane planar layout.
+			f.Init3Plane(3840, 2160, 1920, 1080, -0.5f, -0.5f);
+			f.frame.repr.sys = PL_COLOR_SYSTEM_BT_2020_NC;
+			const ChromaUpscale::CflOffsets hdr10Planar = ChromaUpscale::CflOffsetsFromFrame(f.frame);
+			Assert::IsTrue(hdr10Planar.valid, L"4:2:0 BT.2020/HDR10 top-left (3-plane) must be valid");
+			Assert::AreEqual(-0.5, hdr10Planar.x, 1e-6, L"3-plane 4:2:0 top-left x offset");
+			Assert::AreEqual(-0.5, hdr10Planar.y, 1e-6, L"3-plane 4:2:0 top-left y offset");
+
+			// MPEG-1 4:2:0 center-sited (0.0, 0.0).
+			f.Init2Plane(1920, 1080, 960, 540, 0.0f, 0.0f);
+			const ChromaUpscale::CflOffsets mpeg1Center = ChromaUpscale::CflOffsetsFromFrame(f.frame);
+			Assert::IsTrue(mpeg1Center.valid, L"4:2:0 MPEG-1 center must be valid");
+			Assert::AreEqual(0.0, mpeg1Center.x, 1e-6, L"4:2:0 MPEG-1 center x offset");
+			Assert::AreEqual(0.0, mpeg1Center.y, 1e-6, L"4:2:0 MPEG-1 center y offset");
+
+			// 4:2:2 left-sited (w/2, h, -0.5, 0.0).
+			f.Init2Plane(1920, 1080, 960, 1080, -0.5f, 0.0f);
+			const ChromaUpscale::CflOffsets left422 = ChromaUpscale::CflOffsetsFromFrame(f.frame);
+			Assert::IsTrue(left422.valid, L"4:2:2 left must be valid");
+			Assert::AreEqual(-0.5, left422.x, 1e-6, L"4:2:2 left x offset");
+			Assert::AreEqual(0.0, left422.y, 1e-6, L"4:2:2 left y offset");
+
+			// Negative controls: non-subsampled 4:4:4 (both zero and non-zero shifts), 1-plane RGB,
+			// and empty frame must all return valid == false.
+			f.Init2Plane(1920, 1080, 1920, 1080, 0.0f, 0.0f);
+			Assert::IsFalse(ChromaUpscale::CflOffsetsFromFrame(f.frame).valid,
+				L"negative control: 4:4:4 (0, 0) is not subsampled and must return valid == false");
+			f.Init2Plane(1920, 1080, 1920, 1080, -0.5f, -0.5f);
+			Assert::IsFalse(ChromaUpscale::CflOffsetsFromFrame(f.frame).valid,
+				L"negative control: 4:4:4 (-0.5, -0.5) is not subsampled and must return valid == false");
+
+			f.InitRgb1Plane(1920, 1080);
+			Assert::IsFalse(ChromaUpscale::CflOffsetsFromFrame(f.frame).valid,
+				L"negative control: 1-plane RGB frame must return valid == false");
+
+			pl_frame emptyFrame{};
+			Assert::IsFalse(ChromaUpscale::CflOffsetsFromFrame(emptyFrame).valid,
+				L"negative control: empty frame must return valid == false");
+		}
+
+		TEST_METHOD(CflHookOffsetsSkipUserConfiguredParameters)
+		{
+			// Q#7 (GEM-066): explicit user-configured chroma_offset_x / chroma_offset_y on a CfL_Prediction.glsl
+			// rule must never be overwritten by per-frame siting, while any unset axis still follows the frame.
+			DummyPlFrame f;
+			f.Init2Plane(3840, 2160, 1920, 1080, -0.5f, -0.5f);
+
+			DummyCflHook cflHook(0.25f, -0.25f);
+			std::vector<const pl_hook*> hooks = { &cflHook.hook };
+
+			ConfiguredShaderRule userXRule;
+			userXRule.name = "cfl";
+			userXRule.label = "CfL_Prediction";
+			userXRule.filename = "CfL_Prediction.glsl";
+			userXRule.parameters["chroma_offset_x"] = "0.25";
+			const std::vector<ConfiguredShaderRule> rulesWithX = { userXRule };
+
+			Assert::IsTrue(ChromaUpscale::RuleSetsCflParam(rulesWithX, "chroma_offset_x"),
+				L"RuleSetsCflParam must detect user-configured chroma_offset_x");
+			Assert::IsFalse(ChromaUpscale::RuleSetsCflParam(rulesWithX, "chroma_offset_y"),
+				L"RuleSetsCflParam must return false for unset chroma_offset_y");
+
+			ChromaUpscale::ApplyCflHookOffsets(f.frame, hooks, rulesWithX, false);
+			Assert::AreEqual(0.25f, cflHook.valX.f, 1e-6f,
+				L"user-configured chroma_offset_x must stay untouched at 0.25");
+			Assert::AreEqual(-0.5f, cflHook.valY.f, 1e-6f,
+				L"unset chroma_offset_y must be updated to frame top-left siting (-0.5)");
+
+			// Symmetric check: user sets only chroma_offset_y -> x updates, y stays untouched.
+			cflHook.valX.f = 0.25f;
+			cflHook.valY.f = 0.125f;
+			ConfiguredShaderRule userYRule;
+			userYRule.name = "cfl";
+			userYRule.label = "CfL_Prediction";
+			userYRule.filename = "CfL_Prediction.glsl";
+			userYRule.parameters["chroma_offset_y"] = "0.125";
+			const std::vector<ConfiguredShaderRule> rulesWithY = { userYRule };
+			Assert::IsFalse(ChromaUpscale::RuleSetsCflParam(rulesWithY, "chroma_offset_x"),
+				L"RuleSetsCflParam must return false for unset chroma_offset_x");
+			Assert::IsTrue(ChromaUpscale::RuleSetsCflParam(rulesWithY, "chroma_offset_y"),
+				L"RuleSetsCflParam must detect user-configured chroma_offset_y");
+			ChromaUpscale::ApplyCflHookOffsets(f.frame, hooks, rulesWithY, false);
+			Assert::AreEqual(-0.5f, cflHook.valX.f, 1e-6f,
+				L"unset chroma_offset_x must be updated to frame siting (-0.5)");
+			Assert::AreEqual(0.125f, cflHook.valY.f, 1e-6f,
+				L"user-configured chroma_offset_y must stay untouched at 0.125");
+
+			// In-test negative control: exact same frame and hook, empty rule.parameters ->
+			// ApplyCflHookOffsets must overwrite BOTH chroma_offset_x and chroma_offset_y.
+			cflHook.valX.f = 0.25f;
+			cflHook.valY.f = -0.25f;
+			ConfiguredShaderRule defaultRule;
+			defaultRule.name = "cfl";
+			defaultRule.label = "CfL_Prediction";
+			defaultRule.filename = "CfL_Prediction.glsl";
+			const std::vector<ConfiguredShaderRule> emptyParamRules = { defaultRule };
+			Assert::IsFalse(ChromaUpscale::RuleSetsCflParam(emptyParamRules, "chroma_offset_x"),
+				L"negative control: empty parameters must not claim chroma_offset_x");
+			Assert::IsFalse(ChromaUpscale::RuleSetsCflParam(emptyParamRules, "chroma_offset_y"),
+				L"negative control: empty parameters must not claim chroma_offset_y");
+
+			ChromaUpscale::ApplyCflHookOffsets(f.frame, hooks, emptyParamRules, false);
+			Assert::AreEqual(-0.5f, cflHook.valX.f, 1e-6f,
+				L"negative control: without user override, chroma_offset_x must update to -0.5");
+			Assert::AreEqual(-0.5f, cflHook.valY.f, 1e-6f,
+				L"negative control: without user override, chroma_offset_y must update to -0.5");
+		}
+
+		TEST_METHOD(CflHookOffsetsNoOpOnOriginalPathway)
+		{
+			// Q#7 (GEM-066): on the Original pathway (originalPathway == true), ApplyCflHookOffsets must be
+			// a strict no-op, leaving dynamic CfL hook parameters untouched.
+			DummyPlFrame f;
+			f.Init2Plane(3840, 2160, 1920, 1080, -0.5f, -0.5f);
+
+			DummyCflHook cflHook(0.25f, 0.75f);
+			std::vector<const pl_hook*> hooks = { &cflHook.hook };
+
+			ConfiguredShaderRule defaultRule;
+			defaultRule.name = "cfl";
+			defaultRule.label = "CfL_Prediction";
+			defaultRule.filename = "CfL_Prediction.glsl";
+			const std::vector<ConfiguredShaderRule> rules = { defaultRule };
+
+			ChromaUpscale::ApplyCflHookOffsets(f.frame, hooks, rules, true);
+			Assert::AreEqual(0.25f, cflHook.valX.f, 1e-6f,
+				L"originalPathway=true must leave chroma_offset_x untouched");
+			Assert::AreEqual(0.75f, cflHook.valY.f, 1e-6f,
+				L"originalPathway=true must leave chroma_offset_y untouched");
+
+			// In-test negative control: exact same frame, hook, and rules with originalPathway=false
+			// must update both parameters to the frame's top-left (-0.5, -0.5) siting.
+			ChromaUpscale::ApplyCflHookOffsets(f.frame, hooks, rules, false);
+			Assert::AreEqual(-0.5f, cflHook.valX.f, 1e-6f,
+				L"negative control: originalPathway=false must update chroma_offset_x to -0.5");
+			Assert::AreEqual(-0.5f, cflHook.valY.f, 1e-6f,
+				L"negative control: originalPathway=false must update chroma_offset_y to -0.5");
 		}
 	};
 
@@ -1295,6 +1641,210 @@ namespace VideoProcessorTest
 			}
 			Assert::IsTrue(outCb[0].v == outCb[1].v && outCr[0].v == outCr[1].v,
 				L"3-plane and 4-plane alpha frames produce bit-identical upsampled chroma");
+		}
+
+		TEST_METHOD(ChromaCflPredictionShaderDynamicOffsetsShiftChromaOnWarp)
+		{
+			// Q#7 (GEM-066): verify the real bundled shaders/CfL_Prediction.glsl preserves its MIT license header,
+			// declares //!TYPE DYNAMIC float on chroma_offset_x (-0.5) and chroma_offset_y (0.0), parses via
+			// pl_mpv_user_shader_parse with PL_HOOK_PAR_DYNAMIC float parameters, and dynamically shifts GPU chroma
+			// alignment on a sharp horizontal+vertical Y+CbCr step edge via ApplyCflHookOffsets without re-parsing.
+			const std::string shaderSource = LoadBundledCflShader();
+			Assert::IsFalse(shaderSource.empty(), L"bundled shaders/CfL_Prediction.glsl must be readable");
+			Assert::IsTrue(shaderSource.find("MIT License") != std::string::npos,
+				L"MIT License header in shaders/CfL_Prediction.glsl must remain intact");
+			Assert::IsTrue(HasDynamicFloatParam(shaderSource, "chroma_offset_x"),
+				L"shaders/CfL_Prediction.glsl must declare //!TYPE DYNAMIC float on chroma_offset_x");
+			Assert::IsTrue(HasDynamicFloatParam(shaderSource, "chroma_offset_y"),
+				L"shaders/CfL_Prediction.glsl must declare //!TYPE DYNAMIC float on chroma_offset_y");
+
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = dev.Gpu();
+
+			const pl_hook* cflHook = nullptr;
+			pl_renderer renderer = nullptr;
+			pl_tex lumaTex = nullptr;
+			pl_tex chromaTex = nullptr;
+			pl_tex targetTex = nullptr;
+
+			struct WarpCleanup
+			{
+				pl_gpu gpu;
+				pl_renderer* rr;
+				const pl_hook** hook;
+				pl_tex* luma;
+				pl_tex* chroma;
+				pl_tex* target;
+
+				WarpCleanup(pl_gpu g, pl_renderer* r, const pl_hook** h, pl_tex* l, pl_tex* c, pl_tex* t)
+					: gpu(g), rr(r), hook(h), luma(l), chroma(c), target(t) {}
+
+				~WarpCleanup()
+				{
+					if (rr && *rr) pl_renderer_destroy(rr);
+					if (hook && *hook) pl_mpv_user_shader_destroy(hook);
+					if (target && *target) pl_tex_destroy(gpu, target);
+					if (chroma && *chroma) pl_tex_destroy(gpu, chroma);
+					if (luma && *luma) pl_tex_destroy(gpu, luma);
+				}
+
+				WarpCleanup(const WarpCleanup&) = delete;
+				WarpCleanup& operator=(const WarpCleanup&) = delete;
+			} cleanup(gpu, &renderer, &cflHook, &lumaTex, &chromaTex, &targetTex);
+
+			cflHook = pl_mpv_user_shader_parse(gpu, shaderSource.data(), shaderSource.size());
+			Assert::IsNotNull(cflHook, L"CfL_Prediction.glsl must parse cleanly via pl_mpv_user_shader_parse");
+
+			const pl_hook_par* parX = FindHookParam(cflHook, "chroma_offset_x");
+			const pl_hook_par* parY = FindHookParam(cflHook, "chroma_offset_y");
+			Assert::IsNotNull(parX, L"parsed CfL hook must expose chroma_offset_x parameter");
+			Assert::IsNotNull(parY, L"parsed CfL hook must expose chroma_offset_y parameter");
+			Assert::IsTrue(parX->type == PL_VAR_FLOAT && parX->mode == PL_HOOK_PAR_DYNAMIC && parX->data != nullptr,
+				L"chroma_offset_x must be PL_VAR_FLOAT with PL_HOOK_PAR_DYNAMIC and mutable data pointer");
+			Assert::IsTrue(parY->type == PL_VAR_FLOAT && parY->mode == PL_HOOK_PAR_DYNAMIC && parY->data != nullptr,
+				L"chroma_offset_y must be PL_VAR_FLOAT with PL_HOOK_PAR_DYNAMIC and mutable data pointer");
+			Assert::AreEqual(-0.5f, parX->initial.f, 1e-6f, L"default chroma_offset_x must remain -0.5");
+			Assert::AreEqual(0.0f, parY->initial.f, 1e-6f, L"default chroma_offset_y must remain 0.0");
+			Assert::AreEqual(-0.5f, parX->data->f, 1e-6f, L"initial live chroma_offset_x value must be -0.5");
+			Assert::AreEqual(0.0f, parY->data->f, 1e-6f, L"initial live chroma_offset_y value must be 0.0");
+
+			// Build a 64x64 4:2:0 sharp horizontal+vertical Y+CbCr quadrant step edge whose BT.709 RGB
+			// values stay strictly inside [0.11, 0.90] (zero clipping on both sides of the edge).
+			const int W = 64, H = 64, cw = 32, ch = 32;
+			Plane luma(W, H), cb(cw, ch), cr(cw, ch);
+			for (int y = 0; y < H; ++y)
+				for (int x = 0; x < W; ++x)
+					luma.at(x, y) = (x >= W / 2 && y >= H / 2) ? 680.0 : 240.0;
+			for (int cy = 0; cy < ch; ++cy)
+				for (int cx = 0; cx < cw; ++cx)
+				{
+					const bool fg = (cx >= cw / 2 && cy >= ch / 2);
+					cb.at(cx, cy) = fg ? 288.0 : 736.0;
+					cr.at(cx, cy) = fg ? 624.0 : 464.0;
+				}
+
+			lumaTex = UploadR16(gpu, luma);
+			chromaTex = UploadRg16(gpu, cb, cr);
+			Assert::IsTrue(lumaTex != nullptr && chromaTex != nullptr, L"4:2:0 step edge textures uploaded");
+
+			pl_fmt targetFmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+			Assert::IsNotNull(targetFmt, L"RGBA32F renderable+host_readable target format must be available");
+			pl_tex_params tp{};
+			tp.w = W;
+			tp.h = H;
+			tp.format = targetFmt;
+			tp.renderable = true;
+			tp.host_readable = true;
+			tp.blit_dst = (targetFmt->caps & PL_FMT_CAP_BLITTABLE) != 0;
+			targetTex = pl_tex_create(gpu, &tp);
+			Assert::IsNotNull(targetTex, L"RGBA32F render target created");
+
+			renderer = pl_renderer_create(dev.log, gpu);
+			Assert::IsNotNull(renderer, L"libplacebo renderer created");
+
+			pl_frame target{};
+			target.num_planes = 1;
+			target.planes[0].texture = targetTex;
+			target.planes[0].components = 3;
+			target.planes[0].component_mapping[0] = PL_CHANNEL_R;
+			target.planes[0].component_mapping[1] = PL_CHANNEL_G;
+			target.planes[0].component_mapping[2] = PL_CHANNEL_B;
+			target.repr.sys = PL_COLOR_SYSTEM_RGB;
+			target.repr.levels = PL_COLOR_LEVELS_FULL;
+			target.color = pl_color_space_bt709;
+
+			std::vector<const pl_hook*> hooks = { cflHook };
+			ConfiguredShaderRule cflRule;
+			cflRule.name = "cfl";
+			cflRule.label = "CfL_Prediction";
+			cflRule.filename = "CfL_Prediction.glsl";
+			const std::vector<ConfiguredShaderRule> rules = { cflRule };
+
+			pl_render_params rparams = pl_render_default_params;
+			rparams.dither_params = nullptr;
+			rparams.error_diffusion = nullptr;
+			rparams.hooks = hooks.data();
+			rparams.num_hooks = static_cast<int>(hooks.size());
+
+			auto renderFrame = [&](const pl_frame& src) -> std::vector<float>
+			{
+				const float black[3] = { 0.0f, 0.0f, 0.0f };
+				pl_frame_clear(gpu, &target, black);
+				Assert::IsTrue(pl_render_image(renderer, &src, &target, &rparams),
+					L"pl_render_image with CfL_Prediction.glsl must succeed");
+				const pl_render_errors errs = pl_renderer_get_errors(renderer);
+				Assert::IsTrue(errs.errors == 0 && errs.num_disabled_hooks == 0,
+					L"pl_render_image must execute CfL_Prediction.glsl without errors or disabled hooks");
+				pl_gpu_finish(gpu);
+				std::vector<float> rgba(static_cast<size_t>(W) * H * 4, 0.0f);
+				pl_tex_transfer_params dl{};
+				dl.tex = targetTex;
+				dl.ptr = rgba.data();
+				Assert::IsTrue(pl_tex_download(gpu, &dl), L"float32 render target download must succeed");
+				for (size_t i = 0; i < static_cast<size_t>(W) * H; ++i)
+				{
+					Assert::IsTrue(std::isfinite(rgba[i * 4 + 0]) &&
+						std::isfinite(rgba[i * 4 + 1]) &&
+						std::isfinite(rgba[i * 4 + 2]),
+						L"rendered RGB pixels must be finite");
+				}
+				return rgba;
+			};
+
+			auto maxRgbDiffInBox = [&](const std::vector<float>& a, const std::vector<float>& b,
+				int x0, int y0, int x1, int y1) -> double
+			{
+				double worst = 0.0;
+				for (int y = y0; y < y1; ++y)
+					for (int x = x0; x < x1; ++x)
+					{
+						const size_t base = (static_cast<size_t>(y) * W + x) * 4;
+						for (int c = 0; c < 3; ++c)
+							worst = (std::max)(worst, std::fabs(static_cast<double>(a[base + c]) - static_cast<double>(b[base + c])));
+					}
+				return worst;
+			};
+
+			// Render 1: top-left (-0.5, -0.5) via ApplyCflHookOffsets on the parsed hook.
+			const pl_frame frameTopLeft = Frame2(lumaTex, chromaTex, -0.5, -0.5);
+			ChromaUpscale::ApplyCflHookOffsets(frameTopLeft, hooks, rules, false);
+			Assert::AreEqual(-0.5f, parX->data->f, 1e-6f, L"ApplyCflHookOffsets must set chroma_offset_x to -0.5 for top-left");
+			Assert::AreEqual(-0.5f, parY->data->f, 1e-6f, L"ApplyCflHookOffsets must set chroma_offset_y to -0.5 for top-left");
+			const std::vector<float> outTopLeft = renderFrame(frameTopLeft);
+
+			// Render 2: center (0.0, 0.0) on the EXACT SAME parsed pl_hook (no re-parse).
+			const pl_frame frameCenter = Frame2(lumaTex, chromaTex, 0.0, 0.0);
+			ChromaUpscale::ApplyCflHookOffsets(frameCenter, hooks, rules, false);
+			Assert::AreEqual(0.0f, parX->data->f, 1e-6f, L"ApplyCflHookOffsets must set chroma_offset_x to 0.0 for center");
+			Assert::AreEqual(0.0f, parY->data->f, 1e-6f, L"ApplyCflHookOffsets must set chroma_offset_y to 0.0 for center");
+			const std::vector<float> outCenter = renderFrame(frameCenter);
+
+			// Render 3 (isolated dynamic-uniform proof): render the EXACT SAME frameTopLeft while the same
+			// parsed pl_hook still holds (0.0, 0.0) from ApplyCflHookOffsets(frameCenter, ...). Any difference
+			// vs outTopLeft is 100% caused by the dynamic GPU shader parameters (not pl_frame.shift_x/y).
+			const std::vector<float> outTopLeftWithCenterParams = renderFrame(frameTopLeft);
+
+			const double maxDiffEdge = maxRgbDiffInBox(outTopLeft, outCenter, 24, 24, 56, 56);
+			const double maxDiffDynamicX = maxRgbDiffInBox(outTopLeft, outTopLeftWithCenterParams, 28, 44, 36, 52);
+			const double maxDiffDynamicY = maxRgbDiffInBox(outTopLeft, outTopLeftWithCenterParams, 44, 28, 52, 36);
+			const double maxDiffFlat = maxRgbDiffInBox(outTopLeft, outCenter, 6, 6, 20, 20);
+
+			LogF("CfL_Prediction dynamic offsets WARP: top-left vs center edge %.4f, isolated dynX %.4f, isolated dynY %.4f, flat %.6f",
+				maxDiffEdge, maxDiffDynamicX, maxDiffDynamicY, maxDiffFlat);
+
+			// In-test negative control: top-left (-0.5, -0.5) and center (0.0, 0.0) outputs must differ
+			// measurably at the edge, and both dynamic shader uniforms must independently shift chroma
+			// on the exact same pl_frame without re-parsing the hook.
+			Assert::IsTrue(maxDiffEdge > 0.01,
+				L"negative control: top-left (-0.5, -0.5) and center (0.0, 0.0) edge outputs must differ by > 0.01");
+			Assert::IsTrue(maxDiffDynamicX > 0.01,
+				L"negative control: dynamic chroma_offset_x alone must shift vertical-edge chroma by > 0.01 without re-parsing");
+			Assert::IsTrue(maxDiffDynamicY > 0.01,
+				L"negative control: dynamic chroma_offset_y alone must shift horizontal-edge chroma by > 0.01 without re-parsing");
+			Assert::IsTrue(maxDiffFlat < 1e-3,
+				L"flat interior must remain unaffected (< 1e-3) across dynamic siting updates");
 		}
 	};
 }
