@@ -1181,22 +1181,6 @@ float srcVal = td_sh_m0[cyCenter][lx + TD_RAD_FINE];
 
 #if TD_MEMO_IS_HALF
 float rawL = td_sample_half_ld3(cur_low_band, p, halfActive).x;
-#elif TD_MEMO_COMPACT
-// RealTime compact path stores half-res L in bands_ld3_out; sample the exact same bilinear half-res L from LDS
-// (matching kPass1FullMH's td_sample_half_ld3 bit-for-bit so bL_half_upsampled + bM + bH == srcVal!).
-vec2 hcL = (vec2(p) - vec2(0.5)) / 2.0;
-vec2 hLoL = vec2(float(hax0), float(hay0));
-vec2 hHiL = vec2(float(max(hax0, hax1 - 1)), float(max(hay0, hay1 - 1)));
-vec2 hClL = clamp(hcL, hLoL, hHiL) - vec2(float(hBaseX - 1), float(hBaseY - 1));
-vec2 locClL = clamp(hClL, vec2(0.0), vec2(9.0));
-ivec2 i0L = ivec2(floor(locClL));
-ivec2 i1L = min(ivec2(9), i0L + ivec2(1));
-vec2 fL = locClL - vec2(i0L);
-float l00 = td_sh_mh0[i0L.y + TD_RAD_HDIFF][i0L.x + TD_RAD_HDIFF];
-float l10 = td_sh_mh0[i0L.y + TD_RAD_HDIFF][i1L.x + TD_RAD_HDIFF];
-float l01 = td_sh_mh0[i1L.y + TD_RAD_HDIFF][i0L.x + TD_RAD_HDIFF];
-float l11 = td_sh_mh0[i1L.y + TD_RAD_HDIFF][i1L.x + TD_RAD_HDIFF];
-float rawL = (l00 + (l10 - l00) * fL.x) * (1.0 - fL.y) + (l01 + (l11 - l01) * fL.x) * fL.y;
 #else
 float rawL = texelFetch(cur_low_band, p, 0).x;
 #endif
@@ -1494,15 +1478,23 @@ if (tid == 0)
         spatialDetailRms = sqrt(max(0.0, totCur.z * invC));
     }
 
+    vec4 priorT = texelFetch(cell_prior, cell, 0);
+    float rawSc = (u_cell_prior_has_step_scale > 0.5) ? priorT.z : 1.0;
+    float cellScale = (!td_is_bad(rawSc) && rawSc > 0.0) ? clamp(rawSc, TD_STEP_SCALE_MIN, TD_STEP_SCALE_MAX) : 1.0;
+    float cellStepScaleSq = cellScale * cellScale;
+    float cellStepNoiseVar = max(0.0, u_step_noise_var) * cellStepScaleSq;
+    float cellStructureFloor = u_structure_floor * cellStepScaleSq;
+    float quantMidRmsBound = TD_PIXEL_BOUND_SIGMA * sqrt(cellStepNoiseVar) * TD_HM_PEAK;
+
     float cM3Val = max(0.0, curEnergy - cM2);
-    float cleanM2 = max(0.0, cM2 - u_step_noise_var * TD_GAIN_MID);
-    float cleanM3 = max(0.0, cM3Val - u_step_noise_var * TD_GAIN_D3);
+    float cleanM2 = max(0.0, cM2 - cellStepNoiseVar * TD_GAIN_MID);
+    float cleanM3 = max(0.0, cM3Val - cellStepNoiseVar * TD_GAIN_D3);
     float curFDebiased = (cleanM2 + cleanM3 > TD_NUM_FLOOR)
         ? (cleanM2 / (cleanM2 + cleanM3 + TD_NUM_FLOOR))
         : curF;
 
     bool focusChange = false;
-    int expFocusBits = int(round(texelFetch(cell_prior, cell, 0).y));
+    int expFocusBits = int(round(priorT.y));
     if ((expFocusBits & 1) != 0)
     {
         focusChange = true;
@@ -1510,16 +1502,20 @@ if (tid == 0)
     else if (totCur.w > 0.5 && K > 0)
     {
         float invC = 1.0 / totCur.w;
-        float quantMidRmsBound = sqrt(12.0 * max(0.0, u_step_noise_var)) * TD_HM_PEAK;
         for (int k = 0; k < K; ++k)
         {
             float rM2 = totRefM2[k] * invC;
             float rM3 = totRefD3[k] * invC;
             float rEnergy = rM2 + rM3;
             float rF = (rEnergy > TD_NUM_FLOOR) ? (rM2 / (rEnergy + TD_NUM_FLOOR)) : 1.0;
-            if (rEnergy > u_structure_floor && cM2 < rM2 && curFDebiased < TD_F_SHARP &&
-                (rF - curF) > TD_F_SHIFT_DELTA &&
-                (curF <= TD_F_DEFOCUS || (sqrt(rM2) - sqrt(cM2)) > quantMidRmsBound))
+            float cleanRefM2 = max(0.0, rM2 - TD_BASE_QUANT_VAR * TD_GAIN_MID);
+            float cleanRefM3 = max(0.0, rM3 - TD_BASE_QUANT_VAR * TD_GAIN_D3);
+            float refFDebiased = (cleanRefM2 + cleanRefM3 > TD_NUM_FLOOR)
+                ? (cleanRefM2 / (cleanRefM2 + cleanRefM3 + TD_NUM_FLOOR))
+                : rF;
+            if (rEnergy > cellStructureFloor && cM2 < rM2 && curFDebiased < TD_F_SHARP &&
+                (refFDebiased - curFDebiased) > TD_F_SHIFT_DELTA &&
+                (sqrt(rM2) - sqrt(cM2)) > quantMidRmsBound)
             {
                 focusChange = true;
                 break;

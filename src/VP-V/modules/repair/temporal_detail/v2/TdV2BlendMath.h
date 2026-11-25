@@ -1005,7 +1005,7 @@ namespace TdV2
 			if (!valid || !AllFinite())
 				return false;
 			const double w = h[6] * x + h[7] * y + h[8];
-			if (!std::isfinite(w) || std::fabs(w) <= kSolvePivotFloor)
+			if (!std::isfinite(w) || std::fabs(w) <= kSolveNumericalFloor)
 				return false;
 			const double sx = (h[0] * x + h[1] * y + h[2]) / w;
 			const double sy = (h[3] * x + h[4] * y + h[5]) / w;

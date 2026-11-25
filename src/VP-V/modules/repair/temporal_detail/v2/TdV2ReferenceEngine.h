@@ -562,7 +562,8 @@ namespace TdV2
 		double stepTotalVar,
 		const std::vector<uint8_t>* explicitFocusChangeCells,
 		StandInRegistry* standIns,
-		const std::vector<uint8_t>* explicitDefocusedCells = nullptr)
+		const std::vector<uint8_t>* explicitDefocusedCells = nullptr,
+		const std::vector<double>* cellStepScales = nullptr)
 	{
 		(void)sourceBits;
 		if (standIns != nullptr)
@@ -582,13 +583,11 @@ namespace TdV2
 		const double fSharp = AnalyticalEdgeFocusRatio(0.0);
 		const double fDefocus = AnalyticalEdgeFocusRatio(VpUnit::BandFromBase::kSigmaBase);
 		const double fShiftDelta = fSharp - fDefocus;
-		// Exact Parseval M-band passband supremum ||H_M||_inf and uniform-step deadzone RMS bound
-		// Delta_eff * ||H_M||_inf = sqrt(12 * stepNoiseVar) * ||H_M||_inf (Rule 1: zero magic numbers).
+		// Exact M-band passband supremum ||H_M||_inf (matches a2BandPeakSq[1] and ApplyTransformUnknownBound 1:1).
 		const double s1SqF = VpUnit::BandFromBase::kSigmaFine * VpUnit::BandFromBase::kSigmaFine;
 		const double s2SqF = VpUnit::BandFromBase::kSigmaBase * VpUnit::BandFromBase::kSigmaBase;
 		const double wStarSqF = (2.0 * std::log(VpUnit::BandFromBase::kSigmaBase / VpUnit::BandFromBase::kSigmaFine)) / (s2SqF - s1SqF);
 		const double hmPeakF = std::exp(-(s1SqF * wStarSqF) / 2.0) - std::exp(-(s2SqF * wStarSqF) / 2.0);
-		const double quantMidRmsBound = std::sqrt(12.0 * stepNoiseVar) * hmPeakF;
 
 		const ActiveRect ar = active.ClampedTo(curBands.M.w, curBands.M.h);
 
@@ -634,17 +633,32 @@ namespace TdV2
 				const double curF = cellFocusRatio(curBands, cx, cy, curEnergy, curM2);
 				info[idx].focusRatio = curF;
 
+				// Per-cell AQ/PQ step scaling of coding noise variance & structure floor (homogeneous degree 2 in stepDelta).
+				double cellScale = 1.0;
+				if (cellStepScales != nullptr && idx < cellStepScales->size())
+				{
+					const double sv = (*cellStepScales)[idx];
+					if (std::isfinite(sv) && sv > 0.0)
+						cellScale = sv < kCellStepScaleMin ? kCellStepScaleMin : (sv > kCellStepScaleMax ? kCellStepScaleMax : sv);
+				}
+				const double cellStepScaleSq = cellScale * cellScale;
+				const double cellStepNoiseVar = stepNoiseVar * cellStepScaleSq;
+				const double cellStructureFloor = structureFloor * cellStepScaleSq;
+				// Exact 3-sigma M-band Parseval passband bound matching ApplyTransformUnknownBound:
+				// any M-band RMS drop <= kPixelBoundSigma * sqrt(cellStepNoiseVar) * ||H_M||_inf can arise from lawful B-frame quantization!
+				const double quantMidRmsBound = kPixelBoundSigma * std::sqrt(cellStepNoiseVar) * hmPeakF;
+
 				// Noise-debiased focus ratio for optical bokeh / rack-focus detection:
 				// White coding noise passes ~6.5x more variance into M (gains.mid) than D3 (gains.d3);
 				// subtracting exact BandFromBase white-noise variance restores the true optical focus ratio.
 				const double curM3 = (std::max)(0.0, curEnergy - curM2);
-				const double cleanM2 = (std::max)(0.0, curM2 - stepNoiseVar * focusGains.mid);
-				const double cleanM3 = (std::max)(0.0, curM3 - stepNoiseVar * focusGains.d3);
+				const double cleanM2 = (std::max)(0.0, curM2 - cellStepNoiseVar * focusGains.mid);
+				const double cleanM3 = (std::max)(0.0, curM3 - cellStepNoiseVar * focusGains.d3);
 				const double curFDebiased = (cleanM2 + cleanM3 > kEngineNumFloor)
 					? (cleanM2 / (cleanM2 + cleanM3 + kEngineNumFloor))
 					: curF;
 
-				if (curEnergy > structureFloor && curFDebiased <= fDefocus)
+				if (curEnergy > cellStructureFloor && curFDebiased <= fDefocus)
 					info[idx].isDefocused = true;
 
 				if (explicitDefocusedCells != nullptr && idx < explicitDefocusedCells->size() && (*explicitDefocusedCells)[idx] != 0)
@@ -656,18 +670,22 @@ namespace TdV2
 				}
 				else
 				{
-					// Detect genuine focal-plane shift (rack focus) along motion respecting Parseval's theorem:
-					// Optical defocus (|H(w)| <= 1) strictly reduces mid-band energy (curM2 < refM2), drops focus
-					// ratio by > F(0) - F(kSigmaBase), AND reduces M-band RMS by strictly more than the codec's
-					// derived deadzone quantization bound Delta_eff * ||H_M||_inf = sqrt(12 * stepNoiseVar) * ||H_M||_inf,
+					// Detect genuine focal-plane shift (rack focus) along motion respecting 2D Parseval's theorem:
+					// Strict conjunction on noise-debiased focus ratios + 3-sigma 2D Parseval M-band RMS bound
 					// so static curved skies (refF ~= curF) and B-frame quantization wipes NEVER trigger false vetoes!
 					for (const auto& rb : refBands)
 					{
 						double refEnergy = 0.0, refM2 = 0.0;
 						const double refF = cellFocusRatio(rb, cx, cy, refEnergy, refM2);
-						if (refEnergy > structureFloor && curM2 < refM2 && curFDebiased < fSharp &&
-						    (refF - curF) > fShiftDelta &&
-						    (curF <= fDefocus || (std::sqrt(refM2) - std::sqrt(curM2)) > quantMidRmsBound))
+						const double refM3 = (std::max)(0.0, refEnergy - refM2);
+						const double cleanRefM2 = (std::max)(0.0, refM2 - baseQuantVar * focusGains.mid);
+						const double cleanRefM3 = (std::max)(0.0, refM3 - baseQuantVar * focusGains.d3);
+						const double refFDebiased = (cleanRefM2 + cleanRefM3 > kEngineNumFloor)
+							? (cleanRefM2 / (cleanRefM2 + cleanRefM3 + kEngineNumFloor))
+							: refF;
+						if (refEnergy > cellStructureFloor && curM2 < refM2 && curFDebiased < fSharp &&
+						    (refFDebiased - curFDebiased) > fShiftDelta &&
+						    (std::sqrt(refM2) - std::sqrt(curM2)) > quantMidRmsBound)
 						{
 							info[idx].focusChange = true;
 							break;
@@ -1252,6 +1270,27 @@ namespace TdV2
 			const double midPassbandPeak = std::exp(-0.5 * s1Sq * wStarSq) - std::exp(-0.5 * s2Sq * wStarSq);
 			const double a2BandPeakSq[3] = { 1.0, midPassbandPeak * midPassbandPeak, 1.0 };
 
+			// Resolve per-cell AQ/PQ step scale upfront so FocusGuard, A2, pixel bounds, and 8x8 POCS share identical scales.
+			std::vector<double> cellStepScales(numCells, 1.0);
+			if (!in.cellStepScale.empty())
+			{
+				for (size_t ci = 0; ci < numCells && ci < in.cellStepScale.size(); ++ci)
+				{
+					const double sv = in.cellStepScale[ci];
+					if (std::isfinite(sv) && sv > 0.0)
+					{
+						cellStepScales[ci] = sv < kCellStepScaleMin ? kCellStepScaleMin : (sv > kCellStepScaleMax ? kCellStepScaleMax : sv);
+					}
+					else
+					{
+						cellStepScales[ci] = 0.0;
+						nonFiniteCellFlag[ci] = 1u;
+						if (standIns != nullptr)
+							standIns->Engage(StandInKind::NonFiniteClosure, "non-finite or non-positive cellStepScale");
+					}
+				}
+			}
+
 			// Evaluate physics-derived frequency-split focus guard across all aligned references.
 			std::vector<ThreeBandPlanes> refBandList;
 			refBandList.reserve(refs.size());
@@ -1260,7 +1299,7 @@ namespace TdV2
 			const auto focusCells = EvaluateFocusGuardStandIn(
 				curBands, refBandList, active, res.cellsW, res.cellsH, cellPx, cfg_.sourceBits,
 				a2Stats.valid ? a2Stats.totalVar : 0.0,
-				in.explicitFocusChangeCells, standIns, in.explicitDefocusedCells);
+				in.explicitFocusChangeCells, standIns, in.explicitDefocusedCells, &cellStepScales);
 
 			const int K = static_cast<int>(refs.size());
 			std::array<std::array<std::vector<double>, kMaxBlendRefs>, 3> cellW;
@@ -1284,25 +1323,6 @@ namespace TdV2
 			std::vector<double> cellRetainedGrain(numCells, 0.0);
 			std::vector<double> cellMeanCleanY(numCells, 0.0);
 			std::vector<double> cellStdCleanY(numCells, 0.0);
-			std::vector<double> cellStepScales(numCells, 1.0);
-			if (!in.cellStepScale.empty())
-			{
-				for (size_t ci = 0; ci < numCells && ci < in.cellStepScale.size(); ++ci)
-				{
-					const double sv = in.cellStepScale[ci];
-					if (std::isfinite(sv) && sv > 0.0)
-					{
-						cellStepScales[ci] = sv < kCellStepScaleMin ? kCellStepScaleMin : (sv > kCellStepScaleMax ? kCellStepScaleMax : sv);
-					}
-					else
-					{
-						cellStepScales[ci] = 0.0;
-						nonFiniteCellFlag[ci] = 1u;
-						if (standIns != nullptr)
-							standIns->Engage(StandInKind::NonFiniteClosure, "non-finite or non-positive cellStepScale");
-					}
-				}
-			}
 
 			const bool faceMaskSizeMismatch = (in.faceMask != nullptr && !in.faceMask->empty() && in.faceMask->size() != numCells);
 			if (faceMaskSizeMismatch && standIns != nullptr)

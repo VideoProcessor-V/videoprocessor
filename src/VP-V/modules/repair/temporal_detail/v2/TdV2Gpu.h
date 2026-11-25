@@ -1006,6 +1006,7 @@ namespace Gpu
 				return failVisible("TdV2GpuEngine::ProcessFrameGpu prevPeak2.cleanTex dimension mismatch", StandInKind::GpuDispatchFailed);
 			if (!checkTexDim(in.codecModelPbTex, w, h))
 				return failVisible("TdV2GpuEngine::ProcessFrameGpu codecModelPbTex dimension mismatch", StandInKind::GpuDispatchFailed);
+			pl_tex effCurLowBandTex = in.curLowBandTex;
 			if (in.curLowBandTex != nullptr)
 			{
 				const pl_tex_params& mp = in.curLowBandTex->params;
@@ -1021,6 +1022,14 @@ namespace Gpu
 					if (standIns != nullptr)
 						standIns->Engage(StandInKind::BandMemoW2, "TdV2GpuEngine::ProcessFrameGpu curLowBandTex invalid dimensions or format");
 					return failVisible("TdV2GpuEngine::ProcessFrameGpu curLowBandTex invalid dimensions or format (expected sampleable float w x h, or wHalf x hHalf in RealTime)", StandInKind::GpuDispatchFailed);
+				}
+				if (cfg_.preset == Preset::RealTime && !dimHalf)
+				{
+					// TD-AUDIT-M1: RealTime compact half-res bands require wHalf x hHalf curLowBandTex (HalfSigma(2.5));
+					// bypass mismatched full-res w x h memo cleanly to native half-res runBandDecomp with visible BandMemoW2!
+					effCurLowBandTex = nullptr;
+					if (standIns != nullptr)
+						standIns->Engage(StandInKind::BandMemoW2, "TdV2GpuEngine::ProcessFrameGpu full-res curLowBandTex bypassed in RealTime (requires wHalf x hHalf)");
 				}
 			}
 			if ((in.motionVecTex != nullptr) != (in.motionMetaTex != nullptr))
@@ -1349,7 +1358,7 @@ namespace Gpu
 			p.cellPriorTex = in.cellPriorTex;
 			p.faceMaskTex = in.faceMaskTex;
 			p.codecModelPbTex = in.codecModelPbTex;
-			p.curLowBandTex = in.curLowBandTex;
+			p.curLowBandTex = effCurLowBandTex;
 			p.retainedGrainVar = &in.retainedGrainVar;
 			p.cellStepScale = &in.cellStepScale;
 			p.explicitFocusChangeCells = in.explicitFocusChangeCells;
@@ -3069,12 +3078,16 @@ namespace Gpu
 				p2aHdr += VpvGpu::Define("TD_F_DEFOCUS", fDefocus);
 				p2aHdr += VpvGpu::Define("TD_F_SHIFT_DELTA", fShiftDelta);
 				p2aHdr += VpvGpu::Define("TD_HM_PEAK", hmPeakF);
+				p2aHdr += VpvGpu::Define("TD_PIXEL_BOUND_SIGMA", kPixelBoundSigma);
+				p2aHdr += VpvGpu::Define("TD_BASE_QUANT_VAR", baseQuantVar);
+				p2aHdr += VpvGpu::Define("TD_STEP_SCALE_MIN", kCellStepScaleMin);
+				p2aHdr += VpvGpu::Define("TD_STEP_SCALE_MAX", kCellStepScaleMax);
 				p2aHdr += Shaders::kCoreHelpers;
 				if (compactBands)
 					p2aHdr += Shaders::kHalfBandSamplerHelper;
 				p2aHdr += Shaders::kPass2CellStatsHeader;
 
-				pl_shader_var v2a[15] = {
+				pl_shader_var v2a[16] = {
 					VpvGpu::Var("u_k", &uK),
 					VpvGpu::Var("u_ax0", &uAx0),
 					VpvGpu::Var("u_ay0", &uAy0),
@@ -3089,7 +3102,8 @@ namespace Gpu
 					VpvGpu::Var("u_has_face_mask", &uHasFaceMask),
 					VpvGpu::Var("u_has_clean_split", &uHasCleanSplit),
 					VpvGpu::Var("u_same_clean_rec", &uSameCleanRec),
-					VpvGpu::Var("u_bokeh_mode", &uBokehMode)
+					VpvGpu::Var("u_bokeh_mode", &uBokehMode),
+					VpvGpu::Var("u_cell_prior_has_step_scale", &uCellPriorHasStepScale)
 				};
 				const size_t shmemP2a = (256u * 4u + 256u * 4u + 256u + 16u) * sizeof(float);
 				// Distinct dummy texture (sc.cellWeights is unused in Pass 2A) when curCleanTex aliases recYTex.
@@ -3114,7 +3128,7 @@ namespace Gpu
 						VpvGpu::Storage("warp_diag", dstWarpDiag),
 						VpvGpu::Storage("cell_stats", sc.cellStats)
 					};
-					ok2a = runPass("td_v2_p2a_cell_stats", p2aHdr, p2aBody.c_str(), d2a, 13, v2a, 15, cw, ch, 16, 16, shmemP2a);
+					ok2a = runPass("td_v2_p2a_cell_stats", p2aHdr, p2aBody.c_str(), d2a, 13, v2a, 16, cw, ch, 16, 16, shmemP2a);
 				}
 				else
 				{
@@ -3137,7 +3151,7 @@ namespace Gpu
 						VpvGpu::Storage("warp_diag", dstWarpDiag),
 						VpvGpu::Storage("cell_stats", sc.cellStats)
 					};
-					ok2a = runPass("td_v2_p2a_cell_stats", p2aHdr, p2aBody.c_str(), d2a, 17, v2a, 15, cw, ch, 16, 16, shmemP2a);
+					ok2a = runPass("td_v2_p2a_cell_stats", p2aHdr, p2aBody.c_str(), d2a, 17, v2a, 16, cw, ch, 16, 16, shmemP2a);
 				}
 				if (!ok2a)
 				{
