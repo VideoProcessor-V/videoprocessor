@@ -796,7 +796,7 @@ namespace Tests
 				bob1080Stream.push_back(makeNoisyBob1080Snap(
 					fieldPhase,
 					static_cast<uint64_t>(100 + f), static_cast<int64_t>(f) * 1200000,
-					0x6100ull + static_cast<uint64_t>(f * 43), isCut));
+					0x7100ull + static_cast<uint64_t>(f * 43), isCut));
 			}
 
 			const SourceGeometry::Delivered deliv{ kFhdW, kFhdH };
