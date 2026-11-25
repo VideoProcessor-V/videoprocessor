@@ -16,6 +16,8 @@
 #include <VP-V/modules/motion/estimation/P2CpuForm.h>
 #include <VP-V/modules/motion/estimation/P2PairRecord.h>
 #include <VP-V/modules/control/diagnostics/DiagnosticHistory.h>
+#include <VP-V/modules/motion/estimation/global_model/PairGlobalFill.h>
+#include <VP-V/core/FallbackPlainText.h>
 
 #include <cstring>
 #include <memory>
@@ -124,6 +126,66 @@ namespace VideoProcessorTest
 			DiagnosticHistory::RingCounters c;
 			DiagnosticHistory::Global().decisions.Snapshot(&c, 1);
 			return c.written;
+		}
+
+		// RAII join guard so off-render-thread tests always join cleanly even on assertion failure (Rule 2).
+		struct PairGlobalThreadJoinGuard
+		{
+			std::thread thread;
+			~PairGlobalThreadJoinGuard()
+			{
+				if (thread.joinable())
+					thread.join();
+			}
+			PairGlobalThreadJoinGuard() = default;
+			PairGlobalThreadJoinGuard(const PairGlobalThreadJoinGuard&) = delete;
+			PairGlobalThreadJoinGuard& operator=(const PairGlobalThreadJoinGuard&) = delete;
+		};
+
+		// Local IExternalDemand double forwarding RegisterOwnerFill to a standalone SkeletonMemo (zero global hub mutation).
+		struct FakePairGlobalDemand : Vpv::Skeleton::IExternalDemand
+		{
+			VpSkeleton::SkeletonMemo* memo = nullptr;
+			int registerCalls = 0;
+
+			explicit FakePairGlobalDemand(VpSkeleton::SkeletonMemo* target) : memo(target) {}
+			~FakePairGlobalDemand() {}
+
+			void SetExternalDemand(const void*, const void*, const std::vector<VpSkeleton::ConsumerDecl>&,
+				const std::vector<VpSkeleton::ProductId>&) override {}
+			void ClearExternalDemand(const void*, const void*) override {}
+			VpSkeleton::SkeletonMemo::Registration RegisterOwnerFill(VpSkeleton::ProductId id, VpSkeleton::AcquireForm form,
+				const std::string& unit, VpSkeleton::OwnerFill fill) override
+			{
+				++registerCalls;
+				if (memo == nullptr)
+					return VpSkeleton::SkeletonMemo::Registration::NotInCatalog;
+				return memo->RegisterOwnerFill(id, form, unit, std::move(fill));
+			}
+		};
+
+		VpMotion::PairGlobal MakePairGlobalSample(VpMotion::PairGlobalSource src, bool valid, uint64_t epoch, float base)
+		{
+			VpMotion::PairGlobal r;
+			r.src = src;
+			r.valid = valid;
+			r.p2Epoch = epoch;
+			for (int d = 0; d < 2; ++d)
+				for (int k = 0; k < 4; ++k)
+				{
+					r.vec[d][k] = base + 0.375f * float(d * 4 + k) * (d == 0 ? 1.0f : -1.0f);
+					r.second[d][k] = -base - 0.625f * float(d * 4 + k) + 0.125f;
+				}
+			return r;
+		}
+
+		bool SamePairGlobal(const VpMotion::PairGlobal& a, const VpMotion::PairGlobal& b)
+		{
+			return a.src == b.src
+				&& a.p2Epoch == b.p2Epoch
+				&& a.valid == b.valid
+				&& std::memcmp(a.vec, b.vec, sizeof(a.vec)) == 0
+				&& std::memcmp(a.second, b.second, sizeof(a.second)) == 0;
 		}
 	}
 
@@ -454,6 +516,650 @@ namespace VideoProcessorTest
 			reads.NoteP2CpuFormRead(true);
 			update();
 			Assert::AreEqual<size_t>(2, P2FormRecordsSince(from).size(), L"no further decline: no further record");
+		}
+
+		// M1#2 (U10 C1, PairGlobalFill.h): deterministic 80-byte little-endian POD codec round-trip for every PairGlobalSource
+		// and valid flag, plus corruption negative controls proving every malformed wire buffer is rejected with `out` untouched.
+		TEST_METHOD(PairGlobalCodecRoundTripAndCorruptionNegativeControls)
+		{
+			Assert::AreEqual(size_t(80), VpMotion::kPairGlobalRecordBytes, L"PairGlobal wire format is exactly 80 bytes");
+			Assert::AreEqual(std::string("cleared"), std::string(VpMotion::PairGlobalSourceName(VpMotion::PairGlobalSource::Cleared)));
+			Assert::AreEqual(std::string("camera_model"), std::string(VpMotion::PairGlobalSourceName(VpMotion::PairGlobalSource::CameraModel)));
+			Assert::AreEqual(std::string("engine"), std::string(VpMotion::PairGlobalSourceName(VpMotion::PairGlobalSource::Engine)));
+			Assert::AreEqual(std::string("gap_seed"), std::string(VpMotion::PairGlobalSourceName(VpMotion::PairGlobalSource::GapSeed)));
+			Assert::AreEqual(std::string("matcher_d1"), std::string(VpMotion::PairGlobalSourceName(VpMotion::PairGlobalSource::MatcherD1)));
+			Assert::AreEqual(std::string("?"), std::string(VpMotion::PairGlobalSourceName(static_cast<VpMotion::PairGlobalSource>(99))));
+
+			const VpMotion::PairGlobalSource allSources[] = {
+				VpMotion::PairGlobalSource::Cleared,
+				VpMotion::PairGlobalSource::CameraModel,
+				VpMotion::PairGlobalSource::Engine,
+				VpMotion::PairGlobalSource::GapSeed,
+				VpMotion::PairGlobalSource::MatcherD1
+			};
+			uint64_t idx = 0;
+			for (VpMotion::PairGlobalSource src : allSources)
+			{
+				for (int validFlag = 0; validFlag <= 1; ++validFlag)
+				{
+					const VpMotion::PairGlobal in = MakePairGlobalSample(src, validFlag != 0,
+						0x0123456789ABCDEFULL + idx * 0x01010101ULL, 2.5f + float(idx));
+					uint8_t wire[VpMotion::kPairGlobalRecordBytes] = {};
+					Assert::AreEqual(VpMotion::kPairGlobalRecordBytes,
+						VpMotion::EncodePairGlobal(in, wire, sizeof(wire)), L"encode returns exact wire byte count");
+					// Pin little-endian magic "PPG1" and header layout.
+					Assert::AreEqual(int('P'), int(wire[0]));
+					Assert::AreEqual(int('P'), int(wire[1]));
+					Assert::AreEqual(int('G'), int(wire[2]));
+					Assert::AreEqual(int('1'), int(wire[3]));
+					Assert::AreEqual(int(static_cast<uint8_t>(src)), int(wire[4]));
+					Assert::AreEqual(int(validFlag != 0 ? VpMotion::kPairGlobalFlagValid : 0u), int(wire[5]));
+					Assert::AreEqual(0, int(wire[6]), L"reserved byte 0 must be zero");
+					Assert::AreEqual(0, int(wire[7]), L"reserved byte 1 must be zero");
+
+					VpMotion::PairGlobal decoded = MakePairGlobalSample(VpMotion::PairGlobalSource::GapSeed, false, 999u, -99.0f);
+					Assert::IsTrue(VpMotion::DecodePairGlobal(wire, sizeof(wire), decoded), L"valid wire record decodes");
+					Assert::IsTrue(SamePairGlobal(in, decoded), L"bit-exact round-trip of vec, second, src, p2Epoch, valid");
+					++idx;
+				}
+			}
+
+			// Encode negative controls: null buffer, truncated capacity, and unknown PairGlobalSource enum value.
+			const VpMotion::PairGlobal good = MakePairGlobalSample(VpMotion::PairGlobalSource::CameraModel, true, 0xFEDCBA9876543210ULL, 4.25f);
+			uint8_t goodWire[VpMotion::kPairGlobalRecordBytes] = {};
+			Assert::AreEqual(size_t(0), VpMotion::EncodePairGlobal(good, nullptr, sizeof(goodWire)), L"null output refused");
+			Assert::AreEqual(size_t(0), VpMotion::EncodePairGlobal(good, goodWire, sizeof(goodWire) - 1u), L"short buffer refused");
+			VpMotion::PairGlobal badEnum = good;
+			badEnum.src = static_cast<VpMotion::PairGlobalSource>(static_cast<uint8_t>(VpMotion::PairGlobalSource::MatcherD1) + 1u);
+			Assert::AreEqual(size_t(0), VpMotion::EncodePairGlobal(badEnum, goodWire, sizeof(goodWire)), L"out-of-range enum refused on encode");
+			badEnum.src = static_cast<VpMotion::PairGlobalSource>(0xFFu);
+			Assert::AreEqual(size_t(0), VpMotion::EncodePairGlobal(badEnum, goodWire, sizeof(goodWire)), L"0xFF enum refused on encode");
+			Assert::AreEqual(VpMotion::kPairGlobalRecordBytes, VpMotion::EncodePairGlobal(good, goodWire, sizeof(goodWire)));
+
+			// Decode corruption negative controls on the exact same valid wire buffer: every rejection leaves sentinel `out` untouched.
+			const VpMotion::PairGlobal sentinel = MakePairGlobalSample(VpMotion::PairGlobalSource::GapSeed, false, 0xCAFEBABE11223344ULL, -13.5f);
+			auto assertRejectedUntouched = [&](const uint8_t* buf, size_t len, const wchar_t* msg) {
+				VpMotion::PairGlobal out = sentinel;
+				Assert::IsFalse(VpMotion::DecodePairGlobal(buf, len, out), msg);
+				Assert::IsTrue(SamePairGlobal(sentinel, out), L"failed decode must leave output untouched");
+			};
+
+			assertRejectedUntouched(nullptr, sizeof(goodWire), L"null input rejected");
+			assertRejectedUntouched(goodWire, sizeof(goodWire) - 1u, L"truncated 79-byte buffer rejected");
+			uint8_t overWire[VpMotion::kPairGlobalRecordBytes + 1u] = {};
+			std::memcpy(overWire, goodWire, sizeof(goodWire));
+			assertRejectedUntouched(overWire, sizeof(overWire), L"oversized 81-byte buffer rejected");
+
+			uint8_t corrupt[VpMotion::kPairGlobalRecordBytes] = {};
+			auto testMutation = [&](size_t byteIndex, uint8_t newValue, const wchar_t* msg) {
+				std::memcpy(corrupt, goodWire, sizeof(goodWire));
+				corrupt[byteIndex] = newValue;
+				assertRejectedUntouched(corrupt, sizeof(corrupt), msg);
+			};
+			testMutation(0u, uint8_t(goodWire[0] ^ 0x01u), L"corrupt magic byte 0 rejected");
+			testMutation(3u, uint8_t(goodWire[3] ^ 0x80u), L"corrupt magic byte 3 rejected");
+			testMutation(4u, uint8_t(static_cast<uint8_t>(VpMotion::PairGlobalSource::MatcherD1) + 1u), L"unknown PairGlobalSource (5) rejected");
+			testMutation(4u, 0xFFu, L"unknown PairGlobalSource (0xFF) rejected");
+			testMutation(5u, 0x02u, L"unknown flag bit (0x02) rejected");
+			testMutation(5u, 0x03u, L"valid + unknown flag bit (0x03) rejected");
+			testMutation(6u, 0x01u, L"non-zero reserved byte 0 rejected");
+			testMutation(7u, 0x80u, L"non-zero reserved byte 1 rejected");
+
+			// Same-input positive control: the exact uncorrupted buffer decodes and replaces sentinel.
+			VpMotion::PairGlobal outGood = sentinel;
+			Assert::IsTrue(VpMotion::DecodePairGlobal(goodWire, sizeof(goodWire), outGood), L"uncorrupted buffer decodes");
+			Assert::IsTrue(SamePairGlobal(good, outGood), L"uncorrupted buffer matches source record");
+		}
+
+		// M1#2 (U10 C1, PairGlobalFill.h): VariantKey axis contract (kAxisParam0 only, param0 == 1 required).
+		// Default variant and param0 != 1 decline visibly with "param0 must be 1"; undeclared axes return VariantUndeclared.
+		TEST_METHOD(PairGlobalVariantKeyAndParam0Enforcement)
+		{
+			using namespace VpSkeleton;
+			const VariantKey key = VpMotion::PairGlobalKey();
+			Assert::AreEqual(uint16_t(1), key.param0, L"PairGlobalKey sets param0 == 1");
+			Assert::AreEqual(uint32_t(VariantKey::kAxisParam0), key.Axes(), L"PairGlobalKey uses kAxisParam0 only");
+			Assert::IsFalse(key.IsDefault(), L"PairGlobalKey is non-default");
+			Assert::AreEqual(uint8_t(0), key.plane);
+			Assert::AreEqual(uint16_t(0), key.param1);
+
+			int sentinelTex = 7;
+			const pl_tex fakeTex = reinterpret_cast<pl_tex>(&sentinelTex);
+			int cpuCalls = 0;
+			int gpuCalls = 0;
+
+			SkeletonMemo memo;
+			memo.SetRenderThread(std::this_thread::get_id());
+			Assert::IsTrue(memo.RegisterOwnerFill(kP7CameraFit, AcquireForm::Cpu, VpMotion::kPairGlobalUnit,
+				VpMotion::MakeP7PairGlobalCpuOwnerFill([&](const OwnerFillRequest&, SkeletonMemo&, VpMotion::PairGlobal& out, std::string&) {
+					++cpuCalls;
+					out = MakePairGlobalSample(VpMotion::PairGlobalSource::CameraModel, true, 12u, 1.0f);
+					return true;
+				})) == SkeletonMemo::Registration::Registered);
+			Assert::IsTrue(memo.RegisterOwnerFill(kP7CameraFit, AcquireForm::Gpu, VpMotion::kPairGlobalUnit,
+				VpMotion::MakeP7PairGlobalGpuOwnerFill([&](const OwnerFillRequest&, SkeletonMemo&, VpMotion::PairGlobalGpuView& out, std::string&) {
+					++gpuCalls;
+					out.globalVector = fakeTex;
+					out.record = MakePairGlobalSample(VpMotion::PairGlobalSource::MatcherD1, true, 12u, 1.0f);
+					return true;
+				})) == SkeletonMemo::Registration::Registered);
+
+			// Positive control: param0 == 1 succeeds for both CPU and GPU forms.
+			Assert::IsTrue(memo.Acquire(kP7CameraFit, 11, AcquireForm::Cpu, key).status == AcquireStatus::FilledAtRead);
+			Assert::IsTrue(memo.Acquire(kP7CameraFit, 11, AcquireForm::Gpu, key).status == AcquireStatus::FilledAtRead);
+			Assert::AreEqual(1, cpuCalls);
+			Assert::AreEqual(1, gpuCalls);
+
+			// Negative control 1: default VariantKey{} (param0 == 0) declines visibly with "param0 must be 1" before provider runs.
+			for (AcquireForm form : { AcquireForm::Cpu, AcquireForm::Gpu })
+			{
+				const AcquireResult r = memo.Acquire(kP7CameraFit, 12, form, VariantKey{});
+				Assert::IsTrue(r.status == AcquireStatus::Unavailable, L"default variant must decline");
+				Assert::IsTrue(r.cause == AcquireCause::OwnerDeclined, L"default variant is OwnerDeclined");
+				Assert::IsTrue(Has(memo.LastCause(kP7CameraFit), "param0 must be 1"), L"visible decline reason names param0 == 1");
+			}
+			Assert::AreEqual(1, cpuCalls, L"CPU provider must not run for param0 == 0");
+			Assert::AreEqual(1, gpuCalls, L"GPU provider must not run for param0 == 0");
+
+			// Negative control 2: param0 == 2 declines visibly with "param0 must be 1" before provider runs.
+			VariantKey badParam0;
+			badParam0.param0 = 2u;
+			for (AcquireForm form : { AcquireForm::Cpu, AcquireForm::Gpu })
+			{
+				const AcquireResult r = memo.Acquire(kP7CameraFit, 13, form, badParam0);
+				Assert::IsTrue(r.status == AcquireStatus::Unavailable, L"param0 == 2 must decline");
+				Assert::IsTrue(r.cause == AcquireCause::OwnerDeclined, L"param0 == 2 is OwnerDeclined");
+				Assert::IsTrue(Has(memo.LastCause(kP7CameraFit), "param0 must be 1"), L"visible decline reason names param0 == 1");
+			}
+			Assert::AreEqual(1, cpuCalls, L"CPU provider must not run for param0 == 2");
+			Assert::AreEqual(1, gpuCalls, L"GPU provider must not run for param0 == 2");
+
+			// Negative control 3: undeclared axes (plane = 1 alone, plane = 1 with param0 = 1, param1 = 1 with param0 = 1) -> VariantUndeclared.
+			VariantKey planeOnly;
+			planeOnly.plane = 1u;
+			VariantKey planeAndParam0 = key;
+			planeAndParam0.plane = 1u;
+			VariantKey param1AndParam0 = key;
+			param1AndParam0.param1 = 1u;
+			const VariantKey undeclared[] = { planeOnly, planeAndParam0, param1AndParam0 };
+			for (const VariantKey& badKey : undeclared)
+			{
+				for (AcquireForm form : { AcquireForm::Cpu, AcquireForm::Gpu })
+				{
+					const AcquireResult r = memo.Acquire(kP7CameraFit, 14, form, badKey);
+					Assert::IsTrue(r.status == AcquireStatus::Unavailable, L"undeclared axis must fail");
+					Assert::IsTrue(r.cause == AcquireCause::VariantUndeclared, L"undeclared axis must be VariantUndeclared");
+				}
+			}
+			Assert::AreEqual(1, cpuCalls, L"CPU provider must not run for undeclared axis");
+			Assert::AreEqual(1, gpuCalls, L"GPU provider must not run for undeclared axis");
+		}
+
+		// M1#2 (U10 C1, PairGlobalFill.h + FallbackCatalog::PairGlobalUnavailable + FallbackPlainText):
+		// Default CPU fill reads kP2VectorPair via nested memo.Acquire, publishes Engine PairGlobal once (reused on 2nd read),
+		// works off-render-thread, and declines visibly with "motion.pair_global_unavailable" when P2 is absent, GlobalSet() is false,
+		// or a custom PairGlobalCpuFn fails.
+		TEST_METHOD(PairGlobalCpuOwnerFillDefaultP2NestedFallbackAndNegativeControls)
+		{
+			using namespace VpSkeleton;
+
+			// Positive path: real VectorEngine + P2CpuForm registered -> default MakeP7PairGlobalCpuOwnerFill() reads nested P2.
+			Rig rig;   // pair (10, 11), generation 1, globalSet = true
+			SkeletonMemo memo;
+			memo.SetRenderThread(std::this_thread::get_id());
+			Assert::IsTrue(RegisterFill(memo, rig.EngineOf()));
+			Assert::IsTrue(memo.RegisterOwnerFill(kP7CameraFit, AcquireForm::Cpu, VpMotion::kPairGlobalUnit,
+				VpMotion::MakeP7PairGlobalCpuOwnerFill()) == SkeletonMemo::Registration::Registered);
+
+			VpMotion::PairGlobal rec1;
+			AcquireResult res1;
+			FallbackCatalog::Decision fb1;
+			Assert::IsTrue(VpMotion::AcquirePairGlobalCpu(memo, 11, rec1, &res1, &fb1), L"default CPU fill serves from nested P2");
+			Assert::IsTrue(res1.status == AcquireStatus::FilledAtRead, L"first read fills at read");
+			Assert::IsTrue(res1.source == AcquireSource::Memo);
+			Assert::AreEqual(VpMotion::kPairGlobalRecordBytes, res1.cpuBytes);
+			Assert::IsTrue(rec1.valid, L"published engine record is valid");
+			Assert::IsTrue(rec1.src == VpMotion::PairGlobalSource::Engine, L"default nested P2 fill tags PairGlobalSource::Engine");
+			Assert::AreEqual(uint64_t(1), rec1.p2Epoch, L"p2Epoch carries P2 generation");
+			Assert::AreEqual(0, std::memcmp(rec1.vec, rig.flow->global, sizeof(rec1.vec)), L"vec[2][4] matches P2 global bit-for-bit");
+			Assert::AreEqual(0, std::memcmp(rec1.second, rig.flow->second, sizeof(rec1.second)), L"second[2][4] matches P2 second bit-for-bit");
+			Assert::IsFalse(fb1.engaged, L"success releases motion.pair_global_unavailable");
+			Assert::AreEqual(std::string("motion.pair_global_unavailable"), fb1.id);
+			Assert::IsTrue(fb1.reason.empty(), L"released fallback has empty reason");
+			Assert::AreEqual(1ull, rig.engine.P2CpuFormServed(), L"nested memo.Acquire read P2 once");
+
+			// 2nd acquire on same seq = 11: Reused (compute-once).
+			VpMotion::PairGlobal rec2;
+			AcquireResult res2;
+			FallbackCatalog::Decision fb2;
+			Assert::IsTrue(VpMotion::AcquirePairGlobalCpu(memo, 11, rec2, &res2, &fb2));
+			Assert::IsTrue(res2.status == AcquireStatus::Reused, L"2nd acquire reuses memo spot");
+			Assert::IsTrue(SamePairGlobal(rec1, rec2), L"reused record matches first read bit-for-bit");
+			Assert::IsFalse(fb2.engaged);
+			Assert::AreEqual(1ull, memo.CountersOf(kP7CameraFit).ownerFillCalls, L"compute-once: P7 owner fill ran once");
+			Assert::AreEqual(1ull, rig.engine.P2CpuFormServed(), L"compute-once: P2 not re-acquired");
+
+			// CPU form is any-thread (renderThreadOnly = false): off-render-thread Acquire succeeds.
+			VpMotion::PairGlobal recWorker;
+			AcquireResult resWorker;
+			FallbackCatalog::Decision fbWorker;
+			bool workerOk = false;
+			{
+				PairGlobalThreadJoinGuard guard;
+				guard.thread = std::thread([&]() {
+					workerOk = VpMotion::AcquirePairGlobalCpu(memo, 11, recWorker, &resWorker, &fbWorker);
+				});
+			}
+			Assert::IsTrue(workerOk, L"CPU pair-global acquire succeeds off render thread");
+			Assert::IsTrue(resWorker.status == AcquireStatus::Reused);
+			Assert::IsTrue(SamePairGlobal(rec1, recWorker));
+			Assert::IsFalse(fbWorker.engaged);
+
+			// Negative control 1 (EXACT SAME seq = 11, P2 absent): declines visibly and engages motion.pair_global_unavailable.
+			{
+				SkeletonMemo memoNoP2;
+				Assert::IsTrue(memoNoP2.RegisterOwnerFill(kP7CameraFit, AcquireForm::Cpu, VpMotion::kPairGlobalUnit,
+					VpMotion::MakeP7PairGlobalCpuOwnerFill()) == SkeletonMemo::Registration::Registered);
+				VpMotion::PairGlobal recMissing = rec1;
+				AcquireResult resMissing;
+				FallbackCatalog::Decision fbMissing;
+				Assert::IsFalse(VpMotion::AcquirePairGlobalCpu(memoNoP2, 11, recMissing, &resMissing, &fbMissing),
+					L"negative control: absent P2 must fail AcquirePairGlobalCpu");
+				Assert::IsTrue(resMissing.status == AcquireStatus::Unavailable);
+				Assert::IsTrue(resMissing.cause == AcquireCause::OwnerDeclined);
+				Assert::IsFalse(recMissing.valid, L"failed acquire clears output record");
+				Assert::IsTrue(recMissing.src == VpMotion::PairGlobalSource::Cleared);
+				Assert::AreEqual(uint64_t(0), recMissing.p2Epoch);
+				Assert::IsTrue(fbMissing.engaged, L"absent P2 engages fallback");
+				Assert::AreEqual(std::string("motion.pair_global_unavailable"), fbMissing.id);
+				Assert::IsFalse(fbMissing.reason.empty(), L"fallback reason must be non-empty");
+				Assert::IsTrue(Has(fbMissing.reason, "pair global: unavailable"), L"fallback reason carries decline detail");
+				Assert::IsTrue(Has(fbMissing.reason, "motion estimation aborted for this frame"));
+			}
+
+			// Negative control 2 (EXACT SAME seq = 11, real VectorEngine + P2CpuForm present, BUT GlobalSet() == false):
+			// P2 IS readable, yet default PairGlobal fill must decline visibly instead of publishing an unset global.
+			{
+				VpMotion::VectorEngine unsetEngine;
+				unsetEngine.PublishProducer(std::make_shared<MotionAhead::Producer>());
+				unsetEngine.p2Slot->SetGeneration(unsetEngine.motionValidity.StreamGeneration());
+				unsetEngine.p2Slot->Publish(10, 11, unsetEngine.p2Slot->Generation(), MakeFlow(3.0f, /*globalSet=*/false, false));
+
+				VpMotion::P2PairRecord directP2;
+				std::string p2Why;
+				Assert::IsTrue(unsetEngine.P2RecordEndingAt(11, directP2, p2Why), L"precondition: P2 record itself exists");
+				Assert::IsFalse(directP2.GlobalSet(), L"precondition: P2 record has GlobalSet() == false");
+
+				SkeletonMemo memoUnset;
+				VpMotion::IVectorEngine* enginePtr = &unsetEngine;
+				Assert::IsTrue(RegisterFill(memoUnset, [enginePtr](const void*) { return enginePtr; }));
+				Assert::IsTrue(memoUnset.RegisterOwnerFill(kP7CameraFit, AcquireForm::Cpu, VpMotion::kPairGlobalUnit,
+					VpMotion::MakeP7PairGlobalCpuOwnerFill()) == SkeletonMemo::Registration::Registered);
+
+				VpMotion::PairGlobal recUnset = rec1;
+				AcquireResult resUnset;
+				FallbackCatalog::Decision fbUnset;
+				Assert::IsFalse(VpMotion::AcquirePairGlobalCpu(memoUnset, 11, recUnset, &resUnset, &fbUnset),
+					L"negative control: GlobalSet() == false must decline");
+				Assert::IsTrue(resUnset.status == AcquireStatus::Unavailable);
+				Assert::IsTrue(resUnset.cause == AcquireCause::OwnerDeclined);
+				Assert::AreEqual(1ull, unsetEngine.P2CpuFormServed(), L"nested P2 was actually read before declining");
+				Assert::IsFalse(recUnset.valid);
+				Assert::IsTrue(fbUnset.engaged, L"unset P2 global engages motion.pair_global_unavailable");
+				Assert::AreEqual(std::string("motion.pair_global_unavailable"), fbUnset.id);
+				Assert::IsTrue(Has(fbUnset.reason, "pair global: unavailable"));
+			}
+
+			// Custom PairGlobalCpuFn: success, custom failure reason, empty failure reason, and invalid-enum encode failure + FallbackPlainText.
+			{
+				const VpMotion::PairGlobal customOk = MakePairGlobalSample(VpMotion::PairGlobalSource::CameraModel, true, 77u, -5.5f);
+				SkeletonMemo memoCustom;
+				Assert::IsTrue(memoCustom.RegisterOwnerFill(kP7CameraFit, AcquireForm::Cpu, VpMotion::kPairGlobalUnit,
+					VpMotion::MakeP7PairGlobalCpuOwnerFill([&](const OwnerFillRequest& req, SkeletonMemo&, VpMotion::PairGlobal& out, std::string& why) {
+						if (req.seq == 20)
+						{
+							out = customOk;
+							return true;
+						}
+						if (req.seq == 21)
+						{
+							why = "camera fit rank-deficient";
+							return false;
+						}
+						if (req.seq == 22)
+						{
+							why.clear();
+							return false;
+						}
+						out = customOk;
+						out.src = static_cast<VpMotion::PairGlobalSource>(99);
+						return true;
+					})) == SkeletonMemo::Registration::Registered);
+
+				VpMotion::PairGlobal got;
+				AcquireResult res;
+				FallbackCatalog::Decision fb;
+				Assert::IsTrue(VpMotion::AcquirePairGlobalCpu(memoCustom, 20, got, &res, &fb));
+				Assert::IsTrue(SamePairGlobal(customOk, got));
+				Assert::IsFalse(fb.engaged);
+
+				Assert::IsFalse(VpMotion::AcquirePairGlobalCpu(memoCustom, 21, got, &res, &fb), L"custom provider failure declines");
+				Assert::IsTrue(res.cause == AcquireCause::OwnerDeclined);
+				Assert::IsTrue(fb.engaged);
+				Assert::AreEqual(std::string("motion.pair_global_unavailable"), fb.id);
+				Assert::IsTrue(Has(fb.reason, "camera fit rank-deficient"), L"custom why must appear in fallback reason");
+				Assert::IsTrue(Has(memoCustom.LastCause(kP7CameraFit), "camera fit rank-deficient"));
+
+				Assert::IsFalse(VpMotion::AcquirePairGlobalCpu(memoCustom, 22, got, &res, &fb), L"empty why still produces visible reason");
+				Assert::IsTrue(fb.engaged && Has(fb.reason, "pair global: unavailable"));
+
+				Assert::IsFalse(VpMotion::AcquirePairGlobalCpu(memoCustom, 23, got, &res, &fb), L"unencodable enum declines visibly");
+				Assert::IsTrue(fb.engaged && Has(fb.reason, "pair global: record not encoded"));
+
+				// FallbackPlainText plain English sentence exists and is used by FallbackNoticeText (never generic unknown-id text).
+				const std::string sentence = FallbackPlainText::Sentence("motion.pair_global_unavailable");
+				Assert::IsFalse(sentence.empty(), L"FallbackPlainText must have a plain-English sentence for motion.pair_global_unavailable");
+				const std::string notice = FallbackPlainText::FallbackNoticeText("motion.pair_global_unavailable", fb.reason);
+				Assert::IsTrue(notice.find(sentence) == 0u, L"FallbackNoticeText must lead with the catalog plain-English sentence");
+				Assert::IsTrue(Has(notice, fb.reason.c_str()), L"FallbackNoticeText must include the detail reason");
+
+				const FallbackCatalog::Decision directEngaged = FallbackCatalog::PairGlobalUnavailable(true, "unit check");
+				Assert::IsTrue(directEngaged.engaged && directEngaged.id == "motion.pair_global_unavailable" && Has(directEngaged.reason, "unit check"));
+				const FallbackCatalog::Decision directReleased = FallbackCatalog::PairGlobalUnavailable(false);
+				Assert::IsFalse(directReleased.engaged);
+				Assert::AreEqual(std::string("motion.pair_global_unavailable"), directReleased.id);
+			}
+		}
+
+		// M1#2 (U10 C1, PairGlobalFill.h): GPU zero-copy frame-scoped view (gpu.bytes == 0, 1x1, view = true, frameScoped = true),
+		// compute-once reuse, OnSeal eviction with same-input non-frame-scoped stale-handle negative control, off-render-thread
+		// WrongThread enforcement (RAII thread join guard), and null/declining/absent provider fallback visibility.
+		TEST_METHOD(PairGlobalGpuOwnerFillZeroCopyFrameScopedAndNegativeControls)
+		{
+			using namespace VpSkeleton;
+
+			int sentinelMem[4] = { 101, 202, 303, 404 };
+			const pl_tex texVecA = reinterpret_cast<pl_tex>(&sentinelMem[0]);
+			const pl_tex texSecA = reinterpret_cast<pl_tex>(&sentinelMem[1]);
+			const pl_tex texVecB = reinterpret_cast<pl_tex>(&sentinelMem[2]);
+			const pl_tex texSecB = reinterpret_cast<pl_tex>(&sentinelMem[3]);
+
+			const VpMotion::PairGlobal recA = MakePairGlobalSample(VpMotion::PairGlobalSource::MatcherD1, true, 55u, 1.5f);
+			const VpMotion::PairGlobal recB = MakePairGlobalSample(VpMotion::PairGlobalSource::MatcherD1, true, 56u, -2.25f);
+
+			pl_tex curVec = texVecA;
+			pl_tex curSec = texSecA;
+			VpMotion::PairGlobal curRec = recA;
+			int providerCalls = 0;
+
+			auto provider = [&](const OwnerFillRequest& req, SkeletonMemo&, VpMotion::PairGlobalGpuView& outView, std::string& outWhy) -> bool {
+				++providerCalls;
+				if (req.seq == 13)
+				{
+					outView.globalVector = nullptr;
+					outView.globalSecond = curSec;
+					outView.record = curRec;
+					return true;   // returns true but with null globalVector: must still decline visibly
+				}
+				if (req.seq == 14)
+				{
+					outWhy = "matcher global tex unallocated";
+					return false;
+				}
+				outView.globalVector = curVec;
+				outView.globalSecond = curSec;
+				outView.record = curRec;
+				return true;
+			};
+
+			// Zero-copy view (view = true, gpu.bytes = 0) works without GPU dispatcher or VRAM ledger grant.
+			SkeletonMemo memo;
+			memo.SetRenderThread(std::this_thread::get_id());
+			Assert::IsTrue(memo.RegisterOwnerFill(kP7CameraFit, AcquireForm::Gpu, VpMotion::kPairGlobalUnit,
+				VpMotion::MakeP7PairGlobalGpuOwnerFill(provider)) == SkeletonMemo::Registration::Registered);
+
+			// 1st acquire: FilledAtRead, zero-copy 1x1 view, exact PairGlobalGpuView payload, fallback released.
+			VpMotion::PairGlobalGpuView view1;
+			AcquireResult res1;
+			FallbackCatalog::Decision fb1;
+			Assert::IsTrue(VpMotion::AcquirePairGlobalGpu(memo, 11, view1, &res1, &fb1), L"1st GPU acquire succeeds");
+			Assert::IsTrue(res1.status == AcquireStatus::FilledAtRead);
+			Assert::IsTrue(res1.source == AcquireSource::Memo);
+			Assert::AreEqual(uint64_t(0), res1.gpu.bytes, L"zero-copy GPU view allocates 0 bytes");
+			Assert::AreEqual(uint32_t(1), res1.gpu.width, L"1x1 global texture width");
+			Assert::AreEqual(uint32_t(1), res1.gpu.height, L"1x1 global texture height");
+			Assert::IsTrue(res1.gpu.resource == static_cast<const void*>(texVecA), L"gpu.resource carries globalVector handle");
+			Assert::IsTrue(res1.gpu.textureSet == VpMotion::PairGlobalGpuTag());
+			const VpMotion::PairGlobalGpuView* directView = VpMotion::PairGlobalGpuOf(res1);
+			Assert::IsNotNull(directView, L"PairGlobalGpuOf extracts view from tagged result");
+			Assert::IsTrue(directView->globalVector == texVecA && directView->globalSecond == texSecA);
+			Assert::IsTrue(SamePairGlobal(recA, directView->record));
+			Assert::IsTrue(view1.globalVector == texVecA && view1.globalSecond == texSecA);
+			Assert::IsTrue(SamePairGlobal(recA, view1.record));
+			Assert::IsFalse(fb1.engaged);
+			Assert::AreEqual(std::string("motion.pair_global_unavailable"), fb1.id);
+			Assert::AreEqual(1, providerCalls);
+
+			// 2nd acquire on same seq = 11: Reused (compute-once).
+			VpMotion::PairGlobalGpuView view2;
+			AcquireResult res2;
+			FallbackCatalog::Decision fb2;
+			Assert::IsTrue(VpMotion::AcquirePairGlobalGpu(memo, 11, view2, &res2, &fb2));
+			Assert::IsTrue(res2.status == AcquireStatus::Reused, L"2nd GPU acquire reuses frame spot");
+			Assert::IsTrue(view2.globalVector == texVecA && view2.globalSecond == texSecA);
+			Assert::IsFalse(fb2.engaged);
+			Assert::AreEqual(1, providerCalls, L"compute-once: GPU provider called once");
+
+			std::weak_ptr<void> weakReal = res1.gpu.keepAlive;
+			res1 = AcquireResult();
+			res2 = AcquireResult();
+			Assert::IsFalse(weakReal.expired(), L"memo holds view keep-alive prior to OnSeal");
+			Assert::AreEqual(size_t(1), memo.MemoCount());
+
+			// Same-input negative control (Rule 3): a naive non-frame-scoped GPU view on the EXACT SAME seq = 11
+			// survives OnSeal(11) and keeps returning the STALE texVecA handle after the matcher rotates to texVecB.
+			{
+				pl_tex naiveVec = texVecA;
+				pl_tex naiveSec = texSecA;
+				int naiveCalls = 0;
+				OwnerFill baseFill = VpMotion::MakeP7PairGlobalGpuOwnerFill(
+					[&](const OwnerFillRequest&, SkeletonMemo&, VpMotion::PairGlobalGpuView& outView, std::string&) {
+						++naiveCalls;
+						outView.globalVector = naiveVec;
+						outView.globalSecond = naiveSec;
+						outView.record = recA;
+						return true;
+					});
+				OwnerFill naiveFill = baseFill;
+				naiveFill.frameScoped = false;
+				naiveFill.fill = [inner = baseFill.fill](const OwnerFillRequest& req, SkeletonMemo& m, OwnerFillOutput& out) {
+					const bool ok = inner(req, m, out);
+					if (ok)
+						out.scope = OwnerFillOutput::Scope::Window;
+					return ok;
+				};
+				SkeletonMemo naiveMemo;
+				naiveMemo.SetRenderThread(std::this_thread::get_id());
+				Assert::IsTrue(naiveMemo.RegisterOwnerFill(kP7CameraFit, AcquireForm::Gpu, VpMotion::kPairGlobalUnit, naiveFill)
+					== SkeletonMemo::Registration::Registered);
+				VpMotion::PairGlobalGpuView nv1, nv2;
+				AcquireResult nr1, nr2;
+				Assert::IsTrue(VpMotion::AcquirePairGlobalGpu(naiveMemo, 11, nv1, &nr1));
+				Assert::IsTrue(nv1.globalVector == texVecA);
+				std::weak_ptr<void> weakNaive = nr1.gpu.keepAlive;
+				nr1 = AcquireResult();
+				naiveMemo.OnSeal(11);
+				naiveVec = texVecB;
+				naiveSec = texSecB;
+				Assert::AreEqual(0ull, naiveMemo.CountersOf(kP7CameraFit).released,
+					L"negative control: naive non-frame-scoped view is NOT evicted at OnSeal(11)");
+				Assert::IsFalse(weakNaive.expired(), L"negative control: naive view leaks keep-alive past OnSeal(11)");
+				Assert::IsTrue(VpMotion::AcquirePairGlobalGpu(naiveMemo, 11, nv2, &nr2));
+				Assert::IsTrue(nr2.status == AcquireStatus::Reused && nv2.globalVector == texVecA && naiveCalls == 1,
+					L"negative control: naive view returns stale texVecA handle instead of rotated texVecB");
+			}
+
+			// Protected path: MakeP7PairGlobalGpuOwnerFill evicts the frame-scoped view at OnSeal(11).
+			memo.OnSeal(11);
+			Assert::AreEqual(size_t(0), memo.MemoCount(), L"frame-scoped GPU view evicted at OnSeal(11)");
+			Assert::AreEqual(1ull, memo.CountersOf(kP7CameraFit).released, L"eviction counted as released");
+			Assert::IsTrue(weakReal.expired(), L"keep-alive dropped once frame-scoped view is evicted");
+
+			curVec = texVecB;
+			curSec = texSecB;
+			curRec = recB;
+			VpMotion::PairGlobalGpuView view3;
+			AcquireResult res3;
+			FallbackCatalog::Decision fb3;
+			Assert::IsTrue(VpMotion::AcquirePairGlobalGpu(memo, 11, view3, &res3, &fb3));
+			Assert::IsTrue(res3.status == AcquireStatus::FilledAtRead, L"post-OnSeal acquire does not reuse evicted view");
+			Assert::IsTrue(view3.globalVector == texVecB && view3.globalSecond == texSecB, L"fresh rotated handles served, never stale texVecA");
+			Assert::IsTrue(SamePairGlobal(recB, view3.record));
+			Assert::IsFalse(fb3.engaged);
+			Assert::AreEqual(2, providerCalls);
+
+			// Off-render-thread GPU acquire: Unavailable(WrongThread), fallback engaged, provider never invoked (RAII thread guard).
+			VpMotion::PairGlobalGpuView workerView;
+			AcquireResult workerRes;
+			FallbackCatalog::Decision workerFb;
+			bool workerOk = true;
+			{
+				PairGlobalThreadJoinGuard guard;
+				guard.thread = std::thread([&]() {
+					workerOk = VpMotion::AcquirePairGlobalGpu(memo, 12, workerView, &workerRes, &workerFb);
+				});
+			}
+			Assert::IsFalse(workerOk, L"GPU acquire off render thread must fail");
+			Assert::IsTrue(workerRes.status == AcquireStatus::Unavailable);
+			Assert::IsTrue(workerRes.cause == AcquireCause::WrongThread, L"off-render-thread GPU acquire is WrongThread");
+			Assert::IsNull(workerView.globalVector);
+			Assert::IsTrue(workerFb.engaged && workerFb.id == "motion.pair_global_unavailable");
+			Assert::IsFalse(workerFb.reason.empty());
+			Assert::AreEqual(2, providerCalls, L"GPU provider must not run off render thread");
+
+			// Advancing seal to 12 retires frame 11: FrameReleased, never recomputed.
+			memo.OnSeal(12);
+			VpMotion::PairGlobalGpuView retiredView;
+			AcquireResult retiredRes;
+			FallbackCatalog::Decision retiredFb;
+			Assert::IsFalse(VpMotion::AcquirePairGlobalGpu(memo, 11, retiredView, &retiredRes, &retiredFb));
+			Assert::IsTrue(retiredRes.status == AcquireStatus::Unavailable && retiredRes.cause == AcquireCause::FrameReleased);
+			Assert::IsTrue(retiredFb.engaged && retiredFb.id == "motion.pair_global_unavailable");
+			Assert::AreEqual(2, providerCalls, L"retired frame never recomputes");
+
+			// Null globalVector returned with true -> visibly declined + fallback engaged.
+			VpMotion::PairGlobalGpuView nullView;
+			AcquireResult nullRes;
+			FallbackCatalog::Decision nullFb;
+			Assert::IsFalse(VpMotion::AcquirePairGlobalGpu(memo, 13, nullView, &nullRes, &nullFb),
+				L"null globalVector must decline visibly");
+			Assert::IsTrue(nullRes.status == AcquireStatus::Unavailable && nullRes.cause == AcquireCause::OwnerDeclined);
+			Assert::IsNull(VpMotion::PairGlobalGpuOf(nullRes));
+			Assert::IsNull(nullView.globalVector);
+			Assert::IsTrue(nullFb.engaged && nullFb.id == "motion.pair_global_unavailable");
+			Assert::IsTrue(Has(nullFb.reason, "pair global: unavailable"));
+
+			// Provider explicit decline with custom reason -> surfaces in fallback decision.
+			VpMotion::PairGlobalGpuView decView;
+			AcquireResult decRes;
+			FallbackCatalog::Decision decFb;
+			Assert::IsFalse(VpMotion::AcquirePairGlobalGpu(memo, 14, decView, &decRes, &decFb));
+			Assert::IsTrue(decRes.status == AcquireStatus::Unavailable && decRes.cause == AcquireCause::OwnerDeclined);
+			Assert::IsTrue(decFb.engaged && decFb.id == "motion.pair_global_unavailable");
+			Assert::IsTrue(Has(decFb.reason, "matcher global tex unallocated"));
+
+			// Default MakeP7PairGlobalGpuOwnerFill() with null provider -> declines visibly with "gpu provider absent".
+			{
+				SkeletonMemo memoNoGpuFn;
+				memoNoGpuFn.SetRenderThread(std::this_thread::get_id());
+				Assert::IsTrue(memoNoGpuFn.RegisterOwnerFill(kP7CameraFit, AcquireForm::Gpu, VpMotion::kPairGlobalUnit,
+					VpMotion::MakeP7PairGlobalGpuOwnerFill()) == SkeletonMemo::Registration::Registered);
+				VpMotion::PairGlobalGpuView v;
+				AcquireResult r;
+				FallbackCatalog::Decision fb;
+				Assert::IsFalse(VpMotion::AcquirePairGlobalGpu(memoNoGpuFn, 15, v, &r, &fb));
+				Assert::IsTrue(r.status == AcquireStatus::Unavailable && r.cause == AcquireCause::OwnerDeclined);
+				Assert::IsTrue(fb.engaged && fb.id == "motion.pair_global_unavailable");
+				Assert::IsTrue(Has(fb.reason, "pair global: gpu provider absent"));
+			}
+		}
+
+		// M1#2 (U10 C1, PairGlobalFill.h): TryRegisterPairGlobalFills idempotency, catalog wrong-unit refusal (NotOwner),
+		// refusing demand visibility, and PairGlobalGpuOf foreign textureSet tag rejection.
+		TEST_METHOD(PairGlobalRegistrationIdempotencyOwnerGuardAndTagGuard)
+		{
+			using namespace VpSkeleton;
+
+			Assert::AreEqual(std::string(VpMotion::kPairGlobalUnit), SkeletonMemo::OwnerUnitOf(kP7CameraFit),
+				L"kP7CameraFit catalog owner must match kPairGlobalUnit");
+
+			SkeletonMemo memo;
+			memo.SetRenderThread(std::this_thread::get_id());
+
+			// Negative control: registering kP7CameraFit under non-owning units (including sibling "motion/estimation") is refused (NotOwner).
+			Assert::IsTrue(memo.RegisterOwnerFill(kP7CameraFit, AcquireForm::Cpu, "wrong/unit",
+				VpMotion::MakeP7PairGlobalCpuOwnerFill()) == SkeletonMemo::Registration::NotOwner,
+				L"wrong unit must be refused for kP7CameraFit CPU");
+			Assert::IsTrue(memo.RegisterOwnerFill(kP7CameraFit, AcquireForm::Gpu, "motion/estimation",
+				VpMotion::MakeP7PairGlobalGpuOwnerFill()) == SkeletonMemo::Registration::NotOwner,
+				L"sibling motion/estimation unit must be refused for kP7CameraFit GPU");
+			Assert::IsFalse(memo.HasOwnerFill(kP7CameraFit, AcquireForm::Cpu));
+			Assert::IsFalse(memo.HasOwnerFill(kP7CameraFit, AcquireForm::Gpu));
+
+			// Negative control: refusing IExternalDemand (NotInCatalog) -> TryRegisterPairGlobalFills returns false.
+			FakePairGlobalDemand refusingDemand(nullptr);
+			Assert::IsFalse(VpMotion::TryRegisterPairGlobalFills(&refusingDemand),
+				L"TryRegisterPairGlobalFills must return false when demand refuses registration");
+			Assert::AreEqual(2, refusingDemand.registerCalls, L"attempted both CPU and GPU registrations");
+
+			// Positive path + idempotency: memo-backed IExternalDemand registers both CPU & GPU fills once and stays true on repeat.
+			int sentinelMem[2] = { 17, 29 };
+			const pl_tex fakeTex = reinterpret_cast<pl_tex>(&sentinelMem[0]);
+			const VpMotion::PairGlobal expectedRec = MakePairGlobalSample(VpMotion::PairGlobalSource::GapSeed, true, 88u, 3.75f);
+
+			auto cpuFn = [expectedRec](const OwnerFillRequest&, SkeletonMemo&, VpMotion::PairGlobal& out, std::string&) {
+				out = expectedRec;
+				return true;
+			};
+			auto gpuFn = [fakeTex, expectedRec](const OwnerFillRequest&, SkeletonMemo&, VpMotion::PairGlobalGpuView& out, std::string&) {
+				out.globalVector = fakeTex;
+				out.record = expectedRec;
+				return true;
+			};
+
+			FakePairGlobalDemand memoDemand(&memo);
+			Assert::IsTrue(VpMotion::TryRegisterPairGlobalFills(&memoDemand, cpuFn, gpuFn), L"first registration succeeds");
+			Assert::IsTrue(memo.HasOwnerFill(kP7CameraFit, AcquireForm::Cpu));
+			Assert::IsTrue(memo.HasOwnerFill(kP7CameraFit, AcquireForm::Gpu));
+			Assert::IsTrue(VpMotion::TryRegisterPairGlobalFills(&memoDemand, cpuFn, gpuFn), L"duplicate registration is idempotent");
+			Assert::AreEqual(4, memoDemand.registerCalls);
+
+			VpMotion::PairGlobal gotCpu;
+			AcquireResult resCpu;
+			FallbackCatalog::Decision fbCpu;
+			Assert::IsTrue(VpMotion::AcquirePairGlobalCpu(memo, 30, gotCpu, &resCpu, &fbCpu));
+			Assert::IsTrue(resCpu.status == AcquireStatus::FilledAtRead && SamePairGlobal(expectedRec, gotCpu) && !fbCpu.engaged);
+
+			VpMotion::PairGlobalGpuView gotGpu;
+			AcquireResult resGpu;
+			FallbackCatalog::Decision fbGpu;
+			Assert::IsTrue(VpMotion::AcquirePairGlobalGpu(memo, 30, gotGpu, &resGpu, &fbGpu));
+			Assert::IsTrue(resGpu.status == AcquireStatus::FilledAtRead && gotGpu.globalVector == fakeTex && !fbGpu.engaged);
+			Assert::IsNotNull(VpMotion::PairGlobalGpuOf(resGpu), L"real tagged GPU result yields non-null PairGlobalGpuView");
+
+			// Tag guard negative controls: foreign textureSet tag and Unavailable result with matching tag both yield nullptr.
+			AcquireResult foreign;
+			foreign.status = AcquireStatus::FilledAtRead;
+			foreign.gpu.resource = const_cast<void*>(static_cast<const void*>(fakeTex));
+			foreign.gpu.textureSet = &sentinelMem[1];
+			foreign.gpu.keepAlive = std::make_shared<int>(12345);
+			Assert::IsNull(VpMotion::PairGlobalGpuOf(foreign), L"PairGlobalGpuOf must reject foreign textureSet tag");
+
+			AcquireResult unavailableTagged;
+			unavailableTagged.status = AcquireStatus::Unavailable;
+			unavailableTagged.gpu.textureSet = VpMotion::PairGlobalGpuTag();
+			unavailableTagged.gpu.keepAlive = std::make_shared<VpMotion::PairGlobalGpuView>();
+			Assert::IsNull(VpMotion::PairGlobalGpuOf(unavailableTagged), L"PairGlobalGpuOf must reject Unavailable results");
 		}
 	};
 }
