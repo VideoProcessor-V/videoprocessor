@@ -2,7 +2,9 @@
 #include "DetailPulse.h"
 
 #include <vprenderer/GrainPreserve.h>
+#include <VP-V/core/SkeletonAcquire.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h>
+#include <VP-V/modules/repair/grain_split/BandMemo.h>
 
 #include <libplacebo/dispatch.h>
 
@@ -46,7 +48,7 @@ namespace DetailPulse
 #define HB 16
 #define SW (BLK + 2 * R1)
 #define HL (HB + 2)
-#define RB (HL + 2 * GP_R)
+#define RB (HL + 2 * VPU_BAND_FROM_BASE_R)
 shared float sy[SW * SW];
 shared float sh[SW * BLK];
 shared float slow[HL * HL];
@@ -136,7 +138,7 @@ shared float shor[RB * HL];
 void load_low(ivec2 qb, ivec2 hi, ivec2 hhi)
 {
     uint li = gl_LocalInvocationIndex;
-    ivec2 ob = qb - ivec2(1 + GP_R);
+    ivec2 ob = qb - ivec2(1 + VPU_BAND_FROM_BASE_R);
     for (int i = int(li); i < RB * RB; i += 256) {
         ivec2 b = clamp(ob + ivec2(i % RB, i / RB), ivec2(0), hhi) * 2;
         sbox[i] = vpu_half_luma_mean4(code_at(clamp(b, PIC_LO(hi), PIC_HI(hi))), code_at(clamp(b + ivec2(1, 0), PIC_LO(hi), PIC_HI(hi))),
@@ -147,8 +149,8 @@ void load_low(ivec2 qb, ivec2 hi, ivec2 hhi)
         int r = i / HL, c = i % HL;
         int x = clamp(qb.x - 1 + c, 0, hhi.x) - ob.x;
         float a = 0.0;
-        for (int k = -GP_R; k <= GP_R; k++)
-            a += gp_w(k) * sbox[r * RB + x + k];
+        for (int k = -VPU_BAND_FROM_BASE_R; k <= VPU_BAND_FROM_BASE_R; k++)
+            a += vpu_band_from_base_w(k) * sbox[r * RB + x + k];
         shor[i] = a;
     }
     barrier();
@@ -156,8 +158,8 @@ void load_low(ivec2 qb, ivec2 hi, ivec2 hhi)
         int r = i / HL, c = i % HL;
         int y = clamp(qb.y - 1 + r, 0, hhi.y) - ob.y;
         float a = 0.0;
-        for (int k = -GP_R; k <= GP_R; k++)
-            a += gp_w(k) * shor[(y + k) * HL + c];
+        for (int k = -VPU_BAND_FROM_BASE_R; k <= VPU_BAND_FROM_BASE_R; k++)
+            a += vpu_band_from_base_w(k) * shor[(y + k) * HL + c];
         slow[i] = a;
     }
 }
@@ -554,7 +556,11 @@ shared float sm[O_SLOW + HL * HL];
 void low_fetch(ivec2 qb, ivec2 hhi, int n)
 {
     for (int i = int(gl_LocalInvocationIndex); i < n; i += 256)
+#ifdef LOW_NORMALISED
+        sm[O_SLOW + i] = code_scale * texelFetch(low_in, clamp(qb - ivec2(1) + ivec2(i % HL, i / HL), ivec2(0), hhi), 0).r;
+#else
         sm[O_SLOW + i] = texelFetch(low_in, clamp(qb - ivec2(1) + ivec2(i % HL, i / HL), ivec2(0), hhi), 0).r;
+#endif
 }
 // The block's codes by quads.
 void block_codes(ivec2 origin, vec2 isz, int n)
@@ -1040,9 +1046,14 @@ for (int q = 0; q < 4; q++) {
 			c.gpR = GrainPreserve::LowRadius(WideSigma(c.geometry.scale));
 			c.tilesX = (c.geometry.w + kTilePx - 1) / kTilePx;
 			c.tilesY = (c.geometry.h + kTilePx - 1) / kTilePx;
+			VpUnit::BandMemo::BandKey lowKey;
+			lowKey.resolution = VpUnit::BandMemo::Stage::Half;
+			lowKey.sigmaPx = WideSigma(c.geometry.scale);
+			lowKey.law = VpUnit::BandMemo::Law::Low;
+			lowKey.edge = VpUnit::BandFromBase::EdgeMode::Replicate;
 			c.bandHeader = "#define R1 " + std::to_string(c.r1) + "\n" + "#define RING " + std::to_string(kRingSlots) + "\n" +
 				WeightsGlsl("fw", "FW_R", c.r1, FineWeight, c.geometry.scale) +
-				GrainPreserve::LowWeightsGlsl(WideSigma(c.geometry.scale)) + BAND_HEADER + VpUnit::HalfLuma::GlslMean4() + LOW_HEADER;
+				VpUnit::BandMemo::GlslOf(lowKey) + BAND_HEADER + VpUnit::HalfLuma::GlslMean4() + LOW_HEADER;
 			const int sw = kTilePx + 2 * c.r1, hl = kTilePx / 2 + 2, rb = hl + 2 * c.gpR;
 			c.bandShmem = sizeof(float) * (sw * sw + sw * kTilePx + hl * hl + 1024 + rb * rb + rb * hl);
 			c.halfW = (c.geometry.w + 1) / 2;
@@ -1184,16 +1195,71 @@ for (int q = 0; q < 4; q++) {
 			return true;
 		}
 
+		// Acquire shared kBandMemo GPU wide low band for uncropped single-component luma; false = visible fallback reason in `why`.
+		bool TryAcquireBandMemo(const Params& params, uint64_t seq, const Constants& c, pl_tex luma, bool skipReasonRepeat,
+			VpSkeleton::AcquireResult& pin, pl_tex& texOut, std::string& why)
+		{
+			texOut = nullptr;
+			if (skipReasonRepeat)
+			{
+				why = "repeat frame (picture may differ from source seq)";
+				return false;
+			}
+			if (c.rgb || luma->params.format->num_components != 1)
+			{
+				why = "RGB/multi-component plane (band_memo serves YCbCr luma only)";
+				return false;
+			}
+			if (c.pict)
+			{
+				why = "cropped active-picture border (band_memo blurs full plane)";
+				return false;
+			}
+			if (params.memo == nullptr || seq == 0u)
+			{
+				why = params.memo == nullptr ? "no skeleton memo bound" : "frame sequence 0 (unkeyed)";
+				return false;
+			}
+			VpUnit::BandMemo::BandKey key;
+			key.resolution = VpUnit::BandMemo::Stage::Half;
+			key.pipelineStage = 0;
+			key.plane = 0;
+			key.width = static_cast<uint32_t>(c.halfW);
+			key.height = static_cast<uint32_t>(c.halfH);
+			key.sigmaPx = WideSigma(c.geometry.scale);
+			key.law = VpUnit::BandMemo::Law::Low;
+			key.edge = VpUnit::BandFromBase::EdgeMode::Replicate;
+			pin = params.memo->Acquire(VpSkeleton::kBandMemo, seq, VpSkeleton::AcquireForm::Gpu,
+				VpUnit::BandMemo::ToVariant(key));
+			if (!pin.Ok() || !pin.gpu.Valid() || pin.gpu.resource == nullptr)
+			{
+				const std::string detail = params.memo->LastCause(VpSkeleton::kBandMemo);
+				why = std::string("kBandMemo unavailable (") + VpSkeleton::Token(pin.cause)
+					+ (detail.empty() ? ")" : ": " + detail + ")");
+				return false;
+			}
+			pl_tex t = static_cast<pl_tex>(pin.gpu.resource);
+			if (t->params.w != c.halfW || t->params.h != c.halfH || !t->params.sampleable)
+			{
+				why = "kBandMemo texture layout mismatch";
+				pin = VpSkeleton::AcquireResult();
+				return false;
+			}
+			texOut = t;
+			return true;
+		}
+
 		// Measure (pass 1) and reduce (pass 2). ahead: the look-ahead (no previous frame, no
-		// field; the ring's look-ahead entry). detail_pulse_fast: the low band pass first, into
-		// lowTex (read back by the measure pass and by the apply pass after it).
+		// field; the ring's look-ahead entry). detail_pulse_fast / kBandMemo: when lowTex is given,
+		// either read precomputed kBandMemo (lowPrecomputed=true, scaled by code_scale when lowNormalised)
+		// or compute the low pass into lowTex first.
 		bool MeasureAndReduce(pl_dispatch dispatch, pl_tex luma, const Params& params, const Constants& c,
 			pl_tex statsOut, pl_tex weightOut, pl_tex prevStats, pl_tex ring,
 			bool ahead, int cur, int nValid, int nUse, int sceneRestart, bool aheadValid, std::string& error, pl_tex lowTex = nullptr,
-			float historyKeep2 = 1.0f)
+			float historyKeep2 = 1.0f, bool lowPrecomputed = false, bool lowNormalised = false)
 		{
-			const bool fast = params.fast && lowTex;
-			if (fast && !LowPass(dispatch, luma, c, lowTex, !ahead, error))
+			const bool fast = (params.fast || lowPrecomputed) && lowTex != nullptr;
+			if (fast && !lowPrecomputed && !LowPass(dispatch, luma, c, lowTex, !ahead, error))
 				return false;
 			const bool useField = !ahead && params.field != nullptr;
 			const bool usePrev = !ahead && prevStats != nullptr;
@@ -1224,6 +1290,7 @@ for (int q = 0; q < 4; q++) {
 					v[nv++] = { pl_var_float("untrusted_share"), &untrustedShare, true };
 				}
 				std::string header = Defines(c) + (fast ? c.fastHeader : c.bandHeader);
+				if (lowNormalised) header = "#define LOW_NORMALISED 1\n" + header;
 				if (ahead) header = "#define AHEAD 1\n" + header;
 				if (usePrev) header = "#define PREV 1\n" + header;
 				if (useField) header = "#define FIELD 1\n" + header;
@@ -1279,7 +1346,7 @@ for (int q = 0; q < 4; q++) {
 		// into it first when computeLow (a repeat or another geometry; a new frame's measure pass
 		// computed it already).
 		bool ApplyPass(pl_dispatch dispatch, pl_tex luma, pl_tex dst, pl_tex weight, pl_tex ring, const Constants& c,
-			const float* tileRatio, std::string& error, pl_tex lowTex = nullptr, bool computeLow = false)
+			const float* tileRatio, std::string& error, pl_tex lowTex = nullptr, bool computeLow = false, bool lowNormalised = false)
 		{
 			const bool fast = lowTex != nullptr;
 			if (fast && computeLow && !LowPass(dispatch, luma, c, lowTex, tileRatio == nullptr, error))
@@ -1291,6 +1358,7 @@ for (int q = 0; q < 4; q++) {
 			int nv = CodeVars(c, v);
 			if (tileRatio) v[nv++] = { pl_var_vec2("tile_ratio"), tileRatio, true };
 			std::string header = fast ? Defines(c) + APPLY_HEADER + c.fastHeader : Defines(c) + c.bandHeader + APPLY_HEADER;
+			if (lowNormalised) header = "#define LOW_NORMALISED 1\n" + header;
 			if (tileRatio) header = "#define XGEO 1\n" + header;
 			const size_t shmem = fast ? c.fastShmem : c.bandShmem + sizeof(float) * 9;
 			if (!Compute(dispatch, tileRatio ? "VideoProcessor detail pulse: apply (other geometry)" : "VideoProcessor detail pulse: apply",
@@ -1391,14 +1459,29 @@ for (int q = 0; q < 4; q++) {
 		const bool sameGeometry = m.decided && c.geometry == m.geometry;
 		const bool repeat = sameGeometry && params.sequence != 0 && params.sequence == m.lastSequence;
 		const bool consecutive = sameGeometry && m.lastSequence != 0 && params.sequence == m.lastSequence + 1;
+		VpSkeleton::AcquireResult memoBand;
+		pl_tex memoLowTex = nullptr;
+		{
+			std::string why;
+			if (TryAcquireBandMemo(params, params.sequence, c, luma, repeat, memoBand, memoLowTex, why))
+				++bandMemoHits;
+			else
+			{
+				++bandMemoFallbacks;
+				lastBandMemoFallback = why;
+			}
+		}
+		const bool needLocalLow = memoLowTex == nullptr && params.fast;
 		pl_fmt f4 = Float32(gpu, 4);
 		if (!Ensure(gpu, m.out, c.geometry.w, c.geometry.h, StorableLike(gpu, luma->params.format), true) ||
-			!f4 || !EnsureRing(gpu, m.ring) || (params.fast && !Ensure(gpu, m.low, c.halfW, c.halfH, Float32(gpu, 1))))
+			!f4 || !EnsureRing(gpu, m.ring) || (needLocalLow && !Ensure(gpu, m.low, c.halfW, c.halfH, Float32(gpu, 1))))
 		{
 			error = "no storable textures";
 			++failures;
 			return false;
 		}
+		pl_tex activeLow = memoLowTex ? memoLowTex : (params.fast ? m.low : nullptr);
+		const bool lowFromMemo = memoLowTex != nullptr;
 		if (!repeat)
 		{
 			const int next = 1 - m.statsIndex;
@@ -1452,7 +1535,7 @@ for (int q = 0; q < 4; q++) {
 			}
 			if (!MeasureAndReduce(dispatch, luma, params, c, m.stats[next], m.weight,
 				consecutive && m.stats[m.statsIndex] ? m.stats[m.statsIndex] : nullptr, m.ring,
-				false, slot, nValid, nUse, sceneRestart, aheadValid, error, params.fast ? m.low : nullptr, historyKeep2))
+				false, slot, nValid, nUse, sceneRestart, aheadValid, error, activeLow, historyKeep2, lowFromMemo, lowFromMemo))
 			{
 				++failures;
 				m.decided = false;
@@ -1466,9 +1549,9 @@ for (int q = 0; q < 4; q++) {
 			m.decided = true;
 			if (aheadValid) ++aheadUsed;
 		}
-		// detail_pulse_fast: a new frame reads back the low band its measure pass wrote; a repeat
-		// (another picture: hunt 3 F6) computes its own.
-		if (!ApplyPass(dispatch, luma, m.out, m.weight, m.ring, c, nullptr, error, params.fast ? m.low : nullptr, repeat))
+		// detail_pulse_fast / kBandMemo: a new frame reads back the low band from kBandMemo or its measure pass;
+		// a repeat (another picture: hunt 3 F6) computes its own.
+		if (!ApplyPass(dispatch, luma, m.out, m.weight, m.ring, c, nullptr, error, activeLow, !lowFromMemo && repeat, lowFromMemo))
 		{
 			++failures;
 			return false;
@@ -1527,6 +1610,7 @@ for (int q = 0; q < 4; q++) {
 			return false;
 		}
 		pl_frame measured = next;
+		bool didDeband = false;
 		if (debander && deband && deband->thresholdCodes > 0.0)
 		{
 			// Hunt 3 F4: as Apply's frame - the debander first, per picture (no hold along a
@@ -1542,15 +1626,29 @@ for (int q = 0; q < 4; q++) {
 				return false;
 			}
 			measured = debanded;
+			didDeband = true;
 		}
 		if (!impl) impl = new Impl();
 		Impl& m = *impl;
 		const pl_tex luma = measured.planes[0].texture;
 		Constants c;
 		Prepare(luma, params, c, &measured);
+		VpSkeleton::AcquireResult memoBand;
+		pl_tex memoLowTex = nullptr;
+		{
+			std::string why;
+			if (!didDeband && TryAcquireBandMemo(params, sequence, c, luma, false, memoBand, memoLowTex, why))
+				++bandMemoHits;
+			else
+			{
+				++bandMemoFallbacks;
+				lastBandMemoFallback = didDeband ? "look-ahead frame debanded (pipelineStage > 0)" : why;
+			}
+		}
+		const bool lowFromMemo = memoLowTex != nullptr;
 		pl_fmt f4 = Float32(gpu, 4);
 		if (!f4 || !EnsureRing(gpu, m.ring) || !Ensure(gpu, m.aheadStats, c.tilesX, c.tilesY, f4) ||
-			!Ensure(gpu, m.aheadWeight, c.tilesX, c.tilesY, f4) || (params.fast && !Ensure(gpu, m.low, c.halfW, c.halfH, Float32(gpu, 1))))
+			!Ensure(gpu, m.aheadWeight, c.tilesX, c.tilesY, f4) || (!lowFromMemo && params.fast && !Ensure(gpu, m.low, c.halfW, c.halfH, Float32(gpu, 1))))
 		{
 			error = "no storable textures";
 			++failures;
@@ -1558,7 +1656,7 @@ for (int q = 0; q < 4; q++) {
 		}
 		m.aheadSequence = 0;
 		if (!MeasureAndReduce(dispatch, luma, params, c, m.aheadStats, m.aheadWeight, nullptr, m.ring,
-			true, 0, 0, 0, 0, false, error, params.fast ? m.low : nullptr))
+			true, 0, 0, 0, 0, false, error, lowFromMemo ? memoLowTex : (params.fast ? m.low : nullptr), 1.0f, lowFromMemo, lowFromMemo))
 		{
 			++failures;
 			return false;
@@ -1588,9 +1686,22 @@ for (int q = 0; q < 4; q++) {
 		Constants c;
 		Prepare(luma, params, c, nullptr);
 		c.codeScale = m.codeScale;
+		VpSkeleton::AcquireResult memoBand;
+		pl_tex memoLowTex = nullptr;
+		{
+			std::string why;
+			if (TryAcquireBandMemo(params, sequence, c, luma, false, memoBand, memoLowTex, why))
+				++bandMemoHits;
+			else
+			{
+				++bandMemoFallbacks;
+				lastBandMemoFallback = why;
+			}
+		}
+		const bool lowFromMemo = memoLowTex != nullptr;
 		pl_fmt f4 = Float32(gpu, 4);
 		if (!f4 || !EnsureRing(gpu, m.ring) || !Ensure(gpu, m.aheadStats, c.tilesX, c.tilesY, f4) ||
-			!Ensure(gpu, m.aheadWeight, c.tilesX, c.tilesY, f4) || (params.fast && !Ensure(gpu, m.low, c.halfW, c.halfH, Float32(gpu, 1))))
+			!Ensure(gpu, m.aheadWeight, c.tilesX, c.tilesY, f4) || (!lowFromMemo && params.fast && !Ensure(gpu, m.low, c.halfW, c.halfH, Float32(gpu, 1))))
 		{
 			error = "no storable textures";
 			++failures;
@@ -1598,7 +1709,7 @@ for (int q = 0; q < 4; q++) {
 		}
 		m.aheadSequence = 0;
 		if (!MeasureAndReduce(dispatch, luma, params, c, m.aheadStats, m.aheadWeight, nullptr, m.ring,
-			true, 0, 0, 0, 0, false, error, params.fast ? m.low : nullptr))
+			true, 0, 0, 0, 0, false, error, lowFromMemo ? memoLowTex : (params.fast ? m.low : nullptr), 1.0f, lowFromMemo, lowFromMemo))
 		{
 			++failures;
 			return false;

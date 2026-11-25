@@ -2,7 +2,9 @@
 #include "VpDebander.h"
 
 #include <vprenderer/GrainPreserve.h>
+#include <VP-V/core/SkeletonAcquire.h>
 #include <VP-V/modules/input/source_analysis/regions/BusyEdgeGlsl.h>
+#include <VP-V/modules/repair/grain_split/BandMemo.h>
 
 #include <libplacebo/dispatch.h>
 
@@ -144,24 +146,14 @@ if (q.x < size.x && q.y < size.y) {
 		const char* const SPLIT_H_BODY = R"GLSL(
 ivec2 q = ivec2(gl_GlobalInvocationID.xy);
 ivec2 size = imageSize(dst);
-if (q.x < size.x && q.y < size.y) {
-    ivec2 hi = textureSize(src, 0) - ivec2(1);
-    vec4 acc = vec4(0.0);
-    for (int i = -GP_R; i <= GP_R; i++)
-        acc += gp_w(i) * texelFetch(src, clamp(q + ivec2(i, 0), ivec2(0), hi), 0);
-    imageStore(dst, q, acc);
-}
+if (q.x < size.x && q.y < size.y)
+    imageStore(dst, q, vpu_band_from_base_across(src, q));
 )GLSL";
 		const char* const SPLIT_V_BODY = R"GLSL(
 ivec2 q = ivec2(gl_GlobalInvocationID.xy);
 ivec2 size = imageSize(dst);
-if (q.x < size.x && q.y < size.y) {
-    ivec2 hi = textureSize(src, 0) - ivec2(1);
-    vec4 acc = vec4(0.0);
-    for (int i = -GP_R; i <= GP_R; i++)
-        acc += gp_w(i) * texelFetch(src, clamp(q + ivec2(0, i), ivec2(0), hi), 0);
-    imageStore(dst, q, acc);
-}
+if (q.x < size.x && q.y < size.y)
+    imageStore(dst, q, vpu_band_from_base_down(src, q));
 )GLSL";
 		// The structure tensor of the low band per TB x TB block of its (half-resolution)
 		// pixels: the mean of (gx^2, gx gy, gy^2), central differences, summed over the
@@ -335,8 +327,10 @@ if (b.x < size.x && b.y < size.y) {
 		lastFailureError.clear();
 	}
 
-	bool Module::SplitLowBand(pl_gpu gpu, pl_dispatch dispatch, pl_tex in, int slot, int plane, int ncomp, double scale, double codeUnit)
+	bool Module::SplitLowBand(pl_gpu gpu, pl_dispatch dispatch, pl_tex in, int slot, int plane, int ncomp, double scale, double codeUnit,
+		pl_tex acquiredLow, pl_tex& splitLowOut)
 	{
+		splitLowOut = nullptr;
 		const int hw = (in->params.w + 1) / 2, hh = (in->params.h + 1) / 2;
 		const int n = in->params.format->num_components;
 		const int tb = GrainPreserve::SplitTensorHalfBlock(scale);
@@ -350,35 +344,61 @@ if (b.x < size.x && b.y < size.y) {
 			tp.storable = true;
 			return fmt && pl_tex_recreate(gpu, &tex, &tp);
 		};
-		if (!ensure(splitHalf[slot][plane], hw, hh, FloatFormat(gpu, n, false)) ||
-			!ensure(splitTmp[slot][plane], hw, hh, FloatFormat(gpu, n, false)) ||
-			!ensure(splitLow[slot][plane], hw, hh, FloatFormat(gpu, n, true)) ||
-			!ensure(splitTensor[slot][plane], tw, th, FloatFormat(gpu, 4, true)))
+		if (!ensure(splitTensor[slot][plane], tw, th, FloatFormat(gpu, 4, true)))
 		{
 			error = "no float texture for the grain split";
 			lastFailureError = error;
 			++failures;
 			return false;
 		}
-		const int gx = (hw + 15) / 16, gy = (hh + 15) / 16;
-		const std::string weights = GrainPreserve::LowWeightsGlsl(GrainPreserve::kSplitSigma * scale);
-		const pl_shader_desc dh[2] = { Sampled("src", in, false), Storage("dst", splitHalf[slot][plane]) };
-		const pl_shader_desc dx[2] = { Sampled("src", splitHalf[slot][plane], false), Storage("dst", splitTmp[slot][plane]) };
-		const pl_shader_desc dy[2] = { Sampled("src", splitTmp[slot][plane], false), Storage("dst", splitLow[slot][plane]) };
-		const pl_shader_desc dt[2] = { Sampled("src", splitLow[slot][plane], false), Storage("dst", splitTensor[slot][plane]) };
+		pl_tex lowTex = acquiredLow;
+		if (lowTex == nullptr)
+		{
+			if (!ensure(splitHalf[slot][plane], hw, hh, FloatFormat(gpu, n, false)) ||
+				!ensure(splitTmp[slot][plane], hw, hh, FloatFormat(gpu, n, false)) ||
+				!ensure(splitLow[slot][plane], hw, hh, FloatFormat(gpu, n, true)))
+			{
+				error = "no float texture for the grain split";
+				lastFailureError = error;
+				++failures;
+				return false;
+			}
+			const int gx = (hw + 15) / 16, gy = (hh + 15) / 16;
+			VpUnit::BandMemo::BandKey key;
+			key.resolution = VpUnit::BandMemo::Stage::Half;
+			key.plane = static_cast<uint8_t>(plane);
+			key.width = static_cast<uint32_t>(hw);
+			key.height = static_cast<uint32_t>(hh);
+			key.sigmaPx = VpUnit::BandFromBase::kSigmaLow * scale;
+			key.law = VpUnit::BandMemo::Law::Low;
+			key.edge = VpUnit::BandFromBase::EdgeMode::Replicate;
+			const std::string weights = VpUnit::BandMemo::GlslOf(key);
+			const pl_shader_desc dh[2] = { Sampled("src", in, false), Storage("dst", splitHalf[slot][plane]) };
+			const pl_shader_desc dx[2] = { Sampled("src", splitHalf[slot][plane], false), Storage("dst", splitTmp[slot][plane]) };
+			const pl_shader_desc dy[2] = { Sampled("src", splitTmp[slot][plane], false), Storage("dst", splitLow[slot][plane]) };
+			if (!Pass(dispatch, "VideoProcessor deband: grain split (half)", std::string(), SPLIT_HALF_BODY, dh, 2, nullptr, 0, gx, gy) ||
+				!Pass(dispatch, "VideoProcessor deband: grain split (across)", weights, SPLIT_H_BODY, dx, 2, nullptr, 0, gx, gy) ||
+				!Pass(dispatch, "VideoProcessor deband: grain split (down)", weights, SPLIT_V_BODY, dy, 2, nullptr, 0, gx, gy))
+			{
+				error = "the grain split passes failed";
+				lastFailureError = error;
+				++failures;
+				return false;
+			}
+			lowTex = splitLow[slot][plane];
+		}
+		const pl_shader_desc dt[2] = { Sampled("src", lowTex, false), Storage("dst", splitTensor[slot][plane]) };
 		const float codeScale = static_cast<float>(1.0 / codeUnit);
 		const pl_shader_var vt[1] = { { pl_var_float("code_scale"), &codeScale, true } };
 		const std::string tensorHeader = "#define NCOMP " + std::to_string(ncomp) + "\n#define TB " + std::to_string(tb) + "\n";
-		if (!Pass(dispatch, "VideoProcessor deband: grain split (half)", std::string(), SPLIT_HALF_BODY, dh, 2, nullptr, 0, gx, gy) ||
-			!Pass(dispatch, "VideoProcessor deband: grain split (across)", weights, SPLIT_H_BODY, dx, 2, nullptr, 0, gx, gy) ||
-			!Pass(dispatch, "VideoProcessor deband: grain split (down)", weights, SPLIT_V_BODY, dy, 2, nullptr, 0, gx, gy) ||
-			!Pass(dispatch, "VideoProcessor deband: grain split (contours)", tensorHeader, SPLIT_TENSOR_BODY, dt, 2, vt, 1, (tw + 15) / 16, (th + 15) / 16))
+		if (!Pass(dispatch, "VideoProcessor deband: grain split (contours)", tensorHeader, SPLIT_TENSOR_BODY, dt, 2, vt, 1, (tw + 15) / 16, (th + 15) / 16))
 		{
 			error = "the grain split passes failed";
 			lastFailureError = error;
 			++failures;
 			return false;
 		}
+		splitLowOut = lowTex;
 		return true;
 	}
 
@@ -509,8 +529,64 @@ if (b.x < size.x && b.y < size.y) {
 			const float cohLo = static_cast<float>(GrainPreserve::kSplitCoherenceLo), cohHi = static_cast<float>(GrainPreserve::kSplitCoherenceHi);
 			const float rhoLo = static_cast<float>(GrainPreserve::kSplitConsistencyLo), rhoHi = static_cast<float>(GrainPreserve::kSplitConsistencyHi);
 			const float alongInvNeff = static_cast<float>(GrainPreserve::SplitAlongInvNeff());
-			if (useSplit && !SplitLowBand(gpu, dispatch, in, slot, plane, ncomp, splitScale, codeUnit))
-				return false;
+			VpSkeleton::AcquireResult memoBand;
+			pl_tex splitLowTex = nullptr;
+			if (useSplit)
+			{
+				pl_tex acquiredLow = nullptr;
+				const int hw = (in->params.w + 1) / 2, hh = (in->params.h + 1) / 2;
+				const int inComps = in->params.format->num_components;
+				if (plane == 0 && inComps == 1 && params.memo != nullptr && params.sequence != 0u
+					&& pl_color_system_is_ycbcr_like(source.repr.sys))
+				{
+					VpUnit::BandMemo::BandKey key;
+					key.resolution = VpUnit::BandMemo::Stage::Half;
+					key.pipelineStage = 0;
+					key.plane = 0;
+					key.width = static_cast<uint32_t>(hw);
+					key.height = static_cast<uint32_t>(hh);
+					key.sigmaPx = VpUnit::BandFromBase::kSigmaLow * splitScale;
+					key.law = VpUnit::BandMemo::Law::Low;
+					key.edge = VpUnit::BandFromBase::EdgeMode::Replicate;
+					memoBand = params.memo->Acquire(VpSkeleton::kBandMemo, params.sequence, VpSkeleton::AcquireForm::Gpu,
+						VpUnit::BandMemo::ToVariant(key));
+					if (memoBand.Ok() && memoBand.gpu.Valid() && memoBand.gpu.resource != nullptr)
+					{
+						pl_tex t = static_cast<pl_tex>(memoBand.gpu.resource);
+						if (t->params.w == hw && t->params.h == hh && t->params.sampleable
+							&& (t->params.format->caps & PL_FMT_CAP_LINEAR))
+						{
+							acquiredLow = t;
+							++bandMemoHits;
+						}
+						else
+						{
+							++bandMemoFallbacks;
+							lastBandMemoFallback = "kBandMemo texture layout/linear-cap mismatch";
+							memoBand = VpSkeleton::AcquireResult();
+						}
+					}
+					else
+					{
+						++bandMemoFallbacks;
+						const std::string detail = params.memo->LastCause(VpSkeleton::kBandMemo);
+						lastBandMemoFallback = std::string("kBandMemo unavailable (") + VpSkeleton::Token(memoBand.cause)
+							+ (detail.empty() ? ")" : ": " + detail + ")");
+					}
+				}
+				else
+				{
+					++bandMemoFallbacks;
+					if (plane != 0 || inComps != 1 || !pl_color_system_is_ycbcr_like(source.repr.sys))
+						lastBandMemoFallback = "chroma/RGB/multi-component plane (band_memo serves YCbCr luma only)";
+					else if (params.memo == nullptr)
+						lastBandMemoFallback = "no skeleton memo bound";
+					else
+						lastBandMemoFallback = "frame sequence 0 (unkeyed)";
+				}
+				if (!SplitLowBand(gpu, dispatch, in, slot, plane, ncomp, splitScale, codeUnit, acquiredLow, splitLowTex))
+					return false;
+			}
 			const float lapMin = static_cast<float>(GrainPreserve::GuardLaplacianCodes(params.thresholdCodes, params.colorDepth) * codeUnit);
 			const float extMin = static_cast<float>(GrainPreserve::GuardExtremumCodes(params.thresholdCodes, params.colorDepth) * codeUnit);
 			const float vetoLo = static_cast<float>(GrainPreserve::kVetoLo);
@@ -588,7 +664,7 @@ if (b.x < size.x && b.y < size.y) {
 			if (useGuard) d[nd++] = Sampled("grain_spatial", guard[slot][plane], true);
 			if (useSplit)
 			{
-				d[nd++] = Sampled("split_low", splitLow[slot][plane], true);
+				d[nd++] = Sampled("split_low", splitLowTex, true);
 				d[nd++] = Sampled("split_tensor", splitTensor[slot][plane], true);
 			}
 			const int writeW = weightOut ? 1 : 0;
