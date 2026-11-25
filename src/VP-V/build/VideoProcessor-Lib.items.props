@@ -43,6 +43,7 @@
     <ClInclude Include="..\VP-V\modules\output\calibration_lut\calibration\TranscriptRecorder.h" />
     <ClInclude Include="..\VP-V\modules\drive\led_compensation\LedController.h" />
     <ClInclude Include="..\VP-V\modules\drive\led_measure\LedMeasurement.h" />
+    <ClInclude Include="..\VP-V\modules\drive\led_measure\SourceStatsDisplay.h" />
     <ClInclude Include="..\VP-V\modules\drive\led_measure\FrameStats.h" />
     <ClInclude Include="..\VP-V\modules\drive\led_compensation\LedDriveModule.h" />
     <ClInclude Include="..\VP-V\modules\drive\led_measure\LedMeasurementHook.h" />
@@ -149,6 +150,12 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="..\VP-V\modules\input\source_analysis\events\shared\CutFadeJudge.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\lane\shared\SourceStats.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\control\skeleton\SceneRecordReader.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="..\VP-V\modules\input\capture\CaptureDisplayFixes.cpp" />

@@ -314,6 +314,12 @@ namespace
 			state->cuts.insert(sequence);
 			return *this;
 		}
+		SceneVerdicts& Fade(uint64_t sequence, float fadeKeep = -1.0f)
+		{
+			std::lock_guard<std::mutex> guard(state->mutex);
+			state->fades[sequence] = fadeKeep;
+			return *this;
+		}
 		SceneVerdicts& Unknown(uint64_t sequence, const char* why)
 		{
 			std::lock_guard<std::mutex> guard(state->mutex);
@@ -356,12 +362,38 @@ namespace
 				return true;
 			};
 		}
+		LedDrive::SceneVerdictFn VerdictReader() const
+		{
+			const std::shared_ptr<State> shared = state;
+			return [shared](uint64_t sequence, LedDrive::SceneVerdict& verdict, const char** why) -> bool
+			{
+				std::lock_guard<std::mutex> guard(shared->mutex);
+				++shared->calls;
+				++shared->callsPerSequence[sequence];
+				verdict = LedDrive::SceneVerdict{};
+				const auto unknown = shared->unknown.find(sequence);
+				if (unknown != shared->unknown.end())
+				{
+					if (why != nullptr) *why = unknown->second;
+					return false;
+				}
+				verdict.cut = shared->cuts.count(sequence) != 0;
+				const auto fade = shared->fades.find(sequence);
+				if (fade != shared->fades.end())
+				{
+					verdict.fade = true;
+					verdict.fadeKeep = fade->second;
+				}
+				return true;
+			};
+		}
 
 	private:
 		struct State
 		{
 			std::mutex mutex;
 			std::set<uint64_t> cuts;
+			std::map<uint64_t, float> fades;
 			std::map<uint64_t, const char*> unknown;
 			size_t calls = 0;
 			std::map<uint64_t, size_t> callsPerSequence;

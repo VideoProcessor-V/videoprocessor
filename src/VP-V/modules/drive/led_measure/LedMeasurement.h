@@ -210,8 +210,17 @@ namespace LedDrive
 	// Code at or above which `percentile` percent of blocks lie below.
 	double HistogramPercentile(const uint32_t* histogram, uint32_t total, double percentile);
 
+	// Shared U7 scene verdict for a source sequence (O#2 L1: cut + fade + fadeKeep from skeleton SceneOf).
+	struct SceneVerdict
+	{
+		bool cut = false;
+		bool fade = false;
+		float fadeKeep = -1.0f;
+	};
+	using SceneVerdictFn = std::function<bool(uint64_t sequence, SceneVerdict& verdict, const char** why)>;
+
 	// Reads the shared SCENE cut for a source sequence (FIX-LED-CUT-U7): false = genuine failure, `*why` (may be null) names it.
-	// The default (empty function) is VpSkeleton::SceneRecordReader::AcquireCut: the skeleton's U7 verdict, GOT-OR-COMPUTED for the
+	// The default (empty function) is VpSkeleton::SceneRecordReader::AcquireScene: the skeleton's U7 verdict, GOT-OR-COMPUTED for the
 	// frame (also a queued frame ahead of the seal). A test injects its own, per module (state allowed).
 	using SceneCutFn = std::function<bool(uint64_t sequence, bool& cut, const char** why)>;
 
@@ -220,14 +229,15 @@ namespace LedDrive
 	public:
 		explicit StatsBuilder(const LedDriveConfig& config);
 		using SceneCutFn = ::LedDrive::SceneCutFn;
+		using SceneVerdictFn = ::LedDrive::SceneVerdictFn;
 		void SetSceneReader(SceneCutFn reader) { sceneReader = std::move(reader); }
-		// timeMs: the frame's time, for highlight persistence. sourcePeriodMs: the measured source
-		// frame period (<= 0 = unmeasured), for fade keys written in frames (bug hunt 31).
-		// sequence: the frame's source sequence, the key of the shared scene record the CUT is read from (FIX-LED-CUT-U7: the private
-		// mean-difference > cut_threshold judge is gone). 0 or no readable record = no cut for this frame, counted (SceneMissing) and
-		// surfaced by the caller; never a private re-judgement.
+		void SetSceneVerdictReader(SceneVerdictFn reader);
+		// timeMs: the frame's time, for highlight persistence. sourcePeriodMs: retained for API compatibility.
+		// sequence: the frame's source sequence, the key of the shared scene record CUT and FADE are read from (FIX-LED-CUT-U7 + O#2 L1:
+		// private mean-difference cut and APL-decline fade judges are gone). 0 or no readable record = no cut/fade for this frame, counted
+		// (SceneMissing) and surfaced by the caller; never a private re-judgement.
 		FrameStats Build(const RawMeasurement& raw, double timeMs = 0.0, double sourcePeriodMs = 0.0, uint64_t sequence = 0);
-		// Frames whose cut came from the shared scene judge / frames where it could not answer (no cut judged), and whether the
+		// Frames whose scene came from the shared scene judge / frames where it could not answer (no cut/fade judged), and whether the
 		// LAST Build got an answer (and the cause when not).
 		uint64_t SceneFromRecord() const { return sceneFromRecord; }
 		uint64_t SceneMissing() const { return sceneMissing; }
@@ -245,10 +255,10 @@ namespace LedDrive
 
 	private:
 		LedDriveConfig config;
-		std::deque<Sample> aplHistory;   // (time, APL) over the fade window
 		std::deque<Sample> highlightHistory;
 		std::deque<Sample> sustainHistory;
-		SceneCutFn sceneReader;   // empty = the skeleton's SceneRecordReader::AcquireCut
+		SceneCutFn sceneReader;          // legacy cut-only test injection
+		SceneVerdictFn sceneVerdictReader;   // full U7 verdict test injection (wins over sceneReader; both empty = AcquireScene)
 		uint64_t sceneFromRecord = 0;
 		uint64_t sceneMissing = 0;
 		bool lastSceneFromRecord = false;

@@ -28,9 +28,24 @@
 // AFTER the frame's submit, never between libplacebo's passes; fx/dv-frame-quiet, no event query).
 // Collect reads a slot only once the fence reports the copy complete and maps it with DO_NOT_WAIT
 // (ReadbackRing schedules). Other backends keep pl_buf_poll / pl_buf_read, which do not block there.
+namespace VpSkeleton
+{
+	struct VariantKey;
+}
+
 namespace LedDrive
 {
 	class NativeTexReadback;
+	namespace SourceStatsDisplay
+	{
+		struct DisplayRecord;
+	}
+
+	// O#4 (L2b): pipeline stage variant for the GPU display-domain P4 measurement pass.
+	enum class MeasurementStageVariant : uint8_t
+	{
+		PreOutput = 0
+	};
 
 	class MeasurementHook
 	{
@@ -40,11 +55,17 @@ namespace LedDrive
 		static constexpr int MAX_BLOCKS_Y = 180;
 
 		MeasurementHook();
+		explicit MeasurementHook(MeasurementStageVariant stageVariant);
 		~MeasurementHook();
 		MeasurementHook(const MeasurementHook&) = delete;
 		MeasurementHook& operator=(const MeasurementHook&) = delete;
 
 		const pl_hook* Hook() const { return &hook; }
+		MeasurementStageVariant StageVariant() const;
+		uint64_t HookStagesMask() const;
+		bool MatchesStage(uint64_t stage) const;
+		VpSkeleton::VariantKey VariantKey() const;
+		int StageMismatches() const;
 		// Before rendering: which part of the picture to measure, the R, G, B
 		// weights for the APL, and the gamma boost exponent (the statistics
 		// describe the boosted picture, as the script's screenshots did), and
@@ -91,6 +112,8 @@ namespace LedDrive
 		// for the oldest (tests only).
 		int Collect(std::vector<RawMeasurement>& out, int waitMs = 0,
 			std::vector<uint64_t>* sequences = nullptr);
+		// O#4 (L2b): collect finished GPU measurements directly as display-domain P4 records.
+		int CollectDisplay(std::vector<SourceStatsDisplay::DisplayRecord>& out, int waitMs = 0, std::vector<uint64_t>* sequences = nullptr, double highlightPercentile = 99.5, int scriptHighlightCode = 215);
 		// Destroys the GPU buffers; call before the GPU is destroyed.
 		void Release();
 		int Dropped() const { return dropped; }
@@ -117,6 +140,9 @@ namespace LedDrive
 		void ReleaseNative();
 
 		pl_hook hook{};
+		MeasurementStageVariant stageVariant = MeasurementStageVariant::PreOutput;
+		int stageMismatches = 0;
+		bool stageMismatchLogged = false;
 		pl_gpu gpu = nullptr;
 		pl_buf ring[RING] = {};
 		uint64_t slotSequence[RING] = {};

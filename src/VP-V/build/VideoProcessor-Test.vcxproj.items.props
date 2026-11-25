@@ -61,6 +61,9 @@
     <ClCompile Include="..\VP-V\modules\drive\led_measure\tests\LedMeasureHookTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
+    <ClCompile Include="..\VP-V\modules\drive\led_measure\tests\LedMeasureStageVariantWarpTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="..\VP-V\modules\drive\led_measure\tests\NativeReadbackWarpTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
@@ -102,6 +105,9 @@
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="..\VP-V\modules\input\source_analysis\tests\SourceResolutionHookTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\tests\SourceResolutionFrameBoundWaitWarpTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
     <ClCompile Include="..\VP-V\modules\motion\consumers\tests\DejudderHookTests.cpp">
@@ -660,6 +666,8 @@
     <ClCompile Include="..\VP-V\tests\suite\LedDriveControllerTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\LedScriptLookaheadTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\LedDriveMeasurementTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\drive\led_measure\tests\LedFadeU7Tests.cpp" />
+    <ClCompile Include="..\VP-V\modules\drive\led_measure\tests\SourceStatsDisplayTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\LedDriveCompensateTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\LedScriptCorrelationTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\CrashStateTests.cpp" />
@@ -1121,6 +1129,12 @@
     </ClCompile>
     <ClCompile Include="..\VP-V\modules\motion\estimation\tests\MotionValidityResyncTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\SourceResolutionFrameBoundTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\tests\SourceResolutionU7MigrationTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\tests\SourceResolutionFrameBoundWaitTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="..\VP-V\tests\suite\SourceResolutionFrameQuietTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>

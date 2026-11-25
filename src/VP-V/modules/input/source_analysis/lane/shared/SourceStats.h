@@ -21,7 +21,7 @@
 //              empty (a plane under 32 x 18): the structure input of U7's cut law (CutFadeJudge::ScorePair)
 // Determinism: integer sums in a fixed row order; a finished record never depends on how the rows were chunked.
 //
-// Header-only, C++14, no Windows or GPU headers.
+// Pure C++14, no Windows or GPU headers. Out-of-line NormalisedMean lives in SourceStats.cpp (VideoProcessor-Lib).
 #pragma once
 
 #include <algorithm>
@@ -123,6 +123,9 @@ inline bool ReadRecord(const uint8_t* buf, size_t bytes, Record* out)
     std::memcpy(out, buf, sizeof(Record));
     return out->version == kRecordVersion;
 }
+
+// Normalised frame mean in [0, 1] derived directly from the Q6 analysis axis ceiling (kAxisQ6Max = 65472; O#5 M1, out-of-line in SourceStats.cpp).
+double NormalisedMean(const Record& rec);
 
 inline uint32_t Isqrt64(uint64_t v)
 {

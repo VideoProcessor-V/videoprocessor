@@ -1585,5 +1585,24 @@ bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur
     return fade;
 }
 
+BlankVerdict BlankOf(const SourceStats::Record& rec)
+{
+    BlankVerdict out;
+    if (rec.pixelCount == 0)
+        return out;
+    const uint32_t spread = rec.p99 > rec.p01 ? rec.p99 - rec.p01 : 0u;
+    bool flat = spread <= kBlackSpreadP4;
+    if (!flat && rec.gridFound != 0) {
+        Grid g;
+        GridOf(rec, &g);
+        flat = Flatness(g) < kFlatF;
+    }
+    const bool black = flat && rec.mean <= kBlackMeanMaxP4;
+    out.flat = flat;
+    out.black = black;
+    out.blank = flat;
+    return out;
+}
+
 } // namespace CutFadeJudge
 } // namespace VpUnit

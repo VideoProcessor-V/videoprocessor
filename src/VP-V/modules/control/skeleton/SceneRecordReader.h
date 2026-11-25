@@ -2,22 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
-// The content-intent observers' reader of the SCENE record (W1-C7, doc 93 row "row 2"): frame `seq`'s cut as published by the skeleton
-// at the frame's seal (SkeletonModule::FillScene -> FrameAnalysis::Store::PublishScene; the verdict is U7 v2, VpUnit::CutFadeJudge::CutTracker
-// over the P4 record sequence, U7-accuracy). `cut` is the DELIVERED cut: once per confirmed cut, at the cut frame or late (Scene::cutLate;
-// normally one frame, more only when the frame after the cut had no scene group). Compute-once: this only READS the store (PeekScene), it never classifies and never starts any producer.
-//
-// Not found (false) when: no store is registered, more than one renderer is registered (the observers' walk carries no renderer key; the
-// key is never guessed), the store is off (frame_analysis_store=false), or the frame has no scene group yet (look-ahead frames are walked
-// BEFORE the render thread seals them: the normal case for a deep queue). The caller then keeps its previous private judgement and counts
-// the frame as such, so every step down is visible.
-//
-// Epoch: NOT checked. The store keeps its slots across a discontinuity (Invalidate only moves the epoch), and the verdict of a
-// published scene group is a property of that frame pair, not of the epoch. The observers' own rule bounds the use: a pair is read only
-// when it is contiguous and adjacent (previous + 1, no discontinuity flag), so a record of another epoch is not asked for in practice.
-// "Stale" in the README therefore means: no scene group for that sequence (not published yet, or the slot left the ring).
-//
-// Header-only, C++14.
+// The content-intent observers', LED's, and SRM's reader of the shared SCENE record and P4 source stats.
+// CutOf / AcquireCut keep their original inline bodies for Bill-TU line parity; SceneOf / AcquireScene /
+// AcquireSourceStats live out-of-line in SceneRecordReader.cpp (VideoProcessor-Lib) so SourceStats.h is
+// never pulled into Bill-owned TUs. Pure C++14.
 
 #include <VP-V/core/FrameAnalysisStore.h>
 #include <VP-V/modules/control/skeleton/SkeletonFacts.h>   // Demand(), SceneAnswer; not SkeletonAccess.h (hub header: no libplacebo in Lib)
@@ -25,10 +13,28 @@
 
 #include <cstdint>
 
+namespace VpUnit
+{
+	namespace SourceStats
+	{
+		struct Record;
+	}
+}
+
 namespace VpSkeleton
 {
 	namespace SceneRecordReader
 	{
+		struct SceneVerdict
+		{
+			bool cut = false;
+			bool fade = false;
+			float fadeKeep = -1.0f;
+		};
+
+		// Peek-only store reader of full scene verdict (out-of-line in SceneRecordReader.cpp).
+		bool SceneOf(uint64_t seq, SceneVerdict& out);
+
 		inline bool CutOf(uint64_t seq, bool& cut)
 		{
 			cut = false;
@@ -41,6 +47,10 @@ namespace VpSkeleton
 			cut = scene.cut;
 			return true;
 		}
+
+		// GET-OR-COMPUTE readers (out-of-line in SceneRecordReader.cpp): full scene verdict and P4 SourceStats.
+		bool AcquireScene(uint64_t seq, SceneVerdict& out, const char** why);
+		bool AcquireSourceStats(uint64_t seq, VpUnit::SourceStats::Record& out, const char** why);
 
 		// GET-OR-COMPUTE reader (the LED's, measured frame AND look-ahead): the skeleton's scene product (SceneOf) for frame `seq`. It reads the
 		// store's group when present, else the two P4 records are acquired through the renderer's memo (made now for a frame ahead of the seal)

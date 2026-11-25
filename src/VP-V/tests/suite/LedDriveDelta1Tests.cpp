@@ -976,19 +976,24 @@ namespace VideoProcessorTest
 			Assert::AreEqual(config.ledFloorBlack, out.lightTarget, L"A cut to black targets led_floor_black");
 			Assert::AreEqual(253, out.light, L"An unseen cut is ramped like any change");
 
-			// A fast fade: the APL halves every frame, but the LED moves at most
-			// rate_down / 60 per frame.
+			// A fast fade: the APL decays every frame with shared U7 fade verdicts,
+			// but the LED moves at most rate_down / 60 per frame.
 			CompensateController fading(config);
 			StatsBuilder fadeStats(config);
+			SceneVerdicts fadeVerdicts;
+			fadeStats.SetSceneVerdictReader(fadeVerdicts.VerdictReader());
 			double t = 0.0;
+			uint64_t fadeSeq = 0;
 			for (int frame = 0; frame < 30; ++frame, t += FRAME_MS)
-				fading.Tick(fadeStats.Build(Frame(120.0), t), FRAME_MS);
+				fading.Tick(fadeStats.Build(Frame(120.0), t, 0.0, ++fadeSeq), FRAME_MS);
 			double apl = 120.0, previous = fading.Level();
 			bool faded = false;
 			for (int frame = 0; frame < 40; ++frame, t += FRAME_MS)
 			{
 				apl = 16.0 + (apl - 16.0) * 0.9;
-				const FrameStats stats = fadeStats.Build(Frame(apl), t);
+				++fadeSeq;
+				fadeVerdicts.Fade(fadeSeq);
+				const FrameStats stats = fadeStats.Build(Frame(apl), t, 0.0, fadeSeq);
 				const ControllerOutput o = fading.Tick(stats, FRAME_MS);
 				faded = faded || stats.fade;
 				Assert::IsTrue(previous - fading.Level() <= 120.0 / 60.0 + 1e-9);

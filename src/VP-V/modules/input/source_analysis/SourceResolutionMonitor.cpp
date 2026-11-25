@@ -1,7 +1,12 @@
 #include <pch.h>
 #include "SourceResolutionMonitor.h"
+#include <VP-V/core/AnalysisLane.h>
 #include <VP-V/core/LumaWeights.h>
 #include <VP-V/core/RobustStats.h>
+#include <VP-V/core/SealPoint.h>
+#include <VP-V/modules/control/skeleton/SceneRecordReader.h>
+#include <VP-V/modules/input/source_analysis/events/shared/CutFadeJudge.h>
+#include <VP-V/modules/input/source_analysis/lane/shared/SourceStats.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
 #include <VP-V/modules/input/source_analysis/regions/CodingEvidence.h>
 #include <VP-V/modules/input/source_analysis/identity/chain/ChainEstimator.h>
@@ -22,6 +27,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <sstream>
 
 namespace SourceResolutionMonitor
@@ -29,6 +35,9 @@ namespace SourceResolutionMonitor
 	namespace
 	{
 		constexpr int kPixels = Monitor::kTile * Monitor::kTile;
+		// Derived from FrameCutJudge::Seen's 4096-frame retention contract (SourceResolutionDetector.cpp:1484,
+		// ~1 minute at 60 Hz) so shared U7 look-ahead coverage matches the fallback FrameCutJudge window.
+		static constexpr size_t kU7AheadHistoryCap = 4096u;
 
 		// One invocation per tile pixel: the native luma (or Rec. 709 luma of
 		// an RGB plane) at the tile's origin, written as a float. Tiles of
@@ -70,7 +79,26 @@ if (tile < int(tiles) && g.y < ts) {
 		}
 	}
 
+	const char* WaitMissCauseText(WaitMissCause cause)
+	{
+		switch (cause)
+		{
+		case WaitMissCause::None: return "none";
+		case WaitMissCause::LatePoll: return "late poll";
+		case WaitMissCause::DropOrBacklog: return "drop/backlog";
+		case WaitMissCause::BoundedWaitTimeout: return "wait timeout";
+		}
+		return "unknown";
+	}
+
 	Monitor::Monitor()
+		: u7SceneSharedCount(0), u7SceneFallbackCount(0),
+		p4StatsSharedCount(0), p4StatsFallbackCount(0),
+		waitMissLatePollCount(0), waitMissDropOrBacklogCount(0), waitMissTimeoutCount(0),
+		timedOutThrough(0), seenJobsDropped(0), seenHeldDropped(0), seenSubmitSkipped(0),
+		deterministicWait(false), deterministicWaitBoundUs(0),
+		deterministicSlackUs(0), deterministicGuardUs(0),
+		deterministicWaitCalls(0), deterministicWaitYields(0)
 	{
 		chainEst.reset(new SourceIdentity::Chain::ChainEstimator());   // inert until SetChainEnabled(true): no thread, no tap
 		worker = std::thread([this] { Worker(); });
@@ -96,6 +124,11 @@ if (tile < int(tiles) && g.y < ts) {
 
 	Monitor::~Monitor()
 	{
+		{
+			std::lock_guard<std::mutex> lock(outMutex);
+			outStopping = true;
+		}
+		outCv.notify_all();
 		if (chainEst) chainEst->Stop();   // its worker never calls back into the monitor; stopped first
 		{
 			std::lock_guard<std::mutex> lock(mutex);
@@ -176,6 +209,29 @@ if (tile < int(tiles) && g.y < ts) {
 	SourceResolution::FrameEvidence Monitor::LookAheadEvidence(uint64_t from, uint64_t to) const
 	{
 		std::lock_guard<std::mutex> lock(frameJudgeMutex);
+		if (to > from && !u7AheadHistory.empty())
+		{
+			uint64_t expect = from + 1u;
+			bool anyCut = false;
+			for (const U7AheadEntry& entry : u7AheadHistory)
+			{
+				if (entry.seq < expect)
+					continue;
+				if (entry.seq > expect)
+					break;   // gap in (from, to]: not consecutively covered by U7
+				if (entry.cut)
+					anyCut = true;
+				if (expect == to)
+				{
+					SourceResolution::FrameEvidence e;
+					e.covered = true;
+					e.cut = anyCut;
+					e.unresolved = false;
+					return e;
+				}
+				++expect;
+			}
+		}
 		return frameJudge.Evidence(from, to);
 	}
 
@@ -195,6 +251,72 @@ if (tile < int(tiles) && g.y < ts) {
 		int left, int top, int right, int bottom)
 	{
 		LookAheadFrameCoded(sequence, width, height, luma.read, luma.codeMaximum, left, top, right, bottom);
+	}
+
+	void Monitor::SetSharedSceneReader(SharedSceneFn reader)
+	{
+		std::lock_guard<std::mutex> lock(sharedReaderMutex);
+		sharedSceneReader = std::move(reader);
+	}
+
+	void Monitor::SetSharedP4Reader(SharedP4Fn reader)
+	{
+		std::lock_guard<std::mutex> lock(sharedReaderMutex);
+		sharedP4Reader = std::move(reader);
+	}
+
+	bool Monitor::ReadSharedScene(uint64_t seq, SharedSceneInput& out, const char** why) const
+	{
+		out = SharedSceneInput{};
+		SharedSceneFn fn;
+		{
+			std::lock_guard<std::mutex> lock(sharedReaderMutex);
+			fn = sharedSceneReader;
+		}
+		if (fn)
+			return fn(seq, out, why);
+		VpSkeleton::SceneRecordReader::SceneVerdict v;
+		if (!VpSkeleton::SceneRecordReader::AcquireScene(seq, v, why))
+			return false;
+		out.cut = v.cut;
+		out.fade = v.fade;
+		out.fadeKeep = v.fadeKeep;
+		return true;
+	}
+
+	bool Monitor::ReadSharedP4(uint64_t seq, SharedP4Input& out, const char** why) const
+	{
+		out = SharedP4Input{};
+		SharedP4Fn fn;
+		{
+			std::lock_guard<std::mutex> lock(sharedReaderMutex);
+			fn = sharedP4Reader;
+		}
+		if (fn)
+			return fn(seq, out, why);
+		VpUnit::SourceStats::Record rec;
+		if (!VpSkeleton::SceneRecordReader::AcquireSourceStats(seq, rec, why))
+			return false;
+		const VpUnit::CutFadeJudge::BlankVerdict bv = VpUnit::CutFadeJudge::BlankOf(rec);
+		out.blank = bv.blank;
+		out.black = bv.black;
+		out.flat = bv.flat;
+		out.mean = VpUnit::SourceStats::NormalisedMean(rec);
+		return true;
+	}
+
+	void Monitor::NoteU7Fallback(const char* why) const
+	{
+		u7SceneFallbackCount.fetch_add(1, std::memory_order_relaxed);
+		std::lock_guard<std::mutex> lock(sharedReaderMutex);
+		u7SceneFallbackWhyLast = (why != nullptr && why[0] != 0) ? why : "unavailable";
+	}
+
+	void Monitor::NoteP4Fallback(const char* why) const
+	{
+		p4StatsFallbackCount.fetch_add(1, std::memory_order_relaxed);
+		std::lock_guard<std::mutex> lock(sharedReaderMutex);
+		p4StatsFallbackWhyLast = (why != nullptr && why[0] != 0) ? why : "unavailable";
 	}
 
 	void Monitor::LookAheadFrameCoded(uint64_t sequence, int width, int height, const LumaSampler& luma, uint32_t codeMaximum,
@@ -218,75 +340,126 @@ if (tile < int(tiles) && g.y < ts) {
 			x0 = (std::max)(left, (std::min)(x0, right - tileSize));
 			y0 = (std::max)(top, (std::min)(y0, bottom - tileSize));
 		};
-		// Cheap check: the mean and spread on a sparse 32 x 32 grid per tile.
-		double sum = 0.0, spread = 0.0;
-		int count = 0;
-		std::vector<double> pattern;
-		// The sparse grid: 32 x 32 samples per tile whatever its size.
-		const int step = (std::max)(4, tileSize / 32);
-		const int half = tileSize / 2;
-		for (int i = 0; i < tilesX * tilesY; ++i)
-		{
-			int x0, y0;
-			tileOrigin(i, x0, y0);
-			double ts = 0.0, ts2 = 0.0, q[4] = {};
-			double samples = 0.0;
-			for (int y = 0; y < tileSize; y += step)
-				for (int x = 0; x < tileSize; x += step)
-				{
-					const double v = NormalisedLuma(luma(x0 + x, y0 + y), codeMaximum);
-					ts += v; ts2 += v * v;
-					q[(y >= half ? 2 : 0) + (x >= half ? 1 : 0)] += v;
-					samples += 1.0;
-				}
-			const double mean = ts / samples;
-			spread = (std::max)(spread, std::sqrt((std::max)(0.0, ts2 / samples - mean * mean)));
-			for (int k = 0; k < 4; ++k) pattern.push_back(q[k] / (samples / 4.0));
-			sum += mean;
-			++count;
-		}
-		const double mean = sum / count;
+		// O#5 M2: query shared U7 scene (cut) and shared P4 stats (BlankOf + mean) first;
+		// fall back visibly to the local check only when a shared product is unavailable.
+		SharedSceneInput sharedScene;
+		const char* u7Why = "";
+		const bool haveU7 = ReadSharedScene(sequence, sharedScene, &u7Why);
+		if (haveU7)
+			u7SceneSharedCount.fetch_add(1, std::memory_order_relaxed);
+		else
+			NoteU7Fallback(u7Why);
+
+		SharedP4Input sharedP4;
+		const char* p4Why = "";
+		const bool haveP4 = ReadSharedP4(sequence, sharedP4, &p4Why);
+		if (haveP4)
+			p4StatsSharedCount.fetch_add(1, std::memory_order_relaxed);
+		else
+			NoteP4Fallback(p4Why);
+
 		bool cut = false, blank = false;
-		if (fixes)
+		if (haveU7 && haveP4)
 		{
-			// Latch fixes: the tracker's shape-aware cut (a fade or a flash is not a cut) and a
-			// real black (flat and at black) - the look-ahead's events are cuts and blacks only.
-			const SourceResolution::Tracker::Settings ts;
-			const SourceResolution::Thresholds th;
-			const std::vector<char> none(pattern.size(), 0);
-			const double noise = th.flatSpreadCodes / axisRange;
-			double decorrelation = 0.0, share = 0.0, jump = 0.0;
-			if (CutFixes())
-			{
-				// Cut fixes: the per-frame judge with the dark and flash rules; its candidates are the
-				// look-ahead's cut events, and a candidate found to be a flash cancels its event below.
-				std::lock_guard<std::mutex> lock(frameJudgeMutex);
-				cut = frameJudge.Frame(sequence, pattern, blackLevelSeen, noise, secondsPerFrame, ts);
-			}
-			else if (SourceResolution::PatternChange(aheadLastPattern, none, pattern, none, blackLevelSeen, noise, decorrelation, share, &jump))
-			{
-				// Consecutive frames ahead: the motion level per frame interval (the frame rate measured).
-				static GeneralRate::FallbackNotice fallback;   // fixed-constant batch B7 2026-10-18: logged
-				const bool measured = GeneralRate::NoteFallback(fallback, secondsPerFrame > 0.0, "source-resolution cut judge", 24.0);
-				cut = aheadCutJudge.Judge(decorrelation, jump, measured ? secondsPerFrame : 1.0 / 24.0, ts);
-				aheadLastPattern = pattern;
-			}
-			else if (SourceResolution::PatternChange(pattern, none, pattern, none, blackLevelSeen, noise, decorrelation, share))
-				aheadLastPattern = pattern;
-			blank = spread < 3.0 / axisRange && mean <= blackLevelSeen + th.nearBlackShare * (1.0 - blackLevelSeen);
+			cut = sharedScene.cut;
+			blank = fixes ? sharedP4.black : sharedP4.blank;
+			aheadLastMean = sharedP4.mean;
 		}
 		else
 		{
-			cut = aheadLastMean >= 0.0 && std::fabs(mean - aheadLastMean) > SourceResolution::Tracker::Settings{}.cutLevel;
-			blank = spread < 3.0 / axisRange;   // no texture anywhere (black, a fade's end, flat)
+			// Cheap fallback check: the mean and spread on a sparse 32 x 32 grid per tile.
+			double sum = 0.0, spread = 0.0;
+			int count = 0;
+			std::vector<double> pattern;
+			// The sparse grid: 32 x 32 samples per tile whatever its size.
+			const int step = (std::max)(4, tileSize / 32);
+			const int half = tileSize / 2;
+			for (int i = 0; i < tilesX * tilesY; ++i)
+			{
+				int x0, y0;
+				tileOrigin(i, x0, y0);
+				double ts = 0.0, ts2 = 0.0, q[4] = {};
+				double samples = 0.0;
+				for (int y = 0; y < tileSize; y += step)
+					for (int x = 0; x < tileSize; x += step)
+					{
+						const double v = NormalisedLuma(luma(x0 + x, y0 + y), codeMaximum);
+						ts += v; ts2 += v * v;
+						q[(y >= half ? 2 : 0) + (x >= half ? 1 : 0)] += v;
+						samples += 1.0;
+					}
+				const double mean = ts / samples;
+				spread = (std::max)(spread, std::sqrt((std::max)(0.0, ts2 / samples - mean * mean)));
+				for (int k = 0; k < 4; ++k) pattern.push_back(q[k] / (samples / 4.0));
+				sum += mean;
+				++count;
+			}
+			const double mean = sum / count;
+			if (haveU7)
+			{
+				cut = sharedScene.cut;
+			}
+			else if (fixes)
+			{
+				// Latch fixes: the tracker's shape-aware cut (a fade or a flash is not a cut).
+				const SourceResolution::Tracker::Settings ts;
+				const SourceResolution::Thresholds th;
+				const std::vector<char> none(pattern.size(), 0);
+				const double noise = th.flatSpreadCodes / axisRange;
+				double decorrelation = 0.0, share = 0.0, jump = 0.0;
+				if (CutFixes())
+				{
+					// Cut fixes: the per-frame judge with the dark and flash rules; its candidates are the
+					// look-ahead's cut events, and a candidate found to be a flash cancels its event below.
+					std::lock_guard<std::mutex> lock(frameJudgeMutex);
+					cut = frameJudge.Frame(sequence, pattern, blackLevelSeen, noise, secondsPerFrame, ts);
+				}
+				else if (SourceResolution::PatternChange(aheadLastPattern, none, pattern, none, blackLevelSeen, noise, decorrelation, share, &jump))
+				{
+					// Consecutive frames ahead: the motion level per frame interval (the frame rate measured).
+					static GeneralRate::FallbackNotice fallback;   // fixed-constant batch B7 2026-10-18: logged
+					const bool measured = GeneralRate::NoteFallback(fallback, secondsPerFrame > 0.0, "source-resolution cut judge", 24.0);
+					cut = aheadCutJudge.Judge(decorrelation, jump, measured ? secondsPerFrame : 1.0 / 24.0, ts);
+					aheadLastPattern = pattern;
+				}
+				else if (SourceResolution::PatternChange(pattern, none, pattern, none, blackLevelSeen, noise, decorrelation, share))
+					aheadLastPattern = pattern;
+			}
+			else
+			{
+				cut = aheadLastMean >= 0.0 && std::fabs(mean - aheadLastMean) > SourceResolution::Tracker::Settings{}.cutLevel;
+			}
+
+			if (haveP4)
+			{
+				blank = fixes ? sharedP4.black : sharedP4.blank;
+			}
+			else if (fixes)
+			{
+				const SourceResolution::Thresholds th;
+				blank = spread < 3.0 / axisRange && mean <= blackLevelSeen + th.nearBlackShare * (1.0 - blackLevelSeen);
+			}
+			else
+			{
+				blank = spread < 3.0 / axisRange;   // no texture anywhere (black, a fade's end, flat)
+			}
+			aheadLastMean = haveP4 ? sharedP4.mean : mean;
 		}
-		aheadLastMean = mean;
+		if (haveU7)
+		{
+			std::lock_guard<std::mutex> judgeLock(frameJudgeMutex);
+			if (!u7AheadHistory.empty() && sequence <= u7AheadHistory.back().seq)
+				u7AheadHistory.clear();
+			u7AheadHistory.push_back(U7AheadEntry{ sequence, cut });
+			while (u7AheadHistory.size() > kU7AheadHistoryCap)
+				u7AheadHistory.pop_front();
+		}
 		const bool pending = disengagePending || std::fabs(autoPending - autoApplied) > 0.01;
 		bool analyse = false;
 		{
 			std::lock_guard<std::mutex> lock(aheadMutex);
 			if (!pending) { ahead.eventSequence = 0; aheadAwaitTarget = false; return; }
-			if (fixes && CutFixes() && ahead.eventSequence != 0)
+			if (!haveU7 && fixes && CutFixes() && ahead.eventSequence != 0)
 			{
 				// A flash (back to the shape before within the flash window): no switch at it.
 				bool flash = false;
@@ -431,6 +604,10 @@ if (tile < int(tiles) && g.y < ts) {
 	void Monitor::Discontinuity(const char* cause)
 	{
 		const char* const text = cause ? cause : "discontinuity";
+		{
+			std::lock_guard<std::mutex> judgeLock(frameJudgeMutex);
+			u7AheadHistory.clear();
+		}
 		if (chainEnabled.load(std::memory_order_acquire)) chainEst->NoteDiscontinuity(text);   // any thread: a leaf lock
 		discontinuityCause.store(text, std::memory_order_release);
 		// Frame-bound: a new era (results and jobs of the old one are dropped), taking effect at the
@@ -445,19 +622,47 @@ if (tile < int(tiles) && g.y < ts) {
 	{
 		const std::string chainText = chainEnabled.load(std::memory_order_acquire) ? ChainStatusCached() : std::string();
 		const std::string heldText = ConventionNote();
+		std::string u7Why, p4Why;
+		{
+			std::lock_guard<std::mutex> lock(sharedReaderMutex);
+			u7Why = u7SceneFallbackWhyLast;
+			p4Why = p4StatsFallbackWhyLast;
+		}
+		const unsigned long long u7Shared = u7SceneSharedCount.load(std::memory_order_relaxed);
+		const unsigned long long u7Fallback = u7SceneFallbackCount.load(std::memory_order_relaxed);
+		const unsigned long long p4Shared = p4StatsSharedCount.load(std::memory_order_relaxed);
+		const unsigned long long p4Fallback = p4StatsFallbackCount.load(std::memory_order_relaxed);
 		std::lock_guard<std::mutex> lock(mutex);
 		if (!frameBound.load(std::memory_order_acquire))
 		{
-			if (chainText.empty() && heldText.empty()) return snapshot;
 			Snapshot plain = snapshot;
 			plain.chainNote = chainText;
 			plain.conventionNote = heldText;
+			plain.u7SceneShared = u7Shared;
+			plain.u7SceneFallback = u7Fallback;
+			plain.u7SceneFallbackWhy = u7Why;
+			plain.p4StatsShared = p4Shared;
+			plain.p4StatsFallback = p4Fallback;
+			plain.p4StatsFallbackWhy = p4Why;
+			plain.waitsMissed = waitsMissed.load(std::memory_order_relaxed);
+			plain.lastWaitMissCause = lastWaitMissCause;
+			plain.lastWaitMissFramesLate = lastWaitMissFramesLate;
+			plain.lastWaitMissAnalyseMs = lastWaitMissAnalyseMs;
+			plain.waitMissLatePoll = waitMissLatePollCount.load(std::memory_order_relaxed);
+			plain.waitMissDropOrBacklog = waitMissDropOrBacklogCount.load(std::memory_order_relaxed);
+			plain.waitMissTimeout = waitMissTimeoutCount.load(std::memory_order_relaxed);
 			return plain;
 		}
 		// Frame-bound: the released analysis; the GPU-side status and the counters are live.
 		Snapshot out = visible;
 		out.chainNote = chainText;
 		out.conventionNote = heldText;
+		out.u7SceneShared = u7Shared;
+		out.u7SceneFallback = u7Fallback;
+		out.u7SceneFallbackWhy = u7Why;
+		out.p4StatsShared = p4Shared;
+		out.p4StatsFallback = p4Fallback;
+		out.p4StatsFallbackWhy = p4Why;
 		out.notRead = snapshot.notRead;
 		out.error = snapshot.error;
 		out.frameBound = true;
@@ -469,6 +674,12 @@ if (tile < int(tiles) && g.y < ts) {
 		out.submitSkipped = submitSkipped.load(std::memory_order_relaxed);
 		out.engagedReactive = engagedReactive.load(std::memory_order_relaxed);
 		out.waitsMissed = waitsMissed.load(std::memory_order_relaxed);
+		out.lastWaitMissCause = lastWaitMissCause;
+		out.lastWaitMissFramesLate = lastWaitMissFramesLate;
+		out.lastWaitMissAnalyseMs = lastWaitMissAnalyseMs;
+		out.waitMissLatePoll = waitMissLatePollCount.load(std::memory_order_relaxed);
+		out.waitMissDropOrBacklog = waitMissDropOrBacklogCount.load(std::memory_order_relaxed);
+		out.waitMissTimeout = waitMissTimeoutCount.load(std::memory_order_relaxed);
 		out.clockStepsBack = clockStepsBack.load(std::memory_order_relaxed);
 		return out;
 	}
@@ -1343,6 +1554,7 @@ if (tile < int(tiles) && g.y < ts) {
 					have = true;
 					current = std::move(jobQueue.front());
 					jobQueue.pop_front();
+					current.hadBacklog = !jobQueue.empty();
 				}
 				else
 				{
@@ -1389,6 +1601,10 @@ if (tile < int(tiles) && g.y < ts) {
 		tracker.Discontinuity(cause);
 		trackerV.Discontinuity(cause);
 		trackerH.Discontinuity(cause);
+		{
+			std::lock_guard<std::mutex> judgeLock(frameJudgeMutex);
+			u7AheadHistory.clear();
+		}
 		denseGrid.store(false, std::memory_order_release);
 		aheadRan.store(false, std::memory_order_release);   // a new stream: the look-ahead note is re-earned
 		coherenceV.clear();
@@ -1412,6 +1628,7 @@ if (tile < int(tiles) && g.y < ts) {
 		sourceIdLastCuts = tracker.Cuts();
 		snapshot.frameQuality = 1.0;
 		snapshot.frameNoise = -1.0;
+		snapshot.frameFade = false;
 		snapshot.reading = false;
 		snapshot.liveRatio = snapshot.declaredRatio = snapshot.frameRatio = 1.0;
 		snapshot.confidence = 0.0;
@@ -1496,6 +1713,32 @@ if (tile < int(tiles) && g.y < ts) {
 		}
 		thresholds.signatureTiles = j.baseTiles;
 		const SourceResolution::FrameReading frame = SourceResolution::ReadFrame(spectra, thresholds);
+
+		// O#5 M3: query shared U7 scene (cut + fade) and shared P4 stats (BlankOf + NormalisedMean) for sequenced frames
+		// before taking `mutex`; unavailable reads fall back visibly to tile-based measurements.
+		bool haveU7 = false, haveP4 = false;
+		SharedSceneInput sharedScene;
+		SharedP4Input sharedP4;
+		if (j.sequence != 0)
+		{
+			const char* u7Why = "";
+			haveU7 = ReadSharedScene(j.sequence, sharedScene, &u7Why);
+			if (haveU7)
+				u7SceneSharedCount.fetch_add(1, std::memory_order_relaxed);
+			else
+				NoteU7Fallback(u7Why);
+
+			const char* p4Why = "";
+			haveP4 = ReadSharedP4(j.sequence, sharedP4, &p4Why);
+			if (haveP4)
+				p4StatsSharedCount.fetch_add(1, std::memory_order_relaxed);
+			else
+				NoteP4Fallback(p4Why);
+		}
+		const bool effectiveBlank = haveP4 ? (!frame.informative() || sharedP4.blank) : !frame.informative();
+		const bool effectiveBlack = haveP4 ? sharedP4.black : frame.black;
+		const double effectiveMean = haveP4 ? sharedP4.mean : frame.mean;
+		const bool effectiveFade = haveU7 ? sharedScene.fade : false;
 
 		// Source identity (doc 61 SID-2): the relative-noise measurement of the frame's informative tiles, taken BEFORE `mutex`
 		// is held (the render thread's Read() never waits for it). Off (the default): nothing is measured.
@@ -1757,8 +2000,9 @@ if (tile < int(tiles) && g.y < ts) {
 		snapshot.nativeWidth = j.nativeWidth;
 		snapshot.nativeHeight = j.nativeHeight;
 		snapshot.frameRatio = frame.ratio;
-		snapshot.frameBlank = !frame.informative();
-		snapshot.frameBlack = frame.black;
+		snapshot.frameBlank = effectiveBlank;
+		snapshot.frameBlack = effectiveBlack;
+		snapshot.frameFade = effectiveFade;
 		snapshot.liveRatio = RobustStats::Median(ratios, RobustStats::MedianRule::Upper, 1.0);
 		// Latch precision (2026-10-17): the declared rate as the exact rendition behind it - an even
 		// size of the frame within SourceResolution::kSnapBins of this tile's sweep, the simplest ratio (SnapRatio):
@@ -1832,7 +2076,7 @@ if (tile < int(tiles) && g.y < ts) {
 		const bool detailAbove = detailAboveRaw && chainHoldMask != 3u;
 		const uint64_t rowSequence = j.sequence != 0 ? j.sequence : snapshot.frames;
 		sourceIdLastRowSeq = rowSequence;
-		const bool cutFlag = snapshot.cuts != sourceIdLastCuts;
+		const bool cutFlag = (snapshot.cuts != sourceIdLastCuts) || (haveU7 && sharedScene.cut);
 		sourceIdLastCuts = snapshot.cuts;
 		if (idOn && chainEnabled.load(std::memory_order_acquire))
 		{
@@ -1840,8 +2084,8 @@ if (tile < int(tiles) && g.y < ts) {
 			const bool cutSeam = cutForTest.exchange(false, std::memory_order_acq_rel);   // the test seam (one-shot) adds a cut for the chain events only
 			const bool chainCut = cutFlag || cutSeam;
 			if (chainCut) chainEst->NoteEvent(SourceIdentity::Chain::EstimatorEvent::Cut, rowSequence);
-			// Blank is an edge: a dark or flat scene flags it once, not on every evaluation. Fade is not fed today (no fade source).
-			const bool blankNow = !frame.informative();
+			// Blank is an edge: a dark or flat scene flags it once, not on every evaluation.
+			const bool blankNow = effectiveBlank;
 			if (blankNow && !chainWasBlank) chainEst->NoteEvent(SourceIdentity::Chain::EstimatorEvent::Blank, rowSequence);
 			chainWasBlank = blankNow;
 			// Revert window: the evidence window is cleared at the END of a mixed (menu / overlay) episode and at the first cut after one; a
@@ -1881,8 +2125,8 @@ if (tile < int(tiles) && g.y < ts) {
 			in.classical.chainHoldMask = static_cast<uint8_t>(chainHoldMask);   // 0 in Off (the record is not read there)
 			in.deliveredRatio = frame.informative() ? frame.ratio : 0.0;
 			in.noise = idNoise;
-			in.apl = frame.mean;
-			in.blank = !frame.informative();
+			in.apl = effectiveMean;
+			in.blank = effectiveBlank;
 			in.cut = cutFlag;
 			in.nativeHeight = j.nativeHeight;
 			const unsigned long long eventsBefore = sourceId.Events();
@@ -1933,7 +2177,7 @@ if (tile < int(tiles) && g.y < ts) {
 			f << rowSequence << ',' << Num(j.seconds) << ',' << (idMode == SourceIdMode::On ? "on" : idMode == SourceIdMode::Shadow ? "shadow" : "off") << ','
 				<< diagCodedBits.load(std::memory_order_acquire) << ',' << diagOutputBits.load(std::memory_order_acquire) << ','
 				<< (frame.informative() ? 1 : 0) << ',' << frame.informativeTiles << ',' << frame.tiles << ',' << (frame.mixed ? 1 : 0) << ','
-				<< (frame.informative() ? 0 : 1) << ',' << (frame.black ? 1 : 0) << ',' << (cutFlag ? 1 : 0) << ',' << snapshot.cuts << ','
+				<< (effectiveBlank ? 1 : 0) << ',' << (effectiveBlack ? 1 : 0) << ',' << (cutFlag ? 1 : 0) << ',' << snapshot.cuts << ','
 				<< snapshot.shots << ',' << Num(frame.ratio) << ',' << Num(frame.ratioH) << ',' << Num(frame.ratioV) << ','
 				<< Num(frame.horizontal.coherence) << ',' << Num(frame.vertical.coherence) << ',' << Num(tracker.Ratio()) << ','
 				<< Num(tracker.Candidate()) << ',' << Num(trackerH.Ratio()) << ',' << Num(trackerH.Candidate()) << ',' << Num(trackerV.Ratio()) << ','
@@ -1941,7 +2185,7 @@ if (tile < int(tiles) && g.y < ts) {
 				<< Num(snapshot.axisRatioX) << ',' << Num(snapshot.axisRatioY) << ',' << Num(snapshot.axisConfidence) << ','
 				<< Num(diagConfH) << ',' << Num(diagConfV) << ',' << (detailAboveRaw ? 1 : 0) << ',' << (detailAbove ? 1 : 0) << ','
 				<< chainHoldMask << ',' << (idOn ? Num(snapshot.frameQuality) : std::string()) << ',' << (idOn ? Num(snapshot.frameNoise) : std::string())
-				<< ',' << Num(frame.mean) << ',' << sourceId.Events() << ',' << sourceId.Detector().Confounded() << ','
+				<< ',' << Num(effectiveMean) << ',' << sourceId.Events() << ',' << sourceId.Detector().Confounded() << ','
 				<< Num(snapshot.evidenceSeconds) << '\n';
 			diagFrameRow = f.str();
 		}
@@ -1960,7 +2204,7 @@ if (tile < int(tiles) && g.y < ts) {
 			const int n = snprintf(cols, sizeof(cols), ",%s,%.6f,%llu,%.4f,%.4f,%d,%d,%d,%d,%d,%.6f,%.4f,%.4f,%.3f,%d,%s,%d,%d",
 				idMode == SourceIdMode::On ? "on" : idMode == SourceIdMode::Shadow ? "shadow" : "off", j.seconds,
 				static_cast<unsigned long long>(rowSequence), frame.ratioV, frame.ratioH, detailAbove ? 1 : 0, frame.mixed ? 1 : 0,
-				frame.informative() ? 0 : 1, cutFlag ? 1 : 0, 0 /* fade: no fade source is fed today */, frame.mean,
+				effectiveBlank ? 1 : 0, cutFlag ? 1 : 0, effectiveFade ? 1 : 0, effectiveMean,
 				snapshot.axisRatioX, snapshot.axisRatioY, snapshot.axisConfidence, snapshot.kernel,
 				kernelName.c_str(), snapshot.kernelVotes, snapshot.kernelAgree);
 			if (idOn && haveRecord)
@@ -1975,9 +2219,23 @@ if (tile < int(tiles) && g.y < ts) {
 		{
 			// Frame-bound: a result that reaches the held queue AFTER its release point (the frame it belongs to
 			// is already decided, D frames on) is applied late, so this run's decisions depended on the worker's
-			// timing: counted as a missed wait (no bounded wait runs in the renderer), never silent.
-			if (j.sequence != 0 && j.sequence <= releasedThrough.load(std::memory_order_acquire))
-				waitsMissed.fetch_add(1, std::memory_order_relaxed);
+			// timing: classify exact per-miss cause (LatePoll vs DropOrBacklog) and count, never silent.
+			// Skip sequences already billed as BoundedWaitTimeout (HIGH-3) and classify drops by per-event delta (MED-1).
+			const uint64_t rel = releasedThrough.load(std::memory_order_acquire);
+			const unsigned long long curJobs = jobsDropped.load(std::memory_order_relaxed);
+			const unsigned long long curHeld = heldDropped.load(std::memory_order_relaxed);
+			const unsigned long long curSkipped = submitSkipped.load(std::memory_order_relaxed);
+			const bool newDropOrSkip = (curJobs != seenJobsDropped) || (curHeld != seenHeldDropped) || (curSkipped != seenSubmitSkipped);
+			seenJobsDropped = curJobs;
+			seenHeldDropped = curHeld;
+			seenSubmitSkipped = curSkipped;
+			if (j.sequence != 0 && j.sequence <= rel && j.sequence > timedOutThrough)
+			{
+				const uint64_t framesLate = (rel >= j.sequence) ? (rel - j.sequence + 1u) : 1u;
+				const bool backlogOrDrop = j.hadBacklog || newDropOrSkip;
+				RecordWaitMissLocked(backlogOrDrop ? WaitMissCause::DropOrBacklog : WaitMissCause::LatePoll,
+					framesLate, snapshot.analyseMs);
+			}
 			PushHeld(j, workerReset);
 			analysedThrough.store(j.sequence, std::memory_order_release);
 			FinishSequence(j.sequence);
@@ -2039,7 +2297,21 @@ if (tile < int(tiles) && g.y < ts) {
 		bool boundReset = false;
 		if (bound)
 		{
-			const bool released = ReleaseHeldFor(renderSequence);
+			bool waited = false;
+			bool waitedOk = true;
+			if (deterministicWait.load(std::memory_order_acquire) &&
+				(autoReset.load(std::memory_order_acquire) || !haveBoundWaitSeq || lastBoundWaitSeq != renderSequence) &&
+				!ReadyFor(renderSequence))
+			{
+				waited = true;
+				waitedOk = WaitForReadyDeterministic(renderSequence);
+			}
+			const bool released = ReleaseHeldFor(renderSequence, waited && !waitedOk);
+			if (waited)
+			{
+				haveBoundWaitSeq = true;
+				lastBoundWaitSeq = renderSequence;
+			}
 			const bool carried = pendingBoundReset.exchange(false, std::memory_order_acq_rel);
 			boundReset = released || carried;
 		}
@@ -2602,14 +2874,26 @@ if (tile < int(tiles) && g.y < ts) {
 			heldHead = heldCount = 0;
 			jobQueue.clear();
 			visible = snapshot;
+			lastWaitMissCause = WaitMissCause::None;
+			lastWaitMissFramesLate = 0;
+			lastWaitMissAnalyseMs = 0.0;
+			timedOutThrough = 0;
+			seenJobsDropped = seenHeldDropped = seenSubmitSkipped = 0;
+		}
+		{
+			std::lock_guard<std::mutex> judgeLock(frameJudgeMutex);
+			u7AheadHistory.clear();
 		}
 		{
 			std::lock_guard<std::mutex> lock(outMutex);
 			outstanding.clear();
 		}
+		outCv.notify_all();
 		submitClock.Reset();
 		decideClock.Reset();
 		lastSubmit = -1e9;
+		haveBoundWaitSeq = false;
+		lastBoundWaitSeq = 0;
 		denseGridApplied.store(false, std::memory_order_release);
 		// A fresh era: a reset carried from the previous era is superseded by this one's (autoReset
 		// below), and reproducibility is judged per era (losses of the previous era are not this run's).
@@ -2620,6 +2904,11 @@ if (tile < int(tiles) && g.y < ts) {
 		submitSkipped.store(0, std::memory_order_relaxed);
 		engagedReactive.store(0, std::memory_order_relaxed);
 		waitsMissed.store(0, std::memory_order_relaxed);
+		waitMissLatePollCount.store(0, std::memory_order_relaxed);
+		waitMissDropOrBacklogCount.store(0, std::memory_order_relaxed);
+		waitMissTimeoutCount.store(0, std::memory_order_relaxed);
+		deterministicWaitCalls.store(0, std::memory_order_relaxed);
+		deterministicWaitYields.store(0, std::memory_order_relaxed);
 		frameLead.store(lead, std::memory_order_release);
 		frameBound.store(on, std::memory_order_release);
 		// A fresh era on the render side (the clocks changed domain): no worker-side reset, so the
@@ -2718,9 +3007,177 @@ if (tile < int(tiles) && g.y < ts) {
 
 	void Monitor::FinishSequence(uint64_t sequence)
 	{
-		std::lock_guard<std::mutex> lock(outMutex);
-		for (auto it = outstanding.begin(); it != outstanding.end(); ++it)
-			if (*it == sequence) { outstanding.erase(it); return; }
+		bool erased = false;
+		{
+			std::lock_guard<std::mutex> lock(outMutex);
+			for (auto it = outstanding.begin(); it != outstanding.end(); ++it)
+			{
+				if (*it == sequence)
+				{
+					outstanding.erase(it);
+					erased = true;
+					break;
+				}
+			}
+		}
+		if (erased)
+			outCv.notify_all();
+	}
+
+	void Monitor::RecordWaitMissLocked(WaitMissCause cause, uint64_t framesLate, double analyseMs)
+	{
+		waitsMissed.fetch_add(1, std::memory_order_relaxed);
+		switch (cause)
+		{
+		case WaitMissCause::LatePoll:
+			waitMissLatePollCount.fetch_add(1, std::memory_order_relaxed);
+			break;
+		case WaitMissCause::DropOrBacklog:
+			waitMissDropOrBacklogCount.fetch_add(1, std::memory_order_relaxed);
+			break;
+		case WaitMissCause::BoundedWaitTimeout:
+			waitMissTimeoutCount.fetch_add(1, std::memory_order_relaxed);
+			break;
+		case WaitMissCause::None:
+			break;
+		}
+		lastWaitMissCause = cause;
+		lastWaitMissFramesLate = framesLate;
+		lastWaitMissAnalyseMs = analyseMs >= 0.0 ? analyseMs : snapshot.analyseMs;
+	}
+
+	void Monitor::NoteWaitMissed()
+	{
+		NoteWaitMissed(WaitMissCause::BoundedWaitTimeout, 0);
+	}
+
+	void Monitor::NoteWaitMissed(WaitMissCause cause, uint64_t renderSequence, uint64_t framesLate, double analyseMs)
+	{
+		const uint64_t lead = frameLead.load(std::memory_order_acquire);
+		const uint64_t through = renderSequence >= lead ? renderSequence - lead : 0u;
+		uint64_t computedLate = framesLate;
+		if (computedLate == 0 && renderSequence != 0)
+		{
+			const uint64_t done = analysedThrough.load(std::memory_order_acquire);
+			computedLate = through > done ? (through - done) : 1u;
+		}
+		std::lock_guard<std::mutex> lock(mutex);
+		if (cause == WaitMissCause::BoundedWaitTimeout)
+		{
+			const uint64_t mark = renderSequence != 0 ? through : releasedThrough.load(std::memory_order_acquire);
+			if (mark > timedOutThrough)
+				timedOutThrough = mark;
+		}
+		RecordWaitMissLocked(cause, computedLate, analyseMs);
+	}
+
+	void Monitor::BindLaneReadyProbe(VpSkeleton::AnalysisLane& lane)
+	{
+		auto lastSeq = std::make_shared<std::atomic<uint64_t>>(0);
+		lane.SetReadyProbe(
+			[this, lastSeq](uint64_t s) {
+				lastSeq->store(s, std::memory_order_release);
+				return ReadyFor(s);
+			},
+			[this, lastSeq]() {
+				NoteWaitMissed(WaitMissCause::BoundedWaitTimeout, lastSeq->load(std::memory_order_acquire));
+			});
+	}
+
+	void Monitor::UnbindLaneReadyProbe(VpSkeleton::AnalysisLane& lane)
+	{
+		lane.SetReadyProbe(nullptr, nullptr);
+	}
+
+	void Monitor::SetDeterministicWait(bool deterministic, uint32_t boundUs)
+	{
+		deterministicWaitBoundUs.store(boundUs, std::memory_order_release);
+		deterministicWait.store(deterministic, std::memory_order_release);
+	}
+
+	void Monitor::SetDeterministicSlack(uint32_t presentSlackUs, uint32_t guardUs)
+	{
+		deterministicSlackUs.store(presentSlackUs, std::memory_order_release);
+		deterministicGuardUs.store(guardUs, std::memory_order_release);
+	}
+
+	bool Monitor::DeterministicWait() const
+	{
+		return deterministicWait.load(std::memory_order_acquire);
+	}
+
+	unsigned long long Monitor::DeterministicWaitCalls() const
+	{
+		return deterministicWaitCalls.load(std::memory_order_relaxed);
+	}
+
+	unsigned long long Monitor::DeterministicWaitYields() const
+	{
+		return deterministicWaitYields.load(std::memory_order_relaxed);
+	}
+
+	bool Monitor::WaitForReadyDeterministic(uint64_t renderSequence, uint32_t presentSlackUs, uint32_t guardUs)
+	{
+		if (!frameBound.load(std::memory_order_acquire) || !deterministicWait.load(std::memory_order_acquire))
+			return ReadyFor(renderSequence);
+		deterministicWaitCalls.fetch_add(1, std::memory_order_relaxed);
+		if (ReadyFor(renderSequence))
+			return true;
+
+		const uint32_t configuredBoundUs = deterministicWaitBoundUs.load(std::memory_order_acquire);
+		VpSkeleton::WaitPolicy policy;
+		policy.deterministicRun = true;
+		if (configuredBoundUs > 0)
+		{
+			policy.explicitTestWait = true;
+			policy.testWaitUs = configuredBoundUs;
+		}
+		else
+		{
+			policy.explicitTestWait = false;
+			const bool useStoredSlack = (presentSlackUs == 0 && guardUs == 0);
+			policy.presentSlackUs = useStoredSlack ? deterministicSlackUs.load(std::memory_order_acquire) : presentSlackUs;
+			policy.guardUs = useStoredSlack ? deterministicGuardUs.load(std::memory_order_acquire) : guardUs;
+		}
+
+		const auto start = std::chrono::steady_clock::now();
+		for (;;)
+		{
+			if (ReadyFor(renderSequence))
+				return true;
+			const long long elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+				std::chrono::steady_clock::now() - start).count();
+			const uint32_t waitedUs = elapsed > 0
+				? static_cast<uint32_t>((std::min)(elapsed, static_cast<long long>((std::numeric_limits<uint32_t>::max)())))
+				: 0u;
+			uint32_t waitMoreUs = 0;
+			const VpSkeleton::WaitDecision decision = VpSkeleton::DecideWait(
+				VpSkeleton::Variants::NonIdentical, true, VpSkeleton::SlotState::Writing, policy, waitedUs, &waitMoreUs);
+			if (decision == VpSkeleton::WaitDecision::SealNow)
+				return ReadyFor(renderSequence);
+			if (decision == VpSkeleton::WaitDecision::BoundMissed)
+			{
+				NoteWaitMissed(WaitMissCause::BoundedWaitTimeout, renderSequence);
+				return false;
+			}
+			deterministicWaitYields.fetch_add(1, std::memory_order_relaxed);
+			const uint64_t lead = frameLead.load(std::memory_order_acquire);
+			const uint64_t through = renderSequence >= lead ? renderSequence - lead : 0u;
+			std::unique_lock<std::mutex> lock(outMutex);
+			auto isReadyLocked = [&]() -> bool {
+				if (outStopping || renderSequence < lead)
+					return true;
+				for (const uint64_t o : outstanding)
+					if (o <= through)
+						return false;
+				return true;
+			};
+			if (isReadyLocked())
+				return !outStopping;
+			outCv.wait_for(lock, std::chrono::microseconds(waitMoreUs > 0 ? waitMoreUs : 1u), isReadyLocked);
+			if (outStopping)
+				return false;
+		}
 	}
 
 	bool Monitor::ReadyFor(uint64_t s) const
@@ -2768,14 +3225,26 @@ if (tile < int(tiles) && g.y < ts) {
 	double Monitor::BeginBoundFrame(uint64_t sourceSequence, double seconds)
 	{
 		const double mapped = submitClock.Advance(seconds, clockStepsBack);
+		// O#6: deterministic-only bounded ready wait (live mode returns immediately without sleeping).
+		// WaitForReadyDeterministic fast-returns true with 0 yields when ReadyFor is already true,
+		// incrementing DeterministicWaitCalls() so callers/tests distinguish deterministic checks from live mode.
+		const bool detWait = deterministicWait.load(std::memory_order_acquire);
+		bool waitedOk = true;
+		if (detWait)
+			waitedOk = WaitForReadyDeterministic(sourceSequence);
 		// The renderer's order is Discontinuity -> Frame -> AutoFactor(s): a reset this release
 		// consumed (the flagged discontinuity or a held worker reset) is carried to AutoFactor.
-		if (ReleaseHeldFor(sourceSequence))
+		if (ReleaseHeldFor(sourceSequence, detWait && !waitedOk))
 			pendingBoundReset.store(true, std::memory_order_release);
+		if (detWait)
+		{
+			haveBoundWaitSeq = true;
+			lastBoundWaitSeq = sourceSequence;
+		}
 		return mapped;
 	}
 
-	bool Monitor::ReleaseHeldFor(uint64_t sequence)
+	bool Monitor::ReleaseHeldFor(uint64_t sequence, bool timedOut)
 	{
 		const uint64_t lead = frameLead.load(std::memory_order_acquire);
 		const uint64_t through = sequence >= lead ? sequence - lead : 0;
@@ -2789,8 +3258,13 @@ if (tile < int(tiles) && g.y < ts) {
 			ResetVisible();
 			denseGridApplied.store(false, std::memory_order_release);
 			releasedThrough.store(0, std::memory_order_release);   // a new stretch: earlier release points mean nothing
+			timedOutThrough = 0;
+			haveBoundWaitSeq = false;
+			lastBoundWaitSeq = 0;
 			reset = true;
 		}
+		if (timedOut && through > timedOutThrough)
+			timedOutThrough = through;
 		if (through > releasedThrough.load(std::memory_order_relaxed))
 			releasedThrough.store(through, std::memory_order_release);
 		const uint64_t era = epoch.load(std::memory_order_acquire);
@@ -2854,6 +3328,12 @@ if (tile < int(tiles) && g.y < ts) {
 	std::string Describe(const Snapshot& s, double autoRatio, bool autoSelected)
 	{
 		std::string text = DescribeBase(s, autoRatio, autoSelected);
+		if (s.u7SceneFallback > 0)
+			text += "; U7 scene fallback " + std::to_string(s.u7SceneFallback) +
+				(s.u7SceneFallbackWhy.empty() ? std::string() : " (" + s.u7SceneFallbackWhy + ")");
+		if (s.p4StatsFallback > 0)
+			text += "; P4 stats fallback " + std::to_string(s.p4StatsFallback) +
+				(s.p4StatsFallbackWhy.empty() ? std::string() : " (" + s.p4StatsFallbackWhy + ")");
 		if (!s.historyNote.empty()) text += "; " + s.historyNote;
 		if (!s.chainNote.empty()) text += "; " + s.chainNote;
 		if (autoSelected && !s.conventionNote.empty()) text += "; " + s.conventionNote;   // AutoFactors refreshes it only under auto
@@ -2864,6 +3344,19 @@ if (tile < int(tiles) && g.y < ts) {
 		std::string out = text + bound;
 		if (s.engagedReactive != 0)
 			out += "; engaged " + std::to_string(s.engagedReactive) + "x without the look-ahead (reactive fallback: the cut could not be read ahead)";
+		if (s.waitsMissed != 0)
+		{
+			char miss[256];
+			snprintf(miss, sizeof(miss),
+				"; last wait miss: %s (%llu frames late, analyseMs %.1f; late poll %llu, drop/backlog %llu, wait timeout %llu)",
+				WaitMissCauseText(s.lastWaitMissCause),
+				static_cast<unsigned long long>(s.lastWaitMissFramesLate),
+				s.lastWaitMissAnalyseMs,
+				s.waitMissLatePoll,
+				s.waitMissDropOrBacklog,
+				s.waitMissTimeout);
+			out += miss;
+		}
 		if (s.heldDropped != 0 || s.jobsDropped != 0 || s.submitSkipped != 0 || s.waitsMissed != 0)
 			out += " (analyses were lost to timing: this run is not reproducible)";
 		return out;

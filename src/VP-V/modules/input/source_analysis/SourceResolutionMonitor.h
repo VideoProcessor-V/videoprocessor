@@ -28,6 +28,10 @@
 #include <vector>
 
 namespace SourceIdentity { namespace Chain { class ChainEstimator; } }
+namespace VpSkeleton
+{
+	class AnalysisLane;
+}
 
 // Stage 12 step B in the renderer (owner 2026-10-15): the effective
 // resolution, bitrate quality and effective bit depth of every source, and
@@ -45,6 +49,16 @@ namespace SourceIdentity { namespace Chain { class ChainEstimator; } }
 // source or format change, seek / live queue reset) or a confidence drop.
 namespace SourceResolutionMonitor
 {
+	// O#6 (SRM-FRAMEBOUND-WAIT): exact classification of frame-bound wait misses (Ctrl+I & Ctrl+Alt+D).
+	enum class WaitMissCause : uint8_t
+	{
+		None = 0,
+		LatePoll,
+		DropOrBacklog,
+		BoundedWaitTimeout
+	};
+	const char* WaitMissCauseText(WaitMissCause cause);
+
 	struct Snapshot
 	{
 		bool reading = false;          // at least one frame analysed since the last discontinuity
@@ -53,6 +67,7 @@ namespace SourceResolutionMonitor
 		double frameRatio = 1.0;       // the last analysed frame
 		bool frameBlank = false;       // the last analysed frame had no detail (black, a fade's dark end, flat)
 		bool frameBlack = false;       // ... and was a real black (every tile flat at black; latch fixes)
+		bool frameFade = false;        // O#5 M3: the last analysed frame's shared U7 fade verdict
 		double liveRatio = 1.0;        // the spec's live reading: median of the last ~2 s, snapped on a cut
 		double declaredRatio = 1.0;    // the tracker's conservative value
 		double confidence = 0.0;       // of the declared value (0..1)
@@ -116,10 +131,21 @@ namespace SourceResolutionMonitor
 		unsigned long long heldDropped = 0;   // dropped oldest because the held queue was full
 		unsigned long long heldStale = 0;     // held / queued results of an era before a Discontinuity()
 		unsigned long long jobsDropped = 0;   // queued jobs dropped oldest because the job queue was full
-		unsigned long long waitsMissed = 0;   // NoteWaitMissed(): a deterministic wait ran out
+		unsigned long long waitsMissed = 0;   // NoteWaitMissed(): a deterministic wait ran out or a bound result arrived late
+		WaitMissCause lastWaitMissCause = WaitMissCause::None;
+		uint64_t lastWaitMissFramesLate = 0;
+		double lastWaitMissAnalyseMs = 0.0;
+		unsigned long long waitMissLatePoll = 0;
+		unsigned long long waitMissDropOrBacklog = 0;
+		unsigned long long waitMissTimeout = 0;
 		unsigned long long clockStepsBack = 0; // source seconds that went backwards (clamped)
 		unsigned long long submitSkipped = 0; // frame-bound: frames not copied because both readback slots were still in flight
 		unsigned long long engagedReactive = 0; // frame-bound: engages made by the reactive trigger because the look-ahead was unavailable or stale (visible fallback)
+		// O#5 M1-M4: shared U7 scene & P4 stats reads and visible fallback diagnostics.
+		unsigned long long u7SceneShared = 0, u7SceneFallback = 0;
+		std::string u7SceneFallbackWhy;
+		unsigned long long p4StatsShared = 0, p4StatsFallback = 0;
+		std::string p4StatsFallbackWhy;
 	};
 
 	class Monitor
@@ -129,6 +155,26 @@ namespace SourceResolutionMonitor
 		~Monitor();
 		Monitor(const Monitor&) = delete;
 		Monitor& operator=(const Monitor&) = delete;
+
+		// O#5 M1-M4: injectable shared U7 scene and P4 stats readers for deterministic tests
+		// (empty = default VpSkeleton::SceneRecordReader::AcquireScene / AcquireSourceStats).
+		struct SharedSceneInput
+		{
+			bool cut = false;
+			bool fade = false;
+			float fadeKeep = -1.0f;
+		};
+		struct SharedP4Input
+		{
+			bool blank = false;
+			bool black = false;
+			bool flat = false;
+			double mean = 0.0;
+		};
+		using SharedSceneFn = std::function<bool(uint64_t seq, SharedSceneInput& out, const char** why)>;
+		using SharedP4Fn = std::function<bool(uint64_t seq, SharedP4Input& out, const char** why)>;
+		void SetSharedSceneReader(SharedSceneFn reader);
+		void SetSharedP4Reader(SharedP4Fn reader);
 
 		// Render thread, every rendered source frame: submits a tile copy when
 		// the interval has passed and a slot is free, and collects finished
@@ -178,8 +224,21 @@ namespace SourceResolutionMonitor
 		bool ReadyFor(uint64_t s) const;
 		// The source sequence of the last analysed frame (0 = none yet). Any thread.
 		uint64_t AnalysedThrough() const { return analysedThrough.load(std::memory_order_acquire); }
-		// The lane's wait for ReadyFor ran out: counted, shown by Describe.
-		void NoteWaitMissed() { waitsMissed.fetch_add(1, std::memory_order_relaxed); }
+		// The lane's wait for ReadyFor ran out (or a bound analysis arrived late): counted with exact cause, shown by Describe.
+		void NoteWaitMissed();
+		void NoteWaitMissed(WaitMissCause cause, uint64_t renderSequence, uint64_t framesLate = 0, double analyseMs = -1.0);
+		// O#6 (SRM-FRAMEBOUND-WAIT): wire Monitor::ReadyFor / NoteWaitMissed onto an AnalysisLane's deterministic wait probe.
+		void BindLaneReadyProbe(VpSkeleton::AnalysisLane& lane);
+		void UnbindLaneReadyProbe(VpSkeleton::AnalysisLane& lane);
+		// Deterministic-only bounded ready wait (default OFF: live mode never blocks on worker readiness).
+		// boundUs > 0 uses an explicit wait bound; boundUs == 0 uses presentSlackUs - guardUs per SealPoint.h N1
+		// (using SetDeterministicSlack when BeginBoundFrame / AutoFactor or a 0-arg call invokes WaitForReadyDeterministic).
+		void SetDeterministicWait(bool deterministic, uint32_t boundUs = 0);
+		void SetDeterministicSlack(uint32_t presentSlackUs, uint32_t guardUs = 0);
+		bool DeterministicWait() const;
+		bool WaitForReadyDeterministic(uint64_t renderSequence, uint32_t presentSlackUs = 0, uint32_t guardUs = 0);
+		unsigned long long DeterministicWaitCalls() const;
+		unsigned long long DeterministicWaitYields() const;
 		unsigned long long WaitsMissed() const { return waitsMissed.load(std::memory_order_relaxed); }
 		unsigned long long HeldDropped() const { return heldDropped.load(std::memory_order_relaxed); }
 		unsigned long long ClockStepsBack() const { return clockStepsBack.load(std::memory_order_relaxed); }
@@ -562,6 +621,7 @@ namespace SourceResolutionMonitor
 			uint64_t sequence = 0;       // the source frame copied (h3-latch: look-ahead evidence)
 			uint64_t streamKey = 0;      // R3: SetStreamKey's value when the copy was taken
 			uint64_t epoch = 0;          // frame-bound: Discontinuity() count when the copy was taken
+			bool hadBacklog = false;     // O#6: another frame-bound job was already queued behind this one when popped
 		};
 		// Frame-bound: one analysed result waiting for its render sequence.
 		struct Held
@@ -582,7 +642,7 @@ namespace SourceResolutionMonitor
 		};
 		double DecisionNow(double seconds);                 // render thread (AutoFactor / AutoFactors)
 		double DecisionPeek(double seconds) const;          // AutoTransition
-		bool ReleaseHeldFor(uint64_t sequence);             // true: a reset to apply
+		bool ReleaseHeldFor(uint64_t sequence, bool timedOut = false);   // true: a reset to apply
 		double BeginBoundFrame(uint64_t sourceSequence, double seconds);   // Frame()'s frame-bound front part
 		// Frame()'s parts (see FrameBegin / FrameSubmit).
 		void PrepareGpu(pl_gpu g);
@@ -593,9 +653,20 @@ namespace SourceResolutionMonitor
 		struct FrameCarry { bool valid = false, bound = false; uint64_t sequence = 0; double raw = 0.0, seconds = 0.0; };
 		FrameCarry carry;   // FrameBegin -> FrameSubmit (render thread)
 		void PushHeld(const Job& j, bool reset);            // with `mutex` held
+		void RecordWaitMissLocked(WaitMissCause cause, uint64_t framesLate, double analyseMs);   // with `mutex` held
 		void ResetVisible();                                // with `mutex` held
 		void NoteSubmitted(uint64_t sequence);
 		void FinishSequence(uint64_t sequence);
+		bool ReadSharedScene(uint64_t seq, SharedSceneInput& out, const char** why) const;
+		bool ReadSharedP4(uint64_t seq, SharedP4Input& out, const char** why) const;
+		void NoteU7Fallback(const char* why) const;
+		void NoteP4Fallback(const char* why) const;
+		mutable std::mutex sharedReaderMutex;
+		SharedSceneFn sharedSceneReader;
+		SharedP4Fn sharedP4Reader;
+		mutable std::atomic<unsigned long long> u7SceneSharedCount, u7SceneFallbackCount;
+		mutable std::atomic<unsigned long long> p4StatsSharedCount, p4StatsFallbackCount;
+		mutable std::string u7SceneFallbackWhyLast, p4StatsFallbackWhyLast;
 		void Worker();
 		void Fail(const char* what, double seconds);
 		// One history row (event .. note, 13 fields) plus the replay / identity columns (SourceHistory::kExtraColumns fields
@@ -614,12 +685,26 @@ namespace SourceResolutionMonitor
 		std::atomic<uint64_t> analysedThrough{ 0 };
 		std::atomic<uint64_t> releasedThrough{ 0 };   // the last release point (s - D) of ReleaseHeldFor; a result at or before it is late
 		std::atomic<unsigned long long> waitsMissed{ 0 }, heldDropped{ 0 }, heldStale{ 0 }, jobsDropped{ 0 }, clockStepsBack{ 0 }, submitSkipped{ 0 }, engagedReactive{ 0 };
+		std::atomic<unsigned long long> waitMissLatePollCount, waitMissDropOrBacklogCount, waitMissTimeoutCount;
+		WaitMissCause lastWaitMissCause = WaitMissCause::None;   // guarded by `mutex`
+		uint64_t lastWaitMissFramesLate = 0;                     // guarded by `mutex`
+		double lastWaitMissAnalyseMs = 0.0;                      // guarded by `mutex`
+		uint64_t timedOutThrough;                                // guarded by `mutex`: bound sequences already billed as BoundedWaitTimeout
+		unsigned long long seenJobsDropped, seenHeldDropped, seenSubmitSkipped;   // guarded by `mutex`: delta trackers for DropOrBacklog vs LatePoll
+		std::atomic<bool> deterministicWait;
+		std::atomic<uint32_t> deterministicWaitBoundUs;
+		std::atomic<uint32_t> deterministicSlackUs, deterministicGuardUs;
+		std::atomic<unsigned long long> deterministicWaitCalls, deterministicWaitYields;
+		bool haveBoundWaitSeq = false;                           // render thread: avoids double wait across BeginBoundFrame + AutoFactor
+		uint64_t lastBoundWaitSeq = 0;
 		std::atomic<bool> denseGridApplied{ false };
 		Held held[kHeldCap];            // ring, guarded by `mutex`
 		size_t heldHead = 0, heldCount = 0;
 		Snapshot visible;               // what Read() returns when frame-bound (guarded by `mutex`)
 		std::deque<Job> jobQueue;       // frame-bound FIFO to the worker (guarded by `mutex`)
 		mutable std::mutex outMutex;    // leaf lock: the frames in flight
+		std::condition_variable outCv;  // notified on FinishSequence / SetFrameBound / ~Monitor
+		bool outStopping = false;       // guarded by `outMutex`
 		std::deque<uint64_t> outstanding;
 		SourceClock submitClock, decideClock;   // render thread
 
@@ -770,6 +855,12 @@ namespace SourceResolutionMonitor
 		SourceResolution::Tracker::CutJudge aheadCutJudge;
 		// Cut fixes: the per-frame judge (render thread writes, worker reads Evidence) under its mutex.
 		SourceResolution::FrameCutJudge frameJudge;
+		struct U7AheadEntry
+		{
+			uint64_t seq;
+			bool cut;
+		};
+		std::deque<U7AheadEntry> u7AheadHistory;   // guarded by `frameJudgeMutex` (MED-3: consecutive U7 verdicts for LookAheadEvidence)
 		mutable std::mutex frameJudgeMutex;
 		double blackLevelSeen = 64.0 / 1023.0;  // the source's black (Frame), for the look-ahead
 		bool aheadAwaitTarget = false;   // the event frame was black: analyse the next frame with picture

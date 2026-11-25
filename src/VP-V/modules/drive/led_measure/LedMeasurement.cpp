@@ -1,5 +1,6 @@
 #include <pch.h>
 #include "LedMeasurement.h"
+#include "SourceStatsDisplay.h"
 #include <VP-V/modules/control/skeleton/SceneRecordReader.h>   // FIX-LED-CUT-U7: the shared U7 verdict (read only)
 
 #include <algorithm>
@@ -432,19 +433,16 @@ namespace LedDrive
 
 	double HistogramPercentile(const uint32_t* histogram, uint32_t total, double percentile)
 	{
-		if (total == 0) return 16.0;
-		const double above = total * (100.0 - percentile) / 100.0;
-		double counted = 0.0;
-		for (int code = HISTOGRAM_BINS - 1; code >= 0; --code)
-		{
-			counted += histogram[code];
-			if (counted > above) return code;
-		}
-		return 0.0;
+		return SourceStatsDisplay::DisplayPercentile(histogram, total, percentile);
 	}
 
 	StatsBuilder::StatsBuilder(const LedDriveConfig& configIn) : config(configIn)
 	{
+	}
+
+	void StatsBuilder::SetSceneVerdictReader(SceneVerdictFn reader)
+	{
+		sceneVerdictReader = std::move(reader);
 	}
 
 	namespace
@@ -473,43 +471,63 @@ namespace LedDrive
 	{
 		FrameStats stats;
 		if (raw.blocks == 0) return stats;
-		stats.blocks = raw.blocks;
+		const SourceStatsDisplay::DisplayRecord summary = SourceStatsDisplay::SummaryFromRaw(
+			raw, config.highlightPercentile, config.scriptHighlightCode);
+		stats.blocks = summary.blocks;
 		std::copy(raw.histogram, raw.histogram + HISTOGRAM_BINS, stats.histogram.begin());
-		stats.apl = static_cast<double>(raw.sum) / SUM_SCALE / raw.blocks;
-		stats.highlight = HistogramPercentile(raw.histogram, raw.blocks, config.highlightPercentile);
-		// Until mode: compensate defines the knee threshold (step 4), the area is
-		// measured against the script's highlight level.
-		uint32_t bright = 0;
-		for (int code = std::max(0, std::min(config.scriptHighlightCode, 255)); code < HISTOGRAM_BINS; ++code)
-			bright += raw.histogram[code];
-		stats.highlightArea = static_cast<double>(bright) / raw.blocks;
-
-		// The script's highlight test used the maximum of its downscale.
-		stats.maximum = raw.maximum > 0 ? static_cast<double>(raw.maximum) / SUM_SCALE : stats.highlight;
+		stats.apl = summary.apl;
+		stats.highlight = summary.highlight;
+		stats.highlightArea = summary.highlightArea;
+		stats.maximum = summary.maximum;
 
 		// Sustained highlight: minimum over highlight_persist_ms, so a flash
 		// shorter than that never raises it.
 		stats.sustainedHighlight = WindowMinimum(highlightHistory, timeMs, stats.highlight,
 			config.highlightPersistMs);
 
-		// FIX-LED-CUT-U7 (owner answer 2026-11-15 (2)): the cut is the shared scene judge's verdict (U7, CutFadeJudge over the P4
-		// records) for this source sequence, GOT-OR-COMPUTED through the skeleton (also for a queued frame ahead of the seal), not a
-		// private mean-difference threshold (that metric and its cell memory are deleted). Genuine failure (sequence 0, no lane, the
-		// frame beyond the planned depth ...) = NO cut this frame, counted, with the cause in stats.sceneWhy for the caller's visible entry.
+		(void)sourcePeriodMs;
+
+		// FIX-LED-CUT-U7 + O#2 L1: both cut and fade are the shared scene judge's verdict (U7, CutFadeJudge over P4 records) for this
+		// source sequence, GOT-OR-COMPUTED through the skeleton (also for a queued frame ahead of the seal). Private mean-difference
+		// cut and APL-decline fade loops are deleted. Genuine failure (sequence 0, no lane, beyond planned depth, ...) = no cut/fade
+		// this frame, counted (sceneMissing) with the exact cause in stats.sceneWhy; never a private re-judgement.
 		{
-			bool recordCut = false;
+			SceneVerdict verdict;
 			const char* why = "no frame sequence";
 			bool found = false;
 			if (sequence != 0)
 			{
 				why = "";
-				found = sceneReader ? sceneReader(sequence, recordCut, &why)
-					: VpSkeleton::SceneRecordReader::AcquireCut(sequence, recordCut, &why);
+				if (sceneVerdictReader)
+				{
+					found = sceneVerdictReader(sequence, verdict, &why);
+				}
+				else if (sceneReader)
+				{
+					bool recordCut = false;
+					found = sceneReader(sequence, recordCut, &why);
+					verdict.cut = found && recordCut;
+					verdict.fade = false;
+					verdict.fadeKeep = -1.0f;
+				}
+				else
+				{
+					VpSkeleton::SceneRecordReader::SceneVerdict shared;
+					found = VpSkeleton::SceneRecordReader::AcquireScene(sequence, shared, &why);
+					if (found)
+					{
+						verdict.cut = shared.cut;
+						verdict.fade = shared.fade;
+						verdict.fadeKeep = shared.fadeKeep;
+					}
+				}
 			}
 			lastSceneFromRecord = found;
 			lastSceneWhy = found ? "" : (why != nullptr ? why : "");
 			if (found) ++sceneFromRecord; else ++sceneMissing;
-			stats.cut = found && recordCut;
+			stats.cut = found && verdict.cut;
+			stats.fade = found && verdict.fade;
+			stats.fadeKeep = found ? verdict.fadeKeep : -1.0f;
 			stats.sceneKnown = found;
 			stats.sceneWhy = lastSceneWhy;
 		}
@@ -519,32 +537,6 @@ namespace LedDrive
 		// wait out the window; a flash without a cut still does).
 		if (stats.cut) sustainHistory.clear();
 		stats.sustainedApl = WindowMinimum(sustainHistory, timeMs, stats.apl, config.aplPersistMs);
-
-		// Fade (in time, any frame rate): APL fell between every pair of
-		// frames over at least the last fade_ms, each step at no less than
-		// fade_min_slope per second, with no cut among them.
-		if (stats.cut || (!aplHistory.empty() && timeMs < aplHistory.back().time)) aplHistory.clear();
-		aplHistory.push_back({ timeMs, stats.apl });
-		while (aplHistory.size() > MAX_WINDOW_SAMPLES)
-			aplHistory.pop_front();
-		// Keep the newest sample at or before the window's start, so the
-		// samples kept span the whole window.
-		// Bug hunt 31: fade keys written in source frames follow the measured period (not 24 Hz).
-		const double fadeMs = config.EffectiveFadeMs(sourcePeriodMs);
-		const double fadeMinSlope = config.EffectiveFadeMinSlope(sourcePeriodMs);
-		while (aplHistory.size() > 2 && aplHistory[1].time <= timeMs - fadeMs + 1e-6)
-			aplHistory.pop_front();
-		if (aplHistory.size() >= 2 && timeMs - aplHistory.front().time >= fadeMs - 1e-6)
-		{
-			bool falling = true;
-			for (size_t i = 1; i < aplHistory.size(); ++i)
-			{
-				const double seconds = std::max(0.0, aplHistory[i].time - aplHistory[i - 1].time) / 1000.0;
-				const double drop = aplHistory[i - 1].value - aplHistory[i].value;
-				falling = falling && drop > 0.0 && drop >= fadeMinSlope * seconds - 1e-9;
-			}
-			stats.fade = falling;
-		}
 		return stats;
 	}
 }

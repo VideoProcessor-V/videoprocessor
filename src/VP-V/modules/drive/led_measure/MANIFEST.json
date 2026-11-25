@@ -14,7 +14,8 @@
     "src/VP-V/modules/drive/led_measure/NativeReadback.h",
     "src/VP-V/modules/drive/led_measure/LedMeasurementHook.cpp",
     "src/VP-V/modules/drive/led_measure/LedMeasurementHook.h",
-    "src/VP-V/modules/drive/led_measure/FrameStats.h"
+    "src/VP-V/modules/drive/led_measure/FrameStats.h",
+    "src/VP-V/modules/drive/led_measure/SourceStatsDisplay.h"
   ],
   "components": {
     "files": {
