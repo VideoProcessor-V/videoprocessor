@@ -231,9 +231,21 @@ def parse_csv_text(text: str, source: str = "<csv>") -> RunMetrics:
                 ahead_renders = max(ahead_renders, int(float(norm[key])))
                 break
 
-        note = norm.get("motion_field_ahead", "") or norm.get("status", "")
-        if note and _AHEAD_LINE_RE.search(note):
-            ahead_lines.append(note)
+        for col in ("motion_field_ahead", "status"):
+            note = norm.get(col, "")
+            if not note:
+                continue
+            m_ahead = _AHEAD_LINE_RE.search(note)
+            if m_ahead:
+                ahead_lines.append(note)
+                inside = m_ahead.group(1)
+                s_val = _extract_first_int(inside, _AHEAD_SLOTS_PATTERNS)
+                r_val = _extract_first_int(inside, _AHEAD_RENDERS_PATTERNS)
+                if s_val is not None:
+                    ahead_slots = max(ahead_slots, s_val)
+                if r_val is not None:
+                    ahead_renders = max(ahead_renders, r_val)
+                break
 
     late_presents = late_cumulative_max if late_cumulative_max is not None else late_flags_sum
     return RunMetrics(
@@ -264,6 +276,10 @@ def parse_json_data(data: Mapping[str, Any], source: str = "<json>") -> RunMetri
     else:
         mean_ms = float(data.get("render_ms_mean", 0.0))
         p95_ms = float(data.get("render_ms_p95", mean_ms))
+        if not math.isfinite(mean_ms):
+            raise ValueError(f"Non-finite render_ms_mean ({mean_ms}) in {source}")
+        if not math.isfinite(p95_ms):
+            raise ValueError(f"Non-finite render_ms_p95 ({p95_ms}) in {source}")
         sample_count = int(data.get("sample_count", 1 if mean_ms > 0.0 else 0))
 
     late_presents = int(data.get("late_presents", 0))
@@ -337,12 +353,20 @@ def evaluate_rate(rate: str, baseline: RunMetrics, candidate: RunMetrics) -> Rat
     added_late = max(0, delta_late)
 
     reasons: List[str] = []
+    if not math.isfinite(baseline.render_ms_mean) or not math.isfinite(baseline.render_ms_p95):
+        reasons.append("baseline has non-finite render_ms metric")
+    if not math.isfinite(candidate.render_ms_mean) or not math.isfinite(candidate.render_ms_p95):
+        reasons.append("candidate has non-finite render_ms metric")
     if baseline.sample_count <= 0:
         reasons.append("baseline has no render_ms samples")
     if candidate.sample_count <= 0:
         reasons.append("candidate has no render_ms samples")
-    if not (render_ms_saved > 0.0):
+    if not math.isfinite(render_ms_saved):
+        reasons.append(f"render_ms_saved ({render_ms_saved}) is non-finite")
+    elif not (render_ms_saved > 0.0):
         reasons.append(f"render_ms_saved ({render_ms_saved:+.3f} ms) <= 0.0")
+    if not math.isfinite(p95_ms_saved):
+        reasons.append(f"p95_ms_saved ({p95_ms_saved}) is non-finite")
     if added_late != 0:
         reasons.append(f"added_late_presents ({added_late}) != 0")
 
