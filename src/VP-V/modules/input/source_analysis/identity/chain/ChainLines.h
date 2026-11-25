@@ -4,11 +4,13 @@
 
 // LineSnapshot (SID-C2b): a compact copy of exactly the lines the chain estimator reads from one plane, and nothing else.
 //
-// The SourceFrameTap sink copies the LineSampler lines into a snapshot (integer 10-bit codes, 2 bytes per sample, about 0.4 MB
-// at 3840x2160 for 32 rows + 32 columns) and releases the plane; the estimator's worker converts it to the units' `LineSet`
-// (doubles) and runs on that. The live path and a replay of a dumped snapshot are the same code on the same integers, so a
-// dumped ring reproduces the live record bytes exactly (doc 78 section 9b: "the chain estimator is a pure function of its
-// sampled lines"). `scalerRect` of the units' LineSet is the active rectangle (the bars were not part of the scaled raster).
+// The SourceFrameTap sink copies the LineSampler lines into a snapshot (2 bytes per sample, about 0.4 MB at 3840x2160
+// for 32 rows + 32 columns; Q6 fixed-point on the 10-bit analysis axis when fracBits == kSnapshotFracBits, or legacy
+// integer 10-bit codes when fracBits == 0) and releases the plane; the estimator's worker converts it to the units' `LineSet`
+// (doubles on the 10-bit axis) and runs on that. The live path and a replay of a dumped snapshot are the same code on the same
+// integers, so a dumped ring reproduces the live record bytes exactly (doc 78 section 9b: "the chain estimator is a pure
+// function of its sampled lines"). `scalerRect` of the units' LineSet is the active rectangle (the bars were not part of the
+// scaled raster).
 //
 // Header-only, standard library only, C++14, no clock.
 #include "LineSampler.h"
@@ -35,6 +37,11 @@ namespace SourceIdentity
 		constexpr uint32_t kEvMenuHold = 1u << 6;      // SID r2 R7 (safety rules on): a menu / overlay episode began; the upscaled latch is not carried into it
 		constexpr uint32_t kEvAbrStep = 1u << 7;       // SID r2 R5 (safety rules on, switch): an ABR rendition step event
 
+		// Slice 21 L4: Q6 fixed-point fraction bits on the 10-bit analysis axis (16-bit uint16_t storage minus 10-bit axis = 6,
+		// matching AnalysisAxis10.h::kAxisFractionBits; 1 LSB = 1/64 of a 10-bit code). Fits 8-bit (code8 << 8 <= 65280),
+		// 10-bit (code10 << 6 <= 65472), and 12-bit DV (code12 << 4 <= 65520) losslessly in uint16_t.
+		constexpr uint8_t kSnapshotFracBits = 6u;
+
 		struct LineSnapshot
 		{
 			uint64_t seq = 0;
@@ -49,10 +56,11 @@ namespace SourceIdentity
 			LineRect inner;                   // active shrunk by the sampler margin (the lines' extent)
 			int rowCount = 0;
 			int colCount = 0;
+			uint8_t fracBits = 0;             // fractional bits of rows/cols on the 10-bit axis (0 = legacy integer 10-bit, kSnapshotFracBits = Q6)
 			std::vector<int32_t> rowY;        // frame y of every row line
 			std::vector<int32_t> colX;        // frame x of every column line
-			std::vector<uint16_t> rows;       // rowCount x inner.w, 10-bit codes
-			std::vector<uint16_t> cols;       // colCount x inner.h, 10-bit codes
+			std::vector<uint16_t> rows;       // rowCount x inner.w, 10-bit codes << fracBits
+			std::vector<uint16_t> cols;       // colCount x inner.h, 10-bit codes << fracBits
 
 			size_t Bytes() const
 			{
@@ -61,10 +69,12 @@ namespace SourceIdentity
 			}
 		};
 
-		// Copies the lines of `plan` out of a plane (samples of `Pix`, row stride in samples). `scale` converts a sample to 10-bit
-		// codes (1 for the tap's plane). False when the plan is invalid or the plane is null.
+		// Copies the lines of `plan` out of a plane (samples of `Pix`, row stride in samples). `scale` converts a sample to
+		// snapshot units (10-bit codes << fracBits; e.g. scale = 1, fracBits = 0 for legacy 10-bit, or scale = 2^msbShift,
+		// fracBits = kSnapshotFracBits for Q6). False when the plan is invalid or the plane is null.
 		template <class Pix>
-		inline bool CaptureLines(const LinePlan& plan, const Pix* plane, std::ptrdiff_t stride, double scale, LineSnapshot& out)
+		inline bool CaptureLines(const LinePlan& plan, const Pix* plane, std::ptrdiff_t stride, double scale, LineSnapshot& out,
+			uint8_t fracBits = 0)
 		{
 			if (!plan.valid || plane == nullptr || plan.inner.w < 1 || plan.inner.h < 1)
 				return false;
@@ -76,6 +86,7 @@ namespace SourceIdentity
 			out.inner = plan.inner;
 			out.rowCount = plan.rowCount;
 			out.colCount = plan.colCount;
+			out.fracBits = fracBits;
 			out.rowY.assign(plan.rowY, plan.rowY + plan.rowCount);
 			out.colX.assign(plan.colX, plan.colX + plan.colCount);
 			out.rows.assign(static_cast<size_t>(plan.rowCount) * static_cast<size_t>(plan.inner.w), 0);
@@ -98,9 +109,10 @@ namespace SourceIdentity
 		}
 
 		// The units' LineSet of one axis of a snapshot (the same geometry LineSampler::Fill gives with the active rectangle as the
-		// scaler rectangle). False when the axis has no lines.
+		// scaler rectangle), converted to doubles on the 10-bit axis. False when the axis has no lines.
 		inline bool ToLineSet(const LineSnapshot& s, int axis, LineSet& out)
 		{
+			const double invScale = s.fracBits > 0 ? std::ldexp(1.0, -static_cast<int>(s.fracBits)) : 1.0;
 			if (axis == 0)
 			{
 				if (s.rowCount <= 0 || s.inner.w < 1 || s.rows.size() != static_cast<size_t>(s.rowCount) * static_cast<size_t>(s.inner.w))
@@ -110,7 +122,7 @@ namespace SourceIdentity
 				out.origin = s.inner.x - s.active.x;
 				out.Resize(s.rowCount, s.inner.w);
 				for (size_t i = 0; i < s.rows.size(); ++i)
-					out.data[i] = static_cast<double>(s.rows[i]);
+					out.data[i] = static_cast<double>(s.rows[i]) * invScale;
 				for (int j = 0; j < s.rowCount; ++j)
 					out.cross[static_cast<size_t>(j)] = s.rowY[static_cast<size_t>(j)] - s.active.y;
 				return true;
@@ -122,20 +134,25 @@ namespace SourceIdentity
 			out.origin = s.inner.y - s.active.y;
 			out.Resize(s.colCount, s.inner.h);
 			for (size_t i = 0; i < s.cols.size(); ++i)
-				out.data[i] = static_cast<double>(s.cols[i]);
+				out.data[i] = static_cast<double>(s.cols[i]) * invScale;
 			for (int j = 0; j < s.colCount; ++j)
 				out.cross[static_cast<size_t>(j)] = s.colX[static_cast<size_t>(j)] - s.active.x;
 			return true;
 		}
 
 		// The output quantisation step of the delivered picture in 10-bit codes, from its own samples: 4 when every sampled code is
-		// a multiple of 4 (an 8-bit picture carried in 10-bit codes), else 1 (a true 10-bit picture). Looks at up to ~4096 samples.
+		// a multiple of 4 on the 10-bit axis (an 8-bit picture carried in 10-bit or Q6 codes), else 1 (a 10-bit or deeper picture).
+		// Looks at up to ~4096 samples.
 		inline int DetectStepCodes(const LineSnapshot& s)
 		{
-			auto allMultiple = [](const std::vector<uint16_t>& v) {
+			// On the 10-bit axis, multiples of 4 (= 2^2) stored with `fracBits` fractional bits are multiples of 2^(2 + fracBits),
+			// i.e. the lowest (2 + fracBits) bits are zero: 0x03 for fracBits == 0 (legacy 10-bit), 0xFF for fracBits == 6 (Q6).
+			const unsigned shift = 2u + static_cast<unsigned>(s.fracBits);
+			const uint32_t mask = shift >= 16u ? 0xFFFFu : ((1u << shift) - 1u);
+			auto allMultiple = [mask](const std::vector<uint16_t>& v) {
 				const size_t stride = v.size() > 2048 ? v.size() / 2048 : 1;
 				for (size_t i = 0; i < v.size(); i += stride)
-					if ((v[i] & 3u) != 0u)
+					if ((static_cast<uint32_t>(v[i]) & mask) != 0u)
 						return false;
 				return true;
 			};
@@ -148,10 +165,10 @@ namespace SourceIdentity
 		// where the asymptotic relative standard error of a Gaussian MAD (~1.167 / sqrt(N)) is ~15%.
 		constexpr size_t kMinFloorDiffs = 64u;
 
-		// Unit-agnostic measured floor in snapshot code units from interior 1-D second differences (GEM-083, shadow):
+		// Unit-agnostic measured floor in 10-bit axis code units from interior 1-D second differences (GEM-083, shadow):
 		//   d2[i] = x[i - 1] - 2*x[i] + x[i + 1]   strictly within each row/col line (never across a line boundary).
 		// For i.i.d. zero-mean perturbations of std dev sigma, Var(d2) = (1^2 + (-2)^2 + 1^2) * sigma^2 = 6 * sigma^2,
-		// so sigma_hat = RobustStats::MadSigma(RobustStats::Mad(d2)) / sqrt(6). Floored by the uniform quantisation
+		// so sigma_hat = RobustStats::MadSigma(RobustStats::Mad(d2) * 2^(-fracBits)) / sqrt(6). Floored by the uniform quantisation
 		// std dev stepCodes / sqrt(12). Returns quiet_NaN when fewer than kMinFloorDiffs (64) valid diffs exist.
 		inline double MeasuredFloorCodes(const LineSnapshot& s, double stepCodes)
 		{
@@ -185,7 +202,8 @@ namespace SourceIdentity
 						diffs.push_back(static_cast<int32_t>(col[i - 1]) - 2 * static_cast<int32_t>(col[i]) + static_cast<int32_t>(col[i + 1]));
 				}
 			}
-			const double raw = RobustStats::MadSigma(RobustStats::Mad(diffs)) / std::sqrt(6.0);
+			const double invScale = s.fracBits > 0 ? std::ldexp(1.0, -static_cast<int>(s.fracBits)) : 1.0;
+			const double raw = RobustStats::MadSigma(RobustStats::Mad(diffs) * invScale) / std::sqrt(6.0);
 			const double effStep = (std::isfinite(stepCodes) && stepCodes > 0.0) ? stepCodes : 1.0;
 			const double qFloor = effStep / std::sqrt(12.0);
 			return (std::max)(raw, qFloor);
@@ -212,6 +230,7 @@ namespace SourceIdentity
 			mix(static_cast<uint64_t>(s.active.w)); mix(static_cast<uint64_t>(s.active.h));
 			mix(static_cast<uint64_t>(s.inner.x)); mix(static_cast<uint64_t>(s.inner.y));
 			mix(static_cast<uint64_t>(s.inner.w)); mix(static_cast<uint64_t>(s.inner.h));
+			mix(static_cast<uint64_t>(s.fracBits));
 			for (int32_t v : s.rowY) mix(static_cast<uint64_t>(v));
 			for (int32_t v : s.colX) mix(static_cast<uint64_t>(v));
 			for (uint16_t v : s.rows) mix(v);

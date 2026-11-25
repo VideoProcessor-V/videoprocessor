@@ -682,8 +682,8 @@ namespace SourceIdentity
 					return;
 				}
 				std::shared_ptr<LineSnapshot> snap = std::make_shared<LineSnapshot>();
-				const double scale = std::pow(2.0, static_cast<double>(v.msbShift) - 6.0);   // codes of the tap's plane -> 10-bit codes
-				if (!CaptureLines<uint16_t>(plan, v.luma, static_cast<std::ptrdiff_t>(v.strideSamples), scale, *snap))
+				const double scale = std::pow(2.0, static_cast<double>(v.msbShift));   // tap plane -> 16-bit Q6 axis (10-bit << kSnapshotFracBits)
+				if (!CaptureLines<uint16_t>(plan, v.luma, static_cast<std::ptrdiff_t>(v.strideSamples), scale, *snap, kSnapshotFracBits))
 				{
 					cUnusable.fetch_add(1, std::memory_order_relaxed);
 					nextDueMs.store(now + interval, std::memory_order_release);

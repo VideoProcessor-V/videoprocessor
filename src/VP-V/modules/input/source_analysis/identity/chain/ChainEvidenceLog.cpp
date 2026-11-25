@@ -271,7 +271,7 @@ namespace SourceIdentity
 		{
 			std::string s;
 			s += "SIDL";
-			PutU32(s, 2);
+			PutU32(s, 3u);
 			PutU32(s, static_cast<uint32_t>(headerJson.size()));
 			s += headerJson;
 			PutU32(s, static_cast<uint32_t>(evals.size()));
@@ -290,6 +290,7 @@ namespace SourceIdentity
 				PutI32(s, e.inner.x); PutI32(s, e.inner.y); PutI32(s, e.inner.w); PutI32(s, e.inner.h);
 				PutU32(s, static_cast<uint32_t>(e.rowCount));
 				PutU32(s, static_cast<uint32_t>(e.colCount));
+				PutU32(s, static_cast<uint32_t>(e.fracBits));
 				for (int32_t v : e.rowY) PutI32(s, v);
 				for (int32_t v : e.colX) PutI32(s, v);
 				PutU16Array(s, e.rows);
@@ -306,7 +307,8 @@ namespace SourceIdentity
 				return false;
 			Rd r(bytes);
 			r.pos = 4;
-			if (r.U32() != 2u)
+			const uint32_t version = r.U32();
+			if (!r.ok || (version != 2u && version != 3u))
 				return false;
 			const uint32_t headerLen = r.U32();
 			if (!r.ok || r.Left() < headerLen)
@@ -329,6 +331,13 @@ namespace SourceIdentity
 				e.inner.x = r.I32(); e.inner.y = r.I32(); e.inner.w = r.I32(); e.inner.h = r.I32();
 				const uint32_t rc = r.U32();
 				const uint32_t cc = r.U32();
+				if (version == 3u)
+				{
+					const uint32_t fb = r.U32();
+					if (!r.ok || fb > 255u)
+						return false;
+					e.fracBits = static_cast<uint8_t>(fb);
+				}
 				if (!r.ok || rc > static_cast<uint32_t>(kMaxLines) || cc > static_cast<uint32_t>(kMaxLines) || e.inner.w < 0 || e.inner.h < 0)
 					return false;
 				e.rowCount = static_cast<int>(rc);
