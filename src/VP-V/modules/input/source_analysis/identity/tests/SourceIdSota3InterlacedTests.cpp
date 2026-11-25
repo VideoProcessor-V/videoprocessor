@@ -718,17 +718,85 @@ namespace Tests
 			using namespace Sota3InterlacedFx;
 
 			// Build 4-shot x 4-eval (16 evaluations at 1.2 s cadence -> 3.6 s dwell/shot >= 3.0 s) 1920x1080
-			// native-H (srcW = 1920 -> 1920) + field-bobbed-V (srcH = 540 -> 1080, alternating +-0.25 phase) stream:
+			// native-H (srcW = 1920 -> 1920) + field-bobbed-V (srcH = 540 -> 1080, alternating +-0.25 phase) stream
+			// with realistic 10-bit sensor noise (sigma = 0.9 codes) so segment residuals stay non-degenerate:
+			auto makeNoisyBob1080Snap = [](double phaseV, uint64_t seq, int64_t timeUs, uint64_t seed, bool cut) -> C::LineSnapshot {
+				C::LineRect active{ 0, 0, kFhdW, kFhdH };
+				const C::LinePlan plan = C::LineSampler::Plan(active, seq);
+				Assert::IsTrue(plan.valid);
+
+				C::LineSnapshot snap;
+				snap.seq = seq;
+				snap.timeUs = timeUs;
+				snap.rasterW = kFhdW;
+				snap.rasterH = kFhdH;
+				snap.active = plan.active;
+				snap.inner = plan.inner;
+				snap.rowCount = plan.rowCount;
+				snap.colCount = plan.colCount;
+				snap.rowY.assign(plan.rowY, plan.rowY + plan.rowCount);
+				snap.colX.assign(plan.colX, plan.colX + plan.colCount);
+				snap.rows.assign(static_cast<size_t>(plan.rowCount) * static_cast<size_t>(plan.inner.w), 512u);
+				snap.cols.assign(static_cast<size_t>(plan.colCount) * static_cast<size_t>(plan.inner.h), 512u);
+				if (cut)
+				{
+					snap.flags = C::kEvCut;
+					snap.cuts = 1;
+					snap.eventTimeUs = timeUs;
+				}
+
+				SplitMix64 rng(seed);
+				constexpr double kSensorSigmaCodes = 0.9;
+				for (int j = 0; j < plan.rowCount; ++j)
+				{
+					uint16_t* dst = &snap.rows[static_cast<size_t>(j) * static_cast<size_t>(plan.inner.w)];
+					for (int i = 0; i < plan.inner.w; ++i)
+						dst[i] = Quantize10(512.0 + 60.0 * rng.Normal01() + kSensorSigmaCodes * rng.Normal01());
+				}
+
+				const int srcH = 540;
+				const int r = C::Kernel(kBicubic).radius;
+				const int taps = 2 * r;
+				std::vector<double> wt(static_cast<size_t>(taps));
+				std::vector<double> srcCol(static_cast<size_t>(srcH), 512.0);
+				const double ratioV = static_cast<double>(srcH) / static_cast<double>(kFhdH);
+				for (int j = 0; j < plan.colCount; ++j)
+				{
+					for (int y = 0; y < srcH; ++y)
+						srcCol[static_cast<size_t>(y)] = 512.0 + 60.0 * rng.Normal01();
+					uint16_t* dst = &snap.cols[static_cast<size_t>(j) * static_cast<size_t>(plan.inner.h)];
+					for (int i = 0; i < plan.inner.h; ++i)
+					{
+						const int outY = plan.inner.y + i;
+						const double p = (static_cast<double>(outY) + 0.5) * ratioV - 0.5 + phaseV;
+						const double fl = std::floor(p);
+						C::TapWeights(kBicubic, p - fl, wt.data());
+						double acc = 0.0;
+						for (int s = 0; s < taps; ++s)
+						{
+							int c = static_cast<int>(fl) - r + 1 + s;
+							if (c < 0)
+								c = 0;
+							if (c > srcH - 1)
+								c = srcH - 1;
+							acc += wt[static_cast<size_t>(s)] * srcCol[static_cast<size_t>(c)];
+						}
+						dst[i] = Quantize10(acc + kSensorSigmaCodes * rng.Normal01());
+					}
+				}
+				return snap;
+			};
+
 			std::vector<C::LineSnapshot> bob1080Stream;
 			bob1080Stream.reserve(16u);
-			for (int s = 0; s < 16; ++s)
+			for (int f = 0; f < 16; ++f)
 			{
-				const bool isCut = (s % 4) == 0;
-				const double fieldPhase = ((s & 1) == 0) ? 0.25 : -0.25;
-				bob1080Stream.push_back(MakeAnisotropicSnapshot(
-					kFhdW, kFhdH, kFhdW, 540, kLanczos3, kBicubic, 0.0, fieldPhase,
-					static_cast<uint64_t>(100 + s), static_cast<int64_t>(s) * 1200000,
-					0x6100ull + static_cast<uint64_t>(s * 43), isCut));
+				const bool isCut = (f % 4) == 0;
+				const double fieldPhase = ((f & 1) == 0) ? 0.25 : -0.25;
+				bob1080Stream.push_back(makeNoisyBob1080Snap(
+					fieldPhase,
+					static_cast<uint64_t>(100 + f), static_cast<int64_t>(f) * 1200000,
+					0x6100ull + static_cast<uint64_t>(f * 43), isCut));
 			}
 
 			const SourceGeometry::Delivered deliv{ kFhdW, kFhdH };

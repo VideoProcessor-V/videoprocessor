@@ -798,13 +798,108 @@ namespace Tests
 			pqCfg.linearizeForDescale = true;
 
 			// Build 3-shot x 6-eval (18 evaluations at 0.8 s cadence -> 4.0 s dwell/shot, all 3 shots inside 12.75 s window)
-			// high-contrast native 3840x2160 HDR10 PQ stream:
+			// high-contrast aperiodic native 3840x2160 HDR10 PQ stream (variable cycle widths avoid synthetic fixed-period
+			// harmonic Fourier-comb dips on rational sub-grids while preserving exact PQ shadow/pedestal/specular physics):
+			auto buildAperiodicNativePqSnap = [](uint64_t seq, int64_t timeUs, uint64_t seed, bool cut) -> C::LineSnapshot {
+				C::LineRect active{ 0, 0, kUhdW, kUhdH };
+				const C::LinePlan plan = C::LineSampler::Plan(active, seq);
+				Assert::IsTrue(plan.valid, L"fixture: valid LinePlan");
+
+				C::LineSnapshot snap;
+				snap.seq = seq;
+				snap.timeUs = timeUs;
+				snap.rasterW = kUhdW;
+				snap.rasterH = kUhdH;
+				snap.active = plan.active;
+				snap.inner = plan.inner;
+				snap.rowCount = plan.rowCount;
+				snap.colCount = plan.colCount;
+				snap.rowY.assign(plan.rowY, plan.rowY + plan.rowCount);
+				snap.colX.assign(plan.colX, plan.colX + plan.colCount);
+				snap.rows.assign(static_cast<size_t>(plan.rowCount) * static_cast<size_t>(plan.inner.w), 64u);
+				snap.cols.assign(static_cast<size_t>(plan.colCount) * static_cast<size_t>(plan.inner.h), 64u);
+				if (cut)
+				{
+					snap.flags = C::kEvCut;
+					snap.cuts = 1;
+					snap.eventTimeUs = timeUs;
+				}
+
+				SplitMix64 rng(seed ^ (seq * 0x9e3779b97f4a7c15ull));
+				auto synthAperiodicLine = [&rng](int nLen, std::vector<double>& outCode10) {
+					const double yShadowBase = 0.0028;
+					const double yShadowTex = 0.00055;
+					const double yMidLit = 0.095;
+					const double ySpecHi = 0.72;
+					const int ramp = 6;
+					outCode10.resize(static_cast<size_t>(nLen));
+					int i = 0;
+					while (i < nLen)
+					{
+						for (int r = 0; r < ramp && i < nLen; ++r, ++i)
+						{
+							const double u = (static_cast<double>(r) + 0.5) / static_cast<double>(ramp);
+							const double w = 0.5 - 0.5 * std::cos(C::kPi * u);
+							const double yLin = std::exp(std::log(yShadowBase) + (std::log(yMidLit) - std::log(yShadowBase)) * w);
+							outCode10[static_cast<size_t>(i)] = QuantizeHdrCode10(C::PqOetf(yLin), 10, true);
+						}
+						const int hiW = 15 + static_cast<int>(rng.NextU64() % 14ull);
+						const int endHi = (std::min)(nLen, i + hiW);
+						while (i < endHi)
+						{
+							const int runLen = 2 + static_cast<int>(rng.NextU64() % 5ull);
+							const bool isHi = (rng.NextU64() & 1ull) != 0ull;
+							for (int k = 0; k < runLen && i < endHi; ++k, ++i)
+							{
+								const double target = isHi
+									? (ySpecHi + 0.020 * rng.Normal01())
+									: (yMidLit + 0.012 * rng.Normal01());
+								const double yLin = C::ClampD(target, 0.085, 0.85);
+								outCode10[static_cast<size_t>(i)] = QuantizeHdrCode10(C::PqOetf(yLin), 10, true);
+							}
+						}
+						for (int r = 0; r < ramp && i < nLen; ++r, ++i)
+						{
+							const double u = (static_cast<double>(r) + 0.5) / static_cast<double>(ramp);
+							const double w = 0.5 - 0.5 * std::cos(C::kPi * u);
+							const double yLin = std::exp(std::log(yMidLit) + (std::log(yShadowBase) - std::log(yMidLit)) * w);
+							outCode10[static_cast<size_t>(i)] = QuantizeHdrCode10(C::PqOetf(yLin), 10, true);
+						}
+						const int shW = 13 + static_cast<int>(rng.NextU64() % 18ull);
+						const int endSh = (std::min)(nLen, i + shW);
+						while (i < endSh)
+						{
+							const double yLin = C::ClampD(yShadowBase + yShadowTex * rng.Normal01(), 0.0016, 0.04);
+							outCode10[static_cast<size_t>(i)] = QuantizeHdrCode10(C::PqOetf(yLin), 10, true);
+							++i;
+						}
+					}
+				};
+
+				std::vector<double> fullLine;
+				for (int j = 0; j < plan.rowCount; ++j)
+				{
+					synthAperiodicLine(kUhdW, fullLine);
+					uint16_t* dst = &snap.rows[static_cast<size_t>(j) * static_cast<size_t>(plan.inner.w)];
+					for (int i = 0; i < plan.inner.w; ++i)
+						dst[i] = static_cast<uint16_t>(std::floor(fullLine[static_cast<size_t>(plan.inner.x + i)] + 0.5));
+				}
+				for (int j = 0; j < plan.colCount; ++j)
+				{
+					synthAperiodicLine(kUhdH, fullLine);
+					uint16_t* dst = &snap.cols[static_cast<size_t>(j) * static_cast<size_t>(plan.inner.h)];
+					for (int i = 0; i < plan.inner.h; ++i)
+						dst[i] = static_cast<uint16_t>(std::floor(fullLine[static_cast<size_t>(plan.inner.y + i)] + 0.5));
+				}
+				return snap;
+			};
+
 			std::vector<C::LineSnapshot> pqNatStream;
 			pqNatStream.reserve(18u);
 			for (int s = 0; s < 18; ++s)
 			{
 				const bool isCut = (s % 6) == 0;
-				pqNatStream.push_back(BuildHdrSnapshot10Bit(kUhdW, kUhdH, kUhdW, kUhdH, kLanczos3, C::HdrTransfer::Pq,
+				pqNatStream.push_back(buildAperiodicNativePqSnap(
 					static_cast<uint64_t>(100 + s), static_cast<int64_t>(s) * 800000,
 					0x9400ull + static_cast<uint64_t>(s * 37), isCut));
 			}
