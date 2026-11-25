@@ -21,6 +21,7 @@
 
 #include <cstring>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -2650,6 +2651,389 @@ namespace VideoProcessorTest
 					L"same-input control: memo records real P2 decline cause only when eligible");
 				Assert::IsFalse(memoGate.Decisions().empty(),
 					L"same-input control: P2 decline surfaces in Decisions() only when eligible");
+			}
+		}
+
+		// Audit2 (6146f7f0a) regression: (1) foreign memo GPU view clears ctx.globalSecond[0..1] when null, aborts visibly
+		// (0 dispatches, clears stale pin) on asymmetric missing backward second texture, and aborts on clear-dispatch failure;
+		// (2) convenience overload defers LoadEngineGlobalFromP2 until after P7 GPU memo-hit check; (3) MatcherSkeletonMemoScope
+		// unbinds (nullptr, 0) strictly before dropping shared_ptr on normal exit, Release(), and exception unwind.
+		TEST_METHOD(ForeignMemoSecondClearAbortDeferredP2AndMemoScopeUnwind)
+		{
+			using namespace VpMotion;
+			using namespace VpSkeleton;
+
+			int sentinels[8] = { 501, 502, 503, 504, 601, 602, 603, 604 };
+			pl_tex dstVec[2] = { reinterpret_cast<pl_tex>(&sentinels[0]), reinterpret_cast<pl_tex>(&sentinels[1]) };
+			pl_tex dstSec[2] = { reinterpret_cast<pl_tex>(&sentinels[2]), reinterpret_cast<pl_tex>(&sentinels[3]) };
+			const pl_tex kMemoVec0 = reinterpret_cast<pl_tex>(&sentinels[4]);
+			const pl_tex kMemoVec1 = reinterpret_cast<pl_tex>(&sentinels[5]);
+			const pl_tex kMemoSec0 = reinterpret_cast<pl_tex>(&sentinels[6]);
+			Assert::IsTrue(kMemoVec0 != dstVec[0] && kMemoVec1 != dstVec[1] && kMemoSec0 != dstSec[0],
+				L"precondition: memo textures are distinct from caller targets");
+
+			PairGlobalDispatchRecorder recMock;
+			PairGlobalGpuContext ctx;
+			ctx.twoCandidates = true;
+			ctx.globalVector = dstVec;
+			ctx.globalSecond = dstSec;
+			ctx.dispatch = recMock.MakeDispatch();
+
+			PairGlobalSelectionInput camIn;
+			camIn.globalPrior = true;
+			camIn.useModelGlobal = true;
+			camIn.modelFwd[0] = 8.0f; camIn.modelFwd[1] = -8.0f;
+			camIn.modelBwd[0] = -8.0f; camIn.modelBwd[1] = 8.0f;
+			camIn.modelInputScale = 0.5f;
+
+			const PairGlobal expectedRec = MakePairGlobalSample(PairGlobalSource::CameraModel, true, 0u, 1.5f);
+
+			// Part 1 (HIGH #1): Foreign memo globalSecond[0..1] zero-clear & missing-backward-second / clear-failure aborts.
+			{
+				SkeletonMemo memoClear;
+				memoClear.SetRenderThread(std::this_thread::get_id());
+				Assert::IsTrue(memoClear.RegisterOwnerFill(kP7CameraFit, AcquireForm::Gpu, kPairGlobalUnit,
+					MakeP7PairGlobalGpuOwnerFill([&](const OwnerFillRequest&, SkeletonMemo&, PairGlobalGpuView& outView, std::string&) {
+						outView.globalVector = kMemoVec0;
+						outView.globalVectorBwd = kMemoVec1;
+						outView.globalSecond = nullptr;
+						outView.globalSecondBwd = nullptr;
+						outView.record = expectedRec;
+						outView.hasOutcome = true;
+						outView.outcome.source = PairGlobalSource::CameraModel;
+						outView.outcome.modelGlobalUsed = true;
+						outView.outcome.clearSecond = true;
+						return true;
+					})) == SkeletonMemo::Registration::Registered);
+
+				// Case 1a: foreign view with globalSecond == nullptr && globalSecondBwd == nullptr, twoCandidates = true ->
+				// 4 dispatches: 2 vector copies + 2 zero-clears targeting dstSec[0..1] with {0, 0, 0, 0}.
+				PairGlobal outRec;
+				PairGlobalSelectionOutcome outOutcome;
+				FallbackCatalog::Decision outFb;
+				std::string outErr = "stale";
+				bool usedMemo = false;
+				AcquireResult memoPin;
+				recMock.Reset();
+
+				Assert::IsTrue(AcquireOrFillPairGlobalGpu(&memoClear, 41, camIn, ctx, outRec, outOutcome, outFb, outErr, &usedMemo, &memoPin),
+					L"Case 1a: foreign view with null second textures must succeed after zero-clearing dstSec[0..1]");
+				Assert::IsTrue(usedMemo, L"Case 1a: served via SkeletonMemo GPU path");
+				Assert::IsFalse(outFb.engaged, L"Case 1a: fallback released on success");
+				Assert::AreEqual(std::string("motion.pair_global_unavailable"), outFb.id);
+				Assert::IsTrue(outErr.empty());
+				Assert::IsTrue(memoPin.Ok() && static_cast<bool>(memoPin.pin), L"Case 1a: valid memoPin retained");
+				Assert::IsTrue(SamePairGlobal(expectedRec, outRec));
+				Assert::IsTrue(outOutcome.source == PairGlobalSource::CameraModel && outOutcome.modelGlobalUsed && outOutcome.clearSecond);
+
+				Assert::AreEqual(size_t(4), recMock.calls.size(),
+					L"Case 1a: 2 vector copies + 2 zero-clear dispatches for dstSec[0..1]");
+				for (size_t i = 0; i < 2; ++i)
+				{
+					Assert::AreEqual(std::string("VideoProcessor de-judder: global motion (memo gpu view)"),
+						recMock.calls[i].description, L"Case 1a: vector copy label");
+					Assert::AreEqual(2, recMock.calls[i].numDescriptors);
+					Assert::IsTrue(recMock.calls[i].dstType == PL_DESC_SAMPLED_TEX);
+					Assert::IsTrue(recMock.calls[i].dstTex == (i == 0 ? kMemoVec0 : kMemoVec1));
+					Assert::IsTrue(recMock.calls[i].lastDstTex == dstVec[i]);
+				}
+				for (size_t i = 0; i < 2; ++i)
+				{
+					const PairGlobalDispatchCall& clearCall = recMock.calls[2 + i];
+					Assert::AreEqual(std::string("VideoProcessor de-judder: global motion second (memo clear)"),
+						clearCall.description, L"Case 1a: exact memo second zero-clear label");
+					Assert::AreEqual(1, clearCall.numDescriptors, L"Case 1a: clear binds storage dst only");
+					Assert::AreEqual(std::string("dst"), clearCall.dstName);
+					Assert::IsTrue(clearCall.dstType == PL_DESC_STORAGE_IMG);
+					Assert::IsTrue(clearCall.dstTex == dstSec[i], L"Case 1a: clear targets exact dstSec[d]");
+					Assert::AreEqual(std::string("gvec"), clearCall.varName);
+					Assert::IsTrue(clearCall.hasVec4 && Vec4AllZero(clearCall.vec4),
+						L"Case 1a: clear writes exact {0, 0, 0, 0}");
+					Assert::AreEqual(1, clearCall.w);
+					Assert::AreEqual(1, clearCall.h);
+					Assert::AreEqual(1, clearCall.threadsX);
+				}
+
+				// Case 1b (same-input negative control): asymmetric foreign view (globalSecond = kMemoSec0,
+				// globalSecondBwd = nullptr) -> Ruling 2 abort, 0 partial dispatches, stale valid memoPin cleared.
+				SkeletonMemo memoAsym;
+				memoAsym.SetRenderThread(std::this_thread::get_id());
+				Assert::IsTrue(memoAsym.RegisterOwnerFill(kP7CameraFit, AcquireForm::Gpu, kPairGlobalUnit,
+					MakeP7PairGlobalGpuOwnerFill([&](const OwnerFillRequest&, SkeletonMemo&, PairGlobalGpuView& outView, std::string&) {
+						outView.globalVector = kMemoVec0;
+						outView.globalVectorBwd = kMemoVec1;
+						outView.globalSecond = kMemoSec0;
+						outView.globalSecondBwd = nullptr;
+						outView.record = expectedRec;
+						return true;
+					})) == SkeletonMemo::Registration::Registered);
+
+				Assert::IsTrue(memoPin.Ok() && static_cast<bool>(memoPin.pin),
+					L"Case 1b precondition: outMemoPin pre-populated with stale valid pin from Case 1a");
+				outRec = expectedRec;
+				usedMemo = true;
+				outErr.clear();
+				recMock.Reset();
+
+				Assert::IsFalse(AcquireOrFillPairGlobalGpu(&memoAsym, 41, camIn, ctx, outRec, outOutcome, outFb, outErr, &usedMemo, &memoPin),
+					L"Case 1b: asymmetric foreign second view must abort (Ruling 2)");
+				Assert::IsFalse(usedMemo);
+				Assert::IsFalse(outRec.valid);
+				Assert::IsTrue(outRec.src == PairGlobalSource::Cleared);
+				Assert::IsTrue(Has(outErr, "missing backward second texture"),
+					L"Case 1b: outError names missing backward second texture");
+				Assert::IsTrue(outFb.engaged, L"Case 1b: fallback engaged visibly");
+				Assert::AreEqual(std::string("motion.pair_global_unavailable"), outFb.id);
+				Assert::IsTrue(Has(outFb.reason, "missing backward second texture"),
+					L"Case 1b: outFallback.reason names missing backward second texture");
+				Assert::IsFalse(memoPin.Ok(), L"Case 1b: stale valid pin cleared on abort");
+				Assert::IsFalse(static_cast<bool>(memoPin.pin));
+				Assert::AreEqual(size_t(0), recMock.calls.size(),
+					L"Case 1b: 0 partial dispatches before aborting on missing backward second texture");
+
+				// Case 1c (same-input negative control): failing ctx.dispatch on call 3 (memo clear for dstSec[0]) ->
+				// clean Ruling 2 abort on exact same memoClear / seq = 41 / camIn / ctx.
+				outRec = expectedRec;
+				usedMemo = true;
+				outErr.clear();
+				recMock.Reset(/*failCall=*/3);
+				ctx.dispatch = recMock.MakeDispatch();
+
+				Assert::IsFalse(AcquireOrFillPairGlobalGpu(&memoClear, 41, camIn, ctx, outRec, outOutcome, outFb, outErr, &usedMemo, &memoPin),
+					L"Case 1c: failing memo clear dispatch must abort (Ruling 2)");
+				Assert::IsFalse(usedMemo);
+				Assert::IsFalse(outRec.valid);
+				Assert::IsTrue(outRec.src == PairGlobalSource::Cleared);
+				Assert::IsTrue(outFb.engaged && outFb.id == "motion.pair_global_unavailable");
+				Assert::IsTrue(Has(outErr, "global motion second (memo clear)"));
+				Assert::IsTrue(Has(outFb.reason, "global motion second (memo clear)"));
+				Assert::IsFalse(memoPin.Ok());
+				Assert::AreEqual(size_t(3), recMock.calls.size(), L"Case 1c: stops on failing clear dispatch for dstSec[0]");
+				Assert::AreEqual(std::string("VideoProcessor de-judder: global motion second (memo clear)"),
+					recMock.calls[2].description);
+				Assert::IsTrue(recMock.calls[2].dstTex == dstSec[0]);
+
+				recMock.Reset();
+				ctx.dispatch = recMock.MakeDispatch();
+			}
+
+			// Part 2 (MED #2): Convenience overload defers LoadEngineGlobalFromP2 until after P7 GPU memo-hit check.
+			{
+				Rig rig;   // pair (10, 11) published -> seq = 61 is missing and increments P2CpuFormDeclined() if queried
+				const P2PairRecord directP2Fallback = MakeP2PairRecord(60, 61, 99u, rig.flow->global, rig.flow->second, true, false);
+
+				PairGlobalSelectionInput p2EligibleIn;
+				p2EligibleIn.cutOrFlash = false;
+				p2EligibleIn.globalPrior = true;
+				p2EligibleIn.useModelGlobal = false;
+				p2EligibleIn.opticalFlowGlobal = true;
+				p2EligibleIn.seeded = true;
+				p2EligibleIn.gapSeedCandidate = true;
+				p2EligibleIn.gapSeedVec[0][0] = 1.5f; p2EligibleIn.gapSeedVec[0][2] = 0.2f; p2EligibleIn.gapSeedVec[0][3] = 1.0f;
+				p2EligibleIn.gapSeedVec[1][0] = -1.5f; p2EligibleIn.gapSeedVec[1][2] = 0.2f; p2EligibleIn.gapSeedVec[1][3] = 1.0f;
+				p2EligibleIn.gapSeedHolds = []() { return true; };
+
+				const PairGlobal p7HitRec = MakePairGlobalSample(PairGlobalSource::CameraModel, true, 0u, 4.0f);
+
+				SkeletonMemo memoP7Hit;
+				memoP7Hit.SetRenderThread(std::this_thread::get_id());
+				Assert::IsTrue(RegisterFill(memoP7Hit, rig.EngineOf()));
+				Assert::IsTrue(memoP7Hit.RegisterOwnerFill(kP7CameraFit, AcquireForm::Gpu, kPairGlobalUnit,
+					MakeP7PairGlobalGpuOwnerFill([&](const OwnerFillRequest&, SkeletonMemo&, PairGlobalGpuView& outView, std::string&) {
+						outView.globalVector = dstVec[0];
+						outView.globalVectorBwd = dstVec[1];
+						outView.globalSecond = dstSec[0];
+						outView.globalSecondBwd = dstSec[1];
+						outView.record = p7HitRec;
+						outView.hasOutcome = true;
+						outView.outcome.source = PairGlobalSource::CameraModel;
+						outView.outcome.modelGlobalUsed = true;
+						outView.outcome.clearSecond = true;
+						return true;
+					})) == SkeletonMemo::Registration::Registered);
+
+				PairGlobal outRec;
+				PairGlobalSelectionOutcome outOutcome;
+				FallbackCatalog::Decision outFb;
+				std::string outErr;
+				bool usedMemo = false;
+				recMock.Reset();
+
+				Assert::IsTrue(AcquireOrFillPairGlobalGpu(&memoP7Hit, 61, &directP2Fallback, p2EligibleIn, ctx, outRec, outOutcome, outFb, outErr, &usedMemo),
+					L"Part 2: P7 GPU memo hit succeeds via convenience overload");
+				Assert::IsTrue(usedMemo, L"Part 2: served via P7 GPU memo hit");
+				Assert::IsFalse(outFb.engaged);
+				Assert::IsTrue(SamePairGlobal(p7HitRec, outRec));
+				Assert::AreEqual(size_t(0), recMock.calls.size());
+				Assert::AreEqual(0ull, rig.engine.P2CpuFormDeclined(),
+					L"Part 2: P7 GPU memo hit must never trigger eager LoadEngineGlobalFromP2 decline");
+				Assert::IsTrue(memoP7Hit.LastCause(kP2VectorPair).empty(),
+					L"Part 2: LastCause(kP2VectorPair) remains empty on P7 GPU memo hit");
+				Assert::IsTrue(memoP7Hit.Decisions().empty(),
+					L"Part 2: Decisions() remains empty on P7 GPU memo hit");
+
+				// Same-input negative control: remove the P7 GPU fill on a second memo with only P2CpuForm +
+				// TryRegisterPairGlobalCpuFill on the exact same seq = 61 and p2EligibleIn -> P2 IS queried and declines.
+				SkeletonMemo memoNoP7Gpu;
+				memoNoP7Gpu.SetRenderThread(std::this_thread::get_id());
+				Assert::IsTrue(RegisterFill(memoNoP7Gpu, rig.EngineOf()));
+				FakePairGlobalDemand noP7Demand(&memoNoP7Gpu);
+				Assert::IsTrue(TryRegisterPairGlobalCpuFill(&noP7Demand));
+				Assert::IsFalse(memoNoP7Gpu.HasOwnerFill(kP7CameraFit, AcquireForm::Gpu));
+
+				usedMemo = true;
+				recMock.Reset();
+				Assert::IsTrue(AcquireOrFillPairGlobalGpu(&memoNoP7Gpu, 61, &directP2Fallback, p2EligibleIn, ctx, outRec, outOutcome, outFb, outErr, &usedMemo),
+					L"Part 2 negative control: without P7 GPU fill, direct path queries P2 and falls through to GapSeed");
+				Assert::IsFalse(usedMemo);
+				Assert::IsFalse(outFb.engaged);
+				Assert::IsTrue(outOutcome.source == PairGlobalSource::GapSeed);
+				Assert::AreEqual(1ull, rig.engine.P2CpuFormDeclined(),
+					L"Part 2 negative control: exact same seq = 61 and input increments P2CpuFormDeclined on direct path");
+				Assert::IsFalse(memoNoP7Gpu.LastCause(kP2VectorPair).empty(),
+					L"Part 2 negative control: LastCause(kP2VectorPair) populated on direct P2 miss");
+				Assert::IsTrue(Has(memoNoP7Gpu.LastCause(kP2VectorPair), "no pair ahead for frame 61"));
+				Assert::IsFalse(memoNoP7Gpu.Decisions().empty());
+			}
+
+			// Part 3 (MED #1): MatcherSkeletonMemoScope exception-safe unbind strictly before shared_ptr drop.
+			{
+				struct FakeMatcher
+				{
+					struct Call
+					{
+						SkeletonMemo* memo = nullptr;
+						uint64_t seq = 0;
+						bool memoAliveDuringCall = false;
+					};
+					std::weak_ptr<SkeletonMemo> watched;
+					bool assertAliveOnUnbind = false;
+					std::vector<Call> calls;
+
+					void SetSkeletonMemo(SkeletonMemo* m, uint64_t s)
+					{
+						const bool alive = !watched.expired();
+						if (assertAliveOnUnbind && m == nullptr)
+							Assert::IsFalse(watched.expired(),
+								L"SetSkeletonMemo(nullptr, 0) must run strictly before shared_ptr::reset()");
+						calls.push_back(Call{ m, s, alive });
+					}
+				};
+
+				// Normal RAII scope exit.
+				{
+					auto sp = std::make_shared<SkeletonMemo>();
+					SkeletonMemo* raw = sp.get();
+					std::weak_ptr<SkeletonMemo> weakMemo = sp;
+					FakeMatcher fake;
+					fake.watched = weakMemo;
+					fake.assertAliveOnUnbind = true;
+					{
+						MatcherSkeletonMemoScope<FakeMatcher> scope(fake, std::move(sp), 71);
+						Assert::IsNull(sp.get(), L"scope takes ownership of shared_ptr");
+						Assert::AreEqual(size_t(1), fake.calls.size());
+						Assert::IsTrue(fake.calls[0].memo == raw && fake.calls[0].seq == 71 && fake.calls[0].memoAliveDuringCall);
+					}
+					Assert::AreEqual(size_t(2), fake.calls.size(), L"normal scope exit unbinds once");
+					Assert::IsTrue(fake.calls[1].memo == nullptr && fake.calls[1].seq == 0 && fake.calls[1].memoAliveDuringCall,
+						L"normal unwind called SetSkeletonMemo(nullptr, 0) while weakMemo was still unexpired");
+					Assert::IsTrue(weakMemo.expired(), L"after scope exit, shared_ptr is dropped and weakMemo expired");
+				}
+
+				// Explicit Release() (and idempotent second Release() + destructor).
+				{
+					auto sp = std::make_shared<SkeletonMemo>();
+					SkeletonMemo* raw = sp.get();
+					std::weak_ptr<SkeletonMemo> weakMemo = sp;
+					FakeMatcher fake;
+					fake.watched = weakMemo;
+					fake.assertAliveOnUnbind = true;
+					{
+						MatcherSkeletonMemoScope<FakeMatcher> scope(fake, std::move(sp), 73);
+						Assert::IsFalse(weakMemo.expired());
+						scope.Release();
+						Assert::IsTrue(weakMemo.expired(), L"Release() drops shared_ptr immediately after unbind");
+						Assert::AreEqual(size_t(2), fake.calls.size());
+						Assert::IsTrue(fake.calls[0].memo == raw && fake.calls[0].seq == 73);
+						Assert::IsTrue(fake.calls[1].memo == nullptr && fake.calls[1].seq == 0 && fake.calls[1].memoAliveDuringCall);
+						scope.Release();
+					}
+					Assert::AreEqual(size_t(2), fake.calls.size(), L"repeated Release() and destructor are idempotent");
+					Assert::IsTrue(weakMemo.expired());
+				}
+
+				// Exception unwind: SetSkeletonMemo(nullptr, 0) runs while weakMemo is still unexpired, then shared_ptr drops.
+				{
+					auto sp = std::make_shared<SkeletonMemo>();
+					SkeletonMemo* raw = sp.get();
+					std::weak_ptr<SkeletonMemo> weakMemo = sp;
+					FakeMatcher fake;
+					fake.watched = weakMemo;
+					fake.assertAliveOnUnbind = true;
+					bool caught = false;
+					try
+					{
+						MatcherSkeletonMemoScope<FakeMatcher> s(fake, std::move(sp), 77);
+						Assert::IsNull(sp.get());
+						throw std::runtime_error("boom");
+					}
+					catch (const std::runtime_error&)
+					{
+						caught = true;
+					}
+					Assert::IsTrue(caught, L"exception propagated out of scope");
+					Assert::AreEqual(size_t(2), fake.calls.size(), L"exception unwind unbinds exactly once");
+					Assert::IsTrue(fake.calls[0].memo == raw && fake.calls[0].seq == 77 && fake.calls[0].memoAliveDuringCall,
+						L"ctor bound (sp.get(), 77)");
+					Assert::IsTrue(fake.calls[1].memo == nullptr && fake.calls[1].seq == 0 && fake.calls[1].memoAliveDuringCall,
+						L"exception unwind unbound (nullptr, 0) while weakMemo was still unexpired");
+					Assert::IsTrue(weakMemo.expired(), L"after catch block, weakMemo is expired");
+				}
+
+				// Same-input negative control (Rule 3): naive non-RAII manual bind/unbind around the exact same throw
+				// skips SetSkeletonMemo(nullptr, 0), leaving a dangling memo pointer bound after weakMemo expires.
+				{
+					FakeMatcher naiveFake;
+					std::weak_ptr<SkeletonMemo> naiveWeak;
+					auto throwOnFlag = [](bool fail) {
+						if (fail)
+							throw std::runtime_error("boom");
+					};
+					bool caught = false;
+					try
+					{
+						auto sp = std::make_shared<SkeletonMemo>();
+						naiveWeak = sp;
+						naiveFake.watched = naiveWeak;
+						naiveFake.SetSkeletonMemo(sp.get(), 77);
+						throwOnFlag(true);
+						naiveFake.SetSkeletonMemo(nullptr, 0);
+					}
+					catch (const std::runtime_error&)
+					{
+						caught = true;
+					}
+					Assert::IsTrue(caught);
+					Assert::IsTrue(naiveWeak.expired(), L"negative control: memo destroyed on unwind");
+					Assert::AreEqual(size_t(1), naiveFake.calls.size(),
+						L"negative control: without MatcherSkeletonMemoScope, unbind never ran on exception");
+					Assert::IsNotNull(naiveFake.calls[0].memo);
+				}
+
+				// Null shared_ptr (warm-up case): binds (nullptr, 0) cleanly even when seq is non-zero.
+				{
+					FakeMatcher warmFake;
+					warmFake.assertAliveOnUnbind = false;
+					{
+						MatcherSkeletonMemoScope<FakeMatcher> s(warmFake, std::shared_ptr<SkeletonMemo>(), 88);
+						Assert::AreEqual(size_t(1), warmFake.calls.size());
+						Assert::IsTrue(warmFake.calls[0].memo == nullptr && warmFake.calls[0].seq == 0,
+							L"warm-up null shared_ptr binds (nullptr, 0)");
+					}
+					Assert::AreEqual(size_t(2), warmFake.calls.size());
+					Assert::IsTrue(warmFake.calls[1].memo == nullptr && warmFake.calls[1].seq == 0,
+						L"warm-up unwind cleanly unbinds (nullptr, 0)");
+				}
 			}
 		}
 	};
