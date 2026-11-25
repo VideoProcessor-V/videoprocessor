@@ -199,9 +199,21 @@ namespace TdV2
 		int maxAheadRefs = kContractAheadRefs;
 		int aheadCeiling = kContractAheadCeiling;
 
-		// Dual-source fusion controls (ProVQE-validated: recurrent carry + prev/next peaks).
-		bool enableCarryForward = true;
+		// Dual-source fusion & carry controls (TD-U5 / Owner D2):
+		// - enableCarryForward (legacy chained carry): DEFAULT OFF per Owner Decision #3 & D2.
+		// - enableAnchoredCarry (single-resample anchored carry from last confirmed peak with held-out structure check
+		//   and real kDrift audit): DEFAULT OFF per Owner D2 until injected-fault tests pass.
+		bool enableCarryForward = false;
+		bool enableAnchoredCarry = false;
+		int maxAnchorAgeFrames = kContractBackRefs; // Bounded by composed-vector depth (8 back, ComposedVectorPlan.h)
 		bool enableLongAnchor = false;
+
+		// Modular low-cost quality switches (Plan Phase 6 + Fable audit M-3, M-9, L-1, L-3):
+		bool enableSmoothWarpVectors = true;   // 6.1 / L-1: bilinearly interpolate 16-px cell vectors in warp (vs nearest-cell)
+		bool enableHardFbOcclusionGate = true; // 6.2 / M-3: hard > 1.0 px forward/backward error -> weight 0, continuous taper below
+		bool chromaReuseLumaWeights = false;   // 6.6: optional toggle letting chroma reuse luma weights (laptop budget comparison)
+		bool enableSmoothLayer4Guard = true;   // L-3: bilinearly interpolate Layer-4 grain-guard add-back fraction across cells
+		bool enableGpuCounterSummary = true;   // M-9: compact 2-texel (32-byte) live GPU counter summary readback in zero-copy mode
 
 		// Reference vs RealTime switches aligned to ShortcutLedger().
 		int momentPoolRadiusCells = 1;  // H-band (or legacy uniform) radius: 1 => 3x3 cells (Reference), 0 => 1x1 cell (RealTime SC-01)

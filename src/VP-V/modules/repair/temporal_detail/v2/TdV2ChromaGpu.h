@@ -1376,11 +1376,19 @@ for (int b = 0; b < 3; ++b)
 
         float curV = (chIdx == 0) ? curB.x : curB.y;
         int ownActiveMask = int(round(ownW.w));
+        bool reuseLumaW = (u_reuse_luma_weights > 0.5);
         float bandDelta = 0.0;
         for (int k = 0; k < K; ++k)
         {
             if ((refFl[k] & 1) == 0) continue;
-            if ((ownActiveMask & (1 << k)) == 0) continue;
+            if (reuseLumaW)
+            {
+                if (td_vec_comp(ownW, k) <= 0.0) continue;
+            }
+            else if ((ownActiveMask & (1 << k)) == 0)
+            {
+                continue;
+            }
             float diff = curV - ((chIdx == 0) ? refB[k].x : refB[k].y);
             if (td_is_bad(diff)) continue;
 
@@ -1894,6 +1902,11 @@ else
 		bool isCutOrSpanInvalid = false;
 		double fadeKeep = 1.0;                   // Upstream U7 gradual retention keep in [0, 1] (default 1.0 = bit-identical; <=0 or NaN closes delta to 0)
 		PsdShape psdShape;                       // Optional P10g grain PSD shape multipliers (default 1.0 white-noise identity)
+
+		// Optional precomputed luma cell weights & diagonal variance textures (3*cw x ch RGBA32F) for Plan 6.6
+		// (`cfg_.chromaReuseLumaWeights`): when enabled and valid, skips Pass C2A & C2B completely!
+		pl_tex lumaCellWeightsTex = nullptr;
+		pl_tex lumaCellDiagCTex = nullptr;
 	};
 
 	struct ChromaGpuOutput
@@ -3147,9 +3160,19 @@ imageStore(out_coded_delta, p, vec4(0.0));
 			}
 			pl_tex finalFlagsTex = sc.refFlags[curFlagsSlot];
 
+			// Plan 6.6 (`cfg_.chromaReuseLumaWeights`): when enabled and valid luma weight/diag textures (3*cw x ch) are supplied,
+			// skip Pass C2A (chroma cell moments) and Pass C2B (chroma QP solve) completely and reuse luma weights directly!
+			const bool reuseLumaWeightsGpu =
+				cfg_.chromaReuseLumaWeights &&
+				in.lumaCellWeightsTex != nullptr && in.lumaCellDiagCTex != nullptr &&
+				in.lumaCellWeightsTex->params.w == 3 * cw && in.lumaCellWeightsTex->params.h == ch &&
+				in.lumaCellDiagCTex->params.w == 3 * cw && in.lumaCellDiagCTex->params.h == ch;
+			const double maxAllowedStepScale = cfg_.enableAqStepScaling ? kCellStepScaleMax : 1.0;
+
 			// ---- PASS C2A: LDS Cell-Moment Reduction for Cb & Cr ----
 			const bool sameCleanRec = (codedCleanTex == codedRecTex);
 			const float uSameCleanRec = sameCleanRec ? 1.0f : 0.0f;
+			if (!reuseLumaWeightsGpu)
 			{
 				const std::string c2aHdr = chromaGeom + Shaders::kCoreHelpers + ChromaShaders::kSitedCoordHelpers +
 				                           ChromaShaders::kPassChromaCellStatsHeader;
@@ -3184,9 +3207,8 @@ imageStore(out_coded_delta, p, vec4(0.0));
 					return failVisible("td_v2_c2a_cell_stats dispatch failed", StandInKind::GpuDispatchFailed);
 			}
 
-			const double maxAllowedStepScale = cfg_.enableAqStepScaling ? kCellStepScaleMax : 1.0;
-
 			// ---- PASS C2B: Chan-Pebay Merge + Closed-Form w* = C^-1 c Solve (Cb & Cr) ----
+			if (!reuseLumaWeightsGpu)
 			{
 				std::string c2bHdr = chromaGeom;
 				c2bHdr += VpvGpu::Define("TD_GAIN_LOW", effLowGain);
@@ -3275,17 +3297,23 @@ float td_huber_taper(float diffSq, float diagC)
 }
 )GLSL";
 
+				pl_tex bindWeightsCb = reuseLumaWeightsGpu ? in.lumaCellWeightsTex : sc.weightsCb;
+				pl_tex bindWeightsCr = reuseLumaWeightsGpu ? in.lumaCellWeightsTex : sc.weightsCr;
+				pl_tex bindDiagCb = reuseLumaWeightsGpu ? in.lumaCellDiagCTex : sc.diagCb;
+				pl_tex bindDiagCr = reuseLumaWeightsGpu ? in.lumaCellDiagCTex : sc.diagCr;
+				const float uReuseLumaWeights = reuseLumaWeightsGpu ? 1.0f : 0.0f;
+
 				pl_shader_desc d3[16] = {
 					VpvGpu::Sampled("cur_l", sc.curL), VpvGpu::Sampled("cur_mh", sc.curMH),
 					VpvGpu::Sampled("ref_l_0", sc.refL[0]), VpvGpu::Sampled("ref_l_1", sc.refL[1]), VpvGpu::Sampled("ref_l_2", sc.refL[2]),
 					VpvGpu::Sampled("ref_mh_0", sc.refMH[0]), VpvGpu::Sampled("ref_mh_1", sc.refMH[1]), VpvGpu::Sampled("ref_mh_2", sc.refMH[2]),
 					VpvGpu::Sampled("ref_flags", finalFlagsTex),
-					VpvGpu::Sampled("cell_weights_cb", sc.weightsCb), VpvGpu::Sampled("cell_weights_cr", sc.weightsCr),
-					VpvGpu::Sampled("cell_diag_cb", sc.diagCb), VpvGpu::Sampled("cell_diag_cr", sc.diagCr),
+					VpvGpu::Sampled("cell_weights_cb", bindWeightsCb), VpvGpu::Sampled("cell_weights_cr", bindWeightsCr),
+					VpvGpu::Sampled("cell_diag_cb", bindDiagCb), VpvGpu::Sampled("cell_diag_cr", bindDiagCr),
 					VpvGpu::Sampled("cell_prior", cellPriorTex), VpvGpu::Sampled("face_mask", faceMaskBind),
 					VpvGpu::Storage("coded_delta_raw", sc.codedDeltaRaw)
 				};
-				pl_shader_var v3[14] = {
+				pl_shader_var v3[15] = {
 					VpvGpu::Var("u_k", &uK),
 					VpvGpu::Var("u_cax0", &uCAx0), VpvGpu::Var("u_cay0", &uCAy0),
 					VpvGpu::Var("u_cax1", &uCAx1), VpvGpu::Var("u_cay1", &uCAy1),
@@ -3295,9 +3323,10 @@ float td_huber_taper(float diffSq, float diagC)
 					VpvGpu::Var("u_has_face_mask", &uHasFaceMask),
 					VpvGpu::Var("u_cell_prior_has_step_scale", &uPriorHasStep),
 					VpvGpu::Var("u_pixel_bound_kappa", &uPixelBoundKappa),
-					VpvGpu::Var("u_enable_joint_bound", &uEnableJointBound)
+					VpvGpu::Var("u_enable_joint_bound", &uEnableJointBound),
+					VpvGpu::Var("u_reuse_luma_weights", &uReuseLumaWeights)
 				};
-				if (!runPass("td_v2_c3_blend_bound", c3Hdr, ChromaShaders::kPassChromaBlendBound, d3, 16, v3, 14, cGx, cGy))
+				if (!runPass("td_v2_c3_blend_bound", c3Hdr, ChromaShaders::kPassChromaBlendBound, d3, 16, v3, 15, cGx, cGy))
 					return failVisible("td_v2_c3_blend_bound dispatch failed", StandInKind::GpuDispatchFailed);
 				if (standIns != nullptr)
 					standIns->Engage(StandInKind::TransformUnknownBound);

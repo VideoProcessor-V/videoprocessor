@@ -49,6 +49,10 @@ namespace TdV2
 	// Strictly numerical denominator floor.
 	constexpr double kEngineNumFloor = 1e-9;
 
+	// Hard forward/backward occlusion gate threshold in source pixels (refs/111 s6 / Fable M-3 / Plan 6.2):
+	// vector disagreement > 1.0 px hard-zeros blend weight (0.0); continuous confidence tapers below 1.0 px.
+	constexpr double kHardFbOcclusionPx = 1.0;
+
 	// Analytical 1D step-edge Fourier energy passing through difference-of-Gaussians G(a) - G(b):
 	//   integral |exp(-0.5 a^2 w^2) - exp(-0.5 b^2 w^2)|^2 / w^2 dw  proportional to  2 * sqrt((a^2 + b^2) / 2) - a - b.
 	inline double StepEdgeBandEnergy(double sigmaA, double sigmaB)
@@ -161,7 +165,8 @@ namespace TdV2
 		const std::vector<uint8_t>* cellValid = nullptr,
 		const std::vector<RegionMotionClass>* cellCls = nullptr,
 		const Homography3x3* cameraH = nullptr,
-		std::vector<uint8_t>* outNonFiniteCells = nullptr)
+		std::vector<uint8_t>* outNonFiniteCells = nullptr,
+		bool enableSmoothWarpVectors = true)
 	{
 		WarpDiagnostics diag;
 		const int w = refClean.w;
@@ -248,8 +253,8 @@ namespace TdV2
 					// leave fallbackClean (curClean) in outWarped with outValid = 0.
 					continue;
 				}
-				const double vx = cellVx[cIdx];
-				const double vy = cellVy[cIdx];
+				double vx = cellVx[cIdx];
+				double vy = cellVy[cIdx];
 				const bool useCamH = (cameraH != nullptr && cameraH->valid &&
 				                      cellCls != nullptr && cIdx < cellCls->size() &&
 				                      (*cellCls)[cIdx] == RegionMotionClass::Camera);
@@ -277,6 +282,50 @@ namespace TdV2
 							(*outNonFiniteCells)[cIdx] = 1u;
 						// Leave fallbackClean value in outWarped (no zero-hole) with outValid = 0.
 						continue;
+					}
+					// Plan 6.1 / Fable L-1: Bilinearly interpolate 16-px cell vectors between cell centers when enabled,
+					// strictly skipping invalid or non-finite neighbor cells so bad vectors never bleed into valid neighbors.
+					if (enableSmoothWarpVectors && cellPx > 0)
+					{
+						const double gx = (static_cast<double>(x) + 0.5) / static_cast<double>(cellPx) - 0.5;
+						const double gy = (static_cast<double>(y) + 0.5) / static_cast<double>(cellPx) - 0.5;
+						const int x0 = (std::max)(0, (std::min)(cellsW - 1, static_cast<int>(std::floor(gx))));
+						const int y0 = (std::max)(0, (std::min)(cellsH - 1, static_cast<int>(std::floor(gy))));
+						const int x1 = (std::min)(cellsW - 1, x0 + 1);
+						const int y1 = (std::min)(cellsH - 1, y0 + 1);
+						const double tx = RampMath::Clamp01(gx - static_cast<double>(x0));
+						const double ty = RampMath::Clamp01(gy - static_cast<double>(y0));
+						const size_t cIds[4] = {
+							static_cast<size_t>(y0) * cellsW + x0,
+							static_cast<size_t>(y0) * cellsW + x1,
+							static_cast<size_t>(y1) * cellsW + x0,
+							static_cast<size_t>(y1) * cellsW + x1
+						};
+						const double cwts[4] = {
+							(1.0 - tx) * (1.0 - ty),
+							tx * (1.0 - ty),
+							(1.0 - tx) * ty,
+							tx * ty
+						};
+						double wSum = 0.0, accVx = 0.0, accVy = 0.0;
+						for (int q = 0; q < 4; ++q)
+						{
+							const size_t qi = cIds[q];
+							if (cellValid != nullptr && qi < cellValid->size() && (*cellValid)[qi] == 0u)
+								continue;
+							const double qvx = cellVx[qi];
+							const double qvy = cellVy[qi];
+							if (!std::isfinite(qvx) || !std::isfinite(qvy))
+								continue;
+							wSum += cwts[q];
+							accVx += cwts[q] * qvx;
+							accVy += cwts[q] * qvy;
+						}
+						if (wSum > kEngineNumFloor)
+						{
+							vx = accVx / wSum;
+							vy = accVy / wSum;
+						}
 					}
 					sxLocal = static_cast<double>(x - ar.x0) + vx;
 					syLocal = static_cast<double>(y - ar.y0) + vy;
@@ -389,6 +438,7 @@ namespace TdV2
 		std::vector<RegionMotionClass> cls;
 		std::vector<uint8_t> valid;
 		std::vector<double> confidence;       // Optional P3r continuous per-cell motion confidence in [0, 1] (empty => 1.0 everywhere)
+		std::vector<double> fbErrorPx;        // Optional forward/backward disagreement in px (6.2 / M-3: > 1.0 px => hard weight 0)
 
 		bool IsWellFormed(int expectedCW, int expectedCH) const
 		{
@@ -398,7 +448,8 @@ namespace TdV2
 			return vx.size() == n && vy.size() == n &&
 			       camVx.size() == n && camVy.size() == n &&
 			       cls.size() == n && valid.size() == n &&
-			       (confidence.empty() || confidence.size() == n);
+			       (confidence.empty() || confidence.size() == n) &&
+			       (fbErrorPx.empty() || fbErrorPx.size() == n);
 		}
 
 		static CellMotionField Uniform(int cw, int ch, double mvx, double mvy,
@@ -426,8 +477,12 @@ namespace TdV2
 		size_t nonFiniteCells = 0;
 	};
 
-	// Compute camera-relative object speed gate with Karis 3x3 max-velocity silhouette dilation.
-	inline MotionGateResult EvaluateCameraRelativeMotionGate(const CellMotionField& mf, StandInRegistry* standIns = nullptr)
+	// Compute camera-relative object speed gate with Karis 3x3 max-velocity silhouette dilation
+	// and Plan 6.2 / Fable M-3 hard > 1.0 px forward/backward occlusion gate (continuous confidence tapers below 1.0 px).
+	inline MotionGateResult EvaluateCameraRelativeMotionGate(
+		const CellMotionField& mf,
+		StandInRegistry* standIns = nullptr,
+		bool enableHardFbOcclusionGate = true)
 	{
 		MotionGateResult out;
 		if (!mf.IsWellFormed(mf.cellsW, mf.cellsH))
@@ -443,8 +498,10 @@ namespace TdV2
 
 		std::vector<double> relSpeed(n, 0.0);
 		std::vector<double> cellConf(n, 1.0);
+		std::vector<uint8_t> fbOccluded(n, 0u);
 		std::vector<uint8_t> finiteCell(n, 0u);
 		const bool hasConf = !mf.confidence.empty();
+		const bool hasFbErr = !mf.fbErrorPx.empty();
 		for (size_t i = 0; i < n; ++i)
 		{
 			if (!mf.valid[i])
@@ -467,13 +524,27 @@ namespace TdV2
 				}
 				cellConf[i] = RampMath::Clamp01(rawConf);
 			}
+			if (hasFbErr)
+			{
+				const double rawFb = mf.fbErrorPx[i];
+				if (!std::isfinite(rawFb) || rawFb < 0.0)
+				{
+					out.nonFiniteCellMask[i] = 1u;
+					++out.nonFiniteCells;
+					continue;
+				}
+				if (enableHardFbOcclusionGate && rawFb > kHardFbOcclusionPx)
+				{
+					fbOccluded[i] = 1u;
+				}
+			}
 			finiteCell[i] = 1u;
 			const double dvx = mf.vx[i] - mf.camVx[i];
 			const double dvy = mf.vy[i] - mf.camVy[i];
 			relSpeed[i] = std::sqrt(dvx * dvx + dvy * dvy);
 		}
 		if (out.nonFiniteCells > 0 && standIns != nullptr)
-			standIns->Engage(StandInKind::NonFiniteClosure, "EvaluateCameraRelativeMotionGate non-finite vector or confidence");
+			standIns->Engage(StandInKind::NonFiniteClosure, "EvaluateCameraRelativeMotionGate non-finite vector, confidence, or fbErrorPx");
 
 		for (int cy = 0; cy < mf.cellsH; ++cy)
 		{
@@ -483,9 +554,9 @@ namespace TdV2
 				if (!finiteCell[idx])
 					continue;
 				const RegionMotionClass c = mf.cls[idx];
-				if (c == RegionMotionClass::Overlay)
+				if (c == RegionMotionClass::Overlay || fbOccluded[idx] != 0u)
 				{
-					// Hard drop on overlays/subtitles across ALL bands (prevents ghost letters).
+					// Hard drop on overlays/subtitles and > 1.0 px forward/backward occlusion cells across ALL bands.
 					out.gateL[idx] = 0.0;
 					out.gateMH[idx] = 0.0;
 					continue;
@@ -737,7 +808,14 @@ namespace TdV2
 		const std::vector<uint8_t>* faceMask = nullptr; // Pass-1 per-cell (cellsW * cellsH) face/non-rigid mask (non-zero => delta == 0)
 		std::vector<double> cellStepScale;    // Optional per-cell AQ/PQ step scale (cellsW * cellsH; empty => 1.0 neutral everywhere)
 		PsdShape psdShape;                    // Optional P10g grain PSD shape multipliers (default 1.0 = white-noise identity)
-		QualityPattern::FrameRole frameRole = QualityPattern::FrameRole::Unknown; // Optional frame role for A2e same-role history cap
+		QualityPattern::FrameRole frameRole = QualityPattern::FrameRole::Unknown; // Optional frame role for A2e / 2-frame stats pool
+
+		// TD-U5 (H-4 / Owner D2): Anchored carry & peak drift measurement inputs.
+		bool isConfirmedPeak = false;          // True on confirmed quality peaks: measures real kDrift and re-anchors carry
+		CellMotionField anchorComposedMotion;  // Single-resample composed vector field current -> last confirmed peak anchor
+		bool hasAnchorComposedMotion = false;
+		CellMotionField directPeakToPeakMotion;// Optional direct vector field current peak -> previous peak (for exact kDrift)
+		bool hasDirectPeakToPeakMotion = false;
 	};
 
 	struct FrameProcessResult
@@ -756,13 +834,17 @@ namespace TdV2
 		size_t motionStandInRefs = 0;         // References with null/mismatched motion field visibly handled
 		size_t missingMotionSkippedRefs = 0;  // References skipped per L4 because motion field was null (zero whole-frame Still blend)
 		size_t faceMaskedCells = 0;           // Pass-1 face/non-rigid masked cells forced to exact delta == 0
-		size_t codecModelPbStandInCells = 0;  // Unique cells where STRICT/CELL used warped-ref stand-in for missing Field B P_B
+		size_t codecModelPbStandInCells = 0;  // Unique cells where STRICT/CELL fell back visibly when Field B P_B absent
 		size_t a2InvalidCells = 0;            // Cells closed to zero because A2 step/deadZonePhi stats were invalid
 		size_t borderBilinearPixels = 0;      // Active-rect 1-2 px border bilinear fallback pixel count
 		bool carryUsed = false;
 		bool carryReset = false;
-		EmpiricalOwnErrorPrior empiricalOwnError; // TD-U1 A2e per-band x activity-class own-error prior U_j(class)
-		AlignedSharpnessSummary alignedSharpness; // TD-U1 motion-aligned relative sharpness r_t (abstaining focus cells)
+		bool anchoredCarryUsed = false;             // TD-U5: true when single-resample anchored carry served as a ref this frame
+		size_t anchoredCarryHeldOutRejectCells = 0; // TD-U5: cells rejected by per-cell held-out structure check (marked for re-seed)
+		size_t driftBarredCells = 0;                // TD-U5: cells barred from carry for next span because measured kDrift > 1.0 px
+		bool driftReducedSearchUsed = false;        // TD-U5: true when seeded local block search measured kDrift ("drift: reduced")
+		EmpiricalOwnErrorPrior empiricalOwnError;   // TD-U1 A2e per-band x activity-class own-error prior U_j(class)
+		AlignedSharpnessSummary alignedSharpness;   // TD-U1 motion-aligned relative sharpness r_t (abstaining focus cells)
 	};
 
 	// ---- Corner-Tapered Spatial-Only Bilinear Weight Interpolation (Zero New Constants) ----
@@ -938,6 +1020,11 @@ namespace TdV2
 		{
 			hasCarry_ = false;
 			carryClean_ = TdV2Plane();
+			hasAnchor_ = false;
+			anchorClean_ = TdV2Plane();
+			anchorAgeFrames_ = 0;
+			anchorBarredCells_.clear();
+			anchorReseedCells_.clear();
 			hasLastSeq_ = false;
 			lastSeq_ = 0;
 			a2eHistory_.Reset();
@@ -947,6 +1034,11 @@ namespace TdV2
 
 		bool HasCarry() const { return hasCarry_; }
 		const TdV2Plane& CarryClean() const { return carryClean_; }
+		bool HasAnchor() const { return hasAnchor_; }
+		int AnchorAgeFrames() const { return anchorAgeFrames_; }
+		const TdV2Plane& AnchorClean() const { return anchorClean_; }
+		const std::vector<uint8_t>& AnchorBarredCells() const { return anchorBarredCells_; }
+		const std::vector<uint8_t>& AnchorReseedCells() const { return anchorReseedCells_; }
 
 		FrameProcessResult ProcessFrame(const FrameProcessInput& in, StandInRegistry* standIns = nullptr)
 		{
@@ -1004,11 +1096,13 @@ namespace TdV2
 			}
 			const bool effectiveCut = in.isCutOrSpanInvalid || (effFadeKeep <= 0.0);
 
-			// Cut / invalid span, fadeKeep <= 0, resolution change, seek, or non-consecutive frame sequence resets recurrent carry cleanly.
-			const bool seqDiscontinuous = hasCarry_ && hasLastSeq_ &&
+			// Cut / invalid span, fadeKeep <= 0, resolution change, seek, or non-consecutive frame sequence resets carry & anchor cleanly.
+			const bool seqDiscontinuous = (hasCarry_ || hasAnchor_) && hasLastSeq_ &&
 				!(in.seq == 0 && lastSeq_ == 0) &&
 				(in.seq != lastSeq_ + 1);
-			if (effectiveCut || seqDiscontinuous || (hasCarry_ && (carryClean_.w != w || carryClean_.h != h)))
+			const bool dimChanged = (hasCarry_ && (carryClean_.w != w || carryClean_.h != h)) ||
+			                        (hasAnchor_ && (anchorClean_.w != w || anchorClean_.h != h));
+			if (effectiveCut || seqDiscontinuous || dimChanged)
 			{
 				ResetCarry();
 				res.carryReset = true;
@@ -1117,6 +1211,17 @@ namespace TdV2
 				return true;
 			};
 
+			int anchoredCarryRefIdx = -1;
+			const int maxAnchorAge = cfg_.maxAnchorAgeFrames > 0 ? cfg_.maxAnchorAgeFrames : kContractBackRefs;
+			if (hasAnchor_ && anchorAgeFrames_ > maxAnchorAge)
+			{
+				hasAnchor_ = false;
+				anchorClean_ = TdV2Plane();
+				anchorAgeFrames_ = 0;
+				anchorBarredCells_.clear();
+				anchorReseedCells_.clear();
+			}
+
 			if (!effectiveCut)
 			{
 				if (in.prevPeak.cleanPlane != nullptr)
@@ -1125,7 +1230,20 @@ namespace TdV2
 					tryAddRefSpec(in.nextPeak.cleanPlane, in.nextPeak.motion, in.nextPeak.isExactCopyOfCurrent, RefRole::NextPeak, in.nextPeak.cameraHomography);
 				if (in.prevPeak2.cleanPlane != nullptr)
 					tryAddRefSpec(in.prevPeak2.cleanPlane, in.prevPeak2.motion, in.prevPeak2.isExactCopyOfCurrent, RefRole::PrevPeak2, in.prevPeak2.cameraHomography);
-				if (cfg_.enableCarryForward && hasCarry_ && carryClean_.w == w && carryClean_.h == h)
+				// TD-U5 (H-4 / Owner D2): Single-resample anchored carry from last confirmed peak along composed vector,
+				// treated as a second past peak (PrevPeak2) for A1 (NEVER frame-to-frame chained resample).
+				if (cfg_.enableAnchoredCarry && hasAnchor_ && anchorClean_.w == w && anchorClean_.h == h &&
+				    anchorAgeFrames_ >= 1 && anchorAgeFrames_ <= maxAnchorAge)
+				{
+					const CellMotionField* ancMf = in.hasAnchorComposedMotion ? &in.anchorComposedMotion : nullptr;
+					if (tryAddRefSpec(&anchorClean_, ancMf, false, RefRole::PrevPeak2))
+					{
+						anchoredCarryRefIdx = static_cast<int>(refSpecs.size()) - 1;
+						res.anchoredCarryUsed = true;
+						res.carryUsed = true;
+					}
+				}
+				else if (cfg_.enableCarryForward && hasCarry_ && carryClean_.w == w && carryClean_.h == h)
 				{
 					if (tryAddRefSpec(&carryClean_, in.hasCarryMotion ? &in.carryMotion : nullptr, false, RefRole::Carry))
 						res.carryUsed = true;
@@ -1135,9 +1253,21 @@ namespace TdV2
 			res.activeRefCount = refSpecs.size();
 			if (refSpecs.empty())
 			{
-				// First frame / cut frame / all refs skipped: seed recurrent carry with current clean plane; output stays receivedY.
+				// First frame / cut frame / all refs skipped: seed carry (and anchor if confirmed peak); output stays receivedY.
 				carryClean_ = curClean;
 				hasCarry_ = true;
+				if (in.isConfirmedPeak)
+				{
+					anchorClean_ = curClean;
+					hasAnchor_ = true;
+					anchorAgeFrames_ = 1;
+					anchorBarredCells_.assign(numCells, 0u);
+					anchorReseedCells_.assign(numCells, 0u);
+				}
+				else if (hasAnchor_)
+				{
+					++anchorAgeFrames_;
+				}
 				hasLastSeq_ = true;
 				lastSeq_ = in.seq;
 				return res;
@@ -1230,7 +1360,8 @@ namespace TdV2
 				const WarpDiagnostics wDiag = WarpCleanReference(
 					*spec.cleanPlane, curClean, active, spec.motion->vx, spec.motion->vy,
 					res.cellsW, res.cellsH, cellPx, wr.clean, wr.validPx, standIns,
-					&spec.motion->valid, &spec.motion->cls, &spec.cameraHomography, &nonFiniteCellFlag);
+					&spec.motion->valid, &spec.motion->cls, &spec.cameraHomography, &nonFiniteCellFlag,
+					cfg_.enableSmoothWarpVectors);
 				res.borderBilinearPixels += wDiag.borderBilinearPixels;
 				if (wDiag.nonFinitePixels > 0)
 				{
@@ -1248,7 +1379,7 @@ namespace TdV2
 					}
 				}
 				wr.bands = DecomposeActiveBands(wr.clean, active, standIns);
-				wr.motionGate = EvaluateCameraRelativeMotionGate(*spec.motion, standIns);
+				wr.motionGate = EvaluateCameraRelativeMotionGate(*spec.motion, standIns, cfg_.enableHardFbOcclusionGate);
 				if (wr.motionGate.nonFiniteCells > 0)
 				{
 					for (size_t ci = 0; ci < numCells && ci < wr.motionGate.nonFiniteCellMask.size(); ++ci)
@@ -1284,6 +1415,235 @@ namespace TdV2
 						nonFiniteCellFlag[ci] = 1u;
 						if (standIns != nullptr)
 							standIns->Engage(StandInKind::NonFiniteClosure, "non-finite or non-positive cellStepScale");
+					}
+				}
+			}
+
+			// ---- TD-U5 (H-4 / Owner D2): Per-Cell Held-Out Structure Check on Anchored Carry & Real kDrift Audit ----
+			// 1) Held-out structure check on anchored carry BEFORE use:
+			//    - Mid-band normalized correlation (NCC) between warped anchor M-band and received clean M-band
+			//      (strictly invariant to amplitude scaling, so mid-band detail loss alone NEVER fails it).
+			//    - Coarse-band mean difference within the U3 limit |mean(L_anc) - mean(L_cur)| <= kappa * sqrt(U_L).
+			//    - Failing cells get carry weight 0 and are marked in anchorReseedCells_ for re-seed at the next peak.
+			const double depthScaleDrift = DepthScale(cfg_.sourceBits);
+			const double baseQuantVarDrift = (depthScaleDrift * depthScaleDrift) / 12.0;
+			const double midNoiseFloorHeldOut = 2.0 * gains.mid * baseQuantVarDrift;
+			const double effKappaHeldOut = ClampPixelBoundKappa(cfg_.pixelBoundKappa);
+			if (anchoredCarryRefIdx >= 0 && anchoredCarryRefIdx < static_cast<int>(refs.size()))
+			{
+				WarpedRef& ancRef = refs[static_cast<size_t>(anchoredCarryRefIdx)];
+				if (anchorReseedCells_.size() != numCells)
+					anchorReseedCells_.assign(numCells, 0u);
+				for (int cy = 0; cy < res.cellsH; ++cy)
+				{
+					const int y0 = (std::max)(active.y0, cy * cellPx);
+					const int y1 = (std::min)(active.y1, (cy + 1) * cellPx);
+					if (y1 <= y0) continue;
+					for (int cx = 0; cx < res.cellsW; ++cx)
+					{
+						const int x0 = (std::max)(active.x0, cx * cellPx);
+						const int x1 = (std::min)(active.x1, (cx + 1) * cellPx);
+						if (x1 <= x0) continue;
+						const size_t cIdx = static_cast<size_t>(cy) * res.cellsW + cx;
+
+						// Barred from previous peak's drift audit (> 1.0 px): force anchor weight strictly 0.
+						if (cIdx < anchorBarredCells_.size() && anchorBarredCells_[cIdx] != 0u)
+						{
+							ancRef.motionGate.gateL[cIdx] = 0.0;
+							ancRef.motionGate.gateMH[cIdx] = 0.0;
+							continue;
+						}
+						if (ancRef.motionGate.gateL[cIdx] <= 0.0 && ancRef.motionGate.gateMH[cIdx] <= 0.0)
+							continue;
+
+						double sumCurM = 0.0, sumAncM = 0.0, sumCurL = 0.0, sumAncL = 0.0;
+						size_t cnt = 0;
+						for (int y = y0; y < y1; ++y)
+						{
+							for (int x = x0; x < x1; ++x)
+							{
+								const size_t pIdx = static_cast<size_t>(y) * w + x;
+								if (ancRef.validPx[pIdx] == 0u)
+									continue;
+								sumCurM += curBands.M.at(x, y);
+								sumAncM += ancRef.bands.M.at(x, y);
+								sumCurL += curBands.L.at(x, y);
+								sumAncL += ancRef.bands.L.at(x, y);
+								++cnt;
+							}
+						}
+						if (cnt == 0)
+						{
+							ancRef.motionGate.gateL[cIdx] = 0.0;
+							ancRef.motionGate.gateMH[cIdx] = 0.0;
+							anchorReseedCells_[cIdx] = 1u;
+							++res.anchoredCarryHeldOutRejectCells;
+							continue;
+						}
+						const double invN = 1.0 / static_cast<double>(cnt);
+						const double muCurM = sumCurM * invN;
+						const double muAncM = sumAncM * invN;
+						const double muCurL = sumCurL * invN;
+						const double muAncL = sumAncL * invN;
+
+						double varCurM = 0.0, varAncM = 0.0, covM = 0.0;
+						for (int y = y0; y < y1; ++y)
+						{
+							for (int x = x0; x < x1; ++x)
+							{
+								const size_t pIdx = static_cast<size_t>(y) * w + x;
+								if (ancRef.validPx[pIdx] == 0u)
+									continue;
+								const double dc = curBands.M.at(x, y) - muCurM;
+								const double da = ancRef.bands.M.at(x, y) - muAncM;
+								varCurM += dc * dc;
+								varAncM += da * da;
+								covM += dc * da;
+							}
+						}
+						varCurM *= invN;
+						varAncM *= invN;
+						covM *= invN;
+
+						bool structOk = true;
+						if (varCurM > midNoiseFloorHeldOut && varAncM > midNoiseFloorHeldOut)
+						{
+							const double ncc = covM / std::sqrt(varCurM * varAncM);
+							// Derived 3-sigma zero-correlation significance floor: 3 / sqrt(N_eff,M), capped at 0.5.
+							const double nEffM = EffectiveSamplesForBand(1, static_cast<double>(cnt));
+							const double nccMin = (std::min)(0.5, std::sqrt(kHuberKneeSq) / std::sqrt(nEffM));
+							if (!std::isfinite(ncc) || ncc < nccMin)
+								structOk = false;
+						}
+						const double cScale = cellStepScales[cIdx];
+						const double coarseVar = (std::max)(a2Stats.totalVar * cScale * cScale, baseQuantVarDrift) * gains.low;
+						const double coarseLimit = effKappaHeldOut * std::sqrt(coarseVar);
+						if (std::fabs(muAncL - muCurL) > coarseLimit)
+							structOk = false;
+
+						if (!structOk)
+						{
+							ancRef.motionGate.gateL[cIdx] = 0.0;
+							ancRef.motionGate.gateMH[cIdx] = 0.0;
+							anchorReseedCells_[cIdx] = 1u;
+							++res.anchoredCarryHeldOutRejectCells;
+						}
+					}
+				}
+			}
+
+			// 2) Real kDrift measurement at every confirmed peak (Plan Phase 3 / Fable H-4 / 99 s2.5 fallback a):
+			//    Compares direct peak-to-peak vector against composed trail vector (or falls back visibly to a seeded
+			//    +/- 2 px local block search with "drift: reduced" tag). Written into td.maps kDrift; drifted cells
+			//    (> kHardFbOcclusionPx = 1.0 px) are barred from carry for the next span!
+			std::vector<float> cellDriftPx(numCells, 0.0f);
+			std::vector<uint8_t> nextSpanBarredCells(numCells, 0u);
+			if (in.isConfirmedPeak && !effectiveCut && in.hasAnchorComposedMotion &&
+			    in.anchorComposedMotion.IsWellFormed(res.cellsW, res.cellsH))
+			{
+				if (in.hasDirectPeakToPeakMotion && in.directPeakToPeakMotion.IsWellFormed(res.cellsW, res.cellsH))
+				{
+					for (size_t ci = 0; ci < numCells; ++ci)
+					{
+						if (in.anchorComposedMotion.valid[ci] == 0u || in.directPeakToPeakMotion.valid[ci] == 0u)
+							continue;
+						const double dvx = in.directPeakToPeakMotion.vx[ci] - in.anchorComposedMotion.vx[ci];
+						const double dvy = in.directPeakToPeakMotion.vy[ci] - in.anchorComposedMotion.vy[ci];
+						if (!std::isfinite(dvx) || !std::isfinite(dvy))
+							continue;
+						const double drift = std::hypot(dvx, dvy);
+						cellDriftPx[ci] = static_cast<float>(drift);
+						if (drift > kHardFbOcclusionPx)
+						{
+							nextSpanBarredCells[ci] = 1u;
+							++res.driftBarredCells;
+						}
+					}
+				}
+				else if (hasAnchor_ && anchorClean_.w == w && anchorClean_.h == h)
+				{
+					// Seeded local block search (+/- 2 px around composed trail + quadratic sub-pixel peak) with visible tag.
+					res.driftReducedSearchUsed = true;
+					if (standIns != nullptr)
+						standIns->Engage(StandInKind::LongPairDrift, "drift: reduced (seeded local block search around composed trail)");
+					const int kSearchRad = 2;
+					for (int cy = 0; cy < res.cellsH; ++cy)
+					{
+						const int y0 = (std::max)(active.y0, cy * cellPx);
+						const int y1 = (std::min)(active.y1, (cy + 1) * cellPx);
+						if (y1 <= y0) continue;
+						for (int cx = 0; cx < res.cellsW; ++cx)
+						{
+							const int x0 = (std::max)(active.x0, cx * cellPx);
+							const int x1 = (std::min)(active.x1, (cx + 1) * cellPx);
+							if (x1 <= x0) continue;
+							const size_t ci = static_cast<size_t>(cy) * res.cellsW + cx;
+							if (in.anchorComposedMotion.valid[ci] == 0u)
+								continue;
+							const double baseVx = in.anchorComposedMotion.vx[ci];
+							const double baseVy = in.anchorComposedMotion.vy[ci];
+							if (!std::isfinite(baseVx) || !std::isfinite(baseVy))
+								continue;
+
+							double sadGrid[5][5] = {};
+							int bestDx = 0, bestDy = 0;
+							double bestSad = std::numeric_limits<double>::infinity();
+							for (int dy = -kSearchRad; dy <= kSearchRad; ++dy)
+							{
+								for (int dx = -kSearchRad; dx <= kSearchRad; ++dx)
+								{
+									double sad = 0.0;
+									size_t cnt = 0;
+									for (int y = y0; y < y1; y += 2)
+									{
+										const int ry = static_cast<int>(std::lround(static_cast<double>(y) + baseVy)) + dy;
+										if (ry < active.y0 || ry >= active.y1) continue;
+										for (int x = x0; x < x1; x += 2)
+										{
+											const int rx = static_cast<int>(std::lround(static_cast<double>(x) + baseVx)) + dx;
+											if (rx < active.x0 || rx >= active.x1) continue;
+											sad += std::fabs(curClean.at(x, y) - anchorClean_.at(rx, ry));
+											++cnt;
+										}
+									}
+									const double meanSad = (cnt > 0) ? (sad / static_cast<double>(cnt)) : std::numeric_limits<double>::infinity();
+									sadGrid[dy + kSearchRad][dx + kSearchRad] = meanSad;
+									if (meanSad < bestSad)
+									{
+										bestSad = meanSad;
+										bestDx = dx;
+										bestDy = dy;
+									}
+								}
+							}
+							double subDx = static_cast<double>(bestDx);
+							double subDy = static_cast<double>(bestDy);
+							if (bestDx > -kSearchRad && bestDx < kSearchRad)
+							{
+								const double cL = sadGrid[bestDy + kSearchRad][bestDx + kSearchRad - 1];
+								const double c0 = sadGrid[bestDy + kSearchRad][bestDx + kSearchRad];
+								const double cR = sadGrid[bestDy + kSearchRad][bestDx + kSearchRad + 1];
+								const double den = cL - 2.0 * c0 + cR;
+								if (std::isfinite(den) && den > kEngineNumFloor)
+									subDx += (std::max)(-0.5, (std::min)(0.5, 0.5 * (cL - cR) / den));
+							}
+							if (bestDy > -kSearchRad && bestDy < kSearchRad)
+							{
+								const double cU = sadGrid[bestDy + kSearchRad - 1][bestDx + kSearchRad];
+								const double c0 = sadGrid[bestDy + kSearchRad][bestDx + kSearchRad];
+								const double cD = sadGrid[bestDy + kSearchRad + 1][bestDx + kSearchRad];
+								const double den = cU - 2.0 * c0 + cD;
+								if (std::isfinite(den) && den > kEngineNumFloor)
+									subDy += (std::max)(-0.5, (std::min)(0.5, 0.5 * (cU - cD) / den));
+							}
+							const double drift = std::hypot(subDx, subDy);
+							cellDriftPx[ci] = static_cast<float>(drift);
+							if (drift > kHardFbOcclusionPx)
+							{
+								nextSpanBarredCells[ci] = 1u;
+								++res.driftBarredCells;
+							}
+						}
 					}
 				}
 			}
@@ -2115,7 +2475,7 @@ namespace TdV2
 					mBlock.f[TdMapsView::kCodingNoise] = static_cast<float>(std::sqrt((std::max)(0.0, a2Stats.totalVar * cellStepScaleSq)));
 					mBlock.f[TdMapsView::kLightGain] = 1.0f;
 					mBlock.f[TdMapsView::kLightOffset] = 0.0f;
-					mBlock.f[TdMapsView::kDrift] = 0.0f;
+					mBlock.f[TdMapsView::kDrift] = cellDriftPx[cIdx];
 					mBlock.f[TdMapsView::kBandMask] = static_cast<float>(activeBandBits);
 				}
 			}
@@ -2409,6 +2769,7 @@ namespace TdV2
 				? DecomposeActiveBands(ownGrain, active, nullptr)
 				: ThreeBandPlanes{};
 
+			std::vector<double> cellAddBackFrac(numCells, 0.0);
 			for (int cy = 0; cy < res.cellsH; ++cy)
 			{
 				const int y0 = (std::max)(active.y0, cy * cellPx);
@@ -2481,15 +2842,41 @@ namespace TdV2
 					if (gDec.violated && gDec.addBackFraction > 0.0)
 					{
 						++res.guardViolationCells;
-						for (int y = y0; y < y1; ++y)
+						cellAddBackFrac[cIdx] = gDec.addBackFraction;
+						if (!cfg_.enableSmoothLayer4Guard)
 						{
-							for (int x = x0; x < x1; ++x)
+							for (int y = y0; y < y1; ++y)
 							{
-								const double addBack = gDec.addBackFraction * (inFullBands.H.at(x, y) - outFullBands.H.at(x, y));
-								candOut.at(x, y) += addBack;
-								// BLOCKER-2 invariant: candClean is NOT modified here, keeping carryClean_ 100% grain-free!
+								for (int x = x0; x < x1; ++x)
+								{
+									const double addBack = gDec.addBackFraction * (inFullBands.H.at(x, y) - outFullBands.H.at(x, y));
+									candOut.at(x, y) += addBack;
+									// BLOCKER-2 invariant: candClean is NOT modified here, keeping carryClean_ 100% grain-free!
+								}
 							}
 						}
+					}
+				}
+			}
+
+			// Fable L-3: Spatially bilinearly interpolated Layer-4 grain-guard add-back (removes 16-px block seams
+			// while keeping Pass-1 face-masked cells strictly untouched and candClean 100% grain-free).
+			if (cfg_.enableSmoothLayer4Guard && res.guardViolationCells > 0)
+			{
+				for (int y = active.y0; y < active.y1; ++y)
+				{
+					const int cy = (std::min)(res.cellsH - 1, y / cellPx);
+					for (int x = active.x0; x < active.x1; ++x)
+					{
+						const int cx = (std::min)(res.cellsW - 1, x / cellPx);
+						const size_t cIdx = static_cast<size_t>(cy) * res.cellsW + cx;
+						if (isFaceMaskedCell(cIdx))
+							continue;
+						const double frac = SpatialBilinearWeight(
+							cellAddBackFrac.data(), res.cellsW, res.cellsH,
+							static_cast<double>(x), static_cast<double>(y), cellPx);
+						if (frac > 0.0)
+							candOut.at(x, y) += frac * (inFullBands.H.at(x, y) - outFullBands.H.at(x, y));
 					}
 				}
 			}
@@ -2498,8 +2885,7 @@ namespace TdV2
 			for (uint8_t nf : nonFiniteCellFlag)
 				if (nf != 0u) ++res.nonFiniteCells;
 
-			// Update recurrent carry-forward buffer strictly with the grain-free estimate `candClean`
-			// (under gradual U7 fadeKeep in (0, 1): fadeKeep * fusedClean + (1 - fadeKeep) * curClean).
+			// Update legacy recurrent carry-forward buffer strictly with the grain-free estimate `candClean`.
 			if (effFadeKeep < 1.0)
 			{
 				carryClean_ = TdV2Plane(w, h, 0.0);
@@ -2512,6 +2898,22 @@ namespace TdV2
 				carryClean_ = candClean;
 			}
 			hasCarry_ = true;
+
+			// TD-U5 (H-4 / Owner D2): Re-anchor single-resample carry strictly at confirmed peaks (grain-free candClean only!),
+			// installing the next-span drift bar mask and clearing held-out re-seed flags.
+			if (in.isConfirmedPeak && !effectiveCut)
+			{
+				anchorClean_ = candClean;
+				hasAnchor_ = true;
+				anchorAgeFrames_ = 1;
+				anchorBarredCells_ = std::move(nextSpanBarredCells);
+				anchorReseedCells_.assign(numCells, 0u);
+			}
+			else if (hasAnchor_)
+			{
+				++anchorAgeFrames_;
+			}
+
 			hasLastSeq_ = true;
 			lastSeq_ = in.seq;
 			res.outputClean = candClean;
@@ -2553,6 +2955,11 @@ namespace TdV2
 		Config cfg_;
 		bool hasCarry_ = false;
 		TdV2Plane carryClean_;
+		bool hasAnchor_ = false;
+		TdV2Plane anchorClean_;
+		int anchorAgeFrames_ = 0;
+		std::vector<uint8_t> anchorBarredCells_;
+		std::vector<uint8_t> anchorReseedCells_;
 		bool hasLastSeq_ = false;
 		uint64_t lastSeq_ = 0;
 		A2ePriorHistory a2eHistory_;

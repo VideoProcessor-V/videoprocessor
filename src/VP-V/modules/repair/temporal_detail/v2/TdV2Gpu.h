@@ -82,6 +82,7 @@ namespace Gpu
 		size_t singleRefA2Cells = 0;
 		size_t motionStandInRefs = 0;
 		size_t borderBilinearPixels = 0;
+		size_t cellsLimited = 0;                 // M-9: live count of cells where statistical output limit engaged
 		bool carryUsed = false;
 		bool carryReset = false;
 		bool scratchShort = false;
@@ -185,6 +186,7 @@ namespace Gpu
 		size_t singleRefA2Cells = 0;
 		size_t motionStandInRefs = 0;
 		size_t borderBilinearPixels = 0;
+		size_t cellsLimited = 0;                 // M-9: live count of cells where statistical output limit engaged
 		bool carryUsed = false;
 		bool carryReset = false;
 		bool scratchShort = false;
@@ -567,7 +569,7 @@ namespace Gpu
 					&inMotionVecTex_, &inMotionMetaTex_, &inCellPriorTex_, &inFaceMaskTex_,
 					&outYTex_, &outCleanTex_, &outDeltaTex_, &outTdMapsTex_,
 					&outDiagFlagsTex_, &outGuardCellTex_, &outWarpDiagTex_,
-					&ebPriorTex_, &prevRoleStatsTex_[0], &prevRoleStatsTex_[1], &prevRoleStatsTex_[2],
+					&ebPriorTex_, &counterSummaryTex_, &prevRoleStatsTex_[0], &prevRoleStatsTex_[1], &prevRoleStatsTex_[2],
 					&chromaCodedDeltaTex_, &chromaDelivUvTex_, &chromaDelivRgbTex_,
 					&chromaOutUvTex_, &chromaOutRgbTex_, &chromaOutDeltaTex_ })
 				{
@@ -584,7 +586,7 @@ namespace Gpu
 					&privWarpedVal_, &privRefFlags_[0], &privRefFlags_[1],
 					&privDeltaScratch_,
 					&privMotionGate_, &privCellWeights_, &privCellDiagC_, &privCellStats_, &privCellFocus_,
-					&ebPriorTex_, &prevRoleStatsTex_[0], &prevRoleStatsTex_[1], &prevRoleStatsTex_[2],
+					&ebPriorTex_, &counterSummaryTex_, &prevRoleStatsTex_[0], &prevRoleStatsTex_[1], &prevRoleStatsTex_[2],
 					&carryCleanTex_,
 					&inRecYTex_, &inCleanYTex_, &inRefCleanTex_, &inCodecModelPbTex_,
 					&inMotionVecTex_, &inMotionMetaTex_, &inCellPriorTex_, &inFaceMaskTex_,
@@ -1408,6 +1410,7 @@ namespace Gpu
 			out.singularCells = oc.singularCells;
 			out.singleRefA2Cells = oc.singleRefA2Cells;
 			out.borderBilinearPixels = oc.borderBilinearPixels;
+			out.cellsLimited = oc.cellsLimited;
 			out.usedExternalBandMemo = oc.usedExternalBandMemo;
 			if (out.readbackCellDiagnostics)
 				out.tdMaps = std::move(oc.tdMaps);
@@ -2298,6 +2301,7 @@ namespace Gpu
 			size_t singularCells = 0;
 			size_t singleRefA2Cells = 0;
 			size_t borderBilinearPixels = 0;
+			size_t cellsLimited = 0;
 			bool carryReset = false;
 			bool scratchShort = false;
 			bool usedExternalBandMemo = false;
@@ -2579,6 +2583,7 @@ namespace Gpu
 					// matching prepacked GPU motion layout identically!
 					const int slot = (std::max)(0, (std::min)(2, refSpecs[static_cast<size_t>(k)].motionSlot));
 					const bool hasConf = !mf.confidence.empty();
+					const bool hasFb = !mf.fbErrorPx.empty();
 					for (int cy = 0; cy < ch; ++cy)
 					{
 						for (int cx = 0; cx < cw; ++cx)
@@ -2592,7 +2597,7 @@ namespace Gpu
 							motMetaBuf[dstTexel * 4u + 0u] = static_cast<float>(static_cast<int>(mf.cls[srcIdx]));
 							motMetaBuf[dstTexel * 4u + 1u] = mf.valid[srcIdx] ? 1.0f : 0.0f;
 							motMetaBuf[dstTexel * 4u + 2u] = hasConf ? static_cast<float>(mf.confidence[srcIdx]) : 1.0f;
-							motMetaBuf[dstTexel * 4u + 3u] = 0.0f;
+							motMetaBuf[dstTexel * 4u + 3u] = hasFb ? static_cast<float>(mf.fbErrorPx[srcIdx]) : 0.0f;
 						}
 					}
 				}
@@ -2605,9 +2610,13 @@ namespace Gpu
 				motionVecTex = inMotionVecTex_;
 				motionMetaTex = inMotionMetaTex_;
 			}
-			// Preserve full backwards compatibility when callers supply legacy 2-channel RG32F motionMetaTex (.z defaults to 1.0).
+			// Preserve full backwards compatibility when callers supply legacy 2-channel RG32F motionMetaTex (.z=1.0, .w=0.0).
 			const bool motionMetaHasConf = (motionMetaTex->params.format != nullptr && motionMetaTex->params.format->num_components >= 3);
+			const bool motionMetaHasFb = (motionMetaTex->params.format != nullptr && motionMetaTex->params.format->num_components >= 4);
 			const float uMotionMetaHasConf = motionMetaHasConf ? 1.0f : 0.0f;
+			const float uMotionMetaHasFb = motionMetaHasFb ? 1.0f : 0.0f;
+			const float uEnableHardFbGate = cfg_.enableHardFbOcclusionGate ? 1.0f : 0.0f;
+			const float uEnableSmoothWarp = cfg_.enableSmoothWarpVectors ? 1.0f : 0.0f;
 
 			pl_tex cellPriorTex = p.cellPriorTex;
 			if (!cellPriorTex)
@@ -2832,7 +2841,7 @@ namespace Gpu
 			const int cellGx8 = Detail::GroupsFor(cw, 8);
 			const int cellGy8 = Detail::GroupsFor(ch, 8);
 
-			// ---- PASS 1A: Camera-Relative Motion Gate + Karis 3x3 Silhouette Dilation ----
+			// ---- PASS 1A: Camera-Relative Motion Gate + Karis 3x3 Silhouette Dilation + Hard FB Occlusion Gate (6.2 / M-3) ----
 			{
 				std::string hdr = staticGeom;
 				hdr += VpvGpu::DefineInt("TD_CLS_OBJECT", static_cast<int>(RegionMotionClass::Object));
@@ -2840,6 +2849,7 @@ namespace Gpu
 				hdr += VpvGpu::DefineInt("TD_CLS_DYN_TEX", static_cast<int>(RegionMotionClass::DynamicTexture));
 				hdr += VpvGpu::Define("TD_STILL_SPEED", kStillObjectSpeedPx);
 				hdr += VpvGpu::Define("TD_FAST_CUTOFF", kFastObjectCutoffPx);
+				hdr += VpvGpu::Define("TD_HARD_FB_OCCLUSION_PX", kHardFbOcclusionPx);
 				hdr += Shaders::kCoreHelpers;
 				hdr += Shaders::kPass1MotionGateHeader;
 				pl_shader_desc d[3] = {
@@ -2847,14 +2857,16 @@ namespace Gpu
 					VpvGpu::Sampled("motion_meta", motionMetaTex),
 					VpvGpu::Storage("motion_gate", sc.motionGate)
 				};
-				pl_shader_var v[5] = {
+				pl_shader_var v[7] = {
 					VpvGpu::Var("u_k", &uK),
 					VpvGpu::Var("u_ref_motion_slot_0", &uRefMotionSlot0),
 					VpvGpu::Var("u_ref_motion_slot_1", &uRefMotionSlot1),
 					VpvGpu::Var("u_ref_motion_slot_2", &uRefMotionSlot2),
-					VpvGpu::Var("u_motion_meta_has_conf", &uMotionMetaHasConf)
+					VpvGpu::Var("u_motion_meta_has_conf", &uMotionMetaHasConf),
+					VpvGpu::Var("u_motion_meta_has_fb", &uMotionMetaHasFb),
+					VpvGpu::Var("u_enable_hard_fb_gate", &uEnableHardFbGate)
 				};
-				if (!runPass("td_v2_p1_motion_gate", hdr, Shaders::kPass1MotionGate, d, 3, v, 5,
+				if (!runPass("td_v2_p1_motion_gate", hdr, Shaders::kPass1MotionGate, d, 3, v, 7,
 				             Detail::GroupsFor(K * cw, 16), Detail::GroupsFor(ch, 16), 16, 16))
 				{
 					resetCarryIfActive();
@@ -3079,7 +3091,7 @@ namespace Gpu
 					VpvGpu::Storage("warped_val", sc.warpedVal),
 					VpvGpu::Storage("ref_flags_out", sc.refFlags[dstFlagsSlot])
 				};
-				pl_shader_var wv[18] = {
+				pl_shader_var wv[19] = {
 					VpvGpu::Var("u_ax0", &uAx0),
 					VpvGpu::Var("u_ay0", &uAy0),
 					VpvGpu::Var("u_ax1", &uAx1),
@@ -3089,11 +3101,12 @@ namespace Gpu
 					VpvGpu::Var("u_flags_clear", &uFlagsClear),
 					VpvGpu::Var("u_same_ref_cur", &uSameRefCur),
 					VpvGpu::Var("u_use_homography", &uUseH),
+					VpvGpu::Var("u_enable_smooth_warp", &uEnableSmoothWarp),
 					VpvGpu::Var("u_h0", &uH[0]), VpvGpu::Var("u_h1", &uH[1]), VpvGpu::Var("u_h2", &uH[2]),
 					VpvGpu::Var("u_h3", &uH[3]), VpvGpu::Var("u_h4", &uH[4]), VpvGpu::Var("u_h5", &uH[5]),
 					VpvGpu::Var("u_h6", &uH[6]), VpvGpu::Var("u_h7", &uH[7]), VpvGpu::Var("u_h8", &uH[8])
 				};
-				if (!runPass("td_v2_p1_warp", warpHdr, Shaders::kPass1WarpAndGate, dw, 7, wv, 18, fullGx, fullGy, 16, 16, shmemWarp))
+				if (!runPass("td_v2_p1_warp", warpHdr, Shaders::kPass1WarpAndGate, dw, 7, wv, 19, fullGx, fullGy, 16, 16, shmemWarp))
 				{
 					resetCarryIfActive();
 					return failCore("td_v2_p1_warp dispatch failed", StandInKind::GpuDispatchFailed);
@@ -3498,8 +3511,12 @@ namespace Gpu
 				}
 			}
 
-			// ---- PASS 4 (Speedup 4): Fused Recompose + Layer-4 TdGuardPort + Apply in ONE Dispatch! ----
+			// ---- PASS 4 (Speedup 4 + Fable L-3): Fused Recompose + Layer-4 TdGuardPort + Optional Smooth Guard Apply ----
 			{
+				const bool runSmoothGuard = cfg_.enableSmoothLayer4Guard && cfg_.ModifiesPixels();
+				const float uSmoothGuard = runSmoothGuard ? 1.0f : 0.0f;
+				pl_tex p4OutY = runSmoothGuard ? sc.warpedVal : dstOutY;
+
 				std::string p4Hdr = staticGeom;
 				p4Hdr += Shaders::BuildFineTapHeader();
 				p4Hdr += VpvGpu::Define("TD_GAIN_FINE", gains.fine);
@@ -3516,9 +3533,9 @@ namespace Gpu
 					VpvGpu::Storage("out_clean", dstOutClean),
 					VpvGpu::Storage("carry_clean", carryCleanTex_),
 					VpvGpu::Storage("guard_cell", dstGuardCell),
-					VpvGpu::Storage("out_y", dstOutY)
+					VpvGpu::Storage("out_y", p4OutY)
 				};
-				pl_shader_var v4[8] = {
+				pl_shader_var v4[9] = {
 					VpvGpu::Var("u_ax0", &uAx0),
 					VpvGpu::Var("u_ay0", &uAy0),
 					VpvGpu::Var("u_ax1", &uAx1),
@@ -3526,15 +3543,41 @@ namespace Gpu
 					VpvGpu::Var("u_has_clean_split", &uHasCleanSplit),
 					VpvGpu::Var("u_same_clean_rec", &uSameCleanRec),
 					VpvGpu::Var("u_shadow_mode", &uShadowMode),
-					VpvGpu::Var("u_fade_keep", &uFadeKeep)
+					VpvGpu::Var("u_fade_keep", &uFadeKeep),
+					VpvGpu::Var("u_smooth_guard", &uSmoothGuard)
 				};
 				const size_t shmemP4 = (3u * fineTileDim * fineTileDim + 3u * fineTileDim * 16u + 512u + 2u) * sizeof(float);
 				const std::string p4Body = Shaders::BuildPass4FusedApplyGuardBody();
 				if (!runPass("td_v2_p4_fused_apply_guard", p4Hdr, p4Body.c_str(),
-				             d4, 9, v4, 8, cw, ch, 16, 16, shmemP4))
+				             d4, 9, v4, 9, cw, ch, 16, 16, shmemP4))
 				{
 					resetCarryIfActive();
 					return failCore("td_v2_p4_fused_apply_guard dispatch failed", StandInKind::GpuDispatchFailed);
+				}
+
+				if (runSmoothGuard)
+				{
+					std::string sgHdr = staticGeom + Shaders::BuildFineTapHeader() + Shaders::kCoreHelpers + Shaders::kPass4SmoothGuardHeader;
+					pl_shader_desc dsg[5] = {
+						VpvGpu::Sampled("rec_y", p.recYTex),
+						VpvGpu::Sampled("cand_out", sc.warpedVal),
+						VpvGpu::Sampled("guard_cell", dstGuardCell),
+						VpvGpu::Sampled("cell_focus", sc.cellFocus),
+						VpvGpu::Storage("out_y", dstOutY)
+					};
+					pl_shader_var vsg[4] = {
+						VpvGpu::Var("u_ax0", &uAx0),
+						VpvGpu::Var("u_ay0", &uAy0),
+						VpvGpu::Var("u_ax1", &uAx1),
+						VpvGpu::Var("u_ay1", &uAy1)
+					};
+					const size_t shmemSg = (2u * fineTileDim * fineTileDim + 2u * fineTileDim * 16u) * sizeof(float);
+					if (!runPass("td_v2_p4b_smooth_guard", sgHdr, Shaders::kPass4SmoothGuardApply,
+					             dsg, 5, vsg, 4, fullGx, fullGy, 16, 16, shmemSg))
+					{
+						resetCarryIfActive();
+						return failCore("td_v2_p4b_smooth_guard dispatch failed", StandInKind::GpuDispatchFailed);
+					}
 				}
 			}
 
@@ -3549,7 +3592,58 @@ namespace Gpu
 
 			if (!p.readbackCellDiag)
 			{
-				// Zero-copy realtime path (no CPU readback): engage ALL host-deterministic StandInRegistry tokens cleanly (Rule 4)!
+				// Fable M-9: Compact 2-texel (8-float = 32-byte) live GPU counter summary readback in zero-copy mode!
+				// Reports exact per-frame fallback counts visibly on Ctrl+I & FallbackCatalog without cell-grid readback.
+				bool summaryRead = false;
+				if (cfg_.enableGpuCounterSummary &&
+				    Detail::EnsureTex(gpu, counterSummaryTex_, 2, 1, fmtRGBA32, true, true, false, true))
+				{
+					const std::string csumHdr = staticGeom + Shaders::kPassCounterSummaryReduceHeader;
+					pl_shader_desc dcs[5] = {
+						VpvGpu::Sampled("cell_diag_flags", dstDiagFlags),
+						VpvGpu::Sampled("guard_cell", dstGuardCell),
+						VpvGpu::Sampled("warp_diag", dstWarpDiag),
+						VpvGpu::Sampled("cell_focus", sc.cellFocus),
+						VpvGpu::Storage("counter_summary", counterSummaryTex_)
+					};
+					const size_t shmemCs = (256u * 8u) * sizeof(float);
+					if (runPass("td_v2_p5_counter_summary", csumHdr, Shaders::kPassCounterSummaryReduce,
+					            dcs, 5, nullptr, 0, 1, 1, 16, 16, shmemCs))
+					{
+						oc.dispatches = dispatches;
+						lastDispatchCount_ = dispatches;
+						float sBuf[8] = {};
+						if (Detail::DownloadFloats(gpu, counterSummaryTex_, sBuf))
+						{
+							oc.focusVetoCells = static_cast<size_t>(std::llround((std::max)(0.0f, sBuf[0])));
+							oc.nonFiniteCells = static_cast<size_t>(std::llround((std::max)(0.0f, sBuf[1])));
+							oc.guardViolationCells = static_cast<size_t>(std::llround((std::max)(0.0f, sBuf[2])));
+							oc.cellsLimited = static_cast<size_t>(std::llround((std::max)(0.0f, sBuf[3])));
+							oc.singularCells = static_cast<size_t>(std::llround((std::max)(0.0f, sBuf[4])));
+							oc.singleRefA2Cells = static_cast<size_t>(std::llround((std::max)(0.0f, sBuf[5])));
+							oc.faceMaskedCells = static_cast<size_t>(std::llround((std::max)(0.0f, sBuf[6])));
+							oc.borderBilinearPixels = static_cast<size_t>(std::llround((std::max)(0.0f, sBuf[7])));
+							summaryRead = true;
+							if (standIns != nullptr)
+							{
+								if (oc.nonFiniteCells > 0)
+									standIns->Engage(StandInKind::NonFiniteClosure, "TdV2GpuEngine live summary: non-finite cell(s)");
+								if (oc.singularCells > 0)
+									standIns->Engage(StandInKind::SingularSolveClosure, "TdV2GpuEngine live summary: singular covariance cell(s)");
+								if (oc.singleRefA2Cells > 0)
+									standIns->Engage(StandInKind::SingleRefA1ToA2Fallback);
+								if (oc.borderBilinearPixels > 0)
+									standIns->Engage(StandInKind::BorderBilinearFallback);
+								if (oc.cellsLimited > 0)
+									standIns->Engage(StandInKind::TransformUnknownBound);
+								if (oc.faceMaskedCells > 0)
+									standIns->Engage(StandInKind::FaceNonRigidMask);
+							}
+						}
+					}
+				}
+
+				// Zero-copy realtime path: engage ALL host-deterministic StandInRegistry tokens cleanly (Rule 4)!
 				if (standIns != nullptr)
 				{
 					const bool hasActiveArea = !ar.Empty();
@@ -3619,7 +3713,8 @@ namespace Gpu
 						}
 					}
 				}
-				oc.faceMaskedCells = cpuFaceMaskedCount;
+				if (!summaryRead)
+					oc.faceMaskedCells = cpuFaceMaskedCount;
 				return true;
 			}
 
@@ -4017,8 +4112,9 @@ float td_fine_hp_warp_gain(vec2 mv)
 		pl_tex outGuardCellTex_ = nullptr;
 		pl_tex outWarpDiagTex_ = nullptr;
 
-		// TD-U4: Compact 3x2 EB prior texture + optional default-OFF 2-frame same-role stats-only snapshots.
+		// TD-U4 + M-9: Compact 3x2 EB prior texture, 2x1 live counter summary, + optional 2-frame same-role stats snapshots.
 		pl_tex ebPriorTex_ = nullptr;
+		pl_tex counterSummaryTex_ = nullptr;
 		pl_tex prevRoleStatsTex_[3] = {};
 		bool hasPrevRoleStats_[3] = {};
 		int prevRoleStatsCw_[3] = {};

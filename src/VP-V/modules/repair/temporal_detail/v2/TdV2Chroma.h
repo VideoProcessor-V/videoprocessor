@@ -24,6 +24,7 @@
 // Header-only, C++14/17, no Windows headers.
 #pragma once
 
+#include <VP-V/core/ChromaSiting.h>
 #include <VP-V/core/LumaWeights.h>
 #include <VP-V/core/OnePole.h>
 #include <VP-V/core/Ramp.h>
@@ -59,10 +60,10 @@ namespace TdV2
 	// Rejects near-zero grazing splat corners while accepting fresh and near-I decayed bilinear splats.
 	constexpr double kMinCanvasFootprintWeight = 1.0 / 16.0;
 
-	// Derived rate-aware near-I anchor canvas decay time constant in seconds (Rule 1 & U23 OnePole):
-	// Contract back-reference horizon kContractBackRefs (8 frames) at cinema kDefaultSourceHz (24000/1001 Hz).
+	// Derived rate-aware near-I anchor canvas decay time constant in source seconds (Rule 1, U23 OnePole, Fable L-2):
+	// Exact 1/3 second temporal horizon in source seconds (never hardcoded to 23.976 Hz frame counts).
 	// Applied via OnePole::AlphaFor(dtSec, kAnchorCanvasTauSec) so accumulation stays strictly bounded across time.
-	constexpr double kAnchorCanvasTauSec = static_cast<double>(kContractBackRefs) / kDefaultSourceHz;
+	constexpr double kAnchorCanvasTauSec = 1.0 / 3.0;
 
 	// ---- Chroma Format & Siting Vocabulary ----
 
@@ -154,13 +155,13 @@ namespace TdV2
 			return (ly + 0.5 - s) / static_cast<double>(subY) - 0.5;
 		}
 
-		// Edge-aligned resample coordinate-scaling law matching core/ChromaSiting.h ShiftAfterResample:
-		//   shift' = shift * factor.
+		// Edge-aligned resample coordinate-scaling law delegating directly to shared core/ChromaSiting.h (Fable M-7):
+		//   shift' = ChromaSiting::ShiftAfterResample(shift, factor).
 		SitingSpec Resampled(double factorX, double factorY) const
 		{
 			return {
-				static_cast<float>(static_cast<double>(shiftX) * factorX),
-				static_cast<float>(static_cast<double>(shiftY) * factorY)
+				ChromaSiting::ShiftAfterResample(shiftX, factorX),
+				ChromaSiting::ShiftAfterResample(shiftY, factorY)
 			};
 		}
 	};
@@ -1835,6 +1836,11 @@ namespace TdV2
 
 		// Optional P10g spectral grain PSD shape multipliers (SOTA #6; default 1.0 = white-noise identity).
 		PsdShape psdShape;
+
+		// Optional precomputed luma cell weights & diagonal variance for Plan 6.6 (`cfg_.chromaReuseLumaWeights`):
+		// when enabled and non-null with matching cell count, skips chroma moment accumulation & QP solve cleanly.
+		const std::array<std::array<std::vector<double>, kMaxBlendRefs>, 3>* lumaCellWeights = nullptr;
+		const std::array<std::array<std::vector<double>, kMaxBlendRefs>, 3>* lumaCellDiagC = nullptr;
 	};
 
 	struct ChromaProcessResult
@@ -3272,7 +3278,33 @@ namespace TdV2
 
 				const auto g1 = VpUnit::BandFromBase::Taps<double>(VpUnit::BandFromBase::kSigmaFine, 3.0, true, 0.0);
 
-				for (int cy = 0; cy < res.cellsH; ++cy)
+				// Plan 6.6 (chromaReuseLumaWeights): when enabled and caller supplies precomputed luma cell weights,
+				// reuse luma weights directly and skip chroma moment accumulation & QP solve cleanly.
+				const bool reuseLumaW = cfg_.chromaReuseLumaWeights && in.lumaCellWeights != nullptr;
+				if (reuseLumaW)
+				{
+					for (int b = 0; b < 3; ++b)
+					{
+						for (int k = 0; k < K; ++k)
+						{
+							const auto& srcW = (*in.lumaCellWeights)[b][k];
+							if (srcW.size() == numCells)
+							{
+								for (size_t ci = 0; ci < numCells; ++ci)
+								{
+									if (isFaceMaskedCell(ci) || isFocusVetoedBand(ci, b))
+										continue;
+									const double wv = srcW[ci];
+									cellW[b][k][ci] = (std::isfinite(wv) && wv > 0.0) ? wv : 0.0;
+								}
+							}
+							if (in.lumaCellDiagC != nullptr && (*in.lumaCellDiagC)[b][k].size() == numCells)
+								cellDiagC[b][k] = (*in.lumaCellDiagC)[b][k];
+						}
+					}
+				}
+
+				for (int cy = 0; !reuseLumaW && cy < res.cellsH; ++cy)
 				{
 					for (int cx = 0; cx < res.cellsW; ++cx)
 					{
