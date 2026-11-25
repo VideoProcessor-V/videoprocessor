@@ -18,10 +18,12 @@
 #include <VP-V/core/GpuAllocator.h>
 #include <VP-V/core/Products.h>
 #include <VP-V/core/SkeletonAcquire.h>
+#include <VP-V/core/VramUsers.h>
 #include <VP-V/modules/input/capture/SourcePlanes.h>
 #include <VP-V/modules/input/source_analysis/regions/EdgeMapFill.h>
 
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <thread>
 #include <vector>
@@ -286,6 +288,182 @@ namespace VideoProcessorTest
 			Assert::IsTrue(dev.lastShape.fmt == TexFormat::R32F, L"R32F (12-bit exact)");
 
 			SourcePlanes::Forget(&host);
+		}
+
+		// S#4 (R4 / S#3 R3): kEdgeMap CPU owner fill + EdgeMapCpuReadback contract on the CPU tier:
+		// demand-gating (0 submits / 0 VRAM without demand), VRAM declaration under ProductVramUserId(kEdgeMap)
+		// (outside DeclarableVramUsers), non-latched ReadbackPending while in flight, lag-1 fill + lag-2 reuse
+		// + lag-3 FrameReleased (keepFrames == 2), latched OwnerDeclined on unscheduled frames, and clean teardown.
+		TEST_METHOD(EdgeMapCpuFillHonoursDemandGatePendingRetryLagOneTwoAndVram)
+		{
+			using namespace VpSkeleton;
+			using namespace Vpv::Regions;
+
+			struct VramResetScope
+			{
+				VramResetScope() { VramUsers::Instance().ResetForTesting(); }
+				~VramResetScope() { VramUsers::Instance().ResetForTesting(); }
+			} vramScope;
+
+			constexpr int kW = 16, kH = 12;
+			constexpr size_t kElems = size_t(kW) * size_t(kH);
+			constexpr size_t kPayloadBytes = kElems * sizeof(float);
+			const uint64_t expectedVram = uint64_t(kEdgeMapReadbackSlots) * uint64_t(kPayloadBytes) * 2u;
+
+			class FakeEdgeReadbackDevice : public IReadbackDevice
+			{
+			public:
+				std::vector<char> done;
+				std::vector<std::vector<float>> slotPayloads;
+				int copies = 0;
+				int unmaps = 0;
+
+				explicit FakeEdgeReadbackDevice(size_t slots)
+					: done(slots, 0), slotPayloads(slots, std::vector<float>(kElems, 0.0f)) {}
+
+				bool CopyToStaging(ProductId id, uint64_t seq, int stagingIndex) override
+				{
+					if (id != kEdgeMap || stagingIndex < 0 || size_t(stagingIndex) >= slotPayloads.size())
+						return false;
+					++copies;
+					done[size_t(stagingIndex)] = 0;
+					std::vector<float>& dst = slotPayloads[size_t(stagingIndex)];
+					for (size_t i = 0; i < dst.size(); ++i)
+						dst[i] = static_cast<float>(seq * 1000u + i);
+					return true;
+				}
+				bool QueryDone(int stagingIndex) override
+				{
+					return stagingIndex >= 0 && size_t(stagingIndex) < done.size() && done[size_t(stagingIndex)] != 0;
+				}
+				const void* MapNoWait(int stagingIndex, size_t* bytes) override
+				{
+					if (stagingIndex < 0 || size_t(stagingIndex) >= slotPayloads.size())
+						return nullptr;
+					*bytes = slotPayloads[size_t(stagingIndex)].size() * sizeof(float);
+					return slotPayloads[size_t(stagingIndex)].data();
+				}
+				void Unmap(int) override { ++unmaps; }
+			};
+
+			auto findVramEntry = [](uint16_t id, uint64_t* outHeld) -> bool {
+				const VramUsers::Snapshot snap = VramUsers::Instance().Take();
+				for (const std::pair<uint16_t, uint64_t>& h : snap.heldById)
+				{
+					if (h.first == id)
+					{
+						if (outHeld) *outHeld = h.second;
+						return true;
+					}
+				}
+				return false;
+			};
+
+			const uint16_t edgeVramId = ProductVramUserId(kEdgeMap);
+			Assert::AreEqual(uint16_t(kUserProductBase + kEdgeMap), edgeVramId,
+				L"ProductVramUserId(kEdgeMap) == kUserProductBase + kEdgeMap");
+
+			// Confirm ProductVramUserId(kEdgeMap) is NOT added to DeclarableVramUsers.
+			size_t declarableCount = 0;
+			const uint16_t* declarableIds = DeclarableVramUsers(&declarableCount);
+			for (size_t i = 0; i < declarableCount; ++i)
+				Assert::IsTrue(declarableIds[i] != edgeVramId,
+					L"kEdgeMap CPU readback uses kUserProductBase + kEdgeMap, never a new DeclarableVramUsers id");
+
+			FakeEdgeReadbackDevice dev(kEdgeMapReadbackSlots);
+			EdgeMapCpuReadback rb;
+			rb.AttachExternalDevice(&dev, kEdgeMapReadbackSlots, expectedVram);
+
+			SkeletonMemo memo;
+			memo.SetRenderThread(std::this_thread::get_id());
+			Assert::IsTrue(memo.RegisterOwnerFill(kEdgeMap, AcquireForm::Cpu, kEdgeMapUnit, MakeEdgeMapCpuOwnerFill(&rb))
+				== SkeletonMemo::Registration::Registered, L"kEdgeMap CPU owner fill registers under kEdgeMapUnit");
+
+			// Negative control #1: with demand off (default), ScheduleExternal submits nothing, declares 0 VRAM,
+			// and Acquire declines visibly with "demand".
+			Assert::IsFalse(rb.Demanded(), L"demand defaults to false");
+			Assert::IsFalse(rb.ScheduleExternal(10u), L"negative control: ScheduleExternal returns false without demand");
+			Assert::AreEqual(uint64_t(0), rb.Counters().submitted, L"negative control: 0 submits without demand");
+			Assert::AreEqual(0, dev.copies, L"negative control: 0 device copies without demand");
+			Assert::AreEqual(uint64_t(0), rb.DeclaredVramBytes(), L"negative control: 0 declared VRAM without demand");
+			Assert::IsFalse(findVramEntry(edgeVramId, nullptr), L"negative control: VramUsers has no kEdgeMap entry without demand");
+
+			const AcquireResult rNoDemand = memo.Acquire(kEdgeMap, 10u, AcquireForm::Cpu);
+			Assert::IsTrue(rNoDemand.status == AcquireStatus::Unavailable && rNoDemand.cause == AcquireCause::OwnerDeclined,
+				L"negative control: Acquire without demand returns OwnerDeclined");
+			Assert::IsTrue(memo.LastCause(kEdgeMap).find("demand") != std::string::npos,
+				L"negative control: LastCause visibly names missing demand");
+
+			// Reset memo latch before demand-active lifecycle so seq 10 can be exercised cleanly.
+			memo.Clear();
+
+			// Demand active: ScheduleExternal submits frame 10 and declares VRAM under ProductVramUserId(kEdgeMap).
+			rb.SetDemand(true);
+			Assert::IsTrue(rb.Demanded());
+			Assert::IsTrue(rb.ScheduleExternal(10u), L"demand active: ScheduleExternal(10) submits");
+			Assert::AreEqual(uint64_t(1), rb.Counters().submitted, L"1 submit recorded");
+			Assert::AreEqual(1, dev.copies, L"1 staging copy issued");
+			Assert::AreEqual(expectedVram, rb.DeclaredVramBytes(), L"DeclaredVramBytes matches expected staging VRAM");
+			uint64_t heldVram = 0;
+			Assert::IsTrue(findVramEntry(edgeVramId, &heldVram), L"VramUsers contains ProductVramUserId(kEdgeMap)");
+			Assert::AreEqual(expectedVram, heldVram, L"VramUsers heldBytes equals expectedVram");
+
+			// In-flight -> ReadbackPending (NOT latched).
+			memo.OnSeal(10u);
+			const AcquireResult rPend = memo.Acquire(kEdgeMap, 10u, AcquireForm::Cpu);
+			Assert::IsTrue(rPend.status == AcquireStatus::Unavailable && rPend.cause == AcquireCause::ReadbackPending,
+				L"in-flight readback returns non-latched ReadbackPending");
+			Assert::AreEqual(uint64_t(1), memo.CountersOf(kEdgeMap).unavailable[size_t(AcquireCause::ReadbackPending)],
+				L"ReadbackPending counter incremented");
+
+			// 1 frame later (lag-1: OnSeal(11)), device finishes -> retry succeeds (FilledAtRead) with exact float32 payload.
+			memo.OnSeal(11u);
+			dev.done[0] = 1;
+			const AcquireResult rLag1 = memo.Acquire(kEdgeMap, 10u, AcquireForm::Cpu);
+			Assert::IsTrue(rLag1.status == AcquireStatus::FilledAtRead && rLag1.Ok(),
+				L"lag-1 retry after device ready returns FilledAtRead");
+			Assert::IsNotNull(rLag1.cpu);
+			Assert::AreEqual(kPayloadBytes, rLag1.cpuBytes, L"exact R32F byte count");
+			for (size_t i = 0; i < kElems; ++i)
+			{
+				float v = 0.0f;
+				std::memcpy(&v, rLag1.cpu + i * sizeof(float), sizeof(float));
+				Assert::AreEqual(static_cast<float>(10u * 1000u + i), v, 0.0f, L"exact float32 texel payload");
+			}
+			Assert::AreEqual(1, dev.unmaps, L"staging buffer unmapped cleanly");
+
+			// Lag-2 (OnSeal(12)): keepFrames == 2, !frameScoped -> Reused from memo!
+			memo.OnSeal(12u);
+			const AcquireResult rLag2 = memo.Acquire(kEdgeMap, 10u, AcquireForm::Cpu);
+			Assert::IsTrue(rLag2.status == AcquireStatus::Reused && rLag2.cpu == rLag1.cpu && rLag2.cpuBytes == kPayloadBytes,
+				L"lag-2 Acquire reuses kept memo spot (keepFrames == 2, !frameScoped)");
+
+			// Lag-3 (OnSeal(13)): past keepFrames == 2 -> FrameReleased!
+			memo.OnSeal(13u);
+			const AcquireResult rLag3 = memo.Acquire(kEdgeMap, 10u, AcquireForm::Cpu);
+			Assert::IsTrue(rLag3.status == AcquireStatus::Unavailable && rLag3.cause == AcquireCause::FrameReleased,
+				L"lag-3 Acquire past keepFrames == 2 returns FrameReleased");
+
+			// Negative control #2: unscheduled frame 99 declines visibly ("not scheduled") and latches OwnerDeclined.
+			memo.OnSeal(99u);
+			const uint64_t callsBefore99 = memo.CountersOf(kEdgeMap).ownerFillCalls;
+			const AcquireResult rUnsched1 = memo.Acquire(kEdgeMap, 99u, AcquireForm::Cpu);
+			Assert::IsTrue(rUnsched1.status == AcquireStatus::Unavailable && rUnsched1.cause == AcquireCause::OwnerDeclined,
+				L"negative control: unscheduled frame returns OwnerDeclined (not ReadbackPending)");
+			Assert::IsTrue(memo.LastCause(kEdgeMap).find("not scheduled") != std::string::npos,
+				L"negative control: LastCause names 'not scheduled'");
+			Assert::AreEqual(callsBefore99 + 1u, memo.CountersOf(kEdgeMap).ownerFillCalls);
+
+			const AcquireResult rUnsched2 = memo.Acquire(kEdgeMap, 99u, AcquireForm::Cpu);
+			Assert::IsTrue(rUnsched2.status == AcquireStatus::Unavailable && rUnsched2.cause == AcquireCause::OwnerDeclined,
+				L"negative control: second Acquire on unscheduled frame stays OwnerDeclined");
+			Assert::AreEqual(callsBefore99 + 1u, memo.CountersOf(kEdgeMap).ownerFillCalls,
+				L"negative control: latched OwnerDeclined does not re-invoke fill");
+
+			// Teardown withdraws VRAM cleanly.
+			rb.SetDemand(false);
+			Assert::AreEqual(uint64_t(0), rb.DeclaredVramBytes(), L"SetDemand(false) withdraws DeclaredVramBytes to 0");
+			Assert::IsFalse(findVramEntry(edgeVramId, nullptr), L"SetDemand(false) removes kEdgeMap entry from VramUsers");
 		}
 	};
 }
