@@ -217,6 +217,23 @@ namespace ScalerPass
 		}
 	}
 
+	size_t Module::TextureBytes() const
+	{
+		size_t total = 0;
+		auto add = [&](pl_tex t) {
+			if (!t || !t->params.format || t->params.w <= 0 || t->params.h <= 0)
+				return;
+			const size_t bpp = t->params.format->texel_size ? t->params.format->texel_size : t->params.format->internal_size;
+			total += static_cast<size_t>(t->params.w) * static_cast<size_t>(t->params.h) * bpp;
+		};
+		for (int s = 0; s < kSlots; ++s)
+		{
+			add(textures[s]);
+			add(temps[s]);
+		}
+		return total;
+	}
+
 	bool Module::Apply(pl_gpu gpu, pl_dispatch dispatch, const Source& src, int dstW, int dstH, const Settings& st, pl_tex& out, int slot)
 	{
 		error.clear();

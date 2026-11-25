@@ -85,7 +85,7 @@ namespace ScalerPass
 		const std::string& Note() const { return note; }
 		// One line describing the last successful Apply.
 		const std::string& Status() const { return status; }
-		unsigned long long Failures() const { return failures; }
+		unsigned long long Failures() const { return failures; } size_t TextureBytes() const;
 
 	private:
 		static constexpr int kSlots = 3;
