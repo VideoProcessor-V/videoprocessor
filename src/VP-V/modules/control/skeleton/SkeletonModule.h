@@ -51,7 +51,12 @@ namespace Vpv
 		struct MemoHost;    // per renderer: the GET-OR-COMPUTE-AND-PUBLISH memo, with or without a lane (SkeletonModule.cpp; L-CORE)
 		struct Bundle;      // the lane and its producers for one source size (SkeletonModule.cpp)
 		class SkeletonGpuDispatcher;   // gpu/SkeletonGpuDispatcher.h (libplacebo; not included here)
-		struct GpuSlotTag { const void* host = nullptr; };   // the per-renderer pl_gpu, kept as a HostSlots aux
+		struct GpuSlotTag
+		{
+			explicit GpuSlotTag(const void* h = nullptr) : host(h) {}
+			const void* host = nullptr;
+			std::atomic<uint32_t> renderTid{ 0 };   // FIX3-D7: per-host Win32 render thread ID (also covers memo-only hosts)
+		};   // the per-renderer pl_gpu (kept as a HostSlots aux) and per-host render TID
 
 		class SkeletonModule : public Hub::ISkeletonModule, public IExternalDemand
 		{
@@ -348,10 +353,11 @@ namespace Vpv
 			std::map<std::pair<VpSkeleton::ProductId, VpSkeleton::AcquireForm>, std::pair<std::string, VpSkeleton::OwnerFill>> ownerFills_;
 			std::shared_ptr<VpSkeleton::SkeletonMemo> MemoHostOf(const void* host, bool create) const;
 			// L-CORE (102b P13-NO-LANE-GPU-ALLOC) / FIX3-D7: the VRAM ledger grant and GPU presence of a memo no lane is bound to
-			// (strictly render-thread-only: guarded by renderTid_ recorded on render-thread entry points). Re-planned when the need,
-			// the declared VRAM users, the GPU presence or the binding changed, else every kNoLaneReplanFrames.
+			// (strictly per-host render-thread-only: guarded by RenderTidOf(host) recorded on render-thread entry points). Re-planned
+			// when the need, the declared VRAM users, the GPU presence or the binding changed, else every kNoLaneReplanFrames.
 			void PlanNoLaneGpu(const void* host);
-			std::atomic<uint32_t> renderTid_{ 0 };   // FIX3-D7: Win32 thread ID of render-thread entry points (0 = not yet observed)
+			void RecordRenderTid(const void* host);
+			uint32_t RenderTidOf(const void* host) const;
 			// QKP B: the queue window of this Begin (derived before the memo seal, published to the board); the board is read by any thread.
 			void DeriveMemoWindow(const void* host, const std::shared_ptr<VpSkeleton::SkeletonMemo>& memo, uint64_t seq, const std::shared_ptr<HostState>& st, bool sampleTiming = true);
 		public:

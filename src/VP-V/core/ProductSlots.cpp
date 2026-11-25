@@ -271,25 +271,25 @@ bool SlotSet::Release(uint64_t seq, uint64_t releaseValue)
 
 uint32_t SlotSet::ReleaseThrough(uint64_t upToSeq, uint64_t releaseValue)
 {
+    if (upToSeq > kSlotSeqMask - ring_) {
+        counters_.releaseThroughExactOrderErrors.fetch_add(1, std::memory_order_relaxed);
+        return 0u;
+    }
     if (hasReleasedThrough_ && upToSeq <= releasedThrough_) {
         counters_.releaseThroughExactOrderErrors.fetch_add(1, std::memory_order_relaxed);
         return 0u;
     }
-    if (upToSeq > kSlotSeqMask - ring_) {
+    Slot& exact = slots_[SlotOf(upToSeq)];
+    const uint64_t exactBiased = Biased(upToSeq);
+    const SlotWord ew = Unpack(exact.word.load(std::memory_order_acquire));
+    const bool exactRenderHeld =
+        ew.seq == exactBiased
+        && (ew.state == SlotState::Sealed || ew.state == SlotState::Live || ew.state == SlotState::Rejected
+            || ew.state == SlotState::LiveLaneOwned || ew.state == SlotState::RejectedLaneOwned);
+    const bool exactDiscarded = (exact.discardedSeq == exactBiased);
+    if (!exactRenderHeld && !exactDiscarded)
         counters_.releaseThroughExactOrderErrors.fetch_add(1, std::memory_order_relaxed);
-    } else {
-        Slot& exact = slots_[SlotOf(upToSeq)];
-        const uint64_t exactBiased = Biased(upToSeq);
-        const SlotWord ew = Unpack(exact.word.load(std::memory_order_acquire));
-        const bool exactRenderHeld =
-            ew.seq == exactBiased
-            && (ew.state == SlotState::Sealed || ew.state == SlotState::Live || ew.state == SlotState::Rejected
-                || ew.state == SlotState::LiveLaneOwned || ew.state == SlotState::RejectedLaneOwned);
-        const bool exactDiscarded = (exact.discardedSeq == exactBiased);
-        if (!exactRenderHeld && !exactDiscarded)
-            counters_.releaseThroughExactOrderErrors.fetch_add(1, std::memory_order_relaxed);
-    }
-    const uint64_t limit = upToSeq > kSlotSeqMask - ring_ ? kSlotSeqMask : Biased(upToSeq);
+    const uint64_t limit = Biased(upToSeq);
     uint32_t released = 0;
     const bool fullScan = !hasReleasedThrough_ || (upToSeq - releasedThrough_) >= uint64_t(ring_);
     if (fullScan) {

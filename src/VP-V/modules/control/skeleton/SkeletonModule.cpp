@@ -346,8 +346,12 @@ namespace Vpv
 				bool operator==(const AheadKey& o) const { return id == o.id && depth == o.depth && asked == o.asked && by == o.by; }
 			};
 			// The binding is dropped on the render thread by StopBundle / a rebuild's new bind; this is the safety net (by token: a newer
-			// lane's binding is kept).
-			~Bundle() { VpSkeleton::UnbindLaneFromMemo(lane, *memo); }
+			// lane's binding is kept). Join worker threads before unbinding so no worker job runs across unbind/teardown.
+			~Bundle()
+			{
+				threads.Stop();
+				VpSkeleton::UnbindLaneFromMemo(lane, *memo);
+			}
 
 			// The registry for a wiring, the measured source period and the queue frames (0 = the unmeasured defaults). Re-made at each
 			// Configure so the record histories follow the period and the queue; the GPU declarations do not depend on either.
@@ -441,6 +445,7 @@ namespace Vpv
 			uint32_t gpuMemoryGen = 0;
 
 			// Any thread.
+			std::atomic<uint32_t> renderTid{ 0 };   // FIX3-D7: per-host Win32 render thread ID (0 = not yet observed)
 			std::atomic<uint32_t> srcW{ 0 }, srcH{ 0 };
 			std::atomic<uint64_t> srcFrames{ 0 };
 			// W23-4p (G6) / Gate 3 LOW-5: declared BEFORE bundle so bundle (which holds &entranceLiveDriven)
@@ -1106,10 +1111,46 @@ namespace Vpv
 			constexpr uint32_t kNoLaneReplanFrames = 240;   // a re-read of the card's free memory without a lane (no per-frame DXGI query)
 		}
 
+		void SkeletonModule::RecordRenderTid(const void* host)
+		{
+			if (!host)
+				return;
+			const uint32_t tid = static_cast<uint32_t>(GetCurrentThreadId());
+			if (const std::shared_ptr<HostState> st = hosts_.Find(host))
+				st->renderTid.store(tid, std::memory_order_release);
+			if (const std::shared_ptr<GpuSlotTag> gs = gpuSlots_.Find(host))
+			{
+				gs->renderTid.store(tid, std::memory_order_release);
+			}
+			else
+			{
+				std::shared_ptr<GpuSlotTag> tag = std::make_shared<GpuSlotTag>(host);
+				tag->renderTid.store(tid, std::memory_order_release);
+				if (!gpuSlots_.Put(host, std::move(tag)))
+					if (const std::shared_ptr<GpuSlotTag> gs2 = gpuSlots_.Find(host))
+						gs2->renderTid.store(tid, std::memory_order_release);
+			}
+		}
+
+		uint32_t SkeletonModule::RenderTidOf(const void* host) const
+		{
+			if (!host)
+				return 0u;
+			if (const std::shared_ptr<HostState> st = hosts_.Find(host))
+			{
+				const uint32_t t = st->renderTid.load(std::memory_order_acquire);
+				if (t != 0u)
+					return t;
+			}
+			if (const std::shared_ptr<GpuSlotTag> gs = gpuSlots_.Find(host))
+				return gs->renderTid.load(std::memory_order_acquire);
+			return 0u;
+		}
+
 		void SkeletonModule::PlanNoLaneGpu(const void* host)
 		{
-			// FIX3-D7: strictly render-thread-only (never calls QueryCard or mutates MemoHost planning fields off-thread).
-			const uint32_t rtid = renderTid_.load(std::memory_order_acquire);
+			// FIX3-D7: strictly per-host render-thread-only (never calls QueryCard or mutates MemoHost planning fields off-thread).
+			const uint32_t rtid = RenderTidOf(host);
 			if (rtid == 0u || static_cast<uint32_t>(GetCurrentThreadId()) != rtid)
 				return;
 			const std::shared_ptr<MemoHost> mh = memoHosts_.Find(host);
@@ -1222,9 +1263,9 @@ namespace Vpv
 				fm.haveNext = true;
 			}
 			fm.gpu = gpuSlots_.Aux(host);
-			// FIX3-D7: lazily created no-lane memo on frame 1 plans GPU presence/grant strictly on the render thread
+			// FIX3-D7: lazily created no-lane memo on frame 1 plans GPU presence/grant strictly on this host's render thread
 			// (never off-thread on producer/worker threads, and zero mutex held across QueryCard inside PlanNoLaneGpu).
-			const uint32_t rtid = renderTid_.load(std::memory_order_acquire);
+			const uint32_t rtid = RenderTidOf(host);
 			if (!fm.memo->LaneBound() && rtid != 0u && static_cast<uint32_t>(GetCurrentThreadId()) == rtid)
 				PlanNoLaneGpu(host);
 			return fm;
@@ -1250,14 +1291,14 @@ namespace Vpv
 				ownerFills_[key] = std::make_pair(unit, fill);
 				memoHosts_.ForEach([&memos](const void* h, const std::shared_ptr<MemoHost>& m) { memos.emplace_back(h, m->memo); });
 			}
-			const uint32_t rtid = renderTid_.load(std::memory_order_acquire);
-			const bool onRender = rtid != 0u && static_cast<uint32_t>(GetCurrentThreadId()) == rtid;
+			const uint32_t curTid = static_cast<uint32_t>(GetCurrentThreadId());
 			for (const auto& hm : memos)
 			{
 				hm.second->RegisterOwnerFill(id, form, unit, fill);
-				// D3 / FIX3-D6: refresh window_.aheadCompute immediately on frame 1 when a new ahead-demanding owner fill
-				// registers on the render thread after Begin sealed frame 1, before ahead Acquire calls arrive.
-				if (fill.aheadDepth > 0 && onRender && hm.second->Seals() > 0)
+				// D3 / FIX3-D6 / FIX3-D7: refresh window_.aheadCompute immediately on frame 1 when a new ahead-demanding owner fill
+				// registers on this host's render thread after Begin sealed frame 1, before ahead Acquire calls arrive.
+				const uint32_t rtid = RenderTidOf(hm.first);
+				if (fill.aheadDepth > 0 && rtid != 0u && curTid == rtid && hm.second->Seals() > 0)
 					DeriveMemoWindow(hm.first, hm.second, hm.second->Window().current, hosts_.Find(hm.first), false);
 			}
 			return Reg::Registered;
@@ -1283,12 +1324,12 @@ namespace Vpv
 				ownerFills_[key] = std::make_pair(unit, fill);
 				memoHosts_.ForEach([&memos](const void* h, const std::shared_ptr<MemoHost>& m) { memos.emplace_back(h, m->memo); });
 			}
-			const uint32_t rtid = renderTid_.load(std::memory_order_acquire);
-			const bool onRender = rtid != 0u && static_cast<uint32_t>(GetCurrentThreadId()) == rtid;
+			const uint32_t curTid = static_cast<uint32_t>(GetCurrentThreadId());
 			for (const auto& hm : memos)
 			{
 				hm.second->ReplaceOwnerFill(id, form, unit, fill);
-				if (fill.aheadDepth > 0 && onRender && hm.second->Seals() > 0)
+				const uint32_t rtid = RenderTidOf(hm.first);
+				if (fill.aheadDepth > 0 && rtid != 0u && curTid == rtid && hm.second->Seals() > 0)
 					DeriveMemoWindow(hm.first, hm.second, hm.second->Window().current, hosts_.Find(hm.first), false);
 			}
 			return had ? Reg::Replaced : Reg::Registered;
@@ -1406,7 +1447,7 @@ namespace Vpv
 			switch (f.kind)
 			{
 			case RE::Lifecycle::GpuCreated:
-				renderTid_.store(static_cast<uint32_t>(GetCurrentThreadId()), std::memory_order_release);
+				RecordRenderTid(f.host);
 				// Audit S3: a memo device still attached at GpuCreated belongs to a renderer that never sent GpuReleased (a dead device,
 				// whatever the new pl_gpu's address): abandoned before the new one is known, so a same-address pl_gpu is never mistaken
 				// for it (its pl_dispatch is forgotten, not reused). Covers a memo-only host too (no lane state).
@@ -1459,7 +1500,6 @@ namespace Vpv
 			case RE::Lifecycle::GpuReleased:
 			case RE::Lifecycle::Shutdown:
 			{
-				renderTid_.store(static_cast<uint32_t>(GetCurrentThreadId()), std::memory_order_release);
 				const std::shared_ptr<HostState> st = hosts_.Find(f.host);
 				if (st)
 					Teardown(st, false);   // join lane workers & release dispatcher first while hosts_ still holds aux
@@ -1556,6 +1596,8 @@ namespace Vpv
 					if (!st)
 					{
 						st = std::make_shared<HostState>(host);
+						if (const uint32_t rtid = RenderTidOf(host))
+							st->renderTid.store(rtid, std::memory_order_release);
 						if (!hosts_.Put(host, st))
 							return;
 					}
@@ -1575,6 +1617,8 @@ namespace Vpv
 			if (!st)
 			{
 				st = std::make_shared<HostState>(host);
+				if (const uint32_t rtid = RenderTidOf(host))
+					st->renderTid.store(rtid, std::memory_order_release);
 				if (!hosts_.Put(host, st))
 				{
 					// The table holds sixteen renderers; without a slot there is no state to show this on.
@@ -2984,7 +3028,7 @@ namespace Vpv
 			}
 			if (c.phase == RE::FramePhase::Entrance)
 			{
-				renderTid_.store(static_cast<uint32_t>(GetCurrentThreadId()), std::memory_order_release);
+				RecordRenderTid(c.host);
 				if (const std::shared_ptr<HostState> e = hosts_.Find(c.host))
 				{
 					e->budgetFeed.NoteCaptureRate(c.captureRateHz);   // S0: measured rate for the slot budget
@@ -3016,7 +3060,7 @@ namespace Vpv
 			}
 			if (c.phase != RE::FramePhase::Begin && c.phase != RE::FramePhase::AfterRender)
 				return false;
-			renderTid_.store(static_cast<uint32_t>(GetCurrentThreadId()), std::memory_order_release);
+			RecordRenderTid(c.host);
 			if (c.phase == RE::FramePhase::AfterRender)
 				if (const std::shared_ptr<MemoHost> mh = memoHosts_.Find(c.host))
 					if (mh->gpuDevice)
@@ -3079,7 +3123,7 @@ namespace Vpv
 		// to the outcome) without an active lane for this host or with no sequence. Render thread.
 		void SkeletonModule::OnAfterPresent(RE::FrameContext& c, RE::PresentContext& p)
 		{
-			renderTid_.store(static_cast<uint32_t>(GetCurrentThreadId()), std::memory_order_release);
+			RecordRenderTid(c.host);
 			// fx/dv-frame-quiet (refs/121): the frame's native GPU work VP deferred (the monitor's tile pass + copy, the hooks' copies)
 			// is issued here, after the submit and outside libplacebo's frame, for every host and before any early return below.
 			FrameQuiet::Deferred::EndThisFrame();
@@ -3405,8 +3449,6 @@ namespace Vpv
 			{
 				// Published after the graph is configured: a source frame arriving meanwhile waits in `pending`.
 				std::atomic_store(&st.bundle, b);
-				if (current)
-					current->threads.Stop();
 				DrainPending(st, *b);
 			}
 			++b->framesSinceConfigure;
