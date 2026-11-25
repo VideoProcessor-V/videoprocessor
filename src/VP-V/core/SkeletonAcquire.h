@@ -1110,18 +1110,9 @@ public:
             gpuContext->Close();   // a kept pointer gets nothing after the fill
         if (!ok && gpuContext && gpuContext->Refused() != 0 && out.declineReason.empty())
             out.declineReason = gpuContext->LastRefusal();   // a refused allocation is worded with the decline
-        if (ok && form == AcquireForm::Cpu && out.bytes.empty()) {
-            ok = false;
-            out.pending = false;
-        }
-        if (ok && form == AcquireForm::Gpu && !out.gpu.Valid()) {
-            ok = false;
-            out.pending = false;
-        }
-        if (ok && fill.view && out.gpu.bytes != 0) {
-            ok = false;   // a view allocates nothing: bytes would be outside the ledger
-            out.pending = false;
-        }
+        if (ok && form == AcquireForm::Cpu && out.bytes.empty()) { ok = false; out.pending = false; }
+        if (ok && form == AcquireForm::Gpu && !out.gpu.Valid()) { ok = false; out.pending = false; }
+        if (ok && fill.view && out.gpu.bytes != 0) { ok = false; out.pending = false; }
         lk.lock();
         AcquireCounters& c2 = counters_[id];
         if (gpuContext) {

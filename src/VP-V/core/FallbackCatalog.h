@@ -1175,7 +1175,8 @@ namespace FallbackCatalog
 		size_t n = 0;
 		const ProductEntry* e = ProductEntries(&n);
 		for (size_t i = 0; i < n; ++i)
-			if (std::string(e[i].id) == id) return &e[i];
+			if (std::string(e[i].id) == id)
+				return &e[i];
 		return nullptr;
 	}
 	// ---- input.capture: the capture extension's renderer binding (M2 P10) ------------------------
@@ -1184,7 +1185,8 @@ namespace FallbackCatalog
 	// CPU formatters and the render upload run instead.
 	inline Decision CaptureUnbound(bool unbound)
 	{
-		if (!unbound) return Released("capture extension");
+		if (!unbound)
+			return Released("capture extension");
 		return Engaged("capture extension", "capture routes off for this renderer (no extension slot): the CPU formatters "
 			"and the render upload");
 	}
