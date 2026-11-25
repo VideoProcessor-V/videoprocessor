@@ -1014,7 +1014,7 @@ namespace VideoProcessorTest
 				Assert::AreEqual(4ull, interpMemo.GrainPreservedRuns(), L"phases 0.2, 0.4, 0.6, 0.8 run grain-preserved path");
 				Assert::AreEqual(8ull, interpMemo.BandMemoHits(), L"all 4 interpolated phases hit kBandMemo for both seqA and seqB");
 				Assert::AreEqual(0ull, interpMemo.BandMemoFallbacks(), L"zero BandMemo fallbacks on luma with memo registered");
-				Assert::AreEqual(uint64_t(6), gpuMemo.memo.Counters(VpSkeleton::kBandMemo).reusedMemo,
+				Assert::AreEqual(uint64_t(6), gpuMemo.memo.CountersOf(VpSkeleton::kBandMemo).reusedMemo,
 					L"8 acquires minus 2 fills == 6 memo reuses across the 24p->120Hz cadence");
 
 				// Negative control: without kBandMemo (memo=nullptr), every interpolated phase falls back (recomputes privately).

@@ -890,7 +890,7 @@ namespace VideoProcessorTest
 			Assert::AreEqual(1ull, debandB.mod.BandMemoHits(), L"debandB hit kBandMemo");
 			Assert::AreEqual(0ull, debandA.mod.BandMemoFallbacks(), L"debandA had zero fallbacks");
 			Assert::AreEqual(0ull, debandB.mod.BandMemoFallbacks(), L"debandB had zero fallbacks");
-			Assert::IsTrue(gpuMemo.memo.Counters(VpSkeleton::kBandMemo).reusedMemo >= 1u, L"memo counter recorded reuse");
+			Assert::IsTrue(gpuMemo.memo.CountersOf(VpSkeleton::kBandMemo).reusedMemo >= 1u, L"memo counter recorded reuse");
 
 			const std::vector<uint16_t> rawMemoA = downloadR16(outA.planes[0].texture);
 			const std::vector<uint16_t> rawMemoB = downloadR16(outB.planes[0].texture);

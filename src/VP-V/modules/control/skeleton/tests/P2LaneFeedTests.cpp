@@ -295,10 +295,13 @@ namespace P2LaneFeedTestsNs
 			Assert::IsTrue(ri.kind == ReadInfo::Ring && ri.header != nullptr, L"P2(1) published in ring slot");
 			Assert::IsTrue(ri.header->prov == VpAncestry::Provenance::AheadOfa, L"provenance must be AheadOfa");
 
+			auto stampsEqual = [](const VpIndicator::Stamp& a, const VpIndicator::Stamp& b) {
+				return a.era == b.era && a.ancient == b.ancient && a.v == b.v;
+			};
 			VpIndicator::Stamp honoured;
 			Assert::IsTrue(p2Set->HonouredOf(1, &honoured));
 			const VpIndicator::Stamp atPublish = rig.indicator->StampOf(1);
-			Assert::IsTrue(honoured == atPublish, L"hdr.honoured equals StampOf(to) at publish");
+			Assert::IsTrue(stampsEqual(honoured, atPublish), L"hdr.honoured equals StampOf(to) at publish");
 
 			// Negative control 1: duplicate offer of the already-published frame is Stale (never reclaims).
 			Assert::IsTrue(feed->Offer(Pair(1)) == Outcome::Stale);
@@ -310,7 +313,7 @@ namespace P2LaneFeedTestsNs
 
 			// Negative control 2 (K1): a continuity event after publish makes the seal reject the slot.
 			rig.indicator->Advance(VpIndicator::kContinuity, VpResync::Cause::DriftDrop, 1, 1);
-			Assert::IsFalse(honoured == rig.indicator->StampOf(1));
+			Assert::IsFalse(stampsEqual(honoured, rig.indicator->StampOf(1)));
 			const std::vector<ProductFrameResult> res = rig.table->Resolve(1, rig.indicator->Seal(1),
 				[](const Node&, uint64_t, int, VpAncestry::Header&, uint32_t) { return true; });
 			bool sawP2 = false;

@@ -1909,7 +1909,7 @@ namespace DetailPulseTestsNs
 			Assert::AreEqual(2ull, dpB.mod.BandMemoHits(), L"dpB hit kBandMemo on both frames");
 			Assert::AreEqual(0ull, dpA.mod.BandMemoFallbacks(), L"dpA had zero fallbacks");
 			Assert::AreEqual(0ull, dpB.mod.BandMemoFallbacks(), L"dpB had zero fallbacks");
-			Assert::IsTrue(gpuMemo.memo.Counters(VpSkeleton::kBandMemo).reusedMemo >= 2u, L"memo recorded reuse for second reader");
+			Assert::IsTrue(gpuMemo.memo.CountersOf(VpSkeleton::kBandMemo).reusedMemo >= 2u, L"memo recorded reuse for second reader");
 
 			Assert::AreEqual(0ull, dpFallback.mod.BandMemoHits(), L"memo=nullptr has zero hits");
 			Assert::AreEqual(2ull, dpFallback.mod.BandMemoFallbacks(), L"memo=nullptr increments BandMemoFallbacks on both frames");

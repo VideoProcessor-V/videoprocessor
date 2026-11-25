@@ -53,9 +53,22 @@ namespace FieldOfAheadPairTestsNs
 		}
 	};
 
+	struct DummyMatcher
+	{
+		struct CameraGuidanceUse
+		{
+			bool modelGlobal = false, staticFromModel = false, matcherSkipped = false, narrowPass = false, e1Pass = false;
+			bool narrowDroppedEngine = false, e1DroppedEngine = false;
+			const char* rejected = "";
+		};
+		void SetCameraGuidance(std::shared_ptr<const CameraModel::GuidanceFrame>) {}
+		CameraGuidanceUse CameraGuidanceUsed() const { return {}; }
+		pl_tex CameraGuidanceCounts() const { return nullptr; }
+	};
+
 	bool RunEstimate(VectorEngine& e, uint64_t a, uint64_t b)
 	{
-		int dummyMatcher = 0;
+		DummyMatcher dummyMatcher;
 		return e.Estimate(a, b, true, 24.0, e.motionValidity.Epoch(), false, dummyMatcher,
 			[]() { return true; }, [](const FallbackCatalog::Decision&) {});
 	}

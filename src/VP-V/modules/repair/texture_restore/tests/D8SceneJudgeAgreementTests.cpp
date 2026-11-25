@@ -1028,7 +1028,7 @@ namespace D8SceneJudgeAgreementNs
 			Assert::IsTrue(TextureRestore::Params().vectorVeto, L"TextureRestore::Params::vectorVeto defaults ON");
 
 			// 2. Synthesize a large-histogram pan pair that triggers U7 CutFadeJudge::ClassifyEvents cut == true.
-			SourceStats::Record prevRec{}, curRec{};
+			VpUnit::SourceStats::Record prevRec{}, curRec{};
 			prevRec.pixelCount = 10000u; prevRec.mean = 16000u; prevRec.p01 = 8000u; prevRec.p50 = 16000u; prevRec.p99 = 24000u;
 			curRec.pixelCount = 10000u; curRec.mean = 40000u; curRec.p01 = 32000u; curRec.p50 = 40000u; curRec.p99 = 48000u;
 			for (uint32_t i = 0; i < 100u; ++i)
@@ -1039,7 +1039,7 @@ namespace D8SceneJudgeAgreementNs
 			const EventSignals ev = ClassifyEvents(prevRec, curRec, false, false);
 			Assert::IsTrue(ev.cut, L"non-vacuous: large-histogram pan triggers U7 cut == true");
 
-			constexpr uint64_t kSeq = 42u;
+			static constexpr uint64_t kSeq = 42u;
 			static bool g_cutFlag = true;
 			g_cutFlag = ev.cut;
 			auto panCutReader = [](uint64_t seq, FrameAnalysis::Scene& sc) -> bool {

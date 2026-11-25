@@ -1563,11 +1563,11 @@ namespace GrainNodeTestsNs
 				Assert::IsTrue(maxRawDiff > 0.05f, L"negative control: blurred output diverges strongly from raw input");
 
 				// Second acquire for exact same (seq, BandKey) reuses cached memo entry with zero extra fill.
-				const uint64_t reusedBefore = memo.Counters(VpSkeleton::kBandMemo).reusedMemo;
+				const uint64_t reusedBefore = memo.CountersOf(VpSkeleton::kBandMemo).reusedMemo;
 				const VpSkeleton::AcquireResult r2 = memo.Acquire(VpSkeleton::kBandMemo, seq, VpSkeleton::AcquireForm::Cpu, vk);
 				Assert::IsTrue(r2.Ok() && r2.cpu != nullptr, L"repeated CPU kBandMemo acquire succeeded");
 				Assert::AreEqual(expectedFillsAfter, counters->fills.load(), L"repeated acquire does NOT recompute");
-				Assert::AreEqual(reusedBefore + 1u, memo.Counters(VpSkeleton::kBandMemo).reusedMemo, L"memo counter records reuse");
+				Assert::AreEqual(reusedBefore + 1u, memo.CountersOf(VpSkeleton::kBandMemo).reusedMemo, L"memo counter records reuse");
 				Assert::IsTrue(std::memcmp(r2.cpu, ref.data(), ref.size() * sizeof(float)) == 0, L"repeated acquire stays bit-identical");
 			};
 

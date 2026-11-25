@@ -483,9 +483,9 @@ namespace SceneReaderContractTestsNs
 						const char* why = nullptr;
 						Assert::IsTrue(VpSkeleton::SceneRecordReader::AcquireScene(uint64_t(s), v, &why));
 
-						Assert::AreEqual(storeFade[size_t(s)], live.fade, L"live SceneOf fade must equal Store-ON fade");
-						Assert::AreEqual(storeFade[size_t(s)], f.fade, L"live SceneFactsOf fade must equal Store-ON fade");
-						Assert::AreEqual(storeFade[size_t(s)], v.fade, L"live AcquireScene fade must equal Store-ON fade");
+						Assert::AreEqual(static_cast<bool>(storeFade[size_t(s)]), live.fade, L"live SceneOf fade must equal Store-ON fade");
+						Assert::AreEqual(static_cast<bool>(storeFade[size_t(s)]), f.fade, L"live SceneFactsOf fade must equal Store-ON fade");
+						Assert::AreEqual(static_cast<bool>(storeFade[size_t(s)]), v.fade, L"live AcquireScene fade must equal Store-ON fade");
 						Assert::AreEqual(double(storeKeep[size_t(s)]), double(live.fadeKeep), 1e-6);
 						Assert::AreEqual(double(storeKeep[size_t(s)]), double(f.fadeKeep), 1e-6);
 						Assert::AreEqual(double(storeKeep[size_t(s)]), double(v.fadeKeep), 1e-6);

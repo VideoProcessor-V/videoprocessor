@@ -321,7 +321,7 @@ namespace VideoProcessorTest
 				RE::LifecycleFacts created;
 				created.kind = RE::Lifecycle::GpuCreated;
 				created.host = hubHost;
-				created.gpu = const_cast<void*>(gpuB);
+				created.gpu = reinterpret_cast<pl_gpu>(const_cast<void*>(gpuB));
 				Vpv::Hub::ExtensionHub::Instance().OnLifecycle(created);
 
 				Assert::IsTrue(caches.GpuSupportsFloat32Fbo(hubHost, gpuB, &CountingMockFloat32Probe));
