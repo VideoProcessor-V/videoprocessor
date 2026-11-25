@@ -1,0 +1,344 @@
+// Copyright(C) 2026 VP-V contributors
+// SPDX-License-Identifier: GPL-3.0-only
+
+// O#6 (SRM-FRAMEBOUND-WAIT): Red Team adversarial CPU tests for frame-bound wait-miss cause
+// diagnostics and deterministic-only ready wait.
+// Verifies:
+//   1. Exact classification and Describe() surfacing for all 3 wait-miss causes (LatePoll, DropOrBacklog,
+//      BoundedWaitTimeout) + clean era reset on SetFrameBound.
+//   2. Deterministic still run with real worker thread reports WaitsMissed() == 0 and Reproducible() == true,
+//      while the exact same frame cadence in live mode (SetDeterministicWait(false)) misses waits visibly.
+//   3. Live mode NEVER blocks present on in-flight analysis (both direct Monitor and AnalysisLane::BindLaneReadyProbe),
+//      while deterministic opposing control waits and records BoundedWaitTimeout when the bound expires.
+
+#include "pch.h"
+#include "CppUnitTest.h"
+
+#include <VP-V/core/AnalysisLane.h>
+#include <VP-V/modules/input/source_analysis/SourceResolutionMonitor.h>
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <random>
+#include <string>
+#include <thread>
+#include <vector>
+
+using namespace Microsoft::VisualStudio::CppUnitTestFramework;
+
+namespace
+{
+	using SourceResolutionMonitor::Monitor;
+	using SourceResolutionMonitor::Snapshot;
+	using SourceResolutionMonitor::WaitMissCause;
+
+	constexpr int kW = 1920;
+	constexpr int kH = 1080;
+	constexpr double kBlackNorm = 64.0 / 1023.0;
+
+	bool Contains(const std::string& haystack, const char* needle)
+	{
+		return haystack.find(needle) != std::string::npos;
+	}
+
+	std::vector<float> StillNoiseTiles(unsigned seed)
+	{
+		std::mt19937 rng(seed);
+		std::normal_distribution<double> dist(0.50, 0.12);
+		std::vector<float> tiles(static_cast<size_t>(8) * Monitor::kTile * Monitor::kTile);
+		for (float& v : tiles)
+		{
+			const double c = (std::min)(1.0, (std::max)(0.0, dist(rng)));
+			v = static_cast<float>(std::round(c * 1023.0) / 1023.0);
+		}
+		return tiles;
+	}
+
+	void ConfigureMinimalLane(VpSkeleton::AnalysisLane& lane, bool hostDeterministic, uint32_t testWaitUs)
+	{
+		VpSkeleton::LaneSettings settings;
+		settings.mode = VpSkeleton::LaneSettings::Mode::On;
+		settings.deterministic = VpSkeleton::LaneSettings::Det::Auto;
+		settings.testWaitUs = testWaitUs;
+
+		const VpSkeleton::Registry reg = VpSkeleton::FirstProducts();
+		VpSkeleton::ConsumerDecl consumer;
+		consumer.id = 1;
+		VpSkeleton::AddConsume(consumer, VpSkeleton::kP4SourceStats);
+		std::vector<VpSkeleton::ConsumerDecl> consumers{ consumer };
+
+		VpSkeleton::GraphSettings gs;
+		gs.dims.width = 64;
+		gs.dims.height = 48;
+		gs.renderAhead = 0;
+		gs.laneLead = 1;
+		gs.queueDepth = 4;
+		gs.lookAheadWalk = 0;
+
+		VpSkeleton::CardProfile card;
+		card.vramBudgetBytes = 1ull << 30;
+		card.systemRamFreeBytes = 1ull << 30;
+		card.uploadGBps = 10.0;
+		card.computeScale = 1.0;
+
+		VpSkeleton::TierInput tier;
+		tier.framePeriodMs = 40.0;
+
+		lane.Configure(settings, reg, consumers, gs, card, tier, 1, hostDeterministic);
+	}
+}
+
+namespace VideoProcessorTest
+{
+	TEST_CLASS(SourceResolutionFrameBoundWaitTests)
+	{
+	public:
+		// Test 1: all 3 wait-miss causes (LatePoll, DropOrBacklog, BoundedWaitTimeout) surfaced in Snapshot & Describe(),
+		// and cleared cleanly by SetFrameBound era reset.
+		TEST_METHOD(WaitMissCausesAreSurfacedInSnapshotAndDescribe)
+		{
+			Monitor m;
+			m.SetFrameBound(true, 2);
+			{
+				const Snapshot clean = m.Read();
+				Assert::AreEqual<unsigned long long>(0, clean.waitsMissed);
+				Assert::IsTrue(clean.lastWaitMissCause == WaitMissCause::None);
+				Assert::AreEqual<unsigned long long>(0, clean.waitMissLatePoll);
+				Assert::AreEqual<unsigned long long>(0, clean.waitMissDropOrBacklog);
+				Assert::AreEqual<unsigned long long>(0, clean.waitMissTimeout);
+				Assert::IsFalse(Contains(SourceResolutionMonitor::Describe(clean, 1.0, true), "last wait miss"));
+			}
+
+			// Advance release point to 10 - 2 = 8.
+			std::string why;
+			double fx = 1.0, fy = 1.0;
+			m.FrameFrontForTest(10, 10.0);
+			m.AutoFactors(kW, kH, 0.5, why, fx, fy, 10.0, 10);
+
+			// Cause 1: LatePoll (seq 5 <= releasedThrough 8, zero drops/backlog -> framesLate = 8 - 5 + 1 = 4).
+			const std::vector<float> tiles = StillNoiseTiles(101u);
+			m.AnalyseTilesForTest(tiles, 8, 5.0, kW, kH, {}, {}, 8, Monitor::kTile, kBlackNorm, 5);
+			{
+				const Snapshot s = m.Read();
+				Assert::AreEqual<unsigned long long>(1, s.waitsMissed);
+				Assert::IsTrue(s.lastWaitMissCause == WaitMissCause::LatePoll);
+				Assert::AreEqual<uint64_t>(4ull, s.lastWaitMissFramesLate);
+				Assert::IsTrue(s.lastWaitMissAnalyseMs >= 0.0);
+				Assert::AreEqual<unsigned long long>(1, s.waitMissLatePoll);
+				Assert::AreEqual<unsigned long long>(0, s.waitMissDropOrBacklog);
+				Assert::AreEqual<unsigned long long>(0, s.waitMissTimeout);
+				const std::string desc = SourceResolutionMonitor::Describe(s, 1.0, true);
+				Assert::IsTrue(Contains(desc, "late poll"), L"Describe must name 'late poll'");
+				Assert::IsTrue(Contains(desc, "4 frames late"), L"Describe must name exact frames late");
+				Assert::IsTrue(Contains(desc, "analyseMs"), L"Describe must include analyseMs");
+				Assert::IsTrue(Contains(desc, "late poll 1, drop/backlog 0, wait timeout 0"));
+			}
+
+			// Cause 2: DropOrBacklog (a skipped copy exists in this era; seq 6 <= 8 -> framesLate = 3).
+			m.NoteCopySkipped();
+			m.AnalyseTilesForTest(tiles, 8, 6.0, kW, kH, {}, {}, 8, Monitor::kTile, kBlackNorm, 6);
+			{
+				const Snapshot s = m.Read();
+				Assert::AreEqual<unsigned long long>(2, s.waitsMissed);
+				Assert::IsTrue(s.lastWaitMissCause == WaitMissCause::DropOrBacklog);
+				Assert::AreEqual<uint64_t>(3ull, s.lastWaitMissFramesLate);
+				Assert::IsTrue(s.lastWaitMissAnalyseMs >= 0.0);
+				Assert::AreEqual<unsigned long long>(1, s.waitMissLatePoll);
+				Assert::AreEqual<unsigned long long>(1, s.waitMissDropOrBacklog);
+				Assert::AreEqual<unsigned long long>(0, s.waitMissTimeout);
+				const std::string desc = SourceResolutionMonitor::Describe(s, 1.0, true);
+				Assert::IsTrue(Contains(desc, "drop/backlog"), L"Describe must name 'drop/backlog'");
+				Assert::IsTrue(Contains(desc, "3 frames late"));
+				Assert::IsTrue(Contains(desc, "analyseMs"));
+				Assert::IsTrue(Contains(desc, "late poll 1, drop/backlog 1, wait timeout 0"));
+			}
+
+			// Cause 3: BoundedWaitTimeout (in-flight seq 11 blocks renderSequence 13 until bound expires).
+			m.NoteSubmittedForTest(11);
+			m.SetDeterministicWait(true, 15000); // 15 ms explicit deterministic bound
+			Assert::IsFalse(m.WaitForReadyDeterministic(13), L"Uncompleted in-flight sequence must time out");
+			{
+				const Snapshot s = m.Read();
+				Assert::AreEqual<unsigned long long>(3, s.waitsMissed);
+				Assert::IsTrue(s.lastWaitMissCause == WaitMissCause::BoundedWaitTimeout);
+				Assert::IsTrue(s.lastWaitMissFramesLate >= 1ull);
+				Assert::IsTrue(s.lastWaitMissAnalyseMs >= 0.0);
+				Assert::AreEqual<unsigned long long>(1, s.waitMissLatePoll);
+				Assert::AreEqual<unsigned long long>(1, s.waitMissDropOrBacklog);
+				Assert::AreEqual<unsigned long long>(1, s.waitMissTimeout);
+				const std::string desc = SourceResolutionMonitor::Describe(s, 1.0, true);
+				Assert::IsTrue(Contains(desc, "wait timeout"), L"Describe must name 'wait timeout'");
+				Assert::IsTrue(Contains(desc, "frames late"));
+				Assert::IsTrue(Contains(desc, "analyseMs"));
+				Assert::IsTrue(Contains(desc, "late poll 1, drop/backlog 1, wait timeout 1"));
+			}
+
+			// Era reset via SetFrameBound clears every wait-miss counter and last-cause field cleanly.
+			m.SetFrameBound(true, 4);
+			{
+				const Snapshot reset = m.Read();
+				Assert::AreEqual<unsigned long long>(0, reset.waitsMissed);
+				Assert::IsTrue(reset.lastWaitMissCause == WaitMissCause::None);
+				Assert::AreEqual<uint64_t>(0ull, reset.lastWaitMissFramesLate);
+				Assert::AreEqual(0.0, reset.lastWaitMissAnalyseMs, 1e-12);
+				Assert::AreEqual<unsigned long long>(0, reset.waitMissLatePoll);
+				Assert::AreEqual<unsigned long long>(0, reset.waitMissDropOrBacklog);
+				Assert::AreEqual<unsigned long long>(0, reset.waitMissTimeout);
+				Assert::IsTrue(m.Reproducible());
+				Assert::IsFalse(Contains(SourceResolutionMonitor::Describe(reset, 1.0, true), "last wait miss"));
+			}
+		}
+
+		// Test 2: Deterministic still run with real worker thread reports zero waits missed and Reproducible()==true;
+		// negative control on the EXACT same frame cadence & submission schedule in live mode misses waits visibly.
+		TEST_METHOD(DeterministicStillRunReportsZeroWaitsMissedWhileLiveControlMisses)
+		{
+			const std::vector<float> stillTiles = StillNoiseTiles(20260601u);
+
+			// Deterministic run: waits cleanly on outCv before release points -> 0 waits missed, 0 drops, reproducible.
+			{
+				Monitor det;
+				det.SetFrameBound(true, 4);
+				det.SetDeterministicWait(true, 500000); // 500 ms generous deterministic test bound
+				std::string why;
+				double fx = 1.0, fy = 1.0;
+				for (uint64_t seq = 1; seq <= 20; ++seq)
+				{
+					const double t = static_cast<double>(seq) * 0.5;
+					det.FrameFrontForTest(seq, t);
+					det.AutoFactors(kW, kH, 0.5, why, fx, fy, t, seq);
+					if (seq % 2 == 1)
+						det.SubmitJobForTest(stillTiles, 8, t, kW, kH, 8, Monitor::kTile, kBlackNorm, seq);
+				}
+				const Snapshot s = det.Read();
+				Assert::AreEqual<unsigned long long>(0, det.WaitsMissed(), L"Deterministic still run must report 0 waits missed");
+				Assert::AreEqual<unsigned long long>(0, det.JobsDroppedCount(), L"Deterministic still run must drop 0 jobs");
+				Assert::IsTrue(det.Reproducible(), L"Deterministic still run must remain reproducible");
+				Assert::IsTrue(s.reading && s.frames >= 5, L"Deterministic still run must publish analysed frames after startup");
+				Assert::IsTrue(det.DeterministicWaitCalls() > 0);
+			}
+
+			// Negative control: EXACT same frame cadence & worker submission schedule without deterministic wait
+			// (SetDeterministicWait(false)): immediate poll races past worker jobs -> WaitsMissed() > 0, !Reproducible().
+			{
+				Monitor live;
+				live.SetFrameBound(true, 4);
+				live.SetDeterministicWait(false);
+				std::string why;
+				double fx = 1.0, fy = 1.0;
+				for (uint64_t seq = 1; seq <= 20; ++seq)
+				{
+					const double t = static_cast<double>(seq) * 0.5;
+					live.FrameFrontForTest(seq, t);
+					live.AutoFactors(kW, kH, 0.5, why, fx, fy, t, seq);
+					if (seq % 2 == 1)
+						live.SubmitJobForTest(stillTiles, 8, t, kW, kH, 8, Monitor::kTile, kBlackNorm, seq);
+				}
+				// Wait for the background worker to finish analysing the queued jobs so late completions are recorded.
+				for (int i = 0; i < 4000 && !live.ReadyFor(25); ++i)
+					std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+				const Snapshot s = live.Read();
+				Assert::AreEqual<unsigned long long>(0, live.DeterministicWaitYields(),
+					L"Live control must never yield/sleep on present");
+				Assert::IsTrue(live.WaitsMissed() > 0,
+					L"Negative control: unwaited live cadence racing past real worker jobs must record WaitsMissed() > 0");
+				Assert::IsFalse(live.Reproducible(),
+					L"Negative control: missed waits must visibly mark the run non-reproducible");
+				const std::string desc = SourceResolutionMonitor::Describe(s, 1.0, true);
+				Assert::IsTrue(Contains(desc, "last wait miss:"), L"Describe must name the exact miss cause");
+				Assert::IsTrue(Contains(desc, "late poll") || Contains(desc, "drop/backlog"),
+					L"Describe must classify the late worker completion as late poll or drop/backlog");
+			}
+		}
+
+		// Test 3: Live mode NEVER blocks present on in-flight analysis (direct Monitor + AnalysisLane::BindLaneReadyProbe);
+		// opposing deterministic control waits and records BoundedWaitTimeout when the bound expires.
+		TEST_METHOD(LiveModeNeverBlocksPresentOnInFlightAnalysis)
+		{
+			// Part A: direct Monitor FrameFrontForTest + AutoFactors with in-flight sequence 10 never completing.
+			{
+				Monitor liveMon;
+				liveMon.SetFrameBound(true, 4);
+				liveMon.SetDeterministicWait(false);
+				liveMon.NoteSubmittedForTest(10); // in-flight seq 10 <= 14 - 4 (not ready!)
+				Assert::IsFalse(liveMon.ReadyFor(14));
+
+				std::string why;
+				double fx = 1.0, fy = 1.0;
+				const auto t0 = std::chrono::steady_clock::now();
+				liveMon.FrameFrontForTest(14, 14.0);
+				liveMon.AutoFactors(kW, kH, 0.5, why, fx, fy, 14.0, 14);
+				const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+					std::chrono::steady_clock::now() - t0).count();
+
+				Assert::IsTrue(elapsedMs < 25, L"Live mode must return immediately without blocking present");
+				Assert::AreEqual<unsigned long long>(0, liveMon.DeterministicWaitCalls());
+				Assert::AreEqual<unsigned long long>(0, liveMon.DeterministicWaitYields());
+				Assert::AreEqual<unsigned long long>(0, liveMon.WaitsMissed());
+			}
+
+			// Opposing control A: deterministic mode on the exact same in-flight sequence 10 waits and times out visibly.
+			{
+				Monitor detMon;
+				detMon.SetFrameBound(true, 4);
+				detMon.SetDeterministicWait(true, 30000); // 30 ms explicit bound
+				detMon.NoteSubmittedForTest(10);
+				Assert::IsFalse(detMon.ReadyFor(14));
+
+				std::string why;
+				double fx = 1.0, fy = 1.0;
+				detMon.FrameFrontForTest(14, 14.0);
+				detMon.AutoFactors(kW, kH, 0.5, why, fx, fy, 14.0, 14);
+
+				Assert::IsTrue(detMon.DeterministicWaitCalls() >= 1);
+				Assert::IsTrue(detMon.DeterministicWaitYields() >= 1);
+				Assert::AreEqual<unsigned long long>(1, detMon.WaitsMissed());
+				Assert::IsTrue(detMon.Read().lastWaitMissCause == WaitMissCause::BoundedWaitTimeout);
+			}
+
+			// Part B: AnalysisLane bound via BindLaneReadyProbe(lane) — live vs deterministic opposing control.
+			{
+				Monitor mon;
+				mon.SetFrameBound(true, 4);
+				mon.NoteSubmittedForTest(10);
+				Assert::IsFalse(mon.ReadyFor(14));
+
+				// Live AnalysisLane (hostDeterministic=false, testWaitUs=0): DeterministicWaitUs returns 0 immediately.
+				VpIndicator::Indicator liveInd;
+				VpSkeleton::AnalysisLane liveLane(&liveInd, []() -> uint64_t { return 0ull; });
+				ConfigureMinimalLane(liveLane, false, 0);
+				mon.BindLaneReadyProbe(liveLane);
+				Assert::AreEqual(0u, liveLane.DeterministicWaitUs(14, 50000),
+					L"Live AnalysisLane must NEVER wait on an unready SRM probe");
+				Assert::AreEqual<unsigned long long>(0, mon.WaitsMissed());
+				mon.UnbindLaneReadyProbe(liveLane);
+
+				// Opposing deterministic AnalysisLane (hostDeterministic=true, testWaitUs=10000): waits and reports timeout.
+				VpIndicator::Indicator detInd;
+				VpSkeleton::AnalysisLane detLane(&detInd, []() -> uint64_t { return 0ull; });
+				ConfigureMinimalLane(detLane, true, 10000);
+				mon.BindLaneReadyProbe(detLane);
+
+				const uint32_t firstWait = detLane.DeterministicWaitUs(14, 0);
+				Assert::IsTrue(firstWait > 0u,
+					L"Opposing control: deterministic AnalysisLane must wait on unready SRM probe");
+				int steps = 0;
+				while (detLane.DeterministicWaitUs(14, 0) > 0u)
+				{
+					Assert::IsTrue(++steps < 200, L"Deterministic lane wait must be bounded");
+				}
+				Assert::AreEqual<uint64_t>(1ull, detLane.ReadyProbeMisses());
+				Assert::AreEqual<unsigned long long>(1, mon.WaitsMissed());
+				Assert::IsTrue(mon.Read().lastWaitMissCause == WaitMissCause::BoundedWaitTimeout);
+
+				// Unbind clears the probe cleanly.
+				mon.UnbindLaneReadyProbe(detLane);
+				Assert::AreEqual(0u, detLane.DeterministicWaitUs(15, 0),
+					L"Unbound probe must no longer cause deterministic waits");
+			}
+		}
+	};
+}
