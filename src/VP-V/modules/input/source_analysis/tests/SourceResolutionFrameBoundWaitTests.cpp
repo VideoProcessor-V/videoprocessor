@@ -444,30 +444,107 @@ namespace VideoProcessorTest
 		// governs BeginBoundFrame / WaitForReadyDeterministic when boundUs == 0.
 		TEST_METHOD(SetDeterministicSlackGovernsZeroBoundWait)
 		{
-			Monitor m;
-			m.SetFrameBound(true, 2);
-			m.SetDeterministicWait(true, 0);
-			m.SetDeterministicSlack(0, 0);
-			m.NoteSubmittedForTest(10);
+			// Subcase 1: zero slack with boundUs=0 -> immediate BoundMissed without yielding.
+			{
+				Monitor mZero;
+				mZero.SetFrameBound(true, 2);
+				mZero.SetDeterministicWait(true, 0);
+				mZero.SetDeterministicSlack(0, 0);
+				mZero.NoteSubmittedForTest(10);
 
-			// Zero slack -> immediate BoundMissed without yielding.
-			Assert::IsFalse(m.WaitForReadyDeterministic(12));
-			Assert::AreEqual<unsigned long long>(0, m.DeterministicWaitYields(),
-				L"Zero slack with boundUs=0 must time out immediately without yielding");
-			Assert::AreEqual<unsigned long long>(1, m.WaitsMissed());
-			Assert::IsTrue(m.Read().lastWaitMissCause == WaitMissCause::BoundedWaitTimeout);
+				Assert::IsFalse(mZero.WaitForReadyDeterministic(12));
+				Assert::AreEqual<unsigned long long>(0, mZero.DeterministicWaitYields(),
+					L"Zero slack with boundUs=0 must time out immediately without yielding");
+				Assert::AreEqual<unsigned long long>(1, mZero.WaitsMissed());
+				Assert::IsTrue(mZero.Read().lastWaitMissCause == WaitMissCause::BoundedWaitTimeout);
+			}
 
-			// Opposing control: configure non-zero slack (25 ms slack, 5 ms guard -> 20 ms budget) -> yields before timing out.
-			m.SetFrameBound(true, 2);
-			m.SetDeterministicWait(true, 0);
-			m.SetDeterministicSlack(25000, 5000);
-			m.NoteSubmittedForTest(10);
-			m.FrameFrontForTest(12, 12.0);
-			Assert::IsTrue(m.DeterministicWaitCalls() >= 1);
-			Assert::IsTrue(m.DeterministicWaitYields() >= 1,
-				L"Configured deterministic slack must drive bounded waiting when boundUs=0");
-			Assert::AreEqual<unsigned long long>(1, m.WaitsMissed());
-			Assert::IsTrue(m.Read().lastWaitMissCause == WaitMissCause::BoundedWaitTimeout);
+			// Subcase 2 (opposing control): fresh Monitor with configured non-zero slack (25 ms slack, 5 ms guard -> 20 ms budget)
+			// yields before timing out cleanly (zero state leakage from subcase 1).
+			{
+				Monitor mSlack;
+				mSlack.SetFrameBound(true, 2);
+				mSlack.SetDeterministicWait(true, 0);
+				mSlack.SetDeterministicSlack(25000, 5000);
+				mSlack.NoteSubmittedForTest(10);
+
+				mSlack.FrameFrontForTest(12, 12.0);
+				Assert::IsTrue(mSlack.DeterministicWaitCalls() >= 1);
+				Assert::IsTrue(mSlack.DeterministicWaitYields() >= 1,
+					L"Configured deterministic slack must drive bounded waiting when boundUs=0");
+				Assert::AreEqual<unsigned long long>(1, mSlack.WaitsMissed());
+				Assert::IsTrue(mSlack.Read().lastWaitMissCause == WaitMissCause::BoundedWaitTimeout);
+			}
+		}
+
+		// Pass A2 MED-1 (7e66aabb1) regression test: Discontinuity() resets timedOutThrough and haveBoundWaitSeq
+		// so a restarted stretch neither swallows late arrivals below the old timedOutThrough nor skips
+		// WaitForReadyDeterministic when a prior sequence number recurs.
+		TEST_METHOD(DiscontinuityResetsTimedOutThroughAndBoundWaitSequence)
+		{
+			const std::vector<float> tiles = StillNoiseTiles(20260620u);
+
+			// Part 1: timedOutThrough reset — after BoundedWaitTimeout at seq=100 (timedOutThrough=98) and
+			// Discontinuity("seek"), a late arrival at seq=5 (< 98) in the restarted stretch MUST be counted.
+			{
+				Monitor m;
+				m.SetFrameBound(true, 2);
+				m.SetDeterministicWait(true, 15000);
+				m.NoteSubmittedForTest(98);
+
+				std::string why;
+				double fx = 1.0, fy = 1.0;
+				m.FrameFrontForTest(100, 100.0); // through = 98 -> BoundedWaitTimeout -> timedOutThrough = 98
+				m.AutoFactors(kW, kH, 0.5, why, fx, fy, 100.0, 100);
+				Assert::AreEqual<unsigned long long>(1, m.WaitsMissed());
+				Assert::IsTrue(m.Read().lastWaitMissCause == WaitMissCause::BoundedWaitTimeout);
+
+				// Finish old seq 98 before the seek (swallowed by timedOutThrough == 98, clearing outstanding).
+				m.AnalyseTilesForTest(tiles, 8, 98.0, kW, kH, {}, {}, 8, Monitor::kTile, kBlackNorm, 98);
+				Assert::AreEqual<unsigned long long>(1, m.WaitsMissed(),
+					L"Pre-seek completion of seq 98 stays deduplicated by timedOutThrough=98");
+
+				// Trigger discontinuity and restart stretch from seq = 1..7 (releasedThrough resets to 0 then advances to 5).
+				m.Discontinuity("seek");
+				m.FrameFrontForTest(1, 101.0);
+				m.AutoFactors(kW, kH, 0.5, why, fx, fy, 101.0, 1);
+				m.FrameFrontForTest(7, 102.0);
+				m.AutoFactors(kW, kH, 0.5, why, fx, fy, 102.0, 7);
+				Assert::AreEqual<unsigned long long>(1, m.WaitsMissed());
+
+				// Late arrival on seq=5 (5 <= releasedThrough=5, and 5 < old timedOutThrough=98) MUST be detected!
+				m.AnalyseTilesForTest(tiles, 8, 101.5, kW, kH, {}, {}, 8, Monitor::kTile, kBlackNorm, 5);
+				const Snapshot s = m.Read();
+				Assert::AreEqual<unsigned long long>(2, m.WaitsMissed(),
+					L"Discontinuity must reset timedOutThrough so late seq=5 (< old 98) is not swallowed");
+				Assert::IsTrue(s.lastWaitMissCause == WaitMissCause::LatePoll);
+				Assert::AreEqual<unsigned long long>(1, s.waitMissTimeout);
+				Assert::AreEqual<unsigned long long>(1, s.waitMissLatePoll);
+			}
+
+			// Part 2 (same-input collision control): if seq=100 recurs immediately after Discontinuity("seek"),
+			// colliding with the prior lastBoundWaitSeq==100, AutoFactors MUST still invoke WaitForReadyDeterministic.
+			{
+				Monitor mRecur;
+				mRecur.SetFrameBound(true, 2);
+				mRecur.SetDeterministicWait(true, 15000);
+				mRecur.NoteSubmittedForTest(98);
+
+				std::string why;
+				double fx = 1.0, fy = 1.0;
+				mRecur.FrameFrontForTest(100, 100.0); // WaitForReadyDeterministic(100) -> calls=1, waitsMissed=1, lastBoundWaitSeq=100
+				mRecur.AutoFactors(kW, kH, 0.5, why, fx, fy, 100.0, 100); // same stretch: deduped (calls still 1)
+				Assert::AreEqual<unsigned long long>(1, mRecur.DeterministicWaitCalls());
+				Assert::AreEqual<unsigned long long>(1, mRecur.WaitsMissed());
+
+				// Discontinuity -> seq=100 recurs directly on AutoFactors (colliding with prior lastBoundWaitSeq=100).
+				mRecur.Discontinuity("seek");
+				mRecur.AutoFactors(kW, kH, 0.5, why, fx, fy, 101.0, 100);
+				Assert::AreEqual<unsigned long long>(2, mRecur.DeterministicWaitCalls(),
+					L"AutoFactors must NOT skip WaitForReadyDeterministic when seq=100 recurs after Discontinuity");
+				Assert::AreEqual<unsigned long long>(2, mRecur.WaitsMissed());
+				Assert::IsTrue(mRecur.Read().lastWaitMissCause == WaitMissCause::BoundedWaitTimeout);
+			}
 		}
 	};
 }

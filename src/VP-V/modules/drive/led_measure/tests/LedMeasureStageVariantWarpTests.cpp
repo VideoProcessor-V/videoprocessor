@@ -29,10 +29,24 @@ namespace VideoProcessorTest
 		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(PreOutputStageVariantMatchesCpuDisplayLawOnWarp)
 		{
+			std::string log;
 			TargetLutGpuFixture fixture;
 			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
-			std::string log;
 			fixture.CaptureLog(&log);
+			struct CaptureLogGuard
+			{
+				TargetLutGpuFixture& f;
+				bool active = true;
+				void Release()
+				{
+					if (active)
+					{
+						f.CaptureLog(nullptr);
+						active = false;
+					}
+				}
+				~CaptureLogGuard() { Release(); }
+			} captureLogGuard{ fixture };
 
 			constexpr int kSize = 192;
 			constexpr double kBoost = 2.2 / 2.4;
@@ -52,6 +66,11 @@ namespace VideoProcessorTest
 			const LedDrive::PixelRect subtitlePx{ 36.0, 156.0, 154.0, 180.0 };
 
 			LedDrive::MeasurementHook hook(LedDrive::MeasurementStageVariant::PreOutput);
+			struct HookGuard
+			{
+				LedDrive::MeasurementHook& h;
+				~HookGuard() { h.Release(); }
+			} hookGuard{ hook };
 			Assert::IsTrue(hook.StageVariant() == LedDrive::MeasurementStageVariant::PreOutput);
 			Assert::AreEqual(static_cast<uint64_t>(PL_HOOK_PRE_OUTPUT), static_cast<uint64_t>(hook.Hook()->stages));
 			Assert::AreEqual(static_cast<uint64_t>(PL_HOOK_PRE_OUTPUT), hook.HookStagesMask());
@@ -135,7 +154,7 @@ namespace VideoProcessorTest
 			Assert::IsTrue(std::fabs(cpuUnboosted.apl - gpuRec.apl) > 5.0,
 				L"Negative control: unboosted CPU baseline must diverge from boosted GPU CollectDisplay by > 5 codes");
 
-			fixture.CaptureLog(nullptr);
+			captureLogGuard.Release();
 			AssertCleanLibplaceboLogExceptPreOutputBug(log);
 		}
 

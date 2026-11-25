@@ -23,6 +23,7 @@
 #include <VP-V/modules/input/source_analysis/lane/shared/SourceStats.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -182,11 +183,18 @@ namespace
 		void ClearExternalDemand(const void*, const void*) override {}
 
 		void SetSceneAnswer(const Vpv::Skeleton::SceneAnswer& ans) { answer_ = ans; }
+		void SetCallMemoOnSceneOf(bool on) { callMemoOnSceneOf_ = on; }
+		uint64_t SceneOfCalls() const { return sceneOfCalls_.load(std::memory_order_relaxed); }
 
-		Vpv::Skeleton::SceneAnswer SceneOf(const void* host, uint64_t) const override
+		Vpv::Skeleton::SceneAnswer SceneOf(const void* host, uint64_t seq) const override
 		{
+			sceneOfCalls_.fetch_add(1, std::memory_order_relaxed);
 			if (host == host_)
+			{
+				if (callMemoOnSceneOf_ && memo_)
+					memo_->Acquire(VpSkeleton::kP4SourceStats, seq, VpSkeleton::AcquireForm::Cpu);
 				return answer_;
+			}
 			Vpv::Skeleton::SceneAnswer miss;
 			miss.known = false;
 			miss.why = "test: unknown host";
@@ -209,6 +217,8 @@ namespace
 		const void* host_ = nullptr;
 		std::shared_ptr<VpSkeleton::SkeletonMemo> memo_;
 		Vpv::Skeleton::SceneAnswer answer_;
+		bool callMemoOnSceneOf_ = false;
+		mutable std::atomic<uint64_t> sceneOfCalls_{ 0 };
 	};
 
 	class FakeSrmDemandModule : public Vpv::Hub::ISkeletonModule
@@ -936,6 +946,120 @@ namespace VideoProcessorTest
 				workerPublished.join();
 				Assert::IsTrue(pubReadOk, L"Off-render-thread AcquireSourceStats must succeed via CopyPublished once published");
 				Assert::AreEqual(64.0 / 1023.0, pubReadMean, 1e-9);
+				Assert::IsTrue(memo->Decisions().empty());
+			}
+		}
+
+		// Pass A2 HIGH-1 (7e66aabb1) regression test: SceneRecordReader::AcquireScene obeys MUST-9 off the render thread:
+		//   - Store miss off render thread returns false ("scene not published (off render thread)"), NEVER calls SceneOf/memo->Acquire,
+		//     and leaves SkeletonMemo::Decisions() completely empty.
+		//   - Store hit off render thread returns true directly via non-mutating StoreFor(owner)->PeekScene with exact verdict
+		//     and SkeletonMemo::Decisions() completely empty.
+		//   - Render-thread store miss delegates to SceneOf cleanly.
+		TEST_METHOD(AcquireSceneObeysMust9OffRenderThreadWithStoreHitAndMissControls)
+		{
+			const int ownerTag = 0;
+			const void* const owner = &ownerTag;
+			FrameAnalysis::Store store(16);
+			store.SetEnabled(true);
+			SrmTapOwnerScope tap(owner, &store);
+
+			auto memo = std::make_shared<VpSkeleton::SkeletonMemo>();
+			memo->SetRenderThread(std::this_thread::get_id());
+			VpSkeleton::OwnerFill p4Fill;
+			p4Fill.renderThreadOnly = true;
+			p4Fill.fill = [](const VpSkeleton::OwnerFillRequest&, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) -> bool {
+				constexpr uint32_t kHw = 64, kHh = 36;
+				const std::vector<uint16_t> flatBlack(static_cast<size_t>(kHw) * kHh, static_cast<uint16_t>(64u << 6));
+				out.bytes.assign(VpUnit::SourceStats::kRecordBytes, 0);
+				return VpUnit::SourceStats::ComputeRecord(flatBlack.data(), kHw, kHh, out.bytes.data(), out.bytes.size());
+			};
+			const std::string p4Owner = VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP4SourceStats);
+			Assert::IsTrue(
+				memo->RegisterOwnerFill(VpSkeleton::kP4SourceStats, VpSkeleton::AcquireForm::Cpu, p4Owner, std::move(p4Fill))
+				== VpSkeleton::SkeletonMemo::Registration::Registered);
+
+			FakeSrmSkeletonDemand demand(owner, memo);
+			demand.SetCallMemoOnSceneOf(true); // proves hazard: any off-thread SceneOf call would trigger WrongThread in memo->Decisions()!
+			Vpv::Skeleton::SceneAnswer liveAns;
+			liveAns.known = true;
+			liveAns.cut = false;
+			liveAns.fade = true;
+			liveAns.fadeKeep = 0.77f;
+			liveAns.from = Vpv::Skeleton::SceneAnswer::From::Live;
+			demand.SetSceneAnswer(liveAns);
+			SrmHubScope hub(&demand);
+
+			// 1. Negative control (store miss off render thread): refuses cleanly without calling SceneOf or polluting Decisions().
+			{
+				bool onRenderThread = true;
+				bool ok = true;
+				std::string whyStr;
+				VpSkeleton::SceneRecordReader::SceneVerdict v;
+				std::thread workerMiss([&]() {
+					onRenderThread = memo->OnRenderThread();
+					const char* why = "";
+					ok = VpSkeleton::SceneRecordReader::AcquireScene(61, v, &why);
+					whyStr = (why != nullptr) ? why : "";
+				});
+				workerMiss.join();
+				Assert::IsFalse(onRenderThread, L"Worker thread must be off the render thread");
+				Assert::IsFalse(ok, L"Off-render-thread AcquireScene on store miss must return false");
+				Assert::AreEqual(std::string("scene not published (off render thread)"), whyStr);
+				Assert::IsFalse(v.cut);
+				Assert::IsFalse(v.fade);
+				Assert::AreEqual(-1.0f, v.fadeKeep, 1e-6f);
+				Assert::AreEqual<uint64_t>(0ull, demand.SceneOfCalls(),
+					L"MUST-9: AcquireScene off render thread must NOT enter SceneOf live fill");
+				Assert::IsTrue(memo->Decisions().empty(),
+					L"MUST-9: off-render-thread AcquireScene must leave SkeletonMemo::Decisions() completely empty");
+			}
+
+			// 2. Positive control (store hit off render thread): reads published store scene directly, zero SceneOf calls, zero Decisions().
+			{
+				FrameAnalysis::Identity id;
+				id.seq = 62;
+				Assert::IsTrue(store.Begin(id, FrameAnalysis::kScene) != 0);
+				FrameAnalysis::Scene published;
+				published.cut = true;
+				published.fade = true;
+				published.fadeKeep = 0.68f;
+				published.confirmed = true;
+				Assert::IsTrue(store.PublishScene(62, published));
+
+				bool onRenderThread = true;
+				bool ok = false;
+				std::string whyStr = "unset";
+				VpSkeleton::SceneRecordReader::SceneVerdict v;
+				std::thread workerHit([&]() {
+					onRenderThread = memo->OnRenderThread();
+					const char* why = "sentinel";
+					ok = VpSkeleton::SceneRecordReader::AcquireScene(62, v, &why);
+					whyStr = (why != nullptr) ? why : "";
+				});
+				workerHit.join();
+				Assert::IsFalse(onRenderThread, L"Worker thread must be off the render thread");
+				Assert::IsTrue(ok, L"Off-render-thread AcquireScene must succeed on store hit via PeekScene");
+				Assert::AreEqual(std::string(""), whyStr);
+				Assert::IsTrue(v.cut);
+				Assert::IsTrue(v.fade);
+				Assert::AreEqual(0.68f, v.fadeKeep, 1e-6f);
+				Assert::AreEqual<uint64_t>(0ull, demand.SceneOfCalls(),
+					L"Store hit must be served via non-mutating PeekScene without entering SceneOf");
+				Assert::IsTrue(memo->Decisions().empty());
+			}
+
+			// 3. Render-thread control (store miss ON render thread): delegates to SceneOf cleanly.
+			{
+				Assert::IsTrue(memo->OnRenderThread());
+				VpSkeleton::SceneRecordReader::SceneVerdict v;
+				const char* why = "sentinel";
+				Assert::IsTrue(VpSkeleton::SceneRecordReader::AcquireScene(63, v, &why));
+				Assert::AreEqual(std::string(""), std::string(why));
+				Assert::IsFalse(v.cut);
+				Assert::IsTrue(v.fade);
+				Assert::AreEqual(0.77f, v.fadeKeep, 1e-6f);
+				Assert::AreEqual<uint64_t>(1ull, demand.SceneOfCalls());
 				Assert::IsTrue(memo->Decisions().empty());
 			}
 		}
