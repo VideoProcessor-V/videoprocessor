@@ -411,12 +411,12 @@ namespace Calibration
 		out << "# Dynamic Drive characterisation (VP automatic calibration, phase 2)\n"
 			<< "#\n"
 			<< "# The measured values in .vpprojector form (feat/dd-projector-profiles).\n"
-			<< "# To use them in a device profile: copy profiles\\dynamic-drive\\barco-fl35.vpprojector,\n"
+			<< "# To use them in a device profile: copy profiles\\dynamic-drive\\<projector>.vpprojector,\n"
 			<< "# replace these keys in the matching sections, raise [profile] version, and\n"
 			<< "# point [projector.default] device_profile at the copy. The same values are\n"
 			<< "# also what Apply writes to [projector.default] (led_characterisation.cfg);\n"
 			<< "# those keys override a profile's values, so either route gives the same result.\n"
-			<< "# Drive values are in device units (VP's 0-255 LPW1 = device units on the FL35).\n"
+			<< "# Drive values are in device units (VP's 0-255 LPW1 = device units on the projector).\n"
 			<< "# Measured between LPW1 " << limits.sweepLow << " and " << limits.ceiling << ", CNTR "
 			<< limits.contrastNeutral << " to " << limits.contrastMax << ".\n\n";
 		out << "[light]\n";

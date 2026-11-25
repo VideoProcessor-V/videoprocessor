@@ -119,6 +119,7 @@ namespace TemporalDetail
 			pair.gridW = flow->gridW;
 			pair.gridH = flow->gridH;
 			pair.blockPx = 4.0 * scaleX;   // the engine's cell is 4 producer pixels
+			pair.blockPxY = 4.0 * scaleY;  // vertical pitch in source pixels (MED-1)
 			pair.vx.resize(cells);
 			pair.vy.resize(cells);
 			pair.trust.resize(cells);

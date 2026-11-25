@@ -276,6 +276,7 @@ namespace LedDrive
 		// module runs as a dry run (the LED is not driven, the picture is not compensated).
 		// The renderer adds them to the heading it publishes (GetFallbacksStatus).
 		std::vector<FallbackStatus::Entry> FallbackEntries() const;
+		void FallbackEntriesInto(std::vector<FallbackStatus::Entry>& out) const;
 		static constexpr const char* kHoldFallbackId = "LED drive";
 		static constexpr const char* kDryRunFallbackId = "projector";
 		// FIX-LED-CUT-U7: engaged while the measured frame has no readable shared scene record (no cut is judged then).

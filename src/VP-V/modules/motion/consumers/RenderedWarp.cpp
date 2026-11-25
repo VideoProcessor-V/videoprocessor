@@ -46,19 +46,22 @@ vec2 rw_moved(vec2 p, vec2 sp, vec2 slope, vec2 d)
 {
     if (all(equal(d, vec2(0.0))))
         return vec2(0.0);
-    vec2 q = p - d / slope;
+    vec2 q0 = p - d / slope;
+    vec2 q = q0;
     if (nls_active > 0.5) {
         vec2 target = sp - d;
-        vec2 q0 = q;
         for (int k = 0; k < 2; k++) {
             vec2 sl = max(rw_source(q + vec2(0.5)) - rw_source(q - vec2(0.5)), vec2(1e-4));
             q -= (rw_source(q) - target) / sl;
         }
         if (any(isnan(q)) || any(isinf(q)) || any(greaterThan(abs(q - q0), abs(d / slope) + vec2(2.0))))
             q = q0;
-        return p - q;
     }
-    return d / slope;
+    // POD1-M5: guard non-finite displacement unconditionally (both NLS and linear paths).
+    vec2 moved = p - q;
+    if (any(isnan(moved)) || any(isinf(moved)))
+        return vec2(0.0);
+    return moved;
 }
 )GLSL"
 		const char* const WARP_FUNCTIONS_SOURCE_ONLY = RW_SOURCE_GLSL;
@@ -183,8 +186,8 @@ if (q.x < size.x && q.y < size.y) {
                     o = texelFetch(cached, q, 0);
                 } else {
 #ifdef FEATHER
-                    // Delta 9 H1: the feather is in output pixels, the field in source.
-                    float hw = hold_weight(sp, feather_px * max(slope.x, slope.y));
+                    // Delta 9 H1 + POD1-M5: per-axis output feather mapped into source pixels by slope.
+                    float hw = hold_weight_xy(sp, feather_px * slope);
                     if (hw == 0.0) {
                         o = texelFetch(cached, q, 0);
                     } else {

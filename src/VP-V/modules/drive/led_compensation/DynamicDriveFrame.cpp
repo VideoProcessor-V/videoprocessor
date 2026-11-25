@@ -455,21 +455,23 @@ namespace LedDrive
 		// Audit N1: with no module and nothing engaged, no registry calls (the LED-off frame).
 		if (!led && mergedModuleFallbackIds.empty())
 			return;
-		const std::vector<FallbackStatus::Entry> entries = led ? led->FallbackEntries() : std::vector<FallbackStatus::Entry>();
-		std::vector<std::string> currentIds;
-		currentIds.reserve(entries.size());
-		for (const FallbackStatus::Entry& entry : entries)
+		// POD1-M7: reuse hoisted scratch buffers across frames (zero steady-state per-frame allocation).
+		scratchModuleEntries.clear();
+		if (led)
+			led->FallbackEntriesInto(scratchModuleEntries);
+		scratchModuleIds.clear();
+		for (const FallbackStatus::Entry& entry : scratchModuleEntries)
 		{
 			Engage(entry.id.c_str(), entry.reason);
-			if (std::find(currentIds.begin(), currentIds.end(), entry.id) == currentIds.end())
-				currentIds.push_back(entry.id);
+			if (std::find(scratchModuleIds.begin(), scratchModuleIds.end(), entry.id) == scratchModuleIds.end())
+				scratchModuleIds.push_back(entry.id);
 		}
 		for (const std::string& prevId : mergedModuleFallbackIds)
 		{
-			if (std::find(currentIds.begin(), currentIds.end(), prevId) == currentIds.end())
+			if (std::find(scratchModuleIds.begin(), scratchModuleIds.end(), prevId) == scratchModuleIds.end())
 				ReleaseFallback(prevId.c_str());
 		}
-		mergedModuleFallbackIds = std::move(currentIds);
+		mergedModuleFallbackIds.swap(scratchModuleIds);
 	}
 
 	bool DynamicDriveFrame::OnResync(bool full, bool timing, uint64_t sourceSequence, double sourceRateHz)

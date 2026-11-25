@@ -151,6 +151,7 @@ namespace LedDrive
 	private:
 		IPredictionSink& module;
 		StatsBuilder builder;
+		LedDriveConfig cachedConfig;    // POD1-M7: cached on ConfigGeneration() (zero per-frame Config() copy)
 		uint64_t builderGeneration = 0;
 		uint64_t lastSequence = 0;
 		// Hunt 3 (LED1): the builder's clock. sourceSequence x the current

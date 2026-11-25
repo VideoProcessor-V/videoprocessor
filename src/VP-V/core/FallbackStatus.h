@@ -154,11 +154,8 @@ namespace FallbackStatus
 			std::lock_guard<std::mutex> guard(mutex);
 			return std::any_of(entries.begin(), entries.end(), [&](const Entry& e) { return e.id == id; });
 		}
-		std::vector<Entry> Entries() const
-		{
-			std::lock_guard<std::mutex> guard(mutex);
-			return entries;
-		}
+		std::vector<Entry> Entries() const { std::lock_guard<std::mutex> guard(mutex); return entries; }
+		void EntriesInto(std::vector<Entry>& out) const { std::lock_guard<std::mutex> guard(mutex); out.assign(entries.begin(), entries.end()); }
 		std::string Heading() const { return Format(Entries()); }
 		void Clear()
 		{

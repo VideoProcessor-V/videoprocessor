@@ -328,7 +328,8 @@ namespace TemporalDetail
 
 		inline double PairAt(const MotionPair& m, const std::vector<float>& g, double x, double y)
 		{
-			const double gx = (x + m.originX + 0.5) / m.blockPx - 0.5, gy = (y + m.originY + 0.5) / m.blockPx - 0.5;
+			const double by = m.blockPxY > 0.0 ? m.blockPxY : m.blockPx;
+			const double gx = (x + m.originX + 0.5) / m.blockPx - 0.5, gy = (y + m.originY + 0.5) / by - 0.5;
 			const double fx = std::floor(gx), fy = std::floor(gy);
 			const double tx = gx - fx, ty = gy - fy;
 			auto at = [&](int i, int j) { return static_cast<double>(g[static_cast<size_t>((std::max)(0, (std::min)(m.gridH - 1, j))) * m.gridW + (std::max)(0, (std::min)(m.gridW - 1, i))]); };

@@ -748,9 +748,10 @@ namespace LedDrive
 		else if (fadeToBlack && level > target)
 		{
 			// Follow the fade at its own rate (its APL ratio above black), never
-			// faster than rate_down.
+			// faster than rate_down. POD1-L3: if previousApl is already at/below black (16),
+			// ratio is 0 so level still ramps down at maxDown instead of stalling forever.
 			const double ratio = previousApl > 16.0 ?
-				std::max(0.0, std::min((stats.apl - 16.0) / (previousApl - 16.0), 1.0)) : 1.0;
+				std::max(0.0, std::min((stats.apl - 16.0) / (previousApl - 16.0), 1.0)) : 0.0;
 			level = std::max(static_cast<double>(target), level - std::min(maxDown, level * (1.0 - ratio)));
 		}
 		else

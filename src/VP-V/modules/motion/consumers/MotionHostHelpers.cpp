@@ -297,5 +297,18 @@ namespace Vpv
 			}
 			return true;
 		}
+
+		void SyncEstimatorFallbacks(const ::Dejudder::MotionWarp& dejudder,
+			const std::function<void(const FallbackCatalog::Decision&)>& syncFallback)
+		{
+			if (!syncFallback)
+				return;
+			syncFallback(dejudder.LastPairGlobalFallback());
+			// POD1-M7: surface U7 scene-verdict fallback visibly in the host FallbackStatus registry.
+			const std::string& u7Why = dejudder.LastU7SceneFallback();
+			syncFallback(u7Why.empty()
+				? FallbackCatalog::Released("motion.u7_scene")
+				: FallbackCatalog::Engaged("motion.u7_scene", u7Why));
+		}
 	}
 }

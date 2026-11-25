@@ -401,7 +401,7 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 		!vectorEstimate.motionEngineWarming, *dejudder, [&]() { return dejudder->Estimate(sa, sb, maskSlot, adaptiveGrainMapWanted); },
 		[this](const FallbackCatalog::Decision& decision) { SyncFallback(decision); });
 	memoScope.Release();
-	SyncFallback(dejudder->LastPairGlobalFallback());
+	Vpv::MotionHost::SyncEstimatorFallbacks(*dejudder, [this](const FallbackCatalog::Decision& decision) { SyncFallback(decision); });
 	dejudder->SetWarmUp(false);
 	if (motionEstimated && !vectorEstimate.motionEngineWarming)
 		++vectorEngine.WorkCounters().matcherEstimates;   // W2-C1 (B9): the warm-up's dummy estimate is counted as a warm-up

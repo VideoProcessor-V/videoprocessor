@@ -459,15 +459,26 @@ namespace LedDrive
 		// VP Renderer filter (2026-10-17): in the filter process (source=file) the running LED
 		// drive is held for the next graph instead of returning the projector to full light; the
 		// capture app never gets here with a hold-over.
+		// POD1-M4: synchronize state fields (holdoverMs, suspended, signature, module) under stateMutex.
 		lifecycleWorker->Flush();
-		const std::shared_ptr<LedDriveModule> held = std::atomic_load(&module);
-		if (holdoverMs > 0 && held && !suspended)
+		std::shared_ptr<LedDriveModule> held;
+		std::string heldSignature;
+		uint32_t heldMs = 0;
 		{
-			std::atomic_store(&module, std::shared_ptr<LedDriveModule>());
-			if (context.frame)
-				context.frame->PublishModule(std::shared_ptr<LedDriveModule>());
-			ProcessLedDriveHoldover().Park(held, signature, holdoverMs);
+			std::lock_guard<std::mutex> lock(stateMutex);
+			const std::shared_ptr<LedDriveModule> current = std::atomic_load(&module);
+			if (holdoverMs > 0 && current && !suspended)
+			{
+				held = current;
+				heldSignature = signature;
+				heldMs = holdoverMs;
+				std::atomic_store(&module, std::shared_ptr<LedDriveModule>());
+				if (context.frame)
+					context.frame->PublishModule(std::shared_ptr<LedDriveModule>());
+			}
 		}
+		if (held)
+			ProcessLedDriveHoldover().Park(held, heldSignature, heldMs);
 	}
 
 	std::shared_ptr<LedDriveModule> DynamicDriveHost::DetachLocked(const HostContext& context)
@@ -738,9 +749,13 @@ namespace LedDrive
 
 	void DynamicDriveHost::ResumeAfterCalibration(const HostContext& context)
 	{
-		if (!calibrationSuspended)
-			return;
-		calibrationSuspended = false;
+		// POD1-M4: synchronize calibrationSuspended under stateMutex before delegating.
+		{
+			std::lock_guard<std::mutex> lock(stateMutex);
+			if (!calibrationSuspended)
+				return;
+			calibrationSuspended = false;
+		}
 		ResumeAfterTest(context);
 	}
 

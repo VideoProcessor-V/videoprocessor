@@ -131,5 +131,7 @@ namespace Vpv
 			float t, ::Dejudder::Planes& out, VpMotion::VectorEngine& vectorEngine,
 			Dejudder::ExtrasState& dejudderExtras, uint64_t nowTickMs,
 			const std::function<void(const FallbackCatalog::Decision&)>& syncFallback);
+		void SyncEstimatorFallbacks(const ::Dejudder::MotionWarp& dejudder,
+			const std::function<void(const FallbackCatalog::Decision&)>& syncFallback);
 	}
 }
