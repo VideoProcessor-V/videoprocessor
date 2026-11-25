@@ -1605,5 +1605,180 @@ namespace SkeletonAcquireTestsNs
 			OwnerGpuContext quiet(&silent, 0);
 			Assert::AreEqual(uint64_t(0), quiet.MaxSharedMemory(), L"a device that does not say: 0 (not known)");
 		}
+
+		// S#1 (R1): AcquireCause::ReadbackPending is counted, visible in LastCause and Decisions, NEVER latched
+		// in memo_ (retries on the exact same key until ready), wakes concurrent waiters promptly without deadlock,
+		// and contrasts against same-product latched OwnerDeclined / throwing / empty-bytes negative controls.
+		TEST_METHOD(ReadbackPendingIsCountedVisibleNeverLatchedAndWakesWaiters)
+		{
+			Assert::AreEqual(std::string("readback pending"), std::string(Token(AcquireCause::ReadbackPending)),
+				L"Token(AcquireCause::ReadbackPending) == 'readback pending'");
+
+			SkeletonMemo m;
+			m.SetNames(nullptr);
+			const std::string decId = "skeleton acquire product " + std::to_string(kP10GrainSplit);
+
+			std::atomic<int> seq10Calls{ 0 };
+			std::atomic<int> seq11Calls{ 0 };
+			std::atomic<int> seq12Calls{ 0 };
+			std::atomic<int> seq13Calls{ 0 };
+			OwnerFill fill;
+			fill.fill = [&](const OwnerFillRequest& r, SkeletonMemo&, OwnerFillOutput& out) -> bool {
+				if (r.seq == 10u) {
+					const int n = seq10Calls.fetch_add(1) + 1;
+					if (n == 1) {
+						out.pending = true;
+						out.declineReason = "in flight";
+						return false;
+					}
+					out.bytes.resize(16u);
+					for (size_t i = 0; i < out.bytes.size(); ++i)
+						out.bytes[i] = uint8_t(0x50u + i);
+					return true;
+				}
+				if (r.seq == 11u) {
+					// Negative control: ordinary decline (out.pending == false) MUST latch OwnerDeclined even though call 2 would succeed.
+					const int n = seq11Calls.fetch_add(1) + 1;
+					if (n == 1) {
+						out.pending = false;
+						out.declineReason = "hard decline";
+						return false;
+					}
+					out.bytes.assign(16u, 0xAAu);
+					return true;
+				}
+				if (r.seq == 12u) {
+					// Negative control: throwing fill MUST NOT produce ReadbackPending even if out.pending was set before throw.
+					seq12Calls.fetch_add(1);
+					out.pending = true;
+					out.declineReason = "throwing after pending";
+					throw std::runtime_error("fill threw after setting pending");
+				}
+				if (r.seq == 13u) {
+					// Negative control: returning true with empty CPU bytes MUST NOT produce ReadbackPending even if out.pending was set.
+					seq13Calls.fetch_add(1);
+					out.pending = true;
+					out.bytes.clear();
+					return true;
+				}
+				return false;
+			};
+			Assert::IsTrue(m.RegisterOwnerFill(kP10GrainSplit, AcquireForm::Cpu, kGrainUnit, fill) == SkeletonMemo::Registration::Registered);
+
+			// Call 1 on seq 10: ReadbackPending, counted, visible in LastCause and Decisions.
+			const AcquireResult r1 = m.Acquire(kP10GrainSplit, 10u, AcquireForm::Cpu);
+			Assert::IsTrue(r1.status == AcquireStatus::Unavailable && r1.cause == AcquireCause::ReadbackPending,
+				L"call 1 returns Unavailable / ReadbackPending");
+			Assert::AreEqual(uint64_t(1), m.CountersOf(kP10GrainSplit).unavailable[size_t(AcquireCause::ReadbackPending)],
+				L"ReadbackPending counted once");
+			Assert::AreEqual(uint64_t(1), m.CountersOf(kP10GrainSplit).ownerFillCalls, L"ownerFillCalls == 1 after call 1");
+			const std::string last1 = m.LastCause(kP10GrainSplit);
+			Assert::IsTrue(Has(last1, "readback pending") && Has(last1, "in flight"),
+				L"LastCause surfaces 'readback pending' and declineReason 'in flight'");
+			Assert::IsTrue(AnyDecision(m.Decisions(), decId.c_str(), "readback pending")
+				&& AnyDecision(m.Decisions(), decId.c_str(), "in flight"),
+				L"Decisions surfaces 'readback pending' and 'in flight'");
+
+			// Call 2 on the EXACT same key (kP10GrainSplit, 10, Cpu): NOT latched -> re-invokes fill, publishes bytes, releases decision.
+			const AcquireResult r2 = m.Acquire(kP10GrainSplit, 10u, AcquireForm::Cpu);
+			Assert::IsTrue(r2.status == AcquireStatus::FilledAtRead && r2.Ok(), L"call 2 retries and returns FilledAtRead");
+			Assert::AreEqual(uint64_t(2), m.CountersOf(kP10GrainSplit).ownerFillCalls, L"ownerFillCalls == 2 (re-invoked)");
+			Assert::AreEqual(2, seq10Calls.load(), L"fill body ran twice for seq 10");
+			Assert::IsNotNull(r2.cpu, L"published CPU payload non-null");
+			Assert::AreEqual(size_t(16), r2.cpuBytes, L"published CPU payload size == 16");
+			for (size_t i = 0; i < 16u; ++i)
+				Assert::AreEqual(uint8_t(0x50u + i), r2.cpu[i], L"exact published payload byte");
+			Assert::IsTrue(m.LastCause(kP10GrainSplit).empty(), L"LastCause cleared once served");
+			Assert::IsFalse(AnyDecision(m.Decisions(), decId.c_str(), "readback pending"),
+				L"fallback decision released once served");
+
+			// Call 3 on the exact same key: Reused, fill NOT re-invoked.
+			const AcquireResult r3 = m.Acquire(kP10GrainSplit, 10u, AcquireForm::Cpu);
+			Assert::IsTrue(r3.status == AcquireStatus::Reused && r3.cpu == r2.cpu && r3.cpuBytes == 16u,
+				L"call 3 reuses published memo spot");
+			Assert::AreEqual(uint64_t(2), m.CountersOf(kP10GrainSplit).ownerFillCalls, L"ownerFillCalls stays 2 on Reuse");
+
+			// Mandatory same-input negative control #1: ordinary decline (out.pending == false) latches OwnerDeclined.
+			const AcquireResult d1 = m.Acquire(kP10GrainSplit, 11u, AcquireForm::Cpu);
+			Assert::IsTrue(d1.status == AcquireStatus::Unavailable && d1.cause == AcquireCause::OwnerDeclined,
+				L"negative control: ordinary decline returns OwnerDeclined");
+			Assert::AreEqual(1, seq11Calls.load(), L"negative control: ordinary decline invokes fill once");
+			const AcquireResult d2 = m.Acquire(kP10GrainSplit, 11u, AcquireForm::Cpu);
+			Assert::IsTrue(d2.status == AcquireStatus::Unavailable && d2.cause == AcquireCause::OwnerDeclined,
+				L"negative control: retry on latched OwnerDeclined still returns OwnerDeclined");
+			Assert::AreEqual(1, seq11Calls.load(),
+				L"negative control: latched OwnerDeclined MUST NOT re-invoke fill (contrast with non-latched ReadbackPending)");
+
+			// Mandatory same-input negative control #2: throwing fill & true-with-empty-bytes MUST NOT report ReadbackPending.
+			const uint64_t pendingBeforeNeg = m.CountersOf(kP10GrainSplit).unavailable[size_t(AcquireCause::ReadbackPending)];
+			const AcquireResult th1 = m.Acquire(kP10GrainSplit, 12u, AcquireForm::Cpu);
+			const AcquireResult th2 = m.Acquire(kP10GrainSplit, 12u, AcquireForm::Cpu);
+			Assert::IsTrue(th1.cause == AcquireCause::OwnerDeclined && th2.cause == AcquireCause::OwnerDeclined,
+				L"negative control: throwing fill with out.pending=true degrades to latched OwnerDeclined, never ReadbackPending");
+			Assert::AreEqual(1, seq12Calls.load(), L"negative control: throwing fill latched (called once)");
+
+			const AcquireResult em1 = m.Acquire(kP10GrainSplit, 13u, AcquireForm::Cpu);
+			const AcquireResult em2 = m.Acquire(kP10GrainSplit, 13u, AcquireForm::Cpu);
+			Assert::IsTrue(em1.cause == AcquireCause::OwnerDeclined && em2.cause == AcquireCause::OwnerDeclined,
+				L"negative control: returning true with empty bytes and out.pending=true degrades to latched OwnerDeclined, never ReadbackPending");
+			Assert::AreEqual(1, seq13Calls.load(), L"negative control: empty-bytes fill latched (called once)");
+			Assert::AreEqual(pendingBeforeNeg, m.CountersOf(kP10GrainSplit).unavailable[size_t(AcquireCause::ReadbackPending)],
+				L"negative control: neither throw nor empty-bytes increments ReadbackPending counter");
+
+			// Concurrent waiter test: thread 2 blocks on the same key while call 1 is in flight; call 1 returns
+			// ReadbackPending -> both threads wake promptly with ReadbackPending (no deadlock), and call 3 succeeds.
+			struct WaitState {
+				SkeletonMemo memo;
+				std::atomic<bool> inFill{ false };
+				std::atomic<bool> t2Started{ false };
+				std::atomic<bool> releaseFill{ false };
+				std::atomic<bool> allowSuccess{ false };
+				std::atomic<int> calls{ 0 };
+				AcquireResult t1Res, t2Res;
+			};
+			auto st = std::make_shared<WaitState>();
+			OwnerFill cf;
+			cf.fill = [st](const OwnerFillRequest&, SkeletonMemo&, OwnerFillOutput& out) -> bool {
+				st->calls.fetch_add(1);
+				if (!st->allowSuccess.load()) {
+					st->inFill.store(true);
+					WaitFlag(st->releaseFill);
+					out.pending = true;
+					out.declineReason = "in flight";
+					return false;
+				}
+				out.bytes.assign(12u, 0x7Bu);
+				return true;
+			};
+			Assert::IsTrue(st->memo.RegisterOwnerFill(kP10GrainSplit, AcquireForm::Cpu, kGrainUnit, cf) == SkeletonMemo::Registration::Registered);
+
+			const bool ran = RunsWithin([st]() {
+				std::thread t1([st]() { st->t1Res = st->memo.Acquire(kP10GrainSplit, 20u, AcquireForm::Cpu); });
+				WaitFlag(st->inFill);
+				std::thread t2([st]() {
+					st->t2Started.store(true);
+					st->t2Res = st->memo.Acquire(kP10GrainSplit, 20u, AcquireForm::Cpu);
+				});
+				WaitFlag(st->t2Started);
+				std::this_thread::sleep_for(std::chrono::milliseconds(20));
+				st->releaseFill.store(true);
+				t1.join();
+				t2.join();
+			}, 10000);
+			Assert::IsTrue(ran, L"concurrent ReadbackPending waiters wake promptly without deadlock");
+			Assert::AreEqual(1, st->calls.load(), L"concurrent waiter woke from t1's fill rather than running a second fill");
+			Assert::IsTrue(st->t1Res.status == AcquireStatus::Unavailable && st->t1Res.cause == AcquireCause::ReadbackPending,
+				L"caller thread finishes with ReadbackPending");
+			Assert::IsTrue(st->t2Res.status == AcquireStatus::Unavailable && st->t2Res.cause == AcquireCause::ReadbackPending,
+				L"concurrent waiter wakes with ReadbackPending");
+
+			st->allowSuccess.store(true);
+			const AcquireResult rRetry = st->memo.Acquire(kP10GrainSplit, 20u, AcquireForm::Cpu);
+			Assert::IsTrue(rRetry.status == AcquireStatus::FilledAtRead && rRetry.Ok(),
+				L"subsequent Acquire on the same key succeeds with FilledAtRead after waiters woke");
+			Assert::AreEqual(2, st->calls.load(), L"retry invokes fill once");
+			Assert::AreEqual(size_t(12), rRetry.cpuBytes);
+			Assert::AreEqual(uint8_t(0x7B), rRetry.cpu[0]);
+		}
 	};
 }

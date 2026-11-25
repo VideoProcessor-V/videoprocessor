@@ -575,5 +575,100 @@ namespace QueueKeyedMemoTestsNs
 			m.SetWindow(w);
 			Assert::IsTrue(m.GpuNeedBytes() == 4096u * (1u + w.back + w.ahead), L"GpuNeedBytes x the whole window");
 		}
+
+		// S#1 (R1) + QueueWindow: with keepFrames = 2, a lag-1 frame (seq - 1) returning ReadbackPending inside
+		// the queue window is NOT latched and succeeds on retry once ready; once the window advances past retention,
+		// the frame returns FrameReleased without re-invoking the fill. Paired with a same-window latched OwnerDeclined
+		// negative control.
+		TEST_METHOD(ReadbackPendingRetriesInsideQueueWindowUntilReadyOrReleased)
+		{
+			SkeletonMemo m;
+			const QueueWindowTerms terms = Terms(0, 0, 0, 2, 0);   // window back = 0; retention governed by owner keepFrames = 2
+
+			std::atomic<int> pendingFillCalls{ 0 };
+			std::atomic<bool> ready9{ false };
+			std::atomic<bool> ready10{ false };
+			OwnerFill pendingFill;
+			pendingFill.keepFrames = 2;
+			pendingFill.fill = [&](const OwnerFillRequest& r, SkeletonMemo&, OwnerFillOutput& out) -> bool {
+				pendingFillCalls.fetch_add(1);
+				const bool isReady = (r.seq == 9u && ready9.load()) || (r.seq == 10u && ready10.load());
+				if (!isReady) {
+					out.pending = true;
+					out.declineReason = "async readback in flight";
+					return false;
+				}
+				out.bytes.assign(32u, 0);
+				for (size_t i = 0; i < out.bytes.size(); ++i)
+					out.bytes[i] = uint8_t(r.seq * 7u + i);
+				return true;
+			};
+			Assert::IsTrue(m.RegisterOwnerFill(kP10GrainSplit, AcquireForm::Cpu, kGrainUnit, pendingFill) == SkeletonMemo::Registration::Registered);
+
+			// 1. Frame 10 sealed: lag-1 frame 9 is inside keepFrames = 2 retention (edge = 10 - 2 = 8 <= 9).
+			Render(m, 10u, terms);
+			const AcquireResult p9First = m.Acquire(kP10GrainSplit, 9u, AcquireForm::Cpu);
+			Assert::IsTrue(p9First.status == AcquireStatus::Unavailable && p9First.cause == AcquireCause::ReadbackPending,
+				L"lag-1 frame 9 returns ReadbackPending while readback is in flight");
+			Assert::AreEqual(1, pendingFillCalls.load(), L"fill called once for pending frame 9");
+
+			// Mark frame 9 ready and retry inside the same window: NOT latched -> succeeds with FilledAtRead.
+			ready9.store(true);
+			const AcquireResult p9Retry = m.Acquire(kP10GrainSplit, 9u, AcquireForm::Cpu);
+			Assert::IsTrue(p9Retry.status == AcquireStatus::FilledAtRead && OfFrame(p9Retry, 9u),
+				L"lag-1 frame 9 retries inside queue window and publishes exact frame-9 bytes");
+			Assert::AreEqual(2, pendingFillCalls.load(), L"fill re-invoked on retry after ReadbackPending");
+
+			const AcquireResult p9Reuse = m.Acquire(kP10GrainSplit, 9u, AcquireForm::Cpu);
+			Assert::IsTrue(p9Reuse.status == AcquireStatus::Reused && p9Reuse.cpu == p9Retry.cpu,
+				L"subsequent read of frame 9 reuses memo spot");
+			Assert::AreEqual(2, pendingFillCalls.load(), L"no third fill call on reuse");
+
+			// 2. Frame 11 sealed: lag-1 frame 10 returns ReadbackPending (edge = 11 - 2 = 9 <= 10), then window
+			//    advances to frame 13 (edge = 13 - 2 = 11 > 10) -> frame 10 is released and NEVER calls the fill again.
+			Render(m, 11u, terms);
+			const AcquireResult p10Pending = m.Acquire(kP10GrainSplit, 10u, AcquireForm::Cpu);
+			Assert::IsTrue(p10Pending.status == AcquireStatus::Unavailable && p10Pending.cause == AcquireCause::ReadbackPending,
+				L"lag-1 frame 10 returns ReadbackPending on frame 11");
+			Assert::AreEqual(3, pendingFillCalls.load(), L"fill called once for pending frame 10");
+
+			Render(m, 13u, terms);   // edge for keepFrames=2 is 13 - 2 = 11 -> seq 10 is now past retention
+			ready10.store(true);
+			const AcquireResult p10Released = m.Acquire(kP10GrainSplit, 10u, AcquireForm::Cpu);
+			Assert::IsTrue(p10Released.status == AcquireStatus::Unavailable && p10Released.cause == AcquireCause::FrameReleased,
+				L"once window advances past keepFrames = 2, pending frame 10 returns FrameReleased");
+			Assert::AreEqual(3, pendingFillCalls.load(),
+				L"released frame 10 must NOT re-invoke the owner fill");
+
+			// 3. Mandatory same-window negative control: an ordinary decline (out.pending == false) with keepFrames = 2
+			//    on lag-1 frame 12 (inside window at frame 13: edge = 11 <= 12) latches OwnerDeclined and does NOT retry.
+			std::atomic<int> declineCalls{ 0 };
+			std::atomic<bool> allowDeclineSuccess{ false };
+			OwnerFill declineFill;
+			declineFill.keepFrames = 2;
+			declineFill.fill = [&](const OwnerFillRequest& r, SkeletonMemo&, OwnerFillOutput& out) -> bool {
+				declineCalls.fetch_add(1);
+				if (!allowDeclineSuccess.load()) {
+					out.pending = false;
+					out.declineReason = "ordinary decline";
+					return false;
+				}
+				out.bytes.assign(32u, uint8_t(r.seq));
+				return true;
+			};
+			Assert::IsTrue(m.RegisterOwnerFill(kP11RegionBlockStats, AcquireForm::Cpu, kRegionUnit, declineFill) == SkeletonMemo::Registration::Registered);
+
+			const AcquireResult dec1 = m.Acquire(kP11RegionBlockStats, 12u, AcquireForm::Cpu);
+			Assert::IsTrue(dec1.status == AcquireStatus::Unavailable && dec1.cause == AcquireCause::OwnerDeclined,
+				L"negative control: ordinary decline inside window returns OwnerDeclined");
+			Assert::AreEqual(1, declineCalls.load());
+
+			allowDeclineSuccess.store(true);
+			const AcquireResult dec2 = m.Acquire(kP11RegionBlockStats, 12u, AcquireForm::Cpu);
+			Assert::IsTrue(dec2.status == AcquireStatus::Unavailable && dec2.cause == AcquireCause::OwnerDeclined,
+				L"negative control: retry of ordinary decline inside same window stays latched OwnerDeclined");
+			Assert::AreEqual(1, declineCalls.load(),
+				L"negative control: latched OwnerDeclined does NOT re-invoke fill (contrast with ReadbackPending)");
+		}
 	};
 }

@@ -96,7 +96,7 @@ enum : ProductId {
     // fill (repair/grain_split/BandMemoFill.h; R13-8, 102b B3-ID30-EXCLUSIONS, LB3-BAND-MEMO-GPU; C8 slice 8, coreplan-C8-8-U2).
     kBandMemo = 30,       // 30 band_memo (BandMemo: the per-frame low band of the grain unit; owner repair/grain_split)
     kEdgeMap = 31,        // 31 edge_map (C3 fixed id table; per-frame memo of the source-luma Sobel; readers: L-FOCUS focus map, L-B5 busy-edge; X5 AdaptiveDownscale acquires a stage/domain variant in CJ-3 (owner 11-14 16:43 (3); frozen 17:19; 102b X5-EDGEMAP-CJ3, KEDGEMAP-RULE3 UPDATE :523); later deband guard, occlusion, TD); lead 8 allocation 31, 05:2x 11-14
-    kFocusMap = 32,       // 32 focus_map (L-FOCUS; RESERVED until it lands)
+    kFocusMap = 32,       // 32 focus_map (P17, job #1 L-FOCUS, owner 11-12 22:16 / 22:18): per P11 block defocus level, focus change, confidence, flags; built ON kEdgeMap (owner 11-14 05:25); owner input/source_analysis/focus_map
     kRoomLight = 33,      // 33 room_light (CF-1 CAM-2: HELD STATE, the smoothed room light the LED intent publishes; read by the appearance stage)
     kComposedVectors = 34,// 34 composed_vectors (ECV: VpComposed::Product, modules/motion/estimation/composed; the code has landed, the id stays RESERVED until its registry decl + reader row land, lead ruling SHOULD S3)
     kP10gGrainLevel = 35, // 35 grain.level (P10g, refs/120 T3; coreplan-C10-15b-PC-grain.md:19): per-16-px-block grain level from P10, owner fill
@@ -112,7 +112,7 @@ static_assert(kSourceGeometry == 29 && kBandMemo == kSourceGeometry + 1 && kP10g
 // token, no inputs, no reader row, no catalog row), so ids stay indexes and Size() == kSkeletonProductEnd. Registry::Validate accepts an
 // absent slot ONLY at a listed id and rejects a real declaration at a listed id; Has() is false for an absent slot, so any input naming one
 // fails closed ("unknown input product"). The lane that lands a product declares it under its fixed number and deletes the number here.
-constexpr ProductId kReservedProductIds[] = { kFocusMap, kComposedVectors };
+constexpr ProductId kReservedProductIds[] = { kComposedVectors };
 constexpr size_t kReservedProductCount = sizeof(kReservedProductIds) / sizeof(kReservedProductIds[0]);
 constexpr bool IsReservedProduct(ProductId id)
 {
@@ -124,8 +124,7 @@ constexpr bool IsReservedProduct(ProductId id)
 // The planned token of a reserved id (shown in the product-graph doc and the Ctrl+Alt+D status line; "" for any other id).
 constexpr const char* ReservedProductName(ProductId id)
 {
-    return id == kFocusMap ? "focus_map"
-         : id == kComposedVectors ? "composed_vectors" : "";
+    return id == kComposedVectors ? "composed_vectors" : "";
 }
 
 // v1 names of ids 16-18 (kept so existing readers compile; the tokens and contracts are the v2 ones above).
@@ -1127,28 +1126,30 @@ inline void AppendRoomLightProduct(std::vector<ProductDecl>& decls)
     decls.push_back(p);
 }
 
-// Appends edge_map (31), pads 32, appends room_light (33), and pads 34; AppendGrainLevelProduct then appends
-// grain.level (35) and camera fit field (36), so EVERY caller that completes the skeleton set (SkeletonProducts,
-// RegionEvidence) calls AppendBandMemoProduct, AppendEdgeMapProduct, AppendGrainLevelProduct in that order and
-// gets Size() == kSkeletonProductEnd (37).
-inline void AppendEdgeMapProduct(std::vector<ProductDecl>& decls)
-{
-    using detail::AddInput;
-    using detail::AddTerm;
-    using detail::Make;
-    using namespace VpIndicator;
+// P17 focus_map (id 32, L-FOCUS, S18 F1): per P11 block defocus/change from kEdgeMap (lag 1/2), P11, P2, P7.
+constexpr uint32_t kFocusMapBytesPerBlock = 8;
+inline void AppendFocusMapProduct(std::vector<ProductDecl>& decls) {
+    using detail::AddInput; using detail::AddTerm; using detail::Make; using namespace VpIndicator;
+    ProductDecl p = Make(kFocusMap, "focus_map", "focus map (defocus / focus change)", Backend::GpuCompute, 1, Tier::T1,
+                         Bit(kFull) | Bit(kContinuity), Bit(kSettingsAnalysis) | Bit(kSettingsMotion));
+    p.sourceFrame = true; p.missingInputForm = true; p.refRenderMs = 0.05f;
+    AddInput(p, kEdgeMap, 1); AddInput(p, kEdgeMap, 2);
+    AddInput(p, kP11RegionBlockStats, 1); AddInput(p, kP11RegionBlockStats, 2);
+    AddInput(p, kP2VectorPair, 1); AddInput(p, kP7CameraFit, 1);
+    AddTerm(p, 4, kFocusMapBytesPerBlock);
+    PadReservedUntil(decls, kFocusMap); decls.push_back(p);
+}
+
+// Appends edge_map (31), focus_map (32), room_light (33), and pads 34; AppendGrainLevelProduct closes at 37.
+inline void AppendEdgeMapProduct(std::vector<ProductDecl>& decls) {
+    using detail::AddInput; using detail::AddTerm; using detail::Make; using namespace VpIndicator;
     ProductDecl p = Make(kEdgeMap, "edge_map", "edge map (source luma Sobel)", Backend::GpuCompute, 1, Tier::T0,
                          Bit(kFull) | Bit(kContinuity), Bit(kSettingsAnalysis));
-    p.sourceFrame = true;
-    AddInput(p, kP13SourceRing, 0);
-    // 8 B per source pixel (shift 0 = the full plane): the LARGEST variant one fill serves, the stage variant's RG32F (CB-18
-    // SHOULD-2), so the ledger, the fill's reserve and the ahead cost are one figure. The default variant's R32F uses half.
-    AddTerm(p, 0, 8);
-    p.refRenderMs = 0.05f;
-    PadReservedUntil(decls, kEdgeMap);
-    decls.push_back(p);
-    AppendRoomLightProduct(decls);   // fixed id 33 (pads 32)
-    PadReservedUntil(decls, kP10gGrainLevel);
+    p.sourceFrame = true; p.refRenderMs = 0.05f;
+    AddInput(p, kP13SourceRing, 0); AddTerm(p, 0, 8);
+    PadReservedUntil(decls, kEdgeMap); decls.push_back(p);
+    AppendFocusMapProduct(decls);
+    AppendRoomLightProduct(decls); PadReservedUntil(decls, kP10gGrainLevel);
 }
 
 // grain.level (P10g, fixed id 35; refs/120 T3, coreplan-C10-15b-PC-grain.md:19): the per-block grain level of the source luma, one

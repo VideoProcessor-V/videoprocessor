@@ -33,19 +33,15 @@ struct SourceFrameView {
     uint64_t seq = 0;
     std::shared_ptr<const void> keepAlive;
     const uint16_t* luma = nullptr;
-    uint32_t width = 0;
-    uint32_t height = 0;
-    uint32_t strideSamples = 0;   // samples per row (>= width)
+    uint32_t width = 0, height = 0, strideSamples = 0;   // samples per row (>= width)
     uint8_t msbShift = 0;
     bool Valid() const { return luma != nullptr && width > 0 && height > 0 && strideSamples >= width; }
     // The ONE MSB-align law (doc 91 D5): one raw luma sample scaled to the full 16-bit range, (raw << msbShift).
     uint16_t MsbAlign(uint16_t raw) const { return uint16_t(uint32_t(raw) << msbShift); }
     // Row y, samples [x0, x0 + n), MSB-aligned into dst (n samples). The caller guarantees Valid() and the range.
-    void Row16(uint32_t y, uint32_t x0, uint32_t n, uint16_t* dst) const
-    {
+    void Row16(uint32_t y, uint32_t x0, uint32_t n, uint16_t* dst) const {
         const uint16_t* src = luma + size_t(y) * strideSamples + x0;
-        for (uint32_t i = 0; i < n; ++i)
-            dst[i] = MsbAlign(src[i]);
+        for (uint32_t i = 0; i < n; ++i) dst[i] = MsbAlign(src[i]);
     }
 };
 
@@ -131,13 +127,15 @@ public:
 };
 
 // Asynchronous readback of a GPU product into system memory (host hook, render thread only): copy
-// into a staging buffer, then poll QueryDone (non-blocking; a D3D11 host may answer it with a DO_NOT_WAIT
-// Map of the staging copy, see drive/led_measure/NativeReadback.h). Never a blocking Map on the render context.
+// into a staging buffer, then poll QueryDone (non-blocking; D3D11 production implementation in
+// drive/led_measure/NativeCopyReadback.h over NativeReadback.h). Never a blocking Map on the render context.
 class IReadbackDevice {
 public:
     virtual ~IReadbackDevice() {}
     virtual bool CopyToStaging(ProductId product, uint64_t seq, int stagingIndex) = 0;
     virtual bool QueryDone(int stagingIndex) = 0;                // non-blocking
+    virtual bool QueryFailed(int /*stagingIndex*/) const { return false; }   // non-blocking async copy failure check
+    virtual void Discard(int /*stagingIndex*/) {}                            // drop internal mapping of discarded slot
     virtual const void* MapNoWait(int stagingIndex, size_t* bytes) = 0;  // null when busy (DO_NOT_WAIT)
     virtual void Unmap(int stagingIndex) = 0;
 };

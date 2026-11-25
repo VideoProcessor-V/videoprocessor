@@ -27,6 +27,7 @@
 #include <VP-V/modules/input/source_analysis/VpFrameAnalysis.h>
 #include <VP-V/modules/control/skeleton/gpu/OwnerGpuDevice.h>
 #include <VP-V/modules/input/source_analysis/FrameQuiet.h>
+#include <VP-V/modules/input/source_analysis/focus_map/FocusMapFill.h>
 #include <VP-V/modules/control/skeleton/gpu/SkeletonGpuDispatcher.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneGpuGrainKernel.h>
@@ -310,6 +311,27 @@ namespace Vpv
 				boundGpuHandleOf = gpuHandleOf;
 				boundLeaseOf = leaseOf;
 				VpSkeleton::BindLaneToMemo(lane, *memo, gpuHandleOf, std::move(leaseOf));
+				// L-FOCUS: the owner fill of kFocusMap (input/source_analysis/focus_map); the frame size is the lane graph's. The memo is the
+				// renderer's and outlives this bundle, so a rebuilt bundle REPLACES the previous bundle's fill (explicit replacement on a graph
+				// rebuild; a plain register would be refused as AlreadyRegistered and keep the old frame size). The result is kept and shown
+				// (FocusMap::StatusDecision on the Fallbacks list): a refused registration is never silent (audit SHOULD 5).
+				{
+					FocusMap::FillConfig focus;
+					focus.stats = focusStats;
+					const Dims frame = dims;
+					focus.geometry = [frame](uint64_t, int& w, int& h) {
+						w = int(frame.width);
+						h = int(frame.height);
+						return w > 0 && h > 0;
+					};
+					const VpSkeleton::SkeletonMemo::Registration r =
+						memo->ReplaceOwnerFill(VpSkeleton::kFocusMap, VpSkeleton::AcquireForm::Cpu, FocusMap::kUnitPath, FocusMap::MakeOwnerFill(focus));
+					focusRegistered = r == VpSkeleton::SkeletonMemo::Registration::Registered || r == VpSkeleton::SkeletonMemo::Registration::Replaced;
+					focusRegistrationWhy = r == VpSkeleton::SkeletonMemo::Registration::NotOwner ? "not the catalog's owner unit"
+						: r == VpSkeleton::SkeletonMemo::Registration::NotInCatalog ? "kFocusMap is not in the product catalog"
+						: r == VpSkeleton::SkeletonMemo::Registration::BadDefaults ? "bad default variant"
+						: r == VpSkeleton::SkeletonMemo::Registration::AlreadyRegistered ? "already registered" : "";
+				}
 			}
 
 			// GF-P1 AHEAD-DECL call site (GF-P2b, gate G6 C2): the lane fills' ahead depths follow the configured consumers (external demand
@@ -393,6 +415,11 @@ namespace Vpv
 			VpSkeleton::Registry registry;   // what the lane (and the dispatcher's Configure) are built on
 			// Declared before the lane: they outlive its state (the runner points at them).
 			std::atomic<uint64_t> lightPendingAsNone{ 0 };   // P12 gate: a Pending previous frame read as not made (until G6)
+			// L-FOCUS: the kFocusMap owner fill's counters (shared with the fill) and its registration result (written once in the
+			// constructor body, read by the status): FocusMap::StatusDecision.
+			std::shared_ptr<FocusMap::FillConfig::Stats> focusStats = std::make_shared<FocusMap::FillConfig::Stats>();
+			bool focusRegistered = false;
+			std::string focusRegistrationWhy;
 			VpLaneProducts::HalfLumaProducer p1;
 			VpLaneProducts::SourceStatsProducer p4;
 			std::unique_ptr<VpLaneProducts::GpuComputeLaneJob> job10, job11, job12;   // null unless the GPU gap is on
@@ -4222,6 +4249,7 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 					addDecision(d);
 				for (const FallbackCatalog::Decision& d : b->memo->Decisions())
 					addDecision(d);   // B1 G5: "skeleton acquire <product>" (cause, frame) while a product is not served
+				addDecision(FocusMap::StatusDecision(b->focusStats.get(), b->focusRegistered, b->focusRegistrationWhy));   // L-FOCUS: registration + retention
 				addDecision(FallbackCatalog::SkeletonGpuMemory(st.gpuMemoryNote));
 				if (gd != nullptr && st.gpuMemoryNote.empty())
 				{
@@ -4269,7 +4297,7 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 				// listed by the lane's own status). A user below level 0 also has its governor notice in "Analysis: ..." (plan.notice).
 				if (const std::shared_ptr<const VpSkeleton::GovernorPlan> usersPlan = lane.CurrentGovernorPlan())   // GF-P2b MUST-4 (2): the current users plan
 					for (const VpSkeleton::UserGrant& g : usersPlan->grants)
-						if (g.id < VpSkeleton::kUserProductBase)
+						if (g.id < VpSkeleton::kUserProductBase || g.id == VpSkeleton::ProductVramUserId(VpSkeleton::kEdgeMap))
 							full.push_back(std::string("VRAM ") + VpSkeleton::Token(g.tier) + " " + g.name + ": " + VpSkeleton::FormatMB(g.bytes) + " level " +
 								std::to_string(g.level) + (g.shed ? " (off)" : g.reduced ? " (reduced)" : ""));
 				if (gd != nullptr)

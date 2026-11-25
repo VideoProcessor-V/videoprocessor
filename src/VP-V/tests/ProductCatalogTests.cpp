@@ -16,6 +16,7 @@
 #include <VP-V/modules/input/source_analysis/SourceResolutionDetector.h>
 #include <VP-V/modules/input/source_analysis/identity/SourceGeometryProduct.h>
 #include <VP-V/modules/input/source_analysis/identity/SourceIdProduct.h>
+#include <VP-V/modules/input/source_analysis/focus_map/FocusMap.h>
 #include <VP-V/modules/input/source_analysis/regions/RegionEvidence.h>
 #include <VP-V/modules/scaling/rebase/RebaseDecision.h>
 #include <VP-V/modules/repair/grain_split/GrainSplit.h>
@@ -187,16 +188,19 @@ namespace ProductCatalogTestsNs
 				{ kTdMaps, "temporal detail" },
 				{ kTdTrailSummary, "temporal detail" },
 				{ kBandMemo, "interpolator / hiccup repair" },
+				// WAIVER-S18-F0-TESTS: kFocusMap (P17) landed (unreserved from fixed table); row 30 ("focus map (screen pass)") reads kEdgeMap and row 31 ("temporal detail") reads kFocusMap.
+				{ kEdgeMap, "focus map (screen pass)" },
+				{ kFocusMap, "temporal detail" },
 			};
 			const Registry reg = SkeletonProducts();
-			Assert::AreEqual(size_t(kSkeletonProductEnd) - kReservedProductCount - 8u, sizeof(expected) / sizeof(expected[0]),
-				L"every product but the matcher pair, the three held-state records (source identity, source geometry, room light), the causal quality pattern, the edge map, the grain level (no catalog reader row yet; owner fills only) and the camera fit field (read only by P8, as P8's declared input) has an expectation");
+			Assert::AreEqual(size_t(kSkeletonProductEnd) - kReservedProductCount - 7u, sizeof(expected) / sizeof(expected[0]),
+				L"every product but the matcher pair, the three held-state records (source identity, source geometry, room light), the causal quality pattern, the grain level (no catalog reader row yet; owner fill only) and the camera fit field (read only by P8, as P8's declared input) has an expectation");
 			// CP-A1-D4-CAMLABEL-FIELDCOPY: p7f_camera_fit_field is written by the camera worker BEFORE P7 is published and read only by P8 (a
 			// declared product input, no consumer row): no consumer can fill it live, so it has no live-fill owner and no consumer.
 			Assert::IsNull(LiveFillOwner(kCameraFitField), L"the camera fit field has no live-fill owner (camera worker publishes it with P7)");
 			Assert::IsTrue(ConsumersOf(kCameraFitField).empty(), L"no consumer row reads the camera fit field; P8 is its one reader");
-			// kEdgeMap is exempt above because no catalog reader row declares it yet (L-B5 owner fill only): pin that state.
-			Assert::IsNull(LiveFillOwner(kEdgeMap), L"kEdgeMap has no live-fill owner until a reader row is declared; then give it an expectation and drop the exemption");
+			// WAIVER-S18-F0-TESTS: kEdgeMap now has a catalog reader row (row 30 "focus map (screen pass)"), so its exemption is dropped.
+			Assert::IsNotNull(LiveFillOwner(kEdgeMap), L"kEdgeMap has a live-fill owner: the focus map screen pass reads it");
 			// kP10gGrainLevel is exempt for the same reason (P10g T3 owner fill; its first reader, the hybrid upscaler, declares no row yet).
 			Assert::IsNull(LiveFillOwner(kP10gGrainLevel), L"kP10gGrainLevel has no live-fill owner until a reader row is declared; then give it an expectation and drop the exemption");
 			// The causal quality pattern is a substitute (read as P15 by its declared id): nobody reads it by its own id.
@@ -227,7 +231,8 @@ namespace ProductCatalogTestsNs
 			for (const ProductDecl& d : reg.All())
 				if (ConsumersOf(d.id).empty() && d.backend != Backend::RenderOnly)
 					++unread;
-			Assert::AreEqual(size_t(5) + kReservedProductCount, unread, L"the matcher pair, the causal quality pattern (substitutes read by the declared id), the edge map and the P10g grain level (no reader row yet), the camera fit field (read only by P8 as its declared input, CP-A1-D4) and the reserved absent slots of the fixed id table (room light is read by the appearance row, CF-1 FIX1 SHOULD 6)");
+			// WAIVER-S18-F0-TESTS: kEdgeMap now has a reader row (row 30 "focus map (screen pass)"), so unread drops from 5 + kReservedProductCount to 4 + kReservedProductCount.
+			Assert::AreEqual(size_t(4) + kReservedProductCount, unread, L"the matcher pair, the causal quality pattern (substitutes read by the declared id), the P10g grain level (no reader row yet), the camera fit field (read only by P8 as its declared input, CP-A1-D4) and the reserved absent slots of the fixed id table (kEdgeMap is read by focus map row 30; room light is read by the appearance row, CF-1 FIX1 SHOULD 6)");
 
 			// Over the ACTIVE consumers: with the temporal-detail camera row off, P7's owner is the next lag-0 reader.
 			std::vector<uint16_t> active;
@@ -432,6 +437,7 @@ namespace ProductCatalogTestsNs
 				{ kTdAdmission, TdProducts::kUnitVersion },
 				{ kSourceIdentity, SourceIdentity::kUnitVersion },
 				{ kSourceGeometry, SourceGeometry::kUnitVersion },
+				{ kFocusMap, FocusMap::kUnitVersion },
 				{ kP10GrainSplit, GrainSplit::kUnitVersion }, { kP10cGrainSplitChroma, GrainSplit::kUnitVersion },
 			};
 			for (const Pair& p : pairs) {

@@ -1163,9 +1163,11 @@ namespace FallbackCatalog
 			// Room light (CF-1 FIX1 SHOULD 6; colour/appearance/RoomLight.h): the held record is absent or the sensor is lost, so the appearance
 			// stage holds, then decays toward a dark room, and says so on its status line.
 			{ "product.room_light", "room light record unavailable or sensor lost: the appearance stage holds the last value, then assumes a dark room, shown on its status line" },
+			// Focus map (P17, job #1 L-FOCUS; input/source_analysis/focus_map): the per-region defocus / focus-change record could not be made for
+			// this frame (an input product was unavailable): readers act as without a focus map (temporal detail keeps its classical form).
+			{ "product.focus_map", "focus map unavailable for this frame (an input product was not served): readers act as without a focus map" },
 		};
-		if (count)
-			*count = sizeof(kEntries) / sizeof(kEntries[0]);
+		if (count) *count = sizeof(kEntries) / sizeof(kEntries[0]);
 		return kEntries;
 	}
 	inline const ProductEntry* FindProductEntry(const char* id)

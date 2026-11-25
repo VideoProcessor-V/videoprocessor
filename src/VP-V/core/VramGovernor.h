@@ -59,6 +59,9 @@ enum VramUserId : uint16_t {
     kUserProductBase = 0x100,  // + ProductId: skeleton lane products
 };
 
+// Derived VRAM user id for a skeleton product (uses the kUserProductBase + ProductId namespace).
+constexpr uint16_t ProductVramUserId(ProductId id) { return static_cast<uint16_t>(kUserProductBase + id); }
+
 struct VramUser {
     uint16_t id = 0;
     const char* name = "";
@@ -382,12 +385,8 @@ inline TierPlan PlanTiers(const Registry& reg, const Graph& g, const CardProfile
     }
 
     // The governor input: every other user, then the VRAM products.
-    GovernorInput gi;
-    gi.card = card;
-    gi.ownUsageBytes = in.ownUsageBytes;
-    gi.transientBytes = in.transientBytes;
-    gi.headroom = in.headroom;
-    gi.users = in.otherUsers;
+    GovernorInput gi; gi.card = card; gi.ownUsageBytes = in.ownUsageBytes; gi.transientBytes = in.transientBytes;
+    gi.headroom = in.headroom; gi.users = in.otherUsers;
     std::vector<int> userOf(all.size(), -1);
     std::vector<size_t> inRenderLevel(all.size(), 0);   // the level that is the identical in-render form (full history)
     std::vector<std::vector<uint8_t>> levelHistory(all.size());   // governed products: granted depth per level
@@ -398,11 +397,8 @@ inline TierPlan PlanTiers(const Registry& reg, const Graph& g, const CardProfile
         all[i].historyGranted = n.historyFull;
         if (all[i].residency != Residency::Vram)
             continue;
-        VramUser u;
-        u.id = uint16_t(kUserProductBase + n.id);
-        u.name = reg.Get(n.id).name;
-        u.tier = n.tier;
-        u.shedOrder = shed[i];
+        VramUser u; u.id = uint16_t(kUserProductBase + n.id); u.name = reg.Get(n.id).name;
+        u.tier = n.tier; u.shedOrder = shed[i];
         // The lane-drop level keeps the picture only when the product can be RECOMPUTED in the render (identical result). A single-store
         // product has no live fill: its lane-drop level is "not kept", i.e. its readers lose the store and run their own visible fallback,
         // a reduced (non-identical) mode, so it must not rank as lossless (S2: it used to be shed before lossy products of its tier by
@@ -436,8 +432,15 @@ inline TierPlan PlanTiers(const Registry& reg, const Graph& g, const CardProfile
                 levelHistory[i].push_back(uint8_t(h));
             }
         }
-        userOf[i] = int(gi.users.size());
-        gi.users.push_back(u);
+        int existing = -1;
+        for (size_t k = 0; k < gi.users.size(); ++k)
+            if (gi.users[k].id == u.id) { existing = int(k); break; }
+        if (existing >= 0) {
+            const uint64_t extra = LevelBytes(gi.users[size_t(existing)], 0);
+            for (uint64_t& b : u.levels) b += extra;
+            gi.users[size_t(existing)] = u; userOf[i] = existing;
+        } else {
+            userOf[i] = int(gi.users.size()); gi.users.push_back(u); }
     }
     std::vector<size_t> level;
     plan.governor = PlanVram(gi, &level);

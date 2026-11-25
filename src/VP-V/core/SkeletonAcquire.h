@@ -188,6 +188,7 @@ enum class AcquireCause : uint8_t {
     NotQueued,           // the frame is beyond the queue window (seq > current + ahead): not a fill (design s2.3)
     NotPlannedAhead,     // the frame is beyond the product's planned ahead depth (SetAheadPlan; design s2.7): made at its render
     PresentsStalled,     // presents stopped advancing past the window (design s9.0 A3 / audit S3): ahead demand stops, nothing evicted
+    ReadbackPending,     // async GPU -> CPU readback in flight (non-latched: retries on next Acquire; mirrors LanePending)
     CauseCount
 };
 
@@ -221,6 +222,7 @@ inline const char* Token(AcquireCause c)
     case AcquireCause::NotQueued: return "frame not in the queue yet";
     case AcquireCause::NotPlannedAhead: return "not planned this far ahead (made at its render)";
     case AcquireCause::PresentsStalled: return "presents stalled: no work ahead until they move";
+    case AcquireCause::ReadbackPending: return "readback pending";
     case AcquireCause::CauseCount: break;
     }
     return "?";
@@ -254,6 +256,9 @@ struct OwnerFillOutput {
     std::vector<uint8_t> bytes;
     GpuMemoHandle gpu;
     std::string declineReason;   // a declining fill's reason: shown with the cause (LastCause, Fallbacks entry)
+    // Non-latched async readback pending (S#1 / R1): when the fill returns false with pending = true, Acquire reports
+    // AcquireCause::ReadbackPending and does NOT latch Declined in memo_ so subsequent calls retry (mirrors LanePending).
+    bool pending = false;
     // PER-RESULT lifetime (design s2.3): Frame = a one-render-frame VIEW (released at the next seal, e.g. P13 of the render
     // frame); Window = kept with its frame in the queue (an owned ahead texture); FillDefault = OwnerFill::frameScoped.
     enum class Scope : uint8_t { FillDefault, Frame, Window } scope = Scope::FillDefault;
@@ -452,34 +457,17 @@ public:
     bool UnbindLane(const void* token)
     {
         std::lock_guard<std::mutex> g(mutex_);
-        if (token == nullptr || lane_.token != token)
-            return false;
+        if (token == nullptr || lane_.token != token) return false;
         lane_ = LaneSlotSource();
         laneOwners_.clear();
         RefreshHasAheadDemandsLocked();
         return true;
     }
-    bool LaneBound() const
-    {
-        std::lock_guard<std::mutex> g(mutex_);
-        return bool(lane_.read) || bool(lane_.copyPublished);
-    }
-    uint64_t LaneBinds() const
-    {
-        std::lock_guard<std::mutex> g(mutex_);
-        return laneBinds_;
-    }
+    bool LaneBound() const { std::lock_guard<std::mutex> g(mutex_); return bool(lane_.read) || bool(lane_.copyPublished); }
+    uint64_t LaneBinds() const { std::lock_guard<std::mutex> g(mutex_); return laneBinds_; }
     // The render thread (the skeleton, every Begin). Not declared = every thread counts as the render thread.
-    void SetRenderThread(std::thread::id id)
-    {
-        std::lock_guard<std::mutex> g(mutex_);
-        renderThread_ = id;
-    }
-    bool OnRenderThread() const
-    {
-        std::lock_guard<std::mutex> g(mutex_);
-        return OnRenderThreadLocked();
-    }
+    void SetRenderThread(std::thread::id id) { std::lock_guard<std::mutex> g(mutex_); renderThread_ = id; }
+    bool OnRenderThread() const { std::lock_guard<std::mutex> g(mutex_); return OnRenderThreadLocked(); }
     // A frame whose memo spots were released (a request for it is FrameReleased).
     bool Released(uint64_t seq) const
     {
@@ -1098,18 +1086,16 @@ public:
             ok = fill.fill(req, *this, out);
         } catch (...) {
             ok = false;   // a throwing fill is a decline (counted, visible), never a stuck Filling entry
+            out.pending = false;
         }
         FillingOnThisThread().pop_back();
         if (gpuContext)
             gpuContext->Close();   // a kept pointer gets nothing after the fill
         if (!ok && gpuContext && gpuContext->Refused() != 0 && out.declineReason.empty())
             out.declineReason = gpuContext->LastRefusal();   // a refused allocation is worded with the decline
-        if (ok && form == AcquireForm::Cpu && out.bytes.empty())
-            ok = false;
-        if (ok && form == AcquireForm::Gpu && !out.gpu.Valid())
-            ok = false;
-        if (ok && fill.view && out.gpu.bytes != 0)
-            ok = false;   // a view allocates nothing: bytes would be outside the ledger
+        if (ok && form == AcquireForm::Cpu && out.bytes.empty()) { ok = false; out.pending = false; }
+        if (ok && form == AcquireForm::Gpu && !out.gpu.Valid()) { ok = false; out.pending = false; }
+        if (ok && fill.view && out.gpu.bytes != 0) { ok = false; out.pending = false; }
         lk.lock();
         AcquireCounters& c2 = counters_[id];
         if (gpuContext) {
@@ -1117,7 +1103,7 @@ public:
             c2.gpuAllocBytes += gpuContext->Used();
             c2.gpuAllocRefused += gpuContext->Refused();
         }
-        AcquireCause cause = ok ? AcquireCause::None : AcquireCause::OwnerDeclined;
+        AcquireCause cause = ok ? AcquireCause::None : (out.pending ? AcquireCause::ReadbackPending : AcquireCause::OwnerDeclined);
         if (ok && form == AcquireForm::Gpu && !e->orphaned && out.gpu.bytes > e->reserved
             && gpuBytes_ - e->reserved + out.gpu.bytes > gpuBudget_)
             cause = AcquireCause::OverBudget;
@@ -1128,6 +1114,13 @@ public:
         if (cause != AcquireCause::None) {
             e->state = Entry::Declined;
             e->cause = cause;
+            if (cause == AcquireCause::ReadbackPending) {
+                // Non-latched async readback pending (S#1 / R1): erase from memo_ BEFORE notifying waiters so concurrent
+                // waiters wake up with ReadbackPending while subsequent Acquire calls retry cleanly (never latched Declined).
+                const auto self = memo_.find(key);
+                if (self != memo_.end() && self->second == e)
+                    memo_.erase(self);
+            }
             cv_.notify_all();
             if (cause == AcquireCause::OverBudget && e->ahead && !e->orphaned) {
                 // The s2.7 safety net: an AHEAD fill measured above its reserve is a plan miss. Its key is not kept declined, so the

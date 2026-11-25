@@ -1390,8 +1390,8 @@ namespace SkeletonCoreContextTestsNs
 				Assert::IsTrue(ids[i] != uint16_t(kUserSkeletonMemo), L"not a declarable user");
 		}
 	};
-	// R14-97 M3: the reserved ids of the fixed product-id table (30 band_memo, 32 focus_map, 34 composed_vectors; 33 room_light landed in CF-1 CAM-2) are ABSENT
-	// slots: no declaration, no reads, fail closed everywhere a name could reach them.
+	// R14-97 M3: the reserved ids of the fixed product-id table (34 composed_vectors; 30 band_memo landed in C8 slice 8,
+	// 32 focus_map landed in S#0/F0, 33 room_light landed in CF-1 CAM-2) are ABSENT slots: no declaration, no reads, fail closed everywhere a name could reach them.
 	TEST_CLASS(ReservedProductIdTests)
 	{
 	public:
@@ -1401,7 +1401,9 @@ namespace SkeletonCoreContextTestsNs
 			const char* why = "";
 			Assert::IsTrue(reg.Validate(&why), L"valid with absent slots");
 			Assert::IsTrue(reg.Size() == size_t(kSkeletonProductEnd), L"Size() is the id span");
-			Assert::IsTrue(reg.ReservedAbsent() == 2u && kReservedProductCount == 2u, L"two reserved slots (kBandMemo unreserved by C8 slice 8, kRoomLight unreserved by CF-1)");
+			// WAIVER-S18-F0-TESTS: kFocusMap (id 32) unreserved and landed; only kComposedVectors (id 34) remains reserved (2 -> 1).
+			Assert::IsTrue(reg.ReservedAbsent() == 1u && kReservedProductCount == 1u, L"one reserved slot (kComposedVectors; kBandMemo, kFocusMap and kRoomLight landed)");
+			Assert::IsTrue(reg.Has(kFocusMap) && kFocusMap == 32 && !IsReservedProduct(kFocusMap), L"focus_map landed at its fixed id 32 and is no longer reserved");
 			for (ProductId id : kReservedProductIds)
 			{
 				Assert::IsTrue(IsReservedProduct(id) && !reg.Has(id), L"absent: Has() is false");
@@ -1414,7 +1416,8 @@ namespace SkeletonCoreContextTestsNs
 		TEST_METHOD(ARealDeclarationAtAReservedIdIsRejected)
 		{
 			std::vector<ProductDecl> d = SkeletonProducts().All();
-			d[kFocusMap] = detail::Make(kFocusMap, "focus_map", "focus map", Backend::Cpu, 1, Tier::T1, 0, 0);
+			// WAIVER-S18-F0-TESTS: kFocusMap landed at id 32; exercise the still-reserved slot kComposedVectors (id 34).
+			d[kComposedVectors] = detail::Make(kComposedVectors, "composed_vectors", "composed vectors", Backend::Cpu, 1, Tier::T1, 0, 0);
 			const char* why = "";
 			Assert::IsFalse(Registry(d).Validate(&why), L"a declaration at a reserved id is refused");
 			Assert::IsTrue(std::string(why).find("reserved") != std::string::npos, L"with the reason");
@@ -1423,7 +1426,8 @@ namespace SkeletonCoreContextTestsNs
 		TEST_METHOD(AnInputNamingAReservedIdIsRejected)
 		{
 			std::vector<ProductDecl> d = SkeletonProducts().All();
-			detail::AddInput(d[kP4SourceStats], kFocusMap, 0);
+			// WAIVER-S18-F0-TESTS: kFocusMap landed at id 32; exercise the still-reserved slot kComposedVectors (id 34).
+			detail::AddInput(d[kP4SourceStats], kComposedVectors, 0);
 			const char* why = "";
 			Assert::IsFalse(Registry(d).Validate(&why), L"an input naming an absent slot fails closed");
 			Assert::IsTrue(std::string(why).find("unknown input") != std::string::npos, L"unknown input product");
@@ -1434,7 +1438,8 @@ namespace SkeletonCoreContextTestsNs
 			ConsumerDecl c;
 			c.id = 1;
 			c.name = "reserved reader";
-			AddConsume(c, kFocusMap);
+			// WAIVER-S18-F0-TESTS: kFocusMap landed at id 32; exercise the still-reserved slot kComposedVectors (id 34).
+			AddConsume(c, kComposedVectors);
 			GraphSettings gs;
 			const Graph g = BuildGraph(SkeletonProducts(), std::vector<ConsumerDecl>(1, c), gs);
 			Assert::IsFalse(g.valid, L"a consumer of an unlanded product is refused, visibly");
@@ -1454,10 +1459,11 @@ namespace SkeletonCoreContextTestsNs
 			}
 			const std::vector<std::string> lines = m.StatusLines();
 			bool listed = false;
+			// WAIVER-S18-F0-TESTS: reserved status line lists composed_vectors only (focus_map landed and is no longer reserved).
 			for (const std::string& l : lines)
-				listed = listed || (l.find("reserved product ids") != std::string::npos && l.find("focus_map") != std::string::npos
-					&& l.find("composed_vectors") != std::string::npos);
-			Assert::IsTrue(listed, L"the Ctrl+Alt+D status lists the reserved ids and names");
+				listed = listed || (l.find("reserved product ids") != std::string::npos && l.find("composed_vectors") != std::string::npos
+					&& l.find("focus_map") == std::string::npos);
+			Assert::IsTrue(listed, L"the Ctrl+Alt+D status lists the reserved id and name (composed_vectors; focus_map landed)");
 		}
 	};
 }
