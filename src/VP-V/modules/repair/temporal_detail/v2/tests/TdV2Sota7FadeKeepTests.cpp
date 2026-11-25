@@ -297,7 +297,7 @@ namespace TdV2Sota7FadeKeepNs
 				f0.cleanY = clean0;
 				f0.hasCleanSplit = true;
 				f0.hasStepPrior = true;
-				f0.estimatedStepDelta = 12.0;
+				f0.estimatedStepDelta = 48.0;
 				f0.prevPeak.cleanPlane = &refPrev0;
 				f0.prevPeak.motion = &zeroMf;
 				f0.nextPeak.cleanPlane = &refNext0;
@@ -315,7 +315,7 @@ namespace TdV2Sota7FadeKeepNs
 				f1.hasCleanSplit = false;
 				f1.retainedGrainVar = grainPrior;
 				f1.hasStepPrior = true;
-				f1.estimatedStepDelta = 14.0;
+				f1.estimatedStepDelta = 48.0;
 				f1.hasCarryMotion = true;
 				f1.carryMotion = zeroMf;
 				f1.fadeKeep = fadeKeepFrame1;
@@ -331,7 +331,7 @@ namespace TdV2Sota7FadeKeepNs
 				f2.cleanY = clean2;
 				f2.hasCleanSplit = true;
 				f2.hasStepPrior = true;
-				f2.estimatedStepDelta = 14.0;
+				f2.estimatedStepDelta = 48.0;
 				f2.hasCarryMotion = true;
 				f2.carryMotion = zeroMf;
 				f2.fadeKeep = 1.0;

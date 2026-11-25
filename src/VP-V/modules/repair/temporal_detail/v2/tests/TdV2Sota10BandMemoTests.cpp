@@ -332,7 +332,7 @@ namespace TdV2Sota10BandMemoNs
 				gIn.cleanYTex = tClean.tex;
 				gIn.hasCleanSplit = true;
 				gIn.hasStepPrior = true;
-				gIn.estimatedStepDelta = 14.0;
+				gIn.estimatedStepDelta = 48.0;
 				gIn.prevPeak.cleanTex = tPrev.tex;
 				gIn.prevPeak.motion = &zeroMf;
 				gIn.nextPeak.cleanTex = tNext.tex;

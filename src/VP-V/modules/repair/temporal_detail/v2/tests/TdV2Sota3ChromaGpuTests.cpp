@@ -383,20 +383,21 @@ namespace TdV2Sota3ChromaGpuNs
 				Assert::IsTrue(MaxAbsDiffRect(outExtractedGrainCb, grainDelivCb, dRoi) <= 1e-3,
 					L"Own chroma grain must pass through untouched when clean split has zero leak");
 
-				// Mandatory Same-Input Negative Control: naive 3-frame chroma average crushes own chroma grain variance!
+				// Mandatory Same-Input Negative Control: naive 3-frame chroma average crushes own chroma grain variance to ~1/9!
 				const TdV2Plane prevDelivCb = UpsampleDeltaToDelivered(
 					prevCb, lumaW, lumaH, ChromaSubsampling::Yuv420, delivFmt, siting, lumaFull, nullptr);
 				const TdV2Plane nextDelivCb = UpsampleDeltaToDelivered(
 					nextCb, lumaW, lumaH, ChromaSubsampling::Yuv420, delivFmt, siting, lumaFull, nullptr);
-				TdV2Plane naiveAvgResidual(masterDelivCb.w, masterDelivCb.h, 0.0);
-				for (size_t i = 0; i < naiveAvgResidual.v.size(); ++i)
+				TdV2Plane naiveExtractedGrainCb(masterDelivCb.w, masterDelivCb.h, 0.0);
+				for (size_t i = 0; i < naiveExtractedGrainCb.v.size(); ++i)
 				{
 					const double avg = (recDelivCb.v[i] + prevDelivCb.v[i] + nextDelivCb.v[i]) / 3.0;
-					naiveAvgResidual.v[i] = avg - masterDelivCb.v[i];
+					const double cleanExpectedAvg = (cleanDelivCb.v[i] + 2.0 * masterDelivCb.v[i]) / 3.0;
+					naiveExtractedGrainCb.v[i] = avg - cleanExpectedAvg;
 				}
 				const double trueGrainVar = FineBandVarianceRect(grainDelivCb, dRoi);
 				const double gpuGrainVar = FineBandVarianceRect(outExtractedGrainCb, dRoi);
-				const double naiveGrainVar = FineBandVarianceRect(naiveAvgResidual, dRoi);
+				const double naiveGrainVar = FineBandVarianceRect(naiveExtractedGrainCb, dRoi);
 				Assert::IsTrue(gpuGrainVar >= 0.96 * trueGrainVar && naiveGrainVar < 0.25 * trueGrainVar,
 					FmtMsg("Own chroma grain variance retention: gpu=%.4f, naive=%.4f, true=%.4f",
 						gpuGrainVar, naiveGrainVar, trueGrainVar).c_str());
@@ -608,7 +609,11 @@ namespace TdV2Sota3ChromaGpuNs
 			std::vector<uint8_t> bokehMask(numCells, 0u);
 			faceMask[static_cast<size_t>(1 * cw + 1)] = 1u;  // Cell (1, 1): coded [8..16)x[8..16), deliv 4:2:2 [8..16)x[16..32)
 			rackMask[static_cast<size_t>(1 * cw + 3)] = 1u;  // Cell (3, 1): coded [24..32)x[8..16), deliv 4:2:2 [24..32)x[16..32)
-			bokehMask[static_cast<size_t>(1 * cw + 5)] = 1u; // Cell (5, 1): coded [40..48)x[8..16), deliv 4:2:2 [40..48)x[16..32)
+			// 2x2 bokeh block (5..6, 1..2): coded [40..56)x[8..24), deliv 4:2:2 [40..56)x[16..48) so interior stays outside G_fine rFine=3 halo!
+			bokehMask[static_cast<size_t>(1 * cw + 5)] = 1u;
+			bokehMask[static_cast<size_t>(1 * cw + 6)] = 1u;
+			bokehMask[static_cast<size_t>(2 * cw + 5)] = 1u;
+			bokehMask[static_cast<size_t>(2 * cw + 6)] = 1u;
 
 			ChromaProcessInput in;
 			in.seq = 330;
@@ -661,13 +666,13 @@ namespace TdV2Sota3ChromaGpuNs
 			const ChromaGpuProcessResult gpuUnt = gUnt.engine.ProcessChromaPlanes(ctx.gpu, ctx.dispatch, maskedIn, nullptr, &siUnt);
 			Assert::IsTrue(gpuUnt.succeeded);
 			Assert::AreEqual(static_cast<size_t>(1u), gpuUnt.faceMaskedCells);
-			Assert::AreEqual(static_cast<size_t>(2u), gpuUnt.focusVetoCells);
+			Assert::AreEqual(static_cast<size_t>(5u), gpuUnt.focusVetoCells);
 			Assert::IsTrue(siUnt.IsActive(StandInKind::FaceNonRigidMask));
 
-			// Coded-grid zero-delta check on all 3 masked/vetoed cells
+			// Coded-grid zero-delta check on all masked/vetoed cells
 			Assert::AreEqual(0.0, MaxAbsRect(gpuUnt.codedDeltaCb, ActiveRect{ 8, 8, 16, 16 }), L"Face codedDeltaCb must be 0.0");
 			Assert::AreEqual(0.0, MaxAbsRect(gpuUnt.codedDeltaCb, ActiveRect{ 24, 8, 32, 16 }), L"Rack codedDeltaCb must be 0.0");
-			Assert::AreEqual(0.0, MaxAbsRect(gpuUnt.codedDeltaCb, ActiveRect{ 40, 8, 48, 16 }), L"Untouched bokeh codedDeltaCb must be 0.0");
+			Assert::AreEqual(0.0, MaxAbsRect(gpuUnt.codedDeltaCb, ActiveRect{ 40, 8, 56, 24 }), L"Untouched bokeh codedDeltaCb must be 0.0");
 
 			// Delivered 4:2:2 strict zero-delta & bit-exact passthrough check (matching CPU TdV2ChromaEngine!)
 			Assert::AreEqual(0.0, MaxAbsRect(cpuUnt.deliveredDeltaCb, ActiveRect{ 8, 16, 16, 32 }), L"CPU face deliveredDeltaCb must be 0.0");
@@ -677,7 +682,7 @@ namespace TdV2Sota3ChromaGpuNs
 				L"GPU face-masked cell outputCb MUST stay bit-exact receivedCb on 4:2:0->4:2:2");
 			Assert::AreEqual(0.0, MaxAbsRect(gpuUnt.deliveredDeltaCb, ActiveRect{ 24, 16, 32, 32 }),
 				L"GPU rack-focus cell MUST keep deliveredDeltaCb == 0.0 across 4:2:0->4:2:2 upsampling");
-			Assert::AreEqual(0.0, MaxAbsRect(gpuUnt.deliveredDeltaCb, ActiveRect{ 40, 16, 48, 32 }),
+			Assert::AreEqual(0.0, MaxAbsRect(gpuUnt.deliveredDeltaCb, ActiveRect{ 40, 16, 56, 48 }),
 				L"GPU BokehMode::Untouched defocused cell MUST keep deliveredDeltaCb == 0.0 across 4:2:0->4:2:2 upsampling");
 
 			// BokehMode::LowBandCellOnly allows L-band on bokeh cell while keeping rack-focus & face cells strictly 0.0!
@@ -689,9 +694,9 @@ namespace TdV2Sota3ChromaGpuNs
 			Assert::AreEqual(0.0, MaxAbsRect(gpuLow.codedDeltaCb, ActiveRect{ 24, 8, 32, 16 }),
 				L"Rack-focus codedDeltaCb must stay 0.0 under BokehMode::LowBandCellOnly");
 			const ThreeBandPlanes lowBands = DecomposeActiveBands(gpuLow.codedDeltaCb, ActiveRect::Full(cW, cH));
-			Assert::IsTrue(RmsRect(lowBands.L, ActiveRect{ 42, 10, 46, 14 }) > 2.0,
+			Assert::IsTrue(RmsRect(lowBands.L, ActiveRect{ 44, 12, 52, 20 }) > 2.0,
 				L"BokehMode::LowBandCellOnly must allow L-band recovery on defocused cell");
-			Assert::IsTrue(RmsRect(lowBands.H, ActiveRect{ 42, 10, 46, 14 }) < 0.35,
+			Assert::IsTrue(RmsRect(lowBands.H, ActiveRect{ 44, 12, 52, 20 }) < 0.35,
 				L"BokehMode::LowBandCellOnly must hard-veto H-band on defocused cell");
 		}
 

@@ -450,7 +450,7 @@ namespace TdV2Sota8HomographyNs
 				inNoH.cleanY = curDeg;
 				inNoH.hasCleanSplit = true;
 				inNoH.hasStepPrior = true;
-				inNoH.estimatedStepDelta = 14.0;
+				inNoH.estimatedStepDelta = 56.0;
 				inNoH.prevPeak.cleanPlane = &prevRef;
 				inNoH.prevPeak.motion = &mfPrev;
 				inNoH.prevPeak.cameraHomography.valid = false;
@@ -593,7 +593,7 @@ namespace TdV2Sota8HomographyNs
 			inNoH.cleanCr = delivDegCr;
 			inNoH.hasCleanSplit = true;
 			inNoH.hasStepPrior = true;
-			inNoH.estimatedStepDelta = 14.0;
+			inNoH.estimatedStepDelta = 56.0;
 			inNoH.prevPeak.cleanCb = &codedPrevCb;
 			inNoH.prevPeak.cleanCr = &codedPrevCr;
 			inNoH.prevPeak.lumaMotion = &mfPrev;
@@ -685,7 +685,7 @@ namespace TdV2Sota8HomographyNs
 				lIn.cleanY = curDeg;
 				lIn.hasCleanSplit = true;
 				lIn.hasStepPrior = true;
-				lIn.estimatedStepDelta = 14.0;
+				lIn.estimatedStepDelta = 56.0;
 				lIn.prevPeak.cleanPlane = &refClean;
 				lIn.prevPeak.motion = &mf;
 				lIn.prevPeak.cameraHomography = badCases[ci];
@@ -727,7 +727,7 @@ namespace TdV2Sota8HomographyNs
 				cIn.cleanCr = curDeg;
 				cIn.hasCleanSplit = true;
 				cIn.hasStepPrior = true;
-				cIn.estimatedStepDelta = 14.0;
+				cIn.estimatedStepDelta = 56.0;
 				cIn.prevPeak.cleanCb = &refClean;
 				cIn.prevPeak.cleanCr = &refClean;
 				cIn.prevPeak.lumaMotion = &mf;

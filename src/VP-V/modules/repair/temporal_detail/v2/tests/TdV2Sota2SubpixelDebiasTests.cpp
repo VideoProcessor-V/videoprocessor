@@ -264,8 +264,8 @@ namespace TdV2Sota2SubpixelDebiasNs
 			//   nextPeak sits at (+0.5, +0.5) (warped with mv = (+0.5, +0.5) -> fractional phase 0.5, 0.5).
 			// Current frame has ZERO coding loss! Any H-band attenuation comes purely from false c_A1 upward bias.
 			const TdV2Plane curSharp = RenderShiftedHighFreq(w, h, 0.0, 0.0);
-			const TdV2Plane prevHalf = RenderShiftedHighFreq(w, h, +0.5, +0.5); // sample at (x - 0.5, y - 0.5) aligns!
-			const TdV2Plane nextHalf = RenderShiftedHighFreq(w, h, -0.5, -0.5); // sample at (x + 0.5, y + 0.5) aligns!
+			const TdV2Plane prevHalf = RenderShiftedHighFreq(w, h, -0.5, -0.5); // sample at (x - 0.5, y - 0.5) -> HighFreqMasterAt(x, y)!
+			const TdV2Plane nextHalf = RenderShiftedHighFreq(w, h, +0.5, +0.5); // sample at (x + 0.5, y + 0.5) -> HighFreqMasterAt(x, y)!
 
 			const CellMotionField mfPrevHalf = CellMotionField::Uniform(cw, ch, -0.5, -0.5, -0.5, -0.5, RegionMotionClass::Still);
 			const CellMotionField mfNextHalf = CellMotionField::Uniform(cw, ch, +0.5, +0.5, +0.5, +0.5, RegionMotionClass::Still);
@@ -279,7 +279,7 @@ namespace TdV2Sota2SubpixelDebiasNs
 			halfIn.prevPeak = { &prevHalf, &mfPrevHalf, false };
 			halfIn.nextPeak = { &nextHalf, &mfNextHalf, false };
 			halfIn.hasStepPrior = true;
-			halfIn.estimatedStepDelta = 32.0; // Realistic B-frame QP step so cA2 does not hide false cA1 bias
+			halfIn.estimatedStepDelta = 44.0; // Realistic B-frame QP step so cA2 does not hide false cA1 bias or Case-C wipe recovery
 			halfIn.deadZonePhi = kDeadZonePhiInter;
 			halfIn.zeroCoeffFraction = 0.35;
 
@@ -324,8 +324,8 @@ namespace TdV2Sota2SubpixelDebiasNs
 
 			// Case B: Integer-pel (-1.0, +1.0) pan control -> debias=true vs debias=false MUST be bit-identical!
 			{
-				const TdV2Plane prevInt = RenderShiftedHighFreq(w, h, +1.0, -1.0);
-				const TdV2Plane nextInt = RenderShiftedHighFreq(w, h, -1.0, +1.0);
+				const TdV2Plane prevInt = RenderShiftedHighFreq(w, h, -1.0, +1.0);
+				const TdV2Plane nextInt = RenderShiftedHighFreq(w, h, +1.0, -1.0);
 				const CellMotionField mfPrevInt = CellMotionField::Uniform(cw, ch, -1.0, +1.0, -1.0, +1.0, RegionMotionClass::Still);
 				const CellMotionField mfNextInt = CellMotionField::Uniform(cw, ch, +1.0, -1.0, +1.0, -1.0, RegionMotionClass::Still);
 

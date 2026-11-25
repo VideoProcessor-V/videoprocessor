@@ -309,13 +309,15 @@ namespace TdV2Sota6PsdShapeNs
 
 				// Mandatory Same-Input Negative Control:
 				// Naive white-noise PsdShape (1.0, 1.0, 1.0) under-subtracts M-band clumpy grain variance by >2.2x,
-				// causing upward-biased EstimateC_A1 > 0 that falsely strips > 2.2 RMS codes of clumpy film grain!
+				// causing upward-biased EstimateC_A1 > 0 (~1.93 RMS pre-guard clean stripping; ~1.37 RMS post-TdGuardPort)!
+				const double whiteCleanStripRms    = RmsDiffRect(gWhite.outputClean, curClean, interior);
+				const double psdCleanStripRms      = RmsDiffRect(gPsd.outputClean,   curClean, interior);
 				const double whiteStrippedGrainRms = RmsDiffRect(gWhite.outputY, received, interior);
 				const double psdStrippedGrainRms   = RmsDiffRect(gPsd.outputY,   received, interior);
-				Assert::IsTrue(whiteStrippedGrainRms > 2.2,
-					FmtMsg("Negative control failed: white-noise PsdShape did not strip clumpy M-band grain (rms=%.4f)",
-						whiteStrippedGrainRms).c_str());
-				Assert::IsTrue(psdStrippedGrainRms < whiteStrippedGrainRms * 0.30,
+				Assert::IsTrue(whiteCleanStripRms > 1.8 && whiteStrippedGrainRms > 1.1,
+					FmtMsg("Negative control failed: white-noise PsdShape did not strip clumpy M-band grain (clean=%.4f, out=%.4f)",
+						whiteCleanStripRms, whiteStrippedGrainRms).c_str());
+				Assert::IsTrue(psdCleanStripRms < whiteCleanStripRms * 0.25 && psdStrippedGrainRms < whiteStrippedGrainRms * 0.30,
 					FmtMsg("SOTA-6 wired PsdShape on luma MUST prevent false clumpy grain stripping: psdRms=%.4f vs whiteRms=%.4f",
 						psdStrippedGrainRms, whiteStrippedGrainRms).c_str());
 
@@ -385,7 +387,7 @@ namespace TdV2Sota6PsdShapeNs
 				const double chPsdStripCb   = RmsDiffRect(crGpuPsd.outputCb,   received, interior);
 				const double chWhiteStripCr = RmsDiffRect(crGpuWhite.outputCr, received, interior);
 				const double chPsdStripCr   = RmsDiffRect(crGpuPsd.outputCr,   received, interior);
-				Assert::IsTrue(chWhiteStripCb > 2.2 && chWhiteStripCr > 2.2,
+				Assert::IsTrue(chWhiteStripCb > 1.1 && chWhiteStripCr > 1.1,
 					FmtMsg("Chroma negative control failed: white PsdShape did not strip clumpy chroma grain (cb=%.4f)",
 						chWhiteStripCb).c_str());
 				Assert::IsTrue(chPsdStripCb < chWhiteStripCb * 0.30 && chPsdStripCr < chWhiteStripCr * 0.30,

@@ -414,20 +414,22 @@ namespace TdV2MinorsTestsNs
 			const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
 
 			// Cell layout (8x4):
-			//   Rack-focus cell (cx=1, cy=1): coded rect [8..16) x [8..16), delivered 4:2:2 rect [8..16) x [16..32)
-			//   Bokeh cell      (cx=4, cy=1): coded rect [32..40) x [8..16), delivered 4:2:2 rect [32..40) x [16..32)
-			//   Sharp cell      (cx=6, cy=2): coded rect [48..56) x [16..24), delivered 4:2:2 rect [48..56) x [32..48)
+			//   Rack-focus cell (cx=1, cy=1):       coded rect [8..16) x [8..16),   delivered 4:2:2 rect [8..16) x [16..32)
+			//   Bokeh 2x2 block (cx=3..4, cy=1..2): coded rect [24..40) x [8..24),  delivered 4:2:2 rect [24..40) x [16..48)
+			//   Sharp cell      (cx=6, cy=2):       coded rect [48..56) x [16..24), delivered 4:2:2 rect [48..56) x [32..48)
 			const size_t rackCell = static_cast<size_t>(1 * cw + 1);
-			const size_t bokehCell = static_cast<size_t>(1 * cw + 4);
 			std::vector<uint8_t> rackMask(numCells, 0u);
 			std::vector<uint8_t> bokehMask(numCells, 0u);
 			rackMask[rackCell] = 1u;
-			bokehMask[bokehCell] = 1u;
+			bokehMask[static_cast<size_t>(1 * cw + 3)] = 1u;
+			bokehMask[static_cast<size_t>(1 * cw + 4)] = 1u;
+			bokehMask[static_cast<size_t>(2 * cw + 3)] = 1u;
+			bokehMask[static_cast<size_t>(2 * cw + 4)] = 1u;
 
 			const ActiveRect rackCodedRect{ 8, 8, 16, 16 };
 			const ActiveRect rackDelivRect{ 8, 16, 16, 32 };
-			const ActiveRect bokehCodedRect{ 32, 8, 40, 16 };
-			const ActiveRect bokehDelivRect{ 32, 16, 40, 32 };
+			const ActiveRect bokehCodedRect{ 24, 8, 40, 24 };
+			const ActiveRect bokehDelivRect{ 24, 16, 40, 48 };
 			const ActiveRect sharpDelivRect{ 48, 32, 56, 48 };
 
 			ChromaProcessInput baseIn;
@@ -476,7 +478,7 @@ namespace TdV2MinorsTestsNs
 
 			TdV2ChromaEngine engUntouched(cfgUntouched);
 			const ChromaProcessResult resUnt = engUntouched.ProcessFrame(maskedIn, nullptr);
-			Assert::AreEqual(static_cast<size_t>(2u), resUnt.focusVetoCells, L"focusVetoCells must count rack + bokeh cells");
+			Assert::AreEqual(static_cast<size_t>(5u), resUnt.focusVetoCells, L"focusVetoCells must count 1 rack + 4 bokeh cells");
 			Assert::AreEqual(0.0, MaxAbsRect(resUnt.codedDeltaCb, rackCodedRect), L"Rack-focus codedDeltaCb must be exact 0.0");
 			Assert::AreEqual(0.0, MaxAbsRect(resUnt.codedDeltaCr, rackCodedRect), L"Rack-focus codedDeltaCr must be exact 0.0");
 			Assert::AreEqual(0.0, MaxAbsRect(resUnt.deliveredDeltaCb, rackDelivRect), L"Rack-focus deliveredDeltaCb must be exact 0.0");
@@ -502,7 +504,8 @@ namespace TdV2MinorsTestsNs
 			Assert::AreEqual(0.0, MaxAbsRect(resLow.deliveredDeltaCb, rackDelivRect),
 				L"Rack-focus deliveredDeltaCb MUST stay exact 0.0 under BokehMode::LowBandCellOnly");
 
-			const ActiveRect bokehInterior{ 34, 10, 38, 14 }; // Interior of 8x8 coded cell away from 3-px filter halo
+			// 8x8 interior of 16x16 (2x2-cell) bokeh coded block (>= 4 coded px from sharp neighbors, outside G_fine rFine=3 halo)
+			const ActiveRect bokehInterior{ 28, 12, 36, 20 };
 			const ThreeBandPlanes lowCodedBands = DecomposeActiveBands(resLow.codedDeltaCb, ActiveRect::Full(cW, cH));
 			const double bokehLowL = RmsRect(lowCodedBands.L, bokehInterior);
 			const double bokehLowH = RmsRect(lowCodedBands.H, bokehInterior);

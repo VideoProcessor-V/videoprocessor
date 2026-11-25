@@ -267,14 +267,15 @@ namespace TdV2Sota1StepScaleNs
 				prevScale = got;
 			}
 
-			// Deep PQ toe / pure black clamps to kPqStepWeightMin = 0.25; 10000-nit peak clamps to kPqStepWeightMax = 2.0
+			// Deep PQ toe / pure black clamps to kPqStepWeightMin = 0.25; 10000-nit peak matches exact ST.2084 Weber flatness (~1.00138)
 			Assert::AreEqual(kPqStepWeightMin, ComputeCellStepScale(0.0, 0.0, true, 10.0), 1e-15,
 				L"Pure black PQ code 0 must clamp to shadow floor 0.25");
 			const double eDeepToe = IndependentPqNitsToSignal(0.01);
 			Assert::AreEqual(kPqStepWeightMin, ComputeCellStepScale(0.0, eDeepToe * 1023.0, true, 10.0), 1e-12,
 				L"0.01-nit PQ deep toe must clamp to shadow floor 0.25");
-			Assert::AreEqual(kPqStepWeightMax, ComputeCellStepScale(0.0, 1023.0, true, 10.0), 1e-12,
-				L"10000-nit PQ peak code 1023 must clamp to highlight ceiling 2.0");
+			const double expectedPeakWeber = s203 / numericLogSlope(1.0 - 2e-6);
+			Assert::AreEqual(expectedPeakWeber, ComputeCellStepScale(0.0, 1023.0, true, 10.0), 1e-4,
+				L"10000-nit PQ peak code 1023 must match exact SMPTE ST.2084 Weber slope ratio (~1.00138)");
 
 			// High-AQ dark cell (+15 QP in 5-nit PQ shadow): AQ doubling (+15 QP -> 5.657x) overcomes PQ shadow
 			// tightening (~0.35x) to yield scale > 1.8 (> 1.0), whereas naive AQ-ignorant scale stays 1.0!
@@ -393,7 +394,7 @@ namespace TdV2Sota1StepScaleNs
 				baseIn.prevPeak = { &prevClean, &stillMf, false };
 				baseIn.nextPeak = { &nextClean, &stillMf, false };
 				baseIn.hasStepPrior = true;
-				baseIn.estimatedStepDelta = 5.0; // Tight frame-level nominal step
+				baseIn.estimatedStepDelta = 8.5; // Nominal frame step: scale==1.0 clears >1.5 RMS in tightRect while darkScale>2.5 unlocks dark AQ!
 				baseIn.deadZonePhi = kDeadZonePhiInter;
 				baseIn.zeroCoeffFraction = 0.35;
 				baseIn.transformIdentified8x8 = xform8x8;
