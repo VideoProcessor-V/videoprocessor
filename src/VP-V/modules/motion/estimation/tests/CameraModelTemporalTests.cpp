@@ -1,14 +1,18 @@
 // Copyright(C) 2026 VP-V contributors
 // SPDX-License-Identifier: GPL-3.0-only
 #include "pch.h"
+#include <VP-V/core/SkeletonAcquire.h>
 #include <VP-V/modules/motion/estimation/global_model/GlobalModelTemporal.h>
 #include <VP-V/modules/motion/estimation/global_model/GlobalModelObjects.h>
 #include <VP-V/modules/motion/estimation/global_model/PixelResidualReference.h>
 #include <VP-V/modules/motion/estimation/global_model/GlobalModelGeometry.h>
+#include <VP-V/modules/motion/estimation/global_model/link/CameraRecordPool.h>
+#include <VP-V/modules/motion/estimation/global_model/link/CameraSmoother.h>
 #include "SyntheticCameraFields.h"
 #include "CppUnitTest.h"
 
 #include <cmath>
+#include <map>
 #include <vector>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
@@ -386,6 +390,149 @@ namespace VideoProcessorTest
 			Assert::IsTrue(without.Consistency(dt, probe) < withFloor.Consistency(dt, probe, fl), L"floor never makes it worse");
 			// A real 40x speed change is still flagged with the floor.
 			Assert::IsTrue(withFloor.Consistency(dt, Rates(0, 0, 20.0 / dt, 4.0 / dt), fl) < 0.2, L"a 40x change is still flagged");
+		}
+
+		// W23-B3 M2#11 (L-B4-P9-FILL): kP9CameraSmoothed CPU owner fill matches independent FixedLagSmoother(2),
+		// materially smooths noisy P7 pan records (negative control vs raw P7), visibly declines absent P7, falls back
+		// causally on short windows and laneLead == 0, and honours Reason::Cut segment boundaries.
+		TEST_METHOD(P9OwnerFillMatchesFixedLagSmootherAndDeclinesAbsentP7)
+		{
+			using Reg = VpSkeleton::SkeletonMemo::Registration;
+			const double dt = 1.0 / 24.0;
+
+			auto registerP7Map = [](VpSkeleton::SkeletonMemo& memo, const std::map<uint64_t, CameraMotion>& records) {
+				VpSkeleton::OwnerFill p7Fill;
+				p7Fill.renderThreadOnly = false;
+				p7Fill.fill = [records](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) -> bool {
+					const auto it = records.find(req.seq);
+					if (it == records.end())
+					{
+						out.declineReason = "no P7 record for seq";
+						return false;
+					}
+					uint8_t buf[CameraLink::kRecordPodMaxBytes]{};
+					const size_t n = CameraLink::EncodeRecordPod(it->second, buf, sizeof(buf));
+					if (n == 0) return false;
+					out.bytes.assign(buf, buf + n);
+					return true;
+				};
+				Assert::IsTrue(memo.RegisterOwnerFill(VpSkeleton::kP7CameraFit, VpSkeleton::AcquireForm::Cpu,
+					VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP7CameraFit), std::move(p7Fill)) == Reg::Registered);
+			};
+
+			// 5-frame noisy pan sequence (seq = 10..14): centre seq = 12 carries a +96 px/s (+4 px) jitter spike.
+			std::map<uint64_t, CameraMotion> p7;
+			const double txList[5] = { 240.0, 232.0, 336.0, 248.0, 240.0 };
+			const double tyList[5] = { -48.0, -44.0, -96.0, -52.0, -48.0 };
+			FixedLagSmoother refSmoother(2);
+			for (int i = 0; i < 5; ++i)
+			{
+				const uint64_t seq = 10u + static_cast<uint64_t>(i);
+				CameraMotion m = TransRecord(seq, txList[i], tyList[i], dt);
+				m.confidence = 0.9;
+				p7[seq] = m;
+				refSmoother.Push(m);
+			}
+			Params refParams;
+			Assert::IsTrue(refSmoother.Smoothed(12u, refParams), L"independent FixedLagSmoother(2) smooths seq=12");
+
+			VpSkeleton::SkeletonMemo memo;
+			registerP7Map(memo, p7);
+			CameraLink::P9OwnerCounters counters;
+			Assert::IsTrue(memo.RegisterOwnerFill(VpSkeleton::kP9CameraSmoothed, VpSkeleton::AcquireForm::Cpu,
+				CameraLink::kP9OwnerUnit, CameraLink::MakeP9OwnerFill(2, &counters)) == Reg::Registered);
+
+			// 1. Centre frame seq = 12: smoothed == true, effectiveLead == 2, matches FixedLagSmoother(2) to <= 1e-6.
+			const VpSkeleton::AcquireResult res12 = memo.Acquire(VpSkeleton::kP9CameraSmoothed, 12u, VpSkeleton::AcquireForm::Cpu);
+			Assert::IsTrue(res12.Ok() && res12.cpu != nullptr && res12.cpuBytes > 0, L"P9 acquire seq=12 ok");
+			CameraMotion dec12;
+			uint8_t lead12 = 0;
+			Assert::IsTrue(CameraLink::DecodeSmoothedPod(res12.cpu, res12.cpuBytes, dec12, &lead12), L"DecodeSmoothedPod seq=12");
+			Assert::IsTrue(dec12.smoothed, L"seq=12 is smoothed");
+			Assert::AreEqual(2, int(lead12), L"effectiveLead == 2");
+			Assert::IsTrue(dec12.smoothedParams.type == refParams.type, L"smoothed model type matches");
+			for (int i = 0; i < 9; ++i)
+				Assert::AreEqual(refParams.h[i], dec12.smoothedParams.h[i], 1e-6, L"smoothedParams matches FixedLagSmoother(2)");
+			Assert::AreEqual(uint64_t(1), counters.fills.load());
+			Assert::AreEqual(uint64_t(1), counters.smoothed.load());
+
+			// Negative control (a): raw unsmoothed P7 at seq = 12 diverges materially from smoothed P9 (proving real smoothing).
+			Assert::IsTrue(std::fabs(p7[12u].params.h[2] - dec12.smoothedParams.h[2]) > 1.5,
+				L"negative control: raw P7 tx at seq=12 diverges materially from smoothed P9");
+			Assert::IsTrue(std::fabs(p7[12u].params.h[5] - dec12.smoothedParams.h[5]) > 0.5,
+				L"negative control: raw P7 ty at seq=12 diverges materially from smoothed P9");
+
+			// Negative control (b): absent centre P7 (seq = 99) visibly declines with OwnerDeclined, non-empty LastCause, declines >= 1.
+			const VpSkeleton::AcquireResult resMissing = memo.Acquire(VpSkeleton::kP9CameraSmoothed, 99u, VpSkeleton::AcquireForm::Cpu);
+			Assert::IsFalse(resMissing.Ok(), L"absent centre P7 cannot produce P9");
+			Assert::IsTrue(resMissing.cause == VpSkeleton::AcquireCause::OwnerDeclined, L"absent P7 causes OwnerDeclined");
+			Assert::IsFalse(memo.LastCause(VpSkeleton::kP9CameraSmoothed).empty(), L"visible LastCause on absent P7");
+			Assert::IsTrue(counters.declines.load() >= 1u, L"decline counter incremented");
+
+			// Negative control (c1): window-short (seq = 14, future 15..16 absent) returns causal P7 with smoothed == false.
+			const VpSkeleton::AcquireResult res14 = memo.Acquire(VpSkeleton::kP9CameraSmoothed, 14u, VpSkeleton::AcquireForm::Cpu);
+			Assert::IsTrue(res14.Ok() && res14.cpu != nullptr && res14.cpuBytes > 0, L"window-short seq=14 serves causal P7");
+			CameraMotion dec14;
+			uint8_t lead14 = 99;
+			Assert::IsTrue(CameraLink::DecodeSmoothedPod(res14.cpu, res14.cpuBytes, dec14, &lead14));
+			Assert::IsFalse(dec14.smoothed, L"window-short seq=14 is causal (not smoothed)");
+			Assert::AreEqual(0, int(lead14), L"causal fallback records lead == 0");
+			Assert::AreEqual(p7[14u].params.h[2], dec14.params.h[2], 1e-9, L"causal fallback preserves raw P7 h[2]");
+			Assert::AreEqual(uint64_t(1), counters.causalFallback.load(), L"causalFallback counter incremented");
+
+			// Negative control (c2): laneLead == 0 returns causal P7 even when full window 10..14 exists.
+			{
+				VpSkeleton::SkeletonMemo memoZero;
+				registerP7Map(memoZero, p7);
+				CameraLink::P9OwnerCounters zeroCounters;
+				Assert::IsTrue(memoZero.RegisterOwnerFill(VpSkeleton::kP9CameraSmoothed, VpSkeleton::AcquireForm::Cpu,
+					CameraLink::kP9OwnerUnit, CameraLink::MakeP9OwnerFill(0, &zeroCounters)) == Reg::Registered);
+				const VpSkeleton::AcquireResult r0 = memoZero.Acquire(VpSkeleton::kP9CameraSmoothed, 12u, VpSkeleton::AcquireForm::Cpu);
+				Assert::IsTrue(r0.Ok());
+				CameraMotion dec0;
+				uint8_t lead0 = 99;
+				Assert::IsTrue(CameraLink::DecodeSmoothedPod(r0.cpu, r0.cpuBytes, dec0, &lead0));
+				Assert::IsFalse(dec0.smoothed, L"laneLead == 0 never smooths");
+				Assert::AreEqual(0, int(lead0));
+				Assert::AreEqual(p7[12u].params.h[2], dec0.params.h[2], 1e-9);
+				Assert::AreEqual(uint64_t(1), zeroCounters.causalFallback.load());
+				Assert::AreEqual(uint64_t(0), zeroCounters.smoothed.load());
+			}
+
+			// Negative control (d): cut boundary at seq = 13 (Reason::Cut) stops smoothing cleanly matching FixedLagSmoother.
+			{
+				std::map<uint64_t, CameraMotion> p7Cut = p7;
+				std::map<uint64_t, CameraMotion> p7NoCut = p7;
+				p7Cut[13u].reason = Reason::Cut;
+				p7Cut[13u].valid = false;
+				p7Cut[14u] = TransRecord(14u, -720.0, 240.0, dt);
+				p7NoCut[13u] = TransRecord(13u, -720.0, 240.0, dt);
+				p7NoCut[14u] = TransRecord(14u, -720.0, 240.0, dt);
+
+				FixedLagSmoother cutRefSmoother(2), noCutRefSmoother(2);
+				for (uint64_t s = 10u; s <= 14u; ++s)
+				{
+					cutRefSmoother.Push(p7Cut[s]);
+					noCutRefSmoother.Push(p7NoCut[s]);
+				}
+				Params cutRef, noCutRef;
+				Assert::IsTrue(cutRefSmoother.Smoothed(12u, cutRef), L"cut-bounded window still smooths past side");
+				Assert::IsTrue(noCutRefSmoother.Smoothed(12u, noCutRef));
+
+				VpSkeleton::SkeletonMemo memoCut;
+				registerP7Map(memoCut, p7Cut);
+				Assert::IsTrue(memoCut.RegisterOwnerFill(VpSkeleton::kP9CameraSmoothed, VpSkeleton::AcquireForm::Cpu,
+					CameraLink::kP9OwnerUnit, CameraLink::MakeP9OwnerFill(2, nullptr)) == Reg::Registered);
+				const VpSkeleton::AcquireResult rc = memoCut.Acquire(VpSkeleton::kP9CameraSmoothed, 12u, VpSkeleton::AcquireForm::Cpu);
+				Assert::IsTrue(rc.Ok());
+				CameraMotion decCut;
+				Assert::IsTrue(CameraLink::DecodeSmoothedPod(rc.cpu, rc.cpuBytes, decCut, nullptr));
+				Assert::IsTrue(decCut.smoothed, L"seq=12 smoothed across past neighbours up to cut at seq=13");
+				for (int i = 0; i < 9; ++i)
+					Assert::AreEqual(cutRef.h[i], decCut.smoothedParams.h[i], 1e-6, L"cut-bounded P9 matches FixedLagSmoother");
+				Assert::IsTrue(std::fabs(decCut.smoothedParams.h[2] - noCutRef.h[2]) > 5.0,
+					L"negative control: cut at seq=13 blocks post-cut motion from leaking into seq=12");
+			}
 		}
 	};
 
