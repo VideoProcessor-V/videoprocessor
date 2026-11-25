@@ -1279,7 +1279,9 @@ float rs_slope(float y)
 			mapState = MapState::NoField;
 			return false;
 		}
-		const bool first = resized || mapSequence == 0;
+		// A gap in the source sequence (the measure paused, a drop) starts over: the old map no
+		// longer follows the content (GEM-071).
+		const bool first = resized || mapSequence == 0 || !mapReady || sequence != mapSequence + 1;
 		const int next = 1 - mapIndex;
 		const float firstF = first ? 1.0f : 0.0f;
 		const float alpha = OnePole::AlphaForMs(frameSeconds * 1000.0f, settings.grainMapSmoothMs, OnePole::DtRule::AsGiven);
