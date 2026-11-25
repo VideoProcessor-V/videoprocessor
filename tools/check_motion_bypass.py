@@ -49,6 +49,9 @@ ALLOW = [
      "reason": "BestShift / Measure: CPU global pan for the content classifier (luma projections, MAD +-12.5%); the engine "
                "global overrides it later (VectorEngine ServeStatistics -> MotionIntent). Planned: skip when a P2 pair is ahead, "
                "no-pair path stays as a visible fallback (next reset)."},
+    {"file": "src/VP-V/modules/input/source_analysis/events/shared/CutFadeJudge.cpp", "patterns": ["sad"], "max_hits": 1, "row": 2,
+     "reason": "U7 v5 coarse 24x24 grid affine fade residual EvalIntShiftEFade across +-2 cells on P4 source stats before "
+               "motion estimation runs; evaluates affine-fitted fade error eFade, not pixel/block motion estimation."},
 ]
 
 

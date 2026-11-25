@@ -108,6 +108,7 @@ SITES = [
      # wide = the body signatures only (DetailPulse.cpp has its own MEASURE_BODY / FAST_MEASURE_BODY symbol).
      "re": r"\bMEASURE_BODY\b|\blength\(vec2\(gx,\s*gy\)\)|abs\(4\.0 \* e - b - d - f - h\)",
      "wide": r"\blength\(vec2\(gx,\s*gy\)\)|abs\(4\.0 \* e - b - d - f - h\)",
+     "owner": [_M + "input/source_analysis/regions/BusyEdgeGlsl.h"],
      "only": [_M + "scaling/output/AdaptiveDownscale.cpp"]},
     {"id": "X6", "product": "kP11RegionBlockStats", "refs": "126 s4 X6",
      "what": "source-resolution detector own flat-block test",

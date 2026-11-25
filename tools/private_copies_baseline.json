@@ -19,24 +19,6 @@
    "max_hits": 1
   },
   {
-   "key": "a|X1|src/VP-V/modules/motion/estimation/matcher/DejudderWarp.cpp",
-   "rule": "a",
-   "site": "X1",
-   "refs": "126 s4 X1",
-   "reason": "matcher D1 global search inside the motion owner folder (file-level scope)",
-   "seed": true,
-   "max_hits": 22
-  },
-  {
-   "key": "a|X1|src/VP-V/modules/motion/estimation/matcher/DejudderWarp.h",
-   "rule": "a",
-   "site": "X1",
-   "refs": "126 s4 X1",
-   "reason": "matcher D1 global search inside the motion owner folder (file-level scope)",
-   "seed": true,
-   "max_hits": 1
-  },
-  {
    "key": "a|X5|src/VP-V/modules/scaling/output/AdaptiveDownscale.cpp",
    "rule": "a",
    "site": "X5",
@@ -44,15 +26,6 @@
    "reason": "MEASURE_BODY Sobel + Laplacian region stats: slice 18 (P31 gradient, P10/P11 grain)",
    "seed": true,
    "max_hits": 4
-  },
-  {
-   "key": "a|X6|src/VP-V/modules/input/source_analysis/SourceResolutionDetector.cpp",
-   "rule": "a",
-   "site": "X6",
-   "refs": "126 s4 X6",
-   "reason": "source-resolution detector own flat-block test",
-   "seed": true,
-   "max_hits": 5
   },
   {
    "key": "a|X7|src/VP-V/modules/repair/temporal_detail/TemporalDetailGpu.cpp",
@@ -69,24 +42,6 @@
    "site": "X7~moved",
    "refs": "audit B0 (moved-copy detection)",
    "reason": "the seeded signature also occurs in a sibling file of the same module/producer (declaration or a second module with the same private pattern); counted so it cannot grow",
-   "seed": false,
-   "max_hits": 1
-  },
-  {
-   "key": "b|X8|src/VP-V/modules/drive/led_measure#kP4SourceStats",
-   "rule": "b",
-   "site": "X8",
-   "refs": "126 s4 X8",
-   "reason": "declared product read never made, or owner compute without publish",
-   "seed": false,
-   "max_hits": 1
-  },
-  {
-   "key": "b|X8|src/VP-V/modules/input/source_analysis/SourceResolutionMonitor#kP4SourceStats",
-   "rule": "b",
-   "site": "X8",
-   "refs": "126 s4 X8",
-   "reason": "declared product read never made, or owner compute without publish",
    "seed": false,
    "max_hits": 1
   },
