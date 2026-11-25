@@ -1162,4 +1162,1119 @@ namespace VideoProcessorTest
 			Assert::IsNull(VpMotion::PairGlobalGpuOf(unavailableTagged), L"PairGlobalGpuOf must reject Unavailable results");
 		}
 	};
+
+	namespace
+	{
+		struct PairGlobalDispatchCall
+		{
+			std::string description;
+			std::string dstName;
+			pl_desc_type dstType = PL_DESC_INVALID;
+			pl_tex dstTex = nullptr;
+			pl_tex lastDstTex = nullptr;
+			int numDescriptors = 0;
+			std::string varName;
+			bool hasVec4 = false;
+			float vec4[4] = {};
+			int w = 0;
+			int h = 0;
+			int threadsX = 0;
+			int threadsY = 0;
+		};
+
+		struct PairGlobalDispatchRecorder
+		{
+			std::vector<PairGlobalDispatchCall> calls;
+			int failOnCall = 0;
+			std::string* errorSink = nullptr;
+			std::string failError;
+
+			void Reset(int failCall = 0, std::string* sink = nullptr, const char* err = nullptr)
+			{
+				calls.clear();
+				failOnCall = failCall;
+				errorSink = sink;
+				failError = err ? err : "";
+			}
+
+			VpMotion::MatcherGlobalD1::DispatchFn MakeDispatch()
+			{
+				return [this](const char* description, const char*, const char*,
+					const pl_shader_desc* descriptors, int numDescriptors,
+					const pl_shader_var* variables, int numVariables,
+					int w, int h, int group) -> bool
+				{
+					PairGlobalDispatchCall c;
+					c.description = description ? description : "";
+					c.numDescriptors = numDescriptors;
+					if (descriptors != nullptr && numDescriptors >= 1)
+					{
+						c.dstName = descriptors[0].desc.name ? descriptors[0].desc.name : "";
+						c.dstType = descriptors[0].desc.type;
+						c.dstTex = static_cast<pl_tex>(descriptors[0].binding.object);
+						c.lastDstTex = static_cast<pl_tex>(descriptors[numDescriptors - 1].binding.object);
+					}
+					if (variables != nullptr && numVariables >= 1 && variables[0].data != nullptr)
+					{
+						c.varName = variables[0].var.name ? variables[0].var.name : "";
+						std::memcpy(c.vec4, variables[0].data, sizeof(c.vec4));
+						c.hasVec4 = true;
+					}
+					c.w = w;
+					c.h = h;
+					c.threadsX = group;
+					c.threadsY = group;
+					calls.push_back(c);
+					if (failOnCall > 0 && static_cast<int>(calls.size()) == failOnCall)
+					{
+						if (errorSink != nullptr && !failError.empty())
+							*errorSink = failError;
+						return false;
+					}
+					return true;
+				};
+			}
+
+			VpMotion::MatcherGlobalD1::DispatchPerBlockFn MakeDispatchPerBlock()
+			{
+				return [this](const char* description, const char*, const char*,
+					const pl_shader_desc* descriptors, int numDescriptors,
+					const pl_shader_var* variables, int numVariables,
+					int w, int h, int threadsX, int threadsY) -> bool
+				{
+					PairGlobalDispatchCall c;
+					c.description = description ? description : "";
+					c.numDescriptors = numDescriptors;
+					if (descriptors != nullptr && numDescriptors >= 1)
+					{
+						c.dstName = descriptors[0].desc.name ? descriptors[0].desc.name : "";
+						c.dstType = descriptors[0].desc.type;
+						c.dstTex = static_cast<pl_tex>(descriptors[0].binding.object);
+						c.lastDstTex = static_cast<pl_tex>(descriptors[numDescriptors - 1].binding.object);
+					}
+					if (variables != nullptr && numVariables >= 1 && variables[0].data != nullptr)
+					{
+						c.varName = variables[0].var.name ? variables[0].var.name : "";
+						std::memcpy(c.vec4, variables[0].data, sizeof(c.vec4));
+						c.hasVec4 = true;
+					}
+					c.w = w;
+					c.h = h;
+					c.threadsX = threadsX;
+					c.threadsY = threadsY;
+					calls.push_back(c);
+					if (failOnCall > 0 && static_cast<int>(calls.size()) == failOnCall)
+					{
+						if (errorSink != nullptr && !failError.empty())
+							*errorSink = failError;
+						return false;
+					}
+					return true;
+				};
+			}
+		};
+
+		bool Vec4AllZero(const float v[4])
+		{
+			const float zero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+			return std::memcmp(v, zero, sizeof(zero)) == 0;
+		}
+
+		bool PairVecAllZero(const float v[2][4])
+		{
+			return Vec4AllZero(v[0]) && Vec4AllZero(v[1]);
+		}
+
+		MotionAhead::FlowPtr MakeClearGlobalFlow(float dx, float dy, bool globalSet)
+		{
+			MotionAhead::FlowPtr flow = MakeFlow(1.0f, globalSet, false);
+			flow->global[0][0] = dx;
+			flow->global[0][1] = dy;
+			flow->global[0][2] = 0.25f;
+			flow->global[0][3] = 1.0f;
+			flow->global[1][0] = -dx;
+			flow->global[1][1] = -dy;
+			flow->global[1][2] = 0.30f;
+			flow->global[1][3] = 1.0f;
+			return flow;
+		}
+	}
+
+	// M1#4 (U10 C3, PairGlobalFill.h): pure CPU selection branch precedence, LoadEngineGlobalFromP2 strict memo vs direct
+	// fallback contract, ClearPairGlobalGpu, and ExecutePairGlobalGpu constant-write dispatch parity.
+	TEST_CLASS(PairGlobalFillBranchOrderTests)
+	{
+	public:
+		// Strict precedence cascade: cutOrFlash > CameraModel > Engine (clear) > GapSeed (holds) > MatcherD1 > Cleared,
+		// with same-input negative controls for OpticalFlowTrust::GlobalUsable / opticalFlowGlobalFallback and gapSeedHolds rejection.
+		TEST_METHOD(StrictPrecedenceCascadeAndNegativeControls)
+		{
+			using namespace VpMotion;
+
+			int gapSeedHoldsCalls = 0;
+			bool gapSeedHoldsReturn = true;
+
+			PairGlobalSelectionInput base;
+			base.cutOrFlash = true;
+			base.globalPrior = true;
+			base.useModelGlobal = true;
+			base.modelFwd[0] = 16.0f;
+			base.modelFwd[1] = -24.0f;
+			base.modelBwd[0] = -8.0f;
+			base.modelBwd[1] = 32.0f;
+			base.modelInputScale = 0.5f;   // exact dyadic D1 scaling: fwd = {1.0, -1.5, 0.5, 1.0}, bwd = {-0.5, 2.0, 0.5, 1.0}
+			base.opticalFlowGlobal = true;
+			base.opticalFlowGlobalFallback = true;
+			base.seeded = true;
+			base.engineValid = true;
+			base.engineEpoch = 42u;
+			base.engineVec[0][0] = 2.25f;  base.engineVec[0][1] = -1.75f; base.engineVec[0][2] = 0.35f; base.engineVec[0][3] = 1.0f;
+			base.engineVec[1][0] = -2.25f; base.engineVec[1][1] = 1.75f;  base.engineVec[1][2] = 0.40f; base.engineVec[1][3] = 1.0f;
+			base.gapSeedCandidate = true;
+			base.gapSeedVec[0][0] = 3.5f;  base.gapSeedVec[0][1] = 0.75f;  base.gapSeedVec[0][2] = 0.25f; base.gapSeedVec[0][3] = 1.0f;
+			base.gapSeedVec[1][0] = -3.5f; base.gapSeedVec[1][1] = -0.75f; base.gapSeedVec[1][2] = 0.30f; base.gapSeedVec[1][3] = 1.0f;
+			base.gapSeedHolds = [&]() -> bool {
+				++gapSeedHoldsCalls;
+				return gapSeedHoldsReturn;
+			};
+
+			Assert::IsTrue(OpticalFlowTrust::GlobalUsable(base.engineVec[0]), L"precondition: base engine fwd vector is clear");
+			Assert::IsTrue(OpticalFlowTrust::GlobalUsable(base.engineVec[1]), L"precondition: base engine bwd vector is clear");
+
+			auto runSelect = [&](const PairGlobalSelectionInput& in, PairGlobal& rec, PairGlobalSelectionOutcome& out)
+			{
+				// Pre-dirty outputs to verify SelectPairGlobal resets every field on every call.
+				rec = MakePairGlobalSample(PairGlobalSource::MatcherD1, true, 9999u, 19.0f);
+				out.source = PairGlobalSource::MatcherD1;
+				out.modelGlobalUsed = true;
+				out.globalFromEngine = true;
+				out.engineGlobalFallback = true;
+				out.searchSeedUsed = true;
+				out.searchSeedRejected = true;
+				out.needsD1Search = true;
+				out.clearSecond = true;
+				gapSeedHoldsCalls = 0;
+				SelectPairGlobal(in, rec, out);
+			};
+
+			PairGlobal rec;
+			PairGlobalSelectionOutcome out;
+
+			// Step 1: cutOrFlash = true wins over EVERY candidate (CameraModel, Engine, GapSeed, MatcherD1).
+			{
+				runSelect(base, rec, out);
+				Assert::IsTrue(out.source == PairGlobalSource::Cleared, L"Step 1: cutOrFlash -> Cleared");
+				Assert::IsTrue(rec.src == PairGlobalSource::Cleared);
+				Assert::IsFalse(rec.valid, L"Step 1: cutOrFlash record is invalid");
+				Assert::AreEqual(uint64_t(0), rec.p2Epoch);
+				Assert::IsTrue(out.clearSecond, L"Step 1: cutOrFlash clears second");
+				Assert::IsFalse(out.modelGlobalUsed);
+				Assert::IsFalse(out.globalFromEngine);
+				Assert::IsFalse(out.engineGlobalFallback);
+				Assert::IsFalse(out.searchSeedUsed);
+				Assert::IsFalse(out.searchSeedRejected);
+				Assert::IsFalse(out.needsD1Search);
+				Assert::AreEqual(0, gapSeedHoldsCalls, L"Step 1: cutOrFlash must not invoke gapSeedHolds");
+				Assert::IsTrue(PairVecAllZero(rec.vec), L"Step 1: vec zeroed");
+				Assert::IsTrue(PairVecAllZero(rec.second), L"Step 1: second zeroed");
+			}
+
+			// Step 2: drop cutOrFlash = false on exact same input -> CameraModel wins.
+			PairGlobalSelectionInput step2 = base;
+			step2.cutOrFlash = false;
+			{
+				runSelect(step2, rec, out);
+				Assert::IsTrue(out.source == PairGlobalSource::CameraModel, L"Step 2: CameraModel wins");
+				Assert::IsTrue(rec.src == PairGlobalSource::CameraModel);
+				Assert::IsTrue(rec.valid);
+				Assert::AreEqual(uint64_t(0), rec.p2Epoch);
+				Assert::IsTrue(out.modelGlobalUsed);
+				Assert::IsTrue(out.clearSecond);
+				Assert::IsFalse(out.globalFromEngine);
+				Assert::IsFalse(out.engineGlobalFallback);
+				Assert::IsFalse(out.searchSeedUsed);
+				Assert::IsFalse(out.searchSeedRejected);
+				Assert::IsFalse(out.needsD1Search);
+				Assert::AreEqual(0, gapSeedHoldsCalls, L"Step 2: CameraModel must not invoke gapSeedHolds");
+				Assert::AreEqual(1.0f, rec.vec[0][0], 0.0f, L"Step 2: fwd x = modelFwd[0] * scale / 8");
+				Assert::AreEqual(-1.5f, rec.vec[0][1], 0.0f, L"Step 2: fwd y = modelFwd[1] * scale / 8");
+				Assert::AreEqual(0.5f, rec.vec[0][2], 0.0f, L"Step 2: fwd z = 0.5");
+				Assert::AreEqual(1.0f, rec.vec[0][3], 0.0f, L"Step 2: fwd w = 1.0");
+				Assert::AreEqual(-0.5f, rec.vec[1][0], 0.0f, L"Step 2: bwd x = modelBwd[0] * scale / 8");
+				Assert::AreEqual(2.0f, rec.vec[1][1], 0.0f, L"Step 2: bwd y = modelBwd[1] * scale / 8");
+				Assert::AreEqual(0.5f, rec.vec[1][2], 0.0f, L"Step 2: bwd z = 0.5");
+				Assert::AreEqual(1.0f, rec.vec[1][3], 0.0f, L"Step 2: bwd w = 1.0");
+				Assert::IsTrue(PairVecAllZero(rec.second), L"Step 2: second zeroed");
+
+				// Same-input check: even when engineVec is ambiguous, CameraModel suppresses engineGlobalFallback.
+				PairGlobalSelectionInput step2Ambig = step2;
+				step2Ambig.engineVec[1][2] = 0.95f;
+				Assert::IsFalse(OpticalFlowTrust::GlobalUsable(step2Ambig.engineVec[1]));
+				runSelect(step2Ambig, rec, out);
+				Assert::IsTrue(out.source == PairGlobalSource::CameraModel);
+				Assert::IsTrue(out.modelGlobalUsed);
+				Assert::IsFalse(out.engineGlobalFallback, L"Step 2: CameraModel must suppress engineGlobalFallback");
+				Assert::AreEqual(0, gapSeedHoldsCalls);
+			}
+
+			// Step 3: drop useModelGlobal = false on exact same input -> Engine wins (clear engineVec).
+			PairGlobalSelectionInput step3 = step2;
+			step3.useModelGlobal = false;
+			{
+				runSelect(step3, rec, out);
+				Assert::IsTrue(out.source == PairGlobalSource::Engine, L"Step 3: clear Engine wins");
+				Assert::IsTrue(rec.src == PairGlobalSource::Engine);
+				Assert::IsTrue(rec.valid);
+				Assert::AreEqual(uint64_t(42), rec.p2Epoch, L"Step 3: p2Epoch propagated from engineEpoch");
+				Assert::IsTrue(out.globalFromEngine);
+				Assert::IsFalse(out.clearSecond, L"Step 3: Engine must NOT clear globalSecond");
+				Assert::IsFalse(out.modelGlobalUsed);
+				Assert::IsFalse(out.engineGlobalFallback);
+				Assert::IsFalse(out.searchSeedUsed);
+				Assert::IsFalse(out.searchSeedRejected);
+				Assert::IsFalse(out.needsD1Search);
+				Assert::AreEqual(0, gapSeedHoldsCalls, L"Step 3: Engine must not invoke gapSeedHolds");
+				Assert::AreEqual(0, std::memcmp(rec.vec, step3.engineVec, sizeof(rec.vec)), L"Step 3: vec bit-equal to engineVec");
+				Assert::IsTrue(PairVecAllZero(rec.second));
+			}
+
+			// Step 4: Same-input negative control for OpticalFlowTrust::GlobalUsable / opticalFlowGlobalFallback.
+			{
+				PairGlobalSelectionInput step4 = step3;
+				step4.engineVec[1][2] = 0.95f;   // ambiguous (>= 0.9) on exact same input
+				Assert::IsTrue(OpticalFlowTrust::GlobalUsable(step4.engineVec[0]));
+				Assert::IsFalse(OpticalFlowTrust::GlobalUsable(step4.engineVec[1]), L"precondition: bwd engineVec is ambiguous");
+
+				// 4a: opticalFlowGlobalFallback = true -> Engine rejected, engineGlobalFallback raised, falls through to GapSeed.
+				step4.opticalFlowGlobalFallback = true;
+				runSelect(step4, rec, out);
+				Assert::IsTrue(out.engineGlobalFallback, L"Step 4a: ambiguous engine raises engineGlobalFallback");
+				Assert::IsFalse(out.globalFromEngine, L"Step 4a: ambiguous engine rejected");
+				Assert::AreEqual(1, gapSeedHoldsCalls, L"Step 4a: gapSeedHolds invoked once on fallthrough");
+				Assert::IsTrue(out.source == PairGlobalSource::GapSeed, L"Step 4a: falls through to GapSeed");
+				Assert::IsTrue(rec.src == PairGlobalSource::GapSeed);
+				Assert::IsTrue(rec.valid);
+				Assert::AreEqual(uint64_t(0), rec.p2Epoch);
+				Assert::IsTrue(out.searchSeedUsed);
+				Assert::IsFalse(out.searchSeedRejected);
+				Assert::IsTrue(out.clearSecond);
+				Assert::IsFalse(out.needsD1Search);
+				Assert::AreEqual(0, std::memcmp(rec.vec, step4.gapSeedVec, sizeof(rec.vec)), L"Step 4a: vec bit-equal to gapSeedVec");
+				Assert::IsTrue(PairVecAllZero(rec.second));
+
+				// 4b: opticalFlowGlobalFallback = false on EXACT SAME ambiguous engineVec -> Engine accepted.
+				step4.opticalFlowGlobalFallback = false;
+				runSelect(step4, rec, out);
+				Assert::IsTrue(out.source == PairGlobalSource::Engine, L"Step 4b: fallback disabled accepts ambiguous engine");
+				Assert::IsTrue(rec.src == PairGlobalSource::Engine);
+				Assert::IsTrue(rec.valid);
+				Assert::AreEqual(uint64_t(42), rec.p2Epoch);
+				Assert::IsTrue(out.globalFromEngine);
+				Assert::IsFalse(out.engineGlobalFallback, L"Step 4b: no engineGlobalFallback when fallback disabled");
+				Assert::IsFalse(out.clearSecond);
+				Assert::AreEqual(0, gapSeedHoldsCalls, L"Step 4b: gapSeedHolds not called when engine accepted");
+				Assert::AreEqual(0, std::memcmp(rec.vec, step4.engineVec, sizeof(rec.vec)));
+
+				// 4c: validity-channel boundary (w == 0.5 <= 0.5 with clear z == 0.2) fails GlobalUsable when fallback enabled.
+				PairGlobalSelectionInput step4LowW = step3;
+				step4LowW.engineVec[0][2] = 0.20f;
+				step4LowW.engineVec[0][3] = 0.50f;
+				Assert::IsFalse(OpticalFlowTrust::GlobalUsable(step4LowW.engineVec[0]));
+				step4LowW.opticalFlowGlobalFallback = true;
+				runSelect(step4LowW, rec, out);
+				Assert::IsTrue(out.engineGlobalFallback && out.source == PairGlobalSource::GapSeed && gapSeedHoldsCalls == 1,
+					L"Step 4c: w <= 0.5 rejected when opticalFlowGlobalFallback = true");
+				step4LowW.opticalFlowGlobalFallback = false;
+				runSelect(step4LowW, rec, out);
+				Assert::IsTrue(!out.engineGlobalFallback && out.source == PairGlobalSource::Engine && gapSeedHoldsCalls == 0,
+					L"Step 4c: w <= 0.5 accepted when opticalFlowGlobalFallback = false");
+
+				// 4d: engine eligibility gates (opticalFlowGlobal = false, seeded = false) suppress engineGlobalFallback even on ambiguous vec.
+				PairGlobalSelectionInput step4NotSeeded = step3;
+				step4NotSeeded.engineVec[1][2] = 0.95f;
+				step4NotSeeded.seeded = false;
+				runSelect(step4NotSeeded, rec, out);
+				Assert::IsFalse(out.engineGlobalFallback, L"Step 4d: unseeded engine must not set engineGlobalFallback");
+				Assert::IsTrue(out.source == PairGlobalSource::GapSeed && gapSeedHoldsCalls == 1);
+
+				PairGlobalSelectionInput step4FlowOff = step3;
+				step4FlowOff.engineVec[1][2] = 0.95f;
+				step4FlowOff.opticalFlowGlobal = false;
+				runSelect(step4FlowOff, rec, out);
+				Assert::IsFalse(out.engineGlobalFallback, L"Step 4d: opticalFlowGlobal = false must not set engineGlobalFallback");
+				Assert::IsTrue(out.source == PairGlobalSource::GapSeed && gapSeedHoldsCalls == 1);
+			}
+
+			// Step 5: Same-input negative control for gapSeedHolds rejection -> falls through to MatcherD1.
+			{
+				PairGlobalSelectionInput step5 = step3;
+				step5.engineValid = false;
+				gapSeedHoldsReturn = false;
+				runSelect(step5, rec, out);
+				Assert::AreEqual(1, gapSeedHoldsCalls, L"Step 5: gapSeedHolds invoked once");
+				Assert::IsTrue(out.searchSeedRejected, L"Step 5: searchSeedRejected set");
+				Assert::IsFalse(out.searchSeedUsed, L"Step 5: searchSeedUsed false");
+				Assert::IsTrue(out.source == PairGlobalSource::MatcherD1, L"Step 5: rejected GapSeed falls through to MatcherD1");
+				Assert::IsTrue(rec.src == PairGlobalSource::MatcherD1);
+				Assert::IsFalse(rec.valid);
+				Assert::IsTrue(out.needsD1Search);
+				Assert::IsFalse(out.clearSecond);
+				Assert::IsFalse(out.engineGlobalFallback);
+
+				// Combined fallthrough: ambiguous engine + rejected GapSeed keeps both engineGlobalFallback and searchSeedRejected.
+				PairGlobalSelectionInput step5Both = step3;
+				step5Both.engineVec[1][2] = 0.95f;
+				step5Both.opticalFlowGlobalFallback = true;
+				gapSeedHoldsReturn = false;
+				runSelect(step5Both, rec, out);
+				Assert::AreEqual(1, gapSeedHoldsCalls);
+				Assert::IsTrue(out.engineGlobalFallback && out.searchSeedRejected && out.needsD1Search && out.source == PairGlobalSource::MatcherD1,
+					L"Step 5: ambiguous engine + rejected gap seed both visible on MatcherD1 fallthrough");
+
+				gapSeedHoldsReturn = true;
+			}
+
+			// Step 6: gapSeedCandidate = false, globalPrior = true -> MatcherD1 without calling gapSeedHolds.
+			{
+				PairGlobalSelectionInput step6 = step3;
+				step6.engineValid = false;
+				step6.gapSeedCandidate = false;
+				runSelect(step6, rec, out);
+				Assert::IsTrue(out.source == PairGlobalSource::MatcherD1, L"Step 6: MatcherD1 selected");
+				Assert::IsTrue(rec.src == PairGlobalSource::MatcherD1);
+				Assert::IsFalse(rec.valid);
+				Assert::IsTrue(out.needsD1Search);
+				Assert::IsFalse(out.searchSeedRejected);
+				Assert::IsFalse(out.searchSeedUsed);
+				Assert::IsFalse(out.clearSecond);
+				Assert::AreEqual(0, gapSeedHoldsCalls, L"Step 6: gapSeedHolds not called when gapSeedCandidate = false");
+			}
+
+			// Step 7: globalPrior = false (with cutOrFlash = false and all other candidates enabled, even ambiguous engineVec) -> Cleared.
+			{
+				PairGlobalSelectionInput step7 = step2;
+				step7.globalPrior = false;
+				step7.engineVec[1][2] = 0.95f;
+				runSelect(step7, rec, out);
+				Assert::IsTrue(out.source == PairGlobalSource::Cleared, L"Step 7: !globalPrior -> Cleared");
+				Assert::IsTrue(rec.src == PairGlobalSource::Cleared);
+				Assert::IsFalse(rec.valid);
+				Assert::IsFalse(out.clearSecond, L"Step 7: !globalPrior does not request clearSecond");
+				Assert::IsFalse(out.needsD1Search);
+				Assert::IsFalse(out.modelGlobalUsed);
+				Assert::IsFalse(out.globalFromEngine);
+				Assert::IsFalse(out.engineGlobalFallback);
+				Assert::IsFalse(out.searchSeedUsed);
+				Assert::IsFalse(out.searchSeedRejected);
+				Assert::AreEqual(0, gapSeedHoldsCalls, L"Step 7: !globalPrior must not call gapSeedHolds");
+				Assert::IsTrue(PairVecAllZero(rec.vec));
+				Assert::IsTrue(PairVecAllZero(rec.second));
+			}
+		}
+
+		// LoadEngineGlobalFromP2 strict contract: memo != nullptr reads kP2VectorPair ONLY (never silently falls back to
+		// directFallback on miss/decline/unset); memo == nullptr reads directFallback when GlobalSet() is true.
+		TEST_METHOD(LoadEngineGlobalFromP2MemoVsDirectFallbackContract)
+		{
+			using namespace VpMotion;
+			using namespace VpSkeleton;
+
+			// Real VectorEngine + P2CpuForm serving seq 11 with generation 1 and clear global vectors.
+			VectorEngine engine;
+			engine.PublishProducer(std::make_shared<MotionAhead::Producer>());
+			engine.p2Slot->SetGeneration(engine.motionValidity.StreamGeneration());
+			const MotionAhead::FlowPtr memoFlow = MakeClearGlobalFlow(2.5f, -1.25f, /*globalSet=*/true);
+			Assert::IsTrue(engine.p2Slot->Publish(10, 11, engine.p2Slot->Generation(), memoFlow));
+
+			SkeletonMemo memo;
+			IVectorEngine* enginePtr = &engine;
+			Assert::IsTrue(RegisterFill(memo, [enginePtr](const void*) { return enginePtr; }));
+
+			// Distinct directFallback with completely different values and epoch so any silent leak is immediately caught.
+			const MotionAhead::FlowPtr directFlow = MakeClearGlobalFlow(-6.0f, 4.5f, /*globalSet=*/true);
+			const P2PairRecord directFallback = MakeP2PairRecord(10, 11, 77u, directFlow->global, directFlow->second, true, false);
+			Assert::IsTrue(directFallback.GlobalSet());
+			Assert::IsTrue(std::memcmp(memoFlow->global, directFallback.global, sizeof(memoFlow->global)) != 0,
+				L"precondition: memo global differs from directFallback global");
+
+			auto dirtyEngineFields = [](PairGlobalSelectionInput& in)
+			{
+				in.engineValid = true;
+				in.engineEpoch = 999u;
+				for (int d = 0; d < 2; ++d)
+					for (int k = 0; k < 4; ++k)
+						in.engineVec[d][k] = -88.0f;
+			};
+
+			// Case 1: memo != nullptr hit -> populates from memo kP2VectorPair and ignores directFallback.
+			{
+				PairGlobalSelectionInput in;
+				dirtyEngineFields(in);
+				Assert::IsTrue(LoadEngineGlobalFromP2(&memo, 11, &directFallback, in), L"memo hit returns true");
+				Assert::IsTrue(in.engineValid);
+				Assert::AreEqual(uint64_t(1), in.engineEpoch, L"epoch must come from memo P2PairRecord, not directFallback");
+				Assert::AreEqual(0, std::memcmp(in.engineVec, memoFlow->global, sizeof(in.engineVec)),
+					L"engineVec must match memo P2PairRecord bit-for-bit, ignoring directFallback");
+			}
+
+			// Case 2a (Negative control — no silent fallback when memo has no kP2VectorPair fill registered):
+			{
+				SkeletonMemo emptyMemo;
+				PairGlobalSelectionInput in;
+				dirtyEngineFields(in);
+				Assert::IsFalse(LoadEngineGlobalFromP2(&emptyMemo, 11, &directFallback, in),
+					L"negative control: memo without P2 fill must NOT silently read directFallback");
+				Assert::IsFalse(in.engineValid, L"engineValid must be false on memo miss");
+				Assert::AreEqual(uint64_t(0), in.engineEpoch, L"stale engineEpoch must be cleared");
+				Assert::IsTrue(PairVecAllZero(in.engineVec), L"stale engineVec must be cleared");
+			}
+
+			// Case 2b (Negative control — no silent fallback when memo P2 fill declines missing seq 12):
+			{
+				PairGlobalSelectionInput in;
+				dirtyEngineFields(in);
+				Assert::IsFalse(LoadEngineGlobalFromP2(&memo, 12, &directFallback, in),
+					L"negative control: memo OwnerDeclined must NOT silently read directFallback");
+				Assert::IsFalse(in.engineValid);
+				Assert::AreEqual(uint64_t(0), in.engineEpoch);
+				Assert::IsTrue(PairVecAllZero(in.engineVec));
+			}
+
+			// Case 2c (Negative control — no silent fallback when memo P2 record has GlobalSet() == false):
+			{
+				VectorEngine unsetEngine;
+				unsetEngine.PublishProducer(std::make_shared<MotionAhead::Producer>());
+				unsetEngine.p2Slot->SetGeneration(unsetEngine.motionValidity.StreamGeneration());
+				Assert::IsTrue(unsetEngine.p2Slot->Publish(10, 11, unsetEngine.p2Slot->Generation(),
+					MakeClearGlobalFlow(2.5f, -1.25f, /*globalSet=*/false)));
+				SkeletonMemo unsetMemo;
+				IVectorEngine* unsetPtr = &unsetEngine;
+				Assert::IsTrue(RegisterFill(unsetMemo, [unsetPtr](const void*) { return unsetPtr; }));
+
+				PairGlobalSelectionInput in;
+				dirtyEngineFields(in);
+				Assert::IsFalse(LoadEngineGlobalFromP2(&unsetMemo, 11, &directFallback, in),
+					L"negative control: memo GlobalSet() == false must NOT silently read directFallback");
+				Assert::IsFalse(in.engineValid);
+				Assert::AreEqual(uint64_t(0), in.engineEpoch);
+				Assert::IsTrue(PairVecAllZero(in.engineVec));
+			}
+
+			// Case 3: memo == nullptr (standalone unit-test path) reads directFallback iff GlobalSet() is true.
+			{
+				PairGlobalSelectionInput in;
+				dirtyEngineFields(in);
+				Assert::IsTrue(LoadEngineGlobalFromP2(nullptr, 11, &directFallback, in),
+					L"standalone path (memo == nullptr) reads valid directFallback");
+				Assert::IsTrue(in.engineValid);
+				Assert::AreEqual(uint64_t(77), in.engineEpoch);
+				Assert::AreEqual(0, std::memcmp(in.engineVec, directFallback.global, sizeof(in.engineVec)));
+
+				P2PairRecord unsetDirect = directFallback;
+				unsetDirect.flags &= ~kP2PairFlagGlobalSet;
+				Assert::IsFalse(unsetDirect.GlobalSet());
+				dirtyEngineFields(in);
+				Assert::IsFalse(LoadEngineGlobalFromP2(nullptr, 11, &unsetDirect, in),
+					L"standalone path rejects directFallback with GlobalSet() == false");
+				Assert::IsFalse(in.engineValid);
+				Assert::AreEqual(uint64_t(0), in.engineEpoch);
+				Assert::IsTrue(PairVecAllZero(in.engineVec));
+
+				dirtyEngineFields(in);
+				Assert::IsFalse(LoadEngineGlobalFromP2(nullptr, 11, nullptr, in),
+					L"standalone path with null directFallback returns false");
+				Assert::IsFalse(in.engineValid);
+				Assert::AreEqual(uint64_t(0), in.engineEpoch);
+				Assert::IsTrue(PairVecAllZero(in.engineVec));
+			}
+		}
+
+		// ClearPairGlobalGpu exact pass label / null-skipping / failure propagation, and ExecutePairGlobalGpu constant-write
+		// dispatch counts, labels, and gvec payloads for CameraModel, Engine, GapSeed, and cutOrFlash.
+		TEST_METHOD(ClearPairGlobalGpuAndConstantWriteDispatchParity)
+		{
+			using namespace VpMotion;
+
+			int sentinels[4] = { 11, 22, 33, 44 };
+			pl_tex vecTex[2] = { reinterpret_cast<pl_tex>(&sentinels[0]), reinterpret_cast<pl_tex>(&sentinels[1]) };
+			pl_tex secTex[2] = { reinterpret_cast<pl_tex>(&sentinels[2]), reinterpret_cast<pl_tex>(&sentinels[3]) };
+
+			const char* const kClearLabel = "VideoProcessor de-judder: global motion cleared (camera model: cut / flash)";
+			PairGlobalDispatchRecorder recMock;
+
+			// ClearPairGlobalGpu: all 4 non-null textures dispatched in exact order with exact label and zero fillv.
+			{
+				recMock.Reset();
+				PairGlobal outRec = MakePairGlobalSample(PairGlobalSource::Engine, true, 5u, 2.0f);
+				Assert::IsTrue(ClearPairGlobalGpu(vecTex, secTex, recMock.MakeDispatch(), outRec));
+				Assert::IsTrue(outRec.src == PairGlobalSource::Cleared);
+				Assert::IsFalse(outRec.valid);
+				Assert::AreEqual(size_t(4), recMock.calls.size(), L"all 4 non-null textures cleared");
+				const pl_tex expectedTargets[4] = { vecTex[0], vecTex[1], secTex[0], secTex[1] };
+				for (size_t i = 0; i < 4; ++i)
+				{
+					Assert::AreEqual(std::string(kClearLabel), recMock.calls[i].description, L"exact cut/flash clear pass label");
+					Assert::AreEqual(std::string("dst"), recMock.calls[i].dstName);
+					Assert::IsTrue(recMock.calls[i].dstType == PL_DESC_STORAGE_IMG);
+					Assert::IsTrue(recMock.calls[i].dstTex == expectedTargets[i], L"exact clear target order");
+					Assert::AreEqual(std::string("fillv"), recMock.calls[i].varName);
+					Assert::IsTrue(recMock.calls[i].hasVec4 && Vec4AllZero(recMock.calls[i].vec4), L"fillv is all zero");
+					Assert::AreEqual(1, recMock.calls[i].w);
+					Assert::AreEqual(1, recMock.calls[i].h);
+					Assert::AreEqual(1, recMock.calls[i].threadsX);
+				}
+			}
+
+			// ClearPairGlobalGpu: skips null entries without dispatching them.
+			{
+				recMock.Reset();
+				pl_tex partialVec[2] = { vecTex[0], nullptr };
+				pl_tex partialSec[2] = { nullptr, secTex[1] };
+				PairGlobal outRec;
+				Assert::IsTrue(ClearPairGlobalGpu(partialVec, partialSec, recMock.MakeDispatch(), outRec));
+				Assert::AreEqual(size_t(2), recMock.calls.size(), L"null textures skipped");
+				Assert::IsTrue(recMock.calls[0].dstTex == vecTex[0]);
+				Assert::IsTrue(recMock.calls[1].dstTex == secTex[1]);
+
+				recMock.Reset();
+				Assert::IsTrue(ClearPairGlobalGpu(vecTex, nullptr, recMock.MakeDispatch(), outRec));
+				Assert::AreEqual(size_t(2), recMock.calls.size(), L"null globalSecond array skipped");
+				Assert::IsTrue(recMock.calls[0].dstTex == vecTex[0]);
+				Assert::IsTrue(recMock.calls[1].dstTex == vecTex[1]);
+			}
+
+			// ClearPairGlobalGpu negative controls: null callback and mid-clear dispatch failure return false immediately.
+			{
+				PairGlobal outRec;
+				Assert::IsFalse(ClearPairGlobalGpu(vecTex, secTex, MatcherGlobalD1::DispatchFn(), outRec),
+					L"empty dispatch callback returns false");
+				Assert::IsTrue(outRec.src == PairGlobalSource::Cleared && !outRec.valid);
+
+				recMock.Reset(/*failCall=*/2);
+				Assert::IsFalse(ClearPairGlobalGpu(vecTex, secTex, recMock.MakeDispatch(), outRec),
+					L"failed clear dispatch returns false");
+				Assert::AreEqual(size_t(2), recMock.calls.size(), L"stops on first failing clear dispatch");
+			}
+
+			// ExecutePairGlobalGpu constant-write parity: CameraModel, Engine, GapSeed, cutOrFlash, and !globalPrior.
+			PairGlobalGpuContext ctx;
+			ctx.twoCandidates = true;
+			ctx.globalVector = vecTex;
+			ctx.globalSecond = secTex;
+			ctx.dispatch = recMock.MakeDispatch();
+
+			// CameraModel with twoCandidates = true -> 4 dispatches (vec0, sec0, vec1, sec1).
+			{
+				recMock.Reset();
+				PairGlobalSelectionInput in;
+				in.globalPrior = true;
+				in.useModelGlobal = true;
+				in.modelFwd[0] = 24.0f; in.modelFwd[1] = -16.0f;
+				in.modelBwd[0] = -16.0f; in.modelBwd[1] = 8.0f;
+				in.modelInputScale = 0.5f;   // fwd = {1.5, -1.0, 0.5, 1.0}, bwd = {-1.0, 0.5, 0.5, 1.0}
+
+				PairGlobal outRec;
+				PairGlobalSelectionOutcome outOutcome;
+				FallbackCatalog::Decision outFb;
+				std::string outErr = "stale";
+				Assert::IsTrue(ExecutePairGlobalGpu(in, ctx, outRec, outOutcome, outFb, outErr));
+				Assert::IsTrue(outErr.empty());
+				Assert::IsFalse(outFb.engaged);
+				Assert::AreEqual(std::string("motion.pair_global_unavailable"), outFb.id);
+				Assert::AreEqual(size_t(4), recMock.calls.size(), L"CameraModel + twoCandidates dispatches 4 passes");
+
+				Assert::AreEqual(std::string("VideoProcessor de-judder: global motion (camera model)"), recMock.calls[0].description);
+				Assert::IsTrue(recMock.calls[0].dstTex == vecTex[0] && recMock.calls[0].varName == "gvec");
+				Assert::AreEqual(0, std::memcmp(recMock.calls[0].vec4, outRec.vec[0], sizeof(outRec.vec[0])));
+
+				Assert::AreEqual(std::string("VideoProcessor de-judder: global motion second (camera model)"), recMock.calls[1].description);
+				Assert::IsTrue(recMock.calls[1].dstTex == secTex[0] && recMock.calls[1].varName == "gvec" && Vec4AllZero(recMock.calls[1].vec4));
+
+				Assert::AreEqual(std::string("VideoProcessor de-judder: global motion (camera model)"), recMock.calls[2].description);
+				Assert::IsTrue(recMock.calls[2].dstTex == vecTex[1] && recMock.calls[2].varName == "gvec");
+				Assert::AreEqual(0, std::memcmp(recMock.calls[2].vec4, outRec.vec[1], sizeof(outRec.vec[1])));
+
+				Assert::AreEqual(std::string("VideoProcessor de-judder: global motion second (camera model)"), recMock.calls[3].description);
+				Assert::IsTrue(recMock.calls[3].dstTex == secTex[1] && recMock.calls[3].varName == "gvec" && Vec4AllZero(recMock.calls[3].vec4));
+
+				// Same CameraModel input with twoCandidates = false -> 2 dispatches only (no second clear).
+				PairGlobalGpuContext ctxOne = ctx;
+				ctxOne.twoCandidates = false;
+				recMock.Reset();
+				Assert::IsTrue(ExecutePairGlobalGpu(in, ctxOne, outRec, outOutcome, outFb, outErr));
+				Assert::AreEqual(size_t(2), recMock.calls.size(), L"CameraModel without twoCandidates dispatches 2 passes");
+				Assert::IsTrue(recMock.calls[0].dstTex == vecTex[0] && recMock.calls[1].dstTex == vecTex[1]);
+
+				// Negative control: failing second-candidate write aborts visibly with exact label in error and fallback.
+				recMock.Reset(/*failCall=*/2);
+				Assert::IsFalse(ExecutePairGlobalGpu(in, ctx, outRec, outOutcome, outFb, outErr));
+				Assert::AreEqual(size_t(2), recMock.calls.size());
+				Assert::IsTrue(Has(outErr, "dispatch failed: VideoProcessor de-judder: global motion second (camera model)"));
+				Assert::IsTrue(outFb.engaged && outFb.id == "motion.pair_global_unavailable" && Has(outFb.reason, outErr.c_str()));
+			}
+
+			// Engine with twoCandidates = true -> 2 dispatches ONLY (Engine does NOT clear globalSecond!).
+			{
+				recMock.Reset();
+				PairGlobalSelectionInput in;
+				in.globalPrior = true;
+				in.opticalFlowGlobal = true;
+				in.seeded = true;
+				in.engineValid = true;
+				in.engineEpoch = 19u;
+				in.engineVec[0][0] = 1.25f;  in.engineVec[0][1] = 0.5f;  in.engineVec[0][2] = 0.3f; in.engineVec[0][3] = 1.0f;
+				in.engineVec[1][0] = -1.25f; in.engineVec[1][1] = -0.5f; in.engineVec[1][2] = 0.35f; in.engineVec[1][3] = 1.0f;
+
+				PairGlobal outRec;
+				PairGlobalSelectionOutcome outOutcome;
+				FallbackCatalog::Decision outFb;
+				std::string outErr;
+				Assert::IsTrue(ExecutePairGlobalGpu(in, ctx, outRec, outOutcome, outFb, outErr));
+				Assert::IsFalse(outFb.engaged);
+				Assert::AreEqual(std::string("motion.pair_global_unavailable"), outFb.id);
+				Assert::AreEqual(size_t(2), recMock.calls.size(), L"Engine must dispatch 2 passes only (never clears globalSecond)");
+				Assert::AreEqual(std::string("VideoProcessor de-judder: global motion (engine)"), recMock.calls[0].description);
+				Assert::IsTrue(recMock.calls[0].dstTex == vecTex[0] && recMock.calls[0].varName == "gvec");
+				Assert::AreEqual(0, std::memcmp(recMock.calls[0].vec4, in.engineVec[0], sizeof(in.engineVec[0])));
+				Assert::AreEqual(std::string("VideoProcessor de-judder: global motion (engine)"), recMock.calls[1].description);
+				Assert::IsTrue(recMock.calls[1].dstTex == vecTex[1] && recMock.calls[1].varName == "gvec");
+				Assert::AreEqual(0, std::memcmp(recMock.calls[1].vec4, in.engineVec[1], sizeof(in.engineVec[1])));
+			}
+
+			// GapSeed with twoCandidates = true -> 4 dispatches (vec0, sec0, vec1, sec1).
+			{
+				recMock.Reset();
+				PairGlobalSelectionInput in;
+				in.globalPrior = true;
+				in.gapSeedCandidate = true;
+				in.gapSeedVec[0][0] = -2.0f; in.gapSeedVec[0][1] = 1.5f;  in.gapSeedVec[0][2] = 0.2f; in.gapSeedVec[0][3] = 1.0f;
+				in.gapSeedVec[1][0] = 2.0f;  in.gapSeedVec[1][1] = -1.5f; in.gapSeedVec[1][2] = 0.25f; in.gapSeedVec[1][3] = 1.0f;
+				in.gapSeedHolds = []() { return true; };
+
+				PairGlobal outRec;
+				PairGlobalSelectionOutcome outOutcome;
+				FallbackCatalog::Decision outFb;
+				std::string outErr;
+				Assert::IsTrue(ExecutePairGlobalGpu(in, ctx, outRec, outOutcome, outFb, outErr));
+				Assert::IsFalse(outFb.engaged);
+				Assert::AreEqual(std::string("motion.pair_global_unavailable"), outFb.id);
+				Assert::AreEqual(size_t(4), recMock.calls.size(), L"GapSeed + twoCandidates dispatches 4 passes");
+				Assert::AreEqual(std::string("VideoProcessor de-judder: global motion (gap seed)"), recMock.calls[0].description);
+				Assert::IsTrue(recMock.calls[0].dstTex == vecTex[0] && std::memcmp(recMock.calls[0].vec4, in.gapSeedVec[0], sizeof(in.gapSeedVec[0])) == 0);
+				Assert::AreEqual(std::string("VideoProcessor de-judder: global motion second (gap seed)"), recMock.calls[1].description);
+				Assert::IsTrue(recMock.calls[1].dstTex == secTex[0] && Vec4AllZero(recMock.calls[1].vec4));
+				Assert::AreEqual(std::string("VideoProcessor de-judder: global motion (gap seed)"), recMock.calls[2].description);
+				Assert::IsTrue(recMock.calls[2].dstTex == vecTex[1] && std::memcmp(recMock.calls[2].vec4, in.gapSeedVec[1], sizeof(in.gapSeedVec[1])) == 0);
+				Assert::AreEqual(std::string("VideoProcessor de-judder: global motion second (gap seed)"), recMock.calls[3].description);
+				Assert::IsTrue(recMock.calls[3].dstTex == secTex[1] && Vec4AllZero(recMock.calls[3].vec4));
+			}
+
+			// cutOrFlash via ExecutePairGlobalGpu (success vs clear failure) and !globalPrior (0 dispatches).
+			{
+				PairGlobalSelectionInput cutIn;
+				cutIn.cutOrFlash = true;
+				cutIn.globalPrior = true;
+				PairGlobal outRec;
+				PairGlobalSelectionOutcome outOutcome;
+				FallbackCatalog::Decision outFb;
+				std::string outErr;
+
+				recMock.Reset();
+				Assert::IsTrue(ExecutePairGlobalGpu(cutIn, ctx, outRec, outOutcome, outFb, outErr));
+				Assert::AreEqual(size_t(4), recMock.calls.size());
+				Assert::AreEqual(std::string(kClearLabel), recMock.calls[0].description);
+				Assert::IsFalse(outFb.engaged);
+				Assert::AreEqual(std::string("motion.pair_global_unavailable"), outFb.id);
+
+				recMock.Reset(/*failCall=*/1);
+				Assert::IsFalse(ExecutePairGlobalGpu(cutIn, ctx, outRec, outOutcome, outFb, outErr));
+				Assert::IsTrue(outFb.engaged && outFb.id == "motion.pair_global_unavailable" && Has(outErr, "clear dispatch failed"));
+
+				PairGlobalSelectionInput noPriorIn;
+				noPriorIn.globalPrior = false;
+				recMock.Reset();
+				Assert::IsTrue(ExecutePairGlobalGpu(noPriorIn, ctx, outRec, outOutcome, outFb, outErr));
+				Assert::AreEqual(size_t(0), recMock.calls.size(), L"!globalPrior performs 0 dispatches");
+				Assert::IsFalse(outFb.engaged);
+			}
+		}
+	};
+
+	// M1#4 (U10 C3, PairGlobalFill.h): Ruling 2 abort + visible FallbackCatalog::PairGlobalUnavailable on D1 failure,
+	// clean release via FallbackCatalog::Sync on same-input recovery, and AcquireOrFillPairGlobalGpu skeleton-wired
+	// failure vs success vs placeholder fallthrough.
+	TEST_CLASS(PairGlobalUnavailableIsVisibleTests)
+	{
+	public:
+		// Ruling 2 abort + visible "motion.pair_global_unavailable" on D1 failure (parallel missing GPU / missing scratch /
+		// failing dispatchPerBlock; serial failing dispatch), plus exact-same-context positive control releasing the registry.
+		TEST_METHOD(PairGlobalUnavailableIsVisible)
+		{
+			using namespace VpMotion;
+
+			int sentinels[11] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
+			pl_tex l1A = reinterpret_cast<pl_tex>(&sentinels[0]);
+			pl_tex l1B = reinterpret_cast<pl_tex>(&sentinels[1]);
+			pl_tex l2A = reinterpret_cast<pl_tex>(&sentinels[2]);
+			pl_tex l2B = reinterpret_cast<pl_tex>(&sentinels[3]);
+			pl_tex vecTex[2] = { reinterpret_cast<pl_tex>(&sentinels[4]), reinterpret_cast<pl_tex>(&sentinels[5]) };
+			pl_tex secTex[2] = { reinterpret_cast<pl_tex>(&sentinels[6]), reinterpret_cast<pl_tex>(&sentinels[7]) };
+			pl_tex scratchSad2 = reinterpret_cast<pl_tex>(&sentinels[8]);
+			pl_tex scratchSad1 = reinterpret_cast<pl_tex>(&sentinels[9]);
+			pl_tex scratchPick = reinterpret_cast<pl_tex>(&sentinels[10]);
+
+			PairGlobalSelectionInput d1In;
+			d1In.globalPrior = true;   // selects MatcherD1 (no camera model, engine, or gap seed)
+
+			PairGlobalDispatchRecorder recMock;
+
+			// Case A1: Parallel D1 with gpu == nullptr and null scratch textures -> Ruling 2 abort with "global motion: missing GPU".
+			{
+				pl_tex nullSad2 = nullptr, nullSad1 = nullptr, nullPick = nullptr;
+				PairGlobalGpuContext ctx;
+				ctx.gpu = nullptr;
+				ctx.serialReference = false;
+				ctx.twoCandidates = true;
+				ctx.l1A = l1A; ctx.l1B = l1B; ctx.l2A = l2A; ctx.l2B = l2B;
+				ctx.globalVector = vecTex;
+				ctx.globalSecond = secTex;
+				ctx.bothSad2 = &nullSad2;
+				ctx.bothSad1 = &nullSad1;
+				ctx.bothPick = &nullPick;
+				ctx.dispatchPerBlock = recMock.MakeDispatchPerBlock();
+
+				PairGlobal outRec;
+				PairGlobalSelectionOutcome outOutcome;
+				FallbackCatalog::Decision outFb;
+				std::string outErr;
+				recMock.Reset();
+				Assert::IsFalse(ExecutePairGlobalGpu(d1In, ctx, outRec, outOutcome, outFb, outErr),
+					L"Case A1: missing GPU on D1 must abort (return false)");
+				Assert::IsTrue(outOutcome.source == PairGlobalSource::MatcherD1 && outOutcome.needsD1Search);
+				Assert::IsFalse(outRec.valid, L"Case A1: aborted D1 must never mark record valid");
+				Assert::AreEqual(size_t(0), recMock.calls.size(), L"Case A1: 0 dispatches on missing GPU");
+				Assert::AreEqual(std::string("global motion: missing GPU"), outErr);
+				Assert::IsTrue(outFb.engaged, L"Case A1: fallback must engage visibly");
+				Assert::AreEqual(std::string("motion.pair_global_unavailable"), outFb.id);
+				Assert::IsTrue(Has(outFb.reason, outErr.c_str()), L"Case A1: fallback reason contains exact outError");
+				Assert::IsTrue(Has(outFb.reason, "motion estimation aborted"), L"Case A1: fallback reason names abort");
+				const std::string plain = FallbackPlainText::Sentence(outFb.id);
+				Assert::IsFalse(plain.empty(), L"Case A1: FallbackPlainText has plain English sentence");
+			}
+
+			// Case A2: Parallel D1 with null scratch pointer handles -> Ruling 2 abort.
+			{
+				PairGlobalGpuContext ctx;
+				ctx.serialReference = false;
+				ctx.l1A = l1A; ctx.l1B = l1B; ctx.l2A = l2A; ctx.l2B = l2B;
+				ctx.globalVector = vecTex;
+				ctx.dispatchPerBlock = recMock.MakeDispatchPerBlock();
+
+				PairGlobal outRec;
+				PairGlobalSelectionOutcome outOutcome;
+				FallbackCatalog::Decision outFb;
+				std::string outErr;
+				recMock.Reset();
+				Assert::IsFalse(ExecutePairGlobalGpu(d1In, ctx, outRec, outOutcome, outFb, outErr),
+					L"Case A2: missing scratch handles must abort");
+				Assert::IsFalse(outRec.valid);
+				Assert::IsFalse(outErr.empty());
+				Assert::IsTrue(outFb.engaged && outFb.id == "motion.pair_global_unavailable");
+				Assert::IsTrue(Has(outFb.reason, outErr.c_str()) && Has(outFb.reason, "motion estimation aborted"));
+			}
+
+			// Case A3: Parallel D1 with failing DispatchPerBlockFn vs exact-same-context positive control.
+			{
+				PairGlobalGpuContext ctx;
+				ctx.serialReference = false;
+				ctx.twoCandidates = true;
+				ctx.l1A = l1A; ctx.l1B = l1B; ctx.l2A = l2A; ctx.l2B = l2B;
+				ctx.globalVector = vecTex;
+				ctx.globalSecond = secTex;
+				ctx.bothSad2 = &scratchSad2;
+				ctx.bothSad1 = &scratchSad1;
+				ctx.bothPick = &scratchPick;
+
+				PairGlobal outRec;
+				PairGlobalSelectionOutcome outOutcome;
+				FallbackCatalog::Decision outFb;
+				std::string outErr;
+				recMock.Reset(/*failCall=*/2, &outErr, "shader rejected: global motion pick (D1)");
+				ctx.dispatchPerBlock = recMock.MakeDispatchPerBlock();
+
+				Assert::IsFalse(ExecutePairGlobalGpu(d1In, ctx, outRec, outOutcome, outFb, outErr),
+					L"Case A3: failing parallel D1 dispatch must abort");
+				Assert::IsFalse(outRec.valid);
+				Assert::AreEqual(size_t(2), recMock.calls.size());
+				Assert::AreEqual(std::string("shader rejected: global motion pick (D1)"), outErr);
+				Assert::IsTrue(outFb.engaged && outFb.id == "motion.pair_global_unavailable");
+				Assert::IsTrue(Has(outFb.reason, outErr.c_str()) && Has(outFb.reason, "motion estimation aborted"));
+
+				// Same-input positive control on exact same parallel ctx.
+				recMock.Reset();
+				ctx.dispatchPerBlock = recMock.MakeDispatchPerBlock();
+				Assert::IsTrue(ExecutePairGlobalGpu(d1In, ctx, outRec, outOutcome, outFb, outErr),
+					L"Case A3 positive control: succeeding parallel D1 returns true");
+				Assert::AreEqual(size_t(4), recMock.calls.size(), L"RunBoth dispatches 4 D1 stages");
+				Assert::IsTrue(outRec.valid && outErr.empty());
+				Assert::IsFalse(outFb.engaged);
+				Assert::AreEqual(std::string("motion.pair_global_unavailable"), outFb.id);
+			}
+
+			// Case A4 + Case B: Serial D1 failing DispatchFn engages registry visibly; exact-same-context succeeding
+			// serial DispatchFn returns true and releases registry cleanly to "Fallbacks engaged: none".
+			{
+				FallbackStatus::Registry reg;
+				Assert::AreEqual(std::string("Fallbacks engaged: none"), reg.Heading());
+
+				PairGlobalGpuContext serialCtx;
+				serialCtx.gpu = nullptr;
+				serialCtx.serialReference = true;
+				serialCtx.twoCandidates = false;
+				serialCtx.l1A = l1A; serialCtx.l1B = l1B; serialCtx.l2A = l2A; serialCtx.l2B = l2B;
+				serialCtx.globalVector = vecTex;
+				serialCtx.globalSecond = secTex;
+
+				PairGlobal outRec;
+				PairGlobalSelectionOutcome outOutcome;
+				FallbackCatalog::Decision outFb;
+				std::string outErr;
+				recMock.Reset(/*failCall=*/2, &outErr, "D1 serial dispatch failed on bwd");
+				serialCtx.dispatch = recMock.MakeDispatch();
+
+				Assert::IsFalse(ExecutePairGlobalGpu(d1In, serialCtx, outRec, outOutcome, outFb, outErr),
+					L"Case A4: failing serial D1 must abort (Ruling 2)");
+				Assert::IsFalse(outRec.valid, L"Case A4: aborted serial D1 never marks record valid");
+				Assert::AreEqual(size_t(2), recMock.calls.size(), L"fwd succeeded, bwd failed");
+				Assert::AreEqual(std::string("D1 serial dispatch failed on bwd"), outErr);
+				Assert::IsTrue(outFb.engaged);
+				Assert::AreEqual(std::string("motion.pair_global_unavailable"), outFb.id);
+				Assert::IsTrue(Has(outFb.reason, outErr.c_str()), L"Case A4: reason preserves exact outError");
+				Assert::IsTrue(Has(outFb.reason, "motion estimation aborted"), L"Case A4: reason names abort");
+
+				const std::string sentence = FallbackPlainText::Sentence(outFb.id);
+				Assert::IsFalse(sentence.empty(), L"Case A4: FallbackPlainText sentence must be non-empty plain English");
+				const std::string notice = FallbackPlainText::FallbackNoticeText(outFb.id, outFb.reason);
+				Assert::IsTrue(notice.find(sentence) == 0u && Has(notice, outErr.c_str()),
+					L"Case A4: plain-English notice wraps exact technical reason");
+
+				Assert::IsTrue(FallbackCatalog::Sync(reg, outFb), L"Case A4: Sync transitions registry to engaged");
+				Assert::IsTrue(reg.Engaged("motion.pair_global_unavailable"));
+				Assert::IsTrue(Has(reg.Heading(), "motion.pair_global_unavailable"));
+				Assert::IsTrue(Has(reg.Heading(), "D1 serial dispatch failed on bwd"));
+
+				// Case B (Same-input positive control + release): re-run exact same PairGlobalGpuContext with succeeding serial DispatchFn.
+				recMock.Reset();
+				serialCtx.dispatch = recMock.MakeDispatch();
+				Assert::IsTrue(ExecutePairGlobalGpu(d1In, serialCtx, outRec, outOutcome, outFb, outErr),
+					L"Case B: succeeding serial D1 on exact same context returns true");
+				Assert::AreEqual(size_t(2), recMock.calls.size(), L"Case B: fwd + bwd serial D1 dispatches");
+				Assert::AreEqual(std::string("VideoProcessor de-judder: global motion (D1, serial reference)"), recMock.calls[0].description);
+				Assert::AreEqual(std::string("VideoProcessor de-judder: global motion (D1, serial reference)"), recMock.calls[1].description);
+				Assert::IsTrue(recMock.calls[0].lastDstTex == vecTex[0] && recMock.calls[1].lastDstTex == vecTex[1]);
+				Assert::IsTrue(outRec.valid && outErr.empty());
+				Assert::IsFalse(outFb.engaged, L"Case B: success releases motion.pair_global_unavailable");
+				Assert::AreEqual(std::string("motion.pair_global_unavailable"), outFb.id);
+
+				Assert::IsTrue(FallbackCatalog::Sync(reg, outFb), L"Case B: Sync transitions registry back to released");
+				Assert::IsFalse(reg.Engaged("motion.pair_global_unavailable"));
+				Assert::AreEqual(std::string("Fallbacks engaged: none"), reg.Heading(),
+					L"Case B: registry returns cleanly to Fallbacks engaged: none");
+			}
+		}
+
+		// AcquireOrFillPairGlobalGpu skeleton-wired behavior: real GPU owner-fill error aborts (Ruling 2, no silent direct
+		// fallthrough), valid GPU owner-fill propagates view+outcome and releases fallback, skeleton placeholder falls through
+		// cleanly to ExecutePairGlobalGpu, and the P2 convenience overload respects memo vs standalone direct fallback.
+		TEST_METHOD(AcquireOrFillPairGlobalGpuSkeletonFailureSuccessAndPlaceholderFallthrough)
+		{
+			using namespace VpMotion;
+			using namespace VpSkeleton;
+
+			int sentinels[4] = { 101, 102, 103, 104 };
+			pl_tex vecTex[2] = { reinterpret_cast<pl_tex>(&sentinels[0]), reinterpret_cast<pl_tex>(&sentinels[1]) };
+			pl_tex secTex[2] = { reinterpret_cast<pl_tex>(&sentinels[2]), reinterpret_cast<pl_tex>(&sentinels[3]) };
+
+			PairGlobalDispatchRecorder recMock;
+			PairGlobalGpuContext ctx;
+			ctx.twoCandidates = true;
+			ctx.globalVector = vecTex;
+			ctx.globalSecond = secTex;
+			ctx.dispatch = recMock.MakeDispatch();
+
+			PairGlobalSelectionInput camIn;
+			camIn.globalPrior = true;
+			camIn.useModelGlobal = true;
+			camIn.modelFwd[0] = 16.0f; camIn.modelFwd[1] = 8.0f;
+			camIn.modelBwd[0] = -16.0f; camIn.modelBwd[1] = -8.0f;
+			camIn.modelInputScale = 0.5f;
+
+			FallbackStatus::Registry reg;
+
+			// Case 1: SkeletonMemo GPU owner fill declines with a real error ("global motion: no 32-bit float storage format") ->
+			// Ruling 2 abort, NEVER falls through to direct ExecutePairGlobalGpu even though ctx.dispatch would succeed!
+			{
+				SkeletonMemo memoFail;
+				memoFail.SetRenderThread(std::this_thread::get_id());
+				Assert::IsTrue(memoFail.RegisterOwnerFill(kP7CameraFit, AcquireForm::Gpu, kPairGlobalUnit,
+					MakeP7PairGlobalGpuOwnerFill([](const OwnerFillRequest&, SkeletonMemo&, PairGlobalGpuView&, std::string& outWhy) {
+						outWhy = "global motion: no 32-bit float storage format";
+						return false;
+					})) == SkeletonMemo::Registration::Registered);
+
+				PairGlobal outRec = MakePairGlobalSample(PairGlobalSource::CameraModel, true, 1u, 1.0f);
+				PairGlobalSelectionOutcome outOutcome;
+				FallbackCatalog::Decision outFb;
+				std::string outErr;
+				bool usedMemoGpu = true;
+				recMock.Reset();
+
+				Assert::IsFalse(AcquireOrFillPairGlobalGpu(&memoFail, 20, camIn, ctx, outRec, outOutcome, outFb, outErr, &usedMemoGpu),
+					L"Case 1: real GPU owner-fill error must abort (Ruling 2)");
+				Assert::IsFalse(usedMemoGpu);
+				Assert::AreEqual(size_t(0), recMock.calls.size(),
+					L"Case 1: real GPU owner-fill failure must NOT silently fall through to direct fill");
+				Assert::IsFalse(outRec.valid);
+				Assert::IsTrue(outRec.src == PairGlobalSource::Cleared);
+				Assert::IsTrue(outFb.engaged);
+				Assert::AreEqual(std::string("motion.pair_global_unavailable"), outFb.id);
+				Assert::IsTrue(Has(outFb.reason, "no 32-bit float storage format"),
+					L"Case 1: fallback reason preserves real GPU error");
+				Assert::IsTrue(Has(outFb.reason, "motion estimation aborted"));
+				Assert::IsTrue(Has(outErr, "no 32-bit float storage format"));
+
+				Assert::IsTrue(FallbackCatalog::Sync(reg, outFb));
+				Assert::IsTrue(reg.Engaged("motion.pair_global_unavailable"));
+			}
+
+			// Case 2: SkeletonMemo GPU owner fill succeeds -> propagates view + outcome (both hasOutcome = true and false)
+			// and releases "motion.pair_global_unavailable" without invoking direct dispatch.
+			{
+				const PairGlobal expectedCamRec = MakePairGlobalSample(PairGlobalSource::CameraModel, true, 0u, 3.0f);
+				const PairGlobal expectedEngRec = MakePairGlobalSample(PairGlobalSource::Engine, true, 55u, -1.5f);
+
+				SkeletonMemo memoOk;
+				memoOk.SetRenderThread(std::this_thread::get_id());
+				Assert::IsTrue(memoOk.RegisterOwnerFill(kP7CameraFit, AcquireForm::Gpu, kPairGlobalUnit,
+					MakeP7PairGlobalGpuOwnerFill([&](const OwnerFillRequest& req, SkeletonMemo&, PairGlobalGpuView& outView, std::string&) {
+						outView.globalVector = vecTex[0];
+						outView.globalSecond = secTex[0];
+						if (req.seq == 21)
+						{
+							outView.record = expectedCamRec;
+							outView.hasOutcome = true;
+							outView.outcome.source = PairGlobalSource::CameraModel;
+							outView.outcome.modelGlobalUsed = true;
+							outView.outcome.clearSecond = true;
+						}
+						else
+						{
+							outView.record = expectedEngRec;
+							outView.hasOutcome = false;
+						}
+						return true;
+					})) == SkeletonMemo::Registration::Registered);
+
+				PairGlobal outRec;
+				PairGlobalSelectionOutcome outOutcome;
+				FallbackCatalog::Decision outFb;
+				std::string outErr = "previous error";
+				bool usedMemoGpu = false;
+				recMock.Reset();
+
+				Assert::IsTrue(AcquireOrFillPairGlobalGpu(&memoOk, 21, camIn, ctx, outRec, outOutcome, outFb, outErr, &usedMemoGpu),
+					L"Case 2: valid GPU owner fill returns true");
+				Assert::IsTrue(usedMemoGpu, L"Case 2: served via SkeletonMemo GPU path");
+				Assert::AreEqual(size_t(0), recMock.calls.size(), L"Case 2: direct ExecutePairGlobalGpu not invoked");
+				Assert::IsTrue(SamePairGlobal(expectedCamRec, outRec), L"Case 2: view record propagated bit-for-bit");
+				Assert::IsTrue(outOutcome.source == PairGlobalSource::CameraModel);
+				Assert::IsTrue(outOutcome.modelGlobalUsed && outOutcome.clearSecond && !outOutcome.globalFromEngine);
+				Assert::IsTrue(outErr.empty());
+				Assert::IsFalse(outFb.engaged, L"Case 2: fallback released on success");
+				Assert::AreEqual(std::string("motion.pair_global_unavailable"), outFb.id);
+
+				Assert::IsTrue(FallbackCatalog::Sync(reg, outFb));
+				Assert::AreEqual(std::string("Fallbacks engaged: none"), reg.Heading(),
+					L"Case 2: registry released cleanly to none");
+
+				// hasOutcome = false synthesizes outcome flags from outView.record.src.
+				usedMemoGpu = false;
+				Assert::IsTrue(AcquireOrFillPairGlobalGpu(&memoOk, 22, camIn, ctx, outRec, outOutcome, outFb, outErr, &usedMemoGpu));
+				Assert::IsTrue(usedMemoGpu && recMock.calls.empty());
+				Assert::IsTrue(SamePairGlobal(expectedEngRec, outRec));
+				Assert::IsTrue(outOutcome.source == PairGlobalSource::Engine && outOutcome.globalFromEngine && !outOutcome.clearSecond);
+				Assert::IsFalse(outFb.engaged);
+			}
+
+			// Case 3: SkeletonMemo placeholder GPU owner fill ("pair global: gpu provider absent") -> falls through cleanly
+			// to ExecutePairGlobalGpu (verified with mock DispatchFn).
+			{
+				SkeletonMemo memoPlaceholder;
+				memoPlaceholder.SetRenderThread(std::this_thread::get_id());
+				Assert::IsTrue(memoPlaceholder.RegisterOwnerFill(kP7CameraFit, AcquireForm::Gpu, kPairGlobalUnit,
+					MakeP7PairGlobalGpuOwnerFill()) == SkeletonMemo::Registration::Registered);
+
+				PairGlobal outRec;
+				PairGlobalSelectionOutcome outOutcome;
+				FallbackCatalog::Decision outFb;
+				std::string outErr;
+				bool usedMemoGpu = true;
+				recMock.Reset();
+
+				Assert::IsTrue(AcquireOrFillPairGlobalGpu(&memoPlaceholder, 23, camIn, ctx, outRec, outOutcome, outFb, outErr, &usedMemoGpu),
+					L"Case 3: gpu provider absent placeholder falls through cleanly to ExecutePairGlobalGpu");
+				Assert::IsFalse(usedMemoGpu, L"Case 3: direct fill executed after placeholder decline");
+				Assert::AreEqual(size_t(4), recMock.calls.size(), L"Case 3: mock DispatchFn ran all 4 CameraModel passes");
+				Assert::IsTrue(outOutcome.source == PairGlobalSource::CameraModel && outOutcome.modelGlobalUsed && outRec.valid);
+				Assert::IsFalse(outFb.engaged);
+				Assert::AreEqual(std::string("motion.pair_global_unavailable"), outFb.id);
+			}
+
+			// Case 4: Convenience overload loads kP2VectorPair when memo != nullptr (ignoring directP2Fallback) and uses
+			// directP2Fallback when memo == nullptr.
+			{
+				VectorEngine engine;
+				engine.PublishProducer(std::make_shared<MotionAhead::Producer>());
+				engine.p2Slot->SetGeneration(engine.motionValidity.StreamGeneration());
+				const MotionAhead::FlowPtr memoFlow = MakeClearGlobalFlow(3.25f, -0.75f, true);
+				Assert::IsTrue(engine.p2Slot->Publish(10, 11, engine.p2Slot->Generation(), memoFlow));
+
+				SkeletonMemo memoP2;
+				memoP2.SetRenderThread(std::this_thread::get_id());
+				IVectorEngine* enginePtr = &engine;
+				Assert::IsTrue(RegisterFill(memoP2, [enginePtr](const void*) { return enginePtr; }));
+				Assert::IsTrue(memoP2.RegisterOwnerFill(kP7CameraFit, AcquireForm::Gpu, kPairGlobalUnit,
+					MakeP7PairGlobalGpuOwnerFill()) == SkeletonMemo::Registration::Registered);
+
+				const MotionAhead::FlowPtr directFlow = MakeClearGlobalFlow(-5.5f, 2.25f, true);
+				const P2PairRecord directP2 = MakeP2PairRecord(10, 11, 88u, directFlow->global, directFlow->second, true, false);
+
+				PairGlobalSelectionInput engIn;
+				engIn.globalPrior = true;
+				engIn.opticalFlowGlobal = true;
+				engIn.seeded = true;
+
+				PairGlobal outRec;
+				PairGlobalSelectionOutcome outOutcome;
+				FallbackCatalog::Decision outFb;
+				std::string outErr;
+
+				recMock.Reset();
+				Assert::IsTrue(AcquireOrFillPairGlobalGpu(&memoP2, 11, &directP2, engIn, ctx, outRec, outOutcome, outFb, outErr));
+				Assert::IsTrue(outOutcome.source == PairGlobalSource::Engine && outOutcome.globalFromEngine);
+				Assert::AreEqual(uint64_t(1), outRec.p2Epoch, L"Case 4: memo path uses kP2VectorPair epoch, not directP2");
+				Assert::AreEqual(size_t(2), recMock.calls.size());
+				Assert::AreEqual(0, std::memcmp(recMock.calls[0].vec4, memoFlow->global[0], sizeof(memoFlow->global[0])));
+				Assert::AreEqual(0, std::memcmp(recMock.calls[1].vec4, memoFlow->global[1], sizeof(memoFlow->global[1])));
+
+				recMock.Reset();
+				Assert::IsTrue(AcquireOrFillPairGlobalGpu(nullptr, 11, &directP2, engIn, ctx, outRec, outOutcome, outFb, outErr));
+				Assert::IsTrue(outOutcome.source == PairGlobalSource::Engine && outOutcome.globalFromEngine);
+				Assert::AreEqual(uint64_t(88), outRec.p2Epoch, L"Case 4: standalone path uses directP2 epoch");
+				Assert::AreEqual(size_t(2), recMock.calls.size());
+				Assert::AreEqual(0, std::memcmp(recMock.calls[0].vec4, directP2.global[0], sizeof(directP2.global[0])));
+				Assert::AreEqual(0, std::memcmp(recMock.calls[1].vec4, directP2.global[1], sizeof(directP2.global[1])));
+			}
+		}
+	};
 }
