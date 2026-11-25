@@ -568,14 +568,26 @@ vec4 hook()
     if (ap_out_of_range(outLin)) {
         float lo = 0.0;
         float hi = jmh.y;
+        bool foundInRange = !ap_out_of_range(fromXyz * ap_inverse(jmh.x, 0.0, jmh.z) * 0.01);
         for (int i = 0; i < 6; i++) {
             float mid = 0.5 * (lo + hi);
-            if (ap_out_of_range(fromXyz * ap_inverse(jmh.x, mid, jmh.z) * 0.01))
+            if (ap_out_of_range(fromXyz * ap_inverse(jmh.x, mid, jmh.z) * 0.01)) {
                 hi = mid;
-            else
+            } else {
                 lo = mid;
+                foundInRange = true;
+            }
         }
-        outLin = fromXyz * ap_inverse(jmh.x, lo, jmh.z) * 0.01;
+        vec3 bisected = fromXyz * ap_inverse(jmh.x, lo, jmh.z) * 0.01;
+        if (foundInRange) {
+            outLin = bisected;
+        } else {
+            // When D < 1 at J ~ 100 (e.g. D65 white under dim screen with veil), M = 0 is equi-energy E
+            // (outside [0, upper] with a red cast) rather than D65 white. If no tested M is in-range,
+            // clamp the finite pre-bisection colour to [0, upper] instead of collapsing onto equi-energy E.
+            bool origFinite = !any(isnan(outLin)) && !any(isinf(outLin));
+            outLin = clamp(origFinite ? outLin : bisected, vec3(0.0), vec3(ap_upper()));
+        }
     }
 
     // Room light reflected by the screen (flare): a toe, never a subtract-and-clip (FIX1 MUST 5; Cam16::FlareToDisplayed).
