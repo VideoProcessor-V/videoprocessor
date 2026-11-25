@@ -738,6 +738,12 @@
      "reason": "call of the shared siting law (refs/126 s3, B0)"
     },
     {
+     "file": "src/VP-V/modules/repair/temporal_detail/v2/TdV2Chroma.h",
+     "pattern": "ChromaSiting",
+     "kind": "shared_function_use",
+     "reason": "call of the shared siting law (refs/126 s3, Fable M-7)"
+    },
+    {
      "file": "src/VP-V/modules/input/source_analysis/identity/chain/ChainEstimator.cpp",
      "pattern": "PolyphaseProposer",
      "kind": "false_positive",
