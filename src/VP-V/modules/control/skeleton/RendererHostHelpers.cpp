@@ -4,6 +4,7 @@
 #include "RendererHostHelpers.h"
 
 #include <DebugLog.h>
+#include <VP-V/core/GpuAttributionPl.h>
 #include <VP-V/modules/output/presentation/RepeatReuseGlue.h>
 
 #include <algorithm>
@@ -18,7 +19,10 @@ namespace Vpv
 		void EnsureRebaseDispatch(pl_dispatch& rebaseDispatch, pl_log log, pl_d3d11 d3d11)
 		{
 			if (!rebaseDispatch)
+			{
 				rebaseDispatch = pl_dispatch_create(log, d3d11->gpu);
+				GpuAttribution::Watch(rebaseDispatch, "rebase");
+			}
 		}
 
 		void TagSlotHooks(const std::vector<const pl_hook*>& frameHooks,

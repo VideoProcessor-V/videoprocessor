@@ -234,6 +234,39 @@ namespace ScalerPass
 		return total;
 	}
 
+	pl_fmt Module::SelectFloatFormat(pl_gpu gpu, int comps, Precision precision, bool preferStorable, bool& fellBackTo16)
+	{
+		fellBackTo16 = false;
+		if (!gpu || comps < 1)
+			return nullptr;
+		auto findFloatBits = [&](int bits, unsigned caps) -> pl_fmt {
+			pl_fmt f = pl_find_fmt(gpu, PL_FMT_FLOAT, comps, bits, bits, static_cast<enum pl_fmt_caps>(caps));
+			if (!f && comps == 3)
+				f = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, bits, bits, static_cast<enum pl_fmt_caps>(caps));
+			return f;
+		};
+		// POD2-M6: preserve 32-bit float precision before falling back to 16-bit half-float:
+		// F32+storable -> F32+renderable -> F16+storable -> F16+renderable.
+		if (precision == Precision::F32)
+		{
+			if (preferStorable)
+				if (pl_fmt f = findFloatBits(32, kRenderCaps | PL_FMT_CAP_STORABLE))
+					return f;
+			if (pl_fmt f = findFloatBits(32, kRenderCaps))
+				return f;
+			pl_fmt f16 = preferStorable ? findFloatBits(16, kRenderCaps | PL_FMT_CAP_STORABLE) : nullptr;
+			if (!f16)
+				f16 = findFloatBits(16, kRenderCaps);
+			if (f16)
+				fellBackTo16 = true;
+			return f16;
+		}
+		if (preferStorable)
+			if (pl_fmt f = findFloatBits(16, kRenderCaps | PL_FMT_CAP_STORABLE))
+				return f;
+		return findFloatBits(16, kRenderCaps);
+	}
+
 	bool Module::Apply(pl_gpu gpu, pl_dispatch dispatch, const Source& src, int dstW, int dstH, const Settings& st, pl_tex& out, int slot)
 	{
 		error.clear();
@@ -272,21 +305,6 @@ namespace ScalerPass
 		pl_fmt fmt = nullptr;
 		std::string newNote;
 		const bool preferStorable = polar && gpu->glsl.compute && gpu->glsl.max_shmem_size > 0;
-		auto findFloatWithCaps = [&](int comps, unsigned caps, bool& fellBackTo16) -> pl_fmt {
-			const int bits = st.precision == Precision::F32 ? 32 : 16;
-			pl_fmt f = pl_find_fmt(gpu, PL_FMT_FLOAT, comps, bits, bits, static_cast<enum pl_fmt_caps>(caps));
-			if (!f && comps == 3)
-				f = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, bits, bits, static_cast<enum pl_fmt_caps>(caps));
-			if (!f && st.precision == Precision::F32)
-			{
-				f = pl_find_fmt(gpu, PL_FMT_FLOAT, comps, 16, 16, static_cast<enum pl_fmt_caps>(caps));
-				if (!f && comps == 3)
-					f = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 16, 16, static_cast<enum pl_fmt_caps>(caps));
-				if (f)
-					fellBackTo16 = true;
-			}
-			return f;
-		};
 		if (st.precision == Precision::Target)
 		{
 			fmt = st.targetFormat ? st.targetFormat : srcFmt;
@@ -304,15 +322,8 @@ namespace ScalerPass
 		}
 		else
 		{
-			const int comps = srcFmt->num_components;
 			bool fellBackTo16 = false;
-			if (preferStorable)
-				fmt = findFloatWithCaps(comps, kRenderCaps | PL_FMT_CAP_STORABLE, fellBackTo16);
-			if (!fmt)
-			{
-				fellBackTo16 = false;
-				fmt = findFloatWithCaps(comps, kRenderCaps, fellBackTo16);
-			}
+			fmt = SelectFloatFormat(gpu, srcFmt->num_components, st.precision, preferStorable, fellBackTo16);
 			if (fellBackTo16)
 				newNote = "scaler precision: half float (f32 not renderable)";
 			else if (st.precision == Precision::F16)

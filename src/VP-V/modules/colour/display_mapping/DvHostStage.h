@@ -325,6 +325,8 @@ public:
 			m_lutStatus = m_toneDolbyRunning && lutChoice.size > 0 && !lutChoice.withinBudget ?
 				"DV tone LUT: largest size misses the interpolation budget" : std::string();
 			if (!m_recoveryStatus.empty()) m_engage("DV contrast recovery", m_recoveryStatus); else m_release("DV contrast recovery");
+			// POD2-M5: surface tone-LUT precision budget miss in FallbackCatalog (never silent).
+			if (!m_lutStatus.empty()) m_engage("DV tone LUT", m_lutStatus); else m_release("DV tone LUT");
 		}
 		if (!dvToneFallback.empty()) m_engage("DV tone mapping", dvToneFallback + ": " + DvDolbyStyle::FallbackName(f.trims)); else m_release("DV tone mapping");
 		// Audit 7: libplacebo's input_avg / input_max for the curve come from L1 via hdr.avg_pq_y / max_pq_y.

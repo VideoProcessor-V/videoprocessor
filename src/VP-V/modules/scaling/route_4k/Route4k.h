@@ -78,7 +78,12 @@ namespace Route4k
 		ScalerKernels::Spec safeFilter = DefaultSafeFilter();
 		float sharpAntiring = 0.5f;
 		float safeAntiring = 0.5f;
-		float wBase = 1.0f;
+		// POD2-M8: default 0.5 engages HybridBlend (1.0 bypassed the blend via sharpOnly);
+		// edgeTerm/grainTerm/motionTerm feed hb_weight until Wave 4-6 live maps are wired.
+		float wBase = 0.5f;
+		float edgeTerm = 0.0f;
+		float grainTerm = 1.0f;
+		float motionTerm = 1.0f;
 		bool preferFloat32 = true;
 	};
 

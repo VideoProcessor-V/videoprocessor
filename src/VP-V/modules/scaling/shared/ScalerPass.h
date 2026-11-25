@@ -86,6 +86,8 @@ namespace ScalerPass
 		// One line describing the last successful Apply.
 		const std::string& Status() const { return status; }
 		unsigned long long Failures() const { return failures; } size_t TextureBytes() const;
+		// POD2-M6: float format selection order: F32+storable -> F32+renderable -> F16+storable -> F16+renderable.
+		static pl_fmt SelectFloatFormat(pl_gpu gpu, int comps, Precision precision, bool preferStorable, bool& fellBackTo16);
 
 	private:
 		static constexpr int kSlots = 3;
