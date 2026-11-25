@@ -427,7 +427,11 @@ public:
             RefreshHasAheadDemandsLocked();
         return removed;
     }
-    bool HasOwnerFill(ProductId id, AcquireForm form) const { std::lock_guard<std::mutex> g(mutex_); return OwnerLocked(OwnerKey(id, form)) != nullptr; }
+    bool HasOwnerFill(ProductId id, AcquireForm form) const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        return OwnerLocked(OwnerKey(id, form)) != nullptr;
+    }
     // L-CORE: the lane BINDS the memo: its slots become the first G2 source and its fills (the lane's CPU live computes) take
     // precedence over module registrations of the same (product, form) while bound. A second bind replaces the first (graph
     // rebuild: the new bundle binds before the old one ends). A fill for a product outside the catalog is ignored.
@@ -455,13 +459,33 @@ public:
         RefreshHasAheadDemandsLocked();
         return true;
     }
-    bool LaneBound() const { std::lock_guard<std::mutex> g(mutex_); return bool(lane_.read) || bool(lane_.copyPublished); }
-    uint64_t LaneBinds() const { std::lock_guard<std::mutex> g(mutex_); return laneBinds_; }
+    bool LaneBound() const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        return bool(lane_.read) || bool(lane_.copyPublished);
+    }
+    uint64_t LaneBinds() const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        return laneBinds_;
+    }
     // The render thread (the skeleton, every Begin). Not declared = every thread counts as the render thread.
-    void SetRenderThread(std::thread::id id) { std::lock_guard<std::mutex> g(mutex_); renderThread_ = id; }
-    bool OnRenderThread() const { std::lock_guard<std::mutex> g(mutex_); return OnRenderThreadLocked(); }
+    void SetRenderThread(std::thread::id id)
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        renderThread_ = id;
+    }
+    bool OnRenderThread() const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        return OnRenderThreadLocked();
+    }
     // A frame whose memo spots were released (a request for it is FrameReleased).
-    bool Released(uint64_t seq) const { std::lock_guard<std::mutex> g(mutex_); return haveReleased_ && seq <= releasedThrough_; }
+    bool Released(uint64_t seq) const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        return haveReleased_ && seq <= releasedThrough_;
+    }
     // The memo's GPU working set as VRAM ledger LEVELS (amendment A5 / audit M6): one level per step of THE ahead ladder
     // (QueueWindow.h AheadLadderStates over the registered allocating GPU fills and the current window), non-increasing, so a short
     // grant gives the largest plan that fits, never 0. `mode` / `budget` = the S-C inputs (QueueWindow.h; null budget = not fed, no
@@ -484,21 +508,57 @@ public:
         return levels.empty() ? 0u : levels.front();
     }
     // OnSeal calls so far (the skeleton seals once per Begin: with the lane after its seal, else directly).
-    uint64_t Seals() const { std::lock_guard<std::mutex> g(mutex_); return seals_; }
+    uint64_t Seals() const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        return seals_;
+    }
     // GF-P2a MUST-7: frame `seq` is AHEAD of the render seal (render order, not the thread): a seal happened and seq is past it.
     // Read-only. False before the first seal (and after Clear): every frame counts as render order then.
-    bool AheadOfSeal(uint64_t seq) const { std::lock_guard<std::mutex> g(mutex_); return haveSealed_ && seq > lastSeal_; }
-    uint32_t KeepFrames() const { std::lock_guard<std::mutex> g(mutex_); return keepFrames_; }
-    uint64_t Refusals() const { std::lock_guard<std::mutex> g(mutex_); return refusals_; }
+    bool AheadOfSeal(uint64_t seq) const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        return haveSealed_ && seq > lastSeal_;
+    }
+    uint32_t KeepFrames() const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        return keepFrames_;
+    }
+    uint64_t Refusals() const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        return refusals_;
+    }
     // The renderer this memo belongs to (handed to every fill as OwnerFillRequest::host).
-    void SetHost(const void* host) { std::lock_guard<std::mutex> g(mutex_); host_ = host; }
-    void SetLaneSource(LaneSlotSource src) { std::lock_guard<std::mutex> g(mutex_); lane_ = std::move(src); }
+    void SetHost(const void* host)
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        host_ = host;
+    }
+    void SetLaneSource(LaneSlotSource src)
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        lane_ = std::move(src);
+    }
     // The skeleton GPU dispatcher exists (SkeletonModule wiring). Without it every GPU fill declines: NoGpuDispatcher.
-    void SetGpuDispatcherPresent(bool present) { std::lock_guard<std::mutex> g(mutex_); gpuPresent_ = present; }
+    void SetGpuDispatcherPresent(bool present)
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        gpuPresent_ = present;
+    }
     // R2: the device side of the sanctioned GPU context (the skeleton GPU dispatcher; null when it goes). Render thread.
-    void SetGpuDevice(IOwnerGpuDevice* device) { std::lock_guard<std::mutex> g(mutex_); gpuDevice_ = device; }
+    void SetGpuDevice(IOwnerGpuDevice* device)
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        gpuDevice_ = device;
+    }
     // GF-P1 MUST-3: an owner GPU device is attached (SetGpuDevice non-null). Read-only; the binder keeps presence while one is.
-    bool HasGpuDevice() const { std::lock_guard<std::mutex> g(mutex_); return gpuDevice_ != nullptr; }
+    bool HasGpuDevice() const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        return gpuDevice_ != nullptr;
+    }
     // R2 (audit S1): textures a reader still pinned when the device went: forgotten by the device (never destroyed through a device
     // that may be gone; the driver frees them with the device). Counted here and on the status lines (not silent).
     void NoteGpuForgotten(uint64_t textures, uint64_t bytes)
@@ -560,7 +620,11 @@ public:
         windowSet_ = true;
         window_ = w;
     }
-    QueueWindow Window() const { std::lock_guard<std::mutex> g(mutex_); return window_; }
+    QueueWindow Window() const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        return window_;
+    }
     // The last presented source frame (the AfterPresent feed); a frame is kept until it was presented (minus history).
     void NotePresented(uint64_t seq)
     {
@@ -628,8 +692,16 @@ public:
         numberingMayRestart_ = true;    // the next seal may go back without releasing this epoch's fills
     }
     void Invalidate(InvalidateCause cause) { BumpEpoch(cause); }
-    uint64_t Discontinuities() const { std::lock_guard<std::mutex> g(mutex_); return discontinuities_; }
-    uint64_t Epoch() const { std::lock_guard<std::mutex> g(mutex_); return epoch_; }
+    uint64_t Discontinuities() const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        return discontinuities_;
+    }
+    uint64_t Epoch() const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        return epoch_;
+    }
     // The S3 admission link (design s2.7). What the memo's ahead work costs for `w`: one AheadCost per registered GPU fill that
     // allocates (its declared reserve, or the measured bytes of its largest result when larger, times the measured fills one render
     // frame holds: a per-picture keyed product holds several at once) and per CPU fill that has run (its
@@ -742,17 +814,46 @@ public:
         plan_ = plan;
         planSet_ = true;
     }
-    AheadPlan Plan() const { std::lock_guard<std::mutex> g(mutex_); return plan_; }
-    uint64_t Invalidations(InvalidateCause c) const { std::lock_guard<std::mutex> g(mutex_); return c < InvalidateCause::Count ? invalidations_[size_t(c)] : 0u; }
-    void SetKeepFrames(uint32_t frames) { std::lock_guard<std::mutex> g(mutex_); keepFrames_ = frames; }
+    AheadPlan Plan() const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        return plan_;
+    }
+    uint64_t Invalidations(InvalidateCause c) const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        return c < InvalidateCause::Count ? invalidations_[size_t(c)] : 0u;
+    }
+    void SetKeepFrames(uint32_t frames)
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        keepFrames_ = frames;
+    }
     // The VRAM ledger's grant for the memo's GPU spots (SkeletonModule: the scratch-arena grant of the lane plan). Not granted
     // = every GPU fill declines (NoLedgerGrant); granted = GPU bytes are reserved against `bytes`.
-    void SetGpuBudget(bool granted, uint64_t bytes) { std::lock_guard<std::mutex> g(mutex_); gpuGranted_ = granted; gpuBudget_ = bytes; }
-    bool GpuGranted() const { std::lock_guard<std::mutex> g(mutex_); return gpuGranted_; }
-    uint64_t GpuBudget() const { std::lock_guard<std::mutex> g(mutex_); return gpuBudget_; }
+    void SetGpuBudget(bool granted, uint64_t bytes)
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        gpuGranted_ = granted;
+        gpuBudget_ = bytes;
+    }
+    bool GpuGranted() const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        return gpuGranted_;
+    }
+    uint64_t GpuBudget() const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        return gpuBudget_;
+    }
     // The producer fence completion (GPU retire): a released GPU spot whose recorded read fence is beyond it is kept. Without a
     // source, a spot with a noted read is held until teardown (shown on the status lines), never dropped under a GPU read.
-    void SetFenceCompleted(std::function<uint64_t()> f) { std::lock_guard<std::mutex> g(mutex_); fenceCompleted_ = std::move(f); }
+    void SetFenceCompleted(std::function<uint64_t()> f)
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        fenceCompleted_ = std::move(f);
+    }
     // Product names for the status / Fallbacks text (the registry's tokens).
     void SetNames(const Registry* reg)
     {
@@ -1104,14 +1205,30 @@ public:
     }
 
     // L-CORE M5: the bound lane's seal reports what it did with a CPU live fill (SkeletonAcquireLane.h's lookup).
-    void NoteSealComputed(ProductId id) { std::lock_guard<std::mutex> g(mutex_); ++counters_[id].sealComputed; }
-    void NoteSealReused(ProductId id) { std::lock_guard<std::mutex> g(mutex_); ++counters_[id].sealReused; }
+    void NoteSealComputed(ProductId id)
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        ++counters_[id].sealComputed;
+    }
+    void NoteSealReused(ProductId id)
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        ++counters_[id].sealReused;
+    }
     // QKP slice C (R14-73): the lane's seal COMPUTED a frame of (id) in its REDUCED form (an input was missing at the seal, so the
     // law ran with that input absent: AnalysisLane.h's seal live fill, `missing != 0`). A compute, not a reuse: it is a different
     // result from the full form, so it is counted apart from sealComputed and Computed() (the published-lookup is never asked).
-    void NoteSealComputedReduced(ProductId id) { std::lock_guard<std::mutex> g(mutex_); ++counters_[id].sealComputedReduced; }
+    void NoteSealComputedReduced(ProductId id)
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        ++counters_[id].sealComputedReduced;
+    }
     // QKP slice C (R14-73): the lane's worker skipped a frame of (id) the render thread had made first.
-    void NoteWorkerReused(ProductId id) { std::lock_guard<std::mutex> g(mutex_); ++counters_[id].workerReused; }
+    void NoteWorkerReused(ProductId id)
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        ++counters_[id].workerReused;
+    }
     // C5-SKREDS MUST-1: a lane worker adopted an owner-fill publication (BindLaneToMemo's SetWorkerAdopt). Lane threads.
     void NoteWorkerAdopted(ProductId id) { std::lock_guard<std::mutex> g(mutex_); ++counters_[id].workerAdopted; }
     // The seal's question (SkeletonAcquireLane.h): did a reader publish the default CPU form of (id, seq)? Copies it.
@@ -1469,8 +1586,10 @@ private:
     {
         Entry& e = *it->second;
         if (!e.orphaned) {
-            if (e.gpuForm) gpuBytes_ -= e.reserved;
-            else cpuBytes_ -= e.bytes.size();
+            if (e.gpuForm)
+                gpuBytes_ -= e.reserved;
+            else
+                cpuBytes_ -= e.bytes.size();
             e.reserved = 0;
             e.orphaned = true;
         }
