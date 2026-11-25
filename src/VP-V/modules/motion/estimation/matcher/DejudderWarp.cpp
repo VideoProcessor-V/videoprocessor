@@ -12,6 +12,7 @@
 #include <VP-V/modules/motion/consumers/DejudderPolicy.h>
 #include <VP-V/modules/motion/estimation/global_model/CameraGuidanceGpu.h>
 #include <VP-V/modules/motion/estimation/global_model/MatcherGlobalD1.h>
+#include <VP-V/modules/motion/estimation/global_model/PairGlobalFill.h>
 #include <VP-V/core/RobustStatsShaders.h>
 #include <VP-V/core/GpuAttributionPl.h>
 
@@ -2136,10 +2137,22 @@ if (q.x < size.x && q.y < size.y) {
 	}
 
 	MotionWarp::MotionWarp(pl_log logIn, pl_gpu gpuIn, const Settings& settingsIn)
-		: log(logIn), gpu(gpuIn), settings(settingsIn), base(settingsIn)
+		: log(logIn), gpu(gpuIn), settings(settingsIn), base(settingsIn),
+		lastPairGlobalFallback(FallbackCatalog::PairGlobalUnavailable(false))
 	{
 		dispatch = pl_dispatch_create(log, gpu);
 		GpuAttribution::Watch(dispatch, "dejudder");
+	}
+
+	const FallbackCatalog::Decision& MotionWarp::LastPairGlobalFallback() const
+	{
+		return HalvesForSearch() && inner ? inner->LastPairGlobalFallback() : lastPairGlobalFallback;
+	}
+
+	void MotionWarp::SetSkeletonMemo(VpSkeleton::SkeletonMemo* memo, uint64_t seq)
+	{
+		skeletonMemo = memo;
+		skeletonSeq = seq;
 	}
 
 	Settings MotionWarp::Scaled(const Settings& given, int inputHeight)
@@ -2787,39 +2800,6 @@ if (q.x < size.x && q.y < size.y) {
 		keptInK = true;
 	}
 
-	bool MotionWarp::Global(pl_tex fromL1, pl_tex toL1, pl_tex fromL2, pl_tex toL2, pl_tex out, pl_tex second)
-	{
-		const auto dispatchFn = [this](const char* description, const char* header, const char* body,
-			const pl_shader_desc* descriptors, int numDescriptors,
-			const pl_shader_var* variables, int numVariables, int w, int h, int group) -> bool
-		{
-			return Dispatch(description, header, body, descriptors, numDescriptors, variables, numVariables, w, h, group);
-		};
-		const auto dispatchPerBlockFn = [this](const char* description, const char* header, const char* body,
-			const pl_shader_desc* descriptors, int numDescriptors,
-			const pl_shader_var* variables, int numVariables, int w, int h, int threadsX, int threadsY) -> bool
-		{
-			return DispatchPerBlock(description, header, body, descriptors, numDescriptors, variables, numVariables, w, h, threadsX, threadsY);
-		};
-		return VpMotion::MatcherGlobalD1::RunSingle(gpu, serialSearchForTest,
-			fromL1, toL1, fromL2, toL2, out, second,
-			globalSad2, globalSad1, globalPick,
-			dispatchFn, dispatchPerBlockFn, error);
-	}
-
-	bool MotionWarp::GlobalBoth(pl_tex l1A, pl_tex l1B, pl_tex l2A, pl_tex l2B, pl_tex out[2], pl_tex second[2])
-	{
-		const auto dispatchPerBlockFn = [this](const char* description, const char* header, const char* body,
-			const pl_shader_desc* descriptors, int numDescriptors,
-			const pl_shader_var* variables, int numVariables, int w, int h, int threadsX, int threadsY) -> bool
-		{
-			return DispatchPerBlock(description, header, body, descriptors, numDescriptors, variables, numVariables, w, h, threadsX, threadsY);
-		};
-		return VpMotion::MatcherGlobalD1::RunBoth(gpu, l1A, l1B, l2A, l2B, out, second,
-			globalBothSad2, globalBothSad1, globalBothPick,
-			dispatchPerBlockFn, error);
-	}
-
 	bool MotionWarp::Search(pl_tex fromHalf, pl_tex toHalf, pl_tex fromL1, pl_tex toL1,
 		pl_tex fromL2, pl_tex toL2, pl_tex global, pl_tex previous, pl_tex out, pl_tex globalTwo,
 		pl_tex cameraKeep, bool cameraStatic)
@@ -3140,7 +3120,6 @@ if (li == 0) {
 		static const char* const fill = "ivec2 b = ivec2(gl_GlobalInvocationID.xy);\n"
 			"if (b.x < imageSize(dst).x && b.y < imageSize(dst).y) imageStore(dst, b, fillv);\n";
 		const float untrusted[4] = { 0.0f, 0.0f, 1.0e4f, 1.0f };
-		const float none[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 		for (pl_tex t : { forward, backward })
 		{
 			const pl_shader_desc out[1] = { Storage("dst", t) };
@@ -3149,15 +3128,19 @@ if (li == 0) {
 					blocksX, blocksY, 8))
 				return false;
 		}
-		for (pl_tex t : { globalVector[0], globalVector[1], globalSecond[0], globalSecond[1] })
+		const auto dispatchFn = [this](const char* description, const char* header, const char* body,
+			const pl_shader_desc* descriptors, int numDescriptors,
+			const pl_shader_var* variables, int numVariables, int w, int h, int group) -> bool
 		{
-			if (!t)
-				continue;
-			const pl_shader_desc out[1] = { Storage("dst", t) };
-			const pl_shader_var var[1] = { { pl_var_vec4("fillv"), none, true } };
-			if (!Dispatch("VideoProcessor de-judder: global motion cleared (camera model: cut / flash)", nullptr, fill, out, 1, var, 1, 1, 1, 1))
-				return false;
+			return Dispatch(description, header, body, descriptors, numDescriptors, variables, numVariables, w, h, group);
+		};
+		VpMotion::PairGlobal clearedRecord;
+		if (!VpMotion::ClearPairGlobalGpu(globalVector, globalSecond, dispatchFn, clearedRecord))
+		{
+			lastPairGlobalFallback = FallbackCatalog::PairGlobalUnavailable(true, error);
+			return false;
 		}
+		lastPairGlobalFallback = FallbackCatalog::PairGlobalUnavailable(false);
 		return true;
 	}
 
@@ -3661,11 +3644,14 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			searchSeedValid = false;
 		}
 		inner->SetWarmUp(warmUpEstimate);
+		inner->SetSkeletonMemo(skeletonMemo, skeletonSeq);
 		if (!inner->Estimate(la, lb, -1, false))
 		{
+			lastPairGlobalFallback = inner->LastPairGlobalFallback();
 			error = "lowRes: " + inner->LastError();
 			return false;
 		}
+		lastPairGlobalFallback = inner->LastPairGlobalFallback();
 		searchSeedUsed = inner->SearchSeedUsed();
 		searchSeedRejected = inner->SearchSeedRejected();
 		auto up = [&](pl_tex src, pl_tex dst) -> bool
@@ -3761,13 +3747,15 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		return true;
 	}
 
-	bool MotionWarp::OpticalFlowSearch(pl_tex outForward, pl_tex outBackward)
+	bool MotionWarp::OpticalFlowSearch(pl_tex outForward, pl_tex outBackward, VpMotion::P2PairRecord* outPairRecord)
 	{
 		// SK-MV (doc 83, MV2; owner decision 2026-11-08: ONE motion source). This matcher opens no NVOF engine: the look-ahead
 		// producer (MotionAhead::Producer) is the one NvOpticalFlow session per device, and the pair it published (P2, read through the
 		// engine's P2View and handed here by SetExternalFlow) is the only optical-flow input. With no pair that fits this estimate
 		// (no producer running: motion_ahead_frames off, low latency, a short queue, a miss) NOTHING runs here and the block searches
 		// take over (the P2m path); noPairAhead says so and the host shows it (FallbackCatalog::Motion), never silently.
+		if (outPairRecord != nullptr)
+			*outPairRecord = VpMotion::P2PairRecord();
 		const std::shared_ptr<const MotionAhead::Flow> ahead = std::move(externalFlow);
 		externalFlow.reset();
 		externalFlowUsed = false;
@@ -3841,9 +3829,6 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		context->UpdateSubresource(ofFlow[0], 0, nullptr, ahead->forward.data(), static_cast<UINT>(ahead->gridW * 4), 0);
 		context->UpdateSubresource(ofFlow[1], 0, nullptr, ahead->backward.data(), static_cast<UINT>(ahead->gridW * 4), 0);
 		externalFlowUsed = true;
-		for (int d = 0; d < 2; ++d)
-			for (int k = 0; k < 4; ++k) engineGlobal[d][k] = ahead->global[d][k];
-		engineGlobalValid = true;
 		// The engine's extras as trust weights per block (cost; its own consistency).
 		UploadEngineWeights(*ahead);   // none applied when it cannot (as without them)
 		const std::string header = std::string(RESCORE_HEADER);
@@ -3863,6 +3848,8 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			!Dispatch("VideoProcessor de-judder: optical flow to blocks (backward)", header.c_str(), OF_TO_SEARCH_BODY, bw, 4,
 				reachVar, 1, blocksX, blocksY, 8))
 			return fail("its block pass failed");
+		if (outPairRecord != nullptr)
+			*outPairRecord = VpMotion::MakeP2PairRecord(0, 0, 0, ahead->global, ahead->second, true, ahead->globalGeneral);
 		return true;
 	}
 
@@ -3955,8 +3942,12 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			~GuidanceClear() { g.reset(); }
 		} guidanceClear{ cameraGuidance };
 		cameraGuidanceUse = CameraGuidanceUse();
+		lastPairGlobalFallback = FallbackCatalog::PairGlobalUnavailable(false);
 		if (inner)
+		{
 			inner->cameraGuidanceUse = CameraGuidanceUse();
+			inner->lastPairGlobalFallback = FallbackCatalog::PairGlobalUnavailable(false);
+		}
 		ReleaseBorrowed();   // B3: last pair's product levels go back; this pair's are bound after EnsureTextures
 		estimated = false;
 		// F2: cleared on EVERY Estimate, for this instance and its lowRes inners (an Estimate that fails before the inner
@@ -4089,114 +4080,94 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			}
 			else
 			{
-			engineGlobalValid = false;
 			ofWeighted = false;
 			noPairAhead = false;   // set by OpticalFlowSearch when optical flow is wanted and no pair computed ahead fits
 			pairSizeMismatch = false;
+			VpMotion::P2PairRecord directPairRecord;
 			opticalFlowUsed = settings.opticalFlow && !serialSearchForTest &&
-				(candidateMode ? OpticalFlowSearch(ofSearch[0], ofSearch[1]) : OpticalFlowSearch(forward, backward));
+				(candidateMode ? OpticalFlowSearch(ofSearch[0], ofSearch[1], &directPairRecord)
+				               : OpticalFlowSearch(forward, backward, &directPairRecord));
 			const bool replaced = opticalFlowUsed && !candidateMode;
 			// Seed: the engine's vectors stand in for the first sweep (no searches).
 			const bool seeded = opticalFlowUsed && candidateMode && settings.opticalFlowSeed;
 			seedFed = seeded;   // F2: LastSeed (CPU record only)
-			// Planner Q1: the engine's whole-frame motion when its field is known here and it
-			// seeds the refinement (the searches, which read M2's second candidate, do not run).
 			globalFromEngine = false;
-			// ... when it is clear; otherwise the global search below (opticalFlowGlobalFallback).
-			const bool engineGlobalClear = !settings.opticalFlowGlobalFallback ||
-				(OpticalFlowTrust::GlobalUsable(engineGlobal[0]) && OpticalFlowTrust::GlobalUsable(engineGlobal[1]));
-			const bool modelGlobal = cg && cg->useModelGlobal && settings.globalPrior;
-			bool gapSeed = searchSeedValid && settings.globalPrior;   // SK-MV hiccup gap seed: used (or dropped) by THIS estimate only
-			searchSeedValid = false;
+
+			// U10 C3: pair-global selection law + GPU fill live in ONE owner (global_model/PairGlobalFill.h).
+			VpMotion::PairGlobalSelectionInput pgIn;
+			pgIn.cutOrFlash = false;
+			pgIn.globalPrior = settings.globalPrior;
+			pgIn.useModelGlobal = cg != nullptr && cg->useModelGlobal;
+			if (cg != nullptr)
+			{
+				pgIn.modelFwd[0] = cg->globalFwd[0];
+				pgIn.modelFwd[1] = cg->globalFwd[1];
+				pgIn.modelBwd[0] = cg->globalBwd[0];
+				pgIn.modelBwd[1] = cg->globalBwd[1];
+			}
+			pgIn.modelInputScale = cgInputScale;
+			pgIn.opticalFlowGlobal = settings.opticalFlowGlobal;
+			pgIn.opticalFlowGlobalFallback = settings.opticalFlowGlobalFallback;
+			pgIn.seeded = seeded;
+			const uint64_t pairSeq = skeletonSeq != 0 ? skeletonSeq : b.sequence;
+			pgIn.gapSeedCandidate = searchSeedValid;
+			searchSeedValid = false;   // SK-MV hiccup gap seed: used (or dropped) by THIS estimate only
 			searchSeedUsed = false;
 			searchSeedRejected = false;
-			// A gap seed that would reach D1 must first explain this pair better than the zero vector does (pre-approved SAD-vs-zero rejection):
-			// otherwise it is dropped and the global search below runs exactly as without a seed.
-			if (gapSeed && !modelGlobal &&
-				!(settings.globalPrior && settings.opticalFlowGlobal && seeded && engineGlobalValid && engineGlobalClear) && !GapSeedHolds())
-			{
-				gapSeed = false;
-				searchSeedRejected = true;   // counted and logged by the host (motionGapRejected), distinct from "unseeded"
-			}
-			if (!modelGlobal && settings.globalPrior && settings.opticalFlowGlobal && seeded && engineGlobalValid && !engineGlobalClear)
-				++globalFallbacks;
-			if (modelGlobal)
-			{
-				// Plan 19 phase 2: the camera model's centre translation as D1 (1/8 texels of this instance's
-				// input; z = 0.5: confident), the D1 search skipped. M2's second candidate is cleared.
-				for (int d = 0; d < 2; ++d)
-				{
-					const float* g = d == 0 ? cg->globalFwd : cg->globalBwd;
-					const float value[4] = { g[0] * cgInputScale / 8.0f, g[1] * cgInputScale / 8.0f, 0.5f, 1.0f };
-					const pl_shader_desc out[1] = { Storage("dst", globalVector[d]) };
-					const pl_shader_var var[1] = { { pl_var_vec4("gvec"), value, true } };
-					if (!Dispatch("VideoProcessor de-judder: global motion (camera model)", nullptr,
-							"if (gl_GlobalInvocationID.x == 0u && gl_GlobalInvocationID.y == 0u) imageStore(dst, ivec2(0), gvec);\n",
-							out, 1, var, 1, 1, 1, 1))
-						return false;
-					if (two && globalSecond[d])
-					{
-						const float none[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-						const pl_shader_desc out2[1] = { Storage("dst", globalSecond[d]) };
-						const pl_shader_var var2[1] = { { pl_var_vec4("gvec"), none, true } };
-						if (!Dispatch("VideoProcessor de-judder: global motion second (camera model)", nullptr,
-								"if (gl_GlobalInvocationID.x == 0u && gl_GlobalInvocationID.y == 0u) imageStore(dst, ivec2(0), gvec);\n",
-								out2, 1, var2, 1, 1, 1, 1))
-							return false;
-					}
-				}
-				cameraGuidanceUse.modelGlobal = true;
-			}
-			else if (settings.globalPrior && settings.opticalFlowGlobal && seeded && engineGlobalValid && engineGlobalClear)
+			if (pgIn.gapSeedCandidate)
 			{
 				for (int d = 0; d < 2; ++d)
-				{
-					const float* g = engineGlobal[d];
-					const float value[4] = { g[0], g[1], g[2], g[3] };
-					const pl_shader_desc out[1] = { Storage("dst", globalVector[d]) };
-					const pl_shader_var var[1] = { { pl_var_vec4("gvec"), value, true } };
-					if (!Dispatch("VideoProcessor de-judder: global motion (engine)", nullptr,
-							"if (gl_GlobalInvocationID.x == 0u && gl_GlobalInvocationID.y == 0u) imageStore(dst, ivec2(0), gvec);\n",
-							out, 1, var, 1, 1, 1, 1))
-						return false;
-				}
-				globalFromEngine = true;
+					for (int k = 0; k < 4; ++k)
+						pgIn.gapSeedVec[d][k] = searchSeed[d][k];
+				pgIn.gapSeedHolds = [this]() { return GapSeedHolds(); };
 			}
-			else if (gapSeed)
+
+			VpMotion::PairGlobalGpuContext pgCtx;
+			pgCtx.gpu = gpu;
+			pgCtx.serialReference = serialSearchForTest;
+			pgCtx.twoCandidates = two;
+			pgCtx.l1A = l1A;
+			pgCtx.l1B = l1B;
+			pgCtx.l2A = l2A;
+			pgCtx.l2B = l2B;
+			pgCtx.globalVector = globalVector;
+			pgCtx.globalSecond = globalSecond;
+			pgCtx.singleSad2 = &globalSad2;
+			pgCtx.singleSad1 = &globalSad1;
+			pgCtx.singlePick = &globalPick;
+			pgCtx.bothSad2 = &globalBothSad2;
+			pgCtx.bothSad1 = &globalBothSad1;
+			pgCtx.bothPick = &globalBothPick;
+			pgCtx.dispatch = [this](const char* description, const char* header, const char* body,
+				const pl_shader_desc* descriptors, int numDescriptors,
+				const pl_shader_var* variables, int numVariables, int w, int h, int group) -> bool
 			{
-				// SK-MV: D1 starts from the last valid shared pair's motion scaled by the gap (z = 0.5: confident enough to start from);
-				// M2's second candidate is cleared. A prior only: every block still searches and its own match decides.
-				for (int d = 0; d < 2; ++d)
-				{
-					const float value[4] = { searchSeed[d][0], searchSeed[d][1], searchSeed[d][2], searchSeed[d][3] };
-					const pl_shader_desc out[1] = { Storage("dst", globalVector[d]) };
-					const pl_shader_var var[1] = { { pl_var_vec4("gvec"), value, true } };
-					if (!Dispatch("VideoProcessor de-judder: global motion (gap seed)", nullptr,
-							"if (gl_GlobalInvocationID.x == 0u && gl_GlobalInvocationID.y == 0u) imageStore(dst, ivec2(0), gvec);\n",
-							out, 1, var, 1, 1, 1, 1))
-						return false;
-					if (two && globalSecond[d])
-					{
-						const float none[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-						const pl_shader_desc out2[1] = { Storage("dst", globalSecond[d]) };
-						const pl_shader_var var2[1] = { { pl_var_vec4("gvec"), none, true } };
-						if (!Dispatch("VideoProcessor de-judder: global motion second (gap seed)", nullptr,
-								"if (gl_GlobalInvocationID.x == 0u && gl_GlobalInvocationID.y == 0u) imageStore(dst, ivec2(0), gvec);\n",
-								out2, 1, var2, 1, 1, 1, 1))
-							return false;
-					}
-				}
-				searchSeedUsed = true;
-			}
-			else if (settings.globalPrior)
+				return Dispatch(description, header, body, descriptors, numDescriptors, variables, numVariables, w, h, group);
+			};
+			pgCtx.dispatchPerBlock = [this](const char* description, const char* header, const char* body,
+				const pl_shader_desc* descriptors, int numDescriptors,
+				const pl_shader_var* variables, int numVariables, int w, int h, int threadsX, int threadsY) -> bool
+			{
+				return DispatchPerBlock(description, header, body, descriptors, numDescriptors, variables, numVariables, w, h, threadsX, threadsY);
+			};
+
+			VpMotion::PairGlobal pgRecord;
+			VpMotion::PairGlobalSelectionOutcome pgOutcome;
+			bool pgOk = false;
 			{
 				const GpuAttribution::SuppressPrivateCopyScope warmUpD1(warmUpEstimate ? "U10" : nullptr);
-				if (serialSearchForTest ?
-					(!Global(l1A, l1B, l2A, l2B, globalVector[0], two ? globalSecond[0] : nullptr) ||
-					 !Global(l1B, l1A, l2B, l2A, globalVector[1], two ? globalSecond[1] : nullptr)) :
-					!GlobalBoth(l1A, l1B, l2A, l2B, globalVector, two ? globalSecond : nullptr))
-					return false;
+				pgOk = VpMotion::AcquireOrFillPairGlobalGpu(skeletonMemo, pairSeq,
+					opticalFlowUsed ? &directPairRecord : nullptr, pgIn, pgCtx,
+					pgRecord, pgOutcome, lastPairGlobalFallback, error);
 			}
+			if (pgOutcome.engineGlobalFallback)
+				++globalFallbacks;
+			searchSeedRejected = pgOutcome.searchSeedRejected;
+			if (!pgOk)
+				return false;   // Ruling 2: abort Estimate on pair-global failure (lastPairGlobalFallback is engaged)
+			cameraGuidanceUse.modelGlobal = pgOutcome.modelGlobalUsed;
+			globalFromEngine = pgOutcome.globalFromEngine;
+			searchSeedUsed = pgOutcome.searchSeedUsed;
 			// 11a E1: the first sweep into `sweep`, the second into the searches.
 			const bool twoSweeps = settings.estCandidates && !replaced;
 			// Plan 19 phase 2: the guided passes (narrow before the search, E1 skip before the second sweep)

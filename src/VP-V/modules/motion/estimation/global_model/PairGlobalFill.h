@@ -23,9 +23,12 @@
 #include <VP-V/core/VariantKey.h>
 #include <VP-V/core/hub/ExtensionHub.h>
 #include <VP-V/modules/control/skeleton/SkeletonFacts.h>
+#include <VP-V/modules/motion/estimation/OpticalFlowTrust.h>
 #include <VP-V/modules/motion/estimation/P2PairRecord.h>
+#include <VP-V/modules/motion/estimation/global_model/MatcherGlobalD1.h>
 
 #include <libplacebo/gpu.h>
+#include <libplacebo/shaders.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -84,6 +87,181 @@ namespace VpMotion
 		uint64_t p2Epoch = 0;
 		bool valid = false;
 	};
+
+	// D1 pyramid scale: L1 is 1/8 of the matcher's input resolution (8 input px per D1 texel).
+	static constexpr float kPairGlobalD1TexelScale = 8.0f;
+	// D1 confidence z for camera-model prior: confident midpoint below OpticalFlowTrust::GlobalUsable's 0.9 ambiguity ceiling.
+	static constexpr float kPairGlobalConfidentZ = 0.5f;
+	// D1 validity w channel for a populated vector (OpticalFlowTrust::GlobalUsable requires w > 0.5).
+	static constexpr float kPairGlobalValidW = 1.0f;
+
+	// Pure CPU selection law inputs (U10 C3: moved verbatim from matcher/DejudderWarp.cpp).
+	struct PairGlobalSelectionInput
+	{
+		bool cutOrFlash = false;
+		bool globalPrior = false;
+		bool useModelGlobal = false;
+		float modelFwd[2] = {};
+		float modelBwd[2] = {};
+		float modelInputScale = 1.0f;
+		bool opticalFlowGlobal = false;
+		bool opticalFlowGlobalFallback = true;
+		bool seeded = false;
+		bool engineValid = false;
+		float engineVec[2][4] = {};
+		uint64_t engineEpoch = 0;
+		bool gapSeedCandidate = false;
+		float gapSeedVec[2][4] = {};
+		std::function<bool()> gapSeedHolds; // invoked ONLY when gapSeed is reached (lazy, exact parity with DW.cpp)
+	};
+
+	struct PairGlobalSelectionOutcome
+	{
+		PairGlobalSource source = PairGlobalSource::Cleared;
+		bool modelGlobalUsed = false;
+		bool globalFromEngine = false;
+		bool engineGlobalFallback = false; // increment globalFallbacks when true
+		bool searchSeedUsed = false;
+		bool searchSeedRejected = false;
+		bool needsD1Search = false;        // true when MatcherD1 GPU search must run
+		bool clearSecond = false;          // true for Cut/Flash, CameraModel, GapSeed
+	};
+
+	// Pure CPU pair-global selection law (exact branch precedence moved verbatim from DejudderWarp.cpp):
+	//   1. cutOrFlash (highest precedence: clears vec + second)
+	//   2. CameraModel (useModelGlobal && globalPrior)
+	//   3. Engine (globalPrior && opticalFlowGlobal && seeded && engineValid && engineGlobalClear)
+	//   4. GapSeed (gapSeedCandidate && globalPrior && gapSeedHolds()) — rejected falls through to MatcherD1
+	//   5. MatcherD1 (globalPrior)
+	//   6. Cleared (!globalPrior)
+	inline void SelectPairGlobal(const PairGlobalSelectionInput& in, PairGlobal& outRecord, PairGlobalSelectionOutcome& out)
+	{
+		outRecord = PairGlobal();
+		out = PairGlobalSelectionOutcome();
+
+		if (in.cutOrFlash)
+		{
+			outRecord.src = PairGlobalSource::Cleared;
+			outRecord.valid = false;
+			out.source = PairGlobalSource::Cleared;
+			out.clearSecond = true;
+			return;
+		}
+
+		const bool engineGlobalClear = !in.opticalFlowGlobalFallback
+			|| (OpticalFlowTrust::GlobalUsable(in.engineVec[0]) && OpticalFlowTrust::GlobalUsable(in.engineVec[1]));
+		const bool modelGlobal = in.useModelGlobal && in.globalPrior;
+		const bool engineEligible = in.globalPrior && in.opticalFlowGlobal && in.seeded && in.engineValid;
+
+		if (!modelGlobal && engineEligible && !engineGlobalClear)
+			out.engineGlobalFallback = true;
+
+		if (modelGlobal)
+		{
+			// Plan 19 phase 2: camera model's centre translation in D1 1/8 texels; z = 0.5 confident; M2 second cleared.
+			outRecord.vec[0][0] = in.modelFwd[0] * in.modelInputScale / kPairGlobalD1TexelScale;
+			outRecord.vec[0][1] = in.modelFwd[1] * in.modelInputScale / kPairGlobalD1TexelScale;
+			outRecord.vec[0][2] = kPairGlobalConfidentZ;
+			outRecord.vec[0][3] = kPairGlobalValidW;
+			outRecord.vec[1][0] = in.modelBwd[0] * in.modelInputScale / kPairGlobalD1TexelScale;
+			outRecord.vec[1][1] = in.modelBwd[1] * in.modelInputScale / kPairGlobalD1TexelScale;
+			outRecord.vec[1][2] = kPairGlobalConfidentZ;
+			outRecord.vec[1][3] = kPairGlobalValidW;
+			outRecord.src = PairGlobalSource::CameraModel;
+			outRecord.valid = true;
+			out.source = PairGlobalSource::CameraModel;
+			out.modelGlobalUsed = true;
+			out.clearSecond = true;
+		}
+		else if (engineEligible && engineGlobalClear)
+		{
+			for (int d = 0; d < 2; ++d)
+				for (int k = 0; k < 4; ++k)
+					outRecord.vec[d][k] = in.engineVec[d][k];
+			outRecord.src = PairGlobalSource::Engine;
+			outRecord.p2Epoch = in.engineEpoch;
+			outRecord.valid = true;
+			out.source = PairGlobalSource::Engine;
+			out.globalFromEngine = true;
+			out.clearSecond = false;
+		}
+		else if (in.gapSeedCandidate && in.globalPrior)
+		{
+			const bool holds = !in.gapSeedHolds || in.gapSeedHolds();
+			if (holds)
+			{
+				for (int d = 0; d < 2; ++d)
+					for (int k = 0; k < 4; ++k)
+						outRecord.vec[d][k] = in.gapSeedVec[d][k];
+				outRecord.src = PairGlobalSource::GapSeed;
+				outRecord.valid = true;
+				out.source = PairGlobalSource::GapSeed;
+				out.searchSeedUsed = true;
+				out.clearSecond = true;
+			}
+			else
+			{
+				outRecord.src = PairGlobalSource::MatcherD1;
+				outRecord.valid = false;
+				out.source = PairGlobalSource::MatcherD1;
+				out.searchSeedRejected = true;
+				out.needsD1Search = true;
+			}
+		}
+		else if (in.globalPrior)
+		{
+			outRecord.src = PairGlobalSource::MatcherD1;
+			outRecord.valid = false;
+			out.source = PairGlobalSource::MatcherD1;
+			out.needsD1Search = true;
+		}
+		else
+		{
+			outRecord.src = PairGlobalSource::Cleared;
+			outRecord.valid = false;
+			out.source = PairGlobalSource::Cleared;
+		}
+	}
+
+	// Loads the engine whole-frame motion into PairGlobalSelectionInput:
+	//   - When `memo != nullptr`, acquires kP2VectorPair (AcquireForm::Cpu) through SkeletonMemo and decodes P2PairRecord
+	//     (does NOT silently fall back to `directFallback` on a memo miss/decline).
+	//   - When `memo == nullptr` (standalone MotionWarp in unit tests), reads `directFallback` when GlobalSet() is true.
+	inline bool LoadEngineGlobalFromP2(VpSkeleton::SkeletonMemo* memo, uint64_t seq,
+		const P2PairRecord* directFallback, PairGlobalSelectionInput& in)
+	{
+		in.engineValid = false;
+		in.engineEpoch = 0;
+		for (int d = 0; d < 2; ++d)
+			for (int k = 0; k < 4; ++k)
+				in.engineVec[d][k] = 0.0f;
+
+		if (memo != nullptr)
+		{
+			const VpSkeleton::AcquireResult p2 = memo->Acquire(VpSkeleton::kP2VectorPair, seq, VpSkeleton::AcquireForm::Cpu);
+			P2PairRecord rec;
+			if (p2.Ok() && DecodeP2PairRecord(p2.cpu, p2.cpuBytes, rec) && rec.GlobalSet())
+			{
+				for (int d = 0; d < 2; ++d)
+					for (int k = 0; k < 4; ++k)
+						in.engineVec[d][k] = rec.global[d][k];
+				in.engineEpoch = rec.generation;
+				in.engineValid = true;
+				return true;
+			}
+			return false;
+		}
+		if (directFallback != nullptr && directFallback->GlobalSet())
+		{
+			for (int d = 0; d < 2; ++d)
+				for (int k = 0; k < 4; ++k)
+					in.engineVec[d][k] = directFallback->global[d][k];
+			in.engineEpoch = directFallback->generation;
+			in.engineValid = true;
+			return true;
+		}
+		return false;
+	}
 
 	namespace pair_global_detail
 	{
@@ -195,6 +373,8 @@ namespace VpMotion
 		pl_tex globalVector = nullptr;
 		pl_tex globalSecond = nullptr;
 		PairGlobal record;
+		PairGlobalSelectionOutcome outcome;
+		bool hasOutcome = false;
 	};
 
 	// Tag stored in GpuMemoHandle::textureSet to identify a PairGlobalFill GPU view carrying a const PairGlobalGpuView.
@@ -399,5 +579,290 @@ namespace VpMotion
 		const bool gpuOk = gpuReg == VpSkeleton::SkeletonMemo::Registration::Registered
 			|| gpuReg == VpSkeleton::SkeletonMemo::Registration::AlreadyRegistered;
 		return cpuOk && gpuOk;
+	}
+
+	// Cut / flash clear (U10 C3: moved verbatim from DejudderWarp::CameraSkipSearches): zeroes every non-null
+	// globalVector[0..1] and globalSecond[0..1] texture with the exact pass label.
+	inline bool ClearPairGlobalGpu(pl_tex globalVector[2], pl_tex globalSecond[2],
+		const MatcherGlobalD1::DispatchFn& dispatch, PairGlobal& outRecord)
+	{
+		outRecord = PairGlobal();
+		outRecord.src = PairGlobalSource::Cleared;
+		outRecord.valid = false;
+		if (!dispatch)
+			return false;
+		static const char* const kClearBody =
+			"ivec2 b = ivec2(gl_GlobalInvocationID.xy);\n"
+			"if (b.x < imageSize(dst).x && b.y < imageSize(dst).y) imageStore(dst, b, fillv);\n";
+		const float none[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+		const pl_tex targets[4] = {
+			globalVector ? globalVector[0] : nullptr,
+			globalVector ? globalVector[1] : nullptr,
+			globalSecond ? globalSecond[0] : nullptr,
+			globalSecond ? globalSecond[1] : nullptr
+		};
+		for (pl_tex t : targets)
+		{
+			if (!t)
+				continue;
+			const pl_shader_desc out[1] = { MatcherGlobalD1::Storage("dst", t) };
+			const pl_shader_var var[1] = { { pl_var_vec4("fillv"), none, true } };
+			if (!dispatch("VideoProcessor de-judder: global motion cleared (camera model: cut / flash)",
+					nullptr, kClearBody, out, 1, var, 1, 1, 1, 1))
+				return false;
+		}
+		return true;
+	}
+
+	// GPU execution context for ExecutePairGlobalGpu / AcquireOrFillPairGlobalGpu (caller owns all pl_tex handles).
+	struct PairGlobalGpuContext
+	{
+		pl_gpu gpu = nullptr;
+		bool serialReference = false;
+		bool twoCandidates = false;
+		pl_tex l1A = nullptr;
+		pl_tex l1B = nullptr;
+		pl_tex l2A = nullptr;
+		pl_tex l2B = nullptr;
+		pl_tex* globalVector = nullptr; // array of 2: [0] fwd, [1] bwd
+		pl_tex* globalSecond = nullptr; // optional array of 2: [0] fwd, [1] bwd
+		pl_tex* singleSad2 = nullptr;   // caller-owned D1 scratch (serial / single)
+		pl_tex* singleSad1 = nullptr;
+		pl_tex* singlePick = nullptr;
+		pl_tex* bothSad2 = nullptr;     // caller-owned D1 scratch (parallel bidirectional)
+		pl_tex* bothSad1 = nullptr;
+		pl_tex* bothPick = nullptr;
+		MatcherGlobalD1::DispatchFn dispatch;
+		MatcherGlobalD1::DispatchPerBlockFn dispatchPerBlock;
+	};
+
+	// Runs SelectPairGlobal and materializes the selected pair global onto globalVector[0..1] (and globalSecond[0..1]
+	// where clearSecond applies), or runs MatcherGlobalD1::RunSingle / RunBoth when needsD1Search is true.
+	// Ruling 2 (coreplan-C8-10-U10.md): on ANY failure (D1 format/texture create/dispatch), preserves exact outError,
+	// engages outFallback = FallbackCatalog::PairGlobalUnavailable(true, outError), and returns false (ABORT, no zero-global
+	// continuation). On success, releases outFallback = FallbackCatalog::PairGlobalUnavailable(false) and returns true.
+	inline bool ExecutePairGlobalGpu(
+		const PairGlobalSelectionInput& in,
+		const PairGlobalGpuContext& ctx,
+		PairGlobal& outRecord,
+		PairGlobalSelectionOutcome& outOutcome,
+		FallbackCatalog::Decision& outFallback,
+		std::string& outError)
+	{
+		outError.clear();
+		SelectPairGlobal(in, outRecord, outOutcome);
+
+		if (in.cutOrFlash)
+		{
+			if (!ClearPairGlobalGpu(ctx.globalVector, ctx.globalSecond, ctx.dispatch, outRecord))
+			{
+				if (outError.empty())
+					outError = "global motion: clear dispatch failed";
+				outFallback = FallbackCatalog::PairGlobalUnavailable(true, outError);
+				return false;
+			}
+			outFallback = FallbackCatalog::PairGlobalUnavailable(false);
+			return true;
+		}
+
+		if (outOutcome.source == PairGlobalSource::CameraModel
+			|| outOutcome.source == PairGlobalSource::Engine
+			|| outOutcome.source == PairGlobalSource::GapSeed)
+		{
+			if (!ctx.dispatch || !ctx.globalVector || !ctx.globalVector[0] || !ctx.globalVector[1])
+			{
+				outError = !ctx.dispatch ? "global motion: missing dispatch callback"
+					: "global motion: missing output textures";
+				outFallback = FallbackCatalog::PairGlobalUnavailable(true, outError);
+				return false;
+			}
+			static const char* const kStoreOneBody =
+				"if (gl_GlobalInvocationID.x == 0u && gl_GlobalInvocationID.y == 0u) imageStore(dst, ivec2(0), gvec);\n";
+			const char* vecLabel = nullptr;
+			const char* secondLabel = nullptr;
+			if (outOutcome.source == PairGlobalSource::CameraModel)
+			{
+				vecLabel = "VideoProcessor de-judder: global motion (camera model)";
+				secondLabel = "VideoProcessor de-judder: global motion second (camera model)";
+			}
+			else if (outOutcome.source == PairGlobalSource::Engine)
+			{
+				vecLabel = "VideoProcessor de-judder: global motion (engine)";
+			}
+			else
+			{
+				vecLabel = "VideoProcessor de-judder: global motion (gap seed)";
+				secondLabel = "VideoProcessor de-judder: global motion second (gap seed)";
+			}
+			for (int d = 0; d < 2; ++d)
+			{
+				const float value[4] = { outRecord.vec[d][0], outRecord.vec[d][1], outRecord.vec[d][2], outRecord.vec[d][3] };
+				const pl_shader_desc out[1] = { MatcherGlobalD1::Storage("dst", ctx.globalVector[d]) };
+				const pl_shader_var var[1] = { { pl_var_vec4("gvec"), value, true } };
+				if (!ctx.dispatch(vecLabel, nullptr, kStoreOneBody, out, 1, var, 1, 1, 1, 1))
+				{
+					if (outError.empty())
+						outError = std::string("dispatch failed: ") + vecLabel;
+					outFallback = FallbackCatalog::PairGlobalUnavailable(true, outError);
+					return false;
+				}
+				if (ctx.twoCandidates && outOutcome.clearSecond && secondLabel != nullptr
+					&& ctx.globalSecond != nullptr && ctx.globalSecond[d] != nullptr)
+				{
+					const float none[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+					const pl_shader_desc out2[1] = { MatcherGlobalD1::Storage("dst", ctx.globalSecond[d]) };
+					const pl_shader_var var2[1] = { { pl_var_vec4("gvec"), none, true } };
+					if (!ctx.dispatch(secondLabel, nullptr, kStoreOneBody, out2, 1, var2, 1, 1, 1, 1))
+					{
+						if (outError.empty())
+							outError = std::string("dispatch failed: ") + secondLabel;
+						outFallback = FallbackCatalog::PairGlobalUnavailable(true, outError);
+						return false;
+					}
+				}
+			}
+			outFallback = FallbackCatalog::PairGlobalUnavailable(false);
+			return true;
+		}
+
+		if (outOutcome.needsD1Search)
+		{
+			if (!ctx.globalVector || !ctx.globalVector[0] || !ctx.globalVector[1])
+			{
+				outError = "global motion: missing output textures";
+				outFallback = FallbackCatalog::PairGlobalUnavailable(true, outError);
+				return false;
+			}
+			bool ok = false;
+			if (ctx.serialReference)
+			{
+				pl_tex dummySad2 = nullptr, dummySad1 = nullptr, dummyPick = nullptr;
+				pl_tex& s2 = ctx.singleSad2 ? *ctx.singleSad2 : dummySad2;
+				pl_tex& s1 = ctx.singleSad1 ? *ctx.singleSad1 : dummySad1;
+				pl_tex& sp = ctx.singlePick ? *ctx.singlePick : dummyPick;
+				pl_tex sec0 = (ctx.twoCandidates && ctx.globalSecond) ? ctx.globalSecond[0] : nullptr;
+				pl_tex sec1 = (ctx.twoCandidates && ctx.globalSecond) ? ctx.globalSecond[1] : nullptr;
+				ok = MatcherGlobalD1::RunSingle(ctx.gpu, true, ctx.l1A, ctx.l1B, ctx.l2A, ctx.l2B,
+						ctx.globalVector[0], sec0, s2, s1, sp, ctx.dispatch, ctx.dispatchPerBlock, outError)
+					&& MatcherGlobalD1::RunSingle(ctx.gpu, true, ctx.l1B, ctx.l1A, ctx.l2B, ctx.l2A,
+						ctx.globalVector[1], sec1, s2, s1, sp, ctx.dispatch, ctx.dispatchPerBlock, outError);
+			}
+			else
+			{
+				if (!ctx.bothSad2 || !ctx.bothSad1 || !ctx.bothPick)
+				{
+					outError = "global motion: missing scratch texture handles";
+					outFallback = FallbackCatalog::PairGlobalUnavailable(true, outError);
+					return false;
+				}
+				pl_tex secondPair[2] = {
+					(ctx.twoCandidates && ctx.globalSecond) ? ctx.globalSecond[0] : nullptr,
+					(ctx.twoCandidates && ctx.globalSecond) ? ctx.globalSecond[1] : nullptr
+				};
+				ok = MatcherGlobalD1::RunBoth(ctx.gpu, ctx.l1A, ctx.l1B, ctx.l2A, ctx.l2B,
+					ctx.globalVector, (ctx.twoCandidates && ctx.globalSecond) ? secondPair : nullptr,
+					*ctx.bothSad2, *ctx.bothSad1, *ctx.bothPick, ctx.dispatchPerBlock, outError);
+			}
+			if (!ok)
+			{
+				// Ruling 2: preserve exact error text ("no 32-bit float storage format" / "cannot create the candidate textures"),
+				// engage visible FallbackCatalog::PairGlobalUnavailable, and ABORT (no zero-global continuation).
+				outFallback = FallbackCatalog::PairGlobalUnavailable(true, outError);
+				return false;
+			}
+			outRecord.valid = true;
+			outFallback = FallbackCatalog::PairGlobalUnavailable(false);
+			return true;
+		}
+
+		// !globalPrior && !cutOrFlash: no global motion prior requested.
+		outFallback = FallbackCatalog::PairGlobalUnavailable(false);
+		return true;
+	}
+
+	// Unified GPU entry point for BOTH skeleton-wired and standalone callers:
+	//   - When `!in.cutOrFlash && in.globalPrior && memo != nullptr && memo->HasOwnerFill(kP7CameraFit, Gpu)`:
+	//     invokes memo->Acquire(kP7CameraFit, seq, Gpu, PairGlobalKey()). If served, returns the published view; if the
+	//     registered fill failed for a real reason (not merely an unbound default GPU provider / missing dispatcher),
+	//     engages FallbackCatalog::PairGlobalUnavailable and aborts (Ruling 2).
+	//   - Otherwise (standalone MotionWarp with memo == nullptr, unregistered GPU fill, or default unbound GPU provider):
+	//     executes ExecutePairGlobalGpu directly through the ONE PairGlobalFill owner code.
+	inline bool AcquireOrFillPairGlobalGpu(
+		VpSkeleton::SkeletonMemo* memo,
+		uint64_t seq,
+		const PairGlobalSelectionInput& in,
+		const PairGlobalGpuContext& ctx,
+		PairGlobal& outRecord,
+		PairGlobalSelectionOutcome& outOutcome,
+		FallbackCatalog::Decision& outFallback,
+		std::string& outError,
+		bool* outUsedMemoGpu = nullptr)
+	{
+		if (outUsedMemoGpu != nullptr)
+			*outUsedMemoGpu = false;
+
+		if (!in.cutOrFlash && in.globalPrior && memo != nullptr
+			&& memo->HasOwnerFill(VpSkeleton::kP7CameraFit, VpSkeleton::AcquireForm::Gpu))
+		{
+			PairGlobalGpuView view;
+			VpSkeleton::AcquireResult res;
+			FallbackCatalog::Decision acqFallback;
+			if (AcquirePairGlobalGpu(*memo, seq, view, &res, &acqFallback))
+			{
+				outRecord = view.record;
+				if (view.hasOutcome)
+				{
+					outOutcome = view.outcome;
+				}
+				else
+				{
+					outOutcome = PairGlobalSelectionOutcome();
+					outOutcome.source = outRecord.src;
+					outOutcome.modelGlobalUsed = (outRecord.src == PairGlobalSource::CameraModel);
+					outOutcome.globalFromEngine = (outRecord.src == PairGlobalSource::Engine);
+					outOutcome.searchSeedUsed = (outRecord.src == PairGlobalSource::GapSeed);
+					outOutcome.clearSecond = (outRecord.src == PairGlobalSource::Cleared
+						|| outRecord.src == PairGlobalSource::CameraModel
+						|| outRecord.src == PairGlobalSource::GapSeed);
+				}
+				outFallback = acqFallback;
+				outError.clear();
+				if (outUsedMemoGpu != nullptr)
+					*outUsedMemoGpu = true;
+				return true;
+			}
+			const std::string cause = memo->LastCause(VpSkeleton::kP7CameraFit);
+			const bool providerAbsent = (res.cause == VpSkeleton::AcquireCause::NoGpuDispatcher)
+				|| (res.cause == VpSkeleton::AcquireCause::OwnerDeclined
+					&& cause.find("pair global: gpu provider absent") != std::string::npos);
+			if (!providerAbsent)
+			{
+				outRecord = PairGlobal();
+				outOutcome = PairGlobalSelectionOutcome();
+				outError = !cause.empty() ? cause : VpSkeleton::Token(res.cause);
+				outFallback = acqFallback.engaged ? acqFallback : FallbackCatalog::PairGlobalUnavailable(true, outError);
+				return false;
+			}
+		}
+
+		return ExecutePairGlobalGpu(in, ctx, outRecord, outOutcome, outFallback, outError);
+	}
+
+	// Convenience overload: loads engine global via LoadEngineGlobalFromP2 (kP2VectorPair when memo != nullptr,
+	// else directP2Fallback) before executing AcquireOrFillPairGlobalGpu.
+	inline bool AcquireOrFillPairGlobalGpu(
+		VpSkeleton::SkeletonMemo* memo,
+		uint64_t seq,
+		const P2PairRecord* directP2Fallback,
+		PairGlobalSelectionInput in,
+		const PairGlobalGpuContext& ctx,
+		PairGlobal& outRecord,
+		PairGlobalSelectionOutcome& outOutcome,
+		FallbackCatalog::Decision& outFallback,
+		std::string& outError,
+		bool* outUsedMemoGpu = nullptr)
+	{
+		LoadEngineGlobalFromP2(memo, seq, directP2Fallback, in);
+		return AcquireOrFillPairGlobalGpu(memo, seq, in, ctx, outRecord, outOutcome, outFallback, outError, outUsedMemoGpu);
 	}
 }
