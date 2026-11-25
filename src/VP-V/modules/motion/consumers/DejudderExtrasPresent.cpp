@@ -909,7 +909,7 @@ namespace Vpv
 						else
 						{
 							// POD1-H1: pass live SkeletonMemo + (sourceSequence, nextSourceSequence) for shared kBandMemo acquisition.
-							const Vpv::Skeleton::FrameMemo fm = Vpv::Skeleton::MemoForHost(h.host, f.sourceSequence);
+							const Vpv::Skeleton::FrameMemo fm = Vpv::Skeleton::MemoForHost(host.host, f.sourceSequence);
 							interpOk = frameInterpolator->Run(a, b, motion, shift, activeSettings.interpolationFallback, warped,
 								0, 0, fm.memo.get(), f.sourceSequence, f.nextSourceSequence);
 							const std::string& bmWhy = frameInterpolator->LastBandMemoFallback();

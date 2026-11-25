@@ -86,6 +86,7 @@ namespace Vpv
 				resolver_ = std::move(resolver);
 				const size_t payloadBytes = 16u + static_cast<size_t>(gw_) * static_cast<size_t>(gh_) * 2u * sizeof(float);
 				slotBufs_.assign(static_cast<size_t>(slots_), std::vector<uint8_t>(payloadBytes, 0u));
+				slotFailed_.assign(static_cast<size_t>(slots_), 0u);
 				pendingFlush_ = false;
 				lastError_ = S_OK;
 				failedCount_ = 0;
@@ -102,6 +103,7 @@ namespace Vpv
 				srcW_ = srcH_ = block_ = gw_ = gh_ = slots_ = 0;
 				resolver_ = nullptr;
 				slotBufs_.clear();
+				slotFailed_.clear();
 				pendingFlush_ = false;
 			}
 
@@ -124,6 +126,7 @@ namespace Vpv
 			{
 				if (!Active() || !resolver_ || stagingIndex < 0 || stagingIndex >= slots_)
 					return false;
+				slotFailed_[static_cast<size_t>(stagingIndex)] = 0u;
 				int ax0 = 0, ay0 = 0, ax1 = srcW_, ay1 = srcH_;
 				pl_tex src = resolver_(id, seq, ax0, ay0, ax1, ay1);
 				if (!src || src->params.w != srcW_ || src->params.h != srcH_)
@@ -250,36 +253,31 @@ if (li == 0u)
 				const LedDrive::ReadState st = native_.Poll(stagingIndex);
 				if (st == LedDrive::ReadState::Failed)
 				{
-					lastError_ = native_.LastError();
-					++failedCount_;
+					const size_t idx = static_cast<size_t>(stagingIndex);
+					if (slotFailed_[idx] == 0u)
+					{
+						slotFailed_[idx] = 1u;
+						lastError_ = native_.LastError();
+						++failedCount_;
+					}
 					return false;
 				}
 				return st == LedDrive::ReadState::Ready;
 			}
 
-			bool QueryFailed(int stagingIndex) override
+			bool QueryFailed(int stagingIndex) const override
 			{
-				if (!Active() || stagingIndex < 0 || stagingIndex >= slots_)
-					return false;
-				if (pendingFlush_)
-				{
-					pl_gpu_flush(gpu_);
-					pendingFlush_ = false;
-				}
-				const LedDrive::ReadState st = native_.Poll(stagingIndex);
-				if (st == LedDrive::ReadState::Failed)
-				{
-					lastError_ = native_.LastError();
-					++failedCount_;
-					return true;
-				}
-				return false;
+				return Active() && stagingIndex >= 0 && stagingIndex < slots_ &&
+					slotFailed_[static_cast<size_t>(stagingIndex)] != 0u;
 			}
 
 			void Discard(int stagingIndex) override
 			{
 				if (Active() && stagingIndex >= 0 && stagingIndex < slots_)
+				{
+					slotFailed_[static_cast<size_t>(stagingIndex)] = 0u;
 					native_.Discard(stagingIndex);
+				}
 			}
 
 			const void* MapNoWait(int stagingIndex, size_t* bytes) override
@@ -318,8 +316,13 @@ if (li == 0u)
 				{
 					if (native_.Failed())
 					{
-						lastError_ = native_.LastError();
-						++failedCount_;
+						const size_t idx = static_cast<size_t>(stagingIndex);
+						if (slotFailed_[idx] == 0u)
+						{
+							slotFailed_[idx] = 1u;
+							lastError_ = native_.LastError();
+							++failedCount_;
+						}
 					}
 					return nullptr;
 				}
@@ -336,6 +339,7 @@ if (li == 0u)
 			int srcW_ = 0, srcH_ = 0, block_ = 0, gw_ = 0, gh_ = 0, slots_ = 0;
 			SourceResolver resolver_;
 			std::vector<std::vector<uint8_t>> slotBufs_;
+			std::vector<uint8_t> slotFailed_;
 			bool pendingFlush_ = false;
 			HRESULT lastError_ = S_OK;
 			uint64_t failedCount_ = 0;

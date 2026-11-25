@@ -4,6 +4,7 @@
 // CC slice 12 step 12.2 / series A (refs/112 P2: ONE host include in place of the per-module .inl lines): the out-of-line
 // bodies and forwarding-only Vpv::HostAccess adapters of LibplaceboVideoRenderer::Impl, right after the Impl struct.
 // Included exactly once, by one `// VPV-HOOK` line; no other translation unit may include it.
+#include <VP-V/modules/motion/consumers/MotionHostHelpers.h>   // Package C 5: compiled in MotionHostHelpers.cpp
 #include <VP-V/modules/motion/estimation/VectorEngineEstimate.inl>   // P5a-5: the estimate and the engine keeper (Impl members)
 #include <VP-V/modules/motion/consumers/DejudderPolicyRunner.inl>   // M2 P5b-3: the de-judder policy (Impl members)
 #include <VP-V/modules/motion/consumers/PhaseTimeline.inl>   // M2 P5b-4: phase picture, timeline helpers, status, release (Impl members)
@@ -15,7 +16,6 @@
 #include <VP-V/modules/drive/led_compensation/LedIntentMethods.h>   // P11a-f: compiled in LedIntentMethods.cpp
 #include <VP-V/modules/drive/led_compensation/LedSdrLiftMethods.h>   // P11a-d: compiled in LedSdrLiftMethods.cpp
 #include <VP-V/modules/output/presentation/PresentationHostHelpers.h>   // Package C 4: compiled in PresentationHostHelpers.cpp
-#include <VP-V/modules/motion/consumers/MotionHostHelpers.h>   // Package C 5: compiled in MotionHostHelpers.cpp
 #include <VP-V/modules/control/skeleton/RendererHostHelpers.h>   // Package C 6: compiled in RendererHostHelpers.cpp
 
 void LibplaceboVideoRenderer::Impl::ConfigureIntentInterpreter() { ConfigureIntentMotion(); ConfigureIntentAmbient(); }

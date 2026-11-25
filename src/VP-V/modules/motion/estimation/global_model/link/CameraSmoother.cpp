@@ -529,7 +529,7 @@ namespace CameraLink
 				const uint64_t lo = req.seq > lag ? (req.seq - lag) : 0u;
 				const uint64_t hi = req.seq <= ((std::numeric_limits<uint64_t>::max)() - lag)
 					? (req.seq + lag) : (std::numeric_limits<uint64_t>::max)();
-				constexpr size_t kMaxWindow = static_cast<size_t>(VpSkeleton::kMaxCameraLead) * 2u + 1u;
+				static constexpr size_t kMaxWindow = static_cast<size_t>(VpSkeleton::kMaxCameraLead) * 2u + 1u;
 				std::array<CameraModel::CameraMotion, kMaxWindow> windowRecs{};
 				std::array<bool, kMaxWindow> windowValid{};
 				for (uint64_t s = lo; s <= hi; ++s)
@@ -578,11 +578,21 @@ namespace CameraLink
 				if (smoother.Smoothed(req.seq, smoothedParams))
 				{
 					// HIGH-3: CE-WATER-C2 LOO spike filter parity with CameraSmoother::Query.
-					auto findWindowRec = [&](uint64_t s) -> const CameraModel::CameraMotion* {
-						if (s < lo || s > hi) return nullptr;
-						const size_t idx = static_cast<size_t>(s - lo);
-						return (idx < kMaxWindow && windowValid[idx]) ? &windowRecs[idx] : nullptr;
+					struct WindowRecFinder
+					{
+						uint64_t lo;
+						uint64_t hi;
+						const CameraModel::CameraMotion* recs;
+						const bool* valid;
+						size_t count;
+						const CameraModel::CameraMotion* operator()(uint64_t s) const
+						{
+							if (s < lo || s > hi) return nullptr;
+							const size_t idx = static_cast<size_t>(s - lo);
+							return (idx < count && valid[idx]) ? &recs[idx] : nullptr;
+						}
 					};
+					const WindowRecFinder findWindowRec{ lo, hi, windowRecs.data(), windowValid.data(), windowValid.size() };
 					const LooEval loo = EvaluateLooInnovation(req.seq, centre, findWindowRec);
 					if (loo.spikeFlagged && loo.haveLoo)
 						smoothedParams = SubstituteLooSpike(req.seq, centre, activeLead, loo.looHat, findWindowRec);
