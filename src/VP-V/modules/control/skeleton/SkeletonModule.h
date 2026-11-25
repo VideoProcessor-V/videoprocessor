@@ -406,7 +406,7 @@ namespace Vpv
 			}
 			std::atomic<uint64_t> queueBits_{ uint64_t(1) << 8 };   // legacy 0-arg fallback snapshot; initial value = Pack of default QueueShape (0 / 1 / 0, nothing wired)
 			mutable std::mutex hostQueueMutex_;                     // K#9: pre-creation per-host QueueShape storage (seeded into HostState / MemoHost on creation)
-			std::vector<std::pair<const void*, uint64_t>> hostQueues_;
+			mutable std::vector<std::pair<const void*, uint64_t>> hostQueues_;
 		};
 
 		// Adds SkeletonModule to the hub. Start-up only; idempotent. After RegisterResyncExtension.

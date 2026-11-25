@@ -1228,17 +1228,17 @@ namespace Vpv
 				MergeAtomicBits(st->queueBits, set);
 			if (mh)
 				MergeAtomicBits(mh->queueBits, set);
-			if (!st && !mh)
+			if (!st || !mh)
 			{
 				std::lock_guard<std::mutex> lock(hostQueueMutex_);
-				// K#9 (Audit MEDIUM-1): re-check after acquiring hostQueueMutex_ in case a racing Put just inserted HostState/MemoHost.
-				const std::shared_ptr<HostState> st2 = hosts_.Find(host);
-				const std::shared_ptr<MemoHost> mh2 = memoHosts_.Find(host);
+				// K#9 (Audit MEDIUM-1): re-check any missing handle(s) under hostQueueMutex_ in case a racing Put just inserted HostState/MemoHost.
+				const std::shared_ptr<HostState> st2 = !st ? hosts_.Find(host) : nullptr;
+				const std::shared_ptr<MemoHost> mh2 = !mh ? memoHosts_.Find(host) : nullptr;
 				if (st2)
 					MergeAtomicBits(st2->queueBits, set);
 				if (mh2)
 					MergeAtomicBits(mh2->queueBits, set);
-				if (st2 || mh2)
+				if (st || mh || st2 || mh2)
 					return;
 				for (auto& kv : hostQueues_)
 					if (kv.first == host)
@@ -1256,10 +1256,10 @@ namespace Vpv
 
 		void SkeletonModule::MergeAllQueues(const std::function<void(QueueShape&)>& set)
 		{
+			std::lock_guard<std::mutex> lock(hostQueueMutex_);
 			MergeAtomicBits(queueBits_, set);
 			hosts_.ForEach([&set](const void*, const std::shared_ptr<HostState>& st) { MergeAtomicBits(st->queueBits, set); });
 			memoHosts_.ForEach([&set](const void*, const std::shared_ptr<MemoHost>& mh) { MergeAtomicBits(mh->queueBits, set); });
-			std::lock_guard<std::mutex> lock(hostQueueMutex_);
 			for (auto& kv : hostQueues_)
 			{
 				QueueShape q = Unpack(kv.second);
@@ -1271,10 +1271,10 @@ namespace Vpv
 		void SkeletonModule::PublishQueue(const QueueShape& q)
 		{
 			const uint64_t bits = Pack(q);
+			std::lock_guard<std::mutex> lock(hostQueueMutex_);
 			queueBits_.store(bits, std::memory_order_release);
 			hosts_.ForEach([bits](const void*, const std::shared_ptr<HostState>& st) { st->queueBits.store(bits, std::memory_order_release); });
 			memoHosts_.ForEach([bits](const void*, const std::shared_ptr<MemoHost>& mh) { mh->queueBits.store(bits, std::memory_order_release); });
-			std::lock_guard<std::mutex> lock(hostQueueMutex_);
 			for (auto& kv : hostQueues_)
 				kv.second = bits;
 		}
@@ -1290,17 +1290,17 @@ namespace Vpv
 				st->queueBits.store(bits, std::memory_order_release);
 			if (mh)
 				mh->queueBits.store(bits, std::memory_order_release);
-			if (!st && !mh)
+			if (!st || !mh)
 			{
 				std::lock_guard<std::mutex> lock(hostQueueMutex_);
-				// K#9 (Audit MEDIUM-1): re-check after acquiring hostQueueMutex_ in case a racing Put just inserted HostState/MemoHost.
-				const std::shared_ptr<HostState> st2 = hosts_.Find(host);
-				const std::shared_ptr<MemoHost> mh2 = memoHosts_.Find(host);
+				// K#9 (Audit MEDIUM-1): re-check any missing handle(s) under hostQueueMutex_ in case a racing Put just inserted HostState/MemoHost.
+				const std::shared_ptr<HostState> st2 = !st ? hosts_.Find(host) : nullptr;
+				const std::shared_ptr<MemoHost> mh2 = !mh ? memoHosts_.Find(host) : nullptr;
 				if (st2)
 					st2->queueBits.store(bits, std::memory_order_release);
 				if (mh2)
 					mh2->queueBits.store(bits, std::memory_order_release);
-				if (st2 || mh2)
+				if (st || mh || st2 || mh2)
 					return;
 				for (auto& kv : hostQueues_)
 					if (kv.first == host)
@@ -1493,13 +1493,12 @@ namespace Vpv
 				// K#9 (Audit MEDIUM-1): serialize pre-creation hostQueues_ adoption with Put (lock order: ownerFillsMutex_ -> hostQueueMutex_).
 				std::lock_guard<std::mutex> qLock(hostQueueMutex_);
 				uint64_t seed = queueBits_.load(std::memory_order_acquire);
-				auto& hq = const_cast<std::vector<std::pair<const void*, uint64_t>>&>(hostQueues_);
-				auto qIt = hq.end();
-				for (auto it = hq.begin(); it != hq.end(); ++it)
+				auto qIt = hostQueues_.end();
+				for (auto it = hostQueues_.begin(); it != hostQueues_.end(); ++it)
 					if (it->first == host) { qIt = it; break; }
 				if (const std::shared_ptr<HostState> hs = hosts_.Find(host))
 					seed = hs->queueBits.load(std::memory_order_acquire);
-				else if (qIt != hq.end())
+				else if (qIt != hostQueues_.end())
 					seed = qIt->second;
 				made->queueBits.store(seed, std::memory_order_release);
 				Hub::HostSlots<MemoHost>& slots = const_cast<Hub::HostSlots<MemoHost>&>(memoHosts_);
@@ -1509,8 +1508,8 @@ namespace Vpv
 						return other->memo;   // another thread made it first
 					return nullptr;          // the table is full (sixteen renderers): no memo, the caller's "unavailable" shows it
 				}
-				if (qIt != hq.end())
-					hq.erase(qIt);
+				if (qIt != hostQueues_.end())
+					hostQueues_.erase(qIt);
 			}
 			return made->memo;
 		}
