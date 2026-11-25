@@ -90,16 +90,32 @@ Both estimators are wired identically on CPU (`TdV2FrameRole.h`, `TdV2ReferenceE
 - **Single-resample anchored carry (`H-4`, `H-5`):**
   - When enabled, anchors strictly to the last confirmed peak (`maxAnchorAgeFrames = 8`, `PrevPeak2` role for `A1`), warping once from the anchor rather than chaining resamples.
   - Per-cell held-out structure check (mid-band NCC invariant to fine detail loss + coarse-band mean difference within the U3 limit): failing cells receive weight `0` and are flagged for re-seed.
-- **Real `kDrift` measurement (`M-2`):**
-  - Measured at confirmed peaks via direct vs composed flow (or seeded $\pm 2\text{ px}$ local block refinement tagged visibly as `"drift: reduced"` / `StandInKind::LongPairDrift`), published in `td.maps kDrift`, barring cells with `kDrift > 1.0 px` for the next span.
-- **Phase 6 modular switches (CPU & GLSL):**
-  - `enableSmoothWarpVectors = true` (`6.1` / `L-1`, `td_smooth_warp`): bilinear vector interpolation between 16x16 cell centres.
-  - `enableHardFbOcclusionGate = true` (`6.2` / `M-3`, `td_hard_fb_gate`): hard-zeros reference weights when forward/backward disagreement exceeds `1.0 px`.
-  - `chromaReuseLumaWeights = false` (`6.6`, `td_chroma_weights`): independent chroma weights by default, or reuse luma cell weights (skipping chroma Pass C2A/C2B).
-  - `enableSmoothLayer4Guard = true` (`L-3`, `td_smooth_grain_guard`): Pass 4B bilinear grain add-back using dead `sc.warpedVal` to prevent SRV/UAV aliasing with zero extra VRAM.
+- **Real `kDrift` measurement (`M-2`, `UPG-BLKR-3`, `UPG-HIGH-2`):**
+  - Measured at confirmed peaks via direct vs composed flow (or seeded $\pm 2\text{ px}$ sub-pixel bilinear block refinement tagged visibly as `"drift: reduced"` / `StandInKind::LongPairDrift`), published in `td.maps kDrift` on BOTH CPU and GPU (`kPassAnchorDriftAudit`), barring cells with `kDrift > kAnchorDriftBarPx` (`0.25 px`, derived from P3r's quarter-pel floor) for the next span.
+- **Phase 6 modular switches (CPU & GLSL, luma & chroma):**
+  - `enableSmoothWarpVectors = true` (`6.1` / `L-1`, `td_smooth_warp`): bilinear vector interpolation between 16x16 cell centres (requiring matching `RegionMotionClass` across all 4 corners).
+  - `enableHardFbOcclusionGate = true` (`6.2` / `M-3`, `td_hard_fb_gate`): hard-zeros reference weights when forward/backward disagreement exceeds `kHardFbOcclusionPx = 1.0 px` on both luma and chroma CPU/GPU.
+  - `chromaReuseLumaWeights = false` (`6.6`, `td_chroma_weights`): independent chroma weights by default, or reuse luma cell weights mapped strictly by matching `RefRole` (disabled on Branch A `Unidentified`, preserving Layer-4 `cellRetainedGrain`, zero-clearing GPU diagnostics when C2A/C2B are skipped, and gating Pass C3 on `motion_gate` rather than `ownW <= 0`).
+  - `enableSmoothLayer4Guard = true` (`L-3`, `td_smooth_grain_guard`): Pass 4B / Pass C4B bilinear grain add-back using dead `sc.warpedVal` / `sc.warpedUv` to prevent SRV/UAV aliasing with zero extra VRAM.
   - `enableGpuCounterSummary = true` (`M-9`): compact 2-texel (32-byte) `counterSummaryTex_` live summary readback in zero-copy GPU mode.
 - **Shared core & time-domain hygiene (`M-7`, `L-2`):**
   - `TdV2Chroma.h` directly includes `<VP-V/core/ChromaSiting.h>` and delegates `SitingSpec::Resampled` to `ChromaSiting::ShiftAfterResample`.
   - `kAnchorCanvasTauSec = 1.0 / 3.0` (source seconds, rate-independent).
 - **GPU late-carry controller (`D5`, `TdV2GpuLateCarry.h`):**
-  - GPU-side `TdV2GpuLateCarryController` on `pl_tex` (warp + linear decay `2/3 -> 1/3 -> 0` + U3 consistency clamp + explicit stale-sequence late-arrival guard `OnLateResultArrived` + visible `FallbackCatalog`/`StandInRegistry` counters).
+  - GPU-side `TdV2GpuLateCarryController` on `pl_tex` (warp + linear decay `2/3 -> 1/3 -> 0` using un-decayed `next_delta` + `Overlay`/`DynamicTexture` zeroing + opposite-sign/hull/Huber/U3-kappa guards + explicit stale-sequence late-arrival guard `OnLateResultArrived` + destructor `pl_tex_destroy` cleanup + `MakeVramUser` persistent VRAM budgeting).
+
+---
+
+## 8. Chroma Reduction Fidelity & Cross-Model Audit Closures (`CHR-HIGH-1..4`, `UPG-BLKR-1..4`, `UPG-HIGH-1..6`)
+
+- **Delivered-to-coded chroma reduction (`CHR-HIGH-4`):**
+  - `TdV2Chroma.h` / `TdV2ChromaGpu.h` reduce delivered 4:4:4 / RGB chroma to the identified coded subsampling grid using sited 4-tap Catmull-Rom resampling (`SampleSitedActive` / `kPassChromaReduce`). Catmull-Rom is a fast, local interpolating point-sampler rather than the exact linear-algebraic left-inverse $D(U(x)) = x$ of the upstream chroma upsampler $U$; when the delivered grid already matches the coded YUV grid (native 4:2:0 / 4:2:2 / 4:4:4), reduction is an exact bit-identical identity with zero resampling passes.
+  - Anchor canvas referencing (`ChromaProcessInput::enableAnchorCanvasRef`) defaults to `false`, is strictly gated on `cfg_.enableAnchoredCarry && in.enableAnchorCanvasRef` (`D2`), and runs a per-cell held-out mid-band NCC + coarse-band mean-difference check before accepting anchor canvas cells.
+  - Carried-CfL OLS ridge uses derived chroma noise variance `max(a2Stats.totalVar, lsbQuantVar)` rather than a hardcoded `1/12` floor.
+- **Chroma `A2e` / EB / `U3` & Bokeh / Focus Parity (`CHR-HIGH-1/2`, `CHR-MEDIUM-1..3`, `CHR-LOW-1/3`):**
+  - Both CPU `TdV2Chroma.h` and GPU `TdV2ChromaGpu.h` run band-dependent pooling (`PoolRadiusForBand`), coded-chroma `EffectiveSamplesForBand`, `EmpiricalBayesShrinkC`, `A2ePriorHistory` (holding rolling median on one-sided `K = 1` frames and opening the multi-ref `A2e + A3` upper envelope to `U_j + 3*tau` while keeping `kappa * sqrt(U_j)` output bounds honest), `hPoolR` own-grain pooling, standalone chroma rack-focus shift fallback when `explicitFocusChangeCells` is absent, flat-cell unsplit grain protection when `retainedGrainVar == 0`, and bokeh-boundary straddle protection (CPU `codedDeltaLow` + GPU `td_sample_coded_delta_sited` defocused-tap masking) so sharp `M`/`H` coded deltas never bleed 1–2 px into bokeh.
+- **Luma & GPU Audit Closures (`UPG-BLKR-1/3/4`, `UPG-HIGH-1..6`, `UPG-MED-1..3`, `UPG-LOW-1`):**
+  - Fixed `QualityPattern::FrameRole` mapping (`Peak=0`, `Reference=1`, `NonReference=2`, skipping `Unknown`/`ExactCopy`) and gated 2-frame same-role stats pooling on matching `RefRole`, age `<= 1 s`, and `|v| < 0.5 * cellPx`.
+  - Split oversized raw GLSL literals (`kPass2SolverHeader`, `kPass2MergeAndSolve`, `kPassChromaEbPriorReduce`, `kPassChromaMergeSolve`) so every raw GLSL literal across `v2/*.h` stays `<= 12,090 B` CRLF (well below MSVC's `16,380 B` `C2026` limit).
+  - Replaced the bogus `E_H / E_M == 1.345` `dzStep` and 4-px stride in `TdV2NonBlockStepEstimator` / `kPassQualityEvidenceReduce` with a per-row/per-column monotonic 3-px-plateau quantization staircase check excluding `Overlay` cells and aggregating by median.
+  - Added GPU `kPassAnchorHeldOutCheck` + `kPassAnchorDriftAudit` writing real `kDrift` into `td.maps slice2.z`, wired `ebPriorTex_` into GPU `kPass2MergeAndSolve` (always zero-initialized when EB is off), and prevented `anchorAgeFrames_ <= 1` self-instrumentation vs `prevPeak`.
