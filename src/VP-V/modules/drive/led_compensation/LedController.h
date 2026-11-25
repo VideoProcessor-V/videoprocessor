@@ -364,6 +364,9 @@ namespace LedDrive
 		double protection = 0.0;
 		double area = 0.0;
 		double previousApl = -1.0;
+		// O#2 L1: latched U7 fade direction (+1 brightening fade-in, -1 darkening fade-out, 0 unknown/none),
+		// preserved across repeated 24p@60Hz output frames where stats.apl == previousApl.
+		int fadeDirection;
 		bool ramping = false;
 		// cut_lead: window: the jump for a cut still in the window was sent.
 		bool cutLeadSent = false;

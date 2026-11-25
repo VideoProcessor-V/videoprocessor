@@ -21,7 +21,7 @@
 //              empty (a plane under 32 x 18): the structure input of U7's cut law (CutFadeJudge::ScorePair)
 // Determinism: integer sums in a fixed row order; a finished record never depends on how the rows were chunked.
 //
-// Header-only, C++14, no Windows or GPU headers.
+// Pure C++14, no Windows or GPU headers. Out-of-line NormalisedMean lives in SourceStats.cpp (VideoProcessor-Lib).
 #pragma once
 
 #include <algorithm>

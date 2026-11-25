@@ -231,8 +231,10 @@ namespace SourceResolutionMonitor
 		void BindLaneReadyProbe(VpSkeleton::AnalysisLane& lane);
 		void UnbindLaneReadyProbe(VpSkeleton::AnalysisLane& lane);
 		// Deterministic-only bounded ready wait (default OFF: live mode never blocks on worker readiness).
-		// boundUs = 0 uses presentSlackUs - guardUs per SealPoint.h N1 (0 slack = immediate timeout).
+		// boundUs > 0 uses an explicit wait bound; boundUs == 0 uses presentSlackUs - guardUs per SealPoint.h N1
+		// (using SetDeterministicSlack when BeginBoundFrame / AutoFactor or a 0-arg call invokes WaitForReadyDeterministic).
 		void SetDeterministicWait(bool deterministic, uint32_t boundUs = 0);
+		void SetDeterministicSlack(uint32_t presentSlackUs, uint32_t guardUs = 0);
 		bool DeterministicWait() const;
 		bool WaitForReadyDeterministic(uint64_t renderSequence, uint32_t presentSlackUs = 0, uint32_t guardUs = 0);
 		unsigned long long DeterministicWaitCalls() const;
@@ -687,8 +689,11 @@ namespace SourceResolutionMonitor
 		WaitMissCause lastWaitMissCause = WaitMissCause::None;   // guarded by `mutex`
 		uint64_t lastWaitMissFramesLate = 0;                     // guarded by `mutex`
 		double lastWaitMissAnalyseMs = 0.0;                      // guarded by `mutex`
+		uint64_t timedOutThrough;                                // guarded by `mutex`: bound sequences already billed as BoundedWaitTimeout
+		unsigned long long seenJobsDropped, seenHeldDropped, seenSubmitSkipped;   // guarded by `mutex`: delta trackers for DropOrBacklog vs LatePoll
 		std::atomic<bool> deterministicWait;
 		std::atomic<uint32_t> deterministicWaitBoundUs;
+		std::atomic<uint32_t> deterministicSlackUs, deterministicGuardUs;
 		std::atomic<unsigned long long> deterministicWaitCalls, deterministicWaitYields;
 		bool haveBoundWaitSeq = false;                           // render thread: avoids double wait across BeginBoundFrame + AutoFactor
 		uint64_t lastBoundWaitSeq = 0;
@@ -850,6 +855,12 @@ namespace SourceResolutionMonitor
 		SourceResolution::Tracker::CutJudge aheadCutJudge;
 		// Cut fixes: the per-frame judge (render thread writes, worker reads Evidence) under its mutex.
 		SourceResolution::FrameCutJudge frameJudge;
+		struct U7AheadEntry
+		{
+			uint64_t seq;
+			bool cut;
+		};
+		std::deque<U7AheadEntry> u7AheadHistory;   // guarded by `frameJudgeMutex` (MED-3: consecutive U7 verdicts for LookAheadEvidence)
 		mutable std::mutex frameJudgeMutex;
 		double blackLevelSeen = 64.0 / 1023.0;  // the source's black (Frame), for the look-ahead
 		bool aheadAwaitTarget = false;   // the event frame was black: analyse the next frame with picture

@@ -517,7 +517,7 @@ namespace LedDrive
 	}
 
 	CompensateController::CompensateController(const LedDriveConfig& configIn, const FluxModel& fluxIn)
-		: config(configIn), flux(fluxIn), level(configIn.ledCeiling), light(configIn.ledCeiling)
+		: config(configIn), flux(fluxIn), level(configIn.ledCeiling), light(configIn.ledCeiling), fadeDirection(0)
 	{
 	}
 
@@ -534,6 +534,7 @@ namespace LedDrive
 		protection = 0.0;
 		area = 0.0;
 		previousApl = -1.0;
+		fadeDirection = 0;
 		ramping = false;
 		cutLeadSent = false;
 	}
@@ -594,9 +595,17 @@ namespace LedDrive
 		const double highlightFloor = protection *
 			flux.LevelFor(highlightLinear / std::pow(2.0, allowedStops) / contrastHeadroom, 0, ceiling);
 
-		// O#2 L1: shared U7 stats.fade is true for both fade-out (darkening) and fade-in (brightening);
-		// only a darkening fade dims toward ledFloorBlack and holds compensation gain.
-		const bool fadeToBlack = stats.fade && !(previousApl >= 0.0 && stats.apl > previousApl);
+		// O#2 L1: shared U7 stats.fade is true for both fade-out (darkening) and fade-in (brightening).
+		// Latch direction on non-zero APL steps so repeated 24p@60Hz output frames (stats.apl == previousApl)
+		// preserve a brightening fade-in (+1) instead of transiently clamping to ledFloorBlack or holding gain.
+		// On the first tick after Reset() (previousApl < 0), fadeDirection stays 0 (darkening-compatible).
+		if (!stats.fade)
+			fadeDirection = 0;
+		else if (previousApl >= 0.0 && stats.apl > previousApl)
+			fadeDirection = 1;
+		else if (previousApl >= 0.0 && stats.apl < previousApl)
+			fadeDirection = -1;
+		const bool fadeToBlack = stats.fade && fadeDirection <= 0;
 		const bool cutToBlack = stats.cut && apl < 20;
 		const bool toBlack = fadeToBlack || cutToBlack;
 		const int base = toBlack ? config.ledFloorBlack :

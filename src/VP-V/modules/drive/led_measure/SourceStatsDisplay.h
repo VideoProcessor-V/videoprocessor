@@ -227,7 +227,8 @@ namespace LedDrive
 						v = r * params.weights[0] + g * params.weights[1] + b * params.weights[2];
 						return true;
 					},
-					left, top, right, bottom, screenW, screenH, params.masks, params.maskCount);
+					left, top, right, bottom, screenW, screenH, params.masks,
+					(params.masks != nullptr && params.maskCount > 0) ? params.maskCount : 0);
 				if (peakCode >= 0.0)
 					raw.maximum = static_cast<uint32_t>(peakCode * static_cast<double>(SUM_SCALE) + 0.5);
 			}

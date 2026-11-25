@@ -16,8 +16,8 @@ Every consumer migrated under Package O reads shared products through the skelet
   - `SceneVerdict { bool cut; bool fade; float fadeKeep; }` (`fadeKeep < 0` when not provided).
   - `CutOf(seq, cut)` — peek-only store read of delivered cut (existing content-intent path).
   - `SceneOf(seq, SceneVerdict& out)` — peek-only store read (`SingleStore()->PeekScene(seq, scene)`) returning `cut`, `fade`, and `fadeKeep`.
-  - `AcquireScene(seq, SceneVerdict& out, const char** why)` — get-or-compute reader through `IExternalDemand::SceneOf(owners[0], seq)` under the single-owner contract (`owners.size() == 1`, never guessed). On any unavailability (`"no store owner"`, `"renderer ambiguous"`, `"no skeleton module"`, or `a.why`), returns `false` with exact static `*why` and neutral `out`.
-  - `AcquireCut(seq, cut, why)` — delegates directly to `AcquireScene`.
+  - `AcquireScene(seq, SceneVerdict& out, const char** why)` — get-or-compute reader through `IExternalDemand::SceneOf(owners[0], seq)` under the single-owner contract (`owners.size() == 1`, never guessed; implemented out-of-line in `SceneRecordReader.cpp`). On any unavailability (`"no store owner"`, `"renderer ambiguous"`, `"no skeleton module"`, or `a.why`), returns `false` with exact static `*why` and neutral `out`.
+  - `AcquireCut(seq, cut, why)` & `CutOf(seq, cut)` — keep their original inline bodies in `SceneRecordReader.h` for exact Bill-TU line parity (`0` header delta), while `SceneOf`, `AcquireScene`, and `AcquireSourceStats` live out-of-line in `SceneRecordReader.cpp`.
 - **Shared blank/black predicate (`CutFadeJudge::BlankOf`):**
   - `BlankVerdict { bool blank; bool black; bool flat; }` derived strictly from existing U7/P4 contract constants (Rule 1, zero invented numbers):
     - `rec.pixelCount == 0` -> `{ false, false, false }`.
@@ -36,9 +36,12 @@ Every consumer migrated under Package O reads shared products through the skelet
 - **Shared helpers:**
   - `FirstBinReaching<Acc>(hist, bins, target)` — shared percentile bin-search law (reused by both source-domain P4 and display-domain `SourceStatsDisplay`).
   - `NormalisedMean(const Record& rec)` — `rec.pixelCount > 0 ? min(1.0, double(rec.mean) / double(Vpv::AnalysisDomain::kAxisQ6Max)) : 0.0`.
-- **Reader facade (`SceneRecordReader::AcquireSourceStats`):**
-  - Single-owner check (`StoreOwners().size() == 1`) -> `IExternalDemand::MemoFor(owners[0], seq)` -> `memo->Acquire(kP4SourceStats, seq, AcquireForm::Cpu)` -> `SourceStats::ReadRecord(ar.cpu, ar.cpuBytes, &out)`.
-  - Every failure returns `false` with exact static `*why` (`"no store owner"`, `"renderer ambiguous"`, `"no skeleton module"`, `"no frame memo"`, `VpSkeleton::Token(ar.cause)`, or `"p4 record version mismatch"`).
+- **Reader facade (`SceneRecordReader::AcquireSourceStats`, out-of-line in `SceneRecordReader.cpp`):**
+  - Single-owner check (`StoreOwners().size() == 1`), then obeys `MUST-9` without mutating `SkeletonMemo::lastCause_`:
+    1. Non-mutating lane-lease peek via `IExternalDemand::LeaseFor(owners[0], kP4SourceStats)` + `ReadPublishedBytes` (any thread).
+    2. Non-mutating memo peek via `IExternalDemand::MemoFor(owners[0], seq)` + `CopyPublished` (accepting both `kRecordBytes` and `sizeof(Record)`, any thread).
+    3. Guarded render-thread `Acquire`: checks `HasOwnerFill` (`"no analysis lane"`), `OnRenderThread` (`"p4 not published (off render thread)"`), and `Released(seq)` (`"frame released"`) before calling `memo->Acquire(kP4SourceStats, seq, AcquireForm::Cpu)` -> `SourceStats::ReadRecord`.
+  - Every failure returns `false` with exact static `*why` (`"no store owner"`, `"renderer ambiguous"`, `"no skeleton module"`, `"no frame memo"`, `"no analysis lane"`, `"p4 not published (off render thread)"`, `"frame released"`, `VpSkeleton::Token(ar.cause)`, or `"p4 record version mismatch"`).
 
 ### 1.4 P2 / P3 — `EngineFieldFacts` & `MotionValidity`
 - **Owner:** `src/VP-V/modules/control/skeleton/SkeletonFacts.h` (`Vpv::Skeleton::EngineFieldFacts`, published alongside `kP2VectorPair` / `kP2mMatcherPair` / `kP3AnalysisField`) and `MotionValidity` (`StampAt`, discontinuity epoch / `PairSpansSlip`).

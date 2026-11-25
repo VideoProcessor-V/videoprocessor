@@ -92,7 +92,9 @@ if (tile < int(tiles) && g.y < ts) {
 		: u7SceneSharedCount(0), u7SceneFallbackCount(0),
 		p4StatsSharedCount(0), p4StatsFallbackCount(0),
 		waitMissLatePollCount(0), waitMissDropOrBacklogCount(0), waitMissTimeoutCount(0),
+		timedOutThrough(0), seenJobsDropped(0), seenHeldDropped(0), seenSubmitSkipped(0),
 		deterministicWait(false), deterministicWaitBoundUs(0),
+		deterministicSlackUs(0), deterministicGuardUs(0),
 		deterministicWaitCalls(0), deterministicWaitYields(0)
 	{
 		chainEst.reset(new SourceIdentity::Chain::ChainEstimator());   // inert until SetChainEnabled(true): no thread, no tap
@@ -204,6 +206,29 @@ if (tile < int(tiles) && g.y < ts) {
 	SourceResolution::FrameEvidence Monitor::LookAheadEvidence(uint64_t from, uint64_t to) const
 	{
 		std::lock_guard<std::mutex> lock(frameJudgeMutex);
+		if (to > from && !u7AheadHistory.empty())
+		{
+			uint64_t expect = from + 1u;
+			bool anyCut = false;
+			for (const U7AheadEntry& entry : u7AheadHistory)
+			{
+				if (entry.seq < expect)
+					continue;
+				if (entry.seq > expect)
+					break;   // gap in (from, to]: not consecutively covered by U7
+				if (entry.cut)
+					anyCut = true;
+				if (expect == to)
+				{
+					SourceResolution::FrameEvidence e;
+					e.covered = true;
+					e.cut = anyCut;
+					e.unresolved = false;
+					return e;
+				}
+				++expect;
+			}
+		}
 		return frameJudge.Evidence(from, to);
 	}
 
@@ -417,6 +442,15 @@ if (tile < int(tiles) && g.y < ts) {
 			}
 			aheadLastMean = haveP4 ? sharedP4.mean : mean;
 		}
+		if (haveU7)
+		{
+			std::lock_guard<std::mutex> judgeLock(frameJudgeMutex);
+			if (!u7AheadHistory.empty() && sequence <= u7AheadHistory.back().seq)
+				u7AheadHistory.clear();
+			u7AheadHistory.push_back(U7AheadEntry{ sequence, cut });
+			while (u7AheadHistory.size() > 256u)
+				u7AheadHistory.pop_front();
+		}
 		const bool pending = disengagePending || std::fabs(autoPending - autoApplied) > 0.01;
 		bool analyse = false;
 		{
@@ -564,6 +598,10 @@ if (tile < int(tiles) && g.y < ts) {
 	void Monitor::Discontinuity(const char* cause)
 	{
 		const char* const text = cause ? cause : "discontinuity";
+		{
+			std::lock_guard<std::mutex> judgeLock(frameJudgeMutex);
+			u7AheadHistory.clear();
+		}
 		if (chainEnabled.load(std::memory_order_acquire)) chainEst->NoteDiscontinuity(text);   // any thread: a leaf lock
 		discontinuityCause.store(text, std::memory_order_release);
 		// Frame-bound: a new era (results and jobs of the old one are dropped), taking effect at the
@@ -1557,6 +1595,10 @@ if (tile < int(tiles) && g.y < ts) {
 		tracker.Discontinuity(cause);
 		trackerV.Discontinuity(cause);
 		trackerH.Discontinuity(cause);
+		{
+			std::lock_guard<std::mutex> judgeLock(frameJudgeMutex);
+			u7AheadHistory.clear();
+		}
 		denseGrid.store(false, std::memory_order_release);
 		aheadRan.store(false, std::memory_order_release);   // a new stream: the look-ahead note is re-earned
 		coherenceV.clear();
@@ -2172,14 +2214,19 @@ if (tile < int(tiles) && g.y < ts) {
 			// Frame-bound: a result that reaches the held queue AFTER its release point (the frame it belongs to
 			// is already decided, D frames on) is applied late, so this run's decisions depended on the worker's
 			// timing: classify exact per-miss cause (LatePoll vs DropOrBacklog) and count, never silent.
+			// Skip sequences already billed as BoundedWaitTimeout (HIGH-3) and classify drops by per-event delta (MED-1).
 			const uint64_t rel = releasedThrough.load(std::memory_order_acquire);
-			if (j.sequence != 0 && j.sequence <= rel)
+			const unsigned long long curJobs = jobsDropped.load(std::memory_order_relaxed);
+			const unsigned long long curHeld = heldDropped.load(std::memory_order_relaxed);
+			const unsigned long long curSkipped = submitSkipped.load(std::memory_order_relaxed);
+			const bool newDropOrSkip = (curJobs != seenJobsDropped) || (curHeld != seenHeldDropped) || (curSkipped != seenSubmitSkipped);
+			seenJobsDropped = curJobs;
+			seenHeldDropped = curHeld;
+			seenSubmitSkipped = curSkipped;
+			if (j.sequence != 0 && j.sequence <= rel && j.sequence > timedOutThrough)
 			{
 				const uint64_t framesLate = (rel >= j.sequence) ? (rel - j.sequence + 1u) : 1u;
-				const bool backlogOrDrop = j.hadBacklog ||
-					jobsDropped.load(std::memory_order_relaxed) > 0 ||
-					heldDropped.load(std::memory_order_relaxed) > 0 ||
-					submitSkipped.load(std::memory_order_relaxed) > 0;
+				const bool backlogOrDrop = j.hadBacklog || newDropOrSkip;
 				RecordWaitMissLocked(backlogOrDrop ? WaitMissCause::DropOrBacklog : WaitMissCause::LatePoll,
 					framesLate, snapshot.analyseMs);
 			}
@@ -2818,6 +2865,12 @@ if (tile < int(tiles) && g.y < ts) {
 			lastWaitMissCause = WaitMissCause::None;
 			lastWaitMissFramesLate = 0;
 			lastWaitMissAnalyseMs = 0.0;
+			timedOutThrough = 0;
+			seenJobsDropped = seenHeldDropped = seenSubmitSkipped = 0;
+		}
+		{
+			std::lock_guard<std::mutex> judgeLock(frameJudgeMutex);
+			u7AheadHistory.clear();
 		}
 		{
 			std::lock_guard<std::mutex> lock(outMutex);
@@ -2988,23 +3041,35 @@ if (tile < int(tiles) && g.y < ts) {
 
 	void Monitor::NoteWaitMissed(WaitMissCause cause, uint64_t renderSequence, uint64_t framesLate, double analyseMs)
 	{
+		const uint64_t lead = frameLead.load(std::memory_order_acquire);
+		const uint64_t through = renderSequence >= lead ? renderSequence - lead : 0u;
 		uint64_t computedLate = framesLate;
 		if (computedLate == 0 && renderSequence != 0)
 		{
-			const uint64_t lead = frameLead.load(std::memory_order_acquire);
-			const uint64_t through = renderSequence >= lead ? renderSequence - lead : 0u;
 			const uint64_t done = analysedThrough.load(std::memory_order_acquire);
 			computedLate = through > done ? (through - done) : 1u;
 		}
 		std::lock_guard<std::mutex> lock(mutex);
+		if (cause == WaitMissCause::BoundedWaitTimeout)
+		{
+			const uint64_t mark = renderSequence != 0 ? through : releasedThrough.load(std::memory_order_acquire);
+			if (mark > timedOutThrough)
+				timedOutThrough = mark;
+		}
 		RecordWaitMissLocked(cause, computedLate, analyseMs);
 	}
 
 	void Monitor::BindLaneReadyProbe(VpSkeleton::AnalysisLane& lane)
 	{
+		auto lastSeq = std::make_shared<std::atomic<uint64_t>>(0);
 		lane.SetReadyProbe(
-			[this](uint64_t s) { return ReadyFor(s); },
-			[this]() { NoteWaitMissed(WaitMissCause::BoundedWaitTimeout, 0); });
+			[this, lastSeq](uint64_t s) {
+				lastSeq->store(s, std::memory_order_release);
+				return ReadyFor(s);
+			},
+			[this, lastSeq]() {
+				NoteWaitMissed(WaitMissCause::BoundedWaitTimeout, lastSeq->load(std::memory_order_acquire));
+			});
 	}
 
 	void Monitor::UnbindLaneReadyProbe(VpSkeleton::AnalysisLane& lane)
@@ -3016,6 +3081,12 @@ if (tile < int(tiles) && g.y < ts) {
 	{
 		deterministicWaitBoundUs.store(boundUs, std::memory_order_release);
 		deterministicWait.store(deterministic, std::memory_order_release);
+	}
+
+	void Monitor::SetDeterministicSlack(uint32_t presentSlackUs, uint32_t guardUs)
+	{
+		deterministicSlackUs.store(presentSlackUs, std::memory_order_release);
+		deterministicGuardUs.store(guardUs, std::memory_order_release);
 	}
 
 	bool Monitor::DeterministicWait() const
@@ -3052,8 +3123,9 @@ if (tile < int(tiles) && g.y < ts) {
 		else
 		{
 			policy.explicitTestWait = false;
-			policy.presentSlackUs = presentSlackUs;
-			policy.guardUs = guardUs;
+			const bool useStoredSlack = (presentSlackUs == 0 && guardUs == 0);
+			policy.presentSlackUs = useStoredSlack ? deterministicSlackUs.load(std::memory_order_acquire) : presentSlackUs;
+			policy.guardUs = useStoredSlack ? deterministicGuardUs.load(std::memory_order_acquire) : guardUs;
 		}
 
 		const auto start = std::chrono::steady_clock::now();

@@ -3,6 +3,8 @@
 // Out-of-line implementations of VpSkeleton::SceneRecordReader (see SceneRecordReader.h).
 
 #include <VP-V/modules/control/skeleton/SceneRecordReader.h>
+
+#include <VP-V/core/AnalysisLane.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/SourceStats.h>
 
 #include <vector>
@@ -64,18 +66,67 @@ namespace VpSkeleton
 				reason = owners.empty() ? "no store owner" : "renderer ambiguous";
 			else if (Vpv::Skeleton::IExternalDemand* demand = Vpv::Skeleton::Demand())
 			{
+				// MUST-9: try non-mutating lane-published lease read first (safe on any thread, zero memo lastCause_ mutation).
+				const VpSkeleton::LaneLease lease = demand->LeaseFor(owners[0], VpSkeleton::kP4SourceStats);
+				if (lease.Valid() && lease.bytes != nullptr && lease.bytes->Bytes() >= sizeof(VpUnit::SourceStats::Record))
+				{
+					std::vector<uint8_t> laneBuf;
+					const VpSkeleton::PublishedRead pr = VpSkeleton::ReadPublishedBytes(
+						lease, VpSkeleton::kP4SourceStats, seq, lease.bytes->Bytes(),
+						[&laneBuf](const uint8_t* src, size_t n) {
+							laneBuf.assign(src, src + n);
+						});
+					if (pr == VpSkeleton::PublishedRead::Copied)
+					{
+						if (VpUnit::SourceStats::ReadRecord(laneBuf.data(), laneBuf.size(), &out))
+						{
+							if (why != nullptr)
+								*why = "";
+							return true;
+						}
+						if (why != nullptr)
+							*why = "p4 record version mismatch";
+						return false;
+					}
+				}
+
 				const Vpv::Skeleton::FrameMemo fm = demand->MemoFor(owners[0], seq);
 				if (!fm.Valid())
 					reason = "no frame memo";
 				else
 				{
-					const VpSkeleton::AcquireResult ar = fm.memo->Acquire(VpSkeleton::kP4SourceStats, seq, VpSkeleton::AcquireForm::Cpu);
-					if (!ar.Ok())
-						reason = VpSkeleton::Token(ar.cause);
-					else if (VpUnit::SourceStats::ReadRecord(ar.cpu, ar.cpuBytes, &out))
-						found = true;
+					// MUST-9: try non-mutating memo CopyPublished on any thread (accepts both padded kRecordBytes and compact sizeof(Record)).
+					std::vector<uint8_t> recBuf(VpUnit::SourceStats::kRecordBytes, 0);
+					size_t copiedBytes = 0;
+					if (fm.memo->CopyPublished(VpSkeleton::kP4SourceStats, seq, recBuf.data(), recBuf.size()))
+						copiedBytes = recBuf.size();
+					else if (sizeof(VpUnit::SourceStats::Record) != VpUnit::SourceStats::kRecordBytes &&
+						fm.memo->CopyPublished(VpSkeleton::kP4SourceStats, seq, recBuf.data(), sizeof(VpUnit::SourceStats::Record)))
+						copiedBytes = sizeof(VpUnit::SourceStats::Record);
+
+					if (copiedBytes > 0)
+					{
+						if (VpUnit::SourceStats::ReadRecord(recBuf.data(), copiedBytes, &out))
+							found = true;
+						else
+							reason = "p4 record version mismatch";
+					}
+					else if (!fm.memo->HasOwnerFill(VpSkeleton::kP4SourceStats, VpSkeleton::AcquireForm::Cpu))
+						reason = "no analysis lane";
+					else if (!fm.memo->OnRenderThread())
+						reason = "p4 not published (off render thread)";
+					else if (fm.memo->Released(seq))
+						reason = "frame released";
 					else
-						reason = "p4 record version mismatch";
+					{
+						const VpSkeleton::AcquireResult ar = fm.memo->Acquire(VpSkeleton::kP4SourceStats, seq, VpSkeleton::AcquireForm::Cpu);
+						if (!ar.Ok())
+							reason = VpSkeleton::Token(ar.cause);
+						else if (VpUnit::SourceStats::ReadRecord(ar.cpu, ar.cpuBytes, &out))
+							found = true;
+						else
+							reason = "p4 record version mismatch";
+					}
 				}
 			}
 			else
