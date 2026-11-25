@@ -6,8 +6,10 @@
 #include <VP-V/core/GpuAllocator.h>
 #include <VP-V/core/ProductSlots.h>
 #include <VP-V/core/Products.h>
+#include <VP-V/modules/input/source_analysis/regions/RegionEvidence.h>
 #include <VP-V/modules/repair/grain_split/GrainSplit.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -402,13 +404,31 @@ namespace GrainSplit
 		return kFields;
 	}
 
+	// Exact log2 of RegionEvidence::BlockSizeFor(frameHeight) (which returns power-of-two B in {8, 16, 32, 64},
+	// giving shift in {3, 4, 5, 6}: 8 px at <=720p, 16 px at 1080p, 32 px at 2160p, 64 px at 4320p).
+	// Used by StorageLedgerLines only; does not alter BlockShiftFor, GrainLayout, or GrainDecl.
+	inline uint8_t LedgerBlockShiftFor(int frameHeight)
+	{
+		const int b = RegionEvidence::BlockSizeFor(frameHeight);
+		uint8_t shift = 0;
+		for (int v = b; v > 1; v >>= 1)
+			++shift;
+		return shift;
+	}
+
 	// The ledger comparison (Ctrl+Alt+D): the PEAK bytes of the grain split per storage layout, scratch included.
 	// v3 (refs/116): the scratch is the same for both layouts - two half-size rg32f planes (4 B per plane px) plus the
 	// block grid (16 B per block). Full: slots at 16 B/px (+ 16 B per block); Compact: slots at 8 B/px (+ 16 B per block).
 	// So with N = ring + live slots compact is 8N + 4 B/px against full's 16N + 4: it saves for every N >= 1.
-	inline std::vector<std::string> StorageLedgerLines(VpSkeleton::Dims d, unsigned slotsRingPlusLive, int blockShift = 4)
+	// When blockShift < 0 (default), the block grid shift is derived from d.height via LedgerBlockShiftFor (matching
+	// RegionEvidence::BlockSizeFor); an explicit blockShift >= 0 is honoured and clamped to <= 30 (max signed 32-bit
+	// power-of-two shift) for explicit callers and negative controls.
+	inline std::vector<std::string> StorageLedgerLines(VpSkeleton::Dims d, unsigned slotsRingPlusLive, int blockShift = -1)
 	{
-		const uint64_t px = VpSkeleton::CellsAt(d, 0), blocks = VpSkeleton::CellsAt(d, static_cast<uint8_t>(blockShift));
+		const uint8_t shift = blockShift < 0
+			? LedgerBlockShiftFor(static_cast<int>(d.height))
+			: static_cast<uint8_t>((std::min)(blockShift, 30));
+		const uint64_t px = VpSkeleton::CellsAt(d, 0), blocks = VpSkeleton::CellsAt(d, shift);
 		const uint64_t fullSlot = px * 16 + blocks * 16, compactSlot = px * 8 + blocks * 16;
 		const uint64_t scratch = px * 4 + blocks * 16;
 		const uint64_t fullPeak = fullSlot * slotsRingPlusLive + scratch, compactPeak = compactSlot * slotsRingPlusLive + scratch;
