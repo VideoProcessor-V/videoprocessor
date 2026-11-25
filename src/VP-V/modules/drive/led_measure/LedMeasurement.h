@@ -231,7 +231,7 @@ namespace LedDrive
 		using SceneCutFn = ::LedDrive::SceneCutFn;
 		using SceneVerdictFn = ::LedDrive::SceneVerdictFn;
 		void SetSceneReader(SceneCutFn reader) { sceneReader = std::move(reader); }
-		void SetSceneVerdictReader(SceneVerdictFn reader) { sceneVerdictReader = std::move(reader); }
+		void SetSceneVerdictReader(SceneVerdictFn reader);
 		// timeMs: the frame's time, for highlight persistence. sourcePeriodMs: retained for API compatibility.
 		// sequence: the frame's source sequence, the key of the shared scene record CUT and FADE are read from (FIX-LED-CUT-U7 + O#2 L1:
 		// private mean-difference cut and APL-decline fade judges are gone). 0 or no readable record = no cut/fade for this frame, counted

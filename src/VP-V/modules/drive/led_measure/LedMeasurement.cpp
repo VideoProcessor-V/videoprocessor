@@ -440,6 +440,11 @@ namespace LedDrive
 	{
 	}
 
+	void StatsBuilder::SetSceneVerdictReader(SceneVerdictFn reader)
+	{
+		sceneVerdictReader = std::move(reader);
+	}
+
 	namespace
 	{
 		// The lowest value of a window that always includes the newest sample

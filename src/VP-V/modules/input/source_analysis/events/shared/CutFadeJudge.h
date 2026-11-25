@@ -200,31 +200,13 @@ inline double Flatness(const Grid& a)
     return std::sqrt(s / double(kGridH * (kGridW - 1) + (kGridH - 1) * kGridW));
 }
 
-// Shared blank / black / flat verdict derived strictly from P4 + U7 contract constants (O#5 M1).
+// Shared blank / black / flat verdict derived strictly from P4 + U7 contract constants (O#5 M1; out-of-line in CutFadeJudge.cpp).
 struct BlankVerdict {
     bool blank = false;
     bool black = false;
     bool flat = false;
 };
-
-inline BlankVerdict BlankOf(const SourceStats::Record& rec)
-{
-    BlankVerdict out;
-    if (rec.pixelCount == 0)
-        return out;
-    const uint32_t spread = rec.p99 > rec.p01 ? rec.p99 - rec.p01 : 0u;
-    bool flat = spread <= kBlackSpreadP4;
-    if (!flat && rec.gridFound != 0) {
-        Grid g;
-        GridOf(rec, &g);
-        flat = Flatness(g) < kFlatF;
-    }
-    const bool black = flat && rec.mean <= kBlackMeanMaxP4;
-    out.flat = flat;
-    out.black = black;
-    out.blank = flat;
-    return out;
-}
+BlankVerdict BlankOf(const SourceStats::Record& rec);
 
 // ---- 576-cell spatial affine fade helpers -------------------------------------------------------------------------------
 

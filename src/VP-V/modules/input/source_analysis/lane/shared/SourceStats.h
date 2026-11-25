@@ -124,13 +124,8 @@ inline bool ReadRecord(const uint8_t* buf, size_t bytes, Record* out)
     return out->version == kRecordVersion;
 }
 
-// Normalised frame mean in [0, 1] derived directly from the Q6 analysis axis ceiling (kAxisQ6Max = 65472; O#5 M1).
-inline double NormalisedMean(const Record& rec)
-{
-    return rec.pixelCount > 0
-        ? (std::min)(1.0, static_cast<double>(rec.mean) / static_cast<double>(Vpv::AnalysisDomain::kAxisQ6Max))
-        : 0.0;
-}
+// Normalised frame mean in [0, 1] derived directly from the Q6 analysis axis ceiling (kAxisQ6Max = 65472; O#5 M1, out-of-line in SourceStats.cpp).
+double NormalisedMean(const Record& rec);
 
 inline uint32_t Isqrt64(uint64_t v)
 {

@@ -28,7 +28,10 @@
 #include <vector>
 
 namespace SourceIdentity { namespace Chain { class ChainEstimator; } }
-namespace VpSkeleton { class AnalysisLane; }
+namespace VpSkeleton
+{
+	class AnalysisLane;
+}
 
 // Stage 12 step B in the renderer (owner 2026-10-15): the effective
 // resolution, bitrate quality and effective bit depth of every source, and
@@ -222,17 +225,18 @@ namespace SourceResolutionMonitor
 		// The source sequence of the last analysed frame (0 = none yet). Any thread.
 		uint64_t AnalysedThrough() const { return analysedThrough.load(std::memory_order_acquire); }
 		// The lane's wait for ReadyFor ran out (or a bound analysis arrived late): counted with exact cause, shown by Describe.
-		void NoteWaitMissed() { NoteWaitMissed(WaitMissCause::BoundedWaitTimeout, 0); }
+		void NoteWaitMissed();
 		void NoteWaitMissed(WaitMissCause cause, uint64_t renderSequence, uint64_t framesLate = 0, double analyseMs = -1.0);
 		// O#6 (SRM-FRAMEBOUND-WAIT): wire Monitor::ReadyFor / NoteWaitMissed onto an AnalysisLane's deterministic wait probe.
 		void BindLaneReadyProbe(VpSkeleton::AnalysisLane& lane);
 		void UnbindLaneReadyProbe(VpSkeleton::AnalysisLane& lane);
 		// Deterministic-only bounded ready wait (default OFF: live mode never blocks on worker readiness).
+		// boundUs = 0 uses presentSlackUs - guardUs per SealPoint.h N1 (0 slack = immediate timeout).
 		void SetDeterministicWait(bool deterministic, uint32_t boundUs = 0);
-		bool DeterministicWait() const { return deterministicWait.load(std::memory_order_acquire); }
+		bool DeterministicWait() const;
 		bool WaitForReadyDeterministic(uint64_t renderSequence, uint32_t presentSlackUs = 0, uint32_t guardUs = 0);
-		unsigned long long DeterministicWaitCalls() const { return deterministicWaitCalls.load(std::memory_order_relaxed); }
-		unsigned long long DeterministicWaitYields() const { return deterministicWaitYields.load(std::memory_order_relaxed); }
+		unsigned long long DeterministicWaitCalls() const;
+		unsigned long long DeterministicWaitYields() const;
 		unsigned long long WaitsMissed() const { return waitsMissed.load(std::memory_order_relaxed); }
 		unsigned long long HeldDropped() const { return heldDropped.load(std::memory_order_relaxed); }
 		unsigned long long ClockStepsBack() const { return clockStepsBack.load(std::memory_order_relaxed); }
@@ -658,8 +662,8 @@ namespace SourceResolutionMonitor
 		mutable std::mutex sharedReaderMutex;
 		SharedSceneFn sharedSceneReader;
 		SharedP4Fn sharedP4Reader;
-		mutable std::atomic<unsigned long long> u7SceneSharedCount{ 0 }, u7SceneFallbackCount{ 0 };
-		mutable std::atomic<unsigned long long> p4StatsSharedCount{ 0 }, p4StatsFallbackCount{ 0 };
+		mutable std::atomic<unsigned long long> u7SceneSharedCount, u7SceneFallbackCount;
+		mutable std::atomic<unsigned long long> p4StatsSharedCount, p4StatsFallbackCount;
 		mutable std::string u7SceneFallbackWhyLast, p4StatsFallbackWhyLast;
 		void Worker();
 		void Fail(const char* what, double seconds);
@@ -679,13 +683,13 @@ namespace SourceResolutionMonitor
 		std::atomic<uint64_t> analysedThrough{ 0 };
 		std::atomic<uint64_t> releasedThrough{ 0 };   // the last release point (s - D) of ReleaseHeldFor; a result at or before it is late
 		std::atomic<unsigned long long> waitsMissed{ 0 }, heldDropped{ 0 }, heldStale{ 0 }, jobsDropped{ 0 }, clockStepsBack{ 0 }, submitSkipped{ 0 }, engagedReactive{ 0 };
-		std::atomic<unsigned long long> waitMissLatePollCount{ 0 }, waitMissDropOrBacklogCount{ 0 }, waitMissTimeoutCount{ 0 };
+		std::atomic<unsigned long long> waitMissLatePollCount, waitMissDropOrBacklogCount, waitMissTimeoutCount;
 		WaitMissCause lastWaitMissCause = WaitMissCause::None;   // guarded by `mutex`
 		uint64_t lastWaitMissFramesLate = 0;                     // guarded by `mutex`
 		double lastWaitMissAnalyseMs = 0.0;                      // guarded by `mutex`
-		std::atomic<bool> deterministicWait{ false };
-		std::atomic<uint32_t> deterministicWaitBoundUs{ 0 };
-		std::atomic<unsigned long long> deterministicWaitCalls{ 0 }, deterministicWaitYields{ 0 };
+		std::atomic<bool> deterministicWait;
+		std::atomic<uint32_t> deterministicWaitBoundUs;
+		std::atomic<unsigned long long> deterministicWaitCalls, deterministicWaitYields;
 		bool haveBoundWaitSeq = false;                           // render thread: avoids double wait across BeginBoundFrame + AutoFactor
 		uint64_t lastBoundWaitSeq = 0;
 		std::atomic<bool> denseGridApplied{ false };

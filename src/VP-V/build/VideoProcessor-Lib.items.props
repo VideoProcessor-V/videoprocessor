@@ -152,6 +152,12 @@
     <ClCompile Include="..\VP-V\modules\input\source_analysis\events\shared\CutFadeJudge.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\lane\shared\SourceStats.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\control\skeleton\SceneRecordReader.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="..\VP-V\modules\input\capture\CaptureDisplayFixes.cpp" />
     <ClCompile Include="..\VP-V\modules\input\queue_timing\QueueLookahead.cpp" />
     <ClCompile Include="..\VP-V\modules\input\queue_timing\VpFixedBudgetPolicy.cpp" />

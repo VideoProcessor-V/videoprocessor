@@ -28,12 +28,18 @@
 // AFTER the frame's submit, never between libplacebo's passes; fx/dv-frame-quiet, no event query).
 // Collect reads a slot only once the fence reports the copy complete and maps it with DO_NOT_WAIT
 // (ReadbackRing schedules). Other backends keep pl_buf_poll / pl_buf_read, which do not block there.
-namespace VpSkeleton { struct VariantKey; }
+namespace VpSkeleton
+{
+	struct VariantKey;
+}
 
 namespace LedDrive
 {
 	class NativeTexReadback;
-	namespace SourceStatsDisplay { struct DisplayRecord; }
+	namespace SourceStatsDisplay
+	{
+		struct DisplayRecord;
+	}
 
 	// O#4 (L2b): pipeline stage variant for the GPU display-domain P4 measurement pass.
 	enum class MeasurementStageVariant : uint8_t
@@ -107,9 +113,7 @@ namespace LedDrive
 		int Collect(std::vector<RawMeasurement>& out, int waitMs = 0,
 			std::vector<uint64_t>* sequences = nullptr);
 		// O#4 (L2b): collect finished GPU measurements directly as display-domain P4 records.
-		int CollectDisplay(std::vector<SourceStatsDisplay::DisplayRecord>& out, int waitMs = 0,
-			std::vector<uint64_t>* sequences = nullptr, double highlightPercentile = 99.5,
-			int scriptHighlightCode = 215);
+		int CollectDisplay(std::vector<SourceStatsDisplay::DisplayRecord>& out, int waitMs = 0, std::vector<uint64_t>* sequences = nullptr, double highlightPercentile = 99.5, int scriptHighlightCode = 215);
 		// Destroys the GPU buffers; call before the GPU is destroyed.
 		void Release();
 		int Dropped() const { return dropped; }

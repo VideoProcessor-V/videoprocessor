@@ -2,31 +2,24 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
-// The content-intent observers' reader of the SCENE record (W1-C7, doc 93 row "row 2"): frame `seq`'s cut as published by the skeleton
-// at the frame's seal (SkeletonModule::FillScene -> FrameAnalysis::Store::PublishScene; the verdict is U7 v2, VpUnit::CutFadeJudge::CutTracker
-// over the P4 record sequence, U7-accuracy). `cut` is the DELIVERED cut: once per confirmed cut, at the cut frame or late (Scene::cutLate;
-// normally one frame, more only when the frame after the cut had no scene group). Compute-once: this only READS the store (PeekScene), it never classifies and never starts any producer.
-//
-// Not found (false) when: no store is registered, more than one renderer is registered (the observers' walk carries no renderer key; the
-// key is never guessed), the store is off (frame_analysis_store=false), or the frame has no scene group yet (look-ahead frames are walked
-// BEFORE the render thread seals them: the normal case for a deep queue). The caller then keeps its previous private judgement and counts
-// the frame as such, so every step down is visible.
-//
-// Epoch: NOT checked. The store keeps its slots across a discontinuity (Invalidate only moves the epoch), and the verdict of a
-// published scene group is a property of that frame pair, not of the epoch. The observers' own rule bounds the use: a pair is read only
-// when it is contiguous and adjacent (previous + 1, no discontinuity flag), so a record of another epoch is not asked for in practice.
-// "Stale" in the README therefore means: no scene group for that sequence (not published yet, or the slot left the ring).
-//
-// Header-only, C++14.
+// The content-intent observers', LED's, and SRM's reader of the shared SCENE record and P4 source stats.
+// CutOf / AcquireCut keep their original inline bodies for Bill-TU line parity; SceneOf / AcquireScene /
+// AcquireSourceStats live out-of-line in SceneRecordReader.cpp (VideoProcessor-Lib) so SourceStats.h is
+// never pulled into Bill-owned TUs. Pure C++14.
 
 #include <VP-V/core/FrameAnalysisStore.h>
-#include <VP-V/core/Products.h>
-#include <VP-V/core/SkeletonAcquire.h>
 #include <VP-V/modules/control/skeleton/SkeletonFacts.h>   // Demand(), SceneAnswer; not SkeletonAccess.h (hub header: no libplacebo in Lib)
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
-#include <VP-V/modules/input/source_analysis/lane/shared/SourceStats.h>
 
 #include <cstdint>
+
+namespace VpUnit
+{
+	namespace SourceStats
+	{
+		struct Record;
+	}
+}
 
 namespace VpSkeleton
 {
@@ -39,37 +32,34 @@ namespace VpSkeleton
 			float fadeKeep = -1.0f;
 		};
 
-		inline bool SceneOf(uint64_t seq, SceneVerdict& out)
+		// Peek-only store reader of full scene verdict (out-of-line in SceneRecordReader.cpp).
+		bool SceneOf(uint64_t seq, SceneVerdict& out);
+
+		inline bool CutOf(uint64_t seq, bool& cut)
 		{
-			out = SceneVerdict{};
+			cut = false;
 			FrameAnalysis::Store* store = VpFrameAnalysis::SourceFrameTap::SingleStore();
 			if (!store)
 				return false;
 			FrameAnalysis::Scene scene;
 			if (!store->PeekScene(seq, scene))
 				return false;
-			out.cut = scene.cut;
-			out.fade = scene.fade;
-			out.fadeKeep = scene.fadeKeep;
+			cut = scene.cut;
 			return true;
 		}
 
-		inline bool CutOf(uint64_t seq, bool& cut)
-		{
-			SceneVerdict verdict;
-			const bool found = SceneOf(seq, verdict);
-			cut = found && verdict.cut;
-			return found;
-		}
+		// GET-OR-COMPUTE readers (out-of-line in SceneRecordReader.cpp): full scene verdict and P4 SourceStats.
+		bool AcquireScene(uint64_t seq, SceneVerdict& out, const char** why);
+		bool AcquireSourceStats(uint64_t seq, VpUnit::SourceStats::Record& out, const char** why);
 
-		// GET-OR-COMPUTE reader (the LED's, measured frame AND look-ahead, and SRM): the skeleton's scene product (SceneOf) for frame `seq`.
-		// It reads the store's group when present, else the two P4 records are acquired through the renderer's memo (made now for a frame ahead
-		// of the seal) and the verdict is published for the later seal (computed once). The renderer key is the ONE registered owner (the Host
-		// registers its store even with frame_analysis_store=off, so the key exists); more than one renderer is ambiguous and never guessed.
-		// False = genuine failure; `*why` (when given) names it, static text. `out` is reset to defaults then.
-		inline bool AcquireScene(uint64_t seq, SceneVerdict& out, const char** why)
+		// GET-OR-COMPUTE reader (the LED's, measured frame AND look-ahead): the skeleton's scene product (SceneOf) for frame `seq`. It reads the
+		// store's group when present, else the two P4 records are acquired through the renderer's memo (made now for a frame ahead of the seal)
+		// and the verdict is published for the later seal (computed once). The renderer key is the ONE registered owner (the Host registers its
+		// store even with frame_analysis_store=off, so the key exists); more than one renderer is ambiguous and never guessed.
+		// False = genuine failure; `*why` (when given) names it, static text. cut is false then.
+		inline bool AcquireCut(uint64_t seq, bool& cut, const char** why)
 		{
-			out = SceneVerdict{};
+			cut = false;
 			const char* reason = "";
 			bool found = false;
 			const std::vector<const void*> owners = VpFrameAnalysis::SourceFrameTap::StoreOwners();
@@ -80,54 +70,11 @@ namespace VpSkeleton
 				const Vpv::Skeleton::SceneAnswer a = demand->SceneOf(owners[0], seq);
 				if (a.known)
 				{
-					out.cut = a.cut;
-					out.fade = a.fade;
-					out.fadeKeep = a.fadeKeep;
+					cut = a.cut;
 					found = true;
 				}
 				else
 					reason = (a.why != nullptr && a.why[0] != 0) ? a.why : "scene unknown";
-			}
-			else
-				reason = "no skeleton module";
-			if (why != nullptr)
-				*why = reason;
-			return found;
-		}
-
-		inline bool AcquireCut(uint64_t seq, bool& cut, const char** why)
-		{
-			SceneVerdict verdict;
-			const bool found = AcquireScene(seq, verdict, why);
-			cut = found && verdict.cut;
-			return found;
-		}
-
-		// GET-OR-COMPUTE reader of P4 SourceStats for frame `seq` through the renderer's skeleton memo (O#5).
-		// Single-owner contract; returns false with exact static `*why` on any unavailability.
-		inline bool AcquireSourceStats(uint64_t seq, VpUnit::SourceStats::Record& out, const char** why)
-		{
-			out = VpUnit::SourceStats::Record{};
-			const char* reason = "";
-			bool found = false;
-			const std::vector<const void*> owners = VpFrameAnalysis::SourceFrameTap::StoreOwners();
-			if (owners.size() != 1)
-				reason = owners.empty() ? "no store owner" : "renderer ambiguous";
-			else if (Vpv::Skeleton::IExternalDemand* demand = Vpv::Skeleton::Demand())
-			{
-				const Vpv::Skeleton::FrameMemo fm = demand->MemoFor(owners[0], seq);
-				if (!fm.Valid())
-					reason = "no frame memo";
-				else
-				{
-					const VpSkeleton::AcquireResult ar = fm.memo->Acquire(VpSkeleton::kP4SourceStats, seq, VpSkeleton::AcquireForm::Cpu);
-					if (!ar.Ok())
-						reason = VpSkeleton::Token(ar.cause);
-					else if (VpUnit::SourceStats::ReadRecord(ar.cpu, ar.cpuBytes, &out))
-						found = true;
-					else
-						reason = "p4 record version mismatch";
-				}
 			}
 			else
 				reason = "no skeleton module";

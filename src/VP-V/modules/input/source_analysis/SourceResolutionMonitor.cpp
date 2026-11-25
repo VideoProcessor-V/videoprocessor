@@ -89,6 +89,11 @@ if (tile < int(tiles) && g.y < ts) {
 	}
 
 	Monitor::Monitor()
+		: u7SceneSharedCount(0), u7SceneFallbackCount(0),
+		p4StatsSharedCount(0), p4StatsFallbackCount(0),
+		waitMissLatePollCount(0), waitMissDropOrBacklogCount(0), waitMissTimeoutCount(0),
+		deterministicWait(false), deterministicWaitBoundUs(0),
+		deterministicWaitCalls(0), deterministicWaitYields(0)
 	{
 		chainEst.reset(new SourceIdentity::Chain::ChainEstimator());   // inert until SetChainEnabled(true): no thread, no tap
 		worker = std::thread([this] { Worker(); });
@@ -2976,6 +2981,11 @@ if (tile < int(tiles) && g.y < ts) {
 		lastWaitMissAnalyseMs = analyseMs >= 0.0 ? analyseMs : snapshot.analyseMs;
 	}
 
+	void Monitor::NoteWaitMissed()
+	{
+		NoteWaitMissed(WaitMissCause::BoundedWaitTimeout, 0);
+	}
+
 	void Monitor::NoteWaitMissed(WaitMissCause cause, uint64_t renderSequence, uint64_t framesLate, double analyseMs)
 	{
 		uint64_t computedLate = framesLate;
@@ -3006,6 +3016,21 @@ if (tile < int(tiles) && g.y < ts) {
 	{
 		deterministicWaitBoundUs.store(boundUs, std::memory_order_release);
 		deterministicWait.store(deterministic, std::memory_order_release);
+	}
+
+	bool Monitor::DeterministicWait() const
+	{
+		return deterministicWait.load(std::memory_order_acquire);
+	}
+
+	unsigned long long Monitor::DeterministicWaitCalls() const
+	{
+		return deterministicWaitCalls.load(std::memory_order_relaxed);
+	}
+
+	unsigned long long Monitor::DeterministicWaitYields() const
+	{
+		return deterministicWaitYields.load(std::memory_order_relaxed);
 	}
 
 	bool Monitor::WaitForReadyDeterministic(uint64_t renderSequence, uint32_t presentSlackUs, uint32_t guardUs)
