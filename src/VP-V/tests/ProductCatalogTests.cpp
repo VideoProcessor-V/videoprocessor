@@ -801,17 +801,20 @@ namespace ProductCatalogTestsNs
 					Assert::Fail(L"NotYetConsumed / Reserved are product flags");
 				}
 			}
-			// Detail pulse (id 0) and texture restore (id 1): P10 and P11 are flagged not read for both; DP's P4 is not read, TR's P4 is a
-			// view through the scene group (WAIVER-15C-ROWS, gate-15c-X8-rows0-1-P4: row 1 GRANT, row 0 REFUSED); the held identity read is not flagged.
+			// Detail pulse (id 0) and texture restore (id 1): P10 is flagged not read for both; P11 is now read live (15c C3b);
+			// DP's P4 is not read, TR's P4 is a view through the scene group (WAIVER-15C-ROWS, gate-15c-X8-rows0-1-P4: row 1 GRANT, row 0 REFUSED);
+			// the held identity read is not flagged.
 			size_t dpTr = 0;
 			for (const ConsumerFlag& f : ConsumerFlags())
 				if ((f.consumerId == kCatalogConsumerIdBase + 0 || f.consumerId == kCatalogConsumerIdBase + 1) && f.kind == FlagKind::NotRead)
 					++dpTr;
-			Assert::AreEqual(size_t(5), dpTr, L"DP: P10, P11, P4 not read today; TR: P10, P11 not read today");
+			// WAIVER-15C-C3B-P11-TESTS: DP/TR P11 NotRead flags removed (5 -> 3: DP P10, DP P4, TR P10).
+			Assert::AreEqual(size_t(3), dpTr, L"DP: P10, P4 not read today; TR: P10 not read today (P11 live)");
 			// WAIVER-B3Z-02 (coordinator approved 2026-11-12): NotRead = DP / TR 6 + producer P1 + matcher P1, P4 + identification P4 = 10.
 			// WAIVER-15C-ROWS (gate-15c-X8-rows0-1-P4): TR P4 NotRead -> ViewIsActual, so DP / TR 5 + the four F1 rows = 9.
 			// WAIVER-15D-P16: + the debander TD read path's coding_evidence (row 23; P16 now has a producer) = 10.
-			Assert::AreEqual(size_t(10), cNotRead, L"DP / TR's five + the F1 rows (782 P1, 781 P1 / P4, 776 P4) + debander P16");
+			// WAIVER-15C-C3B-P11-TESTS: DP/TR P11 live reads remove 2 NotRead flags (10 -> 8).
+			Assert::AreEqual(size_t(8), cNotRead, L"DP / TR's three + the F1 rows (782 P1, 781 P1 / P4, 776 P4) + debander P16");
 			{
 				const ConsumerFlag* deb = ConsumerFlagOf(uint16_t(kCatalogConsumerIdBase + 23), kCodingEvidence);
 				Assert::IsTrue(deb && deb->kind == FlagKind::NotRead && std::string(deb->item) == "TD", L"row 23 P16: not read today, item TD");
@@ -851,9 +854,12 @@ namespace ProductCatalogTestsNs
 			// WAIVER-15C-ROWS: + TR P4 (view, scene group) + CfL P13 (view, source pl_frame): NotRead 9 + external 7 + views 4 = 20.
 			// WAIVER-15C-ROWS (row 2 P3 r2): + deband P3 (view, live matcher field): NotRead 9 + external 7 + views 5 = 21.
 			// WAIVER-15D-P16: + debander P16 NotRead: NotRead 10 + external 7 + views 5 = 22.
+			// WAIVER-15C-C3B-P11-TESTS: DP/TR P11 live reads remove 2 NotRead flags: NotRead 8 + external 7 + views 5 = 20.
+			Assert::IsNull(ConsumerFlagOf(idDp, kP11RegionBlockStats), L"DP P11 is read live (no NotRead flag)");
+			Assert::IsNull(ConsumerFlagOf(idTr, kP11RegionBlockStats), L"TR P11 is read live (no NotRead flag)");
 			Assert::AreEqual(size_t(7), cExt, L"synthesis x4 + DP + TR + adaptive downscale: P3 read at render");
 			Assert::AreEqual(size_t(5), cViews, L"camera fit: P3 via SeedFieldOf; identification: P5 via the tap; TR: P4 via the scene group; CfL: P13 via the source pl_frame; deband: P3 via Params.field");   // WAIVER-B3Z-02 (coordinator approved 2026-11-12); WAIVER-15C-ROWS
-			Assert::AreEqual(size_t(22), ConsumerFlags().size());   // WAIVER-B3Z-02 (coordinator approved 2026-11-12); WAIVER-15C-ROWS; WAIVER-15D-P16: +1 (debander P16 NotRead)
+			Assert::AreEqual(size_t(20), ConsumerFlags().size());   // WAIVER-B3Z-02; WAIVER-15C-ROWS; WAIVER-15D-P16; WAIVER-15C-C3B-P11-TESTS: -2 (DP/TR P11 live)
 			for (const ConsumerFlag& f : ConsumerFlags())
 				if (f.kind != FlagKind::NotRead && !(f.consumerId == idIdentity && f.input == kP5MonitorTiles)
 					&& !(f.consumerId == idTr && f.input == kP4SourceStats) && !(f.consumerId == idCfl && f.input == kP13SourceRing))
@@ -906,13 +912,18 @@ namespace ProductCatalogTestsNs
 			const std::string dir = SettingsTestSupport::RepoRoot() + "src\\VP-V\\modules\\repair\\texture_restore\\";
 			// WAIVER-B2-NOTREAD-LAW: the U1 law constants (GrainSplit::DefaultParams / GrainSplit::Params, ND04) are not a product read;
 			// exactly those two names are exempt, every other GrainSplit:: reference still counts.
-			const std::regex reads("\\bk(P10|P11|P4)\\w*|\\bGrainSplit::(?!DefaultParams\\b|Params\\b)|RegionEvidence|SourceStats\\.h|LaneGpuProducts|LaneCpuProducts|LaneProducts|Products\\.h|FrameAnalysisStore|\\bProductId\\b");
-			// The teeth: a real P10 product / accessor read in a declared-NotRead file still trips the scan; the law constants alone do not.
+			// WAIVER-15C-C3B-P11-TESTS: DP/TR now read kP11RegionBlockStats (15c C3b) using RegionEvidence grid sizing and
+			// VpLaneProducts::P11BandTextures / ExtractP11BandTextures; still-NotRead P10/P4 tokens and all other product refs still trip.
+			const std::regex reads("\\bk(P10|P4)\\w*|\\bGrainSplit::(?!DefaultParams\\b|Params\\b)|SourceStats\\.h|LaneGpuProducts|LaneCpuProducts|\\bLaneProducts\\b|VpLaneProducts::(?!P11BandTextures\\b|ExtractP11BandTextures\\b)|Products\\.h|FrameAnalysisStore|\\bProductId\\b");
+			// The teeth: a real P10/P4 product / accessor read in a declared-NotRead file still trips the scan; the law constants and live P11 reader alone do not.
 			Assert::IsTrue(std::regex_search(std::string("GrainSplit::Gpu::Splitter s; s.Compute(gpu);"), reads), L"a GrainSplit producer reference trips the scan");
 			Assert::IsTrue(std::regex_search(std::string("auto d = GrainSplit::ReaderFallback(\"x\", st);"), reads), L"a GrainSplit product accessor trips the scan");
 			Assert::IsTrue(std::regex_search(std::string("const auto& t = store.Get(kP10GrainSplit);"), reads), L"a P10 product alias trips the scan");
+			Assert::IsTrue(std::regex_search(std::string("const auto& t = store.Get(kP4SourceStats);"), reads), L"a P4 product alias trips the scan");
+			Assert::IsTrue(std::regex_search(std::string("VpLaneProducts::RegionStatsKernel k;"), reads), L"non-P11-band VpLaneProducts references still trip the scan");
 			Assert::IsTrue(std::regex_search(std::string("GrainSplit::DefaultParams(); GrainSplit::ParamsView v;"), reads), L"only the exact law names are exempt");
 			Assert::IsFalse(std::regex_search(std::string("constexpr GrainSplit::Params kGrainLaw = GrainSplit::DefaultParams();"), reads), L"the U1 law constants are not a product read");
+			Assert::IsFalse(std::regex_search(std::string("auto bt = VpLaneProducts::ExtractP11BandTextures(pin);"), reads), L"live P11 band extraction is exempt");
 			for (const char* name : { "DetailPulse.h", "DetailPulse.cpp", "TextureRestore.h", "TextureRestore.cpp" }) {
 				const std::string path = dir + name;
 				Assert::IsTrue(fs::exists(path), L"the DetailPulse / TextureRestore sources exist where the flag says");
