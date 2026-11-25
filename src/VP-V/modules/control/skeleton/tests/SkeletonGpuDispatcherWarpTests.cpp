@@ -15,6 +15,7 @@
 #include <libplacebo/dispatch.h>
 #include <libplacebo/shaders/custom.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <memory>
@@ -381,6 +382,77 @@ namespace VideoProcessorTest
 			Assert::IsTrue(std::fabs(cost.MaxPassMs() - 2.0) < 1.0e-9, L"worst pass ms");
 			const std::string line = Vpv::Skeleton::FormatCostLine("P10 grain split", cost);
 			Assert::IsTrue(line.find("P10 grain split") != std::string::npos && line.find("3.25 ms/frame") != std::string::npos, L"status text");
+		}
+
+		// K#12 (SK-VRAM PERF-6, GEM-179): when oldJobsJoined == true, Configure destroys old product textures BEFORE
+		// allocating replacements so peak VRAM stays <= max(old, new) with zero graveyard; negative control
+		// (oldJobsJoined == false) queues the old set in the graveyard and peaks at old + new.
+		BEGIN_TEST_METHOD_ATTRIBUTE(ConfigureWithOldJobsJoinedReclaimsBeforeAllocatingKeepingPeakAtMax)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(ConfigureWithOldJobsJoinedReclaimsBeforeAllocatingKeepingPeakAtMax)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			SkeletonGpuDispatcher disp(fixture.Gpu(), true);
+			Assert::IsTrue(disp.Valid(), L"own dispatch on the renderer's gpu");
+			disp.AddKernel(std::unique_ptr<VpLaneProducts::IProductKernel>(new CopyKernel()));
+
+			Setup s1(Dims{ 64, 48 });
+			{
+				const bool cfgOk = disp.Configure(s1.graph, s1.reg, s1.plan, s1.dims, 0u, false);
+				std::string why = disp.LastError();
+				for (const FallbackCatalog::Decision& fd : disp.Fallbacks())
+					if (fd.engaged)
+						why += " | " + fd.id + ": " + fd.reason;
+				Assert::IsTrue(cfgOk, (L"initial configure 64x48: " + std::wstring(why.begin(), why.end())).c_str());
+			}
+			const uint64_t oldBytes = disp.AllocatedBytes();
+			Assert::IsTrue(oldBytes > 0u, L"initial 64x48 allocation is non-zero");
+			Assert::AreEqual(uint64_t(0), disp.GraveyardBytes(), L"no graveyard after initial configure");
+			Assert::IsTrue(disp.HoldsVideoMemory(), L"HoldsVideoMemory true while product textures allocated");
+
+			// Joined reconfigure to larger 96x64: old textures destroyed BEFORE allocating new -> peak <= max(old, new).
+			disp.ResetPeakBytesForTesting();
+			Setup s2(Dims{ 96, 64 });
+			Assert::IsTrue(disp.Configure(s2.graph, s2.reg, s2.plan, s2.dims, 0u, true),
+				L"K#12: reconfigure 64x48 -> 96x64 with oldJobsJoined=true succeeds");
+			const uint64_t newBytes = disp.AllocatedBytes();
+			Assert::IsTrue(newBytes > oldBytes, L"96x64 allocation is strictly larger than 64x48");
+			Assert::AreEqual(size_t(0), disp.PendingReleases(),
+				L"K#12: oldJobsJoined=true leaves zero pending graveyard releases");
+			Assert::AreEqual(uint64_t(0), disp.GraveyardBytes(),
+				L"K#12: oldJobsJoined=true holds zero graveyard bytes");
+			Assert::IsTrue(disp.Stats().releasesDone >= 1u,
+				L"K#12: old texture set destroyed immediately before allocating replacements");
+			Assert::IsTrue(disp.PeakAllocatedBytes() <= (std::max)(oldBytes, newBytes),
+				L"K#12: joined reconfigure peak VRAM stays <= max(oldBytes, newBytes)");
+			Assert::IsTrue(disp.PeakAllocatedBytes() < oldBytes + newBytes,
+				L"K#12: joined reconfigure never spikes to oldBytes + newBytes");
+			Assert::AreEqual(newBytes, disp.AllocatedBytes(),
+				L"K#12: live allocation equals newBytes");
+
+			// In-test negative control (oldJobsJoined = false): reconfigure back to 64x48 keeps old set in graveyard
+			// and peaks at newBytes + oldBytes.
+			disp.ResetPeakBytesForTesting();
+			Assert::IsTrue(disp.Configure(s1.graph, s1.reg, s1.plan, s1.dims, 0u, false),
+				L"K#12 negative control: reconfigure 96x64 -> 64x48 with oldJobsJoined=false succeeds");
+			Assert::IsTrue(disp.PendingReleases() >= 1u,
+				L"K#12 negative control: unjoined path queues old texture set in graveyard");
+			Assert::AreEqual(newBytes, disp.GraveyardBytes(),
+				L"K#12 negative control: graveyard holds full previous texture set bytes");
+			Assert::AreEqual(newBytes + oldBytes, disp.PeakAllocatedBytes(),
+				L"K#12 negative control: unjoined path peaks at newBytes + oldBytes");
+			Assert::AreEqual(oldBytes, disp.AllocatedBytes(),
+				L"live allocation equals oldBytes after shrinking back to 64x48");
+			Assert::IsTrue(disp.HoldsVideoMemory(), L"HoldsVideoMemory true with live + graveyard textures");
+
+			disp.FlushReleases();
+			Assert::AreEqual(size_t(0), disp.PendingReleases(), L"FlushReleases drains graveyard");
+			Assert::AreEqual(uint64_t(0), disp.GraveyardBytes(), L"FlushReleases zeroes GraveyardBytes");
+			disp.Release();
+			Assert::AreEqual(uint64_t(0), disp.AllocatedBytes(), L"Release frees all live textures");
+			Assert::IsFalse(disp.HoldsVideoMemory(), L"HoldsVideoMemory false after Release");
 		}
 	};
 }

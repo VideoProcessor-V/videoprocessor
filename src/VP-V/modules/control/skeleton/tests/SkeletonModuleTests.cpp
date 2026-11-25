@@ -24,10 +24,12 @@
 #include <VP-V/core/hub/HostState.h>
 #include <VP-V/core/FrameAnalysisStore.h>
 #include <VP-V/core/FramesInFlight.h>
+#include <VP-V/core/MemoGpuGrant.h>
 #include <VP-V/core/PostPresentSpare.h>
 #include <VP-V/core/VramUsers.h>
 #include <VP-V/modules/control/skeleton/SkeletonAccess.h>
 #include <VP-V/modules/control/skeleton/SkeletonModule.h>
+#include <VP-V/modules/control/skeleton/gpu/SkeletonGpuDispatcher.h>
 #include <VP-V/modules/input/signal/ResyncExtension.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
 #include <VP-V/modules/input/source_analysis/VpFrameAnalysisHost.h>
@@ -4789,6 +4791,261 @@ namespace SkeletonModuleTestsNs
 			Assert::IsFalse(anyAhead);
 			Assert::IsTrue(wiredSum > 0u);
 #endif
+		}
+
+		// K#11 (SK-VRAM GEM-162): the skeleton's own held VRAM (memo->GpuBytes(), plus dispatcher allocated + graveyard
+		// bytes) is excluded from other-app usage via ownUsageBytes so re-planning (PlanMemoGpuGrantLevels and frame-61
+		// periodKnown Configure) never double-counts its own spots and flaps grants off.
+		BEGIN_TEST_METHOD_ATTRIBUTE(Frame61PeriodKnownReconfigureDoesNotFlapOwnHeldVram)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(Frame61PeriodKnownReconfigureDoesNotFlapOwnHeldVram)
+		{
+			struct VramUsersGuard
+			{
+				VramUsersGuard() { VpSkeleton::VramUsers::Instance().ResetForTesting(); }
+				~VramUsersGuard() { VpSkeleton::VramUsers::Instance().ResetForTesting(); }
+			} vramGuard;
+
+			const uint64_t mb = 1024ull * 1024ull;
+			const uint64_t memoNeed = 16 * mb;
+
+			// ---- 1. Direct PlanMemoGpuGrantLevels / PlanMemoGpuGrant unit proof + in-test negative control ----
+			// Budget = 100 MiB, usage = 84 MiB (includes 16 MiB already held by the memo; FreeVram = 16 MiB).
+			// With memoHeld = 16 MiB in ownUsageBytes: avail = 32 MiB -> 0.80 * 32 MiB = 25.6 MiB >= 16 MiB (GRANTS 16 MiB).
+			// Negative control (memoHeld = 0): avail = 16 MiB -> 0.80 * 16 MiB = 12.8 MiB < 16 MiB (SHEDS / FLAPS!).
+			{
+				VpSkeleton::CardProfile unitCard;
+				unitCard.key.luid = 162;
+				unitCard.vramBudgetBytes = 100 * mb;
+				unitCard.vramUsageBytes = 84 * mb;
+
+				const std::vector<uint64_t> singleLevel{ memoNeed };
+				const VpSkeleton::MemoGpuGrant withHeld =
+					VpSkeleton::PlanMemoGpuGrantLevels(unitCard, true, 0u, singleLevel, memoNeed);
+				Assert::IsTrue(withHeld.granted,
+					L"K#11: PlanMemoGpuGrantLevels grants 16 MiB when own held 16 MiB is counted in ownUsageBytes");
+				Assert::AreEqual(memoNeed, withHeld.bytes,
+					L"K#11: full 16 MiB granted when memoHeld is excluded from other-app usage");
+
+				const VpSkeleton::MemoGpuGrant withoutHeld =
+					VpSkeleton::PlanMemoGpuGrantLevels(unitCard, true, 0u, singleLevel, 0u);
+				Assert::IsFalse(withoutHeld.granted,
+					L"K#11 negative control: omitting memoHeld double-counts own 16 MiB and sheds the grant");
+				Assert::IsTrue(withoutHeld.bytes < memoNeed,
+					L"K#11 negative control: grant drops below 16 MiB without memoHeld");
+
+				const std::vector<uint64_t> twoLevels{ memoNeed, 8 * mb };
+				const VpSkeleton::MemoGpuGrant steppedWithHeld =
+					VpSkeleton::PlanMemoGpuGrantLevels(unitCard, true, 0u, twoLevels, memoNeed);
+				const VpSkeleton::MemoGpuGrant steppedWithoutHeld =
+					VpSkeleton::PlanMemoGpuGrantLevels(unitCard, true, 0u, twoLevels, 0u);
+				Assert::IsTrue(steppedWithHeld.granted && steppedWithHeld.bytes == memoNeed,
+					L"K#11: multi-level ladder keeps top 16 MiB level with memoHeld");
+				Assert::IsTrue(steppedWithoutHeld.bytes < memoNeed,
+					L"K#11 negative control: multi-level ladder steps down below 16 MiB without memoHeld");
+
+				const VpSkeleton::MemoGpuGrant singleWithHeld =
+					VpSkeleton::PlanMemoGpuGrant(unitCard, true, 0u, memoNeed, memoNeed);
+				const VpSkeleton::MemoGpuGrant singleWithoutHeld =
+					VpSkeleton::PlanMemoGpuGrant(unitCard, true, 0u, memoNeed, 0u);
+				Assert::IsTrue(singleWithHeld.granted && singleWithHeld.bytes == memoNeed,
+					L"K#11: PlanMemoGpuGrant grants 16 MiB with memoHeld");
+				Assert::IsFalse(singleWithoutHeld.granted,
+					L"K#11 negative control: PlanMemoGpuGrant sheds without memoHeld");
+			}
+
+			// ---- 2. Full SkeletonModule frame-61 periodKnown reconfigure test ----
+			{
+				Rig rig(Lane("on"));
+				pl_gpu_t fakeGpu{};
+				VpSkeleton::CardProfile ample;
+				ample.key.luid = 162;
+				ample.vramBudgetBytes = 256 * mb;
+				ample.vramUsageBytes = 0;
+				rig.sk.SetCardForTesting(ample);
+				rig.ResyncApply("on");
+				GpuCreatedWithDevice(rig, &fakeGpu);
+
+				const Vpv::Skeleton::SkeletonGpuDispatcher* disp = rig.sk.GpuDispatcherFor(rig.Host());
+				Assert::IsNotNull(disp, L"lane=on with device constructs GPU dispatcher");
+				const uint64_t priv = disp->PrivateBytes(VpSkeleton::Dims{ kW, kH }, false);
+				Assert::IsTrue(priv > 0u, L"dispatcher private working memory is positive");
+
+				VpSkeleton::OwnerFill g;
+				g.reserveBytes = memoNeed;
+				g.fill = [memoNeed](const VpSkeleton::OwnerFillRequest&, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+					static int tex = 0;
+					out.gpu.resource = &tex;
+					out.gpu.bytes = memoNeed;
+					return true;
+				};
+				const std::string p1Owner = VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP1HalfLuma);
+				Assert::IsFalse(p1Owner.empty(), L"kP1HalfLuma has catalog owner unit");
+				Assert::IsTrue(
+					rig.sk.RegisterOwnerFill(VpSkeleton::kP1HalfLuma, VpSkeleton::AcquireForm::Gpu, p1Owner, g)
+						== VpSkeleton::SkeletonMemo::Registration::Registered,
+					L"register 16 MiB GPU owner fill on kP1HalfLuma");
+
+				auto configures = [&rig]() {
+					const std::string text = rig.Command();
+					const size_t k = text.find(" graph configure");
+					Assert::IsTrue(k != std::string::npos);
+					const size_t b = text.rfind(' ', k - 1);
+					return std::stoi(text.substr(b + 1, k - b - 1));
+				};
+
+				rig.Frame(1);
+				Assert::AreEqual(1, configures(), L"frame 1 performs initial graph configure");
+				const Vpv::Skeleton::FrameMemo fm1 = rig.sk.MemoFor(rig.Host(), 1u);
+				Assert::IsTrue(fm1.Valid() && fm1.memo != nullptr, L"frame 1 memo valid");
+				Assert::IsTrue(fm1.memo->GpuGranted(), L"frame 1 grants memo GPU budget");
+				Assert::IsTrue(fm1.memo->GpuBudget() >= memoNeed, L"frame 1 memo GPU budget covers 16 MiB");
+
+				const VpSkeleton::AcquireResult r1 =
+					fm1.memo->Acquire(VpSkeleton::kP1HalfLuma, 1u, VpSkeleton::AcquireForm::Gpu);
+				Assert::IsTrue(r1.Ok(), L"frame 1 16 MiB GPU spot fills cleanly");
+				Assert::AreEqual(memoNeed, fm1.memo->GpuBytes(), L"memo now holds 16 MiB GPU spot");
+
+				// Derive cardAfterAlloc directly from frame 1's plan and priv:
+				// effUsage = cardAfterAlloc.vramUsageBytes + priv = budget - memoNeed.
+				//   - WITH memo->GpuBytes() in ownUsageBytes: avail = 2 * memoNeed -> 0.80 * 32 MiB = 25.6 MiB >= plan1Total (FITS).
+				//   - WITHOUT memo->GpuBytes() (pre-fix): avail = memoNeed -> 0.80 * 16 MiB = 12.8 MiB < 16 MiB (SHEDS!).
+				const std::shared_ptr<const VpSkeleton::GovernorPlan> gp1 =
+					rig.sk.LaneOf(rig.Host())->CurrentGovernorPlan();
+				Assert::IsNotNull(gp1.get(), L"frame 1 governor plan available");
+				const uint64_t plan1Total = gp1->totalBytes;
+				Assert::IsTrue(plan1Total >= memoNeed, L"plan1Total includes 16 MiB memo grant");
+				const uint64_t budgetWithOwn = uint64_t(double(memoNeed * 2u) * VpSkeleton::kHeadroomStart);
+				Assert::IsTrue(plan1Total <= budgetWithOwn,
+					L"derived 25.6 MiB governor budget covers memoNeed + 64x48 lane products");
+
+				VpSkeleton::CardProfile cardAfterAlloc;
+				cardAfterAlloc.key.luid = 162;
+				cardAfterAlloc.vramBudgetBytes = (std::max)(256 * mb, (memoNeed + priv) * 4u);
+				cardAfterAlloc.vramUsageBytes = cardAfterAlloc.vramBudgetBytes - memoNeed - priv;
+				Assert::IsTrue(cardAfterAlloc.FreeVram() > priv,
+					L"PrivateBytes pre-check remains satisfied with 16 MiB memo spot included in vramUsageBytes");
+				rig.sk.SetCardForTesting(cardAfterAlloc);
+
+				// Drive frames 2..65, holding the 16 MiB GPU spot each frame so memo->GpuBytes() == 16 MiB
+				// when frame 61 crosses kReconfigureMinFrames (60) and triggers the periodKnown reconfigure.
+				for (int64_t s = 2; s <= 65; ++s)
+				{
+					if (s == 61)
+						Assert::AreEqual(memoNeed, fm1.memo->GpuBytes(),
+							L"memo holds 16 MiB immediately before frame 61 periodKnown reconfigure");
+					rig.Frame(s);
+					const Vpv::Skeleton::FrameMemo fm = rig.sk.MemoFor(rig.Host(), uint64_t(s));
+					Assert::IsTrue(fm.Valid() && fm.memo != nullptr, L"frame memo valid across reconfigure");
+					Assert::IsTrue(fm.memo->GpuGranted(),
+						L"K#11: memo GPU grant stays true across frame 61 periodKnown reconfigure (zero flapping)");
+					Assert::IsTrue(fm.memo->GpuBudget() >= memoNeed,
+						L"K#11: memo GPU budget stays >= 16 MiB across frame 61 periodKnown reconfigure");
+					const VpSkeleton::AcquireResult rs =
+						fm.memo->Acquire(VpSkeleton::kP1HalfLuma, uint64_t(s), VpSkeleton::AcquireForm::Gpu);
+					Assert::IsTrue(rs.Ok(), L"K#11: 16 MiB GPU spot remains acquirable across frames 2..65");
+					Assert::AreEqual(memoNeed, fm.memo->GpuBytes(), L"memo holds 16 MiB spot for current frame");
+					if (s == 49)
+						Assert::AreEqual(1, configures(), L"still 1 configure before kReconfigureMinFrames (60)");
+				}
+				// Frame 65 (65 % 16 == 1) refreshes fullText after the frame-61 periodKnown reconfigure.
+				Assert::IsTrue(configures() >= 2,
+					L"K#11: frame 61 periodKnown reconfigure actually fired (configures >= 2)");
+			}
+		}
+
+		// K#11 (SK-VRAM GEM-169): when dispatcher PrivateBytes exceeds FreeVram before wiring/rebuild,
+		// Begin refuses the GPU dispatcher BEFORE building the Bundle, so frame 1 leaves HasGpuDispatcher() == false,
+		// engages skeleton_gpu_memory immediately, and configures ONCE across frames 1..4 (zero frame-2 rebuild).
+		BEGIN_TEST_METHOD_ATTRIBUTE(PrivateBytesExceedingFreeVramRefusesBeforeWiringWithSingleConfigure)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(PrivateBytesExceedingFreeVramRefusesBeforeWiringWithSingleConfigure)
+		{
+			struct VramUsersGuard
+			{
+				VramUsersGuard() { VpSkeleton::VramUsers::Instance().ResetForTesting(); }
+				~VramUsersGuard() { VpSkeleton::VramUsers::Instance().ResetForTesting(); }
+			} vramGuard;
+
+			const uint64_t mb = 1024ull * 1024ull;
+			auto configuresOf = [](Rig& rig) {
+				const std::string text = rig.Command();
+				const size_t k = text.find(" graph configure");
+				Assert::IsTrue(k != std::string::npos);
+				const size_t b = text.rfind(' ', k - 1);
+				return std::stoi(text.substr(b + 1, k - b - 1));
+			};
+
+			uint64_t measuredPriv = 0;
+			// Tight FreeVram (< PrivateBytes): refused before wiring on frame 1 with a single Configure across frames 1..4.
+			{
+				Rig rig(Lane("on"));
+				pl_gpu_t fakeGpu{};
+				rig.ResyncApply("on");
+				GpuCreatedWithDevice(rig, &fakeGpu);
+
+				const Vpv::Skeleton::SkeletonGpuDispatcher* disp = rig.sk.GpuDispatcherFor(rig.Host());
+				Assert::IsNotNull(disp, L"lane=on with device constructs GPU dispatcher");
+				measuredPriv = disp->PrivateBytes(VpSkeleton::Dims{ kW, kH }, false);
+				Assert::IsTrue(measuredPriv > 0u, L"derived dispatcher PrivateBytes is positive");
+
+				VpSkeleton::CardProfile tight;
+				tight.key.luid = 169;
+				tight.vramBudgetBytes = (std::max)(64 * mb, measuredPriv * 2u);
+				tight.vramUsageBytes = tight.vramBudgetBytes - (measuredPriv / 2u);
+				Assert::IsTrue(tight.FreeVram() < measuredPriv, L"derived FreeVram is strictly below PrivateBytes");
+				rig.sk.SetCardForTesting(tight);
+
+				rig.Frame(1);
+				Assert::IsNotNull(rig.sk.LaneOf(rig.Host()), L"lane exists on frame 1");
+				Assert::IsFalse(rig.sk.LaneOf(rig.Host())->HasGpuDispatcher(),
+					L"K#11: dispatcher is NOT wired on frame 1 when PrivateBytes exceeds FreeVram");
+				Assert::IsTrue(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_gpu_memory"),
+					L"K#11: skeleton_gpu_memory fallback engages immediately on frame 1");
+				Assert::AreEqual(1, configuresOf(rig),
+					L"K#11: frame 1 configures exactly once (no pre-refusal throwaway bundle)");
+				Assert::IsFalse(disp->HoldsVideoMemory(),
+					L"dispatcher holds zero video memory after pre-wiring refusal");
+
+				for (int64_t s = 2; s <= 4; ++s)
+				{
+					rig.Frame(s);
+					Assert::AreEqual(1, configuresOf(rig),
+						L"K#11: frames 2..4 keep configures == 1 (ZERO frame-2 rebuild)");
+					Assert::IsFalse(rig.sk.LaneOf(rig.Host())->HasGpuDispatcher(),
+						L"K#11: dispatcher remains unwired across frames 2..4");
+					Assert::IsFalse(disp->HoldsVideoMemory(),
+						L"K#11: dispatcher holds zero video memory across frames 2..4");
+					Assert::IsTrue(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_gpu_memory"),
+						L"K#11: skeleton_gpu_memory fallback remains engaged across frames 2..4");
+				}
+			}
+
+			// In-test negative control: ample FreeVram >= 4 * PrivateBytes wires dispatcher on frame 1 without fallback.
+			{
+				Rig rig(Lane("on"));
+				pl_gpu_t fakeGpu{};
+				rig.ResyncApply("on");
+				GpuCreatedWithDevice(rig, &fakeGpu);
+
+				VpSkeleton::CardProfile ample;
+				ample.key.luid = 169;
+				ample.vramBudgetBytes = (std::max)(256 * mb, measuredPriv * 8u);
+				ample.vramUsageBytes = 0;
+				Assert::IsTrue(ample.FreeVram() >= measuredPriv * 4u, L"negative control card has ample FreeVram");
+				rig.sk.SetCardForTesting(ample);
+
+				rig.Frame(1);
+				Assert::IsNotNull(rig.sk.LaneOf(rig.Host()), L"negative control lane exists on frame 1");
+				Assert::IsTrue(rig.sk.LaneOf(rig.Host())->HasGpuDispatcher(),
+					L"K#11 negative control: ample FreeVram wires GPU dispatcher on frame 1");
+				Assert::IsFalse(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_gpu_memory"),
+					L"K#11 negative control: ample FreeVram does NOT engage skeleton_gpu_memory");
+				Assert::AreEqual(1, configuresOf(rig),
+					L"K#11 negative control: ample FreeVram configures once on frame 1");
+			}
 		}
 	};
 
