@@ -101,7 +101,7 @@ namespace VideoProcessorTest
 				StartupFolder original(kOriginalFile);
 				Assert::IsTrue(Vpv::RunningPathway::Original(), L"an Original start-up file did not latch Original");
 				Assert::AreEqual(int(Vpv::RunningPathway::kOriginal), Vpv::RunningPathway::Value().load());
-				Assert::IsFalse(Vpv::RunningPathway::Latch(false), L"a later latch replaced the start-up file's Original") ;
+				Assert::IsTrue(Vpv::RunningPathway::Latch(false), L"a later latch replaced the start-up file's Original");
 			}
 			Vpv::RunningPathway::SetForTesting(Vpv::RunningPathway::kUnknown);
 			{

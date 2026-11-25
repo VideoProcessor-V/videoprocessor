@@ -3008,27 +3008,86 @@ namespace VideoProcessorTest
 				Assert::IsTrue(cachedTex->params.blit_dst,
 					L"GEM-217: cache texture must enable blit_dst for pl_tex_blit fast path");
 
+			// Hoist float32 readback helper for both Part 3b (Cache::Apply blit parity) and GEM-145 feather parity
+			// (verifies mix(cached, rw_cubic, hw) directly in the unclamped PRE_OUTPUT float domain before 8-bit UNORM clamping).
+			struct DispatchGuard
+			{
+				pl_dispatch dp = nullptr;
+				~DispatchGuard() { if (dp) pl_dispatch_destroy(&dp); }
+			};
+			DispatchGuard dispatchGuard{ pl_dispatch_create(fixture.Log(), gpu) };
+			Assert::IsNotNull(dispatchGuard.dp, L"pl_dispatch for Cache::Apply blit proof");
+
+			const pl_fmt f32Fmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, static_cast<enum pl_fmt_caps>(
+				PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE | PL_FMT_CAP_LINEAR |
+				PL_FMT_CAP_BLITTABLE | PL_FMT_CAP_HOST_READABLE));
+			Assert::IsNotNull(f32Fmt, L"WARP must expose blitable, storable, host-readable rgba32f");
+			Assert::IsTrue(f32Fmt == cachedTex->params.format,
+				L"rgba32f format must match Cache::Apply's StorageFormat");
+
+			auto readbackFloatTex = [&](pl_tex srcTex) -> std::vector<float>
+			{
+				pl_tex_params dp{};
+				dp.w = srcTex->params.w;
+				dp.h = srcTex->params.h;
+				dp.format = f32Fmt;
+				dp.storable = true;
+				dp.host_readable = true;
+				TexGuard staging{ gpu, pl_tex_create(gpu, &dp) };
+				Assert::IsNotNull(staging.tex, L"float32 staging texture for bit-exact readback");
+
+				pl_shader_desc descs[2]{};
+				descs[0].desc.name = "src";
+				descs[0].desc.type = PL_DESC_SAMPLED_TEX;
+				descs[0].binding.object = srcTex;
+				descs[0].binding.address_mode = PL_TEX_ADDRESS_CLAMP;
+				descs[0].binding.sample_mode = PL_TEX_SAMPLE_NEAREST;
+				descs[1].desc.name = "dst";
+				descs[1].desc.type = PL_DESC_STORAGE_IMG;
+				descs[1].desc.access = PL_DESC_ACCESS_WRITEONLY;
+				descs[1].binding.object = staging.tex;
+
+				pl_custom_shader custom{};
+				custom.description = "test readback rgba32f";
+				custom.body =
+					"ivec2 q = ivec2(gl_GlobalInvocationID.xy);\n"
+					"if (q.x < imageSize(dst).x && q.y < imageSize(dst).y)\n"
+					"    imageStore(dst, q, texelFetch(src, q, 0));\n";
+				custom.input = PL_SHADER_SIG_NONE;
+				custom.output = PL_SHADER_SIG_NONE;
+				custom.descriptors = descs;
+				custom.num_descriptors = 2;
+				custom.compute = true;
+				custom.compute_group_size[0] = 16;
+				custom.compute_group_size[1] = 16;
+
+				pl_shader sh = pl_dispatch_begin(dispatchGuard.dp);
+				const bool built = pl_shader_custom(sh, &custom);
+				if (!built)
+					pl_dispatch_abort(dispatchGuard.dp, &sh);
+				Assert::IsTrue(built, L"readback compute shader build failed");
+				pl_dispatch_compute_params cp{};
+				cp.shader = &sh;
+				cp.dispatch_size[0] = (dp.w + 15) / 16;
+				cp.dispatch_size[1] = (dp.h + 15) / 16;
+				cp.dispatch_size[2] = 1;
+				Assert::IsTrue(pl_dispatch_compute(dispatchGuard.dp, &cp), L"readback compute dispatch failed");
+				pl_gpu_finish(gpu);
+
+				std::vector<float> out(static_cast<size_t>(dp.w) * dp.h * 4, 0.0f);
+				pl_tex_transfer_params dl{};
+				dl.tex = staging.tex;
+				dl.ptr = out.data();
+				Assert::IsTrue(pl_tex_download(gpu, &dl), L"readback staging download failed");
+				return out;
+			};
+
 			// Part 3b (GEM-217 runtime proof + same-input negative control): exercise Cache::Apply's
 			// pl_tex_blit fast path directly with a matching rgba32f blit_src texture (independent of
 			// libplacebo's output_fbo_float32 option), verify Blits() == 1 and bit-exact pixel parity,
 			// then feed the exact same pixels via a non-blittable (blit_src = false) rgba32f texture
 			// as a negative control proving fallback to compute leaves Blits() == 0 with bit-exact parity.
 			{
-				struct DispatchGuard
-				{
-					pl_dispatch dp = nullptr;
-					~DispatchGuard() { if (dp) pl_dispatch_destroy(&dp); }
-				};
-				DispatchGuard dispatchGuard{ pl_dispatch_create(fixture.Log(), gpu) };
-				Assert::IsNotNull(dispatchGuard.dp, L"pl_dispatch for Cache::Apply blit proof");
-
-				const pl_fmt f32Fmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, static_cast<enum pl_fmt_caps>(
-					PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE | PL_FMT_CAP_LINEAR |
-					PL_FMT_CAP_BLITTABLE | PL_FMT_CAP_HOST_READABLE));
-				Assert::IsNotNull(f32Fmt, L"WARP must expose blitable, storable, host-readable rgba32f");
-				Assert::IsTrue(f32Fmt == cachedTex->params.format,
-					L"rgba32f format must match Cache::Apply's StorageFormat");
-
 				const int bw = 64, bh = 32;
 				std::vector<float> srcPixels(static_cast<size_t>(bw) * bh * 4);
 				for (int y = 0; y < bh; ++y)
@@ -3055,63 +3114,6 @@ namespace VideoProcessorTest
 				srcParams.blit_src = false;
 				TexGuard noBlitSrc{ gpu, pl_tex_create(gpu, &srcParams) };
 				Assert::IsNotNull(noBlitSrc.tex, L"rgba32f non-blitable negative-control source texture");
-
-				auto readbackFloatTex = [&](pl_tex srcTex) -> std::vector<float>
-				{
-					pl_tex_params dp{};
-					dp.w = srcTex->params.w;
-					dp.h = srcTex->params.h;
-					dp.format = f32Fmt;
-					dp.storable = true;
-					dp.host_readable = true;
-					TexGuard staging{ gpu, pl_tex_create(gpu, &dp) };
-					Assert::IsNotNull(staging.tex, L"float32 staging texture for bit-exact readback");
-
-					pl_shader_desc descs[2]{};
-					descs[0].desc.name = "src";
-					descs[0].desc.type = PL_DESC_SAMPLED_TEX;
-					descs[0].binding.object = srcTex;
-					descs[0].binding.address_mode = PL_TEX_ADDRESS_CLAMP;
-					descs[0].binding.sample_mode = PL_TEX_SAMPLE_NEAREST;
-					descs[1].desc.name = "dst";
-					descs[1].desc.type = PL_DESC_STORAGE_IMG;
-					descs[1].desc.access = PL_DESC_ACCESS_WRITEONLY;
-					descs[1].binding.object = staging.tex;
-
-					pl_custom_shader custom{};
-					custom.description = "test readback rgba32f";
-					custom.body =
-						"ivec2 q = ivec2(gl_GlobalInvocationID.xy);\n"
-						"if (q.x < imageSize(dst).x && q.y < imageSize(dst).y)\n"
-						"    imageStore(dst, q, texelFetch(src, q, 0));\n";
-					custom.input = PL_SHADER_SIG_NONE;
-					custom.output = PL_SHADER_SIG_NONE;
-					custom.descriptors = descs;
-					custom.num_descriptors = 2;
-					custom.compute = true;
-					custom.compute_group_size[0] = 16;
-					custom.compute_group_size[1] = 16;
-
-					pl_shader sh = pl_dispatch_begin(dispatchGuard.dp);
-					const bool built = pl_shader_custom(sh, &custom);
-					if (!built)
-						pl_dispatch_abort(dispatchGuard.dp, &sh);
-					Assert::IsTrue(built, L"readback compute shader build failed");
-					pl_dispatch_compute_params cp{};
-					cp.shader = &sh;
-					cp.dispatch_size[0] = (dp.w + 15) / 16;
-					cp.dispatch_size[1] = (dp.h + 15) / 16;
-					cp.dispatch_size[2] = 1;
-					Assert::IsTrue(pl_dispatch_compute(dispatchGuard.dp, &cp), L"readback compute dispatch failed");
-					pl_gpu_finish(gpu);
-
-					std::vector<float> out(static_cast<size_t>(dp.w) * dp.h * 4, 0.0f);
-					pl_tex_transfer_params dl{};
-					dl.tex = staging.tex;
-					dl.ptr = out.data();
-					Assert::IsTrue(pl_tex_download(gpu, &dl), L"readback staging download failed");
-					return out;
-				};
 
 				pl_hook_params hp{};
 				hp.gpu = gpu;
@@ -3170,13 +3172,14 @@ namespace VideoProcessorTest
 				Assert::IsNotNull(lazyRenderedOut);
 			}
 
-			auto renderExtra = [&](const Dejudder::Settings& matcherSettings, pl_tex* dispOut)
+			auto renderExtra = [&](const Dejudder::Settings& matcherSettings, pl_tex* dispOut, std::vector<float>& outFloat)
 			{
 				pl_tex out = nullptr;
 				Assert::IsTrue(rendered.Run(cachedTex, warp.Field(), warp.FrameTrust(),
 					warp.GetSettings().minTrustedShare, 0.5f, g, out, nullptr, &matcherSettings,
 					nullptr, nullptr, nullptr, dispOut, 1.0f),
 					ExtendedRangeGpuProbe::ToWide(rendered.Error() + "; log: " + log).c_str());
+				outFloat = readbackFloatTex(out);
 				pl_frame image = DejudderRendered::Frame(out, cache.Repr(), cache.Color());
 				pl_frame t = makeTarget();
 				std::vector<const pl_hook*> kept;
@@ -3185,9 +3188,11 @@ namespace VideoProcessorTest
 				return downloadTarget();
 			};
 
-			const std::vector<RgbaPixel> hardPixels = renderExtra(settingsNoFeather, nullptr);
+			const std::vector<float> ownFloat = readbackFloatTex(cachedTex);
+			std::vector<float> hardFloat, softFloat;
+			const std::vector<RgbaPixel> hardPixels = renderExtra(settingsNoFeather, nullptr, hardFloat);
 			pl_tex dispTex = nullptr;
-			const std::vector<RgbaPixel> softPixels = renderExtra(settings, &dispTex);
+			const std::vector<RgbaPixel> softPixels = renderExtra(settings, &dispTex, softFloat);
 			Assert::IsNotNull(dispTex, L"WRITE_DISP must produce displacement texture");
 			Assert::AreEqual(width, dispTex->params.w);
 			Assert::AreEqual(height, dispTex->params.h);
@@ -3285,9 +3290,12 @@ namespace VideoProcessorTest
 						++bandedPixels;
 						if (rgbDiff(softPixels[i], hardPixels[i]) > 0) ++bandedChangedFromHard;
 						if (rgbDiff(softPixels[i], own[i]) > 0) ++bandedChangedFromOwn;
-						const double er = std::fabs(softPixels[i].r - (own[i].r + hw * (hardPixels[i].r - own[i].r)));
-						const double eg = std::fabs(softPixels[i].g - (own[i].g + hw * (hardPixels[i].g - own[i].g)));
-						const double eb = std::fabs(softPixels[i].b - (own[i].b + hw * (hardPixels[i].b - own[i].b)));
+						// Check mix(cached, rw_cubic, hw) in the unclamped PRE_OUTPUT float domain
+						// (avoids 8-bit UNORM clamping of Catmull-Rom >1/<0 overshoots in hardPixels).
+						const size_t fi = i * 4u;
+						const double er = 255.0 * std::fabs(softFloat[fi + 0] - (ownFloat[fi + 0] + hw * (hardFloat[fi + 0] - ownFloat[fi + 0])));
+						const double eg = 255.0 * std::fabs(softFloat[fi + 1] - (ownFloat[fi + 1] + hw * (hardFloat[fi + 1] - ownFloat[fi + 1])));
+						const double eb = 255.0 * std::fabs(softFloat[fi + 2] - (ownFloat[fi + 2] + hw * (hardFloat[fi + 2] - ownFloat[fi + 2])));
 						worstFeatherErr = (std::max)(worstFeatherErr, (std::max)(er, (std::max)(eg, eb)));
 					}
 				}

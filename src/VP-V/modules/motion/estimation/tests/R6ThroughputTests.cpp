@@ -778,10 +778,13 @@ namespace VideoProcessorTest
 			assertPairsBitIdentical(syncRun.gen1, asyncRun.gen1);
 			assertPairsBitIdentical(syncRun.gen2, asyncRun.gen2);
 
-			// Negative control on the bit-identity comparator: mutating a single backward vector changes fbError.
+			// Negative control on the bit-identity comparator: mutating an interior backward vector
+			// sampled by FbError under forward (+64, -32) changes fbError.
 			auto probeClean = MakeSyntheticFlow(64, 36, 64, -32);
 			auto probeCorrupt = MakeSyntheticFlow(64, 36, 64, -32);
-			probeCorrupt->backward[0] = static_cast<int16_t>(probeCorrupt->backward[0] + 128);
+			const size_t midCell = (static_cast<size_t>(probeCorrupt->gridH / 2) * static_cast<size_t>(probeCorrupt->gridW) +
+				static_cast<size_t>(probeCorrupt->gridW / 2)) * 2u;
+			probeCorrupt->backward[midCell] = static_cast<int16_t>(probeCorrupt->backward[midCell] + 128);
 			MotionAhead::FlowExtras(*probeClean);
 			MotionAhead::FlowExtras(*probeCorrupt);
 			Assert::IsFalse(probeClean->fbError.empty());

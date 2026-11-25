@@ -3622,7 +3622,7 @@ namespace VideoProcessorTest
 			auto nextNoise = [&rng]() -> float
 			{
 				rng = rng * 1664525u + 1013904223u;
-				return (static_cast<float>(rng >> 8) / 16777216.0f - 0.5f) * 3.0f;   // [-1.5, +1.5] codes
+				return (static_cast<float>(rng >> 8) / 16777216.0f - 0.5f) * 4.0f;   // [-2.0, +2.0] codes -> grainScale in active (0.45, 0.95) ramp interior, clear of edgeLo=8 knife-edge
 			};
 			for (int y = 0; y < sh; ++y)
 			{
@@ -3645,7 +3645,9 @@ namespace VideoProcessorTest
 						code = tileStep + vertRamp + nextNoise();
 					}
 					code = (std::max)(0.0f, (std::min)(255.0f, code));
-					const float norm = code / 255.0f;
+					// Exact binary16-representable dyadic values (1/1024 steps) so libplacebo's rgba16f PRE_SCALE FBO
+					// introduces zero quantization drift against the pure-CPU float32 reference.
+					const float norm = std::round((code / 255.0f) * 1024.0f) / 1024.0f;
 					float* px = &srcRgba[(static_cast<size_t>(y) * sw + x) * 4];
 					px[0] = px[1] = px[2] = norm;
 					px[3] = 1.0f;
@@ -3694,18 +3696,26 @@ namespace VideoProcessorTest
 				cs.primaries = PL_COLOR_PRIM_BT_709;
 				cs.transfer = PL_COLOR_TRC_GAMMA22;
 				const VpMeasure::MeasureDomain dom = VpMeasure::MeasureDomainFor(cs, PL_COLOR_SYSTEM_BT_709, PL_COLOR_PRIM_BT_709);
-				std::vector<float> luma(static_cast<size_t>(sw) * sh, 0.0f);
-				for (int i = 0; i < sw * sh; ++i)
+				// libplacebo crops image.crop into a rw x rh PRE_SCALE FBO before AdaptiveDownscale::Measure,
+				// so Sobel and the 4-neighbor Laplacian clamp at the rw x rh crop boundaries.
+				std::vector<float> luma(static_cast<size_t>(rw) * rh, 0.0f);
+				for (int qy = 0; qy < rh; ++qy)
 				{
-					const double rgb[3] = { srcRgba[i * 4 + 0], srcRgba[i * 4 + 1], srcRgba[i * 4 + 2] };
-					luma[static_cast<size_t>(i)] = static_cast<float>(VpMeasure::MeasureLumaCode(dom, rgb));
+					for (int qx = 0; qx < rw; ++qx)
+					{
+						const int px = (std::max)(0, (std::min)(sw - 1, ox + qx));
+						const int py = (std::max)(0, (std::min)(sh - 1, oy + qy));
+						const size_t srcIdx = (static_cast<size_t>(py) * sw + px) * 4u;
+						const double rgb[3] = { srcRgba[srcIdx + 0], srcRgba[srcIdx + 1], srcRgba[srcIdx + 2] };
+						luma[static_cast<size_t>(qy) * rw + qx] = static_cast<float>(VpMeasure::MeasureLumaCode(dom, rgb));
+					}
 				}
-				const std::vector<float> sobel = RegionEvidence::BusyEdge::SobelMagnitude(luma.data(), sw, sh);
+				const std::vector<float> sobel = RegionEvidence::BusyEdge::SobelMagnitude(luma.data(), rw, rh);
 				auto atClamped = [&](int x, int y) -> float
 				{
-					const int cx = (std::max)(0, (std::min)(sw - 1, x));
-					const int cy = (std::max)(0, (std::min)(sh - 1, y));
-					return luma[static_cast<size_t>(cy) * sw + cx];
+					const int cx = (std::max)(0, (std::min)(rw - 1, x));
+					const int cy = (std::max)(0, (std::min)(rh - 1, y));
+					return luma[static_cast<size_t>(cy) * rw + cx];
 				};
 				double sumLap = 0.0, sumFlat = 0.0, sumFree = 0.0;
 				float maxSeamErr = 0.0f;
@@ -3713,14 +3723,12 @@ namespace VideoProcessorTest
 				{
 					for (int qx = 0; qx < rw; ++qx)
 					{
-						const int px = (std::max)(0, (std::min)(sw - 1, ox + qx));
-						const int py = (std::max)(0, (std::min)(sh - 1, oy + qy));
-						const float e = luma[static_cast<size_t>(py) * sw + px];
-						const float b = atClamped(ox + qx, oy + qy - 1);
-						const float d = atClamped(ox + qx - 1, oy + qy);
-						const float f = atClamped(ox + qx + 1, oy + qy);
-						const float h = atClamped(ox + qx, oy + qy + 1);
-						const float grad = 0.25f * sobel[static_cast<size_t>(py) * sw + px];
+						const float e = luma[static_cast<size_t>(qy) * rw + qx];
+						const float b = atClamped(qx, qy - 1);
+						const float d = atClamped(qx - 1, qy);
+						const float f = atClamped(qx + 1, qy);
+						const float h = atClamped(qx, qy + 1);
+						const float grad = 0.25f * sobel[static_cast<size_t>(qy) * rw + qx];
 						const float ed = smoothstepCpu(st.edgeLo, st.edgeHi, grad);
 						const float lap = std::fabs(4.0f * e - b - d - f - h);
 						const float flatPx = grad < st.edgeLo ? 1.0f : 0.0f;
@@ -3737,10 +3745,10 @@ namespace VideoProcessorTest
 						{
 							const int wgX = (qx / 16) * 16;
 							const int wgY = (qy / 16) * 16;
-							const float bNH = atClamped(ox + wgX + lx, oy + wgY + (std::max)(ly - 1, 0));
-							const float dNH = atClamped(ox + wgX + (std::max)(lx - 1, 0), oy + wgY + ly);
-							const float fNH = atClamped(ox + wgX + (std::min)(lx + 1, 15), oy + wgY + ly);
-							const float hNH = atClamped(ox + wgX + lx, oy + wgY + (std::min)(ly + 1, 15));
+							const float bNH = atClamped(wgX + lx, wgY + (std::max)(ly - 1, 0));
+							const float dNH = atClamped(wgX + (std::max)(lx - 1, 0), wgY + ly);
+							const float fNH = atClamped(wgX + (std::min)(lx + 1, 15), wgY + ly);
+							const float hNH = atClamped(wgX + lx, wgY + (std::min)(ly + 1, 15));
 							const float lapNH = std::fabs(4.0f * e - bNH - dNH - fNH - hNH);
 							maxSeamErr = (std::max)(maxSeamErr, std::fabs(lap - lapNH));
 						}

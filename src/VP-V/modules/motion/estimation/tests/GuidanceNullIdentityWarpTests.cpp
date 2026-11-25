@@ -945,7 +945,7 @@ namespace VideoProcessorTest
 				~LogScope() { f.CaptureLog(nullptr); }
 			} logScope(fixture, &log);
 
-			constexpr int kMcW = 256, kMcH = 128;
+			constexpr int kMcW = 288, kMcH = 144;
 			constexpr int kPanX = 10, kPanY = 4;       // dominant uniform pan (+5, +2) half-res -> dense REFINE_BODY duplicates
 			constexpr int kObj1Dx = -6, kObj1Dy = 6;   // distinct moving object (-3, +3) half-res
 			constexpr int kObj2Dx = 5, kObj2Dy = 3;    // odd source shift (+2.5, +1.5) half-res -> genuine half-pel refinement
@@ -957,8 +957,8 @@ namespace VideoProcessorTest
 			};
 			auto inObj2 = [=](int x, int y, int t)
 			{
-				return x >= 144 + kObj2Dx * t && x < 208 + kObj2Dx * t &&
-					y >= 52 + kObj2Dy * t && y < 116 + kObj2Dy * t;
+				return x >= 160 + kObj2Dx * t && x < 224 + kObj2Dx * t &&
+					y >= 56 + kObj2Dy * t && y < 120 + kObj2Dy * t;
 			};
 			// Band-limited 2D trigonometric texture for Object 2 so odd-pixel (+5, +3) shifts have
 			// < 1 code bilinear half-pel error (trusted in Field()) while whole-pel offsets have >> 10 codes.
@@ -1355,14 +1355,14 @@ namespace VideoProcessorTest
 				~LogScope() { f.CaptureLog(nullptr); }
 			} logScope(fixture, &log);
 
-			constexpr int kJ2W = 130, kJ2H = 138;   // halfW=65 (65%8==1), halfH=69 (69%8==5), blocks=9x9
+			constexpr int kJ2W = 142, kJ2H = 138;   // halfW=71 (71%8==7), halfH=69 (69%8==5), blocks=9x9 (non-multiple-of-8 WG1 edge on both axes)
 			constexpr int kHalfW = (kJ2W + 1) / 2;
 			constexpr int kHalfH = (kJ2H + 1) / 2;
 			constexpr int kBlocksX = (kHalfW + 7) / 8;
 			constexpr int kBlocksY = (kHalfH + 7) / 8;
 			constexpr int kSplitY = 88;             // cuts middle of parent block row by=5 (y=80..95)
-			constexpr double kUpDx = -5.5, kUpDy = -4.0;     // half-res (-2.75, -2.0): exact quarter-pel X, clean even splitYB=84
-			constexpr double kLoDx = 4.5, kLoDy = -4.0;      // half-res (+2.25, -2.0): exact quarter-pel X, opposite X shear
+			constexpr double kUpDx = -6.5, kUpDy = -2.0;     // half-res (-3.25, -1.0): exact quarter-pel X, clear L2 peak, clean even splitYB=86
+			constexpr double kLoDx = 4.5, kLoDy = -2.0;      // half-res (+2.25, -1.0): exact quarter-pel X, opposite X shear
 
 			// Multi-scale continuous band-limited luma in [6768, 58768]: low frequencies survive L1/L2
 			// (GlobalBoth D1), mid frequencies give sharp quarter-pel curvature (QPEL) and strong
@@ -1401,9 +1401,9 @@ namespace VideoProcessorTest
 				[&](int x, int y) -> uint16_t
 				{
 					// Occluded 2x2 block patch: where blocks (1..2, 1..2) = [16,48)x[16,48) in A land in B
-					// under (-5.5, -4.0) -> [10,44)x[12,46). Forces f.z=0 and vectorOk=0 on all 4 blocks so
+					// under (-7.5, -4.0) -> [8,42)x[12,46). Forces f.z=0 and vectorOk=0 on all 4 blocks so
 					// PIXEL_MASK hits ws<=0 4x4 fallback at p=(15,15) [index 5] and p=(16,16) [index 0].
-					if (x >= 10 && x < 44 && y >= 12 && y < 46)
+					if (x >= 8 && x < 42 && y >= 12 && y < 46)
 						return DejudderTexture(x, y, 77);
 					double v = 0.0;
 					if (static_cast<double>(y) < splitYB)
@@ -1613,6 +1613,8 @@ namespace VideoProcessorTest
 						std::fabs(vy - static_cast<float>(kLoDy)) <= 0.5f)
 					{
 						++lowerMatched;
+						if (bx == kBlocksX - 1)
+							++edgeColMatched;
 						if (by == kBlocksY - 1)
 							++edgeRowMatched;
 					}
@@ -1983,9 +1985,10 @@ namespace VideoProcessorTest
 				const DejudderFrame texB = MakeDejudderFrame(kJ2W, kJ2H,
 					[&](int x, int y) -> uint16_t
 					{
-						// Exact (-4, -2) source shift (in-bounds at bx=8 & by=8) + 2x2-aligned +-4-code noise
-						// that survives 2x2 downsampling: fails matchTolerance=3.0 alone, passes with TEXTURE_TOL.
-						const double sign = (((x / 2) ^ (y / 2)) & 1) ? 1024.0 : -1024.0;
+						// Exact (-4, -2) source shift (in-bounds at bx=8 & by=8) + 4x4-aligned +-4-code noise
+						// (2x2 in half-res so neither 2x2 downsampling nor half-pel bilinear cancels it): fails
+						// matchTolerance=3.0 alone, passes with TEXTURE_TOL.
+						const double sign = (((x / 4) ^ (y / 4)) & 1) ? 1024.0 : -1024.0;
 						return clampU16(smoothMultiScale(static_cast<double>(x + 4), static_cast<double>(y + 2), 0.3) + sign);
 					},
 					[](int x, int y, int c) -> uint16_t { return DejudderTexture(x * 2, y, 7 + c); });
@@ -2288,9 +2291,20 @@ namespace VideoProcessorTest
 						L"S3-H5 PICTURE guard: STILL_ZERO IN_PLACE must not stamp out-of-picture identical blocks (by=0..1)");
 			for (int by = 2; by < 4; ++by)
 				for (int bx = 0; bx < picField.blocksX; ++bx)
-					Assert::IsTrue(picField.trusted(bx, by) &&
-						std::fabs(picField.vx(bx, by)) < 1e-4f && std::fabs(picField.vy(bx, by)) < 1e-4f,
-						L"S3-H5 PICTURE guard: STILL_ZERO IN_PLACE must still stamp in-picture identical blocks (by=2..3)");
+				{
+					const bool centerInPicture = (bx * 16 + 8) < kSzW;
+					if (centerInPicture)
+					{
+						Assert::IsTrue(picField.trusted(bx, by) &&
+							std::fabs(picField.vx(bx, by)) < 1e-4f && std::fabs(picField.vy(bx, by)) < 1e-4f,
+							L"S3-H5 PICTURE guard: STILL_ZERO IN_PLACE must still stamp in-picture identical blocks (by=2..3)");
+					}
+					else
+					{
+						Assert::IsFalse(picField.trusted(bx, by),
+							L"S3-H5 PICTURE guard: STILL_ZERO IN_PLACE must not stamp rightmost partial block whose center lies past picture.z");
+					}
+				}
 			for (int sby = 0; sby < 4; ++sby)
 				for (int sbx = 0; sbx < sw; ++sbx)
 				{
@@ -2302,8 +2316,11 @@ namespace VideoProcessorTest
 				for (int sbx = 0; sbx < sw - 1; ++sbx)
 				{
 					const size_t i = (static_cast<size_t>(sby) * sw + sbx) * 4u;
-					Assert::IsTrue(isSubStillStamp(picSub[i], picSub[i + 1u], picSub[i + 2u], picSub[i + 3u]),
-						L"S3-H5 PICTURE guard: STILL_ZERO IN_PLACE must stamp in-picture identical sub-blocks (sby=4..7, sbx=0..16)");
+					if ((sbx * 8 + 4) < kSzW)
+					{
+						Assert::IsTrue(isSubStillStamp(picSub[i], picSub[i + 1u], picSub[i + 2u], picSub[i + 3u]),
+							L"S3-H5 PICTURE guard: STILL_ZERO IN_PLACE must stamp in-picture identical sub-blocks (sby=4..7, center < kSzW)");
+					}
 				}
 
 			AssertCleanLibplaceboLog(log, "StillZeroInPlacePreservesMovingHalfPictureAreaAndOobGuardOnNonMultipleOf8Grid");

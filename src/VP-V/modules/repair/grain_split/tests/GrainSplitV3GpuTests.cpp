@@ -465,7 +465,7 @@ public:
 		const Case cases[] = {
 			{ 1280, 720, 8, 0x308ec19d2183c7b1ull, 0xefe7a232b85c1a98ull },
 			{ 1920, 1080, 16, 0xcfa64dbed42d3583ull, 0x485bcd46682e3108ull },
-			{ 3840, 2160, 32, 0x23ca19cdabd353b1ull, 0x30b5d6e1685ac00cull },
+			{ 3840, 2160, 32, 0xe212f34b353d3b06ull, 0x3337c8b02768ad22ull },   // post GS-155 (6bfb1d462): 4K flat-clipped bin-7 blocks excluded
 			{ 1031, 587, 64, 0xdceedb61daa8de8dull, 0x18b58ec0492b7f28ull },
 			{ 257, 143, 32, 0xbb99a79cc34ce9d6ull, 0x13a4b5dae2aa48b5ull },
 		};

@@ -296,15 +296,30 @@ namespace VideoProcessorTest
 			{
 				double lo = 0.0;
 				double hi = jmh.M;
+				bool foundInRange = !outOfRange(invLin(0.0));
 				for (int i = 0; i < 6; ++i)
 				{
 					const double mid = 0.5 * (lo + hi);
 					if (outOfRange(invLin(mid)))
 						hi = mid;
 					else
+					{
 						lo = mid;
+						foundInRange = true;
+					}
 				}
-				outLin = invLin(lo);
+				const std::array<double, 3> bisected = invLin(lo);
+				if (foundInRange)
+				{
+					outLin = bisected;
+				}
+				else
+				{
+					const bool origFinite = std::isfinite(outLin[0]) && std::isfinite(outLin[1]) && std::isfinite(outLin[2]);
+					const std::array<double, 3>& src = origFinite ? outLin : bisected;
+					for (int c = 0; c < 3; ++c)
+						outLin[c] = (std::min)(upper, (std::max)(0.0, src[c]));
+				}
 			}
 
 			for (int c = 0; c < 3; ++c)

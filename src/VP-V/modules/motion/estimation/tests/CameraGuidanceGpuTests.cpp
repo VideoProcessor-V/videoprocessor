@@ -749,11 +749,11 @@ namespace VideoProcessorTest
 			Assert::IsTrue(e1FadeWBorderAcc > 0, L"CG_FADE E1 skip must also accept clamped border blocks");
 			Assert::IsTrue(e1FadeWGpu[(static_cast<size_t>(2) * kBlocksX + 2) * 4 + 2] >= 0.0f,
 				L"hint==0, eligible==1 block must still be accepted by E1 under CG_FADE");
-			Assert::IsTrue(e1FadeWGpu[(static_cast<size_t>(3) * kBlocksX + 2) * 4 + 2] < 0.0f,
+			Assert::IsTrue(e1FadeWGpu[(static_cast<size_t>(2) * kBlocksX + 3) * 4 + 2] < 0.0f,
 				L"eligible==0 block must escalate in E1");
-			Assert::IsTrue(e1FadeWGpu[(static_cast<size_t>(4) * kBlocksX + 2) * 4 + 2] < 0.0f,
+			Assert::IsTrue(e1FadeWGpu[(static_cast<size_t>(2) * kBlocksX + 4) * 4 + 2] < 0.0f,
 				L"sweep vector outside cg_agree must escalate in E1");
-			Assert::IsTrue(e1FadeWGpu[(static_cast<size_t>(5) * kBlocksX + 2) * 4 + 2] < 0.0f,
+			Assert::IsTrue(e1FadeWGpu[(static_cast<size_t>(2) * kBlocksX + 5) * 4 + 2] < 0.0f,
 				L"agreeing sweep vector exceeding cg_tol must escalate in E1");
 
 			const std::vector<float> e1FadeNoWGpu = runGpuPass(true, true, false);

@@ -226,10 +226,10 @@ namespace VideoProcessorTest
 			}
 
 			// (b) Rule 3 Same-Input Negative Control ("Prove the Hazard Is Real"):
-			// Bottom 60% = coherent-drift water (-24, 0) with modest spatio-temporal checkerboard ripples (+-0.58 px,
-			// within 0.05 * 24 = 1.20 px RANSAC agreement gate so unprotected RANSAC locks onto the 60% drifting water,
-			// while discrete curvature 2 * 0.58 = 1.16 px > 3 * sigma_C and temporal diff 1.16 px > 3 * sqrt(2) * prec
-			// cleanly exclude it); top 40% = true rigid camera pan (8, -3).
+			// Bottom 60% = coherent-drift water (-32, 0) (exact 2-block advection avoiding 1.5-block rounding parity alias)
+			// with modest spatio-temporal checkerboard ripples (+-0.58 px, within 0.05 * 32 = 1.60 px RANSAC agreement gate
+			// so unprotected RANSAC locks onto the 60% drifting water, while discrete curvature 2 * 0.58 = 1.16 px > 3 * sigma_C
+			// and advected temporal diff 1.16 px > 3 * sqrt(2) * prec cleanly exclude it); top 40% = true rigid camera pan (8, -3).
 			{
 				CameraModel::Config cfgOff, cfgOn;
 				cfgOff.waterBlockExclude = false;
@@ -248,7 +248,7 @@ namespace VideoProcessorTest
 							if (by >= waterStartRow)
 							{
 								const float ripple = (((bx + by + static_cast<int>(s)) & 1) != 0) ? 0.58f : -0.58f;
-								g.fx[i] = -24.0f + ripple;
+								g.fx[i] = -32.0f + ripple;
 								g.fy[i] = 0.0f;
 							}
 							else

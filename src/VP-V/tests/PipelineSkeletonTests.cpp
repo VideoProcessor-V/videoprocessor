@@ -651,8 +651,14 @@ namespace PipelineSkeletonTestsNs
 			// Audit item 8: the compensation must act on exactly the measured picture.
 			PipelineSlots::Registry registry;
 			std::string reason;
-			// Moving Stage 13 between them (measure, appearance, compensation) is refused.
+			// Moving Stage 13 after drive.led_measure is refused by the CF-1 P3 hard rule
+			// (colour.appearance must run before drive.led_measure).
 			Assert::IsFalse(registry.SetOrderByNames("drive.led_measure, colour.appearance", &reason));
+			Assert::IsTrue(reason.find("colour.appearance must run before drive.led_measure") != std::string::npos, W(reason).c_str());
+			// Moving a picture-modifying PreOutput slot without a drive.led_measure hard rule
+			// (output.calibration_lut) between measure and compensation is refused by Step 3b.
+			reason.clear();
+			Assert::IsFalse(registry.SetOrderByNames("drive.led_measure, output.calibration_lut, drive.led_compensation, drive.black_level", &reason));
 			Assert::IsTrue(reason.find("between drive.led_measure and drive.led_compensation") != std::string::npos, W(reason).c_str());
 		}
 
