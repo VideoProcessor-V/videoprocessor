@@ -275,6 +275,7 @@ public:
         return samples_.empty() ? uint16_t(0) : samples_.front().v;
     }
     bool Any() const { return !samples_.empty(); }
+    void Reset() { samples_.clear(); }
 
 private:
     struct S { uint64_t us; uint16_t v; };

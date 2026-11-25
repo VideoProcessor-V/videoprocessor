@@ -10,6 +10,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -164,7 +165,10 @@ public:
     void BeginFrame()
     {
         if (owner_.BoundToOther()) { ++crossThread_; frameCross_.store(true); return; }   // another thread: owner's records untouched
-        frameShort_.clear();
+        {
+            std::lock_guard<std::mutex> lock(shortMutex_);
+            frameShort_.clear();
+        }
         frameNested_ = false;
         frameCross_.store(false);
     }
@@ -191,9 +195,9 @@ public:
     // caller reduces or switches off for this frame; the shortage is recorded for FrameDecision()).
     Handle Acquire(const char* owner, const TexShape& shape)
     {
-        if (!owner_.Bound()) { ++outsideScope_; return Handle(); }   // never reserved nor scoped: no scope is open
+        if (!owner_.Bound()) { outsideScope_.fetch_add(1, std::memory_order_relaxed); return Fail(owner); }   // POD1-M3: atomic + visible Fail(owner)
         if (!owner_.BoundToCaller()) { ++crossThread_; frameCross_.store(true); return Handle(); }   // another thread: atomics only
-        if (!scopeOpen_) { ++outsideScope_; return Fail(owner); }
+        if (!scopeOpen_) { outsideScope_.fetch_add(1, std::memory_order_relaxed); return Fail(owner); }
         const size_t pool = PoolIndex(shape);
         if (pool == pools_.size()) { ++shed_; return Fail(owner); }   // not planned: tier shed or never asked
         const char* const name = owner ? owner : "";
@@ -215,13 +219,18 @@ public:
     FallbackCatalog::Decision FrameDecision() const
     {
         const bool cross = frameCross_.load();
-        if (frameShort_.empty() && !frameNested_ && !cross)
+        std::vector<std::string> shortCopy;
+        {
+            std::lock_guard<std::mutex> lock(shortMutex_);
+            shortCopy = frameShort_;
+        }
+        if (shortCopy.empty() && !frameNested_ && !cross)
             return FallbackCatalog::Released("scratch_arena");
         std::string reason;
-        if (!frameShort_.empty()) {
+        if (!shortCopy.empty()) {
             std::string list;
-            for (size_t i = 0; i < frameShort_.size(); ++i)
-                list += (i ? ", " : "") + frameShort_[i];
+            for (size_t i = 0; i < shortCopy.size(); ++i)
+                list += (i ? ", " : "") + shortCopy[i];
             reason = "scratch memory short: " + list + " reduced/off";
         }
         if (frameNested_)
@@ -250,7 +259,7 @@ public:
     uint64_t Exhausted() const { return exhausted_; }
     uint64_t Shed() const { return shed_; }
     uint64_t CrossThreadAcquires() const { return crossThread_.load(); }
-    uint64_t OutsideScopeAcquires() const { return outsideScope_; }
+    uint64_t OutsideScopeAcquires() const { return outsideScope_.load(std::memory_order_relaxed); }
     uint64_t NestedScopes() const { return nestedScopes_; }
     uint32_t CreateFailures() const { return createFailures_; }
     uint32_t Reserves() const { return reserves_; }
@@ -277,6 +286,7 @@ private:
     Handle Fail(const char* owner)
     {
         const std::string name = owner ? owner : "?";
+        std::lock_guard<std::mutex> lock(shortMutex_);
         if (std::find(frameShort_.begin(), frameShort_.end(), name) == frameShort_.end()) {
             frameShort_.push_back(name);
             std::sort(frameShort_.begin(), frameShort_.end());
@@ -290,11 +300,13 @@ private:
     std::vector<SlotSlice> slices_;
     bool frameNested_ = false;
     uint64_t nestedScopes_ = 0;
+    mutable std::mutex shortMutex_;         // POD1-M3: guards frameShort_ on slow/unbound Fail() paths only
     std::vector<std::string> frameShort_;   // owners that went without this frame (sorted, unique)
     ThreadBinding owner_;   // atomic: BoundToOtherThread / Acquire read it from any thread
     bool scopeOpen_ = false;
     uint16_t scope_ = 0;
-    uint64_t acquired_ = 0, exhausted_ = 0, shed_ = 0, outsideScope_ = 0;
+    uint64_t acquired_ = 0, exhausted_ = 0, shed_ = 0;
+    std::atomic<uint64_t> outsideScope_{ 0 };
     std::atomic<uint64_t> crossThread_{ 0 };
     std::atomic<bool> frameCross_{ false };
     uint32_t createFailures_ = 0, reserves_ = 0;

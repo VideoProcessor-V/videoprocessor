@@ -8,6 +8,7 @@
 #include <VP-V/modules/input/source_analysis/lane/shared/SourceStats.h>
 
 #include <array>
+#include <cstring>
 #include <map>
 #include <mutex>
 #include <vector>
@@ -73,51 +74,19 @@ namespace VpSkeleton
 						}
 					}
 				}
-				std::vector<uint8_t> probe(VpUnit::SourceStats::kRecordBytes, 0);
-				if (memo.CopyPublished(VpSkeleton::kP4SourceStats, s, probe.data(), probe.size()))
-					return true;
-				if (sizeof(VpUnit::SourceStats::Record) != VpUnit::SourceStats::kRecordBytes &&
-					memo.CopyPublished(VpSkeleton::kP4SourceStats, s, probe.data(), sizeof(VpUnit::SourceStats::Record)))
-					return true;
-				return false;
+				// POD1-M7: non-mutating check without per-frame heap allocation.
+				return memo.HasReadyCpu(VpSkeleton::kP4SourceStats, s);
 			}
 
-			// Non-mutating mirror of SkeletonMemo::Acquire's queue-window / ahead-plan admission checks
-			// (SkeletonAcquire.h:967-982). Prevents look-ahead readers (e.g. SRM LookAheadFrameCoded) from
-			// triggering SkeletonMemo::Fail() and polluting SkeletonMemo::lastCause_[kP4SourceStats] (MUST-9).
+			// POD1-M7: delegate directly to SkeletonMemo::CheckAheadAdmitted (exact single source of truth; zero window drift).
 			bool AheadAdmittedNonMutating(const VpSkeleton::SkeletonMemo& memo, uint64_t seq, const char*& reason)
 			{
 				if (!memo.AheadOfSeal(seq))
 					return true;
-				const VpSkeleton::QueueWindow w = memo.Window();
-				// Contract: QueueWindow is default-zeroed before SkeletonMemo::SetWindow(); any non-zero
-				// dimension (wired, current, ahead, back) indicates a configured window (windowSet_).
-				const bool hasWindow = (w.wired != 0 || w.current != 0 || w.ahead != 0 || w.back != 0);
-				if (hasWindow)
+				VpSkeleton::AcquireCause cause = VpSkeleton::AcquireCause::None;
+				if (!memo.CheckAheadAdmitted(VpSkeleton::kP4SourceStats, seq, cause))
 				{
-					if (seq > w.current + uint64_t(w.ahead))
-					{
-						reason = VpSkeleton::Token(VpSkeleton::AcquireCause::NotQueued);
-						return false;
-					}
-					if (seq > w.current + uint64_t(w.aheadCompute))
-					{
-						reason = VpSkeleton::Token(VpSkeleton::AcquireCause::NotPlannedAhead);
-						return false;
-					}
-					if (w.presentKnown && w.current > w.presented &&
-						w.current - w.presented > uint64_t(w.history) + uint64_t(w.renderAhead) + 1u + uint64_t(w.ahead))
-					{
-						reason = VpSkeleton::Token(VpSkeleton::AcquireCause::PresentsStalled);
-						return false;
-					}
-				}
-				const VpSkeleton::AheadPlan plan = memo.Plan();
-				uint16_t plannedDepth = 0;
-				if (hasWindow && plan.Has(uint16_t(VpSkeleton::kP4SourceStats), 0u, &plannedDepth) &&
-					seq > w.current + uint64_t(plannedDepth))
-				{
-					reason = VpSkeleton::Token(VpSkeleton::AcquireCause::NotPlannedAhead);
+					reason = VpSkeleton::Token(cause);
 					return false;
 				}
 				return true;
@@ -230,19 +199,35 @@ namespace VpSkeleton
 				reason = owners.empty() ? "no store owner" : "renderer ambiguous";
 			else if (Vpv::Skeleton::IExternalDemand* demand = Vpv::Skeleton::Demand())
 			{
-				// MUST-9: try non-mutating lane-published lease read first (safe on any thread, zero memo lastCause_ mutation).
+				// MUST-9 / POD1-M7: non-mutating lane-published lease read into stack buffer (zero per-frame heap alloc).
+				constexpr size_t kStackRecBytes = VpUnit::SourceStats::kRecordBytes >= sizeof(VpUnit::SourceStats::Record)
+					? VpUnit::SourceStats::kRecordBytes : sizeof(VpUnit::SourceStats::Record);
 				const VpSkeleton::LaneLease lease = demand->LeaseFor(owners[0], VpSkeleton::kP4SourceStats);
 				if (lease.Valid() && lease.bytes != nullptr && lease.bytes->Bytes() >= sizeof(VpUnit::SourceStats::Record))
 				{
-					std::vector<uint8_t> laneBuf;
+					std::array<uint8_t, kStackRecBytes> stackBuf{};
+					std::vector<uint8_t> overflowBuf;
+					const uint8_t* copiedPtr = nullptr;
+					size_t copiedN = 0;
 					const VpSkeleton::PublishedRead pr = VpSkeleton::ReadPublishedBytes(
 						lease, VpSkeleton::kP4SourceStats, seq, lease.bytes->Bytes(),
-						[&laneBuf](const uint8_t* src, size_t n) {
-							laneBuf.assign(src, src + n);
+						[&stackBuf, &overflowBuf, &copiedPtr, &copiedN](const uint8_t* src, size_t n) {
+							if (n <= stackBuf.size())
+							{
+								std::memcpy(stackBuf.data(), src, n);
+								copiedPtr = stackBuf.data();
+								copiedN = n;
+							}
+							else
+							{
+								overflowBuf.assign(src, src + n);
+								copiedPtr = overflowBuf.data();
+								copiedN = overflowBuf.size();
+							}
 						});
 					if (pr == VpSkeleton::PublishedRead::Copied)
 					{
-						if (VpUnit::SourceStats::ReadRecord(laneBuf.data(), laneBuf.size(), &out))
+						if (VpUnit::SourceStats::ReadRecord(copiedPtr, copiedN, &out))
 						{
 							if (why != nullptr)
 								*why = "";
@@ -259,11 +244,11 @@ namespace VpSkeleton
 					reason = "no frame memo";
 				else
 				{
-					// MUST-9: try non-mutating memo CopyPublished on any thread (accepts both padded kRecordBytes and compact sizeof(Record)).
-					std::vector<uint8_t> recBuf(VpUnit::SourceStats::kRecordBytes, 0);
+					// MUST-9 / POD1-M7: non-mutating memo CopyPublished into stack buffer (zero per-frame heap alloc).
+					std::array<uint8_t, kStackRecBytes> recBuf{};
 					size_t copiedBytes = 0;
-					if (fm.memo->CopyPublished(VpSkeleton::kP4SourceStats, seq, recBuf.data(), recBuf.size()))
-						copiedBytes = recBuf.size();
+					if (fm.memo->CopyPublished(VpSkeleton::kP4SourceStats, seq, recBuf.data(), VpUnit::SourceStats::kRecordBytes))
+						copiedBytes = VpUnit::SourceStats::kRecordBytes;
 					else if (sizeof(VpUnit::SourceStats::Record) != VpUnit::SourceStats::kRecordBytes &&
 						fm.memo->CopyPublished(VpSkeleton::kP4SourceStats, seq, recBuf.data(), sizeof(VpUnit::SourceStats::Record)))
 						copiedBytes = sizeof(VpUnit::SourceStats::Record);
