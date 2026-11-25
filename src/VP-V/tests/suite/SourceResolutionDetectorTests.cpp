@@ -3,6 +3,7 @@
 
 #include <VP-V/modules/input/source_analysis/SourceResolutionDetector.h>
 #include <VP-V/modules/input/source_analysis/SourceResolutionMonitor.h>
+#include <VP-V/modules/input/source_analysis/picture/shared/PictureRect.h>
 #include <VP-V/tests/support/HardwarePrerequisites.h>
 #include <VP-V/tests/support/SubtitleTextTestPattern.h>
 
@@ -12,6 +13,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <functional>
+#include <limits>
 #include <map>
 #include <random>
 #include <string>
@@ -2292,6 +2294,239 @@ namespace VideoProcessorTest
 				L"AheadWorker completed analysis of target frame 11 at negative-control codeMaximum = 1023");
 			Assert::IsFalse(ahead10.informative,
 				L"negative control: exact same luma values at codeMaximum = 1023 sit below the 10-bit floor and read uninformative");
+		}
+
+		// O#8 (X6 -> U8 PictureRect): SourceResolution::Analyse delegates tile-bar margin detection to
+		// VpUnit::PictureRect::DetectTileBars (preserving W21-5 codeMaximum scaling, dark ceiling, padded stride,
+		// all-black empty active rect, degenerate/NaN guards, and kUnitVersion == 1), paired with same-input
+		// negative controls proving every guard is real.
+		TEST_METHOD(TileBarDetectionUsesSharedU8PictureRectWithBitDepthAndEdgeGuards)
+		{
+			Assert::AreEqual(uint32_t(1), VpUnit::PictureRect::kUnitVersion,
+				L"U8 PictureRect::kUnitVersion remains pinned at 1");
+
+			auto texturedPixel = [](int x, int y) -> float {
+				// Deterministic non-constant mid-luma texture in [0.35, 0.65], well above darkCeiling = 0.1.
+				return 0.35f + 0.30f * static_cast<float>((x * 7 + y * 13) % 17) / 16.0f;
+			};
+
+			auto makeTileWithBars = [&](int barL, int barR, int barT, int barB, int stride, float barVal) {
+				std::vector<float> buf(static_cast<size_t>(kTile) * static_cast<size_t>(stride), 0.95f); // bright sentinel in stride padding
+				for (int y = 0; y < kTile; ++y)
+				{
+					const bool inBarY = (y < barT) || (y >= kTile - barB);
+					for (int x = 0; x < kTile; ++x)
+					{
+						const bool inBarX = (x < barL) || (x >= kTile - barR);
+						buf[static_cast<size_t>(y) * static_cast<size_t>(stride) + static_cast<size_t>(x)] =
+							(inBarX || inBarY) ? barVal : texturedPixel(x, y);
+					}
+				}
+				return buf;
+			};
+
+			const float kStudioBlack10 = 64.0f / 1023.0f; // ~= 0.06256 <= darkCeiling (0.1)
+
+			// 1. Letterbox (top + bottom dark bars), pillarbox (left + right dark bars),
+			//    and asymmetric 4-sided dark bars (exercising non-tight padded stride with bright sentinels).
+			struct BarCase { int l, r, t, b, stride; const wchar_t* label; };
+			const BarCase cases[] = {
+				{ 0,  0,  24, 40, kTile,      L"letterbox" },
+				{ 36, 20, 0,  0,  kTile,      L"pillarbox" },
+				{ 18, 30, 12, 44, kTile + 17, L"asymmetric 4-sided with padded stride" },
+			};
+			for (const BarCase& c : cases)
+			{
+				const std::vector<float> tile = makeTileWithBars(c.l, c.r, c.t, c.b, c.stride, kStudioBlack10);
+				const VpUnit::PictureRect::TileBars bars =
+					VpUnit::PictureRect::DetectTileBars(tile.data(), c.stride, kTile, 1023);
+				SourceResolution::Spectrum spec;
+				Assert::IsTrue(SourceResolution::Analyse(tile.data(), c.stride, kTile, spec, 1023), c.label);
+
+				Assert::AreEqual(c.l, bars.left, c.label);
+				Assert::AreEqual(c.r, bars.right, c.label);
+				Assert::AreEqual(c.t, bars.top, c.label);
+				Assert::AreEqual(c.b, bars.bottom, c.label);
+				Assert::AreEqual(bars.left, spec.barLeft, L"Analyse barLeft matches U8 DetectTileBars");
+				Assert::AreEqual(bars.right, spec.barRight, L"Analyse barRight matches U8 DetectTileBars");
+				Assert::AreEqual(bars.top, spec.barTop, L"Analyse barTop matches U8 DetectTileBars");
+				Assert::AreEqual(bars.bottom, spec.barBottom, L"Analyse barBottom matches U8 DetectTileBars");
+
+				const VpUnit::PictureRect::Rect active = VpUnit::PictureRect::TileActiveRect(kTile, bars);
+				Assert::IsFalse(active.Empty(), c.label);
+				Assert::AreEqual(static_cast<float>(c.l), active.x0, 0.0f, c.label);
+				Assert::AreEqual(static_cast<float>(c.t), active.y0, 0.0f, c.label);
+				Assert::AreEqual(static_cast<float>(kTile - c.r), active.x1, 0.0f, c.label);
+				Assert::AreEqual(static_cast<float>(kTile - c.b), active.y1, 0.0f, c.label);
+				Assert::IsTrue(VpUnit::PictureRect::InPicture(active, active.x0, active.y0), L"active top-left inclusive");
+				Assert::IsFalse(VpUnit::PictureRect::InPicture(active, active.x1, active.y0), L"active right exclusive");
+				Assert::IsFalse(VpUnit::PictureRect::InPicture(active, active.x0, active.y1), L"active bottom exclusive");
+			}
+
+			// 2. All-black tile: barLeft == kTile, barRight == 0, barTop == kTile, barBottom == 0, TileActiveRect is Empty().
+			{
+				const std::vector<float> allBlack(static_cast<size_t>(kTile) * kTile, kStudioBlack10);
+				const VpUnit::PictureRect::TileBars bars =
+					VpUnit::PictureRect::DetectTileBars(allBlack.data(), kTile, kTile, 1023);
+				SourceResolution::Spectrum spec;
+				Assert::IsTrue(SourceResolution::Analyse(allBlack.data(), kTile, kTile, spec, 1023));
+
+				Assert::AreEqual(kTile, bars.left, L"all-black tile left == kTile");
+				Assert::AreEqual(0, bars.right, L"all-black tile right == 0");
+				Assert::AreEqual(kTile, bars.top, L"all-black tile top == kTile");
+				Assert::AreEqual(0, bars.bottom, L"all-black tile bottom == 0");
+				Assert::AreEqual(bars.left, spec.barLeft);
+				Assert::AreEqual(bars.right, spec.barRight);
+				Assert::AreEqual(bars.top, spec.barTop);
+				Assert::AreEqual(bars.bottom, spec.barBottom);
+				Assert::IsTrue(VpUnit::PictureRect::TileActiveRect(kTile, bars).Empty(),
+					L"all-black tile active rect must be Empty()");
+
+				// 3. Invalid / degenerate inputs to DetectTileBars & TileActiveRect.
+				const VpUnit::PictureRect::TileBars bNull = VpUnit::PictureRect::DetectTileBars(nullptr, kTile, kTile, 1023);
+				const VpUnit::PictureRect::TileBars bZero = VpUnit::PictureRect::DetectTileBars(allBlack.data(), kTile, 0, 1023);
+				const VpUnit::PictureRect::TileBars bNeg = VpUnit::PictureRect::DetectTileBars(allBlack.data(), kTile, -4, 1023);
+				const VpUnit::PictureRect::TileBars bShortStride = VpUnit::PictureRect::DetectTileBars(allBlack.data(), kTile - 1, kTile, 1023);
+				const VpUnit::PictureRect::TileBars invalidCases[] = { bNull, bZero, bNeg, bShortStride };
+				for (const VpUnit::PictureRect::TileBars& b : invalidCases)
+				{
+					Assert::AreEqual(0, b.left, L"invalid input returns zero left bar");
+					Assert::AreEqual(0, b.right, L"invalid input returns zero right bar");
+					Assert::AreEqual(0, b.top, L"invalid input returns zero top bar");
+					Assert::AreEqual(0, b.bottom, L"invalid input returns zero bottom bar");
+				}
+				Assert::IsTrue(VpUnit::PictureRect::TileActiveRect(0, bars).Empty(), L"n <= 0 yields Empty()");
+				VpUnit::PictureRect::TileBars negMargin;
+				negMargin.left = -1;
+				Assert::IsTrue(VpUnit::PictureRect::TileActiveRect(kTile, negMargin).Empty(), L"negative margin yields Empty()");
+				VpUnit::PictureRect::TileBars fullSpan;
+				fullSpan.left = kTile / 2;
+				fullSpan.right = kTile / 2;
+				Assert::IsTrue(VpUnit::PictureRect::TileActiveRect(kTile, fullSpan).Empty(), L"left + right == n yields Empty()");
+			}
+
+			// 4. NaN pixel inside an otherwise dark bar column/row must reject that column/row as non-bar.
+			{
+				std::vector<float> nanColTile = makeTileWithBars(32, 0, 0, 0, kTile, kStudioBlack10);
+				Assert::AreEqual(32, VpUnit::PictureRect::DetectTileBars(nanColTile.data(), kTile, kTile, 1023).left,
+					L"precondition: clean 32-px dark left bar");
+				nanColTile[static_cast<size_t>(123) * kTile + static_cast<size_t>(10)] = std::numeric_limits<float>::quiet_NaN();
+
+				// Mandatory same-input negative control: naive std::min/std::max scan without NaN rejection
+				// (exact pre-fix X6 pattern) silently ignores NaN and falsely flags all 32 columns as a bar.
+				const double maxSpan10 = 2.0 / 1023.0;
+				const double darkCeil = 0.1;
+				int naiveLeft = 0;
+				while (naiveLeft < kTile)
+				{
+					double lo = 1e9, hi = -1e9;
+					for (int y = 0; y < kTile; ++y)
+					{
+						const double v = nanColTile[static_cast<size_t>(y) * kTile + static_cast<size_t>(naiveLeft)];
+						lo = (std::min)(lo, v);
+						hi = (std::max)(hi, v);
+					}
+					if (!(hi - lo <= maxSpan10 && hi <= darkCeil)) break;
+					++naiveLeft;
+				}
+				Assert::AreEqual(32, naiveLeft,
+					L"negative control: naive min/max scan without NaN check silently ignores NaN and returns 32");
+
+				const VpUnit::PictureRect::TileBars nanBars =
+					VpUnit::PictureRect::DetectTileBars(nanColTile.data(), kTile, kTile, 1023);
+				SourceResolution::Spectrum nanSpec;
+				Assert::IsTrue(SourceResolution::Analyse(nanColTile.data(), kTile, kTile, nanSpec, 1023));
+				Assert::AreEqual(10, nanBars.left, L"NaN pixel at column 10 rejects column 10 as non-bar");
+				Assert::AreEqual(10, nanSpec.barLeft, L"Analyse inherits U8 NaN column rejection");
+
+				// NaN at row 0 of column 0 exercises the initial lo != lo guard.
+				nanColTile[0] = std::numeric_limits<float>::quiet_NaN();
+				const VpUnit::PictureRect::TileBars nanOrigin =
+					VpUnit::PictureRect::DetectTileBars(nanColTile.data(), kTile, kTile, 1023);
+				Assert::AreEqual(0, nanOrigin.left, L"NaN at (0, 0) rejects column 0");
+				Assert::AreEqual(0, nanOrigin.top, L"NaN at (0, 0) rejects row 0");
+
+				// NaN inside a dark top bar row rejects that row.
+				std::vector<float> nanRowTile = makeTileWithBars(0, 0, 24, 0, kTile, kStudioBlack10);
+				nanRowTile[static_cast<size_t>(7) * kTile + static_cast<size_t>(50)] = std::numeric_limits<float>::quiet_NaN();
+				Assert::AreEqual(7, VpUnit::PictureRect::DetectTileBars(nanRowTile.data(), kTile, kTile, 1023).top,
+					L"NaN pixel at row 7 rejects row 7 as non-bar");
+			}
+
+			// 5. Mandatory same-input negative control #1: 12-bit 3-code dark ripple (80/4095 & 83/4095;
+			//    span = 3/4095 > 2/4095 at 12-bit, but < 2/1023 at 10-bit) vs 1-code 12-bit dark bar.
+			{
+				std::vector<float> ripple3 = makeTileWithBars(0, 0, 0, 0, kTile, kStudioBlack10);
+				std::vector<float> ripple1 = makeTileWithBars(0, 0, 0, 0, kTile, kStudioBlack10);
+				for (int y = 0; y < kTile; ++y)
+				{
+					for (int x = 0; x < 32; ++x)
+					{
+						ripple3[static_cast<size_t>(y) * kTile + static_cast<size_t>(x)] =
+							static_cast<float>((y & 1) ? 83 : 80) / 4095.0f;
+						ripple1[static_cast<size_t>(y) * kTile + static_cast<size_t>(x)] =
+							static_cast<float>((y & 1) ? 81 : 80) / 4095.0f;
+					}
+				}
+
+				const VpUnit::PictureRect::TileBars bars12 =
+					VpUnit::PictureRect::DetectTileBars(ripple3.data(), kTile, kTile, 4095);
+				const VpUnit::PictureRect::TileBars bars10 =
+					VpUnit::PictureRect::DetectTileBars(ripple3.data(), kTile, kTile, 1023);
+				const VpUnit::PictureRect::TileBars trueBar12 =
+					VpUnit::PictureRect::DetectTileBars(ripple1.data(), kTile, kTile, 4095);
+
+				SourceResolution::Spectrum spec12, spec10, specTrue12;
+				Assert::IsTrue(SourceResolution::Analyse(ripple3.data(), kTile, kTile, spec12, 4095));
+				Assert::IsTrue(SourceResolution::Analyse(ripple3.data(), kTile, kTile, spec10, 1023));
+				Assert::IsTrue(SourceResolution::Analyse(ripple1.data(), kTile, kTile, specTrue12, 4095));
+
+				Assert::AreEqual(0, bars12.left,
+					L"12-bit 3-code dark ripple (3/4095 > 2/4095) is NOT flagged as bar at codeMaximum = 4095");
+				Assert::AreEqual(0, spec12.barLeft,
+					L"Analyse at codeMaximum = 4095 rejects 3-code 12-bit dark ripple");
+				Assert::AreEqual(32, bars10.left,
+					L"negative control: exact same 3-code 12-bit buffer IS flagged as 32-px bar at codeMaximum = 1023");
+				Assert::AreEqual(32, spec10.barLeft,
+					L"negative control: Analyse at codeMaximum = 1023 flags exact same 3-code buffer as 32-px bar");
+				Assert::AreEqual(32, trueBar12.left,
+					L"1-code 12-bit dark bar (1/4095 <= 2/4095) IS detected as 32-px bar at codeMaximum = 4095");
+				Assert::AreEqual(32, specTrue12.barLeft,
+					L"Analyse at codeMaximum = 4095 detects 1-code 12-bit dark bar");
+			}
+
+			// 6. Mandatory same-input negative control #2: bright flat border (constant 0.50f > darkCeiling = 0.1).
+			{
+				const std::vector<float> brightFlat = makeTileWithBars(32, 0, 0, 0, kTile, 0.50f);
+
+				// Prove directly on the exact same columns that a naive flatness-only check falsely flags all 32 columns.
+				const double maxSpan10 = 2.0 / 1023.0;
+				int naiveFlatOnlyCols = 0;
+				while (naiveFlatOnlyCols < kTile)
+				{
+					double lo = static_cast<double>(brightFlat[static_cast<size_t>(naiveFlatOnlyCols)]);
+					double hi = lo;
+					for (int y = 1; y < kTile; ++y)
+					{
+						const double v = static_cast<double>(brightFlat[static_cast<size_t>(y) * kTile + static_cast<size_t>(naiveFlatOnlyCols)]);
+						lo = (std::min)(lo, v);
+						hi = (std::max)(hi, v);
+					}
+					if (!((hi - lo) <= maxSpan10)) break;
+					++naiveFlatOnlyCols;
+				}
+				Assert::AreEqual(32, naiveFlatOnlyCols,
+					L"negative control: naive flatness-only check (ignoring darkCeiling) falsely flags all 32 bright-flat columns");
+
+				const VpUnit::PictureRect::TileBars brightBars =
+					VpUnit::PictureRect::DetectTileBars(brightFlat.data(), kTile, kTile, 1023);
+				SourceResolution::Spectrum brightSpec;
+				Assert::IsTrue(SourceResolution::Analyse(brightFlat.data(), kTile, kTile, brightSpec, 1023));
+				Assert::AreEqual(0, brightBars.left,
+					L"bright flat 0.50f border (> darkCeiling 0.1) must NOT be flagged by U8 DetectTileBars");
+				Assert::AreEqual(0, brightSpec.barLeft,
+					L"bright flat 0.50f border (> darkCeiling 0.1) must NOT be flagged by SourceResolution::Analyse");
+			}
 		}
 	};
 }
