@@ -303,13 +303,9 @@ namespace GrainSplit
 		// Modifier accessors (same prelude): vec2 gs_energies(ivec2 b) -> (e1, e2) block means of d1^2, d2^2 (codes^2) or (-1, -1)
 		// when the layout has none (Full); float gs_tilt(ivec2 b) = log2((e1 + 1e-3) / (e2 + 1e-3)) (0 when unavailable);
 		// `#define GS_HAS_ENERGIES 1|0` tells a shader which. A reader treats "unavailable" as absent and derives its own.
-		std::string ViewGlsl(GrainSplit::Storage storage, double codeUnit);
+		std::string ViewGlsl(GrainSplit::Storage storage, double codeUnit); std::string ViewGlslCr(GrainSplit::Storage storage, double codeUnit);
 		// Appends the sampled descriptors ViewGlsl reads (Full: split, gblocks; Compact: gs_a, gs_b, gblocks).
-		void BindView(const Frame& f, std::vector<pl_shader_desc>& out);
-		// Secondary view for a paired chroma component in the same shader (e.g., semi-planar P010/P210 CbCr):
-		// defines gs_fetch_cr / gs_blocks_cr and binds static descriptor names split_cr / gs_a_cr / gs_b_cr / gblocks_cr.
-		std::string ViewGlslCr(GrainSplit::Storage storage, double codeUnit);
-		void BindViewCr(const Frame& f, std::vector<pl_shader_desc>& out);
+		void BindView(const Frame& f, std::vector<pl_shader_desc>& out); void BindViewCr(const Frame& f, std::vector<pl_shader_desc>& out);
 
 		// THE EXPLICIT FIELD TABLE of both layouts (owner decision: one main map plus small modifier fields). Base = the main
 		// split map (s1, s2, base); Modifiers = what steers a derivation: per-pixel Wiener share f, per-block grain level N,

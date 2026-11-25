@@ -28,10 +28,7 @@
 #include <vector>
 
 namespace SourceIdentity { namespace Chain { class ChainEstimator; } }
-namespace VpSkeleton
-{
-	class AnalysisLane; class SkeletonMemo;
-}
+namespace VpSkeleton { class AnalysisLane; class SkeletonMemo; }
 
 // Stage 12 step B in the renderer (owner 2026-10-15): the effective
 // resolution, bitrate quality and effective bit depth of every source, and
@@ -615,8 +612,7 @@ namespace SourceResolutionMonitor
 			int nativeWidth = 0, nativeHeight = 0;
 			// The tiles' centres in the picture (normalised; empty: the 4-column layout) and how
 			// many of them are the base grid (the frame signature; 0 = all).
-			std::vector<float> tileX, tileY;
-			std::vector<uint32_t> tileOriginX, tileOriginY;   // pixel top-left origin per tile (for non-aliasing BandMemo crop keys)
+			std::vector<float> tileX, tileY; std::vector<uint32_t> tileOriginX, tileOriginY;
 			int baseTiles = 0;
 			int tileSize = kTile;
 			double blackLevel = 64.0 / 1023.0;
@@ -928,8 +924,7 @@ namespace SourceResolutionMonitor
 		double clockSeconds = 0.0, secondsPerFrame = 0.0, panPixelsPerFrame = 0.0;
 		double disengageSince = 0.0;
 		unsigned long long disengageCuts = 0;
-		unsigned long long disengageFrames = 0;
-		std::atomic<VpSkeleton::SkeletonMemo*> bandMemo{ nullptr };
+		unsigned long long disengageFrames = 0; std::atomic<VpSkeleton::SkeletonMemo*> bandMemo{ nullptr };
 	};
 
 	// The stats-line / status text.
