@@ -642,6 +642,9 @@ namespace VideoProcessorTest
 		// S1-M1 (Pass-A MED): SyncHostFromImpl must unify capture and timed-file arrival so a cold-Original HostBinding
 		// (OriginalPathwayOf == true) with a fresh IngressState (m_originalPathway == false) immediately clears to VP-V
 		// when VP-V FixSwitchBits are published, binds implHost for paused/idle SettingsApplied, and re-binds after GpuReleased.
+		BEGIN_TEST_METHOD_ATTRIBUTE(SyncHostFromImplClearsStaleOriginalPathwayAndRebindsAfterGpuReleased)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")   // lifecycle enum only: no GPU device
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(SyncHostFromImplClearsStaleOriginalPathwayAndRebindsAfterGpuReleased)
 		{
 			RunningPathwayGuard latchGuard;
