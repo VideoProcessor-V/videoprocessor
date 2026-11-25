@@ -787,7 +787,7 @@ inline void AppendCameraProducts(std::vector<ProductDecl>& decls)
 
     // P7: the per-frame global camera fit; its own previous frame seeds the temporal fit (history 1).
     // VariantKey{ param0 = 1 } (kAxisParam0): the pair-global sub-record (motion/estimation/global_model/PairGlobalFill.h;
-    // CPU PairGlobal POD and GPU 1x1 RGBA32F globalVector/globalSecond view).
+    // CPU PairGlobal POD and GPU 1x1 RGBA16F globalVector/globalSecond view).
     ProductDecl p7 = Make(kP7CameraFit, "p7_camera_fit", "camera fit", Backend::Cpu, 1, Tier::T0, content,
                           Bit(kSettingsMotion));
     // G-A3 (coordinator decision 2026-11-08, camera ahead fit): the fit reads only the UNGUIDED P2 pair, through IVectorEngine::FlowOf,

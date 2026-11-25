@@ -2153,6 +2153,8 @@ if (q.x < size.x && q.y < size.y) {
 	{
 		skeletonMemo = memo;
 		skeletonSeq = seq;
+		if (inner)
+			inner->SetSkeletonMemo(memo, seq);
 	}
 
 	Settings MotionWarp::Scaled(const Settings& given, int inputHeight)
@@ -3941,19 +3943,15 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			std::shared_ptr<const CameraModel::GuidanceFrame>& g;
 			~GuidanceClear() { g.reset(); }
 		} guidanceClear{ cameraGuidance };
-		cameraGuidanceUse = CameraGuidanceUse();
-		lastPairGlobalFallback = FallbackCatalog::PairGlobalUnavailable(false);
-		if (inner)
-		{
-			inner->cameraGuidanceUse = CameraGuidanceUse();
-			inner->lastPairGlobalFallback = FallbackCatalog::PairGlobalUnavailable(false);
-		}
+		VpSkeleton::AcquireResult pairGlobalPin;   // U10: keeps any acquired kP7CameraFit memo GPU pin alive across Search/Refine/FrameTrust
 		ReleaseBorrowed();   // B3: last pair's product levels go back; this pair's are bound after EnsureTextures
 		estimated = false;
-		// F2: cleared on EVERY Estimate, for this instance and its lowRes inners (an Estimate that fails before the inner
-		// runs must not leave the inner's last "seeded" standing); set below only where the seed stands in for the first sweep.
+		// F2 + U10: cleared on EVERY Estimate, for this instance and all lowRes inners (4K & 8K) so an Estimate that fails
+		// before an inner runs must not leave stale seeded / guidance / pair-global fallback state standing.
 		for (MotionWarp* w = this; w; w = w->inner.get())
 		{
+			w->cameraGuidanceUse = CameraGuidanceUse();
+			w->lastPairGlobalFallback = FallbackCatalog::PairGlobalUnavailable(false);
 			w->seedFed = false;
 			w->seedSkipped = false;
 		}
@@ -4158,7 +4156,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 				const GpuAttribution::SuppressPrivateCopyScope warmUpD1(warmUpEstimate ? "U10" : nullptr);
 				pgOk = VpMotion::AcquireOrFillPairGlobalGpu(skeletonMemo, pairSeq,
 					opticalFlowUsed ? &directPairRecord : nullptr, pgIn, pgCtx,
-					pgRecord, pgOutcome, lastPairGlobalFallback, error);
+					pgRecord, pgOutcome, lastPairGlobalFallback, error, nullptr, &pairGlobalPin);
 			}
 			if (pgOutcome.engineGlobalFallback)
 				++globalFallbacks;

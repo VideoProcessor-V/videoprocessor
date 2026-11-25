@@ -4,7 +4,7 @@
 
 // motion/estimation/global_model: the OWNER FILL of kP7CameraFit's pair-global sub-record (U10 C1; VariantKey{ param0 = 1 },
 // kAxisParam0) for both AcquireForm::Cpu (80-byte deterministic little-endian PairGlobal POD) and AcquireForm::Gpu
-// (zero-copy 1x1 RGBA32F globalVector / globalSecond view).
+// (zero-copy 1x1 RGBA16F globalVector / globalSecond view).
 // Contract (coreplan-C8-10-U10.md):
 //   - Owner unit: "motion/estimation/global_model" (ProductCatalog.h kP7CameraFit row).
 //   - Variant axis: kAxisParam0 only; param0 == 1 is the pair-global sub-record. Any other param0 value declines visibly;
@@ -367,11 +367,13 @@ namespace VpMotion
 		return true;
 	}
 
-	// Zero-copy GPU view of the 1x1 RGBA32F globalVector / globalSecond textures plus the decoded PairGlobal record.
+	// Zero-copy GPU view of the 1x1 RGBA16F globalVector / globalSecond textures plus the decoded PairGlobal record.
 	struct PairGlobalGpuView
 	{
-		pl_tex globalVector = nullptr;
-		pl_tex globalSecond = nullptr;
+		pl_tex globalVector = nullptr;      // forward [0]
+		pl_tex globalSecond = nullptr;      // forward second [0]
+		pl_tex globalVectorBwd = nullptr;   // backward [1]
+		pl_tex globalSecondBwd = nullptr;   // backward second [1]
 		PairGlobal record;
 		PairGlobalSelectionOutcome outcome;
 		bool hasOutcome = false;
@@ -454,7 +456,7 @@ namespace VpMotion
 	{
 		VpSkeleton::OwnerFill f;
 		f.variantAxes = VpSkeleton::VariantKey::kAxisParam0;
-		f.view = true;               // zero-copy view of 1x1 RGBA32F globalVector / globalSecond (0 extra VRAM bytes)
+		f.view = true;               // zero-copy view of 1x1 RGBA16F globalVector / globalSecond (0 extra VRAM bytes)
 		f.frameScoped = true;        // valid only for the current render frame (released at the next OnSeal)
 		f.renderThreadOnly = true;   // GPU handles are render-thread only
 		f.fill = [fn](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo& memo, VpSkeleton::OwnerFillOutput& out) {
@@ -558,6 +560,23 @@ namespace VpMotion
 		if (outResult != nullptr)
 			*outResult = std::move(r);
 		return ok;
+	}
+
+	// Registers ONLY the CPU kP7CameraFit pair-global owner fill under kPairGlobalUnit with the skeleton found via the
+	// hub (or an injected demand in tests). Used when no GPU pair-global provider is bound so
+	// memo->HasOwnerFill(kP7CameraFit, Gpu) stays cleanly false (no stub decline pollution in memo->Decisions()).
+	inline bool TryRegisterPairGlobalCpuFill(Vpv::Skeleton::IExternalDemand* demand = nullptr,
+		PairGlobalCpuFn cpuFn = PairGlobalCpuFn())
+	{
+		if (demand == nullptr)
+			demand = static_cast<Vpv::Skeleton::IExternalDemand*>(
+				Vpv::Hub::ExtensionHub::Instance().Query(Vpv::Skeleton::kExternalDemandQueryId));
+		if (demand == nullptr)
+			return false;
+		const VpSkeleton::SkeletonMemo::Registration cpuReg = demand->RegisterOwnerFill(
+			VpSkeleton::kP7CameraFit, VpSkeleton::AcquireForm::Cpu, kPairGlobalUnit, MakeP7PairGlobalCpuOwnerFill(std::move(cpuFn)));
+		return cpuReg == VpSkeleton::SkeletonMemo::Registration::Registered
+			|| cpuReg == VpSkeleton::SkeletonMemo::Registration::AlreadyRegistered;
 	}
 
 	// Registers BOTH the CPU and GPU kP7CameraFit pair-global owner fills under kPairGlobalUnit with the skeleton found via the
@@ -796,10 +815,14 @@ namespace VpMotion
 		PairGlobalSelectionOutcome& outOutcome,
 		FallbackCatalog::Decision& outFallback,
 		std::string& outError,
-		bool* outUsedMemoGpu = nullptr)
+		bool* outUsedMemoGpu = nullptr,
+		VpSkeleton::AcquireResult* outMemoPin = nullptr)
 	{
+		outError.clear();
 		if (outUsedMemoGpu != nullptr)
 			*outUsedMemoGpu = false;
+		if (outMemoPin != nullptr)
+			*outMemoPin = VpSkeleton::AcquireResult();
 
 		if (!in.cutOrFlash && in.globalPrior && memo != nullptr
 			&& memo->HasOwnerFill(VpSkeleton::kP7CameraFit, VpSkeleton::AcquireForm::Gpu))
@@ -809,6 +832,65 @@ namespace VpMotion
 			FallbackCatalog::Decision acqFallback;
 			if (AcquirePairGlobalGpu(*memo, seq, view, &res, &acqFallback))
 			{
+				const pl_tex srcVec[2] = { view.globalVector, view.globalVectorBwd };
+				const pl_tex srcSec[2] = { view.globalSecond, view.globalSecondBwd };
+				auto copyOne = [&](pl_tex src, pl_tex dst, const char* label) -> bool {
+					if (!src || !dst || src == dst)
+						return true;
+					if (!ctx.dispatch)
+					{
+						outError = "pair global: missing dispatch callback for memo gpu copy";
+						return false;
+					}
+					static const char* const kCopyOneBody =
+						"if (gl_GlobalInvocationID.x == 0u && gl_GlobalInvocationID.y == 0u) imageStore(dst, ivec2(0), texelFetch(src, ivec2(0), 0));\n";
+					const pl_shader_desc copyDesc[2] = {
+						MatcherGlobalD1::Sampled("src", src, false),
+						MatcherGlobalD1::Storage("dst", dst)
+					};
+					if (!ctx.dispatch(label, nullptr, kCopyOneBody, copyDesc, 2, nullptr, 0, 1, 1, 1))
+					{
+						if (outError.empty())
+							outError = std::string("dispatch failed: ") + label;
+						return false;
+					}
+					return true;
+				};
+				if (ctx.globalVector != nullptr)
+				{
+					if (ctx.globalVector[0] != nullptr && srcVec[0] != ctx.globalVector[0]
+						&& ctx.globalVector[1] != nullptr && srcVec[1] == nullptr)
+					{
+						outRecord = PairGlobal();
+						outOutcome = PairGlobalSelectionOutcome();
+						outError = "pair global: memo gpu view missing backward texture";
+						outFallback = FallbackCatalog::PairGlobalUnavailable(true, outError);
+						return false;
+					}
+					for (int d = 0; d < 2; ++d)
+					{
+						if (!copyOne(srcVec[d], ctx.globalVector[d], "VideoProcessor de-judder: global motion (memo gpu view)"))
+						{
+							outRecord = PairGlobal();
+							outOutcome = PairGlobalSelectionOutcome();
+							outFallback = FallbackCatalog::PairGlobalUnavailable(true, outError);
+							return false;
+						}
+					}
+				}
+				if (ctx.twoCandidates && ctx.globalSecond != nullptr)
+				{
+					for (int d = 0; d < 2; ++d)
+					{
+						if (!copyOne(srcSec[d], ctx.globalSecond[d], "VideoProcessor de-judder: global motion second (memo gpu view)"))
+						{
+							outRecord = PairGlobal();
+							outOutcome = PairGlobalSelectionOutcome();
+							outFallback = FallbackCatalog::PairGlobalUnavailable(true, outError);
+							return false;
+						}
+					}
+				}
 				outRecord = view.record;
 				if (view.hasOutcome)
 				{
@@ -827,6 +909,8 @@ namespace VpMotion
 				}
 				outFallback = acqFallback;
 				outError.clear();
+				if (outMemoPin != nullptr)
+					*outMemoPin = std::move(res);
 				if (outUsedMemoGpu != nullptr)
 					*outUsedMemoGpu = true;
 				return true;
@@ -849,7 +933,7 @@ namespace VpMotion
 	}
 
 	// Convenience overload: loads engine global via LoadEngineGlobalFromP2 (kP2VectorPair when memo != nullptr,
-	// else directP2Fallback) before executing AcquireOrFillPairGlobalGpu.
+	// else directP2Fallback) only when engine global is eligible, before executing AcquireOrFillPairGlobalGpu.
 	inline bool AcquireOrFillPairGlobalGpu(
 		VpSkeleton::SkeletonMemo* memo,
 		uint64_t seq,
@@ -860,9 +944,13 @@ namespace VpMotion
 		PairGlobalSelectionOutcome& outOutcome,
 		FallbackCatalog::Decision& outFallback,
 		std::string& outError,
-		bool* outUsedMemoGpu = nullptr)
+		bool* outUsedMemoGpu = nullptr,
+		VpSkeleton::AcquireResult* outMemoPin = nullptr)
 	{
-		LoadEngineGlobalFromP2(memo, seq, directP2Fallback, in);
-		return AcquireOrFillPairGlobalGpu(memo, seq, in, ctx, outRecord, outOutcome, outFallback, outError, outUsedMemoGpu);
+		if (!in.cutOrFlash && in.globalPrior && !in.useModelGlobal && in.opticalFlowGlobal && in.seeded)
+			LoadEngineGlobalFromP2(memo, seq, directP2Fallback, in);
+		else
+			in.engineValid = false;
+		return AcquireOrFillPairGlobalGpu(memo, seq, in, ctx, outRecord, outOutcome, outFallback, outError, outUsedMemoGpu, outMemoPin);
 	}
 }

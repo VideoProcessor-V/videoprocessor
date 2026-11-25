@@ -41,7 +41,7 @@
 #include <utility>
 #include <vector>
 
-namespace VpSkeleton { class QueueWindowBoard; }   // core/QueueWindow.h (QKP E: the lease window's bound)
+namespace VpSkeleton { class QueueWindowBoard; class SkeletonMemo; }   // core/QueueWindow.h, core/SkeletonAcquire.h
 
 namespace VpMotion
 {
@@ -309,8 +309,9 @@ namespace VpMotion
 			NoteEstimated(done, aSequence, bSequence, epochAtChoice);
 			return done;
 		}
-		unsigned long long PreEstimateHookFailures() const { return hookFailures_.failures; }
-		bool PreEstimateHooked() const { return preEstimateHook_.load(std::memory_order_acquire) != nullptr; }
+		unsigned long long PreEstimateHookFailures() const;
+		bool PreEstimateHooked() const;
+		VpSkeleton::SkeletonMemo* SkeletonMemoFor(uint64_t seq) const;
 		// The optical-flow engine's whole-frame motion of the pair the matcher took ahead (flow->global[0], D1 format:
 		// 1/8-size texels, z ambiguity, w written); null = no producer pair. CPU record for EngineGlobal only.
 		void NoteEngineGlobal(uint64_t from, uint64_t to, const float* global, int searchHalvings);
@@ -391,7 +392,7 @@ namespace VpMotion
 		// calls it without a lock); the hook object may be destroyed only after the clear has returned.
 		void SetPreEstimateHook(IPreEstimateHook* hook) override { preEstimateHook_.store(hook, std::memory_order_release); }
 		void SetCameraFitWanted(bool wanted) override { cameraFitWanted_.store(wanted, std::memory_order_release); }
-		bool CameraFitWanted() const { return cameraFitWanted_.load(std::memory_order_acquire); }
+		bool CameraFitWanted() const;
 		// W2-C1 (C1-4) TEST SEAM (rule 25; README "One motion-engine state"): every producer start fails with this reason, as NVOF
 		// does on an adapter or size it cannot serve, without a device (PlanProducer then treats the device as present). Empty (the
 		// default; nothing in the product sets it) = the real start. CPU tests only: EngineAbsentPipelineTests scenario 2.

@@ -1000,6 +1000,27 @@ namespace VpMotion
 		return FallbackCatalog::Released(hookFailures_.id);
 	}
 
+	unsigned long long VectorEngine::PreEstimateHookFailures() const
+	{
+		return hookFailures_.failures;
+	}
+
+	bool VectorEngine::PreEstimateHooked() const
+	{
+		return preEstimateHook_.load(std::memory_order_acquire) != nullptr;
+	}
+
+	bool VectorEngine::CameraFitWanted() const
+	{
+		return cameraFitWanted_.load(std::memory_order_acquire);
+	}
+
+	VpSkeleton::SkeletonMemo* VectorEngine::SkeletonMemoFor(uint64_t seq) const
+	{
+		const Vpv::Skeleton::FrameMemo fm = Vpv::Skeleton::MemoForHost(host_, seq);
+		return fm.Valid() ? fm.memo.get() : nullptr;
+	}
+
 	void VectorEngine::NoteEngineGlobal(uint64_t from, uint64_t to, const float* global, int searchHalvings)
 	{
 		// A caller without the pair's sample: sampled here (usable does not depend on the picture height).

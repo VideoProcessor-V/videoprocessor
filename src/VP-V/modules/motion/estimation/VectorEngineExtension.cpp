@@ -68,7 +68,7 @@ namespace VpMotion
 			return false;
 		if (!p3Registered_.load(std::memory_order_acquire) && TryRegisterP3FieldFill())
 			p3Registered_.store(true, std::memory_order_release);
-		if (!pairGlobalRegistered_.load(std::memory_order_acquire) && TryRegisterPairGlobalFills())
+		if (!pairGlobalRegistered_.load(std::memory_order_acquire) && TryRegisterPairGlobalCpuFill())
 			pairGlobalRegistered_.store(true, std::memory_order_release);
 		return false;
 	}

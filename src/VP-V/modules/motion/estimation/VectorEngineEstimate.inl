@@ -396,9 +396,12 @@ bool LibplaceboVideoRenderer::Impl::RunDejudderEstimate(const Dejudder::Planes& 
 	// and reads what it did right after. No hook registered (camera guidance off) = the matcher's Estimate only, as
 	// before: nothing bound, no extra GPU work. Never for the warm-up's dummy A -> A estimate.
 	dejudder->SetWarmUp(vectorEstimate.motionEngineWarming);
+	dejudder->SetSkeletonMemo(vectorEngine.SkeletonMemoFor(bSequence), bSequence);
 	const bool motionEstimated = vectorEngine.Estimate(aSequence, bSequence, ahead, dejudderSourceHz, motionShadowEpoch,
 		!vectorEstimate.motionEngineWarming, *dejudder, [&]() { return dejudder->Estimate(sa, sb, maskSlot, adaptiveGrainMapWanted); },
 		[this](const FallbackCatalog::Decision& decision) { SyncFallback(decision); });
+	dejudder->SetSkeletonMemo(nullptr, 0);
+	SyncFallback(dejudder->LastPairGlobalFallback());
 	dejudder->SetWarmUp(false);
 	if (motionEstimated && !vectorEstimate.motionEngineWarming)
 		++vectorEngine.WorkCounters().matcherEstimates;   // W2-C1 (B9): the warm-up's dummy estimate is counted as a warm-up
