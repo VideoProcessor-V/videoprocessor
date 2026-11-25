@@ -2920,18 +2920,34 @@ namespace Gpu
 			{
 				const bool memoIsHalf = (p.curLowBandTex->params.w == wHalf && p.curLowBandTex->params.h == hHalf &&
 				                         (wHalf != w || hHalf != h));
-				const int rHDiff = VpUnit::BandFromBase::BandRadius(
-					0.5 * std::sqrt(VpUnit::BandFromBase::kSigmaLow * VpUnit::BandFromBase::kSigmaLow -
-					                VpUnit::BandFromBase::kSigmaBase * VpUnit::BandFromBase::kSigmaBase));
-				const size_t hDiffDim = static_cast<size_t>(10 + 2 * rHDiff);
-				const size_t shmemMemo = (fineTileDim * fineTileDim + fineTileDim * 16u +
-				                          hDiffDim * hDiffDim + hDiffDim * 10u + 100u) * sizeof(float);
+				// OPUS-L1: In Preset::Reference with full-res curLowBandTex, compute exact full-res G(sqrt(6.0^2 - 2.5^2)) D3
+				// directly in LDS (16.2 KB) instead of 2x2 box downsampling!
+				const bool memoFullD3 = (!compactBands && !memoIsHalf);
+				const double sigmaDiff = std::sqrt(
+					VpUnit::BandFromBase::kSigmaLow * VpUnit::BandFromBase::kSigmaLow -
+					VpUnit::BandFromBase::kSigmaBase * VpUnit::BandFromBase::kSigmaBase);
+				size_t shmemMemo = 0;
+				if (memoFullD3)
+				{
+					const int rFDiff = VpUnit::BandFromBase::BandRadius(sigmaDiff);
+					const size_t fDiffDim = static_cast<size_t>(16 + 2 * rFDiff);
+					shmemMemo = (fineTileDim * fineTileDim + fineTileDim * 16u +
+					             fDiffDim * fDiffDim + fDiffDim * 16u) * sizeof(float);
+				}
+				else
+				{
+					const int rHDiff = VpUnit::BandFromBase::BandRadius(0.5 * sigmaDiff);
+					const size_t hDiffDim = static_cast<size_t>(10 + 2 * rHDiff);
+					shmemMemo = (fineTileDim * fineTileDim + fineTileDim * 16u +
+					             hDiffDim * hDiffDim + hDiffDim * 10u + 100u) * sizeof(float);
+				}
 
 				std::string memoHdr = staticGeom;
 				memoHdr += VpvGpu::DefineInt("TD_MEMO_COMPACT", compactBands ? 1 : 0);
 				memoHdr += VpvGpu::DefineInt("TD_MEMO_IS_HALF", memoIsHalf ? 1 : 0);
+				memoHdr += VpvGpu::DefineInt("TD_MEMO_FULL_D3", memoFullD3 ? 1 : 0);
 				memoHdr += Shaders::BuildFineTapHeader();
-				memoHdr += Shaders::BuildHalfDiffTapHeader();
+				memoHdr += memoFullD3 ? Shaders::BuildFullDiffTapHeader() : Shaders::BuildHalfDiffTapHeader();
 				memoHdr += Shaders::kCoreHelpers;
 				memoHdr += Shaders::kHalfBandSamplerHelper;
 				memoHdr += Shaders::kPass1BandFromMemoHeader;
@@ -3072,6 +3088,7 @@ namespace Gpu
 			{
 				std::string p2aHdr = staticGeom;
 				p2aHdr += VpvGpu::DefineInt("TD_COMPACT_BANDS", compactBands ? 1 : 0);
+				p2aHdr += VpvGpu::DefineInt("TD_EDGE_AWARE_UPSAMPLE", cfg_.enableEdgeAwareWeightUpsample ? 1 : 0);
 				p2aHdr += VpvGpu::Define("TD_GAIN_MID", gains.mid);
 				p2aHdr += VpvGpu::Define("TD_GAIN_D3", gains.d3);
 				p2aHdr += VpvGpu::Define("TD_F_SHARP", fSharp);

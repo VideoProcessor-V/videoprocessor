@@ -2073,7 +2073,8 @@ else
 		bool ScratchShort() const { return scratchShort_; }
 
 		static std::vector<VpSkeleton::ArenaRequest> ArenaRequests(
-			pl_gpu gpu, int lumaW, int lumaH, ChromaSubsampling codedSubsampling, int cellPx = kCanonicalBlockPx)
+			pl_gpu gpu, int lumaW, int lumaH, ChromaSubsampling codedSubsampling, int cellPx = kCanonicalBlockPx,
+			ChromaGridStatus gridStatus = ChromaGridStatus::Identified)
 		{
 			if (!gpu || lumaW <= 0 || lumaH <= 0)
 				return {};
@@ -2083,14 +2084,19 @@ else
 			{
 				return {};
 			}
-			return ChromaGpuDetail::BuildChromaArenaRequests(lumaW, lumaH, codedSubsampling, cellPx, true);
+			// OPUS-M1: When gridStatus == Unidentified and deliveredFormat is unspecified, conservatively size for full 4:4:4
+			// so arena-backed Unidentified 4:2:2 / 4:4:4 / RGB frames never hit GpuScratchShortage.
+			const ChromaSubsampling effCodedSub =
+				(gridStatus == ChromaGridStatus::Unidentified) ? ChromaSubsampling::Yuv444 : codedSubsampling;
+			return ChromaGpuDetail::BuildChromaArenaRequests(lumaW, lumaH, effCodedSub, cellPx, true);
 		}
 
-		// TD-AUDIT-L2: Format-aware ArenaRequests omits the 3 coded-grid reduction scratch textures (-47..190 MiB at 4K!)
-		// whenever deliveredFormat is native YUV matching codedSubsampling (zero Pass C0 reduction dispatches).
+		// TD-AUDIT-L2 + OPUS-M1: Format-aware ArenaRequests omits the 3 coded-grid reduction scratch textures (-47..190 MiB at 4K!)
+		// whenever deliveredFormat is native YUV matching the effective coded grid, and sizes Unidentified grids for full delivered resolution.
 		static std::vector<VpSkeleton::ArenaRequest> ArenaRequests(
 			pl_gpu gpu, int lumaW, int lumaH, ChromaSubsampling codedSubsampling,
-			DeliveredChromaFormat deliveredFormat, int cellPx = kCanonicalBlockPx)
+			DeliveredChromaFormat deliveredFormat, int cellPx = kCanonicalBlockPx,
+			ChromaGridStatus gridStatus = ChromaGridStatus::Identified)
 		{
 			if (!gpu || lumaW <= 0 || lumaH <= 0)
 				return {};
@@ -2100,28 +2106,36 @@ else
 			{
 				return {};
 			}
-			const bool needReduce = (deliveredFormat == DeliveredChromaFormat::Rgb444) ||
-			                        (codedSubsampling != DeliveredSubsampling(deliveredFormat));
-			return ChromaGpuDetail::BuildChromaArenaRequests(lumaW, lumaH, codedSubsampling, cellPx, needReduce);
+			const ChromaSubsampling delivSub = DeliveredSubsampling(deliveredFormat);
+			const ChromaSubsampling effCodedSub =
+				(gridStatus == ChromaGridStatus::Unidentified) ? delivSub : codedSubsampling;
+			const bool needReduce = (deliveredFormat == DeliveredChromaFormat::Rgb444) || (effCodedSub != delivSub);
+			return ChromaGpuDetail::BuildChromaArenaRequests(lumaW, lumaH, effCodedSub, cellPx, needReduce);
 		}
 
 		static uint64_t EstimatedScratchVramBytes(
-			int lumaW, int lumaH, ChromaSubsampling codedSubsampling, int cellPx = kCanonicalBlockPx)
+			int lumaW, int lumaH, ChromaSubsampling codedSubsampling, int cellPx = kCanonicalBlockPx,
+			ChromaGridStatus gridStatus = ChromaGridStatus::Identified)
 		{
+			const ChromaSubsampling effCodedSub =
+				(gridStatus == ChromaGridStatus::Unidentified) ? ChromaSubsampling::Yuv444 : codedSubsampling;
 			uint64_t total = 0;
-			for (const VpSkeleton::ArenaRequest& r : ChromaGpuDetail::BuildChromaArenaRequests(lumaW, lumaH, codedSubsampling, cellPx, true))
+			for (const VpSkeleton::ArenaRequest& r : ChromaGpuDetail::BuildChromaArenaRequests(lumaW, lumaH, effCodedSub, cellPx, true))
 				total += VpSkeleton::ShapeBytes(r.shape) * static_cast<uint64_t>(r.count);
 			return total;
 		}
 
 		static uint64_t EstimatedScratchVramBytesFor(
 			int lumaW, int lumaH, ChromaSubsampling codedSubsampling,
-			DeliveredChromaFormat deliveredFormat, int cellPx = kCanonicalBlockPx)
+			DeliveredChromaFormat deliveredFormat, int cellPx = kCanonicalBlockPx,
+			ChromaGridStatus gridStatus = ChromaGridStatus::Identified)
 		{
-			const bool needReduce = (deliveredFormat == DeliveredChromaFormat::Rgb444) ||
-			                        (codedSubsampling != DeliveredSubsampling(deliveredFormat));
+			const ChromaSubsampling delivSub = DeliveredSubsampling(deliveredFormat);
+			const ChromaSubsampling effCodedSub =
+				(gridStatus == ChromaGridStatus::Unidentified) ? delivSub : codedSubsampling;
+			const bool needReduce = (deliveredFormat == DeliveredChromaFormat::Rgb444) || (effCodedSub != delivSub);
 			uint64_t total = 0;
-			for (const VpSkeleton::ArenaRequest& r : ChromaGpuDetail::BuildChromaArenaRequests(lumaW, lumaH, codedSubsampling, cellPx, needReduce))
+			for (const VpSkeleton::ArenaRequest& r : ChromaGpuDetail::BuildChromaArenaRequests(lumaW, lumaH, effCodedSub, cellPx, needReduce))
 				total += VpSkeleton::ShapeBytes(r.shape) * static_cast<uint64_t>(r.count);
 			return total;
 		}
