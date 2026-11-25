@@ -3851,6 +3851,207 @@ imageStore(out_rgb, p, vec4(nrgb, float(diagFlags)));
 imageStore(out_delta, p, vec4(delta, 0.0, 0.0));
 )GLSL";
 
+	// ---- TD-U1: GPU Cell-Grid Quality & Own-Error Evidence Reduction (AlignedSharpness + NonBlockPictureStep) ----
+	// Dispatch: TD_CW x TD_CH workgroups of 16x16 (1 WG per 16x16 cell).
+	// Output quality_cells (TD_CW x TD_CH RGBA32F):
+	//   .x = E_cur (grain-corrected M+H energy of current cell)
+	//   .y = E_prev_debiased (grain-corrected M+H/beta_HP energy of warped previous cell)
+	//   .z = grid-free NonBlockPictureStep (plateau staircase jump + scale-invariant dead-zone deficit)
+	//   .w = cell flags (bit0 = trusted & textured & !focusFlagged, bit1 = textured activity class, bit2 = nonFinite)
+	constexpr const char* kPassQualityEvidenceHeader = R"GLSL(
+shared float td_qe_cur_m[256];
+shared float td_qe_cur_h[256];
+shared float td_qe_prv_m[256];
+shared float td_qe_prv_h[256];
+shared float td_qe_stair_sum[256];
+shared float td_qe_stair_cnt[256];
+shared float td_qe_px_cnt[256];
+shared uint td_qe_bad[256];
+)GLSL";
+
+	constexpr const char* kPassQualityEvidenceReduce = R"GLSL(
+ivec2 cell = ivec2(gl_WorkGroupID.xy);
+if (cell.x >= TD_CW || cell.y >= TD_CH)
+    return;
+int lx = int(gl_LocalInvocationID.x);
+int ly = int(gl_LocalInvocationID.y);
+int tid = ly * 16 + lx;
+
+int ax0 = int(round(u_ax0));
+int ay0 = int(round(u_ay0));
+int ax1 = int(round(u_ax1));
+int ay1 = int(round(u_ay1));
+bool hasPrev = (u_has_prev_bands > 0.5);
+float halfLsb = u_half_lsb;
+
+float sCurM = 0.0, sCurH = 0.0, sPrvM = 0.0, sPrvH = 0.0;
+float sStair = 0.0, sStairCnt = 0.0, sCnt = 0.0;
+uint badFlag = 0u;
+
+int px = cell.x * TD_CELL_PX + lx;
+int py = cell.y * TD_CELL_PX + ly;
+if (lx < TD_CELL_PX && ly < TD_CELL_PX && px >= ax0 && px < ax1 && py >= ay0 && py < ay1)
+{
+    ivec2 p = ivec2(px, py);
+    vec4 cb = texelFetch(cur_bands, p, 0);
+    float cv = texelFetch(cur_clean, p, 0).x;
+    if (td_is_bad(cb.y) || td_is_bad(cb.z) || td_is_bad(cv))
+    {
+        badFlag = 1u;
+    }
+    else
+    {
+        sCurM = cb.y * cb.y;
+        sCurH = cb.z * cb.z;
+        sCnt = 1.0;
+        if (hasPrev)
+        {
+            vec4 pb = texelFetch(prev_bands, p, 0);
+            if (!td_is_bad(pb.y) && !td_is_bad(pb.z))
+            {
+                sPrvM = pb.y * pb.y;
+                sPrvH = pb.z * pb.z;
+            }
+            else
+            {
+                badFlag = 1u;
+            }
+        }
+        // Grid-free horizontal plateau-to-plateau staircase jump (ZERO x % 8 / y % 8 checks).
+        if (px >= ax0 + 2 && px + 1 < ax1)
+        {
+            float vm2 = texelFetch(cur_clean, ivec2(px - 2, py), 0).x;
+            float vm1 = texelFetch(cur_clean, ivec2(px - 1, py), 0).x;
+            float vp1 = texelFetch(cur_clean, ivec2(px + 1, py), 0).x;
+            if (!td_is_bad(vm2) && !td_is_bad(vm1) && !td_is_bad(vp1))
+            {
+                if (abs(vm1 - vm2) <= halfLsb && abs(vp1 - cv) <= halfLsb)
+                {
+                    float j = abs(cv - vm1);
+                    if (j > halfLsb) { sStair += j; sStairCnt += 1.0; }
+                }
+                else if (px + 2 < ax1)
+                {
+                    float vp2 = texelFetch(cur_clean, ivec2(px + 2, py), 0).x;
+                    if (!td_is_bad(vp2) && abs(vm1 - vm2) <= halfLsb && abs(vp2 - vp1) <= halfLsb)
+                    {
+                        float j2 = abs(vp1 - vm1);
+                        if (j2 > halfLsb) { sStair += j2; sStairCnt += 1.0; }
+                    }
+                }
+            }
+        }
+        // Grid-free vertical plateau-to-plateau staircase jump.
+        if (py >= ay0 + 2 && py + 1 < ay1)
+        {
+            float vm2 = texelFetch(cur_clean, ivec2(px, py - 2), 0).x;
+            float vm1 = texelFetch(cur_clean, ivec2(px, py - 1), 0).x;
+            float vp1 = texelFetch(cur_clean, ivec2(px, py + 1), 0).x;
+            if (!td_is_bad(vm2) && !td_is_bad(vm1) && !td_is_bad(vp1))
+            {
+                if (abs(vm1 - vm2) <= halfLsb && abs(vp1 - cv) <= halfLsb)
+                {
+                    float j = abs(cv - vm1);
+                    if (j > halfLsb) { sStair += j; sStairCnt += 1.0; }
+                }
+                else if (py + 2 < ay1)
+                {
+                    float vp2 = texelFetch(cur_clean, ivec2(px, py + 2), 0).x;
+                    if (!td_is_bad(vp2) && abs(vm1 - vm2) <= halfLsb && abs(vp2 - vp1) <= halfLsb)
+                    {
+                        float j2 = abs(vp1 - vm1);
+                        if (j2 > halfLsb) { sStair += j2; sStairCnt += 1.0; }
+                    }
+                }
+            }
+        }
+    }
+}
+
+td_qe_cur_m[tid] = sCurM;
+td_qe_cur_h[tid] = sCurH;
+td_qe_prv_m[tid] = sPrvM;
+td_qe_prv_h[tid] = sPrvH;
+td_qe_stair_sum[tid] = sStair;
+td_qe_stair_cnt[tid] = sStairCnt;
+td_qe_px_cnt[tid] = sCnt;
+td_qe_bad[tid] = badFlag;
+memoryBarrierShared();
+barrier();
+
+for (int stride = 128; stride > 0; stride >>= 1)
+{
+    if (tid < stride)
+    {
+        td_qe_cur_m[tid] += td_qe_cur_m[tid + stride];
+        td_qe_cur_h[tid] += td_qe_cur_h[tid + stride];
+        td_qe_prv_m[tid] += td_qe_prv_m[tid + stride];
+        td_qe_prv_h[tid] += td_qe_prv_h[tid + stride];
+        td_qe_stair_sum[tid] += td_qe_stair_sum[tid + stride];
+        td_qe_stair_cnt[tid] += td_qe_stair_cnt[tid + stride];
+        td_qe_px_cnt[tid] += td_qe_px_cnt[tid + stride];
+        td_qe_bad[tid] |= td_qe_bad[tid + stride];
+    }
+    memoryBarrierShared();
+    barrier();
+}
+
+if (tid == 0)
+{
+    float cnt = td_qe_px_cnt[0];
+    if (cnt <= 0.5 || td_qe_bad[0] != 0u)
+    {
+        imageStore(quality_cells, cell, vec4(0.0, 0.0, 0.0, (td_qe_bad[0] != 0u) ? 4.0 : 0.0));
+        return;
+    }
+    float invC = 1.0 / cnt;
+    float eCurM = td_qe_cur_m[0] * invC;
+    float eCurH = td_qe_cur_h[0] * invC;
+    float ePrvM = td_qe_prv_m[0] * invC;
+    float ePrvH = td_qe_prv_h[0] * invC;
+
+    vec4 priorT = texelFetch(cell_prior, cell, 0);
+    float retGVar = (!td_is_bad(priorT.x) && priorT.x > 0.0) ? priorT.x : 0.0;
+    int focusBits = int(round(priorT.y));
+    bool focusFlagged = ((focusBits & 3) != 0);
+
+    float gM = retGVar * TD_GAIN_MID;
+    float gH = retGVar * TD_GAIN_FINE;
+    float cleanCur = max(0.0, eCurM - gM) + max(0.0, eCurH - gH);
+
+    float betaHp = 1.0;
+    bool mvTrusted = false;
+    if (hasPrev)
+    {
+        vec2 mm = texelFetch(motion_meta, cell, 0).xy;
+        vec2 mv = texelFetch(motion_vec, cell, 0).xy;
+        mvTrusted = (mm.y >= 0.5) && !td_is_bad(mv.x) && !td_is_bad(mv.y);
+        if (mvTrusted)
+            betaHp = max(td_fine_hp_warp_gain(mv), TD_NUM_FLOOR);
+    }
+    float cleanPrv = hasPrev ? (max(0.0, ePrvM - gM) + max(0.0, (ePrvH / betaHp) - gH)) : 0.0;
+
+    float stepEst = (td_qe_stair_cnt[0] > 0.5) ? (td_qe_stair_sum[0] / td_qe_stair_cnt[0]) : 0.0;
+    if (eCurM > TD_MID_TEX_FLOOR && TD_GAIN_FINE > TD_NUM_FLOOR)
+    {
+        float expectedH = eCurM * TD_NATURAL_HM_RATIO;
+        if (expectedH > eCurH)
+        {
+            float missingVar = (expectedH - eCurH) / TD_GAIN_FINE;
+            float dzStep = TD_DEADZONE_STEP_SCALE * sqrt(missingVar);
+            stepEst = max(stepEst, dzStep);
+        }
+    }
+
+    int flags = 0;
+    if (cleanCur > TD_ACT_TEX_FLOOR)
+        flags |= 2;
+    if (hasPrev && mvTrusted && !focusFlagged && cleanCur > TD_ACT_TEX_FLOOR && cleanPrv > TD_ACT_TEX_FLOOR)
+        flags |= 1;
+    imageStore(quality_cells, cell, vec4(cleanCur, cleanPrv, stepEst, float(flags)));
+}
+)GLSL";
+
 } // namespace Shaders
 } // namespace Gpu
 } // namespace TdV2

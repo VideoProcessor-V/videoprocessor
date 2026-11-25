@@ -100,6 +100,28 @@ namespace TdV2
 		return s == SolverMode::LegacyClipRescale ? "legacy-clip-rescale" : "active-set-exact";
 	}
 
+	// Picture-only frame-role & own-error signal estimator mode (TD-U1 / B-2 / Owner D1):
+	//   - AlignedSharpnessA2e (default): motion-aligned relative sharpness r_t + empirical A2e own-error prior U_j(class)
+	//   - NonBlockPictureStep: grid-free picture-only staircase-jump + fine-band dead-zone coding-step estimator (no 8-px edges)
+	//   - LegacyBlockEdge8px: original 8-px block-boundary excess gradient (optional AVC/MPEG-2 bonus cue / diagnostic)
+	enum class QualitySignalMode : uint8_t
+	{
+		AlignedSharpnessA2e = 0,
+		NonBlockPictureStep = 1,
+		LegacyBlockEdge8px = 2
+	};
+
+	inline const char* QualitySignalModeToken(QualitySignalMode q)
+	{
+		switch (q)
+		{
+		case QualitySignalMode::AlignedSharpnessA2e: return "aligned-sharpness-a2e";
+		case QualitySignalMode::NonBlockPictureStep: return "non-block-picture-step";
+		case QualitySignalMode::LegacyBlockEdge8px: return "legacy-block-edge-8px";
+		}
+		return "unknown";
+	}
+
 	// Single-codebase preset selector (99 s2B: Reference vs RealTime, every shortcut explicitly named SC-*).
 	enum class Preset : uint8_t
 	{
@@ -152,6 +174,8 @@ namespace TdV2
 		ResidualMode residualMode = ResidualMode::Cell;
 		VarianceEstimator estimator = VarianceEstimator::A3_ConservativeMin;
 		SolverMode solverMode = SolverMode::ActiveSetExact;
+		QualitySignalMode qualitySignalMode = QualitySignalMode::AlignedSharpnessA2e;
+		bool enableA2eEmpiricalPrior = true;
 		Preset preset = Preset::Reference;
 		BokehMode bokehMode = BokehMode::Untouched;
 

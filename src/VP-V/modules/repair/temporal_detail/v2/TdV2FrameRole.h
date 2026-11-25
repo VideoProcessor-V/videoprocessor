@@ -15,6 +15,8 @@
 #include <VP-V/core/Ramp.h>
 #include <VP-V/core/RobustStats.h>
 #include <VP-V/modules/input/source_analysis/identity/quality_pattern/QualityPatternRecord.h>
+#include <VP-V/modules/repair/grain_split/shared/BandFromBase.h>
+#include <VP-V/modules/repair/temporal_detail/v2/TdV2BlendMath.h>
 #include <VP-V/modules/repair/temporal_detail/v2/TdV2Config.h>
 #include <VP-V/modules/repair/temporal_detail/v2/TdV2StandIns.h>
 
@@ -325,6 +327,620 @@ namespace TdV2
 			}
 			return out;
 		}
+	};
+
+	// ---- TD-U1 (Owner D1(b)): Grid-Free Non-Block Picture-Only Coding-Step Estimator ----
+	// Does NOT rely on x % 8 == 0 or y % 8 == 0 block boundaries (works on deblocked HEVC, AV1,
+	// and rescaled 1080p->4K streams). Combines two derived quantization-physics cues:
+	//   1) Flat-plateau staircase step-comb: plateau-to-plateau jump heights |I(p) - I(p-1)| or |I(p+1) - I(p-1)|
+	//      bracketed by flat neighbors within half-LSB rounding resolution (0.5 * DepthScale).
+	//   2) Scale-invariant fine-band dead-zone deficit: compares fine-band variance E_H = Var(I - G_fine(I))
+	//      against the analytical 1/f step-edge reference E_M * (E_H_ref / E_M_ref) derived strictly from
+	//      U2 BandFromBase sigmas (kSigmaFine, kSigmaBase), mapping missing fine variance through V0 = theta^2 / 3
+	//      with theta = (1 - phi) * Delta -> Delta = sqrt(3 * missingVar / gains.fine) / (1 - phi).
+	struct TdV2NonBlockStepEstimator : public ICodingGridSource
+	{
+		CodingGridSummary Measure(
+			const double* curY,
+			const double* prev1Y,
+			const double* prev2Y,
+			int w,
+			int h,
+			int sourceBits,
+			StandInRegistry* standIns) const override
+		{
+			CodingGridSummary out;
+			if (curY == nullptr || w <= 0 || h <= 0)
+				return out;
+			if (!(PeakCodeForBits(sourceBits) > 0.0))
+			{
+				if (standIns != nullptr)
+					standIns->Engage(StandInKind::NonFiniteClosure, "TdV2NonBlockStepEstimator invalid sourceBits");
+				return out;
+			}
+
+			const size_t nPx = static_cast<size_t>(w) * static_cast<size_t>(h);
+			std::vector<double> plane(nPx, 0.0);
+			for (size_t i = 0; i < nPx; ++i)
+			{
+				if (!std::isfinite(curY[i]))
+				{
+					if (standIns != nullptr)
+						standIns->Engage(StandInKind::NonFiniteClosure, "TdV2NonBlockStepEstimator non-finite pixel");
+					return out;
+				}
+				plane[i] = curY[i];
+			}
+
+			// Compute grid-free M and H bands via shared U2 BandFromBase taps.
+			const auto tapsFine = VpUnit::BandFromBase::Taps<double>(VpUnit::BandFromBase::kSigmaFine, 3.0, true, 0.0);
+			const auto tapsBase = VpUnit::BandFromBase::Taps<double>(VpUnit::BandFromBase::kSigmaBase, 3.0, true, 0.0);
+			std::vector<double> gFine, gBase;
+			VpUnit::BandFromBase::BlurTaps(plane, gFine, w, h, tapsFine, VpUnit::BandFromBase::EdgeMode::Replicate);
+			VpUnit::BandFromBase::BlurTaps(plane, gBase, w, h, tapsBase, VpUnit::BandFromBase::EdgeMode::Replicate);
+
+			const BandWhiteNoiseGains gains = ComputeBandWhiteNoiseGains();
+			// Analytical 1D step-edge Fourier energy ratio E_H_ref / E_M_ref from BandFromBase sigmas:
+			//   E(a, b) = 2 * sqrt((a^2 + b^2) / 2) - a - b.
+			const double s1 = VpUnit::BandFromBase::kSigmaFine;
+			const double s2 = VpUnit::BandFromBase::kSigmaBase;
+			const double eHRef = 2.0 * std::sqrt(0.5 * s1 * s1) - s1;
+			const double eMRef = 2.0 * std::sqrt(0.5 * (s1 * s1 + s2 * s2)) - s1 - s2;
+			const double naturalHM = (eMRef > kRoleNumFloor) ? (eHRef / eMRef) : 1.0;
+
+			const int cellEdge = static_cast<int>(QualityPattern::kBlockGridCellEdge);
+			out.cellsW = static_cast<int>(QualityPattern::BlockGridCellsX(static_cast<uint32_t>(w)));
+			out.cellsH = static_cast<int>(QualityPattern::BlockGridCellsY(static_cast<uint32_t>(h)));
+			const size_t numCells = static_cast<size_t>(out.cellsW) * static_cast<size_t>(out.cellsH);
+			out.cells.resize(numCells);
+
+			const double depthScale = DepthScale(sourceBits);
+			const double halfLsb = kExactCopyHalfStep10Bit * depthScale;
+			const double baseQuantVar = (depthScale * depthScale) / 12.0;
+			const double midTextureFloor = 2.0 * gains.mid * baseQuantVar;
+			const double deadZoneScale = std::sqrt(3.0) / (1.0 - kDeadZonePhiInter);
+
+			std::vector<double> cellSteps;
+			cellSteps.reserve(numCells);
+			std::vector<double> stairJumps;
+			double sumStep = 0.0;
+			double maxStep = 0.0;
+			size_t copy1Count = 0;
+			size_t copy2Count = 0;
+
+			for (int cy = 0; cy < out.cellsH; ++cy)
+			{
+				const int y0 = cy * cellEdge;
+				const int y1 = (std::min)(h, y0 + cellEdge);
+				for (int cx = 0; cx < out.cellsW; ++cx)
+				{
+					const int x0 = cx * cellEdge;
+					const int x1 = (std::min)(w, x0 + cellEdge);
+					stairJumps.clear();
+					double sumMSq = 0.0;
+					double sumHSq = 0.0;
+					double copyDiff1 = 0.0;
+					double copyDiff2 = 0.0;
+					size_t pxCnt = 0;
+					bool cellNonFinite = false;
+
+					for (int y = y0; y < y1; ++y)
+					{
+						for (int x = x0; x < x1; ++x)
+						{
+							const size_t idx = static_cast<size_t>(y) * static_cast<size_t>(w) + static_cast<size_t>(x);
+							const double v = plane[idx];
+							const double mVal = gFine[idx] - gBase[idx];
+							const double hVal = v - gFine[idx];
+							sumMSq += mVal * mVal;
+							sumHSq += hVal * hVal;
+							++pxCnt;
+
+							if (prev1Y != nullptr)
+							{
+								if (std::isfinite(prev1Y[idx])) copyDiff1 += std::fabs(v - prev1Y[idx]);
+								else cellNonFinite = true;
+							}
+							if (prev2Y != nullptr)
+							{
+								if (std::isfinite(prev2Y[idx])) copyDiff2 += std::fabs(v - prev2Y[idx]);
+								else cellNonFinite = true;
+							}
+
+							// Grid-free horizontal plateau-to-plateau staircase jump (1-px or 2-px deblocked transition):
+							if (x >= 2 && x + 1 < w)
+							{
+								const double vm2 = plane[idx - 2];
+								const double vm1 = plane[idx - 1];
+								const double vp1 = plane[idx + 1];
+								if (std::fabs(vm1 - vm2) <= halfLsb && std::fabs(vp1 - v) <= halfLsb)
+								{
+									const double jump = std::fabs(v - vm1);
+									if (jump > halfLsb)
+										stairJumps.push_back(jump);
+								}
+								else if (x + 2 < w)
+								{
+									const double vp2 = plane[idx + 2];
+									if (std::fabs(vm1 - vm2) <= halfLsb && std::fabs(vp2 - vp1) <= halfLsb)
+									{
+										const double jump2 = std::fabs(vp1 - vm1);
+										if (jump2 > halfLsb)
+											stairJumps.push_back(jump2);
+									}
+								}
+							}
+							// Grid-free vertical plateau-to-plateau staircase jump:
+							if (y >= 2 && y + 1 < h)
+							{
+								const size_t stride = static_cast<size_t>(w);
+								const double vm2 = plane[idx - 2 * stride];
+								const double vm1 = plane[idx - stride];
+								const double vp1 = plane[idx + stride];
+								if (std::fabs(vm1 - vm2) <= halfLsb && std::fabs(vp1 - v) <= halfLsb)
+								{
+									const double jump = std::fabs(v - vm1);
+									if (jump > halfLsb)
+										stairJumps.push_back(jump);
+								}
+								else if (y + 2 < h)
+								{
+									const double vp2 = plane[idx + 2 * stride];
+									if (std::fabs(vm1 - vm2) <= halfLsb && std::fabs(vp2 - vp1) <= halfLsb)
+									{
+										const double jump2 = std::fabs(vp1 - vm1);
+										if (jump2 > halfLsb)
+											stairJumps.push_back(jump2);
+									}
+								}
+							}
+						}
+					}
+
+					if (cellNonFinite)
+					{
+						if (standIns != nullptr)
+							standIns->Engage(StandInKind::NonFiniteClosure, "TdV2NonBlockStepEstimator non-finite prev pixel");
+						out.valid = false;
+						return out;
+					}
+
+					CodingGridCell& cell = out.cells[static_cast<size_t>(cy) * out.cellsW + cx];
+					double stepEst = 0.0;
+					if (!stairJumps.empty())
+					{
+						stepEst = RobustStats::Median(stairJumps, RobustStats::MedianRule::MeanOfMiddle);
+					}
+					if (pxCnt > 0)
+					{
+						const double invCnt = 1.0 / static_cast<double>(pxCnt);
+						const double eM = sumMSq * invCnt;
+						const double eH = sumHSq * invCnt;
+						if (eM > midTextureFloor && gains.fine > kRoleNumFloor)
+						{
+							const double expectedEH = eM * naturalHM;
+							if (expectedEH > eH)
+							{
+								const double missingVar = (expectedEH - eH) / gains.fine;
+								const double dzStep = deadZoneScale * std::sqrt(missingVar);
+								if (dzStep > stepEst)
+									stepEst = dzStep;
+							}
+						}
+						if (prev1Y != nullptr && (copyDiff1 * invCnt) <= halfLsb)
+						{
+							cell.copyPrev1 = true;
+							++copy1Count;
+						}
+						if (prev2Y != nullptr && (copyDiff2 * invCnt) <= halfLsb)
+						{
+							cell.copyPrev2 = true;
+							++copy2Count;
+						}
+					}
+					cell.stepDelta = stepEst;
+					cell.boundaryRatio = 1.0; // Strictly grid-free: no 8-px boundary ratio claim
+					cellSteps.push_back(stepEst);
+					sumStep += stepEst;
+					if (stepEst > maxStep)
+						maxStep = stepEst;
+				}
+			}
+
+			if (numCells > 0)
+			{
+				const double invCells = 1.0 / static_cast<double>(numCells);
+				out.stepMean = sumStep * invCells;
+				out.stepP90 = RobustStats::Quantile(cellSteps, 0.90, RobustStats::RankRule::NearestRank);
+				out.stepMax = maxStep;
+				out.exactCopyFracPrev1 = static_cast<double>(copy1Count) * invCells;
+				out.exactCopyFracPrev2 = static_cast<double>(copy2Count) * invCells;
+				out.pictureScore = RampMath::Clamp01(1.0 / (1.0 + out.stepMean / (std::max)(depthScale, kRoleNumFloor)));
+				out.detectedPeriodX = 0;
+				out.detectedPeriodY = 0;
+				out.valid = true;
+			}
+			return out;
+		}
+	};
+
+	// ---- TD-U1 (Plan Phase 1): Empirical Own-Error Prior A2e (U_j(class)) + Source-Seconds History Guard ----
+	// Activity classes for A2e: 0 = flat, 1 = textured (separated strictly by 0-dB SNR vs 1-LSB quantization floor).
+	constexpr int kA2eActivityClasses = 2;
+	// Rolling history window in SOURCE SECONDS (never hardcoded frame counts, matching plan 99 s2.7 Frames(1 s)).
+	constexpr double kA2eHistoryHorizonSec = 1.0;
+	// Flash / missed-cut over-estimate cap ratio from Plan Phase 1 line 66 ("never more than 2x above").
+	constexpr double kA2eOverEstimateCapFactor = 2.0;
+
+	struct EmpiricalOwnErrorPrior
+	{
+		// U[band][activityClass]: robust median of grain-corrected c_IV over active cells
+		// band: 0=L, 1=M, 2=H; activityClass: 0=flat, 1=textured.
+		double U[3][kA2eActivityClasses] = {};
+		uint32_t cellCount[3][kA2eActivityClasses] = {};
+		bool valid = false;
+		bool cappedByHistory = false;
+		bool frozenOnDiscontinuity = false;
+
+		double ForBandClass(int band, int activityClass) const
+		{
+			if (band < 0 || band >= 3 || activityClass < 0 || activityClass >= kA2eActivityClasses)
+				return 0.0;
+			const double v = U[band][activityClass];
+			return (std::isfinite(v) && v > 0.0) ? v : 0.0;
+		}
+
+		double TotalForClass(int activityClass) const
+		{
+			return ForBandClass(0, activityClass) + ForBandClass(1, activityClass) + ForBandClass(2, activityClass);
+		}
+	};
+
+	// Rolling time-domain (source seconds) history of recent same-role A2e priors so a single-frame flash,
+	// strobe, or missed cut cannot inflate U_j and widen the output limit.
+	class A2ePriorHistory
+	{
+	public:
+		struct Entry
+		{
+			double timeSec = 0.0;
+			QualityPattern::FrameRole role = QualityPattern::FrameRole::Unknown;
+			EmpiricalOwnErrorPrior prior;
+		};
+
+		void Reset()
+		{
+			history_.clear();
+			elapsedSec_ = 0.0;
+			hasFrozenPrior_ = false;
+			frozenPrior_ = EmpiricalOwnErrorPrior{};
+		}
+
+		// Cap `candidate` by 2x rolling median of recent same-role frames within kA2eHistoryHorizonSec.
+		// On cut/fade/resync (`freezeDiscontinuity == true`), freezes history (does not push `candidate` and caps
+		// against the last frozen prior if present).
+		EmpiricalOwnErrorPrior ApplyCapAndRecord(
+			const EmpiricalOwnErrorPrior& candidate,
+			QualityPattern::FrameRole role,
+			double sourceHz,
+			bool freezeDiscontinuity,
+			bool resetOnCut)
+		{
+			EmpiricalOwnErrorPrior out = candidate;
+			const double hz = (std::isfinite(sourceHz) && sourceHz > 0.0) ? sourceHz : kDefaultSourceHz;
+			const double dtSec = 1.0 / hz;
+
+			if (resetOnCut)
+			{
+				Reset();
+				out.frozenOnDiscontinuity = true;
+				return out;
+			}
+
+			elapsedSec_ += dtSec;
+
+			// Prune entries older than kA2eHistoryHorizonSec (strictly in source seconds).
+			while (!history_.empty() && (elapsedSec_ - history_.front().timeSec) > kA2eHistoryHorizonSec)
+				history_.pop_front();
+
+			if (freezeDiscontinuity)
+			{
+				out.frozenOnDiscontinuity = true;
+				if (hasFrozenPrior_ && frozenPrior_.valid && out.valid)
+				{
+					for (int b = 0; b < 3; ++b)
+					{
+						for (int c = 0; c < kA2eActivityClasses; ++c)
+						{
+							const double refU = frozenPrior_.ForBandClass(b, c);
+							if (refU > kRoleNumFloor && out.U[b][c] > kA2eOverEstimateCapFactor * refU)
+							{
+								out.U[b][c] = kA2eOverEstimateCapFactor * refU;
+								out.cappedByHistory = true;
+							}
+						}
+					}
+				}
+				return out;
+			}
+
+			if (!out.valid)
+				return out;
+
+			// Gather same-role recent entries (or all entries if role == Unknown) for robust median cap.
+			for (int b = 0; b < 3; ++b)
+			{
+				for (int c = 0; c < kA2eActivityClasses; ++c)
+				{
+					std::vector<double> vals;
+					vals.reserve(history_.size());
+					for (const Entry& e : history_)
+					{
+						if (role != QualityPattern::FrameRole::Unknown &&
+						    e.role != QualityPattern::FrameRole::Unknown &&
+						    e.role != role)
+						{
+							continue;
+						}
+						if (e.prior.valid && e.prior.cellCount[b][c] > 0)
+							vals.push_back(e.prior.ForBandClass(b, c));
+					}
+					if (vals.size() >= 2u)
+					{
+						const double med = RobustStats::Median(vals, RobustStats::MedianRule::MeanOfMiddle);
+						const double cap = kA2eOverEstimateCapFactor * med;
+						if (med > kRoleNumFloor && out.U[b][c] > cap)
+						{
+							out.U[b][c] = cap;
+							out.cappedByHistory = true;
+						}
+					}
+				}
+			}
+
+			history_.push_back(Entry{ elapsedSec_, role, out });
+			frozenPrior_ = out;
+			hasFrozenPrior_ = true;
+			return out;
+		}
+
+		size_t Size() const { return history_.size(); }
+
+	private:
+		std::deque<Entry> history_;
+		double elapsedSec_ = 0.0;
+		bool hasFrozenPrior_ = false;
+		EmpiricalOwnErrorPrior frozenPrior_;
+	};
+
+	// ---- TD-U1 (Plan Phase 1): Motion-Aligned Relative Sharpness Along Motion ----
+	// For each adjacent pair (t, t-1 warped onto t), on cells with trusted motion, non-focus-flagged,
+	// and texture above the 0-dB 1-LSB quantization noise floor:
+	//   E_t        = max(0, E_M(t) + E_H(t) - retainedGrainVar * (gains.mid + gains.fine))
+	//   E'_(t-1)   = max(0, E_M(warped t-1) + E_H(warped t-1) / max(beta_HP(vx,vy), eps) - prevGrainLeak)
+	//   r_t        = median_trusted( ln(E_t / E'_(t-1)) )
+	// Optional symmetric mode: if reverse pair (E'_t warped onto t-1 vs E_(t-1)) is also supplied,
+	//   r_t = 0.5 * (median ln(E_t / E'_(t-1)) - median ln(E_(t-1) / E'_t)), cancelling warp attenuation identically.
+	struct AlignedSharpnessSummary
+	{
+		double relativeSharpnessR = 0.0;    // r_t = median_trusted ln(E_t / E'_{t-1})
+		double exactCopyFracPrev1 = 0.0;
+		double exactCopyFracPrev2 = 0.0;
+		size_t trustedCellCount = 0;
+		size_t focusAbstainedCells = 0;
+		bool valid = false;
+	};
+
+	inline AlignedSharpnessSummary MeasureAlignedSharpnessFromCellEnergies(
+		const std::vector<double>& curMidEnergy,
+		const std::vector<double>& curFineEnergy,
+		const std::vector<double>& prevWarpedMidEnergy,
+		const std::vector<double>& prevWarpedFineEnergy,
+		const std::vector<double>& motionVx,
+		const std::vector<double>& motionVy,
+		const std::vector<uint8_t>& motionValid,
+		const std::vector<uint8_t>* focusFlaggedCells,
+		const std::vector<double>* retainedGrainVar,
+		int sourceBits,
+		double exactCopyFracPrev1 = 0.0,
+		double exactCopyFracPrev2 = 0.0,
+		const std::vector<double>* revPrevMidEnergy = nullptr,
+		const std::vector<double>* revPrevFineEnergy = nullptr,
+		const std::vector<double>* revCurWarpedMidEnergy = nullptr,
+		const std::vector<double>* revCurWarpedFineEnergy = nullptr,
+		StandInRegistry* standIns = nullptr)
+	{
+		AlignedSharpnessSummary out;
+		out.exactCopyFracPrev1 = exactCopyFracPrev1;
+		out.exactCopyFracPrev2 = exactCopyFracPrev2;
+		const size_t n = curMidEnergy.size();
+		if (n == 0 || curFineEnergy.size() != n ||
+		    prevWarpedMidEnergy.size() != n || prevWarpedFineEnergy.size() != n ||
+		    motionVx.size() != n || motionVy.size() != n || motionValid.size() != n ||
+		    !(PeakCodeForBits(sourceBits) > 0.0))
+		{
+			return out;
+		}
+
+		const BandWhiteNoiseGains gains = ComputeBandWhiteNoiseGains();
+		const double depthScale = DepthScale(sourceBits);
+		const double baseQuantVar = (depthScale * depthScale) / 12.0;
+		// Exact 0-dB SNR texture floor in the (M + H) band domain against 1-LSB quantization noise.
+		const double textureFloor = 2.0 * (gains.mid + gains.fine) * baseQuantVar;
+
+		const bool hasSymmetric = (revPrevMidEnergy != nullptr && revPrevFineEnergy != nullptr &&
+		                           revCurWarpedMidEnergy != nullptr && revCurWarpedFineEnergy != nullptr &&
+		                           revPrevMidEnergy->size() == n && revPrevFineEnergy->size() == n &&
+		                           revCurWarpedMidEnergy->size() == n && revCurWarpedFineEnergy->size() == n);
+
+		std::vector<double> logRatios;
+		logRatios.reserve(n);
+		for (size_t i = 0; i < n; ++i)
+		{
+			if (motionValid[i] == 0u)
+				continue;
+			if (focusFlaggedCells != nullptr && i < focusFlaggedCells->size() && (*focusFlaggedCells)[i] != 0u)
+			{
+				++out.focusAbstainedCells;
+				continue;
+			}
+			const double cm = curMidEnergy[i];
+			const double ch = curFineEnergy[i];
+			const double pm = prevWarpedMidEnergy[i];
+			const double ph = prevWarpedFineEnergy[i];
+			const double vx = motionVx[i];
+			const double vy = motionVy[i];
+			if (!std::isfinite(cm) || !std::isfinite(ch) || !std::isfinite(pm) || !std::isfinite(ph) ||
+			    !std::isfinite(vx) || !std::isfinite(vy))
+			{
+				if (standIns != nullptr)
+					standIns->Engage(StandInKind::NonFiniteClosure, "MeasureAlignedSharpness non-finite cell energy");
+				continue;
+			}
+
+			double grainLeakM = 0.0;
+			double grainLeakH = 0.0;
+			if (retainedGrainVar != nullptr && i < retainedGrainVar->size())
+			{
+				const double gv = (*retainedGrainVar)[i];
+				if (std::isfinite(gv) && gv > 0.0)
+				{
+					grainLeakM = gv * gains.mid;
+					grainLeakH = gv * gains.fine;
+				}
+			}
+
+			const double eCurM = (std::max)(0.0, cm - grainLeakM);
+			const double eCurH = (std::max)(0.0, ch - grainLeakH);
+			const double eCur = eCurM + eCurH;
+
+			const double betaHp = (std::max)(FineBandBicubicWarpVarianceGain(vx, vy), kRoleNumFloor);
+			const double ePrevM = (std::max)(0.0, pm - grainLeakM);
+			// Debias bicubic sub-pixel H-band warp attenuation so fractional pans do not bias r_t.
+			const double ePrevH = (std::max)(0.0, (ph / betaHp) - grainLeakH);
+			const double ePrev = ePrevM + ePrevH;
+
+			if (eCur <= textureFloor || ePrev <= textureFloor)
+				continue;
+
+			double lr = std::log(eCur / ePrev);
+			if (hasSymmetric)
+			{
+				const double rpm = (*revPrevMidEnergy)[i];
+				const double rph = (*revPrevFineEnergy)[i];
+				const double rcm = (*revCurWarpedMidEnergy)[i];
+				const double rch = (*revCurWarpedFineEnergy)[i];
+				if (std::isfinite(rpm) && std::isfinite(rph) && std::isfinite(rcm) && std::isfinite(rch))
+				{
+					const double eRevPrev = (std::max)(0.0, rpm - grainLeakM) + (std::max)(0.0, rph - grainLeakH);
+					const double eRevCur = (std::max)(0.0, rcm - grainLeakM) + (std::max)(0.0, (rch / betaHp) - grainLeakH);
+					if (eRevPrev > textureFloor && eRevCur > textureFloor)
+					{
+						// Symmetric average cancels residual kernel-shape attenuation identically.
+						lr = 0.5 * (lr - std::log(eRevPrev / eRevCur));
+					}
+				}
+			}
+
+			if (std::isfinite(lr))
+				logRatios.push_back(lr);
+		}
+
+		out.trustedCellCount = logRatios.size();
+		if (!logRatios.empty())
+		{
+			out.relativeSharpnessR = RobustStats::Median(logRatios, RobustStats::MedianRule::MeanOfMiddle);
+			out.valid = std::isfinite(out.relativeSharpnessR);
+		}
+		return out;
+	}
+
+	// Maintains running log-sharpness sum S_t = sum r_k with sliding-window median removed (Plan Phase 1)
+	// and converts into FrameRoleEvidence for TdV2FrameRoleDetector (preserving exact-copy & cut/fade handling).
+	class AlignedSharpnessTracker
+	{
+	public:
+		static constexpr size_t kMaxRunningWindow = 9;
+
+		void Reset()
+		{
+			runningSumS_ = 0.0;
+			recentS_.clear();
+		}
+
+		double CurrentRunningSum() const { return runningSumS_; }
+
+		FrameRoleEvidence PushPairAndBuildEvidence(
+			uint64_t seq,
+			const AlignedSharpnessSummary& summary,
+			const EmpiricalOwnErrorPrior* a2ePrior,
+			bool isCut,
+			bool isFade,
+			int sourceBits,
+			uint16_t bonusPeriodX = 0,
+			uint16_t bonusPeriodY = 0)
+		{
+			FrameRoleEvidence ev;
+			ev.seq = seq;
+			ev.exactCopyFracPrev1 = summary.exactCopyFracPrev1;
+			ev.exactCopyFracPrev2 = summary.exactCopyFracPrev2;
+			ev.isCut = isCut;
+			ev.isFade = isFade;
+			ev.sourceBits = sourceBits;
+			ev.periodX = bonusPeriodX;
+			ev.periodY = bonusPeriodY;
+
+			if (isCut)
+			{
+				Reset();
+				ev.qualityScore = 0.5;
+				return ev;
+			}
+			if (isFade)
+			{
+				ev.qualityScore = 0.5;
+				return ev;
+			}
+
+			// Exact copies do not advance the running sharpness sum (zero drift on 3:2 pulldown repeats).
+			const bool isCopy = (summary.exactCopyFracPrev1 >= kFullFrameCopyFrac) ||
+			                    (summary.exactCopyFracPrev2 >= kFullFrameCopyFrac);
+			if (!isCopy && summary.valid && std::isfinite(summary.relativeSharpnessR))
+			{
+				runningSumS_ += summary.relativeSharpnessR;
+			}
+			recentS_.push_back(runningSumS_);
+			if (recentS_.size() > kMaxRunningWindow)
+				recentS_.pop_front();
+
+			// Remove sliding-window median from running sum S_t -> centered relative sharpness S_tilde.
+			std::vector<double> winVec(recentS_.begin(), recentS_.end());
+			const double medS = RobustStats::Median(winVec, RobustStats::MedianRule::MeanOfMiddle);
+			double sTilde = runningSumS_ - medS;
+
+			// Secondary role cue from A2e empirical own-error prior U_j (Plan Phase 1 item 2(a)):
+			// Valleys have higher own error U; fold in stepMean/stepP90/stepMax from sqrt(U_total)
+			// so QualityPattern::Record carries real own-error scale even on deblocked HEVC/AV1!
+			if (a2ePrior != nullptr && a2ePrior->valid)
+			{
+				const double uFlat = a2ePrior->TotalForClass(0);
+				const double uTex = a2ePrior->TotalForClass(1);
+				const double rmsFlat = std::sqrt((std::max)(0.0, uFlat));
+				const double rmsTex = std::sqrt((std::max)(0.0, uTex));
+				ev.stepMean = 0.5 * (rmsFlat + rmsTex);
+				ev.stepP90 = (std::max)(rmsFlat, rmsTex);
+				ev.stepMax = ev.stepP90;
+			}
+
+			// Monotonic smooth bijection R -> (0, 1): 0.5 + 0.5 * tanh(sTilde) preserves exact ordering,
+			// local maxima (Peaks), local minima (Valleys), and window rank!
+			ev.qualityScore = RampMath::Clamp01(0.5 + 0.5 * std::tanh(sTilde));
+			return ev;
+		}
+
+	private:
+		double runningSumS_ = 0.0;
+		std::deque<double> recentS_;
 	};
 
 	// ---- Picture-Only P15 / P15c Frame-Role Detector (plan s2.1 D10 & s3.2 TD-S2) ----

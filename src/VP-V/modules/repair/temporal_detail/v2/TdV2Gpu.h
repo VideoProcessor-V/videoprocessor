@@ -3656,6 +3656,193 @@ namespace Gpu
 			return true;
 		}
 
+	public:
+		bool ComputeQualityEvidenceGpu(
+			pl_gpu gpu,
+			pl_dispatch dp,
+			pl_tex curBandsTex,
+			pl_tex prevWarpedBandsTex,
+			pl_tex curCleanTex,
+			pl_tex cellPriorTex,
+			pl_tex motionVecTex,
+			pl_tex motionMetaTex,
+			pl_tex outQualityCellsTex,
+			int w,
+			int h,
+			const ActiveRect& active,
+			int sourceBits,
+			AlignedSharpnessSummary* outSharpness = nullptr,
+			double* outMeanGridFreeStep = nullptr,
+			StandInRegistry* standIns = nullptr)
+		{
+			if (!gpu || !dp || !curBandsTex || !curCleanTex || !cellPriorTex || !outQualityCellsTex ||
+			    w <= 0 || h <= 0 || !(PeakCodeForBits(sourceBits) > 0.0))
+			{
+				if (standIns != nullptr)
+					standIns->Engage(StandInKind::GpuDispatchFailed, "ComputeQualityEvidenceGpu invalid inputs");
+				return false;
+			}
+			const int cellPx = cfg_.cellPx > 0 ? cfg_.cellPx : kCanonicalBlockPx;
+			const int cw = (w + cellPx - 1) / cellPx;
+			const int ch = (h + cellPx - 1) / cellPx;
+			const ActiveRect ar = active.Empty() ? ActiveRect::Full(w, h) : active.ClampedTo(w, h);
+			if (ar.Empty() || outQualityCellsTex->params.w != cw || outQualityCellsTex->params.h != ch)
+			{
+				if (standIns != nullptr)
+					standIns->Engage(StandInKind::GpuDispatchFailed, "ComputeQualityEvidenceGpu dimension mismatch");
+				return false;
+			}
+
+			const BandWhiteNoiseGains gains = ComputeBandWhiteNoiseGains();
+			const double depthScale = DepthScale(sourceBits);
+			const double baseQuantVar = (depthScale * depthScale) / 12.0;
+			const double s1 = VpUnit::BandFromBase::kSigmaFine;
+			const double s2 = VpUnit::BandFromBase::kSigmaBase;
+			const double eHRef = 2.0 * std::sqrt(0.5 * s1 * s1) - s1;
+			const double eMRef = 2.0 * std::sqrt(0.5 * (s1 * s1 + s2 * s2)) - s1 - s2;
+			const double naturalHM = (eMRef > kEngineNumFloor) ? (eHRef / eMRef) : 1.0;
+
+			std::string hdr;
+			hdr += VpvGpu::DefineInt("TD_W", w);
+			hdr += VpvGpu::DefineInt("TD_H", h);
+			hdr += VpvGpu::DefineInt("TD_CW", cw);
+			hdr += VpvGpu::DefineInt("TD_CH", ch);
+			hdr += VpvGpu::DefineInt("TD_CELL_PX", cellPx);
+			hdr += VpvGpu::Define("TD_NUM_FLOOR", kEngineNumFloor);
+			hdr += VpvGpu::Define("TD_GAIN_MID", gains.mid);
+			hdr += VpvGpu::Define("TD_GAIN_FINE", gains.fine);
+			hdr += VpvGpu::Define("TD_MID_TEX_FLOOR", 2.0 * gains.mid * baseQuantVar);
+			hdr += VpvGpu::Define("TD_ACT_TEX_FLOOR", 2.0 * (gains.mid + gains.fine) * baseQuantVar);
+			hdr += VpvGpu::Define("TD_NATURAL_HM_RATIO", naturalHM);
+			hdr += VpvGpu::Define("TD_DEADZONE_STEP_SCALE", std::sqrt(3.0) / (1.0 - kDeadZonePhiInter));
+			hdr += Shaders::BuildFineTapHeader();
+			hdr += Shaders::kCoreHelpers;
+			hdr += R"GLSL(
+void td_hp_warp_axis(float v, out float outWW, out float outUU, out float outWU, out float outGG, out float outG0)
+{
+    float f = v - floor(v);
+    vec4 w = td_cubic_weights(f);
+    outWW = dot(w, w);
+    int gLen = 2 * TD_RAD_FINE + 1;
+    outGG = 0.0;
+    for (int j = 0; j < gLen; ++j) { float gj = TD_TAP_FINE[j]; outGG += gj * gj; }
+    outG0 = TD_TAP_FINE[TD_RAD_FINE];
+    outUU = 0.0; outWU = 0.0;
+    for (int m = -TD_RAD_FINE - 1; m <= TD_RAD_FINE + 2; ++m)
+    {
+        float u = 0.0;
+        for (int i = 0; i < 4; ++i)
+        {
+            int idx = (m - (i - 1)) + TD_RAD_FINE;
+            if (idx >= 0 && idx < gLen) u += w[i] * TD_TAP_FINE[idx];
+        }
+        outUU += u * u;
+        if (m >= -1 && m <= 2) outWU += w[m + 1] * u;
+    }
+}
+float td_fine_hp_warp_gain(vec2 mv)
+{
+    if (td_is_bad(mv.x) || td_is_bad(mv.y)) return 1.0;
+    float wwX = 0.0, uuX = 0.0, wuX = 0.0, ggX = 0.0, g0X = 0.0;
+    float wwY = 0.0, uuY = 0.0, wuY = 0.0, ggY = 0.0, g0Y = 0.0;
+    td_hp_warp_axis(mv.x, wwX, uuX, wuX, ggX, g0X);
+    td_hp_warp_axis(mv.y, wwY, uuY, wuY, ggY, g0Y);
+    float den = 1.0 - 2.0 * g0X * g0Y + ggX * ggY;
+    if (!(den > TD_NUM_FLOOR)) return clamp(wwX * wwY, 0.0, 1.0);
+    float ratio = (wwX * wwY - 2.0 * wuX * wuY + uuX * uuY) / den;
+    return td_is_bad(ratio) ? clamp(wwX * wwY, 0.0, 1.0) : clamp(ratio, 0.0, 1.0);
+}
+)GLSL";
+			hdr += Shaders::kPassQualityEvidenceHeader;
+
+			const bool hasPrev = (prevWarpedBandsTex != nullptr && motionVecTex != nullptr && motionMetaTex != nullptr);
+			float uAx0 = static_cast<float>(ar.x0), uAy0 = static_cast<float>(ar.y0);
+			float uAx1 = static_cast<float>(ar.x1), uAy1 = static_cast<float>(ar.y1);
+			float uHasPrev = hasPrev ? 1.0f : 0.0f;
+			float uHalfLsb = static_cast<float>(kExactCopyHalfStep10Bit * depthScale);
+
+			pl_shader_desc descs[7] = {
+				VpvGpu::Sampled("cur_bands", curBandsTex),
+				VpvGpu::Sampled("prev_bands", hasPrev ? prevWarpedBandsTex : curBandsTex),
+				VpvGpu::Sampled("cur_clean", curCleanTex),
+				VpvGpu::Sampled("cell_prior", cellPriorTex),
+				VpvGpu::Sampled("motion_vec", hasPrev ? motionVecTex : cellPriorTex),
+				VpvGpu::Sampled("motion_meta", hasPrev ? motionMetaTex : cellPriorTex),
+				VpvGpu::Storage("quality_cells", outQualityCellsTex)
+			};
+			pl_shader_var vars[6] = {
+				VpvGpu::Var("u_ax0", &uAx0), VpvGpu::Var("u_ay0", &uAy0),
+				VpvGpu::Var("u_ax1", &uAx1), VpvGpu::Var("u_ay1", &uAy1),
+				VpvGpu::Var("u_has_prev_bands", &uHasPrev),
+				VpvGpu::Var("u_half_lsb", &uHalfLsb)
+			};
+
+			pl_shader sh = pl_dispatch_begin(dp);
+			if (!sh)
+				return false;
+			if (!VpvGpu::AddCompute(sh, hdr.c_str(), Shaders::kPassQualityEvidenceReduce, descs, 7, vars, 6, 16, 16, 8u * 256u * sizeof(float)))
+			{
+				pl_dispatch_abort(dp, &sh);
+				return false;
+			}
+			pl_dispatch_compute_params cp{};
+			cp.shader = &sh;
+			cp.dispatch_size[0] = cw;
+			cp.dispatch_size[1] = ch;
+			cp.dispatch_size[2] = 1;
+			if (!pl_dispatch_compute(dp, &cp))
+				return false;
+
+			if (outSharpness != nullptr || outMeanGridFreeStep != nullptr)
+			{
+				std::vector<float> buf(static_cast<size_t>(cw) * static_cast<size_t>(ch) * 4u, 0.0f);
+				if (!Detail::DownloadFloats(gpu, outQualityCellsTex, buf.data()))
+					return false;
+				std::vector<double> logRatios;
+				double stepSum = 0.0;
+				size_t stepCnt = 0;
+				for (size_t i = 0; i < static_cast<size_t>(cw) * static_cast<size_t>(ch); ++i)
+				{
+					const double eCur = buf[i * 4u + 0u];
+					const double ePrv = buf[i * 4u + 1u];
+					const double stp = buf[i * 4u + 2u];
+					const int fl = static_cast<int>(std::lround(buf[i * 4u + 3u]));
+					if ((fl & 4) != 0)
+					{
+						if (standIns != nullptr)
+							standIns->Engage(StandInKind::NonFiniteClosure, "ComputeQualityEvidenceGpu non-finite cell");
+						continue;
+					}
+					if (std::isfinite(stp) && stp >= 0.0)
+					{
+						stepSum += stp;
+						++stepCnt;
+					}
+					if ((fl & 1) != 0 && eCur > kEngineNumFloor && ePrv > kEngineNumFloor)
+					{
+						const double lr = std::log(eCur / ePrv);
+						if (std::isfinite(lr))
+							logRatios.push_back(lr);
+					}
+				}
+				if (outMeanGridFreeStep != nullptr)
+					*outMeanGridFreeStep = stepCnt > 0 ? (stepSum / static_cast<double>(stepCnt)) : 0.0;
+				if (outSharpness != nullptr)
+				{
+					AlignedSharpnessSummary sum;
+					sum.trustedCellCount = logRatios.size();
+					if (!logRatios.empty())
+					{
+						sum.relativeSharpnessR = RobustStats::Median(logRatios, RobustStats::MedianRule::MeanOfMiddle);
+						sum.valid = std::isfinite(sum.relativeSharpnessR);
+					}
+					*outSharpness = sum;
+				}
+			}
+			return true;
+		}
+
+	private:
 		void DestroyPrivateScratch(pl_gpu gpu)
 		{
 			if (!gpu)

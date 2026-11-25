@@ -737,6 +737,7 @@ namespace TdV2
 		const std::vector<uint8_t>* faceMask = nullptr; // Pass-1 per-cell (cellsW * cellsH) face/non-rigid mask (non-zero => delta == 0)
 		std::vector<double> cellStepScale;    // Optional per-cell AQ/PQ step scale (cellsW * cellsH; empty => 1.0 neutral everywhere)
 		PsdShape psdShape;                    // Optional P10g grain PSD shape multipliers (default 1.0 = white-noise identity)
+		QualityPattern::FrameRole frameRole = QualityPattern::FrameRole::Unknown; // Optional frame role for A2e same-role history cap
 	};
 
 	struct FrameProcessResult
@@ -760,6 +761,8 @@ namespace TdV2
 		size_t borderBilinearPixels = 0;      // Active-rect 1-2 px border bilinear fallback pixel count
 		bool carryUsed = false;
 		bool carryReset = false;
+		EmpiricalOwnErrorPrior empiricalOwnError; // TD-U1 A2e per-band x activity-class own-error prior U_j(class)
+		AlignedSharpnessSummary alignedSharpness; // TD-U1 motion-aligned relative sharpness r_t (abstaining focus cells)
 	};
 
 	// ---- Corner-Tapered Spatial-Only Bilinear Weight Interpolation (Zero New Constants) ----
@@ -937,6 +940,7 @@ namespace TdV2
 			carryClean_ = TdV2Plane();
 			hasLastSeq_ = false;
 			lastSeq_ = 0;
+			a2eHistory_.Reset();
 		}
 
 		bool HasCarry() const { return hasCarry_; }
@@ -1398,7 +1402,44 @@ namespace TdV2
 				return false;
 			};
 
-			// Per-cell moment pooling (FP32 centered), blind c estimation (A1/A2/A3), convex w* = C^-1 c, motion & focus gates.
+			// ---- Stage 2A: Per-cell spatial stats, aligned sharpness energies, pooled FP32 moments & raw grain-corrected c_IV ----
+			struct CellBandMoments
+			{
+				double C[kMaxBlendRefs][kMaxBlendRefs] = {};
+				double cIvRaw[kMaxBlendRefs] = {};     // Grain-corrected unbounded c_IV (before [0, min(C_pp, C_nn)] clip)
+				double cIvClipped[kMaxBlendRefs] = {}; // Clipped c_A1 in [0, min(C_pp, C_nn)]
+				bool hasIndependentPartner[kMaxBlendRefs] = {};
+				size_t sampleCount = 0;
+			};
+
+			const double depthScale = DepthScale(cfg_.sourceBits);
+			const double baseQuantVar = (depthScale * depthScale) / 12.0;
+			const double activityTexFloor = 2.0 * (gains.mid + gains.fine) * baseQuantVar;
+
+			std::vector<double> cellSpatialDetailRms(numCells, 0.0);
+			std::vector<double> cellOwnGrainVarArr(numCells, 0.0);
+			std::vector<uint8_t> cellActivityClass(numCells, 0u); // 0 = flat, 1 = textured
+			std::vector<double> cellCurMidE(numCells, 0.0);
+			std::vector<double> cellCurFineE(numCells, 0.0);
+			std::vector<double> cellPrevMidE(numCells, 0.0);
+			std::vector<double> cellPrevFineE(numCells, 0.0);
+			std::vector<uint8_t> cellFocusFlagged(numCells, 0u);
+			std::array<std::vector<CellBandMoments>, 3> cellMoments;
+			for (int b = 0; b < 3; ++b)
+				cellMoments[b].resize(numCells);
+
+			int prevRefIdx = -1;
+			for (int k = 0; k < K; ++k)
+			{
+				if (refs[k].role == RefRole::PrevPeak)
+				{
+					prevRefIdx = k;
+					break;
+				}
+			}
+
+			std::array<std::array<std::vector<double>, kA2eActivityClasses>, 3> a2eSamples;
+
 			for (int cy = 0; cy < res.cellsH; ++cy)
 			{
 				for (int cx = 0; cx < res.cellsW; ++cx)
@@ -1406,7 +1447,10 @@ namespace TdV2
 					const size_t cIdx = static_cast<size_t>(cy) * res.cellsW + cx;
 					const FocusCellInfo& fInfo = focusCells[cIdx];
 					if (fInfo.focusChange || fInfo.isExplicitBokeh)
+					{
 						++res.focusVetoCells;
+						cellFocusFlagged[cIdx] = 1u;
+					}
 
 					// Map TD cell to P10/P10g retained grain variance cell (dynamic P10-D6 mapping).
 					double cellRetainedGrainVar = 0.0;
@@ -1436,9 +1480,11 @@ namespace TdV2
 					}
 					cellRetainedGrain[cIdx] = cellRetainedGrainVar;
 
-					// Compute spatial fine-band detail RMS for TdMapsView::kRealDetail (MEDIUM-3: spatial detail, NOT temporal noise),
-					// cell own-grain variance (Layer-3 leaked-grain transfer ceiling), and cell clean-luma mean/std (SOTA #4 SC-04).
+					// Compute spatial mid+fine detail energy, own-grain variance, and clean-luma mean/std.
+					double spatialMidEnergy = 0.0;
 					double spatialFineEnergy = 0.0;
+					double prevMidEnergy = 0.0;
+					double prevFineEnergy = 0.0;
 					double cellOwnGrainEnergy = 0.0;
 					double cleanYMean = 0.0;
 					double cleanYM2 = 0.0;
@@ -1452,8 +1498,17 @@ namespace TdV2
 						{
 							for (int x = sx0; x < sx1; ++x)
 							{
+								const double mv = curBands.M.at(x, y);
 								const double hv = curBands.H.at(x, y);
+								spatialMidEnergy += mv * mv;
 								spatialFineEnergy += hv * hv;
+								if (prevRefIdx >= 0)
+								{
+									const double pmv = refs[prevRefIdx].bands.M.at(x, y);
+									const double phv = refs[prevRefIdx].bands.H.at(x, y);
+									prevMidEnergy += pmv * pmv;
+									prevFineEnergy += phv * phv;
+								}
 								if (splitActive)
 								{
 									const double og = ownGrain.at(x, y);
@@ -1467,26 +1522,33 @@ namespace TdV2
 							}
 						}
 					}
+					const double invSpatialCnt = spatialPxCnt > 0 ? (1.0 / static_cast<double>(spatialPxCnt)) : 0.0;
 					cellMeanCleanY[cIdx] = cleanYMean;
 					cellStdCleanY[cIdx] = spatialPxCnt > 0
-						? std::sqrt((std::max)(0.0, cleanYM2 / static_cast<double>(spatialPxCnt)))
+						? std::sqrt((std::max)(0.0, cleanYM2 * invSpatialCnt))
 						: 0.0;
-					const double spatialDetailRms = spatialPxCnt > 0
-						? std::sqrt(spatialFineEnergy / static_cast<double>(spatialPxCnt))
-						: 0.0;
-					const double curHVar = spatialDetailRms * spatialDetailRms;
-					const double cellOwnGrainVar = (splitActive && spatialPxCnt > 0)
-						? (cellOwnGrainEnergy / static_cast<double>(spatialPxCnt))
+					const double curMVar = spatialMidEnergy * invSpatialCnt;
+					const double curHVar = spatialFineEnergy * invSpatialCnt;
+					const double spatialDetailRms = std::sqrt((std::max)(0.0, curHVar));
+					cellSpatialDetailRms[cIdx] = spatialDetailRms;
+					cellCurMidE[cIdx] = curMVar;
+					cellCurFineE[cIdx] = curHVar;
+					cellPrevMidE[cIdx] = prevMidEnergy * invSpatialCnt;
+					cellPrevFineE[cIdx] = prevFineEnergy * invSpatialCnt;
+					cellOwnGrainVarArr[cIdx] = (splitActive && spatialPxCnt > 0)
+						? (cellOwnGrainEnergy * invSpatialCnt)
 						: 0.0;
 
-					const double cellStepScaleVal = cellStepScales[cIdx];
-					const double cellStepScaleSq = cellStepScaleVal * cellStepScaleVal;
+					const double cleanTexMH = (std::max)(0.0, curMVar - cellRetainedGrainVar * gains.mid * in.psdShape.ForBand(1)) +
+					                          (std::max)(0.0, curHVar - cellRetainedGrainVar * gains.fine * in.psdShape.ForBand(2));
+					const uint8_t actClass = (cleanTexMH > activityTexFloor) ? 1u : 0u;
+					cellActivityClass[cIdx] = actClass;
 
-					// H13 (plan Q2 / s1.3 L127 / s3.3): Pass-1 face / non-rigid masked cells force ALL band weights (L, M, H)
-					// strictly to 0.0 so every pixel in the masked cell stays bit-for-bit passthrough (delta == 0).
 					if (isFaceMaskedCell(cIdx))
 					{
 						++res.faceMaskedCells;
+						const double cellStepScaleVal = cellStepScales[cIdx];
+						const double cellStepScaleSq = cellStepScaleVal * cellStepScaleVal;
 						TdMapsView::Block& mBlock = res.tdMaps[cIdx];
 						mBlock.f[TdMapsView::kValidity] = 0.0f;
 						mBlock.f[TdMapsView::kTrailConfidence0] = 0.0f;
@@ -1503,17 +1565,9 @@ namespace TdV2
 						continue;
 					}
 
-					double cellWeightSumAll = 0.0;
-					double cellResEnergy = 0.0;
-					unsigned activeBandBits = 0;
-					bool cellUsedSingleRefA2 = false;
-					bool cellHadSingular = false;
-
 					for (int b = 0; b < 3; ++b)
 					{
 						const TdV2Plane& curB = bandPlaneOf(curBands, b);
-						// Exact Welford online mean-centered second-moment accumulator (zero first-pixel-anchor
-						// catastrophic cancellation; matches GPU Chan-Pebay parallel merge to FP32 precision).
 						double muWelford[kMaxBlendRefs] = {};
 						double scatterWelford[kMaxBlendRefs][kMaxBlendRefs] = {};
 						size_t sampleCount = 0;
@@ -1532,9 +1586,6 @@ namespace TdV2
 							{
 								const int pcx = (std::min)(res.cellsW - 1, x / cellPx);
 								const size_t pCell = static_cast<size_t>(pcy) * res.cellsW + pcx;
-								// Exclude pixels owned by hard-vetoed cells (face-masked cells, genuine focal-plane shift
-								// cells on all bands, bokeh-vetoed bands per BokehMode, Overlay/DynamicTexture/fast Object/invalid motion)
-								// from 3x3 covariance pooling so vetoed regions never poison neighboring normal cells.
 								if (isFaceMaskedCell(pCell) || isFocusVetoedBand(pCell, b))
 									continue;
 
@@ -1586,7 +1637,8 @@ namespace TdV2
 						if (sampleCount == 0)
 							continue;
 
-						double C[kMaxBlendRefs][kMaxBlendRefs] = {};
+						CellBandMoments& cm = cellMoments[b][cIdx];
+						cm.sampleCount = sampleCount;
 						const double invSampleN = 1.0 / static_cast<double>(sampleCount);
 						for (int i = 0; i < K; ++i)
 						{
@@ -1594,35 +1646,28 @@ namespace TdV2
 							{
 								const double m2 = scatterWelford[i][j] * invSampleN + muWelford[i] * muWelford[j];
 								const double val = (i == j && m2 < 0.0) ? 0.0 : m2;
-								C[i][j] = val;
-								C[j][i] = val;
+								cm.C[i][j] = val;
+								cm.C[j][i] = val;
 							}
 						}
-						// Store each cell's unpooled local second moment (capped by pooled C[k][k]) as its 3-sigma Huber
-						// outlier scale so a stationary neighbor cell never has its Huber scale inflated by an adjacent
-						// moving cell in the 3x3 pool (for poolR == 0, ownDiag == C[k][k] identically).
+
 						for (int k = 0; k < K; ++k)
 						{
 							const double ownDiag = (ownSampleCount > 0)
 								? (ownSumSq[k] / static_cast<double>(ownSampleCount))
-								: C[k][k];
-							cellDiagC[b][k][cIdx] = (std::min)(ownDiag, C[k][k]);
+								: cm.C[k][k];
+							cellDiagC[b][k][cIdx] = (std::min)(ownDiag, cm.C[k][k]);
 						}
 
-						double cVec[kMaxBlendRefs] = {};
+						// Precompute grain-corrected three-cornered-hat c_IV per ref for A2e frame prior pooling.
+						const double psdScale = in.psdShape.ForBand(b);
+						bool cellContributedA2e = false;
 						for (int k = 0; k < K; ++k)
 						{
-							// A2 rounding-cell prior for ref k on band b using Parseval passband supremum ||H_b||_inf^2
-							// and per-cell AQ/PQ step scale (homogeneous of degree 2 in stepDelta), capped to [0, C[k][k]].
-							const double cA2 = (std::min)(EstimateC_A2(a2Stats, refs[k].isExactCopy) * cellStepScaleSq * a2BandPeakSq[b], C[k][k]);
-
-							// A1 grain-corrected Three-Cornered Hat using an independent peak partner (NEVER Carry <-> Peak),
-							// with P10g PsdShape psdScale (SOTA #6) and optional sub-pixel bicubic H-band debias (SOTA #2).
-							const double psdScale = in.psdShape.ForBand(b);
-							double cA1 = cA2;
 							const int partner = findIndependentA1Partner(k);
 							if (partner >= 0)
 							{
+								cm.hasIndependentPartner[k] = true;
 								double subpixelBias = 0.0;
 								if (cfg_.enableSubpixelHAttenuationDebias && b == 2 &&
 								    cIdx < refs[k].motionVx.size() && cIdx < refs[partner].motionVx.size())
@@ -1632,16 +1677,116 @@ namespace TdV2
 										refs[partner].motionVx[cIdx], refs[partner].motionVy[cIdx],
 										curHVar, cellRetainedGrainVar * bandTransfer[2] * psdScale);
 								}
-								cA1 = EstimateC_A1(C[k][partner], C[k][k], C[partner][partner],
-								                   cellRetainedGrainVar, bandTransfer[b], 1.0, psdScale, subpixelBias);
+								const double grainTerm = (std::max)(0.0, cellRetainedGrainVar) * bandTransfer[b] * (std::max)(0.0, psdScale);
+								const double rawIv = cm.C[k][partner] - grainTerm - (std::max)(0.0, subpixelBias);
+								cm.cIvRaw[k] = std::isfinite(rawIv) ? rawIv : 0.0;
+								cm.cIvClipped[k] = EstimateC_A1(cm.C[k][partner], cm.C[k][k], cm.C[partner][partner],
+								                                cellRetainedGrainVar, bandTransfer[b], 1.0, psdScale, subpixelBias);
+								if (!cellContributedA2e && !refs[k].isExactCopy && !isFocusVetoedBand(cIdx, b))
+								{
+									const double mGate = (b == 0) ? refs[k].motionGate.gateL[cIdx] : refs[k].motionGate.gateMH[cIdx];
+									if (mGate > 0.0 && std::isfinite(cm.cIvClipped[k]))
+									{
+										a2eSamples[b][actClass].push_back(cm.cIvClipped[k]);
+										cellContributedA2e = true;
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+
+			// ---- Frame-Level TD-U1 Reductions: Aligned Relative Sharpness r_t & A2e Own-Error Prior U_j(class) ----
+			if (prevRefIdx >= 0 && prevRefIdx < static_cast<int>(refSpecs.size()) && refSpecs[prevRefIdx].motion != nullptr)
+			{
+				const CellMotionField& pmf = *refSpecs[prevRefIdx].motion;
+				res.alignedSharpness = MeasureAlignedSharpnessFromCellEnergies(
+					cellCurMidE, cellCurFineE, cellPrevMidE, cellPrevFineE,
+					pmf.vx, pmf.vy, pmf.valid, &cellFocusFlagged,
+					&cellRetainedGrain, cfg_.sourceBits,
+					refs[prevRefIdx].isExactCopy ? 1.0 : 0.0, 0.0,
+					nullptr, nullptr, nullptr, nullptr, standIns);
+			}
+
+			{
+				EmpiricalOwnErrorPrior rawA2e;
+				bool anyClassValid = false;
+				for (int b = 0; b < 3; ++b)
+				{
+					for (int ac = 0; ac < kA2eActivityClasses; ++ac)
+					{
+						if (!a2eSamples[b][ac].empty())
+						{
+							rawA2e.U[b][ac] = (std::max)(0.0, RobustStats::Median(a2eSamples[b][ac], RobustStats::MedianRule::MeanOfMiddle));
+							rawA2e.cellCount[b][ac] = static_cast<uint32_t>(a2eSamples[b][ac].size());
+							anyClassValid = true;
+						}
+					}
+					// If one activity class had 0 cells (e.g. uniform frame), fall back cleanly to the other populated class.
+					if (rawA2e.cellCount[b][0] == 0 && rawA2e.cellCount[b][1] > 0)
+						rawA2e.U[b][0] = rawA2e.U[b][1];
+					else if (rawA2e.cellCount[b][1] == 0 && rawA2e.cellCount[b][0] > 0)
+						rawA2e.U[b][1] = rawA2e.U[b][0];
+				}
+				rawA2e.valid = anyClassValid;
+				const bool freezeA2e = effectiveCut || (effFadeKeep < 1.0);
+				res.empiricalOwnError = a2eHistory_.ApplyCapAndRecord(
+					rawA2e, in.frameRole, cfg_.sourceHz, freezeA2e, effectiveCut);
+			}
+
+			// ---- Stage 2B: Per-cell blind c selection, constrained convex QP solve, motion/focus/grain/fade gates ----
+			for (int cy = 0; cy < res.cellsH; ++cy)
+			{
+				for (int cx = 0; cx < res.cellsW; ++cx)
+				{
+					const size_t cIdx = static_cast<size_t>(cy) * res.cellsW + cx;
+					if (isFaceMaskedCell(cIdx))
+						continue;
+
+					const double cellRetainedGrainVar = cellRetainedGrain[cIdx];
+					const double spatialDetailRms = cellSpatialDetailRms[cIdx];
+					const double curHVar = spatialDetailRms * spatialDetailRms;
+					const double cellOwnGrainVar = cellOwnGrainVarArr[cIdx];
+					const double cellStepScaleVal = cellStepScales[cIdx];
+					const double cellStepScaleSq = cellStepScaleVal * cellStepScaleVal;
+					const int actClass = static_cast<int>(cellActivityClass[cIdx]);
+
+					double cellWeightSumAll = 0.0;
+					double cellResEnergy = 0.0;
+					unsigned activeBandBits = 0;
+					bool cellUsedSingleRefA2 = false;
+					bool cellHadSingular = false;
+
+					for (int b = 0; b < 3; ++b)
+					{
+						const CellBandMoments& cm = cellMoments[b][cIdx];
+						if (cm.sampleCount == 0)
+							continue;
+
+						const double (&C)[kMaxBlendRefs][kMaxBlendRefs] = cm.C;
+						double cVec[kMaxBlendRefs] = {};
+						for (int k = 0; k < K; ++k)
+						{
+							// A2 prior for ref k on band b:
+							// - On unidentified transforms when A2e empirical prior is active and no explicit codec step was supplied,
+							//   use U_j(class) (Plan Phase 1 A2e) instead of 1-LSB default; otherwise use rounding-cell A2.
+							const bool useA2ePrior = cfg_.enableA2eEmpiricalPrior && !in.transformIdentified8x8 &&
+							                         !in.hasStepPrior && res.empiricalOwnError.valid;
+							const double rawA2 = useA2ePrior
+								? (refs[k].isExactCopy ? 0.0 : res.empiricalOwnError.ForBandClass(b, actClass))
+								: (EstimateC_A2(a2Stats, refs[k].isExactCopy) * cellStepScaleSq * a2BandPeakSq[b]);
+							const double cA2 = (std::min)(rawA2, C[k][k]);
+
+							const double psdScale = in.psdShape.ForBand(b);
+							double cA1 = cA2;
+							if (cm.hasIndependentPartner[k])
+							{
+								cA1 = cm.cIvClipped[k];
 							}
 							else if (cfg_.estimator != VarianceEstimator::A2_RoundingCells)
 							{
-								// No independent peak partner -> fall back from A1 to A2 visibly (counted once per cell).
 								cellUsedSingleRefA2 = true;
-								// Prevent C^-1 c weight inversion when ref k falls back to A2 while another non-copy
-								// ref j != k in the same solve uses A1 (e.g. nextPeak + carry with prevPeak absent):
-								// cap cA1 from above by min_{j != k, !exactCopy} EstimateC_A1(C[k][j], ...) (never inflates above cA2).
 								for (int j = 0; j < K; ++j)
 								{
 									if (j == k || refs[j].isExactCopy)
@@ -1663,7 +1808,6 @@ namespace TdV2
 							}
 
 							cVec[k] = SelectBlindC(cfg_.estimator, cA1, cA2);
-							// Exact copy of reference k always gets c_k = 0 (refs/111 s2.2 fact 3).
 							if (refs[k].isExactCopy)
 								cVec[k] = 0.0;
 						}
@@ -2244,5 +2388,6 @@ namespace TdV2
 		TdV2Plane carryClean_;
 		bool hasLastSeq_ = false;
 		uint64_t lastSeq_ = 0;
+		A2ePriorHistory a2eHistory_;
 	};
 }
