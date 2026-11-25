@@ -1027,10 +1027,10 @@ namespace D8SceneJudgeAgreementNs
 			Assert::IsTrue(DetailPulse::Params().vectorVeto, L"DetailPulse::Params::vectorVeto defaults ON");
 			Assert::IsTrue(TextureRestore::Params().vectorVeto, L"TextureRestore::Params::vectorVeto defaults ON");
 
-			// 2. Synthesize a large-histogram pan pair that triggers U7 CutFadeJudge::ClassifyEvents cut == true.
+			// 2. Synthesize a large-histogram pan pair (different luma spread, not an unchanged-spread flash) that triggers U7 CutFadeJudge::ClassifyEvents cut == true.
 			VpUnit::SourceStats::Record prevRec{}, curRec{};
 			prevRec.pixelCount = 10000u; prevRec.mean = 16000u; prevRec.p01 = 8000u; prevRec.p50 = 16000u; prevRec.p99 = 24000u;
-			curRec.pixelCount = 10000u; curRec.mean = 40000u; curRec.p01 = 32000u; curRec.p50 = 40000u; curRec.p99 = 48000u;
+			curRec.pixelCount = 10000u; curRec.mean = 40000u; curRec.p01 = 16000u; curRec.p50 = 40000u; curRec.p99 = 60000u;
 			for (uint32_t i = 0; i < 100u; ++i)
 			{
 				prevRec.hist[200u + i] = 100u;
