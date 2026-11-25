@@ -5,11 +5,12 @@
 // kBandMemo Shared Current-Frame Low-Band Zero-Duplicate Reuse (curLowBandTex in TdV2GpuEngine):
 //   1. GpuBandMemoReferenceAndRealTimeDropDispatchesAndMatchSelfComputedBands (GpuWarp):
 //      - Preset::Reference: valid full-res curLowBandTex strictly drops dispatchCount by -1 vs curLowBandTex==nullptr
-//        baseline, sets usedExternalBandMemo=true, and matches self-computed BandFromBase output (< 1e-3 RMS).
-//      - Preset::RealTime: BOTH valid full-res (w x h) AND valid half-res (wHalf x hHalf) curLowBandTex strictly
-//        drop dispatchCount by -2 vs curLowBandTex==nullptr baseline, set usedExternalBandMemo=true, and match
-//        self-computed BandFromBase output (< 1e-3 RMS).
-//      - Includes adversarial perturbed-memo control proving curLowBandTex is genuinely consumed in Pass 1C!
+//        baseline, sets usedExternalBandMemo=true, and matches self-computed BandFromBase output (< 2e-4 RMS).
+//      - Preset::RealTime: valid half-res (wHalf x hHalf) curLowBandTex strictly drops dispatchCount by -2 vs
+//        curLowBandTex==nullptr baseline, sets usedExternalBandMemo=true, and matches native RealTime (< 2e-4 RMS);
+//        mismatched full-res (w x h) curLowBandTex cleanly bypasses to native half-res runBandDecomp
+//        (usedExternalBandMemo=false, StandInKind::BandMemoW2 engaged, bit-exact < 2e-4 parity with native RealTime!).
+//      - Includes adversarial perturbed-memo controls proving valid memos are genuinely consumed in Pass 1C!
 //   2. GpuBandMemoDimensionAndFormatMismatchFailClosedVisiblyZeroSilentFallback (GpuWarp):
 //      - Wrong dimensions ((w-4) x h), half-res curLowBandTex passed to Preset::Reference, and non-float UNORM r8
 //        curLowBandTex ALL fail closed visibly (succeeded=false, externalBandMemoRejected=true, dispatchCount=0,
@@ -286,6 +287,9 @@ namespace TdV2Sota10BandMemoNs
 			TdV2Plane curLowPerturbed = curLowFull;
 			for (size_t i = 0; i < curLowPerturbed.v.size(); ++i)
 				curLowPerturbed.v[i] += 35.0;
+			TdV2Plane curLowHalfPerturbed = curLowHalf;
+			for (size_t i = 0; i < curLowHalfPerturbed.v.size(); ++i)
+				curLowHalfPerturbed.v[i] += 35.0;
 
 			const std::vector<float> recF = PlaneToFloats(recY);
 			const std::vector<float> cleanF = PlaneToFloats(curClean);
@@ -294,9 +298,10 @@ namespace TdV2Sota10BandMemoNs
 			const std::vector<float> memoFullF = PlaneToFloats(curLowFull);
 			const std::vector<float> memoHalfF = PlaneToFloats(curLowHalf);
 			const std::vector<float> memoPertF = PlaneToFloats(curLowPerturbed);
+			const std::vector<float> memoHalfPertF = PlaneToFloats(curLowHalfPerturbed);
 
 			OwnedTex tRec(wc.gpu), tClean(wc.gpu), tPrev(wc.gpu), tNext(wc.gpu);
-			OwnedTex tMemoFull(wc.gpu), tMemoHalf(wc.gpu), tMemoPert(wc.gpu);
+			OwnedTex tMemoFull(wc.gpu), tMemoHalf(wc.gpu), tMemoPert(wc.gpu), tMemoHalfPert(wc.gpu);
 			tRec.tex = CreateFloatTex(wc.gpu, w, h, 1, true, false, recF.data());
 			tClean.tex = CreateFloatTex(wc.gpu, w, h, 1, true, false, cleanF.data());
 			tPrev.tex = CreateFloatTex(wc.gpu, w, h, 1, true, false, prevF.data());
@@ -304,10 +309,11 @@ namespace TdV2Sota10BandMemoNs
 			tMemoFull.tex = CreateFloatTex(wc.gpu, w, h, 1, true, false, memoFullF.data());
 			tMemoHalf.tex = CreateFloatTex(wc.gpu, wHalf, hHalf, 1, true, false, memoHalfF.data());
 			tMemoPert.tex = CreateFloatTex(wc.gpu, w, h, 1, true, false, memoPertF.data());
+			tMemoHalfPert.tex = CreateFloatTex(wc.gpu, wHalf, hHalf, 1, true, false, memoHalfPertF.data());
 
 			const CellMotionField zeroMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
 
-			auto runCase = [&](Preset preset, pl_tex memoTex, GpuFrameOutput& gOut, TdV2Plane& outY, TdV2Plane& outClean)
+			auto runCase = [&](Preset preset, pl_tex memoTex, GpuFrameOutput& gOut, TdV2Plane& outY, TdV2Plane& outClean, StandInRegistry& st)
 			{
 				Config cfg;
 				cfg.preset = preset;
@@ -344,8 +350,9 @@ namespace TdV2Sota10BandMemoNs
 				gOut.outputCleanTex = tOutClean.tex;
 				gOut.readbackCellDiagnostics = true;
 
+				st.Reset();
 				arena.BeginFrame();
-				const bool ok = eng.engine.ProcessFrameGpu(wc.gpu, wc.dispatch, gIn, gOut, &arena, nullptr);
+				const bool ok = eng.engine.ProcessFrameGpu(wc.gpu, wc.dispatch, gIn, gOut, &arena, &st);
 				Assert::IsTrue(ok && gOut.succeeded);
 				Assert::IsTrue(Detail::DownloadPlaneR32F(wc.gpu, tOutY.tex, w, h, outY));
 				Assert::IsTrue(Detail::DownloadPlaneR32F(wc.gpu, tOutClean.tex, w, h, outClean));
@@ -354,9 +361,10 @@ namespace TdV2Sota10BandMemoNs
 			// ---- Part A: Preset::Reference (-1 dispatch, exact BandFromBase parity) ----
 			GpuFrameOutput refBaseOut, refMemoOut, refPertOut;
 			TdV2Plane refBaseY, refBaseClean, refMemoY, refMemoClean, refPertY, refPertClean;
-			runCase(Preset::Reference, nullptr, refBaseOut, refBaseY, refBaseClean);
-			runCase(Preset::Reference, tMemoFull.tex, refMemoOut, refMemoY, refMemoClean);
-			runCase(Preset::Reference, tMemoPert.tex, refPertOut, refPertY, refPertClean);
+			StandInRegistry stRefBase, stRefMemo, stRefPert;
+			runCase(Preset::Reference, nullptr, refBaseOut, refBaseY, refBaseClean, stRefBase);
+			runCase(Preset::Reference, tMemoFull.tex, refMemoOut, refMemoY, refMemoClean, stRefMemo);
+			runCase(Preset::Reference, tMemoPert.tex, refPertOut, refPertY, refPertClean, stRefPert);
 
 			Assert::IsFalse(refBaseOut.usedExternalBandMemo);
 			Assert::IsFalse(refBaseOut.externalBandMemoRejected);
@@ -377,31 +385,51 @@ namespace TdV2Sota10BandMemoNs
 			Assert::IsTrue(RmsDiff(refPertClean, refMemoClean) > 1.0,
 				FmtMsg("curLowBandTex appears unused: perturbed vs true memo rms=%.6f", RmsDiff(refPertClean, refMemoClean)).c_str());
 
-			// ---- Part B: Preset::RealTime (-2 dispatches for BOTH full-res and half-res curLowBandTex!) ----
-			GpuFrameOutput rtBaseOut, rtFullOut, rtHalfOut;
-			TdV2Plane rtBaseY, rtBaseClean, rtFullY, rtFullClean, rtHalfY, rtHalfClean;
-			runCase(Preset::RealTime, nullptr, rtBaseOut, rtBaseY, rtBaseClean);
-			runCase(Preset::RealTime, tMemoFull.tex, rtFullOut, rtFullY, rtFullClean);
-			runCase(Preset::RealTime, tMemoHalf.tex, rtHalfOut, rtHalfY, rtHalfClean);
+			// ---- Part B: Preset::RealTime (half-res saves -2 dispatches; mismatched full-res bypasses cleanly!) ----
+			GpuFrameOutput rtBaseOut, rtFullOut, rtFullPertOut, rtHalfOut, rtHalfPertOut;
+			TdV2Plane rtBaseY, rtBaseClean, rtFullY, rtFullClean, rtFullPertY, rtFullPertClean;
+			TdV2Plane rtHalfY, rtHalfClean, rtHalfPertY, rtHalfPertClean;
+			StandInRegistry stRtBase, stRtFull, stRtFullPert, stRtHalf, stRtHalfPert;
+			runCase(Preset::RealTime, nullptr, rtBaseOut, rtBaseY, rtBaseClean, stRtBase);
+			runCase(Preset::RealTime, tMemoFull.tex, rtFullOut, rtFullY, rtFullClean, stRtFull);
+			runCase(Preset::RealTime, tMemoPert.tex, rtFullPertOut, rtFullPertY, rtFullPertClean, stRtFullPert);
+			runCase(Preset::RealTime, tMemoHalf.tex, rtHalfOut, rtHalfY, rtHalfClean, stRtHalf);
+			runCase(Preset::RealTime, tMemoHalfPert.tex, rtHalfPertOut, rtHalfPertY, rtHalfPertClean, stRtHalfPert);
 
 			Assert::IsFalse(rtBaseOut.usedExternalBandMemo);
-			Assert::IsTrue(rtFullOut.usedExternalBandMemo && !rtFullOut.externalBandMemoRejected);
-			Assert::IsTrue(rtHalfOut.usedExternalBandMemo && !rtHalfOut.externalBandMemoRejected);
-			Assert::AreEqual(rtBaseOut.dispatchCount - 2, rtFullOut.dispatchCount,
-				FmtMsg("RealTime full-res curLowBandTex must save -2 dispatches: base=%.0f memo=%.0f",
+
+			// TD-AUDIT-M1: Full-res w x h curLowBandTex in Preset::RealTime bypasses cleanly to native half-res
+			// runBandDecomp (usedExternalBandMemo == false, StandInKind::BandMemoW2 visibly engaged, < 2e-4 parity!).
+			Assert::IsFalse(rtFullOut.usedExternalBandMemo,
+				L"RealTime must bypass mismatched full-res curLowBandTex to native half-res runBandDecomp");
+			Assert::IsFalse(rtFullOut.externalBandMemoRejected,
+				L"RealTime full-res curLowBandTex bypass must succeed without hard rejection");
+			Assert::AreEqual(rtBaseOut.dispatchCount, rtFullOut.dispatchCount,
+				FmtMsg("RealTime bypassed full-res curLowBandTex must run native half-res dispatches: base=%.0f got=%.0f",
 					static_cast<double>(rtBaseOut.dispatchCount), static_cast<double>(rtFullOut.dispatchCount)).c_str());
+			Assert::IsTrue(stRtFull.IsActive(StandInKind::BandMemoW2),
+				L"RealTime full-res curLowBandTex bypass must visibly engage StandInKind::BandMemoW2");
+			Assert::IsTrue(stRtFull.Detail(StandInKind::BandMemoW2).find("bypassed in RealTime") != std::string::npos,
+				L"StandInKind::BandMemoW2 detail must visibly report RealTime full-res curLowBandTex bypass");
+			Assert::IsTrue(RmsDiff(rtFullClean, rtBaseClean) < 2e-4 && MaxAbsDiff(rtFullClean, rtBaseClean) < 2e-4,
+				FmtMsg("RealTime bypassed full-res BandMemo clean parity mismatch: rms=%.6f max=%.6f",
+					RmsDiff(rtFullClean, rtBaseClean), MaxAbsDiff(rtFullClean, rtBaseClean)).c_str());
+			Assert::IsTrue(RmsDiff(rtFullY, rtBaseY) < 2e-4 && MaxAbsDiff(rtFullY, rtBaseY) < 2e-4,
+				FmtMsg("RealTime bypassed full-res BandMemo outputY parity mismatch: rms=%.6f", RmsDiff(rtFullY, rtBaseY)).c_str());
+			Assert::IsTrue(MaxAbsDiff(rtFullPertClean, rtBaseClean) < 2e-4,
+				L"Perturbed full-res curLowBandTex in RealTime must also be bypassed cleanly");
+
+			// Valid half-res wHalf x hHalf curLowBandTex in Preset::RealTime saves -2 dispatches with < 2e-4 parity!
+			Assert::IsTrue(rtHalfOut.usedExternalBandMemo && !rtHalfOut.externalBandMemoRejected);
 			Assert::AreEqual(rtBaseOut.dispatchCount - 2, rtHalfOut.dispatchCount,
 				FmtMsg("RealTime half-res curLowBandTex must save -2 dispatches: base=%.0f memo=%.0f",
 					static_cast<double>(rtBaseOut.dispatchCount), static_cast<double>(rtHalfOut.dispatchCount)).c_str());
-
-			// Full-res curLowBandTex G(2.5) downsampled via 2x2 box into RealTime half-res bands_ld3_out has effective
-			// sigma = sqrt(2.5^2 + 0.5^2) = 2.5495 vs native half-res sigma = 2.5000 (~0.0045 code RMS), whereas
-			// half-res curLowBandTex matches native RealTime within < 2e-4!
-			Assert::IsTrue(RmsDiff(rtFullClean, rtBaseClean) < 1e-2 && MaxAbsDiff(rtFullClean, rtBaseClean) < 1e-1,
-				FmtMsg("RealTime full-res BandMemo mismatch: rms=%.6f max=%.6f", RmsDiff(rtFullClean, rtBaseClean), MaxAbsDiff(rtFullClean, rtBaseClean)).c_str());
 			Assert::IsTrue(RmsDiff(rtHalfClean, rtBaseClean) < 2e-4 && MaxAbsDiff(rtHalfClean, rtBaseClean) < 2e-3,
 				FmtMsg("RealTime half-res BandMemo mismatch: rms=%.6f", RmsDiff(rtHalfClean, rtBaseClean)).c_str());
 			Assert::IsTrue(RmsDiff(rtHalfY, rtBaseY) < 2e-4);
+			Assert::IsTrue(RmsDiff(rtHalfPertClean, rtHalfClean) > 1.0,
+				FmtMsg("RealTime half-res curLowBandTex appears unused: perturbed vs true rms=%.6f",
+					RmsDiff(rtHalfPertClean, rtHalfClean)).c_str());
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(GpuBandMemoDimensionAndFormatMismatchFailClosedVisiblyZeroSilentFallback)

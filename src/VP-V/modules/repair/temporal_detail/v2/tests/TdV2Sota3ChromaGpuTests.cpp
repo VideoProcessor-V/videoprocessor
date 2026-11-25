@@ -894,6 +894,578 @@ namespace TdV2Sota3ChromaGpuNs
 				}
 			}
 		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(GpuChromaUnidentifiedCoarseOnlyPreservesFullGridRejectsFinerCodedAndTrimsNativeArena)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(GpuChromaUnidentifiedCoarseOnlyPreservesFullGridRejectsFinerCodedAndTrimsNativeArena)
+		{
+			WarpContext ctx;
+			const Config cfg = MakePreset(Preset::Reference, Mode::On);
+			const YCbCrMatrixSpec mat = YCbCrMatrixSpec::Bt709();
+			const double midCode = 512.0;
+
+			// ---- Part A (TD-AUDIT-H2a): ChromaGridStatus::Unidentified across Yuv422, Yuv444, and Rgb444 ----
+			// Adversarially pass codedSubsampling = Yuv420 alongside gridStatus = Unidentified:
+			// GPU MUST visibly engage StandInKind::ChromaGridDetector, set coarseBandOnly = true, keep full delivered
+			// resolution (codedW == dW, codedH == dH, ZERO 4:2:0 downsampling of real chroma!), preserve high-frequency
+			// real chroma detail untouched, and match CPU TdV2ChromaEngine Branch-A coarse-only within < 1e-2 codes!
+			{
+				const int lumaW = 96;
+				const int lumaH = 96;
+				const int cw = lumaW / 16;
+				const int ch = lumaH / 16;
+				const ActiveRect lumaFull = ActiveRect::Full(lumaW, lumaH);
+				const SitingSpec siting = SitingSpec::Left();
+				const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+
+				const DeliveredChromaFormat delivFormats[3] = {
+					DeliveredChromaFormat::Yuv422,
+					DeliveredChromaFormat::Yuv444,
+					DeliveredChromaFormat::Rgb444
+				};
+
+				for (int fi = 0; fi < 3; ++fi)
+				{
+					const DeliveredChromaFormat delivFmt = delivFormats[fi];
+					const int dSubX = DeliveredSubsampleX(delivFmt);
+					const int dSubY = DeliveredSubsampleY(delivFmt);
+					const int dW = ChromaDetail::SubsampledDim(lumaW, dSubX);
+					const int dH = ChromaDetail::SubsampledDim(lumaH, dSubY);
+					const ActiveRect dFull = ActiveRect::Full(dW, dH);
+					const ActiveRect dInterior{ dW / 4, 20, (3 * dW) / 4, dH - 20 };
+
+					TdV2Plane masterLowCb(dW, dH, 512.0), masterLowCr(dW, dH, 512.0);
+					TdV2Plane curCb(dW, dH, 512.0), curCr(dW, dH, 512.0);
+					TdV2Plane lumaY(lumaW, lumaH, 500.0);
+
+					for (int y = 0; y < dH; ++y)
+					{
+						const double wy = (y >= 8 && y < dH - 8)
+							? (0.5 * (1.0 - std::cos(2.0 * kPi * static_cast<double>(y - 8) / static_cast<double>(dH - 17))))
+							: 0.0;
+						for (int x = 0; x < dW; ++x)
+						{
+							const double wx = (x >= 8 / dSubX && x < dW - 8 / dSubX)
+								? (0.5 * (1.0 - std::cos(2.0 * kPi * static_cast<double>(x - 8 / dSubX) / static_cast<double>(dW - 2 * (8 / dSubX) - 1))))
+								: 0.0;
+							const double win = wx * wy;
+							const double lowCb = 478.0 + 0.65 * static_cast<double>(x * dSubX) + 0.22 * static_cast<double>(y * dSubY);
+							const double lowCr = 546.0 - 0.60 * static_cast<double>(x * dSubX) - 0.20 * static_cast<double>(y * dSubY);
+							masterLowCb.at(x, y) = lowCb;
+							masterLowCr.at(x, y) = lowCr;
+
+							const double bandCb = std::nearbyint(lowCb / 20.0) * 20.0;
+							const double bandCr = std::nearbyint(lowCr / 20.0) * 20.0;
+
+							// Real delivered-grid high-frequency chroma above 4:2:0 Nyquist (present ONLY in cur, absent in peaks!)
+							const double hfWave = (dSubX > 1)
+								? std::sin(2.0 * kPi * static_cast<double>(y) / 2.4 + 0.25 * static_cast<double>(x))
+								: (std::cos(2.0 * kPi * static_cast<double>(x) / 2.4) * std::sin(2.0 * kPi * static_cast<double>(y) / 2.4));
+							const double hfCb = 18.0 * win * hfWave;
+							const double hfCr = -16.0 * win * hfWave;
+
+							curCb.at(x, y) = bandCb + hfCb;
+							curCr.at(x, y) = bandCr + hfCr;
+						}
+					}
+
+					TdV2Plane prevCb = masterLowCb, prevCr = masterLowCr;
+					TdV2Plane nextCb = masterLowCb, nextCr = masterLowCr;
+					{
+						std::mt19937 rP(9301u + static_cast<uint32_t>(fi)), rN(9311u + static_cast<uint32_t>(fi));
+						std::normal_distribution<double> nd(0.0, 0.35);
+						for (size_t i = 0; i < prevCb.v.size(); ++i)
+						{
+							prevCb.v[i] += nd(rP); prevCr.v[i] += nd(rP);
+							nextCb.v[i] += nd(rN); nextCr.v[i] += nd(rN);
+						}
+					}
+
+					ChromaProcessInput cIn;
+					cIn.seq = static_cast<uint64_t>(500 + fi);
+					cIn.lumaW = lumaW;
+					cIn.lumaH = lumaH;
+					cIn.deliveredFormat = delivFmt;
+					cIn.codedSubsampling = ChromaSubsampling::Yuv420; // Adversarial: Unidentified MUST ignore 4:2:0 and keep dW x dH!
+					cIn.gridStatus = ChromaGridStatus::Unidentified;
+					cIn.siting = siting;
+					cIn.matrix = mat;
+					cIn.activeRect = lumaFull;
+					cIn.hasCleanSplit = true;
+					cIn.cleanCb = curCb;
+					cIn.cleanCr = curCr;
+					cIn.prevPeak = { &prevCb, &prevCr, &stillMf, false };
+					cIn.nextPeak = { &nextCb, &nextCr, &stillMf, false };
+					cIn.hasStepPrior = true;
+					cIn.estimatedStepDelta = 24.0;
+					cIn.deadZonePhi = kDeadZonePhiInter;
+					cIn.zeroCoeffFraction = 0.35;
+
+					if (delivFmt == DeliveredChromaFormat::Rgb444)
+					{
+						cIn.receivedR = TdV2Plane(dW, dH, 0.0);
+						cIn.receivedG = TdV2Plane(dW, dH, 0.0);
+						cIn.receivedB = TdV2Plane(dW, dH, 0.0);
+						const double kR = 2.0 * (1.0 - mat.kr);
+						const double kB = 2.0 * (1.0 - mat.kb);
+						for (size_t i = 0; i < curCb.v.size(); ++i)
+						{
+							const double yv = lumaY.v[i];
+							const double cb0 = curCb.v[i] - midCode;
+							const double cr0 = curCr.v[i] - midCode;
+							cIn.receivedR.v[i] = yv + kR * cr0;
+							cIn.receivedB.v[i] = yv + kB * cb0;
+							cIn.receivedG.v[i] = yv - (mat.kr * kR / mat.kg) * cr0 - (mat.kb * kB / mat.kg) * cb0;
+						}
+					}
+					else
+					{
+						cIn.receivedCb = curCb;
+						cIn.receivedCr = curCr;
+					}
+
+					TdV2ChromaEngine cpuEng(cfg);
+					ChromaGpuGuard gpuGuard(ctx.gpu, cfg);
+					StandInRegistry siCpu, siGpu;
+					const ChromaProcessResult cpuRes = cpuEng.ProcessFrame(cIn, &siCpu);
+					const ChromaGpuProcessResult gpuRes = gpuGuard.engine.ProcessChromaPlanes(ctx.gpu, ctx.dispatch, cIn, nullptr, &siGpu);
+
+					Assert::IsTrue(gpuRes.succeeded, L"Unidentified grid GPU chroma must succeed");
+					Assert::IsTrue(gpuRes.coarseBandOnly && cpuRes.coarseBandOnly,
+						L"Unidentified grid must set coarseBandOnly == true on both CPU and GPU");
+					Assert::IsTrue(siGpu.IsActive(StandInKind::ChromaGridDetector) && siCpu.IsActive(StandInKind::ChromaGridDetector),
+						L"Unidentified grid must visibly engage StandInKind::ChromaGridDetector");
+					Assert::AreEqual(dW, gpuRes.codedW, L"Unidentified grid must keep full delivered width (zero 4:2:0 downsampling!)");
+					Assert::AreEqual(dH, gpuRes.codedH, L"Unidentified grid must keep full delivered height (zero 4:2:0 downsampling!)");
+
+					// Strict CPU Branch-A coarse-only parity (< 1e-2 codes) across deltas and outputs!
+					Assert::IsTrue(MaxAbsDiffRect(cpuRes.deliveredDeltaCb, gpuRes.deliveredDeltaCb, dFull) < 1e-2,
+						FmtMsg("Unidentified fmt=%.0f deliveredDeltaCb CPU/GPU diff=%.6f",
+							static_cast<double>(fi), MaxAbsDiffRect(cpuRes.deliveredDeltaCb, gpuRes.deliveredDeltaCb, dFull)).c_str());
+					Assert::IsTrue(MaxAbsDiffRect(cpuRes.deliveredDeltaCr, gpuRes.deliveredDeltaCr, dFull) < 1e-2,
+						FmtMsg("Unidentified fmt=%.0f deliveredDeltaCr CPU/GPU diff=%.6f",
+							static_cast<double>(fi), MaxAbsDiffRect(cpuRes.deliveredDeltaCr, gpuRes.deliveredDeltaCr, dFull)).c_str());
+
+					TdV2Plane gpuOutCb(dW, dH, 0.0);
+					if (delivFmt == DeliveredChromaFormat::Rgb444)
+					{
+						Assert::IsTrue(MaxAbsDiffRect(cpuRes.outputR, gpuRes.outputR, dFull) < 1e-2 &&
+						               MaxAbsDiffRect(cpuRes.outputG, gpuRes.outputG, dFull) < 1e-2 &&
+						               MaxAbsDiffRect(cpuRes.outputB, gpuRes.outputB, dFull) < 1e-2,
+							L"Unidentified Rgb444 output RGB must match CPU Branch-A within < 1e-2 codes");
+						for (size_t i = 0; i < gpuOutCb.v.size(); ++i)
+						{
+							double yv = 0.0, cbv = 0.0, crv = 0.0;
+							mat.RgbToYCbCr(gpuRes.outputR.v[i], gpuRes.outputG.v[i], gpuRes.outputB.v[i], midCode, yv, cbv, crv);
+							gpuOutCb.v[i] = cbv;
+						}
+					}
+					else
+					{
+						Assert::IsTrue(MaxAbsDiffRect(cpuRes.outputCb, gpuRes.outputCb, dFull) < 1e-2 &&
+						               MaxAbsDiffRect(cpuRes.outputCr, gpuRes.outputCr, dFull) < 1e-2,
+							L"Unidentified YUV output Cb/Cr must match CPU Branch-A within < 1e-2 codes");
+						gpuOutCb = gpuRes.outputCb;
+					}
+
+					// Real delivered-grid high-frequency chroma is preserved untouched (< 5e-2 RMS), whereas
+					// a naive full-band temporal average negative control destroys the real HF chroma (> 5.0 RMS)!
+					const ThreeBandPlanes curBandsCb = DecomposeActiveBands(curCb, dFull);
+					const ThreeBandPlanes outBandsCb = DecomposeActiveBands(gpuOutCb, dFull);
+					TdV2Plane naiveFullCb(dW, dH, 0.0);
+					for (size_t i = 0; i < curCb.v.size(); ++i)
+						naiveFullCb.v[i] = (curCb.v[i] + prevCb.v[i] + nextCb.v[i]) / 3.0;
+					const ThreeBandPlanes naiveBandsCb = DecomposeActiveBands(naiveFullCb, dFull);
+					const double gpuHfLoss = RmsDiffRect(outBandsCb.H, curBandsCb.H, dInterior);
+					const double naiveHfLoss = RmsDiffRect(naiveBandsCb.H, curBandsCb.H, dInterior);
+					Assert::IsTrue(gpuHfLoss < 5e-2 && naiveHfLoss > 5.0,
+						FmtMsg("Unidentified fmt=%.0f must preserve real HF chroma (gpuLoss=%.5f vs naiveLoss=%.3f)",
+							static_cast<double>(fi), gpuHfLoss, naiveHfLoss).c_str());
+
+					// Coarse banding error IS genuinely reduced!
+					double dummyGain = 1.0;
+					const double sigX = kUnidentifiedChromaSigmaLumaPx / static_cast<double>(dSubX);
+					const double sigY = kUnidentifiedChromaSigmaLumaPx / static_cast<double>(dSubY);
+					const TdV2Plane refCoarse = ChromaDetail::BlurActiveAnisotropic(masterLowCb, dFull, sigX, sigY, dummyGain);
+					const TdV2Plane inCoarse  = ChromaDetail::BlurActiveAnisotropic(curCb, dFull, sigX, sigY, dummyGain);
+					const TdV2Plane outCoarse = ChromaDetail::BlurActiveAnisotropic(gpuOutCb, dFull, sigX, sigY, dummyGain);
+					Assert::IsTrue(RmsDiffRect(outCoarse, refCoarse, dInterior) < RmsDiffRect(inCoarse, refCoarse, dInterior) * 0.70,
+						L"Unidentified coarse-only mode must genuinely reduce coarse chroma banding error");
+				}
+			}
+
+			// ---- Part B (TD-AUDIT-H2b): Invalid codedSubsampling finer than deliveredFormat rejected visibly ----
+			{
+				const int lumaW = 64, lumaH = 64;
+				const CellMotionField stillMf = CellMotionField::Uniform(4, 4, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+
+				auto assertFinerCodedRejected = [&](ChromaSubsampling badCoded, DeliveredChromaFormat delivFmt, const wchar_t* label)
+				{
+					const int dW = ChromaDetail::SubsampledDim(lumaW, DeliveredSubsampleX(delivFmt));
+					const int dH = ChromaDetail::SubsampledDim(lumaH, DeliveredSubsampleY(delivFmt));
+					const TdV2Plane flatPlane(dW, dH, 512.0);
+
+					ChromaProcessInput badIn;
+					badIn.seq = 520;
+					badIn.lumaW = lumaW;
+					badIn.lumaH = lumaH;
+					badIn.gridStatus = ChromaGridStatus::Identified;
+					badIn.codedSubsampling = badCoded;
+					badIn.deliveredFormat = delivFmt;
+					badIn.receivedCb = flatPlane;
+					badIn.receivedCr = flatPlane;
+					badIn.hasCleanSplit = true;
+					badIn.cleanCb = flatPlane;
+					badIn.cleanCr = flatPlane;
+					badIn.prevPeak = { &flatPlane, &flatPlane, &stillMf, false };
+					badIn.nextPeak = { &flatPlane, &flatPlane, &stillMf, false };
+					badIn.hasStepPrior = true;
+					badIn.estimatedStepDelta = 16.0;
+
+					ChromaGpuGuard gGuard(ctx.gpu, cfg);
+					StandInRegistry st;
+					const ChromaGpuProcessResult r = gGuard.engine.ProcessChromaPlanes(ctx.gpu, ctx.dispatch, badIn, nullptr, &st);
+					Assert::IsFalse(r.succeeded, label);
+					Assert::AreEqual(0, r.dispatchCount, label);
+					Assert::IsFalse(r.lastError.empty(), label);
+					Assert::IsTrue(st.IsActive(StandInKind::GpuDispatchFailed), label);
+				};
+
+				assertFinerCodedRejected(ChromaSubsampling::Yuv444, DeliveredChromaFormat::Yuv420, L"coded=444 on delivered=420 must fail visibly");
+				assertFinerCodedRejected(ChromaSubsampling::Yuv422, DeliveredChromaFormat::Yuv420, L"coded=422 on delivered=420 must fail visibly");
+				assertFinerCodedRejected(ChromaSubsampling::Yuv444, DeliveredChromaFormat::Yuv422, L"coded=444 on delivered=422 must fail visibly");
+			}
+
+			// ---- Part C (TD-AUDIT-L2): Format-aware EstimatedScratchVramBytesFor & ArenaRequests trim 3 reduced* textures ----
+			{
+				const int w4k = 3840;
+				const int h4k = 2160;
+				const uint64_t full420 = TdV2ChromaGpuEngine::EstimatedScratchVramBytes(w4k, h4k, ChromaSubsampling::Yuv420);
+				const uint64_t nat420  = TdV2ChromaGpuEngine::EstimatedScratchVramBytesFor(w4k, h4k, ChromaSubsampling::Yuv420, DeliveredChromaFormat::Yuv420);
+				const uint64_t full422 = TdV2ChromaGpuEngine::EstimatedScratchVramBytes(w4k, h4k, ChromaSubsampling::Yuv422);
+				const uint64_t nat422  = TdV2ChromaGpuEngine::EstimatedScratchVramBytesFor(w4k, h4k, ChromaSubsampling::Yuv422, DeliveredChromaFormat::Yuv422);
+				const uint64_t full444 = TdV2ChromaGpuEngine::EstimatedScratchVramBytes(w4k, h4k, ChromaSubsampling::Yuv444);
+				const uint64_t nat444  = TdV2ChromaGpuEngine::EstimatedScratchVramBytesFor(w4k, h4k, ChromaSubsampling::Yuv444, DeliveredChromaFormat::Yuv444);
+				const uint64_t rgb444  = TdV2ChromaGpuEngine::EstimatedScratchVramBytesFor(w4k, h4k, ChromaSubsampling::Yuv444, DeliveredChromaFormat::Rgb444);
+				const uint64_t up420To444 = TdV2ChromaGpuEngine::EstimatedScratchVramBytesFor(w4k, h4k, ChromaSubsampling::Yuv420, DeliveredChromaFormat::Yuv444);
+
+				// Exact 3 * cW * cH * 8-byte RG32F reduction scratch savings (-47.5 MiB on 4K 4:2:0, -189.8 MiB on 4K 4:4:4)!
+				Assert::AreEqual(static_cast<uint64_t>(3ULL * 1920ULL * 1080ULL * 8ULL), full420 - nat420,
+					L"4K native 4:2:0 must trim exact 3 x 1920x1080 RG32F textures (47.46 MiB)");
+				Assert::AreEqual(static_cast<uint64_t>(3ULL * 1920ULL * 2160ULL * 8ULL), full422 - nat422,
+					L"4K native 4:2:2 must trim exact 3 x 1920x2160 RG32F textures (94.92 MiB)");
+				Assert::AreEqual(static_cast<uint64_t>(3ULL * 3840ULL * 2160ULL * 8ULL), full444 - nat444,
+					L"4K native 4:4:4 must trim exact 3 x 3840x2160 RG32F textures (189.84 MiB)");
+				Assert::AreEqual(full444, rgb444, L"Delivered Rgb444 requires Pass C0 RGB->YUV reduction scratch");
+				Assert::AreEqual(full420, up420To444, L"Player-upsampled 4:2:0->4:4:4 requires Pass C0 reduction scratch");
+
+				const auto reqs4k420 = TdV2ChromaGpuEngine::ArenaRequests(ctx.gpu, w4k, h4k, ChromaSubsampling::Yuv420, DeliveredChromaFormat::Yuv420);
+				const auto reqs4k444 = TdV2ChromaGpuEngine::ArenaRequests(ctx.gpu, w4k, h4k, ChromaSubsampling::Yuv444, DeliveredChromaFormat::Yuv444);
+				Assert::AreEqual(nat420, VpSkeleton::PlanArena(reqs4k420, VpSkeleton::Tier::T1).bytes);
+				Assert::AreEqual(nat444, VpSkeleton::PlanArena(reqs4k444, VpSkeleton::Tier::T1).bytes);
+
+				// Execute live on WARP using the trimmed format-aware ScratchArena on native 4:2:0 AND native 4:4:4!
+				const int lumaW = 64, lumaH = 64;
+				const CellMotionField stillMf = CellMotionField::Uniform(4, 4, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+				VpSkeleton::PlTexBackend backend(ctx.gpu);
+
+				const ChromaSubsampling subs[2] = { ChromaSubsampling::Yuv420, ChromaSubsampling::Yuv444 };
+				const DeliveredChromaFormat fmts[2] = { DeliveredChromaFormat::Yuv420, DeliveredChromaFormat::Yuv444 };
+				for (int mi = 0; mi < 2; ++mi)
+				{
+					const int cW = ChromaDetail::SubsampledDim(lumaW, SubsampleX(subs[mi]));
+					const int cH = ChromaDetail::SubsampledDim(lumaH, SubsampleY(subs[mi]));
+					TdV2Plane masterCb(cW, cH, 512.0), masterCr(cW, cH, 512.0);
+					TdV2Plane degCb(cW, cH, 512.0), degCr(cW, cH, 512.0);
+					for (int y = 0; y < cH; ++y)
+					{
+						for (int x = 0; x < cW; ++x)
+						{
+							const double s = 20.0 * std::sin(2.0 * kPi * (x / 5.0 + y / 6.0) + 0.4);
+							masterCb.at(x, y) = 512.0 + s;
+							masterCr.at(x, y) = 512.0 - s;
+							degCb.at(x, y) = 512.0 + 0.25 * s;
+							degCr.at(x, y) = 512.0 - 0.25 * s;
+						}
+					}
+					TdV2Plane prevMasterCb = masterCb, prevMasterCr = masterCr;
+					TdV2Plane nextMasterCb = masterCb, nextMasterCr = masterCr;
+					{
+						std::mt19937 rP(9401u + static_cast<uint32_t>(mi)), rN(9411u + static_cast<uint32_t>(mi));
+						std::normal_distribution<double> nd(0.0, 0.35);
+						for (size_t i = 0; i < masterCb.v.size(); ++i)
+						{
+							prevMasterCb.v[i] += nd(rP); prevMasterCr.v[i] += nd(rP);
+							nextMasterCb.v[i] += nd(rN); nextMasterCr.v[i] += nd(rN);
+						}
+					}
+
+					const auto trimmedReqs = TdV2ChromaGpuEngine::ArenaRequests(ctx.gpu, lumaW, lumaH, subs[mi], fmts[mi], 16);
+					VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> trimmedArena(backend);
+					Assert::IsTrue(trimmedArena.Reserve(VpSkeleton::PlanArena(trimmedReqs, VpSkeleton::Tier::T1)));
+
+					ChromaProcessInput nIn;
+					nIn.seq = static_cast<uint64_t>(530 + mi);
+					nIn.lumaW = lumaW;
+					nIn.lumaH = lumaH;
+					nIn.gridStatus = ChromaGridStatus::Identified;
+					nIn.codedSubsampling = subs[mi];
+					nIn.deliveredFormat = fmts[mi];
+					nIn.receivedCb = degCb;
+					nIn.receivedCr = degCr;
+					nIn.hasCleanSplit = true;
+					nIn.cleanCb = degCb;
+					nIn.cleanCr = degCr;
+					nIn.prevPeak = { &prevMasterCb, &prevMasterCr, &stillMf, false };
+					nIn.nextPeak = { &nextMasterCb, &nextMasterCr, &stillMf, false };
+					nIn.hasStepPrior = true;
+					nIn.estimatedStepDelta = 36.0;
+					nIn.deadZonePhi = kDeadZonePhiInter;
+					nIn.zeroCoeffFraction = 0.35;
+
+					ChromaGpuGuard gGuard(ctx.gpu, cfg);
+					StandInRegistry stNat;
+					trimmedArena.BeginFrame();
+					const ChromaGpuProcessResult rNat = gGuard.engine.ProcessChromaPlanes(ctx.gpu, ctx.dispatch, nIn, &trimmedArena, &stNat);
+					Assert::IsTrue(rNat.succeeded && !rNat.scratchShort, L"Native YUV must execute cleanly on trimmed format-aware arena");
+					Assert::IsFalse(stNat.IsActive(StandInKind::GpuScratchShortage));
+					Assert::IsFalse(stNat.IsActive(StandInKind::GpuPrivateScratchFallback));
+					const ActiveRect cRoi{ 4, 4, cW - 4, cH - 4 };
+					Assert::IsTrue(RmsDiffRect(rNat.outputCb, masterCb, cRoi) < RmsDiffRect(degCb, masterCb, cRoi) * 0.45);
+
+					// Mandatory Negative Control on 4:2:0 trimmed arena: player-upsampled 4:2:0->4:4:4 needs reducedRec (7th RG32F)
+					// and MUST visibly report scratchShort on the 6-RG32F native arena (proving the 3 textures were genuinely omitted!).
+					if (mi == 0)
+					{
+						ChromaProcessInput upIn = nIn;
+						upIn.seq = 539;
+						upIn.deliveredFormat = DeliveredChromaFormat::Yuv444;
+						upIn.receivedCb = TdV2Plane(lumaW, lumaH, 512.0);
+						upIn.receivedCr = TdV2Plane(lumaW, lumaH, 512.0);
+						StandInRegistry stShort;
+						trimmedArena.BeginFrame();
+						const ChromaGpuProcessResult rUp = gGuard.engine.ProcessChromaPlanes(ctx.gpu, ctx.dispatch, upIn, &trimmedArena, &stShort);
+						Assert::IsFalse(rUp.succeeded, L"Upsampled 4:2:0->4:4:4 on native-trimmed 6-RG32F arena must fail visibly");
+						Assert::IsTrue(rUp.scratchShort && stShort.IsActive(StandInKind::GpuScratchShortage),
+							L"Upsampled 4:2:0->4:4:4 on native-trimmed arena must engage GpuScratchShortage");
+					}
+				}
+			}
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(GpuChromaSmallCellPx8CornerZeroMvWithLargeInteriorForegroundMvZeroOobAndCpuParity)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(GpuChromaSmallCellPx8CornerZeroMvWithLargeInteriorForegroundMvZeroOobAndCpuParity)
+		{
+			WarpContext ctx;
+
+			// 128x128 luma with cellPx = 8 -> 16x16 cells!
+			// On Yuv420 (64x64 coded = 4x4 workgroups of 16x16 coded px), each 16x16 coded workgroup spans 4x4 luma cells:
+			// e.g. workgroup (1, 1) [coded 16..31 x 16..31] has 4 corner cells (4,4), (7,4), (4,7), (7,7).
+			// Setting those 4 corner cells to mv = (0, 0) while interior cells carry large mv = (+10, -10) luma px
+			// (+5, -5 coded px -> ldsRy = -5..-1 < 0 and ldsRx = 20 >= 20 if LDS were wrongly enabled!) directly tests TD-AUDIT-H3!
+			const int lumaW = 128;
+			const int lumaH = 128;
+			const int cellPx = 8;
+			const int cw = lumaW / cellPx; // 16
+			const int ch = lumaH / cellPx; // 16
+			const ActiveRect lumaFull = ActiveRect::Full(lumaW, lumaH);
+			const SitingSpec siting = SitingSpec::Left();
+
+			Config cfg = MakePreset(Preset::Reference, Mode::On);
+			cfg.cellPx = cellPx;
+			cfg.grainCellPx = cellPx;
+
+			const ChromaSubsampling codedSubs[2] = { ChromaSubsampling::Yuv420, ChromaSubsampling::Yuv422 };
+			const DeliveredChromaFormat delivFmts[2] = { DeliveredChromaFormat::Yuv420, DeliveredChromaFormat::Yuv422 };
+
+			for (int si = 0; si < 2; ++si)
+			{
+				const ChromaSubsampling cSub = codedSubs[si];
+				const DeliveredChromaFormat dFmt = delivFmts[si];
+				const int subX = SubsampleX(cSub);
+				const int subY = SubsampleY(cSub);
+				const int cW = ChromaDetail::SubsampledDim(lumaW, subX);
+				const int cH = ChromaDetail::SubsampledDim(lumaH, subY);
+				const ActiveRect cFull = ActiveRect::Full(cW, cH);
+
+				auto sampleBaseScene = [&](double lx, double ly, bool isCb) -> double
+				{
+					const double s = 28.0 * std::sin(2.0 * kPi * (lx / 12.0 + ly / 14.0) + 0.35)
+					               + 22.0 * std::cos(2.0 * kPi * (lx / 6.0 - ly / 6.5) + 0.9);
+					return isCb ? (512.0 + s) : (512.0 - 0.9 * s);
+				};
+
+				auto isWgCornerCell = [](int cx, int cy) -> bool
+				{
+					const int rx = cx % 4;
+					const int ry = cy % 4;
+					return (rx == 0 || rx == 3) && (ry == 0 || ry == 3);
+				};
+
+				auto isForegroundBlockCell = [&](int cx, int cy) -> bool
+				{
+					// Interior cells of workgroup (1, 1) [cells 4..7 x 4..7] and workgroup (2, 1) [cells 8..11 x 4..7]
+					// excluding the 4 corner cells of each 4x4 workgroup block!
+					const bool inWg11 = (cx >= 4 && cx <= 7 && cy >= 4 && cy <= 7) && !isWgCornerCell(cx, cy);
+					const bool inWg21 = (cx >= 8 && cx <= 11 && cy >= 4 && cy <= 7) && !isWgCornerCell(cx, cy);
+					return inWg11 || inWg21;
+				};
+
+				// Regime 1: Fast foreground Object (mv = (+10, -10), camMv = (0, 0), cls = Object) surrounded by
+				// 4 workgroup corner cells with mv = (0, 0) (Still), proving zero OOB LDS corruption & <1e-2 parity.
+				// Regime 2: Tracked motion (mv = (+10, -10), camMv = (+10, -10), cls = Camera -> gate = 1.0) so
+				// warped interior pixels from p + (+5, -5) are actively fused with full weight into outputCb/Cr!
+				for (int regime = 0; regime < 2; ++regime)
+				{
+					const bool trackedActiveFuse = (regime == 1);
+					CellMotionField mfPrev = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+					CellMotionField mfNext = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+
+					for (int cy = 0; cy < ch; ++cy)
+					{
+						for (int cx = 0; cx < cw; ++cx)
+						{
+							if (!isForegroundBlockCell(cx, cy))
+								continue;
+							const size_t idx = static_cast<size_t>(cy * cw + cx);
+							mfPrev.vx[idx] = +10.0;
+							mfPrev.vy[idx] = -10.0;
+							mfNext.vx[idx] = +10.0;
+							mfNext.vy[idx] = -10.0;
+							if (trackedActiveFuse)
+							{
+								mfPrev.camVx[idx] = +10.0; mfPrev.camVy[idx] = -10.0; mfPrev.cls[idx] = RegionMotionClass::Camera;
+								mfNext.camVx[idx] = +10.0; mfNext.camVy[idx] = -10.0; mfNext.cls[idx] = RegionMotionClass::Camera;
+							}
+							else
+							{
+								mfPrev.cls[idx] = RegionMotionClass::Object;
+								mfNext.cls[idx] = RegionMotionClass::Object;
+							}
+						}
+					}
+
+					// Smooth continuous reference scene everywhere:
+					//   prevRef(lx, ly) ~= sampleBaseScene(lx, ly), nextRef(lx, ly) ~= sampleBaseScene(lx, ly)
+					//   masterCur(lx, ly) == sampleBaseScene(lx + 10, ly - 10) on interior (+10, -10) cells,
+					//                     == sampleBaseScene(lx, ly) on (0, 0) cells!
+					// Hence ref(p + mvCoded) == masterCur(p) pixel-for-pixel across the entire plane (zero stamp seams!).
+					TdV2Plane masterCurCb(cW, cH, 512.0), masterCurCr(cW, cH, 512.0);
+					TdV2Plane prevRefCb(cW, cH, 512.0), prevRefCr(cW, cH, 512.0);
+					TdV2Plane nextRefCb(cW, cH, 512.0), nextRefCr(cW, cH, 512.0);
+					for (int y = 0; y < cH; ++y)
+					{
+						const double ly = siting.CodedToLumaY(static_cast<double>(y), subY);
+						const int cy = (std::max)(0, (std::min)(ch - 1, static_cast<int>(std::floor(ly)) / cellPx));
+						for (int x = 0; x < cW; ++x)
+						{
+							const double lx = siting.CodedToLumaX(static_cast<double>(x), subX);
+							const int cx = (std::max)(0, (std::min)(cw - 1, static_cast<int>(std::floor(lx)) / cellPx));
+							const bool fg = isForegroundBlockCell(cx, cy);
+							const double sx = fg ? (lx + 10.0) : lx;
+							const double sy = fg ? (ly - 10.0) : ly;
+							masterCurCb.at(x, y) = sampleBaseScene(sx, sy, true);
+							masterCurCr.at(x, y) = sampleBaseScene(sx, sy, false);
+							prevRefCb.at(x, y) = sampleBaseScene(lx, ly, true);
+							prevRefCr.at(x, y) = sampleBaseScene(lx, ly, false);
+							nextRefCb.at(x, y) = sampleBaseScene(lx, ly, true);
+							nextRefCr.at(x, y) = sampleBaseScene(lx, ly, false);
+						}
+					}
+					{
+						std::mt19937 rP(9501u + static_cast<uint32_t>(si * 2 + regime));
+						std::mt19937 rN(9511u + static_cast<uint32_t>(si * 2 + regime));
+						std::normal_distribution<double> nd(0.0, 0.35);
+						for (size_t i = 0; i < prevRefCb.v.size(); ++i)
+						{
+							prevRefCb.v[i] += nd(rP); prevRefCr.v[i] += nd(rP);
+							nextRefCb.v[i] += nd(rN); nextRefCr.v[i] += nd(rN);
+						}
+					}
+
+					const ThreeBandPlanes mBandsCb = DecomposeActiveBands(masterCurCb, cFull);
+					const ThreeBandPlanes mBandsCr = DecomposeActiveBands(masterCurCr, cFull);
+					TdV2Plane degCurCb(cW, cH, 512.0), degCurCr(cW, cH, 512.0);
+					for (size_t i = 0; i < masterCurCb.v.size(); ++i)
+					{
+						degCurCb.v[i] = masterCurCb.v[i] - 0.80 * (mBandsCb.M.v[i] + mBandsCb.H.v[i]);
+						degCurCr.v[i] = masterCurCr.v[i] - 0.80 * (mBandsCr.M.v[i] + mBandsCr.H.v[i]);
+					}
+
+					const auto arenaReqs = TdV2ChromaGpuEngine::ArenaRequests(ctx.gpu, lumaW, lumaH, cSub, dFmt, cellPx);
+					VpSkeleton::PlTexBackend backend(ctx.gpu);
+					VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> arena(backend);
+					Assert::IsTrue(arena.Reserve(VpSkeleton::PlanArena(arenaReqs, VpSkeleton::Tier::T1)));
+
+					ChromaProcessInput in;
+					in.seq = static_cast<uint64_t>(600 + si * 10 + regime);
+					in.lumaW = lumaW;
+					in.lumaH = lumaH;
+					in.gridStatus = ChromaGridStatus::Identified;
+					in.codedSubsampling = cSub;
+					in.deliveredFormat = dFmt;
+					in.siting = siting;
+					in.activeRect = lumaFull;
+					in.receivedCb = degCurCb;
+					in.receivedCr = degCurCr;
+					in.hasCleanSplit = true;
+					in.cleanCb = degCurCb;
+					in.cleanCr = degCurCr;
+					in.prevPeak = { &prevRefCb, &prevRefCr, &mfPrev, false };
+					in.nextPeak = { &nextRefCb, &nextRefCr, &mfNext, false };
+					in.hasStepPrior = true;
+					in.estimatedStepDelta = 48.0;
+					in.deadZonePhi = kDeadZonePhiInter;
+					in.zeroCoeffFraction = 0.35;
+
+					TdV2ChromaEngine cpuEng(cfg);
+					ChromaGpuGuard gpuGuard(ctx.gpu, cfg);
+					arena.BeginFrame();
+					const ChromaProcessResult cpuRes = cpuEng.ProcessFrame(in, nullptr);
+					const ChromaGpuProcessResult gpuRes = gpuGuard.engine.ProcessChromaPlanes(ctx.gpu, ctx.dispatch, in, &arena, nullptr);
+
+					Assert::IsTrue(gpuRes.succeeded && !gpuRes.scratchShort, L"cellPx=8 chroma GPU run must succeed");
+					Assert::AreEqual(static_cast<size_t>(0u), gpuRes.nonFiniteCells, L"Zero non-finite / OOB LDS corruption cells allowed");
+					for (double v : gpuRes.outputCb.v)
+						Assert::IsTrue(std::isfinite(v), L"All outputCb pixels must be finite (zero OOB LDS NaN)");
+					for (double v : gpuRes.outputCr.v)
+						Assert::IsTrue(std::isfinite(v), L"All outputCr pixels must be finite (zero OOB LDS NaN)");
+
+					// Strict CPU vs WARP GPU parity (< 1e-2 codes) across the entire plane including workgroup (1, 1)!
+					const double maxDiffCb = MaxAbsDiffRect(cpuRes.outputCb, gpuRes.outputCb, cFull);
+					const double maxDiffCr = MaxAbsDiffRect(cpuRes.outputCr, gpuRes.outputCr, cFull);
+					Assert::IsTrue(maxDiffCb < 1e-2 && maxDiffCr < 1e-2,
+						FmtMsg("TD-AUDIT-H3 cellPx=8 CPU/GPU parity failed (sub=%.0f regime=%.0f): maxCb=%.6f maxCr=%.6f",
+							static_cast<double>(si), static_cast<double>(regime), maxDiffCb, maxDiffCr).c_str());
+
+					if (trackedActiveFuse)
+					{
+						// Interior core of workgroup (1, 1) cells (5..6, 5..6) -> luma [40..56) x [40..56)
+						const ActiveRect wgInteriorCoded{ 40 / subX, 40 / subY, 56 / subX, 56 / subY };
+						const double inFgErr = RmsDiffRect(degCurCb, masterCurCb, wgInteriorCoded);
+						const double outFgErr = RmsDiffRect(gpuRes.outputCb, masterCurCb, wgInteriorCoded);
+
+						// Mandatory Same-Input Negative Control: using the workgroup corner's mv=(0,0) on those interior
+						// cells samples unaligned ref(p + 0) instead of ref(p + (+5, -5)), failing recovery (> 14 codes)!
+						const CellMotionField wrongZeroMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+						ChromaProcessInput wrongIn = in;
+						wrongIn.seq = static_cast<uint64_t>(650 + si);
+						wrongIn.prevPeak.lumaMotion = &wrongZeroMf;
+						wrongIn.nextPeak.lumaMotion = &wrongZeroMf;
+						ChromaGpuGuard wrongGuard(ctx.gpu, cfg);
+						const ChromaGpuProcessResult wrongRes = wrongGuard.engine.ProcessChromaPlanes(ctx.gpu, ctx.dispatch, wrongIn, nullptr, nullptr);
+						const double wrongFgErr = RmsDiffRect(wrongRes.outputCb, masterCurCb, wgInteriorCoded);
+
+						Assert::IsTrue(outFgErr < inFgErr * 0.50 && wrongFgErr > outFgErr * 2.5 && wrongFgErr > 14.0,
+							FmtMsg("cellPx=8 interior (+10,-10) cells must fuse cleanly without LDS OOB: out=%.4f in=%.4f wrongZeroMv=%.2f",
+								outFgErr, inFgErr, wrongFgErr).c_str());
+					}
+				}
+			}
+		}
 	};
 } // namespace TdV2Sota3ChromaGpuNs
 } // namespace Tests

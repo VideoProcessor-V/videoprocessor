@@ -510,6 +510,288 @@ namespace TdV2AntiOverProtectionNs
 						naiveFineVar, naiveObjSmear).c_str());
 			}
 		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(FocusGuardRecoversCoarseRampQuantWipeWithCellStepScaleYetVetoesTrueOpticalRackFocus)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(FocusGuardRecoversCoarseRampQuantWipeWithCellStepScaleYetVetoesTrueOpticalRackFocus)
+		{
+			WarpContext ctx;
+
+			const int w = 64;
+			const int h = 64;
+			const int cw = w / 16; // 4
+			const int ch = h / 16; // 4
+			const size_t numCells = static_cast<size_t>(cw * ch);
+			const ActiveRect full = ActiveRect::Full(w, h);
+			const ActiveRect interior{ 16, 16, 48, 48 };
+			const CellMotionField stillMf = CellMotionField::Uniform(cw, ch, 0.0, 0.0, 0.0, 0.0, RegionMotionClass::Still);
+
+			// ---- Part A (TD-AUDIT-H1a): Focused B-frame cell with coarse D3 gradient/ramp + deadzone-wiped M-band ----
+			// Must NOT be falsely vetoed by FocusGuard (neither by curF <= fDefocus nor by unscaled stepNoiseVar when
+			// per-cell cellStepScale > 1.0 unlocks high-AQ quantization cells!).
+			{
+				TdV2Plane rampOnly(w, h, 0.0);
+				TdV2Plane master(w, h, 0.0);
+				for (int y = 0; y < h; ++y)
+				{
+					for (int x = 0; x < w; ++x)
+					{
+						const double fx = static_cast<double>(x);
+						const double fy = static_cast<double>(y);
+						const double coarseRamp = 420.0 + 1.4 * fx + 0.9 * fy
+							+ 28.0 * std::sin(2.0 * kPi * fx / 48.0 + 0.3) * std::cos(2.0 * kPi * fy / 44.0 - 0.2);
+						const double mhTex = 14.0 * std::sin(2.0 * kPi * (fx / 10.5 + fy / 11.5) + 0.5)
+							+ 11.0 * std::cos(2.0 * kPi * (fx / 11.0 - fy / 9.8) + 1.1)
+							+ 7.0 * std::sin(2.0 * kPi * (fx / 3.8 + fy / 4.2) + 0.4);
+						rampOnly.at(x, y) = coarseRamp;
+						master.at(x, y) = coarseRamp + mhTex;
+					}
+				}
+
+				TdV2Plane curBFrame = rampOnly;
+				TdV2Plane prevPeak = master;
+				TdV2Plane nextPeak = master;
+				{
+					std::mt19937 rCur(7101u), rPrev(7102u), rNext(7103u);
+					std::normal_distribution<double> ndCur(0.0, 0.5);
+					std::normal_distribution<double> ndRef(0.0, 0.35);
+					for (size_t i = 0; i < master.v.size(); ++i)
+					{
+						curBFrame.v[i] += ndCur(rCur);
+						prevPeak.v[i] += ndRef(rPrev);
+						nextPeak.v[i] += ndRef(rNext);
+					}
+				}
+
+				// Fixture invariant: coarse D3 ramp dominates over deadzone-wiped M-band so raw curF <= fDefocus!
+				const ThreeBandPlanes curBands = DecomposeActiveBands(curBFrame, full);
+				const ThreeBandPlanes masterBands = DecomposeActiveBands(master, full);
+				double cM2 = 0.0, cD3 = 0.0;
+				for (int y = 16; y < 32; ++y)
+				{
+					for (int x = 16; x < 32; ++x)
+					{
+						cM2 += curBands.M.at(x, y) * curBands.M.at(x, y);
+						cD3 += curBands.D3.at(x, y) * curBands.D3.at(x, y);
+					}
+				}
+				const double rawCurF = cM2 / (cM2 + cD3 + kEngineNumFloor);
+				const double fDefocus = AnalyticalEdgeFocusRatio(VpUnit::BandFromBase::kSigmaBase);
+				Assert::IsTrue(rawCurF <= fDefocus,
+					FmtMsg("Fixture must exercise curF=%.4f <= fDefocus=%.4f (old disjunctive trap)", rawCurF, fDefocus).c_str());
+
+				Config cfgRef = MakePreset(Preset::Reference, Mode::On);
+				cfgRef.enableLongAnchor = false;
+				cfgRef.enableCarryForward = false;
+
+				FrameProcessInput baseIn;
+				baseIn.seq = 400;
+				baseIn.receivedY = curBFrame;
+				baseIn.hasCleanSplit = true;
+				baseIn.cleanY = curBFrame;
+				baseIn.activeRect = full;
+				baseIn.prevPeak = { &prevPeak, &stillMf, false };
+				baseIn.nextPeak = { &nextPeak, &stillMf, false };
+				baseIn.hasStepPrior = true;
+				baseIn.deadZonePhi = kDeadZonePhiInter;
+				baseIn.zeroCoeffFraction = 0.35;
+
+				const double inCleanRms = RmsDiffRect(curBFrame, master, interior);
+				const double inMidRms = RmsDiffRect(curBands.M, masterBands.M, interior);
+				Assert::IsTrue(inCleanRms > 9.0 && inMidRms > 6.0);
+
+				// Check A1: stepDelta = 14.0, unit cellStepScale (1.0) -> 0 false focus vetoes despite curF <= fDefocus!
+				{
+					FrameProcessInput in14 = baseIn;
+					in14.estimatedStepDelta = 14.0;
+					TdV2ReferenceEngine cpu14(cfgRef);
+					EngineGuard gpu14(ctx.gpu, cfgRef);
+					const FrameProcessResult cRes14 = cpu14.ProcessFrame(in14, nullptr);
+					const GpuProcessResult gRes14 = gpu14.engine.ProcessFrame(ctx.gpu, ctx.dispatch, in14, nullptr, nullptr);
+					Assert::IsTrue(gRes14.succeeded);
+					Assert::AreEqual(static_cast<size_t>(0u), cRes14.focusVetoCells,
+						L"CPU FocusGuard MUST NOT falsely veto coarse-D3 + deadzone-wiped M-band B-frame");
+					Assert::AreEqual(static_cast<size_t>(0u), gRes14.focusVetoCells,
+						L"GPU FocusGuard MUST NOT falsely veto coarse-D3 + deadzone-wiped M-band B-frame");
+					Assert::IsTrue(MaxAbsDiffRect(cRes14.outputY, gRes14.outputY, full) <= kGpuCpuTol);
+					Assert::IsTrue(RmsDiffRect(gRes14.outputClean, master, interior) < inCleanRms * 0.45 &&
+					               RmsDiffRect(DecomposeActiveBands(gRes14.outputClean, full).M, masterBands.M, interior) < inMidRms * 0.45,
+						L"Focused B-frame with coarse D3 ramp must strongly recover wiped M/H texture");
+				}
+
+				// Check A2: Per-cell cellStepScale scaling in FocusGuard (nominal stepDelta = 5.0, +12 QP AQ cellStepScale = 4.0)
+				// + Mandatory Same-Input Negative Control (cellStepScale = 1.0 on exact same stepDelta = 5.0 inputs)!
+				{
+					const double aqScale = ComputeCellStepScale(12.0, 500.0, false, 10.0); // 4.0
+					Assert::AreEqual(4.0, aqScale, 1e-12);
+
+					FrameProcessInput inUnscaled = baseIn;
+					inUnscaled.seq = 401;
+					inUnscaled.estimatedStepDelta = 5.0;
+					inUnscaled.cellStepScale.assign(numCells, 1.0);
+
+					FrameProcessInput inScaled = inUnscaled;
+					inScaled.seq = 402;
+					inScaled.cellStepScale.assign(numCells, aqScale);
+
+					TdV2ReferenceEngine cpuUnscaled(cfgRef), cpuScaled(cfgRef);
+					EngineGuard gpuUnscaled(ctx.gpu, cfgRef), gpuScaled(ctx.gpu, cfgRef);
+					const FrameProcessResult cUn = cpuUnscaled.ProcessFrame(inUnscaled, nullptr);
+					const GpuProcessResult gUn = gpuUnscaled.engine.ProcessFrame(ctx.gpu, ctx.dispatch, inUnscaled, nullptr, nullptr);
+					const FrameProcessResult cSc = cpuScaled.ProcessFrame(inScaled, nullptr);
+					const GpuProcessResult gSc = gpuScaled.engine.ProcessFrame(ctx.gpu, ctx.dispatch, inScaled, nullptr, nullptr);
+					Assert::IsTrue(gUn.succeeded && gSc.succeeded);
+
+					// Same-input negative control: at scale == 1.0 (tiny 5.0 step), the 6.4-RMS M-band drop exceeds the
+					// unscaled 3.21-code Parseval bound and triggers focusVetoCells == numCells!
+					Assert::AreEqual(numCells, cUn.focusVetoCells, L"Negative control (scale=1.0 at step=5.0) must trigger FocusGuard");
+					Assert::AreEqual(numCells, gUn.focusVetoCells, L"GPU negative control (scale=1.0 at step=5.0) must trigger FocusGuard");
+					Assert::IsTrue(RmsDiffRect(gUn.outputClean, master, interior) > inCleanRms * 0.85);
+
+					// With per-cell cellStepScale = 4.0 (+12 QP AQ), FocusGuard scales cellStepNoiseVar & quantMidRmsBound,
+					// eliminating ALL false vetoes (focusVetoCells == 0) and unlocking full M/H recovery on CPU & GPU!
+					Assert::AreEqual(static_cast<size_t>(0u), cSc.focusVetoCells,
+						L"CPU FocusGuard must scale cellStepNoiseVar by cellStepScaleSq (zero false vetoes)");
+					Assert::AreEqual(static_cast<size_t>(0u), gSc.focusVetoCells,
+						L"GPU FocusGuard must scale cellStepNoiseVar by cellStepScaleSq (zero false vetoes)");
+					Assert::IsTrue(MaxAbsDiffRect(cSc.outputY, gSc.outputY, full) <= kGpuCpuTol);
+					Assert::IsTrue(RmsDiffRect(gSc.outputClean, master, interior) < inCleanRms * 0.45 &&
+					               RmsDiffRect(DecomposeActiveBands(gSc.outputClean, full).M, masterBands.M, interior) < inMidRms * 0.45,
+						FmtMsg("Scaled FocusGuard cleanRms=%.4f vs in=%.4f",
+							RmsDiffRect(gSc.outputClean, master, interior), inCleanRms).c_str());
+
+					// Also verify Preset::RealTime on WARP GPU respects cellStepScale in FocusGuard!
+					Config cfgRt = MakePreset(Preset::RealTime, Mode::On);
+					cfgRt.enableCarryForward = false;
+					EngineGuard gpuRt(ctx.gpu, cfgRt);
+					const GpuProcessResult gScRt = gpuRt.engine.ProcessFrame(ctx.gpu, ctx.dispatch, inScaled, nullptr, nullptr);
+					Assert::IsTrue(gScRt.succeeded);
+					Assert::AreEqual(static_cast<size_t>(0u), gScRt.focusVetoCells);
+					Assert::IsTrue(RmsDiffRect(gScRt.outputClean, master, interior) < inCleanRms * 0.50);
+				}
+			}
+
+			// ---- Part B (TD-AUDIT-H1b): Genuine optical rack-focus (sigma_PSF = 3.6) on sharp edge + quant noise ----
+			// MUST still be vetoed (focusVetoCells > 0, zero sharp M/H bleed onto defocus) on BOTH CPU & WARP GPU!
+			{
+				TdV2Plane sharpBars(w, h, 0.0);
+				for (int y = 0; y < h; ++y)
+				{
+					for (int x = 0; x < w; ++x)
+					{
+						const double bar = (x >= 24 && x < 40) ? 660.0 : 240.0;
+						sharpBars.at(x, y) = bar + 0.4 * static_cast<double>(y);
+					}
+				}
+
+				const auto defocusTaps = VpUnit::BandFromBase::Taps<double>(3.6, 3.0, true, 0.0);
+				TdV2Plane defocusedClean(w, h, 0.0);
+				VpUnit::BandFromBase::BlurTaps(sharpBars.v, defocusedClean.v, w, h, defocusTaps, VpUnit::BandFromBase::EdgeMode::Replicate);
+
+				TdV2Plane curRack = defocusedClean;
+				TdV2Plane prevRack = sharpBars;
+				TdV2Plane nextRack = sharpBars;
+				{
+					std::mt19937 rC(7201u), rP(7202u), rN(7203u);
+					std::normal_distribution<double> ndCur(0.0, 1.4);
+					std::normal_distribution<double> ndRef(0.0, 0.6);
+					for (size_t i = 0; i < sharpBars.v.size(); ++i)
+					{
+						curRack.v[i] += ndCur(rC);
+						prevRack.v[i] += ndRef(rP);
+						nextRack.v[i] += ndRef(rN);
+					}
+				}
+
+				// Even under BokehMode::LowBandCellOnly, optical rack-focus (focusChange) MUST hard-veto ALL bands!
+				Config cfgRackRef = MakePreset(Preset::Reference, Mode::On);
+				cfgRackRef.enableLongAnchor = false;
+				cfgRackRef.enableCarryForward = false;
+				cfgRackRef.bokehMode = BokehMode::LowBandCellOnly;
+
+				Config cfgRackRt = MakePreset(Preset::RealTime, Mode::On);
+				cfgRackRt.enableCarryForward = false;
+				cfgRackRt.bokehMode = BokehMode::LowBandCellOnly;
+
+				FrameProcessInput rackIn;
+				rackIn.seq = 410;
+				rackIn.receivedY = curRack;
+				rackIn.hasCleanSplit = true;
+				rackIn.cleanY = curRack;
+				rackIn.activeRect = full;
+				rackIn.prevPeak = { &prevRack, &stillMf, false };
+				rackIn.nextPeak = { &nextRack, &stillMf, false };
+				rackIn.hasStepPrior = true;
+				rackIn.estimatedStepDelta = 8.0;
+				rackIn.deadZonePhi = kDeadZonePhiInter;
+				rackIn.zeroCoeffFraction = 0.35;
+
+				TdV2ReferenceEngine cpuRackEng(cfgRackRef);
+				EngineGuard gpuRackRefEng(ctx.gpu, cfgRackRef);
+				EngineGuard gpuRackRtEng(ctx.gpu, cfgRackRt);
+				StandInRegistry siCpu, siGpu;
+
+				const FrameProcessResult cpuRack = cpuRackEng.ProcessFrame(rackIn, &siCpu);
+				const GpuProcessResult gpuRack = gpuRackRefEng.engine.ProcessFrame(ctx.gpu, ctx.dispatch, rackIn, nullptr, &siGpu);
+				const GpuProcessResult gpuRackRt = gpuRackRtEng.engine.ProcessFrame(ctx.gpu, ctx.dispatch, rackIn, nullptr, nullptr);
+				Assert::IsTrue(gpuRack.succeeded && gpuRackRt.succeeded);
+
+				// All 8 edge-straddling cells (cx in {1, 2}, cy in 0..3) MUST trigger focusVetoCells on CPU & GPU!
+				Assert::IsTrue(cpuRack.focusVetoCells >= 8u,
+					FmtMsg("CPU optical rack-focus sigma=3.6 must veto >=8 edge cells, got %.0f", static_cast<double>(cpuRack.focusVetoCells)).c_str());
+				Assert::IsTrue(gpuRack.focusVetoCells >= 8u && gpuRackRt.focusVetoCells >= 8u,
+					FmtMsg("GPU optical rack-focus sigma=3.6 must veto >=8 edge cells, ref=%.0f rt=%.0f",
+						static_cast<double>(gpuRack.focusVetoCells), static_cast<double>(gpuRackRt.focusVetoCells)).c_str());
+				Assert::IsTrue(siCpu.IsActive(StandInKind::FocusMapK32) && siGpu.IsActive(StandInKind::FocusMapK32));
+
+				for (int cy = 1; cy <= 2; ++cy)
+				{
+					for (int cx = 1; cx <= 2; ++cx)
+					{
+						const size_t idx = static_cast<size_t>(cy * cw + cx);
+						Assert::AreEqual(0.0, static_cast<double>(cpuRack.tdMaps[idx].f[TdMapsView::kBandMask]), 0.0,
+							L"CPU rack-focus edge cell kBandMask must be 0");
+						Assert::AreEqual(0.0, static_cast<double>(gpuRack.tdMaps[idx].f[TdMapsView::kBandMask]), 0.0,
+							L"GPU rack-focus edge cell kBandMask must be 0");
+					}
+				}
+
+				// Inside edgeCore [24..40) x [8..56) (interpolating strictly between vetoed cells cx=1 and cx=2),
+				// zero sharp M/H energy bleeds onto the defocused edge, whereas naive 3-frame blending bleeds > 25%!
+				const ActiveRect edgeCore{ 24, 8, 40, 56 };
+				const ThreeBandPlanes bCur = DecomposeActiveBands(curRack, full);
+				const ThreeBandPlanes bRef = DecomposeActiveBands(prevRack, full);
+				const ThreeBandPlanes bCpu = DecomposeActiveBands(cpuRack.outputY, full);
+				const ThreeBandPlanes bGpu = DecomposeActiveBands(gpuRack.outputY, full);
+				const ThreeBandPlanes bGpuRt = DecomposeActiveBands(gpuRackRt.outputY, full);
+
+				TdV2Plane naiveRack(w, h, 0.0);
+				for (size_t i = 0; i < curRack.v.size(); ++i)
+					naiveRack.v[i] = (curRack.v[i] + prevRack.v[i] + nextRack.v[i]) / 3.0;
+				const ThreeBandPlanes bNaive = DecomposeActiveBands(naiveRack, full);
+
+				const double refGapM = RmsDiffRect(bCur.M, bRef.M, edgeCore);
+				const double refGapH = RmsDiffRect(bCur.H, bRef.H, edgeCore);
+				Assert::IsTrue(refGapM > 15.0 && refGapH > 15.0);
+
+				Assert::AreEqual(0.0, MaxAbsDiffRect(cpuRack.outputY, curRack, edgeCore), 1e-12,
+					L"CPU rack-focus edgeCore must stay bit-exact untouched");
+				Assert::IsTrue(MaxAbsDiffRect(gpuRack.outputY, curRack, edgeCore) <= 1e-4,
+					L"GPU rack-focus edgeCore must stay untouched to R32F precision");
+				Assert::IsTrue(RmsDiffRect(bCpu.M, bCur.M, edgeCore) <= 1e-3 * refGapM &&
+				               RmsDiffRect(bGpu.M, bCur.M, edgeCore) <= 1e-3 * refGapM &&
+				               RmsDiffRect(bGpuRt.M, bCur.M, edgeCore) <= 1e-3 * refGapM,
+					L"Zero sharp M-band bleed onto optical rack-focus allowed");
+				Assert::IsTrue(RmsDiffRect(bCpu.H, bCur.H, edgeCore) <= 1e-3 * refGapH &&
+				               RmsDiffRect(bGpu.H, bCur.H, edgeCore) <= 1e-3 * refGapH &&
+				               RmsDiffRect(bGpuRt.H, bCur.H, edgeCore) <= 1e-3 * refGapH,
+					L"Zero sharp H-band bleed onto optical rack-focus allowed");
+				Assert::IsTrue(RmsDiffRect(bNaive.M, bCur.M, edgeCore) > 0.50 * refGapM &&
+				               RmsDiffRect(bNaive.H, bCur.H, edgeCore) > 0.50 * refGapH,
+					L"Negative control: un-gated temporal average must bleed >50% RMS sharp M/H onto rack-focus");
+			}
+		}
 	};
 } // namespace TdV2AntiOverProtectionNs
 } // namespace Tests
