@@ -2630,19 +2630,27 @@ namespace TdV2
 							}
 
 							const double curV = curCoarse.at(x, y);
-							double delta = 0.0;
+							double ownBandSum = 0.0;
 							for (int k = 0; k < K; ++k)
+								ownBandSum += cellW[k][cIdx];
+							double delta = 0.0;
+							if (ownBandSum > 0.0)
 							{
-								if (cRefs[k].validPx[pIdx] == 0u || cellW[k][cIdx] <= 0.0)
-									continue;
-								const TdV2Plane& refP = isCb ? cRefs[k].coarseCb : cRefs[k].coarseCr;
-								const double diff = curV - refP.at(x, y);
-								const double wEff = cfg_.enablePerCornerHuber
-									? SpatialBilinearHuberWeight(cellW[k].data(), cellDiagC[k].data(), res.cellsW, res.cellsH, lx, ly, cellPx, diff)
-									: SpatialBilinearWeight(cellW[k].data(), res.cellsW, res.cellsH, lx, ly, cellPx);
-								if (wEff <= 0.0)
-									continue;
-								delta -= wEff * diff;
+								for (int k = 0; k < K; ++k)
+								{
+									// Hard veto boundary guard: zero bleed across face/focus/exact-copy/motion/singular vetoes,
+									// without creating a step discontinuity at non-vetoed convex simplex corners (w_k == 0 while sum_j w_j > 0).
+									if (cRefs[k].validPx[pIdx] == 0u || cRefs[k].isExactCopy || cRefs[k].motionGate.gateL[cIdx] <= 0.0)
+										continue;
+									const TdV2Plane& refP = isCb ? cRefs[k].coarseCb : cRefs[k].coarseCr;
+									const double diff = curV - refP.at(x, y);
+									const double wEff = cfg_.enablePerCornerHuber
+										? SpatialBilinearHuberWeight(cellW[k].data(), cellDiagC[k].data(), res.cellsW, res.cellsH, lx, ly, cellPx, diff)
+										: SpatialBilinearWeight(cellW[k].data(), res.cellsW, res.cellsH, lx, ly, cellPx);
+									if (wEff <= 0.0)
+										continue;
+									delta -= wEff * diff;
+								}
 							}
 							if (std::fabs(delta) > 0.0)
 								delta = ApplyTransformUnknownBound(delta, bandVar, standIns);
@@ -3741,19 +3749,29 @@ namespace TdV2
 						for (int b = 0; b < 3; ++b)
 						{
 							const double curV = bandPlaneOf(curBands, b).at(x, y);
-							double bandDelta = 0.0;
+							double ownBandSum = 0.0;
 							for (int k = 0; k < K; ++k)
+								ownBandSum += cellW[b][k][cIdx];
+							double bandDelta = 0.0;
+							if (!isFocusVetoedBand(cIdx, b) && ownBandSum > 0.0)
 							{
-								if (refs[static_cast<size_t>(k)].validPx[pIdx] == 0u || cellW[b][k][cIdx] <= 0.0)
-									continue;
-								const ThreeBandPlanes& rBands = isCb ? refs[static_cast<size_t>(k)].bandsCb : refs[static_cast<size_t>(k)].bandsCr;
-								const double diff = curV - bandPlaneOf(rBands, b).at(x, y);
-								const double wEff = cfg_.enablePerCornerHuber
-									? SpatialBilinearHuberWeight(cellW[b][k].data(), cellDiagC[b][k].data(), res.cellsW, res.cellsH, lx, ly, cellPx, diff)
-									: SpatialBilinearWeight(cellW[b][k].data(), res.cellsW, res.cellsH, lx, ly, cellPx);
-								if (wEff <= 0.0)
-									continue;
-								bandDelta -= wEff * diff;
+								for (int k = 0; k < K; ++k)
+								{
+									// Hard veto boundary guard: zero bleed across face/focus/exact-copy/CfL/motion/singular vetoes,
+									// without creating a step discontinuity at non-vetoed convex simplex corners (w_k == 0 while sum_j w_j > 0).
+									const WarpedChromaRef& wr = refs[static_cast<size_t>(k)];
+									const double ownMGate = (b == 0) ? wr.motionGate.gateL[cIdx] : wr.motionGate.gateMH[cIdx];
+									if (wr.validPx[pIdx] == 0u || wr.isExactCopy || (wr.isCfl && cflReject[cIdx] != 0u) || ownMGate <= 0.0)
+										continue;
+									const ThreeBandPlanes& rBands = isCb ? wr.bandsCb : wr.bandsCr;
+									const double diff = curV - bandPlaneOf(rBands, b).at(x, y);
+									const double wEff = cfg_.enablePerCornerHuber
+										? SpatialBilinearHuberWeight(cellW[b][k].data(), cellDiagC[b][k].data(), res.cellsW, res.cellsH, lx, ly, cellPx, diff)
+										: SpatialBilinearWeight(cellW[b][k].data(), res.cellsW, res.cellsH, lx, ly, cellPx);
+									if (wEff <= 0.0)
+										continue;
+									bandDelta -= wEff * diff;
+								}
 							}
 							if (!inFull8x8Block)
 							{

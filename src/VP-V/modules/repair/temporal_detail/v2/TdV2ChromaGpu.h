@@ -1263,6 +1263,21 @@ for (int chIdx = 0; chIdx < 2; ++chIdx)
 
     for (int b = 0; b < 3; ++b)
     {
+        bool bandVeto = isFace || focusChange || (isDefocused && (b >= 1 || !bokehAllowL)) ||
+                        (u_coarse_only > 0.5 && b >= 1);
+        float bSum = bandW[b].x + bandW[b].y + bandW[b].z;
+        int activeMask = 0;
+        if (!bandVeto && bSum > 0.0)
+        {
+            for (int k = 0; k < K; ++k)
+            {
+                vec2 mg = texelFetch(motion_gate, ivec2(k * TD_CW + cell.x, cell.y), 0).xy;
+                float mGate = (b == 0) ? mg.x : mg.y;
+                if (!td_is_exact_copy(k) && mGate > 0.0)
+                    activeMask |= (1 << k);
+            }
+        }
+        bandW[b].w = float(activeMask);
         if (chIdx == 0) imageStore(cell_weights_cb, ivec2(b * TD_CW + cell.x, cell.y), bandW[b]);
         else            imageStore(cell_weights_cr, ivec2(b * TD_CW + cell.x, cell.y), bandW[b]);
     }
@@ -1357,11 +1372,12 @@ for (int b = 0; b < 3; ++b)
         vec4 d11 = (chIdx == 0) ? texelFetch(cell_diag_cb, ivec2(b * TD_CW + x1, y1), 0) : texelFetch(cell_diag_cr, ivec2(b * TD_CW + x1, y1), 0);
 
         float curV = (chIdx == 0) ? curB.x : curB.y;
+        int ownActiveMask = int(round(ownW.w));
         float bandDelta = 0.0;
         for (int k = 0; k < K; ++k)
         {
             if ((refFl[k] & 1) == 0) continue;
-            if (td_vec_comp(ownW, k) <= 0.0) continue;
+            if ((ownActiveMask & (1 << k)) == 0) continue;
             float diff = curV - ((chIdx == 0) ? refB[k].x : refB[k].y);
             if (td_is_bad(diff)) continue;
 
