@@ -12,18 +12,23 @@
 // VP_TEST_REAL_FOOTAGE names that folder; otherwise it logs and passes.
 
 #include <AviInfoFrameColorimetry.h>
+#include <VP-V/core/FrameAnalysisStore.h>
+#include <VP-V/modules/control/skeleton/SceneRecordReader.h>
 #include <VP-V/modules/input/signal/HdrInference.h>
 #include <VP-V/modules/input/signal/HdrVetoCaptureGate.h>
+#include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
 #include <RendererProfileConfig.h>
 #include <VideoState.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
@@ -1096,6 +1101,128 @@ namespace Tests
 			Assert::AreEqual<uint64_t>(0, gate.FallbackCutCount(), L"CaptureGate exposes FallbackCutCount");
 			Assert::IsFalse(gate.UsedFallbackOnLastObserve());
 			Assert::IsNull(gate.LastFallbackReason(), L"CaptureGate exposes null LastFallbackReason on U7 hit");
+		}
+
+		// W23-Audit-Fix1 BLOCKER-2: skipped 20 Hz interval scan (prevSeq, seq], capture-counter -> renderer sequence
+		// alignment, armed pre-ingress visible fallback, sequence reset fallback, and cross-thread synchronization.
+		TEST_METHOD(HdrVetoBlocker2SkippedIntervalAlignmentArmedFallbackAndThreadSafety)
+		{
+			const HdrVetoFrameStats s1 = Measure(SdrGrid(SceneLinear(3, 1.0, 0.01)));
+			const HdrVetoFrameStats sDiff = Measure(SdrGrid(SceneLinear(29, 2.0, 0.01)));
+
+			// 1. Skipped 20 Hz frames: cut on skipped seq 11 must be caught when observing seq 13 after seq 10,
+			// even when s1 == s1 (so local GridHistCut would return false) and seq 13 itself has cut=false.
+			HdrVetoCutDetector skipDet;
+			auto readerCutAt11 = [](uint64_t seq, bool& cutOut, const char**) -> bool {
+				cutOut = (seq == 11);
+				return true;
+			};
+			skipDet.SetSceneReader(readerCutAt11);
+			Assert::IsFalse(skipDet.Observe(s1, 10), L"baseline sample at seq 10");
+			Assert::IsTrue(skipDet.Observe(s1, 13), L"cut on skipped seq 11 in (10, 13] must be detected");
+			Assert::AreEqual<uint64_t>(1, skipDet.SharedCutHits());
+			Assert::AreEqual<uint64_t>(0, skipDet.FallbackCutCount());
+			Assert::IsFalse(skipDet.UsedFallbackOnLastObserve());
+
+			// Negative control on exact same reader/seq 13: observing only single seq 13 (after seq 12) returns false.
+			HdrVetoCutDetector singleSeqNeg;
+			singleSeqNeg.SetSceneReader(readerCutAt11);
+			Assert::IsFalse(singleSeqNeg.Observe(s1, 12));
+			Assert::IsFalse(singleSeqNeg.Observe(s1, 13),
+				L"negative control: seq 13 alone has cut=false, proving the cut came from scanning (10, 13]");
+
+			// Partial unsealed interval (seq 21 sealed cut=false, seq 22 not sealed): must fall back visibly to GridHistCut.
+			HdrVetoCutDetector partialDet;
+			partialDet.SetSceneReader([](uint64_t seq, bool& cutOut, const char** whyOut) -> bool {
+				if (seq == 21) { cutOut = false; return true; }
+				if (whyOut) *whyOut = "seq 22 not sealed";
+				return false;
+			});
+			Assert::IsFalse(partialDet.Observe(s1, 20));
+			Assert::IsTrue(partialDet.Observe(sDiff, 22), L"incomplete interval falls back visibly to GridHistCut");
+			Assert::IsTrue(partialDet.UsedFallbackOnLastObserve());
+			Assert::AreEqual(std::string("seq 22 not sealed"), std::string(partialDet.LastFallbackReason()));
+
+			// Sequence reset / backward jump (20 -> 1): must fall back visibly instead of trusting stale seq 1.
+			HdrVetoCutDetector resetDet;
+			resetDet.SetSceneReader([](uint64_t, bool& cutOut, const char**) -> bool { cutOut = false; return true; });
+			Assert::IsFalse(resetDet.Observe(s1, 20));
+			Assert::IsTrue(resetDet.Observe(sDiff, 1), L"backward sequence restart falls back to GridHistCut");
+			Assert::IsTrue(resetDet.UsedFallbackOnLastObserve());
+			Assert::IsNotNull(resetDet.LastFallbackReason());
+
+			// 2. Capture-counter -> renderer sourceSequence alignment (never compare capture driver counter against store seq).
+			{
+				FrameAnalysis::Store store(8);
+				int ownerToken = 0;
+				struct Scope {
+					void* o;
+					Scope(void* owner, FrameAnalysis::Store* s) : o(owner) { VpFrameAnalysis::SourceFrameTap::SetStore(o, s); }
+					~Scope() { VpSkeleton::SceneRecordReader::ClearCaptureSequences(o); VpFrameAnalysis::SourceFrameTap::SetStore(o, nullptr); }
+				} scope(&ownerToken, &store);
+
+				VpSkeleton::SceneRecordReader::RecordCaptureSequence(&ownerToken, 5000, 123456, 7);
+				uint64_t resolved = 0;
+				Assert::IsTrue(VpSkeleton::SceneRecordReader::ResolveCaptureSequence(5000, 123456, resolved));
+				Assert::AreEqual<uint64_t>(7, resolved, L"capture counter 5000 resolves to renderer seq 7");
+				// Negative controls: unmapped pre-ingress counter, wrong timestamp, and cleared mapping all return false.
+				Assert::IsFalse(VpSkeleton::SceneRecordReader::ResolveCaptureSequence(5001, 123456, resolved));
+				Assert::AreEqual<uint64_t>(0, resolved);
+				Assert::IsFalse(VpSkeleton::SceneRecordReader::ResolveCaptureSequence(5000, 999999, resolved));
+				VpSkeleton::SceneRecordReader::ClearCaptureSequences(&ownerToken);
+				Assert::IsFalse(VpSkeleton::SceneRecordReader::ResolveCaptureSequence(5000, 123456, resolved),
+					L"ClearCaptureSequences invalidates mappings after flush/restart");
+			}
+
+			// 3. Armed capture-before-renderer ingress: seq=0 while armed falls back visibly to GridHistCut and switches on cut.
+			{
+				HdrVetoCaptureGate gate;
+				VideoStateComPtr sdr(new VideoState());
+				sdr->valid = true;
+				sdr->eotf = EOTF::SDR;
+				Assert::IsTrue(gate.WantsSample(9, 1000));
+				Assert::IsFalse(gate.Observe(9, s1, 10).cut);
+				gate.Arm(9, sdr);
+				Assert::IsTrue(gate.WantsSample(9, 1016));
+				const HdrVetoCaptureGate::Observation obs = gate.Observe(9, sDiff, 0);
+				Assert::IsTrue(obs.cut, L"armed pre-ingress fallback detects cut via GridHistCut");
+				Assert::IsTrue(obs.switchState != nullptr && obs.switchState->eotf == EOTF::SDR);
+				Assert::IsTrue(obs.usedFallback, L"armed pre-ingress fallback is visible");
+				Assert::IsNotNull(obs.fallbackReason);
+				Assert::IsTrue(std::string(obs.fallbackReason).find("armed before renderer ingress") != std::string::npos,
+					L"armed pre-ingress fallback names exact cause");
+			}
+
+			// 4. Cross-thread synchronization on HdrVetoCaptureGate (capture vs UI diagnostics/arming).
+			{
+				HdrVetoCaptureGate gate;
+				VideoStateComPtr sdr(new VideoState());
+				sdr->valid = true;
+				sdr->eotf = EOTF::SDR;
+				std::atomic<bool> stop{ false };
+				std::thread uiThread([&]() {
+					uint64_t iters = 0;
+					while (!stop.load(std::memory_order_acquire))
+					{
+						if ((iters & 1u) == 0u) gate.Arm(1, sdr); else gate.Disarm();
+						(void)gate.SharedCutHits();
+						(void)gate.FallbackCutCount();
+						(void)gate.LastFallbackReason();
+						(void)gate.UsedFallbackOnLastObserve();
+						(void)gate.LastGridDifference();
+						(void)gate.LastHistogramDistance();
+						++iters;
+					}
+				});
+				for (uint64_t i = 1; i <= 200; ++i)
+				{
+					if (gate.WantsSample(1, 1000 + i * 50))
+						(void)gate.Observe(1, (i & 1u) ? s1 : sDiff, 0);
+				}
+				stop.store(true, std::memory_order_release);
+				uiThread.join();
+				Assert::IsTrue(gate.FallbackCutCount() > 0, L"synchronized concurrent observes completed cleanly");
+			}
 		}
 	};
 }
