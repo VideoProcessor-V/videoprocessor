@@ -251,7 +251,9 @@ barrier();
 for (uint i = li; i < uint(GS_BW * GS_BH); i += 256u) {
     ivec2 b = ivec2(int(i % uint(GS_BW)), int(i / uint(GS_BW)));
     float q = texelFetch(quiet, b, 0).x / (GS_CODE_SCALE * GS_CODE_SCALE);
-    int bin = gs_level_bin(gs_block_luma(b) / GS_CODE_SCALE);
+    float lumaTen = gs_block_luma(b) / GS_CODE_SCALE;
+    if (!(q >= 0.0) || !(q < 1e30) || !(lumaTen >= -1e30) || !(lumaTen < 1e30)) continue;
+    int bin = gs_level_bin(lumaTen);
     if ((bin == 0 || bin == GS_LEVEL_BINS - 1) && !(q > GS_LEVEL_ZERO_FLOOR)) continue;
     int key = clamp(int(floatBitsToUint(max(q, 0.015625)) >> 20) - 968, 0, GS_KEYS - 1);
     atomicAdd(s_hist[bin * GS_KEYS + key], 1u);

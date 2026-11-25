@@ -361,9 +361,9 @@ if (gv_li == 0u)
 				Observe(c.host, luma);
 				return false;
 			}
-			void OnStatus(const RE::Context&, RE::StatusKind kind, std::vector<std::string>& lines, const char*, const char*) override
+			void OnStatus(const RE::Context& ctx, RE::StatusKind kind, std::vector<std::string>& lines, const char*, const char*) override
 			{
-				if (kind != RE::StatusKind::Fallbacks)
+				if (kind != RE::StatusKind::Fallbacks || Hub::ExtensionHub::Instance().OriginalPathway(ctx.host))
 					return;
 				const std::vector<std::string> f = FallbackLines();
 				lines.insert(lines.end(), f.begin(), f.end());
@@ -560,11 +560,23 @@ if (gv_li == 0u)
 				if (levelDone)
 					return ok;
 				tried_ = want;   // a refused registration is retried at the next size change, not every frame
+				using R = VpSkeleton::SkeletonMemo::Registration;
 				if (ok)
-					demand->UnregisterOwnerFill(VpSkeleton::kP10gGrainLevel, VpSkeleton::AcquireForm::Gpu, kOwnerUnit);
-				const VpSkeleton::SkeletonMemo::Registration r =
-					demand->RegisterOwnerFill(VpSkeleton::kP10gGrainLevel, VpSkeleton::AcquireForm::Gpu, kOwnerUnit, MakeOwnerFill(want, counters_));
-				const bool now = r == VpSkeleton::SkeletonMemo::Registration::Registered;
+				{
+					// POD2-M4: atomic ReplaceOwnerFill eliminates the unregistered gap between Unregister and Register;
+					// a failed replace preserves the previous active registration and reports the failure visibly.
+					const R r = demand->ReplaceOwnerFill(VpSkeleton::kP10gGrainLevel, VpSkeleton::AcquireForm::Gpu, kOwnerUnit, MakeOwnerFill(want, counters_));
+					if (r == R::Replaced || r == R::Registered)
+					{
+						reserve_ = want;
+						levelProblem_.clear();
+						return true;
+					}
+					levelProblem_ = "P10g owner fill " + RegistrationText(r) + " (reserve " + std::to_string(want) + " B; retried at the next size change)";
+					return true;   // previous registration remains intact
+				}
+				const R r = demand->RegisterOwnerFill(VpSkeleton::kP10gGrainLevel, VpSkeleton::AcquireForm::Gpu, kOwnerUnit, MakeOwnerFill(want, counters_));
+				const bool now = r == R::Registered;
 				reserve_ = now ? want : uint64_t(0);
 				registered_.store(now, std::memory_order_release);
 				levelProblem_ = now ? std::string()
