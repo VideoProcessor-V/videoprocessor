@@ -634,6 +634,75 @@ namespace LaneProductsTestsNs
 			Assert::IsTrue(ring2.Counters().staleDropped == 0u, L"copying is not dropped");
 		}
 
+		// S#2 (R2): ReadbackRing::HasInFlight / HasReady / HasPending track Copying -> Ready -> Free transitions
+		// per sequence (with same-ring unsubmitted-sequence negative controls) and Reset() clears all slots to Free.
+		TEST_METHOD(ReadbackRingTracksInFlightReadyPendingAndResetsCleanly)
+		{
+			FakeReadback dev(3);
+			ReadbackRing ring(&dev, 3);
+
+			// Negative control before any submit: neither seq 10 nor seq 11 is in-flight, ready, or pending.
+			Assert::IsFalse(ring.HasInFlight(10u), L"initial: seq 10 not in-flight");
+			Assert::IsFalse(ring.HasReady(10u), L"initial: seq 10 not ready");
+			Assert::IsFalse(ring.HasPending(10u), L"initial: seq 10 not pending");
+
+			// Submit seq 10 -> Copying (HasInFlight == true, HasReady == false, HasPending == true).
+			Assert::IsTrue(ring.Submit(kP5MonitorTiles, 10u), L"submit seq 10");
+			Assert::IsTrue(ring.HasInFlight(10u), L"submitted seq 10 is in-flight");
+			Assert::IsFalse(ring.HasReady(10u), L"submitted seq 10 is not ready before device completes");
+			Assert::IsTrue(ring.HasPending(10u), L"submitted seq 10 is pending");
+			// Mandatory same-ring negative control: unsubmitted seq 11 must report false across all helpers.
+			Assert::IsFalse(ring.HasInFlight(11u), L"negative control: unsubmitted seq 11 is not in-flight");
+			Assert::IsFalse(ring.HasReady(11u), L"negative control: unsubmitted seq 11 is not ready");
+			Assert::IsFalse(ring.HasPending(11u), L"negative control: unsubmitted seq 11 is not pending");
+
+			// Poll while device not done: remains in-flight only.
+			ring.Poll();
+			Assert::IsTrue(ring.HasInFlight(10u) && !ring.HasReady(10u) && ring.HasPending(10u),
+				L"still in-flight after Poll when device not done");
+
+			// Mark device done + Poll -> Ready (HasInFlight == false, HasReady == true, HasPending == true).
+			dev.done[0] = 1;
+			ring.Poll();
+			Assert::IsFalse(ring.HasInFlight(10u), L"done seq 10 is no longer in-flight after Poll");
+			Assert::IsTrue(ring.HasReady(10u), L"done seq 10 is Ready after Poll");
+			Assert::IsTrue(ring.HasPending(10u), L"Ready seq 10 remains pending until Take");
+			Assert::IsFalse(ring.HasInFlight(11u) || ring.HasReady(11u) || ring.HasPending(11u),
+				L"negative control: seq 11 remains absent after Poll");
+
+			// Take(10) -> Free (HasInFlight == false, HasReady == false, HasPending == false).
+			uint8_t seen = 0;
+			size_t bytes = 0;
+			Assert::IsTrue(ring.Take(10u, [&](const void* p, size_t n) {
+				seen = static_cast<const uint8_t*>(p)[0];
+				bytes = n;
+			}), L"Take(10) succeeds");
+			Assert::AreEqual(uint8_t(10), seen, L"Take(10) delivered seq 10 payload");
+			Assert::AreEqual(size_t(16), bytes, L"Take(10) delivered 16 bytes");
+			Assert::IsFalse(ring.HasInFlight(10u), L"taken seq 10 not in-flight");
+			Assert::IsFalse(ring.HasReady(10u), L"taken seq 10 not ready");
+			Assert::IsFalse(ring.HasPending(10u), L"taken seq 10 not pending");
+
+			// Submit seq 12 (stays Copying) and seq 13 (completes to Ready), then Reset() -> all slots Free.
+			Assert::IsTrue(ring.Submit(kP5MonitorTiles, 12u), L"submit seq 12");
+			Assert::IsTrue(ring.Submit(kP5MonitorTiles, 13u), L"submit seq 13");
+			dev.done[1] = 1;   // slot 1 holds seq 13
+			ring.Poll();
+			Assert::IsTrue(ring.HasInFlight(12u) && ring.HasPending(12u), L"pre-reset: seq 12 is Copying / pending");
+			Assert::IsTrue(ring.HasReady(13u) && ring.HasPending(13u), L"pre-reset: seq 13 is Ready / pending");
+
+			ring.Reset();
+			Assert::IsFalse(ring.HasInFlight(12u), L"post-reset: seq 12 no longer in-flight");
+			Assert::IsFalse(ring.HasPending(12u), L"post-reset: seq 12 no longer pending");
+			Assert::IsFalse(ring.HasReady(13u), L"post-reset: seq 13 no longer ready");
+			Assert::IsFalse(ring.HasPending(13u), L"post-reset: seq 13 no longer pending");
+			for (size_t i = 0; i < ring.Count(); ++i)
+				Assert::IsTrue(ring.StateOf(i) == ReadbackRing::State::Free, L"post-reset: every slot is State::Free");
+			Assert::IsFalse(ring.Take(13u, nullptr), L"post-reset: Take(13) returns false");
+			Assert::IsTrue(ring.Submit(kP5MonitorTiles, 14u) && ring.HasInFlight(14u),
+				L"post-reset: ring cleanly accepts fresh submit seq 14");
+		}
+
 		TEST_METHOD(VramDropMovesP6InRenderFirst)
 		{
 			std::vector<ProductDecl> decls = FirstProducts().All();
