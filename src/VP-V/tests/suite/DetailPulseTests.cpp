@@ -2269,6 +2269,126 @@ namespace DetailPulseTestsNs
 			Assert::IsTrue(maxVetoBoost > 0.5, L"vetoed DP retained frame 0 history and boosted coarse frame 1");
 			Assert::IsTrue(maxVetoVsNoVeto > 0.5, L"negative control: suppressing vs taking restart materially alters DP GPU output");
 		}
+
+		// W23-Final O#7: DetailPulse look-ahead cut check uses shared U7 (SceneRestartOf) instead of private mean-luma cut_codes.
+		TEST_METHOD(DetailPulseGpuLookAheadUsesSharedU7InsteadOfPrivateLumaCut)
+		{
+			PulseGpu g;
+			const int w = 256, h = 192;
+			auto makeFrame = [w, h](double meanOffset, double fineScale) {
+				Image img(w, h);
+				for (int y = 0; y < h; ++y)
+					for (int x = 0; x < w; ++x)
+					{
+						const double px = x + 0.5, py = y + 0.5;
+						const double base = 400.0 + meanOffset
+							+ 40.0 * std::sin(6.283185307 * px / 211.0)
+							+ 40.0 * std::sin(6.283185307 * py / 173.0 + 1.0);
+						const double fine = 10.0 * std::sin(6.283185307 * px / 7.3 + 0.4) * std::sin(6.283185307 * py / 9.1)
+							+ 6.0 * std::sin(6.283185307 * (px + py) / 4.7);
+						img.at(x, y) = std::round((std::max)(64.0, (std::min)(940.0, base + fineScale * fine)));
+					}
+				return img;
+			};
+			auto meanOf = [](const Image& img) {
+				double sum = 0.0;
+				for (double v : img.v) sum += v;
+				return sum / static_cast<double>(img.v.size());
+			};
+
+			// Steady f0 == f1 (soft detail), higher-detail f2 (energy ratio ~(1/0.7)^2 = 2.04 <= kAheadMaxRatio 2.5):
+			// past ring alone yields neutral gain 1.0, so ONLY look-ahead f2 can boost f1.
+			const Image f0 = makeFrame(0.0, 0.7);
+			const Image f1 = f0;
+			const Image f2EqualMean = makeFrame(0.0, 1.0);
+			const Image f2ShiftedMean = makeFrame(200.0, 1.0);
+
+			const double defaultCutCodes = DetailPulse::CutCodes(1.0, 10);
+			Assert::IsTrue(std::fabs(meanOf(f2EqualMean) - meanOf(f1)) < 1.0 && std::fabs(meanOf(f2EqualMean) - meanOf(f1)) < defaultCutCodes,
+				L"precondition: equal-mean f2 sits far below retired private CutCodes");
+			Assert::IsTrue(std::fabs(meanOf(f2ShiftedMean) - meanOf(f1)) > defaultCutCodes,
+				L"negative control precondition: +200 code mean shift exceeds retired private CutCodes and would have been falsely rejected");
+
+			pl_tex tex0 = g.Upload(f0);
+			pl_tex tex1 = g.Upload(f1);
+			pl_tex tex2Eq = g.Upload(f2EqualMean);
+			pl_tex tex2Shift = g.Upload(f2ShiftedMean);
+
+			auto runSeq = [&](pl_tex aheadTex, VpDetailRestore::SceneReaderFn reader, DetailPulse::Module& mod) -> Image {
+				DetailPulse::Params p;
+				p.sceneReader = reader;
+				p.sequence = 1;
+				pl_frame out0{}, out1{};
+				Assert::IsTrue(mod.Apply(g.gpu, g.dispatch, PulseGpu::LumaFrame(tex0), p, out0), W(mod.LastError().c_str()).c_str());
+				Assert::IsTrue(mod.MeasureAhead(g.gpu, g.dispatch, aheadTex, 3, p), W(mod.LastError().c_str()).c_str());
+				p.sequence = 2;
+				Assert::IsTrue(mod.Apply(g.gpu, g.dispatch, PulseGpu::LumaFrame(tex1), p, out1), W(mod.LastError().c_str()).c_str());
+				return g.Readback(out1.planes[0].texture);
+			};
+
+			// Case A: Equal-mean cut reported by U7 on seq 3 must block look-ahead (defeats retired private cut_codes).
+			auto cutOnSeq3 = [](uint64_t sequence, FrameAnalysis::Scene& scene) -> bool {
+				scene = FrameAnalysis::Scene();
+				scene.cut = (sequence == 3);
+				return true;
+			};
+			{
+				DetailPulse::Module modA;
+				const Image outA = runSeq(tex2Eq, cutOnSeq3, modA);
+				Assert::AreEqual(1ull, modA.AheadSceneRestarts(), L"Case A: U7 cut on seq 3 recorded as AheadSceneRestarts");
+				Assert::AreEqual(0ull, modA.AheadFrames(), L"Case A: look-ahead blocked by U7 cut");
+				Assert::AreEqual(0ull, modA.AheadSceneHits(), L"Case A: cut does not count as an allowed ahead hit");
+				Assert::AreEqual(0.0, MaxAbsDiff(outA, f1), 0.0, L"Case A: neutral gain 1.0 leaves f1 unchanged");
+				modA.Release(g.gpu);
+			}
+
+			// In-test Negative Control: exact same (f0, f1, f2EqualMean) with NoCutReader genuinely boosts f1 via look-ahead.
+			{
+				DetailPulse::Module modCtrl;
+				const Image outCtrl = runSeq(tex2Eq, &NoCutReader, modCtrl);
+				Assert::AreEqual(1ull, modCtrl.AheadSceneHits(), L"Negative Control: continuous U7 permits look-ahead");
+				Assert::AreEqual(1ull, modCtrl.AheadFrames(), L"Negative Control: look-ahead used on f1");
+				Assert::AreEqual(0ull, modCtrl.AheadSceneRestarts(), L"Negative Control: no ahead restart");
+				Assert::IsTrue(MaxAbsDiff(outCtrl, f1) > 0.5,
+					L"Negative Control: exact same frames drive > 0.5 code gain boost when U7 reports no cut");
+				modCtrl.Release(g.gpu);
+			}
+
+			// Case B: Missing U7 record on look-ahead seq 3 fails closed visibly (no private luma fallback).
+			auto missingOnSeq3 = [](uint64_t sequence, FrameAnalysis::Scene& scene) -> bool {
+				if (sequence == 3)
+					return false;
+				scene = FrameAnalysis::Scene();
+				return true;
+			};
+			{
+				DetailPulse::Module modB;
+				const Image outB = runSeq(tex2Eq, missingOnSeq3, modB);
+				Assert::AreEqual(0ull, modB.AheadFrames(), L"Case B: missing U7 record blocks look-ahead");
+				Assert::AreEqual(1ull, modB.AheadSceneFallbacks(), L"Case B: missing U7 record counted visibly");
+				Assert::IsFalse(modB.LastAheadSceneFallback().empty(), L"Case B: fallback reason is populated");
+				Assert::AreEqual(0.0, MaxAbsDiff(outB, f1), 0.0, L"Case B: fail-closed neutral gain leaves f1 unchanged");
+				modB.Release(g.gpu);
+			}
+
+			// Case C: Non-cut +200 code mean-luma shift accepted when U7 reports continuous (retired private cut_codes is gone).
+			{
+				DetailPulse::Module modC;
+				const Image outC = runSeq(tex2Shift, &NoCutReader, modC);
+				Assert::AreEqual(1ull, modC.AheadSceneHits(), L"Case C: continuous U7 accepts large mean-luma shift");
+				Assert::AreEqual(1ull, modC.AheadFrames(), L"Case C: look-ahead used despite +200 code luma shift");
+				Assert::AreEqual(0ull, modC.AheadSceneRestarts(), L"Case C: no restart on continuous U7");
+				Assert::AreEqual(0ull, modC.AheadSceneFallbacks(), L"Case C: no fallback on readable U7");
+				Assert::IsTrue(MaxAbsDiff(outC, f1) > 0.5,
+					L"Case C: look-ahead boosts f1 despite +200 code shift that retired private cut_codes would have rejected");
+				modC.Release(g.gpu);
+			}
+
+			pl_tex_destroy(g.gpu, &tex0);
+			pl_tex_destroy(g.gpu, &tex1);
+			pl_tex_destroy(g.gpu, &tex2Eq);
+			pl_tex_destroy(g.gpu, &tex2Shift);
+		}
 	};
 }
 

@@ -815,12 +815,14 @@ namespace ProductCatalogTestsNs
 				if ((f.consumerId == kCatalogConsumerIdBase + 0 || f.consumerId == kCatalogConsumerIdBase + 1) && f.kind == FlagKind::NotRead)
 					++dpTr;
 			// WAIVER-15C-C3B-P11-TESTS: DP/TR P11 NotRead flags removed (5 -> 3: DP P10, DP P4, TR P10).
-			Assert::AreEqual(size_t(3), dpTr, L"DP: P10, P4 not read today; TR: P10 not read today (P11 live)");
+			// WAIVER-W23-O7-DP-ROW0: DP Row 0 P4 migrated from NotRead (D10) to ViewIsActual (D8) (3 -> 2: DP P10, TR P10).
+			Assert::AreEqual(size_t(2), dpTr, L"DP: P10 not read today (P4 view via U7, P11 live); TR: P10 not read today (P4 view via U7, P11 live)");
 			// WAIVER-B3Z-02 (coordinator approved 2026-11-12): NotRead = DP / TR 6 + producer P1 + matcher P1, P4 + identification P4 = 10.
 			// WAIVER-15C-ROWS (gate-15c-X8-rows0-1-P4): TR P4 NotRead -> ViewIsActual, so DP / TR 5 + the four F1 rows = 9.
 			// WAIVER-15D-P16: + the debander TD read path's coding_evidence (row 23; P16 now has a producer) = 10.
 			// WAIVER-15C-C3B-P11-TESTS: DP/TR P11 live reads remove 2 NotRead flags (10 -> 8).
-			Assert::AreEqual(size_t(8), cNotRead, L"DP / TR's three + the F1 rows (782 P1, 781 P1 / P4, 776 P4) + debander P16");
+			// WAIVER-W23-O7-DP-ROW0: DP Row 0 P4 NotRead -> ViewIsActual (8 -> 7).
+			Assert::AreEqual(size_t(7), cNotRead, L"DP / TR's two P10 + the F1 rows (782 P1, 781 P1 / P4, 776 P4) + debander P16");
 			{
 				const ConsumerFlag* deb = ConsumerFlagOf(uint16_t(kCatalogConsumerIdBase + 23), kCodingEvidence);
 				Assert::IsTrue(deb && deb->kind == FlagKind::NotRead && std::string(deb->item) == "TD", L"row 23 P16: not read today, item TD");
@@ -835,11 +837,13 @@ namespace ProductCatalogTestsNs
 			Assert::AreEqual(std::string("D6-D8"), std::string(ConsumerFlagOf(idIdentity, kP4SourceStats)->item), L"776 P4: register item D6-D8");
 			Assert::AreEqual(std::string("D8"), std::string(ConsumerFlagOf(idMatcher, kP4SourceStats)->item), L"781 P4: register item D8");
 			Assert::IsTrue(ConsumerFlagOf(idIdentity, kP5MonitorTiles) && ConsumerFlagOf(idIdentity, kP5MonitorTiles)->kind == FlagKind::ViewIsActual);
-			// WAIVER-15C-ROWS (gate-15c-X8-rows0-1-P4): DP P4 stays the D10 reader switch (NotRead); TR P4 is the scene-group view (D8).
+			// WAIVER-15C-ROWS / WAIVER-W23-O7-DP-ROW0: both DP P4 and TR P4 are scene-group views (D8, SceneRestart.h SceneRestartOf).
 			const uint16_t idDp = uint16_t(kCatalogConsumerIdBase + 0), idTr = uint16_t(kCatalogConsumerIdBase + 1),
 				idCfl = uint16_t(kCatalogConsumerIdBase + 11);
-			Assert::IsTrue(ConsumerFlagOf(idDp, kP4SourceStats) && ConsumerFlagOf(idDp, kP4SourceStats)->kind == FlagKind::NotRead, L"DP P4 not read");
-			Assert::AreEqual(std::string("D10"), std::string(ConsumerFlagOf(idDp, kP4SourceStats)->item), L"DP P4: the D10 reader switch (C7 landed without it)");
+			Assert::IsTrue(ConsumerFlagOf(idDp, kP4SourceStats) && ConsumerFlagOf(idDp, kP4SourceStats)->kind == FlagKind::ViewIsActual, L"DP P4: view");
+			Assert::AreEqual(std::string("D8"), std::string(ConsumerFlagOf(idDp, kP4SourceStats)->item), L"DP P4: register item D8");
+			Assert::IsTrue(std::string(ConsumerFlagOf(idDp, kP4SourceStats)->note).find("SceneRestart.h SceneRestartOf") != std::string::npos,
+				L"DP P4: the view is the scene group (SceneRestartOf)");
 			Assert::IsTrue(ConsumerFlagOf(idTr, kP4SourceStats) && ConsumerFlagOf(idTr, kP4SourceStats)->kind == FlagKind::ViewIsActual, L"TR P4: view");
 			Assert::AreEqual(std::string("D8"), std::string(ConsumerFlagOf(idTr, kP4SourceStats)->item), L"TR P4: register item D8");
 			Assert::IsTrue(std::string(ConsumerFlagOf(idTr, kP4SourceStats)->note).find("SceneRestart.h SceneRestartOf") != std::string::npos,
@@ -861,15 +865,16 @@ namespace ProductCatalogTestsNs
 			// WAIVER-15C-ROWS (row 2 P3 r2): + deband P3 (view, live matcher field): NotRead 9 + external 7 + views 5 = 21.
 			// WAIVER-15D-P16: + debander P16 NotRead: NotRead 10 + external 7 + views 5 = 22.
 			// WAIVER-15C-C3B-P11-TESTS: DP/TR P11 live reads remove 2 NotRead flags: NotRead 8 + external 7 + views 5 = 20.
+			// WAIVER-W23-O7-DP-ROW0: DP Row 0 P4 NotRead -> ViewIsActual: NotRead 7 + external 7 + views 6 = 20.
 			Assert::IsNull(ConsumerFlagOf(idDp, kP11RegionBlockStats), L"DP P11 is read live (no NotRead flag)");
 			Assert::IsNull(ConsumerFlagOf(idTr, kP11RegionBlockStats), L"TR P11 is read live (no NotRead flag)");
 			Assert::AreEqual(size_t(7), cExt, L"synthesis x4 + DP + TR + adaptive downscale: P3 read at render");
-			Assert::AreEqual(size_t(5), cViews, L"camera fit: P3 via SeedFieldOf; identification: P5 via the tap; TR: P4 via the scene group; CfL: P13 via the source pl_frame; deband: P3 via Params.field");   // WAIVER-B3Z-02 (coordinator approved 2026-11-12); WAIVER-15C-ROWS
+			Assert::AreEqual(size_t(6), cViews, L"camera fit: P3 via SeedFieldOf; identification: P5 via the tap; DP & TR: P4 via the scene group; CfL: P13 via the source pl_frame; deband: P3 via Params.field");   // WAIVER-B3Z-02 (coordinator approved 2026-11-12); WAIVER-15C-ROWS; WAIVER-W23-O7-DP-ROW0
 			Assert::AreEqual(size_t(20), ConsumerFlags().size());   // WAIVER-B3Z-02; WAIVER-15C-ROWS; WAIVER-15D-P16; WAIVER-15C-C3B-P11-TESTS: -2 (DP/TR P11 live)
 			for (const ConsumerFlag& f : ConsumerFlags())
 				if (f.kind != FlagKind::NotRead && !(f.consumerId == idIdentity && f.input == kP5MonitorTiles)
-					&& !(f.consumerId == idTr && f.input == kP4SourceStats) && !(f.consumerId == idCfl && f.input == kP13SourceRing))
-					Assert::IsTrue(f.input == kP3AnalysisField, L"the view / external-view consumer flags are the P3 render-time reads (and 776 P5, TR P4, CfL P13)");
+					&& !((f.consumerId == idDp || f.consumerId == idTr) && f.input == kP4SourceStats) && !(f.consumerId == idCfl && f.input == kP13SourceRing))
+					Assert::IsTrue(f.input == kP3AnalysisField, L"the view / external-view consumer flags are the P3 render-time reads (and 776 P5, DP/TR P4, CfL P13)");
 
 			// 4b. AUDIT-R2 F1 rule: a read of a product without a producer is never actual, and an unwired row reads nothing.
 			const Registry regF1 = SkeletonProducts();
