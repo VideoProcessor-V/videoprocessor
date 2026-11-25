@@ -149,8 +149,8 @@ class PostPresentSpare {
 public:
     void Register(ISpareWork* w)
     {
-        if (!w) return;
-        if (std::find(m_works.begin(), m_works.end(), w) == m_works.end()) m_works.push_back(w);
+        if (!w || std::find(m_works.begin(), m_works.end(), w) != m_works.end()) return;
+        m_works.insert(std::upper_bound(m_works.begin(), m_works.end(), w, &PostPresentSpare::Before), w);
     }
     void Unregister(ISpareWork* w)
     {
@@ -175,7 +175,6 @@ public:
         m_order.clear();
         for (ISpareWork* w : m_works) if (w->HasWork()) m_order.push_back(w);
         if (m_order.empty()) return Finish(r, SpareOutcome::NothingToDo);
-        std::sort(m_order.begin(), m_order.end(), &PostPresentSpare::Before);
         if (m_promote) {   // S4: a starved unmeasured unpack / core work goes first this slot
             auto it = std::find(m_order.begin(), m_order.end(), m_promote);
             if (it != m_order.end() && !(m_promote->PredictMs() > 0.0)) {
@@ -196,7 +195,7 @@ public:
             bool run = false;
             if (limit > 0.0) {
                 if (!(pred > 0.0)) {
-                    run = r.ran == 0 && r.usedMs <= 0.0;   // unmeasured: only as the slot's first work
+                    run = r.usedMs <= 0.0;   // unmeasured: only while no slot time has been consumed yet
                     if (run) ++r.unmeasured;
                 } else if (pred <= limit) {
                     run = true;
