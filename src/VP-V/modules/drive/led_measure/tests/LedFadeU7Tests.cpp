@@ -24,6 +24,7 @@
 
 #include <VP-V/tests/support/LedDriveTestSupport.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <map>
