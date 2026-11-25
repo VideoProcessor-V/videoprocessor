@@ -32,6 +32,8 @@ namespace CameraModel
 	// CameraMotion::verdictFlags bits (why an Ambiguous verdict was given beyond the competing-motion signal).
 	constexpr uint8_t kVerdictDynamicTexture = 1;
 	constexpr uint8_t kVerdictStaticCamera = 2;   // Ambiguous because the static (identity) model explains the background as well as the fit (Config::staticCamera)
+	constexpr uint8_t kVerdictPhotometricDisagreement = 4;   // Ambiguous because R3 pixel-domain verification disagreed with the vector fit (CE-WATER-C3)
+	constexpr uint8_t kVerdictAnyDemotion = kVerdictDynamicTexture | kVerdictStaticCamera | kVerdictPhotometricDisagreement;
 
 	enum class ModelType : uint8_t { None, Translation, Similarity, Affine, Homography };
 
@@ -72,6 +74,8 @@ namespace CameraModel
 			return "ambiguous (dynamic texture, water-like)";
 		if (reason == Reason::Ambiguous && (verdictFlags & kVerdictStaticCamera) != 0)
 			return "ambiguous (static background explains the motion better: foreground object)";
+		if (reason == Reason::Ambiguous && (verdictFlags & kVerdictPhotometricDisagreement) != 0)
+			return "ambiguous (photometric brightness-constancy disagreement)";
 		return ReasonText(reason);
 	}
 
@@ -115,10 +119,19 @@ namespace CameraModel
 		double inlierShare = 0, precision = 0, coverage = 0, temporal = 0.5, conditioning = 0,
 			engineAgreement = 0.5, inverse = 0.5, ambiguity = 1, logit = 0;
 		// Dynamic-texture detector statistics (Config::dynTexture; 0 otherwise): share of trusted blocks that disagree with the
-		// camera model, and the temporal / spatial incoherence of that disagreement.
+		// camera model, the temporal / spatial incoherence of that disagreement, whole-field discrete vector curvature share
+		// (dynCurvature), and camera-advected lag-1 residual autocorrelation (dynRhoTemp in [-1, 1]).
 		double dynShare = 0, dynTemporal = 0, dynSpatial = 0, dynField = 0;
+		double dynCurvature = 0, dynRhoTemp = 0;
 		// CE-WATER-C1 (Config::waterBlockExclude; 0 when off): share of evaluated blocks excluded as incoherent dynamic texture / water.
 		double waterExcludedShare = 0;
+		// C4 diagnostics (populated on every valid fit):
+		//  * rawShare: unsaturated trusted inlier mass fraction in [0, 1] before the inlierShareLo/Hi ramp.
+		//  * shearEnergy: RMS vector difference (source px) between a chosen Affine/Homography model and its best
+		//    4-DOF Similarity approximation over the 4 picture corners + centre (0 for Translation/Similarity).
+		//  * dipoleTB / dipoleLR: norm (source px) of top-vs-bottom (y < 0 vs y >= 0) and left-vs-right (x < 0 vs x >= 0)
+		//    trust-weighted mean signed residuals (clamped at the 3 * threshold support radius).
+		double rawShare = 0, shearEnergy = 0, dipoleTB = 0, dipoleLR = 0;
 		// Static-camera hypothesis statistics (Config::staticCamera; 0 otherwise): share of the trusted border-ring blocks the
 		// identity model explains, and the share the fitted model explains.
 		double staticRing = 0, staticFit = 0;

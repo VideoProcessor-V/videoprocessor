@@ -3,6 +3,7 @@
 #include "CameraLinkCore.h"
 
 #include "CameraDump.h"
+#include "CameraRecordPool.h"
 #include "CameraUsable.h"
 
 #include <VP-V/core/PassTimerInbox.h>
@@ -911,5 +912,72 @@ namespace CameraLink
 	std::shared_ptr<const CameraModel::GuidanceFrame> CameraLinkCore::GuideFor(uint64_t seq)
 	{
 		return guideProvider ? guideProvider(seq) : nullptr;
+	}
+
+	bool DecodeRecordPod(const uint8_t* in, size_t bytes, CameraModel::CameraMotion& m)
+	{
+		if (!in || bytes == 0)
+			return false;
+		detail::Reader r(in, bytes);
+		const uint32_t magic = r.Get<uint32_t>();
+		if (!r.ok || (magic != kRecordPodMagic && magic != kRecordPodMagicV1))
+			return false;
+		CameraModel::CameraMotion x;
+		x.seq = r.Get<uint64_t>(); x.pairFrom = r.Get<uint64_t>(); x.pairTo = r.Get<uint64_t>(); x.pairSeconds = r.Get<double>();
+		x.resyncGeneration = r.Get<uint64_t>(); x.rebaseGeneration = r.Get<uint64_t>();
+		x.valid = r.Get<uint8_t>() != 0;
+		const uint8_t type = r.Get<uint8_t>();
+		const uint8_t reason = r.Get<uint8_t>();
+		if (type > kRecordPodLastModelType || reason > kRecordPodLastReason)
+			return false;
+		x.params.type = static_cast<CameraModel::ModelType>(type);
+		x.reason = static_cast<CameraModel::Reason>(reason);
+		const uint8_t flags = r.Get<uint8_t>();
+		x.seededFromNext = (flags & 1) != 0; x.bridged = (flags & 2) != 0; x.inFade = (flags & 4) != 0;
+		x.smoothed = (flags & 8) != 0; x.labelsOnGpu = (flags & 16) != 0;
+		for (int i = 0; i < 9; ++i) x.params.h[i] = r.Get<double>();
+		const uint8_t smoothedType = r.Get<uint8_t>();
+		if (smoothedType > kRecordPodLastModelType)
+			return false;
+		x.smoothedParams.type = static_cast<CameraModel::ModelType>(smoothedType);
+		for (int i = 0; i < 9; ++i) x.smoothedParams.h[i] = r.Get<double>();
+		x.rates.logScale = r.Get<double>(); x.rates.angle = r.Get<double>(); x.rates.tx = r.Get<double>(); x.rates.ty = r.Get<double>();
+		x.confidence = r.Get<double>();
+		CameraModel::Signals& s = x.signals;
+		s.inlierShare = r.Get<double>(); s.precision = r.Get<double>(); s.coverage = r.Get<double>(); s.temporal = r.Get<double>();
+		s.conditioning = r.Get<double>(); s.engineAgreement = r.Get<double>(); s.inverse = r.Get<double>();
+		s.ambiguity = r.Get<double>(); s.logit = r.Get<double>();
+		const uint8_t sf = r.Get<uint8_t>();
+		s.haveBackward = (sf & 1) != 0; s.haveEngine = (sf & 2) != 0;
+		detail::GetFadeFields(r, x);
+		x.samples = r.Get<uint32_t>(); x.hypotheses = r.Get<uint32_t>(); x.costMicros = r.Get<int64_t>();
+		x.picture.left = r.Get<int32_t>(); x.picture.top = r.Get<int32_t>(); x.picture.right = r.Get<int32_t>(); x.picture.bottom = r.Get<int32_t>();
+		(void)r.Get<uint32_t>();
+		if (magic == kRecordPodMagic)
+		{
+			x.verdictFlags = r.Get<uint8_t>();
+			x.layerFlags = r.Get<uint8_t>();
+			x.finalRefineCells = r.Get<uint32_t>();
+			s.dynShare = r.Get<double>(); s.dynTemporal = r.Get<double>(); s.dynSpatial = r.Get<double>(); s.dynField = r.Get<double>();
+			s.waterExcludedShare = r.Get<double>();
+			s.staticRing = r.Get<double>(); s.staticFit = r.Get<double>();
+			s.border = r.Get<double>(); s.continuity = r.Get<double>();
+			x.layerRisk = r.Get<double>();
+			x.haveObjectLayer = r.Get<uint8_t>() != 0;
+			x.objectLayer.id = r.Get<uint8_t>();
+			const uint8_t objType = r.Get<uint8_t>();
+			if (objType > kRecordPodLastModelType)
+				return false;
+			x.objectLayer.type = static_cast<CameraModel::ModelType>(objType);
+			for (int i = 0; i < 9; ++i) x.objectLayer.h[i] = r.Get<double>();
+			x.objectLayer.blocks = r.Get<uint32_t>();
+			x.objectLayer.cx = r.Get<double>(); x.objectLayer.cy = r.Get<double>();
+			s.dynCurvature = r.Get<double>(); s.dynRhoTemp = r.Get<double>();
+			s.rawShare = r.Get<double>(); s.shearEnergy = r.Get<double>(); s.dipoleTB = r.Get<double>(); s.dipoleLR = r.Get<double>();
+		}
+		if (!r.ok)
+			return false;
+		m = x;
+		return true;
 	}
 }

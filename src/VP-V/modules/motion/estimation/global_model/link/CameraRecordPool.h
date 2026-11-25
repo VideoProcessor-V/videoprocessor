@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 // Camera link (K1-3): the record pool parallel to P7's SlotSet, and the POD codec for the P7 slot bytes.
-// The slot holds a fixed, small CameraRecordPod (declared 1 KB; the encoded form is about 330 B); the heavy parts (the
+// The slot holds a fixed, small CameraRecordPod (declared 1 KB; the encoded CRD2 form is 595 B, CRD1 legacy is 366 B); the heavy parts (the
 // per-block arrays and the CPU field copy) are shared_ptrs kept here, indexed by seq mod ring like the SlotSet. The
 // producer writes an entry only while it holds the claim for that seq; readers use an entry only for a seq whose slot
-// they have pinned / sealed. Pure, header-only, C++14, deterministic.
+// they have pinned / sealed. Pure, C++14, deterministic (DecodeRecordPod defined in CameraLinkCore.cpp).
 #pragma once
 
 #include "FieldCopy.h"
@@ -21,8 +21,9 @@
 
 namespace CameraLink
 {
-	constexpr size_t kRecordPodMaxBytes = 1024;   // the declared P7 size (core/Products.h p7.size.fixedBytes)
-	constexpr uint32_t kRecordPodMagic = 0x43524431u;   // "CRD1"
+	constexpr size_t kRecordPodMaxBytes = 1024;          // the declared P7 size (core/Products.h p7.size.fixedBytes)
+	constexpr uint32_t kRecordPodMagicV1 = 0x43524431u;  // "CRD1" (legacy v1 payload; still decoded cleanly)
+	constexpr uint32_t kRecordPodMagic = 0x43524432u;    // "CRD2" (GEM-137: carries verdict/layer flags, finalRefineCells, dyn/water/static/two-layer signals)
 
 	namespace detail
 	{
@@ -50,12 +51,16 @@ namespace CameraLink
 				return v;
 			}
 		};
+		inline void GetFadeFields(Reader& r, CameraModel::CameraMotion& x) { x.fadeGain = r.Get<double>(); x.fadeOffset = r.Get<double>(); }
 	}
 
 	// Encodes everything of the record except `blocks` and `objects` (the objects stay off in K1; their count is stored so
-	// a decode can tell). Returns the byte count, 0 when the buffer is too small.
+	// a decode can tell). Writes CRD2 (v1 prefix at identical byte offsets + v2 tail). Returns the byte count, 0 when the
+	// buffer is null or too small.
 	inline size_t EncodeRecordPod(const CameraModel::CameraMotion& m, uint8_t* out, size_t cap)
 	{
+		if (!out || cap == 0)
+			return 0;
 		detail::Writer w(out, cap < kRecordPodMaxBytes ? cap : kRecordPodMaxBytes);
 		w.Put(kRecordPodMagic);
 		w.Put(m.seq); w.Put(m.pairFrom); w.Put(m.pairTo); w.Put(m.pairSeconds);
@@ -75,6 +80,24 @@ namespace CameraLink
 		w.Put(m.samples); w.Put(m.hypotheses); w.Put(m.costMicros);
 		w.Put(int32_t(m.picture.left)); w.Put(int32_t(m.picture.top)); w.Put(int32_t(m.picture.right)); w.Put(int32_t(m.picture.bottom));
 		w.Put(uint32_t(m.objects.size()));
+		// CRD2 tail (GEM-137): verdict/layer flags, full-resolution refine count, dynamic-texture / water / static / two-layer signals and object layer.
+		w.Put(m.verdictFlags);
+		w.Put(m.layerFlags);
+		w.Put(m.finalRefineCells);
+		w.Put(s.dynShare); w.Put(s.dynTemporal); w.Put(s.dynSpatial); w.Put(s.dynField);
+		w.Put(s.waterExcludedShare);
+		w.Put(s.staticRing); w.Put(s.staticFit);
+		w.Put(s.border); w.Put(s.continuity);
+		w.Put(m.layerRisk);
+		w.Put(uint8_t(m.haveObjectLayer ? 1 : 0));
+		w.Put(m.objectLayer.id);
+		w.Put(uint8_t(m.objectLayer.type));
+		for (int i = 0; i < 9; ++i) w.Put(m.objectLayer.h[i]);
+		w.Put(m.objectLayer.blocks);
+		w.Put(m.objectLayer.cx); w.Put(m.objectLayer.cy);
+		// CE-WATER / C4 diagnostics tail (appended to CRD2; total 595 B <= 1024 B).
+		w.Put(s.dynCurvature); w.Put(s.dynRhoTemp);
+		w.Put(s.rawShare); w.Put(s.shearEnergy); w.Put(s.dipoleTB); w.Put(s.dipoleLR);
 		return w.ok ? w.n : 0;
 	}
 
@@ -83,49 +106,9 @@ namespace CameraLink
 	constexpr uint8_t kRecordPodLastModelType = uint8_t(CameraModel::ModelType::Homography);
 	constexpr uint8_t kRecordPodLastReason = uint8_t(CameraModel::Reason::Disabled);
 
-	// Decodes into `m` (blocks left null). False on a bad magic, a short buffer, or a ModelType / Reason byte outside its
-	// enum (the target is then untouched).
-	inline bool DecodeRecordPod(const uint8_t* in, size_t bytes, CameraModel::CameraMotion& m)
-	{
-		detail::Reader r(in, bytes);
-		if (r.Get<uint32_t>() != kRecordPodMagic)
-			return false;
-		CameraModel::CameraMotion x;
-		x.seq = r.Get<uint64_t>(); x.pairFrom = r.Get<uint64_t>(); x.pairTo = r.Get<uint64_t>(); x.pairSeconds = r.Get<double>();
-		x.resyncGeneration = r.Get<uint64_t>(); x.rebaseGeneration = r.Get<uint64_t>();
-		x.valid = r.Get<uint8_t>() != 0;
-		const uint8_t type = r.Get<uint8_t>();
-		const uint8_t reason = r.Get<uint8_t>();
-		if (type > kRecordPodLastModelType || reason > kRecordPodLastReason)
-			return false;
-		x.params.type = static_cast<CameraModel::ModelType>(type);
-		x.reason = static_cast<CameraModel::Reason>(reason);
-		const uint8_t flags = r.Get<uint8_t>();
-		x.seededFromNext = (flags & 1) != 0; x.bridged = (flags & 2) != 0; x.inFade = (flags & 4) != 0;
-		x.smoothed = (flags & 8) != 0; x.labelsOnGpu = (flags & 16) != 0;
-		for (int i = 0; i < 9; ++i) x.params.h[i] = r.Get<double>();
-		const uint8_t smoothedType = r.Get<uint8_t>();
-		if (smoothedType > kRecordPodLastModelType)
-			return false;
-		x.smoothedParams.type = static_cast<CameraModel::ModelType>(smoothedType);
-		for (int i = 0; i < 9; ++i) x.smoothedParams.h[i] = r.Get<double>();
-		x.rates.logScale = r.Get<double>(); x.rates.angle = r.Get<double>(); x.rates.tx = r.Get<double>(); x.rates.ty = r.Get<double>();
-		x.confidence = r.Get<double>();
-		CameraModel::Signals& s = x.signals;
-		s.inlierShare = r.Get<double>(); s.precision = r.Get<double>(); s.coverage = r.Get<double>(); s.temporal = r.Get<double>();
-		s.conditioning = r.Get<double>(); s.engineAgreement = r.Get<double>(); s.inverse = r.Get<double>();
-		s.ambiguity = r.Get<double>(); s.logit = r.Get<double>();
-		const uint8_t sf = r.Get<uint8_t>();
-		s.haveBackward = (sf & 1) != 0; s.haveEngine = (sf & 2) != 0;
-		x.fadeGain = r.Get<double>(); x.fadeOffset = r.Get<double>();
-		x.samples = r.Get<uint32_t>(); x.hypotheses = r.Get<uint32_t>(); x.costMicros = r.Get<int64_t>();
-		x.picture.left = r.Get<int32_t>(); x.picture.top = r.Get<int32_t>(); x.picture.right = r.Get<int32_t>(); x.picture.bottom = r.Get<int32_t>();
-		(void)r.Get<uint32_t>();
-		if (!r.ok)
-			return false;
-		m = x;
-		return true;
-	}
+	// Decodes CRD2 or legacy CRD1 into `m` (blocks left null; CRD1 leaves v2 fields at CameraMotion defaults).
+	// False on a null/short buffer, bad magic, or a ModelType / Reason byte outside its enum (the target is then untouched).
+	bool DecodeRecordPod(const uint8_t* in, size_t bytes, CameraModel::CameraMotion& m);
 
 	// What the pool keeps of the field a record was fitted from: its PROVENANCE only (origin and the P2 epoch the staleness checks read).
 	// The field's content is NOT kept here: it lives in the declared product p7f_camera_fit_field (CameraFitFieldPod.h).

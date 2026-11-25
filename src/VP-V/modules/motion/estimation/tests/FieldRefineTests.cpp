@@ -172,7 +172,7 @@ namespace VideoProcessorTest
 			Params p;
 			const Block inv = RefineBlock(s.In(), p, 1, 1);
 			Assert::AreEqual(0.0f, inv.vx); Assert::AreEqual(0, static_cast<int>(inv.confidence));
-			Assert::AreEqual(static_cast<int>(kKept), static_cast<int>(inv.flags));
+			Assert::AreEqual(static_cast<int>(kKept | kInvalid), static_cast<int>(inv.flags));
 			const Block occ = RefineBlock(s.In(), p, 0, 0);
 			Assert::AreEqual(2.0f, occ.vx);
 			Assert::AreEqual(static_cast<int>(kOccluded | kKept), static_cast<int>(occ.flags));
@@ -221,6 +221,83 @@ namespace VideoProcessorTest
 			f[2].flags = kKept | kBoundary;   // own block boundary: no offset
 			Offset(f.data(), 3, 1, 8, 20.0f, 4.0f, ox, oy);
 			Assert::AreEqual(0.0f, ox); Assert::AreEqual(0.0f, oy);
+		}
+
+		TEST_METHOD(InvalidNanSeedIsTaggedAndNeverBlendedIntoValidNeighbourOffset)
+		{
+			Scene s;
+			s.w = 32; s.h = 32; s.gw = 4; s.gh = 4;
+			s.Build(2.0, 1.0, true);   // uniform pan: half-px (2, 1) = source (4, 2)
+			s.SetP3(4.0f, 2.0f);
+			const size_t validIdx = static_cast<size_t>(1 * s.gw + 1);
+			const size_t nanIdx = static_cast<size_t>(1 * s.gw + 2);
+			const size_t infIdx = static_cast<size_t>(2 * s.gw + 1);
+			const size_t camNanIdx = static_cast<size_t>(2 * s.gw + 2);
+			s.p3[nanIdx * 2] = std::numeric_limits<float>::quiet_NaN();
+			s.p3[infIdx * 2 + 1] = std::numeric_limits<float>::infinity();
+			s.camMask[camNanIdx] = 1;
+			s.cam[camNanIdx * 2] = std::numeric_limits<float>::quiet_NaN();
+			s.cam[camNanIdx * 2 + 1] = std::numeric_limits<float>::infinity();
+
+			Params p;
+			std::vector<Block> field;
+			RefineField(s.In(), p, field);
+
+			// Invalid NaN / +Inf P3 seeds emit (0, 0), conf 0, flags = kKept | kInvalid (18), and survive Pack/Unpack.
+			for (size_t idx : { nanIdx, infIdx })
+			{
+				Assert::AreEqual(0.0f, field[idx].vx);
+				Assert::AreEqual(0.0f, field[idx].vy);
+				Assert::AreEqual(0, static_cast<int>(field[idx].confidence));
+				Assert::AreEqual(static_cast<int>(kKept | kInvalid), static_cast<int>(field[idx].flags));
+				Assert::AreEqual(static_cast<int>(kKept | kInvalid), static_cast<int>(Unpack(Pack(field[idx])).flags));
+			}
+
+			// Valid neighbours (1, 1) and (2, 2) stay kKept (non-finite P3 neighbour skipped, non-finite camera seed skipped).
+			for (size_t idx : { validIdx, camNanIdx })
+			{
+				Assert::AreEqual(4.0f, field[idx].vx);
+				Assert::AreEqual(2.0f, field[idx].vy);
+				Assert::AreEqual(255, static_cast<int>(field[idx].confidence));
+				Assert::AreEqual(static_cast<int>(kKept), static_cast<int>(field[idx].flags));
+			}
+
+			// Protected AB1#2 Offset(): valid neighbour pixels bordering the NaN / +Inf blocks must NOT pull (0, 0).
+			float ox = 9.0f, oy = 9.0f;
+			Offset(field.data(), s.gw, s.gh, p.blockSource, 15.5f, 12.0f, ox, oy);
+			Assert::AreEqual(0.0f, ox, 0.0f, L"valid neighbour right border must not blend NaN block's (0, 0)");
+			Assert::AreEqual(0.0f, oy, 0.0f, L"valid neighbour right border y must stay zero");
+			Offset(field.data(), s.gw, s.gh, p.blockSource, 12.0f, 15.5f, ox, oy);
+			Assert::AreEqual(0.0f, ox, 0.0f, L"valid neighbour bottom border must not blend +Inf block's (0, 0)");
+			Assert::AreEqual(0.0f, oy, 0.0f, L"valid neighbour bottom border y must stay zero");
+			Offset(field.data(), s.gw, s.gh, p.blockSource, 15.5f, 15.5f, ox, oy);
+			Assert::AreEqual(0.0f, ox, 0.0f, L"valid neighbour corner bordering both invalid blocks must stay zero");
+			Assert::AreEqual(0.0f, oy, 0.0f, L"valid neighbour corner y must stay zero");
+
+			// Invalid blocks themselves return (0, 0) from Offset().
+			Offset(field.data(), s.gw, s.gh, p.blockSource, 16.5f, 12.0f, ox, oy);
+			Assert::AreEqual(0.0f, ox, 0.0f, L"invalid NaN block itself must return zero offset");
+			Assert::AreEqual(0.0f, oy, 0.0f, L"invalid NaN block y must return zero offset");
+			Offset(field.data(), s.gw, s.gh, p.blockSource, 12.0f, 16.5f, ox, oy);
+			Assert::AreEqual(0.0f, ox, 0.0f, L"invalid +Inf block itself must return zero offset");
+			Assert::AreEqual(0.0f, oy, 0.0f, L"invalid +Inf block y must return zero offset");
+
+			// Rule 3 same-input negative control ("Prove the Hazard Is Real"):
+			// Strip kInvalid back to the pre-AB1#2 flag (kKept only) on the exact same RefineField output.
+			std::vector<Block> preFix = field;
+			preFix[nanIdx].flags = static_cast<uint8_t>(preFix[nanIdx].flags & ~kInvalid);
+			preFix[infIdx].flags = static_cast<uint8_t>(preFix[infIdx].flags & ~kInvalid);
+			Assert::AreEqual(static_cast<int>(kKept), static_cast<int>(preFix[nanIdx].flags));
+			Assert::AreEqual(static_cast<int>(kKept), static_cast<int>(preFix[infIdx].flags));
+
+			Offset(preFix.data(), s.gw, s.gh, p.blockSource, 15.5f, 12.0f, ox, oy);
+			Assert::IsTrue(std::fabs(ox) > 0.5f && ox < 0.0f, L"negative control: without kInvalid, NaN block's (0, 0) pulls valid pan toward zero");
+			Assert::IsTrue(std::fabs(oy) > 0.5f && oy < 0.0f, L"negative control: without kInvalid, NaN block's (0, 0) pulls valid y pan toward zero");
+			Offset(preFix.data(), s.gw, s.gh, p.blockSource, 12.0f, 15.5f, ox, oy);
+			Assert::IsTrue(std::fabs(ox) > 0.5f && ox < 0.0f, L"negative control: without kInvalid, +Inf block's (0, 0) pulls valid pan toward zero");
+			Assert::IsTrue(std::fabs(oy) > 0.5f && oy < 0.0f, L"negative control: without kInvalid, +Inf block's (0, 0) pulls valid y pan toward zero");
+			Offset(preFix.data(), s.gw, s.gh, p.blockSource, 16.5f, 12.0f, ox, oy);
+			Assert::IsTrue(std::fabs(ox) > 0.5f, L"negative control: without kInvalid, invalid block itself gets smeared by valid neighbour");
 		}
 
 		TEST_METHOD(PlaceholderProducerPublishesAbsentAndTheFallbackIsVisible)

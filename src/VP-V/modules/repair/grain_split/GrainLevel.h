@@ -210,18 +210,20 @@ namespace GrainLevel
 	}
 
 	// The production warp (R14-95): the reference plane resampled at each pixel's landing from the ECV plane (VpComposed::Plane::Warp, the ONE shared
-	// vector sampler) with the ONE shared bicubic. valid[i] = 1 where the chain is alive, the landing is in the frame and the 16-tap footprint fits.
-	// WarpBicubic above (a private BlockField) stays only as the CPU test stand-in until the consumer reads ECV planes.
+	// vector sampler) with the ONE shared bicubic. SampleLanded (BilinearTap / Plane::At / Plane::Warp) and SampleBicubic share the ONE pixel-index
+	// coordinate convention where integer pixel (x, y) is at (double(x), double(y)). valid[i] = 1 where the chain is alive, the landing is in the frame
+	// and the 16-tap footprint fits. WarpBicubic above (a private BlockField) stays only as the CPU test stand-in until the consumer reads ECV planes.
 	inline Warped WarpFromComposed(const Plane& ref, const VpComposed::Plane& ecv, int w, int h)
 	{
 		Warped o;
+		if (w <= 0 || h <= 0) return o;
 		o.v = Plane(w, h, 0.0);
 		o.valid.assign(static_cast<size_t>(w) * h, 0);
 		for (int y = 0; y < h; ++y)
 			for (int x = 0; x < w; ++x)
 			{
 				double s = 0.0;
-				if (!ecv.SampleLanded(ref, x, y, s)) continue;
+				if (!ecv.SampleLanded(ref, static_cast<double>(x), static_cast<double>(y), s)) continue;
 				o.v.at(x, y) = s;
 				o.valid[static_cast<size_t>(y) * w + x] = 1;
 			}

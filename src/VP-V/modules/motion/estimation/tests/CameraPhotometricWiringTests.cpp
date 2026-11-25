@@ -87,8 +87,6 @@ namespace VideoProcessorTest
 			b.resize(n);
 			return b;
 		}
-
-		bool Attempted(PhotometricOutcome o) { return o == PhotometricOutcome::Refined || o == PhotometricOutcome::FellBack; }
 	}
 
 	TEST_CLASS(CameraPhotometricWiringTests)
@@ -119,22 +117,45 @@ namespace VideoProcessorTest
 				FitOnce(f, &photo);
 				Assert::IsTrue(photo.outcome == PhotometricOutcome::SkippedResolution, L"quarter form at 1080: skipped (resolution)");
 			}
-			// (c) s 4 at 2160 rows and (d) s 2 at 1080 rows: attempted.
+			// (c) s 4 at 2160 rows and (d) s 2 at 1080 rows: vectors biased by 0.6 px (strictly inside R3's
+			// 3 * 0.25 = 0.75 px PhotometricVerdict agreement gate) must actively refine back to the true luma pan
+			// while the same-input vector-only negative control remains stuck at the biased pan.
+			const double bias = 0.6;
 			{
-				const Field f = PanField(uhd, tx, ty);
+				const Field f = PanField(uhd, tx + bias, ty);
+				const CameraMotion vecOnly = FitOnce(f, nullptr);
+				Assert::IsTrue(vecOnly.valid && std::fabs(vecOnly.params.h[2] - tx) > 0.4,
+					L"same-input negative control (4K): vector-only fit stays stuck on biased pan");
 				const LumaPair lp(uhd, 4.0, tx, ty);
 				PhotometricInput photo;
 				photo.luma = lp.View();
-				FitOnce(f, &photo);
-				Assert::IsTrue(Attempted(photo.outcome), (L"quarter form at 2160 is attempted, outcome " + std::wstring(1, L'0' + int(photo.outcome))).c_str());
+				const CameraMotion r = FitOnce(f, &photo);
+				Assert::IsTrue(photo.outcome == PhotometricOutcome::Refined,
+					(L"quarter form at 2160 must refine biased vectors, outcome " + std::wstring(1, L'0' + int(photo.outcome))).c_str());
+				Assert::IsTrue(photo.result.status == RefineStatus::Refined,
+					L"quarter form at 2160 must report RefineStatus::Refined");
+				Assert::IsTrue(r.valid && (r.verdictFlags & kVerdictPhotometricDisagreement) == 0,
+					L"quarter form at 2160 agreeing refine must not flag photometric disagreement");
+				Assert::IsTrue(std::fabs(r.params.h[2] - tx) < 0.05 && std::fabs(r.params.h[5] - ty) < 0.05,
+					L"quarter form at 2160 recovers true luma pan within 0.05 px");
 			}
 			{
-				const Field f = PanField(hd, tx, ty);
+				const Field f = PanField(hd, tx + bias, ty);
+				const CameraMotion vecOnly = FitOnce(f, nullptr);
+				Assert::IsTrue(vecOnly.valid && std::fabs(vecOnly.params.h[2] - tx) > 0.4,
+					L"same-input negative control (1080): vector-only fit stays stuck on biased pan");
 				const LumaPair lp(hd, 2.0, tx, ty);
 				PhotometricInput photo;
 				photo.luma = lp.View();
-				FitOnce(f, &photo);
-				Assert::IsTrue(Attempted(photo.outcome), (L"half form at 1080 is attempted, outcome " + std::wstring(1, L'0' + int(photo.outcome))).c_str());
+				const CameraMotion r = FitOnce(f, &photo);
+				Assert::IsTrue(photo.outcome == PhotometricOutcome::Refined,
+					(L"half form at 1080 must refine biased vectors, outcome " + std::wstring(1, L'0' + int(photo.outcome))).c_str());
+				Assert::IsTrue(photo.result.status == RefineStatus::Refined,
+					L"half form at 1080 must report RefineStatus::Refined");
+				Assert::IsTrue(r.valid && (r.verdictFlags & kVerdictPhotometricDisagreement) == 0,
+					L"half form at 1080 agreeing refine must not flag photometric disagreement");
+				Assert::IsTrue(std::fabs(r.params.h[2] - tx) < 0.05 && std::fabs(r.params.h[5] - ty) < 0.05,
+					L"half form at 1080 recovers true luma pan within 0.05 px");
 			}
 		}
 
@@ -163,20 +184,27 @@ namespace VideoProcessorTest
 
 		TEST_METHOD(AFallBackKeepsTheVectorModelAndTheRecord)
 		{
-			// The luma pair moves the OTHER way (a pan the vectors do not show): the verification refuses it and the vector model stays.
+			// The luma pair moves the OTHER way (a pan the vectors do not show): the verification refuses the warp,
+			// keeps the vector model bit-for-bit, and visibly demotes the record via kVerdictPhotometricDisagreement (CE-WATER-C3).
 			const Frame hd{ 1920, 1080 };
 			const double tx = 6.0, ty = -2.0;
 			const Field f = PanField(hd, tx, ty);
 			const CameraMotion vectorOnly = FitOnce(f, nullptr);
+			Assert::IsTrue(vectorOnly.valid && ReasonUsable(vectorOnly.reason) && vectorOnly.confidence >= 0.5,
+				L"same-input negative control: vector-only fit is usable without photometric check");
 			const LumaPair lp(hd, 2.0, -tx, -ty, 33);
 			PhotometricInput photo;
 			photo.luma = lp.View();
 			const CameraMotion r = FitOnce(f, &photo);
 			Assert::IsTrue(photo.outcome == PhotometricOutcome::FellBack, (L"the refine fell back, outcome " + std::wstring(1, L'0' + int(photo.outcome))).c_str());
 			Assert::IsTrue(photo.result.status != RefineStatus::Refined, L"its own status says why (not refined)");
+			Assert::IsTrue(vectorOnly.params.type == r.params.type, L"the vector model type is kept");
 			for (int k = 0; k < 9; ++k)
 				Assert::AreEqual(vectorOnly.params.h[k], r.params.h[k], L"the vector model is kept, bit for bit");
-			Assert::IsTrue(Pod(vectorOnly) == Pod(r), L"and so is the whole record");
+			Assert::IsTrue(r.reason == Reason::Ambiguous, L"opposite-direction luma disagreement demotes reason to Ambiguous");
+			Assert::IsTrue((r.verdictFlags & kVerdictPhotometricDisagreement) != 0, L"kVerdictPhotometricDisagreement is visibly set");
+			Assert::IsFalse(ReasonUsable(r.reason), L"demoted record is not usable");
+			Assert::IsTrue(r.confidence < 0.5, L"demoted confidence drops below 0.5");
 		}
 
 		TEST_METHOD(WithoutAPhotometricInputOrWithASkipTheRecordIsByteIdentical)
@@ -196,19 +224,51 @@ namespace VideoProcessorTest
 
 		TEST_METHOD(TheVerdictStubReturnsTheRefinedResultUnchanged)
 		{
+			// 1. Agreeing sub-3-sigma refine (correctionPx = 0.3 <= 3 * 0.25 = 0.75): passes through unchanged.
+			const Params vecModel = R3Scenes::Translation(1.5, -0.5);
 			RefineResult in;
 			in.status = RefineStatus::Refined;
 			in.model = R3Scenes::Translation(1.25, -0.5);
 			in.correctionPx = 0.3;
 			in.residualBefore = 4.0;
 			in.residualAfter = 2.0;
-			const RefineResult out = PhotometricVerdict(R3Scenes::Translation(1.5, -0.5), in, 0.25);
+			bool disagreed = true;
+			const RefineResult out = PhotometricVerdict(vecModel, in, 0.25, &disagreed);
+			Assert::IsFalse(disagreed, L"agreeing refine does not flag disagreement");
 			Assert::IsTrue(out.status == in.status);
 			for (int k = 0; k < 9; ++k)
 				Assert::AreEqual(in.model.h[k], out.model.h[k]);
 			Assert::AreEqual(in.correctionPx, out.correctionPx);
 			Assert::AreEqual(in.residualBefore, out.residualBefore);
 			Assert::AreEqual(in.residualAfter, out.residualAfter);
+
+			// 2. Live PhotometricVerdict (CE-WATER-C3): > 3-sigma geometric disagreement refuses the warp and restores vecModel.
+			RefineResult farIn = in;
+			farIn.model = R3Scenes::Translation(3.0, -0.5);
+			farIn.correctionPx = 1.5;   // > 3 * 0.25 = 0.75 px
+			bool farDisagreed = false;
+			const RefineResult farOut = PhotometricVerdict(vecModel, farIn, 0.25, &farDisagreed);
+			Assert::IsTrue(farDisagreed, L"> 3-sigma geometric correction flags disagreement");
+			Assert::IsTrue(farOut.status == RefineStatus::FellBackTooFar, L"discordant warp demoted to FellBackTooFar");
+			for (int k = 0; k < 9; ++k)
+				Assert::AreEqual(vecModel.h[k], farOut.model.h[k], L"vector model restored bit-for-bit on geometric disagreement");
+
+			// 3. Brightness-constancy disagreement on FellBackNoImprovement above gradient floor vs quantization-floor negative control.
+			RefineResult brightFail;
+			brightFail.status = RefineStatus::FellBackNoImprovement;
+			brightFail.model = vecModel;
+			brightFail.residualBefore = 12.0;
+			brightFail.residualAfter = 14.0;   // > kPhotometricBrightnessFloorCodes2 (8.0)
+			bool brightDisagreed = false;
+			(void)PhotometricVerdict(vecModel, brightFail, 0.25, &brightDisagreed);
+			Assert::IsTrue(brightDisagreed, L"brightness-constancy failure flags disagreement");
+
+			RefineResult quantNoise = brightFail;
+			quantNoise.residualBefore = 0.2;
+			quantNoise.residualAfter = 0.25;   // <= kPhotometricQuantFloorCodes2 (1.125)
+			bool quantDisagreed = true;
+			(void)PhotometricVerdict(vecModel, quantNoise, 0.25, &quantDisagreed);
+			Assert::IsFalse(quantDisagreed, L"quantization-floor rounding wobble must not false-trigger disagreement");
 		}
 
 		TEST_METHOD(EachOutcomeHasItsCounterAndTheLineAndDecisionsShowThem)
@@ -281,36 +341,132 @@ namespace VideoProcessorTest
 
 		TEST_METHOD(TheProducerPassesTheLumaPairOnlyAtItsExactSize)
 		{
-			// The 4K pan job of the link tests (240 x 135 blocks, 2160 rows): a quarter-form luma pair of 960 x 540 is attempted; the same
-			// planes with a declared size they do not have are not used (counted as no luma).
+			// The 4K pan job of the link tests (240 x 135 blocks, 2160 rows): vectors are biased by +0.6 px (10.6 vs true
+			// luma pan 10.0, strictly inside R3's 3 * 0.25 = 0.75 px PhotometricVerdict agreement gate). A quarter-form luma
+			// pair of exact size 960 x 540 must actively refine (photoRefined == 1, photoFellBack == 0, h[2] ~= 10.0); the
+			// same-input vector-only control and mismatched-size / zero-step planes skip luma and stay stuck at ~10.6.
 			const Frame uhd{ 3840, 2160 };
-			const LumaPair lp(uhd, 4.0, 10.0, 0.0);
+			const double trueTx = 10.0, bias = 0.6;
+			const LumaPair lp(uhd, 4.0, trueTx, 0.0);
 			auto from = std::make_shared<const std::vector<uint8_t>>(lp.a), to = std::make_shared<const std::vector<uint8_t>>(lp.b);
-			auto run = [&](int w, int h, double step, CameraLink::FitCounters& counters) {
+			const CameraLink::CameraFitJob baseJob = CameraLinkTest::PanJob(1, trueTx + bias);
+			auto run = [&](bool attachLuma, int w, int h, double step, CameraLink::FitCounters& counters) -> CameraLink::CameraFitResult {
 				CameraLink::CameraFitProducer producer(CameraModel::Config(), &counters);
 				CameraLink::TimingFacts tf;
 				tf.measuredSourceHz = 24.0;
 				producer.SetTimingFacts(tf);
 				producer.NoteTiming();
-				CameraLink::CameraFitJob job = CameraLinkTest::PanJob(1, 10.0);
-				job.lumaFrom = from;
-				job.lumaTo = to;
-				job.lumaW = w;
-				job.lumaH = h;
-				job.lumaStep = step;
-				producer.Fit(job);
+				CameraLink::CameraFitJob job = baseJob;
+				if (attachLuma)
+				{
+					job.lumaFrom = from;
+					job.lumaTo = to;
+					job.lumaW = w;
+					job.lumaH = h;
+					job.lumaStep = step;
+				}
+				return producer.Fit(job);
 			};
+			CameraLink::FitCounters vecOnlyCounters;
+			const CameraLink::CameraFitResult vecOnlyRes = run(false, 0, 0, 0.0, vecOnlyCounters);
+			Assert::AreEqual(uint64_t(1), vecOnlyCounters.photoSkippedNoLuma.load(), L"no luma attached: counted as no luma");
+			Assert::AreEqual(uint64_t(0), vecOnlyCounters.photoRefined.load());
+			Assert::AreEqual(uint64_t(0), vecOnlyCounters.photoFellBack.load());
+			Assert::IsTrue(vecOnlyRes.record != nullptr && vecOnlyRes.record->valid
+				&& std::fabs(vecOnlyRes.record->params.h[2] - trueTx) > 0.4,
+				L"same-input negative control: producer without luma stays stuck at biased pan ~10.6");
+
 			CameraLink::FitCounters exact;
-			run(lp.w, lp.h, lp.s, exact);
-			Assert::AreEqual(uint64_t(1), exact.photoRefined.load() + exact.photoFellBack.load(), L"the exact-size pair is attempted");
+			const CameraLink::CameraFitResult exactRes = run(true, lp.w, lp.h, lp.s, exact);
+			Assert::AreEqual(uint64_t(1), exact.photoRefined.load(), L"the exact-size biased pair must be refined");
+			Assert::AreEqual(uint64_t(0), exact.photoFellBack.load(), L"the exact-size biased pair must not fall back");
 			Assert::AreEqual(uint64_t(0), exact.photoSkippedNoLuma.load());
+			Assert::IsTrue(exactRes.record != nullptr && exactRes.record->valid
+				&& (exactRes.record->verdictFlags & kVerdictPhotometricDisagreement) == 0,
+				L"exact-size agreeing refine produces a valid record without disagreement");
+			Assert::IsTrue(std::fabs(exactRes.record->params.h[2] - trueTx) < 0.05
+				&& std::fabs(exactRes.record->params.h[5]) < 0.05,
+				L"exact-size producer fit recovers true luma pan 10.0 within 0.05 px");
+
 			CameraLink::FitCounters wrong;
-			run(lp.w - 1, lp.h, lp.s, wrong);
+			const CameraLink::CameraFitResult wrongRes = run(true, lp.w - 1, lp.h, lp.s, wrong);
 			Assert::AreEqual(uint64_t(1), wrong.photoSkippedNoLuma.load(), L"a size that is not the planes' own: no luma");
-			Assert::AreEqual(uint64_t(0), wrong.photoRefined.load() + wrong.photoFellBack.load());
+			Assert::AreEqual(uint64_t(0), wrong.photoRefined.load());
+			Assert::AreEqual(uint64_t(0), wrong.photoFellBack.load());
+			Assert::IsTrue(wrongRes.record != nullptr && wrongRes.record->valid
+				&& std::fabs(wrongRes.record->params.h[2] - trueTx) > 0.4,
+				L"mismatched-size luma is not applied: record stays at biased pan ~10.6");
+
 			CameraLink::FitCounters noStep;
-			run(lp.w, lp.h, 0.0, noStep);
+			const CameraLink::CameraFitResult noStepRes = run(true, lp.w, lp.h, 0.0, noStep);
 			Assert::AreEqual(uint64_t(1), noStep.photoSkippedNoLuma.load(), L"no source step: no luma");
+			Assert::AreEqual(uint64_t(0), noStep.photoRefined.load());
+			Assert::AreEqual(uint64_t(0), noStep.photoFellBack.load());
+			Assert::IsTrue(noStepRes.record != nullptr && noStepRes.record->valid
+				&& std::fabs(noStepRes.record->params.h[2] - trueTx) > 0.4,
+				L"zero-step luma is not applied: record stays at biased pan ~10.6");
+		}
+
+		TEST_METHOD(BiasedFourKPanRefinesToTrueLumaPanAcrossFitAndProducer)
+		{
+			// CT-M5 end-to-end proof: vectors biased by 0.6 px (tx = 10.6 vs true luma pan 10.0, strictly inside R3's
+			// 3 * 0.25 = 0.75 px PhotometricVerdict agreement gate) actively refine to 10.0 (< 0.05 px) on both
+			// Fitter::Fit and CameraFitProducer::Fit, while the exact same biased field without luma stays stuck at ~10.6.
+			const Frame uhd{ 3840, 2160 };
+			const double trueTx = 10.0, trueTy = 0.0, bias = 0.6;
+			const Field biasedField = PanField(uhd, trueTx + bias, trueTy);
+			const LumaPair lp(uhd, 4.0, trueTx, trueTy);
+
+			// Same-input negative control via Fitter::Fit (no photometric input).
+			const CameraMotion vecOnly = FitOnce(biasedField, nullptr);
+			Assert::IsTrue(vecOnly.valid, L"negative control: vector-only fit is valid");
+			Assert::IsTrue(std::fabs(vecOnly.params.h[2] - trueTx) > 0.4,
+				L"same-input negative control: FitOnce(biasedField, nullptr) stays stuck at biased ~10.6");
+
+			// Direct Fitter::Fit with quarter-form 4K luma pair.
+			PhotometricInput photo;
+			photo.luma = lp.View();
+			const CameraMotion r = FitOnce(biasedField, &photo);
+			Assert::IsTrue(photo.outcome == PhotometricOutcome::Refined, L"biased 4K pan outcome must be Refined");
+			Assert::IsTrue(photo.result.status == RefineStatus::Refined, L"biased 4K pan status must be RefineStatus::Refined");
+			Assert::IsTrue(photo.result.residualAfter < photo.result.residualBefore,
+				L"photometric refinement strictly lowers the Huber luma residual");
+			Assert::IsTrue(r.valid && (r.verdictFlags & kVerdictPhotometricDisagreement) == 0,
+				L"agreeing 0.6 px refine does not trigger photometric disagreement");
+			Assert::IsTrue(std::fabs(r.params.h[2] - trueTx) < 0.05 && std::fabs(r.params.h[5] - trueTy) < 0.05,
+				L"refined Fitter::Fit recovers true luma pan 10.0 within 0.05 px");
+			Assert::IsTrue(std::fabs(r.params.h[2] - photo.result.model.h[2]) < 1e-9,
+				L"record carries exact refined model");
+			Assert::IsTrue(r.signals.precision < vecOnly.signals.precision,
+				L"signals are rebuilt on the refined model against the biased vectors");
+
+			// Same biased field through CameraFitProducer counters + record output.
+			CameraLink::FitCounters counters;
+			CameraLink::CameraFitProducer producer(CameraModel::Config(), &counters);
+			CameraLink::TimingFacts tf;
+			tf.measuredSourceHz = 24.0;
+			producer.SetTimingFacts(tf);
+			producer.NoteTiming();
+			CameraLink::CameraFitJob job;
+			job.seq = 5;
+			job.field = CameraLinkTest::CopyOf(biasedField, 5);
+			job.facts.pairSeconds = 1.0 / 24.0;
+			job.stamp = job.field->stamp;
+			job.lumaFrom = std::make_shared<const std::vector<uint8_t>>(lp.a);
+			job.lumaTo = std::make_shared<const std::vector<uint8_t>>(lp.b);
+			job.lumaW = lp.w;
+			job.lumaH = lp.h;
+			job.lumaStep = lp.s;
+			const CameraLink::CameraFitResult prodRes = producer.Fit(job);
+			Assert::AreEqual(uint64_t(1), counters.photoRefined.load(), L"producer counts photoRefined == 1");
+			Assert::AreEqual(uint64_t(0), counters.photoFellBack.load(), L"producer counts photoFellBack == 0");
+			Assert::AreEqual(uint64_t(0), counters.photoSkippedNoLuma.load());
+			Assert::AreEqual(uint64_t(0), counters.photoSkippedResolution.load());
+			Assert::AreEqual(uint64_t(0), counters.photoSkippedOther.load());
+			Assert::IsTrue(prodRes.record != nullptr && prodRes.record->valid
+				&& std::fabs(prodRes.record->params.h[2] - trueTx) < 0.05
+				&& std::fabs(prodRes.record->params.h[5] - trueTy) < 0.05,
+				L"producer fit recovers true luma pan 10.0 within 0.05 px");
 		}
 	};
 }

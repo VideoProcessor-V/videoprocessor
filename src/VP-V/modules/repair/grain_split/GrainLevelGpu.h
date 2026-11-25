@@ -60,6 +60,7 @@
 #include <libplacebo/dispatch.h>
 
 #include <atomic>
+#include <climits>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -89,6 +90,17 @@ namespace GrainSplit
 			VpSkeleton::AppendGrainLevelProduct(decls);
 			return decls.size() > size_t(VpSkeleton::kP10gGrainLevel) && decls[VpSkeleton::kP10gGrainLevel].id == VpSkeleton::kP10gGrainLevel
 				? VpSkeleton::BytesOf(decls[VpSkeleton::kP10gGrainLevel].size, luma) : uint64_t(0);
+		}
+
+		// Ahead-planner reserve for the nested P10 variant owner (S2-M4), DERIVED from VariantOwner::ReserveFor at scale 1.0
+		// (ContextShapesOf, default 10-bit variant key: the exact formula VariantOwner::MakeOwnerFill uses). 0 = no valid size.
+		inline uint64_t SplitReserveBytes(VpSkeleton::Dims luma)
+		{
+			constexpr uint32_t kMaxDim = static_cast<uint32_t>(INT_MAX);   // domain bound of VariantOwner::MakeOwnerFill(int, int)
+			if (luma.width == 0 || luma.height == 0 || luma.width > kMaxDim || luma.height > kMaxDim)
+				return 0;
+			return Gpu::VariantOwner::ReserveFor(
+				Gpu::VariantFor(static_cast<int>(luma.width), static_cast<int>(luma.height), 1.0, 10));
 		}
 
 		// The signal's colour depth from the frame's bit encoding (the P10 variant key's code-unit axis): color_depth, else
@@ -287,10 +299,12 @@ if (gv_li == 0u)
 			return std::string(kFallbackId) + ": grain level runs the single-frame law (temporal grain passes not built yet)";
 		}
 
-		// Registers, through the skeleton found by the hub (tests pass their own demand): the P10 variant owner's fill (once; its
-		// reserve is per variant) and the P10g fill with a reserve derived from the LARGEST source luma size over the live hosts,
-		// observed at Entrance; the P10g fill is re-registered only when that size changes (as EdgeMapModule). A host is forgotten at
-		// GpuReleased / Shutdown. Cost per frame: one short lock and a lookup in at most sixteen entries.
+		// Registers, through the skeleton found by the hub (tests pass their own demand): the P10 variant owner's fill (registered
+		// initially via RegisterThrough and atomically replaced via ReplaceOwnerFill when the largest observed source luma reserve
+		// grows or a new session re-attaches after full detach; S2-M4) and the P10g fill with a reserve derived from the LARGEST
+		// source luma size over the live hosts, observed at Entrance; the P10g fill is re-registered only when that size changes
+		// (as EdgeMapModule). A host is forgotten at GpuReleased / Shutdown. Cost per frame: one short lock and a lookup in at most
+		// sixteen entries.
 		class GrainLevelModule : public Hub::ISkeletonModule
 		{
 		public:
@@ -352,6 +366,7 @@ if (gv_li == 0u)
 						{
 							h.luma = luma;
 							h.bytes = ReserveBytes(luma);
+							h.splitBytes = SplitReserveBytes(luma);
 						}
 						found = true;
 						break;
@@ -363,6 +378,7 @@ if (gv_li == 0u)
 					h.host = host;
 					h.luma = luma;
 					h.bytes = ReserveBytes(luma);
+					h.splitBytes = SplitReserveBytes(luma);
 					hosts_.push_back(h);
 				}
 				return UpdateLocked(demand);
@@ -389,6 +405,11 @@ if (gv_li == 0u)
 				std::lock_guard<std::mutex> g(mutex_);
 				return registered_.load(std::memory_order_acquire) ? reserve_ : uint64_t(0);
 			}
+			uint64_t SplitRegisteredReserveBytes() const
+			{
+				std::lock_guard<std::mutex> g(mutex_);
+				return splitRegistered_.load(std::memory_order_acquire) ? splitReserve_ : uint64_t(0);
+			}
 			const Counters& Stats() const { return *counters_; }
 		private:
 			static constexpr size_t kMaxHosts = 16;   // the skeleton's renderer table (HostSlots)
@@ -396,47 +417,110 @@ if (gv_li == 0u)
 			{
 				const void* host = nullptr;
 				VpSkeleton::Dims luma;
-				uint64_t bytes = 0;   // ReserveBytes(luma)
+				uint64_t bytes = 0;        // ReserveBytes(luma)
+				uint64_t splitBytes = 0;   // SplitReserveBytes(luma)
 			};
 			bool UpdateLocked(Skeleton::IExternalDemand* demand)
 			{
 				uint64_t want = 0;
-				VpSkeleton::Dims wantLuma{};
+				uint64_t wantSplit = 0;
+				VpSkeleton::Dims wantSplitLuma{};
 				for (const HostSize& h : hosts_)
+				{
 					if (h.bytes > want)
-					{
 						want = h.bytes;
-						wantLuma = h.luma;
+					if (h.splitBytes > wantSplit)
+					{
+						wantSplit = h.splitBytes;
+						wantSplitLuma = h.luma;
 					}
+				}
 				const bool ok = registered_.load(std::memory_order_acquire);
+				const bool splitOk = splitRegistered_.load(std::memory_order_acquire);
 				const bool levelDone = (ok && want == reserve_) || want == tried_;
 				if (want == 0)
 				{
-					// No live size: nothing is owed (the split's state stays: it is registered once). tried_ resets so a refused size
-					// is retried, and shown again, when it returns (review-cb-p10g-r2 MUST-1); a registered fill stays done through
-					// ok && want == reserve_.
+					// No live size: nothing is owed. Reset tried_ and splitTriedReserve_ so a refused size is retried (and shown
+					// again) when it returns (review-cb-p10g-r2 MUST-1); an active registration stays short-circuited on exact
+					// match via ok && want == reserve_ (and splitReserve_ for P10), while splitDetached_ lets a new session at a
+					// different resolution re-baseline P10's ahead-planner reserve cleanly (S2-M4).
 					levelProblem_.clear();
 					tried_ = 0;
+					splitTriedReserve_ = 0;
+					if (splitOk)
+					{
+						splitProblem_.clear();
+						splitDetached_ = true;
+					}
+					return ok;
 				}
-				if (want == 0 || (levelDone && splitTried_))
+				// P10 variant owner ahead-planner reserve tracking (S2-M4):
+				//   - initial registration (!splitTried_): atomic RegisterThrough (preserves AlreadyRegistered for 15b A1);
+				//   - when owned by us (splitOk): atomic ReplaceOwnerFill whenever wantSplit grows above splitReserve_
+				//     (or differs from splitReserve_ on the first size after a full detach), skipping repeated retries of an
+				//     already-refused reserve until the requested size changes or detaches.
+				if (splitOk && wantSplit > 0 && !splitDetached_ && wantSplit <= splitReserve_)
+				{
+					splitProblem_.clear();
+					splitTriedReserve_ = splitReserve_;
+				}
+				else if (splitOk && wantSplit > 0 && splitDetached_ && wantSplit == splitReserve_)
+				{
+					splitProblem_.clear();
+					splitTriedReserve_ = splitReserve_;
+					splitDetached_ = false;
+				}
+				const bool splitNeedInit = !splitTried_ && wantSplit > 0;
+				const bool splitNeedReplace = splitOk && wantSplit > 0
+					&& (wantSplit > splitReserve_ || (splitDetached_ && wantSplit != splitReserve_))
+					&& wantSplit != splitTriedReserve_;
+				const bool splitNeedWork = splitNeedInit || splitNeedReplace;
+				if (levelDone && !splitNeedWork)
 					return ok;
 				if (demand == nullptr)
 					demand = static_cast<Skeleton::IExternalDemand*>(Hub::ExtensionHub::Instance().Query(Skeleton::kExternalDemandQueryId));
 				if (demand == nullptr)
 				{
 					// No skeleton yet: retried at the next Entrance, shown meanwhile (a size has been seen).
-					levelProblem_ = "no skeleton to register with (the skeleton module is not registered yet); retried at the next frame";
+					if (!levelDone)
+						levelProblem_ = "no skeleton to register with (the skeleton module is not registered yet); retried at the next frame";
+					if (splitNeedWork && levelDone)
+						splitProblem_ = "no skeleton to register with (the skeleton module is not registered yet); retried at the next frame";
 					return ok;
 				}
-				if (!splitTried_)
+				if (splitNeedInit)
 				{
-					splitTried_ = true;   // the P10 variant owner: registered once (its reserve is per variant); a refusal is not retried
+					splitTried_ = true;   // initial P10 owner registration: an initial refusal / AlreadyRegistered is not retried
 					using R = VpSkeleton::SkeletonMemo::Registration;
-					const R rs = splitOwner_.RegisterThrough(*demand, static_cast<int>(wantLuma.width), static_cast<int>(wantLuma.height));
-					splitRegistered_.store(rs == R::Registered, std::memory_order_release);
+					const R rs = splitOwner_.RegisterThrough(*demand, static_cast<int>(wantSplitLuma.width), static_cast<int>(wantSplitLuma.height));
+					const bool reg = rs == R::Registered;
+					splitReserve_ = reg ? wantSplit : uint64_t(0);
+					splitTriedReserve_ = reg ? wantSplit : uint64_t(0);
+					splitDetached_ = false;
+					splitRegistered_.store(reg, std::memory_order_release);
 					splitElsewhere_.store(rs == R::AlreadyRegistered, std::memory_order_release);   // benign: see MERGE NOTE
-					splitProblem_ = rs == R::Registered || rs == R::AlreadyRegistered ? std::string()
+					splitProblem_ = reg || rs == R::AlreadyRegistered ? std::string()
 						: "P10 variant owner " + RegistrationText(rs) + " (P10 variant Acquires stay NoOwnerFill; not retried)";
+				}
+				else if (splitNeedReplace)
+				{
+					// S2-M4: atomic ReplaceOwnerFill keeps the ahead-planner reserve tracking the largest observed luma
+					// with zero unregistered gap. A failed replace preserves the active registration and reports visibly.
+					splitTriedReserve_ = wantSplit;
+					using R = VpSkeleton::SkeletonMemo::Registration;
+					const R rs = demand->ReplaceOwnerFill(VpSkeleton::kP10GrainSplit, VpSkeleton::AcquireForm::Gpu, kOwnerUnit,
+						splitOwner_.MakeOwnerFill(static_cast<int>(wantSplitLuma.width), static_cast<int>(wantSplitLuma.height)));
+					if (rs == R::Replaced || rs == R::Registered)
+					{
+						splitReserve_ = wantSplit;
+						splitDetached_ = false;
+						splitProblem_.clear();
+					}
+					else
+					{
+						splitProblem_ = "P10 variant owner " + RegistrationText(rs)
+							+ " (reserve " + std::to_string(wantSplit) + " B; retried at the next size change)";
+					}
 				}
 				if (levelDone)
 					return ok;
@@ -458,7 +542,10 @@ if (gv_li == 0u)
 			std::shared_ptr<Counters> counters_;
 			uint64_t reserve_ = 0;
 			uint64_t tried_ = 0;
+			uint64_t splitReserve_ = 0;        // ahead-planner reserveBytes of our registered kP10GrainSplit fill
+			uint64_t splitTriedReserve_ = 0;   // last kP10GrainSplit reserve attempted (avoids per-frame retry on refused replace)
 			bool splitTried_ = false;
+			bool splitDetached_ = false;       // set when all hosts detach (want == 0) so the next session can re-baseline splitReserve_
 			std::string levelProblem_;   // the P10g registration's missing state in words (empty = none); guarded by mutex_
 			std::string splitProblem_;   // the P10 owner's refusal in words (empty = registered or served elsewhere); guarded by mutex_
 			std::atomic<bool> registered_{ false };

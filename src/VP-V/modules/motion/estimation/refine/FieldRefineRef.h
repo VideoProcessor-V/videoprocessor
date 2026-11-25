@@ -6,7 +6,7 @@
 //
 // Law (per 8x8 SOURCE-pixel block = 4x4 pixels of the half luma):
 //  * Seeds: the P3 vector (source px, over the pair A -> B) and, on blocks the P8 labels call camera, the camera-model
-//    vector. A non-finite / invalid P3 vector gives no search (zero vector, confidence 0, flag kept).
+//    vector. A non-finite / invalid P3 vector gives no search (zero vector, confidence 0, flag kept | invalid).
 //  * Search: DMVR-style, +-kRange (2) integer half-luma px around the seed, window = block + `margin` px on every
 //    side (default 2 -> 8x8 half px), cost = SAD of A(window, integer indices, edge clamp) against B bilinearly sampled
 //    at the same position + seed + offset (float arithmetic, fixed scan order dy outer / dx inner, strict < so the first
@@ -16,7 +16,8 @@
 //  * Confidence u8 = 255 * clamp(1 - best / mean(25 costs)); 0 when the mean is ~0 (flat: no information).
 //  * Flags: kRefined (output differs from P3 by > keepEps), kKept (otherwise, also invalid/occluded blocks),
 //    kBoundary (a finite 4-neighbour P3 vector differs by > boundaryThr source px, or the best sits on the edge of the
-//    search range on either axis: per-pixel checks needed), kOccluded (input occlusion flag: no search).
+//    search range on either axis: per-pixel checks needed), kOccluded (input occlusion flag: no search),
+//    kInvalid (non-finite / invalid P3 seed: no search, excluded from per-pixel offset blending).
 //  * Never starts the matcher: pure function of its inputs. BDOF/PROF-style per-pixel offsets are NEVER stored:
 //    Offset() (and vpu_field_refine_offset in the GLSL) is an on-the-fly accessor for the consumer's own band.
 #pragma once
@@ -34,7 +35,8 @@ namespace VpUnit
 		constexpr int kRange = 2;                 // +-2 half-luma px
 		constexpr int kSide = 2 * kRange + 1;     // 5
 		constexpr int kCandidates = kSide * kSide;
-		constexpr uint8_t kRefined = 1, kKept = 2, kBoundary = 4, kOccluded = 8;
+		// Power-of-two bit flags packed into Block::flags (uint8_t); kInvalid = 1u << 4 = 16.
+		constexpr uint8_t kRefined = 1, kKept = 2, kBoundary = 4, kOccluded = 8, kInvalid = 16;
 
 		struct Params
 		{
@@ -152,7 +154,7 @@ namespace VpUnit
 			const float* seed = in.p3 + i * 2;
 			if (!Finite2(seed))
 			{
-				out.flags = kKept;
+				out.flags = static_cast<uint8_t>(kKept | kInvalid);
 				return out;
 			}
 			if (in.occluded && in.occluded[i])
@@ -303,8 +305,9 @@ namespace VpUnit
 
 		// On-the-fly PROF-style per-pixel offset (source px) at source pixel (px, py): the bilinear blend of the four
 		// nearest block-centre vectors minus the containing block's own vector, so block vector + offset is a smooth
-		// field inside a motion-coherent region. Neighbours flagged boundary / occluded contribute the own vector (no
-		// smearing across a discontinuity); a boundary / occluded own block gets 0. Never stored.
+		// field inside a motion-coherent region. Neighbours flagged boundary / occluded / invalid contribute the own
+		// vector (no smearing across a discontinuity or invalid zero vector); a boundary / occluded / invalid own block
+		// gets 0. Never stored.
 		inline void Offset(const Block* field, int gridW, int gridH, int blockSource, float px, float py, float& ox, float& oy)
 		{
 			ox = oy = 0.0f;
@@ -312,7 +315,7 @@ namespace VpUnit
 			const int cx = std::min(std::max(static_cast<int>(std::floor(px / bs)), 0), gridW - 1);
 			const int cy = std::min(std::max(static_cast<int>(std::floor(py / bs)), 0), gridH - 1);
 			const Block& own = field[static_cast<size_t>(cy) * gridW + cx];
-			if (own.flags & (kBoundary | kOccluded))
+			if (own.flags & (kBoundary | kOccluded | kInvalid))
 				return;
 			const float u = px / bs - 0.5f, v = py / bs - 0.5f;
 			const float fu = std::floor(u), fv = std::floor(v);
@@ -324,7 +327,7 @@ namespace VpUnit
 				const int ii = std::min(std::max(i0 + (k & 1), 0), gridW - 1);
 				const int jj = std::min(std::max(j0 + (k >> 1), 0), gridH - 1);
 				const Block& b = field[static_cast<size_t>(jj) * gridW + ii];
-				const bool use = !(b.flags & (kBoundary | kOccluded));
+				const bool use = !(b.flags & (kBoundary | kOccluded | kInvalid));
 				vx[k] = use ? b.vx : own.vx;
 				vy[k] = use ? b.vy : own.vy;
 			}

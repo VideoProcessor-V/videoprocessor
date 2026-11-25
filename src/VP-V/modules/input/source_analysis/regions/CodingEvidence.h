@@ -70,8 +70,9 @@ namespace CodingEvidence
 	// 3x as many, each window's occupancy as a Hill number of order 4; the median window. 0 when no window can be judged.
 	double EffectiveBitsOf(const std::vector<unsigned long long>& histogram);
 	// Hunt 2 M3: the coding-grid blockiness of one axis's mean absolute step per position (`steps[x]` between x and x + 1). 1 when no
-	// grid stands out; `period` gets the grid's period in pixels (0 = none).
-	double GridBlockiness(const std::vector<double>& steps, double& period);
+	// grid stands out; `period` gets the grid's period in pixels (0 = none). `axisScale` is native codes per 10-bit axis code (1 at
+	// <= 10-bit, 4 at 12-bit; clamped to >= 1) so the quarter-axis-code noise floor matches MeasureTile at all bit depths.
+	double GridBlockiness(const std::vector<double>& steps, double& period, int axisScale = 1);
 	// Hunt 2 M3: an 8x8 block (row-major codes) holds a band edge (two dominant levels a minimum to maximum step apart, split along a line).
 	bool BandEdgeBlock(const int* block, int minimumStep, int maximumStep);
 

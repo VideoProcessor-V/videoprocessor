@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "FieldReadbackRing.h"
 
+#include <VP-V/core/VramUsers.h>
+
 #include <algorithm>
 
 namespace CameraLink
@@ -37,43 +39,142 @@ namespace CameraLink
 
 	FieldReadbackRing::~FieldReadbackRing()
 	{
-		if (!m_gpu)
-			return;
-		if (m_native)
-			m_native->Release();
-		bool any = !m_parked.empty();
-		for (const Entry& e : m_entries)
-			any = any || e.buf;
-		if (any)
-			pl_gpu_finish(m_gpu);   // destructor only: copies may be in flight and the buffers must outlive them
-		for (Entry& e : m_entries)
-			if (e.buf)
-				pl_buf_destroy(m_gpu, &e.buf);
-		for (pl_buf& b : m_parked)
-			pl_buf_destroy(m_gpu, &b);
+		Release();
 	}
 
-	void FieldReadbackRing::Release(Entry& e)
+	void FieldReadbackRing::Release()
+	{
+		if (!m_gpu)
+		{
+			WithdrawVram();
+			return;
+		}
+		bool any = !m_parked.empty() || (m_native && m_native->HasPendingFlush());
+		for (const Entry& e : m_entries)
+			any = any || e.buf || e.state == State::InFlight || e.state == State::Draining;
+		if (any)
+			pl_gpu_finish(m_gpu);   // teardown only: copies (including Draining slots) may be in flight and resources must outlive them
+		if (m_native)
+		{
+			m_retiredFlushCount += m_native->FlushCount();
+			m_native->Release();
+			m_native.reset();
+		}
+		for (Entry& e : m_entries)
+		{
+			if (e.buf)
+			{
+				pl_buf_destroy(m_gpu, &e.buf);
+				e.bufBytes = 0;
+			}
+			ResetEntry(e);
+		}
+		for (ParkedBuf& p : m_parked)
+			if (p.buf)
+				pl_buf_destroy(m_gpu, &p.buf);
+		m_parked.clear();
+		m_gpu = nullptr;
+		WithdrawVram();
+	}
+
+	size_t FieldReadbackRing::DrainingSlots() const
+	{
+		size_t n = 0;
+		for (const Entry& e : m_entries)
+			if (e.state == State::Draining)
+				++n;
+		return n;
+	}
+
+	uint64_t FieldReadbackRing::AllocatedVramBytes() const
+	{
+		uint64_t bytes = m_native ? m_native->AllocatedBytes() : 0;
+		for (const Entry& e : m_entries)
+			if (e.buf)
+				bytes += static_cast<uint64_t>(e.bufBytes);
+		for (const ParkedBuf& p : m_parked)
+			if (p.buf)
+				bytes += static_cast<uint64_t>(p.bytes);
+		return bytes;
+	}
+
+	void FieldReadbackRing::UpdateVramDeclaration()
+	{
+		const uint64_t held = AllocatedVramBytes();
+		if (held == m_declaredVram)
+			return;
+		if (held > 0)
+		{
+			VpSkeleton::VramUsers::Instance().MarkActive(this, VpSkeleton::kUserCameraModel, true);
+			VpSkeleton::VramUsers::Instance().DeclareFixed(this, VpSkeleton::kUserCameraModel, held);
+		}
+		else
+		{
+			VpSkeleton::VramUsers::Instance().Release(this, VpSkeleton::kUserCameraModel);
+		}
+		m_declaredVram = held;
+	}
+
+	void FieldReadbackRing::WithdrawVram()
+	{
+		VpSkeleton::VramUsers::Instance().Release(this, VpSkeleton::kUserCameraModel);
+		m_declaredVram = 0;
+	}
+
+	void FieldReadbackRing::ResetEntry(Entry& e)
 	{
 		e.state = State::Free;
 		e.fwd = nullptr;
 		e.bwd = nullptr;
 		e.mapped = false;
 		e.haveBwd = false;
+		e.native = false;
 		e.seed = false;
 	}
 
 	void FieldReadbackRing::DrainParked()
 	{
+		if (!m_gpu)
+			return;
+		bool freed = false;
 		for (size_t i = 0; i < m_parked.size();)
 		{
-			if (!pl_buf_poll(m_gpu, m_parked[i], 0))
+			if (!pl_buf_poll(m_gpu, m_parked[i].buf, 0))
 			{
-				pl_buf_destroy(m_gpu, &m_parked[i]);
+				pl_buf_destroy(m_gpu, &m_parked[i].buf);
 				m_parked.erase(m_parked.begin() + static_cast<std::ptrdiff_t>(i));
+				freed = true;
 			}
 			else
 				++i;
+		}
+		if (freed)
+			UpdateVramDeclaration();
+	}
+
+	void FieldReadbackRing::DrainDraining()
+	{
+		for (size_t i = 0; i < m_entries.size(); ++i)
+		{
+			Entry& e = m_entries[i];
+			if (e.state != State::Draining)
+				continue;
+			if (!m_native)
+			{
+				ResetEntry(e);
+				++m_drainedCount;
+				++m_stats.drained;
+				continue;
+			}
+			const int idx = static_cast<int>(i);
+			const LedDrive::ReadState st = m_native->Poll(idx);
+			if (st == LedDrive::ReadState::Pending)
+				continue;   // GPU still holds the cleared copy: keep Draining, never reuse yet
+			if (st == LedDrive::ReadState::Ready)
+				m_native->Discard(idx);   // unmap without delivering: cleared copies are never returned as valid readbacks
+			ResetEntry(e);
+			++m_drainedCount;
+			++m_stats.drained;
 		}
 	}
 
@@ -89,13 +190,15 @@ namespace CameraLink
 		if (m_nativeUnavailable)
 			return false;
 		for (const Entry& x : m_entries)
-			if (&x != &e && x.state == State::InFlight && x.native)
-				return false;   // a different geometry or format while copies are in flight: this request uses the buffer path / is dropped
+			if (&x != &e && (x.state == State::InFlight || x.state == State::Draining) && x.native)
+				return false;   // a different geometry or format while copies are in flight or draining: wait until idle
 		if (!m_native)
 			m_native.reset(new NativeCopyReadback());
 		if (!m_native->Create(m_log, m_gpu, static_cast<int>(m_entries.size()), e.gridW, e.gridH, planes, fp16))
 		{
+			m_retiredFlushCount += m_native->FlushCount();
 			m_native.reset();
+			UpdateVramDeclaration();
 			if (!m_nativeEverOk)
 				m_nativeUnavailable = true;   // the very first Create failed: not D3D11 (or no storable format): the pl_buf path for good
 			else
@@ -103,6 +206,7 @@ namespace CameraLink
 			return false;
 		}
 		m_nativeEverOk = true;
+		UpdateVramDeclaration();
 		return true;
 	}
 
@@ -153,10 +257,12 @@ namespace CameraLink
 			}
 			if (!e.buf)
 			{
+				UpdateVramDeclaration();
 				m_lastError = "cannot create a host-readable buffer";
 				return false;
 			}
 			e.bufBytes = need;
+			UpdateVramDeclaration();
 		}
 		pl_tex_transfer_params d{};
 		d.tex = e.fwd;
@@ -176,7 +282,7 @@ namespace CameraLink
 			if (!pl_tex_download(m_gpu, &b))
 			{
 				// The forward copy is already queued: park the buffer so it is destroyed only once idle.
-				m_parked.push_back(e.buf);
+				m_parked.push_back(ParkedBuf(e.buf, e.bufBytes));
 				e.buf = nullptr;
 				e.bufBytes = 0;
 				return false;
@@ -202,7 +308,7 @@ namespace CameraLink
 		e.ticket = ++m_ticket;
 		if (!Start(e))
 		{
-			Release(e);
+			ResetEntry(e);
 			++m_stats.failed;
 			return false;
 		}
@@ -279,6 +385,7 @@ namespace CameraLink
 	size_t FieldReadbackRing::Poll(std::vector<std::shared_ptr<FieldCopy>>& ready)
 	{
 		DrainParked();
+		DrainDraining();
 		m_flying.clear();
 		for (Entry& e : m_entries)
 			if (e.state == State::InFlight && !e.mapped)
@@ -312,7 +419,7 @@ namespace CameraLink
 					// An error HRESULT, not "still drawing": freed and counted as failed (CameraLinkCore turns
 					// it into a readback event), never an entry that stays in flight forever.
 					m_lastError = "native readback copy reported a device error";
-					Release(e);
+					ResetEntry(e);
 					++m_stats.failed;
 					continue;
 				}
@@ -336,7 +443,7 @@ namespace CameraLink
 				float* dst = ensureScratch(need / sizeof(float));
 				if (!pl_buf_read(m_gpu, e.buf, 0, dst, need))
 				{
-					Release(e);
+					ResetEntry(e);
 					++m_stats.failed;
 					continue;
 				}
@@ -348,7 +455,7 @@ namespace CameraLink
 				if (!SeedToSourceGrid(base, base + blocks * 4, e.layout, *c))
 				{
 					m_lastError = "the optical-flow seed's layout does not match its source grid";
-					Release(e);
+					ResetEntry(e);
 					++m_stats.failed;
 					continue;
 				}
@@ -360,7 +467,7 @@ namespace CameraLink
 				if (e.haveBwd)
 					UnpackRgba(base + blocks * 4, blocks, e.scale, c->bwdX, c->bwdY, c->bwdTrust);
 			}
-			Release(e);
+			ResetEntry(e);
 			++m_stats.completed;
 			ready.push_back(std::move(c));
 			++n;
@@ -368,17 +475,43 @@ namespace CameraLink
 		return n;
 	}
 
+	void FieldReadbackRing::OnFrameStart()
+	{
+		DrainParked();
+		DrainDraining();
+		FlushPending();
+	}
+
+	bool FieldReadbackRing::FlushPending()
+	{
+		return m_native && m_native->FlushPending();
+	}
+
 	void FieldReadbackRing::Clear()
 	{
 		for (Entry& e : m_entries)
 		{
+			if (e.state == State::Draining)
+				continue;   // already draining on GPU: never reset to Free until Poll() != Pending
+			if (e.state == State::InFlight && e.native && m_native)
+			{
+				// GEM-135 (AB1#3): native copy still in flight on GPU; enter Draining so slot is never
+				// delivered and never reused or recreated until Poll() != Pending.
+				e.state = State::Draining;
+				e.fwd = nullptr;
+				e.bwd = nullptr;
+				e.mapped = false;
+				e.haveBwd = false;
+				e.seed = false;
+				continue;
+			}
 			if (e.state == State::InFlight && e.buf && !e.native)
 			{
-				m_parked.push_back(e.buf);   // may still be written: destroyed by a later Request/Poll once idle
+				m_parked.push_back(ParkedBuf(e.buf, e.bufBytes));   // may still be written: destroyed by a later Request/Poll once idle
 				e.buf = nullptr;
 				e.bufBytes = 0;
 			}
-			Release(e);
+			ResetEntry(e);
 		}
 	}
 }

@@ -349,5 +349,304 @@ namespace GrainLevelLawTestsNs
 			Require(rows[4].ms4kLo == 2.5 && rows[4].ms4kHi == 3.9, "B 8+4 row = design-grain-chain-cost row 8 band");
 			Log("share of the owner 4.5 ms budget: B 8+4 upper " + std::to_string(GrainLevel::BudgetShare(rows[4], GrainLevel::kOwnerBudget4kMs)));
 		}
+
+		// GS 157 (L#4 trace test, test-only; does not code GS 215): synthetic I-B-B-B GOP grain pulse (20 frames, GOP = 4)
+		// on a flat + textured 10-bit plane with independent per-frame grain seeds across CRF 24 and CRF 32 starvation
+		// regimes, plus same-input uniform-grain baseline negative controls. Logs per-frame N_unit4, NLF_t, N_b, flat
+		// grain-to-clean leak, and the exact I-frame NLF_t / N_unit4 under-cap ratio for offline GS 215 evaluation.
+		TEST_METHOD(Gs157IvsBFrameGrainPulseTracesNUnit4AndNlfT)
+		{
+			constexpr int kFrames = 20;
+			constexpr int kGop = 4;
+			constexpr double kBaseLuma = 448.0;            // centre of 10-bit NLF bin 3 ([384, 512))
+			constexpr double kSigma0 = 5.0;                // nominal 10-bit film grain std dev (variance 25.0 codes^2)
+			constexpr double kSourceHz = 24.0;
+			constexpr double kMaxCodeSq = 1024.0 * 1024.0; // physical 10-bit squared-code upper bound
+			constexpr int kFlatX0 = kB, kFlatX1 = kW - kB;
+			constexpr int kFlatY0 = kB, kFlatY1 = 3 * kB;  // y in [16, 48): 12+ px clear of the ramp at y in (60, 68)
+			constexpr int kMaxBins = 64;
+
+			// Top half (y <= 60): pure flat midtone; smooth cubic ramp on (60, 68); bottom half (y >= 68): translating texture.
+			// Pure horizontal pan (shiftX = 1.0 * t, vx = -1.0, vy = 0.0) keeps the flat/textured split stationary across all 20 frames.
+			auto texMask = [](int y) -> double
+			{
+				if (y <= 60) return 0.0;
+				if (y >= 68) return 1.0;
+				const double u = static_cast<double>(y - 60) / 8.0;
+				return u * u * (3.0 - 2.0 * u);
+			};
+
+			auto makeFlatTexFrame = [&](double shiftX, double sigma, uint32_t seed) -> Plane
+			{
+				Plane p(kW, kH);
+				std::mt19937 rng(seed);
+				std::normal_distribution<double> nd(0.0, 1.0);
+				for (int y = 0; y < kH; ++y)
+				{
+					const double m = texMask(y);
+					for (int x = 0; x < kW; ++x)
+					{
+						const double xs = static_cast<double>(x) - shiftX;
+						const double tex = 20.0 * std::sin(0.30 * xs + 0.20 * static_cast<double>(y))
+							+ 12.0 * std::sin(0.17 * xs - 0.23 * static_cast<double>(y));
+						p.at(x, y) = kBaseLuma + m * tex + (sigma > 0.0 ? sigma * nd(rng) : 0.0);
+					}
+				}
+				return p;
+			};
+
+			struct TraceSummary
+			{
+				double meanI_Nunit4 = 0.0, meanB_Nunit4 = 0.0;
+				double meanI_NlfT = 0.0, meanB_NlfT = 0.0;
+				double meanI_Nb = 0.0, meanB_Nb = 0.0;
+				double meanI_NlfOverNunit4 = 0.0;  // mean over temporal I-frames of per-frame (NLF_t / N_unit4)
+				double ratioI_NlfOverNunit4 = 0.0; // meanI_NlfT / meanI_Nunit4
+				double meanI_FlatLeakV5 = 0.0, meanB_FlatLeakV5 = 0.0;
+				double meanI_FlatLeakU4 = 0.0, meanB_FlatLeakU4 = 0.0;
+				int temporalIFrames = 0, temporalBFrames = 0;
+			};
+
+			auto runRegime = [&](const std::string& tag, double sigmaI, double sigmaB, uint32_t seedBase) -> TraceSummary
+			{
+				GrainLevel::BlockField field;
+				field.Init(kW, kH, kB, -1.0, 0.0);
+				GrainLevel::Estimator est;
+				const GrainLevel::Params& p = est.Parameters();
+				const int bins = p.split.levelBins;
+				Require(bins > 0 && bins <= kMaxBins, tag + ": levelBins in supported stack range");
+				const double cs = GrainSplit::DepthScale(p.split.sourceBits), es = cs * cs;
+				GrainLevel::Context ctx;
+				ctx.sourceHz = kSourceHz;
+				ctx.field = &field;
+
+				TraceSummary s;
+				for (int t = 0; t < kFrames; ++t)
+				{
+					const bool isI = (t % kGop) == 0;
+					const double sigma = isI ? sigmaI : sigmaB;
+					const Plane y = makeFlatTexFrame(static_cast<double>(t), sigma, seedBase + static_cast<uint32_t>(t));
+					const GrainSplit::Split u = Split(y);
+					const GrainLevel::Result o = est.Step(u, ctx);
+
+					if (t == 0)
+					{
+						Require(o.mode == GrainLevel::Mode::SingleFrame && o.reason == GrainLevel::Reason::NoPrevious,
+							tag + ": frame 0 is single-frame (no previous)");
+					}
+					else
+					{
+						Require(o.mode == GrainLevel::Mode::Temporal && o.reason == GrainLevel::Reason::None,
+							tag + ": temporal mode active for t=" + std::to_string(t));
+						Require(o.regionsTrusted > 0 && o.skipRegions == 0,
+							tag + ": trusted regions present and skipGuard inactive on 1 px pan at t=" + std::to_string(t));
+					}
+
+					// Per-pixel conservation & bounds check.
+					double maxYErr = 0.0;
+					for (size_t i = 0; i < u.f.v.size(); ++i)
+					{
+						Require(std::isfinite(o.f.v[i]) && o.f.v[i] >= -1e-12 && o.f.v[i] <= 1.0 + 1e-12,
+							tag + ": f finite and in [0, 1] at t=" + std::to_string(t));
+						Require(std::isfinite(o.gate.v[i]) && o.gate.v[i] >= -1e-12 && o.gate.v[i] <= 1.0 + 1e-12,
+							tag + ": gate finite and in [0, 1] at t=" + std::to_string(t));
+						Require(o.f.v[i] >= u.f.v[i] - 1e-12,
+							tag + ": f' >= f (mirror gate off) at t=" + std::to_string(t));
+						maxYErr = (std::max)(maxYErr, std::fabs((o.clean.v[i] + o.grain.v[i]) - y.v[i]));
+					}
+					Require(maxYErr < 1e-9, tag + ": clean + grain reproduces Y exactly at t=" + std::to_string(t));
+
+					// Per-block N_unit4, NLF_t, and N_b invariants.
+					bool validB[kMaxBins] = {};
+					if (t > 0)
+					{
+						Require(static_cast<int>(o.levelT.size()) == bins && static_cast<int>(o.validT.size()) == bins,
+							tag + ": levelT/validT sized to levelBins at t=" + std::to_string(t));
+						for (int j = 0; j < bins; ++j)
+						{
+							validB[j] = o.validT[static_cast<size_t>(j)] != 0;
+							if (validB[j])
+							{
+								const double lv = o.levelT[static_cast<size_t>(j)];
+								Require(std::isfinite(lv) && lv >= 0.0 && lv < kMaxCodeSq,
+									tag + ": levelT finite, non-negative, bounded at t=" + std::to_string(t));
+							}
+						}
+					}
+
+					double sumN4 = 0.0, sumNlfT = 0.0, sumNb = 0.0;
+					const size_t nb = u.N.size();
+					Require(o.Nb.size() == nb && o.retained.size() == nb && nb > 0, tag + ": block arrays sized");
+					for (int by = 0; by < u.bh; ++by)
+						for (int bx = 0; bx < u.bw; ++bx)
+						{
+							const size_t i = static_cast<size_t>(by) * static_cast<size_t>(u.bw) + static_cast<size_t>(bx);
+							const double n4 = u.N[i];
+							const double nbVal = o.Nb[i];
+							Require(std::isfinite(n4) && n4 >= 0.0 && n4 < kMaxCodeSq,
+								tag + ": N_unit4 finite, non-negative, bounded at t=" + std::to_string(t));
+							Require(std::isfinite(nbVal) && nbVal >= 0.0 && nbVal < kMaxCodeSq,
+								tag + ": N_b finite, non-negative, bounded at t=" + std::to_string(t));
+							Require(std::isfinite(o.retained[i]) && o.retained[i] >= 0.0 && o.retained[i] < kMaxCodeSq,
+								tag + ": retained finite, non-negative, bounded at t=" + std::to_string(t));
+							Require(nbVal <= n4 + 1e-6,
+								tag + ": N_b never over-estimates above N_unit4 at t=" + std::to_string(t));
+
+							sumN4 += n4;
+							sumNb += nbVal;
+							if (t > 0)
+							{
+								const double luma = u.base.at((std::min)(bx * u.B + u.B / 2, u.w - 1), (std::min)(by * u.B + u.B / 2, u.h - 1));
+								double cap = 0.0;
+								const bool hasCap = GrainSplit::GrainLevelCap(o.levelT.data(), validB, p.split, luma / cs, cap);
+								Require(hasCap, tag + ": NLF_t cap valid on every block at t=" + std::to_string(t));
+								const double nlfBlock = cap * es;
+								Require(std::isfinite(nlfBlock) && nlfBlock >= 0.0 && nlfBlock < kMaxCodeSq,
+									tag + ": NLF_t finite, non-negative, bounded at t=" + std::to_string(t));
+								const double expectedNb = (std::min)(n4, p.ct * nlfBlock);
+								Require(std::fabs(nbVal - expectedNb) <= 1e-12,
+									tag + ": N_b == min(N_unit4, c_t * NLF_t) at t=" + std::to_string(t));
+								sumNlfT += nlfBlock;
+							}
+						}
+
+					const double meanN4 = sumN4 / static_cast<double>(nb);
+					const double meanNb = sumNb / static_cast<double>(nb);
+					const double meanNlfT = t > 0 ? sumNlfT / static_cast<double>(nb) : 0.0;
+
+					// Flat-interior grain-to-clean leak: on y in [16, 48), true structure is constant kBaseLuma (D_struct = 0),
+					// so D = d1 + d2 is pure planted grain and s1 + s2 = f * D is the exact grain energy leaking into clean.
+					double sumD2 = 0.0, sumCleanU4_2 = 0.0, sumCleanV5_2 = 0.0;
+					for (int py = kFlatY0; py < kFlatY1; ++py)
+						for (int px = kFlatX0; px < kFlatX1; ++px)
+						{
+							const double d = u.d1.at(px, py) + u.d2.at(px, py);
+							const double cu4 = u.s1.at(px, py) + u.s2.at(px, py);
+							const double cv5 = o.s1.at(px, py) + o.s2.at(px, py);
+							sumD2 += d * d;
+							sumCleanU4_2 += cu4 * cu4;
+							sumCleanV5_2 += cv5 * cv5;
+						}
+					Require(sumD2 > 0.0, tag + ": planted grain energy positive on flat interior at t=" + std::to_string(t));
+					const double flatLeakU4 = sumCleanU4_2 / sumD2;
+					const double flatLeakV5 = sumCleanV5_2 / sumD2;
+					Require(std::isfinite(flatLeakU4) && flatLeakU4 >= 0.0 && flatLeakU4 <= 1.0 + 1e-12,
+						tag + ": u4 flat grain-to-clean leak in [0, 1] at t=" + std::to_string(t));
+					Require(std::isfinite(flatLeakV5) && flatLeakV5 >= 0.0 && flatLeakV5 <= 1.0 + 1e-12,
+						tag + ": v5 flat grain-to-clean leak in [0, 1] at t=" + std::to_string(t));
+
+					char line[320];
+					if (t == 0)
+					{
+						std::snprintf(line, sizeof(line),
+							"GS157 [%s] t=%2d (%c) sigma=%.3f N_unit4=%7.3f NLF_t=    N/A N_b=%7.3f NLF_t/N_u4=  N/A flatLeakV5=%.4f flatLeakU4=%.4f lowered=%d",
+							tag.c_str(), t, isI ? 'I' : 'B', sigma, meanN4, meanNb, flatLeakV5, flatLeakU4, o.nlfTLowersN ? 1 : 0);
+					}
+					else
+					{
+						const double ratio = meanN4 > 0.0 ? meanNlfT / meanN4 : 0.0;
+						std::snprintf(line, sizeof(line),
+							"GS157 [%s] t=%2d (%c) sigma=%.3f N_unit4=%7.3f NLF_t=%7.3f N_b=%7.3f NLF_t/N_u4=%.3f flatLeakV5=%.4f flatLeakU4=%.4f lowered=%d",
+							tag.c_str(), t, isI ? 'I' : 'B', sigma, meanN4, meanNlfT, meanNb, ratio, flatLeakV5, flatLeakU4, o.nlfTLowersN ? 1 : 0);
+
+						if (isI)
+						{
+							s.meanI_Nunit4 += meanN4;
+							s.meanI_NlfT += meanNlfT;
+							s.meanI_Nb += meanNb;
+							s.meanI_NlfOverNunit4 += ratio;
+							s.meanI_FlatLeakV5 += flatLeakV5;
+							s.meanI_FlatLeakU4 += flatLeakU4;
+							++s.temporalIFrames;
+						}
+						else
+						{
+							s.meanB_Nunit4 += meanN4;
+							s.meanB_NlfT += meanNlfT;
+							s.meanB_Nb += meanNb;
+							s.meanB_FlatLeakV5 += flatLeakV5;
+							s.meanB_FlatLeakU4 += flatLeakU4;
+							++s.temporalBFrames;
+						}
+					}
+					Log(line);
+				}
+
+				Require(s.temporalIFrames == 4 && s.temporalBFrames == 15, tag + ": expected 4 temporal I-frames and 15 temporal B-frames");
+				s.meanI_Nunit4 /= static_cast<double>(s.temporalIFrames);
+				s.meanI_NlfT /= static_cast<double>(s.temporalIFrames);
+				s.meanI_Nb /= static_cast<double>(s.temporalIFrames);
+				s.meanI_NlfOverNunit4 /= static_cast<double>(s.temporalIFrames);
+				s.meanI_FlatLeakV5 /= static_cast<double>(s.temporalIFrames);
+				s.meanI_FlatLeakU4 /= static_cast<double>(s.temporalIFrames);
+				s.meanB_Nunit4 /= static_cast<double>(s.temporalBFrames);
+				s.meanB_NlfT /= static_cast<double>(s.temporalBFrames);
+				s.meanB_Nb /= static_cast<double>(s.temporalBFrames);
+				s.meanB_FlatLeakV5 /= static_cast<double>(s.temporalBFrames);
+				s.meanB_FlatLeakU4 /= static_cast<double>(s.temporalBFrames);
+				s.ratioI_NlfOverNunit4 = s.meanI_Nunit4 > 0.0 ? s.meanI_NlfT / s.meanI_Nunit4 : 0.0;
+
+				char sumLine[360];
+				std::snprintf(sumLine, sizeof(sumLine),
+					"GS157 SUMMARY [%s] meanI_N_u4=%.3f meanB_N_u4=%.3f (B/I=%.3f) | I_NLF_t=%.3f I_N_b=%.3f | GS215_I_undercap(mean_ratio=%.4f, meanNLF/meanNu4=%.4f) | flatLeakV5(I=%.4f, B=%.4f) flatLeakU4(I=%.4f, B=%.4f)",
+					tag.c_str(), s.meanI_Nunit4, s.meanB_Nunit4, s.meanB_Nunit4 / s.meanI_Nunit4,
+					s.meanI_NlfT, s.meanI_Nb, s.meanI_NlfOverNunit4, s.ratioI_NlfOverNunit4,
+					s.meanI_FlatLeakV5, s.meanB_FlatLeakV5, s.meanI_FlatLeakU4, s.meanB_FlatLeakU4);
+				Log(sumLine);
+				return s;
+			};
+
+			// CRF 24: I-frames keep 48% of nominal grain variance, B-frames starved to 13% variance; plus same-input constant-grain control.
+			const double crf24SigmaI = std::sqrt(0.48) * kSigma0;
+			const double crf24SigmaB = std::sqrt(0.13) * kSigma0;
+			const TraceSummary crf24Pulse = runRegime("CRF24-IBBB", crf24SigmaI, crf24SigmaB, 15700u);
+			const TraceSummary crf24Ctrl = runRegime("CRF24-UNIFORM-CTRL", crf24SigmaI, crf24SigmaI, 15700u);
+
+			// CRF 32: stronger B-frame starvation (I-frames 24% variance, B-frames 3% variance); plus same-input constant-grain control.
+			const double crf32SigmaI = std::sqrt(0.24) * kSigma0;
+			const double crf32SigmaB = std::sqrt(0.03) * kSigma0;
+			const TraceSummary crf32Pulse = runRegime("CRF32-IBBB", crf32SigmaI, crf32SigmaB, 15732u);
+			const TraceSummary crf32Ctrl = runRegime("CRF32-UNIFORM-CTRL", crf32SigmaI, crf32SigmaI, 15732u);
+
+			// Exact same-input proof: I-frames are bit-identical between each pulse and its uniform-grain control.
+			Require(std::fabs(crf24Pulse.meanI_Nunit4 - crf24Ctrl.meanI_Nunit4) < 1e-12,
+				"CRF24 same-input control: I-frame N_unit4 matches bit-for-bit");
+			Require(std::fabs(crf32Pulse.meanI_Nunit4 - crf32Ctrl.meanI_Nunit4) < 1e-12,
+				"CRF32 same-input control: I-frame N_unit4 matches bit-for-bit");
+
+			// CRF 24 physical & trace invariants + negative control contrast.
+			Require(crf24Pulse.meanB_Nunit4 < 0.5 * crf24Pulse.meanI_Nunit4,
+				"CRF24 pulse: N_unit4 on starved B-frames < 0.5 * N_unit4 on I-frames");
+			Require(crf24Ctrl.meanB_Nunit4 >= 0.85 * crf24Ctrl.meanI_Nunit4 && crf24Ctrl.meanB_Nunit4 <= 1.15 * crf24Ctrl.meanI_Nunit4,
+				"CRF24 negative control: uniform grain keeps N_unit4 steady across I and B slots (proves B-frame drop is real)");
+			Require(crf24Pulse.meanI_Nb < crf24Pulse.meanI_Nunit4,
+				"CRF24 pulse: B-frame-pulled NLF_t caps I-frame N_b below N_unit4");
+			Require(crf24Pulse.meanI_NlfOverNunit4 < 0.5 * crf24Ctrl.meanI_NlfOverNunit4,
+				"CRF24 pulse vs uniform control: B-frame starvation pulls I-frame NLF_t/N_unit4 below half of uniform-grain control");
+			Require(crf24Pulse.meanI_FlatLeakV5 > crf24Pulse.meanI_FlatLeakU4,
+				"CRF24 pulse: I-frame NLF_t under-cap increases flat grain-to-clean leak over unit-4");
+			Require(crf24Pulse.meanI_FlatLeakV5 > crf24Ctrl.meanI_FlatLeakV5,
+				"CRF24 pulse vs uniform control: I-frame flat grain-to-clean leak exceeds uniform-grain control");
+
+			// CRF 32 physical & trace invariants + negative control contrast.
+			Require(crf32Pulse.meanB_Nunit4 < 0.5 * crf32Pulse.meanI_Nunit4,
+				"CRF32 pulse: N_unit4 on starved B-frames < 0.5 * N_unit4 on I-frames");
+			Require(crf32Ctrl.meanB_Nunit4 >= 0.85 * crf32Ctrl.meanI_Nunit4 && crf32Ctrl.meanB_Nunit4 <= 1.15 * crf32Ctrl.meanI_Nunit4,
+				"CRF32 negative control: uniform grain keeps N_unit4 steady across I and B slots (proves B-frame drop is real)");
+			Require(crf32Pulse.meanI_Nb < crf32Pulse.meanI_Nunit4,
+				"CRF32 pulse: B-frame-pulled NLF_t caps I-frame N_b below N_unit4");
+			Require(crf32Pulse.meanI_NlfOverNunit4 < 0.5 * crf32Ctrl.meanI_NlfOverNunit4,
+				"CRF32 pulse vs uniform control: B-frame starvation pulls I-frame NLF_t/N_unit4 below half of uniform-grain control");
+			Require(crf32Pulse.meanI_FlatLeakV5 > crf32Pulse.meanI_FlatLeakU4,
+				"CRF32 pulse: I-frame NLF_t under-cap increases flat grain-to-clean leak over unit-4");
+			Require(crf32Pulse.meanI_FlatLeakV5 > crf32Ctrl.meanI_FlatLeakV5,
+				"CRF32 pulse vs uniform control: I-frame flat grain-to-clean leak exceeds uniform-grain control");
+
+			// Cross-regime monotonicity: CRF 32 exhibits strictly stronger B-frame starvation and I-frame under-cap than CRF 24.
+			Require((crf32Pulse.meanB_Nunit4 / crf32Pulse.meanI_Nunit4) < (crf24Pulse.meanB_Nunit4 / crf24Pulse.meanI_Nunit4),
+				"CRF32 shows strictly stronger B-frame N_unit4 starvation than CRF24");
+			Require(crf32Pulse.meanI_NlfOverNunit4 < crf24Pulse.meanI_NlfOverNunit4,
+				"CRF32 shows strictly stronger I-frame NLF_t/N_unit4 under-cap than CRF24");
+		}
 	};
 }

@@ -3,7 +3,7 @@
 //
 // output.dither / dither need map, shader side. Header-only GLSL strings; no libplacebo or Windows headers here.
 //
-// 1. BlockPassHeaderGlsl() + BlockPassBodyGlsl(): the BLOCK PASS (a libplacebo custom compute shader, 8x8 groups, one
+// 1. BlockPassHeaderGlsl() + BlockPassBodyGlsl(): the BLOCK PASS (a libplacebo custom compute shader, 16x16 groups, one
 //    thread per region block), the arithmetic order of DitherNeed::TargetBlock<float> and MapT<float>::Update.
 //    Descriptors: dn_gs            sampled rgba32f, grid size: the grain split's block texture (GrainSplit::Gpu::Frame::blocks:
 //                                  the block grain level N in .x, e3 in .y); nearest, clamp

@@ -253,11 +253,12 @@ namespace OutputDomainMap
 	{
 		const Result s = MapPoint(c, x, y), e = MapPoint(c, x + vx, y + vy);
 		Result r;
-		r.valid = s.valid;
+		r.valid = s.valid && e.valid;
 		r.rebaseFading = s.rebaseFading;
-		if (!std::isfinite(vx) || !std::isfinite(vy))   // GEM-SD-VECTORS MUST-6: a non-finite vector is invalid and zero, never NaN downstream
+		if (!detail::Fin(vx) || !detail::Fin(vy))   // GEM-SD-VECTORS MUST-6: a non-finite vector is invalid and zero, never NaN downstream
 		{
 			r.valid = false;
+			r.inside = false;
 			r.x = 0.0;
 			r.y = 0.0;
 			return r;
@@ -268,8 +269,18 @@ namespace OutputDomainMap
 			r.y = vy;
 			return r;
 		}
-		r.x = e.x - s.x;
-		r.y = e.y - s.y;
+		const double dx = e.x - s.x;
+		const double dy = e.y - s.y;
+		if (!e.valid || !detail::Fin(dx) || !detail::Fin(dy))
+		{
+			r.valid = false;
+			r.inside = false;
+			r.x = 0.0;
+			r.y = 0.0;
+			return r;
+		}
+		r.x = dx;
+		r.y = dy;
 		r.inside = s.inside && e.inside;
 		return r;
 	}

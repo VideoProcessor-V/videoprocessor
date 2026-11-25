@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <string>
 
 namespace GrainSplit
@@ -212,9 +213,15 @@ if (blk.x < GS_BW && blk.y < GS_BH) {
 }
 )GLSL";
 
-			// 4a. LEVEL (refs/116b, unit 4): ONE workgroup. Per luma bin the 10th percentile of the blocks' quiet values, by an integer
-			// histogram of 1/8-octave classes (key from the float bits: identical to GrainSplit::LevelKey), -> level_out(bin) =
-			// (class-midpoint level in ten-bit-equivalent codes^2, valid, 0, 0). Integer counts make the table order-independent.
+			// 4a. LEVEL (refs/116b, unit 4; GS 155 zero-energy exclusion): ONE workgroup. Per luma bin the 10th percentile of
+			// the blocks' quiet values, by an integer histogram of 1/8-octave classes (key from the float bits: identical to
+			// GrainSplit::LevelKey), -> level_out(bin) = (class-midpoint level in ten-bit-equivalent codes^2, valid, 0, 0).
+			// Integer counts make the table order-independent.
+			// GS 155: at the two quantization boundary bins (bin 0 crushed black, bin GS_LEVEL_BINS - 1 clipped white), blocks
+			// with ten-bit-equivalent energy q <= 1/12 code^2 (GS_LEVEL_ZERO_FLOOR, variance of uniform [-0.5, +0.5] code
+			// quantization rounding error: integral_{-0.5}^{+0.5} x^2 dx = 1/12) are excluded so flat-clipped blocks cannot
+			// collapse the boundary percentile toward zero. Exclusion is strictly by energy, NEVER by pixel code value
+			// (ADR-0002: grainy BTB/WTW blocks have q > 1/12 and remain included). Mirrors GrainSplit::GrainLevelTable.
 			const char* const LEVEL_HEADER = R"GLSL(
 #define GS_KEYS 160
 shared uint s_hist[GS_LEVEL_BINS * GS_KEYS];
@@ -244,8 +251,9 @@ barrier();
 for (uint i = li; i < uint(GS_BW * GS_BH); i += 256u) {
     ivec2 b = ivec2(int(i % uint(GS_BW)), int(i / uint(GS_BW)));
     float q = texelFetch(quiet, b, 0).x / (GS_CODE_SCALE * GS_CODE_SCALE);
-    int key = clamp(int(floatBitsToUint(max(q, 0.015625)) >> 20) - 968, 0, GS_KEYS - 1);
     int bin = gs_level_bin(gs_block_luma(b) / GS_CODE_SCALE);
+    if ((bin == 0 || bin == GS_LEVEL_BINS - 1) && !(q > GS_LEVEL_ZERO_FLOOR)) continue;
+    int key = clamp(int(floatBitsToUint(max(q, 0.015625)) >> 20) - 968, 0, GS_KEYS - 1);
     atomicAdd(s_hist[bin * GS_KEYS + key], 1u);
     atomicAdd(s_n[bin], 1u);
 }
@@ -429,6 +437,109 @@ if (p.x < GS_W && p.y < GS_H) {
 				PartialSize(s.bw, s.bh, B, sub, &s.pw, &s.ph);
 				return s;
 			}
+			// Input and law validation shared by Splitter::Begin, Splitter::StepOn, and Splitter::Compute(OwnerGpuContext&).
+			// Rejects NaN, +/-Inf, non-positive values, and reciprocals/products that overflow or underflow IEEE-754 double
+			// before any GPU allocation or GaussRadius/V3HalfRadius cast.
+			bool ValidateInput(pl_tex plane, int component, double codeUnit, double scale, int B, std::string& error)
+			{
+				if (!plane || !plane->params.sampleable || plane->params.w < 1 || plane->params.h < 1 || component < 0 || component > 3 || B < 1)
+				{
+					error = "grain split: invalid input";
+					return false;
+				}
+				if (!std::isfinite(codeUnit) || !std::isfinite(scale))
+				{
+					error = "grain split: invalid input (non-finite codeUnit or scale)";
+					return false;
+				}
+				if (!(codeUnit > 0.0) || !(scale > 0.0))
+				{
+					error = "grain split: invalid input";
+					return false;
+				}
+				if (!std::isfinite(1.0 / codeUnit))
+				{
+					error = "grain split: invalid input (non-finite 1 / codeUnit)";
+					return false;
+				}
+				return true;
+			}
+			bool ValidateLaw(double scale, const Params& params, std::string& error)
+			{
+				if (params.subBlocks < 1 || params.subBlocks > 16 || params.levelBins < 1 || params.levelBins > 16 || params.levelPercentile < 1 ||
+					params.levelPercentile > 99 || params.levelMinBlocks < 1 || params.sourceBits < 8 || params.sourceBits > 16)
+				{
+					error = "grain split: invalid law";
+					return false;
+				}
+				const double s1 = params.sigmaFine * scale;
+				const double sb = params.sigmaBase * scale;
+				const double s6 = params.sigmaLow * scale;
+				const double ds = GrainSplit::DepthScale(params.sourceBits);
+				const double energyFloorScaled = params.energyFloor * ds * ds;
+				if (!std::isfinite(params.sigmaFine) || !std::isfinite(params.sigmaBase) || !std::isfinite(params.sigmaLow) ||
+					!std::isfinite(s1) || !std::isfinite(sb) || !std::isfinite(s6) ||
+					!std::isfinite(s1 * s1) || !std::isfinite(sb * sb) || !std::isfinite(s6 * s6) ||
+					!std::isfinite(params.grainCal) || !std::isfinite(params.kappa) ||
+					!std::isfinite(params.energyFloor) || !std::isfinite(energyFloorScaled))
+				{
+					error = "grain split: invalid law (non-finite parameter)";
+					return false;
+				}
+				if (!(params.sigmaFine > 0.0) || !(s1 > 0.0) || !(s1 * s1 > 0.0) ||
+					!(sb >= GrainSplit::kV3MinLowSigma) || !(s6 >= GrainSplit::kV3MinLowSigma) ||
+					!(params.grainCal >= 0.0) || !(params.kappa >= 0.0) || !(params.energyFloor > 0.0))
+				{
+					error = "grain split: invalid law";
+					return false;
+				}
+				return true;
+			}
+			// Checks pass shared-memory demand against maxShmem, guarding GaussRadius / V3HalfRadius against int/size_t overflow
+			// before casting to int. The 3.0 and 3.5 / 1e-9 factors mirror the exact contract of BandFromBase::BandRadius
+			// (BandFromBase.h) and GrainSplit::V3HalfRadius (GrainSplit.h).
+			bool CheckPassSharedMemory(uint64_t maxShmem, int B, double scale, const Params& params, std::string& error)
+			{
+				const double s1 = params.sigmaFine * scale;
+				const double sb = params.sigmaBase * scale;
+				const double s6 = params.sigmaLow * scale;
+				const double hb = GrainSplit::V3HalfSigma(sb);
+				const double h6 = GrainSplit::V3HalfSigma(s6);
+				// Largest radius where tileSpan + 2 * r fits in int and sizeof(float) * aa * aa stays <= SIZE_MAX / 2.
+				const int maxTileSpan = (std::max)(kApplyTile + 2, (std::max)(kHalfTw, kDownTr));
+				const size_t maxAa = static_cast<size_t>(std::sqrt(static_cast<double>((std::numeric_limits<size_t>::max)() / (2u * sizeof(float)))));
+				const size_t maxSpan = (std::min)(static_cast<size_t>((std::numeric_limits<int>::max)()), maxAa);
+				const double maxSafeRadius = static_cast<double>(maxSpan - static_cast<size_t>(maxTileSpan)) / 2.0;
+				const double r1Raw = std::ceil(3.0 * s1);
+				const double rbRaw = std::ceil(3.5 * hb - 1e-9);
+				const double r6Raw = std::ceil(3.5 * h6 - 1e-9);
+				if (!std::isfinite(hb) || !std::isfinite(h6) || !std::isfinite(r1Raw) || !std::isfinite(rbRaw) || !std::isfinite(r6Raw))
+				{
+					error = "grain split: invalid law (non-finite filter radius)";
+					return false;
+				}
+				if (r1Raw > maxSafeRadius || rbRaw > maxSafeRadius || r6Raw > maxSafeRadius)
+				{
+					error = "grain split: the passes exceed shared memory (filter radius overflow), the device offers " +
+						std::to_string(maxShmem) + " B";
+					return false;
+				}
+				const int r1 = GaussRadius(s1), rl = (std::max)(GrainSplit::V3HalfRadius(sb), GrainSplit::V3HalfRadius(s6));
+				const int ch = ChunkOf(B), ap = ch + 2 * r1, la = ch / 2 + 3;
+				const int aw = kApplyTile + 2, aa = aw + 2 * r1, lapp = kApplyTile / 2 + 2;
+				const size_t need[5] = { sizeof(float) * size_t(kHalfTh) * size_t(kHalfTw + 2 * rl), 2 * sizeof(float) * size_t(kDownTc) * size_t(kDownTr + 2 * rl),
+					sizeof(float) * (size_t(ap) * ap + size_t(ap) * ch + 2u * size_t(la) * la + 4u * size_t(ch) * ch),
+					sizeof(float) * (size_t(aa) * aa + size_t(aa) * kApplyTile + 2u * size_t(lapp) * lapp + size_t(aw) * aw),
+					sizeof(uint32_t) * (size_t(params.levelBins) * 160u + size_t(params.levelBins)) };
+				const size_t most = (std::max)((std::max)(need[0], need[1]), (std::max)((std::max)(need[2], need[3]), need[4]));
+				if (uint64_t(most) > maxShmem)
+				{
+					error = "grain split: the passes need " + std::to_string(most) + " B of shared memory, the device offers " +
+						std::to_string(maxShmem) + " B";
+					return false;
+				}
+				return true;
+			}
 		}
 
 		uint64_t WorkingBytes(int w, int h, int B, int sub)
@@ -471,9 +582,13 @@ if (p.x < GS_W && p.y < GS_H) {
 
 		void Splitter::Release(pl_gpu gpu)
 		{
-			if (gpu)
-				for (pl_tex* t : { &m_tmp, &m_low, &m_part, &m_quiet, &m_level, &m_blocks, &m_outFull, &m_outA, &m_outB })
-					if (*t) pl_tex_destroy(gpu, t);
+			for (pl_tex* t : { &m_tmp, &m_low, &m_part, &m_quiet, &m_level, &m_blocks, &m_outFull, &m_outA, &m_outB })
+			{
+				if (gpu && *t)
+					pl_tex_destroy(gpu, t);
+				*t = nullptr;
+			}
+			m_run = Run();
 			m_out = Frame();
 		}
 
@@ -578,6 +693,7 @@ if (p.x < GS_W && p.y < GS_H) {
 			const Params& params, uint64_t seq, ContextHold& hold)
 		{
 			hold = ContextHold();
+			m_run = Run();
 			m_out = Frame();
 			m_error.clear();
 			m_scratchShort = false;
@@ -593,11 +709,9 @@ if (p.x < GS_W && p.y < GS_H) {
 				m_error = "grain split: the GPU context does not report the device's compute shared memory";
 				return false;
 			}
-			if (!plane)
-			{
-				m_error = "grain split: invalid input";
+			if (!ValidateInput(plane, component, codeUnit, scale, B, m_error) || !ValidateLaw(scale, params, m_error) ||
+				!CheckPassSharedMemory(ctx.MaxSharedMemory(), B, scale, params, m_error))
 				return false;
-			}
 			const ContextShapes shapes = ContextShapesOf(plane->params.w, plane->params.h, B, params);   // rg32f / rgba32f
 			if (!shapes.Valid())
 			{
@@ -666,7 +780,8 @@ if (p.x < GS_W && p.y < GS_H) {
 					DefineInt("GS_B", B) + DefineInt("GS_BW", bw) + DefineInt("GS_BH", bh) + DefineInt("GS_UNIT_VERSION", GrainSplit::kUnitVersion) +
 					DefineInt("GS_LEVEL_BINS", params.levelBins) + DefineInt("GS_LEVEL_PCT", params.levelPercentile) +
 					DefineInt("GS_LEVEL_MINB", params.levelMinBlocks) + DefineInt("GS_LEVEL_ON", params.levelCap ? 1 : 0) +
-					Define("GS_CODE_SCALE", GrainSplit::DepthScale(params.sourceBits));
+					Define("GS_CODE_SCALE", GrainSplit::DepthScale(params.sourceBits)) +
+					Define("GS_LEVEL_ZERO_FLOOR", GrainSplit::kLevelZeroEnergyFloor);
 				const double s1 = params.sigmaFine * scale, sb = params.sigmaBase * scale, s6 = params.sigmaLow * scale;
 				t.r1 = GaussRadius(s1);
 				t.rb = GrainSplit::V3HalfRadius(sb);
@@ -709,6 +824,20 @@ if (p.x < GS_W && p.y < GS_H) {
 			else if (!m_run.active || m_run.next != step)
 			{
 				m_error = "grain split: step out of order";
+				m_run = Run();
+				m_out = Frame();
+				return false;
+			}
+			else if (!dispatch)
+			{
+				m_error = "grain split: invalid input";
+				m_run = Run();
+				m_out = Frame();
+				return false;
+			}
+			else if (!ValidateInput(plane, component, codeUnit, scale, B, m_error) || !ValidateLaw(scale, params, m_error) ||
+				!CheckPassSharedMemory(dev.maxShmem, B, scale, params, m_error))
+			{
 				m_run = Run();
 				m_out = Frame();
 				return false;
@@ -833,43 +962,25 @@ if (p.x < GS_W && p.y < GS_H) {
 			m_error.clear();
 			m_scratchShort = false;
 			m_out = Frame();   // a failed Compute never leaves the previous frame's product looking valid
-			if (!dispatch || !plane || !plane->params.sampleable || component < 0 || component > 3 || !(codeUnit > 0.0) || B < 1)
+			if (!dispatch)
 			{
 				m_error = "grain split: invalid input";
 				return false;
 			}
+			if (!ValidateInput(plane, component, codeUnit, scale, B, m_error))
+				return false;
 			if (!gpu && (options.storage != GrainSplit::Storage::Full || options.arena || !options.scratch.All() || !options.targets.split ||
 				!options.targets.blocks || options.targets.splitB))
 			{
 				m_error = "grain split: invalid input (without a device every texture of the Full layout is supplied by the caller)";
 				return false;
 			}
-			if (!(params.sigmaFine > 0.0) || !(params.sigmaBase * scale >= GrainSplit::kV3MinLowSigma) || !(params.sigmaLow * scale >= GrainSplit::kV3MinLowSigma) ||
-				params.subBlocks < 1 || params.subBlocks > 16 || params.levelBins < 1 || params.levelBins > 16 || params.levelPercentile < 1 ||
-				params.levelPercentile > 99 || params.levelMinBlocks < 1 || params.sourceBits < 8 || params.sourceBits > 16)
-			{
-				m_error = "grain split: invalid law";
+			if (!ValidateLaw(scale, params, m_error))
 				return false;
-			}
 			VPV_COMPUTE_ONCE_AT("U1", options.seq ? static_cast<int64_t>(options.seq) : ::ComputeOnce::CurrentSeq(), ::ComputeOnce::Variant(plane->params.w, plane->params.h, component, B));
 			// The passes' shared memory against the device limit (a visible refusal, never a silent fallback).
-			{
-				const double s1 = params.sigmaFine * scale;
-				const int r1 = GaussRadius(s1), rl = (std::max)(GrainSplit::V3HalfRadius(params.sigmaBase * scale), GrainSplit::V3HalfRadius(params.sigmaLow * scale));
-				const int ch = ChunkOf(B), ap = ch + 2 * r1, la = ch / 2 + 3;
-				const int aw = kApplyTile + 2, aa = aw + 2 * r1, lapp = kApplyTile / 2 + 2;
-				const size_t need[5] = { sizeof(float) * size_t(kHalfTh) * size_t(kHalfTw + 2 * rl), 2 * sizeof(float) * size_t(kDownTc) * size_t(kDownTr + 2 * rl),
-					sizeof(float) * (size_t(ap) * ap + size_t(ap) * ch + 2u * size_t(la) * la + 4u * size_t(ch) * ch),
-					sizeof(float) * (size_t(aa) * aa + size_t(aa) * kApplyTile + 2u * size_t(lapp) * lapp + size_t(aw) * aw),
-					sizeof(uint32_t) * (size_t(params.levelBins) * 160u + size_t(params.levelBins)) };
-				const size_t most = (std::max)((std::max)(need[0], need[1]), (std::max)((std::max)(need[2], need[3]), need[4]));
-				if (uint64_t(most) > dev.maxShmem)
-				{
-					m_error = "grain split: the passes need " + std::to_string(most) + " B of shared memory, the device offers " +
-						std::to_string(dev.maxShmem) + " B";
-					return false;
-				}
-			}
+			if (!CheckPassSharedMemory(dev.maxShmem, B, scale, params, m_error))
+				return false;
 			const StorageChoice choice = ChooseStorage(options.storage, plane->params.format, codeUnit);
 			m_storageNote = choice.why;
 			const bool compact = choice.storage == GrainSplit::Storage::Compact;

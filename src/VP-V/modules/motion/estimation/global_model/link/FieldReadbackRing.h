@@ -26,14 +26,14 @@ namespace CameraLink
 	public:
 		struct Stats
 		{
-			uint64_t requested = 0, completed = 0, dropped = 0, failed = 0;
+			uint64_t requested = 0, completed = 0, dropped = 0, failed = 0, drained = 0;
 		};
 
 		// `entries` is clamped to >= 3.
 		// `log` may be null. On D3D11 the NativeCopyReadback path is used (no buffer transfers there); elsewhere pl_buf.
 		FieldReadbackRing(pl_gpu gpu, int entries, pl_log log = nullptr);
-		// Tolerates copies in flight: pl_gpu_finish (the only blocking wait, destructor only) then pl_buf_destroy, because
-		// destroying a buffer the GPU still writes would be a use-after-free.
+		// Tolerates copies in flight (including Draining slots): pl_gpu_finish (the only blocking wait, teardown only) then
+		// releases native textures/staging and pl_bufs, and withdraws VRAM from VramUsers.
 		~FieldReadbackRing();
 		FieldReadbackRing(const FieldReadbackRing&) = delete;
 		FieldReadbackRing& operator=(const FieldReadbackRing&) = delete;
@@ -48,21 +48,39 @@ namespace CameraLink
 		bool Request(const VpMotion::SeedField& f);
 
 		// Appends every finished entry, in request order, as a new FieldCopy (source px) and frees it. Never blocks.
+		// Also drains idle parked pl_bufs and completed Draining native slots.
 		size_t Poll(std::vector<std::shared_ptr<FieldCopy>>& ready);
 
-		// Graph swap: forgets all entries. Buffers the GPU may still write are parked and destroyed by a later
-		// Request/Poll once idle (never waited for).
+		// Frame-boundary maintenance: drains parked pl_bufs and completed Draining native slots, and submits any pending
+		// native readback copies with ONE batched pl_gpu_flush(m_gpu). Never blocks.
+		void OnFrameStart();
+
+		// Submits queued native readback copies since the last flush with ONE pl_gpu_flush(m_gpu). False when nothing is pending.
+		bool FlushPending();
+
+		// Graph swap: forgets all entries. In-flight pl_buf buffers are parked and destroyed once idle; in-flight native
+		// slots enter Draining (unmapped/never delivered, never reused until Poll() != Pending). Never waits.
 		void Clear();
+
+		// Explicit teardown (also called by ~FieldReadbackRing()): finishes any in-flight/Draining copies, releases all
+		// textures and buffers, and withdraws the VramUsers (kUserCameraModel) declaration. Idempotent.
+		void Release();
 
 		struct Stats Stats() const { return m_stats; }
 		const char* LastError() const { return m_lastError; }
 		int Entries() const { return static_cast<int>(m_entries.size()); }
+		// GEM-135 (AB1#3) diagnostics: visible draining, batched-flush, and VRAM declaration state.
+		size_t DrainingSlots() const;
+		uint64_t DrainedCount() const { return m_drainedCount; }
+		uint64_t FlushCount() const { return m_retiredFlushCount + (m_native ? m_native->FlushCount() : 0); }
+		bool HasPendingFlush() const { return m_native && m_native->HasPendingFlush(); }
+		uint64_t DeclaredVramBytes() const { return m_declaredVram; }
 		// Test inspection hooks (GEM-143 / MC-READBACK): prove source-format-gated fp16 staging and 0 steady-state scratch allocations.
 		uint64_t ScratchReallocationsForTest() const { return m_scratchReallocs; }
 		bool NativeIsFp16ForTest() const { return m_native && m_native->IsFp16(); }
 
 	private:
-		enum class State { Free, Pending, InFlight };
+		enum class State { Free, Pending, InFlight, Draining };
 		struct Entry
 		{
 			State state = State::Free;
@@ -80,12 +98,23 @@ namespace CameraLink
 			bool seed = false;     // F2: a SeedField (converted in Poll with `layout`)
 			SeedLayout layout;
 		};
+		struct ParkedBuf
+		{
+			pl_buf buf = nullptr;
+			size_t bytes = 0;
+			ParkedBuf() = default;
+			ParkedBuf(pl_buf b, size_t n) : buf(b), bytes(n) {}
+		};
 		Entry* FreeSlot();     // null = full (counted as dropped)
 		bool Begin(Entry& e);  // ticket + Start; on failure released and counted
 
 		bool Start(Entry& e);
-		void Release(Entry& e);
+		void ResetEntry(Entry& e);
 		void DrainParked();
+		void DrainDraining();
+		uint64_t AllocatedVramBytes() const;
+		void UpdateVramDeclaration();
+		void WithdrawVram();
 		const char* m_lastError = "";
 
 		bool TryNative(const Entry& e);
@@ -95,12 +124,15 @@ namespace CameraLink
 		bool m_nativeEverOk = false;        // the first Create worked (D3D11): later failures retry, they do not demote
 		bool m_nativeUnavailable = false;   // the very FIRST Create failed (not D3D11): the pl_buf path for good
 		std::vector<Entry> m_entries;
-		std::vector<pl_buf> m_parked;
+		std::vector<ParkedBuf> m_parked;
 		// GEM-143 (MC-READBACK): reusable Poll() scratch buffers (0 steady-state per-poll heap allocations).
 		std::vector<Entry*> m_flying;
 		std::vector<float> m_scratch;
 		uint64_t m_scratchReallocs = 0;
 		uint64_t m_ticket = 0;
+		uint64_t m_drainedCount = 0;
+		uint64_t m_retiredFlushCount = 0;
+		uint64_t m_declaredVram = 0;
 		struct Stats m_stats;
 	};
 }

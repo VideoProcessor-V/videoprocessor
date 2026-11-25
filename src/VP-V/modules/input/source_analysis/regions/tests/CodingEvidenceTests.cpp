@@ -7,6 +7,7 @@
 #include "pch.h"
 #include "CppUnitTest.h"
 
+#include <VP-V/core/ComputeOnce.h>
 #include <VP-V/modules/input/source_analysis/regions/CodingEvidence.h>
 #include <VP-V/modules/input/source_analysis/SourceResolutionDetector.h>
 #include <VP-V/modules/input/source_analysis/SourceResolutionMonitor.h>
@@ -105,6 +106,27 @@ namespace VideoProcessorTest
 		struct ProviderGuard
 		{
 			~ProviderGuard() { CE::Hub::Instance().SetMemoProvider(nullptr); }
+		};
+		struct ComputeOnceScope
+		{
+			bool prevEnabled = false;
+			ComputeOnce::ThreadFrame prevFrame;
+			ComputeOnceScope()
+				: prevEnabled(ComputeOnce::Enabled())
+				, prevFrame(ComputeOnce::Current())
+			{
+				ComputeOnce::SetEnabled(true);
+				ComputeOnce::Global().Reset();
+				ComputeOnce::Current() = ComputeOnce::ThreadFrame();
+			}
+			~ComputeOnceScope()
+			{
+				ComputeOnce::Global().Reset();
+				ComputeOnce::Current() = prevFrame;
+				ComputeOnce::SetEnabled(prevEnabled);
+			}
+			ComputeOnceScope(const ComputeOnceScope&) = delete;
+			ComputeOnceScope& operator=(const ComputeOnceScope&) = delete;
 		};
 	}
 
@@ -413,6 +435,254 @@ namespace VideoProcessorTest
 			std::vector<CE::TileMeasure> got;
 			std::string why;
 			Assert::IsFalse(hub.AcquireTiles(this, 6, pack, got, why), L"no call after the clear");
+		}
+
+		// 15d J2 / L#8: P16 CodingEvidence owner fill records ComputeOnce "U13" once per computed frame,
+		// does not recount on memo reuse or declined fills, and catches real duplicates when memo is bypassed.
+		TEST_METHOD(OwnerFillRecordsComputeOnceU13OncePerFrameAndNotOnReuseOrDecline)
+		{
+			ComputeOnceScope computeOnceScope;
+			CE::Hub hub;
+			auto memo = std::make_shared<VpSkeleton::SkeletonMemo>();
+			const VpSkeleton::OwnerFill fill = CE::MakeOwnerFill(hub, 0);
+			Assert::IsTrue(
+				memo->RegisterOwnerFill(VpSkeleton::kCodingEvidence, VpSkeleton::AcquireForm::Cpu, CE::kUnitPath, fill)
+					== VpSkeleton::SkeletonMemo::Registration::Registered,
+				L"owner registered");
+			hub.SetMemoProvider([memo](const void*) { return memo; });
+
+			const std::string expectedVariant = ComputeOnce::detail::HexVariant(ComputeOnce::Variant(0));
+			auto checkU13 = [&](uint64_t expectedCalls, uint64_t expectedFrames, uint64_t expectedDupFrames, uint32_t expectedMaxPerFrame, const wchar_t* phase) {
+				const std::vector<ComputeOnce::UnitRow> rows = ComputeOnce::Global().Rows();
+				const std::vector<ComputeOnce::GapRow> gaps = ComputeOnce::Global().Gaps();
+				Assert::AreEqual<size_t>(0, gaps.size(), phase);
+				size_t u13Rows = 0;
+				const ComputeOnce::UnitRow* u13 = nullptr;
+				for (const ComputeOnce::UnitRow& r : rows)
+				{
+					if (r.unit == "U13")
+					{
+						++u13Rows;
+						if (r.variant == expectedVariant)
+							u13 = &r;
+					}
+				}
+				Assert::AreEqual<size_t>(1, u13Rows, phase);
+				Assert::IsNotNull(u13, phase);
+				Assert::AreEqual<uint64_t>(expectedCalls, u13->calls, phase);
+				Assert::AreEqual<uint64_t>(expectedFrames, u13->frames, phase);
+				Assert::AreEqual<uint64_t>(expectedDupFrames, u13->dupFrames, phase);
+				Assert::AreEqual<uint32_t>(expectedMaxPerFrame, u13->maxPerFrame, phase);
+				if (expectedDupFrames > 0)
+					Assert::IsFalse(u13->dupCallers.empty(), phase);
+				else
+					Assert::IsTrue(u13->dupCallers.empty(), phase);
+			};
+
+			// 1) First acquire for frame seq = 10 computes once through SkeletonMemo -> U13 calls=1, frames=1, dupFrames=0, gaps=0.
+			const std::shared_ptr<CE::TilePack> pack10 = PackOf({ Clean(30), Blocked(31) });
+			std::vector<CE::TileMeasure> got10;
+			std::string why;
+			Assert::IsTrue(hub.AcquireTiles(this, 10, pack10, got10, why), L"first acquire for seq=10 succeeds");
+			Assert::AreEqual<size_t>(2, got10.size(), L"seq=10 measured both tiles");
+			{
+				const VpSkeleton::AcquireCounters c = memo->CountersOf(VpSkeleton::kCodingEvidence);
+				Assert::IsTrue(c.ownerFillCalls == 1 && c.reusedMemo == 0, L"seq=10 ran owner fill once");
+			}
+			checkU13(1, 1, 0, 1, L"after first acquire of seq=10");
+
+			// 2) Second acquire for the SAME frame seq = 10 hits the memo cache -> U13 stays calls=1 (zero double-compute).
+			std::vector<CE::TileMeasure> again10;
+			Assert::IsTrue(hub.AcquireTiles(this, 10, pack10, again10, why), L"second acquire for seq=10 reuses memo");
+			Assert::AreEqual<size_t>(2, again10.size(), L"seq=10 reused tiles");
+			{
+				const VpSkeleton::AcquireCounters c = memo->CountersOf(VpSkeleton::kCodingEvidence);
+				Assert::IsTrue(c.ownerFillCalls == 1 && c.reusedMemo == 1, L"seq=10 second acquire was a memo reuse");
+			}
+			checkU13(1, 1, 0, 1, L"after memo cache hit on seq=10");
+
+			// 3) Distinct frame seq = 11 computes once -> U13 advances to calls=2, frames=2, dupFrames=0.
+			const std::shared_ptr<CE::TilePack> pack11 = PackOf({ Clean(32), Blocked(33) });
+			std::vector<CE::TileMeasure> got11;
+			Assert::IsTrue(hub.AcquireTiles(this, 11, pack11, got11, why), L"acquire for distinct seq=11 succeeds");
+			Assert::AreEqual<size_t>(2, got11.size(), L"seq=11 measured both tiles");
+			{
+				const VpSkeleton::AcquireCounters c = memo->CountersOf(VpSkeleton::kCodingEvidence);
+				Assert::IsTrue(c.ownerFillCalls == 2 && c.reusedMemo == 1, L"seq=11 ran owner fill once");
+			}
+			checkU13(2, 2, 0, 1, L"after acquire of distinct frame seq=11");
+
+			// 4) Rule 3 negative control A (declined fills): unstaged seq = 12 and malformed seq = 13 decline visibly and do NOT count U13.
+			Assert::IsTrue(hub.Staged(12) == nullptr, L"precondition: nothing staged for seq=12");
+			const VpSkeleton::AcquireResult declined = memo->Acquire(VpSkeleton::kCodingEvidence, 12, VpSkeleton::AcquireForm::Cpu);
+			Assert::IsFalse(declined.Ok(), L"seq=12 with no staged pack is unavailable");
+			Assert::IsTrue(declined.status == VpSkeleton::AcquireStatus::Unavailable && declined.cause == VpSkeleton::AcquireCause::OwnerDeclined,
+				L"seq=12 declined visibly as OwnerDeclined");
+			checkU13(2, 2, 0, 1, L"after declined fill on unstaged seq=12");
+
+			auto badPack = std::make_shared<CE::TilePack>();
+			badPack->tiles = 2;
+			badPack->tileSize = kN;   // missing pixels: MeasurePack refuses
+			std::vector<CE::TileMeasure> gotBad;
+			Assert::IsFalse(hub.AcquireTiles(this, 13, badPack, gotBad, why), L"malformed pack for seq=13 declines");
+			Assert::IsTrue(why == VpSkeleton::Token(VpSkeleton::AcquireCause::OwnerDeclined), L"malformed pack declines visibly as OwnerDeclined");
+			checkU13(2, 2, 0, 1, L"after declined fill on malformed seq=13");
+
+			// 5) Rule 3 negative control B (memo bypass on exact same seq=10 input): direct second fill call triggers U13 duplicate detection.
+			hub.Stage(10, pack10);
+			VpSkeleton::OwnerFillRequest dupReq;
+			dupReq.id = VpSkeleton::kCodingEvidence;
+			dupReq.seq = 10;
+			dupReq.form = VpSkeleton::AcquireForm::Cpu;
+			VpSkeleton::OwnerFillOutput dupOut;
+			const bool dupFilled = fill.fill(dupReq, *memo, dupOut);
+			hub.Unstage(10);
+			Assert::IsTrue(dupFilled, L"direct bypass fill for staged seq=10 succeeded");
+			Assert::IsFalse(dupOut.bytes.empty(), L"direct bypass fill produced bytes");
+			checkU13(3, 2, 1, 2, L"after memo-bypass duplicate fill on seq=10");
+		}
+
+		// S4-M4: GridBlockiness scales its quarter-axis-code noise floor by axisScale (1 at <= 10-bit, 4 at 12-bit)
+		// so 12-bit coding grids match 10-bit scale-invariantly instead of suffering a 4x floor bias.
+		TEST_METHOD(GridBlockiness12BitMatches10BitWithAxisScaleFloor)
+		{
+			// 1) Direct GridBlockiness scale invariance on subtle 8-px periodic steps:
+			// 10-bit boundary = 0.5, inner = 0.1 -> exact analytical ratio (0.1 + 0.4 + 0.25) / (0.1 + 0.25) = 15 / 7.
+			// 12-bit (axisScale = 4) boundary = 2.0, inner = 0.4 -> exact analytical ratio (0.4 + 1.6 + 1.0) / (0.4 + 1.0) = 15 / 7.
+			constexpr int kAxisScale10 = 1;
+			constexpr int kAxisScale12 = 4;
+			const size_t stepCount = static_cast<size_t>(kFrameTile - 1);
+			std::vector<double> steps10(stepCount, 0.1);
+			std::vector<double> steps12(stepCount, 0.4);
+			for (size_t x = 7; x < stepCount; x += 8)
+			{
+				steps10[x] = 0.5;
+				steps12[x] = 2.0;
+			}
+
+			double period10 = 0.0;
+			double period12 = 0.0;
+			const double grid10 = CE::GridBlockiness(steps10, period10, kAxisScale10);
+			const double grid12 = CE::GridBlockiness(steps12, period12, kAxisScale12);
+			const double expectedSubtleRatio = 15.0 / 7.0;
+			Assert::AreEqual(8.0, period10, 1e-12, L"10-bit subtle 8-px grid period");
+			Assert::AreEqual(8.0, period12, 1e-12, L"12-bit subtle 8-px grid period");
+			Assert::AreEqual(expectedSubtleRatio, grid10, 1e-12, L"10-bit GridBlockiness matches analytical quarter-code floor ratio");
+			Assert::AreEqual(grid10, grid12, 1e-12, L"12-bit GridBlockiness with axisScale=4 is scale-invariant against 10-bit");
+
+			// Contract check: default axisScale and non-positive axisScale clamp to 1.
+			double periodDefault = 0.0;
+			double periodClamped = 0.0;
+			const double gridDefault = CE::GridBlockiness(steps10, periodDefault);
+			const double gridClamped = CE::GridBlockiness(steps10, periodClamped, 0);
+			Assert::AreEqual(grid10, gridDefault, 1e-12, L"default axisScale matches axisScale=1");
+			Assert::AreEqual(grid10, gridClamped, 1e-12, L"non-positive axisScale clamps to 1");
+			Assert::AreEqual(8.0, periodDefault, 1e-12, L"default axisScale period");
+			Assert::AreEqual(8.0, periodClamped, 1e-12, L"clamped axisScale period");
+
+			// Rule 3 same-input negative control A (subtle grid): pre-fix unscaled axisScale=1 on the exact same 12-bit steps12
+			// inflates ratio to (0.4 + 1.6 + 0.25) / (0.4 + 0.25) = 45 / 13 (~3.462 vs ~2.143: +1.319 bias, >2x excess over 1.0).
+			double periodNaive12 = 0.0;
+			const double gridNaive12 = CE::GridBlockiness(steps12, periodNaive12, 1);
+			Assert::AreEqual(8.0, periodNaive12, 1e-12, L"unscaled 12-bit still locks onto the 8-px period");
+			Assert::AreEqual(45.0 / 13.0, gridNaive12, 1e-12, L"unscaled 12-bit matches pre-fix unscaled-floor bias formula");
+			Assert::IsTrue(gridNaive12 - grid10 > 0.3, L"same-input negative control: unscaled 12-bit diverges > 0.3 above 10-bit");
+			Assert::IsTrue((gridNaive12 - 1.0) > 2.0 * (grid10 - 1.0),
+				L"same-input negative control: unscaled 12-bit inflates blockiness excess by > 2x");
+
+			// Rule 3 same-input negative control B (quarter-code noise-floor regime): inner=0, boundary=0.25 (10-bit) / 1.0 (12-bit).
+			// Scaled 12-bit matches 10-bit (2.0), whereas pre-fix axisScale=1 inflates excess by exact 4x (5.0 vs 2.0).
+			std::vector<double> flatSteps10(stepCount, 0.0);
+			std::vector<double> flatSteps12(stepCount, 0.0);
+			for (size_t x = 7; x < stepCount; x += 8)
+			{
+				flatSteps10[x] = 0.25;
+				flatSteps12[x] = 1.0;
+			}
+			double periodFlat10 = 0.0;
+			double periodFlat12 = 0.0;
+			double periodFlatNaive12 = 0.0;
+			const double flatGrid10 = CE::GridBlockiness(flatSteps10, periodFlat10, kAxisScale10);
+			const double flatGrid12 = CE::GridBlockiness(flatSteps12, periodFlat12, kAxisScale12);
+			const double flatGridNaive12 = CE::GridBlockiness(flatSteps12, periodFlatNaive12, 1);
+			Assert::AreEqual(8.0, periodFlat10, 1e-12, L"10-bit quarter-code boundary period");
+			Assert::AreEqual(8.0, periodFlat12, 1e-12, L"12-bit quarter-axis-code boundary period");
+			Assert::AreEqual(8.0, periodFlatNaive12, 1e-12, L"unscaled 12-bit quarter-axis-code boundary period");
+			Assert::AreEqual(2.0, flatGrid10, 1e-12, L"10-bit quarter-code boundary reads 2.0");
+			Assert::AreEqual(flatGrid10, flatGrid12, 1e-12, L"12-bit quarter-axis-code boundary matches 10-bit");
+			Assert::AreEqual(5.0, flatGridNaive12, 1e-12, L"pre-fix unscaled 12-bit inflates quarter-axis-code excess by exact 4x");
+			Assert::AreEqual(4.0, (flatGridNaive12 - 1.0) / (flatGrid10 - 1.0), 1e-12,
+				L"same-input negative control: exact 4x floor-bias ratio in noise-floor regime");
+
+			// 2) End-to-end MeasureTile on the exact same normalized float 128x128 luma tile at 10-bit (1023) vs 12-bit (4095).
+			// Codes 420 and 421 map to exact 10-bit {420, 421} (step 1) and exact 12-bit {1681, 1685} (step 4, zero rounding jitter):
+			// - Rows 0..63: alternating 8-px block offset -> boundary step 64/128 = 0.5 (10-bit) / 2.0 (12-bit).
+			// - Rows 64..112: 7 inner-transition patterns x 7 contiguous rows (spacing 7 -> no vertical grid at P >= 8)
+			//   hitting every inner transition u=0..6 twice per cycle -> inner step 14/128 = 7/64 (10-bit) / 28/64 (12-bit).
+			// - Rows 113..127: flat base level.
+			// Analytical blockinessRobust = (7/64 + 25/64 + 16/64) / (7/64 + 16/64) = 48/23 (~2.087);
+			// pre-fix unscaled 12-bit would read (28/64 + 100/64 + 16/64) / (28/64 + 16/64) = 36/11 (~3.273).
+			constexpr int kBaseCode10 = 420;
+			std::vector<float> tile(static_cast<size_t>(kFrameTile) * kFrameTile, static_cast<float>(kBaseCode10) / 1023.0f);
+			const float hiLuma = static_cast<float>(kBaseCode10 + 1) / 1023.0f;
+			for (int y = 0; y < 64; ++y)
+			{
+				for (int x = 0; x < kFrameTile; ++x)
+				{
+					if (((x / 8) % 2) != 0)
+						tile[static_cast<size_t>(y) * kFrameTile + static_cast<size_t>(x)] = hiLuma;
+				}
+			}
+			for (int p = 0; p < 7; ++p)
+			{
+				const int yStart = 64 + p * 7;
+				for (int dy = 0; dy < 7; ++dy)
+				{
+					const int y = yStart + dy;
+					for (int x = 0; x < kFrameTile; ++x)
+					{
+						const int u = x % 8;
+						const bool raised = (p < 6) ? (u == p + 1) : (u >= 1 && u <= 6);
+						if (raised)
+							tile[static_cast<size_t>(y) * kFrameTile + static_cast<size_t>(x)] = hiLuma;
+					}
+				}
+			}
+
+			const CE::TileMeasure m10 = CE::MeasureTile(tile.data(), kFrameTile, kFrameTile, 1023);
+			const CE::TileMeasure m12 = CE::MeasureTile(tile.data(), kFrameTile, kFrameTile, 4095);
+			const double expectedTileRatio = 48.0 / 23.0;
+			Assert::AreEqual(8.0, m10.blockPeriod, 1e-12, L"10-bit MeasureTile detects 8-px block period");
+			Assert::AreEqual(8.0, m12.blockPeriod, 1e-12, L"12-bit MeasureTile detects 8-px block period");
+			Assert::AreEqual(expectedTileRatio, m10.blockinessRobust, 1e-12, L"10-bit MeasureTile blockinessRobust matches analytical value");
+			Assert::AreEqual(m10.blockinessRobust, m12.blockinessRobust, 1e-12,
+				L"12-bit MeasureTile blockinessRobust matches 10-bit without 4x floor bias");
+			Assert::AreEqual(m10.blockiness, m12.blockiness, 1e-12, L"12-bit MeasureTile fixed blockiness matches 10-bit");
+
+			// Rule 3 same-input negative control C (on MeasureTile's exact 12-bit horizontal steps):
+			std::vector<double> tileStepsH12(stepCount, 0.0);
+			for (int y = 0; y < kFrameTile; ++y)
+			{
+				for (int x = 0; x + 1 < kFrameTile; ++x)
+				{
+					const int c0 = static_cast<int>(std::lround(tile[static_cast<size_t>(y) * kFrameTile + static_cast<size_t>(x)] * 4095.0f));
+					const int c1 = static_cast<int>(std::lround(tile[static_cast<size_t>(y) * kFrameTile + static_cast<size_t>(x + 1)] * 4095.0f));
+					tileStepsH12[static_cast<size_t>(x)] += std::fabs(static_cast<double>(c1 - c0));
+				}
+			}
+			for (double& s : tileStepsH12) s /= static_cast<double>(kFrameTile);
+			double periodTile12Fixed = 0.0;
+			double periodTile12Naive = 0.0;
+			const double tileGrid12Fixed = CE::GridBlockiness(tileStepsH12, periodTile12Fixed, kAxisScale12);
+			const double tileGrid12Naive = CE::GridBlockiness(tileStepsH12, periodTile12Naive, 1);
+			Assert::AreEqual(8.0, periodTile12Fixed, 1e-12, L"reconstructed 12-bit tile steps period");
+			Assert::AreEqual(8.0, periodTile12Naive, 1e-12, L"unscaled 12-bit tile steps period");
+			Assert::AreEqual(m12.blockinessRobust, tileGrid12Fixed, 1e-12, L"reconstructed 12-bit tile steps match MeasureTile");
+			Assert::AreEqual(36.0 / 11.0, tileGrid12Naive, 1e-12, L"pre-fix unscaled 12-bit tile steps read inflated 36/11");
+			Assert::IsTrue(tileGrid12Naive - m10.blockinessRobust > 0.3,
+				L"same-input negative control: pre-fix unscaled 12-bit MeasureTile steps diverge > 0.3 above 10-bit");
+			Assert::IsTrue((tileGrid12Naive - 1.0) > 2.0 * (m10.blockinessRobust - 1.0),
+				L"same-input negative control: pre-fix unscaled 12-bit MeasureTile excess is > 2x inflated");
 		}
 	};
 }

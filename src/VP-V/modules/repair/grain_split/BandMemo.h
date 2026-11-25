@@ -52,7 +52,17 @@ namespace BandMemo
 		double eps = 0.0;
 	};
 
+	// Codec quantization (Rule 1 derivation):
+	//   VariantKey::sigmaMilli stores floor(sigma * 1000) in milli-pixels (1e-3 px), and param0 stores the micro-pixel
+	//   remainder in 0..999 (1e-6 px), giving a 1e-6 px quantum (kMicroPerPx = 1000000, kMicroPerMilli = 1000).
+	//   Under std::llround (ties away from zero), any sigmaPx < 0.5 / kMicroPerPx = 0.5e-6 px rounds to 0 micro-pixels
+	//   (sigmaMilli == 0 && param0 == 0), colliding with the "not a band key" sentinel; hence kMinSigmaPx = 0.5 / kMicroPerPx.
+	//   kMaxSigmaPx = 4.0e6 px bounds sigmaMilli = micro / kMicroPerMilli <= 4.0e9 < UINT32_MAX without uint32_t overflow.
+	constexpr uint32_t kMilliPerPx = 1000u;
 	constexpr uint32_t kMicroPerPx = 1000000u;
+	constexpr uint32_t kMicroPerMilli = kMicroPerPx / kMilliPerPx;
+	constexpr double kMinSigmaPx = 0.5 / double(kMicroPerPx);
+	constexpr double kMaxSigmaPx = 4.0e6;
 	constexpr double kFactors[4] = { 3.0, 2.0, 4.0, 2.5 };
 
 	inline int FactorIndex(double f)
@@ -64,11 +74,12 @@ namespace BandMemo
 	}
 	inline bool EpsIsEncodable(double e) { return e == 0.0 || std::fabs(e - 1e-9) < 1e-18; }
 
-	// True when `k` is inside the codec's vocabulary (sigma > 0 and below ~4e6 px, a listed factor, eps 0 or 1e-9; Law::Low carries no
-	// factor / minOne / eps of its own: they must be the defaults so one law has one spelling).
+	// True when `k` is inside the codec's vocabulary (sigmaPx in [kMinSigmaPx, kMaxSigmaPx] so micro-pixel rounding stays
+	// strictly positive and fits uint32_t sigmaMilli, a listed factor, eps 0 or 1e-9; Law::Low carries no factor / minOne /
+	// eps of its own: they must be the defaults so one law has one spelling).
 	inline bool Encodable(const BandKey& k)
 	{
-		if (!(k.sigmaPx > 0.0) || k.sigmaPx > 4.0e6)
+		if (!(k.sigmaPx >= kMinSigmaPx) || !(k.sigmaPx <= kMaxSigmaPx))
 			return false;
 		if (k.law == Law::Low)
 			return k.factor == 3.0 && k.minOne && k.eps == 0.0;
@@ -82,6 +93,8 @@ namespace BandMemo
 		if (!Encodable(k))
 			return v;
 		const uint64_t micro = static_cast<uint64_t>(std::llround(k.sigmaPx * double(kMicroPerPx)));
+		if (micro == 0u)
+			return v;
 		v.scale = k.resolution == Stage::Half ? uint8_t(1) : uint8_t(0);
 		v.stage = k.pipelineStage;
 		v.plane = k.plane;
@@ -90,8 +103,8 @@ namespace BandMemo
 			v.width = k.width;
 			v.height = k.height;
 		}
-		v.sigmaMilli = static_cast<uint32_t>(micro / 1000u);
-		v.param0 = static_cast<uint16_t>(micro % 1000u);
+		v.sigmaMilli = static_cast<uint32_t>(micro / kMicroPerMilli);
+		v.param0 = static_cast<uint16_t>(micro % kMicroPerMilli);
 		uint16_t p1 = 0;
 		if (k.edge == BandFromBase::EdgeMode::Reflect) p1 |= 1u;
 		if (k.law == Law::Low) p1 |= 2u;
@@ -102,12 +115,19 @@ namespace BandMemo
 		return v;
 	}
 
-	// The key of a canonical VariantKey (its defaults are the zero fields: sigma 0 is not a band). False = not a band key.
+	// The key of a canonical VariantKey (its defaults are the zero fields: sigma 0 is not a band; param0 must lie in
+	// 0..kMicroPerMilli-1 so non-canonical param0 >= 1000 aliases cannot split memo slots; width/height are both or none).
+	// False = not a band key.
 	inline bool FromVariant(const VpSkeleton::VariantKey& v, BandKey* out)
 	{
 		if (v.sigmaMilli == 0u && v.param0 == 0u)
 			return false;
-		if (v.scale > 1u || v.precision != 0 || v.codeUnit != 0 || v.HasCrop() || v.param1 >= 64u)
+		if (v.param0 >= kMicroPerMilli)
+			return false;
+		if ((v.width == 0u) != (v.height == 0u))
+			return false;
+		if (v.scale > 1u || v.precision != 0 || v.codeUnit != 0 || v.HasCrop()
+			|| v.cropX != 0u || v.cropY != 0u || v.cropW != 0u || v.cropH != 0u || v.param1 >= 64u)
 			return false;
 		BandKey k;
 		k.resolution = v.scale == 1u ? Stage::Half : Stage::Full;
@@ -115,7 +135,7 @@ namespace BandMemo
 		k.plane = v.plane;
 		k.width = v.width;
 		k.height = v.height;
-		k.sigmaPx = (double(v.sigmaMilli) * 1000.0 + double(v.param0)) / double(kMicroPerPx);
+		k.sigmaPx = (double(v.sigmaMilli) * double(kMicroPerMilli) + double(v.param0)) / double(kMicroPerPx);
 		k.edge = (v.param1 & 1u) ? BandFromBase::EdgeMode::Reflect : BandFromBase::EdgeMode::Replicate;
 		k.law = (v.param1 & 2u) ? Law::Low : Law::Taps;
 		k.minOne = (v.param1 & 4u) == 0u;

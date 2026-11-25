@@ -45,16 +45,25 @@ namespace CameraLink
 		int Planes() const { return m_planes; }
 		bool IsFp16() const { return m_fp16; }
 		int Slots() const { return m_native ? m_native->Slots() : 0; }
+		// Exact allocated GPU + staging texture bytes across all slots (0 when inactive).
+		uint64_t AllocatedBytes() const;
 
 		// Exact IEEE-754 binary16 -> binary32 conversion (handles normals, subnormals, +/-0, +/-Inf, NaN).
 		static float HalfToFloat(uint16_t h);
 
-		// Dispatches the copy of a (and b when planes == 2) into slot i and queues the native copy. False: dispatch failed.
+		// Dispatches the copy of a (and b when planes == 2) into slot i and queues the native copy without flushing;
+		// call FlushPending() once after a batch of Start() calls (Poll/Read also flush once if still pending). False: dispatch failed.
 		bool Start(int slot, pl_tex a, pl_tex b);
-		// Never blocks. Pending: the GPU still holds the copy. Ready: mapped, Read returns it. Failed: an error
-		// HRESULT (LastError), not "still drawing": release the slot and show the failure.
-		LedDrive::ReadState Poll(int slot) { return m_native ? m_native->Poll(slot) : LedDrive::ReadState::Pending; }
+		// Submits all queued copies since the last flush with ONE pl_gpu_flush(m_gpu). False when nothing is pending.
+		bool FlushPending();
+		bool HasPendingFlush() const { return m_pendingFlush; }
+		uint64_t FlushCount() const { return m_flushCount; }
+		// Never blocks. Flushes pending queued copies once if needed. Pending: the GPU still holds the copy. Ready: mapped,
+		// Read returns it. Failed: an error HRESULT (LastError), not "still drawing": release the slot and show the failure.
+		LedDrive::ReadState Poll(int slot);
 		bool Ready(int slot) { return Poll(slot) == LedDrive::ReadState::Ready; }
+		// Drops a Ready slot's mapping without reading it (used when draining cleared slots).
+		void Discard(int slot) { if (m_native) m_native->Discard(slot); }
 		HRESULT LastError() const { return m_native ? m_native->LastError() : S_OK; }
 		// dst: w * h * planes * 4 floats. False while the GPU still holds the slot, and on an error.
 		bool Read(int slot, float* dst);
@@ -66,5 +75,7 @@ namespace CameraLink
 		pl_dispatch m_dispatch = nullptr;
 		int m_w = 0, m_h = 0, m_planes = 1;
 		bool m_fp16 = false;
+		bool m_pendingFlush = false;
+		uint64_t m_flushCount = 0;
 	};
 }

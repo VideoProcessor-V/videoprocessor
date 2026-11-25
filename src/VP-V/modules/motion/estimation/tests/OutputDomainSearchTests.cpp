@@ -5,11 +5,18 @@
 // (fallback/OutputDomainSearchGlsl.h) and is named by the shader with one `// VP_INCLUDE motion.output_domain_search` line.
 // These CPU tests pin that the expanded shader is BYTE-IDENTICAL to Temporal sigma-delta.glsl at b5ae6eda5 (the file the
 // passes were cut from) plus the GEM-W1B V1 sigma-delta MUST-1 quantiser hunk (9db725b55: the exact-code carry guard,
-// +7 lines), for LF and CRLF copies, that the shader file itself keeps no search pass, and that an unknown
-// include id fails the load (no silent shader without its search). The GPU proof (dither_vectors own capture hashes) is
-// RendererCaptureHarnessTests; this golden is the text form of the same claim (rule 28: never edit it to pass).
-// Re-pinned once under a lead WAIVER (A20-GEM rule 28, audit-W1B-9db725b55 M2/M3): the W2-C8 move itself was proven against
-// the plain b5ae6eda5 text (46000 bytes, FNV-1a 64 0xd631910eb881f914) up to dbbef8c07; the quantiser changed on purpose after.
+// +7 lines), the W23-A3 S2-H3 NaN/Inf-safe VALID_TAG & motion-gate hunk (72d94a734: +296 bytes), the W23-A3 S2-H4
+// exact-code dither-noise zeroing hunk (4619d3552: +423 bytes), and the W23-A3 AC#2 / GEM-026 near-black BTB clamp hunk
+// (1519996c2: +801 bytes), for LF and CRLF copies,
+// that the shader file itself keeps no search pass, and that an unknown include id fails the load (no silent shader without
+// its search). The GPU proof (dither_vectors own capture hashes) is RendererCaptureHarnessTests; this golden is the text form
+// of the same claim (rule 28: never edit it to pass).
+// Re-pinned under lead WAIVERs: first A20-GEM rule 28 (audit-W1B-9db725b55 M2/M3: b5ae6eda5 46000 bytes / 0xd631910eb881f914
+// -> 46429 bytes / 0x0d641f7c4ab28cb3); second WAIVER-W23-S2H3 (72d94a734 NaN/Inf-safe carried() tag & motion-gate fix:
+// 46429 bytes / 0x0d641f7c4ab28cb3 -> 46725 bytes / 0xe8f6cdb71922605e); third WAIVER-W23-S2H4 (4619d3552 exact-code
+// dither-noise zeroing fix in both quantiser branches: 46725 bytes / 0xe8f6cdb71922605e -> 47148 bytes / 0xbbadb2ca33be85e8);
+// fourth WAIVER-GEM-026 (AC#2 / GEM-026, 1519996c2 near-black code_min >= black_code clamp preserving BTB footroom:
+// 47148 bytes / 0xbbadb2ca33be85e8 -> 47949 bytes / 0x87ec256ae3caf978).
 #include "pch.h"
 #include "CppUnitTest.h"
 
@@ -27,9 +34,11 @@ namespace VideoProcessorTest
 	namespace
 	{
 		// FNV-1a 64 of `git show b5ae6eda5:"shaders/Temporal sigma-delta.glsl"` with the 9db725b55 quantiser hunk
-		// (`git diff dbbef8c07 9db725b55 -- "shaders/Temporal sigma-delta.glsl"`) applied (LF line ends, 46429 bytes).
-		constexpr uint64_t kOriginalFnv1a64 = 0x0d641f7c4ab28cb3ull;
-		constexpr size_t kOriginalBytes = 46429;
+		// (`git diff dbbef8c07 9db725b55`), the W23-A3 S2-H3 NaN/Inf-safe tag & motion-gate hunk (72d94a734),
+		// the W23-A3 S2-H4 exact-code dither-noise zeroing hunk (4619d3552), and the W23-A3 AC#2 / GEM-026
+		// near-black BTB clamp hunk (1519996c2) applied (LF line ends, 47949 bytes; re-pinned under WAIVER-GEM-026).
+		constexpr uint64_t kOriginalFnv1a64 = 0x87ec256ae3caf978ull;
+		constexpr size_t kOriginalBytes = 47949;
 
 		uint64_t Fnv1a64(const std::string& text)
 		{

@@ -301,10 +301,18 @@ namespace GrainSplit
 		std::string lastFiller_;
 	};
 
+	// Block-grid shift derived from RegionEvidence::BlockSizeFor(h) in {8, 16, 32, 64}: 16 px (shift 4 = log2(16)) is
+	// the declaration upper bound for >=768p (B in {16, 32, 64}); for <=720p (B = 8 = 2^3), shift 3 matches the real
+	// ceil(w/8) x ceil(h/8) block grid declared by TapFormProducts(reg, B). Non-positive blockPx defaults to shift 4.
+	inline uint8_t BlockShiftFor(int blockPx)
+	{
+		return (blockPx > 0 && blockPx <= 8) ? uint8_t(3) : uint8_t(4);
+	}
+
 	// The layout of one P10 buffer for the plane `desc` describes, for the GRANTED storage. Full: split rgba32f + blocks
 	// rgba32f; Compact: A rg16f + B rg16 + blocks rgba32f (N, e3, e1, e2). The block grid is ABSOLUTE: ceil(w / B) x
-	// ceil(h / B) of the node's real block edge (the declaration counts it at the smallest edge, 16 px, an upper bound:
-	// ProductTexLayout::MatchesDecl matches per shift and bounds the grid per axis).
+	// ceil(h / B) of the node's real block edge (the declaration counts it at shift BlockShiftFor(B): 8 px for <=720p,
+	// 16 px upper bound for >=768p; ProductTexLayout::MatchesDecl matches per shift and bounds the grid per axis).
 	inline VpSkeleton::ProductTexLayout GrainLayout(Storage storage, const GrainDesc& desc)
 	{
 		using VpSkeleton::TexFormat;
@@ -319,10 +327,7 @@ namespace GrainSplit
 		};
 		const int B = desc.B > 0 ? desc.B : 1;
 		const uint32_t bw = static_cast<uint32_t>((desc.w + B - 1) / B), bh = static_cast<uint32_t>((desc.h + B - 1) / B);
-		// Derived from RegionEvidence::BlockSizeFor(h) in {8, 16, 32, 64}: 16 px (shift 4 = log2(16)) is the
-		// declaration upper bound for >=768p (B in {16, 32, 64}); for <=720p (B = 8 = 2^3), shift 3 matches the
-		// real ceil(w/8) x ceil(h/8) block grid declared by TapFormProducts(reg, B).
-		const uint8_t blockShift = B <= 8 ? uint8_t(3) : uint8_t(4);
+		const uint8_t blockShift = BlockShiftFor(B);
 		if (storage == Storage::Compact)
 		{
 			term(0, TexFormat::RG16F, 0, 0);
@@ -339,9 +344,21 @@ namespace GrainSplit
 
 	// The P10 declaration of the GRANTED storage (finisher MUST 2): the governor plans, and ProductTextures checks, what is
 	// really allocated. Built from the one core declaration (VpSkeleton::AppendGrainSplitProducts), never a private copy.
-	inline VpSkeleton::ProductDecl GrainDecl(Storage granted)
+	// `blockPx` is the node's runtime block edge (RegionEvidence::BlockSizeFor(h) in {8, 16, 32, 64}; default 16 keeps the
+	// static shift-4 declaration for >=768p and 1-arg callers). For <=720p (blockPx <= 8), the block-grid term shift is
+	// rewritten 4 -> 3 to match GrainLayout and TapFormProducts(reg, blockPx).
+	inline VpSkeleton::ProductDecl GrainDecl(Storage granted, int blockPx = 16)
 	{
-		return VpSkeleton::SkeletonProducts(granted == Storage::Compact).Get(VpSkeleton::kP10GrainSplit);
+		VpSkeleton::ProductDecl decl = VpSkeleton::SkeletonProducts(granted == Storage::Compact).Get(VpSkeleton::kP10GrainSplit);
+		const uint8_t blockShift = BlockShiftFor(blockPx);
+		if (blockShift != 4u)
+		{
+			const size_t n = decl.size.termCount < decl.size.terms.size() ? size_t(decl.size.termCount) : decl.size.terms.size();
+			for (size_t i = 0; i < n; ++i)
+				if (decl.size.terms[i].shift == 4u)
+					decl.size.terms[i].shift = blockShift;
+		}
+		return decl;
 	}
 	// The skeleton registry for the GRANTED storages (what the tier plan / governor must be built from): luma (P10) and the
 	// chroma planes (P10c) are granted separately (ChooseStorage per plane).

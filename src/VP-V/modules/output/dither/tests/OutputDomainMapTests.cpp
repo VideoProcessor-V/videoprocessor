@@ -243,5 +243,89 @@ namespace OutputDomainMapTestsNs
 				Require(std::memcmp(&a.x, &b.x, sizeof(double)) == 0, L"bit-identical");
 			}
 		}
+
+		// GEM-SD-VECTORS MUST-6 adversarial test: MapVector MUST reject non-finite displacements (NaN, +-Inf) in vx/vy
+		// and finite displacements that overflow or invalidate the endpoint, returning valid == false, inside == false,
+		// and finite zero displacement (0.0, 0.0) so NaN/Inf never propagates downstream.
+		BEGIN_TEST_METHOD_ATTRIBUTE(MapVectorRejectsNonFiniteDisplacementAndEndpoint)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(MapVectorRejectsNonFiniteDisplacementAndEndpoint)
+		{
+			const Config c = Letterbox();   // active (0,140)-(1920,940) -> output (0,280)-(3840,1880), 2x scale
+			const double startX = 400.0, startY = 500.0;
+			const double nan = std::numeric_limits<double>::quiet_NaN();
+			const double inf = std::numeric_limits<double>::infinity();
+			const double maxD = (std::numeric_limits<double>::max)();
+
+			// Same-input finite-vector positive control: identical config and start point map cleanly with 2x scale.
+			const Result ok = MapVector(c, startX, startY, 20.0, -4.0);
+			Require(ok.valid && ok.inside && detail::Fin(ok.x) && detail::Fin(ok.y), L"positive control: finite vector valid and inside");
+			Require(Near(ok.x, 40.0, 1e-9) && Near(ok.y, -8.0, 1e-9), L"positive control: finite vector scales by 2x");
+
+			// Same-input negative control (Rule 3): naive unguarded endpoint subtraction e.x - s.x produces non-finite
+			// values on NaN, +Inf, and finite overflow displacements (proving the hazard is real on these inputs).
+			{
+				const Result s = MapPoint(c, startX, startY);
+				Require(s.valid && s.inside, L"start point valid and inside");
+				const Result eNan = MapPoint(c, startX + nan, startY);
+				const Result eInf = MapPoint(c, startX + inf, startY);
+				const Result eOvf = MapPoint(c, startX + maxD, startY);
+				Require(!detail::Fin(eNan.x - s.x), L"Negative control: naive e.x - s.x leaks NaN");
+				Require(!detail::Fin(eInf.x - s.x), L"Negative control: naive e.x - s.x leaks +Inf");
+				Require(!detail::Fin(eOvf.x - s.x), L"Negative control: finite DBL_MAX on 2x scale overflows e.x - s.x to +Inf");
+			}
+
+			auto checkRejected = [](const Result& r, const wchar_t* label)
+			{
+				Require(!r.valid, label);
+				Require(!r.inside, label);
+				Require(detail::Fin(r.x) && detail::Fin(r.y), label);
+				Require(r.x == 0.0 && r.y == 0.0, label);
+			};
+
+			// 1. Non-finite displacements in vx / vy (NaN, +Inf, -Inf):
+			checkRejected(MapVector(c, startX, startY, nan, 0.0), L"NaN vx must be rejected with finite (0, 0)");
+			checkRejected(MapVector(c, startX, startY, 0.0, nan), L"NaN vy must be rejected with finite (0, 0)");
+			checkRejected(MapVector(c, startX, startY, nan, nan), L"NaN vx/vy must be rejected with finite (0, 0)");
+			checkRejected(MapVector(c, startX, startY, inf, 0.0), L"+Inf vx must be rejected with finite (0, 0)");
+			checkRejected(MapVector(c, startX, startY, 0.0, inf), L"+Inf vy must be rejected with finite (0, 0)");
+			checkRejected(MapVector(c, startX, startY, -inf, 1.0), L"-Inf vx must be rejected with finite (0, 0)");
+			checkRejected(MapVector(c, startX, startY, 1.0, -inf), L"-Inf vy must be rejected with finite (0, 0)");
+
+			// Non-finite displacement on an invalid map config MUST still return finite (0, 0), never echo NaN/Inf.
+			const Config invalidCfg;
+			checkRejected(MapVector(invalidCfg, startX, startY, nan, 1.0), L"NaN vx on invalid config must not echo NaN");
+			checkRejected(MapVector(invalidCfg, startX, startY, 1.0, inf), L"+Inf vy on invalid config must not echo +Inf");
+
+			// 2. Finite displacement causing mapped endpoint overflow (!Fin(dx) / !Fin(dy)) on 2x output scale:
+			checkRejected(MapVector(c, startX, startY, maxD, 0.0), L"finite +DBL_MAX vx overflowing mapped endpoint must be rejected");
+			checkRejected(MapVector(c, startX, startY, -maxD, 0.0), L"finite -DBL_MAX vx overflowing mapped endpoint must be rejected");
+			checkRejected(MapVector(c, startX, startY, 0.0, maxD), L"finite +DBL_MAX vy overflowing mapped endpoint must be rejected");
+			checkRejected(MapVector(c, startX, startY, 0.0, -maxD), L"finite -DBL_MAX vy overflowing mapped endpoint must be rejected");
+
+			// 3. Finite displacement causing endpoint sum overflow (x + vx == +Inf -> !e.valid) on valid identity map:
+			const Config id = Config::Identity(1920, 1080);
+			const double bigX = 1.0e308;
+			Require(MapPoint(id, bigX, 500.0).valid, L"start point at 1e308 is finite and valid");
+			Require(!MapPoint(id, bigX + bigX, 500.0).valid, L"Negative control: finite bigX + bigX overflows endpoint to invalid +Inf");
+			const Result bigOk = MapVector(id, bigX, 500.0, -1.0e307, 2.0);
+			Require(bigOk.valid && detail::Fin(bigOk.x) && detail::Fin(bigOk.y), L"positive control: finite non-overflowing step from bigX stays valid");
+			checkRejected(MapVector(id, bigX, 500.0, bigX, 0.0), L"finite vx overflowing x + vx to +Inf (!e.valid) must be rejected");
+
+			// 4. Downstream MapBlockVectors isolation: a NaN block produces finite (0, 0) and inside == 0 while its neighbor maps cleanly.
+			Config scale2 = Config::Identity(1920, 1080);
+			scale2.output = MakeBox(0, 0, 3840, 2160);
+			CameraModel::Rect fullPic;
+			fullPic.left = 0; fullPic.top = 0; fullPic.right = 1920; fullPic.bottom = 1080;
+			const std::vector<float> mx = { 20.0f, std::numeric_limits<float>::quiet_NaN() };
+			const std::vector<float> my = { 4.0f, 1.0f };
+			std::vector<float> ox, oy;
+			std::vector<uint8_t> inside;
+			Require(MapBlockVectors(scale2, fullPic, 2, 1, 16.0, mx, my, ox, oy, inside), L"MapBlockVectors succeeds on valid config");
+			Require(inside[0] == 1 && Near(ox[0], 40.0, 1e-4) && Near(oy[0], 8.0, 1e-4), L"finite neighbor block maps normally");
+			Require(inside[1] == 0 && CameraModel::IsFiniteBits(ox[1]) && CameraModel::IsFiniteBits(oy[1]) && ox[1] == 0.0f && oy[1] == 0.0f,
+				L"NaN block in MapBlockVectors must yield finite (0, 0) and inside == 0");
+		}
 	};
 }

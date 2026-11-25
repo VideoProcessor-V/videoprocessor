@@ -61,7 +61,7 @@ namespace GrainSplit
 			NodeLayout n;
 			n.choice = ChooseStorage(requested, planeFormat, codeUnit);
 			n.layout = GrainLayout(n.choice.storage, desc);
-			n.decl = GrainDecl(n.choice.storage);
+			n.decl = GrainDecl(n.choice.storage, desc.B);
 			return n;
 		}
 

@@ -30,6 +30,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <random>
 #include <string>
 #include <vector>
@@ -569,5 +570,387 @@ public:
 			Assert::IsTrue(blocks > 0, L"blocks were compared");
 			Assert::IsTrue(static_cast<double>(agree) >= 0.995 * static_cast<double>(blocks), Wide(total).c_str());
 		}
+	}
+
+	// S2-H7: Splitter::Release(nullptr) (detached/lost GPU) must null all 9 private texture handles AND reset the active
+	// stepped run (m_run), so a mid-step Release(nullptr) cannot continue via Step(...) and reusing the same Splitter on a
+	// fresh WARP device succeeds cleanly with bit-identical output for both Full and Compact layouts.
+	BEGIN_TEST_METHOD_ATTRIBUTE(V3ReleaseNullClearsActiveStepAndRecoversOnFreshDevice)
+		TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+	END_TEST_METHOD_ATTRIBUTE()
+	TEST_METHOD(V3ReleaseNullClearsActiveStepAndRecoversOnFreshDevice)
+	{
+		using namespace GrainSplitV3GpuTestsNs;
+		struct TexGuard
+		{
+			pl_gpu gpu = nullptr;
+			pl_tex tex = nullptr;
+			TexGuard(pl_gpu g, pl_tex t) : gpu(g), tex(t) {}
+			~TexGuard() { if (gpu && tex) pl_tex_destroy(gpu, &tex); }
+			TexGuard(const TexGuard&) = delete;
+			TexGuard& operator=(const TexGuard&) = delete;
+		};
+		struct SplitterGuard
+		{
+			pl_gpu gpu = nullptr;
+			GrainSplit::Gpu::Splitter* s = nullptr;
+			SplitterGuard(pl_gpu g, GrainSplit::Gpu::Splitter* sp) : gpu(g), s(sp) {}
+			~SplitterGuard() { if (gpu && s) s->Release(gpu); }
+			SplitterGuard(const SplitterGuard&) = delete;
+			SplitterGuard& operator=(const SplitterGuard&) = delete;
+		};
+
+		const int w = 128, h = 96, B = 16;
+		const double scale = B / 16.0;
+		const Plane y = MakePlane(w, h, 709u);
+		const GrainSplit::Params params;
+		GrainSplit::Gpu::Options fullOpts;
+		fullOpts.storage = Storage::Full;
+		GrainSplit::Gpu::Options compactOpts;
+		compactOpts.storage = Storage::Compact;
+
+		Product refFull, refCompact;
+		GrainSplit::Gpu::Splitter splitter;   // survives dev1 teardown to verify fresh-device recovery on dev2
+
+		// Phase 1: first WARP device (negative controls, mid-step Release(nullptr), and handle-forgetting verification).
+		{
+			GpuDevice dev1;
+			Assert::IsTrue(dev1.Create(), L"Could not create first libplacebo WARP test device");
+			pl_gpu gpu1 = dev1.Gpu();
+			TexGuard tex1{ gpu1, UploadLuma(gpu1, y) };
+			Assert::IsNotNull(tex1.tex, L"upload plane on dev1");
+
+			// (1) Same-input negative control: without Release(nullptr), Step(0), Step(1), Step(2)..Step(6) succeed
+			// continuously and produce a valid Frame and reference outputs for both Full and Compact layouts.
+			{
+				GrainSplit::Gpu::Splitter control;
+				SplitterGuard controlGuard{ gpu1, &control };
+				Assert::IsTrue(control.Step(gpu1, dev1.dispatch, tex1.tex, 0, kCodeUnit, scale, B, params, fullOpts, 0u),
+					Wide("control Step(0): " + control.LastError()).c_str());
+				Assert::IsTrue(control.Step(gpu1, dev1.dispatch, tex1.tex, 0, kCodeUnit, scale, B, params, fullOpts, 1u),
+					Wide("control Step(1): " + control.LastError()).c_str());
+				Assert::IsTrue(control.Step(gpu1, dev1.dispatch, tex1.tex, 0, kCodeUnit, scale, B, params, fullOpts, 2u),
+					Wide("negative control: without Release(nullptr), Step(2) must continue the active run: " + control.LastError()).c_str());
+				for (uint32_t s = 3u; s < GrainSplit::Gpu::Splitter::StepCount(); ++s)
+				{
+					Assert::IsTrue(control.Step(gpu1, dev1.dispatch, tex1.tex, 0, kCodeUnit, scale, B, params, fullOpts, s),
+						Wide("control Step(" + std::to_string(s) + "): " + control.LastError()).c_str());
+				}
+				const GrainSplit::Gpu::Frame& cf = control.Out();
+				Assert::IsNotNull(cf.split, L"control Full Out().split");
+				Assert::IsNotNull(cf.blocks, L"control Full Out().blocks");
+				Assert::AreEqual(w, cf.w, L"control Full Out().w");
+				Assert::AreEqual(h, cf.h, L"control Full Out().h");
+				Assert::AreEqual(GrainSplit::kUnitVersion, cf.version, L"control Full Out().version");
+				refFull.a = DownloadRGBA(gpu1, dev1.dispatch, cf.split);
+				refFull.blocks = DownloadRGBA(gpu1, dev1.dispatch, cf.blocks);
+				Assert::IsTrue(!refFull.a.empty() && !refFull.blocks.empty(), L"control Full download");
+
+				Assert::IsTrue(control.Compute(gpu1, dev1.dispatch, tex1.tex, 0, kCodeUnit, scale, B, params, compactOpts),
+					Wide("control Compact Compute: " + control.LastError()).c_str());
+				const GrainSplit::Gpu::Frame& cc = control.Out();
+				Assert::IsNotNull(cc.split, L"control Compact Out().split");
+				Assert::IsNotNull(cc.splitB, L"control Compact Out().splitB");
+				Assert::IsNotNull(cc.blocks, L"control Compact Out().blocks");
+				refCompact.a = DownloadRGBA(gpu1, dev1.dispatch, cc.split);
+				refCompact.b = DownloadRGBA(gpu1, dev1.dispatch, cc.splitB);
+				refCompact.blocks = DownloadRGBA(gpu1, dev1.dispatch, cc.blocks);
+				Assert::IsTrue(!refCompact.a.empty() && !refCompact.b.empty() && !refCompact.blocks.empty(), L"control Compact download");
+			}
+
+			// (2) Populate all 9 private texture handles (Compact allocates m_tmp..m_level, m_blocks, m_outA, m_outB;
+			// starting a Full stepped run also allocates m_outFull while leaving m_run active mid-step at next = 2).
+			Assert::IsTrue(splitter.Compute(gpu1, dev1.dispatch, tex1.tex, 0, kCodeUnit, scale, B, params, compactOpts),
+				Wide("splitter Compact Compute on dev1: " + splitter.LastError()).c_str());
+			Assert::IsNotNull(splitter.Out().split, L"pre-release Compact Out().split is live");
+			Assert::IsNotNull(splitter.Out().splitB, L"pre-release Compact Out().splitB is live");
+			Assert::IsNotNull(splitter.Out().blocks, L"pre-release Compact Out().blocks is live");
+			Assert::AreEqual(w, splitter.Out().w, L"pre-release Out().w");
+			Assert::AreEqual(h, splitter.Out().h, L"pre-release Out().h");
+			Assert::AreEqual(GrainSplit::kUnitVersion, splitter.Out().version, L"pre-release Out().version");
+
+			Assert::IsTrue(splitter.Step(gpu1, dev1.dispatch, tex1.tex, 0, kCodeUnit, scale, B, params, fullOpts, 0u),
+				Wide("splitter Step(0) on dev1: " + splitter.LastError()).c_str());
+			Assert::IsTrue(splitter.Step(gpu1, dev1.dispatch, tex1.tex, 0, kCodeUnit, scale, B, params, fullOpts, 1u),
+				Wide("splitter Step(1) confirms active run with live textures before Release(nullptr): " + splitter.LastError()).c_str());
+
+			// Mid-step Release(nullptr): simulates lost/detached GPU where pl_tex_destroy cannot be called.
+			splitter.Release(nullptr);
+			Assert::IsNull(splitter.Out().split, L"Release(nullptr) clears Out().split");
+			Assert::IsNull(splitter.Out().splitB, L"Release(nullptr) clears Out().splitB");
+			Assert::IsNull(splitter.Out().blocks, L"Release(nullptr) clears Out().blocks");
+			Assert::AreEqual(0, splitter.Out().w, L"Release(nullptr) clears Out().w");
+			Assert::AreEqual(0, splitter.Out().h, L"Release(nullptr) clears Out().h");
+			Assert::AreEqual(static_cast<uint32_t>(0), splitter.Out().version, L"Release(nullptr) clears Out().version");
+
+			// Pre-fix bug #1: Release(nullptr) left m_run.active = true and m_run.next = 2, so Step(2) succeeded
+			// using stale handles instead of failing cleanly with "step out of order".
+			const bool continuedAfterNullRelease = splitter.Step(gpu1, dev1.dispatch, tex1.tex, 0, kCodeUnit, scale, B, params, fullOpts, 2u);
+			Assert::IsFalse(continuedAfterNullRelease,
+				L"Step(2) after mid-step Release(nullptr) must fail rather than continuing the abandoned run");
+			Assert::IsTrue(splitter.LastError().find("step out of order") != std::string::npos,
+				Wide("expected 'step out of order' after Release(nullptr), got: " + splitter.LastError()).c_str());
+			Assert::IsNull(splitter.Out().split, L"failed Step(2) leaves Out().split null");
+			Assert::IsNull(splitter.Out().splitB, L"failed Step(2) leaves Out().splitB null");
+			Assert::IsNull(splitter.Out().blocks, L"failed Step(2) leaves Out().blocks null");
+
+			// (3) Pre-fix bug #2 deterministic pointer-identity proof (zero UB): without Release(nullptr), pl_tex_recreate
+			// reuses cached non-null output handles; after Release(nullptr), all cached handles must be forgotten so
+			// subsequent Compute allocates fresh pl_tex handles at distinct addresses while the abandoned ones remain live.
+			{
+				GrainSplit::Gpu::Splitter ptrProbe;
+				Assert::IsTrue(ptrProbe.Compute(gpu1, dev1.dispatch, tex1.tex, 0, kCodeUnit, scale, B, params, fullOpts),
+					Wide("ptrProbe Full Compute 1: " + ptrProbe.LastError()).c_str());
+				pl_tex oldFullSplit = ptrProbe.Out().split;
+				pl_tex oldFullBlocks = ptrProbe.Out().blocks;
+				Assert::IsNotNull(oldFullSplit, L"ptrProbe oldFullSplit");
+				Assert::IsNotNull(oldFullBlocks, L"ptrProbe oldFullBlocks");
+
+				Assert::IsTrue(ptrProbe.Compute(gpu1, dev1.dispatch, tex1.tex, 0, kCodeUnit, scale, B, params, compactOpts),
+					Wide("ptrProbe Compact Compute 1: " + ptrProbe.LastError()).c_str());
+				pl_tex oldCompactA = ptrProbe.Out().split;
+				pl_tex oldCompactB = ptrProbe.Out().splitB;
+				Assert::IsNotNull(oldCompactA, L"ptrProbe oldCompactA");
+				Assert::IsNotNull(oldCompactB, L"ptrProbe oldCompactB");
+
+				// Negative control: without Release(nullptr), cached handles are reused identically by pl_tex_recreate.
+				Assert::IsTrue(ptrProbe.Compute(gpu1, dev1.dispatch, tex1.tex, 0, kCodeUnit, scale, B, params, compactOpts),
+					Wide("ptrProbe Compact Compute negative control: " + ptrProbe.LastError()).c_str());
+				Assert::IsTrue(ptrProbe.Out().split == oldCompactA,
+					L"negative control: without Release(nullptr), Splitter reuses cached m_outA handle");
+				Assert::IsTrue(ptrProbe.Out().splitB == oldCompactB,
+					L"negative control: without Release(nullptr), Splitter reuses cached m_outB handle");
+				Assert::IsTrue(ptrProbe.Out().blocks == oldFullBlocks,
+					L"negative control: without Release(nullptr), Splitter reuses cached m_blocks handle");
+
+				ptrProbe.Release(nullptr);
+				Assert::IsNull(ptrProbe.Out().split, L"ptrProbe Release(nullptr) clears Out().split");
+				Assert::IsNull(ptrProbe.Out().splitB, L"ptrProbe Release(nullptr) clears Out().splitB");
+				Assert::IsNull(ptrProbe.Out().blocks, L"ptrProbe Release(nullptr) clears Out().blocks");
+
+				// After Release(nullptr), private pointers must be nulled so pl_tex_recreate allocates new handles
+				// rather than reusing the old ones (which were not destroyed because gpu was nullptr).
+				Assert::IsTrue(ptrProbe.Compute(gpu1, dev1.dispatch, tex1.tex, 0, kCodeUnit, scale, B, params, fullOpts),
+					Wide("ptrProbe Full Compute after Release(nullptr): " + ptrProbe.LastError()).c_str());
+				Assert::IsNotNull(ptrProbe.Out().split, L"ptrProbe newFullSplit");
+				Assert::IsNotNull(ptrProbe.Out().blocks, L"ptrProbe newFullBlocks");
+				Assert::IsTrue(ptrProbe.Out().split != oldFullSplit,
+					L"Release(nullptr) must null m_outFull so a new texture is allocated instead of reusing the old handle");
+				Assert::IsTrue(ptrProbe.Out().blocks != oldFullBlocks,
+					L"Release(nullptr) must null m_blocks so a new texture is allocated instead of reusing the old handle");
+
+				Assert::IsTrue(ptrProbe.Compute(gpu1, dev1.dispatch, tex1.tex, 0, kCodeUnit, scale, B, params, compactOpts),
+					Wide("ptrProbe Compact Compute after Release(nullptr): " + ptrProbe.LastError()).c_str());
+				Assert::IsNotNull(ptrProbe.Out().split, L"ptrProbe newCompactA");
+				Assert::IsNotNull(ptrProbe.Out().splitB, L"ptrProbe newCompactB");
+				Assert::IsTrue(ptrProbe.Out().split != oldCompactA,
+					L"Release(nullptr) must null m_outA so a new texture is allocated instead of reusing the old handle");
+				Assert::IsTrue(ptrProbe.Out().splitB != oldCompactB,
+					L"Release(nullptr) must null m_outB so a new texture is allocated instead of reusing the old handle");
+
+				// Clean up both the newly created textures and the four saved old output textures (proven distinct above).
+				ptrProbe.Release(gpu1);
+				pl_tex_destroy(gpu1, &oldFullSplit);
+				pl_tex_destroy(gpu1, &oldFullBlocks);
+				pl_tex_destroy(gpu1, &oldCompactA);
+				pl_tex_destroy(gpu1, &oldCompactB);
+			}
+		}   // dev1 is now completely destroyed (simulating real device loss)
+
+		// Phase 2: create a brand-new WARP device and reuse the SAME Splitter instance across all 9 texture slots.
+		{
+			GpuDevice dev2;
+			Assert::IsTrue(dev2.Create(), L"Could not create second libplacebo WARP test device");
+			pl_gpu gpu2 = dev2.Gpu();
+			SplitterGuard splitterGuard{ gpu2, &splitter };
+			TexGuard tex2{ gpu2, UploadLuma(gpu2, y) };
+			Assert::IsNotNull(tex2.tex, L"upload plane on dev2");
+
+			// Full Compute on dev2 exercises Ensure on m_tmp, m_low, m_part, m_quiet, m_level, m_blocks, m_outFull.
+			Assert::IsTrue(splitter.Compute(gpu2, dev2.dispatch, tex2.tex, 0, kCodeUnit, scale, B, params, fullOpts),
+				Wide("Full Compute on fresh device after Release(nullptr) failed: " + splitter.LastError()).c_str());
+			const GrainSplit::Gpu::Frame& f2 = splitter.Out();
+			Assert::IsNotNull(f2.split, L"dev2 Full Out().split");
+			Assert::IsNull(f2.splitB, L"dev2 Full Out().splitB is null");
+			Assert::IsNotNull(f2.blocks, L"dev2 Full Out().blocks");
+			Assert::AreEqual(w, f2.w, L"dev2 Full Out().w");
+			Assert::AreEqual(h, f2.h, L"dev2 Full Out().h");
+			Assert::AreEqual(GrainSplit::kUnitVersion, f2.version, L"dev2 Full Out().version");
+			const std::vector<float> gotFullA = DownloadRGBA(gpu2, dev2.dispatch, f2.split);
+			const std::vector<float> gotFullBlocks = DownloadRGBA(gpu2, dev2.dispatch, f2.blocks);
+			Assert::IsTrue(SameBits(refFull.a, gotFullA) && SameBits(refFull.blocks, gotFullBlocks),
+				L"Full output on fresh device after Release(nullptr) must be bit-identical to dev1 reference");
+
+			// Compact Compute on dev2 also exercises Ensure on m_outA and m_outB (covering all 9 m_* handles).
+			Assert::IsTrue(splitter.Compute(gpu2, dev2.dispatch, tex2.tex, 0, kCodeUnit, scale, B, params, compactOpts),
+				Wide("Compact Compute on fresh device after Release(nullptr) failed: " + splitter.LastError()).c_str());
+			const GrainSplit::Gpu::Frame& c2 = splitter.Out();
+			Assert::IsNotNull(c2.split, L"dev2 Compact Out().split");
+			Assert::IsNotNull(c2.splitB, L"dev2 Compact Out().splitB");
+			Assert::IsNotNull(c2.blocks, L"dev2 Compact Out().blocks");
+			const std::vector<float> gotCompactA = DownloadRGBA(gpu2, dev2.dispatch, c2.split);
+			const std::vector<float> gotCompactB = DownloadRGBA(gpu2, dev2.dispatch, c2.splitB);
+			const std::vector<float> gotCompactBlocks = DownloadRGBA(gpu2, dev2.dispatch, c2.blocks);
+			Assert::IsTrue(SameBits(refCompact.a, gotCompactA) && SameBits(refCompact.b, gotCompactB) && SameBits(refCompact.blocks, gotCompactBlocks),
+				L"Compact output on fresh device after Release(nullptr) must be bit-identical to dev1 reference");
+
+			// Stepped loop on dev2 also recovers cleanly and matches Full reference bit-for-bit.
+			for (uint32_t s = 0u; s < GrainSplit::Gpu::Splitter::StepCount(); ++s)
+			{
+				Assert::IsTrue(splitter.Step(gpu2, dev2.dispatch, tex2.tex, 0, kCodeUnit, scale, B, params, fullOpts, s),
+					Wide("dev2 Step(" + std::to_string(s) + "): " + splitter.LastError()).c_str());
+			}
+			const std::vector<float> gotSteppedA = DownloadRGBA(gpu2, dev2.dispatch, splitter.Out().split);
+			const std::vector<float> gotSteppedBlocks = DownloadRGBA(gpu2, dev2.dispatch, splitter.Out().blocks);
+			Assert::IsTrue(SameBits(refFull.a, gotSteppedA) && SameBits(refFull.blocks, gotSteppedBlocks),
+				L"stepped run on fresh device after Release(nullptr) must match dev1 reference bit-for-bit");
+
+			// Mid-step Release(validGpu) must also reset m_run so Step(2) fails cleanly instead of touching freed handles.
+			Assert::IsTrue(splitter.Step(gpu2, dev2.dispatch, tex2.tex, 0, kCodeUnit, scale, B, params, fullOpts, 0u),
+				Wide("dev2 pre-Release(gpu2) Step(0): " + splitter.LastError()).c_str());
+			Assert::IsTrue(splitter.Step(gpu2, dev2.dispatch, tex2.tex, 0, kCodeUnit, scale, B, params, fullOpts, 1u),
+				Wide("dev2 pre-Release(gpu2) Step(1): " + splitter.LastError()).c_str());
+			splitter.Release(gpu2);
+			Assert::IsNull(splitter.Out().split, L"Release(gpu2) clears Out().split");
+			Assert::IsNull(splitter.Out().blocks, L"Release(gpu2) clears Out().blocks");
+			Assert::AreEqual(static_cast<uint32_t>(0), splitter.Out().version, L"Release(gpu2) clears Out().version");
+			Assert::IsFalse(splitter.Step(gpu2, dev2.dispatch, tex2.tex, 0, kCodeUnit, scale, B, params, fullOpts, 2u),
+				L"Step(2) after mid-step Release(gpu2) must fail cleanly");
+			Assert::IsTrue(splitter.LastError().find("step out of order") != std::string::npos,
+				Wide("expected 'step out of order' after Release(gpu2), got: " + splitter.LastError()).c_str());
+
+			Logger::WriteMessage("S2-H7: mid-step Release(nullptr) cleared active run + all 9 handles and recovered bit-identically on fresh WARP device");
+		}
+	}
+
+	// S2-M2: Splitter::Begin and StepOn must visibly reject non-finite (+Inf/-Inf/NaN and overflowing reciprocals/products)
+	// scale, codeUnit, and Params fields before any GPU pass or GaussRadius cast, clear Out(), report "non-finite" in
+	// LastError(), and recover cleanly on the same Splitter instance with valid finite arguments.
+	BEGIN_TEST_METHOD_ATTRIBUTE(SplitterRejectsInfiniteScaleCodeUnitAndSigmasVisibly)
+		TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+	END_TEST_METHOD_ATTRIBUTE()
+	TEST_METHOD(SplitterRejectsInfiniteScaleCodeUnitAndSigmasVisibly)
+	{
+		using namespace GrainSplitV3GpuTestsNs;
+		struct TexGuard
+		{
+			pl_gpu gpu = nullptr;
+			pl_tex tex = nullptr;
+			TexGuard(pl_gpu g, pl_tex t) : gpu(g), tex(t) {}
+			~TexGuard() { if (gpu && tex) pl_tex_destroy(gpu, &tex); }
+			TexGuard(const TexGuard&) = delete;
+			TexGuard& operator=(const TexGuard&) = delete;
+		};
+		struct SplitterGuard
+		{
+			pl_gpu gpu = nullptr;
+			GrainSplit::Gpu::Splitter* s = nullptr;
+			SplitterGuard(pl_gpu g, GrainSplit::Gpu::Splitter* sp) : gpu(g), s(sp) {}
+			~SplitterGuard() { if (gpu && s) s->Release(gpu); }
+			SplitterGuard(const SplitterGuard&) = delete;
+			SplitterGuard& operator=(const SplitterGuard&) = delete;
+		};
+
+		GpuDevice dev;
+		Assert::IsTrue(dev.Create(), L"Could not create the libplacebo WARP test device");
+		pl_gpu gpu = dev.Gpu();
+
+		const int w = 64, h = 64, B = 16;
+		const double validScale = 1.0;
+		const double validCodeUnit = 1.0 / 1023.0;
+		const GrainSplit::Params validParams{};
+		const Plane y = MakePlane(w, h, 823u);
+		TexGuard tex{ gpu, UploadLuma(gpu, y) };
+		Assert::IsNotNull(tex.tex, L"upload plane");
+
+		GrainSplit::Gpu::Splitter splitter;
+		SplitterGuard splitterGuard{ gpu, &splitter };
+
+		// (1) Positive control on the exact same texture: valid finite arguments succeed and populate Out().
+		Assert::IsTrue(splitter.Compute(gpu, dev.dispatch, tex.tex, 0, validCodeUnit, validScale, B, validParams),
+			Wide("positive control Compute failed: " + splitter.LastError()).c_str());
+		Assert::IsTrue(splitter.LastError().empty(),
+			Wide("positive control must clear LastError, got: " + splitter.LastError()).c_str());
+		Assert::IsNotNull(splitter.Out().split, L"positive control Out().split");
+		Assert::IsNotNull(splitter.Out().blocks, L"positive control Out().blocks");
+		Assert::AreEqual(w, splitter.Out().w, L"positive control Out().w");
+		Assert::AreEqual(h, splitter.Out().h, L"positive control Out().h");
+		Assert::AreEqual(GrainSplit::kUnitVersion, splitter.Out().version, L"positive control Out().version");
+		const std::vector<float> refSplit = DownloadRGBA(gpu, dev.dispatch, splitter.Out().split);
+		const std::vector<float> refBlocks = DownloadRGBA(gpu, dev.dispatch, splitter.Out().blocks);
+		Assert::IsTrue(!refSplit.empty() && !refBlocks.empty(), L"positive control download");
+
+		// (2) Non-finite adversarial inputs on the exact same texture and Splitter instance.
+		const double kInf = std::numeric_limits<double>::infinity();
+		const double kNan = std::numeric_limits<double>::quiet_NaN();
+		auto withParam = [&](auto mutator) {
+			GrainSplit::Params p = validParams;
+			mutator(p);
+			return p;
+		};
+		struct BadCase
+		{
+			const char* label;
+			double codeUnit;
+			double scale;
+			GrainSplit::Params params;
+		};
+		const BadCase badCases[] = {
+			{ "scale=+Inf", validCodeUnit, kInf, validParams },
+			{ "scale=-Inf", validCodeUnit, -kInf, validParams },
+			{ "scale=NaN", validCodeUnit, kNan, validParams },
+			{ "codeUnit=+Inf", kInf, validScale, validParams },
+			{ "codeUnit=1e-320 (1/codeUnit overflows to +Inf)", 1e-320, validScale, validParams },
+			{ "params.sigmaFine=+Inf", validCodeUnit, validScale, withParam([&](GrainSplit::Params& p) { p.sigmaFine = kInf; }) },
+			{ "params.sigmaBase=+Inf", validCodeUnit, validScale, withParam([&](GrainSplit::Params& p) { p.sigmaBase = kInf; }) },
+			{ "params.sigmaLow=+Inf", validCodeUnit, validScale, withParam([&](GrainSplit::Params& p) { p.sigmaLow = kInf; }) },
+			{ "params.grainCal=+Inf", validCodeUnit, validScale, withParam([&](GrainSplit::Params& p) { p.grainCal = kInf; }) },
+			{ "params.kappa=NaN", validCodeUnit, validScale, withParam([&](GrainSplit::Params& p) { p.kappa = kNan; }) },
+			{ "params.energyFloor=+Inf", validCodeUnit, validScale, withParam([&](GrainSplit::Params& p) { p.energyFloor = kInf; }) },
+			{ "params.sigmaFine=1e200 (s1*s1 overflows to +Inf)", validCodeUnit, validScale, withParam([&](GrainSplit::Params& p) { p.sigmaFine = 1e200; }) },
+		};
+		for (const BadCase& c : badCases)
+		{
+			const std::wstring tag = Wide(std::string(c.label));
+			const bool ok = splitter.Compute(gpu, dev.dispatch, tex.tex, 0, c.codeUnit, c.scale, B, c.params);
+			Assert::IsFalse(ok, (tag + L": non-finite input must be refused").c_str());
+			Assert::IsNull(splitter.Out().split, (tag + L": refused Compute must leave Out().split null").c_str());
+			Assert::IsNull(splitter.Out().splitB, (tag + L": refused Compute must leave Out().splitB null").c_str());
+			Assert::IsNull(splitter.Out().blocks, (tag + L": refused Compute must leave Out().blocks null").c_str());
+			Assert::AreEqual(static_cast<uint32_t>(0), splitter.Out().version, (tag + L": refused Compute must clear Out().version").c_str());
+			Assert::IsFalse(splitter.LastError().empty(), (tag + L": refused Compute must populate LastError()").c_str());
+			Assert::IsTrue(splitter.LastError().find("non-finite") != std::string::npos,
+				Wide(std::string(c.label) + ": expected LastError() to name 'non-finite', got: " + splitter.LastError()).c_str());
+		}
+
+		// Mid-step non-finite rejection: Step(0) succeeds validly, then Step(1) with scale=+Inf aborts the active run visibly.
+		const GrainSplit::Gpu::Options defaultOpts{};
+		Assert::IsTrue(splitter.Step(gpu, dev.dispatch, tex.tex, 0, validCodeUnit, validScale, B, validParams, defaultOpts, 0u),
+			Wide("mid-step setup Step(0) failed: " + splitter.LastError()).c_str());
+		Assert::IsFalse(splitter.Step(gpu, dev.dispatch, tex.tex, 0, validCodeUnit, kInf, B, validParams, defaultOpts, 1u),
+			L"mid-step Step(1) with scale=+Inf must be refused");
+		Assert::IsNull(splitter.Out().split, L"mid-step non-finite refusal leaves Out().split null");
+		Assert::IsNull(splitter.Out().blocks, L"mid-step non-finite refusal leaves Out().blocks null");
+		Assert::IsTrue(splitter.LastError().find("non-finite") != std::string::npos,
+			Wide("mid-step Step(1) with scale=+Inf expected 'non-finite', got: " + splitter.LastError()).c_str());
+		Assert::IsFalse(splitter.Step(gpu, dev.dispatch, tex.tex, 0, validCodeUnit, validScale, B, validParams, defaultOpts, 2u),
+			L"aborted stepped run must not allow Step(2) to continue");
+
+		// (3) Recovery check: the same Splitter instance succeeds cleanly on valid finite input and matches the baseline bit-for-bit.
+		Assert::IsTrue(splitter.Compute(gpu, dev.dispatch, tex.tex, 0, validCodeUnit, validScale, B, validParams),
+			Wide("recovery Compute after non-finite refusals failed: " + splitter.LastError()).c_str());
+		Assert::IsTrue(splitter.LastError().empty(),
+			Wide("recovery Compute must clear LastError, got: " + splitter.LastError()).c_str());
+		Assert::IsNotNull(splitter.Out().split, L"recovery Out().split");
+		Assert::IsNotNull(splitter.Out().blocks, L"recovery Out().blocks");
+		Assert::AreEqual(w, splitter.Out().w, L"recovery Out().w");
+		Assert::AreEqual(h, splitter.Out().h, L"recovery Out().h");
+		Assert::AreEqual(GrainSplit::kUnitVersion, splitter.Out().version, L"recovery Out().version");
+		const std::vector<float> recSplit = DownloadRGBA(gpu, dev.dispatch, splitter.Out().split);
+		const std::vector<float> recBlocks = DownloadRGBA(gpu, dev.dispatch, splitter.Out().blocks);
+		Assert::IsTrue(SameBits(refSplit, recSplit) && SameBits(refBlocks, recBlocks),
+			L"recovery Compute after non-finite refusals must match positive-control output bit-for-bit");
+
+		Logger::WriteMessage("S2-M2: Splitter visibly rejected all 12 non-finite Compute cases + mid-step +Inf and recovered bit-identically");
 	}
 };

@@ -11,7 +11,8 @@
 //   uniforms: ivec2 fr_size (half luma), ivec2 fr_grid (blocks), int fr_block_half (4), int fr_margin (2),
 //             float fr_boundary_thr, float fr_keep_eps, int fr_use_cam
 // and calls `vec4 vpu_field_refine_search(ivec2 blk)` -> (vx, vy, confidence 0..255, flags) with the Ref flag bits
-// (1 refined, 2 kept, 4 boundary, 8 occluded). The P3 "valid" channel replaces the CPU's non-finite test.
+// (1 refined, 2 kept, 4 boundary, 8 occluded, 16 invalid). Non-finite P3 seeds (or s.z < 0.5) emit kept|invalid (18);
+// non-finite camera seeds are skipped just like the CPU reference.
 //
 // FieldRefineOffsetGlsl() is the per-pixel accessor `vec2 vpu_field_refine_offset(vec2 source_pixel)`: the consumer's
 // own band calls it on the fly (~20 ops/px here; the BDOF gradient term of doc 72 is not part of v1). The host declares
@@ -26,6 +27,28 @@ namespace VpUnit
 		inline const char* FieldRefineSearchGlsl()
 		{
 			return R"GLSL(
+#ifndef VPU_FR_FLAGS_DEFINED
+#define VPU_FR_FLAGS_DEFINED 1
+// Bit-for-bit match with FieldRefineRef.h (power-of-two uint8_t flags; VPU_FR_INVALID = 1u << 4 = 16u).
+const uint VPU_FR_REFINED = 1u;
+const uint VPU_FR_KEPT = 2u;
+const uint VPU_FR_BOUNDARY = 4u;
+const uint VPU_FR_OCCLUDED = 8u;
+const uint VPU_FR_INVALID = 16u;
+#endif
+
+// IEEE-754 binary32 finiteness by exponent bit mask (exponent 0xFF = NaN / +/-Inf),
+// immune to non-strict shader compilers folding isnan/isinf away.
+bool fr_finite(float x)
+{
+    return (floatBitsToUint(x) & 0x7F800000u) != 0x7F800000u;
+}
+
+bool fr_finite2(vec2 v)
+{
+    return fr_finite(v.x) && fr_finite(v.y);
+}
+
 float fr_sample(sampler2D t, vec2 p)
 {
     float fx = floor(p.x), fy = floor(p.y);
@@ -87,8 +110,10 @@ float fr_parabola(float cm, float c0, float cp)
 vec4 vpu_field_refine_search(ivec2 blk)
 {
     vec4 s = texelFetch(fr_p3, blk, 0);
-    if (s.z < 0.5) return vec4(0.0, 0.0, 0.0, 2.0);
-    if (s.w > 0.5) return vec4(s.xy, 0.0, 10.0);
+    if (!fr_finite(s.z) || s.z < 0.5 || !fr_finite2(s.xy))
+        return vec4(0.0, 0.0, 0.0, float(VPU_FR_KEPT | VPU_FR_INVALID));
+    if (fr_finite(s.w) && s.w > 0.5)
+        return vec4(s.xy, 0.0, float(VPU_FR_OCCLUDED | VPU_FR_KEPT));
     vec2 seed = s.xy;
     float cost3[25]; float mean3;
     int b3 = fr_surface(blk, seed * 0.5, cost3, mean3);
@@ -97,7 +122,7 @@ vec4 vpu_field_refine_search(ivec2 blk)
     vec2 sh = seed * 0.5;
     vec4 cam = vec4(0.0);
     if (fr_use_cam != 0) cam = texelFetch(fr_cam, blk, 0);
-    if (cam.z > 0.5) {
+    if (fr_finite(cam.z) && cam.z > 0.5 && fr_finite2(cam.xy)) {
         float costc[25]; float meanc;
         vec2 cs = cam.xy * 0.5;
         int bc = fr_surface(blk, cs, costc, meanc);
@@ -126,12 +151,12 @@ vec4 vpu_field_refine_search(ivec2 blk)
         ivec2 n = blk + nb[k];
         if (n.x < 0 || n.y < 0 || n.x >= fr_grid.x || n.y >= fr_grid.y) continue;
         vec4 nv = texelFetch(fr_p3, n, 0);
-        if (nv.z < 0.5) continue;
+        if (!fr_finite(nv.z) || nv.z < 0.5 || !fr_finite2(nv.xy)) continue;
         if (abs(nv.x - seed.x) > fr_boundary_thr || abs(nv.y - seed.y) > fr_boundary_thr) boundary = true;
     }
     bool moved = abs(v.x - seed.x) > fr_keep_eps || abs(v.y - seed.y) > fr_keep_eps;
-    float flags = (moved ? 1.0 : 2.0) + (boundary ? 4.0 : 0.0);
-    return vec4(v, conf, flags);
+    uint flags = (moved ? VPU_FR_REFINED : VPU_FR_KEPT) | (boundary ? VPU_FR_BOUNDARY : 0u);
+    return vec4(v, conf, float(flags));
 }
 )GLSL";
 		}
@@ -139,14 +164,25 @@ vec4 vpu_field_refine_search(ivec2 blk)
 		inline const char* FieldRefineOffsetGlsl()
 		{
 			return R"GLSL(
+#ifndef VPU_FR_FLAGS_DEFINED
+#define VPU_FR_FLAGS_DEFINED 1
+// Bit-for-bit match with FieldRefineRef.h (power-of-two uint8_t flags; VPU_FR_INVALID = 1u << 4 = 16u).
+const uint VPU_FR_REFINED = 1u;
+const uint VPU_FR_KEPT = 2u;
+const uint VPU_FR_BOUNDARY = 4u;
+const uint VPU_FR_OCCLUDED = 8u;
+const uint VPU_FR_INVALID = 16u;
+#endif
+
 vec2 vpu_field_refine_offset(vec2 px)
 {
+    const uint exclude_mask = VPU_FR_BOUNDARY | VPU_FR_OCCLUDED | VPU_FR_INVALID;
     float bs = float(vpu_field_refine_block);
     ivec2 g = vpu_field_refine_grid;
     ivec2 c = clamp(ivec2(floor(px / bs)), ivec2(0), g - ivec2(1));
     vec4 own = texelFetch(vpu_field_refine_tex, c, 0);
-    int own_flags = int(own.w + 0.5);
-    if ((own_flags & 12) != 0) return vec2(0.0);
+    uint own_flags = uint(max(own.w, 0.0) + 0.5);
+    if ((own_flags & exclude_mask) != 0u) return vec2(0.0);
     vec2 uv = px / bs - vec2(0.5);
     vec2 fl = floor(uv);
     float tx = uv.x - fl.x, ty = uv.y - fl.y;
@@ -155,7 +191,7 @@ vec2 vpu_field_refine_offset(vec2 px)
     for (int k = 0; k < 4; ++k) {
         ivec2 q = clamp(i0 + ivec2(k & 1, k >> 1), ivec2(0), g - ivec2(1));
         vec4 b = texelFetch(vpu_field_refine_tex, q, 0);
-        bool use = (int(b.w + 0.5) & 12) == 0;
+        bool use = (uint(max(b.w, 0.0) + 0.5) & exclude_mask) == 0u;
         v[k] = use ? b.xy : own.xy;
     }
     precise float ax = (v[0].x * (1.0 - tx) + v[1].x * tx) * (1.0 - ty) + (v[2].x * (1.0 - tx) + v[3].x * tx) * ty;

@@ -250,3 +250,10 @@ Decisions (lead A20-CB, recorded for the owner batch):
 - GPU and CPU share one tap list (`BandMemo::TapsOf`) so the GLSL table and the CPU blur cannot drift; a text-identity test is requested.
 - Decisions and sources: lead18 coreplan-C8-8-U2.md (slice 8, B1-B4); lead 8 iface-L-B3 rulings a-e (11-14); R14-95 fixed id table (11-14); principles/skeleton-products.md rule 4. Waiver WAIVER-C8-ID30 (reserved count 4 to 3).
 - Original text: lead 8 iface-L-B3 rulings a-e; principles/skeleton-products.md rule 4.
+
+## Tuning and evaluation gates (GS 212)
+
+The **two-seed grain isolate** and **`FrozenLeak`** (`GrainLevel::FrozenLeak`, the share of true structure-band energy leaked into the grain layer under frozen Wiener gains `f`) are the authoritative acceptance gates for grain separation.
+
+- **NEVER tune `kappa` or `NLF` (noise level function) against PSNR or VMAF.** PSNR and VMAF reward over-smoothing and bleeding grain into `base`, and penalize faithful grain preservation.
+- Judge any change to the split law, `kappa`, or the `NLF` cap strictly by the two-seed grain isolate and `FrozenLeak`, not by PSNR or VMAF.

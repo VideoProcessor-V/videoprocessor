@@ -513,11 +513,15 @@ bool carried(ivec2 from, vec3 x, float gate_scale, float amp, out vec3 r)
     r = vec3(0.0);
     vec4 rs = write_a_ ? imageLoad(RESID_NEXT, from) : imageLoad(RESID, from);
     vec4 ps = write_a_ ? imageLoad(PREV_NEXT, from) : imageLoad(PREV, from);
-    if (abs(rs.a - VALID_TAG) >= 1e-3 || any(isnan(rs.rgb)) || any(isnan(ps.rgb)))
+    // NaN-safe tag check and finite-state guard: uninitialised rgba16f VRAM can hold
+    // NaN or Inf, and `abs(NaN - VALID_TAG) >= 1e-3` evaluates to false.
+    if (!(abs(rs.a - VALID_TAG) < 1e-3) || any(isnan(rs)) || any(isinf(rs.rgb)) ||
+        any(isnan(ps.rgb)) || any(isinf(ps.rgb)))
         return false;
     // motion_threshold is in 8-bit codes; x is in output codes.
+    // Negated <= so NaN in x, ps.rgb, or the gate threshold cannot pass as valid.
     float units = color_bits > 9.0 ? 4.0 : 1.0;
-    if (any(greaterThan(abs(x - ps.rgb), vec3(motion_threshold * units * gate_scale))))
+    if (!all(lessThanEqual(abs(x - ps.rgb), vec3(motion_threshold * units * gate_scale))))
         return false;
     r = clamp(rs.rgb, -resid_bound(amp), resid_bound(amp));
     return true;
@@ -554,8 +558,11 @@ void hook()
     // emitted (also on the stable DLL, which has no output clamp).
     float code_bits = ten ? 10.0 : 8.0;
     float code_unit = exp2(code_bits - 8.0);
-    float code_min = limited ? code_unit : 0.0;
-    float code_max = limited ? 255.0 * code_unit - 1.0 : exp2(code_bits) - 1.0;
+    float timing_min = limited ? code_unit : 0.0;
+    // GEM-SD-CARRY / GEM-026 (Rule 1: ITU-R BT.601/BT.709/BT.2020 limited-range
+    // nominal black is 16 * 2^(n-8) = 16 at 8-bit, 64 at 10-bit; 0 in full range).
+    float black_code = limited ? 16.0 * code_unit : 0.0;
+    vec3 code_max = vec3(limited ? 255.0 * code_unit - 1.0 : exp2(code_bits) - 1.0);
 
     vec4 src = HOOKED_mul * texelFetch(HOOKED_raw, pos, 0);
     vec3 x = src.rgb * in_scale;
@@ -598,6 +605,14 @@ void hook()
         x = vec3(ten ? ramp * 4.0 : ramp);
     }
 
+    // GEM-SD-CARRY / GEM-026: prevent legal/above-black pixels (x >= black_code)
+    // from dithering below studio black into BTB (k < 16 at 8-bit, k < 64 at
+    // 10-bit) in both quantiser branches, while keeping true BTB content
+    // (x < black_code) clamped only at timing_min (preserving ADR-0002 footroom).
+    // For x >= black_code, clamping k up to black_code keeps x - k >= 0 so
+    // r_next = x + r - k stays within +-resid_bound(amp) and unbiased.
+    vec3 code_min = mix(vec3(timing_min), vec3(black_code), vec3(greaterThanEqual(x, vec3(black_code))));
+
     vec3 k;
     // libplacebo adds 1 to `frame` for every pass it runs and this is the
     // fifth of five, so frame / 5 is the refresh count: the same noise
@@ -610,6 +625,13 @@ void hook()
     if (dither_need > 0.5)
         amp = min(amp + max(dn_extra(vec2(pos)), 0.0), 0.5);
     vec3 d = vec3((ign(vec2(pos), frame / 5) - 0.5) * 2.0 * amp);
+    // Exact-code immunity (GEM-W1B V1 MUST-1, S2-H4): an exact output code is
+    // never moved by carried residual or by dither. At amp = 0.5 (e.g. with
+    // dither_need = auto), FP32 rounding of x + d for ign near 1.0 reaches
+    // x + 0.5 and flips floor(x + d + 0.5) by +1 code (~250 px/frame at 4K
+    // 10-bit). Zeroing d here protects both the enabled and disabled branches.
+    vec3 exact_code = vec3(equal(x, floor(x + 0.5)));
+    d = mix(d, vec3(0.0), exact_code);
 
     if (enabled > 0.5) {
         ivec2 state_size = imageSize(RESID);
@@ -649,7 +671,6 @@ void hook()
         // GEM-W1B V1 sigma-delta MUST-1: an exact code is never moved, so the carried residual does not
         // act on it either (r = 0.3 then -0.7 dithered black 16 into 15/17). Where the snap above fired or
         // x is exactly a whole code: no carry in, none out.
-        vec3 exact_code = vec3(equal(x, floor(x + 0.5)));
         r = mix(r, vec3(0.0), exact_code);
 
         // First-order sigma-delta: quantise the error-corrected value, carry

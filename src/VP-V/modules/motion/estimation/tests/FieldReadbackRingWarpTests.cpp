@@ -5,6 +5,8 @@
 // exact round trip, never waits when full, teardown with copies in flight; plus a pure CPU UnpackRgba test.
 #include "pch.h"
 #include <VP-V/tests/VpLutGpuTestSupport.h>
+#include <VP-V/core/VramUsers.h>
+#include <VP-V/modules/motion/estimation/global_model/link/CameraLabelProducer.h>
 #include <VP-V/modules/motion/estimation/global_model/link/FieldReadbackRing.h>
 
 #include <algorithm>
@@ -62,6 +64,38 @@ namespace VideoProcessorTest
 			f.blockSize = 16;
 			f.scaleToSourcePx = scale;
 			return f;
+		}
+
+		struct TexGuard
+		{
+			pl_gpu gpu = nullptr;
+			pl_tex tex = nullptr;
+			TexGuard(pl_gpu g, pl_tex t) : gpu(g), tex(t) {}
+			TexGuard(const TexGuard&) = delete;
+			TexGuard& operator=(const TexGuard&) = delete;
+			~TexGuard()
+			{
+				if (gpu && tex)
+					pl_tex_destroy(gpu, &tex);
+			}
+		};
+
+		uint64_t CameraModelVramBytes()
+		{
+			const VpSkeleton::VramUsers::Snapshot snap = VpSkeleton::VramUsers::Instance().Take();
+			for (const auto& kv : snap.heldById)
+				if (kv.first == VpSkeleton::kUserCameraModel)
+					return kv.second;
+			return 0;
+		}
+
+		bool CameraModelIsUnpopulated()
+		{
+			const VpSkeleton::VramUsers::Snapshot snap = VpSkeleton::VramUsers::Instance().Take();
+			for (uint16_t id : snap.unpopulated)
+				if (id == VpSkeleton::kUserCameraModel)
+					return true;
+			return false;
 		}
 	}
 
@@ -530,6 +564,316 @@ namespace VideoProcessorTest
 					Assert::AreEqual(static_cast<float>(expected), got, 0.0f);
 				}
 			}
+		}
+
+		// GEM-135 (AB1#3): batched pl_gpu_flush on OnFrameStart() (eliminating per-Start flushes) and safe
+		// Draining transition on Clear() while native copies are in flight — never delivered, never prematurely
+		// reused, drains cleanly, and delivers subsequent fresh frames bit-exact.
+		BEGIN_TEST_METHOD_ATTRIBUTE(ClearWithInFlightNativeCopiesDrainsSafelyWithoutDelivery)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(ClearWithInFlightNativeCopiesDrainsSafelyWithoutDelivery)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			const int w = 32, h = 24;
+			const size_t nBlocks = static_cast<size_t>(w) * static_cast<size_t>(h);
+			const std::vector<float> oldFwdData = KnownTexels(w, h);
+			std::vector<float> oldBwdData = oldFwdData;
+			for (float& v : oldBwdData) v = -v * 0.5f - 10.0f;
+			std::vector<float> freshFwdData(nBlocks * 4);
+			std::vector<float> freshBwdData(nBlocks * 4);
+			for (size_t i = 0; i < nBlocks * 4; ++i)
+			{
+				freshFwdData[i] = 500.0f + static_cast<float>(i % 97) * 0.5f;
+				freshBwdData[i] = -500.0f - static_cast<float>(i % 89) * 0.25f;
+			}
+			TexGuard oldFwd(gpu, MakeField(gpu, w, h, oldFwdData));
+			TexGuard oldBwd(gpu, MakeField(gpu, w, h, oldBwdData));
+			TexGuard freshFwd(gpu, MakeField(gpu, w, h, freshFwdData));
+			TexGuard freshBwd(gpu, MakeField(gpu, w, h, freshBwdData));
+
+			constexpr uint64_t kBatchCount = 3;
+
+			// Rule 3 negative control on the exact same inputs:
+			// (a) Flushing after every Start() (pre-fix 1-flush-per-Start behavior) costs kBatchCount flushes (> 1).
+			// (b) Without Clear(), the exact same kBatchCount queued native copies complete and deliver all 3 frames.
+			{
+				CameraLink::FieldReadbackRing baselineRing(gpu, static_cast<int>(kBatchCount), fixture.Log());
+				for (uint64_t s = 0; s < kBatchCount; ++s)
+				{
+					Assert::IsTrue(baselineRing.Request(MakeVerified(oldFwd.tex, oldBwd.tex, w, h, 100 + s, 1.0f)),
+						L"baseline Request failed");
+					Assert::IsTrue(baselineRing.FlushPending(), L"baseline per-request FlushPending must submit copy");
+				}
+				Assert::AreEqual<uint64_t>(kBatchCount, baselineRing.FlushCount(),
+					L"negative control: naive per-Start flushing issues 1 flush per request");
+				pl_gpu_finish(gpu);
+				std::vector<std::shared_ptr<CameraLink::FieldCopy>> baseReady;
+				for (int tries = 0; tries < 2000 && baseReady.size() < static_cast<size_t>(kBatchCount); ++tries)
+				{
+					baselineRing.Poll(baseReady);
+					if (baseReady.size() < static_cast<size_t>(kBatchCount))
+						std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				}
+				Assert::AreEqual<size_t>(static_cast<size_t>(kBatchCount), baseReady.size(),
+					L"negative control: without Clear(), all 3 queued copies must deliver");
+				Assert::AreEqual<uint64_t>(0, baselineRing.DrainedCount(), L"baseline had no Clear/drain");
+			}
+
+			// Protected path: batched flush + Clear() draining + fresh frame delivery after drain.
+			{
+				CameraLink::FieldReadbackRing ring(gpu, static_cast<int>(kBatchCount), fixture.Log());
+				Assert::IsFalse(ring.HasPendingFlush(), L"fresh ring must not have pending flush");
+				Assert::AreEqual<uint64_t>(0, ring.FlushCount(), L"fresh ring must start with 0 flushes");
+				Assert::AreEqual<size_t>(0, ring.DrainingSlots(), L"fresh ring must start with 0 draining slots");
+				Assert::AreEqual<uint64_t>(0, ring.DrainedCount(), L"fresh ring must start with 0 drained count");
+
+				for (uint64_t s = 0; s < kBatchCount; ++s)
+				{
+					Assert::IsTrue(ring.Request(MakeVerified(oldFwd.tex, oldBwd.tex, w, h, 100 + s, 1.0f)),
+						L"batched Request failed");
+				}
+				Assert::IsTrue(ring.HasPendingFlush(),
+					L"GEM-135: queued native copies must report HasPendingFlush() == true before OnFrameStart()");
+				Assert::AreEqual<uint64_t>(0, ring.FlushCount(),
+					L"GEM-135: Start() must NOT issue per-request pl_gpu_flush before OnFrameStart()");
+
+				// Single frame-boundary batched flush for all 3 queued Start() calls.
+				ring.OnFrameStart();
+				Assert::AreEqual<uint64_t>(1, ring.FlushCount(),
+					L"GEM-135: OnFrameStart() must batch multiple Start() calls into ONE pl_gpu_flush");
+				Assert::IsFalse(ring.HasPendingFlush(),
+					L"GEM-135: HasPendingFlush() must be false after OnFrameStart()");
+				// Redundant OnFrameStart() with nothing pending must not issue an extra flush.
+				ring.OnFrameStart();
+				Assert::AreEqual<uint64_t>(1, ring.FlushCount(),
+					L"GEM-135: redundant OnFrameStart() with no pending flush must not increment FlushCount()");
+
+				// Clear() while native slots are InFlight: must enter Draining, NOT be immediately freed.
+				ring.Clear();
+				Assert::AreEqual<size_t>(static_cast<size_t>(kBatchCount), ring.DrainingSlots(),
+					L"GEM-135: Clear() with in-flight native copies must move all 3 slots into Draining");
+				Assert::AreEqual<uint64_t>(0, ring.DrainedCount(), L"DrainedCount() must remain 0 before Poll/drain");
+				Assert::AreEqual<uint64_t>(0, ring.Stats().drained, L"Stats().drained must remain 0 before Poll/drain");
+
+				// Repeated Clear() while already Draining must keep slots Draining (never prematurely Free).
+				ring.Clear();
+				Assert::AreEqual<size_t>(static_cast<size_t>(kBatchCount), ring.DrainingSlots(),
+					L"GEM-135: repeated Clear() must not reset Draining slots to Free");
+
+				// While all slots are Draining, Request() must drop rather than overwrite a live GPU copy.
+				Assert::IsFalse(ring.Request(MakeVerified(freshFwd.tex, freshBwd.tex, w, h, 199, 1.0f)),
+					L"GEM-135: Draining slots must not be reused before GPU completion");
+				Assert::AreEqual<uint64_t>(1, ring.Stats().dropped, L"full-of-Draining ring must drop new Request()");
+
+				// Subsequent Poll() / OnFrameStart() must drain all 3 cleanly WITHOUT delivering any cleared frame.
+				std::vector<std::shared_ptr<CameraLink::FieldCopy>> clearedReady;
+				for (int tries = 0; tries < 2000 && ring.DrainingSlots() > 0; ++tries)
+				{
+					if ((tries & 1) == 0)
+						ring.Poll(clearedReady);
+					else
+						ring.OnFrameStart();
+					if (ring.DrainingSlots() > 0)
+						std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				}
+				Assert::AreEqual<size_t>(0, ring.DrainingSlots(),
+					L"GEM-135: Draining slots must drain cleanly to 0");
+				Assert::AreEqual<uint64_t>(kBatchCount, ring.DrainedCount(),
+					L"GEM-135: DrainedCount() must count every drained slot");
+				Assert::AreEqual<uint64_t>(kBatchCount, ring.Stats().drained,
+					L"GEM-135: Stats().drained must match DrainedCount()");
+				Assert::IsTrue(clearedReady.empty(),
+					L"GEM-135: cleared frames must NEVER be delivered as valid readbacks");
+				Assert::AreEqual<uint64_t>(0, ring.Stats().completed,
+					L"GEM-135: Stats().completed must remain 0 after draining cleared slots");
+				Assert::AreEqual<uint64_t>(1, ring.FlushCount(),
+					L"GEM-135: draining already-flushed slots must not issue extra pl_gpu_flush");
+
+				// Enqueue a fresh frame after drain and assert exact new frame data delivers cleanly.
+				const uint64_t freshSeq = 201;
+				const float freshScale = 1.5f;
+				Assert::IsTrue(ring.Request(MakeVerified(freshFwd.tex, freshBwd.tex, w, h, freshSeq, freshScale)),
+					L"Request after drain must succeed");
+				Assert::IsTrue(ring.HasPendingFlush(), L"fresh Request must set HasPendingFlush()");
+				Assert::AreEqual<uint64_t>(1, ring.FlushCount(), L"fresh Request must not flush before OnFrameStart()");
+				ring.OnFrameStart();
+				Assert::IsFalse(ring.HasPendingFlush(), L"OnFrameStart() must clear HasPendingFlush()");
+				Assert::AreEqual<uint64_t>(2, ring.FlushCount(), L"OnFrameStart() must increment FlushCount() once");
+
+				pl_gpu_finish(gpu);
+				std::vector<std::shared_ptr<CameraLink::FieldCopy>> freshReady;
+				for (int tries = 0; tries < 2000 && freshReady.empty(); ++tries)
+				{
+					ring.Poll(freshReady);
+					if (freshReady.empty())
+						std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				}
+				Assert::AreEqual<size_t>(1, freshReady.size(), L"fresh frame after drain must deliver exactly 1 copy");
+				const CameraLink::FieldCopy& got = *freshReady[0];
+				Assert::IsTrue(got.Valid(), L"fresh copy must be valid");
+				Assert::IsTrue(got.HaveBackward(), L"fresh copy must have backward plane");
+				Assert::AreEqual(freshSeq, got.seq, L"fresh copy must carry the new seq, never a cleared seq");
+				Assert::AreEqual<uint64_t>(1, ring.Stats().completed, L"exactly 1 completed copy");
+				Assert::AreEqual<uint64_t>(0, ring.Stats().failed, L"0 failed copies");
+				for (size_t i = 0; i < nBlocks; ++i)
+				{
+					Assert::IsTrue(got.fwdX[i] == freshFwdData[i * 4 + 0] * freshScale, L"fresh fwdX mismatch");
+					Assert::IsTrue(got.fwdY[i] == freshFwdData[i * 4 + 1] * freshScale, L"fresh fwdY mismatch");
+					Assert::IsTrue(got.fwdTrust[i] == freshFwdData[i * 4 + 2], L"fresh fwdTrust mismatch");
+					Assert::IsTrue(got.bwdX[i] == freshBwdData[i * 4 + 0] * freshScale, L"fresh bwdX mismatch");
+					Assert::IsTrue(got.bwdY[i] == freshBwdData[i * 4 + 1] * freshScale, L"fresh bwdY mismatch");
+					Assert::IsTrue(got.bwdTrust[i] == freshBwdData[i * 4 + 2], L"fresh bwdTrust mismatch");
+				}
+			}
+		}
+
+		// GEM-135 (AB1#3): FieldReadbackRing and CameraLabelProducer must declare exact allocated VRAM bytes
+		// under VpSkeleton::kUserCameraModel and withdraw them cleanly on both explicit Release() and destruction.
+		BEGIN_TEST_METHOD_ATTRIBUTE(ReadbackRingAndLabelProducerDeclareAndWithdrawVramUsers)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(ReadbackRingAndLabelProducerDeclareAndWithdrawVramUsers)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+
+			const uint64_t baselineBytes = CameraModelVramBytes();
+			const bool baselineUnpopulated = CameraModelIsUnpopulated();
+
+			const int ringW = 32, ringH = 24, ringEntries = 4;
+			const int labelW = 20, labelH = 12;
+			TexGuard srcFwd(gpu, MakeField(gpu, ringW, ringH, KnownTexels(ringW, ringH)));
+			TexGuard srcBwd(gpu, MakeField(gpu, ringW, ringH, KnownTexels(ringW, ringH)));
+
+			// Independent physical byte derivations (Rule 1 & Rule 3 — no self-referenced oracle):
+			// FieldReadbackRing native rgba32f: entries * w * h * 2 planes * 16 bytes/texel * 2 textures/slot (default + staging).
+			constexpr uint64_t kRgba32fTexelBytes = 4ull * sizeof(float);
+			constexpr uint64_t kNativePlanes = 2ull;
+			constexpr uint64_t kTexturesPerNativeSlot = 2ull;
+			const uint64_t expectedRingBytes = static_cast<uint64_t>(ringEntries) * static_cast<uint64_t>(ringW)
+				* static_cast<uint64_t>(ringH) * kNativePlanes * kRgba32fTexelBytes * kTexturesPerNativeSlot;
+			const uint64_t expectedOneLabelTexBytes = static_cast<uint64_t>(labelW) * static_cast<uint64_t>(labelH)
+				* kRgba32fTexelBytes;
+
+			const size_t labelBlocks = static_cast<size_t>(labelW) * static_cast<size_t>(labelH);
+			auto blocks = std::make_shared<CameraModel::BlockData>();
+			blocks->gridW = labelW;
+			blocks->gridH = labelH;
+			blocks->blockSize = 16.0;
+			blocks->label.assign(labelBlocks, static_cast<uint8_t>(CameraModel::Label::Camera));
+			blocks->modelX.assign(labelBlocks, 1.5f);
+			blocks->modelY.assign(labelBlocks, -0.75f);
+			blocks->resX.assign(labelBlocks, 0.1f);
+			blocks->resY.assign(labelBlocks, 0.2f);
+			blocks->tinyMover.assign(labelBlocks, 0);
+			CameraModel::CameraMotion rec;
+			rec.valid = true;
+			rec.reason = CameraModel::Reason::Ok;
+			rec.blocks = blocks;
+
+			// Rule 3 negative control: an undeclared owner that marks active without DeclareFixed leaves
+			// VramUsers blind (0 bytes added) and flags kUserCameraModel in Snapshot::unpopulated.
+			{
+				int undeclaredOwner = 0;
+				struct OwnerGuard
+				{
+					const void* owner;
+					explicit OwnerGuard(const void* o) : owner(o) {}
+					OwnerGuard(const OwnerGuard&) = delete;
+					OwnerGuard& operator=(const OwnerGuard&) = delete;
+					~OwnerGuard() { VpSkeleton::VramUsers::Instance().Release(owner, VpSkeleton::kUserCameraModel); }
+				} ownerGuard(&undeclaredOwner);
+				VpSkeleton::VramUsers::Instance().MarkActive(&undeclaredOwner, VpSkeleton::kUserCameraModel, true);
+				Assert::AreEqual(baselineBytes, CameraModelVramBytes(),
+					L"negative control: undeclared allocation adds 0 bytes to VramUsers");
+				Assert::IsTrue(CameraModelIsUnpopulated(),
+					L"negative control: active owner without declaration must surface in VramUsers::unpopulated");
+			}
+			Assert::AreEqual(baselineBytes, CameraModelVramBytes(), L"negative control cleanup must restore baseline bytes");
+			Assert::AreEqual(baselineUnpopulated, CameraModelIsUnpopulated(), L"negative control cleanup must restore unpopulated state");
+
+			// Part 1: Explicit Release() path, per-owner isolation, and idempotency.
+			{
+				CameraLink::FieldReadbackRing ring(gpu, ringEntries, fixture.Log());
+				CameraLink::CameraLabelProducer prod(fixture.Log(), gpu, CameraLink::LabelMode::Upload, 3, 2, CameraModel::Config(), false);
+				Assert::AreEqual<uint64_t>(0, ring.DeclaredVramBytes(), L"ring must declare 0 before allocation");
+				Assert::AreEqual<uint64_t>(0, prod.DeclaredVramBytes(), L"producer must declare 0 before allocation");
+				Assert::AreEqual(baselineBytes, CameraModelVramBytes(), L"VramUsers must stay at baseline before allocations");
+
+				Assert::IsTrue(ring.Request(MakeVerified(srcFwd.tex, srcBwd.tex, ringW, ringH, 1, 1.0f)),
+					L"ring Request for VRAM declaration test failed");
+				Assert::IsTrue(ring.DeclaredVramBytes() > 0, L"GEM-135: FieldReadbackRing must declare > 0 VRAM bytes");
+				Assert::AreEqual(expectedRingBytes, ring.DeclaredVramBytes(),
+					L"GEM-135: FieldReadbackRing DeclaredVramBytes must match exact allocated native texture bytes");
+				Assert::AreEqual(baselineBytes + ring.DeclaredVramBytes(), CameraModelVramBytes(),
+					L"GEM-135: VramUsers(kUserCameraModel) must increase by exact FieldReadbackRing declared bytes");
+
+				CameraLink::LabelTarget ringSlot;
+				ringSlot.live = false;
+				ringSlot.index = 0;
+				CameraLink::LabelTarget liveSlot;
+				liveSlot.live = true;
+				liveSlot.index = 0;
+				Assert::IsTrue(prod.Produce(rec, nullptr, ringSlot), L"producer ring slot Produce failed");
+				Assert::AreEqual(expectedOneLabelTexBytes, prod.DeclaredVramBytes(),
+					L"GEM-135: CameraLabelProducer must declare exact bytes for 1 allocated label texture");
+				Assert::IsTrue(prod.Produce(rec, nullptr, liveSlot), L"producer live slot Produce failed");
+				Assert::IsTrue(prod.DeclaredVramBytes() > 0, L"GEM-135: CameraLabelProducer must declare > 0 VRAM bytes");
+				Assert::AreEqual(expectedOneLabelTexBytes * 2ull, prod.DeclaredVramBytes(),
+					L"GEM-135: CameraLabelProducer must declare exact bytes for 2 allocated label textures");
+				Assert::AreEqual(baselineBytes + ring.DeclaredVramBytes() + prod.DeclaredVramBytes(), CameraModelVramBytes(),
+					L"GEM-135: VramUsers(kUserCameraModel) total must equal baseline + ring + producer declared bytes");
+				Assert::AreEqual(baselineUnpopulated, CameraModelIsUnpopulated(),
+					L"GEM-135: declared owners must not mark kUserCameraModel as unpopulated");
+
+				// Release ring first: must withdraw only ring's bytes, leaving producer's declaration intact.
+				const uint64_t prodBytes = prod.DeclaredVramBytes();
+				ring.Release();
+				Assert::AreEqual<uint64_t>(0, ring.DeclaredVramBytes(), L"GEM-135: ring DeclaredVramBytes must be 0 after Release()");
+				Assert::AreEqual(baselineBytes + prodBytes, CameraModelVramBytes(),
+					L"GEM-135: releasing ring must withdraw exact ring bytes without touching producer");
+				ring.Release();   // idempotent
+				Assert::AreEqual<uint64_t>(0, ring.DeclaredVramBytes(), L"ring Release() must be idempotent");
+				Assert::AreEqual(baselineBytes + prodBytes, CameraModelVramBytes(), L"idempotent ring Release() must preserve VramUsers");
+
+				// Release producer: must return VramUsers to exact baseline.
+				prod.Release();
+				Assert::AreEqual<uint64_t>(0, prod.DeclaredVramBytes(), L"GEM-135: producer DeclaredVramBytes must be 0 after Release()");
+				Assert::AreEqual(baselineBytes, CameraModelVramBytes(),
+					L"GEM-135: VramUsers(kUserCameraModel) must return to exact baseline after both Release() calls");
+				prod.Release();   // idempotent
+				Assert::AreEqual<uint64_t>(0, prod.DeclaredVramBytes(), L"producer Release() must be idempotent");
+				Assert::AreEqual(baselineBytes, CameraModelVramBytes(), L"idempotent producer Release() must keep exact baseline");
+			}
+			Assert::AreEqual(baselineBytes, CameraModelVramBytes(), L"post-scope VramUsers must remain at exact baseline");
+			Assert::AreEqual(baselineUnpopulated, CameraModelIsUnpopulated(), L"post-scope unpopulated state must match baseline");
+
+			// Part 2: Destructor withdrawal path (no explicit Release() call; ring still has an in-flight copy).
+			{
+				const int dtorEntries = 3;
+				const uint64_t expectedDtorRingBytes = static_cast<uint64_t>(dtorEntries) * static_cast<uint64_t>(ringW)
+					* static_cast<uint64_t>(ringH) * kNativePlanes * kRgba32fTexelBytes * kTexturesPerNativeSlot;
+				CameraLink::FieldReadbackRing dtorRing(gpu, dtorEntries, fixture.Log());
+				CameraLink::CameraLabelProducer dtorProd(fixture.Log(), gpu, CameraLink::LabelMode::Upload, 2, 1, CameraModel::Config(), false);
+				Assert::IsTrue(dtorRing.Request(MakeVerified(srcFwd.tex, srcBwd.tex, ringW, ringH, 2, 1.0f)),
+					L"destructor-path ring Request failed");
+				CameraLink::LabelTarget slot0;
+				slot0.live = false;
+				slot0.index = 0;
+				Assert::IsTrue(dtorProd.Produce(rec, nullptr, slot0), L"destructor-path producer Produce failed");
+				Assert::AreEqual(expectedDtorRingBytes, dtorRing.DeclaredVramBytes(), L"destructor-path ring declared bytes");
+				Assert::AreEqual(expectedOneLabelTexBytes, dtorProd.DeclaredVramBytes(), L"destructor-path producer declared bytes");
+				Assert::AreEqual(baselineBytes + dtorRing.DeclaredVramBytes() + dtorProd.DeclaredVramBytes(), CameraModelVramBytes(),
+					L"destructor-path VramUsers must reflect both allocations before scope exit");
+			}
+			Assert::AreEqual(baselineBytes, CameraModelVramBytes(),
+				L"GEM-135: destructors must withdraw all kUserCameraModel VRAM back to exact baseline (Rule 2 zero leak)");
+			Assert::AreEqual(baselineUnpopulated, CameraModelIsUnpopulated(),
+				L"GEM-135: destructors must clear active marks cleanly");
 		}
 	};
 }

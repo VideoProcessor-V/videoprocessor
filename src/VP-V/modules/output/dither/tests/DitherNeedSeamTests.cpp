@@ -452,5 +452,110 @@ namespace DitherNeedSeamTestsNs
 			const DitherNeedSeam::Outcome afterFail = gpuStage.Evaluate(true, false, p.Feed(), p.grid);
 			Assert::IsTrue(afterFail.result == DitherNeed::Result::On && afterFail.decision.reset);
 		}
+
+		// GEM-022 adversarial test: bit-depth quantization floor 1 - 2^(colorBits - sourceBits) keeps a clean deep
+		// source active over a narrower link, while same-depth (and coarser) sources retain pure quality modulation.
+		BEGIN_TEST_METHOD_ATTRIBUTE(BitDepthFloorKeepsCleanDeepSourceActiveOverNarrowerLink)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(BitDepthFloorKeepsCleanDeepSourceActiveOverNarrowerLink)
+		{
+			const DitherNeed::Params base;
+			Products clean(96, 64, 1.0);
+
+			// Same-input negative control (Rule 3): without the bit-depth floor, a clean quality == 1.0 source yields
+			// SourceIdentity::DitherNeed == 0.0 (< 1e-3) which turns dithering off even when 10-bit source precision
+			// exceeds an 8-bit link; AND on same-depth (8 -> 8) or coarser (8 -> 10), the floor must stay 0.0 so
+			// same-depth quality modulation still yields NotNeeded.
+			Assert::AreEqual(0.0, SourceIdentity::DitherNeed(clean.quality), 1e-12,
+				L"Negative control: raw quality-only need is 0.0 on a clean source (would wrongly turn off 10->8 without floor)");
+			{
+				DitherNeedSeam::Stage sameDepthStage;
+				DitherNeedSeam::Feed sameDepth = clean.Feed();
+				sameDepth.sourceBits = 8;
+				sameDepth.colorBits = 8;
+				const DitherNeedSeam::Outcome o = sameDepthStage.Evaluate(true, false, sameDepth, clean.grid, base);
+				Assert::AreEqual(0.0, o.qualityNeed, 1e-12, L"same-depth 8->8 must have bitDepthFloor == 0.0 and qualityNeed == 0.0");
+				Assert::IsTrue(o.result == DitherNeed::Result::NotNeeded, L"same-depth clean source must stay NotNeeded");
+				Assert::IsFalse(o.extraAllowed, L"same-depth clean source must not allow extra amplitude");
+				Assert::AreEqual(base.aBase, o.params.aNeed, 1e-12, L"same-depth clean source keeps aNeed == aBase");
+			}
+			{
+				DitherNeedSeam::Stage coarserStage;
+				DitherNeedSeam::Feed coarser = clean.Feed();
+				coarser.sourceBits = 8;
+				coarser.colorBits = 10;
+				const DitherNeedSeam::Outcome o = coarserStage.Evaluate(true, false, coarser, clean.grid, base);
+				Assert::AreEqual(0.0, o.qualityNeed, 1e-12, L"coarser 8->10 source must have bitDepthFloor == 0.0");
+				Assert::IsTrue(o.result == DitherNeed::Result::NotNeeded && !o.extraAllowed,
+					L"coarser 8->10 clean source must stay NotNeeded");
+			}
+
+			// (a) Clean 10-bit source over 8-bit link: floor = 1 - 2^(8 - 10) = 0.75.
+			{
+				DitherNeedSeam::Stage stage;
+				DitherNeedSeam::Feed f = clean.Feed();
+				f.sourceBits = 10;
+				f.colorBits = 8;
+				const DitherNeedSeam::Outcome o = stage.Evaluate(true, false, f, clean.grid, base);
+				const double expectedFloor = 1.0 - std::ldexp(1.0, 8 - 10);
+				Assert::AreEqual(0.75, expectedFloor, 0.0);
+				Assert::AreEqual(0.75, o.qualityNeed, 1e-12, L"GEM-022: 10->8 clean source must get qualityNeed == 0.75");
+				Assert::IsTrue(o.result == DitherNeed::Result::On, L"GEM-022: 10->8 clean source must stay Result::On");
+				Assert::IsTrue(o.extraAllowed, L"GEM-022: 10->8 clean source must allow extra amplitude");
+				Assert::IsFalse(o.fallback.engaged);
+				Assert::AreEqual(base.aBase + 0.75 * (base.aNeed - base.aBase), o.params.aNeed, 1e-12,
+					L"GEM-022: 10->8 aNeed must scale by bitDepthFloor 0.75");
+			}
+
+			// (b) Clean 12-bit -> 8-bit (15/16 = 0.9375) and clean 12-bit -> 10-bit (0.75).
+			{
+				DitherNeedSeam::Stage stage12to8;
+				DitherNeedSeam::Feed f = clean.Feed();
+				f.sourceBits = 12;
+				f.colorBits = 8;
+				const DitherNeedSeam::Outcome o = stage12to8.Evaluate(true, false, f, clean.grid, base);
+				Assert::AreEqual(15.0 / 16.0, o.qualityNeed, 1e-12, L"GEM-022: 12->8 clean source must get qualityNeed == 0.9375");
+				Assert::IsTrue(o.result == DitherNeed::Result::On && o.extraAllowed, L"GEM-022: 12->8 clean source must be On");
+				Assert::AreEqual(base.aBase + 0.9375 * (base.aNeed - base.aBase), o.params.aNeed, 1e-12,
+					L"GEM-022: 12->8 aNeed must scale by 15/16");
+			}
+			{
+				DitherNeedSeam::Stage stage12to10;
+				DitherNeedSeam::Feed f = clean.Feed();
+				f.sourceBits = 12;
+				f.colorBits = 10;
+				const DitherNeedSeam::Outcome o = stage12to10.Evaluate(true, false, f, clean.grid, base);
+				Assert::AreEqual(0.75, o.qualityNeed, 1e-12, L"GEM-022: 12->10 clean source must get qualityNeed == 0.75");
+				Assert::IsTrue(o.result == DitherNeed::Result::On && o.extraAllowed, L"GEM-022: 12->10 clean source must be On");
+				Assert::AreEqual(base.aBase + 0.75 * (base.aNeed - base.aBase), o.params.aNeed, 1e-12,
+					L"GEM-022: 12->10 aNeed must scale by 0.75");
+			}
+
+			// (d) Low-quality source (quality = 0.0 -> raw qualityNeed = 1.0) with 10 -> 8 keeps max(1.0, 0.75) == 1.0,
+			//     and mid-quality (quality = 0.5 -> raw 0.5) with 10 -> 8 takes max(0.5, 0.75) == 0.75.
+			{
+				Products poor(96, 64, 0.0);
+				DitherNeedSeam::Stage stagePoor;
+				DitherNeedSeam::Feed f = poor.Feed();
+				f.sourceBits = 10;
+				f.colorBits = 8;
+				const DitherNeedSeam::Outcome o = stagePoor.Evaluate(true, false, f, poor.grid, base);
+				Assert::AreEqual(1.0, o.qualityNeed, 1e-12, L"GEM-022: poor 10->8 source must preserve max(1.0, 0.75) == 1.0");
+				Assert::IsTrue(o.result == DitherNeed::Result::On && o.extraAllowed);
+				Assert::AreEqual(base.aNeed, o.params.aNeed, 1e-12, L"poor 10->8 keeps full base.aNeed");
+			}
+			{
+				Products mid(96, 64, 0.5);
+				DitherNeedSeam::Stage stageMid;
+				DitherNeedSeam::Feed f = mid.Feed();
+				f.sourceBits = 10;
+				f.colorBits = 8;
+				const DitherNeedSeam::Outcome o = stageMid.Evaluate(true, false, f, mid.grid, base);
+				Assert::AreEqual(0.75, o.qualityNeed, 1e-12, L"GEM-022: mid-quality 10->8 source takes max(0.5, 0.75) == 0.75");
+				Assert::IsTrue(o.result == DitherNeed::Result::On && o.extraAllowed);
+				Assert::AreEqual(base.aBase + 0.75 * (base.aNeed - base.aBase), o.params.aNeed, 1e-12);
+			}
+		}
 	};
 }

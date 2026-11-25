@@ -742,6 +742,637 @@ namespace VideoProcessorTest
 			}
 		}
 
+		// W23-A3 S2-H3 (WARP): uninitialised rgba16f storage textures (RESID / RESID_NEXT / PREV / PREV_NEXT) can hold
+		// NaN or Inf on frame 1. Pre-fix `abs(rs.a - VALID_TAG) >= 1e-3` evaluated to false on NaN (accepting garbage
+		// rs.rgb), and pre-fix lacked any(isinf(rs.rgb)) / any(isinf(ps.rgb)) (clamping +Inf to +0.5). This test runs
+		// the real expanded `shaders/Temporal sigma-delta.glsl` on WARP with a seed pass immediately before the
+		// unmodified quantizer pass that pre-fills four 8x16 regions for the exact same input pixel (code 100.3,
+		// full-range 8-bit, zero dither):
+		//   Region 0 (x in [0, 8)):   NaN tag in rs.a + garbage +0.45 in rs.rgb -> must be rejected (output 100; pre-fix gave 101)
+		//   Region 1 (x in [8, 16)):  +Inf in rs.rgb with VALID_TAG             -> must be rejected (output 100; pre-fix gave 101)
+		//   Region 2 (x in [16, 24)): +Inf in ps.rgb with VALID_TAG & +0.45     -> must be rejected (output 100)
+		//   Region 3 (x in [24, 32)): same-input negative control (Rule 3) -- VALID_TAG + finite ps.rgb + +0.45 residual ->
+		//     MUST pass carried() and flip the exact same input pixel from 100 to 101, proving the seed pass ran and the
+		//     carried() rejection in Regions 0..2 is non-vacuous.
+		BEGIN_TEST_METHOD_ATTRIBUTE(SigmaDeltaCarriedRejectsNanAndInfStateTagOnFrameOne)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(SigmaDeltaCarriedRejectsNanAndInfStateTagOnFrameOne)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			const int width = 32, height = 16;
+			static const char* const kSeedPass = R"GLSL(//!HOOK OUTPUT
+//!BIND HOOKED
+//!BIND RESID
+//!BIND PREV
+//!BIND RESID_NEXT
+//!BIND PREV_NEXT
+//!SAVE S2H3_SEED
+//!COMPONENTS 1
+//!WIDTH HOOKED.w
+//!HEIGHT HOOKED.h
+//!DESC Test S2-H3: pre-fill sigma-delta rgba16f state with NaN/Inf/valid regions
+//!COMPUTE 16 16
+
+#define VALID_TAG (0.25 + 0.0078125 * mod(floor(instance_tag), 64.0))
+
+void hook()
+{
+    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(out_image);
+    ivec2 state_size = imageSize(RESID);
+    if (pos.x >= size.x || pos.y >= size.y || pos.x >= state_size.x || pos.y >= state_size.y)
+        return;
+    float qnan = uintBitsToFloat((pos.x < 100000) ? 0x7fc00000u : 0u);
+    float pinf = uintBitsToFloat((pos.x < 100000) ? 0x7f800000u : 0u);
+    vec4 rs;
+    vec4 ps;
+    if (pos.x < 8) {
+        rs = vec4(0.45, 0.45, 0.45, qnan);
+        ps = vec4(100.25, 100.25, 100.25, 1.0);
+    } else if (pos.x < 16) {
+        rs = vec4(pinf, pinf, pinf, VALID_TAG);
+        ps = vec4(100.25, 100.25, 100.25, 1.0);
+    } else if (pos.x < 24) {
+        rs = vec4(0.45, 0.45, 0.45, VALID_TAG);
+        ps = vec4(pinf, pinf, pinf, 1.0);
+    } else {
+        rs = vec4(0.45, 0.45, 0.45, VALID_TAG);
+        ps = vec4(100.25, 100.25, 100.25, 1.0);
+    }
+    imageStore(RESID, pos, rs);
+    imageStore(PREV, pos, ps);
+    imageStore(RESID_NEXT, pos, rs);
+    imageStore(PREV_NEXT, pos, ps);
+    imageStore(out_image, pos, vec4(0.0));
+}
+
+)GLSL";
+			CustomHookChain::Chain chain({
+				[](const std::string& file, std::string& source, std::string& reason)
+				{
+					source = LoadBundledShader(file.c_str());
+					if (source.empty())
+					{
+						reason = "bundled shader not found";
+						return false;
+					}
+					const size_t descPos = source.find("//!DESC VideoProcessor temporal sigma-delta quantizer");
+					if (descPos == std::string::npos)
+					{
+						reason = "quantizer pass marker not found";
+						return false;
+					}
+					const size_t hookPos = source.rfind("//!HOOK OUTPUT", descPos);
+					if (hookPos == std::string::npos)
+					{
+						reason = "quantizer pass //!HOOK OUTPUT not found";
+						return false;
+					}
+					source.insert(hookPos, kSeedPass);
+					return true;
+				},
+				[&fixture](const std::string& source) -> const pl_hook*
+				{
+					return pl_mpv_user_shader_parse(fixture.Gpu(), source.data(), source.size());
+				},
+				[](const pl_hook*& hook) { pl_mpv_user_shader_destroy(&hook); } });
+			ConfiguredShaderRule sigma;
+			sigma.name = "sigma_delta";
+			sigma.filename = "Temporal sigma-delta.glsl";
+			sigma.stageOrder = 90;
+			sigma.parameters = { { "enabled", "1" }, { "levels_full", "1" }, { "swapchain_bits", "8" },
+				{ "color_bits", "8" }, { "noise_amplitude", "0" }, { "motion_threshold", "1" },
+				{ "motion_compensation", "0" } };
+			chain.Configure({ sigma });
+			CustomHookChain::TemplateValues values;
+			values.outputWidth = width;
+			values.outputHeight = height;
+			values.sourceWidth = width;
+			values.sourceHeight = height;
+			values.refreshHz = 60.0;
+			values.sourceFps = 60.0;
+			std::string log;
+			fixture.CaptureLog(&log);
+			chain.Ensure(values);
+			fixture.CaptureLog(nullptr);
+			std::vector<const pl_hook*> hooks;
+			chain.Collect(false, hooks);
+			Assert::AreEqual(size_t{ 1 }, hooks.size(), (L"libplacebo rejected the S2-H3 seeded sigma-delta shader: " +
+				std::wstring(log.begin(), log.end())).c_str());
+			AssertCleanLibplaceboLog(log);
+
+			fixture.CaptureLog(&log);
+			const std::vector<std::vector<int>> out = fixture.RenderSequence(hooks[0], width, height, 1,
+				[](int, int, int) { return 100.3; });
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
+			Assert::AreEqual(size_t{ 1 }, out.size(), L"expected 1 rendered frame");
+			Assert::AreEqual(static_cast<size_t>(width) * height, out[0].size(), L"unexpected output pixel count");
+
+			for (int y = 0; y < height; ++y)
+			{
+				for (int x = 0; x < width; ++x)
+				{
+					const int got = out[0][static_cast<size_t>(y) * width + x];
+					if (x < 8)
+					{
+						Assert::AreEqual(100, got,
+							(L"S2-H3 Region 0 (NaN tag in rs.a + 0.45 garbage residual) corrupted pixel (" +
+								std::to_wstring(x) + L"," + std::to_wstring(y) + L") to " + std::to_wstring(got)).c_str());
+					}
+					else if (x < 16)
+					{
+						Assert::AreEqual(100, got,
+							(L"S2-H3 Region 1 (+Inf in rs.rgb with valid tag) corrupted pixel (" +
+								std::to_wstring(x) + L"," + std::to_wstring(y) + L") to " + std::to_wstring(got)).c_str());
+					}
+					else if (x < 24)
+					{
+						Assert::AreEqual(100, got,
+							(L"S2-H3 Region 2 (+Inf in ps.rgb with valid tag) corrupted pixel (" +
+								std::to_wstring(x) + L"," + std::to_wstring(y) + L") to " + std::to_wstring(got)).c_str());
+					}
+					else
+					{
+						Assert::AreEqual(101, got,
+							(L"S2-H3 Region 3 (same-input negative control: valid tag + finite ps + 0.45 residual) failed to carry at pixel (" +
+								std::to_wstring(x) + L"," + std::to_wstring(y) + L"), got " + std::to_wstring(got)).c_str());
+					}
+				}
+			}
+		}
+
+		// W23-A3 S2-H4 (WARP): exact output codes must never flicker at half-code dither amplitude (amp = 0.5).
+		// Without zeroing d on exact codes, FP32 rounding of `x + d` for ign(pos, frame / 5) near 1.0 reaches
+		// `x + 0.5f` (at x = 512.0f, 0.5 ULP is 2^-15 = 1/32768) and flips `floor(x + d + 0.5)` from 512 to 513
+		// in both the enabled = 1 and enabled = 0 branches.
+		// Runs the real expanded `shaders/Temporal sigma-delta.glsl` on WARP over a 64x64 (4,096 px) 10-bit
+		// full-range grid for 12 refreshes (advancing frame / 5 across 0..11, which hits high ign values near 1.0),
+		// with two Rule 3 same-input negative controls:
+		//   (i)  The pre-fix un-zeroed FP32 formula on the exact same 64x64 x 12 (pos, frame/5) coordinates at
+		//        x = 512.0f, amp = 0.5f MUST produce > 0 flipped pixels (proving the FP32 rounding hazard is real).
+		//   (ii) A non-exact fractional 10-bit input (1026.25 / 2048.0, landing on 1026/2048 = 512.4990 codes on
+		//        both truncating and rounding rgba16f stores, outside the exact-code snap window) on the exact same
+		//        shader MUST still dither across {512, 513} on frame 0 (r = 0) in both enabled = 1 and enabled = 0
+		//        branches (proving d was not globally disabled).
+		BEGIN_TEST_METHOD_ATTRIBUTE(SigmaDeltaExactCodeNeverFlickersAtHalfCodeAmplitude)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(SigmaDeltaExactCodeNeverFlickersAtHalfCodeAmplitude)
+		{
+			constexpr int width = 64;
+			constexpr int height = 64;
+			constexpr int frames = 12;
+			constexpr int exactCode = 512;
+			constexpr float exactValue = static_cast<float>(exactCode) / 1023.0f;
+			// Quarter rgba16f step above 1026/2048 (= 512.4990 codes): truncating and rounding rgba16f stores
+			// both hold 1026/2048 (offset +0.4990 > above 0.2598, so the exact-code snap does not fire), and
+			// an rgba32f store holds 512.6239 (also strictly fractional and outside the 1e-3 snap).
+			constexpr float fractionalValue = 1026.25f / 2048.0f;
+
+			// Rule 3 negative control (i): prove the un-zeroed FP32 rounding hazard genuinely flips > 0 pixels
+			// on this exact 64x64 x 12 (pos, frame/5) grid at x = 512.0f, amp = 0.5f.
+			int unzeroedFlips = 0;
+			for (int f = 0; f < frames; ++f)
+			{
+				for (int y = 0; y < height; ++y)
+				{
+					for (int x = 0; x < width; ++x)
+					{
+						const float ign = SigmaDeltaDomain::Ign(static_cast<float>(x), static_cast<float>(y), f);
+						const float d = (ign - 0.5f) * 2.0f * 0.5f;
+						const float xPlusD = static_cast<float>(exactCode) + d;
+						const int unzeroed = static_cast<int>(std::floor(xPlusD + 0.5f));
+						if (unzeroed != exactCode)
+							++unzeroedFlips;
+					}
+				}
+			}
+			Assert::IsTrue(unzeroedFlips > 0,
+				L"S2-H4 negative control (i): un-zeroed FP32 floor(512 + d + 0.5) must flip > 0 pixels on the 64x64 x 12 grid");
+
+			auto renderTenBitFrames = [&](bool enabled, float sourceValue, int frameCount) -> std::vector<std::vector<uint32_t>>
+			{
+				TargetLutGpuFixture fixture;
+				Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+				pl_gpu gpu = fixture.Gpu();
+
+				struct LogCaptureGuard
+				{
+					TargetLutGpuFixture& owner;
+					~LogCaptureGuard() { owner.CaptureLog(nullptr); }
+				};
+				struct TexGuard
+				{
+					pl_gpu owner;
+					pl_tex tex = nullptr;
+					~TexGuard()
+					{
+						if (tex)
+							pl_tex_destroy(owner, &tex);
+					}
+				};
+
+				CustomHookChain::Chain chain(SigmaLoader(fixture));
+				ConfiguredShaderRule sigma;
+				sigma.name = "sigma_delta";
+				sigma.filename = "Temporal sigma-delta.glsl";
+				sigma.stageOrder = 90;
+				sigma.parameters = {
+					{ "enabled", enabled ? "1" : "0" },
+					{ "levels_full", "1" },
+					{ "swapchain_bits", "10" },
+					{ "color_bits", "10" },
+					{ "noise_amplitude", "0.5" },
+					{ "motion_compensation", "0" }
+				};
+				chain.Configure({ sigma });
+				CustomHookChain::TemplateValues values;
+				values.outputWidth = values.sourceWidth = width;
+				values.outputHeight = values.sourceHeight = height;
+				values.refreshHz = values.sourceFps = 60.0;
+
+				std::string log;
+				{
+					LogCaptureGuard guard{ fixture };
+					fixture.CaptureLog(&log);
+					chain.Ensure(values);
+				}
+				std::vector<const pl_hook*> hooks;
+				chain.Collect(false, hooks);
+				Assert::AreEqual(size_t{ 1 }, hooks.size(),
+					(L"libplacebo rejected Temporal sigma-delta.glsl: " + std::wstring(log.begin(), log.end())).c_str());
+				AssertCleanLibplaceboLog(log);
+
+				pl_fmt sourceFormat = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, PL_FMT_CAP_SAMPLEABLE);
+				Assert::IsNotNull(sourceFormat, L"No sampleable RGBA32F source format");
+				pl_fmt targetFormat = nullptr;
+				const auto targetCaps = static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE);
+				for (int i = 0; i < gpu->num_formats; ++i)
+				{
+					pl_fmt f = gpu->formats[i];
+					if (f->type == PL_FMT_UNORM && f->num_components == 4 && f->component_depth[0] == 10 &&
+						f->texel_size == 4 && (f->caps & targetCaps) == targetCaps && f->host_bits[0] == 10)
+					{
+						targetFormat = f;
+						break;
+					}
+				}
+				Assert::IsNotNull(targetFormat, L"No host-readable RGB10A2 target format");
+
+				const size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
+				std::vector<float> texels(pixelCount * 4);
+				for (size_t i = 0; i < pixelCount; ++i)
+				{
+					texels[i * 4 + 0] = sourceValue;
+					texels[i * 4 + 1] = sourceValue;
+					texels[i * 4 + 2] = sourceValue;
+					texels[i * 4 + 3] = 1.0f;
+				}
+
+				pl_tex_params sp{};
+				sp.w = width;
+				sp.h = height;
+				sp.format = sourceFormat;
+				sp.sampleable = true;
+				sp.initial_data = texels.data();
+				TexGuard sourceGuard{ gpu, pl_tex_create(gpu, &sp) };
+				Assert::IsNotNull(sourceGuard.tex, L"Failed to create 64x64 source texture");
+
+				pl_tex_params tp{};
+				tp.w = width;
+				tp.h = height;
+				tp.format = targetFormat;
+				tp.renderable = true;
+				tp.host_readable = true;
+				TexGuard targetGuard{ gpu, pl_tex_create(gpu, &tp) };
+				Assert::IsNotNull(targetGuard.tex, L"Failed to create 64x64 RGB10A2 target texture");
+
+				pl_frame image = TargetLutGpuFixture::MakeRgbFrame(sourceGuard.tex);
+				pl_frame output = TargetLutGpuFixture::MakeRgbFrame(targetGuard.tex);
+				output.repr.levels = PL_COLOR_LEVELS_FULL;
+				output.repr.bits.sample_depth = 10;
+				output.repr.bits.color_depth = 10;
+				output.repr.bits.bit_shift = 0;
+
+				pl_render_params params = pl_render_fast_params;
+				params.dither_params = nullptr;
+				params.error_diffusion = nullptr;
+				params.hooks = hooks.data();
+				params.num_hooks = static_cast<int>(hooks.size());
+
+				std::vector<std::vector<uint32_t>> rendered;
+				rendered.reserve(static_cast<size_t>(frameCount));
+				{
+					LogCaptureGuard guard{ fixture };
+					fixture.CaptureLog(&log);
+					for (int f = 0; f < frameCount; ++f)
+					{
+						Assert::IsTrue(pl_render_image(fixture.Renderer(), &image, &output, &params),
+							L"pl_render_image failed for S2-H4 10-bit frame");
+						pl_gpu_finish(gpu);
+						std::vector<uint32_t> pixels(pixelCount, 0u);
+						pl_tex_transfer_params download{};
+						download.tex = targetGuard.tex;
+						download.ptr = pixels.data();
+						Assert::IsTrue(pl_tex_download(gpu, &download), L"pl_tex_download failed for S2-H4");
+						rendered.push_back(std::move(pixels));
+					}
+				}
+				AssertCleanLibplaceboLog(log);
+				return rendered;
+			};
+
+			// Protected behavior: BOTH enabled = 1 and enabled = 0 branches must emit exact code 512 on
+			// EVERY pixel of the 64x64 grid across all 12 refreshes (zero pixels flicker to 513 or 511).
+			for (const bool enabled : { true, false })
+			{
+				const std::wstring branch = enabled ? L"enabled=1" : L"enabled=0";
+				const std::vector<std::vector<uint32_t>> exactFrames = renderTenBitFrames(enabled, exactValue, frames);
+				Assert::AreEqual(static_cast<size_t>(frames), exactFrames.size(), L"unexpected frame count");
+				for (int f = 0; f < frames; ++f)
+				{
+					Assert::AreEqual(static_cast<size_t>(width) * static_cast<size_t>(height), exactFrames[f].size(),
+						L"unexpected pixel count");
+					for (int y = 0; y < height; ++y)
+					{
+						for (int x = 0; x < width; ++x)
+						{
+							const uint32_t pixel = exactFrames[f][static_cast<size_t>(y) * width + x];
+							const int r = static_cast<int>(pixel & 1023u);
+							const int g = static_cast<int>((pixel >> 10) & 1023u);
+							const int b = static_cast<int>((pixel >> 20) & 1023u);
+							if (r != exactCode || g != exactCode || b != exactCode)
+							{
+								Assert::Fail((L"S2-H4 exact code 512 flickered at amp=0.5 (" + branch +
+									L", refresh " + std::to_wstring(f) + L", pixel " +
+									std::to_wstring(x) + L"," + std::to_wstring(y) +
+									L"): got R=" + std::to_wstring(r) + L" G=" + std::to_wstring(g) +
+									L" B=" + std::to_wstring(b)).c_str());
+							}
+						}
+					}
+				}
+
+				// Rule 3 negative control (ii): a non-exact fractional input on the exact same shader
+				// must still dither across {512, 513} on frame 0 (r = 0), proving d was not globally disabled.
+				const std::vector<std::vector<uint32_t>> fracFrames = renderTenBitFrames(enabled, fractionalValue, 1);
+				Assert::AreEqual(size_t{ 1 }, fracFrames.size(), L"expected 1 fractional negative-control frame");
+				int count512 = 0;
+				int count513 = 0;
+				for (const uint32_t pixel : fracFrames[0])
+				{
+					const int r = static_cast<int>(pixel & 1023u);
+					const int g = static_cast<int>((pixel >> 10) & 1023u);
+					const int b = static_cast<int>((pixel >> 20) & 1023u);
+					Assert::IsTrue((r == 512 || r == 513) && g == r && b == r,
+						(L"S2-H4 fractional control (" + branch + L") emitted out-of-range code: R=" +
+							std::to_wstring(r) + L" G=" + std::to_wstring(g) + L" B=" + std::to_wstring(b)).c_str());
+					if (r == 512)
+						++count512;
+					else
+						++count513;
+				}
+				Assert::IsTrue(count512 > 0 && count513 > 0,
+					(L"S2-H4 negative control (ii) (" + branch + L"): fractional input must dither across {512, 513} " +
+						L"(count512=" + std::to_wstring(count512) + L", count513=" + std::to_wstring(count513) + L")").c_str());
+			}
+		}
+
+		// W23-A3 AC#2 / GEM-026 / GEM-SD-CARRY (WARP): in limited-range 8-bit output, a legal near-black
+		// pixel (x = 16.25, outside the exact-code snap window) must never dither below studio black into
+		// BTB (code < 16) even at half-code dither amplitude (amp = 0.5), while remaining actively dithered
+		// and unbiased around 16.25. Simultaneously, true BTB footroom (x = 12.5 < 16) on the exact same
+		// frame must pass through untouched (ADR-0002), never clamped up to 16.
+		// Rule 3 same-input negative control: the pre-fix unclamped quantiser (code_min = timing_min = 1.0)
+		// on the exact same left-half 16x16 x 32 (x, y, frame/5) grid at x = 16.25, amp = 0.5 MUST emit
+		// BTB code 15 (unclampedBtbCount > 0), proving the BTB-excursion hazard was real.
+		BEGIN_TEST_METHOD_ATTRIBUTE(SigmaDeltaNearBlackNeverEmitsBtbWhileTrueBtbPassesThrough)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(SigmaDeltaNearBlackNeverEmitsBtbWhileTrueBtbPassesThrough)
+		{
+			constexpr int width = 32;
+			constexpr int height = 16;
+			constexpr int halfWidth = width / 2;
+			constexpr int frames = 32;
+			constexpr double leftCode = 16.25;
+			constexpr double rightCode = 12.5;
+			constexpr double amplitude = 0.5;
+			constexpr double residBound = 0.5 + amplitude;
+
+			// Rule 3 same-input negative control: pre-fix unclamped loop (code_min = 1.0, code_max = 254.0)
+			// on the exact same left-half 16x16 x 32 coordinates at x = 16.25, amp = 0.5 must emit BTB code 15.
+			int unclampedBtbCount = 0;
+			for (int y = 0; y < height; ++y)
+			{
+				for (int x = 0; x < halfWidth; ++x)
+				{
+					double r = 0.0;
+					for (int f = 0; f < frames; ++f)
+					{
+						const double d = (static_cast<double>(SigmaDeltaDomain::Ign(
+							static_cast<float>(x), static_cast<float>(y), f)) - 0.5) * 2.0 * amplitude;
+						const double k = (std::min)((std::max)(std::floor(leftCode + r + d + 0.5), 1.0), 254.0);
+						r = (std::min)((std::max)(leftCode + r - k, -residBound), residBound);
+						if (static_cast<int>(k) < 16)
+							++unclampedBtbCount;
+					}
+				}
+			}
+			Assert::IsTrue(unclampedBtbCount > 0,
+				L"GEM-026 negative control: pre-fix unclamped sigma-delta at x=16.25, amp=0.5 must emit BTB (< 16)");
+
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+
+			struct LogCaptureGuard
+			{
+				TargetLutGpuFixture& owner;
+				~LogCaptureGuard() { owner.CaptureLog(nullptr); }
+			};
+			struct TexGuard
+			{
+				pl_gpu owner;
+				pl_tex tex = nullptr;
+				~TexGuard()
+				{
+					if (tex)
+						pl_tex_destroy(owner, &tex);
+				}
+			};
+
+			CustomHookChain::Chain chain(SigmaLoader(fixture));
+			ConfiguredShaderRule sigma;
+			sigma.name = "sigma_delta";
+			sigma.filename = "Temporal sigma-delta.glsl";
+			sigma.stageOrder = 90;
+			sigma.parameters = {
+				{ "enabled", "1" },
+				{ "levels_full", "0" },
+				{ "swapchain_bits", "8" },
+				{ "color_bits", "8" },
+				{ "noise_amplitude", "0.5" },
+				{ "motion_compensation", "0" }
+			};
+			chain.Configure({ sigma });
+			CustomHookChain::TemplateValues values;
+			values.outputWidth = values.sourceWidth = width;
+			values.outputHeight = values.sourceHeight = height;
+			values.refreshHz = values.sourceFps = 60.0;
+
+			std::string log;
+			{
+				LogCaptureGuard guard{ fixture };
+				fixture.CaptureLog(&log);
+				chain.Ensure(values);
+			}
+			std::vector<const pl_hook*> hooks;
+			chain.Collect(false, hooks);
+			Assert::AreEqual(size_t{ 1 }, hooks.size(),
+				(L"libplacebo rejected Temporal sigma-delta.glsl: " + std::wstring(log.begin(), log.end())).c_str());
+			AssertCleanLibplaceboLog(log);
+
+			pl_fmt sourceFormat = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, PL_FMT_CAP_SAMPLEABLE);
+			Assert::IsNotNull(sourceFormat, L"No sampleable RGBA32F source format");
+			pl_fmt targetFormat = pl_find_fmt(gpu, PL_FMT_UNORM, 4, 8, 8,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+			Assert::IsNotNull(targetFormat, L"No host-readable RGBA8 target format");
+
+			// Full-range float RGB source values that libplacebo's 8-bit limited-range encoding maps to
+			// 16.25 / 255.0 on the left half (legal near-black) and 12.5 / 255.0 on the right half (true BTB).
+			constexpr float leftSource = static_cast<float>((leftCode - 16.0) / 219.0);
+			constexpr float rightSource = static_cast<float>((rightCode - 16.0) / 219.0);
+			const size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
+			std::vector<float> texels(pixelCount * 4);
+			for (int y = 0; y < height; ++y)
+			{
+				for (int x = 0; x < width; ++x)
+				{
+					const float v = (x < halfWidth) ? leftSource : rightSource;
+					float* dst = &texels[(static_cast<size_t>(y) * width + x) * 4];
+					dst[0] = v;
+					dst[1] = v;
+					dst[2] = v;
+					dst[3] = 1.0f;
+				}
+			}
+
+			pl_tex_params sp{};
+			sp.w = width;
+			sp.h = height;
+			sp.format = sourceFormat;
+			sp.sampleable = true;
+			sp.initial_data = texels.data();
+			TexGuard sourceGuard{ gpu, pl_tex_create(gpu, &sp) };
+			Assert::IsNotNull(sourceGuard.tex, L"Failed to create 32x16 RGBA32F source texture");
+
+			pl_tex_params tp{};
+			tp.w = width;
+			tp.h = height;
+			tp.format = targetFormat;
+			tp.renderable = true;
+			tp.host_readable = true;
+			TexGuard targetGuard{ gpu, pl_tex_create(gpu, &tp) };
+			Assert::IsNotNull(targetGuard.tex, L"Failed to create 32x16 RGBA8 target texture");
+
+			pl_frame image = TargetLutGpuFixture::MakeRgbFrame(sourceGuard.tex);
+			pl_frame output = TargetLutGpuFixture::MakeRgbFrame(targetGuard.tex);
+			output.repr.levels = PL_COLOR_LEVELS_LIMITED;
+			output.repr.bits.sample_depth = 8;
+			output.repr.bits.color_depth = 8;
+			output.repr.bits.bit_shift = 0;
+
+			pl_render_params params = pl_render_fast_params;
+			params.dither_params = nullptr;
+			params.error_diffusion = nullptr;
+			params.hooks = hooks.data();
+			params.num_hooks = static_cast<int>(hooks.size());
+
+			int leftCount16 = 0;
+			int leftCount17 = 0;
+			int rightCount12 = 0;
+			int rightCount13 = 0;
+			double leftSum = 0.0;
+			double rightSum = 0.0;
+			const int halfSamples = halfWidth * height * frames;
+
+			{
+				LogCaptureGuard guard{ fixture };
+				fixture.CaptureLog(&log);
+				std::vector<RgbaPixel> pixels(pixelCount);
+				for (int f = 0; f < frames; ++f)
+				{
+					Assert::IsTrue(pl_render_image(fixture.Renderer(), &image, &output, &params),
+						L"pl_render_image failed for GEM-026 limited-range 8-bit frame");
+					pl_gpu_finish(gpu);
+					pl_tex_transfer_params download{};
+					download.tex = targetGuard.tex;
+					download.ptr = pixels.data();
+					Assert::IsTrue(pl_tex_download(gpu, &download), L"pl_tex_download failed for GEM-026");
+
+					for (int y = 0; y < height; ++y)
+					{
+						for (int x = 0; x < width; ++x)
+						{
+							const RgbaPixel p = pixels[static_cast<size_t>(y) * width + x];
+							const int code = static_cast<int>(p.r);
+							Assert::IsTrue(p.g == p.r && p.b == p.r,
+								(L"GEM-026 neutral gray channel mismatch at refresh " + std::to_wstring(f) +
+									L" (" + std::to_wstring(x) + L"," + std::to_wstring(y) + L"): R=" +
+									std::to_wstring(p.r) + L" G=" + std::to_wstring(p.g) + L" B=" +
+									std::to_wstring(p.b)).c_str());
+
+							if (x < halfWidth)
+							{
+								Assert::IsTrue(code >= 16,
+									(L"GEM-026 near-black legal pixel (x=16.25) emitted BTB code " +
+										std::to_wstring(code) + L" at refresh " + std::to_wstring(f) +
+										L" (" + std::to_wstring(x) + L"," + std::to_wstring(y) + L")").c_str());
+								if (code == 16)
+									++leftCount16;
+								else if (code == 17)
+									++leftCount17;
+								leftSum += static_cast<double>(code);
+							}
+							else
+							{
+								// True BTB (x = 12.5 < 16): must stay in BTB footroom (never clamped to 16),
+								// bounded by the first-order loop envelope floor(12.5 +- (residBound + amp) + 0.5) in [11, 14].
+								Assert::IsTrue(code >= 11 && code <= 14,
+									(L"GEM-026 true BTB pixel (x=12.5) left BTB envelope [11,14] with code " +
+										std::to_wstring(code) + L" at refresh " + std::to_wstring(f) +
+										L" (" + std::to_wstring(x) + L"," + std::to_wstring(y) + L")").c_str());
+								if (code == 12)
+									++rightCount12;
+								else if (code == 13)
+									++rightCount13;
+								rightSum += static_cast<double>(code);
+							}
+						}
+					}
+				}
+			}
+			AssertCleanLibplaceboLog(log);
+
+			// First-order loop deterministic static mean bound: residBound / frames + rgba16f store step (~0.016) < 0.05.
+			const double leftMean = leftSum / static_cast<double>(halfSamples);
+			const double rightMean = rightSum / static_cast<double>(halfSamples);
+			Assert::IsTrue(leftCount16 > 0 && leftCount17 > 0,
+				(L"GEM-026 near-black legal pixel (x=16.25) must actively dither across 16 and 17 (count16=" +
+					std::to_wstring(leftCount16) + L", count17=" + std::to_wstring(leftCount17) + L")").c_str());
+			Assert::IsTrue(std::fabs(leftMean - leftCode) < 0.05,
+				(L"GEM-026 near-black legal mean biased away from 16.25: got " + std::to_wstring(leftMean)).c_str());
+			Assert::IsTrue(rightCount12 > 0 && rightCount13 > 0,
+				(L"GEM-026 true BTB pixel (x=12.5) must actively dither across 12 and 13 (count12=" +
+					std::to_wstring(rightCount12) + L", count13=" + std::to_wstring(rightCount13) + L")").c_str());
+			Assert::IsTrue(std::fabs(rightMean - rightCode) < 0.05,
+				(L"GEM-026 true BTB mean biased away from 12.5: got " + std::to_wstring(rightMean)).c_str());
+		}
+
 		// Gate verify 2026-10-17: the sigma-delta on the GPU is unbiased. Flat patches at every
 		// 10-bit level and at off-grid levels (every 1/32 code around chosen codes, exactly
 		// representable in the rgba16f OUTPUT texture) go through the shader for 192 static
@@ -1295,10 +1926,22 @@ namespace VideoProcessorTest
 			for (auto& e : flat.e) { e.V = 0.01; e.Sout = 1.0; }
 			flat.fingerprint = "flat";
 			Assert::IsFalse(DitherNeed::NeededAnywhere(flat, 4.0, p), L"tiny V: the link step is invisible");
-			// a visible step only below code 64 (BTB) does not count
-			LightLevel::Lut btbOnly = flat;
-			for (int c = 0; c < 64; ++c) btbOnly.e[static_cast<size_t>(c)].V = 5.0;
-			Assert::IsFalse(DitherNeed::NeededAnywhere(btbOnly, 4.0, p), L"codes below 64 are not counted");
+			// GEM-021: full-range dark codes (1..63) with visible V MUST count in Gate/NeededAnywhere.
+			LightLevel::Lut fullRangeDark = flat;
+			for (int c = 1; c < 64; ++c) fullRangeDark.e[static_cast<size_t>(c)].V = 5.0;
+			// Same-input negative control (Rule 3): pre-fix loop starting at c = 64 misses dark codes completely.
+			double naiveFrom64Max = 0.0;
+			for (int c = 64; c < LightLevel::kLutSize; ++c)
+				naiveFrom64Max = (std::max)(naiveFrom64Max, DitherNeed::GateVis<double>(p, fullRangeDark.e[static_cast<size_t>(c)].V, fullRangeDark.e[static_cast<size_t>(c)].Sout, 4.0));
+			Assert::AreEqual(0.0, naiveFrom64Max, 0.0, L"Negative control: c >= 64 scan sees zero visibility on dark-only full-range LUT");
+			Assert::IsTrue(DitherNeed::NeededAnywhere(fullRangeDark, 4.0, p), L"GEM-021: full-range dark codes 1..63 with visible V must count");
+			const DitherNeed::LutGate darkGate = DitherNeed::Gate(fullRangeDark, 4.0, p);
+			Assert::IsTrue(darkGate.needed && darkGate.worstCode >= 1 && darkGate.worstCode < 64, L"GEM-021: Gate worstCode must be < 64");
+			// Limited-range LUT: BTB codes 0..63 have V == 0.0 (and 0 elsewhere) -> still returns false.
+			LightLevel::Lut limitedBtbZero;
+			for (auto& e : limitedBtbZero.e) { e.V = 0.0; e.Sout = 1.0; }
+			limitedBtbZero.fingerprint = "limited-btb-zero";
+			Assert::IsFalse(DitherNeed::NeededAnywhere(limitedBtbZero, 4.0, p), L"limited-range LUT with V == 0 in 0..63 and 0 elsewhere is not needed");
 			LightLevel::Lut one = flat;
 			one.e[600].V = 5.0;
 			Assert::IsTrue(DitherNeed::NeededAnywhere(one, 4.0, p), L"one visible code is enough");
@@ -2752,6 +3395,100 @@ if (g.y == 0 && g.x < DN_N) {
 
 			finish.ReleaseGpu(gpu);
 			Assert::AreEqual(size_t{ 0 }, finish.DitherNeedVramBytes(), L"ReleaseGpu frees all VRAM");
+			ft.Destroy(gpu);
+			pl_tex_destroy(gpu, &lutTex);
+			pl_tex_destroy(gpu, &lutOutTex);
+			pl_dispatch_destroy(&dispatch);
+		}
+
+		// GEM-030 adversarial WARP test: BlockPass::Step MUST reject fa.grid.B != a.blockPx with
+		// DitherNeed::kGrainGridMismatch (Result::Unavailable) even when all texture dimensions and gw/gh match,
+		// and BlockPass::VramBytes() MUST remain > 0 after Invalidate() until Release(gpu) frees the ping-pong textures.
+		BEGIN_TEST_METHOD_ATTRIBUTE(DitherNeedWarpBlockPassRejectsBlockSizeMismatchAndKeepsVramAcrossInvalidate)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(DitherNeedWarpBlockPassRejectsBlockSizeMismatchAndKeepsVramAcrossInvalidate)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+			pl_dispatch dispatch = pl_dispatch_create(fixture.Log(), gpu);
+			Assert::IsNotNull(dispatch);
+
+			DnFixture fx;
+			fx.Make(0);
+			DwFrameTex ft;
+			ft.Make(gpu, fx);
+			const LightLevel::Lut lut = DnFixture::GoldenLut();
+			const std::vector<float> lt = LightLevel::PackTexels(lut), ot = LightLevel::PackOutputTexels(lut);
+			pl_tex lutTex = DwRgba32f(gpu, LightLevel::kLutSize, 1, lt.data());
+			pl_tex lutOutTex = DwRgba32f(gpu, LightLevel::kLutSize, 1, ot.data());
+
+			DitherNeed::Gpu::BlockPass pass;
+			Assert::AreEqual(size_t{ 0 }, pass.VramBytes(), L"fresh BlockPass holds 0 VRAM");
+
+			// Positive control: exact same healthy inputs with matching fa.grid.B == a.blockPx succeed and allocate ping-pong state.
+			DitherNeed::FrameArgs fa = DnArgs(fx.grid, 1.0 / 60.0, false, "gem030-fp");
+			fa.needed = true;
+			const DitherNeed::Gpu::Args good = DwArgs(ft, fx, lutTex, lutOutTex, fa);
+			const DitherNeed::Gpu::BlockPass::StepResult ok = pass.Step(gpu, dispatch, good, fa, false);
+			DwCheck(ok.ran && ok.decision.result == DitherNeed::Result::On && ok.missing == 0u && pass.Current() != nullptr,
+				"matching fa.grid / Args must run: " + pass.LastError());
+			const size_t expectedBytes = static_cast<size_t>(2) * fx.grid.Count() * 16u;
+			Assert::IsTrue(pass.VramBytes() > 0 && pass.VramBytes() == expectedBytes,
+				L"BlockPass::VramBytes() must report both allocated rgba32f ping-pong textures");
+
+			// GEM-030 part 1: mismatch ONLY fa.grid.B != a.blockPx on the exact same healthy textures & gw/gh.
+			// Same-input negative control (Rule 3): Validate(good) == 0 and gw/gh match, proving a pre-fix check
+			// omitting fa.grid.B != a.blockPx would wrongly accept this mismatched block size and execute the pass.
+			DitherNeed::FrameArgs badB = fa;
+			badB.grid.B = good.blockPx * 2;
+			Assert::AreEqual(0u, DitherNeed::Gpu::BlockPass::Validate(good),
+				L"Negative control: texture dimensions are valid so only fa.grid.B != a.blockPx differs");
+			Assert::IsTrue(badB.grid.gw == good.gridW && badB.grid.gh == good.gridH && badB.grid.B != good.blockPx,
+				L"Negative control: gw/gh agree while block size B disagrees");
+
+			const DitherNeed::Gpu::BlockPass::StepResult bad = pass.Step(gpu, dispatch, good, badB, false);
+			Assert::IsFalse(bad.ran, L"GEM-030: fa.grid.B != a.blockPx must not run the pass");
+			Assert::IsTrue(bad.decision.result == DitherNeed::Result::Unavailable && bad.decision.off,
+				L"GEM-030: fa.grid.B != a.blockPx must yield Result::Unavailable");
+			Assert::AreEqual(static_cast<unsigned>(DitherNeed::kGrainGridMismatch), bad.missing,
+				L"GEM-030: fa.grid.B != a.blockPx must set DitherNeed::kGrainGridMismatch");
+			Assert::IsTrue(bad.decision.status.find(DitherNeed::MissingText(DitherNeed::kGrainGridMismatch)) != std::string::npos,
+				L"GEM-030: status must name the grain grid mismatch");
+			Assert::IsNull(pass.Current(), L"GEM-030: rejected Step must invalidate Current()");
+			Assert::IsTrue(pass.VramBytes() > 0 && pass.VramBytes() == expectedBytes,
+				L"GEM-030: VramBytes() must remain > 0 while ping-pong textures remain allocated after rejected Step");
+
+			// Also rejected as Unavailable (not NotNeeded) when needed == false and Args.blockPx differs in the other direction.
+			DitherNeed::FrameArgs notNeededFa = fa;
+			notNeededFa.needed = false;
+			DitherNeed::Gpu::Args badArgsBlock = good;
+			badArgsBlock.blockPx = fa.grid.B * 2;
+			const DitherNeed::Gpu::BlockPass::StepResult badNotNeeded = pass.Step(gpu, dispatch, badArgsBlock, notNeededFa, false);
+			Assert::IsFalse(badNotNeeded.ran);
+			Assert::IsTrue(badNotNeeded.decision.result == DitherNeed::Result::Unavailable,
+				L"GEM-030: block size mismatch must stay Unavailable even when needed == false");
+			Assert::AreEqual(static_cast<unsigned>(DitherNeed::kGrainGridMismatch), badNotNeeded.missing);
+
+			// Recover on the next healthy frame (resets temporal state), then verify explicit Invalidate() vs Release(gpu).
+			const DitherNeed::Gpu::BlockPass::StepResult rec = pass.Step(gpu, dispatch, good, fa, false);
+			DwCheck(rec.ran && rec.decision.result == DitherNeed::Result::On && rec.decision.reset && pass.Current() != nullptr,
+				"recovery after GEM-030 mismatch must succeed with reset: " + pass.LastError());
+			Assert::AreEqual(expectedBytes, pass.VramBytes());
+
+			// GEM-030 part 2: explicit Invalidate() clears Current() (m_valid == false) while textures remain live in VRAM.
+			pass.Invalidate();
+			Assert::IsNull(pass.Current(), L"Invalidate() must hide Current()");
+			Assert::IsTrue(pass.VramBytes() > 0, L"GEM-030: VramBytes() must remain > 0 after Invalidate()");
+			Assert::AreEqual(expectedBytes, pass.VramBytes(),
+				L"GEM-030: VramBytes() must report exact allocated ping-pong bytes after Invalidate()");
+
+			// Release(gpu) destroys the textures and drops VramBytes() to 0.
+			pass.Release(gpu);
+			Assert::IsNull(pass.Current());
+			Assert::AreEqual(size_t{ 0 }, pass.VramBytes(), L"GEM-030: VramBytes() must equal 0 after Release(gpu)");
+
 			ft.Destroy(gpu);
 			pl_tex_destroy(gpu, &lutTex);
 			pl_tex_destroy(gpu, &lutOutTex);

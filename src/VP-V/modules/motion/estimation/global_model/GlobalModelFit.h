@@ -134,8 +134,10 @@ namespace CameraModel
 		// reported Ambiguous with verdictFlags & kVerdictDynamicTexture and a confidence below 0.5, never usable.
 		bool dynTexture = false;
 		DynTextureConfig dynTextureCfg;
-		// CE-WATER-C1 (default OFF): per-block dynamic-texture / water incoherence exclusion from the fitter's sample /
-		// inlier set. false = records are byte-identical to the fitter without it (m_waterPrev is never touched).
+		// CE-WATER-C1 (default OFF): per-block model-free discrete vector Laplacian water exclusion from the fitter's
+		// sample / refinement / photometric mask (kept strictly separate from BlockData::excluded so water is never
+		// stamped Label::Overlay or BlockHint::Excluded), plus a remaining-rigid-support guard.
+		// false = records are byte-identical to the fitter without it (m_waterPrev is never touched).
 		bool waterBlockExclude = false;
 		DynTextureExcludeConfig waterExcludeCfg;
 		// Static-camera hypothesis (R1-STATIC). false = records are byte-identical to the fitter without it (nothing is

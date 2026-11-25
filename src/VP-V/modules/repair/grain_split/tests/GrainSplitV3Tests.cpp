@@ -25,6 +25,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <random>
 #include <string>
 #include <vector>
@@ -652,6 +653,201 @@ namespace GrainSplitV3TestsNs
 				int fw = 0, fh = 0;
 				const std::vector<double> flat = VpUnit::BandFromBase::BandFromHalf(halfOf(std::vector<double>(67 * 45, 321.0), 67, 45, fw, fh), fw, fh, sg);
 				for (double x : flat) Require(std::fabs(x - 321.0) < 1e-9, "constant plane stays constant");
+			}
+		}
+
+		// GS-155 (L#3): boundary-bin zero-energy exclusion (q <= 1/12 code^2 in 10-bit-equivalent units) with BTB/WTW
+		// preserved and clean midtones untouched. Every sub-case pairs a Rule 3 same-input negative control against the
+		// protected GrainLevelTable / LevelBlockExcluded / ApplyLevelCap path.
+		TEST_METHOD(Gs155ExcludesZeroEnergyBoundaryBlocksAndPreservesGrainyBtbWtw)
+		{
+			const GrainSplit::Params p;
+			const int top = p.levelBins - 1;
+			Require(std::fabs(GrainSplit::kLevelZeroEnergyFloor - 1.0 / 12.0) < 1e-15, "kLevelZeroEnergyFloor == 1/12 code^2");
+
+			// Pre-fix naive NLF table (exact pre-GS-155 law: includes ALL blocks without boundary zero-energy exclusion).
+			auto naiveLevelTable = [](const std::vector<double>& quiet, const std::vector<double>& blockLuma,
+				const GrainSplit::Params& par, double* outLevel, bool* outValid)
+			{
+				const double cs = GrainSplit::DepthScale(par.sourceBits), es = cs * cs;
+				std::vector<std::vector<int>> keys(static_cast<size_t>(par.levelBins));
+				for (size_t i = 0; i < quiet.size(); ++i)
+				{
+					const int bin = GrainSplit::LevelBin(blockLuma[i] / cs, par);
+					keys[static_cast<size_t>(bin)].push_back(GrainSplit::LevelKey(quiet[i] / es));
+				}
+				for (int j = 0; j < par.levelBins; ++j)
+				{
+					std::vector<int>& k = keys[static_cast<size_t>(j)];
+					const int n = static_cast<int>(k.size());
+					outValid[j] = n >= par.levelMinBlocks && n > 0;
+					outLevel[j] = 0.0;
+					if (!outValid[j]) continue;
+					std::sort(k.begin(), k.end());
+					const int r = (par.levelPercentile * n + 99) / 100;
+					outLevel[j] = GrainSplit::LevelOfKey(k[static_cast<size_t>((std::max)(1, r) - 1)]);
+				}
+			};
+
+			const double expect4 = GrainSplit::LevelOfKey(GrainSplit::LevelKey(4.0));
+			const double nanVal = std::numeric_limits<double>::quiet_NaN();
+
+			// (a) Bin 0: 50% crushed zero-energy black (luma = 0.0, quiet = 0.0 <= 1/12) + 50% grainy BTB (luma = 32.0 < 64, quiet = 4.0).
+			{
+				Require(GrainSplit::LevelBlockExcluded(0, 0.0, p), "bin 0 q=0 excluded");
+				Require(GrainSplit::LevelBlockExcluded(0, GrainSplit::kLevelZeroEnergyFloor, p), "bin 0 q=1/12 excluded");
+				Require(!GrainSplit::LevelBlockExcluded(0, GrainSplit::kLevelZeroEnergyFloor + 1e-6, p), "bin 0 q=1/12+1e-6 preserved");
+				Require(!GrainSplit::LevelBlockExcluded(0, 4.0, p), "bin 0 grainy BTB q=4 preserved");
+				Require(GrainSplit::LevelBlockExcluded(0, nanVal, p), "bin 0 NaN excluded (NaN-safe)");
+
+				std::vector<double> q, l;
+				for (int i = 0; i < 20; ++i) { q.push_back(0.0); l.push_back(0.0); }
+				for (int i = 0; i < 20; ++i) { q.push_back(4.0); l.push_back(32.0); }
+
+				double naiveLevel[8]{}, level[8]{};
+				bool naiveValid[8]{}, valid[8]{};
+				naiveLevelTable(q, l, p, naiveLevel, naiveValid);
+				GrainSplit::GrainLevelTable(q, l, p, level, valid);
+
+				char buf[200];
+				std::snprintf(buf, sizeof buf, "GS-155 (a) bin 0: naive %.4f (valid %d) vs protected %.4f (valid %d)",
+					naiveLevel[0], naiveValid[0] ? 1 : 0, level[0], valid[0] ? 1 : 0);
+				Log(buf);
+				Require(naiveValid[0] && naiveLevel[0] < 0.05, "negative control (a): pre-fix naive bin-0 percentile collapses (< 0.05)");
+				Require(valid[0], "GS-155 (a): bin 0 valid from grainy BTB blocks");
+				Require(level[0] > 2.5 && level[0] == expect4, "GS-155 (a): bin 0 recovers grainy BTB level (~4.0)");
+
+				// ApplyLevelCap end-to-end check: naive cap crushes BTB N; protected ApplyLevelCap preserves BTB N.
+				std::vector<double> nNaive(q.size(), 4.0), nProtected(q.size(), 4.0);
+				for (size_t i = 0; i < nNaive.size(); ++i)
+				{
+					double cap = 0.0;
+					if (GrainSplit::GrainLevelCap(naiveLevel, naiveValid, p, l[i], cap)) nNaive[i] = (std::min)(nNaive[i], cap);
+				}
+				GrainSplit::ApplyLevelCap(nProtected, q, l, p);
+				Require(nNaive[20] < 0.05, "negative control (a): naive cap crushes grainy BTB block N (< 0.05)");
+				Require(nProtected[20] > 2.5, "GS-155 (a): ApplyLevelCap preserves grainy BTB block N (> 2.5)");
+
+				// ADR-0002 check: exclusion is strictly by energy, NEVER by pixel code value (grainy block at code 0.0 survives).
+				std::vector<double> qCode0(20, 4.0), lCode0(20, 0.0);
+				GrainSplit::GrainLevelTable(qCode0, lCode0, p, level, valid);
+				Require(valid[0] && level[0] == expect4, "GS-155 (a) ADR-0002: grainy block at luma=0.0 is NOT excluded by code value");
+
+				// All-crushed bin 0 + valid bin 1: bin 0 becomes invalid and extrapolates bin 1 instead of collapsing to ~0.
+				std::vector<double> qAll, lAll;
+				for (int i = 0; i < 20; ++i) { qAll.push_back(0.0); lAll.push_back(0.0); }
+				for (int i = 0; i < 20; ++i) { qAll.push_back(4.0); lAll.push_back(192.0); }
+				GrainSplit::GrainLevelTable(qAll, lAll, p, level, valid);
+				double cap = 0.0;
+				Require(!valid[0] && valid[1], "all-crushed bin 0 excluded -> invalid while bin 1 valid");
+				Require(GrainSplit::GrainLevelCap(level, valid, p, 32.0, cap) && cap == level[1] && cap > 2.5,
+					"all-crushed bin 0 extrapolates bin 1 instead of collapsing to ~0");
+			}
+
+			// (b) Top bin (levelBins - 1): 50% clipped white (luma = 1023.0, quiet = 0.0) + 50% grainy WTW (luma = 980.0 > 940, quiet = 4.0).
+			{
+				Require(GrainSplit::LevelBlockExcluded(top, 0.0, p), "top bin q=0 excluded");
+				Require(GrainSplit::LevelBlockExcluded(top, GrainSplit::kLevelZeroEnergyFloor, p), "top bin q=1/12 excluded");
+				Require(!GrainSplit::LevelBlockExcluded(top, GrainSplit::kLevelZeroEnergyFloor + 1e-6, p), "top bin q=1/12+1e-6 preserved");
+				Require(!GrainSplit::LevelBlockExcluded(top, 4.0, p), "top bin grainy WTW q=4 preserved");
+				Require(GrainSplit::LevelBlockExcluded(top, nanVal, p), "top bin NaN excluded (NaN-safe)");
+
+				std::vector<double> q, l;
+				for (int i = 0; i < 20; ++i) { q.push_back(0.0); l.push_back(1023.0); }
+				for (int i = 0; i < 20; ++i) { q.push_back(4.0); l.push_back(980.0); }
+
+				double naiveLevel[8]{}, level[8]{};
+				bool naiveValid[8]{}, valid[8]{};
+				naiveLevelTable(q, l, p, naiveLevel, naiveValid);
+				GrainSplit::GrainLevelTable(q, l, p, level, valid);
+
+				char buf[200];
+				std::snprintf(buf, sizeof buf, "GS-155 (b) bin %d: naive %.4f (valid %d) vs protected %.4f (valid %d)",
+					top, naiveLevel[top], naiveValid[top] ? 1 : 0, level[top], valid[top] ? 1 : 0);
+				Log(buf);
+				Require(naiveValid[top] && naiveLevel[top] < 0.05, "negative control (b): pre-fix naive top-bin percentile collapses (< 0.05)");
+				Require(valid[top], "GS-155 (b): top bin valid from grainy WTW blocks");
+				Require(level[top] > 2.5 && level[top] == expect4, "GS-155 (b): top bin recovers grainy WTW level (~4.0)");
+			}
+
+			// (c) Interior midtone bin (bin 3, luma = 400.0): 50% flat (quiet = 0.0) + 50% texture (quiet = 100.0).
+			// Clean midtone protection MUST be preserved: interior bins never exclude zero-energy blocks.
+			{
+				for (int b = 1; b < top; ++b)
+					Require(!GrainSplit::LevelBlockExcluded(b, 0.0, p), "interior bin never excludes zero-energy blocks");
+
+				std::vector<double> q, l;
+				for (int i = 0; i < 20; ++i) { q.push_back(0.0); l.push_back(400.0); }
+				for (int i = 0; i < 20; ++i) { q.push_back(100.0); l.push_back(400.0); }
+
+				// Same-input negative control for over-broad exclusion (what happens if bin 3 also excluded q <= 1/12).
+				std::vector<int> overbroadKeys;
+				for (size_t i = 0; i < q.size(); ++i)
+					if (q[i] > GrainSplit::kLevelZeroEnergyFloor) overbroadKeys.push_back(GrainSplit::LevelKey(q[i]));
+				std::sort(overbroadKeys.begin(), overbroadKeys.end());
+				const int overbroadN = static_cast<int>(overbroadKeys.size());
+				const int overbroadR = (p.levelPercentile * overbroadN + 99) / 100;
+				const double overbroadLevel3 = GrainSplit::LevelOfKey(overbroadKeys[static_cast<size_t>((std::max)(1, overbroadR) - 1)]);
+				Require(overbroadLevel3 > 90.0, "negative control (c): over-broad midtone exclusion destroys clean-frame cap (> 90)");
+
+				double level[8]{};
+				bool valid[8]{};
+				GrainSplit::GrainLevelTable(q, l, p, level, valid);
+				char buf[200];
+				std::snprintf(buf, sizeof buf, "GS-155 (c) bin 3: over-broad %.4f vs protected %.4f (valid %d)",
+					overbroadLevel3, level[3], valid[3] ? 1 : 0);
+				Log(buf);
+				Require(!GrainSplit::LevelBlockExcluded(3, 0.0, p), "GS-155 (c): LevelBlockExcluded(3, 0.0, p) == false");
+				Require(valid[3] && level[3] < 0.05 && level[3] == GrainSplit::LevelOfKey(0),
+					"GS-155 (c): interior midtone bin 3 stays at quiet floor (~2^-6), preserving clean-frame protection");
+			}
+
+			// (d) Depth scaling (12-bit, sourceBits = 12, DepthScale = 4, es = 16):
+			// quiet = 16 * (1/12) = 1.3333 is excluded in boundary bins while quiet = 16 * 1.0 is preserved.
+			{
+				GrainSplit::Params p12;
+				p12.sourceBits = 12;
+				const double cs = GrainSplit::DepthScale(p12.sourceBits);
+				const double es = cs * cs;
+				Require(cs == 4.0 && es == 16.0, "12-bit DepthScale == 4, es == 16");
+
+				const double qFloor12 = es * GrainSplit::kLevelZeroEnergyFloor;   // 16/12 = 1.3333 (> 1/12 in raw 12-bit units!)
+				const double qGrain12 = es * 1.0;                                 // 16.0 (10-bit-equivalent q = 1.0)
+				const double expect1 = GrainSplit::LevelOfKey(GrainSplit::LevelKey(1.0));
+
+				for (int boundary = 0; boundary < 2; ++boundary)
+				{
+					const int binIdx = boundary == 0 ? 0 : top;
+					const double luma12 = (boundary == 0 ? 32.0 : 980.0) * cs;
+					std::vector<double> q12, l12;
+					for (int i = 0; i < 20; ++i) { q12.push_back(qFloor12); l12.push_back(luma12); }
+					for (int i = 0; i < 20; ++i) { q12.push_back(qGrain12); l12.push_back(luma12); }
+
+					// Same-input negative control: unscaled exclusion checks raw quiet <= 1/12 instead of quiet/es <= 1/12,
+					// so qFloor12 = 16/12 leaks into the bin and pulls the 10th percentile down to ~1/12 (< 0.15).
+					std::vector<int> unscaledKeys;
+					for (size_t i = 0; i < q12.size(); ++i)
+					{
+						if (q12[i] <= GrainSplit::kLevelZeroEnergyFloor) continue;   // buggy unscaled check
+						unscaledKeys.push_back(GrainSplit::LevelKey(q12[i] / es));
+					}
+					std::sort(unscaledKeys.begin(), unscaledKeys.end());
+					const int unscaledN = static_cast<int>(unscaledKeys.size());
+					const int unscaledR = (p12.levelPercentile * unscaledN + 99) / 100;
+					const double unscaledLevel = GrainSplit::LevelOfKey(unscaledKeys[static_cast<size_t>((std::max)(1, unscaledR) - 1)]);
+					Require(unscaledLevel < 0.15, "negative control (d): unscaled floor fails to exclude 16*(1/12) in 12-bit");
+
+					double level12[8]{};
+					bool valid12[8]{};
+					GrainSplit::GrainLevelTable(q12, l12, p12, level12, valid12);
+					char buf[200];
+					std::snprintf(buf, sizeof buf, "GS-155 (d) 12-bit bin %d: unscaled %.4f vs protected %.4f (valid %d)",
+						binIdx, unscaledLevel, level12[binIdx], valid12[binIdx] ? 1 : 0);
+					Log(buf);
+					Require(valid12[binIdx], "GS-155 (d): 12-bit boundary bin valid from q = 16 * 1.0 blocks");
+					Require(level12[binIdx] > 0.8 && level12[binIdx] == expect1,
+						"GS-155 (d): 12-bit boundary bin excludes 16*(1/12) and recovers 10-bit-equivalent level 1.0");
+				}
 			}
 		}
 	};
