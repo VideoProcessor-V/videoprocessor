@@ -20,6 +20,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 
@@ -135,6 +136,81 @@ inline void Halved(const int in[4], int out[4])
     out[1] = in[1] / 2;
     out[2] = (in[2] + 1) / 2;
     out[3] = (in[3] + 1) / 2;
+}
+
+// Per-edge dark bar widths (in tile pixels) detected on a square normalised-luma tile.
+struct TileBars {
+    int left = 0, right = 0, top = 0, bottom = 0;
+};
+
+// Shared tile-bar margin detection (moved unchanged from SourceResolutionDetector.cpp X6, preserving W21-5 codeMaximum):
+// full columns from left/right and full rows from top/bottom whose span is within 2 quantization codes at `codeMaximum`
+// (2 / max(1, codeMaximum)) and whose maximum does not exceed a tenth of the normalised [0, 1] luma range (0.1).
+// Returns {0, 0, 0, 0} if luma is null, n <= 0, or stride < n.
+inline TileBars DetectTileBars(const float* luma, int stride, int n, int codeMaximum = 1023)
+{
+    TileBars bars;
+    if (!luma || n <= 0 || stride < n)
+        return bars;
+    // Derived: 2 quantization codes at `codeMaximum` (e.g. 2/1023 for 10-bit, 2/4095 for 12-bit);
+    // dark ceiling = 1/10 of the normalised [0, 1] luma range (contract moved from SourceResolutionDetector).
+    const double maxSpan = 2.0 / static_cast<double>((std::max)(1, codeMaximum));
+    const double darkCeiling = 0.1;
+    auto isBarColumn = [&](int x) {
+        double lo = static_cast<double>(luma[static_cast<size_t>(x)]);
+        if (lo != lo)
+            return false;
+        double hi = lo;
+        for (int y = 1; y < n; ++y) {
+            const double v = static_cast<double>(luma[static_cast<size_t>(y) * static_cast<size_t>(stride) + static_cast<size_t>(x)]);
+            if (v != v)
+                return false;
+            lo = (std::min)(lo, v);
+            hi = (std::max)(hi, v);
+        }
+        return (hi - lo) <= maxSpan && hi <= darkCeiling;
+    };
+    auto isBarRow = [&](int y) {
+        const float* r = luma + static_cast<size_t>(y) * static_cast<size_t>(stride);
+        double lo = static_cast<double>(r[0]);
+        if (lo != lo)
+            return false;
+        double hi = lo;
+        for (int x = 1; x < n; ++x) {
+            const double v = static_cast<double>(r[static_cast<size_t>(x)]);
+            if (v != v)
+                return false;
+            lo = (std::min)(lo, v);
+            hi = (std::max)(hi, v);
+        }
+        return (hi - lo) <= maxSpan && hi <= darkCeiling;
+    };
+    while (bars.left < n && isBarColumn(bars.left))
+        ++bars.left;
+    while (bars.right < n - bars.left && isBarColumn(n - 1 - bars.right))
+        ++bars.right;
+    while (bars.top < n && isBarRow(bars.top))
+        ++bars.top;
+    while (bars.bottom < n - bars.top && isBarRow(n - 1 - bars.bottom))
+        ++bars.bottom;
+    return bars;
+}
+
+// Active picture rectangle [b.left, b.top, n - b.right, n - b.bottom) inside an n x n tile,
+// or empty {0, 0, 0, 0} if n <= 0, any margin is negative, or the bars cover the whole tile on either axis.
+inline Rect TileActiveRect(int n, const TileBars& b)
+{
+    Rect r;
+    if (n <= 0 || b.left < 0 || b.right < 0 || b.top < 0 || b.bottom < 0)
+        return r;
+    if (static_cast<int64_t>(b.left) + static_cast<int64_t>(b.right) >= static_cast<int64_t>(n) ||
+        static_cast<int64_t>(b.top) + static_cast<int64_t>(b.bottom) >= static_cast<int64_t>(n))
+        return r;
+    r.x0 = static_cast<float>(b.left);
+    r.y0 = static_cast<float>(b.top);
+    r.x1 = static_cast<float>(n - b.right);
+    r.y1 = static_cast<float>(n - b.bottom);
+    return r;
 }
 
 // ---- GLSL -----------------------------------------------------------------------------------------------------------------

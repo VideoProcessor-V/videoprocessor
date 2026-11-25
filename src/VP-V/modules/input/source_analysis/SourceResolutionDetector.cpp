@@ -11,6 +11,7 @@
 #include <cassert>
 #include <utility>
 #include <VP-V/core/RobustStats.h>
+#include <VP-V/modules/input/source_analysis/picture/shared/PictureRect.h>
 
 namespace SourceResolution
 {
@@ -276,24 +277,12 @@ namespace SourceResolution
 			}
 			for (int i = 0; i < 4; ++i) out.quadrants[i] = q[i] / (static_cast<double>(h) * h);
 			out.spread = std::sqrt(sq / (static_cast<double>(n) * n));
-			// Bars: constant (two codes) dark (a tenth of the range) full columns / rows from each edge.
-			const double flat = 2.0 / (std::max)(1, codeMaximum), dark = 0.1;
-			auto column = [&](int x) {
-				double lo = 1e9, hi = -1e9;
-				for (int y = 0; y < n; ++y) { const double v = luma[static_cast<size_t>(y) * stride + x]; lo = (std::min)(lo, v); hi = (std::max)(hi, v); }
-				return hi - lo <= flat && hi <= dark;
-			};
-			auto row = [&](int y) {
-				double lo = 1e9, hi = -1e9;
-				const float* r = luma + static_cast<size_t>(y) * stride;
-				for (int x = 0; x < n; ++x) { lo = (std::min)(lo, static_cast<double>(r[x])); hi = (std::max)(hi, static_cast<double>(r[x])); }
-				return hi - lo <= flat && hi <= dark;
-			};
-			out.barLeft = out.barRight = out.barTop = out.barBottom = 0;
-			while (out.barLeft < n && column(out.barLeft)) ++out.barLeft;
-			while (out.barRight < n - out.barLeft && column(n - 1 - out.barRight)) ++out.barRight;
-			while (out.barTop < n && row(out.barTop)) ++out.barTop;
-			while (out.barBottom < n - out.barTop && row(n - 1 - out.barBottom)) ++out.barBottom;
+			// Bars: constant (two codes) dark (a tenth of the range) full columns / rows from each edge (shared U8 PictureRect).
+			const VpUnit::PictureRect::TileBars bars = VpUnit::PictureRect::DetectTileBars(luma, stride, n, codeMaximum);
+			out.barLeft = bars.left;
+			out.barRight = bars.right;
+			out.barTop = bars.top;
+			out.barBottom = bars.bottom;
 		}
 		// The coding measure (P16 kCodingEvidence) is the regions unit's: the monitor Acquires it; Analyse leaves `out.coding` as it is.
 		return true;
@@ -693,12 +682,12 @@ namespace SourceResolution
 			const Spectrum& s = tiles[i];
 			if (i < signatureTiles)
 			{
-				const bool flat = t.latchFixes && flatBar(s);
+				const bool isFlatBar = t.latchFixes && flatBar(s);
 				if (t.latchFixes)
 				{
-					for (int q = 0; q < 4; ++q) { frame.pattern.push_back(s.quadrants[q]); frame.patternFlat.push_back(flat ? 1 : 0); }
+					for (int q = 0; q < 4; ++q) { frame.pattern.push_back(s.quadrants[q]); frame.patternFlat.push_back(isFlatBar ? 1 : 0); }
 					// h3-latch: the luma distribution of the same (not flat bar) tiles, from their code histograms.
-					if (!flat && !s.coding.histogram.empty())
+					if (!isFlatBar && !s.coding.histogram.empty())
 					{
 						if (frame.distribution.empty()) frame.distribution.assign(static_cast<size_t>(kDistributionBins), 0.0);
 						const size_t codes = s.coding.histogram.size();
@@ -707,7 +696,7 @@ namespace SourceResolution
 					}
 				}
 				// A flat bar tile stays out of the mean / signature unless every tile is flat (black).
-				if (!flat || allFlat)
+				if (!isFlatBar || allFlat)
 				{
 					sum += s.mean;
 					signature += s.mean * static_cast<double>(i + 1);
