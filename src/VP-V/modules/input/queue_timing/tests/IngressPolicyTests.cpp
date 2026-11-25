@@ -11,9 +11,11 @@
 #include <VP-V/core/FrameAnalysisStore.h>
 #include <VP-V/core/RunningPathwayLatch.h>
 
+#include <atomic>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
@@ -836,6 +838,293 @@ namespace VideoProcessorTest
 				Assert::AreEqual(2, renderer.targetCalls,
 					L"After post-GpuReleased SettingsApplied(code=1), QueueTargetFn must NOT run");
 			}
+		}
+
+		// S1-M1 (Pass-A MED #3): SyncHostFromImpl must use a sequence-guarded CAS on pathwayState so a concurrent
+		// FixSwitchBits read on the capture/file arrival thread can never clobber a newer SettingsApplied transition
+		// on the render thread back to a stale pathway.
+		TEST_METHOD(SyncHostFromImplConcurrentWithSettingsAppliedNeverLeavesStalePathway)
+		{
+			RunningPathwayGuard latchGuard;
+			Vpv::RunningPathway::SetForTesting(Vpv::RunningPathway::kVpv);
+			Vpv::Ingress::IngressPolicy policy;
+
+			S1M1FakeRenderer renderer;
+			int impl = 0;
+			struct HubImplGuard
+			{
+				const void* host;
+				explicit HubImplGuard(const void* h) : host(h) {}
+				~HubImplGuard()
+				{
+					RE::LifecycleFacts shutdown;
+					shutdown.host = host;
+					shutdown.kind = RE::Lifecycle::Shutdown;
+					Vpv::Hub::ExtensionHub::Instance().OnLifecycle(shutdown);
+				}
+				HubImplGuard(const HubImplGuard&) = delete;
+				HubImplGuard& operator=(const HubImplGuard&) = delete;
+			} hubGuard(&impl);
+
+			Vpv::Ingress::HostBinding bind(&renderer, &S1M1FakeRenderer::DecideDrop, &renderer, &S1M1FakeRenderer::TargetSeven);
+			Assert::IsTrue(bind.Registered(), L"HostBinding must register");
+
+			Vpv::Ingress::IngressState state;
+			std::atomic<bool> queueFixes{ false };
+			std::atomic<bool> motionFixes{ false };
+
+			Vpv::Ingress::IngressState::FixSwitches vpvSwitches;
+			vpvSwitches.pulldownFixes = true;
+			vpvSwitches.timingContinuityFixes = true;
+			vpvSwitches.cadenceClassFixes = true;
+			vpvSwitches.queueTimingFixes = true;
+			vpvSwitches.motionHistoryFixes = true;
+			vpvSwitches.originalPathway = false;
+			const uint32_t vpvBits = Vpv::Ingress::IngressState::FixSwitchBitsOf(vpvSwitches);
+
+			Vpv::Ingress::IngressState::FixSwitches origSwitches;
+			origSwitches.pulldownFixes = false;
+			origSwitches.timingContinuityFixes = false;
+			origSwitches.cadenceClassFixes = false;
+			origSwitches.queueTimingFixes = false;
+			origSwitches.motionHistoryFixes = false;
+			origSwitches.originalPathway = true;
+			const uint32_t origBits = Vpv::Ingress::IngressState::FixSwitchBitsOf(origSwitches);
+
+			RE::FrameContext fc;
+			fc.host = &renderer;
+
+			// 1. Negative control (sequential sync): without a racing SettingsApplied, SyncHostFromImpl actively updates
+			// OriginalPathwayOf(&renderer) in both directions (VP-V -> Original -> VP-V) when NoteFixSwitches changes.
+			Assert::IsTrue(Vpv::Hub::ExtensionHub::Instance().NoteFixSwitches(&impl, vpvBits),
+				L"negative control: publish initial VP-V FixSwitchBits");
+			Vpv::Ingress::SyncHostFromImpl(&renderer, &impl, state, queueFixes, motionFixes);
+			Assert::IsFalse(Vpv::Ingress::OriginalPathwayOf(&renderer),
+				L"negative control: sequential SyncHostFromImpl must reflect VP-V FixSwitchBits");
+
+			Assert::IsTrue(Vpv::Hub::ExtensionHub::Instance().NoteFixSwitches(&impl, origBits),
+				L"negative control: publish Original FixSwitchBits");
+			Vpv::Ingress::SyncHostFromImpl(&renderer, &impl, state, queueFixes, motionFixes);
+			Assert::IsTrue(Vpv::Ingress::OriginalPathwayOf(&renderer),
+				L"negative control: sequential SyncHostFromImpl must update VP-V -> Original when NoteFixSwitches changes");
+
+			Assert::IsTrue(Vpv::Hub::ExtensionHub::Instance().NoteFixSwitches(&impl, vpvBits),
+				L"negative control: publish VP-V FixSwitchBits again");
+			Vpv::Ingress::SyncHostFromImpl(&renderer, &impl, state, queueFixes, motionFixes);
+			Assert::IsFalse(Vpv::Ingress::OriginalPathwayOf(&renderer),
+				L"negative control: sequential SyncHostFromImpl must update Original -> VP-V when NoteFixSwitches changes");
+
+			// 2. Negative control (same-input unprotected hazard): reading FixSwitchBits before SettingsApplied(code=1)
+			// and then calling unconditional NoteOriginalPathway with the stale bits clobbers Original back to VP-V
+			// and causes OnQueueTarget to execute the VP-V hook (2 -> 7).
+			{
+				uint32_t staleBits = 0;
+				Assert::IsTrue(Vpv::Hub::ExtensionHub::Instance().FixSwitchBits(&impl, staleBits),
+					L"negative control: read pre-transition VP-V FixSwitchBits snapshot");
+				Assert::AreEqual<uint32_t>(vpvBits, staleBits,
+					L"negative control: pre-transition snapshot must equal vpvBits");
+
+				Assert::IsTrue(Vpv::Hub::ExtensionHub::Instance().NoteFixSwitches(&impl, origBits),
+					L"negative control: render thread publishes Original FixSwitchBits");
+				RE::LifecycleFacts toOrig;
+				toOrig.host = &impl;
+				toOrig.kind = RE::Lifecycle::SettingsApplied;
+				toOrig.code = 1;
+				policy.OnLifecycle(toOrig);
+				Assert::IsTrue(Vpv::Ingress::OriginalPathwayOf(&renderer),
+					L"negative control: SettingsApplied(code=1) sets OriginalPathwayOf(&renderer) == true");
+
+				RE::QueueTargetContext qcOrig;
+				qcOrig.capacity = 8;
+				qcOrig.billTarget = 2;
+				qcOrig.target = 2;
+				policy.OnQueueTarget(fc, qcOrig);
+				Assert::AreEqual<size_t>(2, qcOrig.target,
+					L"negative control: Original pathway preserves Bill's target == 2 before stale clobber");
+				Assert::AreEqual(0, renderer.targetCalls,
+					L"negative control: QueueTargetFn must not run before stale clobber");
+
+				// Unprotected pre-fix step: unconditional NoteOriginalPathway with the stale VP-V snapshot.
+				Vpv::Ingress::NoteOriginalPathway(&renderer,
+					Vpv::Ingress::IngressState::FixSwitchesFromBits(staleBits).originalPathway);
+				Assert::IsFalse(Vpv::Ingress::OriginalPathwayOf(&renderer),
+					L"negative control: unprotected NoteOriginalPathway with stale VP-V bits clobbers SettingsApplied(code=1)");
+
+				RE::QueueTargetContext qcClobbered;
+				qcClobbered.capacity = 8;
+				qcClobbered.billTarget = 2;
+				qcClobbered.target = 2;
+				policy.OnQueueTarget(fc, qcClobbered);
+				Assert::AreEqual<size_t>(7, qcClobbered.target,
+					L"negative control: stale clobber breaks Original gating and mutates qc.target (2 -> 7)");
+				Assert::AreEqual(1, renderer.targetCalls,
+					L"negative control: stale clobber erroneously invokes QueueTargetFn");
+			}
+
+			// 3. Concurrent race proof: 2,000 synchronized rounds (1,000 VP-V -> Original and 1,000 Original -> VP-V,
+			// ending deterministically on Original == true) racing Thread A (NoteFixSwitches + SettingsApplied) against
+			// Thread B (SyncHostFromImpl) from a per-round barrier with deterministic phase stagger.
+			std::atomic<bool> stop{ false };
+			std::atomic<int> startGen{ 0 };
+			std::atomic<int> doneA{ 0 };
+			std::atomic<int> doneB{ 0 };
+			std::atomic<bool> roundTargetOriginal{ true };
+			std::atomic<int> roundStagger{ 0 };
+			std::atomic<int> publishFailures{ 0 };
+
+			auto waitUntil = [&stop](const std::atomic<int>& flag, int target) -> bool
+			{
+				for (unsigned spins = 0u; flag.load(std::memory_order_acquire) < target; ++spins)
+				{
+					if (stop.load(std::memory_order_acquire))
+						return false;
+					if ((spins & 63u) == 63u)
+						std::this_thread::yield();
+				}
+				return true;
+			};
+
+			constexpr int kRounds = 2000;
+			constexpr int kStaggerSteps = 32;
+			constexpr int kThreadAMaxStagger = 24;
+
+			std::thread threadA;
+			std::thread threadB;
+			struct ThreadJoinGuard
+			{
+				std::atomic<bool>& stopFlag;
+				std::thread& a;
+				std::thread& b;
+				ThreadJoinGuard(std::atomic<bool>& s, std::thread& ta, std::thread& tb)
+					: stopFlag(s), a(ta), b(tb)
+				{
+				}
+				~ThreadJoinGuard()
+				{
+					stopFlag.store(true, std::memory_order_release);
+					if (a.joinable())
+						a.join();
+					if (b.joinable())
+						b.join();
+				}
+				ThreadJoinGuard(const ThreadJoinGuard&) = delete;
+				ThreadJoinGuard& operator=(const ThreadJoinGuard&) = delete;
+			} joinGuard(stop, threadA, threadB);
+
+			threadA = std::thread([&]()
+			{
+				std::atomic<int> delayA{ 0 };
+				for (int nextRound = 1; nextRound <= kRounds; ++nextRound)
+				{
+					if (!waitUntil(startGen, nextRound))
+						return;
+					const bool targetOrig = roundTargetOriginal.load(std::memory_order_acquire);
+					const int stagger = roundStagger.load(std::memory_order_acquire);
+					if (stagger < kThreadAMaxStagger)
+					{
+						for (int s = 0; s < stagger; ++s)
+							delayA.fetch_add(1, std::memory_order_relaxed);
+					}
+					if (!Vpv::Hub::ExtensionHub::Instance().NoteFixSwitches(&impl, targetOrig ? origBits : vpvBits))
+						publishFailures.fetch_add(1, std::memory_order_relaxed);
+					RE::LifecycleFacts applied;
+					applied.host = &impl;
+					applied.kind = RE::Lifecycle::SettingsApplied;
+					applied.code = targetOrig ? 1 : 0;
+					policy.OnLifecycle(applied);
+					doneA.store(nextRound, std::memory_order_release);
+				}
+			});
+
+			threadB = std::thread([&]()
+			{
+				std::atomic<int> delayB{ 0 };
+				for (int nextRound = 1; nextRound <= kRounds; ++nextRound)
+				{
+					if (!waitUntil(startGen, nextRound))
+						return;
+					const int stagger = roundStagger.load(std::memory_order_acquire);
+					if (stagger >= kThreadAMaxStagger)
+					{
+						for (int s = 0; s < (stagger - kThreadAMaxStagger + 1); ++s)
+							delayB.fetch_add(1, std::memory_order_relaxed);
+					}
+					Vpv::Ingress::SyncHostFromImpl(&renderer, &impl, state, queueFixes, motionFixes);
+					doneB.store(nextRound, std::memory_order_release);
+				}
+			});
+
+			int vpvToOrigRounds = 0;
+			int origToVpvRounds = 0;
+			for (int round = 0; round < kRounds; ++round)
+			{
+				// Even rounds: Original -> VP-V; odd rounds: VP-V -> Original (final round 1999 ends on Original == true).
+				const bool targetOrig = (round % 2) == 1;
+				const uint32_t initBits = targetOrig ? vpvBits : origBits;
+				Assert::IsTrue(Vpv::Hub::ExtensionHub::Instance().NoteFixSwitches(&impl, initBits),
+					L"round setup must publish starting FixSwitchBits");
+				RE::LifecycleFacts initApplied;
+				initApplied.host = &impl;
+				initApplied.kind = RE::Lifecycle::SettingsApplied;
+				initApplied.code = targetOrig ? 0 : 1;
+				policy.OnLifecycle(initApplied);
+				if (targetOrig)
+				{
+					Assert::IsFalse(Vpv::Ingress::OriginalPathwayOf(&renderer),
+						L"VP-V -> Original round must start with OriginalPathwayOf(&renderer) == false");
+				}
+				else
+				{
+					Assert::IsTrue(Vpv::Ingress::OriginalPathwayOf(&renderer),
+						L"Original -> VP-V round must start with OriginalPathwayOf(&renderer) == true");
+				}
+
+				roundTargetOriginal.store(targetOrig, std::memory_order_release);
+				roundStagger.store((round / 2) % kStaggerSteps, std::memory_order_release);
+				const int nextRound = round + 1;
+				startGen.store(nextRound, std::memory_order_release);
+
+				Assert::IsTrue(waitUntil(doneA, nextRound), L"Thread A must complete race round");
+				Assert::IsTrue(waitUntil(doneB, nextRound), L"Thread B must complete race round");
+
+				const bool actualOriginal = Vpv::Ingress::OriginalPathwayOf(&renderer);
+				if (targetOrig)
+				{
+					Assert::IsTrue(actualOriginal,
+						L"Concurrent SyncHostFromImpl must never clobber SettingsApplied(code=1) back to stale VP-V");
+					++vpvToOrigRounds;
+				}
+				else
+				{
+					Assert::IsFalse(actualOriginal,
+						L"Concurrent SyncHostFromImpl must never clobber SettingsApplied(code=0) back to stale Original");
+					++origToVpvRounds;
+				}
+			}
+
+			stop.store(true, std::memory_order_release);
+			threadA.join();
+			threadB.join();
+
+			Assert::AreEqual(0, publishFailures.load(std::memory_order_acquire),
+				L"Every NoteFixSwitches publish on Thread A must succeed");
+			Assert::AreEqual(kRounds / 2, vpvToOrigRounds,
+				L"All 1,000 VP-V -> Original synchronized race rounds must execute");
+			Assert::AreEqual(kRounds / 2, origToVpvRounds,
+				L"All 1,000 Original -> VP-V synchronized race rounds must execute");
+
+			// Final authoritative pathway after round 1999 is Original == true; verify OnQueueTarget respects it.
+			Assert::IsTrue(Vpv::Ingress::OriginalPathwayOf(&renderer),
+				L"Final pathway after race rounds must remain Original == true");
+			RE::QueueTargetContext qcFinal;
+			qcFinal.capacity = 8;
+			qcFinal.billTarget = 2;
+			qcFinal.target = 2;
+			policy.OnQueueTarget(fc, qcFinal);
+			Assert::AreEqual<size_t>(2, qcFinal.target,
+				L"After concurrent race ending on Original, OnQueueTarget must preserve Bill's target == 2");
+			Assert::AreEqual(1, renderer.targetCalls,
+				L"After concurrent race ending on Original, QueueTargetFn must NOT run");
 		}
 	};
 }
