@@ -1092,6 +1092,16 @@ if (run && lead) {
 }
 )GLSL";
 
+		// GEM-144 (MC-SEARCH-2): 64-thread work group per block for quarter-pel refinement.
+		// All 64 threads compute the 9 * 144 = 1296 candidate pixel diffs in parallel (coalesced
+		// 2D texture reads of to_half), then 9 threads sum each candidate in the exact serial
+		// (y, x) order of QPEL_BODY_SERIAL (100% bit-identical, 5,796 B shared memory < 16 KB).
+		const char* const QPEL_HEADER = R"GLSL(
+shared float qp_from[144];
+shared float qp_diff[1296];
+shared float qp_sads[9];
+)GLSL";
+
 		const char* const QPEL_BODY = R"GLSL(
 ivec2 b = ivec2(gl_WorkGroupID.xy);
 ivec2 blocks = imageSize(dst);
@@ -1103,19 +1113,40 @@ bool run = inside && f.z > 0.5;
 half_size_ = textureSize(from_half, 0);
 ivec2 o = b * 8;
 vec2 v0 = f.xy * 0.5;
-pb_load_from(o, li, run);
-pb_sync();
-if (run && li < 9)
-    pb_sads[li] = pb_sad_sub(o, v0 + 0.25 * vec2(li % 3 - 1, li / 3 - 1));
-pb_sync();
+if (run) {
+    for (int i = li; i < 144; i += 64)
+        qp_from[i] = from_at(o + ivec2(i % 12 - 2, i / 12 - 2));
+}
+memoryBarrierShared();
+barrier();
+if (run) {
+    for (int e = li; e < 1296; e += 64) {
+        int c = e / 144;
+        int p = e % 144;
+        vec2 v = c == 4 ? v0 : v0 + 0.25 * vec2(c % 3 - 1, c / 3 - 1);
+        ivec2 xy = o + ivec2(p % 12 - 2, p / 12 - 2);
+        qp_diff[e] = abs(qp_from[p] - to_lin(vec2(xy) + v));
+    }
+}
+memoryBarrierShared();
+barrier();
+if (run && li < 9) {
+    float s = 0.0;
+    int base = li * 144;
+    for (int p = 0; p < 144; p++)
+        s += qp_diff[base + p];
+    qp_sads[li] = s;
+}
+memoryBarrierShared();
+barrier();
 if (inside && lead) {
     if (run) {
         vec2 best = v0;
-        float best_sad = pb_sads[4];
+        float best_sad = qp_sads[4];
         for (int dy = -1; dy <= 1; dy++)
             for (int dx = -1; dx <= 1; dx++) {
                 if (dx == 0 && dy == 0) continue;
-                float s = pb_sads[(dy + 1) * 3 + dx + 1];
+                float s = qp_sads[(dy + 1) * 3 + dx + 1];
                 if (s < best_sad) { best_sad = s; best = v0 + 0.25 * vec2(dx, dy); }
             }
         f.xy = best * 2.0;
@@ -1168,6 +1199,34 @@ bool in_picture_(vec2 c) { return true; }
 )GLSL";
 
 		const char* const STILL_ZERO_BODY = R"GLSL(
+#ifdef IN_PLACE
+ivec2 b = ivec2(gl_GlobalInvocationID.xy);
+ivec2 size = imageSize(field_io);
+if (b.x < size.x && b.y < size.y) {
+    ivec2 bs = ivec2(block_px);
+    ivec2 o = b * bs;
+    if (in_picture_(vec2(o) + vec2(bs) * 0.5)) {
+        ivec2 psz = textureSize(luma_a, 0);
+        bool same = true;
+        bool any_px = false;
+        for (int y = 0; y < bs.y && same; y++)
+            for (int x = 0; x < bs.x; x++) {
+                ivec2 p = o + ivec2(x, y);
+                if (p.x >= psz.x || p.y >= psz.y)
+                    continue;
+                any_px = true;
+                if (texelFetch(luma_a, p, 0).r != texelFetch(luma_b, p, 0).r) { same = false; break; }
+            }
+        if (same && any_px) {
+#ifdef SUB_FIELD
+            imageStore(field_io, b, vec4(0.0, 0.0, 1.0, 1.0));
+#else
+            imageStore(field_io, b, vec4(0.0, 0.0, 1.0, 0.0));
+#endif
+        }
+    }
+}
+#else
 ivec2 b = ivec2(gl_GlobalInvocationID.xy);
 ivec2 size = imageSize(dst);
 if (b.x < size.x && b.y < size.y) {
@@ -1195,6 +1254,7 @@ if (b.x < size.x && b.y < size.y) {
 #endif
     }
 }
+#endif
 )GLSL";
 
 		const char* const COPY_BODY = R"GLSL(
@@ -1588,12 +1648,16 @@ for (int k = int(i); k < total; k += 256) {
     if (q.x < 0.0 || q.y < 0.0 || q.x > float(l1s.x - 1) || q.y > float(l1s.y - 1))
         continue;
     vec2 t = (q + vec2(0.5)) / vec2(l1s);
-    // Both sampled, then chosen: an implicit-LOD sample may not sit in a
-    // branch (D3D11's HLSL compiler).
-    float fa = texelFetch(l1_a, p, 0).r, fb = texelFetch(l1_b, p, 0).r;
-    float ta = texture(l1_a, t).r, tb = texture(l1_b, t).r;
-    float a = d == 0 ? fa : fb;
-    float b = d == 0 ? tb : ta;
+    // Explicit LOD 0.0 is legal inside branches in D3D11 HLSL and Vulkan/SPIR-V,
+    // halving L1 texture bandwidth per direction (bit-identical on single-mip l1_a/l1_b).
+    float a, b;
+    if (d == 0) {
+        a = texelFetch(l1_a, p, 0).r;
+        b = textureLod(l1_b, t, 0.0).r;
+    } else {
+        a = texelFetch(l1_b, p, 0).r;
+        b = textureLod(l1_a, t, 0.0).r;
+    }
     s += abs(a - b);
     n += 1.0;
 }
@@ -1722,14 +1786,35 @@ if (b.x < blocks.x && b.y < blocks.y) {
 #ifdef TEXTURE_TOL
     // M1: the block's texture (mean absolute neighbour difference of A's
     // half-resolution luma) raises the error a correct match may have.
+    // Rolling 2-row cache fetches each from_half texel once (81 vs 192 fetches)
+    // with exact edge clamping and exact (y, x) float summation order.
     ivec2 hs_ = textureSize(from_half, 0);
+    ivec2 lim_ = hs_ - ivec2(2);
+    ivec2 o_ = clamp(b * 8, ivec2(0), lim_);
+    int py_cur_ = o_.y;
+    float cur_[9];
+    float nxt_[9];
+    for (int k_ = 0; k_ < 9; k_++) {
+        int px_ = min(o_.x + k_, hs_.x - 1);
+        cur_[k_] = texelFetch(from_half, ivec2(px_, py_cur_), 0).r;
+        nxt_[k_] = texelFetch(from_half, ivec2(px_, min(py_cur_ + 1, hs_.y - 1)), 0).r;
+    }
     float tex_ = 0.0;
-    for (int y = 0; y < 8; y++)
-        for (int x = 0; x < 8; x++) {
-            ivec2 p = clamp(b * 8 + ivec2(x, y), ivec2(0), hs_ - ivec2(2));
-            float c0 = texelFetch(from_half, p, 0).r;
-            tex_ += abs(texelFetch(from_half, p + ivec2(1, 0), 0).r - c0) + abs(texelFetch(from_half, p + ivec2(0, 1), 0).r - c0);
+    for (int y = 0; y < 8; y++) {
+        int py_ = clamp(b.y * 8 + y, 0, lim_.y);
+        if (py_ != py_cur_) {
+            for (int k_ = 0; k_ < 9; k_++) {
+                cur_[k_] = nxt_[k_];
+                nxt_[k_] = texelFetch(from_half, ivec2(min(o_.x + k_, hs_.x - 1), min(py_ + 1, hs_.y - 1)), 0).r;
+            }
+            py_cur_ = py_;
         }
+        for (int x = 0; x < 8; x++) {
+            int ix_ = clamp(b.x * 8 + x, 0, lim_.x) - o_.x;
+            float c0 = cur_[ix_];
+            tex_ += abs(cur_[ix_ + 1] - c0) + abs(nxt_[ix_] - c0);
+        }
+    }
     float extra_ = texture_tol * tex_ / 128.0;
 #else
     float extra_ = 0.0;
@@ -1793,43 +1878,59 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		// the differences over the block's 8x8, their mean removed (a fade, a
 		// lighting change), then the mean absolute residual. Temporal noise
 		// survives the motion compensation; static texture does not.
+		// GEM-144 (MC-SEARCH-2): 64-thread work group (8x8) per block replaces the 64-float
+		// per-thread register array d[64] and parallelizes all 128 texture fetches across the
+		// block (544 B shared memory < 16 KB), then thread 0 sums in exact i = 0..63 serial order.
 		const char* const GRAIN_ERROR_HEADER = R"GLSL(
+shared float ge_d[64];
+shared float ge_a[64];
+shared vec2 ge_v[4];
 ivec2 half_size_;
 float from_at(ivec2 p) { return texelFetch(from_half, clamp(p, ivec2(0), half_size_ - ivec2(1)), 0).r; }
 float to_lin(vec2 p) { return texture(to_half, (p + vec2(0.5)) / vec2(half_size_)).r; }
 )GLSL";
 
 		const char* const GRAIN_ERROR_BODY = R"GLSL(
-ivec2 b = ivec2(gl_GlobalInvocationID.xy);
-ivec2 blocks = imageSize(dst);
-if (b.x < blocks.x && b.y < blocks.y) {
-    half_size_ = textureSize(from_half, 0);
-    vec2 v = texelFetch(field, b, 0).xy * 0.5;
-    ivec2 o = b * 8;
+ivec2 b = ivec2(gl_WorkGroupID.xy);
+int li = int(gl_LocalInvocationIndex);
+half_size_ = textureSize(from_half, 0);
+if (li == 0) {
+    vec2 v0 = texelFetch(field, b, 0).xy * 0.5;
 #ifdef SPLIT
     // 11a E2: a split block's quadrants at their own sub-block vectors.
-    vec2 vq[4];
     for (int k = 0; k < 4; k++) {
         vec4 sf = texelFetch(sub_field, b * 2 + ivec2(k % 2, k / 2), 0);
-        vq[k] = sf.w > 0.5 ? sf.xy * 0.5 : v;
+        ge_v[k] = sf.w > 0.5 ? sf.xy * 0.5 : v0;
     }
+#else
+    ge_v[0] = v0;
 #endif
-    float d[64];
+}
+memoryBarrierShared();
+barrier();
+{
+    ivec2 p = b * 8 + ivec2(li % 8, li / 8);
+    float a = from_at(p);
+#ifdef SPLIT
+    vec2 v = ge_v[(li % 8) / 4 + 2 * ((li / 8) / 4)];
+#else
+    vec2 v = ge_v[0];
+#endif
+    ge_a[li] = a;
+    ge_d[li] = a - to_lin(vec2(p) + v);
+}
+memoryBarrierShared();
+barrier();
+if (li == 0) {
     float mean_d = 0.0, mean_y = 0.0;
     for (int i = 0; i < 64; i++) {
-        ivec2 p = o + ivec2(i % 8, i / 8);
-        float a = from_at(p);
-#ifdef SPLIT
-        v = vq[(i % 8) / 4 + 2 * ((i / 8) / 4)];
-#endif
-        d[i] = a - to_lin(vec2(p) + v);
-        mean_d += d[i];
-        mean_y += a;
+        mean_d += ge_d[i];
+        mean_y += ge_a[i];
     }
     mean_d /= 64.0;
     float e = 0.0;
     for (int i = 0; i < 64; i++)
-        e += abs(d[i] - mean_d);
+        e += abs(ge_d[i] - mean_d);
     imageStore(dst, b, vec4(e / 64.0, mean_y / 64.0, 0.0, 1.0));
 }
 )GLSL";
@@ -2164,48 +2265,84 @@ float hold_weight(vec2 lp, float feather)
 		// then whole half-resolution pixels +-1 (= +-2 source px) and half a
 		// pixel. Output per sub-block: (vector, SAD per sample, 1); other
 		// blocks repeat the parent search (vector, SAD, 0).
+		// GEM-151 (MC-SEARCH-2): cooperatively cache the 10x10 search neighborhood in shared
+		// memory (1,600 B < 16 KB, single uniform barrier), deduplicate parent+neighbor vectors
+		// once per split block, and cache each quadrant's 4x4 from_half patch once in registers
+		// (16 vs up to 416 fetches/quadrant). Exact tie-breaking and float summation order.
 		const char* const SPLIT_SEARCH_BODY = R"GLSL(
+shared vec4 sp_search[10][10];
+float sp_fq_[16];
+
 float sad_q(ivec2 o, vec2 v)
 {
     float s = 0.0;
     for (int y = 0; y < 4; y++)
         for (int x = 0; x < 4; x++) {
             ivec2 p = o + ivec2(x, y);
-            s += abs(from_at(p) - to_lin(vec2(p) + v));
+            s += abs(sp_fq_[y * 4 + x] - to_lin(vec2(p) + v));
         }
     return s;
 }
 
 void main_split()
 {
+    ivec2 wg0 = ivec2(gl_WorkGroupID.xy) * 8 - ivec2(1);
+    ivec2 loc = ivec2(gl_LocalInvocationID.xy);
     ivec2 b = ivec2(gl_GlobalInvocationID.xy);
     ivec2 blocks = textureSize(search, 0);
+    int li = int(gl_LocalInvocationIndex);
+    for (int i = li; i < 100; i += 64) {
+        int tx = i % 10;
+        int ty = i / 10;
+        sp_search[ty][tx] = texelFetch(search, clamp(wg0 + ivec2(tx, ty), ivec2(0), blocks - ivec2(1)), 0);
+    }
+    memoryBarrierShared();
+    barrier();
     if (b.x >= blocks.x || b.y >= blocks.y)
         return;
-    vec4 fs = texelFetch(search, b, 0);
-    bool split = fs.z > split_sad;
+    vec4 fs = sp_search[loc.y + 1][loc.x + 1];
+    if (fs.z <= split_sad) {
+        for (int q = 0; q < 4; q++)
+            imageStore(dst, b * 2 + ivec2(q % 2, q / 2), vec4(fs.xyz, 0.0));
+        return;
+    }
     half_size_ = textureSize(from_half, 0);
+    vec2 cand[9];
+    int nc = 0;
+    cand[nc++] = fs.xy;
+    for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++) {
+            if (dx == 0 && dy == 0) continue;
+            vec2 v = sp_search[loc.y + 1 + dy][loc.x + 1 + dx].xy;
+            bool dup = false;
+            for (int j = 0; j < nc; j++) {
+                if (all(equal(v, cand[j]))) { dup = true; break; }
+            }
+            if (!dup)
+                cand[nc++] = v;
+        }
     for (int q = 0; q < 4; q++) {
         ivec2 sb = b * 2 + ivec2(q % 2, q / 2);
-        if (!split) {
-            imageStore(dst, sb, vec4(fs.xyz, 0.0));
-            continue;
-        }
         ivec2 o = b * 8 + ivec2(q % 2, q / 2) * 4;
-        vec2 best = fs.xy;
+        for (int y = 0; y < 4; y++)
+            for (int x = 0; x < 4; x++)
+                sp_fq_[y * 4 + x] = from_at(o + ivec2(x, y));
+        vec2 best = cand[0];
         float best_sad = sad_q(o, best);
-        for (int dy = -1; dy <= 1; dy++)
-            for (int dx = -1; dx <= 1; dx++) {
-                if (dx == 0 && dy == 0) continue;
-                ivec2 c = clamp(b + ivec2(dx, dy), ivec2(0), blocks - ivec2(1));
-                vec2 v = texelFetch(search, c, 0).xy;
-                float s = sad_q(o, v);
-                if (s < best_sad) { best_sad = s; best = v; }
-            }
+        for (int k = 1; k < 9; k++) {
+            if (k >= nc) break;
+            float s = sad_q(o, cand[k]);
+            if (s < best_sad) { best_sad = s; best = cand[k]; }
+        }
         vec2 centre = round(best);
         for (int dy = -1; dy <= 1; dy++)
             for (int dx = -1; dx <= 1; dx++) {
                 vec2 v = centre + vec2(dx, dy);
+                bool seen = false;
+                for (int j = 0; j < nc; j++) {
+                    if (all(equal(v, cand[j]))) { seen = true; break; }
+                }
+                if (seen) continue;
                 float s = sad_q(o, v);
                 if (s < best_sad) { best_sad = s; best = v; }
             }
@@ -2214,6 +2351,13 @@ void main_split()
             for (int dx = -1; dx <= 1; dx++) {
                 if (dx == 0 && dy == 0) continue;
                 vec2 v = best + 0.5 * vec2(dx, dy);
+                vec2 d = clamp(round(v - centre), vec2(-1.0), vec2(1.0));
+                if (all(equal(v, centre + d))) continue;
+                bool seen = false;
+                for (int j = 0; j < nc; j++) {
+                    if (all(equal(v, cand[j]))) { seen = true; break; }
+                }
+                if (seen) continue;
                 float s = sad_q(o, v);
                 if (s < best_sad) { best_sad = s; fbest = v; }
             }
@@ -2653,20 +2797,45 @@ if (q.x < size.x && q.y < size.y) {
 		return true;
 	}
 
-	// Identical blocks get the exact zero vector: `fieldTex` through `scratch`, copied back.
+	// Identical blocks get the exact zero vector: in-place via read-write storage image
+	// when supported (preserving fieldTex object identity without scratch/copy), else via scratch.
 	bool MotionWarp::StillZero(pl_tex& fieldTex, pl_tex& scratch, const Planes& a, const Planes& b, int w, int h, int blockPixels,
 		bool subField)
 	{
 		if (!fieldTex || !a.luma || !b.luma)
 			return true;
+		const bool same = a.luma == b.luma;   // one texture bound once (libplacebo rejects it twice)
+		const bool usePicture = settings.pictureArea && picture;
+		const bool inPlace = fieldTex->params.format && (fieldTex->params.format->caps & PL_FMT_CAP_READWRITE) != 0;
+		const int block = blockPixels;
+		const pl_shader_var vars[1] = { { pl_var_int("block_px"), &block, true } };
+		if (inPlace)
+		{
+			pl_shader_desc fieldDesc{};
+			fieldDesc.desc.name = "field_io";
+			fieldDesc.desc.type = PL_DESC_STORAGE_IMG;
+			fieldDesc.desc.access = PL_DESC_ACCESS_READWRITE;
+			fieldDesc.binding.object = fieldTex;
+			std::vector<pl_shader_desc> desc;
+			desc.reserve(4);
+			desc.push_back(fieldDesc);
+			desc.push_back(Sampled("luma_a", a.luma, false));
+			if (!same)
+				desc.push_back(Sampled("luma_b", b.luma, false));
+			if (usePicture)
+				desc.push_back(Sampled("picture", picture, false));
+			const std::string header = std::string("#define IN_PLACE 1\n") +
+				(subField ? "#define SUB_FIELD 1\n" : "") +
+				(same ? "#define luma_b luma_a\n" : "") + (usePicture ? "#define PICTURE 1\n" : "") + STILL_ZERO_HEADER;
+			return Dispatch("VideoProcessor de-judder: identical blocks still", header.c_str(), STILL_ZERO_BODY,
+				desc.data(), static_cast<int>(desc.size()), vars, 1, w, h, 8);
+		}
 		pl_tex_params params = fieldTex->params;
 		if (!pl_tex_recreate(gpu, &scratch, &params))
 		{
 			error = "cannot create the still-block field";
 			return false;
 		}
-		const bool same = a.luma == b.luma;   // one texture bound once (libplacebo rejects it twice)
-		const bool usePicture = settings.pictureArea && picture;
 		std::vector<pl_shader_desc> desc;
 		desc.reserve(5);
 		desc.push_back(Sampled("src_field", fieldTex, false));
@@ -2676,8 +2845,6 @@ if (q.x < size.x && q.y < size.y) {
 		desc.push_back(Storage("dst", scratch));
 		if (usePicture)
 			desc.push_back(Sampled("picture", picture, false));
-		const int block = blockPixels;
-		const pl_shader_var vars[1] = { { pl_var_int("block_px"), &block, true } };
 		const std::string header = std::string(subField ? "#define SUB_FIELD 1\n" : "") +
 			(same ? "#define luma_b luma_a\n" : "") + (usePicture ? "#define PICTURE 1\n" : "") + STILL_ZERO_HEADER;
 		if (!Dispatch("VideoProcessor de-judder: identical blocks still", header.c_str(), STILL_ZERO_BODY,
@@ -3571,11 +3738,25 @@ if (li == 0) {
 	namespace
 	{
 		// M5: the pixel check of each trusted block (see Settings).
+		// Cooperative 10x10 shared tile of src_field (1,600 B < 16 KB, single uniform barrier)
+		// replaces 257 src_field fetches per trusted block with 100 fetches per 8x8 work group.
+		const char* const VERIFY_HEADER = "shared vec4 vf_tile[10][10];\n";
+
 		const char* const VERIFY_BODY = R"GLSL(
+ivec2 wg0 = ivec2(gl_WorkGroupID.xy) * 8 - ivec2(1);
+ivec2 loc = ivec2(gl_LocalInvocationID.xy);
 ivec2 b = ivec2(gl_GlobalInvocationID.xy);
 ivec2 blocks = imageSize(dst);
+int li = int(gl_LocalInvocationIndex);
+for (int i = li; i < 100; i += 64) {
+    int tx = i % 10;
+    int ty = i / 10;
+    vf_tile[ty][tx] = texelFetch(src_field, clamp(wg0 + ivec2(tx, ty), ivec2(0), blocks - ivec2(1)), 0);
+}
+memoryBarrierShared();
+barrier();
 if (b.x < blocks.x && b.y < blocks.y) {
-    vec4 f = texelFetch(src_field, b, 0);
+    vec4 f = vf_tile[loc.y + 1][loc.x + 1];
     if (f.z > 0.5) {
         ivec2 hs = textureSize(from_half, 0);
         float bad = 0.0;
@@ -3590,7 +3771,8 @@ if (b.x < blocks.x && b.y < blocks.y) {
                 float ws = 0.0;
                 for (int yy = 0; yy <= 1; yy++)
                     for (int xx = 0; xx <= 1; xx++) {
-                        vec4 n = texelFetch(src_field, clamp(g0 + ivec2(xx, yy), ivec2(0), blocks - ivec2(1)), 0);
+                        ivec2 ti = g0 + ivec2(xx, yy) - wg0;
+                        vec4 n = vf_tile[ti.y][ti.x];
                         float w = (xx == 1 ? t.x : 1.0 - t.x) * (yy == 1 ? t.y : 1.0 - t.y);
                         if (n.z > 0.5) { v += w * n.xy; ws += w; }
                     }
@@ -3650,7 +3832,8 @@ vec2 field_vector_all(vec2 lp)
 )GLSL";
 
 		// M6: which blocks' vectors may be used: trusted, or detailed with a
-		// fair match.
+		// fair match. Rolling 2-row cache fetches each from_half texel once (81 vs 192
+		// fetches) with exact edge clamping and exact (y, x) float summation order.
 		const char* const VECTOR_OK_BODY = R"GLSL(
 ivec2 b = ivec2(gl_GlobalInvocationID.xy);
 ivec2 blocks = imageSize(dst);
@@ -3659,13 +3842,32 @@ if (b.x < blocks.x && b.y < blocks.y) {
     float ok = f.z > 0.5 ? 1.0 : 0.0;
     if (ok < 0.5 && f.w <= own_error) {
         ivec2 hs = textureSize(from_half, 0);
+        ivec2 lim = hs - ivec2(2);
+        ivec2 o = clamp(b * 8, ivec2(0), lim);
+        int py_cur = o.y;
+        float cur[9];
+        float nxt[9];
+        for (int k = 0; k < 9; k++) {
+            int px = min(o.x + k, hs.x - 1);
+            cur[k] = texelFetch(from_half, ivec2(px, py_cur), 0).r;
+            nxt[k] = texelFetch(from_half, ivec2(px, min(py_cur + 1, hs.y - 1)), 0).r;
+        }
         float t = 0.0;
-        for (int y = 0; y < 8; y++)
-            for (int x = 0; x < 8; x++) {
-                ivec2 p = clamp(b * 8 + ivec2(x, y), ivec2(0), hs - ivec2(2));
-                float c0 = texelFetch(from_half, p, 0).r;
-                t += abs(texelFetch(from_half, p + ivec2(1, 0), 0).r - c0) + abs(texelFetch(from_half, p + ivec2(0, 1), 0).r - c0);
+        for (int y = 0; y < 8; y++) {
+            int py = clamp(b.y * 8 + y, 0, lim.y);
+            if (py != py_cur) {
+                for (int k = 0; k < 9; k++) {
+                    cur[k] = nxt[k];
+                    nxt[k] = texelFetch(from_half, ivec2(min(o.x + k, hs.x - 1), min(py + 1, hs.y - 1)), 0).r;
+                }
+                py_cur = py;
             }
+            for (int x = 0; x < 8; x++) {
+                int ix = clamp(b.x * 8 + x, 0, lim.x) - o.x;
+                float c0 = cur[ix];
+                t += abs(cur[ix + 1] - c0) + abs(nxt[ix] - c0);
+            }
+        }
         ok = t / 128.0 >= own_texture ? 1.0 : 0.0;
     }
     imageStore(dst, b, vec4(ok, 0.0, 0.0, 1.0));
@@ -3673,21 +3875,92 @@ if (b.x < blocks.x && b.y < blocks.y) {
 )GLSL";
 
 		// M6: the weight of each half-resolution pixel of A.
+		// Cooperative 18x18 from_half tile (1,296 B) + 6x6 field tile (576 B) [+ 6x6 vector_ok
+		// tile (144 B)] = 2,016 B max (< 16 KB), single uniform barrier before bounds check.
+		const char* const PIXEL_MASK_HEADER = R"GLSL(
+shared float pm_from[18][18];
+shared vec4 pm_field[6][6];
+#ifdef PIXEL_OWN_VECTORS
+shared float pm_vok[6][6];
+#endif
+vec2 pm_field_vector_all(vec2 lp, ivec2 f0)
+{
+    vec2 g = lp / 16.0 - vec2(0.5);
+    ivec2 g0 = ivec2(floor(g));
+    vec2 t = g - vec2(g0);
+    vec2 v = vec2(0.0);
+    float ws = 0.0;
+    for (int y = 0; y <= 1; y++)
+        for (int x = 0; x <= 1; x++) {
+            ivec2 ti = g0 + ivec2(x, y) - f0;
+            vec4 f = pm_field[ti.y][ti.x];
+            float w = (x == 1 ? t.x : 1.0 - t.x) * (y == 1 ? t.y : 1.0 - t.y);
+#ifdef PIXEL_TRUSTED_VECTORS
+#ifdef PIXEL_OWN_VECTORS
+            if (pm_vok[ti.y][ti.x] < 0.5) w = 0.0;
+#else
+            if (f.z < 0.5) w = 0.0;
+#endif
+#endif
+            v += w * f.xy;
+            ws += w;
+        }
+#ifdef PIXEL_TRUSTED_VECTORS
+    if (ws <= 0.0) {
+        for (int y = -1; y <= 2; y++)
+            for (int x = -1; x <= 2; x++) {
+                ivec2 ti = g0 + ivec2(x, y) - f0;
+                vec4 f = pm_field[ti.y][ti.x];
+#ifdef PIXEL_OWN_VECTORS
+                f.z = pm_vok[ti.y][ti.x];
+#endif
+                if (f.z > 0.5) { v += f.xy; ws += 1.0; }
+            }
+    }
+    return ws > 0.0 ? v / ws : vec2(0.0);
+#else
+    return v;
+#endif
+}
+)GLSL";
+
 		const char* const PIXEL_MASK_BODY = R"GLSL(
+ivec2 wg0 = ivec2(gl_WorkGroupID.xy) * 16;
+ivec2 loc = ivec2(gl_LocalInvocationID.xy);
 ivec2 p = ivec2(gl_GlobalInvocationID.xy);
 ivec2 hs = imageSize(dst);
+ivec2 fs = textureSize(field, 0);
+ivec2 p0 = wg0 - ivec2(1);
+ivec2 f0 = ivec2(gl_WorkGroupID.xy) * 2 - ivec2(2);
+int li = int(gl_LocalInvocationIndex);
+for (int i = li; i < 324; i += 256) {
+    int tx = i % 18;
+    int ty = i / 18;
+    pm_from[ty][tx] = texelFetch(from_half, clamp(p0 + ivec2(tx, ty), ivec2(0), hs - ivec2(1)), 0).r;
+}
+if (li < 36) {
+    int fx = li % 6;
+    int fy = li / 6;
+    ivec2 fc = clamp(f0 + ivec2(fx, fy), ivec2(0), fs - ivec2(1));
+    pm_field[fy][fx] = texelFetch(field, fc, 0);
+#ifdef PIXEL_OWN_VECTORS
+    pm_vok[fy][fx] = texelFetch(vector_ok, fc, 0).r;
+#endif
+}
+memoryBarrierShared();
+barrier();
 if (p.x < hs.x && p.y < hs.y) {
-    vec2 v = field_vector_all((vec2(p) + vec2(0.5)) * 2.0) * 0.5;
+    vec2 v = pm_field_vector_all((vec2(p) + vec2(0.5)) * 2.0, f0) * 0.5;
     float e = 0.0;
     for (int y = -1; y <= 1; y++)
         for (int x = -1; x <= 1; x++) {
             ivec2 q = clamp(p + ivec2(x, y), ivec2(0), hs - ivec2(1));
-            e += abs(texelFetch(from_half, q, 0).r - texture(to_half, (vec2(q) + v + vec2(0.5)) / vec2(hs)).r);
+            e += abs(pm_from[loc.y + y + 1][loc.x + x + 1] - texture(to_half, (vec2(q) + v + vec2(0.5)) / vec2(hs)).r);
         }
     e /= 9.0;
     // Two tiers: the pixel's own block passed the block test or not.
-    ivec2 fs = textureSize(field, 0);
-    bool trusted = texelFetch(field, clamp(p / 8, ivec2(0), fs - ivec2(1)), 0).z > 0.5;
+    ivec2 bi = p / 8 - f0;
+    bool trusted = pm_field[bi.y][bi.x].z > 0.5;
     float lo = trusted ? mask_lo : mask_lo_u, hi = trusted ? mask_hi : mask_hi_u;
 #ifdef PIXEL_FAST
     // Fast motion must predict B more exactly (v in half-resolution pixels).
@@ -4552,12 +4825,12 @@ if (b.x < blocks.x && b.y < blocks.y) {
 				const pl_shader_desc qpelDesc[4] = {
 					Sampled("raw", rawField, false), Sampled("from_half", halfA, false),
 					Sampled("to_half", halfB, true), Storage("dst", settings.vectorSmooth ? qpelField : field) };
-				static const std::string qpelHeader = std::string(SUBPEL_HEADER) + PERBLOCK_HEADER;
+				static const std::string qpelHeader = std::string(SUBPEL_HEADER) + QPEL_HEADER;
 				if (serialSearchForTest ?
 					!Dispatch("VideoProcessor de-judder: quarter-pel (11a E3, serial reference)", SUBPEL_HEADER,
 						QPEL_BODY_SERIAL, qpelDesc, 4, nullptr, 0, blocksX, blocksY, 8) :
 					!DispatchPerBlock("VideoProcessor de-judder: quarter-pel (11a E3)", qpelHeader.c_str(), QPEL_BODY,
-						qpelDesc, 4, nullptr, 0, blocksX, blocksY, 8, 4))
+						qpelDesc, 4, nullptr, 0, blocksX, blocksY, 8, 8))
 					return false;
 			}
 			if (settings.vectorSmooth && !Smooth(settings.estQpel ? qpelField : rawField))
@@ -4577,7 +4850,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 					{ pl_var_float("verify_share"), &verifyShare, true } };
 				const pl_shader_desc verifyDesc[4] = { Sampled("src_field", field, false), Sampled("from_half", halfA, false),
 					Sampled("to_half", halfB, true), Storage("dst", verifyField) };
-				if (!Dispatch("VideoProcessor de-judder: pixel verification (M5)", nullptr, VERIFY_BODY, verifyDesc, 4, verifyVars, 2,
+				if (!Dispatch("VideoProcessor de-judder: pixel verification (M5)", VERIFY_HEADER, VERIFY_BODY, verifyDesc, 4, verifyVars, 2,
 						blocksX, blocksY, 8))
 					return false;
 				std::swap(field, verifyField);
@@ -4799,7 +5072,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			if (own)
 				maskDescs.push_back(Sampled("vector_ok", vectorOk, false));
 			const std::string maskHeader = std::string(settings.pixelTrustedVectors ? "#define PIXEL_TRUSTED_VECTORS 1\n" : "") +
-				(own ? "#define PIXEL_OWN_VECTORS 1\n" : "") + (fast ? "#define PIXEL_FAST 1\n" : "") + FIELD_ALL_GLSL;
+				(own ? "#define PIXEL_OWN_VECTORS 1\n" : "") + (fast ? "#define PIXEL_FAST 1\n" : "") + PIXEL_MASK_HEADER;
 			if (!Dispatch("VideoProcessor de-judder: pixel trust (M6)", maskHeader.c_str(), PIXEL_MASK_BODY, maskDescs.data(),
 					static_cast<int>(maskDescs.size()), maskVars, fast ? 6 : 4, halfW, halfH, 16))
 				return false;
@@ -4838,9 +5111,9 @@ if (b.x < blocks.x && b.y < blocks.y) {
 				Sampled("from_half", halfA, false), Sampled("to_half", halfB, true),
 				Sampled("field", field, false), Storage("dst", grainError), Sampled("sub_field", subField, false) };
 			static const std::string grainSplitHeader = std::string("#define SPLIT 1\n") + GRAIN_ERROR_HEADER;
-			if (!Dispatch("VideoProcessor de-judder: grain error (adaptive downscale)",
+			if (!DispatchPerBlock("VideoProcessor de-judder: grain error (adaptive downscale)",
 				settings.estSplit ? grainSplitHeader.c_str() : GRAIN_ERROR_HEADER,
-				GRAIN_ERROR_BODY, grainDesc, settings.estSplit ? 5 : 4, nullptr, 0, blocksX, blocksY, 8))
+				GRAIN_ERROR_BODY, grainDesc, settings.estSplit ? 5 : 4, nullptr, 0, blocksX, blocksY, 8, 8))
 				return false;
 			grainErrorValid = true;
 		}
