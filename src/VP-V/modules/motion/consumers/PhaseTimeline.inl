@@ -16,16 +16,12 @@
 
 bool LibplaceboVideoRenderer::Impl::RunVpPhaseInterpolation()
 {
-	return Vpv::MotionHost::RunVpPhaseInterpolationHost(frameInterpolator, log, d3d11->gpu, activeSettings,
-		vpPhaseA, vpPhaseB, vpPhaseMotion, vpPhaseT, vpPhasePlanes, vectorEngine, dejudderExtras, GetTickCount64(),
-		[this](const FallbackCatalog::Decision& d) { SyncFallback(d); });
+	return Vpv::MotionHost::RunVpPhaseInterpolationHost(frameInterpolator, log, d3d11->gpu, activeSettings, vpPhaseA, vpPhaseB, vpPhaseMotion, vpPhaseT, vpPhasePlanes, vectorEngine, dejudderExtras, GetTickCount64(), [this](const FallbackCatalog::Decision& d) { SyncFallback(d); });
 }
 
 double LibplaceboVideoRenderer::Impl::TimelineDisplayHz() const
 {
-	const double measured = presentationTelemetry.Snapshot().measuredDisplayHz;
-	return dejudderPolicy.timelineDisplayRateHold.Update(measured, renderLoadDisplayRefreshHz.load(std::memory_order_acquire),
-		activeSettings.timingContinuityFixes);
+	return dejudderPolicy.timelineDisplayRateHold.Update(presentationTelemetry.Snapshot().measuredDisplayHz, renderLoadDisplayRefreshHz.load(std::memory_order_acquire), activeSettings.timingContinuityFixes);
 }
 
 bool LibplaceboVideoRenderer::Impl::VpTimelineWanted() const
@@ -466,27 +462,22 @@ void LibplaceboVideoRenderer::Impl::RegisterDejudderCacheFrame(const pl_frame& t
 {
     if (pipelineSlots.OriginalPathway()) return;   // PHASE 1: no cache stage, no geometry (Bill's hooks only)
     dejudderExtras.dejudderSubtitleComposed = subtitleCompositionSucceeded;
-    {
-        const pl_tex framebuffer = target.planes[0].texture;
-        const SubtitleBoxRect subtitleHolds[] = { relocatedSubtitle.source, relocatedSubtitle.generatedCleanup,
-            relocatedSubtitle.destination, relocatedSubtitle.layoutCoverage };
-        DejudderCacheStage::Frame cacheFrame;
-        cacheFrame.extrasMayFollow = dejudderReason == DejudderPolicy::Reason::Active &&
-            dejudderExtrasAllowed && dejudder && !cadenceRepeat && sourceSequence != 0;
-        cacheFrame.geometryForVectors = !cacheFrame.extrasMayFollow && vectorDemand.Serves(VectorDemand::Consumer::SigmaDelta) &&
-            dejudder && !cadenceRepeat && sourceSequence != 0 && !interpolating && !vpTimelineActive;   // vector engine: the sigma-delta's vectors need the geometry
-        cacheFrame.sourceSequence = sourceSequence;
-        cacheFrame.sourceCrop = renderImage.crop;
-        cacheFrame.targetCrop = target.crop;
-        cacheFrame.framebufferW = framebuffer ? static_cast<float>(framebuffer->params.w) : 0.0f;
-        cacheFrame.framebufferH = framebuffer ? static_cast<float>(framebuffer->params.h) : 0.0f;
-        cacheFrame.nlsSubmitted = nlsSubmitted;
-        cacheFrame.warpRendered = activeSettings.dejudderWarpRendered;
-        cacheFrame.interpolating = interpolating;
-        cacheFrame.subtitleHolds = subtitleCompositionSucceeded ? subtitleHolds : nullptr;
-        cacheFrame.numSubtitleHolds = 4;
-        dejudderCacheStage.Register(cacheFrame, [this]() { return KnownNlsMapping(); }, frameHooks);
-    }
+    const pl_tex framebuffer = target.planes[0].texture;
+    const SubtitleBoxRect subtitleHolds[] = { relocatedSubtitle.source, relocatedSubtitle.generatedCleanup, relocatedSubtitle.destination, relocatedSubtitle.layoutCoverage };
+    DejudderCacheStage::Frame cacheFrame;
+    cacheFrame.extrasMayFollow = dejudderReason == DejudderPolicy::Reason::Active && dejudderExtrasAllowed && dejudder && !cadenceRepeat && sourceSequence != 0;
+    cacheFrame.geometryForVectors = !cacheFrame.extrasMayFollow && vectorDemand.Serves(VectorDemand::Consumer::SigmaDelta) && dejudder && !cadenceRepeat && sourceSequence != 0 && !interpolating && !vpTimelineActive;
+    cacheFrame.sourceSequence = sourceSequence;
+    cacheFrame.sourceCrop = renderImage.crop;
+    cacheFrame.targetCrop = target.crop;
+    cacheFrame.framebufferW = framebuffer ? static_cast<float>(framebuffer->params.w) : 0.0f;
+    cacheFrame.framebufferH = framebuffer ? static_cast<float>(framebuffer->params.h) : 0.0f;
+    cacheFrame.nlsSubmitted = nlsSubmitted;
+    cacheFrame.warpRendered = activeSettings.dejudderWarpRendered;
+    cacheFrame.interpolating = interpolating;
+    cacheFrame.subtitleHolds = subtitleCompositionSucceeded ? subtitleHolds : nullptr;
+    cacheFrame.numSubtitleHolds = 4;
+    dejudderCacheStage.Register(cacheFrame, [this]() { return KnownNlsMapping(); }, frameHooks);
 }
 // M2 P5b-5 (audit F1): after the R10 call. Not planned (no binding / hub, or the plan threw): no stale timeline
 // flags, Bill's draw of the host's list, and the visible "timeline" fallback; planned: released.
