@@ -4133,7 +4133,7 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 				// listed by the lane's own status). A user below level 0 also has its governor notice in "Analysis: ..." (plan.notice).
 				if (const std::shared_ptr<const VpSkeleton::GovernorPlan> usersPlan = lane.CurrentGovernorPlan())   // GF-P2b MUST-4 (2): the current users plan
 					for (const VpSkeleton::UserGrant& g : usersPlan->grants)
-						if (g.id < VpSkeleton::kUserProductBase)
+						if (g.id < VpSkeleton::kUserProductBase || g.id == VpSkeleton::ProductVramUserId(VpSkeleton::kEdgeMap))
 							full.push_back(std::string("VRAM ") + VpSkeleton::Token(g.tier) + " " + g.name + ": " + VpSkeleton::FormatMB(g.bytes) + " level " +
 								std::to_string(g.level) + (g.shed ? " (off)" : g.reduced ? " (reduced)" : ""));
 				if (gd != nullptr)

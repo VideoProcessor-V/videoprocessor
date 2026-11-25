@@ -33,9 +33,7 @@ struct SourceFrameView {
     uint64_t seq = 0;
     std::shared_ptr<const void> keepAlive;
     const uint16_t* luma = nullptr;
-    uint32_t width = 0;
-    uint32_t height = 0;
-    uint32_t strideSamples = 0;   // samples per row (>= width)
+    uint32_t width = 0, height = 0, strideSamples = 0;   // samples per row (>= width)
     uint8_t msbShift = 0;
     bool Valid() const { return luma != nullptr && width > 0 && height > 0 && strideSamples >= width; }
     // The ONE MSB-align law (doc 91 D5): one raw luma sample scaled to the full 16-bit range, (raw << msbShift).
@@ -138,6 +136,8 @@ public:
     virtual ~IReadbackDevice() {}
     virtual bool CopyToStaging(ProductId product, uint64_t seq, int stagingIndex) = 0;
     virtual bool QueryDone(int stagingIndex) = 0;                // non-blocking
+    virtual bool QueryFailed(int /*stagingIndex*/) const { return false; }   // non-blocking async copy failure check
+    virtual void Discard(int /*stagingIndex*/) {}                            // drop internal mapping of discarded slot
     virtual const void* MapNoWait(int stagingIndex, size_t* bytes) = 0;  // null when busy (DO_NOT_WAIT)
     virtual void Unmap(int stagingIndex) = 0;
 };

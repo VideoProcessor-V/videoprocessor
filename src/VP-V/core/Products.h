@@ -1133,9 +1133,9 @@ inline void AppendFocusMapProduct(std::vector<ProductDecl>& decls) {
     ProductDecl p = Make(kFocusMap, "focus_map", "focus map (defocus / focus change)", Backend::GpuCompute, 1, Tier::T1,
                          Bit(kFull) | Bit(kContinuity), Bit(kSettingsAnalysis) | Bit(kSettingsMotion));
     p.sourceFrame = true; p.missingInputForm = true; p.refRenderMs = 0.05f;
-    AddInput(p, kEdgeMap, 0); AddInput(p, kEdgeMap, 1);
-    AddInput(p, kP11RegionBlockStats, 0); AddInput(p, kP11RegionBlockStats, 1);
-    AddInput(p, kP2VectorPair, 0); AddInput(p, kP7CameraFit, 0);
+    AddInput(p, kEdgeMap, 1); AddInput(p, kEdgeMap, 2);
+    AddInput(p, kP11RegionBlockStats, 1); AddInput(p, kP11RegionBlockStats, 2);
+    AddInput(p, kP2VectorPair, 1); AddInput(p, kP7CameraFit, 1);
     AddTerm(p, 4, kFocusMapBytesPerBlock);
     PadReservedUntil(decls, kFocusMap); decls.push_back(p);
 }

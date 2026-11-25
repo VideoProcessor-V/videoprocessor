@@ -127,6 +127,8 @@ namespace LedDrive
 		// VpSkeleton::IReadbackDevice
 		bool CopyToStaging(VpSkeleton::ProductId product, uint64_t seq, int stagingIndex) override;
 		bool QueryDone(int stagingIndex) override;
+		bool QueryFailed(int stagingIndex) const override;
+		void Discard(int stagingIndex) override;
 		const void* MapNoWait(int stagingIndex, size_t* bytes) override;
 		void Unmap(int stagingIndex) override;
 
@@ -152,7 +154,7 @@ namespace LedDrive
 		SourceResolver m_resolver;
 		std::vector<std::vector<float>> m_slotBufs;
 		std::vector<uint8_t> m_slotMapped;
-		std::vector<uint8_t> m_slotFailedCounted;
+		std::vector<uint8_t> m_slotFailed;
 		bool m_deferFlush = false;
 		HRESULT m_lastError = S_OK;
 		uint64_t m_failedCount = 0;

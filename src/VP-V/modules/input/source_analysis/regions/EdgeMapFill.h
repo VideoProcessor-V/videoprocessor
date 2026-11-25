@@ -197,7 +197,8 @@ namespace Vpv
 
 		// CPU owner fill of kEdgeMap (S#3 / R3): non-blocking readback from the host's EdgeMapCpuReadback ring.
 		// Keeps kEdgeMapCpuKeepFrames (2) frames behind the seal so lag-1 focus_map and its lag-2 delta both hit memo.
-		inline VpSkeleton::OwnerFill MakeEdgeMapCpuOwnerFill(std::function<EdgeMapCpuReadback*(const void* host)> lookup)
+		inline VpSkeleton::OwnerFill MakeEdgeMapCpuOwnerFill(
+			std::function<std::shared_ptr<EdgeMapCpuReadback>(const void* host)> lookup)
 		{
 			VpSkeleton::OwnerFill f;
 			f.variantAxes = 0;
@@ -205,8 +206,8 @@ namespace Vpv
 			f.frameScoped = false;
 			f.renderThreadOnly = true;
 			f.fill = [lookup](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) -> bool {
-				EdgeMapCpuReadback* rb = lookup ? lookup(req.host) : nullptr;
-				if (rb == nullptr)
+				const std::shared_ptr<EdgeMapCpuReadback> rb = lookup ? lookup(req.host) : std::shared_ptr<EdgeMapCpuReadback>();
+				if (!rb)
 				{
 					out.declineReason = "edge_map CPU: no readback state for host";
 					return false;
@@ -218,7 +219,10 @@ namespace Vpv
 
 		inline VpSkeleton::OwnerFill MakeEdgeMapCpuOwnerFill(EdgeMapCpuReadback* direct)
 		{
-			return MakeEdgeMapCpuOwnerFill([direct](const void*) { return direct; });
+			const std::shared_ptr<EdgeMapCpuReadback> nonOwning = direct != nullptr
+				? std::shared_ptr<EdgeMapCpuReadback>(direct, [](EdgeMapCpuReadback*) {})
+				: std::shared_ptr<EdgeMapCpuReadback>();
+			return MakeEdgeMapCpuOwnerFill([nonOwning](const void*) { return nonOwning; });
 		}
 
 		// Registers the kEdgeMap fill with the skeleton found by the hub (tests pass their own demand). The reserve is derived
@@ -232,16 +236,47 @@ namespace Vpv
 		public:
 			~EdgeMapModule() override
 			{
-				std::lock_guard<std::mutex> g(mutex_);
-				for (HostSize& h : hosts_)
+				Skeleton::IExternalDemand* cpuDem = nullptr;
+				Skeleton::IExternalDemand* gpuDem = nullptr;
+				bool unregCpu = false;
+				bool unregGpu = false;
+				bool cpuHub = false;
+				bool gpuHub = false;
 				{
-					if (h.readback)
+					std::lock_guard<std::mutex> g(state_->mutex);
+					for (HostSize& h : state_->hosts)
 					{
-						h.readback->Release();
-						h.readback->SetHostGpu(nullptr);
+						if (h.readback)
+						{
+							h.readback->Release();
+							h.readback->SetHostGpu(nullptr);
+						}
 					}
+					state_->hosts.clear();
+					unregCpu = cpuOwnedRegistration_;
+					cpuDem = cpuDemand_;
+					cpuHub = cpuFromHub_;
+					unregGpu = registered_.load(std::memory_order_acquire);
+					gpuDem = gpuDemand_;
+					gpuHub = gpuFromHub_;
 				}
-				hosts_.clear();
+				state_.reset();
+				if (unregCpu)
+				{
+					Skeleton::IExternalDemand* d = cpuHub
+						? static_cast<Skeleton::IExternalDemand*>(Hub::ExtensionHub::Instance().Query(Skeleton::kExternalDemandQueryId))
+						: cpuDem;
+					if (d != nullptr)
+						d->UnregisterOwnerFill(VpSkeleton::kEdgeMap, VpSkeleton::AcquireForm::Cpu, kEdgeMapUnit);
+				}
+				if (unregGpu)
+				{
+					Skeleton::IExternalDemand* d = gpuHub
+						? static_cast<Skeleton::IExternalDemand*>(Hub::ExtensionHub::Instance().Query(Skeleton::kExternalDemandQueryId))
+						: gpuDem;
+					if (d != nullptr)
+						d->UnregisterOwnerFill(VpSkeleton::kEdgeMap, VpSkeleton::AcquireForm::Gpu, kEdgeMapUnit);
+				}
 			}
 			const char* Name() const override { return "input.source_analysis.edge_map"; }
 			void OnLifecycle(RE::LifecycleFacts& f) override
@@ -250,7 +285,7 @@ namespace Vpv
 					return;
 				if (f.kind == RE::Lifecycle::GpuCreated)
 				{
-					std::lock_guard<std::mutex> g(mutex_);
+					std::lock_guard<std::mutex> g(state_->mutex);
 					if (HostSize* h = FindOrAddHostLocked(f.host))
 						h->readback->SetHostGpu(f.gpu);
 				}
@@ -275,8 +310,8 @@ namespace Vpv
 					if (demand != nullptr)
 					{
 						{
-							std::lock_guard<std::mutex> g(mutex_);
-							RegisterCpuFillLocked(demand);
+							std::lock_guard<std::mutex> g(state_->mutex);
+							RegisterCpuFillLocked(demand, true);
 						}
 						const uint64_t seq = uint64_t(c.seq);
 						const Skeleton::FrameMemo fm = demand->MemoFor(c.host, seq);
@@ -298,27 +333,35 @@ namespace Vpv
 			// Enables or disables demand-gated kEdgeMap CPU readback for `host`. Disabling releases staging textures and withdraws VRAM.
 			void SetCpuDemand(const void* host, bool active, Skeleton::IExternalDemand* demand = nullptr)
 			{
-				std::lock_guard<std::mutex> g(mutex_);
+				std::lock_guard<std::mutex> g(state_->mutex);
 				if (host == nullptr)
 					return;
 				HostSize* h = FindOrAddHostLocked(host);
 				if (h && h->readback)
 					h->readback->SetDemand(active);
 				if (active)
-					RegisterCpuFillLocked(demand);
+					RegisterCpuFillLocked(demand, demand == nullptr);
 			}
 			bool HasCpuDemand(const void* host) const
 			{
-				std::lock_guard<std::mutex> g(mutex_);
-				for (const HostSize& h : hosts_)
+				std::lock_guard<std::mutex> g(state_->mutex);
+				for (const HostSize& h : state_->hosts)
 					if (h.host == host)
 						return h.readback && h.readback->Demanded();
 				return false;
 			}
+			std::shared_ptr<EdgeMapCpuReadback> ReadbackSharedFor(const void* host) const
+			{
+				std::lock_guard<std::mutex> g(state_->mutex);
+				for (const HostSize& h : state_->hosts)
+					if (h.host == host)
+						return h.readback;
+				return nullptr;
+			}
 			EdgeMapCpuReadback* ReadbackFor(const void* host)
 			{
-				std::lock_guard<std::mutex> g(mutex_);
-				for (HostSize& h : hosts_)
+				std::lock_guard<std::mutex> g(state_->mutex);
+				for (HostSize& h : state_->hosts)
 					if (h.host == host)
 						return h.readback.get();
 				return nullptr;
@@ -327,7 +370,7 @@ namespace Vpv
 			// current reserve is registered.
 			bool Observe(const void* host, VpSkeleton::Dims luma, Skeleton::IExternalDemand* demand = nullptr)
 			{
-				std::lock_guard<std::mutex> g(mutex_);
+				std::lock_guard<std::mutex> g(state_->mutex);
 				if (HostSize* h = FindOrAddHostLocked(host))
 				{
 					if (h->luma.width != luma.width || h->luma.height != luma.height)
@@ -341,17 +384,17 @@ namespace Vpv
 			// Forgets `host`; releases its CPU readback / withdraws VRAM; a smaller largest size re-registers the fill with the smaller reserve (none left: registration kept).
 			void Forget(const void* host, Skeleton::IExternalDemand* demand = nullptr)
 			{
-				std::lock_guard<std::mutex> g(mutex_);
-				for (size_t i = 0; i < hosts_.size(); ++i)
+				std::lock_guard<std::mutex> g(state_->mutex);
+				for (size_t i = 0; i < state_->hosts.size(); ++i)
 				{
-					if (hosts_[i].host == host)
+					if (state_->hosts[i].host == host)
 					{
-						if (hosts_[i].readback)
+						if (state_->hosts[i].readback)
 						{
-							hosts_[i].readback->Release();
-							hosts_[i].readback->SetHostGpu(nullptr);
+							state_->hosts[i].readback->Release();
+							state_->hosts[i].readback->SetHostGpu(nullptr);
 						}
-						hosts_.erase(hosts_.begin() + std::ptrdiff_t(i));
+						state_->hosts.erase(state_->hosts.begin() + std::ptrdiff_t(i));
 						break;
 					}
 				}
@@ -362,7 +405,7 @@ namespace Vpv
 			// The reserve of the registered fill (0 = none registered).
 			uint64_t RegisteredReserveBytes() const
 			{
-				std::lock_guard<std::mutex> g(mutex_);
+				std::lock_guard<std::mutex> g(state_->mutex);
 				return registered_.load(std::memory_order_acquire) ? reserve_ : uint64_t(0);
 			}
 		private:
@@ -374,36 +417,33 @@ namespace Vpv
 				uint64_t bytes = 0;   // EdgeMapFillReserveBytes(luma)
 				std::shared_ptr<EdgeMapCpuReadback> readback = std::make_shared<EdgeMapCpuReadback>();
 			};
+			struct SharedState
+			{
+				mutable std::mutex mutex;
+				std::vector<HostSize> hosts;
+			};
 			HostSize* FindOrAddHostLocked(const void* host)
 			{
 				if (host == nullptr)
 					return nullptr;
-				for (HostSize& h : hosts_)
+				for (HostSize& h : state_->hosts)
 					if (h.host == host)
 						return &h;
-				if (hosts_.size() >= kMaxHosts)
+				if (state_->hosts.size() >= kMaxHosts)
 					return nullptr;
 				HostSize h;
 				h.host = host;
-				hosts_.push_back(std::move(h));
-				return &hosts_.back();
-			}
-			std::shared_ptr<EdgeMapCpuReadback> ReadbackSharedFor(const void* host) const
-			{
-				std::lock_guard<std::mutex> g(mutex_);
-				for (const HostSize& h : hosts_)
-					if (h.host == host)
-						return h.readback;
-				return nullptr;
+				state_->hosts.push_back(std::move(h));
+				return &state_->hosts.back();
 			}
 			bool AnyCpuDemandLocked() const
 			{
-				for (const HostSize& h : hosts_)
+				for (const HostSize& h : state_->hosts)
 					if (h.readback && h.readback->Demanded())
 						return true;
 				return false;
 			}
-			void RegisterCpuFillLocked(Skeleton::IExternalDemand* demand)
+			void RegisterCpuFillLocked(Skeleton::IExternalDemand* demand, bool fromHub)
 			{
 				if (cpuRegistered_.load(std::memory_order_acquire))
 					return;
@@ -411,18 +451,37 @@ namespace Vpv
 					demand = static_cast<Skeleton::IExternalDemand*>(Hub::ExtensionHub::Instance().Query(Skeleton::kExternalDemandQueryId));
 				if (demand == nullptr)
 					return;
+				std::weak_ptr<SharedState> weakState = state_;
 				const VpSkeleton::SkeletonMemo::Registration cr =
 					demand->RegisterOwnerFill(VpSkeleton::kEdgeMap, VpSkeleton::AcquireForm::Cpu, kEdgeMapUnit,
-						MakeEdgeMapCpuOwnerFill([this](const void* host) { return ReadbackFor(host); }));
+						MakeEdgeMapCpuOwnerFill([weakState](const void* host) -> std::shared_ptr<EdgeMapCpuReadback> {
+							const std::shared_ptr<SharedState> st = weakState.lock();
+							if (!st)
+								return nullptr;
+							std::lock_guard<std::mutex> g(st->mutex);
+							for (const HostSize& h : st->hosts)
+								if (h.host == host)
+									return h.readback;
+							return nullptr;
+						}));
 				if (cr == VpSkeleton::SkeletonMemo::Registration::Registered || cr == VpSkeleton::SkeletonMemo::Registration::AlreadyRegistered)
+				{
 					cpuRegistered_.store(true, std::memory_order_release);
+					if (cr == VpSkeleton::SkeletonMemo::Registration::Registered)
+					{
+						cpuOwnedRegistration_ = true;
+						cpuDemand_ = fromHub ? nullptr : demand;
+						cpuFromHub_ = fromHub;
+					}
+				}
 			}
 			bool UpdateLocked(Skeleton::IExternalDemand* demand)
 			{
+				const bool fromHub = (demand == nullptr);
 				if (AnyCpuDemandLocked())
-					RegisterCpuFillLocked(demand);
+					RegisterCpuFillLocked(demand, fromHub);
 				uint64_t want = 0;
-				for (const HostSize& h : hosts_)
+				for (const HostSize& h : state_->hosts)
 					if (h.bytes > want)
 						want = h.bytes;
 				const bool ok = registered_.load(std::memory_order_acquire);
@@ -440,12 +499,21 @@ namespace Vpv
 				const bool now = r == VpSkeleton::SkeletonMemo::Registration::Registered;
 				reserve_ = now ? want : uint64_t(0);
 				registered_.store(now, std::memory_order_release);
+				if (now)
+				{
+					gpuDemand_ = fromHub ? nullptr : demand;
+					gpuFromHub_ = fromHub;
+				}
 				return now;
 			}
-			mutable std::mutex mutex_;
-			std::vector<HostSize> hosts_;
+			std::shared_ptr<SharedState> state_ = std::make_shared<SharedState>();
 			uint64_t reserve_ = 0;   // the registered fill's reserve
 			uint64_t tried_ = 0;     // the last reserve a registration was attempted with
+			Skeleton::IExternalDemand* gpuDemand_ = nullptr;
+			bool gpuFromHub_ = false;
+			Skeleton::IExternalDemand* cpuDemand_ = nullptr;
+			bool cpuFromHub_ = false;
+			bool cpuOwnedRegistration_ = false;
 			std::atomic<bool> registered_{ false };
 			std::atomic<bool> cpuRegistered_{ false };
 		};

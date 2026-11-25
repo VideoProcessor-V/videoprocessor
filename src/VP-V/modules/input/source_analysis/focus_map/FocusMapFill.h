@@ -44,6 +44,7 @@ namespace FocusMap
 			std::atomic<uint64_t> edgeLaw{ 0 }, edgePending{ 0 }, edgeUnavailable{ 0 };
 			std::atomic<bool> lastEdgeUnavailable{ false };
 			std::atomic<uint8_t> lastEdgeCause{ 0 };
+			std::atomic<uint8_t> lastPendingCause{ 0 };
 		};
 		std::shared_ptr<Stats> stats = std::make_shared<Stats>();
 	};
@@ -114,6 +115,7 @@ namespace FocusMap
 					++cfg.stats->edgeUnavailable;
 					cfg.stats->lastEdgeUnavailable.store(true);
 					cfg.stats->lastEdgeCause.store(static_cast<uint8_t>(AcquireCause::OwnerDeclined));
+					cfg.stats->lastPendingCause.store(static_cast<uint8_t>(AcquireCause::None));
 				}
 				return false;
 			}
@@ -121,7 +123,11 @@ namespace FocusMap
 			const bool havePrevSeq = sampleSeq > 0;
 			const uint64_t prevSeq = havePrevSeq ? sampleSeq - 1 : uint64_t(0);
 
-			// Edge-map-only law (v2, zero v1 interim fallback): Acquire kEdgeMap CPU at lag 1 (sampleSeq) first.
+			// Acquire lag-2 (prevSeq) BEFORE lag-1 (sampleSeq) so taking sampleSeq never stale-drops an
+			// unconsumed prevSeq in any ReadbackRing (ascending seq order; defense-in-depth with keepOlder).
+			const AcquireResult rp = havePrevSeq ? memo.Acquire(kEdgeMap, prevSeq, AcquireForm::Cpu) : AcquireResult();
+
+			// Edge-map-only law (v2, zero v1 interim fallback): validate kEdgeMap CPU at lag 1 (sampleSeq).
 			const size_t edgeNeed = static_cast<size_t>(w) * static_cast<size_t>(h) * sizeof(float);
 			const AcquireResult re = memo.Acquire(kEdgeMap, sampleSeq, AcquireForm::Cpu);
 			if (!re.Ok() && re.cause == AcquireCause::ReadbackPending)
@@ -131,7 +137,7 @@ namespace FocusMap
 				if (cfg.stats)
 				{
 					++cfg.stats->edgePending;
-					cfg.stats->lastEdgeCause.store(static_cast<uint8_t>(AcquireCause::ReadbackPending));
+					cfg.stats->lastPendingCause.store(static_cast<uint8_t>(AcquireCause::ReadbackPending));
 				}
 				return false;
 			}
@@ -146,6 +152,7 @@ namespace FocusMap
 					++cfg.stats->edgeUnavailable;
 					cfg.stats->lastEdgeUnavailable.store(true);
 					cfg.stats->lastEdgeCause.store(static_cast<uint8_t>(c));
+					cfg.stats->lastPendingCause.store(static_cast<uint8_t>(AcquireCause::None));
 				}
 				return false;
 			}
@@ -172,7 +179,6 @@ namespace FocusMap
 			bool havePrev = false, prevReleased = false;
 			if (havePrevSeq)
 			{
-				const AcquireResult rp = memo.Acquire(kEdgeMap, prevSeq, AcquireForm::Cpu);
 				if (!rp.Ok() && rp.cause == AcquireCause::ReadbackPending)
 				{
 					out.pending = true;
@@ -180,7 +186,7 @@ namespace FocusMap
 					if (cfg.stats)
 					{
 						++cfg.stats->edgePending;
-						cfg.stats->lastEdgeCause.store(static_cast<uint8_t>(AcquireCause::ReadbackPending));
+						cfg.stats->lastPendingCause.store(static_cast<uint8_t>(AcquireCause::ReadbackPending));
 					}
 					return false;
 				}
@@ -248,6 +254,7 @@ namespace FocusMap
 				++cfg.stats->edgeLaw;
 				cfg.stats->lastEdgeUnavailable.store(false);
 				cfg.stats->lastEdgeCause.store(static_cast<uint8_t>(AcquireCause::None));
+				cfg.stats->lastPendingCause.store(static_cast<uint8_t>(AcquireCause::None));
 			}
 			return true;
 		};

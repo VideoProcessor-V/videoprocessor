@@ -64,6 +64,11 @@ namespace Vpv
 			void AttachExternalDevice(VpSkeleton::IReadbackDevice* device, uint8_t slots = kEdgeMapReadbackSlots,
 				uint64_t declaredVramBytes = 0)
 			{
+				if (ring_)
+				{
+					ring_->Reset();
+					ring_.reset();
+				}
 				ReleaseOwnedGpu();
 				WithdrawVram();
 				externalDevice_ = device;
@@ -74,10 +79,6 @@ namespace Vpv
 					ring_.reset(new VpLaneProducts::ReadbackRing(externalDevice_, externalSlots_));
 					if (demanded_ && externalVramBytes_ > 0)
 						DeclareVram(externalVramBytes_);
-				}
-				else
-				{
-					ring_.reset();
 				}
 			}
 
@@ -92,6 +93,11 @@ namespace Vpv
 				const int h = edgeTex->params.h;
 				if (!device_.Active() || deviceGpu_ != gpu || device_.Width() != w || device_.Height() != h)
 				{
+					if (ring_)
+					{
+						ring_->Reset();
+						ring_.reset();
+					}
 					ReleaseOwnedGpu();
 					WithdrawVram();
 					externalDevice_ = nullptr;
@@ -108,6 +114,10 @@ namespace Vpv
 				ring_->Poll();
 				if (ring_->HasPending(seq))
 					return true;
+				const uint64_t minKeep = seq > kEdgeMapCpuKeepFrames ? seq - kEdgeMapCpuKeepFrames : uint64_t(0);
+				ring_->EvictReadyOlderThan(minKeep);
+				if (!ring_->HasFreeSlot())
+					ring_->EvictOldestReady();
 				pendingSeq_ = seq;
 				pendingTex_ = edgeTex;
 				const bool submitted = ring_->Submit(VpSkeleton::kEdgeMap, seq);
@@ -133,6 +143,10 @@ namespace Vpv
 				ring_->Poll();
 				if (ring_->HasPending(seq))
 					return true;
+				const uint64_t minKeep = seq > kEdgeMapCpuKeepFrames ? seq - kEdgeMapCpuKeepFrames : uint64_t(0);
+				ring_->EvictReadyOlderThan(minKeep);
+				if (!ring_->HasFreeSlot())
+					ring_->EvictOldestReady();
 				return ring_->Submit(VpSkeleton::kEdgeMap, seq);
 			}
 
@@ -153,18 +167,18 @@ namespace Vpv
 						const uint8_t* b = static_cast<const uint8_t*>(p);
 						outBytes.assign(b, b + n);
 					}
-				});
+				}, kEdgeMapCpuKeepFrames);
 				if (taken && !outBytes.empty())
 					return true;
-				if (externalDevice_ == nullptr && device_.FailedCount() > 0)
-				{
-					outReason = "edge_map CPU: readback device failed";
-					return false;
-				}
 				if (ring_->HasInFlight(seq) || ring_->HasReady(seq))
 				{
 					outPending = true;
 					outReason = "edge_map CPU: readback in flight";
+					return false;
+				}
+				if (ring_->WasFailed(seq))
+				{
+					outReason = "edge_map CPU: readback device failed";
 					return false;
 				}
 				outReason = demanded_ ? "edge_map CPU: readback not scheduled for frame" : "edge_map CPU: no active CPU demand";
@@ -180,12 +194,12 @@ namespace Vpv
 			// Releases owned GPU staging textures, resets ring state, and withdraws the VramUsers declaration.
 			void Release()
 			{
-				ReleaseOwnedGpu();
 				if (ring_)
 				{
 					ring_->Reset();
 					ring_.reset();
 				}
+				ReleaseOwnedGpu();
 				WithdrawVram();
 			}
 

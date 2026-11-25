@@ -283,7 +283,7 @@ if (p.x < d.x && p.y < d.y) {
 
 	void NativeCopyReadback::Release()
 	{
-		if (m_pendingFlush && m_gpu)
+		if (m_gpu && (m_pendingFlush || m_native))
 			pl_gpu_finish(m_gpu);
 		m_pendingFlush = false;
 		if (m_native)
@@ -312,7 +312,7 @@ if (p.x < d.x && p.y < d.y) {
 		for (size_t i = 0; i < m_slotBufs.size(); ++i)
 			m_slotBufs[i].assign(slotFloats, 0.0f);
 		m_slotMapped.assign(static_cast<size_t>(slots), 0u);
-		m_slotFailedCounted.assign(static_cast<size_t>(slots), 0u);
+		m_slotFailed.assign(static_cast<size_t>(slots), 0u);
 		m_resolver = std::move(resolver);
 		m_lastError = S_OK;
 		m_failedCount = 0;
@@ -326,9 +326,9 @@ if (p.x < d.x && p.y < d.y) {
 
 	void NativeCopyReadbackDevice::RecordSlotFailure(int stagingIndex)
 	{
-		if (ValidSlot(stagingIndex) && m_slotFailedCounted[static_cast<size_t>(stagingIndex)] == 0u)
+		if (ValidSlot(stagingIndex) && m_slotFailed[static_cast<size_t>(stagingIndex)] == 0u)
 		{
-			m_slotFailedCounted[static_cast<size_t>(stagingIndex)] = 1u;
+			m_slotFailed[static_cast<size_t>(stagingIndex)] = 1u;
 			++m_failedCount;
 		}
 		m_lastError = m_copy.LastError();
@@ -342,7 +342,7 @@ if (p.x < d.x && p.y < d.y) {
 		if (!src)
 			return false;
 		m_slotMapped[static_cast<size_t>(stagingIndex)] = 0u;
-		m_slotFailedCounted[static_cast<size_t>(stagingIndex)] = 0u;
+		m_slotFailed[static_cast<size_t>(stagingIndex)] = 0u;
 		if (!m_copy.Start(stagingIndex, src, nullptr))
 			return false;
 		if (!m_deferFlush)
@@ -362,6 +362,16 @@ if (p.x < d.x && p.y < d.y) {
 		if (st == ReadState::Failed)
 			RecordSlotFailure(stagingIndex);
 		return false;
+	}
+
+	bool NativeCopyReadbackDevice::QueryFailed(int stagingIndex) const
+	{
+		return ValidSlot(stagingIndex) && m_slotFailed[static_cast<size_t>(stagingIndex)] != 0u;
+	}
+
+	void NativeCopyReadbackDevice::Discard(int stagingIndex)
+	{
+		Unmap(stagingIndex);
 	}
 
 	const void* NativeCopyReadbackDevice::MapNoWait(int stagingIndex, size_t* bytes)
@@ -402,6 +412,7 @@ if (p.x < d.x && p.y < d.y) {
 		if (!ValidSlot(stagingIndex))
 			return;
 		m_slotMapped[static_cast<size_t>(stagingIndex)] = 0u;
+		m_slotFailed[static_cast<size_t>(stagingIndex)] = 0u;
 		if (Active())
 			m_copy.Discard(stagingIndex);
 	}
@@ -411,7 +422,7 @@ if (p.x < d.x && p.y < d.y) {
 		m_copy.Release();
 		m_slotBufs.clear();
 		m_slotMapped.clear();
-		m_slotFailedCounted.clear();
+		m_slotFailed.clear();
 		m_resolver = nullptr;
 		m_deferFlush = false;
 		m_lastError = S_OK;
