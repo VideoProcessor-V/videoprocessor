@@ -51,6 +51,19 @@ namespace DmPreDeband
 		std::string status;
 	};
 
+	struct ActiveRect
+	{
+		double x0 = 0.0;
+		double y0 = 0.0;
+		double x1 = 1.0;
+		double y1 = 1.0;
+	};
+
+	ActiveRect NormalizedActiveRect(double cropX0, double cropY0, double cropX1, double cropY1, int frameWidth, int frameHeight);
+	ActiveRect IntersectNormalizedActiveRect(double cropX0, double cropY0, double cropX1, double cropY1,
+		bool hasTrusted, int trustLeft, int trustTop, int trustRight, int trustBottom, int trustW, int trustH,
+		int frameWidth, int frameHeight);
 	Decision Decide(const Inputs& in);
-	std::vector<std::pair<const char*, double>> ShaderParameters(const Decision& d, int frameHeight, bool ictcpInput = false);
+	std::vector<std::pair<const char*, double>> ShaderParameters(const Decision& d, int frameHeight, bool ictcpInput = false,
+		const ActiveRect& activeRect = ActiveRect{});
 }

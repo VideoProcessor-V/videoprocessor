@@ -129,17 +129,78 @@ namespace DmPreDeband
 		return d;
 	}
 
-	std::vector<std::pair<const char*, double>> ShaderParameters(const Decision& d, int frameHeight, bool ictcpInput)
+	ActiveRect NormalizedActiveRect(double cropX0, double cropY0, double cropX1, double cropY1, int frameWidth, int frameHeight)
+	{
+		ActiveRect full;
+		if (frameWidth <= 0 || frameHeight <= 0 ||
+			!std::isfinite(cropX0) || !std::isfinite(cropY0) || !std::isfinite(cropX1) || !std::isfinite(cropY1))
+			return full;
+		const double invW = 1.0 / static_cast<double>(frameWidth);
+		const double invH = 1.0 / static_cast<double>(frameHeight);
+		const double x0 = (std::max)(0.0, (std::min)(1.0, (std::min)(cropX0, cropX1) * invW));
+		const double x1 = (std::max)(0.0, (std::min)(1.0, (std::max)(cropX0, cropX1) * invW));
+		const double y0 = (std::max)(0.0, (std::min)(1.0, (std::min)(cropY0, cropY1) * invH));
+		const double y1 = (std::max)(0.0, (std::min)(1.0, (std::max)(cropY0, cropY1) * invH));
+		if (!(x1 > x0) || !(y1 > y0))
+			return full;
+		return ActiveRect{ x0, y0, x1, y1 };
+	}
+
+	ActiveRect IntersectNormalizedActiveRect(double cropX0, double cropY0, double cropX1, double cropY1,
+		bool hasTrusted, int trustLeft, int trustTop, int trustRight, int trustBottom, int trustW, int trustH,
+		int frameWidth, int frameHeight)
+	{
+		if (frameWidth <= 0 || frameHeight <= 0)
+			return ActiveRect{};
+		double ax0 = 0.0, ay0 = 0.0;
+		double ax1 = static_cast<double>(frameWidth), ay1 = static_cast<double>(frameHeight);
+		if (std::isfinite(cropX0) && std::isfinite(cropY0) && std::isfinite(cropX1) && std::isfinite(cropY1) &&
+			cropX1 > cropX0 && cropY1 > cropY0)
+		{
+			ax0 = (std::max)(ax0, cropX0);
+			ay0 = (std::max)(ay0, cropY0);
+			ax1 = (std::min)(ax1, cropX1);
+			ay1 = (std::min)(ay1, cropY1);
+		}
+		if (hasTrusted && trustW == frameWidth && trustH == frameHeight &&
+			trustRight > trustLeft && trustBottom > trustTop)
+		{
+			ax0 = (std::max)(ax0, static_cast<double>(trustLeft));
+			ay0 = (std::max)(ay0, static_cast<double>(trustTop));
+			ax1 = (std::min)(ax1, static_cast<double>(trustRight));
+			ay1 = (std::min)(ay1, static_cast<double>(trustBottom));
+		}
+		if (!(ax1 > ax0) || !(ay1 > ay0))
+			return ActiveRect{};
+		return NormalizedActiveRect(ax0, ay0, ax1, ay1, frameWidth, frameHeight);
+	}
+
+	std::vector<std::pair<const char*, double>> ShaderParameters(const Decision& d, int frameHeight, bool ictcpInput,
+		const ActiveRect& activeRect)
 	{
 		const double height = static_cast<double>((std::max)(1, frameHeight));
 		const double scaledRadius = kBaseRadiusPx * height / kReferenceHeightLines;
 		const double radius = (std::max)(kMinRadiusPx, (std::min)(kMaxRadiusPx, scaledRadius)); // VPV-FALLBACK not-a-fallback: physical shader radius clamp [kMinRadiusPx, kMaxRadiusPx]
+		auto unitClamp = [](double v, double fallback)
+		{
+			return std::isfinite(v) ? (std::max)(0.0, (std::min)(1.0, v)) : fallback;
+		};
+		double ax0 = unitClamp(activeRect.x0, 0.0);
+		double ay0 = unitClamp(activeRect.y0, 0.0);
+		double ax1 = unitClamp(activeRect.x1, 1.0);
+		double ay1 = unitClamp(activeRect.y1, 1.0);
+		if (!(ax1 > ax0)) { ax0 = 0.0; ax1 = 1.0; }
+		if (!(ay1 > ay0)) { ay0 = 0.0; ay1 = 1.0; }
 		return {
 			{ "dm_deband_active", d.active ? 1.0 : 0.0 },
 			{ "dm_deband_thr", d.active ? d.thresholdNorm : 0.0 },
 			{ "dm_deband_radius", radius },
 			{ "dm_deband_grain_guard", d.grainGuardOn ? 1.0 : 0.0 },
 			{ "dm_deband_ictcp_input", ictcpInput ? 1.0 : 0.0 },
+			{ "dm_active_x0", ax0 },
+			{ "dm_active_y0", ay0 },
+			{ "dm_active_x1", ax1 },
+			{ "dm_active_y1", ay1 },
 		};
 	}
 }
