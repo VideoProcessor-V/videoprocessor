@@ -46,6 +46,7 @@
     <ClCompile Include="..\VP-V\modules\input\capture\EarlyUpload.cpp" />
     <ClCompile Include="..\VP-V\modules\scaling\output\AdaptiveDownscale.cpp" />
     <ClCompile Include="..\VP-V\modules\scaling\shared\ScalerPass.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="..\VP-V\modules\scaling\route_4k\Route4k.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="..\VP-V\modules\scaling\chroma_upscale\CflHookOffsets.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="..\VP-V\modules\colour\display_mapping\DmPreDeband.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="..\VP-V\modules\output\calibration_lut\CalibrationLutHost.cpp" />

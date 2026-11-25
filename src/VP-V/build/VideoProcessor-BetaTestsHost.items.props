@@ -36,5 +36,8 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\scaling\shared\ScalerPass.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\scaling\route_4k\Route4k.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
   </ItemGroup>
 </Project>

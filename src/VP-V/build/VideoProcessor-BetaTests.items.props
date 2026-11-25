@@ -20,6 +20,9 @@
     <ClCompile Include="..\VP-V\modules\scaling\shared\ScalerPass.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="..\VP-V\modules\scaling\route_4k\Route4k.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="..\VP-V\modules\motion\estimation\global_model\GlobalModelGeometry.cpp"/>
     <ClCompile Include="..\VP-V\modules\motion\estimation\global_model\GlobalModelTemporal.cpp"/>
     <ClCompile Include="..\VP-V\modules\motion\estimation\global_model\DynamicTexture.cpp"/>

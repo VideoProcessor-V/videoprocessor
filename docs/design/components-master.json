@@ -839,9 +839,12 @@
     {
       "slot": "scaling.route_4k",
       "order": 100,
-      "status": "placeholder",
-      "code_location": "none (placeholder)",
-      "live_files": [],
+      "status": "built",
+      "code_location": "migrated",
+      "live_files": [
+        "src/VP-V/modules/scaling/route_4k/Route4k.h",
+        "src/VP-V/modules/scaling/route_4k/Route4k.cpp"
+      ],
       "components": {
         "files": {
           "required": [],
@@ -853,14 +856,14 @@
         },
         "tools": [],
         "config_keys": [
-          "entrance_route_4k"
+          "upscale_route"
         ],
         "upstream_modules": [
           "scaling.rebase",
           "repair.texture_restore"
         ]
       },
-      "fallback_when_missing": "Off or failed -> libplacebo scales straight to output."
+      "fallback_when_missing": "Off or failed -> libplacebo scales straight to output (FallbackCatalog::Engaged(\"4K route\", ...))."
     },
     {
       "slot": "scaling.refine",

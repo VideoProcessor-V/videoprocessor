@@ -749,30 +749,30 @@
       "unit": "scaling",
       "side": "input",
       "order": 100,
-      "status": "placeholder",
+      "status": "built",
       "hook_point": "prepass",
-      "purpose": "Bring the picture to the PROCESSING resolution = min(source, max(4K, effective output active size)) with fixed 1-D x2 shaders per needed axis (H then V); 8K placeholder rules. Off = straight to output scaling.",
+      "purpose": "Upscale planes to derived processing geometry = max(input, max(delivered, output)) via ScalerPass + HybridBlend (SourceGeometrySet ratios; never downscales an axis, zero fixed x2 shaders). Controlled by upscale_route (off | rebased_only | always_4k); off = zero GPU passes, byte-identical straight to output scaling.",
       "contract": {
-        "input": "planes at the encoded/repaired size",
-        "output": "planes at the processing size (normally 3840x2160 or the output active size if larger); r16",
-        "geometry": "per-axis scale; active area mapped",
-        "delay_share": "0 frames; ~4x pixel throughput for 1080 sources downstream",
+        "input": "planes at the encoded/rebased/repaired size",
+        "output": "planes at the derived processing size (f32 default; f16 fallback visibly named in FormatNote); chroma subsampling, ChromaSiting::ShiftAfterResample and crop mapped",
+        "geometry": "derived per-axis scale from active delivered/output geometry and SourceGeometrySet; never downscales an axis",
+        "delay_share": "0 frames",
         "lookahead": "none"
       },
-      "settings_keys": [],
-      "planned_keys": [
-        "entrance_route_4k"
+      "settings_keys": [
+        "upscale_route"
       ],
-      "tiers": "Classic/Low off (straight to output); Mid/Upper on",
+      "planned_keys": [],
+      "tiers": "off by default across tiers (rebased_only / always_4k opt-in until M4 sweep)",
       "fallback": {
         "entry": "4K route: off (<reason>)",
-        "behaviour": "Off or failed -> libplacebo scales straight to output."
+        "behaviour": "Off or failed -> libplacebo scales straight to output (FallbackCatalog::Engaged(\"4K route\", ...))."
       },
       "upstream": [
         "scaling.rebase",
         "repair.texture_restore"
       ],
-      "fingerprint": "the fixed 1-D x2 shader identity is locked in the refine net fingerprint",
+      "fingerprint": "ScalerPass kernel spec + HybridBlend law (single source of truth)",
       "tests": {
         "placeholder": [
           "byte-identical with the slot off",
