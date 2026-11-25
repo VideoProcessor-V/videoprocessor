@@ -3083,25 +3083,37 @@ namespace Vpv
 				st.feedLastEngineSeq = 0;   // the numbering restarted: what was pending belongs to the old era
 				st.feedRingCount = 0;
 			}
-			// Y1b: a NEW latest field is taken at Begin (retryOnly) as well as at AfterRender: the pair the estimate ahead made after the last
-			// AfterRender is published before the seal of its frame, not one frame later.
+			// Y1b / Z3 (N#5): query ALL valid engine field entries via AheadFieldSeqs (falling back to LatestVerifiedFieldSeq when
+			// AheadFieldSeqs returns 0, e.g. fakes that do not override AheadFieldSeqs) and enqueue every unseen entry ascending.
 			{
-				const uint64_t s = e->LatestVerifiedFieldSeq();
-				bool queued = false;
-				for (size_t i = 0; i < st.feedRingCount; ++i)
-					queued = queued || st.feedRing[i].seq == s;
-				if (s != 0 && s != st.feedLastEngineSeq && !queued)
+				uint64_t seqs[kFeedPendingRing] = {};
+				size_t seqCount = e->AheadFieldSeqs(seqs, kFeedPendingRing);
+				if (seqCount == 0)
 				{
+					const uint64_t latest = e->LatestVerifiedFieldSeq();
+					if (latest != 0)
+						seqs[seqCount++] = latest;
+				}
+				for (size_t idx = 0; idx < seqCount; ++idx)
+				{
+					const uint64_t s = seqs[idx];
+					if (s == 0 || s <= st.feedLastEngineSeq)
+						continue;
+					bool queued = false;
+					for (size_t i = 0; i < st.feedRingCount; ++i)
+						queued = queued || st.feedRing[i].seq == s;
+					if (queued)
+						continue;
 					VpMotion::VerifiedField f;
 					if (!e->FieldOf(s, f))
 					{
 						++st.feed.noField;
-						st.feedLastEngineSeq = s;
+						st.feedLastEngineSeq = (std::max)(st.feedLastEngineSeq, s);
 					}
 					else if (e->PairSpansSlip(f.pairFrom, f.pairTo))
 					{
 						++st.feed.slip;   // a pair across a gap / resync: no field of it is published, its readers fall back
-						st.feedLastEngineSeq = s;
+						st.feedLastEngineSeq = (std::max)(st.feedLastEngineSeq, s);
 					}
 					else
 					{
@@ -3151,12 +3163,12 @@ namespace Vpv
 					st.facts[static_cast<size_t>(head.seq % kFactsRing)] = head.facts;
 					++st.feed.published;
 					st.feed.lastSeq = head.seq;
-					st.feedLastEngineSeq = head.seq;
+					st.feedLastEngineSeq = (std::max)(st.feedLastEngineSeq, head.seq);
 				}
 				else if (head.attempts >= kFeedRetries)
 				{
 					++st.feed.abandoned;
-					st.feedLastEngineSeq = head.seq;
+					st.feedLastEngineSeq = (std::max)(st.feedLastEngineSeq, head.seq);
 				}
 				else
 					break;
@@ -4148,6 +4160,19 @@ namespace Vpv
 				addDecision(FallbackCatalog::SkeletonRegulatorInput(hasBundle && !st.timing.measured, st.timing.noted, st.timing.lastNotedMs));
 addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleton::KnownUndeclaredVramUsers()) : std::string()));   // MV7 standing gap
 				addDecision(FallbackCatalog::SkeletonEngineFeed(st.feedNeeded && st.engine == nullptr));   // SK-W stage D: P2m / P3 cannot be published
+				{
+					// Z3 (N#5): visible fallback whenever ahead P3 or P2 entries were overwritten or abandoned before publish.
+					const std::shared_ptr<P2LaneFeed> p2f = std::atomic_load(&st.p2Feed);
+					const P2LaneFeed::Counters p2c = p2f ? p2f->Read() : P2LaneFeed::Counters();
+					std::string aheadWhy;
+					if (st.feed.overwritten > 0)
+						aheadWhy += (aheadWhy.empty() ? "" : "; ") + std::to_string(st.feed.overwritten) + " ahead P3 field(s) overwritten before publish";
+					if (st.feed.abandoned > 0)
+						aheadWhy += (aheadWhy.empty() ? "" : "; ") + std::to_string(st.feed.abandoned) + " ahead P3 field(s) abandoned";
+					if (p2c.overwritten > 0)
+						aheadWhy += (aheadWhy.empty() ? "" : "; ") + std::to_string(p2c.overwritten) + " ahead P2 pair(s) overwritten before publish";
+					addDecision(FallbackCatalog::MotionFieldAhead(!aheadWhy.empty(), aheadWhy));
+				}
 				addDecision(FallbackCatalog::SkeletonSceneVeto(vetoOff));   // U7-accuracy Q5: the cut veto's reach, never silent
 				addDecision(FallbackCatalog::SkeletonSceneNoGrid(st.sceneNoGrid.load(std::memory_order_relaxed)));   // U7 v2 no-grid fallback
 				// MV7 guard: a module that holds video memory is active but declared none of it: visible, never silent.

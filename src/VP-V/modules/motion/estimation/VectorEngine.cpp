@@ -21,6 +21,7 @@
 #include <VP-V/modules/control/skeleton/SkeletonAccess.h>
 #include <VP-V/modules/motion/estimation/VectorEngineFallbackSync.h>
 #include <VP-V/core/QueueWindow.h>
+#include <VP-V/core/VramUsers.h>
 
 #include <algorithm>
 #include <chrono>
@@ -896,6 +897,7 @@ namespace VpMotion
 	VectorEngine::~VectorEngine()
 	{
 		p2Slot->SetObserver(VpMotion::P2Slot::Observer());   // Y1b: no producer call may reach this engine after here
+		ReleaseAheadRingVram();   // Z3 (N#5): withdraw any declared ahead field ring VRAM on teardown
 		ClearP1AheadDemand();
 		// Contract (SetPreEstimateHook): the consumer clears its hook before the engine goes; say so if it did not.
 		if (preEstimateHook_.load(std::memory_order_acquire) != nullptr)
@@ -964,6 +966,7 @@ namespace VpMotion
 				engine.motionProducerStopLogged = false;
 				engine.motionProducerStartRetry = MotionAhead::ProducerRecovery();
 				engine.NoteFlowSourceSize(0, 0, 0, 0);
+				engine.ReleaseAheadRingVram();
 				if (producer)
 					engine.motionEnginePairsBase += producer->GetStats().pairs;
 			});
@@ -1055,6 +1058,41 @@ namespace VpMotion
 		for (size_t i = 0; i < kFieldSlots; ++i)
 			fields_[i] = FieldRecord();
 		snapshotOfFrom_ = 0;
+	}
+
+	void VectorEngine::DeclareAheadRingVram(uint32_t width, uint32_t height, int depth)
+	{
+		if (width == 0 || height == 0 || depth <= 0)
+		{
+			ReleaseAheadRingVram();
+			return;
+		}
+		const int clampedDepth = depth > LaneAhead::kAheadCeilingLead ? LaneAhead::kAheadCeilingLead : depth;
+		const uint64_t bytes = LaneAhead::RingVramBytes(width, height, clampedDepth);
+		if (bytes == 0)
+		{
+			ReleaseAheadRingVram();
+			return;
+		}
+		VpSkeleton::VramUsers::Instance().DeclareStepped(
+			&aheadRingVramBytes_,
+			VpSkeleton::kUserMotionMatcher,
+			bytes,
+			VpSkeleton::Tier::T1,
+			"ahead field ring off (render-time estimate runs)");
+		VpSkeleton::VramUsers::Instance().MarkActive(&aheadRingVramBytes_, VpSkeleton::kUserMotionMatcher, true);
+		aheadRingVramBytes_ = bytes;
+	}
+
+	void VectorEngine::ReleaseAheadRingVram()
+	{
+		VpSkeleton::VramUsers::Instance().Release(&aheadRingVramBytes_, VpSkeleton::kUserMotionMatcher);
+		aheadRingVramBytes_ = 0;
+	}
+
+	uint64_t VectorEngine::AheadRingVramBytes() const
+	{
+		return aheadRingVramBytes_;
 	}
 
 	uint64_t VectorEngine::P2SlotGeneration() const { return p2Slot->Generation(); }

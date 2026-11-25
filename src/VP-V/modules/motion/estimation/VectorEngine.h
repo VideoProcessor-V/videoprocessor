@@ -439,6 +439,11 @@ namespace VpMotion
 		void NoteAheadField(uint64_t from, uint64_t to, uint64_t epoch, int matcherSlot);
 		// Clears all live + snapshot field records and any pending snapshot marker (resync/reset). Render thread.
 		void ResetFieldRecords();
+		// Z3 (N#5): declares / releases the motion ahead field ring's VRAM to VramUsers under kUserMotionMatcher
+		// using the derived LaneAhead::RingVramBytes(width, height, depth) formula.
+		void DeclareAheadRingVram(uint32_t width, uint32_t height, int depth);
+		void ReleaseAheadRingVram();
+		uint64_t AheadRingVramBytes() const;
 		// Rule 1 derivation: 1 live slot (slot 0) + D snapshot/ahead slots (slots 1..D), where D = VpSkeleton::kAheadCeiling
 		// (== LaneAhead::kAheadCeilingLead == 6, verified by static_assert in VectorEngine.cpp). Total = 1 + 6 = 7 slots.
 		static constexpr size_t kFieldSlots = 1u + static_cast<size_t>(VpSkeleton::kAheadCeiling);
@@ -644,6 +649,7 @@ namespace VpMotion
 		// Y1a / Y1b: slot 0 = LIVE record (last successful estimate), slots 1..D = SNAPSHOT/AHEAD records (newest first).
 		FieldRecord fields_[kFieldSlots];   // render thread
 		uint64_t snapshotOfFrom_ = 0;       // the A of the live pair the last ahead snapshot captured (0 = none pending)
+		uint64_t aheadRingVramBytes_ = 0;   // Z3 (N#5): declared kUserMotionMatcher ahead field ring VRAM (0 = none)
 		FieldRecord& RecordLive();
 		const FieldRecord& RecordLive() const;
 		const FieldRecord& RecordSnapshot(size_t i) const;
