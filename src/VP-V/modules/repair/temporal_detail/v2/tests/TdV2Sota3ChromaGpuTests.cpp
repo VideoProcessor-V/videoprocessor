@@ -130,10 +130,10 @@ namespace TdV2Sota3ChromaGpuNs
 		OwnedTex& operator=(const OwnedTex&) = delete;
 	};
 
-	static std::wstring FmtMsg(const char* fmt, double a = 0.0, double b = 0.0, double c = 0.0)
+	static std::wstring FmtMsg(const char* fmt, double a = 0.0, double b = 0.0, double c = 0.0, double d = 0.0)
 	{
 		char buf[340];
-		std::snprintf(buf, sizeof(buf), fmt, a, b, c);
+		std::snprintf(buf, sizeof(buf), fmt, a, b, c, d);
 		std::string s(buf);
 		return std::wstring(s.begin(), s.end());
 	}
