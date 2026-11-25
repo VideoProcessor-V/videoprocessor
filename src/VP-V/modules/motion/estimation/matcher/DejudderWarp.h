@@ -642,7 +642,7 @@ namespace Dejudder
 		{
 			return static_cast<float>(settings.consistencyPixels * GeneralScale::AboveReference(height, settings.generalRates));
 		}
-		pl_tex FadeStateTexture() const { return fadeState ? fadeState : inner ? inner->FadeStateTexture() : nullptr; }
+		pl_tex FadeStateTexture() const { return (HalvesForSearch() && inner) ? inner->FadeStateTexture() : fadeState; }
 		bool EnsureTextures(const Planes& a);
 		bool passTiming = false;
 		bool serialSearchForTest = false;

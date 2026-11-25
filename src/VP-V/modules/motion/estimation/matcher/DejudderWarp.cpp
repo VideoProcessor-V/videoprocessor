@@ -4658,7 +4658,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 				trustDescs.push_back(Sampled("hist_a", l2A, false));
 				trustDescs.push_back(Sampled("hist_b", l2B, false));
 			}
-			const pl_tex activeFade = (HalvesForSearch() && inner) ? inner->FadeStateTexture() : fadeState;
+			const pl_tex activeFade = FadeStateTexture();
 			const bool fadeOn = settings.fadeMatch && activeFade != nullptr;
 			if (fadeOn)
 				trustDescs.push_back(Sampled("fade_state", activeFade, false));
