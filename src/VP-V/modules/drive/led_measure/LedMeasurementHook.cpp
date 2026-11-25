@@ -1,5 +1,6 @@
 #include <pch.h>
 #include "LedMeasurementHook.h"
+#include "SourceStatsDisplay.h"
 
 #include <DebugLog.h>
 #include <VP-V/modules/drive/led_measure/NativeReadback.h>
@@ -228,8 +229,20 @@ if (i < READBACK_WORDS) {
 	}
 
 	MeasurementHook::MeasurementHook()
+		: MeasurementHook(MeasurementStageVariant::PreOutput)
 	{
-		hook.stages = PL_HOOK_PRE_OUTPUT;
+	}
+
+	MeasurementHook::MeasurementHook(MeasurementStageVariant variant)
+		: stageVariant(variant)
+	{
+		switch (stageVariant)
+		{
+		case MeasurementStageVariant::PreOutput:
+		default:
+			hook.stages = PL_HOOK_PRE_OUTPUT;
+			break;
+		}
 		hook.input = PL_HOOK_SIG_TEX;
 		hook.priv = this;
 		hook.hook = &MeasurementHook::Run;
@@ -239,6 +252,36 @@ if (i < READBACK_WORDS) {
 	MeasurementHook::~MeasurementHook()
 	{
 		Release();
+	}
+
+	MeasurementStageVariant MeasurementHook::StageVariant() const
+	{
+		return stageVariant;
+	}
+
+	uint64_t MeasurementHook::HookStagesMask() const
+	{
+		return static_cast<uint64_t>(hook.stages);
+	}
+
+	bool MeasurementHook::MatchesStage(uint64_t stage) const
+	{
+		return stage != 0 && (stage & static_cast<uint64_t>(hook.stages)) != 0;
+	}
+
+	VpSkeleton::VariantKey MeasurementHook::VariantKey() const
+	{
+		switch (stageVariant)
+		{
+		case MeasurementStageVariant::PreOutput:
+		default:
+			return SourceStatsDisplay::VariantKeyFor(SourceStatsDisplay::PreOutputStage(), VpSkeleton::kPrecisionFloat32);
+		}
+	}
+
+	int MeasurementHook::StageMismatches() const
+	{
+		return stageMismatches;
 	}
 
 	void MeasurementHook::SetFrame(const MeasurementRect& rectIn, const double weightsIn[3],
@@ -259,6 +302,19 @@ if (i < READBACK_WORDS) {
 	{
 		pl_hook_res none{};
 		none.output = PL_HOOK_SIG_NONE;
+		if (!params) return none;
+		if (params->stage != 0 && (static_cast<uint64_t>(params->stage) & static_cast<uint64_t>(hook.stages)) == 0)
+		{
+			++stageMismatches;
+			if (!stageMismatchLogged)
+			{
+				stageMismatchLogged = true;
+				DebugLog::Log("Dynamic Drive: measurement hook called at mismatched stage 0x%llx (expected mask 0x%llx); skipping",
+					static_cast<unsigned long long>(params->stage),
+					static_cast<unsigned long long>(hook.stages));
+			}
+			return none;
+		}
 		if (!params->tex) return none;
 		if (gpu && gpu != params->gpu) Release();
 		gpu = params->gpu;
@@ -621,6 +677,17 @@ if (i < READBACK_WORDS) {
 			std::this_thread::sleep_for(std::chrono::milliseconds(1));
 		}
 		return collected;
+	}
+
+	int MeasurementHook::CollectDisplay(std::vector<SourceStatsDisplay::DisplayRecord>& out, int waitMs,
+		std::vector<uint64_t>* sequences, double highlightPercentile, int scriptHighlightCode)
+	{
+		std::vector<RawMeasurement> raws;
+		const int count = Collect(raws, waitMs, sequences);
+		out.reserve(out.size() + raws.size());
+		for (const RawMeasurement& raw : raws)
+			out.push_back(SourceStatsDisplay::SummaryFromRaw(raw, highlightPercentile, scriptHighlightCode));
+		return count;
 	}
 
 	void MeasurementHook::Release()
