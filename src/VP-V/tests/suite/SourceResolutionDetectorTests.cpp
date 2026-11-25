@@ -2,17 +2,20 @@
 #include "CppUnitTest.h"
 
 #include <VP-V/modules/input/source_analysis/SourceResolutionDetector.h>
+#include <VP-V/modules/input/source_analysis/SourceResolutionMonitor.h>
 #include <VP-V/tests/support/HardwarePrerequisites.h>
 #include <VP-V/tests/support/SubtitleTextTestPattern.h>
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <functional>
 #include <map>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
@@ -2077,6 +2080,218 @@ namespace VideoProcessorTest
 						Assert::AreEqual(0, static_cast<int>(std::lround(lines)) % 2, L"an even number");
 						Assert::IsTrue(std::fabs(snapped - r) <= SourceResolution::kSnapBins / tile + 1e-12 || std::fabs(snapped - r) <= 1.0 / frame + 1e-12, L"within the snap reach");
 					}
+		}
+
+		// W21-5: every codeMaximum-scaled law in SourceResolutionDetector scales honestly from 10-bit (1023)
+		// to 12-bit (4095): bar flat tolerance (2 / codeMaximum), Informative quantisation floor
+		// (log10(step^2 / 12)), ReadFrame noiseLevel (flatSpreadCodes / codeMaximum), ReadFrame
+		// quantisationFloor, and signalBits = 12 effective-bit snapping. Every assertion is paired with an
+		// in-test negative control on the exact same synthetic tiles at codeMaximum = 1023 (and codingFixes off).
+		TEST_METHOD(TwelveBitCodeMaximumScalesQuantisationFloorAndBarTolerance)
+		{
+			auto hashDelta12 = [](int x, int y) -> int {
+				// Deterministic aperiodic 2D hash -> uniform integer in [-5, +5] 12-bit codes.
+				// Variance = ((11^2 - 1) / 12) / 4095^2 = 10 / 4095^2 ~= 5.963e-7 (log10 ~= -6.2245),
+				// sitting +0.58 decades above the 12-bit Informative threshold (-6.804)
+				// and -0.63 decades below the 10-bit Informative threshold (-5.599).
+				uint64_t h = (static_cast<uint64_t>(static_cast<uint32_t>(x)) * 0x9E3779B97F4A7C15ULL) ^
+					(static_cast<uint64_t>(static_cast<uint32_t>(y)) * 0xBF58476D1CE4E5B9ULL) ^
+					0x94D049BB133111EBULL;
+				h ^= h >> 30;
+				h *= 0xBF58476D1CE4E5B9ULL;
+				h ^= h >> 27;
+				h *= 0x94D049BB133111EBULL;
+				h ^= h >> 31;
+				return static_cast<int>(h % 11ULL) - 5;
+			};
+
+			// 1. Informative(), ReadFrame::noiseLevel, and ReadFrame::quantisationFloor on the exact same
+			//    low-amplitude 12-bit tile at codeMaximum = 4095 vs negative control codeMaximum = 1023.
+			std::vector<float> lowAmpTile(static_cast<size_t>(kTile) * kTile);
+			for (int y = 0; y < kTile; ++y)
+				for (int x = 0; x < kTile; ++x)
+					lowAmpTile[static_cast<size_t>(y) * kTile + static_cast<size_t>(x)] =
+						static_cast<float>(2048 + hashDelta12(x, y)) / 4095.0f;
+
+			SourceResolution::Spectrum specLow;
+			Assert::IsTrue(SourceResolution::Analyse(lowAmpTile.data(), kTile, kTile, specLow, 4095),
+				L"Analyse succeeds on synthetic 12-bit tile");
+
+			SourceResolution::Thresholds t12;
+			t12.codeMaximum = 4095;
+			SourceResolution::Thresholds t10;
+			t10.codeMaximum = 1023;
+
+			Assert::IsTrue(SourceResolution::Informative(specLow, t12),
+				L"12-bit low-amplitude texture stands above the 12-bit quantisation floor + informativeDecades");
+			Assert::IsFalse(SourceResolution::Informative(specLow, t10),
+				L"negative control: exact same tile fails Informative under hardcoded 10-bit codeMaximum = 1023");
+
+			const SourceResolution::FrameReading r12 = SourceResolution::ReadFrame({ specLow }, t12);
+			const SourceResolution::FrameReading r10 = SourceResolution::ReadFrame({ specLow }, t10);
+
+			Assert::IsTrue(r12.informative(), L"ReadFrame reports informative at codeMaximum = 4095");
+			Assert::IsFalse(r10.informative(), L"negative control: ReadFrame reports uninformative at codeMaximum = 1023");
+
+			const double expectedFloor12 = std::log10((1.0 / 4095.0) * (1.0 / 4095.0) / 12.0);
+			const double expectedFloor10 = std::log10((1.0 / 1023.0) * (1.0 / 1023.0) / 12.0);
+			const double expectedGap = 2.0 * std::log10(4095.0 / 1023.0);
+			Assert::AreEqual(expectedFloor12, r12.quantisationFloor, 1e-12, L"12-bit quantisationFloor = log10((1/4095)^2 / 12)");
+			Assert::AreEqual(expectedFloor10, r10.quantisationFloor, 1e-12, L"10-bit negative control quantisationFloor = log10((1/1023)^2 / 12)");
+			Assert::AreEqual(expectedGap, r10.quantisationFloor - r12.quantisationFloor, 1e-12,
+				L"10-bit vs 12-bit quantisationFloor differs by 2 * log10(4095 / 1023) ~= 1.2047 decades");
+
+			Assert::AreEqual(2.0 / 4095.0, r12.noiseLevel, 1e-12, L"12-bit noiseLevel = flatSpreadCodes / 4095");
+			Assert::AreEqual(2.0 / 1023.0, r10.noiseLevel, 1e-12, L"10-bit negative control noiseLevel = flatSpreadCodes / 1023");
+			Assert::AreEqual(4095.0 / 1023.0, r10.noiseLevel / r12.noiseLevel, 1e-9,
+				L"10-bit noiseLevel is ~4x larger than 12-bit noiseLevel");
+
+			// 2. signalBits = 12 effective-bit snapping: a 12-bit ramp populating 13/16 codes per 16-code window
+			//    yields effectiveBits = 12 + log2(13/16) ~= 11.70 (>= 12 - 0.5), which snaps to 12 bits when
+			//    codingFixes is on; a 10-bit-in-12-bit ramp (4/16 codes) yields 10.0 bits (< 11.5) and stays at 10.
+			std::vector<float> rampSnap12(static_cast<size_t>(kTile) * kTile);
+			std::vector<float> rampTenInTwelve(static_cast<size_t>(kTile) * kTile);
+			for (int y = 0; y < kTile; ++y)
+				for (int x = 0; x < kTile; ++x)
+				{
+					const int codeNear12 = 1024 + (x / 13) * 16 + (x % 13);
+					const int code10In12 = 1024 + (x % 64) * 4;
+					rampSnap12[static_cast<size_t>(y) * kTile + static_cast<size_t>(x)] = static_cast<float>(codeNear12) / 4095.0f;
+					rampTenInTwelve[static_cast<size_t>(y) * kTile + static_cast<size_t>(x)] = static_cast<float>(code10In12) / 4095.0f;
+				}
+
+			SourceResolution::Spectrum specSnap12, spec10In12;
+			Assert::IsTrue(SourceResolution::Analyse(rampSnap12.data(), kTile, kTile, specSnap12, 4095));
+			specSnap12.coding = VpUnit::CodingEvidence::MeasureTile(rampSnap12.data(), kTile, kTile, 4095);
+			Assert::IsTrue(SourceResolution::Analyse(rampTenInTwelve.data(), kTile, kTile, spec10In12, 4095));
+			spec10In12.coding = VpUnit::CodingEvidence::MeasureTile(rampTenInTwelve.data(), kTile, kTile, 4095);
+
+			const SourceResolution::FrameReading rSnap12 = SourceResolution::ReadFrame({ specSnap12 }, t12);
+			Assert::IsTrue(rSnap12.effectiveBits > 11.5 && rSnap12.effectiveBits < 11.9,
+				L"13/16-occupied 12-bit ramp produces effectiveBits strictly inside (11.5, 11.9)");
+			Assert::AreEqual(expectedFloor12, rSnap12.quantisationFloor, 1e-12,
+				L"effectiveBits >= signalBits - 0.5 snaps to signalBits = 12 and yields the full 12-bit floor");
+
+			SourceResolution::Thresholds t12NoSnap = t12;
+			t12NoSnap.codingFixes = false;
+			const SourceResolution::FrameReading rNoSnap12 = SourceResolution::ReadFrame({ specSnap12 }, t12NoSnap);
+			Assert::IsTrue(rNoSnap12.quantisationFloor > expectedFloor12 + 0.1,
+				L"negative control: without codingFixes snapping, ~11.7-bit effective depth leaves quantisationFloor elevated");
+
+			const SourceResolution::FrameReading rTenInTwelve = SourceResolution::ReadFrame({ spec10In12 }, t12);
+			const double expectedFloor10In12 = std::log10((4.0 / 4095.0) * (4.0 / 4095.0) / 12.0);
+			Assert::IsTrue(rTenInTwelve.effectiveBits > 9.9 && rTenInTwelve.effectiveBits < 10.1,
+				L"4/16-occupied 12-bit ramp reads as 10 effective bits");
+			Assert::AreEqual(expectedFloor10In12, rTenInTwelve.quantisationFloor, 1e-9,
+				L"negative control: 10-bit content in a 12-bit signal does NOT snap to 12 bits");
+
+			const SourceResolution::FrameReading rSnap10 = SourceResolution::ReadFrame({ specSnap12 }, t10);
+			Assert::AreEqual(expectedFloor10, rSnap10.quantisationFloor, 1e-12,
+				L"negative control: exact same 12-bit spectrum clamped to codeMaximum = 1023 snaps to 10-bit floor");
+
+			// 3. Bar flat tolerance (flat = 2 / codeMaximum): a dark left region with 3-code 12-bit ripple
+			//    (3/4095 > 2/4095, but 3/4095 < 2/1023 ~= 8/4095) must NOT be flagged as a bar at 12-bit,
+			//    while the exact same tile IS falsely flagged as a bar at 10-bit; a 1-code 12-bit bar still is.
+			std::vector<float> barRipple3(static_cast<size_t>(kTile) * kTile, 0.5f);
+			std::vector<float> barRipple1(static_cast<size_t>(kTile) * kTile, 0.5f);
+			for (int y = 0; y < kTile; ++y)
+				for (int x = 0; x < 32; ++x)
+				{
+					barRipple3[static_cast<size_t>(y) * kTile + static_cast<size_t>(x)] =
+						static_cast<float>((y & 1) ? 83 : 80) / 4095.0f;
+					barRipple1[static_cast<size_t>(y) * kTile + static_cast<size_t>(x)] =
+						static_cast<float>((y & 1) ? 81 : 80) / 4095.0f;
+				}
+
+			SourceResolution::Spectrum bar12, bar10, trueBar12;
+			Assert::IsTrue(SourceResolution::Analyse(barRipple3.data(), kTile, kTile, bar12, 4095));
+			Assert::IsTrue(SourceResolution::Analyse(barRipple3.data(), kTile, kTile, bar10, 1023));
+			Assert::IsTrue(SourceResolution::Analyse(barRipple1.data(), kTile, kTile, trueBar12, 4095));
+
+			Assert::AreEqual(0, bar12.barLeft,
+				L"3-code 12-bit dark ripple (3/4095 > 2/4095) is NOT falsely flagged as a constant bar at codeMaximum = 4095");
+			Assert::AreEqual(32, bar10.barLeft,
+				L"negative control: exact same 3-code 12-bit ripple IS falsely flagged as a 32-px bar at codeMaximum = 1023");
+			Assert::AreEqual(32, trueBar12.barLeft,
+				L"true 1-code 12-bit dark bar (1/4095 <= 2/4095) is still detected at codeMaximum = 4095");
+		}
+
+		// W21-5: Monitor::AheadWorker must propagate the look-ahead's codeMaximum (e.g. 4095 for 12-bit) into
+		// ReadFrame's Thresholds::codeMaximum. Pre-fix SourceResolutionMonitor.cpp left thresholds.codeMaximum at
+		// default 1023, causing low-amplitude 12-bit frames sitting between the 12-bit and 10-bit quantisation
+		// floors to report Ahead().informative == false.
+		TEST_METHOD(LookAheadWorkerPropagatesTwelveBitCodeMaximumToReadFrame)
+		{
+			constexpr int kWidth = 1920;
+			constexpr int kHeight = 1080;
+
+			auto lumaNorm = [](int x, int y) -> double {
+				// Exact same 12-bit low-amplitude mid-grey texture: variance = 10 / 4095^2 (log10 ~= -6.2245),
+				// strictly above the 12-bit Informative threshold (-6.804) and strictly below the 10-bit
+				// Informative threshold (-5.599) even after 10-bit integer rounding (~ -6.13).
+				uint64_t h = (static_cast<uint64_t>(static_cast<uint32_t>(x)) * 0x9E3779B97F4A7C15ULL) ^
+					(static_cast<uint64_t>(static_cast<uint32_t>(y)) * 0xBF58476D1CE4E5B9ULL) ^
+					0x94D049BB133111EBULL;
+				h ^= h >> 30;
+				h *= 0xBF58476D1CE4E5B9ULL;
+				h ^= h >> 27;
+				h *= 0x94D049BB133111EBULL;
+				h ^= h >> 31;
+				const int delta = static_cast<int>(h % 11ULL) - 5;
+				return static_cast<double>(2048 + delta) / 4095.0;
+			};
+
+			auto runLookAhead = [&](uint32_t codeMax) -> SourceResolutionMonitor::Monitor::AheadState {
+				// Stack-allocated Monitor: ~Monitor() cleanly stops and joins both worker threads via RAII.
+				SourceResolutionMonitor::Monitor monitor;
+
+				SourceResolutionMonitor::Snapshot snap;
+				snap.reading = true;
+				snap.declaredRatio = 0.5;
+				snap.confidence = 1.0;
+				snap.nativeWidth = kWidth;
+				snap.nativeHeight = kHeight;
+				snap.frames = 1;
+				monitor.InjectResultForTest(snap, 1);
+
+				std::string why;
+				const double factor = monitor.AutoFactor(kHeight, 0.5, why, 1.0, 1);
+				Assert::AreEqual(1.0, factor, 1e-9, L"AutoFactor enters pending engage while holding native");
+
+				SourceResolutionMonitor::CodedLumaSampler blackSampler;
+				blackSampler.codeMaximum = codeMax;
+				blackSampler.read = [](int, int) { return 0; };
+				monitor.LookAheadFrame(10, kWidth, kHeight, blackSampler, 0, 0, kWidth, kHeight);
+
+				SourceResolutionMonitor::CodedLumaSampler textureSampler;
+				textureSampler.codeMaximum = codeMax;
+				textureSampler.read = [lumaNorm, codeMax](int x, int y) {
+					return static_cast<int>(std::lround(lumaNorm(x, y) * static_cast<double>(codeMax)));
+				};
+				monitor.LookAheadFrame(11, kWidth, kHeight, textureSampler, 0, 0, kWidth, kHeight);
+
+				SourceResolutionMonitor::Monitor::AheadState state;
+				for (int waitMs = 0; waitMs < 5000; ++waitMs)
+				{
+					state = monitor.Ahead();
+					if (state.ready && state.targetSequence == 11) break;
+					std::this_thread::sleep_for(std::chrono::milliseconds(1));
+				}
+				return state;
+			};
+
+			const SourceResolutionMonitor::Monitor::AheadState ahead12 = runLookAhead(4095u);
+			Assert::IsTrue(ahead12.ready && ahead12.targetSequence == 11,
+				L"AheadWorker completed analysis of target frame 11 at codeMaximum = 4095");
+			Assert::IsTrue(ahead12.informative,
+				L"12-bit LookAheadFrame must propagate codeMaximum = 4095 into ReadFrame thresholds so Ahead().informative is true");
+
+			// Mandatory in-test negative control: exact same normalised luma values fed at codeMaximum = 1023.
+			const SourceResolutionMonitor::Monitor::AheadState ahead10 = runLookAhead(1023u);
+			Assert::IsTrue(ahead10.ready && ahead10.targetSequence == 11,
+				L"AheadWorker completed analysis of target frame 11 at negative-control codeMaximum = 1023");
+			Assert::IsFalse(ahead10.informative,
+				L"negative control: exact same luma values at codeMaximum = 1023 sit below the 10-bit floor and read uninformative");
 		}
 	};
 }
