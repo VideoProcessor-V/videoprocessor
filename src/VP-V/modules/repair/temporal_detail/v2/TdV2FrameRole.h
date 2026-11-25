@@ -349,10 +349,31 @@ namespace TdV2
 			int sourceBits,
 			StandInRegistry* standIns) const override
 		{
+			return MeasureWithOverlay(curY, prev1Y, prev2Y, w, h, sourceBits, nullptr, kCanonicalBlockPx, standIns);
+		}
+
+		// Grid-free monotonic flat-plateau staircase estimator (UPG-HIGH-4):
+		// - Excludes Overlay cells and high-contrast scene/subtitle edges (|jump| > PeakCode / 16).
+		// - Excludes 1-LSB native bit-depth rounding (|jump| <= 1.5 * depthScale) and smooth gradients.
+		// - Requires >= 2 same-sign consistent (max/min <= 2.0) plateau-to-plateau steps along the SAME row or column
+		//   (eliminating single isolated graphic edges and 2-tone boxes).
+		// - Removes the invalid E_H/E_M band-ratio assumption so clean upscaled 1080p->4K / soft content reports 0.
+		CodingGridSummary MeasureWithOverlay(
+			const double* curY,
+			const double* prev1Y,
+			const double* prev2Y,
+			int w,
+			int h,
+			int sourceBits,
+			const uint8_t* overlayCells,
+			int cellPx,
+			StandInRegistry* standIns) const
+		{
 			CodingGridSummary out;
 			if (curY == nullptr || w <= 0 || h <= 0)
 				return out;
-			if (!(PeakCodeForBits(sourceBits) > 0.0))
+			const double peakCode = PeakCodeForBits(sourceBits);
+			if (!(peakCode > 0.0))
 			{
 				if (standIns != nullptr)
 					standIns->Engage(StandInKind::NonFiniteClosure, "TdV2NonBlockStepEstimator invalid sourceBits");
@@ -360,7 +381,6 @@ namespace TdV2
 			}
 
 			const size_t nPx = static_cast<size_t>(w) * static_cast<size_t>(h);
-			std::vector<double> plane(nPx, 0.0);
 			for (size_t i = 0; i < nPx; ++i)
 			{
 				if (!std::isfinite(curY[i]))
@@ -369,40 +389,22 @@ namespace TdV2
 						standIns->Engage(StandInKind::NonFiniteClosure, "TdV2NonBlockStepEstimator non-finite pixel");
 					return out;
 				}
-				plane[i] = curY[i];
 			}
 
-			// Compute grid-free M and H bands via shared U2 BandFromBase taps.
-			const auto tapsFine = VpUnit::BandFromBase::Taps<double>(VpUnit::BandFromBase::kSigmaFine, 3.0, true, 0.0);
-			const auto tapsBase = VpUnit::BandFromBase::Taps<double>(VpUnit::BandFromBase::kSigmaBase, 3.0, true, 0.0);
-			std::vector<double> gFine, gBase;
-			VpUnit::BandFromBase::BlurTaps(plane, gFine, w, h, tapsFine, VpUnit::BandFromBase::EdgeMode::Replicate);
-			VpUnit::BandFromBase::BlurTaps(plane, gBase, w, h, tapsBase, VpUnit::BandFromBase::EdgeMode::Replicate);
-
-			const BandWhiteNoiseGains gains = ComputeBandWhiteNoiseGains();
-			// Analytical 1D step-edge Fourier energy ratio E_H_ref / E_M_ref from BandFromBase sigmas:
-			//   E(a, b) = 2 * sqrt((a^2 + b^2) / 2) - a - b.
-			const double s1 = VpUnit::BandFromBase::kSigmaFine;
-			const double s2 = VpUnit::BandFromBase::kSigmaBase;
-			const double eHRef = 2.0 * std::sqrt(0.5 * s1 * s1) - s1;
-			const double eMRef = 2.0 * std::sqrt(0.5 * (s1 * s1 + s2 * s2)) - s1 - s2;
-			const double naturalHM = (eMRef > kRoleNumFloor) ? (eHRef / eMRef) : 1.0;
-
-			const int cellEdge = static_cast<int>(QualityPattern::kBlockGridCellEdge);
-			out.cellsW = static_cast<int>(QualityPattern::BlockGridCellsX(static_cast<uint32_t>(w)));
-			out.cellsH = static_cast<int>(QualityPattern::BlockGridCellsY(static_cast<uint32_t>(h)));
+			const int cellEdge = cellPx > 0 ? cellPx : static_cast<int>(QualityPattern::kBlockGridCellEdge);
+			out.cellsW = (w + cellEdge - 1) / cellEdge;
+			out.cellsH = (h + cellEdge - 1) / cellEdge;
 			const size_t numCells = static_cast<size_t>(out.cellsW) * static_cast<size_t>(out.cellsH);
 			out.cells.resize(numCells);
 
 			const double depthScale = DepthScale(sourceBits);
 			const double halfLsb = kExactCopyHalfStep10Bit * depthScale;
-			const double baseQuantVar = (depthScale * depthScale) / 12.0;
-			const double midTextureFloor = 2.0 * gains.mid * baseQuantVar;
-			const double deadZoneScale = std::sqrt(3.0) / (1.0 - kDeadZonePhiInter);
+			// Strictly above 1-LSB native rounding and below 4-bit coarse-quantization ceiling (Peak/16 = 64 codes at 10-bit).
+			const double minBandJump = 1.5 * depthScale;
+			const double maxBandJump = peakCode / 16.0;
 
 			std::vector<double> cellSteps;
 			cellSteps.reserve(numCells);
-			std::vector<double> stairJumps;
 			double sumStep = 0.0;
 			double maxStep = 0.0;
 			size_t copy1Count = 0;
@@ -416,9 +418,9 @@ namespace TdV2
 				{
 					const int x0 = cx * cellEdge;
 					const int x1 = (std::min)(w, x0 + cellEdge);
-					stairJumps.clear();
-					double sumMSq = 0.0;
-					double sumHSq = 0.0;
+					const size_t cIdx = static_cast<size_t>(cy) * static_cast<size_t>(out.cellsW) + static_cast<size_t>(cx);
+					const bool isOverlay = (overlayCells != nullptr && overlayCells[cIdx] != 0u);
+
 					double copyDiff1 = 0.0;
 					double copyDiff2 = 0.0;
 					size_t pxCnt = 0;
@@ -429,13 +431,8 @@ namespace TdV2
 						for (int x = x0; x < x1; ++x)
 						{
 							const size_t idx = static_cast<size_t>(y) * static_cast<size_t>(w) + static_cast<size_t>(x);
-							const double v = plane[idx];
-							const double mVal = gFine[idx] - gBase[idx];
-							const double hVal = v - gFine[idx];
-							sumMSq += mVal * mVal;
-							sumHSq += hVal * hVal;
+							const double v = curY[idx];
 							++pxCnt;
-
 							if (prev1Y != nullptr)
 							{
 								if (std::isfinite(prev1Y[idx])) copyDiff1 += std::fabs(v - prev1Y[idx]);
@@ -445,54 +442,6 @@ namespace TdV2
 							{
 								if (std::isfinite(prev2Y[idx])) copyDiff2 += std::fabs(v - prev2Y[idx]);
 								else cellNonFinite = true;
-							}
-
-							// Grid-free horizontal plateau-to-plateau staircase jump (1-px or 2-px deblocked transition):
-							if (x >= 2 && x + 1 < w)
-							{
-								const double vm2 = plane[idx - 2];
-								const double vm1 = plane[idx - 1];
-								const double vp1 = plane[idx + 1];
-								if (std::fabs(vm1 - vm2) <= halfLsb && std::fabs(vp1 - v) <= halfLsb)
-								{
-									const double jump = std::fabs(v - vm1);
-									if (jump > halfLsb)
-										stairJumps.push_back(jump);
-								}
-								else if (x + 2 < w)
-								{
-									const double vp2 = plane[idx + 2];
-									if (std::fabs(vm1 - vm2) <= halfLsb && std::fabs(vp2 - vp1) <= halfLsb)
-									{
-										const double jump2 = std::fabs(vp1 - vm1);
-										if (jump2 > halfLsb)
-											stairJumps.push_back(jump2);
-									}
-								}
-							}
-							// Grid-free vertical plateau-to-plateau staircase jump:
-							if (y >= 2 && y + 1 < h)
-							{
-								const size_t stride = static_cast<size_t>(w);
-								const double vm2 = plane[idx - 2 * stride];
-								const double vm1 = plane[idx - stride];
-								const double vp1 = plane[idx + stride];
-								if (std::fabs(vm1 - vm2) <= halfLsb && std::fabs(vp1 - v) <= halfLsb)
-								{
-									const double jump = std::fabs(v - vm1);
-									if (jump > halfLsb)
-										stairJumps.push_back(jump);
-								}
-								else if (y + 2 < h)
-								{
-									const double vp2 = plane[idx + 2 * stride];
-									if (std::fabs(vm1 - vm2) <= halfLsb && std::fabs(vp2 - vp1) <= halfLsb)
-									{
-										const double jump2 = std::fabs(vp1 - vm1);
-										if (jump2 > halfLsb)
-											stairJumps.push_back(jump2);
-									}
-								}
 							}
 						}
 					}
@@ -505,28 +454,157 @@ namespace TdV2
 						return out;
 					}
 
-					CodingGridCell& cell = out.cells[static_cast<size_t>(cy) * out.cellsW + cx];
-					double stepEst = 0.0;
-					if (!stairJumps.empty())
+					double cellJumpSum = 0.0;
+					size_t cellJumpCnt = 0;
+					if (!isOverlay)
 					{
-						stepEst = RobustStats::Median(stairJumps, RobustStats::MedianRule::MeanOfMiddle);
+						// Horizontal scanlines inside cell: require >= 2 same-sign consistent 3-px-plateau steps per row.
+						for (int y = y0; y < y1; ++y)
+						{
+							int posCnt = 0, negCnt = 0;
+							double posSum = 0.0, posMin = maxBandJump, posMax = 0.0;
+							double negSum = 0.0, negMin = maxBandJump, negMax = 0.0;
+							const size_t rowBase = static_cast<size_t>(y) * static_cast<size_t>(w);
+							for (int x = x0; x < x1; ++x)
+							{
+								if (x < 3 || x + 2 >= w)
+									continue;
+								const double vm3 = curY[rowBase + static_cast<size_t>(x - 3)];
+								const double vm2 = curY[rowBase + static_cast<size_t>(x - 2)];
+								const double vm1 = curY[rowBase + static_cast<size_t>(x - 1)];
+								const double v0  = curY[rowBase + static_cast<size_t>(x)];
+								const double vp1 = curY[rowBase + static_cast<size_t>(x + 1)];
+								const double vp2 = curY[rowBase + static_cast<size_t>(x + 2)];
+								const bool leftFlat = (std::fabs(vm1 - vm2) <= halfLsb && std::fabs(vm2 - vm3) <= halfLsb);
+								if (!leftFlat)
+									continue;
+								double signedJump = 0.0;
+								bool matched = false;
+								if (std::fabs(vp1 - v0) <= halfLsb && std::fabs(vp2 - vp1) <= halfLsb)
+								{
+									signedJump = v0 - vm1;
+									matched = true;
+								}
+								else if (x + 3 < w)
+								{
+									const double vp3 = curY[rowBase + static_cast<size_t>(x + 3)];
+									const bool monoMid = ((v0 - vm1) * (vp1 - v0) >= 0.0);
+									if (monoMid && std::fabs(vp2 - vp1) <= halfLsb && std::fabs(vp3 - vp2) <= halfLsb)
+									{
+										signedJump = vp1 - vm1;
+										matched = true;
+									}
+								}
+								if (!matched)
+									continue;
+								const double aj = std::fabs(signedJump);
+								if (aj > minBandJump && aj <= maxBandJump)
+								{
+									if (signedJump > 0.0)
+									{
+										++posCnt;
+										posSum += aj;
+										if (aj < posMin) posMin = aj;
+										if (aj > posMax) posMax = aj;
+									}
+									else
+									{
+										++negCnt;
+										negSum += aj;
+										if (aj < negMin) negMin = aj;
+										if (aj > negMax) negMax = aj;
+									}
+								}
+							}
+							if (posCnt >= 2 && posMax <= 2.0 * posMin)
+							{
+								cellJumpSum += posSum;
+								cellJumpCnt += static_cast<size_t>(posCnt);
+							}
+							if (negCnt >= 2 && negMax <= 2.0 * negMin)
+							{
+								cellJumpSum += negSum;
+								cellJumpCnt += static_cast<size_t>(negCnt);
+							}
+						}
+
+						// Vertical scanlines inside cell: require >= 2 same-sign consistent 3-px-plateau steps per column.
+						const size_t stride = static_cast<size_t>(w);
+						for (int x = x0; x < x1; ++x)
+						{
+							int posCnt = 0, negCnt = 0;
+							double posSum = 0.0, posMin = maxBandJump, posMax = 0.0;
+							double negSum = 0.0, negMin = maxBandJump, negMax = 0.0;
+							for (int y = y0; y < y1; ++y)
+							{
+								if (y < 3 || y + 2 >= h)
+									continue;
+								const size_t idx = static_cast<size_t>(y) * stride + static_cast<size_t>(x);
+								const double vm3 = curY[idx - 3 * stride];
+								const double vm2 = curY[idx - 2 * stride];
+								const double vm1 = curY[idx - stride];
+								const double v0  = curY[idx];
+								const double vp1 = curY[idx + stride];
+								const double vp2 = curY[idx + 2 * stride];
+								const bool leftFlat = (std::fabs(vm1 - vm2) <= halfLsb && std::fabs(vm2 - vm3) <= halfLsb);
+								if (!leftFlat)
+									continue;
+								double signedJump = 0.0;
+								bool matched = false;
+								if (std::fabs(vp1 - v0) <= halfLsb && std::fabs(vp2 - vp1) <= halfLsb)
+								{
+									signedJump = v0 - vm1;
+									matched = true;
+								}
+								else if (y + 3 < h)
+								{
+									const double vp3 = curY[idx + 3 * stride];
+									const bool monoMid = ((v0 - vm1) * (vp1 - v0) >= 0.0);
+									if (monoMid && std::fabs(vp2 - vp1) <= halfLsb && std::fabs(vp3 - vp2) <= halfLsb)
+									{
+										signedJump = vp1 - vm1;
+										matched = true;
+									}
+								}
+								if (!matched)
+									continue;
+								const double aj = std::fabs(signedJump);
+								if (aj > minBandJump && aj <= maxBandJump)
+								{
+									if (signedJump > 0.0)
+									{
+										++posCnt;
+										posSum += aj;
+										if (aj < posMin) posMin = aj;
+										if (aj > posMax) posMax = aj;
+									}
+									else
+									{
+										++negCnt;
+										negSum += aj;
+										if (aj < negMin) negMin = aj;
+										if (aj > negMax) negMax = aj;
+									}
+								}
+							}
+							if (posCnt >= 2 && posMax <= 2.0 * posMin)
+							{
+								cellJumpSum += posSum;
+								cellJumpCnt += static_cast<size_t>(posCnt);
+							}
+							if (negCnt >= 2 && negMax <= 2.0 * negMin)
+							{
+								cellJumpSum += negSum;
+								cellJumpCnt += static_cast<size_t>(negCnt);
+							}
+						}
 					}
+
+					CodingGridCell& cell = out.cells[cIdx];
+					const double stepEst = (cellJumpCnt > 0) ? (cellJumpSum / static_cast<double>(cellJumpCnt)) : 0.0;
 					if (pxCnt > 0)
 					{
 						const double invCnt = 1.0 / static_cast<double>(pxCnt);
-						const double eM = sumMSq * invCnt;
-						const double eH = sumHSq * invCnt;
-						if (eM > midTextureFloor && gains.fine > kRoleNumFloor)
-						{
-							const double expectedEH = eM * naturalHM;
-							if (expectedEH > eH)
-							{
-								const double missingVar = (expectedEH - eH) / gains.fine;
-								const double dzStep = deadZoneScale * std::sqrt(missingVar);
-								if (dzStep > stepEst)
-									stepEst = dzStep;
-							}
-						}
 						if (prev1Y != nullptr && (copyDiff1 * invCnt) <= halfLsb)
 						{
 							cell.copyPrev1 = true;
@@ -581,6 +659,7 @@ namespace TdV2
 		bool valid = false;
 		bool cappedByHistory = false;
 		bool frozenOnDiscontinuity = false;
+		bool heldFromHistory = false;
 
 		double ForBandClass(int band, int activityClass) const
 		{
@@ -646,6 +725,13 @@ namespace TdV2
 			if (freezeDiscontinuity)
 			{
 				out.frozenOnDiscontinuity = true;
+				if (!out.valid && hasFrozenPrior_ && frozenPrior_.valid)
+				{
+					out = frozenPrior_;
+					out.frozenOnDiscontinuity = true;
+					out.heldFromHistory = true;
+					return out;
+				}
 				if (hasFrozenPrior_ && frozenPrior_.valid && out.valid)
 				{
 					for (int b = 0; b < 3; ++b)
@@ -664,8 +750,55 @@ namespace TdV2
 				return out;
 			}
 
+			// UPG-HIGH-5: On one-sided frames (K = 1, carry off) where candidate has no A1 pairs (`!out.valid`),
+			// hold the rolling median of recent same-role frames (or all recent frames / frozenPrior_ within horizon)
+			// so one-sided frames never collapse to 1-LSB! Do NOT push the held copy back into history_.
 			if (!out.valid)
+			{
+				EmpiricalOwnErrorPrior held;
+				bool anyHeld = false;
+				for (int b = 0; b < 3; ++b)
+				{
+					for (int c = 0; c < kA2eActivityClasses; ++c)
+					{
+						std::vector<double> sameRoleVals;
+						std::vector<double> anyRoleVals;
+						for (const Entry& e : history_)
+						{
+							if (!e.prior.valid || e.prior.cellCount[b][c] == 0)
+								continue;
+							const double v = e.prior.ForBandClass(b, c);
+							anyRoleVals.push_back(v);
+							if (role != QualityPattern::FrameRole::Unknown &&
+							    e.role != QualityPattern::FrameRole::Unknown &&
+							    e.role == role)
+							{
+								sameRoleVals.push_back(v);
+							}
+						}
+						const std::vector<double>& src = !sameRoleVals.empty() ? sameRoleVals : anyRoleVals;
+						if (!src.empty())
+						{
+							held.U[b][c] = (std::max)(0.0, RobustStats::Median(src, RobustStats::MedianRule::MeanOfMiddle));
+							held.cellCount[b][c] = static_cast<uint32_t>(src.size());
+							anyHeld = true;
+						}
+					}
+				}
+				if (anyHeld)
+				{
+					held.valid = true;
+					held.heldFromHistory = true;
+					return held;
+				}
+				if (hasFrozenPrior_ && frozenPrior_.valid && !history_.empty())
+				{
+					held = frozenPrior_;
+					held.heldFromHistory = true;
+					return held;
+				}
 				return out;
+			}
 
 			// Gather same-role recent entries (or all entries if role == Unknown) for robust median cap.
 			for (int b = 0; b < 3; ++b)

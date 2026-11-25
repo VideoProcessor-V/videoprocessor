@@ -49,10 +49,6 @@ namespace TdV2
 	// Strictly numerical denominator floor.
 	constexpr double kEngineNumFloor = 1e-9;
 
-	// Hard forward/backward occlusion gate threshold in source pixels (refs/111 s6 / Fable M-3 / Plan 6.2):
-	// vector disagreement > 1.0 px hard-zeros blend weight (0.0); continuous confidence tapers below 1.0 px.
-	constexpr double kHardFbOcclusionPx = 1.0;
-
 	// Analytical 1D step-edge Fourier energy passing through difference-of-Gaussians G(a) - G(b):
 	//   integral |exp(-0.5 a^2 w^2) - exp(-0.5 b^2 w^2)|^2 / w^2 dw  proportional to  2 * sqrt((a^2 + b^2) / 2) - a - b.
 	inline double StepEdgeBandEnergy(double sigmaA, double sigmaB)
@@ -841,10 +837,15 @@ namespace TdV2
 		bool carryReset = false;
 		bool anchoredCarryUsed = false;             // TD-U5: true when single-resample anchored carry served as a ref this frame
 		size_t anchoredCarryHeldOutRejectCells = 0; // TD-U5: cells rejected by per-cell held-out structure check (marked for re-seed)
-		size_t driftBarredCells = 0;                // TD-U5: cells barred from carry for next span because measured kDrift > 1.0 px
+		size_t driftBarredCells = 0;                // TD-U5: cells barred from carry for next span because measured kDrift > kAnchorDriftBarPx
 		bool driftReducedSearchUsed = false;        // TD-U5: true when seeded local block search measured kDrift ("drift: reduced")
 		EmpiricalOwnErrorPrior empiricalOwnError;   // TD-U1 A2e per-band x activity-class own-error prior U_j(class)
 		AlignedSharpnessSummary alignedSharpness;   // TD-U1 motion-aligned relative sharpness r_t (abstaining focus cells)
+		// Plan 6.6 / CHR-HIGH-3: Exported post-gate luma cell weights [band][ref][cell] + explicit per-slot RefRole
+		// so chroma `reuse_luma` maps each ref slot strictly by matching RefRole (never blind index k).
+		std::vector<double> lumaCellWeights[3][kMaxBlendRefs];
+		RefRole lumaRefRoles[kMaxBlendRefs] = {};
+		int lumaActiveRefCount = 0;
 	};
 
 	// ---- Corner-Tapered Spatial-Only Bilinear Weight Interpolation (Zero New Constants) ----
@@ -1027,6 +1028,7 @@ namespace TdV2
 			anchorReseedCells_.clear();
 			hasLastSeq_ = false;
 			lastSeq_ = 0;
+			elapsedSec_ = 0.0;
 			a2eHistory_.Reset();
 			for (auto& slot : sameRoleStats_)
 				slot.Reset();
@@ -1230,9 +1232,13 @@ namespace TdV2
 					tryAddRefSpec(in.nextPeak.cleanPlane, in.nextPeak.motion, in.nextPeak.isExactCopyOfCurrent, RefRole::NextPeak, in.nextPeak.cameraHomography);
 				if (in.prevPeak2.cleanPlane != nullptr)
 					tryAddRefSpec(in.prevPeak2.cleanPlane, in.prevPeak2.motion, in.prevPeak2.isExactCopyOfCurrent, RefRole::PrevPeak2, in.prevPeak2.cameraHomography);
-				// TD-U5 (H-4 / Owner D2): Single-resample anchored carry from last confirmed peak along composed vector,
+				// TD-U5 (H-4 / Owner D2 / UPG-HIGH-1): Single-resample anchored carry from last confirmed peak along composed vector,
 				// treated as a second past peak (PrevPeak2) for A1 (NEVER frame-to-frame chained resample).
-				if (cfg_.enableAnchoredCarry && hasAnchor_ && anchorClean_.w == w && anchorClean_.h == h &&
+				// UPG-HIGH-1: NEVER inject anchorClean_ when in.prevPeak is the exact same peak (anchorAgeFrames_ <= 1),
+				// which would create self-instrumentation (d_prevPeak == d_anchor -> c_IV == C_00)!
+				const bool anchorDuplicatesPrevPeak = (in.prevPeak.cleanPlane != nullptr) && (anchorAgeFrames_ <= 1);
+				if (cfg_.enableAnchoredCarry && hasAnchor_ && !anchorDuplicatesPrevPeak &&
+				    anchorClean_.w == w && anchorClean_.h == h &&
 				    anchorAgeFrames_ >= 1 && anchorAgeFrames_ <= maxAnchorAge)
 				{
 					const CellMotionField* ancMf = in.hasAnchorComposedMotion ? &in.anchorComposedMotion : nullptr;
@@ -1446,11 +1452,15 @@ namespace TdV2
 						if (x1 <= x0) continue;
 						const size_t cIdx = static_cast<size_t>(cy) * res.cellsW + cx;
 
-						// Barred from previous peak's drift audit (> 1.0 px): force anchor weight strictly 0.
-						if (cIdx < anchorBarredCells_.size() && anchorBarredCells_[cIdx] != 0u)
+						// Barred from previous peak's drift audit (> kAnchorDriftBarPx) or prior held-out failure
+						// awaiting next confirmed peak re-seed (UPG-HIGH-2): force anchor weight strictly 0.
+						if ((cIdx < anchorBarredCells_.size() && anchorBarredCells_[cIdx] != 0u) ||
+						    (cIdx < anchorReseedCells_.size() && anchorReseedCells_[cIdx] != 0u))
 						{
 							ancRef.motionGate.gateL[cIdx] = 0.0;
 							ancRef.motionGate.gateMH[cIdx] = 0.0;
+							if (cIdx < anchorReseedCells_.size() && anchorReseedCells_[cIdx] != 0u)
+								++res.anchoredCarryHeldOutRejectCells;
 							continue;
 						}
 						if (ancRef.motionGate.gateL[cIdx] <= 0.0 && ancRef.motionGate.gateMH[cIdx] <= 0.0)
@@ -1553,7 +1563,7 @@ namespace TdV2
 							continue;
 						const double drift = std::hypot(dvx, dvy);
 						cellDriftPx[ci] = static_cast<float>(drift);
-						if (drift > kHardFbOcclusionPx)
+						if (drift > kAnchorDriftBarPx)
 						{
 							nextSpanBarredCells[ci] = 1u;
 							++res.driftBarredCells;
@@ -1562,7 +1572,9 @@ namespace TdV2
 				}
 				else if (hasAnchor_ && anchorClean_.w == w && anchorClean_.h == h)
 				{
-					// Seeded local block search (+/- 2 px around composed trail + quadratic sub-pixel peak) with visible tag.
+					// Seeded local block search (+/- 2 px around exact floating-point composed trail + quadratic sub-pixel peak)
+					// with visible tag. Samples anchorClean_ bilinearly at exact (x + baseVx + dx, y + baseVy + dy) so sub-pixel
+					// composed bias (e.g. 8 * 0.05 = 0.40 px) is NEVER erased by integer rounding (UPG-HIGH-2).
 					res.driftReducedSearchUsed = true;
 					if (standIns != nullptr)
 						standIns->Engage(StandInKind::LongPairDrift, "drift: reduced (seeded local block search around composed trail)");
@@ -1596,13 +1608,25 @@ namespace TdV2
 									size_t cnt = 0;
 									for (int y = y0; y < y1; y += 2)
 									{
-										const int ry = static_cast<int>(std::lround(static_cast<double>(y) + baseVy)) + dy;
-										if (ry < active.y0 || ry >= active.y1) continue;
+										const double sy = static_cast<double>(y) + baseVy + static_cast<double>(dy);
+										if (sy < static_cast<double>(active.y0) || sy > static_cast<double>(active.y1 - 1)) continue;
+										const int iy0 = static_cast<int>(std::floor(sy));
+										const int iy1 = (std::min)(active.y1 - 1, iy0 + 1);
+										const double fy = sy - static_cast<double>(iy0);
 										for (int x = x0; x < x1; x += 2)
 										{
-											const int rx = static_cast<int>(std::lround(static_cast<double>(x) + baseVx)) + dx;
-											if (rx < active.x0 || rx >= active.x1) continue;
-											sad += std::fabs(curClean.at(x, y) - anchorClean_.at(rx, ry));
+											const double sx = static_cast<double>(x) + baseVx + static_cast<double>(dx);
+											if (sx < static_cast<double>(active.x0) || sx > static_cast<double>(active.x1 - 1)) continue;
+											const int ix0 = static_cast<int>(std::floor(sx));
+											const int ix1 = (std::min)(active.x1 - 1, ix0 + 1);
+											const double fx = sx - static_cast<double>(ix0);
+											const double a00 = anchorClean_.at(ix0, iy0);
+											const double a10 = anchorClean_.at(ix1, iy0);
+											const double a01 = anchorClean_.at(ix0, iy1);
+											const double a11 = anchorClean_.at(ix1, iy1);
+											const double aVal = (1.0 - fy) * ((1.0 - fx) * a00 + fx * a10) +
+											                    fy * ((1.0 - fx) * a01 + fx * a11);
+											sad += std::fabs(curClean.at(x, y) - aVal);
 											++cnt;
 										}
 									}
@@ -1638,7 +1662,7 @@ namespace TdV2
 							}
 							const double drift = std::hypot(subDx, subDy);
 							cellDriftPx[ci] = static_cast<float>(drift);
-							if (drift > kHardFbOcclusionPx)
+							if (drift > kAnchorDriftBarPx)
 							{
 								nextSpanBarredCells[ci] = 1u;
 								++res.driftBarredCells;
@@ -2057,19 +2081,33 @@ namespace TdV2
 				}
 			}
 
-			// ---- TD-U4 (Owner D4(b)): Optional 2-Frame Same-Role Statistics-Only Pooling (DEFAULT OFF) ----
-			// Pools ONLY cell statistics (C, c_raw - NEVER pixels or weights!) across at most 2 recent frames of the same role.
-			// Resets cleanly on cut, fade, resolution change, or ref-count mismatch; stores UNMERGED current stats so history
-			// NEVER chains recursively beyond 2 frames!
+			// ---- TD-U4 (Owner D4(b) / UPG-BLKR-1 / UPG-MED-2): Optional 2-Frame Same-Role Statistics-Only Pooling (DEFAULT OFF) ----
+			// Pools ONLY cell statistics (C, c_raw - NEVER pixels or weights!) across at most 2 recent frames of the same role:
+			//   Peak -> 0, Reference -> 1, NonReference -> 2; skips Unknown & ExactCopy (-1) so pulldown repeats never poison stats!
+			// Requires matching RefRole per slot, source-seconds age <= kA2eHistoryHorizonSec, and low inter-frame cell motion
+			// (|v| < 0.5 * cellPx) so fast-moving cells never mix unrelated spatial content.
+			const double frameHz = (std::isfinite(cfg_.sourceHz) && cfg_.sourceHz > 0.0) ? cfg_.sourceHz : kDefaultSourceHz;
+			elapsedSec_ += (1.0 / frameHz);
+			auto roleToPoolIdx = [](QualityPattern::FrameRole r) -> int
+			{
+				switch (r)
+				{
+				case QualityPattern::FrameRole::Peak:         return 0;
+				case QualityPattern::FrameRole::Reference:    return 1;
+				case QualityPattern::FrameRole::NonReference: return 2;
+				case QualityPattern::FrameRole::Unknown:
+				case QualityPattern::FrameRole::ExactCopy:
+				default:                                      return -1;
+				}
+			};
+			const int roleIdx = roleToPoolIdx(in.frameRole);
 			if (effectiveCut || effFadeKeep < 1.0)
 			{
 				for (auto& slot : sameRoleStats_)
 					slot.Reset();
 			}
-			else if (cfg_.enableTwoFrameSameRoleStatsPool && in.frameRole != QualityPattern::FrameRole::Unknown)
+			else if (cfg_.enableTwoFrameSameRoleStatsPool && roleIdx >= 0)
 			{
-				const int roleIdx = (in.frameRole == QualityPattern::FrameRole::Peak) ? 0
-					: ((in.frameRole == QualityPattern::FrameRole::Mid) ? 1 : 2);
 				SameRoleStatsSlot& prevSlot = sameRoleStats_[static_cast<size_t>(roleIdx)];
 				// Capture unmerged snapshot of current frame's cell stats BEFORE merging with prevSlot.
 				SameRoleStatsSlot curSnapshot;
@@ -2077,6 +2115,9 @@ namespace TdV2
 				curSnapshot.cellsW = res.cellsW;
 				curSnapshot.cellsH = res.cellsH;
 				curSnapshot.refCount = K;
+				curSnapshot.timeSec = elapsedSec_;
+				for (int i = 0; i < K; ++i)
+					curSnapshot.refRoles[i] = refSpecs[static_cast<size_t>(i)].role;
 				for (int b = 0; b < 3; ++b)
 				{
 					curSnapshot.bands[b].resize(numCells);
@@ -2095,8 +2136,24 @@ namespace TdV2
 					}
 				}
 
-				if (prevSlot.valid && prevSlot.cellsW == res.cellsW && prevSlot.cellsH == res.cellsH && prevSlot.refCount == K)
+				bool rolesMatch = prevSlot.valid && prevSlot.cellsW == res.cellsW &&
+				                  prevSlot.cellsH == res.cellsH && prevSlot.refCount == K &&
+				                  (elapsedSec_ - prevSlot.timeSec) <= kA2eHistoryHorizonSec;
+				if (rolesMatch)
 				{
+					for (int i = 0; i < K; ++i)
+					{
+						if (prevSlot.refRoles[i] != refSpecs[static_cast<size_t>(i)].role)
+						{
+							rolesMatch = false;
+							break;
+						}
+					}
+				}
+
+				if (rolesMatch)
+				{
+					const double maxStaticSpeedPx = 0.5 * static_cast<double>(cellPx);
 					for (int b = 0; b < 3; ++b)
 					{
 						a2eSamples[b][0].clear();
@@ -2105,8 +2162,40 @@ namespace TdV2
 						{
 							CellBandMoments& cm = cellMoments[b][ci];
 							const SameRoleCellStat& pm = prevSlot.bands[b][ci];
-							if (cm.sampleCount == 0 || pm.sampleCount == 0)
+							// Gate 2-frame static-coordinate merge strictly to low-motion cells (|v| < 0.5 * cellPx).
+							bool lowMotionCell = true;
+							for (int i = 0; i < K; ++i)
+							{
+								if (ci < refs[i].motionVx.size() && ci < refs[i].motionVy.size())
+								{
+									const double spd = std::hypot(refs[i].motionVx[ci], refs[i].motionVy[ci]);
+									if (!std::isfinite(spd) || spd >= maxStaticSpeedPx)
+									{
+										lowMotionCell = false;
+										break;
+									}
+								}
+							}
+							if (cm.sampleCount == 0 || pm.sampleCount == 0 || !lowMotionCell)
+							{
+								// Still preserve current cell's A2e observation even when not merged.
+								if (cm.sampleCount > 0)
+								{
+									for (int k = 0; k < K; ++k)
+									{
+										if (cm.hasIndependentPartner[k] && !refs[k].isExactCopy && !isFocusVetoedBand(ci, b))
+										{
+											const double mGate = (b == 0) ? refs[k].motionGate.gateL[ci] : refs[k].motionGate.gateMH[ci];
+											if (mGate > 0.0 && std::isfinite(cm.cIvClipped[k]))
+											{
+												a2eSamples[b][cellActivityClass[ci]].push_back(cm.cIvClipped[k]);
+												break;
+											}
+										}
+									}
+								}
 								continue;
+							}
 							const double nCur = static_cast<double>(cm.sampleCount);
 							const double nPrev = static_cast<double>(pm.sampleCount);
 							const double nTot = nCur + nPrev;
@@ -2267,14 +2356,29 @@ namespace TdV2
 						double cVec[kMaxBlendRefs] = {};
 						for (int k = 0; k < K; ++k)
 						{
-							// A2 prior for ref k on band b (TD-U3 / H-1: exact bandTransfer[b], never filter-peak 1.0 amplification):
-							// - On unidentified transforms when A2e empirical prior is active and no explicit codec step was supplied,
-							//   use U_j(class) * cellStepScaleSq (Plan Phase 1 A2e) instead of 1-LSB default; otherwise use rounding-cell A2.
+							// A2 prior for ref k on band b (TD-U3 / H-1 / UPG-HIGH-5):
+							// - On unidentified transforms when A2e empirical prior is active and no explicit codec step was supplied:
+							//   * Single-ref (no independent A1 partner): use conservative class median U_j(class) * cellStepScaleSq.
+							//   * Multi-ref (independent A1 partner present): allow upper envelope (U_j + 3*tau) * cellStepScaleSq
+							//     so A3 = min(EB-shrunk cA1, cA2) repairs worst-5% damaged cells rather than clipping them to median!
 							const bool useA2ePrior = cfg_.enableA2eEmpiricalPrior && !in.transformIdentified8x8 &&
 							                         !in.hasStepPrior && res.empiricalOwnError.valid;
-							const double rawA2 = useA2ePrior
-								? (refs[k].isExactCopy ? 0.0 : res.empiricalOwnError.ForBandClass(b, actClass) * cellStepScaleSq)
-								: (EstimateC_A2(a2Stats, refs[k].isExactCopy) * cellStepScaleSq * bandTransfer[b]);
+							double rawA2 = 0.0;
+							if (useA2ePrior)
+							{
+								if (!refs[k].isExactCopy)
+								{
+									const double priorU = res.empiricalOwnError.ForBandClass(b, actClass);
+									const double upperEnvelope = cm.hasIndependentPartner[k]
+										? (priorU + std::sqrt(kHuberKneeSq * (std::max)(0.0, ebTauSq[b][actClass])))
+										: priorU;
+									rawA2 = upperEnvelope * cellStepScaleSq;
+								}
+							}
+							else
+							{
+								rawA2 = EstimateC_A2(a2Stats, refs[k].isExactCopy) * cellStepScaleSq * bandTransfer[b];
+							}
 							const double cA2 = (std::min)(rawA2, C[k][k]);
 
 							const double psdScale = in.psdShape.ForBand(b);
@@ -2482,6 +2586,15 @@ namespace TdV2
 
 			if (res.faceMaskedCells > 0 && standIns != nullptr)
 				standIns->Engage(StandInKind::FaceNonRigidMask);
+
+			// Plan 6.6 / CHR-HIGH-3: Export final post-gate luma cell weights & explicit RefRoles for chroma reuse_luma.
+			res.lumaActiveRefCount = K;
+			for (int k = 0; k < K; ++k)
+			{
+				res.lumaRefRoles[k] = refs[static_cast<size_t>(k)].role;
+				for (int b = 0; b < 3; ++b)
+					res.lumaCellWeights[b][k] = cellW[b][k];
+			}
 
 			// Per-pixel spatial-only interpolation (ZERO bleed across vetoed cell boundaries — HIGH-5),
 			// toggleable 3-sigma per-corner Huber taper (cfg_.enablePerCornerHuber), and honest statistical limit (TD-U3 / D3).
@@ -2940,6 +3053,8 @@ namespace TdV2
 			int cellsW = 0;
 			int cellsH = 0;
 			int refCount = 0;
+			double timeSec = 0.0;
+			RefRole refRoles[kMaxBlendRefs] = {};
 			std::array<std::vector<SameRoleCellStat>, 3> bands;
 			void Reset()
 			{
@@ -2947,6 +3062,9 @@ namespace TdV2
 				cellsW = 0;
 				cellsH = 0;
 				refCount = 0;
+				timeSec = 0.0;
+				for (int i = 0; i < kMaxBlendRefs; ++i)
+					refRoles[i] = RefRole::PrevPeak;
 				for (auto& v : bands)
 					v.clear();
 			}
@@ -2962,6 +3080,7 @@ namespace TdV2
 		std::vector<uint8_t> anchorReseedCells_;
 		bool hasLastSeq_ = false;
 		uint64_t lastSeq_ = 0;
+		double elapsedSec_ = 0.0;
 		A2ePriorHistory a2eHistory_;
 		std::array<SameRoleStatsSlot, 3> sameRoleStats_;
 	};

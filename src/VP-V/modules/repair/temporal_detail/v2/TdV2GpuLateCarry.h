@@ -79,9 +79,11 @@ int cx = min(TD_CW - 1, p.x / TD_CELL_PX);
 int cy = min(TD_CH - 1, p.y / TD_CELL_PX);
 vec2 mv = texelFetch(motion_vec, ivec2(cx, cy), 0).xy;
 vec2 mm = texelFetch(motion_meta, ivec2(cx, cy), 0).xy;
+int mCls = int(round(mm.x));
 float curC = texelFetch(cur_clean, p, 0).x;
 
-if (mm.y < 0.5 || td_is_bad(mv.x) || td_is_bad(mv.y) || td_is_bad(curC))
+// UPG-HIGH-3: Strictly zero delta on Overlay (3), DynamicTexture (2), invalid motion, or non-finite values!
+if (mm.y < 0.5 || mCls == 2 || mCls == 3 || td_is_bad(mv.x) || td_is_bad(mv.y) || td_is_bad(curC))
 {
     imageStore(out_delta, p, vec4(0.0));
     imageStore(next_delta, p, vec4(0.0));
@@ -137,15 +139,36 @@ float wClean = mix(mix(c00, c10, f.x), mix(c01, c11, f.x), f.y);
 
 float bound = u_pixel_bound_kappa * sqrt(max(0.0, u_step_total_var));
 float outD = 0.0;
+float nextBaseD = 0.0;
 float outV = 0.0;
-if (!td_is_bad(wDelta) && !td_is_bad(wClean) && abs(wClean - curC) <= bound)
+if (!td_is_bad(wDelta) && !td_is_bad(wClean))
 {
-    outD = clamp(wDelta * u_decay_scale, -bound, bound);
-    outV = 1.0;
+    // UPG-HIGH-3: Match CPU TdV2LateCarryController 1:1:
+    //   1) Store UN-DECAYED warped base delta in next_delta so hop 1 applies 2/3 and hop 2 applies 1/3 (NEVER 2/9!).
+    //   2) Opposite-sign rejection against desiredDir = wClean - curC.
+    //   3) Convex-hull clamp |scaled| <= |desiredDir|.
+    //   4) 3-sigma Huber pixel taper psi(r^2 / (9 * stepTotalVar)) + statistical kappa * sqrt(stepTotalVar) cap.
+    nextBaseD = wDelta;
+    float desiredDir = wClean - curC;
+    float scaled = wDelta * u_decay_scale;
+    if (scaled * desiredDir >= 0.0)
+    {
+        if (abs(scaled) > abs(desiredDir))
+            scaled = desiredDir;
+        if (u_step_total_var > 0.0)
+        {
+            float r2 = desiredDir * desiredDir;
+            float knee = 9.0 * u_step_total_var;
+            if (r2 > knee && r2 > TD_NUM_FLOOR)
+                scaled *= sqrt(knee / r2);
+        }
+        outD = clamp(scaled, -bound, bound);
+        outV = 1.0;
+    }
 }
 
 imageStore(out_delta, p, vec4(outD, 0.0, 0.0, 0.0));
-imageStore(next_delta, p, vec4(outD, 0.0, 0.0, 0.0));
+imageStore(next_delta, p, vec4(nextBaseD, 0.0, 0.0, 0.0));
 imageStore(next_clean, p, vec4(td_is_bad(wClean) ? curC : wClean, 0.0, 0.0, 0.0));
 imageStore(next_valid, p, vec4(outV, 0.0, 0.0, 0.0));
 )GLSL";
@@ -179,6 +202,59 @@ imageStore(next_valid, p, vec4(outV, 0.0, 0.0, 0.0));
 	{
 	public:
 		TdV2GpuLateCarryController() = default;
+		~TdV2GpuLateCarryController()
+		{
+			if (ownerGpu_ != nullptr)
+				Reset(ownerGpu_);
+		}
+		TdV2GpuLateCarryController(const TdV2GpuLateCarryController&) = delete;
+		TdV2GpuLateCarryController& operator=(const TdV2GpuLateCarryController&) = delete;
+
+		// Exact VRAM budgeting for persistent ping-pong carry buffers (UPG-HIGH-3: zero unbudgeted VRAM!).
+		static uint64_t EstimatedPersistentVramBytes(int w, int h, int cellPx = kCanonicalBlockPx)
+		{
+			if (w <= 0 || h <= 0)
+				return 0;
+			const int effCellPx = cellPx > 0 ? cellPx : kCanonicalBlockPx;
+			const uint64_t px = static_cast<uint64_t>(w) * static_cast<uint64_t>(h);
+			const uint64_t cw = static_cast<uint64_t>((w + effCellPx - 1) / effCellPx);
+			const uint64_t ch = static_cast<uint64_t>((h + effCellPx - 1) / effCellPx);
+			const uint64_t bR32 = VpSkeleton::BytesPerTexel(VpSkeleton::TexFormat::R32F);
+			const uint64_t bRGBA32 = VpSkeleton::BytesPerTexel(VpSkeleton::TexFormat::RGBA32F);
+			// 2 ping-pong slots x (deltaTex_ + cleanTex_ + validTex_) R32F + motVecTex_ + motMetaTex_ RGBA32F.
+			return 6u * px * bR32 + 2u * (cw * ch) * bRGBA32;
+		}
+
+		uint64_t AllocatedPersistentVramBytes() const
+		{
+			uint64_t total = 0;
+			for (pl_tex t : {
+				deltaTex_[0], deltaTex_[1], cleanTex_[0], cleanTex_[1],
+				validTex_[0], validTex_[1], motVecTex_, motMetaTex_ })
+			{
+				total += VpSkeleton::TexBytesOf(t);
+			}
+			return total;
+		}
+
+		static VpSkeleton::VramUser MakeVramUser(int w, int h, int cellPx = kCanonicalBlockPx)
+		{
+			VpSkeleton::VramUser u;
+			u.id = VpSkeleton::kUserTemporalDetail;
+			u.name = VpSkeleton::VramUserName(VpSkeleton::kUserTemporalDetail);
+			u.tier = VpSkeleton::Tier::T1;
+			u.shedOrder = 0;
+			u.lossless = false;
+			const uint64_t bytes = EstimatedPersistentVramBytes(w, h, cellPx);
+			u.levels.push_back(bytes);
+			u.levelText.push_back(nullptr);
+			if (bytes > 0)
+			{
+				u.levels.push_back(0);
+				u.levelText.push_back("late carry off (GPU memory shed)");
+			}
+			return u;
+		}
 
 		void Reset(pl_gpu gpu = nullptr)
 		{
@@ -188,14 +264,17 @@ imageStore(next_valid, p, vec4(outV, 0.0, 0.0, 0.0));
 			lateStreak_ = 0;
 			expired_ = false;
 			curSlot_ = 0;
-			if (gpu != nullptr)
+			hasPresentedSeq_ = false;
+			lastPresentedSeq_ = 0;
+			pl_gpu effGpu = (gpu != nullptr) ? gpu : ownerGpu_;
+			if (effGpu != nullptr)
 			{
 				for (pl_tex* t : {
 					&deltaTex_[0], &deltaTex_[1], &cleanTex_[0], &cleanTex_[1],
 					&validTex_[0], &validTex_[1], &motVecTex_, &motMetaTex_ })
 				{
 					if (*t != nullptr)
-						pl_tex_destroy(gpu, t);
+						pl_tex_destroy(effGpu, t);
 				}
 			}
 			else
@@ -209,6 +288,7 @@ imageStore(next_valid, p, vec4(outV, 0.0, 0.0, 0.0));
 				motVecTex_ = nullptr;
 				motMetaTex_ = nullptr;
 			}
+			ownerGpu_ = nullptr;
 		}
 
 		void OnCutOrReset(pl_gpu gpu = nullptr, StandInRegistry* standIns = nullptr)
@@ -265,6 +345,7 @@ imageStore(next_valid, p, vec4(outV, 0.0, 0.0, 0.0));
 			{
 				return false;
 			}
+			ownerGpu_ = gpu;
 
 			const int cw = (w + kCanonicalBlockPx - 1) / kCanonicalBlockPx;
 			const int ch = (h + kCanonicalBlockPx - 1) / kCanonicalBlockPx;
@@ -516,6 +597,7 @@ imageStore(next_valid, p, vec4(outV, 0.0, 0.0, 0.0));
 		uint64_t lateArrivalsDiscarded_ = 0;
 		std::string lastDiscardStatus_;
 
+		pl_gpu ownerGpu_ = nullptr;
 		pl_tex deltaTex_[2] = {};
 		pl_tex cleanTex_[2] = {};
 		pl_tex validTex_[2] = {};

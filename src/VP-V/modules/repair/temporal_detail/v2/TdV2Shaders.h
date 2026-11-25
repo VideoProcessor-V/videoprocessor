@@ -1548,6 +1548,7 @@ for (int stride = 128; stride > 0; stride >>= 1)
 
 float cellMeanCleanY = 0.0;
 float cellStdCleanY = 0.0;
+float cellMidVar = 0.0;
 #if TD_EDGE_AWARE_UPSAMPLE
 if (tid == 0)
 {
@@ -1578,6 +1579,7 @@ if (tid == 0)
         curF = (curEnergy > TD_NUM_FLOOR) ? (cM2 / (curEnergy + TD_NUM_FLOOR)) : 1.0;
         spatialDetailRms = sqrt(max(0.0, totCur.z * invC));
     }
+    cellMidVar = cM2;
 
     vec4 priorT = texelFetch(cell_prior, cell, 0);
     float rawSc = (u_cell_prior_has_step_scale > 0.5) ? priorT.z : 1.0;
@@ -1827,14 +1829,16 @@ for (int b = 0; b < 3; ++b)
             imageStore(cell_stats, ivec2(b * TD_CW + cell.x, cell.y), vec4(0.0));
             imageStore(cell_stats, ivec2(b * TD_CW + cell.x, TD_CH + cell.y), vec4(0.0));
             imageStore(cell_stats, ivec2(b * TD_CW + cell.x, 2 * TD_CH + cell.y),
-                       (b == 0) ? vec4(0.0, 0.0, cellMeanCleanY, cellStdCleanY) : vec4(0.0));
+                       (b == 0) ? vec4(0.0, 0.0, cellMeanCleanY, cellStdCleanY)
+                                : ((b == 1) ? vec4(0.0, 0.0, cellMidVar, 0.0) : vec4(0.0)));
         }
         else
         {
             imageStore(cell_stats, ivec2(b * TD_CW + cell.x, cell.y), vec4(ncCell, mu.x, mu.y, mu.z));
             imageStore(cell_stats, ivec2(b * TD_CW + cell.x, TD_CH + cell.y), td_sh_red4[0]);
             imageStore(cell_stats, ivec2(b * TD_CW + cell.x, 2 * TD_CH + cell.y),
-                       (b == 0) ? vec4(td_sh_red4b[0].xy, cellMeanCleanY, cellStdCleanY) : vec4(td_sh_red4b[0].xy, 0.0, 0.0));
+                       (b == 0) ? vec4(td_sh_red4b[0].xy, cellMeanCleanY, cellStdCleanY)
+                                : ((b == 1) ? vec4(td_sh_red4b[0].xy, cellMidVar, 0.0) : vec4(td_sh_red4b[0].xy, 0.0, 0.0)));
         }
     }
     memoryBarrierShared();
@@ -2055,8 +2059,8 @@ float td_select_blind_c(int estMode, float cA1, float cA2)
 }
 )GLSL";
 
-	// Split out solver header to stay strictly below MSVC's 16,380-byte raw string literal limit (C2026).
-	constexpr const char* kPass2SolverHeader = R"GLSL(
+	// Split solver header into Part1 + Part2 (CHR-LOW-2 / UPG-MED-1: stay well below MSVC C2026 16,380 B limit!).
+	constexpr const char* kPass2SolverHeaderPart1 = R"GLSL(
 bool td_cholesky_solve_3(float L[3][3], float rhs[3], int sz, out float outX[3])
 {
     outX[0] = 0.0; outX[1] = 0.0; outX[2] = 0.0;
@@ -2178,6 +2182,9 @@ int td_solve_convex(int K, float C[3][3], float cVec[3], int solverMode, out flo
     }
 
     // ActiveSetExact: symmetrize regularized A = 0.5*(C + C') + reg*I and verify full SPD via Cholesky.
+)GLSL";
+
+	constexpr const char* kPass2SolverHeaderPart2 = R"GLSL(
     float A[3][3];
     float Lf[3][3];
     for (int i = 0; i < 3; ++i)
@@ -2347,12 +2354,20 @@ int td_solve_convex(int K, float C[3][3], float cVec[3], int solverMode, out flo
 }
 )GLSL";
 
-	// ---- PASS 2-EB (TD-U4 / H-3): 1-Workgroup Cell-Grid Reduction for U_j(class) & Spread tau^2 ----
+	inline std::string BuildPass2SolverHeader()
+	{
+		return std::string(kPass2SolverHeaderPart1) + kPass2SolverHeaderPart2;
+	}
+
+	// ---- PASS 2-EB (TD-U4 / H-3 / UPG-HIGH-5): 1-Workgroup Robust Cell-Grid Reduction for U_j(class) & Spread tau^2 ----
 	// Dispatch: 1x1x1 workgroup of 16x16 threads (256 threads striding over cw*ch cells).
+	// Activity class uses grain-corrected (M + H) matching CPU TdV2ReferenceEngine.h:1898.
+	// Uses a 2-pass robust trimmed mean (rejecting outlier cells > mean + 1.5*std) so worst-5% spikes never distort U_j(class).
 	// Output: eb_prior_out (3 x 2 RGBA32F: (b, actClass) -> vec4(U_prior, tauSq, validFlag, cellCount)).
 	constexpr const char* kPass2EbPriorReduceHeader = R"GLSL(
 shared vec4 td_eb_acc[256];
 shared float td_eb_cnt[256];
+shared float td_eb_trim_cap;
 )GLSL";
 
 	constexpr const char* kPass2EbPriorReduce = R"GLSL(
@@ -2360,8 +2375,6 @@ int tid = int(gl_LocalInvocationID.y) * 16 + int(gl_LocalInvocationID.x);
 int K = int(round(u_k));
 int totalCells = TD_CW * TD_CH;
 
-// Accumulate per band b in {0,1,2} and activity class ac in {0,1}:
-//   .x = sum(cClip), .y = sum(cRaw), .z = sum(cRaw^2), .w = sum(seSq)
 float outU[6];
 float outTau[6];
 float outCnt[6];
@@ -2379,8 +2392,10 @@ for (int b = 0; b < 3; ++b)
     int bandPoolR = (b == 0) ? int(round(u_pool_r_l)) : ((b == 1) ? int(round(u_pool_r_m)) : int(round(u_pool_r_h)));
     for (int ac = 0; ac < 2; ++ac)
     {
+        // Pass 1: accumulate raw & clipped moments to compute mean, variance, tau^2, and 1.5-sigma robust trim ceiling.
         vec4 locAcc = vec4(0.0);
         float locCnt = 0.0;
+        float locClipSq = 0.0;
         for (int idx = tid; idx < totalCells; idx += 256)
         {
             int cx = idx % TD_CW;
@@ -2395,13 +2410,14 @@ for (int b = 0; b < 3; ++b)
                 continue;
 
             float retG = max(0.0, texelFetch(cell_prior, cell, 0).x);
+            float mVar = max(0.0, texelFetch(cell_stats, ivec2(TD_CW + cx, 2 * TD_CH + cy), 0).z);
             float hVar = fInfo.z * fInfo.z;
-            float cleanTexH = max(0.0, hVar - retG * TD_GAIN_FINE * u_psd_fine);
-            int cellAc = (cleanTexH > u_activity_tex_floor) ? 1 : 0;
+            float cleanTexMH = max(0.0, mVar - retG * TD_GAIN_MID * u_psd_mid) +
+                               max(0.0, hVar - retG * TD_GAIN_FINE * u_psd_fine);
+            int cellAc = (cleanTexMH > u_activity_tex_floor) ? 1 : 0;
             if (cellAc != ac)
                 continue;
 
-            // Pool cell_stats over bandPoolR (matching Pass 2B exactly).
             float nPool = 0.0;
             vec3 muPool = vec3(0.0);
             float s00 = 0.0, s01 = 0.0, s02 = 0.0, s11 = 0.0, s12 = 0.0, s22 = 0.0;
@@ -2462,6 +2478,8 @@ for (int b = 0; b < 3; ++b)
                 if (partner < 0) continue;
                 vec2 mg = texelFetch(motion_gate, ivec2(k * TD_CW + cx, cy), 0).xy;
                 float mGate = (b == 0) ? mg.x : mg.y;
+                if (k == int(round(u_anchor_ref_idx)) && texelFetch(anchor_barred, cell, 0).x > 0.5)
+                    mGate = 0.0;
                 if (!(mGate > 0.0)) continue;
                 float gTerm = retG * bGain * psdScale;
                 float cRaw = C[k][partner] - gTerm;
@@ -2471,6 +2489,7 @@ for (int b = 0; b < 3; ++b)
                 if (!td_is_bad(cRaw) && !td_is_bad(seSq))
                 {
                     locAcc += vec4(cClip, cRaw, cRaw * cRaw, seSq);
+                    locClipSq += cClip * cClip;
                     locCnt += 1.0;
                 }
                 break;
@@ -2491,26 +2510,113 @@ for (int b = 0; b < 3; ++b)
             memoryBarrierShared();
             barrier();
         }
+        float p1Cnt = td_eb_cnt[0];
+        vec4 p1Tot = td_eb_acc[0];
+
+        // Reduce sum(cClip^2) for robust upper trim ceiling (meanClip + 1.5*stdClip).
+        td_eb_cnt[tid] = locClipSq;
+        memoryBarrierShared();
+        barrier();
+        for (int s = 128; s > 0; s >>= 1)
+        {
+            if (tid < s) td_eb_cnt[tid] += td_eb_cnt[tid + s];
+            memoryBarrierShared();
+            barrier();
+        }
         if (tid == 0)
         {
-            float cnt = td_eb_cnt[0];
             int slot = b * 2 + ac;
-            outCnt[slot] = cnt;
-            if (cnt > 0.5)
+            outCnt[slot] = p1Cnt;
+            td_eb_trim_cap = 1e30;
+            if (p1Cnt > 0.5)
             {
-                vec4 tot = td_eb_acc[0];
-                outU[slot] = max(0.0, tot.x / cnt);
-                if (cnt > 1.5)
+                float meanClip = max(0.0, p1Tot.x / p1Cnt);
+                outU[slot] = meanClip;
+                float varClip = max(0.0, td_eb_cnt[0] / p1Cnt - meanClip * meanClip);
+                td_eb_trim_cap = meanClip + 1.5 * sqrt(varClip);
+                if (p1Cnt > 1.5)
                 {
-                    float meanRaw = tot.y / cnt;
-                    float varRaw = max(0.0, (tot.z - cnt * meanRaw * meanRaw) / (cnt - 1.0));
-                    float meanSe = tot.w / cnt;
+                    float meanRaw = p1Tot.y / p1Cnt;
+                    float varRaw = max(0.0, (p1Tot.z - p1Cnt * meanRaw * meanRaw) / (p1Cnt - 1.0));
+                    float meanSe = p1Tot.w / p1Cnt;
                     outTau[slot] = max(0.0, varRaw - meanSe);
                 }
             }
         }
         memoryBarrierShared();
         barrier();
+
+        // Pass 2: robust trimmed estimate of U_j(class) (excludes right-tail outlier cells above trim cap).
+        if (p1Cnt > 3.5)
+        {
+            float trimCap = td_eb_trim_cap;
+            float tSum = 0.0;
+            float tCnt = 0.0;
+            for (int idx = tid; idx < totalCells; idx += 256)
+            {
+                int cx = idx % TD_CW;
+                int cy = idx / TD_CW;
+                ivec2 cell = ivec2(cx, cy);
+                vec4 fInfo = texelFetch(cell_focus, cell, 0);
+                int fFlags = int(round(fInfo.x));
+                if (fInfo.w > 0.5 || ((fFlags & 1) != 0) || (((fFlags & 2) != 0) && (b >= 1 || u_bokeh_mode < 0.5)))
+                    continue;
+                float retG = max(0.0, texelFetch(cell_prior, cell, 0).x);
+                float mVar = max(0.0, texelFetch(cell_stats, ivec2(TD_CW + cx, 2 * TD_CH + cy), 0).z);
+                float hVar = fInfo.z * fInfo.z;
+                float cleanTexMH = max(0.0, mVar - retG * TD_GAIN_MID * u_psd_mid) +
+                                   max(0.0, hVar - retG * TD_GAIN_FINE * u_psd_fine);
+                if (((cleanTexMH > u_activity_tex_floor) ? 1 : 0) != ac)
+                    continue;
+                vec4 t0 = texelFetch(cell_stats, ivec2(b * TD_CW + cx, cy), 0);
+                if (t0.x <= 0.5) continue;
+                float invN = 1.0 / t0.x;
+                vec3 muc = t0.yzw;
+                vec4 t1 = texelFetch(cell_stats, ivec2(b * TD_CW + cx, TD_CH + cy), 0);
+                vec2 t2 = texelFetch(cell_stats, ivec2(b * TD_CW + cx, 2 * TD_CH + cy), 0).xy;
+                float C00 = max(0.0, t1.x * invN + muc.x * muc.x);
+                float C01 = t1.y * invN + muc.x * muc.y;
+                float C02 = t1.z * invN + muc.x * muc.z;
+                float C11 = max(0.0, t1.w * invN + muc.y * muc.y);
+                float C12 = t2.x * invN + muc.y * muc.z;
+                float C22 = max(0.0, t2.y * invN + muc.z * muc.z);
+                float Cmat[3][3];
+                Cmat[0][0] = C00; Cmat[0][1] = C01; Cmat[0][2] = C02;
+                Cmat[1][0] = C01; Cmat[1][1] = C11; Cmat[1][2] = C12;
+                Cmat[2][0] = C02; Cmat[2][1] = C12; Cmat[2][2] = C22;
+                for (int k = 0; k < K; ++k)
+                {
+                    if (td_is_exact_copy(k)) continue;
+                    int partner = td_find_independent_a1_partner(K, k);
+                    if (partner < 0) continue;
+                    vec2 mg = texelFetch(motion_gate, ivec2(k * TD_CW + cx, cy), 0).xy;
+                    float mGate2 = (b == 0) ? mg.x : mg.y;
+                    if (k == int(round(u_anchor_ref_idx)) && texelFetch(anchor_barred, cell, 0).x > 0.5)
+                        mGate2 = 0.0;
+                    if (!(mGate2 > 0.0)) continue;
+                    float cClip = clamp(Cmat[k][partner] - retG * bGain * psdScale, 0.0, max(0.0, min(Cmat[k][k], Cmat[partner][partner])));
+                    if (!td_is_bad(cClip) && cClip <= trimCap)
+                    {
+                        tSum += cClip;
+                        tCnt += 1.0;
+                    }
+                    break;
+                }
+            }
+            td_eb_acc[tid] = vec4(tSum, tCnt, 0.0, 0.0);
+            memoryBarrierShared();
+            barrier();
+            for (int s = 128; s > 0; s >>= 1)
+            {
+                if (tid < s) td_eb_acc[tid].xy += td_eb_acc[tid + s].xy;
+                memoryBarrierShared();
+                barrier();
+            }
+            if (tid == 0 && td_eb_acc[0].y > 0.5)
+                outU[b * 2 + ac] = max(0.0, td_eb_acc[0].x / td_eb_acc[0].y);
+            memoryBarrierShared();
+            barrier();
+        }
     }
 }
 
@@ -2539,7 +2645,24 @@ if (p.x >= 3 * TD_CW || p.y >= 3 * TD_CH)
 imageStore(dst_stats, p, texelFetch(src_stats, p, 0));
 )GLSL";
 
-	constexpr const char* kPass2MergeAndSolve = R"GLSL(
+	// Tiny 3*cw x ch cell-weights copy so Plan 6.6 chroma reuse_luma reads a lifetime-safe persistent texture (CHR-HIGH-3).
+	constexpr const char* kPass2CopyCellWeights = R"GLSL(
+ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+if (p.x >= 3 * TD_CW || p.y >= TD_CH)
+    return;
+imageStore(dst_weights, p, texelFetch(src_weights, p, 0));
+)GLSL";
+
+	// Tiny full-res R32F plane copy for single-resample anchored carry peak snapshots (UPG-BLKR-3).
+	constexpr const char* kPassCopyPlaneR32 = R"GLSL(
+ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+if (p.x >= TD_W || p.y >= TD_H)
+    return;
+imageStore(dst_plane, p, vec4(texelFetch(src_plane, p, 0).x, 0.0, 0.0, 0.0));
+)GLSL";
+
+	// Split kPass2MergeAndSolve into Part1 + Part2 (UPG-MED-1: stay well below MSVC C2026 16,380 B limit!).
+	constexpr const char* kPass2MergeAndSolvePart1 = R"GLSL(
 ivec2 cell = ivec2(gl_GlobalInvocationID.xy);
 if (cell.x >= TD_CW || cell.y >= TD_CH)
     return;
@@ -2667,9 +2790,24 @@ for (int b = 0; b < 3; ++b)
         }
     }
 
-    // Optional default-OFF 2-frame same-role statistics-only pooling (TD-U4 / Owner D4(b)):
-    // merges ONLY cell statistics from the previous same-role frame via exact Chan-Pebay merge (NEVER pixels or weights!).
-    if (mergePrevStats && nPool > 0.5)
+    // Optional default-OFF 2-frame same-role statistics-only pooling (TD-U4 / Owner D4(b) / UPG-MED-2):
+    // merges ONLY cell statistics from the previous same-role frame on low-motion cells (|v| < 0.5 * TD_CELL_PX).
+    bool lowMotionForMerge = mergePrevStats;
+    if (lowMotionForMerge)
+    {
+        float maxSpd = 0.5 * float(TD_CELL_PX);
+        for (int kk = 0; kk < K; ++kk)
+        {
+            int slot = clamp(td_p2b_motion_slot(kk), 0, 2);
+            vec2 mv = texelFetch(motion_vec, ivec2(slot * TD_CW + cell.x, cell.y), 0).xy;
+            if (td_is_bad(mv.x) || td_is_bad(mv.y) || length(mv) >= maxSpd)
+            {
+                lowMotionForMerge = false;
+                break;
+            }
+        }
+    }
+    if (lowMotionForMerge && nPool > 0.5)
     {
         for (int dy = -bandPoolR; dy <= bandPoolR; ++dy)
         {
@@ -2699,7 +2837,9 @@ for (int b = 0; b < 3; ++b)
             }
         }
     }
+)GLSL";
 
+	constexpr const char* kPass2MergeAndSolvePart2 = R"GLSL(
     vec4 wOut = vec4(0.0);
     vec4 diagOut = vec4(0.0);
 
@@ -2736,12 +2876,15 @@ for (int b = 0; b < 3; ++b)
                 refMv[kk] = texelFetch(motion_vec, ivec2(slot * TD_CW + cell.x, cell.y), 0).xy;
             }
         }
-        float cleanTexH = max(0.0, curHVar - cellRetGVar * TD_GAIN_FINE * u_psd_fine);
-        int cellAc = (cleanTexH > u_activity_tex_floor) ? 1 : 0;
+        float curMVar = max(0.0, texelFetch(cell_stats, ivec2(TD_CW + cell.x, 2 * TD_CH + cell.y), 0).z);
+        float cleanTexMH = max(0.0, curMVar - cellRetGVar * TD_GAIN_MID * u_psd_mid) +
+                           max(0.0, curHVar - cellRetGVar * TD_GAIN_FINE * u_psd_fine);
+        int cellAc = (cleanTexMH > u_activity_tex_floor) ? 1 : 0;
         vec4 ebInfo = texelFetch(eb_prior, ivec2(b, cellAc), 0);
         float ebPriorU = max(0.0, ebInfo.x);
         float ebTauSq = max(0.0, ebInfo.y);
         bool ebValid = (ebInfo.z > 0.5);
+        bool useA2ePrior = (u_use_a2e_prior > 0.5) && ebValid;
         float nEff = td_effective_samples_for_band(b, nPool);
 
         float cVec[3];
@@ -2749,13 +2892,26 @@ for (int b = 0; b < 3; ++b)
         for (int k = 0; k < K; ++k)
         {
             bool exactCopy = td_is_exact_copy(k);
-            float cA2 = (u_a2_valid > 0.5)
-                ? ((u_a2_sigma_sent + (exactCopy ? 0.0 : u_a2_sigma_zero)) * cellStepScaleSq * bGain)
-                : 0.0;
-            // Plan L81 physical upper bound: c_k in [0, C_{k,k}].
-            cA2 = min(cA2, C[k][k]);
-            float cA1 = cA2;
             int partner = td_find_independent_a1_partner(K, k);
+            // UPG-BLKR-4 & UPG-HIGH-5: When A2e empirical prior is active on transform-unknown streams without explicit step prior,
+            // use ebPriorU (with + 3*tau upper envelope when partner >= 0 so worst-5% damaged cells get repaired, and conservative
+            // class prior ebPriorU on one-sided K = 1 cells!). Never starve HEVC/AV1 GPU repair to 1-LSB!
+            float rawA2 = 0.0;
+            if (useA2ePrior)
+            {
+                if (!exactCopy)
+                {
+                    float upperEnv = (partner >= 0) ? (ebPriorU + 3.0 * sqrt(ebTauSq)) : ebPriorU;
+                    rawA2 = upperEnv * cellStepScaleSq;
+                }
+            }
+            else if (u_a2_valid > 0.5)
+            {
+                rawA2 = (u_a2_sigma_sent + (exactCopy ? 0.0 : u_a2_sigma_zero)) * cellStepScaleSq * bGain;
+            }
+            // Plan L81 physical upper bound: c_k in [0, C_{k,k}].
+            float cA2 = min(rawA2, C[k][k]);
+            float cA1 = cA2;
             if (partner >= 0)
             {
                 float subBias = useSubpixelH
@@ -2792,9 +2948,9 @@ for (int b = 0; b < 3; ++b)
             }
         }
 
-        // TD-U3 (H-1): Per-block own-error variance U_j(block) for the honest transform-unknown statistical limit.
+        // TD-U3 (H-1 / UPG-BLKR-4): Per-block own-error variance U_j(block) for the honest transform-unknown statistical limit.
         float blockOwnU = (u_a2_valid > 0.5) ? (u_a2_total_var * cellStepScaleSq * bGain) : 0.0;
-        if (u_use_empirical_u > 0.5)
+        if (u_use_empirical_u > 0.5 && ebValid)
         {
             float sumC = 0.0;
             float nC = 0.0;
@@ -2832,10 +2988,14 @@ for (int b = 0; b < 3; ++b)
             float bandWSum = 0.0;
             float wFinal[3];
             wFinal[0] = 0.0; wFinal[1] = 0.0; wFinal[2] = 0.0;
+            int ancRefIdx = int(round(u_anchor_ref_idx));
+            bool ancBarred = (ancRefIdx >= 0) && (texelFetch(cell_drift, cell, 0).y > 0.5);
             for (int k = 0; k < K; ++k)
             {
                 vec2 mg = texelFetch(motion_gate, ivec2(k * TD_CW + cell.x, cell.y), 0).xy;
                 float mGate = (b == 0) ? mg.x : mg.y;
+                if (k == ancRefIdx && ancBarred)
+                    mGate = 0.0;
                 wFinal[k] = solvedW[k] * mGate * focusGate;
                 bandWSum += wFinal[k];
             }
@@ -2931,6 +3091,8 @@ for (int b = 0; b < 3; ++b)
     imageStore(cell_weights, ivec2(b * TD_CW + cell.x, cell.y), bandW[b]);
 
 // Populate U19 TdMapsView 12 channels across 3 RGBA32F slices (plane p at y = p * TD_CH + cell.y).
+// UPG-BLKR-3: Write real measured kDrift from cell_drift texture into slice2.z (no longer hardcoded 0.0!).
+float measuredDriftPx = (u_has_cell_drift > 0.5) ? max(0.0, texelFetch(cell_drift, cell, 0).x) : 0.0;
 vec4 slice0 = vec4(
     (activeBandBits != 0) ? 1.0 : 0.0,
     clamp(cellWeightSumAll / 3.0, 0.0, 1.0),
@@ -2941,7 +3103,7 @@ vec4 slice1 = vec4(
     clamp(cellWeightSumAll / 3.0, 0.0, 1.0),
     sqrt(max(0.0, cellRetGVar)),
     sqrt(max(0.0, u_a2_total_var * cellStepScaleSq)));
-vec4 slice2 = vec4(1.0, 0.0, 0.0, float(activeBandBits));
+vec4 slice2 = vec4(1.0, 0.0, measuredDriftPx, float(activeBandBits));
 
 imageStore(td_maps, ivec2(cell.x, cell.y), slice0);
 imageStore(td_maps, ivec2(cell.x, TD_CH + cell.y), slice1);
@@ -2951,6 +3113,261 @@ imageStore(cell_diag_flags, cell, vec4(
     cellNonFinite ? 1.0 : 0.0,
     cellSingular ? 1.0 : 0.0,
     cellSingleRefA2 ? 1.0 : 0.0));
+)GLSL";
+
+	inline std::string BuildPass2MergeAndSolveBody()
+	{
+		return std::string(kPass2MergeAndSolvePart1) + kPass2MergeAndSolvePart2;
+	}
+
+	// ---- PASS 1-ANC (UPG-BLKR-3 / H-4): GPU Per-Cell Held-Out Structure Check on Anchored Carry ----
+	// Dispatch: TD_CW x TD_CH workgroups of 16x16 threads (1 WG per cell, strided for any TD_CELL_PX).
+	// Mirrors CPU TdV2ReferenceEngine.h held-out check:
+	//   - Checks persistent anchor_barred (drift > kAnchorDriftBarPx or prior held-out failure awaiting next peak).
+	//   - Computes mid-band NCC (invariant to detail loss) and coarse-band mean diff vs kappa * sqrt(U_L).
+	//   - Zeroes anchor ref motion_gate on failure and latches anchor_barred = 1.0 until next confirmed peak.
+	constexpr const char* kPassAnchorHeldOutHeader = R"GLSL(
+shared vec4 td_anc_s1[256];
+shared vec2 td_anc_s2[256];
+shared float td_anc_mu[4];
+)GLSL";
+
+	constexpr const char* kPassAnchorHeldOutCheck = R"GLSL(
+ivec2 cell = ivec2(gl_WorkGroupID.xy);
+if (cell.x >= TD_CW || cell.y >= TD_CH)
+    return;
+int lx = int(gl_LocalInvocationID.x);
+int ly = int(gl_LocalInvocationID.y);
+int tid = ly * 16 + lx;
+int ancIdx = int(round(u_anchor_ref_idx));
+int ax0 = int(round(u_ax0)), ay0 = int(round(u_ay0));
+int ax1 = int(round(u_ax1)), ay1 = int(round(u_ay1));
+ivec4 halfActive = ivec4(int(round(u_hax0)), int(round(u_hay0)), int(round(u_hax1)), int(round(u_hay1)));
+
+vec4 mgOrig = texelFetch(motion_gate_in, ivec2(ancIdx * TD_CW + cell.x, cell.y), 0);
+bool alreadyBarred = (texelFetch(anchor_barred_in, cell, 0).x > 0.5);
+bool activeCell = (!alreadyBarred) && (mgOrig.x > 0.0 || mgOrig.y > 0.0);
+
+vec4 loc1 = vec4(0.0); // (sumCurM, sumAncM, sumCurL, sumAncL)
+float locCnt = 0.0;
+if (activeCell)
+{
+    for (int dy = ly; dy < TD_CELL_PX; dy += 16)
+    {
+        int py = cell.y * TD_CELL_PX + dy;
+        if (py < ay0 || py >= ay1) continue;
+        for (int dx = lx; dx < TD_CELL_PX; dx += 16)
+        {
+            int px = cell.x * TD_CELL_PX + dx;
+            if (px < ax0 || px >= ax1) continue;
+            ivec2 p = ivec2(px, py);
+            uint pf = uint(round(texelFetch(ref_flags, p, 0).x * 65535.0));
+            if ((td_unpack_ref_flags(pf, ancIdx) & 1) == 0) continue;
+            vec3 cb = td_fetch_cur_band(p, halfActive);
+            vec3 ab = td_fetch_ref_band(ancIdx, p, halfActive);
+            loc1 += vec4(cb.y, ab.y, cb.x, ab.x);
+            locCnt += 1.0;
+        }
+    }
+}
+td_anc_s1[tid] = loc1;
+td_anc_s2[tid] = vec2(locCnt, 0.0);
+memoryBarrierShared();
+barrier();
+for (int s = 128; s > 0; s >>= 1)
+{
+    if (tid < s)
+    {
+        td_anc_s1[tid] += td_anc_s1[tid + s];
+        td_anc_s2[tid].x += td_anc_s2[tid + s].x;
+    }
+    memoryBarrierShared();
+    barrier();
+}
+if (tid == 0)
+{
+    float n = td_anc_s2[0].x;
+    float invN = (n > 0.5) ? (1.0 / n) : 0.0;
+    td_anc_mu[0] = td_anc_s1[0].x * invN;
+    td_anc_mu[1] = td_anc_s1[0].y * invN;
+    td_anc_mu[2] = td_anc_s1[0].z * invN;
+    td_anc_mu[3] = td_anc_s1[0].w * invN;
+}
+memoryBarrierShared();
+barrier();
+
+float totN = td_anc_s2[0].x;
+vec4 locCov = vec4(0.0); // (varCurM, varAncM, covM, 0)
+if (activeCell && totN > 0.5)
+{
+    float muCurM = td_anc_mu[0];
+    float muAncM = td_anc_mu[1];
+    for (int dy = ly; dy < TD_CELL_PX; dy += 16)
+    {
+        int py = cell.y * TD_CELL_PX + dy;
+        if (py < ay0 || py >= ay1) continue;
+        for (int dx = lx; dx < TD_CELL_PX; dx += 16)
+        {
+            int px = cell.x * TD_CELL_PX + dx;
+            if (px < ax0 || px >= ax1) continue;
+            ivec2 p = ivec2(px, py);
+            uint pf = uint(round(texelFetch(ref_flags, p, 0).x * 65535.0));
+            if ((td_unpack_ref_flags(pf, ancIdx) & 1) == 0) continue;
+            float dc = td_fetch_cur_band(p, halfActive).y - muCurM;
+            float da = td_fetch_ref_band(ancIdx, p, halfActive).y - muAncM;
+            locCov += vec4(dc * dc, da * da, dc * da, 0.0);
+        }
+    }
+}
+td_anc_s1[tid] = locCov;
+memoryBarrierShared();
+barrier();
+for (int s = 128; s > 0; s >>= 1)
+{
+    if (tid < s) td_anc_s1[tid] += td_anc_s1[tid + s];
+    memoryBarrierShared();
+    barrier();
+}
+
+if (tid == 0)
+{
+    if (alreadyBarred)
+    {
+        imageStore(anchor_barred_out, cell, vec4(1.0, 0.0, 0.0, 0.0));
+        return;
+    }
+    if (!activeCell)
+    {
+        imageStore(anchor_barred_out, cell, vec4(0.0));
+        return;
+    }
+    bool ok = (totN > 0.5);
+    if (ok)
+    {
+        float invN = 1.0 / totN;
+        float varCurM = td_anc_s1[0].x * invN;
+        float varAncM = td_anc_s1[0].y * invN;
+        float covM = td_anc_s1[0].z * invN;
+        if (varCurM > u_mid_noise_floor && varAncM > u_mid_noise_floor)
+        {
+            float ncc = covM / sqrt(varCurM * varAncM);
+            float nEffM = max(1.0, totN / (4.0 * 3.14159265358979323846 * 1.0 * 1.0));
+            float nccMin = min(0.5, 3.0 / sqrt(nEffM));
+            if (td_is_bad(ncc) || ncc < nccMin)
+                ok = false;
+        }
+        vec4 pt = texelFetch(cell_prior, cell, 0);
+        float sc = (u_cell_prior_has_step_scale > 0.5 && !td_is_bad(pt.z) && pt.z > 0.0)
+            ? clamp(pt.z, TD_STEP_SCALE_MIN, TD_STEP_SCALE_MAX) : 1.0;
+        float coarseVar = max(u_a2_total_var * sc * sc, u_base_quant_var) * TD_GAIN_LOW;
+        float coarseLimit = u_kappa * sqrt(max(0.0, coarseVar));
+        if (abs(td_anc_mu[3] - td_anc_mu[2]) > coarseLimit)
+            ok = false;
+    }
+    imageStore(anchor_barred_out, cell, vec4(ok ? 0.0 : 1.0, 0.0, 0.0, 0.0));
+}
+)GLSL";
+
+	// ---- PASS 1-DRIFT (UPG-BLKR-3 / UPG-HIGH-2): Real GPU kDrift Measurement & Bar Update ----
+	// Dispatch: ceil(TD_CW / 8) x ceil(TD_CH / 8), group 8x8.
+	// Mode 0 (u_drift_mode == 0): clear cell_drift to 0.0 (non-peak frames).
+	// Mode 1 (u_drift_mode == 1): direct peak-to-peak vs composed trail vector difference.
+	// Mode 2 (u_drift_mode == 2): seeded +/- 2 px bilinear sub-pixel search around exact float composed trail ("drift: reduced").
+	constexpr const char* kPassAnchorDriftAudit = R"GLSL(
+ivec2 cell = ivec2(gl_GlobalInvocationID.xy);
+if (cell.x >= TD_CW || cell.y >= TD_CH)
+    return;
+int mode = int(round(u_drift_mode));
+float curBarred = texelFetch(anchor_barred_in, cell, 0).x;
+if (mode == 0)
+{
+    imageStore(cell_drift_out, cell, vec4(0.0, curBarred, 0.0, 0.0));
+    return;
+}
+
+vec4 compMv = texelFetch(anchor_comp_mv, cell, 0);
+float drift = 0.0;
+bool valid = (compMv.z > 0.5) && !td_is_bad(compMv.x) && !td_is_bad(compMv.y);
+
+if (valid && mode == 1)
+{
+    vec4 dirMv = texelFetch(direct_p2p_mv, cell, 0);
+    if (dirMv.z > 0.5 && !td_is_bad(dirMv.x) && !td_is_bad(dirMv.y))
+        drift = length(dirMv.xy - compMv.xy);
+}
+else if (valid && mode == 2)
+{
+    int ax0 = int(round(u_ax0)), ay0 = int(round(u_ay0));
+    int ax1 = int(round(u_ax1)), ay1 = int(round(u_ay1));
+    int x0 = max(ax0, cell.x * TD_CELL_PX);
+    int y0 = max(ay0, cell.y * TD_CELL_PX);
+    int x1 = min(ax1, (cell.x + 1) * TD_CELL_PX);
+    int y1 = min(ay1, (cell.y + 1) * TD_CELL_PX);
+    float sadGrid[25];
+    int bestDx = 0, bestDy = 0;
+    float bestSad = 1e30;
+    for (int dy = -2; dy <= 2; ++dy)
+    {
+        for (int dx = -2; dx <= 2; ++dx)
+        {
+            float sad = 0.0;
+            float cnt = 0.0;
+            for (int y = y0; y < y1; y += 2)
+            {
+                float sy = float(y) + compMv.y + float(dy);
+                if (sy < float(ay0) || sy > float(ay1 - 1)) continue;
+                int iy0 = int(floor(sy));
+                int iy1 = min(ay1 - 1, iy0 + 1);
+                float fy = sy - float(iy0);
+                for (int x = x0; x < x1; x += 2)
+                {
+                    float sx = float(x) + compMv.x + float(dx);
+                    if (sx < float(ax0) || sx > float(ax1 - 1)) continue;
+                    int ix0 = int(floor(sx));
+                    int ix1 = min(ax1 - 1, ix0 + 1);
+                    float fx = sx - float(ix0);
+                    float a00 = texelFetch(anchor_clean, ivec2(ix0, iy0), 0).x;
+                    float a10 = texelFetch(anchor_clean, ivec2(ix1, iy0), 0).x;
+                    float a01 = texelFetch(anchor_clean, ivec2(ix0, iy1), 0).x;
+                    float a11 = texelFetch(anchor_clean, ivec2(ix1, iy1), 0).x;
+                    float aVal = mix(mix(a00, a10, fx), mix(a01, a11, fx), fy);
+                    float cVal = texelFetch(cur_clean, ivec2(x, y), 0).x;
+                    if (!td_is_bad(aVal) && !td_is_bad(cVal))
+                    {
+                        sad += abs(cVal - aVal);
+                        cnt += 1.0;
+                    }
+                }
+            }
+            float mSad = (cnt > 0.5) ? (sad / cnt) : 1e30;
+            sadGrid[(dy + 2) * 5 + (dx + 2)] = mSad;
+            if (mSad < bestSad) { bestSad = mSad; bestDx = dx; bestDy = dy; }
+        }
+    }
+    float subDx = float(bestDx), subDy = float(bestDy);
+    if (bestDx > -2 && bestDx < 2)
+    {
+        float cL = sadGrid[(bestDy + 2) * 5 + (bestDx + 1)];
+        float c0 = sadGrid[(bestDy + 2) * 5 + (bestDx + 2)];
+        float cR = sadGrid[(bestDy + 2) * 5 + (bestDx + 3)];
+        float den = cL - 2.0 * c0 + cR;
+        if (!td_is_bad(den) && den > TD_NUM_FLOOR)
+            subDx += clamp(0.5 * (cL - cR) / den, -0.5, 0.5);
+    }
+    if (bestDy > -2 && bestDy < 2)
+    {
+        float cU = sadGrid[(bestDy + 1) * 5 + (bestDx + 2)];
+        float c0 = sadGrid[(bestDy + 2) * 5 + (bestDx + 2)];
+        float cD = sadGrid[(bestDy + 3) * 5 + (bestDx + 2)];
+        float den = cU - 2.0 * c0 + cD;
+        if (!td_is_bad(den) && den > TD_NUM_FLOOR)
+            subDy += clamp(0.5 * (cU - cD) / den, -0.5, 0.5);
+    }
+    drift = length(vec2(subDx, subDy));
+}
+
+imageStore(cell_drift_out, cell, vec4(drift, curBarred, 0.0, 0.0));
+imageStore(anchor_barred_out, cell, vec4((drift > TD_ANCHOR_DRIFT_BAR_PX) ? 1.0 : 0.0, 0.0, 0.0, 0.0));
 )GLSL";
 
 	// ---- PASS 3A: Spatial-Only Weight Interpolation + 3-Sigma Huber Taper + Pixel-Domain Bound ----
@@ -4447,88 +4864,145 @@ int ax1 = int(round(u_ax1));
 int ay1 = int(round(u_ay1));
 bool hasPrev = (u_has_prev_bands > 0.5);
 float halfLsb = u_half_lsb;
+float minBandJump = u_min_band_jump;
+float maxBandJump = u_max_band_jump;
+
+bool isOverlayCell = hasPrev && (int(round(texelFetch(motion_meta, cell, 0).x)) == 3);
 
 float sCurM = 0.0, sCurH = 0.0, sPrvM = 0.0, sPrvH = 0.0;
 float sStair = 0.0, sStairCnt = 0.0, sCnt = 0.0;
 uint badFlag = 0u;
 
-int px = cell.x * TD_CELL_PX + lx;
-int py = cell.y * TD_CELL_PX + ly;
-if (lx < TD_CELL_PX && ly < TD_CELL_PX && px >= ax0 && px < ax1 && py >= ay0 && py < ay1)
+// UPG-HIGH-4: Stride across full TD_CELL_PX (never hardcoded 16x16!) for energy accumulation.
+int cellX0 = cell.x * TD_CELL_PX;
+int cellY0 = cell.y * TD_CELL_PX;
+int cellX1 = min(ax1, cellX0 + TD_CELL_PX);
+int cellY1 = min(ay1, cellY0 + TD_CELL_PX);
+for (int dy = ly; dy < TD_CELL_PX; dy += 16)
 {
-    ivec2 p = ivec2(px, py);
-    vec4 cb = texelFetch(cur_bands, p, 0);
-    float cv = texelFetch(cur_clean, p, 0).x;
-    if (td_is_bad(cb.y) || td_is_bad(cb.z) || td_is_bad(cv))
+    int py = cellY0 + dy;
+    if (py < ay0 || py >= cellY1) continue;
+    for (int dx = lx; dx < TD_CELL_PX; dx += 16)
     {
-        badFlag = 1u;
-    }
-    else
-    {
-        sCurM = cb.y * cb.y;
-        sCurH = cb.z * cb.z;
-        sCnt = 1.0;
+        int px = cellX0 + dx;
+        if (px < ax0 || px >= cellX1) continue;
+        ivec2 p = ivec2(px, py);
+        vec4 cb = texelFetch(cur_bands, p, 0);
+        float cv = texelFetch(cur_clean, p, 0).x;
+        if (td_is_bad(cb.y) || td_is_bad(cb.z) || td_is_bad(cv))
+        {
+            badFlag = 1u;
+            continue;
+        }
+        sCurM += cb.y * cb.y;
+        sCurH += cb.z * cb.z;
+        sCnt += 1.0;
         if (hasPrev)
         {
             vec4 pb = texelFetch(prev_bands, p, 0);
             if (!td_is_bad(pb.y) && !td_is_bad(pb.z))
             {
-                sPrvM = pb.y * pb.y;
-                sPrvH = pb.z * pb.z;
+                sPrvM += pb.y * pb.y;
+                sPrvH += pb.z * pb.z;
             }
             else
             {
                 badFlag = 1u;
             }
         }
-        // Grid-free horizontal plateau-to-plateau staircase jump (ZERO x % 8 / y % 8 checks).
-        if (px >= ax0 + 2 && px + 1 < ax1)
+    }
+}
+
+// UPG-HIGH-4: Exact 1:1 mirror of CPU TdV2NonBlockStepEstimator monotonic 3-px-plateau per-row & per-column
+// staircase check (excludes Overlay cells, 1-LSB native ramps, smooth gradients, upscaled frames, & single crisp edges!).
+if (!isOverlayCell && lx == 0)
+{
+    for (int dy = ly; dy < TD_CELL_PX; dy += 16)
+    {
+        int py = cellY0 + dy;
+        if (py < ay0 || py >= cellY1) continue;
+        int posCnt = 0, negCnt = 0;
+        float posSum = 0.0, posMin = maxBandJump, posMax = 0.0;
+        float negSum = 0.0, negMin = maxBandJump, negMax = 0.0;
+        for (int px = max(ax0, cellX0); px < cellX1; ++px)
         {
+            if (px < ax0 + 3 || px + 2 >= ax1) continue;
+            float vm3 = texelFetch(cur_clean, ivec2(px - 3, py), 0).x;
             float vm2 = texelFetch(cur_clean, ivec2(px - 2, py), 0).x;
             float vm1 = texelFetch(cur_clean, ivec2(px - 1, py), 0).x;
+            float v0  = texelFetch(cur_clean, ivec2(px, py), 0).x;
             float vp1 = texelFetch(cur_clean, ivec2(px + 1, py), 0).x;
-            if (!td_is_bad(vm2) && !td_is_bad(vm1) && !td_is_bad(vp1))
+            float vp2 = texelFetch(cur_clean, ivec2(px + 2, py), 0).x;
+            if (td_is_bad(vm3) || td_is_bad(vm2) || td_is_bad(vm1) || td_is_bad(v0) || td_is_bad(vp1) || td_is_bad(vp2))
+                continue;
+            if (!(abs(vm1 - vm2) <= halfLsb && abs(vm2 - vm3) <= halfLsb)) continue;
+            float sj = 0.0;
+            bool ok = false;
+            if (abs(vp1 - v0) <= halfLsb && abs(vp2 - vp1) <= halfLsb) { sj = v0 - vm1; ok = true; }
+            else if (px + 3 < ax1)
             {
-                if (abs(vm1 - vm2) <= halfLsb && abs(vp1 - cv) <= halfLsb)
+                float vp3 = texelFetch(cur_clean, ivec2(px + 3, py), 0).x;
+                if (!td_is_bad(vp3) && ((v0 - vm1) * (vp1 - v0) >= 0.0) &&
+                    abs(vp2 - vp1) <= halfLsb && abs(vp3 - vp2) <= halfLsb)
                 {
-                    float j = abs(cv - vm1);
-                    if (j > halfLsb) { sStair += j; sStairCnt += 1.0; }
-                }
-                else if (px + 2 < ax1)
-                {
-                    float vp2 = texelFetch(cur_clean, ivec2(px + 2, py), 0).x;
-                    if (!td_is_bad(vp2) && abs(vm1 - vm2) <= halfLsb && abs(vp2 - vp1) <= halfLsb)
-                    {
-                        float j2 = abs(vp1 - vm1);
-                        if (j2 > halfLsb) { sStair += j2; sStairCnt += 1.0; }
-                    }
+                    sj = vp1 - vm1; ok = true;
                 }
             }
+            if (!ok) continue;
+            float aj = abs(sj);
+            if (aj > minBandJump && aj <= maxBandJump)
+            {
+                if (sj > 0.0) { posCnt += 1; posSum += aj; posMin = min(posMin, aj); posMax = max(posMax, aj); }
+                else          { negCnt += 1; negSum += aj; negMin = min(negMin, aj); negMax = max(negMax, aj); }
+            }
         }
-        // Grid-free vertical plateau-to-plateau staircase jump.
-        if (py >= ay0 + 2 && py + 1 < ay1)
+        if (posCnt >= 2 && posMax <= 2.0 * posMin) { sStair += posSum; sStairCnt += float(posCnt); }
+        if (negCnt >= 2 && negMax <= 2.0 * negMin) { sStair += negSum; sStairCnt += float(negCnt); }
+    }
+}
+if (!isOverlayCell && ly == 0)
+{
+    for (int dx = lx; dx < TD_CELL_PX; dx += 16)
+    {
+        int px = cellX0 + dx;
+        if (px < ax0 || px >= cellX1) continue;
+        int posCnt = 0, negCnt = 0;
+        float posSum = 0.0, posMin = maxBandJump, posMax = 0.0;
+        float negSum = 0.0, negMin = maxBandJump, negMax = 0.0;
+        for (int py = max(ay0, cellY0); py < cellY1; ++py)
         {
+            if (py < ay0 + 3 || py + 2 >= ay1) continue;
+            float vm3 = texelFetch(cur_clean, ivec2(px, py - 3), 0).x;
             float vm2 = texelFetch(cur_clean, ivec2(px, py - 2), 0).x;
             float vm1 = texelFetch(cur_clean, ivec2(px, py - 1), 0).x;
+            float v0  = texelFetch(cur_clean, ivec2(px, py), 0).x;
             float vp1 = texelFetch(cur_clean, ivec2(px, py + 1), 0).x;
-            if (!td_is_bad(vm2) && !td_is_bad(vm1) && !td_is_bad(vp1))
+            float vp2 = texelFetch(cur_clean, ivec2(px, py + 2), 0).x;
+            if (td_is_bad(vm3) || td_is_bad(vm2) || td_is_bad(vm1) || td_is_bad(v0) || td_is_bad(vp1) || td_is_bad(vp2))
+                continue;
+            if (!(abs(vm1 - vm2) <= halfLsb && abs(vm2 - vm3) <= halfLsb)) continue;
+            float sj = 0.0;
+            bool ok = false;
+            if (abs(vp1 - v0) <= halfLsb && abs(vp2 - vp1) <= halfLsb) { sj = v0 - vm1; ok = true; }
+            else if (py + 3 < ay1)
             {
-                if (abs(vm1 - vm2) <= halfLsb && abs(vp1 - cv) <= halfLsb)
+                float vp3 = texelFetch(cur_clean, ivec2(px, py + 3), 0).x;
+                if (!td_is_bad(vp3) && ((v0 - vm1) * (vp1 - v0) >= 0.0) &&
+                    abs(vp2 - vp1) <= halfLsb && abs(vp3 - vp2) <= halfLsb)
                 {
-                    float j = abs(cv - vm1);
-                    if (j > halfLsb) { sStair += j; sStairCnt += 1.0; }
-                }
-                else if (py + 2 < ay1)
-                {
-                    float vp2 = texelFetch(cur_clean, ivec2(px, py + 2), 0).x;
-                    if (!td_is_bad(vp2) && abs(vm1 - vm2) <= halfLsb && abs(vp2 - vp1) <= halfLsb)
-                    {
-                        float j2 = abs(vp1 - vm1);
-                        if (j2 > halfLsb) { sStair += j2; sStairCnt += 1.0; }
-                    }
+                    sj = vp1 - vm1; ok = true;
                 }
             }
+            if (!ok) continue;
+            float aj = abs(sj);
+            if (aj > minBandJump && aj <= maxBandJump)
+            {
+                if (sj > 0.0) { posCnt += 1; posSum += aj; posMin = min(posMin, aj); posMax = max(posMax, aj); }
+                else          { negCnt += 1; negSum += aj; negMin = min(negMin, aj); negMax = max(negMax, aj); }
+            }
         }
+        if (posCnt >= 2 && posMax <= 2.0 * posMin) { sStair += posSum; sStairCnt += float(posCnt); }
+        if (negCnt >= 2 && negMax <= 2.0 * negMin) { sStair += negSum; sStairCnt += float(negCnt); }
     }
 }
 
@@ -4595,17 +5069,8 @@ if (tid == 0)
     }
     float cleanPrv = hasPrev ? (max(0.0, ePrvM - gM) + max(0.0, (ePrvH / betaHp) - gH)) : 0.0;
 
+    // Strictly monotonic staircase step estimate (zero bogus E_H/E_M band-ratio dzStep).
     float stepEst = (td_qe_stair_cnt[0] > 0.5) ? (td_qe_stair_sum[0] / td_qe_stair_cnt[0]) : 0.0;
-    if (eCurM > TD_MID_TEX_FLOOR && TD_GAIN_FINE > TD_NUM_FLOOR)
-    {
-        float expectedH = eCurM * TD_NATURAL_HM_RATIO;
-        if (expectedH > eCurH)
-        {
-            float missingVar = (expectedH - eCurH) / TD_GAIN_FINE;
-            float dzStep = TD_DEADZONE_STEP_SCALE * sqrt(missingVar);
-            stepEst = max(stepEst, dzStep);
-        }
-    }
 
     int flags = 0;
     if (cleanCur > TD_ACT_TEX_FLOOR)

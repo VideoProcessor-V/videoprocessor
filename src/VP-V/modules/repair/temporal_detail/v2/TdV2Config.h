@@ -36,6 +36,14 @@ namespace TdV2
 	// Standard cinema 23.976 Hz frame rate (24000 / 1001) used only as default rate when caller supplies no measured Hz.
 	constexpr double kDefaultSourceHz = 24000.0 / 1001.0;
 
+	// Hard forward/backward occlusion gate threshold in source pixels (refs/111 s6 / Fable M-3 / Plan 6.2):
+	// vector disagreement > 1.0 px hard-zeros blend weight (0.0); continuous confidence tapers below 1.0 px.
+	constexpr double kHardFbOcclusionPx = 1.0;
+
+	// Quarter-pel anchor trail drift bar in source pixels (P3r tracking precision floor = 1/4 px):
+	// catches sustained >= 0.05 px/frame composed-vector drift cleanly within one 8-frame GOP span.
+	constexpr double kAnchorDriftBarPx = 0.25;
+
 	// Top-level operating mode. Default is strictly Off.
 	enum class Mode : uint8_t
 	{

@@ -3227,7 +3227,7 @@ imageStore(out_coded_delta, p, vec4(0.0));
 				c2bHdr += Shaders::BuildFineTapHeader();
 				c2bHdr += Shaders::kCoreHelpers;
 				c2bHdr += Shaders::kPass2MergeSolveHeader;
-				c2bHdr += Shaders::kPass2SolverHeader;
+				c2bHdr += Shaders::BuildPass2SolverHeader();
 
 				float uSolverMode = (cfg_.solverMode == SolverMode::LegacyClipRescale) ? 1.0f : 0.0f;
 				float uPoolRL = static_cast<float>(cfg_.PoolRadiusForBand(0));

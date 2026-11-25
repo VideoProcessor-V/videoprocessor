@@ -385,6 +385,8 @@ namespace TdV2
 		int momentPoolRadiusCells = 1;
 		bool enableLongAnchor = true;
 		bool enableCarryForward = true;
+		bool enableAnchoredCarry = true;
+		bool preferChromaReuseLuma = false;  // UPG-MED-3: ReducedAnchor may reuse luma weights on chroma for GPU headroom
 		bool enableChroma = true;
 		bool tdActive = true;
 		bool preservesCellIntegrity = true;  // Invariant: STRICT/CELL integrity preserved at EVERY tier
@@ -403,6 +405,8 @@ namespace TdV2
 			s.momentPoolRadiusCells = 1; // 3x3 cells
 			s.enableLongAnchor = true;
 			s.enableCarryForward = true;
+			s.enableAnchoredCarry = true;
+			s.preferChromaReuseLuma = false;
 			s.enableChroma = true;
 			s.tdActive = true;
 			break;
@@ -410,6 +414,8 @@ namespace TdV2
 			s.momentPoolRadiusCells = 1; // 3x3 cells
 			s.enableLongAnchor = false;  // Drops long-reach I-anchor first
 			s.enableCarryForward = true;
+			s.enableAnchoredCarry = false;
+			s.preferChromaReuseLuma = true;
 			s.enableChroma = true;
 			s.tdActive = true;
 			break;
@@ -417,6 +423,8 @@ namespace TdV2
 			s.momentPoolRadiusCells = 0; // 1x1 cell
 			s.enableLongAnchor = false;
 			s.enableCarryForward = false;
+			s.enableAnchoredCarry = false;
+			s.preferChromaReuseLuma = true;
 			s.enableChroma = false;      // Luma-only local peaks
 			s.tdActive = true;
 			break;
@@ -424,6 +432,8 @@ namespace TdV2
 			s.momentPoolRadiusCells = 0;
 			s.enableLongAnchor = false;
 			s.enableCarryForward = false;
+			s.enableAnchoredCarry = false;
+			s.preferChromaReuseLuma = true;
 			s.enableChroma = false;
 			s.tdActive = false;
 			break;
@@ -439,6 +449,8 @@ namespace TdV2
 		cfg.momentPoolRadiusCells = (std::max)(0, (std::min)(cfg.momentPoolRadiusCells, spec.momentPoolRadiusCells));
 		cfg.enableLongAnchor = cfg.enableLongAnchor && spec.enableLongAnchor;
 		cfg.enableCarryForward = cfg.enableCarryForward && spec.enableCarryForward;
+		cfg.enableAnchoredCarry = cfg.enableAnchoredCarry && spec.enableAnchoredCarry;
+		cfg.chromaReuseLumaWeights = cfg.chromaReuseLumaWeights || spec.preferChromaReuseLuma;
 		// ResidualMode (STRICT vs CELL) is NEVER weakened or substituted with L3 clamp under GPU budget pressure.
 		if (!spec.tdActive)
 			cfg.mode = Mode::Off;
@@ -617,8 +629,9 @@ namespace TdV2
 		double deadZonePhi = kDeadZonePhiInter;    // Dead-zone offset phi in (0, 1)
 		int sourceBits = 10;                       // Source bit depth for pixel code-range POCS
 		int cellProjIterations = 2;                // <= 2 POCS steps
-		const TdV2Plane* codecModelPb = nullptr;   // Field B P_B prediction (null engages CodecModelPbStandIn visibly)
-		const TdV2Plane* referenceClean = nullptr; // Optional aligned reference clean plane for residual consistency & P_B stand-in
+		double pixelBoundKappa = kPixelBoundKappaDefault; // TD-U3 (Owner D3): statistical bound kappa in [1.0, 3.0]
+		const TdV2Plane* codecModelPb = nullptr;   // Field B P_B prediction (absent -> visible statistical bound fallback)
+		const TdV2Plane* referenceClean = nullptr; // Optional aligned reference clean plane for residual consistency only (NEVER fake P_B)
 	};
 
 	struct LateCarryDecision
@@ -897,51 +910,40 @@ namespace TdV2
 			                         !ctx->codecModelPb->Empty() &&
 			                         ctx->codecModelPb->w == curClean.w && ctx->codecModelPb->h == curClean.h);
 
-			auto isBlockRefGuideValid = [&](int bx, int by) -> bool
+			// TD-U3 / H-1 / UPG-HIGH-3: Only project 8x8 DCT STRICT/CELL when real encoder prediction codecModelPb is supplied!
+			// NEVER substitute warped *refGuide as fake P_B; absent P_B visibly falls back to statistical kappa * sqrt(U) bound.
+			const double effKappa = (ctx != nullptr) ? ClampPixelBoundKappa(ctx->pixelBoundKappa) : kPixelBoundKappaDefault;
+			const bool canRunTransform8x8 = hasInterior8x8 && hasValidPb;
+			if (hasInterior8x8 && !hasValidPb && standIns != nullptr)
 			{
-				if (refGuide == nullptr)
-					return false;
-				if (hasExplicitRef)
-					return true;
-				for (int j = 0; j < 8; ++j)
-				{
-					const size_t rowBase = static_cast<size_t>(by + j) * static_cast<size_t>(curClean.w);
-					for (int i = 0; i < 8; ++i)
-					{
-						const size_t pIdx = rowBase + static_cast<size_t>(bx + i);
-						if (pIdx >= prevCleanValidMask.size() || prevCleanValidMask[pIdx] == 0u)
-							return false;
-					}
-				}
-				return true;
-			};
-
-			const int numBlocksX = hasInterior8x8 ? ((bxEnd - bxStart) / 8) : 0;
-			const int numBlocksY = hasInterior8x8 ? ((byEnd - byStart) / 8) : 0;
+				standIns->Engage(StandInKind::CodecModelPbStandIn,
+					ctx->codecModelPb == nullptr
+						? "TdV2LateCarryController Field B P_B absent; using statistical pixel bound"
+						: "TdV2LateCarryController codecModelPb dimension mismatch; using statistical pixel bound");
+			}
+			const int numBlocksX = canRunTransform8x8 ? ((bxEnd - bxStart) / 8) : 0;
+			const int numBlocksY = canRunTransform8x8 ? ((byEnd - byStart) / 8) : 0;
 			std::vector<uint8_t> blockProjectable(
 				static_cast<size_t>(numBlocksX) * static_cast<size_t>(numBlocksY), 0u);
 			bool anyProjectableBlock = false;
-			if (hasInterior8x8)
+			if (canRunTransform8x8)
 			{
 				for (int by = byStart; by < byEnd; by += 8)
 				{
 					const int bRow = (by - byStart) / 8;
 					for (int bx = bxStart; bx < bxEnd; bx += 8)
 					{
-						if (hasValidPb || isBlockRefGuideValid(bx, by))
-						{
-							const int bCol = (bx - bxStart) / 8;
-							blockProjectable[static_cast<size_t>(bRow) * static_cast<size_t>(numBlocksX) +
-							                 static_cast<size_t>(bCol)] = 1u;
-							anyProjectableBlock = true;
-						}
+						const int bCol = (bx - bxStart) / 8;
+						blockProjectable[static_cast<size_t>(bRow) * static_cast<size_t>(numBlocksX) +
+						                 static_cast<size_t>(bCol)] = 1u;
+						anyProjectableBlock = true;
 					}
 				}
 			}
 
 			auto canProjectBlock = [&](int bx, int by) -> bool
 			{
-				if (!hasInterior8x8 || bx < bxStart || bx + 8 > bxEnd || by < byStart || by + 8 > byEnd)
+				if (!canRunTransform8x8 || bx < bxStart || bx + 8 > bxEnd || by < byStart || by + 8 > byEnd)
 					return false;
 				const int bCol = (bx - bxStart) / 8;
 				const int bRow = (by - byStart) / 8;
@@ -1024,7 +1026,7 @@ namespace TdV2
 						}
 					}
 
-					const bool inFull8x8 = hasInterior8x8 && (x >= bxStart) && (x < bxEnd) &&
+					const bool inFull8x8 = canRunTransform8x8 && (x >= bxStart) && (x < bxEnd) &&
 					                       (y >= byStart) && (y < byEnd) &&
 					                       canProjectBlock((x / 8) * 8, (y / 8) * 8);
 					if (inFull8x8)
@@ -1033,26 +1035,17 @@ namespace TdV2
 					}
 					else
 					{
-						// Bound each non-zero carried pixel via current frame's quantization cell bound without flooding StandInRegistry per pixel.
-						dec.delta.at(x, y) = ApplyTransformUnknownBound(scaled, stepTotalVar, nullptr);
+						// Bound each non-zero carried pixel via current frame's quantization cell bound honoring effKappa (TD-U3).
+						dec.delta.at(x, y) = ApplyTransformUnknownBound(scaled, stepTotalVar, nullptr, effKappa);
 						anyPixelBounded = true;
 					}
 				}
 			}
 
-			// Transform-identified 8x8 DCT STRICT/CELL projection on carried delta when active (Q7a & H14).
-			// Only run on blocks with a valid prediction (codecModelPb or fully valid refGuide); unprojectable blocks
-			// already fell cleanly into ApplyTransformUnknownBound above.
-			if (hasInterior8x8 && anyProjectableBlock)
+			// Transform-identified 8x8 DCT STRICT/CELL projection on carried delta strictly when real codecModelPb exists (Q7a & H-1).
+			if (canRunTransform8x8 && anyProjectableBlock)
 			{
-				const TdV2Plane& predClean = hasValidPb ? *ctx->codecModelPb : *refGuide;
-				if (!hasValidPb && standIns != nullptr)
-				{
-					standIns->Engage(StandInKind::CodecModelPbStandIn,
-						ctx->codecModelPb == nullptr
-							? "TdV2LateCarryController Field B P_B absent; using stand-in prediction"
-							: "TdV2LateCarryController codecModelPb dimension mismatch; using stand-in");
-				}
+				const TdV2Plane& predClean = *ctx->codecModelPb;
 				const double peakCode = PeakCodeForBits(ctx->sourceBits);
 				const int iters = (std::max)(1, (std::min)(2, ctx->cellProjIterations));
 				for (int it = 0; it < iters; ++it)

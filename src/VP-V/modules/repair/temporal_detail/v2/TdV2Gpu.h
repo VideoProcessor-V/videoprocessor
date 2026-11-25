@@ -154,6 +154,13 @@ namespace Gpu
 		double fadeKeep = 1.0;                   // Upstream U7 gradual retention keep in [0, 1] (default 1.0 = bit-identical; <=0 or NaN resets carry)
 		PsdShape psdShape;                       // Optional P10g grain PSD shape multipliers (default 1.0 white-noise identity)
 		QualityPattern::FrameRole frameRole = QualityPattern::FrameRole::Unknown; // Optional frame role for 2-frame same-role stats pooling
+
+		// TD-U5 / UPG-BLKR-3: Single-resample anchored carry & real GPU kDrift audit inputs (default inert when enableAnchoredCarry == false).
+		bool isConfirmedPeak = false;
+		bool hasAnchorComposedMotion = false;
+		CellMotionField anchorComposedMotion;
+		bool hasDirectPeakToPeakMotion = false;
+		CellMotionField directPeakToPeakMotion;
 	};
 
 	struct GpuFrameOutput
@@ -167,6 +174,7 @@ namespace Gpu
 		pl_tex diagFlagsTex = nullptr;           // Optional: cw x ch RGBA32F (storable)
 		pl_tex guardCellTex = nullptr;           // Optional: cw x ch RG32F (storable)
 		pl_tex warpDiagTex = nullptr;            // Optional: cw x ch RG32F (storable)
+		pl_tex lumaCellWeightsTex = nullptr;     // Optional (or populated from engine persistent copy): 3*cw x ch RGBA32F for Plan 6.6 chroma reuse_luma
 
 		// When true, reads back tiny cell-grid diagnostics to populate counters, tdMaps, and StandInRegistry.
 		// When false (zero-copy realtime render loop), performs ZERO GPU->CPU downloads!
@@ -189,6 +197,10 @@ namespace Gpu
 		size_t cellsLimited = 0;                 // M-9: live count of cells where statistical output limit engaged
 		bool carryUsed = false;
 		bool carryReset = false;
+		bool anchoredCarryUsed = false;          // UPG-BLKR-3: true when single-resample GPU anchored carry served this frame
+		bool driftReducedSearchUsed = false;     // UPG-BLKR-3: true when GPU seeded bilinear search measured kDrift
+		int lumaRefRoles[3] = { 0, 1, 2 };       // Plan 6.6 / CHR-HIGH-3: explicit refRole per luma weight slot (0=PrevPeak,1=NextPeak,2=Carry,3=PrevPeak2)
+		int lumaActiveRefCount = 0;
 		bool scratchShort = false;
 		bool usedExternalBandMemo = false;       // True when caller-supplied kBandMemo curLowBandTex skipped current-frame low-band blur
 		bool externalBandMemoRejected = false;   // True when non-null curLowBandTex failed dimension/format validation (visible fail-closed)
@@ -543,19 +555,35 @@ namespace Gpu
 			hasCarry_ = false;
 			carryW_ = 0;
 			carryH_ = 0;
+			hasAnchor_ = false;
+			anchorW_ = 0;
+			anchorH_ = 0;
+			anchorAgeFrames_ = 0;
+			ancBarSlot_ = 0;
 			hasLastSeq_ = false;
 			lastSeq_ = 0;
+			elapsedSec_ = 0.0;
+			a2eHistory_.Reset();
 			for (int r = 0; r < 3; ++r)
 			{
 				hasPrevRoleStats_[r] = false;
 				prevRoleStatsCw_[r] = 0;
 				prevRoleStatsCh_[r] = 0;
 				prevRoleStatsK_[r] = 0;
+				prevRoleStatsTimeSec_[r] = 0.0;
+				for (int j = 0; j < 3; ++j)
+					prevRoleStatsRoles_[r][j] = 0;
 				if (gpu != nullptr && prevRoleStatsTex_[r] != nullptr)
 					pl_tex_destroy(gpu, &prevRoleStatsTex_[r]);
 			}
-			if (gpu != nullptr && carryCleanTex_ != nullptr)
-				pl_tex_destroy(gpu, &carryCleanTex_);
+			if (gpu != nullptr)
+			{
+				for (pl_tex* t : { &carryCleanTex_, &anchorCleanTex_, &anchorBarredTex_[0], &anchorBarredTex_[1], &cellDriftTex_ })
+				{
+					if (*t != nullptr)
+						pl_tex_destroy(gpu, t);
+				}
+			}
 		}
 
 		void Release(pl_gpu gpu)
@@ -567,9 +595,11 @@ namespace Gpu
 				for (pl_tex* t : {
 					&inRecYTex_, &inCleanYTex_, &inRefCleanTex_, &inCodecModelPbTex_,
 					&inMotionVecTex_, &inMotionMetaTex_, &inCellPriorTex_, &inFaceMaskTex_,
+					&inAnchorCompMvTex_, &inDirectP2pMvTex_,
 					&outYTex_, &outCleanTex_, &outDeltaTex_, &outTdMapsTex_,
-					&outDiagFlagsTex_, &outGuardCellTex_, &outWarpDiagTex_,
+					&outDiagFlagsTex_, &outGuardCellTex_, &outWarpDiagTex_, &outLumaCellWeightsTex_,
 					&ebPriorTex_, &counterSummaryTex_, &prevRoleStatsTex_[0], &prevRoleStatsTex_[1], &prevRoleStatsTex_[2],
+					&anchorCleanTex_, &anchorBarredTex_[0], &anchorBarredTex_[1], &cellDriftTex_,
 					&chromaCodedDeltaTex_, &chromaDelivUvTex_, &chromaDelivRgbTex_,
 					&chromaOutUvTex_, &chromaOutRgbTex_, &chromaOutDeltaTex_ })
 				{
@@ -587,11 +617,12 @@ namespace Gpu
 					&privDeltaScratch_,
 					&privMotionGate_, &privCellWeights_, &privCellDiagC_, &privCellStats_, &privCellFocus_,
 					&ebPriorTex_, &counterSummaryTex_, &prevRoleStatsTex_[0], &prevRoleStatsTex_[1], &prevRoleStatsTex_[2],
-					&carryCleanTex_,
+					&carryCleanTex_, &anchorCleanTex_, &anchorBarredTex_[0], &anchorBarredTex_[1], &cellDriftTex_,
 					&inRecYTex_, &inCleanYTex_, &inRefCleanTex_, &inCodecModelPbTex_,
 					&inMotionVecTex_, &inMotionMetaTex_, &inCellPriorTex_, &inFaceMaskTex_,
+					&inAnchorCompMvTex_, &inDirectP2pMvTex_,
 					&outYTex_, &outCleanTex_, &outDeltaTex_, &outTdMapsTex_,
-					&outDiagFlagsTex_, &outGuardCellTex_, &outWarpDiagTex_,
+					&outDiagFlagsTex_, &outGuardCellTex_, &outWarpDiagTex_, &outLumaCellWeightsTex_,
 					&chromaCodedDeltaTex_, &chromaDelivUvTex_, &chromaDelivRgbTex_,
 					&chromaOutUvTex_, &chromaOutRgbTex_, &chromaOutDeltaTex_ })
 				{
@@ -690,7 +721,10 @@ namespace Gpu
 		static uint64_t EstimatedPersistentVramBytes(
 			int w, int h, int cellPx = kCanonicalBlockPx, Preset preset = Preset::Reference,
 			bool includeChroma = false, bool includeRealTimeInternalOutputs = false,
-			bool includeCpuStagingInputs = false)
+			bool includeCpuStagingInputs = false,
+			bool includeTwoFrameStatsPool = false,
+			bool includeAnchoredCarry = false,
+			bool includeLumaWeightsExport = false)
 		{
 			if (w <= 0 || h <= 0)
 				return 0;
@@ -708,16 +742,21 @@ namespace Gpu
 			uint64_t total = 0;
 			// Persistent carryCleanTex_ (1 x R32F)
 			total += 1u * px * bR32;
-			// All 8 cell-grid persistent IO/output textures:
-			//   inMotionVecTex_ (3*cells RGBA32F), inMotionMetaTex_ (3*cells RGBA32F: cls, valid, confidence, 0),
-			//   outTdMapsTex_ (3*cells RGBA32F), outDiagFlagsTex_ / inCellPriorTex_ (2 * cells RGBA32F),
-			//   outGuardCellTex_ / outWarpDiagTex_ (2 * cells RG32F),
-			//   inFaceMaskTex_ (cells R32F).
-			total += (3u * cells) * (2u * bRGBA32);
-			total += (3u * cells) * bRGBA32;
-			total += 2u * cells * bRGBA32;
-			total += 2u * cells * bRG32;
-			total += cells * bR32;
+			// Core persistent cell-grid IO/output textures + compact EB prior (3x2) & live counter summary (2x1) (UPG-MED-3):
+			total += (3u * cells) * (2u * bRGBA32); // inMotionVecTex_, inMotionMetaTex_
+			total += (3u * cells) * bRGBA32;        // outTdMapsTex_
+			total += 2u * cells * bRGBA32;          // outDiagFlagsTex_, inCellPriorTex_
+			total += 2u * cells * bRG32;            // outGuardCellTex_, outWarpDiagTex_
+			total += cells * bR32;                  // inFaceMaskTex_
+			total += 6u * bRGBA32;                  // ebPriorTex_ (3x2 RGBA32F = 96 B)
+			if (compact)
+				total += 2u * bRGBA32;              // counterSummaryTex_ (2x1 RGBA32F = 32 B in zero-copy mode)
+			if (includeLumaWeightsExport)
+				total += (3u * cells) * bRGBA32;    // outLumaCellWeightsTex_ (Plan 6.6)
+			if (includeAnchoredCarry)
+				total += 1u * px * bR32 + 2u * cells * bR32 + cells * bRG32 + 2u * cells * bRGBA32; // anchorClean_, anchorBarred_[2], cellDrift_, anchor/direct MV
+			if (includeTwoFrameStatsPool)
+				total += (3u * 9u * cells) * bRGBA32; // prevRoleStatsTex_[0..2] (UPG-MED-3)
 			// Reference preset (or CPU-staging ProcessFrame under RealTime) budgets all 6 full-res R32F staging/output
 			// textures (inRecYTex_, inCleanYTex_, inRefCleanTex_, inCodecModelPbTex_, outYTex_, outCleanTex_) +
 			// 1 full-res RG32F (outDeltaTex_). Zero-copy RealTime ProcessFrameGpu uses caller-supplied outputs unless
@@ -823,21 +862,28 @@ namespace Gpu
 			return u;
 		}
 
-		// Live allocated byte introspection over ALL 16 persistent luma pl_tex members (exact 1:1 match with Release(gpu)).
+		// Live allocated byte introspection over ALL persistent luma pl_tex members (UPG-MED-3: exact 1:1 match with Release(gpu)).
 		uint64_t AllocatedPersistentLumaVramBytes() const
 		{
 			uint64_t total = 0;
 			for (pl_tex t : {
-				carryCleanTex_,
+				carryCleanTex_, anchorCleanTex_, anchorBarredTex_[0], anchorBarredTex_[1], cellDriftTex_,
 				inRecYTex_, inCleanYTex_, inRefCleanTex_, inCodecModelPbTex_,
 				inMotionVecTex_, inMotionMetaTex_, inCellPriorTex_, inFaceMaskTex_,
+				inAnchorCompMvTex_, inDirectP2pMvTex_,
 				outYTex_, outCleanTex_, outDeltaTex_, outTdMapsTex_,
-				outDiagFlagsTex_, outGuardCellTex_, outWarpDiagTex_ })
+				outDiagFlagsTex_, outGuardCellTex_, outWarpDiagTex_, outLumaCellWeightsTex_,
+				ebPriorTex_, counterSummaryTex_, prevRoleStatsTex_[0], prevRoleStatsTex_[1], prevRoleStatsTex_[2] })
 			{
 				total += VpSkeleton::TexBytesOf(t);
 			}
 			return total;
 		}
+
+		// Plan 6.6 / CHR-HIGH-3: Accessors for persistent post-gate luma cell weights & explicit RefRole mapping.
+		pl_tex LastLumaCellWeightsTex() const { return outLumaCellWeightsTex_; }
+		int LastLumaActiveRefCount() const { return lastLumaActiveRefCount_; }
+		int LastLumaRefRole(int slot) const { return (slot >= 0 && slot < 3) ? lastLumaRefRoles_[slot] : -1; }
 
 		// Live allocated byte introspection over ALL 6 persistent chroma pl_tex members (exact 1:1 match with Release(gpu)).
 		uint64_t AllocatedPersistentChromaVramBytes() const
@@ -1172,6 +1218,15 @@ namespace Gpu
 				return preferred0;
 			};
 
+			int anchoredCarryRefIdx = -1;
+			const int maxAnchorAge = cfg_.maxAnchorAgeFrames > 0 ? cfg_.maxAnchorAgeFrames : kContractBackRefs;
+			if (hasAnchor_ && (anchorAgeFrames_ > maxAnchorAge || anchorW_ != w || anchorH_ != h))
+			{
+				hasAnchor_ = false;
+				anchorW_ = 0;
+				anchorH_ = 0;
+				anchorAgeFrames_ = 0;
+			}
 			if (!effectiveCut)
 			{
 				if (in.prevPeak.cleanTex != nullptr)
@@ -1193,7 +1248,21 @@ namespace Gpu
 						tryAddGpuRef(in.prevPeak2.cleanTex, false, p2Slot, 3, in.prevPeak2.motion, in.prevPeak2.isExactCopyOfCurrent, in.prevPeak2.cameraHomography);
 					}
 				}
-				if (cfg_.enableCarryForward && hasCarry_ && carryW_ == w && carryH_ == h)
+				// UPG-BLKR-3 + UPG-HIGH-1: Single-resample GPU anchored carry from last confirmed peak (NEVER self-instrument age<=1 == prevPeak!).
+				const bool anchorDuplicatesPrevPeak = (in.prevPeak.cleanTex != nullptr) && (anchorAgeFrames_ <= 1);
+				if (cfg_.enableAnchoredCarry && hasAnchor_ && !anchorDuplicatesPrevPeak &&
+				    anchorCleanTex_ != nullptr && anchorW_ == w && anchorH_ == h &&
+				    anchorAgeFrames_ >= 1 && anchorAgeFrames_ <= maxAnchorAge)
+				{
+					const int aSlot = hasPrepackedMotion ? 2 : pickUnusedSlot(2, 1, 0);
+					if (tryAddGpuRef(anchorCleanTex_, false, aSlot, 3, in.hasAnchorComposedMotion ? &in.anchorComposedMotion : nullptr, false))
+					{
+						anchoredCarryRefIdx = static_cast<int>(refSpecs.size()) - 1;
+						out.anchoredCarryUsed = true;
+						out.carryUsed = true;
+					}
+				}
+				else if (cfg_.enableCarryForward && hasCarry_ && carryW_ == w && carryH_ == h)
 				{
 					const int cSlot = hasPrepackedMotion ? 2 : pickUnusedSlot(2, 1, 0);
 					if (tryAddGpuRef(nullptr, true, cSlot, 2, in.hasCarryMotion ? &in.carryMotion : nullptr, false))
@@ -1311,6 +1380,39 @@ namespace Gpu
 				hasCarry_ = true;
 				carryW_ = w;
 				carryH_ = h;
+				if (in.isConfirmedPeak && cfg_.enableAnchoredCarry)
+				{
+					if (Detail::EnsureTex(gpu, anchorCleanTex_, w, h, fmtR32, true, true, false, false))
+					{
+						pl_shader_desc da[2] = {
+							VpvGpu::Sampled("src_plane", curCleanTex),
+							VpvGpu::Storage("dst_plane", anchorCleanTex_)
+						};
+						if (VpvGpu::Pass(dispatch, "td_v2_p0_anchor_seed",
+						                 Detail::StaticGeomDefines(w, h, out.cellsW, out.cellsH, cellPx),
+						                 Shaders::kPassCopyPlaneR32, da, 2, nullptr, 0,
+						                 Detail::GroupsFor(w, 16), Detail::GroupsFor(h, 16), 0, 16, 16))
+						{
+							++seedDispatches;
+							out.dispatchCount = seedDispatches;
+							lastDispatchCount_ = seedDispatches;
+							hasAnchor_ = true;
+							anchorW_ = w;
+							anchorH_ = h;
+							anchorAgeFrames_ = 1;
+							ancBarSlot_ = 0;
+							if (Detail::EnsureTex(gpu, anchorBarredTex_[0], out.cellsW, out.cellsH, fmtR32, true, true, true, false))
+							{
+								std::vector<float> zBar(numCells, 0.0f);
+								Detail::UploadFloats(gpu, anchorBarredTex_[0], zBar.data());
+							}
+						}
+					}
+				}
+				else if (hasAnchor_)
+				{
+					++anchorAgeFrames_;
+				}
 				hasLastSeq_ = true;
 				lastSeq_ = in.seq;
 				out.succeeded = true;
@@ -1379,10 +1481,17 @@ namespace Gpu
 			p.explicitDefocusedCells = in.explicitDefocusedCells;
 			p.faceMask = in.faceMask;
 			p.a2 = a2;
+			p.hasStepPrior = in.hasStepPrior;
 			p.psdShape = in.psdShape;
 			p.fadeKeep = effFadeKeep;
 			p.transformIdentified8x8 = in.transformIdentified8x8;
 			p.frameRole = in.frameRole;
+			p.isConfirmedPeak = in.isConfirmedPeak;
+			p.anchoredCarryRefIdx = anchoredCarryRefIdx;
+			p.hasAnchorComposedMotion = in.hasAnchorComposedMotion;
+			p.anchorComposedMotion = in.hasAnchorComposedMotion ? &in.anchorComposedMotion : nullptr;
+			p.hasDirectPeakToPeakMotion = in.hasDirectPeakToPeakMotion;
+			p.directPeakToPeakMotion = in.hasDirectPeakToPeakMotion ? &in.directPeakToPeakMotion : nullptr;
 			p.outYTex = out.outputYTex;
 			p.outCleanTex = out.outputCleanTex;
 			p.outDeltaTex = out.tdDeltaTex;
@@ -1390,6 +1499,7 @@ namespace Gpu
 			p.outDiagFlagsTex = out.diagFlagsTex;
 			p.outGuardCellTex = out.guardCellTex;
 			p.outWarpDiagTex = out.warpDiagTex;
+			p.outLumaCellWeightsTex = out.lumaCellWeightsTex;
 			p.readbackCellDiag = out.readbackCellDiagnostics;
 
 			CoreDispatchOutcome oc{};
@@ -1411,7 +1521,13 @@ namespace Gpu
 			out.singleRefA2Cells = oc.singleRefA2Cells;
 			out.borderBilinearPixels = oc.borderBilinearPixels;
 			out.cellsLimited = oc.cellsLimited;
+			out.driftReducedSearchUsed = oc.driftReducedSearchUsed;
 			out.usedExternalBandMemo = oc.usedExternalBandMemo;
+			out.lumaActiveRefCount = lastLumaActiveRefCount_;
+			for (int i = 0; i < 3; ++i)
+				out.lumaRefRoles[i] = lastLumaRefRoles_[i];
+			if (out.lumaCellWeightsTex == nullptr && outLumaCellWeightsTex_ != nullptr)
+				out.lumaCellWeightsTex = outLumaCellWeightsTex_;
 			if (out.readbackCellDiagnostics)
 				out.tdMaps = std::move(oc.tdMaps);
 			out.succeeded = true;
@@ -1581,14 +1697,14 @@ namespace Gpu
 			refSpecs.reserve(kMaxGpuRefs);
 
 			auto tryAddRefSpec = [&](const TdV2Plane* refClean, bool useCarry, int motionSlot, int refRole, const CellMotionField* mf, bool exactCopy,
-			                         const Homography3x3& camH = Homography3x3{}) -> bool
+			                         const Homography3x3& camH = Homography3x3{}, pl_tex explicitGpuTex = nullptr) -> bool
 			{
-				if (!useCarry)
+				if (!useCarry && explicitGpuTex == nullptr)
 				{
 					if (refClean == nullptr || refClean->Empty() || refClean->w != w || refClean->h != h)
 						return false;
 				}
-				else if (!hasCarry_ || carryW_ != w || carryH_ != h || carryCleanTex_ == nullptr)
+				else if (useCarry && (!hasCarry_ || carryW_ != w || carryH_ != h || carryCleanTex_ == nullptr))
 				{
 					return false;
 				}
@@ -1601,8 +1717,8 @@ namespace Gpu
 
 				ActiveRefSpec spec;
 				spec.cpuClean = refClean;
-				spec.gpuCleanTex = useCarry ? carryCleanTex_ : nullptr;
-				spec.useGpuCarry = useCarry;
+				spec.gpuCleanTex = useCarry ? carryCleanTex_ : explicitGpuTex;
+				spec.useGpuCarry = useCarry || (explicitGpuTex != nullptr);
 				spec.motionSlot = motionSlot;
 				spec.refRole = refRole;
 				spec.isExactCopy = exactCopy;
@@ -1647,6 +1763,15 @@ namespace Gpu
 				return preferred0;
 			};
 
+			int anchoredCarryRefIdx = -1;
+			const int maxAnchorAge = cfg_.maxAnchorAgeFrames > 0 ? cfg_.maxAnchorAgeFrames : kContractBackRefs;
+			if (hasAnchor_ && (anchorAgeFrames_ > maxAnchorAge || anchorW_ != w || anchorH_ != h))
+			{
+				hasAnchor_ = false;
+				anchorW_ = 0;
+				anchorH_ = 0;
+				anchorAgeFrames_ = 0;
+			}
 			if (!effectiveCut)
 			{
 				if (in.prevPeak.cleanPlane != nullptr)
@@ -1658,7 +1783,19 @@ namespace Gpu
 					const int p2Slot = pickUnusedSlot(1, 2, 0);
 					tryAddRefSpec(in.prevPeak2.cleanPlane, false, p2Slot, 3, in.prevPeak2.motion, in.prevPeak2.isExactCopyOfCurrent, in.prevPeak2.cameraHomography);
 				}
-				if (cfg_.enableCarryForward && hasCarry_ && carryW_ == w && carryH_ == h)
+				const bool anchorDuplicatesPrevPeak = (in.prevPeak.cleanPlane != nullptr) && (anchorAgeFrames_ <= 1);
+				if (cfg_.enableAnchoredCarry && hasAnchor_ && !anchorDuplicatesPrevPeak &&
+				    anchorCleanTex_ != nullptr && anchorW_ == w && anchorH_ == h &&
+				    anchorAgeFrames_ >= 1 && anchorAgeFrames_ <= maxAnchorAge)
+				{
+					const int aSlot = pickUnusedSlot(2, 1, 0);
+					if (tryAddRefSpec(nullptr, false, aSlot, 3, in.hasAnchorComposedMotion ? &in.anchorComposedMotion : nullptr, false, Homography3x3{}, anchorCleanTex_))
+					{
+						anchoredCarryRefIdx = static_cast<int>(refSpecs.size()) - 1;
+						res.carryUsed = true;
+					}
+				}
+				else if (cfg_.enableCarryForward && hasCarry_ && carryW_ == w && carryH_ == h)
 				{
 					const int cSlot = pickUnusedSlot(2, 1, 0);
 					if (tryAddRefSpec(nullptr, true, cSlot, 2, in.hasCarryMotion ? &in.carryMotion : nullptr, false))
@@ -1699,6 +1836,27 @@ namespace Gpu
 				hasCarry_ = true;
 				carryW_ = w;
 				carryH_ = h;
+				if (in.isConfirmedPeak && cfg_.enableAnchoredCarry)
+				{
+					if (Detail::EnsureTex(gpu, anchorCleanTex_, w, h, fmtR32, true, true, true, false) &&
+					    Detail::UploadPlaneR32F(gpu, anchorCleanTex_, curCleanPlane))
+					{
+						hasAnchor_ = true;
+						anchorW_ = w;
+						anchorH_ = h;
+						anchorAgeFrames_ = 1;
+						ancBarSlot_ = 0;
+						if (Detail::EnsureTex(gpu, anchorBarredTex_[0], res.cellsW, res.cellsH, fmtR32, true, true, true, false))
+						{
+							std::vector<float> zBar(numCells, 0.0f);
+							Detail::UploadFloats(gpu, anchorBarredTex_[0], zBar.data());
+						}
+					}
+				}
+				else if (hasAnchor_)
+				{
+					++anchorAgeFrames_;
+				}
 				hasLastSeq_ = true;
 				lastSeq_ = in.seq;
 				res.succeeded = true;
@@ -1735,6 +1893,27 @@ namespace Gpu
 				hasCarry_ = true;
 				carryW_ = w;
 				carryH_ = h;
+				if (in.isConfirmedPeak && cfg_.enableAnchoredCarry)
+				{
+					if (Detail::EnsureTex(gpu, anchorCleanTex_, w, h, fmtR32, true, true, true, false) &&
+					    Detail::UploadPlaneR32F(gpu, anchorCleanTex_, curCleanPlane))
+					{
+						hasAnchor_ = true;
+						anchorW_ = w;
+						anchorH_ = h;
+						anchorAgeFrames_ = 1;
+						ancBarSlot_ = 0;
+						if (Detail::EnsureTex(gpu, anchorBarredTex_[0], res.cellsW, res.cellsH, fmtR32, true, true, true, false))
+						{
+							std::vector<float> zBar(numCells, 0.0f);
+							Detail::UploadFloats(gpu, anchorBarredTex_[0], zBar.data());
+						}
+					}
+				}
+				else if (hasAnchor_)
+				{
+					++anchorAgeFrames_;
+				}
 				hasLastSeq_ = true;
 				lastSeq_ = in.seq;
 				res.succeeded = true;
@@ -1820,10 +1999,17 @@ namespace Gpu
 			p.faceMask = effFaceMask;
 			p.codecModelPbTex = codecModelPbTex;
 			p.a2 = a2;
+			p.hasStepPrior = in.hasStepPrior;
 			p.psdShape = in.psdShape;
 			p.fadeKeep = effFadeKeep;
 			p.transformIdentified8x8 = in.transformIdentified8x8;
 			p.frameRole = in.frameRole;
+			p.isConfirmedPeak = in.isConfirmedPeak;
+			p.anchoredCarryRefIdx = anchoredCarryRefIdx;
+			p.hasAnchorComposedMotion = in.hasAnchorComposedMotion;
+			p.anchorComposedMotion = in.hasAnchorComposedMotion ? &in.anchorComposedMotion : nullptr;
+			p.hasDirectPeakToPeakMotion = in.hasDirectPeakToPeakMotion;
+			p.directPeakToPeakMotion = in.hasDirectPeakToPeakMotion ? &in.directPeakToPeakMotion : nullptr;
 			p.outYTex = outYTex_;
 			p.outCleanTex = outCleanTex_;
 			p.outDeltaTex = outDeltaTex_;
@@ -2277,10 +2463,17 @@ namespace Gpu
 			const std::vector<uint8_t>* explicitDefocusedCells = nullptr;
 			const std::vector<uint8_t>* faceMask = nullptr;
 			Detail::ResolvedA2StepPrior a2{};
+			bool hasStepPrior = false;
 			PsdShape psdShape{};
 			double fadeKeep = 1.0;
 			bool transformIdentified8x8 = false;
 			QualityPattern::FrameRole frameRole = QualityPattern::FrameRole::Unknown;
+			bool isConfirmedPeak = false;
+			int anchoredCarryRefIdx = -1;
+			bool hasAnchorComposedMotion = false;
+			const CellMotionField* anchorComposedMotion = nullptr;
+			bool hasDirectPeakToPeakMotion = false;
+			const CellMotionField* directPeakToPeakMotion = nullptr;
 			pl_tex outYTex = nullptr;
 			pl_tex outCleanTex = nullptr;
 			pl_tex outDeltaTex = nullptr;
@@ -2288,6 +2481,7 @@ namespace Gpu
 			pl_tex outDiagFlagsTex = nullptr;
 			pl_tex outGuardCellTex = nullptr;
 			pl_tex outWarpDiagTex = nullptr;
+			pl_tex outLumaCellWeightsTex = nullptr;
 			bool readbackCellDiag = false;
 		};
 
@@ -2305,6 +2499,7 @@ namespace Gpu
 			bool carryReset = false;
 			bool scratchShort = false;
 			bool usedExternalBandMemo = false;
+			bool driftReducedSearchUsed = false;
 			std::vector<TdMapsView::Block> tdMaps;
 		};
 
@@ -2778,13 +2973,14 @@ namespace Gpu
 			const float uPixelBoundKappa = static_cast<float>(ClampPixelBoundKappa(cfg_.pixelBoundKappa));
 			const float uEnableJointBound = cfg_.enableJointCrossBandBound ? 1.0f : 0.0f;
 			const float uUseEmpiricalU = (cfg_.enableA2eEmpiricalPrior && !runDctPocs) ? 1.0f : 0.0f;
+			const float uUseA2ePrior = (cfg_.enableA2eEmpiricalPrior && !p.transformIdentified8x8 && !p.hasStepPrior) ? 1.0f : 0.0f;
 			const float uPocsIters = static_cast<float>((std::max)(1, (std::min)(2, cfg_.cellProjIterations)));
 			const float uResidualMode = (cfg_.residualMode == ResidualMode::Strict) ? 1.0f : 0.0f;
 			const float uPoolRL = static_cast<float>(cfg_.PoolRadiusForBand(0));
 			const float uPoolRM = static_cast<float>(cfg_.PoolRadiusForBand(1));
 			const float uPoolRH = static_cast<float>(cfg_.PoolRadiusForBand(2));
 			const float uEnableEbShrink = cfg_.enableEmpiricalBayesShrinkage ? 1.0f : 0.0f;
-			const float uActivityTexFloor = static_cast<float>(2.0 * gains.fine * baseQuantVar);
+			const float uActivityTexFloor = static_cast<float>(2.0 * (gains.mid + gains.fine) * baseQuantVar);
 			const float uEstimator = static_cast<float>(static_cast<int>(cfg_.estimator));
 			const float uRefMotionSlot0 = (K > 0) ? static_cast<float>(refSpecs[0].motionSlot) : 0.0f;
 			const float uRefMotionSlot1 = (K > 1) ? static_cast<float>(refSpecs[1].motionSlot) : 0.0f;
@@ -3121,6 +3317,165 @@ namespace Gpu
 			}
 			pl_tex finalRefFlagsTex = sc.refFlags[curFlagsSlot];
 
+			// ---- PASS 1-ANC & PASS 1-DRIFT (UPG-BLKR-3 / H-4 / UPG-HIGH-2): GPU Anchored Carry Held-Out & Real kDrift ----
+			bool hasCellDriftTex = false;
+			if (p.anchoredCarryRefIdx >= 0 || (p.isConfirmedPeak && p.hasAnchorComposedMotion && p.anchorComposedMotion != nullptr))
+			{
+				const bool barReady =
+					Detail::EnsureTex(gpu, anchorBarredTex_[0], cw, ch, fmtR32, true, true, true, false) &&
+					Detail::EnsureTex(gpu, anchorBarredTex_[1], cw, ch, fmtR32, true, true, true, false) &&
+					Detail::EnsureTex(gpu, cellDriftTex_, cw, ch, fmtRG32, true, true, false, false);
+				if (!barReady)
+				{
+					resetCarryIfActive();
+					return failCore("TdV2GpuEngine anchorBarred/cellDrift alloc failed", StandInKind::GpuDispatchFailed);
+				}
+
+				// 1) Per-cell held-out structure check on anchored carry BEFORE Pass 2B / Pass 2-EB.
+				if (p.anchoredCarryRefIdx >= 0 && p.anchoredCarryRefIdx < K)
+				{
+					const int srcBarSlot = ancBarSlot_;
+					const int dstBarSlot = 1 - srcBarSlot;
+					const float uAncIdx = static_cast<float>(p.anchoredCarryRefIdx);
+					const float uMidNoiseF = static_cast<float>(2.0 * gains.mid * baseQuantVar);
+					const float uBaseQuantF = static_cast<float>(baseQuantVar);
+					std::string ancHdr = staticGeom;
+					ancHdr += VpvGpu::DefineInt("TD_COMPACT_BANDS", compactBands ? 1 : 0);
+					ancHdr += VpvGpu::Define("TD_GAIN_LOW", gains.low);
+					ancHdr += VpvGpu::Define("TD_STEP_SCALE_MIN", kCellStepScaleMin);
+					ancHdr += VpvGpu::Define("TD_STEP_SCALE_MAX", maxAllowedStepScale);
+					ancHdr += Shaders::kCoreHelpers;
+					if (compactBands)
+						ancHdr += Shaders::kHalfBandSamplerHelper;
+					ancHdr += Shaders::kPassAnchorHeldOutHeader;
+
+					pl_shader_var van[14] = {
+						VpvGpu::Var("u_anchor_ref_idx", &uAncIdx),
+						VpvGpu::Var("u_ax0", &uAx0), VpvGpu::Var("u_ay0", &uAy0),
+						VpvGpu::Var("u_ax1", &uAx1), VpvGpu::Var("u_ay1", &uAy1),
+						VpvGpu::Var("u_hax0", &uHAx0), VpvGpu::Var("u_hay0", &uHAy0),
+						VpvGpu::Var("u_hax1", &uHAx1), VpvGpu::Var("u_hay1", &uHAy1),
+						VpvGpu::Var("u_mid_noise_floor", &uMidNoiseF),
+						VpvGpu::Var("u_base_quant_var", &uBaseQuantF),
+						VpvGpu::Var("u_a2_total_var", &uA2TotalVar),
+						VpvGpu::Var("u_kappa", &uPixelBoundKappa),
+						VpvGpu::Var("u_cell_prior_has_step_scale", &uCellPriorHasStepScale)
+					};
+					const size_t shAnc = (256u * 6u + 4u) * sizeof(float);
+					bool okAnc = false;
+					if (!compactBands)
+					{
+						pl_shader_desc dan[9] = {
+							VpvGpu::Sampled("cur_bands", sc.curBands),
+							VpvGpu::Sampled("ref_bands_0", sc.refBands[0]),
+							VpvGpu::Sampled("ref_bands_1", sc.refBands[1]),
+							VpvGpu::Sampled("ref_bands_2", sc.refBands[2]),
+							VpvGpu::Sampled("ref_flags", finalRefFlagsTex),
+							VpvGpu::Sampled("motion_gate_in", sc.motionGate),
+							VpvGpu::Sampled("anchor_barred_in", anchorBarredTex_[srcBarSlot]),
+							VpvGpu::Sampled("cell_prior", cellPriorTex),
+							VpvGpu::Storage("anchor_barred_out", anchorBarredTex_[dstBarSlot])
+						};
+						okAnc = runPass("td_v2_p1_anchor_heldout", ancHdr, Shaders::kPassAnchorHeldOutCheck,
+						                dan, 9, van, 14, cw, ch, 16, 16, shAnc);
+					}
+					else
+					{
+						pl_shader_desc dan[13] = {
+							VpvGpu::Sampled("cur_bands_mh", sc.curBandsMH),
+							VpvGpu::Sampled("cur_bands_ld3", sc.curBandsLD3),
+							VpvGpu::Sampled("ref_bands_mh_0", sc.refBandsMH[0]),
+							VpvGpu::Sampled("ref_bands_mh_1", sc.refBandsMH[1]),
+							VpvGpu::Sampled("ref_bands_mh_2", sc.refBandsMH[2]),
+							VpvGpu::Sampled("ref_bands_ld3_0", sc.refBandsLD3[0]),
+							VpvGpu::Sampled("ref_bands_ld3_1", sc.refBandsLD3[1]),
+							VpvGpu::Sampled("ref_bands_ld3_2", sc.refBandsLD3[2]),
+							VpvGpu::Sampled("ref_flags", finalRefFlagsTex),
+							VpvGpu::Sampled("motion_gate_in", sc.motionGate),
+							VpvGpu::Sampled("anchor_barred_in", anchorBarredTex_[srcBarSlot]),
+							VpvGpu::Sampled("cell_prior", cellPriorTex),
+							VpvGpu::Storage("anchor_barred_out", anchorBarredTex_[dstBarSlot])
+						};
+						okAnc = runPass("td_v2_p1_anchor_heldout", ancHdr, Shaders::kPassAnchorHeldOutCheck,
+						                dan, 13, van, 14, cw, ch, 16, 16, shAnc);
+					}
+					if (!okAnc)
+					{
+						resetCarryIfActive();
+						return failCore("td_v2_p1_anchor_heldout dispatch failed", StandInKind::GpuDispatchFailed);
+					}
+					ancBarSlot_ = dstBarSlot;
+				}
+
+				// 2) Real GPU kDrift measurement at confirmed peaks (direct or seeded +/- 2 px bilinear search) -> cellDriftTex_!
+				int driftMode = 0;
+				if (p.isConfirmedPeak && p.hasAnchorComposedMotion && p.anchorComposedMotion != nullptr &&
+				    p.anchorComposedMotion->IsWellFormed(cw, ch))
+				{
+					if (Detail::EnsureTex(gpu, inAnchorCompMvTex_, cw, ch, fmtRGBA32, true, false, true, false))
+					{
+						std::vector<float> cmv(numCells * 4u, 0.0f);
+						for (size_t i = 0; i < numCells; ++i)
+						{
+							cmv[i * 4u + 0u] = static_cast<float>(p.anchorComposedMotion->vx[i]);
+							cmv[i * 4u + 1u] = static_cast<float>(p.anchorComposedMotion->vy[i]);
+							cmv[i * 4u + 2u] = p.anchorComposedMotion->valid[i] ? 1.0f : 0.0f;
+						}
+						if (Detail::UploadFloats(gpu, inAnchorCompMvTex_, cmv.data()))
+						{
+							if (p.hasDirectPeakToPeakMotion && p.directPeakToPeakMotion != nullptr &&
+							    p.directPeakToPeakMotion->IsWellFormed(cw, ch) &&
+							    Detail::EnsureTex(gpu, inDirectP2pMvTex_, cw, ch, fmtRGBA32, true, false, true, false))
+							{
+								std::vector<float> dmv(numCells * 4u, 0.0f);
+								for (size_t i = 0; i < numCells; ++i)
+								{
+									dmv[i * 4u + 0u] = static_cast<float>(p.directPeakToPeakMotion->vx[i]);
+									dmv[i * 4u + 1u] = static_cast<float>(p.directPeakToPeakMotion->vy[i]);
+									dmv[i * 4u + 2u] = p.directPeakToPeakMotion->valid[i] ? 1.0f : 0.0f;
+								}
+								if (Detail::UploadFloats(gpu, inDirectP2pMvTex_, dmv.data()))
+									driftMode = 1;
+							}
+							else if (hasAnchor_ && anchorCleanTex_ != nullptr && anchorW_ == w && anchorH_ == h)
+							{
+								driftMode = 2;
+								oc.driftReducedSearchUsed = true;
+								if (standIns != nullptr)
+									standIns->Engage(StandInKind::LongPairDrift, "drift: reduced (GPU seeded bilinear search around composed trail)");
+							}
+						}
+					}
+				}
+				const int srcBarSlot = ancBarSlot_;
+				const int dstBarSlot = 1 - srcBarSlot;
+				const float uDriftMode = static_cast<float>(driftMode);
+				std::string drHdr = staticGeom + VpvGpu::Define("TD_ANCHOR_DRIFT_BAR_PX", kAnchorDriftBarPx) + Shaders::kCoreHelpers;
+				pl_shader_desc ddr[7] = {
+					VpvGpu::Sampled("anchor_comp_mv", inAnchorCompMvTex_ ? inAnchorCompMvTex_ : cellPriorTex),
+					VpvGpu::Sampled("direct_p2p_mv", inDirectP2pMvTex_ ? inDirectP2pMvTex_ : cellPriorTex),
+					VpvGpu::Sampled("cur_clean", p.curCleanTex),
+					VpvGpu::Sampled("anchor_clean", (anchorCleanTex_ != nullptr) ? anchorCleanTex_ : p.curCleanTex),
+					VpvGpu::Sampled("anchor_barred_in", anchorBarredTex_[srcBarSlot]),
+					VpvGpu::Storage("cell_drift_out", cellDriftTex_),
+					VpvGpu::Storage("anchor_barred_out", anchorBarredTex_[dstBarSlot])
+				};
+				pl_shader_var vdr[5] = {
+					VpvGpu::Var("u_drift_mode", &uDriftMode),
+					VpvGpu::Var("u_ax0", &uAx0), VpvGpu::Var("u_ay0", &uAy0),
+					VpvGpu::Var("u_ax1", &uAx1), VpvGpu::Var("u_ay1", &uAy1)
+				};
+				if (!runPass("td_v2_p1_anchor_drift", drHdr, Shaders::kPassAnchorDriftAudit,
+				             ddr, 7, vdr, 5, cellGx8, cellGy8, 8, 8))
+				{
+					resetCarryIfActive();
+					return failCore("td_v2_p1_anchor_drift dispatch failed", StandInKind::GpuDispatchFailed);
+				}
+				if (driftMode != 0)
+					ancBarSlot_ = dstBarSlot;
+				hasCellDriftTex = true;
+			}
+
 			// ---- PASS 2A (Speedup 2): Coalesced 16x16 LDS Cell-Moment Reduction + Fused Focus Guard ----
 			if (standIns != nullptr)
 				standIns->Engage(StandInKind::FocusMapK32);
@@ -3225,12 +3580,19 @@ namespace Gpu
 			const double midPassbandPeak = std::exp(-0.5 * s1Sq * wStarSq) - std::exp(-0.5 * s2Sq * wStarSq);
 			const double a2PeakMidSq = midPassbandPeak * midPassbandPeak;
 
-			// ---- PASS 2-EB (TD-U4 / H-3): 1-Workgroup Cell-Grid Reduction for U_j(class) & Spread tau^2 ----
-			if (!Detail::EnsureTex(gpu, ebPriorTex_, 3, 2, fmtRGBA32, true, true, false, false))
+			// ---- PASS 2-EB (TD-U4 / H-3 / UPG-BLKR-4 / UPG-HIGH-5): Robust U_j(class) & Spread tau^2 + A2ePriorHistory ----
+			// host_writable=true & host_readable=true on this tiny 3x2 (96-byte) texture guarantees:
+			//   1) ebPriorTex_ is ALWAYS initialized (zero-filled when disabled -> never uninitialized on legacy_1x1!).
+			//   2) GPU shares CPU's exact A2ePriorHistory (1-second rolling-median cap, cut/fade freeze, AND one-sided K=1 hold!).
+			if (!Detail::EnsureTex(gpu, ebPriorTex_, 3, 2, fmtRGBA32, true, true, true, true))
 			{
 				resetCarryIfActive();
 				return failCore("TdV2GpuEngine ebPriorTex alloc failed", StandInKind::GpuDispatchFailed);
 			}
+			const float uAnchorRefIdx = static_cast<float>(p.anchoredCarryRefIdx);
+			const float uHasCellDrift = hasCellDriftTex ? 1.0f : 0.0f;
+			pl_tex anchorBarredBind = hasCellDriftTex ? anchorBarredTex_[ancBarSlot_] : cellPriorTex;
+			pl_tex cellDriftBind = hasCellDriftTex ? cellDriftTex_ : cellPriorTex;
 			{
 				std::string p2bSharedHdr = staticGeom;
 				p2bSharedHdr += VpvGpu::Define("TD_GAIN_LOW", gains.low);
@@ -3250,17 +3612,20 @@ namespace Gpu
 				p2bSharedHdr += Shaders::kCoreHelpers;
 				p2bSharedHdr += Shaders::kPass2MergeSolveHeader;
 
-				if (cfg_.enableEmpiricalBayesShrinkage)
+				const bool needEbPrior = cfg_.enableEmpiricalBayesShrinkage || cfg_.enableA2eEmpiricalPrior;
+				float ebBuf[24] = {}; // 3 bands x 2 activity classes x 4 floats (U, tauSq, valid, cnt)
+				if (needEbPrior)
 				{
 					std::string ebHdr = p2bSharedHdr + Shaders::kPass2EbPriorReduceHeader;
-					pl_shader_desc deb[5] = {
+					pl_shader_desc deb[6] = {
 						VpvGpu::Sampled("cell_stats", sc.cellStats),
 						VpvGpu::Sampled("cell_focus", sc.cellFocus),
 						VpvGpu::Sampled("motion_gate", sc.motionGate),
 						VpvGpu::Sampled("cell_prior", cellPriorTex),
+						VpvGpu::Sampled("anchor_barred", anchorBarredBind),
 						VpvGpu::Storage("eb_prior_out", ebPriorTex_)
 					};
-					pl_shader_var veb[18] = {
+					pl_shader_var veb[19] = {
 						VpvGpu::Var("u_k", &uK),
 						VpvGpu::Var("u_pool_r_l", &uPoolRL),
 						VpvGpu::Var("u_pool_r_m", &uPoolRM),
@@ -3278,39 +3643,106 @@ namespace Gpu
 						VpvGpu::Var("u_psd_low", &uPsdLow),
 						VpvGpu::Var("u_psd_mid", &uPsdMid),
 						VpvGpu::Var("u_psd_fine", &uPsdFine),
-						VpvGpu::Var("u_activity_tex_floor", &uActivityTexFloor)
+						VpvGpu::Var("u_activity_tex_floor", &uActivityTexFloor),
+						VpvGpu::Var("u_anchor_ref_idx", &uAnchorRefIdx)
 					};
-					const size_t shmemEb = (256u * 5u) * sizeof(float);
-					if (!runPass("td_v2_p2_eb_prior", ebHdr, Shaders::kPass2EbPriorReduce, deb, 5, veb, 18, 1, 1, 16, 16, shmemEb))
+					const size_t shmemEb = (256u * 5u + 1u) * sizeof(float);
+					if (!runPass("td_v2_p2_eb_prior", ebHdr, Shaders::kPass2EbPriorReduce, deb, 6, veb, 19, 1, 1, 16, 16, shmemEb))
 					{
 						resetCarryIfActive();
 						return failCore("td_v2_p2_eb_prior dispatch failed", StandInKind::GpuDispatchFailed);
 					}
+					// Apply CPU-identical time-domain A2ePriorHistory rolling-median cap, fade freeze, & one-sided K=1 hold (96 bytes!).
+					EmpiricalOwnErrorPrior rawA2e;
+					if (Detail::DownloadFloats(gpu, ebPriorTex_, ebBuf))
+					{
+						bool anyV = false;
+						for (int ac = 0; ac < 2; ++ac)
+						{
+							for (int b = 0; b < 3; ++b)
+							{
+								const size_t idx = (static_cast<size_t>(ac) * 3u + static_cast<size_t>(b)) * 4u;
+								const float uVal = ebBuf[idx + 0u];
+								const float vFlag = ebBuf[idx + 2u];
+								const float cVal = ebBuf[idx + 3u];
+								if (vFlag > 0.5f && std::isfinite(uVal) && uVal >= 0.0f)
+								{
+									rawA2e.U[b][ac] = static_cast<double>(uVal);
+									rawA2e.cellCount[b][ac] = static_cast<uint32_t>(Detail::NonNegRoundToSize(cVal));
+									anyV = true;
+								}
+							}
+						}
+						rawA2e.valid = anyV;
+					}
+					const EmpiricalOwnErrorPrior effA2e = a2eHistory_.ApplyCapAndRecord(
+						rawA2e, p.frameRole, cfg_.sourceHz, (p.fadeKeep < 1.0), false);
+					for (int ac = 0; ac < 2; ++ac)
+					{
+						for (int b = 0; b < 3; ++b)
+						{
+							const size_t idx = (static_cast<size_t>(ac) * 3u + static_cast<size_t>(b)) * 4u;
+							ebBuf[idx + 0u] = effA2e.valid ? static_cast<float>(effA2e.ForBandClass(b, ac)) : 0.0f;
+							ebBuf[idx + 1u] = (effA2e.valid && !effA2e.heldFromHistory && std::isfinite(ebBuf[idx + 1u]) && ebBuf[idx + 1u] > 0.0f)
+								? ebBuf[idx + 1u] : 0.0f;
+							ebBuf[idx + 2u] = effA2e.valid ? 1.0f : 0.0f;
+							ebBuf[idx + 3u] = static_cast<float>(effA2e.cellCount[b][ac]);
+						}
+					}
+				}
+				// Always upload initialized ebBuf (zeroed when disabled -> NEVER uninitialized on legacy_1x1!).
+				if (!Detail::UploadFloats(gpu, ebPriorTex_, ebBuf))
+				{
+					resetCarryIfActive();
+					return failCore("TdV2GpuEngine ebPriorTex upload failed", StandInKind::GpuDispatchFailed);
 				}
 
-				// Optional default-OFF 2-frame same-role statistics-only pooling (TD-U4 / Owner D4(b)).
+				// Optional default-OFF 2-frame same-role statistics-only pooling (TD-U4 / Owner D4(b) / UPG-BLKR-1 / UPG-MED-2).
+				const double frameHzGpu = (std::isfinite(cfg_.sourceHz) && cfg_.sourceHz > 0.0) ? cfg_.sourceHz : kDefaultSourceHz;
+				elapsedSec_ += (1.0 / frameHzGpu);
 				int roleSlot = -1;
 				if (p.fadeKeep < 1.0)
 				{
 					for (int r = 0; r < 3; ++r)
 						hasPrevRoleStats_[r] = false;
 				}
-				else if (cfg_.enableTwoFrameSameRoleStatsPool && p.frameRole != QualityPattern::FrameRole::Unknown)
+				else if (cfg_.enableTwoFrameSameRoleStatsPool)
 				{
-					roleSlot = (p.frameRole == QualityPattern::FrameRole::Peak) ? 0
-						: ((p.frameRole == QualityPattern::FrameRole::Mid) ? 1 : 2);
+					switch (p.frameRole)
+					{
+					case QualityPattern::FrameRole::Peak:         roleSlot = 0; break;
+					case QualityPattern::FrameRole::Reference:    roleSlot = 1; break;
+					case QualityPattern::FrameRole::NonReference: roleSlot = 2; break;
+					case QualityPattern::FrameRole::Unknown:
+					case QualityPattern::FrameRole::ExactCopy:
+					default:                                      roleSlot = -1; break;
+					}
 				}
-				const bool canMergePrevRoleStats =
-					(roleSlot >= 0 && hasPrevRoleStats_[roleSlot] && prevRoleStatsTex_[roleSlot] != nullptr &&
-					 prevRoleStatsCw_[roleSlot] == cw && prevRoleStatsCh_[roleSlot] == ch && prevRoleStatsK_[roleSlot] == K);
+				bool roleSlotRolesMatch = (roleSlot >= 0 && hasPrevRoleStats_[roleSlot] && prevRoleStatsTex_[roleSlot] != nullptr &&
+				                           prevRoleStatsCw_[roleSlot] == cw && prevRoleStatsCh_[roleSlot] == ch &&
+				                           prevRoleStatsK_[roleSlot] == K &&
+				                           (elapsedSec_ - prevRoleStatsTimeSec_[roleSlot]) <= kA2eHistoryHorizonSec);
+				if (roleSlotRolesMatch)
+				{
+					for (int i = 0; i < K; ++i)
+					{
+						if (prevRoleStatsRoles_[roleSlot][i] != refSpecs[static_cast<size_t>(i)].refRole)
+						{
+							roleSlotRolesMatch = false;
+							break;
+						}
+					}
+				}
+				const bool canMergePrevRoleStats = roleSlotRolesMatch;
 				const float uMergePrevStats = canMergePrevRoleStats ? 1.0f : 0.0f;
 				pl_tex prevStatsBind = canMergePrevRoleStats ? prevRoleStatsTex_[roleSlot] : sc.cellStats;
 
-				// ---- PASS 2B (Speedup 2 + TD-U2/U3/U4): Band-Dependent Chan-Pebay Merge + EB Shrink + Active-Set Solve + TdMaps ----
-				std::string p2bHdr = p2bSharedHdr + Shaders::kPass2SolverHeader;
+				// ---- PASS 2B (Speedup 2 + TD-U2/U3/U4 + UPG-BLKR-3/4): Band-Dependent Merge + EB + Active-Set Solve + TdMaps ----
+				std::string p2bHdr = p2bSharedHdr + Shaders::BuildPass2SolverHeader();
+				const std::string p2bBody = Shaders::BuildPass2MergeAndSolveBody();
 				float uSolverMode = (cfg_.solverMode == SolverMode::LegacyClipRescale) ? 1.0f : 0.0f;
 
-				pl_shader_desc d2b[11] = {
+				pl_shader_desc d2b[12] = {
 					VpvGpu::Sampled("cell_stats", sc.cellStats),
 					VpvGpu::Sampled("prev_cell_stats", prevStatsBind),
 					VpvGpu::Sampled("eb_prior", ebPriorTex_),
@@ -3318,12 +3750,13 @@ namespace Gpu
 					VpvGpu::Sampled("motion_gate", sc.motionGate),
 					VpvGpu::Sampled("motion_vec", motionVecTex),
 					VpvGpu::Sampled("cell_prior", cellPriorTex),
+					VpvGpu::Sampled("cell_drift", cellDriftBind),
 					VpvGpu::Storage("cell_weights", sc.cellWeights),
 					VpvGpu::Storage("cell_diag_c", sc.cellDiagC),
 					VpvGpu::Storage("td_maps", dstTdMaps),
 					VpvGpu::Storage("cell_diag_flags", dstDiagFlags)
 				};
-				pl_shader_var v2b[31] = {
+				pl_shader_var v2b[34] = {
 					VpvGpu::Var("u_k", &uK),
 					VpvGpu::Var("u_pool_r_l", &uPoolRL),
 					VpvGpu::Var("u_pool_r_m", &uPoolRM),
@@ -3354,12 +3787,35 @@ namespace Gpu
 					VpvGpu::Var("u_psd_mid", &uPsdMid),
 					VpvGpu::Var("u_psd_fine", &uPsdFine),
 					VpvGpu::Var("u_fade_keep", &uFadeKeep),
-					VpvGpu::Var("u_use_empirical_u", &uUseEmpiricalU)
+					VpvGpu::Var("u_use_empirical_u", &uUseEmpiricalU),
+					VpvGpu::Var("u_use_a2e_prior", &uUseA2ePrior),
+					VpvGpu::Var("u_has_cell_drift", &uHasCellDrift),
+					VpvGpu::Var("u_anchor_ref_idx", &uAnchorRefIdx)
 				};
-				if (!runPass("td_v2_p2b_merge_solve", p2bHdr, Shaders::kPass2MergeAndSolve, d2b, 11, v2b, 31, cellGx8, cellGy8, 8, 8))
+				if (!runPass("td_v2_p2b_merge_solve", p2bHdr, p2bBody.c_str(), d2b, 12, v2b, 34, cellGx8, cellGy8, 8, 8))
 				{
 					resetCarryIfActive();
 					return failCore("td_v2_p2b_merge_solve dispatch failed", StandInKind::GpuDispatchFailed);
+				}
+
+				// Plan 6.6 / CHR-HIGH-3: Export lifetime-safe persistent luma cell weights & explicit RefRole metadata.
+				lastLumaActiveRefCount_ = K;
+				for (int i = 0; i < 3; ++i)
+					lastLumaRefRoles_[i] = (i < K) ? refSpecs[static_cast<size_t>(i)].refRole : -1;
+				if (cfg_.chromaReuseLumaWeights || p.outLumaCellWeightsTex != nullptr)
+				{
+					pl_tex dstLw = p.outLumaCellWeightsTex;
+					if (!dstLw && Detail::EnsureTex(gpu, outLumaCellWeightsTex_, 3 * cw, ch, fmtRGBA32, true, true, false, false))
+						dstLw = outLumaCellWeightsTex_;
+					if (dstLw != nullptr && dstLw->params.w == 3 * cw && dstLw->params.h == ch)
+					{
+						pl_shader_desc dlw[2] = {
+							VpvGpu::Sampled("src_w", sc.cellWeights),
+							VpvGpu::Storage("dst_w", dstLw)
+						};
+						runPass("td_v2_p2_copy_weights", staticGeom, Shaders::kPass2CopyCellWeights, dlw, 2, nullptr, 0,
+						        Detail::GroupsFor(3 * cw, 8), Detail::GroupsFor(ch, 8), 8, 8);
+					}
 				}
 
 				// Save unmerged current frame cell statistics for optional 2-frame same-role pooling (NEVER chains recursively!).
@@ -3378,6 +3834,9 @@ namespace Gpu
 							prevRoleStatsCw_[roleSlot] = cw;
 							prevRoleStatsCh_[roleSlot] = ch;
 							prevRoleStatsK_[roleSlot] = K;
+							prevRoleStatsTimeSec_[roleSlot] = elapsedSec_;
+							for (int i = 0; i < 3; ++i)
+								prevRoleStatsRoles_[roleSlot][i] = (i < K) ? refSpecs[static_cast<size_t>(i)].refRole : -1;
 						}
 					}
 				}
@@ -3585,6 +4044,28 @@ namespace Gpu
 			hasCarry_ = true;
 			carryW_ = w;
 			carryH_ = h;
+			// UPG-BLKR-3: Re-anchor single-resample GPU anchorCleanTex_ strictly at confirmed peaks (grain-free dstOutClean!).
+			if (p.isConfirmedPeak && cfg_.enableAnchoredCarry)
+			{
+				if (Detail::EnsureTex(gpu, anchorCleanTex_, w, h, fmtR32, true, true, false, false))
+				{
+					pl_shader_desc da[2] = {
+						VpvGpu::Sampled("src_plane", dstOutClean),
+						VpvGpu::Storage("dst_plane", anchorCleanTex_)
+					};
+					if (runPass("td_v2_p4_anchor_update", staticGeom, Shaders::kPassCopyPlaneR32, da, 2, nullptr, 0, fullGx, fullGy, 16, 16))
+					{
+						hasAnchor_ = true;
+						anchorW_ = w;
+						anchorH_ = h;
+						anchorAgeFrames_ = 1;
+					}
+				}
+			}
+			else if (hasAnchor_)
+			{
+				++anchorAgeFrames_;
+			}
 			hasLastSeq_ = true;
 			lastSeq_ = p.seq;
 			oc.dispatches = dispatches;
@@ -3969,6 +4450,8 @@ float td_fine_hp_warp_gain(vec2 mv)
 			float uAx1 = static_cast<float>(ar.x1), uAy1 = static_cast<float>(ar.y1);
 			float uHasPrev = hasPrev ? 1.0f : 0.0f;
 			float uHalfLsb = static_cast<float>(kExactCopyHalfStep10Bit * depthScale);
+			float uMinBandJump = static_cast<float>(1.5 * depthScale);
+			float uMaxBandJump = static_cast<float>(PeakCodeForBits(sourceBits) / 16.0);
 
 			pl_shader_desc descs[7] = {
 				VpvGpu::Sampled("cur_bands", curBandsTex),
@@ -3979,17 +4462,19 @@ float td_fine_hp_warp_gain(vec2 mv)
 				VpvGpu::Sampled("motion_meta", hasPrev ? motionMetaTex : cellPriorTex),
 				VpvGpu::Storage("quality_cells", outQualityCellsTex)
 			};
-			pl_shader_var vars[6] = {
+			pl_shader_var vars[8] = {
 				VpvGpu::Var("u_ax0", &uAx0), VpvGpu::Var("u_ay0", &uAy0),
 				VpvGpu::Var("u_ax1", &uAx1), VpvGpu::Var("u_ay1", &uAy1),
 				VpvGpu::Var("u_has_prev_bands", &uHasPrev),
-				VpvGpu::Var("u_half_lsb", &uHalfLsb)
+				VpvGpu::Var("u_half_lsb", &uHalfLsb),
+				VpvGpu::Var("u_min_band_jump", &uMinBandJump),
+				VpvGpu::Var("u_max_band_jump", &uMaxBandJump)
 			};
 
 			pl_shader sh = pl_dispatch_begin(dp);
 			if (!sh)
 				return false;
-			if (!VpvGpu::AddCompute(sh, hdr.c_str(), Shaders::kPassQualityEvidenceReduce, descs, 7, vars, 6, 16, 16, 8u * 256u * sizeof(float)))
+			if (!VpvGpu::AddCompute(sh, hdr.c_str(), Shaders::kPassQualityEvidenceReduce, descs, 7, vars, 8, 16, 16, 8u * 256u * sizeof(float)))
 			{
 				pl_dispatch_abort(dp, &sh);
 				return false;
@@ -4008,8 +4493,8 @@ float td_fine_hp_warp_gain(vec2 mv)
 				if (!Detail::DownloadFloats(gpu, outQualityCellsTex, buf.data()))
 					return false;
 				std::vector<double> logRatios;
-				double stepSum = 0.0;
-				size_t stepCnt = 0;
+				std::vector<double> cellSteps;
+				cellSteps.reserve(static_cast<size_t>(cw) * static_cast<size_t>(ch));
 				for (size_t i = 0; i < static_cast<size_t>(cw) * static_cast<size_t>(ch); ++i)
 				{
 					const double eCur = buf[i * 4u + 0u];
@@ -4023,10 +4508,7 @@ float td_fine_hp_warp_gain(vec2 mv)
 						continue;
 					}
 					if (std::isfinite(stp) && stp >= 0.0)
-					{
-						stepSum += stp;
-						++stepCnt;
-					}
+						cellSteps.push_back(stp);
 					if ((fl & 1) != 0 && eCur > kEngineNumFloor && ePrv > kEngineNumFloor)
 					{
 						const double lr = std::log(eCur / ePrv);
@@ -4034,8 +4516,11 @@ float td_fine_hp_warp_gain(vec2 mv)
 							logRatios.push_back(lr);
 					}
 				}
+				// UPG-HIGH-4: Use exact RobustStats::Median matching CPU TdV2NonBlockStepEstimator::Measure!
 				if (outMeanGridFreeStep != nullptr)
-					*outMeanGridFreeStep = stepCnt > 0 ? (stepSum / static_cast<double>(stepCnt)) : 0.0;
+					*outMeanGridFreeStep = !cellSteps.empty()
+						? RobustStats::Median(cellSteps, RobustStats::MedianRule::MeanOfMiddle)
+						: 0.0;
 				if (outSharpness != nullptr)
 				{
 					AlignedSharpnessSummary sum;
@@ -4073,9 +4558,19 @@ float td_fine_hp_warp_gain(vec2 mv)
 		bool hasCarry_ = false;
 		int carryW_ = 0;
 		int carryH_ = 0;
+		bool hasAnchor_ = false;
+		int anchorW_ = 0;
+		int anchorH_ = 0;
+		int anchorAgeFrames_ = 0;
+		int ancBarSlot_ = 0;
 		bool hasLastSeq_ = false;
 		uint64_t lastSeq_ = 0;
+		double elapsedSec_ = 0.0;
+		A2ePriorHistory a2eHistory_;
 		pl_tex carryCleanTex_ = nullptr;
+		pl_tex anchorCleanTex_ = nullptr;
+		pl_tex anchorBarredTex_[2] = {};
+		pl_tex cellDriftTex_ = nullptr;
 
 		// Owned private scratch textures (used ONLY when arena == nullptr).
 		pl_tex privCurBands_ = nullptr;
@@ -4104,6 +4599,8 @@ float td_fine_hp_warp_gain(vec2 mv)
 		pl_tex inMotionMetaTex_ = nullptr;
 		pl_tex inCellPriorTex_ = nullptr;
 		pl_tex inFaceMaskTex_ = nullptr;
+		pl_tex inAnchorCompMvTex_ = nullptr;
+		pl_tex inDirectP2pMvTex_ = nullptr;
 		pl_tex outYTex_ = nullptr;
 		pl_tex outCleanTex_ = nullptr;
 		pl_tex outDeltaTex_ = nullptr;
@@ -4111,6 +4608,9 @@ float td_fine_hp_warp_gain(vec2 mv)
 		pl_tex outDiagFlagsTex_ = nullptr;
 		pl_tex outGuardCellTex_ = nullptr;
 		pl_tex outWarpDiagTex_ = nullptr;
+		pl_tex outLumaCellWeightsTex_ = nullptr;
+		int lastLumaRefRoles_[3] = { 0, 1, 2 };
+		int lastLumaActiveRefCount_ = 0;
 
 		// TD-U4 + M-9: Compact 3x2 EB prior texture, 2x1 live counter summary, + optional 2-frame same-role stats snapshots.
 		pl_tex ebPriorTex_ = nullptr;
@@ -4120,6 +4620,8 @@ float td_fine_hp_warp_gain(vec2 mv)
 		int prevRoleStatsCw_[3] = {};
 		int prevRoleStatsCh_[3] = {};
 		int prevRoleStatsK_[3] = {};
+		int prevRoleStatsRoles_[3][3] = {};
+		double prevRoleStatsTimeSec_[3] = {};
 
 		// Cached Chroma GPU Apply textures (Speedup 7: reused across frames, freed in Release(gpu)).
 		pl_tex chromaCodedDeltaTex_ = nullptr;
