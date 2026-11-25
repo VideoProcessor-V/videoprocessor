@@ -7,7 +7,6 @@
 #include <libplacebo/shaders/custom.h>
 
 #include <libplacebo/dispatch.h>
-#include <libplacebo/shaders/sampling.h>
 
 #include <algorithm>
 #include <cmath>
@@ -216,17 +215,14 @@ if (p.x < size.x && p.y < size.y) {
 		{
 			if (inverseTemp[slot] && gpu) pl_tex_destroy(gpu, &inverseTemp[slot]);
 			inverseTemp[slot] = nullptr;
+			if (textures[slot][0] && gpu) pl_tex_destroy(gpu, &textures[slot][0]);
+			textures[slot][0] = nullptr;
 		}
-		for (int slot = 0; slot < kSlots; ++slot)
-			for (int plane = 0; plane < PL_MAX_PLANES; ++plane)
-			{
-				if (textures[slot][plane] && gpu) pl_tex_destroy(gpu, &textures[slot][plane]);
-				textures[slot][plane] = nullptr;
-				pl_shader_obj_destroy(&luts[slot][plane]);
-				if (separableTemp[slot][plane] && gpu) pl_tex_destroy(gpu, &separableTemp[slot][plane]);
-				separableTemp[slot][plane] = nullptr;
-				pl_shader_obj_destroy(&lutsDown[slot][plane]);
-			}
+		for (int plane = 0; plane < PL_MAX_PLANES; ++plane)
+		{
+			scalerPasses[plane].Release(gpu);
+			chromaTempPasses[plane].Release(gpu);
+		}
 	}
 
 	bool Module::Apply(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, double factorX, double factorY, pl_frame& out, int slot)
@@ -295,109 +291,103 @@ if (p.x < size.x && p.y < size.y) {
 					" not renderable, " + (params.format->name ? params.format->name : "float") +
 					(half ? " (half float: 32-bit float not renderable)" : ""));
 			}
-			if (!pl_tex_recreate(gpu, &textures[slot][plane], &params))
-			{
-				error = "texture allocation failed";
-				++failures;
-				return false;
-			}
 			// Kernel-matched (luma, exactly 2:1 on each re-based axis, a kernel identified).
 			const bool acrossHalf = factorX < 1.0 && w * 2 == in->params.w;
 			const bool downHalf = factorY < 1.0 && h * 2 == in->params.h;
 			if (plane == 0 && kernel >= 0 && (factorX >= 1.0 || acrossHalf) && (factorY >= 1.0 || downHalf) &&
 				(params.format->caps & PL_FMT_CAP_STORABLE))
 			{
-				if (!InversePlane(gpu, dispatch, in, w, h, acrossHalf, downHalf, textures[slot][plane], slot, note))
-				{
-					++failures;
-					return false;
-				}
-				kernelUsed = true;
-				result.planes[plane].texture = textures[slot][plane];
-				continue;
-			}
-			if (!oneAxis && separable && plane > 0)   // chroma only: a 1D Lanczos rings into black bars (luma stays polar)
-			{
-				// Two 1D Lanczos passes: across into a temporary, then down.
-				// GEM-065: prefer 32-bit float -> 16-bit float -> UNORM (with visible note)
-				// so the first pass preserves negative Lanczos lobes and overshoot into the
-				// second pass without clipping.
-				const auto separableFallbackCaps = static_cast<enum pl_fmt_caps>(
-					PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_RENDERABLE);
-				pl_tex_params tp{};
-				tp.w = w;
-				tp.h = in->params.h;
-				tp.format = SelectIntermediateFormat(gpu, params.format, renderCaps, separableFallbackCaps,
-					plane, "separable temp", note);
-				if (!tp.format)
-				{
-					error = "no renderable format for plane " + std::to_string(plane) + " separable temp";
-					++failures;
-					return false;
-				}
-				tp.sampleable = true;
-				tp.renderable = true;
-				if (!pl_tex_recreate(gpu, &separableTemp[slot][plane], &tp))
+				if (!pl_tex_recreate(gpu, &textures[slot][0], &params))
 				{
 					error = "texture allocation failed";
 					++failures;
 					return false;
 				}
-				auto ortho = [&](pl_tex from, pl_tex to, int nw, int nh, pl_shader_obj* lut) {
-					pl_shader s1 = pl_dispatch_begin(dispatch);
-					pl_sample_src s{};
-					s.tex = from;
-					s.rect = { 0.0f, 0.0f, static_cast<float>(from->params.w), static_cast<float>(from->params.h) };
-					s.new_w = nw;
-					s.new_h = nh;
-					s.components = from->params.format->num_components;
-					pl_sample_filter_params f{};
-					f.filter = pl_filter_lanczos;
-					f.antiring = antiring;
-					f.lut = lut;
-					pl_dispatch_params d{};
-					d.shader = &s1;
-					d.target = to;
-					if (!pl_shader_sample_ortho2(s1, &s, &f) || !pl_dispatch_finish(dispatch, &d))
-					{
-						if (s1) pl_dispatch_abort(dispatch, &s1);
-						return false;
-					}
-					return true;
-				};
-				if (!ortho(in, separableTemp[slot][plane], w, in->params.h, &luts[slot][plane]) ||
-					!ortho(separableTemp[slot][plane], textures[slot][plane], w, h, &lutsDown[slot][plane]))
+				if (!InversePlane(gpu, dispatch, in, w, h, acrossHalf, downHalf, textures[slot][0], slot, note))
 				{
-					error = "downscale pass failed";
 					++failures;
 					return false;
 				}
-				result.planes[plane].texture = textures[slot][plane];
+				kernelUsed = true;
+				result.planes[plane].texture = textures[slot][0];
 				continue;
 			}
-			pl_shader sh = pl_dispatch_begin(dispatch);
-			pl_sample_src src{};
-			src.tex = in;
-			src.rect = { 0.0f, 0.0f, static_cast<float>(in->params.w), static_cast<float>(in->params.h) };
-			src.new_w = w;
-			src.new_h = h;
-			src.components = in->params.format->num_components;
-			pl_sample_filter_params filter{};
-			filter.filter = oneAxis ? pl_filter_lanczos : pl_filter_ewa_lanczossharp;
-			filter.antiring = antiring;
-			filter.lut = &luts[slot][plane];
-			pl_dispatch_params dp{};
-			dp.shader = &sh;
-			dp.target = textures[slot][plane];
-			const bool sampled = oneAxis ? pl_shader_sample_ortho2(sh, &src, &filter) : pl_shader_sample_polar(sh, &src, &filter);
-			if (!sampled || !pl_dispatch_finish(dispatch, &dp))
+			const ScalerPass::Source src = {
+				in, 0.0f, 0.0f, static_cast<float>(in->params.w), static_cast<float>(in->params.h)
+			};
+			if (!oneAxis && separable && plane > 0)   // chroma only: a 1D Lanczos rings into black bars (luma stays polar)
 			{
-				if (sh) pl_dispatch_abort(dispatch, &sh);
-				error = "downscale pass failed";
+				// Two 1D Lanczos passes via ScalerPass (B5b): across into a temporary, then down.
+				// GEM-065 / GEM-072: SelectIntermediateFormat prefers 32-bit float -> 16-bit float -> UNORM
+				// with every degraded step recorded visibly in `note` so negative Lanczos lobes and >1
+				// overshoot are preserved between passes without clipping.
+				const auto separableFallbackCaps = static_cast<enum pl_fmt_caps>(
+					PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_RENDERABLE);
+				pl_fmt tempFmt = SelectIntermediateFormat(gpu, params.format, renderCaps, separableFallbackCaps,
+					plane, "separable temp", note);
+				if (!tempFmt)
+				{
+					error = "no renderable format for plane " + std::to_string(plane) + " separable temp";
+					++failures;
+					return false;
+				}
+				ScalerPass::Settings passX;
+				passX.filter.kind = ScalerKernels::Kind::Lanczos;
+				passX.filter.radius = 3;
+				passX.axis = ScalerPass::Axis::X;
+				passX.plane = ScalerPass::Plane::Chroma;
+				passX.precision = ScalerPass::Precision::Target;
+				passX.targetFormat = tempFmt;
+				passX.antiring = antiring;
+				pl_tex tempTex = nullptr;
+				if (!chromaTempPasses[plane].Apply(gpu, dispatch, src, w, in->params.h, passX, tempTex, slot))
+				{
+					error = "downscale pass failed: " + chromaTempPasses[plane].LastError();
+					++failures;
+					return false;
+				}
+				const ScalerPass::Source tempSrc = {
+					tempTex, 0.0f, 0.0f, static_cast<float>(tempTex->params.w), static_cast<float>(tempTex->params.h)
+				};
+				ScalerPass::Settings passY = passX;
+				passY.axis = ScalerPass::Axis::Y;
+				passY.targetFormat = params.format;
+				pl_tex outTex = nullptr;
+				if (!scalerPasses[plane].Apply(gpu, dispatch, tempSrc, w, h, passY, outTex, slot))
+				{
+					error = "downscale pass failed: " + scalerPasses[plane].LastError();
+					++failures;
+					return false;
+				}
+				result.planes[plane].texture = outTex;
+				continue;
+			}
+			// B5b: one-axis uses 1D Lanczos(3) along the re-based axis; both-axes luma (and
+			// non-separable chroma) stays polar EWA Lanczos sharp, all through ScalerPass.
+			ScalerPass::Settings st;
+			if (oneAxis)
+			{
+				st.filter.kind = ScalerKernels::Kind::Lanczos;
+				st.filter.radius = 3;
+				st.axis = factorX < 1.0 ? ScalerPass::Axis::X : ScalerPass::Axis::Y;
+			}
+			else
+			{
+				st.filter.kind = ScalerKernels::Kind::EwaLanczosSharp;
+				st.axis = ScalerPass::Axis::Both;
+			}
+			st.plane = plane == 0 ? ScalerPass::Plane::Luma : ScalerPass::Plane::Chroma;
+			st.precision = ScalerPass::Precision::Target;
+			st.targetFormat = params.format;
+			st.antiring = antiring;
+			pl_tex outTex = nullptr;
+			if (!scalerPasses[plane].Apply(gpu, dispatch, src, w, h, st, outTex, slot))
+			{
+				error = "downscale pass failed: " + scalerPasses[plane].LastError();
 				++failures;
 				return false;
 			}
-			result.planes[plane].texture = textures[slot][plane];
+			result.planes[plane].texture = outTex;
 		}
 		// Chroma siting (research/chroma 2026-10-24): the planes were resampled edge-aligned by the
 		// factors, so their shifts scale with them; the old -0.5 moved colour by 1/4 of a re-based

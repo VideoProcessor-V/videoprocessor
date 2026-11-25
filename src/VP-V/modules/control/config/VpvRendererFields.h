@@ -426,6 +426,11 @@ namespace VpvRenderer
 		double adaptiveUpscaleWBase = 1.0;
 		bool adaptiveUpscaleSuperresScale = true;
 		std::string upscaleLight = "linear";     // linear | gamma
+		// Q2-B3 (scaling.route_4k / scaling.output): 4K route mode and hybrid upscaler branch kernels.
+		std::string upscaleRoute = "off";        // off | rebased_only | always_4k
+		std::string upscaleSharp = "lanczos3";   // lanczos3 | ewa_lanczossharp | catmull_rom | lanczos2 | lanczos4 | bicubic
+		std::string upscaleSafe = "hermite";     // hermite | lanczos3 | catmull_rom | ewa_lanczossharp | bicubic | bilinear
+		double upscaleSharpAntiring = 0.5;       // 0.0..1.0
 		AdaptiveDownscale::Settings adaptive;
 		bool debandGrain = false;   // deband_grain: libplacebo's deband adds grain (off: VP's dither does that job)
 		EdgeBlanking::Insets edgeBlanking;

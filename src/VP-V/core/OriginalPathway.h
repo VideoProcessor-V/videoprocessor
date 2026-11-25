@@ -26,9 +26,9 @@ namespace OriginalPathway
 		const char* slot;   // the slot whose VP additions it removes (slots.json id)
 	};
 
-	inline const std::array<Override, 76>& Overrides()
+	inline const std::array<Override, 81>& Overrides()
 	{
-		static const std::array<Override, 76> table = { {
+		static const std::array<Override, 81> table = { {
 			{ "capture_path", "standard", "input.capture" },
 			{ "capture_upload", "render", "input.capture" },
 			{ "native_rgb_ingest", "off", "input.capture" },
@@ -79,6 +79,8 @@ namespace OriginalPathway
 			{ "nls_sampling", "bilinear", "scaling.geometry" },
 			{ "adaptive_downscale", "off", "scaling.output" },
 			{ "adaptive_upscale", "off", "scaling.output" },
+			{ "upscale_route", "off", "scaling.route_4k" }, { "upscale_sharp_antiring", "0.5", "scaling.output" },
+			{ "upscale_sharp", "lanczos3", "scaling.output" }, { "upscale_safe", "hermite", "scaling.output" },
 			{ "ssim_bitrate_aware", "off", "scaling.output" },
 			{ "downscale_light", "linear", "scaling.output" },
 			{ "fbo_float32", "off", "scaling.output" },
@@ -102,6 +104,7 @@ namespace OriginalPathway
 			{ "low_bitrate_handling", "off", "repair.deband" },
 			{ "ssim_residual_stabilise", "off", "scaling.output" },
 			{ "cnn_residual_stabilise", "off", "scaling.output" },
+			{ "sharp_residual_stabilise", "off", "scaling.output" },
 			{ "residual_stabilise_grain_guard", "off", "scaling.output" },
 			{ "adaptive_motion", "off", "scaling.output" },   // the motion-adapted blend (2026-10-31)
 			{ "dejudder_estimate_ahead", "off", "motion.estimation" },

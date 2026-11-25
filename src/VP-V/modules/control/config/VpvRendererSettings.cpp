@@ -261,6 +261,9 @@ namespace VpvRendererSettings
 		}
 		readChoice("downscale_light", settings.downscaleLight, { "linear", "gamma" });
 		readChoice("upscale_light", settings.upscaleLight, { "linear", "gamma" });
+		readChoice("upscale_route", settings.upscaleRoute, { "off", "rebased_only", "always_4k" });
+		readChoice("upscale_sharp", settings.upscaleSharp, { "lanczos3", "ewa_lanczossharp", "catmull_rom", "lanczos2", "lanczos4", "bicubic" });
+		readChoice("upscale_safe", settings.upscaleSafe, { "hermite", "lanczos3", "catmull_rom", "ewa_lanczossharp", "bicubic", "bilinear" });
 		// Hunk B4 (saturation, de-judder, repair, intent, ... )
 		if (config.TryGetString(rule.section, "saturation", raw))
 		{
@@ -389,8 +392,10 @@ namespace VpvRendererSettings
 			std::make_pair("dv_tunnel_gpu_unpack", &settings.dvTunnelGpuUnpack),
 			std::make_pair("dv_trims", &settings.dvTrims),
 			std::make_pair("dv_tunnel_fixes", &settings.dvTunnelFixes),
-			// Stage 12 §2c / S8-1: the residual held along the vectors (on = when they exist).
+			// Stage 12 §2c / S8-1 / Q2-B3: the residual held along the vectors (on = when they exist).
+			// Legacy cnn_residual_stabilise is read before sharp_residual_stabilise so sharp_residual_stabilise takes precedence when both exist.
 			std::make_pair("cnn_residual_stabilise", &settings.adaptive.cnnResidualStabilise),
+			std::make_pair("sharp_residual_stabilise", &settings.adaptive.cnnResidualStabilise),
 			std::make_pair("ssim_residual_stabilise", &settings.adaptive.ssimResidualStabilise),
 			std::make_pair("ssim_bitrate_aware", &settings.ssimBitrateAware),
 			// Film grain (owner 2026-10-17): the faithful defaults on / deband_grain off.
@@ -812,6 +817,15 @@ namespace VpvRendererSettings
 				DebugLog::Log("profile '%s': invalid adaptive_upscale_w_base '%s'; keeping %g",
 					rule.section.c_str(), raw.c_str(), settings.adaptiveUpscaleWBase);
 		}
+		if (config.TryGetString(rule.section, "upscale_sharp_antiring", raw))
+		{
+			double parsed = 0.0;
+			if (DisplayRuleExpression::ParseNumber(raw, parsed) && parsed >= 0.0 && parsed <= 1.0)
+				settings.upscaleSharpAntiring = parsed;
+			else
+				DebugLog::Log("profile '%s': invalid upscale_sharp_antiring '%s'; keeping %g",
+					rule.section.c_str(), raw.c_str(), settings.upscaleSharpAntiring);
+		}
 		for (const auto& toggle : { std::make_pair("adaptive_downscale", &settings.adaptiveDownscale),
 			std::make_pair("adaptive_chroma_ssim", &settings.adaptive.chromaSsim),
 			std::make_pair("adaptive_grain_map", &settings.adaptive.grainMap),
@@ -1132,6 +1146,10 @@ namespace VpvRendererSettings
 		settings.nlsSamplingCatmull = false;               // key=nls_sampling
 		settings.adaptiveDownscale = false;                // key=adaptive_downscale
 		settings.adaptiveUpscale = false;                  // key=adaptive_upscale
+		settings.upscaleRoute = "off";                     // key=upscale_route
+		settings.upscaleSharp = "lanczos3";                // key=upscale_sharp
+		settings.upscaleSafe = "hermite";                  // key=upscale_safe
+		settings.upscaleSharpAntiring = 0.5;               // key=upscale_sharp_antiring
 		settings.ssimBitrateAware = false;                 // key=ssim_bitrate_aware
 		settings.downscaleLight = "linear";                // key=downscale_light
 		settings.fboFloat32 = 0;                           // key=fbo_float32
@@ -1156,6 +1174,7 @@ namespace VpvRendererSettings
 		settings.lowBitrateHandling = "off";               // key=low_bitrate_handling
 		settings.adaptive.ssimResidualStabilise = false;   // key=ssim_residual_stabilise
 		settings.adaptive.cnnResidualStabilise = false;    // key=cnn_residual_stabilise
+		settings.adaptive.cnnResidualStabilise = false;    // key=sharp_residual_stabilise
 		settings.adaptive.residualGrainGuard = false;      // key=residual_stabilise_grain_guard
 		settings.adaptive.motionStrength = 0.0f;           // key=adaptive_motion
 		settings.dejudderEstimateAhead = false;            // key=dejudder_estimate_ahead
@@ -1347,6 +1366,10 @@ namespace VpvRendererSettings
 			<< settings.adaptiveUpscaleWBase << '|'
 			<< settings.adaptiveUpscaleSuperresScale << '|'
 			<< settings.upscaleLight << '|'
+			<< settings.upscaleRoute << '|'
+			<< settings.upscaleSharp << '|'
+			<< settings.upscaleSafe << '|'
+			<< settings.upscaleSharpAntiring << '|'
 			<< settings.adaptiveDownscale << '|'
 			<< settings.adaptive.wBase << '|'
 			<< settings.adaptive.edgeLo << '|'
@@ -1442,6 +1465,10 @@ namespace VpvRendererSettings
 		currentTransport.adaptiveUpscaleWBase = next.adaptiveUpscaleWBase;
 		currentTransport.adaptiveUpscaleSuperresScale = next.adaptiveUpscaleSuperresScale;
 		currentTransport.upscaleLight = next.upscaleLight;
+		currentTransport.upscaleRoute = next.upscaleRoute;
+		currentTransport.upscaleSharp = next.upscaleSharp;
+		currentTransport.upscaleSafe = next.upscaleSafe;
+		currentTransport.upscaleSharpAntiring = next.upscaleSharpAntiring;
 		currentTransport.adaptive = next.adaptive;
 		currentTransport.debandGrain = next.debandGrain;
 		currentTransport.debandVpExclusive = next.debandVpExclusive;
@@ -1603,6 +1630,10 @@ namespace VpvRendererSettings
 		changed(current.dejudderWarpRendered != next.dejudderWarpRendered, "dejudder_warp_stage");
 		changed(current.downscaleLight != next.downscaleLight, "downscale_light");
 		changed(current.upscaleLight != next.upscaleLight, "upscale_light");
+		changed(current.upscaleRoute != next.upscaleRoute, "upscale_route");
+		changed(current.upscaleSharp != next.upscaleSharp, "upscale_sharp");
+		changed(current.upscaleSafe != next.upscaleSafe, "upscale_safe");
+		changed(current.upscaleSharpAntiring != next.upscaleSharpAntiring, "upscale_sharp_antiring");
 		changed(current.adaptiveUpscale != next.adaptiveUpscale ||
 			current.adaptiveUpscaleWBase != next.adaptiveUpscaleWBase ||
 			current.adaptiveUpscaleSuperresScale != next.adaptiveUpscaleSuperresScale, "adaptive_upscale");
@@ -1632,6 +1663,7 @@ namespace VpvRendererSettings
 		<< "deband_vp=" << s.debandVp << "\n"
 		<< "low_bitrate_handling=" << s.lowBitrateHandling << "\n"
 		<< "cnn_residual_stabilise=" << (s.adaptive.cnnResidualStabilise ? "on" : "off") << "\n"
+		<< "sharp_residual_stabilise=" << (s.adaptive.cnnResidualStabilise ? "on" : "off") << "\n"
 		<< "ssim_residual_stabilise=" << (s.adaptive.ssimResidualStabilise ? "on" : "off") << "\n"
 		<< "ssim_bitrate_aware=" << (s.ssimBitrateAware ? "on" : "off") << "\n"
 		<< "ssim_bitrate_floor=" << s.ssimBitrateFloor << "\n"
@@ -1745,6 +1777,10 @@ namespace VpvRendererSettings
 		<< "adaptive_downscale=" << s.adaptiveDownscale << "\n"
 		<< "adaptive_upscale=" << s.adaptiveUpscale << "\n"
 		<< "upscale_light=" << s.upscaleLight << "\n"
+		<< "upscale_route=" << s.upscaleRoute << "\n"
+		<< "upscale_sharp=" << s.upscaleSharp << "\n"
+		<< "upscale_safe=" << s.upscaleSafe << "\n"
+		<< "upscale_sharp_antiring=" << s.upscaleSharpAntiring << "\n"
 		<< "fbo_float32=" << s.fboFloat32 << "\n"
 		<< "matcher.matchTolerance=" << m.matchTolerance << "\n"
 		<< "matcher.minTrustedShare=" << m.minTrustedShare << "\n"

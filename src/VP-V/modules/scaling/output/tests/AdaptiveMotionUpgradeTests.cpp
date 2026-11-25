@@ -23,6 +23,7 @@
 #include <VP-V/core/Products.h>
 #include <VP-V/core/Ramp.h>
 #include <VP-V/modules/control/config/VpvRendererSettings.h>
+#include <VP-V/modules/motion/estimation/P3FieldFill.h>
 #include <VP-V/modules/output/dither/CustomHookChain.h>
 #include <VP-V/modules/scaling/output/AdaptiveDownscaleStage.h>
 #include <VP-V/modules/scaling/output/NlsMaskMapping.h>
@@ -812,7 +813,7 @@ namespace VideoProcessorTest
 				double weight = 1.0;
 				bool grainWanted = false, noSsim = false;
 				int publishedCount = 0;
-				int p10gAsks = 0, otherAsks = 0;
+				int p10gAsks = 0, p3Asks = 0, otherAsks = 0;
 				static int dummyGrainTex = 0;
 				static int dummyMotionTex = 0;
 				bool vectorsLive = false;
@@ -824,13 +825,28 @@ namespace VideoProcessorTest
 				host.ssimInChain = []() { return true; };
 				host.publishStatus = [&]() { ++publishedCount; };
 				host.acquire = [&](VpSkeleton::ProductId id, uint64_t, const VpSkeleton::VariantKey& key) {
-					if (id == VpSkeleton::kP10gGrainLevel && key.IsDefault())
-						++p10gAsks;
-					else
-						++otherAsks;
 					VpSkeleton::AcquireResult r;
-					r.status = VpSkeleton::AcquireStatus::Reused;
-					r.gpu.resource = &dummyGrainTex;
+					if (id == VpSkeleton::kP10gGrainLevel && key.IsDefault())
+					{
+						++p10gAsks;
+						r.status = VpSkeleton::AcquireStatus::Reused;
+						r.gpu.resource = &dummyGrainTex;
+					}
+					else if (id == VpSkeleton::kP3AnalysisField && key.IsDefault())
+					{
+						++p3Asks;
+						if (vectorsLive)
+						{
+							r.status = VpSkeleton::AcquireStatus::Reused;
+							r.gpu.resource = &dummyMotionTex;
+						}
+						else
+							r.cause = VpSkeleton::AcquireCause::OwnerDeclined;
+					}
+					else
+					{
+						++otherAsks;
+					}
 					return r;
 				};
 				host.motion = [&]() {
@@ -860,6 +876,7 @@ namespace VideoProcessorTest
 					std::vector<const pl_hook*> hooks;
 					stage.Register(makeFrame(1), host, { weight, grainWanted, noSsim }, hooks);
 					Assert::AreEqual(1, p10gAsks, L"P10g must be acquired once per upscale frame via Acquire");
+					Assert::AreEqual(1, p3Asks, L"P3 must be acquired once per 2-axis upscale frame via Acquire");
 					Assert::AreEqual(0, otherAsks, L"no unexpected stage Acquire calls");
 					Assert::IsFalse(grainWanted, L"motionStrength 0.0 must not request grain/motion map");
 					const std::vector<std::string> lines0 = stage.StatusLines();
@@ -876,6 +893,8 @@ namespace VideoProcessorTest
 					std::vector<const pl_hook*> hooks;
 					stage.Register(makeFrame(2), host, { weight, grainWanted, noSsim }, hooks);
 					Assert::AreEqual(2, p10gAsks, L"P10g acquired once on frame 2");
+					Assert::AreEqual(2, p3Asks, L"P3 acquired once on frame 2");
+					Assert::AreEqual(0, otherAsks, L"no unexpected stage Acquire calls on frame 2");
 					const std::vector<std::string> lines35 = stage.StatusLines();
 					const std::string joined35 = JoinLines(lines35);
 					Assert::IsTrue(HasSubstring(lines35, "upscale motion: no vectors (alias-safe weight)"),
@@ -894,6 +913,9 @@ namespace VideoProcessorTest
 				{
 					std::vector<const pl_hook*> hooks;
 					stage.Register(makeFrame(3), host, { weight, grainWanted, noSsim }, hooks);
+					Assert::AreEqual(3, p10gAsks, L"P10g acquired once on frame 3");
+					Assert::AreEqual(3, p3Asks, L"P3 acquired once on frame 3");
+					Assert::AreEqual(0, otherAsks, L"no unexpected stage Acquire calls on frame 3");
 					const std::vector<std::string> lines75 = stage.StatusLines();
 					const std::string joined75 = JoinLines(lines75);
 					Assert::IsTrue(HasSubstring(lines75, "0.75") && !HasSubstring(lines75, "0.35"),
@@ -902,6 +924,286 @@ namespace VideoProcessorTest
 						L"live consecutive vectors must clear the no-vectors status line");
 					Assert::IsTrue(publishedCount > pubBefore, L"strength change in StatusLines() must trigger publishStatus");
 				}
+			}
+		}
+
+		// W23-B4 M1#1 (CPU): upscale motion acquires kP3AnalysisField (AcquireForm::Gpu), never silently falls back
+		// to host.motion().field, pins the acquired handle while upscale is active and releases it on non-upscale,
+		// fails visibly when frameTrust is absent, and abstains at zero cost on one-axis / vectorsRun=false / nlsUnknown.
+		TEST_METHOD(UpscaleMotionAcquiresP3AnalysisFieldAndRejectsStaleHostMotionFallback)
+		{
+			using namespace AdaptiveMotionUpgradeDetail;
+
+			AdaptiveDownscale::Module module;
+			module.SetCutSource([](uint64_t, uint64_t) {
+				AdaptiveDownscale::CutVerdict v;
+				v.state = AdaptiveDownscale::CutVerdict::State::Known;
+				return v;
+			});
+			AdaptiveDownscaleStage::Stage stage{ module };
+			AdaptiveDownscale::Settings settings;
+			SetMotionStrength(settings, 0.5f);
+			double weight = 1.0;
+			bool grainWanted = false, noSsim = false;
+
+			static int dummyGrainTex = 0;
+			static int dummyHostField = 0;
+			static int dummyP3Tex = 0;
+			static int dummyFactsTrust = 0;
+			static int dummyAuxTrust = 0;
+
+			auto makeFrame = [&](uint64_t seq, float sw = 1920.0f, float sh = 1080.0f, float tw = 2560.0f, float th = 1440.0f) {
+				AdaptiveDownscaleStage::Frame f;
+				f.adaptive = &settings;
+				f.adaptiveUpscale = true;
+				f.lowBitrateOff = true;
+				f.sourceSequence = seq;
+				f.nominalSourceRateHz = 24.0;
+				f.sourceCrop = { 0.0f, 0.0f, sw, sh };
+				f.targetCrop = { 0.0f, 0.0f, tw, th };
+				return f;
+			};
+
+			// 1. Mandatory in-test negative control: host.motion has LIVE field + frameTrust, while
+			//    Acquire(kP3AnalysisField) declines with OwnerDeclined. Stage MUST NOT fall back to host.motion().field.
+			{
+				AdaptiveDownscaleStage::Host host;
+				host.fallbackFramePeriod = []() { return 1.0f / 24.0f; };
+				host.bitrate = [](double& q) { q = 1.0; return false; };
+				host.nlsMapping = []() { return NlsMaskMapping::Mapping{}; };
+				host.ssimInChain = []() { return true; };
+				host.publishStatus = []() {};
+				host.motion = []() {
+					AdaptiveDownscaleStage::MotionSource m;
+					m.live = true;
+					m.field = reinterpret_cast<pl_tex>(&dummyHostField);
+					m.frameTrust = reinterpret_cast<pl_tex>(&dummyAuxTrust);
+					return m;
+				};
+				host.acquire = [](VpSkeleton::ProductId id, uint64_t, const VpSkeleton::VariantKey&) {
+					VpSkeleton::AcquireResult r;
+					if (id == VpSkeleton::kP10gGrainLevel)
+					{
+						r.status = VpSkeleton::AcquireStatus::Reused;
+						r.gpu.resource = &dummyGrainTex;
+					}
+					else if (id == VpSkeleton::kP3AnalysisField)
+					{
+						r.status = VpSkeleton::AcquireStatus::Unavailable;
+						r.cause = VpSkeleton::AcquireCause::OwnerDeclined;
+					}
+					return r;
+				};
+
+				// Same-input naive negative control: reading host.motion() directly falsely reports live vectors!
+				const AdaptiveDownscaleStage::MotionSource naiveMotion = host.motion();
+				Assert::IsTrue(naiveMotion.live && naiveMotion.field != nullptr && naiveMotion.frameTrust != nullptr,
+					L"negative control: naive host.motion()-only check falsely reports live == true on the exact same host");
+
+				std::vector<const pl_hook*> hooks;
+				stage.Register(makeFrame(10), host, { weight, grainWanted, noSsim }, hooks);
+				Assert::IsFalse(stage.UpscaleMotionCause().empty(),
+					L"OwnerDeclined on kP3AnalysisField must produce non-empty UpscaleMotionCause");
+				Assert::IsTrue(stage.UpscaleMotionCause().find("kP3AnalysisField") != std::string::npos,
+					(L"UpscaleMotionCause must name kP3AnalysisField, got: " + Wide(stage.UpscaleMotionCause())).c_str());
+				const std::vector<std::string> lines = stage.StatusLines();
+				const std::string joined = JoinLines(lines);
+				Assert::IsTrue(HasSubstring(lines, "upscale motion: no vectors (alias-safe weight)"),
+					(L"declined kP3AnalysisField must emit verbatim no-vectors status: " + Wide(joined)).c_str());
+				Assert::IsFalse(HasSubstring(lines, "ExternalView"),
+					(L"must never emit legacy ExternalView status line: " + Wide(joined)).c_str());
+				const FallbackCatalog::Decision fb = stage.Fallback();
+				Assert::IsTrue(fb.engaged && fb.id == "output scaling" && fb.reason.find("no vectors") != std::string::npos,
+					(L"declined kP3AnalysisField must engage output scaling no-vectors fallback, got: " + Wide(fb.reason)).c_str());
+				Assert::IsTrue(fb.reason.find("ExternalView") == std::string::npos,
+					(L"Fallback() must not report ExternalView: " + Wide(fb.reason)).c_str());
+			}
+
+			// 2a. Positive Acquire proof via VerifiedField::trust in P3FieldFactsTag() + pin lifetime across non-upscale.
+			{
+				std::shared_ptr<int> pin = std::make_shared<int>(42);
+				auto facts = std::make_shared<VpMotion::VerifiedField>();
+				facts->fwd = reinterpret_cast<pl_tex>(&dummyP3Tex);
+				facts->trust = reinterpret_cast<pl_tex>(&dummyFactsTrust);
+
+				AdaptiveDownscaleStage::Host host;
+				host.fallbackFramePeriod = []() { return 1.0f / 24.0f; };
+				host.bitrate = [](double& q) { q = 1.0; return false; };
+				host.nlsMapping = []() { return NlsMaskMapping::Mapping{}; };
+				host.ssimInChain = []() { return true; };
+				host.publishStatus = []() {};
+				host.motion = []() { return AdaptiveDownscaleStage::MotionSource{}; };   // no auxiliary trust needed
+				host.acquire = [&](VpSkeleton::ProductId id, uint64_t, const VpSkeleton::VariantKey&) {
+					VpSkeleton::AcquireResult r;
+					if (id == VpSkeleton::kP10gGrainLevel)
+					{
+						r.status = VpSkeleton::AcquireStatus::Reused;
+						r.gpu.resource = &dummyGrainTex;
+					}
+					else if (id == VpSkeleton::kP3AnalysisField)
+					{
+						r.status = VpSkeleton::AcquireStatus::Reused;
+						r.gpu.resource = &dummyP3Tex;
+						r.gpu.textureSet = VpMotion::P3FieldFactsTag();
+						r.gpu.keepAlive = std::static_pointer_cast<void>(facts);
+						r.pin = pin;
+					}
+					return r;
+				};
+
+				std::vector<const pl_hook*> hooks;
+				stage.Register(makeFrame(11), host, { weight, grainWanted, noSsim }, hooks);
+				Assert::IsTrue(stage.UpscaleMotionCause().empty(),
+					(L"live kP3AnalysisField with P3FieldFactsTag trust must clear UpscaleMotionCause, got: " + Wide(stage.UpscaleMotionCause())).c_str());
+				const std::vector<std::string> lines = stage.StatusLines();
+				Assert::IsFalse(HasSubstring(lines, "ExternalView"), L"Acquire P3 must emit no ExternalView line");
+				Assert::IsFalse(HasSubstring(lines, "no vectors"), L"live Acquire P3 must emit no no-vectors line");
+				const FallbackCatalog::Decision fb = stage.Fallback();
+				Assert::IsTrue(fb.reason.find("ExternalView") == std::string::npos, L"live Acquire P3 must not engage ExternalView fallback");
+				Assert::IsTrue(fb.reason.find("no vectors") == std::string::npos, L"live Acquire P3 must not engage no-vectors fallback");
+				Assert::IsTrue(pin.use_count() >= 2, L"kP3AnalysisField pin must be held while upscale is active");
+
+				// Transition to non-upscale frame (1:1 native): pin must be released!
+				hooks.clear();
+				AdaptiveDownscaleStage::Frame nonUp = makeFrame(12, 1920.0f, 1080.0f, 1920.0f, 1080.0f);
+				stage.Register(nonUp, host, { weight, grainWanted, noSsim }, hooks);
+				Assert::AreEqual(long(1), pin.use_count(), L"transitioning to non-upscale frame must release kP3AnalysisField pin");
+			}
+
+			// 2b. Positive Acquire proof with auxiliary host.motion().frameTrust (no P3FieldFactsTag) + pin release.
+			{
+				std::shared_ptr<int> pinAux = std::make_shared<int>(99);
+				AdaptiveDownscaleStage::Host host;
+				host.fallbackFramePeriod = []() { return 1.0f / 24.0f; };
+				host.bitrate = [](double& q) { q = 1.0; return false; };
+				host.nlsMapping = []() { return NlsMaskMapping::Mapping{}; };
+				host.ssimInChain = []() { return true; };
+				host.publishStatus = []() {};
+				host.motion = []() {
+					AdaptiveDownscaleStage::MotionSource m;
+					m.live = false;
+					m.field = nullptr;
+					m.frameTrust = reinterpret_cast<pl_tex>(&dummyAuxTrust);
+					return m;
+				};
+				host.acquire = [&](VpSkeleton::ProductId id, uint64_t, const VpSkeleton::VariantKey&) {
+					VpSkeleton::AcquireResult r;
+					if (id == VpSkeleton::kP10gGrainLevel)
+					{
+						r.status = VpSkeleton::AcquireStatus::Reused;
+						r.gpu.resource = &dummyGrainTex;
+					}
+					else if (id == VpSkeleton::kP3AnalysisField)
+					{
+						r.status = VpSkeleton::AcquireStatus::Reused;
+						r.gpu.resource = &dummyP3Tex;
+						r.pin = pinAux;
+					}
+					return r;
+				};
+
+				std::vector<const pl_hook*> hooks;
+				stage.Register(makeFrame(13), host, { weight, grainWanted, noSsim }, hooks);
+				Assert::IsTrue(stage.UpscaleMotionCause().empty(),
+					(L"live kP3AnalysisField with auxiliary frameTrust must succeed, got: " + Wide(stage.UpscaleMotionCause())).c_str());
+				Assert::IsFalse(HasSubstring(stage.StatusLines(), "ExternalView"), L"no ExternalView with auxiliary frameTrust");
+				Assert::IsFalse(HasSubstring(stage.StatusLines(), "no vectors"), L"no no-vectors line with auxiliary frameTrust");
+				Assert::IsTrue(pinAux.use_count() >= 2, L"kP3AnalysisField pin must be held with auxiliary frameTrust");
+
+				hooks.clear();
+				AdaptiveDownscaleStage::Frame offFrame = makeFrame(14);
+				offFrame.adaptiveUpscale = false;
+				stage.Register(offFrame, host, { weight, grainWanted, noSsim }, hooks);
+				Assert::AreEqual(long(1), pinAux.use_count(), L"disabling upscale must release kP3AnalysisField pin");
+			}
+
+			// 3. Missing frameTrust visible fallback: kP3AnalysisField returns GPU resource, but BOTH VerifiedField::trust
+			//    and host.motion().frameTrust are null -> visible fallback naming "kP3AnalysisField has no frame trust",
+			//    and the acquired pin MUST NOT be retained!
+			{
+				std::shared_ptr<int> noTrustPin = std::make_shared<int>(77);
+				AdaptiveDownscaleStage::Host host;
+				host.fallbackFramePeriod = []() { return 1.0f / 24.0f; };
+				host.bitrate = [](double& q) { q = 1.0; return false; };
+				host.nlsMapping = []() { return NlsMaskMapping::Mapping{}; };
+				host.ssimInChain = []() { return true; };
+				host.publishStatus = []() {};
+				host.motion = []() { return AdaptiveDownscaleStage::MotionSource{}; };
+				host.acquire = [&](VpSkeleton::ProductId id, uint64_t, const VpSkeleton::VariantKey&) {
+					VpSkeleton::AcquireResult r;
+					if (id == VpSkeleton::kP10gGrainLevel)
+					{
+						r.status = VpSkeleton::AcquireStatus::Reused;
+						r.gpu.resource = &dummyGrainTex;
+					}
+					else if (id == VpSkeleton::kP3AnalysisField)
+					{
+						r.status = VpSkeleton::AcquireStatus::Reused;
+						r.gpu.resource = &dummyP3Tex;
+						r.pin = noTrustPin;
+					}
+					return r;
+				};
+
+				std::vector<const pl_hook*> hooks;
+				stage.Register(makeFrame(15), host, { weight, grainWanted, noSsim }, hooks);
+				Assert::AreEqual(long(1), noTrustPin.use_count(),
+					L"missing frameTrust must not retain kP3AnalysisField pin");
+				Assert::AreEqual(std::string("kP3AnalysisField has no frame trust"), stage.UpscaleMotionCause(),
+					L"missing frameTrust must surface exact cause");
+				const std::vector<std::string> lines = stage.StatusLines();
+				const std::string joined = JoinLines(lines);
+				Assert::IsTrue(HasSubstring(lines, "upscale motion: no vectors (alias-safe weight)")
+					&& HasSubstring(lines, "kP3AnalysisField has no frame trust"),
+					(L"missing frameTrust must emit verbatim no-vectors + cause in: " + Wide(joined)).c_str());
+				const FallbackCatalog::Decision fb = stage.Fallback();
+				Assert::IsTrue(fb.engaged && fb.id == "output scaling"
+					&& fb.reason.find("kP3AnalysisField has no frame trust") != std::string::npos,
+					(L"missing frameTrust must engage Fallback() with cause, got: " + Wide(fb.reason)).c_str());
+			}
+
+			// 4. Zero-cost abstention: oneAxis upscale, vectorsRun == false, and nlsUnknown MUST NOT acquire kP3AnalysisField!
+			{
+				int p3Asks = 0;
+				AdaptiveDownscaleStage::Host host;
+				host.fallbackFramePeriod = []() { return 1.0f / 24.0f; };
+				host.bitrate = [](double& q) { q = 1.0; return false; };
+				host.nlsMapping = []() { NlsMaskMapping::Mapping m{}; m.valid = false; return m; };
+				host.ssimInChain = []() { return true; };
+				host.publishStatus = []() {};
+				host.motion = []() { return AdaptiveDownscaleStage::MotionSource{}; };
+				host.acquire = [&](VpSkeleton::ProductId id, uint64_t, const VpSkeleton::VariantKey&) {
+					if (id == VpSkeleton::kP3AnalysisField)
+						++p3Asks;
+					VpSkeleton::AcquireResult r;
+					if (id == VpSkeleton::kP10gGrainLevel)
+					{
+						r.status = VpSkeleton::AcquireStatus::Reused;
+						r.gpu.resource = &dummyGrainTex;
+					}
+					return r;
+				};
+
+				std::vector<const pl_hook*> hooks;
+				// (a) one-axis upscale (width-only: 1920x1440 -> 2560x1440)
+				stage.Register(makeFrame(16, 1920.0f, 1440.0f, 2560.0f, 1440.0f), host, { weight, grainWanted, noSsim }, hooks);
+				Assert::IsTrue(stage.OneAxisThisFrame(), L"premise: 1920x1440 -> 2560x1440 is one-axis");
+				Assert::AreEqual(0, p3Asks, L"one-axis upscale must not Acquire kP3AnalysisField");
+
+				// (b) vectorsRun == false
+				hooks.clear();
+				AdaptiveDownscaleStage::Frame noVec = makeFrame(17);
+				noVec.vectorsRun = false;
+				stage.Register(noVec, host, { weight, grainWanted, noSsim }, hooks);
+				Assert::AreEqual(0, p3Asks, L"vectorsRun == false must not Acquire kP3AnalysisField");
+
+				// (c) nlsUnknown (nlsSubmitted == true, !nlsMap.valid)
+				hooks.clear();
+				AdaptiveDownscaleStage::Frame badNls = makeFrame(18);
+				badNls.nlsSubmitted = true;
+				badNls.nlsFile = "UnknownNLS.glsl";
+				stage.Register(badNls, host, { weight, grainWanted, noSsim }, hooks);
+				Assert::AreEqual(0, p3Asks, L"nlsUnknown must not Acquire kP3AnalysisField");
 			}
 		}
 
@@ -1576,6 +1878,16 @@ namespace VideoProcessorTest
 						r.status = VpSkeleton::AcquireStatus::Reused;
 						r.gpu.resource = const_cast<pl_tex_t*>(cleanGrain);
 					}
+					else if (id == VpSkeleton::kP3AnalysisField)
+					{
+						if (liveVectors)
+						{
+							r.status = VpSkeleton::AcquireStatus::Reused;
+							r.gpu.resource = const_cast<pl_tex_t*>(whipField);
+						}
+						else
+							r.cause = VpSkeleton::AcquireCause::OwnerDeclined;
+					}
 					return r;
 				};
 				host.motion = [&]() {
@@ -2061,6 +2373,11 @@ namespace VideoProcessorTest
 					{
 						r.status = VpSkeleton::AcquireStatus::Reused;
 						r.gpu.resource = const_cast<pl_tex_t*>(offCenterGrain);
+					}
+					else if (id == VpSkeleton::kP3AnalysisField)
+					{
+						r.status = VpSkeleton::AcquireStatus::Reused;
+						r.gpu.resource = const_cast<pl_tex_t*>(offCenterMotion);
 					}
 					return r;
 				};

@@ -64,10 +64,14 @@
       "fbo_float32",
       "hybrid_refine_d",
       "residual_stabilise_grain_guard",
+      "sharp_residual_stabilise",
       "ssim_bitrate_aware",
       "ssim_bitrate_floor",
       "ssim_residual_stabilise",
-      "upscale_light"
+      "upscale_light",
+      "upscale_safe",
+      "upscale_sharp",
+      "upscale_sharp_antiring"
     ],
     "upstream_modules": [
       "scaling.chroma_upscale",

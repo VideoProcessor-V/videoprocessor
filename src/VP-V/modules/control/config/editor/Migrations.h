@@ -17,7 +17,7 @@
 #include "ConfigEditorWindow.h"
 
 namespace ConfigEditorCore { struct ConfigDocument; }
-namespace Vpv { bool FoldLegacyInputPolicy(ConfigEditorCore::ConfigDocument& document); }
+namespace Vpv { bool FoldLegacyInputPolicy(ConfigEditorCore::ConfigDocument& document); bool MigrateSharpResidualStabilise(ConfigEditorCore::ConfigDocument& document); }
 
 void ConfigEditorWindow::migrateRefreshKeys()
 {
@@ -178,7 +178,7 @@ void ConfigEditorWindow::migrateProfileValueNormalisations()
             document_->RemoveKnown(section.toStdString(), key);
             migrated = true;
         }
-    if (!migrated) return;
+    if (!Vpv::MigrateSharpResidualStabilise(*document_) && !migrated) return;
     dirty_ = true;
     hasPendingMigrations_ = true;
     document_->requiresMigrationBackup = document_->existedAtLoad;

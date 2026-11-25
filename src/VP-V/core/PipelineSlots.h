@@ -82,7 +82,7 @@ namespace PipelineSlots
 		{ Id::RepairEncoding, "repair.encoding", Side::Input, 70, HookPoint::Prepass, Status::Placeholder, Origin::Vp },
 		{ Id::RepairDeband, "repair.deband", Side::Input, 80, HookPoint::Prepass, Status::Built, Origin::Vp },
 		{ Id::RepairTextureRestore, "repair.texture_restore", Side::Input, 90, HookPoint::Prepass, Status::Built, Origin::Vp },
-		{ Id::ScalingRoute4k, "scaling.route_4k", Side::Input, 100, HookPoint::Prepass, Status::Placeholder, Origin::Vp },
+		{ Id::ScalingRoute4k, "scaling.route_4k", Side::Input, 100, HookPoint::Prepass, Status::Built, Origin::Vp },
 		{ Id::ScalingRefine, "scaling.refine", Side::Input, 110, HookPoint::Prepass, Status::Placeholder, Origin::Vp },
 		{ Id::ScalingChromaUpscale, "scaling.chroma_upscale", Side::Input, 120, HookPoint::Prepass, Status::Placeholder, Origin::Vp },
 		{ Id::MotionVectorDelivery, "motion.vector_delivery", Side::Processing, 130, HookPoint::Host, Status::Partial, Origin::Vp },

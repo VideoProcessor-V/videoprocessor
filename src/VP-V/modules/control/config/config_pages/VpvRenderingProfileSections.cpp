@@ -1032,12 +1032,12 @@ namespace Vpv
         lowBitrate->setToolTip(QStringLiteral(
             "How VP deband reacts to compression (blocking, banding). Auto: by the measured bitrate quality. "
             "Off: by the content's bit depth only. On: always as for a poor stream."));
-        auto* cnnStabilise = addChoice(QStringLiteral("Steady CNN detail (upscaling)"), QStringLiteral("cnn_residual_stabilise"),
+        auto* sharpStabilise = addChoice(QStringLiteral("Steady sharp detail (upscaling)"), QStringLiteral("sharp_residual_stabilise"),
             { QStringLiteral("on"), QStringLiteral("off") });
-        cnnStabilise->setToolTip(QStringLiteral(
-            "The detail the CNN upscaler adds can shimmer on compressed streams (it is re-invented every frame). "
-            "On: where the de-judder's motion is trusted, that added detail is averaged along the motion over about "
-            "three frames; the picture itself is untouched. Without the motion it does nothing (same as off)."));
+        sharpStabilise->setToolTip(QStringLiteral(
+            "The detail the sharp upscaler branch adds can shimmer on compressed streams. "
+            "On: where motion vectors are trusted, that added detail is held along the motion over about "
+            "three frames; the alias-safe base is untouched. Without motion vectors it does nothing (same as off)."));
         auto* ssimStabilise = addChoice(QStringLiteral("Steady SSIM detail (downscaling)"), QStringLiteral("ssim_residual_stabilise"),
             { QStringLiteral("on"), QStringLiteral("off") });
         ssimStabilise->setToolTip(QStringLiteral(
@@ -2521,6 +2521,27 @@ namespace Vpv
             "the picture is scaled down from 2x in linear light; without a CNN the plain upscale is in gamma light "
             "(libplacebo upscales in linear light only through sigmoid, which is kept off because it clips "
             "above-white). Gamma: gamma light everywhere, like madVR."));
+        auto* upscaleRoute = addChoice(QStringLiteral("4K route pre-render upscale"),
+            QStringLiteral("upscale_route"), { QStringLiteral("off"), QStringLiteral("rebased_only"), QStringLiteral("always_4k") });
+        upscaleRoute->setToolTip(QStringLiteral(
+            "Pre-render 4K route upscaling (scaling.route_4k): off = bypassed straight to output scaling, "
+            "rebased_only = upscale only rebased frames, always_4k = upscale whenever target exceeds input."));
+        auto* upscaleSharp = addChoice(QStringLiteral("Sharp upscaler branch"),
+            QStringLiteral("upscale_sharp"), { QStringLiteral("lanczos3"), QStringLiteral("ewa_lanczossharp"),
+            QStringLiteral("catmull_rom"), QStringLiteral("lanczos2"), QStringLiteral("lanczos4"), QStringLiteral("bicubic") });
+        upscaleSharp->setToolTip(QStringLiteral(
+            "Resampling kernel for the sharp branch of the hybrid upscaler (default: lanczos3)."));
+        auto* upscaleSafe = addChoice(QStringLiteral("Alias-safe upscaler branch"),
+            QStringLiteral("upscale_safe"), { QStringLiteral("hermite"), QStringLiteral("lanczos3"),
+            QStringLiteral("catmull_rom"), QStringLiteral("ewa_lanczossharp"), QStringLiteral("bicubic"), QStringLiteral("bilinear") });
+        upscaleSafe->setToolTip(QStringLiteral(
+            "Resampling kernel for the alias-safe branch of the hybrid upscaler (default: hermite)."));
+        auto* upscaleSharpAntiring = addText(QStringLiteral("Sharp branch anti-ringing (0 to 1)"),
+            QStringLiteral("upscale_sharp_antiring"));
+        upscaleSharpAntiring->setValidator(new QDoubleValidator(0.0, 1.0, 2, upscaleSharpAntiring));
+        upscaleSharpAntiring->setPlaceholderText(QStringLiteral("0.5"));
+        upscaleSharpAntiring->setToolTip(QStringLiteral(
+            "Anti-ringing clamp strength for the sharp upscaler branch (default 0.5; 0 = off, 1 = full clamp)."));
         MarkGpuCost(form, upscaleOn, 2);
         {
             auto greyUpscale = [upscaleOn, upscaleWBase, upscaleSuperres, upscaleLight]()
@@ -2553,7 +2574,7 @@ namespace Vpv
         handles.ssimStabilise = ssimStabilise;
         handles.bitrateAware = bitrateAware;
         handles.bitrateFloor = bitrateFloor;
-        handles.cnnStabilise = cnnStabilise;
+        handles.cnnStabilise = sharpStabilise;
         return handles;
     }
 

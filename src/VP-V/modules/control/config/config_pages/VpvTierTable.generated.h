@@ -58,10 +58,14 @@ namespace Vpv
             t.defaults.push_back({ "source_resolution_text_guard", "on" });
             t.defaults.push_back({ "source_resolution_mixed_guard", "on" });
             t.defaults.push_back({ "adaptive_upscale", "off" });
+            t.defaults.push_back({ "upscale_route", "off" });
+            t.defaults.push_back({ "upscale_sharp", "lanczos3" });
+            t.defaults.push_back({ "upscale_safe", "hermite" });
             t.defaults.push_back({ "adaptive_grain_map", "on" });
             t.defaults.push_back({ "ssim_bitrate_aware", "on" });
             t.defaults.push_back({ "ssim_residual_stabilise", "on" });
             t.defaults.push_back({ "cnn_residual_stabilise", "on" });
+            t.defaults.push_back({ "sharp_residual_stabilise", "on" });
             t.defaults.push_back({ "fbo_float32", "auto" });
             t.defaults.push_back({ "ambient_adapt", "off" });
             t.defaults.push_back({ "appearance", "off" });
@@ -81,7 +85,7 @@ namespace Vpv
             t.slotList.push_back({ "repair.deband", "Deband", "repair", "built", 80, "deband: libplacebo deband (VP debander failed: <error>) / VP deband: off on the DV tunnel planes (no deband after decode yet)" });
             t.slotList.push_back({ "colour.dm_pre", "DV display mapping: pre (RGB input)", "colour", "built", 85, "DV deband: off (<reason>)" });
             t.slotList.push_back({ "repair.texture_restore", "Texture restore + breathing add-on", "repair", "built", 90, "Texture restore: inactive (<reason>)" });
-            t.slotList.push_back({ "scaling.route_4k", "4K route (entrance stage 2b)", "scaling", "placeholder", 100, "4K route: off (<reason>)" });
+            t.slotList.push_back({ "scaling.route_4k", "4K route (entrance stage 2b)", "scaling", "built", 100, "4K route: off (<reason>)" });
             t.slotList.push_back({ "scaling.refine", "Refine net", "scaling", "placeholder", 110, "Refine: bypassed (fingerprint mismatch / group underperforms / low latency)" });
             t.slotList.push_back({ "scaling.chroma_upscale", "Chroma upscale (placeholder)", "scaling", "placeholder", 120, "Chroma upscale: libplacebo (<reason>)" });
             t.slotList.push_back({ "scaling.shared", "Shared scaler unit (ScalerPass)", "scaling", "placeholder", 125, "Scaler pass: caller's own path (<reason>)" });
@@ -254,10 +258,12 @@ namespace Vpv
                 u.toggles.push_back({ "adaptive_grain_map", "Grain map steers the downscale", { "on", "off" }, "scaling.output" });
                 u.toggles.push_back({ "ssim_bitrate_aware", "Gentler sharpening on poor streams", { "on", "off" }, "scaling.output" });
                 u.toggles.push_back({ "ssim_residual_stabilise", "Steady the downscaler's added detail along motion", { "on", "off" }, "scaling.output" });
-                u.toggles.push_back({ "cnn_residual_stabilise", "Steady the upscaler's added detail along motion", { "on", "off" }, "scaling.output" });
+                u.toggles.push_back({ "sharp_residual_stabilise", "Steady the sharp upscaler's added detail along motion", { "on", "off" }, "scaling.output" });
                 u.toggles.push_back({ "adaptive_upscale", "Grain-aware upscale for small sources", { "on", "off" }, "scaling.output" });
+                u.toggles.push_back({ "upscale_route", "4K route pre-render upscale", { "off", "rebased_only", "always_4k" }, "scaling.route_4k" });
+                u.toggles.push_back({ "upscale_sharp", "Hybrid upscaler: sharp branch filter", { "lanczos3", "ewa_lanczossharp", "catmull_rom", "lanczos2", "lanczos4", "bicubic" }, "scaling.output" });
+                u.toggles.push_back({ "upscale_safe", "Hybrid upscaler: alias-safe branch filter", { "hermite", "lanczos3", "catmull_rom", "ewa_lanczossharp", "bicubic", "bilinear" }, "scaling.output" });
                 u.toggles.push_back({ "source_resolution_frame_bound", "Re-base: decide on a fixed frame delay", { "on", "off" }, "input.source_analysis" });
-                u.planned.push_back({ "entrance_route_4k", "4K route (fixed 1-D steps to 4K)", "scaling.route_4k" });
                 u.planned.push_back({ "refine_net", "4K refine net", "scaling.refine" });
                 u.planned.push_back({ "hybrid_refine_d", "Extra detail-recovery step under the hybrid scaler", "scaling.output" });
                 t.units.push_back(u);

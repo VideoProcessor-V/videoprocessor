@@ -195,7 +195,7 @@ namespace EntranceSegmentTestsNs
 		{
 			// Zero-cost rule: placeholders have no component by default, so the walk never reaches them.
 			const std::vector<Stage> plan = EntranceSegment::Plan(PipelineSlots::Registry());
-			const std::vector<Stage> expected = { Stage::Rebase, Stage::Deband, Stage::Detail };
+			const std::vector<Stage> expected = { Stage::Rebase, Stage::Deband, Stage::Detail, Stage::Route4k };
 			Assert::IsTrue(plan == expected);
 		}
 

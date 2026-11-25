@@ -1485,6 +1485,9 @@ namespace Vpv
 					"Default 1.0: the full adaptation. 0 leaves the picture unchanged; values between blend the adaptation in." },
 				{ "appearance_screen_white_nits", "Screen white", 1.0, 1000.0, 1, 1.0, 48.0, " nits",
 					"Default 48 nits: the luminance of the screen white the picture is adapted to. Used as given until the measured switch in Advanced is on." },
+				// Q2-B3 (scaling.output): sharp-branch anti-ringing for the hybrid upscaler.
+				{ "upscale_sharp_antiring", "Sharp branch anti-ringing", 0.0, 1.0, 2, 0.05, 0.5, nullptr,
+					"Default 0.5: anti-ringing strength for the sharp upscaler branch (0 = off, 1 = full clamp)." },
 			};
 			for (const NumberRowSpec& r : kNumberRows)
 				if (std::string(r.key) == key) return &r;

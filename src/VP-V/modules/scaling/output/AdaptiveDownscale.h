@@ -179,14 +179,15 @@ namespace AdaptiveDownscale
 	constexpr float kEdgeEnergyPerSigma = 3.5682482f;   // sqrt(20) * sqrt(2 / pi) = 4.4721360 * 0.7978846
 
 	// Stage 12 §2c / S8-1: the de-judder's motion for the source frame being
-	// rendered (from the last estimate; null = none: this frame's residual).
+	// rendered (from the last estimate or Acquire(kP3AnalysisField); null = none: this frame's residual).
 	struct Motion
 	{
-		pl_tex field = nullptr;        // MotionWarp::Field(): vx, vy (source px), trust, error per 16x16 block
-		pl_tex frameTrust = nullptr;   // MotionWarp::FrameTrust(): r = the trusted share
+		pl_tex field = nullptr;          // P3 analysis field: vx, vy (source px), trust, error per 16x16 block
+		pl_tex frameTrust = nullptr;     // frame trust texture: r = the trusted share
+		std::shared_ptr<const void> pin; // M1#1: keeps Acquire(kP3AnalysisField) alive until the next frame / ClearMotion()
 		float minTrustedShare = 0.25f;
-		pl_rect2df sourceCrop{};       // the source crop libplacebo scales, in the field's source pixels
-		NlsMaskMapping::Mapping nls{}; // NLS coordinate mapping when active (residual hold stays off under NLS)
+		pl_rect2df sourceCrop{};         // the source crop libplacebo scales, in the field's source pixels
+		NlsMaskMapping::Mapping nls{};   // NLS coordinate mapping when active (residual hold stays off under NLS)
 	};
 
 	// Stage 12 §2c / delta 15 S8-2 (owner 2026-10-15): the weight scale for a

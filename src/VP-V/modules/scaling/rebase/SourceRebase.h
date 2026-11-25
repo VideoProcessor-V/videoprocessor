@@ -3,6 +3,8 @@
 #include <libplacebo/renderer.h>
 #include <libplacebo/shaders.h>
 
+#include <VP-V/modules/scaling/shared/ScalerPass.h>
+
 #include <string>
 
 // Stage 12 step A (docs/VP-stage12-build-plan.md; owner 2026-10-15):
@@ -91,15 +93,14 @@ namespace SourceRebase
 
 	private:
 		static constexpr int kSlots = 3;
-		pl_tex textures[kSlots][PL_MAX_PLANES] = {};
+		pl_tex textures[kSlots][1] = {};   // plane-0 output for the 2:1 kernel-matched inverse path
 		pl_tex inverseTemp[kSlots] = {};   // the first (horizontal) inverse pass
-		pl_tex separableTemp[kSlots][PL_MAX_PLANES] = {};   // the separable filter's first pass
-		pl_shader_obj lutsDown[kSlots][PL_MAX_PLANES] = {};
+		ScalerPass::Module scalerPasses[PL_MAX_PLANES];
+		ScalerPass::Module chromaTempPasses[PL_MAX_PLANES];
 		int kernel = -1;
 		bool kernelUsed = false;
 		bool InversePlane(pl_gpu gpu, pl_dispatch dispatch, pl_tex in, int w, int h, bool acrossInverse, bool downInverse,
 			pl_tex out, int slot, std::string& note);
-		pl_shader_obj luts[kSlots][PL_MAX_PLANES] = {};
 		std::string error;
 		std::string formatNote;
 		unsigned long long failures = 0;
