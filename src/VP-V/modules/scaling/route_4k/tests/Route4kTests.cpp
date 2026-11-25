@@ -13,6 +13,7 @@
 #include "CppUnitTest.h"
 
 #include <VP-V/core/ChromaSiting.h>
+#include <VP-V/core/LumaWeights.h>
 #include <VP-V/core/PipelineSlots.h>
 #include <VP-V/modules/scaling/output/AdaptiveDownscale.h>
 #include <VP-V/modules/scaling/route_4k/Route4k.h>
@@ -97,12 +98,12 @@ namespace Route4kTestsNs
 		ScalerGuard& operator=(const ScalerGuard&) = delete;
 	};
 
-	bool DownloadFloats(pl_gpu gpu, pl_tex tex, std::vector<float>& out)
+	bool DownloadFloatComponents(pl_gpu gpu, pl_tex tex, int expectedComponents, std::vector<float>& out)
 	{
 		if (!gpu || !tex || !tex->params.format)
 			return false;
 		const pl_fmt fmt = tex->params.format;
-		if (fmt->type != PL_FMT_FLOAT || fmt->component_depth[0] != 32 || fmt->num_components != 1)
+		if (fmt->type != PL_FMT_FLOAT || fmt->component_depth[0] != 32 || fmt->num_components != expectedComponents)
 			return false;
 		pl_tex_params rp{};
 		rp.w = tex->params.w;
@@ -117,11 +118,16 @@ namespace Route4kTestsNs
 		bp.src = tex;
 		bp.dst = readable.tex;
 		pl_tex_blit(gpu, &bp);
-		out.assign(static_cast<size_t>(rp.w) * rp.h, 0.0f);
+		out.assign(static_cast<size_t>(rp.w) * rp.h * expectedComponents, 0.0f);
 		pl_tex_transfer_params dp{};
 		dp.tex = readable.tex;
 		dp.ptr = out.data();
 		return pl_tex_download(gpu, &dp);
+	}
+
+	bool DownloadFloats(pl_gpu gpu, pl_tex tex, std::vector<float>& out)
+	{
+		return DownloadFloatComponents(gpu, tex, 1, out);
 	}
 
 	TEST_CLASS(Route4kCpuTests)
@@ -271,6 +277,31 @@ namespace Route4kTestsNs
 			Assert::AreEqual(1.5, p1440.geometry.factorX, 1e-9);
 			Assert::AreEqual(1.5, p1440.geometry.factorY, 1e-9);
 			Assert::IsTrue(std::fabs(d1440.ratioX - 2.0) > 0.4, L"negative control: 1440p->4K is 1.5x, not fixed 2x");
+
+			// 5. One-axis and mixed-axis no-downscale cases:
+			// H-only: 1920x2160 -> 3840x2160
+			const Route4k::PlanResult pHOnly = Route4k::Plan(1920, 2160, 3840, 2160, 3840, 2160, true, true, false, rebasedCfg);
+			Assert::IsTrue(pHOnly.shouldRun && pHOnly.oneAxis, L"1920x2160 -> 3840x2160 must run as one-axis");
+			Assert::AreEqual(3840, pHOnly.geometry.dstW);
+			Assert::AreEqual(2160, pHOnly.geometry.dstH);
+			Assert::AreEqual(2.0, pHOnly.geometry.factorX, 1e-9);
+			Assert::AreEqual(1.0, pHOnly.geometry.factorY, 1e-9);
+
+			// V-only: 3840x1080 -> 3840x2160
+			const Route4k::PlanResult pVOnly = Route4k::Plan(3840, 1080, 3840, 2160, 3840, 2160, true, true, false, rebasedCfg);
+			Assert::IsTrue(pVOnly.shouldRun && pVOnly.oneAxis, L"3840x1080 -> 3840x2160 must run as one-axis");
+			Assert::AreEqual(3840, pVOnly.geometry.dstW);
+			Assert::AreEqual(2160, pVOnly.geometry.dstH);
+			Assert::AreEqual(1.0, pVOnly.geometry.factorX, 1e-9);
+			Assert::AreEqual(2.0, pVOnly.geometry.factorY, 1e-9);
+
+			// Mixed-axis no-downscale: 4096x1080 on 3840x2160 target keeps 4096 width (never downscales X) and upscales Y 2x!
+			const Route4k::PlanResult pMixed = Route4k::Plan(4096, 1080, 3840, 2160, 3840, 2160, true, true, false, alwaysCfg);
+			Assert::IsTrue(pMixed.shouldRun && pMixed.oneAxis, L"4096x1080 on 3840x2160 must run as one-axis (Y only)");
+			Assert::AreEqual(4096, pMixed.geometry.dstW, L"mixed-axis must never downscale wider X axis");
+			Assert::AreEqual(2160, pMixed.geometry.dstH);
+			Assert::AreEqual(1.0, pMixed.geometry.factorX, 1e-9);
+			Assert::AreEqual(2.0, pMixed.geometry.factorY, 1e-9);
 		}
 
 		TEST_METHOD(NoDoubleUpscaleInvariantAndUnroutedNegativeControl)
@@ -459,6 +490,8 @@ namespace Route4kTestsNs
 
 			const int sw = 64, sh = 48;
 			const int dw = 128, dh = 96;
+			const int cw = sw / 2, ch = sh / 2;
+			const int dcw = dw / 2, dch = dh / 2;
 			std::vector<uint16_t> lumaRaw(static_cast<size_t>(sw) * sh);
 			for (int y = 0; y < sh; ++y)
 				for (int x = 0; x < sw; ++x)
@@ -467,7 +500,20 @@ namespace Route4kTestsNs
 					const double v = hi ? 0.85 : 0.15;
 					lumaRaw[static_cast<size_t>(y) * sw + x] = static_cast<uint16_t>(std::lround(v * 65535.0));
 				}
-			std::vector<uint16_t> chromaRaw(static_cast<size_t>(sw / 2) * (sh / 2) * 2, 32768u);
+
+			// Non-uniform 2D pattern on BOTH Cb and Cr (distinct per-channel spatial gradients + edges).
+			std::vector<uint16_t> chromaRaw(static_cast<size_t>(cw) * ch * 2);
+			for (int y = 0; y < ch; ++y)
+				for (int x = 0; x < cw; ++x)
+				{
+					const double cbBase = (((x * 2 + y) / 4) & 1) ? 0.82 : 0.18;
+					const double cbGrad = 0.08 * (static_cast<double>(x) / (std::max)(1, cw - 1) - 0.5);
+					const double crBase = (((x + y * 3) / 5) & 1) ? 0.78 : 0.22;
+					const double crGrad = 0.08 * (static_cast<double>(y) / (std::max)(1, ch - 1) - 0.5);
+					const size_t idx = (static_cast<size_t>(y) * cw + x) * 2;
+					chromaRaw[idx + 0] = static_cast<uint16_t>(std::lround((std::min)(1.0, (std::max)(0.0, cbBase + cbGrad)) * 65535.0));
+					chromaRaw[idx + 1] = static_cast<uint16_t>(std::lround((std::min)(1.0, (std::max)(0.0, crBase + crGrad)) * 65535.0));
+				}
 
 			pl_tex_params lp{};
 			lp.w = sw; lp.h = sh; lp.format = pl_find_named_fmt(gpu, "r16"); lp.sampleable = true; lp.initial_data = lumaRaw.data();
@@ -475,7 +521,7 @@ namespace Route4kTestsNs
 			Assert::IsNotNull(lumaTex.tex, L"luma r16 upload failed");
 
 			pl_tex_params cp{};
-			cp.w = sw / 2; cp.h = sh / 2; cp.format = pl_find_named_fmt(gpu, "rg16"); cp.sampleable = true; cp.initial_data = chromaRaw.data();
+			cp.w = cw; cp.h = ch; cp.format = pl_find_named_fmt(gpu, "rg16"); cp.sampleable = true; cp.initial_data = chromaRaw.data();
 			TexGuard chromaTex(gpu, pl_tex_create(gpu, &cp));
 			Assert::IsNotNull(chromaTex.tex, L"chroma rg16 upload failed");
 
@@ -491,12 +537,13 @@ namespace Route4kTestsNs
 			src.planes[1].component_mapping[0] = PL_CHANNEL_CB;
 			src.planes[1].component_mapping[1] = PL_CHANNEL_CR;
 			src.planes[1].shift_x = -0.5f;
-			src.planes[1].shift_y = 0.0f;
+			src.planes[1].shift_y = 0.25f;
 			src.crop = { 0.0f, 0.0f, static_cast<float>(sw), static_cast<float>(sh) };
 
+			// Asymmetric weight (0.75f) detects swapped sharp/safe operands!
 			Route4k::Config cfg;
 			cfg.mode = Route4k::Mode::RebasedOnly;
-			cfg.wBase = 0.5f;
+			cfg.wBase = 0.75f;
 			Assert::IsTrue(Route4k::ParseKernel("lanczos3", cfg.sharpFilter));
 			Assert::IsTrue(Route4k::ParseKernel("hermite", cfg.safeFilter));
 			cfg.sharpAntiring = 0.5f;
@@ -512,8 +559,8 @@ namespace Route4kTestsNs
 			Assert::IsTrue(mod.Apply(gpu, dev.dispatch, src, plan, cfg, out, 0),
 				Wide("Route4k::Apply failed: " + mod.LastError()).c_str());
 
-			// Independent ground truth: run ScalerPass sharp (lanczos3) and safe (hermite) separately
-			// and blend via CPU HybridBlend::BlendLuma(s, f, 0.5f).
+			// Independent ground truth for plane 0: run ScalerPass sharp (lanczos3) and safe (hermite) separately
+			// and blend via CPU HybridBlend::BlendLuma(s, f, 0.75f).
 			ScalerPass::Module sharpRef, safeRef;
 			ScalerGuard sharpGuard(gpu, sharpRef), safeGuard(gpu, safeRef);
 			const ScalerPass::Source spSrc = { lumaTex.tex, 0.0f, 0.0f, static_cast<float>(sw), static_cast<float>(sh) };
@@ -541,24 +588,216 @@ namespace Route4kTestsNs
 
 			float maxBranchDiff = 0.0f;
 			float maxBlendErr = 0.0f;
+			float maxSwappedDiff = 0.0f;
 			for (size_t i = 0; i < gotBlend.size(); ++i)
 			{
 				maxBranchDiff = (std::max)(maxBranchDiff, std::fabs(refSharp[i] - refSafe[i]));
-				const float expected = HybridBlend::BlendLuma(refSharp[i], refSafe[i], 0.5f);
+				const float expected = HybridBlend::BlendLuma(refSharp[i], refSafe[i], cfg.wBase);
+				const float swapped = HybridBlend::BlendLuma(refSafe[i], refSharp[i], cfg.wBase);
 				maxBlendErr = (std::max)(maxBlendErr, std::fabs(gotBlend[i] - expected));
+				maxSwappedDiff = (std::max)(maxSwappedDiff, std::fabs(gotBlend[i] - swapped));
 			}
-			// Negative control: sharp (lanczos3) and safe (hermite) branches must genuinely differ on edges!
+			// Negative control 1: sharp (lanczos3) and safe (hermite) branches must genuinely differ on edges!
 			Assert::IsTrue(maxBranchDiff > 0.01f,
 				(L"negative control: sharp vs safe branches must differ on sharp edges, maxBranchDiff=" + std::to_wstring(maxBranchDiff)).c_str());
+			// Negative control 2: swapped asymmetric blend (0.75*safe + 0.25*sharp) MUST diverge from gotBlend!
+			Assert::IsTrue(maxSwappedDiff > 0.005f,
+				(L"negative control: swapped BlendLuma(safe, sharp, 0.75) must diverge from gotBlend, maxSwappedDiff=" + std::to_wstring(maxSwappedDiff)).c_str());
 			// GPU compute blend must match CPU HybridBlend law within float32 rounding (1e-5).
 			Assert::IsTrue(maxBlendErr <= 1e-5f,
 				(L"Route4k GPU blend diverged from HybridBlend CPU law: maxErr=" + std::to_wstring(maxBlendErr)).c_str());
 
-			// Chroma siting shift and crop updated via ChromaSiting::ShiftAfterResample.
-			Assert::AreEqual(ChromaSiting::ShiftAfterResample(src.planes[1].shift_x, 2.0), out.planes[1].shift_x, 1e-6f);
-			Assert::AreEqual(ChromaSiting::ShiftAfterResample(src.planes[1].shift_y, 2.0), out.planes[1].shift_y, 1e-6f);
+			// Plane 1 (chroma): texture replaced, resized to dw/2 x dh/2, matches independent ScalerPass chroma reference!
+			Assert::IsTrue(out.planes[1].texture != nullptr && out.planes[1].texture != src.planes[1].texture,
+				L"Route4k must replace plane 1 texture with resampled chroma");
+			Assert::AreEqual(dcw, out.planes[1].texture->params.w, L"resampled chroma width must equal dw / 2");
+			Assert::AreEqual(dch, out.planes[1].texture->params.h, L"resampled chroma height must equal dh / 2");
+
+			ScalerPass::Module chromaRef, chromaWrongRef;
+			ScalerGuard chromaRefGuard(gpu, chromaRef), chromaWrongGuard(gpu, chromaWrongRef);
+			const ScalerPass::Source cSrc = { chromaTex.tex, 0.0f, 0.0f, static_cast<float>(cw), static_cast<float>(ch) };
+			ScalerPass::Settings cSt;
+			cSt.filter = cfg.sharpFilter;
+			cSt.axis = ScalerPass::Axis::Both;
+			cSt.plane = ScalerPass::Plane::Chroma;
+			cSt.precision = ScalerPass::Precision::F32;
+			cSt.order = ScalerPass::Order::AcrossFirst;
+			cSt.antiring = cfg.sharpAntiring;
+			pl_tex chromaRefOut = nullptr;
+			Assert::IsTrue(chromaRef.Apply(gpu, dev.dispatch, cSrc, dcw, dch, cSt, chromaRefOut, 0));
+
+			ScalerPass::Settings cWrongSt = cSt;
+			cWrongSt.filter = cfg.safeFilter;
+			cWrongSt.antiring = cfg.safeAntiring;
+			pl_tex chromaWrongOut = nullptr;
+			Assert::IsTrue(chromaWrongRef.Apply(gpu, dev.dispatch, cSrc, dcw, dch, cWrongSt, chromaWrongOut, 0));
+
+			std::vector<float> gotChroma, refChroma, wrongChroma;
+			Assert::IsTrue(DownloadFloatComponents(gpu, out.planes[1].texture, 2, gotChroma), L"plane 1 rg32f download failed");
+			Assert::IsTrue(DownloadFloatComponents(gpu, chromaRefOut, 2, refChroma));
+			Assert::IsTrue(DownloadFloatComponents(gpu, chromaWrongOut, 2, wrongChroma));
+			Assert::AreEqual(refChroma.size(), gotChroma.size());
+
+			float maxChromaErr = 0.0f;
+			float maxChromaNegDiff = 0.0f;
+			for (size_t i = 0; i < gotChroma.size(); ++i)
+			{
+				maxChromaErr = (std::max)(maxChromaErr, std::fabs(gotChroma[i] - refChroma[i]));
+				maxChromaNegDiff = (std::max)(maxChromaNegDiff, std::fabs(gotChroma[i] - wrongChroma[i]));
+			}
+			Assert::IsTrue(maxChromaNegDiff > 0.005f,
+				(L"negative control: hermite chroma reference must differ from lanczos3 plane 1 output, maxDiff=" + std::to_wstring(maxChromaNegDiff)).c_str());
+			Assert::IsTrue(maxChromaErr <= 1e-5f,
+				(L"Route4k plane 1 chroma diverged from ScalerPass reference: maxErr=" + std::to_wstring(maxChromaErr)).c_str());
+
+			// Chroma siting shifts (both X and non-zero Y) and crop updated via ChromaSiting::ShiftAfterResample.
+			const float expectedShiftX = ChromaSiting::ShiftAfterResample(src.planes[1].shift_x, 2.0);
+			const float expectedShiftY = ChromaSiting::ShiftAfterResample(src.planes[1].shift_y, 2.0);
+			Assert::IsTrue(std::fabs(expectedShiftY - src.planes[1].shift_y) > 0.1f,
+				L"premise: non-zero shift_y 0.25 must change under 2x resample (0.5 != 0.25)");
+			Assert::AreEqual(expectedShiftX, out.planes[1].shift_x, 1e-6f);
+			Assert::AreEqual(expectedShiftY, out.planes[1].shift_y, 1e-6f);
 			Assert::AreEqual(static_cast<float>(dw), out.crop.x1, 1e-5f);
 			Assert::AreEqual(static_cast<float>(dh), out.crop.y1, 1e-5f);
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(SinglePlaneRgbHybridBlendIsLumaOnlyAndPreservesChroma)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(SinglePlaneRgbHybridBlendIsLumaOnlyAndPreservesChroma)
+		{
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create libplacebo WARP test device");
+			pl_gpu gpu = dev.Gpu();
+
+			const int sw = 64, sh = 48;
+			const int dw = 128, dh = 96;
+			// Saturated RGB edges with distinct per-channel spatial transitions so lanczos3 vs hermite
+			// have non-equal per-channel deltas (R-G and B-G differ between sharp and safe branches).
+			std::vector<float> srcRgba(static_cast<size_t>(sw) * sh * 4);
+			for (int y = 0; y < sh; ++y)
+				for (int x = 0; x < sw; ++x)
+				{
+					const bool hiRG = ((x / 5 + y / 4) & 1) != 0;
+					const bool hiB = (((x + y) / 4) & 1) != 0;
+					const size_t idx = (static_cast<size_t>(y) * sw + x) * 4;
+					srcRgba[idx + 0] = hiRG ? 0.90f : 0.12f;
+					srcRgba[idx + 1] = hiRG ? 0.16f : 0.78f;
+					srcRgba[idx + 2] = hiB ? 0.92f : 0.10f;
+					srcRgba[idx + 3] = 0.75f;
+				}
+
+			pl_fmt rgba32f = pl_find_named_fmt(gpu, "rgba32f");
+			Assert::IsNotNull(rgba32f, L"rgba32f format required");
+			pl_tex_params tp{};
+			tp.w = sw; tp.h = sh; tp.format = rgba32f; tp.sampleable = true; tp.initial_data = srcRgba.data();
+			TexGuard srcTex(gpu, pl_tex_create(gpu, &tp));
+			Assert::IsNotNull(srcTex.tex, L"source rgba32f upload failed");
+
+			pl_frame src{};
+			src.num_planes = 1;
+			src.planes[0].texture = srcTex.tex;
+			src.planes[0].components = 4;
+			src.planes[0].component_mapping[0] = 0;
+			src.planes[0].component_mapping[1] = 1;
+			src.planes[0].component_mapping[2] = 2;
+			src.planes[0].component_mapping[3] = 3;
+			src.repr.sys = PL_COLOR_SYSTEM_RGB;
+			src.color.primaries = PL_COLOR_PRIM_BT_709;
+			src.crop = { 0.0f, 0.0f, static_cast<float>(sw), static_cast<float>(sh) };
+
+			Route4k::Config cfg;
+			cfg.mode = Route4k::Mode::Always4k;
+			cfg.wBase = 0.75f;
+			Assert::IsTrue(Route4k::ParseKernel("lanczos3", cfg.sharpFilter));
+			Assert::IsTrue(Route4k::ParseKernel("hermite", cfg.safeFilter));
+			cfg.sharpAntiring = 0.5f;
+			cfg.safeAntiring = 0.5f;
+			cfg.preferFloat32 = true;
+
+			const Route4k::PlanResult plan = Route4k::Plan(sw, sh, dw, dh, dw, dh, true, true, false, cfg);
+			Assert::IsTrue(plan.shouldRun);
+
+			Route4k::Module mod;
+			Route4kGuard modGuard(gpu, mod);
+			pl_frame out{};
+			Assert::IsTrue(mod.Apply(gpu, dev.dispatch, src, plan, cfg, out, 0),
+				Wide("Route4k RGB Apply failed: " + mod.LastError()).c_str());
+
+			// Independent ScalerPass sharp & safe branches.
+			ScalerPass::Module sharpRef, safeRef;
+			ScalerGuard sharpGuard(gpu, sharpRef), safeGuard(gpu, safeRef);
+			const ScalerPass::Source spSrc = { srcTex.tex, 0.0f, 0.0f, static_cast<float>(sw), static_cast<float>(sh) };
+			ScalerPass::Settings sharpSt;
+			sharpSt.filter = cfg.sharpFilter;
+			sharpSt.axis = ScalerPass::Axis::Both;
+			sharpSt.plane = ScalerPass::Plane::Luma;
+			sharpSt.precision = ScalerPass::Precision::F32;
+			sharpSt.order = ScalerPass::Order::AcrossFirst;
+			sharpSt.antiring = cfg.sharpAntiring;
+			pl_tex sharpOut = nullptr;
+			Assert::IsTrue(sharpRef.Apply(gpu, dev.dispatch, spSrc, dw, dh, sharpSt, sharpOut, 0));
+
+			ScalerPass::Settings safeSt = sharpSt;
+			safeSt.filter = cfg.safeFilter;
+			safeSt.antiring = cfg.safeAntiring;
+			pl_tex safeOut = nullptr;
+			Assert::IsTrue(safeRef.Apply(gpu, dev.dispatch, spSrc, dw, dh, safeSt, safeOut, 0));
+
+			std::vector<float> gotRgba, refSharp, refSafe;
+			Assert::IsTrue(DownloadFloatComponents(gpu, out.planes[0].texture, 4, gotRgba), L"rgba32f download failed");
+			Assert::IsTrue(DownloadFloatComponents(gpu, sharpOut, 4, refSharp));
+			Assert::IsTrue(DownloadFloatComponents(gpu, safeOut, 4, refSafe));
+			Assert::AreEqual(refSharp.size(), gotRgba.size());
+
+			double kwD[3] = {};
+			LumaCoeff::ForSystem(src.repr.sys, src.color.primaries, kwD);
+			const float kw[3] = { static_cast<float>(kwD[0]), static_cast<float>(kwD[1]), static_cast<float>(kwD[2]) };
+
+			float maxBlendRgbErr = 0.0f;
+			float maxAlphaErr = 0.0f;
+			float maxRouteChromaShift = 0.0f;
+			float maxNaiveChromaShift = 0.0f;
+			float maxNaiveVsRouteDiff = 0.0f;
+			const size_t nPx = static_cast<size_t>(dw) * dh;
+			for (size_t i = 0; i < nPx; ++i)
+			{
+				const float* s = &refSharp[i * 4];
+				const float* f = &refSafe[i * 4];
+				const float* g = &gotRgba[i * 4];
+				float expected[3] = {};
+				HybridBlend::BlendRgb(s, f, kw, cfg.wBase, expected);
+				for (int c = 0; c < 3; ++c)
+					maxBlendRgbErr = (std::max)(maxBlendRgbErr, std::fabs(g[c] - expected[c]));
+				maxAlphaErr = (std::max)(maxAlphaErr, std::fabs(g[3] - s[3]));
+
+				// Luma-only blend adds identical scalar delta to R, G, B -> preserves sharp R-G and B-G exactly!
+				const float sharpRG = s[0] - s[1];
+				const float sharpBG = s[2] - s[1];
+				maxRouteChromaShift = (std::max)(maxRouteChromaShift, std::fabs((g[0] - g[1]) - sharpRG));
+				maxRouteChromaShift = (std::max)(maxRouteChromaShift, std::fabs((g[2] - g[1]) - sharpBG));
+
+				// Mandatory in-test negative control on the exact same input: naive per-channel RGB lerp alters chroma!
+				float naive[3];
+				for (int c = 0; c < 3; ++c)
+				{
+					naive[c] = s[c] + (1.0f - cfg.wBase) * (f[c] - s[c]);
+					maxNaiveVsRouteDiff = (std::max)(maxNaiveVsRouteDiff, std::fabs(naive[c] - g[c]));
+				}
+				maxNaiveChromaShift = (std::max)(maxNaiveChromaShift, std::fabs((naive[0] - naive[1]) - sharpRG));
+				maxNaiveChromaShift = (std::max)(maxNaiveChromaShift, std::fabs((naive[2] - naive[1]) - sharpBG));
+			}
+
+			Assert::IsTrue(maxNaiveChromaShift > 0.005f,
+				(L"negative control: naive per-channel RGB lerp must alter sharp chroma (R-G / B-G), maxShift=" + std::to_wstring(maxNaiveChromaShift)).c_str());
+			Assert::IsTrue(maxNaiveVsRouteDiff > 0.005f,
+				(L"negative control: naive per-channel RGB lerp must diverge from luma-only Route4k RGB output, maxDiff=" + std::to_wstring(maxNaiveVsRouteDiff)).c_str());
+			Assert::IsTrue(maxRouteChromaShift <= 1e-5f,
+				(L"Route4k RGB blend must preserve sharp chroma (R-G / B-G) within f32 rounding, maxShift=" + std::to_wstring(maxRouteChromaShift)).c_str());
+			Assert::IsTrue(maxBlendRgbErr <= 1e-5f,
+				(L"Route4k RGB output diverged from HybridBlend::BlendRgb: maxErr=" + std::to_wstring(maxBlendRgbErr)).c_str());
+			Assert::IsTrue(maxAlphaErr <= 1e-5f,
+				(L"Route4k RGB output altered alpha: maxErr=" + std::to_wstring(maxAlphaErr)).c_str());
 		}
 	};
 }

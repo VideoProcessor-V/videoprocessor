@@ -39,6 +39,8 @@ namespace Tests
 			{
 				AllSitesResetGuard reset;
 				const Site all[] = { Site::GrainMap, Site::TextureStats, Site::TextureRef, Site::VectorField, Site::Debander };
+				Assert::AreEqual(static_cast<size_t>(Site::Count), sizeof(all) / sizeof(all[0]),
+					L"test array must cover every CameraPassFailSeam::Site enum value");
 				for (Site s : all)
 				{
 					Assert::AreEqual(0, Armed(s).load(), L"site must start unarmed");

@@ -290,25 +290,27 @@ namespace VideoProcessorTest
 				Assert::AreEqual(std::string("high"), sec["quality"], L"unrelated keys untouched");
 			}
 
-			// 2. Mandatory same-input negative control / precedence: explicit sharp_residual_stabilise=on MUST survive
-			//    stale cnn_residual_stabilise=off (a naive overwrite-always migration would clobber 'on' to 'off'!).
+			// 2. Precedence vs legacy-only contrast: explicit sharp_residual_stabilise=on MUST survive
+			//    stale cnn_residual_stabilise=off, whereas an otherwise-identical section carrying only
+			//    cnn_residual_stabilise=off migrates to sharp_residual_stabilise=off.
 			{
-				std::map<std::string, std::string> sec;
-				sec["sharp_residual_stabilise"] = "on";
-				sec["cnn_residual_stabilise"] = "off";
+				std::map<std::string, std::string> withExplicit;
+				withExplicit["sharp_residual_stabilise"] = "on";
+				withExplicit["cnn_residual_stabilise"] = "off";
 
-				// Naive baseline on the exact same input: blindly overwriting sharp with legacy clobbers 'on' -> 'off'!
-				std::map<std::string, std::string> naive = sec;
-				naive["sharp_residual_stabilise"] = naive["cnn_residual_stabilise"];
-				naive.erase("cnn_residual_stabilise");
-				Assert::AreEqual(std::string("off"), naive["sharp_residual_stabilise"],
-					L"negative control: naive overwrite clobbers explicit sharp_residual_stabilise=on to off");
+				std::map<std::string, std::string> legacyOnly;
+				legacyOnly["cnn_residual_stabilise"] = "off";
 
-				Assert::IsTrue(Vpv::MigrateSharpResidualStabiliseSection(sec),
+				Assert::IsTrue(Vpv::MigrateSharpResidualStabiliseSection(legacyOnly),
+					L"legacy-only section must report a migration");
+				Assert::AreEqual(std::string("off"), legacyOnly["sharp_residual_stabilise"],
+					L"contrast baseline: legacy-only cnn_residual_stabilise=off migrates to off");
+
+				Assert::IsTrue(Vpv::MigrateSharpResidualStabiliseSection(withExplicit),
 					L"removing stale legacy key must report a change (true)");
-				Assert::IsTrue(sec.find("cnn_residual_stabilise") == sec.end(),
+				Assert::IsTrue(withExplicit.find("cnn_residual_stabilise") == withExplicit.end(),
 					L"stale cnn_residual_stabilise must be removed");
-				Assert::AreEqual(std::string("on"), sec["sharp_residual_stabilise"],
+				Assert::AreEqual(std::string("on"), withExplicit["sharp_residual_stabilise"],
 					L"existing sharp_residual_stabilise=on must take precedence over stale cnn_residual_stabilise=off");
 			}
 

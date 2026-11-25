@@ -1118,8 +1118,10 @@ namespace VideoProcessorTest
 			}
 
 			// 3. Missing frameTrust visible fallback: kP3AnalysisField returns GPU resource, but BOTH VerifiedField::trust
-			//    and host.motion().frameTrust are null -> visible fallback naming "kP3AnalysisField has no frame trust".
+			//    and host.motion().frameTrust are null -> visible fallback naming "kP3AnalysisField has no frame trust",
+			//    and the acquired pin MUST NOT be retained!
 			{
+				std::shared_ptr<int> noTrustPin = std::make_shared<int>(77);
 				AdaptiveDownscaleStage::Host host;
 				host.fallbackFramePeriod = []() { return 1.0f / 24.0f; };
 				host.bitrate = [](double& q) { q = 1.0; return false; };
@@ -1127,7 +1129,7 @@ namespace VideoProcessorTest
 				host.ssimInChain = []() { return true; };
 				host.publishStatus = []() {};
 				host.motion = []() { return AdaptiveDownscaleStage::MotionSource{}; };
-				host.acquire = [](VpSkeleton::ProductId id, uint64_t, const VpSkeleton::VariantKey&) {
+				host.acquire = [&](VpSkeleton::ProductId id, uint64_t, const VpSkeleton::VariantKey&) {
 					VpSkeleton::AcquireResult r;
 					if (id == VpSkeleton::kP10gGrainLevel)
 					{
@@ -1138,12 +1140,15 @@ namespace VideoProcessorTest
 					{
 						r.status = VpSkeleton::AcquireStatus::Reused;
 						r.gpu.resource = &dummyP3Tex;
+						r.pin = noTrustPin;
 					}
 					return r;
 				};
 
 				std::vector<const pl_hook*> hooks;
 				stage.Register(makeFrame(15), host, { weight, grainWanted, noSsim }, hooks);
+				Assert::AreEqual(long(1), noTrustPin.use_count(),
+					L"missing frameTrust must not retain kP3AnalysisField pin");
 				Assert::AreEqual(std::string("kP3AnalysisField has no frame trust"), stage.UpscaleMotionCause(),
 					L"missing frameTrust must surface exact cause");
 				const std::vector<std::string> lines = stage.StatusLines();

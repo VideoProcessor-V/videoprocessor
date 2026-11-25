@@ -6447,6 +6447,101 @@ namespace
 			("CUI-L2 negative control: unfocused textChanged failed to sync spinbox to 0.65, got " +
 				std::to_string(strength->value())).c_str());
 	}
+
+	// Q2-B3 (Migrations.cpp): end-to-end load-time migration of cnn_residual_stabilise -> sharp_residual_stabilise
+	// through ConfigEditorWindow (Vpv::MigrateSharpResidualStabilise):
+	//   - [general] untouched;
+	//   - [vprenderer] cnn_residual_stabilise: off -> sharp_residual_stabilise: off, removes legacy key, creates backup;
+	//   - [vprenderer.Cinema] explicit sharp_residual_stabilise: on + stale cnn_residual_stabilise: off -> preserves on
+	//     and removes stale cnn_residual_stabilise;
+	//   - same-input clean-config negative control (no cnn_residual_stabilise) creates zero migration backups.
+	void testSharpResidualStabiliseLoadMigration()
+	{
+		// 1. Legacy keys present in both [vprenderer] and [vprenderer.Cinema].
+		{
+			QTemporaryDir dir;
+			const char* text =
+				"[general]\nrenderer: VP Renderer\n"
+				"[vprenderer]\ncnn_residual_stabilise: off\n"
+				"[vprenderer.Cinema]\nsharp_residual_stabilise: on\ncnn_residual_stabilise: off\n";
+			const QString path = WriteFixture(dir, text);
+			{
+				ConfigEditorWindow window(path, 0, true);
+				save(window);
+			}
+			const QStringList backups = QDir(dir.path()).entryList(
+				{ QStringLiteral("VideoProcessor.cfg.before-config-migration.*.bak") }, QDir::Files);
+			require(!backups.isEmpty(),
+				"Q2-B3 migration: saving migrated cnn_residual_stabilise did not create a .before-config-migration.*.bak backup");
+			{
+				QFile backupFile(dir.filePath(backups.front()));
+				require(backupFile.open(QIODevice::ReadOnly), "Q2-B3 migration: cannot read backup file");
+				const QByteArray backupBytes = backupFile.readAll().replace("\r\n", "\n");
+				require(backupBytes.contains("cnn_residual_stabilise: off"),
+					"Q2-B3 migration: backup file did not preserve pre-migration cnn_residual_stabilise");
+			}
+
+			ConfigFile cfg;
+			require(cfg.Load(path.toStdString(), ConfigFile::ReadPolicy::Fresh),
+				"Q2-B3 migration: cannot reload saved config");
+			std::string val;
+			require(cfg.TryGetString("general", "renderer", val) && val == "VP Renderer",
+				("Q2-B3 migration: [general] renderer was altered\n" + FileText(path)).c_str());
+			require(!cfg.TryGetString("general", "sharp_residual_stabilise", val) &&
+				!cfg.TryGetString("general", "cnn_residual_stabilise", val),
+				("Q2-B3 migration: [general] must not receive residual_stabilise keys\n" + FileText(path)).c_str());
+
+			bool baseSectionMigrated = false;
+			for (const std::string& section : cfg.GetSectionNames())
+			{
+				std::string legacy;
+				require(!cfg.TryGetString(section, "cnn_residual_stabilise", legacy),
+					("Q2-B3 migration: legacy cnn_residual_stabilise remained in [" + section + "]\n" + FileText(path)).c_str());
+				const std::string norm = ConfigFile::NormalizeName(section);
+				if ((norm == "vprenderer" || norm.compare(0, 11, "vprenderer.") == 0) && norm != "vprenderer.cinema")
+				{
+					std::string migratedVal;
+					if (cfg.TryGetString(section, "sharp_residual_stabilise", migratedVal) &&
+						ConfigFile::NormalizeName(migratedVal) == "off")
+						baseSectionMigrated = true;
+				}
+			}
+			require(baseSectionMigrated,
+				("Q2-B3 migration: [vprenderer] cnn_residual_stabilise: off did not migrate to sharp_residual_stabilise: off\n" +
+					FileText(path)).c_str());
+
+			std::string cinemaSharp;
+			require(cfg.TryGetString("vprenderer.Cinema", "sharp_residual_stabilise", cinemaSharp) &&
+				ConfigFile::NormalizeName(cinemaSharp) == "on",
+				("Q2-B3 migration: [vprenderer.Cinema] explicit sharp_residual_stabilise: on was not preserved\n" +
+					FileText(path)).c_str());
+			requireVpReads(path);
+		}
+
+		// 2. Negative control: an already-clean config without cnn_residual_stabilise creates NO migration backup.
+		{
+			QTemporaryDir dir;
+			const char* cleanText =
+				"[general]\nrenderer: VP Renderer\n"
+				"[vprenderer.Cinema]\nsharp_residual_stabilise: on\n";
+			const QString path = WriteFixture(dir, cleanText);
+			{
+				ConfigEditorWindow window(path, 0, true);
+				save(window);
+			}
+			const QStringList backups = QDir(dir.path()).entryList(
+				{ QStringLiteral("VideoProcessor.cfg.before-config-migration.*.bak") }, QDir::Files);
+			require(backups.isEmpty(),
+				"Q2-B3 migration negative control: clean config without cnn_residual_stabilise must not trigger migration backup");
+			ConfigFile cfg;
+			require(cfg.Load(path.toStdString(), ConfigFile::ReadPolicy::Fresh),
+				"Q2-B3 migration negative control: cannot reload clean config");
+			std::string cinemaSharp;
+			require(cfg.TryGetString("vprenderer.Cinema", "sharp_residual_stabilise", cinemaSharp) &&
+				ConfigFile::NormalizeName(cinemaSharp) == "on",
+				"Q2-B3 migration negative control: clean sharp_residual_stabilise: on was altered");
+		}
+	}
 }
 
 int RunVpvConfigTests(const std::function<int(const char*, const std::function<void()>&)>& run,
@@ -6516,5 +6611,6 @@ int RunVpvConfigTests(const std::function<int(const char*, const std::function<v
 	failures += run("VP-V: CUI-M3 CAM16 appearance replacement gated on strength and pipeline_slots_off", testAppearanceReplacementGatedOnStrengthAndSlotOff);
 	failures += run("VP-V: CUI-L1 PageOf nested sub-tab path for Developer > Proposed retirement", testPageOfNestedSubTabPath);
 	failures += run("VP-V: CUI-L2 adaptive_motion profile switch updates focused spinbox without clobbering typing", testAdaptiveMotionProfileSwitchUpdatesFocusedSpinbox);
+	failures += run("VP-V: Q2-B3 sharp_residual_stabilise load-time migration, precedence, and backup", testSharpResidualStabiliseLoadMigration);
 	return failures;
 }
