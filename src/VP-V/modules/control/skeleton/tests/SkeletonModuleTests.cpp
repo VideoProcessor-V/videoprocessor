@@ -47,6 +47,9 @@
 #include <thread>
 #include <type_traits>
 #include <vector>
+#if defined(_DEBUG)
+#include <crtdbg.h>
+#endif
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
@@ -4309,6 +4312,483 @@ namespace SkeletonModuleTestsNs
 
 			Assert::AreEqual(faultsBefore, SkeletonModule::ContainedFaults(),
 				L"zero contained faults across N2 / MUST-2 / MUST-3 / MUST-8");
+		}
+
+		// K#9 Part A: per-host QueueShape isolates two hosts sharing one SkeletonModule across SettingsApplied,
+		// QueueDepth, CollectAhead, Begin, DeriveMemoWindow, and UnpublishRenderAhead.
+		BEGIN_TEST_METHOD_ATTRIBUTE(TwoHostsHaveIndependentQueueShapesAndKeepWindows)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(TwoHostsHaveIndependentQueueShapesAndKeepWindows)
+		{
+			struct VramUsersGuard
+			{
+				VramUsersGuard() { VpSkeleton::VramUsers::Instance().ResetForTesting(); }
+				~VramUsersGuard() { VpSkeleton::VramUsers::Instance().ResetForTesting(); }
+			} vramGuard;
+
+			TempCfg cfg(Lane("on"));
+			std::atomic<uint64_t> clockUs{ 1000u };
+			SkeletonModule sk(cfg.Loader(), [&clockUs]() { return clockUs.fetch_add(10u); });
+			ResyncExtension resync;
+			FakeRenderer hostA;
+			FakeRenderer hostB;
+
+			struct HostsCleanupGuard
+			{
+				SkeletonModule& sk;
+				const void* a;
+				const void* b;
+				~HostsCleanupGuard()
+				{
+					RE::LifecycleFacts f;
+					f.kind = RE::Lifecycle::Shutdown;
+					f.host = a;
+					sk.OnLifecycle(f);
+					f.host = b;
+					sk.OnLifecycle(f);
+					Tap::SetStore(a, nullptr);
+					Tap::Unregister(a);
+					Tap::SetStore(b, nullptr);
+					Tap::Unregister(b);
+				}
+			} cleanup{ sk, &hostA, &hostB };
+
+			std::vector<uint16_t> pixels(size_t(kW) * kH, 420u);
+			auto deliver = [&](const void* h, uint64_t seq) {
+				SourceFrameView v;
+				v.seq = seq;
+				v.luma = pixels.data();
+				v.width = kW;
+				v.height = kH;
+				v.strideSamples = kW;
+				v.msbShift = 6;
+				Tap::Deliver(h, v);
+			};
+
+			auto resyncOn = [&](const void* h) {
+				RE::LifecycleFacts f;
+				f.host = h;
+				f.kind = RE::Lifecycle::SettingsApplied;
+				f.subject = "on";
+				resync.OnLifecycle(f);
+			};
+			auto sendLife = [&](const void* h, RE::Lifecycle kind, int code, double value) {
+				RE::LifecycleFacts f;
+				f.host = h;
+				f.kind = kind;
+				f.code = code;
+				f.value = value;
+				sk.OnLifecycle(f);
+			};
+			auto sendCollect = [&](const void* h, size_t queueSize) {
+				RE::QueueView qv;
+				qv.size = queueSize;
+				RE::FrameContext fc;
+				fc.host = h;
+				fc.phase = RE::FramePhase::CollectAhead;
+				fc.phaseData = &qv;
+				Assert::IsFalse(sk.OnFrame(fc));
+			};
+			auto driveFrame = [&](const void* h, int64_t seq, double renderAheadVal) {
+				clockUs.fetch_add(40000u);
+				sendLife(h, RE::Lifecycle::QueueDepth, 0, renderAheadVal);
+				RE::IngressContext ic;
+				ic.host = h;
+				ic.seq = seq;
+				ic.queueGeneration = 1;
+				ic.stateKey = 0x1000;
+				ic.formatKey = 7;
+				ic.frameCounter = seq;
+				ic.timestamp = seq * 1000;
+				ic.ticksPerSecond = 24000;
+				ic.measuredRateHz = 24.0;
+				resync.OnIngress(ic);
+				if (seq == 1)
+					deliver(h, 1u);
+				deliver(h, uint64_t(seq) + 1u);
+				RE::FrameContext fc;
+				fc.host = h;
+				fc.seq = seq;
+				fc.phase = RE::FramePhase::Begin;
+				resync.OnFrame(fc);
+				Assert::IsFalse(sk.OnFrame(fc));
+				fc.phase = RE::FramePhase::AfterRender;
+				Assert::IsFalse(sk.OnFrame(fc));
+			};
+
+			resyncOn(&hostA);
+			resyncOn(&hostB);
+			sendLife(&hostA, RE::Lifecycle::GpuCreated, 0, 0.0);
+			sendLife(&hostB, RE::Lifecycle::GpuCreated, 0, 0.0);
+
+			// Deliver distinct queue terms per host through real lifecycle / frame callbacks.
+			sendLife(&hostA, RE::Lifecycle::SettingsApplied, 0, 2.0);
+			sendLife(&hostA, RE::Lifecycle::QueueDepth, 0, 1.0);
+			sendCollect(&hostA, 2u);
+
+			sendLife(&hostB, RE::Lifecycle::SettingsApplied, 0, 10.0);
+			sendLife(&hostB, RE::Lifecycle::QueueDepth, 0, 4.0);
+			sendCollect(&hostB, 6u);
+
+			const SkeletonModule::QueueShape qA = sk.CurrentQueue(&hostA);
+			const SkeletonModule::QueueShape qB = sk.CurrentQueue(&hostB);
+			Assert::AreEqual<int>(1, int(qA.renderAhead), L"hostA renderAhead == 1");
+			Assert::AreEqual<int>(2, int(qA.laneLead), L"hostA laneLead == 2");
+			Assert::AreEqual<int>(2, int(qA.lookAheadWalk), L"hostA lookAheadWalk == 2");
+			Assert::AreEqual<int>(SkeletonModule::QueueShape::kAll, int(qA.wired));
+			Assert::AreEqual<int>(4, int(qB.renderAhead), L"hostB renderAhead == 4");
+			Assert::AreEqual<int>(6, int(qB.laneLead), L"hostB laneLead == 6");
+			Assert::AreEqual<int>(10, int(qB.lookAheadWalk), L"hostB lookAheadWalk == 10");
+			Assert::AreEqual<int>(SkeletonModule::QueueShape::kAll, int(qB.wired));
+
+			for (int64_t s = 1; s <= 6; ++s)
+			{
+				driveFrame(&hostA, s, 1.0);
+				driveFrame(&hostB, s, 4.0);
+			}
+
+			const SkeletonModule::QueueShape usedA = sk.QueueInUseOf(&hostA).used;
+			const SkeletonModule::QueueShape usedB = sk.QueueInUseOf(&hostB).used;
+			Assert::IsTrue(usedA != usedB, L"QueueInUseOf differs between hostA and hostB");
+			Assert::IsTrue(usedA.renderAhead == 1 && usedA.laneLead == 2 && usedA.lookAheadWalk == 2,
+				L"hostA QueueInUse matches hostA terms");
+			Assert::IsTrue(usedB.renderAhead == 4 && usedB.laneLead == 6 && usedB.lookAheadWalk == 10,
+				L"hostB QueueInUse matches hostB terms");
+
+			// In-test negative control: hostA's QueueFramesFor is strictly smaller than hostB's (distinct windows).
+			const unsigned framesA = VpSkeleton::QueueFramesFor(usedA.renderAhead, usedA.laneLead, usedA.lookAheadWalk);
+			const unsigned framesB = VpSkeleton::QueueFramesFor(usedB.renderAhead, usedB.laneLead, usedB.lookAheadWalk);
+			Assert::IsTrue(framesA < framesB, L"negative control: hostA queue frames strictly smaller than hostB");
+			Assert::AreEqual(5u, framesA);
+			Assert::AreEqual(20u, framesB);
+
+			// Verify lane graph settings are strictly independent per host.
+			Assert::IsNotNull(sk.LaneOf(&hostA));
+			Assert::IsNotNull(sk.LaneOf(&hostB));
+			const VpSkeleton::GraphSettings gsA = sk.LaneOf(&hostA)->State()->graph.settings;
+			const VpSkeleton::GraphSettings gsB = sk.LaneOf(&hostB)->State()->graph.settings;
+			Assert::IsTrue(gsA.renderAhead == 1 && gsA.laneLead == 2 && gsA.lookAheadWalk == 2,
+				L"hostA lane graph settings isolated");
+			Assert::IsTrue(gsB.renderAhead == 4 && gsB.laneLead == 6 && gsB.lookAheadWalk == 10,
+				L"hostB lane graph settings isolated");
+
+			// Verify WindowBoard keep windows (back / ahead) are strictly independent per host.
+			const VpSkeleton::QueueWindowBoard* boardA = sk.WindowBoardOf(&hostA);
+			const VpSkeleton::QueueWindowBoard* boardB = sk.WindowBoardOf(&hostB);
+			Assert::IsNotNull(boardA);
+			Assert::IsNotNull(boardB);
+			VpSkeleton::QueueWindow wA, wB;
+			Assert::IsTrue(boardA->Read(&wA));
+			Assert::IsTrue(boardB->Read(&wB));
+			Assert::AreEqual<uint16_t>(1u, wA.back, L"hostA back == 1");
+			Assert::AreEqual<uint16_t>(4u, wB.back, L"hostB back == 4");
+			Assert::AreEqual<uint16_t>(4u, wA.ahead, L"hostA ahead == L(2) + W(2) == 4");
+			Assert::AreEqual<uint16_t>(16u, wB.ahead, L"hostB ahead == L(6) + W(10) == 16");
+			Assert::IsTrue(wA.back != wB.back && wA.ahead != wB.ahead, L"independent keep windows");
+
+			// UnpublishRenderAhead(&hostA) unwires ONLY hostA; hostB's kRenderAhead stays wired with renderAhead == 4.
+			sk.UnpublishRenderAhead(&hostA);
+			const SkeletonModule::QueueShape qAAfter = sk.CurrentQueue(&hostA);
+			const SkeletonModule::QueueShape qBAfter = sk.CurrentQueue(&hostB);
+			Assert::AreEqual<int>(0, int(qAAfter.wired & SkeletonModule::QueueShape::kRenderAhead),
+				L"UnpublishRenderAhead(&hostA) unwires hostA's kRenderAhead");
+			Assert::AreEqual<int>(0, int(qAAfter.renderAhead));
+			Assert::IsTrue((qBAfter.wired & SkeletonModule::QueueShape::kRenderAhead) != 0,
+				L"hostB's kRenderAhead remains wired after UnpublishRenderAhead(&hostA)");
+			Assert::AreEqual<int>(4, int(qBAfter.renderAhead));
+		}
+
+		// K#9 Part B: per-host ConfirmedCutHostReader isolates confirmed-cut vetoes across two hosts with
+		// separate enabled FrameAnalysis::Stores while neither host engages skeleton_scene_veto.
+		BEGIN_TEST_METHOD_ATTRIBUTE(TwoHostsConfirmedCutVetoIsIsolatedPerHost)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(TwoHostsConfirmedCutVetoIsIsolatedPerHost)
+		{
+			Rig rigA(Lane("on"));
+			ShapeTwoStillShots(rigA);   // confirmed cut at kCutFrame (12) on hostA
+
+			FakeRenderer hostB;
+			struct HostBShutdownGuard
+			{
+				SkeletonModule& sk;
+				const void* host;
+				~HostBShutdownGuard()
+				{
+					RE::LifecycleFacts f;
+					f.host = host;
+					f.kind = RE::Lifecycle::Shutdown;
+					sk.OnLifecycle(f);
+					Tap::Unregister(host);
+				}
+			} hostBGuard{ rigA.sk, &hostB };
+
+			FrameAnalysis::Store storeA(FrameAnalysis::RingDepth(4, 4));
+			FrameAnalysis::Store storeB(FrameAnalysis::RingDepth(4, 4));
+			Tap::SetStore(rigA.Host(), &storeA);
+			SceneStoreGuard guardA(rigA.Host());
+			Tap::SetStore(&hostB, &storeB);
+			SceneStoreGuard guardB(&hostB);
+
+			// Setup resync & GpuCreated on both hosts.
+			rigA.ResyncApply("on");
+			rigA.Life(RE::Lifecycle::GpuCreated);
+			{
+				RE::LifecycleFacts rf;
+				rf.host = &hostB;
+				rf.kind = RE::Lifecycle::SettingsApplied;
+				rf.subject = "on";
+				rigA.resync.OnLifecycle(rf);
+				RE::LifecycleFacts gf;
+				gf.host = &hostB;
+				gf.kind = RE::Lifecycle::GpuCreated;
+				rigA.sk.OnLifecycle(gf);
+			}
+
+			// Flat/still picture for hostB (zero cuts across every frame).
+			std::vector<uint16_t> flatB(size_t(kW) * kH, 400u);
+			auto deliverB = [&](uint64_t seq) {
+				SourceFrameView v;
+				v.seq = seq;
+				v.luma = flatB.data();
+				v.width = kW;
+				v.height = kH;
+				v.strideSamples = kW;
+				v.msbShift = 6;
+				Tap::Deliver(&hostB, v);
+			};
+			auto frameB = [&](int64_t seq) {
+				RE::IngressContext ic;
+				ic.host = &hostB;
+				ic.seq = seq;
+				ic.queueGeneration = 1;
+				ic.stateKey = 0x1000;
+				ic.formatKey = 7;
+				ic.frameCounter = seq;
+				ic.timestamp = seq * 1000;
+				ic.ticksPerSecond = 24000;
+				ic.measuredRateHz = 24.0;
+				rigA.resync.OnIngress(ic);
+				if (seq == 1)
+					deliverB(1u);
+				deliverB(uint64_t(seq) + 1u);
+				rigA.base += 40000u;
+				RE::FrameContext fc;
+				fc.host = &hostB;
+				fc.seq = seq;
+				fc.phase = RE::FramePhase::Begin;
+				rigA.resync.OnFrame(fc);
+				Assert::IsFalse(rigA.sk.OnFrame(fc));
+				fc.phase = RE::FramePhase::AfterRender;
+				Assert::IsFalse(rigA.sk.OnFrame(fc));
+			};
+
+			// Drive frames 1 .. kCutFrame + 2 on both hosts (opening kCutFrame & kCutFrame + 1 records in both stores).
+			for (int64_t s = 1; s <= int64_t(kCutFrame) + 2; ++s)
+			{
+				if (s == int64_t(kCutFrame) || s == int64_t(kCutFrame) + 1)
+				{
+					storeA.Begin(SceneTestId(uint64_t(s)), FrameAnalysis::kScene);
+					storeB.Begin(SceneTestId(uint64_t(s)), FrameAnalysis::kScene);
+				}
+				rigA.Frame(s);
+				frameB(s);
+			}
+
+			FrameAnalysis::Scene sceneA, sceneB;
+			Assert::IsTrue(storeA.PeekScene(kCutFrame, sceneA) && sceneA.confirmed && sceneA.cutHere,
+				L"precondition: hostA has a confirmed cut at kCutFrame");
+			Assert::IsTrue(storeB.PeekScene(kCutFrame, sceneB) && sceneB.confirmed && !sceneB.cutHere,
+				L"precondition: hostB has a confirmed non-cut at kCutFrame");
+
+			// In-test negative control: 2 stores registered -> Tap::SingleStore() is nullptr and legacy seam fails to veto hostA.
+			Assert::IsNull(Tap::SingleStore(), L"negative control: 2 stores registered -> Tap::SingleStore() is nullptr");
+			const MotionValidity::State::ConfirmedCutFn legacySeam =
+				MotionValidity::State::ConfirmedCutReader().load(std::memory_order_acquire);
+			Assert::IsNotNull(legacySeam);
+			Assert::IsFalse(legacySeam(kCutFrame),
+				L"negative control: legacy single-store ConfirmedCutReader returns false with 2 hosts (would miss hostA cut)");
+			Assert::IsNotNull(MotionValidity::State::ConfirmedCutHostReader().load(std::memory_order_acquire),
+				L"K#9 Part B: per-host ConfirmedCutHostReader is bound");
+
+			// Per-host MotionValidity::State isolation.
+			MotionValidity::State mvA, mvB;
+			mvA.SetHost(rigA.Host());
+			mvB.SetHost(&hostB);
+			Assert::IsTrue(mvA.IsConfirmedCut(kCutFrame), L"hostA sees confirmed cut at kCutFrame");
+			Assert::IsFalse(mvB.IsConfirmedCut(kCutFrame), L"hostB sees NO cut at kCutFrame");
+			Assert::IsFalse(mvA.PairValidAt(kCutFrame - 1u, kCutFrame),
+				L"K#9 Part B: hostA pair across confirmed cut is vetoed");
+			Assert::AreEqual<uint64_t>(1u, mvA.ConfirmedCutRefusals(), L"hostA recorded 1 confirmed-cut refusal");
+			Assert::IsTrue(mvB.PairValidAt(kCutFrame - 1u, kCutFrame),
+				L"K#9 Part B: hostB pair is NOT falsely vetoed by hostA's cut");
+			Assert::AreEqual<uint64_t>(0u, mvB.ConfirmedCutRefusals(), L"hostB recorded 0 confirmed-cut refusals");
+
+			// Neither host engages skeleton_scene_veto fallback with per-host ConfirmedCutHostReader active.
+			Assert::IsFalse(HasId(rigA.Lines(RE::StatusKind::Fallbacks), "skeleton_scene_veto"),
+				L"hostA does not engage skeleton_scene_veto with 2 hosts");
+			std::vector<std::string> fbB;
+			RE::Context ctxB;
+			ctxB.host = &hostB;
+			rigA.sk.OnStatus(ctxB, RE::StatusKind::Fallbacks, fbB, nullptr, nullptr);
+			Assert::IsFalse(HasId(fbB, "skeleton_scene_veto"),
+				L"hostB does not engage skeleton_scene_veto with 2 hosts");
+		}
+
+		// K#10: SkeletonMemo::HasAheadDemands() (including laneOwners_ shadowing), steady-state QueueWindow
+		// short-circuit parity, immediate SceneVetoOffCode change detection on non-due frames, and zero-alloc
+		// steady-state queries under Debug CRT alloc hook.
+		BEGIN_TEST_METHOD_ATTRIBUTE(SteadyStateNoAheadDemandsShortCircuitAndZeroAllocRefresh)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(SteadyStateNoAheadDemandsShortCircuitAndZeroAllocRefresh)
+		{
+			// ---- 1. Direct SkeletonMemo::HasAheadDemands() + laneOwners_ shadowing negative control ----
+			{
+				VpSkeleton::SkeletonMemo memo;
+				Assert::IsFalse(memo.HasAheadDemands(), L"negative control: fresh memo has no ahead demands");
+
+				VpSkeleton::OwnerFill modFill;
+				modFill.aheadDepth = 3u;
+				modFill.fill = [](const VpSkeleton::OwnerFillRequest&, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput&) {
+					return false;
+				};
+				Assert::IsTrue(
+					memo.RegisterOwnerFill(VpSkeleton::kP10GrainSplit, VpSkeleton::AcquireForm::Cpu, "repair/grain_split", modFill)
+						== VpSkeleton::SkeletonMemo::Registration::Registered);
+				Assert::IsTrue(memo.HasAheadDemands(), L"module owner fill with aheadDepth=3 sets HasAheadDemands() true");
+
+				// Bind a lane shadowing (kP10GrainSplit, Cpu) with aheadDepth = 0 -> must shadow owners_ and yield false.
+				VpSkeleton::LaneSlotSource src;
+				src.token = &memo;
+				std::map<std::pair<VpSkeleton::ProductId, VpSkeleton::AcquireForm>, VpSkeleton::OwnerFill> laneFills;
+				VpSkeleton::OwnerFill shadowFill;
+				shadowFill.aheadDepth = 0u;
+				laneFills[std::make_pair(VpSkeleton::kP10GrainSplit, VpSkeleton::AcquireForm::Cpu)] = shadowFill;
+				memo.BindLane(src, laneFills);
+				Assert::IsFalse(memo.HasAheadDemands(),
+					L"K#10: laneOwners_ shadowing owners_ with aheadDepth=0 makes HasAheadDemands() false");
+
+				Assert::IsTrue(memo.UnbindLane(&memo));
+				Assert::IsTrue(memo.HasAheadDemands(), L"unbinding lane restores underlying module aheadDepth=3");
+
+				Assert::IsTrue(memo.UnregisterOwnerFill(VpSkeleton::kP10GrainSplit, VpSkeleton::AcquireForm::Cpu, "repair/grain_split"));
+				Assert::IsFalse(memo.HasAheadDemands(), L"unregistering owner fill returns HasAheadDemands() to false");
+			}
+
+			// ---- 2. Steady-state Rig past kEarlyRefreshFrames: QueueWindow parity + non-due SceneVetoOffCode toggle ----
+			Rig rig(Lane("on"), 64);
+			FrameAnalysis::Store store(FrameAnalysis::RingDepth(4, 4));
+			Tap::SetStore(rig.Host(), &store);
+			SceneStoreGuard storeGuard(rig.Host());
+			rig.ResyncApply("on");
+			rig.Life(RE::Lifecycle::GpuCreated);
+
+			for (int64_t s = 1; s <= 18; ++s)
+				rig.Frame(s);
+
+			VpSkeleton::SkeletonMemo* memo = rig.sk.MemoOf(rig.Host());
+			Assert::IsNotNull(memo);
+			Assert::IsFalse(memo->HasAheadDemands(), L"steady-state lane without ahead consumers has HasAheadDemands() == false");
+
+			const VpSkeleton::QueueWindowBoard* board = rig.sk.WindowBoardOf(rig.Host());
+			Assert::IsNotNull(board);
+			VpSkeleton::QueueWindow w;
+			Assert::IsTrue(board->Read(&w), L"window board published");
+			Assert::IsTrue((w.wired & VpSkeleton::QueueWindowTerms::kAheadNeed) != 0u,
+				L"K#10: short-circuit preserves kAheadNeed wired bit (exact parity with SetAheadConsumers(empty))");
+			Assert::AreEqual<uint16_t>(0u, w.aheadCompute, L"aheadCompute == 0 with no ahead demands");
+			Assert::IsTrue(w.aheadBinding == VpSkeleton::AheadBinding::NoConsumer, L"aheadBinding == NoConsumer");
+			Assert::IsFalse(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_scene_veto"),
+				L"enabled single store has scene veto active");
+
+			// Negative control: toggling store off/on on non-kRefreshEvery frames (19, 20) immediately triggers Refresh.
+			store.SetEnabled(false);
+			rig.Frame(19);
+			Assert::IsTrue(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_scene_veto"),
+				L"negative control: disabling store immediately engages skeleton_scene_veto on non-due frame 19");
+
+			store.SetEnabled(true);
+			rig.Frame(20);
+			Assert::IsFalse(HasId(rig.Lines(RE::StatusKind::Fallbacks), "skeleton_scene_veto"),
+				L"negative control: re-enabling store immediately releases skeleton_scene_veto on non-due frame 20");
+
+			for (int64_t s = 21; s <= 32; ++s)
+				rig.Frame(s);
+
+			// ---- 3. Debug CRT alloc-hook check on zero-alloc steady-state query primitives ----
+#if defined(_DEBUG)
+			struct DebugAllocCounter
+			{
+				static std::atomic<uint64_t>& Count()
+				{
+					static std::atomic<uint64_t> c{ 0 };
+					return c;
+				}
+				static std::atomic<bool>& Active()
+				{
+					static std::atomic<bool> a{ false };
+					return a;
+				}
+				static std::thread::id& TargetTid()
+				{
+					static std::thread::id tid;
+					return tid;
+				}
+				static int __cdecl Hook(int allocType, void*, size_t, int blockType, long, const unsigned char*, int)
+				{
+					if (blockType != _CRT_BLOCK
+						&& (allocType == _HOOK_ALLOC || allocType == _HOOK_REALLOC)
+						&& Active().load(std::memory_order_acquire)
+						&& std::this_thread::get_id() == TargetTid())
+					{
+						Count().fetch_add(1, std::memory_order_relaxed);
+					}
+					return 1;
+				}
+				_CRT_ALLOC_HOOK prev = nullptr;
+				DebugAllocCounter()
+				{
+					TargetTid() = std::this_thread::get_id();
+					Count().store(0u, std::memory_order_relaxed);
+					Active().store(true, std::memory_order_release);
+					prev = _CrtSetAllocHook(&Hook);
+				}
+				~DebugAllocCounter()
+				{
+					Active().store(false, std::memory_order_release);
+					_CrtSetAllocHook(prev);
+				}
+			} allocCounter;
+
+			// Negative control: verify the CRT hook observes a >SSO heap allocation.
+			{
+				std::string probe(64u, 'x');
+				Assert::AreEqual(size_t(64), probe.size());
+				Assert::IsTrue(DebugAllocCounter::Count().load(std::memory_order_relaxed) >= 1u,
+					L"negative control: CRT alloc hook observes 64-byte std::string allocation");
+			}
+			DebugAllocCounter::Count().store(0u, std::memory_order_relaxed);
+
+			bool anyAhead = false;
+			uint32_t wiredSum = 0;
+			for (int i = 0; i < 1000; ++i)
+			{
+				anyAhead = anyAhead || memo->HasAheadDemands();
+				const SkeletonModule::QueueShape qs = rig.sk.CurrentQueue(rig.Host());
+				VpSkeleton::QueueWindow curW;
+				if (board->Read(&curW))
+					wiredSum += uint32_t(curW.wired) + uint32_t(qs.wired);
+			}
+			const uint64_t queryAllocs = DebugAllocCounter::Count().load(std::memory_order_relaxed);
+			DebugAllocCounter::Active().store(false, std::memory_order_release);
+
+			Assert::AreEqual(uint64_t(0), queryAllocs,
+				L"K#10: 1,000 steady-state HasAheadDemands / CurrentQueue / WindowBoard::Read queries incur ZERO heap allocations");
+			Assert::IsFalse(anyAhead);
+			Assert::IsTrue(wiredSum > 0u);
+#endif
 		}
 	};
 
