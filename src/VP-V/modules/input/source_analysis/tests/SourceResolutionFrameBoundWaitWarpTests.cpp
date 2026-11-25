@@ -29,6 +29,11 @@ namespace VideoProcessorTest
 			pl_gpu gpu = fixture.Gpu();
 			pl_dispatch dispatch = pl_dispatch_create(fixture.Log(), gpu);
 			Assert::IsNotNull(dispatch, L"Could not create pl_dispatch on WARP");
+			struct DispatchGuard
+			{
+				pl_dispatch* d;
+				~DispatchGuard() { if (d && *d) pl_dispatch_destroy(d); }
+			} dispatchGuard{ &dispatch };
 
 			constexpr int kW = 1280;
 			constexpr int kH = 720;
@@ -49,6 +54,19 @@ namespace VideoProcessorTest
 			tp.initial_data = luma.data();
 			pl_tex tex = pl_tex_create(gpu, &tp);
 			Assert::IsNotNull(tex, L"Could not upload synthetic still luma texture on WARP");
+			struct TexGuard
+			{
+				pl_gpu g;
+				pl_tex* t;
+				~TexGuard() { if (g && t && *t) pl_tex_destroy(g, t); }
+			} texGuard{ gpu, &tex };
+
+			struct MonitorGpuGuard
+			{
+				SourceResolutionMonitor::Monitor& m;
+				pl_gpu g;
+				~MonitorGpuGuard() { m.Release(g); }
+			};
 
 			pl_frame frame{};
 			frame.num_planes = 1;
@@ -68,6 +86,7 @@ namespace VideoProcessorTest
 			// Deterministic still run across real WARP GPU FrameBegin / AutoFactors / FrameSubmit.
 			{
 				SourceResolutionMonitor::Monitor det;
+				MonitorGpuGuard detGuard{ det, gpu };
 				det.SetFrameBound(true, 8);
 				det.SetDeterministicWait(true, 500000);
 				std::string why;
@@ -93,13 +112,13 @@ namespace VideoProcessorTest
 				Assert::IsTrue(s.frames >= 2,
 					L"Deterministic still run on WARP must release analysed frames");
 				Assert::IsTrue(det.DeterministicWaitCalls() > 0);
-				det.Release(gpu);
 			}
 
 			// Negative control on the EXACT same WARP GPU fixture & still frame in live mode (SetDeterministicWait(false)):
 			// live mode MUST NEVER wait/yield on present.
 			{
 				SourceResolutionMonitor::Monitor live;
+				MonitorGpuGuard liveGuard{ live, gpu };
 				live.SetFrameBound(true, 8);
 				live.SetDeterministicWait(false);
 				std::string why;
@@ -117,11 +136,7 @@ namespace VideoProcessorTest
 					L"Live mode on WARP must never invoke deterministic wait");
 				Assert::AreEqual<unsigned long long>(0, live.DeterministicWaitYields(),
 					L"Live mode on WARP must report 0 wait yields on present");
-				live.Release(gpu);
 			}
-
-			pl_tex_destroy(gpu, &tex);
-			pl_dispatch_destroy(&dispatch);
 		}
 	};
 }

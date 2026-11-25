@@ -142,16 +142,21 @@ namespace VideoProcessorTest
 			maskedParams.masks = &subtitleMask;
 			maskedParams.maskCount = 1;
 
+			// Analytical block count: 64x64=4096 total; mask [36,154) x [156,180) covers block centres
+			// bx in [12..50] (39 cols) and by in [52..59] (8 rows) -> 39*8=312 masked -> 4096 - 312 = 3784 unmasked.
+			constexpr uint32_t kExpectedMaskedBlocks = 64u * 64u - 39u * 8u;
+			static_assert(kExpectedMaskedBlocks == 3784u, "analytical unmasked block count");
+
 			const SourceStatsDisplay::DisplayRecord masked =
 				SourceStatsDisplay::MeasureDisplayFrame(kSize, kSize, sampleRgb, maskedParams);
-			Assert::IsTrue(masked.blocks > 0 && masked.blocks < naiveUnmasked.blocks,
-				L"Masked measurement must exclude subtitle blocks");
+			Assert::AreEqual(kExpectedMaskedBlocks, masked.blocks,
+				L"Masked measurement must match exact analytical unmasked block count (3784)");
 			Assert::AreEqual(analyticalSpecBoxCode, masked.maximum, 0.25,
 				L"Masked measurement must recover exact analytical 2x2 specular box peak");
-			// Picture APL: 1 block at specular box + (blocks - 1) blocks at background.
+			// Picture APL: 1 block at specular box + (3784 - 1) blocks at background (independent of masked.blocks).
 			const double analyticalMaskedApl =
-				(analyticalSpecBoxCode + static_cast<double>(masked.blocks - 1u) * analyticalBgCode) /
-				static_cast<double>(masked.blocks);
+				(analyticalSpecBoxCode + static_cast<double>(kExpectedMaskedBlocks - 1u) * analyticalBgCode) /
+				static_cast<double>(kExpectedMaskedBlocks);
 			Assert::AreEqual(analyticalMaskedApl, masked.apl, 0.25,
 				L"Masked measurement must recover exact analytical picture APL");
 			Assert::IsTrue(masked.apl < naiveUnmasked.apl - 5.0,
@@ -195,6 +200,54 @@ namespace VideoProcessorTest
 				L"Unboosted baseline APL must match 16 + 219 * 0.35");
 			Assert::IsTrue(std::fabs(boosted.apl - unboosted.apl) > 5.0,
 				L"Negative control: unboosted baseline must diverge from boosted measurement by > 5 codes");
+		}
+
+		// Non-grey RGB luma weighting against independent analytical formula + null-mask safety (Pass A MED-4).
+		TEST_METHOD(MeasureDisplayFrameNonGreyWeightsAndNullMaskSafety)
+		{
+			constexpr int kSize = 96;
+			constexpr double kR = 0.80, kG = 0.30, kB = 0.10;
+			auto sampleColor = [](int, int, double& r, double& g, double& b) -> bool
+			{
+				r = kR;
+				g = kG;
+				b = kB;
+				return true;
+			};
+
+			// BT.709 weights.
+			SourceStatsDisplay::MeasureParams bt709;
+			bt709.weights[0] = 0.2126;
+			bt709.weights[1] = 0.7152;
+			bt709.weights[2] = 0.0722;
+			const double expected709 = 16.0 + 219.0 * (0.2126 * kR + 0.7152 * kG + 0.0722 * kB);
+			const SourceStatsDisplay::DisplayRecord rec709 =
+				SourceStatsDisplay::MeasureDisplayFrame(kSize, kSize, sampleColor, bt709);
+			Assert::AreEqual(expected709, rec709.apl, 0.1, L"BT.709 non-grey APL must match analytical dot product");
+			Assert::AreEqual(expected709, rec709.maximum, 0.1, L"BT.709 non-grey maximum must match analytical dot product");
+
+			// Opposing control on exact same RGB pixels with Rec.601 default weights (diverges by ~7.6 codes).
+			SourceStatsDisplay::MeasureParams bt601;
+			const double expected601 = 16.0 + 219.0 * (0.299 * kR + 0.587 * kG + 0.114 * kB);
+			const SourceStatsDisplay::DisplayRecord rec601 =
+				SourceStatsDisplay::MeasureDisplayFrame(kSize, kSize, sampleColor, bt601);
+			Assert::AreEqual(expected601, rec601.apl, 0.1, L"Rec.601 non-grey APL must match analytical dot product");
+			Assert::IsTrue(std::fabs(rec601.apl - rec709.apl) > 5.0,
+				L"Negative control: Rec.601 and BT.709 weights must visibly diverge on non-grey RGB");
+
+			// Null-mask safety (Pass A MED-4): masks == nullptr with maskCount > 0 must not dereference null and
+			// must equal the unmasked baseline identically.
+			SourceStatsDisplay::MeasureParams nullMaskParams = bt709;
+			nullMaskParams.masks = nullptr;
+			nullMaskParams.maskCount = 2;
+			nullMaskParams.peakFullCoverage = true;
+			const SourceStatsDisplay::DisplayRecord recNullMask =
+				SourceStatsDisplay::MeasureDisplayFrame(kSize, kSize, sampleColor, nullMaskParams);
+			Assert::AreEqual(rec709.blocks, recNullMask.blocks);
+			Assert::AreEqual(rec709.raw.sum, recNullMask.raw.sum);
+			Assert::AreEqual(rec709.raw.maximum, recNullMask.raw.maximum);
+			Assert::AreEqual(rec709.apl, recNullMask.apl, 1e-12);
+			Assert::AreEqual(rec709.maximum, recNullMask.maximum, 1e-12);
 		}
 	};
 }

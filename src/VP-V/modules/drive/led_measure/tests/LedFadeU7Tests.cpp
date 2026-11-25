@@ -416,5 +416,122 @@ namespace VideoProcessorTest
 					L"Darkening fade-out MUST target ledFloorBlack");
 			}
 		}
+
+		// Visible fallback causes when multiple renderer owners are registered ("renderer ambiguous")
+		// or when no skeleton module is registered on the ExtensionHub ("no skeleton module").
+		TEST_METHOD(RendererAmbiguousAndNoSkeletonModuleReportVisibleCauses)
+		{
+			StatsBuilder builder(FadeTestConfig());
+
+			// Case A: two registered renderer owners -> "renderer ambiguous".
+			{
+				FakeSceneDemand demand;
+				HubScope hub(&demand);
+				FrameAnalysis::Store storeA(8);
+				FrameAnalysis::Store storeB(8);
+				const int ownerTagA = 1;
+				const int ownerTagB = 2;
+				TapOwnerScope tapA(&ownerTagA, &storeA);
+				TapOwnerScope tapB(&ownerTagB, &storeB);
+
+				const FrameStats ambig = builder.Build(UniformRaw(80.0), 0.0, 0.0, 10);
+				Assert::IsFalse(ambig.sceneKnown, L"Two registered owners must report sceneKnown=false");
+				Assert::IsFalse(ambig.fade);
+				Assert::IsFalse(ambig.cut);
+				Assert::AreEqual(-1.0f, ambig.fadeKeep, 1e-6f);
+				Assert::AreEqual(std::string("renderer ambiguous"), std::string(ambig.sceneWhy));
+				Assert::AreEqual<uint64_t>(1, builder.SceneMissing());
+			}
+
+			// Case B: single owner registered, but ExtensionHub has no skeleton module -> "no skeleton module".
+			{
+				struct EmptyHubScope
+				{
+					EmptyHubScope() { Vpv::Hub::ExtensionHub::Instance().ResetModulesForTesting(); }
+					~EmptyHubScope() { Vpv::Hub::ExtensionHub::Instance().ResetModulesForTesting(); }
+				} emptyHub;
+
+				FrameAnalysis::Store store(8);
+				const int ownerTag = 3;
+				TapOwnerScope tap(&ownerTag, &store);
+
+				const FrameStats noMod = builder.Build(UniformRaw(80.0), 40.0, 0.0, 11);
+				Assert::IsFalse(noMod.sceneKnown, L"Missing skeleton module must report sceneKnown=false");
+				Assert::IsFalse(noMod.fade);
+				Assert::IsFalse(noMod.cut);
+				Assert::AreEqual(-1.0f, noMod.fadeKeep, 1e-6f);
+				Assert::AreEqual(std::string("no skeleton module"), std::string(noMod.sceneWhy));
+				Assert::AreEqual<uint64_t>(2, builder.SceneMissing());
+			}
+		}
+
+		// Pass A HIGH-2 regression test: 24p @ 60Hz repeated output frames during a brightening fade-in
+		// must preserve latched brightening direction (holdGain=false, lightTarget > ledFloorBlack),
+		// while darkening fade-out repeated frames hold gain and target ledFloorBlack, and a single
+		// post-Reset() fade=true frame preserves darkening-compatible holdGain=true.
+		TEST_METHOD(CompensateControllerLatchesFadeDirectionAcrossRepeated24pAt60HzFrames)
+		{
+			const LedDriveConfig config = FadeTestConfig();
+			constexpr double kTickMs = 1000.0 / 60.0;
+
+			// Leg A: 24p @ 60Hz brightening fade-in (repeated output frames where stats.apl == previousApl).
+			{
+				CompensateController controller(config);
+				StatsBuilder builder(config);
+				SceneVerdicts verdicts;
+				for (uint64_t s = 11; s <= 19; ++s)
+					verdicts.Fade(s, 0.85f);
+				builder.SetSceneVerdictReader(verdicts.VerdictReader());
+
+				for (uint64_t s = 1; s <= 10; ++s)
+					controller.Tick(builder.Build(UniformRaw(20.0), static_cast<double>(s) * kTickMs, 0.0, s), kTickMs);
+
+				const double repeatedRising[9] = { 30.0, 30.0, 30.0, 40.0, 40.0, 40.0, 50.0, 50.0, 50.0 };
+				for (int i = 0; i < 9; ++i)
+				{
+					const uint64_t seq = static_cast<uint64_t>(11 + i);
+					const FrameStats stats = builder.Build(UniformRaw(repeatedRising[i]), static_cast<double>(seq) * kTickMs, 0.0, seq);
+					Assert::IsTrue(stats.fade);
+					const ControllerOutput out = controller.Tick(stats, kTickMs);
+					Assert::IsFalse(out.holdGain, L"Repeated brightening fade-in frame must NOT transiently hold gain");
+					Assert::IsTrue(out.lightTarget > config.ledFloorBlack,
+						L"Repeated brightening fade-in frame must NEVER clamp lightTarget to ledFloorBlack");
+				}
+			}
+
+			// Leg B (negative control): exact same 24p @ 60Hz cadence on a darkening fade-out.
+			{
+				CompensateController controller(config);
+				StatsBuilder builder(config);
+				SceneVerdicts verdicts;
+				for (uint64_t s = 11; s <= 19; ++s)
+					verdicts.Fade(s, 0.85f);
+				builder.SetSceneVerdictReader(verdicts.VerdictReader());
+
+				for (uint64_t s = 1; s <= 10; ++s)
+					controller.Tick(builder.Build(UniformRaw(120.0), static_cast<double>(s) * kTickMs, 0.0, s), kTickMs);
+
+				const double repeatedFalling[9] = { 100.0, 100.0, 100.0, 80.0, 80.0, 80.0, 60.0, 60.0, 60.0 };
+				for (int i = 0; i < 9; ++i)
+				{
+					const uint64_t seq = static_cast<uint64_t>(11 + i);
+					const FrameStats stats = builder.Build(UniformRaw(repeatedFalling[i]), static_cast<double>(seq) * kTickMs, 0.0, seq);
+					Assert::IsTrue(stats.fade);
+					const ControllerOutput out = controller.Tick(stats, kTickMs);
+					Assert::IsTrue(out.holdGain, L"Repeated darkening fade-out frame MUST hold gain");
+					Assert::AreEqual(config.ledFloorBlack, out.lightTarget,
+						L"Repeated darkening fade-out frame MUST target ledFloorBlack");
+				}
+
+				// Leg C: post-Reset() single fade=true frame preserves darkening-compatible holdGain=true.
+				controller.Reset(255);
+				FrameStats postReset = builder.Build(UniformRaw(80.0), 20.0 * kTickMs, 0.0, 20);
+				postReset.fade = true;
+				const ControllerOutput resetOut = controller.Tick(postReset, kTickMs);
+				Assert::IsTrue(resetOut.holdGain, L"First fade=true tick after Reset() must preserve holdGain=true");
+				Assert::AreEqual(config.ledFloorBlack, resetOut.lightTarget,
+					L"First fade=true tick after Reset() must target ledFloorBlack");
+			}
+		}
 	};
 }

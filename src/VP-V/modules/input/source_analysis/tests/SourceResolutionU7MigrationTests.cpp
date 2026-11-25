@@ -25,10 +25,13 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <memory>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
@@ -40,11 +43,11 @@ namespace
 
 	constexpr double kBlackNorm = 64.0 / 1023.0;
 
-	// Generates 8 informative high-contrast noise tiles (mean ~0.50, never blank/black locally).
-	std::vector<float> TexturedTiles(unsigned seed)
+	// Generates 8 informative high-contrast noise tiles at the given mean (never blank/black locally).
+	std::vector<float> TexturedTilesAt(unsigned seed, double mean, double stddev = 0.14)
 	{
 		std::mt19937 rng(seed);
-		std::normal_distribution<double> dist(0.50, 0.14);
+		std::normal_distribution<double> dist(mean, stddev);
 		std::vector<float> tiles(static_cast<size_t>(8) * Monitor::kTile * Monitor::kTile);
 		for (float& v : tiles)
 		{
@@ -52,6 +55,109 @@ namespace
 			v = static_cast<float>(std::round(c * 1023.0) / 1023.0);
 		}
 		return tiles;
+	}
+
+	std::vector<float> TexturedTiles(unsigned seed)
+	{
+		return TexturedTilesAt(seed, 0.50, 0.14);
+	}
+
+	struct TempHistoryDir
+	{
+		std::string path;
+		TempHistoryDir()
+		{
+			char tmp[MAX_PATH] = {};
+			Assert::IsTrue(GetTempPathA(ARRAYSIZE(tmp), tmp) > 0);
+			char dir[MAX_PATH] = {};
+			Assert::IsTrue(GetTempFileNameA(tmp, "srm", 0, dir) != 0);
+			Assert::IsTrue(DeleteFileA(dir) != 0);
+			Assert::IsTrue(CreateDirectoryA(dir, nullptr) != 0);
+			path = dir;
+		}
+		~TempHistoryDir()
+		{
+			if (path.empty()) return;
+			WIN32_FIND_DATAA found{};
+			HANDLE search = FindFirstFileA((path + "\\*").c_str(), &found);
+			if (search != INVALID_HANDLE_VALUE)
+			{
+				do
+				{
+					if (!(found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+						DeleteFileA((path + "\\" + found.cFileName).c_str());
+				} while (FindNextFileA(search, &found));
+				FindClose(search);
+			}
+			RemoveDirectoryA(path.c_str());
+		}
+	};
+
+	std::vector<std::string> SplitCsvLine(const std::string& line)
+	{
+		std::vector<std::string> cols;
+		std::string cur;
+		bool inQuotes = false;
+		for (size_t i = 0; i < line.size(); ++i)
+		{
+			const char c = line[i];
+			if (c == '"')
+				inQuotes = !inQuotes;
+			else if (c == ',' && !inQuotes)
+			{
+				cols.push_back(cur);
+				cur.clear();
+			}
+			else if (c != '\r')
+				cur.push_back(c);
+		}
+		cols.push_back(cur);
+		return cols;
+	}
+
+	bool ReadHistoryRowForSeq(const std::string& csvPath, uint64_t targetSeq,
+		int& outBlank, int& outCut, int& outFade, double& outApl)
+	{
+		std::ifstream in(csvPath.c_str());
+		if (!in)
+			return false;
+		std::string headerLine;
+		if (!std::getline(in, headerLine))
+			return false;
+		const std::vector<std::string> header = SplitCsvLine(headerLine);
+		auto colOf = [&](const char* name) -> int
+		{
+			for (size_t i = 0; i < header.size(); ++i)
+				if (header[i] == name)
+					return static_cast<int>(i);
+			return -1;
+		};
+		const int iEvent = colOf("event");
+		const int iSeq = colOf("seq");
+		const int iBlank = colOf("blank");
+		const int iCut = colOf("cut");
+		const int iFade = colOf("fade");
+		const int iApl = colOf("apl");
+		if (iEvent < 0 || iSeq < 0 || iBlank < 0 || iCut < 0 || iFade < 0 || iApl < 0)
+			return false;
+		std::string line;
+		while (std::getline(in, line))
+		{
+			if (line.empty()) continue;
+			const std::vector<std::string> cols = SplitCsvLine(line);
+			const int maxIdx = (std::max)((std::max)(iEvent, iSeq), (std::max)((std::max)(iBlank, iCut), (std::max)(iFade, iApl)));
+			if (static_cast<int>(cols.size()) <= maxIdx) continue;
+			if (cols[static_cast<size_t>(iEvent)] != "reading") continue;
+			if (cols[static_cast<size_t>(iSeq)].empty()) continue;
+			const uint64_t seq = static_cast<uint64_t>(std::strtoull(cols[static_cast<size_t>(iSeq)].c_str(), nullptr, 10));
+			if (seq != targetSeq) continue;
+			outBlank = std::atoi(cols[static_cast<size_t>(iBlank)].c_str());
+			outCut = std::atoi(cols[static_cast<size_t>(iCut)].c_str());
+			outFade = std::atoi(cols[static_cast<size_t>(iFade)].c_str());
+			outApl = std::atof(cols[static_cast<size_t>(iApl)].c_str());
+			return true;
+		}
+		return false;
 	}
 
 	VpUnit::SourceStats::Record ComputeSyntheticP4(const std::vector<uint16_t>& half, uint32_t hw, uint32_t hh)
@@ -454,6 +560,384 @@ namespace VideoProcessorTest
 			Assert::AreEqual(std::string("no store owner"), d.p4StatsFallbackWhy);
 			Assert::IsFalse(d.frameFade);
 			Assert::IsFalse(d.frameBlack, L"Negative control: without skeleton owner, local tiles read non-black");
+		}
+
+		// Pass B LOW: CutFadeJudge::BlankOf grid-flatness branch (spread > kBlackSpreadP4 with Flatness(grid) < kFlatF),
+		// contrasted against a non-flat textured grid having the EXACT same p99-p01 spread.
+		TEST_METHOD(CutFadeJudgeBlankOfGridFlatnessBranchDistinguishesSmoothFromTextured)
+		{
+			constexpr uint32_t kHw = 64, kHh = 36; // 2x2 pixels per 32x18 grid cell
+
+			// Smooth mid-grey vertical ramp: g(gy) = 100.0 + 0.5*gy -> P4 25600..27776 (spread ~2176 >> kBlackSpreadP4=256),
+			// while Flatness(grid) ~= 0.0034 << kFlatF=0.02.
+			std::vector<uint16_t> smoothMid(static_cast<size_t>(kHw) * kHh);
+			for (uint32_t y = 0; y < kHh; ++y)
+			{
+				const uint32_t gy = y / 2u; // 0..17
+				const uint16_t val = static_cast<uint16_t>(25600u + gy * 128u);
+				for (uint32_t x = 0; x < kHw; ++x)
+					smoothMid[static_cast<size_t>(y) * kHw + x] = val;
+			}
+			const VpUnit::SourceStats::Record smoothMidRec = ComputeSyntheticP4(smoothMid, kHw, kHh);
+			Assert::AreEqual(1u, smoothMidRec.gridFound);
+			Assert::IsTrue(smoothMidRec.p99 - smoothMidRec.p01 > VpUnit::CutFadeJudge::kBlackSpreadP4,
+				L"Precondition: spread must exceed kBlackSpreadP4 to exercise the grid-flatness branch");
+			const VpUnit::CutFadeJudge::BlankVerdict smoothMidBv = VpUnit::CutFadeJudge::BlankOf(smoothMidRec);
+			Assert::IsTrue(smoothMidBv.flat, L"Smooth mid-grey ramp with Flatness < kFlatF must classify flat=true");
+			Assert::IsTrue(smoothMidBv.blank, L"Smooth mid-grey ramp must classify blank=true");
+			Assert::IsFalse(smoothMidBv.black, L"Smooth mid-grey ramp (mean > kBlackMeanMaxP4) must classify black=false");
+
+			// Smooth dark vertical ramp: P4 2560..3240 (spread ~640 > 256, mean < kBlackMeanMaxP4=12288, Flatness < 0.01).
+			std::vector<uint16_t> smoothDark(static_cast<size_t>(kHw) * kHh);
+			for (uint32_t y = 0; y < kHh; ++y)
+			{
+				const uint32_t gy = y / 2u;
+				const uint16_t val = static_cast<uint16_t>(2560u + gy * 40u);
+				for (uint32_t x = 0; x < kHw; ++x)
+					smoothDark[static_cast<size_t>(y) * kHw + x] = val;
+			}
+			const VpUnit::SourceStats::Record smoothDarkRec = ComputeSyntheticP4(smoothDark, kHw, kHh);
+			Assert::IsTrue(smoothDarkRec.p99 - smoothDarkRec.p01 > VpUnit::CutFadeJudge::kBlackSpreadP4);
+			const VpUnit::CutFadeJudge::BlankVerdict smoothDarkBv = VpUnit::CutFadeJudge::BlankOf(smoothDarkRec);
+			Assert::IsTrue(smoothDarkBv.flat && smoothDarkBv.blank && smoothDarkBv.black,
+				L"Smooth dark ramp via grid-flatness branch must classify flat=true, blank=true, black=true");
+
+			// Negative control with the EXACT same spread (25600..27776, spread=2176) arranged as a 2x2-pixel
+			// cell checkerboard -> Flatness ~= 0.078 >> kFlatF=0.02 -> must classify non-flat/non-blank.
+			std::vector<uint16_t> checkerSameSpread(static_cast<size_t>(kHw) * kHh);
+			for (uint32_t y = 0; y < kHh; ++y)
+				for (uint32_t x = 0; x < kHw; ++x)
+					checkerSameSpread[static_cast<size_t>(y) * kHw + x] =
+						(((x / 2u) ^ (y / 2u)) & 1u) ? 27776u : 25600u;
+			const VpUnit::SourceStats::Record checkerRec = ComputeSyntheticP4(checkerSameSpread, kHw, kHh);
+			Assert::AreEqual(smoothMidRec.p99 - smoothMidRec.p01, checkerRec.p99 - checkerRec.p01,
+				L"Negative control must carry the exact same p99-p01 spread as the smooth ramp");
+			const VpUnit::CutFadeJudge::BlankVerdict checkerBv = VpUnit::CutFadeJudge::BlankOf(checkerRec);
+			Assert::IsFalse(checkerBv.flat, L"Negative control: high-frequency grid with identical spread must NOT be flat");
+			Assert::IsFalse(checkerBv.blank);
+			Assert::IsFalse(checkerBv.black);
+		}
+
+		// Pass B MED-3 (parts 1 & 3) + Pass A MED-3: same-input negative controls for:
+		//   - Analyse() U7 cut propagation (verified via history CSV cut column)
+		//   - LookAheadEvidence(from, to) consecutive U7 history coverage (and Discontinuity clear)
+		//   - SRM P4 mean replacement (NormalisedMean vs private tile mean ~0.25 in history CSV apl column)
+		TEST_METHOD(SrmAnalyseCutLookAheadEvidenceAndP4MeanSameInputControls)
+		{
+			constexpr int kW = 1024, kH = 512;
+			const std::vector<float> lowMeanTiles = TexturedTilesAt(20260510u, 0.25, 0.06);
+			auto staticSampler = [](int x, int y) -> int
+			{
+				const unsigned h = (static_cast<unsigned>(x) * 73856093u) ^ (static_cast<unsigned>(y) * 19349663u);
+				return 200 + static_cast<int>((h >> 16) % 500u);
+			};
+
+			// 1. Shared U7 + P4 monitor: identical static tiles + identical static look-ahead frames;
+			//    U7 says cut=true on seq 12, P4 says mean=0.75 on seq 30.
+			TempHistoryDir sharedDir;
+			{
+				Monitor sharedMon;
+				sharedMon.SetHistoryFolder(sharedDir.path);
+				sharedMon.SetSharedSceneReader([](uint64_t seq, Monitor::SharedSceneInput& out, const char**) -> bool {
+					out.cut = (seq == 12);
+					out.fade = false;
+					out.fadeKeep = 1.0f;
+					return true;
+				});
+				sharedMon.SetSharedP4Reader([](uint64_t seq, Monitor::SharedP4Input& out, const char**) -> bool {
+					out.blank = false;
+					out.black = false;
+					out.flat = false;
+					out.mean = (seq == 30) ? 0.75 : 0.25;
+					return true;
+				});
+
+				// LookAheadFrame populates consecutive U7 history for LookAheadEvidence(from, to).
+				for (uint64_t s = 10; s <= 13; ++s)
+					sharedMon.LookAheadFrame(s, kW, kH, staticSampler, 0, 0, kW, kH);
+
+				const SourceResolution::FrameEvidence evWithCut = sharedMon.LookAheadEvidence(10, 13);
+				Assert::IsTrue(evWithCut.covered, L"Shared U7 consecutive look-ahead frames must mark evidence covered=true");
+				Assert::IsTrue(evWithCut.cut, L"Shared U7 cut on seq 12 must report LookAheadEvidence(10, 13).cut=true");
+				Assert::IsFalse(evWithCut.unresolved);
+
+				const SourceResolution::FrameEvidence evNoCut = sharedMon.LookAheadEvidence(10, 11);
+				Assert::IsTrue(evNoCut.covered);
+				Assert::IsFalse(evNoCut.cut, L"Interval (10, 11] without U7 cut must report cut=false");
+
+				// Analyse() on identical static tiles: seq 11 (no cut) -> seq 12 (U7 cut) -> seq 30 (P4 mean=0.75).
+				sharedMon.AnalyseTilesForTest(lowMeanTiles, 8, 1.0, kW, kH, {}, {}, 8, Monitor::kTile, kBlackNorm, 11);
+				sharedMon.AnalyseTilesForTest(lowMeanTiles, 8, 1.5, kW, kH, {}, {}, 8, Monitor::kTile, kBlackNorm, 12);
+				sharedMon.AnalyseTilesForTest(lowMeanTiles, 8, 2.0, kW, kH, {}, {}, 8, Monitor::kTile, kBlackNorm, 30);
+				sharedMon.FlushHistoryNow();
+
+				const std::string csvPath = sharedMon.HistoryPath();
+				Assert::IsFalse(csvPath.empty());
+				int blank11 = -1, cut11 = -1, fade11 = -1;
+				double apl11 = -1.0;
+				Assert::IsTrue(ReadHistoryRowForSeq(csvPath, 11, blank11, cut11, fade11, apl11));
+				Assert::AreEqual(0, cut11, L"seq 11 without U7 cut must record cut=0");
+
+				int blank12 = -1, cut12 = -1, fade12 = -1;
+				double apl12 = -1.0;
+				Assert::IsTrue(ReadHistoryRowForSeq(csvPath, 12, blank12, cut12, fade12, apl12));
+				Assert::AreEqual(1, cut12, L"Analyse() must propagate shared U7 cut=1 even on identical static tiles");
+
+				int blank30 = -1, cut30 = -1, fade30 = -1;
+				double apl30 = -1.0;
+				Assert::IsTrue(ReadHistoryRowForSeq(csvPath, 30, blank30, cut30, fade30, apl30));
+				Assert::AreEqual(0.75, apl30, 1e-4, L"Analyse() must replace private tile mean (~0.25) with shared P4 mean (0.75)");
+
+				// Discontinuity clears U7 ahead history so LookAheadEvidence no longer reports stale coverage.
+				sharedMon.Discontinuity("test seek");
+				Assert::IsFalse(sharedMon.LookAheadEvidence(10, 13).covered,
+					L"Discontinuity must clear u7AheadHistory");
+			}
+
+			// 2. Negative control on the EXACT same tiles & static frames WITHOUT shared U7 / P4:
+			//    LookAheadEvidence sees cut=false, Analyse() records cut=0 on seq 12, and apl stays at private tile mean (~0.25).
+			TempHistoryDir naiveDir;
+			{
+				Monitor naiveMon;
+				naiveMon.SetHistoryFolder(naiveDir.path);
+				naiveMon.SetSharedSceneReader([](uint64_t, Monitor::SharedSceneInput&, const char** why) -> bool {
+					if (why != nullptr) *why = "test: no u7";
+					return false;
+				});
+				naiveMon.SetSharedP4Reader([](uint64_t, Monitor::SharedP4Input&, const char** why) -> bool {
+					if (why != nullptr) *why = "test: no p4";
+					return false;
+				});
+
+				for (uint64_t s = 10; s <= 13; ++s)
+					naiveMon.LookAheadFrame(s, kW, kH, staticSampler, 0, 0, kW, kH);
+				Assert::IsFalse(naiveMon.LookAheadEvidence(10, 13).cut,
+					L"Negative control: identical static frames without U7 must NOT report LookAheadEvidence cut");
+
+				naiveMon.AnalyseTilesForTest(lowMeanTiles, 8, 1.0, kW, kH, {}, {}, 8, Monitor::kTile, kBlackNorm, 11);
+				naiveMon.AnalyseTilesForTest(lowMeanTiles, 8, 1.5, kW, kH, {}, {}, 8, Monitor::kTile, kBlackNorm, 12);
+				naiveMon.AnalyseTilesForTest(lowMeanTiles, 8, 2.0, kW, kH, {}, {}, 8, Monitor::kTile, kBlackNorm, 30);
+				naiveMon.FlushHistoryNow();
+
+				const std::string csvPath = naiveMon.HistoryPath();
+				int blank12 = -1, cut12 = -1, fade12 = -1;
+				double apl12 = -1.0;
+				Assert::IsTrue(ReadHistoryRowForSeq(csvPath, 12, blank12, cut12, fade12, apl12));
+				Assert::AreEqual(0, cut12, L"Negative control: identical static tiles without U7 must record cut=0");
+
+				int blank30 = -1, cut30 = -1, fade30 = -1;
+				double apl30 = -1.0;
+				Assert::IsTrue(ReadHistoryRowForSeq(csvPath, 30, blank30, cut30, fade30, apl30));
+				Assert::IsTrue(apl30 < 0.35, L"Negative control: without shared P4, apl must stay near private tile mean (~0.25)");
+			}
+		}
+
+		// Pass B MED-3 (part 2): LookAheadFrame P4 black/blank under BOTH SetLatchFixes(true) and SetLatchFixes(false),
+		// contrasted against exact same non-black textured tiles without shared P4.
+		TEST_METHOD(SrmLookAheadFrameP4BlackAndBlankUnderBothLatchFixesModes)
+		{
+			constexpr int kW = 1024, kH = 512;
+			auto nonBlackTextured = [](int x, int y) -> int
+			{
+				const unsigned h = (static_cast<unsigned>(x) * 73856093u) ^ (static_cast<unsigned>(y) * 19349663u);
+				return 300 + static_cast<int>((h >> 16) % 500u); // textured, mean ~0.54 (never locally blank or black)
+			};
+
+			Snapshot lower;
+			lower.reading = true;
+			lower.nativeWidth = kW;
+			lower.nativeHeight = kH;
+			lower.declaredRatio = lower.liveRatio = lower.frameRatio = 0.5;
+			lower.confidence = 0.9;
+			lower.frames = 10;
+
+			auto armPending = [&](Monitor& m)
+			{
+				m.InjectResultForTest(lower, 1);
+				std::string why;
+				m.AutoFactor(kH, 0.8, why, 1.0, 1);
+			};
+
+			// Mode A: SetLatchFixes(true) -> LookAheadFrame uses sharedP4.black (not flat bright blank).
+			{
+				Monitor blackMon;
+				blackMon.SetLatchFixes(true);
+				blackMon.SetSharedSceneReader([](uint64_t, Monitor::SharedSceneInput& out, const char**) -> bool {
+					out.cut = false;
+					return true;
+				});
+				blackMon.SetSharedP4Reader([](uint64_t seq, Monitor::SharedP4Input& out, const char**) -> bool {
+					out.blank = (seq == 30);
+					out.black = (seq == 30);
+					out.flat = (seq == 30);
+					out.mean = (seq == 30) ? kBlackNorm : 0.54;
+					return true;
+				});
+				armPending(blackMon);
+				blackMon.LookAheadFrame(29, kW, kH, nonBlackTextured, 0, 0, kW, kH);
+				blackMon.LookAheadFrame(30, kW, kH, nonBlackTextured, 0, 0, kW, kH);
+				Assert::AreEqual<uint64_t>(30ull, blackMon.Ahead().eventSequence,
+					L"LatchFixes(true): shared P4 black=true must arm LookAheadFrame even on textured non-black tiles");
+				Assert::AreEqual<uint64_t>(0ull, blackMon.Ahead().targetSequence,
+					L"Blank/black event must await the next non-blank picture frame as target");
+
+				// Bright flat (blank=true, black=false) with LatchFixes(true) must NOT arm an event.
+				Monitor flatBrightMon;
+				flatBrightMon.SetLatchFixes(true);
+				flatBrightMon.SetSharedSceneReader([](uint64_t, Monitor::SharedSceneInput& out, const char**) -> bool {
+					out.cut = false;
+					return true;
+				});
+				flatBrightMon.SetSharedP4Reader([](uint64_t seq, Monitor::SharedP4Input& out, const char**) -> bool {
+					out.blank = (seq == 30);
+					out.black = false;
+					out.flat = (seq == 30);
+					out.mean = 0.54;
+					return true;
+				});
+				armPending(flatBrightMon);
+				flatBrightMon.LookAheadFrame(29, kW, kH, nonBlackTextured, 0, 0, kW, kH);
+				flatBrightMon.LookAheadFrame(30, kW, kH, nonBlackTextured, 0, 0, kW, kH);
+				Assert::AreEqual<uint64_t>(0ull, flatBrightMon.Ahead().eventSequence,
+					L"LatchFixes(true): bright flat non-black (blank=true, black=false) must NOT arm");
+
+				// Negative control: no shared P4 on exact same non-black tiles -> eventSequence stays 0.
+				Monitor naiveFixesOn;
+				naiveFixesOn.SetLatchFixes(true);
+				naiveFixesOn.SetSharedSceneReader([](uint64_t, Monitor::SharedSceneInput& out, const char**) -> bool {
+					out.cut = false;
+					return true;
+				});
+				naiveFixesOn.SetSharedP4Reader([](uint64_t, Monitor::SharedP4Input&, const char** why) -> bool {
+					if (why != nullptr) *why = "test: no p4";
+					return false;
+				});
+				armPending(naiveFixesOn);
+				naiveFixesOn.LookAheadFrame(29, kW, kH, nonBlackTextured, 0, 0, kW, kH);
+				naiveFixesOn.LookAheadFrame(30, kW, kH, nonBlackTextured, 0, 0, kW, kH);
+				Assert::AreEqual<uint64_t>(0ull, naiveFixesOn.Ahead().eventSequence,
+					L"Negative control (LatchFixes=true): textured tiles without shared P4 must NOT arm");
+			}
+
+			// Mode B: SetLatchFixes(false) -> LookAheadFrame uses sharedP4.blank (flat non-black arms).
+			{
+				Monitor blankMon;
+				blankMon.SetLatchFixes(false);
+				blankMon.SetSharedSceneReader([](uint64_t, Monitor::SharedSceneInput& out, const char**) -> bool {
+					out.cut = false;
+					return true;
+				});
+				blankMon.SetSharedP4Reader([](uint64_t seq, Monitor::SharedP4Input& out, const char**) -> bool {
+					out.blank = (seq == 30);
+					out.black = false;
+					out.flat = (seq == 30);
+					out.mean = 0.54;
+					return true;
+				});
+				armPending(blankMon);
+				blankMon.LookAheadFrame(29, kW, kH, nonBlackTextured, 0, 0, kW, kH);
+				blankMon.LookAheadFrame(30, kW, kH, nonBlackTextured, 0, 0, kW, kH);
+				Assert::AreEqual<uint64_t>(30ull, blankMon.Ahead().eventSequence,
+					L"LatchFixes(false): shared P4 blank=true must arm LookAheadFrame even when black=false");
+				Assert::AreEqual<uint64_t>(0ull, blankMon.Ahead().targetSequence);
+
+				// Negative control: no shared P4 on exact same non-black tiles -> eventSequence stays 0.
+				Monitor naiveFixesOff;
+				naiveFixesOff.SetLatchFixes(false);
+				naiveFixesOff.SetSharedSceneReader([](uint64_t, Monitor::SharedSceneInput& out, const char**) -> bool {
+					out.cut = false;
+					return true;
+				});
+				naiveFixesOff.SetSharedP4Reader([](uint64_t, Monitor::SharedP4Input&, const char** why) -> bool {
+					if (why != nullptr) *why = "test: no p4";
+					return false;
+				});
+				armPending(naiveFixesOff);
+				naiveFixesOff.LookAheadFrame(29, kW, kH, nonBlackTextured, 0, 0, kW, kH);
+				naiveFixesOff.LookAheadFrame(30, kW, kH, nonBlackTextured, 0, 0, kW, kH);
+				Assert::AreEqual<uint64_t>(0ull, naiveFixesOff.Ahead().eventSequence,
+					L"Negative control (LatchFixes=false): textured tiles without shared P4 must NOT arm");
+			}
+		}
+
+		// Pass A HIGH-1 regression test (MUST-9): AcquireSourceStats when no lane/owner fill is active OR when called
+		// off the render thread must return false with an explicit non-empty cause AND leave SkeletonMemo::Decisions()
+		// completely empty (zero spurious global "skeleton acquire p4_source_stats" fallback).
+		TEST_METHOD(AcquireSourceStatsObeysMust9WithZeroSpuriousMemoFallbacks)
+		{
+			const int ownerTag = 0;
+			const void* const owner = &ownerTag;
+			FrameAnalysis::Store store(8);
+			SrmTapOwnerScope tap(owner, &store);
+
+			// Subcase A: memo exists with NO registered P4 owner fill (no analysis lane).
+			{
+				auto emptyMemo = std::make_shared<VpSkeleton::SkeletonMemo>();
+				FakeSrmSkeletonDemand demand(owner, emptyMemo);
+				SrmHubScope hub(&demand);
+
+				VpUnit::SourceStats::Record rec;
+				const char* why = "";
+				Assert::IsFalse(VpSkeleton::SceneRecordReader::AcquireSourceStats(50, rec, &why),
+					L"AcquireSourceStats without P4 owner fill must return false");
+				Assert::IsTrue(why != nullptr && why[0] != '\0', L"Must return explicit non-empty failure cause");
+				Assert::AreEqual(std::string("no analysis lane"), std::string(why));
+				Assert::IsTrue(emptyMemo->Decisions().empty(),
+					L"MUST-9: AcquireSourceStats without owner fill must NOT record a spurious global memo Fallback decision");
+			}
+
+			// Subcase B: P4 owner fill registered, render thread pinned to main thread; worker thread calls AcquireSourceStats.
+			{
+				auto memo = std::make_shared<VpSkeleton::SkeletonMemo>();
+				memo->SetRenderThread(std::this_thread::get_id());
+				VpSkeleton::OwnerFill p4Fill;
+				p4Fill.fill = [](const VpSkeleton::OwnerFillRequest&, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) -> bool {
+					constexpr uint32_t kHw = 64, kHh = 36;
+					const std::vector<uint16_t> flatBlack(static_cast<size_t>(kHw) * kHh, static_cast<uint16_t>(64u << 6));
+					out.bytes.assign(VpUnit::SourceStats::kRecordBytes, 0);
+					return VpUnit::SourceStats::ComputeRecord(flatBlack.data(), kHw, kHh, out.bytes.data(), out.bytes.size());
+				};
+				const std::string p4Owner = VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP4SourceStats);
+				Assert::IsTrue(
+					memo->RegisterOwnerFill(VpSkeleton::kP4SourceStats, VpSkeleton::AcquireForm::Cpu, p4Owner, std::move(p4Fill))
+					== VpSkeleton::SkeletonMemo::Registration::Registered);
+
+				FakeSrmSkeletonDemand demand(owner, memo);
+				SrmHubScope hub(&demand);
+
+				// Off-render-thread read of unpublished seq 51: returns false with explicit cause, ZERO memo Decisions().
+				bool offThreadOk = true;
+				std::string offThreadWhy;
+				std::thread workerUnpublished([&]() {
+					VpUnit::SourceStats::Record rec;
+					const char* why = "";
+					offThreadOk = VpSkeleton::SceneRecordReader::AcquireSourceStats(51, rec, &why);
+					offThreadWhy = (why != nullptr) ? why : "";
+				});
+				workerUnpublished.join();
+				Assert::IsFalse(offThreadOk, L"Off-render-thread AcquireSourceStats on unpublished frame must return false");
+				Assert::IsFalse(offThreadWhy.empty(), L"Off-render-thread miss must report explicit non-empty cause");
+				Assert::AreEqual(std::string("p4 not published (off render thread)"), offThreadWhy);
+				Assert::IsTrue(memo->Decisions().empty(),
+					L"MUST-9: off-render-thread AcquireSourceStats must NOT pollute SkeletonMemo::Decisions()");
+
+				// Positive control: publish seq 52 on render thread -> off-render-thread AcquireSourceStats succeeds via CopyPublished!
+				const VpSkeleton::AcquireResult pub = memo->Acquire(VpSkeleton::kP4SourceStats, 52, VpSkeleton::AcquireForm::Cpu);
+				Assert::IsTrue(pub.Ok());
+				bool pubReadOk = false;
+				double pubReadMean = -1.0;
+				std::thread workerPublished([&]() {
+					VpUnit::SourceStats::Record rec;
+					const char* why = "";
+					pubReadOk = VpSkeleton::SceneRecordReader::AcquireSourceStats(52, rec, &why);
+					if (pubReadOk)
+						pubReadMean = VpUnit::SourceStats::NormalisedMean(rec);
+				});
+				workerPublished.join();
+				Assert::IsTrue(pubReadOk, L"Off-render-thread AcquireSourceStats must succeed via CopyPublished once published");
+				Assert::AreEqual(64.0 / 1023.0, pubReadMean, 1e-9);
+				Assert::IsTrue(memo->Decisions().empty());
+			}
 		}
 	};
 }
