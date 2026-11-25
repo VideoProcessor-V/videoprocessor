@@ -547,6 +547,66 @@ namespace CameraModel
 			*lrOut = (wL > 0.0 && wR > 0.0) ? std::hypot(rxL / wL - rxR / wR, ryL / wL - ryR / wR) : 0.0;
 		}
 
+		// CE-WATER spatial-spread / leverage check: 2x2 covariance eigenvalues of surviving rigid block centres
+		// normalized by picture half-extents (aspect-ratio invariant: full 2D uniform support has lambdaMin = lambdaMax = 1/3,
+		// ratio = 1.0; a thin strip of relative thickness h has ratio = h^2, perpendicular lever arm 1/h = sqrt(lambdaMax / lambdaMin)).
+		struct SpatialSpread
+		{
+			double lambdaMin = 0.0;
+			double lambdaMax = 0.0;
+			double ratio = 0.0;   // lambdaMin / lambdaMax in [0, 1]
+		};
+
+		SpatialSpread ComputeSpatialSpread(const std::vector<Sample>& samples, const Rect& pic,
+			const std::vector<uint8_t>* mask = nullptr)
+		{
+			SpatialSpread sp;
+			const double hw = 0.5 * pic.Width();
+			const double hh = 0.5 * pic.Height();
+			if (!(hw > 0.0) || !(hh > 0.0))
+				return sp;
+			double sw = 0.0, mx = 0.0, my = 0.0;
+			for (size_t i = 0; i < samples.size(); ++i)
+			{
+				if (mask && !(*mask)[i])
+					continue;
+				const double w = samples[i].w;
+				if (!(w > 0.0))
+					continue;
+				sw += w;
+				mx += w * (samples[i].x / hw);
+				my += w * (samples[i].y / hh);
+			}
+			if (!(sw > 0.0))
+				return sp;
+			mx /= sw;
+			my /= sw;
+			double cxx = 0.0, cxy = 0.0, cyy = 0.0;
+			for (size_t i = 0; i < samples.size(); ++i)
+			{
+				if (mask && !(*mask)[i])
+					continue;
+				const double w = samples[i].w;
+				if (!(w > 0.0))
+					continue;
+				const double dx = samples[i].x / hw - mx;
+				const double dy = samples[i].y / hh - my;
+				cxx += w * dx * dx;
+				cxy += w * dx * dy;
+				cyy += w * dy * dy;
+			}
+			cxx /= sw;
+			cxy /= sw;
+			cyy /= sw;
+			const double tr = cxx + cyy;
+			const double diff = cxx - cyy;
+			const double disc = std::sqrt(std::max(0.0, diff * diff + 4.0 * cxy * cxy));
+			sp.lambdaMax = std::max(0.0, 0.5 * (tr + disc));
+			sp.lambdaMin = std::max(0.0, 0.5 * (tr - disc));
+			sp.ratio = sp.lambdaMax > 1e-12 ? (sp.lambdaMin / sp.lambdaMax) : 0.0;
+			return sp;
+		}
+
 		struct ChosenModel
 		{
 			Params model;
@@ -605,6 +665,25 @@ namespace CameraModel
 				return cost;
 			};
 
+			// CE-WATER rigid-block spatial-spread / leverage cap (zero magic numbers, derived from Config::absThresholdSigmas):
+			// When surviving rigid blocks collapse into a thin strip (perpendicular lever arm sqrt(lambdaMax/lambdaMin) > absThresholdSigmas,
+			// i.e. lambdaMin / lambdaMax < 1 / absThresholdSigmas^2 = 1/9), cap the model ladder at 4-DOF Similarity so weak perpendicular
+			// leverage cannot swing corners under 6-DOF Affine or 8-DOF Homography; when even the major axis spans < 1/absThresholdSigmas
+			// of the picture (lambdaMax < (1/3) / absThresholdSigmas^2 = 1/27), cap at 2-DOF Translation.
+			ModelType ladderMax = maxModel;
+			if (c.waterBlockExclude)
+			{
+				const double sig = std::max(1.0, c.absThresholdSigmas);
+				const double minRatio = 1.0 / (sig * sig);
+				const double minMajorVar = minRatio / 3.0;
+				const SpatialSpread sp = ComputeSpatialSpread(wbuf, f.pic);
+				if (sp.lambdaMax < minMajorVar)
+					ladderMax = std::min(ladderMax, ModelType::Translation);
+				else if (sp.ratio < minRatio)
+					ladderMax = std::min(ladderMax, ModelType::Similarity);
+			}
+			const bool runEarly = earlyExit && w.type <= ladderMax;
+
 			static const ModelType kAll[4] = { ModelType::Translation, ModelType::Similarity, ModelType::Affine, ModelType::Homography };
 			Params chosen;
 			bool haveChosen = false;
@@ -614,7 +693,7 @@ namespace CameraModel
 			// Early exit: keep H0's (refined) type and try ONE step up from the same weighted set under the same
 			// complexity-penalty test; otherwise run the whole ladder from translation.
 			int tiFirst = 0, tiLast = 3;
-			if (earlyExit)
+			if (runEarly)
 			{
 				tiFirst = static_cast<int>(w.type) - static_cast<int>(ModelType::Translation);
 				tiLast = std::min(3, tiFirst + 1);
@@ -627,10 +706,10 @@ namespace CameraModel
 					haveBestSim = true;
 				}
 			}
-			for (int ti = tiFirst + (earlyExit ? 1 : 0); ti <= tiLast; ++ti)
+			for (int ti = tiFirst + (runEarly ? 1 : 0); ti <= tiLast; ++ti)
 			{
 				const ModelType ty = kAll[ti];
-				if (ty > maxModel)
+				if (ty > ladderMax)
 					break;
 				if (ty == ModelType::Affine && quadrants < 2 && haveChosen)
 					continue;
@@ -675,7 +754,7 @@ namespace CameraModel
 			// homography would never relax when the motion becomes a pure pan. When the type is still H0's and
 			// above Translation, fit ONE type down from the same weighted set; the lower type wins when the
 			// higher one does not earn its extra parameters under the same complexity-penalty test.
-			if (c.stepDownOnEarlyExit && earlyExit && haveChosen && chosen.type == w.type && chosen.type > ModelType::Translation)
+			if (c.stepDownOnEarlyExit && runEarly && haveChosen && chosen.type == w.type && chosen.type > ModelType::Translation)
 			{
 				const ModelType lowerTy = kAll[static_cast<int>(chosen.type) - static_cast<int>(ModelType::Translation) - 1];
 				Params lp;
@@ -1856,7 +1935,11 @@ namespace CameraModel
 						++rigidQuadrants;
 				const double borderSupport = f.preWaterRingMass > 0.0 ? (inlRingMass / f.preWaterRingMass) : 0.0;
 				const double preWaterInlierShare = f.preWaterTrustedMass > 0.0 ? (inlMass / f.preWaterTrustedMass) : 0.0;
-				if (rigidQuadrants < 2 || borderSupport < c.borderVetoRatio || preWaterInlierShare < c.inlierShareLo)
+				const double sig = std::max(1.0, c.absThresholdSigmas);
+				const double minMajorVar = 1.0 / (3.0 * sig * sig);
+				const SpatialSpread inlSpread = ComputeSpatialSpread(f.s, f.pic, &cam->inl);
+				if (rigidQuadrants < 2 || borderSupport < c.borderVetoRatio || preWaterInlierShare < c.inlierShareLo
+					|| inlSpread.lambdaMax < minMajorVar)
 				{
 					rec.reason = Reason::Ambiguous;
 					rec.verdictFlags |= kVerdictDynamicTexture;
@@ -2201,6 +2284,7 @@ namespace CameraModel
 					const bool runDetect = m_config.dynTexture || m_config.staticCamera;
 					CameraMotion seed = Impl::Run(*this, *in.next, nullptr, false, m_config.objects, false, nullptr, runDetect, &seedPrec);
 					m_dyn.Reset();   // look-ahead peek on in.next must not seed the real next pair's detector history with itself
+					m_waterPrev.Reset();
 					if (seed.valid && ReasonUsable(seed.reason))   // GEM-131: a seed fit that is itself unusable (Ambiguous, ...) seeds nothing
 					{
 						rec.valid = true;
@@ -2247,6 +2331,7 @@ namespace CameraModel
 					const bool runDetect = m_config.dynTexture || m_config.staticCamera;
 					CameraMotion nx = Impl::Run(*this, *in.next, &preForNext, false, false, false, nullptr, runDetect);
 					m_dyn.Reset();   // look-ahead peek on in.next must not seed the real next pair's detector history with itself
+					m_waterPrev.Reset();
 					if (nx.valid && ReasonUsable(nx.reason))   // GEM-131: the same verdict gate for the flash bridge
 					{
 						const Params nextP = TimeScale(nx.params, in.pairSeconds / in.next->pairSeconds, in.picture);

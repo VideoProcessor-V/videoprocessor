@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "DynamicTexture.h"
 
+#include <VP-V/core/OnePole.h>
+
 #include <algorithm>
 #include <cmath>
 
@@ -291,7 +293,7 @@ namespace CameraModel
 	}
 
 	WaterExcludeStats ComputeWaterExclusionMask(const DynTextureExcludeConfig& cfg, const PairInput& in,
-		const DynTextureState& prevState, double precPx, std::vector<uint8_t>& maskOut)
+		DynTextureState& state, double precPx, std::vector<uint8_t>& maskOut)
 	{
 		WaterExcludeStats stats;
 		const int gw = in.gridW, gh = in.gridH;
@@ -299,21 +301,28 @@ namespace CameraModel
 			in.fwdX == nullptr || in.fwdY == nullptr || in.fwdTrust == nullptr)
 		{
 			maskOut.clear();
+			state.scratchProb.clear();
 			return stats;
 		}
 		const size_t nb = static_cast<size_t>(gw) * static_cast<size_t>(gh);
 		maskOut.assign(nb, 0);
+		state.scratchProb.assign(nb, 0.0f);
 		const double prec = ResolvePrecision(in, precPx);
-		const bool prevOk = prevState.have && prevState.gridW == gw && prevState.gridH == gh &&
-			prevState.picture == in.picture && prevState.seconds > 0 && in.pairSeconds > 0 &&
-			prevState.prev.valid.size() == nb;
-		const double k = prevOk ? in.pairSeconds / prevState.seconds : 1.0;
+		const bool seqContinuous = !(in.pairFrom != 0 && state.lastPairTo != 0 && in.pairFrom != state.lastPairTo);
+		const bool prevOk = !in.cut && seqContinuous && state.have && state.gridW == gw && state.gridH == gh &&
+			state.picture == in.picture && state.seconds > 0 && in.pairSeconds > 0 &&
+			state.prev.valid.size() == nb;
+		const double k = prevOk ? in.pairSeconds / state.seconds : 1.0;
 		// Derived temporal difference threshold: for i.i.d. noise sigma = prec on each pair,
 		// std(v_t - k * v_{t-1}) = sqrt(1 + k^2) * prec (zero arbitrary rel * |v| scaling).
 		const double temporalThr = cfg.curvatureSigmas * std::sqrt(1.0 + k * k) * prec;
+		// Short motion-advected persistence decay via OnePole::AlphaFor (source-time seconds, frame-rate invariant).
+		const bool havePrevProb = prevOk && cfg.persistenceSeconds > 0.0 && state.waterProb.size() == nb;
+		const double decay = havePrevProb ? (1.0 - OnePole::AlphaFor(in.pairSeconds, cfg.persistenceSeconds)) : 0.0;
 
-		// Precompute per-block validity once (inside active picture, not text-guard, finite positive trust & vector).
-		std::vector<uint8_t> valid(nb, 0);
+		// POD1-M7: reuse hoisted valid buffer on state (zero steady-state per-frame heap allocation).
+		std::vector<uint8_t>& valid = state.scratchValid;
+		valid.assign(nb, 0);
 		for (int by = 0; by < gh; ++by)
 		{
 			const double cy = (by + 0.5) * in.blockSize;
@@ -344,16 +353,14 @@ namespace CameraModel
 
 				// Model-free symmetric discrete vector curvature (100% invariant to pan, zoom, rotation, affine speed).
 				double curvMag = 0.0, curvSigma = 0.0;
-				if (!EvalSymmetricCurvature(bx, by, gw, gh, valid.data(), in.fwdX, in.fwdY, prec, &curvMag, &curvSigma))
-					continue;
-				const bool spatialIncoh = curvMag > cfg.curvatureSigmas * curvSigma;
-				if (!spatialIncoh)
-					continue;
+				const bool haveCurv = EvalSymmetricCurvature(bx, by, gw, gh, valid.data(), in.fwdX, in.fwdY, prec, &curvMag, &curvSigma);
+				const bool spatialIncoh = haveCurv && (curvMag > cfg.curvatureSigmas * curvSigma);
 
-				// Check temporal coherence against the advected previous-pair vector when history exists.
+				// Motion-advected lookup into the previous pair (serves both temporal incoherence and short persistence).
 				bool haveTemporal = false;
 				bool temporalIncoh = false;
-				if (prevOk)
+				double carriedProb = 0.0;
+				if (prevOk && (spatialIncoh || havePrevProb))
 				{
 					const double vx = static_cast<double>(in.fwdX[b]), vy = static_cast<double>(in.fwdY[b]);
 					const double cx = (bx + 0.5) * in.blockSize, cy = (by + 0.5) * in.blockSize;
@@ -366,22 +373,66 @@ namespace CameraModel
 						if (px0 >= 0 && px0 < gw && py0 >= 0 && py0 < gh)
 						{
 							const size_t pb = static_cast<size_t>(py0) * static_cast<size_t>(gw) + static_cast<size_t>(px0);
-							if (prevState.prev.valid[pb] != 0)
+							if (state.prev.valid[pb] != 0)
 							{
-								haveTemporal = true;
-								const double qx = static_cast<double>(prevState.prev.vx[pb]) * k;
-								const double qy = static_cast<double>(prevState.prev.vy[pb]) * k;
-								temporalIncoh = Len(vx - qx, vy - qy) > temporalThr;
+								if (spatialIncoh)
+								{
+									haveTemporal = true;
+									const double qx = static_cast<double>(state.prev.vx[pb]) * k;
+									const double qy = static_cast<double>(state.prev.vy[pb]) * k;
+									temporalIncoh = Len(vx - qx, vy - qy) > temporalThr;
+								}
+								if (havePrevProb)
+									carriedProb = static_cast<double>(state.waterProb[pb]) * decay;
 							}
 						}
 					}
 				}
 
-				const bool drop = haveTemporal ? temporalIncoh : true;
-				if (drop)
+				const bool rawDrop = spatialIncoh && (haveTemporal ? temporalIncoh : true);
+				const double prob = std::max(rawDrop ? 1.0 : 0.0, carriedProb);
+				state.scratchProb[b] = static_cast<float>(prob);
+				if (rawDrop || prob >= 0.5)
 				{
 					maskOut[b] = 1;
 					++stats.excluded;
+				}
+			}
+		}
+
+		// 3x3 cell-grid neighbor fill ("no rigid island in the middle of the ocean"):
+		// Any single unflagged in-picture cell surrounded by >= neighborFillMin (6/8) flagged valid neighbors
+		// is folded into the contiguous water sheet. Synchronous snapshot prevents runaway cascading; border /
+		// active-rect edge cells have <= 5 valid neighbors so blanking never bleeds in.
+		if (cfg.neighborFillMin > 0 && cfg.neighborFillMin <= 8 && stats.excluded > 0)
+		{
+			state.scratchRawMask.assign(maskOut.begin(), maskOut.end());
+			const uint8_t* rawMask = state.scratchRawMask.data();
+			for (int by = 1; by + 1 < gh; ++by)
+			{
+				for (int bx = 1; bx + 1 < gw; ++bx)
+				{
+					const size_t b = static_cast<size_t>(by) * static_cast<size_t>(gw) + static_cast<size_t>(bx);
+					if (!valid[b] || rawMask[b] != 0)
+						continue;
+					int flaggedNbrs = 0;
+					for (int dy = -1; dy <= 1; ++dy)
+					{
+						const size_t row = static_cast<size_t>(by + dy) * static_cast<size_t>(gw);
+						for (int dx = -1; dx <= 1; ++dx)
+						{
+							if (dx == 0 && dy == 0)
+								continue;
+							const size_t nbIdx = row + static_cast<size_t>(bx + dx);
+							if (valid[nbIdx] && rawMask[nbIdx] != 0)
+								++flaggedNbrs;
+						}
+					}
+					if (flaggedNbrs >= cfg.neighborFillMin)
+					{
+						maskOut[b] = 1;
+						++stats.excluded;
+					}
 				}
 			}
 		}
@@ -436,6 +487,11 @@ namespace CameraModel
 			state.gridH = gh;
 			state.picture = in.picture;
 			state.seconds = in.pairSeconds;
+			state.lastPairTo = in.pairTo;
+			if (state.scratchProb.size() == nb)
+				state.waterProb.swap(state.scratchProb);
+			else
+				state.waterProb.assign(nb, 0.0f);
 		}
 		else
 			state.Reset();
