@@ -195,6 +195,7 @@ namespace VpvRendererSettings
 		readChoice("capture_path", settings.capturePath, { "standard", "gpu" });
 		readChoice("capture_upload", settings.captureUpload, { "auto", "render", "early" });
 		readChoice("dv_display_mapping", settings.dvDisplayMapping, { "vp", "original" });   // CF-1 P3
+		readChoice("dv_post_decode_deband", settings.dvPostDecodeDeband, { "auto", "off" });   // CF-DV P5
 		readChoice("dv_tone_mapping", settings.dvToneMapping, { "libplacebo", "dolby_style" });   // feat/dv-l8
 		readChoice("appearance_room", settings.appearanceRoom, { "cinema", "living_low", "living_lit", "auto" });   // CF-1 CAM-4
 		config.TryGetString(rule.section, "dv_compare_capture_folder", settings.dvCompareCaptureFolder);   // feat/dv-l8 WIP
@@ -1095,6 +1096,7 @@ namespace VpvRendererSettings
 		settings.dvTrims = false;                          // key=dv_trims
 		settings.dvToneMapping = "libplacebo";             // key=dv_tone_mapping
 		settings.dvDisplayMapping = "original";            // key=dv_display_mapping
+		settings.dvPostDecodeDeband = "off";               // key=dv_post_decode_deband
 		settings.queueTimingFixes = false;                 // key=queue_timing_fixes
 		settings.pulldownFixes = false;                    // key=pulldown_fixes
 		settings.timingContinuityFixes = false;            // key=timing_continuity_fixes
@@ -1240,6 +1242,7 @@ namespace VpvRendererSettings
 			<< settings.sourceResolution << '|'
 			<< settings.dvToneMapping << '|'
 			<< settings.dvDisplayMapping << '|'
+			<< settings.dvPostDecodeDeband << '|'
 			<< settings.dvCompareCaptureFolder << '|'
 			<< settings.sourceResolutionAutoMinConfidence << '|'
 			<< settings.sourceResolutionEvidenceShots << '|'
@@ -1582,6 +1585,7 @@ namespace VpvRendererSettings
 		changed(current.dvTrims != next.dvTrims, "dv_trims");
 		changed(current.dvToneMapping != next.dvToneMapping, "dv_tone_mapping");
 		changed(current.dvDisplayMapping != next.dvDisplayMapping, "dv_display_mapping");
+		changed(current.dvPostDecodeDeband != next.dvPostDecodeDeband, "dv_post_decode_deband");
 		changed(current.dvCompareCaptureFolder != next.dvCompareCaptureFolder, "dv_compare_capture_folder");
 		changed(current.dvTunnelFixes != next.dvTunnelFixes, "dv_tunnel_fixes");
 		changed(current.dejudderHoldFeatherPx != next.dejudderHoldFeatherPx ||
@@ -1726,6 +1730,7 @@ namespace VpvRendererSettings
 		<< "dv_trims=" << s.dvTrims << "\n"
 		<< "dv_tone_mapping=" << s.dvToneMapping << "\n"
 		<< "dv_display_mapping=" << s.dvDisplayMapping << "\n"
+		<< "dv_post_decode_deband=" << s.dvPostDecodeDeband << "\n"
 		<< "dv_compare_capture_folder=" << s.dvCompareCaptureFolder << "\n"
 		<< "dv_tunnel_fixes=" << (s.dvTunnelFixes ? "on" : "off") << "\n"
 		<< "hdr_inference=" << s.hdrInference << "\n"

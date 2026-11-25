@@ -623,22 +623,24 @@
       "unit": "colour",
       "side": "input",
       "order": 85,
-      "status": "placeholder",
+      "status": "built",
       "hook_point": "HOST",
-      "purpose": "Reserved stage dm.pre of the DV display-mapping split: work on the decoded RGB before libplacebo's colour map.",
+      "purpose": "Post-decode I-only Dolby Vision debander (CF-DV P5): runs on the decoded PQ picture before libplacebo's colour map, debanding strictly BT.2100 ICtCp intensity I from the shared D5 12-bit tap and P14 coding quality.",
       "contract": {
-        "input": "decoded RGB picture",
-        "output": "same domain",
+        "input": "decoded PQ picture + shared D5 12-bit tap + P14 coding quality",
+        "output": "same domain (BTB/WTW preserved; Ct and Cp untouched)",
         "geometry": "delivered size",
-        "delay_share": "0 frames (placeholder: no component, no hook)",
+        "delay_share": "0 frames (one MAIN hook when active; zero hooks when off)",
         "lookahead": "none"
       },
-      "settings_keys": [],
+      "settings_keys": [
+        "dv_post_decode_deband"
+      ],
       "planned_keys": [],
-      "tiers": "n/a (placeholder)",
+      "tiers": "not tiered (default off)",
       "fallback": {
-        "entry": "DV display mapping (pre): off (<reason>)",
-        "behaviour": "Off = pass-through; the slot is a placeholder until its stage lands."
+        "entry": "DV deband: off (<reason>)",
+        "behaviour": "Off by default (zero hooks). With dv_post_decode_deband = auto on a DV picture, absent D5 12-bit tap, absent P14 coding quality, or missing shaders/vp_dm_pre_deband.glsl leaves the picture untouched and engages the DV deband fallback visibly (no private decode)."
       },
       "upstream": [
         "input.source_analysis"
@@ -649,22 +651,27 @@
           "byte-identical with the slot off",
           "zero hooks when off"
         ],
-        "isolation": [],
+        "isolation": [
+          "DmPreDeband CPU policy + tap law + shader parameter tests",
+          "vp_dm_pre_deband.glsl GPU I-only, grain-guard, and BTB/WTW tests"
+        ],
         "contract": [
-          "slot off: no pass and no hook, pipeline byte-identical"
+          "slot off: no pass and no hook, pipeline byte-identical",
+          "absent tap or quality engages DV deband fallback visibly (no private decode)"
         ],
         "chain": []
       },
-      "open_items": [
-        "DV display mapping (docs refs 125): phase P1 reserves the slot; the stage lands in a later phase"
-      ],
+      "open_items": [],
       "decisions": [
-        "VP-V DV display mapping proposal (refs 125)"
+        "VP-V DV display mapping proposal (refs 125)",
+        "CF-DV P5 post-decode I-only DV debander"
       ],
       "origin": "vp",
       "original_pathway": {
         "mode": "off",
-        "settings": {}
+        "settings": {
+          "dv_post_decode_deband": "off"
+        }
       },
       "zone": "host",
       "movable": false

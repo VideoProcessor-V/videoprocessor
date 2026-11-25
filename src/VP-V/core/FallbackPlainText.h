@@ -46,7 +46,7 @@ namespace FallbackPlainText
 			{ "skeleton_scene_no_grid", "Scene changes in this small picture are judged by the simpler two-frame test" },
 			{ "SDR tone shape", "The SDR tone shape was not applied" },
 			{ "calibration LUT: display mapping", "The calibration table is applied as VP's last colour step so the Dolby Vision mapping acts before it" },
-			{ "DV display mapping: container", "The Dolby Vision display mapping cannot read this capture format, so the standard mapping runs" },
+			{ "DV display mapping: container", "The Dolby Vision display mapping cannot read this capture format, so the standard mapping runs" }, { "DV deband", "Post-decode Dolby Vision debanding is off" },
 			{ "output scaling", "The output scaler was replaced by a simpler one" },
 			{ "Colour appearance", "The room and screen colour adaptation could not run (its shader did not load)" },
 			{ "room light sensor", "The room light sensor is not giving a live reading, so the room adaptation uses a held or dark value" },

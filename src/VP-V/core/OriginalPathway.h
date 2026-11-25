@@ -26,9 +26,9 @@ namespace OriginalPathway
 		const char* slot;   // the slot whose VP additions it removes (slots.json id)
 	};
 
-	inline const std::array<Override, 75>& Overrides()
+	inline const std::array<Override, 76>& Overrides()
 	{
-		static const std::array<Override, 75> table = { {
+		static const std::array<Override, 76> table = { {
 			{ "capture_path", "standard", "input.capture" },
 			{ "capture_upload", "render", "input.capture" },
 			{ "native_rgb_ingest", "off", "input.capture" },
@@ -39,6 +39,7 @@ namespace OriginalPathway
 			{ "dv_trims", "off", "colour.dm_trims" },
 			{ "dv_tone_mapping", "libplacebo", "colour.dm_curve" },   // feat/dv-l8
 			{ "dv_display_mapping", "original", "colour.dm_curve" },   // CF-1 P3: the either/or master (vp | original)
+			{ "dv_post_decode_deband", "off", "colour.dm_pre" },   // CF-DV P5: post-decode I-only DV debander
 			{ "queue_timing_fixes", "off", "input.queue_timing" },
 			{ "pulldown_fixes", "off", "input.queue_timing" },
 			{ "timing_continuity_fixes", "off", "input.queue_timing" },

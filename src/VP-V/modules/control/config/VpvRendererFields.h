@@ -105,6 +105,7 @@ namespace VpvRenderer
 		// non-certified reimplementation, see DolbyVisionTrims.h).
 		bool dvTrims = true;             // default on (test/dv-synthetic verdict, 2026-10-24; not certified)
 		std::string dvDisplayMapping = "vp";   // CF-1 P3: vp | original (original = Bill's libplacebo DV mapping, no VP trims or curve)
+		std::string dvPostDecodeDeband = "off";   // CF-DV P5: off | auto (colour.dm_pre post-decode I-only DV debander)
 		std::string dvToneMapping = "libplacebo";   // feat/dv-l8: libplacebo | dolby_style (DvDolbyStyle.h; approx.)
 		std::string dvCompareCaptureFolder;          // feat/dv-l8 WIP: DV comparison capture folder ("" = VP_DV_COMPARE_PATH / off)
 		// Restore switch (DV tunnel bug hunt 2026-10-17, default on): the whole-raster

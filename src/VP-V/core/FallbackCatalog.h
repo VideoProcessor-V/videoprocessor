@@ -1235,7 +1235,8 @@ namespace FallbackCatalog
 	// appearance is configured), so the LED shadow cap's ambient term is not refreshed. Listed while that lasts.
 	inline Decision AmbientAdaptLedShadowCapSaved(bool stale)
 	{
-		return stale ? Engaged("room-light: LED shadow cap", "room-light: LED shadow cap uses saved ambient_adapt (off) while ambient_adapt is given back")
-		             : Released("room-light: LED shadow cap");
+		return stale ? Engaged("room-light: LED shadow cap", "room-light: LED shadow cap uses saved ambient_adapt (off) while ambient_adapt is given back") : Released("room-light: LED shadow cap");
 	}
+	// CF-DV P5 (colour.dm_pre): post-decode I-only DV debander requested (dv_post_decode_deband = auto) but cannot act.
+	inline Decision DvPostDecodeDeband(bool engaged, const std::string& reason = std::string()) { return engaged ? Engaged("DV deband", reason.empty() ? std::string("off (fallback)") : reason) : Released("DV deband"); }
 }

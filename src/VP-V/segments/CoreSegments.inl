@@ -752,6 +752,38 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
     if (dvStage.SkipPlaneDeband(activeSettings.dvTunnelFixes, renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION,
         frameParams.deband_params != nullptr))
         frameParams.deband_params = nullptr;
+    {   // CF-DV P5 (colour.dm_pre): post-decode I-only DV debander (shaders/vp_dm_pre_deband.glsl at MAIN; zero hooks when off).
+        DmPreDeband::Inputs dmIn;
+        dmIn.dolbyVisionPicture = renderImage.repr.sys == PL_COLOR_SYSTEM_DOLBYVISION;
+        dmIn.slotRuns = pipelineSlots.Runs(PipelineSlots::Id::ColourDmPre);
+        dmIn.originalPathway = pipelineSlots.OriginalPathway();
+        dmIn.mode = activeSettings.dvPostDecodeDeband;
+        if (dmIn.dolbyVisionPicture && dmIn.slotRuns && !dmIn.originalPathway && DmPreDeband::ParseMode(dmIn.mode) == DmPreDeband::Mode::Auto)
+        {
+            const SourceResolutionMonitor::Snapshot dmSnap = vpv.sourceAnalysis.sourceMonitor.Read();
+            dmIn.tapAvailable = renderImage.num_planes > 0 && renderImage.planes[0].texture != nullptr && renderImage.repr.bits.color_depth >= 12;
+            dmIn.qualityAvailable = dmSnap.reading && !dmSnap.codingUnavailable;
+            dmIn.effectiveBits = dmSnap.reading ? dmSnap.effectiveBits : 12.0;
+            dmIn.bitrateQuality = dmSnap.reading ? vpv.sourceAnalysis.sourceMonitor.SharedQuality(dmSnap, SourceIdentity::QualityConsumer::Deband) : 1.0;   // U12
+            dmIn.snapLevels = activeSettings.sourceCodingFixes;
+            dmIn.grainGuard = activeSettings.debandVpGrainGuard;
+        }
+        const DmPreDeband::Decision& dmDec = dvStage.PrepareDmPreDeband(dmIn, hookTemplates);
+        size_t dmCollected = 0;
+        if (dmDec.active)
+        {
+            const size_t start = frameHooks.size();
+            dvStage.DmPreDebandHook().Collect(false, frameHooks);
+            dmCollected = frameHooks.size() - start;
+            if (dmCollected > 0) {
+                TagSlotHooks(start, PipelineSlots::Id::ColourDmPre);
+                const auto dmParams = DmPreDeband::ShaderParameters(dmDec, height);
+                for (size_t i = start; i < frameHooks.size(); ++i)
+                    for (const auto& kv : dmParams) CustomHookChain::SetHookParameter(frameHooks[i], kv.first, kv.second);
+            }
+        }
+        dvStage.FinishDmPreDeband(dmCollected);
+    }
     // Stage 8-1: a downscaling frame in gamma light when chosen (the de-
     // judder extras reuse these parameters).
     // 8b: both branches in one light domain (AdaptiveDownscaleStage::ApplyLight; WP-13).
