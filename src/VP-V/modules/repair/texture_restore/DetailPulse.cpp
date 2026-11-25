@@ -3,7 +3,9 @@
 
 #include <vprenderer/GrainPreserve.h>
 #include <VP-V/core/SkeletonAcquire.h>
+#include <VP-V/modules/input/source_analysis/lane/LaneGpuRegionKernel.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/HalfLuma.h>
+#include <VP-V/modules/input/source_analysis/regions/RegionEvidence.h>
 #include <VP-V/modules/repair/grain_split/BandMemo.h>
 
 #include <libplacebo/dispatch.h>
@@ -742,6 +744,147 @@ if (li == 0u) {
 }
 )GLSL";
 
+		// Shared P11 band-energy measure pass (15c C3b): reads (e1, e2) from P11 re_s2 (and validates re_s4.w >= 0 when present)
+		// instead of recomputing per-pixel D1/D2 energies; measures only low-band mean/spread and optional FIELD untrusted share.
+		const char* const P11_MEASURE_BODY = R"GLSL(
+uint li = gl_LocalInvocationIndex;
+ivec2 lid = ivec2(gl_LocalInvocationID.xy);
+ivec2 sz = textureSize(src, 0);
+ivec2 hi = sz - ivec2(1);
+ivec2 hsz = (sz + ivec2(1)) / 2;
+ivec2 hhi = hsz - ivec2(1);
+ivec2 blk = ivec2(gl_WorkGroupID.xy);
+ivec2 origin = blk * BLK;
+ivec2 qb = blk * HB;
+#ifdef P11_FAST_LOW
+low_fetch(qb, hhi, HL * HL);
+barrier();
+float acc_u = 0.0;
+#ifdef FIELD
+ivec2 fs = textureSize(field, 0);
+for (int q = 0; q < 4; q++) {
+    ivec2 o = lid * 2 + ivec2(q & 1, q >> 1);
+    ivec2 p = origin + o;
+    if (p.x < sz.x && p.y < sz.y && PIC_IN(p)) {
+        vec2 lp = vec2(origin + lid * 2 + ivec2(1)) * to_field;
+        if (texelFetch(field, clamp(ivec2(floor(lp / 16.0)), ivec2(0), fs - ivec2(1)), 0).z <= trust_min)
+            acc_u += 1.0;
+    }
+}
+#endif
+ivec2 hl = ivec2(int(li % 16u), int(li / 16u));
+ivec2 hq = qb + hl;
+float shift = sm[O_SLOW + 9 * HL + 9];
+vec2 hacc = vec2(0.0);
+if (hq.x < hsz.x && hq.y < hsz.y && PIC_HALF_IN(hq)) {
+    float l = sm[O_SLOW + (hl.y + 1) * HL + hl.x + 1];
+    hacc = vec2(l - shift, (l - shift) * (l - shift));
+}
+barrier();
+sm[li] = acc_u;
+sm[256u + li] = hacc.x;
+sm[512u + li] = hacc.y;
+barrier();
+for (uint s = 128u; s > 0u; s >>= 1u) {
+    if (li < s) {
+        sm[li] += sm[li + s];
+        sm[256u + li] += sm[256u + li + s];
+        sm[512u + li] += sm[512u + li + s];
+    }
+    barrier();
+}
+if (li == 0u) {
+    ivec2 tn = min(ivec2(BLK), sz - origin);
+    ivec2 hn2 = min(ivec2(HB), hsz - qb);
+    float n = max(float(tn.x * tn.y), 1.0);
+    float hn = max(float(hn2.x * hn2.y), 1.0);
+    float hm = sm[256] / hn;
+    float mean_l = shift + hm;
+    float spread = sqrt(max(sm[512] / hn - hm * hm, 0.0));
+    float u = sm[0] / n;
+#else
+load_low(qb, hi, hhi);
+barrier();
+vec4 acc = vec4(0.0);
+for (int q = 0; q < 4; q++) {
+    ivec2 o = lid * 2 + ivec2(q & 1, q >> 1);
+    ivec2 p = origin + o;
+    if (p.x < sz.x && p.y < sz.y && PIC_IN(p))
+        acc.z += 1.0;
+}
+#ifdef FIELD
+if (acc.z > 0.0) {
+    vec2 lp = vec2(origin + lid * 2 + ivec2(1)) * to_field;
+    ivec2 fs = textureSize(field, 0);
+    vec4 f = texelFetch(field, clamp(ivec2(floor(lp / 16.0)), ivec2(0), fs - ivec2(1)), 0);
+    if (f.z <= trust_min)
+        acc.w = acc.z;
+}
+#endif
+ivec2 hl = ivec2(int(li % 16u), int(li / 16u));
+ivec2 hq = qb + hl;
+float shift = slow[9 * HL + 9];
+vec4 hacc = vec4(0.0);
+if (hq.x < hsz.x && hq.y < hsz.y && PIC_HALF_IN(hq)) {
+    float l = slow[(hl.y + 1) * HL + hl.x + 1];
+    hacc = vec4(l - shift, (l - shift) * (l - shift), 1.0, 0.0);
+}
+vec4 tot = reduce4(acc);
+vec4 htot = reduce4(hacc);
+if (li == 0u) {
+    float n = max(tot.z, 1.0);
+    float hn = max(htot.z, 1.0);
+    float hm = htot.x / hn;
+    float mean_l = shift + hm;
+    float spread = sqrt(max(htot.y / hn - hm * hm, 0.0));
+    float u = tot.w / n;
+#endif
+    ivec2 t0 = origin;
+    ivec2 t1 = min(origin + ivec2(BLK), sz);
+    ivec2 b0 = t0 / p11_block;
+    ivec2 b1 = max(b0 + ivec2(1), (t1 + ivec2(p11_block - 1)) / p11_block);
+    vec2 e_acc = vec2(0.0);
+    float a_acc = 0.0;
+    for (int by = b0.y; by < b1.y; ++by) {
+        int oy = min(t1.y, (by + 1) * p11_block) - max(t0.y, by * p11_block);
+        for (int bx = b0.x; bx < b1.x; ++bx) {
+            int ox = min(t1.x, (bx + 1) * p11_block) - max(t0.x, bx * p11_block);
+            float area = float(max(0, ox) * max(0, oy));
+            if (!(area > 0.0)) continue;
+            ivec2 q = clamp(ivec2(bx, by), ivec2(0), p11_grid - ivec2(1));
+            vec4 s2 = texelFetch(p11_s2, q, 0);
+#ifdef HAVE_P11_S4
+            if (texelFetch(p11_s4, q, 0).w >= 0.0) {
+                e_acc += area * max(s2.xy, vec2(0.0));
+                a_acc += area;
+            }
+#else
+            e_acc += area * max(s2.xy, vec2(0.0));
+            a_acc += area;
+#endif
+        }
+    }
+    vec2 e12 = a_acc > 0.0 ? (e_acc / a_acc) * p11_code_scale2 : vec2(0.0);
+    imageStore(stats_out, blk, vec4(e12.x, e12.y, mean_l, spread));
+    float change = 0.0;
+    float w = 1.0;
+    float measurable = 1.0;
+#ifdef PREV
+    vec4 pv = texelFetch(prev_stats, blk, 0);
+    change = max(abs(mean_l - pv.z), abs(spread - pv.w));
+    float en = e12.x + e12.y, ep = pv.x + pv.y;
+    if (en > energy_jump * ep || ep > energy_jump * en)
+        measurable = 0.0;
+#endif
+#ifdef FIELD
+    w = 1.0 - smoothstep(0.0, untrusted_share, u);
+#elif defined(PREV)
+    w = 1.0 - smoothstep(veto_codes, 2.0 * veto_codes, change);
+#endif
+    imageStore(weight_out, blk, vec4(w, u, change, measurable));
+}
+)GLSL";
+
 		const char* const FAST_APPLY_BODY = R"GLSL(
 uint li = gl_LocalInvocationIndex;
 ivec2 sz = textureSize(src, 0);
@@ -1250,18 +1393,77 @@ for (int q = 0; q < 4; q++) {
 			return true;
 		}
 
+		// Acquire shared kP11RegionBlockStats band energies (re_s2 = (e1, e2, e3, off_lap), optional re_s4.w = N);
+		// false = visible fallback reason in `why` (15c C3b, Rule 4).
+		bool TryAcquireP11BandEnergies(const Params& params, uint64_t seq, const Constants& c, pl_tex luma,
+			bool skipReasonRepeat, bool didDeband, VpSkeleton::AcquireResult& pin,
+			VpLaneProducts::P11BandTextures& texOut, int& p11BlockOut, std::string& why)
+		{
+			texOut = VpLaneProducts::P11BandTextures();
+			p11BlockOut = 0;
+			if (skipReasonRepeat)
+			{
+				why = "repeat frame (picture may differ from source seq)";
+				return false;
+			}
+			if (didDeband)
+			{
+				why = "look-ahead frame debanded (pipelineStage > 0)";
+				return false;
+			}
+			if (c.rgb || luma->params.format->num_components != 1)
+			{
+				why = "RGB/multi-component plane (P11 serves YCbCr luma only)";
+				return false;
+			}
+			if (c.pict)
+			{
+				why = "cropped active-picture border (P11 spans frame rect)";
+				return false;
+			}
+			if (params.memo == nullptr || seq == 0u)
+			{
+				why = params.memo == nullptr ? "no skeleton memo bound" : "frame sequence 0 (unkeyed)";
+				return false;
+			}
+			pin = params.memo->Acquire(VpSkeleton::kP11RegionBlockStats, seq, VpSkeleton::AcquireForm::Gpu);
+			if (!pin.Ok() || !pin.gpu.Valid())
+			{
+				why = std::string("P11 unavailable (") + VpSkeleton::Token(pin.cause) + ")";
+				pin = VpSkeleton::AcquireResult();
+				return false;
+			}
+			const int p11B = RegionEvidence::BlockSizeFor(c.geometry.h);
+			const RegionEvidence::Grid g = RegionEvidence::MakeGrid(c.geometry.w, c.geometry.h, p11B);
+			VpLaneProducts::P11BandTextures bt = VpLaneProducts::ExtractP11BandTextures(pin);
+			if (bt.s2 == nullptr || bt.s2->params.w != g.gw || bt.s2->params.h != g.gh)
+			{
+				why = "P11 re_s2 missing or grid mismatch";
+				pin = VpSkeleton::AcquireResult();
+				return false;
+			}
+			if (bt.s4 != nullptr && (bt.s4->params.w != g.gw || bt.s4->params.h != g.gh))
+				bt.s4 = nullptr;
+			texOut = bt;
+			p11BlockOut = p11B;
+			return true;
+		}
+
 		// Measure (pass 1) and reduce (pass 2). ahead: the look-ahead (no previous frame, no
 		// field; the ring's look-ahead entry). detail_pulse_fast / kBandMemo: when lowTex is given,
 		// either read precomputed kBandMemo (lowPrecomputed=true, scaled by code_scale when lowNormalised)
-		// or compute the low pass into lowTex first.
+		// or compute the low pass into lowTex first. When p11Tex.s2 != nullptr, reads (e1, e2) from P11 re_s2.
 		bool MeasureAndReduce(pl_dispatch dispatch, pl_tex luma, const Params& params, const Constants& c,
 			pl_tex statsOut, pl_tex weightOut, pl_tex prevStats, pl_tex ring,
 			bool ahead, int cur, int nValid, int nUse, int sceneRestart, bool aheadValid, std::string& error, pl_tex lowTex = nullptr,
-			float historyKeep2 = 1.0f, bool lowPrecomputed = false, bool lowNormalised = false)
+			float historyKeep2 = 1.0f, bool lowPrecomputed = false, bool lowNormalised = false,
+			const VpLaneProducts::P11BandTextures* p11Tex = nullptr, int p11Block = 0)
 		{
 			const bool fast = (params.fast || lowPrecomputed) && lowTex != nullptr;
 			if (fast && !lowPrecomputed && !LowPass(dispatch, luma, c, lowTex, !ahead, error))
 				return false;
+			const bool useP11 = p11Tex != nullptr && p11Tex->s2 != nullptr && p11Block > 0;
+			const bool haveP11S4 = useP11 && p11Tex->s4 != nullptr;
 			const bool useField = !ahead && params.field != nullptr;
 			const bool usePrev = !ahead && prevStats != nullptr;
 			const float toField[2] = {
@@ -1271,8 +1473,10 @@ for (int q = 0; q < 4; q++) {
 			const float untrustedShare = static_cast<float>(kVetoUntrustedShare);
 			const float vetoCodes = static_cast<float>(VetoCodes(params.bitrateQuality, params.colorDepth));
 			const float energyJump = static_cast<float>(kTileEnergyJump);
+			const int p11Grid[2] = { useP11 ? p11Tex->s2->params.w : 0, useP11 ? p11Tex->s2->params.h : 0 };
+			const float p11CodeScale2 = static_cast<float>(std::pow(2.0, 2 * (params.colorDepth - 10)));
 			{
-				pl_shader_desc d[6];
+				pl_shader_desc d[8];
 				int nd = 0;
 				d[nd++] = Sampled("src", luma);
 				d[nd++] = Storage("stats_out", statsOut);
@@ -1280,7 +1484,9 @@ for (int q = 0; q < 4; q++) {
 				if (fast) d[nd++] = Sampled("low_in", lowTex);
 				if (usePrev) d[nd++] = Sampled("prev_stats", prevStats);
 				if (useField) d[nd++] = Sampled("field", params.field);
-				pl_shader_var v[11];
+				if (useP11) d[nd++] = Sampled("p11_s2", p11Tex->s2);
+				if (haveP11S4) d[nd++] = Sampled("p11_s4", p11Tex->s4);
+				pl_shader_var v[14];
 				int nv = CodeVars(c, v);
 				if (usePrev && !useField) v[nv++] = { pl_var_float("veto_codes"), &vetoCodes, true };
 				if (usePrev) v[nv++] = { pl_var_float("energy_jump"), &energyJump, true };
@@ -1290,13 +1496,22 @@ for (int q = 0; q < 4; q++) {
 					v[nv++] = { pl_var_float("trust_min"), &trustMin, true };
 					v[nv++] = { pl_var_float("untrusted_share"), &untrustedShare, true };
 				}
+				if (useP11)
+				{
+					v[nv++] = { pl_var_ivec2("p11_grid"), p11Grid, true };
+					v[nv++] = { pl_var_int("p11_block"), &p11Block, true };
+					v[nv++] = { pl_var_float("p11_code_scale2"), &p11CodeScale2, true };
+				}
 				std::string header = Defines(c) + (fast ? c.fastHeader : c.bandHeader);
 				if (lowNormalised) header = "#define LOW_NORMALISED 1\n" + header;
 				if (ahead) header = "#define AHEAD 1\n" + header;
 				if (usePrev) header = "#define PREV 1\n" + header;
 				if (useField) header = "#define FIELD 1\n" + header;
+				if (useP11 && fast) header = "#define P11_FAST_LOW 1\n" + header;
+				if (haveP11S4) header = "#define HAVE_P11_S4 1\n" + header;
+				const char* body = useP11 ? P11_MEASURE_BODY : (fast ? FAST_MEASURE_BODY : MEASURE_BODY);
 				if (!Compute(dispatch, ahead ? "VideoProcessor detail pulse: measure (look-ahead)" : "VideoProcessor detail pulse: measure",
-					header, fast ? FAST_MEASURE_BODY : MEASURE_BODY, d, nd, v, nv, fast ? c.fastShmem : MeasureShmem(c), c.tilesX, c.tilesY, ahead ? -1 : 0))
+					header, body, d, nd, v, nv, fast ? c.fastShmem : MeasureShmem(c), c.tilesX, c.tilesY, ahead ? -1 : 0))
 				{
 					error = "the measure pass failed";
 					return false;
@@ -1403,6 +1618,9 @@ for (int q = 0; q < 4; q++) {
 	unsigned long long Module::BandMemoHits() const { return bandMemoHits; }
 	unsigned long long Module::BandMemoFallbacks() const { return bandMemoFallbacks; }
 	const std::string& Module::LastBandMemoFallback() const { return lastBandMemoFallback; }
+	unsigned long long Module::P11EnergyHits() const { return p11EnergyHits; }
+	unsigned long long Module::P11EnergyFallbacks() const { return p11EnergyFallbacks; }
+	const std::string& Module::LastP11EnergyFallback() const { return lastP11EnergyFallback; }
 
 	void Module::Forget()
 	{
@@ -1537,9 +1755,26 @@ for (int q = 0; q < 4; q++) {
 				sceneWhy = nullptr;
 				lastHistoryKeep = 0.0f;
 			}
+			VpSkeleton::AcquireResult memoP11;
+			VpLaneProducts::P11BandTextures p11Tex;
+			int p11Block = 0;
+			{
+				std::string p11Why;
+				if (TryAcquireP11BandEnergies(params, params.sequence, c, luma, false, false, memoP11, p11Tex, p11Block, p11Why))
+				{
+					++p11EnergyHits;
+					lastP11EnergyFallback.clear();
+				}
+				else
+				{
+					++p11EnergyFallbacks;
+					lastP11EnergyFallback = p11Why;
+				}
+			}
 			if (!MeasureAndReduce(dispatch, luma, params, c, m.stats[next], m.weight,
 				consecutive && m.stats[m.statsIndex] ? m.stats[m.statsIndex] : nullptr, m.ring,
-				false, slot, nValid, nUse, sceneRestart, aheadValid, error, activeLow, historyKeep2, lowFromMemo, lowFromMemo))
+				false, slot, nValid, nUse, sceneRestart, aheadValid, error, activeLow, historyKeep2, lowFromMemo, lowFromMemo,
+				p11Tex.s2 ? &p11Tex : nullptr, p11Block))
 			{
 				++failures;
 				m.decided = false;
@@ -1658,9 +1893,26 @@ for (int q = 0; q < 4; q++) {
 			++failures;
 			return false;
 		}
+		VpSkeleton::AcquireResult memoP11;
+		VpLaneProducts::P11BandTextures p11Tex;
+		int p11Block = 0;
+		{
+			std::string p11Why;
+			if (TryAcquireP11BandEnergies(params, sequence, c, luma, false, didDeband, memoP11, p11Tex, p11Block, p11Why))
+			{
+				++p11EnergyHits;
+				lastP11EnergyFallback.clear();
+			}
+			else
+			{
+				++p11EnergyFallbacks;
+				lastP11EnergyFallback = p11Why;
+			}
+		}
 		m.aheadSequence = 0;
 		if (!MeasureAndReduce(dispatch, luma, params, c, m.aheadStats, m.aheadWeight, nullptr, m.ring,
-			true, 0, 0, 0, 0, false, error, lowFromMemo ? memoLowTex : (params.fast ? m.low : nullptr), 1.0f, lowFromMemo, lowFromMemo))
+			true, 0, 0, 0, 0, false, error, lowFromMemo ? memoLowTex : (params.fast ? m.low : nullptr), 1.0f, lowFromMemo, lowFromMemo,
+			p11Tex.s2 ? &p11Tex : nullptr, p11Block))
 		{
 			++failures;
 			return false;
@@ -1711,9 +1963,26 @@ for (int q = 0; q < 4; q++) {
 			++failures;
 			return false;
 		}
+		VpSkeleton::AcquireResult memoP11;
+		VpLaneProducts::P11BandTextures p11Tex;
+		int p11Block = 0;
+		{
+			std::string p11Why;
+			if (TryAcquireP11BandEnergies(params, sequence, c, luma, false, false, memoP11, p11Tex, p11Block, p11Why))
+			{
+				++p11EnergyHits;
+				lastP11EnergyFallback.clear();
+			}
+			else
+			{
+				++p11EnergyFallbacks;
+				lastP11EnergyFallback = p11Why;
+			}
+		}
 		m.aheadSequence = 0;
 		if (!MeasureAndReduce(dispatch, luma, params, c, m.aheadStats, m.aheadWeight, nullptr, m.ring,
-			true, 0, 0, 0, 0, false, error, lowFromMemo ? memoLowTex : (params.fast ? m.low : nullptr), 1.0f, lowFromMemo, lowFromMemo))
+			true, 0, 0, 0, 0, false, error, lowFromMemo ? memoLowTex : (params.fast ? m.low : nullptr), 1.0f, lowFromMemo, lowFromMemo,
+			p11Tex.s2 ? &p11Tex : nullptr, p11Block))
 		{
 			++failures;
 			return false;

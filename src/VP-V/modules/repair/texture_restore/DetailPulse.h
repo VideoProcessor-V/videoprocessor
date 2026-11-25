@@ -201,18 +201,9 @@ namespace DetailPulse
 		Module& operator=(const Module&) = delete;
 		~Module();   // frees the CPU state only: call Release(gpu) first for the textures
 
-		// `source` with its luma plane stabilised into this module's texture (other planes
-		// pass through); false (and `out` untouched) on any failure: the caller renders the
-		// frame as it was.
-		// A repeat (the same sequence again) applies the stored decision to the picture given,
-		// with that picture's own bands (hunt 3 F6: a Stage B phase picture, a gap fill or a
-		// de-judder extra is another picture than A).
+		// Restores luma of `source` into this module's texture; repeated seq reapplies stored decision on picture's own bands.
 		bool Apply(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, const Params& params, pl_frame& out);
-		// Hunt 3 (the crossfade's path being left): the current decision (HistorySequence())
-		// on a picture of another plane geometry (another re-base factor). Its own bands at its
-		// own scale (params.planeLines), the tile weights read at the same picture position;
-		// never advances or restarts the history; its own output texture, so the frame Apply
-		// returned stays valid. False when no decision is held.
+		// Applies held decision (HistorySequence()) on a picture of another geometry without advancing history.
 		bool ApplyForeign(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, const Params& params, pl_frame& out);
 		// Optional look-ahead: measure the next source frame's band energies (its luma plane,
 		// in the same domain as Apply's: only when no re-base is engaged) so the reference
@@ -258,13 +249,16 @@ namespace DetailPulse
 		unsigned long long BandMemoHits() const;
 		unsigned long long BandMemoFallbacks() const;
 		const std::string& LastBandMemoFallback() const;
+		unsigned long long P11EnergyHits() const;
+		unsigned long long P11EnergyFallbacks() const;
+		const std::string& LastP11EnergyFallback() const;
 
 	private:
 		struct Impl;
 		Impl* impl = nullptr;
-		std::string error, lastBandMemoFallback;
+		std::string error, lastBandMemoFallback, lastP11EnergyFallback;
 		unsigned long long failures = 0, frames = 0, aheadUsed = 0, sceneMissing = 0, scenePartials = 0, sceneFadeRestarts = 0;
-		unsigned long long sceneSoftResets = 0, bandMemoHits = 0, bandMemoFallbacks = 0;
+		unsigned long long sceneSoftResets = 0, bandMemoHits = 0, bandMemoFallbacks = 0, p11EnergyHits = 0, p11EnergyFallbacks = 0;
 		double sceneSoftStrengthSum = 0.0;
 		VpDetailRestore::SoftResetWatch softWatch;
 		bool sceneUnavailable = false;

@@ -617,14 +617,12 @@ inline const std::vector<ProductFlag>& ProductFlags()
 inline const std::vector<ConsumerFlag>& ConsumerFlags()
 {
     static const std::vector<ConsumerFlag> flags = {
-        // D4: DetailPulse / TextureRestore are catalogued as P10 / P11 / P4 readers but read none (modules/repair/texture_restore/DetailPulse.cpp, TextureRestore.cpp:
-        // private bands / tiles and private cut-fade logic, host scalar params); the declarations stay, the code is made to read them by C10 / D10
-        // (doc 93 s2 D10 reader switch, rows 6/7; C7 landed without switching them, AUDIT-R2 F1).
-        { uint16_t(kCatalogConsumerIdBase + 0), kP10GrainSplit, FlagKind::NotRead, "C10", "private bands (DetailPulse.h)" },
-        { uint16_t(kCatalogConsumerIdBase + 0), kP11RegionBlockStats, FlagKind::NotRead, "C10", "private 32-px tiles" },
+        // D4: DetailPulse / TextureRestore read P11 band energies (15c C3b); P10 bands (DP/TR) and P4 (DP) stay flagged NotRead.
+        { uint16_t(kCatalogConsumerIdBase + 0), kP10GrainSplit, FlagKind::NotRead, "C10",
+          "private bands (DetailPulse.h)" },
         { uint16_t(kCatalogConsumerIdBase + 0), kP4SourceStats, FlagKind::NotRead, "D10", "private cut / fade logic" },
-        { uint16_t(kCatalogConsumerIdBase + 1), kP10GrainSplit, FlagKind::NotRead, "C10", "private bands (TextureRestore.h)" },
-        { uint16_t(kCatalogConsumerIdBase + 1), kP11RegionBlockStats, FlagKind::NotRead, "C10", "private 16-px tiles" },
+        { uint16_t(kCatalogConsumerIdBase + 1), kP10GrainSplit, FlagKind::NotRead, "C10",
+          "private bands (TextureRestore.h)" },
         { uint16_t(kCatalogConsumerIdBase + 1), kP4SourceStats, FlagKind::ViewIsActual, "D8",
           "P4 via the scene group (repair/texture_restore/SceneRestart.h SceneRestartOf; U7 over two P4 records, SkeletonModule.cpp ClassifyEvents)" },
         // AUDIT-R2 F1 (B3-Z Z2): the optical-flow producer, the matcher and source identification print their declared reads as actual

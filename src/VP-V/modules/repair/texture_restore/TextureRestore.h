@@ -113,9 +113,9 @@ namespace TextureRestore
 		VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend>* arena = nullptr;  // SA1: null = private textures as before
 		// The reader of the source frame's scene group (the shared cut / fade verdict, U7 via P4); null = the skeleton's store.
 		VpDetailRestore::SceneReaderFn sceneReader = nullptr;
-		// cut_soft_reset (default on): the soft reset on a high-confidence non-cut candidate (SceneRestart.h; the bar is
-		// CutFadeJudge::kSoftResetBar, provisional). Off = no soft reset; cuts restart and fades reduce exactly as before.
+		// cut_soft_reset (default on): soft reset on high-confidence non-cut candidate (SceneRestart.h).
 		bool softReset = VpDetailRestore::kDefaultCutSoftReset;
+		VpSkeleton::SkeletonMemo* memo = nullptr;  // optional: acquire shared P11 band energies
 	};
 
 	// SA1: the scratch arena scopes (one per Apply / ApplyForeign call) and the temporaries they ask for.
@@ -133,18 +133,10 @@ namespace TextureRestore
 		Module(const Module&) = delete;
 		Module& operator=(const Module&) = delete;
 
-		// `source` with its luma plane restored into this module's texture (other planes pass
-		// through); false (and `out` untouched) on any failure: the caller renders the frame as
-		// it was. cap 1.0 returns `source` itself. A repeated sequence reuses its frame's gains
-		// and never advances the references; a non-consecutive one (or 0) restarts them.
-		// Hunt 3 F7: a repeat writes its own low bands (its picture may be another one: a Stage
-		// B phase picture, a gap fill, a de-judder extra), never the previous frame's set the
-		// next new frame compares against.
+		// Restores luma plane of `source` into this module's texture (other planes pass through); false on failure.
+		// cap 1.0 returns `source`; repeated sequence reuses gains with its own low bands (F7); non-consecutive restarts.
 		bool Apply(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, const Params& params, pl_frame& out);
-		// Hunt 3 (the crossfade's path being left): the current frame's gains (HistorySequence())
-		// on a picture of another plane geometry (another re-base factor): its own bands at its
-		// own scale, the tile gains read at the same picture position. Never advances or
-		// restarts the references; its own textures (the frame Apply returned stays valid).
+		// Applies current frame's gains (HistorySequence()) on a picture of another geometry without advancing references.
 		bool ApplyForeign(pl_gpu gpu, pl_dispatch dispatch, const pl_frame& source, const Params& params, pl_frame& out);
 		// A discontinuity (MotionValidity invalidation, re-base change): references restart.
 		void Forget();
@@ -174,17 +166,17 @@ namespace TextureRestore
 		// frames the rule would have fired on had their verdict been confirmed.
 		bool SceneSoftResetInactive() const { return softWatch.Inactive(); }
 		unsigned long long SceneSoftWaiting() const { return softWatch.waiting; }
-		// The source frame the references last advanced on (0 = none or a restart pending): a
-		// caller may apply this frame's decision to another picture of it (a de-judder extra)
-		// as a repeat, without advancing.
 		uint64_t HistorySequence() const;
+		unsigned long long P11EnergyHits() const;
+		unsigned long long P11EnergyFallbacks() const;
+		const std::string& LastP11EnergyFallback() const;
 
 	private:
 		struct Impl;
 		Impl* impl = nullptr;
-		std::string error;
+		std::string error, lastP11EnergyFallback;
 		unsigned long long failures = 0, frames = 0, sceneMissing = 0, scenePartials = 0, sceneFadeRestarts = 0;
-		unsigned long long sceneSoftResets = 0;
+		unsigned long long sceneSoftResets = 0, p11EnergyHits = 0, p11EnergyFallbacks = 0;
 		double sceneSoftStrengthSum = 0.0;
 		VpDetailRestore::SoftResetWatch softWatch;
 		bool sceneUnavailable = false;

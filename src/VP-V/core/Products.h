@@ -62,7 +62,7 @@ enum : ProductId {
 // (SA2 defines P10/P10c with exactly these names; SkeletonProducts() is the one assembly point).
 //   P10  grain split          shared grain-free picture + grain layer of the source (GPU, gap)
 //   P10c chroma split         the Cb/Cr extension, read only by the chroma-from-luma grain guard
-//   P11  region block stats   per-block statistics (mean/var/gradient/tensor/Laplacian) + reserved E1/E2/E3 band energies
+//   P11  region block stats   per-block statistics (mean/var/gradient/tensor/Laplacian) + E1/E2/E3 band energies (re_s2) and N (re_s4.w)
 //   P12  light level          the 16 KB perceptual LUT + per-block light level (WP2 reserved)
 //   P13  source ring          VIEWS of the unpacked planes of the queued frames (owned by queue/upload): 0 extra bytes
 //   td.blocks / td.memory / td.anchor_pass     (v1: td.analysis / td.refstore / td.admission) TemporalDetail's products, redefined by doc 72 (unit v2)
@@ -891,8 +891,8 @@ inline void AppendRegionProducts(std::vector<ProductDecl>& decls)
     const CounterMask content = Bit(kFull) | Bit(kContinuity);
 
     // 6 x rgba32f per block (5 stats + aux) = 96 B at the 16 px block edge (an upper bound for the larger blocks of
-    // 4K/8K: 0.8 MB at 4K with B = 32). E1/E2/E3 (band energies per block, SA5) are RESERVED in the same product:
-    // adding them bumps the unit version, not the id.
+    // 4K/8K: 0.8 MB at 4K with B = 32). E1/E2/E3 band energies live in re_s2 (e1, e2, e3, off_lap) and N in re_s4.w,
+    // populated from P10's blocks term in both Compact and Full storage modes (15c C3).
     ProductDecl p11 = Make(kP11RegionBlockStats, "region_block_stats", "region block statistics", Backend::GpuCompute, 1,
                            Tier::T0, content, Bit(kSettingsAnalysis) | Bit(kSettingsMotion) | Bit(kSettingsOutput));
     p11.sourceFrame = true;
