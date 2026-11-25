@@ -84,8 +84,7 @@ namespace VpDebander
 		// The grain guard's busy-share texture of a slot's plane (grainGuard on, grainSplit off; null otherwise): the guard parity test.
 		pl_tex GuardTextureForTest(int slot, int plane) const { return (slot >= 0 && slot < kSlots && plane >= 0 && plane < PL_MAX_PLANES) ? guard[slot][plane] : nullptr; }
 		// Fallback coarse tensor texture (allocated only when !useP11) and private low-band texture (allocated only when P10/kBandMemo absent).
-		pl_tex SplitTensorTextureForTest(int slot, int plane) const { return (slot >= 0 && slot < kSlots && plane >= 0 && plane < PL_MAX_PLANES) ? splitTensor[slot][plane] : nullptr; }
-		pl_tex SplitLowTextureForTest(int slot, int plane) const { return (slot >= 0 && slot < kSlots && plane >= 0 && plane < PL_MAX_PLANES) ? splitLow[slot][plane] : nullptr; }
+		pl_tex SplitTensorTextureForTest(int slot, int plane) const { return (slot >= 0 && slot < kSlots && plane >= 0 && plane < PL_MAX_PLANES) ? splitTensor[slot][plane] : nullptr; } pl_tex SplitLowTextureForTest(int slot, int plane) const { return (slot >= 0 && slot < kSlots && plane >= 0 && plane < PL_MAX_PLANES) ? splitLow[slot][plane] : nullptr; }
 		const std::string& LastError() const { return error; }
 		const std::string& LastFailureError() const { return lastFailureError; }
 		// R1-W1-RES (doc 72 item 2): the debander is the FALLBACK LAYER under temporal detail (order TD -> deband -> CR). Its read path
@@ -114,20 +113,16 @@ namespace VpDebander
 		pl_tex weight[2][PL_MAX_PLANES] = {};   // blur weights (slot 0): this source frame's and the previous one's
 		pl_tex weightDummy = nullptr;           // 1x1 r32f sink bound on non-main slots (reuses the compiled shader, no cold compile)
 		pl_tex guard[kSlots][PL_MAX_PLANES] = {};   // grainGuard: the spatial grain share per 16x16 block
-		pl_tex splitHalf[kSlots][PL_MAX_PLANES] = {};
-		pl_tex splitTmp[kSlots][PL_MAX_PLANES] = {};
-		pl_tex splitLow[kSlots][PL_MAX_PLANES] = {};
-		pl_tex splitTensor[kSlots][PL_MAX_PLANES] = {};
+		pl_tex splitHalf[kSlots][PL_MAX_PLANES] = {}, splitTmp[kSlots][PL_MAX_PLANES] = {};
+		pl_tex splitLow[kSlots][PL_MAX_PLANES] = {}, splitTensor[kSlots][PL_MAX_PLANES] = {};
 		bool SplitLowBand(pl_gpu gpu, pl_dispatch dispatch, pl_tex in, int slot, int plane, double scale,
 			pl_tex acquiredLow, pl_tex& splitLowOut);
 		int curIndex = 0;                        // weight[curIndex] = weightSequence's
 		bool prevValid = false;                  // weight[1 - curIndex] = weightSequence - 1's
 		uint64_t weightSequence = 0;
 		int weightW[PL_MAX_PLANES] = {}, weightH[PL_MAX_PLANES] = {};
-		std::string error, lastFailureError, lastBandMemoFallback, lastGrainGuardFallback;
-		std::vector<pl_shader_desc> descScratch;
-		std::string headerScratch, cachedBandWeights;
-		double cachedBandScale = -1.0;
+		std::string error, lastFailureError, lastBandMemoFallback, lastGrainGuardFallback, headerScratch, cachedBandWeights;
+		std::vector<pl_shader_desc> descScratch; double cachedBandScale = -1.0;
 		TdProducts::ReadResult tdRead;
 		unsigned long long failures = 0, held = 0, bandMemoHits = 0, bandMemoFallbacks = 0, grainGuardHits = 0, grainGuardFallbacks = 0;
 	};

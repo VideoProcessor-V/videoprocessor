@@ -30,8 +30,7 @@
 namespace SourceIdentity { namespace Chain { class ChainEstimator; } }
 namespace VpSkeleton
 {
-	class AnalysisLane;
-	class SkeletonMemo;
+	class AnalysisLane; class SkeletonMemo;
 }
 
 // Stage 12 step B in the renderer (owner 2026-10-15): the effective
@@ -600,7 +599,6 @@ namespace SourceResolutionMonitor
 		// ... and the frame's source sequence (the look-ahead's evidence for the step; 0 = none).
 		void AnalyseTilesForTest(const std::vector<float>& tiles, int count, double seconds, int nativeWidth, int nativeHeight,
 			const std::vector<float>& tileX, const std::vector<float>& tileY, int baseTiles, int tileSize, double blackLevel, uint64_t sequence);
-		// Optional CPU kBandMemo hook for tile noise measurement (null = U2 BandFromBase::BlurTaps on tile samples).
 		void SetBandMemo(VpSkeleton::SkeletonMemo* memo) { bandMemo.store(memo, std::memory_order_release); }
 		// Tests only (efficiency 2026-10-24): called on the analysing thread just before the
 		// kernel fits, with `mutex` released (a test can prove Read() does not wait for a fit).

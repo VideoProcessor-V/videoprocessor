@@ -134,9 +134,7 @@ namespace AdaptiveDownscale
 		pl_tex error = nullptr;        // MotionWarp::GrainError()
 		pl_tex field = nullptr;        // MotionWarp::Field()
 		pl_tex frameTrust = nullptr;   // MotionWarp::FrameTrust()
-		float minTrustedShare = 0.25f;
-		int fieldBlockPx = 16;             // source pixels per field block (VerifiedField::blockSize)
-		float scaleToSourcePx = 1.0f;      // field vector units -> source pixels (VerifiedField::scaleToSourcePx)
+		float minTrustedShare = 0.25f; int fieldBlockPx = 16; float scaleToSourcePx = 1.0f;
 		// The source crop libplacebo scales (the block grid is in source
 		// pixels of the whole frame) and, with NLS, the NLS map over it.
 		pl_rect2df sourceCrop{};
@@ -187,9 +185,7 @@ namespace AdaptiveDownscale
 		pl_tex field = nullptr;          // P3 analysis field: vx, vy (source px), trust, error per 16x16 block
 		pl_tex frameTrust = nullptr;     // frame trust texture: r = the trusted share
 		std::shared_ptr<const void> pin; // M1#1: keeps Acquire(kP3AnalysisField) alive until the next frame / ClearMotion()
-		float minTrustedShare = 0.25f;
-		int fieldBlockPx = 16;           // source pixels per field block (VerifiedField::blockSize)
-		float scaleToSourcePx = 1.0f;    // field vector units -> source pixels (VerifiedField::scaleToSourcePx)
+		float minTrustedShare = 0.25f; int fieldBlockPx = 16; float scaleToSourcePx = 1.0f;
 		pl_rect2df sourceCrop{};         // the source crop libplacebo scales, in the field's source pixels
 		NlsMaskMapping::Mapping nls{};   // NLS coordinate mapping when active (residual hold stays off under NLS)
 	};
@@ -550,9 +546,8 @@ namespace AdaptiveDownscale
 		pl_tex map[2] = { nullptr, nullptr };
 		int mapIndex = 0;
 		bool mapReady = false;          // map[mapIndex] belongs to `sequence`
-		uint64_t mapSequence = 0;
+		uint64_t mapSequence = 0; float mapBlockPx = 16.0f;
 		pl_rect2df mapSourceCrop{};     // S4-H1: source crop cached with map[mapIndex] (survives ClearGrainField on repeats)
-		float mapBlockPx = 16.0f;       // POD2-M7: block pitch cached with map[mapIndex]
 		NlsMaskMapping::Mapping mapNls{};
 		MapState mapState = MapState::Off;
 		GrainField grainField{};
@@ -569,9 +564,8 @@ namespace AdaptiveDownscale
 		pl_tex motionMap[2] = { nullptr, nullptr };   // motion-adapted blend: factor per block
 		int motionIndex = 0;
 		bool motionReady = false;                      // motionMap[motionIndex] belongs to motionSequence
-		uint64_t motionSequence = 0;
+		uint64_t motionSequence = 0; float motionBlockPx = 16.0f;
 		pl_rect2df motionSourceCrop{};                 // S4-H1: source crop cached with motionMap[motionIndex] (survives ClearMotion on repeats)
-		float motionBlockPx = 16.0f;                   // POD2-M7: block pitch cached with motionMap[motionIndex]
 		NlsMaskMapping::Mapping motionNls{};
 		MotionState motionState = MotionState::Off;
 		pl_buf readback = nullptr;

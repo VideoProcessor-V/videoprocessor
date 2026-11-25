@@ -6,7 +6,7 @@
 #include <VP-V/modules/control/skeleton/SkeletonAccess.h>
 #include <VP-V/modules/motion/estimation/P3FieldFill.h>
 #include <VP-V/modules/output/dither/CustomHookChain.h>
-#include <VP-V/modules/repair/grain_split/GrainLevelGpu.h>
+#include <VP-V/modules/repair/grain_split/P10gFacts.h>
 #include <VP-V/modules/scaling/output/DownscaleLight.h>
 #include <libplacebo/filters.h>
 #include <vprenderer/GrainPreserve.h>
@@ -169,7 +169,7 @@ namespace AdaptiveDownscaleStage
 			gs.level = static_cast<pl_tex>(r.gpu.resource);
 			gs.pin = r.pin;
 			gs.sourceCrop = frame.sourceCrop;
-			if (const GrainSplit::LevelGpu::GrainLevelFacts* gf = GrainSplit::LevelGpu::FactsOf(r))
+			if (const auto* gf = GrainSplit::LevelGpu::FactsOf(r))
 			{
 				if (gf->codeToEightBit > 0.0 && std::isfinite(gf->codeToEightBit))
 					gs.codeToEightBit = static_cast<float>(gf->codeToEightBit);

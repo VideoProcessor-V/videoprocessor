@@ -53,6 +53,7 @@
 #include <VP-V/modules/repair/grain_split/GpuPassUtil.h>
 #include <VP-V/modules/repair/grain_split/GrainSplitGpu.h>
 #include <VP-V/modules/repair/grain_split/GrainSplitVariantOwner.h>
+#include <VP-V/modules/repair/grain_split/P10gFacts.h>
 
 #include <libplacebo/colorspace.h>
 #include <libplacebo/dispatch.h>
@@ -112,35 +113,8 @@ namespace GrainSplit
 			return 10;
 		}
 
-		// Converts source analysis codes (native depth bits) to 8-bit codes: 255 / ((1 << depth) - 1).
-		// POD2-H1 fix: 12-bit sources use 255/4095 (not 10-bit 255/1023), 8-bit sources use 255/255 = 1.0.
-		inline double CodeToEightBitOf(int sourceBits)
-		{
-			const int bits = (sourceBits >= 1 && sourceBits <= 16) ? sourceBits : 10;
-			return 255.0 / static_cast<double>((1u << bits) - 1u);
-		}
-
-		// Metadata carried on kP10gGrainLevel GPU AcquireResult via textureSet tag + keepAlive (same idiom as P3FieldFill.h).
-		struct GrainLevelFacts
-		{
-			int sourceBits = 10;
-			int blockPx = 16;
-			double codeToEightBit = 255.0 / 1023.0;
-			std::shared_ptr<void> textureKeepAlive;   // keeps the allocated RGBA32F GPU texture alive
-		};
-
-		inline const void* GrainLevelFactsTag()
-		{
-			static const char tag = 0;
-			return &tag;
-		}
-
-		inline const GrainLevelFacts* FactsOf(const VpSkeleton::AcquireResult& r)
-		{
-			return r.Ok() && r.gpu.textureSet == GrainLevelFactsTag()
-				? static_cast<const GrainLevelFacts*>(r.gpu.keepAlive.get())
-				: nullptr;
-		}
+		using GrainLevelFacts = P10gFacts;
+		inline const void* GrainLevelFactsTag() { return P10gFactsTag(); }
 
 		// What the module shows (status / Fallbacks): fills that published, fills that declined, the last decline, and whether the
 		// most recent fill declined (lastDeclined: set by Decline, cleared by NoteFill; the declined line is shown only while set,
