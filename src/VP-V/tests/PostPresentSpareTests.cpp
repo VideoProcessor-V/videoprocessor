@@ -425,8 +425,15 @@ namespace PostPresentSpareTest
 
 			// Slot 1: Unpack (0.4) + CoreSplit (2.0 > 1.6 remaining -> split) + CoreTieFirst (0.5) + CoreUnmeasured deferred -> promoted next slot.
 			runAndCompare(1, 2.0, 1.0);
+			const size_t slot1Count = a.order.size();
+			Assert::AreEqual(size_t(3), slot1Count, L"Slot 1 executes exactly 3 works in canonical order");
+			Assert::AreEqual<uint16_t>(10u, a.order[0], L"Slot 1 canonical [0]: Unpack (id 10)");
+			Assert::AreEqual<uint16_t>(20u, a.order[1], L"Slot 1 canonical [1]: CoreSplit (id 20, order 1)");
+			Assert::AreEqual<uint16_t>(22u, a.order[2], L"Slot 1 canonical [2]: CoreTieFirst (id 22, order 2)");
 			// Slot 2: promoted CoreUnmeasured runs first, then remaining works in canonical order.
 			runAndCompare(2, 6.0, 2.0);
+			Assert::IsTrue(a.order.size() > slot1Count, L"Slot 2 executed works");
+			Assert::AreEqual<uint16_t>(25u, a.order[slot1Count], L"Slot 2 canonical [0]: promoted CoreUnmeasured (id 25) runs first");
 
 			// Mid-run Unregister + re-Register in different orders on A vs B.
 			a.spare.Unregister(&a.coreTieFirst.work);

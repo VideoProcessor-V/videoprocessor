@@ -4790,6 +4790,114 @@ namespace SkeletonModuleTestsNs
 				L"K#10: 1,000 steady-state HasAheadDemands / CurrentQueue / WindowBoard::Read queries incur ZERO heap allocations");
 			Assert::IsFalse(anyAhead);
 			Assert::IsTrue(wiredSum > 0u);
+
+			// ---- 3b. Real DeriveMemoWindow !HasAheadDemands() short-circuit allocation proof (memo-only host) ----
+			{
+				Rig noLaneRig(Lane("off"));
+				Assert::IsTrue(noLaneRig.sk.MemoFor(noLaneRig.Host(), 1u).Valid(), L"no-lane memo created");
+				VpSkeleton::SkeletonMemo* noLaneMemo = noLaneRig.sk.MemoOf(noLaneRig.Host());
+				Assert::IsNotNull(noLaneMemo);
+
+				VpSkeleton::OwnerFill cpuFill;
+				cpuFill.aheadDepth = 0u;
+				cpuFill.fill = [](const VpSkeleton::OwnerFillRequest&, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput&) {
+					return false;
+				};
+				Assert::IsTrue(
+					noLaneRig.sk.RegisterOwnerFill(VpSkeleton::kP10GrainSplit, VpSkeleton::AcquireForm::Cpu, "repair/grain_split", cpuFill)
+						== VpSkeleton::SkeletonMemo::Registration::Registered);
+				Assert::IsFalse(noLaneMemo->HasAheadDemands(), L"aheadDepth=0 keeps HasAheadDemands() false");
+
+				auto driveNoLaneBegin = [&noLaneRig](int64_t seq) {
+					RE::FrameContext c;
+					c.host = noLaneRig.Host();
+					c.phase = RE::FramePhase::Begin;
+					c.seq = seq;
+					Assert::IsFalse(noLaneRig.sk.OnFrame(c));
+				};
+
+				// Warm up frames 1..5 so PlanNoLaneGpu caches (kNoLaneReplanFrames = 240) and Window is initialized.
+				for (int64_t s = 1; s <= 5; ++s)
+					driveNoLaneBegin(s);
+
+				DebugAllocCounter::Count().store(0u, std::memory_order_relaxed);
+				DebugAllocCounter::Active().store(true, std::memory_order_release);
+				for (int64_t s = 6; s <= 15; ++s)
+					driveNoLaneBegin(s);
+				DebugAllocCounter::Active().store(false, std::memory_order_release);
+				const uint64_t allocsShortCircuit = DebugAllocCounter::Count().load(std::memory_order_relaxed);
+
+				// In-test negative control: replace the SAME CPU owner fill with aheadDepth = 2 (identical owners_.size() == 1
+				// so PlanNoLaneGpu and OnSeal allocate identically, while DeriveMemoWindow takes the ActiveAheadDemands path).
+				cpuFill.aheadDepth = 2u;
+				Assert::IsTrue(
+					noLaneRig.sk.ReplaceOwnerFill(VpSkeleton::kP10GrainSplit, VpSkeleton::AcquireForm::Cpu, "repair/grain_split", cpuFill)
+						== VpSkeleton::SkeletonMemo::Registration::Replaced);
+				Assert::IsTrue(noLaneMemo->HasAheadDemands(), L"negative control: aheadDepth=2 enables HasAheadDemands()");
+				driveNoLaneBegin(16);   // warm up 1 frame so Window settles
+
+				DebugAllocCounter::Count().store(0u, std::memory_order_relaxed);
+				DebugAllocCounter::Active().store(true, std::memory_order_release);
+				for (int64_t s = 17; s <= 26; ++s)
+					driveNoLaneBegin(s);
+				DebugAllocCounter::Active().store(false, std::memory_order_release);
+				const uint64_t allocsWithAheadDemands = DebugAllocCounter::Count().load(std::memory_order_relaxed);
+
+				Assert::IsTrue(allocsWithAheadDemands >= allocsShortCircuit + 10u,
+					L"K#10: !HasAheadDemands() short-circuit eliminates per-frame ActiveAheadDemands/vector allocations in DeriveMemoWindow");
+			}
+
+			// ---- 3c. Real Refresh SceneVetoOffCode zero-alloc proof on steady-state non-due frames ----
+			// Both rigs run single-threaded (SetWorkerThreadsForTesting(false)) and skip FillScene identically:
+			//   - rigNoStore: StoreFor(host) == nullptr -> SceneVetoCode::On (pre-fix SceneVetoOff returned "" = 0 allocs)
+			//   - rigStoreOff: StoreFor(host) disabled  -> SceneVetoCode::StoreOff (pre-fix SceneVetoOff returned 53-char >SSO string)
+			// Across 8 non-due frames (19..26, between kRefreshEvery multiples 17 and 33), enum gating adds 0 allocations.
+			{
+				Rig rigNoStore(Lane("on"), 64);
+				rigNoStore.sk.SetWorkerThreadsForTesting(false);
+				rigNoStore.ResyncApply("on");
+				rigNoStore.Life(RE::Lifecycle::GpuCreated);
+
+				Rig rigStoreOff(Lane("on"), 64);
+				rigStoreOff.sk.SetWorkerThreadsForTesting(false);
+				FrameAnalysis::Store offStore(FrameAnalysis::RingDepth(4, 4));
+				offStore.SetEnabled(false);
+				Tap::SetStore(rigStoreOff.Host(), &offStore);
+				SceneStoreGuard offGuard(rigStoreOff.Host());
+				rigStoreOff.ResyncApply("on");
+				rigStoreOff.Life(RE::Lifecycle::GpuCreated);
+
+				for (int64_t s = 1; s <= 18; ++s)
+				{
+					rigNoStore.Frame(s);
+					rigStoreOff.Frame(s);
+				}
+				Assert::IsFalse(HasId(rigNoStore.Lines(RE::StatusKind::Fallbacks), "skeleton_scene_veto"),
+					L"baseline rig without store has SceneVetoCode::On");
+				Assert::IsTrue(HasId(rigStoreOff.Lines(RE::StatusKind::Fallbacks), "skeleton_scene_veto"),
+					L"disabled-store rig has SceneVetoCode::StoreOff settled in shownVetoOff");
+
+				auto measureNonDueBegin = [](Rig& target, int64_t fromSeq, int64_t toSeq) -> uint64_t {
+					uint64_t total = 0;
+					for (int64_t s = fromSeq; s <= toSeq; ++s)
+					{
+						target.Ingress(s);
+						target.Deliver(uint64_t(s) + 1);
+						DebugAllocCounter::Count().store(0u, std::memory_order_relaxed);
+						DebugAllocCounter::Active().store(true, std::memory_order_release);
+						target.Begin(s);
+						DebugAllocCounter::Active().store(false, std::memory_order_release);
+						total += DebugAllocCounter::Count().load(std::memory_order_relaxed);
+						target.After(s);
+					}
+					return total;
+				};
+
+				const uint64_t allocsNoStore = measureNonDueBegin(rigNoStore, 19, 26);
+				const uint64_t allocsStoreOff = measureNonDueBegin(rigStoreOff, 19, 26);
+				Assert::AreEqual(allocsNoStore, allocsStoreOff,
+					L"K#10: steady-state non-due Refresh with SceneVetoCode::StoreOff incurs ZERO extra heap allocations vs On");
+			}
 #endif
 		}
 
@@ -4950,8 +5058,8 @@ namespace SkeletonModuleTestsNs
 						Assert::AreEqual(1, configures(), L"still 1 configure before kReconfigureMinFrames (60)");
 				}
 				// Frame 65 (65 % 16 == 1) refreshes fullText after the frame-61 periodKnown reconfigure.
-				Assert::IsTrue(configures() >= 2,
-					L"K#11: frame 61 periodKnown reconfigure actually fired (configures >= 2)");
+				Assert::AreEqual(2, configures(),
+					L"K#11: exactly 2 configures across frames 1..65 (initial + frame-61 periodKnown, zero flapping)");
 			}
 		}
 
