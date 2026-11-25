@@ -169,154 +169,154 @@
 
 //!PARAM enabled
 //!DESC 1 = sigma-delta active, 0 = plain rounding only (A/B switch)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 1.0
 1.0
 
 //!PARAM levels_full
 //!DESC Set by the renderer from the frame's target (delta 5): 0 = limited range, 1 = full range
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 1.0
 0.0
 
 //!PARAM swapchain_bits
 //!DESC Set by the renderer from the frame's target (delta 5): swapchain sample depth, 10 or 8
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 8.0
 //!MAXIMUM 10.0
 10.0
 
 //!PARAM color_bits
 //!DESC Set by the renderer from the frame's target (delta 5): the colour depth it quantises to, 8 or 10
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 8.0
 //!MAXIMUM 10.0
 8.0
 
 //!PARAM noise_amplitude
 //!DESC Decorrelation dither amplitude, in output codes (breaks sigma-delta limit cycles)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 0.5
 0.15
 
 //!PARAM motion_threshold
 //!DESC Per-pixel change (8-bit codes) above which the carried residual is discarded
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 64.0
 1.0
 
 //!PARAM motion_compensation
 //!DESC 1 = carry the residual along the picture's motion (stage 4), 0 = plain motion gate only
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 1.0
 0.0
 
 //!PARAM match_tolerance
 //!DESC Average luma difference (8-bit codes) up to which a block's motion vector is trusted
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.1
 //!MAXIMUM 8.0
 1.5
 
 //!PARAM occlusion_mask
 //!DESC Set by the renderer: 1 = read the de-judder occlusion mask from alpha (stage 6c), 0 = ignore alpha
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 1.0
 0.0
 
 //!PARAM grain_tolerance_scale
 //!DESC Set by the renderer (S1): match_tolerance x this where the grain map in alpha sees film grain; 1 = off
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 1.0
 //!MAXIMUM 8.0
 1.0
 
 //!PARAM instance_tag
 //!DESC Set by the renderer when it creates the hook: this instance's state tag (stale state from a freed hook never matches)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 16777216.0
 0.0
 
 //!PARAM static_refresh
 //!DESC Set by the renderer: 1 = this refresh repeats the previous picture (a cadence repeat), so the motion is zero and the search is skipped
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 1.0
 0.0
 
 //!PARAM vector_source
 //!DESC Set by the renderer (delta 8 R1): 1 = take this refresh's block vectors from VPVEC, 0 = own search
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 1.0
 0.0
 
 //!PARAM vector_pixel
 //!DESC Set by the renderer (planner D2): 1 = the quantizer takes this refresh's per-pixel displacement from VPPIX
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 1.0
 0.0
 
 //!PARAM output_float32
 //!DESC Set by the renderer (audit 2026-10-16): 1 = the OUTPUT texture is rgba32f (output_fbo_float32 in effect), 0 = rgba16f
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 1.0
 0.0
 
 //!PARAM dither_need
 //!DESC Set by the renderer: 1 = add the per-block extra dither amplitude of VPDN to noise_amplitude (dither need map), 0 = off
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 1.0
 0.0
 
 //!PARAM dn_scale_x
 //!DESC Set by the renderer with dither_need: output pixel to block-grid source pixel scale, horizontal
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.000001
 //!MAXIMUM 1000000.0
 1.0
 
 //!PARAM dn_scale_y
 //!DESC Set by the renderer with dither_need: output pixel to block-grid source pixel scale, vertical
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.000001
 //!MAXIMUM 1000000.0
 1.0
 
 //!PARAM dn_off_x
 //!DESC Set by the renderer with dither_need: output pixel to block-grid source pixel offset, horizontal
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -1000000.0
 //!MAXIMUM 1000000.0
 0.0
 
 //!PARAM dn_off_y
 //!DESC Set by the renderer with dither_need: output pixel to block-grid source pixel offset, vertical
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -1000000.0
 //!MAXIMUM 1000000.0
 0.0
 
 //!PARAM dn_block
 //!DESC Set by the renderer with dither_need: the block edge of the VPDN grid in source pixels
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 1.0
 //!MAXIMUM 4096.0
 16.0
 
 //!PARAM test_ramp
 //!DESC 1 = replace the picture with a 10-bit horizontal grey ramp for verification
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 1.0
 0.0

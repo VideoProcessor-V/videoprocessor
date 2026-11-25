@@ -18,336 +18,336 @@
 
 //!PARAM apr_dc_r
 //!DESC reference adaptation gain (CAT16 channel 0)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 20.0
 1.0
 
 //!PARAM apr_dc_g
 //!DESC reference adaptation gain (CAT16 channel 1)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 20.0
 1.0
 
 //!PARAM apr_dc_b
 //!DESC reference adaptation gain (CAT16 channel 2)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 20.0
 1.0
 
 //!PARAM apr_fl
 //!DESC reference luminance-level adaptation FL
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 10.0
 1.0
 
 //!PARAM apr_nbb
 //!DESC reference background induction Nbb
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 10.0
 1.0
 
 //!PARAM apr_aw
 //!DESC reference achromatic response of the white
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 1000.0
 100.0
 
 //!PARAM apr_cz
 //!DESC reference c times z
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 5.0
 1.0
 
 //!PARAM apr_nc
 //!DESC reference chromatic induction Nc
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 2.0
 1.0
 
 //!PARAM apr_t
 //!DESC reference (1.64 - 0.29^n)^0.73
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 5.0
 1.0
 
 //!PARAM apr_flq
 //!DESC reference FL^0.25
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 5.0
 1.0
 
 //!PARAM aps_dc_r
 //!DESC screen adaptation gain (CAT16 channel 0)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 20.0
 1.0
 
 //!PARAM aps_dc_g
 //!DESC screen adaptation gain (CAT16 channel 1)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 20.0
 1.0
 
 //!PARAM aps_dc_b
 //!DESC screen adaptation gain (CAT16 channel 2)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 20.0
 1.0
 
 //!PARAM aps_fl
 //!DESC screen luminance-level adaptation FL
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 10.0
 1.0
 
 //!PARAM aps_nbb
 //!DESC screen background induction Nbb
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 10.0
 1.0
 
 //!PARAM aps_aw
 //!DESC screen achromatic response of the white
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 1000.0
 100.0
 
 //!PARAM aps_cz
 //!DESC screen c times z
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 5.0
 1.0
 
 //!PARAM aps_nc
 //!DESC screen chromatic induction Nc
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 2.0
 1.0
 
 //!PARAM aps_t
 //!DESC screen (1.64 - 0.29^n)^0.73
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 5.0
 1.0
 
 //!PARAM aps_flq
 //!DESC screen FL^0.25
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 5.0
 1.0
 
 //!PARAM apx_strength
 //!DESC blend of the appearance model (0 = identity)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 1.0
 0.0
 
 //!PARAM apx_veil
 //!DESC screen veil as a fraction of the screen white
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 1.0
 0.0
 
 //!PARAM apx_screen_nits
 //!DESC screen white in nits (PQ output scale)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 10000.0
 100.0
 
 //!PARAM apx_ref_nits
 //!DESC reference white in nits (PQ output scale)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 10000.0
 100.0
 
 //!PARAM apx_pq
 //!DESC 1: PQ output signal; 0: gamma
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 1.0
 0.0
 
 //!PARAM apx_gamma
 //!DESC output gamma for a gamma signal
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 1.0
 //!MAXIMUM 4.0
 2.4
 
 //!PARAM apx_trc_kind
 //!DESC output transfer of a gamma signal: 0 power (apx_gamma), 1 BT.1886, 2 sRGB
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 2.0
 0.0
 
 //!PARAM apx_trc_param
 //!DESC BT.1886 black offset b (0 = pure 2.4)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 100.0
 0.0
 
 //!PARAM apx_knee
 //!DESC encoded level below which the model blends out (gamma_boost_knee, the delta-11 toe; 0 = none)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 0.5
 0.0
 
 //!PARAM apm_00
 //!DESC output RGB to XYZ (white Y = 1), row 0 col 0
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -5.0
 //!MAXIMUM 5.0
 0.4124
 
 //!PARAM apm_01
 //!DESC output RGB to XYZ, row 0 col 1
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -5.0
 //!MAXIMUM 5.0
 0.3576
 
 //!PARAM apm_02
 //!DESC output RGB to XYZ, row 0 col 2
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -5.0
 //!MAXIMUM 5.0
 0.1805
 
 //!PARAM apm_10
 //!DESC output RGB to XYZ, row 1 col 0
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -5.0
 //!MAXIMUM 5.0
 0.2126
 
 //!PARAM apm_11
 //!DESC output RGB to XYZ, row 1 col 1
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -5.0
 //!MAXIMUM 5.0
 0.7152
 
 //!PARAM apm_12
 //!DESC output RGB to XYZ, row 1 col 2
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -5.0
 //!MAXIMUM 5.0
 0.0722
 
 //!PARAM apm_20
 //!DESC output RGB to XYZ, row 2 col 0
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -5.0
 //!MAXIMUM 5.0
 0.0193
 
 //!PARAM apm_21
 //!DESC output RGB to XYZ, row 2 col 1
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -5.0
 //!MAXIMUM 5.0
 0.1192
 
 //!PARAM apm_22
 //!DESC output RGB to XYZ, row 2 col 2
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -5.0
 //!MAXIMUM 5.0
 0.9505
 
 //!PARAM apn_00
 //!DESC XYZ to output RGB (inverse of apm), row 0 col 0
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -20.0
 //!MAXIMUM 20.0
 3.2406
 
 //!PARAM apn_01
 //!DESC XYZ to output RGB (inverse of apm), row 0 col 1
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -20.0
 //!MAXIMUM 20.0
 -1.5372
 
 //!PARAM apn_02
 //!DESC XYZ to output RGB (inverse of apm), row 0 col 2
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -20.0
 //!MAXIMUM 20.0
 -0.4986
 
 //!PARAM apn_10
 //!DESC XYZ to output RGB (inverse of apm), row 1 col 0
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -20.0
 //!MAXIMUM 20.0
 -0.9689
 
 //!PARAM apn_11
 //!DESC XYZ to output RGB (inverse of apm), row 1 col 1
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -20.0
 //!MAXIMUM 20.0
 1.8758
 
 //!PARAM apn_12
 //!DESC XYZ to output RGB (inverse of apm), row 1 col 2
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -20.0
 //!MAXIMUM 20.0
 0.0415
 
 //!PARAM apn_20
 //!DESC XYZ to output RGB (inverse of apm), row 2 col 0
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -20.0
 //!MAXIMUM 20.0
 0.0557
 
 //!PARAM apn_21
 //!DESC XYZ to output RGB (inverse of apm), row 2 col 1
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -20.0
 //!MAXIMUM 20.0
 -0.2040
 
 //!PARAM apn_22
 //!DESC XYZ to output RGB (inverse of apm), row 2 col 2
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -20.0
 //!MAXIMUM 20.0
 1.0570
 
 //!PARAM apx_hunt_scale
 //!DESC factor on M keeping trim x Hunt saturation within the larger alone (doc 115 B13)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 4.0
 1.0
@@ -585,7 +585,8 @@ vec4 hook()
             // When D < 1 at J ~ 100 (e.g. D65 white under dim screen with veil), M = 0 is equi-energy E
             // (outside [0, upper] with a red cast) rather than D65 white. If no tested M is in-range,
             // clamp the finite pre-bisection colour to [0, upper] instead of collapsing onto equi-energy E.
-            bool origFinite = !any(isnan(outLin)) && !any(isinf(outLin));
+            // POD2-L11: FXC-safe bounded finite check (false for NaN/+Inf/-Inf without relying on FXC isnan/isinf).
+            bool origFinite = all(greaterThanEqual(outLin, vec3(-1e30))) && all(lessThanEqual(outLin, vec3(1e30)));
             outLin = clamp(origFinite ? outLin : bisected, vec3(0.0), vec3(ap_upper()));
         }
     }

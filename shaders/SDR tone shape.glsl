@@ -22,35 +22,35 @@
 
 //!PARAM headroom
 //!DESC Reference white below peak (fraction)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 0.5
 0.0
 
 //!PARAM knee_start
 //!DESC Roll-off start (fraction of peak, linear)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.5
 //!MAXIMUM 0.99
 0.8
 
 //!PARAM strength
 //!DESC Knee strength (0 = straight)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 1.0
 0.0
 
 //!PARAM eotf
 //!DESC Output gamma used to linearise
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 1.0
 //!MAXIMUM 3.0
 2.2
 
 //!PARAM recovery
 //!DESC Contrast recovery under the knee (0 = off)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 2.0
 0.0

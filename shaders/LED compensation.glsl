@@ -81,91 +81,91 @@
 
 //!PARAM gain
 //!DESC Picture gain (1 = untouched)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 16.0
 1.0
 
 //!PARAM knee
 //!DESC Soft roll-off width below white
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 0.5
 0.08
 
 //!PARAM gain_domain
 //!DESC 0 = encoded signal (script), 1 = linear light (compensate)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 1.0
 0.0
 
 //!PARAM compensation_eotf
 //!DESC Projector light exponent on the final code (delta 4: 2.41)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 1.0
 //!MAXIMUM 3.0
 2.41
 
 //!PARAM boost
 //!DESC Gamma boost exponent (1 = off)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.2
 //!MAXIMUM 3.0
 1.0
 
 //!PARAM boost_knee
 //!DESC Delta 11: the boost blends into the identity below this (0 = global boost)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 0.5
 0.0
 
 //!PARAM boost_knee_width
 //!DESC Delta 11: width of the boost toe's smoothstep
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 0.5
 0.05
 
 //!PARAM shadow_lift
 //!DESC Delta 11: scene-adaptive shadow lift strength (0 = off)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 1.0
 0.0
 
 //!PARAM veil
 //!DESC Delta 11: the LED module's veil estimate for this frame (0-1)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 1.0
 0.0
 
 //!PARAM btb_passthrough
 //!DESC led_btb_passthrough: 1 = below black leaves the hook as it came in, 0 = boosted and gained with the picture (before 2026-10-17)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 1.0
 1.0
 
 //!PARAM wtw_passthrough
 //!DESC led_wtw_passthrough: 1 = whiter-than-white keeps its value under the boost and any gain (a colour partly above white: split restore, hue kept); 0 = rolled under white (before 2026-10-17)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 1.0
 1.0
 
 //!PARAM extended_floor
 //!DESC Lowest encodable signal of the extended range (default: 10-bit limited code 4, 8-bit code 1)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -0.5
 //!MAXIMUM 0.0
 -0.0684932
 
 //!PARAM extended_ceiling
 //!DESC Highest encodable signal of the extended range (default: 10-bit limited code 1019)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 1.0
 //!MAXIMUM 2.0
 1.0901826
