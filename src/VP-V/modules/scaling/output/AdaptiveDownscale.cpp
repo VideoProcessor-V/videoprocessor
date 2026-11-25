@@ -237,9 +237,10 @@ if (b.x < blocks.x && b.y < blocks.y) {
     bool frame_ok = texelFetch(frame_trust, ivec2(0), 0).r >= min_trusted_share;
     bool reset = texelFetch(state, ivec2(0), 0).a > 1.5 || first_map > 0.5;
     bool trusted = frame_ok && f.z > 0.5;
-    vec2 c = (vec2(b) + vec2(0.5)) * 16.0;
-    vec2 pc = trusted ? c - f.xy : c;
-    ivec2 pb = clamp(ivec2(floor(pc / 16.0)), ivec2(0), blocks - ivec2(1));
+    float bpx = max(field_block_px, 1.0);
+    vec2 c = (vec2(b) + vec2(0.5)) * bpx;
+    vec2 pc = trusted ? c - f.xy * field_vec_scale : c;
+    ivec2 pb = clamp(ivec2(floor(pc / bpx)), ivec2(0), blocks - ivec2(1));
     vec4 prev = texelFetch(map_in, pb, 0);
     float wgt = max(mix(1.0, 2.0 * (1.0 - clamp(ge.g / 255.0, 0.0, 1.0)), shadow_bias), 0.0);
     float energy = ge.r * temporal_to_spatial * wgt;
@@ -322,19 +323,22 @@ if (b.x < blocks.x && b.y < blocks.y) {
     max_dv = max(max_dv, ad_neighbor_dv(fn2, f.xy, f_xy_ok));
     max_dv = max(max_dv, ad_neighbor_dv(fn3, f.xy, f_xy_ok));
     float denom = max(crop_h, 1e-3) * max(frame_seconds, 1e-6);
-    float speed = f_xy_ok ? length(f.xy) / denom : 0.0;
-    float shear_speed = max_dv / denom;
+    float vscale = (!ad_nonfinite(field_vec_scale) && field_vec_scale > 0.0) ? field_vec_scale : 1.0;
+    vec2 fxy = f.xy * vscale;
+    float speed = f_xy_ok ? length(fxy) / denom : 0.0;
+    float shear_speed = (max_dv * vscale) / denom;
     // Option 4B: shear ramp across speed_lo..speed_hi; rigid cinema pans stay crisp up to 2*speed_hi..4*speed_hi.
     float ramp_shear = ad_smoothstep_safe(speed_lo, speed_hi, shear_speed);
     float ramp_pan = ad_smoothstep_safe(2.0 * speed_hi, 4.0 * speed_hi, speed);
     float ramp = max(ramp_shear, ramp_pan);
     float target = fl + (1.0 - fl) * conf * (1.0 - ramp);
-    vec2 c = (vec2(b) + vec2(0.5)) * 16.0;
-    vec2 pc = (conf > 0.0 && f_xy_ok) ? c - f.xy : c;
+    float bpx = max(field_block_px, 1.0);
+    vec2 c = (vec2(b) + vec2(0.5)) * bpx;
+    vec2 pc = (conf > 0.0 && f_xy_ok) ? c - fxy : c;
     if (ad_nonfinite(pc.x) || ad_nonfinite(pc.y))
         pc = c;
     // Bilinear temporal advection across block centres in map_in.
-    vec2 ppos = clamp(pc / 16.0 - vec2(0.5), vec2(0.0), vec2(lim));
+    vec2 ppos = clamp(pc / bpx - vec2(0.5), vec2(0.0), vec2(lim));
     ivec2 p0 = ivec2(floor(ppos));
     ivec2 p1 = min(p0 + ivec2(1), lim);
     vec2 pt = ppos - vec2(p0);
@@ -389,7 +393,7 @@ if (q.x < size.x && q.y < size.y) {
 #endif
         vec2 sp = crop.xy + u * crop.zw;          // source pixels of the whole frame
         ivec2 msize = textureSize(grain_map, 0);
-        vec2 gpos = sp / 16.0 - vec2(0.5);
+        vec2 gpos = sp / max(map_block_px, 1.0) - vec2(0.5);
         ivec2 g0 = ivec2(floor(gpos));
         vec2 t = gpos - vec2(g0);
         float acc = 0.0;
@@ -415,7 +419,7 @@ if (q.x < size.x && q.y < size.y) {
 #endif
         vec2 msp = mw_crop.xy + mu * mw_crop.zw;
         ivec2 mwsz = textureSize(motion_map, 0);
-        vec2 mpos = msp / 16.0 - vec2(0.5);
+        vec2 mpos = msp / max(mw_block_px, 1.0) - vec2(0.5);
         ivec2 m0 = ivec2(floor(mpos));
         vec2 mt = mpos - vec2(m0);
         float macc = 0.0;
@@ -455,10 +459,10 @@ if (q.x < size.x && q.y < size.y) {
             float nb10 = texelFetch(grain_level, clamp(l0 + ivec2(1, 0), ivec2(0), lsize - ivec2(1)), 0).x;
             float nb01 = texelFetch(grain_level, clamp(l0 + ivec2(0, 1), ivec2(0), lsize - ivec2(1)), 0).x;
             float nb11 = texelFetch(grain_level, clamp(l0 + ivec2(1, 1), ivec2(0), lsize - ivec2(1)), 0).x;
-            g00 = nb00 >= 0.0 ? mix(grain_floor, 1.0, 1.0 - smoothstep(grain_lo, grain_hi, sqrt(max(nb00, 0.0)) * grain_level_scale)) : grain_floor;
-            g10 = nb10 >= 0.0 ? mix(grain_floor, 1.0, 1.0 - smoothstep(grain_lo, grain_hi, sqrt(max(nb10, 0.0)) * grain_level_scale)) : grain_floor;
-            g01 = nb01 >= 0.0 ? mix(grain_floor, 1.0, 1.0 - smoothstep(grain_lo, grain_hi, sqrt(max(nb01, 0.0)) * grain_level_scale)) : grain_floor;
-            g11 = nb11 >= 0.0 ? mix(grain_floor, 1.0, 1.0 - smoothstep(grain_lo, grain_hi, sqrt(max(nb11, 0.0)) * grain_level_scale)) : grain_floor;
+            g00 = (!ad_nonfinite(nb00) && nb00 >= 0.0) ? mix(grain_floor, 1.0, 1.0 - smoothstep(grain_lo, grain_hi, sqrt(max(nb00, 0.0)) * grain_level_scale)) : grain_floor;
+            g10 = (!ad_nonfinite(nb10) && nb10 >= 0.0) ? mix(grain_floor, 1.0, 1.0 - smoothstep(grain_lo, grain_hi, sqrt(max(nb10, 0.0)) * grain_level_scale)) : grain_floor;
+            g01 = (!ad_nonfinite(nb01) && nb01 >= 0.0) ? mix(grain_floor, 1.0, 1.0 - smoothstep(grain_lo, grain_hi, sqrt(max(nb01, 0.0)) * grain_level_scale)) : grain_floor;
+            g11 = (!ad_nonfinite(nb11) && nb11 >= 0.0) ? mix(grain_floor, 1.0, 1.0 - smoothstep(grain_lo, grain_hi, sqrt(max(nb11, 0.0)) * grain_level_scale)) : grain_floor;
         }
         float gx0 = g00 + lt.x * (g10 - g00);
         float gx1 = g01 + lt.x * (g11 - g01);
@@ -522,10 +526,10 @@ if (q.x < size.x && q.y < size.y) {
     float rs = r; \
     vec2 sps = rs_crop.xy + (s - src_origin) / src_size * rs_crop.zw; \
     ivec2 fsz = textureSize(rs_field, 0); \
-    vec4 f = texelFetch(rs_field, clamp(ivec2(floor(sps / 16.0)), ivec2(0), fsz - ivec2(1)), 0); \
+    vec4 f = texelFetch(rs_field, clamp(ivec2(floor(sps / max(rs_block_px, 1.0))), ivec2(0), fsz - ivec2(1)), 0); \
     bool frame_ok = texelFetch(rs_trust, ivec2(0), 0).r >= rs_min_share; \
     if (rs_prev_valid > 0.5 && frame_ok && f.z > 0.5 && texelFetch(state, ivec2(0), 0).a < 1.5) { \
-        vec2 sprev = s - f.xy * src_size / rs_crop.zw; \
+        vec2 sprev = s - (f.xy * rs_vec_scale) * src_size / rs_crop.zw; \
         vec2 qprev = (sprev - src_origin) / src_per_dst; \
         float rp = texture(rs_prev, qprev / vec2(size)).r; \
         rs = mix(rp, r, rs_alpha); \
@@ -591,10 +595,10 @@ float rs_slope(float y)
     float rs = r; \
     vec2 sps = rs_crop.xy + (s - src_origin) / src_size * rs_crop.zw; \
     ivec2 fsz = textureSize(rs_field, 0); \
-    vec4 f = texelFetch(rs_field, clamp(ivec2(floor(sps / 16.0)), ivec2(0), fsz - ivec2(1)), 0); \
+    vec4 f = texelFetch(rs_field, clamp(ivec2(floor(sps / max(rs_block_px, 1.0))), ivec2(0), fsz - ivec2(1)), 0); \
     bool frame_ok = texelFetch(rs_trust, ivec2(0), 0).r >= rs_min_share; \
     if (rs_prev_valid > 0.5 && frame_ok && f.z > 0.5 && texelFetch(state, ivec2(0), 0).a < 1.5) { \
-        vec2 sprev = s - f.xy * src_size / rs_crop.zw; \
+        vec2 sprev = s - (f.xy * rs_vec_scale) * src_size / rs_crop.zw; \
         vec2 qprev = (sprev - src_origin) / src_per_dst; \
         ivec2 psz = textureSize(rs_prev, 0); \
         float rp = texelFetch(rs_prev, clamp(ivec2(floor(qprev)), ivec2(0), psz - ivec2(1)), 0).r; \
@@ -1365,7 +1369,9 @@ float rs_slope(float y)
 		const pl_shader_desc d[6] = { Sampled("field", gf.field, false), Sampled("grain_error", gf.error, false),
 			Sampled("frame_trust", gf.frameTrust, false), Sampled("state", state, false),
 			Sampled("map_in", map[mapIndex], false), Storage("map_out", map[next]) };
-		const pl_shader_var v[8] = {
+		const float fieldBlockPx = static_cast<float>(gf.fieldBlockPx > 0 ? gf.fieldBlockPx : 16);
+		const float fieldVecScale = (gf.scaleToSourcePx > 0.0f && std::isfinite(gf.scaleToSourcePx)) ? gf.scaleToSourcePx : 1.0f;
+		const pl_shader_var v[10] = {
 			{ pl_var_float("min_trusted_share"), &gf.minTrustedShare, true },
 			{ pl_var_float("first_map"), &firstF, true },
 			{ pl_var_float("shadow_bias"), &settings.shadowBias, true },
@@ -1373,8 +1379,10 @@ float rs_slope(float y)
 			{ pl_var_float("grain_lo"), &settings.grainLo, true },
 			{ pl_var_float("grain_hi"), &settings.grainHi, true },
 			{ pl_var_float("grain_floor"), &settings.grainFloor, true },
-			{ pl_var_float("smooth_alpha"), &alpha, true } };
-		if (!Compute(dispatch, "VideoProcessor adaptive downscale: grain map", NONFINITE_GLSL, MAP_BODY, d, 6, v, 8,
+			{ pl_var_float("smooth_alpha"), &alpha, true },
+			{ pl_var_float("field_block_px"), &fieldBlockPx, true },
+			{ pl_var_float("field_vec_scale"), &fieldVecScale, true } };
+		if (!Compute(dispatch, "VideoProcessor adaptive downscale: grain map", NONFINITE_GLSL, MAP_BODY, d, 6, v, 10,
 			(bw + 15) / 16, (bh + 15) / 16))
 		{
 			mapReady = false;
@@ -1387,6 +1395,7 @@ float rs_slope(float y)
 		mapReady = true;
 		mapSequence = sequence;
 		mapSourceCrop = gf.sourceCrop;
+		mapBlockPx = fieldBlockPx;
 		mapNls = gf.nls;
 		mapState = MapState::Used;
 		return true;
@@ -1448,7 +1457,9 @@ float rs_slope(float y)
 		const float cropH = motion.sourceCrop.y1 - motion.sourceCrop.y0;
 		const pl_shader_desc d[5] = { Sampled("field", motion.field, false), Sampled("frame_trust", motion.frameTrust, false),
 			Sampled("state", state, false), Sampled("map_in", motionMap[motionIndex], false), Storage("map_out", motionMap[next]) };
-		const pl_shader_var v[9] = {
+		const float fieldBlockPx = static_cast<float>(motion.fieldBlockPx > 0 ? motion.fieldBlockPx : 16);
+		const float fieldVecScale = (motion.scaleToSourcePx > 0.0f && std::isfinite(motion.scaleToSourcePx)) ? motion.scaleToSourcePx : 1.0f;
+		const pl_shader_var v[11] = {
 			{ pl_var_float("min_trusted_share"), &motion.minTrustedShare, true },
 			{ pl_var_float("first_map"), &firstF, true },
 			{ pl_var_float("crop_h"), &cropH, true },
@@ -1457,8 +1468,10 @@ float rs_slope(float y)
 			{ pl_var_float("speed_hi"), &settings.motionSpeedHi, true },
 			{ pl_var_float("motion_floor"), &settings.motionFloor, true },
 			{ pl_var_float("smooth_alpha_attack"), &alphaAttack, true },
-			{ pl_var_float("smooth_alpha_release"), &alphaRelease, true } };
-		if (!Compute(dispatch, "VideoProcessor adaptive scaling: motion-adapted weights", MotionHeader().c_str(), MOTION_BODY, d, 5, v, 9,
+			{ pl_var_float("smooth_alpha_release"), &alphaRelease, true },
+			{ pl_var_float("field_block_px"), &fieldBlockPx, true },
+			{ pl_var_float("field_vec_scale"), &fieldVecScale, true } };
+		if (!Compute(dispatch, "VideoProcessor adaptive scaling: motion-adapted weights", MotionHeader().c_str(), MOTION_BODY, d, 5, v, 11,
 			(bw + 15) / 16, (bh + 15) / 16))
 		{
 			motionReady = false;
@@ -1471,6 +1484,7 @@ float rs_slope(float y)
 		motionReady = true;
 		motionSequence = sequence;
 		motionSourceCrop = motion.sourceCrop;
+		motionBlockPx = fieldBlockPx;
 		motionNls = motion.nls;
 		motionState = MotionState::Used;
 		return true;
@@ -1624,12 +1638,17 @@ float rs_slope(float y)
 				(motionFloor ? "#define AD_MOTION_FLOOR 1\n" : "") +
 				(grainPublished ? "#define AD_GRAIN_PUBLISHED 1\n" : "") : std::string();
 			const bool guard = stabilise && settings.residualGrainGuard;
-			const std::string header = "#define AD_KW " + LumaWeightsGlsl(domain) + "\n" + upHeader +
+			const std::string header = "#define AD_KW " + LumaWeightsGlsl(domain) + "\n" +
+				std::string(NONFINITE_GLSL) + upHeader +
 				(useMotion ? std::string("#define AD_MOTION 1\n") : std::string()) +
 				(useMap ? std::string("#define AD_USE_MAP 1\n") : std::string()) +
 				(anyNlsHelper ? nlsHeader : std::string()) +
 				(stabilise ? (guard ? STABILISE_GUARD_DEFINE : STABILISE_DEFINE) : PLAIN_DEFINE);
 			const float wBase = upscale.on ? upscale.wBase : settings.wBase;
+			const float mapBlockPxVal = mapBlockPx > 0.0f ? mapBlockPx : 16.0f;
+			const float mwBlockPxVal = motionBlockPx > 0.0f ? motionBlockPx : 16.0f;
+			const float rsBlockPxVal = static_cast<float>(motion.fieldBlockPx > 0 ? motion.fieldBlockPx : 16);
+			const float rsVecScaleVal = (motion.scaleToSourcePx > 0.0f && std::isfinite(motion.scaleToSourcePx)) ? motion.scaleToSourcePx : 1.0f;
 			std::vector<pl_shader_var> v = {
 				{ pl_var_vec2("src_origin"), srcOrigin, true },
 				{ pl_var_vec2("src_per_dst"), srcPerDst, true } };
@@ -1644,6 +1663,7 @@ float rs_slope(float y)
 			if (useMap)
 			{
 				v.push_back({ pl_var_vec4("crop"), crop, true });
+				v.push_back({ pl_var_float("map_block_px"), &mapBlockPxVal, true });
 				v.push_back({ pl_var_float("nls_active"), &nlsActive, true });
 			}
 			if (useMap || anyNlsHelper)
@@ -1656,6 +1676,8 @@ float rs_slope(float y)
 			if (stabilise)
 			{
 				v.push_back({ pl_var_vec4("rs_crop"), rsCrop, true });
+				v.push_back({ pl_var_float("rs_block_px"), &rsBlockPxVal, true });
+				v.push_back({ pl_var_float("rs_vec_scale"), &rsVecScaleVal, true });
 				v.push_back({ pl_var_float("rs_prev_valid"), &prevValid, true });
 				v.push_back({ pl_var_float("rs_alpha"), &rsAlpha, true });
 				v.push_back({ pl_var_float("rs_min_share"), &rsMinShare, true });
@@ -1681,6 +1703,7 @@ float rs_slope(float y)
 			{
 				v.push_back({ pl_var_vec2("mw_src_size"), srcSize, true });
 				v.push_back({ pl_var_vec4("mw_crop"), mwCrop, true });
+				v.push_back({ pl_var_float("mw_block_px"), &mwBlockPxVal, true });
 				v.push_back({ pl_var_float("motion_strength"), &motionStrength, true });
 				v.push_back({ pl_var_float("mw_nls_active"), &mwNlsActive, true });
 			}

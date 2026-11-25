@@ -6,6 +6,7 @@
 #include <VP-V/modules/control/skeleton/SkeletonAccess.h>
 #include <VP-V/modules/motion/estimation/P3FieldFill.h>
 #include <VP-V/modules/output/dither/CustomHookChain.h>
+#include <VP-V/modules/repair/grain_split/GrainLevelGpu.h>
 #include <VP-V/modules/scaling/output/DownscaleLight.h>
 #include <libplacebo/filters.h>
 #include <vprenderer/GrainPreserve.h>
@@ -69,6 +70,8 @@ namespace AdaptiveDownscaleStage
 				motion.frameTrust = m.frameTrust;
 				motion.pin = pin;
 				motion.minTrustedShare = m.minTrustedShare;
+				motion.fieldBlockPx = m.fieldBlockPx > 0 ? m.fieldBlockPx : 16;
+				motion.scaleToSourcePx = (m.fieldScaleToSourcePx > 0.0f && std::isfinite(m.fieldScaleToSourcePx)) ? m.fieldScaleToSourcePx : 1.0f;
 				motion.sourceCrop = frame.sourceCrop;
 				motion.nls = frame.nlsSubmitted ? nlsMap : NlsMaskMapping::Mapping{};
 				module.SetMotion(motion);
@@ -120,6 +123,13 @@ namespace AdaptiveDownscaleStage
 			out.motion.field = p3Field;
 			out.motion.frameTrust = frameTrust;
 			out.motion.minTrustedShare = minTrustedShare;
+			if (facts != nullptr)
+			{
+				if (facts->blockSize > 0)
+					out.motion.fieldBlockPx = facts->blockSize;
+				if (facts->scaleToSourcePx > 0.0f && std::isfinite(facts->scaleToSourcePx))
+					out.motion.fieldScaleToSourcePx = facts->scaleToSourcePx;
+			}
 			out.pin = r.pin;
 			return out;
 		}
@@ -159,6 +169,13 @@ namespace AdaptiveDownscaleStage
 			gs.level = static_cast<pl_tex>(r.gpu.resource);
 			gs.pin = r.pin;
 			gs.sourceCrop = frame.sourceCrop;
+			if (const GrainSplit::LevelGpu::GrainLevelFacts* gf = GrainSplit::LevelGpu::FactsOf(r))
+			{
+				if (gf->codeToEightBit > 0.0 && std::isfinite(gf->codeToEightBit))
+					gs.codeToEightBit = static_cast<float>(gf->codeToEightBit);
+				if (gf->blockPx > 0)
+					gs.blockPx = gf->blockPx;
+			}
 			gs.nls = (frame.nlsSubmitted && nlsMap.valid) ? nlsMap : NlsMaskMapping::Mapping{};
 			module.SetGrainLevel(gs);
 			t.published = true;
@@ -387,6 +404,8 @@ namespace AdaptiveDownscaleStage
 					field.field = m.field;
 					field.frameTrust = m.frameTrust;
 					field.minTrustedShare = m.minTrustedShare;
+					field.fieldBlockPx = m.fieldBlockPx > 0 ? m.fieldBlockPx : 16;
+					field.scaleToSourcePx = (m.fieldScaleToSourcePx > 0.0f && std::isfinite(m.fieldScaleToSourcePx)) ? m.fieldScaleToSourcePx : 1.0f;
 					field.sourceCrop = frame.sourceCrop;
 					bool known = true;
 					if (frame.nlsSubmitted)

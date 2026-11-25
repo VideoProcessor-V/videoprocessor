@@ -38,6 +38,8 @@ namespace AdaptiveDownscaleStage
 		pl_tex frameTrust = nullptr;   // ... frameTrust
 		pl_tex grainError = nullptr;   // ... grainError
 		float minTrustedShare = 0.25f; // EstimateState::MinTrustedShare()
+		int fieldBlockPx = 16;         // VerifiedField::blockSize in source px (default 16)
+		float fieldScaleToSourcePx = 1.0f; // VerifiedField::scaleToSourcePx (default 1.0)
 	};
 
 	// The settings the stage reads (from the renderer's active settings) and this frame's facts.
