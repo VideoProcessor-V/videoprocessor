@@ -2325,6 +2325,10 @@ vec4 bandW[3];
 bandW[0] = vec4(0.0);
 bandW[1] = vec4(0.0);
 bandW[2] = vec4(0.0);
+float bandU[3];
+bandU[0] = 0.0;
+bandU[1] = 0.0;
+bandU[2] = 0.0;
 
 for (int b = 0; b < 3; ++b)
 {
@@ -2425,7 +2429,7 @@ for (int b = 0; b < 3; ++b)
         {
             bool exactCopy = td_is_exact_copy(k);
             float cA2 = (u_a2_valid > 0.5)
-                ? ((u_a2_sigma_sent + (exactCopy ? 0.0 : u_a2_sigma_zero)) * cellStepScaleSq * td_a2_band_peak_sq(b))
+                ? ((u_a2_sigma_sent + (exactCopy ? 0.0 : u_a2_sigma_zero)) * cellStepScaleSq * bGain)
                 : 0.0;
             // Plan L81 physical upper bound: c_k in [0, C_{k,k}].
             cA2 = min(cA2, C[k][k]);
@@ -2456,6 +2460,24 @@ for (int b = 0; b < 3; ++b)
                 }
             }
         }
+
+        // TD-U3 (H-1): Per-block own-error variance U_j(block) for the honest transform-unknown statistical limit.
+        float blockOwnU = (u_a2_valid > 0.5) ? (u_a2_total_var * cellStepScaleSq * bGain) : 0.0;
+        if (u_use_empirical_u > 0.5)
+        {
+            float sumC = 0.0;
+            float nC = 0.0;
+            for (int k = 0; k < K; ++k)
+            {
+                if (!td_is_exact_copy(k))
+                {
+                    sumC += max(0.0, cVec[k]);
+                    nC += 1.0;
+                }
+            }
+            blockOwnU = (nC > 0.5) ? (sumC / nC) : 0.0;
+        }
+        bandU[b] = blockOwnU;
 
         float solvedW[3];
         int status = td_solve_convex(K, C, cVec, int(round(u_solver_mode)), solvedW);
@@ -2497,6 +2519,8 @@ for (int b = 0; b < 3; ++b)
     bandW[b] = wOut;
     if (b == 0)
         diagOut.w = cellStdCleanY;
+    else if (b == 2)
+        diagOut.w = bandU[2];
     imageStore(cell_diag_c, ivec2(b * TD_CW + cell.x, cell.y), diagOut);
 }
 
@@ -2570,6 +2594,8 @@ if (u_fade_keep < 1.0)
 
 midWeightSum = bandW[1].x + bandW[1].y + bandW[1].z;
 bandW[0].w = cellMeanCleanY;
+bandW[1].w = bandU[0];
+bandW[2].w = bandU[1];
 for (int b = 0; b < 3; ++b)
     imageStore(cell_weights, ivec2(b * TD_CW + cell.x, cell.y), bandW[b]);
 
@@ -2806,8 +2832,14 @@ if (u_enable_edge_aware_upsample > 0.5)
     }
 }
 
+float cellU[3];
+cellU[0] = max(0.0, texelFetch(cell_weights, ivec2(1 * TD_CW + cx, cy), 0).w);
+cellU[1] = max(0.0, texelFetch(cell_weights, ivec2(2 * TD_CW + cx, cy), 0).w);
+cellU[2] = max(0.0, texelFetch(cell_diag_c,  ivec2(2 * TD_CW + cx, cy), 0).w);
+
 float totalDelta = 0.0;
 float boundedDelta = 0.0;
+float sumBandVar = 0.0;
 float boundEngaged = 0.0;
 for (int b = 0; b < 3; ++b)
 {
@@ -2892,11 +2924,12 @@ for (int b = 0; b < 3; ++b)
         bandDelta -= wEff * diff;
     }
 
-    float bandVar = (u_a2_valid > 0.5) ? (u_a2_total_var * cellStepScaleSq * td_a2_band_peak_sq(b)) : 0.0;
+    float bandVar = cellU[b];
+    sumBandVar += bandVar;
     float clampedBand = bandDelta;
     if (abs(bandDelta) > 0.0)
     {
-        float bound = TD_PIXEL_BOUND_SIGMA * sqrt(max(0.0, bandVar));
+        float bound = u_pixel_bound_kappa * sqrt(max(0.0, bandVar));
         clampedBand = clamp(bandDelta, -bound, bound);
         if (!inFull8x8)
         {
@@ -2906,6 +2939,19 @@ for (int b = 0; b < 3; ++b)
     }
     totalDelta += bandDelta;
     boundedDelta += clampedBand;
+}
+
+// TD-U3 (H-1 / Owner D3): Joint cross-band limit |sum_j Delta_j(p)| <= kappa * sqrt(sum_j U_j(block)).
+if (u_enable_joint_bound > 0.5)
+{
+    float jointBound = u_pixel_bound_kappa * sqrt(max(0.0, sumBandVar));
+    if (abs(boundedDelta) > 0.0)
+        boundedDelta = clamp(boundedDelta, -jointBound, jointBound);
+    if (!inFull8x8 && abs(totalDelta) > 0.0)
+    {
+        boundEngaged = 1.0;
+        totalDelta = clamp(totalDelta, -jointBound, jointBound);
+    }
 }
 
 float outX = td_is_bad(totalDelta) ? 0.0 : totalDelta;

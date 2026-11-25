@@ -2610,8 +2610,9 @@ namespace TdV2
 						}
 					}
 
-					// Unit-sum DC transfer gain = 1.0 for coherent coarse-band quantization-cell bound (Rule 1).
-					const double bandVar = a2Stats.valid ? a2Stats.totalVar : 0.0;
+					// TD-U3 (H-1 / Owner D3): Coarse-band statistical limit with ClampPixelBoundKappa(cfg_.pixelBoundKappa).
+					const double effKappa = ClampPixelBoundKappa(cfg_.pixelBoundKappa);
+					const double bandVar = a2Stats.valid ? (a2Stats.totalVar * ComputeBandWhiteNoiseGains().low) : 0.0;
 					for (int y = delivActive.y0; y < delivActive.y1; ++y)
 					{
 						const double ly = in.siting.CodedToLumaY(static_cast<double>(y), dSubY);
@@ -2653,7 +2654,7 @@ namespace TdV2
 								}
 							}
 							if (std::fabs(delta) > 0.0)
-								delta = ApplyTransformUnknownBound(delta, bandVar, standIns);
+								delta = ApplyTransformUnknownBound(delta, bandVar, standIns, effKappa);
 							outDelta.at(x, y) = (delta == 0.0) ? 0.0 : delta;
 						}
 					}
@@ -3224,16 +3225,9 @@ namespace TdV2
 			}
 
 			// B6: Per-band fusion on coded Cb and coded Cr independently using shared TdV2BlendMath + Layer-4 TdGuardPort.
+			// TD-U3 (H-1): exact bandTransfer[b] = ||H_b||_2^2 (filter-peak 1.0 full-variance amplification removed).
 			const BandWhiteNoiseGains gains = ComputeBandWhiteNoiseGains();
 			const double bandTransfer[3] = { gains.low, gains.mid, gains.fine };
-
-			// Exact Parseval passband supremum ||H_b||_inf^2 for A2 rounding-cell variance upper bound
-			// (1:1 parity with TdV2ReferenceEngine.h): L=1.0, M=midPassbandPeak^2, H=1.0.
-			const double s1Sq = VpUnit::BandFromBase::kSigmaFine * VpUnit::BandFromBase::kSigmaFine;
-			const double s2Sq = VpUnit::BandFromBase::kSigmaBase * VpUnit::BandFromBase::kSigmaBase;
-			const double wStarSq = (2.0 * std::log(VpUnit::BandFromBase::kSigmaBase / VpUnit::BandFromBase::kSigmaFine)) / (s2Sq - s1Sq);
-			const double midPassbandPeak = std::exp(-(s1Sq * wStarSq) / 2.0) - std::exp(-(s2Sq * wStarSq) / 2.0);
-			const double a2BandPeakSq[3] = { 1.0, midPassbandPeak * midPassbandPeak, 1.0 };
 
 			auto bandPlaneOf = [](const ThreeBandPlanes& bp, int b) -> const TdV2Plane&
 			{
@@ -3522,9 +3516,9 @@ namespace TdV2
 							for (int ai = 0; ai < activeK; ++ai)
 							{
 								const int k = activeIdx[ai];
-								// A2 rounding-cell prior using Parseval passband supremum ||H_b||_inf^2,
+								// A2 rounding-cell prior using exact bandTransfer[b] = ||H_b||_2^2,
 								// capped to [0, C[ai][ai]] per Plan L81 (c_k <= C_kk).
-								const double cA2 = (std::min)(EstimateC_A2(a2Stats, refs[static_cast<size_t>(k)].isExactCopy) * a2BandPeakSq[b], C[ai][ai]);
+								const double cA2 = (std::min)(EstimateC_A2(a2Stats, refs[static_cast<size_t>(k)].isExactCopy) * bandTransfer[b], C[ai][ai]);
 								double cA1 = cA2;
 
 								// Find an independent A1 instrument partner (LOW-7): NEVER allow two anchor-derived
@@ -3699,9 +3693,12 @@ namespace TdV2
 					}
 					else
 					{
-						predCleanPtr = isCb ? &refs[0].cleanCb : &refs[0].cleanCr;
-						predValidPtr = &refs[0].validPx;
+						// TD-U3 (H-1): Remove warped-peak substitute for missing Field B P_B; fall back visibly to statistical limit.
+						canRunPocs = false;
 						usingPbStandIn = true;
+						res.codecModelPbStandInCells += numCells;
+						if (standIns != nullptr)
+							standIns->Engage(StandInKind::CodecModelPbStandIn, "chroma CodecModel Field B P_B absent; falling back to statistical limit");
 					}
 				}
 
@@ -3745,7 +3742,9 @@ namespace TdV2
 						                            (x >= bxStart) && (x < bxEnd) && (y >= byStart) && (y < byEnd) &&
 						                            isBlockPredValid((x / 8) * 8, (y / 8) * 8);
 
+						const double effKappa = ClampPixelBoundKappa(cfg_.pixelBoundKappa);
 						double totalDelta = 0.0;
+						double sumBandVar = 0.0;
 						for (int b = 0; b < 3; ++b)
 						{
 							const double curV = bandPlaneOf(curBands, b).at(x, y);
@@ -3775,14 +3774,16 @@ namespace TdV2
 							}
 							if (!inFull8x8Block)
 							{
-								// Use exact Parseval passband supremum a2BandPeakSq[b] (consistent with cA2 and Branch A)
-								// so coherent L/M quantization wear is bounded at its true passband limit without over-clipping.
-								const double bandVar = a2Stats.valid ? (a2Stats.totalVar * a2BandPeakSq[b]) : 0.0;
+								// TD-U3 (H-1 / Owner D3): Exact bandTransfer[b] = ||H_b||_2^2 + adjustable kappa.
+								const double bandVar = a2Stats.valid ? (a2Stats.totalVar * bandTransfer[b]) : 0.0;
+								sumBandVar += bandVar;
 								if (std::fabs(bandDelta) > 0.0)
-									bandDelta = ApplyTransformUnknownBound(bandDelta, bandVar, standIns);
+									bandDelta = ApplyTransformUnknownBound(bandDelta, bandVar, standIns, effKappa);
 							}
 							totalDelta += bandDelta;
 						}
+						if (!inFull8x8Block && cfg_.enableJointCrossBandBound && std::fabs(totalDelta) > 0.0)
+							totalDelta = ApplyJointCrossBandBound(totalDelta, sumBandVar, standIns, effKappa);
 						outCodedDelta.at(x, y) = (totalDelta == 0.0) ? 0.0 : totalDelta;
 					}
 				}

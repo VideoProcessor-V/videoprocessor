@@ -23,12 +23,17 @@
 #include <VP-V/modules/motion/estimation/LaneAheadPolicy.h>
 #include <VP-V/modules/repair/temporal_detail/products/TdProductContracts.h>
 #include <VP-V/modules/repair/temporal_detail/products/TdProductReads.h>
+#include <VP-V/modules/repair/temporal_detail/v2/TdV2BlendMath.h>
 #include <VP-V/modules/repair/temporal_detail/v2/TdV2Config.h>
 #include <VP-V/modules/repair/temporal_detail/v2/TdV2Scheduler.h>
 #include <VP-V/modules/repair/temporal_detail/v2/TdV2StandIns.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <cstdlib>
+#include <iomanip>
+#include <sstream>
 #include <string>
 
 namespace TdV2
@@ -59,7 +64,8 @@ namespace TdV2
 	{
 		Mode mode = Mode::Off;
 		ResidualMode residualMode = ResidualMode::Cell;
-		Preset preset = Preset::RealTime;       // Harness-only default "realtime"
+		double limitKappa = kPixelBoundKappaDefault; // TD-U3 / Owner D3: strict default 1.0, range [1.0, 3.0]
+		Preset preset = Preset::RealTime;            // Harness-only default "realtime"
 		OverlayMode overlay = OverlayMode::Off;
 	};
 
@@ -111,6 +117,24 @@ namespace TdV2
 			problem = "invalid td_mode value '" + value + "' (expected cell|strict)";
 			return false;
 		}
+		if (k == "td_limit_kappa")
+		{
+			if (v.empty())
+			{
+				problem = "invalid td_limit_kappa value '" + value + "' (expected number in [1.0, 3.0])";
+				return false;
+			}
+			char* endPtr = nullptr;
+			const double parsed = std::strtod(v.c_str(), &endPtr);
+			if (endPtr == nullptr || *endPtr != '\0' || !std::isfinite(parsed) ||
+			    parsed < kPixelBoundKappaMin || parsed > kPixelBoundKappaMax)
+			{
+				problem = "invalid td_limit_kappa value '" + value + "' (expected number in [1.0, 3.0])";
+				return false;
+			}
+			settings.limitKappa = parsed;
+			return true;
+		}
 		if (k == "td_preset")
 		{
 			if (v == "realtime") { settings.preset = Preset::RealTime; return true; }
@@ -138,6 +162,7 @@ namespace TdV2
 	{
 		Config cfg = MakePreset(s.preset, s.mode);
 		cfg.residualMode = s.residualMode;
+		cfg.pixelBoundKappa = ClampPixelBoundKappa(s.limitKappa);
 		if (originalPathway)
 			ApplyOriginalPathwayOverride(cfg);
 		return cfg;
@@ -276,6 +301,8 @@ namespace TdV2
 		TdV2RuntimeSettings settings;
 		bool originalPathway = false;
 		bool wiredToLiveRenderer = false; // Honest default: library ready, not wired to live renderer yet (Wave 4-6 hookup)
+		bool transformIdentified8x8 = false; // True only on identified 8x8 AVC/MPEG transform with real encoder prediction
+		bool hasCodecModelPb = false;        // True only when real Field B CodecModel prediction P_B is available
 		TdTier tier = TdTier::Full;
 		int usableLeadE = VpMotion::LaneAhead::kDepthTarget;
 		bool lateCarried = false;
@@ -296,11 +323,25 @@ namespace TdV2
 		const int ceiling = static_cast<int>(VpSkeleton::kAheadCeiling);
 		const int target = VpMotion::LaneAhead::kDepthTarget;
 		const int clampedE = (std::max)(0, (std::min)(ceiling, in.usableLeadE));
+		const double effKappa = ClampPixelBoundKappa(in.settings.limitKappa);
+		std::ostringstream kappaOss;
+		kappaOss << std::fixed << std::setprecision(1) << effKappa;
+
+		const bool activeCellRegime = in.transformIdentified8x8 && in.hasCodecModelPb;
 
 		std::string line = in.wiredToLiveRenderer
 			? (std::string("Temporal detail: ") + ModeToken(in.settings.mode))
 			: (std::string("Temporal detail v2: library ready (not wired to live renderer yet - connects at Wave 4-6 integration); requested=") + ModeToken(in.settings.mode));
-		line += ", mode=" + std::string(ResidualModeToken(in.settings.residualMode));
+		if (activeCellRegime)
+		{
+			line += ", limit: cell (AVC 8x8)";
+			line += ", mode=" + std::string(ResidualModeToken(in.settings.residualMode));
+		}
+		else
+		{
+			line += ", limit: statistical (transform unknown), kappa=" + kappaOss.str();
+			line += ", mode=" + std::string(ResidualModeToken(in.settings.residualMode)) + " (inactive: transform unknown)";
+		}
 		if (in.settings.overlay != OverlayMode::Off)
 			line += ", overlay=" + std::string(OverlayModeToken(in.settings.overlay));
 		line += ", tier=" + std::string(TdTierName(in.tier));

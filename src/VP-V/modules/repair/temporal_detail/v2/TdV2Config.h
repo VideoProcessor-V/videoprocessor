@@ -179,6 +179,14 @@ namespace TdV2
 		Preset preset = Preset::Reference;
 		BokehMode bokehMode = BokehMode::Untouched;
 
+		// Honest transform-unknown output limit multiplier kappa in [1.0, 3.0] (TD-U3 / Owner D3):
+		// strict default 1.0: |Delta_j(p)| <= kappa * sqrt(U_j(block)) and |sum_j Delta_j(p)| <= kappa * sqrt(sum_j U_j(block)).
+		double pixelBoundKappa = 1.0;
+		bool enableJointCrossBandBound = true;
+		// Per-cell AQ dQP step widening (M-6): OFF by default until a live HDMI AQ producer exists;
+		// PQ perceptual weighting may only tighten (<= 1.0), never widen beyond 1.0.
+		bool enableAqStepScaling = false;
+
 		// Source code depth in bits (10 = standard 10-bit pipeline; scaled via DepthScale(sourceBits) = 2^(bits - 10)).
 		int sourceBits = 10;
 

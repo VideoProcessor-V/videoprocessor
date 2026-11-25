@@ -644,9 +644,9 @@ namespace TdV2
 				const double cellStepScaleSq = cellScale * cellScale;
 				const double cellStepNoiseVar = stepNoiseVar * cellStepScaleSq;
 				const double cellStructureFloor = structureFloor * cellStepScaleSq;
-				// Exact 3-sigma M-band Parseval passband bound matching ApplyTransformUnknownBound:
-				// any M-band RMS drop <= kPixelBoundSigma * sqrt(cellStepNoiseVar) * ||H_M||_inf can arise from lawful B-frame quantization!
-				const double quantMidRmsBound = kPixelBoundSigma * std::sqrt(cellStepNoiseVar) * hmPeakF;
+				// Exact 3-sigma M-band Parseval passband bound (decoupled from TD-U3 pixelBoundKappa):
+				// any M-band RMS drop <= 3 * sqrt(cellStepNoiseVar) * ||H_M||_inf can arise from lawful B-frame quantization!
+				const double quantMidRmsBound = std::sqrt(kHuberKneeSq) * std::sqrt(cellStepNoiseVar) * hmPeakF;
 
 				// Noise-debiased focus ratio for optical bokeh / rack-focus detection:
 				// White coding noise passes ~6.5x more variance into M (gains.mid) than D3 (gains.d3);
@@ -1258,23 +1258,14 @@ namespace TdV2
 				refs.push_back(std::move(wr));
 			}
 
-			// Exact derived 2D separable white-noise transfer gains from U2 BandFromBase kernel taps (HIGH-1: zero magic/over-subtraction).
+			// Exact derived 2D separable white-noise transfer gains from U2 BandFromBase kernel taps (HIGH-1 + TD-U3/H-1:
+			// exact band shares ||H_b||_2^2; the old filter-peak 1.0 full-variance amplification is removed).
 			const BandWhiteNoiseGains gains = ComputeBandWhiteNoiseGains();
 			const double bandTransfer[3] = { gains.low, gains.mid, gains.fine };
 
-			// Exact Parseval passband supremum ||H_b||_inf^2 for A2 rounding-cell variance upper bound:
-			// Unlike white film grain (whose variance splits by bandTransfer[b] = ||H_b||_2^2), codec quantization wear
-			// can concentrate inside a single band's passband (e.g. L/M banding & block wear) up to ||H_b||_inf^2:
-			//   - Band L (G_base):        sup |H_L(w)|^2 = |H_L(0)|^2 = 1.0
-			//   - Band M (G_fine-G_base): sup |H_M(w)|^2 attained at w*^2 = 2*ln(kSigmaBase/kSigmaFine)/(kSigmaBase^2 - kSigmaFine^2)
-			//   - Band H (1 - G_fine):    sup |H_H(w)|^2 = 1.0
-			const double s1Sq = VpUnit::BandFromBase::kSigmaFine * VpUnit::BandFromBase::kSigmaFine;
-			const double s2Sq = VpUnit::BandFromBase::kSigmaBase * VpUnit::BandFromBase::kSigmaBase;
-			const double wStarSq = (2.0 * std::log(VpUnit::BandFromBase::kSigmaBase / VpUnit::BandFromBase::kSigmaFine)) / (s2Sq - s1Sq);
-			const double midPassbandPeak = std::exp(-0.5 * s1Sq * wStarSq) - std::exp(-0.5 * s2Sq * wStarSq);
-			const double a2BandPeakSq[3] = { 1.0, midPassbandPeak * midPassbandPeak, 1.0 };
-
 			// Resolve per-cell AQ/PQ step scale upfront so FocusGuard, A2, pixel bounds, and 8x8 POCS share identical scales.
+			// TD-U3 (M-6): PQ perceptual factor may ONLY tighten (<= 1.0); AQ widening (> 1.0) is gated behind cfg_.enableAqStepScaling (default false).
+			const double maxAllowedStepScale = cfg_.enableAqStepScaling ? kCellStepScaleMax : 1.0;
 			std::vector<double> cellStepScales(numCells, 1.0);
 			if (!in.cellStepScale.empty())
 			{
@@ -1283,7 +1274,7 @@ namespace TdV2
 					const double sv = in.cellStepScale[ci];
 					if (std::isfinite(sv) && sv > 0.0)
 					{
-						cellStepScales[ci] = sv < kCellStepScaleMin ? kCellStepScaleMin : (sv > kCellStepScaleMax ? kCellStepScaleMax : sv);
+						cellStepScales[ci] = sv < kCellStepScaleMin ? kCellStepScaleMin : (sv > maxAllowedStepScale ? maxAllowedStepScale : sv);
 					}
 					else
 					{
@@ -1308,8 +1299,10 @@ namespace TdV2
 			const int K = static_cast<int>(refs.size());
 			std::array<std::array<std::vector<double>, kMaxBlendRefs>, 3> cellW;
 			std::array<std::array<std::vector<double>, kMaxBlendRefs>, 3> cellDiagC;
+			std::array<std::vector<double>, 3> cellOwnErrU;
 			for (int b = 0; b < 3; ++b)
 			{
+				cellOwnErrU[b].assign(numCells, 0.0);
 				for (int k = 0; k < K; ++k)
 				{
 					cellW[b][k].assign(numCells, 0.0);
@@ -1768,14 +1761,14 @@ namespace TdV2
 						double cVec[kMaxBlendRefs] = {};
 						for (int k = 0; k < K; ++k)
 						{
-							// A2 prior for ref k on band b:
+							// A2 prior for ref k on band b (TD-U3 / H-1: exact bandTransfer[b], never filter-peak 1.0 amplification):
 							// - On unidentified transforms when A2e empirical prior is active and no explicit codec step was supplied,
-							//   use U_j(class) (Plan Phase 1 A2e) instead of 1-LSB default; otherwise use rounding-cell A2.
+							//   use U_j(class) * cellStepScaleSq (Plan Phase 1 A2e) instead of 1-LSB default; otherwise use rounding-cell A2.
 							const bool useA2ePrior = cfg_.enableA2eEmpiricalPrior && !in.transformIdentified8x8 &&
 							                         !in.hasStepPrior && res.empiricalOwnError.valid;
 							const double rawA2 = useA2ePrior
-								? (refs[k].isExactCopy ? 0.0 : res.empiricalOwnError.ForBandClass(b, actClass))
-								: (EstimateC_A2(a2Stats, refs[k].isExactCopy) * cellStepScaleSq * a2BandPeakSq[b]);
+								? (refs[k].isExactCopy ? 0.0 : res.empiricalOwnError.ForBandClass(b, actClass) * cellStepScaleSq)
+								: (EstimateC_A2(a2Stats, refs[k].isExactCopy) * cellStepScaleSq * bandTransfer[b]);
 							const double cA2 = (std::min)(rawA2, C[k][k]);
 
 							const double psdScale = in.psdShape.ForBand(b);
@@ -1811,6 +1804,25 @@ namespace TdV2
 							if (refs[k].isExactCopy)
 								cVec[k] = 0.0;
 						}
+
+						// TD-U3 (H-1): Per-block own-error variance U_j(block) for the honest transform-unknown statistical limit.
+						// Uses the cell's own selected/shrunk blind own-error estimate when empirical A2e is active, else exact bandTransfer[b].
+						double blockOwnU = a2Stats.totalVar * cellStepScaleSq * bandTransfer[b];
+						if (cfg_.enableA2eEmpiricalPrior && !in.transformIdentified8x8 && res.empiricalOwnError.valid)
+						{
+							double sumC = 0.0;
+							int nC = 0;
+							for (int k = 0; k < K; ++k)
+							{
+								if (!refs[k].isExactCopy)
+								{
+									sumC += (cVec[k] > 0.0 ? cVec[k] : 0.0);
+									++nC;
+								}
+							}
+							blockOwnU = (nC > 0) ? (sumC / static_cast<double>(nC)) : 0.0;
+						}
+						cellOwnErrU[b][cIdx] = blockOwnU;
 
 						const BlendSolveResult solved = SolveConvexWeights(C, cVec, K, kDefaultTraceRegScale, standIns, cfg_.solverMode);
 						if (solved.nonFiniteClosed)
@@ -1957,34 +1969,31 @@ namespace TdV2
 				standIns->Engage(StandInKind::FaceNonRigidMask);
 
 			// Per-pixel spatial-only interpolation (ZERO bleed across vetoed cell boundaries — HIGH-5),
-			// toggleable 3-sigma per-corner Huber taper (cfg_.enablePerCornerHuber), and pixel-domain bound when transform is unknown.
-			// Codec-frame-grid-aligned interior full 8x8 bounds so non-8-aligned letterbox/pillarbox bars
-			// never misalign the codec's 8x8 grid and leading/trailing partial strips receive ApplyTransformUnknownBound.
+			// toggleable 3-sigma per-corner Huber taper (cfg_.enablePerCornerHuber), and honest statistical limit (TD-U3 / D3).
+			// TD-U3 (H-1): 8x8 DCT STRICT/CELL POCS runs ONLY when BOTH transformIdentified8x8 AND a real encoder prediction
+			// `codecModelPb` are present (warped-peak substitute refs[0].clean is removed; absent P_B falls back visibly
+			// to the statistical per-band + joint cross-band limit).
 			TdV2Plane deltaPlane(w, h, 0.0);
 			const int bxStart = ((active.x0 + 7) / 8) * 8;
 			const int byStart = ((active.y0 + 7) / 8) * 8;
 			const int bxEnd = (active.x1 / 8) * 8;
 			const int byEnd = (active.y1 / 8) * 8;
+			const double effKappa = ClampPixelBoundKappa(cfg_.pixelBoundKappa);
 			const bool hasValidCodecModelPb = (in.codecModelPb != nullptr && !in.codecModelPb->Empty() &&
 			                                   in.codecModelPb->w == w && in.codecModelPb->h == h);
-			// When 8x8 DCT POCS uses warped refs[0].clean as stand-in predictor (codecModelPb absent),
-			// require every pixel in the 8x8 block to have valid warped prediction (refs[0].validPx != 0)
-			// so invalid-motion/OOB fallback pixels never enter DCT projection; skipped blocks retain
-			// ApplyTransformUnknownBound protection instead.
-			auto isBlockStandInValid = [&](int bx, int by) -> bool
+			const bool canRun8x8Pocs = in.transformIdentified8x8 && hasValidCodecModelPb && effStepDelta > 0.0 &&
+			                           (bxStart < bxEnd) && (byStart < byEnd);
+			if (in.transformIdentified8x8 && !hasValidCodecModelPb)
 			{
-				if (hasValidCodecModelPb)
-					return true;
-				for (int j = 0; j < 8; ++j)
+				if (standIns != nullptr)
 				{
-					for (int i = 0; i < 8; ++i)
-					{
-						if (refs[0].validPx[static_cast<size_t>(by + j) * w + static_cast<size_t>(bx + i)] == 0u)
-							return false;
-					}
+					standIns->Engage(StandInKind::CodecModelPbStandIn,
+						in.codecModelPb == nullptr
+							? "CodecModel Field B P_B absent; falling back to statistical limit (no warped-peak substitute)"
+							: "codecModelPb dimension mismatch; falling back to statistical limit (no warped-peak substitute)");
 				}
-				return true;
-			};
+				res.codecModelPbStandInCells = numCells;
+			}
 
 			for (int y = active.y0; y < active.y1; ++y)
 			{
@@ -2002,13 +2011,13 @@ namespace TdV2
 						continue;
 					}
 
-					// Pixels in leading/trailing non-8-aligned partial strips OR 8x8 blocks with invalid stand-in
-					// predictor pixels cannot enter 8x8 DCT POCS, so they ALWAYS receive the derived pixel-domain bound.
-					const bool inFull8x8Block = in.transformIdentified8x8 && effStepDelta > 0.0 && (bxStart < bxEnd) && (byStart < byEnd) &&
-					                            (x >= bxStart) && (x < bxEnd) && (y >= byStart) && (y < byEnd) &&
-					                            isBlockStandInValid((x / 8) * 8, (y / 8) * 8);
+					// Pixels outside valid 8x8 DCT POCS (transform unknown, missing real P_B, or non-8-aligned strips)
+					// receive the honest statistical per-band + joint cross-band limit (TD-U3 / H-1 / Owner D3).
+					const bool inFull8x8Block = canRun8x8Pocs &&
+					                            (x >= bxStart) && (x < bxEnd) && (y >= byStart) && (y < byEnd);
 
 					double totalDelta = 0.0;
+					double sumBandVar = 0.0;
 					for (int b = 0; b < 3; ++b)
 					{
 						const TdV2Plane& curBandPlane = bandPlaneOf(curBands, b);
@@ -2086,36 +2095,29 @@ namespace TdV2
 								continue;
 							bandDelta -= wEff * diff;
 						}
-						// Apply derived per-band quantization-cell bound using Parseval passband supremum a2BandPeakSq[b]
-						// and per-cell AQ/PQ step scale when transform is unknown OR outside valid 8x8 POCS blocks.
+						// TD-U3 (H-1 / Owner D3): Per-band statistical limit |Delta_j(p)| <= kappa * sqrt(U_j(block)).
 						if (!inFull8x8Block)
 						{
-							const double pxStepScale = cellStepScales[cIdx];
-							const double bandVar = a2Stats.totalVar * (pxStepScale * pxStepScale) * a2BandPeakSq[b];
+							const double bandVar = cellOwnErrU[b][cIdx];
+							sumBandVar += bandVar;
 							if (std::fabs(bandDelta) > 0.0)
-								bandDelta = ApplyTransformUnknownBound(bandDelta, bandVar, standIns);
+								bandDelta = ApplyTransformUnknownBound(bandDelta, bandVar, standIns, effKappa);
 						}
 						totalDelta += bandDelta;
 					}
+					// TD-U3 (H-1): Joint cross-band limit |sum_j Delta_j(p)| <= kappa * sqrt(sum_j U_j(block)).
+					if (!inFull8x8Block && cfg_.enableJointCrossBandBound && std::fabs(totalDelta) > 0.0)
+						totalDelta = ApplyJointCrossBandBound(totalDelta, sumBandVar, standIns, effKappa);
 					deltaPlane.at(x, y) = totalDelta;
 				}
 			}
 
-			// Identified 8x8 DCT transform-domain STRICT/CELL projection strictly on the coded residual r = X - P_B (HIGH-6 & H14),
-			// over codec-frame-grid-aligned interior blocks [bxStart, bxEnd) x [byStart, byEnd),
-			// alternating with the pixel-domain code range [0, PeakCodeForBits] for genuine 2-set POCS!
-			if (in.transformIdentified8x8 && effStepDelta > 0.0 && (bxStart < bxEnd) && (byStart < byEnd))
+			// Identified 8x8 DCT transform-domain STRICT/CELL projection strictly on the coded residual r = X - P_B (HIGH-6 & TD-U3),
+			// ONLY when a real encoder prediction `codecModelPb` is supplied (never warped-peak substitute).
+			if (canRun8x8Pocs)
 			{
 				const double peakCode = PeakCodeForBits(cfg_.sourceBits);
-				const TdV2Plane& predClean = hasValidCodecModelPb ? *in.codecModelPb : refs[0].clean;
-				std::vector<uint8_t> pbStandInCellFlag(numCells, 0u);
-				if (!hasValidCodecModelPb && standIns != nullptr)
-				{
-					standIns->Engage(StandInKind::CodecModelPbStandIn,
-						in.codecModelPb == nullptr
-							? "CodecModel Field B P_B absent; using refs[0].clean stand-in"
-							: "codecModelPb dimension mismatch; using refs[0].clean stand-in");
-				}
+				const TdV2Plane& predClean = *in.codecModelPb;
 
 				const int iters = (std::max)(1, (std::min)(2, cfg_.cellProjIterations));
 				for (int it = 0; it < iters; ++it)
@@ -2125,10 +2127,6 @@ namespace TdV2
 					{
 						for (int bx = bxStart; bx < bxEnd; bx += 8)
 						{
-							// Never project against invalid-motion/OOB stand-in predictor pixels (preserve pixel-bound delta).
-							if (!isBlockStandInValid(bx, by))
-								continue;
-
 							// Skip untouched / vetoed zero-delta 8x8 blocks so FP64 DCT round-trip stays bit-exact.
 							bool anyNonZeroDelta = false;
 							for (int j = 0; j < 8 && !anyNonZeroDelta; ++j)
@@ -2171,9 +2169,6 @@ namespace TdV2
 										deltaPlane.at(bx + i, by + j) = 0.0;
 								continue;
 							}
-							if (!hasValidCodecModelPb)
-								pbStandInCellFlag[bCellIdx] = 1u;
-
 							ProjectResidual8x8Dct(sentRes, blendRes, effStepDelta * blockStepScale, effPhi, cfg_.residualMode, projRes);
 							for (int j = 0; j < 8; ++j)
 							{
@@ -2188,15 +2183,13 @@ namespace TdV2
 					}
 
 					// Set 2: Pixel-domain valid code-range projection [0, peakCode] (makes 2nd POCS iteration genuine).
-					// Untouched zero-delta pixels and skipped invalid-stand-in blocks stay untouched.
+					// Untouched zero-delta pixels stay untouched.
 					if (peakCode > 0.0)
 					{
 						for (int by = byStart; by < byEnd; by += 8)
 						{
 							for (int bx = bxStart; bx < bxEnd; bx += 8)
 							{
-								if (!isBlockStandInValid(bx, by))
-									continue;
 								for (int j = 0; j < 8; ++j)
 								{
 									for (int i = 0; i < 8; ++i)
@@ -2212,12 +2205,6 @@ namespace TdV2
 							}
 						}
 					}
-				}
-
-				if (!hasValidCodecModelPb)
-				{
-					for (uint8_t flag : pbStandInCellFlag)
-						if (flag != 0u) ++res.codecModelPbStandInCells;
 				}
 			}
 

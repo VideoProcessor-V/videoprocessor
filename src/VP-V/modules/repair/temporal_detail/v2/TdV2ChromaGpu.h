@@ -1171,7 +1171,7 @@ for (int chIdx = 0; chIdx < 2; ++chIdx)
             {
                 bool exactCopy = td_is_exact_copy(k);
                 float cA2 = (u_a2_valid > 0.5)
-                    ? ((u_a2_sigma_sent + (exactCopy ? 0.0 : u_a2_sigma_zero)) * cellStepScaleSq * td_a2_band_peak_sq(b))
+                    ? ((u_a2_sigma_sent + (exactCopy ? 0.0 : u_a2_sigma_zero)) * cellStepScaleSq * bGain)
                     : 0.0;
                 cA2 = min(cA2, C[k][k]);
                 float cA1 = cA2;
@@ -1339,6 +1339,7 @@ for (int k = 0; k < K; ++k)
     refFl[k] = td_unpack_ref_flags(packedFl, k);
 
 vec2 totalDelta = vec2(0.0);
+float sumBandVar = 0.0;
 for (int b = 0; b < 3; ++b)
 {
     vec2 curB = (b == 0) ? texelFetch(cur_l, p, 0).xy
@@ -1355,8 +1356,9 @@ for (int b = 0; b < 3; ++b)
         }
     }
 
-    float bandVar = (u_a2_valid > 0.5) ? (u_a2_total_var * cellStepScaleSq * td_a2_band_peak_sq(b)) : 0.0;
-    float bound = TD_PIXEL_BOUND_SIGMA * sqrt(max(0.0, bandVar));
+    float bandVar = (u_a2_valid > 0.5) ? (u_a2_total_var * cellStepScaleSq * td_band_gain(b)) : 0.0;
+    sumBandVar += bandVar;
+    float bound = u_pixel_bound_kappa * sqrt(max(0.0, bandVar));
 
     for (int chIdx = 0; chIdx < 2; ++chIdx)
     {
@@ -1405,6 +1407,13 @@ for (int b = 0; b < 3; ++b)
         if (chIdx == 0) totalDelta.x += bandDelta;
         else            totalDelta.y += bandDelta;
     }
+}
+
+if (u_enable_joint_bound > 0.5)
+{
+    float jointBound = u_pixel_bound_kappa * sqrt(max(0.0, sumBandVar));
+    if (abs(totalDelta.x) > 0.0) totalDelta.x = clamp(totalDelta.x, -jointBound, jointBound);
+    if (abs(totalDelta.y) > 0.0) totalDelta.y = clamp(totalDelta.y, -jointBound, jointBound);
 }
 
 vec2 safeD = vec2(td_is_bad(totalDelta.x) ? 0.0 : totalDelta.x,
@@ -3174,6 +3183,8 @@ imageStore(out_coded_delta, p, vec4(0.0));
 					return failVisible("td_v2_c2a_cell_stats dispatch failed", StandInKind::GpuDispatchFailed);
 			}
 
+			const double maxAllowedStepScale = cfg_.enableAqStepScaling ? kCellStepScaleMax : 1.0;
+
 			// ---- PASS C2B: Chan-Pebay Merge + Closed-Form w* = C^-1 c Solve (Cb & Cr) ----
 			{
 				std::string c2bHdr = chromaGeom;
@@ -3189,7 +3200,7 @@ imageStore(out_coded_delta, p, vec4(0.0));
 				c2bHdr += VpvGpu::Define("TD_SOLVE_FLOOR", kSolveNumericalFloor);
 				c2bHdr += VpvGpu::Define("TD_PIVOT_FLOOR", kSolvePivotFloor);
 				c2bHdr += VpvGpu::Define("TD_STEP_SCALE_MIN", kCellStepScaleMin);
-				c2bHdr += VpvGpu::Define("TD_STEP_SCALE_MAX", kCellStepScaleMax);
+				c2bHdr += VpvGpu::Define("TD_STEP_SCALE_MAX", maxAllowedStepScale);
 				c2bHdr += Shaders::BuildFineTapHeader();
 				c2bHdr += Shaders::kCoreHelpers;
 				c2bHdr += Shaders::kPass2MergeSolveHeader;
@@ -3233,18 +3244,22 @@ imageStore(out_coded_delta, p, vec4(0.0));
 				}
 			}
 
-			// ---- PASS C3: Coded-Grid Chroma Blend + 3-Sigma Huber + Parseval Bound ----
+			// ---- PASS C3: Coded-Grid Chroma Blend + 3-Sigma Huber + Honest Output Limit (TD-U3) ----
 			{
+				const float uPixelBoundKappa = static_cast<float>(ClampPixelBoundKappa(cfg_.pixelBoundKappa));
+				const float uEnableJointBound = cfg_.enableJointCrossBandBound ? 1.0f : 0.0f;
+
 				std::string c3Hdr = chromaGeom;
-				c3Hdr += VpvGpu::Define("TD_A2_PEAK_MID_SQ", a2PeakMidSq);
+				c3Hdr += VpvGpu::Define("TD_GAIN_LOW", effLowGain);
+				c3Hdr += VpvGpu::Define("TD_GAIN_MID", gains.mid);
+				c3Hdr += VpvGpu::Define("TD_GAIN_FINE", gains.fine);
 				c3Hdr += VpvGpu::Define("TD_HUBER_KNEE_SQ", kHuberKneeSq);
-				c3Hdr += VpvGpu::Define("TD_PIXEL_BOUND_SIGMA", kPixelBoundSigma);
 				c3Hdr += VpvGpu::Define("TD_STEP_SCALE_MIN", kCellStepScaleMin);
-				c3Hdr += VpvGpu::Define("TD_STEP_SCALE_MAX", kCellStepScaleMax);
+				c3Hdr += VpvGpu::Define("TD_STEP_SCALE_MAX", maxAllowedStepScale);
 				c3Hdr += Shaders::kCoreHelpers;
 				c3Hdr += ChromaShaders::kSitedCoordHelpers;
 				c3Hdr += R"GLSL(
-float td_a2_band_peak_sq(int b) { return (b == 1) ? TD_A2_PEAK_MID_SQ : 1.0; }
+float td_band_gain(int b) { if (b == 0) return TD_GAIN_LOW; if (b == 1) return TD_GAIN_MID; return TD_GAIN_FINE; }
 float td_vec_comp(vec4 v, int k) { if (k == 0) return v.x; if (k == 1) return v.y; return v.z; }
 float td_huber_taper(float diffSq, float diagC)
 {
@@ -3264,7 +3279,7 @@ float td_huber_taper(float diffSq, float diagC)
 					VpvGpu::Sampled("cell_prior", cellPriorTex), VpvGpu::Sampled("face_mask", faceMaskBind),
 					VpvGpu::Storage("coded_delta_raw", sc.codedDeltaRaw)
 				};
-				pl_shader_var v3[12] = {
+				pl_shader_var v3[14] = {
 					VpvGpu::Var("u_k", &uK),
 					VpvGpu::Var("u_cax0", &uCAx0), VpvGpu::Var("u_cay0", &uCAy0),
 					VpvGpu::Var("u_cax1", &uCAx1), VpvGpu::Var("u_cay1", &uCAy1),
@@ -3272,9 +3287,11 @@ float td_huber_taper(float diffSq, float diagC)
 					VpvGpu::Var("u_a2_valid", &uA2Valid), VpvGpu::Var("u_a2_total_var", &uA2Total),
 					VpvGpu::Var("u_enable_per_corner_huber", &uEnableHuber),
 					VpvGpu::Var("u_has_face_mask", &uHasFaceMask),
-					VpvGpu::Var("u_cell_prior_has_step_scale", &uPriorHasStep)
+					VpvGpu::Var("u_cell_prior_has_step_scale", &uPriorHasStep),
+					VpvGpu::Var("u_pixel_bound_kappa", &uPixelBoundKappa),
+					VpvGpu::Var("u_enable_joint_bound", &uEnableJointBound)
 				};
-				if (!runPass("td_v2_c3_blend_bound", c3Hdr, ChromaShaders::kPassChromaBlendBound, d3, 16, v3, 12, cGx, cGy))
+				if (!runPass("td_v2_c3_blend_bound", c3Hdr, ChromaShaders::kPassChromaBlendBound, d3, 16, v3, 14, cGx, cGy))
 					return failVisible("td_v2_c3_blend_bound dispatch failed", StandInKind::GpuDispatchFailed);
 				if (standIns != nullptr)
 					standIns->Engage(StandInKind::TransformUnknownBound);

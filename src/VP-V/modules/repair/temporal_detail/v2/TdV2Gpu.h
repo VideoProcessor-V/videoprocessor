@@ -2729,7 +2729,13 @@ namespace Gpu
 			const int byStart = ((ar.y0 + 7) / 8) * 8;
 			const int bxEnd = (ar.x1 / 8) * 8;
 			const int byEnd = (ar.y1 / 8) * 8;
-			const bool runDctPocs = p.transformIdentified8x8 && (effStepDelta > 0.0) && (bxStart < bxEnd) && (byStart < byEnd);
+			// TD-U3 (H-1): 8x8 DCT STRICT/CELL POCS runs ONLY when a real encoder prediction `codecModelPbTex` is supplied;
+			// the warped-peak substitute refs[0].clean is removed and absent P_B falls back visibly to the statistical limit.
+			const bool hasExplicitPb = (p.codecModelPbTex != nullptr);
+			const bool runDctPocs = p.transformIdentified8x8 && hasExplicitPb && (effStepDelta > 0.0) && (bxStart < bxEnd) && (byStart < byEnd);
+			if (p.transformIdentified8x8 && !hasExplicitPb && standIns != nullptr)
+				standIns->Engage(StandInKind::CodecModelPbStandIn, "TdV2GpuEngine Field B P_B absent; falling back to statistical limit (no warped-peak substitute)");
+			const double maxAllowedStepScale = cfg_.enableAqStepScaling ? kCellStepScaleMax : 1.0;
 
 			const float uK = static_cast<float>(K);
 			const float uAx0 = static_cast<float>(ar.x0);
@@ -2744,7 +2750,10 @@ namespace Gpu
 			const float uBy0 = static_cast<float>(byStart);
 			const float uBx1 = static_cast<float>(bxEnd);
 			const float uBy1 = static_cast<float>(byEnd);
-			const float uXform8x8 = p.transformIdentified8x8 ? 1.0f : 0.0f;
+			const float uXform8x8 = runDctPocs ? 1.0f : 0.0f;
+			const float uPixelBoundKappa = static_cast<float>(ClampPixelBoundKappa(cfg_.pixelBoundKappa));
+			const float uEnableJointBound = cfg_.enableJointCrossBandBound ? 1.0f : 0.0f;
+			const float uUseEmpiricalU = (cfg_.enableA2eEmpiricalPrior && !runDctPocs) ? 1.0f : 0.0f;
 			const float uPocsIters = static_cast<float>((std::max)(1, (std::min)(2, cfg_.cellProjIterations)));
 			const float uResidualMode = (cfg_.residualMode == ResidualMode::Strict) ? 1.0f : 0.0f;
 			const float uPoolR = static_cast<float>(cfg_.momentPoolRadiusCells > 0 ? cfg_.momentPoolRadiusCells : 0);
@@ -3095,10 +3104,10 @@ namespace Gpu
 				p2aHdr += VpvGpu::Define("TD_F_DEFOCUS", fDefocus);
 				p2aHdr += VpvGpu::Define("TD_F_SHIFT_DELTA", fShiftDelta);
 				p2aHdr += VpvGpu::Define("TD_HM_PEAK", hmPeakF);
-				p2aHdr += VpvGpu::Define("TD_PIXEL_BOUND_SIGMA", kPixelBoundSigma);
+				p2aHdr += VpvGpu::Define("TD_PIXEL_BOUND_SIGMA", std::sqrt(kHuberKneeSq));
 				p2aHdr += VpvGpu::Define("TD_BASE_QUANT_VAR", baseQuantVar);
 				p2aHdr += VpvGpu::Define("TD_STEP_SCALE_MIN", kCellStepScaleMin);
-				p2aHdr += VpvGpu::Define("TD_STEP_SCALE_MAX", kCellStepScaleMax);
+				p2aHdr += VpvGpu::Define("TD_STEP_SCALE_MAX", maxAllowedStepScale);
 				p2aHdr += Shaders::kCoreHelpers;
 				if (compactBands)
 					p2aHdr += Shaders::kHalfBandSamplerHelper;
@@ -3199,7 +3208,7 @@ namespace Gpu
 				p2bHdr += VpvGpu::Define("TD_SOLVE_FLOOR", kSolveNumericalFloor);
 				p2bHdr += VpvGpu::Define("TD_PIVOT_FLOOR", kSolvePivotFloor);
 				p2bHdr += VpvGpu::Define("TD_STEP_SCALE_MIN", kCellStepScaleMin);
-				p2bHdr += VpvGpu::Define("TD_STEP_SCALE_MAX", kCellStepScaleMax);
+				p2bHdr += VpvGpu::Define("TD_STEP_SCALE_MAX", maxAllowedStepScale);
 				p2bHdr += Shaders::BuildFineTapHeader();
 				p2bHdr += Shaders::kCoreHelpers;
 				p2bHdr += Shaders::kPass2MergeSolveHeader;
@@ -3218,7 +3227,7 @@ namespace Gpu
 					VpvGpu::Storage("td_maps", dstTdMaps),
 					VpvGpu::Storage("cell_diag_flags", dstDiagFlags)
 				};
-				pl_shader_var v2b[25] = {
+				pl_shader_var v2b[26] = {
 					VpvGpu::Var("u_k", &uK),
 					VpvGpu::Var("u_pool_r", &uPoolR),
 					VpvGpu::Var("u_estimator", &uEstimator),
@@ -3243,16 +3252,17 @@ namespace Gpu
 					VpvGpu::Var("u_psd_low", &uPsdLow),
 					VpvGpu::Var("u_psd_mid", &uPsdMid),
 					VpvGpu::Var("u_psd_fine", &uPsdFine),
-					VpvGpu::Var("u_fade_keep", &uFadeKeep)
+					VpvGpu::Var("u_fade_keep", &uFadeKeep),
+					VpvGpu::Var("u_use_empirical_u", &uUseEmpiricalU)
 				};
-				if (!runPass("td_v2_p2b_merge_solve", p2bHdr, Shaders::kPass2MergeAndSolve, d2b, 9, v2b, 25, cellGx8, cellGy8, 8, 8))
+				if (!runPass("td_v2_p2b_merge_solve", p2bHdr, Shaders::kPass2MergeAndSolve, d2b, 9, v2b, 26, cellGx8, cellGy8, 8, 8))
 				{
 					resetCarryIfActive();
 					return failCore("td_v2_p2b_merge_solve dispatch failed", StandInKind::GpuDispatchFailed);
 				}
 			}
 
-			// ---- PASS 3A: Spatial-Only Weight Interpolation + 3-Sigma Huber Taper + Pixel Bound ----
+			// ---- PASS 3A: Spatial-Only Weight Interpolation + 3-Sigma Huber Taper + Honest Output Limit (TD-U3) ----
 			{
 				std::string bHdr = staticGeom;
 				bHdr += VpvGpu::DefineInt("TD_COMPACT_BANDS", compactBands ? 1 : 0);
@@ -3261,15 +3271,14 @@ namespace Gpu
 				bHdr += VpvGpu::Define("TD_GAIN_FINE", gains.fine);
 				bHdr += VpvGpu::Define("TD_A2_PEAK_MID_SQ", a2PeakMidSq);
 				bHdr += VpvGpu::Define("TD_HUBER_KNEE_SQ", kHuberKneeSq);
-				bHdr += VpvGpu::Define("TD_PIXEL_BOUND_SIGMA", kPixelBoundSigma);
 				bHdr += VpvGpu::Define("TD_STEP_SCALE_MIN", kCellStepScaleMin);
-				bHdr += VpvGpu::Define("TD_STEP_SCALE_MAX", kCellStepScaleMax);
+				bHdr += VpvGpu::Define("TD_STEP_SCALE_MAX", maxAllowedStepScale);
 				bHdr += Shaders::kCoreHelpers;
 				if (compactBands)
 					bHdr += Shaders::kHalfBandSamplerHelper;
 				bHdr += Shaders::kPass3BlendHeader;
 
-				pl_shader_var bv[20] = {
+				pl_shader_var bv[22] = {
 					VpvGpu::Var("u_k", &uK),
 					VpvGpu::Var("u_ax0", &uAx0),
 					VpvGpu::Var("u_ay0", &uAy0),
@@ -3289,7 +3298,9 @@ namespace Gpu
 					VpvGpu::Var("u_enable_per_corner_huber", &uEnableHuber),
 					VpvGpu::Var("u_cell_prior_has_step_scale", &uCellPriorHasStepScale),
 					VpvGpu::Var("u_enable_edge_aware_upsample", &uEnableEdgeAwareUpsample),
-					VpvGpu::Var("u_enable_nbr_soft_clamp", &uEnableNbrSoftClamp)
+					VpvGpu::Var("u_enable_nbr_soft_clamp", &uEnableNbrSoftClamp),
+					VpvGpu::Var("u_pixel_bound_kappa", &uPixelBoundKappa),
+					VpvGpu::Var("u_enable_joint_bound", &uEnableJointBound)
 				};
 
 				const size_t shmemP3a = (18u * 18u * 2u) * sizeof(float);
@@ -3308,7 +3319,7 @@ namespace Gpu
 						VpvGpu::Sampled("cell_prior", cellPriorTex),
 						VpvGpu::Storage("delta_out", deltaTarget)
 					};
-					ok3a = runPass("td_v2_p3_blend_bound", bHdr, Shaders::kPass3BlendAndBound, db, 9, bv, 20, fullGx, fullGy, 16, 16, shmemP3a);
+					ok3a = runPass("td_v2_p3_blend_bound", bHdr, Shaders::kPass3BlendAndBound, db, 9, bv, 22, fullGx, fullGy, 16, 16, shmemP3a);
 				}
 				else
 				{
@@ -3327,7 +3338,7 @@ namespace Gpu
 						VpvGpu::Sampled("cell_prior", cellPriorTex),
 						VpvGpu::Storage("delta_out", deltaTarget)
 					};
-					ok3a = runPass("td_v2_p3_blend_bound", bHdr, Shaders::kPass3BlendAndBound, db, 13, bv, 20, fullGx, fullGy, 16, 16, shmemP3a);
+					ok3a = runPass("td_v2_p3_blend_bound", bHdr, Shaders::kPass3BlendAndBound, db, 13, bv, 22, fullGx, fullGy, 16, 16, shmemP3a);
 				}
 				if (!ok3a)
 				{
@@ -3336,27 +3347,22 @@ namespace Gpu
 				}
 			}
 
-			// ---- PASS 3B: Optional Codec-Grid-Aligned 8x8 DCT-II STRICT/CELL POCS ----
-			// Uses explicit Field B CodecModel P_B when supplied; otherwise falls back visibly to sc.warpedVal (refs[0].clean)!
+			// ---- PASS 3B: Optional Codec-Grid-Aligned 8x8 DCT-II STRICT/CELL POCS (strictly requires real P_B, TD-U3) ----
 			if (runDctPocs)
 			{
-				const bool hasExplicitPb = (p.codecModelPbTex != nullptr);
-				const float uHasExplicitPb = hasExplicitPb ? 1.0f : 0.0f;
-				// H14: visibly record CodecModelPbStandIn ONLY when STRICT/CELL runs without explicit Field B P_B!
-				if (!hasExplicitPb && standIns != nullptr)
-					standIns->Engage(StandInKind::CodecModelPbStandIn, "TdV2GpuEngine STRICT/CELL using refs[0].clean stand-in for Field B P_B");
+				const float uHasExplicitPb = 1.0f;
 
 				std::string pHdr = staticGeom;
 				pHdr += VpvGpu::DefineInt("TD_POCS_HAS_STEP_SCALE", 1);
 				pHdr += VpvGpu::Define("TD_STEP_SCALE_MIN", kCellStepScaleMin);
-				pHdr += VpvGpu::Define("TD_STEP_SCALE_MAX", kCellStepScaleMax);
+				pHdr += VpvGpu::Define("TD_STEP_SCALE_MAX", maxAllowedStepScale);
 				pHdr += Shaders::BuildDctBasisHeader();
 				pHdr += Shaders::kCoreHelpers;
 				pHdr += Shaders::kPass3bDctHeader;
 				pl_shader_desc dp[7] = {
 					VpvGpu::Sampled("delta_in", sc.deltaScratch),
 					VpvGpu::Sampled("cur_clean", p.curCleanTex),
-					VpvGpu::Sampled("pred_clean", hasExplicitPb ? p.codecModelPbTex : sc.warpedVal),
+					VpvGpu::Sampled("pred_clean", p.codecModelPbTex),
 					VpvGpu::Sampled("cell_focus", sc.cellFocus),
 					VpvGpu::Sampled("ref_flags", finalRefFlagsTex),
 					VpvGpu::Sampled("cell_prior", cellPriorTex),

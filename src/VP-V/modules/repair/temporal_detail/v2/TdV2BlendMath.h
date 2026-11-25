@@ -39,8 +39,23 @@ namespace TdV2
 	// Huber pixel outlier knee: r = d^2 / C_kk > 3^2 = 9 (standard 3-sigma Gaussian tail P(|z| > 3) = 0.27%, refs/111:255).
 	constexpr double kHuberKneeSq = 9.0;
 
-	// Pixel-domain band bound multiplier when codec transform is unknown: 3-sigma Gaussian bound (consistent with Huber knee).
-	constexpr double kPixelBoundSigma = 3.0;
+	// Pixel-domain band bound multiplier kappa_c when codec transform is unknown (TD-U3 / Owner D3):
+	// strict default 1.0, adjustable range [1.0, 3.0].
+	constexpr double kPixelBoundKappaMin = 1.0;
+	constexpr double kPixelBoundKappaMax = 3.0;
+	constexpr double kPixelBoundKappaDefault = 1.0;
+	constexpr double kPixelBoundSigma = kPixelBoundKappaDefault;
+
+	inline double ClampPixelBoundKappa(double kappa)
+	{
+		if (!std::isfinite(kappa))
+			return kPixelBoundKappaDefault;
+		if (kappa < kPixelBoundKappaMin)
+			return kPixelBoundKappaMin;
+		if (kappa > kPixelBoundKappaMax)
+			return kPixelBoundKappaMax;
+		return kappa;
+	}
 
 	// Zero temporal weight ramp invariant (99 s2.1 M2, refs/111:212): weights are interpolated spatially only.
 	constexpr double kTemporalWeightRamp = 0.0;
@@ -128,29 +143,32 @@ namespace TdV2
 	// Physical step-scale bounds: +/- 4 octaves = +/- 24 QP steps (exact 6-QP doubling law 2^(dQP/6)), spanning [1/16, 16].
 	constexpr double kCellStepScaleMin = 1.0 / 16.0;
 	constexpr double kCellStepScaleMax = 16.0;
-	// ST.2084 PQ shadow sensitivity weight bounds: [-2, +1] octaves = [1/4, 2] relative to ITU-R BT.2408 diffuse white (203 nits).
+	// ST.2084 PQ shadow sensitivity weight bounds (TD-U3 / M-6): PQ perceptual factor may ONLY tighten
+	// down to 1/4 in deep shadows relative to ITU-R BT.2408 diffuse white (203 nits), NEVER widen beyond 1.0.
 	constexpr double kPqStepWeightMin = 0.25;
-	constexpr double kPqStepWeightMax = 2.0;
+	constexpr double kPqStepWeightMax = 1.0;
 
 	// Compute per-cell quantization step scale factor combining:
-	//   1) HEVC / AVC / AV1 standard 6-QP step doubling law: 2^(cellQpDelta / 6) (clamped to +/- 24 QP => [1/16, 16]).
+	//   1) Optional HEVC / AVC / AV1 standard 6-QP step doubling law: 2^(cellQpDelta / 6) (clamped to +/- 24 QP => [1/16, 16]),
+	//      gated behind `enableAqStepScaling` (TD-U3 / M-6: OFF by default until a live HDMI AQ producer exists).
 	//   2) Exact SMPTE ST 2084 PQ EOTF logarithmic slope (Weber contrast per unit PQ code) relative to
 	//      ITU-R BT.2408 HDR diffuse white (203 nits) when `isPqHdr == true`:
 	//        S(e) = d(ln L)/de = (1/M1) * (1/(p - C1) + C3/(C2 - C3*p)) * (p / (M2 * e)),  p = e^(1/M2)
-	//        pqWeight(e) = clamp(S(e_203) / S(e), 1/4, 2)
-	//      At 203 nits: pqWeight == 1.0 exactly; in deep PQ shadows where 1 code step causes a larger relative
+	//        pqWeight(e) = clamp(S(e_203) / S(e), 1/4, 1.0)
+	//      At >= 203 nits: pqWeight == 1.0 (never widens); in deep PQ shadows where 1 code step causes a larger relative
 	//      luminance jump, pqWeight tightens smoothly down to 0.25 to respect PQ shadow JND sensitivity.
-	// When cellQpDelta == 0 and !isPqHdr, returns exact 1.0 (100% baseline identity).
+	// When !enableAqStepScaling and !isPqHdr, returns exact 1.0 (100% baseline identity).
 	inline double ComputeCellStepScale(
 		double cellQpDelta,
 		double cellMeanPqCode,
 		bool isPqHdr,
-		double sourceBits = 10.0)
+		double sourceBits = 10.0,
+		bool enableAqStepScaling = false)
 	{
 		if (!std::isfinite(cellQpDelta))
 			return 1.0;
 		const double clampedQp = cellQpDelta < -24.0 ? -24.0 : (cellQpDelta > 24.0 ? 24.0 : cellQpDelta);
-		const double aqScale = std::exp2(clampedQp / 6.0);
+		const double aqScale = enableAqStepScaling ? std::exp2(clampedQp / 6.0) : 1.0;
 
 		double pqWeight = 1.0;
 		if (isPqHdr)
@@ -201,10 +219,11 @@ namespace TdV2
 			}
 		}
 
+		const double maxScale = enableAqStepScaling ? kCellStepScaleMax : 1.0;
 		const double combined = aqScale * pqWeight;
 		if (!std::isfinite(combined))
 			return 1.0;
-		return combined < kCellStepScaleMin ? kCellStepScaleMin : (combined > kCellStepScaleMax ? kCellStepScaleMax : combined);
+		return combined < kCellStepScaleMin ? kCellStepScaleMin : (combined > maxScale ? maxScale : combined);
 	}
 
 	// ---- FP32 Centered Second-Moment Accumulator (2026-11-20 CVQE review s3) ----
@@ -1141,9 +1160,9 @@ namespace TdV2
 		InverseDct8x8(projDct, outResidual);
 	}
 
-	// Transform-unknown pixel-domain band bound (HEVC / AV1 over HDMI, plan s1.2 #2 & refs/111:244-245):
-	//   |Delta_j(p)| <= kappa_c * sqrt(sigma_0,j^2)
-	// Always engages StandInKind::TransformUnknownBound visibly so the pixel-domain bound is NEVER silent.
+	// Transform-unknown pixel-domain band bound (HEVC / AV1 over HDMI, TD-U3 / Owner D3, refs/111 s5):
+	//   |Delta_j(p)| <= kappa_c * sqrt(U_j(block))
+	// Always engages StandInKind::TransformUnknownBound visibly so the statistical limit is NEVER silent.
 	inline double ApplyTransformUnknownBound(
 		double rawDelta,
 		double totalStepVar,
@@ -1161,6 +1180,28 @@ namespace TdV2
 		}
 		const double bound = kappaC * std::sqrt(totalStepVar);
 		return (std::max)(-bound, (std::min)(bound, rawDelta));
+	}
+
+	// Joint cross-band transform-unknown limit (TD-U3 / H-1 / Owner D3):
+	//   |sum_j Delta_j(p)| <= kappa_c * sqrt(sum_j U_j(block))
+	// Prevents the three bands (L, M, H) from each independently spending the full allowance.
+	inline double ApplyJointCrossBandBound(
+		double sumDelta,
+		double sumBandVar,
+		StandInRegistry* standIns,
+		double kappaC = kPixelBoundSigma)
+	{
+		if (standIns != nullptr)
+			standIns->Engage(StandInKind::TransformUnknownBound);
+		if (!std::isfinite(sumDelta) || !std::isfinite(sumBandVar) || !std::isfinite(kappaC) ||
+		    sumBandVar < 0.0 || kappaC <= 0.0)
+		{
+			if (standIns != nullptr)
+				standIns->Engage(StandInKind::NonFiniteClosure, "ApplyJointCrossBandBound non-finite");
+			return 0.0;
+		}
+		const double bound = kappaC * std::sqrt(sumBandVar);
+		return (std::max)(-bound, (std::min)(bound, sumDelta));
 	}
 
 	// Resolve upstream U7 gradual fadeKeep in [0, 1] (Rule 1 + Rule 4):
