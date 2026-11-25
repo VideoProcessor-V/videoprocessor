@@ -172,7 +172,7 @@ namespace VideoProcessorTest
 			constexpr double kLinearGrey = 0.35;
 			constexpr double kBoost = 2.2 / 2.4;
 
-			auto sampleGrey = [](int, int, double& r, double& g, double& b) -> bool
+			auto sampleGrey = [kLinearGrey](int, int, double& r, double& g, double& b) -> bool
 			{
 				r = g = b = kLinearGrey;
 				return true;
@@ -207,7 +207,7 @@ namespace VideoProcessorTest
 		{
 			constexpr int kSize = 96;
 			constexpr double kR = 0.80, kG = 0.30, kB = 0.10;
-			auto sampleColor = [](int, int, double& r, double& g, double& b) -> bool
+			auto sampleColor = [kR, kG, kB](int, int, double& r, double& g, double& b) -> bool
 			{
 				r = kR;
 				g = kG;

@@ -1720,8 +1720,8 @@ namespace ProductSlotsTestsNs
 		// recycle negative control proving raw buffer corruption is caught as PublishedRead::Recycled.
 		TEST_METHOD(ReadPublishedBytesFourSlotStressHasZeroTornReads)
 		{
-			constexpr size_t kWords = 32u;
-			constexpr size_t kPayloadBytes = kWords * sizeof(uint64_t);   // 256 bytes
+			static constexpr size_t kWords = 32u;
+			static constexpr size_t kPayloadBytes = kWords * sizeof(uint64_t);   // 256 bytes
 			const auto acceptAll = [](const Header&) { return SealReason::Accepted; };
 
 			auto makeWord = [](uint64_t seq, size_t idx) -> uint64_t {

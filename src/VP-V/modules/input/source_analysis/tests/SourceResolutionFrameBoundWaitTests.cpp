@@ -315,7 +315,7 @@ namespace VideoProcessorTest
 				Assert::IsFalse(mon.ReadyFor(14));
 
 				// Live AnalysisLane (hostDeterministic=false, testWaitUs=0): DeterministicWaitUs returns 0 immediately.
-				VpIndicator::Indicator liveInd;
+				VpIndicator::Indicator liveInd(VpIndicator::NextEra(), VpIndicator::Indicator::kMinCapacity);
 				VpSkeleton::AnalysisLane liveLane(&liveInd, []() -> uint64_t { return 0ull; });
 				ConfigureMinimalLane(liveLane, false, 0);
 				mon.BindLaneReadyProbe(liveLane);
@@ -325,7 +325,7 @@ namespace VideoProcessorTest
 				mon.UnbindLaneReadyProbe(liveLane);
 
 				// Opposing deterministic AnalysisLane (hostDeterministic=true, testWaitUs=10000): waits and reports timeout.
-				VpIndicator::Indicator detInd;
+				VpIndicator::Indicator detInd(VpIndicator::NextEra(), VpIndicator::Indicator::kMinCapacity);
 				VpSkeleton::AnalysisLane detLane(&detInd, []() -> uint64_t { return 0ull; });
 				ConfigureMinimalLane(detLane, true, 10000);
 				mon.BindLaneReadyProbe(detLane);

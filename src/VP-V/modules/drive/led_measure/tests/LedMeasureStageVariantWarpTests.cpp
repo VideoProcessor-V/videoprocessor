@@ -165,7 +165,7 @@ namespace VideoProcessorTest
 		{
 			LedDrive::MeasurementHook hook(LedDrive::MeasurementStageVariant::PreOutput);
 			Assert::IsTrue(hook.MatchesStage(PL_HOOK_PRE_OUTPUT));
-			Assert::IsFalse(hook.MatchesStage(PL_HOOK_MAIN));
+			Assert::IsFalse(hook.MatchesStage(PL_HOOK_SCALED));
 			Assert::IsFalse(hook.MatchesStage(PL_HOOK_OUTPUT));
 			Assert::IsFalse(hook.MatchesStage(0));
 			Assert::AreEqual(0, hook.StageMismatches());
@@ -179,12 +179,12 @@ namespace VideoProcessorTest
 			Assert::AreEqual(1, hook.StageMismatches(), L"PL_HOOK_OUTPUT invocation must increment StageMismatches");
 			Assert::AreEqual(0, hook.Measured(), L"Wrong-stage invocation must never silently measure");
 
-			pl_hook_params wrongMain{};
-			wrongMain.stage = PL_HOOK_MAIN;
-			const pl_hook_res resMain = hook.Hook()->hook(hook.Hook()->priv, &wrongMain);
-			Assert::AreEqual(static_cast<int>(PL_HOOK_SIG_NONE), static_cast<int>(resMain.output));
-			Assert::IsFalse(resMain.failed);
-			Assert::AreEqual(2, hook.StageMismatches(), L"PL_HOOK_MAIN invocation must increment StageMismatches");
+			pl_hook_params wrongScaled{};
+			wrongScaled.stage = PL_HOOK_SCALED;
+			const pl_hook_res resScaled = hook.Hook()->hook(hook.Hook()->priv, &wrongScaled);
+			Assert::AreEqual(static_cast<int>(PL_HOOK_SIG_NONE), static_cast<int>(resScaled.output));
+			Assert::IsFalse(resScaled.failed);
+			Assert::AreEqual(2, hook.StageMismatches(), L"PL_HOOK_SCALED invocation must increment StageMismatches");
 			Assert::AreEqual(0, hook.Measured());
 		}
 	};
