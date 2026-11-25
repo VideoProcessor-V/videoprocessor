@@ -14,6 +14,7 @@
 #pragma once
 
 #include <VP-V/core/Ramp.h>
+#include <VP-V/core/SkeletonAcquire.h>
 #include <VP-V/modules/motion/estimation/composed/WarpSampler.h>
 #include <VP-V/modules/repair/grain_split/GrainSplit.h>
 #include <VP-V/modules/repair/temporal_detail/TemporalDetail.h>
@@ -22,6 +23,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -54,6 +56,11 @@ namespace TemporalDetail
 		std::vector<double> guard, guardViolation, addBack;
 		std::vector<uint8_t> guardOn;
 		int guardTrips = 0, guardActive = 0, addBackBlocks = 0;
+		// 15b A4 (lag-1 P10 acquire): visible diagnostics for Acquire(kP10GrainSplit, seq - 1, Cpu). Not in operator== (diagnostic).
+		bool lag1Missing = false;
+		uint64_t lag1Hits = 0;
+		uint64_t lag1UnavailableCount = 0;
+		std::string lag1UnavailableWhy;
 		std::vector<int> slotId;                  // -1 none
 		std::vector<long long> refSeq;            // source frame seq of the reference transferred from (-1 none; measurement)
 		std::vector<uint8_t> retired, refreshed, usedFuture, camera;
@@ -77,9 +84,44 @@ namespace TemporalDetail
 		}
 	};
 
+	// Serializes a CPU grain plane (double codes) into raw bytes for kP10GrainSplit AcquireForm::Cpu.
+	inline std::vector<uint8_t> PackCpuGrainPlane(const Plane& grain)
+	{
+		std::vector<uint8_t> bytes(grain.v.size() * sizeof(double));
+		if (!bytes.empty())
+			std::memcpy(bytes.data(), grain.v.data(), bytes.size());
+		return bytes;
+	}
+
 	namespace Detail
 	{
 		using GrainSplit::Gauss;
+
+		// Decodes kP10GrainSplit AcquireForm::Cpu payload (either double[w*h] or float[w*h] grain codes).
+		inline bool UnpackCpuGrainPlane(const uint8_t* bytes, size_t len, int w, int h, Plane& out)
+		{
+			if (bytes == nullptr || w <= 0 || h <= 0)
+				return false;
+			const size_t n = static_cast<size_t>(w) * static_cast<size_t>(h);
+			if (len == n * sizeof(double))
+			{
+				out = Plane(w, h);
+				std::memcpy(out.v.data(), bytes, len);
+				return true;
+			}
+			if (len == n * sizeof(float))
+			{
+				out = Plane(w, h);
+				for (size_t i = 0; i < n; ++i)
+				{
+					float v = 0.0f;
+					std::memcpy(&v, bytes + i * sizeof(float), sizeof(float));
+					out.v[i] = static_cast<double>(v);
+				}
+				return true;
+			}
+			return false;
+		}
 
 		// The 4-tap Catmull-Rom of README step 5, separable. The weights are the ONE shared law VpComposed::CubicWeights
 		// (motion/estimation/composed/WarpSampler.h; rule 20, owner 11-14 05:22); this model keeps only its own footprint rule:
@@ -398,6 +440,7 @@ namespace TemporalDetail
 			// see README "Regionally adaptive gates") fills it; empty or short = 1 (the global tunables).
 			std::vector<float> blockGates;
 			char codedType = 0;   // 'I' / 'P' / 'B' when known (offline measurement only; live VP has none), 0 = unknown
+			VpSkeleton::SkeletonMemo* memo = nullptr;   // optional per-frame override (else Model::Memo()) for shared P10/P10g Acquire
 		};
 
 		// Model-only knobs for measurement and the guard's own test (not user settings, never in the config):
@@ -462,6 +505,12 @@ namespace TemporalDetail
 
 		const Diagnostics& Diag() const { return m_diag; }
 
+		void SetMemo(VpSkeleton::SkeletonMemo* memo) { m_memo = memo; }
+		VpSkeleton::SkeletonMemo* Memo() const { return m_memo; }
+		uint64_t Lag1Hits() const { return m_lag1Hits; }
+		uint64_t Lag1UnavailableCount() const { return m_lag1UnavailableCount; }
+		const std::string& LastLag1UnavailableWhy() const { return m_lastLag1UnavailableWhy; }
+
 		// Processes the active picture (in.active) as the whole plane: its border is the plane edge for every filter,
 		// statistic and warp; pixels outside it are copied unchanged (bit-exact).
 		Plane Process(const FrameIn& in);
@@ -491,7 +540,11 @@ namespace TemporalDetail
 		Detail::CleanBasis m_basis;
 		Tuning m_tune;
 		Diagnostics m_diag;
-		Plane m_prevGin, m_prevGout;   // the previous frame's input and output grain on the shared map (guard lag-1)
+		VpSkeleton::SkeletonMemo* m_memo = nullptr;
+		uint64_t m_lag1Hits = 0;
+		uint64_t m_lag1UnavailableCount = 0;
+		std::string m_lastLag1UnavailableWhy;
+		Plane m_prevGout;              // the previous frame's output grain (lag-1 input grain P_in is acquired from kP10GrainSplit)
 		bool m_havePrevG = false;
 		Plane m_lastOut;
 		std::vector<Source> m_slots;
@@ -843,6 +896,7 @@ namespace TemporalDetail
 		c.seq = in.seq; c.contentHz = in.contentHz; c.planeLines = in.planeLines; c.stamps = in.stamps;
 		c.cut = in.cut; c.fade = in.fade; c.fadeKeep = in.fadeKeep; c.quality = in.quality; c.blockGates = in.blockGates;
 		c.sceneRestart = in.sceneRestart;   // cut_soft_reset: the consumers' scene answer, as the flags
+		c.memo = in.memo;
 		const Detail::OffsetMotionSource shifted(in.motion, r.left, r.top);
 		c.motion = in.motion ? &shifted : nullptr;
 		std::vector<Plane> futures;
@@ -1486,9 +1540,63 @@ namespace TemporalDetail
 		// --- Step 10: output-vs-input grain guard on the shared grain map (tile statistics, pooled over 3 x 3 blocks) ---
 		// G_in = Y - clean (the split); G_out = the same map applied to the output = G_in + (1 - f) delta. Per block:
 		// energies, the cross term <(1 - f) delta, G_in> (current grain removed when negative) and the lag-1 sums against
-		// the previous frame's G_in / G_out warped one hop along the backward vectors (measurement only, never output).
+		// the previous frame's G_in (acquired from shared kP10GrainSplit at seq - 1, never a private buffer) and G_out
+		// warped one hop along the backward vectors (measurement only, never output).
 		{
-			const bool lagOk = m_havePrevG && haveBwd && !reason && m_prevGin.w == w && m_prevGin.h == h;
+			VpSkeleton::SkeletonMemo* const memo = in.memo ? in.memo : m_memo;
+			Plane lag1Pin;
+			bool lagOk = false;
+			std::string lag1Why;
+			const bool lagAttempted = m_havePrevG && haveBwd && !reason && m_prevGout.w == w && m_prevGout.h == h;
+			if (lagAttempted)
+			{
+				if (memo == nullptr)
+				{
+					lag1Why = "no skeleton memo bound for lag-1 kP10GrainSplit";
+				}
+				else if (in.seq <= 1u)
+				{
+					lag1Why = "seq <= 1 (no lag-1 frame)";
+				}
+				else
+				{
+					const VpSkeleton::AcquireResult lag1Res = memo->Acquire(
+						VpSkeleton::kP10GrainSplit, in.seq - 1u, VpSkeleton::AcquireForm::Cpu);
+					if (!lag1Res.Ok() || lag1Res.cpu == nullptr)
+					{
+						const std::string detail = memo->LastCause(VpSkeleton::kP10GrainSplit);
+						lag1Why = std::string("lag-1 kP10GrainSplit unavailable (") + VpSkeleton::Token(lag1Res.cause)
+							+ (detail.empty() ? ")" : ": " + detail + ")");
+					}
+					else if (!Detail::UnpackCpuGrainPlane(lag1Res.cpu, lag1Res.cpuBytes, w, h, lag1Pin))
+					{
+						lag1Why = "lag-1 kP10GrainSplit CPU payload size mismatch (got "
+							+ std::to_string(lag1Res.cpuBytes) + " B, expected "
+							+ std::to_string(static_cast<size_t>(w) * static_cast<size_t>(h) * sizeof(double))
+							+ " B double or "
+							+ std::to_string(static_cast<size_t>(w) * static_cast<size_t>(h) * sizeof(float)) + " B float)";
+					}
+					else
+					{
+						lagOk = true;
+					}
+				}
+				if (lagOk)
+				{
+					++m_lag1Hits;
+					d.lag1Missing = false;
+					d.lag1UnavailableWhy.clear();
+				}
+				else
+				{
+					++m_lag1UnavailableCount;
+					m_lastLag1UnavailableWhy = lag1Why;
+					d.lag1Missing = true;
+					d.lag1UnavailableWhy = lag1Why;
+				}
+			}
+			d.lag1Hits = m_lag1Hits;
+			d.lag1UnavailableCount = m_lag1UnavailableCount;
 			constexpr int kGs = GrainSplit::Guard::kSums;   // the guard unit's seven tile sums (GrainGuard.h)
 			std::vector<double> sums(static_cast<size_t>(nb) * kGs, 0.0);
 			for (int y = 0; y < h; ++y)
@@ -1504,7 +1612,7 @@ namespace TemporalDetail
 					{
 						const double vx = Detail::PairAt(bwd, bwd.vx, x, y), vy = Detail::PairAt(bwd, bwd.vy, x, y);
 						const Detail::Taps t = Detail::MakeTaps(x + vx, y + vy);
-						const double pin = Detail::SampleTaps(m_prevGin, t), pout = Detail::SampleTaps(m_prevGout, t);
+						const double pin = Detail::SampleTaps(lag1Pin, t), pout = Detail::SampleTaps(m_prevGout, t);
 						sb[3] += gin * pin; sb[4] += gout * pout; sb[5] += pin * pin; sb[6] += pout * pout;
 					}
 				}
@@ -1575,7 +1683,6 @@ namespace TemporalDetail
 		}
 
 		// --- Recompose: a pixel with nothing to add is copied unchanged (bit-exact) ---
-		m_prevGin = A.grain;
 		m_prevGout = A.grain;
 		for (size_t pi = 0; pi < np; ++pi)
 		{
