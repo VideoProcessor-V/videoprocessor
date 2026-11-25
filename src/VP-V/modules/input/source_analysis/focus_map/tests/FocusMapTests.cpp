@@ -942,5 +942,123 @@ namespace VideoProcessorTest
 
 				rb.SetDemand(false);
 			}
+
+			// W23-Fix2 HIGH-2 regression:
+			// (1) EdgeSums clamps strictly to Geometry active picture rect (letterbox bar border causes zero bleed on straddling blocks;
+			//     same-input negative control without active rect falsely reads sharp on the straddling row).
+			// (2) FieldMotion scales S10.5 vectors using p2Cell / p2CellY and anisotropic p2ScaleX / p2ScaleY (no hardcoded / 16.0).
+			// (3) FocusMapFill validates lag-1 (req.seq - 1) using sampleSeq's geometry (survives resolution switch at req.seq) and
+			//     checks lag-2 ReadbackPending BEFORE acquiring P11 or running EdgeSums.
+			TEST_METHOD(ActiveRectBarBleedAnisotropicP2CellLag1GeometryAndPendingOrder)
+			{
+				using namespace VpSkeleton;
+
+				// 1. Active-rect bar-bleed negative control on 128x96 (block = 8; row by=1 covers y=8..15).
+				const Geometry gNoRect = Geometry::Make(kW, kH);
+				Geometry gActive = Geometry::Make(kW, kH);
+				gActive.SetActiveRect(0, 12, kW, kH - 12);   // rows 0..11 and 84..95 are letterbox bars
+
+				const std::vector<uint8_t> barEdge = EdgeField([](int, int y) {
+					return (y < 12 || y >= kH - 12) ? 200.0f : 5.0f;   // bright bar border + defocused picture
+				});
+				const std::vector<float> p11 = ConfidentP11Scene(gNoRect);
+				const EdgeSumsHolder naiveSums = MakeEdgeSums(gNoRect, barEdge);
+				const EdgeSumsHolder clampedSums = MakeEdgeSums(gActive, barEdge);
+
+				std::vector<Block> naiveOut, clampedOut;
+				ComputeGrid(Params(), gNoRect, p11.data(), nullptr, nullptr, nullptr, false, naiveOut, naiveSums.View());
+				ComputeGrid(Params(), gActive, p11.data(), nullptr, nullptr, nullptr, false, clampedOut, clampedSums.View());
+
+				// Block (bx=4, by=1) straddles y=8..11 (bar) and y=12..15 (defocused picture).
+				const size_t straddleIdx = static_cast<size_t>(1) * gNoRect.gw + 4u;
+				Assert::IsTrue(naiveOut[straddleIdx].defocus < 0.1f,
+					L"negative control: without active rect, bright bar edge makes straddling block falsely read sharp");
+				Assert::IsTrue(clampedOut[straddleIdx].defocus > 0.9f,
+					L"active-rect clamp excludes letterbox bar pixels so straddling block accurately reads defocused");
+
+				// 2. P2CellOf scaling ({4, 8, 16, 32}) + anisotropic A-lens (p2ScaleY != p2ScaleX).
+				auto makeUniformP2 = [](const Geometry& g, int16_t rawX, int16_t rawY) {
+					std::vector<uint8_t> buf(static_cast<size_t>(g.p2gw) * static_cast<size_t>(g.p2gh) * kP2BytesPerCell, 0u);
+					for (size_t i = 0; i < static_cast<size_t>(g.p2gw) * static_cast<size_t>(g.p2gh); ++i)
+					{
+						std::memcpy(&buf[i * kP2BytesPerCell + 4], &rawX, 2);
+						std::memcpy(&buf[i * kP2BytesPerCell + 6], &rawY, 2);
+					}
+					return buf;
+				};
+				for (int cell : { 4, 8, 16, 32 })
+				{
+					const Geometry gc = Geometry::Make(kW, kH, cell);
+					const std::vector<uint8_t> p2 = makeUniformP2(gc, 128, -64);   // 4.0 and -2.0 engine px
+					const BlockMotion m = FieldMotion(gc, p2.data(), 2, 2);
+					const double expectedDx = 4.0 * (static_cast<double>(cell) / 4.0);
+					const double expectedDy = -2.0 * (static_cast<double>(cell) / 4.0);
+					Assert::AreEqual(expectedDx, static_cast<double>(m.dx), 1e-4, L"FieldMotion dx scales with p2Cell");
+					Assert::AreEqual(expectedDy, static_cast<double>(m.dy), 1e-4, L"FieldMotion dy scales with p2Cell");
+				}
+				{
+					// Anisotropic A-lens: horizontal 2.0 source px / engine px, vertical 2.5 source px / engine px.
+					const Geometry gAniso = Geometry::Make(kW, kH, 8, 10, 2.0, 2.5);
+					const std::vector<uint8_t> p2 = makeUniformP2(gAniso, 64, 64);   // 2.0 engine px on both axes
+					const BlockMotion m = FieldMotion(gAniso, p2.data(), 2, 2);
+					Assert::AreEqual(4.0f, m.dx, 1e-4f, L"anisotropic FieldMotion dx = 2.0 * 2.0 = 4.0 source px");
+					Assert::AreEqual(5.0f, m.dy, 1e-4f, L"anisotropic FieldMotion dy = 2.0 * 2.5 = 5.0 source px");
+					Assert::IsTrue(std::fabs(m.dy - m.dx) > 0.5f, L"anisotropic scaleY is NOT collapsed into isotropic / 16.0");
+				}
+
+				// 3. Lag-1 geometry validation (resolution switch at req.seq == 5) & lag-2 ReadbackPending BEFORE P11/EdgeSums.
+				{
+					SkeletonMemo m;
+					std::atomic<int> p11Calls{ 0 };
+					std::atomic<bool> lag2Pending{ true };
+
+					OwnerFill fe;
+					fe.keepFrames = 2;
+					fe.fill = [&](const OwnerFillRequest& r, SkeletonMemo&, OwnerFillOutput& o) {
+						if (r.seq == 3u && lag2Pending.load())
+						{
+							o.pending = true;
+							o.declineReason = "lag-2 pending";
+							return false;
+						}
+						o.bytes = barEdge;
+						return true;
+					};
+					OwnerFill f11;
+					f11.keepFrames = 2;
+					f11.fill = [&](const OwnerFillRequest&, SkeletonMemo&, OwnerFillOutput& o) {
+						++p11Calls;
+						o.bytes = FloatBytes(p11);
+						return true;
+					};
+					Assert::IsTrue(m.RegisterOwnerFill(kEdgeMap, AcquireForm::Cpu, "input/source_analysis/regions", fe) == SkeletonMemo::Registration::Registered);
+					Assert::IsTrue(m.RegisterOwnerFill(kP11RegionBlockStats, AcquireForm::Cpu, "input/source_analysis/regions", f11) == SkeletonMemo::Registration::Registered);
+
+					FillConfig cfg;
+					// Frame 5 switched to 192x144 while lag-1 (frame 4) and lag-2 (frame 3) are still 128x96!
+					cfg.geometry = [](uint64_t seq, int& w, int& h) {
+						if (seq >= 5u) { w = 192; h = 144; return true; }
+						w = kW; h = kH; return true;
+					};
+					cfg.activeRect = [](uint64_t, int& x0, int& y0, int& x1, int& y1) {
+						x0 = 0; y0 = 12; x1 = kW; y1 = kH - 12; return true;
+					};
+					Assert::IsTrue(m.RegisterOwnerFill(kFocusMap, AcquireForm::Cpu, kUnitPath, MakeOwnerFill(cfg)) == SkeletonMemo::Registration::Registered);
+
+					// First attempt: lag-2 (seq 3) is pending -> MUST return ReadbackPending BEFORE touching P11!
+					const AcquireResult rPending = m.Acquire(kFocusMap, 5u, AcquireForm::Cpu);
+					Assert::IsFalse(rPending.Ok(), L"pending lag-2 declines non-latched");
+					Assert::IsTrue(rPending.cause == AcquireCause::ReadbackPending, L"propagates ReadbackPending");
+					Assert::AreEqual(0, p11Calls.load(), L"ReadbackPending checked BEFORE acquiring P11 or running EdgeSums");
+
+					// Second attempt: lag-2 now ready -> succeeds using lag-1 (seq 4) geometry 128x96 (16x12 blocks), NOT seq 5's 192x144!
+					lag2Pending.store(false);
+					const AcquireResult rOk = m.Acquire(kFocusMap, 5u, AcquireForm::Cpu);
+					Assert::IsTrue(rOk.Ok(), L"Acquire(kFocusMap, 5) succeeds using sampleSeq=4 geometry after seq-5 resize");
+					Assert::AreEqual(gActive.Blocks() * kBytesPerBlock, rOk.cpuBytes, L"output grid matches sampleSeq=4 (128x96) block count");
+					Assert::IsTrue(Unpack(rOk.cpu + straddleIdx * kBytesPerBlock).defocus > 0.9f,
+						L"FocusMapFill activeRect callback prevents bar bleed on straddling block");
+				}
+			}
 	};
 }
