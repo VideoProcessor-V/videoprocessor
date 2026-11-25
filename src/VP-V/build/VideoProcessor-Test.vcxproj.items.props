@@ -639,6 +639,7 @@
     <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\SourceIdChainVoterTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\SourceIdChainGateTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\ChainEstimatorTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\ChainMeasuredFloorTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\ChainEvidenceLogTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\ChainGovernorStatusTests.cpp" />
     <ClCompile Include="..\VP-V\modules\input\source_analysis\identity\tests\ChainEvalRegistrationTests.cpp" />
