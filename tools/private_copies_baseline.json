@@ -19,6 +19,15 @@
    "max_hits": 1
   },
   {
+   "key": "a|X4|src/VP-V/modules/repair/deband/VpDebander.cpp",
+   "rule": "a",
+   "site": "X4",
+   "refs": "126 s4 X4 / W23-Fix2 BLOCKER-1",
+   "reason": "O(N) coarse block-tensor contour fallback (SPLIT_TENSOR_BODY) run only when P11 is absent (native RGB / P11 unavailable), consuming shared P10 when present",
+   "seed": true,
+   "max_hits": 2
+  },
+  {
    "key": "a|X5|src/VP-V/modules/scaling/output/AdaptiveDownscale.cpp",
    "rule": "a",
    "site": "X5",

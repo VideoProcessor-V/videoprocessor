@@ -126,17 +126,17 @@
      "evidence": [
       [
        "motion/estimation/matcher/DejudderWarp.cpp",
-       2634,
+       2673,
        "bool MotionWarp::Downsample(pl_tex luma, pl_tex half, pl_tex l1, pl_tex l2, bool fullRange, pl_tex fade, int l"
       ],
       [
        "motion/estimation/matcher/DejudderWarp.cpp",
-       2656,
+       2695,
        "Pyramid(half, l1, l2, 0, levels);"
       ],
       [
        "motion/estimation/matcher/DejudderWarp.cpp",
-       2659,
+       2698,
        "bool MotionWarp::Pyramid(pl_tex half, pl_tex l1, pl_tex l2, int from, int levels)"
       ]
      ],
@@ -177,17 +177,17 @@
      "evidence": [
       [
        "motion/estimation/matcher/DejudderWarp.cpp",
-       2634,
+       2673,
        "bool MotionWarp::Downsample(pl_tex luma, pl_tex half, pl_tex l1, pl_tex l2, bool fullRange, pl_tex fade, int l"
       ],
       [
        "motion/estimation/matcher/DejudderWarp.cpp",
-       2656,
+       2695,
        "Pyramid(half, l1, l2, 0, levels);"
       ],
       [
        "motion/estimation/matcher/DejudderWarp.cpp",
-       2659,
+       2698,
        "bool MotionWarp::Pyramid(pl_tex half, pl_tex l1, pl_tex l2, int from, int levels)"
       ]
      ],
@@ -502,12 +502,12 @@
       ],
       [
        "motion/estimation/global_model/link/CameraLinkCore.cpp",
-       485,
+       487,
        "if (m_pool->Get(f.seq, e, true))"
       ],
       [
        "motion/estimation/global_model/link/CameraLinkCore.cpp",
-       781,
+       787,
        "if (!m_pool->Get(seq, e))"
       ]
      ],
@@ -1142,7 +1142,7 @@
      "evidence": [
       [
        "repair/grain_split/BandMemoFill.h",
-       273,
+       275,
        "const VpSkeleton::AcquireResult src = memo.Acquire(VpSkeleton::kP1HalfLuma, req.seq, VpSkeleton::AcquireForm::"
       ]
      ],
@@ -1201,12 +1201,12 @@
      "evidence": [
       [
        "input/source_analysis/focus_map/FocusMapFill.h",
-       128,
+       135,
        "const AcquireResult rp = havePrevSeq ? memo.Acquire(kEdgeMap, prevSeq, AcquireForm::Cpu) : AcquireResult();"
       ],
       [
        "input/source_analysis/focus_map/FocusMapFill.h",
-       132,
+       136,
        "const AcquireResult re = memo.Acquire(kEdgeMap, sampleSeq, AcquireForm::Cpu);"
       ]
      ],
@@ -1226,13 +1226,13 @@
      "evidence": [
       [
        "input/source_analysis/focus_map/FocusMapFill.h",
-       165,
+       192,
        "const AcquireResult p11 = memo.Acquire(kP11RegionBlockStats, sampleSeq, AcquireForm::Cpu);"
       ],
       [
        "input/source_analysis/focus_map/FocusMapFill.h",
-       193,
-       "const AcquireResult pp = memo.Acquire(kP11RegionBlockStats, prevSeq, AcquireForm::Cpu);"
+       211,
+       "const AcquireResult pp = prevGeomSame ? memo.Acquire(kP11RegionBlockStats, prevSeq, AcquireForm::Cpu) : Acquir"
       ]
      ],
      "kind": "",
@@ -1250,7 +1250,7 @@
      "evidence": [
       [
        "input/source_analysis/focus_map/FocusMapFill.h",
-       161,
+       181,
        "const AcquireResult r2 = memo.Acquire(kP2VectorPair, sampleSeq, AcquireForm::Cpu);"
       ]
      ],
@@ -1269,7 +1269,7 @@
      "evidence": [
       [
        "input/source_analysis/focus_map/FocusMapFill.h",
-       221,
+       246,
        "const AcquireResult r7 = memo.Acquire(kP7CameraFit, sampleSeq, AcquireForm::Cpu);"
       ]
      ],
@@ -1308,12 +1308,12 @@
      "evidence": [
       [
        "input/source_analysis/regions/EdgeMapFill.h",
-       100,
+       102,
        "const VpSkeleton::AcquireResult src = memo.Acquire(VpSkeleton::kP13SourceRing, req.seq, VpSkeleton::AcquireFor"
       ],
       [
        "input/source_analysis/regions/EdgeMapFill.h",
-       150,
+       152,
        "const VpSkeleton::AcquireResult src = memo.Acquire(VpSkeleton::kP13SourceRing, req.seq, VpSkeleton::AcquireFor"
       ]
      ],
@@ -1352,7 +1352,7 @@
      "evidence": [
       [
        "repair/grain_split/GrainLevelGpu.h",
-       215,
+       219,
        "const VpSkeleton::AcquireResult split = memo.Acquire(VpSkeleton::kP10GrainSplit, req.seq, VpSkeleton::AcquireF"
       ]
      ],
@@ -1371,7 +1371,7 @@
      "evidence": [
       [
        "repair/grain_split/GrainLevelGpu.h",
-       204,
+       208,
        "const VpSkeleton::AcquireResult src = memo.Acquire(VpSkeleton::kP13SourceRing, req.seq, VpSkeleton::AcquireFor"
       ]
      ],
@@ -1457,7 +1457,7 @@
      "evidence": [
       [
        "control/skeleton/SkeletonModule.cpp",
-       2311,
+       2344,
        "const AnalysisLane::ProductRead r10 = b->lane.ReadOf(VpSkeleton::kP10GrainSplit, seq);"
       ]
      ],
@@ -1476,7 +1476,7 @@
      "evidence": [
       [
        "control/skeleton/SkeletonModule.cpp",
-       2333,
+       2366,
        "const AnalysisLane::ProductRead r11 = b->lane.ReadOf(VpSkeleton::kP11RegionBlockStats, seq);"
       ]
      ],
