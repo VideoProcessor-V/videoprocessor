@@ -39,11 +39,14 @@
 #include <VP-V/modules/motion/estimation/global_model/CameraProducts.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <thread>
@@ -4808,6 +4811,30 @@ namespace SkeletonModuleTestsNs
 						== VpSkeleton::SkeletonMemo::Registration::Registered);
 				Assert::IsFalse(noLaneMemo->HasAheadDemands(), L"aheadDepth=0 keeps HasAheadDemands() false");
 
+				// Bind a minimal LaneSlotSource so LaneBound() == true and PlanNoLaneGpu returns immediately (0 allocs),
+				// isolating DeriveMemoWindow + OnSeal inside OnFrame(Begin). RAII guard ensures clean unbind on unwind.
+				struct LaneBindGuard
+				{
+					VpSkeleton::SkeletonMemo* m = nullptr;
+					const void* token = nullptr;
+					~LaneBindGuard()
+					{
+						if (m != nullptr && token != nullptr)
+							m->UnbindLane(token);
+					}
+				} bindGuard;
+				{
+					VpSkeleton::LaneSlotSource src;
+					src.token = &noLaneRig;
+					src.read = [](VpSkeleton::ProductId, uint64_t, VpSkeleton::AcquireForm, VpSkeleton::LaneSlotSource::Read*) {
+						return VpSkeleton::LaneSlotSource::State::NotLaneProduct;
+					};
+					noLaneMemo->BindLane(src, std::map<std::pair<VpSkeleton::ProductId, VpSkeleton::AcquireForm>, VpSkeleton::OwnerFill>());
+					bindGuard.m = noLaneMemo;
+					bindGuard.token = &noLaneRig;
+				}
+				Assert::IsTrue(noLaneMemo->LaneBound(), L"minimal LaneSlotSource marks memo LaneBound for PlanNoLaneGpu bypass");
+
 				auto driveNoLaneBegin = [&noLaneRig](int64_t seq) {
 					RE::FrameContext c;
 					c.host = noLaneRig.Host();
@@ -4816,35 +4843,50 @@ namespace SkeletonModuleTestsNs
 					Assert::IsFalse(noLaneRig.sk.OnFrame(c));
 				};
 
-				// Warm up frames 1..5 so PlanNoLaneGpu caches (kNoLaneReplanFrames = 240) and Window is initialized.
+				// Warm up frames 1..5 so gpuSlots_ tag and Window are initialized.
 				for (int64_t s = 1; s <= 5; ++s)
 					driveNoLaneBegin(s);
 
+				// Measure exact OnSeal baseline across 10 calls (in MSVC _DEBUG _ITERATOR_DEBUG_LEVEL==2,
+				// OnSeal's local empty std::vector<shared_ptr<Entry>> drop allocates 1 _Container_proxy per call;
+				// in _ITERATOR_DEBUG_LEVEL==0 this baseline is 0). Subtracting it isolates DeriveMemoWindow to exact 0.
 				DebugAllocCounter::Count().store(0u, std::memory_order_relaxed);
 				DebugAllocCounter::Active().store(true, std::memory_order_release);
 				for (int64_t s = 6; s <= 15; ++s)
+					noLaneMemo->OnSeal(uint64_t(s));
+				DebugAllocCounter::Active().store(false, std::memory_order_release);
+				const uint64_t onSealBaseline = DebugAllocCounter::Count().load(std::memory_order_relaxed);
+
+				DebugAllocCounter::Count().store(0u, std::memory_order_relaxed);
+				DebugAllocCounter::Active().store(true, std::memory_order_release);
+				for (int64_t s = 16; s <= 25; ++s)
 					driveNoLaneBegin(s);
 				DebugAllocCounter::Active().store(false, std::memory_order_release);
 				const uint64_t allocsShortCircuit = DebugAllocCounter::Count().load(std::memory_order_relaxed);
 
-				// In-test negative control: replace the SAME CPU owner fill with aheadDepth = 2 (identical owners_.size() == 1
-				// so PlanNoLaneGpu and OnSeal allocate identically, while DeriveMemoWindow takes the ActiveAheadDemands path).
+				Assert::IsTrue(allocsShortCircuit >= onSealBaseline, L"OnFrame(Begin) includes OnSeal");
+				const uint64_t deriveWindowShortCircuitAllocs = allocsShortCircuit - onSealBaseline;
+				Assert::AreEqual(uint64_t(0), deriveWindowShortCircuitAllocs,
+					L"K#10: !HasAheadDemands() short-circuit in DeriveMemoWindow incurs EXACTLY ZERO heap allocations across 10 steady-state frames");
+
+				// In-test negative control: replace the SAME CPU owner fill with aheadDepth = 2 (HasAheadDemands() == true)
+				// so DeriveMemoWindow executes ActiveAheadDemands() and allocates on every frame.
 				cpuFill.aheadDepth = 2u;
 				Assert::IsTrue(
 					noLaneRig.sk.ReplaceOwnerFill(VpSkeleton::kP10GrainSplit, VpSkeleton::AcquireForm::Cpu, "repair/grain_split", cpuFill)
 						== VpSkeleton::SkeletonMemo::Registration::Replaced);
 				Assert::IsTrue(noLaneMemo->HasAheadDemands(), L"negative control: aheadDepth=2 enables HasAheadDemands()");
-				driveNoLaneBegin(16);   // warm up 1 frame so Window settles
+				driveNoLaneBegin(26);   // warm up 1 frame so Window settles
 
 				DebugAllocCounter::Count().store(0u, std::memory_order_relaxed);
 				DebugAllocCounter::Active().store(true, std::memory_order_release);
-				for (int64_t s = 17; s <= 26; ++s)
+				for (int64_t s = 27; s <= 36; ++s)
 					driveNoLaneBegin(s);
 				DebugAllocCounter::Active().store(false, std::memory_order_release);
 				const uint64_t allocsWithAheadDemands = DebugAllocCounter::Count().load(std::memory_order_relaxed);
 
-				Assert::IsTrue(allocsWithAheadDemands >= allocsShortCircuit + 10u,
-					L"K#10: !HasAheadDemands() short-circuit eliminates per-frame ActiveAheadDemands/vector allocations in DeriveMemoWindow");
+				Assert::IsTrue(allocsWithAheadDemands >= onSealBaseline + 10u,
+					L"K#10 negative control: active ahead demand executes ActiveAheadDemands() and allocates in DeriveMemoWindow");
 			}
 
 			// ---- 3c. Real Refresh SceneVetoOffCode zero-alloc proof on steady-state non-due frames ----
