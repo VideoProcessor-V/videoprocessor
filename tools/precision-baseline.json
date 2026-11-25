@@ -2,21 +2,20 @@
  "classes": {
   "A": 27,
   "O": 32,
-  "R": 29,
+  "R": 22,
   "T": 0,
-  "U": 62
+  "U": 59
  },
  "files": {
-  "src/VP-V/core/LaneInterfaces.h": 1,
   "src/VP-V/modules/control/skeleton/SkeletonModule.cpp": 2,
   "src/VP-V/modules/drive/led_measure/LedMeasurementHook.cpp": 1,
   "src/VP-V/modules/input/capture/EarlyUpload.cpp": 1,
   "src/VP-V/modules/input/signal/DvTunnelTapLaw.h": 5,
-  "src/VP-V/modules/input/source_analysis/VpFrameAnalysis.cpp": 3,
+  "src/VP-V/modules/input/source_analysis/VpFrameAnalysis.cpp": 2,
   "src/VP-V/modules/input/source_analysis/VpFrameAnalysis.h": 2,
   "src/VP-V/modules/input/source_analysis/lane/LaneCpuProducts.h": 4,
   "src/VP-V/modules/input/source_analysis/lane/shared/EngineLumaGpu.cpp": 2,
-  "src/VP-V/modules/motion/estimation/MotionAheadProducer.cpp": 8,
+  "src/VP-V/modules/motion/estimation/MotionAheadProducer.cpp": 5,
   "src/VP-V/modules/motion/estimation/MotionAheadProducer.h": 4,
   "src/VP-V/modules/motion/estimation/NvOpticalFlow.h": 1,
   "src/VP-V/modules/motion/estimation/longpair/LongPairService.cpp": 2,
@@ -27,7 +26,7 @@
   "src/VP-V/modules/repair/temporal_detail/products/TdProductContracts.h": 3,
   "src/VP-V/nets/NetPackage.h": 1,
   "src/VP-V/nets/PlNetRunner.cpp": 2,
-  "src/VideoProcessor-Lib/AnalysisLumaSource.cpp": 16,
+  "src/VideoProcessor-Lib/AnalysisLumaSource.cpp": 13,
   "src/VideoProcessor-Lib/DisplayMonitorInventory.h": 1,
   "src/VideoProcessor-Lib/DolbyVisionTunnelInput.h": 1,
   "src/VideoProcessor-Lib/P210FrameLayout.h": 2,
@@ -46,8 +45,6 @@
   "src/VideoProcessor-Lib/video_frame_formatter/CR12BtoRGB48VideoFrameFormatter.AVX2.cpp": 1,
   "src/VideoProcessor-Lib/video_frame_formatter/CR12BtoRGB48VideoFrameFormatter.Common.h": 1,
   "src/VideoProcessor-Lib/video_frame_formatter/CR210toRGB48VideoFrameFormatter.AVX2.cpp": 1,
-  "src/VideoProcessor-Lib/video_frame_formatter/CRGBDolbyVisionTunnelFormatter.cpp": 1,
-  "src/VideoProcessor-Lib/video_frame_formatter/CRGBDolbyVisionTunnelFormatter.h": 1,
   "src/VideoProcessor-Lib/video_frame_formatter/CV210toP010VideoFrameFormatter.Common.h": 1,
   "src/VideoProcessor-Lib/vprenderer/LibplaceboPluginVideoRenderer.cpp": 3,
   "src/VideoProcessor-Lib/vprenderer/LibplaceboPluginVideoRenderer.h": 3,
@@ -62,10 +59,6 @@
   "note": "refs/119 sweep at 6772f5fcb; U = hit file not yet keyed to a refs/119 row (to classify)"
  },
  "sites": {
-  "src/VP-V/core/LaneInterfaces.h": {
-   "class": "U",
-   "row": "UNCLASSIFIED"
-  },
   "src/VP-V/modules/control/skeleton/SkeletonModule.cpp": {
    "class": "U",
    "row": "UNCLASSIFIED"
@@ -218,14 +211,6 @@
    "class": "U",
    "row": "UNCLASSIFIED"
   },
-  "src/VideoProcessor-Lib/video_frame_formatter/CRGBDolbyVisionTunnelFormatter.cpp": {
-   "class": "U",
-   "row": "UNCLASSIFIED"
-  },
-  "src/VideoProcessor-Lib/video_frame_formatter/CRGBDolbyVisionTunnelFormatter.h": {
-   "class": "U",
-   "row": "UNCLASSIFIED"
-  },
   "src/VideoProcessor-Lib/video_frame_formatter/CV210toP010VideoFrameFormatter.Common.h": {
    "class": "O",
    "row": "119#63"
@@ -248,5 +233,5 @@
   }
  },
  "tool": "N2 precision",
- "total": 150
+ "total": 140
 }
