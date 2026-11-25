@@ -1849,15 +1849,6 @@ namespace Gpu
 				res.carryReset = res.carryReset || hadCarry;
 				return failVisible("TdV2GpuEngine outputClean/tdDelta download failed", StandInKind::GpuDispatchFailed);
 			}
-			// Preserve bit-exact double passthrough on pixels where GPU tdDelta is strictly 0.0 (eliminates 1-ULP FP32 roundtrip drift).
-			if (cfg_.ModifiesPixels() && res.outputY.v.size() == in.receivedY.v.size() && res.tdDelta.v.size() == in.receivedY.v.size())
-			{
-				for (size_t i = 0; i < res.tdDelta.v.size(); ++i)
-				{
-					if (res.tdDelta.v[i] == 0.0 && std::isfinite(in.receivedY.v[i]))
-						res.outputY.v[i] = in.receivedY.v[i];
-				}
-			}
 
 			if (anyBoundEngaged && standIns != nullptr)
 				standIns->Engage(StandInKind::TransformUnknownBound);

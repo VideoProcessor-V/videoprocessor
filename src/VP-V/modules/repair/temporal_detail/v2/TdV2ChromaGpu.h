@@ -772,9 +772,9 @@ for (int stride = 128; stride > 0; stride >>= 1)
 if (tid == 0)
 {
     float nAct = td_cs_red4[0].z;
-    float ogVarCb = (hasCleanSplit && nAct > 0.5) ? (td_cs_red4[0].x / nAct) : 0.0;
-    float ogVarCr = (hasCleanSplit && nAct > 0.5) ? (td_cs_red4[0].y / nAct) : 0.0;
-    imageStore(cell_own_grain, cell, vec4(ogVarCb, ogVarCr, 0.0, 0.0));
+    float ogSumCb2 = hasCleanSplit ? td_cs_red4[0].x : 0.0;
+    float ogSumCr2 = hasCleanSplit ? td_cs_red4[0].y : 0.0;
+    imageStore(cell_own_grain, cell, vec4(ogSumCb2, ogSumCr2, nAct, 0.0));
     uint dMask = (td_cs_mask[0] & 7u) | (cellIsFace ? 8u : 0u) | (td_cs_mask[0] & 16u);
     imageStore(warp_diag, cell, vec4(td_cs_red4[0].w, float(dMask), 0.0, 0.0));
 }
@@ -981,7 +981,23 @@ if (td_is_bad(rawStepScale) || !(rawStepScale > 0.0)) cellNonFinite = true;
 else cellStepScale = clamp(rawStepScale, TD_STEP_SCALE_MIN, TD_STEP_SCALE_MAX);
 float cellStepScaleSq = cellStepScale * cellStepScale;
 
-vec2 ownGrainVar = max(vec2(0.0), texelFetch(cell_own_grain, cell, 0).xy);
+// Pool own-grain variance over the exact same [-poolR, +poolR] window as C (1:1 parity with CPU TdV2Chroma.h).
+vec2 ogSumPool = vec2(0.0);
+float ogCntPool = 0.0;
+for (int dy = -poolR; dy <= poolR; ++dy)
+{
+    int ncy = cell.y + dy;
+    if (ncy < 0 || ncy >= TD_CH) continue;
+    for (int dx = -poolR; dx <= poolR; ++dx)
+    {
+        int ncx = cell.x + dx;
+        if (ncx < 0 || ncx >= TD_CW) continue;
+        vec3 ogT = texelFetch(cell_own_grain, ivec2(ncx, ncy), 0).xyz;
+        ogSumPool += ogT.xy;
+        ogCntPool += ogT.z;
+    }
+}
+vec2 ownGrainVar = (ogCntPool > 0.5) ? max(vec2(0.0), ogSumPool / ogCntPool) : vec2(0.0);
 
 for (int chIdx = 0; chIdx < 2; ++chIdx)
 {
@@ -1878,10 +1894,10 @@ else
 			pushReq(3u * ucw, uch, VpSkeleton::TexFormat::RGBA32F, 5);
 			// Cell-grid 3*cw x 3*ch RGBA32F (2): cellStatsCb, cellStatsCr
 			pushReq(3u * ucw, 3u * uch, VpSkeleton::TexFormat::RGBA32F, 2);
-			// Cell-grid cw x ch RG32F (2): cellOwnGrain, warpDiag
-			pushReq(ucw, uch, VpSkeleton::TexFormat::RG32F, 2);
-			// Cell-grid cw x ch RGBA32F (2): cellDiagFlags, guardCell
-			pushReq(ucw, uch, VpSkeleton::TexFormat::RGBA32F, 2);
+			// Cell-grid cw x ch RG32F (1): warpDiag
+			pushReq(ucw, uch, VpSkeleton::TexFormat::RG32F, 1);
+			// Cell-grid cw x ch RGBA32F (3): cellOwnGrain (sumCb2, sumCr2, nAct, 0), cellDiagFlags, guardCell
+			pushReq(ucw, uch, VpSkeleton::TexFormat::RGBA32F, 3);
 			return reqs;
 		}
 	} // namespace ChromaGpuDetail
@@ -2425,7 +2441,7 @@ imageStore(out_coded_delta, p, vec4(0.0));
 					sc.statsCb = arena->Acquire(kChromaArenaOwner, shCellStats);
 					sc.statsCr = arena->Acquire(kChromaArenaOwner, shCellStats);
 
-					sc.ownGrain = arena->Acquire(kChromaArenaOwner, shCellRG);
+					sc.ownGrain = arena->Acquire(kChromaArenaOwner, shCellRGBA);
 					sc.warpDiag = arena->Acquire(kChromaArenaOwner, shCellRG);
 					sc.diagFlags = arena->Acquire(kChromaArenaOwner, shCellRGBA);
 					sc.guardCell = arena->Acquire(kChromaArenaOwner, shCellRGBA);
@@ -3392,7 +3408,7 @@ float td_huber_taper(float diffSq, float diagC)
 			          Detail::EnsureTex(gpu, privDiagCr_, 3 * cw, ch, fmtRGBA32, true, true, false, false) &&
 			          Detail::EnsureTex(gpu, privStatsCb_, 3 * cw, 3 * ch, fmtRGBA32, true, true, false, false) &&
 			          Detail::EnsureTex(gpu, privStatsCr_, 3 * cw, 3 * ch, fmtRGBA32, true, true, false, false) &&
-			          Detail::EnsureTex(gpu, privOwnGrain_, cw, ch, fmtRG32, true, true, false, false) &&
+			          Detail::EnsureTex(gpu, privOwnGrain_, cw, ch, fmtRGBA32, true, true, false, false) &&
 			          Detail::EnsureTex(gpu, privWarpDiag_, cw, ch, fmtRG32, true, true, false, true) &&
 			          Detail::EnsureTex(gpu, privDiagFlags_, cw, ch, fmtRGBA32, true, true, false, true) &&
 			          Detail::EnsureTex(gpu, privGuardCell_, cw, ch, fmtRGBA32, true, true, false, true);
