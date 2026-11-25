@@ -286,6 +286,106 @@ namespace VideoProcessorTest
 				Vpv::Hub::RecordCurrentFrame(fc);
 			}
 		};
+
+		// Tiny RAII guards for WARP GPU test log capture and device handles so an early Assert::* throw
+		// never causes UAF on the stack log string or leaks pl_tex / pl_hook / pl_dispatch / Module state.
+		struct ScopedLogCapture
+		{
+			TargetLutGpuFixture* fixture = nullptr;
+			ScopedLogCapture(TargetLutGpuFixture& f, std::string& sink) : fixture(&f)
+			{
+				fixture->CaptureLog(&sink);
+			}
+			~ScopedLogCapture() { Release(); }
+			void Release()
+			{
+				if (fixture)
+				{
+					fixture->CaptureLog(nullptr);
+					fixture = nullptr;
+				}
+			}
+			ScopedLogCapture(const ScopedLogCapture&) = delete;
+			ScopedLogCapture& operator=(const ScopedLogCapture&) = delete;
+		};
+
+		struct ScopedTex
+		{
+			pl_gpu gpu = nullptr;
+			pl_tex tex = nullptr;
+			ScopedTex() = default;
+			ScopedTex(pl_gpu g, pl_tex t) : gpu(g), tex(t) {}
+			~ScopedTex() { Reset(); }
+			void Reset(pl_tex t = nullptr)
+			{
+				if (gpu && tex)
+					pl_tex_destroy(gpu, &tex);
+				tex = t;
+			}
+			operator pl_tex() const { return tex; }
+			ScopedTex(const ScopedTex&) = delete;
+			ScopedTex& operator=(const ScopedTex&) = delete;
+			ScopedTex(ScopedTex&& o) noexcept : gpu(o.gpu), tex(o.tex) { o.gpu = nullptr; o.tex = nullptr; }
+			ScopedTex& operator=(ScopedTex&& o) noexcept
+			{
+				if (this != &o)
+				{
+					Reset();
+					gpu = o.gpu;
+					tex = o.tex;
+					o.gpu = nullptr;
+					o.tex = nullptr;
+				}
+				return *this;
+			}
+		};
+
+		struct ScopedHook
+		{
+			const pl_hook* hook = nullptr;
+			ScopedHook() = default;
+			explicit ScopedHook(const pl_hook* h) : hook(h) {}
+			~ScopedHook() { Reset(); }
+			void Reset(const pl_hook* h = nullptr)
+			{
+				if (hook)
+					pl_mpv_user_shader_destroy(&hook);
+				hook = h;
+			}
+			operator const pl_hook*() const { return hook; }
+			ScopedHook(const ScopedHook&) = delete;
+			ScopedHook& operator=(const ScopedHook&) = delete;
+		};
+
+		struct ScopedDispatch
+		{
+			pl_dispatch dispatch = nullptr;
+			ScopedDispatch() = default;
+			explicit ScopedDispatch(pl_dispatch d) : dispatch(d) {}
+			~ScopedDispatch() { Reset(); }
+			void Reset(pl_dispatch d = nullptr)
+			{
+				if (dispatch)
+					pl_dispatch_destroy(&dispatch);
+				dispatch = d;
+			}
+			operator pl_dispatch() const { return dispatch; }
+			ScopedDispatch(const ScopedDispatch&) = delete;
+			ScopedDispatch& operator=(const ScopedDispatch&) = delete;
+		};
+
+		struct ScopedModule
+		{
+			AdaptiveDownscale::Module mod;
+			ScopedModule() = default;
+			~ScopedModule() { mod.Release(); }
+			AdaptiveDownscale::Module& operator*() { return mod; }
+			const AdaptiveDownscale::Module& operator*() const { return mod; }
+			AdaptiveDownscale::Module* operator->() { return &mod; }
+			const AdaptiveDownscale::Module* operator->() const { return &mod; }
+			ScopedModule(const ScopedModule&) = delete;
+			ScopedModule& operator=(const ScopedModule&) = delete;
+		};
 	}
 
 	TEST_CLASS(AdaptiveScalingHookTests)
@@ -1899,15 +1999,15 @@ namespace VideoProcessorTest
 			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
 			pl_gpu gpu = fixture.Gpu();
 			std::string log;
-			fixture.CaptureLog(&log);
+			ScopedLogCapture logGuard(fixture, log);
 
 			const std::string ssimSource = LoadBundledShader("SSimDownscaler.glsl");
 			Assert::IsFalse(ssimSource.empty(), L"SSimDownscaler.glsl must load");
-			const pl_hook* ssim = pl_mpv_user_shader_parse(gpu, ssimSource.data(), ssimSource.size());
-			Assert::IsNotNull(ssim, L"SSimDownscaler.glsl must parse");
+			ScopedHook ssim(pl_mpv_user_shader_parse(gpu, ssimSource.data(), ssimSource.size()));
+			Assert::IsNotNull(ssim.hook, L"SSimDownscaler.glsl must parse");
 
-			pl_dispatch dispatch = pl_dispatch_create(fixture.Log(), gpu);
-			Assert::IsNotNull(dispatch, L"pl_dispatch_create failed on WARP");
+			ScopedDispatch dispatch(pl_dispatch_create(fixture.Log(), gpu));
+			Assert::IsNotNull(dispatch.dispatch, L"pl_dispatch_create failed on WARP");
 
 			pl_fmt srcFmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
 				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR));
@@ -1985,9 +2085,9 @@ namespace VideoProcessorTest
 				p[3] = 1.0f;
 			}
 
-			pl_tex cleanTex = makeFloatTex(cleanData);
-			pl_tex overshootTex = makeFloatTex(overshootData);
-			pl_tex nanTex = makeFloatTex(nanData);
+			ScopedTex cleanTex(gpu, makeFloatTex(cleanData));
+			ScopedTex overshootTex(gpu, makeFloatTex(overshootData));
+			ScopedTex nanTex(gpu, makeFloatTex(nanData));
 
 			auto assertAllFinite = [](const std::vector<float>& px, const wchar_t* label)
 			{
@@ -2018,25 +2118,25 @@ namespace VideoProcessorTest
 				edgeTp.sampleable = true;
 				edgeTp.storable = true;
 				edgeTp.host_readable = true;
-				pl_tex edgeDst = pl_tex_create(gpu, &edgeTp);
-				Assert::IsNotNull(edgeDst, L"RG32F edge-map output texture creation failed");
+				ScopedTex edgeDst(gpu, pl_tex_create(gpu, &edgeTp));
+				Assert::IsNotNull(edgeDst.tex, L"RG32F edge-map output texture creation failed");
 
 				pl_color_space pqColor{};
 				pqColor.primaries = PL_COLOR_PRIM_BT_2020;
 				pqColor.transfer = PL_COLOR_TRC_PQ;
 				std::string dispatchWhy;
-				const bool dispatched = Vpv::Regions::DispatchEdgeMapStage(dispatch, overshootTex, pqColor,
-					PL_COLOR_SYSTEM_BT_2020_NC, PL_COLOR_PRIM_BT_2020, edgeDst, dispatchWhy);
+				const bool dispatched = Vpv::Regions::DispatchEdgeMapStage(dispatch.dispatch, overshootTex.tex, pqColor,
+					PL_COLOR_SYSTEM_BT_2020_NC, PL_COLOR_PRIM_BT_2020, edgeDst.tex, dispatchWhy);
 				Assert::IsTrue(dispatched,
 					(L"DispatchEdgeMapStage(PQ) failed on WARP: " + std::wstring(dispatchWhy.begin(), dispatchWhy.end())).c_str());
 				pl_gpu_finish(gpu);
 
 				std::vector<float> edgeRg(static_cast<size_t>(sw) * sh * 2, 0.0f);
 				pl_tex_transfer_params edgeDl{};
-				edgeDl.tex = edgeDst;
+				edgeDl.tex = edgeDst.tex;
 				edgeDl.ptr = edgeRg.data();
 				Assert::IsTrue(pl_tex_download(gpu, &edgeDl), L"RG32F edge-map download failed");
-				pl_tex_destroy(gpu, &edgeDst);
+				edgeDst.Reset();
 
 				assertAllFinite(edgeRg, L"Direct MeasureDomainGlsl (DispatchEdgeMapStage PQ) RG32F output");
 
@@ -2079,11 +2179,11 @@ namespace VideoProcessorTest
 				tp.format = dstFmt;
 				tp.renderable = true;
 				tp.host_readable = true;
-				pl_tex target = pl_tex_create(gpu, &tp);
-				Assert::IsNotNull(target, L"RGBA32F target texture creation failed");
+				ScopedTex target(gpu, pl_tex_create(gpu, &tp));
+				Assert::IsNotNull(target.tex, L"RGBA32F target texture creation failed");
 
 				pl_frame image = TargetLutGpuFixture::MakeRgbFrame(src);
-				pl_frame out = TargetLutGpuFixture::MakeRgbFrame(target);
+				pl_frame out = TargetLutGpuFixture::MakeRgbFrame(target.tex);
 				image.color.transfer = out.color.transfer = trc;
 				image.color.primaries = out.color.primaries = prim;
 
@@ -2096,7 +2196,7 @@ namespace VideoProcessorTest
 				if (advance)
 					++sequence;
 				module.SetFrame(st, sequence, 1.0f / 24.0f);
-				const pl_hook* hooks[3] = { module.Measure(), ssim, module.Blend() };
+				const pl_hook* hooks[3] = { module.Measure(), ssim.hook, module.Blend() };
 				params.hooks = hooks;
 				params.num_hooks = 3;
 
@@ -2108,11 +2208,10 @@ namespace VideoProcessorTest
 				{
 					outPx->assign(static_cast<size_t>(dw) * dh * 4, 0.0f);
 					pl_tex_transfer_params dl{};
-					dl.tex = target;
+					dl.tex = target.tex;
 					dl.ptr = outPx->data();
 					Assert::IsTrue(pl_tex_download(gpu, &dl), L"RGBA32F target download failed");
 				}
-				pl_tex_destroy(gpu, &target);
 			};
 
 			auto noCutSource = [](uint64_t, uint64_t)
@@ -2126,16 +2225,16 @@ namespace VideoProcessorTest
 			// 1. PQ overshoot test: smooth clean frame (state.r = 1.0) -> high-grain PQ overshoot frames
 			//    (with c = 1.00..4.00 past c_pole ~= 1.99206) -> clean frame (no cut).
 			{
-				AdaptiveDownscale::Module module;
-				module.SetCutSource(noCutSource);
+				ScopedModule module;
+				module->SetCutSource(noCutSource);
 				uint64_t sequence = 0;
 				std::vector<float> out2, out3;
 
 				// Frame 1: initialize state cleanly near 1.0 on the smooth PQ surface.
-				renderFrame(module, sequence, cleanTex, PL_COLOR_TRC_PQ, PL_COLOR_PRIM_BT_2020, true, nullptr);
-				renderFrame(module, sequence, cleanTex, PL_COLOR_TRC_PQ, PL_COLOR_PRIM_BT_2020, false, nullptr);
-				renderFrame(module, sequence, cleanTex, PL_COLOR_TRC_PQ, PL_COLOR_PRIM_BT_2020, false, nullptr);
-				const AdaptiveDownscale::Stats stats1 = module.LastStats();
+				renderFrame(*module, sequence, cleanTex, PL_COLOR_TRC_PQ, PL_COLOR_PRIM_BT_2020, true, nullptr);
+				renderFrame(*module, sequence, cleanTex, PL_COLOR_TRC_PQ, PL_COLOR_PRIM_BT_2020, false, nullptr);
+				renderFrame(*module, sequence, cleanTex, PL_COLOR_TRC_PQ, PL_COLOR_PRIM_BT_2020, false, nullptr);
+				const AdaptiveDownscale::Stats stats1 = module->LastStats();
 				Assert::IsTrue(stats1.valid && std::isfinite(stats1.grainScale) && stats1.grainScale > 0.99f,
 					(L"clean PQ Frame 1 must initialize state grainScale near 1.0, got " + std::to_wstring(stats1.grainScale)).c_str());
 
@@ -2143,11 +2242,11 @@ namespace VideoProcessorTest
 				// Over 8 advancing frames (alpha ~= 0.08 toward grainFloor = 0.40), clean grainScale drops to ~0.71 < 0.90;
 				// pre-fix unclamped ad_lin poisons t.x -> NaN -> DXBC smoothstep(NaN) == 0 -> target = 1.0 (stuck at 1.0!).
 				for (int f = 0; f < 8; ++f)
-					renderFrame(module, sequence, overshootTex, PL_COLOR_TRC_PQ, PL_COLOR_PRIM_BT_2020, true, f == 7 ? &out2 : nullptr);
-				renderFrame(module, sequence, overshootTex, PL_COLOR_TRC_PQ, PL_COLOR_PRIM_BT_2020, false, nullptr);
-				renderFrame(module, sequence, overshootTex, PL_COLOR_TRC_PQ, PL_COLOR_PRIM_BT_2020, false, nullptr);
-				const AdaptiveDownscale::Stats stats2 = module.LastStats();
-				Assert::IsTrue(module.Active() && module.Failures() == 0, L"PQ overshoot frame: module must stay active with zero failures");
+					renderFrame(*module, sequence, overshootTex, PL_COLOR_TRC_PQ, PL_COLOR_PRIM_BT_2020, true, f == 7 ? &out2 : nullptr);
+				renderFrame(*module, sequence, overshootTex, PL_COLOR_TRC_PQ, PL_COLOR_PRIM_BT_2020, false, nullptr);
+				renderFrame(*module, sequence, overshootTex, PL_COLOR_TRC_PQ, PL_COLOR_PRIM_BT_2020, false, nullptr);
+				const AdaptiveDownscale::Stats stats2 = module->LastStats();
+				Assert::IsTrue(module->Active() && module->Failures() == 0, L"PQ overshoot frame: module must stay active with zero failures");
 				Assert::IsTrue(stats2.valid, L"PQ overshoot frame: grain state statistics must be read back");
 				Assert::IsTrue(std::isfinite(stats2.grainScale) && stats2.grainScale >= st.grainFloor - 1e-4f && stats2.grainScale <= 1.0f + 1e-4f,
 					(L"PQ overshoot frame: state grainScale must stay finite and in [grainFloor, 1], got " + std::to_wstring(stats2.grainScale)).c_str());
@@ -2159,44 +2258,40 @@ namespace VideoProcessorTest
 				assertAllFinite(out2, L"PQ overshoot frame output");
 
 				// Subsequent clean PQ frame (no cut) must stay finite and uncorrupted.
-				renderFrame(module, sequence, cleanTex, PL_COLOR_TRC_PQ, PL_COLOR_PRIM_BT_2020, true, &out3);
-				renderFrame(module, sequence, cleanTex, PL_COLOR_TRC_PQ, PL_COLOR_PRIM_BT_2020, false, nullptr);
-				renderFrame(module, sequence, cleanTex, PL_COLOR_TRC_PQ, PL_COLOR_PRIM_BT_2020, false, nullptr);
-				const AdaptiveDownscale::Stats stats3 = module.LastStats();
-				Assert::IsTrue(module.Active() && module.Failures() == 0, L"post-overshoot clean PQ frame: module must stay active with zero failures");
+				renderFrame(*module, sequence, cleanTex, PL_COLOR_TRC_PQ, PL_COLOR_PRIM_BT_2020, true, &out3);
+				renderFrame(*module, sequence, cleanTex, PL_COLOR_TRC_PQ, PL_COLOR_PRIM_BT_2020, false, nullptr);
+				renderFrame(*module, sequence, cleanTex, PL_COLOR_TRC_PQ, PL_COLOR_PRIM_BT_2020, false, nullptr);
+				const AdaptiveDownscale::Stats stats3 = module->LastStats();
+				Assert::IsTrue(module->Active() && module->Failures() == 0, L"post-overshoot clean PQ frame: module must stay active with zero failures");
 				Assert::IsTrue(stats3.valid, L"post-overshoot clean PQ frame: statistics must be read back");
 				Assert::IsTrue(std::isfinite(stats3.grainScale) && stats3.grainScale >= st.grainFloor - 1e-4f && stats3.grainScale <= 1.0f + 1e-4f,
 					(L"post-overshoot clean PQ frame: state grainScale must stay finite, got " + std::to_wstring(stats3.grainScale)).c_str());
 				Assert::IsTrue(std::isfinite(stats3.meanW) && stats3.meanW >= 0.0f && stats3.meanW <= st.wBase + 1e-4f,
 					(L"post-overshoot clean PQ frame: state meanW must stay finite, got " + std::to_wstring(stats3.meanW)).c_str());
 				assertAllFinite(out3, L"post-overshoot clean PQ frame output");
-
-				module.Release();
 			}
 
 			// 2. Poisoned-state recovery on WARP:
 			// (a) End-to-end AdaptiveDownscale::Module: clean frame -> NaN-injected frame -> clean frame with cut = false.
 			{
-				AdaptiveDownscale::Module module;
-				module.SetCutSource(noCutSource);
+				ScopedModule module;
+				module->SetCutSource(noCutSource);
 				uint64_t sequence = 0;
 				std::vector<float> recoveredOut;
 
-				renderFrame(module, sequence, cleanTex, PL_COLOR_TRC_GAMMA22, PL_COLOR_PRIM_BT_709, true, nullptr);
-				renderFrame(module, sequence, nanTex, PL_COLOR_TRC_GAMMA22, PL_COLOR_PRIM_BT_709, true, nullptr);
-				renderFrame(module, sequence, cleanTex, PL_COLOR_TRC_GAMMA22, PL_COLOR_PRIM_BT_709, true, &recoveredOut);
-				renderFrame(module, sequence, cleanTex, PL_COLOR_TRC_GAMMA22, PL_COLOR_PRIM_BT_709, false, nullptr);
-				renderFrame(module, sequence, cleanTex, PL_COLOR_TRC_GAMMA22, PL_COLOR_PRIM_BT_709, false, nullptr);
-				const AdaptiveDownscale::Stats recovered = module.LastStats();
-				Assert::IsTrue(module.Active() && module.Failures() == 0, L"NaN recovery frame: module must stay active with zero failures");
+				renderFrame(*module, sequence, cleanTex, PL_COLOR_TRC_GAMMA22, PL_COLOR_PRIM_BT_709, true, nullptr);
+				renderFrame(*module, sequence, nanTex, PL_COLOR_TRC_GAMMA22, PL_COLOR_PRIM_BT_709, true, nullptr);
+				renderFrame(*module, sequence, cleanTex, PL_COLOR_TRC_GAMMA22, PL_COLOR_PRIM_BT_709, true, &recoveredOut);
+				renderFrame(*module, sequence, cleanTex, PL_COLOR_TRC_GAMMA22, PL_COLOR_PRIM_BT_709, false, nullptr);
+				renderFrame(*module, sequence, cleanTex, PL_COLOR_TRC_GAMMA22, PL_COLOR_PRIM_BT_709, false, nullptr);
+				const AdaptiveDownscale::Stats recovered = module->LastStats();
+				Assert::IsTrue(module->Active() && module->Failures() == 0, L"NaN recovery frame: module must stay active with zero failures");
 				Assert::IsTrue(recovered.valid, L"NaN recovery frame: statistics must be read back");
 				Assert::IsTrue(std::isfinite(recovered.grainScale) && recovered.grainScale >= st.grainFloor - 1e-4f && recovered.grainScale <= 1.0f + 1e-4f,
 					(L"NaN recovery frame: FINAL_BODY_B must recover finite grainScale, got " + std::to_wstring(recovered.grainScale)).c_str());
 				Assert::IsTrue(std::isfinite(recovered.meanW) && recovered.meanW >= 0.0f && recovered.meanW <= st.wBase + 1e-4f,
 					(L"NaN recovery frame: meanW must recover finite, got " + std::to_wstring(recovered.meanW)).c_str());
 				assertAllFinite(recoveredOut, L"NaN recovery clean frame output");
-
-				module.Release();
 			}
 
 			// (b) Direct WARP GPU poisoned-state proof of the real production FINAL_BODY_B extracted from
@@ -2267,8 +2362,8 @@ namespace VideoProcessorTest
 				partialTp.format = srcFmt;
 				partialTp.sampleable = true;
 				partialTp.initial_data = partialInit;
-				pl_tex partialTex = pl_tex_create(gpu, &partialTp);
-				Assert::IsNotNull(partialTex, L"1x1 RGBA32F partial_in texture creation failed");
+				ScopedTex partialTex(gpu, pl_tex_create(gpu, &partialTp));
+				Assert::IsNotNull(partialTex.tex, L"1x1 RGBA32F partial_in texture creation failed");
 
 				pl_tex_params stateTp{};
 				stateTp.w = 1;
@@ -2278,8 +2373,8 @@ namespace VideoProcessorTest
 				stateTp.storable = true;
 				stateTp.host_writable = true;
 				stateTp.host_readable = true;
-				pl_tex stateTex = pl_tex_create(gpu, &stateTp);
-				Assert::IsNotNull(stateTex, L"1x1 RGBA32F state_io texture creation failed");
+				ScopedTex stateTex(gpu, pl_tex_create(gpu, &stateTp));
+				Assert::IsNotNull(stateTex.tex, L"1x1 RGBA32F state_io texture creation failed");
 
 				pl_tex_params statsTp{};
 				statsTp.w = 1;
@@ -2288,32 +2383,32 @@ namespace VideoProcessorTest
 				statsTp.sampleable = true;
 				statsTp.storable = true;
 				statsTp.host_readable = true;
-				pl_tex statsTex = pl_tex_create(gpu, &statsTp);
-				Assert::IsNotNull(statsTex, L"1x1 RGBA32F ad_stats_img texture creation failed");
+				ScopedTex statsTex(gpu, pl_tex_create(gpu, &statsTp));
+				Assert::IsNotNull(statsTex.tex, L"1x1 RGBA32F ad_stats_img texture creation failed");
 
 				auto dispatchFinalOnPoisonedState = [&](const std::string& headerText, const std::string& bodyText,
 					const char* desc, float outState[4], float outStats[4])
 				{
 					float poisonedState[4] = { std::numeric_limits<float>::quiet_NaN(), 0.0f, 0.0f, 1.0f };
 					pl_tex_transfer_params up{};
-					up.tex = stateTex;
+					up.tex = stateTex.tex;
 					up.ptr = poisonedState;
 					Assert::IsTrue(pl_tex_upload(gpu, &up), L"RGBA32F poisoned state upload failed");
 
 					pl_shader_desc d[3]{};
 					d[0].desc.name = "partial_in";
 					d[0].desc.type = PL_DESC_SAMPLED_TEX;
-					d[0].binding.object = partialTex;
+					d[0].binding.object = partialTex.tex;
 					d[0].binding.address_mode = PL_TEX_ADDRESS_CLAMP;
 					d[0].binding.sample_mode = PL_TEX_SAMPLE_NEAREST;
 					d[1].desc.name = "state_io";
 					d[1].desc.type = PL_DESC_STORAGE_IMG;
 					d[1].desc.access = PL_DESC_ACCESS_READWRITE;
-					d[1].binding.object = stateTex;
+					d[1].binding.object = stateTex.tex;
 					d[2].desc.name = "ad_stats_img";
 					d[2].desc.type = PL_DESC_STORAGE_IMG;
 					d[2].desc.access = PL_DESC_ACCESS_WRITEONLY;
-					d[2].binding.object = statsTex;
+					d[2].binding.object = statsTex.tex;
 
 					const float writeStatsF = 1.0f;
 					const float advanceF = 1.0f;
@@ -2344,10 +2439,10 @@ namespace VideoProcessorTest
 					custom.compute_group_size[0] = 16;
 					custom.compute_group_size[1] = 16;
 
-					pl_shader sh = pl_dispatch_begin(dispatch);
+					pl_shader sh = pl_dispatch_begin(dispatch.dispatch);
 					const bool customOk = pl_shader_custom(sh, &custom);
 					if (!customOk)
-						pl_dispatch_abort(dispatch, &sh);
+						pl_dispatch_abort(dispatch.dispatch, &sh);
 					Assert::IsTrue(customOk, L"pl_shader_custom failed for poisoned-state FINAL_BODY_B test");
 
 					pl_dispatch_compute_params compute{};
@@ -2355,16 +2450,16 @@ namespace VideoProcessorTest
 					compute.dispatch_size[0] = 1;
 					compute.dispatch_size[1] = 1;
 					compute.dispatch_size[2] = 1;
-					Assert::IsTrue(pl_dispatch_compute(dispatch, &compute), L"pl_dispatch_compute failed for poisoned-state FINAL_BODY_B test");
+					Assert::IsTrue(pl_dispatch_compute(dispatch.dispatch, &compute), L"pl_dispatch_compute failed for poisoned-state FINAL_BODY_B test");
 					pl_gpu_finish(gpu);
 
 					pl_tex_transfer_params stateDl{};
-					stateDl.tex = stateTex;
+					stateDl.tex = stateTex.tex;
 					stateDl.ptr = outState;
 					Assert::IsTrue(pl_tex_download(gpu, &stateDl), L"RGBA32F state_io download failed");
 
 					pl_tex_transfer_params statsDl{};
-					statsDl.tex = statsTex;
+					statsDl.tex = statsTex.tex;
 					statsDl.ptr = outStats;
 					Assert::IsTrue(pl_tex_download(gpu, &statsDl), L"RGBA32F ad_stats_img download failed");
 				};
@@ -2404,9 +2499,6 @@ namespace VideoProcessorTest
 				Assert::IsTrue(unhealedState[3] < 1.5f,
 					(L"WARP negative control: pre-fix ordered prev.r < 0.0 must not signal cut on NaN, got state.a=" +
 						std::to_wstring(unhealedState[3])).c_str());
-
-				for (pl_tex* t : { &partialTex, &stateTex, &statsTex })
-					pl_tex_destroy(gpu, t);
 			}
 
 			// 3. MANDATORY IN-TEST NEGATIVE CONTROLS (CPU float32 math):
@@ -2429,11 +2521,12 @@ namespace VideoProcessorTest
 			Assert::IsFalse(std::isfinite(nan + 0.1f * (1.0f - nan)),
 				L"negative control: unguarded one-pole mix(NaN, target, alpha) remains non-finite");
 
-			pl_dispatch_destroy(&dispatch);
-			for (pl_tex* t : { &cleanTex, &overshootTex, &nanTex })
-				pl_tex_destroy(gpu, t);
-			pl_mpv_user_shader_destroy(&ssim);
-			fixture.CaptureLog(nullptr);
+			dispatch.Reset();
+			nanTex.Reset();
+			overshootTex.Reset();
+			cleanTex.Reset();
+			ssim.Reset();
+			logGuard.Release();
 			AssertCleanLibplaceboLog(log);
 			Assert::AreEqual(0, pl_renderer_get_errors(fixture.Renderer()).num_disabled_hooks, L"A hook was disabled");
 		}
@@ -3269,12 +3362,12 @@ namespace VideoProcessorTest
 			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
 			pl_gpu gpu = fixture.Gpu();
 			std::string log;
-			fixture.CaptureLog(&log);
+			ScopedLogCapture logGuard(fixture, log);
 
 			const std::string ssimSource = LoadBundledShader("SSimDownscaler.glsl");
 			Assert::IsFalse(ssimSource.empty(), L"SSimDownscaler.glsl must load");
-			const pl_hook* ssim = pl_mpv_user_shader_parse(gpu, ssimSource.data(), ssimSource.size());
-			Assert::IsNotNull(ssim, L"SSimDownscaler.glsl must parse");
+			ScopedHook ssim(pl_mpv_user_shader_parse(gpu, ssimSource.data(), ssimSource.size()));
+			Assert::IsNotNull(ssim.hook, L"SSimDownscaler.glsl must parse");
 
 			pl_fmt srcFmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
 				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR));
@@ -3298,8 +3391,8 @@ namespace VideoProcessorTest
 			stp.format = srcFmt;
 			stp.sampleable = true;
 			stp.initial_data = srcData.data();
-			pl_tex srcTex = pl_tex_create(gpu, &stp);
-			Assert::IsNotNull(srcTex, L"RGBA32F source texture creation failed");
+			ScopedTex srcTex(gpu, pl_tex_create(gpu, &stp));
+			Assert::IsNotNull(srcTex.tex, L"RGBA32F source texture creation failed");
 
 			auto makeUniformGrid = [&](float r, float g, float b, float a) -> pl_tex
 			{
@@ -3323,11 +3416,11 @@ namespace VideoProcessorTest
 			};
 
 			// Zero-motion trusted field (f.z = 1.0 > 0.5), frameTrust = 1.0 >= minTrustedShare (0.25).
-			pl_tex fieldTex = makeUniformGrid(0.0f, 0.0f, 1.0f, 0.0f);
+			ScopedTex fieldTex(gpu, makeUniformGrid(0.0f, 0.0f, 1.0f, 0.0f));
 			// Heavy-grain error (ge.r = 20.0 -> energy ~= 126.6 >> grainHi = 8.0 -> target = grainFloor = 0.40).
-			pl_tex heavyErrorTex = makeUniformGrid(20.0f, 127.5f, 0.0f, 1.0f);
+			ScopedTex heavyErrorTex(gpu, makeUniformGrid(20.0f, 127.5f, 0.0f, 1.0f));
 			// Clean error (ge.r = 0.0 -> energy = 0.0 < grainLo = 2.0 -> target = 1.0).
-			pl_tex cleanErrorTex = makeUniformGrid(0.0f, 127.5f, 0.0f, 1.0f);
+			ScopedTex cleanErrorTex(gpu, makeUniformGrid(0.0f, 127.5f, 0.0f, 1.0f));
 
 			const float trustVal = 1.0f;
 			pl_tex_params trp{};
@@ -3336,8 +3429,8 @@ namespace VideoProcessorTest
 			trp.format = trustFmt;
 			trp.sampleable = true;
 			trp.initial_data = &trustVal;
-			pl_tex trustTex = pl_tex_create(gpu, &trp);
-			Assert::IsNotNull(trustTex, L"frame trust texture creation failed");
+			ScopedTex trustTex(gpu, pl_tex_create(gpu, &trp));
+			Assert::IsNotNull(trustTex.tex, L"frame trust texture creation failed");
 
 			AdaptiveDownscale::Settings st;
 			st.grainMap = true;
@@ -3363,11 +3456,11 @@ namespace VideoProcessorTest
 				tp.format = dstFmt;
 				tp.renderable = true;
 				tp.host_readable = true;
-				pl_tex target = pl_tex_create(gpu, &tp);
-				Assert::IsNotNull(target, L"RGBA32F target texture creation failed");
+				ScopedTex target(gpu, pl_tex_create(gpu, &tp));
+				Assert::IsNotNull(target.tex, L"RGBA32F target texture creation failed");
 
-				pl_frame image = TargetLutGpuFixture::MakeRgbFrame(srcTex);
-				pl_frame out = TargetLutGpuFixture::MakeRgbFrame(target);
+				pl_frame image = TargetLutGpuFixture::MakeRgbFrame(srcTex.tex);
+				pl_frame out = TargetLutGpuFixture::MakeRgbFrame(target.tex);
 				image.color.transfer = out.color.transfer = PL_COLOR_TRC_GAMMA22;
 				image.color.primaries = out.color.primaries = PL_COLOR_PRIM_BT_709;
 
@@ -3380,19 +3473,19 @@ namespace VideoProcessorTest
 				module.SetFrame(st, seq, 1.0f / 24.0f);
 				AdaptiveDownscale::GrainField gf;
 				gf.error = errorTex;
-				gf.field = fieldTex;
-				gf.frameTrust = trustTex;
+				gf.field = fieldTex.tex;
+				gf.frameTrust = trustTex.tex;
 				gf.minTrustedShare = 0.25f;
 				gf.sourceCrop = { 0.0f, 0.0f, static_cast<float>(sw), static_cast<float>(sh) };
 				module.SetGrainField(gf);
 
-				const pl_hook* hooks[3] = { module.Measure(), ssim, module.Blend() };
+				const pl_hook* hooks[3] = { module.Measure(), ssim.hook, module.Blend() };
 				params.hooks = hooks;
 				params.num_hooks = 3;
 
 				const bool ok = pl_render_image(fixture.Renderer(), &image, &out, &params);
 				pl_gpu_finish(gpu);
-				pl_tex_destroy(gpu, &target);
+				target.Reset();
 				Assert::IsTrue(ok, L"pl_render_image failed on WARP");
 				Assert::IsTrue(module.Active() && module.Failures() == 0,
 					L"AdaptiveDownscale module must be active with zero failures");
@@ -3439,21 +3532,19 @@ namespace VideoProcessorTest
 			//    Frame 1 initializes grainMap.r at grainFloor (~0.40); after the sequence gap to seq = 5 with a clean
 			//    grainField, UpdateMap must treat it as first_map = 1 and snap cleanly to 1.0 (>= 0.99), NOT smooth from 0.40.
 			{
-				AdaptiveDownscale::Module gapMod;
-				gapMod.hostReadableMap = true;
-				gapMod.SetCutSource(noCutSource);
+				ScopedModule gapMod;
+				gapMod->hostReadableMap = true;
+				gapMod->SetCutSource(noCutSource);
 
-				renderFrame(gapMod, 1, heavyErrorTex);
-				checkGrainMapRange(gapMod, 0.35f, 0.45f, L"sequence-gap Frame seq=1 (heavy grain)");
+				renderFrame(*gapMod, 1, heavyErrorTex.tex);
+				checkGrainMapRange(*gapMod, 0.35f, 0.45f, L"sequence-gap Frame seq=1 (heavy grain)");
 
-				renderFrame(gapMod, 5, cleanErrorTex);
-				checkGrainMapRange(gapMod, 0.99f, 1.001f, L"sequence-gap Frame seq=5 (clean after 1->5 gap must snap to 1.0)");
+				renderFrame(*gapMod, 5, cleanErrorTex.tex);
+				checkGrainMapRange(*gapMod, 0.99f, 1.001f, L"sequence-gap Frame seq=5 (clean after 1->5 gap must snap to 1.0)");
 
 				// Backward sequence discontinuity (5 -> 3, 3 != 5 + 1, cut = false): must also snap cleanly back to floor.
-				renderFrame(gapMod, 3, heavyErrorTex);
-				checkGrainMapRange(gapMod, 0.35f, 0.45f, L"sequence-gap Frame seq=3 (heavy grain after 5->3 backward gap must snap to floor)");
-
-				gapMod.Release();
+				renderFrame(*gapMod, 3, heavyErrorTex.tex);
+				checkGrainMapRange(*gapMod, 0.35f, 0.45f, L"sequence-gap Frame seq=3 (heavy grain after 5->3 backward gap must snap to floor)");
 			}
 
 			// 2. MANDATORY IN-TEST NEGATIVE CONTROL (exact same Frame 1 -> Frame 2 inputs with CONSECUTIVE seq = 1 -> seq = 2,
@@ -3461,24 +3552,25 @@ namespace VideoProcessorTest
 			//    toward 1.0 (~0.448, strictly > 0.41 and < 0.70), NOT snap — proving smoothing is active and the snap in
 			//    Step 1 is caused strictly by the sequence gap.
 			{
-				AdaptiveDownscale::Module consecMod;
-				consecMod.hostReadableMap = true;
-				consecMod.SetCutSource(noCutSource);
+				ScopedModule consecMod;
+				consecMod->hostReadableMap = true;
+				consecMod->SetCutSource(noCutSource);
 
-				renderFrame(consecMod, 1, heavyErrorTex);
-				checkGrainMapRange(consecMod, 0.35f, 0.45f, L"negative control Frame seq=1 (heavy grain)");
+				renderFrame(*consecMod, 1, heavyErrorTex.tex);
+				checkGrainMapRange(*consecMod, 0.35f, 0.45f, L"negative control Frame seq=1 (heavy grain)");
 
-				renderFrame(consecMod, 2, cleanErrorTex);
-				checkGrainMapRange(consecMod, st.grainFloor + 0.01f, 0.70f,
+				renderFrame(*consecMod, 2, cleanErrorTex.tex);
+				checkGrainMapRange(*consecMod, st.grainFloor + 0.01f, 0.70f,
 					L"negative control Frame seq=2 (consecutive clean must smooth slowly from 0.40, not snap)");
-
-				consecMod.Release();
 			}
 
-			for (pl_tex* t : { &srcTex, &fieldTex, &heavyErrorTex, &cleanErrorTex, &trustTex })
-				pl_tex_destroy(gpu, t);
-			pl_mpv_user_shader_destroy(&ssim);
-			fixture.CaptureLog(nullptr);
+			trustTex.Reset();
+			cleanErrorTex.Reset();
+			heavyErrorTex.Reset();
+			fieldTex.Reset();
+			srcTex.Reset();
+			ssim.Reset();
+			logGuard.Release();
 			AssertCleanLibplaceboLog(log);
 			Assert::AreEqual(0, pl_renderer_get_errors(fixture.Renderer()).num_disabled_hooks, L"A hook was disabled");
 		}
@@ -3501,12 +3593,12 @@ namespace VideoProcessorTest
 			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
 			pl_gpu gpu = fixture.Gpu();
 			std::string log;
-			fixture.CaptureLog(&log);
+			ScopedLogCapture logGuard(fixture, log);
 
 			const std::string ssimSource = LoadBundledShader("SSimDownscaler.glsl");
 			Assert::IsFalse(ssimSource.empty(), L"SSimDownscaler.glsl must load");
-			const pl_hook* ssim = pl_mpv_user_shader_parse(gpu, ssimSource.data(), ssimSource.size());
-			Assert::IsNotNull(ssim, L"SSimDownscaler.glsl must parse");
+			ScopedHook ssim(pl_mpv_user_shader_parse(gpu, ssimSource.data(), ssimSource.size()));
+			Assert::IsNotNull(ssim.hook, L"SSimDownscaler.glsl must parse");
 
 			pl_fmt rgba32fSample = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
 				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR));
@@ -3566,8 +3658,8 @@ namespace VideoProcessorTest
 			stp.format = rgba32fSample;
 			stp.sampleable = true;
 			stp.initial_data = srcRgba.data();
-			pl_tex srcTex = pl_tex_create(gpu, &stp);
-			Assert::IsNotNull(srcTex, L"RGBA32F source texture creation failed");
+			ScopedTex srcTex(gpu, pl_tex_create(gpu, &stp));
+			Assert::IsNotNull(srcTex.tex, L"RGBA32F source texture creation failed");
 
 			AdaptiveDownscale::Settings st;
 			st.wBase = 1.0f;
@@ -4023,11 +4115,11 @@ if (q.x < size.x && q.y < size.y) {
 				tp.format = rgba32fTarget;
 				tp.renderable = true;
 				tp.host_readable = true;
-				pl_tex target = pl_tex_create(gpu, &tp);
-				Assert::IsNotNull(target, L"RGBA32F target creation failed");
-				pl_frame image = TargetLutGpuFixture::MakeRgbFrame(srcTex);
+				ScopedTex target(gpu, pl_tex_create(gpu, &tp));
+				Assert::IsNotNull(target.tex, L"RGBA32F target creation failed");
+				pl_frame image = TargetLutGpuFixture::MakeRgbFrame(srcTex.tex);
 				image.crop = crop;
-				pl_frame out = TargetLutGpuFixture::MakeRgbFrame(target);
+				pl_frame out = TargetLutGpuFixture::MakeRgbFrame(target.tex);
 				image.color.transfer = out.color.transfer = PL_COLOR_TRC_GAMMA22;
 				image.color.primaries = out.color.primaries = PL_COLOR_PRIM_BT_709;
 				pl_render_params params = pl_render_default_params;
@@ -4043,10 +4135,9 @@ if (q.x < size.x && q.y < size.y) {
 				Assert::IsTrue(ok, L"pl_render_image failed on WARP");
 				std::vector<float> px(static_cast<size_t>(dw) * dh * 4, 0.0f);
 				pl_tex_transfer_params dl{};
-				dl.tex = target;
+				dl.tex = target.tex;
 				dl.ptr = px.data();
 				Assert::IsTrue(pl_tex_download(gpu, &dl), L"target download failed");
-				pl_tex_destroy(gpu, &target);
 				return px;
 			};
 
@@ -4087,22 +4178,22 @@ if (q.x < size.x && q.y < size.y) {
 						std::to_wstring(cpuRef.grainScale)).c_str());
 
 				// Production AdaptiveDownscale::Module (tiled ad_tile[18][18] measure pass).
-				AdaptiveDownscale::Module mod;
-				mod.SetCutSource(noCutSource);
-				mod.SetFrame(st, 1, 1.0f / 24.0f);
-				const std::vector<float> modPx = renderHooks(mod.Measure(), ssim, mod.Blend(), cc.crop, cc.dw, cc.dh);
-				Assert::IsTrue(mod.Active() && mod.Failures() == 0,
+				ScopedModule mod;
+				mod->SetCutSource(noCutSource);
+				mod->SetFrame(st, 1, 1.0f / 24.0f);
+				const std::vector<float> modPx = renderHooks(mod->Measure(), ssim.hook, mod->Blend(), cc.crop, cc.dw, cc.dh);
+				Assert::IsTrue(mod->Active() && mod->Failures() == 0,
 					(std::wstring(cc.label) + L"AdaptiveDownscale::Module must succeed").c_str());
 				// Poll stats on non-advancing repeats (seq stays 1 -> advance == 0).
 				for (int rep = 0; rep < 3; ++rep)
-					renderHooks(mod.Measure(), ssim, mod.Blend(), cc.crop, cc.dw, cc.dh);
-				const AdaptiveDownscale::Stats modStats = mod.LastStats();
+					renderHooks(mod->Measure(), ssim.hook, mod->Blend(), cc.crop, cc.dw, cc.dh);
+				const AdaptiveDownscale::Stats modStats = mod->LastStats();
 				Assert::IsTrue(modStats.valid, (std::wstring(cc.label) + L"LastStats must become valid").c_str());
 
 				// Independent un-tiled direct-texelFetch GPU reference on exact same input & crop.
 				ReferenceMeasureHook untiledRef;
 				untiledRef.Init(gpu, st, false, rg32fStore, r16fEdge, rgba32fStoreRead, 0x5650544553543100ull + uint64_t(ci) * 4ull);
-				const std::vector<float> refPx = renderHooks(&untiledRef.measureHook, ssim, &untiledRef.blendHook, cc.crop, cc.dw, cc.dh);
+				const std::vector<float> refPx = renderHooks(&untiledRef.measureHook, ssim.hook, &untiledRef.blendHook, cc.crop, cc.dw, cc.dh);
 				float refStateVals[4] = {};
 				pl_tex_transfer_params sdl{};
 				sdl.tex = untiledRef.state;
@@ -4144,7 +4235,7 @@ if (q.x < size.x && q.y < size.y) {
 
 					ReferenceMeasureHook noHaloRef;
 					noHaloRef.Init(gpu, st, true, rg32fStore, r16fEdge, rgba32fStoreRead, 0x5650544553543200ull);
-					const std::vector<float> noHaloPx = renderHooks(&noHaloRef.measureHook, ssim, &noHaloRef.blendHook, cc.crop, cc.dw, cc.dh);
+					const std::vector<float> noHaloPx = renderHooks(&noHaloRef.measureHook, ssim.hook, &noHaloRef.blendHook, cc.crop, cc.dw, cc.dh);
 					float nhStateVals[4] = {};
 					pl_tex_transfer_params nhdl{};
 					nhdl.tex = noHaloRef.state;
@@ -4168,12 +4259,12 @@ if (q.x < size.x && q.y < size.y) {
 				}
 
 				untiledRef.Release();
-				mod.Release();
+				mod->Release();
 			}
 
-			pl_tex_destroy(gpu, &srcTex);
-			pl_mpv_user_shader_destroy(&ssim);
-			fixture.CaptureLog(nullptr);
+			srcTex.Reset();
+			ssim.Reset();
+			logGuard.Release();
 			AssertCleanLibplaceboLog(log);
 			Assert::AreEqual(0, pl_renderer_get_errors(fixture.Renderer()).num_disabled_hooks, L"A hook was disabled");
 		}
@@ -4193,7 +4284,7 @@ if (q.x < size.x && q.y < size.y) {
 			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
 			pl_gpu gpu = fixture.Gpu();
 			std::string log;
-			fixture.CaptureLog(&log);
+			ScopedLogCapture logGuard(fixture, log);
 
 			pl_fmt rgba32fSample = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
 				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR));
@@ -4227,8 +4318,8 @@ if (q.x < size.x && q.y < size.y) {
 			stp.format = rgba32fSample;
 			stp.sampleable = true;
 			stp.initial_data = srcData.data();
-			pl_tex srcTex = pl_tex_create(gpu, &stp);
-			Assert::IsNotNull(srcTex, L"source texture creation failed");
+			ScopedTex srcTex(gpu, pl_tex_create(gpu, &stp));
+			Assert::IsNotNull(srcTex.tex, L"source texture creation failed");
 
 			auto makeUniformGrid = [&](float r, float g, float b, float a) -> pl_tex
 			{
@@ -4250,8 +4341,8 @@ if (q.x < size.x && q.y < size.y) {
 				Assert::IsNotNull(tex, L"grid texture creation failed");
 				return tex;
 			};
-			pl_tex fieldTex = makeUniformGrid(0.0f, 0.0f, 1.0f, 0.0f);
-			pl_tex errorTex = makeUniformGrid(10.0f, 127.5f, 0.0f, 1.0f);
+			ScopedTex fieldTex(gpu, makeUniformGrid(0.0f, 0.0f, 1.0f, 0.0f));
+			ScopedTex errorTex(gpu, makeUniformGrid(10.0f, 127.5f, 0.0f, 1.0f));
 			const float trustVal = 1.0f;
 			pl_tex_params trp{};
 			trp.w = 1;
@@ -4259,8 +4350,8 @@ if (q.x < size.x && q.y < size.y) {
 			trp.format = trustFmt;
 			trp.sampleable = true;
 			trp.initial_data = &trustVal;
-			pl_tex trustTex = pl_tex_create(gpu, &trp);
-			Assert::IsNotNull(trustTex, L"frame trust texture creation failed");
+			ScopedTex trustTex(gpu, pl_tex_create(gpu, &trp));
+			Assert::IsNotNull(trustTex.tex, L"frame trust texture creation failed");
 
 			AdaptiveDownscale::Settings st;
 			st.motionStrength = 1.0f;
@@ -4302,11 +4393,11 @@ if (q.x < size.x && q.y < size.y) {
 				tp.format = rgba32fTarget;
 				tp.renderable = true;
 				tp.host_readable = true;
-				pl_tex target = pl_tex_create(gpu, &tp);
-				Assert::IsNotNull(target, L"RGBA32F target creation failed");
+				ScopedTex target(gpu, pl_tex_create(gpu, &tp));
+				Assert::IsNotNull(target.tex, L"RGBA32F target creation failed");
 
-				pl_frame image = TargetLutGpuFixture::MakeRgbFrame(srcTex);
-				pl_frame out = TargetLutGpuFixture::MakeRgbFrame(target);
+				pl_frame image = TargetLutGpuFixture::MakeRgbFrame(srcTex.tex);
+				pl_frame out = TargetLutGpuFixture::MakeRgbFrame(target.tex);
 				image.color.transfer = out.color.transfer = PL_COLOR_TRC_GAMMA22;
 				image.color.primaries = out.color.primaries = PL_COLOR_PRIM_BT_709;
 
@@ -4332,16 +4423,16 @@ if (q.x < size.x && q.y < size.y) {
 					mod->SetUpscale(up);
 
 					AdaptiveDownscale::Motion mot;
-					mot.field = fieldTex;
-					mot.frameTrust = trustTex;
+					mot.field = fieldTex.tex;
+					mot.frameTrust = trustTex.tex;
 					mot.minTrustedShare = 0.25f;
 					mot.sourceCrop = { 0.0f, 0.0f, static_cast<float>(sw), static_cast<float>(sh) };
 					mod->SetMotion(mot);
 
 					AdaptiveDownscale::GrainField gf;
-					gf.error = errorTex;
-					gf.field = fieldTex;
-					gf.frameTrust = trustTex;
+					gf.error = errorTex.tex;
+					gf.field = fieldTex.tex;
+					gf.frameTrust = trustTex.tex;
 					gf.minTrustedShare = 0.25f;
 					gf.sourceCrop = { 0.0f, 0.0f, static_cast<float>(sw), static_cast<float>(sh) };
 					mod->SetGrainField(gf);
@@ -4370,10 +4461,9 @@ if (q.x < size.x && q.y < size.y) {
 
 				std::vector<float> px(static_cast<size_t>(ow) * oh * 4, 0.0f);
 				pl_tex_transfer_params dl{};
-				dl.tex = target;
+				dl.tex = target.tex;
 				dl.ptr = px.data();
 				Assert::IsTrue(pl_tex_download(gpu, &dl), L"target download failed");
-				pl_tex_destroy(gpu, &target);
 				return px;
 			};
 
@@ -4381,22 +4471,21 @@ if (q.x < size.x && q.y < size.y) {
 			const std::vector<float> bilinearOnlyPx = renderUpscale(nullptr, 0, 192, 96, false, 0.0f, nullptr, nullptr);
 			std::vector<float> faithfulOnlyPx;
 			{
-				AdaptiveDownscale::Module refMod;
-				refMod.SetCutSource(noCutSource);
-				faithfulOnlyPx = renderUpscale(&refMod, 1, 192, 96, false, 0.0f, nullptr, nullptr);
-				Assert::IsTrue(refMod.Active() && refMod.Failures() == 0, L"faithful-only reference must succeed");
-				refMod.Release();
+				ScopedModule refMod;
+				refMod->SetCutSource(noCutSource);
+				faithfulOnlyPx = renderUpscale(&(*refMod), 1, 192, 96, false, 0.0f, nullptr, nullptr);
+				Assert::IsTrue(refMod->Active() && refMod->Failures() == 0, L"faithful-only reference must succeed");
 			}
 
 			// 1. Fresh AdaptiveDownscale::Module on one-axis upscale (128x96 -> 192x96, oneAxis = true, cnnResidualStabilise = false):
 			//    MUST skip all measure/edge/state/grain-map/motion-map passes (only faithful ScalerPass in Measure() + Blend()).
-			AdaptiveDownscale::Module mod;
-			mod.SetCutSource(noCutSource);
+			ScopedModule mod;
+			mod->SetCutSource(noCutSource);
 			HookDispatchRecord oneAxisMeasure, oneAxisBlend;
-			const std::vector<float> oneAxisPx = renderUpscale(&mod, 1, 192, 96, true, 1.0f, &oneAxisMeasure, &oneAxisBlend);
-			Assert::IsTrue(mod.Active() && mod.Failures() == 0,
+			const std::vector<float> oneAxisPx = renderUpscale(&(*mod), 1, 192, 96, true, 1.0f, &oneAxisMeasure, &oneAxisBlend);
+			Assert::IsTrue(mod->Active() && mod->Failures() == 0,
 				L"one-axis upscale must remain active with zero failures");
-			Assert::AreEqual(1, mod.LastUpscaleRatio(), L"one-axis upscale must operate at 1x base ratio");
+			Assert::AreEqual(1, mod->LastUpscaleRatio(), L"one-axis upscale must operate at 1x base ratio");
 			Assert::AreEqual(1, oneAxisMeasure.count,
 				(L"one-axis upscale Measure() must dispatch ONLY the faithful scaler pass (1), got " +
 					std::to_wstring(oneAxisMeasure.count)).c_str());
@@ -4420,10 +4509,10 @@ if (q.x < size.x && q.y < size.y) {
 			// 2. MANDATORY IN-TEST NEGATIVE CONTROL (exact same module, settings, Motion, and GrainField with
 			//    upscale.oneAxis = false, two-axis 128x96 -> 192x144): measure/edge/state/motion passes MUST dispatch.
 			HookDispatchRecord twoAxisMeasure, twoAxisBlend;
-			renderUpscale(&mod, 2, 192, 144, false, 1.0f, &twoAxisMeasure, &twoAxisBlend);
-			Assert::IsTrue(mod.Active() && mod.Failures() == 0,
+			renderUpscale(&(*mod), 2, 192, 144, false, 1.0f, &twoAxisMeasure, &twoAxisBlend);
+			Assert::IsTrue(mod->Active() && mod->Failures() == 0,
 				L"two-axis negative control must remain active with zero failures");
-			Assert::IsTrue(mod.LastMotionState() == AdaptiveDownscale::MotionState::Used,
+			Assert::IsTrue(mod->LastMotionState() == AdaptiveDownscale::MotionState::Used,
 				L"two-axis negative control must build and use the motion map");
 
 			const int oneAxisTotal = oneAxisMeasure.count + oneAxisBlend.count;
@@ -4439,10 +4528,12 @@ if (q.x < size.x && q.y < size.y) {
 				twoAxisMeasure.HasPassContaining("motion-adapted"),
 				L"negative control (two-axis): Measure() must dispatch edge, cut state, and motion-adapted passes");
 
-			mod.Release();
-			for (pl_tex* t : { &srcTex, &fieldTex, &errorTex, &trustTex })
-				pl_tex_destroy(gpu, t);
-			fixture.CaptureLog(nullptr);
+			mod->Release();
+			trustTex.Reset();
+			errorTex.Reset();
+			fieldTex.Reset();
+			srcTex.Reset();
+			logGuard.Release();
 			AssertCleanLibplaceboLog(log);
 			Assert::AreEqual(0, pl_renderer_get_errors(fixture.Renderer()).num_disabled_hooks, L"A hook was disabled");
 		}
@@ -4462,12 +4553,12 @@ if (q.x < size.x && q.y < size.y) {
 			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
 			pl_gpu gpu = fixture.Gpu();
 			std::string log;
-			fixture.CaptureLog(&log);
+			ScopedLogCapture logGuard(fixture, log);
 
 			const std::string ssimSource = LoadBundledShader("SSimDownscaler.glsl");
 			Assert::IsFalse(ssimSource.empty(), L"SSimDownscaler.glsl must load");
-			const pl_hook* ssim = pl_mpv_user_shader_parse(gpu, ssimSource.data(), ssimSource.size());
-			Assert::IsNotNull(ssim, L"SSimDownscaler.glsl must parse");
+			ScopedHook ssim(pl_mpv_user_shader_parse(gpu, ssimSource.data(), ssimSource.size()));
+			Assert::IsNotNull(ssim.hook, L"SSimDownscaler.glsl must parse");
 
 			pl_fmt rgba32fSample = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
 				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR));
@@ -4504,8 +4595,8 @@ if (q.x < size.x && q.y < size.y) {
 			stp.format = rgba32fSample;
 			stp.sampleable = true;
 			stp.initial_data = srcData.data();
-			pl_tex srcTex = pl_tex_create(gpu, &stp);
-			Assert::IsNotNull(srcTex, L"source texture creation failed");
+			ScopedTex srcTex(gpu, pl_tex_create(gpu, &stp));
+			Assert::IsNotNull(srcTex.tex, L"source texture creation failed");
 
 			// High grain thresholds so grainScale == 1.0 (isolating the edge term w = 1 - e cleanly).
 			// edgeLo = 50, edgeHi = 100 cleanly separates right-half period-3 texture (grad <= 34.6 -> e = 0)
@@ -4538,11 +4629,11 @@ if (q.x < size.x && q.y < size.y) {
 				tp.format = rgba32fTarget;
 				tp.renderable = true;
 				tp.host_readable = true;
-				pl_tex target = pl_tex_create(gpu, &tp);
-				Assert::IsNotNull(target, L"RGBA32F target creation failed");
+				ScopedTex target(gpu, pl_tex_create(gpu, &tp));
+				Assert::IsNotNull(target.tex, L"RGBA32F target creation failed");
 
-				pl_frame image = TargetLutGpuFixture::MakeRgbFrame(srcTex);
-				pl_frame out = TargetLutGpuFixture::MakeRgbFrame(target);
+				pl_frame image = TargetLutGpuFixture::MakeRgbFrame(srcTex.tex);
+				pl_frame out = TargetLutGpuFixture::MakeRgbFrame(target.tex);
 				image.color.transfer = out.color.transfer = PL_COLOR_TRC_GAMMA22;
 				image.color.primaries = out.color.primaries = PL_COLOR_PRIM_BT_709;
 
@@ -4565,19 +4656,19 @@ if (q.x < size.x && q.y < size.y) {
 						mProxy.Init(mod->Measure(), measureRec);
 						bProxy.Init(mod->Blend(), blendRec);
 						hooks.push_back(&mProxy.hook);
-						hooks.push_back(ssim);
+						hooks.push_back(ssim.hook);
 						hooks.push_back(&bProxy.hook);
 					}
 					else
 					{
 						hooks.push_back(mod->Measure());
-						hooks.push_back(ssim);
+						hooks.push_back(ssim.hook);
 						hooks.push_back(mod->Blend());
 					}
 				}
 				else
 				{
-					hooks.push_back(ssim);
+					hooks.push_back(ssim.hook);
 				}
 				params.hooks = hooks.data();
 				params.num_hooks = static_cast<int>(hooks.size());
@@ -4588,10 +4679,9 @@ if (q.x < size.x && q.y < size.y) {
 
 				std::vector<float> px(static_cast<size_t>(dw) * dh * 4, 0.0f);
 				pl_tex_transfer_params dl{};
-				dl.tex = target;
+				dl.tex = target.tex;
 				dl.ptr = px.data();
 				Assert::IsTrue(pl_tex_download(gpu, &dl), L"target download failed");
-				pl_tex_destroy(gpu, &target);
 				return px;
 			};
 
@@ -4618,11 +4708,10 @@ if (q.x < size.x && q.y < size.y) {
 			{
 				AdaptiveDownscale::Settings faithfulSt = st;
 				faithfulSt.wBase = 0.0f;
-				AdaptiveDownscale::Module refMod;
-				refMod.SetCutSource(noCutSource);
-				faithfulOnlyPx = renderDownscale(&refMod, faithfulSt, 1, nullptr, nullptr);
-				Assert::IsTrue(refMod.Active() && refMod.Failures() == 0, L"faithful-only baseline must succeed");
-				refMod.Release();
+				ScopedModule refMod;
+				refMod->SetCutSource(noCutSource);
+				faithfulOnlyPx = renderDownscale(&(*refMod), faithfulSt, 1, nullptr, nullptr);
+				Assert::IsTrue(refMod->Active() && refMod->Failures() == 0, L"faithful-only baseline must succeed");
 			}
 
 			VpSkeleton::Dims dims;
@@ -4641,19 +4730,18 @@ if (q.x < size.x && q.y < size.y) {
 				Assert::IsTrue(Vpv::Skeleton::CurrentFrameMemo().Valid(),
 					L"precondition: skeleton memo must be active for memo-served test");
 
-				AdaptiveDownscale::Module memoMod;
-				memoMod.SetCutSource(noCutSource);
-				memoBlendedPx = renderDownscale(&memoMod, st, 1, &memoMeasureRec, &memoBlendRec);
-				Assert::IsTrue(memoMod.Active() && memoMod.Failures() == 0,
+				ScopedModule memoMod;
+				memoMod->SetCutSource(noCutSource);
+				memoBlendedPx = renderDownscale(&(*memoMod), st, 1, &memoMeasureRec, &memoBlendRec);
+				Assert::IsTrue(memoMod->Active() && memoMod->Failures() == 0,
 					L"memo-served kEdgeMap frame must succeed with zero failures");
-				Assert::IsTrue(memoMod.EdgeMapStatus().empty(),
+				Assert::IsTrue(memoMod->EdgeMapStatus().empty(),
 					(L"memo-served kEdgeMap must clear EdgeMapStatus(), got: " +
-						ExtendedRangeGpuProbe::ToWide(memoMod.EdgeMapStatus())).c_str());
+						ExtendedRangeGpuProbe::ToWide(memoMod->EdgeMapStatus())).c_str());
 				Assert::AreEqual(uint64_t(1), memoHost.memo->CountersOf(VpSkeleton::kEdgeMap).ownerFillCalls,
 					L"skeleton memo kEdgeMap owner fill must run once");
 				Assert::IsFalse(memoMeasureRec.HasPassContaining("VP-V edge map"),
 					L"memo-served kEdgeMap must skip the module's private DispatchEdgeMapStage pass");
-				memoMod.Release();
 			}
 
 			// (a2) Synthetic inverted kEdgeMap served via skeleton memo:
@@ -4677,15 +4765,16 @@ if (q.x < size.x && q.y < size.y) {
 				ep.format = rg32fSample;
 				ep.sampleable = true;
 				ep.initial_data = synthEm.data();
-				pl_tex synthEmTex = pl_tex_create(gpu, &ep);
-				Assert::IsNotNull(synthEmTex, L"synthetic RG32F edge map creation failed");
+				ScopedTex synthEmTex(gpu, pl_tex_create(gpu, &ep));
+				Assert::IsNotNull(synthEmTex.tex, L"synthetic RG32F edge map creation failed");
 
+				pl_tex synthEmRaw = synthEmTex.tex;
 				VpSkeleton::OwnerFill synthFill = Vpv::Regions::MakeEdgeMapOwnerFill(reserve);
-				synthFill.fill = [synthEmTex, reserve](const VpSkeleton::OwnerFillRequest&, VpSkeleton::SkeletonMemo&,
+				synthFill.fill = [synthEmRaw, reserve](const VpSkeleton::OwnerFillRequest&, VpSkeleton::SkeletonMemo&,
 					VpSkeleton::OwnerFillOutput& out) {
-					out.gpu.resource = const_cast<void*>(static_cast<const void*>(synthEmTex));
-					out.gpu.width = static_cast<uint32_t>(synthEmTex->params.w);
-					out.gpu.height = static_cast<uint32_t>(synthEmTex->params.h);
+					out.gpu.resource = const_cast<void*>(static_cast<const void*>(synthEmRaw));
+					out.gpu.width = static_cast<uint32_t>(synthEmRaw->params.w);
+					out.gpu.height = static_cast<uint32_t>(synthEmRaw->params.h);
 					out.gpu.format = static_cast<uint32_t>(VpSkeleton::TexFormat::RG32F);
 					out.gpu.bytes = reserve;
 					out.gpu.keepAlive = std::shared_ptr<void>(out.gpu.resource, [](void*) {});
@@ -4696,21 +4785,20 @@ if (q.x < size.x && q.y < size.y) {
 				{
 					ScopedEdgeMapMemoHost synthHost(gpu, std::move(synthFill));
 					synthHost.BeginFrame(1);
-					AdaptiveDownscale::Module synthMod;
-					synthMod.SetCutSource(noCutSource);
+					ScopedModule synthMod;
+					synthMod->SetCutSource(noCutSource);
 					HookDispatchRecord sMeasure, sBlend;
-					synthBlendedPx = renderDownscale(&synthMod, st, 1, &sMeasure, &sBlend);
-					Assert::IsTrue(synthMod.Active() && synthMod.Failures() == 0,
+					synthBlendedPx = renderDownscale(&(*synthMod), st, 1, &sMeasure, &sBlend);
+					Assert::IsTrue(synthMod->Active() && synthMod->Failures() == 0,
 						L"synthetic served kEdgeMap frame must succeed");
-					Assert::IsTrue(synthMod.EdgeMapStatus().empty(),
+					Assert::IsTrue(synthMod->EdgeMapStatus().empty(),
 						L"synthetic served kEdgeMap must report empty EdgeMapStatus()");
 					Assert::AreEqual(uint64_t(1), synthHost.memo->CountersOf(VpSkeleton::kEdgeMap).ownerFillCalls,
 						L"synthetic kEdgeMap fill must be served through the skeleton memo");
 					Assert::IsFalse(sMeasure.HasPassContaining("VP-V edge map"),
 						L"synthetic served kEdgeMap must not dispatch private VP-V edge map");
-					synthMod.Release();
 				}
-				pl_tex_destroy(gpu, &synthEmTex);
+				synthEmTex.Reset();
 
 				float leftVsSsim = 0.0f, leftVsFaithful = 0.0f;
 				float rightVsFaithful = 0.0f, rightVsSsim = 0.0f;
@@ -4745,22 +4833,21 @@ if (q.x < size.x && q.y < size.y) {
 			HookDispatchRecord noMemoMeasureRec, noMemoBlendRec;
 			std::vector<float> noMemoBlendedPx;
 			{
-				AdaptiveDownscale::Module noMemoMod;
-				noMemoMod.SetCutSource(noCutSource);
-				noMemoBlendedPx = renderDownscale(&noMemoMod, st, 1, &noMemoMeasureRec, &noMemoBlendRec);
-				Assert::IsTrue(noMemoMod.Active() && noMemoMod.Failures() == 0,
+				ScopedModule noMemoMod;
+				noMemoMod->SetCutSource(noCutSource);
+				noMemoBlendedPx = renderDownscale(&(*noMemoMod), st, 1, &noMemoMeasureRec, &noMemoBlendRec);
+				Assert::IsTrue(noMemoMod->Active() && noMemoMod->Failures() == 0,
 					L"no-memo negative control frame must succeed with zero failures");
-				Assert::IsFalse(noMemoMod.EdgeMapStatus().empty(),
+				Assert::IsFalse(noMemoMod->EdgeMapStatus().empty(),
 					L"negative control (no skeleton memo): EdgeMapStatus() must be non-empty");
-				Assert::IsTrue(noMemoMod.EdgeMapStatus().find("no skeleton memo") != std::string::npos,
+				Assert::IsTrue(noMemoMod->EdgeMapStatus().find("no skeleton memo") != std::string::npos,
 					(L"negative control (no skeleton memo): unexpected EdgeMapStatus: " +
-						ExtendedRangeGpuProbe::ToWide(noMemoMod.EdgeMapStatus())).c_str());
+						ExtendedRangeGpuProbe::ToWide(noMemoMod->EdgeMapStatus())).c_str());
 				Assert::IsTrue(noMemoMeasureRec.HasPassContaining("VP-V edge map"),
 					L"negative control (no skeleton memo): private DispatchEdgeMapStage pass must dispatch");
 				Assert::AreEqual(memoMeasureRec.count + 1, noMemoMeasureRec.count,
 					(L"no-memo Measure() must dispatch exactly 1 more pass (private edge map) than memo-served (memo=" +
 						std::to_wstring(memoMeasureRec.count) + L", noMemo=" + std::to_wstring(noMemoMeasureRec.count) + L")").c_str());
-				noMemoMod.Release();
 			}
 
 			// Real memo-served kEdgeMap output vs private no-memo edge-map output must be bit-identical (<= 1e-6f).
@@ -4798,9 +4885,9 @@ if (q.x < size.x && q.y < size.y) {
 				(L"negative control (no memo): sub-threshold texture must select SSIM over faithful (maxTexVsSsim=" +
 					std::to_wstring(maxTexVsSsim) + L", maxTexVsFaithful=" + std::to_wstring(maxTexVsFaithful) + L")").c_str());
 
-			pl_tex_destroy(gpu, &srcTex);
-			pl_mpv_user_shader_destroy(&ssim);
-			fixture.CaptureLog(nullptr);
+			srcTex.Reset();
+			ssim.Reset();
+			logGuard.Release();
 			AssertCleanLibplaceboLog(log);
 			Assert::AreEqual(0, pl_renderer_get_errors(fixture.Renderer()).num_disabled_hooks, L"A hook was disabled");
 		}
