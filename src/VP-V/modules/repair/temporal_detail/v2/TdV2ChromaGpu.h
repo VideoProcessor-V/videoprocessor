@@ -1086,17 +1086,18 @@ for (int chIdx = 0; chIdx < 2; ++chIdx)
 
     for (int b = 0; b < 3; ++b)
     {
+        int bandPoolR = (b == 0) ? int(round(u_pool_r_l)) : ((b == 1) ? int(round(u_pool_r_m)) : int(round(u_pool_r_h)));
         float nPool = 0.0;
         vec3 muPool = vec3(0.0);
         float s00 = 0.0, s01 = 0.0, s02 = 0.0, s11 = 0.0, s12 = 0.0, s22 = 0.0;
         bool hasOwnStats = false;
         vec3 ownDiag = vec3(0.0);
 
-        for (int dy = -poolR; dy <= poolR; ++dy)
+        for (int dy = -bandPoolR; dy <= bandPoolR; ++dy)
         {
             int ncy = cell.y + dy;
             if (ncy < 0 || ncy >= TD_CH) continue;
-            for (int dx = -poolR; dx <= poolR; ++dx)
+            for (int dx = -bandPoolR; dx <= bandPoolR; ++dx)
             {
                 int ncx = cell.x + dx;
                 if (ncx < 0 || ncx >= TD_CW) continue;
@@ -3207,6 +3208,9 @@ imageStore(out_coded_delta, p, vec4(0.0));
 				c2bHdr += Shaders::kPass2SolverHeader;
 
 				float uSolverMode = (cfg_.solverMode == SolverMode::LegacyClipRescale) ? 1.0f : 0.0f;
+				float uPoolRL = static_cast<float>(cfg_.PoolRadiusForBand(0));
+				float uPoolRM = static_cast<float>(cfg_.PoolRadiusForBand(1));
+				float uPoolRH = static_cast<float>(cfg_.PoolRadiusForBand(2));
 
 				pl_shader_desc d2b[11] = {
 					VpvGpu::Sampled("cell_stats_cb", sc.statsCb),
@@ -3221,8 +3225,10 @@ imageStore(out_coded_delta, p, vec4(0.0));
 					VpvGpu::Storage("cell_diag_cr", sc.diagCr),
 					VpvGpu::Storage("cell_diag_flags", dstDiagFlags)
 				};
-				pl_shader_var v2b[25] = {
-					VpvGpu::Var("u_k", &uK), VpvGpu::Var("u_pool_r", &uPoolR), VpvGpu::Var("u_estimator", &uEstimator),
+				pl_shader_var v2b[28] = {
+					VpvGpu::Var("u_k", &uK), VpvGpu::Var("u_pool_r", &uPoolR),
+					VpvGpu::Var("u_pool_r_l", &uPoolRL), VpvGpu::Var("u_pool_r_m", &uPoolRM), VpvGpu::Var("u_pool_r_h", &uPoolRH),
+					VpvGpu::Var("u_estimator", &uEstimator),
 					VpvGpu::Var("u_solver_mode", &uSolverMode),
 					VpvGpu::Var("u_ref_role_0", &uRefRole0), VpvGpu::Var("u_ref_role_1", &uRefRole1), VpvGpu::Var("u_ref_role_2", &uRefRole2),
 					VpvGpu::Var("u_ref_motion_slot_0", &uRefSlot0), VpvGpu::Var("u_ref_motion_slot_1", &uRefSlot1), VpvGpu::Var("u_ref_motion_slot_2", &uRefSlot2),
@@ -3237,7 +3243,7 @@ imageStore(out_coded_delta, p, vec4(0.0));
 					VpvGpu::Var("u_psd_fine", &uPsdFine),
 					VpvGpu::Var("u_coarse_only", &uCoarseOnly)
 				};
-				if (!runPass("td_v2_c2b_merge_solve", c2bHdr, ChromaShaders::kPassChromaMergeSolve, d2b, 11, v2b, 25,
+				if (!runPass("td_v2_c2b_merge_solve", c2bHdr, ChromaShaders::kPassChromaMergeSolve, d2b, 11, v2b, 28,
 				             Detail::GroupsFor(cw, 8), Detail::GroupsFor(ch, 8), 8, 8))
 				{
 					return failVisible("td_v2_c2b_merge_solve dispatch failed", StandInKind::GpuDispatchFailed);

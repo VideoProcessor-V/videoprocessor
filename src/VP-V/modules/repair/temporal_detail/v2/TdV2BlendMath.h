@@ -886,6 +886,63 @@ namespace TdV2
 		return raw < upper ? raw : upper;
 	}
 
+	// ---- TD-U4 (H-3): Derived Effective Independent Samples & Empirical-Bayes Shrinkage of c_IV ----
+	// Effective independent sample count for band b over `sampleCountPx` pixels (Rule 1: derived from BandFromBase sigmas):
+	//   sigma_L = kSigmaBase (2.5 px) -> 2*pi*sigma_L^2 ~= 39.27 px^2 (~6.52/cell, ~163 per 5x5 pool)
+	//   sigma_M = kSigmaFine (1.0 px) -> 2*pi*sigma_M^2 ~=  6.28 px^2 (~40.7/cell, ~367 per 3x3 pool)
+	//   sigma_H = 0.5 px (Nyquist half-pixel correlation floor) -> 2*pi*(0.5)^2 = pi/2 (~163/cell)
+	inline double EffectiveSamplesForBand(int band, double sampleCountPx)
+	{
+		if (!std::isfinite(sampleCountPx) || sampleCountPx <= 0.0)
+			return 1.0;
+		const double sigma = (band == 0)
+			? VpUnit::BandFromBase::kSigmaBase
+			: ((band == 1) ? VpUnit::BandFromBase::kSigmaFine : 0.5);
+		const double corrArea = 2.0 * kDctPi * sigma * sigma;
+		const double nEff = sampleCountPx / corrArea;
+		return (std::isfinite(nEff) && nEff > 1.0) ? nEff : 1.0;
+	}
+
+	// Wishart sampling variance of the sample cross-moment c_raw = (1/N) sum(d_p * d_n):
+	//   se^2 = (C_pp * C_nn + C_pn^2) / N_eff  (TD-U4 / Plan Phase 2c).
+	inline double SamplingVarianceOfCrossMoment(double cPP, double cNN, double cPN, double nEff)
+	{
+		if (!std::isfinite(cPP) || !std::isfinite(cNN) || !std::isfinite(cPN) || !std::isfinite(nEff))
+			return 0.0;
+		const double effN = nEff > 1.0 ? nEff : 1.0;
+		const double pp = cPP > 0.0 ? cPP : 0.0;
+		const double nn = cNN > 0.0 ? cNN : 0.0;
+		const double v = (pp * nn + cPN * cPN) / effN;
+		return (std::isfinite(v) && v > 0.0) ? v : 0.0;
+	}
+
+	// Empirical-Bayes James-Stein / normal-prior shrinkage of grain-corrected c_raw toward frame prior U_j(class):
+	//   B = tau^2 / (tau^2 + se^2),   c_hat = clip(U + B * (c_raw - U), 0, min(C_pp, C_nn)).
+	// Grain correction is ALWAYS applied BEFORE calling this; exact-copy cells stay strictly 0 outside this helper.
+	inline double EmpiricalBayesShrinkC(
+		double cRaw,
+		double seSq,
+		double priorU,
+		double tauSq,
+		double upperCap)
+	{
+		if (!std::isfinite(cRaw) || !std::isfinite(seSq) || !std::isfinite(priorU) ||
+		    !std::isfinite(tauSq) || !std::isfinite(upperCap))
+		{
+			return 0.0;
+		}
+		const double cap = upperCap > 0.0 ? upperCap : 0.0;
+		const double u = priorU > 0.0 ? priorU : 0.0;
+		const double t2 = tauSq > 0.0 ? tauSq : 0.0;
+		const double s2 = seSq > 0.0 ? seSq : 0.0;
+		const double denom = t2 + s2;
+		const double B = (denom > kSolveNumericalFloor) ? RampMath::Clamp01(t2 / denom) : 0.0;
+		const double shrunk = u + B * (cRaw - u);
+		if (!std::isfinite(shrunk) || shrunk <= 0.0)
+			return 0.0;
+		return shrunk < cap ? shrunk : cap;
+	}
+
 	// ---- Blind Estimator A2: Codec Rounding Prior (Two-Sided Exponential / Laplacian Quantization Cells, refs/111 s3.3) ----
 	// For step Delta, dead-zone offset phi (1/6 inter, 1/3 intra), dead-zone half-width theta = (1 - phi) * Delta,
 	// and zero-coefficient fraction pi0 in (0, 1):

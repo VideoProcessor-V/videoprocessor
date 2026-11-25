@@ -152,6 +152,7 @@ namespace Gpu
 		bool isCutOrSpanInvalid = false;
 		double fadeKeep = 1.0;                   // Upstream U7 gradual retention keep in [0, 1] (default 1.0 = bit-identical; <=0 or NaN resets carry)
 		PsdShape psdShape;                       // Optional P10g grain PSD shape multipliers (default 1.0 white-noise identity)
+		QualityPattern::FrameRole frameRole = QualityPattern::FrameRole::Unknown; // Optional frame role for 2-frame same-role stats pooling
 	};
 
 	struct GpuFrameOutput
@@ -542,6 +543,15 @@ namespace Gpu
 			carryH_ = 0;
 			hasLastSeq_ = false;
 			lastSeq_ = 0;
+			for (int r = 0; r < 3; ++r)
+			{
+				hasPrevRoleStats_[r] = false;
+				prevRoleStatsCw_[r] = 0;
+				prevRoleStatsCh_[r] = 0;
+				prevRoleStatsK_[r] = 0;
+				if (gpu != nullptr && prevRoleStatsTex_[r] != nullptr)
+					pl_tex_destroy(gpu, &prevRoleStatsTex_[r]);
+			}
 			if (gpu != nullptr && carryCleanTex_ != nullptr)
 				pl_tex_destroy(gpu, &carryCleanTex_);
 		}
@@ -557,6 +567,7 @@ namespace Gpu
 					&inMotionVecTex_, &inMotionMetaTex_, &inCellPriorTex_, &inFaceMaskTex_,
 					&outYTex_, &outCleanTex_, &outDeltaTex_, &outTdMapsTex_,
 					&outDiagFlagsTex_, &outGuardCellTex_, &outWarpDiagTex_,
+					&ebPriorTex_, &prevRoleStatsTex_[0], &prevRoleStatsTex_[1], &prevRoleStatsTex_[2],
 					&chromaCodedDeltaTex_, &chromaDelivUvTex_, &chromaDelivRgbTex_,
 					&chromaOutUvTex_, &chromaOutRgbTex_, &chromaOutDeltaTex_ })
 				{
@@ -573,6 +584,7 @@ namespace Gpu
 					&privWarpedVal_, &privRefFlags_[0], &privRefFlags_[1],
 					&privDeltaScratch_,
 					&privMotionGate_, &privCellWeights_, &privCellDiagC_, &privCellStats_, &privCellFocus_,
+					&ebPriorTex_, &prevRoleStatsTex_[0], &prevRoleStatsTex_[1], &prevRoleStatsTex_[2],
 					&carryCleanTex_,
 					&inRecYTex_, &inCleanYTex_, &inRefCleanTex_, &inCodecModelPbTex_,
 					&inMotionVecTex_, &inMotionMetaTex_, &inCellPriorTex_, &inFaceMaskTex_,
@@ -1368,6 +1380,7 @@ namespace Gpu
 			p.psdShape = in.psdShape;
 			p.fadeKeep = effFadeKeep;
 			p.transformIdentified8x8 = in.transformIdentified8x8;
+			p.frameRole = in.frameRole;
 			p.outYTex = out.outputYTex;
 			p.outCleanTex = out.outputCleanTex;
 			p.outDeltaTex = out.tdDeltaTex;
@@ -1807,6 +1820,7 @@ namespace Gpu
 			p.psdShape = in.psdShape;
 			p.fadeKeep = effFadeKeep;
 			p.transformIdentified8x8 = in.transformIdentified8x8;
+			p.frameRole = in.frameRole;
 			p.outYTex = outYTex_;
 			p.outCleanTex = outCleanTex_;
 			p.outDeltaTex = outDeltaTex_;
@@ -2263,6 +2277,7 @@ namespace Gpu
 			PsdShape psdShape{};
 			double fadeKeep = 1.0;
 			bool transformIdentified8x8 = false;
+			QualityPattern::FrameRole frameRole = QualityPattern::FrameRole::Unknown;
 			pl_tex outYTex = nullptr;
 			pl_tex outCleanTex = nullptr;
 			pl_tex outDeltaTex = nullptr;
@@ -2756,7 +2771,11 @@ namespace Gpu
 			const float uUseEmpiricalU = (cfg_.enableA2eEmpiricalPrior && !runDctPocs) ? 1.0f : 0.0f;
 			const float uPocsIters = static_cast<float>((std::max)(1, (std::min)(2, cfg_.cellProjIterations)));
 			const float uResidualMode = (cfg_.residualMode == ResidualMode::Strict) ? 1.0f : 0.0f;
-			const float uPoolR = static_cast<float>(cfg_.momentPoolRadiusCells > 0 ? cfg_.momentPoolRadiusCells : 0);
+			const float uPoolRL = static_cast<float>(cfg_.PoolRadiusForBand(0));
+			const float uPoolRM = static_cast<float>(cfg_.PoolRadiusForBand(1));
+			const float uPoolRH = static_cast<float>(cfg_.PoolRadiusForBand(2));
+			const float uEnableEbShrink = cfg_.enableEmpiricalBayesShrinkage ? 1.0f : 0.0f;
+			const float uActivityTexFloor = static_cast<float>(2.0 * gains.fine * baseQuantVar);
 			const float uEstimator = static_cast<float>(static_cast<int>(cfg_.estimator));
 			const float uRefMotionSlot0 = (K > 0) ? static_cast<float>(refSpecs[0].motionSlot) : 0.0f;
 			const float uRefMotionSlot1 = (K > 1) ? static_cast<float>(refSpecs[1].motionSlot) : 0.0f;
@@ -3193,31 +3212,95 @@ namespace Gpu
 			const double midPassbandPeak = std::exp(-0.5 * s1Sq * wStarSq) - std::exp(-0.5 * s2Sq * wStarSq);
 			const double a2PeakMidSq = midPassbandPeak * midPassbandPeak;
 
-			// ---- PASS 2B (Speedup 2): Exact Chan-Pebay Merge + Blind A1/A2/A3 + KxK Solve + TdMaps ----
+			// ---- PASS 2-EB (TD-U4 / H-3): 1-Workgroup Cell-Grid Reduction for U_j(class) & Spread tau^2 ----
+			if (!Detail::EnsureTex(gpu, ebPriorTex_, 3, 2, fmtRGBA32, true, true, false, false))
 			{
-				std::string p2bHdr = staticGeom;
-				p2bHdr += VpvGpu::Define("TD_GAIN_LOW", gains.low);
-				p2bHdr += VpvGpu::Define("TD_GAIN_MID", gains.mid);
-				p2bHdr += VpvGpu::Define("TD_GAIN_FINE", gains.fine);
-				p2bHdr += VpvGpu::Define("TD_ORIGIN_LOW", gains.originLow);
-				p2bHdr += VpvGpu::Define("TD_ORIGIN_MID", gains.originMid);
-				p2bHdr += VpvGpu::Define("TD_ORIGIN_FINE", gains.originFine);
-				p2bHdr += VpvGpu::Define("TD_A2_PEAK_MID_SQ", a2PeakMidSq);
-				p2bHdr += VpvGpu::Define("TD_MIN_VAR_RETENTION", TdGuardPort::kMinVarianceRetention);
-				p2bHdr += VpvGpu::Define("TD_TRACE_REG", kDefaultTraceRegScale);
-				p2bHdr += VpvGpu::Define("TD_SOLVE_FLOOR", kSolveNumericalFloor);
-				p2bHdr += VpvGpu::Define("TD_PIVOT_FLOOR", kSolvePivotFloor);
-				p2bHdr += VpvGpu::Define("TD_STEP_SCALE_MIN", kCellStepScaleMin);
-				p2bHdr += VpvGpu::Define("TD_STEP_SCALE_MAX", maxAllowedStepScale);
-				p2bHdr += Shaders::BuildFineTapHeader();
-				p2bHdr += Shaders::kCoreHelpers;
-				p2bHdr += Shaders::kPass2MergeSolveHeader;
-				p2bHdr += Shaders::kPass2SolverHeader;
+				resetCarryIfActive();
+				return failCore("TdV2GpuEngine ebPriorTex alloc failed", StandInKind::GpuDispatchFailed);
+			}
+			{
+				std::string p2bSharedHdr = staticGeom;
+				p2bSharedHdr += VpvGpu::Define("TD_GAIN_LOW", gains.low);
+				p2bSharedHdr += VpvGpu::Define("TD_GAIN_MID", gains.mid);
+				p2bSharedHdr += VpvGpu::Define("TD_GAIN_FINE", gains.fine);
+				p2bSharedHdr += VpvGpu::Define("TD_ORIGIN_LOW", gains.originLow);
+				p2bSharedHdr += VpvGpu::Define("TD_ORIGIN_MID", gains.originMid);
+				p2bSharedHdr += VpvGpu::Define("TD_ORIGIN_FINE", gains.originFine);
+				p2bSharedHdr += VpvGpu::Define("TD_A2_PEAK_MID_SQ", a2PeakMidSq);
+				p2bSharedHdr += VpvGpu::Define("TD_MIN_VAR_RETENTION", TdGuardPort::kMinVarianceRetention);
+				p2bSharedHdr += VpvGpu::Define("TD_TRACE_REG", kDefaultTraceRegScale);
+				p2bSharedHdr += VpvGpu::Define("TD_SOLVE_FLOOR", kSolveNumericalFloor);
+				p2bSharedHdr += VpvGpu::Define("TD_PIVOT_FLOOR", kSolvePivotFloor);
+				p2bSharedHdr += VpvGpu::Define("TD_STEP_SCALE_MIN", kCellStepScaleMin);
+				p2bSharedHdr += VpvGpu::Define("TD_STEP_SCALE_MAX", maxAllowedStepScale);
+				p2bSharedHdr += Shaders::BuildFineTapHeader();
+				p2bSharedHdr += Shaders::kCoreHelpers;
+				p2bSharedHdr += Shaders::kPass2MergeSolveHeader;
 
+				if (cfg_.enableEmpiricalBayesShrinkage)
+				{
+					std::string ebHdr = p2bSharedHdr + Shaders::kPass2EbPriorReduceHeader;
+					pl_shader_desc deb[5] = {
+						VpvGpu::Sampled("cell_stats", sc.cellStats),
+						VpvGpu::Sampled("cell_focus", sc.cellFocus),
+						VpvGpu::Sampled("motion_gate", sc.motionGate),
+						VpvGpu::Sampled("cell_prior", cellPriorTex),
+						VpvGpu::Storage("eb_prior_out", ebPriorTex_)
+					};
+					pl_shader_var veb[18] = {
+						VpvGpu::Var("u_k", &uK),
+						VpvGpu::Var("u_pool_r_l", &uPoolRL),
+						VpvGpu::Var("u_pool_r_m", &uPoolRM),
+						VpvGpu::Var("u_pool_r_h", &uPoolRH),
+						VpvGpu::Var("u_ref_role_0", &uRefRole0),
+						VpvGpu::Var("u_ref_role_1", &uRefRole1),
+						VpvGpu::Var("u_ref_role_2", &uRefRole2),
+						VpvGpu::Var("u_ref_motion_slot_0", &uRefMotionSlot0),
+						VpvGpu::Var("u_ref_motion_slot_1", &uRefMotionSlot1),
+						VpvGpu::Var("u_ref_motion_slot_2", &uRefMotionSlot2),
+						VpvGpu::Var("u_exact_copy_0", &uExactCopy0),
+						VpvGpu::Var("u_exact_copy_1", &uExactCopy1),
+						VpvGpu::Var("u_exact_copy_2", &uExactCopy2),
+						VpvGpu::Var("u_bokeh_mode", &uBokehMode),
+						VpvGpu::Var("u_psd_low", &uPsdLow),
+						VpvGpu::Var("u_psd_mid", &uPsdMid),
+						VpvGpu::Var("u_psd_fine", &uPsdFine),
+						VpvGpu::Var("u_activity_tex_floor", &uActivityTexFloor)
+					};
+					const size_t shmemEb = (256u * 5u) * sizeof(float);
+					if (!runPass("td_v2_p2_eb_prior", ebHdr, Shaders::kPass2EbPriorReduce, deb, 5, veb, 18, 1, 1, 16, 16, shmemEb))
+					{
+						resetCarryIfActive();
+						return failCore("td_v2_p2_eb_prior dispatch failed", StandInKind::GpuDispatchFailed);
+					}
+				}
+
+				// Optional default-OFF 2-frame same-role statistics-only pooling (TD-U4 / Owner D4(b)).
+				int roleSlot = -1;
+				if (p.fadeKeep < 1.0)
+				{
+					for (int r = 0; r < 3; ++r)
+						hasPrevRoleStats_[r] = false;
+				}
+				else if (cfg_.enableTwoFrameSameRoleStatsPool && p.frameRole != QualityPattern::FrameRole::Unknown)
+				{
+					roleSlot = (p.frameRole == QualityPattern::FrameRole::Peak) ? 0
+						: ((p.frameRole == QualityPattern::FrameRole::Mid) ? 1 : 2);
+				}
+				const bool canMergePrevRoleStats =
+					(roleSlot >= 0 && hasPrevRoleStats_[roleSlot] && prevRoleStatsTex_[roleSlot] != nullptr &&
+					 prevRoleStatsCw_[roleSlot] == cw && prevRoleStatsCh_[roleSlot] == ch && prevRoleStatsK_[roleSlot] == K);
+				const float uMergePrevStats = canMergePrevRoleStats ? 1.0f : 0.0f;
+				pl_tex prevStatsBind = canMergePrevRoleStats ? prevRoleStatsTex_[roleSlot] : sc.cellStats;
+
+				// ---- PASS 2B (Speedup 2 + TD-U2/U3/U4): Band-Dependent Chan-Pebay Merge + EB Shrink + Active-Set Solve + TdMaps ----
+				std::string p2bHdr = p2bSharedHdr + Shaders::kPass2SolverHeader;
 				float uSolverMode = (cfg_.solverMode == SolverMode::LegacyClipRescale) ? 1.0f : 0.0f;
 
-				pl_shader_desc d2b[9] = {
+				pl_shader_desc d2b[11] = {
 					VpvGpu::Sampled("cell_stats", sc.cellStats),
+					VpvGpu::Sampled("prev_cell_stats", prevStatsBind),
+					VpvGpu::Sampled("eb_prior", ebPriorTex_),
 					VpvGpu::Sampled("cell_focus", sc.cellFocus),
 					VpvGpu::Sampled("motion_gate", sc.motionGate),
 					VpvGpu::Sampled("motion_vec", motionVecTex),
@@ -3227,11 +3310,16 @@ namespace Gpu
 					VpvGpu::Storage("td_maps", dstTdMaps),
 					VpvGpu::Storage("cell_diag_flags", dstDiagFlags)
 				};
-				pl_shader_var v2b[26] = {
+				pl_shader_var v2b[31] = {
 					VpvGpu::Var("u_k", &uK),
-					VpvGpu::Var("u_pool_r", &uPoolR),
+					VpvGpu::Var("u_pool_r_l", &uPoolRL),
+					VpvGpu::Var("u_pool_r_m", &uPoolRM),
+					VpvGpu::Var("u_pool_r_h", &uPoolRH),
 					VpvGpu::Var("u_estimator", &uEstimator),
 					VpvGpu::Var("u_solver_mode", &uSolverMode),
+					VpvGpu::Var("u_enable_eb_shrink", &uEnableEbShrink),
+					VpvGpu::Var("u_merge_prev_stats", &uMergePrevStats),
+					VpvGpu::Var("u_activity_tex_floor", &uActivityTexFloor),
 					VpvGpu::Var("u_ref_role_0", &uRefRole0),
 					VpvGpu::Var("u_ref_role_1", &uRefRole1),
 					VpvGpu::Var("u_ref_role_2", &uRefRole2),
@@ -3255,10 +3343,30 @@ namespace Gpu
 					VpvGpu::Var("u_fade_keep", &uFadeKeep),
 					VpvGpu::Var("u_use_empirical_u", &uUseEmpiricalU)
 				};
-				if (!runPass("td_v2_p2b_merge_solve", p2bHdr, Shaders::kPass2MergeAndSolve, d2b, 9, v2b, 26, cellGx8, cellGy8, 8, 8))
+				if (!runPass("td_v2_p2b_merge_solve", p2bHdr, Shaders::kPass2MergeAndSolve, d2b, 11, v2b, 31, cellGx8, cellGy8, 8, 8))
 				{
 					resetCarryIfActive();
 					return failCore("td_v2_p2b_merge_solve dispatch failed", StandInKind::GpuDispatchFailed);
+				}
+
+				// Save unmerged current frame cell statistics for optional 2-frame same-role pooling (NEVER chains recursively!).
+				if (roleSlot >= 0)
+				{
+					if (Detail::EnsureTex(gpu, prevRoleStatsTex_[roleSlot], 3 * cw, 3 * ch, fmtRGBA32, true, true, false, false))
+					{
+						pl_shader_desc dcp[2] = {
+							VpvGpu::Sampled("src_stats", sc.cellStats),
+							VpvGpu::Storage("dst_stats", prevRoleStatsTex_[roleSlot])
+						};
+						if (runPass("td_v2_p2_copy_stats", staticGeom, Shaders::kPass2CopyCellStats, dcp, 2, nullptr, 0,
+						            Detail::GroupsFor(3 * cw, 8), Detail::GroupsFor(3 * ch, 8), 8, 8))
+						{
+							hasPrevRoleStats_[roleSlot] = true;
+							prevRoleStatsCw_[roleSlot] = cw;
+							prevRoleStatsCh_[roleSlot] = ch;
+							prevRoleStatsK_[roleSlot] = K;
+						}
+					}
 				}
 			}
 
@@ -3908,6 +4016,14 @@ float td_fine_hp_warp_gain(vec2 mv)
 		pl_tex outDiagFlagsTex_ = nullptr;
 		pl_tex outGuardCellTex_ = nullptr;
 		pl_tex outWarpDiagTex_ = nullptr;
+
+		// TD-U4: Compact 3x2 EB prior texture + optional default-OFF 2-frame same-role stats-only snapshots.
+		pl_tex ebPriorTex_ = nullptr;
+		pl_tex prevRoleStatsTex_[3] = {};
+		bool hasPrevRoleStats_[3] = {};
+		int prevRoleStatsCw_[3] = {};
+		int prevRoleStatsCh_[3] = {};
+		int prevRoleStatsK_[3] = {};
 
 		// Cached Chroma GPU Apply textures (Speedup 7: reused across frames, freed in Release(gpu)).
 		pl_tex chromaCodedDeltaTex_ = nullptr;

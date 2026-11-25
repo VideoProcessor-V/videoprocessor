@@ -158,7 +158,7 @@ namespace TdV2
 	inline const ShortcutEntry* ShortcutLedger(size_t& count)
 	{
 		static const ShortcutEntry kLedger[] = {
-			{ "SC-01", "Moment pooling radius: 3x3 cells (Reference) vs 1x1 cell (RealTime optional)", false, true },
+			{ "SC-01", "H-band moment pooling radius: 3x3 cells (Reference) vs 1x1 cell (RealTime); L stays 5x5 and M stays 3x3 when band-dependent pooling is enabled", false, true },
 			{ "SC-02", "Long-reach I-anchor y_4: enabled when drift-audited (Reference) vs local peaks+carry only (RealTime)", false, true },
 			{ "SC-03", "Cell projection iterations: 2 POCS steps (Reference) vs 1 POCS step (RealTime)", false, true },
 			{ "SC-04", "Weight upsampling: optional clean-luma-guided edge-aware bilinear (enableEdgeAwareWeightUpsample) vs spatial bilinear with per-corner 3-sigma Huber taper (default)", false, true },
@@ -204,8 +204,29 @@ namespace TdV2
 		bool enableLongAnchor = false;
 
 		// Reference vs RealTime switches aligned to ShortcutLedger().
-		int momentPoolRadiusCells = 1;  // 1 => 3x3 cells (48 px at 16 px cells, refs/111 s3.5); 0 => 1x1 cell
+		int momentPoolRadiusCells = 1;  // H-band (or legacy uniform) radius: 1 => 3x3 cells (Reference), 0 => 1x1 cell (RealTime SC-01)
 		int cellProjIterations = 2;     // <= 2 POCS iterations per refs/111 s5
+
+		// TD-U4 (H-3 / Owner D4): Steadier statistics & flicker controls (all cleanly toggleable for ablation).
+		// - enableBandDependentPool (default true): 5x5 cells (r=2) for L, 3x3 (r=1) for M, momentPoolRadiusCells for H (SC-01 applies to H only).
+		// - enableEmpiricalBayesShrinkage (default true): shrinks raw c_IV toward frame prior U_j(class) using se^2 and tau^2.
+		// - enableTwoFrameSameRoleStatsPool (DEFAULT OFF per Owner D4(b)): pools ONLY cell statistics (C, c_raw - NEVER pixels or weights)
+		//   across at most 2 recent frames of the same role; resets on cut/fade/size change.
+		bool enableBandDependentPool = true;
+		bool enableEmpiricalBayesShrinkage = true;
+		bool enableTwoFrameSameRoleStatsPool = false;
+
+		int PoolRadiusForBand(int band) const
+		{
+			const int baseR = momentPoolRadiusCells > 0 ? momentPoolRadiusCells : 0;
+			if (!enableBandDependentPool)
+				return baseR;
+			if (band == 0)
+				return 2; // 5x5 cells for coarse band L (~163 effective independent samples)
+			if (band == 1)
+				return 1; // 3x3 cells for mid band M (~367 effective independent samples)
+			return baseR; // 3x3 (Reference) or 1x1 (RealTime SC-01) for fine band H
+		}
 
 		// Per-pixel 3-sigma per-corner Huber outlier taper psi(r) = min(1, 9/r) during spatial weight recomposition.
 		// Default true; setting false disables per-corner Huber taper on the exact same engine (negative control).

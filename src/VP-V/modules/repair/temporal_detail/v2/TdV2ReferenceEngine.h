@@ -941,6 +941,8 @@ namespace TdV2
 			hasLastSeq_ = false;
 			lastSeq_ = 0;
 			a2eHistory_.Reset();
+			for (auto& slot : sameRoleStats_)
+				slot.Reset();
 		}
 
 		bool HasCarry() const { return hasCarry_; }
@@ -1315,7 +1317,6 @@ namespace TdV2
 				return (b == 0) ? bp.L : ((b == 1) ? bp.M : bp.H);
 			};
 
-			const int poolR = cfg_.momentPoolRadiusCells > 0 ? cfg_.momentPoolRadiusCells : 0;
 			const int gW = (w + grainCellPx - 1) / grainCellPx;
 			std::vector<double> cellRetainedGrain(numCells, 0.0);
 			std::vector<double> cellMeanCleanY(numCells, 0.0);
@@ -1399,8 +1400,10 @@ namespace TdV2
 			struct CellBandMoments
 			{
 				double C[kMaxBlendRefs][kMaxBlendRefs] = {};
-				double cIvRaw[kMaxBlendRefs] = {};     // Grain-corrected unbounded c_IV (before [0, min(C_pp, C_nn)] clip)
-				double cIvClipped[kMaxBlendRefs] = {}; // Clipped c_A1 in [0, min(C_pp, C_nn)]
+				double cIvRaw[kMaxBlendRefs] = {};      // Grain-corrected unbounded c_IV (before [0, min(C_pp, C_nn)] clip)
+				double cIvClipped[kMaxBlendRefs] = {};  // Clipped c_A1 in [0, min(C_pp, C_nn)]
+				double cIvSeSq[kMaxBlendRefs] = {};     // Wishart sampling variance se^2 = (C_pp C_nn + C_pn^2) / N_eff
+				double cIvUpperCap[kMaxBlendRefs] = {}; // Physical upper cap min(C_pp, C_nn)
 				bool hasIndependentPartner[kMaxBlendRefs] = {};
 				size_t sampleCount = 0;
 			};
@@ -1560,6 +1563,7 @@ namespace TdV2
 
 					for (int b = 0; b < 3; ++b)
 					{
+						const int bandPoolR = cfg_.PoolRadiusForBand(b);
 						const TdV2Plane& curB = bandPlaneOf(curBands, b);
 						double muWelford[kMaxBlendRefs] = {};
 						double scatterWelford[kMaxBlendRefs][kMaxBlendRefs] = {};
@@ -1567,10 +1571,10 @@ namespace TdV2
 						double ownSumSq[kMaxBlendRefs] = {};
 						size_t ownSampleCount = 0;
 
-						const int py0 = (std::max)(active.y0, (cy - poolR) * cellPx);
-						const int py1 = (std::min)(active.y1, (cy + poolR + 1) * cellPx);
-						const int px0 = (std::max)(active.x0, (cx - poolR) * cellPx);
-						const int px1 = (std::min)(active.x1, (cx + poolR + 1) * cellPx);
+						const int py0 = (std::max)(active.y0, (cy - bandPoolR) * cellPx);
+						const int py1 = (std::min)(active.y1, (cy + bandPoolR + 1) * cellPx);
+						const int px0 = (std::max)(active.x0, (cx - bandPoolR) * cellPx);
+						const int px1 = (std::min)(active.x1, (cx + bandPoolR + 1) * cellPx);
 
 						for (int y = py0; y < py1; ++y)
 						{
@@ -1672,7 +1676,10 @@ namespace TdV2
 								}
 								const double grainTerm = (std::max)(0.0, cellRetainedGrainVar) * bandTransfer[b] * (std::max)(0.0, psdScale);
 								const double rawIv = cm.C[k][partner] - grainTerm - (std::max)(0.0, subpixelBias);
+								const double nEff = EffectiveSamplesForBand(b, static_cast<double>(cm.sampleCount));
 								cm.cIvRaw[k] = std::isfinite(rawIv) ? rawIv : 0.0;
+								cm.cIvUpperCap[k] = (std::max)(0.0, (std::min)(cm.C[k][k], cm.C[partner][partner]));
+								cm.cIvSeSq[k] = SamplingVarianceOfCrossMoment(cm.C[k][k], cm.C[partner][partner], cm.C[k][partner], nEff);
 								cm.cIvClipped[k] = EstimateC_A1(cm.C[k][partner], cm.C[k][k], cm.C[partner][partner],
 								                                cellRetainedGrainVar, bandTransfer[b], 1.0, psdScale, subpixelBias);
 								if (!cellContributedA2e && !refs[k].isExactCopy && !isFocusVetoedBand(cIdx, b))
@@ -1690,7 +1697,97 @@ namespace TdV2
 				}
 			}
 
-			// ---- Frame-Level TD-U1 Reductions: Aligned Relative Sharpness r_t & A2e Own-Error Prior U_j(class) ----
+			// ---- TD-U4 (Owner D4(b)): Optional 2-Frame Same-Role Statistics-Only Pooling (DEFAULT OFF) ----
+			// Pools ONLY cell statistics (C, c_raw - NEVER pixels or weights!) across at most 2 recent frames of the same role.
+			// Resets cleanly on cut, fade, resolution change, or ref-count mismatch; stores UNMERGED current stats so history
+			// NEVER chains recursively beyond 2 frames!
+			if (effectiveCut || effFadeKeep < 1.0)
+			{
+				for (auto& slot : sameRoleStats_)
+					slot.Reset();
+			}
+			else if (cfg_.enableTwoFrameSameRoleStatsPool && in.frameRole != QualityPattern::FrameRole::Unknown)
+			{
+				const int roleIdx = (in.frameRole == QualityPattern::FrameRole::Peak) ? 0
+					: ((in.frameRole == QualityPattern::FrameRole::Mid) ? 1 : 2);
+				SameRoleStatsSlot& prevSlot = sameRoleStats_[static_cast<size_t>(roleIdx)];
+				// Capture unmerged snapshot of current frame's cell stats BEFORE merging with prevSlot.
+				SameRoleStatsSlot curSnapshot;
+				curSnapshot.valid = true;
+				curSnapshot.cellsW = res.cellsW;
+				curSnapshot.cellsH = res.cellsH;
+				curSnapshot.refCount = K;
+				for (int b = 0; b < 3; ++b)
+				{
+					curSnapshot.bands[b].resize(numCells);
+					for (size_t ci = 0; ci < numCells; ++ci)
+					{
+						const CellBandMoments& src = cellMoments[b][ci];
+						SameRoleCellStat& dst = curSnapshot.bands[b][ci];
+						dst.sampleCount = src.sampleCount;
+						for (int i = 0; i < K; ++i)
+						{
+							dst.cIvRaw[i] = src.cIvRaw[i];
+							dst.hasPartner[i] = src.hasIndependentPartner[i];
+							for (int j = 0; j < K; ++j)
+								dst.C[i][j] = src.C[i][j];
+						}
+					}
+				}
+
+				if (prevSlot.valid && prevSlot.cellsW == res.cellsW && prevSlot.cellsH == res.cellsH && prevSlot.refCount == K)
+				{
+					for (int b = 0; b < 3; ++b)
+					{
+						a2eSamples[b][0].clear();
+						a2eSamples[b][1].clear();
+						for (size_t ci = 0; ci < numCells; ++ci)
+						{
+							CellBandMoments& cm = cellMoments[b][ci];
+							const SameRoleCellStat& pm = prevSlot.bands[b][ci];
+							if (cm.sampleCount == 0 || pm.sampleCount == 0)
+								continue;
+							const double nCur = static_cast<double>(cm.sampleCount);
+							const double nPrev = static_cast<double>(pm.sampleCount);
+							const double nTot = nCur + nPrev;
+							const double wCur = nCur / nTot;
+							const double wPrev = nPrev / nTot;
+							for (int i = 0; i < K; ++i)
+							{
+								for (int j = 0; j < K; ++j)
+									cm.C[i][j] = wCur * cm.C[i][j] + wPrev * pm.C[i][j];
+							}
+							cm.sampleCount = cm.sampleCount + pm.sampleCount;
+							const double nEffMerged = EffectiveSamplesForBand(b, static_cast<double>(cm.sampleCount));
+							bool cellContributed = false;
+							for (int k = 0; k < K; ++k)
+							{
+								const int partner = findIndependentA1Partner(k);
+								if (partner >= 0 && cm.hasIndependentPartner[k] && pm.hasPartner[k])
+								{
+									cm.cIvRaw[k] = wCur * cm.cIvRaw[k] + wPrev * pm.cIvRaw[k];
+									cm.cIvUpperCap[k] = (std::max)(0.0, (std::min)(cm.C[k][k], cm.C[partner][partner]));
+									cm.cIvSeSq[k] = SamplingVarianceOfCrossMoment(cm.C[k][k], cm.C[partner][partner], cm.C[k][partner], nEffMerged);
+									const double clipped = cm.cIvRaw[k] <= 0.0 ? 0.0 : (cm.cIvRaw[k] < cm.cIvUpperCap[k] ? cm.cIvRaw[k] : cm.cIvUpperCap[k]);
+									cm.cIvClipped[k] = clipped;
+									if (!cellContributed && !refs[k].isExactCopy && !isFocusVetoedBand(ci, b))
+									{
+										const double mGate = (b == 0) ? refs[k].motionGate.gateL[ci] : refs[k].motionGate.gateMH[ci];
+										if (mGate > 0.0 && std::isfinite(clipped))
+										{
+											a2eSamples[b][cellActivityClass[ci]].push_back(clipped);
+											cellContributed = true;
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+				prevSlot = std::move(curSnapshot);
+			}
+
+			// ---- Frame-Level TD-U1 & TD-U4 Reductions: Aligned Sharpness r_t, A2e Prior U_j(class), & EB Spread tau^2 ----
 			if (prevRefIdx >= 0 && prevRefIdx < static_cast<int>(refSpecs.size()) && refSpecs[prevRefIdx].motion != nullptr)
 			{
 				const CellMotionField& pmf = *refSpecs[prevRefIdx].motion;
@@ -1726,6 +1823,55 @@ namespace TdV2
 				const bool freezeA2e = effectiveCut || (effFadeKeep < 1.0);
 				res.empiricalOwnError = a2eHistory_.ApplyCapAndRecord(
 					rawA2e, in.frameRole, cfg_.sourceHz, freezeA2e, effectiveCut);
+			}
+
+			// TD-U4 (H-3): Cross-cell spread tau^2 = max(0, Var(c_raw) - mean(se^2)) per band x activity class.
+			double ebTauSq[3][kA2eActivityClasses] = {};
+			if (cfg_.enableEmpiricalBayesShrinkage && res.empiricalOwnError.valid)
+			{
+				for (int b = 0; b < 3; ++b)
+				{
+					double meanRaw[kA2eActivityClasses] = {};
+					double m2Raw[kA2eActivityClasses] = {};
+					double sumSeSq[kA2eActivityClasses] = {};
+					size_t cnt[kA2eActivityClasses] = {};
+					for (size_t ci = 0; ci < numCells; ++ci)
+					{
+						if (isFaceMaskedCell(ci) || isFocusVetoedBand(ci, b))
+							continue;
+						const CellBandMoments& cm = cellMoments[b][ci];
+						if (cm.sampleCount == 0)
+							continue;
+						const int ac = static_cast<int>(cellActivityClass[ci]);
+						for (int k = 0; k < K; ++k)
+						{
+							if (!cm.hasIndependentPartner[k] || refs[k].isExactCopy)
+								continue;
+							const double mGate = (b == 0) ? refs[k].motionGate.gateL[ci] : refs[k].motionGate.gateMH[ci];
+							if (!(mGate > 0.0) || !std::isfinite(cm.cIvRaw[k]) || !std::isfinite(cm.cIvSeSq[k]))
+								continue;
+							++cnt[ac];
+							const double d = cm.cIvRaw[k] - meanRaw[ac];
+							meanRaw[ac] += d / static_cast<double>(cnt[ac]);
+							m2Raw[ac] += d * (cm.cIvRaw[k] - meanRaw[ac]);
+							sumSeSq[ac] += cm.cIvSeSq[k];
+							break; // One unbiased c_IV observation per active cell
+						}
+					}
+					for (int ac = 0; ac < kA2eActivityClasses; ++ac)
+					{
+						if (cnt[ac] >= 2)
+						{
+							const double varRaw = m2Raw[ac] / static_cast<double>(cnt[ac] - 1);
+							const double meanSe = sumSeSq[ac] / static_cast<double>(cnt[ac]);
+							ebTauSq[b][ac] = (std::max)(0.0, varRaw - meanSe);
+						}
+					}
+					if (cnt[0] < 2 && cnt[1] >= 2)
+						ebTauSq[b][0] = ebTauSq[b][1];
+					else if (cnt[1] < 2 && cnt[0] >= 2)
+						ebTauSq[b][1] = ebTauSq[b][0];
+				}
 			}
 
 			// ---- Stage 2B: Per-cell blind c selection, constrained convex QP solve, motion/focus/grain/fade gates ----
@@ -1775,7 +1921,16 @@ namespace TdV2
 							double cA1 = cA2;
 							if (cm.hasIndependentPartner[k])
 							{
-								cA1 = cm.cIvClipped[k];
+								if (cfg_.enableEmpiricalBayesShrinkage && !refs[k].isExactCopy && res.empiricalOwnError.valid)
+								{
+									const double priorU = res.empiricalOwnError.ForBandClass(b, actClass);
+									cA1 = EmpiricalBayesShrinkC(
+										cm.cIvRaw[k], cm.cIvSeSq[k], priorU, ebTauSq[b][actClass], cm.cIvUpperCap[k]);
+								}
+								else
+								{
+									cA1 = cm.cIvClipped[k];
+								}
 							}
 							else if (cfg_.estimator != VarianceEstimator::A2_RoundingCells)
 							{
@@ -2370,11 +2525,37 @@ namespace TdV2
 		}
 
 	private:
+		struct SameRoleCellStat
+		{
+			double C[kMaxBlendRefs][kMaxBlendRefs] = {};
+			double cIvRaw[kMaxBlendRefs] = {};
+			bool hasPartner[kMaxBlendRefs] = {};
+			size_t sampleCount = 0;
+		};
+		struct SameRoleStatsSlot
+		{
+			bool valid = false;
+			int cellsW = 0;
+			int cellsH = 0;
+			int refCount = 0;
+			std::array<std::vector<SameRoleCellStat>, 3> bands;
+			void Reset()
+			{
+				valid = false;
+				cellsW = 0;
+				cellsH = 0;
+				refCount = 0;
+				for (auto& v : bands)
+					v.clear();
+			}
+		};
+
 		Config cfg_;
 		bool hasCarry_ = false;
 		TdV2Plane carryClean_;
 		bool hasLastSeq_ = false;
 		uint64_t lastSeq_ = 0;
 		A2ePriorHistory a2eHistory_;
+		std::array<SameRoleStatsSlot, 3> sameRoleStats_;
 	};
 }
