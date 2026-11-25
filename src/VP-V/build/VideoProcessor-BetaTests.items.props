@@ -39,5 +39,8 @@
     <!-- C5-BETALINK parity with VideoProcessor-BetaTestsHost.items.props: DejudderWarp.cpp calls VpFrameAnalysis::P1Gpu::BuildPyramidInto. -->
     <ClCompile Include="..\VP-V\modules\input\source_analysis\lane\P1GpuFill.cpp"/>
     <ClCompile Include="..\VP-V\core\hub\ExtensionHub.cpp"/>
+    <!-- M1#7: DejudderWarp.cpp reads U7 scene verdicts via SceneRecordReader::AcquireScene. -->
+    <ClCompile Include="..\VP-V\modules\control\skeleton\SceneRecordReader.cpp"/>
+    <ClCompile Include="..\VP-V\core\ProductSlots.cpp"/>
   </ItemGroup>
 </Project>
