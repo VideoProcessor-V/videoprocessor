@@ -197,7 +197,7 @@ namespace TdV2Sota10BandMemoNs
 			}
 		}
 
-		const auto taps = VpUnit::BandFromBase::Taps<double>(0.5 * VpUnit::BandFromBase::kSigmaBase, 3.0, true, 0.0);
+		const auto taps = VpUnit::BandFromBase::Taps<double>(VpUnit::BandFromBase::HalfSigma(VpUnit::BandFromBase::kSigmaBase), 3.0, true, 0.0);
 		const int rad = static_cast<int>(taps.size() / 2);
 		TdV2Plane tmp(wH, hH, 0.0);
 		TdV2Plane out(wH, hH, 0.0);

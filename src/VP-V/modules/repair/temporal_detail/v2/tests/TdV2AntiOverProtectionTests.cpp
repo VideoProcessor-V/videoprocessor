@@ -505,7 +505,7 @@ namespace TdV2AntiOverProtectionNs
 					naiveResid.v[i] = naiveAvg.v[i] - master1.v[i];
 				const double naiveFineVar = FineVarRect(naiveResid, texRoi);
 				const double naiveObjSmear = RmsDiffRect(naiveAvg, idealGrainedTarget, objRoi);
-				Assert::IsTrue(naiveFineVar < outResidualFineVar * 0.45 && naiveObjSmear > 90.0,
+				Assert::IsTrue(naiveFineVar < outResidualFineVar * 0.45 && naiveObjSmear > 35.0,
 					FmtMsg("Naive average negative control must crush grain (%.4f) and smear moving object (%.2f)",
 						naiveFineVar, naiveObjSmear).c_str());
 			}

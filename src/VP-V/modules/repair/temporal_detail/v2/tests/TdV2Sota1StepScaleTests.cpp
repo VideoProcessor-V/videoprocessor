@@ -547,8 +547,11 @@ namespace TdV2Sota1StepScaleNs
 					L"Non-positive cellPriorTex.z == 0.0 must engage StandInKind::NonFiniteClosure visibly");
 				TdV2Plane pBad(w, h, 0.0);
 				Assert::IsTrue(Detail::DownloadPlaneR32F(ctx.gpu, outYBad.tex, w, h, pBad));
-				Assert::AreEqual(0.0, MaxAbsDiffRect(pBad, curClean, ActiveRect{ 0, 0, 16, 16 }),
-					L"Invalid cellPriorTex.z == 0.0 cell must close cleanly to bit-exact passthrough");
+				TdV2Plane curCleanR32(w, h, 0.0);
+				for (size_t i = 0; i < curClean.v.size(); ++i)
+					curCleanR32.v[i] = static_cast<double>(static_cast<float>(curClean.v[i]));
+				Assert::AreEqual(0.0, MaxAbsDiffRect(pBad, curCleanR32, ActiveRect{ 0, 0, 16, 16 }),
+					L"Invalid cellPriorTex.z == 0.0 cell must close cleanly to bit-exact R32F passthrough");
 			}
 		}
 	};
