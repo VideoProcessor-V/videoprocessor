@@ -493,38 +493,6 @@ namespace ScalerPassTestsNs
 		ScalerPass::Axis axis;
 	};
 
-	// C++14 CWG-1558-safe SFINAE probe for optional ScalerPass::Module::TextureBytes().
-	template <typename... Ts>
-	struct MakeVoid { using type = void; };
-	template <typename... Ts>
-	using VoidT = typename MakeVoid<Ts...>::type;
-
-	template <typename T, typename = void>
-	struct HasTextureBytes : std::false_type {};
-
-	template <typename T>
-	struct HasTextureBytes<T, VoidT<decltype(std::declval<const T&>().TextureBytes())>> : std::true_type {};
-
-	template <typename T>
-	bool TryTextureBytes(const T& m, uint64_t& outBytes, std::true_type)
-	{
-		outBytes = static_cast<uint64_t>(m.TextureBytes());
-		return true;
-	}
-
-	template <typename T>
-	bool TryTextureBytes(const T&, uint64_t& outBytes, std::false_type)
-	{
-		outBytes = 0;
-		return false;
-	}
-
-	template <typename T>
-	bool TryTextureBytes(const T& m, uint64_t& outBytes)
-	{
-		return TryTextureBytes(m, outBytes, HasTextureBytes<T>{});
-	}
-
 	// Counts real libplacebo shader dispatches via pl_dispatch_callback (RAII restore on scope exit).
 	struct DispatchCounter
 	{
@@ -1037,6 +1005,50 @@ namespace ScalerPassTestsNs
 			const Image wantX = ScalerReference::ResampleAxis(in, true, 0.0, sw, 96, Lanczos(3));
 			const Image wantY = ScalerReference::ResampleAxis(in, false, 0.0, sh, 64, Lanczos(3));
 
+			// Same-format blittable r32f source (RAII TexGuard) for full-frame and sub-crop 1:1 blit checks.
+			std::vector<float> f32Data(in.v.size());
+			for (size_t i = 0; i < in.v.size(); ++i) f32Data[i] = static_cast<float>(in.v[i]);
+			pl_fmt r32fFmt = pl_find_named_fmt(gpu, "r32f");
+			Assert::IsNotNull(r32fFmt, L"r32f format");
+			const bool r32fBlittable = (r32fFmt->caps & PL_FMT_CAP_BLITTABLE) != 0;
+			pl_tex_params f32Tp{};
+			f32Tp.w = sw;
+			f32Tp.h = sh;
+			f32Tp.format = r32fFmt;
+			f32Tp.sampleable = true;
+			f32Tp.blit_src = r32fBlittable;
+			f32Tp.initial_data = f32Data.data();
+			TexGuard f32Src(gpu, pl_tex_create(gpu, &f32Tp));
+			Assert::IsNotNull(f32Src.tex, L"blittable r32f source upload");
+
+			// Integer sub-crop references + same-input negative controls (ix0=16, iy0=8, 64x48 inside 128x96).
+			const int subIx0 = 16, subIy0 = 8;
+			const int subW = 64, subH = 48;
+			const int subOutW = 48;
+			Image wantSubId(subW, subH);
+			Image originZeroSubId(subW, subH);
+			for (int y = 0; y < subH; ++y)
+				for (int x = 0; x < subW; ++x)
+				{
+					wantSubId.at(x, y) = in.at(x + subIx0, y + subIy0);
+					originZeroSubId.at(x, y) = in.at(x, y);
+				}
+			Assert::IsTrue(MaxDiff(wantSubId, originZeroSubId) > 0.1,
+				L"sub-crop 1:1 negative control: origin-(0,0) crop must differ from origin-(16,8) crop by > 0.1");
+
+			const Image wantSubXFull = ScalerReference::ResampleAxis(
+				in, true, static_cast<double>(subIx0), static_cast<double>(subIx0 + subW), subOutW, Lanczos(3));
+			Image wantSubX(subOutW, subH);
+			Image originZeroYSubX(subOutW, subH);
+			for (int y = 0; y < subH; ++y)
+				for (int x = 0; x < subOutW; ++x)
+				{
+					wantSubX.at(x, y) = wantSubXFull.at(x, y + subIy0);
+					originZeroYSubX.at(x, y) = wantSubXFull.at(x, y);
+				}
+			Assert::IsTrue(MaxDiff(wantSubX, originZeroYSubX) > 0.1,
+				L"sub-crop X-scale negative control: rows 0..47 must differ from rows 8..55 by > 0.1");
+
 			DispatchCounter counter(dev.dispatch);
 			const ScalerPass::Order orders[2] = { ScalerPass::Order::AcrossFirst, ScalerPass::Order::DownFirst };
 			for (ScalerPass::Order order : orders)
@@ -1052,7 +1064,7 @@ namespace ScalerPassTestsNs
 				ScalerPass::Source s;
 				s.tex = srcTex.tex;
 
-				auto runTwoAxisBaseline = [&](int& outDispatches, uint64_t& outTwoAxisBytes, bool& hasBytes) {
+				auto runTwoAxisBaseline = [&](int& outDispatches, size_t& outTwoAxisBytes) {
 					pl_tex out2d = nullptr;
 					counter.Reset();
 					Assert::IsTrue(pass.Apply(gpu, dev.dispatch, s, 96, 64, st, out2d), Wide(pass.LastError()).c_str());
@@ -1061,13 +1073,10 @@ namespace ScalerPassTestsNs
 					Assert::AreEqual(96, out2d->params.w);
 					Assert::AreEqual(64, out2d->params.h);
 					Assert::AreEqual(2, outDispatches, Wide(std::string(orderName) + " two-axis baseline must run 2 ortho dispatches").c_str());
-					hasBytes = TryTextureBytes(pass, outTwoAxisBytes);
-					if (hasBytes)
-					{
-						const uint64_t minOutBytes = static_cast<uint64_t>(96) * 64 * out2d->params.format->texel_size;
-						Assert::IsTrue(outTwoAxisBytes > minOutBytes,
-							Wide(std::string(orderName) + " two-axis baseline must hold temps[slot] in VRAM").c_str());
-					}
+					outTwoAxisBytes = pass.TextureBytes();
+					const size_t outBytesTwoAxis = static_cast<size_t>(96) * 64 * out2d->params.format->texel_size;
+					Assert::IsTrue(outTwoAxisBytes > outBytesTwoAxis,
+						Wide(std::string(orderName) + " two-axis baseline must hold temps[slot] in VRAM").c_str());
 					Image got2d;
 					Assert::IsTrue(DownloadFloatImage(gpu, out2d, got2d), L"readable two-axis f32 output");
 					const Image want2d = ScalerReference::Resample(in, 96, 64, Lanczos(3), order == ScalerPass::Order::DownFirst);
@@ -1077,9 +1086,8 @@ namespace ScalerPassTestsNs
 
 				// (a) Two-axis baseline (128x96 -> 96x64): establishes temps[0] in VRAM.
 				int twoAxisDispatches = 0;
-				uint64_t twoAxisBytes = 0;
-				bool hasTexBytes = false;
-				runTwoAxisBaseline(twoAxisDispatches, twoAxisBytes, hasTexBytes);
+				size_t twoAxisBytes = 0;
+				runTwoAxisBaseline(twoAxisDispatches, twoAxisBytes);
 
 				// (b) Exact 1:1 identity (128x96 -> 128x96, zero siting shift, full crop):
 				//     must bypass 2-pass ortho, match source within <= 1e-5, and free unused temps[0].
@@ -1093,56 +1101,53 @@ namespace ScalerPassTestsNs
 					Assert::AreEqual(sh, outId->params.h);
 					Assert::IsTrue(idDispatches < twoAxisDispatches,
 						Wide(std::string(orderName) + " exact 1:1 identity must bypass 2-pass ortho (< 2 dispatches)").c_str());
-					if (hasTexBytes)
-					{
-						uint64_t idBytes = 0;
-						Assert::IsTrue(TryTextureBytes(pass, idBytes));
-						const uint64_t outBytesId = static_cast<uint64_t>(sw) * sh * outId->params.format->texel_size;
-						Assert::IsTrue(idBytes < twoAxisBytes,
-							Wide(std::string(orderName) + " 1:1 identity must free unused temps[slot] (< twoAxisBytes)").c_str());
-						Assert::IsTrue(idBytes <= outBytesId,
-							Wide(std::string(orderName) + " 1:1 identity must retain zero temp texture bytes").c_str());
-					}
+					const size_t idBytes = pass.TextureBytes();
+					const size_t outBytesId = static_cast<size_t>(sw) * sh * outId->params.format->texel_size;
+					Assert::IsTrue(idBytes < twoAxisBytes,
+						Wide(std::string(orderName) + " 1:1 identity must free unused temps[slot] (< twoAxisBytes)").c_str());
+					Assert::AreEqual(outBytesId, idBytes,
+						Wide(std::string(orderName) + " 1:1 identity must retain only output texture bytes (zero temp bytes)").c_str());
 					Image gotId;
 					Assert::IsTrue(DownloadFloatImage(gpu, outId, gotId), L"readable 1:1 identity f32 output");
 					const double errId = MaxDiff(in, gotId);
-					char line[256];
-					std::snprintf(line, sizeof line, "GEM-080 %s 1:1 identity: dispatches=%d maxDiff=%.3e", orderName, idDispatches, errId);
+					char line[512];
+					std::snprintf(line, sizeof line, "GEM-080 %s 1:1 identity: dispatches=%d texBytes=%zu maxDiff=%.3e",
+						orderName, idDispatches, idBytes, errId);
 					Log(line);
 					Assert::IsTrue(errId <= 1e-5, Wide(line).c_str());
 
-					// Also exercise same-format blittable r32f -> r32f 1:1 identity (direct blit / single-pass bypass).
-					std::vector<float> f32Data(in.v.size());
-					for (size_t i = 0; i < in.v.size(); ++i) f32Data[i] = static_cast<float>(in.v[i]);
-					pl_fmt r32fFmt = pl_find_named_fmt(gpu, "r32f");
-					Assert::IsNotNull(r32fFmt, L"r32f format");
-					pl_tex_params f32Tp{};
-					f32Tp.w = sw;
-					f32Tp.h = sh;
-					f32Tp.format = r32fFmt;
-					f32Tp.sampleable = true;
-					f32Tp.blit_src = (r32fFmt->caps & PL_FMT_CAP_BLITTABLE) != 0;
-					f32Tp.initial_data = f32Data.data();
-					TexGuard f32Src(gpu, pl_tex_create(gpu, &f32Tp));
-					Assert::IsNotNull(f32Src.tex, L"blittable r32f source upload");
+					// Also exercise same-format blittable r32f -> r32f 1:1 identity (direct pl_tex_blit when blittable).
 					ScalerPass::Source sf;
 					sf.tex = f32Src.tex;
 					pl_tex outF32 = nullptr;
 					counter.Reset();
 					Assert::IsTrue(pass.Apply(gpu, dev.dispatch, sf, sw, sh, st, outF32), Wide(pass.LastError()).c_str());
 					const int blitDispatches = counter.dispatches;
+					Assert::IsNotNull(outF32, L"r32f 1:1 identity output texture");
 					Assert::IsTrue(blitDispatches < twoAxisDispatches,
 						Wide(std::string(orderName) + " same-format blittable 1:1 identity must bypass 2-pass ortho (< 2 dispatches)").c_str());
+					if (r32fBlittable)
+					{
+						Assert::AreEqual(0, blitDispatches,
+							Wide(std::string(orderName) + " same-format blittable r32f 1:1 identity must use pl_tex_blit (0 dispatches)").c_str());
+						Assert::IsTrue(pass.Status().find("[1:1 blit]") != std::string::npos,
+							Wide(std::string(orderName) + " same-format blittable r32f 1:1 identity must report [1:1 blit] in Status()").c_str());
+					}
+					const size_t blitBytes = pass.TextureBytes();
+					const size_t outBytesF32 = static_cast<size_t>(sw) * sh * outF32->params.format->texel_size;
+					Assert::AreEqual(outBytesF32, blitBytes,
+						Wide(std::string(orderName) + " same-format blittable 1:1 identity must retain only output texture bytes").c_str());
 					Image gotF32;
 					Assert::IsTrue(DownloadFloatImage(gpu, outF32, gotF32), L"readable r32f 1:1 identity output");
 					const double errF32 = MaxDiff(in, gotF32);
-					std::snprintf(line, sizeof line, "GEM-080 %s r32f 1:1 identity: dispatches=%d maxDiff=%.3e", orderName, blitDispatches, errF32);
+					std::snprintf(line, sizeof line, "GEM-080 %s r32f 1:1 identity: blittable=%d dispatches=%d maxDiff=%.3e status=%s",
+						orderName, r32fBlittable ? 1 : 0, blitDispatches, errF32, pass.Status().c_str());
 					Log(line);
 					Assert::IsTrue(errF32 <= 1e-5, Wide(line).c_str());
 				}
 
 				// Re-establish temps[0] before single-axis X collapse so transition 2-axis -> X-only is proven directly.
-				runTwoAxisBaseline(twoAxisDispatches, twoAxisBytes, hasTexBytes);
+				runTwoAxisBaseline(twoAxisDispatches, twoAxisBytes);
 
 				// (c1) Single-axis X via Axis::Both (128x96 -> 96x96): X scales, Y is exact 1:1.
 				{
@@ -1155,30 +1160,26 @@ namespace ScalerPassTestsNs
 					Assert::AreEqual(sh, outX->params.h);
 					Assert::AreEqual(1, xDispatches,
 						Wide(std::string(orderName) + " single-axis X via Axis::Both must collapse to 1 ortho dispatch").c_str());
-					if (hasTexBytes)
-					{
-						uint64_t xBytes = 0;
-						Assert::IsTrue(TryTextureBytes(pass, xBytes));
-						const uint64_t outBytesX = static_cast<uint64_t>(96) * sh * outX->params.format->texel_size;
-						Assert::IsTrue(xBytes < twoAxisBytes,
-							Wide(std::string(orderName) + " single-axis X via Axis::Both must free unused temps[slot]").c_str());
-						Assert::IsTrue(xBytes <= outBytesX,
-							Wide(std::string(orderName) + " single-axis X via Axis::Both must retain zero temp bytes").c_str());
-					}
+					const size_t xBytes = pass.TextureBytes();
+					const size_t outBytesX = static_cast<size_t>(96) * sh * outX->params.format->texel_size;
+					Assert::IsTrue(xBytes < twoAxisBytes,
+						Wide(std::string(orderName) + " single-axis X via Axis::Both must free unused temps[slot]").c_str());
+					Assert::AreEqual(outBytesX, xBytes,
+						Wide(std::string(orderName) + " single-axis X via Axis::Both must retain only output texture bytes (zero temp bytes)").c_str());
 					Image gotX;
 					Assert::IsTrue(DownloadFloatImage(gpu, outX, gotX), L"readable single-axis X f32 output");
 					const double refErrX = MaxDiff(wantX, gotX);
 					const double explicitDiffX = MaxDiff(explicitX, gotX);
 					char line[256];
-					std::snprintf(line, sizeof line, "GEM-080 %s Axis::Both X-only 128x96->96x96: dispatches=%d refErr=%.4f LSB12 vsAxisX=%.3e",
-						orderName, xDispatches, refErrX / lsb12, explicitDiffX);
+					std::snprintf(line, sizeof line, "GEM-080 %s Axis::Both X-only 128x96->96x96: dispatches=%d texBytes=%zu refErr=%.4f LSB12 vsAxisX=%.3e",
+						orderName, xDispatches, xBytes, refErrX / lsb12, explicitDiffX);
 					Log(line);
 					Assert::IsTrue(refErrX <= lsb12, Wide(line).c_str());
 					Assert::IsTrue(explicitDiffX <= 1e-6, Wide(std::string(orderName) + " Axis::Both X-only must match explicit Axis::X").c_str());
 				}
 
 				// Re-establish temps[0] before single-axis Y collapse so transition 2-axis -> Y-only is proven directly.
-				runTwoAxisBaseline(twoAxisDispatches, twoAxisBytes, hasTexBytes);
+				runTwoAxisBaseline(twoAxisDispatches, twoAxisBytes);
 
 				// (c2) Single-axis Y via Axis::Both (128x96 -> 128x64): Y scales, X is exact 1:1.
 				{
@@ -1191,26 +1192,133 @@ namespace ScalerPassTestsNs
 					Assert::AreEqual(64, outY->params.h);
 					Assert::AreEqual(1, yDispatches,
 						Wide(std::string(orderName) + " single-axis Y via Axis::Both must collapse to 1 ortho dispatch").c_str());
-					if (hasTexBytes)
-					{
-						uint64_t yBytes = 0;
-						Assert::IsTrue(TryTextureBytes(pass, yBytes));
-						const uint64_t outBytesY = static_cast<uint64_t>(sw) * 64 * outY->params.format->texel_size;
-						Assert::IsTrue(yBytes < twoAxisBytes,
-							Wide(std::string(orderName) + " single-axis Y via Axis::Both must free unused temps[slot]").c_str());
-						Assert::IsTrue(yBytes <= outBytesY,
-							Wide(std::string(orderName) + " single-axis Y via Axis::Both must retain zero temp bytes").c_str());
-					}
+					const size_t yBytes = pass.TextureBytes();
+					const size_t outBytesY = static_cast<size_t>(sw) * 64 * outY->params.format->texel_size;
+					Assert::IsTrue(yBytes < twoAxisBytes,
+						Wide(std::string(orderName) + " single-axis Y via Axis::Both must free unused temps[slot]").c_str());
+					Assert::AreEqual(outBytesY, yBytes,
+						Wide(std::string(orderName) + " single-axis Y via Axis::Both must retain only output texture bytes (zero temp bytes)").c_str());
 					Image gotY;
 					Assert::IsTrue(DownloadFloatImage(gpu, outY, gotY), L"readable single-axis Y f32 output");
 					const double refErrY = MaxDiff(wantY, gotY);
 					const double explicitDiffY = MaxDiff(explicitY, gotY);
 					char line[256];
-					std::snprintf(line, sizeof line, "GEM-080 %s Axis::Both Y-only 128x96->128x64: dispatches=%d refErr=%.4f LSB12 vsAxisY=%.3e",
-						orderName, yDispatches, refErrY / lsb12, explicitDiffY);
+					std::snprintf(line, sizeof line, "GEM-080 %s Axis::Both Y-only 128x96->128x64: dispatches=%d texBytes=%zu refErr=%.4f LSB12 vsAxisY=%.3e",
+						orderName, yDispatches, yBytes, refErrY / lsb12, explicitDiffY);
 					Log(line);
 					Assert::IsTrue(refErrY <= lsb12, Wide(line).c_str());
 					Assert::IsTrue(explicitDiffY <= 1e-6, Wide(std::string(orderName) + " Axis::Both Y-only must match explicit Axis::Y").c_str());
+				}
+
+				// Re-establish temps[0] before integer sub-crop 1:1 bypass.
+				runTwoAxisBaseline(twoAxisDispatches, twoAxisBytes);
+
+				// (d1) Exact 1:1 integer sub-crop (ix0=16, iy0=8, 64x48 inside 128x96):
+				//      must bypass 2-pass ortho, free temps[0], and match in.at(x+16, y+8) within <= 1e-5
+				//      on both r16->r32f single-pass and blittable r32f->r32f pl_tex_blit (src_rc offset).
+				{
+					ScalerPass::Source subSrc;
+					subSrc.tex = srcTex.tex;
+					subSrc.x0 = static_cast<float>(subIx0);
+					subSrc.y0 = static_cast<float>(subIy0);
+					subSrc.x1 = static_cast<float>(subIx0 + subW);
+					subSrc.y1 = static_cast<float>(subIy0 + subH);
+
+					pl_tex outSubId = nullptr;
+					counter.Reset();
+					Assert::IsTrue(pass.Apply(gpu, dev.dispatch, subSrc, subW, subH, st, outSubId), Wide(pass.LastError()).c_str());
+					const int subIdDispatches = counter.dispatches;
+					Assert::IsNotNull(outSubId, L"integer sub-crop 1:1 output texture");
+					Assert::AreEqual(subW, outSubId->params.w);
+					Assert::AreEqual(subH, outSubId->params.h);
+					Assert::IsTrue(subIdDispatches < twoAxisDispatches,
+						Wide(std::string(orderName) + " integer sub-crop 1:1 must bypass 2-pass ortho (< 2 dispatches)").c_str());
+					const size_t subIdBytes = pass.TextureBytes();
+					const size_t outBytesSubId = static_cast<size_t>(subW) * subH * outSubId->params.format->texel_size;
+					Assert::IsTrue(subIdBytes < twoAxisBytes,
+						Wide(std::string(orderName) + " integer sub-crop 1:1 must free unused temps[slot]").c_str());
+					Assert::AreEqual(outBytesSubId, subIdBytes,
+						Wide(std::string(orderName) + " integer sub-crop 1:1 must retain only output texture bytes").c_str());
+					Image gotSubId;
+					Assert::IsTrue(DownloadFloatImage(gpu, outSubId, gotSubId), L"readable integer sub-crop 1:1 f32 output");
+					const double errSubId = MaxDiff(wantSubId, gotSubId);
+					char line[512];
+					std::snprintf(line, sizeof line, "GEM-080 %s integer sub-crop 1:1 (16,8)+64x48: dispatches=%d texBytes=%zu maxDiff=%.3e",
+						orderName, subIdDispatches, subIdBytes, errSubId);
+					Log(line);
+					Assert::IsTrue(errSubId <= 1e-5, Wide(line).c_str());
+
+					// Also verify same-format blittable r32f integer sub-crop honours src_rc=(ix0,iy0).
+					ScalerPass::Source f32SubSrc = subSrc;
+					f32SubSrc.tex = f32Src.tex;
+					pl_tex outSubF32 = nullptr;
+					counter.Reset();
+					Assert::IsTrue(pass.Apply(gpu, dev.dispatch, f32SubSrc, subW, subH, st, outSubF32), Wide(pass.LastError()).c_str());
+					const int subBlitDispatches = counter.dispatches;
+					Assert::IsNotNull(outSubF32, L"r32f integer sub-crop 1:1 output texture");
+					Assert::AreEqual(subW, outSubF32->params.w);
+					Assert::AreEqual(subH, outSubF32->params.h);
+					Assert::IsTrue(subBlitDispatches < twoAxisDispatches,
+						Wide(std::string(orderName) + " r32f integer sub-crop 1:1 must bypass 2-pass ortho (< 2 dispatches)").c_str());
+					if (r32fBlittable)
+					{
+						Assert::AreEqual(0, subBlitDispatches,
+							Wide(std::string(orderName) + " r32f integer sub-crop 1:1 must use pl_tex_blit (0 dispatches)").c_str());
+						Assert::IsTrue(pass.Status().find("[1:1 blit]") != std::string::npos,
+							Wide(std::string(orderName) + " r32f integer sub-crop 1:1 must report [1:1 blit] in Status()").c_str());
+					}
+					const size_t subBlitBytes = pass.TextureBytes();
+					const size_t outBytesSubF32 = static_cast<size_t>(subW) * subH * outSubF32->params.format->texel_size;
+					Assert::AreEqual(outBytesSubF32, subBlitBytes,
+						Wide(std::string(orderName) + " r32f integer sub-crop 1:1 must retain only output texture bytes").c_str());
+					Image gotSubF32;
+					Assert::IsTrue(DownloadFloatImage(gpu, outSubF32, gotSubF32), L"readable r32f integer sub-crop 1:1 output");
+					const double errSubF32 = MaxDiff(wantSubId, gotSubF32);
+					std::snprintf(line, sizeof line, "GEM-080 %s r32f integer sub-crop 1:1 (16,8)+64x48: blittable=%d dispatches=%d maxDiff=%.3e status=%s",
+						orderName, r32fBlittable ? 1 : 0, subBlitDispatches, errSubF32, pass.Status().c_str());
+					Log(line);
+					Assert::IsTrue(errSubF32 <= 1e-5, Wide(line).c_str());
+				}
+
+				// Re-establish temps[0] before single-axis X-scale with integer Y sub-crop.
+				runTwoAxisBaseline(twoAxisDispatches, twoAxisBytes);
+
+				// (d2) Single-axis X-scale with integer Y sub-crop (ix0=16, iy0=8, [16,80)x[8,56) -> 48x48):
+				//      X scales 64->48 while Y stays exact integer sub-crop on rows 8..55;
+				//      must collapse to 1 ortho dispatch, free temps[0], and match ScalerReference within <= 1/4095.
+				{
+					ScalerPass::Source subSrc;
+					subSrc.tex = srcTex.tex;
+					subSrc.x0 = static_cast<float>(subIx0);
+					subSrc.y0 = static_cast<float>(subIy0);
+					subSrc.x1 = static_cast<float>(subIx0 + subW);
+					subSrc.y1 = static_cast<float>(subIy0 + subH);
+
+					pl_tex outSubX = nullptr;
+					counter.Reset();
+					Assert::IsTrue(pass.Apply(gpu, dev.dispatch, subSrc, subOutW, subH, st, outSubX), Wide(pass.LastError()).c_str());
+					const int subXDispatches = counter.dispatches;
+					Assert::IsNotNull(outSubX, L"integer Y sub-crop X-scale output texture");
+					Assert::AreEqual(subOutW, outSubX->params.w);
+					Assert::AreEqual(subH, outSubX->params.h);
+					Assert::AreEqual(1, subXDispatches,
+						Wide(std::string(orderName) + " single-axis X-scale with integer Y sub-crop must collapse to 1 ortho dispatch").c_str());
+					Assert::IsTrue(pass.Status().find("[x-only bypass]") != std::string::npos,
+						Wide(std::string(orderName) + " single-axis X-scale with integer Y sub-crop must report [x-only bypass]").c_str());
+					const size_t subXBytes = pass.TextureBytes();
+					const size_t outBytesSubX = static_cast<size_t>(subOutW) * subH * outSubX->params.format->texel_size;
+					Assert::IsTrue(subXBytes < twoAxisBytes,
+						Wide(std::string(orderName) + " single-axis X-scale with integer Y sub-crop must free unused temps[slot]").c_str());
+					Assert::AreEqual(outBytesSubX, subXBytes,
+						Wide(std::string(orderName) + " single-axis X-scale with integer Y sub-crop must retain only output texture bytes").c_str());
+					Image gotSubX;
+					Assert::IsTrue(DownloadFloatImage(gpu, outSubX, gotSubX), L"readable integer Y sub-crop X-scale f32 output");
+					const double refErrSubX = MaxDiff(wantSubX, gotSubX);
+					char line[512];
+					std::snprintf(line, sizeof line, "GEM-080 %s integer Y sub-crop X-scale (16,8)+64x48->48x48: dispatches=%d texBytes=%zu refErr=%.4f LSB12 status=%s",
+						orderName, subXDispatches, subXBytes, refErrSubX / lsb12, pass.Status().c_str());
+					Log(line);
+					Assert::IsTrue(refErrSubX <= lsb12, Wide(line).c_str());
 				}
 			}
 		}
