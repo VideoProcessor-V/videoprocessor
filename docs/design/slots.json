@@ -798,7 +798,9 @@
       "origin": "vp",
       "original_pathway": {
         "mode": "off",
-        "settings": {}
+        "settings": {
+          "upscale_route": "off"
+        }
       },
       "zone": "front_end",
       "movable": true
@@ -1234,11 +1236,15 @@
         "adaptive_upscale",
         "adaptive_upscale_w_base",
         "adaptive_upscale_superres_scale",
+        "upscale_sharp",
+        "upscale_safe",
+        "upscale_sharp_antiring",
         "downscale_light",
         "upscale_light",
         "ssim_bitrate_aware",
         "ssim_bitrate_floor",
         "cnn_residual_stabilise",
+        "sharp_residual_stabilise",
         "ssim_residual_stabilise",
         "residual_stabilise_grain_guard",
         "fbo_float32",
@@ -1288,11 +1294,15 @@
         "settings": {
           "adaptive_downscale": "off",
           "adaptive_upscale": "off",
+          "upscale_sharp": "lanczos3",
+          "upscale_safe": "hermite",
+          "upscale_sharp_antiring": "0.5",
           "ssim_bitrate_aware": "off",
           "downscale_light": "linear",
           "fbo_float32": "off",
           "ssim_residual_stabilise": "off",
           "cnn_residual_stabilise": "off",
+          "sharp_residual_stabilise": "off",
           "residual_stabilise_grain_guard": "off",
           "adaptive_motion": "off"
         }

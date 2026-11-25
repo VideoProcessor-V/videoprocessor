@@ -4,6 +4,7 @@
 #include <ConfigEditorCore.h>
 #include <ConfigFile.h>
 #include <RendererProfileConfig.h>
+#include <VP-V/modules/control/config/editor/SharpResidualMigration.h>
 
 #include <map>
 #include <set>
@@ -95,5 +96,40 @@ namespace Vpv
 				document.RemoveSection(emptied))
 				migratedLegacyInputPolicy = true;
 		return migratedLegacyInputPolicy;
+	}
+
+	bool MigrateSharpResidualStabilise(ConfigEditorCore::ConfigDocument& document)
+	{
+		bool migrated = false;
+		for (const auto& section : document.SectionNames())
+		{
+			const std::string normSection = ConfigFile::NormalizeName(section);
+			if (normSection != "vprenderer" && normSection.compare(0, 11, "vprenderer.") != 0)
+				continue;
+			const auto settings = document.SectionSettings(section);
+			bool hasLegacy = false;
+			std::string legacyValue;
+			bool hasExplicitSharp = false;
+			for (const auto& setting : settings)
+			{
+				const std::string nk = ConfigFile::NormalizeName(setting.first);
+				if (nk == "cnn_residual_stabilise")
+				{
+					hasLegacy = true;
+					legacyValue = setting.second;   // last-wins across duplicates, matching ConfigFile::Load
+				}
+				else if (nk == "sharp_residual_stabilise" && !setting.second.empty())
+				{
+					hasExplicitSharp = true;
+				}
+			}
+			if (!hasLegacy)
+				continue;
+			if (!hasExplicitSharp && !legacyValue.empty())
+				document.SetKnown(section, "sharp_residual_stabilise", legacyValue);
+			while (document.RemoveKnown(section, "cnn_residual_stabilise")) {}
+			migrated = true;
+		}
+		return migrated;
 	}
 }

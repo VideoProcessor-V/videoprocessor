@@ -1032,12 +1032,12 @@ namespace Vpv
         lowBitrate->setToolTip(QStringLiteral(
             "How VP deband reacts to compression (blocking, banding). Auto: by the measured bitrate quality. "
             "Off: by the content's bit depth only. On: always as for a poor stream."));
-        auto* cnnStabilise = addChoice(QStringLiteral("Steady CNN detail (upscaling)"), QStringLiteral("cnn_residual_stabilise"),
+        auto* sharpStabilise = addChoice(QStringLiteral("Steady sharp detail (upscaling)"), QStringLiteral("sharp_residual_stabilise"),
             { QStringLiteral("on"), QStringLiteral("off") });
-        cnnStabilise->setToolTip(QStringLiteral(
-            "The detail the CNN upscaler adds can shimmer on compressed streams (it is re-invented every frame). "
-            "On: where the de-judder's motion is trusted, that added detail is averaged along the motion over about "
-            "three frames; the picture itself is untouched. Without the motion it does nothing (same as off)."));
+        sharpStabilise->setToolTip(QStringLiteral(
+            "The detail the sharp upscaler branch adds can shimmer on compressed streams. "
+            "On: where motion vectors are trusted, that added detail is held along the motion over about "
+            "three frames; the alias-safe base is untouched. Without motion vectors it does nothing (same as off)."));
         auto* ssimStabilise = addChoice(QStringLiteral("Steady SSIM detail (downscaling)"), QStringLiteral("ssim_residual_stabilise"),
             { QStringLiteral("on"), QStringLiteral("off") });
         ssimStabilise->setToolTip(QStringLiteral(

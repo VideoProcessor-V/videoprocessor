@@ -80,10 +80,14 @@
     "source_resolution_text_guard": "on",
     "source_resolution_mixed_guard": "on",
     "adaptive_upscale": "off",
+    "upscale_route": "off",
+    "upscale_sharp": "lanczos3",
+    "upscale_safe": "hermite",
     "adaptive_grain_map": "on",
     "ssim_bitrate_aware": "on",
     "ssim_residual_stabilise": "on",
     "cnn_residual_stabilise": "on",
+    "sharp_residual_stabilise": "on",
     "fbo_float32": "auto",
     "ambient_adapt": "off",
     "appearance": "off",
@@ -547,8 +551,8 @@
           "slot": "scaling.output"
         },
         {
-          "key": "cnn_residual_stabilise",
-          "label": "Steady the upscaler's added detail along motion",
+          "key": "sharp_residual_stabilise",
+          "label": "Steady the sharp upscaler's added detail along motion",
           "values": [
             "on",
             "off"
@@ -565,6 +569,42 @@
           "slot": "scaling.output"
         },
         {
+          "key": "upscale_route",
+          "label": "4K route pre-render upscale",
+          "values": [
+            "off",
+            "rebased_only",
+            "always_4k"
+          ],
+          "slot": "scaling.route_4k"
+        },
+        {
+          "key": "upscale_sharp",
+          "label": "Hybrid upscaler: sharp branch filter",
+          "values": [
+            "lanczos3",
+            "ewa_lanczossharp",
+            "catmull_rom",
+            "lanczos2",
+            "lanczos4",
+            "bicubic"
+          ],
+          "slot": "scaling.output"
+        },
+        {
+          "key": "upscale_safe",
+          "label": "Hybrid upscaler: alias-safe branch filter",
+          "values": [
+            "hermite",
+            "lanczos3",
+            "catmull_rom",
+            "ewa_lanczossharp",
+            "bicubic",
+            "bilinear"
+          ],
+          "slot": "scaling.output"
+        },
+        {
           "key": "source_resolution_frame_bound",
           "label": "Re-base: decide on a fixed frame delay",
           "values": [
@@ -575,11 +615,6 @@
         }
       ],
       "planned": [
-        {
-          "key": "entrance_route_4k",
-          "label": "4K route (fixed 1-D steps to 4K)",
-          "slot": "scaling.route_4k"
-        },
         {
           "key": "refine_net",
           "label": "4K refine net",

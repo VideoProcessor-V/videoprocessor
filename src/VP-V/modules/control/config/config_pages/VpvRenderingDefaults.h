@@ -486,7 +486,7 @@ inline bool IsVpvOnlyKey(const QString& key)
         "shadow_lift_ansi_ramp_hi",
         "shadow_lift_ansi_ramp_lo",
         "shadow_lift_ansi_rate",
-        "shaped_recovery",
+        "shaped_recovery", "sharp_residual_stabilise",
         "sigma_delta",
         "simd",
         "simulated",
@@ -552,7 +552,7 @@ inline bool IsVpvOnlyKey(const QString& key)
         "together",
         "transcript_folder",
         "turns",
-        "upscale_light",
+        "upscale_light", "upscale_route", "upscale_safe", "upscale_sharp", "upscale_sharp_antiring",
         "use_frame_queue",
         "use_mode",
         "user_action",
@@ -674,7 +674,7 @@ inline bool IsVpvChoiceKey(const QString& key)
         "repeat_render_reuse",
         "residual_stabilise_grain_guard",
         "sdr_contrast_recovery",
-        "sdr_tone_shape",
+        "sdr_tone_shape", "sharp_residual_stabilise",
         "source_class",
         "source_coding_fixes",
         "source_range",
@@ -689,7 +689,7 @@ inline bool IsVpvChoiceKey(const QString& key)
         "temporal_dither",
         "texture_restore",
         "timing_continuity_fixes",
-        "upscale_light",
+        "upscale_light", "upscale_route", "upscale_safe", "upscale_sharp",
         "vector_demand",
     };
     const QByteArray latin = key.toLatin1();
@@ -709,7 +709,7 @@ inline bool VpvRenderingDefault(const QString& key, QString& out)
         // settings, AdaptiveDownscale.h), so an unset choice says what
         // it really is (audit 2026-10-14c: these all showed "Auto").
         static const std::pair<const char*, const char*> choiceDefaults[] = {
-            { "capture_path", "gpu" }, { "capture_upload", "auto" }, { "source_range", "auto" }, { "source_resolution", "auto" }, { "deband_vp", "off" }, { "low_bitrate_handling", "auto" }, { "cnn_residual_stabilise", "on" }, { "ssim_residual_stabilise", "on" }, { "ssim_bitrate_aware", "on" }, { "optical_flow", "on" }, { "optical_flow_global", "on" }, { "rebase_kernel_match", "off" }, { "source_resolution_text_guard", "on" }, { "dejudder_even_rates", "whole" }, { "occlusion_mask", "off" },
+            { "capture_path", "gpu" }, { "capture_upload", "auto" }, { "source_range", "auto" }, { "source_resolution", "auto" }, { "deband_vp", "off" }, { "low_bitrate_handling", "auto" }, { "cnn_residual_stabilise", "on" }, { "sharp_residual_stabilise", "on" }, { "ssim_residual_stabilise", "on" }, { "ssim_bitrate_aware", "on" }, { "optical_flow", "on" }, { "optical_flow_global", "on" }, { "rebase_kernel_match", "off" }, { "source_resolution_text_guard", "on" }, { "dejudder_even_rates", "whole" }, { "occlusion_mask", "off" },
             { "dejudder_warp_stage", "rendered" }, { "dejudder_global_prior", "on" },
             { "dejudder_vector_smooth", "on" }, { "dejudder_occlusion_fill", "off" },
             { "dejudder_est_candidates", "on" }, { "dejudder_est_qpel", "on" }, { "dejudder_est_still_zero", "on" }, { "dejudder_est_gate", "on" },
@@ -719,7 +719,7 @@ inline bool VpvRenderingDefault(const QString& key, QString& out)
             { "dejudder_fade_match", "on" }, { "dejudder_low_res", "all" }, { "dejudder_estimate_ahead", "on" },
             { "dejudder_block_taper", "off" }, { "dither_vectors", "auto" }, { "adaptive_downscale", "off" },
             { "adaptive_chroma_ssim", "off" }, { "adaptive_faithful", "auto" }, { "adaptive_grain_map", "on" },
-            { "adaptive_upscale", "off" }, { "adaptive_upscale_superres_scale", "on" }, { "upscale_light", "linear" },
+            { "adaptive_upscale", "off" }, { "adaptive_upscale_superres_scale", "on" }, { "upscale_light", "linear" }, { "upscale_route", "off" }, { "upscale_sharp", "lanczos3" }, { "upscale_safe", "hermite" },
             { "downscale_light", "linear" }, { "preserve_extended_range", "on" }, { "extended_range_more_cases", "on" }, { "sdr_tone_shape", "off" },
             { "motion_ahead_frames", "4" }, { "source_resolution_mixed_guard", "on" }, { "source_resolution_latch_fixes", "on" }, { "source_resolution_cut_fixes", "on" }, { "active_picture_startup_hold", "on" }, { "pulldown_fixes", "on" }, { "timing_continuity_fixes", "on" }, { "cadence_class_fixes", "on" }, { "motion_history_fixes", "on" }, { "vector_demand", "on" }, { "queue_timing_fixes", "on" }, { "general_rate_fixes", "on" }, { "efficiency_fixes", "on" },
             // Render-ahead (docs/VP-render-ahead-design.md).
@@ -755,7 +755,7 @@ inline bool VpvRenderingDefault(const QString& key, QString& out)
         if ((key.startsWith(QStringLiteral("dejudder_")) || key.startsWith(QStringLiteral("dither_")) ||
                 key.startsWith(QStringLiteral("adaptive_")) || key == QStringLiteral("sdr_white_headroom") ||
                 key == QStringLiteral("sdr_knee_start") || key == QStringLiteral("sdr_knee_strength") ||
-                key == QStringLiteral("ssim_bitrate_floor") || key == QStringLiteral("render_ahead_utilisation") ||
+                key == QStringLiteral("ssim_bitrate_floor") || key == QStringLiteral("upscale_sharp_antiring") || key == QStringLiteral("render_ahead_utilisation") ||
                 key.startsWith(QStringLiteral("source_resolution_auto_")) ||
                 key.startsWith(QStringLiteral("source_resolution_evidence_")) ||
                 // Hunt 3 (CFG2): the latch timing fields show 20 / 1.5 / 0.25.

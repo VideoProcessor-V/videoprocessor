@@ -124,7 +124,7 @@ namespace ProfileSchemaHooks
 			if (key == "source_resolution_evidence_seconds") return V(IsNumberInRange(value, 2.0, 120.0));
 			if (key == "deband_vp") return V(IsChoice(value, { "off", "auto", "on" }));
 			if (key == "low_bitrate_handling") return V(IsChoice(value, { "auto", "off", "on" }));
-			if (key == "cnn_residual_stabilise" || key == "ssim_residual_stabilise" || key == "ssim_bitrate_aware") return V(IsChoice(value, { "on", "off" }));
+			if (key == "sharp_residual_stabilise" || key == "cnn_residual_stabilise" || key == "ssim_residual_stabilise" || key == "ssim_bitrate_aware") return V(IsChoice(value, { "on", "off" }));
 			if (key == "ssim_bitrate_floor") return V(IsNumberInRange(value, 0.0, 1.0));
 			// docs/VP-nvof-ahead.md (owner 2026-10-16): optical-flow frames ahead, 0..4 (whole frames).
 			if (key == "motion_ahead_frames") return V(IsChoice(value, { "0", "1", "2", "3", "4" }));
@@ -230,11 +230,10 @@ namespace ProfileSchemaHooks
 			if (key == "dither_vectors") return V(IsChoice(value, { "auto", "own" }));   // delta 8 R1
 			// S2: every FBO in 32-bit float (auto: on, off with Low_Latency).
 			if (key == "fbo_float32") return V(IsChoice(value, { "auto", "on", "off" }));
-			// Stage 8-2: the adaptive downscale blend.
-			if (key == "adaptive_downscale" || key == "adaptive_chroma_ssim" || key == "adaptive_grain_map" ||
-				key == "adaptive_upscale" || key == "adaptive_upscale_superres_scale")
-				return V(IsChoice(value, { "on", "off" }));
-			if (key == "adaptive_upscale_w_base") return V(IsNumberInRange(value, 0.0, 1.0));
+			// Stage 8-2 / Q2-B3: adaptive downscale and hybrid upscaler keys.
+			if (key == "adaptive_downscale" || key == "adaptive_chroma_ssim" || key == "adaptive_grain_map" || key == "adaptive_upscale" || key == "adaptive_upscale_superres_scale") return V(IsChoice(value, { "on", "off" }));
+			if (key == "adaptive_upscale_w_base" || key == "upscale_sharp_antiring") return V(IsNumberInRange(value, 0.0, 1.0));
+			if (key == "upscale_route") return V(IsChoice(value, { "off", "rebased_only", "always_4k" })); if (key == "upscale_sharp") return V(IsChoice(value, { "lanczos3", "ewa_lanczossharp", "catmull_rom", "lanczos2", "lanczos4", "bicubic" })); if (key == "upscale_safe") return V(IsChoice(value, { "hermite", "lanczos3", "catmull_rom", "ewa_lanczossharp", "bicubic", "bilinear" }));
 			// "polar": retired 2026-10-17 (runs as auto), still loaded.
 			if (key == "adaptive_faithful") return V(IsChoice(value, { "polar", "ortho", "auto" }));
 			if (key == "adaptive_w_base" || key == "adaptive_grain_floor" || key == "adaptive_grain_shadow_bias")

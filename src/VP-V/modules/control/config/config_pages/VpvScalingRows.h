@@ -220,8 +220,8 @@ namespace Vpv
 			auto* downscaleLight = addChoice(QStringLiteral("Downscale light"),
 				QStringLiteral("downscale_light"), { QStringLiteral("linear"), QStringLiteral("gamma") });
 			downscaleLight->setToolTip(QStringLiteral(
-				"Light domain for frames that are downscaled. Linear is libplacebo's "
-				"default; gamma matches madVR's SSIM look."));
+				"Light domain for frames that are downscaled. Linear is libplacebo's default; "
+				"gamma matches madVR's SSIM look. On the VP-V pathway, Auto downscaler defaults to lanczos (Original pathway: hermite)."));
 			auto* upscaleLight = addChoice(QStringLiteral("Upscale light"),
 				QStringLiteral("upscale_light"), { QStringLiteral("linear"), QStringLiteral("gamma") });
 			upscaleLight->setToolTip(QStringLiteral(

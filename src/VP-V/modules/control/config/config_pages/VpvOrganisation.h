@@ -166,7 +166,7 @@ namespace Vpv
 				{ K::Toggle, "adaptive_faithful" }, { K::Toggle, "adaptive_grain_map" }, { K::Toggle, "ssim_bitrate_aware" } },
 				{ L::Feature, "the grain-aware downscale (the Scaling tier, Mid)", "adaptive_downscale", nullptr, "off", "off" } },
 			{ "scaling", "upscale", "Grain-aware upscale", "For sources smaller than the projector.", false, false, {
-				{ K::Toggle, "adaptive_upscale" },
+				{ K::Toggle, "adaptive_upscale" }, { K::Toggle, "upscale_route" },
 				{ K::Note, "The scaler filters themselves (upscaler, downscaler, chroma) are Bill's: VP Renderer > Scaling / Quality." } } },
 			{ "scaling", "tier_keys", "Set by the Scaling tier", "What the Scaling tier switches on: re-base (working from the real source size) and the grain-aware downscale.", true, false, {
 				{ K::Row, "source_resolution" }, { K::Row, "adaptive_downscale" }, { K::Row, "adaptive_w_base" } },
@@ -185,9 +185,13 @@ namespace Vpv
 				{ K::Row, "adaptive_motion" }, { K::Row, "adaptive_motion_speed_lo" },
 				{ K::Row, "adaptive_motion_speed_hi" }, { K::Row, "adaptive_motion_floor" },
 				{ K::Row, "adaptive_motion_smooth_ms" } } },
+			{ "scaling", "upscale_branches", "Hybrid upscaler branches",
+				"Kernel choices and anti-ringing for the sharp and alias-safe branches of the hybrid upscaler.", true, false, {
+				{ K::Toggle, "upscale_sharp" }, { K::Toggle, "upscale_safe" },
+				{ K::Number, "upscale_sharp_antiring" } } },
 			{ "scaling", "steadiness", "Scaler steadiness (expert)",
-				"Keeps the SSIM and CNN scalers' added detail steady along motion. Normal viewing never needs these.", true, false, {
-				{ K::Toggle, "ssim_residual_stabilise" }, { K::Toggle, "cnn_residual_stabilise" },
+				"Keeps the SSIM and sharp upscaler branches' added detail steady along motion. Normal viewing never needs these.", true, false, {
+				{ K::Toggle, "ssim_residual_stabilise" }, { K::Toggle, "sharp_residual_stabilise" },
 				{ K::Row, "ssim_bitrate_floor" } } },
 
 			// ---- Colour ----

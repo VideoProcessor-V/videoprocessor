@@ -7,6 +7,7 @@
 #include <VP-V/modules/motion/estimation/P3FieldFill.h>
 #include <VP-V/modules/output/dither/CustomHookChain.h>
 #include <VP-V/modules/scaling/output/DownscaleLight.h>
+#include <libplacebo/filters.h>
 #include <vprenderer/GrainPreserve.h>
 
 #include <algorithm>
@@ -528,6 +529,10 @@ namespace AdaptiveDownscaleStage
 		const bool gamma = downscaleGamma && DownscaleLight::Downscales(sampled, light.targetCrop);
 		if (gamma)
 			params.disable_linear_scaling = true;
+		// G12: VP-V pathway default downscaler is Lanczos when downscaler=auto and quality!=fast
+		// (Original pathway leaves upstream hermite untouched).
+		if (light.vpvDefaultDownscaler)
+			params.downscaler = &pl_filter_lanczos;
 		// 8b: both branches in one light domain: linear (no sigmoid) or gamma.
 		if (upscaleThisFrame && light.slotRuns)
 		{
