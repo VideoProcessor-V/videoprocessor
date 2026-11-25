@@ -1264,7 +1264,7 @@ namespace GrainUnitGpuTestsNs
 				GrainSplit::Gpu::Options opts;
 				opts.storage = Storage::Full;
 				opts.scratch = gd.scratch;
-				Assert::IsTrue(gd.splitter.Compute(gpu, dev.dispatch, gd.plane, 0, 1023.0, 1.0, B, params, opts),
+				Assert::IsTrue(gd.splitter.Compute(gpu, dev.dispatch, gd.plane, 0, 1.0 / 1023.0, 1.0, B, params, opts),
 					Wide(gd.splitter.LastError()).c_str());
 				return DownloadRGBA(gpu, dev.dispatch, gd.scratch.level);
 			};

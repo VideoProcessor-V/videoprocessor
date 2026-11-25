@@ -1158,7 +1158,7 @@ namespace VideoProcessorTest
 
 			// 1. POD1-H1: DejudderExtrasPresent.cpp & MotionHostHelpers.cpp (PhaseTimeline.inl) wire memo + seqA/seqB + FallbackCatalog.
 			const std::string extras = readSrc("src\\VP-V\\modules\\motion\\consumers\\DejudderExtrasPresent.cpp");
-			Assert::IsTrue(extras.find("Vpv::Skeleton::MemoForHost(h.host, f.sourceSequence)") != std::string::npos,
+			Assert::IsTrue(extras.find("Vpv::Skeleton::MemoForHost(host.host, f.sourceSequence)") != std::string::npos,
 				L"POD1-H1: DejudderExtrasPresent must acquire host SkeletonMemo");
 			Assert::IsTrue(extras.find("fm.memo.get(), f.sourceSequence, f.nextSourceSequence") != std::string::npos,
 				L"POD1-H1: DejudderExtrasPresent must pass memo, seqA, seqB to FrameInterpolator::Run");

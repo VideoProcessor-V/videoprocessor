@@ -1609,14 +1609,20 @@ namespace VideoProcessorTest
 			auto advanceUntilReady = [](TestClock& clock, LedDrive::LedDriveModule& mod) -> bool
 			{
 				const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+				auto lastProgress = std::chrono::steady_clock::now();
 				while (std::chrono::steady_clock::now() < deadline)
 				{
 					if (mod.DrivingProjector() && clock.clock->SettledCount() >= 1)
 						return true;
 					if (clock.clock->SettledCount() >= 1)
+					{
 						clock.To(clock.Ms() + 50.0);
+						lastProgress = std::chrono::steady_clock::now();
+					}
+					else if (std::chrono::steady_clock::now() - lastProgress < std::chrono::milliseconds(5))
+						std::this_thread::yield();
 					else
-						std::this_thread::sleep_for(std::chrono::milliseconds(2));
+						std::this_thread::sleep_for(std::chrono::milliseconds(1));
 				}
 				return mod.DrivingProjector() && clock.clock->SettledCount() >= 1;
 			};
