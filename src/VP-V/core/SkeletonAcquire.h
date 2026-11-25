@@ -924,43 +924,65 @@ public:
         }
 
         // G2 (b): the memo spot (a kept spot of a released frame included); a fill in flight is waited for (computed once).
-        auto it = memo_.find(key);
-        if (it != memo_.end() && it->second->epoch != epoch_ && it->second->state != Entry::Filling) {
-            // A spot of an older epoch (a discontinuity since): absent for every reader. Its bytes go at the next seal.
-            Entry& old = *it->second;
-            if (old.gpuForm)
-                gpuBytes_ -= old.reserved;
-            else
-                cpuBytes_ -= old.bytes.size();
-            old.reserved = 0;
-            old.orphaned = true;
-            stale_.push_back(it->second);
-            memo_.erase(it);
-            it = memo_.end();
-        }
-        if (it == memo_.end() && ReleasedForOwnerLocked(seq, ow))
-            return Fail(c, id, seq, AcquireCause::FrameReleased);   // a released frame is never recomputed (lane slots above stay readable)
-        if (it != memo_.end()) {
-            const std::shared_ptr<Entry> e = it->second;
-            if (e->state == Entry::Filling) {
-                // Cycle by key across threads: the fill we would wait for is (transitively) waiting for a fill of ours.
-                if (WaitWouldCycleLocked(e))
-                    return Fail(c, id, seq, AcquireCause::Reentrant);
-                const std::thread::id self = std::this_thread::get_id();
-                waitingOn_[self] = e;
-                cv_.wait(lk, [&e]() { return e->state != Entry::Filling; });
-                waitingOn_.erase(self);
-            }
-            if (e->state == Entry::Ready) {
-                ++c.reusedMemo;
-                if (e->ahead && !e->aheadReuseCounted && haveSealed_ && seq <= lastSeal_) {
-                    ++c.aheadReused;   // an ahead fill reused once its frame renders (or later): the same spot
-                    e->aheadReuseCounted = true;
+        for (;;) {
+            auto it = memo_.find(key);
+            if (it != memo_.end() && it->second->epoch != epoch_ && it->second->state != Entry::Filling) {
+                // A spot of an older epoch (a discontinuity since): absent for every reader. Its bytes go at the next seal.
+                Entry& old = *it->second;
+                if (!old.orphaned) {
+                    if (old.gpuForm)
+                        gpuBytes_ -= old.reserved;
+                    else
+                        cpuBytes_ -= old.bytes.size();
+                    old.reserved = 0;
+                    old.orphaned = true;
                 }
-                return ResultOf(e, AcquireStatus::Reused);
+                stale_.push_back(it->second);
+                memo_.erase(it);
+                it = memo_.end();
             }
-            // Declined for this frame: the same cause, the owner is not asked twice for one frame.
-            return Fail(c, id, seq, e->cause == AcquireCause::None ? AcquireCause::OwnerDeclined : e->cause);
+            if (it == memo_.end() && ReleasedForOwnerLocked(seq, ow))
+                return Fail(c, id, seq, AcquireCause::FrameReleased);   // a released frame is never recomputed (lane slots above stay readable)
+            if (it != memo_.end()) {
+                const std::shared_ptr<Entry> e = it->second;
+                if (e->state == Entry::Filling) {
+                    // Cycle by key across threads: the fill we would wait for is (transitively) waiting for a fill of ours.
+                    if (WaitWouldCycleLocked(e))
+                        return Fail(c, id, seq, AcquireCause::Reentrant);
+                    const std::thread::id self = std::this_thread::get_id();
+                    waitingOn_[self] = e;
+                    cv_.wait(lk, [&e]() { return e->state != Entry::Filling; });
+                    waitingOn_.erase(self);
+                    if (e->epoch != epoch_) {
+                        const auto cur = memo_.find(key);
+                        if (cur != memo_.end() && cur->second == e) {
+                            if (!e->orphaned) {
+                                if (e->gpuForm)
+                                    gpuBytes_ -= e->reserved;
+                                else
+                                    cpuBytes_ -= e->bytes.size();
+                                e->reserved = 0;
+                                e->orphaned = true;
+                            }
+                            stale_.push_back(e);
+                            memo_.erase(cur);
+                        }
+                        ow = OwnerLocked(OwnerKey(id, form));   // re-read after unlock during cv_.wait
+                        continue;
+                    }
+                }
+                if (e->state == Entry::Ready) {
+                    ++c.reusedMemo;
+                    if (e->ahead && !e->aheadReuseCounted && haveSealed_ && seq <= lastSeal_) {
+                        ++c.aheadReused;   // an ahead fill reused once its frame renders (or later): the same spot
+                        e->aheadReuseCounted = true;
+                    }
+                    return ResultOf(e, AcquireStatus::Reused);
+                }
+                // Declined for this frame: the same cause, the owner is not asked twice for one frame.
+                return Fail(c, id, seq, e->cause == AcquireCause::None ? AcquireCause::OwnerDeclined : e->cause);
+            }
+            break;
         }
 
         // Admission (design s2.3): a fill for a frame beyond the queue window is refused, never run.
@@ -1230,7 +1252,8 @@ public:
     {
         std::lock_guard<std::mutex> g(mutex_);
         const auto it = memo_.find(Key{ id, seq, uint8_t(AcquireForm::Cpu), VariantKey() });
-        if (it == memo_.end() || it->second->state != Entry::Ready || it->second->bytes.size() != n || dst == nullptr)
+        if (it == memo_.end() || it->second->state != Entry::Ready || it->second->epoch != epoch_
+            || it->second->bytes.size() != n || dst == nullptr)
             return false;
         std::memcpy(dst, it->second->bytes.data(), n);
         return true;
@@ -1253,19 +1276,17 @@ public:
             haveSealed_ = true;
             lastSeal_ = seq;
             ++seals_;
-            ReleaseIfLocked([](const Entry& e) { return e.frameScoped; }, drop);   // the previous render frame's views
-            {
-                const uint64_t ep = epoch_;
-                ReleaseIfLocked([ep](const Entry& e) { return e.epoch != ep; }, drop);   // spots of an older epoch (BumpEpoch)
-                bumpedThisInterval_ = false;
-                for (auto& s : stale_)
-                    drop.push_back(s);
-                stale_.clear();
-            }
-            // A frame has left the queue below the edge (design s2.3): f < min(seal - back, presented - history).
+            // Single fused pass: previous frame-scoped views, older-epoch spots (BumpEpoch), and frames below the queue edge.
+            const uint64_t ep = epoch_;
             const uint64_t edge = EdgeLocked(seq, 0);
+            ReleaseIfLocked([this, seq, ep, edge](const Entry& e) {
+                return e.frameScoped || e.epoch != ep || (edge > 0 && e.seq < EdgeLocked(seq, e.keep));
+            }, drop);
+            bumpedThisInterval_ = false;
+            for (auto& s : stale_)
+                drop.push_back(s);
+            stale_.clear();
             if (edge > 0) {
-                ReleaseIfLocked([this, seq](const Entry& e) { return e.seq < EdgeLocked(seq, e.keep); }, drop);
                 if (!haveReleased_ || edge - 1u > releasedThrough_)
                     releasedThrough_ = edge - 1u;
                 haveReleased_ = true;
