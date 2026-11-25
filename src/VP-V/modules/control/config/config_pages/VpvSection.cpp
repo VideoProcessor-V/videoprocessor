@@ -504,15 +504,57 @@ namespace Vpv
 				combo->addItem(shown, Q(v));
 			}
 			const SlotInfo* slot = table.Slot(toggle.slot);
-			// A toggle whose effect needs more than its label (C5 batch B: cut_soft_reset, owner 2026-11-15 08:35 U7 Q4).
-			const QString what = std::string(toggle.key) == "cut_soft_reset" ?
-				QStringLiteral("Default on. When the scene judge is very sure a frame is a near-cut that is not a confirmed cut "
-					"(a high bar), detail pulse and texture restore shrink their history instead of carrying the old scene's detail; "
-					"below the bar nothing happens, because mid-scene firing would be worse than the vectors' own quick recovery. "
-					"A confirmed cut still starts over and a fade still shrinks the history, whatever this says. Off: no soft "
-					"reset (shown as \"soft reset: off\" on the detail pulse / texture restore status lines). It acts only on "
-					"confirmed verdicts: where they stay provisional (low latency) the lines read \"soft reset: on (inactive: "
-					"provisional verdicts only)\". The bar is provisional until the D8 truth run.\n\n") : QString();
+			// Plain-English tooltips for toggles whose effect needs more than their label.
+			auto toggleHelp = [](const std::string& k) -> QString
+			{
+				if (k == "cut_soft_reset")
+					return QStringLiteral("Default on. When the scene judge is very sure a frame is a near-cut that is not a confirmed cut "
+						"(a high bar), detail pulse and texture restore shrink their history instead of carrying the old scene's detail; "
+						"below the bar nothing happens, because mid-scene firing would be worse than the vectors' own quick recovery. "
+						"A confirmed cut still starts over and a fade still shrinks the history, whatever this says. Off: no soft "
+						"reset (shown as \"soft reset: off\" on the detail pulse / texture restore status lines). It acts only on "
+						"confirmed verdicts: where they stay provisional (low latency) the lines read \"soft reset: on (inactive: "
+						"provisional verdicts only)\". The bar is provisional until the D8 truth run.\n\n");
+				if (k == "temporal_detail")
+					return QStringLiteral("Default off. Temporal detail v2: library ready (not wired to live renderer yet - connects at Wave 4-6 integration). "
+						"Peak-frame blending that cleans compression banding and softens keyframe pulsing while leaving film grain untouched. "
+						"Toggling this key today stores the setting in your profile but does not yet run in the live renderer or auto-enable the analysis lane. "
+						"Original pathway forces off.\n\n");
+				if (k == "td_limit_kappa")
+					return QStringLiteral("Default 1.0 (strict). Sets the output-change limit multiplier kappa in [1.0, 3.0] when the codec transform is unknown "
+						"(HEVC, AV1, or rescaled HDMI: status shows \"limit: statistical (transform unknown)\" vs \"limit: cell (AVC 8x8)\"). "
+						"Applies both per-band |Delta_j| <= kappa * sqrt(U_j) and joint cross-band |sum Delta_j| <= kappa * sqrt(sum U_j) limits.\n\n");
+				if (k == "td_mode")
+					return QStringLiteral("Default cell. Applies ONLY when an 8x8 AVC/MPEG transform and real encoder prediction are identified "
+						"(\"limit: cell (AVC 8x8)\"). On HEVC/AV1 or unknown transforms this switch shows \"inactive: transform unknown\" "
+						"and the statistical kappa limit governs instead.\n\n");
+				if (k == "td_overlay")
+					return QStringLiteral("Default off. Diagnostic overlay planned for Wave 4-6 hookup showing blend weights, td.maps fields, focus vetoes, or motion gates.\n\n");
+				if (k == "td_solver")
+					return QStringLiteral("Default active_set (exact constrained QP solver over subsets, w_k >= 0, sum w_k <= 1). legacy_clip retains the old clip-then-rescale solver for ablation.\n\n");
+				if (k == "td_quality_signal")
+					return QStringLiteral("Default aligned_a2e (motion-aligned relative sharpness + empirical A2e own-error prior). non_block_step selects the grid-free picture-only step estimator; legacy_block_8px selects the 8-px block-edge cue.\n\n");
+				if (k == "td_stats_pooling")
+					return QStringLiteral("Default band_shrink (5x5 L / 3x3 M / 3x3-or-1x1 H pooling + Empirical-Bayes shrinkage). two_frame_same_role adds 2-frame same-role statistics-only pooling (never pixels or weights, off by default); legacy_1x1 disables both.\n\n");
+				if (k == "td_anchored_carry")
+					return QStringLiteral("Default off (until injected-fault tests pass). Enables single-resample anchored carry from the last confirmed peak with per-cell held-out structure checks and real kDrift auditing.\n\n");
+				if (k == "td_smooth_warp")
+					return QStringLiteral("Default on. Bilinearly interpolates 16-px cell motion vectors across cell centers during warping (skipping invalid neighbors) to prevent block-edge seams.\n\n");
+				if (k == "td_hard_fb_gate")
+					return QStringLiteral("Default on. Hard-zeros blend weights whenever forward/backward vector disagreement exceeds 1.0 px while keeping continuous confidence tapering below 1.0 px.\n\n");
+				if (k == "td_chroma_weights")
+					return QStringLiteral("Default independent. reuse_luma lets chroma reuse luma's blend weights to skip chroma moment/solve passes for laptop budget comparison.\n\n");
+				if (k == "td_smooth_grain_guard")
+					return QStringLiteral("Default on. Spatially bilinearly interpolates Layer-4 grain-guard add-back fractions across cells to eliminate 16-px block seams.\n\n");
+				if (k == "td_subpixel_debias")
+					return QStringLiteral("Default off. Sub-pixel bicubic H-band warp attenuation debiasing in A1 covariance estimation (SOTA-2).\n\n");
+				if (k == "td_edge_upsample")
+					return QStringLiteral("Default off. Clean-luma-guided edge-aware weight upsampling in Pass 3A (SOTA-4).\n\n");
+				if (k == "td_neighborhood_clamp")
+					return QStringLiteral("Default off. Grain-free 3x3 neighborhood 3-sigma C^1 soft clamp on warped reference M/H bands (SOTA-5).\n\n");
+				return QString();
+			};
+			const QString what = toggleHelp(toggle.key);
 			combo->setToolTip(what + QStringLiteral("Key %1 (renderer profile). Slot: %2. See docs/settings/VP-settings-reference.md.")
 				.arg(key, slot ? Q(slot->name) : Q(toggle.slot)) +
 				(retiring ? QStringLiteral("\n\n") + RetirementTip(table, *retiring) : QString()));
@@ -555,19 +597,6 @@ namespace Vpv
 					"its GPU work runs after the frame is submitted, so the same clip gives the same picture every time and "
 					"the work cannot disturb the frame in flight. The switch lands on the next cut, read ahead. Off: the earlier "
 					"mode, where the decision arrives whenever the GPU finishes." },
-				// TD-S7: Temporal Detail v2 (library ready; not wired to live renderer yet - connects at Wave 4-6 integration).
-				{ "temporal_detail", "Temporal detail (off | shadow | on - library ready, not wired to live renderer yet)", "off",
-					"Default off. Temporal detail v2: library ready (not wired to live renderer yet - connects at Wave 4-6 integration). "
-					"Peak-frame blending in quantization cells that cleans banding and softens keyframe pulsing while leaving film grain untouched. "
-					"Toggling this key today stores the setting in your profile but does not yet run in the live renderer or auto-enable the analysis lane "
-					"(dependency-plan helpers live in TdV2Settings.h for Wave 4-6 hookup). Original pathway forces off." },
-				{ "td_mode", "Temporal detail: residual mode (cell | strict - library ready, not wired yet)", "cell",
-					"Default cell. Temporal detail v2: library ready (not wired to live renderer yet - connects at Wave 4-6 integration). "
-					"cell: allows sent codec corrections to shift within their rounding cell for stronger banding and pulse cleanup. "
-					"strict: restores every sent coefficient unchanged and repairs only zeroed dead-zone detail." },
-				{ "td_overlay", "Temporal detail: diagnostic overlay (off | weights | maps | focus | motion - library ready, not wired yet)", "off",
-					"Default off. Temporal detail v2: library ready (not wired to live renderer yet - connects at Wave 4-6 integration). "
-					"Optional diagnostic overlay planned to show per-block blend weights, td.maps fields, focus guard vetoes, or camera-relative motion gates." },
 			};
 			for (const TextRowSpec& r : kRows)
 				if (std::string(r.key) == key) return &r;

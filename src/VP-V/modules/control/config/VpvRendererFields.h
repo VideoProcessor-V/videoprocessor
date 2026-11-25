@@ -158,11 +158,22 @@ namespace VpvRenderer
 		// bitrate quality reading raises it (auto | off | on).
 		std::string debandVp = "off";
 		std::string lowBitrateHandling = "auto";
-		// Temporal Detail v2 (TD-S7; off by default; Original pathway forces off):
-		// temporal_detail = off | shadow | on, td_mode = cell | strict, td_overlay = off | weights | maps | focus | motion.
+		// Temporal Detail v2 (TD-S7 + TD-U1..U5; off by default; Original pathway forces off):
 		std::string temporalDetail = "off";
+		double tdLimitKappa = 1.0;
 		std::string tdMode = "cell";
 		std::string tdOverlay = "off";
+		std::string tdSolver = "active_set";
+		std::string tdQualitySignal = "aligned_a2e";
+		std::string tdStatsPooling = "band_shrink";
+		std::string tdAnchoredCarry = "off";
+		std::string tdSmoothWarp = "on";
+		std::string tdHardFbGate = "on";
+		std::string tdChromaWeights = "independent";
+		std::string tdSmoothGrainGuard = "on";
+		std::string tdSubpixelDebias = "off";
+		std::string tdEdgeUpsample = "off";
+		std::string tdNeighborhoodClamp = "off";
 		// Delta 15 S8-2: the SSIM weight (and the CNN's, 2c) lowered at a low
 		// bitrate quality, down to the floor; the faithful anti-ringing raised.
 		bool ssimBitrateAware = true;

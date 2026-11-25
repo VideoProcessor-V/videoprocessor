@@ -85,7 +85,22 @@
     "cnn_residual_stabilise": "on",
     "fbo_float32": "auto",
     "ambient_adapt": "off",
-    "occlusion_mask": "off"
+    "occlusion_mask": "off",
+    "temporal_detail": "off",
+    "td_limit_kappa": "1.0",
+    "td_mode": "cell",
+    "td_overlay": "off",
+    "td_solver": "active_set",
+    "td_quality_signal": "aligned_a2e",
+    "td_stats_pooling": "band_shrink",
+    "td_anchored_carry": "off",
+    "td_smooth_warp": "on",
+    "td_hard_fb_gate": "on",
+    "td_chroma_weights": "independent",
+    "td_smooth_grain_guard": "on",
+    "td_subpixel_debias": "off",
+    "td_edge_upsample": "off",
+    "td_neighborhood_clamp": "off"
   },
   "units": [
     {
@@ -412,6 +427,150 @@
             "off"
           ],
           "slot": "repair.texture_restore"
+        },
+        {
+          "key": "temporal_detail",
+          "label": "Temporal detail (library ready, not wired to live renderer yet)",
+          "values": [
+            "off",
+            "shadow",
+            "on"
+          ],
+          "slot": "repair.encoding"
+        },
+        {
+          "key": "td_limit_kappa",
+          "label": "Temporal detail: output limit strictness (kappa)",
+          "values": [
+            "1.0",
+            "1.5",
+            "2.0",
+            "2.5",
+            "3.0"
+          ],
+          "slot": "repair.encoding"
+        },
+        {
+          "key": "td_mode",
+          "label": "Temporal detail: 8x8 residual mode (inactive when transform unknown)",
+          "values": [
+            "cell",
+            "strict"
+          ],
+          "slot": "repair.encoding"
+        },
+        {
+          "key": "td_overlay",
+          "label": "Temporal detail: diagnostic overlay",
+          "values": [
+            "off",
+            "weights",
+            "maps",
+            "focus",
+            "motion"
+          ],
+          "slot": "repair.encoding"
+        },
+        {
+          "key": "td_solver",
+          "label": "Blend solver (U2)",
+          "values": [
+            "active_set",
+            "legacy_clip"
+          ],
+          "slot": "repair.encoding"
+        },
+        {
+          "key": "td_quality_signal",
+          "label": "Quality and own-error estimator (U1 / D1)",
+          "values": [
+            "aligned_a2e",
+            "non_block_step",
+            "legacy_block_8px"
+          ],
+          "slot": "repair.encoding"
+        },
+        {
+          "key": "td_stats_pooling",
+          "label": "Statistics pooling and shrinkage (U4 / D4)",
+          "values": [
+            "band_shrink",
+            "two_frame_same_role",
+            "legacy_1x1"
+          ],
+          "slot": "repair.encoding"
+        },
+        {
+          "key": "td_anchored_carry",
+          "label": "Single-resample anchored carry (U5 / D2)",
+          "values": [
+            "off",
+            "on"
+          ],
+          "slot": "repair.encoding"
+        },
+        {
+          "key": "td_smooth_warp",
+          "label": "Smooth bilinear warp vectors (6.1)",
+          "values": [
+            "on",
+            "off"
+          ],
+          "slot": "repair.encoding"
+        },
+        {
+          "key": "td_hard_fb_gate",
+          "label": "Hard > 1 px forward/backward occlusion gate (6.2)",
+          "values": [
+            "on",
+            "off"
+          ],
+          "slot": "repair.encoding"
+        },
+        {
+          "key": "td_chroma_weights",
+          "label": "Chroma blend weights (6.6)",
+          "values": [
+            "independent",
+            "reuse_luma"
+          ],
+          "slot": "repair.encoding"
+        },
+        {
+          "key": "td_smooth_grain_guard",
+          "label": "Smooth bilinear grain-guard add-back (L-3)",
+          "values": [
+            "on",
+            "off"
+          ],
+          "slot": "repair.encoding"
+        },
+        {
+          "key": "td_subpixel_debias",
+          "label": "Sub-pixel H-band warp attenuation debias (SOTA-2)",
+          "values": [
+            "off",
+            "on"
+          ],
+          "slot": "repair.encoding"
+        },
+        {
+          "key": "td_edge_upsample",
+          "label": "Luma-guided edge-aware weight upsampling (SOTA-4)",
+          "values": [
+            "off",
+            "on"
+          ],
+          "slot": "repair.encoding"
+        },
+        {
+          "key": "td_neighborhood_clamp",
+          "label": "3x3 neighborhood soft clamp on M/H refs (SOTA-5)",
+          "values": [
+            "off",
+            "on"
+          ],
+          "slot": "repair.encoding"
         }
       ],
       "planned": [

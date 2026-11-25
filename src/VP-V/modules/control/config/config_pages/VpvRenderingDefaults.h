@@ -527,8 +527,20 @@ inline bool IsVpvOnlyKey(const QString& key)
         "target_mode_refresh",
         "target_transfer",
         "target_white_percent",
+        "td_anchored_carry",
+        "td_chroma_weights",
+        "td_edge_upsample",
+        "td_hard_fb_gate",
+        "td_limit_kappa",
         "td_mode",
+        "td_neighborhood_clamp",
         "td_overlay",
+        "td_quality_signal",
+        "td_smooth_grain_guard",
+        "td_smooth_warp",
+        "td_solver",
+        "td_stats_pooling",
+        "td_subpixel_debias",
         "temporal_detail",
         "temporal_dither",
         "temporal_dither_refresh",
@@ -684,8 +696,20 @@ inline bool VpvRenderingDefault(const QString& key, QString& out)
     if (key == QStringLiteral("saturation")) { out = QStringLiteral("0"); return true; }
     if (key == QStringLiteral("source_geometry_detect")) { out = QStringLiteral("all"); return true; }   // SID r2: wide recognition
     if (key == QStringLiteral("temporal_detail")) { out = QStringLiteral("off"); return true; }          // TD-S7: off by default
+    if (key == QStringLiteral("td_limit_kappa")) { out = QStringLiteral("1.0"); return true; }           // TD-U3: strict default 1.0
     if (key == QStringLiteral("td_mode")) { out = QStringLiteral("cell"); return true; }                 // TD-S7: cell default
     if (key == QStringLiteral("td_overlay")) { out = QStringLiteral("off"); return true; }               // TD-S7: overlay off
+    if (key == QStringLiteral("td_solver")) { out = QStringLiteral("active_set"); return true; }         // TD-U2: exact active-set QP
+    if (key == QStringLiteral("td_quality_signal")) { out = QStringLiteral("aligned_a2e"); return true; }// TD-U1: aligned sharpness + A2e
+    if (key == QStringLiteral("td_stats_pooling")) { out = QStringLiteral("band_shrink"); return true; } // TD-U4: band pool + EB shrink
+    if (key == QStringLiteral("td_anchored_carry")) { out = QStringLiteral("off"); return true; }        // TD-U5: default off
+    if (key == QStringLiteral("td_smooth_warp")) { out = QStringLiteral("on"); return true; }            // 6.1 / L-1
+    if (key == QStringLiteral("td_hard_fb_gate")) { out = QStringLiteral("on"); return true; }           // 6.2 / M-3
+    if (key == QStringLiteral("td_chroma_weights")) { out = QStringLiteral("independent"); return true; }// 6.6
+    if (key == QStringLiteral("td_smooth_grain_guard")) { out = QStringLiteral("on"); return true; }     // L-3
+    if (key == QStringLiteral("td_subpixel_debias")) { out = QStringLiteral("off"); return true; }       // SOTA-2
+    if (key == QStringLiteral("td_edge_upsample")) { out = QStringLiteral("off"); return true; }         // SOTA-4
+    if (key == QStringLiteral("td_neighborhood_clamp")) { out = QStringLiteral("off"); return true; }    // SOTA-5
         // The renderer's own defaults (LibplaceboVideoRenderer.cpp's
         // settings, AdaptiveDownscale.h), so an unset choice says what
         // it really is (audit 2026-10-14c: these all showed "Auto").

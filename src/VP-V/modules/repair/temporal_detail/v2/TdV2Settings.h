@@ -60,13 +60,49 @@ namespace TdV2
 		return "unknown";
 	}
 
+	// TD-U4 / Owner D4 statistics pooling selector:
+	//   - BandShrink (default): 5x5 L / 3x3 M / (3x3 Ref or 1x1 RT) H + Empirical-Bayes shrinkage
+	//   - TwoFrameSameRole: adds optional 2-frame same-role statistics-only pooling (NEVER pixels or weights)
+	//   - Legacy1x1: disables band-dependent pooling and Empirical-Bayes shrinkage (ablation)
+	enum class StatsPoolingMode : uint8_t
+	{
+		BandShrink = 0,
+		TwoFrameSameRole = 1,
+		Legacy1x1 = 2
+	};
+
+	inline const char* StatsPoolingModeToken(StatsPoolingMode m)
+	{
+		switch (m)
+		{
+		case StatsPoolingMode::BandShrink: return "band_shrink";
+		case StatsPoolingMode::TwoFrameSameRole: return "two_frame_same_role";
+		case StatsPoolingMode::Legacy1x1: return "legacy_1x1";
+		}
+		return "unknown";
+	}
+
 	struct TdV2RuntimeSettings
 	{
+		// Main VP-V > Repair > Main > Temporal detail keys
 		Mode mode = Mode::Off;
 		ResidualMode residualMode = ResidualMode::Cell;
 		double limitKappa = kPixelBoundKappaDefault; // TD-U3 / Owner D3: strict default 1.0, range [1.0, 3.0]
 		Preset preset = Preset::RealTime;            // Harness-only default "realtime"
 		OverlayMode overlay = OverlayMode::Off;
+
+		// Advanced / Developer modular ablation switches (VP-V > Repair > Advanced > Temporal detail: tuning)
+		SolverMode solverMode = SolverMode::ActiveSetExact;
+		QualitySignalMode qualitySignalMode = QualitySignalMode::AlignedSharpnessA2e;
+		StatsPoolingMode statsPoolingMode = StatsPoolingMode::BandShrink;
+		bool anchoredCarry = false;        // TD-U5 / D2: OFF by default until fault tests pass
+		bool smoothWarp = true;            // 6.1 / L-1
+		bool hardFbGate = true;            // 6.2 / M-3
+		bool chromaReuseLuma = false;      // 6.6: independent (false) | reuse_luma (true)
+		bool smoothGrainGuard = true;      // L-3
+		bool subpixelDebias = false;       // SOTA-2
+		bool edgeUpsample = false;         // SOTA-4
+		bool neighborhoodClamp = false;    // SOTA-5
 	};
 
 	namespace Detail
@@ -152,6 +188,50 @@ namespace TdV2
 			problem = "invalid td_overlay value '" + value + "' (expected off|weights|maps|focus|motion)";
 			return false;
 		}
+		if (k == "td_solver")
+		{
+			if (v == "active_set") { settings.solverMode = SolverMode::ActiveSetExact; return true; }
+			if (v == "legacy_clip") { settings.solverMode = SolverMode::LegacyClipRescale; return true; }
+			problem = "invalid td_solver value '" + value + "' (expected active_set|legacy_clip)";
+			return false;
+		}
+		if (k == "td_quality_signal")
+		{
+			if (v == "aligned_a2e") { settings.qualitySignalMode = QualitySignalMode::AlignedSharpnessA2e; return true; }
+			if (v == "non_block_step") { settings.qualitySignalMode = QualitySignalMode::NonBlockPictureStep; return true; }
+			if (v == "legacy_block_8px") { settings.qualitySignalMode = QualitySignalMode::LegacyBlockEdge8px; return true; }
+			problem = "invalid td_quality_signal value '" + value + "' (expected aligned_a2e|non_block_step|legacy_block_8px)";
+			return false;
+		}
+		if (k == "td_stats_pooling")
+		{
+			if (v == "band_shrink") { settings.statsPoolingMode = StatsPoolingMode::BandShrink; return true; }
+			if (v == "two_frame_same_role") { settings.statsPoolingMode = StatsPoolingMode::TwoFrameSameRole; return true; }
+			if (v == "legacy_1x1") { settings.statsPoolingMode = StatsPoolingMode::Legacy1x1; return true; }
+			problem = "invalid td_stats_pooling value '" + value + "' (expected band_shrink|two_frame_same_role|legacy_1x1)";
+			return false;
+		}
+		if (k == "td_chroma_weights")
+		{
+			if (v == "independent") { settings.chromaReuseLuma = false; return true; }
+			if (v == "reuse_luma") { settings.chromaReuseLuma = true; return true; }
+			problem = "invalid td_chroma_weights value '" + value + "' (expected independent|reuse_luma)";
+			return false;
+		}
+		auto parseOnOff = [&](const char* keyName, bool& field) -> bool
+		{
+			if (v == "on") { field = true; return true; }
+			if (v == "off") { field = false; return true; }
+			problem = std::string("invalid ") + keyName + " value '" + value + "' (expected on|off)";
+			return false;
+		};
+		if (k == "td_anchored_carry") return parseOnOff("td_anchored_carry", settings.anchoredCarry);
+		if (k == "td_smooth_warp") return parseOnOff("td_smooth_warp", settings.smoothWarp);
+		if (k == "td_hard_fb_gate") return parseOnOff("td_hard_fb_gate", settings.hardFbGate);
+		if (k == "td_smooth_grain_guard") return parseOnOff("td_smooth_grain_guard", settings.smoothGrainGuard);
+		if (k == "td_subpixel_debias") return parseOnOff("td_subpixel_debias", settings.subpixelDebias);
+		if (k == "td_edge_upsample") return parseOnOff("td_edge_upsample", settings.edgeUpsample);
+		if (k == "td_neighborhood_clamp") return parseOnOff("td_neighborhood_clamp", settings.neighborhoodClamp);
 
 		problem = "unknown temporal detail key '" + key + "'";
 		return false;
@@ -163,6 +243,30 @@ namespace TdV2
 		Config cfg = MakePreset(s.preset, s.mode);
 		cfg.residualMode = s.residualMode;
 		cfg.pixelBoundKappa = ClampPixelBoundKappa(s.limitKappa);
+		cfg.solverMode = s.solverMode;
+		cfg.qualitySignalMode = s.qualitySignalMode;
+		cfg.enableA2eEmpiricalPrior = (s.qualitySignalMode == QualitySignalMode::AlignedSharpnessA2e);
+		if (s.statsPoolingMode == StatsPoolingMode::Legacy1x1)
+		{
+			cfg.enableBandDependentPool = false;
+			cfg.enableEmpiricalBayesShrinkage = false;
+			cfg.enableTwoFrameSameRoleStatsPool = false;
+			cfg.momentPoolRadiusCells = 0;
+		}
+		else
+		{
+			cfg.enableBandDependentPool = true;
+			cfg.enableEmpiricalBayesShrinkage = true;
+			cfg.enableTwoFrameSameRoleStatsPool = (s.statsPoolingMode == StatsPoolingMode::TwoFrameSameRole);
+		}
+		cfg.enableAnchoredCarry = s.anchoredCarry;
+		cfg.enableSmoothWarpVectors = s.smoothWarp;
+		cfg.enableHardFbOcclusionGate = s.hardFbGate;
+		cfg.chromaReuseLumaWeights = s.chromaReuseLuma;
+		cfg.enableSmoothLayer4Guard = s.smoothGrainGuard;
+		cfg.enableSubpixelHAttenuationDebias = s.subpixelDebias;
+		cfg.enableEdgeAwareWeightUpsample = s.edgeUpsample;
+		cfg.enableNeighborhoodSoftClamp = s.neighborhoodClamp;
 		if (originalPathway)
 			ApplyOriginalPathwayOverride(cfg);
 		return cfg;

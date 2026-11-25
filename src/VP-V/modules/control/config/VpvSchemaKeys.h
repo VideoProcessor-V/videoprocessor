@@ -123,10 +123,19 @@ namespace ProfileSchemaHooks
 			if (key == "source_resolution_evidence_seconds") return V(IsNumberInRange(value, 2.0, 120.0));
 			if (key == "deband_vp") return V(IsChoice(value, { "off", "auto", "on" }));
 			if (key == "low_bitrate_handling") return V(IsChoice(value, { "auto", "off", "on" }));
-			// Temporal Detail v2 (TD-S7; off by default; Original pathway forces off).
+			// Temporal Detail v2 (TD-S7 + TD-U1..U5; off by default; Original pathway forces off).
 			if (key == "temporal_detail") return V(IsChoice(value, { "off", "shadow", "on" }));
+			if (key == "td_limit_kappa") return V(IsNumberInRange(value, 1.0, 3.0));
 			if (key == "td_mode") return V(IsChoice(value, { "cell", "strict" }));
 			if (key == "td_overlay") return V(IsChoice(value, { "off", "weights", "maps", "focus", "motion" }));
+			if (key == "td_solver") return V(IsChoice(value, { "active_set", "legacy_clip" }));
+			if (key == "td_quality_signal") return V(IsChoice(value, { "aligned_a2e", "non_block_step", "legacy_block_8px" }));
+			if (key == "td_stats_pooling") return V(IsChoice(value, { "band_shrink", "two_frame_same_role", "legacy_1x1" }));
+			if (key == "td_chroma_weights") return V(IsChoice(value, { "independent", "reuse_luma" }));
+			if (key == "td_anchored_carry" || key == "td_smooth_warp" || key == "td_hard_fb_gate" ||
+				key == "td_smooth_grain_guard" || key == "td_subpixel_debias" ||
+				key == "td_edge_upsample" || key == "td_neighborhood_clamp")
+				return V(IsChoice(value, { "on", "off" }));
 			if (key == "cnn_residual_stabilise" || key == "ssim_residual_stabilise" || key == "ssim_bitrate_aware") return V(IsChoice(value, { "on", "off" }));
 			if (key == "ssim_bitrate_floor") return V(IsNumberInRange(value, 0.0, 1.0));
 			// docs/VP-nvof-ahead.md (owner 2026-10-16): optical-flow frames ahead, 0..4 (whole frames).

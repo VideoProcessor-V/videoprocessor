@@ -197,8 +197,32 @@ namespace VpvRendererSettings
 		readChoice("deband_vp", settings.debandVp, { "off", "auto", "on" });
 		readChoice("low_bitrate_handling", settings.lowBitrateHandling, { "auto", "off", "on" });
 		readChoice("temporal_detail", settings.temporalDetail, { "off", "shadow", "on" });
+		{
+			std::string kappaRaw;
+			if (config.TryGetString(rule.section, "td_limit_kappa", kappaRaw))
+			{
+				char* end = nullptr;
+				const double v = std::strtod(kappaRaw.c_str(), &end);
+				if (end != kappaRaw.c_str() && *end == '\0' && std::isfinite(v) && v >= 1.0 && v <= 3.0)
+					settings.tdLimitKappa = v;
+				else
+					DebugLog::Log("display rule '%s': invalid td_limit_kappa '%s'; retaining base setting",
+						rule.name.c_str(), kappaRaw.c_str());
+			}
+		}
 		readChoice("td_mode", settings.tdMode, { "cell", "strict" });
 		readChoice("td_overlay", settings.tdOverlay, { "off", "weights", "maps", "focus", "motion" });
+		readChoice("td_solver", settings.tdSolver, { "active_set", "legacy_clip" });
+		readChoice("td_quality_signal", settings.tdQualitySignal, { "aligned_a2e", "non_block_step", "legacy_block_8px" });
+		readChoice("td_stats_pooling", settings.tdStatsPooling, { "band_shrink", "two_frame_same_role", "legacy_1x1" });
+		readChoice("td_anchored_carry", settings.tdAnchoredCarry, { "off", "on" });
+		readChoice("td_smooth_warp", settings.tdSmoothWarp, { "on", "off" });
+		readChoice("td_hard_fb_gate", settings.tdHardFbGate, { "on", "off" });
+		readChoice("td_chroma_weights", settings.tdChromaWeights, { "independent", "reuse_luma" });
+		readChoice("td_smooth_grain_guard", settings.tdSmoothGrainGuard, { "on", "off" });
+		readChoice("td_subpixel_debias", settings.tdSubpixelDebias, { "off", "on" });
+		readChoice("td_edge_upsample", settings.tdEdgeUpsample, { "off", "on" });
+		readChoice("td_neighborhood_clamp", settings.tdNeighborhoodClamp, { "off", "on" });
 		{
 			// native | auto | any height in lines (general, owner's standing rule).
 			std::string value;
@@ -1102,8 +1126,20 @@ namespace VpvRendererSettings
 		settings.entranceGpuDrain = "off";                 // key=entrance_gpu_drain
 		settings.ditherNeed = "off";                       // key=dither_need
 		settings.temporalDetail = "off";                   // TD-S7: Original == Bill bit-exact (draft module; not in slots.json)
+		settings.tdLimitKappa = 1.0;                       // TD-U3: reset to default in Original pathway
 		settings.tdMode = "cell";                          // TD-S7: reset to default in Original pathway
 		settings.tdOverlay = "off";                        // TD-S7: overlay off in Original pathway
+		settings.tdSolver = "active_set";
+		settings.tdQualitySignal = "aligned_a2e";
+		settings.tdStatsPooling = "band_shrink";
+		settings.tdAnchoredCarry = "off";
+		settings.tdSmoothWarp = "on";
+		settings.tdHardFbGate = "on";
+		settings.tdChromaWeights = "independent";
+		settings.tdSmoothGrainGuard = "on";
+		settings.tdSubpixelDebias = "off";
+		settings.tdEdgeUpsample = "off";
+		settings.tdNeighborhoodClamp = "off";
 	}
 
 	// deband_vp_exclusive: see LibplaceboDebandYieldsToVp in the host (settings = the host's settings struct).
@@ -1296,7 +1332,19 @@ namespace VpvRendererSettings
 			<< settings.adaptive.motionSmoothMs << '|'
 			<< settings.temporalDetail << '|'
 			<< settings.tdMode << '|'
-			<< settings.tdOverlay << '|';
+			<< settings.tdOverlay << '|'
+			<< settings.tdLimitKappa << '|'
+			<< settings.tdSolver << '|'
+			<< settings.tdQualitySignal << '|'
+			<< settings.tdStatsPooling << '|'
+			<< settings.tdAnchoredCarry << '|'
+			<< settings.tdSmoothWarp << '|'
+			<< settings.tdHardFbGate << '|'
+			<< settings.tdChromaWeights << '|'
+			<< settings.tdSmoothGrainGuard << '|'
+			<< settings.tdSubpixelDebias << '|'
+			<< settings.tdEdgeUpsample << '|'
+			<< settings.tdNeighborhoodClamp << '|';
 		if (includeLive)
 		{
 			// Planner Q4: the applied profiles' raw values (structural: any key, present or
@@ -1377,8 +1425,20 @@ namespace VpvRendererSettings
 		currentTransport.debandGrain = next.debandGrain;
 		currentTransport.debandVpExclusive = next.debandVpExclusive;
 		currentTransport.temporalDetail = next.temporalDetail;
+		currentTransport.tdLimitKappa = next.tdLimitKappa;
 		currentTransport.tdMode = next.tdMode;
 		currentTransport.tdOverlay = next.tdOverlay;
+		currentTransport.tdSolver = next.tdSolver;
+		currentTransport.tdQualitySignal = next.tdQualitySignal;
+		currentTransport.tdStatsPooling = next.tdStatsPooling;
+		currentTransport.tdAnchoredCarry = next.tdAnchoredCarry;
+		currentTransport.tdSmoothWarp = next.tdSmoothWarp;
+		currentTransport.tdHardFbGate = next.tdHardFbGate;
+		currentTransport.tdChromaWeights = next.tdChromaWeights;
+		currentTransport.tdSmoothGrainGuard = next.tdSmoothGrainGuard;
+		currentTransport.tdSubpixelDebias = next.tdSubpixelDebias;
+		currentTransport.tdEdgeUpsample = next.tdEdgeUpsample;
+		currentTransport.tdNeighborhoodClamp = next.tdNeighborhoodClamp;
 	}
 
 	// Names of the VP-V settings that differ (appended after the host's own; the order differs from the old interleaved one).
@@ -1398,8 +1458,20 @@ namespace VpvRendererSettings
 			current.sourceResolutionEvidenceSeconds != next.sourceResolutionEvidenceSeconds, "source_resolution");
 		changed(current.debandVp != next.debandVp || current.lowBitrateHandling != next.lowBitrateHandling, "deband_vp");
 		changed(current.temporalDetail != next.temporalDetail, "temporal_detail");
+		changed(current.tdLimitKappa != next.tdLimitKappa, "td_limit_kappa");
 		changed(current.tdMode != next.tdMode, "td_mode");
 		changed(current.tdOverlay != next.tdOverlay, "td_overlay");
+		changed(current.tdSolver != next.tdSolver, "td_solver");
+		changed(current.tdQualitySignal != next.tdQualitySignal, "td_quality_signal");
+		changed(current.tdStatsPooling != next.tdStatsPooling, "td_stats_pooling");
+		changed(current.tdAnchoredCarry != next.tdAnchoredCarry, "td_anchored_carry");
+		changed(current.tdSmoothWarp != next.tdSmoothWarp, "td_smooth_warp");
+		changed(current.tdHardFbGate != next.tdHardFbGate, "td_hard_fb_gate");
+		changed(current.tdChromaWeights != next.tdChromaWeights, "td_chroma_weights");
+		changed(current.tdSmoothGrainGuard != next.tdSmoothGrainGuard, "td_smooth_grain_guard");
+		changed(current.tdSubpixelDebias != next.tdSubpixelDebias, "td_subpixel_debias");
+		changed(current.tdEdgeUpsample != next.tdEdgeUpsample, "td_edge_upsample");
+		changed(current.tdNeighborhoodClamp != next.tdNeighborhoodClamp, "td_neighborhood_clamp");
 		changed(current.pipelineOriginalPathway != next.pipelineOriginalPathway, "pipeline_original_pathway");
 		changed(current.pipelineOrder != next.pipelineOrder, "pipeline_order");
 		changed(current.pipelineSlotsOff != next.pipelineSlotsOff, "pipeline_slots_off");
@@ -1701,7 +1773,19 @@ namespace VpvRendererSettings
 		<< "matcher.taperSad=" << m.taperSad << "\n"
 		<< "temporal_detail=" << s.temporalDetail << "\n"
 		<< "td_mode=" << s.tdMode << "\n"
-		<< "td_overlay=" << s.tdOverlay << "\n";
+		<< "td_overlay=" << s.tdOverlay << "\n"
+		<< "td_limit_kappa=" << s.tdLimitKappa << "\n"
+		<< "td_solver=" << s.tdSolver << "\n"
+		<< "td_quality_signal=" << s.tdQualitySignal << "\n"
+		<< "td_stats_pooling=" << s.tdStatsPooling << "\n"
+		<< "td_anchored_carry=" << s.tdAnchoredCarry << "\n"
+		<< "td_smooth_warp=" << s.tdSmoothWarp << "\n"
+		<< "td_hard_fb_gate=" << s.tdHardFbGate << "\n"
+		<< "td_chroma_weights=" << s.tdChromaWeights << "\n"
+		<< "td_smooth_grain_guard=" << s.tdSmoothGrainGuard << "\n"
+		<< "td_subpixel_debias=" << s.tdSubpixelDebias << "\n"
+		<< "td_edge_upsample=" << s.tdEdgeUpsample << "\n"
+		<< "td_neighborhood_clamp=" << s.tdNeighborhoodClamp << "\n";
 		return o.str();
 	}
 

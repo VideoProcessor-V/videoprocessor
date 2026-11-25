@@ -133,8 +133,9 @@ namespace Vpv
 
 			// ---- Repair ----
 			{ "repair", "temporal_detail", "Temporal detail",
-				"Peak-frame blending in quantization cells that cleans banding and softens keyframe pulsing while leaving film grain untouched. Off by default.", false, false, {
-				{ K::Text, "temporal_detail" }, { K::Text, "td_mode" }, { K::Text, "td_overlay" } } },
+				"Peak-frame blending that cleans compression banding and softens keyframe pulsing while leaving film grain untouched. "
+				"Off by default (library ready; not wired to live renderer yet - connects at Wave 4-6 integration).", false, false, {
+				{ K::Toggle, "temporal_detail" }, { K::Toggle, "td_limit_kappa" }, { K::Toggle, "td_mode" }, { K::Toggle, "td_overlay" } } },
 			{ "repair", "deband", "Deband",
 				"VP's debander: removes banding from compressed sources and leaves film grain alone.", false, false, {
 				{ K::Toggle, "deband_vp_grain_guard" }, { K::Toggle, "deband_vp_exclusive" }, { K::Toggle, "low_bitrate_handling" },
@@ -154,6 +155,14 @@ namespace Vpv
 				"reset on, a near-cut the judge is very sure of (a high bar) shrinks it too; below the bar nothing happens. Used only "
 				"while detail pulse or texture restore is on.", true, false, {
 				{ K::Toggle, "cut_soft_reset" } } },
+			{ "repair", "temporal_detail_tuning", "Temporal detail: tuning",
+				"Modular algorithm and ablation switches for Temporal detail v2. Used only while Temporal detail is shadow or on; "
+				"forced inert when off or on the Original pathway.", true, true, {
+				{ K::Toggle, "td_solver" }, { K::Toggle, "td_quality_signal" }, { K::Toggle, "td_stats_pooling" },
+				{ K::Toggle, "td_anchored_carry" }, { K::Toggle, "td_smooth_warp" }, { K::Toggle, "td_hard_fb_gate" },
+				{ K::Toggle, "td_chroma_weights" }, { K::Toggle, "td_smooth_grain_guard" }, { K::Toggle, "td_subpixel_debias" },
+				{ K::Toggle, "td_edge_upsample" }, { K::Toggle, "td_neighborhood_clamp" } },
+				{ L::Feature, "Temporal detail", "temporal_detail", nullptr, "off", "off" } },
 
 			// ---- Scaling ----
 			{ "scaling", "rebase", "Re-base (your picture slider)",
