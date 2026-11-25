@@ -638,5 +638,201 @@ namespace VideoProcessorTest
 				Assert::AreEqual(3, renderer.targetCalls, L"QueueTargetFn must still run after stale SettingsApplied on shut-down impl");
 			}
 		}
+
+		// S1-M1 (Pass-A MED): SyncHostFromImpl must unify capture and timed-file arrival so a cold-Original HostBinding
+		// (OriginalPathwayOf == true) with a fresh IngressState (m_originalPathway == false) immediately clears to VP-V
+		// when VP-V FixSwitchBits are published, binds implHost for paused/idle SettingsApplied, and re-binds after GpuReleased.
+		TEST_METHOD(SyncHostFromImplClearsStaleOriginalPathwayAndRebindsAfterGpuReleased)
+		{
+			RunningPathwayGuard latchGuard;
+			Vpv::RunningPathway::SetForTesting(Vpv::RunningPathway::kOriginal);
+			Vpv::Ingress::IngressPolicy policy;
+
+			S1M1FakeRenderer renderer;
+			int impl = 0;
+			struct HubImplGuard
+			{
+				const void* host;
+				explicit HubImplGuard(const void* h) : host(h) {}
+				~HubImplGuard()
+				{
+					RE::LifecycleFacts shutdown;
+					shutdown.host = host;
+					shutdown.kind = RE::Lifecycle::Shutdown;
+					Vpv::Hub::ExtensionHub::Instance().OnLifecycle(shutdown);
+				}
+				HubImplGuard(const HubImplGuard&) = delete;
+				HubImplGuard& operator=(const HubImplGuard&) = delete;
+			} hubGuard(&impl);
+
+			// 1. Reproduce the exact Pass-A MED split-brain state: HostBinding initializes to Original (true) from kOriginal
+			// while a fresh IngressState starts with m_originalPathway == false, and the hub publishes VP-V FixSwitchBits.
+			Vpv::Ingress::HostBinding bind(&renderer, &S1M1FakeRenderer::DecideDrop, &renderer, &S1M1FakeRenderer::TargetSeven);
+			Assert::IsTrue(bind.Registered(), L"HostBinding must register");
+			Assert::IsTrue(Vpv::Ingress::OriginalPathwayOf(&renderer), L"HostBinding must initialize OriginalPathwayOf == true under kOriginal");
+
+			Vpv::Ingress::IngressState state;
+			Assert::IsFalse(state.m_originalPathway.load(std::memory_order_acquire),
+				L"fresh IngressState starts with m_originalPathway == false");
+
+			std::atomic<bool> queueFixes{ false };
+			std::atomic<bool> motionFixes{ false };
+
+			Vpv::Ingress::IngressState::FixSwitches vpvSwitches;
+			vpvSwitches.pulldownFixes = true;
+			vpvSwitches.timingContinuityFixes = true;
+			vpvSwitches.cadenceClassFixes = true;
+			vpvSwitches.queueTimingFixes = true;
+			vpvSwitches.motionHistoryFixes = true;
+			vpvSwitches.originalPathway = false;
+			const uint32_t vpvBits = Vpv::Ingress::IngressState::FixSwitchBitsOf(vpvSwitches);
+			Assert::IsTrue(Vpv::Hub::ExtensionHub::Instance().NoteFixSwitches(&impl, vpvBits),
+				L"ExtensionHub must publish VP-V FixSwitchBits for impl");
+
+			RE::FrameContext fc;
+			fc.host = &renderer;
+
+			// 2. In-test negative control: exact pre-fix TimedFileFrames.inl edge-triggered pattern on the exact same
+			// state & fixBits skips NoteOriginalPathway because m_originalPathway was already false -> false, leaving
+			// the binding stuck in Original and OnQueueTarget refusing the VP-V target.
+			{
+				uint32_t readBits = 0;
+				Assert::IsTrue(Vpv::Hub::ExtensionHub::Instance().FixSwitchBits(&impl, readBits),
+					L"negative control: ExtensionHub must return published VP-V FixSwitchBits");
+				Assert::AreEqual<uint32_t>(vpvBits, readBits,
+					L"negative control: published FixSwitchBits must round-trip unchanged");
+
+				const bool preFixChanged = state.SyncIngressSwitches(
+					Vpv::Ingress::IngressState::FixSwitchesFromBits(readBits), queueFixes, motionFixes);
+				Assert::IsFalse(preFixChanged,
+					L"negative control: pre-fix SyncIngressSwitches returns false when state.m_originalPathway is already false");
+				if (preFixChanged)
+					Vpv::Ingress::NoteOriginalPathway(&renderer, state.m_originalPathway.load(std::memory_order_relaxed));
+
+				Assert::IsTrue(Vpv::Ingress::OriginalPathwayOf(&renderer),
+					L"negative control: pre-fix edge-triggered pattern leaves OriginalPathwayOf(&renderer) stuck at true");
+
+				RE::QueueTargetContext qc;
+				qc.capacity = 8;
+				qc.billTarget = 2;
+				qc.target = 2;
+				policy.OnQueueTarget(fc, qc);
+				Assert::AreEqual<size_t>(2, qc.target,
+					L"negative control: stuck Original binding refuses VP-V QueueTarget (preserves Bill's 2)");
+				Assert::AreEqual(0, renderer.targetCalls,
+					L"negative control: QueueTargetFn must NOT run while stuck in Original");
+			}
+
+			// 3. Fix proof: reset fix-switch atomics to false so SyncHostFromImpl must actively populate them, then
+			// call SyncHostFromImpl on the exact same split-brain state (binding == true, state.m_originalPathway == false).
+			queueFixes.store(false, std::memory_order_relaxed);
+			motionFixes.store(false, std::memory_order_relaxed);
+			state.m_pulldownFixes.store(false, std::memory_order_relaxed);
+			state.m_timingContinuityFixes.store(false, std::memory_order_relaxed);
+			state.m_cadenceClassFixes.store(false, std::memory_order_relaxed);
+
+			Vpv::Ingress::SyncHostFromImpl(&renderer, &impl, state, queueFixes, motionFixes);
+
+			Assert::IsFalse(Vpv::Ingress::OriginalPathwayOf(&renderer),
+				L"SyncHostFromImpl must immediately clear stale OriginalPathwayOf(&renderer) to false");
+			Assert::IsTrue(queueFixes.load(std::memory_order_relaxed),
+				L"SyncHostFromImpl must set queueTimingFixes == true from hub FixSwitchBits");
+			Assert::IsTrue(motionFixes.load(std::memory_order_relaxed),
+				L"SyncHostFromImpl must set motionHistoryFixes == true from hub FixSwitchBits");
+			Assert::IsTrue(state.m_pulldownFixes.load(std::memory_order_relaxed),
+				L"SyncHostFromImpl must set pulldownFixes == true from hub FixSwitchBits");
+			Assert::IsTrue(state.m_timingContinuityFixes.load(std::memory_order_relaxed),
+				L"SyncHostFromImpl must set timingContinuityFixes == true from hub FixSwitchBits");
+			Assert::IsTrue(state.m_cadenceClassFixes.load(std::memory_order_relaxed),
+				L"SyncHostFromImpl must set cadenceClassFixes == true from hub FixSwitchBits");
+
+			{
+				RE::QueueTargetContext qc;
+				qc.capacity = 8;
+				qc.billTarget = 2;
+				qc.target = 2;
+				policy.OnQueueTarget(fc, qc);
+				Assert::AreEqual<size_t>(7, qc.target,
+					L"After SyncHostFromImpl, OnQueueTarget must execute VP-V target (2 -> 7)");
+				Assert::AreEqual(1, renderer.targetCalls,
+					L"After SyncHostFromImpl, QueueTargetFn must be invoked once");
+			}
+
+			{
+				RE::LifecycleFacts toOriginal;
+				toOriginal.host = &impl;
+				toOriginal.kind = RE::Lifecycle::SettingsApplied;
+				toOriginal.code = 1;
+				policy.OnLifecycle(toOriginal);
+				Assert::IsTrue(Vpv::Ingress::OriginalPathwayOf(&renderer),
+					L"Paused/idle SettingsApplied(host=&impl, code=1) must immediately flip OriginalPathwayOf(&renderer) to true (proving implHost was bound)");
+			}
+
+			// 4. Post-GpuReleased re-bind proof: GpuReleased clears implHost and drops the hub pathway slot; a subsequent
+			// SyncHostFromImpl with freshly published VP-V FixSwitchBits must clear OriginalPathwayOf(&renderer) again
+			// and re-bind implHost so paused/idle SettingsApplied reaches the renderer once more.
+			{
+				RE::LifecycleFacts gpuReleased;
+				gpuReleased.host = &impl;
+				gpuReleased.kind = RE::Lifecycle::GpuReleased;
+				policy.OnLifecycle(gpuReleased);
+				Vpv::Hub::ExtensionHub::Instance().OnLifecycle(gpuReleased);
+
+				// Prove GpuReleased actually cleared implHost before re-binding.
+				RE::LifecycleFacts ignoredVpv;
+				ignoredVpv.host = &impl;
+				ignoredVpv.kind = RE::Lifecycle::SettingsApplied;
+				ignoredVpv.code = 0;
+				policy.OnLifecycle(ignoredVpv);
+				Assert::IsTrue(Vpv::Ingress::OriginalPathwayOf(&renderer),
+					L"After GpuReleased clears implHost, SettingsApplied(host=&impl, code=0) must NOT mutate unbound renderer");
+			}
+
+			Assert::IsTrue(Vpv::Hub::ExtensionHub::Instance().NoteFixSwitches(&impl, vpvBits),
+				L"ExtensionHub must publish fresh VP-V FixSwitchBits for impl after GpuReleased");
+			queueFixes.store(false, std::memory_order_relaxed);
+			motionFixes.store(false, std::memory_order_relaxed);
+
+			Vpv::Ingress::SyncHostFromImpl(&renderer, &impl, state, queueFixes, motionFixes);
+
+			Assert::IsFalse(Vpv::Ingress::OriginalPathwayOf(&renderer),
+				L"Post-GpuReleased SyncHostFromImpl must clear OriginalPathwayOf(&renderer) back to false");
+			Assert::IsTrue(queueFixes.load(std::memory_order_relaxed),
+				L"Post-GpuReleased SyncHostFromImpl must re-sync queueTimingFixes == true");
+			Assert::IsTrue(motionFixes.load(std::memory_order_relaxed),
+				L"Post-GpuReleased SyncHostFromImpl must re-sync motionHistoryFixes == true");
+
+			{
+				RE::QueueTargetContext qc;
+				qc.capacity = 8;
+				qc.billTarget = 2;
+				qc.target = 2;
+				policy.OnQueueTarget(fc, qc);
+				Assert::AreEqual<size_t>(7, qc.target,
+					L"Post-GpuReleased SyncHostFromImpl must restore VP-V QueueTarget (2 -> 7)");
+				Assert::AreEqual(2, renderer.targetCalls,
+					L"Post-GpuReleased QueueTargetFn must be invoked a second time");
+			}
+
+			{
+				RE::LifecycleFacts toOriginalAgain;
+				toOriginalAgain.host = &impl;
+				toOriginalAgain.kind = RE::Lifecycle::SettingsApplied;
+				toOriginalAgain.code = 1;
+				policy.OnLifecycle(toOriginalAgain);
+				Assert::IsTrue(Vpv::Ingress::OriginalPathwayOf(&renderer),
+					L"Post-GpuReleased SettingsApplied(host=&impl, code=1) must immediately flip OriginalPathwayOf(&renderer) to true (proving implHost was re-bound)");
+
+				RE::QueueTargetContext qc;
+				qc.capacity = 8;
+				qc.billTarget = 2;
+				qc.target = 2;
+				policy.OnQueueTarget(fc, qc);
+				Assert::AreEqual<size_t>(2, qc.target,
+					L"After post-GpuReleased SettingsApplied(code=1), OnQueueTarget must preserve Bill's target == 2");
+				Assert::AreEqual(2, renderer.targetCalls,
+					L"After post-GpuReleased SettingsApplied(code=1), QueueTargetFn must NOT run");
+			}
+		}
 	};
 }
