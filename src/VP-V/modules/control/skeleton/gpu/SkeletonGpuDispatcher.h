@@ -66,11 +66,11 @@ namespace Vpv
 			VpLaneProducts::IProductKernel* KernelOf(VpSkeleton::ProductId id) const;
 
 			// Render thread, GPU-legal phase, after the lane's Configure: (re)allocate the textures of every GPU node of
-			// `graph` that has a kernel, at `dims`. Unchanged graph and size: nothing happens. A changed one moves the old
-			// textures to the deferred release. False when a product could not be allocated (it is then unavailable,
-			// shown through Fallbacks()); the others are kept.
+			// `graph` that has a kernel, at `dims`. Unchanged graph and size: nothing happens. With `oldJobsJoined`,
+			// old textures and graveyard are destroyed before allocating replacements so peak VRAM stays <= max(old, new);
+			// otherwise old textures move to the deferred release. False when a product could not be allocated.
 			bool Configure(const VpSkeleton::Graph& graph, const VpSkeleton::Registry& reg, const VpSkeleton::TierPlan& plan,
-				VpSkeleton::Dims dims, uint32_t settingsGen = 0);
+				VpSkeleton::Dims dims, uint32_t settingsGen = 0, bool oldJobsJoined = false);
 			// Render thread, GPU-legal phase: destroy the texture sets queued by a size or graph change.
 			void FlushReleases();
 			// Everything now (GpuReleased / teardown).
@@ -85,6 +85,9 @@ namespace Vpv
 			const VpLaneProducts::GpuProductTextures* TexturesOf(VpSkeleton::ProductId id) const;
 			pl_tex TapOf(uint64_t seq, bool extended) const;
 			uint64_t AllocatedBytes() const;
+			uint64_t GraveyardBytes() const;
+			uint64_t PeakAllocatedBytes() const { return m_peakBytes; }
+			void ResetPeakBytesForTesting() { m_peakBytes = AllocatedBytes() + GraveyardBytes(); }
 			// The product has textures (false while refused or not yet configured: the lane job declines, the readers fall back).
 			bool Available(VpSkeleton::ProductId id) const;
 			// Any product or tap texture is allocated now (the video-memory query then already counts it).
@@ -135,6 +138,7 @@ namespace Vpv
 				const VpSkeleton::LaneJobContext* job, uint32_t missing);
 			bool Fail(const std::string& why);
 			void PollTimer(ProductState& ps);
+			void NotePeakBytes();
 
 			// The product store's small textures for the kernels (stand-ins, the light level LUT): created and destroyed here.
 			class StaticStore : public VpLaneProducts::IStaticTextures
@@ -169,6 +173,7 @@ namespace Vpv
 			uint32_t m_settingsGen = 0;
 			std::vector<uint16_t> m_scratch;
 			std::string m_error;
+			uint64_t m_peakBytes = 0;
 			Counters m_counters;
 		};
 	}

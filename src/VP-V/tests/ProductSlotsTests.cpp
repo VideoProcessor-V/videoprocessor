@@ -13,6 +13,7 @@
 
 #include <VP-V/core/LaneInterfaces.h>
 #include <VP-V/core/ProductSlots.h>
+#include <VP-V/core/AnalysisLane.h>
 
 #include <atomic>
 #include <cstring>
@@ -1641,6 +1642,328 @@ namespace ProductSlotsTestsNs
 				L"negative control: regression below releasedThrough_ cursor is detected visibly");
 			Assert::AreEqual(uint64_t(0), s.Counters().orderErrors.load());
 			Assert::AreEqual(uint64_t(0), s.Counters().overruns.load());
+		}
+
+		// Prod MED-2 regression: out-of-range upToSeq (> kSlotSeqMask - ring) must return 0 early,
+		// count releaseThroughExactOrderErrors, leave held slots untouched, and never poison releasedThrough_.
+		TEST_METHOD(ReleaseThroughOutOfRangeReturnsEarlyWithoutPoisoningCursor)
+		{
+			const auto acceptAll = [](const Header&) { return SealReason::Accepted; };
+			auto publishAndSeal = [&](SlotSet& set, uint64_t seq) {
+				LaneTicket t;
+				Assert::IsTrue(set.Claim(seq, Provenance::AheadLane, kNoFence, &t) == ClaimResult::Claimed);
+				Assert::IsTrue(set.StartWriting(t));
+				Assert::IsTrue(set.Publish(t) == PublishResult::Published);
+				Assert::IsTrue(set.Seal(seq, acceptAll).outcome == SealOutcome::Sealed);
+			};
+
+			constexpr uint16_t kRing = 8;
+			SlotSet s(kA, kRing, 4);
+			publishAndSeal(s, 1u);
+			publishAndSeal(s, 2u);
+			publishAndSeal(s, 3u);
+
+			// 1. In-test negative control: valid ReleaseThrough(1, 10) succeeds with 0 exact-order errors.
+			Assert::AreEqual(uint32_t(1), s.ReleaseThrough(1u, 10u),
+				L"negative control: valid ReleaseThrough(1, 10) releases frame 1");
+			Assert::AreEqual(uint64_t(0), s.Counters().releaseThroughExactOrderErrors.load(),
+				L"negative control: valid ReleaseThrough(1, 10) records 0 releaseThroughExactOrderErrors");
+			Assert::IsTrue(s.StateOf(1u) == SlotState::Released);
+			Assert::IsTrue(s.StateOf(2u) == SlotState::Sealed && s.StateOf(3u) == SlotState::Sealed);
+
+			// 2. Out-of-range fault A: UINT64_MAX returns 0, increments error count, leaves held slots Sealed.
+			Assert::AreEqual(uint32_t(0), s.ReleaseThrough(UINT64_MAX, 20u),
+				L"UINT64_MAX out-of-range ReleaseThrough must return 0 early without releasing held slots");
+			Assert::AreEqual(uint64_t(1), s.Counters().releaseThroughExactOrderErrors.load(),
+				L"UINT64_MAX out-of-range must increment releaseThroughExactOrderErrors by 1");
+			Assert::IsTrue(s.StateOf(2u) == SlotState::Sealed && s.StateOf(3u) == SlotState::Sealed,
+				L"UINT64_MAX out-of-range must leave held slots 2 and 3 untouched (Sealed)");
+
+			// 3. Out-of-range fault B: exact boundary kSlotSeqMask - ring + 1 returns 0, increments error count, leaves slots Sealed.
+			const uint64_t boundaryOutOfRange = kSlotSeqMask - uint64_t(kRing) + 1u;
+			Assert::AreEqual(uint32_t(0), s.ReleaseThrough(boundaryOutOfRange, 20u),
+				L"kSlotSeqMask - ring + 1 out-of-range ReleaseThrough must return 0 early");
+			Assert::AreEqual(uint64_t(2), s.Counters().releaseThroughExactOrderErrors.load(),
+				L"kSlotSeqMask - ring + 1 out-of-range must increment releaseThroughExactOrderErrors by 1");
+			Assert::IsTrue(s.StateOf(2u) == SlotState::Sealed && s.StateOf(3u) == SlotState::Sealed,
+				L"boundary out-of-range must leave held slots 2 and 3 untouched (Sealed)");
+
+			// 4. Cursor non-poisoning proof: subsequent valid ReleaseThrough(2, 30) succeeds with 0 additional errors.
+			Assert::AreEqual(uint32_t(1), s.ReleaseThrough(2u, 30u),
+				L"subsequent valid ReleaseThrough(2, 30) must succeed returning 1 (releasedThrough_ not poisoned)");
+			Assert::AreEqual(uint64_t(2), s.Counters().releaseThroughExactOrderErrors.load(),
+				L"subsequent valid ReleaseThrough(2, 30) must record 0 additional exact-order errors");
+			Assert::IsTrue(s.StateOf(2u) == SlotState::Released, L"slot 2 released cleanly");
+			Assert::IsTrue(s.StateOf(3u) == SlotState::Sealed, L"slot 3 remains Sealed until explicitly released");
+			Assert::IsTrue(s.Claim(2u + uint64_t(kRing), Provenance::AheadLane, 29u, nullptr) == ClaimResult::ReleasePending,
+				L"fence 30 from valid ReleaseThrough(2, 30) gates reuse");
+			Assert::IsTrue(s.Claim(2u + uint64_t(kRing), Provenance::AheadLane, 30u, nullptr) == ClaimResult::Claimed);
+			Assert::AreEqual(uint32_t(1), s.ReleaseThrough(3u, 31u));
+			Assert::AreEqual(uint64_t(2), s.Counters().releaseThroughExactOrderErrors.load());
+			Assert::AreEqual(uint64_t(0), s.Counters().orderErrors.load());
+
+			// 5. Initial-state boundary: out-of-range before any valid ReleaseThrough must not set hasReleasedThrough_.
+			SlotSet fresh(kA, kRing, 4);
+			publishAndSeal(fresh, 0u);
+			Assert::AreEqual(uint32_t(0), fresh.ReleaseThrough(UINT64_MAX, 20u),
+				L"out-of-range on fresh SlotSet must return 0 early");
+			Assert::AreEqual(uint64_t(1), fresh.Counters().releaseThroughExactOrderErrors.load());
+			Assert::IsTrue(fresh.StateOf(0u) == SlotState::Sealed);
+			Assert::AreEqual(uint32_t(1), fresh.ReleaseThrough(0u, 25u),
+				L"first valid ReleaseThrough(0) after initial out-of-range fault succeeds");
+			Assert::AreEqual(uint64_t(1), fresh.Counters().releaseThroughExactOrderErrors.load());
+			Assert::AreEqual(uint64_t(0), fresh.Counters().orderErrors.load());
+		}
+
+		// K#3 (165): 4-slot concurrent ReadPublishedBytes stress using atomic PublishedViewOf (no PinRef,
+		// no non-atomic header reads) must produce zero torn/mismatched reads, with a deterministic mid-pass
+		// recycle negative control proving raw buffer corruption is caught as PublishedRead::Recycled.
+		TEST_METHOD(ReadPublishedBytesFourSlotStressHasZeroTornReads)
+		{
+			constexpr size_t kWords = 32u;
+			constexpr size_t kPayloadBytes = kWords * sizeof(uint64_t);   // 256 bytes
+			const auto acceptAll = [](const Header&) { return SealReason::Accepted; };
+
+			auto makeWord = [](uint64_t seq, size_t idx) -> uint64_t {
+				return (seq * 0x9E3779B97F4A7C15ull) ^ (uint64_t(idx) * 0xBF58476D1CE4E5B9ull) ^ 0xA5A5A5A55A5A5A5Aull;
+			};
+			auto checksumWords = [](const uint64_t* words) -> uint64_t {
+				uint64_t h = 14695981039346656037ull;
+				for (size_t i = 0; i < kWords - 1u; ++i) {
+					h ^= words[i];
+					h *= 1099511628211ull;
+				}
+				return h;
+			};
+			auto writePayload = [&](uint8_t* dst, uint64_t seq) {
+				uint64_t words[kWords];
+				words[0] = seq;
+				for (size_t i = 1u; i < kWords - 1u; ++i)
+					words[i] = makeWord(seq, i);
+				words[kWords - 1u] = checksumWords(words);
+				std::memcpy(dst, words, kPayloadBytes);
+			};
+			auto verifyPayload = [&](const uint8_t* src, size_t bytes, uint64_t expectedSeq) -> bool {
+				if (bytes != kPayloadBytes)
+					return false;
+				uint64_t words[kWords];
+				std::memcpy(words, src, kPayloadBytes);
+				if (words[0] != expectedSeq)
+					return false;
+				for (size_t i = 1u; i < kWords - 1u; ++i)
+					if (words[i] != makeWord(expectedSeq, i))
+						return false;
+				return words[kWords - 1u] == checksumWords(words);
+			};
+
+			Node n;
+			n.id = kA;
+			n.ring = 4u;
+			n.livePool = 2u;
+			n.bufferBytes = uint32_t(kPayloadBytes);
+
+			// 1. PublishedViewOf state transitions + deterministic mid-pass recycle negative control.
+			{
+				SlotSet ncSet(kA, n.ring, n.livePool);
+				CpuBuffers ncBufs(n);
+				Assert::IsFalse(ncSet.PublishedViewOf(0u).present, L"Empty slot is not present");
+
+				LaneTicket t0;
+				Assert::IsTrue(ncSet.Claim(0u, Provenance::AheadLane, kNoFence, &t0) == ClaimResult::Claimed);
+				Assert::IsFalse(ncSet.PublishedViewOf(0u).present, L"negative control: Claimed slot is not present");
+				Assert::IsTrue(ncSet.StartWriting(t0));
+				Assert::IsFalse(ncSet.PublishedViewOf(0u).present, L"negative control: Writing slot is not present");
+				writePayload(ncBufs.Ring(size_t(t0.slot)), 0u);
+				Assert::IsTrue(ncSet.Publish(t0) == PublishResult::Published);
+
+				const SlotSet::PublishedSlotView vPub = ncSet.PublishedViewOf(0u);
+				Assert::IsTrue(vPub.present && vPub.cgen != 0u,
+					L"PublishedViewOf reports present with non-zero cgen when Published");
+
+				Assert::IsTrue(ncSet.Seal(0u, acceptAll).outcome == SealOutcome::Sealed);
+				const SlotSet::PublishedSlotView vSeal = ncSet.PublishedViewOf(0u);
+				Assert::IsTrue(vSeal.present && vSeal.cgen == vPub.cgen,
+					L"PublishedViewOf stays present with matching cgen when Sealed");
+
+				// Deterministic mid-pass recycle: writer reclaims slot 0 and overwrites with seq 4 while reader is halfway through.
+				std::vector<uint8_t> tornCopy(kPayloadBytes, 0u);
+				const PublishedRead pr = ReadPublishedBytes(ncSet, ncBufs, 0u, [&](const uint8_t* ptr, size_t sz) {
+					Assert::AreEqual(kPayloadBytes, sz);
+					std::memcpy(tornCopy.data(), ptr, kPayloadBytes / 2u);
+					Assert::IsTrue(ncSet.Release(0u, 0u));
+					LaneTicket t4;
+					Assert::IsTrue(ncSet.Claim(4u, Provenance::AheadLane, kNoFence, &t4) == ClaimResult::Claimed);
+					Assert::IsTrue(ncSet.StartWriting(t4));
+					writePayload(ncBufs.Ring(size_t(t4.slot)), 4u);
+					Assert::IsTrue(ncSet.Publish(t4) == PublishResult::Published);
+					std::memcpy(tornCopy.data() + kPayloadBytes / 2u, ptr + kPayloadBytes / 2u, kPayloadBytes / 2u);
+				});
+				Assert::IsFalse(verifyPayload(tornCopy.data(), tornCopy.size(), 0u),
+					L"negative control: raw buffer read across mid-pass slot recycle is genuinely torn");
+				Assert::IsTrue(pr == PublishedRead::Recycled,
+					L"seqlock ReadPublishedBytes MUST catch mid-pass recycle and return PublishedRead::Recycled");
+
+				Assert::IsTrue(ncSet.Seal(4u, acceptAll).outcome == SealOutcome::Sealed);
+				Assert::IsTrue(ncSet.Release(4u, 0u));
+				Assert::IsFalse(ncSet.PublishedViewOf(4u).present,
+					L"negative control: Released slot is not present in PublishedViewOf");
+			}
+
+			// 2. Concurrent 4-slot reader/writer stress: 1 writer cycles seq 0..4000, 2 readers hammer ReadPublishedBytes.
+			SlotSet set(kA, n.ring, n.livePool);
+			CpuBuffers bufs(n);
+			std::atomic<int> readersReady{ 0 };
+			std::atomic<bool> stop{ false };
+			std::atomic<uint64_t> activeSeq{ 0 };
+			std::atomic<uint64_t> copiedCount{ 0 };
+			std::atomic<uint64_t> tornReads{ 0 };
+
+			auto readerLoop = [&]() {
+				std::vector<uint8_t> local(kPayloadBytes, 0u);
+				readersReady.fetch_add(1, std::memory_order_release);
+				while (!stop.load(std::memory_order_acquire)) {
+					const uint64_t head = activeSeq.load(std::memory_order_acquire);
+					const uint64_t lo = head >= 2u ? head - 2u : 0u;
+					for (uint64_t target = lo; target <= head; ++target) {
+						const PublishedRead pr = ReadPublishedBytes(set, bufs, target, [&](const uint8_t* ptr, size_t sz) {
+							if (sz == local.size())
+								std::memcpy(local.data(), ptr, sz);
+						});
+						if (pr == PublishedRead::Copied) {
+							copiedCount.fetch_add(1, std::memory_order_relaxed);
+							if (!verifyPayload(local.data(), local.size(), target))
+								tornReads.fetch_add(1, std::memory_order_relaxed);
+						}
+					}
+					std::this_thread::yield();
+				}
+			};
+
+			struct ThreadJoinGuard {
+				std::atomic<bool>& stopFlag;
+				std::thread r1;
+				std::thread r2;
+				explicit ThreadJoinGuard(std::atomic<bool>& s) : stopFlag(s) {}
+				~ThreadJoinGuard()
+				{
+					stopFlag.store(true, std::memory_order_release);
+					if (r1.joinable())
+						r1.join();
+					if (r2.joinable())
+						r2.join();
+				}
+			} readers(stop);
+
+			readers.r1 = std::thread(readerLoop);
+			readers.r2 = std::thread(readerLoop);
+			while (readersReady.load(std::memory_order_acquire) < 2)
+				std::this_thread::yield();
+
+			for (uint64_t seq = 0u; seq <= 4000u; ++seq) {
+				LaneTicket t;
+				Assert::IsTrue(set.Claim(seq, Provenance::AheadLane, kNoFence, &t) == ClaimResult::Claimed);
+				Assert::IsTrue(set.StartWriting(t));
+				writePayload(bufs.Ring(size_t(t.slot)), seq);
+				Assert::IsTrue(set.Publish(t) == PublishResult::Published);
+				activeSeq.store(seq, std::memory_order_release);
+				Assert::IsTrue(set.Seal(seq, acceptAll).outcome == SealOutcome::Sealed);
+				if (seq >= 2u)
+					Assert::IsTrue(set.Release(seq - 2u, 0u));
+				if ((seq & 31u) == 0u)
+					std::this_thread::yield();
+			}
+
+			stop.store(true, std::memory_order_release);
+			if (readers.r1.joinable())
+				readers.r1.join();
+			if (readers.r2.joinable())
+				readers.r2.join();
+
+			Assert::AreEqual(uint64_t(0), tornReads.load(),
+				L"K#3 (165): zero torn or mismatched-seq reads across 4000-frame 4-slot concurrent stress");
+			Assert::IsTrue(copiedCount.load() > 0u,
+				L"concurrent readers observed real PublishedRead::Copied hits");
+		}
+
+		// K#3 (168): direct SlotSet::Unclaim restores initial Empty and previously Released slots (preserving
+		// releaseValue gating) without burning the target seq, and cleanly acknowledges preempted slots.
+		TEST_METHOD(UnclaimRestoresReleasedAndEmptySlotsWithoutBurningSeq)
+		{
+			const auto acceptAll = [](const Header&) { return SealReason::Accepted; };
+			auto fillSealRelease = [&](SlotSet& s, uint64_t seq, uint64_t releaseFence) {
+				LaneTicket t;
+				Assert::IsTrue(s.Claim(seq, Provenance::AheadLane, kNoFence, &t) == ClaimResult::Claimed);
+				Assert::IsTrue(s.StartWriting(t));
+				Assert::IsTrue(s.Publish(t) == PublishResult::Published);
+				Assert::IsTrue(s.Seal(seq, acceptAll).outcome == SealOutcome::Sealed);
+				Assert::IsTrue(s.Release(seq, releaseFence));
+			};
+
+			// Case A: initial Empty slot -> Claim(0) -> Unclaim(t) restores Empty -> Claim(0) succeeds and publishes.
+			{
+				SlotSet sA(kA, 4, 2);
+				LaneTicket t0;
+				Assert::IsTrue(sA.Claim(0u, Provenance::AheadLane, kNoFence, &t0) == ClaimResult::Claimed);
+				Assert::IsTrue(sA.StateOf(0u) == SlotState::Claimed);
+				Assert::IsTrue(sA.Unclaim(t0), L"Unclaim on still-Claimed initial Empty slot returns true");
+				Assert::IsFalse(t0.valid, L"Unclaim invalidates ticket");
+				Assert::IsTrue(sA.StateOf(0u) == SlotState::Empty, L"slot restored to Empty");
+
+				LaneTicket t0b;
+				Assert::IsTrue(sA.Claim(0u, Provenance::AheadLane, kNoFence, &t0b) == ClaimResult::Claimed,
+					L"frame 0 is claimable again after Unclaim");
+				Assert::IsTrue(sA.StartWriting(t0b));
+				Assert::IsTrue(sA.Publish(t0b) == PublishResult::Published, L"re-claimed frame 0 publishes cleanly");
+				Assert::IsTrue(sA.StateOf(0u) == SlotState::Published);
+			}
+
+			// Case B: Released slot with releaseValue = 55 -> Claim(4) -> Unclaim(t) restores Released(0) and keeps fence 55.
+			{
+				SlotSet sB(kA, 4, 2);
+				fillSealRelease(sB, 0u, 55u);
+				Assert::IsTrue(sB.StateOf(0u) == SlotState::Released);
+
+				LaneTicket t4;
+				Assert::IsTrue(sB.Claim(4u, Provenance::AheadLane, 55u, &t4) == ClaimResult::Claimed);
+				Assert::IsTrue(sB.Unclaim(t4), L"Unclaim on still-Claimed previously-Released slot returns true");
+				Assert::IsFalse(t4.valid);
+				Assert::IsTrue(sB.StateOf(0u) == SlotState::Released, L"slot restored to Released(0)");
+				Assert::IsTrue(sB.Claim(4u, Provenance::AheadLane, 54u, nullptr) == ClaimResult::ReleasePending,
+					L"releaseValue 55 is STILL enforced after Unclaim");
+
+				LaneTicket t4b;
+				Assert::IsTrue(sB.Claim(4u, Provenance::AheadLane, 55u, &t4b) == ClaimResult::Claimed,
+					L"frame 4 is claimable again once fence 55 completes");
+				Assert::IsTrue(sB.StartWriting(t4b));
+				Assert::IsTrue(sB.Publish(t4b) == PublishResult::Published);
+				Assert::IsTrue(sB.StateOf(4u) == SlotState::Published);
+			}
+
+			// In-test negative control: Abandon(t) instead of Unclaim(t) burns seq 4 (subsequent Claim(4) returns Stale).
+			{
+				SlotSet sNeg(kA, 4, 2);
+				fillSealRelease(sNeg, 0u, 55u);
+				LaneTicket tNeg;
+				Assert::IsTrue(sNeg.Claim(4u, Provenance::AheadLane, 55u, &tNeg) == ClaimResult::Claimed);
+				Assert::IsTrue(sNeg.Abandon(tNeg));
+				Assert::IsTrue(sNeg.Claim(4u, Provenance::AheadLane, 55u, nullptr) == ClaimResult::Stale,
+					L"negative control: Abandon burns frame 4 so Claim(4) returns Stale");
+			}
+
+			// Case C: preempted by Seal -> Claim(5) -> Seal(5) (RejectedLaneOwned) -> Unclaim returns false and acknowledges.
+			{
+				SlotSet sC(kA, 4, 2);
+				fillSealRelease(sC, 1u, 0u);   // slot 1 advances to Released(1) so frame 5 is claimable on slot 1
+				LaneTicket t5;
+				Assert::IsTrue(sC.Claim(5u, Provenance::AheadLane, kNoFence, &t5) == ClaimResult::Claimed);
+				const SealResult sr = sC.Seal(5u, acceptAll);
+				Assert::IsTrue(sr.outcome == SealOutcome::NeedsLive && sr.reason == SealReason::LaneLate);
+				Assert::IsTrue(sC.StateOf(5u) == SlotState::RejectedLaneOwned);
+				Assert::IsFalse(sC.Unclaim(t5), L"preempted Claimed slot cannot Unclaim (returns false and calls Ack)");
+				Assert::IsFalse(t5.valid);
+				Assert::IsTrue(sC.StateOf(5u) == SlotState::Rejected,
+					L"failed Unclaim cleanly acknowledged RejectedLaneOwned -> Rejected");
+			}
 		}
 	};
 }

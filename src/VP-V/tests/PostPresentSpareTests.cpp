@@ -305,5 +305,157 @@ namespace PostPresentSpareTest
 			Assert::AreEqual(1u, SpareRowsThatFit(5, 1000.0, 0.001));
 			Assert::AreEqual(0u, SpareRowsThatFit(0, 1.0, 1.0));
 		}
+
+		// K#7: an idle Unpack work returning 0.0 ms leaves usedMs == 0.0, so an unmeasured Core work behind it
+		// MUST run on the very first slot (r.ran == 2), while a non-idle Unpack (> 0 ms) still defers Core.
+		TEST_METHOD(IdleUnpackAllowsUnmeasuredCoreToRunOnFirstSlot)
+		{
+			// 1. Protected path: idle 0-ms Unpack followed by unmeasured 1.5-ms Core.
+			{
+				PostPresentSpare spare;
+				std::vector<uint16_t> order;
+				Scripted unpack(1, SpareClass::Unpack, 0);
+				unpack.pending = 1;
+				unpack.msWhole = 0.0;
+				unpack.order = &order;
+				Scripted core(2, SpareClass::Core, 1);
+				core.pending = 1;
+				core.msWhole = 1.5;
+				core.order = &order;
+				spare.Register(&unpack.work);
+				spare.Register(&core.work);
+
+				const SpareReport r = spare.Run(Slot(1, 10.0));
+				Assert::IsTrue(r.outcome == SpareOutcome::Ran);
+				Assert::AreEqual(2u, r.ran, L"K#7: idle 0-ms Unpack + unmeasured Core both run on slot 1");
+				Assert::AreEqual(2u, r.unmeasured, L"both unmeasured works ran while usedMs remained 0.0");
+				Assert::AreEqual(0u, r.coreDeferred, L"Core must not be deferred behind an idle 0-ms Unpack");
+				Assert::AreEqual(size_t(1), core.runs.size(), L"Core executed on slot 1");
+				Assert::AreEqual(1.5, r.usedMs, 1e-9, L"slot usedMs equals Core's 1.5 ms");
+				const std::vector<uint16_t> want = { 1, 2 };
+				Assert::IsTrue(order == want, L"Unpack ran before Core");
+			}
+
+			// 2. In-test negative control: non-idle Unpack (0.5 ms > 0.0) defers unmeasured Core on slot 1,
+			//    then Core is promoted and runs on slot 2.
+			{
+				PostPresentSpare negSpare;
+				Scripted busyUnpack(1, SpareClass::Unpack, 0);
+				busyUnpack.pending = 2;
+				busyUnpack.msWhole = 0.5;
+				Scripted negCore(2, SpareClass::Core, 1);
+				negCore.pending = 1;
+				negCore.msWhole = 1.5;
+				negSpare.Register(&busyUnpack.work);
+				negSpare.Register(&negCore.work);
+
+				const SpareReport r1 = negSpare.Run(Slot(1, 10.0));
+				Assert::AreEqual(1u, r1.ran, L"negative control: non-idle 0.5-ms Unpack blocks unmeasured Core on slot 1");
+				Assert::AreEqual(1u, r1.coreDeferred, L"negative control: unmeasured Core deferred behind non-idle Unpack");
+				Assert::IsTrue(negCore.runs.empty(), L"negative control: Core did not run on slot 1");
+				Assert::AreEqual(0.5, r1.usedMs, 1e-9);
+
+				const SpareReport r2 = negSpare.Run(Slot(2, 10.0));
+				Assert::AreEqual(1ull, negSpare.Promoted(), L"negative control: deferred Core promoted first on slot 2");
+				Assert::AreEqual(2u, r2.ran, L"Core runs first (promoted) followed by measured Unpack");
+				Assert::AreEqual(size_t(1), negCore.runs.size());
+			}
+		}
+
+		// K#8: PostPresentSpare maintains m_works sorted on Register/Unregister so execution order and every report
+		// field are bit-for-bit identical regardless of registration order or mid-run Unregister/re-Register.
+		TEST_METHOD(RegistrationOrderDoesNotAffectSpareExecutionOrder)
+		{
+			struct RigSet
+			{
+				PostPresentSpare spare;
+				std::vector<uint16_t> order;
+				Scripted unpack{ 10, SpareClass::Unpack, 0 };
+				Scripted coreSplit{ 20, SpareClass::Core, 1 };
+				Scripted coreTieFirst{ 22, SpareClass::Core, 2 };
+				Scripted coreUnmeasured{ 25, SpareClass::Core, 2 };
+				Scripted sliceWork{ 30, SpareClass::Slice, 1 };
+				Scripted fillWork{ 40, SpareClass::Fill, 0 };
+
+				RigSet()
+				{
+					unpack.pending = 1; unpack.msWhole = 0.4; unpack.work.Run(0); unpack.pending = 5; unpack.order = &order;
+					coreSplit.rows = coreSplit.left = 20; coreSplit.msPerRow = 0.1; coreSplit.work.Run(5); coreSplit.left = 20; coreSplit.order = &order;
+					coreTieFirst.pending = 1; coreTieFirst.msWhole = 0.5; coreTieFirst.work.Run(0); coreTieFirst.pending = 5; coreTieFirst.order = &order;
+					coreUnmeasured.pending = 5; coreUnmeasured.msWhole = 0.8; coreUnmeasured.order = &order;   // deliberately unmeasured
+					sliceWork.pending = 1; sliceWork.msWhole = 1.2; sliceWork.work.Run(0); sliceWork.pending = 5; sliceWork.order = &order;
+					fillWork.pending = 1; fillWork.msWhole = 0.7; fillWork.work.Run(0); fillWork.pending = 5; fillWork.order = &order;
+				}
+			};
+
+			RigSet a, b;
+			// Instance A: canonical sorted registration order.
+			a.spare.Register(&a.unpack.work);
+			a.spare.Register(&a.coreSplit.work);
+			a.spare.Register(&a.coreTieFirst.work);
+			a.spare.Register(&a.coreUnmeasured.work);
+			a.spare.Register(&a.sliceWork.work);
+			a.spare.Register(&a.fillWork.work);
+
+			// Instance B: scrambled / reverse registration order.
+			b.spare.Register(&b.fillWork.work);
+			b.spare.Register(&b.coreUnmeasured.work);
+			b.spare.Register(&b.sliceWork.work);
+			b.spare.Register(&b.unpack.work);
+			b.spare.Register(&b.coreTieFirst.work);
+			b.spare.Register(&b.coreSplit.work);
+
+			uint32_t totalSplit = 0;
+			uint32_t totalSliceSkipped = 0;
+			auto runAndCompare = [&](uint64_t key, double budget, double slice) {
+				const SpareReport ra = a.spare.Run(Slot(key, budget, slice));
+				const SpareReport rb = b.spare.Run(Slot(key, budget, slice));
+				Assert::IsTrue(ra.outcome == rb.outcome);
+				Assert::AreEqual(ra.ran, rb.ran);
+				Assert::AreEqual(ra.usedMs, rb.usedMs, 1e-12);
+				Assert::AreEqual(ra.split, rb.split);
+				Assert::AreEqual(ra.unmeasured, rb.unmeasured);
+				Assert::AreEqual(ra.coreDeferred, rb.coreDeferred);
+				Assert::AreEqual(ra.sliceSkipped, rb.sliceSkipped);
+				Assert::AreEqual(ra.fillSkipped, rb.fillSkipped);
+				Assert::IsTrue(a.order == b.order, L"execution order identical regardless of registration order");
+				totalSplit += ra.split;
+				totalSliceSkipped += ra.sliceSkipped;
+			};
+
+			// Slot 1: Unpack (0.4) + CoreSplit (2.0 > 1.6 remaining -> split) + CoreTieFirst (0.5) + CoreUnmeasured deferred -> promoted next slot.
+			runAndCompare(1, 2.0, 1.0);
+			const size_t slot1Count = a.order.size();
+			Assert::AreEqual(size_t(3), slot1Count, L"Slot 1 executes exactly 3 works in canonical order");
+			Assert::AreEqual<uint16_t>(10u, a.order[0], L"Slot 1 canonical [0]: Unpack (id 10)");
+			Assert::AreEqual<uint16_t>(20u, a.order[1], L"Slot 1 canonical [1]: CoreSplit (id 20, order 1)");
+			Assert::AreEqual<uint16_t>(22u, a.order[2], L"Slot 1 canonical [2]: CoreTieFirst (id 22, order 2)");
+			// Slot 2: promoted CoreUnmeasured runs first, then remaining works in canonical order.
+			runAndCompare(2, 6.0, 2.0);
+			Assert::IsTrue(a.order.size() > slot1Count, L"Slot 2 executed works");
+			Assert::AreEqual<uint16_t>(25u, a.order[slot1Count], L"Slot 2 canonical [0]: promoted CoreUnmeasured (id 25) runs first");
+
+			// Mid-run Unregister + re-Register in different orders on A vs B.
+			a.spare.Unregister(&a.coreTieFirst.work);
+			a.spare.Unregister(&a.sliceWork.work);
+			a.spare.Register(&a.coreTieFirst.work);
+			a.spare.Register(&a.sliceWork.work);
+
+			b.spare.Unregister(&b.sliceWork.work);
+			b.spare.Unregister(&b.coreTieFirst.work);
+			b.spare.Register(&b.sliceWork.work);
+			b.spare.Register(&b.coreTieFirst.work);
+
+			runAndCompare(3, 6.0, 0.8);   // slice (1.2 > 0.8) skipped; fill runs
+			runAndCompare(4, 10.0, 5.0);
+
+			Assert::AreEqual(a.spare.Promoted(), b.spare.Promoted());
+			Assert::AreEqual(a.spare.CoreDeferred(), b.spare.CoreDeferred());
+			Assert::AreEqual(a.spare.UsedMsTotal(), b.spare.UsedMsTotal(), 1e-12);
+			Assert::IsTrue(totalSplit > 0u, L"row-splitting branch exercised");
+			Assert::IsTrue(a.spare.Promoted() > 0ull, L"unmeasured promotion branch exercised");
+			Assert::IsTrue(totalSliceSkipped > 0u, L"slice-skip branch exercised");
+			Assert::IsTrue(a.order.size() >= 10u, L"multiple works executed across all 4 slots");
+		}
 	};
 }

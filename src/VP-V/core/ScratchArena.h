@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <thread>
 #include <vector>
@@ -126,25 +127,35 @@ public:
                         backend_->Destroy(h);
         pools_ = std::move(next);
         plan_ = plan;
+        slices_.clear();
+        for (const ArenaRequest& r : plan_.admitted) {
+            const size_t pool = PoolIndex(r.shape);
+            if (pool == pools_.size()) continue;
+            const char* const own = r.owner ? r.owner : "";
+            bool dup = false;
+            for (const SlotSlice& sl : slices_)
+                if (sl.scope == r.scope && sl.pool == pool && std::strcmp(sl.owner.c_str(), own) == 0) { dup = true; break; }
+            if (dup) continue;
+            SlotSlice sl; sl.scope = r.scope; sl.owner = own; sl.pool = pool;
+            sl.base = plan_.OwnerBase(r.scope, r.owner, r.shape);
+            sl.limit = plan_.OwnerCount(r.scope, r.owner, r.shape);
+            slices_.push_back(std::move(sl));
+        }
         ++reserves_;
         return ok;
     }
 
     // The owner hands the arena over (e.g. to a lane thread that will Reserve it next). Owner thread only.
-    void Unbind()
-    {
-        if (owner_.BoundToCaller())
-            owner_.Reset();
-    }
+    void Unbind() { if (owner_.BoundToCaller()) owner_.Reset(); }
 
     // Destroys every texture (device loss, shutdown). Owner thread, or after every user has stopped (destruction).
     void Release()
     {
         for (Pool& p : pools_)
             for (Handle& h : p.tex)
-                if (h)
-                    backend_->Destroy(h);
+                if (h) backend_->Destroy(h);
         pools_.clear();
+        slices_.clear();
         plan_ = ArenaPlan();
         scopeOpen_ = false;
     }
@@ -152,11 +163,7 @@ public:
     // A new frame: forgets the previous frame's shortage record.
     void BeginFrame()
     {
-        if (owner_.BoundToOther()) {
-            ++crossThread_;
-            frameCross_.store(true);
-            return;   // another thread: the owner's records are untouched
-        }
+        if (owner_.BoundToOther()) { ++crossThread_; frameCross_.store(true); return; }   // another thread: owner's records untouched
         frameShort_.clear();
         frameNested_ = false;
         frameCross_.store(false);
@@ -166,19 +173,11 @@ public:
     // shown (FrameDecision). The caller must call EndScope only when this returned true.
     bool BeginScope(uint16_t scope)
     {
-        if (!owner_.BindIfUnbound()) {
-            ++crossThread_;   // another thread's scope: refused, the owner's state untouched
-            frameCross_.store(true);
-            return false;
-        }
-        if (scopeOpen_) {
-            ++nestedScopes_;
-            frameNested_ = true;
-            return false;
-        }
+        if (!owner_.BindIfUnbound()) { ++crossThread_; frameCross_.store(true); return false; }
+        if (scopeOpen_) { ++nestedScopes_; frameNested_ = true; return false; }
         scope_ = scope;
         scopeOpen_ = true;
-        uses_.clear();
+        for (SlotSlice& sl : slices_) sl.used = 0;
         return true;
     }
 
@@ -192,42 +191,22 @@ public:
     // caller reduces or switches off for this frame; the shortage is recorded for FrameDecision()).
     Handle Acquire(const char* owner, const TexShape& shape)
     {
-        if (!owner_.Bound()) {
-            ++outsideScope_;   // never reserved nor scoped: no scope is open
-            return Handle();
-        }
-        if (!owner_.BoundToCaller()) {
-            ++crossThread_;
-            frameCross_.store(true);
-            return Handle();   // another thread: atomics only (count + flag), never the owner's shortage record
-        }
-        if (!scopeOpen_) {
-            ++outsideScope_;
-            return Fail(owner);
-        }
+        if (!owner_.Bound()) { ++outsideScope_; return Handle(); }   // never reserved nor scoped: no scope is open
+        if (!owner_.BoundToCaller()) { ++crossThread_; frameCross_.store(true); return Handle(); }   // another thread: atomics only
+        if (!scopeOpen_) { ++outsideScope_; return Fail(owner); }
         const size_t pool = PoolIndex(shape);
-        if (pool == pools_.size() || !plan_.Admits(scope_, owner, shape)) {
-            ++shed_;   // not planned: its tier was shed (or it never asked)
-            return Fail(owner);
-        }
-        // Counted per (owner, shape): up to this owner's admitted count, from this owner's base index.
-        const uint32_t mine = plan_.OwnerCount(scope_, owner, shape);
-        const uint32_t base = plan_.OwnerBase(scope_, owner, shape);
-        const std::string name = owner ? owner : "";
-        Use* use = nullptr;
-        for (Use& u : uses_)
-            if (u.pool == pool && u.owner == name)
-                use = &u;
-        if (!use) {
-            uses_.push_back(Use{ name, pool, 0u });
-            use = &uses_.back();
-        }
-        const size_t index = size_t(base) + use->count;
-        if (use->count >= mine || index >= pools_[pool].tex.size() || !pools_[pool].tex[index]) {
+        if (pool == pools_.size()) { ++shed_; return Fail(owner); }   // not planned: tier shed or never asked
+        const char* const name = owner ? owner : "";
+        SlotSlice* slice = nullptr;
+        for (SlotSlice& sl : slices_)
+            if (sl.scope == scope_ && sl.pool == pool && std::strcmp(sl.owner.c_str(), name) == 0) { slice = &sl; break; }
+        if (!slice) { ++shed_; return Fail(owner); }
+        const size_t index = size_t(slice->base) + slice->used;
+        if (slice->used >= slice->limit || index >= pools_[pool].tex.size() || !pools_[pool].tex[index]) {
             ++exhausted_;
             return Fail(owner);
         }
-        ++use->count;
+        ++slice->used;
         ++acquired_;
         return pools_[pool].tex[index];
     }
@@ -275,23 +254,23 @@ public:
     uint64_t NestedScopes() const { return nestedScopes_; }
     uint32_t CreateFailures() const { return createFailures_; }
     uint32_t Reserves() const { return reserves_; }
+    size_t SliceCount() const { return slices_.size(); }
 
 private:
-    struct Pool {
-        TexShape shape;
-        std::vector<Handle> tex;
-    };
-    struct Use {
-        std::string owner;
-        size_t pool;
-        uint32_t count;
+    struct Pool { TexShape shape; std::vector<Handle> tex; };
+    struct SlotSlice {
+        uint16_t scope = 0;
+        std::string owner;   // populated once at Reserve(); never allocated in BeginScope()/Acquire()
+        size_t pool = 0;
+        uint32_t base = 0;
+        uint32_t limit = 0;
+        uint32_t used = 0;
     };
 
     size_t PoolIndex(const TexShape& s) const
     {
         for (size_t i = 0; i < pools_.size(); ++i)
-            if (pools_[i].shape == s)
-                return i;
+            if (pools_[i].shape == s) return i;
         return pools_.size();
     }
 
@@ -308,7 +287,7 @@ private:
     TexBackend* backend_;
     std::vector<Pool> pools_;
     ArenaPlan plan_;
-    std::vector<Use> uses_;
+    std::vector<SlotSlice> slices_;
     bool frameNested_ = false;
     uint64_t nestedScopes_ = 0;
     std::vector<std::string> frameShort_;   // owners that went without this frame (sorted, unique)

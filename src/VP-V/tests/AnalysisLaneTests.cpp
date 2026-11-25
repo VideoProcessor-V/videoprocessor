@@ -2246,6 +2246,89 @@ namespace AnalysisLaneTestsNs
 				Assert::IsTrue(neg.Abandon(premature));
 			}
 		}
+
+		// K#3 (167): NotifyWake locks wakeMutex_ around wake_.fetch_add(1) before wakeCv_.notify_all() so rapid
+		// WaitWake / NotifyWake cycles never drop a wakeup and stall on the timeout.
+		TEST_METHOD(NotifyWakeNeverDropsWakeupUnderRapidWaitCycles)
+		{
+			Rig r(4);
+			// In-test negative control: WaitWake with no NotifyWake MUST time out and return false (not vacuously true).
+			const uint64_t idleSeen = r.lane.WakeCount();
+			Assert::IsFalse(r.lane.WaitWake(idleSeen, 5000u),
+				L"negative control: WaitWake without NotifyWake must return false after timeout");
+
+			constexpr int kCycles = 200;
+			constexpr uint32_t kTimeoutUs = 500000u;   // 500 ms per cycle; even 1 lost wakeup breaches the elapsed bound
+			std::atomic<int> ready{ 0 };
+			std::atomic<bool> stop{ false };
+			std::atomic<int> cycleRequested{ 0 };
+			std::atomic<int> cycleDone{ 0 };
+			std::atomic<uint64_t> timeouts{ 0 };
+			std::atomic<int> completedCycles{ 0 };
+
+			struct ThreadJoinGuard {
+				std::atomic<bool>& stopFlag;
+				AnalysisLane& lane;
+				std::thread producer;
+				std::thread consumer;
+				ThreadJoinGuard(std::atomic<bool>& s, AnalysisLane& l) : stopFlag(s), lane(l) {}
+				~ThreadJoinGuard()
+				{
+					stopFlag.store(true, std::memory_order_release);
+					lane.NotifyWake();
+					if (producer.joinable())
+						producer.join();
+					if (consumer.joinable())
+						consumer.join();
+				}
+			} threads(stop, r.lane);
+
+			threads.consumer = std::thread([&]() {
+				ready.fetch_add(1, std::memory_order_release);
+				while (ready.load(std::memory_order_acquire) < 2 && !stop.load(std::memory_order_acquire))
+					std::this_thread::yield();
+				for (int i = 0; i < kCycles && !stop.load(std::memory_order_acquire); ++i) {
+					const uint64_t seen = r.lane.WakeCount();
+					cycleRequested.store(i + 1, std::memory_order_release);
+					if (!r.lane.WaitWake(seen, kTimeoutUs))
+						timeouts.fetch_add(1, std::memory_order_relaxed);
+					completedCycles.fetch_add(1, std::memory_order_relaxed);
+					cycleDone.store(i + 1, std::memory_order_release);
+				}
+			});
+
+			threads.producer = std::thread([&]() {
+				ready.fetch_add(1, std::memory_order_release);
+				while (ready.load(std::memory_order_acquire) < 2 && !stop.load(std::memory_order_acquire))
+					std::this_thread::yield();
+				for (int i = 0; i < kCycles && !stop.load(std::memory_order_acquire); ++i) {
+					while (cycleRequested.load(std::memory_order_acquire) < i + 1
+						&& !stop.load(std::memory_order_acquire))
+						std::this_thread::yield();
+					r.lane.NotifyWake();
+					while (cycleDone.load(std::memory_order_acquire) < i + 1
+						&& !stop.load(std::memory_order_acquire))
+						std::this_thread::yield();
+				}
+			});
+
+			while (ready.load(std::memory_order_acquire) < 2)
+				std::this_thread::yield();
+			const auto t0 = std::chrono::steady_clock::now();
+
+			if (threads.consumer.joinable())
+				threads.consumer.join();
+			if (threads.producer.joinable())
+				threads.producer.join();
+			const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+				std::chrono::steady_clock::now() - t0).count();
+
+			Assert::AreEqual(uint64_t(0), timeouts.load(),
+				L"K#3 (167): ZERO WaitWake timeouts across 200 rapid NotifyWake/WaitWake cycles");
+			Assert::AreEqual(kCycles, completedCycles.load(), L"all 200 rapid wake cycles completed");
+			Assert::IsTrue(elapsedMs < 500,
+				L"200 rapid wake cycles completed well below a single 500 ms timeout (zero lost wakeups)");
+		}
 	};
 
 	// Resync Q0-B: FrameSeal owns the one seal; the lane holds the Indicator by shared handle.

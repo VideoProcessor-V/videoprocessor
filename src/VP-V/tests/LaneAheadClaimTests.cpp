@@ -226,17 +226,23 @@ namespace LaneAheadClaimTestsNs
 			Assert::IsTrue(set.StateOf(1) == SlotState::Published, L"Published, not Sealed");
 			const AnalysisLane::AheadRunResult p4 = r.lane.RunAheadNow(kP4SourceStats, 1);
 			Assert::IsTrue(p4.kind == AnalysisLane::AheadRun::Ran, L"P4 of frame 1 made now through the Published P1");
-			// P4 of frame 1 is itself Published (frame 1 is not sealed): read from its ring slot with allowPublished. ReadOf is the render
-			// read of a SEALED frame and answers None here.
+			// P4 of frame 1 is itself Published (frame 1 is not sealed): direct SlotSet::Read(1, false) answers None (negative control),
+			// while SlotSet::Read(1, true) and AnalysisLane::ReadOf(kP4SourceStats, 1) (ahead CPU read: seq > renderSeq_) both read its ring slot.
 			Assert::IsTrue(st->IndexOf(kP4SourceStats) >= 0, L"P4 node");
 			const size_t p4i = size_t(st->IndexOf(kP4SourceStats));
 			SlotSet& set4 = st->table->At(p4i);
 			Assert::IsTrue(set4.StateOf(1) == SlotState::Published, L"P4 of frame 1 Published by the ahead run");
+			Assert::IsTrue(set4.Read(1, false).kind == ReadInfo::None, L"negative control: non-ahead SlotSet::Read refuses unsealed Published slot");
 			const ReadInfo ri4 = set4.Read(1, true);
 			Assert::IsTrue(ri4.kind == ReadInfo::Ring && st->bufs[p4i], L"P4 in its ring slot");
 			const uint8_t* p4bytes = st->bufs[p4i]->Ring(size_t(ri4.index));
 			const std::vector<uint8_t> made(p4bytes, p4bytes + st->bufs[p4i]->Bytes());
 			Assert::IsTrue(made == r.ExpectedStats(1), L"P4 = the one-shot law over the published input");
+			const AnalysisLane::ProductRead pr4 = r.lane.ReadOf(kP4SourceStats, 1);
+			Assert::IsTrue(pr4.state == AnalysisLane::ProductRead::Ring && pr4.cpu != nullptr && pr4.cpuBytes == st->bufs[p4i]->Bytes(),
+				L"ReadOf serves Published ahead CPU frame (seq > renderSeq_) from its ring slot");
+			const std::vector<uint8_t> readOfBytes(pr4.cpu, pr4.cpu + pr4.cpuBytes);
+			Assert::IsTrue(readOfBytes == r.ExpectedStats(1), L"ReadOf bytes match the one-shot law over the published input");
 			Assert::IsTrue(r.lane.AheadMadeByRender() == 1u, L"only P4 was made: the published P1 was read, not recomputed");
 		}
 
@@ -354,6 +360,69 @@ namespace LaneAheadClaimTestsNs
 				Assert::IsFalse(st->table->LaneAncestors(kP4SourceStats, 1, scratch, pins), L"the lane worker's call (default countWaits) waits");
 			Assert::AreEqual(size_t(0), pins.count, L"nothing stays pinned");
 			Assert::AreEqual(before + 1u, store.Counters().storeWaitRejected.load(), L"the worker counts the reader frame once, not per poll");
+		}
+
+		// K#3 (168): when RunAheadNow finds a claimed slot still pinned (!Writable), Unclaim restores the slot
+		// without burning the target frame seq, so after Unpin the same frame can be made and published cleanly.
+		TEST_METHOD(PinnedSlotDeclinesRunAheadNowWithoutBurningFrame)
+		{
+			LaneRig r;
+			Assert::IsTrue(r.Configure(), L"built");
+			const std::shared_ptr<LaneState> st = r.lane.State();
+			Assert::IsTrue(st != nullptr && st->IndexOf(kP1HalfLuma) >= 0, L"P1 node");
+			SlotSet& set = st->table->At(size_t(st->IndexOf(kP1HalfLuma)));
+			const uint64_t R = set.Ring();
+
+			// Publish frame 0 into ring slot 0 via worker, then seal frame 0 so slot 0 holds Sealed frame 0.
+			r.lane.OnSourceFrame(r.View(0));
+			r.Pump();
+			r.lane.OnRenderStart(0, 4000);
+			Assert::IsTrue(set.StateOf(0) == SlotState::Sealed, L"frame 0 sealed in ring slot 0");
+
+			// Pin frame 0 in ring slot 0, then retire frame 0 so slot 0 becomes Released(0) while pinned.
+			AncestorRef ref;
+			int liveIdx = -2;
+			Assert::IsTrue(set.PinRef(0, &ref, &liveIdx), L"pin frame 0 in ring slot 0");
+			Assert::AreEqual(-1, liveIdx, L"frame 0 resides in ring slot 0, not a live buffer");
+			r.lane.OnFrameRetired(0, 0);
+			Assert::IsTrue(set.StateOf(0) == SlotState::Released, L"frame 0 released while still pinned");
+
+			// Deliver source frame R (maps to slot 0): RunAheadNow claims slot 0, sees !Writable, and Unclaims cleanly.
+			r.lane.OnSourceFrame(r.View(R));
+			const AnalysisLane::AheadRunResult declined = r.lane.RunAheadNow(kP1HalfLuma, R);
+			Assert::IsTrue(declined.kind == AnalysisLane::AheadRun::Declined && Has(declined.why, "pinned"),
+				L"RunAheadNow declines while slot 0 is pinned by frame 0 reader");
+			Assert::IsTrue(set.StateOf(R) != SlotState::Abandoned,
+				L"K#3 (168): declined RunAheadNow MUST NOT leave frame R Abandoned");
+			Assert::IsTrue(set.StateOf(0) == SlotState::Released,
+				L"K#3 (168): Unclaim restored slot 0 back to Released(0)");
+
+			// Unpin frame 0 -> RunAheadNow(kP1HalfLuma, R) now succeeds and publishes bit-identical bytes.
+			set.Unpin(0, liveIdx);
+			const AnalysisLane::AheadRunResult ok = r.lane.RunAheadNow(kP1HalfLuma, R);
+			Assert::IsTrue(ok.kind == AnalysisLane::AheadRun::Ran,
+				L"K#3 (168): after Unpin, RunAheadNow(R) succeeds (frame R was not burned)");
+			Assert::IsTrue(set.StateOf(R) == SlotState::Published, L"frame R Published in slot 0");
+			Assert::IsTrue(r.SlotBytes(kP1HalfLuma, R) == r.ExpectedHalf(R),
+				L"frame R bytes match one-shot law");
+
+			// In-test negative control: pre-fix Abandon(t) on a pinned slot burns frame R (Stale after Unpin).
+			SlotSet neg(kP1HalfLuma, uint16_t(R), 2);
+			const auto acceptAll = [](const Header&) { return SealReason::Accepted; };
+			LaneTicket t0;
+			Assert::IsTrue(neg.Claim(0, Provenance::AheadLane, ~uint64_t(0), &t0) == ClaimResult::Claimed);
+			Assert::IsTrue(neg.StartWriting(t0));
+			Assert::IsTrue(neg.Publish(t0) == PublishResult::Published);
+			Assert::IsTrue(neg.Seal(0, acceptAll).outcome == SealOutcome::Sealed);
+			Assert::IsTrue(neg.PinRef(0, nullptr, nullptr));
+			Assert::IsTrue(neg.Release(0, 0));
+			LaneTicket tR;
+			Assert::IsTrue(neg.Claim(R, Provenance::AheadLane, ~uint64_t(0), &tR) == ClaimResult::Claimed);
+			Assert::IsFalse(neg.Writable(tR), L"negative control: slot 0 is pinned");
+			Assert::IsTrue(neg.Abandon(tR), L"negative control: Abandon instead of Unclaim");
+			neg.Unpin(0);
+			Assert::IsTrue(neg.Claim(R, Provenance::AheadLane, ~uint64_t(0), nullptr) == ClaimResult::Stale,
+				L"negative control: Abandon burns frame R so it returns Stale and can never be published after Unpin");
 		}
 	};
 }

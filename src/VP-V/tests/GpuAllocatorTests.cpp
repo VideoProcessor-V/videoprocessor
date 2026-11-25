@@ -22,6 +22,9 @@
 #include <string>
 #include <thread>
 #include <vector>
+#if defined(_DEBUG)
+#include <crtdbg.h>
+#endif
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
@@ -1051,6 +1054,206 @@ namespace GpuAllocatorTestsNs
 			Assert::IsTrue(six[1].find(FormatMB(compactPeak)) != std::string::npos, L"compact peak line");
 			// WAIVER-P10V3-01: the compact formula text "8 x 6 + 32 B/px" -> "8 x 6 + 4 B/px" (v3 scratch, see above).
 			Assert::IsTrue(six[1].find("8 x 6 + 4 B/px") != std::string::npos, L"compact peak formula");
+		}
+
+		// K#4: ArenaPlan::Admits / OwnerCount / OwnerBase use null-safe strcmp so neither a null query owner
+		// nor a null r.owner stored in ArenaPlan::admitted crashes (both safely return false / 0).
+		TEST_METHOD(NullOwnerInPlanAndAdmitsDoesNotCrashAndReturnsFalse)
+		{
+			const TexShape s = Shape(32, 32, TexFormat::R32F);
+
+			// Case 1: valid non-empty owner "grain" at scope 1 -> negative control passes; nullptr lookup safely returns false / 0.
+			{
+				std::vector<ArenaRequest> reqs;
+				reqs.push_back(Req(1, "grain", Tier::T0, s, 2));
+				const ArenaPlan plan = PlanArena(reqs, Tier::T2);
+
+				// In-test negative control: valid owner is admitted with exact count.
+				Assert::IsTrue(plan.Admits(1, "grain", s), L"negative control: valid owner 'grain' is admitted");
+				Assert::AreEqual(uint32_t(2), plan.OwnerCount(1, "grain", s), L"negative control: OwnerCount('grain') == 2");
+				Assert::AreEqual(uint32_t(0), plan.OwnerBase(1, "grain", s));
+
+				Assert::IsFalse(plan.Admits(1, nullptr, s), L"K#4: Admits(1, nullptr, s) must return false without crashing");
+				Assert::AreEqual(uint32_t(0), plan.OwnerCount(1, nullptr, s), L"K#4: OwnerCount(1, nullptr, s) == 0");
+				Assert::AreEqual(uint32_t(0), plan.OwnerBase(1, nullptr, s), L"K#4: OwnerBase(1, nullptr, s) == 0");
+			}
+
+			// Case 2: ArenaPlan contains an ArenaRequest with r.owner == nullptr at scope 1 -> Admits/OwnerCount/Acquire
+			// for "grain" must return false / 0 cleanly (pre-fix std::string(r.owner) crashed on null r.owner).
+			{
+				std::vector<ArenaRequest> nullReqs;
+				nullReqs.push_back(Req(1, nullptr, Tier::T0, s, 2));
+				const ArenaPlan nullPlan = PlanArena(nullReqs, Tier::T2);
+				Assert::AreEqual(size_t(1), nullPlan.admitted.size());
+				Assert::IsNull(nullPlan.admitted[0].owner, L"precondition: admitted request holds nullptr owner");
+
+				Assert::IsFalse(nullPlan.Admits(1, "grain", s),
+					L"K#4: Admits(1, 'grain', s) against null r.owner must return false without crashing");
+				Assert::AreEqual(uint32_t(0), nullPlan.OwnerCount(1, "grain", s),
+					L"K#4: OwnerCount(1, 'grain', s) against null r.owner == 0");
+
+				FakeBackend be;
+				ScratchArena<FakeBackend> arena(be);
+				Assert::IsTrue(arena.Reserve(nullPlan), L"Reserve succeeds on plan containing null r.owner");
+				arena.BeginFrame();
+				Assert::IsTrue(arena.BeginScope(1));
+				Assert::AreEqual(0, arena.Acquire("grain", s),
+					L"K#4: ScratchArena::Acquire('grain') against null-owner plan returns 0 cleanly");
+				Assert::AreEqual(uint64_t(1), arena.Shed(), L"unadmitted Acquire counted in Shed()");
+				arena.EndScope();
+			}
+		}
+
+		// K#6: ScratchArena precomputes a flat SlotSlice table at Reserve(plan) and executes 10,000 hot-path
+		// BeginFrame/BeginScope/Acquire/EndScope cycles with long (> SSO) owner names, bit-for-bit identical handles,
+		// and ZERO heap allocations (verified via CRT alloc hook in Debug with an in-test allocation negative control).
+		TEST_METHOD(ScratchArenaTenThousandCyclesIdenticalHandlesZeroAllocs)
+		{
+			const TexShape sA = Shape(64, 32, TexFormat::RG32F);
+			const TexShape sB = Shape(32, 32, TexFormat::R16F);
+			// > 32-char owner names exceeding MSVC std::string SSO (15 bytes) so any hot-path std::string construction heap-allocates.
+			const char* const kOwnerA = "stage_owner_exceeding_msvc_sso_capacity_48_bytes_A";
+			const char* const kOwnerB = "stage_owner_exceeding_msvc_sso_capacity_48_bytes_B";
+			const char* const kOwnerC = "stage_owner_exceeding_msvc_sso_capacity_48_bytes_C";
+
+			std::vector<ArenaRequest> reqs;
+			reqs.push_back(Req(1, kOwnerA, Tier::T0, sA, 2));
+			reqs.push_back(Req(1, kOwnerB, Tier::T0, sA, 1));
+			reqs.push_back(Req(1, kOwnerA, Tier::T0, sB, 1));
+			reqs.push_back(Req(2, kOwnerC, Tier::T0, sA, 2));
+			reqs.push_back(Req(2, kOwnerB, Tier::T0, sB, 2));
+			const ArenaPlan plan = PlanArena(reqs, Tier::T2);
+
+			FakeBackend be;
+			ScratchArena<FakeBackend> arena(be);
+			Assert::IsTrue(arena.Reserve(plan), L"Reserve succeeds");
+			const int initialCreated = be.created;
+			const size_t initialSlices = arena.SliceCount();
+			Assert::AreEqual(size_t(5), initialSlices, L"flat slice table precomputed 5 (scope, owner, shape) slices");
+
+			constexpr size_t kPerCycle = 8u;
+			auto runOneCycle = [&](int (&out)[kPerCycle]) -> bool {
+				arena.BeginFrame();
+				if (!arena.BeginScope(1))
+					return false;
+				out[0] = arena.Acquire(kOwnerA, sA);
+				out[1] = arena.Acquire(kOwnerA, sA);
+				out[2] = arena.Acquire(kOwnerB, sA);
+				out[3] = arena.Acquire(kOwnerA, sB);
+				arena.EndScope();
+				if (!arena.BeginScope(2))
+					return false;
+				out[4] = arena.Acquire(kOwnerC, sA);
+				out[5] = arena.Acquire(kOwnerC, sA);
+				out[6] = arena.Acquire(kOwnerB, sB);
+				out[7] = arena.Acquire(kOwnerB, sB);
+				arena.EndScope();
+				return true;
+			};
+
+			// Cycle 0: capture baseline handles.
+			int baseline[kPerCycle] = {};
+			Assert::IsTrue(runOneCycle(baseline), L"baseline cycle 0 succeeds");
+			for (size_t i = 0; i < kPerCycle; ++i)
+				Assert::IsTrue(baseline[i] != 0, L"baseline handle non-null");
+
+#if defined(_DEBUG)
+			struct DebugAllocCounter
+			{
+				static std::atomic<uint64_t>& Count()
+				{
+					static std::atomic<uint64_t> c{ 0 };
+					return c;
+				}
+				static std::atomic<bool>& Active()
+				{
+					static std::atomic<bool> a{ false };
+					return a;
+				}
+				static std::thread::id& TargetTid()
+				{
+					static std::thread::id tid;
+					return tid;
+				}
+				static int __cdecl Hook(int allocType, void*, size_t, int blockType, long, const unsigned char*, int)
+				{
+					if (blockType != _CRT_BLOCK
+						&& (allocType == _HOOK_ALLOC || allocType == _HOOK_REALLOC)
+						&& Active().load(std::memory_order_acquire)
+						&& std::this_thread::get_id() == TargetTid())
+					{
+						Count().fetch_add(1, std::memory_order_relaxed);
+					}
+					return 1;
+				}
+				_CRT_ALLOC_HOOK prev = nullptr;
+				DebugAllocCounter()
+				{
+					TargetTid() = std::this_thread::get_id();
+					Count().store(0u, std::memory_order_relaxed);
+					Active().store(true, std::memory_order_release);
+					prev = _CrtSetAllocHook(&Hook);
+				}
+				~DebugAllocCounter()
+				{
+					Active().store(false, std::memory_order_release);
+					_CrtSetAllocHook(prev);
+				}
+			} allocCounter;
+
+			// In-test negative control: a > SSO std::string allocation MUST increment the CRT alloc hook counter.
+			{
+				std::string probe(64u, 'x');
+				Assert::AreEqual(size_t(64), probe.size());
+				Assert::IsTrue(DebugAllocCounter::Count().load(std::memory_order_relaxed) >= 1u,
+					L"negative control: CRT alloc hook must observe heap allocation of 64-byte std::string");
+			}
+			DebugAllocCounter::Count().store(0u, std::memory_order_relaxed);
+#endif
+
+			constexpr uint64_t kCycles = 10000u;
+			uint64_t scopeFailures = 0u;
+			uint64_t handleMismatches = 0u;
+			for (uint64_t cycle = 0; cycle < kCycles; ++cycle) {
+				int cur[kPerCycle] = {};
+				if (!runOneCycle(cur)) {
+					++scopeFailures;
+					continue;
+				}
+				for (size_t i = 0; i < kPerCycle; ++i)
+					if (cur[i] != baseline[i])
+						++handleMismatches;
+			}
+
+#if defined(_DEBUG)
+			const uint64_t hotPathAllocs = DebugAllocCounter::Count().load(std::memory_order_relaxed);
+			DebugAllocCounter::Active().store(false, std::memory_order_release);
+			Assert::AreEqual(uint64_t(0), hotPathAllocs,
+				L"K#6: 10,000 ScratchArena cycles with >SSO owner names must perform ZERO heap allocations");
+#endif
+
+			Assert::AreEqual(uint64_t(0), scopeFailures, L"every BeginScope succeeded across 10,000 cycles");
+			Assert::AreEqual(uint64_t(0), handleMismatches,
+				L"all 10,000 cycles returned exact bit-for-bit identical handles to cycle 0");
+			Assert::AreEqual(initialCreated, be.created, L"zero new texture creations across 10,000 cycles");
+			Assert::AreEqual(0, be.destroyed, L"zero texture destructions across 10,000 cycles");
+			Assert::AreEqual(initialSlices, arena.SliceCount(), L"SliceCount unchanged across 10,000 cycles");
+			Assert::AreEqual((kCycles + 1u) * uint64_t(kPerCycle), arena.Acquired(),
+				L"exact Acquired() count across baseline + 10,000 cycles");
+			Assert::AreEqual(uint64_t(0), arena.Exhausted());
+			Assert::AreEqual(uint64_t(0), arena.Shed());
+			Assert::IsFalse(arena.FrameDecision().engaged, L"no fallback engaged across clean cycles");
+
+			// In-test negative control (bounds enforcement): acquiring one extra beyond admitted count returns 0 and engages fallback.
+			arena.BeginFrame();
+			Assert::IsTrue(arena.BeginScope(1));
+			Assert::AreEqual(baseline[0], arena.Acquire(kOwnerA, sA));
+			Assert::AreEqual(baseline[1], arena.Acquire(kOwnerA, sA));
+			Assert::AreEqual(0, arena.Acquire(kOwnerA, sA),
+				L"negative control: acquiring 1 extra handle past admitted slice count returns 0");
+			arena.EndScope();
+			Assert::AreEqual(uint64_t(1), arena.Exhausted(), L"negative control: Exhausted() == 1");
+			Assert::IsTrue(arena.FrameDecision().engaged, L"negative control: FrameDecision().engaged == true");
 		}
 	};
 }

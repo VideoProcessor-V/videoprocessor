@@ -212,6 +212,8 @@ struct LaneTicket {
     uint16_t gen = 0;
     Provenance prov = Provenance::None;
     bool valid = false;
+    SlotState priorState = SlotState::Empty;
+    uint64_t priorSeq = 0;
 };
 
 // Where the render reads frame `seq` of a product.
@@ -220,6 +222,16 @@ struct ReadInfo {
     int index = -1;               // ring slot or live-pool buffer
     uint64_t waitValue = 0;       // producer fence value to Wait on before the first read (Ring)
     const Header* header = nullptr;
+};
+
+// Worker-safe atomic snapshot of a slot with content (never touches non-atomic headers).
+struct PublishedSlotView {
+    bool present = false;
+    uint64_t seq = 0;
+    uint16_t gen = 0;
+    uint32_t cgen = 0;
+    SlotState state = SlotState::Empty;
+    int index = -1;
 };
 
 struct SlotCounters {
@@ -334,6 +346,10 @@ public:
     // Lane: phase-2 atomic transition Claimed -> Writing immediately before Begin(job) or writing the ring buffer.
     // Fails cleanly if Seal or Discard preempted the slot first (eliminates pre-Begin duplicate race by 1 CAS).
     bool StartWriting(const LaneTicket& t);
+
+    // Lane: revert a Phase-1 Claimed slot back to its prior Empty/Released state before StartWriting (e.g. !Writable).
+    // Falls back to Ack if preempted by Seal/Discard.
+    bool Unclaim(LaneTicket& t);
 
     // Lane: a reader of the previous tenant may still hold a pin; write only once this is true.
     bool Writable(const LaneTicket& t) const
@@ -634,6 +650,10 @@ public:
             *out = UsesLaneHeader(w.state) ? s.laneHdr.honoured : s.liveHdr.honoured;
         return true;
     }
+
+    // Any thread: worker-safe atomic snapshot of a slot holding content for `seq` (reads only atomic fields).
+    using PublishedSlotView = VpSkeleton::PublishedSlotView;
+    PublishedSlotView PublishedViewOf(uint64_t seq) const;
 
     // Render: where to read frame `seq` (None when there is no valid content).
     // allowPublished: a LEAD input is read before its own seal, from the lane's published (not yet sealed) result.

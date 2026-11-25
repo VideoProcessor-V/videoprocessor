@@ -346,8 +346,12 @@ namespace Vpv
 				bool operator==(const AheadKey& o) const { return id == o.id && depth == o.depth && asked == o.asked && by == o.by; }
 			};
 			// The binding is dropped on the render thread by StopBundle / a rebuild's new bind; this is the safety net (by token: a newer
-			// lane's binding is kept).
-			~Bundle() { VpSkeleton::UnbindLaneFromMemo(lane, *memo); }
+			// lane's binding is kept). Join worker threads before unbinding so no worker job runs across unbind/teardown.
+			~Bundle()
+			{
+				threads.Stop();
+				VpSkeleton::UnbindLaneFromMemo(lane, *memo);
+			}
 
 			// The registry for a wiring, the measured source period and the queue frames (0 = the unmeasured defaults). Re-made at each
 			// Configure so the record histories follow the period and the queue; the GPU declarations do not depend on either.
@@ -409,6 +413,9 @@ namespace Vpv
 			uint64_t framesSinceConfigure = 0;
 		};
 
+		// K#10: cheap enum for scene cut veto status so Refresh() does zero heap allocations when !due.
+		enum class SceneVetoCode : uint8_t { On = 0, StoreOff, MultiRenderer, SeamUnbound };
+
 		struct HostState
 		{
 			explicit HostState(const void* h) : host(h), ownerGen(VpFrameAnalysis::SourceFrameTap::Generation(h)),
@@ -439,8 +446,12 @@ namespace Vpv
 			std::string gpuMemoryNote;
 			uint64_t gpuMemorySizeKey = 0;
 			uint32_t gpuMemoryGen = 0;
+			// K#12: GPU jobs run strictly on the render thread; this tracks synchronous completion of prior bundle worker thread joins.
+			bool oldBundleJobsJoined = true;
 
 			// Any thread.
+			std::atomic<uint32_t> renderTid{ 0 };   // FIX3-D7: per-host Win32 render thread ID (0 = not yet observed)
+			std::atomic<uint64_t> queueBits{ uint64_t(1) << 8 };   // K#9: per-host QueueShape (Pack of default 0 / 1 / 0)
 			std::atomic<uint32_t> srcW{ 0 }, srcH{ 0 };
 			std::atomic<uint64_t> srcFrames{ 0 };
 			// W23-4p (G6) / Gate 3 LOW-5: declared BEFORE bundle so bundle (which holds &entranceLiveDriven)
@@ -468,7 +479,7 @@ namespace Vpv
 			std::string waiting;
 			std::string shownWaiting;
 			bool shownBundle = false;
-			std::string shownVetoOff;   // the cut veto state the cached status text was built for ("" = on)
+			SceneVetoCode shownVetoOff = SceneVetoCode::On;   // K#10: cut veto state the cached status text was built for
 			bool shownNoGrid = false;   // the no-grid fallback state the cached status text was built for
 			uint64_t shownSceneRunMisses = 0;   // sceneRunRebuilt + sceneRunReduced the cached status text was built for
 			uint64_t shownProvisionalCutWithdrawn = 0;   // sceneProvisionalCutWithdrawn the cached status text was built for
@@ -825,6 +836,7 @@ namespace Vpv
 				if (old)
 				{
 					old->threads.Stop();   // joined here first: the workers call the lane's ahead sinks, so nothing may reassign them yet
+					st.oldBundleJobsJoined = true;
 					VpSkeleton::UnbindLaneFromMemo(old->lane, *old->memo);   // L-CORE: on the render thread, after the join
 				}
 			}
@@ -908,9 +920,8 @@ namespace Vpv
 				if (UnjudgedRing()[seq % kUnjudgedRing].compare_exchange_strong(expected, 0, std::memory_order_acq_rel))
 					ScenePairsAcrossLateCut().fetch_add(1, std::memory_order_relaxed);
 			}
-			bool ConfirmedCutAt(uint64_t seq)
+			bool ConfirmedCutInStore(FrameAnalysis::Store* store, uint64_t seq)
 			{
-				FrameAnalysis::Store* store = VpFrameAnalysis::SourceFrameTap::SingleStore();
 				if (store == nullptr)
 					return false;
 				FrameAnalysis::Scene s;
@@ -922,21 +933,40 @@ namespace Vpv
 				}
 				return judged && s.cutHere;
 			}
-			// Why the cut veto cannot work for renderer `host` ("" = it works): its store is off, or the seam's single store is not its
-			// store (more than one renderer: the seam carries no renderer key, so it refuses nothing). No store registered at all happens
-			// only without the Host (tests): nothing is published, nothing to show. Shown as skeleton_scene_veto and on "Skeleton scene:".
-			std::string SceneVetoOff(const void* host)
+			bool ConfirmedCutAt(uint64_t seq)
+			{
+				return ConfirmedCutInStore(VpFrameAnalysis::SourceFrameTap::SingleStore(), seq);
+			}
+			bool ConfirmedCutAtHost(const void* host, uint64_t seq)
+			{
+				return ConfirmedCutInStore(VpFrameAnalysis::SourceFrameTap::StoreFor(host), seq);
+			}
+			// Why the cut veto cannot work for renderer `host` (On = it works): its store is off, or only the legacy single-store
+			// seam is active with >1 renderer, or no seam is bound. Evaluated as an enum before Refresh()'s `due` check (K#10).
+			SceneVetoCode SceneVetoOffCode(const void* host)
 			{
 				FrameAnalysis::Store* own = VpFrameAnalysis::SourceFrameTap::StoreFor(host);
 				if (own == nullptr)
-					return std::string();
+					return SceneVetoCode::On;
 				if (!own->Enabled())
-					return "frame-analysis store off (frame_analysis_store=false)";
-				if (VpFrameAnalysis::SourceFrameTap::SingleStore() != own)
-					return "more than one renderer (the scene seam carries no renderer key)";
-				if (MotionValidity::State::ConfirmedCutReader().load(std::memory_order_acquire) != &ConfirmedCutAt)
-					return "scene seam not bound to the skeleton";
-				return std::string();
+					return SceneVetoCode::StoreOff;
+				const bool hostSeam = MotionValidity::State::ConfirmedCutHostReader().load(std::memory_order_acquire) == &ConfirmedCutAtHost;
+				if (!hostSeam && VpFrameAnalysis::SourceFrameTap::SingleStore() != own)
+					return SceneVetoCode::MultiRenderer;
+				if (!hostSeam && MotionValidity::State::ConfirmedCutReader().load(std::memory_order_acquire) != &ConfirmedCutAt)
+					return SceneVetoCode::SeamUnbound;
+				return SceneVetoCode::On;
+			}
+			const char* SceneVetoOffText(SceneVetoCode code)
+			{
+				switch (code)
+				{
+				case SceneVetoCode::StoreOff: return "frame-analysis store off (frame_analysis_store=false)";
+				case SceneVetoCode::MultiRenderer: return "more than one renderer (the scene seam carries no renderer key)";
+				case SceneVetoCode::SeamUnbound: return "scene seam not bound to the skeleton";
+				case SceneVetoCode::On:
+				default: return "";
+				}
 			}
 			// Live skeleton modules: the seam is cleared when the last one goes (it is ours only while one lives).
 			std::atomic<int>& SceneSeamUsers()
@@ -961,6 +991,7 @@ namespace Vpv
 					static_cast<uint8_t>(SourceResolutionMonitor::Monitor::kLatencyFrames)));
 			SceneSeamUsers().fetch_add(1, std::memory_order_acq_rel);
 			MotionValidity::State::ConfirmedCutReader().store(&ConfirmedCutAt, std::memory_order_release);
+			MotionValidity::State::ConfirmedCutHostReader().store(&ConfirmedCutAtHost, std::memory_order_release);
 		}
 
 		SkeletonModule::~SkeletonModule()
@@ -972,6 +1003,8 @@ namespace Vpv
 			{
 				MotionValidity::State::ConfirmedCutFn ours = &ConfirmedCutAt;
 				MotionValidity::State::ConfirmedCutReader().compare_exchange_strong(ours, nullptr, std::memory_order_acq_rel);
+				MotionValidity::State::ConfirmedCutForHostFn oursHost = &ConfirmedCutAtHost;
+				MotionValidity::State::ConfirmedCutHostReader().compare_exchange_strong(oursHost, nullptr, std::memory_order_acq_rel);
 			}
 			std::vector<std::shared_ptr<HostState>> all;
 			hosts_.ForEach([&all](const void*, const std::shared_ptr<HostState>& st) { all.push_back(st); });
@@ -1028,6 +1061,7 @@ namespace Vpv
 			}
 			const void* host;
 			std::shared_ptr<VpSkeleton::SkeletonMemo> memo;
+			std::atomic<uint64_t> queueBits{ uint64_t(1) << 8 };   // K#9: per-host QueueShape (Pack of default 0 / 1 / 0)
 			// Render thread (PlanNoLaneGpu): what the last no-lane grant was planned for.
 			bool planned = false;
 			bool plannedGpuPresent = false;
@@ -1106,10 +1140,290 @@ namespace Vpv
 			constexpr uint32_t kNoLaneReplanFrames = 240;   // a re-read of the card's free memory without a lane (no per-frame DXGI query)
 		}
 
+		void SkeletonModule::RecordRenderTid(const void* host)
+		{
+			if (!host)
+				return;
+			const uint32_t tid = static_cast<uint32_t>(GetCurrentThreadId());
+			if (const std::shared_ptr<HostState> st = hosts_.Find(host))
+				st->renderTid.store(tid, std::memory_order_release);
+			if (const std::shared_ptr<GpuSlotTag> gs = gpuSlots_.Find(host))
+			{
+				gs->renderTid.store(tid, std::memory_order_release);
+			}
+			else
+			{
+				std::shared_ptr<GpuSlotTag> tag = std::make_shared<GpuSlotTag>(host);
+				tag->renderTid.store(tid, std::memory_order_release);
+				if (!gpuSlots_.Put(host, std::move(tag)))
+					if (const std::shared_ptr<GpuSlotTag> gs2 = gpuSlots_.Find(host))
+						gs2->renderTid.store(tid, std::memory_order_release);
+			}
+		}
+
+		uint32_t SkeletonModule::RenderTidOf(const void* host) const
+		{
+			if (!host)
+				return 0u;
+			if (const std::shared_ptr<HostState> st = hosts_.Find(host))
+			{
+				const uint32_t t = st->renderTid.load(std::memory_order_acquire);
+				if (t != 0u)
+					return t;
+			}
+			if (const std::shared_ptr<GpuSlotTag> gs = gpuSlots_.Find(host))
+				return gs->renderTid.load(std::memory_order_acquire);
+			return 0u;
+		}
+
+		void SkeletonModule::MergeAtomicBits(std::atomic<uint64_t>& bits, const std::function<void(QueueShape&)>& set)
+		{
+			uint64_t cur = bits.load(std::memory_order_relaxed);
+			for (;;)
+			{
+				QueueShape q = Unpack(cur);
+				set(q);
+				const uint64_t next = Pack(q);
+				if (next == cur || bits.compare_exchange_weak(cur, next, std::memory_order_release, std::memory_order_relaxed))
+					break;
+			}
+		}
+
+		uint64_t SkeletonModule::QueueBitsOf(const void* host) const
+		{
+			if (host)
+			{
+				if (const std::shared_ptr<HostState> st = hosts_.Find(host))
+					return st->queueBits.load(std::memory_order_acquire);
+				if (const std::shared_ptr<MemoHost> mh = memoHosts_.Find(host))
+					return mh->queueBits.load(std::memory_order_acquire);
+				std::lock_guard<std::mutex> lock(hostQueueMutex_);
+				if (const std::shared_ptr<HostState> st2 = hosts_.Find(host))
+					return st2->queueBits.load(std::memory_order_acquire);
+				if (const std::shared_ptr<MemoHost> mh2 = memoHosts_.Find(host))
+					return mh2->queueBits.load(std::memory_order_acquire);
+				for (const auto& kv : hostQueues_)
+					if (kv.first == host)
+						return kv.second;
+			}
+			return queueBits_.load(std::memory_order_acquire);
+		}
+
+		void SkeletonModule::EraseHostQueue(const void* host)
+		{
+			if (!host)
+				return;
+			std::lock_guard<std::mutex> lock(hostQueueMutex_);
+			for (auto it = hostQueues_.begin(); it != hostQueues_.end(); ++it)
+				if (it->first == host)
+				{
+					hostQueues_.erase(it);
+					break;
+				}
+		}
+
+		void SkeletonModule::MergeHostQueue(const void* host, const std::function<void(QueueShape&)>& set)
+		{
+			if (!host)
+				return;
+			const std::shared_ptr<HostState> st = hosts_.Find(host);
+			const std::shared_ptr<MemoHost> mh = memoHosts_.Find(host);
+			if (st)
+				MergeAtomicBits(st->queueBits, set);
+			if (mh)
+				MergeAtomicBits(mh->queueBits, set);
+			if (!st || !mh)
+			{
+				std::lock_guard<std::mutex> lock(hostQueueMutex_);
+				// K#9 (Audit MEDIUM-1): re-check any missing handle(s) under hostQueueMutex_ in case a racing Put just inserted HostState/MemoHost.
+				const std::shared_ptr<HostState> st2 = !st ? hosts_.Find(host) : nullptr;
+				const std::shared_ptr<MemoHost> mh2 = !mh ? memoHosts_.Find(host) : nullptr;
+				if (st2)
+					MergeAtomicBits(st2->queueBits, set);
+				if (mh2)
+					MergeAtomicBits(mh2->queueBits, set);
+				if (st || mh || st2 || mh2)
+					return;
+				for (auto& kv : hostQueues_)
+					if (kv.first == host)
+					{
+						QueueShape q = Unpack(kv.second);
+						set(q);
+						kv.second = Pack(q);
+						return;
+					}
+				QueueShape q = Unpack(queueBits_.load(std::memory_order_acquire));
+				set(q);
+				hostQueues_.emplace_back(host, Pack(q));
+			}
+		}
+
+		void SkeletonModule::MergeAllQueues(const std::function<void(QueueShape&)>& set)
+		{
+			std::lock_guard<std::mutex> lock(hostQueueMutex_);
+			MergeAtomicBits(queueBits_, set);
+			hosts_.ForEach([&set](const void*, const std::shared_ptr<HostState>& st) { MergeAtomicBits(st->queueBits, set); });
+			memoHosts_.ForEach([&set](const void*, const std::shared_ptr<MemoHost>& mh) { MergeAtomicBits(mh->queueBits, set); });
+			for (auto& kv : hostQueues_)
+			{
+				QueueShape q = Unpack(kv.second);
+				set(q);
+				kv.second = Pack(q);
+			}
+		}
+
+		void SkeletonModule::PublishQueue(const QueueShape& q)
+		{
+			const uint64_t bits = Pack(q);
+			std::lock_guard<std::mutex> lock(hostQueueMutex_);
+			queueBits_.store(bits, std::memory_order_release);
+			hosts_.ForEach([bits](const void*, const std::shared_ptr<HostState>& st) { st->queueBits.store(bits, std::memory_order_release); });
+			memoHosts_.ForEach([bits](const void*, const std::shared_ptr<MemoHost>& mh) { mh->queueBits.store(bits, std::memory_order_release); });
+			for (auto& kv : hostQueues_)
+				kv.second = bits;
+		}
+
+		void SkeletonModule::PublishQueue(const void* host, const QueueShape& q)
+		{
+			if (!host)
+				return;
+			const uint64_t bits = Pack(q);
+			const std::shared_ptr<HostState> st = hosts_.Find(host);
+			const std::shared_ptr<MemoHost> mh = memoHosts_.Find(host);
+			if (st)
+				st->queueBits.store(bits, std::memory_order_release);
+			if (mh)
+				mh->queueBits.store(bits, std::memory_order_release);
+			if (!st || !mh)
+			{
+				std::lock_guard<std::mutex> lock(hostQueueMutex_);
+				// K#9 (Audit MEDIUM-1): re-check any missing handle(s) under hostQueueMutex_ in case a racing Put just inserted HostState/MemoHost.
+				const std::shared_ptr<HostState> st2 = !st ? hosts_.Find(host) : nullptr;
+				const std::shared_ptr<MemoHost> mh2 = !mh ? memoHosts_.Find(host) : nullptr;
+				if (st2)
+					st2->queueBits.store(bits, std::memory_order_release);
+				if (mh2)
+					mh2->queueBits.store(bits, std::memory_order_release);
+				if (st || mh || st2 || mh2)
+					return;
+				for (auto& kv : hostQueues_)
+					if (kv.first == host)
+					{
+						kv.second = bits;
+						return;
+					}
+				hostQueues_.emplace_back(host, bits);
+			}
+		}
+
+		SkeletonModule::QueueShape SkeletonModule::CurrentQueue() const
+		{
+			const void* soleHost = nullptr;
+			size_t hostCount = 0;
+			hosts_.ForEach([&](const void* h, const std::shared_ptr<HostState>&) { soleHost = h; ++hostCount; });
+			if (hostCount == 1)
+				return CurrentQueue(soleHost);
+			if (hostCount == 0)
+			{
+				size_t memoCount = 0;
+				memoHosts_.ForEach([&](const void* h, const std::shared_ptr<MemoHost>&) { soleHost = h; ++memoCount; });
+				if (memoCount == 1)
+					return CurrentQueue(soleHost);
+				if (memoCount == 0)
+				{
+					std::lock_guard<std::mutex> lock(hostQueueMutex_);
+					size_t hostCount2 = 0;
+					uint64_t soleBits = 0;
+					hosts_.ForEach([&](const void*, const std::shared_ptr<HostState>& st) {
+						soleBits = st->queueBits.load(std::memory_order_acquire);
+						++hostCount2;
+					});
+					if (hostCount2 == 1)
+						return Unpack(soleBits);
+					if (hostCount2 == 0)
+					{
+						size_t memoCount2 = 0;
+						memoHosts_.ForEach([&](const void*, const std::shared_ptr<MemoHost>& mh) {
+							soleBits = mh->queueBits.load(std::memory_order_acquire);
+							++memoCount2;
+						});
+						if (memoCount2 == 1)
+							return Unpack(soleBits);
+						if (memoCount2 == 0 && hostQueues_.size() == 1)
+							return Unpack(hostQueues_[0].second);
+					}
+				}
+			}
+			return Unpack(queueBits_.load(std::memory_order_acquire));
+		}
+
+		SkeletonModule::QueueShape SkeletonModule::CurrentQueue(const void* host) const
+		{
+			return Unpack(QueueBitsOf(host));
+		}
+
+		void SkeletonModule::PublishLookAheadWalk(double frames)
+		{
+			const unsigned w = frames > 0.0 ? (frames < 65535.0 ? unsigned(frames) : 65535u) : 0u;   // NaN and negatives: 0
+			MergeAllQueues([w](QueueShape& q) { q.lookAheadWalk = uint16_t(w); q.wired = uint8_t(q.wired | QueueShape::kLookAhead); });
+		}
+
+		void SkeletonModule::PublishLookAheadWalk(const void* host, double frames)
+		{
+			const unsigned w = frames > 0.0 ? (frames < 65535.0 ? unsigned(frames) : 65535u) : 0u;   // NaN and negatives: 0
+			MergeHostQueue(host, [w](QueueShape& q) { q.lookAheadWalk = uint16_t(w); q.wired = uint8_t(q.wired | QueueShape::kLookAhead); });
+		}
+
+		void SkeletonModule::PublishRenderAhead(double frames)
+		{
+			const unsigned r = frames > 0.0 ? (frames < 255.0 ? unsigned(std::ceil(frames - 1e-9)) : 255u) : 0u;   // NaN and negatives: 0
+			MergeAllQueues([r](QueueShape& q) { q.renderAhead = uint8_t(r); q.wired = uint8_t(q.wired | QueueShape::kRenderAhead); });
+		}
+
+		void SkeletonModule::PublishRenderAhead(const void* host, double frames)
+		{
+			const unsigned r = frames > 0.0 ? (frames < 255.0 ? unsigned(std::ceil(frames - 1e-9)) : 255u) : 0u;   // NaN and negatives: 0
+			MergeHostQueue(host, [r](QueueShape& q) { q.renderAhead = uint8_t(r); q.wired = uint8_t(q.wired | QueueShape::kRenderAhead); });
+		}
+
+		void SkeletonModule::PublishLaneLead(double frames)
+		{
+			const unsigned l = frames > 0.0 ? (frames < 255.0 ? unsigned(frames) : 255u) : 0u;
+			MergeAllQueues([l](QueueShape& q) { q.laneLead = uint8_t(l); q.wired = uint8_t(q.wired | QueueShape::kLaneLead); });
+		}
+
+		void SkeletonModule::PublishLaneLead(const void* host, double frames)
+		{
+			const unsigned l = frames > 0.0 ? (frames < 255.0 ? unsigned(frames) : 255u) : 0u;
+			MergeHostQueue(host, [l](QueueShape& q) { q.laneLead = uint8_t(l); q.wired = uint8_t(q.wired | QueueShape::kLaneLead); });
+		}
+
+		void SkeletonModule::UnpublishRenderAhead()
+		{
+			MergeAllQueues([](QueueShape& q) { q.renderAhead = 0; q.wired = uint8_t(q.wired & ~QueueShape::kRenderAhead); });
+		}
+
+		void SkeletonModule::UnpublishRenderAhead(const void* host)
+		{
+			MergeHostQueue(host, [](QueueShape& q) { q.renderAhead = 0; q.wired = uint8_t(q.wired & ~QueueShape::kRenderAhead); });
+		}
+
+		void SkeletonModule::SetQueueForTesting(QueueShape q)
+		{
+			q.wired = QueueShape::kAll;
+			PublishQueue(q);
+		}
+
+		void SkeletonModule::SetQueueForTesting(const void* host, QueueShape q)
+		{
+			q.wired = QueueShape::kAll;
+			PublishQueue(host, q);
+		}
+
 		void SkeletonModule::PlanNoLaneGpu(const void* host)
 		{
-			// FIX3-D7: strictly render-thread-only (never calls QueryCard or mutates MemoHost planning fields off-thread).
-			const uint32_t rtid = renderTid_.load(std::memory_order_acquire);
+			// FIX3-D7: strictly per-host render-thread-only (never calls QueryCard or mutates MemoHost planning fields off-thread).
+			const uint32_t rtid = RenderTidOf(host);
 			if (rtid == 0u || static_cast<uint32_t>(GetCurrentThreadId()) != rtid)
 				return;
 			const std::shared_ptr<MemoHost> mh = memoHosts_.Find(host);
@@ -1148,7 +1462,7 @@ namespace Vpv
 				card = card_;
 			const bool known = need != 0 && (cardOverride_ || QueryCard(hosts_.Aux(host), card, why));
 			mh->cardWhy = known || need == 0 ? std::string() : why;
-			mh->grant = VpSkeleton::PlanMemoGpuGrantLevels(card, known, VpSkeleton::VramUsers::Instance().Take().heldBytes, levels);
+			mh->grant = VpSkeleton::PlanMemoGpuGrantLevels(card, known, VpSkeleton::VramUsers::Instance().Take().heldBytes, levels, memo.GpuBytes());
 			memo.SetGpuBudget(mh->grant.granted, mh->grant.bytes);
 			// The interim ahead plan (S-A / S-B only; S-C needs the delay budget feed): the first ladder step that fits the grant. Planning
 			// only: it constrains the NEXT acquires (NotPlannedAhead), never evicts what is attached.
@@ -1197,12 +1511,27 @@ namespace Vpv
 			for (const auto& kv : ownerFills_)
 				memo.RegisterOwnerFill(kv.first.first, kv.first.second, kv.second.first, kv.second.second);
 			AttachMemoGpu(*made, gpuSlots_.Aux(host));   // R2: the sanctioned GPU context's device, when the pl_gpu is known
-			Hub::HostSlots<MemoHost>& slots = const_cast<Hub::HostSlots<MemoHost>&>(memoHosts_);
-			if (!slots.Put(host, made))
 			{
-				if (const std::shared_ptr<MemoHost> other = memoHosts_.Find(host))
-					return other->memo;   // another thread made it first
-				return nullptr;          // the table is full (sixteen renderers): no memo, the caller's "unavailable" shows it
+				// K#9 (Audit MEDIUM-1): serialize pre-creation hostQueues_ adoption with Put (lock order: ownerFillsMutex_ -> hostQueueMutex_).
+				std::lock_guard<std::mutex> qLock(hostQueueMutex_);
+				uint64_t seed = queueBits_.load(std::memory_order_acquire);
+				auto qIt = hostQueues_.end();
+				for (auto it = hostQueues_.begin(); it != hostQueues_.end(); ++it)
+					if (it->first == host) { qIt = it; break; }
+				if (const std::shared_ptr<HostState> hs = hosts_.Find(host))
+					seed = hs->queueBits.load(std::memory_order_acquire);
+				else if (qIt != hostQueues_.end())
+					seed = qIt->second;
+				made->queueBits.store(seed, std::memory_order_release);
+				Hub::HostSlots<MemoHost>& slots = const_cast<Hub::HostSlots<MemoHost>&>(memoHosts_);
+				if (!slots.Put(host, made))
+				{
+					if (const std::shared_ptr<MemoHost> other = memoHosts_.Find(host))
+						return other->memo;   // another thread made it first
+					return nullptr;          // the table is full (sixteen renderers): no memo, the caller's "unavailable" shows it
+				}
+				if (qIt != hostQueues_.end())
+					hostQueues_.erase(qIt);
 			}
 			return made->memo;
 		}
@@ -1222,9 +1551,9 @@ namespace Vpv
 				fm.haveNext = true;
 			}
 			fm.gpu = gpuSlots_.Aux(host);
-			// FIX3-D7: lazily created no-lane memo on frame 1 plans GPU presence/grant strictly on the render thread
+			// FIX3-D7: lazily created no-lane memo on frame 1 plans GPU presence/grant strictly on this host's render thread
 			// (never off-thread on producer/worker threads, and zero mutex held across QueryCard inside PlanNoLaneGpu).
-			const uint32_t rtid = renderTid_.load(std::memory_order_acquire);
+			const uint32_t rtid = RenderTidOf(host);
 			if (!fm.memo->LaneBound() && rtid != 0u && static_cast<uint32_t>(GetCurrentThreadId()) == rtid)
 				PlanNoLaneGpu(host);
 			return fm;
@@ -1241,24 +1570,24 @@ namespace Vpv
 				return Reg::NotOwner;
 			if (fill.defaults.stage != 0)
 				return Reg::BadDefaults;
-			std::vector<std::pair<const void*, std::shared_ptr<VpSkeleton::SkeletonMemo>>> memos;
+			std::vector<std::pair<const void*, std::shared_ptr<MemoHost>>> memos;
 			{
 				std::lock_guard<std::mutex> lock(ownerFillsMutex_);
 				const auto key = std::make_pair(id, form);
 				if (ownerFills_.count(key) != 0)
 					return Reg::AlreadyRegistered;
 				ownerFills_[key] = std::make_pair(unit, fill);
-				memoHosts_.ForEach([&memos](const void* h, const std::shared_ptr<MemoHost>& m) { memos.emplace_back(h, m->memo); });
+				memoHosts_.ForEach([&memos](const void* h, const std::shared_ptr<MemoHost>& m) { memos.emplace_back(h, m); });
 			}
-			const uint32_t rtid = renderTid_.load(std::memory_order_acquire);
-			const bool onRender = rtid != 0u && static_cast<uint32_t>(GetCurrentThreadId()) == rtid;
+			const uint32_t curTid = static_cast<uint32_t>(GetCurrentThreadId());
 			for (const auto& hm : memos)
 			{
-				hm.second->RegisterOwnerFill(id, form, unit, fill);
-				// D3 / FIX3-D6: refresh window_.aheadCompute immediately on frame 1 when a new ahead-demanding owner fill
-				// registers on the render thread after Begin sealed frame 1, before ahead Acquire calls arrive.
-				if (fill.aheadDepth > 0 && onRender && hm.second->Seals() > 0)
-					DeriveMemoWindow(hm.first, hm.second, hm.second->Window().current, hosts_.Find(hm.first), false);
+				hm.second->memo->RegisterOwnerFill(id, form, unit, fill);
+				// D3 / FIX3-D6 / FIX3-D7: refresh window_.aheadCompute immediately on frame 1 when a new ahead-demanding owner fill
+				// registers on this host's render thread after Begin sealed frame 1, before ahead Acquire calls arrive.
+				const uint32_t rtid = RenderTidOf(hm.first);
+				if (fill.aheadDepth > 0 && rtid != 0u && curTid == rtid && hm.second->memo->Seals() > 0)
+					DeriveMemoWindow(hm.first, hm.second, hm.second->memo->Window().current, hosts_.Find(hm.first), false);
 			}
 			return Reg::Registered;
 		}
@@ -1275,21 +1604,21 @@ namespace Vpv
 			if (fill.defaults.stage != 0)
 				return Reg::BadDefaults;
 			bool had = false;
-			std::vector<std::pair<const void*, std::shared_ptr<VpSkeleton::SkeletonMemo>>> memos;
+			std::vector<std::pair<const void*, std::shared_ptr<MemoHost>>> memos;
 			{
 				std::lock_guard<std::mutex> lock(ownerFillsMutex_);
 				const auto key = std::make_pair(id, form);
 				had = ownerFills_.count(key) != 0;
 				ownerFills_[key] = std::make_pair(unit, fill);
-				memoHosts_.ForEach([&memos](const void* h, const std::shared_ptr<MemoHost>& m) { memos.emplace_back(h, m->memo); });
+				memoHosts_.ForEach([&memos](const void* h, const std::shared_ptr<MemoHost>& m) { memos.emplace_back(h, m); });
 			}
-			const uint32_t rtid = renderTid_.load(std::memory_order_acquire);
-			const bool onRender = rtid != 0u && static_cast<uint32_t>(GetCurrentThreadId()) == rtid;
+			const uint32_t curTid = static_cast<uint32_t>(GetCurrentThreadId());
 			for (const auto& hm : memos)
 			{
-				hm.second->ReplaceOwnerFill(id, form, unit, fill);
-				if (fill.aheadDepth > 0 && onRender && hm.second->Seals() > 0)
-					DeriveMemoWindow(hm.first, hm.second, hm.second->Window().current, hosts_.Find(hm.first), false);
+				hm.second->memo->ReplaceOwnerFill(id, form, unit, fill);
+				const uint32_t rtid = RenderTidOf(hm.first);
+				if (fill.aheadDepth > 0 && rtid != 0u && curTid == rtid && hm.second->memo->Seals() > 0)
+					DeriveMemoWindow(hm.first, hm.second, hm.second->memo->Window().current, hosts_.Find(hm.first), false);
 			}
 			return had ? Reg::Replaced : Reg::Registered;
 		}
@@ -1406,7 +1735,7 @@ namespace Vpv
 			switch (f.kind)
 			{
 			case RE::Lifecycle::GpuCreated:
-				renderTid_.store(static_cast<uint32_t>(GetCurrentThreadId()), std::memory_order_release);
+				RecordRenderTid(f.host);
 				// Audit S3: a memo device still attached at GpuCreated belongs to a renderer that never sent GpuReleased (a dead device,
 				// whatever the new pl_gpu's address): abandoned before the new one is known, so a same-address pl_gpu is never mistaken
 				// for it (its pl_dispatch is forgotten, not reused). Covers a memo-only host too (no lane state).
@@ -1429,9 +1758,10 @@ namespace Vpv
 				}
 				break;
 			case RE::Lifecycle::SettingsApplied:
-				PublishLookAheadWalk(f.value);   // the host passes the motion look-ahead depth (frames) here: the one queue term it delivers
+				PublishLookAheadWalk(f.host, f.value);   // the host passes the motion look-ahead depth (frames) here: the one queue term it delivers
 				NotePathway(f.host, f.code != 0 ? 1 : 0);   // 15c-c8: kept for the demand-driven reconciles (never a raise in Original)
 				Reconcile(f.host, f.code != 0 ? 1 : 0);   // code != 0: the Original pathway
+				PublishLookAheadWalk(f.host, f.value);   // change-only CAS no-op normally; preserves f.value if Reconcile recycled a dead-renderer HostState
 				break;
 			case RE::Lifecycle::QueueDepth:
 			{
@@ -1444,7 +1774,7 @@ namespace Vpv
 				{
 					if (f.value >= 0.0)   // NaN and negative: the host has no value (no source period): unwired, never an old number
 					{
-						PublishRenderAhead(f.value);
+						PublishRenderAhead(f.host, f.value);
 						const uint64_t nowQ = nowUs_();
 						if (st)
 							st->lastQueueDepthUs.store(nowQ, std::memory_order_relaxed);
@@ -1452,14 +1782,13 @@ namespace Vpv
 							mhq->lastQueueDepthUs.store(nowQ, std::memory_order_relaxed);
 					}
 					else
-						UnpublishRenderAhead();
+						UnpublishRenderAhead(f.host);
 				}
 				break;
 			}
 			case RE::Lifecycle::GpuReleased:
 			case RE::Lifecycle::Shutdown:
 			{
-				renderTid_.store(static_cast<uint32_t>(GetCurrentThreadId()), std::memory_order_release);
 				const std::shared_ptr<HostState> st = hosts_.Find(f.host);
 				if (st)
 					Teardown(st, false);   // join lane workers & release dispatcher first while hosts_ still holds aux
@@ -1472,6 +1801,7 @@ namespace Vpv
 				}
 				memoHosts_.Remove(f.host, true);  // L-CORE: the renderer's memo (a reader's pin keeps its spots until released)
 				hosts_.Remove(f.host, true);      // remove D3D11 device aux LAST (after memo GPU detach)
+				EraseHostQueue(f.host);           // K#9: drop pre-creation per-host queue snapshot if any
 				EraseExternal(f.host);   // a renderer recreated at this address never inherits the old one's external demand
 				// 15c-c8: with the demand goes its raise of the store; version 0 = the next Begin looks again (a later declaration raises anew).
 				VpFrameAnalysis::SourceFrameTap::SetStoreDemand(f.host, false, std::string());
@@ -1556,8 +1886,25 @@ namespace Vpv
 					if (!st)
 					{
 						st = std::make_shared<HostState>(host);
-						if (!hosts_.Put(host, st))
-							return;
+						if (const uint32_t rtid = RenderTidOf(host))
+							st->renderTid.store(rtid, std::memory_order_release);
+						{
+							// K#9 (Audit MEDIUM-1): serialize pre-creation hostQueues_ adoption with Put.
+							std::lock_guard<std::mutex> qLock(hostQueueMutex_);
+							uint64_t seed = queueBits_.load(std::memory_order_acquire);
+							auto qIt = hostQueues_.end();
+							for (auto it = hostQueues_.begin(); it != hostQueues_.end(); ++it)
+								if (it->first == host) { qIt = it; break; }
+							if (const std::shared_ptr<MemoHost> mh = memoHosts_.Find(host))
+								seed = mh->queueBits.load(std::memory_order_acquire);
+							else if (qIt != hostQueues_.end())
+								seed = qIt->second;
+							st->queueBits.store(seed, std::memory_order_release);
+							if (!hosts_.Put(host, st))
+								return;
+							if (qIt != hostQueues_.end())
+								hostQueues_.erase(qIt);
+						}
 					}
 					std::string problems;
 					for (const std::string& p : s.laneProblems)
@@ -1575,11 +1922,28 @@ namespace Vpv
 			if (!st)
 			{
 				st = std::make_shared<HostState>(host);
-				if (!hosts_.Put(host, st))
+				if (const uint32_t rtid = RenderTidOf(host))
+					st->renderTid.store(rtid, std::memory_order_release);
 				{
-					// The table holds sixteen renderers; without a slot there is no state to show this on.
-					DebugLog::Log("Skeleton: host table full; the analysis lane stays off for this renderer");
-					return;
+					// K#9 (Audit MEDIUM-1): serialize pre-creation hostQueues_ adoption with Put.
+					std::lock_guard<std::mutex> qLock(hostQueueMutex_);
+					uint64_t seed = queueBits_.load(std::memory_order_acquire);
+					auto qIt = hostQueues_.end();
+					for (auto it = hostQueues_.begin(); it != hostQueues_.end(); ++it)
+						if (it->first == host) { qIt = it; break; }
+					if (const std::shared_ptr<MemoHost> mh = memoHosts_.Find(host))
+						seed = mh->queueBits.load(std::memory_order_acquire);
+					else if (qIt != hostQueues_.end())
+						seed = qIt->second;
+					st->queueBits.store(seed, std::memory_order_release);
+					if (!hosts_.Put(host, st))
+					{
+						// The table holds sixteen renderers; without a slot there is no state to show this on.
+						DebugLog::Log("Skeleton: host table full; the analysis lane stays off for this renderer");
+						return;
+					}
+					if (qIt != hostQueues_.end())
+						hostQueues_.erase(qIt);
 				}
 			}
 			st->settings = s;
@@ -2865,11 +3229,11 @@ namespace Vpv
 		// lead window of presented lag; H = the owner fills' declared history, plus the lane graph's lag edges once the lane reports them),
 		// handed to the memo BEFORE its seal and published to the board. Render thread, with or without the lane. A term nobody fed stays
 		// unwired (named by Ctrl+Alt+D), never a default.
-		void SkeletonModule::DeriveMemoWindow(const void* host, const std::shared_ptr<VpSkeleton::SkeletonMemo>& memo, uint64_t seq, const std::shared_ptr<HostState>& st, bool sampleTiming)
+		void SkeletonModule::DeriveMemoWindow(const void* host, const std::shared_ptr<MemoHost>& mh, uint64_t seq, const std::shared_ptr<HostState>& st, bool sampleTiming)
 		{
-			const std::shared_ptr<MemoHost> mh = memoHosts_.Find(host);
-			if (!mh)
+			if (!mh || !mh->memo)
 				return;
+			const std::shared_ptr<VpSkeleton::SkeletonMemo>& memo = mh->memo;
 			const uint64_t now = nowUs_();
 			// The period for the stale test of the render-ahead term: the Begin interval of this host (memo-only hosts have no lane period).
 			if (sampleTiming)
@@ -2881,14 +3245,14 @@ namespace Vpv
 					mh->periodUs.store(prev != 0 ? (prev * 9u + (now - lastBegin)) / 10u : now - lastBegin, std::memory_order_relaxed);
 				}
 			}
-			if (!(st && st->active.load(std::memory_order_acquire)) && (CurrentQueue().wired & QueueShape::kRenderAhead) != 0)
+			if (!(st && st->active.load(std::memory_order_acquire)) && (CurrentQueue(host).wired & QueueShape::kRenderAhead) != 0)
 			{
 				const uint64_t last = mh->lastQueueDepthUs.load(std::memory_order_relaxed);
 				const uint64_t period = mh->periodUs.load(std::memory_order_relaxed);
 				if (last != 0 && period != 0 && now > last + 8u * period)
-					UnpublishRenderAhead();   // the plan stopped: the term is unwired (named), never an old number
+					UnpublishRenderAhead(host);   // the plan stopped: the term is unwired (named), never an old number
 			}
-			const QueueShape q = CurrentQueue();
+			const QueueShape q = CurrentQueue(host);
 			VpSkeleton::QueueWindowTerms t;
 			if (q.wired & QueueShape::kRenderAhead) { t.renderAhead = uint16_t(CappedRenderAhead(q.renderAhead)); t.wired = uint8_t(t.wired | VpSkeleton::QueueWindowTerms::kRenderAhead); }
 			if (q.wired & QueueShape::kLaneLead) { t.laneLead = uint16_t((std::min<unsigned>)(q.laneLead, LaneLeadCap(q.renderAhead))); t.wired = uint8_t(t.wired | VpSkeleton::QueueWindowTerms::kLaneLead); }
@@ -2912,17 +3276,27 @@ namespace Vpv
 			t.history = VpSkeleton::HistoryTermOf(nullptr, 0u);
 			t.wired = uint8_t(t.wired | VpSkeleton::QueueWindowTerms::kHistory);
 			// The active ahead consumers' declared needs (L-CORE accessor); none declared = fed, no consumer (aheadCompute 0 / NoConsumer).
-			std::vector<VpSkeleton::AheadDemand> demands;
-			for (const VpSkeleton::SkeletonMemo::AheadDemand& d : memo->ActiveAheadDemands())
+			// K#10: fast lock-free zero-alloc path when no owner fill declares an ahead depth.
+			if (!memo->HasAheadDemands())
 			{
-				VpSkeleton::AheadDemand ad;
-				ad.need = d.depth;
-				// GF-P1 AHEAD-DECL call site (GF-P2b): the requester's name (OwnerFill::aheadBy, a static string) reaches the window's existing
-				// ceiling notice ("ahead compute 6 (by X; ceiling 6)"); an unnamed request keeps the form wording.
-				ad.consumer = d.by != nullptr ? d.by : (d.form != 0 ? "owner fill (GPU)" : "owner fill (CPU)");
-				demands.push_back(ad);
+				t.aheadNeed = 0;
+				t.aheadNeedBy = "";
+				t.wired = uint8_t(t.wired | VpSkeleton::QueueWindowTerms::kAheadNeed);
 			}
-			VpSkeleton::SetAheadConsumers(t, demands);
+			else
+			{
+				std::vector<VpSkeleton::AheadDemand> demands;
+				for (const VpSkeleton::SkeletonMemo::AheadDemand& d : memo->ActiveAheadDemands())
+				{
+					VpSkeleton::AheadDemand ad;
+					ad.need = d.depth;
+					// GF-P1 AHEAD-DECL call site (GF-P2b): the requester's name (OwnerFill::aheadBy, a static string) reaches the window's existing
+					// ceiling notice ("ahead compute 6 (by X; ceiling 6)"); an unnamed request keeps the form wording.
+					ad.consumer = d.by != nullptr ? d.by : (d.form != 0 ? "owner fill (GPU)" : "owner fill (CPU)");
+					demands.push_back(ad);
+				}
+				VpSkeleton::SetAheadConsumers(t, demands);
+			}
 			const uint16_t prevAhead = memo->Window().aheadCompute;
 			const VpSkeleton::QueueWindow w = VpSkeleton::DeriveWindow(t, seq, memo->Epoch());
 			memo->SetWindow(w);
@@ -2977,14 +3351,14 @@ namespace Vpv
 						// QKP B: a memo-only host delivers the lane lead term too (its window needs L).
 						const RE::QueueView& view = *static_cast<const RE::QueueView*>(c.phaseData);
 						const uint8_t size = view.size > 255u ? uint8_t(255) : uint8_t(view.size);
-						PublishLaneLead(double(LowestLeadSample(mhq->leadMutex, mhq->leadWindow, nowUs_(), size)));
+						PublishLaneLead(c.host, double(LowestLeadSample(mhq->leadMutex, mhq->leadWindow, nowUs_(), size)));
 					}
 				}
 				return false;
 			}
 			if (c.phase == RE::FramePhase::Entrance)
 			{
-				renderTid_.store(static_cast<uint32_t>(GetCurrentThreadId()), std::memory_order_release);
+				RecordRenderTid(c.host);
 				if (const std::shared_ptr<HostState> e = hosts_.Find(c.host))
 				{
 					e->budgetFeed.NoteCaptureRate(c.captureRateHz);   // S0: measured rate for the slot budget
@@ -3002,7 +3376,7 @@ namespace Vpv
 									e->dispatcher->FlushReleases();
 									if (const std::shared_ptr<VpSkeleton::LaneState> ls = b->lane.State())
 										if (ls->graph.valid)
-											e->dispatcher->Configure(ls->graph, b->registry, ls->plan, b->dims, b->configuredGen);
+											e->dispatcher->Configure(ls->graph, b->registry, ls->plan, b->dims, b->configuredGen, e->oldBundleJobsJoined);
 								}
 								const AnalysisLane::DeferredReport rep = b->lane.RunDeferredLive(static_cast<uint64_t>(c.seq));
 								const bool prevDriven = e->entranceLiveDriven.exchange(true, std::memory_order_acq_rel);
@@ -3016,7 +3390,7 @@ namespace Vpv
 			}
 			if (c.phase != RE::FramePhase::Begin && c.phase != RE::FramePhase::AfterRender)
 				return false;
-			renderTid_.store(static_cast<uint32_t>(GetCurrentThreadId()), std::memory_order_release);
+			RecordRenderTid(c.host);
 			if (c.phase == RE::FramePhase::AfterRender)
 				if (const std::shared_ptr<MemoHost> mh = memoHosts_.Find(c.host))
 					if (mh->gpuDevice)
@@ -3045,14 +3419,16 @@ namespace Vpv
 			} memoSeal;
 			memoSeal.self = this;
 			memoSeal.host = c.host;
+			std::shared_ptr<MemoHost> memoHost;
 			if (c.phase == RE::FramePhase::Begin && c.seq > 0)
-				if ((memoSeal.memo = MemoHostOf(c.host, false)))
+				if ((memoHost = memoHosts_.Find(c.host)))
 				{
+					memoSeal.memo = memoHost->memo;
 					memoSeal.seq = static_cast<uint64_t>(c.seq);
 					memoSeal.seals = memoSeal.memo->Seals();
 				}
-			if (memoSeal.memo)
-				DeriveMemoWindow(c.host, memoSeal.memo, memoSeal.seq, st);
+			if (memoHost)
+				DeriveMemoWindow(c.host, memoHost, memoSeal.seq, st);
 			if (!st || !st->active.load(std::memory_order_acquire) || c.seq <= 0)
 				return false;
 			const uint64_t epoch = VpFrameAnalysis::SourceFrameTap::Epoch();
@@ -3079,7 +3455,7 @@ namespace Vpv
 		// to the outcome) without an active lane for this host or with no sequence. Render thread.
 		void SkeletonModule::OnAfterPresent(RE::FrameContext& c, RE::PresentContext& p)
 		{
-			renderTid_.store(static_cast<uint32_t>(GetCurrentThreadId()), std::memory_order_release);
+			RecordRenderTid(c.host);
 			// fx/dv-frame-quiet (refs/121): the frame's native GPU work VP deferred (the monitor's tile pass + copy, the hooks' copies)
 			// is issued here, after the submit and outside libplacebo's frame, for every host and before any early return below.
 			FrameQuiet::Deferred::EndThisFrame();
@@ -3110,7 +3486,7 @@ namespace Vpv
 		void SkeletonModule::OnCollectAhead(HostState& st, const RE::QueueView& view)
 		{
 			const uint8_t size = view.size > 255u ? uint8_t(255) : uint8_t(view.size);
-			PublishLaneLead(double(LowestLeadSample(st.leadMutex, st.leadWindow, nowUs_(), size)));
+			PublishLaneLead(st.host, double(LowestLeadSample(st.leadMutex, st.leadWindow, nowUs_(), size)));
 		}
 
 		void SkeletonModule::Begin(HostState& st, int64_t seqIn)
@@ -3166,12 +3542,37 @@ namespace Vpv
 				st.gpuMemorySizeKey = sizeKey;
 				st.gpuMemoryGen = st.settingsGen.load(std::memory_order_relaxed);
 			}
+			// K#11 (169 AMEND) / Audit MEDIUM-2: pre-check private working memory BEFORE wiring/rebuild only when a
+			// bundle build/rewire is actually needed (never polls DXGI every frame when !needPreCheck), reusing the
+			// single QueryCard result inside the configure block below.
+			const std::shared_ptr<Bundle> current = std::atomic_load(&st.bundle);
+			const bool wantGapAhead = st.settings.gpuGap == GpuGapMode::AfterRender;
+			const bool needPreCheck = !current || !SameDims(current->dims, dims)
+				|| current->wiring.dispatcher == nullptr || current->wiring.gapAhead != wantGapAhead
+				|| current->wiring.compactGrain != st.dispatcherCompact;
+			bool preQueried = false;
+			bool preKnown = false;
+			CardProfile preCard;
+			std::string preWhy;
+			if (needPreCheck && st.dispatcher != nullptr && st.gpuMemoryNote.empty() && !st.dispatcher->HoldsVideoMemory())
+			{
+				preQueried = true;
+				if (cardOverride_)
+					preCard = card_;
+				preKnown = cardOverride_ || QueryCard(hosts_.Aux(st.host), preCard, preWhy);
+				const uint64_t priv = st.dispatcher->PrivateBytes(dims, wantGapAhead);
+				if (preKnown && priv > preCard.FreeVram())
+				{
+					st.gpuMemoryNote = "GPU products not made: private working memory " + std::to_string(priv >> 20) +
+						" MiB exceeds the free video memory " + std::to_string(preCard.FreeVram() >> 20) + " MiB (" +
+						Dimensions(dims) + ")";
+				}
+			}
 			wiring.dispatcher = st.gpuMemoryNote.empty() ? st.dispatcher.get() : nullptr;
 			if (st.dispatcher && wiring.dispatcher == nullptr)
 				st.dispatcher->SetLane(nullptr);   // the old lane is about to be replaced: no dangling pointer
-			wiring.gapAhead = wiring.dispatcher != nullptr && st.settings.gpuGap == GpuGapMode::AfterRender;
+			wiring.gapAhead = wiring.dispatcher != nullptr && wantGapAhead;
 			wiring.compactGrain = wiring.dispatcher != nullptr && st.dispatcherCompact;
-			const std::shared_ptr<Bundle> current = std::atomic_load(&st.bundle);
 			const bool rebuild = !current || !SameDims(current->dims, dims) || !current->wiring.Same(wiring);
 			std::shared_ptr<Bundle> b = current;
 			if (rebuild)
@@ -3188,7 +3589,11 @@ namespace Vpv
 					return VpSkeleton::LaneLease();
 				};
 				if (current)
+				{
+					st.oldBundleJobsJoined = false;
 					current->threads.Stop();   // GEM SK-LIFECYCLE: the current bundle's workers are joined before the replacement is built
+					st.oldBundleJobsJoined = true;
+				}
 				if (current)
 					hostMemo->Clear();   // G0 S4: a graph rebuild is a discontinuity: every memo spot of the old graph is released
 				b = std::make_shared<Bundle>(dims, seq, nowUs_, wiring, hostMemo, std::move(leaseOf),
@@ -3206,13 +3611,13 @@ namespace Vpv
 			const bool periodKnown = b->configuredPeriodMs <= 0.0 && st.periodMs > 0.0;
 			// A render-ahead term nobody refreshed for 8 source periods is stale (render-ahead was switched off, or its plan stopped): unwire it
 			// (the depths fall back to their floors, shown by skeleton_queue) instead of keeping an old value wired.
-			if ((CurrentQueue().wired & QueueShape::kRenderAhead) != 0 && st.periodMs > 0.0)
+			if ((CurrentQueue(st.host).wired & QueueShape::kRenderAhead) != 0 && st.periodMs > 0.0)
 			{
 				const uint64_t last = st.lastQueueDepthUs.load(std::memory_order_relaxed);
 				if (last != 0 && now > last + static_cast<uint64_t>(8.0 * st.periodMs * 1000.0))
-					UnpublishRenderAhead();
+					UnpublishRenderAhead(st.host);
 			}
-			const QueueShape fedQueue = CurrentQueue();   // one snapshot per frame: a feed on another thread never races the graph build
+			const QueueShape fedQueue = CurrentQueue(st.host);   // one snapshot per frame: a feed on another thread never races the graph build
 			QueueShape queue = fedQueue;
 			// The ring slots bound R + L together (RingSlotBudget); a feed above them is capped here, and the cap is shown (skeleton_lane_lead).
 			queue.renderAhead = uint8_t(CappedRenderAhead(fedQueue.renderAhead));
@@ -3251,9 +3656,19 @@ namespace Vpv
 			{
 				CardProfile card;
 				std::string why;
-				if (cardOverride_)
-					card = card_;
-				const bool known = cardOverride_ || QueryCard(hosts_.Aux(st.host), card, why);
+				bool known = false;
+				if (preQueried)
+				{
+					card = preCard;
+					why = preWhy;
+					known = preKnown;
+				}
+				else
+				{
+					if (cardOverride_)
+						card = card_;
+					known = cardOverride_ || QueryCard(hosts_.Aux(st.host), card, why);
+				}
 				st.cardNote = known ? std::string() : why;
 				TierInput tier;
 				tier.framePeriodMs = st.periodMs;
@@ -3271,7 +3686,12 @@ namespace Vpv
 					if (memoNeed != 0)
 						tier.otherUsers.push_back(VpSkeleton::MakeMemoVramUser(memoLevels, "skeleton memo"));
 				}
-				tier.ownUsageBytes = declared.heldBytes;
+				// K#11 (162 AS-IS): include the skeleton's own held VRAM (memo GPU spots + dispatcher product/graveyard textures)
+				// so PlanVram does not double-count them as other-app usage. PrivateBytes stays outside ownUsageBytes.
+				uint64_t ownHeld = declared.heldBytes + b->memo->GpuBytes();
+				if (wiring.dispatcher != nullptr)
+					ownHeld += wiring.dispatcher->AllocatedBytes() + wiring.dispatcher->GraveyardBytes();
+				tier.ownUsageBytes = ownHeld;
 				tier.transientBytes = st.vramShortfall;
 				st.vramShortfallUsed = st.vramShortfall;
 				st.vramReplan = false;
@@ -3351,7 +3771,8 @@ namespace Vpv
 				b->BindConsumers(consumers);
 				// Refresh the memo window immediately after BindConsumers so MakeAheadNeed sees the newly bound ahead depths (not the
 				// pre-bind aheadCompute=0 snapshot from OnFrame before Begin).
-				DeriveMemoWindow(st.host, b->memo, seq, hosts_.Find(st.host), false);
+				if (const std::shared_ptr<MemoHost> mh = memoHosts_.Find(st.host))
+					DeriveMemoWindow(st.host, mh, seq, hosts_.Find(st.host), false);
 				{
 					// B1: the memo's GPU spots are budgeted against the VRAM ledger: the memo user's grant of this plan (GF-P2b S10: its own
 					// id kUserSkeletonMemo, MakeMemoVramUser above; the scratch arena's kUserScratchArena / Extra grants are the arena's).
@@ -3405,8 +3826,6 @@ namespace Vpv
 			{
 				// Published after the graph is configured: a source frame arriving meanwhile waits in `pending`.
 				std::atomic_store(&st.bundle, b);
-				if (current)
-					current->threads.Stop();
 				DrainPending(st, *b);
 			}
 			++b->framesSinceConfigure;
@@ -3505,7 +3924,7 @@ namespace Vpv
 				st.dispatcher->FlushReleases();
 				if (const std::shared_ptr<VpSkeleton::LaneState> ls = b->lane.State())
 					if (ls->graph.valid)
-						st.dispatcher->Configure(ls->graph, b->registry, ls->plan, b->dims, b->configuredGen);
+						st.dispatcher->Configure(ls->graph, b->registry, ls->plan, b->dims, b->configuredGen, st.oldBundleJobsJoined);
 			}
 			else if (st.dispatcher && !st.gpuMemoryNote.empty() && st.dispatcher->HoldsVideoMemory())
 			{
@@ -3537,22 +3956,23 @@ namespace Vpv
 		{
 			const std::shared_ptr<Bundle> b = std::atomic_load(&st.bundle);
 			const bool hasBundle = b != nullptr;
-			const uint8_t queueWired = CurrentQueue().wired;
+			const uint8_t queueWired = CurrentQueue(st.host).wired;
 			const uint64_t queueKey = (uint64_t(st.queueFed.laneLead) << 40) | (uint64_t(st.queueUsed.laneLead) << 32) | (uint64_t(st.queueFed.renderAhead) << 24) |
 				(uint64_t(st.queueUsed.renderAhead) << 16) | (st.starveEvents & 0xFFFFu);
-			// U7-accuracy Q5: the cut veto's reach (a store toggle, a second renderer) refreshes the text at once.
-			const std::string vetoOff = SceneVetoOff(st.host);
+			// U7-accuracy Q5 / K#10: evaluate cut veto state as an enum before `due` (zero heap allocations when !due).
+			const SceneVetoCode vetoCode = SceneVetoOffCode(st.host);
 			const bool noGrid = st.sceneNoGrid.load(std::memory_order_relaxed) != 0;   // the no-grid decision engages at once too
 			const uint64_t sceneRunMisses = st.sceneRunRebuilt.load(std::memory_order_relaxed) + st.sceneRunReduced.load(std::memory_order_relaxed);
 			const uint64_t provisionalCutWithdrawn = st.sceneProvisionalCutWithdrawn.load(std::memory_order_relaxed);
 			const bool liveDriven = st.entranceLiveDriven.load(std::memory_order_acquire);
 			const bool due = st.frames <= kEarlyRefreshFrames || st.frames % kRefreshEvery == 1 || st.waiting != st.shownWaiting ||
-				hasBundle != st.shownBundle || queueWired != st.shownQueueWired || queueKey != st.shownQueueKey || vetoOff != st.shownVetoOff ||
+				hasBundle != st.shownBundle || queueWired != st.shownQueueWired || queueKey != st.shownQueueKey || vetoCode != st.shownVetoOff ||
 				noGrid != st.shownNoGrid || sceneRunMisses != st.shownSceneRunMisses ||
 				provisionalCutWithdrawn != st.shownProvisionalCutWithdrawn || liveDriven != st.shownEntranceLiveDriven;
 			if (!due)
 				return;
-			st.shownVetoOff = vetoOff;
+			st.shownVetoOff = vetoCode;
+			const std::string vetoOff(SceneVetoOffText(vetoCode));
 			st.shownNoGrid = noGrid;
 			st.shownSceneRunMisses = sceneRunMisses;
 			st.shownProvisionalCutWithdrawn = provisionalCutWithdrawn;

@@ -7,7 +7,6 @@
 #include <algorithm>
 #include <cstdint>
 #include <functional>
-#include <map>
 #include <vector>
 
 // Skeleton S4: the render thread's idle-gap scheduler (design B6). Work shares the gap in fixed class
@@ -31,15 +30,17 @@ struct GapReport {
 class GapScheduler {
 public:
     // No heap allocation happens in RunGap once the works are added: the scratch vectors and the
-    // learned entries are sized here.
+    // learned entries are sized here, and m_works stays sorted by priority.
     void Add(IGapWork* w)
     {
         if (!w) return;
-        m_works.push_back(w);
+        const auto pos = std::upper_bound(m_works.begin(), m_works.end(), w, &GapScheduler::Before);
+        const auto off = pos - m_works.begin();
+        m_works.insert(pos, w);
+        m_learned.insert(m_learned.begin() + off, Learned());
         m_order.reserve(m_works.size());
         m_noFitSeen.reserve(m_works.size());
         m_capSeen.reserve(m_works.size());
-        m_learned.insert(std::make_pair(w->Id(), Learned()));
     }
     void SetChunkCapUs(uint32_t capUs) { m_capUs = capUs; }
     uint32_t ChunkCapUs() const { return m_capUs; }
@@ -58,7 +59,7 @@ public:
     {
         GapReport r;
         if (!nowUs) return r;
-        std::vector<IGapWork*>& order = m_order;
+        std::vector<size_t>& order = m_order;
         std::vector<uint16_t>& noFitSeen = m_noFitSeen;
         std::vector<uint16_t>& capSeen = m_capSeen;
         noFitSeen.clear();
@@ -70,27 +71,29 @@ public:
             const uint64_t before = nowUs();
             if (before >= gapEndUs) break;
             const uint64_t remaining = gapEndUs - before;
-            const uint64_t limit = std::min<uint64_t>(m_capUs, remaining);
+            const uint64_t limit = (std::min<uint64_t>)(m_capUs, remaining);
 
             order.clear();
-            for (IGapWork* w : m_works) if (w->HasWork()) order.push_back(w);
-            std::sort(order.begin(), order.end(), &GapScheduler::Before);
-            for (IGapWork* w : order)
-                if (w->Class() == GapClass::LaneCompute) { laneHadWork = true; break; }
+            for (size_t i = 0; i < m_works.size(); ++i)
+                if (m_works[i]->HasWork()) {
+                    order.push_back(i);
+                    if (m_works[i]->Class() == GapClass::LaneCompute) laneHadWork = true;
+                }
 
-            IGapWork* pick = nullptr;
-            for (IGapWork* w : order) {
-                const uint64_t pred = Predict(w);
-                if (pred <= limit) { pick = w; break; }
+            size_t pickIdx = m_works.size();
+            for (size_t i : order) {
+                IGapWork* w = m_works[i];
+                const uint64_t pred = Predict(i);
+                if (pred <= limit) { pickIdx = i; break; }
                 if (pred > m_capUs && std::find(capSeen.begin(), capSeen.end(), w->Id()) == capSeen.end()) {
                     // Too big for ANY gap: a learned cost above the cap would starve the work for good, so
                     // it decays toward the work's own prediction once per gap and re-learns when it runs.
                     capSeen.push_back(w->Id());
                     ++r.capNoFit;
                     w->OnCapNoFit();   // the work's own remembered cost decays too (else its prediction pins the floor)
-                    Learned& l = LearnedFor(w);
+                    Learned& l = LearnedFor(i);
                     const uint64_t floorUs = w->PredictUs();
-                    l.emaUs = std::max<uint64_t>(floorUs, l.emaUs > l.emaUs / 4 ? l.emaUs - l.emaUs / 4 : 0u);
+                    l.emaUs = (std::max<uint64_t>)(floorUs, l.emaUs > l.emaUs / 4 ? l.emaUs - l.emaUs / 4 : 0u);
                 }
                 if (w->Class() == GapClass::RenderAheadExtra &&
                     std::find(noFitSeen.begin(), noFitSeen.end(), w->Id()) == noFitSeen.end()) {
@@ -98,23 +101,21 @@ public:
                     ++r.renderAheadNoFit;
                 }
             }
-            if (!pick) break;
+            if (pickIdx == m_works.size()) break;
 
+            IGapWork* pick = m_works[pickIdx];
             pick->RunChunk(static_cast<uint32_t>(limit));
             const uint64_t after = nowUs();
             const uint64_t actual = after > before ? after - before : 0;
 
-            Learned& l = LearnedFor(pick);
+            Learned& l = LearnedFor(pickIdx);
             l.emaUs = static_cast<uint64_t>(static_cast<int64_t>(l.emaUs) +
                 (static_cast<int64_t>(actual) - static_cast<int64_t>(l.emaUs)) / 4);
 
             ++r.chunks;
             r.usedUs[static_cast<size_t>(pick->Class())] += actual;
             if (pick->Class() == GapClass::LaneCompute) laneRan = true;
-            if (actual > remaining) {
-                ++r.overruns;
-                r.overrunUs += actual - remaining;
-            }
+            if (actual > remaining) { ++r.overruns; r.overrunUs += actual - remaining; }
         }
         r.laneStarved = laneHadWork && !laneRan;
         if (r.laneStarved) r.laneStarvedGaps = 1;
@@ -127,8 +128,9 @@ public:
     // Scheduling-only learned cost for a work id (0 when never run).
     uint64_t LearnedUs(uint16_t id) const
     {
-        const auto it = m_learned.find(id);
-        return it == m_learned.end() ? 0 : it->second.emaUs;
+        for (size_t i = 0; i < m_works.size(); ++i)
+            if (m_works[i]->Id() == id) return m_learned[i].emaUs;
+        return 0;
     }
 
 private:
@@ -146,21 +148,16 @@ private:
         return a->Id() < b->Id();
     }
 
-    Learned& LearnedFor(IGapWork* w)
+    Learned& LearnedFor(size_t i)
     {
-        Learned& l = m_learned[w->Id()];   // present since Add: no allocation here
-        if (!l.init) {
-            l.emaUs = w->PredictUs();   // start = the first prediction
-            l.init = true;
-        }
+        Learned& l = m_learned[i];   // parallel with m_works: O(1), no allocation
+        if (!l.init) { l.emaUs = m_works[i]->PredictUs(); l.init = true; }
         return l;
     }
 
-    uint64_t Predict(IGapWork* w)
+    uint64_t Predict(size_t i) const
     {
-        const uint64_t p = w->PredictUs();
-        const auto it = m_learned.find(w->Id());
-        return it == m_learned.end() ? p : std::max<uint64_t>(p, it->second.emaUs);
+        return (std::max<uint64_t>)(m_works[i]->PredictUs(), m_learned[i].emaUs);
     }
 
     void Accumulate(const GapReport& r)
@@ -176,10 +173,10 @@ private:
     }
 
     std::vector<IGapWork*> m_works;
-    std::vector<IGapWork*> m_order;           // scratch (reserved at Add)
+    std::vector<size_t> m_order;              // scratch active indices into sorted m_works (reserved at Add)
     std::vector<uint16_t> m_noFitSeen;
     std::vector<uint16_t> m_capSeen;
-    std::map<uint16_t, Learned> m_learned;   // ordered by id: never an unordered container in decisions
+    std::vector<Learned> m_learned;           // parallel 1-to-1 with m_works (zero map lookups)
     uint32_t m_capUs = 1000;
     GapReport m_totals;
 };

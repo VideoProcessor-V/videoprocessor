@@ -10,6 +10,7 @@
 #include "QueueWindow.h"
 #include "VariantKey.h"
 
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <cstring>
@@ -421,7 +422,10 @@ public:
         std::lock_guard<std::mutex> g(mutex_);
         if (unit != OwnerUnitOf(id))
             return false;
-        return owners_.erase(OwnerKey(id, form)) != 0;
+        const bool removed = owners_.erase(OwnerKey(id, form)) != 0;
+        if (removed)
+            RefreshHasAheadDemandsLocked();
+        return removed;
     }
     bool HasOwnerFill(ProductId id, AcquireForm form) const
     {
@@ -440,6 +444,7 @@ public:
             if (!OwnerUnitOf(kv.first.first).empty())
                 laneOwners_[OwnerKey(kv.first.first, kv.first.second)] = std::move(kv.second);
         ++laneBinds_;
+        RefreshHasAheadDemandsLocked();
     }
     // The lane `token` ends: its source and fills are dropped, ONLY if it is still the bound one (a rebuild bound a newer lane
     // first: nothing happens). Module registrations stay. True = unbound. RENDER THREAD ONLY (like BindLane): the Acquire ahead
@@ -451,6 +456,7 @@ public:
             return false;
         lane_ = LaneSlotSource();
         laneOwners_.clear();
+        RefreshHasAheadDemandsLocked();
         return true;
     }
     bool LaneBound() const
@@ -778,6 +784,8 @@ public:
         JobClass cls = JobClass::Core;
         const char* by = nullptr;   // the requester (OwnerFill::aheadBy), null = unnamed
     };
+    // Lock-free O(1) fast check (K#10): true iff ActiveAheadDemands() would be non-empty.
+    bool HasAheadDemands() const { return hasAheadDemands_.load(std::memory_order_acquire); }
     // The kAheadNeed term's input: every registered fill (lane fill shadowing a module's) declaring an ahead depth > 0, ordered
     // by owner key. Empty = no consumer (aheadCompute stays 0 / NoConsumer upstream).
     std::vector<AheadDemand> ActiveAheadDemands() const
@@ -924,43 +932,45 @@ public:
         }
 
         // G2 (b): the memo spot (a kept spot of a released frame included); a fill in flight is waited for (computed once).
-        auto it = memo_.find(key);
-        if (it != memo_.end() && it->second->epoch != epoch_ && it->second->state != Entry::Filling) {
-            // A spot of an older epoch (a discontinuity since): absent for every reader. Its bytes go at the next seal.
-            Entry& old = *it->second;
-            if (old.gpuForm)
-                gpuBytes_ -= old.reserved;
-            else
-                cpuBytes_ -= old.bytes.size();
-            old.reserved = 0;
-            old.orphaned = true;
-            stale_.push_back(it->second);
-            memo_.erase(it);
-            it = memo_.end();
-        }
-        if (it == memo_.end() && ReleasedForOwnerLocked(seq, ow))
-            return Fail(c, id, seq, AcquireCause::FrameReleased);   // a released frame is never recomputed (lane slots above stay readable)
-        if (it != memo_.end()) {
-            const std::shared_ptr<Entry> e = it->second;
-            if (e->state == Entry::Filling) {
-                // Cycle by key across threads: the fill we would wait for is (transitively) waiting for a fill of ours.
-                if (WaitWouldCycleLocked(e))
-                    return Fail(c, id, seq, AcquireCause::Reentrant);
-                const std::thread::id self = std::this_thread::get_id();
-                waitingOn_[self] = e;
-                cv_.wait(lk, [&e]() { return e->state != Entry::Filling; });
-                waitingOn_.erase(self);
+        for (;;) {
+            auto it = memo_.find(key);
+            if (it != memo_.end() && it->second->epoch != epoch_ && it->second->state != Entry::Filling) {
+                // A spot of an older epoch (a discontinuity since): absent for every reader. Its bytes go at the next seal.
+                EvictStaleLocked(it);
+                it = memo_.end();
             }
-            if (e->state == Entry::Ready) {
-                ++c.reusedMemo;
-                if (e->ahead && !e->aheadReuseCounted && haveSealed_ && seq <= lastSeal_) {
-                    ++c.aheadReused;   // an ahead fill reused once its frame renders (or later): the same spot
-                    e->aheadReuseCounted = true;
+            if (it == memo_.end() && ReleasedForOwnerLocked(seq, ow))
+                return Fail(c, id, seq, AcquireCause::FrameReleased);   // a released frame is never recomputed (lane slots above stay readable)
+            if (it != memo_.end()) {
+                const std::shared_ptr<Entry> e = it->second;
+                if (e->state == Entry::Filling) {
+                    // Cycle by key across threads: the fill we would wait for is (transitively) waiting for a fill of ours.
+                    if (WaitWouldCycleLocked(e))
+                        return Fail(c, id, seq, AcquireCause::Reentrant);
+                    const std::thread::id self = std::this_thread::get_id();
+                    waitingOn_[self] = e;
+                    cv_.wait(lk, [&e]() { return e->state != Entry::Filling; });
+                    waitingOn_.erase(self);
+                    if (e->epoch != epoch_) {
+                        const auto cur = memo_.find(key);
+                        if (cur != memo_.end() && cur->second == e)
+                            EvictStaleLocked(cur);
+                        ow = OwnerLocked(OwnerKey(id, form));   // re-read after unlock during cv_.wait
+                        continue;
+                    }
                 }
-                return ResultOf(e, AcquireStatus::Reused);
+                if (e->state == Entry::Ready) {
+                    ++c.reusedMemo;
+                    if (e->ahead && !e->aheadReuseCounted && haveSealed_ && seq <= lastSeal_) {
+                        ++c.aheadReused;   // an ahead fill reused once its frame renders (or later): the same spot
+                        e->aheadReuseCounted = true;
+                    }
+                    return ResultOf(e, AcquireStatus::Reused);
+                }
+                // Declined for this frame: the same cause, the owner is not asked twice for one frame.
+                return Fail(c, id, seq, e->cause == AcquireCause::None ? AcquireCause::OwnerDeclined : e->cause);
             }
-            // Declined for this frame: the same cause, the owner is not asked twice for one frame.
-            return Fail(c, id, seq, e->cause == AcquireCause::None ? AcquireCause::OwnerDeclined : e->cause);
+            break;
         }
 
         // Admission (design s2.3): a fill for a frame beyond the queue window is refused, never run.
@@ -1220,17 +1230,14 @@ public:
         ++counters_[id].workerReused;
     }
     // C5-SKREDS MUST-1: a lane worker adopted an owner-fill publication (BindLaneToMemo's SetWorkerAdopt). Lane threads.
-    void NoteWorkerAdopted(ProductId id)
-    {
-        std::lock_guard<std::mutex> g(mutex_);
-        ++counters_[id].workerAdopted;
-    }
+    void NoteWorkerAdopted(ProductId id) { std::lock_guard<std::mutex> g(mutex_); ++counters_[id].workerAdopted; }
     // The seal's question (SkeletonAcquireLane.h): did a reader publish the default CPU form of (id, seq)? Copies it.
     bool CopyPublished(ProductId id, uint64_t seq, uint8_t* dst, size_t n) const
     {
         std::lock_guard<std::mutex> g(mutex_);
         const auto it = memo_.find(Key{ id, seq, uint8_t(AcquireForm::Cpu), VariantKey() });
-        if (it == memo_.end() || it->second->state != Entry::Ready || it->second->bytes.size() != n || dst == nullptr)
+        if (it == memo_.end() || it->second->state != Entry::Ready || it->second->epoch != epoch_
+            || it->second->bytes.size() != n || dst == nullptr)
             return false;
         std::memcpy(dst, it->second->bytes.data(), n);
         return true;
@@ -1253,19 +1260,17 @@ public:
             haveSealed_ = true;
             lastSeal_ = seq;
             ++seals_;
-            ReleaseIfLocked([](const Entry& e) { return e.frameScoped; }, drop);   // the previous render frame's views
-            {
-                const uint64_t ep = epoch_;
-                ReleaseIfLocked([ep](const Entry& e) { return e.epoch != ep; }, drop);   // spots of an older epoch (BumpEpoch)
-                bumpedThisInterval_ = false;
-                for (auto& s : stale_)
-                    drop.push_back(s);
-                stale_.clear();
-            }
-            // A frame has left the queue below the edge (design s2.3): f < min(seal - back, presented - history).
+            // Single fused pass: previous frame-scoped views, older-epoch spots (BumpEpoch), and frames below the queue edge.
+            const uint64_t ep = epoch_;
             const uint64_t edge = EdgeLocked(seq, 0);
+            ReleaseIfLocked([this, seq, ep, edge](const Entry& e) {
+                return e.frameScoped || e.epoch != ep || (edge > 0 && e.seq < EdgeLocked(seq, e.keep));
+            }, drop);
+            bumpedThisInterval_ = false;
+            for (auto& s : stale_)
+                drop.push_back(s);
+            stale_.clear();
             if (edge > 0) {
-                ReleaseIfLocked([this, seq](const Entry& e) { return e.seq < EdgeLocked(seq, e.keep); }, drop);
                 if (!haveReleased_ || edge - 1u > releasedThrough_)
                     releasedThrough_ = edge - 1u;
                 haveReleased_ = true;
@@ -1298,26 +1303,10 @@ public:
         const auto it = counters_.find(id);
         return it == counters_.end() ? AcquireCounters() : it->second;
     }
-    size_t MemoCount() const
-    {
-        std::lock_guard<std::mutex> g(mutex_);
-        return memo_.size();
-    }
-    size_t RetiredPending() const
-    {
-        std::lock_guard<std::mutex> g(mutex_);
-        return retired_.size();
-    }
-    uint64_t GpuBytes() const
-    {
-        std::lock_guard<std::mutex> g(mutex_);
-        return gpuBytes_;
-    }
-    uint64_t CpuBytes() const
-    {
-        std::lock_guard<std::mutex> g(mutex_);
-        return cpuBytes_;
-    }
+    size_t MemoCount() const { std::lock_guard<std::mutex> g(mutex_); return memo_.size(); }
+    size_t RetiredPending() const { std::lock_guard<std::mutex> g(mutex_); return retired_.size(); }
+    uint64_t GpuBytes() const { std::lock_guard<std::mutex> g(mutex_); return gpuBytes_; }
+    uint64_t CpuBytes() const { std::lock_guard<std::mutex> g(mutex_); return cpuBytes_; }
     // One line per product asked: "skeleton acquire: p1_half_luma 12 reused (lane 10, memo 2), 1 filled at read, 0 unavailable".
     std::vector<std::string> StatusLines() const
     {
@@ -1517,6 +1506,17 @@ private:
         return renderThread_ == std::thread::id() || renderThread_ == std::this_thread::get_id();
     }
 
+    void RefreshHasAheadDemandsLocked()
+    {
+        bool any = false;
+        for (const auto& kv : laneOwners_)
+            if (kv.second.aheadDepth > 0) { any = true; break; }
+        if (!any)
+            for (const auto& kv : owners_)
+                if (laneOwners_.find(kv.first) == laneOwners_.end() && kv.second.aheadDepth > 0) { any = true; break; }
+        hasAheadDemands_.store(any, std::memory_order_release);
+    }
+
     Registration Register(ProductId id, AcquireForm form, const std::string& unit, OwnerFill fill, bool replace)
     {
         std::lock_guard<std::mutex> g(mutex_);
@@ -1545,6 +1545,7 @@ private:
             return Registration::AlreadyRegistered;
         }
         owners_[k] = std::move(fill);
+        RefreshHasAheadDemandsLocked();
         return had ? Registration::Replaced : Registration::Registered;
     }
 
@@ -1580,6 +1581,21 @@ private:
         return r;
     }
     void Served(ProductId id) { lastCause_.erase(id); }
+
+    void EvictStaleLocked(std::map<Key, std::shared_ptr<Entry>>::iterator it)
+    {
+        Entry& e = *it->second;
+        if (!e.orphaned) {
+            if (e.gpuForm)
+                gpuBytes_ -= e.reserved;
+            else
+                cpuBytes_ -= e.bytes.size();
+            e.reserved = 0;
+            e.orphaned = true;
+        }
+        stale_.push_back(it->second);
+        memo_.erase(it);
+    }
 
     // Release the entries `pred` names. GPU spots under an incomplete read fence go to retired_; the rest to `drop`.
     template <class Pred>
@@ -1623,6 +1639,7 @@ private:
     std::condition_variable cv_;
     std::map<uint32_t, OwnerFill> owners_;        // module registrations
     std::map<uint32_t, OwnerFill> laneOwners_;    // the bound lane's fills (precedence while bound)
+    std::atomic<bool> hasAheadDemands_{ false };  // K#10: mirrors ActiveAheadDemands() non-empty
     std::thread::id renderThread_;                // none = every thread counts as the render thread
     uint64_t laneBinds_ = 0;
     uint64_t seals_ = 0;

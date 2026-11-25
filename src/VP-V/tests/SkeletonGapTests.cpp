@@ -242,5 +242,111 @@ namespace SkeletonGapTestsNs
 			Assert::AreEqual<uint32_t>(750, GapScheduler::DerivedChunkCapUs(1000.0 / 240.0, 750));
 			Assert::AreEqual<uint32_t>(2500, GapScheduler::DerivedChunkCapUs(1000.0 / 24.0, 2500));
 		}
+
+		// K#8: GapScheduler keeps m_works sorted on Add with index-addressed Learned entries, producing
+		// bit-for-bit identical per-gap schedules, reports, Totals(), and LearnedUs(id) regardless of registration order.
+		TEST_METHOD(UnsortedRegistrationProducesIdenticalGapScheduleAndLearnedCosts)
+		{
+			struct CapDecayWork : FakeWork {
+				using FakeWork::FakeWork;
+				void OnCapNoFit() override { predict = predict > 500u ? predict / 2u : predict; }
+			};
+
+			struct GapRig {
+				Clock clk;
+				std::vector<uint16_t> log;
+				GapScheduler sched;
+				FakeWork raBig{ &clk, GapClass::RenderAheadExtra, 1, 350, 350, 12, &log };
+				FakeWork early{ &clk, GapClass::EarlyUploadWrap, 2, 150, 180, 10, &log };
+				FakeWork laneT0Heavy{ &clk, GapClass::LaneCompute, 10, 200, 260, 12, &log, Tier::T0, 8.0 };
+				FakeWork laneT0Light{ &clk, GapClass::LaneCompute, 11, 120, 120, 15, &log, Tier::T0, 2.0 };
+				CapDecayWork laneT1Cap{ &clk, GapClass::LaneCompute, 12, 2400, 180, 10, &log, Tier::T1, 4.0 };
+				FakeWork laneT2Heavy{ &clk, GapClass::LaneCompute, 13, 100, 140, 15, &log, Tier::T2, 9.0 };
+				FakeWork laneT2Tie{ &clk, GapClass::LaneCompute, 14, 100, 100, 15, &log, Tier::T2, 9.0 };
+
+				GapRig() { sched.SetChunkCapUs(1000u); }
+			};
+
+			GapRig a, b;
+			// Scheduler A: canonical priority order.
+			a.sched.Add(&a.raBig);
+			a.sched.Add(&a.early);
+			a.sched.Add(&a.laneT0Heavy);
+			a.sched.Add(&a.laneT0Light);
+			a.sched.Add(&a.laneT1Cap);
+			a.sched.Add(&a.laneT2Heavy);
+			a.sched.Add(&a.laneT2Tie);
+
+			// Scheduler B: scrambled / reverse registration order.
+			b.sched.Add(&b.laneT2Tie);
+			b.sched.Add(&b.laneT1Cap);
+			b.sched.Add(&b.laneT0Light);
+			b.sched.Add(&b.early);
+			b.sched.Add(&b.laneT2Heavy);
+			b.sched.Add(&b.raBig);
+			b.sched.Add(&b.laneT0Heavy);
+
+			const uint64_t budgets[10] = { 300u, 900u, 450u, 1200u, 250u, 1500u, 600u, 800u, 350u, 1400u };
+			for (int g = 0; g < 10; ++g) {
+				const GapReport ra = a.sched.RunGap(a.clk.t + budgets[g], a.clk.Fn());
+				const GapReport rb = b.sched.RunGap(b.clk.t + budgets[g], b.clk.Fn());
+				Assert::AreEqual(ra.chunks, rb.chunks);
+				for (int c = 0; c < 3; ++c)
+					Assert::AreEqual(ra.usedUs[c], rb.usedUs[c]);
+				Assert::AreEqual(ra.overruns, rb.overruns);
+				Assert::AreEqual(ra.overrunUs, rb.overrunUs);
+				Assert::AreEqual(ra.laneStarved, rb.laneStarved);
+				Assert::AreEqual(ra.renderAheadNoFit, rb.renderAheadNoFit);
+				Assert::AreEqual(ra.capNoFit, rb.capNoFit);
+			}
+
+			Assert::IsTrue(!a.log.empty() && a.log == b.log, L"per-gap chunk execution order bit-for-bit identical");
+			Assert::AreEqual(a.clk.t, b.clk.t, L"final clock bit-for-bit identical");
+
+			const GapReport& ta = a.sched.Totals();
+			const GapReport& tb = b.sched.Totals();
+			Assert::AreEqual(ta.chunks, tb.chunks);
+			for (int c = 0; c < 3; ++c)
+				Assert::AreEqual(ta.usedUs[c], tb.usedUs[c]);
+			Assert::AreEqual(ta.overruns, tb.overruns);
+			Assert::AreEqual(ta.overrunUs, tb.overrunUs);
+			Assert::AreEqual(ta.laneStarved, tb.laneStarved);
+			Assert::AreEqual(ta.laneStarvedGaps, tb.laneStarvedGaps);
+			Assert::AreEqual(ta.renderAheadNoFit, tb.renderAheadNoFit);
+			Assert::AreEqual(ta.capNoFit, tb.capNoFit);
+			Assert::IsTrue(ta.chunks > 10u && ta.capNoFit > 0u && ta.renderAheadNoFit > 0u,
+				L"test exercised cap-no-fit decay, render-ahead no-fit backfill, and multi-class scheduling");
+
+			const uint16_t ids[] = { 1, 2, 10, 11, 12, 13, 14 };
+			for (uint16_t id : ids)
+				Assert::AreEqual(a.sched.LearnedUs(id), b.sched.LearnedUs(id),
+					L"LearnedUs(id) bit-for-bit identical between canonical and scrambled registration");
+
+			// In-test negative controls:
+			// (1) unknown id returns 0;
+			Assert::AreEqual<uint64_t>(0, a.sched.LearnedUs(9999u), L"negative control: unknown id returns 0");
+			Assert::AreEqual<uint64_t>(0, b.sched.LearnedUs(9999u), L"negative control: unknown id returns 0");
+
+			// (2) changing HeavyMs / Tier changes execution order even with identical registration order (proves active sorting).
+			Clock c1, c2;
+			std::vector<uint16_t> ord1, ord2;
+			FakeWork w1a(&c1, GapClass::LaneCompute, 20, 50, 50, 1, &ord1, Tier::T0, 1.0);
+			FakeWork w1b(&c1, GapClass::LaneCompute, 21, 50, 50, 1, &ord1, Tier::T0, 10.0);
+			GapScheduler s1;
+			s1.Add(&w1a); s1.Add(&w1b);
+			s1.RunGap(500u, c1.Fn());
+
+			FakeWork w2a(&c2, GapClass::LaneCompute, 20, 50, 50, 1, &ord2, Tier::T0, 10.0);
+			FakeWork w2b(&c2, GapClass::LaneCompute, 21, 50, 50, 1, &ord2, Tier::T1, 10.0);
+			GapScheduler s2;
+			s2.Add(&w2a); s2.Add(&w2b);
+			s2.RunGap(500u, c2.Fn());
+
+			Assert::AreEqual<size_t>(2u, ord1.size());
+			Assert::AreEqual<size_t>(2u, ord2.size());
+			Assert::AreEqual<int>(21, ord1[0], L"negative control: heavier T0 work (id 21) sorts before lighter T0 work (id 20)");
+			Assert::AreEqual<int>(20, ord2[0], L"negative control: T0 work (id 20) sorts before T1 work (id 21)");
+			Assert::IsTrue(ord1 != ord2, L"negative control: priority sorting actively changes execution order");
+		}
 	};
 }

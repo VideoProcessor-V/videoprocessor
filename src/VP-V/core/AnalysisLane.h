@@ -419,18 +419,14 @@ struct LaneState {
 template <class Pass>
 inline PublishedRead ReadPublishedBytes(const SlotSet& set, const CpuBuffers& bufs, uint64_t seq, Pass&& pass)
 {
-    const ReadInfo before = set.Read(seq, true);
-    if (before.kind != ReadInfo::Ring || before.index < 0)
+    const PublishedSlotView v0 = set.PublishedViewOf(seq);
+    if (!v0.present || (v0.state != SlotState::Published && v0.state != SlotState::Sealed) || v0.index < 0)
         return PublishedRead::Absent;
-    const VpAncestry::SlotView v0 = set.ViewAt(uint16_t(before.index));
-    if (!v0.present || v0.seq != seq || !(v0.valid || v0.lanePublished))
-        return PublishedRead::Absent;
-    pass(bufs.Ring(size_t(before.index)), bufs.Bytes());
+    pass(bufs.Ring(size_t(v0.index)), bufs.Bytes());
     std::atomic_thread_fence(std::memory_order_acquire);
-    const ReadInfo after = set.Read(seq, true);
-    const VpAncestry::SlotView v1 = set.ViewAt(uint16_t(before.index));
-    const bool same = after.kind == ReadInfo::Ring && after.index == before.index && v1.present && v1.seq == seq
-                      && v1.cgen == v0.cgen;
+    const PublishedSlotView v1 = set.PublishedViewOf(seq);
+    const bool same = v1.present && (v1.state == SlotState::Published || v1.state == SlotState::Sealed)
+                      && v1.index == v0.index && v1.seq == seq && v1.gen == v0.gen && v1.cgen == v0.cgen;
     return same ? PublishedRead::Copied : PublishedRead::Recycled;
 }
 
@@ -765,8 +761,7 @@ public:
         Header& hdr = set.LaneHeader(t);
         if (!set.Writable(t)) {
             pins.Unpin();
-            LaneTicket a = t;
-            set.Abandon(a);
+            set.Unclaim(t);
             out.why = "slot still pinned by a reader of the previous frame";
             return out;
         }
@@ -1501,7 +1496,10 @@ public:
     }
     void NotifyWake()
     {
-        wake_.fetch_add(1, std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> lock(wakeMutex_);
+            wake_.fetch_add(1, std::memory_order_release);
+        }
         wakeCv_.notify_all();
     }
 

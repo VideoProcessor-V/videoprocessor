@@ -87,7 +87,7 @@ namespace Vpv
 		}
 
 		bool SkeletonGpuDispatcher::Configure(const VpSkeleton::Graph& graph, const VpSkeleton::Registry& reg,
-			const VpSkeleton::TierPlan& plan, Dims dims, uint32_t settingsGen)
+			const VpSkeleton::TierPlan& plan, Dims dims, uint32_t settingsGen, bool oldJobsJoined)
 		{
 			if (!Valid())
 				return Fail("no GPU device for the analysis products");
@@ -104,16 +104,36 @@ namespace Vpv
 			bool ok = true;
 			if (rebuildTextures)
 			{
-				// Old textures: destroyed at the next GPU-legal phase (a lane job of the old graph may still name them).
-				for (auto& kv : m_products)
+				NotePeakBytes();
+				if (oldJobsJoined)
 				{
-					if (kv.second.tex)
+					// K#12 (PERF-6): old workers/jobs are already joined; release graveyard and old textures BEFORE
+					// allocating replacements so peak VRAM stays <= max(old, new) instead of old + new.
+					FlushReleases();
+					for (auto& kv : m_products)
 					{
-						m_graveyard.push_back(std::move(kv.second.tex));
-						++m_counters.releasesQueued;
+						if (kv.second.tex)
+						{
+							kv.second.tex.reset();
+							++m_counters.releasesDone;
+						}
+						if (kv.second.timer)
+							pl_timer_destroy(m_gpu, &kv.second.timer);
 					}
-					if (kv.second.timer)
-						pl_timer_destroy(m_gpu, &kv.second.timer);
+				}
+				else
+				{
+					// Old textures: destroyed at the next GPU-legal phase (a lane job of the old graph may still name them).
+					for (auto& kv : m_products)
+					{
+						if (kv.second.tex)
+						{
+							m_graveyard.push_back(std::move(kv.second.tex));
+							++m_counters.releasesQueued;
+						}
+						if (kv.second.timer)
+							pl_timer_destroy(m_gpu, &kv.second.timer);
+					}
 				}
 				m_products.clear();
 				for (const Node& n : graph.nodes)
@@ -137,6 +157,7 @@ namespace Vpv
 						continue;
 					}
 					++m_counters.allocations;
+					NotePeakBytes();
 					ps.timer = pl_timer_create(m_gpu);
 				}
 			}
@@ -242,12 +263,14 @@ namespace Vpv
 
 		void SkeletonGpuDispatcher::FlushReleases()
 		{
+			NotePeakBytes();
 			m_counters.releasesDone += m_graveyard.size();
 			m_graveyard.clear();   // ~ProductTextures destroys through the backend
 		}
 
 		void SkeletonGpuDispatcher::Release()
 		{
+			NotePeakBytes();
 			FlushReleases();
 			for (auto& kv : m_products)
 			{
@@ -288,7 +311,7 @@ namespace Vpv
 
 		bool SkeletonGpuDispatcher::HoldsVideoMemory() const
 		{
-			if (AllocatedBytes() != 0)
+			if (AllocatedBytes() != 0 || GraveyardBytes() != 0)
 				return true;
 			for (const Tap& t : m_taps)
 				if (t.tap != nullptr || t.extended != nullptr)
@@ -321,6 +344,22 @@ namespace Vpv
 				if (kv.second.tex)
 					b += kv.second.tex->Bytes();
 			return b;
+		}
+
+		uint64_t SkeletonGpuDispatcher::GraveyardBytes() const
+		{
+			uint64_t b = 0;
+			for (const std::unique_ptr<GpuProductTextures>& tex : m_graveyard)
+				if (tex)
+					b += tex->Bytes();
+			return b;
+		}
+
+		void SkeletonGpuDispatcher::NotePeakBytes()
+		{
+			const uint64_t cur = AllocatedBytes() + GraveyardBytes();
+			if (cur > m_peakBytes)
+				m_peakBytes = cur;
 		}
 
 		pl_tex SkeletonGpuDispatcher::TapOf(uint64_t seq, bool extended) const

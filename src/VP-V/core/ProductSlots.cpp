@@ -42,6 +42,8 @@ ClaimResult SlotSet::Claim(uint64_t seq, Provenance prov, uint64_t completedRele
         out->gen = next.gen;
         out->prov = prov;
         out->valid = true;
+        out->priorState = w.state;
+        out->priorSeq = w.seq;
     }
     return ClaimResult::Claimed;
 }
@@ -60,6 +62,30 @@ bool SlotSet::StartWriting(const LaneTicket& t)
     next.state = SlotState::Writing;
     uint64_t raw = Pack(expect);
     return s.word.compare_exchange_strong(raw, Pack(next), std::memory_order_acq_rel, std::memory_order_acquire);
+}
+
+bool SlotSet::Unclaim(LaneTicket& t)
+{
+    if (!t.valid)
+        return false;
+    Slot& s = slots_[t.slot];
+    SlotWord expect;
+    expect.seq = Biased(t.seq);
+    expect.gen = t.gen;
+    expect.state = SlotState::Claimed;
+    expect.prov = t.prov;
+    SlotWord next;
+    next.seq = t.priorSeq;
+    next.gen = uint16_t(t.gen + 1u);
+    next.state = t.priorState;
+    next.prov = Provenance::None;
+    uint64_t raw = Pack(expect);
+    if (s.word.compare_exchange_strong(raw, Pack(next), std::memory_order_acq_rel, std::memory_order_acquire)) {
+        t.valid = false;
+        return true;
+    }
+    Ack(t);
+    return false;
 }
 
 PublishResult SlotSet::Publish(LaneTicket& t, uint64_t producerSignal, uint64_t producerCompleted)
@@ -83,7 +109,7 @@ PublishResult SlotSet::Publish(LaneTicket& t, uint64_t producerSignal, uint64_t 
     s.laneHdr.seq = t.seq;
     s.laneHdr.prov = t.prov;
     s.laneHdr.cgen = cgen;
-    s.laneCgen.store(cgen, std::memory_order_relaxed);
+    s.laneCgen.store(cgen, std::memory_order_release);
     s.producerValue.store(producerSignal, std::memory_order_relaxed);
     SlotWord expect = w;
     SlotWord next = expect;
@@ -217,8 +243,8 @@ bool SlotSet::CommitLive(uint64_t seq, const Header& hdr)
         s.liveHdr.prov = next.prov;
         const uint32_t cgen = NewCgen(s);
         s.liveHdr.cgen = cgen;
-        s.liveCgen.store(cgen, std::memory_order_relaxed);
-        s.liveIndexPub.store(s.liveIndex, std::memory_order_relaxed);
+        s.liveCgen.store(cgen, std::memory_order_release);
+        s.liveIndexPub.store(s.liveIndex, std::memory_order_release);
         if (!s.word.compare_exchange_strong(raw, Pack(next), std::memory_order_acq_rel,
                                             std::memory_order_acquire))
             continue;   // the lane acknowledged meanwhile
@@ -271,25 +297,25 @@ bool SlotSet::Release(uint64_t seq, uint64_t releaseValue)
 
 uint32_t SlotSet::ReleaseThrough(uint64_t upToSeq, uint64_t releaseValue)
 {
+    if (upToSeq > kSlotSeqMask - ring_) {
+        counters_.releaseThroughExactOrderErrors.fetch_add(1, std::memory_order_relaxed);
+        return 0u;
+    }
     if (hasReleasedThrough_ && upToSeq <= releasedThrough_) {
         counters_.releaseThroughExactOrderErrors.fetch_add(1, std::memory_order_relaxed);
         return 0u;
     }
-    if (upToSeq > kSlotSeqMask - ring_) {
+    Slot& exact = slots_[SlotOf(upToSeq)];
+    const uint64_t exactBiased = Biased(upToSeq);
+    const SlotWord ew = Unpack(exact.word.load(std::memory_order_acquire));
+    const bool exactRenderHeld =
+        ew.seq == exactBiased
+        && (ew.state == SlotState::Sealed || ew.state == SlotState::Live || ew.state == SlotState::Rejected
+            || ew.state == SlotState::LiveLaneOwned || ew.state == SlotState::RejectedLaneOwned);
+    const bool exactDiscarded = (exact.discardedSeq == exactBiased);
+    if (!exactRenderHeld && !exactDiscarded)
         counters_.releaseThroughExactOrderErrors.fetch_add(1, std::memory_order_relaxed);
-    } else {
-        Slot& exact = slots_[SlotOf(upToSeq)];
-        const uint64_t exactBiased = Biased(upToSeq);
-        const SlotWord ew = Unpack(exact.word.load(std::memory_order_acquire));
-        const bool exactRenderHeld =
-            ew.seq == exactBiased
-            && (ew.state == SlotState::Sealed || ew.state == SlotState::Live || ew.state == SlotState::Rejected
-                || ew.state == SlotState::LiveLaneOwned || ew.state == SlotState::RejectedLaneOwned);
-        const bool exactDiscarded = (exact.discardedSeq == exactBiased);
-        if (!exactRenderHeld && !exactDiscarded)
-            counters_.releaseThroughExactOrderErrors.fetch_add(1, std::memory_order_relaxed);
-    }
-    const uint64_t limit = upToSeq > kSlotSeqMask - ring_ ? kSlotSeqMask : Biased(upToSeq);
+    const uint64_t limit = Biased(upToSeq);
     uint32_t released = 0;
     const bool fullScan = !hasReleasedThrough_ || (upToSeq - releasedThrough_) >= uint64_t(ring_);
     if (fullScan) {
@@ -391,6 +417,30 @@ bool SlotSet::ReleaseSlotIfThrough(Slot& s, uint64_t limit, uint64_t releaseValu
         }
         return true;
     }
+}
+
+PublishedSlotView SlotSet::PublishedViewOf(uint64_t seq) const
+{
+    PublishedSlotView v;
+    if (seq > kSlotSeqMask - ring_)
+        return v;
+    const uint16_t idx = SlotOf(seq);
+    const Slot& s = slots_[idx];
+    const SlotWord w = Unpack(s.word.load(std::memory_order_acquire));
+    if (w.seq != Biased(seq) || !HasContent(w.state))
+        return v;
+    v.present = true;
+    v.seq = seq;
+    v.gen = w.gen;
+    v.state = w.state;
+    if (UsesLaneHeader(w.state)) {
+        v.index = int(idx);
+        v.cgen = s.laneCgen.load(std::memory_order_acquire);
+    } else {
+        v.index = int(s.liveIndexPub.load(std::memory_order_acquire));
+        v.cgen = s.liveCgen.load(std::memory_order_acquire);
+    }
+    return v;
 }
 
 void SlotSet::Ack(LaneTicket& t)

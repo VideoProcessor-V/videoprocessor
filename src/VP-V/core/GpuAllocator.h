@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <map>
 #include <string>
 #include <tuple>
@@ -139,26 +140,27 @@ struct ArenaPlan {
     uint32_t OwnerCount(uint16_t scope, const char* owner, const TexShape& s) const
     {
         uint32_t n = 0;
-        const std::string o = owner ? owner : "";
+        const char* const o = owner ? owner : "";
         for (const ArenaRequest& r : admitted)
-            if (r.scope == scope && r.shape == s && std::string(r.owner ? r.owner : "") == o)
+            if (r.scope == scope && r.shape == s && std::strcmp(r.owner ? r.owner : "", o) == 0)
                 n += r.count;
         return n;
     }
     uint32_t OwnerBase(uint16_t scope, const char* owner, const TexShape& s) const
     {
         uint32_t n = 0;
-        const std::string o = owner ? owner : "";
+        const char* const o = owner ? owner : "";
         for (const ArenaRequest& r : admitted)
-            if (r.scope == scope && r.shape == s && std::string(r.owner ? r.owner : "") < o)
+            if (r.scope == scope && r.shape == s && std::strcmp(r.owner ? r.owner : "", o) < 0)
                 n += r.count;
         return n;
     }
     // Whether `owner` asked for `shape` in `scope` and was admitted (not shed by tier).
     bool Admits(uint16_t scope, const char* owner, const TexShape& s) const
     {
+        const char* const o = owner ? owner : "";
         for (const ArenaRequest& r : admitted)
-            if (r.scope == scope && r.shape == s && std::string(r.owner) == std::string(owner ? owner : ""))
+            if (r.scope == scope && r.shape == s && std::strcmp(r.owner ? r.owner : "", o) == 0)
                 return true;
         return false;
     }
@@ -173,24 +175,16 @@ inline ArenaPlan PlanArena(const std::vector<ArenaRequest>& requests, Tier maxTi
     ArenaPlan plan;
     plan.maxTier = maxTier;
     for (const ArenaRequest& r : requests) {
-        if (TierRank(r.tier) > TierRank(maxTier)) {
-            ++plan.shedRequests;
-            continue;
-        }
-        if (r.count == 0 || r.shape.w == 0 || r.shape.h == 0)
-            continue;
+        if (TierRank(r.tier) > TierRank(maxTier)) { ++plan.shedRequests; continue; }
+        if (r.count == 0 || r.shape.w == 0 || r.shape.h == 0) continue;
         plan.admitted.push_back(r);
     }
     std::sort(plan.admitted.begin(), plan.admitted.end(), [](const ArenaRequest& a, const ArenaRequest& b) {
-        if (a.scope != b.scope)
-            return a.scope < b.scope;
-        const int c = std::string(a.owner ? a.owner : "").compare(std::string(b.owner ? b.owner : ""));
-        if (c != 0)
-            return c < 0;
-        if (a.shape != b.shape)
-            return ShapeLess(a.shape, b.shape);
-        if (a.count != b.count)
-            return a.count < b.count;
+        if (a.scope != b.scope) return a.scope < b.scope;
+        const int c = std::strcmp(a.owner ? a.owner : "", b.owner ? b.owner : "");
+        if (c != 0) return c < 0;
+        if (a.shape != b.shape) return ShapeLess(a.shape, b.shape);
+        if (a.count != b.count) return a.count < b.count;
         return TierRank(a.tier) < TierRank(b.tier);
     });
     // Per scope, per shape: the textures it holds at once. Capacity = the max over scopes.

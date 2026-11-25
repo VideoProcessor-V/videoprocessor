@@ -406,6 +406,28 @@ namespace MotionValidity
 			static std::atomic<ConfirmedCutFn> reader{ nullptr };
 			return reader;
 		}
+		// K#9: per-host scene seam (works with 2+ renderers). Checked when host_ and ConfirmedCutHostReader() are both non-null;
+		// falls back to ConfirmedCutReader() otherwise.
+		using ConfirmedCutForHostFn = bool (*)(const void* host, uint64_t seq);
+		static std::atomic<ConfirmedCutForHostFn>& ConfirmedCutHostReader()
+		{
+			static std::atomic<ConfirmedCutForHostFn> reader{ nullptr };
+			return reader;
+		}
+		void SetHost(const void* h) noexcept { host_.store(h, std::memory_order_release); }
+		const void* Host() const noexcept { return host_.load(std::memory_order_acquire); }
+		bool IsConfirmedCut(uint64_t seq) const
+		{
+			const void* const h = host_.load(std::memory_order_acquire);
+			if (h != nullptr)
+			{
+				const ConfirmedCutForHostFn hostReader = ConfirmedCutHostReader().load(std::memory_order_acquire);
+				if (hostReader != nullptr)
+					return hostReader(h, seq);
+			}
+			const ConfirmedCutFn reader = ConfirmedCutReader().load(std::memory_order_acquire);
+			return reader != nullptr && reader(seq);
+		}
 		// Every state's confirmed-cut refusals, process-wide and from all readers (GF-P4 S-2): the scene producer shows it on its status
 		// lines (the states live in the engines, which the producer cannot see; audit U7ACC MUST 4, never log-only).
 		static std::atomic<uint64_t>& ConfirmedCutRefusalsAll()
@@ -417,8 +439,7 @@ namespace MotionValidity
 		{
 			if (!(Adjacent(a, b) && SpanStatus(a, b) != SpanState::Invalid))   // C2a-F 1: Unknown (unbound) refuses nothing
 				return false;
-			const ConfirmedCutFn reader = ConfirmedCutReader().load(std::memory_order_acquire);
-			if (reader != nullptr && reader(b))
+			if (IsConfirmedCut(b))
 			{
 				NoteConfirmedCutRefusal();
 				return false;
@@ -657,6 +678,7 @@ namespace MotionValidity
 		std::atomic<int> lastRequest{ static_cast<int>(Cause::Resync) };   // the most recent request's cause
 		std::atomic<uint64_t> unbindMoves{ 0 };
 		mutable std::atomic<uint64_t> confirmedCutRefusals{ 0 };   // U7-accuracy: pairs refused at a confirmed cut
+		std::atomic<const void*> host_{ nullptr };                 // K#9: renderer key for ConfirmedCutHostReader()
 
 		mutable std::mutex keptMutex;
 		uint64_t lastKept = 0, previousKept = 0, keptEpoch = 0;
