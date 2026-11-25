@@ -2658,8 +2658,13 @@ namespace Vpv
 		{
 			out = SceneFacts();
 			const std::shared_ptr<HostState> st = hosts_.Find(host);
-			const std::shared_ptr<Bundle> b = st ? std::atomic_load(&st->bundle) : nullptr;
-			if (!b)
+			if (!st)
+			{
+				out.why = "unknown renderer";
+				return false;
+			}
+			const std::shared_ptr<Bundle> b = std::atomic_load(&st->bundle);
+			if (!b || !b->memo)
 			{
 				out.why = "no analysis lane";
 				return false;
@@ -2709,9 +2714,9 @@ namespace Vpv
 				// seq - 1 has had its render-order fill (it is not ahead of the seal itself).
 				const bool prevRendered = ahead && seq > 1 && !b->memo->AheadOfSeal(seq - 1);
 				SceneFacts f;
-				if (!b)
+				if (!b || !b->memo)
 					f.why = "no analysis lane";
-				if (!b || !SceneFactsFor(st, *b, seq, f, &done, ahead) || !f.valid)
+				if (!b || !b->memo || !SceneFactsFor(st, *b, seq, f, &done, ahead) || !f.valid)
 				{
 					if (answer)
 						answer->why = f.why;

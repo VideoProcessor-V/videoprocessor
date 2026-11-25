@@ -199,7 +199,7 @@ namespace Vpv
 			// The scene of frame `seq` (normally the render thread, after the seal of `seq`): the U7 v2 sequence verdict over the P4 records
 			// around it, the pair fade against `seq - 1` (SkeletonFacts.h SceneFacts). The pair is asked for through the memo (get-or-compute);
 			// off the render thread every record is the lane's published copy. False when a record is not readable (SceneFacts::why names it).
-			bool SceneFactsOf(const void* host, uint64_t seq, SceneFacts& out) const;
+			bool SceneFactsOf(const void* host, uint64_t seq, SceneFacts& out) const override;
 			// The SCENE PRODUCT (W1-C7): cut / fade of frame `seq` against `seq - 1`, the one reader every consumer uses (the camera extension's
 			// ReadScene reads the same store group). Order: the frame-analysis store's scene group (published by this module at the seal of
 			// `seq`); else classified from the two P4 records now (SceneFactsOf), written into the store when it holds the frame's record. The
