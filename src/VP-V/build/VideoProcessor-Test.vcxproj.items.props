@@ -1469,7 +1469,7 @@
     <ClCompile Include="..\VP-V\modules\motion\estimation\tests\MatcherPyramidUnionTests.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>
-    <ClCompile Include="..\VP-V\modules\motion\estimation\global_model\link\NativeCopyReadback.cpp">
+    <ClCompile Include="..\VP-V\modules\drive\led_measure\NativeCopyReadback.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
     </ClCompile>

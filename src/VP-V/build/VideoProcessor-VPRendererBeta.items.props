@@ -100,7 +100,7 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\link\CameraFitProducer.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\link\CameraFitWorker.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\link\FieldReadbackRing.cpp" />
-    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\link\NativeCopyReadback.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\drive\led_measure\NativeCopyReadback.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)..\modules\motion\estimation\global_model\link\CameraLane.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>

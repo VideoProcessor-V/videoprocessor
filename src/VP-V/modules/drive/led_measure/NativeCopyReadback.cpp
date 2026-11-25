@@ -6,16 +6,17 @@
 #include <libplacebo/shaders/custom.h>
 
 #include <cstring>
+#include <utility>
 #if defined(_M_X64) || defined(_M_IX86)
 #include <immintrin.h>
 #include <intrin.h>
 #endif
 
-namespace CameraLink
+namespace LedDrive
 {
 	namespace
 	{
-		// Two variants. The same texture is never bound to two sampled descriptors: on D3D11/WARP a
+		// Two variants per channel layout. The same texture is never bound to two sampled descriptors: on D3D11/WARP a
 		// pass with a duplicated binding wrote nothing (the readback came back zero).
 		const char* kCopyBody1 = R"GLSL(
 ivec2 p = ivec2(gl_GlobalInvocationID.xy);
@@ -29,6 +30,20 @@ ivec2 d = ivec2(nc_dim);
 if (p.x < d.x && p.y < d.y) {
     imageStore(nc_dst, p, texelFetch(nc_a, p, 0));
     imageStore(nc_dst, p + ivec2(0, d.y), texelFetch(nc_b, p, 0));
+}
+)GLSL";
+		const char* kCopyBodyR32F1 = R"GLSL(
+ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+ivec2 d = ivec2(nc_dim);
+if (p.x < d.x && p.y < d.y)
+    imageStore(nc_dst, p, vec4(texelFetch(nc_a, p, 0).r, 0.0, 0.0, 0.0));
+)GLSL";
+		const char* kCopyBodyR32F2 = R"GLSL(
+ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+ivec2 d = ivec2(nc_dim);
+if (p.x < d.x && p.y < d.y) {
+    imageStore(nc_dst, p, vec4(texelFetch(nc_a, p, 0).r, 0.0, 0.0, 0.0));
+    imageStore(nc_dst, p + ivec2(0, d.y), vec4(texelFetch(nc_b, p, 0).r, 0.0, 0.0, 0.0));
 }
 )GLSL";
 
@@ -104,17 +119,24 @@ if (p.x < d.x && p.y < d.y) {
 		return out;
 	}
 
-	bool NativeCopyReadback::Create(pl_log log, pl_gpu gpu, int slots, int w, int h, int planes, bool fp16)
+	bool NativeCopyReadback::Create(pl_log log, pl_gpu gpu, int slots, int w, int h, int planes, CopyFormat fmt)
 	{
 		Release();
 		if (!gpu || w <= 0 || h <= 0 || (planes != 1 && planes != 2))
 			return false;
-		const DXGI_FORMAT fmt = fp16 ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R32G32B32A32_FLOAT;
-		std::unique_ptr<LedDrive::NativeTexReadback> n(new LedDrive::NativeTexReadback());
-		if (!n->Create(gpu, slots, w, h * planes, fmt))
+		DXGI_FORMAT dxgiFmt = DXGI_FORMAT_R32G32B32A32_FLOAT;
+		switch (fmt)
+		{
+		case CopyFormat::Rgba32F: dxgiFmt = DXGI_FORMAT_R32G32B32A32_FLOAT; break;
+		case CopyFormat::Rgba16F: dxgiFmt = DXGI_FORMAT_R16G16B16A16_FLOAT; break;
+		case CopyFormat::R32F:    dxgiFmt = DXGI_FORMAT_R32_FLOAT; break;
+		default: return false;
+		}
+		std::unique_ptr<NativeTexReadback> n(new NativeTexReadback());
+		if (!n->Create(gpu, slots, w, h * planes, dxgiFmt))
 			return false;
 		m_dispatch = pl_dispatch_create(log, gpu);
-		GpuAttribution::Watch(m_dispatch, "camera_native_readback");
+		GpuAttribution::Watch(m_dispatch, "native_copy_readback");
 		if (!m_dispatch)
 		{
 			n->Release(gpu);
@@ -125,8 +147,21 @@ if (p.x < d.x && p.y < d.y) {
 		m_w = w;
 		m_h = h;
 		m_planes = planes;
-		m_fp16 = fp16;
+		m_format = fmt;
 		return true;
+	}
+
+	bool NativeCopyReadback::Create(pl_log log, pl_gpu gpu, int slots, int w, int h, int planes, bool fp16)
+	{
+		return Create(log, gpu, slots, w, h, planes, fp16 ? CopyFormat::Rgba16F : CopyFormat::Rgba32F);
+	}
+
+	size_t NativeCopyReadback::TightBytes() const
+	{
+		if (!Active())
+			return 0;
+		return static_cast<size_t>(m_w) * static_cast<size_t>(m_h)
+			* static_cast<size_t>(m_planes) * static_cast<size_t>(Channels()) * sizeof(float);
 	}
 
 	uint64_t NativeCopyReadback::AllocatedBytes() const
@@ -134,9 +169,14 @@ if (p.x < d.x && p.y < d.y) {
 		if (!Active())
 			return 0;
 		// Exact allocation derivation (NativeTexReadback::Create): each slot owns 1 D3D11_USAGE_DEFAULT target texture
-		// and 1 D3D11_USAGE_STAGING staging texture of w x (h * planes), with 4 channels of 16-bit or 32-bit float.
+		// and 1 D3D11_USAGE_STAGING staging texture of w x (h * planes), with 4 B/texel (R32F), 8 B/texel (Rgba16F),
+		// or 16 B/texel (Rgba32F).
 		constexpr uint64_t kTexturesPerSlot = 2ull;
-		const uint64_t texelBytes = m_fp16 ? (4ull * sizeof(uint16_t)) : (4ull * sizeof(float));
+		uint64_t texelBytes = 4ull * sizeof(float);
+		if (m_format == CopyFormat::Rgba16F)
+			texelBytes = 4ull * sizeof(uint16_t);
+		else if (m_format == CopyFormat::R32F)
+			texelBytes = sizeof(float);
 		return static_cast<uint64_t>(Slots()) * static_cast<uint64_t>(m_w) * static_cast<uint64_t>(m_h)
 			* static_cast<uint64_t>(m_planes) * texelBytes * kTexturesPerSlot;
 	}
@@ -158,9 +198,10 @@ if (p.x < d.x && p.y < d.y) {
 		// Float variables only, as SourceResolutionMonitor (the proven native-readback pass).
 		const float dim[2] = { static_cast<float>(m_w), static_cast<float>(m_h) };
 		const pl_shader_var vars[1] = { { pl_var_vec2("nc_dim"), dim, true } };
+		const bool r32f = m_format == CopyFormat::R32F;
 		pl_custom_shader custom{};
-		custom.description = "VideoProcessor camera link: readback copy";
-		custom.body = two ? kCopyBody2 : kCopyBody1;
+		custom.description = "VideoProcessor native readback copy";
+		custom.body = r32f ? (two ? kCopyBodyR32F2 : kCopyBodyR32F1) : (two ? kCopyBody2 : kCopyBody1);
 		custom.input = PL_SHADER_SIG_NONE;
 		custom.output = PL_SHADER_SIG_NONE;
 		custom.descriptors = desc;
@@ -199,10 +240,10 @@ if (p.x < d.x && p.y < d.y) {
 		return true;
 	}
 
-	LedDrive::ReadState NativeCopyReadback::Poll(int slot)
+	ReadState NativeCopyReadback::Poll(int slot)
 	{
 		if (!m_native)
-			return LedDrive::ReadState::Pending;
+			return ReadState::Pending;
 		if (m_pendingFlush)
 			FlushPending();
 		return m_native->Poll(slot);
@@ -215,8 +256,8 @@ if (p.x < d.x && p.y < d.y) {
 		if (m_pendingFlush)
 			FlushPending();
 		const int rows = m_h * m_planes;
-		if (!m_fp16)
-			return m_native->Read(slot, dst, static_cast<size_t>(m_w) * 16u, rows);
+		if (m_format != CopyFormat::Rgba16F)
+			return m_native->Read(slot, dst, static_cast<size_t>(m_w) * static_cast<size_t>(Channels()) * sizeof(float), rows);
 		const size_t rowElems = static_cast<size_t>(m_w) * 4u;
 		return m_native->ReadRows(slot, rows, [dst, rowElems](const unsigned char* src, size_t pitch, int nRows)
 		{
@@ -254,6 +295,126 @@ if (p.x < d.x && p.y < d.y) {
 			pl_dispatch_destroy(&m_dispatch);
 		m_gpu = nullptr;
 		m_w = m_h = 0;
-		m_fp16 = false;
+		m_planes = 1;
+		m_format = CopyFormat::Rgba32F;
+	}
+
+	// ---- NativeCopyReadbackDevice (VpSkeleton::IReadbackDevice) ---------------------------------------------------------
+
+	bool NativeCopyReadbackDevice::Create(pl_log log, pl_gpu gpu, int slots, int w, int h, CopyFormat fmt,
+		SourceResolver resolver)
+	{
+		Release();
+		if (slots <= 0 || !m_copy.Create(log, gpu, slots, w, h, 1, fmt))
+			return false;
+		const size_t slotFloats = static_cast<size_t>(w) * static_cast<size_t>(h) * static_cast<size_t>(m_copy.Channels());
+		m_slotBufs.resize(static_cast<size_t>(slots));
+		for (size_t i = 0; i < m_slotBufs.size(); ++i)
+			m_slotBufs[i].assign(slotFloats, 0.0f);
+		m_slotMapped.assign(static_cast<size_t>(slots), 0u);
+		m_slotFailedCounted.assign(static_cast<size_t>(slots), 0u);
+		m_resolver = std::move(resolver);
+		m_lastError = S_OK;
+		m_failedCount = 0;
+		return true;
+	}
+
+	void NativeCopyReadbackDevice::SetResolver(SourceResolver resolver)
+	{
+		m_resolver = std::move(resolver);
+	}
+
+	void NativeCopyReadbackDevice::RecordSlotFailure(int stagingIndex)
+	{
+		if (ValidSlot(stagingIndex) && m_slotFailedCounted[static_cast<size_t>(stagingIndex)] == 0u)
+		{
+			m_slotFailedCounted[static_cast<size_t>(stagingIndex)] = 1u;
+			++m_failedCount;
+		}
+		m_lastError = m_copy.LastError();
+	}
+
+	bool NativeCopyReadbackDevice::CopyToStaging(VpSkeleton::ProductId product, uint64_t seq, int stagingIndex)
+	{
+		if (!Active() || !m_resolver || !ValidSlot(stagingIndex))
+			return false;
+		pl_tex src = m_resolver(product, seq);
+		if (!src)
+			return false;
+		m_slotMapped[static_cast<size_t>(stagingIndex)] = 0u;
+		m_slotFailedCounted[static_cast<size_t>(stagingIndex)] = 0u;
+		if (!m_copy.Start(stagingIndex, src, nullptr))
+			return false;
+		if (!m_deferFlush)
+			m_copy.FlushPending();
+		return true;
+	}
+
+	bool NativeCopyReadbackDevice::QueryDone(int stagingIndex)
+	{
+		if (!Active() || !ValidSlot(stagingIndex))
+			return false;
+		if (m_slotMapped[static_cast<size_t>(stagingIndex)] != 0u)
+			return true;
+		const ReadState st = m_copy.Poll(stagingIndex);
+		if (st == ReadState::Ready)
+			return true;
+		if (st == ReadState::Failed)
+			RecordSlotFailure(stagingIndex);
+		return false;
+	}
+
+	const void* NativeCopyReadbackDevice::MapNoWait(int stagingIndex, size_t* bytes)
+	{
+		if (bytes)
+			*bytes = 0;
+		if (!Active() || !ValidSlot(stagingIndex))
+			return nullptr;
+		const size_t idx = static_cast<size_t>(stagingIndex);
+		if (m_slotMapped[idx] != 0u)
+		{
+			if (bytes)
+				*bytes = m_copy.TightBytes();
+			return m_slotBufs[idx].data();
+		}
+		const ReadState st = m_copy.Poll(stagingIndex);
+		if (st == ReadState::Failed)
+		{
+			RecordSlotFailure(stagingIndex);
+			return nullptr;
+		}
+		if (st != ReadState::Ready)
+			return nullptr;
+		if (!m_copy.Read(stagingIndex, m_slotBufs[idx].data()))
+		{
+			if (FAILED(m_copy.LastError()))
+				RecordSlotFailure(stagingIndex);
+			return nullptr;
+		}
+		m_slotMapped[idx] = 1u;
+		if (bytes)
+			*bytes = m_copy.TightBytes();
+		return m_slotBufs[idx].data();
+	}
+
+	void NativeCopyReadbackDevice::Unmap(int stagingIndex)
+	{
+		if (!ValidSlot(stagingIndex))
+			return;
+		m_slotMapped[static_cast<size_t>(stagingIndex)] = 0u;
+		if (Active())
+			m_copy.Discard(stagingIndex);
+	}
+
+	void NativeCopyReadbackDevice::Release()
+	{
+		m_copy.Release();
+		m_slotBufs.clear();
+		m_slotMapped.clear();
+		m_slotFailedCounted.clear();
+		m_resolver = nullptr;
+		m_deferFlush = false;
+		m_lastError = S_OK;
+		m_failedCount = 0;
 	}
 }

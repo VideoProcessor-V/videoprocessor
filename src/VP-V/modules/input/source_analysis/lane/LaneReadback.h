@@ -39,6 +39,34 @@ public:
     State StateOf(size_t i) const { return slots_[i].state; }
     const ReadbackCounters& Counters() const { return counters_; }
 
+    // Inspection & lifecycle helpers for non-blocking async readback owners (S#2 / R2).
+    bool HasInFlight(uint64_t seq) const
+    {
+        for (size_t i = 0; i < slots_.size(); ++i)
+            if (slots_[i].state == State::Copying && slots_[i].seq == seq)
+                return true;
+        return false;
+    }
+
+    bool HasReady(uint64_t seq) const
+    {
+        for (size_t i = 0; i < slots_.size(); ++i)
+            if (slots_[i].state == State::Ready && slots_[i].seq == seq)
+                return true;
+        return false;
+    }
+
+    bool HasPending(uint64_t seq) const { return HasInFlight(seq) || HasReady(seq); }
+
+    // Resets all slot states to Free (for device teardown / resize).
+    void Reset()
+    {
+        for (size_t i = 0; i < slots_.size(); ++i) {
+            slots_[i].state = State::Free;
+            slots_[i].seq = 0;
+        }
+    }
+
     // Needs a Free buffer (lowest index first). False: none free (counted) or the copy failed.
     bool Submit(ProductId product, uint64_t seq)
     {
