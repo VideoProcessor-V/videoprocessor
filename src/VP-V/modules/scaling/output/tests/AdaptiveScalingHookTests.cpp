@@ -2984,5 +2984,233 @@ namespace VideoProcessorTest
 			AssertCleanLibplaceboLog(log);
 			Assert::AreEqual(0, pl_renderer_get_errors(fixture.Renderer()).num_disabled_hooks, L"A hook was disabled");
 		}
+
+		// Q#3 (GEM-071 / ADS-STATE, WARP GPU):
+		// UpdateMap must restart the per-block temporal grain map on a source sequence gap
+		// (sequence != mapSequence + 1), snapping cleanly to the new frame's target instead of
+		// smoothing against the stale pre-gap map when cut = false.
+		// Mandatory in-test negative control: exact same Frame 1 -> Frame 2 inputs with CONSECUTIVE
+		// sequence numbers (seq = 1 -> seq = 2, cut = false) MUST smooth slowly (grainMapSmoothMs = 500 ms)
+		// from ~0.40 toward 1.0 (landing well below 0.70), proving smoothing is genuinely active and that
+		// the snap on seq = 1 -> seq = 5 (and backward gap seq = 5 -> seq = 3) is caused strictly by the gap.
+		TEST_METHOD(GrainMapRestartsAfterASequenceGap)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+
+			const std::string ssimSource = LoadBundledShader("SSimDownscaler.glsl");
+			Assert::IsFalse(ssimSource.empty(), L"SSimDownscaler.glsl must load");
+			const pl_hook* ssim = pl_mpv_user_shader_parse(gpu, ssimSource.data(), ssimSource.size());
+			Assert::IsNotNull(ssim, L"SSimDownscaler.glsl must parse");
+
+			pl_fmt srcFmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR));
+			pl_fmt dstFmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+			pl_fmt gridFmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, PL_FMT_CAP_SAMPLEABLE);
+			pl_fmt trustFmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 1, 32, 32, PL_FMT_CAP_SAMPLEABLE);
+			Assert::IsTrue(srcFmt != nullptr && dstFmt != nullptr && gridFmt != nullptr && trustFmt != nullptr,
+				L"WARP must provide float32 source, target, block-grid, and frame-trust formats");
+
+			static constexpr int sw = 128, sh = 96, dw = 64, dh = 48;
+			static constexpr int bw = sw / 16, bh = sh / 16;
+
+			// Uniform clean mid-grey source texture so scalar grain state stays healthy (state.a == 1.0 after frame 1).
+			std::vector<float> srcData(static_cast<size_t>(sw) * sh * 4, 0.5f);
+			for (size_t i = 0; i < static_cast<size_t>(sw) * sh; ++i)
+				srcData[i * 4 + 3] = 1.0f;
+			pl_tex_params stp{};
+			stp.w = sw;
+			stp.h = sh;
+			stp.format = srcFmt;
+			stp.sampleable = true;
+			stp.initial_data = srcData.data();
+			pl_tex srcTex = pl_tex_create(gpu, &stp);
+			Assert::IsNotNull(srcTex, L"RGBA32F source texture creation failed");
+
+			auto makeUniformGrid = [&](float r, float g, float b, float a) -> pl_tex
+			{
+				std::vector<float> data(static_cast<size_t>(bw) * bh * 4, 0.0f);
+				for (size_t i = 0; i < static_cast<size_t>(bw) * bh; ++i)
+				{
+					data[i * 4 + 0] = r;
+					data[i * 4 + 1] = g;
+					data[i * 4 + 2] = b;
+					data[i * 4 + 3] = a;
+				}
+				pl_tex_params gp{};
+				gp.w = bw;
+				gp.h = bh;
+				gp.format = gridFmt;
+				gp.sampleable = true;
+				gp.initial_data = data.data();
+				pl_tex tex = pl_tex_create(gpu, &gp);
+				Assert::IsNotNull(tex, L"RGBA32F block-grid texture creation failed");
+				return tex;
+			};
+
+			// Zero-motion trusted field (f.z = 1.0 > 0.5), frameTrust = 1.0 >= minTrustedShare (0.25).
+			pl_tex fieldTex = makeUniformGrid(0.0f, 0.0f, 1.0f, 0.0f);
+			// Heavy-grain error (ge.r = 20.0 -> energy ~= 126.6 >> grainHi = 8.0 -> target = grainFloor = 0.40).
+			pl_tex heavyErrorTex = makeUniformGrid(20.0f, 127.5f, 0.0f, 1.0f);
+			// Clean error (ge.r = 0.0 -> energy = 0.0 < grainLo = 2.0 -> target = 1.0).
+			pl_tex cleanErrorTex = makeUniformGrid(0.0f, 127.5f, 0.0f, 1.0f);
+
+			const float trustVal = 1.0f;
+			pl_tex_params trp{};
+			trp.w = 1;
+			trp.h = 1;
+			trp.format = trustFmt;
+			trp.sampleable = true;
+			trp.initial_data = &trustVal;
+			pl_tex trustTex = pl_tex_create(gpu, &trp);
+			Assert::IsNotNull(trustTex, L"frame trust texture creation failed");
+
+			AdaptiveDownscale::Settings st;
+			st.grainMap = true;
+			st.grainMapSmoothMs = 500.0f;   // slow smoothing (~8% per 24 fps frame) so blended vs snapped is unmistakable
+			st.grainLo = 2.0f;
+			st.grainHi = 8.0f;
+			st.grainFloor = 0.4f;
+			st.ssimResidualStabilise = false;
+
+			auto noCutSource = [](uint64_t, uint64_t)
+			{
+				AdaptiveDownscale::CutVerdict v;
+				v.state = AdaptiveDownscale::CutVerdict::State::Known;
+				v.cut = false;
+				return v;
+			};
+
+			auto renderFrame = [&](AdaptiveDownscale::Module& module, uint64_t seq, pl_tex errorTex)
+			{
+				pl_tex_params tp{};
+				tp.w = dw;
+				tp.h = dh;
+				tp.format = dstFmt;
+				tp.renderable = true;
+				tp.host_readable = true;
+				pl_tex target = pl_tex_create(gpu, &tp);
+				Assert::IsNotNull(target, L"RGBA32F target texture creation failed");
+
+				pl_frame image = TargetLutGpuFixture::MakeRgbFrame(srcTex);
+				pl_frame out = TargetLutGpuFixture::MakeRgbFrame(target);
+				image.color.transfer = out.color.transfer = PL_COLOR_TRC_GAMMA22;
+				image.color.primaries = out.color.primaries = PL_COLOR_PRIM_BT_709;
+
+				pl_render_params params = pl_render_default_params;
+				params.dither_params = nullptr;
+				params.error_diffusion = nullptr;
+				params.downscaler = &pl_filter_mitchell;
+				params.disable_linear_scaling = true;
+
+				module.SetFrame(st, seq, 1.0f / 24.0f);
+				AdaptiveDownscale::GrainField gf;
+				gf.error = errorTex;
+				gf.field = fieldTex;
+				gf.frameTrust = trustTex;
+				gf.minTrustedShare = 0.25f;
+				gf.sourceCrop = { 0.0f, 0.0f, static_cast<float>(sw), static_cast<float>(sh) };
+				module.SetGrainField(gf);
+
+				const pl_hook* hooks[3] = { module.Measure(), ssim, module.Blend() };
+				params.hooks = hooks;
+				params.num_hooks = 3;
+
+				const bool ok = pl_render_image(fixture.Renderer(), &image, &out, &params);
+				pl_gpu_finish(gpu);
+				pl_tex_destroy(gpu, &target);
+				Assert::IsTrue(ok, L"pl_render_image failed on WARP");
+				Assert::IsTrue(module.Active() && module.Failures() == 0,
+					L"AdaptiveDownscale module must be active with zero failures");
+				Assert::IsTrue(module.CutAvailable(), L"precondition: cut verdict must stay Known (cut = false)");
+				Assert::IsTrue(module.LastMapState() == AdaptiveDownscale::MapState::Used,
+					L"grain map must be Used when grainMap = true and a valid GrainField is supplied");
+			};
+
+			auto checkGrainMapRange = [&](const AdaptiveDownscale::Module& module, float minAllowed, float maxAllowed,
+				const wchar_t* label)
+			{
+				pl_tex map = module.GrainMap();
+				Assert::IsNotNull(map, (std::wstring(label) + L": GrainMap() must be non-null").c_str());
+				Assert::AreEqual(bw, map->params.w, (std::wstring(label) + L": GrainMap width mismatch").c_str());
+				Assert::AreEqual(bh, map->params.h, (std::wstring(label) + L": GrainMap height mismatch").c_str());
+
+				std::vector<float> texels(static_cast<size_t>(bw) * bh * 4, 0.0f);
+				pl_tex_transfer_params dl{};
+				dl.tex = map;
+				dl.ptr = texels.data();
+				Assert::IsTrue(pl_tex_download(gpu, &dl), (std::wstring(label) + L": GrainMap download failed").c_str());
+
+				float minR = (std::numeric_limits<float>::max)();
+				float maxR = -(std::numeric_limits<float>::max)();
+				for (size_t i = 0; i < static_cast<size_t>(bw) * bh; ++i)
+				{
+					const float r = texels[i * 4 + 0];
+					const float g = texels[i * 4 + 1];
+					Assert::IsTrue(std::isfinite(r) && std::isfinite(g),
+						(std::wstring(label) + L": non-finite grainMap texel at block " + std::to_wstring(i)).c_str());
+					Assert::IsTrue(g > 0.5f,
+						(std::wstring(label) + L": expected trusted block (g > 0.5) at block " + std::to_wstring(i) +
+							L", got " + std::to_wstring(g)).c_str());
+					if (r < minR) minR = r;
+					if (r > maxR) maxR = r;
+				}
+				const std::wstring msg = std::wstring(label) + L": grainMap.r range [" + std::to_wstring(minR) +
+					L", " + std::to_wstring(maxR) + L"], expected within [" + std::to_wstring(minAllowed) +
+					L", " + std::to_wstring(maxAllowed) + L"]";
+				Assert::IsTrue(minR >= minAllowed && maxR <= maxAllowed, msg.c_str());
+			};
+
+			// 1. Sequence-gap case (seq = 1 -> seq = 5, plus backward jump seq = 5 -> seq = 3; cut = false throughout):
+			//    Frame 1 initializes grainMap.r at grainFloor (~0.40); after the sequence gap to seq = 5 with a clean
+			//    grainField, UpdateMap must treat it as first_map = 1 and snap cleanly to 1.0 (>= 0.99), NOT smooth from 0.40.
+			{
+				AdaptiveDownscale::Module gapMod;
+				gapMod.hostReadableMap = true;
+				gapMod.SetCutSource(noCutSource);
+
+				renderFrame(gapMod, 1, heavyErrorTex);
+				checkGrainMapRange(gapMod, 0.35f, 0.45f, L"sequence-gap Frame seq=1 (heavy grain)");
+
+				renderFrame(gapMod, 5, cleanErrorTex);
+				checkGrainMapRange(gapMod, 0.99f, 1.001f, L"sequence-gap Frame seq=5 (clean after 1->5 gap must snap to 1.0)");
+
+				// Backward sequence discontinuity (5 -> 3, 3 != 5 + 1, cut = false): must also snap cleanly back to floor.
+				renderFrame(gapMod, 3, heavyErrorTex);
+				checkGrainMapRange(gapMod, 0.35f, 0.45f, L"sequence-gap Frame seq=3 (heavy grain after 5->3 backward gap must snap to floor)");
+
+				gapMod.Release();
+			}
+
+			// 2. MANDATORY IN-TEST NEGATIVE CONTROL (exact same Frame 1 -> Frame 2 inputs with CONSECUTIVE seq = 1 -> seq = 2,
+			//    cut = false): with grainMapSmoothMs = 500 ms (~8% alpha at 24 fps), Frame 2 MUST smooth slowly from 0.40
+			//    toward 1.0 (~0.448, strictly > 0.41 and < 0.70), NOT snap — proving smoothing is active and the snap in
+			//    Step 1 is caused strictly by the sequence gap.
+			{
+				AdaptiveDownscale::Module consecMod;
+				consecMod.hostReadableMap = true;
+				consecMod.SetCutSource(noCutSource);
+
+				renderFrame(consecMod, 1, heavyErrorTex);
+				checkGrainMapRange(consecMod, 0.35f, 0.45f, L"negative control Frame seq=1 (heavy grain)");
+
+				renderFrame(consecMod, 2, cleanErrorTex);
+				checkGrainMapRange(consecMod, st.grainFloor + 0.01f, 0.70f,
+					L"negative control Frame seq=2 (consecutive clean must smooth slowly from 0.40, not snap)");
+
+				consecMod.Release();
+			}
+
+			for (pl_tex* t : { &srcTex, &fieldTex, &heavyErrorTex, &cleanErrorTex, &trustTex })
+				pl_tex_destroy(gpu, t);
+			pl_mpv_user_shader_destroy(&ssim);
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(log);
+			Assert::AreEqual(0, pl_renderer_get_errors(fixture.Renderer()).num_disabled_hooks, L"A hook was disabled");
+		}
 	};
 }
