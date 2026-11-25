@@ -1732,7 +1732,7 @@ namespace VideoProcessorTest
 				Assert::AreEqual(priv.status, ar.status, L"the same status");
 				Assert::AreEqual(uint64_t(0), arena.Exhausted(), L"the arena never ran short");
 				Assert::IsFalse(arena.FrameDecision().engaged, L"scratch_arena released");
-				Assert::IsTrue(arena.Acquired() >= 6, L"the arena was really used (six chroma-grid temporaries)");
+				Assert::IsTrue(arena.Acquired() >= 5, L"the arena was really used (five chroma-grid temporaries)");
 				LogF("%.0f arena acquires, %.0f exhausted (shared products: %.0f)", static_cast<double>(arena.Acquired()), static_cast<double>(arena.Exhausted()), static_cast<double>(shared));
 				arena.Release();
 			}
@@ -1800,25 +1800,25 @@ namespace VideoProcessorTest
 
 		TEST_METHOD(ChromaCflArenaGridRequestsMergeEqualShapes)
 		{
-			// SA7: on a backend where the 2-component float format falls back to the 4-component one, the six temporaries have one
-			// shape: one request of 6, not two requests the plan could count as 4 + 2 of different pools. Distinct formats: 4 and 2.
+			// SA7 + GEM-074: on a backend where the 2-component float format falls back to the 4-component one, the five temporaries have one
+			// shape: one request of 5, not two requests the plan could count as 4 + 1 of different pools. Distinct formats: 4 and 1 (m.gc removed).
 			const auto same = ChromaUpscale::Gpu::CflModule::GridRequests(VpSkeleton::TexFormat::RGBA32F, VpSkeleton::TexFormat::RGBA32F, 64, 48);
-			Assert::IsTrue(same.size() == 1 && same[0].count == 6, L"equal formats: one request of six");
+			Assert::IsTrue(same.size() == 1 && same[0].count == 5, L"equal formats: one request of five");
 			const auto split = ChromaUpscale::Gpu::CflModule::GridRequests(VpSkeleton::TexFormat::RGBA32F, VpSkeleton::TexFormat::RG32F, 64, 48);
-			Assert::IsTrue(split.size() == 2 && split[0].count == 4 && split[1].count == 2, L"distinct formats: 4 + 2");
+			Assert::IsTrue(split.size() == 2 && split[0].count == 4 && split[1].count == 1, L"distinct formats: 4 + 1");
 			const VpSkeleton::ArenaPlan plan = VpSkeleton::PlanArena(same, VpSkeleton::Tier::T2);
-			Assert::IsTrue(plan.pools.size() == 1 && plan.pools[0].capacity == 6, L"the plan reserves all six");
-			Assert::IsTrue(plan.OwnerCount(ChromaUpscale::Gpu::kArenaScope, ChromaUpscale::Gpu::kArenaOwner, same[0].shape) == 6, L"the owner may hold six");
+			Assert::IsTrue(plan.pools.size() == 1 && plan.pools[0].capacity == 5, L"the plan reserves all five");
+			Assert::IsTrue(plan.OwnerCount(ChromaUpscale::Gpu::kArenaScope, ChromaUpscale::Gpu::kArenaOwner, same[0].shape) == 5, L"the owner may hold five");
 		}
 
 		TEST_METHOD(ChromaCflGpuTextureBytesCountsTheArenaTemporaries)
 		{
-			// SA7: with the temporaries in the arena the module's own bytes drop by 16 per luma pixel (the luma split's bands) and 112
-			// per chroma pixel (lo..avg 80 + two chroma splits' bands 32); the default form is the private-texture form, unchanged.
+			// SA7 + GEM-074: with the temporaries in the arena the module's own bytes drop by 16 per luma pixel (the luma split's bands) and 104
+			// per chroma pixel (lo..avg 72 after m.gc removal + two chroma splits' bands 32); the default form is the private-texture form, unchanged.
 			const int W = 3840, H = 2160, cw = 1920, ch = 1080;
 			const uint64_t priv = ChromaUpscale::Gpu::CflModule::TextureBytes(W, H, cw, ch), inArena = ChromaUpscale::Gpu::CflModule::TextureBytes(W, H, cw, ch, true);
 			Assert::IsTrue(priv == ChromaUpscale::Gpu::CflModule::TextureBytes(W, H, cw, ch, false), L"the default is the private form");
-			Assert::IsTrue(priv - inArena == uint64_t(16) * W * H + uint64_t(112) * cw * ch, L"the temporaries move to the arena");
+			Assert::IsTrue(priv - inArena == uint64_t(16) * W * H + uint64_t(104) * cw * ch, L"the temporaries move to the arena");
 		}
 
 		TEST_METHOD(ChromaCflGpu444EarlyOutResetsGrainStatus)
