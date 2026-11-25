@@ -73,12 +73,12 @@ namespace Tests
 		}
 		TEST_METHOD(DmSlotsAreBuiltAndModifyTheTargetLight)
 		{
-			for (Id id : { Id::ColourDmCurve, Id::ColourDmTrims })
+			for (Id id : { Id::ColourDmPre, Id::ColourDmCurve, Id::ColourDmTrims })
 			{
 				Assert::IsTrue(PipelineSlots::Get(id).status == PipelineSlots::Status::Built);
 				Assert::IsTrue(PipelineSlots::ContractOf(id).modifies);
 			}
-			Assert::IsTrue(PipelineSlots::Get(Id::ColourDmPre).status == PipelineSlots::Status::Placeholder);
+			Assert::IsFalse(PipelineSlots::ContractOf(Id::ColourDmPre).movable);
 		}
 	};
 
