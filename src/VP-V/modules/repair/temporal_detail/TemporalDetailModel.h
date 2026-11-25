@@ -16,6 +16,7 @@
 #include <VP-V/core/Ramp.h>
 #include <VP-V/core/SkeletonAcquire.h>
 #include <VP-V/modules/motion/estimation/composed/WarpSampler.h>
+#include <VP-V/modules/repair/grain_split/P10gCpu.h>
 #include <VP-V/modules/repair/grain_split/GrainSplit.h>
 #include <VP-V/modules/repair/temporal_detail/TemporalDetail.h>
 #include <VP-V/modules/repair/temporal_detail/TemporalDetailMotion.h>
@@ -61,6 +62,12 @@ namespace TemporalDetail
 		uint64_t lag1Hits = 0;
 		uint64_t lag1UnavailableCount = 0;
 		std::string lag1UnavailableWhy;
+		// 15b A4b (input monitor P10g, ProductId 35): acquired per-block (N_b, g, f'^2 N_b, rho1) or visible single-frame fallback. Not in operator== (diagnostic).
+		bool usedP10gLevel = false;
+		uint64_t p10gHits = 0;
+		uint64_t p10gFallbacks = 0;
+		std::string p10gFallbackWhy;
+		std::vector<double> inputGrainNb, inputGrainRetained, inputGrainGate, inputGrainRho1;
 		std::vector<int> slotId;                  // -1 none
 		std::vector<long long> refSeq;            // source frame seq of the reference transferred from (-1 none; measurement)
 		std::vector<uint8_t> retired, refreshed, usedFuture, camera;
@@ -91,6 +98,13 @@ namespace TemporalDetail
 		if (!bytes.empty())
 			std::memcpy(bytes.data(), grain.v.data(), bytes.size());
 		return bytes;
+	}
+
+	// Re-exports of the owner unit's P10g CPU layout and serializer (repair/grain_split/P10gCpu.h).
+	using P10gBlockLevel = GrainSplit::LevelCpu::BlockLevel;
+	inline std::vector<uint8_t> PackCpuP10g(const std::vector<P10gBlockLevel>& blocks)
+	{
+		return GrainSplit::LevelCpu::Pack(blocks);
 	}
 
 	namespace Detail
@@ -510,6 +524,9 @@ namespace TemporalDetail
 		uint64_t Lag1Hits() const { return m_lag1Hits; }
 		uint64_t Lag1UnavailableCount() const { return m_lag1UnavailableCount; }
 		const std::string& LastLag1UnavailableWhy() const { return m_lastLag1UnavailableWhy; }
+		uint64_t P10gHits() const { return m_p10gHits; }
+		uint64_t P10gFallbacks() const { return m_p10gFallbacks; }
+		const std::string& LastP10gFallbackWhy() const { return m_lastP10gFallbackWhy; }
 
 		// Processes the active picture (in.active) as the whole plane: its border is the plane edge for every filter,
 		// statistic and warp; pixels outside it are copied unchanged (bit-exact).
@@ -544,6 +561,9 @@ namespace TemporalDetail
 		uint64_t m_lag1Hits = 0;
 		uint64_t m_lag1UnavailableCount = 0;
 		std::string m_lastLag1UnavailableWhy;
+		uint64_t m_p10gHits = 0;
+		uint64_t m_p10gFallbacks = 0;
+		std::string m_lastP10gFallbackWhy;
 		Plane m_prevGout;              // the previous frame's output grain (lag-1 input grain P_in is acquired from kP10GrainSplit)
 		bool m_havePrevG = false;
 		Plane m_lastOut;
@@ -986,7 +1006,46 @@ namespace TemporalDetail
 		const double peakDecay = std::pow(0.5, 1.0 / Frames(m_set.maxAgeSeconds, hz));
 		const double rise = 1.0 / fRise, fall = 1.0 / fFall;
 
-		const Analysis A = Detail::Analyse(in.luma, scale, B);
+		Analysis A = Detail::Analyse(in.luma, scale, B);
+
+		// --- 15b A4b: input monitor reads shared P10g (ProductId 35) through owner unit P10gCpu.h ---
+		bool usedP10g = false;
+		std::string p10gWhy;
+		std::vector<double> monNb, monRetained, monGate, monRho1;
+		{
+			VpSkeleton::SkeletonMemo* const memo = in.memo ? in.memo : m_memo;
+			if (GrainSplit::LevelCpu::Acquire(memo, in.seq, static_cast<size_t>(nb),
+				monNb, monRetained, monGate, monRho1, p10gWhy))
+			{
+				usedP10g = true;
+				A.N = monNb;
+				++m_p10gHits;
+			}
+			else
+			{
+				++m_p10gFallbacks;
+				m_lastP10gFallbackWhy = p10gWhy;
+				monNb = A.N;
+				monGate.assign(static_cast<size_t>(nb), 0.0);
+				monRho1.assign(static_cast<size_t>(nb), -1.0);
+				monRetained.assign(static_cast<size_t>(nb), 0.0);
+				for (int by = 0; by < bh; ++by)
+					for (int bx = 0; bx < bw; ++bx)
+					{
+						double sumF2 = 0.0;
+						int cnt = 0;
+						for (int yy = by * B; yy < (std::min)(h, (by + 1) * B); ++yy)
+							for (int xx = bx * B; xx < (std::min)(w, (bx + 1) * B); ++xx)
+							{
+								const double fv = A.f.at(xx, yy);
+								sumF2 += fv * fv;
+								++cnt;
+							}
+						const size_t bi = static_cast<size_t>(by) * bw + bx;
+						monRetained[bi] = (cnt > 0 ? sumF2 / static_cast<double>(cnt) : 0.0) * A.N[bi];
+					}
+			}
+		}
 
 		// --- Camera view and the per-block camera labels of this pair ---
 		CameraPairView camView;
@@ -1273,6 +1332,14 @@ namespace TemporalDetail
 		d.refSeq.assign(static_cast<size_t>(nb), -1);
 		d.retired.assign(static_cast<size_t>(nb), 0); d.refreshed.assign(static_cast<size_t>(nb), 0);
 		d.usedFuture.assign(static_cast<size_t>(nb), 0); d.camera.assign(static_cast<size_t>(nb), 0);
+		d.usedP10gLevel = usedP10g;
+		d.p10gFallbackWhy = usedP10g ? std::string() : p10gWhy;
+		d.p10gHits = m_p10gHits;
+		d.p10gFallbacks = m_p10gFallbacks;
+		d.inputGrainNb = std::move(monNb);
+		d.inputGrainRetained = std::move(monRetained);
+		d.inputGrainGate = std::move(monGate);
+		d.inputGrainRho1 = std::move(monRho1);
 
 		std::vector<Contribution> contrib(static_cast<size_t>(nb));
 		for (int i = 0; i < nb; ++i)
