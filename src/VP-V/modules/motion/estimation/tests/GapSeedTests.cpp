@@ -52,6 +52,9 @@ namespace VideoProcessorTest
 
 		// W23-Audit-Fix1 HIGH-1 / G6: GapSeedHolds must never issue a blocking pl_tex_download on the render thread,
 		// and ExecutePairGlobalGpu with gapSeedCheckTex runs D1 + GPU-side conditional mux using gs_check.
+		BEGIN_TEST_METHOD_ATTRIBUTE(GapSeedGpuMuxHasZeroBlockingReadbackAndConditionalDispatches)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(GapSeedGpuMuxHasZeroBlockingReadbackAndConditionalDispatches)
 		{
 			// 1. Source invariant: MotionWarp::GapSeedHolds body contains zero pl_tex_download( calls.

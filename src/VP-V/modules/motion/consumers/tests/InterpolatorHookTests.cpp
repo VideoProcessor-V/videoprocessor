@@ -1141,9 +1141,6 @@ namespace VideoProcessorTest
 		// W23-Audit-Fix1 POD1-H1 / POD1-M6 / MED-3: verify live unprocessed-plane FrameInterpolator call sites pass
 		// SkeletonMemo + (seqA, seqB) and surface LastBandMemoFallback() into FallbackCatalog, FrameInterpolator
 		// derives grid pitch without hardcoded 16.0, and MotionHostHelpers derives holdFeatherPx from referenceHeight.
-		BEGIN_TEST_METHOD_ATTRIBUTE(LiveCallSitesWireBandMemoStatusAndDerivedGridPitch)
-			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
-		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(LiveCallSitesWireBandMemoStatusAndDerivedGridPitch)
 		{
 			const std::string repoRoot = [&]() {
