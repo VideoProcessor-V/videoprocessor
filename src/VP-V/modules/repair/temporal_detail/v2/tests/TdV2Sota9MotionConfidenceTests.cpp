@@ -350,7 +350,12 @@ namespace TdV2Sota9MotionConfidenceNs
 				Assert::IsTrue(RmsDiff(lc.outputY, lg.outputY) < 1e-3);
 
 				lumaRmsCpu[si] = RmsDiff(lc.outputY, curDegY);
-				lumaRmsGpu[si] = RmsDiff(lg.outputY, curDegY);
+				lumaRmsGpu[si] = RmsAbs(lg.tdDelta);
+				if (si == 4)
+				{
+					// R32F outputY carries 1-ULP FP32 quantization (~500 * 2^-24 ~= 3e-5) relative to FP64 curDegY when tdDelta == 0:
+					Assert::AreEqual(0.0, RmsDiff(lg.outputY, curDegY), 5e-5);
+				}
 
 				ChromaProcessInput cIn;
 				cIn.seq = 0;

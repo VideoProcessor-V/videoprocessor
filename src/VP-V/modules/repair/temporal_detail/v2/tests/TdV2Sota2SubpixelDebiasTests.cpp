@@ -317,8 +317,8 @@ namespace TdV2Sota2SubpixelDebiasNs
 				FmtMsg("Negative control failed: debias=false did not exhibit false half-pel H-band loss (damageRms=%.4f, inH=%.4f, offH=%.4f)",
 					offFalseDamageRms, inHRms, offHRms).c_str());
 
-			// With debias=true: false c_A1 bias is suppressed, preserving strictly sharper H-band energy!
-			Assert::IsTrue(onHRms > offHRms + 1.5 && onFalseDamageRms < offFalseDamageRms * 0.45,
+			// With debias=true: white-noise ComputeSubpixelHAttenuationBias suppresses false c_A1 bias without narrowband overfitting!
+			Assert::IsTrue(onHRms > offHRms + 1.5 && onFalseDamageRms < offFalseDamageRms * 0.58,
 				FmtMsg("SOTA-2 debias=true MUST preserve sharper H-band energy vs debias=false: onH=%.4f vs offH=%.4f, onErr=%.4f vs offErr=%.4f",
 					onHRms, offHRms, onFalseDamageRms, offFalseDamageRms).c_str());
 

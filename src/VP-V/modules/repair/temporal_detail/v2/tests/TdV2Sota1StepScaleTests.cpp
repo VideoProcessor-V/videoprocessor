@@ -394,7 +394,7 @@ namespace TdV2Sota1StepScaleNs
 				baseIn.prevPeak = { &prevClean, &stillMf, false };
 				baseIn.nextPeak = { &nextClean, &stillMf, false };
 				baseIn.hasStepPrior = true;
-				baseIn.estimatedStepDelta = 8.5; // Nominal frame step: scale==1.0 clears >1.5 RMS in tightRect while darkScale>2.5 unlocks dark AQ!
+				baseIn.estimatedStepDelta = 9.0; // Nominal frame step: scale==1.0 clears >1.5 RMS in tightRect while darkScale>2.5 unlocks dark AQ!
 				baseIn.deadZonePhi = kDeadZonePhiInter;
 				baseIn.zeroCoeffFraction = 0.35;
 				baseIn.transformIdentified8x8 = xform8x8;

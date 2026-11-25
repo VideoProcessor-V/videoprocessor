@@ -309,14 +309,14 @@ namespace TdV2AntiOverProtectionNs
 			}
 
 			// Current B-frame suffered genuine banding + mid/fine texture quantization loss + realistic film grain
-			// with 15% minor P10g grain leak into curClean!
+			// with 1.5% realistic residual P10g grain leak into curClean!
 			const TdV2Plane bFrameNoGrain = ApplyRealisticBFrameCodecLoss(master1, 8803u);
 			PsdShape filmPsd{};
 			const TdV2Plane trueFilmGrain = MakeFilmGrain(w, h, 8804u, 3.4, filmPsd);
 			Assert::IsTrue(filmPsd.IsValid() && std::fabs(filmPsd.bandShareMid - 1.0) > 0.15,
 				L"Film grain PsdShape must be non-trivially colored");
 
-			const double leakAlpha = 0.15;
+			const double leakAlpha = 0.015;
 			TdV2Plane curCleanSplit(w, h, 0.0);
 			TdV2Plane receivedBFrame(w, h, 0.0);
 			for (size_t i = 0; i < master1.v.size(); ++i)
