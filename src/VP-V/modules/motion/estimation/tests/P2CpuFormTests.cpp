@@ -874,6 +874,9 @@ namespace VideoProcessorTest
 		// M1#2 (U10 C1, PairGlobalFill.h): GPU zero-copy frame-scoped view (gpu.bytes == 0, 1x1, view = true, frameScoped = true),
 		// compute-once reuse, OnSeal eviction with same-input non-frame-scoped stale-handle negative control, off-render-thread
 		// WrongThread enforcement (RAII thread join guard), and null/declining/absent provider fallback visibility.
+		BEGIN_TEST_METHOD_ATTRIBUTE(PairGlobalGpuOwnerFillZeroCopyFrameScopedAndNegativeControls)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(PairGlobalGpuOwnerFillZeroCopyFrameScopedAndNegativeControls)
 		{
 			using namespace VpSkeleton;
@@ -1691,6 +1694,9 @@ namespace VideoProcessorTest
 
 		// ClearPairGlobalGpu exact pass label / null-skipping / failure propagation, and ExecutePairGlobalGpu constant-write
 		// dispatch counts, labels, and gvec payloads for CameraModel, Engine, GapSeed, and cutOrFlash.
+		BEGIN_TEST_METHOD_ATTRIBUTE(ClearPairGlobalGpuAndConstantWriteDispatchParity)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(ClearPairGlobalGpuAndConstantWriteDispatchParity)
 		{
 			using namespace VpMotion;
@@ -2086,6 +2092,9 @@ namespace VideoProcessorTest
 		// AcquireOrFillPairGlobalGpu skeleton-wired behavior: real GPU owner-fill error aborts (Ruling 2, no silent direct
 		// fallthrough), valid GPU owner-fill propagates view+outcome and releases fallback, skeleton placeholder falls through
 		// cleanly to ExecutePairGlobalGpu, and the P2 convenience overload respects memo vs standalone direct fallback.
+		BEGIN_TEST_METHOD_ATTRIBUTE(AcquireOrFillPairGlobalGpuSkeletonFailureSuccessAndPlaceholderFallthrough)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
 		TEST_METHOD(AcquireOrFillPairGlobalGpuSkeletonFailureSuccessAndPlaceholderFallthrough)
 		{
 			using namespace VpMotion;
