@@ -4,9 +4,12 @@
 // VP-V GPU hook tests (moved out of Bill's LibplaceboLutParserTests.cpp; test names unchanged).
 #include "pch.h"
 #include <VP-V/tests/VpLutGpuTestSupport.h>
+#include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/modules/control/skeleton/gpu/OwnerGpuDevice.h>
 #include <VP-V/modules/repair/grain_split/BandMemo.h>
 #include <VP-V/modules/repair/grain_split/BandMemoFill.h>
+#include <fstream>
+#include <sstream>
 
 namespace VideoProcessorTest
 {
@@ -1133,6 +1136,64 @@ namespace VideoProcessorTest
 
 			fixture.CaptureLog(nullptr);
 			AssertCleanLibplaceboLog(log);
+		}
+
+		// W23-Audit-Fix1 POD1-H1 / POD1-M6 / MED-3: verify live unprocessed-plane FrameInterpolator call sites pass
+		// SkeletonMemo + (seqA, seqB) and surface LastBandMemoFallback() into FallbackCatalog, FrameInterpolator
+		// derives grid pitch without hardcoded 16.0, and MotionHostHelpers derives holdFeatherPx from referenceHeight.
+		BEGIN_TEST_METHOD_ATTRIBUTE(LiveCallSitesWireBandMemoStatusAndDerivedGridPitch)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(LiveCallSitesWireBandMemoStatusAndDerivedGridPitch)
+		{
+			const std::string repoRoot = [&]() {
+				std::string dir = __FILE__;
+				const size_t pos = dir.find("\\src\\VP-V\\");
+				return pos != std::string::npos ? dir.substr(0, pos) : std::string(".");
+			}();
+			auto readSrc = [&](const std::string& rel) -> std::string {
+				std::ifstream f(repoRoot + "\\" + rel);
+				Assert::IsTrue(f.is_open(), std::wstring(rel.begin(), rel.end()).c_str());
+				std::ostringstream ss;
+				ss << f.rdbuf();
+				return ss.str();
+			};
+
+			// 1. POD1-H1: DejudderExtrasPresent.cpp & MotionHostHelpers.cpp (PhaseTimeline.inl) wire memo + seqA/seqB + FallbackCatalog.
+			const std::string extras = readSrc("src\\VP-V\\modules\\motion\\consumers\\DejudderExtrasPresent.cpp");
+			Assert::IsTrue(extras.find("Vpv::Skeleton::MemoForHost(h.host, f.sourceSequence)") != std::string::npos,
+				L"POD1-H1: DejudderExtrasPresent must acquire host SkeletonMemo");
+			Assert::IsTrue(extras.find("fm.memo.get(), f.sourceSequence, f.nextSourceSequence") != std::string::npos,
+				L"POD1-H1: DejudderExtrasPresent must pass memo, seqA, seqB to FrameInterpolator::Run");
+			Assert::IsTrue(extras.find("frameInterpolator->LastBandMemoFallback()") != std::string::npos,
+				L"POD1-H1: DejudderExtrasPresent must surface LastBandMemoFallback() into FallbackCatalog");
+
+			const std::string helpers = readSrc("src\\VP-V\\modules\\motion\\consumers\\MotionHostHelpers.cpp");
+			Assert::IsTrue(helpers.find("vectorEngine.SkeletonMemoFor(dejudderExtras.vpPhaseSeqA)") != std::string::npos,
+				L"POD1-H1: RunVpPhaseInterpolationHost must acquire SkeletonMemo");
+			Assert::IsTrue(helpers.find("memo.get(), dejudderExtras.vpPhaseSeqA, dejudderExtras.vpPhaseSeqB") != std::string::npos,
+				L"POD1-H1: RunVpPhaseInterpolationHost must pass memo, seqA, seqB to FrameInterpolator::Run");
+			Assert::IsTrue(helpers.find("frameInterpolator->LastBandMemoFallback()") != std::string::npos,
+				L"POD1-H1: RunVpPhaseInterpolationHost must surface LastBandMemoFallback() into FallbackCatalog");
+
+			// 2. POD1-M6: zero hardcoded 16.0 grid division/multiplication in FrameInterpolator.cpp shaders.
+			const std::string interp = readSrc("src\\VP-V\\modules\\motion\\consumers\\FrameInterpolator.cpp");
+			Assert::IsTrue(interp.find("/ 16.0") == std::string::npos && interp.find("* 16.0") == std::string::npos,
+				L"POD1-M6: FrameInterpolator.cpp must derive field_pitch/occ_pitch instead of hardcoding 16.0");
+			Assert::IsTrue(interp.find("field_pitch") != std::string::npos && interp.find("occ_pitch") != std::string::npos,
+				L"POD1-M6: FrameInterpolator.cpp must pass derived field_pitch and occ_pitch uniforms");
+
+			// 3. MED-3: MotionHostHelpers::RenderedWarpSettings derives from referenceHeight (no hardcoded 2160.0f).
+			Assert::IsTrue(helpers.find("2160.0f") == std::string::npos,
+				L"MED-3: MotionHostHelpers.cpp must not hardcode 2160.0f");
+			Assert::IsTrue(helpers.find("referenceHeight") != std::string::npos,
+				L"MED-3: MotionHostHelpers.cpp must derive holdFeatherPx scaling from referenceHeight");
+
+			// 4. FallbackCatalog decision contract + negative control.
+			const FallbackCatalog::Decision engaged = FallbackCatalog::ProductFallback("product.interpolator", "kBandMemo unavailable");
+			const FallbackCatalog::Decision released = FallbackCatalog::Released("product.interpolator");
+			Assert::IsTrue(engaged.engaged && engaged.id == "product.interpolator" && engaged.reason.find("kBandMemo unavailable") != std::string::npos);
+			Assert::IsFalse(released.engaged, L"negative control: empty LastBandMemoFallback releases product.interpolator cleanly");
 		}
 	};
 }
