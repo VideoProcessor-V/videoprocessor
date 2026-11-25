@@ -49,6 +49,34 @@
 //!MAXIMUM 1.0
 0.0
 
+//!PARAM dm_active_x0
+//!DESC Normalized active-picture left edge [0..1] (letterbox/pillarbox/blanking guard)
+//!TYPE DYNAMIC float
+//!MINIMUM 0.0
+//!MAXIMUM 1.0
+0.0
+
+//!PARAM dm_active_y0
+//!DESC Normalized active-picture top edge [0..1] (letterbox/pillarbox/blanking guard)
+//!TYPE DYNAMIC float
+//!MINIMUM 0.0
+//!MAXIMUM 1.0
+0.0
+
+//!PARAM dm_active_x1
+//!DESC Normalized active-picture right edge [0..1] (letterbox/pillarbox/blanking guard)
+//!TYPE DYNAMIC float
+//!MINIMUM 0.0
+//!MAXIMUM 1.0
+1.0
+
+//!PARAM dm_active_y1
+//!DESC Normalized active-picture bottom edge [0..1] (letterbox/pillarbox/blanking guard)
+//!TYPE DYNAMIC float
+//!MINIMUM 0.0
+//!MAXIMUM 1.0
+1.0
+
 //!HOOK MAIN
 //!BIND HOOKED
 //!DESC VP-V DV post-decode I-only debander (colour.dm_pre)
@@ -161,6 +189,16 @@ vec4 hook()
     if (dm_deband_active < 0.5 || dm_deband_thr <= 0.0)
         return c;
 
+    // POD2-H3: Active-picture / letterbox / edge-blanking guard.
+    // Leave pixels outside the active rect untouched and veto/clamp any tap that crosses outside.
+    vec2 act_min = vec2(min(dm_active_x0, dm_active_x1), min(dm_active_y0, dm_active_y1));
+    vec2 act_max = vec2(max(dm_active_x0, dm_active_x1), max(dm_active_y0, dm_active_y1));
+    if (HOOKED_pos.x < act_min.x || HOOKED_pos.x > act_max.x ||
+        HOOKED_pos.y < act_min.y || HOOKED_pos.y > act_max.y)
+        return c;
+    vec2 tap_min = min(act_min + 0.5 * HOOKED_pt, act_max);
+    vec2 tap_max = max(act_max - 0.5 * HOOKED_pt, act_min);
+
     bool ictcp_in = dm_deband_ictcp_input > 0.5;
     vec3 ictcp = ictcp_in ? c.rgb : dm_rgb_pq_to_ictcp(c.rgb);
     float I_c = ictcp.x;
@@ -176,23 +214,41 @@ vec4 hook()
     vec2 o = vec2(cos(r2 * 6.28318530718), sin(r2 * 6.28318530718)) * d;
     vec2 q = vec2(-o.y, o.x);
 
-    float I_avg = 0.25 * (
-        dm_sample_i(HOOKED_pos + o * HOOKED_pt, ictcp_in) +
-        dm_sample_i(HOOKED_pos - o * HOOKED_pt, ictcp_in) +
-        dm_sample_i(HOOKED_pos + q * HOOKED_pt, ictcp_in) +
-        dm_sample_i(HOOKED_pos - q * HOOKED_pt, ictcp_in));
+    // Symmetric pair veto: only include an opposing ring pair (+o/-o or +q/-q) when both taps lie strictly
+    // inside [tap_min, tap_max], preventing any linear-sampler bleed across letterbox/blanked borders.
+    vec2 p0 = HOOKED_pos + o * HOOKED_pt;
+    vec2 p1 = HOOKED_pos - o * HOOKED_pt;
+    vec2 p2 = HOOKED_pos + q * HOOKED_pt;
+    vec2 p3 = HOOKED_pos - q * HOOKED_pt;
+    bool ok_o = p0.x >= tap_min.x && p0.x <= tap_max.x && p0.y >= tap_min.y && p0.y <= tap_max.y &&
+                p1.x >= tap_min.x && p1.x <= tap_max.x && p1.y >= tap_min.y && p1.y <= tap_max.y;
+    bool ok_q = p2.x >= tap_min.x && p2.x <= tap_max.x && p2.y >= tap_min.y && p2.y <= tap_max.y &&
+                p3.x >= tap_min.x && p3.x <= tap_max.x && p3.y >= tap_min.y && p3.y <= tap_max.y;
+    float sum_I = 0.0;
+    float n_taps = 0.0;
+    if (ok_o) {
+        sum_I += dm_sample_i(p0, ictcp_in) + dm_sample_i(p1, ictcp_in);
+        n_taps += 2.0;
+    }
+    if (ok_q) {
+        sum_I += dm_sample_i(p2, ictcp_in) + dm_sample_i(p3, ictcp_in);
+        n_taps += 2.0;
+    }
+    if (n_taps <= 0.0)
+        return c;
+    float I_avg = sum_I / n_taps;
 
     // Soft blur weight w (VpDebander.cpp: 1 at <= 3/5 * thr, 0 at >= thr).
     float diff = abs(I_c - I_avg);
     float w = 1.0 - smoothstep(0.6 * dm_deband_thr, dm_deband_thr, diff);
 
-    // P10 / Spatial Grain Guard on I: 4-neighbor Laplacian + local extremum veto.
+    // P10 / Spatial Grain Guard on I: 4-neighbor Laplacian + local extremum veto (clamped to active rect).
     // Preserves film grain and fine oscillations while leaving monotone banded staircases unattenuated.
     if (dm_deband_grain_guard > 0.5 && w > 0.0) {
-        float I_n = dm_sample_i(HOOKED_pos + vec2(0.0, -1.0) * HOOKED_pt, ictcp_in);
-        float I_s = dm_sample_i(HOOKED_pos + vec2(0.0, 1.0) * HOOKED_pt, ictcp_in);
-        float I_e = dm_sample_i(HOOKED_pos + vec2(1.0, 0.0) * HOOKED_pt, ictcp_in);
-        float I_w = dm_sample_i(HOOKED_pos + vec2(-1.0, 0.0) * HOOKED_pt, ictcp_in);
+        float I_n = dm_sample_i(clamp(HOOKED_pos + vec2(0.0, -1.0) * HOOKED_pt, tap_min, tap_max), ictcp_in);
+        float I_s = dm_sample_i(clamp(HOOKED_pos + vec2(0.0, 1.0) * HOOKED_pt, tap_min, tap_max), ictcp_in);
+        float I_e = dm_sample_i(clamp(HOOKED_pos + vec2(1.0, 0.0) * HOOKED_pt, tap_min, tap_max), ictcp_in);
+        float I_w = dm_sample_i(clamp(HOOKED_pos + vec2(-1.0, 0.0) * HOOKED_pt, tap_min, tap_max), ictcp_in);
         float lap = abs(4.0 * I_c - I_n - I_s - I_e - I_w);
         float lap_thr = dm_deband_thr / 3.0;    // GrainPreserve::kLapShareOfThreshold (1/3)
         float ext_thr = 0.25 * dm_deband_thr;   // strict local extremum threshold (1/4)

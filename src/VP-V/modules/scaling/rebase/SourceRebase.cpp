@@ -262,24 +262,45 @@ if (p.x < size.x && p.y < size.y) {
 			params.format = in->params.format;
 			// Never below 16 bits: an 8-bit (or 10-bit packed) source plane would requantise the
 			// downscale and lose what the 2:1 average gains (audit 2026-10-16).
+			// POD2-L10: when 16-bit UNORM with matching component count is unavailable (e.g. 3-comp RGB8
+			// on GPUs without RGB16), widen to 4-comp UNORM16 or F32 rather than silently staying 8-bit.
 			if (params.format->component_depth[0] < 16)
-				if (pl_fmt wide = pl_find_fmt(gpu, PL_FMT_UNORM, params.format->num_components, 16, 16, renderCaps))
+			{
+				const int comps = params.format->num_components;
+				pl_fmt wide = pl_find_fmt(gpu, PL_FMT_UNORM, comps, 16, 16, renderCaps);
+				if (!wide && comps == 3)
+					wide = pl_find_fmt(gpu, PL_FMT_UNORM, 4, 16, 16, renderCaps);
+				if (!wide)
+					wide = pl_find_fmt(gpu, PL_FMT_FLOAT, comps, 32, 32, renderCaps);
+				if (!wide && comps == 3)
+					wide = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, renderCaps);
+				if (wide)
 					params.format = wide;
+				else
+					AppendNote(note, "plane " + std::to_string(plane) + ": kept " +
+						(params.format->name ? params.format->name : "<16-bit") +
+						" (no 16-bit UNORM or 32-bit float renderable format)");
+			}
 			params.sampleable = true;
 			params.renderable = true;
 			params.blit_src = true;   // the smooth-motion history copies source planes
 			params.storable = plane == 0 && kernel >= 0 && (params.format->caps & PL_FMT_CAP_STORABLE);   // the inverse passes write it
 			if (!(params.format->caps & PL_FMT_CAP_RENDERABLE))
 			{
-				// Fall back to a float format with the same component count: 32-bit first
-				// (C19 / hunt 2 07-L4: fp16 holds 11 bits, about half a 10-bit code near
-				// white, below the 16 bits asked for), half float only when 32-bit is not
-				// renderable. Logged by the renderer (FormatNote).
+				// Fall back to a float format with the same component count (widening 3 -> 4 if needed):
+				// 32-bit first (C19 / hunt 2 07-L4: fp16 holds 11 bits, about half a 10-bit code near
+				// white, below the 16 bits asked for), half float only when 32-bit is not renderable.
 				const pl_fmt wanted = params.format;
 				params.format = pl_find_fmt(gpu, PL_FMT_FLOAT, wanted->num_components, 32, 32, renderCaps);
+				if (!params.format && wanted->num_components == 3)
+					params.format = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, renderCaps);
 				const bool half = !params.format;
 				if (half)
+				{
 					params.format = pl_find_fmt(gpu, PL_FMT_FLOAT, wanted->num_components, 16, 16, renderCaps);
+					if (!params.format && wanted->num_components == 3)
+						params.format = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 16, 16, renderCaps);
+				}
 				if (!params.format)
 				{
 					error = "no renderable format for plane " + std::to_string(plane);

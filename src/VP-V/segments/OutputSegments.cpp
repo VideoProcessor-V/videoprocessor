@@ -7,6 +7,7 @@
 #include <VP-V/modules/motion/consumers/OcclusionMaskHook.h>
 #include <VP-V/modules/output/dither/OutputEncodingRepair.h>
 #include <VP-V/modules/output/dither/SigmaDeltaDomain.h>
+#include <VP-V/core/GpuAttributionPl.h>
 #include <VP-V/core/VramUsers.h>
 #include <VP-V/modules/control/skeleton/SkeletonFacts.h>
 #include <VP-V/modules/output/dither/DitherNeedGpu.h>
@@ -450,6 +451,7 @@ namespace OutputSegments
 		req.slotOff = slotOff;
 		req.domainSupported = domainSupported;
 		req.colorBits = colorBits;
+		req.sourceBits = sourceFrame.repr.bits.color_depth > 0 ? sourceFrame.repr.bits.color_depth : sourceFrame.repr.bits.sample_depth;
 		req.nlsActive = nlsActive;
 		req.quality = qualityView;
 		req.dtSeconds = captureRateHz > 0.0 ? (1.0 / captureRateHz)
@@ -561,6 +563,7 @@ namespace OutputSegments
 			st.SyncVram(this);
 			DitherNeedSeam::Feed nlsFeed;
 			nlsFeed.colorBits = req.colorBits;
+			nlsFeed.sourceBits = req.sourceBits;
 			nlsFeed.domainSupported = req.domainSupported;
 			nlsFeed.dtSeconds = req.dtSeconds;
 			nlsFeed.discontinuity = req.discontinuity;
@@ -606,7 +609,10 @@ namespace OutputSegments
 		{
 			st.gpu = req.gpu;
 			if (!st.dispatch)
+			{
 				st.dispatch = pl_dispatch_create(req.gpu->log, req.gpu);
+				GpuAttribution::Watch(st.dispatch, "dither_need_gpu");
+			}
 			if (st.lutCache.LastRebuilt() || !st.lutTex || !st.lutOutTex)
 			{
 				DitherNeedGpuState::UploadLut1024(req.gpu, st.lutTex, LightLevel::PackTexels(lut));
@@ -680,6 +686,7 @@ namespace OutputSegments
 		feed.evidenceAgeSeconds = evidenceAge;
 		feed.lutAgeSeconds = 0.0;
 		feed.colorBits = req.colorBits;
+		feed.sourceBits = req.sourceBits;
 		feed.domainSupported = req.domainSupported;
 		feed.dtSeconds = req.dtSeconds;
 		feed.discontinuity = req.discontinuity;

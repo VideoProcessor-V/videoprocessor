@@ -47,9 +47,15 @@ if (p.x < sz.x && p.y < sz.y) {
     // values pass unclamped via additive c + w * (avg - base).
     ivec2 hi = sz - ivec2(1);
 #ifdef P10_GRAIN
+#ifdef P10_GRAIN_DUAL
+    vec4 lowc = vec4(gs_fetch(p).w * p10_cu, gs_fetch_cr(p).w * p10_cu_cr, 0.0, 0.0);
+    vec4 avg = (p10_base_dual_at(pos + o, hi, p10_cu, p10_cu_cr) + p10_base_dual_at(pos - o, hi, p10_cu, p10_cu_cr) +
+                p10_base_dual_at(pos + q, hi, p10_cu, p10_cu_cr) + p10_base_dual_at(pos - q, hi, p10_cu, p10_cu_cr)) / 4.0;
+#else
     vec4 lowc = vec4(gs_fetch(p).w * p10_cu, 0.0, 0.0, 0.0);
     vec4 avg = (p10_base_at(pos + o, hi, p10_cu) + p10_base_at(pos - o, hi, p10_cu) +
                 p10_base_at(pos + q, hi, p10_cu) + p10_base_at(pos - q, hi, p10_cu)) / 4.0;
+#endif
 #else
     vec2 linv = 0.5 / vec2(textureSize(split_low, 0));
     vec4 lowc = texture(split_low, pos * linv);
@@ -60,50 +66,8 @@ if (p.x < sz.x && p.y < sz.y) {
     // P11 re_s1 stores (jxx, jyy, jxy, lap_e) per block in codes^2.
     vec4 J = texture(p11_tensor, pos * p11_scale);
 #else
-    // Exact bilinear interpolation of the per-block low-band structure tensor (GrainPreserve::kSplitTensorBlock):
-    // matches GrainModel::DebandSplit without allocating a private split_tensor texture (15b A3 fallback when P11 absent).
-    vec4 tmask = vec4(1.0, NCOMP > 1 ? 1.0 : 0.0, NCOMP > 2 ? 1.0 : 0.0, 0.0);
-    int tb = max(1, int(floor(0.5 * tensor_px + 0.5)));
-    vec3 Jacc = vec3(0.0);
-#ifdef P10_GRAIN
-    ivec2 lsz = max(ivec2(1), (sz + ivec2(1)) / 2);
-#else
-    ivec2 lsz = textureSize(split_low, 0);
-#endif
-    ivec2 lhi = lsz - ivec2(1);
-    ivec2 ts = (lsz + ivec2(tb - 1)) / tb;
-    vec2 bc = pos / tensor_px - vec2(0.5);
-    ivec2 b0 = ivec2(floor(bc));
-    vec2 bf = bc - vec2(b0);
-    for (int dy = 0; dy <= 1; ++dy) {
-        float wy = dy == 0 ? (1.0 - bf.y) : bf.y;
-        for (int dx = 0; dx <= 1; ++dx) {
-            float bw = wy * (dx == 0 ? (1.0 - bf.x) : bf.x);
-            if (!(bw > 0.0)) continue;
-            ivec2 b = clamp(b0 + ivec2(dx, dy), ivec2(0), ts - ivec2(1));
-            ivec2 q0 = b * tb;
-            ivec2 q1 = min(lsz, q0 + ivec2(tb));
-            vec3 bacc = vec3(0.0);
-            float cnt = 0.0;
-            for (int qy = q0.y; qy < q1.y; ++qy)
-                for (int qx = q0.x; qx < q1.x; ++qx) {
-#ifdef P10_GRAIN
-                    vec2 sp = vec2(float(qx) * 2.0 + 1.0, float(qy) * 2.0 + 1.0);
-                    vec4 gx = 0.5 * code_scale * tmask * (p10_base_at(sp + vec2(2.0, 0.0), hi, p10_cu) - p10_base_at(sp - vec2(2.0, 0.0), hi, p10_cu));
-                    vec4 gy = 0.5 * code_scale * tmask * (p10_base_at(sp + vec2(0.0, 2.0), hi, p10_cu) - p10_base_at(sp - vec2(0.0, 2.0), hi, p10_cu));
-#else
-                    vec4 gx = 0.5 * code_scale * tmask * (texelFetch(split_low, clamp(ivec2(qx + 1, qy), ivec2(0), lhi), 0) -
-                                                          texelFetch(split_low, clamp(ivec2(qx - 1, qy), ivec2(0), lhi), 0));
-                    vec4 gy = 0.5 * code_scale * tmask * (texelFetch(split_low, clamp(ivec2(qx, qy + 1), ivec2(0), lhi), 0) -
-                                                          texelFetch(split_low, clamp(ivec2(qx, qy - 1), ivec2(0), lhi), 0));
-#endif
-                    bacc += vec3(dot(gx, gx), dot(gy, gy), dot(gx, gy));
-                    cnt += 1.0;
-                }
-            Jacc += bw * (bacc / max(cnt, 1.0));
-        }
-    }
-    vec4 J = vec4(Jacc, 0.0);
+    // Coarse per-block fallback tensor prepass (SPLIT_TENSOR_BODY) storing (jxx, jyy, jxy, 1.0) in codes^2.
+    vec4 J = texture(split_tensor, pos / tensor_px / vec2(textureSize(split_tensor, 0)));
 #endif
     float jd = J.x - J.y;
     float coh = sqrt(jd * jd + 4.0 * J.z * J.z) / (J.x + J.y + coh_eps);
@@ -113,7 +77,11 @@ if (p.x < sz.x && p.y < sz.y) {
     for (int k = -ALONG_N; k <= ALONG_N; k++) {
         vec2 sp = pos + float(k) * along;
 #ifdef P10_GRAIN
+#ifdef P10_GRAIN_DUAL
+        vec4 rv = vec4(texture(src, sp * inv).xy, 0.0, 0.0) - p10_base_dual_at(sp, hi, p10_cu, p10_cu_cr);
+#else
         vec4 rv = vec4(texture(src, sp * inv).x, 0.0, 0.0, 0.0) - p10_base_at(sp, hi, p10_cu);
+#endif
 #else
         vec4 rv = texture(src, sp * inv) - texture(split_low, sp * linv);
 #endif
@@ -217,6 +185,51 @@ ivec2 size = imageSize(dst);
 if (q.x < size.x && q.y < size.y)
     imageStore(dst, q, vpu_band_from_base_down(src, q));
 )GLSL";
+		// Coarse per-block fallback contour tensor (O(N) prepass run only when P11 is absent: e.g., native RGB or P11 unavailable).
+		// Stores (jxx, jyy, jxy, 1.0) in codes^2 per tb x tb half-res block, matching P11 channel order and GrainModel::DebandSplit.
+		const char* const SPLIT_TENSOR_BODY = R"GLSL(
+ivec2 b = ivec2(gl_GlobalInvocationID.xy);
+ivec2 size = imageSize(dst);
+if (b.x < size.x && b.y < size.y) {
+#ifdef P10_GRAIN
+    ivec2 fullSz = ivec2(full_w, full_h);
+    ivec2 hi = fullSz - ivec2(1);
+    ivec2 lhi = max(ivec2(1), (fullSz + ivec2(1)) / 2) - ivec2(1);
+#ifdef P10_GRAIN_DUAL
+    vec4 mask = vec4(1.0, 1.0, 0.0, 0.0);
+#else
+    vec4 mask = vec4(1.0, 0.0, 0.0, 0.0);
+#endif
+#else
+    ivec2 lhi = textureSize(src, 0) - ivec2(1);
+    vec4 mask = vec4(1.0, NCOMP > 1 ? 1.0 : 0.0, NCOMP > 2 ? 1.0 : 0.0, 0.0);
+#endif
+    vec3 acc = vec3(0.0);
+    float n = 0.0;
+    for (int j = 0; j < tb; j++)
+        for (int i = 0; i < tb; i++) {
+            ivec2 q = b * tb + ivec2(i, j);
+            if (q.x > lhi.x || q.y > lhi.y)
+                continue;
+#ifdef P10_GRAIN
+            vec2 sp = vec2(float(q.x) * 2.0 + 1.0, float(q.y) * 2.0 + 1.0);
+#ifdef P10_GRAIN_DUAL
+            vec4 gx = 0.5 * code_scale * mask * (p10_base_dual_at(sp + vec2(2.0, 0.0), hi, p10_cu, p10_cu_cr) - p10_base_dual_at(sp - vec2(2.0, 0.0), hi, p10_cu, p10_cu_cr));
+            vec4 gy = 0.5 * code_scale * mask * (p10_base_dual_at(sp + vec2(0.0, 2.0), hi, p10_cu, p10_cu_cr) - p10_base_dual_at(sp - vec2(0.0, 2.0), hi, p10_cu, p10_cu_cr));
+#else
+            vec4 gx = 0.5 * code_scale * mask * (p10_base_at(sp + vec2(2.0, 0.0), hi, p10_cu) - p10_base_at(sp - vec2(2.0, 0.0), hi, p10_cu));
+            vec4 gy = 0.5 * code_scale * mask * (p10_base_at(sp + vec2(0.0, 2.0), hi, p10_cu) - p10_base_at(sp - vec2(0.0, 2.0), hi, p10_cu));
+#endif
+#else
+            vec4 gx = 0.5 * code_scale * mask * (texelFetch(src, clamp(q + ivec2(1, 0), ivec2(0), lhi), 0) - texelFetch(src, clamp(q - ivec2(1, 0), ivec2(0), lhi), 0));
+            vec4 gy = 0.5 * code_scale * mask * (texelFetch(src, clamp(q + ivec2(0, 1), ivec2(0), lhi), 0) - texelFetch(src, clamp(q - ivec2(0, 1), ivec2(0), lhi), 0));
+#endif
+            acc += vec3(dot(gx, gx), dot(gy, gy), dot(gx, gy));
+            n += 1.0;
+        }
+    imageStore(dst, b, vec4(acc / max(n, 1.0), 1.0));
+}
+)GLSL";
 		const char* const P10_BASE_HELPER_GLSL = R"GLSL(
 vec4 p10_base_at(vec2 sp, ivec2 hi, float cu)
 {
@@ -229,6 +242,27 @@ vec4 p10_base_at(vec2 sp, ivec2 hi, float cu)
     float c0 = gs_fetch(ivec2(i0.x, i1.y)).w;
     float d0 = gs_fetch(i1).w;
     return vec4(mix(mix(a, b, fr.x), mix(c0, d0, fr.x), fr.y) * cu, 0.0, 0.0, 0.0);
+}
+)GLSL";
+		const char* const P10_BASE_DUAL_HELPER_GLSL = R"GLSL(
+vec4 p10_base_dual_at(vec2 sp, ivec2 hi, float cu0, float cu1)
+{
+    vec2 q = clamp(sp - vec2(0.5), vec2(0.0), vec2(hi));
+    ivec2 i0 = ivec2(floor(q));
+    ivec2 i1 = min(i0 + ivec2(1), hi);
+    vec2 fr = q - vec2(i0);
+    float a0 = gs_fetch(i0).w;
+    float b0 = gs_fetch(ivec2(i1.x, i0.y)).w;
+    float c0 = gs_fetch(ivec2(i0.x, i1.y)).w;
+    float d0 = gs_fetch(i1).w;
+    float a1 = gs_fetch_cr(i0).w;
+    float b1 = gs_fetch_cr(ivec2(i1.x, i0.y)).w;
+    float c1 = gs_fetch_cr(ivec2(i0.x, i1.y)).w;
+    float d1 = gs_fetch_cr(i1).w;
+    return vec4(
+        mix(mix(a0, b0, fr.x), mix(c0, d0, fr.x), fr.y) * cu0,
+        mix(mix(a1, b1, fr.x), mix(c1, d1, fr.x), fr.y) * cu1,
+        0.0, 0.0);
 }
 )GLSL";
 
@@ -274,21 +308,42 @@ vec4 p10_base_at(vec2 sp, ivec2 hi, float cu)
 			return pl_dispatch_compute(dispatch, &compute);
 		}
 
-		// along_w(k), k in -ALONG_N..ALONG_N: GrainPreserve::SplitAlongWeight.
-		std::string AlongWeightsGlsl()
+		// along_w(k), k in -ALONG_N..ALONG_N: GrainPreserve::SplitAlongWeight (cached once; constant across frames).
+		const std::string& AlongWeightsGlsl()
 		{
-			const int n = GrainPreserve::kSplitAlongTaps;
-			const std::string taps = std::to_string(2 * n + 1);
-			std::string s = "#define ALONG_N " + std::to_string(n) + "\nfloat along_w(int k)\n{\n    float w[" + taps + "] = float[" + taps + "](";
-			for (int k = -n; k <= n; ++k)
-			{
-				char number[32];
-				snprintf(number, sizeof(number), "%.9g", GrainPreserve::SplitAlongWeight(k));
-				s += number;
-				if (k < n)
-					s += ", ";
-			}
-			return s + ");\n    return w[k + ALONG_N];\n}\n";
+			static const std::string cached = [] {
+				const int n = GrainPreserve::kSplitAlongTaps;
+				const std::string taps = std::to_string(2 * n + 1);
+				std::string s = "#define ALONG_N " + std::to_string(n) + "\nfloat along_w(int k)\n{\n    float w[" + taps + "] = float[" + taps + "](";
+				for (int k = -n; k <= n; ++k)
+				{
+					char number[32];
+					snprintf(number, sizeof(number), "%.9g", GrainPreserve::SplitAlongWeight(k));
+					s += number;
+					if (k < n)
+						s += ", ";
+				}
+				return s + ");\n    return w[k + ALONG_N];\n}\n";
+			}();
+			return cached;
+		}
+
+		const std::string& ViewFullGlsl()
+		{
+			static const std::string cached = GrainSplit::Gpu::ViewGlsl(GrainSplit::Storage::Full, 1.0);
+			return cached;
+		}
+
+		const std::string& ViewFullCrGlsl()
+		{
+			static const std::string cached = GrainSplit::Gpu::ViewGlslCr(GrainSplit::Storage::Full, 1.0);
+			return cached;
+		}
+
+		const char* NcompDefine(int ncomp)
+		{
+			static const char* const kDefs[3] = { "#define NCOMP 1\n", "#define NCOMP 2\n", "#define NCOMP 3\n" };
+			return kDefs[(std::max)(1, (std::min)(3, ncomp)) - 1];
 		}
 
 		pl_shader_desc Sampled(const char* name, pl_tex tex, bool linear)
@@ -376,7 +431,7 @@ vec4 p10_base_at(vec2 sp, ivec2 hi, float cu)
 			}
 		for (int s = 0; s < kSlots; ++s)
 			for (int p = 0; p < PL_MAX_PLANES; ++p)
-				for (pl_tex* tex : { &splitHalf[s][p], &splitTmp[s][p], &splitLow[s][p] })
+				for (pl_tex* tex : { &splitHalf[s][p], &splitTmp[s][p], &splitLow[s][p], &splitTensor[s][p] })
 				{
 					if (*tex && gpu) pl_tex_destroy(gpu, tex);
 					*tex = nullptr;
@@ -384,6 +439,8 @@ vec4 p10_base_at(vec2 sp, ivec2 hi, float cu)
 		weightSequence = 0;
 		prevValid = false;
 		lastFailureError.clear();
+		cachedBandScale = -1.0;
+		cachedBandWeights.clear();
 	}
 
 	bool Module::SplitLowBand(pl_gpu gpu, pl_dispatch dispatch, pl_tex in, int slot, int plane, double scale,
@@ -416,21 +473,26 @@ vec4 p10_base_at(vec2 sp, ivec2 hi, float cu)
 			return false;
 		}
 		const int gx = (hw + 15) / 16, gy = (hh + 15) / 16;
-		VpUnit::BandMemo::BandKey key;
-		key.resolution = VpUnit::BandMemo::Stage::Half;
-		key.plane = static_cast<uint8_t>(plane);
-		key.width = static_cast<uint32_t>(hw);
-		key.height = static_cast<uint32_t>(hh);
-		key.sigmaPx = VpUnit::BandFromBase::kSigmaLow * scale;
-		key.law = VpUnit::BandMemo::Law::Low;
-		key.edge = VpUnit::BandFromBase::EdgeMode::Replicate;
-		const std::string weights = VpUnit::BandMemo::GlslOf(key);
+		if (cachedBandScale != scale || cachedBandWeights.empty())
+		{
+			VpUnit::BandMemo::BandKey key;
+			key.resolution = VpUnit::BandMemo::Stage::Half;
+			key.plane = 0;
+			key.width = static_cast<uint32_t>(hw);
+			key.height = static_cast<uint32_t>(hh);
+			key.sigmaPx = VpUnit::BandFromBase::kSigmaLow * scale;
+			key.law = VpUnit::BandMemo::Law::Low;
+			key.edge = VpUnit::BandFromBase::EdgeMode::Replicate;
+			cachedBandWeights = VpUnit::BandMemo::GlslOf(key);
+			cachedBandScale = scale;
+		}
+		static const std::string kEmptyHeader;
 		const pl_shader_desc dh[2] = { Sampled("src", in, false), Storage("dst", splitHalf[slot][plane]) };
 		const pl_shader_desc dx[2] = { Sampled("src", splitHalf[slot][plane], false), Storage("dst", splitTmp[slot][plane]) };
 		const pl_shader_desc dy[2] = { Sampled("src", splitTmp[slot][plane], false), Storage("dst", splitLow[slot][plane]) };
-		if (!Pass(dispatch, "VideoProcessor deband: grain split (half)", std::string(), SPLIT_HALF_BODY, dh, 2, nullptr, 0, gx, gy) ||
-			!Pass(dispatch, "VideoProcessor deband: grain split (across)", weights, SPLIT_H_BODY, dx, 2, nullptr, 0, gx, gy) ||
-			!Pass(dispatch, "VideoProcessor deband: grain split (down)", weights, SPLIT_V_BODY, dy, 2, nullptr, 0, gx, gy))
+		if (!Pass(dispatch, "VideoProcessor deband: grain split (half)", kEmptyHeader, SPLIT_HALF_BODY, dh, 2, nullptr, 0, gx, gy) ||
+			!Pass(dispatch, "VideoProcessor deband: grain split (across)", cachedBandWeights, SPLIT_H_BODY, dx, 2, nullptr, 0, gx, gy) ||
+			!Pass(dispatch, "VideoProcessor deband: grain split (down)", cachedBandWeights, SPLIT_V_BODY, dy, 2, nullptr, 0, gx, gy))
 		{
 			error = "the grain split passes failed";
 			lastFailureError = error;
@@ -561,79 +623,99 @@ vec4 p10_base_at(vec2 sp, ivec2 hi, float cu)
 			// lines in the picture (radiusScale = the source's lines / 1080).
 			const double planeLines = 1080.0 * params.radiusScale * h / (std::max)(1, luma->params.h);
 			const double splitScale = GrainPreserve::GrainScale(planeLines);
-			const float tensorPx = static_cast<float>(2 * GrainPreserve::SplitTensorHalfBlock(splitScale));
+			const int tb = GrainPreserve::SplitTensorHalfBlock(splitScale);
+			const float tensorPx = static_cast<float>(2 * tb);
 			const float alongStep = static_cast<float>(GrainPreserve::kSplitAlongStep * splitScale);
 			const float cohEps = static_cast<float>(GrainPreserve::kSplitTensorEps);
 			const float rhoEps = static_cast<float>(1e-12 * codeUnit * codeUnit);
 			const float cohLo = static_cast<float>(GrainPreserve::kSplitCoherenceLo), cohHi = static_cast<float>(GrainPreserve::kSplitCoherenceHi);
 			const float rhoLo = static_cast<float>(GrainPreserve::kSplitConsistencyLo), rhoHi = static_cast<float>(GrainPreserve::kSplitConsistencyHi);
 			const float alongInvNeff = static_cast<float>(GrainPreserve::SplitAlongInvNeff());
-			VpSkeleton::AcquireResult memoBand, memoGrain, memoP11;
+			VpSkeleton::AcquireResult memoBand, memoGrain, memoGrainCr, memoP11;
 			pl_tex splitLowTex = nullptr;
 			const GrainSplit::Gpu::Frame* p10Frame = nullptr;
+			const GrainSplit::Gpu::Frame* p10FrameCr = nullptr;
 			pl_tex p11TensorTex = nullptr;
 			float p11Scale[2] = { 0.0f, 0.0f };
 			float p10Cu = static_cast<float>(codeUnit);
+			float p10CuCr = static_cast<float>(codeUnit);
 			const float codeScale = static_cast<float>(1.0 / codeUnit);
 			if (useSplit)
 			{
 				const int inComps = in->params.format->num_components;
 				const bool ycbcr = pl_color_system_is_ycbcr_like(source.repr.sys);
+				const bool semiPlanarCbCr = (plane == 1 && inComps == 2 && ncomp == 2 && source.num_planes == 2);
 				std::string guardFbReason;
 
-				// 15b A3: acquire shared P10 (luma) / P10c (chroma) grain split and P11 structure tensor (re_s1).
+				// 15b A3: acquire shared P10 (luma) / P10c (planar Cb/Cr or semi-planar P010/P210 CbCr) grain split and P11 contour tensor (re_s1).
 				if (params.memo != nullptr && params.sequence != 0u && ycbcr)
 				{
+					const int bits = params.colorDepth > 0 && params.colorDepth < 256
+						? params.colorDepth : GrainSplit::DefaultParams().sourceBits;
+					const double planeCu = VpvGpu::CodeUnit(in, source.repr.bits, bits);
+					const int expectedB = GrainSplit::Gpu::BlockFor(splitScale);
+					auto tryAcquireP10 = [&](VpSkeleton::ProductId grainProd, const VpSkeleton::VariantKey& gKey, int comp,
+						const char* prodName, VpSkeleton::AcquireResult& slotRes, const GrainSplit::Gpu::Frame*& outFrame, float& outCu) -> bool {
+						slotRes = params.memo->Acquire(grainProd, params.sequence, VpSkeleton::AcquireForm::Gpu, gKey);
+						if (slotRes.Ok() && slotRes.gpu.textureSet == nullptr && slotRes.gpu.resource != nullptr)
+						{
+							const GrainSplit::Gpu::Frame* candidate = GrainSplit::Gpu::FrameOf(slotRes);
+							const GrainSplit::Gpu::FitResult fit = GrainSplit::Gpu::CheckFit(
+								candidate, w, h, expectedB, splitScale, planeCu, comp, params.sequence);
+							const bool floatPlaneCompact = (candidate != nullptr
+								&& candidate->storage == GrainSplit::Storage::Compact
+								&& in->params.format != nullptr && in->params.format->type == PL_FMT_FLOAT);
+							if (fit == GrainSplit::Gpu::FitResult::Fits && !floatPlaneCompact)
+							{
+								outFrame = candidate;
+								outCu = static_cast<float>(candidate->codeUnit);
+								return true;
+							}
+							if (floatPlaneCompact)
+								guardFbReason = std::string(prodName) + " Compact storage cannot represent float BTB/WTW";
+							else if (fit == GrainSplit::Gpu::FitResult::Stale)
+								guardFbReason = std::string(prodName) + " stale (version/sequence mismatch)";
+							else if (fit == GrainSplit::Gpu::FitResult::WrongSize)
+								guardFbReason = std::string(prodName) + " geometry/codeUnit/component mismatch";
+							else
+								guardFbReason = std::string(prodName) + " frame textures missing";
+							slotRes = VpSkeleton::AcquireResult();
+							return false;
+						}
+						const std::string detail = params.memo->LastCause(grainProd);
+						guardFbReason = std::string(prodName)
+							+ " unavailable (" + VpSkeleton::Token(slotRes.cause)
+							+ (detail.empty() ? ")" : ": " + detail + ")");
+						slotRes = VpSkeleton::AcquireResult();
+						return false;
+					};
+
 					if (inComps == 1 && plane <= 2)
 					{
 						const VpSkeleton::ProductId grainProd = (plane == 0) ? VpSkeleton::kP10GrainSplit : VpSkeleton::kP10cGrainSplitChroma;
 						const VpSkeleton::VariantKey gKey = (plane == 0)
 							? GrainSplit::Gpu::VariantFor(w, h, splitScale, params.colorDepth)
 							: GrainSplit::Gpu::ChromaVariantFor(plane, w, h, splitScale, params.colorDepth);
-						memoGrain = params.memo->Acquire(grainProd, params.sequence, VpSkeleton::AcquireForm::Gpu, gKey);
-						if (memoGrain.Ok() && memoGrain.gpu.textureSet == nullptr && memoGrain.gpu.resource != nullptr)
+						tryAcquireP10(grainProd, gKey, 0, plane == 0 ? "kP10GrainSplit" : "kP10cGrainSplitChroma", memoGrain, p10Frame, p10Cu);
+					}
+					else if (semiPlanarCbCr)
+					{
+						// P010/P210 2-component CbCr plane: acquire both Cb (plane 1, comp 0) and Cr (plane 2, comp 1) from kP10cGrainSplitChroma.
+						const VpSkeleton::VariantKey cbKey = GrainSplit::Gpu::ChromaVariantFor(1, w, h, splitScale, params.colorDepth);
+						const VpSkeleton::VariantKey crKey = GrainSplit::Gpu::ChromaVariantFor(2, w, h, splitScale, params.colorDepth);
+						const bool cbOk = tryAcquireP10(VpSkeleton::kP10cGrainSplitChroma, cbKey, 0, "kP10cGrainSplitChroma(Cb)", memoGrain, p10Frame, p10Cu);
+						const bool crOk = cbOk && tryAcquireP10(VpSkeleton::kP10cGrainSplitChroma, crKey, 1, "kP10cGrainSplitChroma(Cr)", memoGrainCr, p10FrameCr, p10CuCr);
+						if (!crOk)
 						{
-							const GrainSplit::Gpu::Frame* candidate = GrainSplit::Gpu::FrameOf(memoGrain);
-							const int bits = params.colorDepth > 0 && params.colorDepth < 256
-								? params.colorDepth : GrainSplit::DefaultParams().sourceBits;
-							const double planeCu = VpvGpu::CodeUnit(in, source.repr.bits, bits);
-							const int expectedB = GrainSplit::Gpu::BlockFor(splitScale);
-							const GrainSplit::Gpu::FitResult fit = GrainSplit::Gpu::CheckFit(
-								candidate, w, h, expectedB, splitScale, planeCu, 0, params.sequence);
-							const bool floatPlaneCompact = (candidate != nullptr
-								&& candidate->storage == GrainSplit::Storage::Compact
-								&& in->params.format != nullptr && in->params.format->type == PL_FMT_FLOAT);
-							if (fit == GrainSplit::Gpu::FitResult::Fits && !floatPlaneCompact)
-							{
-								p10Frame = candidate;
-								p10Cu = static_cast<float>(candidate->codeUnit);
-							}
-							else
-							{
-								const char* prodName = (plane == 0) ? "kP10GrainSplit" : "kP10cGrainSplitChroma";
-								if (floatPlaneCompact)
-									guardFbReason = std::string(prodName) + " Compact storage cannot represent float BTB/WTW";
-								else if (fit == GrainSplit::Gpu::FitResult::Stale)
-									guardFbReason = std::string(prodName) + " stale (version/sequence mismatch)";
-								else if (fit == GrainSplit::Gpu::FitResult::WrongSize)
-									guardFbReason = std::string(prodName) + " geometry/codeUnit/component mismatch";
-								else
-									guardFbReason = std::string(prodName) + " frame textures missing";
-								memoGrain = VpSkeleton::AcquireResult();
-							}
-						}
-						else
-						{
-							const std::string detail = params.memo->LastCause(grainProd);
-							guardFbReason = std::string(plane == 0 ? "kP10GrainSplit" : "kP10cGrainSplitChroma")
-								+ " unavailable (" + VpSkeleton::Token(memoGrain.cause)
-								+ (detail.empty() ? ")" : ": " + detail + ")");
+							p10Frame = nullptr;
+							p10FrameCr = nullptr;
 							memoGrain = VpSkeleton::AcquireResult();
+							memoGrainCr = VpSkeleton::AcquireResult();
 						}
 					}
 					else
 					{
-						guardFbReason = "multi-component/unsupported plane index (P10/P10c serves single-component Y/Cb/Cr planes)";
+						guardFbReason = "multi-component/unsupported plane index (P10/P10c serves Y, planar Cb/Cr, and semi-planar CbCr)";
 					}
 
 					memoP11 = params.memo->Acquire(VpSkeleton::kP11RegionBlockStats, params.sequence, VpSkeleton::AcquireForm::Gpu);
@@ -779,8 +861,8 @@ vec4 p10_base_at(vec2 sp, ivec2 hi, float cu)
 				const float busyScale = 1.0f;
 				const pl_shader_var gv[5] = { { pl_var_int("bz_block"), &busyBlock, true }, { pl_var_int("bz_ncomp"), &ncomp, true },
 					{ pl_var_float("bz_scale"), &busyScale, true }, { pl_var_float("bz_lap"), &lapMin, true }, { pl_var_float("bz_ext"), &extMin, true } };
-				const std::string guardHeader = RegionEvidence::BusyShareHeaderGlsl();
-				const std::string guardBody = RegionEvidence::BusyShareBodyGlsl();
+				static const std::string guardHeader = RegionEvidence::BusyShareHeaderGlsl();
+				static const std::string guardBody = RegionEvidence::BusyShareBodyGlsl();
 				pl_custom_shader gc{};
 				gc.description = "VideoProcessor deband: grain guard (regions busy share)";
 				gc.header = guardHeader.c_str();
@@ -819,24 +901,103 @@ vec4 p10_base_at(vec2 sp, ivec2 hi, float cu)
 			}
 
 			const bool useP10 = useSplit && p10Frame != nullptr;
+			const bool useP10Dual = useP10 && p10FrameCr != nullptr;
 			const bool useP11 = useSplit && p11TensorTex != nullptr;
-			std::vector<pl_shader_desc> d;
-			d.reserve(12);
-			d.push_back(Sampled("src", in, true));
-			d.push_back(Storage("dst", out[slot][plane]));
-			d.push_back(Storage("w_out", weightOut ? weightOut : weightDummy));
-			if (useHold || useGrain) d.push_back(Sampled("field", params.field, false));
-			if (useHold) d.push_back(Sampled("prev_w", weightIn, true));
-			if (useGrain) d.push_back(Sampled("grain", params.grainError, false));
-			if (useGuard) d.push_back(Sampled("grain_spatial", guard[slot][plane], true));
+			// BLOCKER-1 fix: when P11 is absent (native RGB or P11 unavailable), compute a tiny coarse
+			// tw x th per-block contour tensor in O(N) instead of an O(N^2) per-pixel loop.
+			if (useSplit && !useP11)
+			{
+				const int hw = (w + 1) / 2, hh = (h + 1) / 2;
+				const int tw = (hw + tb - 1) / tb, th = (hh + tb - 1) / tb;
+				pl_tex_params ttp{};
+				ttp.w = tw;
+				ttp.h = th;
+				ttp.format = FloatFormat(gpu, 4, true);
+				ttp.sampleable = true;
+				ttp.storable = true;
+				if (!ttp.format || !pl_tex_recreate(gpu, &splitTensor[slot][plane], &ttp))
+				{
+					error = "no float texture for the grain split contours";
+					lastFailureError = error;
+					++failures;
+					return false;
+				}
+				descScratch.clear();
+				if (useP10)
+				{
+					GrainSplit::Gpu::BindView(*p10Frame, descScratch);
+					if (useP10Dual)
+						GrainSplit::Gpu::BindViewCr(*p10FrameCr, descScratch);
+				}
+				else
+					descScratch.push_back(Sampled("src", splitLowTex, false));
+				descScratch.push_back(Storage("dst", splitTensor[slot][plane]));
+
+				pl_shader_var tv[6];
+				int ntv = 0;
+				tv[ntv++] = { pl_var_float("code_scale"), &codeScale, true };
+				tv[ntv++] = { pl_var_int("tb"), &tb, true };
+				if (useP10)
+				{
+					tv[ntv++] = { pl_var_float("p10_cu"), &p10Cu, true };
+					tv[ntv++] = { pl_var_int("full_w"), &w, true };
+					tv[ntv++] = { pl_var_int("full_h"), &h, true };
+					if (useP10Dual)
+						tv[ntv++] = { pl_var_float("p10_cu_cr"), &p10CuCr, true };
+				}
+				headerScratch.clear();
+				headerScratch += NcompDefine(ncomp);
+				if (useP10)
+				{
+					headerScratch += "#define P10_GRAIN 1\n";
+					if (p10Frame->storage == GrainSplit::Storage::Full)
+						headerScratch += ViewFullGlsl();
+					else
+						headerScratch += GrainSplit::Gpu::ViewGlsl(p10Frame->storage, p10Frame->codeUnit);
+					if (useP10Dual)
+					{
+						headerScratch += "#define P10_GRAIN_DUAL 1\n";
+						if (p10FrameCr->storage == GrainSplit::Storage::Full)
+							headerScratch += ViewFullCrGlsl();
+						else
+							headerScratch += GrainSplit::Gpu::ViewGlslCr(p10FrameCr->storage, p10FrameCr->codeUnit);
+						headerScratch += P10_BASE_DUAL_HELPER_GLSL;
+					}
+					else
+						headerScratch += P10_BASE_HELPER_GLSL;
+				}
+				if (!Pass(dispatch, "VideoProcessor deband: grain split (contours)", headerScratch, SPLIT_TENSOR_BODY,
+					descScratch.data(), static_cast<int>(descScratch.size()), tv, ntv, (tw + 15) / 16, (th + 15) / 16))
+				{
+					error = "the grain split contour pass failed";
+					lastFailureError = error;
+					++failures;
+					return false;
+				}
+			}
+
+			descScratch.clear();
+			descScratch.push_back(Sampled("src", in, true));
+			descScratch.push_back(Storage("dst", out[slot][plane]));
+			descScratch.push_back(Storage("w_out", weightOut ? weightOut : weightDummy));
+			if (useHold || useGrain) descScratch.push_back(Sampled("field", params.field, false));
+			if (useHold) descScratch.push_back(Sampled("prev_w", weightIn, true));
+			if (useGrain) descScratch.push_back(Sampled("grain", params.grainError, false));
+			if (useGuard) descScratch.push_back(Sampled("grain_spatial", guard[slot][plane], true));
 			if (useSplit)
 			{
 				if (useP10)
-					GrainSplit::Gpu::BindView(*p10Frame, d);
+				{
+					GrainSplit::Gpu::BindView(*p10Frame, descScratch);
+					if (useP10Dual)
+						GrainSplit::Gpu::BindViewCr(*p10FrameCr, descScratch);
+				}
 				else
-					d.push_back(Sampled("split_low", splitLowTex, true));
+					descScratch.push_back(Sampled("split_low", splitLowTex, true));
 				if (useP11)
-					d.push_back(Sampled("p11_tensor", p11TensorTex, (p11TensorTex->params.format->caps & PL_FMT_CAP_LINEAR) != 0));
+					descScratch.push_back(Sampled("p11_tensor", p11TensorTex, (p11TensorTex->params.format->caps & PL_FMT_CAP_LINEAR) != 0));
+				else
+					descScratch.push_back(Sampled("split_tensor", splitTensor[slot][plane], true));
 			}
 			const int writeW = weightOut ? 1 : 0;
 			pl_shader_var v[24];
@@ -854,16 +1015,16 @@ vec4 p10_base_at(vec2 sp, ivec2 hi, float cu)
 			}
 			if (useSplit)
 			{
-				if (useP10) v[nv++] = { pl_var_float("p10_cu"), &p10Cu, true };
+				if (useP10)
+				{
+					v[nv++] = { pl_var_float("p10_cu"), &p10Cu, true };
+					if (useP10Dual)
+						v[nv++] = { pl_var_float("p10_cu_cr"), &p10CuCr, true };
+				}
 				if (useP11)
-				{
 					v[nv++] = { pl_var_vec2("p11_scale"), p11Scale, true };
-				}
 				else
-				{
 					v[nv++] = { pl_var_float("tensor_px"), &tensorPx, true };
-					v[nv++] = { pl_var_float("code_scale"), &codeScale, true };
-				}
 				v[nv++] = { pl_var_float("along_step"), &alongStep, true };
 				v[nv++] = { pl_var_float("coh_eps"), &cohEps, true };
 				v[nv++] = { pl_var_float("rho_eps"), &rhoEps, true };
@@ -873,29 +1034,46 @@ vec4 p10_base_at(vec2 sp, ivec2 hi, float cu)
 				v[nv++] = { pl_var_float("rho_hi"), &rhoHi, true };
 				v[nv++] = { pl_var_float("along_inv_neff"), &alongInvNeff, true };
 			}
-			std::string header = "#define NCOMP " + std::to_string(ncomp) + "\n";
-			if (useHold) header += "#define HOLD 1\n";
-			if (useGrain) header += "#define GRAIN 1\n";
-			if (useGuard) header += "#define SPATIAL_GUARD 1\n";
+			headerScratch.clear();
+			headerScratch += NcompDefine(ncomp);
+			if (useHold) headerScratch += "#define HOLD 1\n";
+			if (useGrain) headerScratch += "#define GRAIN 1\n";
+			if (useGuard) headerScratch += "#define SPATIAL_GUARD 1\n";
 			if (useSplit)
 			{
-				header += "#define SPLIT 1\n" + AlongWeightsGlsl();
+				headerScratch += "#define SPLIT 1\n";
+				headerScratch += AlongWeightsGlsl();
 				if (useP10)
 				{
-					header += "#define P10_GRAIN 1\n" + GrainSplit::Gpu::ViewGlsl(p10Frame->storage, p10Frame->codeUnit) + P10_BASE_HELPER_GLSL;
+					headerScratch += "#define P10_GRAIN 1\n";
+					if (p10Frame->storage == GrainSplit::Storage::Full)
+						headerScratch += ViewFullGlsl();
+					else
+						headerScratch += GrainSplit::Gpu::ViewGlsl(p10Frame->storage, p10Frame->codeUnit);
+					if (useP10Dual)
+					{
+						headerScratch += "#define P10_GRAIN_DUAL 1\n";
+						if (p10FrameCr->storage == GrainSplit::Storage::Full)
+							headerScratch += ViewFullCrGlsl();
+						else
+							headerScratch += GrainSplit::Gpu::ViewGlslCr(p10FrameCr->storage, p10FrameCr->codeUnit);
+						headerScratch += P10_BASE_DUAL_HELPER_GLSL;
+					}
+					else
+						headerScratch += P10_BASE_HELPER_GLSL;
 				}
 				if (useP11)
-					header += "#define P11_TENSOR 1\n";
+					headerScratch += "#define P11_TENSOR 1\n";
 			}
 			pl_custom_shader custom{};
 			custom.description = useHold ? (useSplit ? "VideoProcessor deband, grain split (held along the vectors)" : "VideoProcessor deband (held along the vectors)") :
 				(useSplit ? "VideoProcessor deband, grain split" : "VideoProcessor deband");
-			custom.header = header.c_str();
+			custom.header = headerScratch.c_str();
 			custom.body = BODY;
 			custom.input = PL_SHADER_SIG_NONE;
 			custom.output = PL_SHADER_SIG_NONE;
-			custom.descriptors = d.data();
-			custom.num_descriptors = static_cast<int>(d.size());
+			custom.descriptors = descScratch.data();
+			custom.num_descriptors = static_cast<int>(descScratch.size());
 			custom.variables = v;
 			custom.num_variables = nv;
 			custom.compute = true;

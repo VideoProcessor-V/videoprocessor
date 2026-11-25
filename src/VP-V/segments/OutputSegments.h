@@ -136,7 +136,7 @@ namespace OutputSegments
 	{
 		bool requested = false, originalPathway = false, sigmaDeltaActive = false, slotOff = false;
 		bool domainSupported = true, nlsActive = false, discontinuity = false, overrideInputs = false, requireBind = true;
-		int colorBits = 8, regionTransfer = 0;
+		int colorBits = 8, sourceBits = 0, regionTransfer = 0;
 		pl_gpu gpu = nullptr;
 		const void* host = nullptr;
 		uint64_t sourceSequence = 0;

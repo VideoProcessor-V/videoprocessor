@@ -33,23 +33,32 @@ namespace SourceIdentity
 			std::string bandMemoFallback;
 		};
 
+		struct TileOrigin
+		{
+			uint32_t x = 0, y = 0;         // tile top-left pixel inside full frame
+			uint32_t frameW = 0, frameH = 0; // full frame dimensions (0 = legacy standalone T x T tile)
+			bool HasFrame() const;
+		};
+
 		namespace detail
 		{
-			// Out-of-line in CutFadeJudge.cpp (VideoProcessor-Lib): acquires CPU kBandMemo for sigma 1 & 2 (Reflect) into g1/g2 (8-bit codes).
-			bool TryAcquireTileBands(VpSkeleton::SkeletonMemo* memo, uint64_t seq, int T,
+			// Out-of-line in CutFadeJudge.cpp (VideoProcessor-Lib): acquires CPU kBandMemo for sigma 1 & 2 (Reflect) into g1/g2 (8-bit codes),
+			// keyed by tile origin/crop inside the frame so distinct T x T tiles on the same seq never alias.
+			bool TryAcquireTileBands(VpSkeleton::SkeletonMemo* memo, uint64_t seq, int T, const TileOrigin& origin,
 				std::vector<float>& g1, std::vector<float>& g2, std::string& fallbackWhy);
 		}
 
-		// `luma`: T x T samples in 0..1 (8-bit = x255). Optional `memo` + `seq`: acquires CPU kBandMemo (sigma 1 & 2,
-		// Reflect edge) with visible fallback to shared unit U2 (VpUnit::BandFromBase::Taps / BlurTaps).
-		inline TileNoise MeasureNoise(const float* luma, int T, VpSkeleton::SkeletonMemo* memo = nullptr, uint64_t seq = 0)
+		// `luma`: T x T samples in 0..1 (8-bit = x255). Optional `memo` + `seq` + `origin`: acquires CPU kBandMemo (sigma 1 & 2,
+		// Reflect edge) keyed by (frameW, frameH, cropX, cropY, T, T) when origin.HasFrame() so distinct tiles on the same seq never alias,
+		// with visible fallback to shared unit U2 (VpUnit::BandFromBase::Taps / BlurTaps).
+		inline TileNoise MeasureNoise(const float* luma, int T, VpSkeleton::SkeletonMemo* memo = nullptr, uint64_t seq = 0, TileOrigin origin = TileOrigin())
 		{
 			TileNoise out;
 			if (!luma || T < 32) return out;
 			const size_t n = static_cast<size_t>(T) * T;
 			std::vector<float> u(n), g1, g2;
 			for (size_t i = 0; i < n; ++i) u[i] = luma[i] * 255.0f;
-			if (memo != nullptr && seq != 0u && detail::TryAcquireTileBands(memo, seq, T, g1, g2, out.bandMemoFallback)) {
+			if (memo != nullptr && seq != 0u && detail::TryAcquireTileBands(memo, seq, T, origin, g1, g2, out.bandMemoFallback)) {
 				out.usedBandMemo = true;
 			} else {
 				if (memo == nullptr) out.bandMemoFallback = "no skeleton memo bound";

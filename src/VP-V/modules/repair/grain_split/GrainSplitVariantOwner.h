@@ -398,9 +398,9 @@ namespace GrainSplit
 				Observe(c.host, luma, chroma);
 				return false;
 			}
-			void OnStatus(const RendererExtension::Context&, RendererExtension::StatusKind kind, std::vector<std::string>& lines, const char*, const char*) override
+			void OnStatus(const RendererExtension::Context& ctx, RendererExtension::StatusKind kind, std::vector<std::string>& lines, const char*, const char*) override
 			{
-				if (kind != RendererExtension::StatusKind::Fallbacks)
+				if (kind != RendererExtension::StatusKind::Fallbacks || Vpv::Hub::ExtensionHub::Instance().OriginalPathway(ctx.host))
 					return;
 				const std::vector<std::string> f = FallbackLines();
 				lines.insert(lines.end(), f.begin(), f.end());

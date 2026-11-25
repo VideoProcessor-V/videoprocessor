@@ -4,9 +4,11 @@
 #include <VP-V/modules/repair/temporal_detail/products/TdProductReads.h>
 
 #include <libplacebo/renderer.h>
+#include <libplacebo/shaders/custom.h>
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace VpSkeleton { class SkeletonMemo; }
 
@@ -17,19 +19,14 @@ namespace VpDebander
 {
 	struct Params
 	{
-		double thresholdCodes = 0.0; // threshold in signal codes (Strength())
-		int colorDepth = 10;         // signal code depth
-		double radiusScale = 1.0;    // sample radius: 16 px at 1080 lines, by height
-		pl_tex field = nullptr;      // optional: de-judder block field (null = per-frame)
-		pl_tex grainError = nullptr; // optional: grain error texture (r = 8-bit codes)
-		double fieldScale = 1.0;     // source px of field per px of plane's full-size luma
-		double fieldScaleX = 0.0;    // horizontal fieldScale when per-axis (0 = fieldScale)
-		uint64_t sequence = 0;       // source frame sequence (holds across consecutive frames)
-		double holdAlpha = 0.5;      // weight of this frame's decision where held
-		double grainCodes = 2.0;     // grain error (8-bit codes) above which a block is texture
-		bool grainGuard = true;      // deband_vp_grain_guard (default on)
-		bool grainSplit = true;      // deband_vp_grain_guard split (default on; false = spatial-share veto)
-		VpSkeleton::SkeletonMemo* memo = nullptr;   // optional: acquire shared kBandMemo GPU low band
+		double thresholdCodes = 0.0, radiusScale = 1.0;
+		int colorDepth = 10;
+		pl_tex field = nullptr, grainError = nullptr;
+		double fieldScale = 1.0, fieldScaleX = 0.0;
+		uint64_t sequence = 0;
+		double holdAlpha = 0.5, grainCodes = 2.0;
+		bool grainGuard = true, grainSplit = true;
+		VpSkeleton::SkeletonMemo* memo = nullptr;
 	};
 
 	// The threshold in codes from the readings (spec 2d / 2b): the content's
@@ -81,6 +78,8 @@ namespace VpDebander
 		void SetHoldSequenceForTest(uint64_t sequence) { weightSequence = sequence; }
 		// The grain guard's busy-share texture of a slot's plane (grainGuard on, grainSplit off; null otherwise): the guard parity test.
 		pl_tex GuardTextureForTest(int slot, int plane) const { return (slot >= 0 && slot < kSlots && plane >= 0 && plane < PL_MAX_PLANES) ? guard[slot][plane] : nullptr; }
+		// Fallback coarse tensor texture (allocated only when !useP11) and private low-band texture (allocated only when P10/kBandMemo absent).
+		pl_tex SplitTensorTextureForTest(int slot, int plane) const { return (slot >= 0 && slot < kSlots && plane >= 0 && plane < PL_MAX_PLANES) ? splitTensor[slot][plane] : nullptr; } pl_tex SplitLowTextureForTest(int slot, int plane) const { return (slot >= 0 && slot < kSlots && plane >= 0 && plane < PL_MAX_PLANES) ? splitLow[slot][plane] : nullptr; }
 		const std::string& LastError() const { return error; }
 		const std::string& LastFailureError() const { return lastFailureError; }
 		// R1-W1-RES (doc 72 item 2): the debander is the FALLBACK LAYER under temporal detail (order TD -> deband -> CR). Its read path
@@ -109,16 +108,16 @@ namespace VpDebander
 		pl_tex weight[2][PL_MAX_PLANES] = {};   // blur weights (slot 0): this source frame's and the previous one's
 		pl_tex weightDummy = nullptr;           // 1x1 r32f sink bound on non-main slots (reuses the compiled shader, no cold compile)
 		pl_tex guard[kSlots][PL_MAX_PLANES] = {};   // grainGuard: the spatial grain share per 16x16 block
-		pl_tex splitHalf[kSlots][PL_MAX_PLANES] = {};
-		pl_tex splitTmp[kSlots][PL_MAX_PLANES] = {};
-		pl_tex splitLow[kSlots][PL_MAX_PLANES] = {};
+		pl_tex splitHalf[kSlots][PL_MAX_PLANES] = {}, splitTmp[kSlots][PL_MAX_PLANES] = {};
+		pl_tex splitLow[kSlots][PL_MAX_PLANES] = {}, splitTensor[kSlots][PL_MAX_PLANES] = {};
 		bool SplitLowBand(pl_gpu gpu, pl_dispatch dispatch, pl_tex in, int slot, int plane, double scale,
 			pl_tex acquiredLow, pl_tex& splitLowOut);
 		int curIndex = 0;                        // weight[curIndex] = weightSequence's
 		bool prevValid = false;                  // weight[1 - curIndex] = weightSequence - 1's
 		uint64_t weightSequence = 0;
 		int weightW[PL_MAX_PLANES] = {}, weightH[PL_MAX_PLANES] = {};
-		std::string error, lastFailureError, lastBandMemoFallback, lastGrainGuardFallback;
+		std::string error, lastFailureError, lastBandMemoFallback, lastGrainGuardFallback, headerScratch, cachedBandWeights;
+		std::vector<pl_shader_desc> descScratch; double cachedBandScale = -1.0;
 		TdProducts::ReadResult tdRead;
 		unsigned long long failures = 0, held = 0, bandMemoHits = 0, bandMemoFallbacks = 0, grainGuardHits = 0, grainGuardFallbacks = 0;
 	};

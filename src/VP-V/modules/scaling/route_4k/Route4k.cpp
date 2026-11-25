@@ -51,7 +51,7 @@ ivec2 sz = imageSize(dst_img);
 if (p.x < sz.x && p.y < sz.y) {
     vec4 s = texelFetch(sharp_tex, p, 0);
     vec4 f = texelFetch(safe_tex, p, 0);
-    float w = hb_weight(w_base, 0.0, 1.0, 1.0);
+    float w = hb_weight(w_base, edge_term, grain_term, motion_term);
     vec4 o;
     if (rgb_luma_only != 0) {
         float ys = dot(s.rgb, kw);
@@ -362,10 +362,19 @@ if (p.x < sz.x && p.y < sz.y) {
 
 		// Plane 0 (luma / RGB): sharp branch, alias-safe branch, or HybridBlend of both.
 		const float wBase = HybridBlend::SanitizeUnit(cfg.wBase);
-		const bool safeOnly = plan.oneAxis || wBase <= 0.0f;
+		const float edgeTerm = HybridBlend::SanitizeUnit(cfg.edgeTerm);
+		const float grainTerm = HybridBlend::SanitizeUnit(cfg.grainTerm);
+		const float motionTerm = HybridBlend::SanitizeUnit(cfg.motionTerm);
+		HybridBlend::Terms blendTerms;
+		blendTerms.wBase = wBase;
+		blendTerms.edge = edgeTerm;
+		blendTerms.grain = grainTerm;
+		blendTerms.motion = motionTerm;
+		const float effW = HybridBlend::Weight(blendTerms);
+		const bool safeOnly = plan.oneAxis || effW <= 0.0f;
 		const bool sameBranch = SameKernel(cfg.sharpFilter, cfg.safeFilter) &&
 			std::fabs(cfg.sharpAntiring - cfg.safeAntiring) < 1e-6f;
-		const bool sharpOnly = !safeOnly && (wBase >= 1.0f || sameBranch);
+		const bool sharpOnly = !safeOnly && (effW >= 1.0f || sameBranch);
 		const ScalerPass::Source lumaSrc = {
 			lumaIn, 0.0f, 0.0f, static_cast<float>(srcW), static_cast<float>(srcH)
 		};
@@ -470,8 +479,11 @@ if (p.x < sz.x && p.y < sz.y) {
 				static_cast<float>(kwD[2])
 			};
 
-			const pl_shader_var vars[3] = {
+			const pl_shader_var vars[6] = {
 				{ pl_var_float("w_base"), &wBase, true },
+				{ pl_var_float("edge_term"), &edgeTerm, true },
+				{ pl_var_float("grain_term"), &grainTerm, true },
+				{ pl_var_float("motion_term"), &motionTerm, true },
 				{ pl_var_vec3("kw"), kw, true },
 				{ pl_var_int("rgb_luma_only"), &rgbLumaOnly, true }
 			};
@@ -485,7 +497,7 @@ if (p.x < sz.x && p.y < sz.y) {
 			custom.descriptors = desc;
 			custom.num_descriptors = 3;
 			custom.variables = vars;
-			custom.num_variables = 3;
+			custom.num_variables = 6;
 			custom.compute = true;
 			custom.compute_group_size[0] = 16;
 			custom.compute_group_size[1] = 16;
@@ -551,9 +563,9 @@ if (p.x < sz.x && p.y < sz.y) {
 
 		out = result;
 		formatNote = note;
-		char buf[192];
-		std::snprintf(buf, sizeof buf, "4K route: %s (%s), %dx%d -> %dx%d",
-			ModeName(cfg.mode), branchLabel, srcW, srcH, dstW, dstH);
+		char buf[256];
+		std::snprintf(buf, sizeof buf, "4K route: %s (%s, w=%.2f, static e/g/m), %dx%d -> %dx%d",
+			ModeName(cfg.mode), branchLabel, static_cast<double>(effW), srcW, srcH, dstW, dstH);
 		status = buf;
 		return true;
 	}

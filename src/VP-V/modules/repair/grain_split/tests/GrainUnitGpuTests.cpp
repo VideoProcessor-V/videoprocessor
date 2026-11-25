@@ -28,6 +28,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <random>
 #include <string>
 #include <thread>
@@ -272,7 +273,8 @@ namespace GrainUnitGpuTestsNs
 			// WAIVER-P10V4-01 (refs/116b, unit 4: LEVEL pass, NLF cap, depth scale): 0x8949becef0aab5c9 -> 0x7fe213d86466cc12, recomputed offline.
 			// WAIVER-P10V5-01 (refs/127 A1, unit 5: STATS per 16x16 chunk + REDUCE): 0x7fe213d86466cc12 -> 0xf33e0215cda77a66, recomputed offline.
 			// WAIVER-GS-155 (L#3, commit 6bfb1d462: LEVEL_BODY boundary-bin zero-energy exclusion q <= 1/12 code^2, BTB/WTW preserved): 0xf33e0215cda77a66 -> 0x63b5ed5b2aa6ca3b, recomputed offline.
-			Assert::AreEqual(uint64_t(0x63b5ed5b2aa6ca3bull), GrainSplit::Gpu::FullShaderFingerprint(), L"pass shader texts are the unit-5 + GS-155 text");
+			// WAIVER-W23-P2M9 (POD2-M9: LEVEL_BODY midtone NaN/+Inf histogram guard across all bins): 0x63b5ed5b2aa6ca3b -> 0x25867c1fa10f515b, recomputed offline.
+			Assert::AreEqual(uint64_t(0x25867c1fa10f515bull), GrainSplit::Gpu::FullShaderFingerprint(), L"pass shader texts are the unit-5 + GS-155 + POD2-M9 text");
 			const std::string full = GrainSplit::Gpu::ViewGlsl(Storage::Full, kCu10in16);
 			const std::string compact = GrainSplit::Gpu::ViewGlsl(Storage::Compact, kCu10in16);
 			const std::string define = "#define GS_UNIT_VERSION " + std::to_string(GrainSplit::kUnitVersion);
@@ -1192,6 +1194,106 @@ namespace GrainUnitGpuTestsNs
 			Assert::IsTrue(worstSrel <= 1.0 / 1024.0, L"GS-155: |s1|,|s2| CPU-vs-GPU relative error <= 2^-10 for |s| > 64");
 			Assert::IsTrue(worstBase <= 0.05, L"GS-155: |base| CPU-vs-GPU error <= 0.05 code");
 			Assert::IsTrue(worstF <= 1.0 / 255.0, L"GS-155: |f| CPU-vs-GPU error <= 1/255");
+		}
+
+		// POD2-M9 regression test (WARP): midtone NaN/+Inf blocks in LEVEL_BODY must be skipped across ALL bins
+		// (not just boundary bins 0 and levelBins-1), keeping the midtone noise-level floor accurate instead of
+		// collapsing into histogram key 0 (0.015625).
+		BEGIN_TEST_METHOD_ATTRIBUTE(LevelBodyMidtoneNanDoesNotCollapseMidtoneNlf)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(LevelBodyMidtoneNanDoesNotCollapseMidtoneNlf)
+		{
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create libplacebo WARP test device");
+			pl_gpu gpu = dev.Gpu();
+
+			const int w = 256, h = 256, B = 16;
+			const GrainSplit::Params params;   // levelBins = 8, levelPct = 25
+			const int midBin = params.levelBins / 2;   // luma ~ 512 / 1024 -> bin 4 (midtone, not boundary!)
+
+			// Build midtone 10-bit plane (codeUnit = 1023.0, codeScale = 1.0) with uniform Gaussian grain sigma = 2.0 codes.
+			std::mt19937 rng(20261125u);
+			std::normal_distribution<float> dist(0.0f, 2.0f / 1023.0f);
+			std::vector<float> cleanPx(static_cast<size_t>(w) * h);
+			for (float& v : cleanPx)
+				v = 0.56f + dist(rng);   // 0.56 * 1023 ~= 573 -> safely inside midtone bin 4 ([512, 640))
+
+			std::vector<float> nanPx = cleanPx;
+			const float qnan = std::numeric_limits<float>::quiet_NaN();
+			// Corrupt top 6 of 16 block rows (37.5% > 25th percentile!) with NaN pixels in midtone blocks.
+			for (int y = 0; y < 6 * B; ++y)
+				for (int x = 0; x < w; ++x)
+					if ((x & 15) == 8 && (y & 15) == 8)
+						nanPx[static_cast<size_t>(y) * w + x] = qnan;
+
+			pl_fmt r32f = pl_find_fmt(gpu, PL_FMT_FLOAT, 1, 32, 32, PL_FMT_CAP_SAMPLEABLE);
+			Assert::IsNotNull(r32f, L"r32f format required");
+
+			auto runLevel = [&](const std::vector<float>& px) -> std::vector<float>
+			{
+				struct Guard
+				{
+					pl_gpu g = nullptr;
+					pl_tex plane = nullptr;
+					GrainSplit::Gpu::Splitter splitter;
+					GrainSplit::Gpu::Scratch scratch;
+					explicit Guard(pl_gpu d) : g(d) {}
+					~Guard()
+					{
+						splitter.Release(g);
+						for (pl_tex* t : { &scratch.tmp, &scratch.low, &scratch.part, &scratch.quiet, &scratch.level, &plane })
+							if (g && *t) { pl_tex_destroy(g, t); *t = nullptr; }
+					}
+				} gd(gpu);
+
+				pl_tex_params tp{};
+				tp.w = w; tp.h = h; tp.format = r32f; tp.sampleable = true; tp.initial_data = px.data();
+				gd.plane = pl_tex_create(gpu, &tp);
+				Assert::IsNotNull(gd.plane);
+				const GrainSplit::Gpu::ContextShapes shapes = GrainSplit::Gpu::ContextShapesOf(w, h, B, params);
+				Assert::IsTrue(shapes.Valid());
+				VpSkeleton::PlTexBackend backend(gpu);
+				gd.scratch.tmp = backend.Create(shapes.tmp);
+				gd.scratch.low = backend.Create(shapes.low);
+				gd.scratch.part = backend.Create(shapes.part);
+				gd.scratch.quiet = backend.Create(shapes.quiet);
+				gd.scratch.level = backend.Create(shapes.level);
+				Assert::IsTrue(gd.scratch.All());
+
+				GrainSplit::Gpu::Options opts;
+				opts.storage = Storage::Full;
+				opts.scratch = gd.scratch;
+				Assert::IsTrue(gd.splitter.Compute(gpu, dev.dispatch, gd.plane, 0, 1023.0, 1.0, B, params, opts),
+					Wide(gd.splitter.LastError()).c_str());
+				return DownloadRGBA(gpu, dev.dispatch, gd.scratch.level);
+			};
+
+			const std::vector<float> cleanLvl = runLevel(cleanPx);
+			const std::vector<float> nanLvl = runLevel(nanPx);
+
+			const float cleanMidN = cleanLvl[static_cast<size_t>(midBin) * 4u];
+			const float cleanMidValid = cleanLvl[static_cast<size_t>(midBin) * 4u + 1u];
+			const float nanMidN = nanLvl[static_cast<size_t>(midBin) * 4u];
+			const float nanMidValid = nanLvl[static_cast<size_t>(midBin) * 4u + 1u];
+
+			Assert::IsTrue(cleanMidValid > 0.5f && std::isfinite(cleanMidN) && cleanMidN > 1.0f,
+				L"baseline clean midtone NLF must be valid and > 1.0");
+			Assert::IsTrue(nanMidValid > 0.5f && std::isfinite(nanMidN) && nanMidN > 1.0f,
+				L"POD2-M9: midtone NaN blocks must be skipped so midtone NLF remains valid and > 1.0");
+			Assert::IsTrue(std::fabs(nanMidN - cleanMidN) / cleanMidN < 0.35f,
+				(L"POD2-M9: midtone NLF with 37.5% NaN blocks must stay close to clean NLF (clean=" +
+					std::to_wstring(cleanMidN) + L", nan=" + std::to_wstring(nanMidN) + L")").c_str());
+
+			// Negative control: without the midtone NaN guard, 96/256 NaN blocks mapped via max(NaN, 0.015625)
+			// fill histogram bin 0 past the 25th percentile (96 >= 64), collapsing NLF to 0.015625 (>50x collapse).
+			const int totalBlocks = (w / B) * (h / B);
+			const int nanBlocks = 6 * (w / B);
+			const int rank25 = (params.levelPct * totalBlocks + 99) / 100;
+			Assert::IsTrue(nanBlocks >= rank25, L"negative control: 37.5% NaN blocks exceed 25th-percentile rank");
+			const float unguardedCollapse = 0.015625f;
+			Assert::IsTrue(cleanMidN / unguardedCollapse > 50.0f && nanMidN / unguardedCollapse > 50.0f,
+				L"negative control: unguarded NaN->0.015625 collapse would understate midtone NLF by >50x");
 		}
 	};
 }

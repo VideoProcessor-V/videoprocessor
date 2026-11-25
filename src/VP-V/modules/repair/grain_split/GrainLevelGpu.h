@@ -53,6 +53,7 @@
 #include <VP-V/modules/repair/grain_split/GpuPassUtil.h>
 #include <VP-V/modules/repair/grain_split/GrainSplitGpu.h>
 #include <VP-V/modules/repair/grain_split/GrainSplitVariantOwner.h>
+#include <VP-V/modules/repair/grain_split/P10gFacts.h>
 
 #include <libplacebo/colorspace.h>
 #include <libplacebo/dispatch.h>
@@ -111,6 +112,9 @@ namespace GrainSplit
 				return bits.sample_depth;
 			return 10;
 		}
+
+		using GrainLevelFacts = P10gFacts;
+		inline const void* GrainLevelFactsTag() { return P10gFactsTag(); }
 
 		// What the module shows (status / Fallbacks): fills that published, fills that declined, the last decline, and whether the
 		// most recent fill declined (lastDeclined: set by Decline, cleared by NoteFill; the declined line is shown only while set,
@@ -239,6 +243,13 @@ if (gv_li == 0u)
 				if (!VpvGpu::Pass(static_cast<pl_dispatch>(req.gpu->Dispatch()), "VP-V grain level (single-frame)", header, kBodyGlsl,
 						desc.data(), int(desc.size()), nullptr, 0, gs->bw, gs->bh, shmem, kGroupEdge, kGroupEdge))
 					return Decline(out, c, "shader rejected or dispatch failed");
+				std::shared_ptr<GrainLevelFacts> lvlFacts = std::make_shared<GrainLevelFacts>();
+				lvlFacts->sourceBits = depth;
+				lvlFacts->blockPx = gs->B;
+				lvlFacts->codeToEightBit = CodeToEightBitOf(depth);
+				lvlFacts->textureKeepAlive = std::move(out.gpu.keepAlive);
+				out.gpu.textureSet = GrainLevelFactsTag();
+				out.gpu.keepAlive = std::move(lvlFacts);
 				NoteFill(c);
 				return true;
 			};
@@ -324,9 +335,9 @@ if (gv_li == 0u)
 				Observe(c.host, luma);
 				return false;
 			}
-			void OnStatus(const RE::Context&, RE::StatusKind kind, std::vector<std::string>& lines, const char*, const char*) override
+			void OnStatus(const RE::Context& ctx, RE::StatusKind kind, std::vector<std::string>& lines, const char*, const char*) override
 			{
-				if (kind != RE::StatusKind::Fallbacks)
+				if (kind != RE::StatusKind::Fallbacks || Hub::ExtensionHub::Instance().OriginalPathway(ctx.host))
 					return;
 				const std::vector<std::string> f = FallbackLines();
 				lines.insert(lines.end(), f.begin(), f.end());
@@ -523,11 +534,23 @@ if (gv_li == 0u)
 				if (levelDone)
 					return ok;
 				tried_ = want;   // a refused registration is retried at the next size change, not every frame
+				using R = VpSkeleton::SkeletonMemo::Registration;
 				if (ok)
-					demand->UnregisterOwnerFill(VpSkeleton::kP10gGrainLevel, VpSkeleton::AcquireForm::Gpu, kOwnerUnit);
-				const VpSkeleton::SkeletonMemo::Registration r =
-					demand->RegisterOwnerFill(VpSkeleton::kP10gGrainLevel, VpSkeleton::AcquireForm::Gpu, kOwnerUnit, MakeOwnerFill(want, counters_));
-				const bool now = r == VpSkeleton::SkeletonMemo::Registration::Registered;
+				{
+					// POD2-M4: atomic ReplaceOwnerFill eliminates the unregistered gap between Unregister and Register;
+					// a failed replace preserves the previous active registration and reports the failure visibly.
+					const R r = demand->ReplaceOwnerFill(VpSkeleton::kP10gGrainLevel, VpSkeleton::AcquireForm::Gpu, kOwnerUnit, MakeOwnerFill(want, counters_));
+					if (r == R::Replaced || r == R::Registered)
+					{
+						reserve_ = want;
+						levelProblem_.clear();
+						return true;
+					}
+					levelProblem_ = "P10g owner fill " + RegistrationText(r) + " (reserve " + std::to_string(want) + " B; retried at the next size change)";
+					return true;   // previous registration remains intact
+				}
+				const R r = demand->RegisterOwnerFill(VpSkeleton::kP10gGrainLevel, VpSkeleton::AcquireForm::Gpu, kOwnerUnit, MakeOwnerFill(want, counters_));
+				const bool now = r == R::Registered;
 				reserve_ = now ? want : uint64_t(0);
 				registered_.store(now, std::memory_order_release);
 				levelProblem_ = now ? std::string()

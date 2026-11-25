@@ -799,5 +799,99 @@ namespace Route4kTestsNs
 			Assert::IsTrue(maxAlphaErr <= 1e-5f,
 				(L"Route4k RGB output altered alpha: maxErr=" + std::to_wstring(maxAlphaErr)).c_str());
 		}
+
+		// POD2-M8 regression test (WARP): default Config::wBase=0.5 engages HybridBlend (not sharpOnly),
+		// edgeTerm/grainTerm/motionTerm feed hb_weight in GPU compute, and Status() honestly reports static e/g/m.
+		BEGIN_TEST_METHOD_ATTRIBUTE(DefaultWBaseAndStaticEdgeGrainMotionTermsEngageHybridBlend)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(DefaultWBaseAndStaticEdgeGrainMotionTermsEngageHybridBlend)
+		{
+			Route4k::Config defaultCfg;
+			Assert::AreEqual(0.5f, defaultCfg.wBase, 1e-6f,
+				L"POD2-M8: default Config::wBase must be 0.5 (not 1.0 which bypassed HybridBlend)");
+
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create libplacebo WARP test device");
+			pl_gpu gpu = dev.Gpu();
+
+			const int sw = 32, sh = 32, dw = 64, dh = 64;
+			std::vector<float> srcPx(static_cast<size_t>(sw) * sh, 0.25f);
+			for (int y = 0; y < sh; ++y)
+				for (int x = 0; x < sw; ++x)
+					srcPx[static_cast<size_t>(y) * sw + x] = ((x / 2 + y / 2) & 1) ? 0.85f : 0.15f;
+
+			pl_fmt r32f = pl_find_named_fmt(gpu, "r32f");
+			Assert::IsNotNull(r32f);
+			pl_tex_params sp{};
+			sp.w = sw; sp.h = sh; sp.format = r32f; sp.sampleable = true; sp.initial_data = srcPx.data();
+			TexGuard srcTex(gpu, pl_tex_create(gpu, &sp));
+			Assert::IsNotNull(srcTex.tex);
+
+			pl_frame srcFrame{};
+			srcFrame.num_planes = 1;
+			srcFrame.planes[0].texture = srcTex.tex;
+			srcFrame.planes[0].components = 1;
+			srcFrame.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+			srcFrame.crop = { 0.0f, 0.0f, static_cast<float>(sw), static_cast<float>(sh) };
+
+			auto runWith = [&](const Route4k::Config& c, std::string& outStatus) -> std::vector<float>
+			{
+				const Route4k::PlanResult plan = Route4k::Plan(sw, sh, dw, dh, dw, dh, true, true, false, c);
+				Assert::IsTrue(plan.shouldRun);
+				Route4k::Module mod;
+				Route4kGuard guard(gpu, mod);
+				pl_frame outF{};
+				Assert::IsTrue(mod.Apply(gpu, dev.dispatch, srcFrame, plan, c, outF, 0),
+					Wide("Route4k::Apply failed: " + mod.LastError()).c_str());
+				outStatus = mod.Status();
+				std::vector<float> got;
+				Assert::IsTrue(DownloadFloats(gpu, outF.planes[0].texture, got));
+				return got;
+			};
+
+			Route4k::Config sharpCfg;
+			sharpCfg.mode = Route4k::Mode::Always4k;
+			sharpCfg.wBase = 1.0f;
+			std::string sharpStatus;
+			const std::vector<float> sharpOut = runWith(sharpCfg, sharpStatus);
+
+			Route4k::Config safeCfg;
+			safeCfg.mode = Route4k::Mode::Always4k;
+			safeCfg.wBase = 0.0f;
+			std::string safeStatus;
+			const std::vector<float> safeOut = runWith(safeCfg, safeStatus);
+
+			Route4k::Config weightedCfg;
+			weightedCfg.mode = Route4k::Mode::Always4k;
+			weightedCfg.wBase = 0.8f;
+			weightedCfg.edgeTerm = 0.25f;
+			weightedCfg.grainTerm = 0.75f;
+			weightedCfg.motionTerm = 0.5f;
+			std::string weightedStatus;
+			const std::vector<float> weightedOut = runWith(weightedCfg, weightedStatus);
+
+			Assert::IsTrue(weightedStatus.find("blend") != std::string::npos &&
+				weightedStatus.find("static e/g/m") != std::string::npos,
+				(L"POD2-M8: Status() must honestly report blend + static e/g/m, got: " + Wide(weightedStatus)).c_str());
+
+			HybridBlend::Terms t;
+			t.wBase = weightedCfg.wBase;
+			t.edge = weightedCfg.edgeTerm;
+			t.grain = weightedCfg.grainTerm;
+			t.motion = weightedCfg.motionTerm;
+			const float expectedW = HybridBlend::Weight(t);   // 0.8 * 0.75 * 0.75 * 0.5 = 0.225
+			float maxErr = 0.0f, maxVsSharp = 0.0f;
+			for (size_t i = 0; i < weightedOut.size(); ++i)
+			{
+				const float want = HybridBlend::BlendLuma(sharpOut[i], safeOut[i], expectedW);
+				maxErr = (std::max)(maxErr, std::fabs(weightedOut[i] - want));
+				maxVsSharp = (std::max)(maxVsSharp, std::fabs(weightedOut[i] - sharpOut[i]));
+			}
+			Assert::IsTrue(maxErr <= 1e-5f,
+				(L"POD2-M8: GPU weighted Route4k blend must match HybridBlend::Weight(wBase,e,g,m), maxErr=" + std::to_wstring(maxErr)).c_str());
+			Assert::IsTrue(maxVsSharp > 0.02f,
+				L"POD2-M8 negative control: edge/grain/motion terms must move output strictly away from sharp-only branch");
+		}
 	};
 }

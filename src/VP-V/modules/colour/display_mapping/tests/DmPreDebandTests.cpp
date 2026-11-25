@@ -1355,5 +1355,120 @@ namespace VideoProcessorTest
 			fixture.CaptureLog(nullptr);
 			AssertCleanLibplaceboLog(cleanLog, "PreDebandPreservesBtbAndWtwWithoutClipping");
 		}
+
+		// POD2-H3 regression test (WARP): active-picture rect uniforms (dm_active_x0..y1) prevent
+		// vp_dm_pre_deband.glsl ring taps and grain-guard neighbor taps from bleeding bright letterbox /
+		// blanked bars into adjacent dark PQ shadow pixels, while leaving bar pixels untouched.
+		// Same-input negative control with default full-frame active rect [0, 1] exhibits > 0.01 bleed.
+		BEGIN_TEST_METHOD_ATTRIBUTE(ActiveRectBlocksLetterboxBarBleedIntoDarkShadows)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(ActiveRectBlocksLetterboxBarBleedIntoDarkShadows)
+		{
+			// Policy/helper verification: NormalizedActiveRect + IntersectNormalizedActiveRect + ShaderParameters.
+			const DmPreDeband::ActiveRect rect = DmPreDeband::IntersectNormalizedActiveRect(
+				0.0, 16.0, 128.0, 112.0,
+				true, 0, 24, 128, 104, 128, 128,
+				128, 128);
+			Assert::AreEqual(0.0, rect.x0, 1e-12);
+			Assert::AreEqual(24.0 / 128.0, rect.y0, 1e-12);
+			Assert::AreEqual(1.0, rect.x1, 1e-12);
+			Assert::AreEqual(104.0 / 128.0, rect.y1, 1e-12);
+			DmPreDeband::Decision activeDec;
+			activeDec.active = true;
+			activeDec.thresholdNorm = 0.05;
+			activeDec.grainGuardOn = true;
+			const auto params = DmPreDeband::ShaderParameters(activeDec, 1080, true, rect);
+			const double* px0 = FindParam(params, "dm_active_x0");
+			const double* py0 = FindParam(params, "dm_active_y0");
+			const double* px1 = FindParam(params, "dm_active_x1");
+			const double* py1 = FindParam(params, "dm_active_y1");
+			Assert::IsTrue(px0 && py0 && px1 && py1, L"ShaderParameters must emit all four dm_active_* uniforms");
+			Assert::AreEqual(rect.x0, *px0, 1e-12);
+			Assert::AreEqual(rect.y0, *py0, 1e-12);
+			Assert::AreEqual(rect.x1, *px1, 1e-12);
+			Assert::AreEqual(rect.y1, *py1, 1e-12);
+
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create libplacebo WARP GPU fixture");
+			std::string cleanLog;
+			ScopedLogCapture logGuard(fixture, cleanLog);
+
+			ScopedHook debandHook;
+			LoadBundledHook(fixture, "vp_dm_pre_deband.glsl", PL_HOOK_RGB, debandHook);
+
+			constexpr int kW = 128, kH = 128, kBarH = 24;
+			constexpr float kDarkI = 0.10f;
+			constexpr float kBarI = 0.16f;   // 1-of-4 ring tap yields |I_avg - I_c| = 0.015 < 0.6 * 0.05 -> w = 1.0 bleed
+			constexpr double kThrNorm = 0.05;
+			constexpr double kRadius = 16.0;
+
+			std::vector<float> ictcpIn(static_cast<size_t>(kW) * kH * 4u, 0.0f);
+			for (int y = 0; y < kH; ++y)
+			{
+				const float valI = (y < kBarH || y >= kH - kBarH) ? kBarI : kDarkI;
+				for (int x = 0; x < kW; ++x)
+				{
+					const size_t idx = (static_cast<size_t>(y) * kW + static_cast<size_t>(x)) * 4u;
+					ictcpIn[idx + 0] = valI;
+					ictcpIn[idx + 1] = 0.0f;
+					ictcpIn[idx + 2] = 0.0f;
+					ictcpIn[idx + 3] = 1.0f;
+				}
+			}
+
+			// Guarded pass: active rect excludes top/bottom 24 px bars.
+			BindPreDebandUniforms(debandHook.hook, true, kThrNorm, kRadius, true, true);
+			SetHookFloatParam(debandHook.hook, "dm_active_x0", rect.x0);
+			SetHookFloatParam(debandHook.hook, "dm_active_y0", rect.y0);
+			SetHookFloatParam(debandHook.hook, "dm_active_x1", rect.x1);
+			SetHookFloatParam(debandHook.hook, "dm_active_y1", rect.y1);
+			const std::vector<float> guardedOut = RenderRgba32fWithHook(
+				fixture, kW, kH, ictcpIn, debandHook.hook, PL_COLOR_PRIM_BT_2020, PL_COLOR_TRC_PQ);
+			AssertAllRgbFinite(guardedOut, L"Active-rect guarded pre-deband");
+
+			// Negative control (exact same input texture): full-frame [0, 1] active rect lets ring cross into bars.
+			SetHookFloatParam(debandHook.hook, "dm_active_x0", 0.0);
+			SetHookFloatParam(debandHook.hook, "dm_active_y0", 0.0);
+			SetHookFloatParam(debandHook.hook, "dm_active_x1", 1.0);
+			SetHookFloatParam(debandHook.hook, "dm_active_y1", 1.0);
+			const std::vector<float> unguardedOut = RenderRgba32fWithHook(
+				fixture, kW, kH, ictcpIn, debandHook.hook, PL_COLOR_PRIM_BT_2020, PL_COLOR_TRC_PQ);
+			AssertAllRgbFinite(unguardedOut, L"Full-frame negative control pre-deband");
+
+			float maxGuardedShadowBleed = 0.0f;
+			float maxGuardedBarDrift = 0.0f;
+			float maxUnguardedShadowBleed = 0.0f;
+			for (int y = 0; y < kH; ++y)
+			{
+				for (int x = 0; x < kW; ++x)
+				{
+					const size_t idx = (static_cast<size_t>(y) * kW + static_cast<size_t>(x)) * 4u;
+					if (y >= kBarH && y < kH - kBarH)
+					{
+						maxGuardedShadowBleed = (std::max)(maxGuardedShadowBleed, std::fabs(guardedOut[idx] - kDarkI));
+						if (y < kBarH + 14 || y >= kH - kBarH - 14)
+							maxUnguardedShadowBleed = (std::max)(maxUnguardedShadowBleed, std::fabs(unguardedOut[idx] - kDarkI));
+					}
+					else
+					{
+						maxGuardedBarDrift = (std::max)(maxGuardedBarDrift, std::fabs(guardedOut[idx] - kBarI));
+					}
+				}
+			}
+
+			Assert::IsTrue(maxGuardedShadowBleed < 1e-4f,
+				(L"POD2-H3: guarded active rect must have zero bar bleed into dark shadows (got " +
+					std::to_wstring(maxGuardedShadowBleed) + L")").c_str());
+			Assert::IsTrue(maxGuardedBarDrift < 1e-4f,
+				(L"POD2-H3: pixels outside active rect must remain untouched (got " +
+					std::to_wstring(maxGuardedBarDrift) + L")").c_str());
+			Assert::IsTrue(maxUnguardedShadowBleed > 0.010f,
+				(L"POD2-H3 negative control: unguarded full-frame ring must bleed > 0.010 from bar into shadows (got " +
+					std::to_wstring(maxUnguardedShadowBleed) + L")").c_str());
+
+			fixture.CaptureLog(nullptr);
+			AssertCleanLibplaceboLog(cleanLog, "ActiveRectBlocksLetterboxBarBleedIntoDarkShadows");
+		}
 	};
 }

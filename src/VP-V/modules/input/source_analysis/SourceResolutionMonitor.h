@@ -31,6 +31,7 @@ namespace SourceIdentity { namespace Chain { class ChainEstimator; } }
 namespace VpSkeleton
 {
 	class AnalysisLane;
+	class SkeletonMemo;
 }
 
 // Stage 12 step B in the renderer (owner 2026-10-15): the effective
@@ -599,6 +600,7 @@ namespace SourceResolutionMonitor
 		// ... and the frame's source sequence (the look-ahead's evidence for the step; 0 = none).
 		void AnalyseTilesForTest(const std::vector<float>& tiles, int count, double seconds, int nativeWidth, int nativeHeight,
 			const std::vector<float>& tileX, const std::vector<float>& tileY, int baseTiles, int tileSize, double blackLevel, uint64_t sequence);
+		void SetBandMemo(VpSkeleton::SkeletonMemo* memo);
 		// Tests only (efficiency 2026-10-24): called on the analysing thread just before the
 		// kernel fits, with `mutex` released (a test can prove Read() does not wait for a fit).
 		static void (*kernelFitProbeForTest)(Monitor&);
@@ -614,7 +616,7 @@ namespace SourceResolutionMonitor
 			int nativeWidth = 0, nativeHeight = 0;
 			// The tiles' centres in the picture (normalised; empty: the 4-column layout) and how
 			// many of them are the base grid (the frame signature; 0 = all).
-			std::vector<float> tileX, tileY;
+			std::vector<float> tileX, tileY; std::vector<uint32_t> tileOriginX, tileOriginY;
 			int baseTiles = 0;
 			int tileSize = kTile;
 			double blackLevel = 64.0 / 1023.0;
@@ -927,6 +929,7 @@ namespace SourceResolutionMonitor
 		double disengageSince = 0.0;
 		unsigned long long disengageCuts = 0;
 		unsigned long long disengageFrames = 0;
+		std::atomic<VpSkeleton::SkeletonMemo*> bandMemo;
 	};
 
 	// The stats-line / status text.

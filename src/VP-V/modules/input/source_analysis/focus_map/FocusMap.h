@@ -155,37 +155,114 @@ namespace FocusMap
 	{
 		int width = 0, height = 0;
 		int block = 0, gw = 0, gh = 0;   // the P11 grid
-		int p2Cell = 8;                  // source px per P2 cell edge
+		int p2Cell = 8;                  // source px per P2 cell edge (horizontal)
+		int p2CellY = 8;                 // source px per P2 cell edge (vertical; != p2Cell under anisotropic scaling)
 		int p2gw = 0, p2gh = 0;
-		static Geometry Make(int w, int h, int p2CellPx = 8)
+		double p2ScaleX = 0.0;           // source px per P2 engine pixel (X); 0 = derive p2Cell / 4.0
+		double p2ScaleY = 0.0;           // source px per P2 engine pixel (Y); 0 = derive p2CellY / 4.0
+		// Active picture rect [activeX0, activeX1) x [activeY0, activeY1) in source pixels (default full frame).
+		int activeX0 = 0, activeY0 = 0, activeX1 = 0, activeY1 = 0;
+		static Geometry Make(int w, int h, int p2CellPx = 8, int p2CellPy = 0, double scaleX = 0.0, double scaleY = 0.0)
 		{
 			Geometry g;
 			g.width = w; g.height = h;
 			g.block = RegionEvidence::BlockSizeFor(h);
 			g.gw = (w + g.block - 1) / g.block;
 			g.gh = (h + g.block - 1) / g.block;
-			g.p2Cell = p2CellPx;
-			g.p2gw = (w + p2CellPx - 1) / p2CellPx;
-			g.p2gh = (h + p2CellPx - 1) / p2CellPx;
+			g.p2Cell = p2CellPx > 0 ? p2CellPx : 8;
+			g.p2CellY = p2CellPy > 0 ? p2CellPy : g.p2Cell;
+			g.p2gw = (w + g.p2Cell - 1) / g.p2Cell;
+			g.p2gh = (h + g.p2CellY - 1) / g.p2CellY;
+			g.p2ScaleX = scaleX;
+			g.p2ScaleY = scaleY;
+			g.activeX0 = 0;
+			g.activeY0 = 0;
+			g.activeX1 = w;
+			g.activeY1 = h;
 			return g;
+		}
+		void SetActiveRect(int x0, int y0, int x1, int y1)
+		{
+			activeX0 = (std::max)(0, (std::min)(width, x0));
+			activeY0 = (std::max)(0, (std::min)(height, y0));
+			activeX1 = (std::max)(activeX0, (std::min)(width, x1));
+			activeY1 = (std::max)(activeY0, (std::min)(height, y1));
+		}
+		void ClampedActiveRect(int& x0, int& y0, int& x1, int& y1) const
+		{
+			if (activeX1 <= activeX0 || activeY1 <= activeY0)
+			{
+				x0 = 0; y0 = 0; x1 = width; y1 = height;
+				return;
+			}
+			x0 = (std::max)(0, (std::min)(width, activeX0));
+			y0 = (std::max)(0, (std::min)(height, activeY0));
+			x1 = (std::max)(x0, (std::min)(width, activeX1));
+			y1 = (std::max)(y0, (std::min)(height, activeY1));
 		}
 		size_t Blocks() const { return static_cast<size_t>(gw) * gh; }
 	};
 
-	// Per P11 block: the sums of |G|^2 and |G|^4 over the block's pixels of the edge map (the kEdgeMap CPU form: width x height float32
-	// |G| in 10-bit codes, row-major, tightly packed; kEdgeMap's default size term is 4 B per source pixel). A pure reduction of the
-	// shared product, accumulated in double: nothing is measured from the picture here (no gradient of its own). `edgeBytes` is the
-	// published byte payload (width x height x 4 bytes); each row is copied out with memcpy (no aliasing of the byte buffer as floats).
+	// Packed GPU-reduced per-block (sum2, sum4) payload format for kEdgeMap CPU readback (510x smaller than full-res R32F).
+	constexpr uint32_t kEdgeBlockSumsMagic = 0x454D4253u;   // 'EMBS'
+	struct EdgeBlockSumsHeader
+	{
+		uint32_t magic = kEdgeBlockSumsMagic;
+		uint32_t gw = 0;
+		uint32_t gh = 0;
+		uint32_t block = 0;
+	};
+	inline size_t EdgeBlockSumsPayloadBytes(int gw, int gh)
+	{
+		if (gw <= 0 || gh <= 0) return 0u;
+		return sizeof(EdgeBlockSumsHeader) + static_cast<size_t>(gw) * static_cast<size_t>(gh) * 2u * sizeof(float);
+	}
+	inline bool IsEdgeBlockSumsPayload(const Geometry& g, const uint8_t* bytes, size_t byteLen)
+	{
+		const size_t need = EdgeBlockSumsPayloadBytes(g.gw, g.gh);
+		if (bytes == nullptr || need == 0u || byteLen != need)
+			return false;
+		EdgeBlockSumsHeader hdr{};
+		std::memcpy(&hdr, bytes, sizeof(hdr));
+		return hdr.magic == kEdgeBlockSumsMagic
+			&& hdr.gw == static_cast<uint32_t>(g.gw)
+			&& hdr.gh == static_cast<uint32_t>(g.gh)
+			&& hdr.block == static_cast<uint32_t>(g.block);
+	}
+	inline bool UnpackEdgeBlockSums(const Geometry& g, const uint8_t* bytes, size_t byteLen,
+		std::vector<float>& sum2, std::vector<float>& sum4)
+	{
+		if (!IsEdgeBlockSumsPayload(g, bytes, byteLen))
+			return false;
+		const size_t n = g.Blocks();
+		sum2.resize(n);
+		sum4.resize(n);
+		const uint8_t* p = bytes + sizeof(EdgeBlockSumsHeader);
+		for (size_t i = 0; i < n; ++i)
+		{
+			float pair[2] = {};
+			std::memcpy(pair, p + i * sizeof(pair), sizeof(pair));
+			sum2[i] = pair[0];
+			sum4[i] = pair[1];
+		}
+		return true;
+	}
+
+	// Per P11 block: the sums of |G|^2 and |G|^4 over the block's pixels of the edge map strictly inside the active picture
+	// rect (clamping out letterbox/pillarbox/edge-blanking bar borders). `edgeBytes` is the published full-res float32 payload
+	// (width x height x 4 bytes); each row is copied out with memcpy (no aliasing of the byte buffer as floats).
 	inline void EdgeSums(const Geometry& g, const uint8_t* edgeBytes, std::vector<float>& sum2, std::vector<float>& sum4)
 	{
 		const size_t n = g.Blocks();
 		std::vector<double> a2(n, 0.0), a4(n, 0.0);
+		int ax0 = 0, ay0 = 0, ax1 = 0, ay1 = 0;
+		g.ClampedActiveRect(ax0, ay0, ax1, ay1);
 		std::vector<float> line(static_cast<size_t>(g.width > 0 ? g.width : 0));
-		for (int y = 0; y < g.height; ++y)
+		for (int y = ay0; y < ay1; ++y)
 		{
 			const size_t row = static_cast<size_t>(y / g.block) * g.gw;
 			std::memcpy(line.data(), edgeBytes + static_cast<size_t>(y) * g.width * sizeof(float), line.size() * sizeof(float));
-			for (int x = 0; x < g.width; ++x)
+			for (int x = ax0; x < ax1; ++x)
 			{
 				const double v = line[x];
 				const double v2 = v * v;
@@ -203,8 +280,32 @@ namespace FocusMap
 		}
 	}
 
-	// P2 CPU form: per cell fwdX, fwdY, bwdX, bwdY (int16, S10.5 of half-size px: 1/16 source px) then fwdCost, bwdCost (u8) = 10 B.
+	inline bool IsValidEdgePayload(const Geometry& g, const uint8_t* bytes, size_t byteLen)
+	{
+		if (bytes == nullptr || g.width <= 0 || g.height <= 0)
+			return false;
+		if (IsEdgeBlockSumsPayload(g, bytes, byteLen))
+			return true;
+		const size_t fullBytes = static_cast<size_t>(g.width) * static_cast<size_t>(g.height) * sizeof(float);
+		return byteLen == fullBytes;
+	}
+
+	inline bool DecodeEdgePayload(const Geometry& g, const uint8_t* bytes, size_t byteLen,
+		std::vector<float>& sum2, std::vector<float>& sum4)
+	{
+		if (UnpackEdgeBlockSums(g, bytes, byteLen, sum2, sum4))
+			return true;
+		const size_t fullBytes = static_cast<size_t>(g.width) * static_cast<size_t>(g.height) * sizeof(float);
+		if (bytes == nullptr || byteLen != fullBytes)
+			return false;
+		EdgeSums(g, bytes, sum2, sum4);
+		return true;
+	}
+
+	// P2 CPU form: per cell fwdX, fwdY, bwdX, bwdY (int16, S10.5 of engine px: 1/32 engine px, 4 engine px per P2 cell) then fwdCost, bwdCost (u8) = 10 B.
 	constexpr int kP2BytesPerCell = 10;
+	constexpr double kP2S105Subpel = 32.0;    // S10.5 fixed-point subpixel denominator
+	constexpr double kP2EngineGridPx = 4.0;   // NVOF 4x4 engine-pixel grid per P2 cell
 	// P7 CPU form: float tx, ty (source px the content moved from the previous frame to this one), confidence, valid (0 / 1) = 16 B.
 	constexpr int kP7Bytes = 16;
 
@@ -216,13 +317,16 @@ namespace FocusMap
 		MotionSource source = MotionSource::None;
 	};
 
-	// Mean backward vector of the P2 cells inside the block (the cost byte weights: low cost = more trusted).
+	// Mean backward vector of the P2 cells inside the block (cost-weighted), converting S10.5 engine-px units to source px
+	// per axis using p2Cell / p2CellY and optional anisotropic p2ScaleX / p2ScaleY (no hardcoded /16.0).
 	inline BlockMotion FieldMotion(const Geometry& g, const uint8_t* p2, int bx, int by)
 	{
 		double sx = 0, sy = 0, sw = 0;
+		const int cellX = g.p2Cell > 0 ? g.p2Cell : 8;
+		const int cellY = g.p2CellY > 0 ? g.p2CellY : cellX;
 		const int x0 = bx * g.block, y0 = by * g.block;
-		const int cx0 = x0 / g.p2Cell, cy0 = y0 / g.p2Cell;
-		const int cx1 = (std::min)((x0 + g.block + g.p2Cell - 1) / g.p2Cell, g.p2gw), cy1 = (std::min)((y0 + g.block + g.p2Cell - 1) / g.p2Cell, g.p2gh);
+		const int cx0 = x0 / cellX, cy0 = y0 / cellY;
+		const int cx1 = (std::min)((x0 + g.block + cellX - 1) / cellX, g.p2gw), cy1 = (std::min)((y0 + g.block + cellY - 1) / cellY, g.p2gh);
 		for (int cy = cy0; cy < cy1; ++cy)
 			for (int cx = cx0; cx < cx1; ++cx)
 			{
@@ -235,8 +339,10 @@ namespace FocusMap
 			}
 		BlockMotion m;
 		if (sw <= 0) return m;
-		m.dx = static_cast<float>(sx / sw / 16.0);   // S10.5 of half-size px -> source px
-		m.dy = static_cast<float>(sy / sw / 16.0);
+		const double unitX = (g.p2ScaleX > 0.0 ? g.p2ScaleX : (static_cast<double>(cellX) / kP2EngineGridPx)) / kP2S105Subpel;
+		const double unitY = (g.p2ScaleY > 0.0 ? g.p2ScaleY : (static_cast<double>(cellY) / kP2EngineGridPx)) / kP2S105Subpel;
+		m.dx = static_cast<float>((sx / sw) * unitX);
+		m.dy = static_cast<float>((sy / sw) * unitY);
 		m.source = MotionSource::Field;
 		return m;
 	}

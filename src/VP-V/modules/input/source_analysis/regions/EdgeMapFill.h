@@ -34,7 +34,9 @@
 #include <libplacebo/dispatch.h>
 #include <libplacebo/shaders/custom.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstddef>
 #include <functional>
 #include <memory>
@@ -323,7 +325,17 @@ namespace Vpv
 							{
 								std::shared_ptr<EdgeMapCpuReadback> rb = ReadbackSharedFor(c.host);
 								if (rb)
-									rb->ScheduleWithHostGpu(seq, static_cast<pl_tex>(res.gpu.resource));
+								{
+									int ax0 = 0, ay0 = 0, ax1 = int(luma.width), ay1 = int(luma.height);
+									if (c.image->crop.x1 > c.image->crop.x0 && c.image->crop.y1 > c.image->crop.y0)
+									{
+										ax0 = (std::max)(0, (std::min)(int(luma.width), static_cast<int>(std::floor(c.image->crop.x0))));
+										ay0 = (std::max)(0, (std::min)(int(luma.height), static_cast<int>(std::floor(c.image->crop.y0))));
+										ax1 = (std::max)(ax0, (std::min)(int(luma.width), static_cast<int>(std::ceil(c.image->crop.x1))));
+										ay1 = (std::max)(ay0, (std::min)(int(luma.height), static_cast<int>(std::ceil(c.image->crop.y1))));
+									}
+									rb->ScheduleBlockSumsWithHostGpu(seq, static_cast<pl_tex>(res.gpu.resource), ax0, ay0, ax1, ay1);
+								}
 							}
 						}
 					}

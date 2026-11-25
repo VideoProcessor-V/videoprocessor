@@ -3494,6 +3494,92 @@ if (g.y == 0 && g.x < DN_N) {
 			pl_tex_destroy(gpu, &lutOutTex);
 			pl_dispatch_destroy(&dispatch);
 		}
+
+		// POD2-H2 regression test (WARP): OutputFinishSegment::RunDitherNeedGpu forwards req.sourceBits into
+		// DitherNeedSeam::Feed so 10->8 (floor 0.75) and 12->8 (floor 15/16) engage live even for a clean
+		// quality=1.0 source, while same-depth 8->8 and unspecified 0->8 (negative controls) stay NotNeeded.
+		BEGIN_TEST_METHOD_ATTRIBUTE(DitherNeedLiveSourceBitsFloorEngagesFor10And12To8Bit)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(DitherNeedLiveSourceBitsFloorEngagesFor10And12To8Bit)
+		{
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+
+			DnFixture fx;
+			fx.Make(0);
+			DwFrameTex ft;
+			ft.Make(gpu, fx);
+
+			OutputEncodingRepair::Hook repair;
+			OcclusionMask::Hook mask;
+			OutputSegments::OutputFinishSegment finish(repair, mask);
+
+			SourceIdentity::QualityView cleanQuality;
+			cleanQuality.quality = 1.0;   // DitherNeed(1.0) == 0.0 -> only bit-depth floor can engage dither_need
+			cleanQuality.tier = 4;
+			cleanQuality.fallback = FallbackCatalog::Released("source quality");
+
+			auto runWithSourceBits = [&](int sourceBits)
+			{
+				OutputSegments::DitherNeedGpuRequest req;
+				req.requested = true;
+				req.originalPathway = false;
+				req.sigmaDeltaActive = true;
+				req.domainSupported = true;
+				req.nlsActive = false;
+				req.overrideInputs = true;
+				req.requireBind = false;
+				req.colorBits = 8;
+				req.sourceBits = sourceBits;
+				req.gpu = gpu;
+				req.dtSeconds = 1.0 / 24.0;
+				req.aBase = 0.15;
+				req.quality = &cleanQuality;
+				req.sourceCrop = { 0.0f, 0.0f, static_cast<float>(fx.grid.w), static_cast<float>(fx.grid.h) };
+				req.targetCrop = { 0.0f, 0.0f, static_cast<float>(fx.grid.w), static_cast<float>(fx.grid.h) };
+				req.lightSettings = LightLevel::Read([](const std::string&, std::string&) { return false; });
+				req.lightContext.kind = LightLevel::Context::HdrToSdr;
+				req.lightContext.sourcePeakNits = 1000.0;
+				req.overrideGsBlocks = ft.gs;
+				for (size_t i = 0; i < RegionEvidence::kPrecursorTextures; ++i)
+					req.overridePrecursors[i] = ft.pre[i];
+				req.overrideGrid = fx.grid;
+				return finish.RunDitherNeedGpu(req, nullptr, 0);
+			};
+
+			// Negative controls (exact same clean source): 8->8 and unspecified 0->8 stay NotNeeded (floor 0.0).
+			const DitherNeedSeam::Outcome neg0 = runWithSourceBits(0);
+			Assert::IsTrue(neg0.result == DitherNeed::Result::NotNeeded && !neg0.extraAllowed,
+				L"negative control: unspecified sourceBits=0 on clean source must stay NotNeeded");
+			Assert::IsTrue(std::fabs(neg0.qualityNeed) < 1e-6, L"negative control: sourceBits=0 qualityNeed must be 0");
+
+			const DitherNeedSeam::Outcome neg8 = runWithSourceBits(8);
+			Assert::IsTrue(neg8.result == DitherNeed::Result::NotNeeded && !neg8.extraAllowed,
+				L"negative control: 8->8 on clean source must stay NotNeeded");
+			Assert::IsTrue(std::fabs(neg8.qualityNeed) < 1e-6, L"negative control: 8->8 qualityNeed must be 0");
+
+			// 10->8 bit-depth quantization floor: 1 - 2^(8-10) = 0.75 -> On + live BlockPass product.
+			const DitherNeedSeam::Outcome out10 = runWithSourceBits(10);
+			Assert::IsTrue(out10.result == DitherNeed::Result::On && out10.extraAllowed && !out10.fallback.engaged,
+				L"POD2-H2: 10->8 sourceBits must engage dither_need live even for clean quality=1.0 source");
+			Assert::IsTrue(std::fabs(out10.qualityNeed - 0.75) < 1e-6,
+				L"POD2-H2: 10->8 bit-depth floor must equal 0.75");
+			Assert::IsNotNull(finish.DitherNeedCurrent(), L"10->8 live run must produce GPU dither_need texture");
+
+			// 12->8 bit-depth quantization floor: 1 - 2^(8-12) = 15/16 = 0.9375 -> On + higher aNeed than 10->8.
+			const DitherNeedSeam::Outcome out12 = runWithSourceBits(12);
+			Assert::IsTrue(out12.result == DitherNeed::Result::On && out12.extraAllowed && !out12.fallback.engaged,
+				L"POD2-H2: 12->8 sourceBits must engage dither_need live even for clean quality=1.0 source");
+			Assert::IsTrue(std::fabs(out12.qualityNeed - (15.0 / 16.0)) < 1e-6,
+				L"POD2-H2: 12->8 bit-depth floor must equal 15/16 = 0.9375");
+			Assert::IsTrue(out12.params.aNeed > out10.params.aNeed,
+				L"POD2-H2: 12->8 amplitude must exceed 10->8 amplitude");
+
+			finish.ReleaseGpu(gpu);
+			ft.Destroy(gpu);
+		}
 	};
 
 	// GEM-029 (G-T3): pure CPU check that SigmaDeltaDomain supports only 8/10-bit sample and colour depths (no 9-bit).

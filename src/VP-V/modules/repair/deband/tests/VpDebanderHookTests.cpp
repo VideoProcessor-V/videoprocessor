@@ -1419,5 +1419,335 @@ namespace VideoProcessorTest
 			strongRig.memo.OnSeal(params.sequence);
 			zeroP11Rig.memo.OnSeal(zeroP11Params.sequence);
 		}
+
+		// W23-Fix2 BLOCKER-1 & MED-2 regression:
+		// (1) Native RGB plane (!ycbcr -> !useP11) executes the coarse O(N) tw x th block-tensor prepass
+		//     (SplitTensorTextureForTest != nullptr with coarse dimensions) and matches GrainModel::DebandSplit.
+		// (2) P010/P210 2-component CbCr plane acquires BOTH Cb (plane 1, comp 0) and Cr (plane 2, comp 1)
+		//     from kP10cGrainSplitChroma + P11 with ZERO private SplitLowBand / splitTensor passes, while
+		//     preserving grain and smoothing bands on both chroma components; same-input negative control
+		//     without P10c trips visible fallbacks and allocates the private low-band/tensor textures.
+		BEGIN_TEST_METHOD_ATTRIBUTE(VpDebanderRgbCoarseTensorPrepassAndP010CbCrDualP10c)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(VpDebanderRgbCoarseTensorPrepassAndP010CbCrDualP10c)
+		{
+			using Reg = VpSkeleton::SkeletonMemo::Registration;
+			namespace G = GrainSplit::Gpu;
+
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+
+			struct DispatchGuard
+			{
+				pl_dispatch dispatch = nullptr;
+				explicit DispatchGuard(pl_dispatch d) : dispatch(d) {}
+				~DispatchGuard() { if (dispatch) pl_dispatch_destroy(&dispatch); }
+				DispatchGuard(const DispatchGuard&) = delete;
+				DispatchGuard& operator=(const DispatchGuard&) = delete;
+			};
+			struct TexGuard
+			{
+				pl_gpu gpu = nullptr;
+				pl_tex tex = nullptr;
+				TexGuard(pl_gpu g, pl_tex t) : gpu(g), tex(t) {}
+				~TexGuard() { if (gpu && tex) pl_tex_destroy(gpu, &tex); }
+				TexGuard(const TexGuard&) = delete;
+				TexGuard& operator=(const TexGuard&) = delete;
+			};
+			struct DebandGuard
+			{
+				pl_gpu gpu = nullptr;
+				VpDebander::Module mod;
+				explicit DebandGuard(pl_gpu g) : gpu(g) {}
+				~DebandGuard() { mod.Release(gpu); }
+				DebandGuard(const DebandGuard&) = delete;
+				DebandGuard& operator=(const DebandGuard&) = delete;
+			};
+			struct Rig
+			{
+				Vpv::Skeleton::OwnerGpuDevice ownerDev;
+				VpSkeleton::SkeletonMemo memo;
+				G::VariantOwner grainOwner;
+				explicit Rig(pl_gpu g) : ownerDev(g)
+				{
+					memo.SetHost(this);
+					memo.SetRenderThread(std::this_thread::get_id());
+					memo.SetGpuDispatcherPresent(true);
+					memo.SetGpuBudget(true, uint64_t(1) << 29);
+					memo.SetGpuDevice(&ownerDev);
+				}
+				~Rig()
+				{
+					memo.ReleaseGpuSpots();
+					Vpv::Capture::SourcePlanes::Forget(this);
+					ownerDev.Release();
+				}
+				Rig(const Rig&) = delete;
+				Rig& operator=(const Rig&) = delete;
+			};
+
+			DispatchGuard dispGuard(pl_dispatch_create(fixture.Log(), gpu));
+			pl_dispatch dispatch = dispGuard.dispatch;
+			Assert::IsNotNull(dispatch, L"pl_dispatch_create succeeded");
+
+			// --- Part 1: Native RGB plane (rgba16) uses coarse O(N) block-tensor prepass and matches CPU model ---
+			{
+				const int W = 256, H = 128;
+				const int hw = (W + 1) / 2, hh = (H + 1) / 2;
+				const int tb = GrainPreserve::SplitTensorHalfBlock(1.0);
+				const int expectedTw = (hw + tb - 1) / tb;
+				const int expectedTh = (hh + tb - 1) / tb;
+
+				GrainModel::Image gImg(W, H);
+				std::mt19937 rng(9191u);
+				const GrainModel::Image noise = GrainModel::Grain(W, H, 2.0, false, rng);
+				std::vector<uint16_t> rgba(static_cast<size_t>(W) * H * 4u, 65535u);
+				for (int y = 0; y < H; ++y)
+				{
+					for (int x = 0; x < W; ++x)
+					{
+						const double band = 4.0 * std::round((400.0 + 4.0 * x / 16.0) / 4.0);
+						const double code10 = (std::min)(1023.0, (std::max)(0.0, std::round(band + noise.at(x, y))));
+						gImg.at(x, y) = code10;
+						const uint16_t u16 = static_cast<uint16_t>(static_cast<int>(code10) << 6);
+						const size_t base = (static_cast<size_t>(y) * W + x) * 4u;
+						rgba[base + 0] = u16;
+						rgba[base + 1] = u16;
+						rgba[base + 2] = u16;
+						rgba[base + 3] = 65535u;
+					}
+				}
+				pl_tex_params tp{};
+				tp.w = W; tp.h = H;
+				tp.format = pl_find_named_fmt(gpu, "rgba16");
+				tp.sampleable = true;
+				tp.initial_data = rgba.data();
+				Assert::IsNotNull(tp.format, L"rgba16 format available");
+				TexGuard rgbTex(gpu, pl_tex_create(gpu, &tp));
+				Assert::IsNotNull(rgbTex.tex, L"RGB source texture created");
+
+				pl_frame rgbFrame{};
+				rgbFrame.num_planes = 1;
+				rgbFrame.planes[0].texture = rgbTex.tex;
+				rgbFrame.planes[0].components = 3;
+				rgbFrame.planes[0].component_mapping[0] = PL_CHANNEL_R;
+				rgbFrame.planes[0].component_mapping[1] = PL_CHANNEL_G;
+				rgbFrame.planes[0].component_mapping[2] = PL_CHANNEL_B;
+				rgbFrame.repr.sys = PL_COLOR_SYSTEM_RGB;
+				rgbFrame.repr.levels = PL_COLOR_LEVELS_FULL;
+				rgbFrame.repr.bits.sample_depth = 16;
+				rgbFrame.repr.bits.color_depth = 10;
+				rgbFrame.repr.bits.bit_shift = 6;
+				rgbFrame.color = pl_color_space_srgb;
+
+				VpDebander::Params p;
+				p.thresholdCodes = VpDebander::Strength(8.0, 10, 0.0, true);
+				p.colorDepth = 10;
+				p.radiusScale = 2.0;   // matches 2160-line grain scale 1.0, radius 32 px
+				p.grainGuard = true;
+				p.grainSplit = true;
+
+				DebandGuard debandRgb(gpu);
+				pl_frame outRgb{};
+				Assert::IsTrue(debandRgb.mod.Apply(gpu, dispatch, rgbFrame, p, outRgb),
+					ExtendedRangeGpuProbe::ToWide(debandRgb.mod.LastError()).c_str());
+
+				pl_tex tensorTex = debandRgb.mod.SplitTensorTextureForTest(0, 0);
+				Assert::IsNotNull(tensorTex, L"RGB fallback allocates coarse splitTensor prepass texture");
+				Assert::AreEqual(expectedTw, tensorTex->params.w, L"coarse tensor width equals ceil(hw / tb)");
+				Assert::AreEqual(expectedTh, tensorTex->params.h, L"coarse tensor height equals ceil(hh / tb)");
+				Assert::IsTrue(tensorTex->params.w < W / 4 && tensorTex->params.h < H / 4,
+					L"coarse tensor is far smaller than full resolution");
+
+				pl_tex_params rp{};
+				rp.w = W; rp.h = H; rp.format = outRgb.planes[0].texture->params.format; rp.host_readable = true; rp.blit_dst = true;
+				TexGuard readable(gpu, pl_tex_create(gpu, &rp));
+				Assert::IsNotNull(readable.tex, L"RGB readable target created");
+				pl_tex_blit_params bp{}; bp.src = outRgb.planes[0].texture; bp.dst = readable.tex;
+				pl_tex_blit(gpu, &bp);
+				pl_gpu_finish(gpu);
+				std::vector<uint16_t> outRaw(static_cast<size_t>(W) * H * 4u, 0u);
+				pl_tex_transfer_params dl{}; dl.tex = readable.tex; dl.ptr = outRaw.data();
+				Assert::IsTrue(pl_tex_download(gpu, &dl), L"RGB output download succeeded");
+
+				// Verify RGB output parity against CPU GrainModel::DebandSplit (identical inputs across R=G=B).
+				const GrainModel::Image cpu = GrainModel::DebandSplit(gImg, p.thresholdCodes, 32.0);
+				int off = 0;
+				for (int y = 0; y < H; ++y)
+					for (int x = 0; x < W; ++x)
+					{
+						const double got = static_cast<double>(outRaw[(static_cast<size_t>(y) * W + x) * 4u + 1u]) / 64.0;
+						if (std::fabs(got - cpu.at(x, y)) > 1.0) ++off;
+					}
+				Assert::IsTrue(off * 100 <= W * H, L"RGB coarse tensor prepass matches CPU DebandSplit within 1 code on >=99% of pixels");
+			}
+
+			// --- Part 2: P010/P210 2-component CbCr hits dual kP10cGrainSplitChroma + P11 with ZERO private SplitLowBand passes ---
+			{
+				const int W = 256, H = 128;
+				const int CW = 128, CH = 64;
+				std::vector<uint16_t> yRaw(static_cast<size_t>(W) * H, 0u);
+				std::vector<uint16_t> uvRaw(static_cast<size_t>(CW) * CH * 2u, 0u);
+				std::mt19937 rngY(20261u), rngCb(20262u), rngCr(20263u);
+				std::normal_distribution<double> grainDist(0.0, 3.0);
+
+				for (int y = 0; y < H; ++y)
+					for (int x = 0; x < W; ++x)
+					{
+						const double code = (x < W / 2)
+							? (320.0 + 4.0 * static_cast<double>(x / 16))
+							: (500.0 + grainDist(rngY));
+						const int c10 = (std::min)(1023, (std::max)(0, static_cast<int>(std::lround(code))));
+						yRaw[static_cast<size_t>(y) * W + x] = static_cast<uint16_t>(c10 << 6);
+					}
+				for (int y = 0; y < CH; ++y)
+					for (int x = 0; x < CW; ++x)
+					{
+						const double cb = (x < CW / 2)
+							? (480.0 + 4.0 * static_cast<double>(x / 8))
+							: (512.0 + grainDist(rngCb));
+						const double cr = (x < CW / 2)
+							? (520.0 + 4.0 * static_cast<double>(x / 8))
+							: (512.0 + grainDist(rngCr));
+						const int cb10 = (std::min)(1023, (std::max)(0, static_cast<int>(std::lround(cb))));
+						const int cr10 = (std::min)(1023, (std::max)(0, static_cast<int>(std::lround(cr))));
+						const size_t idx = (static_cast<size_t>(y) * CW + x) * 2u;
+						uvRaw[idx + 0] = static_cast<uint16_t>(cb10 << 6);
+						uvRaw[idx + 1] = static_cast<uint16_t>(cr10 << 6);
+					}
+
+				pl_tex_params yp{};
+				yp.w = W; yp.h = H; yp.format = pl_find_named_fmt(gpu, "r16"); yp.sampleable = true; yp.initial_data = yRaw.data();
+				pl_tex_params uvp{};
+				uvp.w = CW; uvp.h = CH; uvp.format = pl_find_named_fmt(gpu, "rg16"); uvp.sampleable = true; uvp.initial_data = uvRaw.data();
+				Assert::IsTrue(yp.format && uvp.format, L"r16/rg16 formats available");
+				TexGuard yTex(gpu, pl_tex_create(gpu, &yp));
+				TexGuard uvTex(gpu, pl_tex_create(gpu, &uvp));
+				Assert::IsTrue(yTex.tex && uvTex.tex, L"P010 Y and CbCr textures created");
+
+				const int p11Block = RegionEvidence::BlockSizeFor(H);
+				const int p11W = (W + p11Block - 1) / p11Block;
+				const int p11H = (H + p11Block - 1) / p11Block;
+				std::vector<float> p11Data(static_cast<size_t>(p11W) * p11H * 4u, 0.0f);
+				for (size_t i = 0; i < static_cast<size_t>(p11W) * p11H; ++i)
+					p11Data[i * 4u + 0u] = 100.0f;
+				pl_tex_params p11p{};
+				p11p.w = p11W; p11p.h = p11H; p11p.format = pl_find_named_fmt(gpu, "rgba32f"); p11p.sampleable = true; p11p.initial_data = p11Data.data();
+				TexGuard p11Tex(gpu, pl_tex_create(gpu, &p11p));
+				Assert::IsNotNull(p11Tex.tex, L"P11 texture created");
+
+				pl_frame p010{};
+				p010.num_planes = 2;
+				p010.planes[0].texture = yTex.tex; p010.planes[0].components = 1; p010.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+				p010.planes[1].texture = uvTex.tex; p010.planes[1].components = 2;
+				p010.planes[1].component_mapping[0] = PL_CHANNEL_CB; p010.planes[1].component_mapping[1] = PL_CHANNEL_CR;
+				p010.repr.sys = PL_COLOR_SYSTEM_BT_709;
+				p010.repr.levels = PL_COLOR_LEVELS_LIMITED;
+				p010.repr.bits.sample_depth = 16;
+				p010.repr.bits.color_depth = 10;
+				p010.repr.bits.bit_shift = 6;
+				p010.color = pl_color_space_bt709;
+
+				const uint64_t kSeq = 301u;
+				Rig rig(gpu);
+				Assert::IsTrue(rig.memo.RegisterOwnerFill(VpSkeleton::kP13SourceRing, VpSkeleton::AcquireForm::Gpu,
+					Vpv::Capture::SourcePlanes::kUnit, Vpv::Capture::SourcePlanes::MakeOwnerFill()) == Reg::Registered);
+				Assert::IsTrue(rig.grainOwner.Register(rig.memo, W, H) == Reg::Registered);
+				Assert::IsTrue(rig.grainOwner.RegisterChroma(rig.memo, CW, CH) == Reg::Registered);
+				VpSkeleton::OwnerFill p11Fill;
+				p11Fill.view = true;
+				p11Fill.frameScoped = true;
+				pl_tex p11Ptr = p11Tex.tex;
+				p11Fill.fill = [p11Ptr, p11W, p11H, kSeq](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+					if (req.seq != kSeq) return false;
+					out.gpu.resource = const_cast<void*>(static_cast<const void*>(p11Ptr));
+					out.gpu.width = static_cast<uint32_t>(p11W);
+					out.gpu.height = static_cast<uint32_t>(p11H);
+					out.gpu.bytes = 0;
+					return true;
+				};
+				Assert::IsTrue(rig.memo.RegisterOwnerFill(VpSkeleton::kP11RegionBlockStats, VpSkeleton::AcquireForm::Gpu,
+					VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP11RegionBlockStats), std::move(p11Fill)) == Reg::Registered);
+
+				Vpv::Capture::SourcePlaneSet set;
+				set.seq = kSeq;
+				set.planes = 2;
+				set.tex[0] = yTex.tex; set.components[0] = 1;
+				set.tex[1] = uvTex.tex; set.components[1] = 2;
+				set.rgb = false;
+				set.repr = p010.repr;
+				set.origin = "vpdebander p010 dual-p10c test";
+				Assert::IsTrue(Vpv::Capture::SourcePlanes::Offer(&rig, set), L"P010 P13 offered");
+
+				VpDebander::Params p;
+				p.thresholdCodes = 12.0;
+				p.colorDepth = 10;
+				p.radiusScale = 1.0;
+				p.grainGuard = true;
+				p.grainSplit = true;
+				p.sequence = kSeq;
+				p.memo = &rig.memo;
+
+				DebandGuard debandP010(gpu);
+				pl_frame outP010{};
+				Assert::IsTrue(debandP010.mod.Apply(gpu, dispatch, p010, p, outP010),
+					ExtendedRangeGpuProbe::ToWide(debandP010.mod.LastError()).c_str());
+
+				// Protected path proofs: ZERO fallbacks, ZERO private SplitLowBand / splitTensor textures allocated!
+				Assert::AreEqual(2ull, debandP010.mod.GrainGuardHits(), L"both Y and 2-component CbCr hit shared P10/P10c + P11");
+				Assert::AreEqual(0ull, debandP010.mod.GrainGuardFallbacks(), L"zero grain-guard fallbacks on P010");
+				Assert::AreEqual(0ull, debandP010.mod.BandMemoFallbacks(), L"zero BandMemo/SplitLowBand fallbacks on P010");
+				Assert::IsNull(debandP010.mod.SplitLowTextureForTest(0, 0), L"no private splitLow allocated for Y");
+				Assert::IsNull(debandP010.mod.SplitLowTextureForTest(0, 1), L"no private splitLow allocated for 2-component CbCr");
+				Assert::IsNull(debandP010.mod.SplitTensorTextureForTest(0, 0), L"no private splitTensor allocated for Y when P11 present");
+				Assert::IsNull(debandP010.mod.SplitTensorTextureForTest(0, 1), L"no private splitTensor allocated for CbCr when P11 present");
+				Assert::AreEqual(uint64_t(1), rig.grainOwner.Computes(), L"P10 luma computed once");
+				Assert::AreEqual(uint64_t(2), rig.grainOwner.ChromaComputes(), L"P10c computed once for Cb (comp 0) and once for Cr (comp 1)");
+
+				// Download CbCr output and confirm grain preservation on BOTH Cb and Cr components.
+				pl_tex_params urp{};
+				urp.w = CW; urp.h = CH; urp.format = outP010.planes[1].texture->params.format; urp.host_readable = true; urp.blit_dst = true;
+				TexGuard uvReadable(gpu, pl_tex_create(gpu, &urp));
+				Assert::IsNotNull(uvReadable.tex, L"CbCr readable target created");
+				pl_tex_blit_params ubp{}; ubp.src = outP010.planes[1].texture; ubp.dst = uvReadable.tex;
+				pl_tex_blit(gpu, &ubp);
+				pl_gpu_finish(gpu);
+				std::vector<uint16_t> uvOut(static_cast<size_t>(CW) * CH * 2u, 0u);
+				pl_tex_transfer_params udl{}; udl.tex = uvReadable.tex; udl.ptr = uvOut.data();
+				Assert::IsTrue(pl_tex_download(gpu, &udl), L"CbCr output download succeeded");
+
+				auto compRms = [&](const std::vector<uint16_t>& buf, int comp) {
+					double sq = 0.0;
+					int n = 0;
+					for (int y = 12; y < CH - 12; ++y)
+						for (int x = CW / 2 + 12; x < CW - 12; ++x)
+						{
+							const double c = static_cast<double>(buf[(static_cast<size_t>(y) * CW + x) * 2u + comp]) / 64.0 - 512.0;
+							sq += c * c;
+							++n;
+						}
+					return std::sqrt(sq / static_cast<double>(n));
+				};
+				Assert::IsTrue(compRms(uvOut, 0) > 0.88 * compRms(uvRaw, 0), L"dual P10c preserves >88% Cb grain RMS");
+				Assert::IsTrue(compRms(uvOut, 1) > 0.88 * compRms(uvRaw, 1), L"dual P10c preserves >88% Cr grain RMS");
+
+				// Negative control: same P010 frame with memo=nullptr visibly falls back and allocates private splitLow & splitTensor.
+				VpDebander::Params pFallback = p;
+				pFallback.memo = nullptr;
+				DebandGuard debandFb(gpu);
+				pl_frame outFb{};
+				Assert::IsTrue(debandFb.mod.Apply(gpu, dispatch, p010, pFallback, outFb),
+					ExtendedRangeGpuProbe::ToWide(debandFb.mod.LastError()).c_str());
+				Assert::AreEqual(0ull, debandFb.mod.GrainGuardHits(), L"negative control: memo=nullptr has 0 hits");
+				Assert::AreEqual(2ull, debandFb.mod.GrainGuardFallbacks(), L"negative control: memo=nullptr trips 2 grain-guard fallbacks");
+				Assert::AreEqual(2ull, debandFb.mod.BandMemoFallbacks(), L"negative control: memo=nullptr trips 2 low-band fallbacks");
+				Assert::IsNotNull(debandFb.mod.SplitLowTextureForTest(0, 1), L"negative control: fallback allocates private splitLow for CbCr");
+				Assert::IsNotNull(debandFb.mod.SplitTensorTextureForTest(0, 1), L"negative control: fallback allocates coarse splitTensor for CbCr");
+
+				rig.memo.OnSeal(kSeq);
+			}
+		}
 	};
 }

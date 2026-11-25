@@ -1751,7 +1751,7 @@ namespace FrameQuality
 {
 namespace detail
 {
-bool TryAcquireTileBands(VpSkeleton::SkeletonMemo* memo, uint64_t seq, int T,
+bool TryAcquireTileBands(VpSkeleton::SkeletonMemo* memo, uint64_t seq, int T, const TileOrigin& origin,
                          std::vector<float>& g1, std::vector<float>& g2, std::string& fallbackWhy)
 {
     if (memo == nullptr || seq == 0u || T <= 0)
@@ -1759,12 +1759,40 @@ bool TryAcquireTileBands(VpSkeleton::SkeletonMemo* memo, uint64_t seq, int T,
         fallbackWhy = memo == nullptr ? "no skeleton memo bound" : "frame sequence 0 (unkeyed)";
         return false;
     }
+    const uint32_t uT = static_cast<uint32_t>(T);
+    const bool hasFrame = origin.HasFrame();
+    if (hasFrame)
+    {
+        if (uint64_t(origin.x) + uint64_t(uT) > uint64_t(origin.frameW)
+            || uint64_t(origin.y) + uint64_t(uT) > uint64_t(origin.frameH))
+        {
+            fallbackWhy = "tile rect outside full-frame dimensions";
+            return false;
+        }
+    }
+    else if (origin.x != 0u || origin.y != 0u)
+    {
+        fallbackWhy = "non-zero tile origin requires full-frame dimensions";
+        return false;
+    }
     const size_t n = static_cast<size_t>(T) * static_cast<size_t>(T);
     auto acquireOne = [&](double sigmaPx, std::vector<float>& dst) -> bool {
         VpUnit::BandMemo::BandKey key;
         key.resolution = VpUnit::BandMemo::Stage::Full;
-        key.width = static_cast<uint32_t>(T);
-        key.height = static_cast<uint32_t>(T);
+        if (hasFrame)
+        {
+            key.width = origin.frameW;
+            key.height = origin.frameH;
+            key.cropX = origin.x;
+            key.cropY = origin.y;
+            key.cropW = uT;
+            key.cropH = uT;
+        }
+        else
+        {
+            key.width = uT;
+            key.height = uT;
+        }
         key.sigmaPx = sigmaPx;
         key.law = VpUnit::BandMemo::Law::Taps;
         key.edge = VpUnit::BandFromBase::EdgeMode::Reflect;
@@ -1789,5 +1817,6 @@ bool TryAcquireTileBands(VpSkeleton::SkeletonMemo* memo, uint64_t seq, int T,
     return acquireOne(1.0, g1) && acquireOne(2.0, g2);
 }
 } // namespace detail
+bool TileOrigin::HasFrame() const { return frameW > 0u && frameH > 0u; }
 } // namespace FrameQuality
 } // namespace SourceIdentity

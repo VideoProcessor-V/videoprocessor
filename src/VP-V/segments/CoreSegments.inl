@@ -772,7 +772,7 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
             dmCollected = frameHooks.size() - start;
             if (dmCollected > 0) {
                 TagSlotHooks(start, PipelineSlots::Id::ColourDmPre);
-                const auto dmParams = DmPreDeband::ShaderParameters(dmDec, height);
+                const auto dmParams = DmPreDeband::ShaderParameters(dmDec, height, false, DmPreDeband::IntersectNormalizedActiveRect(renderImage.crop.x0, renderImage.crop.y0, renderImage.crop.x1, renderImage.crop.y1, hdrTrustedPicture.available, hdrTrustedPicture.left, hdrTrustedPicture.top, hdrTrustedPicture.right, hdrTrustedPicture.bottom, hdrTrustedPicture.rasterWidth, hdrTrustedPicture.rasterHeight, width, height));
                 for (size_t i = start; i < frameHooks.size(); ++i)
                     for (const auto& kv : dmParams) CustomHookChain::SetHookParameter(frameHooks[i], kv.first, kv.second);
             }

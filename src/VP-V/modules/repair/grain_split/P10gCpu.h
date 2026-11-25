@@ -23,6 +23,19 @@ namespace GrainSplit
 	{
 		static_assert(VpSkeleton::kP10gGrainLevel == 35, "kP10gGrainLevel fixed ProductId 35");
 
+		inline double CodeToEightBitOf(int sourceBits)
+		{
+			const int bits = (sourceBits >= 1 && sourceBits <= 16) ? sourceBits : 10;
+			return 255.0 / static_cast<double>((1u << bits) - 1u);
+		}
+
+		struct Meta
+		{
+			int sourceBits = 10;
+			int blockPx = 16;
+			double CodeToEightBit() const { return CodeToEightBitOf(sourceBits); }
+		};
+
 		struct BlockLevel
 		{
 			float nb = 0.0f;         // x: block grain level N_b (codes^2 of D)

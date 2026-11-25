@@ -37,7 +37,7 @@ namespace AdaptiveDownscaleStage
 		pl_tex field = nullptr;        // the P3 field view (EstimateState::LiveFor): field
 		pl_tex frameTrust = nullptr;   // ... frameTrust
 		pl_tex grainError = nullptr;   // ... grainError
-		float minTrustedShare = 0.25f; // EstimateState::MinTrustedShare()
+		float minTrustedShare = 0.25f; int fieldBlockPx = 16; float fieldScaleToSourcePx = 1.0f;
 	};
 
 	// The settings the stage reads (from the renderer's active settings) and this frame's facts.
