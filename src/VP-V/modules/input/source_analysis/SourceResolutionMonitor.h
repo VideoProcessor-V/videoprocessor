@@ -642,7 +642,7 @@ namespace SourceResolutionMonitor
 		};
 		double DecisionNow(double seconds);                 // render thread (AutoFactor / AutoFactors)
 		double DecisionPeek(double seconds) const;          // AutoTransition
-		bool ReleaseHeldFor(uint64_t sequence);             // true: a reset to apply
+		bool ReleaseHeldFor(uint64_t sequence, bool timedOut = false);   // true: a reset to apply
 		double BeginBoundFrame(uint64_t sourceSequence, double seconds);   // Frame()'s frame-bound front part
 		// Frame()'s parts (see FrameBegin / FrameSubmit).
 		void PrepareGpu(pl_gpu g);

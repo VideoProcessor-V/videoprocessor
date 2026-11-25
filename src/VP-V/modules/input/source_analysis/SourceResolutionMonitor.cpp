@@ -2294,31 +2294,23 @@ if (tile < int(tiles) && g.y < ts) {
 		bool boundReset = false;
 		if (bound)
 		{
+			bool waited = false;
+			bool waitedOk = true;
 			if (deterministicWait.load(std::memory_order_acquire) &&
 				(autoReset.load(std::memory_order_acquire) || !haveBoundWaitSeq || lastBoundWaitSeq != renderSequence) &&
 				!ReadyFor(renderSequence))
 			{
-				const bool waitedOk = WaitForReadyDeterministic(renderSequence);
-				const bool released = ReleaseHeldFor(renderSequence);
+				waited = true;
+				waitedOk = WaitForReadyDeterministic(renderSequence);
+			}
+			const bool released = ReleaseHeldFor(renderSequence, waited && !waitedOk);
+			if (waited)
+			{
 				haveBoundWaitSeq = true;
 				lastBoundWaitSeq = renderSequence;
-				if (!waitedOk)
-				{
-					const uint64_t lead = frameLead.load(std::memory_order_acquire);
-					const uint64_t through = renderSequence >= lead ? renderSequence - lead : 0u;
-					std::lock_guard<std::mutex> lock(mutex);
-					if (through > timedOutThrough)
-						timedOutThrough = through;
-				}
-				const bool carried = pendingBoundReset.exchange(false, std::memory_order_acq_rel);
-				boundReset = released || carried;
 			}
-			else
-			{
-				const bool released = ReleaseHeldFor(renderSequence);
-				const bool carried = pendingBoundReset.exchange(false, std::memory_order_acq_rel);
-				boundReset = released || carried;
-			}
+			const bool carried = pendingBoundReset.exchange(false, std::memory_order_acq_rel);
+			boundReset = released || carried;
 		}
 		const Snapshot s = Read();
 		const double before = autoApplied;
@@ -3231,31 +3223,25 @@ if (tile < int(tiles) && g.y < ts) {
 	{
 		const double mapped = submitClock.Advance(seconds, clockStepsBack);
 		// O#6: deterministic-only bounded ready wait (live mode returns immediately without sleeping).
+		// WaitForReadyDeterministic fast-returns true with 0 yields when ReadyFor is already true,
+		// incrementing DeterministicWaitCalls() so callers/tests distinguish deterministic checks from live mode.
 		const bool detWait = deterministicWait.load(std::memory_order_acquire);
 		bool waitedOk = true;
 		if (detWait)
 			waitedOk = WaitForReadyDeterministic(sourceSequence);
 		// The renderer's order is Discontinuity -> Frame -> AutoFactor(s): a reset this release
 		// consumed (the flagged discontinuity or a held worker reset) is carried to AutoFactor.
-		if (ReleaseHeldFor(sourceSequence))
+		if (ReleaseHeldFor(sourceSequence, detWait && !waitedOk))
 			pendingBoundReset.store(true, std::memory_order_release);
 		if (detWait)
 		{
 			haveBoundWaitSeq = true;
 			lastBoundWaitSeq = sourceSequence;
-			if (!waitedOk)
-			{
-				const uint64_t lead = frameLead.load(std::memory_order_acquire);
-				const uint64_t through = sourceSequence >= lead ? sourceSequence - lead : 0u;
-				std::lock_guard<std::mutex> lock(mutex);
-				if (through > timedOutThrough)
-					timedOutThrough = through;
-			}
 		}
 		return mapped;
 	}
 
-	bool Monitor::ReleaseHeldFor(uint64_t sequence)
+	bool Monitor::ReleaseHeldFor(uint64_t sequence, bool timedOut)
 	{
 		const uint64_t lead = frameLead.load(std::memory_order_acquire);
 		const uint64_t through = sequence >= lead ? sequence - lead : 0;
@@ -3274,6 +3260,8 @@ if (tile < int(tiles) && g.y < ts) {
 			lastBoundWaitSeq = 0;
 			reset = true;
 		}
+		if (timedOut && through > timedOutThrough)
+			timedOutThrough = through;
 		if (through > releasedThrough.load(std::memory_order_relaxed))
 			releasedThrough.store(through, std::memory_order_release);
 		const uint64_t era = epoch.load(std::memory_order_acquire);

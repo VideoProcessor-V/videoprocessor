@@ -61,7 +61,9 @@ namespace LedDrive
 				return 0.0;
 			if (above < 0.0)
 				return static_cast<double>(HISTOGRAM_BINS - 1);
-			const double target = totalD - above;
+			double target = totalD - above;
+			if (totalD - target > above)
+				target = std::nextafter(target, totalD);
 			const int bin = VpUnit::SourceStats::FirstBinReaching<double>(histogram, HISTOGRAM_BINS, target);
 			return bin >= 0 ? static_cast<double>(bin) : 0.0;
 		}

@@ -13,6 +13,48 @@ namespace VpSkeleton
 {
 	namespace SceneRecordReader
 	{
+		namespace
+		{
+			// Non-mutating mirror of SkeletonMemo::Acquire's queue-window / ahead-plan admission checks
+			// (SkeletonAcquire.h:967-982). Prevents look-ahead readers (e.g. SRM LookAheadFrameCoded) from
+			// triggering SkeletonMemo::Fail() and polluting SkeletonMemo::lastCause_[kP4SourceStats] (MUST-9).
+			bool AheadAdmittedNonMutating(const VpSkeleton::SkeletonMemo& memo, uint64_t seq, const char*& reason)
+			{
+				if (!memo.AheadOfSeal(seq))
+					return true;
+				const VpSkeleton::QueueWindow w = memo.Window();
+				const bool hasWindow = (w.wired != 0 || w.current != 0);
+				if (hasWindow)
+				{
+					if (seq > w.current + uint64_t(w.ahead))
+					{
+						reason = VpSkeleton::Token(VpSkeleton::AcquireCause::NotQueued);
+						return false;
+					}
+					if (seq > w.current + uint64_t(w.aheadCompute))
+					{
+						reason = VpSkeleton::Token(VpSkeleton::AcquireCause::NotPlannedAhead);
+						return false;
+					}
+					if (w.presentKnown && w.current > w.presented &&
+						w.current - w.presented > uint64_t(w.history) + uint64_t(w.renderAhead) + 1u + uint64_t(w.ahead))
+					{
+						reason = VpSkeleton::Token(VpSkeleton::AcquireCause::PresentsStalled);
+						return false;
+					}
+				}
+				const VpSkeleton::AheadPlan plan = memo.Plan();
+				uint16_t plannedDepth = 0;
+				if (hasWindow && plan.Has(uint16_t(VpSkeleton::kP4SourceStats), 0u, &plannedDepth) &&
+					seq > w.current + uint64_t(plannedDepth))
+				{
+					reason = VpSkeleton::Token(VpSkeleton::AcquireCause::NotPlannedAhead);
+					return false;
+				}
+				return true;
+			}
+		}
+
 		bool SceneOf(uint64_t seq, SceneVerdict& out)
 		{
 			out = SceneVerdict{};
@@ -52,11 +94,17 @@ namespace VpSkeleton
 						return true;
 					}
 				}
-				// MUST-9: off the render thread, never enter SceneOf's live FillScene -> memo->Acquire(P4) path,
-				// which would raise a spurious WrongThread / FrameReleased fallback on the global SkeletonMemo.
+				// MUST-9: before entering SceneOf's live FillScene -> memo->Acquire(P4) path, guard off-thread,
+				// released-frame, and unplanned-ahead requests so SkeletonMemo::Fail() is never polluted.
 				const Vpv::Skeleton::FrameMemo fm = demand->MemoFor(owners[0], seq);
 				if (fm.Valid() && !fm.memo->OnRenderThread())
 					reason = "scene not published (off render thread)";
+				else if (fm.Valid() && (fm.memo->Released(seq) || (seq > 0 && fm.memo->Released(seq - 1))))
+					reason = VpSkeleton::Token(VpSkeleton::AcquireCause::FrameReleased);
+				else if (fm.Valid() && !AheadAdmittedNonMutating(*fm.memo, seq, reason))
+				{
+					// reason populated by AheadAdmittedNonMutating (NotQueued / NotPlannedAhead / PresentsStalled)
+				}
 				else
 				{
 					const Vpv::Skeleton::SceneAnswer a = demand->SceneOf(owners[0], seq);
@@ -138,7 +186,11 @@ namespace VpSkeleton
 					else if (!fm.memo->OnRenderThread())
 						reason = "p4 not published (off render thread)";
 					else if (fm.memo->Released(seq))
-						reason = "frame released";
+						reason = VpSkeleton::Token(VpSkeleton::AcquireCause::FrameReleased);
+					else if (!AheadAdmittedNonMutating(*fm.memo, seq, reason))
+					{
+						// reason populated by AheadAdmittedNonMutating (NotQueued / NotPlannedAhead / PresentsStalled)
+					}
 					else
 					{
 						const VpSkeleton::AcquireResult ar = fm.memo->Acquire(VpSkeleton::kP4SourceStats, seq, VpSkeleton::AcquireForm::Cpu);
