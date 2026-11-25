@@ -42,6 +42,7 @@ namespace AdaptiveDownscale
 		// the source's own codes, uses the source transfer (GuardTransfer).
 		const char* const MEASURE_HEADER = R"GLSL(
 shared vec4 ad_sum[256];
+shared float ad_tile[18][18];
 )GLSL";
 
 		// S9 (CF-2): on the upscale form, grain comes from kP10gGrainLevel (never the private Laplacian partial sums),
@@ -63,19 +64,33 @@ if (gl_LocalInvocationIndex == 0u && advance > 0.5) {
 }
 )GLSL";
 
+		// GEM-077: cache the 16x16 workgroup's 18x18 luma halo (em.y) in shared memory once so the 5-tap Laplacian reads
+		// ad_tile instead of 4 redundant global texelFetch calls per pixel (320 vs 1280 fetches/workgroup; bit-identical).
 		const char* const MEASURE_BODY = R"GLSL(
 ivec2 q = ivec2(gl_GlobalInvocationID.xy);
 uint li = gl_LocalInvocationIndex;
+int lx = int(gl_LocalInvocationID.x);
+int ly = int(gl_LocalInvocationID.y);
+ivec2 p = ivec2(origin) + q;
+ivec2 lim = textureSize(em, 0) - ivec2(1);
+vec2 m = texelFetch(em, clamp(p, ivec2(0), lim), 0).xy;
+ad_tile[ly + 1][lx + 1] = m.y;
+if (ly == 0)
+    ad_tile[0][lx + 1] = texelFetch(em, clamp(p + ivec2(0, -1), ivec2(0), lim), 0).y;
+if (ly == 15)
+    ad_tile[17][lx + 1] = texelFetch(em, clamp(p + ivec2(0, 1), ivec2(0), lim), 0).y;
+if (lx == 0)
+    ad_tile[ly + 1][0] = texelFetch(em, clamp(p + ivec2(-1, 0), ivec2(0), lim), 0).y;
+if (lx == 15)
+    ad_tile[ly + 1][17] = texelFetch(em, clamp(p + ivec2(1, 0), ivec2(0), lim), 0).y;
+barrier();
 vec4 v = vec4(0.0);
 if (q.x < int(region.x) && q.y < int(region.y)) {
-    ivec2 p = ivec2(origin) + q;
-    ivec2 lim = textureSize(em, 0) - ivec2(1);
-    vec2 m = texelFetch(em, clamp(p, ivec2(0), lim), 0).xy;
-    float e = m.y;
-    float b = texelFetch(em, clamp(p + ivec2(0, -1), ivec2(0), lim), 0).y;
-    float d = texelFetch(em, clamp(p + ivec2(-1, 0), ivec2(0), lim), 0).y;
-    float f = texelFetch(em, clamp(p + ivec2(1, 0), ivec2(0), lim), 0).y;
-    float h = texelFetch(em, clamp(p + ivec2(0, 1), ivec2(0), lim), 0).y;
+    float e = ad_tile[ly + 1][lx + 1];
+    float b = ad_tile[ly][lx + 1];
+    float d = ad_tile[ly + 1][lx];
+    float f = ad_tile[ly + 1][lx + 2];
+    float h = ad_tile[ly + 2][lx + 1];
     float grad = 0.25 * m.x;
     float ed = smoothstep(edge_lo, edge_hi, grad);
     imageStore(edge_out, q, vec4(ed));
@@ -349,8 +364,20 @@ ivec2 size = imageSize(dst);
 if (q.x < size.x && q.y < size.y) {
     vec4 fa = texelFetch(faithful, q, 0);
     vec4 ss = texelFetch(hooked, q, 0);
+#ifdef AD_FAITHFUL_PLAIN
+    // GEM-077: one-axis upscale without residual hold uses only faithful luma + hooked chroma (w = 0, ga = 0).
+    const vec3 ku = AD_KW;
+    vec4 o = ss;
+    o.rgb = ss.rgb + vec3(dot(fa.rgb, ku) - dot(ss.rgb, ku));
+#ifdef AD_SUPERRES_ALPHA
+    o.a = 0.0;
+#endif
+    imageStore(dst, q, o);
+#else
     vec2 s = src_origin + (vec2(q) + vec2(0.5)) * src_per_dst;
+#ifndef AD_FAITHFUL_ONLY
     float e = texture(edge, (s - edge_origin) / vec2(textureSize(edge, 0))).r;
+#endif
     float g = texelFetch(state, ivec2(0), 0).r;
 #ifdef AD_USE_MAP
     {
@@ -440,6 +467,11 @@ if (q.x < size.x && q.y < size.y) {
 #else
     g = grain_floor;
 #endif
+#ifdef AD_FAITHFUL_ONLY
+    // 8b one-axis: faithful branch only, and no SuperRes correction (edge and motion are skipped).
+    float w = 0.0;
+    float ga = 0.0;
+#else
     float mt = 1.0;
 #ifdef AD_MOTION
     mt = mf;
@@ -449,10 +481,6 @@ if (q.x < size.x && q.y < size.y) {
 #endif
     float w = hb_weight(w_base, e, g, mt);
     float ga = g * clamp(mt, 0.0, 1.0);   // the strength handed to SSimSuperRes
-#ifdef AD_FAITHFUL_ONLY
-    // 8b one-axis: faithful branch only, and no SuperRes correction.
-    w = 0.0;
-    ga = 0.0;
 #endif
     const vec3 ku = AD_KW;
     vec4 o = ss;
@@ -475,6 +503,7 @@ if (q.x < size.x && q.y < size.y) {
         o.a = fa.a;   // passed through (Stage 10b does not use alpha)
     }
     STABILISE_AND_STORE
+#endif
 #endif
 }
 )GLSL";
@@ -649,7 +678,7 @@ float rs_slope(float y)
 
 		bool Compute(pl_dispatch dispatch, const char* description, const char* header, const char* body,
 			const pl_shader_desc* descriptors, int numDescriptors, const pl_shader_var* variables,
-			int numVariables, int groupsX, int groupsY)
+			int numVariables, int groupsX, int groupsY, size_t computeShmem = 0)
 		{
 			pl_custom_shader custom{};
 			custom.description = description;
@@ -662,6 +691,7 @@ float rs_slope(float y)
 			custom.variables = variables;
 			custom.num_variables = numVariables;
 			custom.compute = true;
+			custom.compute_shmem = computeShmem;
 			custom.compute_group_size[0] = 16;
 			custom.compute_group_size[1] = 16;
 			pl_shader sh = pl_dispatch_begin(dispatch);
@@ -967,14 +997,21 @@ float rs_slope(float y)
 		const int w = std::max(1, static_cast<int>(std::ceil(sx1)) - ox);
 		const int h = std::max(1, static_cast<int>(std::ceil(sy1)) - oy);
 		const int gx = (w + 15) / 16, gy = (h + 15) / 16;
+		// GEM-077: one-axis upscale is faithful-only (w = 0, ga = 0 in BLEND_BODY), so it never reads edge, partial, or
+		// motion_map; without residual hold it does not read state either, and with residual hold it only needs state.a (cut flag).
+		const bool oneAxisUpscale = upscale.on && upscale.oneAxis;
+		const bool oneAxisStabilise = oneAxisUpscale && settings.cnnResidualStabilise &&
+			motion.field && motion.frameTrust && !motion.nls.valid &&
+			motion.sourceCrop.x1 > motion.sourceCrop.x0 && motion.sourceCrop.y1 > motion.sourceCrop.y0;
 		halfFloatPicture = false;
-		if (!Ensure(gpu, edge, w, h, 1, 16, false, true) ||
-			(!upscale.on && !Ensure(gpu, partial, gx, gy, 4, 32, false, false)) || !Ensure(gpu, state, 1, 1, 4, 32, false, false))
+		if ((!oneAxisUpscale && !Ensure(gpu, edge, w, h, 1, 16, false, true)) ||
+			(!upscale.on && !Ensure(gpu, partial, gx, gy, 4, 32, false, false)) ||
+			((!oneAxisUpscale || oneAxisStabilise) && !Ensure(gpu, state, 1, 1, 4, 32, false, false)))
 		{
 			++failures;
 			return unchanged;
 		}
-		if (!readback && !NativeStatsReadback())
+		if (!oneAxisUpscale && !readback && !NativeStatsReadback())
 		{
 			// The final pass writes the statistics straight into this storage
 			// buffer (the LED measurement's pattern); polled frames later.
@@ -1034,196 +1071,234 @@ float rs_slope(float y)
 		const pl_color_system lumaSystem = p->orig_repr ? p->orig_repr->sys : p->repr.sys;
 		const pl_color_primaries lumaPrimaries = p->orig_color ? p->orig_color->primaries : p->color.primaries;
 		domain = MeasureDomainFor(p->color, lumaSystem, lumaPrimaries);
-		// CB slice 18 S3: the edge map of the WHOLE base picture is P1's kEdgeMap stage variant (design-EDGEMAP-DOMAIN-AXIS
-		// rev 2): this picture is offered to P13 as the stage after scaling.geometry and its edge map asked for under
-		// (seq, stage, size, ordinal); EdgeMapStageOrdinal keeps two pictures of one seq (the de-judder extras, a repeat)
-		// apart. The crop is applied where the map is read (MEASURE_BODY), so no crop axis is needed in the key.
-		// The memo path, its visible Unavailable and the no-memo dispatch live in MeasureEdgeMap.h (CPU-tested seam,
-		// tests/MeasureEdgeMapTests.cpp); the no-memo branch dispatches THE shared fill into the module's own texture.
-		const pl_tex em = AcquireMeasureEdgeMap(Vpv::Skeleton::CurrentFrameMemo(), edgeOrdinal, base, p->color, lumaSystem,
-			lumaPrimaries,
-			[&](std::string& why) -> pl_tex {
-				if (!Ensure(gpu, edgeLocal, base->params.w, base->params.h, 2, 32, false, false) ||
-					!Vpv::Regions::DispatchEdgeMapStage(p->dispatch, base, p->color, lumaSystem, lumaPrimaries, edgeLocal, why))
-					return nullptr;
-				return edgeLocal;
-			},
-			edgeMapStatus);
-		if (em == nullptr)
-		{
-			++failures;
-			return unchanged;
-		}
 		const float origin[2] = { static_cast<float>(ox), static_cast<float>(oy) };
 		const float region[2] = { static_cast<float>(w), static_cast<float>(h) };
-		if (upscale.on)
+		if (oneAxisUpscale)
 		{
-			// S9 (CF-2): upscale uses kP10gGrainLevel (never the private Laplacian partial sums), so run edge_out alone.
-			const pl_shader_desc d[2] = { Sampled("em", em, false), Storage("edge_out", edge) };
-			const pl_shader_var v[4] = {
-				{ pl_var_vec2("origin"), origin, true },
-				{ pl_var_vec2("region"), region, true },
-				{ pl_var_float("edge_lo"), &settings.edgeLo, true },
-				{ pl_var_float("edge_hi"), &settings.edgeHi, true } };
-			if (!Compute(p->dispatch, "VideoProcessor adaptive upscale: edge", nullptr, MEASURE_EDGE_ONLY_BODY,
-				d, 2, v, 4, gx, gy))
+			// GEM-077: skip AcquireMeasureEdgeMap, MEASURE_EDGE_ONLY_BODY, and UpdateMotionMap on one-axis upscale
+			// (AD_FAITHFUL_ONLY: w = 0, ga = 0). When residual hold is active, keep only the 1-thread cut-flag state update.
+			if (oneAxisStabilise)
 			{
-				++failures;
-				return unchanged;
-			}
-		}
-		else
-		{
-			const pl_shader_desc d[3] = { Sampled("em", em, false), Storage("edge_out", edge),
-				Storage("partial_out", partial) };
-			const pl_shader_var v[5] = {
-				{ pl_var_vec2("origin"), origin, true },
-				{ pl_var_vec2("region"), region, true },
-				{ pl_var_float("edge_lo"), &settings.edgeLo, true },
-				{ pl_var_float("edge_hi"), &settings.edgeHi, true },
-				{ pl_var_float("shadow_bias"), &settings.shadowBias, true } };
-			if (!Compute(p->dispatch, "VideoProcessor adaptive downscale: measure", MEASURE_HEADER, MEASURE_BODY,
-				d, 3, v, 5, gx, gy))
-			{
-				++failures;
-				return unchanged;
-			}
-		}
-
-		// 3. The frame's grain term (downscale) or cut flag (upscale, S9) into the state (once per source frame).
-		if (upscale.on)
-		{
-			const float advance = sequence != advancedSequence ? 1.0f : 0.0f;
-			float cutIn = 0.0f;
-			if (advance > 0.5f)
-				cutIn = ResolveCut() ? 1.0f : 0.0f;
-			const pl_shader_desc d[1] = { Storage("state_io", state, PL_DESC_ACCESS_READWRITE) };
-			const pl_shader_var v[3] = {
-				{ pl_var_float("advance"), &advance, true },
-				{ pl_var_float("cut_in"), &cutIn, true },
-				{ pl_var_float("grain_floor"), &settings.grainFloor, true } };
-			if (!Compute(p->dispatch, "VideoProcessor adaptive upscale: cut state", nullptr, UPSCALE_STATE_BODY,
-				d, 1, v, 3, 1, 1))
-			{
-				++failures;
-				return unchanged;
-			}
-			if (advance > 0.5f)
-			{
-				advancedSequence = sequence;
-				cutContinuous = true;
-			}
-			if (!UpdateMotionMap(p->dispatch, advance > 0.5f))
-				++failures;
-		}
-		else
-		{
-			const float advance = sequence != advancedSequence ? 1.0f : 0.0f;
-			// FIX-X5-CUT-P4 / C5: the cut event of this new source frame is the shared one (the scene product), asked once per advance.
-			float cutIn = 0.0f;
-			if (advance > 0.5f)
-				cutIn = ResolveCut() ? 1.0f : 0.0f;
-			const bool native = NativeStatsReadback();
-			// Native: a ring slot for this source frame's statistics (none free: skipped, never
-			// waited for); otherwise the one libplacebo buffer when it is free.
-			const int statsSlot = native && advance > 0.5f ? statsSchedule.Claim(++statsFrames) : -1;
-			const bool writeStats = native ? statsSlot >= 0 : advance > 0.5f && readback && !readbackPending;
-			const float writeStatsF = writeStats ? 1.0f : 0.0f;
-			const float total = static_cast<float>(w) * static_cast<float>(h);
-			const float alpha = OnePole::AlphaForMs(frameSeconds * 1000.0f, settings.grainSmoothMs, OnePole::DtRule::AsGiven);
-			pl_buffer_var outVar{};
-			outVar.var = pl_var_vec4("ad_out");
-			outVar.layout = pl_std430_layout(0, &outVar.var);
-			pl_shader_desc d[6] = { Sampled("partial_in", partial, false),
-				Storage("state_io", state, PL_DESC_ACCESS_READWRITE), pl_shader_desc{} };
-			int numDescriptors = 2;
-			if (native)
-			{
-				// The image is always bound (the shader text stays one); written only when a slot
-				// was claimed (write_stats).
-				d[2] = Storage("ad_stats_img", statsNative->Target(statsSlot >= 0 ? statsSlot : 0));
-				numDescriptors = 3;
-			}
-			else if (readback)
-			{
-				d[2].desc.name = "ad_stats";
-				d[2].desc.type = PL_DESC_BUF_STORAGE;
-				d[2].desc.access = PL_DESC_ACCESS_WRITEONLY;
-				d[2].binding.object = readback;
-				d[2].buffer_vars = &outVar;
-				d[2].num_buffer_vars = 1;
-				d[2].memory = PL_MEMORY_COHERENT;
-				numDescriptors = 3;
-			}
-			// X5-GRAIN-P10: the shared products (P10 N, P11 meanY and flat coverage) when supplied; else the
-			// private Laplacian estimate (visible: LastGrainFromSharedProducts() false, the stage status line).
-			// Gate cb-u1 r1 MUST 6: P10 N is in the source code domain, so it maps onto the ramp's Laplacian units only when
-			// the measure domain is the gamma code domain (mode 0). A linear or HDR measure keeps the private estimate, visibly.
-			const bool supplied = grainSource.Valid();
-			const bool shared = supplied && domain.mode < 0.5f;
-			grainDomainRefused = supplied && !shared;
-			const float blockPx = static_cast<float>(grainSource.blockPx);
-			const float codeScale = grainSource.codeToEightBit;
-			const float cropLo[2] = { (std::min)(grainSource.sourceCrop.x0, grainSource.sourceCrop.x1),
-				(std::min)(grainSource.sourceCrop.y0, grainSource.sourceCrop.y1) };
-			const float cropHi[2] = { (std::max)(grainSource.sourceCrop.x0, grainSource.sourceCrop.x1),
-				(std::max)(grainSource.sourceCrop.y0, grainSource.sourceCrop.y1) };
-			if (shared)
-			{
-				d[3] = Sampled("p10_blocks", grainSource.p10Blocks, false);
-				d[4] = Sampled("p11_s0", grainSource.p11Stats0, false);
-				d[5] = Sampled("p11_s4", grainSource.p11Stats4, false);
-			}
-			const pl_shader_var v[13] = {
-				{ pl_var_float("write_stats"), &writeStatsF, true },
-				{ pl_var_float("advance"), &advance, true },
-				{ pl_var_float("cut_in"), &cutIn, true },
-				{ pl_var_float("total_pixels"), &total, true },
-				{ pl_var_float("grain_lo"), &settings.grainLo, true },
-				{ pl_var_float("grain_hi"), &settings.grainHi, true },
-				{ pl_var_float("grain_floor"), &settings.grainFloor, true },
-				{ pl_var_float("smooth_alpha"), &alpha, true },
-				{ pl_var_float("shadow_bias"), &settings.shadowBias, true },
-				{ pl_var_float("block_px"), &blockPx, true },
-				{ pl_var_float("p10_scale"), &codeScale, true },
-				{ pl_var_vec2("crop_lo"), cropLo, true },
-				{ pl_var_vec2("crop_hi"), cropHi, true } };
-			static const std::string p10Define = std::string("#define AD_P10 1\n#define ENERGY_PER_SIGMA ") +
-				std::to_string(kEdgeEnergyPerSigma) + "\n";
-			static const std::string finalImgHeader = std::string("#define AD_STATS_IMG 1\n") + FinalHeader();
-			static const std::string finalP10Header = p10Define + FinalHeader();
-			static const std::string finalImgP10Header = p10Define + finalImgHeader;
-			const char* finalHeader = shared ? (native ? finalImgP10Header.c_str() : finalP10Header.c_str()) :
-				(native ? finalImgHeader.c_str() : FinalHeader().c_str());
-			if (numDescriptors != 3 || !Compute(p->dispatch, "VideoProcessor adaptive downscale: grain",
-				finalHeader, FinalBody().c_str(), d, shared ? 6 : 3, v, shared ? 13 : 8, 1, 1))
-			{
-				if (statsSlot >= 0)
-					statsSchedule.Release(statsSlot);
-				++failures;
-				return unchanged;
-			}
-			grainFromShared = shared;
-			if (statsSlot >= 0 && statsSlot < kStatsSlots)
-				statsSlotBound[statsSlot] = shared;
-			if (statsSlot >= 0)
-				statsNative->QueueDeferred(statsSlot);   // this pass runs inside libplacebo's frame: the native copy follows the frame (NativeReadback.h)
-			if (advance > 0.5f)
-			{
-				advancedSequence = sequence;
-				cutContinuous = true;   // C5: the next ask covers the frames since this one
-				if (writeStats && !native)
+				const float advance = sequence != advancedSequence ? 1.0f : 0.0f;
+				float cutIn = 0.0f;
+				if (advance > 0.5f)
+					cutIn = ResolveCut() ? 1.0f : 0.0f;
+				const pl_shader_desc d[1] = { Storage("state_io", state, PL_DESC_ACCESS_READWRITE) };
+				const pl_shader_var v[3] = {
+					{ pl_var_float("advance"), &advance, true },
+					{ pl_var_float("cut_in"), &cutIn, true },
+					{ pl_var_float("grain_floor"), &settings.grainFloor, true } };
+				if (!Compute(p->dispatch, "VideoProcessor adaptive upscale: cut state", nullptr, UPSCALE_STATE_BODY,
+					d, 1, v, 3, 1, 1))
 				{
-					readbackPending = true;
-					readbackBound = shared;
+					++failures;
+					return unchanged;
+				}
+				if (advance > 0.5f)
+				{
+					advancedSequence = sequence;
+					cutContinuous = true;
 				}
 			}
-			// 4. 8-3: the map, after the scalar (it reads the cut flag).
-			if (!UpdateMap(p->dispatch, advance > 0.5f))
+		}
+		else
+		{
+			// CB slice 18 S3: the edge map of the WHOLE base picture is P1's kEdgeMap stage variant (design-EDGEMAP-DOMAIN-AXIS
+			// rev 2): this picture is offered to P13 as the stage after scaling.geometry and its edge map asked for under
+			// (seq, stage, size, ordinal); EdgeMapStageOrdinal keeps two pictures of one seq (the de-judder extras, a repeat)
+			// apart. The crop is applied where the map is read (MEASURE_BODY), so no crop axis is needed in the key.
+			// The memo path, its visible Unavailable and the no-memo dispatch live in MeasureEdgeMap.h (CPU-tested seam,
+			// tests/MeasureEdgeMapTests.cpp); the no-memo branch dispatches THE shared fill into the module's own texture.
+			// GEM-077: AcquireMeasureEdgeMap already skips the private Sobel fill (edgeLocal) whenever the skeleton memo serves
+			// kEdgeMap (edgeMapStatus.empty()). MEASURE_BODY / MEASURE_EDGE_ONLY_BODY still write edge_out (R16F smoothstepped
+			// crop) because em holds raw un-ramped |G| + luma at full base size while BLEND_BODY linearly samples edge.
+			const pl_tex em = AcquireMeasureEdgeMap(Vpv::Skeleton::CurrentFrameMemo(), edgeOrdinal, base, p->color, lumaSystem,
+				lumaPrimaries,
+				[&](std::string& why) -> pl_tex {
+					if (!Ensure(gpu, edgeLocal, base->params.w, base->params.h, 2, 32, false, false) ||
+						!Vpv::Regions::DispatchEdgeMapStage(p->dispatch, base, p->color, lumaSystem, lumaPrimaries, edgeLocal, why))
+						return nullptr;
+					return edgeLocal;
+				},
+				edgeMapStatus);
+			if (em == nullptr)
+			{
 				++failures;
-			// The motion-adapted factor map (after the scalar: it reads the cut flag).
-			if (!UpdateMotionMap(p->dispatch, advance > 0.5f))
-				++failures;
+				return unchanged;
+			}
+			if (upscale.on)
+			{
+				// S9 (CF-2): upscale uses kP10gGrainLevel (never the private Laplacian partial sums), so run edge_out alone.
+				const pl_shader_desc d[2] = { Sampled("em", em, false), Storage("edge_out", edge) };
+				const pl_shader_var v[4] = {
+					{ pl_var_vec2("origin"), origin, true },
+					{ pl_var_vec2("region"), region, true },
+					{ pl_var_float("edge_lo"), &settings.edgeLo, true },
+					{ pl_var_float("edge_hi"), &settings.edgeHi, true } };
+				if (!Compute(p->dispatch, "VideoProcessor adaptive upscale: edge", nullptr, MEASURE_EDGE_ONLY_BODY,
+					d, 2, v, 4, gx, gy))
+				{
+					++failures;
+					return unchanged;
+				}
+			}
+			else
+			{
+				const pl_shader_desc d[3] = { Sampled("em", em, false), Storage("edge_out", edge),
+					Storage("partial_out", partial) };
+				const pl_shader_var v[5] = {
+					{ pl_var_vec2("origin"), origin, true },
+					{ pl_var_vec2("region"), region, true },
+					{ pl_var_float("edge_lo"), &settings.edgeLo, true },
+					{ pl_var_float("edge_hi"), &settings.edgeHi, true },
+					{ pl_var_float("shadow_bias"), &settings.shadowBias, true } };
+				// Shared memory: ad_sum[256] (vec4) + ad_tile[18][18] (float) = 5392 bytes.
+				const size_t measureShmem = sizeof(float) * (256u * 4u + 18u * 18u);
+				if (!Compute(p->dispatch, "VideoProcessor adaptive downscale: measure", MEASURE_HEADER, MEASURE_BODY,
+					d, 3, v, 5, gx, gy, measureShmem))
+				{
+					++failures;
+					return unchanged;
+				}
+			}
+
+			// 3. The frame's grain term (downscale) or cut flag (upscale, S9) into the state (once per source frame).
+			if (upscale.on)
+			{
+				const float advance = sequence != advancedSequence ? 1.0f : 0.0f;
+				float cutIn = 0.0f;
+				if (advance > 0.5f)
+					cutIn = ResolveCut() ? 1.0f : 0.0f;
+				const pl_shader_desc d[1] = { Storage("state_io", state, PL_DESC_ACCESS_READWRITE) };
+				const pl_shader_var v[3] = {
+					{ pl_var_float("advance"), &advance, true },
+					{ pl_var_float("cut_in"), &cutIn, true },
+					{ pl_var_float("grain_floor"), &settings.grainFloor, true } };
+				if (!Compute(p->dispatch, "VideoProcessor adaptive upscale: cut state", nullptr, UPSCALE_STATE_BODY,
+					d, 1, v, 3, 1, 1))
+				{
+					++failures;
+					return unchanged;
+				}
+				if (advance > 0.5f)
+				{
+					advancedSequence = sequence;
+					cutContinuous = true;
+				}
+				if (!UpdateMotionMap(p->dispatch, advance > 0.5f))
+					++failures;
+			}
+			else
+			{
+				const float advance = sequence != advancedSequence ? 1.0f : 0.0f;
+				// FIX-X5-CUT-P4 / C5: the cut event of this new source frame is the shared one (the scene product), asked once per advance.
+				float cutIn = 0.0f;
+				if (advance > 0.5f)
+					cutIn = ResolveCut() ? 1.0f : 0.0f;
+				const bool native = NativeStatsReadback();
+				// Native: a ring slot for this source frame's statistics (none free: skipped, never
+				// waited for); otherwise the one libplacebo buffer when it is free.
+				const int statsSlot = native && advance > 0.5f ? statsSchedule.Claim(++statsFrames) : -1;
+				const bool writeStats = native ? statsSlot >= 0 : advance > 0.5f && readback && !readbackPending;
+				const float writeStatsF = writeStats ? 1.0f : 0.0f;
+				const float total = static_cast<float>(w) * static_cast<float>(h);
+				const float alpha = OnePole::AlphaForMs(frameSeconds * 1000.0f, settings.grainSmoothMs, OnePole::DtRule::AsGiven);
+				pl_buffer_var outVar{};
+				outVar.var = pl_var_vec4("ad_out");
+				outVar.layout = pl_std430_layout(0, &outVar.var);
+				pl_shader_desc d[6] = { Sampled("partial_in", partial, false),
+					Storage("state_io", state, PL_DESC_ACCESS_READWRITE), pl_shader_desc{} };
+				int numDescriptors = 2;
+				if (native)
+				{
+					// The image is always bound (the shader text stays one); written only when a slot
+					// was claimed (write_stats).
+					d[2] = Storage("ad_stats_img", statsNative->Target(statsSlot >= 0 ? statsSlot : 0));
+					numDescriptors = 3;
+				}
+				else if (readback)
+				{
+					d[2].desc.name = "ad_stats";
+					d[2].desc.type = PL_DESC_BUF_STORAGE;
+					d[2].desc.access = PL_DESC_ACCESS_WRITEONLY;
+					d[2].binding.object = readback;
+					d[2].buffer_vars = &outVar;
+					d[2].num_buffer_vars = 1;
+					d[2].memory = PL_MEMORY_COHERENT;
+					numDescriptors = 3;
+				}
+				// X5-GRAIN-P10: the shared products (P10 N, P11 meanY and flat coverage) when supplied; else the
+				// private Laplacian estimate (visible: LastGrainFromSharedProducts() false, the stage status line).
+				// Gate cb-u1 r1 MUST 6: P10 N is in the source code domain, so it maps onto the ramp's Laplacian units only when
+				// the measure domain is the gamma code domain (mode 0). A linear or HDR measure keeps the private estimate, visibly.
+				const bool supplied = grainSource.Valid();
+				const bool shared = supplied && domain.mode < 0.5f;
+				grainDomainRefused = supplied && !shared;
+				const float blockPx = static_cast<float>(grainSource.blockPx);
+				const float codeScale = grainSource.codeToEightBit;
+				const float cropLo[2] = { (std::min)(grainSource.sourceCrop.x0, grainSource.sourceCrop.x1),
+					(std::min)(grainSource.sourceCrop.y0, grainSource.sourceCrop.y1) };
+				const float cropHi[2] = { (std::max)(grainSource.sourceCrop.x0, grainSource.sourceCrop.x1),
+					(std::max)(grainSource.sourceCrop.y0, grainSource.sourceCrop.y1) };
+				if (shared)
+				{
+					d[3] = Sampled("p10_blocks", grainSource.p10Blocks, false);
+					d[4] = Sampled("p11_s0", grainSource.p11Stats0, false);
+					d[5] = Sampled("p11_s4", grainSource.p11Stats4, false);
+				}
+				const pl_shader_var v[13] = {
+					{ pl_var_float("write_stats"), &writeStatsF, true },
+					{ pl_var_float("advance"), &advance, true },
+					{ pl_var_float("cut_in"), &cutIn, true },
+					{ pl_var_float("total_pixels"), &total, true },
+					{ pl_var_float("grain_lo"), &settings.grainLo, true },
+					{ pl_var_float("grain_hi"), &settings.grainHi, true },
+					{ pl_var_float("grain_floor"), &settings.grainFloor, true },
+					{ pl_var_float("smooth_alpha"), &alpha, true },
+					{ pl_var_float("shadow_bias"), &settings.shadowBias, true },
+					{ pl_var_float("block_px"), &blockPx, true },
+					{ pl_var_float("p10_scale"), &codeScale, true },
+					{ pl_var_vec2("crop_lo"), cropLo, true },
+					{ pl_var_vec2("crop_hi"), cropHi, true } };
+				static const std::string p10Define = std::string("#define AD_P10 1\n#define ENERGY_PER_SIGMA ") +
+					std::to_string(kEdgeEnergyPerSigma) + "\n";
+				static const std::string finalImgHeader = std::string("#define AD_STATS_IMG 1\n") + FinalHeader();
+				static const std::string finalP10Header = p10Define + FinalHeader();
+				static const std::string finalImgP10Header = p10Define + finalImgHeader;
+				const char* finalHeader = shared ? (native ? finalImgP10Header.c_str() : finalP10Header.c_str()) :
+					(native ? finalImgHeader.c_str() : FinalHeader().c_str());
+				// Shared memory: ad_total[256] (vec4) [+ ad_p10[256] (vec2) when AD_P10].
+				const size_t finalShmem = sizeof(float) * 256u * (shared ? 6u : 4u);
+				if (numDescriptors != 3 || !Compute(p->dispatch, "VideoProcessor adaptive downscale: grain",
+					finalHeader, FinalBody().c_str(), d, shared ? 6 : 3, v, shared ? 13 : 8, 1, 1, finalShmem))
+				{
+					if (statsSlot >= 0)
+						statsSchedule.Release(statsSlot);
+					++failures;
+					return unchanged;
+				}
+				grainFromShared = shared;
+				if (statsSlot >= 0 && statsSlot < kStatsSlots)
+					statsSlotBound[statsSlot] = shared;
+				if (statsSlot >= 0)
+					statsNative->QueueDeferred(statsSlot);   // this pass runs inside libplacebo's frame: the native copy follows the frame (NativeReadback.h)
+				if (advance > 0.5f)
+				{
+					advancedSequence = sequence;
+					cutContinuous = true;   // C5: the next ask covers the frames since this one
+					if (writeStats && !native)
+					{
+						readbackPending = true;
+						readbackBound = shared;
+					}
+				}
+				// 4. 8-3: the map, after the scalar (it reads the cut flag).
+				if (!UpdateMap(p->dispatch, advance > 0.5f))
+					++failures;
+				// The motion-adapted factor map (after the scalar: it reads the cut flag).
+				if (!UpdateMotionMap(p->dispatch, advance > 0.5f))
+					++failures;
+			}
 		}
 
 		srcRect = { sx0, sy0, sx1, sy1 };
@@ -1442,7 +1517,8 @@ float rs_slope(float y)
 		// Both residual textures exist while stabilising: the one not written is
 		// bound as rs_prev even when it is not read (a texture may be bound only
 		// once per pass - binding another in its place broke the write).
-		bool stabilise = stabiliseWanted && Ensure(gpu, residual[writeIndex], w, h, 1, 16, false, true) &&
+		const bool oneAxisUpscale = upscale.on && upscale.oneAxis;
+		bool stabilise = stabiliseWanted && state != nullptr && Ensure(gpu, residual[writeIndex], w, h, 1, 16, false, true) &&
 			Ensure(gpu, residual[1 - writeIndex], w, h, 1, 16, false, true);
 		if (readIndex >= 0 && readIndex != 1 - writeIndex)
 			readIndex = -1;   // (never: the previous residual is always the other texture)
@@ -1463,145 +1539,174 @@ float rs_slope(float y)
 			motion.sourceCrop.x1 - motion.sourceCrop.x0, motion.sourceCrop.y1 - motion.sourceCrop.y0 };
 		const float rsAlpha = 1.0f / 3.0f;
 		const float rsMinShare = motion.minTrustedShare;
-		// Without the map the pass has no `grain_map` binding and no map code
-		// (a texture may be bound only once per pass).
-		std::vector<pl_shader_desc> d = { Sampled("hooked", p->tex, false), Sampled("faithful", faithful, false),
-			Sampled("edge", edge, true), Sampled("state", state, false), Storage("dst", out) };
-		if (useMap) d.push_back(Sampled("grain_map", map[mapIndex], false));
-		// Motion-adapted blend: continuum motionStrength (0 = standard unadapted blend).
-		// CF-2 B1 (N1.4): the stage's discontinuity verdict (resync, a drop, no live estimate) also takes the map out.
-		const float motionStrength = MotionSanitizeUnit(settings.motionStrength);
-		const bool motionOn = motionStrength > 0.0f;
-		const bool vectorsInvalid = upscale.on && upscale.vectorsInvalid;
-		const bool useMotion = motionOn && !vectorsInvalid && motionState == MotionState::Used && motionReady &&
-			motionSequence == sequence && motionMap[motionIndex];
-		if (useMotion) d.push_back(Sampled("motion_map", motionMap[motionIndex], false));
-		// The upscale form with adaptive_motion > 0 and no usable map: the motion floor (the alias-safe lean), visibly
-		// (MotionFloorUsed; the stage's status line). One-axis is faithful only already. The downscale form is unchanged.
-		const bool motionFloor = upscale.on && motionOn && !useMotion && !upscale.oneAxis;
-		motionFloorUsed = motionFloor;
-		// CF-2 FIX1 (gate M1): the floor's cause, for the stage's catalog entry (Stage::Fallback) and status line.
-		const char* floorCause = motionFloor ? MotionFloorCause(vectorsInvalid, motionState, motionReady,
-			motionSequence == sequence, motionMap[motionIndex] != nullptr) : nullptr;
-		motionFloorCause = motionFloor ? std::string(floorCause ? floorCause : "no motion map") : std::string();
-		// Switch-over + M2 (grain-consumes-cb-u1): kP10gGrainLevel is in the source gamma code domain; refuse visibly on
-		// linear/HDR measure domains (domain.mode >= 0.5f) so N_b is never silently mis-scaled, falling back to grain_floor.
-		const bool grainLevelSupplied = upscale.on && grainLevel.level != nullptr;
-		const bool grainPublished = grainLevelSupplied && domain.mode < 0.5f;
-		publishedGrainUsed = grainPublished;
-		publishedGrainDomainRefused = grainLevelSupplied && !grainPublished;
-		if (grainPublished) d.push_back(Sampled("grain_level", grainLevel.level, false));   // RGBA32F: texelFetch only
-		if (stabilise)
+		const bool faithfulPlain = oneAxisUpscale && !stabilise;
+		if (faithfulPlain)
 		{
-			d.push_back(Sampled("rs_field", motion.field, false));
-			d.push_back(Sampled("rs_trust", motion.frameTrust, false));
-			// With no previous residual (rs_prev_valid 0) it is bound but not read.
-			d.push_back(Sampled("rs_prev", residual[1 - writeIndex], true));
-			d.push_back(Storage("rs_out", residual[writeIndex]));
+			// GEM-077: one-axis upscale without residual hold binds only hooked, faithful, and dst (zero unused descriptors/uniforms).
+			motionFloorUsed = false;
+			motionFloorCause.clear();
+			publishedGrainUsed = false;
+			publishedGrainDomainRefused = false;
+			const pl_shader_desc d[3] = { Sampled("hooked", p->tex, false), Sampled("faithful", faithful, false),
+				Storage("dst", out) };
+			const std::string header = "#define AD_KW " + LumaWeightsGlsl(domain) + "\n#define AD_FAITHFUL_PLAIN 1\n" +
+				(upscale.superresAlpha ? std::string("#define AD_SUPERRES_ALPHA 1\n") : std::string());
+			if (!Compute(p->dispatch, "VideoProcessor adaptive upscale: blend",
+				header.c_str(), BLEND_BODY, d, 3, nullptr, 0, (w + 15) / 16, (h + 15) / 16))
+			{
+				++failures;
+				return unchanged;
+			}
 		}
-		// Full NLS coordinate mapping across grain map, motion map, and published grain level (emitted once).
-		const bool useMapNls = useMap && mapNls.valid;
-		const bool useMotionNls = useMotion && motionNls.valid;
-		const bool useGrainLevelNls = grainPublished && grainLevel.nls.valid;
-		const bool anyNlsHelper = useMapNls || useMotionNls || useGrainLevelNls;
-		const NlsMaskMapping::Mapping& activeNls = useMapNls ? mapNls :
-			(useMotionNls ? motionNls : grainLevel.nls);
-		const float nlsActive = useMapNls ? 1.0f : 0.0f;
-		const float mwNlsActive = useMotionNls ? 1.0f : 0.0f;
-		const float grainNlsActive = useGrainLevelNls ? 1.0f : 0.0f;
-		const float nlsCurve = static_cast<float>(activeNls.curve);
-		const float nlsGeometry = static_cast<float>(activeNls.geometry);
-		const float nlsScale[2] = { static_cast<float>(activeNls.xScale), static_cast<float>(activeNls.yScale) };
-		const float nlsProtect[2] = { static_cast<float>(activeNls.xProtect), static_cast<float>(activeNls.yProtect) };
-		static const std::string nlsHeader = std::string("#define AD_HAS_NLS 1\n") + OcclusionMask::NlsMapGlsl();
-		// 8b: the upscale form (and alpha for SSimSuperRes) as defines.
-		const std::string upHeader = upscale.on ? std::string("#define AD_UPSCALE 1\n") + HybridBlend::WeightGlsl() +
-			(upscale.superresAlpha ? "#define AD_SUPERRES_ALPHA 1\n" : "") +
-			(upscale.oneAxis ? "#define AD_FAITHFUL_ONLY 1\n" : "") +
-			(motionFloor ? "#define AD_MOTION_FLOOR 1\n" : "") +
-			(grainPublished ? "#define AD_GRAIN_PUBLISHED 1\n" : "") : std::string();
-		const bool guard = stabilise && settings.residualGrainGuard;
-		const std::string header = "#define AD_KW " + LumaWeightsGlsl(domain) + "\n" + upHeader +
-			(useMotion ? std::string("#define AD_MOTION 1\n") : std::string()) +
-			(useMap ? std::string("#define AD_USE_MAP 1\n") : std::string()) +
-			(anyNlsHelper ? nlsHeader : std::string()) +
-			(stabilise ? (guard ? STABILISE_GUARD_DEFINE : STABILISE_DEFINE) : PLAIN_DEFINE);
-		const float wBase = upscale.on ? upscale.wBase : settings.wBase;
-		std::vector<pl_shader_var> v = {
-			{ pl_var_vec2("src_origin"), srcOrigin, true },
-			{ pl_var_vec2("src_per_dst"), srcPerDst, true },
-			{ pl_var_vec2("edge_origin"), edgeOrigin, true },
-			{ pl_var_float("w_base"), &wBase, true },
-			{ pl_var_float("chroma_ssim"), &chroma, true } };
-		if (useMap || stabilise || grainPublished)
-			v.push_back({ pl_var_vec2("src_size"), srcSize, true });
-		if (useMap)
+		else
 		{
-			v.push_back({ pl_var_vec4("crop"), crop, true });
-			v.push_back({ pl_var_float("nls_active"), &nlsActive, true });
-		}
-		if (useMap || anyNlsHelper)
-		{
-			v.push_back({ pl_var_float("nls_curve"), &nlsCurve, true });
-			v.push_back({ pl_var_float("nls_geometry"), &nlsGeometry, true });
-			v.push_back({ pl_var_vec2("nls_scale"), nlsScale, true });
-			v.push_back({ pl_var_vec2("nls_protect"), nlsProtect, true });
-		}
-		if (stabilise)
-		{
-			v.push_back({ pl_var_vec4("rs_crop"), rsCrop, true });
-			v.push_back({ pl_var_float("rs_prev_valid"), &prevValid, true });
-			v.push_back({ pl_var_float("rs_alpha"), &rsAlpha, true });
-			v.push_back({ pl_var_float("rs_min_share"), &rsMinShare, true });
-		}
-		// The guard's coding-noise limit: 8-bit codes of the encoded picture -> normalised.
-		const float rsNoise = settings.residualCodingNoiseCodes > 0.0f ? settings.residualCodingNoiseCodes / 255.0f : 0.0f;
-		const float rsLinear = p->color.transfer == PL_COLOR_TRC_LINEAR ? 1.0f : 0.0f;
-		const float rsGrainFloor = settings.grainFloor;
-		const GuardTransferParams rsTransfer = GuardTransfer(p->orig_color ? *p->orig_color : p->color);
-		if (guard)
-		{
-			v.push_back({ pl_var_float("rs_noise"), &rsNoise, true });
-			v.push_back({ pl_var_float("rs_linear"), &rsLinear, true });
-			v.push_back({ pl_var_float("rs_grain_floor"), &rsGrainFloor, true });
-			v.push_back({ pl_var_float("rs_trc"), &rsTransfer.mode, true });
-			v.push_back({ pl_var_float("rs_a"), &rsTransfer.a, true });
-			v.push_back({ pl_var_float("rs_b"), &rsTransfer.b, true });
-			v.push_back({ pl_var_float("rs_g"), &rsTransfer.g, true });
-		}
-		const float mwCrop[4] = { motionSourceCrop.x0, motionSourceCrop.y0,
-			motionSourceCrop.x1 - motionSourceCrop.x0, motionSourceCrop.y1 - motionSourceCrop.y0 };
-		if (useMotion)
-		{
-			v.push_back({ pl_var_vec2("mw_src_size"), srcSize, true });
-			v.push_back({ pl_var_vec4("mw_crop"), mwCrop, true });
-			v.push_back({ pl_var_float("motion_strength"), &motionStrength, true });
-			v.push_back({ pl_var_float("mw_nls_active"), &mwNlsActive, true });
-		}
-		const float motionFloorValue = HybridBlend::MotionTerm(false, 1.0f, settings.motionFloor, motionStrength);
-		if (motionFloor)
-			v.push_back({ pl_var_float("motion_floor"), &motionFloorValue, true });
-		const pl_rect2df& gc = grainLevel.sourceCrop;
-		const float grainCrop[4] = { gc.x0, gc.y0, gc.x1 - gc.x0, gc.y1 - gc.y0 };
-		const float grainLevelScale = GrainLevelEnergyScale(grainLevel.codeToEightBit);
-		const float grainBlockPx = static_cast<float>(grainLevel.blockPx > 0 ? grainLevel.blockPx : 16);
-		if (upscale.on)
-			v.push_back({ pl_var_float("grain_floor"), &settings.grainFloor, true });   // published or not (the floor)
-		if (grainPublished)
-		{
-			v.push_back({ pl_var_vec4("grain_crop"), grainCrop, true });
-			v.push_back({ pl_var_float("grain_lo"), &settings.grainLo, true });
-			v.push_back({ pl_var_float("grain_hi"), &settings.grainHi, true });
-			v.push_back({ pl_var_float("grain_level_scale"), &grainLevelScale, true });
-			v.push_back({ pl_var_float("grain_block_px"), &grainBlockPx, true });
-			v.push_back({ pl_var_float("grain_nls_active"), &grainNlsActive, true });
-		}
-		if (!Compute(p->dispatch, upscale.on ? "VideoProcessor adaptive upscale: blend" : "VideoProcessor adaptive downscale: blend",
-			header.c_str(), BLEND_BODY, d.data(), static_cast<int>(d.size()), v.data(), static_cast<int>(v.size()),
-			(w + 15) / 16, (h + 15) / 16))
-		{
-			++failures;
-			return unchanged;
+			// Without the map the pass has no `grain_map` binding and no map code
+			// (a texture may be bound only once per pass).
+			std::vector<pl_shader_desc> d = { Sampled("hooked", p->tex, false), Sampled("faithful", faithful, false) };
+			if (!oneAxisUpscale)
+				d.push_back(Sampled("edge", edge, true));
+			d.push_back(Sampled("state", state, false));
+			d.push_back(Storage("dst", out));
+			if (useMap) d.push_back(Sampled("grain_map", map[mapIndex], false));
+			// Motion-adapted blend: continuum motionStrength (0 = standard unadapted blend).
+			// CF-2 B1 (N1.4): the stage's discontinuity verdict (resync, a drop, no live estimate) also takes the map out.
+			const float motionStrength = MotionSanitizeUnit(settings.motionStrength);
+			const bool motionOn = motionStrength > 0.0f;
+			const bool vectorsInvalid = upscale.on && upscale.vectorsInvalid;
+			const bool useMotion = motionOn && !vectorsInvalid && motionState == MotionState::Used && motionReady &&
+				motionSequence == sequence && motionMap[motionIndex];
+			if (useMotion) d.push_back(Sampled("motion_map", motionMap[motionIndex], false));
+			// The upscale form with adaptive_motion > 0 and no usable map: the motion floor (the alias-safe lean), visibly
+			// (MotionFloorUsed; the stage's status line). One-axis is faithful only already. The downscale form is unchanged.
+			const bool motionFloor = upscale.on && motionOn && !useMotion && !upscale.oneAxis;
+			motionFloorUsed = motionFloor;
+			// CF-2 FIX1 (gate M1): the floor's cause, for the stage's catalog entry (Stage::Fallback) and status line.
+			const char* floorCause = motionFloor ? MotionFloorCause(vectorsInvalid, motionState, motionReady,
+				motionSequence == sequence, motionMap[motionIndex] != nullptr) : nullptr;
+			motionFloorCause = motionFloor ? std::string(floorCause ? floorCause : "no motion map") : std::string();
+			// Switch-over + M2 (grain-consumes-cb-u1): kP10gGrainLevel is in the source gamma code domain; refuse visibly on
+			// linear/HDR measure domains (domain.mode >= 0.5f) so N_b is never silently mis-scaled, falling back to grain_floor.
+			const bool grainLevelSupplied = upscale.on && grainLevel.level != nullptr;
+			const bool grainPublished = grainLevelSupplied && domain.mode < 0.5f;
+			publishedGrainUsed = grainPublished;
+			publishedGrainDomainRefused = grainLevelSupplied && !grainPublished;
+			if (grainPublished) d.push_back(Sampled("grain_level", grainLevel.level, false));   // RGBA32F: texelFetch only
+			if (stabilise)
+			{
+				d.push_back(Sampled("rs_field", motion.field, false));
+				d.push_back(Sampled("rs_trust", motion.frameTrust, false));
+				// With no previous residual (rs_prev_valid 0) it is bound but not read.
+				d.push_back(Sampled("rs_prev", residual[1 - writeIndex], true));
+				d.push_back(Storage("rs_out", residual[writeIndex]));
+			}
+			// Full NLS coordinate mapping across grain map, motion map, and published grain level (emitted once).
+			const bool useMapNls = useMap && mapNls.valid;
+			const bool useMotionNls = useMotion && motionNls.valid;
+			const bool useGrainLevelNls = grainPublished && grainLevel.nls.valid;
+			const bool anyNlsHelper = useMapNls || useMotionNls || useGrainLevelNls;
+			const NlsMaskMapping::Mapping& activeNls = useMapNls ? mapNls :
+				(useMotionNls ? motionNls : grainLevel.nls);
+			const float nlsActive = useMapNls ? 1.0f : 0.0f;
+			const float mwNlsActive = useMotionNls ? 1.0f : 0.0f;
+			const float grainNlsActive = useGrainLevelNls ? 1.0f : 0.0f;
+			const float nlsCurve = static_cast<float>(activeNls.curve);
+			const float nlsGeometry = static_cast<float>(activeNls.geometry);
+			const float nlsScale[2] = { static_cast<float>(activeNls.xScale), static_cast<float>(activeNls.yScale) };
+			const float nlsProtect[2] = { static_cast<float>(activeNls.xProtect), static_cast<float>(activeNls.yProtect) };
+			static const std::string nlsHeader = std::string("#define AD_HAS_NLS 1\n") + OcclusionMask::NlsMapGlsl();
+			// 8b: the upscale form (and alpha for SSimSuperRes) as defines.
+			const std::string upHeader = upscale.on ? std::string("#define AD_UPSCALE 1\n") +
+				(upscale.oneAxis ? std::string() : HybridBlend::WeightGlsl()) +
+				(upscale.superresAlpha ? "#define AD_SUPERRES_ALPHA 1\n" : "") +
+				(upscale.oneAxis ? "#define AD_FAITHFUL_ONLY 1\n" : "") +
+				(motionFloor ? "#define AD_MOTION_FLOOR 1\n" : "") +
+				(grainPublished ? "#define AD_GRAIN_PUBLISHED 1\n" : "") : std::string();
+			const bool guard = stabilise && settings.residualGrainGuard;
+			const std::string header = "#define AD_KW " + LumaWeightsGlsl(domain) + "\n" + upHeader +
+				(useMotion ? std::string("#define AD_MOTION 1\n") : std::string()) +
+				(useMap ? std::string("#define AD_USE_MAP 1\n") : std::string()) +
+				(anyNlsHelper ? nlsHeader : std::string()) +
+				(stabilise ? (guard ? STABILISE_GUARD_DEFINE : STABILISE_DEFINE) : PLAIN_DEFINE);
+			const float wBase = upscale.on ? upscale.wBase : settings.wBase;
+			std::vector<pl_shader_var> v = {
+				{ pl_var_vec2("src_origin"), srcOrigin, true },
+				{ pl_var_vec2("src_per_dst"), srcPerDst, true } };
+			if (!oneAxisUpscale)
+			{
+				v.push_back({ pl_var_vec2("edge_origin"), edgeOrigin, true });
+				v.push_back({ pl_var_float("w_base"), &wBase, true });
+				v.push_back({ pl_var_float("chroma_ssim"), &chroma, true });
+			}
+			if (useMap || stabilise || grainPublished)
+				v.push_back({ pl_var_vec2("src_size"), srcSize, true });
+			if (useMap)
+			{
+				v.push_back({ pl_var_vec4("crop"), crop, true });
+				v.push_back({ pl_var_float("nls_active"), &nlsActive, true });
+			}
+			if (useMap || anyNlsHelper)
+			{
+				v.push_back({ pl_var_float("nls_curve"), &nlsCurve, true });
+				v.push_back({ pl_var_float("nls_geometry"), &nlsGeometry, true });
+				v.push_back({ pl_var_vec2("nls_scale"), nlsScale, true });
+				v.push_back({ pl_var_vec2("nls_protect"), nlsProtect, true });
+			}
+			if (stabilise)
+			{
+				v.push_back({ pl_var_vec4("rs_crop"), rsCrop, true });
+				v.push_back({ pl_var_float("rs_prev_valid"), &prevValid, true });
+				v.push_back({ pl_var_float("rs_alpha"), &rsAlpha, true });
+				v.push_back({ pl_var_float("rs_min_share"), &rsMinShare, true });
+			}
+			// The guard's coding-noise limit: 8-bit codes of the encoded picture -> normalised.
+			const float rsNoise = settings.residualCodingNoiseCodes > 0.0f ? settings.residualCodingNoiseCodes / 255.0f : 0.0f;
+			const float rsLinear = p->color.transfer == PL_COLOR_TRC_LINEAR ? 1.0f : 0.0f;
+			const float rsGrainFloor = settings.grainFloor;
+			const GuardTransferParams rsTransfer = GuardTransfer(p->orig_color ? *p->orig_color : p->color);
+			if (guard)
+			{
+				v.push_back({ pl_var_float("rs_noise"), &rsNoise, true });
+				v.push_back({ pl_var_float("rs_linear"), &rsLinear, true });
+				v.push_back({ pl_var_float("rs_grain_floor"), &rsGrainFloor, true });
+				v.push_back({ pl_var_float("rs_trc"), &rsTransfer.mode, true });
+				v.push_back({ pl_var_float("rs_a"), &rsTransfer.a, true });
+				v.push_back({ pl_var_float("rs_b"), &rsTransfer.b, true });
+				v.push_back({ pl_var_float("rs_g"), &rsTransfer.g, true });
+			}
+			const float mwCrop[4] = { motionSourceCrop.x0, motionSourceCrop.y0,
+				motionSourceCrop.x1 - motionSourceCrop.x0, motionSourceCrop.y1 - motionSourceCrop.y0 };
+			if (useMotion)
+			{
+				v.push_back({ pl_var_vec2("mw_src_size"), srcSize, true });
+				v.push_back({ pl_var_vec4("mw_crop"), mwCrop, true });
+				v.push_back({ pl_var_float("motion_strength"), &motionStrength, true });
+				v.push_back({ pl_var_float("mw_nls_active"), &mwNlsActive, true });
+			}
+			const float motionFloorValue = HybridBlend::MotionTerm(false, 1.0f, settings.motionFloor, motionStrength);
+			if (motionFloor)
+				v.push_back({ pl_var_float("motion_floor"), &motionFloorValue, true });
+			const pl_rect2df& gc = grainLevel.sourceCrop;
+			const float grainCrop[4] = { gc.x0, gc.y0, gc.x1 - gc.x0, gc.y1 - gc.y0 };
+			const float grainLevelScale = GrainLevelEnergyScale(grainLevel.codeToEightBit);
+			const float grainBlockPx = static_cast<float>(grainLevel.blockPx > 0 ? grainLevel.blockPx : 16);
+			if (upscale.on)
+				v.push_back({ pl_var_float("grain_floor"), &settings.grainFloor, true });   // published or not (the floor)
+			if (grainPublished)
+			{
+				v.push_back({ pl_var_vec4("grain_crop"), grainCrop, true });
+				v.push_back({ pl_var_float("grain_lo"), &settings.grainLo, true });
+				v.push_back({ pl_var_float("grain_hi"), &settings.grainHi, true });
+				v.push_back({ pl_var_float("grain_level_scale"), &grainLevelScale, true });
+				v.push_back({ pl_var_float("grain_block_px"), &grainBlockPx, true });
+				v.push_back({ pl_var_float("grain_nls_active"), &grainNlsActive, true });
+			}
+			if (!Compute(p->dispatch, upscale.on ? "VideoProcessor adaptive upscale: blend" : "VideoProcessor adaptive downscale: blend",
+				header.c_str(), BLEND_BODY, d.data(), static_cast<int>(d.size()), v.data(), static_cast<int>(v.size()),
+				(w + 15) / 16, (h + 15) / 16))
+			{
+				++failures;
+				return unchanged;
+			}
 		}
 		if (stabilise)
 		{
