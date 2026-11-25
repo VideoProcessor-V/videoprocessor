@@ -364,7 +364,7 @@ namespace GrainLevelLawTestsNs
 			constexpr double kMaxCodeSq = 1024.0 * 1024.0; // physical 10-bit squared-code upper bound
 			constexpr int kFlatX0 = kB, kFlatX1 = kW - kB;
 			constexpr int kFlatY0 = kB, kFlatY1 = 3 * kB;  // y in [16, 48): 12+ px clear of the ramp at y in (60, 68)
-			constexpr int kMaxBins = 64;
+			static constexpr int kMaxBins = 64;
 
 			// Top half (y <= 60): pure flat midtone; smooth cubic ramp on (60, 68); bottom half (y >= 68): translating texture.
 			// Pure horizontal pan (shiftX = 1.0 * t, vx = -1.0, vy = 0.0) keeps the flat/textured split stationary across all 20 frames.

@@ -950,12 +950,12 @@ namespace VideoProcessorTest
 			constexpr int kObj1Dx = -6, kObj1Dy = 6;   // distinct moving object (-3, +3) half-res
 			constexpr int kObj2Dx = 5, kObj2Dy = 3;    // odd source shift (+2.5, +1.5) half-res -> genuine half-pel refinement
 
-			auto inObj1 = [](int x, int y, int t)
+			auto inObj1 = [=](int x, int y, int t)
 			{
 				return x >= 48 + kObj1Dx * t && x < 112 + kObj1Dx * t &&
 					y >= 16 + kObj1Dy * t && y < 80 + kObj1Dy * t;
 			};
-			auto inObj2 = [](int x, int y, int t)
+			auto inObj2 = [=](int x, int y, int t)
 			{
 				return x >= 144 + kObj2Dx * t && x < 208 + kObj2Dx * t &&
 					y >= 52 + kObj2Dy * t && y < 116 + kObj2Dy * t;

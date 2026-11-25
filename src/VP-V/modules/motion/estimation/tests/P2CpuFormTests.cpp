@@ -1291,7 +1291,7 @@ namespace VideoProcessorTest
 
 		MotionAhead::FlowPtr MakeClearGlobalFlow(float dx, float dy, bool globalSet)
 		{
-			MotionAhead::FlowPtr flow = MakeFlow(1.0f, globalSet, false);
+			auto flow = std::make_shared<MotionAhead::Flow>(*MakeFlow(1.0f, globalSet, false));
 			flow->global[0][0] = dx;
 			flow->global[0][1] = dy;
 			flow->global[0][2] = 0.25f;

@@ -13,7 +13,6 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
-#include <filesystem>
 #include <fstream>
 #include <string>
 
@@ -107,15 +106,16 @@ namespace VideoProcessorTest
 		{
 			static std::atomic<unsigned> seq{ 0 };
 			const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-			const std::filesystem::path tempPath = std::filesystem::temp_directory_path() /
-				("vpv_s4_l1_readglobal_" + std::to_string(stamp) + "_" + std::to_string(seq.fetch_add(1)) + ".cfg");
+			char tempDir[MAX_PATH] = {};
+			Assert::IsTrue(GetTempPathA(MAX_PATH, tempDir) != 0, L"S4-L1: GetTempPathA failed");
+			const std::string tempPath = std::string(tempDir) +
+				"vpv_s4_l1_readglobal_" + std::to_string(stamp) + "_" + std::to_string(seq.fetch_add(1)) + ".cfg";
 			struct RemoveOnExit
 			{
-				std::filesystem::path p;
+				std::string p;
 				~RemoveOnExit()
 				{
-					std::error_code ec;
-					std::filesystem::remove(p, ec);
+					DeleteFileA(p.c_str());
 				}
 			} cleanup{ tempPath };
 
@@ -128,7 +128,7 @@ namespace VideoProcessorTest
 			}
 
 			ConfigFile config;
-			Assert::IsTrue(config.Load(tempPath.string(), ConfigFile::ReadPolicy::Fresh),
+			Assert::IsTrue(config.Load(tempPath, ConfigFile::ReadPolicy::Fresh),
 				L"S4-L1: failed to load temporary config fixture");
 
 			VpvRenderer::Fields fields;
