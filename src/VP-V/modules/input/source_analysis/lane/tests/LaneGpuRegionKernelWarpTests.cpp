@@ -9,15 +9,20 @@
 #include "pch.h"
 #include <VP-V/tests/VpLutGpuTestSupport.h>
 #include <VP-V/core/ProductGraph.h>
+#include <VP-V/core/SkeletonAcquire.h>
 #include <VP-V/modules/control/skeleton/gpu/SkeletonGpuDispatcher.h>
+#include <VP-V/modules/input/source_analysis/lane/LaneGpuGrainKernel.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneGpuProducts.h>
 #include <VP-V/modules/input/source_analysis/lane/LaneGpuRegionKernel.h>
 #include <VP-V/modules/input/source_analysis/regions/RegionEvidence.h>
 #include <VP-V/modules/input/source_analysis/regions/RegionEvidenceGlsl.h>
+#include <VP-V/modules/repair/grain_split/GrainSplit.h>
 
 #include <libplacebo/dispatch.h>
 #include <libplacebo/shaders/custom.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -462,6 +467,251 @@ namespace VideoProcessorTest
 			Assert::IsTrue(RegionStatsKernel::BodyGlsl().find("re_bands, blk, 0).zwyx") != std::string::npos &&
 				RegionStatsKernel::BodyGlsl().find("re_s5") != std::string::npos, L"the tap body swizzles the bands and writes aux");
 			Assert::IsTrue(kPinned == 0ull || fp == kPinned, L"the P11 pass GLSL changed: re-pin deliberately");
+		}
+
+		// W23-B3 M2#9 (15c C3): RegionStatsKernel populates re_s2.xyz = (e1, e2, e3) and re_s4.w = N matching independent
+		// CPU GrainSplit::Compute in BOTH P10 Compact (3-term, term 2) and P10 Full (2-term, term 1) storage modes;
+		// ExtractP11BandTextures extracts valid s2/s4 from GpuProductTextures and standalone handles; missing P10 negative
+		// control sets !BandsUsed(), non-empty BandsWhy(), re_s2.xyz == 0, and re_s4.w == -1.
+		BEGIN_TEST_METHOD_ATTRIBUTE(P11BandEnergyMatchesCpuInCompactAndFullModes)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(P11BandEnergyMatchesCpuInCompactAndFullModes)
+		{
+			const int B = RegionEvidence::BlockSizeFor(kH);
+			const RegionEvidence::Grid grid = RegionEvidence::MakeGrid(kW, kH, B);
+			const Dims dims{ uint32_t(kW), uint32_t(kH) };
+
+			// Synthetic structured + grain 10-bit frame (full-frame picture rect so extended tap == frame).
+			std::vector<uint16_t> codes(size_t(kW) * kH, 64u);
+			GrainSplit::Plane cpuPlane(kW, kH);
+			uint32_t seed = 0x51C3A7D9u;
+			for (int y = 0; y < kH; ++y)
+				for (int x = 0; x < kW; ++x)
+				{
+					seed = seed * 1664525u + 1013904223u;
+					const int grain = int((seed >> 24) % 33u) - 16;
+					const double struc = 420.0 + 110.0 * std::sin(6.283185307 * x / 53.0) * std::cos(6.283185307 * y / 71.0)
+						+ 38.0 * std::sin(6.283185307 * (x + y) / 9.5) + ((x >= 140 && x < 240 && y >= 260 && y < 440) ? 140.0 : 0.0);
+					const int code = (std::min)(940, (std::max)(64, int(std::lround(struc)) + grain));
+					codes[size_t(y) * kW + x] = uint16_t(code);
+					cpuPlane.at(x, y) = double(code);
+				}
+
+			const GrainSplit::Split cpuSplit = GrainSplit::Compute(cpuPlane, double(B) / 16.0, B, GrainSplit::Params());
+			Assert::AreEqual(grid.Count(), cpuSplit.e1.size(), L"CPU split e1 block count");
+			Assert::AreEqual(grid.Count(), cpuSplit.N.size(), L"CPU split N block count");
+			double maxCpuE1 = 0.0, maxCpuE2 = 0.0, maxCpuE3 = 0.0, maxCpuN = 0.0;
+			for (size_t i = 0; i < grid.Count(); ++i)
+			{
+				maxCpuE1 = (std::max)(maxCpuE1, cpuSplit.e1[i]);
+				maxCpuE2 = (std::max)(maxCpuE2, cpuSplit.e2[i]);
+				maxCpuE3 = (std::max)(maxCpuE3, cpuSplit.e3[i]);
+				maxCpuN = (std::max)(maxCpuN, cpuSplit.N[i]);
+			}
+			Assert::IsTrue(maxCpuE1 > 10.0 && maxCpuE2 > 10.0 && maxCpuE3 > 10.0 && maxCpuN > 10.0,
+				L"non-vacuous synthetic frame has strong band energies and grain level");
+
+			std::vector<uint8_t> p4(VpLaneProducts::kStatsBytes, 0);
+			{
+				VpLaneProducts::SourceStatsRecord rec;
+				rec.rectFound = 1;
+				rec.rectX0 = 0;
+				rec.rectY0 = 0;
+				rec.rectX1 = uint32_t(kW / 2);
+				rec.rectY1 = uint32_t(kH / 2);
+				VpLaneProducts::WriteStatsRecord(rec, p4.data(), p4.size());
+			}
+
+			std::vector<float> compactS2, compactS4;
+			const GrainSplit::Storage modes[2] = { GrainSplit::Storage::Compact, GrainSplit::Storage::Full };
+			for (GrainSplit::Storage storage : modes)
+			{
+				const bool compact = (storage == GrainSplit::Storage::Compact);
+				TargetLutGpuFixture fixture;
+				Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+				SkeletonGpuDispatcher disp(fixture.Gpu(), true);
+				auto* grainKernel = new VpLaneProducts::GrainSplitKernel(storage);
+				auto* regionKernel = new RegionStatsKernel();
+				disp.AddKernel(std::unique_ptr<VpLaneProducts::IProductKernel>(grainKernel));
+				disp.AddKernel(std::unique_ptr<VpLaneProducts::IProductKernel>(regionKernel));
+
+				const Registry reg = VpLaneProducts::TapFormProducts(SkeletonProducts(compact));
+				ConsumerDecl c;
+				c.id = 1;
+				AddConsume(c, kP11RegionBlockStats);
+				GraphSettings gs;
+				gs.dims = dims;
+				gs.queueDepth = 4;
+				gs.laneLead = 1;
+				const Graph graph = BuildGraph(reg, std::vector<ConsumerDecl>{ c }, gs);
+				TierPlan plan;
+				for (ProductId id : { kP10GrainSplit, kP11RegionBlockStats })
+				{
+					TierEntry e;
+					e.id = id;
+					e.backend = Backend::GpuCompute;
+					e.grant = Grant::Lane;
+					plan.entries.push_back(e);
+				}
+				Assert::IsTrue(disp.Configure(graph, reg, plan, dims), L"dispatcher configure succeeded");
+				Assert::IsTrue(grainKernel->Granted() == storage, L"requested P10 storage mode granted");
+
+				const VpLaneProducts::GpuProductTextures* t10 = disp.TexturesOf(kP10GrainSplit);
+				const VpLaneProducts::GpuProductTextures* t11 = disp.TexturesOf(kP11RegionBlockStats);
+				Assert::IsNotNull(t10, L"P10 textures allocated");
+				Assert::IsNotNull(t11, L"P11 textures allocated");
+				Assert::AreEqual(compact ? size_t(3) : size_t(2), grainKernel->Layout(dims).terms.size(), L"P10 Compact has 3 terms, Full has 2 terms");
+				Assert::IsTrue(compact ? (t10->Ring(0, 2) != nullptr) : (t10->Ring(0, 2) == nullptr && t10->Ring(0, 1) != nullptr),
+					L"P10 Compact exposes term 2 blocks while Full exposes term 1 blocks only");
+
+				const Node* n10 = nullptr;
+				const Node* n11 = nullptr;
+				for (const Node& n : graph.nodes)
+				{
+					if (n.id == kP10GrainSplit) n10 = &n;
+					if (n.id == kP11RegionBlockStats) n11 = &n;
+				}
+				Assert::IsNotNull(n10);
+				Assert::IsNotNull(n11);
+
+				const uint64_t seq = uint64_t(n10->ring) * 2u;
+				SourceFrameView view;
+				view.seq = seq;
+				view.luma = codes.data();
+				view.width = uint32_t(kW);
+				view.height = uint32_t(kH);
+				view.strideSamples = uint32_t(kW);
+				view.msbShift = 6;
+
+				// 1. Run P10 GrainSplitKernel in this storage mode into ring slot 0.
+				LaneJobContext job10;
+				job10.node = n10;
+				job10.seq = seq;
+				job10.ringSlot = 0;
+				job10.source = &view;
+				const uint32_t steps10 = VpLaneProducts::StepsFor(kP10GrainSplit, dims);
+				for (uint32_t s = 0; s < steps10; ++s)
+					Assert::IsTrue(disp.Dispatch(job10, s, steps10), L"P10 grain split dispatch step");
+
+				// 2. Run P11 RegionStatsKernel consuming P10 from ring slot 0.
+				auto runP11 = [&](bool withP10) {
+					SlotSet set10(kP10GrainSplit, uint16_t(n10->ring), uint16_t(n10->livePool));
+					SlotSet set4(kP4SourceStats, 2, 1);
+					LaneInputs pins;
+					pins.count = n11->inputCount;
+					for (size_t k = 0; k < n11->inputCount; ++k)
+					{
+						pins.liveIndex[k] = -1;
+						pins.seqs[k] = seq;
+						pins.sets[k] = nullptr;
+						if (n11->inputs[k].product == kP10GrainSplit && withP10)
+							pins.sets[k] = &set10;
+						else if (n11->inputs[k].product == kP4SourceStats)
+							pins.sets[k] = &set4;
+					}
+					LaneJobContext job11;
+					job11.node = n11;
+					job11.seq = seq;
+					job11.ringSlot = 0;
+					job11.inputs = &pins;
+					for (size_t k = 0; k < n11->inputCount; ++k)
+						if (n11->inputs[k].product == kP4SourceStats)
+							job11.inputData[k] = p4.data();
+					job11.source = &view;
+					Assert::IsTrue(disp.Dispatch(job11, 0, 1), L"P11 region stats dispatch");
+				};
+
+				runP11(true);
+				Assert::IsTrue(regionKernel->BandsUsed(), L"P11 bound P10 bands in this storage mode");
+				Assert::IsTrue(regionKernel->BandsWhy().empty(), L"no bands fallback reason when P10 bound");
+
+				const std::vector<float> s2 = Download<float>(fixture.Gpu(), t11->Ring(0, VpLaneProducts::kP11BandEnergyTerm), 4);
+				const std::vector<float> s4 = Download<float>(fixture.Gpu(), t11->Ring(0, VpLaneProducts::kP11CoverageTerm), 4);
+				Assert::AreEqual(grid.Count() * 4u, s2.size());
+				Assert::AreEqual(grid.Count() * 4u, s4.size());
+
+				double worstRel = 0.0, sumRel = 0.0;
+				for (size_t i = 0; i < grid.Count(); ++i)
+				{
+					const double refs[4] = { cpuSplit.e1[i], cpuSplit.e2[i], cpuSplit.e3[i], cpuSplit.N[i] };
+					const double gots[4] = { s2[i * 4 + 0], s2[i * 4 + 1], s2[i * 4 + 2], s4[i * 4 + 3] };
+					for (int ch = 0; ch < 4; ++ch)
+					{
+						const double rel = std::fabs(gots[ch] - refs[ch]) / (std::max)(std::fabs(refs[ch]), 1.0);
+						worstRel = (std::max)(worstRel, rel);
+						sumRel += rel;
+					}
+				}
+				const double meanRel = sumRel / double(grid.Count() * 4u);
+				char msg[180];
+				snprintf(msg, sizeof(msg), "P11_BAND_PARITY mode=%s worstRel=%.4e meanRel=%.4e\n",
+					compact ? "compact" : "full", worstRel, meanRel);
+				Logger::WriteMessage(msg);
+				Assert::IsTrue(worstRel < 2.5e-2 && meanRel < 5e-3, L"P11 re_s2.(e1,e2,e3) and re_s4.N match CPU GrainSplit::Compute");
+
+				if (compact)
+				{
+					compactS2 = s2;
+					compactS4 = s4;
+				}
+				else
+				{
+					double maxModeDiff = 0.0;
+					for (size_t i = 0; i < grid.Count(); ++i)
+					{
+						for (int ch = 0; ch < 3; ++ch)
+							maxModeDiff = (std::max)(maxModeDiff, double(std::fabs(s2[i * 4 + ch] - compactS2[i * 4 + ch])));
+						maxModeDiff = (std::max)(maxModeDiff, double(std::fabs(s4[i * 4 + 3] - compactS4[i * 4 + 3])));
+					}
+					Assert::IsTrue(maxModeDiff < 1e-3, L"Compact and Full P10 produce identical P11 band energies");
+				}
+
+				// 3. ExtractP11BandTextures works from both GpuProductTextures and standalone handles (and fails closed when !Ok).
+				{
+					AcquireResult laneRes;
+					laneRes.status = AcquireStatus::Reused;
+					laneRes.gpu.resource = const_cast<void*>(static_cast<const void*>(t11->Ring(0, 0)));
+					laneRes.gpu.textureSet = t11;
+					laneRes.gpu.index = 0;
+					laneRes.gpu.ringSlot = true;
+					const VpLaneProducts::P11BandTextures laneBt = VpLaneProducts::ExtractP11BandTextures(laneRes);
+					Assert::IsTrue(laneBt.s2 == t11->Ring(0, VpLaneProducts::kP11BandEnergyTerm), L"ExtractP11BandTextures lane s2");
+					Assert::IsTrue(laneBt.s4 == t11->Ring(0, VpLaneProducts::kP11CoverageTerm), L"ExtractP11BandTextures lane s4");
+
+					AcquireResult standRes;
+					standRes.status = AcquireStatus::FilledAtRead;
+					standRes.gpu.resource = const_cast<void*>(static_cast<const void*>(t11->Ring(0, VpLaneProducts::kP11BandEnergyTerm)));
+					standRes.gpu.view = const_cast<void*>(static_cast<const void*>(t11->Ring(0, VpLaneProducts::kP11CoverageTerm)));
+					const VpLaneProducts::P11BandTextures standBt = VpLaneProducts::ExtractP11BandTextures(standRes);
+					Assert::IsTrue(standBt.s2 == t11->Ring(0, VpLaneProducts::kP11BandEnergyTerm), L"ExtractP11BandTextures standalone s2");
+					Assert::IsTrue(standBt.s4 == t11->Ring(0, VpLaneProducts::kP11CoverageTerm), L"ExtractP11BandTextures standalone s4");
+
+					AcquireResult badRes;
+					badRes.status = AcquireStatus::Unavailable;
+					badRes.cause = AcquireCause::NoOwnerFill;
+					const VpLaneProducts::P11BandTextures badBt = VpLaneProducts::ExtractP11BandTextures(badRes);
+					Assert::IsNull(badBt.s2, L"ExtractP11BandTextures unavailable -> null s2");
+					Assert::IsNull(badBt.s4, L"ExtractP11BandTextures unavailable -> null s4");
+				}
+
+				// 4. Same-input negative control: missing P10 sets !BandsUsed(), non-empty BandsWhy(), re_s2.xyz == 0, re_s4.w == -1.
+				runP11(false);
+				Assert::IsFalse(regionKernel->BandsUsed(), L"missing P10 sets !BandsUsed()");
+				Assert::IsFalse(regionKernel->BandsWhy().empty(), L"missing P10 records visible BandsWhy()");
+				const std::vector<float> noS2 = Download<float>(fixture.Gpu(), t11->Ring(0, VpLaneProducts::kP11BandEnergyTerm), 4);
+				const std::vector<float> noS4 = Download<float>(fixture.Gpu(), t11->Ring(0, VpLaneProducts::kP11CoverageTerm), 4);
+				double maxDeltaFromWithP10 = 0.0;
+				for (size_t i = 0; i < grid.Count(); ++i)
+				{
+					Assert::AreEqual(0.0f, noS2[i * 4 + 0], 0.0f, L"missing P10 writes re_s2.x == 0");
+					Assert::AreEqual(0.0f, noS2[i * 4 + 1], 0.0f, L"missing P10 writes re_s2.y == 0");
+					Assert::AreEqual(0.0f, noS2[i * 4 + 2], 0.0f, L"missing P10 writes re_s2.z == 0");
+					Assert::AreEqual(-1.0f, noS4[i * 4 + 3], 0.0f, L"missing P10 writes re_s4.w == -1");
+					maxDeltaFromWithP10 = (std::max)(maxDeltaFromWithP10, double(std::fabs(s2[i * 4 + 0] - noS2[i * 4 + 0])));
+				}
+				Assert::IsTrue(maxDeltaFromWithP10 > 10.0, L"negative control: missing P10 diverges materially from with-P10 re_s2");
+			}
 		}
 	};
 }

@@ -8,9 +8,12 @@
 #include <VP-V/modules/repair/texture_restore/TextureRestore.h>
 #include <VP-V/core/Ramp.h>
 #include <VP-V/core/SkeletonAcquire.h>
+#include <VP-V/modules/control/skeleton/gpu/OwnerGpuDevice.h>
+#include <VP-V/modules/input/source_analysis/regions/RegionEvidence.h>
 #include <VP-V/modules/repair/grain_split/BandMemo.h>
 #include <VP-V/modules/repair/grain_split/BandMemoFill.h>
 #include <VP-V/modules/repair/grain_split/GpuPassUtil.h>
+#include <VP-V/modules/repair/grain_split/GrainSplit.h>
 
 #include <VP-V/modules/control/skeleton/PlTexBackend.h>
 
@@ -26,6 +29,7 @@
 #include <memory>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
@@ -1454,6 +1458,170 @@ namespace TextureRestoreTestsNs
 				module.Release(gpu);
 				pl_tex_destroy(gpu, &tex);
 			}
+		}
+
+		// W23-B3 M2#9 (15c C3b): TextureRestore acquires shared P11 band energies (re_s2/re_s4) through SkeletonMemo,
+		// increments P11EnergyHits with zero fallbacks; absent/unregistered memo increments P11EnergyFallbacks with a
+		// visible reason; poisoning P11 energies shifts TextureRestore output on the exact same input (proving live consumption).
+		BEGIN_TEST_METHOD_ATTRIBUTE(TextureRestoreAcquiresP11BandEnergiesWithVisibleFallback)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(TextureRestoreAcquiresP11BandEnergiesWithVisibleFallback)
+		{
+			using Reg = VpSkeleton::SkeletonMemo::Registration;
+			struct TexGuard
+			{
+				pl_gpu gpu = nullptr;
+				pl_tex tex = nullptr;
+				TexGuard(pl_gpu g, pl_tex t) : gpu(g), tex(t) {}
+				~TexGuard() { if (gpu && tex) pl_tex_destroy(gpu, &tex); }
+				TexGuard(const TexGuard&) = delete;
+				TexGuard& operator=(const TexGuard&) = delete;
+			};
+			struct ModGuard
+			{
+				pl_gpu gpu = nullptr;
+				TextureRestore::Module mod;
+				explicit ModGuard(pl_gpu g) : gpu(g) {}
+				~ModGuard() { mod.Release(gpu); }
+				ModGuard(const ModGuard&) = delete;
+				ModGuard& operator=(const ModGuard&) = delete;
+			};
+			struct MemoGpuGuard
+			{
+				Vpv::Skeleton::OwnerGpuDevice ownerDev;
+				VpSkeleton::SkeletonMemo memo;
+				explicit MemoGpuGuard(pl_gpu g) : ownerDev(g) {}
+				~MemoGpuGuard() { memo.ReleaseGpuSpots(); ownerDev.Release(); }
+				MemoGpuGuard(const MemoGpuGuard&) = delete;
+				MemoGpuGuard& operator=(const MemoGpuGuard&) = delete;
+			};
+
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = dev.Gpu();
+
+			std::mt19937 rng(409u);
+			const Image scene = Scene(kW, kH, rng);
+			const Image in0 = Quantised(Dctq(Sum(scene, Grain(kW, kH, 1.5 * kCode8, true, rng)), 4.0));
+			const Image in1 = Quantised(Dctq(Sum(scene, Grain(kW, kH, 1.5 * kCode8, true, rng)), 28.0));
+			TexGuard tex0(gpu, UploadLuma(gpu, in0));
+			TexGuard tex1(gpu, UploadLuma(gpu, in1));
+			Assert::IsTrue(tex0.tex != nullptr && tex1.tex != nullptr);
+
+			const int p11B = RegionEvidence::BlockSizeFor(kH);
+			const RegionEvidence::Grid g = RegionEvidence::MakeGrid(kW, kH, p11B);
+			const size_t nb = g.Count();
+
+			auto makeP11Tex = [&](const Image& img, std::vector<float>& s2Buf, std::vector<float>& s4Buf) {
+				GrainSplit::Plane pl(kW, kH);
+				for (int y = 0; y < kH; ++y)
+					for (int x = 0; x < kW; ++x)
+						pl.at(x, y) = img.at(x, y);
+				const GrainSplit::Split sp = GrainSplit::Compute(pl, double(p11B) / 16.0, p11B, GrainSplit::Params());
+				s2Buf.assign(nb * 4u, 0.0f);
+				s4Buf.assign(nb * 4u, 0.0f);
+				for (size_t i = 0; i < nb; ++i)
+				{
+					s2Buf[i * 4 + 0] = static_cast<float>(sp.e1[i]);
+					s2Buf[i * 4 + 1] = static_cast<float>(sp.e2[i]);
+					s2Buf[i * 4 + 2] = static_cast<float>(sp.e3[i]);
+					s4Buf[i * 4 + 0] = 1.0f;
+					s4Buf[i * 4 + 2] = 1.0f;
+					s4Buf[i * 4 + 3] = static_cast<float>(sp.N[i]);
+				}
+			};
+			auto uploadRgba = [&](const std::vector<float>& data) {
+				pl_tex_params tp{};
+				tp.w = g.gw; tp.h = g.gh; tp.format = pl_find_named_fmt(gpu, "rgba32f"); tp.sampleable = true; tp.initial_data = data.data();
+				return pl_tex_create(gpu, &tp);
+			};
+
+			std::vector<float> s20, s40, s21, s41;
+			makeP11Tex(in0, s20, s40);
+			makeP11Tex(in1, s21, s41);
+			TexGuard s2Tex0(gpu, uploadRgba(s20)), s4Tex0(gpu, uploadRgba(s40));
+			TexGuard s2Tex1(gpu, uploadRgba(s21)), s4Tex1(gpu, uploadRgba(s41));
+			// Negative-control poisoned P11: reversed energy drop (frame 1 tiny, frame 2 huge, N=0) suppresses restoration gain.
+			std::vector<float> pS20(nb * 4u, 0.0f), pS21(nb * 4u, 0.0f), pS4(nb * 4u, 0.0f);
+			for (size_t i = 0; i < nb; ++i)
+			{
+				pS20[i * 4 + 0] = 0.01f; pS20[i * 4 + 1] = 0.01f; pS20[i * 4 + 2] = 0.01f;
+				pS21[i * 4 + 0] = 2000.0f; pS21[i * 4 + 1] = 2000.0f; pS21[i * 4 + 2] = 500.0f;
+				pS4[i * 4 + 0] = 1.0f; pS4[i * 4 + 2] = 1.0f; pS4[i * 4 + 3] = 0.0f;
+			}
+			TexGuard ps2Tex0(gpu, uploadRgba(pS20)), ps2Tex1(gpu, uploadRgba(pS21)), ps4Tex(gpu, uploadRgba(pS4));
+			Assert::IsTrue(s2Tex0.tex && s4Tex0.tex && s2Tex1.tex && s4Tex1.tex && ps2Tex0.tex && ps2Tex1.tex && ps4Tex.tex);
+
+			int hostTag = 0;
+			auto initMemo = [&](MemoGpuGuard& mg, pl_tex a2, pl_tex a4, pl_tex b2, pl_tex b4) {
+				mg.memo.SetHost(&hostTag);
+				mg.memo.SetRenderThread(std::this_thread::get_id());
+				mg.memo.SetGpuDispatcherPresent(true);
+				mg.memo.SetGpuBudget(true, uint64_t(1) << 28);
+				mg.memo.SetGpuDevice(&mg.ownerDev);
+				VpSkeleton::OwnerFill fill;
+				fill.view = true;
+				fill.frameScoped = true;
+				fill.fill = [a2, a4, b2, b4, g](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+					if (req.seq != 501u && req.seq != 502u) return false;
+					pl_tex s2 = (req.seq == 501u) ? a2 : b2;
+					pl_tex s4 = (req.seq == 501u) ? a4 : b4;
+					out.gpu.resource = const_cast<void*>(static_cast<const void*>(s2));
+					out.gpu.view = const_cast<void*>(static_cast<const void*>(s4));
+					out.gpu.width = uint32_t(g.gw);
+					out.gpu.height = uint32_t(g.gh);
+					out.gpu.bytes = 0;
+					return true;
+				};
+				Assert::IsTrue(mg.memo.RegisterOwnerFill(VpSkeleton::kP11RegionBlockStats, VpSkeleton::AcquireForm::Gpu,
+					VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP11RegionBlockStats), std::move(fill)) == Reg::Registered);
+			};
+
+			MemoGpuGuard p11Memo(gpu), poisonMemo(gpu);
+			initMemo(p11Memo, s2Tex0.tex, s4Tex0.tex, s2Tex1.tex, s4Tex1.tex);
+			initMemo(poisonMemo, ps2Tex0.tex, ps4Tex.tex, ps2Tex1.tex, ps4Tex.tex);
+			VpSkeleton::SkeletonMemo unregMemo;
+
+			ModGuard modP11(gpu), modNull(gpu), modUnreg(gpu), modPoison(gpu);
+			pl_tex inputs[2] = { tex0.tex, tex1.tex };
+			pl_frame outP11{}, outNull{}, outUnreg{}, outPoison{};
+			for (int k = 0; k < 2; ++k)
+			{
+				TextureRestore::Params p = Frame(501u + static_cast<uint64_t>(k));
+				p.sceneReader = &NoCutReader;
+				p.memo = &p11Memo.memo;
+				Assert::IsTrue(modP11.mod.Apply(gpu, dev.dispatch, LumaFrame(inputs[k]), p, outP11), Wide(modP11.mod.LastError()).c_str());
+
+				TextureRestore::Params pn = p; pn.memo = nullptr;
+				Assert::IsTrue(modNull.mod.Apply(gpu, dev.dispatch, LumaFrame(inputs[k]), pn, outNull), Wide(modNull.mod.LastError()).c_str());
+
+				TextureRestore::Params pu = p; pu.memo = &unregMemo;
+				Assert::IsTrue(modUnreg.mod.Apply(gpu, dev.dispatch, LumaFrame(inputs[k]), pu, outUnreg), Wide(modUnreg.mod.LastError()).c_str());
+
+				TextureRestore::Params pp = p; pp.memo = &poisonMemo.memo;
+				Assert::IsTrue(modPoison.mod.Apply(gpu, dev.dispatch, LumaFrame(inputs[k]), pp, outPoison), Wide(modPoison.mod.LastError()).c_str());
+			}
+
+			Assert::AreEqual(2ull, modP11.mod.P11EnergyHits(), L"TR hit P11 on both frames");
+			Assert::AreEqual(0ull, modP11.mod.P11EnergyFallbacks(), L"TR had zero P11 fallbacks when memo provided P11");
+			Assert::IsTrue(modP11.mod.LastP11EnergyFallback().empty(), L"no fallback reason on P11 hit");
+
+			Assert::AreEqual(0ull, modNull.mod.P11EnergyHits(), L"memo=nullptr has zero P11 hits");
+			Assert::AreEqual(2ull, modNull.mod.P11EnergyFallbacks(), L"memo=nullptr increments P11EnergyFallbacks");
+			Assert::IsFalse(modNull.mod.LastP11EnergyFallback().empty(), L"memo=nullptr records visible fallback reason");
+
+			Assert::AreEqual(0ull, modUnreg.mod.P11EnergyHits(), L"unregistered memo has zero P11 hits");
+			Assert::AreEqual(2ull, modUnreg.mod.P11EnergyFallbacks(), L"unregistered memo increments P11EnergyFallbacks");
+			Assert::IsFalse(modUnreg.mod.LastP11EnergyFallback().empty(), L"unregistered memo records visible fallback reason");
+
+			Assert::AreEqual(2ull, modPoison.mod.P11EnergyHits(), L"poisoned memo still hit P11");
+			const Image imgP11 = Download(gpu, outP11.planes[0].texture);
+			const Image imgPoison = Download(gpu, outPoison.planes[0].texture);
+			const double boostVsIn = MaxAbsDiff(imgP11, in1);
+			const double poisonDelta = MaxAbsDiff(imgP11, imgPoison);
+			Assert::IsTrue(boostVsIn > 0.5, L"non-vacuous: TR with real P11 actively restores the coarse B-frame");
+			Assert::IsTrue(poisonDelta > 0.5, L"negative control: poisoned P11 re_s2/re_s4 shifts TR output on the exact same frame");
 		}
 	};
 }
