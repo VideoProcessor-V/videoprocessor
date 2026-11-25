@@ -134,10 +134,8 @@ namespace LedDrive
 
 		bool Active() const { return m_copy.Active(); }
 		uint64_t AllocatedBytes() const { return m_copy.AllocatedBytes(); }
-		int Width() const { return m_copy.Width(); }
-		int Height() const { return m_copy.Height(); }
-		CopyFormat Format() const { return m_copy.Format(); }
-		int Slots() const { return m_copy.Slots(); }
+		int Width() const { return m_copy.Width(); } int Height() const { return m_copy.Height(); }
+		CopyFormat Format() const { return m_copy.Format(); } int Slots() const { return m_copy.Slots(); }
 		size_t TightBytes() const { return m_copy.TightBytes(); }
 		HRESULT LastError() const { return m_lastError; }
 		uint64_t FailedCount() const { return m_failedCount; }
