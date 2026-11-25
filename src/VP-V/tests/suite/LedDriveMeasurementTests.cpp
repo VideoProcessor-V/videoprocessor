@@ -185,33 +185,40 @@ namespace VideoProcessorTest
 			Assert::AreEqual<uint64_t>(0, builder.SceneMissing(), L"No frame without a verdict");
 			Assert::IsTrue(builder.LastSceneFromRecord());
 
-			// The fade is in time (general): the same at 24p and 60p.
+			// O#2 L1: fade is also the shared U7 verdict (private APL-slope fade detection is deleted).
 			for (double fps : { 24.0, 60.0 })
 			{
 				const double step = 1000.0 / fps;
 				const int frames = static_cast<int>(std::ceil(config.fadeMs / step - 1e-9));
 				StatsBuilder fading(config);
+				SceneVerdicts fadeVerdicts;
+				const uint64_t fadeSeq = static_cast<uint64_t>(frames + 1);
+				fadeVerdicts.Fade(fadeSeq, 0.75f);
+				fading.SetSceneVerdictReader(fadeVerdicts.VerdictReader());
 				double apl = 120.0;
 				FrameStats stats;
 				for (int frame = 0; frame < frames; ++frame)
 				{
-					stats = fading.Build(Uniform(apl), frame * step);
-					Assert::IsFalse(stats.fade, L"Needs fade_ms of declines");
-					apl -= 2.0 * 24.0 / fps;   // 48 APL per second
+					stats = fading.Build(Uniform(apl), frame * step, step, static_cast<uint64_t>(frame + 1));
+					Assert::IsFalse(stats.fade, L"Private APL decline without U7 fade must not set stats.fade");
+					apl -= 2.0 * 24.0 / fps;   // 48 APL per second (would have tripped the deleted private detector)
 				}
-				stats = fading.Build(Uniform(apl), frames * step);
-				Assert::IsTrue(stats.fade, L"A fade after fade_ms");
-				stats = fading.Build(Uniform(apl), (frames + 1) * step);
-				Assert::IsFalse(stats.fade, L"A held frame ends the fade");
+				stats = fading.Build(Uniform(apl), frames * step, step, fadeSeq);
+				Assert::IsTrue(stats.fade, L"Shared U7 fade verdict sets stats.fade");
+				Assert::AreEqual(0.75f, stats.fadeKeep, 1e-6f, L"Shared U7 fadeKeep propagates to FrameStats");
+				stats = fading.Build(Uniform(apl), (frames + 1) * step, step, fadeSeq + 1);
+				Assert::IsFalse(stats.fade, L"A non-fade U7 verdict ends the fade");
 
 				StatsBuilder slow(config);
+				SceneVerdicts driftVerdicts;
+				slow.SetSceneVerdictReader(driftVerdicts.VerdictReader());
 				apl = 120.0;
 				for (int frame = 0; frame <= frames + 2; ++frame)
 				{
-					stats = slow.Build(Uniform(apl), frame * step);
-					apl -= 6.0 / fps;   // 6 APL per second: under fade_min_slope
+					stats = slow.Build(Uniform(apl), frame * step, step, static_cast<uint64_t>(frame + 1));
+					apl -= 6.0 / fps;   // 6 APL per second: drift, U7 fade=false
 				}
-				Assert::IsFalse(stats.fade, L"Below fade_min_slope is drift, not a fade");
+				Assert::IsFalse(stats.fade, L"Drift without U7 fade is not a fade");
 			}
 		}
 
@@ -235,19 +242,22 @@ namespace VideoProcessorTest
 			Assert::AreEqual(static_cast<double>(timed.fadeMs), timed.EffectiveFadeMs(1000.0 / 60.0), 1e-9, L"no frame keys: fade_ms");
 			Assert::AreEqual(timed.fadeMinSlope, timed.EffectiveFadeMinSlope(1000.0 / 60.0), 1e-9);
 
-			// The builder uses the period it is given: a 6-frame fade at 60p is seen after 100 ms.
+			// O#2 L1: StatsBuilder consumes the shared U7 fade verdict rather than private APL decline.
 			const double step = 1000.0 / 60.0;
 			StatsBuilder fading(config);
+			SceneVerdicts fadeVerdicts;
+			fadeVerdicts.Fade(7);
+			fading.SetSceneVerdictReader(fadeVerdicts.VerdictReader());
 			double apl = 120.0;
 			FrameStats stats;
 			for (int frame = 0; frame < 6; ++frame)
 			{
-				stats = fading.Build(Uniform(apl), frame * step, step);
+				stats = fading.Build(Uniform(apl), frame * step, step, static_cast<uint64_t>(frame + 1));
 				Assert::IsFalse(stats.fade);
-				apl -= 1.0;   // 60 APL per second, above 30
+				apl -= 1.0;   // 60 APL per second without U7 fade: stays false
 			}
-			stats = fading.Build(Uniform(apl), 6 * step, step);
-			Assert::IsTrue(stats.fade, L"six source frames of decline at 60p");
+			stats = fading.Build(Uniform(apl), 6 * step, step, 7);
+			Assert::IsTrue(stats.fade, L"shared U7 fade verdict at frame 7");
 		}
 
 		// Step 7b: script mode is the script - real LPW1 and CNTR, VP's picture

@@ -474,10 +474,13 @@ namespace VideoProcessorTest
 		{
 			const LedDriveConfig config = Compensate();
 			StatsBuilder builder(config);
+			SceneVerdicts verdicts;
+			builder.SetSceneVerdictReader(verdicts.VerdictReader());
 			CompensateController controller(config);
 			double now = 0.0;
+			uint64_t sequence = 0;
 			for (int tick = 0; tick < 40; ++tick)
-				controller.Tick(Play(builder, now, 400.0, Frame(120.0)), 400);
+				controller.Tick(Play(builder, now, 400.0, Frame(120.0), sequence), 400);
 			Assert::AreEqual(255, controller.Light());
 			double apl = 120.0;
 			ControllerOutput out;
@@ -485,11 +488,13 @@ namespace VideoProcessorTest
 			while (apl > 20.0)
 			{
 				FrameStats stats;
-				// 24p frames, 45 APL per second (the fade is in time: fade_ms).
+				// 24p frames, 45 APL per second, driven by shared U7 fade verdicts (O#2 L1).
 				for (int frame = 0; frame < 6; ++frame)
 				{
 					apl -= 1.875;
-					stats = builder.Build(Frame(apl), now);
+					++sequence;
+					verdicts.Fade(sequence);
+					stats = builder.Build(Frame(apl), now, 0.0, sequence);
 					now += 1000.0 / 24.0;
 				}
 				out = controller.Tick(stats, 250);   // six 24p frames
