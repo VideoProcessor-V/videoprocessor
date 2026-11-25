@@ -648,6 +648,378 @@ namespace ChromaCflTestsNs
 		}
 		return nullptr;
 	}
+
+	// --- Q#8 (GEM-074): unquantized float32 GPU parity, tiled workgroup seam & inline-grain helpers ---
+	constexpr double kFloat32CodePeak = 1023.0;
+
+	void QuantiseFloat32(Plane& p)
+	{
+		for (double& v : p.v)
+		{
+			const double clamped = (std::min)(kFloat32CodePeak, (std::max)(0.0, v));
+			const float norm = static_cast<float>(clamped / kFloat32CodePeak);
+			v = static_cast<double>(norm) * kFloat32CodePeak;
+		}
+	}
+
+	pl_fmt FindFloat32PlaneFormat(pl_gpu gpu, int comps)
+	{
+		const auto caps = static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE | PL_FMT_CAP_LINEAR);
+		return pl_find_fmt(gpu, PL_FMT_FLOAT, comps, 32, 32, caps);
+	}
+
+	pl_tex UploadR32f(pl_gpu gpu, const Plane& y)
+	{
+		pl_fmt fmt = FindFloat32PlaneFormat(gpu, 1);
+		if (!fmt) return nullptr;
+		std::vector<float> data(y.v.size());
+		for (size_t i = 0; i < data.size(); ++i)
+			data[i] = static_cast<float>(y.v[i] / kFloat32CodePeak);
+		pl_tex_params p{};
+		p.w = y.w; p.h = y.h; p.format = fmt; p.sampleable = true; p.initial_data = data.data();
+		return pl_tex_create(gpu, &p);
+	}
+
+	pl_tex UploadRg32f(pl_gpu gpu, const Plane& cb, const Plane& cr)
+	{
+		pl_fmt fmt = FindFloat32PlaneFormat(gpu, 2);
+		if (!fmt) return nullptr;
+		std::vector<float> data(cb.v.size() * 2);
+		for (size_t i = 0; i < cb.v.size(); ++i)
+		{
+			data[i * 2] = static_cast<float>(cb.v[i] / kFloat32CodePeak);
+			data[i * 2 + 1] = static_cast<float>(cr.v[i] / kFloat32CodePeak);
+		}
+		pl_tex_params p{};
+		p.w = cb.w; p.h = cb.h; p.format = fmt; p.sampleable = true; p.initial_data = data.data();
+		return pl_tex_create(gpu, &p);
+	}
+
+	bool DownloadFloat32(pl_gpu gpu, pl_tex tex, std::vector<float>& out, int& comps)
+	{
+		if (!tex) return false;
+		const pl_fmt fmt = tex->params.format;
+		if (!fmt || fmt->type != PL_FMT_FLOAT || fmt->component_depth[0] != 32) return false;
+		comps = fmt->num_components;
+		pl_tex_params rp{};
+		rp.w = tex->params.w; rp.h = tex->params.h; rp.format = fmt; rp.host_readable = true; rp.blit_dst = true;
+		pl_tex readable = pl_tex_create(gpu, &rp);
+		if (!readable) return false;
+		pl_tex_blit_params bp{}; bp.src = tex; bp.dst = readable;
+		pl_tex_blit(gpu, &bp);
+		out.assign(static_cast<size_t>(rp.w) * rp.h * comps, 0.0f);
+		pl_tex_transfer_params d{}; d.tex = readable; d.ptr = out.data();
+		const bool ok = pl_tex_download(gpu, &d);
+		pl_tex_destroy(gpu, &readable);
+		return ok;
+	}
+
+	void SetReprFloat32(pl_frame& f)
+	{
+		f.repr.sys = PL_COLOR_SYSTEM_BT_709;
+		f.repr.levels = PL_COLOR_LEVELS_LIMITED;
+		f.repr.bits.sample_depth = 32;
+		f.repr.bits.color_depth = 10;
+		f.repr.bits.bit_shift = 0;
+		f.color = pl_color_space_bt709;
+	}
+
+	pl_frame Frame2Float32(pl_tex luma, pl_tex chroma, double sx, double sy)
+	{
+		pl_frame f{};
+		f.num_planes = 2;
+		f.planes[0].texture = luma; f.planes[0].components = 1; f.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+		f.planes[1].texture = chroma; f.planes[1].components = 2;
+		f.planes[1].component_mapping[0] = PL_CHANNEL_CB; f.planes[1].component_mapping[1] = PL_CHANNEL_CR;
+		f.planes[1].shift_x = static_cast<float>(sx); f.planes[1].shift_y = static_cast<float>(sy);
+		SetReprFloat32(f);
+		return f;
+	}
+
+	GpuOut RunGpuFloat32(GpuDevice& dev, const Scene& s, double sx, double sy, const ActiveRect& rect, bool guard = true)
+	{
+		GpuOut o;
+		pl_gpu gpu = dev.Gpu();
+		pl_tex luma = UploadR32f(gpu, s.y);
+		pl_tex chroma = UploadRg32f(gpu, s.cb, s.cr);
+		ChromaUpscale::Gpu::CflModule module;
+		struct FloatCleanup
+		{
+			pl_gpu gpu;
+			ChromaUpscale::Gpu::CflModule* mod;
+			pl_tex* luma;
+			pl_tex* chroma;
+			FloatCleanup(pl_gpu g, ChromaUpscale::Gpu::CflModule* m, pl_tex* l, pl_tex* c)
+				: gpu(g), mod(m), luma(l), chroma(c) {}
+			~FloatCleanup()
+			{
+				if (mod) mod->Release(gpu);
+				if (chroma && *chroma) pl_tex_destroy(gpu, chroma);
+				if (luma && *luma) pl_tex_destroy(gpu, luma);
+			}
+			FloatCleanup(const FloatCleanup&) = delete;
+			FloatCleanup& operator=(const FloatCleanup&) = delete;
+		} cleanup(gpu, &module, &luma, &chroma);
+
+		if (!luma || !chroma)
+		{
+			o.error = "could not allocate r32f/rg32f source textures";
+			return o;
+		}
+		const pl_frame src = Frame2Float32(luma, chroma, sx, sy);
+		ChromaUpscale::Gpu::Params gp;
+		gp.settings.mode = ChromaUpscale::Mode::Cfl;
+		gp.active = rect;
+		gp.cfl.grainGuard = guard;
+		pl_frame out{};
+		o.ok = module.Apply(gpu, dev.dispatch, src, gp, out);
+		o.error = module.LastError();
+		o.status = module.Status();
+		if (o.ok)
+		{
+			o.numPlanes = out.num_planes;
+			o.comps = out.planes[1].components;
+			o.map0 = out.planes[1].component_mapping[0]; o.map1 = out.planes[1].component_mapping[1];
+			o.shiftX = out.planes[1].shift_x; o.shiftY = out.planes[1].shift_y;
+			o.lumaUnchanged = out.planes[0].texture == luma;
+			pl_tex ct = out.planes[1].texture;
+			o.texW = ct->params.w; o.texH = ct->params.h;
+			std::vector<float> raw;
+			int nc = 0;
+			if (DownloadFloat32(gpu, ct, raw, nc))
+			{
+				o.cb = Plane(o.texW, o.texH);
+				o.cr = Plane(o.texW, o.texH);
+				for (size_t i = 0; i < o.cb.v.size(); ++i)
+				{
+					o.cb.v[i] = static_cast<double>(raw[i * nc]) * kFloat32CodePeak;
+					o.cr.v[i] = static_cast<double>(raw[i * nc + 1]) * kFloat32CodePeak;
+				}
+			}
+			else
+			{
+				o.ok = false;
+				o.error = "the float32 output texture could not be read back";
+			}
+		}
+		return o;
+	}
+
+	// Rich 4:2:0 scene crossing multiple 16x16 luma & chroma workgroup seams (x=15/16, 31/32, 63/64; y=15/16, 31/32, 47/48),
+	// non-zero slopes right up to all 4 image borders, sharp step edges, diagonal gradients, independent chroma transitions,
+	// and high-frequency grain (raw != clean). Quantised to exact float32 normalized inputs so CPU and GPU see identical bits.
+	Scene MakeTiledEdgeScene(int w, int h, int cw, int ch, double sx, double sy, uint32_t seed, double lumaSigma, double chromaSigma)
+	{
+		Plane Y(w, h), tcb(w, h), tcr(w, h);
+		for (int y = 0; y < h; ++y)
+			for (int x = 0; x < w; ++x)
+			{
+				const double L = 440.0
+					+ 150.0 * std::tanh((x - 31.5) / 0.8)
+					- 120.0 * std::tanh((y - 31.5) / 0.8)
+					+ 85.0 * std::tanh((0.75 * x + 0.65 * y - 64.0) / 1.0)
+					+ 55.0 * std::sin(2.0 * kPi * x / 19.0 + 0.3) * std::cos(2.0 * kPi * y / 23.0 + 0.5)
+					+ 0.7 * x - 0.5 * y;
+				const double Lc = (std::min)(900.0, (std::max)(100.0, L));
+				Y.at(x, y) = Lc;
+				tcb.at(x, y) = 520.0 + 0.38 * (Lc - 440.0) + 45.0 * std::tanh((x - 63.5) / 1.1) + 28.0 * std::cos(2.0 * kPi * (x + 2.0 * y) / 37.0);
+				tcr.at(x, y) = 500.0 - 0.32 * (Lc - 440.0) - 40.0 * std::tanh((y - 47.5) / 1.1) + 24.0 * std::sin(2.0 * kPi * (2.0 * x - y) / 41.0);
+			}
+		const double fx = static_cast<double>(w) / cw, fy = static_cast<double>(h) / ch;
+		Scene s;
+		s.y = Y;
+		s.cb = ChromaUpscale::TentAtSites(tcb, 0, 0, cw, ch, fx, fy, sx, sy, 0, 0);
+		s.cr = ChromaUpscale::TentAtSites(tcr, 0, 0, cw, ch, fx, fy, sx, sy, 0, 0);
+		Noise n(seed);
+		for (double& v : s.y.v) v += lumaSigma * n.Next();
+		for (double& v : s.cb.v) v += chromaSigma * n.Next();
+		for (double& v : s.cr.v) v += chromaSigma * n.Next();
+		QuantiseFloat32(s.y); QuantiseFloat32(s.cb); QuantiseFloat32(s.cr);
+		return s;
+	}
+
+	// Broken CPU baseline A/C (in-test negative control): same CfL pipeline, except chroma grain add-back is either
+	// dropped (wrongCropOrigin == false: G = 0, simulating omitting inline raw - cc after m.gc removal) or fetched at
+	// the un-shifted crop index (wrongCropOrigin == true: raw(i, j) - cc(i, j) instead of raw(cx0 + i, cy0 + j) - cc(i, j)).
+	ChromaUpscale::Result UpsampleBrokenInlineGrain(const Plane& Y, const Plane& Cb, const Plane& Cr, double sx, double sy,
+		const ActiveRect& activeRect, int colorDepth, bool wrongCropOrigin)
+	{
+		ChromaUpscale::CflParams p;
+		p.grainGuard = true;
+		ChromaUpscale::Result res = ChromaUpscale::Upsample(Y, Cb, Cr, sx, sy, activeRect, colorDepth, 0.0, p);
+		const int W = Y.w, H = Y.h, cw = Cb.w, ch = Cb.h;
+		const double fx = static_cast<double>(W) / cw, fy = static_cast<double>(H) / ch;
+		const ActiveRect rc = activeRect.Resolve(W, H);
+		const ChromaUpscale::Rect lr = { rc.left, rc.top, rc.right, rc.bottom };
+		const ChromaUpscale::Rect cr = ChromaUpscale::ChromaRect(rc, fx, fy, cw, ch);
+		const double linesC = static_cast<double>(H) / fy;
+		const Plane cbCrop = ChromaUpscale::CropPlane(Cb, cr);
+		const Plane crCrop = ChromaUpscale::CropPlane(Cr, cr);
+		const GrainSplit::Split sb = GrainSplit::Compute(cbCrop, ChromaUpscale::Scale(linesC), ChromaUpscale::BlockPx(linesC));
+		const GrainSplit::Split sr = GrainSplit::Compute(crCrop, ChromaUpscale::Scale(linesC), ChromaUpscale::BlockPx(linesC));
+		Plane badGB(cbCrop.w, cbCrop.h, 0.0), badGR(crCrop.w, crCrop.h, 0.0);
+		if (wrongCropOrigin)
+		{
+			for (int j = 0; j < cbCrop.h; ++j)
+				for (int i = 0; i < cbCrop.w; ++i)
+				{
+					badGB.at(i, j) = Cb.get(i, j) - sb.clean.at(i, j);
+					badGR.at(i, j) = Cr.get(i, j) - sr.clean.at(i, j);
+				}
+		}
+		for (int y = lr.y0; y < lr.y1; ++y)
+			for (int x = lr.x0; x < lr.x1; ++x)
+			{
+				const double u = (x + 0.5 - sx) / fx - 0.5 - cr.x0;
+				const double v = (y + 0.5 - sy) / fy - 0.5 - cr.y0;
+				const double trueGB = ChromaUpscale::CatmullRomAt(sb.grain, u, v);
+				const double trueGR = ChromaUpscale::CatmullRomAt(sr.grain, u, v);
+				const double replGB = wrongCropOrigin ? ChromaUpscale::CatmullRomAt(badGB, u, v) : 0.0;
+				const double replGR = wrongCropOrigin ? ChromaUpscale::CatmullRomAt(badGR, u, v) : 0.0;
+				res.cb.at(x, y) = res.cb.at(x, y) - trueGB + replGB;
+				res.cr.at(x, y) = res.cr.at(x, y) - trueGR + replGR;
+			}
+		return res;
+	}
+
+	// Broken CPU baseline B (in-test negative control): omits shared-memory halo aprons across 16x16 workgroup boundaries
+	// in STATS (5x5 regression), AVG (5x5 box), and UP (4x4 Catmull-Rom) by clamping each workgroup's reads to its own
+	// unpadded local tile. Proves our seam assertions genuinely catch missing/broken shared-memory halos on the exact same input.
+	ChromaUpscale::Result UpsampleBrokenHaloOmitted(const Plane& Y, const Plane& Cb, const Plane& Cr, double sx, double sy,
+		const ActiveRect& activeRect, int colorDepth)
+	{
+		ChromaUpscale::CflParams p;
+		p.grainGuard = true;
+		const int W = Y.w, H = Y.h, cw = Cb.w, ch = Cb.h;
+		const double fx = static_cast<double>(W) / cw, fy = static_cast<double>(H) / ch;
+		const ActiveRect rc = activeRect.Resolve(W, H);
+		const ChromaUpscale::Rect lr = { rc.left, rc.top, rc.right, rc.bottom };
+		const ChromaUpscale::Rect cr = ChromaUpscale::ChromaRect(rc, fx, fy, cw, ch);
+		const double lines = static_cast<double>(H), linesC = lines / fy;
+		const Plane yCrop = ChromaUpscale::CropPlane(Y, lr);
+		const Plane cbCrop = ChromaUpscale::CropPlane(Cb, cr), crCrop = ChromaUpscale::CropPlane(Cr, cr);
+		const Plane yc = GrainSplit::Compute(yCrop, ChromaUpscale::Scale(lines), ChromaUpscale::BlockPx(lines)).clean;
+		const GrainSplit::Split sb = GrainSplit::Compute(cbCrop, ChromaUpscale::Scale(linesC), ChromaUpscale::BlockPx(linesC));
+		const GrainSplit::Split sr = GrainSplit::Compute(crCrop, ChromaUpscale::Scale(linesC), ChromaUpscale::BlockPx(linesC));
+		const Plane ylo = ChromaUpscale::TentAtSites(yc, cr.x0, cr.y0, cr.W(), cr.H(), fx, fy, sx, sy, lr.x0, lr.y0);
+		double peak = 1.0;
+		for (int i = 0; i < colorDepth; ++i) peak *= 2.0;
+		const double eps = (p.epsFrac * (peak - 1.0)) * (p.epsFrac * (peak - 1.0));
+
+		auto regressTileClamped = [&](const Plane& cc) {
+			const int w = ylo.w, h = ylo.h;
+			const double n = static_cast<double>((2 * p.radius + 1) * (2 * p.radius + 1));
+			Plane a(w, h), b(w, h);
+			ChromaUpscale::Regression r;
+			r.rho2 = Plane(w, h); r.lo = Plane(w, h); r.hi = Plane(w, h);
+			for (int y = 0; y < h; ++y)
+				for (int x = 0; x < w; ++x)
+				{
+					const int tx0 = (x / 16) * 16, tx1 = (std::min)(w - 1, tx0 + 15);
+					const int ty0 = (y / 16) * 16, ty1 = (std::min)(h - 1, ty0 + 15);
+					double sySum = 0.0, scSum = 0.0;
+					for (int j = -p.radius; j <= p.radius; ++j)
+						for (int i = -p.radius; i <= p.radius; ++i)
+						{
+							const int xx = (std::max)(tx0, (std::min)(tx1, x + i));
+							const int yy = (std::max)(ty0, (std::min)(ty1, y + j));
+							sySum += ylo.at(xx, yy); scSum += cc.at(xx, yy);
+						}
+					const double mY = sySum / n, mC = scSum / n;
+					double syy = 0.0, scc = 0.0, syc = 0.0;
+					for (int j = -p.radius; j <= p.radius; ++j)
+						for (int i = -p.radius; i <= p.radius; ++i)
+						{
+							const int xx = (std::max)(tx0, (std::min)(tx1, x + i));
+							const int yy = (std::max)(ty0, (std::min)(ty1, y + j));
+							const double dy = ylo.at(xx, yy) - mY, dc = cc.at(xx, yy) - mC;
+							syy += dy * dy; scc += dc * dc; syc += dy * dc;
+						}
+					const double vY = (std::max)(syy / n, 0.0), vC = (std::max)(scc / n, 0.0), cov = syc / n;
+					const double aa = cov / (vY + eps);
+					a.at(x, y) = aa;
+					b.at(x, y) = mC - aa * mY;
+					r.rho2.at(x, y) = RampMath::Clamp01<double>(cov * cov / ((vY + eps) * (vC + eps)));
+					double lo = 1e300, hi = -1e300;
+					for (int j = -p.clampR; j <= p.clampR; ++j)
+						for (int i = -p.clampR; i <= p.clampR; ++i)
+						{
+							const int xx = (std::max)(tx0, (std::min)(tx1, x + i));
+							const int yy = (std::max)(ty0, (std::min)(ty1, y + j));
+							const double v = cc.at(xx, yy);
+							lo = (std::min)(lo, v); hi = (std::max)(hi, v);
+						}
+					r.lo.at(x, y) = lo; r.hi.at(x, y) = hi;
+				}
+			r.a = Plane(w, h); r.b = Plane(w, h);
+			for (int y = 0; y < h; ++y)
+				for (int x = 0; x < w; ++x)
+				{
+					const int tx0 = (x / 16) * 16, tx1 = (std::min)(w - 1, tx0 + 15);
+					const int ty0 = (y / 16) * 16, ty1 = (std::min)(h - 1, ty0 + 15);
+					double sa = 0.0, sb2 = 0.0;
+					for (int j = -p.radius; j <= p.radius; ++j)
+						for (int i = -p.radius; i <= p.radius; ++i)
+						{
+							const int xx = (std::max)(tx0, (std::min)(tx1, x + i));
+							const int yy = (std::max)(ty0, (std::min)(ty1, y + j));
+							sa += a.at(xx, yy); sb2 += b.at(xx, yy);
+						}
+					r.a.at(x, y) = sa / n; r.b.at(x, y) = sb2 / n;
+				}
+			return r;
+		};
+
+		const ChromaUpscale::Regression rB = regressTileClamped(sb.clean), rR = regressTileClamped(sr.clean);
+		Plane plB(ylo.w, ylo.h), plR(ylo.w, ylo.h);
+		for (size_t i = 0; i < ylo.v.size(); ++i)
+		{
+			plB.v[i] = rB.a.v[i] * ylo.v[i] + rB.b.v[i];
+			plR.v[i] = rR.a.v[i] * ylo.v[i] + rR.b.v[i];
+		}
+
+		ChromaUpscale::Result res;
+		res.cb = Plane(W, H); res.cr = Plane(W, H);
+		for (int y = 0; y < H; ++y)
+			for (int x = 0; x < W; ++x)
+			{
+				const double uPlane = (x + 0.5 - sx) / fx - 0.5, vPlane = (y + 0.5 - sy) / fy - 0.5;
+				const bool inside = x >= lr.x0 && x < lr.x1 && y >= lr.y0 && y < lr.y1;
+				if (!inside)
+				{
+					res.cb.at(x, y) = Cb.get(static_cast<int>(std::floor(uPlane)), static_cast<int>(std::floor(vPlane)));
+					res.cr.at(x, y) = Cr.get(static_cast<int>(std::floor(uPlane)), static_cast<int>(std::floor(vPlane)));
+					continue;
+				}
+				const double u = uPlane - cr.x0, v = vPlane - cr.y0;
+				const int lx0 = (x / 16) * 16, lx1 = (std::min)(W - 1, lx0 + 15);
+				const int ly0 = (y / 16) * 16, ly1 = (std::min)(H - 1, ly0 + 15);
+				const int cxLo = (std::max)(0, (std::min)(cr.W() - 1, static_cast<int>(std::floor((lx0 + 0.5 - sx) / fx - 0.5 - cr.x0))));
+				const int cxHi = (std::max)(cxLo, (std::min)(cr.W() - 1, static_cast<int>(std::floor((lx1 + 0.5 - sx) / fx - 0.5 - cr.x0))));
+				const int cyLo = (std::max)(0, (std::min)(cr.H() - 1, static_cast<int>(std::floor((ly0 + 0.5 - sy) / fy - 0.5 - cr.y0))));
+				const int cyHi = (std::max)(cyLo, (std::min)(cr.H() - 1, static_cast<int>(std::floor((ly1 + 0.5 - sy) / fy - 0.5 - cr.y0))));
+				const double yv = yc.at(x - lr.x0, y - lr.y0);
+				for (int c = 0; c < 2; ++c)
+				{
+					const ChromaUpscale::Regression& g = c == 0 ? rB : rR;
+					const Plane& cc = c == 0 ? sb.clean : sr.clean;
+					const Plane& gr = c == 0 ? sb.grain : sr.grain;
+					const double A = ChromaUpscale::CatmullRomClamped(g.a, u, v, cxLo, cxHi, cyLo, cyHi);
+					const double Bv = ChromaUpscale::CatmullRomClamped(g.b, u, v, cxLo, cxHi, cyLo, cyHi);
+					const double M = RampMath::Clamp01<double>(ChromaUpscale::CatmullRomClamped(g.rho2, u, v, cxLo, cxHi, cyLo, cyHi));
+					const double base = ChromaUpscale::CatmullRomClamped(cc, u, v, cxLo, cxHi, cyLo, cyHi);
+					const double LO = ChromaUpscale::CatmullRomClamped(g.lo, u, v, cxLo, cxHi, cyLo, cyHi);
+					const double HI = ChromaUpscale::CatmullRomClamped(g.hi, u, v, cxLo, cxHi, cyLo, cyHi);
+					const double G = ChromaUpscale::CatmullRomClamped(gr, u, v, cxLo, cxHi, cyLo, cyHi);
+					const double PL = ChromaUpscale::CatmullRomClamped(c == 0 ? plB : plR, u, v, cxLo, cxHi, cyLo, cyHi);
+					const double lo = (std::min)(LO, HI), hi = (std::max)(LO, HI);
+					const double pred = (std::max)(lo, (std::min)(hi, A * yv + Bv));
+					(c == 0 ? res.cb : res.cr).at(x, y) = base + M * (pred - PL) + G;
+				}
+			}
+		res.status = "ok";
+		return res;
+	}
 }
 
 namespace VideoProcessorTest
@@ -1845,6 +2217,565 @@ namespace VideoProcessorTest
 				L"negative control: dynamic chroma_offset_y alone must shift horizontal-edge chroma by > 0.01 without re-parsing");
 			Assert::IsTrue(maxDiffFlat < 1e-3,
 				L"flat interior must remain unaffected (< 1e-3) across dynamic siting updates");
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(ChromaCflGpuTiledPassesMatchCpuModelInFloat32)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(ChromaCflGpuTiledPassesMatchCpuModelInFloat32)
+		{
+			// Q#8 (GEM-074): WARP parity of tiled STATS/AVG/UP compute passes + inline chroma grain (raw - cc) against
+			// the independent double-precision CPU reference model (ChromaUpscale::Upsample) using unquantised r32f/rg32f
+			// planes (eliminating 16-bit unorm 1/64-code quantisation). Exercises odd non-multiple-of-16 dimensions
+			// (134x98 luma / 67x49 chroma), multiple 16x16 workgroup seams (x=15/16, 31/32, 47/48, 63/64...), all 4 borders,
+			// both PL_CHROMA_LEFT (-0.5, 0.0) and PL_CHROMA_TOP_LEFT (-0.5, -0.5), and asymmetric non-zero active crop
+			// (odd cx0=7, cy0=5, mid-workgroup picture edges) with high-frequency grain (raw != clean).
+			//
+			// IEEE-754 float32 parity bounds (Rule 1 derivation):
+			//   At 10-bit chroma magnitude ~512 codes, 1 ULP(float32) = 512 * 2^-23 = 2^-14 = 6.1035e-5 codes.
+			//   - guard=true  (7-pass GrainSplit + 4-pass CfL in float32 vs CPU double): 0.01 codes (= 9.78e-6 normalised,
+			//     < 1e-5 normalised, 2x tighter than CompareWithModel's 0.02 codes on rg16).
+			//   - guard=false (4-pass LO/STATS/AVG/UP directly in float32 vs CPU double): 0.002 codes (~32 ULPs at 512,
+			//     = 1.96e-6 normalised).
+			constexpr double kMaxCodesWithGrain = 0.01;
+			constexpr double kMaxCodesNoGrain = 0.002;
+			constexpr double kMaxFlatBarCodes = 1e-3;
+
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+
+			auto maxDiffAtSeamAndBorder = [](const Plane& a, const Plane& b, double& seamMax, double& borderMax) {
+				seamMax = 0.0;
+				borderMax = 0.0;
+				for (int y = 0; y < a.h; ++y)
+					for (int x = 0; x < a.w; ++x)
+					{
+						const double d = std::fabs(a.at(x, y) - b.at(x, y));
+						if (x % 16 == 0 || x % 16 == 15 || y % 16 == 0 || y % 16 == 15)
+							seamMax = (std::max)(seamMax, d);
+						if (x == 0 || x == a.w - 1 || y == 0 || y == a.h - 1)
+							borderMax = (std::max)(borderMax, d);
+					}
+			};
+
+			// Case 1: Odd non-multiple-of-16 full frame (134x98 / 67x49), PL_CHROMA_LEFT (-0.5, 0.0), guard=true.
+			{
+				const int W = 134, H = 98, cw = 67, ch = 49;
+				const Scene sc = MakeTiledEdgeScene(W, H, cw, ch, -0.5, 0.0, 801u, 2.0, 3.0);
+
+				// Premise check: verify high-frequency grain is genuinely separated (raw != clean) so inline raw - cc runs.
+				const double linesC = static_cast<double>(H) / 2.0;
+				const GrainSplit::Split cbSplit = GrainSplit::Compute(sc.cb, ChromaUpscale::Scale(linesC), ChromaUpscale::BlockPx(linesC));
+				const double grainPeak = MaxDiff(sc.cb, cbSplit.clean);
+				Assert::IsTrue(grainPeak > 2.0, L"test premise: chroma grain (raw - clean) must exceed 2.0 codes");
+
+				const GpuOut g = RunGpuFloat32(dev, sc, -0.5, 0.0, ActiveRect(), true);
+				Assert::IsTrue(g.ok, Wide(g.error).c_str());
+				Assert::IsTrue(g.texW == W && g.texH == H, L"float32 output matches odd luma dimensions 134x98");
+
+				ChromaUpscale::CflParams cp;
+				cp.grainGuard = true;
+				const ChromaUpscale::Result ref = ChromaUpscale::Upsample(sc.y, sc.cb, sc.cr, -0.5, 0.0, ActiveRect(), 10, 0.0, cp);
+				Assert::AreEqual(std::string("ok"), ref.status);
+
+				const double maxCb = MaxDiff(g.cb, ref.cb), maxCr = MaxDiff(g.cr, ref.cr);
+				double seamCb = 0.0, borderCb = 0.0, seamCr = 0.0, borderCr = 0.0;
+				maxDiffAtSeamAndBorder(g.cb, ref.cb, seamCb, borderCb);
+				maxDiffAtSeamAndBorder(g.cr, ref.cr, seamCr, borderCr);
+				{
+					char msg[256];
+					std::snprintf(msg, sizeof msg,
+						"Q#8 float32 134x98 left (guard=true): max (%.5f, %.5f) codes, seam (%.5f, %.5f), border (%.5f, %.5f)",
+						maxCb, maxCr, seamCb, seamCr, borderCb, borderCr);
+					Logger::WriteMessage(msg);
+				}
+				Assert::IsTrue(maxCb <= kMaxCodesWithGrain && maxCr <= kMaxCodesWithGrain,
+					L"134x98 left-sited float32 GPU output must match CPU model within 0.01 codes (< 1e-5 normalised)");
+				Assert::IsTrue(seamCb <= kMaxCodesWithGrain && seamCr <= kMaxCodesWithGrain,
+					L"134x98 left-sited workgroup seams (x/y=15,16,31,32...) must match CPU model within 0.01 codes");
+				Assert::IsTrue(borderCb <= kMaxCodesWithGrain && borderCr <= kMaxCodesWithGrain,
+					L"134x98 left-sited 4 image borders must match CPU model within 0.01 codes");
+
+				// In-test negative control A (exact same frame): dropping chroma grain (G = 0, simulating omitted inline raw - cc)
+				// must violate the parity bound by > 100x (> 1.0 code).
+				const ChromaUpscale::Result brokenNoGrain = UpsampleBrokenInlineGrain(sc.y, sc.cb, sc.cr, -0.5, 0.0, ActiveRect(), 10, false);
+				const double noGrainGpuErr = (std::max)(MaxDiff(g.cb, brokenNoGrain.cb), MaxDiff(g.cr, brokenNoGrain.cr));
+				const double noGrainRefErr = (std::max)(MaxDiff(ref.cb, brokenNoGrain.cb), MaxDiff(ref.cr, brokenNoGrain.cr));
+				LogF("Q#8 negative control (grain dropped G=0): vs GPU %.4f codes, vs CPU ref %.4f codes", noGrainGpuErr, noGrainRefErr);
+				Assert::IsTrue(noGrainGpuErr > 100.0 * kMaxCodesWithGrain && noGrainRefErr > 100.0 * kMaxCodesWithGrain,
+					L"negative control: dropping inline grain (raw - cc) must cause > 1.0 code error (> 100x parity bound)");
+
+				// In-test negative control B (exact same frame): omitting shared-memory halos across 16x16 workgroup tiles
+				// in STATS/AVG/UP must violate the seam parity bound by > 100x (> 1.0 code).
+				const ChromaUpscale::Result brokenHalo = UpsampleBrokenHaloOmitted(sc.y, sc.cb, sc.cr, -0.5, 0.0, ActiveRect(), 10);
+				double haloSeamGpuCb = 0.0, haloBorderGpuCb = 0.0, haloSeamGpuCr = 0.0, haloBorderGpuCr = 0.0;
+				double haloSeamRefCb = 0.0, haloBorderRefCb = 0.0, haloSeamRefCr = 0.0, haloBorderRefCr = 0.0;
+				maxDiffAtSeamAndBorder(g.cb, brokenHalo.cb, haloSeamGpuCb, haloBorderGpuCb);
+				maxDiffAtSeamAndBorder(g.cr, brokenHalo.cr, haloSeamGpuCr, haloBorderGpuCr);
+				maxDiffAtSeamAndBorder(ref.cb, brokenHalo.cb, haloSeamRefCb, haloBorderRefCb);
+				maxDiffAtSeamAndBorder(ref.cr, brokenHalo.cr, haloSeamRefCr, haloBorderRefCr);
+				const double haloSeamGpu = (std::max)(haloSeamGpuCb, haloSeamGpuCr);
+				const double haloSeamRef = (std::max)(haloSeamRefCb, haloSeamRefCr);
+				LogF("Q#8 negative control (halo omitted at 16x16 seams): vs GPU %.4f codes, vs CPU ref %.4f codes", haloSeamGpu, haloSeamRef);
+				Assert::IsTrue(haloSeamGpu > 100.0 * kMaxCodesWithGrain && haloSeamRef > 100.0 * kMaxCodesWithGrain,
+					L"negative control: omitting 16x16 shared-memory halos must cause > 1.0 code seam error (> 100x parity bound)");
+			}
+
+			// Case 2: Odd non-multiple-of-16 full frame (134x98 / 67x49), PL_CHROMA_TOP_LEFT (-0.5, -0.5),
+			// tested both with guard=true (full pipeline) and guard=false (pure LO/STATS/AVG/UP within 0.002 codes).
+			{
+				const int W = 134, H = 98, cw = 67, ch = 49;
+				const Scene sc = MakeTiledEdgeScene(W, H, cw, ch, -0.5, -0.5, 802u, 2.0, 3.0);
+				for (int guard = 0; guard < 2; ++guard)
+				{
+					const bool useGuard = guard != 0;
+					const double bound = useGuard ? kMaxCodesWithGrain : kMaxCodesNoGrain;
+					const GpuOut g = RunGpuFloat32(dev, sc, -0.5, -0.5, ActiveRect(), useGuard);
+					Assert::IsTrue(g.ok, Wide(g.error).c_str());
+					ChromaUpscale::CflParams cp;
+					cp.grainGuard = useGuard;
+					const ChromaUpscale::Result ref = ChromaUpscale::Upsample(sc.y, sc.cb, sc.cr, -0.5, -0.5, ActiveRect(), 10, 0.0, cp);
+					const double maxCb = MaxDiff(g.cb, ref.cb), maxCr = MaxDiff(g.cr, ref.cr);
+					double seamCb = 0.0, borderCb = 0.0, seamCr = 0.0, borderCr = 0.0;
+					maxDiffAtSeamAndBorder(g.cb, ref.cb, seamCb, borderCb);
+					maxDiffAtSeamAndBorder(g.cr, ref.cr, seamCr, borderCr);
+					LogF("Q#8 float32 134x98 top-left (guard=%.0f): max (%.5f, %.5f) codes, seam (%.5f, %.5f)",
+						static_cast<double>(guard), maxCb, maxCr, seamCb, seamCr);
+					Assert::IsTrue(maxCb <= bound && maxCr <= bound,
+						useGuard ? L"134x98 top-left (guard=true) must match CPU model within 0.01 codes"
+						         : L"134x98 top-left (guard=false) pure LO/STATS/AVG/UP must match CPU model within 0.002 codes");
+					Assert::IsTrue(seamCb <= bound && seamCr <= bound && borderCb <= bound && borderCr <= bound,
+						L"134x98 top-left workgroup seams and borders must match CPU model within bound");
+				}
+			}
+
+			// Case 3: Asymmetric non-zero active crop (padL=14, padT=10, padR=12, padB=14 -> 160x122 frame, 80x61 chroma,
+			// activeRect={14,10,148,108}, odd CFL_CX0=7, CFL_CY0=5, mid-workgroup picture borders) under BOTH
+			// PL_CHROMA_LEFT (-0.5, 0.0) and PL_CHROMA_TOP_LEFT (-0.5, -0.5). Catches missing +ivec2(CFL_CX0, CFL_CY0)
+			// on inline raw - cc and bar/picture mixed-workgroup shared-memory barrier bugs.
+			{
+				const double sitings[2][2] = { { -0.5, 0.0 }, { -0.5, -0.5 } };
+				const double barCode = static_cast<double>(static_cast<float>(820.0 / kFloat32CodePeak)) * kFloat32CodePeak;
+				for (int si = 0; si < 2; ++si)
+				{
+					const double sx = sitings[si][0], sy = sitings[si][1];
+					const Scene pic = MakeTiledEdgeScene(134, 98, 67, 49, sx, sy, 803u + static_cast<uint32_t>(si), 2.0, 3.0);
+					Scene sc = Embed(pic, 14, 10, 12, 14, 2, 2, 64.0, 820.0);
+					QuantiseFloat32(sc.y); QuantiseFloat32(sc.cb); QuantiseFloat32(sc.cr);
+					ActiveRect rect;
+					rect.left = 14; rect.top = 10; rect.right = 148; rect.bottom = 108;
+
+					const GpuOut g = RunGpuFloat32(dev, sc, sx, sy, rect, true);
+					Assert::IsTrue(g.ok, Wide(g.error).c_str());
+					const ChromaUpscale::Result ref = ChromaUpscale::Upsample(sc.y, sc.cb, sc.cr, sx, sy, rect, 10, 0.0);
+					Assert::AreEqual(std::string("ok"), ref.status);
+
+					double maxPicCb = 0.0, maxPicCr = 0.0, maxCropEdge = 0.0, maxBarDev = 0.0;
+					for (int y = 0; y < sc.y.h; ++y)
+						for (int x = 0; x < sc.y.w; ++x)
+						{
+							const bool inside = x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom;
+							if (inside)
+							{
+								const double dcb = std::fabs(g.cb.at(x, y) - ref.cb.at(x, y));
+								const double dcr = std::fabs(g.cr.at(x, y) - ref.cr.at(x, y));
+								maxPicCb = (std::max)(maxPicCb, dcb);
+								maxPicCr = (std::max)(maxPicCr, dcr);
+								if (x == rect.left || x == rect.right - 1 || y == rect.top || y == rect.bottom - 1)
+									maxCropEdge = (std::max)(maxCropEdge, (std::max)(dcb, dcr));
+							}
+							else
+							{
+								maxBarDev = (std::max)(maxBarDev, (std::max)(std::fabs(g.cb.at(x, y) - barCode), std::fabs(g.cr.at(x, y) - barCode)));
+							}
+						}
+					{
+						char msg[256];
+						std::snprintf(msg, sizeof msg,
+							"Q#8 float32 cropped 160x122 (cx0=7,cy0=5, siting %.1f,%.1f): pic (%.5f, %.5f), cropEdge %.5f, barDev %.5f",
+							sx, sy, maxPicCb, maxPicCr, maxCropEdge, maxBarDev);
+						Logger::WriteMessage(msg);
+					}
+					Assert::IsTrue(maxPicCb <= kMaxCodesWithGrain && maxPicCr <= kMaxCodesWithGrain,
+						L"non-zero odd crop picture pixels must match CPU model within 0.01 codes");
+					Assert::IsTrue(maxCropEdge <= kMaxCodesWithGrain,
+						L"non-zero odd crop border pixels (mid-workgroup) must match CPU model within 0.01 codes");
+					Assert::IsTrue(maxBarDev <= kMaxFlatBarCodes,
+						L"bar pixels outside active crop must stay flat at barCode within 1e-3 codes");
+
+					if (si == 0)
+					{
+						// In-test negative control C (exact same cropped frame): forgetting +ivec2(CFL_CX0, CFL_CY0)
+						// when computing inline raw - cc reads bar/shifted chroma and causes > 20 codes error.
+						const ChromaUpscale::Result wrongOrigin = UpsampleBrokenInlineGrain(sc.y, sc.cb, sc.cr, sx, sy, rect, 10, true);
+						const double wrongOriginErr = (std::max)(MaxDiff(g.cb, wrongOrigin.cb), MaxDiff(g.cr, wrongOrigin.cr));
+						LogF("Q#8 negative control (inline raw - cc missing cx0/cy0 offset): error %.2f codes", wrongOriginErr);
+						Assert::IsTrue(wrongOriginErr > 20.0,
+							L"negative control: omitting crop offset (cx0, cy0) on inline raw - cc must produce > 20 codes error");
+					}
+				}
+			}
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(ChromaCflGpuArenaDropsGcPlaneAndReducesVram)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(ChromaCflGpuArenaDropsGcPlaneAndReducesVram)
+		{
+			// Q#8 (GEM-074 AMEND step 1): removing m.gc (computing raw - cc inline in UP_BODY) drops s2 scratch-arena
+			// allocation by 1 full-plane texture (2 -> 1 s2 plane; 6 -> 5 total chroma-grid temporaries) and reduces
+			// TextureBytes() by exactly 8 bytes per chroma pixel (one rg32f chroma-grid plane).
+			// Pre-fix code (with m.gc still allocated) MUST FAIL this test; post-fix code MUST PASS.
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = dev.Gpu();
+
+			// 1. Contract check on GridRequests & ArenaRequests: s2 count must be 1 (not 2), merged count must be 5 (not 6).
+			const auto splitReqs = ChromaUpscale::Gpu::CflModule::GridRequests(VpSkeleton::TexFormat::RGBA32F, VpSkeleton::TexFormat::RG32F, 64, 48);
+			Assert::IsTrue(splitReqs.size() == 2 && splitReqs[0].count == 4 && splitReqs[1].count == 1,
+				L"distinct float formats: 4 s4 (lo, ab, lohi, avg) + 1 s2 (rho only; m.gc removed)");
+			const auto mergedReqs = ChromaUpscale::Gpu::CflModule::GridRequests(VpSkeleton::TexFormat::RGBA32F, VpSkeleton::TexFormat::RGBA32F, 64, 48);
+			Assert::IsTrue(mergedReqs.size() == 1 && mergedReqs[0].count == 5,
+				L"equal float formats: merged single request of 5 temporaries (4 s4 + 1 s2)");
+
+			const auto floatCaps = static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE);
+			pl_fmt f4 = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, floatCaps);
+			pl_fmt f2 = pl_find_fmt(gpu, PL_FMT_FLOAT, 2, 32, 32, floatCaps);
+			if (!f2) f2 = f4;
+			VpSkeleton::TexFormat t4{}, t2{};
+			Assert::IsTrue(VpSkeleton::PlTexBackend::FormatOf(f4, &t4) && VpSkeleton::PlTexBackend::FormatOf(f2, &t2),
+				L"float32 formats must map to arena formats");
+
+			const int W = 128, H = 96, cw = 64, ch = 48;
+			const auto gridOnly = ChromaUpscale::Gpu::CflModule::ArenaRequests(gpu, W, H, cw, ch, static_cast<double>(H), static_cast<double>(ch), false);
+			uint32_t totalGridSlots = 0;
+			uint32_t s2GridSlots = 0;
+			for (const VpSkeleton::ArenaRequest& q : gridOnly)
+			{
+				totalGridSlots += q.count;
+				if (q.shape.fmt == t2) s2GridSlots += q.count;
+			}
+			Assert::AreEqual(uint32_t(5), totalGridSlots, L"ArenaRequests(ownSplit=false) must request exactly 5 chroma-grid textures");
+			Assert::AreEqual(t4 == t2 ? uint32_t(5) : uint32_t(1), s2GridSlots,
+				L"ArenaRequests(ownSplit=false) s2 count must drop to 1 (or 5 when merged with t4)");
+
+			// 2. Real GPU runtime enforcement: independently build a tight 1-s2-plane arena (4 s4 + 1 s2 = 5 textures, ZERO gc).
+			// On pre-fix code (demanding gc + rho = 2 s2 textures), Apply() MUST FAIL with ScratchShort; post-fix MUST SUCCEED.
+			const Scene sc = MakeScene(W, H, cw, ch, -0.5, 0.0, 811u, 1.5, 2.0);
+			const ChromaUpscale::Result ref = RunModel(sc, -0.5, 0.0, ActiveRect());
+
+			auto makeCustomGridReqs = [&](uint8_t s4Count, uint8_t s2Count) {
+				std::vector<VpSkeleton::ArenaRequest> reqs;
+				if (t4 == t2)
+				{
+					VpSkeleton::ArenaRequest q;
+					q.scope = ChromaUpscale::Gpu::kArenaScope;
+					q.owner = ChromaUpscale::Gpu::kArenaOwner;
+					q.tier = VpSkeleton::Tier::T1;
+					q.shape = { static_cast<uint32_t>(cw), static_cast<uint32_t>(ch), t4 };
+					q.count = static_cast<uint8_t>(s4Count + s2Count);
+					if (q.count > 0) reqs.push_back(q);
+				}
+				else
+				{
+					if (s4Count > 0)
+					{
+						VpSkeleton::ArenaRequest q4;
+						q4.scope = ChromaUpscale::Gpu::kArenaScope;
+						q4.owner = ChromaUpscale::Gpu::kArenaOwner;
+						q4.tier = VpSkeleton::Tier::T1;
+						q4.shape = { static_cast<uint32_t>(cw), static_cast<uint32_t>(ch), t4 };
+						q4.count = s4Count;
+						reqs.push_back(q4);
+					}
+					if (s2Count > 0)
+					{
+						VpSkeleton::ArenaRequest q2;
+						q2.scope = ChromaUpscale::Gpu::kArenaScope;
+						q2.owner = ChromaUpscale::Gpu::kArenaOwner;
+						q2.tier = VpSkeleton::Tier::T1;
+						q2.shape = { static_cast<uint32_t>(cw), static_cast<uint32_t>(ch), t2 };
+						q2.count = s2Count;
+						reqs.push_back(q2);
+					}
+				}
+				return reqs;
+			};
+
+			{
+				VpSkeleton::PlTexBackend backend(gpu);
+				VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> arena(backend);
+				const auto tightPlan = VpSkeleton::PlanArena(makeCustomGridReqs(4, 1), VpSkeleton::Tier::T2);
+				Assert::IsTrue(arena.Reserve(tightPlan), L"reserve tight 1-s2-plane arena (5 textures total)");
+				const GpuOut out = RunGpu(dev, sc, -0.5, 0.0, ActiveRect(), false, true, true, &arena);
+				Assert::IsTrue(out.ok, Wide("1-s2-plane arena Apply failed: " + out.error).c_str());
+				Assert::AreEqual(uint64_t(0), arena.Exhausted(), L"1-s2-plane arena must never exhaust");
+				Assert::IsFalse(arena.FrameDecision().engaged, L"scratch_arena must remain released");
+				Assert::AreEqual(uint64_t(5), arena.Acquired(),
+					L"shared-grain Apply must acquire exactly 5 arena textures (4 s4 + 1 s2; m.gc removed)");
+				Assert::IsTrue(MaxDiff(out.cb, ref.cb) <= 0.02 && MaxDiff(out.cr, ref.cr) <= 0.02,
+					L"1-s2-plane arena output with grainGuard=true must still match CPU model within 0.02 codes");
+				arena.Release();
+			}
+
+			// Own-split active path (shared=false, guard=true) with ArenaRequests(..., true).
+			{
+				VpSkeleton::PlTexBackend backend(gpu);
+				VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> arena(backend);
+				const auto ownReqs = ChromaUpscale::Gpu::CflModule::ArenaRequests(gpu, W, H, cw, ch, static_cast<double>(H), static_cast<double>(ch), true);
+				const VpSkeleton::ArenaPlan ownPlan = VpSkeleton::PlanArena(ownReqs, VpSkeleton::Tier::T2);
+				const VpSkeleton::TexShape s2Shape{ static_cast<uint32_t>(cw), static_cast<uint32_t>(ch), t2 };
+				Assert::AreEqual(t4 == t2 ? uint32_t(5) : uint32_t(1),
+					ownPlan.OwnerCount(ChromaUpscale::Gpu::kArenaScope, ChromaUpscale::Gpu::kArenaOwner, s2Shape),
+					L"own-split arena plan must reserve only 1 s2 plane for chroma_cfl");
+				Assert::IsTrue(arena.Reserve(ownPlan), L"reserve own-split arena");
+				const GpuOut out = RunGpu(dev, sc, -0.5, 0.0, ActiveRect(), false, true, false, &arena);
+				Assert::IsTrue(out.ok, Wide("own-split arena Apply failed: " + out.error).c_str());
+				Assert::AreEqual(uint64_t(0), arena.Exhausted(), L"own-split arena must never exhaust");
+				Assert::IsTrue(MaxDiff(out.cb, ref.cb) <= 0.02 && MaxDiff(out.cr, ref.cr) <= 0.02,
+					L"own-split arena output must match CPU model within 0.02 codes");
+				arena.Release();
+			}
+
+			// In-test negative control 1 (exact same frame): removing the remaining s2 plane (0 s2 planes: 4 textures total)
+			// MUST fail Apply visibly, proving the tight arena genuinely enforces exact s2 counts.
+			{
+				VpSkeleton::PlTexBackend backend(gpu);
+				VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> zeroS2Arena(backend);
+				Assert::IsTrue(zeroS2Arena.Reserve(VpSkeleton::PlanArena(makeCustomGridReqs(4, 0), VpSkeleton::Tier::T2)),
+					L"reserve 0-s2-plane negative-control arena");
+				const GpuOut shortOut = RunGpu(dev, sc, -0.5, 0.0, ActiveRect(), false, true, true, &zeroS2Arena);
+				Assert::IsFalse(shortOut.ok, L"negative control: 0-s2-plane arena must fail Apply (rho cannot be acquired)");
+				Assert::IsTrue(zeroS2Arena.FrameDecision().engaged,
+					L"negative control: 0-s2-plane shortage must engage scratch_arena decision");
+				Assert::IsTrue(zeroS2Arena.Shed() > 0 || zeroS2Arena.Exhausted() > 0,
+					L"negative control: 0-s2-plane shortage must be counted in Shed or Exhausted");
+				zeroS2Arena.Release();
+			}
+
+			// 3. VRAM TextureBytes() check + negative control 2: strictly below the 2-s2-plane budget by exact 8 * cw * ch bytes.
+			const int vramSizes[2][4] = { { 3840, 2160, 1920, 1080 }, { 128, 96, 64, 48 } };
+			for (const auto& sz : vramSizes)
+			{
+				const int vw = sz[0], vh = sz[1], vcw = sz[2], vch = sz[3];
+				const uint64_t px = static_cast<uint64_t>(vw) * static_cast<uint64_t>(vh);
+				const uint64_t cpx = static_cast<uint64_t>(vcw) * static_cast<uint64_t>(vch);
+				const uint64_t nbL = static_cast<uint64_t>((vw + 15) / 16) * static_cast<uint64_t>((vh + 15) / 16);
+				const uint64_t nbC = static_cast<uint64_t>((vcw + 15) / 16) * static_cast<uint64_t>((vch + 15) / 16);
+				// Pre-fix 2-s2-plane private budget (lo, gc, ab, rho, lohi, avg = 80 B/chroma px):
+				const uint64_t twoS2PrivateBudget =
+					px * (2 + 32 + 4) + nbL * 32 + cpx * (4 + 2 * 32) + nbC * 2 * 32 + cpx * (16 + 8 + 16 + 8 + 16 + 16);
+				const uint64_t actualPriv = ChromaUpscale::Gpu::CflModule::TextureBytes(vw, vh, vcw, vch, false);
+				const uint64_t actualInArena = ChromaUpscale::Gpu::CflModule::TextureBytes(vw, vh, vcw, vch, true);
+
+				{
+					char msg[256];
+					std::snprintf(msg, sizeof msg,
+						"Q#8 VRAM %dx%d: actualPriv %llu B, twoS2Budget %llu B, saved %llu B (expected %llu B)",
+						vw, vh,
+						static_cast<unsigned long long>(actualPriv),
+						static_cast<unsigned long long>(twoS2PrivateBudget),
+						static_cast<unsigned long long>(twoS2PrivateBudget - actualPriv),
+						static_cast<unsigned long long>(uint64_t(8) * cpx));
+					Logger::WriteMessage(msg);
+				}
+				Assert::IsTrue(actualPriv < twoS2PrivateBudget,
+					L"post-fix TextureBytes() must be strictly lower than the 2-s2-plane budget");
+				Assert::AreEqual(uint64_t(8) * cpx, twoS2PrivateBudget - actualPriv,
+					L"m.gc removal must save exactly 8 bytes per chroma pixel (1 full-plane rg32f texture)");
+				Assert::AreEqual(uint64_t(16) * px + uint64_t(104) * cpx, actualPriv - actualInArena,
+					L"arena temporaries delta must be 16 B/luma px + 104 B/chroma px (72 B grid + 32 B chroma split bands)");
+
+				// In-test negative control 2: a 2-s2-plane count strictly exceeds TextureBytes() by 8 * cw * ch bytes.
+				const uint64_t twoS2Delta = twoS2PrivateBudget - actualInArena;
+				Assert::IsTrue(twoS2PrivateBudget > actualPriv && twoS2Delta > (actualPriv - actualInArena),
+					L"negative control: 2-plane s2 budget must strictly exceed post-fix TextureBytes()");
+			}
+		}
+	};
+
+	TEST_CLASS(ChromaCflGpuHardwareTests)
+	{
+	public:
+		BEGIN_TEST_METHOD_ATTRIBUTE(ChromaCflGpuHardwareTimingDiagnostic)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuHardware")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(ChromaCflGpuHardwareTimingDiagnostic)
+		{
+			// Q#8 (GEM-074): Hardware-GPU-only (VP_TEST_GPU=hardware) timing & parity diagnostic for ChromaCflGpu::Apply
+			// at UHD (3840x2160) and HD (1920x1080) with shared grain products and scratch arena (isolating the tiled
+			// LO/STATS/AVG/UP passes), plus pl_timer GPU query probe and hardware output sanity parity.
+			// Never asserts brittle wall-clock thresholds: checks finite positive GPU duration + real output parity.
+			if (!HardwarePrerequisites::RequireOrSkip(HardwarePrerequisites::Kind::Gpu,
+				"ChromaCflGpuHardwareTimingDiagnostic", ExtendedRangeGpuProbe::OnHardwareGpu(), "needs VP_TEST_GPU=hardware"))
+				return;
+
+			GpuDevice dev;
+			Assert::IsTrue(dev.Create(), L"Could not create the libplacebo hardware test device");
+			pl_gpu gpu = dev.Gpu();
+
+			const int sizes[2][2] = { { 3840, 2160 }, { 1920, 1080 } };
+			for (const auto& sz : sizes)
+			{
+				const int w = sz[0], h = sz[1], cw = w / 2, ch = h / 2;
+				std::vector<uint16_t> yd(static_cast<size_t>(w) * h), cd(static_cast<size_t>(cw) * ch * 2);
+				for (int y = 0; y < h; ++y)
+					for (int x = 0; x < w; ++x)
+						yd[static_cast<size_t>(y) * w + x] = Raw(300.0 + 200.0 * (((x >> 6) + (y >> 6)) & 1) + ((x * 7 + y * 13) & 3));
+				for (int y = 0; y < ch; ++y)
+					for (int x = 0; x < cw; ++x)
+					{
+						const size_t i = (static_cast<size_t>(y) * cw + x) * 2;
+						cd[i] = Raw(500.0 + 60.0 * (((x >> 5) + (y >> 5)) & 1) + ((x * 5 + y * 3) & 3));
+						cd[i + 1] = Raw(520.0 - 40.0 * (((x >> 5) + (y >> 5)) & 1) + ((x * 3 + y * 7) & 3));
+					}
+
+				pl_tex luma = UploadRaw(gpu, w, h, "r16", yd);
+				pl_tex chroma = UploadRaw(gpu, cw, ch, "rg16", cd);
+				ChromaUpscale::Gpu::CflModule module;
+				GrainSplit::Gpu::Splitter pL, pB, pR;
+				pl_timer timer = pl_timer_create(gpu);
+				VpSkeleton::PlTexBackend backend(gpu);
+				VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> arena(backend);
+				struct HwCleanup
+				{
+					pl_gpu gpu;
+					VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend>* arena;
+					ChromaUpscale::Gpu::CflModule* mod;
+					GrainSplit::Gpu::Splitter* sL;
+					GrainSplit::Gpu::Splitter* sB;
+					GrainSplit::Gpu::Splitter* sR;
+					pl_timer* timer;
+					pl_tex* luma;
+					pl_tex* chroma;
+					HwCleanup(pl_gpu g, VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend>* a, ChromaUpscale::Gpu::CflModule* m,
+						GrainSplit::Gpu::Splitter* sl, GrainSplit::Gpu::Splitter* sb, GrainSplit::Gpu::Splitter* sr,
+						pl_timer* t, pl_tex* l, pl_tex* c)
+						: gpu(g), arena(a), mod(m), sL(sl), sB(sb), sR(sr), timer(t), luma(l), chroma(c) {}
+					~HwCleanup()
+					{
+						if (arena) arena->Release();
+						if (mod) mod->Release(gpu);
+						if (sL) sL->Release(gpu);
+						if (sB) sB->Release(gpu);
+						if (sR) sR->Release(gpu);
+						if (timer && *timer) pl_timer_destroy(gpu, timer);
+						if (chroma && *chroma) pl_tex_destroy(gpu, chroma);
+						if (luma && *luma) pl_tex_destroy(gpu, luma);
+					}
+					HwCleanup(const HwCleanup&) = delete;
+					HwCleanup& operator=(const HwCleanup&) = delete;
+				} cleanup(gpu, &arena, &module, &pL, &pB, &pR, &timer, &luma, &chroma);
+
+				Assert::IsTrue(luma != nullptr && chroma != nullptr, L"hardware timing source textures uploaded");
+
+				// Build shared grain products once outside the timed loop (also probing pl_timer GPU timestamps).
+				const double cu = 64.0 / 65535.0;
+				const double lines = static_cast<double>(h), linesC = static_cast<double>(ch);
+				GrainSplit::Gpu::Options splitOpts;
+				splitOpts.timer = timer;
+				const bool splitOk =
+					pL.Compute(gpu, dev.dispatch, luma, 0, cu, ChromaUpscale::Scale(lines), ChromaUpscale::BlockPx(lines), GrainSplit::Params(), splitOpts) &&
+					pB.Compute(gpu, dev.dispatch, chroma, 0, cu, ChromaUpscale::Scale(linesC), ChromaUpscale::BlockPx(linesC), GrainSplit::Params(), splitOpts) &&
+					pR.Compute(gpu, dev.dispatch, chroma, 1, cu, ChromaUpscale::Scale(linesC), ChromaUpscale::BlockPx(linesC), GrainSplit::Params(), splitOpts);
+				Assert::IsTrue(splitOk, L"shared grain products computed on hardware GPU");
+				pl_gpu_finish(gpu);
+
+				uint64_t plTimerTotalNs = 0;
+				if (timer)
+				{
+					uint64_t q = 0;
+					while ((q = pl_timer_query(gpu, timer)) != 0)
+						plTimerTotalNs += q;
+					Assert::IsTrue(plTimerTotalNs > 0, L"hardware pl_timer must report positive GPU nanoseconds");
+				}
+
+				const auto reqs = ChromaUpscale::Gpu::CflModule::ArenaRequests(gpu, w, h, cw, ch, lines, linesC, false);
+				Assert::IsFalse(reqs.empty(), L"hardware arena requests must be non-empty");
+				Assert::IsTrue(arena.Reserve(VpSkeleton::PlanArena(reqs, VpSkeleton::Tier::T2)), L"hardware arena reserve");
+
+				RegionEvidence::GrainProduct sharedProduct;
+				sharedProduct.gpu[0] = &pL.Out(); sharedProduct.gpu[1] = &pB.Out(); sharedProduct.gpu[2] = &pR.Out();
+				const pl_frame src = Frame2(luma, chroma, -0.5, 0.0);
+				ChromaUpscale::Gpu::Params gp;
+				gp.settings.mode = ChromaUpscale::Mode::Cfl;
+				gp.grain = RegionEvidence::GrainView(&sharedProduct);
+				gp.arena = &arena;
+
+				// 3 warm-up frames, then 20 timed frames bracketing CflModule::Apply with pl_gpu_finish.
+				for (int k = 0; k < 3; ++k)
+				{
+					pl_frame out{};
+					arena.BeginFrame();
+					Assert::IsTrue(module.Apply(gpu, dev.dispatch, src, gp, out), Wide(module.LastError()).c_str());
+				}
+				pl_gpu_finish(gpu);
+
+				std::vector<double> ms;
+				ms.reserve(20);
+				for (int k = 0; k < 20; ++k)
+				{
+					pl_frame out{};
+					arena.BeginFrame();
+					pl_gpu_finish(gpu);
+					const auto t0 = std::chrono::steady_clock::now();
+					Assert::IsTrue(module.Apply(gpu, dev.dispatch, src, gp, out), Wide(module.LastError()).c_str());
+					pl_gpu_finish(gpu);
+					const auto t1 = std::chrono::steady_clock::now();
+					Assert::AreEqual(std::string("ok"), module.Status(), L"hardware timing must use shared grain products");
+					Assert::IsTrue(out.planes[1].texture != nullptr &&
+						out.planes[1].texture->params.w == w && out.planes[1].texture->params.h == h,
+						L"hardware CfL output must be full luma resolution");
+					ms.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
+				}
+				std::sort(ms.begin(), ms.end());
+				const double medianMs = ms[ms.size() / 2];
+				Assert::IsTrue(std::isfinite(medianMs) && medianMs > 0.0,
+					L"hardware CfL median GPU duration must be finite and positive");
+				Assert::AreEqual(uint64_t(0), arena.Exhausted(), L"hardware scratch arena must not exhaust");
+
+				char text[256];
+				std::snprintf(text, sizeof text,
+					"Q#8 HW CfL %dx%d 4:2:0 (shared grain + arena): median %.3f ms (min %.3f ms), split pl_timer %.3f ms, VRAM %.1f MB",
+					w, h, medianMs, ms.front(), static_cast<double>(plTimerTotalNs) * 1e-6,
+					ChromaUpscale::Gpu::CflModule::TextureBytes(w, h, cw, ch) / 1048576.0);
+				Logger::WriteMessage(text);
+			}
+
+			// Sanity output parity on hardware GPU + in-test negative control (Mode::Off leaves subsampled chroma untouched).
+			{
+				const int W = 128, H = 96, cw = 64, ch = 48;
+				const Scene sc = MakeScene(W, H, cw, ch, -0.5, 0.0, 819u, 1.5, 2.0);
+				const ChromaUpscale::Result ref = RunModel(sc, -0.5, 0.0, ActiveRect());
+				const GpuOut hwOut = RunGpu(dev, sc, -0.5, 0.0, ActiveRect());
+				Assert::IsTrue(hwOut.ok, Wide(hwOut.error).c_str());
+				Assert::IsTrue(hwOut.texW == W && hwOut.texH == H, L"hardware CfL output must be full 128x96 size");
+				const double wcb = MaxDiff(hwOut.cb, ref.cb), wcr = MaxDiff(hwOut.cr, ref.cr);
+				LogF("Q#8 HW sanity parity 128x96: Cb max %.4f, Cr max %.4f codes", wcb, wcr);
+				Assert::IsTrue(wcb <= 0.02 && wcr <= 0.02, L"hardware GPU output must match CPU model within 0.02 codes");
+
+				// In-test negative control on exact same frame: Mode::Off must NOT upsample chroma.
+				pl_tex luma = UploadR16(gpu, sc.y);
+				pl_tex chroma = UploadRg16(gpu, sc.cb, sc.cr);
+				ChromaUpscale::Gpu::CflModule offMod;
+				struct OffCleanup
+				{
+					pl_gpu gpu; ChromaUpscale::Gpu::CflModule* m; pl_tex* l; pl_tex* c;
+					OffCleanup(pl_gpu g, ChromaUpscale::Gpu::CflModule* mod, pl_tex* lumaT, pl_tex* chromaT)
+						: gpu(g), m(mod), l(lumaT), c(chromaT) {}
+					~OffCleanup() { if (m) m->Release(gpu); if (c && *c) pl_tex_destroy(gpu, c); if (l && *l) pl_tex_destroy(gpu, l); }
+					OffCleanup(const OffCleanup&) = delete;
+					OffCleanup& operator=(const OffCleanup&) = delete;
+				} offCleanup(gpu, &offMod, &luma, &chroma);
+				Assert::IsTrue(luma != nullptr && chroma != nullptr, L"negative control source textures uploaded");
+				const pl_frame src = Frame2(luma, chroma, -0.5, 0.0);
+				ChromaUpscale::Gpu::Params offParams;   // Mode::Off
+				pl_frame offOut{};
+				Assert::IsTrue(offMod.Apply(gpu, dev.dispatch, src, offParams, offOut), Wide(offMod.LastError()).c_str());
+				Assert::IsTrue(offOut.planes[1].texture == chroma &&
+					offOut.planes[1].texture->params.w == cw && offOut.planes[1].texture->params.h == ch,
+					L"negative control: Mode::Off must pass subsampled 64x48 chroma through untouched");
+			}
 		}
 	};
 }
