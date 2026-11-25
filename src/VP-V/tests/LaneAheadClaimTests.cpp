@@ -379,12 +379,14 @@ namespace LaneAheadClaimTestsNs
 			r.lane.OnRenderStart(0, 4000);
 			Assert::IsTrue(set.StateOf(0) == SlotState::Sealed, L"frame 0 sealed in ring slot 0");
 
-			// Pin frame 0 in ring slot 0, then retire frame 0 so slot 0 becomes Released(0) while pinned.
+			// Pin frame 0 in ring slot 0, then retire past P1's history window so slot 0 becomes Released(0) while pinned.
 			AncestorRef ref;
 			int liveIdx = -2;
 			Assert::IsTrue(set.PinRef(0, &ref, &liveIdx), L"pin frame 0 in ring slot 0");
 			Assert::AreEqual(-1, liveIdx, L"frame 0 resides in ring slot 0, not a live buffer");
-			r.lane.OnFrameRetired(0, 0);
+			const uint64_t releaseLag = uint64_t(st->table->NodeAt(size_t(st->IndexOf(kP1HalfLuma))).history) + st->graph.maxSealLag;
+			for (uint64_t s = 0; s <= releaseLag; ++s)
+				r.lane.OnFrameRetired(s, 0);
 			Assert::IsTrue(set.StateOf(0) == SlotState::Released, L"frame 0 released while still pinned");
 
 			// Deliver source frame R (maps to slot 0): RunAheadNow claims slot 0, sees !Writable, and Unclaims cleanly.
