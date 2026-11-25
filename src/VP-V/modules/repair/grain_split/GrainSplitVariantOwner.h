@@ -382,7 +382,7 @@ namespace GrainSplit
 				luma.width = static_cast<uint32_t>(c.image->planes[0].texture->params.w);
 				luma.height = static_cast<uint32_t>(c.image->planes[0].texture->params.h);
 				VpSkeleton::Dims chroma;
-				if (c.image->repr.sys != PL_COLOR_SYSTEM_RGB)
+				if (pl_color_system_is_ycbcr_like(c.image->repr.sys))
 				{
 					for (int p = 1; p < c.image->num_planes && p < 3; ++p)
 					{

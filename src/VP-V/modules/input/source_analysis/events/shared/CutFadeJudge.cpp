@@ -1625,13 +1625,14 @@ bool ReadMemoVectorTrust(VpSkeleton::SkeletonMemo* memo, uint64_t seq, double* t
     if (memo == nullptr || seq == 0u)
         return false;
 
-    // 1. Prefer P7 camera fit (kP7CameraFit, CPU POD): checks valid + ReasonUsable + confidence >= kVectorVetoMinTrust.
+    // 1. Prefer P7 camera fit (kP7CameraFit, CPU POD): validate complete CRD1/CRD2 wire payload
+    // (derived from CameraRecordPool.h EncodeRecordPod field layout; CameraLinkCore.cpp is not in VideoProcessor-Lib).
     const VpSkeleton::AcquireResult p7 = memo->Acquire(VpSkeleton::kP7CameraFit, seq, VpSkeleton::AcquireForm::Cpu);
-    if (p7.Ok() && p7.cpu != nullptr && p7.cpuBytes >= 241u)
+    if (p7.Ok() && p7.cpu != nullptr && p7.cpuBytes >= sizeof(uint32_t))
     {
         CameraLink::detail::Reader r(p7.cpu, p7.cpuBytes);
         const uint32_t magic = r.Get<uint32_t>();
-        if (magic == CameraLink::kRecordPodMagic || magic == CameraLink::kRecordPodMagicV1)
+        if (r.ok && (magic == CameraLink::kRecordPodMagic || magic == CameraLink::kRecordPodMagicV1))
         {
             (void)r.Get<uint64_t>(); (void)r.Get<uint64_t>(); (void)r.Get<uint64_t>(); (void)r.Get<double>();
             (void)r.Get<uint64_t>(); (void)r.Get<uint64_t>();
@@ -1640,11 +1641,34 @@ bool ReadMemoVectorTrust(VpSkeleton::SkeletonMemo* memo, uint64_t seq, double* t
             const uint8_t reasonByte = r.Get<uint8_t>();
             (void)r.Get<uint8_t>();
             for (int i = 0; i < 9; ++i) (void)r.Get<double>();
-            (void)r.Get<uint8_t>();
+            const uint8_t smoothedType = r.Get<uint8_t>();
             for (int i = 0; i < 9; ++i) (void)r.Get<double>();
             for (int i = 0; i < 4; ++i) (void)r.Get<double>();
             const double confidence = r.Get<double>();
-            if (r.ok && mtype <= CameraLink::kRecordPodLastModelType && reasonByte <= CameraLink::kRecordPodLastReason)
+            // Remaining CRD1 fields (CameraRecordPool.h:76-82 -> full 366 B CRD1 layout).
+            for (int i = 0; i < 9; ++i) (void)r.Get<double>();
+            (void)r.Get<uint8_t>();
+            (void)r.Get<double>(); (void)r.Get<double>();
+            (void)r.Get<uint32_t>(); (void)r.Get<uint32_t>(); (void)r.Get<int64_t>();
+            for (int i = 0; i < 4; ++i) (void)r.Get<int32_t>();
+            (void)r.Get<uint32_t>();
+            bool enumsOk = mtype <= CameraLink::kRecordPodLastModelType
+                && reasonByte <= CameraLink::kRecordPodLastReason
+                && smoothedType <= CameraLink::kRecordPodLastModelType;
+            // Full CRD2 tail (CameraRecordPool.h:84-100 -> full 595 B CRD2 layout).
+            if (magic == CameraLink::kRecordPodMagic)
+            {
+                (void)r.Get<uint8_t>(); (void)r.Get<uint8_t>(); (void)r.Get<uint32_t>();
+                for (int i = 0; i < 10; ++i) (void)r.Get<double>();
+                (void)r.Get<uint8_t>(); (void)r.Get<uint8_t>();
+                const uint8_t objType = r.Get<uint8_t>();
+                enumsOk = enumsOk && (objType <= CameraLink::kRecordPodLastModelType);
+                for (int i = 0; i < 9; ++i) (void)r.Get<double>();
+                (void)r.Get<uint32_t>();
+                (void)r.Get<double>(); (void)r.Get<double>();
+                for (int i = 0; i < 6; ++i) (void)r.Get<double>();
+            }
+            if (r.ok && enumsOk)
             {
                 const CameraModel::Reason reason = static_cast<CameraModel::Reason>(reasonByte);
                 const bool ok = valid && CameraModel::ReasonUsable(reason) && confidence >= kVectorVetoMinTrust;
@@ -1663,7 +1687,7 @@ bool ReadMemoVectorTrust(VpSkeleton::SkeletonMemo* memo, uint64_t seq, double* t
         if (VpMotion::DecodeP2PairRecord(p2.cpu, p2.cpuBytes, rec) && rec.GlobalSet()
             && OpticalFlowTrust::GlobalUsable(rec.global[0]))
         {
-            const bool bwdOk = rec.global[1][3] <= 0.5f || OpticalFlowTrust::GlobalUsable(rec.global[1]);
+            const bool bwdOk = OpticalFlowTrust::GlobalUsable(rec.global[1]);
             if (bwdOk)
             {
                 const double w = static_cast<double>(rec.global[0][3]);

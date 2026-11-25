@@ -552,6 +552,21 @@ namespace CameraLink
 
 	namespace
 	{
+		std::string P9RegistrationText(VpSkeleton::SkeletonMemo::Registration r)
+		{
+			using R = VpSkeleton::SkeletonMemo::Registration;
+			switch (r)
+			{
+			case R::Registered: return "registered";
+			case R::Replaced: return "replaced";
+			case R::NotOwner: return "refused: not the catalog's owning unit";
+			case R::NotInCatalog: return "refused: not in the catalog";
+			case R::AlreadyRegistered: return "refused: another fill is already registered";
+			case R::BadDefaults: return "refused: bad defaults";
+			}
+			return "refused";
+		}
+
 		class P9OwnerModule : public Vpv::Hub::ISkeletonModule
 		{
 		public:
@@ -562,11 +577,50 @@ namespace CameraLink
 					|| m_registered.load(std::memory_order_acquire)
 					|| Vpv::Hub::ExtensionHub::Instance().OriginalPathway(c.host))
 					return false;
-				if (RegisterP9OwnerFill(nullptr, int(VpSkeleton::kMaxCameraLead), &m_counters))
+				auto* demand = static_cast<Vpv::Skeleton::IExternalDemand*>(
+					Vpv::Hub::ExtensionHub::Instance().Query(Vpv::Skeleton::kExternalDemandQueryId));
+				if (demand == nullptr)
+				{
+					std::lock_guard<std::mutex> lock(m_mutex);
+					m_problem = "no skeleton to register with (retried at next frame)";
+					return false;
+				}
+				const VpSkeleton::SkeletonMemo::Registration r = demand->RegisterOwnerFill(
+					VpSkeleton::kP9CameraSmoothed, VpSkeleton::AcquireForm::Cpu, kP9OwnerUnit,
+					MakeP9OwnerFill(int(VpSkeleton::kMaxCameraLead), &m_counters));
+				if (r == VpSkeleton::SkeletonMemo::Registration::Registered
+					|| r == VpSkeleton::SkeletonMemo::Registration::AlreadyRegistered)
+				{
 					m_registered.store(true, std::memory_order_release);
+					std::lock_guard<std::mutex> lock(m_mutex);
+					m_problem.clear();
+				}
+				else
+				{
+					std::lock_guard<std::mutex> lock(m_mutex);
+					m_problem = "P9 owner fill " + P9RegistrationText(r);
+				}
 				return false;
 			}
+			void OnStatus(const RendererExtension::Context&, RendererExtension::StatusKind kind,
+				std::vector<std::string>& lines, const char*, const char*) override
+			{
+				if (kind != RendererExtension::StatusKind::Fallbacks)
+					return;
+				std::string problem;
+				{
+					std::lock_guard<std::mutex> lock(m_mutex);
+					problem = m_problem;
+				}
+				if (!problem.empty())
+					lines.push_back("p9_camera_smoothed_unregistered: " + problem);
+				const uint64_t dec = m_counters.declines.load(std::memory_order_relaxed);
+				if (dec > 0)
+					lines.push_back("p9_camera_smoothed_declined: " + std::to_string(dec) + " owner fill declines");
+			}
 		private:
+			mutable std::mutex m_mutex;
+			std::string m_problem;
 			std::atomic<bool> m_registered{ false };
 			P9OwnerCounters m_counters;
 		};
@@ -574,7 +628,11 @@ namespace CameraLink
 
 	void RegisterP9OwnerModule()
 	{
-		static P9OwnerModule mod;
-		Vpv::Hub::ExtensionHub::Instance().Register(&mod);
+		static bool registered = false;
+		if (registered)
+			return;
+		registered = true;
+		Vpv::Hub::ExtensionHub::Instance().AddModule(
+			std::unique_ptr<Vpv::Hub::ISkeletonModule>(new P9OwnerModule()));
 	}
 }

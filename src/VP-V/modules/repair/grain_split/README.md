@@ -64,7 +64,7 @@ Computed once per frame; readers never recompute it.
 - `GrainGuardGlsl.h` (15b A4): the same law as GLSL - `Defines()` (the constants as `GS_GUARD_*`, formatted by
   `VpvGpu::Define`) and `Functions()` (`gs_guard_violation`, `gs_guard_addback`, `gs_guard_step`).
 - `GrainSplitVariantOwner.h` (15b A1): production GPU variant owner fills for both `kP10GrainSplit` (luma) and `kP10cGrainSplitChroma` (Cb/Cr planes), registered in `HubBootstrap.cpp` via `GrainSplit::Gpu::RegisterGrainSplitOwnerModule()` ahead of `GrainLevelModule` (clean handoff: `GrainLevelModule` sees `AlreadyRegistered` for P10).
-- `P10gCpu.h` (M2#8): CPU owner fill for `kP10gGrainLevel` (ProductId 35) fed from P10 CPU grain level; read by `TemporalDetailModel`'s input monitor with visible fallback when absent.
+- `P10gCpu.h` (M2#8): CPU wire layout/codec (`Encode`/`Decode`) and `Acquire` reader for `kP10gGrainLevel` (ProductId 35) (not an owner fill); read by `TemporalDetailModel`'s input monitor with visible fallback when absent.
 - `BandMemo.h` / `BandMemoFill.h` (U2 P30, M2#0-M2#4): live `BandMemoModule` GPU + CPU owner fills registered in `HubBootstrap.cpp` via `Vpv::GrainBand::RegisterBandMemoModule()`, serving GPU and CPU consumer switches (`Interpolator`, `VpDebander`, `DetailPulse`, `TextureRestore`, `FrameQuality`) with visible fallbacks when absent/unkeyed; U2 duplicate baseline shrunk `27 -> 1`.
 - Tests: see `tests/README.md`.
 

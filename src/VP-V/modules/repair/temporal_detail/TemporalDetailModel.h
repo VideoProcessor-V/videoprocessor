@@ -189,9 +189,41 @@ namespace TemporalDetail
 		// The one law of repair.grain_split (the GPU module's memo variant uses the same).
 		inline GrainSplit::Params SplitParams() { return GrainSplit::DefaultParams(); }
 
-		inline Analysis Analyse(const Plane& y, double scale, int B)
+		inline Analysis Analyse(const Plane& y, double scale, int B, const std::vector<double>* overrideN = nullptr)
 		{
-			GrainSplit::Split sp = GrainSplit::Compute(y, scale, B, SplitParams());
+			const GrainSplit::Params p = SplitParams();
+			GrainSplit::Split sp = GrainSplit::Compute(y, scale, B, p);
+			const size_t nb = static_cast<size_t>(sp.bw) * sp.bh;
+			if (overrideN != nullptr && overrideN->size() == nb)
+			{
+				// Recompute Wiener split (f, s1, s2, clean, grain) consistently from the supplied P10g N_b
+				// using the exact GrainSplit::Compute Wiener law so Y = base + s1 + s2 + grain holds identically.
+				sp.N = *overrideN;
+				const double cs = GrainSplit::DepthScale(p.sourceBits);
+				const double floorE = p.energyFloor * cs * cs;
+				Plane d(y.w, y.h);
+				for (size_t i = 0; i < y.v.size(); ++i)
+					d.v[i] = sp.d1.v[i] + sp.d2.v[i];
+				for (int yy = 0; yy < y.h; ++yy)
+					for (int xx = 0; xx < y.w; ++xx)
+					{
+						double e = 0.0;
+						for (int j = -1; j <= 1; ++j)
+							for (int i = -1; i <= 1; ++i)
+							{
+								const double dv = d.get(xx + i, yy + j);
+								e += dv * dv;
+							}
+						e /= 9.0;
+						const double N = sp.N[static_cast<size_t>(yy / B) * sp.bw + (xx / B)];
+						const double fv = RampMath::Clamp01<double>(1.0 - p.kappa * N / (std::max)(e, floorE));
+						sp.f.at(xx, yy) = fv;
+						sp.s1.at(xx, yy) = fv * sp.d1.at(xx, yy);
+						sp.s2.at(xx, yy) = fv * sp.d2.at(xx, yy);
+						sp.clean.at(xx, yy) = sp.base.at(xx, yy) + sp.s1.at(xx, yy) + sp.s2.at(xx, yy);
+						sp.grain.at(xx, yy) = y.at(xx, yy) - sp.clean.at(xx, yy);
+					}
+			}
 			Analysis a;
 			a.w = y.w; a.h = y.h; a.B = B; a.bw = sp.bw; a.bh = sp.bh;
 			a.y = y;
@@ -203,7 +235,6 @@ namespace TemporalDetail
 			a.N = std::move(sp.N);
 			a.s = Plane(y.w, y.h);
 			for (size_t i = 0; i < a.s.v.size(); ++i) a.s.v[i] = a.s1.v[i] + a.s2.v[i];
-			const size_t nb = static_cast<size_t>(a.bw) * a.bh;
 			a.e1.assign(nb, 0.0); a.e2.assign(nb, 0.0); a.e3.assign(nb, 0.0); a.F.assign(nb, 0.0); a.q.assign(nb, 0.0);
 			for (int by = 0; by < a.bh; ++by)
 				for (int bx = 0; bx < a.bw; ++bx)
@@ -1006,8 +1037,6 @@ namespace TemporalDetail
 		const double peakDecay = std::pow(0.5, 1.0 / Frames(m_set.maxAgeSeconds, hz));
 		const double rise = 1.0 / fRise, fall = 1.0 / fFall;
 
-		Analysis A = Detail::Analyse(in.luma, scale, B);
-
 		// --- 15b A4b: input monitor reads shared P10g (ProductId 35) through owner unit P10gCpu.h ---
 		bool usedP10g = false;
 		std::string p10gWhy;
@@ -1018,33 +1047,37 @@ namespace TemporalDetail
 				monNb, monRetained, monGate, monRho1, p10gWhy))
 			{
 				usedP10g = true;
-				A.N = monNb;
 				++m_p10gHits;
 			}
 			else
 			{
 				++m_p10gFallbacks;
 				m_lastP10gFallbackWhy = p10gWhy;
-				monNb = A.N;
-				monGate.assign(static_cast<size_t>(nb), 0.0);
-				monRho1.assign(static_cast<size_t>(nb), -1.0);
-				monRetained.assign(static_cast<size_t>(nb), 0.0);
-				for (int by = 0; by < bh; ++by)
-					for (int bx = 0; bx < bw; ++bx)
-					{
-						double sumF2 = 0.0;
-						int cnt = 0;
-						for (int yy = by * B; yy < (std::min)(h, (by + 1) * B); ++yy)
-							for (int xx = bx * B; xx < (std::min)(w, (bx + 1) * B); ++xx)
-							{
-								const double fv = A.f.at(xx, yy);
-								sumF2 += fv * fv;
-								++cnt;
-							}
-						const size_t bi = static_cast<size_t>(by) * bw + bx;
-						monRetained[bi] = (cnt > 0 ? sumF2 / static_cast<double>(cnt) : 0.0) * A.N[bi];
-					}
 			}
+		}
+
+		Analysis A = Detail::Analyse(in.luma, scale, B, usedP10g ? &monNb : nullptr);
+		if (!usedP10g)
+		{
+			monNb = A.N;
+			monGate.assign(static_cast<size_t>(nb), 0.0);
+			monRho1.assign(static_cast<size_t>(nb), -1.0);
+			monRetained.assign(static_cast<size_t>(nb), 0.0);
+			for (int by = 0; by < bh; ++by)
+				for (int bx = 0; bx < bw; ++bx)
+				{
+					double sumF2 = 0.0;
+					int cnt = 0;
+					for (int yy = by * B; yy < (std::min)(h, (by + 1) * B); ++yy)
+						for (int xx = bx * B; xx < (std::min)(w, (bx + 1) * B); ++xx)
+						{
+							const double fv = A.f.at(xx, yy);
+							sumF2 += fv * fv;
+							++cnt;
+						}
+					const size_t bi = static_cast<size_t>(by) * bw + bx;
+					monRetained[bi] = (cnt > 0 ? sumF2 / static_cast<double>(cnt) : 0.0) * A.N[bi];
+				}
 		}
 
 		// --- Camera view and the per-block camera labels of this pair ---

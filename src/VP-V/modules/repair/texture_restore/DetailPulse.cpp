@@ -1442,8 +1442,18 @@ for (int q = 0; q < 4; q++) {
 				pin = VpSkeleton::AcquireResult();
 				return false;
 			}
-			if (bt.s4 != nullptr && (bt.s4->params.w != g.gw || bt.s4->params.h != g.gh))
-				bt.s4 = nullptr;
+			if (!bt.hasBands)
+			{
+				why = "P11 published without P10 bands (re_have_split == 0)";
+				pin = VpSkeleton::AcquireResult();
+				return false;
+			}
+			if (bt.s4 == nullptr || bt.s4->params.w != g.gw || bt.s4->params.h != g.gh)
+			{
+				why = "P11 re_s4 missing or grid mismatch";
+				pin = VpSkeleton::AcquireResult();
+				return false;
+			}
 			texOut = bt;
 			p11BlockOut = p11B;
 			return true;

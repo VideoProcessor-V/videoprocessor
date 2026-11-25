@@ -419,10 +419,15 @@ if (q.x < size.x && q.y < size.y)
 		}
 
 		// Acquire shared kBandMemo GPU product for single-component luma plane; false = visible fallback reason in `why`.
-		bool TryAcquireBandMemo(VpSkeleton::SkeletonMemo* memo, uint64_t seq, int planeIndex, pl_tex src,
+		bool TryAcquireBandMemo(VpSkeleton::SkeletonMemo* memo, uint64_t seq, int planeIndex, bool processed, pl_tex src,
 			VpSkeleton::AcquireResult& pin, pl_tex& texOut, std::string& why)
 		{
 			texOut = nullptr;
+			if (processed)
+			{
+				why = "processed plane (stage > 0)";
+				return false;
+			}
 			if (planeIndex != 0 || src->params.format->num_components != 1)
 			{
 				why = "chroma/multi-component plane (band_memo serves single-component luma only)";
@@ -769,7 +774,7 @@ if (q.x < size.x && q.y < size.y)
 			if (!preserve)
 				return true;
 			std::string why;
-			if (TryAcquireBandMemo(memo, seqA, planeIndex, srcA, pinA, lowA, why))
+			if (TryAcquireBandMemo(memo, seqA, planeIndex, processed, srcA, pinA, lowA, why))
 			{
 				++bandMemoHits;
 			}
@@ -786,7 +791,7 @@ if (q.x < size.x && q.y < size.y)
 				return true;
 			}
 			why.clear();
-			if (TryAcquireBandMemo(memo, seqB, planeIndex, srcB, pinB, lowB, why))
+			if (TryAcquireBandMemo(memo, seqB, planeIndex, processed, srcB, pinB, lowB, why))
 			{
 				++bandMemoHits;
 			}

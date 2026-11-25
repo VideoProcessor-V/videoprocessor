@@ -12,6 +12,8 @@
 #include <VP-V/core/SkeletonAcquire.h>
 
 #include <algorithm>
+#include <mutex>
+#include <unordered_map>
 
 namespace VpLaneProducts
 {
@@ -20,6 +22,39 @@ namespace VpLaneProducts
 		constexpr size_t kTerms = 6;             // S0..S4 and aux
 		constexpr size_t kBandsTermCompact = 2;  // P10 Compact: split A, split B, blocks (N, e3, e1, e2)
 		constexpr size_t kBandsTermFull = 1;     // P10 Full: split, blocks (N, e3, e1, e2)
+
+		// Per-slot bands-validity registry keyed by P11's re_s2 pl_tex handle so ExtractP11BandTextures
+		// knows whether RegionStatsKernel::Step ran with P10 bands bound (re_have_split == 1) or without
+		// (m_noBands == true -> re_s2.xyz == 0, re_s4.w == -1). Entries are cleared on Release / destruction.
+		std::mutex& SlotBandsMutex()
+		{
+			static std::mutex m;
+			return m;
+		}
+		std::unordered_map<const void*, bool>& SlotBandsRegistry()
+		{
+			static std::unordered_map<const void*, bool> reg;
+			return reg;
+		}
+		void RecordSlotBands(const void* s2Tex, bool hasBands, std::vector<const void*>& owned)
+		{
+			if (s2Tex == nullptr)
+				return;
+			{
+				std::lock_guard<std::mutex> lock(SlotBandsMutex());
+				SlotBandsRegistry()[s2Tex] = hasBands;
+			}
+			if (std::find(owned.begin(), owned.end(), s2Tex) == owned.end())
+				owned.push_back(s2Tex);
+		}
+		bool LookupSlotHasBands(const void* s2Tex)
+		{
+			if (s2Tex == nullptr)
+				return false;
+			std::lock_guard<std::mutex> lock(SlotBandsMutex());
+			const auto it = SlotBandsRegistry().find(s2Tex);
+			return it == SlotBandsRegistry().end() ? true : it->second;
+		}
 	}
 
 	P11BandTextures ExtractP11BandTextures(const VpSkeleton::AcquireResult& res)
@@ -46,7 +81,26 @@ namespace VpLaneProducts
 		if (out.s4 != nullptr && (!out.s4->params.sampleable || out.s4->params.w <= 0 || out.s4->params.h <= 0
 			|| out.s4->params.format == nullptr || out.s4->params.format->num_components < 4))
 			out.s4 = nullptr;
+		out.hasBands = out.s2 != nullptr && LookupSlotHasBands(out.s2);
 		return out;
+	}
+
+	RegionStatsKernel::~RegionStatsKernel()
+	{
+		ClearRecordedSlots();
+	}
+
+	void RegionStatsKernel::ClearRecordedSlots()
+	{
+		if (m_recordedS2.empty())
+			return;
+		{
+			std::lock_guard<std::mutex> lock(SlotBandsMutex());
+			auto& reg = SlotBandsRegistry();
+			for (const void* k : m_recordedS2)
+				reg.erase(k);
+		}
+		m_recordedS2.clear();
 	}
 
 	VpSkeleton::ProductTexLayout RegionStatsKernel::Layout(VpSkeleton::Dims dims) const
@@ -189,13 +243,18 @@ namespace VpLaneProducts
 			VpvGpu::Storage("re_s3", c.out[3]), VpvGpu::Storage("re_s4", c.out[4]), VpvGpu::Storage("re_s5", c.out[5]) };
 		if (!VpvGpu::Pass(c.dispatch, "VideoProcessor P11 region block statistics", m_header, m_body.c_str(), desc, 8, vars, 8,
 				(g.gw + 7) / 8, (g.gh + 7) / 8, 0, 8, 8, c.timer))
+		{
+			RecordSlotBands(c.out[kP11BandEnergyTerm], false, m_recordedS2);
 			return Fail(c, "P11: the stats pass failed to build or dispatch");
+		}
+		RecordSlotBands(c.out[kP11BandEnergyTerm], !m_noBands, m_recordedS2);
 		return true;
 	}
 
 	void RegionStatsKernel::Release(pl_gpu gpu)
 	{
 		(void)gpu;
+		ClearRecordedSlots();
 		if (m_store != nullptr)
 			m_store->Forget(this);   // the store destroys the stand-in
 		m_dummy = nullptr;

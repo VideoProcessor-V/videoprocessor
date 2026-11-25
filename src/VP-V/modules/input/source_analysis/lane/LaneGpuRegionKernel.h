@@ -20,12 +20,13 @@ namespace VpLaneProducts
 	constexpr size_t kP11TensorTerm = 1;       // re_s1 = (jxx, jyy, jxy, lap_e)
 	constexpr size_t kP11BandEnergyTerm = 2;   // re_s2 = (e1, e2, e3, off_lap)
 	constexpr size_t kP11CoverageTerm = 4;     // re_s4 = (in_pic, off_share, vis, N)
-	struct P11BandTextures { pl_tex s2 = nullptr; pl_tex s4 = nullptr; };
+	struct P11BandTextures { pl_tex s2 = nullptr; pl_tex s4 = nullptr; bool hasBands = false; };
 	P11BandTextures ExtractP11BandTextures(const VpSkeleton::AcquireResult& res);
 
 	class RegionStatsKernel : public IProductKernel
 	{
 	public:
+		~RegionStatsKernel() override;
 		VpSkeleton::ProductId Product() const override { return VpSkeleton::kP11RegionBlockStats; }
 		// 6 absolute rgba32f terms at shift 4 (bw x bh): the declaration's 96 B per cell (ProductTexLayout::MatchesDecl).
 		VpSkeleton::ProductTexLayout Layout(VpSkeleton::Dims dims) const override;
@@ -55,9 +56,11 @@ namespace VpLaneProducts
 	private:
 		bool Fail(KernelContext& c, const std::string& why);
 		bool EnsureDummy(pl_gpu gpu);
+		void ClearRecordedSlots();
 
 		pl_tex m_dummy = nullptr;           // the bands stand-in when P10 has none (1 x 1, never read); owned by the texture store
 		IStaticTextures* m_store = nullptr;
+		std::vector<const void*> m_recordedS2;   // P11 re_s2 slot handles tracked in the bands-validity registry
 		std::string m_header, m_body;
 		std::string m_error;
 		std::string m_bandsWhy;

@@ -569,16 +569,31 @@ vec4 p10_base_at(vec2 sp, ivec2 hi, float cu)
 						if (memoGrain.Ok() && memoGrain.gpu.textureSet == nullptr && memoGrain.gpu.resource != nullptr)
 						{
 							const GrainSplit::Gpu::Frame* candidate = GrainSplit::Gpu::FrameOf(memoGrain);
-							if (candidate != nullptr && candidate->split != nullptr && candidate->blocks != nullptr
-								&& (candidate->storage != GrainSplit::Storage::Compact || candidate->splitB != nullptr)
-								&& candidate->w == w && candidate->h == h && candidate->codeUnit > 0.0)
+							const int bits = params.colorDepth > 0 && params.colorDepth < 256
+								? params.colorDepth : GrainSplit::DefaultParams().sourceBits;
+							const double planeCu = VpvGpu::CodeUnit(in, source.repr.bits, bits);
+							const int expectedB = GrainSplit::Gpu::BlockFor(splitScale);
+							const GrainSplit::Gpu::FitResult fit = GrainSplit::Gpu::CheckFit(
+								candidate, w, h, expectedB, splitScale, planeCu, 0, params.sequence);
+							const bool floatPlaneCompact = (candidate != nullptr
+								&& candidate->storage == GrainSplit::Storage::Compact
+								&& in->params.format != nullptr && in->params.format->type == PL_FMT_FLOAT);
+							if (fit == GrainSplit::Gpu::FitResult::Fits && !floatPlaneCompact)
 							{
 								p10Frame = candidate;
 								p10Cu = static_cast<float>(candidate->codeUnit);
 							}
 							else
 							{
-								guardFbReason = std::string(plane == 0 ? "kP10GrainSplit" : "kP10cGrainSplitChroma") + " geometry/frame mismatch";
+								const char* prodName = (plane == 0) ? "kP10GrainSplit" : "kP10cGrainSplitChroma";
+								if (floatPlaneCompact)
+									guardFbReason = std::string(prodName) + " Compact storage cannot represent float BTB/WTW";
+								else if (fit == GrainSplit::Gpu::FitResult::Stale)
+									guardFbReason = std::string(prodName) + " stale (version/sequence mismatch)";
+								else if (fit == GrainSplit::Gpu::FitResult::WrongSize)
+									guardFbReason = std::string(prodName) + " geometry/codeUnit/component mismatch";
+								else
+									guardFbReason = std::string(prodName) + " frame textures missing";
 								memoGrain = VpSkeleton::AcquireResult();
 							}
 						}

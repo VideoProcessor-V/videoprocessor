@@ -18,7 +18,7 @@
 //   width/height  VariantKey size axis: the plane's dims in samples (needed by the CPU form; both or none)
 //   sigmaMilli + param0   sigma px = (sigmaMilli * 1000 + param0) / 1e6 (param0 = 0..999 micro-pixels; 1e-6 px resolution)
 //   param1    bit 0 edge (0 Replicate, 1 Reflect), bit 1 law (0 Taps, 1 Low), bit 2 minOne cleared (0 = at least one tap),
-//             bits 3..4 factor (0 = 3.0, 1 = 2.0, 2 = 4.0, 3 = 2.5), bit 5 eps (0 = none, 1 = 1e-9)
+//             bits 3..4 + bit 6 factor (0 = 3.0, 1 = 2.0, 2 = 4.0, 3 = 2.5, 4 [bit 6] = 3.5), bit 5 eps (0 = none, 1 = 1e-9)
 // A key outside this vocabulary does not decode (FromVariant false) and the fill declines it visibly.
 #include <VP-V/core/VariantKey.h>
 #include <VP-V/modules/repair/grain_split/shared/BandFromBase.h>
@@ -33,7 +33,7 @@ namespace VpUnit
 namespace BandMemo
 {
 	// Bump on ANY change of the codec or of the emitted pass text.
-	constexpr uint32_t kUnitVersion = 1;
+	constexpr uint32_t kUnitVersion = 2;
 
 	enum class Stage : uint8_t { Full = 0, Half = 1 };
 	enum class Law : uint8_t { Taps = 0, Low = 1 };
@@ -63,11 +63,12 @@ namespace BandMemo
 	constexpr uint32_t kMicroPerMilli = kMicroPerPx / kMilliPerPx;
 	constexpr double kMinSigmaPx = 0.5 / double(kMicroPerPx);
 	constexpr double kMaxSigmaPx = 4.0e6;
-	constexpr double kFactors[4] = { 3.0, 2.0, 4.0, 2.5 };
+	constexpr double kFactors[5] = { 3.0, 2.0, 4.0, 2.5, 3.5 };
+	constexpr size_t kFactorCount = sizeof(kFactors) / sizeof(kFactors[0]);
 
 	inline int FactorIndex(double f)
 	{
-		for (int i = 0; i < 4; ++i)
+		for (int i = 0; i < int(kFactorCount); ++i)
 			if (std::fabs(kFactors[i] - f) < 1e-12)
 				return i;
 		return -1;
@@ -109,7 +110,9 @@ namespace BandMemo
 		if (k.edge == BandFromBase::EdgeMode::Reflect) p1 |= 1u;
 		if (k.law == Law::Low) p1 |= 2u;
 		if (!k.minOne) p1 |= 4u;
-		p1 = static_cast<uint16_t>(p1 | (FactorIndex(k.factor) << 3));
+		const uint32_t fi = static_cast<uint32_t>(FactorIndex(k.factor));
+		p1 = static_cast<uint16_t>(p1 | ((fi & 3u) << 3));
+		if (fi >= 4u) p1 |= 64u;
 		if (k.eps != 0.0) p1 |= 32u;
 		v.param1 = p1;
 		return v;
@@ -127,7 +130,10 @@ namespace BandMemo
 		if ((v.width == 0u) != (v.height == 0u))
 			return false;
 		if (v.scale > 1u || v.precision != 0 || v.codeUnit != 0 || v.HasCrop()
-			|| v.cropX != 0u || v.cropY != 0u || v.cropW != 0u || v.cropH != 0u || v.param1 >= 64u)
+			|| v.cropX != 0u || v.cropY != 0u || v.cropW != 0u || v.cropH != 0u || v.param1 >= 128u)
+			return false;
+		const uint32_t fi = ((v.param1 >> 3) & 3u) | ((v.param1 & 64u) ? 4u : 0u);
+		if (fi >= kFactorCount)
 			return false;
 		BandKey k;
 		k.resolution = v.scale == 1u ? Stage::Half : Stage::Full;
@@ -139,7 +145,7 @@ namespace BandMemo
 		k.edge = (v.param1 & 1u) ? BandFromBase::EdgeMode::Reflect : BandFromBase::EdgeMode::Replicate;
 		k.law = (v.param1 & 2u) ? Law::Low : Law::Taps;
 		k.minOne = (v.param1 & 4u) == 0u;
-		k.factor = kFactors[(v.param1 >> 3) & 3u];
+		k.factor = kFactors[fi];
 		k.eps = (v.param1 & 32u) ? 1e-9 : 0.0;
 		if (!Encodable(k))
 			return false;
