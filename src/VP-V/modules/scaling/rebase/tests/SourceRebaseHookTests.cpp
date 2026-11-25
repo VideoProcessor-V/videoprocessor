@@ -1174,6 +1174,227 @@ namespace VideoProcessorTest
 			}
 		}
 
+		TEST_METHOD(EveryPlaneFallbackIsNamedInTheFormatNote)
+		{
+			// GEM-072 (Q#5): SourceRebase::Module::FormatNote() must preserve EVERY plane's
+			// fallback entry separated by "; " (never letting plane 1 overwrite plane 0),
+			// start fresh on every Apply call, and clear back to "" once full precision is
+			// restored on the exact same module instance.
+			const int k = KernelInverse::Find("lanczos3");
+			Assert::IsTrue(k >= 0, L"lanczos3 kernel-inverse candidate must exist");
+
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo test device");
+			pl_gpu gpu = fixture.Gpu();
+
+			struct ScopedFmtCapsMask
+			{
+				struct SavedCaps
+				{
+					pl_fmt_t* fmt;
+					enum pl_fmt_caps caps;
+				};
+				std::vector<SavedCaps> saved;
+
+				ScopedFmtCapsMask() = default;
+				ScopedFmtCapsMask(const ScopedFmtCapsMask&) = delete;
+				ScopedFmtCapsMask& operator=(const ScopedFmtCapsMask&) = delete;
+
+				void MaskMatching(pl_gpu targetGpu, enum pl_fmt_type fmtType, int minDepth,
+					enum pl_fmt_caps clearMask)
+				{
+					if (!targetGpu || !targetGpu->formats)
+						return;
+					for (int i = 0; i < targetGpu->num_formats; ++i)
+					{
+						pl_fmt f = targetGpu->formats[i];
+						if (!f || f->type != fmtType || f->component_depth[0] < minDepth)
+							continue;
+						if ((static_cast<unsigned>(f->caps) & static_cast<unsigned>(clearMask)) == 0u)
+							continue;
+						pl_fmt_t* mut = const_cast<pl_fmt_t*>(f);
+						SavedCaps entry{};
+						entry.fmt = mut;
+						entry.caps = mut->caps;
+						saved.push_back(entry);
+						mut->caps = static_cast<enum pl_fmt_caps>(
+							static_cast<unsigned>(mut->caps) & ~static_cast<unsigned>(clearMask));
+					}
+				}
+
+				~ScopedFmtCapsMask()
+				{
+					// Restore in reverse order so even overlapping masks unwind cleanly
+					// on both normal exit and assertion failure.
+					for (size_t i = saved.size(); i > 0; --i)
+						saved[i - 1].fmt->caps = saved[i - 1].caps;
+				}
+			};
+
+			struct ScopedRebaseResources
+			{
+				pl_gpu gpu = nullptr;
+				pl_dispatch dispatch = nullptr;
+				pl_tex lumaTex = nullptr;
+				pl_tex chromaTex = nullptr;
+				SourceRebase::Module rebase;
+
+				ScopedRebaseResources() = default;
+				ScopedRebaseResources(const ScopedRebaseResources&) = delete;
+				ScopedRebaseResources& operator=(const ScopedRebaseResources&) = delete;
+
+				~ScopedRebaseResources()
+				{
+					if (gpu)
+					{
+						rebase.Release(gpu);
+						if (lumaTex) pl_tex_destroy(gpu, &lumaTex);
+						if (chromaTex) pl_tex_destroy(gpu, &chromaTex);
+					}
+					if (dispatch)
+						pl_dispatch_destroy(&dispatch);
+				}
+			};
+
+			ScopedRebaseResources res;
+			res.gpu = gpu;
+			res.dispatch = pl_dispatch_create(fixture.Log(), gpu);
+			Assert::IsNotNull(res.dispatch, L"pl_dispatch creation");
+
+			const int W = 64, H = 64;
+			std::vector<uint16_t> lumaData(static_cast<size_t>(W) * H, 32768u);
+			std::vector<uint16_t> chromaData(static_cast<size_t>(W / 2) * (H / 2) * 2, 32768u);
+
+			pl_tex_params lp{};
+			lp.w = W;
+			lp.h = H;
+			lp.format = pl_find_named_fmt(gpu, "r16");
+			lp.sampleable = true;
+			lp.initial_data = lumaData.data();
+
+			pl_tex_params cp{};
+			cp.w = W / 2;
+			cp.h = H / 2;
+			cp.format = pl_find_named_fmt(gpu, "rg16");
+			cp.sampleable = true;
+			cp.initial_data = chromaData.data();
+
+			Assert::IsTrue(lp.format != nullptr && cp.format != nullptr, L"r16/rg16 source formats must exist");
+			res.lumaTex = pl_tex_create(gpu, &lp);
+			res.chromaTex = pl_tex_create(gpu, &cp);
+			Assert::IsTrue(res.lumaTex != nullptr && res.chromaTex != nullptr, L"source planes creation");
+
+			pl_frame source{};
+			source.num_planes = 2;
+			source.planes[0].texture = res.lumaTex;
+			source.planes[0].components = 1;
+			source.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+			source.planes[1].texture = res.chromaTex;
+			source.planes[1].components = 2;
+			source.planes[1].component_mapping[0] = PL_CHANNEL_CB;
+			source.planes[1].component_mapping[1] = PL_CHANNEL_CR;
+			source.crop = { 0.0f, 0.0f, static_cast<float>(W), static_cast<float>(H) };
+
+			res.rebase.SetKernel(k);
+			res.rebase.separable = true;
+
+			auto assertTwoPlaneNote = [](const std::string& note, const char* expectPlane0,
+				const char* expectPlane1, const char* expectDetail, const wchar_t* context) {
+				const std::wstring wnote = ExtendedRangeGpuProbe::ToWide(note);
+				const size_t sep = note.find("; ");
+				Assert::IsTrue(sep != std::string::npos,
+					(std::wstring(context) + L": expected '; ' separator between plane fallback notes, got: " + wnote).c_str());
+				Assert::IsTrue(note.find("; ", sep + 2) == std::string::npos,
+					(std::wstring(context) + L": expected exactly two '; '-separated entries (no stale note leak), got: " + wnote).c_str());
+				const std::string firstEntry = note.substr(0, sep);
+				const std::string secondEntry = note.substr(sep + 2);
+				Assert::IsTrue(firstEntry.find(expectPlane0) != std::string::npos,
+					(std::wstring(context) + L": plane 0 fallback missing before '; ', got: " + wnote).c_str());
+				Assert::IsTrue(secondEntry.find(expectPlane1) != std::string::npos,
+					(std::wstring(context) + L": plane 1 fallback missing after '; ', got: " + wnote).c_str());
+				Assert::IsTrue(firstEntry.find(expectDetail) != std::string::npos,
+					(std::wstring(context) + L": plane 0 entry missing expected fallback reason, got: " + wnote).c_str());
+				Assert::IsTrue(secondEntry.find(expectDetail) != std::string::npos,
+					(std::wstring(context) + L": plane 1 entry missing expected fallback reason, got: " + wnote).c_str());
+			};
+
+			const auto intermediateWriteCaps = static_cast<enum pl_fmt_caps>(
+				PL_FMT_CAP_STORABLE | PL_FMT_CAP_RENDERABLE);
+
+			// 1. Mask 32-bit float (storable + renderable): both plane 0 (inverse temp) and
+			//    plane 1 (separable temp) must fall back to half float and both must appear
+			//    in FormatNote() separated by "; ".
+			{
+				ScopedFmtCapsMask maskF32;
+				maskF32.MaskMatching(gpu, PL_FMT_FLOAT, 32, intermediateWriteCaps);
+				Assert::IsTrue(!maskF32.saved.empty(), L"32-bit float formats must be present to mask");
+
+				pl_frame out{};
+				Assert::IsTrue(res.rebase.Apply(gpu, res.dispatch, source, 0.5, out),
+					ExtendedRangeGpuProbe::ToWide(res.rebase.LastError()).c_str());
+				Assert::IsTrue(res.rebase.KernelUsed(), L"plane 0 must run the 2-pass kernel inverse");
+
+				const std::string noteF16 = res.rebase.FormatNote();
+				Logger::WriteMessage(("FormatNote (32-bit float masked): " + noteF16 + "\n").c_str());
+				assertTwoPlaneNote(noteF16, "plane 0 (inverse temp)", "plane 1 (separable temp)",
+					"half float: 32-bit float unavailable", L"32-bit float masked");
+			}
+
+			// 2. Mask BOTH 32-bit float AND 16-bit float (storable + renderable): both plane 0
+			//    (inverse temp) and plane 1 (separable temp) must fall back to UNORM and both
+			//    must be named in FormatNote() separated by "; ".
+			{
+				ScopedFmtCapsMask maskAllFloat;
+				maskAllFloat.MaskMatching(gpu, PL_FMT_FLOAT, 16, intermediateWriteCaps);
+				Assert::IsTrue(!maskAllFloat.saved.empty(), L"float formats must be present to mask");
+
+				pl_frame out{};
+				Assert::IsTrue(res.rebase.Apply(gpu, res.dispatch, source, 0.5, out),
+					ExtendedRangeGpuProbe::ToWide(res.rebase.LastError()).c_str());
+				Assert::IsTrue(res.rebase.KernelUsed(), L"plane 0 must run the 2-pass kernel inverse on UNORM fallback");
+
+				const std::string noteUnorm = res.rebase.FormatNote();
+				Logger::WriteMessage(("FormatNote (32-bit + 16-bit float masked): " + noteUnorm + "\n").c_str());
+				assertTwoPlaneNote(noteUnorm, "plane 0 (inverse temp)", "plane 1 (separable temp)",
+					"UNORM fallback: 32-bit and 16-bit float unavailable", L"32-bit + 16-bit float masked");
+			}
+
+			// 3. Mask PL_FMT_CAP_RENDERABLE on 16-bit UNORM formats (r16/rg16): exercises the
+			//    per-plane non-renderable float-fallback path on both planes 0 and 1, ensuring
+			//    plane 1 does not overwrite plane 0's note.
+			{
+				ScopedFmtCapsMask maskUnormRender;
+				maskUnormRender.MaskMatching(gpu, PL_FMT_UNORM, 16, PL_FMT_CAP_RENDERABLE);
+				Assert::IsTrue(!maskUnormRender.saved.empty(), L"16-bit UNORM renderable formats must be present to mask");
+
+				pl_frame out{};
+				Assert::IsTrue(res.rebase.Apply(gpu, res.dispatch, source, 0.5, out),
+					ExtendedRangeGpuProbe::ToWide(res.rebase.LastError()).c_str());
+
+				const std::string noteNonRenderable = res.rebase.FormatNote();
+				Logger::WriteMessage(("FormatNote (16-bit UNORM non-renderable): " + noteNonRenderable + "\n").c_str());
+				assertTwoPlaneNote(noteNonRenderable, "plane 0:", "plane 1:",
+					"not renderable", L"16-bit UNORM non-renderable");
+			}
+
+			// 4. In-test negative control: with all format caps restored by RAII, re-running
+			//    Apply on the EXACT SAME SourceRebase::Module and frame must take the full
+			//    32-bit float intermediate / native 16-bit UNORM plane path and clear
+			//    FormatNote() back to "" (proving the note reflects live per-call fallbacks
+			//    and never leaks stale fallback text).
+			Assert::IsFalse(res.rebase.FormatNote().empty(),
+				L"negative control precondition: FormatNote must be non-empty before full-precision restore");
+			{
+				pl_frame out{};
+				Assert::IsTrue(res.rebase.Apply(gpu, res.dispatch, source, 0.5, out),
+					ExtendedRangeGpuProbe::ToWide(res.rebase.LastError()).c_str());
+				Assert::IsTrue(res.rebase.KernelUsed(), L"restored full-precision path must run kernel inverse");
+				Assert::IsTrue(res.rebase.FormatNote().empty(),
+					(L"negative control: restoring 32-bit float and UNORM caps must clear FormatNote to empty, got: " +
+						ExtendedRangeGpuProbe::ToWide(res.rebase.FormatNote())).c_str());
+			}
+		}
+
 	private:
 		static void DownloadRebasedPlane(pl_gpu gpu, pl_tex tex, int components, std::vector<float>& values)
 		{
