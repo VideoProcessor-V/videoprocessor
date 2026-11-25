@@ -15,6 +15,7 @@
 // C++14: included by VideoProcessor-Lib code.
 #pragma once
 
+#include <VP-V/core/AheadCeiling.h>
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/modules/motion/estimation/GapSeed.h>
 #include <VP-V/modules/motion/estimation/OnDemandEstimate.h>
@@ -81,6 +82,13 @@ namespace VpMotion
 			bool skipped = false;              // on a false return: the matcher skipped the pair (a cut / flash)
 		};
 		virtual bool LiveSeed(Seed& out) const { out = Seed(); return false; }
+		// Y1b: the matcher's SNAPSHOT of the pair before the live one (captured by SnapshotForWarp ahead of an ahead estimate) and the A of the
+		// pair it holds; null / 0 = none or the snapshot lease was lost (the implementer counts that: motion snapshot fallback). Defaults: none.
+		virtual pl_tex SnapField() const { return nullptr; }
+		virtual uint64_t SnapFieldFrom() const { return 0; }
+		// Y1a / Z3: multi-slot snapshot/ahead view (slot 0 delegates to SnapField / SnapFieldFrom by default).
+		virtual pl_tex SnapFieldAt(int slot) const { return slot == 0 ? SnapField() : nullptr; }
+		virtual uint64_t SnapFieldFromAt(int slot) const { return slot == 0 ? SnapFieldFrom() : 0; }
 	};
 
 	// K4: the guidance sink handed to the pre-estimate hook, 1:1 onto the matcher's SetCameraGuidance.
@@ -420,6 +428,20 @@ namespace VpMotion
 		// calls it without a lock); the hook object may be destroyed only after the clear has returned.
 		void SetPreEstimateHook(IPreEstimateHook* hook) override;
 		void SetCameraFitWanted(bool wanted) override;
+		// Y1b: ONE observer of the P2 slot (IVectorEngine::SetP2PublishSink). Adds the validity epoch and whole-frame usability.
+		void SetP2PublishSink(std::function<void(const VpMotion::P2Published&)> sink) override;
+		uint64_t P2SlotGeneration() const override;
+		size_t AheadFieldSeqs(uint64_t* out, size_t cap) const override;
+		// Y1b: the estimate ahead took the matcher's snapshot of the live pair whose A is `liveFrom` (SnapshotForWarp returned true):
+		// the NEXT successful estimate moves that record to a snapshot slot (slot 0 on the matcher). Render thread.
+		void NoteSnapshotTaken(uint64_t liveFrom);
+		// Y1a / Z3: records an ahead verified field stored in matcher snapshot/ahead slot `matcherSlot` (>= 0). Render thread.
+		void NoteAheadField(uint64_t from, uint64_t to, uint64_t epoch, int matcherSlot);
+		// Clears all live + snapshot field records and any pending snapshot marker (resync/reset). Render thread.
+		void ResetFieldRecords();
+		// Rule 1 derivation: 1 live slot (slot 0) + D snapshot/ahead slots (slots 1..D), where D = VpSkeleton::kAheadCeiling
+		// (== LaneAhead::kAheadCeilingLead == 6, verified by static_assert in VectorEngine.cpp). Total = 1 + 6 = 7 slots.
+		static constexpr size_t kFieldSlots = 1u + static_cast<size_t>(VpSkeleton::kAheadCeiling);
 		bool CameraFitWanted() const;
 		// W2-C1 (C1-4) TEST SEAM (rule 25; README "One motion-engine state"): every producer start fails with this reason, as NVOF
 		// does on an adapter or size it cannot serve, without a device (PlanProducer then treats the device as present). Empty (the
@@ -614,9 +636,19 @@ namespace VpMotion
 		std::atomic<IPreEstimateHook*> preEstimateHook_{ nullptr };
 		std::atomic<bool> cameraFitWanted_{ false };   // SK-W stage D: the external CameraFit want, merged into the next decision
 		std::string producerStartFailureForTesting_;   // C1-4 test seam (FailProducerStartsForTesting); empty in the product
-		struct FieldRecord { uint64_t from = 0, to = 0, epoch = 0; };
-		FieldRecord field_;                 // the last successful estimate (render thread)
-		uint64_t eraFirstFrom_ = 0;         // the A of the first successful estimate in field_.epoch
+		struct FieldRecord
+		{
+			uint64_t from = 0, to = 0, epoch = 0;
+			int matcherSlot = -1;   // -1 = live slot (fields_[0]), >= 0 = matcher snapshot/ahead slot (SnapFieldAt / SnapFieldFromAt)
+		};
+		// Y1a / Y1b: slot 0 = LIVE record (last successful estimate), slots 1..D = SNAPSHOT/AHEAD records (newest first).
+		FieldRecord fields_[kFieldSlots];   // render thread
+		uint64_t snapshotOfFrom_ = 0;       // the A of the live pair the last ahead snapshot captured (0 = none pending)
+		FieldRecord& RecordLive();
+		const FieldRecord& RecordLive() const;
+		const FieldRecord& RecordSnapshot(size_t i) const;
+		size_t FindByTo(uint64_t to) const;
+		uint64_t eraFirstFrom_ = 0;         // the A of the first successful estimate in RecordLive().epoch
 		struct GlobalRecord { uint64_t from = 0, to = 0, epoch = 0; bool valid = false; double x = 0, y = 0; };
 		static constexpr size_t kGlobalRing = 16;   // the link may ask about a pair a frame or so after it was taken
 		GlobalRecord global_[kGlobalRing];          // slot = to % kGlobalRing

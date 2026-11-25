@@ -26,7 +26,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <utility>
 
@@ -38,6 +40,15 @@ namespace MotionAhead
 
 namespace VpMotion
 {
+	// Y1b: one published P2 pair as the publish sink sees it (the skeleton's P2 feed claims its lane slot from it).
+	struct P2Published
+	{
+		uint64_t from = 0, to = 0;
+		uint64_t generation = 0;       // the continuity generation the pair was computed (and accepted) under
+		uint64_t epoch = 0;            // the motion-validity epoch at publish (0 = unknown / not set by the slot)
+		bool globalUsable = false;     // whole-frame motion of the pair usable (a FACT, never a publish gate)
+	};
+
 	// The P2 slot: the pairs the producer computed, per (from, to), under the continuity generation (a new generation clears it; a pair
 	// computed in an older generation is refused). Bounded (oldest first out). The ONLY VectorStore of the P2 product.
 	class P2Slot
@@ -45,6 +56,9 @@ namespace VpMotion
 	public:
 		using Store = VectorStore<MotionAhead::FlowPtr>;
 		using Stats = Store::Stats;
+		// Y1b: what one successful publish tells the (single) observer. epoch / globalUsable are filled by the engine's wrapper of the observer
+		// (the slot knows neither); the slot fills from / to / generation.
+		using Observer = std::function<void(const P2Published&, const MotionAhead::FlowPtr&)>;
 
 		explicit P2Slot(size_t capacity = 16) : store_(capacity) {}
 		P2Slot(const P2Slot&) = delete;
@@ -54,10 +68,10 @@ namespace VpMotion
 		uint64_t Generation() const { return store_.Generation(); }
 		void SetGeneration(uint64_t value) { store_.SetGeneration(value); }
 		// False when the generation moved on while the pair was computed (a discontinuity): nothing is stored.
-		bool Publish(uint64_t from, uint64_t to, uint64_t computedGeneration, MotionAhead::FlowPtr flow)
-		{
-			return store_.Put(from, to, computedGeneration, std::move(flow));
-		}
+		// On success the observer (if any) runs AFTER store_.Put, OUTSIDE the store's mutex, under observerMutex_.
+		bool Publish(uint64_t from, uint64_t to, uint64_t computedGeneration, MotionAhead::FlowPtr flow) { MotionAhead::FlowPtr k = flow; if (!store_.Put(from, to, computedGeneration, std::move(flow))) return false; std::lock_guard<std::mutex> c(observerMutex_); if (observer_) { P2Published i; i.from = from; i.to = to; i.generation = computedGeneration; observer_(i, k); } return true; }
+		// ONE observer; an empty function clears it and never returns while a call is in flight.
+		void SetObserver(Observer observer) { std::lock_guard<std::mutex> c(observerMutex_); observer_ = std::move(observer); }
 		// Every pair goes (a producer was started: the slot of an older producer must not be read as its pairs).
 		void Clear() { store_.Prune(UINT64_MAX); }
 
@@ -97,6 +111,8 @@ namespace VpMotion
 
 	private:
 		Store store_;
+		std::mutex observerMutex_;
+		Observer observer_;
 	};
 
 	// SK-MV: when "no pair ahead" becomes a visible fallback. Not a bare frame count: a run must outlast the look-ahead depth at the

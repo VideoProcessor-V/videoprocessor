@@ -16,7 +16,9 @@
 
 #include <libplacebo/gpu.h>
 
+#include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -232,6 +234,13 @@ namespace VpMotion
 		// SK-W stage D: the camera link (through the skeleton's external demand) says the camera fit wants the verified field: the engine
 		// counts it as the consumer VectorDemand::Consumer::CameraFit at its next decision (any thread: an atomic). The default ignores it.
 		virtual void SetCameraFitWanted(bool /*wanted*/) {}
+		// Y1b: ONE observer of every P2 pair the engine's slot accepts (the skeleton's P2 feed). Called after the pair is stored, outside the store's
+		// mutex, on the producer worker; an empty function clears it and does not return while a call is in flight. The default ignores it (fakes unchanged).
+		virtual void SetP2PublishSink(std::function<void(const VpMotion::P2Published&)> /*sink*/) {}
+		// Y1b: the P2 slot's current continuity generation (a pair computed under another one is dropped by the sink's feed). 0 = none.
+		virtual uint64_t P2SlotGeneration() const { return 0; }
+		// Y1b / Z3 (N#5): cached valid verified-field `to` sequences in ascending order (live + snapshot/ahead slots). Default 0 for fakes.
+		virtual size_t AheadFieldSeqs(uint64_t* /*out*/, size_t /*cap*/) const { return 0; }
 		// (a) the refined field of seq (P3r / U15); false = absent.
 		virtual bool RefinedFieldOf(uint64_t /*seq*/, VerifiedField& /*out*/) const { return false; }
 		virtual bool RefinedFieldAvailable() const { return false; }
