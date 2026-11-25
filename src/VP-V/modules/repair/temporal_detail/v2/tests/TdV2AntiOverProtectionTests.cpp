@@ -502,7 +502,7 @@ namespace TdV2AntiOverProtectionNs
 
 				TdV2Plane naiveResid(w, h, 0.0);
 				for (size_t i = 0; i < naiveResid.v.size(); ++i)
-					naiveResid.v[i] = naiveAvg.v[i] - master1.v[i];
+					naiveResid.v[i] = naiveAvg.v[i] - (bFrameNoGrain.v[i] + prevPeakClean.v[i] + nextPeakClean.v[i]) / 3.0;
 				const double naiveFineVar = FineVarRect(naiveResid, texRoi);
 				const double naiveObjSmear = RmsDiffRect(naiveAvg, idealGrainedTarget, objRoi);
 				Assert::IsTrue(naiveFineVar < outResidualFineVar * 0.45 && naiveObjSmear > 35.0,
