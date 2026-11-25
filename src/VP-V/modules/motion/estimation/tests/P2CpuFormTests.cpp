@@ -16,7 +16,7 @@
 #include <VP-V/modules/motion/estimation/P2CpuForm.h>
 #include <VP-V/modules/motion/estimation/P2PairRecord.h>
 #include <VP-V/modules/control/diagnostics/DiagnosticHistory.h>
-#include <VP-V/modules/motion/estimation/global_model/PairGlobalFill.h>
+#include <VP-V/modules/motion/estimation/global_model/PairGlobalGpu.h>
 #include <VP-V/core/FallbackPlainText.h>
 
 #include <cstring>

@@ -86,6 +86,11 @@ namespace MotionFieldAheadZ3TestsNs
 			, store(frames * kW * kH)
 			, count(frames)
 		{
+			VpSkeleton::CardProfile card;
+			card.vramBudgetBytes = 1ull << 30;
+			card.systemRamFreeBytes = 1ull << 30;
+			card.uploadGBps = 10.0;
+			sk.SetCardForTesting(card);
 			sk.SetWorkerThreadsForTesting(false);
 			uint32_t x = 9001u;
 			for (size_t i = 0; i < store.size(); ++i)

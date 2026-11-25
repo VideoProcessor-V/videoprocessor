@@ -253,17 +253,17 @@ namespace SceneReaderContractTestsNs
 				}
 	}
 
-	// Synthetic 50-frame slow fade starting after frame 4 (matching SkeletonModuleTests).
+	// Synthetic slow fade starting after frame 4 (clean affine ramp so U7 v5 576-cell fade law triggers with partial fadeKeep < 1).
 	void ShapeSlowFade(SceneRig& rig)
 	{
 		for (int s = 0; s < int(rig.count); ++s)
 		{
-			const double g = s <= 4 ? 1.0 : (std::max)(0.25, 1.0 - 0.75 * (s - 4) / 50.0);
+			const double g = s <= 4 ? 1.0 : (std::max)(0.10, 1.0 - 0.90 * (s - 4) / 24.0);
 			for (uint32_t y = 0; y < kH; ++y)
 				for (uint32_t x = 0; x < kW; ++x)
 				{
-					const uint32_t h = (x * 73856093u) ^ (y * 19349663u) ^ (uint32_t(s) * 83492791u);
-					const double v = 64.0 + g * (double(128 + 12 * x) - 64.0) + double(int(h % 17u) - 8);
+					const double base = 128.0 + 10.0 * x + 3.0 * y;
+					const double v = 64.0 + g * (base - 64.0);
 					rig.store[size_t(s) * kW * kH + y * kW + x] =
 						uint16_t((std::min)(1023.0, (std::max)(0.0, std::floor(v + 0.5))));
 				}

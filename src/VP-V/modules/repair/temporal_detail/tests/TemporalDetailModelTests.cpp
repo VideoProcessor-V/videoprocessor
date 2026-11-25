@@ -352,8 +352,21 @@ namespace
 	}
 	Run GoTuned(const std::vector<Plane>& frames, const IMotionSource* motion, const Model::Tuning& tune)
 	{
+		// M2#7: bind shared kP10GrainSplit owner fill so the lag-1 grain guard acquires lag-1 P_in from SkeletonMemo.
+		VpSkeleton::SkeletonMemo memo;
+		VpSkeleton::OwnerFill fill;
+		fill.fill = [&frames](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+			if (req.seq >= frames.size()) return false;
+			const Detail::Analysis a = Detail::Analyse(frames[static_cast<size_t>(req.seq)], 1.0, 16);
+			out.bytes = PackCpuGrainPlane(a.grain);
+			return true;
+		};
+		Assert::IsTrue(memo.RegisterOwnerFill(VpSkeleton::kP10GrainSplit, VpSkeleton::AcquireForm::Cpu,
+			VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP10GrainSplit), std::move(fill))
+			== VpSkeleton::SkeletonMemo::Registration::Registered);
 		Model m(Steady());
 		m.SetTuning(tune);
+		m.SetMemo(&memo);
 		return Go(m, frames, motion);
 	}
 	// --- TD-NONFINITE tests: access to Model's private members by explicit instantiation (the language's sanctioned way past

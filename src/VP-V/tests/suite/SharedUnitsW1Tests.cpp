@@ -803,11 +803,14 @@ namespace SharedUnitsW1TestsNs2
 				std::ifstream in(root + f, std::ios::binary);
 				Assert::IsTrue(in.good());
 				const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-				// Reads only: every ".bitrateQuality" must be a plain assignment (WRITE) to a consumer Params struct
-				// ("p.bitrateQuality = quality;" hands the shared view's value to DetailPulse/TextureRestore); any other use is a read of the snapshot field.
+				// Reads only: every ".bitrateQuality" must be a plain assignment (WRITE) to a consumer Params/Inputs struct
+				// ("p.bitrateQuality = quality;" or "dmIn.bitrateQuality = ... SharedQuality(...);"); any other use is a read of the snapshot field.
 				for (size_t at = text.find(".bitrateQuality"); at != std::string::npos; at = text.find(".bitrateQuality", at + 1))
 				{
-					const bool paramsReceiver = at >= 1 && text[at - 1] == 'p' && (at < 2 || !(std::isalnum(static_cast<unsigned char>(text[at - 2])) || text[at - 2] == '_'));
+					const bool pReceiver = at >= 1 && text[at - 1] == 'p' && (at < 2 || !(std::isalnum(static_cast<unsigned char>(text[at - 2])) || text[at - 2] == '_'));
+					const bool dmInReceiver = at >= 4 && text.compare(at - 4, 4, "dmIn") == 0
+						&& (at < 5 || !(std::isalnum(static_cast<unsigned char>(text[at - 5])) || text[at - 5] == '_'));
+					const bool paramsReceiver = pReceiver || dmInReceiver;
 					size_t after = at + std::strlen(".bitrateQuality");
 					while (after < text.size() && (text[after] == ' ' || text[after] == '\t'))
 						++after;
@@ -817,7 +820,7 @@ namespace SharedUnitsW1TestsNs2
 				for (size_t at = text.find("sourceMonitor.SharedQuality("); at != std::string::npos; at = text.find("sourceMonitor.SharedQuality(", at + 1))
 					++sharedReads;
 			}
-			Assert::AreEqual(static_cast<size_t>(3), sharedReads);   // adaptive scaling, deband, detail pulse: one read each
+			Assert::AreEqual(static_cast<size_t>(4), sharedReads);   // adaptive scaling, DM pre-deband, deband, detail pulse: one read each
 		}
 	};
 }

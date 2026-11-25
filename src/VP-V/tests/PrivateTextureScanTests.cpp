@@ -41,6 +41,8 @@ namespace PrivateTextureScanTestsNs
 		// ScalerPass::Module: the per-slot OUTPUT textures (handed to the caller, kept across frames) and the per-slot two-pass temporary.
 		// EXPIRES when the first B1 caller of ScalerPass lands (102b row SCALERPASS-ARENA: caller-supplied out/temp textures from the arena or product store).
 		{ "src/VP-V/modules/scaling/shared/ScalerPass.cpp", "src/VP-V/modules/scaling/shared/README.md" },
+		// Route4k::Module: per-slot OUTPUT blendTex[slot] handed to the caller across frames (migrates alongside ScalerPass).
+		{ "src/VP-V/modules/scaling/route_4k/Route4k.cpp", "src/VP-V/modules/scaling/route_4k/README.md" },
 	};
 
 	static const char* const kScanDirs[] = {

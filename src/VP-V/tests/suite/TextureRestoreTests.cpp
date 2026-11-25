@@ -1520,7 +1520,7 @@ namespace TextureRestoreTestsNs
 				for (int y = 0; y < kH; ++y)
 					for (int x = 0; x < kW; ++x)
 						pl.at(x, y) = img.at(x, y);
-				const GrainSplit::Split sp = GrainSplit::Compute(pl, double(p11B) / 16.0, p11B, GrainSplit::Params());
+				const GrainSplit::Split sp = GrainSplit::Compute(pl, TextureRestore::Scale(kH), p11B, GrainSplit::Params());
 				s2Buf.assign(nb * 4u, 0.0f);
 				s4Buf.assign(nb * 4u, 0.0f);
 				for (size_t i = 0; i < nb; ++i)
