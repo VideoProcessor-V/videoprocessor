@@ -40,15 +40,16 @@ namespace CalibrationLutStage
 		Hook& operator=(const Hook&) = delete;
 
 		// The LUT for this frame (nullptr = the hook does nothing and is not submitted).
-		void SetLut(const pl_custom_lut* value) { lut = value; }
+		void SetLut(const pl_custom_lut* value);
 		const pl_custom_lut* Lut() const { return lut; }
 		const pl_hook* Get() const { return &hook; }
-		unsigned long long Applied() const { return applied; }
-		unsigned long long Failures() const { return failures; }
+		unsigned long long Applied() const;
+		unsigned long long Failures() const;
 		// Frames whose BTB/WTW went through the LUT's edge slope / stayed at slope 1 (a LUT that
 		// cannot be carried; the renderer can show it as a fallback).
-		unsigned long long SlopeApplied() const { return slopeApplied; }
-		unsigned long long SlopeFallbacks() const { return slopeFallbacks; }
+		unsigned long long SlopeApplied() const;
+		unsigned long long SlopeFallbacks() const;
+		bool SlopeFallbackActive() const;
 		// Frees the LUT texture (with the renderer's other GPU resources, before the GPU goes).
 		void Release();
 
@@ -69,5 +70,6 @@ namespace CalibrationLutStage
 		uint64_t slopeSignature = 0;
 		unsigned long long slopeApplied = 0;
 		unsigned long long slopeFallbacks = 0;
+		bool slopeFallbackActive = false;
 	};
 }

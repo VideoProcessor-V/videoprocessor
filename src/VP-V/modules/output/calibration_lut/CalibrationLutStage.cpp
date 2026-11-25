@@ -27,6 +27,38 @@ namespace CalibrationLutStage
 		Release();
 	}
 
+	void Hook::SetLut(const pl_custom_lut* value)
+	{
+		if (!value || value != lut)
+			slopeFallbackActive = false;
+		lut = value;
+	}
+
+	unsigned long long Hook::Applied() const
+	{
+		return applied;
+	}
+
+	unsigned long long Hook::Failures() const
+	{
+		return failures;
+	}
+
+	unsigned long long Hook::SlopeApplied() const
+	{
+		return slopeApplied;
+	}
+
+	unsigned long long Hook::SlopeFallbacks() const
+	{
+		return slopeFallbacks;
+	}
+
+	bool Hook::SlopeFallbackActive() const
+	{
+		return slopeFallbackActive;
+	}
+
 	void Hook::Release()
 	{
 		pl_shader_obj_destroy(&state);
@@ -37,6 +69,7 @@ namespace CalibrationLutStage
 		slopeData = nullptr;
 		slopeSignature = 0;
 		gpu = nullptr;
+		slopeFallbackActive = false;
 	}
 
 	bool Hook::EnsureSlopeTexture(pl_gpu g)
@@ -176,6 +209,7 @@ namespace CalibrationLutStage
 			return failed();
 		++applied;
 		if (slope) ++slopeApplied; else ++slopeFallbacks;
+		slopeFallbackActive = !slope;
 		pl_hook_res res{};
 		res.output = PL_HOOK_SIG_TEX;
 		res.tex = out;

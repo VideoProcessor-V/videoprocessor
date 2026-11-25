@@ -87,6 +87,7 @@ void LibplaceboVideoRenderer::Impl::UpdatePipelineSlots(const RendererSettings& 
 	{
 		VpMotion::ReleaseVpTimeline(dejudderPolicy, [this](const char* what) { LogVpTimeline(what); });
 		ReleaseFallback("timeline");
+		ReleaseFallback("calibration LUT BTB/WTW");
 		vpPhasePlanesValid = false;
 		// PHASE 2 (refs/113 F2): the re-base shader warm-up is idled here too; its per-frame call in the render loop is
 		// gated in Original and would otherwise never clear a warm-up in flight (the "Preparing shaders..." status).
@@ -208,6 +209,7 @@ void LibplaceboVideoRenderer::Impl::ReportRenderErrors()
     {
         const FallbackCatalog::Decision calibration = calibrationHost.AfterRender(hookErrors);
         if (calibration.engaged) EngageFallback(calibration.id.c_str(), calibration.reason);
+        SyncFallback(calibrationHost.SlopeFallbackDecision());
     }
 }
 

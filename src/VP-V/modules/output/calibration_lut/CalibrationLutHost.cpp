@@ -92,9 +92,11 @@ namespace CalibrationLutHost
 		std::string& status)
 	{
 		TakeResult result;
-		stage.SetLut(nullptr);
 		if (!lut)
+		{
+			stage.SetLut(nullptr);
 			return result;
+		}
 		// R1 (calibration_lut_stage = vp): VP applies the LUT as its last colour hook, after the
 		// LED compensation, instead of libplacebo's target LUT (which runs before VP's hooks).
 		// The Original pathway keeps libplacebo's target LUT, as upstream did.
@@ -111,6 +113,7 @@ namespace CalibrationLutHost
 			stageLogged = true;
 			return result;
 		}
+		stage.SetLut(nullptr);
 		if (stageLogged)
 			DebugLog::Log("display calibration LUT: libplacebo target LUT (calibration_lut_stage libplacebo)");
 		stageLogged = false;
@@ -120,7 +123,13 @@ namespace CalibrationLutHost
 
 	void Adapter::NoteSlopeFallbackLogged()
 	{
-		if (stage.SlopeFallbacks() > 0 && !slopeFallbackLogged)
+		const bool active = stage.Lut() != nullptr && !stageFailed && stage.SlopeFallbackActive();
+		if (!active)
+		{
+			slopeFallbackLogged = false;
+			return;
+		}
+		if (!slopeFallbackLogged)
 		{
 			slopeFallbackLogged = true;
 			DebugLog::Log("display calibration LUT: BTB/WTW carried at slope 1");
@@ -135,19 +144,25 @@ namespace CalibrationLutHost
 
 	FallbackCatalog::Decision Adapter::AfterRender(const pl_render_errors& errors)
 	{
-		NoteSlopeFallbackLogged();
 		// A disabled or failing hook reverts to libplacebo's target LUT for the rest of the
 		// renderer instance, visibly (skeleton audit item 5).
 		FallbackCatalog::Decision decision;
 		decision.id = "calibration LUT";
 		if (stageFailed || !stage.Lut())
+		{
+			NoteSlopeFallbackLogged();
 			return decision;
+		}
 		bool disabled = stage.Failures() > 0;
 		for (int i = 0; !disabled && i < errors.num_disabled_hooks; ++i)
 			disabled = errors.disabled_hooks[i] == stage.Get()->signature;
 		if (!disabled)
+		{
+			NoteSlopeFallbackLogged();
 			return decision;
+		}
 		stageFailed = true;
+		NoteSlopeFallbackLogged();
 		return FallbackCatalog::Engaged("calibration LUT",
 			"the VP stage failed; libplacebo's target LUT (before the LED compensation)");
 	}
@@ -160,7 +175,8 @@ namespace CalibrationLutHost
 	FallbackCatalog::Decision Adapter::SlopeFallbackDecision()
 	{
 		NoteSlopeFallbackLogged();
-		return CalibrationLutHost::SlopeFallbackDecision(stage.SlopeFallbacks());
+		const bool active = stage.Lut() != nullptr && !stageFailed && stage.SlopeFallbackActive();
+		return CalibrationLutHost::SlopeFallbackDecision(active ? 1ull : 0ull);
 	}
 
 	FallbackCatalog::Decision Adapter::LutDropped(const std::string& path) const
