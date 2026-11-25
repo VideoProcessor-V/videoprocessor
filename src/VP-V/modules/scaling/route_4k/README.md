@@ -51,6 +51,8 @@ Code location: **migrated**. The authoritative list is `live_files` in [MANIFEST
 - `src/VP-V/modules/scaling/route_4k/Route4k.h`
 - `src/VP-V/modules/scaling/route_4k/Route4k.cpp`
 
+Per-slot output texture `blendTex[slot]` is handed directly to the caller as the stage's output plane and kept across frames (not a per-call scratch temporary); migrates in SA6/SA7/SA8/SA12 alongside `ScalerPass`.
+
 ## Migration directive
 
 Code moves into this folder only when this slot is touched (opportunistic until M1, a dedicated phase after M1, finished by M2). A move = `git mv` + project/include updates + this module's `live_files` + `docs/design/components-master.json` (regenerate with `python tools/check_module_manifests.py --write`) in the SAME commit, with the build, this module's tests and the chain-gate subset passing. Never leave a copy behind; one module per change; never during a release/deploy window. Update this README in the same commit as any slot change.
