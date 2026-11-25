@@ -87,10 +87,9 @@ namespace VpDebander
 		// of td.maps (validity, stability) and coding_evidence: reset 1 = not requested, the debander decides exactly as today
 		// everywhere; a requested engine with a product absent keeps today's deband everywhere and says so (engaged decision).
 		const TdProducts::ReadResult& TemporalDetailRead() const { return tdRead; }
-		// WP9 (wave S2): the repair stack's order is TD -> deband -> contrast recovery (RepairStack::Order) and this debander is the FALLBACK
-		// layer under temporal detail. The plan follows this frame's temporal-detail read; today (nothing requested) it is {deband, contrast
-		// recovery} with no line. When temporal detail is requested but unusable the line says so and why; the host appends it to the
-		// "VP deband" status line (recovers by itself). Not on the per-frame path: built when the status refreshes.
+		// WP9 (wave S2): repair stack order is TD -> deband -> contrast recovery (fallback layer under TD).
+		// Built on status refresh (not per-frame); when TD is requested but unusable the line says so and why,
+		// appended by the host to the "VP deband" status line (recovers by itself).
 		RepairStack::Plan StackPlan() const { return RepairStack::Decide(tdRead.requested, tdRead.usable, tdRead.reason); }
 		std::string StackStatusLine() const { return StackPlan().status; }
 		unsigned long long Failures() const { return failures; }
@@ -98,6 +97,9 @@ namespace VpDebander
 		unsigned long long BandMemoHits() const;
 		unsigned long long BandMemoFallbacks() const;
 		const std::string& LastBandMemoFallback() const;
+		unsigned long long GrainGuardHits() const;
+		unsigned long long GrainGuardFallbacks() const;
+		const std::string& LastGrainGuardFallback() const;
 		static constexpr int kSlotLookAhead = 2;
 		static constexpr int kSlotCrossfade = 3;
 
@@ -107,16 +109,17 @@ namespace VpDebander
 		pl_tex weight[2][PL_MAX_PLANES] = {};   // blur weights (slot 0): this source frame's and the previous one's
 		pl_tex weightDummy = nullptr;           // 1x1 r32f sink bound on non-main slots (reuses the compiled shader, no cold compile)
 		pl_tex guard[kSlots][PL_MAX_PLANES] = {};   // grainGuard: the spatial grain share per 16x16 block
-		pl_tex splitHalf[kSlots][PL_MAX_PLANES] = {}, splitTmp[kSlots][PL_MAX_PLANES] = {};
-		pl_tex splitLow[kSlots][PL_MAX_PLANES] = {}, splitTensor[kSlots][PL_MAX_PLANES] = {};
-		bool SplitLowBand(pl_gpu gpu, pl_dispatch dispatch, pl_tex in, int slot, int plane, int ncomp, double scale, double codeUnit,
+		pl_tex splitHalf[kSlots][PL_MAX_PLANES] = {};
+		pl_tex splitTmp[kSlots][PL_MAX_PLANES] = {};
+		pl_tex splitLow[kSlots][PL_MAX_PLANES] = {};
+		bool SplitLowBand(pl_gpu gpu, pl_dispatch dispatch, pl_tex in, int slot, int plane, double scale,
 			pl_tex acquiredLow, pl_tex& splitLowOut);
 		int curIndex = 0;                        // weight[curIndex] = weightSequence's
 		bool prevValid = false;                  // weight[1 - curIndex] = weightSequence - 1's
 		uint64_t weightSequence = 0;
 		int weightW[PL_MAX_PLANES] = {}, weightH[PL_MAX_PLANES] = {};
-		std::string error, lastFailureError, lastBandMemoFallback;
+		std::string error, lastFailureError, lastBandMemoFallback, lastGrainGuardFallback;
 		TdProducts::ReadResult tdRead;
-		unsigned long long failures = 0, held = 0, bandMemoHits = 0, bandMemoFallbacks = 0;
+		unsigned long long failures = 0, held = 0, bandMemoHits = 0, bandMemoFallbacks = 0, grainGuardHits = 0, grainGuardFallbacks = 0;
 	};
 }
