@@ -515,23 +515,23 @@ if (i == 0u) {
 		const DispatchFn& dispatch, const DispatchPerBlockFn& dispatchPerBlock,
 		std::string& error)
 	{
+		if (serialReference ? !dispatch : !dispatchPerBlock)
+		{
+			error = "global motion: missing dispatch callback";
+			return false;
+		}
+		if (!fromL1 || !toL1 || !fromL2 || !toL2 || !out)
+		{
+			error = "global motion: missing input or output texture";
+			return false;
+		}
 		if (serialReference)
 		{
-			if (!dispatch)
-			{
-				error = "global motion: missing dispatch callback";
-				return false;
-			}
 			const pl_shader_desc descriptors[5] = {
 				Sampled("from_l1", fromL1, false), Sampled("to_l1", toL1, true),
 				Sampled("from_l2", fromL2, false), Sampled("to_l2", toL2, false), Storage("dst", out) };
 			return dispatch("VideoProcessor de-judder: global motion (D1, serial reference)", kGlobalHeader, kGlobalBody,
 				descriptors, 5, nullptr, 0, kWorkgroupSide, kWorkgroupSide, kWorkgroupSide);
-		}
-		if (!dispatchPerBlock)
-		{
-			error = "global motion: missing dispatch callback";
-			return false;
 		}
 		// Parallel: candidate SADs, the pick, the 1/8 candidates, the vector.
 		if (!sad2 || !sad1 || !pick)
@@ -600,9 +600,9 @@ if (i == 0u) {
 			error = "global motion: missing dispatch callback";
 			return false;
 		}
-		if (!out)
+		if (!l1A || !l1B || !l2A || !l2B || !out || !out[0] || !out[1])
 		{
-			error = "global motion: missing output textures";
+			error = "global motion: missing input or output texture";
 			return false;
 		}
 		if (!bothSad2 || !bothSad1 || !bothPick)
