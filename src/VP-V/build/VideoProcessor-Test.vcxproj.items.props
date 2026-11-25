@@ -12,6 +12,9 @@
     <ClCompile Include="..\VP-V\modules\colour\display_mapping\tests\DvMathTests.cpp" />
     <ClCompile Include="..\VP-V\modules\colour\display_mapping\tests\DvDisplayMappingSlotTests.cpp" />
     <ClCompile Include="..\VP-V\modules\colour\display_mapping\tests\DmCurveTests.cpp" />
+    <ClCompile Include="..\VP-V\modules\colour\display_mapping\tests\DmPreDebandTests.cpp">
+      <ExcludedFromBuild Condition="'$(Platform)'=='Win32'">true</ExcludedFromBuild>
+    </ClCompile>
     <ClCompile Include="..\VP-V\modules\colour\appearance\tests\Cam16ModelTests.cpp" />
     <ClCompile Include="..\VP-V\modules\colour\appearance\tests\RoomLightTests.cpp" />
     <ClCompile Include="..\VP-V\modules\colour\appearance\tests\AppearanceShaderGpuTests.cpp">
