@@ -19,6 +19,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -27,6 +28,7 @@ class ConfigFile;
 
 namespace LedDrive
 {
+	class ISerialPort;
 	class LedDriveModule;
 
 	// The compensation hook's parameters from [led_drive] that apply with or without a running
@@ -132,7 +134,8 @@ namespace LedDrive
 		void ResumeAfterTest(const HostContext& context);
 
 		// The forced shutdown's LED stop (IVideoRenderer::StopLedDriveForShutdown). Never waits
-		// for the state lock: the render side's copy first, else the lock if it is free at once.
+		// for the state lock: reads the render side's copy or the host's lockless atomic copy,
+		// plus any module active or queued on lifecycleWorker.
 		bool StopForShutdown(const HostContext& context);
 
 		// Calibration patterns: the drive stops at full light while patterns show; returns true
@@ -145,6 +148,9 @@ namespace LedDrive
 		std::string StatusText() const;
 
 		// Tests.
+		// Overrides the serial-port factory used when Update() constructs a new LedDriveModule
+		// (empty = production ArbitratedSerialPortFactory()). Takes stateMutex.
+		void SetPortFactoryForTest(std::function<std::unique_ptr<ISerialPort>()> factory);
 		std::shared_ptr<LedDriveModule> Module() const;
 		bool Suspended() const { return suspended; }
 		uint32_t HoldoverMs() const { return holdoverMs; }
@@ -181,5 +187,7 @@ namespace LedDrive
 		std::shared_ptr<const std::string> statusRejection;
 		// GEM-190: single background worker for non-blocking Stop()/ordered Start() handoff under stateMutex.
 		std::unique_ptr<LifecycleWorker> lifecycleWorker;
+		// Test-only serial-port factory override (empty in production -> ArbitratedSerialPortFactory()).
+		std::function<std::unique_ptr<ISerialPort>()> portFactoryForTest;
 	};
 }

@@ -397,6 +397,12 @@ namespace LedDrive
 			lifecycleWorker->Shutdown();
 	}
 
+	void DynamicDriveHost::SetPortFactoryForTest(std::function<std::unique_ptr<ISerialPort>()> factory)
+	{
+		std::lock_guard<std::mutex> guard(stateMutex);
+		portFactoryForTest = std::move(factory);
+	}
+
 	std::shared_ptr<LedDriveModule> DynamicDriveHost::Module() const
 	{
 		return std::atomic_load(&module);
@@ -559,13 +565,16 @@ namespace LedDrive
 		signature = next;
 		std::shared_ptr<LedDriveModule> previous = std::move(current);
 		const bool hadPrevious = previous != nullptr;
+		// GEM-190: enqueue Stop() asynchronously on lifecycleWorker BEFORE clearing module/frame so
+		// stateMutex is never held across blocking serial-port teardown and StopForShutdown() cannot
+		// observe a window where `previous` is absent from both module/frame and lifecycleWorker.
+		// Copy `previous` to keep it alive across EnqueueStop() until published references clear.
+		if (previous)
+			lifecycleWorker->EnqueueStop(previous);
 		std::atomic_store(&module, std::shared_ptr<LedDriveModule>());
 		if (context.frame)
 			context.frame->Clear();
-		// GEM-190: enqueue Stop() asynchronously on lifecycleWorker so stateMutex is never held
-		// across blocking serial-port teardown / worker join.
-		if (previous)
-			lifecycleWorker->EnqueueStop(std::move(previous));
+		previous.reset();
 		if (!valid)
 		{
 			DebugLog::Log("Dynamic Drive: configuration rejected (%s); module and gamma boost off",
@@ -586,7 +595,8 @@ namespace LedDrive
 		{
 			// The serial port goes through the LED drive arbiter: VideoProcessor.exe and the
 			// filter never drive the projector at the same time.
-			nextModule = std::make_shared<LedDriveModule>(ReadProjectorConfig(config), led, ArbitratedSerialPortFactory());
+			const SerialPortFactory portFactory = portFactoryForTest ? portFactoryForTest : ArbitratedSerialPortFactory();
+			nextModule = std::make_shared<LedDriveModule>(ReadProjectorConfig(config), led, portFactory);
 			// GEM-190: if a prior Stop() is still in flight on lifecycleWorker, queue Start()
 			// behind it so the previous module closes the port before nextModule opens it;
 			// otherwise start synchronously (cold start).
@@ -643,15 +653,28 @@ namespace LedDrive
 	// lifecycleWorker. Stop() restores full light.
 	bool DynamicDriveHost::StopForShutdown(const HostContext& context)
 	{
+		// Read the published module BEFORE querying lifecycleWorker so an Update() that enqueues
+		// Stop(previous) and then clears module/frame cannot slip between the two observations;
+		// re-read afterwards as well to catch a newly published replacement module.
+		std::shared_ptr<LedDriveModule> runningBefore;
+		if (context.frame)
+			runningBefore = context.frame->Module();
+		if (!runningBefore)
+			runningBefore = std::atomic_load(&module);
 		std::vector<std::shared_ptr<LedDriveModule>> toStop =
 			lifecycleWorker->CancelPendingStartsAndCollectActive();
-		std::shared_ptr<LedDriveModule> running;
+		const auto addUnique = [&toStop](std::shared_ptr<LedDriveModule> candidate)
+		{
+			if (candidate && std::find(toStop.begin(), toStop.end(), candidate) == toStop.end())
+				toStop.push_back(std::move(candidate));
+		};
+		addUnique(std::move(runningBefore));
+		std::shared_ptr<LedDriveModule> runningAfter;
 		if (context.frame)
-			running = context.frame->Module();
-		if (!running)
-			running = std::atomic_load(&module);
-		if (running && std::find(toStop.begin(), toStop.end(), running) == toStop.end())
-			toStop.push_back(std::move(running));
+			runningAfter = context.frame->Module();
+		if (!runningAfter)
+			runningAfter = std::atomic_load(&module);
+		addUnique(std::move(runningAfter));
 		if (toStop.empty())
 			return true;
 		DebugLog::Log("Dynamic Drive: stopping for the forced shutdown (restoring full light)");
