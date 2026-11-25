@@ -1400,6 +1400,9 @@ for (int q = 0; q < 4; q++) {
 
 	uint64_t Module::HistorySequence() const { return impl && impl->decided ? impl->lastSequence : 0; }
 	int Module::HistoryFrames() const { return impl && impl->decided ? impl->behind : 0; }
+	unsigned long long Module::BandMemoHits() const { return bandMemoHits; }
+	unsigned long long Module::BandMemoFallbacks() const { return bandMemoFallbacks; }
+	const std::string& Module::LastBandMemoFallback() const { return lastBandMemoFallback; }
 
 	void Module::Forget()
 	{

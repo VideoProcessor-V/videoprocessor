@@ -68,7 +68,12 @@ namespace TextureRestore
 	inline double HalfSigma(double sigma) { return VpUnit::BandFromBase::HalfSigma(sigma); }
 	inline int HalfRadius(double sigma) { return VpUnit::BandFromBase::Radius(VpUnit::BandFromBase::HalfSigma(sigma), 3.5, true, 1e-9); }
 	inline double HalfWeight(int k, double sigma) { return VpUnit::BandFromBase::Weight(k, VpUnit::BandFromBase::HalfSigma(sigma), HalfRadius(sigma)); }
-	struct CpuBandResult { std::vector<float> samples; bool fromBandMemo = false; std::string fallbackReason; };
+	struct CpuBandResult
+	{
+		std::vector<float> samples;
+		bool fromBandMemo = false;
+		std::string fallbackReason;
+	};
 	CpuBandResult AcquireFineCpuBand(const std::vector<float>& plane, int w, int h, double scale,
 		VpSkeleton::SkeletonMemo* memo = nullptr, uint64_t seq = 0);
 	CpuBandResult AcquireHalfCpuBand(const std::vector<float>& halfPlane, int hw, int hh, double fullSigmaPx,

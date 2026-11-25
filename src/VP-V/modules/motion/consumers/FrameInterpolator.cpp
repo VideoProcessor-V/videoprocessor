@@ -499,6 +499,10 @@ if (q.x < size.x && q.y < size.y)
 			pl_dispatch_destroy(&dispatch);
 	}
 
+	unsigned long long FrameInterpolator::BandMemoHits() const { return bandMemoHits; }
+	unsigned long long FrameInterpolator::BandMemoFallbacks() const { return bandMemoFallbacks; }
+	const std::string& FrameInterpolator::LastBandMemoFallback() const { return lastBandMemoFallback; }
+
 	void FrameInterpolator::Release()
 	{
 		if (gpu)

@@ -2,6 +2,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Out-of-line non-template CPU bodies of VpUnit::CutFadeJudge (see CutFadeJudge.h).
 #include <VP-V/modules/input/source_analysis/events/shared/CutFadeJudge.h>
+#include <VP-V/core/SkeletonAcquire.h>
+#include <VP-V/modules/input/source_analysis/identity/FrameQuality.h>
+#include <VP-V/modules/repair/grain_split/BandMemo.h>
+#include <cstring>
 
 namespace VpUnit
 {
@@ -1587,3 +1591,50 @@ bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur
 
 } // namespace CutFadeJudge
 } // namespace VpUnit
+
+namespace SourceIdentity
+{
+namespace FrameQuality
+{
+namespace detail
+{
+bool TryAcquireTileBands(VpSkeleton::SkeletonMemo* memo, uint64_t seq, int T,
+                         std::vector<float>& g1, std::vector<float>& g2, std::string& fallbackWhy)
+{
+    if (memo == nullptr || seq == 0u || T <= 0)
+    {
+        fallbackWhy = memo == nullptr ? "no skeleton memo bound" : "frame sequence 0 (unkeyed)";
+        return false;
+    }
+    const size_t n = static_cast<size_t>(T) * static_cast<size_t>(T);
+    auto acquireOne = [&](double sigmaPx, std::vector<float>& dst) -> bool {
+        VpUnit::BandMemo::BandKey key;
+        key.resolution = VpUnit::BandMemo::Stage::Full;
+        key.width = static_cast<uint32_t>(T);
+        key.height = static_cast<uint32_t>(T);
+        key.sigmaPx = sigmaPx;
+        key.law = VpUnit::BandMemo::Law::Taps;
+        key.edge = VpUnit::BandFromBase::EdgeMode::Reflect;
+        key.factor = 3.0;
+        key.minOne = false;
+        key.eps = 0.0;
+        const VpSkeleton::AcquireResult res = memo->Acquire(
+            VpSkeleton::kBandMemo, seq, VpSkeleton::AcquireForm::Cpu, VpUnit::BandMemo::ToVariant(key));
+        if (res.Ok() && res.cpu != nullptr && res.cpuBytes == n * sizeof(float))
+        {
+            dst.resize(n);
+            std::memcpy(dst.data(), res.cpu, res.cpuBytes);
+            for (size_t i = 0; i < n; ++i)
+                dst[i] *= 255.0f;
+            return true;
+        }
+        const std::string detailMsg = memo->LastCause(VpSkeleton::kBandMemo);
+        fallbackWhy = std::string("kBandMemo CPU unavailable (") + VpSkeleton::Token(res.cause)
+            + (detailMsg.empty() ? ")" : ": " + detailMsg + ")");
+        return false;
+    };
+    return acquireOne(1.0, g1) && acquireOne(2.0, g2);
+}
+} // namespace detail
+} // namespace FrameQuality
+} // namespace SourceIdentity

@@ -293,6 +293,10 @@ if (b.x < size.x && b.y < size.y) {
 		return threshold;
 	}
 
+	unsigned long long Module::BandMemoHits() const { return bandMemoHits; }
+	unsigned long long Module::BandMemoFallbacks() const { return bandMemoFallbacks; }
+	const std::string& Module::LastBandMemoFallback() const { return lastBandMemoFallback; }
+
 	void Module::Release(pl_gpu gpu)
 	{
 		for (int s = 0; s < kSlots; ++s)

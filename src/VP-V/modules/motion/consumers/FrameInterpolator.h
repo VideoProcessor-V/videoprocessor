@@ -55,9 +55,9 @@ namespace Interpolator
 		unsigned long long Runs() const { return runs; }
 		unsigned long long GrainPreservedRuns() const { return grainPreservedRuns; }
 		unsigned long long Passthroughs() const { return passthroughs; }
-		unsigned long long BandMemoHits() const { return bandMemoHits; }
-		unsigned long long BandMemoFallbacks() const { return bandMemoFallbacks; }
-		const std::string& LastBandMemoFallback() const { return lastBandMemoFallback; }
+		unsigned long long BandMemoHits() const;
+		unsigned long long BandMemoFallbacks() const;
+		const std::string& LastBandMemoFallback() const;
 		void Release();
 
 	private:

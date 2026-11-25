@@ -69,7 +69,12 @@ namespace DetailPulse
 	inline int FineRadius(double scale) { return VpUnit::BandFromBase::BandRadius(VpUnit::BandFromBase::kSigmaFine * scale); }
 	inline double FineWeight(int i, double scale) { return VpUnit::BandFromBase::BandWeight(i, VpUnit::BandFromBase::kSigmaFine * scale); }
 	inline double WideSigma(double scale) { return VpUnit::BandFromBase::kSigmaBase * scale; }
-	struct CpuBandResult { std::vector<float> samples; bool fromBandMemo = false; std::string fallbackReason; };
+	struct CpuBandResult
+	{
+		std::vector<float> samples;
+		bool fromBandMemo = false;
+		std::string fallbackReason;
+	};
 	CpuBandResult AcquireFineCpuBand(const std::vector<float>& plane, int w, int h, double scale,
 		VpSkeleton::SkeletonMemo* memo = nullptr, uint64_t seq = 0);
 	CpuBandResult AcquireWideCpuBand(const std::vector<float>& halfPlane, int hw, int hh, double scale,
@@ -250,9 +255,9 @@ namespace DetailPulse
 		// frames the rule would have fired on had their verdict been confirmed.
 		bool SceneSoftResetInactive() const { return softWatch.Inactive(); }
 		unsigned long long SceneSoftWaiting() const { return softWatch.waiting; }
-		unsigned long long BandMemoHits() const { return bandMemoHits; }
-		unsigned long long BandMemoFallbacks() const { return bandMemoFallbacks; }
-		const std::string& LastBandMemoFallback() const { return lastBandMemoFallback; }
+		unsigned long long BandMemoHits() const;
+		unsigned long long BandMemoFallbacks() const;
+		const std::string& LastBandMemoFallback() const;
 
 	private:
 		struct Impl;

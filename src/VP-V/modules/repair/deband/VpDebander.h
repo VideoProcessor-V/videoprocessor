@@ -95,9 +95,9 @@ namespace VpDebander
 		std::string StackStatusLine() const { return StackPlan().status; }
 		unsigned long long Failures() const { return failures; }
 		unsigned long long HeldFrames() const { return held; }
-		unsigned long long BandMemoHits() const { return bandMemoHits; }
-		unsigned long long BandMemoFallbacks() const { return bandMemoFallbacks; }
-		const std::string& LastBandMemoFallback() const { return lastBandMemoFallback; }
+		unsigned long long BandMemoHits() const;
+		unsigned long long BandMemoFallbacks() const;
+		const std::string& LastBandMemoFallback() const;
 		static constexpr int kSlotLookAhead = 2;
 		static constexpr int kSlotCrossfade = 3;
 
