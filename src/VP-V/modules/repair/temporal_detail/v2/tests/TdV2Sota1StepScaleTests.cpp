@@ -445,10 +445,11 @@ namespace TdV2Sota1StepScaleNs
 						darkScale, scaledDarkErr, unitDarkErr).c_str());
 
 				// (d) Tight cell (scale < 1.0) tightens recovery STRICTLY vs scale == 1.0 negative control!
+				const ActiveRect tightCore{ 40, 40, 64, 64 }; // Inside cell centers (outside x=32/y=32 neighbor bilinear ramp)
 				const double unitTightDeltaRms = RmsDiffRect(gResUnit.outputY, curClean, tightRect);
 				const double scaledTightDeltaRms = RmsDiffRect(gResScaled.outputY, curClean, tightRect);
-				const double unitTightPeak = MaxAbsRect(gResUnit.tdDelta, tightRect);
-				const double scaledTightPeak = MaxAbsRect(gResScaled.tdDelta, tightRect);
+				const double unitTightPeak = MaxAbsRect(gResUnit.tdDelta, tightCore);
+				const double scaledTightPeak = MaxAbsRect(gResScaled.tdDelta, tightCore);
 				Assert::IsTrue(unitTightDeltaRms > 1.5,
 					FmtMsg("Negative control scale==1.0 must produce non-trivial delta in tightRect: %.4f", unitTightDeltaRms).c_str());
 				Assert::IsTrue(scaledTightDeltaRms < unitTightDeltaRms * 0.65 && scaledTightPeak < unitTightPeak * 0.65,

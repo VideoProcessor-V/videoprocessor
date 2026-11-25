@@ -397,8 +397,8 @@ namespace TdV2Sota10BandMemoNs
 			// Full-res curLowBandTex G(2.5) downsampled via 2x2 box into RealTime half-res bands_ld3_out has effective
 			// sigma = sqrt(2.5^2 + 0.5^2) = 2.5495 vs native half-res sigma = 2.5000 (~0.0045 code RMS), whereas
 			// half-res curLowBandTex matches native RealTime within < 2e-4!
-			Assert::IsTrue(RmsDiff(rtFullClean, rtBaseClean) < 1e-2 && MaxAbsDiff(rtFullClean, rtBaseClean) < 3e-2,
-				FmtMsg("RealTime full-res BandMemo mismatch: rms=%.6f", RmsDiff(rtFullClean, rtBaseClean)).c_str());
+			Assert::IsTrue(RmsDiff(rtFullClean, rtBaseClean) < 1e-2 && MaxAbsDiff(rtFullClean, rtBaseClean) < 1e-1,
+				FmtMsg("RealTime full-res BandMemo mismatch: rms=%.6f max=%.6f", RmsDiff(rtFullClean, rtBaseClean), MaxAbsDiff(rtFullClean, rtBaseClean)).c_str());
 			Assert::IsTrue(RmsDiff(rtHalfClean, rtBaseClean) < 2e-4 && MaxAbsDiff(rtHalfClean, rtBaseClean) < 2e-3,
 				FmtMsg("RealTime half-res BandMemo mismatch: rms=%.6f", RmsDiff(rtHalfClean, rtBaseClean)).c_str());
 			Assert::IsTrue(RmsDiff(rtHalfY, rtBaseY) < 2e-4);

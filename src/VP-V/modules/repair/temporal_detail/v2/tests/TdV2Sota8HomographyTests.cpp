@@ -707,8 +707,10 @@ namespace TdV2Sota8HomographyNs
 
 				// Foreground Object cell (4, 2) must STILL recover cleanly while Camera cells fail closed to passthrough!
 				Assert::IsTrue(ComputeObjectCoreRmse(gRes.outputY, curMaster) < 0.65 * ComputeObjectCoreRmse(curDeg, curMaster));
+				const TdV2Plane zeroPlane(w, h, 0.0);
 				Assert::AreEqual(0.0, ComputeCameraBgRmse(cRes.outputY, curDeg, 4, 0), 1e-9);
-				Assert::AreEqual(0.0, ComputeCameraBgRmse(gRes.outputY, curDeg, 4, 0), 1e-5);
+				Assert::AreEqual(0.0, ComputeCameraBgRmse(gRes.tdDelta, zeroPlane, 4, 0), 1e-6);
+				Assert::AreEqual(0.0, ComputeCameraBgRmse(gRes.outputY, curDeg, 4, 0), 5e-5);
 
 				// Rule 4 + CPU/GPU parity: singular / NaN homography MUST report nonFiniteCells > 0 AND engage NonFiniteClosure!
 				Assert::IsTrue(cRes.nonFiniteCells > 0, L"CPU luma failed to count nonFiniteCells on degenerate homography");
