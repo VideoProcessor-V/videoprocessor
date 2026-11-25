@@ -734,6 +734,8 @@ namespace VideoProcessorTest
 				Assert::IsTrue(warp.LastU7SceneFallback().empty(), L"last fallback cleared on U7 hit");
 				Assert::IsNull(warp.FadeStateForTest(), L"private FadeMatch skipped when U7 says !fade");
 				const std::array<float, 3> trust = DownloadFrameTrust(gpu, warp);
+				Assert::IsTrue(trust[0] < settings.minTrustedShare,
+					L"shared U7 cut forces FrameTrust().r < minTrustedShare for downstream cut hold");
 				Assert::AreEqual(0.0f, trust[1], 1e-4f,
 					L"shared U7 cut resets FrameTrust().g (strength scale) to 0.0 even on well-matched frames");
 			}
@@ -773,6 +775,166 @@ namespace VideoProcessorTest
 				const std::array<float, 3> trustNoFade = DownloadFrameTrust(gpu, warpNoFade);
 				Assert::IsTrue(trustNoFade[1] > 0.5f,
 					L"negative control: U7 {cut=false, fade=false} on exact same frames yields FrameTrust().g > 0.5");
+			}
+
+			// 4. Pass B (a): U7 {cut=true, fade=false} with default ramp controls OFF (trustScaleFull=0, motionScaleHi=0, fadeMatch=false)
+			// must still force BOTH FrameTrust().r < minTrustedShare and FrameTrust().g == 0.0.
+			{
+				Dejudder::Settings plainRamp = DejudderTestSettings();
+				plainRamp.trustScaleFull = 0.0f;
+				plainRamp.motionScaleHi = 0.0f;
+				plainRamp.fadeMatch = false;
+
+				Dejudder::MotionWarp warpPlainCut(fixture.Log(), gpu, plainRamp);
+				warpPlainCut.SetSkeletonMemo(nullptr, 5);
+				warpPlainCut.SetSceneVerdictReader([](uint64_t, bool& cutOut, bool& fadeOut, const char**) -> bool {
+					cutOut = true;
+					fadeOut = false;
+					return true;
+				});
+				Assert::IsTrue(warpPlainCut.Estimate(planesA.planes, planesB.planes),
+					ExtendedRangeGpuProbe::ToWide(warpPlainCut.LastError()).c_str());
+				Assert::AreEqual<uint64_t>(1, warpPlainCut.U7SceneHits(), L"default-ramp U7 cut verdict consumed");
+				const std::array<float, 3> trustPlainCut = DownloadFrameTrust(gpu, warpPlainCut);
+				Assert::IsTrue(trustPlainCut[0] < plainRamp.minTrustedShare,
+					L"default-ramp U7 cut forces FrameTrust().r < minTrustedShare");
+				Assert::AreEqual(0.0f, trustPlainCut[1], 1e-4f,
+					L"default-ramp U7 cut forces FrameTrust().g == 0.0 even when strength ramp block is skipped");
+
+				// Negative control on exact same default-ramp settings + frames: {cut=false, fade=false} stays trusted with scale 1.0.
+				Dejudder::MotionWarp warpPlainClean(fixture.Log(), gpu, plainRamp);
+				warpPlainClean.SetSkeletonMemo(nullptr, 6);
+				warpPlainClean.SetSceneVerdictReader([](uint64_t, bool& cutOut, bool& fadeOut, const char**) -> bool {
+					cutOut = false;
+					fadeOut = false;
+					return true;
+				});
+				Assert::IsTrue(warpPlainClean.Estimate(planesA.planes, planesB.planes),
+					ExtendedRangeGpuProbe::ToWide(warpPlainClean.LastError()).c_str());
+				const std::array<float, 3> trustPlainClean = DownloadFrameTrust(gpu, warpPlainClean);
+				Assert::IsTrue(trustPlainClean[0] >= plainRamp.minTrustedShare,
+					L"negative control: default-ramp non-cut keeps FrameTrust().r >= minTrustedShare");
+				Assert::AreEqual(1.0f, trustPlainClean[1], 1e-4f,
+					L"negative control: default-ramp non-cut keeps FrameTrust().g == 1.0");
+			}
+
+			// 5. Pass B (b): settings.fadeMatch=false is honoured even when U7 reports {cut=false, fade=true}.
+			{
+				Dejudder::Settings noFadeMatch = settings;
+				noFadeMatch.fadeMatch = false;
+				Dejudder::MotionWarp warpFadeOff(fixture.Log(), gpu, noFadeMatch);
+				warpFadeOff.SetSkeletonMemo(nullptr, 7);
+				warpFadeOff.SetSceneVerdictReader([](uint64_t, bool& cutOut, bool& fadeOut, const char**) -> bool {
+					cutOut = false;
+					fadeOut = true;
+					return true;
+				});
+				Assert::IsTrue(warpFadeOff.Estimate(planesA.planes, planesB.planes),
+					ExtendedRangeGpuProbe::ToWide(warpFadeOff.LastError()).c_str());
+				Assert::AreEqual<uint64_t>(1, warpFadeOff.U7SceneHits(), L"fadeMatch=false still consumes U7 verdict");
+				Assert::IsNull(warpFadeOff.FadeStateForTest(), L"fadeMatch=false must not run private FadeMatch");
+				const std::array<float, 3> trustFadeOff = DownloadFrameTrust(gpu, warpFadeOff);
+				Assert::IsTrue(trustFadeOff[1] > 0.5f,
+					L"fadeMatch=false must keep FrameTrust().g > 0.5 even when U7 reports fade (paired with Case 3 <= 0.25)");
+			}
+
+			// 6. Pass B (c): lowResAll fade -> non-fade transition (256x1536 triggers HalvesForSearch()).
+			// Frames 1..2 fade steadily so inner->FadeStateTexture() latches an active non-identity fade gain/offset;
+			// Frame 3 switches to U7 {cut=false, fade=false} on an identical steady pair (lr2, lr2): outer must NOT
+			// apply Frame 2's stale inner fadeState to halfB (which would corrupt PixelMask on the identical pair).
+			{
+				const int lrW = 256, lrH = 1536;
+				auto makeFaded = [lrW, lrH](double scale) {
+					return MakeDejudderFrame(lrW, lrH,
+						[scale](int x, int y) {
+							const double base = static_cast<double>(DejudderTexture(x, y));
+							const double v = 4096.0 + scale * (base - 4096.0);
+							return static_cast<uint16_t>((std::max)(0.0, (std::min)(65535.0, v)));
+						},
+						[](int x, int y, int c) { return DejudderTexture(x * 2, y, 7 + c); });
+				};
+				const DejudderFrame lrFrame2 = makeFaded(0.70);
+				DejudderGpuPlanes lr0, lr1, lr2, lr2Steady;
+				UploadDejudderFrame(gpu, makeFaded(1.00), lr0);
+				UploadDejudderFrame(gpu, makeFaded(0.85), lr1);
+				UploadDejudderFrame(gpu, lrFrame2, lr2);
+				UploadDejudderFrame(gpu, lrFrame2, lr2Steady);
+
+				Dejudder::Settings lrSettings = DejudderTestSettings();
+				lrSettings.lowRes = true;
+				lrSettings.lowResAll = true;
+				lrSettings.fadeMatch = true;
+				lrSettings.pixelTrust = true;
+				lrSettings.trustScaleFull = 0.5f;
+				lrSettings.fadeFloor = 0.25f;
+				lrSettings.strengthRate = 1.0f;
+
+				Dejudder::MotionWarp warpLr(fixture.Log(), gpu, lrSettings);
+				warpLr.SetSceneVerdictReader([](uint64_t seq, bool& cutOut, bool& fadeOut, const char**) -> bool {
+					cutOut = false;
+					fadeOut = (seq == 10 || seq == 11);
+					return true;
+				});
+
+				// Frame 1 (seq 10, fade step 1): establishes FadeMatch previousStep.
+				warpLr.SetSkeletonMemo(nullptr, 10);
+				Assert::IsTrue(warpLr.Estimate(lr0.planes, lr1.planes),
+					ExtendedRangeGpuProbe::ToWide(warpLr.LastError()).c_str());
+				Assert::IsTrue(warpLr.SearchHalvings() >= 1,
+					L"precondition: 256x1536 with lowRes=true engages HalvesForSearch()");
+
+				// Frame 2 (seq 11, fade step 2): inner FadeMatch latches fading=1 and non-identity gain into FadeStateTexture().
+				warpLr.SetSkeletonMemo(nullptr, 11);
+				Assert::IsTrue(warpLr.Estimate(lr1.planes, lr2.planes),
+					ExtendedRangeGpuProbe::ToWide(warpLr.LastError()).c_str());
+				pl_tex innerFadeTex = warpLr.FadeStateForTest();
+				Assert::IsNotNull(innerFadeTex, L"precondition: lowResAll inner ran FadeMatch on U7 fade frame");
+				float fadeStateTexel[4] = {};
+				{
+					pl_tex_transfer_params fd{};
+					fd.tex = innerFadeTex;
+					fd.ptr = fadeStateTexel;
+					Assert::IsTrue(pl_tex_download(gpu, &fd), L"inner FadeStateTexture is host-readable");
+				}
+				Assert::IsTrue(fadeStateTexel[2] > 0.5f && std::fabs(fadeStateTexel[0] - 1.0f) > 0.05f,
+					L"negative control precondition: inner FadeStateTexture holds active non-identity fade gain from Frame 2");
+				const std::array<float, 3> trustLr2 = DownloadFrameTrust(gpu, warpLr);
+				Assert::IsTrue(trustLr2[1] <= lrSettings.fadeFloor + 1e-4f,
+					L"lowResAll Frame 2 U7 fade caps FrameTrust().g at fadeFloor");
+
+				// Frame 3 (seq 12, U7 non-fade, steady identical pair lr2 -> lr2Steady): outer must NOT apply Frame 2's stale fadeState.
+				warpLr.SetSkeletonMemo(nullptr, 12);
+				Assert::IsTrue(warpLr.Estimate(lr2.planes, lr2Steady.planes),
+					ExtendedRangeGpuProbe::ToWide(warpLr.LastError()).c_str());
+				Assert::AreEqual<uint64_t>(3, warpLr.U7SceneHits(),
+					L"lowResAll U7SceneHits counts all 3 estimates");
+				const std::array<float, 3> trustLr3 = DownloadFrameTrust(gpu, warpLr);
+				Assert::IsTrue(trustLr3[0] >= lrSettings.minTrustedShare,
+					L"lowResAll non-fade steady pair keeps FrameTrust().r >= minTrustedShare");
+				Assert::IsTrue(trustLr3[1] > 0.5f,
+					L"lowResAll non-fade steady pair restores FrameTrust().g > 0.5");
+
+				pl_tex maskTex = warpLr.PixelMask();
+				Assert::IsNotNull(maskTex, L"lowResAll pixelTrust allocates outer PixelMask");
+				const int mw = maskTex->params.w, mh = maskTex->params.h;
+				const bool f32Mask = maskTex->params.format->component_depth[0] == 32;
+				std::vector<float> maskF32(f32Mask ? static_cast<size_t>(mw) * mh : 0);
+				std::vector<uint16_t> maskF16(f32Mask ? 0 : static_cast<size_t>(mw) * mh);
+				pl_tex_transfer_params md{};
+				md.tex = maskTex;
+				md.ptr = f32Mask ? static_cast<void*>(maskF32.data()) : static_cast<void*>(maskF16.data());
+				Assert::IsTrue(pl_tex_download(gpu, &md), L"outer PixelMask is host-readable");
+				double maskSum = 0.0;
+				int maskCount = 0;
+				for (int y = 32; y < mh - 32; ++y)
+					for (int x = 16; x < mw - 16; ++x)
+					{
+						const size_t idx = static_cast<size_t>(y) * mw + x;
+						maskSum += f32Mask ? maskF32[idx] : HalfBits(maskF16[idx]);
+						++maskCount;
+					}
+				Assert::IsTrue(maskCount > 0 && (maskSum / static_cast<double>(maskCount)) > 0.95,
+					L"lowResAll non-fade steady pair must keep outer PixelMask > 0.95 (stale inner fadeState must not corrupt halfB)");
 			}
 
 			AssertCleanLibplaceboLog(log);

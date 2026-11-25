@@ -3506,14 +3506,15 @@ namespace VideoProcessorTest
 			Assert::IsTrue(landStrict.ren1 == landStrict.ren2, L"RenderedWarp::Run landingCheck=0.5 repeat must be bit-exact");
 			Assert::IsTrue(landLoose.ren1 == landLoose.ren2, L"RenderedWarp::Run landingCheck=4.0 repeat must be bit-exact");
 
-			// Seam band [120, 144) x [16, height-16): landingCheck = 0.5f rejects divergent landings (collapsing closer to A)
-			// relative to BOTH landingCheck = 0.0f (off) AND landingCheck = 4.0f (same cached #define LAND_A 1 header key!).
+			// Seam band [120, 168) x [16, height-16): covers the full v = 0 -> +20 transition peak around x = 144..152;
+			// landingCheck = 0.5f rejects divergent landings (collapsing closer to A) relative to BOTH landingCheck = 0.0f (off)
+			// AND landingCheck = 4.0f (same cached #define LAND_A 1 header key!).
 			int srcDiff05vs00 = 0, srcDiff05vs40 = 0;
 			int renDiff05vs00 = 0, renDiff05vs40 = 0;
 			double srcErrToA00 = 0.0, srcErrToA05 = 0.0;
 			double renErrToA00 = 0.0, renErrToA05 = 0.0;
 			for (int y = 16; y < height - 16; ++y)
-				for (int x = 120; x < 144; ++x)
+				for (int x = 120; x < 168; ++x)
 				{
 					const size_t i = static_cast<size_t>(y) * width + x;
 					if (std::abs(static_cast<int>(landStrict.src1[i]) - static_cast<int>(landOff.src1[i])) > 256)
