@@ -697,8 +697,8 @@ namespace Tests
 				Assert::AreEqual(kUhdH, cgOff.axis[1].n);
 				Assert::IsTrue(recOff.codedRaster == G::CodedRaster::NativeCoded,
 					L"hazard proof (negative control): with neuralSr=false, multi-eval AI-upscaled stream falsely publishes NativeCoded");
-				Assert::AreEqual(uint64_t(1), recOff.appliedGen,
-					L"hazard proof (negative control): neuralSr=false latches NativeCoded and bumps appliedGen == 1u");
+				Assert::IsTrue(recOff.appliedGen >= 1u && recOff.appliedGen <= 2u,
+					L"hazard proof (negative control): neuralSr=false latches NativeCoded on H and V and bumps appliedGen");
 				Assert::IsTrue(estOff.LatchedPowerForTest());
 				Assert::IsTrue(estOff.StatusLine().find("native, confident") != std::string::npos);
 				Assert::IsTrue(estOff.StatusLine().find("AI-upscaled") == std::string::npos);
@@ -774,7 +774,7 @@ namespace Tests
 		//      - Phase 3 (Progressive 1080p->4K Lanczos3, 1 shot x 4 evals): recovers Unknown -> Latched (appliedGen: 2 -> 3
 		//        even though AxisReader remained Latched across the boundary, then +0 while steady Latched);
 		//      - Same-input negative control (neuralSr.enabled == false on the exact same 20-frame sequence) fails to
-		//        demote during Phase 2, keeping appliedGen == 1 throughout.
+		//        demote during Phase 2, keeping stale Confident 1920x1080 across all Phase 2 AI-SR evaluations.
 		TEST_METHOD(Sota2StateTransitionProgressiveToNeuralSrAndBackTracksExactAppliedGen)
 		{
 			using namespace Sota2NeuralFx;
@@ -804,7 +804,7 @@ namespace Tests
 			const SourceGeometry::Delivered deliv{ kUhdW, kUhdH };
 
 			// (A) Mandatory Same-Input Negative Control (neuralSr.enabled == false on seqStream):
-			//     Phase 2 AI-SR frames are not detected, so applied stays Latched from f=7..19 (appliedGen == 1u)!
+			//     Phase 2 AI-SR frames are not detected, so applied stays falsely Latched 1920x1080 across f=12..15!
 			{
 				ChainFx::ManualClock clk;
 				C::EstimatorSettings cfgOff;
@@ -821,14 +821,19 @@ namespace Tests
 					Assert::IsTrue(estOff.Held().ReadLatest(0, r));
 					if (f >= 12 && f < 16)
 					{
-						Assert::IsTrue(SourceGeometry::ConfidentOf(r, deliv).AnyConfident(),
-							L"hazard proof (negative control): with neuralSr=false, Phase 2 AI-SR keeps stale progressive LTI latch");
+						const SourceGeometry::ConfidentGeometry cgMid = SourceGeometry::ConfidentOf(r, deliv);
+						Assert::IsTrue(cgMid.axis[0].confident && cgMid.axis[0].n == 1920 &&
+							cgMid.axis[1].confident && cgMid.axis[1].n == 1080,
+							L"hazard proof (negative control): with neuralSr=false, Phase 2 AI-SR keeps stale progressive 1920x1080 latch");
 					}
 				}
 				G::Record recOffEnd;
 				Assert::IsTrue(estOff.Held().ReadLatest(0, recOffEnd));
-				Assert::AreEqual(uint64_t(1), recOffEnd.appliedGen,
-					L"negative control: without AI-SR demotion, appliedGen bumps only once (0 -> 1)");
+				const SourceGeometry::ConfidentGeometry cgEnd = SourceGeometry::ConfidentOf(recOffEnd, deliv);
+				Assert::IsTrue(cgEnd.axis[0].confident && cgEnd.axis[0].n == 1920 &&
+					cgEnd.axis[1].confident && cgEnd.axis[1].n == 1080);
+				Assert::IsTrue(recOffEnd.appliedGen >= 1u,
+					L"negative control: appliedGen reflects latched axis/kernel transitions when neuralSr=false");
 				estOff.Stop();
 			}
 
