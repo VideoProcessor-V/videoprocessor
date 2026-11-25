@@ -98,7 +98,8 @@ if (tile < int(tiles) && g.y < ts) {
 		timedOutThrough(0), seenJobsDropped(0), seenHeldDropped(0), seenSubmitSkipped(0),
 		deterministicWait(false), deterministicWaitBoundUs(0),
 		deterministicSlackUs(0), deterministicGuardUs(0),
-		deterministicWaitCalls(0), deterministicWaitYields(0)
+		deterministicWaitCalls(0), deterministicWaitYields(0),
+		bandMemo(nullptr)
 	{
 		chainEst.reset(new SourceIdentity::Chain::ChainEstimator());   // inert until SetChainEnabled(true): no thread, no tap
 		worker = std::thread([this] { Worker(); });
@@ -143,6 +144,11 @@ if (tile < int(tiles) && g.y < ts) {
 		aheadWake.notify_all();
 		if (aheadThread.joinable()) aheadThread.join();
 		FlushHistory(true);
+	}
+
+	void Monitor::SetBandMemo(VpSkeleton::SkeletonMemo* memo)
+	{
+		bandMemo.store(memo, std::memory_order_release);
 	}
 
 	void Monitor::AnalyseTilesForTest(const std::vector<float>& tiles, int count, double seconds, int nativeWidth, int nativeHeight,

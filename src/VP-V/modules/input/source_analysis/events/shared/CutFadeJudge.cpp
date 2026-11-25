@@ -1817,5 +1817,6 @@ bool TryAcquireTileBands(VpSkeleton::SkeletonMemo* memo, uint64_t seq, int T, co
     return acquireOne(1.0, g1) && acquireOne(2.0, g2);
 }
 } // namespace detail
+bool TileOrigin::HasFrame() const { return frameW > 0u && frameH > 0u; }
 } // namespace FrameQuality
 } // namespace SourceIdentity

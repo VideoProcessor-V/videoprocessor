@@ -37,7 +37,7 @@ namespace SourceIdentity
 		{
 			uint32_t x = 0, y = 0;         // tile top-left pixel inside full frame
 			uint32_t frameW = 0, frameH = 0; // full frame dimensions (0 = legacy standalone T x T tile)
-			bool HasFrame() const { return frameW > 0u && frameH > 0u; }
+			bool HasFrame() const;
 		};
 
 		namespace detail
@@ -51,8 +51,7 @@ namespace SourceIdentity
 		// `luma`: T x T samples in 0..1 (8-bit = x255). Optional `memo` + `seq` + `origin`: acquires CPU kBandMemo (sigma 1 & 2,
 		// Reflect edge) keyed by (frameW, frameH, cropX, cropY, T, T) when origin.HasFrame() so distinct tiles on the same seq never alias,
 		// with visible fallback to shared unit U2 (VpUnit::BandFromBase::Taps / BlurTaps).
-		inline TileNoise MeasureNoise(const float* luma, int T, VpSkeleton::SkeletonMemo* memo = nullptr, uint64_t seq = 0,
-			TileOrigin origin = TileOrigin{})
+		inline TileNoise MeasureNoise(const float* luma, int T, VpSkeleton::SkeletonMemo* memo = nullptr, uint64_t seq = 0, TileOrigin origin = TileOrigin())
 		{
 			TileNoise out;
 			if (!luma || T < 32) return out;

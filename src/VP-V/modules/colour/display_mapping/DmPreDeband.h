@@ -13,7 +13,11 @@
 
 namespace DmPreDeband
 {
-	enum class Mode { Off, Auto };
+	enum class Mode
+	{
+		Off,
+		Auto
+	};
 	Mode ParseMode(const std::string& mode);
 	uint16_t TapCode12FromIntensity16(uint16_t intensity16);
 	uint16_t Tap16FromCode12(uint16_t code12);
@@ -40,7 +44,13 @@ namespace DmPreDeband
 		std::string status;
 	};
 
-	struct ActiveRect { double x0 = 0.0, y0 = 0.0, x1 = 1.0, y1 = 1.0; };
+	struct ActiveRect
+	{
+		double x0 = 0.0;
+		double y0 = 0.0;
+		double x1 = 1.0;
+		double y1 = 1.0;
+	};
 	ActiveRect NormalizedActiveRect(double cropX0, double cropY0, double cropX1, double cropY1, int frameWidth, int frameHeight);
 	ActiveRect IntersectNormalizedActiveRect(double cropX0, double cropY0, double cropX1, double cropY1, bool hasTrusted, int trustLeft, int trustTop, int trustRight, int trustBottom, int trustW, int trustH, int frameWidth, int frameHeight);
 	Decision Decide(const Inputs& in);
