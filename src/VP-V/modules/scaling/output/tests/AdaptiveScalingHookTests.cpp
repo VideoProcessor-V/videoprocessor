@@ -5,6 +5,8 @@
 #include "pch.h"
 #include <VP-V/tests/VpLutGpuTestSupport.h>
 #include <VP-V/modules/scaling/output/AdaptiveDownscaleStage.h>
+#include <VP-V/modules/motion/estimation/P3FieldFill.h>
+#include <VP-V/modules/repair/grain_split/GrainLevelGpu.h>
 #include <VP-V/modules/input/source_analysis/regions/BusyEdge.h>
 #include <VP-V/modules/input/source_analysis/regions/EdgeMapDispatch.h>
 #include <VP-V/modules/input/source_analysis/regions/EdgeMapFill.h>
@@ -4896,6 +4898,324 @@ if (q.x < size.x && q.y < size.y) {
 			srcTex.Reset();
 			ssim.Reset();
 			logGuard.Release();
+			AssertCleanLibplaceboLog(log);
+			Assert::AreEqual(0, pl_renderer_get_errors(fixture.Renderer()).num_disabled_hooks, L"A hook was disabled");
+		}
+
+		BEGIN_TEST_METHOD_ATTRIBUTE(PublishedGrainLevelBitDepthScalingNanGuardAndVerifiedFieldMeta)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(PublishedGrainLevelBitDepthScalingNanGuardAndVerifiedFieldMeta)
+		{
+			// POD2-H1 + POD2-M7 GPU regression test (WARP):
+			//  1) BLEND_BODY NaN/+Inf guard: non-finite texels in kP10gGrainLevel fall back to grain_floor
+			//     with zero NaN output pixels (into RGBA32F render target so NaN is never clamped away).
+			//  2) kP10gGrainLevel 12-bit vs 10-bit codeToEightBit via AdaptiveDownscaleStage::Stage::Register:
+			//     same N_b = (0.5 * 4095/255)^2 stays on the clean CNN branch with 12-bit GrainLevelFacts,
+			//     whereas 10-bit default (negative control) over-scales ~4x and collapses to grain_floor.
+			//  3) VerifiedField::blockSize & scaleToSourcePx via Stage::Register (POD2-M7):
+			//     2x2 blockSize=32 P3 field with scaleToSourcePx=4.0 trips rigid-pan motion ramp to motionFloor,
+			//     whereas same field with scaleToSourcePx=1.0 (negative control) stays on the sharp CNN branch.
+			TargetLutGpuFixture fixture;
+			Assert::IsTrue(fixture.Create(), L"Could not create the libplacebo WARP test device");
+			pl_gpu gpu = fixture.Gpu();
+			std::string log;
+			fixture.CaptureLog(&log);
+
+			static constexpr int sw = 64, sh = 64, ow = 96, oh = 96;
+			auto chroma = [](int, int, int) { return static_cast<uint16_t>(32768); };
+			const DejudderFrame frame = MakeDejudderFrame(sw, sh,
+				[](int x, int y) { return DejudderTexture(x, y); }, chroma);
+			DejudderGpuPlanes planes;
+			UploadDejudderFrame(gpu, frame, planes);
+
+			static const char doubler[] =
+				"//!HOOK LUMA\n"
+				"//!BIND HOOKED\n"
+				"//!WIDTH HOOKED.w 2 *\n"
+				"//!HEIGHT HOOKED.h 2 *\n"
+				"//!WHEN OUTPUT.h HOOKED.h / 1.300 >\n"
+				"//!DESC test nearest luma doubler\n"
+				"vec4 hook() { return HOOKED_tex((floor(HOOKED_pos * HOOKED_size) + 0.5) / HOOKED_size); }\n";
+			const pl_hook* cnn = pl_mpv_user_shader_parse(gpu, doubler, sizeof(doubler) - 1);
+			Assert::IsNotNull(cnn, L"stand-in CNN doubler hook must parse");
+
+			pl_fmt rgba32f = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32, PL_FMT_CAP_SAMPLEABLE);
+			pl_fmt r32f = pl_find_fmt(gpu, PL_FMT_FLOAT, 1, 32, 32, PL_FMT_CAP_SAMPLEABLE);
+			pl_fmt targetFmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+			Assert::IsTrue(rgba32f && r32f && targetFmt, L"RGBA32F/R32F formats must exist on WARP");
+
+			auto makeTex = [&](int w, int h, pl_fmt fmt, const void* data) -> pl_tex
+			{
+				pl_tex_params tp{};
+				tp.w = w; tp.h = h; tp.format = fmt; tp.sampleable = true; tp.initial_data = data;
+				pl_tex t = pl_tex_create(gpu, &tp);
+				Assert::IsNotNull(t);
+				return t;
+			};
+
+			auto renderF32 = [&](std::vector<const pl_hook*> hooks) -> std::vector<float>
+			{
+				pl_tex_params tp{};
+				tp.w = ow; tp.h = oh; tp.format = targetFmt; tp.renderable = true; tp.host_readable = true;
+				pl_tex target = pl_tex_create(gpu, &tp);
+				Assert::IsNotNull(target);
+				pl_frame image{};
+				image.num_planes = 2;
+				image.planes[0].texture = planes.planes.luma;
+				image.planes[0].components = 1;
+				image.planes[0].component_mapping[0] = PL_CHANNEL_Y;
+				image.planes[1].texture = planes.planes.chroma;
+				image.planes[1].components = 2;
+				image.planes[1].component_mapping[0] = PL_CHANNEL_CB;
+				image.planes[1].component_mapping[1] = PL_CHANNEL_CR;
+				image.repr.sys = PL_COLOR_SYSTEM_BT_709;
+				image.repr.levels = PL_COLOR_LEVELS_FULL;
+				image.color.primaries = PL_COLOR_PRIM_BT_709;
+				image.color.transfer = PL_COLOR_TRC_BT_1886;
+				pl_frame_set_chroma_location(&image, PL_CHROMA_LEFT);
+				pl_frame t = TargetLutGpuFixture::MakeRgbFrame(target);
+				t.repr.levels = PL_COLOR_LEVELS_FULL;
+				t.color.transfer = PL_COLOR_TRC_BT_1886;
+				pl_render_params params = pl_render_fast_params;
+				params.dither_params = nullptr;
+				params.error_diffusion = nullptr;
+				params.sigmoid_params = nullptr;
+				params.disable_linear_scaling = true;
+				params.upscaler = &pl_filter_ewa_lanczossharp;
+				params.antiringing_strength = 0.5f;
+				params.hooks = hooks.empty() ? nullptr : hooks.data();
+				params.num_hooks = static_cast<int>(hooks.size());
+				Assert::IsTrue(pl_render_image(fixture.Renderer(), &image, &t, &params));
+				pl_gpu_finish(gpu);
+				std::vector<float> px(static_cast<size_t>(ow) * oh * 4);
+				pl_tex_transfer_params d{};
+				d.tex = target;
+				d.ptr = px.data();
+				Assert::IsTrue(pl_tex_download(gpu, &d));
+				pl_tex_destroy(gpu, &target);
+				return px;
+			};
+
+			auto maxRgbDiffRegion = [&](const std::vector<float>& a, const std::vector<float>& b,
+				int x0, int y0, int x1, int y1) -> float
+			{
+				float m = 0.0f;
+				for (int y = y0; y < y1; ++y)
+					for (int x = x0; x < x1; ++x)
+					{
+						const size_t i = (static_cast<size_t>(y) * ow + x) * 4;
+						for (int c = 0; c < 3; ++c)
+							m = (std::max)(m, std::fabs(a[i + c] - b[i + c]));
+					}
+				return m;
+			};
+
+			const std::vector<float> cnnRef = renderF32({ cnn });
+			const std::vector<float> faithfulRef = renderF32({});
+			Assert::IsTrue(maxRgbDiffRegion(cnnRef, faithfulRef, 8, 8, ow - 8, oh - 8) > 0.05f,
+				L"precondition: CNN doubler and faithful scaler must clearly differ");
+
+			// (1) POD2-H1 BLEND_BODY NaN / +Inf guard:
+			//     4x4 grain_level texture: left half (bx < 2) = NaN, right-top (by < 2) = +Inf, right-bottom = 0.0 (clean).
+			const float qnan = std::numeric_limits<float>::quiet_NaN();
+			const float pinf = std::numeric_limits<float>::infinity();
+			std::vector<float> nanData(4 * 4 * 4, 0.0f);
+			for (int by = 0; by < 4; ++by)
+				for (int bx = 0; bx < 4; ++bx)
+				{
+					const size_t i = (static_cast<size_t>(by) * 4 + bx) * 4;
+					nanData[i] = (bx < 2) ? qnan : (by < 2 ? pinf : 0.0f);
+				}
+			pl_tex nanTex = makeTex(4, 4, rgba32f, nanData.data());
+			{
+				ScopedModule mod;
+				AdaptiveDownscale::Settings st;
+				st.grainMap = false;
+				st.edgeLo = 1.0e6f;
+				st.edgeHi = 2.0e6f;
+				st.grainLo = 3.0f;
+				st.grainHi = 6.0f;
+				st.grainFloor = 0.0f;   // non-finite blocks must fall cleanly to faithfulRef (w = 0)
+				st.motionStrength = 0.0f;
+				mod->SetCutSource([](uint64_t, bool& cut, std::string&) { cut = false; return true; });
+				mod->SetFrame(st, 1, 1.0f / 24.0f);
+				AdaptiveDownscale::Upscale up;
+				up.on = true; up.wBase = 1.0f; up.nativeWidth = static_cast<float>(sw); up.nativeHeight = static_cast<float>(sh);
+				mod->SetUpscale(up);
+				AdaptiveDownscale::GrainLevelSource gl;
+				gl.level = nanTex;
+				gl.sourceCrop = { 0.0f, 0.0f, static_cast<float>(sw), static_cast<float>(sh) };
+				mod->SetGrainLevel(gl);
+				const std::vector<float> out = renderF32({ mod->Measure(), cnn, mod->Blend() });
+				for (float v : out)
+					Assert::IsTrue(std::isfinite(v), L"BLEND_BODY NaN/+Inf guard must never emit non-finite pixels");
+				// Left interior (NaN blocks) -> faithfulRef (grain_floor = 0); right-top (+Inf) -> faithfulRef;
+				// right-bottom (nb = 0 clean) -> cnnRef (g = 1).
+				const float nanVsFaithful = maxRgbDiffRegion(out, faithfulRef, 4, 4, ow / 2 - 12, oh - 4);
+				const float infVsFaithful = maxRgbDiffRegion(out, faithfulRef, ow / 2 + 12, 4, ow - 4, oh / 2 - 12);
+				const float cleanVsCnn = maxRgbDiffRegion(out, cnnRef, ow / 2 + 12, oh / 2 + 12, ow - 4, oh - 4);
+				const float nanVsCnn = maxRgbDiffRegion(out, cnnRef, 4, 4, ow / 2 - 12, oh - 4);
+				Assert::IsTrue(nanVsFaithful < 0.01f && nanVsCnn > 0.05f,
+					L"NaN grain_level blocks must fall back to grain_floor (faithful)");
+				Assert::IsTrue(infVsFaithful < 0.01f,
+					L"+Inf grain_level blocks must fall back to grain_floor (faithful)");
+				Assert::IsTrue(cleanVsCnn < 0.01f,
+					L"clean nb=0 blocks on the same frame must stay at CNN (g=1)");
+			}
+			pl_tex_destroy(gpu, &nanTex);
+
+			// (2) POD2-H1 12-bit vs 10-bit kP10gGrainLevel scaling through AdaptiveDownscaleStage::Stage::Register:
+			//     sigma_8bit = 0.5 in 12-bit codes -> sigma_12 = 0.5 * 4095/255 = 8.0294 -> N_b = 64.47.
+			//     With 12-bit facts: energy = 0.5 * 3.5682 = 1.784 (< grainLo 3.0 -> g = 1.0, CNN).
+			//     Negative control (10-bit default): energy = 8.0294 * (255/1023) * 3.5682 = 7.14 (> grainHi 6.0 -> grain_floor 0, faithful).
+			const float sigma12 = 0.5f * (4095.0f / 255.0f);
+			std::vector<float> lvl12Data(4 * 4 * 4, 0.0f);
+			for (size_t i = 0; i < lvl12Data.size(); i += 4)
+				lvl12Data[i] = sigma12 * sigma12;
+			pl_tex lvl12Tex = makeTex(4, 4, rgba32f, lvl12Data.data());
+
+			auto runStageUpscale = [&](const AdaptiveDownscale::Settings& st, bool vectorsRun,
+				std::function<VpSkeleton::AcquireResult(VpSkeleton::ProductId, uint64_t, const VpSkeleton::VariantKey&)> acquireFn)
+				-> std::vector<float>
+			{
+				ScopedModule mod;
+				mod->SetCutSource([](uint64_t, bool& cut, std::string&) { cut = false; return true; });
+				AdaptiveDownscaleStage::Stage stage{ *mod };
+				AdaptiveDownscaleStage::Host host;
+				host.fallbackFramePeriod = []() { return 1.0f / 24.0f; };
+				host.bitrate = [](double& q) { q = 1.0; return false; };
+				host.nlsMapping = []() { return NlsMaskMapping::Mapping(); };
+				host.ssimInChain = []() { return false; };
+				host.motion = []() { return AdaptiveDownscaleStage::MotionSource(); };
+				host.publishStatus = []() {};
+				host.acquire = std::move(acquireFn);
+				AdaptiveDownscaleStage::Frame f;
+				f.adaptiveUpscale = true;
+				f.upscaleWBase = 1.0;
+				f.upscaleSuperresScale = false;
+				f.adaptive = &st;
+				f.lowBitrateOff = true;
+				f.sourceSequence = 10;
+				f.nominalSourceRateHz = 24.0;
+				f.sourceCrop = { 0.0f, 0.0f, static_cast<float>(sw), static_cast<float>(sh) };
+				f.targetCrop = { 0.0f, 0.0f, static_cast<float>(ow), static_cast<float>(oh) };
+				f.vectorsRun = vectorsRun;
+				double weight = 1.0;
+				bool grainWanted = false, noSsim = false;
+				AdaptiveDownscaleStage::SharedState shared{ weight, grainWanted, noSsim };
+				std::vector<const pl_hook*> hooks = { cnn };
+				stage.Register(f, host, shared, hooks);
+				return renderF32(hooks);
+			};
+
+			{
+				AdaptiveDownscale::Settings st;
+				st.grainMap = false;
+				st.edgeLo = 1.0e6f; st.edgeHi = 2.0e6f;
+				st.grainLo = 3.0f; st.grainHi = 6.0f; st.grainFloor = 0.0f;
+				st.motionStrength = 0.0f;
+				auto makeGrainAcquire = [&](int bits)
+				{
+					return [lvl12Tex, bits](VpSkeleton::ProductId id, uint64_t, const VpSkeleton::VariantKey&)
+					{
+						VpSkeleton::AcquireResult r;
+						if (id != VpSkeleton::kP10gGrainLevel)
+							return r;
+						r.status = VpSkeleton::AcquireStatus::Computed;
+						r.gpu.resource = const_cast<void*>(static_cast<const void*>(lvl12Tex));
+						r.gpu.width = 4; r.gpu.height = 4;
+						if (bits > 0)
+						{
+							auto gf = std::make_shared<GrainSplit::LevelGpu::GrainLevelFacts>();
+							gf->sourceBits = bits;
+							gf->blockPx = 16;
+							gf->codeToEightBit = GrainSplit::LevelGpu::CodeToEightBitOf(bits);
+							r.gpu.textureSet = GrainSplit::LevelGpu::GrainLevelFactsTag();
+							r.gpu.keepAlive = gf;
+						}
+						return r;
+					};
+				};
+				const std::vector<float> out12 = runStageUpscale(st, false, makeGrainAcquire(12));
+				const std::vector<float> out10Neg = runStageUpscale(st, false, makeGrainAcquire(10));
+				Assert::IsTrue(maxRgbDiffRegion(out12, cnnRef, 8, 8, ow - 8, oh - 8) < 0.01f,
+					L"POD2-H1: 12-bit GrainLevelFacts must keep 0.5-code grain on the clean CNN branch");
+				Assert::IsTrue(maxRgbDiffRegion(out10Neg, faithfulRef, 8, 8, ow - 8, oh - 8) < 0.01f,
+					L"POD2-H1 negative control: 10-bit scale on same 12-bit N_b over-scales 4x to faithful grain_floor");
+			}
+			pl_tex_destroy(gpu, &lvl12Tex);
+
+			// (3) POD2-M7 VerifiedField::blockSize (32 px -> 2x2 grid on 64x64) & scaleToSourcePx via Stage::Register:
+			//     f.xy = (2.0, 0.0), cropH = 64, fps = 24 -> speed = 2.0 * scale / (64/24) = 0.75 * scale.
+			//     With speedHi = 0.5 (rigid pan ramp 1.0..2.0): scale=4.0 -> speed=3.0 -> motionFloor=0 (faithful);
+			//     negative control scale=1.0 -> speed=0.75 -> sharp CNN (target=1.0).
+			std::vector<float> zeroGrain(4 * 4 * 4, 0.0f);
+			pl_tex cleanGrainTex = makeTex(4, 4, rgba32f, zeroGrain.data());
+			std::vector<float> fieldData(2 * 2 * 4, 0.0f);
+			for (size_t i = 0; i < fieldData.size(); i += 4)
+			{
+				fieldData[i + 0] = 2.0f;
+				fieldData[i + 1] = 0.0f;
+				fieldData[i + 2] = 1.0f;   // full trust
+				fieldData[i + 3] = 1.0f;
+			}
+			pl_tex fieldTex = makeTex(2, 2, rgba32f, fieldData.data());
+			const float trustOne = 1.0f;
+			pl_tex trustTex = makeTex(1, 1, r32f, &trustOne);
+			{
+				AdaptiveDownscale::Settings st;
+				st.grainMap = false;
+				st.edgeLo = 1.0e6f; st.edgeHi = 2.0e6f;
+				st.grainLo = 3.0f; st.grainHi = 6.0f; st.grainFloor = 0.0f;
+				st.motionStrength = 1.0f;
+				st.motionSpeedLo = 0.2f;
+				st.motionSpeedHi = 0.5f;
+				st.motionFloor = 0.0f;
+				st.motionSmoothMs = 0.0f;
+				auto makeMotionAcquire = [&](float scaleToSourcePx)
+				{
+					return [cleanGrainTex, fieldTex, trustTex, scaleToSourcePx](VpSkeleton::ProductId id, uint64_t, const VpSkeleton::VariantKey&)
+					{
+						VpSkeleton::AcquireResult r;
+						if (id == VpSkeleton::kP10gGrainLevel)
+						{
+							r.status = VpSkeleton::AcquireStatus::Computed;
+							r.gpu.resource = const_cast<void*>(static_cast<const void*>(cleanGrainTex));
+							r.gpu.width = 4; r.gpu.height = 4;
+							return r;
+						}
+						if (id == VpSkeleton::kP3AnalysisField)
+						{
+							auto vf = std::make_shared<VpMotion::VerifiedField>();
+							vf->fwd = fieldTex;
+							vf->trust = trustTex;
+							vf->gridW = 2; vf->gridH = 2;
+							vf->blockSize = 32;
+							vf->scaleToSourcePx = scaleToSourcePx;
+							r.status = VpSkeleton::AcquireStatus::Computed;
+							r.gpu.resource = const_cast<void*>(static_cast<const void*>(fieldTex));
+							r.gpu.textureSet = VpMotion::P3FieldFactsTag();
+							r.gpu.width = 2; r.gpu.height = 2;
+							r.gpu.keepAlive = vf;
+							return r;
+						}
+						return r;
+					};
+				};
+				const std::vector<float> outScaled4 = runStageUpscale(st, true, makeMotionAcquire(4.0f));
+				const std::vector<float> outScale1Neg = runStageUpscale(st, true, makeMotionAcquire(1.0f));
+				Assert::IsTrue(maxRgbDiffRegion(outScaled4, faithfulRef, 8, 8, ow - 8, oh - 8) < 0.01f,
+					L"POD2-M7: VerifiedField scaleToSourcePx=4.0 must scale vector speed into rigid-pan motionFloor");
+				Assert::IsTrue(maxRgbDiffRegion(outScale1Neg, cnnRef, 8, 8, ow - 8, oh - 8) < 0.01f,
+					L"POD2-M7 negative control: same field with scaleToSourcePx=1.0 stays below pan ramp (CNN)");
+			}
+			pl_tex_destroy(gpu, &trustTex);
+			pl_tex_destroy(gpu, &fieldTex);
+			pl_tex_destroy(gpu, &cleanGrainTex);
+			pl_mpv_user_shader_destroy(&cnn);
+			fixture.CaptureLog(nullptr);
 			AssertCleanLibplaceboLog(log);
 			Assert::AreEqual(0, pl_renderer_get_errors(fixture.Renderer()).num_disabled_hooks, L"A hook was disabled");
 		}

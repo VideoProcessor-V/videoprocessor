@@ -8,8 +8,11 @@
 #include "CppUnitTest.h"
 
 #include <VP-V/modules/scaling/output/AdaptiveDownscale.h>
+#include <VP-V/modules/repair/grain_split/GrainLevelGpu.h>
+#include <VP-V/modules/repair/grain_split/P10gCpu.h>
 
 #include <cmath>
+#include <memory>
 
 using namespace Microsoft::VisualStudio::CppUnitTestFramework;
 
@@ -126,6 +129,64 @@ namespace VideoProcessorTest
 			AdaptiveDownscale::GrainSource all;
 			all.p10Blocks = &p10; all.p11Stats0 = &s0; all.p11Stats4 = &s4;
 			Assert::IsTrue(all.SameGrid(), L"control: all three present on one grid share it");
+		}
+
+		TEST_METHOD(GrainLevelFactsCodeToEightBitAndMetadataRoundTrip)
+		{
+			// POD2-H1: kP10gGrainLevel carries native bit depth (codeToEightBit = 255 / ((1 << depth) - 1)) and blockPx.
+			Assert::IsTrue(std::fabs(GrainSplit::LevelGpu::CodeToEightBitOf(8) - 1.0) < 1e-12,
+				L"8-bit codeToEightBit must be 255/255 = 1.0");
+			Assert::IsTrue(std::fabs(GrainSplit::LevelGpu::CodeToEightBitOf(10) - (255.0 / 1023.0)) < 1e-12,
+				L"10-bit codeToEightBit must be 255/1023");
+			Assert::IsTrue(std::fabs(GrainSplit::LevelGpu::CodeToEightBitOf(12) - (255.0 / 4095.0)) < 1e-12,
+				L"12-bit codeToEightBit must be 255/4095");
+			Assert::IsTrue(std::fabs(GrainSplit::LevelGpu::CodeToEightBitOf(0) - (255.0 / 1023.0)) < 1e-12,
+				L"out-of-range depth defaults to 10-bit");
+			for (int d : { 8, 10, 12 })
+			{
+				GrainSplit::P10g::Meta m;
+				m.sourceBits = d;
+				m.blockPx = 16;
+				Assert::IsTrue(std::fabs(GrainSplit::P10g::CodeToEightBitOf(d) - GrainSplit::LevelGpu::CodeToEightBitOf(d)) < 1e-12,
+					L"P10g::CodeToEightBitOf must match LevelGpu::CodeToEightBitOf");
+				Assert::IsTrue(std::fabs(m.CodeToEightBit() - GrainSplit::LevelGpu::CodeToEightBitOf(d)) < 1e-12,
+					L"P10g::Meta::CodeToEightBit() must match CodeToEightBitOf");
+			}
+
+			// Negative control (POD2-H1 4x bug): a 1.0 8-bit-code sigma in a 12-bit source has sigma_12 = 4095/255.
+			// With 12-bit facts, energy matches 1.0 * kEdgeEnergyPerSigma; the old hardcoded 10-bit scale is ~4x too large.
+			const double sigma12 = 4095.0 / 255.0;
+			const double energy12 = sigma12 * AdaptiveDownscale::GrainLevelEnergyScale(
+				static_cast<float>(GrainSplit::LevelGpu::CodeToEightBitOf(12)));
+			const double naive10BitEnergy = sigma12 * AdaptiveDownscale::GrainLevelEnergyScale(255.0f / 1023.0f);
+			Assert::IsTrue(std::fabs(energy12 - static_cast<double>(AdaptiveDownscale::kEdgeEnergyPerSigma)) < 1e-4,
+				L"12-bit facts must normalize 12-bit sigma back to 1.0 8-bit code energy");
+			Assert::IsTrue(naive10BitEnergy > 3.9 * static_cast<double>(AdaptiveDownscale::kEdgeEnergyPerSigma),
+				L"negative control: hardcoded 10-bit scale overstates 12-bit grain sigma by ~4x");
+
+			// FactsOf(AcquireResult) round-trip + untagged negative control.
+			auto facts = std::make_shared<GrainSplit::LevelGpu::GrainLevelFacts>();
+			facts->sourceBits = 12;
+			facts->blockPx = 32;
+			facts->codeToEightBit = GrainSplit::LevelGpu::CodeToEightBitOf(12);
+			VpSkeleton::AcquireResult r;
+			r.status = VpSkeleton::AcquireStatus::Computed;
+			r.gpu.textureSet = GrainSplit::LevelGpu::GrainLevelFactsTag();
+			r.gpu.keepAlive = facts;
+			const GrainSplit::LevelGpu::GrainLevelFacts* read = GrainSplit::LevelGpu::FactsOf(r);
+			Assert::IsNotNull(read, L"tagged AcquireResult must yield GrainLevelFacts");
+			Assert::AreEqual(12, read->sourceBits, L"sourceBits must round-trip");
+			Assert::AreEqual(32, read->blockPx, L"blockPx must round-trip");
+			Assert::IsTrue(std::fabs(read->codeToEightBit - (255.0 / 4095.0)) < 1e-12, L"codeToEightBit must round-trip");
+
+			VpSkeleton::AcquireResult untagged = r;
+			untagged.gpu.textureSet = nullptr;
+			Assert::IsNull(GrainSplit::LevelGpu::FactsOf(untagged),
+				L"negative control: untagged AcquireResult must return nullptr");
+			VpSkeleton::AcquireResult failed = r;
+			failed.status = VpSkeleton::AcquireStatus::Unavailable;
+			Assert::IsNull(GrainSplit::LevelGpu::FactsOf(failed),
+				L"negative control: unavailable AcquireResult must return nullptr");
 		}
 	};
 }
