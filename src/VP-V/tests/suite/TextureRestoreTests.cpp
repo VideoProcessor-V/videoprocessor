@@ -7,6 +7,9 @@
 
 #include <VP-V/modules/repair/texture_restore/TextureRestore.h>
 #include <VP-V/core/Ramp.h>
+#include <VP-V/core/SkeletonAcquire.h>
+#include <VP-V/modules/repair/grain_split/BandMemo.h>
+#include <VP-V/modules/repair/grain_split/BandMemoFill.h>
 #include <VP-V/modules/repair/grain_split/GpuPassUtil.h>
 
 #include <VP-V/modules/control/skeleton/PlTexBackend.h>
@@ -20,6 +23,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <memory>
 #include <random>
 #include <string>
 #include <vector>
@@ -1529,6 +1533,131 @@ namespace TextureRestoreBandFromBaseNs
 						VpvGpu::ConstArray("w", 2 * TextureRestore::HalfRadius(sigma) + 1, [&](int k) { return TextureRestore::HalfWeight(k - TextureRestore::HalfRadius(sigma), sigma); }),
 						L"half table text");
 				}
+			}
+		}
+
+		// W23-B3 M2#2 (U2 B4 CPU BandMemo): TextureRestore::AcquireFineCpuBand hits kBandMemo once per key and
+		// matches independent BlurTaps bit-for-bit; AcquireHalfCpuBand (factor=3.5, eps=1e-9 outside BandMemo codec)
+		// visibly reports its codec fallback without calling the owner fill while still matching BlurTaps bit-for-bit.
+		TEST_METHOD(TextureRestoreCpuBandAcquireAndFactor35VisibleFallback)
+		{
+			namespace BFB = VpUnit::BandFromBase;
+			namespace GB = Vpv::GrainBand;
+			using Reg = VpSkeleton::SkeletonMemo::Registration;
+
+			const int W = 64, H = 48;
+			const int HW = (W + 1) / 2, HH = (H + 1) / 2;
+			const size_t nFull = static_cast<size_t>(W) * H;
+			const size_t nHalf = static_cast<size_t>(HW) * HH;
+
+			std::vector<float> fullPlane(nFull, 0.0f);
+			uint32_t rng = 0x9e3779b9u;
+			for (int y = 0; y < H; ++y)
+				for (int x = 0; x < W; ++x)
+				{
+					rng = rng * 1664525u + 1013904223u;
+					const float noise = (static_cast<float>((rng >> 8) & 1023u) / 1023.0f - 0.5f) * 0.22f;
+					const float box = (x >= 18 && x < 46 && y >= 10 && y < 38) ? 0.45f : 0.12f;
+					fullPlane[static_cast<size_t>(y) * W + x] = (std::min)(1.0f, (std::max)(0.0f, box + noise));
+				}
+
+			std::vector<uint16_t> halfU16(nHalf, 0u);
+			std::vector<float> halfFloat(nHalf, 0.0f);
+			constexpr float kInvU16Max = 1.0f / 65535.0f;
+			for (int y = 0; y < HH; ++y)
+				for (int x = 0; x < HW; ++x)
+				{
+					const float avg = 0.25f * (fullPlane[static_cast<size_t>(2 * y) * W + 2 * x]
+						+ fullPlane[static_cast<size_t>(2 * y) * W + 2 * x + 1]
+						+ fullPlane[static_cast<size_t>(2 * y + 1) * W + 2 * x]
+						+ fullPlane[static_cast<size_t>(2 * y + 1) * W + 2 * x + 1]);
+					const uint16_t u = static_cast<uint16_t>(std::lround(avg * 65535.0f));
+					halfU16[static_cast<size_t>(y) * HW + x] = u;
+					halfFloat[static_cast<size_t>(y) * HW + x] = static_cast<float>(u) * kInvU16Max;
+				}
+
+			VpSkeleton::SkeletonMemo memo;
+			const uint64_t kSeq = 60u;
+			VpSkeleton::OwnerFill p13Cpu;
+			p13Cpu.frameScoped = true;
+			p13Cpu.renderThreadOnly = false;
+			p13Cpu.fill = [&fullPlane, kSeq](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+				if (req.seq != kSeq) return false;
+				out.bytes.resize(fullPlane.size() * sizeof(float));
+				std::memcpy(out.bytes.data(), fullPlane.data(), out.bytes.size());
+				return true;
+			};
+			Assert::IsTrue(memo.RegisterOwnerFill(VpSkeleton::kP13SourceRing, VpSkeleton::AcquireForm::Cpu,
+				VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP13SourceRing), std::move(p13Cpu)) == Reg::Registered);
+
+			VpSkeleton::OwnerFill p1Cpu;
+			p1Cpu.frameScoped = true;
+			p1Cpu.renderThreadOnly = false;
+			p1Cpu.fill = [&halfU16, kSeq](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+				if (req.seq != kSeq) return false;
+				out.bytes.resize(halfU16.size() * sizeof(uint16_t));
+				std::memcpy(out.bytes.data(), halfU16.data(), out.bytes.size());
+				return true;
+			};
+			Assert::IsTrue(memo.RegisterOwnerFill(VpSkeleton::kP1HalfLuma, VpSkeleton::AcquireForm::Cpu,
+				VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP1HalfLuma), std::move(p1Cpu)) == Reg::Registered);
+
+			const std::shared_ptr<GB::Counters> counters = std::make_shared<GB::Counters>();
+			Assert::IsTrue(memo.RegisterOwnerFill(VpSkeleton::kBandMemo, VpSkeleton::AcquireForm::Cpu,
+				GB::kBandMemoUnit, GB::MakeBandMemoCpuOwnerFill(counters)) == Reg::Registered);
+
+			// 1. AcquireFineCpuBand: memo hit, single compute, bit-exact parity with independent BlurTaps.
+			std::vector<float> fineRef;
+			const std::vector<float> fineTaps = BFB::Taps<float>(BFB::kSigmaFine, 3.0, true, 0.0);
+			BFB::BlurTaps<float>(fullPlane, fineRef, W, H, fineTaps, BFB::EdgeMode::Replicate);
+
+			const TextureRestore::CpuBandResult fineMemo = TextureRestore::AcquireFineCpuBand(fullPlane, W, H, 1.0, &memo, kSeq);
+			Assert::IsTrue(fineMemo.fromBandMemo && fineMemo.fallbackReason.empty(), L"AcquireFineCpuBand hits kBandMemo");
+			Assert::AreEqual(uint64_t(1), counters->fills.load(), L"fine band computed once");
+			Assert::IsTrue(std::memcmp(fineMemo.samples.data(), fineRef.data(), fineRef.size() * sizeof(float)) == 0,
+				L"AcquireFineCpuBand matches independent BlurTaps bit-for-bit");
+
+			const TextureRestore::CpuBandResult fineRepeat = TextureRestore::AcquireFineCpuBand(fullPlane, W, H, 1.0, &memo, kSeq);
+			Assert::AreEqual(uint64_t(1), counters->fills.load(), L"repeated AcquireFineCpuBand reuses memo");
+			Assert::IsTrue(fineRepeat.fromBandMemo && fineRepeat.fallbackReason.empty());
+
+			// Negative controls for AcquireFineCpuBand: memo=nullptr, seq=0, unregistered memo visibly report fallback.
+			VpSkeleton::SkeletonMemo emptyMemo;
+			const TextureRestore::CpuBandResult fineNull = TextureRestore::AcquireFineCpuBand(fullPlane, W, H, 1.0, nullptr, kSeq);
+			const TextureRestore::CpuBandResult fineUnkeyed = TextureRestore::AcquireFineCpuBand(fullPlane, W, H, 1.0, &memo, 0u);
+			const TextureRestore::CpuBandResult fineUnreg = TextureRestore::AcquireFineCpuBand(fullPlane, W, H, 1.0, &emptyMemo, kSeq);
+			Assert::IsFalse(fineNull.fromBandMemo || fineNull.fallbackReason.empty(), L"fine memo=nullptr visible fallback");
+			Assert::IsFalse(fineUnkeyed.fromBandMemo || fineUnkeyed.fallbackReason.empty(), L"fine seq=0 visible fallback");
+			Assert::IsFalse(fineUnreg.fromBandMemo || fineUnreg.fallbackReason.empty(), L"fine unregistered visible fallback");
+			Assert::IsTrue(std::memcmp(fineNull.samples.data(), fineRef.data(), fineRef.size() * sizeof(float)) == 0, L"fine fallback bit-exact");
+
+			// 2. AcquireHalfCpuBand (factor=3.5, eps=1e-9 outside BandMemo codec): visibly reports codec fallback
+			//    even with valid memo + seq, does NOT invoke owner fill, and matches independent BlurTaps bit-for-bit.
+			for (double fullSigma : { TextureRestore::kSigma2, TextureRestore::kSigma3 })
+			{
+				const TextureRestore::CpuBandResult halfRes = TextureRestore::AcquireHalfCpuBand(halfFloat, HW, HH, fullSigma, &memo, kSeq);
+				Assert::IsFalse(halfRes.fromBandMemo, L"factor=3.5 half band cannot come from BandMemo codec");
+				Assert::IsFalse(halfRes.fallbackReason.empty(), L"factor=3.5 fallback reason must be visible (Rule 4)");
+				Assert::IsTrue(halfRes.fallbackReason.find("codec") != std::string::npos
+					|| halfRes.fallbackReason.find("factor") != std::string::npos,
+					L"factor=3.5 fallback reason visibly names codec/factor");
+				Assert::AreEqual(uint64_t(1), counters->fills.load(), L"unencodable factor=3.5 never invokes BandMemo owner fill");
+
+				const int rh = TextureRestore::HalfRadius(fullSigma);
+				std::vector<float> halfTaps(static_cast<size_t>(2 * rh + 1));
+				for (int i = -rh; i <= rh; ++i)
+					halfTaps[static_cast<size_t>(i + rh)] = static_cast<float>(TextureRestore::HalfWeight(i, fullSigma));
+				std::vector<float> halfRef;
+				BFB::BlurTaps<float>(halfFloat, halfRef, HW, HH, halfTaps, BFB::EdgeMode::Replicate);
+				Assert::AreEqual(halfRef.size(), halfRes.samples.size());
+				Assert::IsTrue(std::memcmp(halfRes.samples.data(), halfRef.data(), halfRef.size() * sizeof(float)) == 0,
+					L"AcquireHalfCpuBand fallback matches independent BlurTaps bit-for-bit");
+
+				// Non-vacuity negative control: raw unblurred halfFloat diverges substantially from blurred band.
+				float maxHalfDiff = 0.0f;
+				for (size_t i = 0; i < nHalf; ++i)
+					maxHalfDiff = (std::max)(maxHalfDiff, std::fabs(halfRes.samples[i] - halfFloat[i]));
+				Assert::IsTrue(maxHalfDiff > 0.05f, L"negative control: half-res blur materially transforms input");
 			}
 		}
 	};

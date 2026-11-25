@@ -1978,5 +1978,125 @@ namespace DetailPulseBandFromBaseNs
 				Assert::AreEqual(before, after, L"GLSL table text");
 			}
 		}
+
+		// W23-B3 M2#2 (U2 B4 CPU BandMemo): DetailPulse::AcquireFineCpuBand & AcquireWideCpuBand hit CPU kBandMemo
+		// once per key, match independent BandFromBase::BlurTaps bit-for-bit, and visibly report fallbacks.
+		TEST_METHOD(DetailPulseCpuBandAcquireAndVisibleFallback)
+		{
+			namespace BFB = VpUnit::BandFromBase;
+			namespace GB = Vpv::GrainBand;
+			using Reg = VpSkeleton::SkeletonMemo::Registration;
+
+			const int W = 64, H = 48;
+			const int HW = (W + 1) / 2, HH = (H + 1) / 2;
+			const size_t nFull = static_cast<size_t>(W) * H;
+			const size_t nHalf = static_cast<size_t>(HW) * HH;
+
+			std::vector<float> fullPlane(nFull, 0.0f);
+			uint32_t rng = 0x2468ace0u;
+			for (int y = 0; y < H; ++y)
+				for (int x = 0; x < W; ++x)
+				{
+					rng = rng * 1664525u + 1013904223u;
+					const float noise = (static_cast<float>((rng >> 8) & 1023u) / 1023.0f - 0.5f) * 0.2f;
+					const float edge = (x >= 24 && x < 40 && y >= 12 && y < 36) ? 0.4f : 0.15f;
+					fullPlane[static_cast<size_t>(y) * W + x] = (std::min)(1.0f, (std::max)(0.0f, edge + noise));
+				}
+
+			std::vector<uint16_t> halfU16(nHalf, 0u);
+			std::vector<float> halfFloat(nHalf, 0.0f);
+			constexpr float kInvU16Max = 1.0f / 65535.0f;
+			for (int y = 0; y < HH; ++y)
+				for (int x = 0; x < HW; ++x)
+				{
+					const float avg = 0.25f * (fullPlane[static_cast<size_t>(2 * y) * W + 2 * x]
+						+ fullPlane[static_cast<size_t>(2 * y) * W + 2 * x + 1]
+						+ fullPlane[static_cast<size_t>(2 * y + 1) * W + 2 * x]
+						+ fullPlane[static_cast<size_t>(2 * y + 1) * W + 2 * x + 1]);
+					const uint16_t u = static_cast<uint16_t>(std::lround(avg * 65535.0f));
+					halfU16[static_cast<size_t>(y) * HW + x] = u;
+					halfFloat[static_cast<size_t>(y) * HW + x] = static_cast<float>(u) * kInvU16Max;
+				}
+
+			VpSkeleton::SkeletonMemo memo;
+			const uint64_t kSeq = 50u;
+			VpSkeleton::OwnerFill p13Cpu;
+			p13Cpu.frameScoped = true;
+			p13Cpu.renderThreadOnly = false;
+			p13Cpu.fill = [&fullPlane, kSeq](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+				if (req.seq != kSeq) return false;
+				out.bytes.resize(fullPlane.size() * sizeof(float));
+				std::memcpy(out.bytes.data(), fullPlane.data(), out.bytes.size());
+				return true;
+			};
+			Assert::IsTrue(memo.RegisterOwnerFill(VpSkeleton::kP13SourceRing, VpSkeleton::AcquireForm::Cpu,
+				VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP13SourceRing), std::move(p13Cpu)) == Reg::Registered);
+
+			VpSkeleton::OwnerFill p1Cpu;
+			p1Cpu.frameScoped = true;
+			p1Cpu.renderThreadOnly = false;
+			p1Cpu.fill = [&halfU16, kSeq](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+				if (req.seq != kSeq) return false;
+				out.bytes.resize(halfU16.size() * sizeof(uint16_t));
+				std::memcpy(out.bytes.data(), halfU16.data(), out.bytes.size());
+				return true;
+			};
+			Assert::IsTrue(memo.RegisterOwnerFill(VpSkeleton::kP1HalfLuma, VpSkeleton::AcquireForm::Cpu,
+				VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP1HalfLuma), std::move(p1Cpu)) == Reg::Registered);
+
+			const std::shared_ptr<GB::Counters> counters = std::make_shared<GB::Counters>();
+			Assert::IsTrue(memo.RegisterOwnerFill(VpSkeleton::kBandMemo, VpSkeleton::AcquireForm::Cpu,
+				GB::kBandMemoUnit, GB::MakeBandMemoCpuOwnerFill(counters)) == Reg::Registered);
+
+			// Independent BlurTaps references.
+			std::vector<float> fineRef, wideRef;
+			const std::vector<float> fineTaps = BFB::Taps<float>(BFB::kSigmaFine, 3.0, true, 0.0);
+			BFB::BlurTaps<float>(fullPlane, fineRef, W, H, fineTaps, BFB::EdgeMode::Replicate);
+			const double wideSigma = DetailPulse::WideSigma(1.0);
+			const int wr = GrainPreserve::LowRadius(wideSigma);
+			std::vector<float> wideTaps(static_cast<size_t>(2 * wr + 1));
+			for (int i = -wr; i <= wr; ++i)
+				wideTaps[static_cast<size_t>(i + wr)] = static_cast<float>(GrainPreserve::LowWeight(i, wideSigma));
+			BFB::BlurTaps<float>(halfFloat, wideRef, HW, HH, wideTaps, BFB::EdgeMode::Replicate);
+
+			// Memo hits: 1 fine fill + 1 wide fill, reused on second acquire.
+			const DetailPulse::CpuBandResult fineMemo = DetailPulse::AcquireFineCpuBand(fullPlane, W, H, 1.0, &memo, kSeq);
+			const DetailPulse::CpuBandResult wideMemo = DetailPulse::AcquireWideCpuBand(halfFloat, HW, HH, 1.0, &memo, kSeq);
+			Assert::IsTrue(fineMemo.fromBandMemo && fineMemo.fallbackReason.empty(), L"AcquireFineCpuBand hits kBandMemo");
+			Assert::IsTrue(wideMemo.fromBandMemo && wideMemo.fallbackReason.empty(), L"AcquireWideCpuBand hits kBandMemo");
+			Assert::AreEqual(uint64_t(2), counters->fills.load(), L"1 fine fill + 1 wide fill");
+			Assert::AreEqual(fineRef.size(), fineMemo.samples.size());
+			Assert::AreEqual(wideRef.size(), wideMemo.samples.size());
+			Assert::IsTrue(std::memcmp(fineMemo.samples.data(), fineRef.data(), fineRef.size() * sizeof(float)) == 0,
+				L"AcquireFineCpuBand matches independent BlurTaps bit-for-bit");
+			Assert::IsTrue(std::memcmp(wideMemo.samples.data(), wideRef.data(), wideRef.size() * sizeof(float)) == 0,
+				L"AcquireWideCpuBand matches independent BlurTaps bit-for-bit");
+
+			const DetailPulse::CpuBandResult fineRepeat = DetailPulse::AcquireFineCpuBand(fullPlane, W, H, 1.0, &memo, kSeq);
+			const DetailPulse::CpuBandResult wideRepeat = DetailPulse::AcquireWideCpuBand(halfFloat, HW, HH, 1.0, &memo, kSeq);
+			Assert::AreEqual(uint64_t(2), counters->fills.load(), L"repeated CPU band acquires reuse memo without recompute");
+			Assert::IsTrue(fineRepeat.fromBandMemo && wideRepeat.fromBandMemo);
+
+			// Negative controls: memo=nullptr, seq=0, unregistered memo visibly report fallback while staying bit-exact.
+			VpSkeleton::SkeletonMemo emptyMemo;
+			const DetailPulse::CpuBandResult fineNull = DetailPulse::AcquireFineCpuBand(fullPlane, W, H, 1.0, nullptr, kSeq);
+			const DetailPulse::CpuBandResult wideNull = DetailPulse::AcquireWideCpuBand(halfFloat, HW, HH, 1.0, nullptr, kSeq);
+			const DetailPulse::CpuBandResult fineUnreg = DetailPulse::AcquireFineCpuBand(fullPlane, W, H, 1.0, &emptyMemo, kSeq);
+			const DetailPulse::CpuBandResult wideUnkeyed = DetailPulse::AcquireWideCpuBand(halfFloat, HW, HH, 1.0, &memo, 0u);
+			Assert::IsFalse(fineNull.fromBandMemo || fineNull.fallbackReason.empty(), L"fine memo=nullptr fallback visible");
+			Assert::IsFalse(wideNull.fromBandMemo || wideNull.fallbackReason.empty(), L"wide memo=nullptr fallback visible");
+			Assert::IsFalse(fineUnreg.fromBandMemo || fineUnreg.fallbackReason.empty(), L"fine unregistered fallback visible");
+			Assert::IsFalse(wideUnkeyed.fromBandMemo || wideUnkeyed.fallbackReason.empty(), L"wide seq=0 fallback visible");
+			Assert::IsTrue(std::memcmp(fineNull.samples.data(), fineRef.data(), fineRef.size() * sizeof(float)) == 0, L"fine fallback bit-exact");
+			Assert::IsTrue(std::memcmp(wideNull.samples.data(), wideRef.data(), wideRef.size() * sizeof(float)) == 0, L"wide fallback bit-exact");
+
+			// Non-vacuity negative control: unblurred planes diverge substantially from blurred bands.
+			float maxFineDiff = 0.0f, maxWideDiff = 0.0f;
+			for (size_t i = 0; i < nFull; ++i)
+				maxFineDiff = (std::max)(maxFineDiff, std::fabs(fineMemo.samples[i] - fullPlane[i]));
+			for (size_t i = 0; i < nHalf; ++i)
+				maxWideDiff = (std::max)(maxWideDiff, std::fabs(wideMemo.samples[i] - halfFloat[i]));
+			Assert::IsTrue(maxFineDiff > 0.05f && maxWideDiff > 0.05f, L"negative control: blur materially transforms input");
+		}
 	};
 }
