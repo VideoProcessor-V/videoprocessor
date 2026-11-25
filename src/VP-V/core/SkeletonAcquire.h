@@ -457,34 +457,17 @@ public:
     bool UnbindLane(const void* token)
     {
         std::lock_guard<std::mutex> g(mutex_);
-        if (token == nullptr || lane_.token != token)
-            return false;
+        if (token == nullptr || lane_.token != token) return false;
         lane_ = LaneSlotSource();
         laneOwners_.clear();
         RefreshHasAheadDemandsLocked();
         return true;
     }
-    bool LaneBound() const
-    {
-        std::lock_guard<std::mutex> g(mutex_);
-        return bool(lane_.read) || bool(lane_.copyPublished);
-    }
-    uint64_t LaneBinds() const
-    {
-        std::lock_guard<std::mutex> g(mutex_);
-        return laneBinds_;
-    }
+    bool LaneBound() const { std::lock_guard<std::mutex> g(mutex_); return bool(lane_.read) || bool(lane_.copyPublished); }
+    uint64_t LaneBinds() const { std::lock_guard<std::mutex> g(mutex_); return laneBinds_; }
     // The render thread (the skeleton, every Begin). Not declared = every thread counts as the render thread.
-    void SetRenderThread(std::thread::id id)
-    {
-        std::lock_guard<std::mutex> g(mutex_);
-        renderThread_ = id;
-    }
-    bool OnRenderThread() const
-    {
-        std::lock_guard<std::mutex> g(mutex_);
-        return OnRenderThreadLocked();
-    }
+    void SetRenderThread(std::thread::id id) { std::lock_guard<std::mutex> g(mutex_); renderThread_ = id; }
+    bool OnRenderThread() const { std::lock_guard<std::mutex> g(mutex_); return OnRenderThreadLocked(); }
     // A frame whose memo spots were released (a request for it is FrameReleased).
     bool Released(uint64_t seq) const
     {
