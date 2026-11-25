@@ -53,6 +53,7 @@ namespace SourceResolutionMonitor
 		double frameRatio = 1.0;       // the last analysed frame
 		bool frameBlank = false;       // the last analysed frame had no detail (black, a fade's dark end, flat)
 		bool frameBlack = false;       // ... and was a real black (every tile flat at black; latch fixes)
+		bool frameFade = false;        // O#5 M3: the last analysed frame's shared U7 fade verdict
 		double liveRatio = 1.0;        // the spec's live reading: median of the last ~2 s, snapped on a cut
 		double declaredRatio = 1.0;    // the tracker's conservative value
 		double confidence = 0.0;       // of the declared value (0..1)
@@ -120,6 +121,11 @@ namespace SourceResolutionMonitor
 		unsigned long long clockStepsBack = 0; // source seconds that went backwards (clamped)
 		unsigned long long submitSkipped = 0; // frame-bound: frames not copied because both readback slots were still in flight
 		unsigned long long engagedReactive = 0; // frame-bound: engages made by the reactive trigger because the look-ahead was unavailable or stale (visible fallback)
+		// O#5 M1-M4: shared U7 scene & P4 stats reads and visible fallback diagnostics.
+		unsigned long long u7SceneShared = 0, u7SceneFallback = 0;
+		std::string u7SceneFallbackWhy;
+		unsigned long long p4StatsShared = 0, p4StatsFallback = 0;
+		std::string p4StatsFallbackWhy;
 	};
 
 	class Monitor
@@ -129,6 +135,26 @@ namespace SourceResolutionMonitor
 		~Monitor();
 		Monitor(const Monitor&) = delete;
 		Monitor& operator=(const Monitor&) = delete;
+
+		// O#5 M1-M4: injectable shared U7 scene and P4 stats readers for deterministic tests
+		// (empty = default VpSkeleton::SceneRecordReader::AcquireScene / AcquireSourceStats).
+		struct SharedSceneInput
+		{
+			bool cut = false;
+			bool fade = false;
+			float fadeKeep = -1.0f;
+		};
+		struct SharedP4Input
+		{
+			bool blank = false;
+			bool black = false;
+			bool flat = false;
+			double mean = 0.0;
+		};
+		using SharedSceneFn = std::function<bool(uint64_t seq, SharedSceneInput& out, const char** why)>;
+		using SharedP4Fn = std::function<bool(uint64_t seq, SharedP4Input& out, const char** why)>;
+		void SetSharedSceneReader(SharedSceneFn reader);
+		void SetSharedP4Reader(SharedP4Fn reader);
 
 		// Render thread, every rendered source frame: submits a tile copy when
 		// the interval has passed and a slot is free, and collects finished
@@ -596,6 +622,16 @@ namespace SourceResolutionMonitor
 		void ResetVisible();                                // with `mutex` held
 		void NoteSubmitted(uint64_t sequence);
 		void FinishSequence(uint64_t sequence);
+		bool ReadSharedScene(uint64_t seq, SharedSceneInput& out, const char** why) const;
+		bool ReadSharedP4(uint64_t seq, SharedP4Input& out, const char** why) const;
+		void NoteU7Fallback(const char* why) const;
+		void NoteP4Fallback(const char* why) const;
+		mutable std::mutex sharedReaderMutex;
+		SharedSceneFn sharedSceneReader;
+		SharedP4Fn sharedP4Reader;
+		mutable std::atomic<unsigned long long> u7SceneSharedCount{ 0 }, u7SceneFallbackCount{ 0 };
+		mutable std::atomic<unsigned long long> p4StatsSharedCount{ 0 }, p4StatsFallbackCount{ 0 };
+		mutable std::string u7SceneFallbackWhyLast, p4StatsFallbackWhyLast;
 		void Worker();
 		void Fail(const char* what, double seconds);
 		// One history row (event .. note, 13 fields) plus the replay / identity columns (SourceHistory::kExtraColumns fields

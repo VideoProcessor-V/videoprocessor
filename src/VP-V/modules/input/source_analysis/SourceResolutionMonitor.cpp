@@ -2,6 +2,9 @@
 #include "SourceResolutionMonitor.h"
 #include <VP-V/core/LumaWeights.h>
 #include <VP-V/core/RobustStats.h>
+#include <VP-V/modules/control/skeleton/SceneRecordReader.h>
+#include <VP-V/modules/input/source_analysis/events/shared/CutFadeJudge.h>
+#include <VP-V/modules/input/source_analysis/lane/shared/SourceStats.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
 #include <VP-V/modules/input/source_analysis/regions/CodingEvidence.h>
 #include <VP-V/modules/input/source_analysis/identity/chain/ChainEstimator.h>
@@ -197,6 +200,72 @@ if (tile < int(tiles) && g.y < ts) {
 		LookAheadFrameCoded(sequence, width, height, luma.read, luma.codeMaximum, left, top, right, bottom);
 	}
 
+	void Monitor::SetSharedSceneReader(SharedSceneFn reader)
+	{
+		std::lock_guard<std::mutex> lock(sharedReaderMutex);
+		sharedSceneReader = std::move(reader);
+	}
+
+	void Monitor::SetSharedP4Reader(SharedP4Fn reader)
+	{
+		std::lock_guard<std::mutex> lock(sharedReaderMutex);
+		sharedP4Reader = std::move(reader);
+	}
+
+	bool Monitor::ReadSharedScene(uint64_t seq, SharedSceneInput& out, const char** why) const
+	{
+		out = SharedSceneInput{};
+		SharedSceneFn fn;
+		{
+			std::lock_guard<std::mutex> lock(sharedReaderMutex);
+			fn = sharedSceneReader;
+		}
+		if (fn)
+			return fn(seq, out, why);
+		VpSkeleton::SceneRecordReader::SceneVerdict v;
+		if (!VpSkeleton::SceneRecordReader::AcquireScene(seq, v, why))
+			return false;
+		out.cut = v.cut;
+		out.fade = v.fade;
+		out.fadeKeep = v.fadeKeep;
+		return true;
+	}
+
+	bool Monitor::ReadSharedP4(uint64_t seq, SharedP4Input& out, const char** why) const
+	{
+		out = SharedP4Input{};
+		SharedP4Fn fn;
+		{
+			std::lock_guard<std::mutex> lock(sharedReaderMutex);
+			fn = sharedP4Reader;
+		}
+		if (fn)
+			return fn(seq, out, why);
+		VpUnit::SourceStats::Record rec;
+		if (!VpSkeleton::SceneRecordReader::AcquireSourceStats(seq, rec, why))
+			return false;
+		const VpUnit::CutFadeJudge::BlankVerdict bv = VpUnit::CutFadeJudge::BlankOf(rec);
+		out.blank = bv.blank;
+		out.black = bv.black;
+		out.flat = bv.flat;
+		out.mean = VpUnit::SourceStats::NormalisedMean(rec);
+		return true;
+	}
+
+	void Monitor::NoteU7Fallback(const char* why) const
+	{
+		u7SceneFallbackCount.fetch_add(1, std::memory_order_relaxed);
+		std::lock_guard<std::mutex> lock(sharedReaderMutex);
+		u7SceneFallbackWhyLast = (why != nullptr && why[0] != 0) ? why : "unavailable";
+	}
+
+	void Monitor::NoteP4Fallback(const char* why) const
+	{
+		p4StatsFallbackCount.fetch_add(1, std::memory_order_relaxed);
+		std::lock_guard<std::mutex> lock(sharedReaderMutex);
+		p4StatsFallbackWhyLast = (why != nullptr && why[0] != 0) ? why : "unavailable";
+	}
+
 	void Monitor::LookAheadFrameCoded(uint64_t sequence, int width, int height, const LumaSampler& luma, uint32_t codeMaximum,
 		int left, int top, int right, int bottom)
 	{
@@ -218,75 +287,117 @@ if (tile < int(tiles) && g.y < ts) {
 			x0 = (std::max)(left, (std::min)(x0, right - tileSize));
 			y0 = (std::max)(top, (std::min)(y0, bottom - tileSize));
 		};
-		// Cheap check: the mean and spread on a sparse 32 x 32 grid per tile.
-		double sum = 0.0, spread = 0.0;
-		int count = 0;
-		std::vector<double> pattern;
-		// The sparse grid: 32 x 32 samples per tile whatever its size.
-		const int step = (std::max)(4, tileSize / 32);
-		const int half = tileSize / 2;
-		for (int i = 0; i < tilesX * tilesY; ++i)
-		{
-			int x0, y0;
-			tileOrigin(i, x0, y0);
-			double ts = 0.0, ts2 = 0.0, q[4] = {};
-			double samples = 0.0;
-			for (int y = 0; y < tileSize; y += step)
-				for (int x = 0; x < tileSize; x += step)
-				{
-					const double v = NormalisedLuma(luma(x0 + x, y0 + y), codeMaximum);
-					ts += v; ts2 += v * v;
-					q[(y >= half ? 2 : 0) + (x >= half ? 1 : 0)] += v;
-					samples += 1.0;
-				}
-			const double mean = ts / samples;
-			spread = (std::max)(spread, std::sqrt((std::max)(0.0, ts2 / samples - mean * mean)));
-			for (int k = 0; k < 4; ++k) pattern.push_back(q[k] / (samples / 4.0));
-			sum += mean;
-			++count;
-		}
-		const double mean = sum / count;
+		// O#5 M2: query shared U7 scene (cut) and shared P4 stats (BlankOf + mean) first;
+		// fall back visibly to the local check only when a shared product is unavailable.
+		SharedSceneInput sharedScene;
+		const char* u7Why = "";
+		const bool haveU7 = ReadSharedScene(sequence, sharedScene, &u7Why);
+		if (haveU7)
+			u7SceneSharedCount.fetch_add(1, std::memory_order_relaxed);
+		else
+			NoteU7Fallback(u7Why);
+
+		SharedP4Input sharedP4;
+		const char* p4Why = "";
+		const bool haveP4 = ReadSharedP4(sequence, sharedP4, &p4Why);
+		if (haveP4)
+			p4StatsSharedCount.fetch_add(1, std::memory_order_relaxed);
+		else
+			NoteP4Fallback(p4Why);
+
 		bool cut = false, blank = false;
-		if (fixes)
+		if (haveU7 && haveP4)
 		{
-			// Latch fixes: the tracker's shape-aware cut (a fade or a flash is not a cut) and a
-			// real black (flat and at black) - the look-ahead's events are cuts and blacks only.
-			const SourceResolution::Tracker::Settings ts;
-			const SourceResolution::Thresholds th;
-			const std::vector<char> none(pattern.size(), 0);
-			const double noise = th.flatSpreadCodes / axisRange;
-			double decorrelation = 0.0, share = 0.0, jump = 0.0;
-			if (CutFixes())
-			{
-				// Cut fixes: the per-frame judge with the dark and flash rules; its candidates are the
-				// look-ahead's cut events, and a candidate found to be a flash cancels its event below.
-				std::lock_guard<std::mutex> lock(frameJudgeMutex);
-				cut = frameJudge.Frame(sequence, pattern, blackLevelSeen, noise, secondsPerFrame, ts);
-			}
-			else if (SourceResolution::PatternChange(aheadLastPattern, none, pattern, none, blackLevelSeen, noise, decorrelation, share, &jump))
-			{
-				// Consecutive frames ahead: the motion level per frame interval (the frame rate measured).
-				static GeneralRate::FallbackNotice fallback;   // fixed-constant batch B7 2026-10-18: logged
-				const bool measured = GeneralRate::NoteFallback(fallback, secondsPerFrame > 0.0, "source-resolution cut judge", 24.0);
-				cut = aheadCutJudge.Judge(decorrelation, jump, measured ? secondsPerFrame : 1.0 / 24.0, ts);
-				aheadLastPattern = pattern;
-			}
-			else if (SourceResolution::PatternChange(pattern, none, pattern, none, blackLevelSeen, noise, decorrelation, share))
-				aheadLastPattern = pattern;
-			blank = spread < 3.0 / axisRange && mean <= blackLevelSeen + th.nearBlackShare * (1.0 - blackLevelSeen);
+			cut = sharedScene.cut;
+			blank = fixes ? sharedP4.black : sharedP4.blank;
+			aheadLastMean = sharedP4.mean;
 		}
 		else
 		{
-			cut = aheadLastMean >= 0.0 && std::fabs(mean - aheadLastMean) > SourceResolution::Tracker::Settings{}.cutLevel;
-			blank = spread < 3.0 / axisRange;   // no texture anywhere (black, a fade's end, flat)
+			// Cheap fallback check: the mean and spread on a sparse 32 x 32 grid per tile.
+			double sum = 0.0, spread = 0.0;
+			int count = 0;
+			std::vector<double> pattern;
+			// The sparse grid: 32 x 32 samples per tile whatever its size.
+			const int step = (std::max)(4, tileSize / 32);
+			const int half = tileSize / 2;
+			for (int i = 0; i < tilesX * tilesY; ++i)
+			{
+				int x0, y0;
+				tileOrigin(i, x0, y0);
+				double ts = 0.0, ts2 = 0.0, q[4] = {};
+				double samples = 0.0;
+				for (int y = 0; y < tileSize; y += step)
+					for (int x = 0; x < tileSize; x += step)
+					{
+						const double v = NormalisedLuma(luma(x0 + x, y0 + y), codeMaximum);
+						ts += v; ts2 += v * v;
+						q[(y >= half ? 2 : 0) + (x >= half ? 1 : 0)] += v;
+						samples += 1.0;
+					}
+				const double mean = ts / samples;
+				spread = (std::max)(spread, std::sqrt((std::max)(0.0, ts2 / samples - mean * mean)));
+				for (int k = 0; k < 4; ++k) pattern.push_back(q[k] / (samples / 4.0));
+				sum += mean;
+				++count;
+			}
+			const double mean = sum / count;
+			if (haveU7)
+			{
+				cut = sharedScene.cut;
+			}
+			else if (fixes)
+			{
+				// Latch fixes: the tracker's shape-aware cut (a fade or a flash is not a cut).
+				const SourceResolution::Tracker::Settings ts;
+				const SourceResolution::Thresholds th;
+				const std::vector<char> none(pattern.size(), 0);
+				const double noise = th.flatSpreadCodes / axisRange;
+				double decorrelation = 0.0, share = 0.0, jump = 0.0;
+				if (CutFixes())
+				{
+					// Cut fixes: the per-frame judge with the dark and flash rules; its candidates are the
+					// look-ahead's cut events, and a candidate found to be a flash cancels its event below.
+					std::lock_guard<std::mutex> lock(frameJudgeMutex);
+					cut = frameJudge.Frame(sequence, pattern, blackLevelSeen, noise, secondsPerFrame, ts);
+				}
+				else if (SourceResolution::PatternChange(aheadLastPattern, none, pattern, none, blackLevelSeen, noise, decorrelation, share, &jump))
+				{
+					// Consecutive frames ahead: the motion level per frame interval (the frame rate measured).
+					static GeneralRate::FallbackNotice fallback;   // fixed-constant batch B7 2026-10-18: logged
+					const bool measured = GeneralRate::NoteFallback(fallback, secondsPerFrame > 0.0, "source-resolution cut judge", 24.0);
+					cut = aheadCutJudge.Judge(decorrelation, jump, measured ? secondsPerFrame : 1.0 / 24.0, ts);
+					aheadLastPattern = pattern;
+				}
+				else if (SourceResolution::PatternChange(pattern, none, pattern, none, blackLevelSeen, noise, decorrelation, share))
+					aheadLastPattern = pattern;
+			}
+			else
+			{
+				cut = aheadLastMean >= 0.0 && std::fabs(mean - aheadLastMean) > SourceResolution::Tracker::Settings{}.cutLevel;
+			}
+
+			if (haveP4)
+			{
+				blank = fixes ? sharedP4.black : sharedP4.blank;
+			}
+			else if (fixes)
+			{
+				const SourceResolution::Thresholds th;
+				blank = spread < 3.0 / axisRange && mean <= blackLevelSeen + th.nearBlackShare * (1.0 - blackLevelSeen);
+			}
+			else
+			{
+				blank = spread < 3.0 / axisRange;   // no texture anywhere (black, a fade's end, flat)
+			}
+			aheadLastMean = haveP4 ? sharedP4.mean : mean;
 		}
-		aheadLastMean = mean;
 		const bool pending = disengagePending || std::fabs(autoPending - autoApplied) > 0.01;
 		bool analyse = false;
 		{
 			std::lock_guard<std::mutex> lock(aheadMutex);
 			if (!pending) { ahead.eventSequence = 0; aheadAwaitTarget = false; return; }
-			if (fixes && CutFixes() && ahead.eventSequence != 0)
+			if (!haveU7 && fixes && CutFixes() && ahead.eventSequence != 0)
 			{
 				// A flash (back to the shape before within the flash window): no switch at it.
 				bool flash = false;
@@ -442,19 +553,40 @@ if (tile < int(tiles) && g.y < ts) {
 	{
 		const std::string chainText = chainEnabled.load(std::memory_order_acquire) ? ChainStatusCached() : std::string();
 		const std::string heldText = ConventionNote();
+		std::string u7Why, p4Why;
+		{
+			std::lock_guard<std::mutex> lock(sharedReaderMutex);
+			u7Why = u7SceneFallbackWhyLast;
+			p4Why = p4StatsFallbackWhyLast;
+		}
+		const unsigned long long u7Shared = u7SceneSharedCount.load(std::memory_order_relaxed);
+		const unsigned long long u7Fallback = u7SceneFallbackCount.load(std::memory_order_relaxed);
+		const unsigned long long p4Shared = p4StatsSharedCount.load(std::memory_order_relaxed);
+		const unsigned long long p4Fallback = p4StatsFallbackCount.load(std::memory_order_relaxed);
 		std::lock_guard<std::mutex> lock(mutex);
 		if (!frameBound.load(std::memory_order_acquire))
 		{
-			if (chainText.empty() && heldText.empty()) return snapshot;
 			Snapshot plain = snapshot;
 			plain.chainNote = chainText;
 			plain.conventionNote = heldText;
+			plain.u7SceneShared = u7Shared;
+			plain.u7SceneFallback = u7Fallback;
+			plain.u7SceneFallbackWhy = u7Why;
+			plain.p4StatsShared = p4Shared;
+			plain.p4StatsFallback = p4Fallback;
+			plain.p4StatsFallbackWhy = p4Why;
 			return plain;
 		}
 		// Frame-bound: the released analysis; the GPU-side status and the counters are live.
 		Snapshot out = visible;
 		out.chainNote = chainText;
 		out.conventionNote = heldText;
+		out.u7SceneShared = u7Shared;
+		out.u7SceneFallback = u7Fallback;
+		out.u7SceneFallbackWhy = u7Why;
+		out.p4StatsShared = p4Shared;
+		out.p4StatsFallback = p4Fallback;
+		out.p4StatsFallbackWhy = p4Why;
 		out.notRead = snapshot.notRead;
 		out.error = snapshot.error;
 		out.frameBound = true;
@@ -1409,6 +1541,7 @@ if (tile < int(tiles) && g.y < ts) {
 		sourceIdLastCuts = tracker.Cuts();
 		snapshot.frameQuality = 1.0;
 		snapshot.frameNoise = -1.0;
+		snapshot.frameFade = false;
 		snapshot.reading = false;
 		snapshot.liveRatio = snapshot.declaredRatio = snapshot.frameRatio = 1.0;
 		snapshot.confidence = 0.0;
@@ -1493,6 +1626,32 @@ if (tile < int(tiles) && g.y < ts) {
 		}
 		thresholds.signatureTiles = j.baseTiles;
 		const SourceResolution::FrameReading frame = SourceResolution::ReadFrame(spectra, thresholds);
+
+		// O#5 M3: query shared U7 scene (cut + fade) and shared P4 stats (BlankOf + NormalisedMean) for sequenced frames
+		// before taking `mutex`; unavailable reads fall back visibly to tile-based measurements.
+		bool haveU7 = false, haveP4 = false;
+		SharedSceneInput sharedScene;
+		SharedP4Input sharedP4;
+		if (j.sequence != 0)
+		{
+			const char* u7Why = "";
+			haveU7 = ReadSharedScene(j.sequence, sharedScene, &u7Why);
+			if (haveU7)
+				u7SceneSharedCount.fetch_add(1, std::memory_order_relaxed);
+			else
+				NoteU7Fallback(u7Why);
+
+			const char* p4Why = "";
+			haveP4 = ReadSharedP4(j.sequence, sharedP4, &p4Why);
+			if (haveP4)
+				p4StatsSharedCount.fetch_add(1, std::memory_order_relaxed);
+			else
+				NoteP4Fallback(p4Why);
+		}
+		const bool effectiveBlank = haveP4 ? (!frame.informative() || sharedP4.blank) : !frame.informative();
+		const bool effectiveBlack = haveP4 ? sharedP4.black : frame.black;
+		const double effectiveMean = haveP4 ? sharedP4.mean : frame.mean;
+		const bool effectiveFade = haveU7 ? sharedScene.fade : false;
 
 		// Source identity (doc 61 SID-2): the relative-noise measurement of the frame's informative tiles, taken BEFORE `mutex`
 		// is held (the render thread's Read() never waits for it). Off (the default): nothing is measured.
@@ -1754,8 +1913,9 @@ if (tile < int(tiles) && g.y < ts) {
 		snapshot.nativeWidth = j.nativeWidth;
 		snapshot.nativeHeight = j.nativeHeight;
 		snapshot.frameRatio = frame.ratio;
-		snapshot.frameBlank = !frame.informative();
-		snapshot.frameBlack = frame.black;
+		snapshot.frameBlank = effectiveBlank;
+		snapshot.frameBlack = effectiveBlack;
+		snapshot.frameFade = effectiveFade;
 		snapshot.liveRatio = RobustStats::Median(ratios, RobustStats::MedianRule::Upper, 1.0);
 		// Latch precision (2026-10-17): the declared rate as the exact rendition behind it - an even
 		// size of the frame within SourceResolution::kSnapBins of this tile's sweep, the simplest ratio (SnapRatio):
@@ -1829,7 +1989,7 @@ if (tile < int(tiles) && g.y < ts) {
 		const bool detailAbove = detailAboveRaw && chainHoldMask != 3u;
 		const uint64_t rowSequence = j.sequence != 0 ? j.sequence : snapshot.frames;
 		sourceIdLastRowSeq = rowSequence;
-		const bool cutFlag = snapshot.cuts != sourceIdLastCuts;
+		const bool cutFlag = (snapshot.cuts != sourceIdLastCuts) || (haveU7 && sharedScene.cut);
 		sourceIdLastCuts = snapshot.cuts;
 		if (idOn && chainEnabled.load(std::memory_order_acquire))
 		{
@@ -1837,8 +1997,8 @@ if (tile < int(tiles) && g.y < ts) {
 			const bool cutSeam = cutForTest.exchange(false, std::memory_order_acq_rel);   // the test seam (one-shot) adds a cut for the chain events only
 			const bool chainCut = cutFlag || cutSeam;
 			if (chainCut) chainEst->NoteEvent(SourceIdentity::Chain::EstimatorEvent::Cut, rowSequence);
-			// Blank is an edge: a dark or flat scene flags it once, not on every evaluation. Fade is not fed today (no fade source).
-			const bool blankNow = !frame.informative();
+			// Blank is an edge: a dark or flat scene flags it once, not on every evaluation.
+			const bool blankNow = effectiveBlank;
 			if (blankNow && !chainWasBlank) chainEst->NoteEvent(SourceIdentity::Chain::EstimatorEvent::Blank, rowSequence);
 			chainWasBlank = blankNow;
 			// Revert window: the evidence window is cleared at the END of a mixed (menu / overlay) episode and at the first cut after one; a
@@ -1878,8 +2038,8 @@ if (tile < int(tiles) && g.y < ts) {
 			in.classical.chainHoldMask = static_cast<uint8_t>(chainHoldMask);   // 0 in Off (the record is not read there)
 			in.deliveredRatio = frame.informative() ? frame.ratio : 0.0;
 			in.noise = idNoise;
-			in.apl = frame.mean;
-			in.blank = !frame.informative();
+			in.apl = effectiveMean;
+			in.blank = effectiveBlank;
 			in.cut = cutFlag;
 			in.nativeHeight = j.nativeHeight;
 			const unsigned long long eventsBefore = sourceId.Events();
@@ -1930,7 +2090,7 @@ if (tile < int(tiles) && g.y < ts) {
 			f << rowSequence << ',' << Num(j.seconds) << ',' << (idMode == SourceIdMode::On ? "on" : idMode == SourceIdMode::Shadow ? "shadow" : "off") << ','
 				<< diagCodedBits.load(std::memory_order_acquire) << ',' << diagOutputBits.load(std::memory_order_acquire) << ','
 				<< (frame.informative() ? 1 : 0) << ',' << frame.informativeTiles << ',' << frame.tiles << ',' << (frame.mixed ? 1 : 0) << ','
-				<< (frame.informative() ? 0 : 1) << ',' << (frame.black ? 1 : 0) << ',' << (cutFlag ? 1 : 0) << ',' << snapshot.cuts << ','
+				<< (effectiveBlank ? 1 : 0) << ',' << (effectiveBlack ? 1 : 0) << ',' << (cutFlag ? 1 : 0) << ',' << snapshot.cuts << ','
 				<< snapshot.shots << ',' << Num(frame.ratio) << ',' << Num(frame.ratioH) << ',' << Num(frame.ratioV) << ','
 				<< Num(frame.horizontal.coherence) << ',' << Num(frame.vertical.coherence) << ',' << Num(tracker.Ratio()) << ','
 				<< Num(tracker.Candidate()) << ',' << Num(trackerH.Ratio()) << ',' << Num(trackerH.Candidate()) << ',' << Num(trackerV.Ratio()) << ','
@@ -1938,7 +2098,7 @@ if (tile < int(tiles) && g.y < ts) {
 				<< Num(snapshot.axisRatioX) << ',' << Num(snapshot.axisRatioY) << ',' << Num(snapshot.axisConfidence) << ','
 				<< Num(diagConfH) << ',' << Num(diagConfV) << ',' << (detailAboveRaw ? 1 : 0) << ',' << (detailAbove ? 1 : 0) << ','
 				<< chainHoldMask << ',' << (idOn ? Num(snapshot.frameQuality) : std::string()) << ',' << (idOn ? Num(snapshot.frameNoise) : std::string())
-				<< ',' << Num(frame.mean) << ',' << sourceId.Events() << ',' << sourceId.Detector().Confounded() << ','
+				<< ',' << Num(effectiveMean) << ',' << sourceId.Events() << ',' << sourceId.Detector().Confounded() << ','
 				<< Num(snapshot.evidenceSeconds) << '\n';
 			diagFrameRow = f.str();
 		}
@@ -1957,7 +2117,7 @@ if (tile < int(tiles) && g.y < ts) {
 			const int n = snprintf(cols, sizeof(cols), ",%s,%.6f,%llu,%.4f,%.4f,%d,%d,%d,%d,%d,%.6f,%.4f,%.4f,%.3f,%d,%s,%d,%d",
 				idMode == SourceIdMode::On ? "on" : idMode == SourceIdMode::Shadow ? "shadow" : "off", j.seconds,
 				static_cast<unsigned long long>(rowSequence), frame.ratioV, frame.ratioH, detailAbove ? 1 : 0, frame.mixed ? 1 : 0,
-				frame.informative() ? 0 : 1, cutFlag ? 1 : 0, 0 /* fade: no fade source is fed today */, frame.mean,
+				effectiveBlank ? 1 : 0, cutFlag ? 1 : 0, effectiveFade ? 1 : 0, effectiveMean,
 				snapshot.axisRatioX, snapshot.axisRatioY, snapshot.axisConfidence, snapshot.kernel,
 				kernelName.c_str(), snapshot.kernelVotes, snapshot.kernelAgree);
 			if (idOn && haveRecord)
@@ -2851,6 +3011,12 @@ if (tile < int(tiles) && g.y < ts) {
 	std::string Describe(const Snapshot& s, double autoRatio, bool autoSelected)
 	{
 		std::string text = DescribeBase(s, autoRatio, autoSelected);
+		if (s.u7SceneFallback > 0)
+			text += "; U7 scene fallback " + std::to_string(s.u7SceneFallback) +
+				(s.u7SceneFallbackWhy.empty() ? std::string() : " (" + s.u7SceneFallbackWhy + ")");
+		if (s.p4StatsFallback > 0)
+			text += "; P4 stats fallback " + std::to_string(s.p4StatsFallback) +
+				(s.p4StatsFallbackWhy.empty() ? std::string() : " (" + s.p4StatsFallbackWhy + ")");
 		if (!s.historyNote.empty()) text += "; " + s.historyNote;
 		if (!s.chainNote.empty()) text += "; " + s.chainNote;
 		if (autoSelected && !s.conventionNote.empty()) text += "; " + s.conventionNote;   // AutoFactors refreshes it only under auto

@@ -20,8 +20,11 @@
 // Header-only, C++14.
 
 #include <VP-V/core/FrameAnalysisStore.h>
+#include <VP-V/core/Products.h>
+#include <VP-V/core/SkeletonAcquire.h>
 #include <VP-V/modules/control/skeleton/SkeletonFacts.h>   // Demand(), SceneAnswer; not SkeletonAccess.h (hub header: no libplacebo in Lib)
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
+#include <VP-V/modules/input/source_analysis/lane/shared/SourceStats.h>
 
 #include <cstdint>
 
@@ -97,6 +100,39 @@ namespace VpSkeleton
 			SceneVerdict verdict;
 			const bool found = AcquireScene(seq, verdict, why);
 			cut = found && verdict.cut;
+			return found;
+		}
+
+		// GET-OR-COMPUTE reader of P4 SourceStats for frame `seq` through the renderer's skeleton memo (O#5).
+		// Single-owner contract; returns false with exact static `*why` on any unavailability.
+		inline bool AcquireSourceStats(uint64_t seq, VpUnit::SourceStats::Record& out, const char** why)
+		{
+			out = VpUnit::SourceStats::Record{};
+			const char* reason = "";
+			bool found = false;
+			const std::vector<const void*> owners = VpFrameAnalysis::SourceFrameTap::StoreOwners();
+			if (owners.size() != 1)
+				reason = owners.empty() ? "no store owner" : "renderer ambiguous";
+			else if (Vpv::Skeleton::IExternalDemand* demand = Vpv::Skeleton::Demand())
+			{
+				const Vpv::Skeleton::FrameMemo fm = demand->MemoFor(owners[0], seq);
+				if (!fm.Valid())
+					reason = "no frame memo";
+				else
+				{
+					const VpSkeleton::AcquireResult ar = fm.memo->Acquire(VpSkeleton::kP4SourceStats, seq, VpSkeleton::AcquireForm::Cpu);
+					if (!ar.Ok())
+						reason = VpSkeleton::Token(ar.cause);
+					else if (VpUnit::SourceStats::ReadRecord(ar.cpu, ar.cpuBytes, &out))
+						found = true;
+					else
+						reason = "p4 record version mismatch";
+				}
+			}
+			else
+				reason = "no skeleton module";
+			if (why != nullptr)
+				*why = reason;
 			return found;
 		}
 	}
