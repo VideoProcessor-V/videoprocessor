@@ -280,5 +280,9 @@
       <Link>shaders\vp_dm_pre_deband.glsl</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Include="..\..\shaders\vp_cam16_appearance.glsl">
+      <Link>shaders\vp_cam16_appearance.glsl</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 </Project>
