@@ -1377,7 +1377,7 @@ for (int chIdx = 0; chIdx < 2; ++chIdx)
                         if (td_is_exact_copy(k) || (centerMask & (1 << k)) == 0) continue;
                         int partner = td_find_independent_a1_partner_masked(K, k, centerMask);
                         if (partner < 0) continue;
-                        if (td_refs_collinear(C[k][k], C[partner][partner], C[k][partner])) continue;
+                        if (td_refs_collinear(C[k][k], C[partner][partner], C[k][partner], bGain)) continue;
                         float rawC = C[k][partner] - retG * bGain * psdScale;
                         float clipC = clamp(rawC, 0.0, max(0.0, min(C[k][k], C[partner][partner])));
                         float nEff = td_effective_samples_for_band(b, nPool);
@@ -1394,7 +1394,9 @@ for (int chIdx = 0; chIdx < 2; ++chIdx)
 }
 )GLSL";
 
-		// ---- PASS C2EB-REDUCE (PROD-GPU-BUG-1 / PROD-GPU-BUG-4): 1-WG Exact Torben 24-Step Median + Centered tau^2 (Cb & Cr) ----
+		// ---- PASS C2EB-REDUCE (PROD-GPU-BUG-1 / PROD-GPU-BUG-4 / PROD-GPU-BUG-9): Parallel (6 x 2) 1-Slice-Per-WG Torben Median + tau^2 ----
+		// Dispatch: 6 x 2 x 1 workgroups of 16x16 threads (slot = gl_WorkGroupID.x = b*2+ac, chIdx = gl_WorkGroupID.y).
+		// Zero outer chIdx/b/ac loops & zero float[6] arrays -> eliminates FXC E_FAIL ICE and runs all 12 slices in parallel!
 		// Output: eb_prior (6 x 2 RGBA32F): x = b*2 + ac, y = chIdx (0=Cb, 1=Cr); .x = U_j, .y = tau^2, .z = validCnt, .w = unsplitGrainVar (at x==0).
 		constexpr const char* kPassChromaEbPriorHeader = R"GLSL(
 #define TD_EB_TILES ((TD_CW * TD_CH + 255) / 256)
@@ -1402,199 +1404,167 @@ shared vec4 td_ceb_acc[256];
 shared vec2 td_ceb_mm[256];
 shared vec4 td_ceb_state;
 shared float td_ceb_mean_raw;
+shared float td_ceb_tau_out;
 )GLSL";
 
 		constexpr const char* kPassChromaEbPriorReduce = R"GLSL(
 int tid = int(gl_LocalInvocationID.y) * 16 + int(gl_LocalInvocationID.x);
+int slot = int(gl_WorkGroupID.x);
+int chIdx = int(gl_WorkGroupID.y);
+int b = slot / 2;
+int ac = slot & 1;
+int targetTag = ac + 1;
 int totalCells = TD_CW * TD_CH;
 
-for (int chIdx = 0; chIdx < 2; ++chIdx)
+vec4 locAcc = vec4(0.0); // (sumRaw, sumSeSq, cnt, 0)
+float locMin = 1e30;
+float locMax = -1e30;
+for (int tile = 0; tile < TD_EB_TILES; ++tile)
 {
-    float outU[6];
-    float outTau[6];
-    float outCnt[6];
-    for (int i = 0; i < 6; ++i) { outU[i] = 0.0; outTau[i] = 0.0; outCnt[i] = 0.0; }
-
-    for (int b = 0; b < 3; ++b)
+    int idx = tile * 256 + tid;
+    if (idx < totalCells)
     {
-        for (int ac = 0; ac < 2; ++ac)
+        int cx = idx % TD_CW;
+        int cy = idx / TD_CW;
+        vec4 ev = texelFetch(eb_scratch, ivec2(b * TD_CW + cx, chIdx * TD_CH + cy), 0);
+        if (int(round(ev.w)) == targetTag)
         {
-            int targetTag = ac + 1;
-            vec4 locAcc = vec4(0.0); // (sumRaw, sumSeSq, cnt, 0)
-            float locMin = 1e30;
-            float locMax = -1e30;
-            for (int tile = 0; tile < TD_EB_TILES; ++tile)
-            {
-                int idx = tile * 256 + tid;
-                if (idx < totalCells)
-                {
-                    int cx = idx % TD_CW;
-                    int cy = idx / TD_CW;
-                    vec4 ev = texelFetch(eb_scratch, ivec2(b * TD_CW + cx, chIdx * TD_CH + cy), 0);
-                    if (int(round(ev.w)) == targetTag)
-                    {
-                        locAcc += vec4(ev.y, ev.z, 1.0, 0.0);
-                        locMin = min(locMin, ev.x);
-                        locMax = max(locMax, ev.x);
-                    }
-                }
-            }
-            td_ceb_acc[tid] = locAcc;
-            td_ceb_mm[tid] = vec2(locMin, locMax);
-            memoryBarrierShared();
-            barrier();
-            for (int stride = 128; stride > 0; stride >>= 1)
-            {
-                if (tid < stride)
-                {
-                    td_ceb_acc[tid] += td_ceb_acc[tid + stride];
-                    td_ceb_mm[tid].x = min(td_ceb_mm[tid].x, td_ceb_mm[tid + stride].x);
-                    td_ceb_mm[tid].y = max(td_ceb_mm[tid].y, td_ceb_mm[tid + stride].y);
-                }
-                memoryBarrierShared();
-                barrier();
-            }
-            float p1Cnt = td_ceb_acc[0].z;
-            int nInt = int(round(p1Cnt));
-            float sumSeAll = td_ceb_acc[0].y;
-            if (tid == 0)
-            {
-                int slot = b * 2 + ac;
-                outCnt[slot] = p1Cnt;
-                td_ceb_mean_raw = (p1Cnt > 0.5) ? (td_ceb_acc[0].x / p1Cnt) : 0.0;
-                if (nInt >= 1)
-                {
-                    float gMin = max(0.0, td_ceb_mm[0].x);
-                    float gMax = max(gMin, td_ceb_mm[0].y);
-                    bool triv = (nInt == 1) || (gMax <= gMin);
-                    td_ceb_state = vec4(gMin, gMax, triv ? 1.0 : 0.0, gMin);
-                }
-                else
-                {
-                    td_ceb_state = vec4(0.0, 0.0, 1.0, 0.0);
-                }
-            }
-            memoryBarrierShared();
-            barrier();
-
-            float meanRaw = td_ceb_mean_raw;
-            for (int iter = 0; iter < 24; ++iter)
-            {
-                vec4 st = td_ceb_state;
-                float mid = 0.5 * (st.x + st.y);
-                bool activeIter = (st.z < 0.5);
-                float cLess = 0.0;
-                float cGreater = 0.0;
-                float maxL = -1e30;
-                float minG = 1e30;
-                float locM2 = 0.0;
-                for (int tile = 0; tile < TD_EB_TILES; ++tile)
-                {
-                    int idx = tile * 256 + tid;
-                    if (idx < totalCells)
-                    {
-                        int cx = idx % TD_CW;
-                        int cy = idx / TD_CW;
-                        vec4 ev = texelFetch(eb_scratch, ivec2(b * TD_CW + cx, chIdx * TD_CH + cy), 0);
-                        if (int(round(ev.w)) == targetTag)
-                        {
-                            if (iter == 0)
-                            {
-                                float dr = ev.y - meanRaw;
-                                locM2 += dr * dr;
-                            }
-                            if (activeIter)
-                            {
-                                float v = ev.x;
-                                if (v < mid) { cLess += 1.0; maxL = max(maxL, v); }
-                                else if (v > mid) { cGreater += 1.0; minG = min(minG, v); }
-                            }
-                        }
-                    }
-                }
-                td_ceb_acc[tid] = vec4(cLess, cGreater, maxL, minG);
-                td_ceb_mm[tid] = vec2(locM2, 0.0);
-                memoryBarrierShared();
-                barrier();
-                for (int stride = 128; stride > 0; stride >>= 1)
-                {
-                    if (tid < stride)
-                    {
-                        td_ceb_acc[tid].x += td_ceb_acc[tid + stride].x;
-                        td_ceb_acc[tid].y += td_ceb_acc[tid + stride].y;
-                        td_ceb_acc[tid].z = max(td_ceb_acc[tid].z, td_ceb_acc[tid + stride].z);
-                        td_ceb_acc[tid].w = min(td_ceb_acc[tid].w, td_ceb_acc[tid + stride].w);
-                        td_ceb_mm[tid].x += td_ceb_mm[tid + stride].x;
-                    }
-                    memoryBarrierShared();
-                    barrier();
-                }
-                if (tid == 0)
-                {
-                    if (iter == 0 && nInt >= 2)
-                    {
-                        float varRaw = max(0.0, td_ceb_mm[0].x / (p1Cnt - 1.0));
-                        float meanSe = sumSeAll / p1Cnt;
-                        outTau[b * 2 + ac] = max(0.0, varRaw - meanSe);
-                    }
-                    if (activeIter)
-                    {
-                        int lessI = int(round(td_ceb_acc[0].x));
-                        int grtrI = int(round(td_ceb_acc[0].y));
-                        float gMaxL = td_ceb_acc[0].z;
-                        float gMinG = td_ceb_acc[0].w;
-                        int halfN = nInt / 2;
-                        if (lessI > halfN)
-                            td_ceb_state.y = (gMaxL > -1e29) ? gMaxL : mid;
-                        else if (grtrI > halfN)
-                            td_ceb_state.x = (gMinG < 1e29) ? gMinG : mid;
-                        else
-                        {
-                            float med = mid;
-                            if ((nInt & 1) == 0)
-                            {
-                                if (lessI == halfN && grtrI == halfN) med = 0.5 * (gMaxL + gMinG);
-                                else if (lessI == halfN)              med = 0.5 * (gMaxL + mid);
-                                else if (grtrI == halfN)              med = 0.5 * (mid + gMinG);
-                            }
-                            td_ceb_state = vec4(med, med, 1.0, med);
-                        }
-                    }
-                }
-                memoryBarrierShared();
-                barrier();
-            }
-            if (tid == 0)
-            {
-                int slot = b * 2 + ac;
-                outU[slot] = max(0.0, (td_ceb_state.z > 0.5) ? td_ceb_state.w : (0.5 * (td_ceb_state.x + td_ceb_state.y)));
-            }
-            memoryBarrierShared();
-            barrier();
+            locAcc += vec4(ev.y, ev.z, 1.0, 0.0);
+            locMin = min(locMin, ev.x);
+            locMax = max(locMax, ev.x);
         }
     }
+}
+td_ceb_acc[tid] = locAcc;
+td_ceb_mm[tid] = vec2(locMin, locMax);
+memoryBarrierShared();
+barrier();
+for (int stride = 128; stride > 0; stride >>= 1)
+{
+    if (tid < stride)
+    {
+        td_ceb_acc[tid] += td_ceb_acc[tid + stride];
+        td_ceb_mm[tid].x = min(td_ceb_mm[tid].x, td_ceb_mm[tid + stride].x);
+        td_ceb_mm[tid].y = max(td_ceb_mm[tid].y, td_ceb_mm[tid + stride].y);
+    }
+    memoryBarrierShared();
+    barrier();
+}
+float p1Cnt = td_ceb_acc[0].z;
+int nInt = int(round(p1Cnt));
+float sumSeAll = td_ceb_acc[0].y;
+if (tid == 0)
+{
+    td_ceb_mean_raw = (p1Cnt > 0.5) ? (td_ceb_acc[0].x / p1Cnt) : 0.0;
+    td_ceb_tau_out = 0.0;
+    if (nInt >= 1)
+    {
+        float gMin = max(0.0, td_ceb_mm[0].x);
+        float gMax = max(gMin, td_ceb_mm[0].y);
+        bool triv = (nInt == 1) || (gMax <= gMin);
+        td_ceb_state = vec4(gMin, gMax, triv ? 1.0 : 0.0, gMin);
+    }
+    else
+    {
+        td_ceb_state = vec4(0.0, 0.0, 1.0, 0.0);
+    }
+}
+memoryBarrierShared();
+barrier();
 
+float meanRaw = td_ceb_mean_raw;
+for (int iter = 0; iter < 24; ++iter)
+{
+    vec4 st = td_ceb_state;
+    float mid = 0.5 * (st.x + st.y);
+    bool activeIter = (st.z < 0.5);
+    float cLess = 0.0;
+    float cGreater = 0.0;
+    float maxL = -1e30;
+    float minG = 1e30;
+    float locM2 = 0.0;
+    for (int tile = 0; tile < TD_EB_TILES; ++tile)
+    {
+        int idx = tile * 256 + tid;
+        if (idx < totalCells)
+        {
+            int cx = idx % TD_CW;
+            int cy = idx / TD_CW;
+            vec4 ev = texelFetch(eb_scratch, ivec2(b * TD_CW + cx, chIdx * TD_CH + cy), 0);
+            if (int(round(ev.w)) == targetTag)
+            {
+                if (iter == 0)
+                {
+                    float dr = ev.y - meanRaw;
+                    locM2 += dr * dr;
+                }
+                if (activeIter)
+                {
+                    float v = ev.x;
+                    if (v < mid) { cLess += 1.0; maxL = max(maxL, v); }
+                    else if (v > mid) { cGreater += 1.0; minG = min(minG, v); }
+                }
+            }
+        }
+    }
+    td_ceb_acc[tid] = vec4(cLess, cGreater, maxL, minG);
+    td_ceb_mm[tid] = vec2(locM2, 0.0);
+    memoryBarrierShared();
+    barrier();
+    for (int stride = 128; stride > 0; stride >>= 1)
+    {
+        if (tid < stride)
+        {
+            td_ceb_acc[tid].x += td_ceb_acc[tid + stride].x;
+            td_ceb_acc[tid].y += td_ceb_acc[tid + stride].y;
+            td_ceb_acc[tid].z = max(td_ceb_acc[tid].z, td_ceb_acc[tid + stride].z);
+            td_ceb_acc[tid].w = min(td_ceb_acc[tid].w, td_ceb_acc[tid + stride].w);
+            td_ceb_mm[tid].x += td_ceb_mm[tid + stride].x;
+        }
+        memoryBarrierShared();
+        barrier();
+    }
     if (tid == 0)
     {
-        float unsplitG = max(0.0, texelFetch(eb_flat, ivec2(0, chIdx), 0).x);
-        for (int b = 0; b < 3; ++b)
+        if (iter == 0 && nInt >= 2)
         {
-            int s0 = b * 2;
-            int s1 = b * 2 + 1;
-            float u0 = outU[s0], t0 = outTau[s0], c0 = outCnt[s0];
-            float u1 = outU[s1], t1 = outTau[s1], c1 = outCnt[s1];
-            if (c0 < 0.5 && c1 > 0.5) u0 = u1;
-            else if (c1 < 0.5 && c0 > 0.5) u1 = u0;
-            if (c0 < 1.5 && c1 >= 1.5) t0 = t1;
-            else if (c1 < 1.5 && c0 >= 1.5) t1 = t0;
-            float anyCnt0 = (c0 > 0.5 || c1 > 0.5) ? max(c0, 1.0) : 0.0;
-            float anyCnt1 = (c0 > 0.5 || c1 > 0.5) ? max(c1, 1.0) : 0.0;
-            imageStore(eb_prior, ivec2(s0, chIdx), vec4(u0, t0, (c0 > 0.5) ? c0 : anyCnt0, (b == 0) ? unsplitG : 0.0));
-            imageStore(eb_prior, ivec2(s1, chIdx), vec4(u1, t1, (c1 > 0.5) ? c1 : anyCnt1, 0.0));
+            float varRaw = max(0.0, td_ceb_mm[0].x / (p1Cnt - 1.0));
+            float meanSe = sumSeAll / p1Cnt;
+            td_ceb_tau_out = max(0.0, varRaw - meanSe);
+        }
+        if (activeIter)
+        {
+            int lessI = int(round(td_ceb_acc[0].x));
+            int grtrI = int(round(td_ceb_acc[0].y));
+            float gMaxL = td_ceb_acc[0].z;
+            float gMinG = td_ceb_acc[0].w;
+            int halfN = nInt / 2;
+            if (lessI > halfN)
+                td_ceb_state.y = (gMaxL > -1e29) ? gMaxL : mid;
+            else if (grtrI > halfN)
+                td_ceb_state.x = (gMinG < 1e29) ? gMinG : mid;
+            else
+            {
+                float med = mid;
+                if ((nInt & 1) == 0)
+                {
+                    if (lessI == halfN && grtrI == halfN) med = 0.5 * (gMaxL + gMinG);
+                    else if (lessI == halfN)              med = 0.5 * (gMaxL + mid);
+                    else if (grtrI == halfN)              med = 0.5 * (mid + gMinG);
+                }
+                td_ceb_state = vec4(med, med, 1.0, med);
+            }
         }
     }
     memoryBarrierShared();
     barrier();
+}
+
+if (tid == 0)
+{
+    float outU = max(0.0, (td_ceb_state.z > 0.5) ? td_ceb_state.w : (0.5 * (td_ceb_state.x + td_ceb_state.y)));
+    float extraW = (slot == 0) ? max(0.0, texelFetch(eb_flat, ivec2(0, chIdx), 0).x) : 0.0;
+    imageStore(eb_prior, ivec2(slot, chIdx), vec4(outU, td_ceb_tau_out, p1Cnt, extraW));
 }
 )GLSL";
 
@@ -1805,7 +1775,7 @@ for (int chIdx = 0; chIdx < 2; ++chIdx)
                     ? ((u_a2_sigma_sent + (exactCopy ? 0.0 : u_a2_sigma_zero)) * cellStepScaleSq * a2BandTransfer)
                     : 0.0;
                 int partner = td_find_independent_a1_partner_masked(K, k, centerMask);
-                if (partner >= 0 && td_refs_collinear(C[k][k], C[partner][partner], C[k][partner]))
+                if (partner >= 0 && td_refs_collinear(C[k][k], C[partner][partner], C[k][partner], bGain))
                     partner = -1;
                 float cA2 = (useA2ePrior && !coarseOnly && ebHasA2e)
                     ? (exactCopy ? 0.0 : (((partner >= 0) ? (ebPriorU + 3.0 * sqrt(ebTauSq)) : ebPriorU) * cellStepScaleSq))
@@ -4135,6 +4105,7 @@ imageStore(out_coded_delta, p, vec4(0.0));
 				c2ebPrepHdr += VpvGpu::Define("TD_TRACE_REG", kDefaultTraceRegScale);
 				c2ebPrepHdr += VpvGpu::Define("TD_SOLVE_FLOOR", kSolveNumericalFloor);
 				c2ebPrepHdr += VpvGpu::Define("TD_PIVOT_FLOOR", kSolvePivotFloor);
+				c2ebPrepHdr += VpvGpu::Define("TD_BASE_QUANT_VAR", baseQuantVarCh);
 				c2ebPrepHdr += Shaders::BuildFineTapHeader();
 				c2ebPrepHdr += Shaders::kCoreHelpers;
 				c2ebPrepHdr += Shaders::kPass2MergeSolveHeader;
@@ -4172,11 +4143,11 @@ imageStore(out_coded_delta, p, vec4(0.0));
 					VpvGpu::Sampled("eb_flat", ebFlatTex_),
 					VpvGpu::Storage("eb_prior", ebPriorTex_)
 				};
-				const size_t sh2eb = (256u * 6u + 5u) * sizeof(float);
-				if (!runPass("td_v2_c2eb_prior_reduce", c2ebRedHdr, ChromaShaders::kPassChromaEbPriorReduce, d2eb, 3, nullptr, 0, 1, 1, 16, 16, sh2eb))
+				const size_t sh2eb = (256u * 6u + 6u) * sizeof(float);
+				if (!runPass("td_v2_c2eb_prior_reduce", c2ebRedHdr, ChromaShaders::kPassChromaEbPriorReduce, d2eb, 3, nullptr, 0, 6, 2, 16, 16, sh2eb))
 					return failVisible("td_v2_c2eb_prior_reduce dispatch failed", StandInKind::GpuDispatchFailed);
 
-				// Apply temporal rolling-median A2e cap & one-sided K=1 hold on host (192 bytes, 1:1 with CPU TdV2Chroma.h).
+				// Apply CPU-identical empty-class fallback + temporal rolling-median A2e cap & one-sided K=1 hold on host (192 B!).
 				std::vector<float> ebBuf(6u * 2u * 4u, 0.0f);
 				if (!Detail::DownloadFloats(gpu, ebPriorTex_, ebBuf.data()))
 					return failVisible("TdV2ChromaGpuEngine ebPriorTex download failed", StandInKind::GpuDispatchFailed);
@@ -4185,6 +4156,7 @@ imageStore(out_coded_delta, p, vec4(0.0));
 					A2ePriorHistory& hist = (chIdx == 0) ? a2eHistoryCb_ : a2eHistoryCr_;
 					const float savedUnsplitG = ebBuf[static_cast<size_t>(chIdx * 6) * 4u + 3u];
 					EmpiricalOwnErrorPrior rawA2e;
+					float tauGrid[3][2] = {};
 					bool anyV = false;
 					for (int b = 0; b < 3; ++b)
 					{
@@ -4192,14 +4164,24 @@ imageStore(out_coded_delta, p, vec4(0.0));
 						{
 							const size_t idx = static_cast<size_t>(chIdx * 6 + b * 2 + ac) * 4u;
 							const float uVal = ebBuf[idx + 0u];
+							const float tVal = ebBuf[idx + 1u];
 							const float cVal = ebBuf[idx + 2u];
 							if (cVal > 0.5f && std::isfinite(uVal) && uVal >= 0.0f)
 							{
 								rawA2e.U[b][ac] = static_cast<double>(uVal);
 								rawA2e.cellCount[b][ac] = static_cast<uint32_t>(Detail::NonNegRoundToSize(cVal));
+								tauGrid[b][ac] = (std::isfinite(tVal) && tVal > 0.0f) ? tVal : 0.0f;
 								anyV = true;
 							}
 						}
+						if (rawA2e.cellCount[b][0] == 0 && rawA2e.cellCount[b][1] > 0)
+							rawA2e.U[b][0] = rawA2e.U[b][1];
+						else if (rawA2e.cellCount[b][1] == 0 && rawA2e.cellCount[b][0] > 0)
+							rawA2e.U[b][1] = rawA2e.U[b][0];
+						if (rawA2e.cellCount[b][0] < 2 && rawA2e.cellCount[b][1] >= 2)
+							tauGrid[b][0] = tauGrid[b][1];
+						else if (rawA2e.cellCount[b][1] < 2 && rawA2e.cellCount[b][0] >= 2)
+							tauGrid[b][1] = tauGrid[b][0];
 					}
 					rawA2e.valid = anyV;
 					const EmpiricalOwnErrorPrior effA2e = hist.ApplyCapAndRecord(
@@ -4210,9 +4192,10 @@ imageStore(out_coded_delta, p, vec4(0.0));
 						{
 							const size_t idx = static_cast<size_t>(chIdx * 6 + b * 2 + ac) * 4u;
 							const double effU = effA2e.valid ? effA2e.ForBandClass(b, ac) : 0.0;
-							const bool cellOk = effA2e.valid && std::isfinite(effU) && effU > 0.0;
+							const bool cellOk = effA2e.valid && std::isfinite(effU) && effU >= 0.0;
 							ebBuf[idx + 0u] = cellOk ? static_cast<float>(effU) : 0.0f;
-							ebBuf[idx + 1u] = cellOk ? ebBuf[idx + 1u] : 0.0f;
+							ebBuf[idx + 1u] = (cellOk && !effA2e.heldFromHistory && std::isfinite(tauGrid[b][ac]) && tauGrid[b][ac] > 0.0f)
+								? tauGrid[b][ac] : 0.0f;
 							ebBuf[idx + 2u] = cellOk ? static_cast<float>((std::max<uint32_t>)(1u, effA2e.cellCount[b][ac])) : 0.0f;
 							ebBuf[idx + 3u] = (b == 0 && ac == 0) ? savedUnsplitG : 0.0f;
 						}
@@ -4238,6 +4221,7 @@ imageStore(out_coded_delta, p, vec4(0.0));
 				c2bHdr += VpvGpu::Define("TD_PIVOT_FLOOR", kSolvePivotFloor);
 				c2bHdr += VpvGpu::Define("TD_STEP_SCALE_MIN", kCellStepScaleMin);
 				c2bHdr += VpvGpu::Define("TD_STEP_SCALE_MAX", maxAllowedStepScale);
+				c2bHdr += VpvGpu::Define("TD_BASE_QUANT_VAR", baseQuantVarCh);
 				c2bHdr += Shaders::BuildFineTapHeader();
 				c2bHdr += Shaders::kCoreHelpers;
 				c2bHdr += Shaders::kPass2MergeSolveHeader;

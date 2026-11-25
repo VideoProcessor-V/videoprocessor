@@ -3725,6 +3725,7 @@ namespace Gpu
 				p2bSharedHdr += VpvGpu::Define("TD_PIVOT_FLOOR", kSolvePivotFloor);
 				p2bSharedHdr += VpvGpu::Define("TD_STEP_SCALE_MIN", kCellStepScaleMin);
 				p2bSharedHdr += VpvGpu::Define("TD_STEP_SCALE_MAX", maxAllowedStepScale);
+				p2bSharedHdr += VpvGpu::Define("TD_BASE_QUANT_VAR", baseQuantVar);
 				p2bSharedHdr += Shaders::BuildFineTapHeader();
 				p2bSharedHdr += Shaders::kCoreHelpers;
 				p2bSharedHdr += Shaders::kPass2MergeSolveHeader;
@@ -3774,20 +3775,21 @@ namespace Gpu
 						return failCore("td_v2_p2_eb_prep dispatch failed", StandInKind::GpuDispatchFailed);
 					}
 
-					// 2) 1-WG Torben 24-step exact MeanOfMiddle median + centered tau^2 -> ebPriorTex_.
+					// 2) Parallel (3 x 2) 1-slice-per-WG Torben 24-step exact MeanOfMiddle median + centered tau^2 -> ebPriorTex_.
 					std::string ebRedHdr = staticGeom + Shaders::kPass2EbPriorReduceHeader;
 					pl_shader_desc deb[2] = {
 						VpvGpu::Sampled("eb_scratch", ebScratchTex_),
 						VpvGpu::Storage("eb_prior_out", ebPriorTex_)
 					};
-					const size_t shmemEb = (256u * 6u + 5u) * sizeof(float);
-					if (!runPass("td_v2_p2_eb_prior", ebRedHdr, Shaders::kPass2EbPriorReduce, deb, 2, nullptr, 0, 1, 1, 16, 16, shmemEb))
+					const size_t shmemEb = (256u * 6u + 6u) * sizeof(float);
+					if (!runPass("td_v2_p2_eb_prior", ebRedHdr, Shaders::kPass2EbPriorReduce, deb, 2, nullptr, 0, 3, 2, 16, 16, shmemEb))
 					{
 						resetCarryIfActive();
 						return failCore("td_v2_p2_eb_prior dispatch failed", StandInKind::GpuDispatchFailed);
 					}
-					// Apply CPU-identical time-domain A2ePriorHistory rolling-median cap, fade freeze, & one-sided K=1 hold (96 bytes!).
+					// Apply CPU-identical empty-class fallback + A2ePriorHistory rolling-median cap, fade freeze, & K=1 hold (96 B!).
 					EmpiricalOwnErrorPrior rawA2e;
+					float tauGrid[3][2] = {};
 					if (Detail::DownloadFloats(gpu, ebPriorTex_, ebBuf))
 					{
 						bool anyV = false;
@@ -3797,15 +3799,28 @@ namespace Gpu
 							{
 								const size_t idx = (static_cast<size_t>(ac) * 3u + static_cast<size_t>(b)) * 4u;
 								const float uVal = ebBuf[idx + 0u];
+								const float tVal = ebBuf[idx + 1u];
 								const float vFlag = ebBuf[idx + 2u];
 								const float cVal = ebBuf[idx + 3u];
 								if (vFlag > 0.5f && std::isfinite(uVal) && uVal >= 0.0f)
 								{
 									rawA2e.U[b][ac] = static_cast<double>(uVal);
 									rawA2e.cellCount[b][ac] = static_cast<uint32_t>(Detail::NonNegRoundToSize(cVal));
+									tauGrid[b][ac] = (std::isfinite(tVal) && tVal > 0.0f) ? tVal : 0.0f;
 									anyV = true;
 								}
 							}
+						}
+						for (int b = 0; b < 3; ++b)
+						{
+							if (rawA2e.cellCount[b][0] == 0 && rawA2e.cellCount[b][1] > 0)
+								rawA2e.U[b][0] = rawA2e.U[b][1];
+							else if (rawA2e.cellCount[b][1] == 0 && rawA2e.cellCount[b][0] > 0)
+								rawA2e.U[b][1] = rawA2e.U[b][0];
+							if (rawA2e.cellCount[b][0] < 2 && rawA2e.cellCount[b][1] >= 2)
+								tauGrid[b][0] = tauGrid[b][1];
+							else if (rawA2e.cellCount[b][1] < 2 && rawA2e.cellCount[b][0] >= 2)
+								tauGrid[b][1] = tauGrid[b][0];
 						}
 						rawA2e.valid = anyV;
 					}
@@ -3817,8 +3832,8 @@ namespace Gpu
 						{
 							const size_t idx = (static_cast<size_t>(ac) * 3u + static_cast<size_t>(b)) * 4u;
 							ebBuf[idx + 0u] = effA2e.valid ? static_cast<float>(effA2e.ForBandClass(b, ac)) : 0.0f;
-							ebBuf[idx + 1u] = (effA2e.valid && !effA2e.heldFromHistory && std::isfinite(ebBuf[idx + 1u]) && ebBuf[idx + 1u] > 0.0f)
-								? ebBuf[idx + 1u] : 0.0f;
+							ebBuf[idx + 1u] = (effA2e.valid && !effA2e.heldFromHistory && std::isfinite(tauGrid[b][ac]) && tauGrid[b][ac] > 0.0f)
+								? tauGrid[b][ac] : 0.0f;
 							ebBuf[idx + 2u] = effA2e.valid ? 1.0f : 0.0f;
 							ebBuf[idx + 3u] = static_cast<float>(effA2e.cellCount[b][ac]);
 						}

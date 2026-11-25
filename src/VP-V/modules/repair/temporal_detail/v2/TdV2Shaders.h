@@ -2008,13 +2008,16 @@ int td_find_independent_a1_partner(int K, int k)
     return td_find_independent_a1_partner_masked(K, k, 7);
 }
 
-// RED-BUG-7a: Detect collinear/duplicate references where E[(d_k - d_j)^2] = C_kk + C_jj - 2*C_kj ~ 0.
-bool td_refs_collinear(float ckk, float cjj, float ckj)
+// RED-BUG-7a / PROD-ALGO-BUG-10: Detect collinear/duplicate references where E[(d_k - d_j)^2] = C_kk + C_jj - 2*C_kj ~ 0.
+// Uses physics-derived floor 0.01 * baseQuantVar * bandGain + 1e-6 * max(C_kk, C_jj) so exact/near-duplicate
+// copies (|R0-R1| < 0.05 LSB) are rejected while genuinely independent clean peaks on damaged B-frames are preserved.
+bool td_refs_collinear(float ckk, float cjj, float ckj, float bandGain)
 {
     float mx = max(ckk, cjj);
     if (!(mx > TD_NUM_FLOOR))
         return false;
-    return (ckk + cjj - 2.0 * ckj) <= 1e-4 * mx;
+    float floorTerm = 0.01 * TD_BASE_QUANT_VAR * max(0.0, bandGain) + 1e-6 * mx;
+    return (ckk + cjj - 2.0 * ckj) <= floorTerm;
 }
 
 float td_psd_scale(int b)
@@ -2548,7 +2551,7 @@ for (int b = 0; b < 3; ++b)
                     if (td_is_exact_copy(k) || (centerMask & (1 << k)) == 0) continue;
                     int partner = td_find_independent_a1_partner_masked(K, k, centerMask);
                     if (partner < 0) continue;
-                    if (td_refs_collinear(C[k][k], C[partner][partner], C[k][partner])) continue;
+                    if (td_refs_collinear(C[k][k], C[partner][partner], C[k][partner], bGain)) continue;
                     float gTerm = retG * bGain * psdScale;
                     float subBias = 0.0;
                     if (b == 2 && u_enable_subpixel_h_debias > 0.5)
@@ -2557,7 +2560,7 @@ for (int b = 0; b < 3; ++b)
                         int sp = clamp(td_p2b_motion_slot(partner), 0, 2);
                         vec2 mvK = texelFetch(motion_vec, ivec2(sk * TD_CW + cell.x, cell.y), 0).xy;
                         vec2 mvP = texelFetch(motion_vec, ivec2(sp * TD_CW + cell.x, cell.y), 0).xy;
-                        subBias = td_subpixel_h_debias(mvK, mvP, hVar, gTerm);
+                        subBias = td_subpixel_h_atten_bias(mvK, mvP, hVar, gTerm);
                     }
                     float cRaw = C[k][partner] - gTerm - subBias;
                     float cClip = clamp(cRaw, 0.0, max(0.0, min(C[k][k], C[partner][partner])));
@@ -2574,9 +2577,9 @@ for (int b = 0; b < 3; ++b)
 }
 )GLSL";
 
-	// ---- PASS 2-EB (TD-U4 / PROD-GPU-BUG-4): 1-WG Exact Order-Statistic Median (Torben 24-Step) + Centered tau^2 ----
-	// Dispatch: 1x1x1 workgroup of 16x16 threads (100% uniform constant-trip-count control flow for FXC cs_5_0).
-	// Matches CPU RobustStats::Median(..., MeanOfMiddle) to < 1e-5 with zero extra host readbacks!
+	// ---- PASS 2-EB (TD-U4 / PROD-GPU-BUG-4 / PROD-GPU-BUG-9): Parallel (3 x 2) 1-Slice-Per-WG Torben 24-Step Exact Median + Centered tau^2 ----
+	// Dispatch: 3 x 2 x 1 workgroups of 16x16 threads (b = gl_WorkGroupID.x, ac = gl_WorkGroupID.y).
+	// Zero outer b/ac loops and zero float[6] arrays -> eliminates FXC E_FAIL ICE and runs all 6 slices in parallel!
 	// Output: eb_prior_out (3 x 2 RGBA32F: (b, actClass) -> vec4(U_prior, tauSq, validFlag, cellCount)).
 	constexpr const char* kPass2EbPriorReduceHeader = R"GLSL(
 #define TD_EB_TILES ((TD_CW * TD_CH + 255) / 256)
@@ -2584,204 +2587,166 @@ shared vec4 td_eb_acc[256];
 shared vec2 td_eb_mm[256];
 shared vec4 td_eb_state;
 shared float td_eb_mean_raw;
+shared float td_eb_tau_out;
 )GLSL";
 
 	constexpr const char* kPass2EbPriorReduce = R"GLSL(
 int tid = int(gl_LocalInvocationID.y) * 16 + int(gl_LocalInvocationID.x);
+int b = int(gl_WorkGroupID.x);
+int ac = int(gl_WorkGroupID.y);
+int targetTag = ac + 1;
 int totalCells = TD_CW * TD_CH;
 
-float outU[6];
-float outTau[6];
-float outCnt[6];
-for (int i = 0; i < 6; ++i)
+// Pass 1: exact count, sum(cRaw), sum(seSq), min(cClip), max(cClip) for this single (b, ac) slice.
+vec4 locAcc = vec4(0.0); // (sumRaw, sumSeSq, cnt, 0)
+float locMin = 1e30;
+float locMax = -1e30;
+for (int tile = 0; tile < TD_EB_TILES; ++tile)
 {
-    outU[i] = 0.0;
-    outTau[i] = 0.0;
-    outCnt[i] = 0.0;
-}
-
-for (int b = 0; b < 3; ++b)
-{
-    for (int ac = 0; ac < 2; ++ac)
+    int idx = tile * 256 + tid;
+    if (idx < totalCells)
     {
-        int targetTag = ac + 1;
-        // Pass 1: exact count, sum(cRaw), sum(seSq), min(cClip), max(cClip).
-        vec4 locAcc = vec4(0.0); // (sumRaw, sumSeSq, cnt, 0)
-        float locMin = 1e30;
-        float locMax = -1e30;
-        for (int tile = 0; tile < TD_EB_TILES; ++tile)
+        int cx = idx % TD_CW;
+        int cy = idx / TD_CW;
+        vec4 ev = texelFetch(eb_scratch, ivec2(b * TD_CW + cx, cy), 0);
+        if (int(round(ev.w)) == targetTag)
         {
-            int idx = tile * 256 + tid;
-            if (idx < totalCells)
-            {
-                int cx = idx % TD_CW;
-                int cy = idx / TD_CW;
-                vec4 ev = texelFetch(eb_scratch, ivec2(b * TD_CW + cx, cy), 0);
-                if (int(round(ev.w)) == targetTag)
-                {
-                    locAcc += vec4(ev.y, ev.z, 1.0, 0.0);
-                    locMin = min(locMin, ev.x);
-                    locMax = max(locMax, ev.x);
-                }
-            }
+            locAcc += vec4(ev.y, ev.z, 1.0, 0.0);
+            locMin = min(locMin, ev.x);
+            locMax = max(locMax, ev.x);
         }
-        td_eb_acc[tid] = locAcc;
-        td_eb_mm[tid] = vec2(locMin, locMax);
-        memoryBarrierShared();
-        barrier();
-        for (int s = 128; s > 0; s >>= 1)
-        {
-            if (tid < s)
-            {
-                td_eb_acc[tid] += td_eb_acc[tid + s];
-                td_eb_mm[tid].x = min(td_eb_mm[tid].x, td_eb_mm[tid + s].x);
-                td_eb_mm[tid].y = max(td_eb_mm[tid].y, td_eb_mm[tid + s].y);
-            }
-            memoryBarrierShared();
-            barrier();
-        }
-        float p1Cnt = td_eb_acc[0].z;
-        int nInt = int(round(p1Cnt));
-        float sumSeAll = td_eb_acc[0].y;
-        if (tid == 0)
-        {
-            int slot = b * 2 + ac;
-            outCnt[slot] = p1Cnt;
-            td_eb_mean_raw = (p1Cnt > 0.5) ? (td_eb_acc[0].x / p1Cnt) : 0.0;
-            if (nInt >= 1)
-            {
-                float gMin = max(0.0, td_eb_mm[0].x);
-                float gMax = max(gMin, td_eb_mm[0].y);
-                bool triv = (nInt == 1) || (gMax <= gMin);
-                td_eb_state = vec4(gMin, gMax, triv ? 1.0 : 0.0, gMin);
-            }
-            else
-            {
-                td_eb_state = vec4(0.0, 0.0, 1.0, 0.0);
-            }
-        }
-        memoryBarrierShared();
-        barrier();
+    }
+}
+td_eb_acc[tid] = locAcc;
+td_eb_mm[tid] = vec2(locMin, locMax);
+memoryBarrierShared();
+barrier();
+for (int s = 128; s > 0; s >>= 1)
+{
+    if (tid < s)
+    {
+        td_eb_acc[tid] += td_eb_acc[tid + s];
+        td_eb_mm[tid].x = min(td_eb_mm[tid].x, td_eb_mm[tid + s].x);
+        td_eb_mm[tid].y = max(td_eb_mm[tid].y, td_eb_mm[tid + s].y);
+    }
+    memoryBarrierShared();
+    barrier();
+}
+float p1Cnt = td_eb_acc[0].z;
+int nInt = int(round(p1Cnt));
+float sumSeAll = td_eb_acc[0].y;
+if (tid == 0)
+{
+    td_eb_mean_raw = (p1Cnt > 0.5) ? (td_eb_acc[0].x / p1Cnt) : 0.0;
+    td_eb_tau_out = 0.0;
+    if (nInt >= 1)
+    {
+        float gMin = max(0.0, td_eb_mm[0].x);
+        float gMax = max(gMin, td_eb_mm[0].y);
+        bool triv = (nInt == 1) || (gMax <= gMin);
+        td_eb_state = vec4(gMin, gMax, triv ? 1.0 : 0.0, gMin);
+    }
+    else
+    {
+        td_eb_state = vec4(0.0, 0.0, 1.0, 0.0);
+    }
+}
+memoryBarrierShared();
+barrier();
 
-        // Pass 2: 24-step Torben exact order-statistic median (MeanOfMiddle) + cancellation-free centered varRaw on iter 0.
-        // Zero groupshared-dependent guards around texelFetch, loops, or barrier() (100% FXC X3663/X4026 safe).
-        float meanRaw = td_eb_mean_raw;
-        for (int iter = 0; iter < 24; ++iter)
+// Pass 2: 24-step Torben exact order-statistic median (MeanOfMiddle) + cancellation-free centered varRaw on iter 0.
+float meanRaw = td_eb_mean_raw;
+for (int iter = 0; iter < 24; ++iter)
+{
+    vec4 st = td_eb_state;
+    float mid = 0.5 * (st.x + st.y);
+    bool activeIter = (st.z < 0.5);
+    float cLess = 0.0;
+    float cGreater = 0.0;
+    float maxL = -1e30;
+    float minG = 1e30;
+    float locM2 = 0.0;
+    for (int tile = 0; tile < TD_EB_TILES; ++tile)
+    {
+        int idx = tile * 256 + tid;
+        if (idx < totalCells)
         {
-            vec4 st = td_eb_state;
-            float mid = 0.5 * (st.x + st.y);
-            bool activeIter = (st.z < 0.5);
-            float cLess = 0.0;
-            float cGreater = 0.0;
-            float maxL = -1e30;
-            float minG = 1e30;
-            float locM2 = 0.0;
-            for (int tile = 0; tile < TD_EB_TILES; ++tile)
+            int cx = idx % TD_CW;
+            int cy = idx / TD_CW;
+            vec4 ev = texelFetch(eb_scratch, ivec2(b * TD_CW + cx, cy), 0);
+            if (int(round(ev.w)) == targetTag)
             {
-                int idx = tile * 256 + tid;
-                if (idx < totalCells)
+                if (iter == 0)
                 {
-                    int cx = idx % TD_CW;
-                    int cy = idx / TD_CW;
-                    vec4 ev = texelFetch(eb_scratch, ivec2(b * TD_CW + cx, cy), 0);
-                    if (int(round(ev.w)) == targetTag)
-                    {
-                        if (iter == 0)
-                        {
-                            float dr = ev.y - meanRaw;
-                            locM2 += dr * dr;
-                        }
-                        if (activeIter)
-                        {
-                            float v = ev.x;
-                            if (v < mid) { cLess += 1.0; maxL = max(maxL, v); }
-                            else if (v > mid) { cGreater += 1.0; minG = min(minG, v); }
-                        }
-                    }
-                }
-            }
-            td_eb_acc[tid] = vec4(cLess, cGreater, maxL, minG);
-            td_eb_mm[tid] = vec2(locM2, 0.0);
-            memoryBarrierShared();
-            barrier();
-            for (int s = 128; s > 0; s >>= 1)
-            {
-                if (tid < s)
-                {
-                    td_eb_acc[tid].x += td_eb_acc[tid + s].x;
-                    td_eb_acc[tid].y += td_eb_acc[tid + s].y;
-                    td_eb_acc[tid].z = max(td_eb_acc[tid].z, td_eb_acc[tid + s].z);
-                    td_eb_acc[tid].w = min(td_eb_acc[tid].w, td_eb_acc[tid + s].w);
-                    td_eb_mm[tid].x += td_eb_mm[tid + s].x;
-                }
-                memoryBarrierShared();
-                barrier();
-            }
-            if (tid == 0)
-            {
-                if (iter == 0 && nInt >= 2)
-                {
-                    float varRaw = max(0.0, td_eb_mm[0].x / (p1Cnt - 1.0));
-                    float meanSe = sumSeAll / p1Cnt;
-                    outTau[b * 2 + ac] = max(0.0, varRaw - meanSe);
+                    float dr = ev.y - meanRaw;
+                    locM2 += dr * dr;
                 }
                 if (activeIter)
                 {
-                    int lessI = int(round(td_eb_acc[0].x));
-                    int grtrI = int(round(td_eb_acc[0].y));
-                    float gMaxL = td_eb_acc[0].z;
-                    float gMinG = td_eb_acc[0].w;
-                    int halfN = nInt / 2;
-                    if (lessI > halfN)
-                    {
-                        td_eb_state.y = (gMaxL > -1e29) ? gMaxL : mid;
-                    }
-                    else if (grtrI > halfN)
-                    {
-                        td_eb_state.x = (gMinG < 1e29) ? gMinG : mid;
-                    }
-                    else
-                    {
-                        float med = mid;
-                        if ((nInt & 1) == 0)
-                        {
-                            if (lessI == halfN && grtrI == halfN) med = 0.5 * (gMaxL + gMinG);
-                            else if (lessI == halfN)              med = 0.5 * (gMaxL + mid);
-                            else if (grtrI == halfN)              med = 0.5 * (mid + gMinG);
-                        }
-                        td_eb_state = vec4(med, med, 1.0, med);
-                    }
+                    float v = ev.x;
+                    if (v < mid) { cLess += 1.0; maxL = max(maxL, v); }
+                    else if (v > mid) { cGreater += 1.0; minG = min(minG, v); }
                 }
             }
-            memoryBarrierShared();
-            barrier();
         }
-        if (tid == 0)
+    }
+    td_eb_acc[tid] = vec4(cLess, cGreater, maxL, minG);
+    td_eb_mm[tid] = vec2(locM2, 0.0);
+    memoryBarrierShared();
+    barrier();
+    for (int s = 128; s > 0; s >>= 1)
+    {
+        if (tid < s)
         {
-            int slot = b * 2 + ac;
-            outU[slot] = max(0.0, (td_eb_state.z > 0.5) ? td_eb_state.w : (0.5 * (td_eb_state.x + td_eb_state.y)));
+            td_eb_acc[tid].x += td_eb_acc[tid + s].x;
+            td_eb_acc[tid].y += td_eb_acc[tid + s].y;
+            td_eb_acc[tid].z = max(td_eb_acc[tid].z, td_eb_acc[tid + s].z);
+            td_eb_acc[tid].w = min(td_eb_acc[tid].w, td_eb_acc[tid + s].w);
+            td_eb_mm[tid].x += td_eb_mm[tid + s].x;
         }
         memoryBarrierShared();
         barrier();
     }
+    if (tid == 0)
+    {
+        if (iter == 0 && nInt >= 2)
+        {
+            float varRaw = max(0.0, td_eb_mm[0].x / (p1Cnt - 1.0));
+            float meanSe = sumSeAll / p1Cnt;
+            td_eb_tau_out = max(0.0, varRaw - meanSe);
+        }
+        if (activeIter)
+        {
+            int lessI = int(round(td_eb_acc[0].x));
+            int grtrI = int(round(td_eb_acc[0].y));
+            float gMaxL = td_eb_acc[0].z;
+            float gMinG = td_eb_acc[0].w;
+            int halfN = nInt / 2;
+            if (lessI > halfN)
+                td_eb_state.y = (gMaxL > -1e29) ? gMaxL : mid;
+            else if (grtrI > halfN)
+                td_eb_state.x = (gMinG < 1e29) ? gMinG : mid;
+            else
+            {
+                float med = mid;
+                if ((nInt & 1) == 0)
+                {
+                    if (lessI == halfN && grtrI == halfN) med = 0.5 * (gMaxL + gMinG);
+                    else if (lessI == halfN)              med = 0.5 * (gMaxL + mid);
+                    else if (grtrI == halfN)              med = 0.5 * (mid + gMinG);
+                }
+                td_eb_state = vec4(med, med, 1.0, med);
+            }
+        }
+    }
+    memoryBarrierShared();
+    barrier();
 }
 
 if (tid == 0)
 {
-    for (int b = 0; b < 3; ++b)
-    {
-        int s0 = b * 2;
-        int s1 = b * 2 + 1;
-        float u0 = outU[s0], t0 = outTau[s0], c0 = outCnt[s0];
-        float u1 = outU[s1], t1 = outTau[s1], c1 = outCnt[s1];
-        if (c0 < 0.5 && c1 > 0.5) u0 = u1;
-        else if (c1 < 0.5 && c0 > 0.5) u1 = u0;
-        if (c0 < 1.5 && c1 >= 1.5) t0 = t1;
-        else if (c1 < 1.5 && c0 >= 1.5) t1 = t0;
-        float anyV = (c0 > 0.5 || c1 > 0.5) ? 1.0 : 0.0;
-        imageStore(eb_prior_out, ivec2(b, 0), vec4(u0, t0, anyV, c0));
-        imageStore(eb_prior_out, ivec2(b, 1), vec4(u1, t1, anyV, c1));
-    }
+    float outU = max(0.0, (td_eb_state.z > 0.5) ? td_eb_state.w : (0.5 * (td_eb_state.x + td_eb_state.y)));
+    imageStore(eb_prior_out, ivec2(b, ac), vec4(outU, td_eb_tau_out, (p1Cnt > 0.5) ? 1.0 : 0.0, p1Cnt));
 }
 )GLSL";
 
@@ -3092,7 +3057,7 @@ for (int b = 0; b < 3; ++b)
             }
             bool exactCopy = td_is_exact_copy(k);
             int partner = td_find_independent_a1_partner_masked(K, k, cellActMask);
-            if (partner >= 0 && td_refs_collinear(C[k][k], C[partner][partner], C[k][partner]))
+            if (partner >= 0 && td_refs_collinear(C[k][k], C[partner][partner], C[k][partner], bGain))
                 partner = -1;
             // UPG-BLKR-4 & UPG-HIGH-5: When A2e empirical prior is active on transform-unknown streams without explicit step prior,
             // use ebPriorU (with + 3*tau upper envelope when partner >= 0 so worst-5% damaged cells get repaired, and conservative
@@ -3140,7 +3105,7 @@ for (int b = 0; b < 3; ++b)
                 for (int j = 0; j < K; ++j)
                 {
                     if (j == k || td_is_exact_copy(j) || (cellActMask & (1 << j)) == 0) continue;
-                    if (td_refs_collinear(C[k][k], C[j][j], C[k][j])) continue;
+                    if (td_refs_collinear(C[k][k], C[j][j], C[k][j], bGain)) continue;
                     float capBias = useSubpixelH
                         ? td_subpixel_h_atten_bias(refMv[k], refMv[j], curHVar, cellRetGVar * bGain * psdScale)
                         : 0.0;

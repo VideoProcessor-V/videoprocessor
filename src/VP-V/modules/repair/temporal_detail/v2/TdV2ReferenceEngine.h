@@ -2080,10 +2080,13 @@ namespace TdV2
 						}
 
 						// Precompute grain-corrected three-cornered-hat c_IV per ref for A2e frame prior pooling.
-						auto refsCollinear = [](double ckk, double cjj, double ckj) -> bool
+						// PROD-ALGO-BUG-10: Derived collinearity floor rejects exact/near-duplicate copies (|R0-R1| < 0.05 LSB)
+						// without falsely rejecting genuinely independent clean peaks on heavily damaged B-frames!
+						const double collinearFloor = 0.01 * baseQuantVar * bandTransfer[b];
+						auto refsCollinear = [collinearFloor](double ckk, double cjj, double ckj) -> bool
 						{
 							const double mx = (std::max)(ckk, cjj);
-							return (mx > kEngineNumFloor) && ((ckk + cjj - 2.0 * ckj) <= 1e-4 * mx);
+							return (mx > kEngineNumFloor) && ((ckk + cjj - 2.0 * ckj) <= (collinearFloor + 1e-6 * mx));
 						};
 						const double psdScale = in.psdShape.ForBand(b);
 						bool cellContributedA2e = false;
@@ -2472,7 +2475,8 @@ namespace TdV2
 									if (j == k || refs[j].isExactCopy || !refActive[j])
 										continue;
 									const double mxKJ = (std::max)(C[k][k], C[j][j]);
-									if (mxKJ > kEngineNumFloor && (C[k][k] + C[j][j] - 2.0 * C[k][j]) <= 1e-4 * mxKJ)
+									const double collinearFloorB = 0.01 * baseQuantVar * bandTransfer[b];
+									if (mxKJ > kEngineNumFloor && (C[k][k] + C[j][j] - 2.0 * C[k][j]) <= (collinearFloorB + 1e-6 * mxKJ))
 										continue;
 									double capBias = 0.0;
 									if (cfg_.enableSubpixelHAttenuationDebias && b == 2 &&
