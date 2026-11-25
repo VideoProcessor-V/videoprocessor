@@ -205,7 +205,8 @@ namespace HalfLuma
 	{
 		return indent + "ivec2 local = ivec2(gl_LocalInvocationID.xy) * 4;\n" +
 			GlslBox4x4Sum(indent, "lq_tile_[(local.y + y) * 64 + local.x + x]");
-		// Fused planar-16 (P010/P210) 2x2 half-luma row decimation -> 8-bit NVOF engine luma (U3 owner law).
+	}
+	// Fused planar-16 (P010/P210) 2x2 half-luma row decimation -> 8-bit NVOF engine luma (U3 owner law).
 	inline void FusedPlanar16HalfLuma8Row(const uint16_t* row0, const uint16_t* row1, int w, int halfW, uint8_t* dst) // PRECISION-OK NVOF-8BIT: NVOF engine 8-bit luma row output
 	{
 		if (!row0 || !row1 || !dst || w <= 0 || halfW <= 0)
@@ -224,6 +225,5 @@ namespace HalfLuma
 			dst[pairs] = FinishEngine8(Box4(a, a, c, c));
 		}
 	}
-}
 }
 }
