@@ -2,31 +2,25 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //
 // input.source_analysis/focus_map: the per-region defocus level and focus-change flag (job #1 L-FOCUS; owner 2026-11-12 22:16 / 22:18).
-// The CPU reference. Everything here is a pure function of SHARED products: P11 region block statistics (the P10 band energies E1 / E2 / E3
-// and the grain level N, copied into the stats block), the P2 backward vector grid (or the P7 camera translation, visibly flagged) and the
-// P11 block statistics of the previous frame. No statistic is measured here; no private band, tensor or vector copy exists.
+// The CPU reference. Everything here is a pure function of SHARED products: kEdgeMap (3x3 Sobel |G| per source pixel, 10-bit codes),
+// P11 region block statistics (the P10 band energies E1 / E2 / E3 and the grain level N, copied into the stats block), the P2 backward
+// vector grid (or the P7 camera translation, visibly flagged) and the previous frame's kEdgeMap + P11 block statistics. No statistic is
+// measured here; no private band, tensor or vector copy exists.
 //
-// Defocus (0 = sharp, 1 = fully defocused). TWO laws, one per frame pair (never mixed across the delta):
-// EDGE LAW (unit v2; owner 11-14 05:25 "focus map built ON the edge map", registered fix FOCUS-EDGEMAP-SWITCH): the sharpness input is
-//   the shared kEdgeMap (3x3 Sobel |G| per source pixel, 10-bit codes). Per P11 block: peak = sum|G|^4 / sum|G|^2 (the energy-weighted
-//   |G|^2: about 0.7 x the edge-crest |G|^2 for any edge, independent of how much of the block the edge covers, so the law does not
-//   depend on the block size), the grain floor kSobelPeakNoiseGain x N (white noise of variance s^2: |G|^2 is exponential with mean
-//   24 s^2, so sum|G|^4 / sum|G|^2 -> 48 s^2), normalised by the same P11 band energy:
-//     sharp = max(peak - 48 N, 0) (no split: N = 0, kNoSplit);  ratio = sharp / (48 total + eps);  defocus = 1 - Ramp(ratio, edgeLo, edgeHi)
+// Defocus (0 = sharp, 1 = fully defocused) — EDGE LAW ONLY (unit v2; S18 F1 deleted the v1 interim law):
+//   Sharpness input: shared kEdgeMap (3x3 Sobel |G| per source pixel, 10-bit codes). Per P11 block: peak = sum|G|^4 / sum|G|^2
+//   (the energy-weighted |G|^2: about 0.7 x the edge-crest |G|^2 for any edge, independent of how much of the block the edge covers,
+//   so the law does not depend on the block size), the grain floor kSobelPeakNoiseGain x N (white noise of variance s^2: |G|^2 is
+//   exponential with mean 24 s^2, so sum|G|^4 / sum|G|^2 -> 48 s^2), normalised by the same P11 band energy:
+//     fine = max(E1 - N, 0) (no split: fine = E1, kNoSplit);  total = fine + E2 + E3;
+//     sharp = max(peak - 48 N, 0) (no split: N = 0, kNoSplit);  ratio = sharp / (48 total + eps);
+//     defocus = 1 - Ramp(ratio, edgeLo, edgeHi);  confidence = Ramp(total, energyLo, energyHi).
 //   A step edge blurred by a Gaussian of sigma b gives ratio ~ 0.6 / b^2 (b = 1 px: 0.6, sharp; b = 2: 0.15; b = 3: 0.07, defocused).
 //   edgeLo / edgeHi are PROVISIONAL (derived from that model, not yet fitted on real rack-focus clips: 102b FOCUS-EDGE-LAW-CALIBRATE).
-// INTERIM LAW (unit v1, used while the edge map is not served on the CPU, flagged kSharpnessInterim by the fill): the share of the
-//   block's band energy that sits in the fine band.
-//   fine = max(E1 - N, 0)  (N = the grain floor; no split: fine = E1, flag kNoSplit),  total = fine + E2 + E3
-//   ratio = fine / (total + eps);  defocus = 1 - Ramp(ratio, ratioLo, ratioHi)
-// Both: confidence = Ramp(total, energyLo, energyHi) (the P11 band energy, unchanged), the same coverage gate and the same flags.
 // Focus change: defocus(this block) - defocus(the block this one came from in the previous frame, found by the motion), flagged when
 //   |delta| >= changeThreshold and both confidences >= minConfidence. kSharper says the region became SHARPER than before.
 // HARD TD RULE (owner 11-12 22:16): detail sharper than the current frame's focus state is never imported into a region whose focus
 // changed; the temporal-detail consumer row is declared only (no wiring here) and reads kChanged + the defocus level.
-//
-// The templates (DefocusBlock<T>, ChangeBlock<T>) are the tolerance oracle of the GLSL mirror (FocusMapGlsl.h), which mirrors the INTERIM
-// law only; the edge law's GPU mirror is owed with the GPU form (102b FOCUS-EDGEMAP-SWITCH follow-up; no GPU form is registered).
 #pragma once
 
 #include <VP-V/core/Ramp.h>
@@ -40,7 +34,7 @@
 
 namespace FocusMap
 {
-	constexpr uint32_t kUnitVersion = 2;   // == VpSkeleton::kExpectedFocusMapUnit (v2: the edge law, FOCUS-EDGEMAP-SWITCH)
+	constexpr uint32_t kUnitVersion = 2;   // == VpSkeleton::kExpectedFocusMapUnit (v2: edge-map-only law, S18 F1)
 	constexpr int kBytesPerBlock = 8;      // u16 defocus (unorm), s16 delta (s1.15), u16 confidence (unorm), u16 flags
 
 	enum Flag : uint16_t
@@ -53,15 +47,13 @@ namespace FocusMap
 		kChanged = 32,         // the focus state changed along the motion (the TD rule reads this)
 		kSharper = 64,         // ... and the region became sharper (delta < 0)
 		kLowConfidence = 128,  // below minConfidence: never flagged changed
-		// Set by the owner fill (FocusMapFill.h), never by ComputeGrid or the GLSL mirror:
-		kNoPreviousRetained = 256,  // with kNoPrevious: the previous frame's P11 (or, under the edge law, edge map) spot was RELEASED
+		// Set by the owner fill (FocusMapFill.h), never by ComputeGrid:
+		kNoPreviousRetained = 256   // with kNoPrevious: the previous frame's P11 or kEdgeMap spot was RELEASED
 		                            // (retention missing), not merely absent
-		kSharpnessInterim = 512     // the INTERIM law was used: the edge map was not served on the CPU for this frame (visible)
 	};
 
 	struct Params
 	{
-		double ratioLo = 0.35, ratioHi = 0.75;        // fine-band share mapped to defocus 1 .. 0
 		double eps = 1e-3;
 		double energyLo = 2.0, energyHi = 30.0;       // total band energy (codes^2) mapped to confidence 0 .. 1
 		double changeThreshold = 0.25;                // |defocus delta| that is a focus change
@@ -76,36 +68,11 @@ namespace FocusMap
 	// exponential with mean 24 s^2 and E|G|^4 / E|G|^2 = 48 s^2: the grain floor of the edge law's peak per unit of N.
 	constexpr double kSobelPeakNoiseGain = 48.0;
 
-	// The ONE linear ramp (core/Ramp.h, U25; rule 20): the private copy that stood here is removed. Bit-identical for every ramp of this
-	// law (each has hi > lo: RampMath::Ramp is then Clamp01((x - lo) / (hi - lo)), the removed copy's arithmetic, NaN passing through).
+	// The ONE linear ramp (core/Ramp.h, U25; rule 20).
 	using RampMath::Ramp;
 
-	// s = one P11 block (RegionEvidence::kStatsChannels floats / doubles). flags gets kValid / kNoSplit.
-	template<class T> inline void DefocusBlock(const Params& p, const T* s, T& defocus, T& confidence, uint32_t& flags)
-	{
-		using namespace RegionEvidence;
-		flags = 0;
-		defocus = T(0);
-		confidence = T(0);
-		if (!(s[kCoverage] >= T(p.minCoverage))) return;
-		const T n = s[kStatN];
-		const bool haveSplit = n >= T(0);
-		if (!haveSplit) flags |= kNoSplit;
-		const T e1 = s[kE1] > T(0) ? s[kE1] : T(0);
-		const T e2 = s[kE2] > T(0) ? s[kE2] : T(0);
-		const T e3 = s[kE3] > T(0) ? s[kE3] : T(0);
-		T fine = haveSplit ? e1 - n : e1;
-		if (fine < T(0)) fine = T(0);
-		const T total = fine + e2 + e3;
-		const T ratio = fine / (total + T(p.eps));
-		defocus = T(1) - RampMath::Ramp<T>(ratio, T(p.ratioLo), T(p.ratioHi));
-		confidence = RampMath::Ramp<T>(total, T(p.energyLo), T(p.energyHi));
-		flags |= kValid;
-	}
-
-	// The EDGE LAW (v2) of one block: s = the P11 block (coverage, N, the band energies for the normaliser and the confidence, exactly as
-	// the interim law reads them); sum2 / sum4 = the block's sums of |G|^2 / |G|^4 from the shared edge map (EdgeSums). Same gate, same
-	// confidence and the same flags as DefocusBlock; only the sharpness term differs.
+	// The EDGE LAW (v2) of one block: s = the P11 block (coverage, N, band energies for the normaliser and confidence);
+	// sum2 / sum4 = the block's sums of |G|^2 / |G|^4 from the shared edge map (EdgeSums).
 	template<class T> inline void DefocusBlockEdge(const Params& p, const T* s, T sum2, T sum4, T& defocus, T& confidence, uint32_t& flags)
 	{
 		using namespace RegionEvidence;
@@ -206,7 +173,7 @@ namespace FocusMap
 	};
 
 	// Per P11 block: the sums of |G|^2 and |G|^4 over the block's pixels of the edge map (the kEdgeMap CPU form: width x height float32
-	// |G| in 10-bit codes, row-major, tightly packed; kEdgeMap's declared size term is 4 B per source pixel). A pure reduction of the
+	// |G| in 10-bit codes, row-major, tightly packed; kEdgeMap's default size term is 4 B per source pixel). A pure reduction of the
 	// shared product, accumulated in double: nothing is measured from the picture here (no gradient of its own). `edgeBytes` is the
 	// published byte payload (width x height x 4 bytes); each row is copied out with memcpy (no aliasing of the byte buffer as floats).
 	inline void EdgeSums(const Geometry& g, const uint8_t* edgeBytes, std::vector<float>& sum2, std::vector<float>& sum4)
@@ -284,7 +251,7 @@ namespace FocusMap
 		return m;
 	}
 
-	// The edge-map sums of one frame (EdgeSums), the edge law's sharpness input. Empty = the edge map was not served (interim law).
+	// The edge-map sums of one frame (EdgeSums), the edge law's required sharpness input.
 	struct EdgeInput
 	{
 		const float* sum2 = nullptr;
@@ -292,21 +259,20 @@ namespace FocusMap
 		bool Served() const { return sum2 != nullptr && sum4 != nullptr; }
 	};
 
-	// The whole grid. stats / prevStats: gw x gh blocks of kPrecursorChannels floats (the P11 CPU form); prevStats may be null (no
-	// reference); p2 / p7 may be null (visible flags). forceNoSplit: P10 itself was unavailable.
-	// edge / prevEdge (the edge law, v2): when `edge` is served, this frame uses the edge law and the previous frame is a reference ONLY
-	// under the same law (prevEdge served too), else it is no reference (kNoPrevious): the delta never mixes two laws. When `edge` is not
-	// served, the interim law runs exactly as before the switch (prevEdge ignored), bit for bit.
+	// The whole grid (EDGE LAW ONLY, S18 F1): stats / prevStats are gw x gh blocks of kPrecursorChannels floats (P11 CPU form);
+	// prevStats may be null (no reference); p2 / p7 may be null (visible flags). forceNoSplit: P10 itself was unavailable.
+	// Requires `edge.Served()` (if !edge.Served() or stats == nullptr, leaves all output blocks zeroed/invalid with kValid unset;
+	// never runs a v1 interim law). If !prevEdge.Served(), treats prevStats as null (kNoPrevious).
 	inline void ComputeGrid(const Params& p, const Geometry& g, const float* stats, const float* prevStats, const uint8_t* p2, const float* p7,
 		bool forceNoSplit, std::vector<Block>& out, EdgeInput edge = EdgeInput(), EdgeInput prevEdge = EdgeInput())
 	{
 		using namespace RegionEvidence;
 		const size_t n = g.Blocks();
 		out.assign(n, Block());
+		if (!edge.Served() || stats == nullptr) return;
+		if (!prevEdge.Served()) prevStats = nullptr;   // no previous edge map: never compare without edge-law reference
 		std::vector<float> pd(n, 0.0f), pc(n, 0.0f);
 		std::vector<uint8_t> pv(n, 0);
-		const bool edgeLaw = edge.Served();
-		if (edgeLaw && !prevEdge.Served()) prevStats = nullptr;   // no reference under the edge law: never compare across laws
 		if (prevStats)
 			for (size_t i = 0; i < n; ++i)
 			{
@@ -315,8 +281,7 @@ namespace FocusMap
 				if (forceNoSplit) s[kStatN] = -1.0f;
 				float d = 0, c = 0;
 				uint32_t f = 0;
-				if (edgeLaw) DefocusBlockEdge<float>(p, s, prevEdge.sum2[i], prevEdge.sum4[i], d, c, f);
-				else DefocusBlock<float>(p, s, d, c, f);
+				DefocusBlockEdge<float>(p, s, prevEdge.sum2[i], prevEdge.sum4[i], d, c, f);
 				pd[i] = d; pc[i] = c; pv[i] = (f & kValid) ? 1 : 0;
 			}
 		for (int by = 0; by < g.gh; ++by)
@@ -328,8 +293,7 @@ namespace FocusMap
 				if (forceNoSplit) s[kStatN] = -1.0f;
 				float d, c;
 				uint32_t f;
-				if (edgeLaw) DefocusBlockEdge<float>(p, s, edge.sum2[i], edge.sum4[i], d, c, f);
-				else DefocusBlock<float>(p, s, d, c, f);
+				DefocusBlockEdge<float>(p, s, edge.sum2[i], edge.sum4[i], d, c, f);
 				BlockMotion m;
 				if (p2) m = FieldMotion(g, p2, bx, by);
 				if (m.source == MotionSource::None && p7) m = CameraMotionOf(p7);
