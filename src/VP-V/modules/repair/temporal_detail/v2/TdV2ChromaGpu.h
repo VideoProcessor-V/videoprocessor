@@ -2001,6 +2001,75 @@ else
 			pushReq(ucw, uch, VpSkeleton::TexFormat::RGBA32F, 3);
 			return reqs;
 		}
+
+		// OPUS-M1 (format-agnostic Unidentified): ScratchArena::Acquire matches TexShape by strict (w, h, fmt) equality,
+		// so a format-agnostic Unidentified arena must include the deduplicated union of coded-grid shapes across all
+		// possible delivered formats {Yuv420 (6 RG32F), Yuv422 (6 RG32F), Yuv444/Rgb444 (9 RG32F)} plus one shared cell-grid set.
+		inline std::vector<VpSkeleton::ArenaRequest> BuildUnidentifiedAgnosticArenaRequests(
+			int lumaW, int lumaH, int cellPx = kCanonicalBlockPx)
+		{
+			std::vector<VpSkeleton::ArenaRequest> reqs;
+			if (lumaW <= 0 || lumaH <= 0)
+				return reqs;
+			const int effCellPx = cellPx > 0 ? cellPx : kCanonicalBlockPx;
+			const uint32_t ucw = static_cast<uint32_t>((lumaW + effCellPx - 1) / effCellPx);
+			const uint32_t uch = static_cast<uint32_t>((lumaH + effCellPx - 1) / effCellPx);
+
+			auto pushReq = [&](uint32_t rw, uint32_t rh, VpSkeleton::TexFormat fmt, uint8_t count)
+			{
+				VpSkeleton::ArenaRequest r;
+				r.scope = kChromaArenaScope;
+				r.owner = kChromaArenaOwner;
+				r.tier = VpSkeleton::Tier::T1;
+				r.shape = VpSkeleton::TexShape{ rw, rh, fmt };
+				r.count = count;
+				reqs.push_back(r);
+			};
+
+			// Deduplicate identical (cW, cH) dims (e.g. lumaW == 1 or lumaH == 1) using max(rgCount) so PlanArena
+			// never double-counts mutually exclusive coded-grid pools.
+			struct CodedGridSpec { uint32_t w; uint32_t h; uint8_t rgCount; };
+			CodedGridSpec specs[3] = {};
+			int specCount = 0;
+			const ChromaSubsampling kSubs[3] = {
+				ChromaSubsampling::Yuv420,
+				ChromaSubsampling::Yuv422,
+				ChromaSubsampling::Yuv444
+			};
+			const uint8_t kRgCounts[3] = { 6u, 6u, 9u };
+			for (int i = 0; i < 3; ++i)
+			{
+				const uint32_t rw = static_cast<uint32_t>(ChromaDetail::SubsampledDim(lumaW, SubsampleX(kSubs[i])));
+				const uint32_t rh = static_cast<uint32_t>(ChromaDetail::SubsampledDim(lumaH, SubsampleY(kSubs[i])));
+				bool merged = false;
+				for (int j = 0; j < specCount; ++j)
+				{
+					if (specs[j].w == rw && specs[j].h == rh)
+					{
+						if (kRgCounts[i] > specs[j].rgCount)
+							specs[j].rgCount = kRgCounts[i];
+						merged = true;
+						break;
+					}
+				}
+				if (!merged)
+					specs[specCount++] = CodedGridSpec{ rw, rh, kRgCounts[i] };
+			}
+
+			for (int i = 0; i < specCount; ++i)
+			{
+				pushReq(specs[i].w, specs[i].h, VpSkeleton::TexFormat::RG32F, specs[i].rgCount);
+				pushReq(specs[i].w, specs[i].h, VpSkeleton::TexFormat::RGBA32F, 6u);
+				pushReq(specs[i].w, specs[i].h, VpSkeleton::TexFormat::R16, 2u);
+			}
+
+			// Single shared cell-grid set (identical across all delivered formats).
+			pushReq(3u * ucw, uch, VpSkeleton::TexFormat::RGBA32F, 5u);
+			pushReq(3u * ucw, 3u * uch, VpSkeleton::TexFormat::RGBA32F, 2u);
+			pushReq(ucw, uch, VpSkeleton::TexFormat::RG32F, 1u);
+			pushReq(ucw, uch, VpSkeleton::TexFormat::RGBA32F, 3u);
+			return reqs;
+		}
 	} // namespace ChromaGpuDetail
 
 	// ---- Modular Fused RG32F GPU Coded-Grid Chroma Fusion Engine (SOTA #3) ----
@@ -2084,11 +2153,12 @@ else
 			{
 				return {};
 			}
-			// OPUS-M1: When gridStatus == Unidentified and deliveredFormat is unspecified, conservatively size for full 4:4:4
-			// so arena-backed Unidentified 4:2:2 / 4:4:4 / RGB frames never hit GpuScratchShortage.
-			const ChromaSubsampling effCodedSub =
-				(gridStatus == ChromaGridStatus::Unidentified) ? ChromaSubsampling::Yuv444 : codedSubsampling;
-			return ChromaGpuDetail::BuildChromaArenaRequests(lumaW, lumaH, effCodedSub, cellPx, true);
+			// OPUS-M1: When gridStatus == Unidentified and deliveredFormat is unspecified, emit the deduplicated union of
+			// {Yuv420, Yuv422, Yuv444/Rgb444} coded-grid shapes (ScratchArena::Acquire matches TexShape by exact equality)
+			// so arena-backed Unidentified frames of ANY delivered format never hit GpuScratchShortage.
+			if (gridStatus == ChromaGridStatus::Unidentified)
+				return ChromaGpuDetail::BuildUnidentifiedAgnosticArenaRequests(lumaW, lumaH, cellPx);
+			return ChromaGpuDetail::BuildChromaArenaRequests(lumaW, lumaH, codedSubsampling, cellPx, true);
 		}
 
 		// TD-AUDIT-L2 + OPUS-M1: Format-aware ArenaRequests omits the 3 coded-grid reduction scratch textures (-47..190 MiB at 4K!)
@@ -2117,10 +2187,12 @@ else
 			int lumaW, int lumaH, ChromaSubsampling codedSubsampling, int cellPx = kCanonicalBlockPx,
 			ChromaGridStatus gridStatus = ChromaGridStatus::Identified)
 		{
-			const ChromaSubsampling effCodedSub =
-				(gridStatus == ChromaGridStatus::Unidentified) ? ChromaSubsampling::Yuv444 : codedSubsampling;
+			const std::vector<VpSkeleton::ArenaRequest> reqs =
+				(gridStatus == ChromaGridStatus::Unidentified)
+					? ChromaGpuDetail::BuildUnidentifiedAgnosticArenaRequests(lumaW, lumaH, cellPx)
+					: ChromaGpuDetail::BuildChromaArenaRequests(lumaW, lumaH, codedSubsampling, cellPx, true);
 			uint64_t total = 0;
-			for (const VpSkeleton::ArenaRequest& r : ChromaGpuDetail::BuildChromaArenaRequests(lumaW, lumaH, effCodedSub, cellPx, true))
+			for (const VpSkeleton::ArenaRequest& r : reqs)
 				total += VpSkeleton::ShapeBytes(r.shape) * static_cast<uint64_t>(r.count);
 			return total;
 		}
