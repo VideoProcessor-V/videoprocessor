@@ -15,6 +15,44 @@ namespace VpSkeleton
 	{
 		namespace
 		{
+			// Matches SkeletonModule::SceneFactsFor's ahead prime span (ref 4 + context 3 + 1; SkeletonModule.cpp:599).
+			constexpr uint64_t kScenePrimeFrames = 8;
+
+			// Non-mutating check: is P4(s) already published in the lane slot (ring, or live on the render thread,
+			// matching AnalysisLane::ReadOf's allowPublished = AheadOfSeal(s) rule) or in the memo?
+			// When true, SkeletonMemo::Acquire serves s via G2(a)/G2(b) without calling Fail().
+			bool HasPublishedP4(Vpv::Skeleton::IExternalDemand* demand, const void* owner,
+				const VpSkeleton::SkeletonMemo& memo, uint64_t s, bool onRenderThread)
+			{
+				const VpSkeleton::LaneLease lease = demand->LeaseFor(owner, VpSkeleton::kP4SourceStats);
+				if (lease.Valid() && lease.bytes != nullptr && lease.bytes->Bytes() >= sizeof(VpUnit::SourceStats::Record))
+				{
+					if (const VpSkeleton::SlotSet* set = lease.table->Find(VpSkeleton::kP4SourceStats))
+					{
+						if (onRenderThread)
+						{
+							const VpSkeleton::ReadInfo ri = set->Read(s, memo.AheadOfSeal(s));
+							if (ri.kind != VpSkeleton::ReadInfo::None && ri.index >= 0)
+								return true;
+						}
+						else
+						{
+							const VpSkeleton::PublishedRead pr = VpSkeleton::ReadPublishedBytes(
+								*set, *lease.bytes, s, [](const uint8_t*, size_t) {});
+							if (pr == VpSkeleton::PublishedRead::Copied)
+								return true;
+						}
+					}
+				}
+				std::vector<uint8_t> probe(VpUnit::SourceStats::kRecordBytes, 0);
+				if (memo.CopyPublished(VpSkeleton::kP4SourceStats, s, probe.data(), probe.size()))
+					return true;
+				if (sizeof(VpUnit::SourceStats::Record) != VpUnit::SourceStats::kRecordBytes &&
+					memo.CopyPublished(VpSkeleton::kP4SourceStats, s, probe.data(), sizeof(VpUnit::SourceStats::Record)))
+					return true;
+				return false;
+			}
+
 			// Non-mutating mirror of SkeletonMemo::Acquire's queue-window / ahead-plan admission checks
 			// (SkeletonAcquire.h:967-982). Prevents look-ahead readers (e.g. SRM LookAheadFrameCoded) from
 			// triggering SkeletonMemo::Fail() and polluting SkeletonMemo::lastCause_[kP4SourceStats] (MUST-9).
@@ -23,7 +61,9 @@ namespace VpSkeleton
 				if (!memo.AheadOfSeal(seq))
 					return true;
 				const VpSkeleton::QueueWindow w = memo.Window();
-				const bool hasWindow = (w.wired != 0 || w.current != 0);
+				// Contract: QueueWindow is default-zeroed before SkeletonMemo::SetWindow(); any non-zero
+				// dimension (wired, current, ahead, back) indicates a configured window (windowSet_).
+				const bool hasWindow = (w.wired != 0 || w.current != 0 || w.ahead != 0 || w.back != 0);
 				if (hasWindow)
 				{
 					if (seq > w.current + uint64_t(w.ahead))
@@ -96,16 +136,41 @@ namespace VpSkeleton
 				}
 				// MUST-9: before entering SceneOf's live FillScene -> memo->Acquire(P4) path, guard off-thread,
 				// released-frame, and unplanned-ahead requests so SkeletonMemo::Fail() is never polluted.
+				// Check pre-published lane/memo P4 first for each frame in SceneFactsFor's [first .. seq] span
+				// so Competitive-mode (back == 0) released frames and pre-published ahead slots still hit G2(a)/G2(b).
 				const Vpv::Skeleton::FrameMemo fm = demand->MemoFor(owners[0], seq);
+				bool blocked = false;
 				if (fm.Valid() && !fm.memo->OnRenderThread())
-					reason = "scene not published (off render thread)";
-				else if (fm.Valid() && (fm.memo->Released(seq) || (seq > 0 && fm.memo->Released(seq - 1))))
-					reason = VpSkeleton::Token(VpSkeleton::AcquireCause::FrameReleased);
-				else if (fm.Valid() && !AheadAdmittedNonMutating(*fm.memo, seq, reason))
 				{
-					// reason populated by AheadAdmittedNonMutating (NotQueued / NotPlannedAhead / PresentsStalled)
+					reason = "scene not published (off render thread)";
+					blocked = true;
 				}
-				else
+				else if (fm.Valid() && seq >= 2)
+				{
+					uint64_t first = seq - 1;
+					if (fm.memo->AheadOfSeal(seq) && seq >= 3)
+					{
+						while (first > 1 && seq - first < kScenePrimeFrames && fm.memo->AheadOfSeal(first - 1))
+							--first;
+					}
+					for (uint64_t s = first; s <= seq; ++s)
+					{
+						if (HasPublishedP4(demand, owners[0], *fm.memo, s, true))
+							continue;
+						if (fm.memo->Released(s))
+						{
+							reason = VpSkeleton::Token(VpSkeleton::AcquireCause::FrameReleased);
+							blocked = true;
+							break;
+						}
+						if (!AheadAdmittedNonMutating(*fm.memo, s, reason))
+						{
+							blocked = true;
+							break;
+						}
+					}
+				}
+				if (!blocked)
 				{
 					const Vpv::Skeleton::SceneAnswer a = demand->SceneOf(owners[0], seq);
 					if (a.known)
@@ -181,25 +246,32 @@ namespace VpSkeleton
 						else
 							reason = "p4 record version mismatch";
 					}
-					else if (!fm.memo->HasOwnerFill(VpSkeleton::kP4SourceStats, VpSkeleton::AcquireForm::Cpu))
-						reason = "no analysis lane";
 					else if (!fm.memo->OnRenderThread())
-						reason = "p4 not published (off render thread)";
-					else if (fm.memo->Released(seq))
-						reason = VpSkeleton::Token(VpSkeleton::AcquireCause::FrameReleased);
-					else if (!AheadAdmittedNonMutating(*fm.memo, seq, reason))
-					{
-						// reason populated by AheadAdmittedNonMutating (NotQueued / NotPlannedAhead / PresentsStalled)
-					}
+						reason = !fm.memo->HasOwnerFill(VpSkeleton::kP4SourceStats, VpSkeleton::AcquireForm::Cpu)
+							? "no analysis lane" : "p4 not published (off render thread)";
 					else
 					{
-						const VpSkeleton::AcquireResult ar = fm.memo->Acquire(VpSkeleton::kP4SourceStats, seq, VpSkeleton::AcquireForm::Cpu);
-						if (!ar.Ok())
-							reason = VpSkeleton::Token(ar.cause);
-						else if (VpUnit::SourceStats::ReadRecord(ar.cpu, ar.cpuBytes, &out))
-							found = true;
+						// Check pre-published render-thread lane slots (including ReadInfo::Live skipped by ReadPublishedBytes)
+						// before enforcing owner-fill / Released / AheadAdmitted guards, matching G2(a) precedence.
+						const bool prePublished = HasPublishedP4(demand, owners[0], *fm.memo, seq, true);
+						if (!prePublished && !fm.memo->HasOwnerFill(VpSkeleton::kP4SourceStats, VpSkeleton::AcquireForm::Cpu))
+							reason = "no analysis lane";
+						else if (!prePublished && fm.memo->Released(seq))
+							reason = VpSkeleton::Token(VpSkeleton::AcquireCause::FrameReleased);
+						else if (!prePublished && !AheadAdmittedNonMutating(*fm.memo, seq, reason))
+						{
+							// reason populated by AheadAdmittedNonMutating (NotQueued / NotPlannedAhead / PresentsStalled)
+						}
 						else
-							reason = "p4 record version mismatch";
+						{
+							const VpSkeleton::AcquireResult ar = fm.memo->Acquire(VpSkeleton::kP4SourceStats, seq, VpSkeleton::AcquireForm::Cpu);
+							if (!ar.Ok())
+								reason = VpSkeleton::Token(ar.cause);
+							else if (VpUnit::SourceStats::ReadRecord(ar.cpu, ar.cpuBytes, &out))
+								found = true;
+							else
+								reason = "p4 record version mismatch";
+						}
 					}
 				}
 			}
