@@ -611,11 +611,15 @@ namespace Tests
 				Assert::AreEqual(1.0, stage.TrimsSaturationGain(), 0.0, L"fresh stage: TrimsSaturationGain starts neutral 1.0");
 
 				runFrame(stage, dvImage, true, 1, false, 1.0, 0, L"NoShaders frame 1");
+				Assert::IsFalse(stage.ReferenceConditions().trimApplied,
+					L"missing trims shader must not mark ReferenceConditions::trimApplied true");
 				Assert::IsTrue(reg.Has("Dolby Vision trims"), L"NoShaders frame 1: visible fallback engaged");
 				Assert::AreEqual(0, reg.engaged["Dolby Vision trims"].compare(0, 11, "NOT applied"),
 					L"NoShaders frame 1: fallback states NOT applied");
 
 				runFrame(stage, dvImage, true, 2, false, 1.0, 0, L"NoShaders frame 2");
+				Assert::IsFalse(stage.ReferenceConditions().trimApplied,
+					L"missing trims shader must not mark ReferenceConditions::trimApplied true");
 				Assert::IsTrue(reg.Has("Dolby Vision trims"), L"NoShaders frame 2: visible fallback stays engaged");
 				Assert::AreEqual(0, reg.engaged["Dolby Vision trims"].compare(0, 11, "NOT applied"),
 					L"NoShaders frame 2: fallback still states NOT applied");
@@ -628,6 +632,8 @@ namespace Tests
 				Registry reg;
 				DvHostStage stage(DummyShaders(), reg.Engage(), reg.Release());
 				runFrame(stage, dvImage, true, 1, true, expectedGain, 1, L"DummyShaders active DV frame 1");
+				Assert::IsTrue(stage.ReferenceConditions().trimApplied,
+					L"loaded trims shader marks ReferenceConditions::trimApplied true");
 				Assert::IsFalse(reg.Has("Dolby Vision trims"), L"DummyShaders active DV: no fallback engaged");
 
 				runFrame(stage, nonDvImage, true, 2, false, 1.0, 0, L"DummyShaders non-DV frame");
