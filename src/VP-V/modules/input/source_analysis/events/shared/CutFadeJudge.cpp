@@ -4,6 +4,10 @@
 #include <VP-V/modules/input/source_analysis/events/shared/CutFadeJudge.h>
 #include <VP-V/core/SkeletonAcquire.h>
 #include <VP-V/modules/input/source_analysis/identity/FrameQuality.h>
+#include <VP-V/modules/motion/estimation/OpticalFlowTrust.h>
+#include <VP-V/modules/motion/estimation/P2PairRecord.h>
+#include <VP-V/modules/motion/estimation/global_model/CameraMotion.h>
+#include <VP-V/modules/motion/estimation/global_model/link/CameraRecordPool.h>
 #include <VP-V/modules/repair/grain_split/BandMemo.h>
 #include <cstring>
 
@@ -1587,6 +1591,112 @@ bool FoldFadeRun(const SourceStats::Record& prev, const SourceStats::Record& cur
         ++run.fadePairs;
     }
     return fade;
+}
+
+const double kVectorVetoMinTrust = kCutHistFrac;
+
+bool ShouldVetoCut(const VectorVeto& v)
+{
+    return v.enabled && v.trusted && (v.trust < 0.0 || v.trust >= kVectorVetoMinTrust);
+}
+
+bool ApplyVectorVeto(bool cut, const VectorVeto& v)
+{
+    return ApplyVectorVeto(cut, v, nullptr);
+}
+
+bool ApplyVectorVeto(bool cut, const VectorVeto& v, bool* vetoedOut)
+{
+    const bool veto = cut && ShouldVetoCut(v);
+    if (vetoedOut)
+        *vetoedOut = veto;
+    return veto ? false : cut;
+}
+
+bool ReadMemoVectorTrust(VpSkeleton::SkeletonMemo* memo, uint64_t seq)
+{
+    return ReadMemoVectorTrust(memo, seq, nullptr);
+}
+
+bool ReadMemoVectorTrust(VpSkeleton::SkeletonMemo* memo, uint64_t seq, double* trustOut)
+{
+    if (trustOut)
+        *trustOut = 0.0;
+    if (memo == nullptr || seq == 0u)
+        return false;
+
+    // 1. Prefer P7 camera fit (kP7CameraFit, CPU POD): checks valid + ReasonUsable + confidence >= kVectorVetoMinTrust.
+    const VpSkeleton::AcquireResult p7 = memo->Acquire(VpSkeleton::kP7CameraFit, seq, VpSkeleton::AcquireForm::Cpu);
+    if (p7.Ok() && p7.cpu != nullptr && p7.cpuBytes >= 241u)
+    {
+        CameraLink::detail::Reader r(p7.cpu, p7.cpuBytes);
+        const uint32_t magic = r.Get<uint32_t>();
+        if (magic == CameraLink::kRecordPodMagic || magic == CameraLink::kRecordPodMagicV1)
+        {
+            (void)r.Get<uint64_t>(); (void)r.Get<uint64_t>(); (void)r.Get<uint64_t>(); (void)r.Get<double>();
+            (void)r.Get<uint64_t>(); (void)r.Get<uint64_t>();
+            const bool valid = r.Get<uint8_t>() != 0;
+            const uint8_t mtype = r.Get<uint8_t>();
+            const uint8_t reasonByte = r.Get<uint8_t>();
+            (void)r.Get<uint8_t>();
+            for (int i = 0; i < 9; ++i) (void)r.Get<double>();
+            (void)r.Get<uint8_t>();
+            for (int i = 0; i < 9; ++i) (void)r.Get<double>();
+            for (int i = 0; i < 4; ++i) (void)r.Get<double>();
+            const double confidence = r.Get<double>();
+            if (r.ok && mtype <= CameraLink::kRecordPodLastModelType && reasonByte <= CameraLink::kRecordPodLastReason)
+            {
+                const CameraModel::Reason reason = static_cast<CameraModel::Reason>(reasonByte);
+                const bool ok = valid && CameraModel::ReasonUsable(reason) && confidence >= kVectorVetoMinTrust;
+                if (trustOut)
+                    *trustOut = ok ? confidence : 0.0;
+                return ok;
+            }
+        }
+    }
+
+    // 2. Fallback when P7 is absent: P2 vector-engine pair CPU form (kP2VectorPair, P2PairRecord).
+    const VpSkeleton::AcquireResult p2 = memo->Acquire(VpSkeleton::kP2VectorPair, seq, VpSkeleton::AcquireForm::Cpu);
+    if (p2.Ok() && p2.cpu != nullptr && p2.cpuBytes == VpMotion::kP2PairRecordBytes)
+    {
+        VpMotion::P2PairRecord rec;
+        if (VpMotion::DecodeP2PairRecord(p2.cpu, p2.cpuBytes, rec) && rec.GlobalSet()
+            && OpticalFlowTrust::GlobalUsable(rec.global[0]))
+        {
+            const bool bwdOk = rec.global[1][3] <= 0.5f || OpticalFlowTrust::GlobalUsable(rec.global[1]);
+            if (bwdOk)
+            {
+                const double w = static_cast<double>(rec.global[0][3]);
+                if (w >= kVectorVetoMinTrust)
+                {
+                    if (trustOut)
+                        *trustOut = w;
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+bool ResolveSceneVectorVeto(uint64_t seq, bool cut, bool (*trustReader)(uint64_t, double*),
+                            VpSkeleton::SkeletonMemo* memo, bool* vetoedOut)
+{
+    if (vetoedOut)
+        *vetoedOut = false;
+    if (!cut)
+        return false;
+    double trust = -1.0;
+    bool trusted = false;
+    if (trustReader != nullptr)
+        trusted = trustReader(seq, &trust);
+    else if (memo != nullptr)
+        trusted = ReadMemoVectorTrust(memo, seq, &trust);
+    VectorVeto vv;
+    vv.enabled = true;
+    vv.trusted = trusted;
+    vv.trust = trust;
+    return ApplyVectorVeto(cut, vv, vetoedOut);
 }
 
 } // namespace CutFadeJudge

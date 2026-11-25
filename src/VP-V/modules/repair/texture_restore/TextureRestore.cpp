@@ -717,6 +717,7 @@ if (p.x < sz.x && p.y < sz.y) {
 	unsigned long long Module::P11EnergyHits() const { return p11EnergyHits; }
 	unsigned long long Module::P11EnergyFallbacks() const { return p11EnergyFallbacks; }
 	const std::string& Module::LastP11EnergyFallback() const { return lastP11EnergyFallback; }
+	unsigned long long Module::SceneVectorVetoes() const { return sceneVectorVetoes; }
 
 	void Module::Release(pl_gpu gpu)
 	{
@@ -983,7 +984,7 @@ if (p.x < sz.x && p.y < sz.y) {
 			if (!restartAll)
 			{
 				const VpDetailRestore::SceneRestartAnswer scene = VpDetailRestore::SceneRestartOf(params.sequence, params.sceneReader,
-					params.softReset);
+					params.softReset, params.vectorVeto, params.vectorTrustReader, params.memo);
 				sceneRestart = scene.restart;
 				sceneUnavailable = !scene.fromRecord || scene.fadeWithoutKeep;
 				sceneWhy = scene.fadeWithoutKeep ? VpDetailRestore::SceneFadeWithoutKeepWhy() : nullptr;
@@ -991,6 +992,8 @@ if (p.x < sz.x && p.y < sz.y) {
 					++sceneMissing;
 				if (scene.fadeWithoutKeep)
 					++sceneFadeRestarts;
+				if (scene.vectorVetoed)
+					++sceneVectorVetoes;
 				if (scene.fadePartial || scene.softPartial)
 					historyKeep2 = static_cast<double>(scene.historyKeep) * scene.historyKeep;
 				if (scene.fadePartial)

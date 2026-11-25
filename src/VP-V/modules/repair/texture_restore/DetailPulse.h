@@ -152,9 +152,10 @@ namespace DetailPulse
 		pl_rect2df picture{};
 		// The reader of the source frame's scene group (the shared cut / fade verdict, U7 via P4); null = the skeleton's store.
 		VpDetailRestore::SceneReaderFn sceneReader = nullptr;
-		// cut_soft_reset (default on): the soft reset on a high-confidence non-cut candidate (SceneRestart.h; the bar is
-		// CutFadeJudge::kSoftResetBar, provisional). Off = no soft reset; cuts restart and fades reduce exactly as before.
+		// cut_soft_reset (default on): soft reset on high-confidence non-cut candidate (SceneRestart.h).
 		bool softReset = VpDetailRestore::kDefaultCutSoftReset;
+		bool vectorVeto = true;  // B6-D8-VECTOR-VETO: veto false pan cuts when P7/P2 vectors are trusted
+		VpDetailRestore::VectorTrustReaderFn vectorTrustReader = nullptr;  // null = query memo P7/P2
 		VpSkeleton::SkeletonMemo* memo = nullptr;   // optional: acquire shared kBandMemo GPU wide low band
 	};
 
@@ -252,13 +253,14 @@ namespace DetailPulse
 		unsigned long long P11EnergyHits() const;
 		unsigned long long P11EnergyFallbacks() const;
 		const std::string& LastP11EnergyFallback() const;
+		unsigned long long SceneVectorVetoes() const;
 
 	private:
 		struct Impl;
 		Impl* impl = nullptr;
 		std::string error, lastBandMemoFallback, lastP11EnergyFallback;
 		unsigned long long failures = 0, frames = 0, aheadUsed = 0, sceneMissing = 0, scenePartials = 0, sceneFadeRestarts = 0;
-		unsigned long long sceneSoftResets = 0, bandMemoHits = 0, bandMemoFallbacks = 0, p11EnergyHits = 0, p11EnergyFallbacks = 0;
+		unsigned long long sceneSoftResets = 0, sceneVectorVetoes = 0, bandMemoHits = 0, bandMemoFallbacks = 0, p11EnergyHits = 0, p11EnergyFallbacks = 0;
 		double sceneSoftStrengthSum = 0.0;
 		VpDetailRestore::SoftResetWatch softWatch;
 		bool sceneUnavailable = false;

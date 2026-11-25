@@ -115,6 +115,8 @@ namespace TextureRestore
 		VpDetailRestore::SceneReaderFn sceneReader = nullptr;
 		// cut_soft_reset (default on): soft reset on high-confidence non-cut candidate (SceneRestart.h).
 		bool softReset = VpDetailRestore::kDefaultCutSoftReset;
+		bool vectorVeto = true;  // B6-D8-VECTOR-VETO: veto false pan cuts when P7/P2 vectors are trusted
+		VpDetailRestore::VectorTrustReaderFn vectorTrustReader = nullptr;  // null = query memo P7/P2
 		VpSkeleton::SkeletonMemo* memo = nullptr;  // optional: acquire shared P11 band energies
 	};
 
@@ -170,13 +172,14 @@ namespace TextureRestore
 		unsigned long long P11EnergyHits() const;
 		unsigned long long P11EnergyFallbacks() const;
 		const std::string& LastP11EnergyFallback() const;
+		unsigned long long SceneVectorVetoes() const;
 
 	private:
 		struct Impl;
 		Impl* impl = nullptr;
 		std::string error, lastP11EnergyFallback;
 		unsigned long long failures = 0, frames = 0, sceneMissing = 0, scenePartials = 0, sceneFadeRestarts = 0;
-		unsigned long long sceneSoftResets = 0, p11EnergyHits = 0, p11EnergyFallbacks = 0;
+		unsigned long long sceneSoftResets = 0, sceneVectorVetoes = 0, p11EnergyHits = 0, p11EnergyFallbacks = 0;
 		double sceneSoftStrengthSum = 0.0;
 		VpDetailRestore::SoftResetWatch softWatch;
 		bool sceneUnavailable = false;
