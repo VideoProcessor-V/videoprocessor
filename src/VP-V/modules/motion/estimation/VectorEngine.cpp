@@ -988,7 +988,16 @@ namespace VpMotion
 		if (epochAtChoice == 0 || epochAtChoice != motionValidity.Epoch())
 			return;
 		FieldRecord& live = RecordLive();
-		if (epochAtChoice != live.epoch || live.from == 0)
+		bool hadCurrentEpoch = false;
+		for (size_t i = 0; i < kFieldSlots; ++i)
+		{
+			if (fields_[i].from != 0 && motionValidity.Current(fields_[i].epoch))
+			{
+				hadCurrentEpoch = true;
+				break;
+			}
+		}
+		if (!hadCurrentEpoch || eraFirstFrom_ == 0 || aSequence < eraFirstFrom_)
 			eraFirstFrom_ = aSequence;
 		// Y1b: the old live record moves to the snapshot ring ONLY when the matcher's snapshot of exactly that pair succeeded
 		// (the ahead estimate's SnapshotForWarp, told through NoteSnapshotTaken) and it is still of the current epoch;
@@ -1033,6 +1042,17 @@ namespace VpMotion
 	{
 		if (from == 0 || to <= from || matcherSlot < 0 || epoch == 0 || !motionValidity.Current(epoch))
 			return;
+		bool hadCurrentEpoch = false;
+		for (size_t i = 0; i < kFieldSlots; ++i)
+		{
+			if (fields_[i].from != 0 && motionValidity.Current(fields_[i].epoch))
+			{
+				hadCurrentEpoch = true;
+				break;
+			}
+		}
+		if (!hadCurrentEpoch || eraFirstFrom_ == 0 || from < eraFirstFrom_)
+			eraFirstFrom_ = from;
 		// Remove any existing snapshot record occupying the same physical matcherSlot or the same `to` frame.
 		for (size_t i = 1; i < kFieldSlots; ++i)
 		{
@@ -1058,6 +1078,7 @@ namespace VpMotion
 		for (size_t i = 0; i < kFieldSlots; ++i)
 			fields_[i] = FieldRecord();
 		snapshotOfFrom_ = 0;
+		eraFirstFrom_ = 0;
 	}
 
 	void VectorEngine::DeclareAheadRingVram(uint32_t width, uint32_t height, int depth)
@@ -1204,39 +1225,48 @@ namespace VpMotion
 	{
 		if (!matcher_ || seq == 0)
 			return false;
-		// Y1a / Y1b: a pair in any slot (0 = live, 1..D = snapshot/ahead), keyed by `to`.
-		const size_t slot = FindByTo(seq);
-		if (slot >= kFieldSlots)
-			return false;
-		const FieldRecord& rec = fields_[slot];
-		if (!motionValidity.Current(rec.epoch))
-			return false;
+		// Y1a / Y1b: scan all slots (0 = live, 1..D = snapshot/ahead) keyed by `to`, taking the first that is both
+		// epoch-current and matcher-backed (matching AheadFieldSeqs) so a stale live slot never shadows a valid snapshot/ahead slot.
+		const FieldRecord* matched = nullptr;
 		pl_tex fwd = nullptr;
-		if (slot == 0)
+		for (size_t i = 0; i < kFieldSlots; ++i)
 		{
-			if (matcher_->LiveFieldFrom() != rec.from)
-				return false;
-			fwd = matcher_->LiveField();
+			const FieldRecord& rec = fields_[i];
+			if (rec.from == 0 || rec.to != seq || !motionValidity.Current(rec.epoch))
+				continue;
+			pl_tex candidate = nullptr;
+			if (i == 0)
+			{
+				if (matcher_->LiveFieldFrom() != rec.from)
+					continue;
+				candidate = matcher_->LiveField();
+			}
+			else
+			{
+				if (rec.matcherSlot < 0 || matcher_->SnapFieldFromAt(rec.matcherSlot) != rec.from)
+					continue;
+				candidate = matcher_->SnapFieldAt(rec.matcherSlot);
+			}
+			if (candidate != nullptr)
+			{
+				matched = &rec;
+				fwd = candidate;
+				break;
+			}
 		}
-		else
-		{
-			if (rec.matcherSlot < 0 || matcher_->SnapFieldFromAt(rec.matcherSlot) != rec.from)
-				return false;
-			fwd = matcher_->SnapFieldAt(rec.matcherSlot);
-		}
-		if (!fwd)
+		if (!matched || !fwd)
 			return false;
 		out = VerifiedField();
-		out.seq = rec.to;
-		out.pairFrom = rec.from;
-		out.pairTo = rec.to;
+		out.seq = matched->to;
+		out.pairFrom = matched->from;
+		out.pairTo = matched->to;
 		out.fwd = fwd;
 		out.gridW = fwd->params.w;
 		out.gridH = fwd->params.h;
 		out.blockSize = 16;          // one texel per 16x16 source block (MotionWarp::Field)
 		out.scaleToSourcePx = 1.0f;  // the field's vectors are in source px
 		// The stamp of the pair's later frame from the bound Indicator (resync on); unbound: the default Stamp.
-		motionValidity.StampAt(rec.to, out.stamp);
+		motionValidity.StampAt(matched->to, out.stamp);
 		return true;
 	}
 
@@ -1631,8 +1661,17 @@ namespace VpMotion
 		constexpr uint64_t kLongestKnownSpan = 64;
 		if (from == 0 || to <= from || to - from > kLongestKnownSpan)
 			return true;
-		// No estimate in the current epoch: where its run starts is unknown.
-		if (RecordLive().from == 0 || !motionValidity.Current(RecordLive().epoch) || from < eraFirstFrom_)
+		// No estimate in the current epoch (live or ahead): where its run starts is unknown.
+		bool hasCurrentField = false;
+		for (size_t i = 0; i < kFieldSlots; ++i)
+		{
+			if (fields_[i].from != 0 && motionValidity.Current(fields_[i].epoch))
+			{
+				hasCurrentField = true;
+				break;
+			}
+		}
+		if (!hasCurrentField || eraFirstFrom_ == 0 || from < eraFirstFrom_)
 			return true;
 		for (uint64_t k = from; k < to; ++k)
 			if (!motionValidity.PairValidAt(k, k + 1))

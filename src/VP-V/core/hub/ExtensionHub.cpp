@@ -799,6 +799,11 @@ namespace Dejudder
 			ring_.Push(key, slot);
 			return false;
 		}
+		if (legacyFrom_ != 0)
+		{
+			++misses;
+			legacyFrom_ = legacyTo_ = legacyEpoch_ = 0;
+		}
 		if (!steps.snapshot || !steps.snapshot())
 		{
 			Note(Reason::SnapshotFailed);
@@ -815,7 +820,6 @@ namespace Dejudder
 			Note(Reason::EstimateFailed);
 			return true;
 		}
-		legacyFrom_ = legacyTo_ = 0;
 		if (ring_.Push(key, slot) != VpMotion::LaneAhead::PushResult::Held)
 		{
 			Note(Reason::EstimateFailed);
@@ -853,7 +857,7 @@ namespace Dejudder
 			ring_.Discard(VpMotion::LaneAhead::DiscardCause::NextDiffers);
 		if (epochNow != 0 && c.after > c.next)
 		{
-			legacyFrom_ = legacyTo_ = 0;
+			legacyFrom_ = legacyTo_ = legacyEpoch_ = 0;
 			VpMotion::LaneAhead::EntryKey key;
 			key.from = c.next;
 			key.to = c.after;
@@ -864,6 +868,7 @@ namespace Dejudder
 		{
 			legacyFrom_ = c.next;
 			legacyTo_ = c.after;
+			legacyEpoch_ = epochNow;
 		}
 		Note(Reason::Ahead);
 		return true;
@@ -873,14 +878,20 @@ namespace Dejudder
 	{
 		if (!ring_.Empty())
 		{
-			const VpMotion::LaneAhead::EntryKey front = ring_.At(0);
-			if (next != 0 && front.from == source && front.to == next)
+			uint64_t targetEpoch = 0;
+			for (int i = 0; i < ring_.Held(); ++i)
 			{
-				ring_.Consume(source, next, front.epoch, nullptr);
+				if (ring_.At(i).from >= source)
+				{
+					targetEpoch = ring_.At(i).epoch;
+					break;
+				}
+			}
+			if (ring_.Consume(source, next, targetEpoch, nullptr))
+			{
 				++hits;
 				return true;
 			}
-			ring_.Discard(VpMotion::LaneAhead::DiscardCause::NextDiffers);
 			++misses;
 			++sequential;
 			return false;
@@ -895,7 +906,7 @@ namespace Dejudder
 				++misses;
 				++sequential;
 			}
-			legacyFrom_ = legacyTo_ = 0;
+			legacyFrom_ = legacyTo_ = legacyEpoch_ = 0;
 			return hit;
 		}
 		++sequential;
@@ -909,12 +920,22 @@ namespace Dejudder
 		if (legacyFrom_ != 0)
 		{
 			const bool pair = next != 0 && legacyFrom_ == source && legacyTo_ == next;
+			const bool hit = pair && epoch != 0 && legacyEpoch_ == epoch;
+			const uint64_t ep = legacyEpoch_;
+			legacyFrom_ = legacyTo_ = legacyEpoch_ = 0;
+			if (hit)
+			{
+				++hits;
+				consumedEpoch = ep;
+				if (outSlot != nullptr)
+					*outSlot = 0;
+				return true;
+			}
 			++misses;
 			if (pair)
 				++epochMisses;
 			++sequential;
 			consumedEpoch = 0;
-			legacyFrom_ = legacyTo_ = 0;
 			return false;
 		}
 		if (ring_.Empty())
@@ -967,13 +988,13 @@ namespace Dejudder
 
 	void AheadSchedule::Discard(VpMotion::LaneAhead::DiscardCause cause)
 	{
-		legacyFrom_ = legacyTo_ = 0;
+		legacyFrom_ = legacyTo_ = legacyEpoch_ = 0;
 		ring_.Discard(cause);
 	}
 
 	void AheadSchedule::Reset()
 	{
-		legacyFrom_ = legacyTo_ = 0;
+		legacyFrom_ = legacyTo_ = legacyEpoch_ = 0;
 		ring_.Reset();
 	}
 

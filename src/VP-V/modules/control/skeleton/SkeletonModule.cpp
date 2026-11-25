@@ -3207,12 +3207,14 @@ namespace Vpv
 				// usable (that is a FACT, EngineFieldFacts::globalValid, never a gate); a slot that already holds content is not claimed again.
 				// Uses TryLockClaim() so the render thread NEVER stalls waiting on the BACK thread (if busy, counted in renderTryBusy and retried).
 				// Without a sink pair (no sink, or the pair never landed) this path still publishes P2 itself when the producer made a usable global.
+				std::shared_ptr<P2LaneFeed> p2FeedKeep;
 				std::unique_lock<std::mutex> p2Claim;
 				if (n.id == VpSkeleton::kP2VectorPair)
 				{
-					if (const std::shared_ptr<P2LaneFeed> feed = std::atomic_load(&st.p2Feed))
+					p2FeedKeep = std::atomic_load(&st.p2Feed);
+					if (p2FeedKeep)
 					{
-						p2Claim = feed->TryLockClaim();
+						p2Claim = p2FeedKeep->TryLockClaim();
 						if (!p2Claim.owns_lock())
 						{
 							all = false;

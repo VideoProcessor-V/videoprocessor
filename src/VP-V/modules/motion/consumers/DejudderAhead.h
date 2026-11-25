@@ -108,7 +108,7 @@ namespace Dejudder
 		bool CheckConditions(const Conditions& c);
 
 		VpMotion::LaneAhead::AheadRing ring_;
-		uint64_t legacyFrom_ = 0, legacyTo_ = 0;   // depth-1 entry when NoteEpoch was not called (2-arg Consume compat)
+		uint64_t legacyFrom_ = 0, legacyTo_ = 0, legacyEpoch_ = 0;   // depth-1 entry when NoteEpoch==0 or after<=next
 		uint64_t epochNow = 0, consumedEpoch = 0;   // E12
 		unsigned long long epochMisses = 0;
 		Reason last = Reason::Off;
