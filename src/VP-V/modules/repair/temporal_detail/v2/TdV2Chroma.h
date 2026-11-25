@@ -2448,6 +2448,7 @@ namespace TdV2
 					const int K = static_cast<int>(cRefs.size());
 					std::array<std::vector<double>, kMaxBlendRefs> cellW;
 					std::array<std::vector<double>, kMaxBlendRefs> cellDiagC;
+					std::vector<double> cellOwnErrU(numCells, a2Stats.valid ? a2Stats.totalVar : 0.0);
 					for (int k = 0; k < K; ++k)
 					{
 						cellW[k].assign(numCells, 0.0);
@@ -2649,6 +2650,26 @@ namespace TdV2
 									cVec[k] = 0.0;
 							}
 
+							// PROD-CPU-GPU-BUG-6B: Per-cell coarse-band own-error variance U_L(block) for honest statistical limit.
+							// Unit-sum low-pass DC transfer = 1.0 (Rule 1), or per-cell mean(cVec) when enableA2eEmpiricalPrior is active.
+							double blockOwnU = a2Stats.valid ? a2Stats.totalVar : 0.0;
+							if (cfg_.enableA2eEmpiricalPrior)
+							{
+								double sumC = 0.0;
+								int nC = 0;
+								for (int k = 0; k < K; ++k)
+								{
+									if (!cRefs[k].isExactCopy)
+									{
+										sumC += (cVec[k] > 0.0 ? cVec[k] : 0.0);
+										++nC;
+									}
+								}
+								if (nC > 0)
+									blockOwnU = sumC / static_cast<double>(nC);
+							}
+							cellOwnErrU[cIdx] = blockOwnU;
+
 							const BlendSolveResult solved = SolveConvexWeights(C, cVec, K, kDefaultTraceRegScale, standIns, cfg_.solverMode);
 							if (solved.nonFiniteClosed) { nonFiniteCellFlag[cIdx] = 1u; continue; }
 							if (solved.singular) { singularCellFlag[cIdx] = 1u; continue; }
@@ -2675,9 +2696,8 @@ namespace TdV2
 						}
 					}
 
-					// TD-U3 (H-1 / Owner D3): Coarse-band statistical limit with ClampPixelBoundKappa(cfg_.pixelBoundKappa).
+					// TD-U3 (H-1 / Owner D3 / PROD-CPU-GPU-BUG-6B): Per-cell coarse-band statistical limit with ClampPixelBoundKappa(cfg_.pixelBoundKappa).
 					const double effKappa = ClampPixelBoundKappa(cfg_.pixelBoundKappa);
-					const double bandVar = a2Stats.valid ? (a2Stats.totalVar * ComputeBandWhiteNoiseGains().low) : 0.0;
 					for (int y = delivActive.y0; y < delivActive.y1; ++y)
 					{
 						const double ly = in.siting.CodedToLumaY(static_cast<double>(y), dSubY);
@@ -2719,7 +2739,7 @@ namespace TdV2
 								}
 							}
 							if (std::fabs(delta) > 0.0)
-								delta = ApplyTransformUnknownBound(delta, bandVar, standIns, effKappa);
+								delta = ApplyTransformUnknownBound(delta, cellOwnErrU[cIdx], standIns, effKappa);
 							outDelta.at(x, y) = (delta == 0.0) ? 0.0 : delta;
 						}
 					}
