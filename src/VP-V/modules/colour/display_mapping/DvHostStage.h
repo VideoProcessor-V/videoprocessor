@@ -474,10 +474,10 @@ public:
 		// Audit M-3 (2026-10-25): the reference conditions (curve, L6 / L0 mastering, L9, L11, the
 		// trims when they ran) for EVERY DV picture with DM - the CAM16 stage needs them with or
 		// without dv_trims.
-		if (p.dvTonePicture)
+		if (p.dvTonePicture) {
 			m_referenceConditions = DvDolbyStyle::Conditions(*p.dm, p.selection, m_toneDolbyRunning, p.libplaceboCurve);
-		else
-			m_referenceConditions = DvDolbyStyle::ReferenceConditions(); // no DV reference after DV -> HDR10 (bug hunt 37 S10)
+			if (!m_trimsWillRun || (p.collect && collected == 0)) m_referenceConditions.trimApplied = false;
+		} else m_referenceConditions = DvDolbyStyle::ReferenceConditions(); // no DV reference after DV -> HDR10 (bug hunt 37 S10)
 		if (!p.ran)
 			return;
 		std::string state = p.state;
