@@ -1198,6 +1198,10 @@ namespace Vpv
 				if (const std::shared_ptr<MemoHost> mh = memoHosts_.Find(host))
 					return mh->queueBits.load(std::memory_order_acquire);
 				std::lock_guard<std::mutex> lock(hostQueueMutex_);
+				if (const std::shared_ptr<HostState> st2 = hosts_.Find(host))
+					return st2->queueBits.load(std::memory_order_acquire);
+				if (const std::shared_ptr<MemoHost> mh2 = memoHosts_.Find(host))
+					return mh2->queueBits.load(std::memory_order_acquire);
 				for (const auto& kv : hostQueues_)
 					if (kv.first == host)
 						return kv.second;
@@ -1328,8 +1332,26 @@ namespace Vpv
 				if (memoCount == 0)
 				{
 					std::lock_guard<std::mutex> lock(hostQueueMutex_);
-					if (hostQueues_.size() == 1)
-						return Unpack(hostQueues_[0].second);
+					size_t hostCount2 = 0;
+					uint64_t soleBits = 0;
+					hosts_.ForEach([&](const void*, const std::shared_ptr<HostState>& st) {
+						soleBits = st->queueBits.load(std::memory_order_acquire);
+						++hostCount2;
+					});
+					if (hostCount2 == 1)
+						return Unpack(soleBits);
+					if (hostCount2 == 0)
+					{
+						size_t memoCount2 = 0;
+						memoHosts_.ForEach([&](const void*, const std::shared_ptr<MemoHost>& mh) {
+							soleBits = mh->queueBits.load(std::memory_order_acquire);
+							++memoCount2;
+						});
+						if (memoCount2 == 1)
+							return Unpack(soleBits);
+						if (memoCount2 == 0 && hostQueues_.size() == 1)
+							return Unpack(hostQueues_[0].second);
+					}
 				}
 			}
 			return Unpack(queueBits_.load(std::memory_order_acquire));
@@ -1739,6 +1761,7 @@ namespace Vpv
 				PublishLookAheadWalk(f.host, f.value);   // the host passes the motion look-ahead depth (frames) here: the one queue term it delivers
 				NotePathway(f.host, f.code != 0 ? 1 : 0);   // 15c-c8: kept for the demand-driven reconciles (never a raise in Original)
 				Reconcile(f.host, f.code != 0 ? 1 : 0);   // code != 0: the Original pathway
+				PublishLookAheadWalk(f.host, f.value);   // change-only CAS no-op normally; preserves f.value if Reconcile recycled a dead-renderer HostState
 				break;
 			case RE::Lifecycle::QueueDepth:
 			{
