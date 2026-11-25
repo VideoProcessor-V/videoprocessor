@@ -195,7 +195,7 @@ namespace VpMotion
 		// The fill's call: a decline also keeps its words for the status segment's "(last: ...)" (BBP-A-COUNTS-CTRLALTD).
 		void NoteP2CpuFormRead(bool served, const std::string& why) const override;
 		std::string P2CpuFormLastDecline() const;
-		unsigned long long P2CpuFormServed() const { return p2CpuFormServed_.load(std::memory_order_relaxed); }
+		unsigned long long P2CpuFormServed() const;
 		unsigned long long P2CpuFormDeclined() const { return p2CpuFormDeclined_.load(std::memory_order_relaxed); }
 		unsigned long long ShallowBackwardPairs() const { return vectorShallowBackwardPairs.load(std::memory_order_relaxed); }
 		// The VRAM governor's release of the motion engine (the de-judder's keeper feeds it; render thread).

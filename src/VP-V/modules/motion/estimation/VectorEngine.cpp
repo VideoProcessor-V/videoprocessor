@@ -1902,6 +1902,11 @@ namespace VpMotion
 		return p2CpuFormLastWhy_;
 	}
 
+	unsigned long long VectorEngine::P2CpuFormServed() const
+	{
+		return p2CpuFormServed_.load(std::memory_order_relaxed);
+	}
+
 	void VectorEngine::NoteFlowSourceSize(int width, int height, int targetEngineW, int targetEngineH)
 	{
 		std::lock_guard<std::mutex> lock(flowMutex_);

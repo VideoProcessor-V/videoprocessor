@@ -1233,9 +1233,10 @@ namespace FallbackCatalog
 	// CF1-G7b residual (gate G1 MUST-5): on a frame where appearance does not act, ambient_adapt is given back to the
 	// render black and the SDR lift, but the host's LED intent evaluation is gated on the SAVED ambient_adapt (off while
 	// appearance is configured), so the LED shadow cap's ambient term is not refreshed. Listed while that lasts.
-	inline Decision AmbientAdaptLedShadowCapSaved(bool stale)
-	{
-		return stale ? Engaged("room-light: LED shadow cap", "room-light: LED shadow cap uses saved ambient_adapt (off) while ambient_adapt is given back")
-		             : Released("room-light: LED shadow cap");
-	}
+	inline Decision AmbientAdaptLedShadowCapSaved(bool stale) {
+		return stale ? Engaged("room-light: LED shadow cap", "room-light: LED shadow cap uses saved ambient_adapt (off) while ambient_adapt is given back") : Released("room-light: LED shadow cap"); }
+	// U10 C1: pair-global estimation failed; motion estimation aborts for this frame (visible, never log-only).
+	inline Decision PairGlobalUnavailable(bool unavailable, const std::string& detail = std::string()) {
+		return unavailable ? Engaged("motion.pair_global_unavailable", "pair global unavailable" + (detail.empty() ? std::string() : ": " + detail) + "; motion estimation aborted for this frame")
+		                   : Released("motion.pair_global_unavailable"); }
 }

@@ -73,6 +73,7 @@ namespace FallbackPlainText
 			{ "composed vectors", "Motion followed across several frames reaches fewer frames than asked; the steps that use it work from fewer frames" },
 			{ "source resolution look-ahead", "Some frames had their source resolution judged on arrival only" },
 			{ "skeleton_admission", "In this low-latency mode the temporal detail results are not made, so the steps that read them run without them" },
+			{ "motion.pair_global_unavailable", "Whole-frame motion could not be measured for this frame, so motion estimation was skipped" },
 		};
 		for (const Entry& e : table)
 			if (id == e.id)

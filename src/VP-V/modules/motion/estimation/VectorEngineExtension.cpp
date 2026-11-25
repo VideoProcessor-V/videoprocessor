@@ -8,6 +8,7 @@
 #include <VP-V/modules/motion/estimation/P3FieldFill.h>
 #include <VP-V/modules/motion/estimation/VectorEngine.h>
 #include <VP-V/modules/motion/estimation/VectorEngineInterface.h>
+#include <VP-V/modules/motion/estimation/global_model/PairGlobalFill.h>
 
 #include <cstring>
 #include <memory>
@@ -61,17 +62,25 @@ namespace VpMotion
 
 	bool VectorEngineExtension::OnFrame(RE::FrameContext& c)
 	{
-		if (c.phase != RE::FramePhase::Entrance || p3Registered_.load(std::memory_order_acquire)
+		if (c.phase != RE::FramePhase::Entrance
+			|| (p3Registered_.load(std::memory_order_acquire) && pairGlobalRegistered_.load(std::memory_order_acquire))
 			|| Vpv::Hub::ExtensionHub::Instance().OriginalPathway(c.host))
 			return false;
-		if (TryRegisterP3FieldFill())
+		if (!p3Registered_.load(std::memory_order_acquire) && TryRegisterP3FieldFill())
 			p3Registered_.store(true, std::memory_order_release);
+		if (!pairGlobalRegistered_.load(std::memory_order_acquire) && TryRegisterPairGlobalFills())
+			pairGlobalRegistered_.store(true, std::memory_order_release);
 		return false;
 	}
 
 	bool VectorEngineExtension::P3FieldRegistered() const
 	{
 		return p3Registered_.load(std::memory_order_acquire);
+	}
+
+	bool VectorEngineExtension::PairGlobalRegistered() const
+	{
+		return pairGlobalRegistered_.load(std::memory_order_acquire);
 	}
 
 	void RegisterVectorEngineExtension()
