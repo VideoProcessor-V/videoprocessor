@@ -619,7 +619,7 @@ bool LibplaceboVideoRenderer::Impl::EstimateAhead(uint64_t sourceSequence, uint6
 	steps.snapshot = [this, timing]()
 	{
 		if (timing) timing->BeginStage(AlphaD3D11FrameGpuTimer::Stage::CoreRender);
-		const bool done = dejudder->SnapshotForWarp();
+		const bool done = dejudder->SnapshotForWarp(); if (done) vectorEngine.NoteSnapshotTaken(dejudderLiveFieldFrom);
 		if (timing) timing->EndStage();
 		return done;
 	};

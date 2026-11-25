@@ -74,6 +74,8 @@ namespace Vpv
 			using VpSkeleton::kLeadWindowSeconds;     // source time the lane-lead feed keeps its lowest value over (core/QueueFrames.h)
 			using VpSkeleton::kLeadPeakHoldSeconds;   // the lane lead's best value is held this long, then decays to the lead in use
 			constexpr size_t kFactsRing = 64;           // engine-field facts kept (frames)
+			// Rule 1 derivation: matches VectorEngine::kFieldSlots = 1 + LaneAhead::kAheadCeilingLead (7: 1 live + D ahead slots).
+			constexpr size_t kFeedPendingRing = 1u + static_cast<size_t>(VpMotion::LaneAhead::kAheadCeilingLead);
 			constexpr size_t kSceneRunRing = 8;         // U7 fade runs kept (frames) and the rebuild depth on a ring miss; the law itself has no
 			                                            // frame count, but a REDUCED rebuild (no ring entry joined) starts its run at most 7 pairs back
 			                                            // (counted: sceneRunReduced, the "Skeleton scene" status line)
@@ -575,10 +577,18 @@ namespace Vpv
 			uint64_t feedEra = 0;
 			bool feedHadEra = false;
 			uint64_t feedLastEngineSeq = 0;      // the last field seq handled (published, slipped or given up)
-			uint64_t feedPendingSeq = 0;         // a field whose slots are still being published (0 = none)
-			unsigned feedPendingMask = 0;        // bit 1 P2, 2 P2m, 4 P3: slots done
-			unsigned feedAttempts = 0;
-			EngineFieldFacts feedPending;
+			// Y1b: the PENDING RING, oldest first (published ascending): fields whose slots are still being published. mask: bit 1 P2, 2 P2m, 4 P3
+			// done. A full ring pushes the oldest out (FeedCounters::overwritten).
+			struct FeedPendingEntry
+			{
+				uint64_t seq = 0;
+				unsigned mask = 0;
+				unsigned attempts = 0;
+				EngineFieldFacts facts;
+			};
+			FeedPendingEntry feedRing[kFeedPendingRing];
+			size_t feedRingCount = 0;
+			std::shared_ptr<P2LaneFeed> p2Feed;  // Y1b: std::atomic_load / atomic_store; installed on st.engine once graph holds P2; null = none
 			EngineFieldFacts facts[kFactsRing];
 
 			// The live lane-lead feed (CollectAhead phase; any thread that delivers it). The queue size jitters by a frame or two: the lead
@@ -993,6 +1003,8 @@ namespace Vpv
 			MotionValidity::State::ConfirmedCutReader().store(&ConfirmedCutAt, std::memory_order_release);
 			MotionValidity::State::ConfirmedCutHostReader().store(&ConfirmedCutAtHost, std::memory_order_release);
 		}
+
+		constexpr size_t P2LaneFeed::kPendingCap;
 
 		SkeletonModule::~SkeletonModule()
 		{
@@ -2017,6 +2029,10 @@ namespace Vpv
 			}
 			if (st->engine != nullptr && gpuAlive && st->fitWantedPushed)
 				st->engine->SetCameraFitWanted(false);   // the engine is still valid at GpuReleased / Shutdown; not for a dead renderer's address
+			const std::shared_ptr<P2LaneFeed> prevFeed = std::atomic_load(&st->p2Feed);
+			if (prevFeed && st->engine != nullptr && gpuAlive)
+				st->engine->SetP2PublishSink(nullptr);   // returns only when no sink call is in flight: the feed may go after this
+			std::atomic_store(&st->p2Feed, std::shared_ptr<P2LaneFeed>());
 			st->engine = nullptr;
 			st->fitWantedPushed = false;
 			st->feedNeeded = false;
@@ -2026,7 +2042,7 @@ namespace Vpv
 			st->entranceLiveDriven.store(false, std::memory_order_release);
 			st->shownEntranceLiveDriven = false;
 			st->lastDisplayFactsKey.clear();
-			st->feedPendingSeq = 0;
+			st->feedRingCount = 0;
 			StopBundle(*st);
 			ReleaseDispatcher(*st, gpuAlive);   // 70b G5: the GPU textures go with the lane (GpuReleased / switched off)
 			{
@@ -2442,6 +2458,13 @@ namespace Vpv
 			return st ? st->feed : FeedCounters();
 		}
 
+		P2LaneFeed::Counters SkeletonModule::P2FeedCountersOf(const void* host) const
+		{
+			const std::shared_ptr<HostState> st = hosts_.Find(host);
+			const std::shared_ptr<P2LaneFeed> feed = st ? std::atomic_load(&st->p2Feed) : nullptr;
+			return feed ? feed->Read() : P2LaneFeed::Counters();
+		}
+
 		bool SkeletonModule::EngineFieldFactsOf(const void* host, uint64_t seq, EngineFieldFacts& out) const
 		{
 			out = EngineFieldFacts();
@@ -2658,8 +2681,13 @@ namespace Vpv
 		{
 			out = SceneFacts();
 			const std::shared_ptr<HostState> st = hosts_.Find(host);
-			const std::shared_ptr<Bundle> b = st ? std::atomic_load(&st->bundle) : nullptr;
-			if (!b)
+			if (!st)
+			{
+				out.why = "unknown renderer";
+				return false;
+			}
+			const std::shared_ptr<Bundle> b = std::atomic_load(&st->bundle);
+			if (!b || !b->memo)
 			{
 				out.why = "no analysis lane";
 				return false;
@@ -2709,9 +2737,9 @@ namespace Vpv
 				// seq - 1 has had its render-order fill (it is not ahead of the seal itself).
 				const bool prevRendered = ahead && seq > 1 && !b->memo->AheadOfSeal(seq - 1);
 				SceneFacts f;
-				if (!b)
+				if (!b || !b->memo)
 					f.why = "no analysis lane";
-				if (!b || !SceneFactsFor(st, *b, seq, f, &done, ahead) || !f.valid)
+				if (!b || !b->memo || !SceneFactsFor(st, *b, seq, f, &done, ahead) || !f.valid)
 				{
 					if (answer)
 						answer->why = f.why;
@@ -2997,8 +3025,20 @@ namespace Vpv
 			const std::shared_ptr<Bundle> b = std::atomic_load(&st.bundle);
 			if (!b)
 				return;
-			if (!st.engine)
-				st.engine = engineProvider_ ? engineProvider_(st.host) : DefaultEngine(st.host);
+			VpMotion::IVectorEngine* nextEngine = engineProvider_ ? engineProvider_(st.host) : (st.engine ? st.engine : DefaultEngine(st.host));
+			if (nextEngine != st.engine)
+			{
+				const std::shared_ptr<P2LaneFeed> prevFeed = std::atomic_load(&st.p2Feed);
+				if (prevFeed && st.engine != nullptr)
+					st.engine->SetP2PublishSink(nullptr);   // uninstall sink BEFORE releasing p2Feed or swapping engine
+				std::atomic_store(&st.p2Feed, std::shared_ptr<P2LaneFeed>());
+				if (st.engine != nullptr && st.fitWantedPushed)
+				{
+					st.engine->SetCameraFitWanted(false);
+					st.fitWantedPushed = false;
+				}
+				st.engine = nextEngine;
+			}
 			VpMotion::IVectorEngine* e = st.engine;
 			if (!e)
 			{
@@ -3006,6 +3046,33 @@ namespace Vpv
 					++st.feed.noEngine;
 				return;
 			}
+			// Y1b: the P2 publish sink, once the graph holds P2. The engine calls it on its producer's worker as each pair lands; pairs it had to
+			// park (inputs / ring not ready) are retried here, at Begin and AfterRender, with zero render-thread wait.
+			std::shared_ptr<P2LaneFeed> feed = std::atomic_load(&st.p2Feed);
+			if (!feed)
+			{
+				const std::shared_ptr<VpSkeleton::LaneState> ls = b->lane.State();
+				if (ls && ls->graph.valid && ls->table && ls->table->Find(VpSkeleton::kP2VectorPair))
+				{
+					const std::weak_ptr<HostState> weak = hosts_.Find(st.host);
+					feed = std::make_shared<P2LaneFeed>(
+						[weak]() {
+							const std::shared_ptr<HostState> s = weak.lock();
+							const std::shared_ptr<Bundle> cur = s ? std::atomic_load(&s->bundle) : nullptr;
+							if (!cur)
+								return VpSkeleton::LaneLease();
+							VpSkeleton::LaneLease l = cur->lane.Lease(VpSkeleton::kP2VectorPair);
+							if (!l.table || !l.table->Find(VpSkeleton::kP2VectorPair))
+								return VpSkeleton::LaneLease();
+							return l;
+						},
+						[e]() { return e->P2SlotGeneration(); });
+					std::atomic_store(&st.p2Feed, feed);
+					e->SetP2PublishSink([feed](const VpMotion::P2Published& p) { feed->Offer(p); });
+				}
+			}
+			if (feed)
+				feed->Drain();
 			const uint64_t era = e->FieldEra();
 			if (!st.feedHadEra || era != st.feedEra)
 			{
@@ -3014,23 +3081,39 @@ namespace Vpv
 				st.feedHadEra = true;
 				st.feedEra = era;
 				st.feedLastEngineSeq = 0;   // the numbering restarted: what was pending belongs to the old era
-				st.feedPendingSeq = 0;
+				st.feedRingCount = 0;
 			}
-			if (!retryOnly)
+			// Y1b / Z3 (N#5): query ALL valid engine field entries via AheadFieldSeqs (falling back to LatestVerifiedFieldSeq when
+			// AheadFieldSeqs returns 0, e.g. fakes that do not override AheadFieldSeqs) and enqueue every unseen entry ascending.
 			{
-				const uint64_t s = e->LatestVerifiedFieldSeq();
-				if (s != 0 && s != st.feedLastEngineSeq && s != st.feedPendingSeq)
+				uint64_t seqs[kFeedPendingRing] = {};
+				size_t seqCount = e->AheadFieldSeqs(seqs, kFeedPendingRing);
+				if (seqCount == 0)
 				{
+					const uint64_t latest = e->LatestVerifiedFieldSeq();
+					if (latest != 0)
+						seqs[seqCount++] = latest;
+				}
+				for (size_t idx = 0; idx < seqCount; ++idx)
+				{
+					const uint64_t s = seqs[idx];
+					if (s == 0 || s <= st.feedLastEngineSeq)
+						continue;
+					bool queued = false;
+					for (size_t i = 0; i < st.feedRingCount; ++i)
+						queued = queued || st.feedRing[i].seq == s;
+					if (queued)
+						continue;
 					VpMotion::VerifiedField f;
 					if (!e->FieldOf(s, f))
 					{
 						++st.feed.noField;
-						st.feedLastEngineSeq = s;
+						st.feedLastEngineSeq = (std::max)(st.feedLastEngineSeq, s);
 					}
 					else if (e->PairSpansSlip(f.pairFrom, f.pairTo))
 					{
 						++st.feed.slip;   // a pair across a gap / resync: no field of it is published, its readers fall back
-						st.feedLastEngineSeq = s;
+						st.feedLastEngineSeq = (std::max)(st.feedLastEngineSeq, s);
 					}
 					else
 					{
@@ -3051,32 +3134,47 @@ namespace Vpv
 							ff.globalX = g.x;
 							ff.globalY = g.y;
 						}
-						st.feedPending = ff;
-						st.feedPendingSeq = s;
-						st.feedPendingMask = 0;
-						st.feedAttempts = 0;
+						if (st.feedRingCount == kFeedPendingRing)
+						{
+							// The oldest field goes (it never published): counted, and the numbering moves past it.
+							++st.feed.overwritten;
+							st.feedLastEngineSeq = (std::max)(st.feedLastEngineSeq, st.feedRing[0].seq);
+							for (size_t i = 1; i < st.feedRingCount; ++i)
+								st.feedRing[i - 1] = st.feedRing[i];
+							--st.feedRingCount;
+						}
+						HostState::FeedPendingEntry& slot = st.feedRing[st.feedRingCount++];
+						slot = HostState::FeedPendingEntry();
+						slot.seq = s;
+						slot.facts = ff;
 					}
 				}
 			}
-			if (st.feedPendingSeq == 0)
-				return;
-			++st.feedAttempts;
-			unsigned mask = st.feedPendingMask;
-			const bool all = PublishEngineSlots(st, *b, st.feedPending, mask);
-			st.feedPendingMask = mask;
-			if (all)
+			// Oldest first; a field that cannot finish yet holds the newer ones back (published ascending) until it is done or given up.
+			while (st.feedRingCount != 0)
 			{
-				st.facts[static_cast<size_t>(st.feedPendingSeq % kFactsRing)] = st.feedPending;
-				++st.feed.published;
-				st.feed.lastSeq = st.feedPendingSeq;
-				st.feedLastEngineSeq = st.feedPendingSeq;
-				st.feedPendingSeq = 0;
-			}
-			else if (st.feedAttempts >= kFeedRetries)
-			{
-				++st.feed.abandoned;
-				st.feedLastEngineSeq = st.feedPendingSeq;
-				st.feedPendingSeq = 0;
+				HostState::FeedPendingEntry& head = st.feedRing[0];
+				++head.attempts;
+				unsigned mask = head.mask;
+				const bool all = PublishEngineSlots(st, *b, head.facts, mask);
+				head.mask = mask;
+				if (all)
+				{
+					st.facts[static_cast<size_t>(head.seq % kFactsRing)] = head.facts;
+					++st.feed.published;
+					st.feed.lastSeq = head.seq;
+					st.feedLastEngineSeq = (std::max)(st.feedLastEngineSeq, head.seq);
+				}
+				else if (head.attempts >= kFeedRetries)
+				{
+					++st.feed.abandoned;
+					st.feedLastEngineSeq = (std::max)(st.feedLastEngineSeq, head.seq);
+				}
+				else
+					break;
+				for (size_t i = 1; i < st.feedRingCount; ++i)
+					st.feedRing[i - 1] = st.feedRing[i];
+				--st.feedRingCount;
 			}
 		}
 
@@ -3104,12 +3202,37 @@ namespace Vpv
 					continue;
 				if ((doneMask & bit) != 0)
 					continue;
-				if (n.id == VpSkeleton::kP2VectorPair && !facts.globalValid)
-				{
-					doneMask |= bit;   // the NVOF producer made no pair for this frame: the slot stays empty (its readers fall back)
-					continue;
-				}
 				VpSkeleton::SlotSet& set = table.At(i);
+				// Y1b: P2 is SKIP-IF-PRESENT. The publish sink (P2LaneFeed) makes the slot as the pair lands, whether or not the pair's global is
+				// usable (that is a FACT, EngineFieldFacts::globalValid, never a gate); a slot that already holds content is not claimed again.
+				// Uses TryLockClaim() so the render thread NEVER stalls waiting on the BACK thread (if busy, counted in renderTryBusy and retried).
+				// Without a sink pair (no sink, or the pair never landed) this path still publishes P2 itself when the producer made a usable global.
+				std::shared_ptr<P2LaneFeed> p2FeedKeep;
+				std::unique_lock<std::mutex> p2Claim;
+				if (n.id == VpSkeleton::kP2VectorPair)
+				{
+					p2FeedKeep = std::atomic_load(&st.p2Feed);
+					if (p2FeedKeep)
+					{
+						p2Claim = p2FeedKeep->TryLockClaim();
+						if (!p2Claim.owns_lock())
+						{
+							all = false;
+							continue;
+						}
+					}
+					if (set.HonouredOf(seq, nullptr))
+					{
+						facts.p2Published = true;
+						doneMask |= bit;
+						continue;
+					}
+					if (!facts.globalValid)
+					{
+						doneMask |= bit;   // the NVOF producer made no pair for this frame: the slot stays empty (its readers fall back)
+						continue;
+					}
+				}
 				// The inputs are pinned BEFORE the claim (into a scratch header): a claim that is then abandoned leaves the slot Abandoned for
 				// this frame, and the retry would find it Stale (a lost frame, counted as a claim failure: the engine feed's retry for
 				// missing inputs could never succeed once a first attempt had claimed). Nothing is claimed while an input is missing.
@@ -3844,8 +3967,23 @@ namespace Vpv
 				++st.dropsApplied;
 			}
 
-			if ((st.feedNeeded || st.wantsCameraFit) && !st.engine)
-				st.engine = engineProvider_ ? engineProvider_(st.host) : DefaultEngine(st.host);
+			if ((st.feedNeeded || st.wantsCameraFit))
+			{
+				VpMotion::IVectorEngine* nextEngine = engineProvider_ ? engineProvider_(st.host) : (st.engine ? st.engine : DefaultEngine(st.host));
+				if (nextEngine != st.engine)
+				{
+					const std::shared_ptr<P2LaneFeed> prevFeed = std::atomic_load(&st.p2Feed);
+					if (prevFeed && st.engine != nullptr)
+						st.engine->SetP2PublishSink(nullptr);
+					std::atomic_store(&st.p2Feed, std::shared_ptr<P2LaneFeed>());
+					if (st.engine != nullptr && st.fitWantedPushed)
+					{
+						st.engine->SetCameraFitWanted(false);
+						st.fitWantedPushed = false;
+					}
+					st.engine = nextEngine;
+				}
+			}
 			// Both directions: declaring the camera fit starts the engine (VectorDemand::Consumer::CameraFit), and WITHDRAWING the whole external
 			// demand (feedNeeded and wantsCameraFit both false) must tell it so too. The push used to sit inside the "something is wanted" branch,
 			// so the last demand going away left the engine running the fit for nobody.
@@ -3861,7 +3999,20 @@ namespace Vpv
 			uint32_t wait = 0;
 			for (int guard = 0; guard < 64 && (wait = b->lane.DeterministicWaitUs(seq, 0)) > 0; ++guard)
 				std::this_thread::sleep_for(std::chrono::microseconds(wait));   // N1: only a deterministic run or an explicit test wait
-			b->lane.OnRenderStart(seq, 0);
+			{
+				// Y1b: per-product ahead counters from the seal's frame results (by node id; P2 / P3 only; nothing is added to the lane).
+				const std::vector<VpSkeleton::ProductFrameResult>& results = b->lane.OnRenderStart(seq, 0);
+				for (const VpSkeleton::ProductFrameResult& r : results)
+				{
+					if (r.pending || r.late)
+						continue;
+					const bool ahead = r.final == VpSkeleton::SealOutcome::Sealed && !r.liveFilled;
+					if (r.id == VpSkeleton::kP2VectorPair)
+						++(ahead ? st.feed.p2Ahead : st.feed.p2Absent);
+					else if (r.id == VpSkeleton::kP3AnalysisField)
+						++(ahead ? st.feed.p3Ahead : st.feed.p3Absent);
+				}
+			}
 			b->memo->SetRenderThread(std::this_thread::get_id());   // L-CORE s5: the render thread is declared at every Begin
 			b->memo->OnSeal(seq);   // B1: the previous frame's memo spots are released (lifetime = frame)
 			{
@@ -4011,6 +4162,19 @@ namespace Vpv
 				addDecision(FallbackCatalog::SkeletonRegulatorInput(hasBundle && !st.timing.measured, st.timing.noted, st.timing.lastNotedMs));
 addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleton::KnownUndeclaredVramUsers()) : std::string()));   // MV7 standing gap
 				addDecision(FallbackCatalog::SkeletonEngineFeed(st.feedNeeded && st.engine == nullptr));   // SK-W stage D: P2m / P3 cannot be published
+				{
+					// Z3 (N#5): visible fallback whenever ahead P3 or P2 entries were overwritten or abandoned before publish.
+					const std::shared_ptr<P2LaneFeed> p2f = std::atomic_load(&st.p2Feed);
+					const P2LaneFeed::Counters p2c = p2f ? p2f->Read() : P2LaneFeed::Counters();
+					std::string aheadWhy;
+					if (st.feed.overwritten > 0)
+						aheadWhy += (aheadWhy.empty() ? "" : "; ") + std::to_string(st.feed.overwritten) + " ahead P3 field(s) overwritten before publish";
+					if (st.feed.abandoned > 0)
+						aheadWhy += (aheadWhy.empty() ? "" : "; ") + std::to_string(st.feed.abandoned) + " ahead P3 field(s) abandoned";
+					if (p2c.overwritten > 0)
+						aheadWhy += (aheadWhy.empty() ? "" : "; ") + std::to_string(p2c.overwritten) + " ahead P2 pair(s) overwritten before publish";
+					addDecision(FallbackCatalog::MotionFieldAhead(!aheadWhy.empty(), aheadWhy));
+				}
 				addDecision(FallbackCatalog::SkeletonSceneVeto(vetoOff));   // U7-accuracy Q5: the cut veto's reach, never silent
 				addDecision(FallbackCatalog::SkeletonSceneNoGrid(st.sceneNoGrid.load(std::memory_order_relaxed)));   // U7 v2 no-grid fallback
 				// MV7 guard: a module that holds video memory is active but declared none of it: visible, never silent.
@@ -4185,6 +4349,23 @@ addDecision(FallbackCatalog::SkeletonVramKnown(hasBundle ? std::string(VpSkeleto
 						static_cast<unsigned long long>(st.externalConsumers), static_cast<unsigned long long>(st.externalDuplicates),
 						st.wantsCameraFit ? "wanted" : "not wanted");
 					full.push_back(feedLine);
+					{
+						// Y1b: P2 sink + ahead counters (CPU-readable: P2FeedCountersOf / FeedCountersOf).
+						const std::shared_ptr<P2LaneFeed> feed = std::atomic_load(&st.p2Feed);
+						const P2LaneFeed::Counters pc = feed ? feed->Read() : P2LaneFeed::Counters();
+						char aheadLine[576] = {};
+						std::snprintf(aheadLine, sizeof(aheadLine),
+							"Skeleton motion products ahead: P2 %llu sealed ahead, %llu absent; P3 %llu ahead, %llu absent; P2 sink %s: %llu published, %llu parked (%llu waiting), %llu stale, %llu overwritten, %llu dropped (generation), %llu without a lane, %llu busy; %llu field(s) pushed out of the pending ring",
+							static_cast<unsigned long long>(st.feed.p2Ahead), static_cast<unsigned long long>(st.feed.p2Absent),
+							static_cast<unsigned long long>(st.feed.p3Ahead), static_cast<unsigned long long>(st.feed.p3Absent),
+							feed ? "installed" : "not installed", static_cast<unsigned long long>(pc.published),
+							static_cast<unsigned long long>(pc.parked), static_cast<unsigned long long>(pc.pending),
+							static_cast<unsigned long long>(pc.stale), static_cast<unsigned long long>(pc.overwritten),
+							static_cast<unsigned long long>(pc.generationDropped), static_cast<unsigned long long>(pc.noLease),
+							static_cast<unsigned long long>(pc.renderTryBusy),
+							static_cast<unsigned long long>(st.feed.overwritten));
+						full.push_back(aheadLine);
+					}
 					const std::string claimNote = ClaimFailedNote(st.feed.claimFailed, st.queueUsed.laneLead == 0);
 					if (!claimNote.empty())
 						full.push_back(claimNote);

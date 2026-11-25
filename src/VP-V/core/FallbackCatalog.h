@@ -1235,9 +1235,10 @@ namespace FallbackCatalog
 	// appearance is configured), so the LED shadow cap's ambient term is not refreshed. Listed while that lasts.
 	inline Decision AmbientAdaptLedShadowCapSaved(bool stale) { return stale ? Engaged("room-light: LED shadow cap", "room-light: LED shadow cap uses saved ambient_adapt (off) while ambient_adapt is given back") : Released("room-light: LED shadow cap"); }
 	// U10 C1: pair-global estimation failed; motion estimation aborts for this frame (visible, never log-only).
-	inline Decision PairGlobalUnavailable(bool unavailable, const std::string& detail = std::string()) {
-		return unavailable ? Engaged("motion.pair_global_unavailable", "pair global unavailable" + (detail.empty() ? std::string() : ": " + detail) + "; motion estimation aborted for this frame")
-		                   : Released("motion.pair_global_unavailable"); }
+	inline Decision PairGlobalUnavailable(bool unavailable, const std::string& detail = std::string()) { return unavailable ? Engaged("motion.pair_global_unavailable", "pair global unavailable" + (detail.empty() ? std::string() : ": " + detail) + "; motion estimation aborted for this frame") : Released("motion.pair_global_unavailable"); }
+	// Z3 (N#5): motion ahead field ring degraded (ahead pairs overwritten or abandoned before publish).
+	inline Decision MotionFieldAhead(bool degraded, const std::string& reason = std::string()) {
+		return degraded ? Engaged("motion_field_ahead", reason.empty() ? std::string("ahead field ring degraded") : reason) : Released("motion_field_ahead"); }
 	// CF-DV P5 (colour.dm_pre): post-decode I-only DV debander requested (dv_post_decode_deband = auto) but cannot act.
 	inline Decision DvPostDecodeDeband(bool engaged, const std::string& reason = std::string()) { return engaged ? Engaged("DV deband", reason.empty() ? std::string("off (fallback)") : reason) : Released("DV deband"); }
 }

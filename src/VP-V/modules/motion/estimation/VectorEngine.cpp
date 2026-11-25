@@ -8,6 +8,7 @@
 #include <VP-V/modules/control/diagnostics/DiagnosticHistory.h>
 #include <VP-V/modules/motion/consumers/DejudderPolicy.h>
 #include <libplacebo/d3d11.h>
+#include <VP-V/modules/motion/estimation/LaneAheadPolicy.h>
 #include <VP-V/modules/motion/estimation/MotionAheadProducer.h>
 #include <VP-V/modules/motion/estimation/OnDemandIssue.h>
 #include <VP-V/modules/motion/estimation/MotionRecordPublish.h>
@@ -20,6 +21,7 @@
 #include <VP-V/modules/control/skeleton/SkeletonAccess.h>
 #include <VP-V/modules/motion/estimation/VectorEngineFallbackSync.h>
 #include <VP-V/core/QueueWindow.h>
+#include <VP-V/core/VramUsers.h>
 
 #include <algorithm>
 #include <chrono>
@@ -734,6 +736,7 @@ namespace VpMotion
 		pending = motionValidity.Consume(motionValiditySeen);
 		if (!pending.changed)
 			return false;
+		ResetFieldRecords();
 		motionInvalidations += pending.invalidations;
 		// GEM-110 (VE-SCALE): a source format or rebase change invalidates the remembered source / target raster size so FlowOf never
 		// applies a pre-switch size (e.g. 1080p) to a post-switch pair (e.g. 4K) even when both share the same engine size.
@@ -887,8 +890,14 @@ namespace VpMotion
 		p1AheadDepth_ = 0;
 	}
 
+	constexpr size_t VectorEngine::kFieldSlots;
+	static_assert(VectorEngine::kFieldSlots == 1u + static_cast<size_t>(LaneAhead::kAheadCeilingLead),
+		"VectorEngine::kFieldSlots must equal 1 + LaneAhead::kAheadCeilingLead");
+
 	VectorEngine::~VectorEngine()
 	{
+		p2Slot->SetObserver(VpMotion::P2Slot::Observer());   // Y1b: no producer call may reach this engine after here
+		ReleaseAheadRingVram();   // Z3 (N#5): withdraw any declared ahead field ring VRAM on teardown
 		ClearP1AheadDemand();
 		// Contract (SetPreEstimateHook): the consumer clears its hook before the engine goes; say so if it did not.
 		if (preEstimateHook_.load(std::memory_order_acquire) != nullptr)
@@ -957,6 +966,7 @@ namespace VpMotion
 				engine.motionProducerStopLogged = false;
 				engine.motionProducerStartRetry = MotionAhead::ProducerRecovery();
 				engine.NoteFlowSourceSize(0, 0, 0, 0);
+				engine.ReleaseAheadRingVram();
 				if (producer)
 					engine.motionEnginePairsBase += producer->GetStats().pairs;
 			});
@@ -977,11 +987,165 @@ namespace VpMotion
 		// recorded (the old record stays and is no longer current either).
 		if (epochAtChoice == 0 || epochAtChoice != motionValidity.Epoch())
 			return;
-		if (epochAtChoice != field_.epoch || field_.from == 0)
+		FieldRecord& live = RecordLive();
+		bool hadCurrentEpoch = false;
+		for (size_t i = 0; i < kFieldSlots; ++i)
+		{
+			if (fields_[i].from != 0 && motionValidity.Current(fields_[i].epoch))
+			{
+				hadCurrentEpoch = true;
+				break;
+			}
+		}
+		if (!hadCurrentEpoch || eraFirstFrom_ == 0 || aSequence < eraFirstFrom_)
 			eraFirstFrom_ = aSequence;
-		field_.from = aSequence;
-		field_.to = bSequence;
-		field_.epoch = epochAtChoice;
+		// Y1b: the old live record moves to the snapshot ring ONLY when the matcher's snapshot of exactly that pair succeeded
+		// (the ahead estimate's SnapshotForWarp, told through NoteSnapshotTaken) and it is still of the current epoch;
+		// otherwise it is gone, as before.
+		if (snapshotOfFrom_ != 0 && live.from == snapshotOfFrom_ && motionValidity.Current(live.epoch))
+		{
+			// Evict any existing snapshot record occupying physical matcherSlot == 0 (matching NoteAheadField)
+			// so overwritten slot-0 records never pile up and evict live matcherSlot >= 1 ahead records.
+			for (size_t i = 1; i < kFieldSlots; ++i)
+			{
+				if (fields_[i].from != 0 && fields_[i].matcherSlot == 0)
+				{
+					for (size_t j = i; j + 1 < kFieldSlots; ++j)
+						fields_[j] = fields_[j + 1];
+					fields_[kFieldSlots - 1] = FieldRecord();
+					--i;
+				}
+			}
+			for (size_t i = kFieldSlots - 1; i > 0; --i)
+				fields_[i] = fields_[i - 1];
+			fields_[1].matcherSlot = 0;   // single-snapshot SnapshotForWarp occupies matcher slot 0
+		}
+		snapshotOfFrom_ = 0;
+		// Clear and compact any snapshot slot that previously held bSequence so FindByTo never sees a duplicate.
+		for (size_t i = 1; i < kFieldSlots; ++i)
+		{
+			if (fields_[i].from != 0 && fields_[i].to == bSequence)
+			{
+				for (size_t j = i; j + 1 < kFieldSlots; ++j)
+					fields_[j] = fields_[j + 1];
+				fields_[kFieldSlots - 1] = FieldRecord();
+				--i;
+			}
+		}
+		live.from = aSequence;
+		live.to = bSequence;
+		live.epoch = epochAtChoice;
+		live.matcherSlot = -1;
+	}
+
+	void VectorEngine::NoteAheadField(uint64_t from, uint64_t to, uint64_t epoch, int matcherSlot)
+	{
+		if (from == 0 || to <= from || matcherSlot < 0 || epoch == 0 || !motionValidity.Current(epoch))
+			return;
+		bool hadCurrentEpoch = false;
+		for (size_t i = 0; i < kFieldSlots; ++i)
+		{
+			if (fields_[i].from != 0 && motionValidity.Current(fields_[i].epoch))
+			{
+				hadCurrentEpoch = true;
+				break;
+			}
+		}
+		if (!hadCurrentEpoch || eraFirstFrom_ == 0 || from < eraFirstFrom_)
+			eraFirstFrom_ = from;
+		// Remove any existing snapshot record occupying the same physical matcherSlot or the same `to` frame.
+		for (size_t i = 1; i < kFieldSlots; ++i)
+		{
+			if (fields_[i].from != 0 && (fields_[i].matcherSlot == matcherSlot || fields_[i].to == to))
+			{
+				for (size_t j = i; j + 1 < kFieldSlots; ++j)
+					fields_[j] = fields_[j + 1];
+				fields_[kFieldSlots - 1] = FieldRecord();
+				--i;
+			}
+		}
+		// Insert newest snapshot/ahead record at slot 1 (slot 0 remains Live).
+		for (size_t i = kFieldSlots - 1; i > 1; --i)
+			fields_[i] = fields_[i - 1];
+		fields_[1].from = from;
+		fields_[1].to = to;
+		fields_[1].epoch = epoch;
+		fields_[1].matcherSlot = matcherSlot;
+	}
+
+	void VectorEngine::ResetFieldRecords()
+	{
+		for (size_t i = 0; i < kFieldSlots; ++i)
+			fields_[i] = FieldRecord();
+		snapshotOfFrom_ = 0;
+		eraFirstFrom_ = 0;
+	}
+
+	void VectorEngine::DeclareAheadRingVram(uint32_t width, uint32_t height, int depth)
+	{
+		if (width == 0 || height == 0 || depth <= 0)
+		{
+			ReleaseAheadRingVram();
+			return;
+		}
+		const int clampedDepth = depth > LaneAhead::kAheadCeilingLead ? LaneAhead::kAheadCeilingLead : depth;
+		const uint64_t bytes = LaneAhead::RingVramBytes(width, height, clampedDepth);
+		if (bytes == 0)
+		{
+			ReleaseAheadRingVram();
+			return;
+		}
+		VpSkeleton::VramUsers::Instance().DeclareStepped(
+			&aheadRingVramBytes_,
+			VpSkeleton::kUserMotionMatcher,
+			bytes,
+			VpSkeleton::Tier::T1,
+			"ahead field ring off (render-time estimate runs)");
+		VpSkeleton::VramUsers::Instance().MarkActive(&aheadRingVramBytes_, VpSkeleton::kUserMotionMatcher, true);
+		aheadRingVramBytes_ = bytes;
+	}
+
+	void VectorEngine::ReleaseAheadRingVram()
+	{
+		VpSkeleton::VramUsers::Instance().Release(&aheadRingVramBytes_, VpSkeleton::kUserMotionMatcher);
+		aheadRingVramBytes_ = 0;
+	}
+
+	uint64_t VectorEngine::AheadRingVramBytes() const
+	{
+		return aheadRingVramBytes_;
+	}
+
+	uint64_t VectorEngine::P2SlotGeneration() const { return p2Slot->Generation(); }
+	void VectorEngine::NoteSnapshotTaken(uint64_t liveFrom) { snapshotOfFrom_ = liveFrom; }
+	VectorEngine::FieldRecord& VectorEngine::RecordLive() { return fields_[0]; }
+	const VectorEngine::FieldRecord& VectorEngine::RecordLive() const { return fields_[0]; }
+	const VectorEngine::FieldRecord& VectorEngine::RecordSnapshot(size_t i) const { return fields_[i + 1 < kFieldSlots ? i + 1 : kFieldSlots - 1]; }
+	size_t VectorEngine::FindByTo(uint64_t to) const
+	{
+		for (size_t i = 0; i < kFieldSlots; ++i)
+			if (fields_[i].from != 0 && fields_[i].to == to)
+				return i;
+		return kFieldSlots;
+	}
+
+	void VectorEngine::SetP2PublishSink(std::function<void(const VpMotion::P2Published&)> sink)
+	{
+		if (!sink)
+		{
+			p2Slot->SetObserver(VpMotion::P2Slot::Observer());   // returns only when no call is in flight
+			return;
+		}
+		// Runs on the producer worker (or R6 async extras thread), after the slot stored the pair, outside the store's mutex.
+		// `this` is safe: ~VectorEngine clears the observer first. Only lock-free atomic reads are performed here
+		// (motionValidity.Epoch() is a lock-free atomic acquire load; OpticalFlowTrust::GlobalUsable reads immutable Flow data).
+		p2Slot->SetObserver([this, sink](const VpMotion::P2Published& info, const MotionAhead::FlowPtr& flow)
+		{
+			VpMotion::P2Published out = info;
+			out.epoch = motionValidity.Epoch();
+			out.globalUsable = flow != nullptr && flow->globalSet && OpticalFlowTrust::GlobalUsable(flow->global[0]);
+			sink(out);
+		});
 	}
 
 	FallbackCatalog::Decision VectorEngine::NoteHookOutcome(bool failed, const std::string& what)
@@ -1049,7 +1213,7 @@ namespace VpMotion
 	uint64_t VectorEngine::LatestVerifiedFieldSeq() const
 	{
 		VerifiedField field;
-		return FieldOf(field_.to, field) ? field_.to : 0;
+		return FieldOf(RecordLive().to, field) ? RecordLive().to : 0;   // the LIVE `to` (a snapshot slot never changes what "latest" means)
 	}
 
 	uint64_t VectorEngine::FieldEra() const
@@ -1059,24 +1223,86 @@ namespace VpMotion
 
 	bool VectorEngine::FieldOf(uint64_t seq, VerifiedField& out) const
 	{
-		if (!matcher_ || seq == 0 || field_.from == 0 || seq != field_.to || matcher_->LiveFieldFrom() != field_.from ||
-			!motionValidity.Current(field_.epoch))
+		if (!matcher_ || seq == 0)
 			return false;
-		const pl_tex fwd = matcher_->LiveField();
-		if (!fwd)
+		// Y1a / Y1b: scan all slots (0 = live, 1..D = snapshot/ahead) keyed by `to`, taking the first that is both
+		// epoch-current and matcher-backed (matching AheadFieldSeqs) so a stale live slot never shadows a valid snapshot/ahead slot.
+		const FieldRecord* matched = nullptr;
+		pl_tex fwd = nullptr;
+		for (size_t i = 0; i < kFieldSlots; ++i)
+		{
+			const FieldRecord& rec = fields_[i];
+			if (rec.from == 0 || rec.to != seq || !motionValidity.Current(rec.epoch))
+				continue;
+			pl_tex candidate = nullptr;
+			if (i == 0)
+			{
+				if (matcher_->LiveFieldFrom() != rec.from)
+					continue;
+				candidate = matcher_->LiveField();
+			}
+			else
+			{
+				if (rec.matcherSlot < 0 || matcher_->SnapFieldFromAt(rec.matcherSlot) != rec.from)
+					continue;
+				candidate = matcher_->SnapFieldAt(rec.matcherSlot);
+			}
+			if (candidate != nullptr)
+			{
+				matched = &rec;
+				fwd = candidate;
+				break;
+			}
+		}
+		if (!matched || !fwd)
 			return false;
 		out = VerifiedField();
-		out.seq = field_.to;
-		out.pairFrom = field_.from;
-		out.pairTo = field_.to;
+		out.seq = matched->to;
+		out.pairFrom = matched->from;
+		out.pairTo = matched->to;
 		out.fwd = fwd;
 		out.gridW = fwd->params.w;
 		out.gridH = fwd->params.h;
 		out.blockSize = 16;          // one texel per 16x16 source block (MotionWarp::Field)
 		out.scaleToSourcePx = 1.0f;  // the field's vectors are in source px
 		// The stamp of the pair's later frame from the bound Indicator (resync on); unbound: the default Stamp.
-		motionValidity.StampAt(field_.to, out.stamp);
+		motionValidity.StampAt(matched->to, out.stamp);
 		return true;
+	}
+
+	size_t VectorEngine::AheadFieldSeqs(uint64_t* out, size_t cap) const
+	{
+		if (!matcher_)
+			return 0;
+		uint64_t seqs[kFieldSlots];
+		size_t count = 0;
+		for (size_t i = 0; i < kFieldSlots; ++i)
+		{
+			const FieldRecord& rec = fields_[i];
+			if (rec.from == 0 || rec.to == 0 || !motionValidity.Current(rec.epoch))
+				continue;
+			if (i == 0)
+			{
+				if (matcher_->LiveFieldFrom() != rec.from || matcher_->LiveField() == nullptr)
+					continue;
+			}
+			else
+			{
+				if (rec.matcherSlot < 0 || matcher_->SnapFieldFromAt(rec.matcherSlot) != rec.from ||
+					matcher_->SnapFieldAt(rec.matcherSlot) == nullptr)
+					continue;
+			}
+			bool dup = false;
+			for (size_t j = 0; j < count; ++j)
+				if (seqs[j] == rec.to) { dup = true; break; }
+			if (!dup)
+				seqs[count++] = rec.to;
+		}
+		std::sort(seqs, seqs + count);
+		const size_t n = (out != nullptr && cap > 0) ? (count < cap ? count : cap) : 0u;
+		for (size_t i = 0; i < n; ++i)
+			out[i] = seqs[i];
+		return n;
 	}
 
 	// F2: the engine's seed of the live pair (the camera fit's input; never the guided live field). The same validity,
@@ -1087,8 +1313,9 @@ namespace VpMotion
 	bool VectorEngine::SeedFieldOf(uint64_t pairTo, SeedField& out) const
 	{
 		out = SeedField();   // absence NotSeeded unless the matcher says the live pair was skipped
-		if (!matcher_ || pairTo == 0 || field_.from == 0 || pairTo != field_.to || matcher_->LiveFieldFrom() != field_.from ||
-			!motionValidity.Current(field_.epoch))
+		const FieldRecord& live = RecordLive();   // Y1b: the seed is LIVE-only (the matcher keeps no snapshot of it)
+		if (!matcher_ || pairTo == 0 || live.from == 0 || pairTo != live.to || matcher_->LiveFieldFrom() != live.from ||
+			!motionValidity.Current(live.epoch))
 			return false;
 		IMatcherView::Seed s;
 		if (!matcher_->LiveSeed(s))
@@ -1110,9 +1337,9 @@ namespace VpMotion
 		if (!(s.tolerance > 0.0f) || !(s.consistencyPx > 0.0f) || !(s.weightPenalty >= 0.0f))
 			return false;
 		out = SeedField();
-		out.seq = field_.to;
-		out.pairFrom = field_.from;
-		out.pairTo = field_.to;
+		out.seq = live.to;
+		out.pairFrom = live.from;
+		out.pairTo = live.to;
 		out.fwd = s.fwd;
 		out.bwd = s.bwd;
 		out.gridW = s.gridW;
@@ -1125,7 +1352,7 @@ namespace VpMotion
 		out.sadTrustMax = s.tolerance;
 		out.weightPenalty = s.weightPenalty;
 		out.consistencyPx = s.consistencyPx;
-		motionValidity.StampAt(field_.to, out.stamp);
+		motionValidity.StampAt(live.to, out.stamp);
 		return true;
 	}
 
@@ -1434,8 +1661,17 @@ namespace VpMotion
 		constexpr uint64_t kLongestKnownSpan = 64;
 		if (from == 0 || to <= from || to - from > kLongestKnownSpan)
 			return true;
-		// No estimate in the current epoch: where its run starts is unknown.
-		if (field_.from == 0 || !motionValidity.Current(field_.epoch) || from < eraFirstFrom_)
+		// No estimate in the current epoch (live or ahead): where its run starts is unknown.
+		bool hasCurrentField = false;
+		for (size_t i = 0; i < kFieldSlots; ++i)
+		{
+			if (fields_[i].from != 0 && motionValidity.Current(fields_[i].epoch))
+			{
+				hasCurrentField = true;
+				break;
+			}
+		}
+		if (!hasCurrentField || eraFirstFrom_ == 0 || from < eraFirstFrom_)
 			return true;
 		for (uint64_t k = from; k < to; ++k)
 			if (!motionValidity.PairValidAt(k, k + 1))

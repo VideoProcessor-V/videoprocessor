@@ -1,5 +1,7 @@
 #pragma once
 
+#include <VP-V/modules/motion/estimation/LaneAheadPolicy.h>
+
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -9,8 +11,9 @@
 // of A, with C (the frame after B) queued, (B, C) is estimated while A's
 // remaining extras read a copy of (A, B)'s field. At B's frame, if the next
 // frame is still C, the estimate is already there; anything else is
-// estimated before the frame as before. The renderer supplies the steps; the
-// tests drive the same class.
+// estimated before the frame as before. Z1 (N#4): backed by VpMotion::LaneAhead::AheadRing
+// as the ONE chain ring arbiter + physical slot tracker (default capacity 1 preserves
+// single-pair behaviour; SetCapacity(depth) enables multi-slot ahead scheduling).
 namespace Dejudder
 {
 	class AheadSchedule
@@ -55,122 +58,58 @@ namespace Dejudder
 			std::function<bool(uint64_t a, uint64_t b)> estimate;        // the matcher on (a, b)
 		};
 
+		AheadSchedule() : ring_(1) {}
+
 		// After A's first extra. True when the remaining extras must read the
 		// copy (the matcher's own outputs may now be (B, C)'s or partly so).
-		bool TryAhead(const Conditions& c, const Steps& steps)
-		{
-			auto skip = [this](Reason r) { Note(r); return false; };
-			if (!c.enabled) return skip(Reason::Off);
-			if (!c.renderedWarp) return skip(Reason::SourceWarp);
-			if (!c.active) return skip(Reason::NotActive);
-			if (c.next == 0) return skip(Reason::NoNext);
-			if (c.after == 0) return skip(c.afterGap ? Reason::AfterGap : Reason::NoAfter);
-			if (c.after == c.next || c.after == c.source) return skip(Reason::AfterNotNew);
-			if (c.estimated != c.source) return skip(Reason::NotEstimated);
-			if (!c.layoutMatches) return skip(Reason::Layout);
-			if (!steps.snapshot || !steps.snapshot()) return skip(Reason::SnapshotFailed);
-			// From here the copy is in use whatever happens.
-			if (!steps.uploadAfter || !steps.uploadAfter()) { Note(Reason::UploadFailed); return true; }
-			if (!steps.estimate || !steps.estimate(c.next, c.after)) { Note(Reason::EstimateFailed); return true; }
-			aheadFor = c.next;
-			aheadNext = c.after;
-			aheadEpoch = epochNow;   // E12 (B3-Z Z2): the entry keeps the epoch it was made in
-			Note(Reason::Ahead);
-			return true;
-		}
+		bool TryAhead(const Conditions& c, const Steps& steps);
+
+		// Z1 multi-slot ring arbiter: picks FreeSlot(), validates conditions + AheadRing chain/capacity/epoch invariants,
+		// runs snapshot/upload/estimate, and pushes EntryKey{ c.next, c.after, epochNow } into that physical slot.
+		bool TryAheadSlot(const Conditions& c, const Steps& steps, int* outSlot = nullptr);
 
 		// At a frame's estimate: true when (source, next) was estimated ahead
 		// (nothing to do but take its planes). False: estimate it now.
-		bool Consume(uint64_t source, uint64_t next)
-		{
-			const bool hit = next != 0 && aheadFor == source && aheadNext == next;
-			if (hit)
-				++hits;
-			else
-			{
-				if (aheadFor != 0)
-					++misses;   // estimated ahead for a pair that did not come
-				++sequential;
-			}
-			aheadFor = aheadNext = 0;
-			return hit;
-		}
+		bool Consume(uint64_t source, uint64_t next);
 
-		// E12 (B3-Z Z2, refs 93-prep-B3Z s4): the epoch-checked form. A hit needs the entry's own epoch (the one
-		// NoteEpoch held when TryAhead made it) to equal `epoch`, the epoch the caller stamps the field with; an
-		// entry of the right pair from another epoch is a miss (also counted in EpochMisses) and the pair is
-		// estimated now. Before, the caller stamped a hit with the CURRENT epoch while the engine refused the same
-		// field for its older one (VectorEngine NoteEstimated). An entry made with no epoch noted (0) never hits
-		// this form. The two-argument Consume above is unchanged (no epoch check).
-		bool Consume(uint64_t source, uint64_t next, uint64_t epoch)
-		{
-			const bool pair = next != 0 && aheadFor == source && aheadNext == next;
-			const bool hit = pair && epoch != 0 && aheadEpoch == epoch;
-			if (hit)
-				++hits;
-			else
-			{
-				if (aheadFor != 0)
-					++misses;
-				if (pair)
-					++epochMisses;
-				++sequential;
-			}
-			consumedEpoch = hit ? aheadEpoch : 0;
-			aheadFor = aheadNext = 0;
-			aheadEpoch = 0;
-			return hit;
-		}
+		// E12 + Z1: epoch-checked consume from the front of the chain ring, returning its physical slot in *outSlot (-1 on miss).
+		bool Consume(uint64_t source, uint64_t next, uint64_t epoch, int* outSlot = nullptr);
+
+		// Z1 ring arbiter controls and read-only views.
+		void SetCapacity(int depth);
+		int Capacity() const;
+		int Held() const;
+		const VpMotion::LaneAhead::AheadRing& Ring() const { return ring_; }
+		int FreeSlot() const { return ring_.FreeSlot(); }
+		int SlotAt(int i) const;
+		const VpMotion::LaneAhead::EntryKey& EntryAt(int i) const;
+		void Discard(VpMotion::LaneAhead::DiscardCause cause);
+		unsigned long long Discarded(VpMotion::LaneAhead::DiscardCause cause) const { return ring_.Discarded(cause); }
 
 		// E12: the epoch of the estimate the matcher holds now (the render-time estimate's, or a consumed entry's).
-		// TryAhead records it with the entry it makes.
+		// TryAhead / TryAheadSlot records it with the entry it makes.
 		void NoteEpoch(uint64_t epoch) { epochNow = epoch; }
 		uint64_t ConsumedEpoch() const { return consumedEpoch; }
 		unsigned long long EpochMisses() const { return epochMisses; }
 
-		void Reset()
-		{
-			aheadFor = aheadNext = 0;
-			aheadEpoch = 0;
-		}
+		void Reset();
 
 		Reason LastReason() const { return last; }
 		unsigned long long Count(Reason r) const { return counts[static_cast<size_t>(r)]; }
 		unsigned long long Hits() const { return hits; }
 		unsigned long long Misses() const { return misses; }
 		unsigned long long Sequential() const { return sequential; }
-		bool Pending() const { return aheadFor != 0; }
+		bool Pending() const { return !ring_.Empty() || legacyFrom_ != 0; }
 
-		static const char* Name(Reason r)
-		{
-			switch (r)
-			{
-			case Reason::Ahead: return "estimated ahead";
-			case Reason::Off: return "off";
-			case Reason::SourceWarp: return "source warp";
-			case Reason::NotActive: return "de-judder not running";
-			case Reason::NoNext: return "next frame unknown";
-			case Reason::NoAfter: return "no frame after next (short queue)";
-			case Reason::AfterNotNew: return "frame after next not new";
-			case Reason::NotEstimated: return "this pair not estimated";
-			case Reason::Layout: return "frame after next in another layout";
-			case Reason::SnapshotFailed: return "copy failed";
-			case Reason::UploadFailed: return "upload failed";
-			case Reason::EstimateFailed: return "estimate failed";
-			case Reason::AfterGap: return "frame after next follows a gap";
-			default: return "?";
-			}
-		}
+		static const char* Name(Reason r);
 
 	private:
-		void Note(Reason r)
-		{
-			last = r;
-			++counts[static_cast<size_t>(r)];
-		}
+		void Note(Reason r);
+		bool CheckConditions(const Conditions& c);
 
-		uint64_t aheadFor = 0, aheadNext = 0;
-		uint64_t aheadEpoch = 0, epochNow = 0, consumedEpoch = 0;   // E12
+		VpMotion::LaneAhead::AheadRing ring_;
+		uint64_t legacyFrom_ = 0, legacyTo_ = 0, legacyEpoch_ = 0;   // depth-1 entry when NoteEpoch==0 or after<=next
+		uint64_t epochNow = 0, consumedEpoch = 0;   // E12
 		unsigned long long epochMisses = 0;
 		Reason last = Reason::Off;
 		std::array<unsigned long long, static_cast<size_t>(Reason::Count)> counts{};

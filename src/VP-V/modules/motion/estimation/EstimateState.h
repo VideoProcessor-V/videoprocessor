@@ -96,6 +96,8 @@ namespace VpMotion
 			out.liveGridH = live->params.h;
 			return true;
 		}
+		uint64_t SnapFieldFrom() const override { Dejudder::IFieldSource::Set s; if (!dejudder) return 0; const auto st = SnapshotFieldSet(dejudder->SnapshotGeneration(), s); if (st == Dejudder::IFieldSource::SnapshotState::Valid) return s.field ? s.from : 0; if (st == Dejudder::IFieldSource::SnapshotState::Lost) { ++snapshotLeaseLostReads_; snapshotLeaseLost_ = true; } return 0; }
+		pl_tex SnapField() const override { Dejudder::IFieldSource::Set s; return dejudder && SnapshotFieldSet(dejudder->SnapshotGeneration(), s) == Dejudder::IFieldSource::SnapshotState::Valid ? s.field : nullptr; }
 
 		// ---- SK-MV pass-through (TEMPORARY until P5c): Dejudder::IFieldSource ----------------------------------
 		// ONE source for the renderer's motion reads when the matcher is bound (RunDejudderEstimate binds it). Live: the motion segment's
@@ -340,8 +342,8 @@ namespace VpMotion
 		VectorEngine& engine_;
 		Dejudder::IFieldSource::Set snapshotSet_;   // render thread
 		uint64_t snapshotGeneration_ = 0;           // the matcher's snapshot lease generation it was captured under (0 = none)
-		bool snapshotLeaseLost_ = false;
-		unsigned long long snapshotLeaseLostReads_ = 0;
+		mutable bool snapshotLeaseLost_ = false;
+		mutable unsigned long long snapshotLeaseLostReads_ = 0;
 		FallbackCatalog::SnapshotLeaseNotes snapshotLeaseNotes_;
 	};
 }

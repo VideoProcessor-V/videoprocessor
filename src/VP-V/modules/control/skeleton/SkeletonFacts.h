@@ -123,6 +123,10 @@ namespace Vpv
 			uint64_t abandoned = 0;       // fields given up after the retries
 			uint64_t eraResets = 0;       // the engine's numbering restarted (seek, resync, format change)
 			uint64_t lastSeq = 0;         // the last frame published
+			uint64_t overwritten = 0;     // Y1b: fields pushed out of the pending ring (oldest goes) before they were published
+			// Y1b: per-product AHEAD counters, from the frame results the seal returns at Begin (P2 / P3 only): sealed ahead vs absent (the reader
+			// goes live, or the product was unavailable). A lagged-seal pending result is neither.
+			uint64_t p2Ahead = 0, p2Absent = 0, p3Ahead = 0, p3Absent = 0;
 		};
 
 		// The EXTERNAL DEMAND entry of the skeleton module (SK-W stage D), for a component beside the lane that does not include the module
@@ -214,6 +218,9 @@ namespace Vpv
 			// the same with frame_analysis_store off. RENDER THREAD for the live path (it reads the lane's slots). Default: unknown (an
 			// implementer without a scene product; the caller shows its visible "unavailable").
 			virtual SceneAnswer SceneOf(const void* /*host*/, uint64_t /*seq*/) const { return SceneAnswer(); }
+			// O#1 (L0 one scene reader): raw scene facts (U7 verdict + P4 means/spreads + active-picture rect) through the same
+			// IExternalDemand facade as SceneOf. Default: invalid ("no skeleton module").
+			virtual bool SceneFactsOf(const void* /*host*/, uint64_t /*seq*/, SceneFacts& out) const { out = SceneFacts(); out.why = "no skeleton module"; return false; }
 			// GF-P2b S3 (GV AMEND 1): how many times the skeleton ERASED this host's external demand entries (GpuReleased / Shutdown, a dead
 			// renderer at the address). A declaring component folds it into its "already declared" key, so a GPU-only reset of the same
 			// renderer (the tap generation unchanged) still re-declares. Only ever grows. Any thread. Default 0 (nothing is ever erased).

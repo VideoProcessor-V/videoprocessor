@@ -5,6 +5,8 @@
 #include "CurrentFrame.h"
 #include "HubQuery.h"
 #include <VP-V/core/ComputeOnce.h>
+#include <VP-V/modules/motion/consumers/DejudderAhead.h>
+#include <VP-V/segments/CoreSegmentCaches.h>
 
 #include <atomic>
 #include <thread>
@@ -152,6 +154,7 @@ namespace Vpv
 		{
 			if (f.kind == RE::Lifecycle::GpuCreated && f.host)
 			{
+				Vpv::Segments::CoreSegmentCaches::Instance().OnGpuCreated(f.host, f.gpu);
 				std::lock_guard<std::mutex> lock(hostsMutex_);
 				HostState& state = hosts_[f.host];
 				state.host = f.host;
@@ -176,6 +179,7 @@ namespace Vpv
 			// Released only for this host: a replacement renderer's state is untouched.
 			if ((f.kind == RE::Lifecycle::GpuReleased || f.kind == RE::Lifecycle::Shutdown) && f.host)
 			{
+				Vpv::Segments::CoreSegmentCaches::Instance().OnGpuReleased(f.host);
 				{
 					std::lock_guard<std::mutex> lock(hostsMutex_);
 					hosts_.erase(f.host);
@@ -382,6 +386,636 @@ namespace Vpv
 			registered = true;
 			ExtensionHub::Instance(); // construct before the registry owns the forwarder, so it is destroyed after it
 			RE::Register(std::unique_ptr<RE::IRendererExtension>(new Forwarder()));
+		}
+	}
+
+	namespace Segments
+	{
+		CoreSegmentCaches& CoreSegmentCaches::Instance()
+		{
+			static CoreSegmentCaches caches;
+			return caches;
+		}
+
+		void CoreSegmentCaches::OnGpuCreated(const void* host, const void* gpu)
+		{
+			if (!host)
+				return;
+			std::lock_guard<std::mutex> lock(mutex_);
+			Entry& e = FindOrAddLocked(host);
+			++e.gpuEpoch;
+			e.gpu = gpu;
+			e.float32Known = false;
+			e.float32Supported = false;
+		}
+
+		bool CoreSegmentCaches::OnGpuCreated(const void* host, const void* gpu, Float32FboProbeFn probe)
+		{
+			if (!host)
+				return (gpu && probe) ? probe(gpu) : false;
+			uint64_t epoch = 0;
+			{
+				std::lock_guard<std::mutex> lock(mutex_);
+				Entry& e = FindOrAddLocked(host);
+				++e.gpuEpoch;
+				e.gpu = gpu;
+				e.float32Known = false;
+				e.float32Supported = false;
+				epoch = e.gpuEpoch;
+			}
+			if (!gpu || !probe)
+				return false;
+			const bool supported = probe(gpu);
+			std::lock_guard<std::mutex> lock(mutex_);
+			if (Entry* e = FindLocked(host))
+			{
+				if (e->gpu == gpu && e->gpuEpoch == epoch)
+				{
+					e->float32Known = true;
+					e->float32Supported = supported;
+				}
+			}
+			return supported;
+		}
+
+		void CoreSegmentCaches::OnGpuReleased(const void* host)
+		{
+			if (!host)
+				return;
+			std::lock_guard<std::mutex> lock(mutex_);
+			for (size_t i = 0; i < entries_.size(); ++i)
+			{
+				if (entries_[i].host == host)
+				{
+					entries_.erase(entries_.begin() + static_cast<std::ptrdiff_t>(i));
+					return;
+				}
+			}
+		}
+
+		bool CoreSegmentCaches::GpuSupportsFloat32Fbo(const void* host, const void* gpu, Float32FboProbeFn probe)
+		{
+			if (!gpu)
+				return false;
+			if (!host)
+				return probe ? probe(gpu) : false;
+			uint64_t epoch = 0;
+			{
+				std::lock_guard<std::mutex> lock(mutex_);
+				Entry& e = FindOrAddLocked(host);
+				if (e.gpu == gpu && e.float32Known)
+					return e.float32Supported;
+				if (e.gpu != gpu || e.gpuEpoch == 0)
+				{
+					++e.gpuEpoch;
+					e.gpu = gpu;
+					e.float32Known = false;
+					e.float32Supported = false;
+				}
+				epoch = e.gpuEpoch;
+			}
+			if (!probe)
+				return false;
+			const bool supported = probe(gpu);
+			std::lock_guard<std::mutex> lock(mutex_);
+			if (Entry* e = FindLocked(host))
+			{
+				if (e->gpu == gpu && e->gpuEpoch == epoch)
+				{
+					e->float32Known = true;
+					e->float32Supported = supported;
+				}
+			}
+			return supported;
+		}
+
+		bool CoreSegmentCaches::RefreshTraceFlag(const void* host, EnvProbeFn probe)
+		{
+			const bool enabled = probe ? probe() : false;
+			if (host)
+			{
+				std::lock_guard<std::mutex> lock(mutex_);
+				Entry& e = FindOrAddLocked(host);
+				e.traceKnown = true;
+				e.traceEnabled = enabled;
+			}
+			return enabled;
+		}
+
+		bool CoreSegmentCaches::TraceHookListEnabled(const void* host, EnvProbeFn probe)
+		{
+			if (!host)
+				return probe ? probe() : false;
+			{
+				std::lock_guard<std::mutex> lock(mutex_);
+				if (const Entry* e = FindLocked(host))
+				{
+					if (e->traceKnown)
+						return e->traceEnabled;
+				}
+			}
+			const bool enabled = probe ? probe() : false;
+			std::lock_guard<std::mutex> lock(mutex_);
+			Entry& e = FindOrAddLocked(host);
+			if (!e.traceKnown)
+			{
+				e.traceKnown = true;
+				e.traceEnabled = enabled;
+			}
+			return e.traceEnabled;
+		}
+
+		void CoreSegmentCaches::ResetForTesting()
+		{
+			std::lock_guard<std::mutex> lock(mutex_);
+			entries_.clear();
+		}
+
+		size_t CoreSegmentCaches::HostCountForTesting() const
+		{
+			std::lock_guard<std::mutex> lock(mutex_);
+			return entries_.size();
+		}
+
+		uint64_t CoreSegmentCaches::GpuEpochForTesting(const void* host) const
+		{
+			if (!host)
+				return 0;
+			std::lock_guard<std::mutex> lock(mutex_);
+			const Entry* e = FindLocked(host);
+			return e ? e->gpuEpoch : 0;
+		}
+
+		CoreSegmentCaches::Entry* CoreSegmentCaches::FindLocked(const void* host)
+		{
+			for (Entry& e : entries_)
+				if (e.host == host)
+					return &e;
+			return nullptr;
+		}
+
+		const CoreSegmentCaches::Entry* CoreSegmentCaches::FindLocked(const void* host) const
+		{
+			for (const Entry& e : entries_)
+				if (e.host == host)
+					return &e;
+			return nullptr;
+		}
+
+		CoreSegmentCaches::Entry& CoreSegmentCaches::FindOrAddLocked(const void* host)
+		{
+			if (Entry* existing = FindLocked(host))
+				return *existing;
+			Entry e;
+			e.host = host;
+			entries_.push_back(e);
+			return entries_.back();
+		}
+	}
+}
+
+namespace VpMotion
+{
+	namespace LaneAhead
+	{
+		constexpr int AheadRing::kCapacityMax;
+
+		const char* KeyName(SpareKey k)
+		{
+			switch (k) {
+			case SpareKey::Auto: return "auto";
+			case SpareKey::On: return "on";
+			case SpareKey::Off: return "off";
+			default: return "?";
+			}
+		}
+
+		bool ParseKey(const char* text, SpareKey& out)
+		{
+			if (!text) return false;
+			const char* names[] = { "auto", "on", "off" };
+			for (int i = 0; i < 3; ++i) {
+				const char* a = names[i];
+				const char* b = text;
+				while (*a && *a == *b) { ++a; ++b; }
+				if (*a == 0 && *b == 0) { out = static_cast<SpareKey>(i); return true; }
+			}
+			return false;
+		}
+
+		const char* ReasonName(Reason r)
+		{
+			switch (r) {
+			case Reason::Ahead: return "ahead";
+			case Reason::Off: return "off";
+			case Reason::LowLatency: return "low latency: single-frame motion, no field ahead";
+			case Reason::Competitive: return "competitive latency";
+			case Reason::EngineOff: return "matcher not estimating";
+			case Reason::ShortQueue: return "short queue";
+			case Reason::RingFull: return "depth held";
+			case Reason::P2NotReady: return "P2 not ready";
+			case Reason::NoSpare: return "no spare";
+			case Reason::SourceNotServed: return "source ring not served in the slot";
+			default: return "?";
+			}
+		}
+
+		Decision Decide(const Input& in)
+		{
+			Decision d;
+			if (!KeyOn(in.key, in.autoAccepted)) { d.reason = Reason::Off; return d; }
+			if (in.competitive) { d.reason = Reason::Competitive; return d; }
+			if (in.lowLatency) { d.reason = Reason::LowLatency; return d; }
+			if (!in.matcherActive) { d.reason = Reason::EngineOff; return d; }
+			int depth = RingCapacity(in.requestedDepth, DepthMax(in.anchorSlots, in.extendedTier));
+			if (in.queuedAfterNext < depth) depth = in.queuedAfterNext > 0 ? in.queuedAfterNext : 0;
+			if (in.laneLead > 0 && in.laneLead - 1 < depth) depth = in.laneLead - 1 > 0 ? in.laneLead - 1 : 0;
+			d.depth = depth;
+			if (depth <= 0) { d.reason = Reason::ShortQueue; return d; }
+			if (in.held >= depth) { d.reason = Reason::RingFull; return d; }
+			if (in.producerRunning && !in.nextPairP2Ready) { d.reason = Reason::P2NotReady; return d; }
+			d.reason = Reason::Ahead;
+			d.pairsWanted = depth - (in.held > 0 ? in.held : 0);
+			return d;
+		}
+
+		AfterEstimateResult AfterEstimateDispatch::Notify(IAfterEstimate* hook, const AfterEstimateView& view, Entry& entry, uint64_t serial)
+		{
+			AfterEstimateResult r = AfterEstimateResult::Called;
+			if (serial == 0 || serial == m_lastSerial) r = AfterEstimateResult::Repeat;
+			else if (!view.key.Valid() || view.key != entry.key) r = AfterEstimateResult::BadKey;
+			else if (!view.fromLuma || !view.toLuma) r = AfterEstimateResult::PlanesMissing;
+			else if (!hook) r = AfterEstimateResult::NoHook;
+			if (r != AfterEstimateResult::Repeat) m_lastSerial = serial;
+			if (r == AfterEstimateResult::Called) hook->AfterEstimate(view, entry);
+			++m_counts[static_cast<size_t>(r)];
+			if (r == AfterEstimateResult::Called) ++m_byPath[view.atRender ? 1 : 0];
+			return r;
+		}
+
+		const char* DiscardCauseName(DiscardCause c)
+		{
+			switch (c) {
+			case DiscardCause::NextDiffers: return "next differs";
+			case DiscardCause::Drop: return "drop";
+			case DiscardCause::Resync: return "resync";
+			case DiscardCause::EpochMoved: return "epoch moved";
+			case DiscardCause::PictureChanged: return "picture";
+			case DiscardCause::LeaseLost: return "lease lost";
+			default: return "?";
+			}
+		}
+
+		void AheadRing::SetCapacity(int capacity)
+		{
+			m_capacity = capacity < 1 ? 1 : (capacity > kCapacityMax ? kCapacityMax : capacity);
+			int keep = m_count < m_capacity ? m_count : m_capacity;
+			for (int i = 0; i < keep; ++i)
+				if (m_slots[static_cast<size_t>(i)] >= m_capacity) { keep = i; break; }
+			while (m_count > keep) { --m_count; ++m_discarded[static_cast<size_t>(DiscardCause::Drop)]; }
+		}
+
+		int AheadRing::FreeSlot() const
+		{
+			for (int s = 0; s < m_capacity; ++s)
+				if (!SlotUsed(s)) return s;
+			return -1;
+		}
+
+		bool AheadRing::Holds(uint64_t from, uint64_t to) const
+		{
+			for (int i = 0; i < m_count; ++i)
+				if (m_entries[static_cast<size_t>(i)].from == from && m_entries[static_cast<size_t>(i)].to == to) return true;
+			return false;
+		}
+
+		PushResult AheadRing::Push(const EntryKey& k, int slot)
+		{
+			PushResult r = PushResult::Held;
+			if (!k.Valid()) r = PushResult::BadKey;
+			else if (Holds(k.from, k.to)) r = PushResult::AlreadyHeld;
+			else if (m_count > 0 && k.from != BackTo()) r = PushResult::NotChained;
+			else if (m_count >= m_capacity) r = PushResult::Full;
+			else if (slot < 0 || slot >= m_capacity || SlotUsed(slot)) r = PushResult::BadSlot;
+			++m_push[static_cast<size_t>(r)];
+			if (r == PushResult::Held) {
+				m_slots[static_cast<size_t>(m_count)] = slot;
+				m_entries[static_cast<size_t>(m_count++)] = k;
+			}
+			return r;
+		}
+
+		bool AheadRing::Consume(uint64_t from, uint64_t to, uint64_t epoch, int* slot)
+		{
+			if (slot != nullptr) *slot = -1;
+			while (m_count > 0 && m_entries[0].from < from) { PopFront(); ++m_discarded[static_cast<size_t>(DiscardCause::Drop)]; }
+			if (m_count == 0) { ++m_sequential; m_consumedEpoch = 0; return false; }
+			const EntryKey& f = m_entries[0];
+			if (f.from == from && f.to == to && epoch != 0 && f.epoch == epoch) {
+				m_consumedEpoch = f.epoch;
+				if (slot != nullptr) *slot = m_slots[0];
+				PopFront();
+				++m_hits;
+				return true;
+			}
+			Discard(f.from == from && f.to == to ? DiscardCause::EpochMoved : DiscardCause::NextDiffers);
+			++m_sequential;
+			m_consumedEpoch = 0;
+			return false;
+		}
+
+		void AheadRing::Discard(DiscardCause c)
+		{
+			m_discarded[static_cast<size_t>(c)] += static_cast<unsigned long long>(m_count);
+			m_count = 0;
+		}
+
+		void AheadRing::PopFront()
+		{
+			for (int i = 1; i < m_count; ++i) {
+				m_entries[static_cast<size_t>(i - 1)] = m_entries[static_cast<size_t>(i)];
+				m_slots[static_cast<size_t>(i - 1)] = m_slots[static_cast<size_t>(i)];
+			}
+			--m_count;
+		}
+
+		bool AheadRing::SlotUsed(int slot) const
+		{
+			for (int i = 0; i < m_count; ++i)
+				if (m_slots[static_cast<size_t>(i)] == slot) return true;
+			return false;
+		}
+
+		int AheadFeed::Pending(const AheadRing& ring, uint64_t* out, int max, int* slots) const
+		{
+			int n = 0;
+			for (int i = 0; i < ring.Held() && n < max; ++i)
+				if (ring.At(i).to > m_lastPublished) {
+					if (slots != nullptr) slots[n] = ring.SlotAt(i);
+					out[n++] = ring.At(i).to;
+				}
+			return n;
+		}
+	}
+}
+
+namespace Dejudder
+{
+	void AheadSchedule::Note(Reason r)
+	{
+		last = r;
+		++counts[static_cast<size_t>(r)];
+	}
+
+	bool AheadSchedule::CheckConditions(const Conditions& c)
+	{
+		auto skip = [this](Reason r) { Note(r); return false; };
+		if (!c.enabled) return skip(Reason::Off);
+		if (!c.renderedWarp) return skip(Reason::SourceWarp);
+		if (!c.active) return skip(Reason::NotActive);
+		if (c.next == 0) return skip(Reason::NoNext);
+		if (c.after == 0) return skip(c.afterGap ? Reason::AfterGap : Reason::NoAfter);
+		if (c.after == c.next || c.after == c.source) return skip(Reason::AfterNotNew);
+		const bool estimatedOk = (c.estimated == c.source) ||
+			(!ring_.Empty() && c.estimated == ring_.At(ring_.Held() - 1).from);
+		if (!estimatedOk) return skip(Reason::NotEstimated);
+		if (!c.layoutMatches) return skip(Reason::Layout);
+		return true;
+	}
+
+	bool AheadSchedule::TryAheadSlot(const Conditions& c, const Steps& steps, int* outSlot)
+	{
+		if (outSlot != nullptr)
+			*outSlot = -1;
+		if (!CheckConditions(c))
+			return false;
+		VpMotion::LaneAhead::EntryKey key;
+		key.from = c.next;
+		key.to = c.after;
+		key.epoch = epochNow;
+		const int slot = ring_.FreeSlot();
+		if (!key.Valid() || ring_.Holds(key.from, key.to) || (!ring_.Empty() && key.from != ring_.BackTo()) || slot < 0)
+		{
+			ring_.Push(key, slot);
+			return false;
+		}
+		if (legacyFrom_ != 0)
+		{
+			++misses;
+			legacyFrom_ = legacyTo_ = legacyEpoch_ = 0;
+		}
+		if (!steps.snapshot || !steps.snapshot())
+		{
+			Note(Reason::SnapshotFailed);
+			return false;
+		}
+		// From here the copy is in use whatever happens.
+		if (!steps.uploadAfter || !steps.uploadAfter())
+		{
+			Note(Reason::UploadFailed);
+			return true;
+		}
+		if (!steps.estimate || !steps.estimate(c.next, c.after))
+		{
+			Note(Reason::EstimateFailed);
+			return true;
+		}
+		if (ring_.Push(key, slot) != VpMotion::LaneAhead::PushResult::Held)
+		{
+			Note(Reason::EstimateFailed);
+			return true;
+		}
+		if (outSlot != nullptr)
+			*outSlot = slot;
+		Note(Reason::Ahead);
+		return true;
+	}
+
+	bool AheadSchedule::TryAhead(const Conditions& c, const Steps& steps)
+	{
+		if (ring_.Capacity() > 1 && epochNow != 0)
+			return TryAheadSlot(c, steps, nullptr);
+		if (!CheckConditions(c))
+			return false;
+		if (!steps.snapshot || !steps.snapshot())
+		{
+			Note(Reason::SnapshotFailed);
+			return false;
+		}
+		// From here the copy is in use whatever happens.
+		if (!steps.uploadAfter || !steps.uploadAfter())
+		{
+			Note(Reason::UploadFailed);
+			return true;
+		}
+		if (!steps.estimate || !steps.estimate(c.next, c.after))
+		{
+			Note(Reason::EstimateFailed);
+			return true;
+		}
+		if (!ring_.Empty())
+			ring_.Discard(VpMotion::LaneAhead::DiscardCause::NextDiffers);
+		if (epochNow != 0 && c.after > c.next)
+		{
+			legacyFrom_ = legacyTo_ = legacyEpoch_ = 0;
+			VpMotion::LaneAhead::EntryKey key;
+			key.from = c.next;
+			key.to = c.after;
+			key.epoch = epochNow;
+			ring_.Push(key, ring_.FreeSlot());
+		}
+		else
+		{
+			legacyFrom_ = c.next;
+			legacyTo_ = c.after;
+			legacyEpoch_ = epochNow;
+		}
+		Note(Reason::Ahead);
+		return true;
+	}
+
+	bool AheadSchedule::Consume(uint64_t source, uint64_t next)
+	{
+		if (!ring_.Empty())
+		{
+			uint64_t targetEpoch = 0;
+			for (int i = 0; i < ring_.Held(); ++i)
+			{
+				if (ring_.At(i).from >= source)
+				{
+					targetEpoch = ring_.At(i).epoch;
+					break;
+				}
+			}
+			if (ring_.Consume(source, next, targetEpoch, nullptr))
+			{
+				++hits;
+				return true;
+			}
+			++misses;
+			++sequential;
+			return false;
+		}
+		if (legacyFrom_ != 0)
+		{
+			const bool hit = next != 0 && legacyFrom_ == source && legacyTo_ == next;
+			if (hit)
+				++hits;
+			else
+			{
+				++misses;
+				++sequential;
+			}
+			legacyFrom_ = legacyTo_ = legacyEpoch_ = 0;
+			return hit;
+		}
+		++sequential;
+		return false;
+	}
+
+	bool AheadSchedule::Consume(uint64_t source, uint64_t next, uint64_t epoch, int* outSlot)
+	{
+		if (outSlot != nullptr)
+			*outSlot = -1;
+		if (legacyFrom_ != 0)
+		{
+			const bool pair = next != 0 && legacyFrom_ == source && legacyTo_ == next;
+			const bool hit = pair && epoch != 0 && legacyEpoch_ == epoch;
+			const uint64_t ep = legacyEpoch_;
+			legacyFrom_ = legacyTo_ = legacyEpoch_ = 0;
+			if (hit)
+			{
+				++hits;
+				consumedEpoch = ep;
+				if (outSlot != nullptr)
+					*outSlot = 0;
+				return true;
+			}
+			++misses;
+			if (pair)
+				++epochMisses;
+			++sequential;
+			consumedEpoch = 0;
+			return false;
+		}
+		if (ring_.Empty())
+		{
+			++sequential;
+			consumedEpoch = 0;
+			return false;
+		}
+		const unsigned long long epochDiscardsBefore = ring_.Discarded(VpMotion::LaneAhead::DiscardCause::EpochMoved);
+		const bool hit = ring_.Consume(source, next, epoch, outSlot);
+		if (hit)
+		{
+			++hits;
+			consumedEpoch = ring_.ConsumedEpoch();
+			return true;
+		}
+		++misses;
+		if (ring_.Discarded(VpMotion::LaneAhead::DiscardCause::EpochMoved) > epochDiscardsBefore)
+			++epochMisses;
+		++sequential;
+		consumedEpoch = 0;
+		return false;
+	}
+
+	void AheadSchedule::SetCapacity(int depth)
+	{
+		ring_.SetCapacity(depth);
+	}
+
+	int AheadSchedule::Capacity() const
+	{
+		return ring_.Capacity();
+	}
+
+	int AheadSchedule::Held() const
+	{
+		return ring_.Held() + (legacyFrom_ != 0 ? 1 : 0);
+	}
+
+	int AheadSchedule::SlotAt(int i) const
+	{
+		return (i >= 0 && i < ring_.Held()) ? ring_.SlotAt(i) : -1;
+	}
+
+	const VpMotion::LaneAhead::EntryKey& AheadSchedule::EntryAt(int i) const
+	{
+		static const VpMotion::LaneAhead::EntryKey kEmpty;
+		return (i >= 0 && i < ring_.Held()) ? ring_.At(i) : kEmpty;
+	}
+
+	void AheadSchedule::Discard(VpMotion::LaneAhead::DiscardCause cause)
+	{
+		legacyFrom_ = legacyTo_ = legacyEpoch_ = 0;
+		ring_.Discard(cause);
+	}
+
+	void AheadSchedule::Reset()
+	{
+		legacyFrom_ = legacyTo_ = legacyEpoch_ = 0;
+		ring_.Reset();
+	}
+
+	const char* AheadSchedule::Name(Reason r)
+	{
+		switch (r)
+		{
+		case Reason::Ahead: return "estimated ahead";
+		case Reason::Off: return "off";
+		case Reason::SourceWarp: return "source warp";
+		case Reason::NotActive: return "de-judder not running";
+		case Reason::NoNext: return "next frame unknown";
+		case Reason::NoAfter: return "no frame after next (short queue)";
+		case Reason::AfterNotNew: return "frame after next not new";
+		case Reason::NotEstimated: return "this pair not estimated";
+		case Reason::Layout: return "frame after next in another layout";
+		case Reason::SnapshotFailed: return "copy failed";
+		case Reason::UploadFailed: return "upload failed";
+		case Reason::EstimateFailed: return "estimate failed";
+		case Reason::AfterGap: return "frame after next follows a gap";
+		default: return "?";
 		}
 	}
 }
