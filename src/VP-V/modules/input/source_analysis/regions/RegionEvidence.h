@@ -294,23 +294,22 @@ namespace RegionEvidence
 		return s;
 	}
 
-	// The split's block texel (E1, E2, E3, N) of block (bx, by): band energies over the block's picture pixels, raster
-	// order. On the GPU the grain split pass writes it; this is its reference. split must be on the same raster and grid.
+	// Block texel (E1, E2, E3, N) for (bx, by): reads P10 frame-span e1..e3 (GPU parity; falls back to frame-span sum if unpopulated).
 	template <class T>
 	inline void BandTexelBlock(const GrainSplit::Split& split, const Rect& picture, int bx, int by, T out[4])
 	{
-		out[0] = out[1] = out[2] = T(0);
-		out[3] = T(split.N[static_cast<size_t>(by) * split.bw + bx]);
-		const BlockSpan s = SpanOf(split.w, split.h, split.B, picture, bx, by);
-		if (s.Empty()) return;
+		const size_t idx = static_cast<size_t>(by) * split.bw + bx;
+		out[0] = out[1] = out[2] = T(0); out[3] = T(split.N[idx]);
+		if (SpanOf(split.w, split.h, split.B, picture, bx, by).Empty()) return;
+		if (idx < split.e1.size() && idx < split.e2.size() && idx < split.e3.size())
+		{ out[0] = T(split.e1[idx]); out[1] = T(split.e2[idx]); out[2] = T(split.e3[idx]); return; }
+		const int x0 = bx * split.B, y0 = by * split.B, x1 = (std::min)(x0 + split.B, split.w), y1 = (std::min)(y0 + split.B, split.h);
+		if (x1 <= x0 || y1 <= y0) return;
 		T e1 = T(0), e2 = T(0), e3 = T(0);
-		for (int y = s.y0; y < s.y1; ++y)
-			for (int x = s.x0; x < s.x1; ++x)
-			{
-				const T a = T(split.d1.at(x, y)), b = T(split.d2.at(x, y)), c = T(split.d3.at(x, y));
-				e1 += a * a; e2 += b * b; e3 += c * c;
-			}
-		const T inv = T(1) / T((s.x1 - s.x0) * (s.y1 - s.y0));
+		for (int y = y0; y < y1; ++y)
+			for (int x = x0; x < x1; ++x)
+			{ const T a = T(split.d1.at(x, y)), b = T(split.d2.at(x, y)), c = T(split.d3.at(x, y)); e1 += a * a; e2 += b * b; e3 += c * c; }
+		const T inv = T(1) / T((x1 - x0) * (y1 - y0));
 		out[0] = e1 * inv; out[1] = e2 * inv; out[2] = e3 * inv;
 	}
 
