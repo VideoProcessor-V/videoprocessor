@@ -654,6 +654,7 @@
     <ClCompile Include="..\VP-V\tests\suite\LedScriptLookaheadTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\LedDriveMeasurementTests.cpp" />
     <ClCompile Include="..\VP-V\modules\drive\led_measure\tests\LedFadeU7Tests.cpp" />
+    <ClCompile Include="..\VP-V\modules\drive\led_measure\tests\SourceStatsDisplayTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\LedDriveCompensateTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\LedScriptCorrelationTests.cpp" />
     <ClCompile Include="..\VP-V\tests\suite\CrashStateTests.cpp" />
