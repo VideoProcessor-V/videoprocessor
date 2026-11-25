@@ -700,12 +700,6 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
             }
         }
     }
-    // SD SHOULD-5: sync Sigma-Delta's temporal-detail product read unconditionally on every frame
-    // via TdProducts::ReadToday so TD fallback state engages and releases accurately even when
-    // de-judder is off or on cadence repeats (never re-reading a stale NextVectorGuard cache).
-    if (TdProducts::SyncRead(fallbacks, TdProducts::Consumer::SigmaDelta,
-        TdProducts::ReadToday(TdProducts::Consumer::SigmaDelta)))
-        DebugLog::Log("%s", fallbacks.Heading().c_str());
     dejudderNextVectorsSequence = 0;   // used (or not) once
     dejudderNextVectorsFrom = 0;
     VpResync::TakeIfDriving(resync, resyncDrive, VpResync::Reader::SigmaDelta);   // R3: checked by stamps above

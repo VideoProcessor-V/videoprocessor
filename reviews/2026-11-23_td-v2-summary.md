@@ -2,7 +2,7 @@
 
 **Date:** 2026-11-24  
 **Branch:** `gemini/td` (branched from W1 tip `bfd055d1f`; **OFF by default**, `Original == Bill` bit-exact)  
-**Drop-In Status (Honest Visibility — Rule 4):** **Temporal detail v2: library ready (not wired to live renderer yet — connects at Wave 4–6 integration).** Toggling `temporal_detail` in Config today persists the setting and exercises the settings parser/fingerprint/UI card, but does **not** yet execute in the live renderer or auto-enable the analysis lane until the single renderer `VPV-HOOK` connects during Wave 4–6 integration.
+**Drop-In Status (Honest Visibility — Rule 4):** **Temporal detail v2: library, unproven (not wired to live renderer yet — real-clip validation pending `TD-U0` and connects at Wave 4–6 integration).** Toggling `temporal_detail` in Config today persists the setting and exercises the settings parser/fingerprint/UI card, but does **not** yet execute in the live renderer or auto-enable the analysis lane until real-clip gates pass and the single renderer `VPV-HOOK` connects during Wave 4–6 integration. (Note: Q9a/Q9b sigma-delta / `DitherNeedSeam` / `CoreSegments.inl` changes were split onto `gemini/td-dither-split` per Owner Ruling #2 and Fable audit M-5.)
 
 ---
 
