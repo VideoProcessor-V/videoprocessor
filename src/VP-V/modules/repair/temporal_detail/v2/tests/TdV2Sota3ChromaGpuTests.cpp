@@ -1516,15 +1516,95 @@ namespace TdV2Sota3ChromaGpuNs
 			Assert::AreEqual(static_cast<uint64_t>(3ULL * static_cast<uint64_t>(lumaW) * static_cast<uint64_t>(lumaH) * 8ULL),
 				estUnidRgb444 - estUnidYuv444,
 				L"OPUS-M1: Rgb444 vs Yuv444 Unidentified scratch must differ by exact 3 full-res RG32F reduction textures");
-			Assert::AreEqual(estUnidRgb444, estUnidAgnostic,
-				L"OPUS-M1: format-agnostic Unidentified EstimatedScratchVramBytes must conservatively size full 4:4:4 + reduction");
+			const uint64_t codedPoolPerPx6 =
+				6ULL * static_cast<uint64_t>(VpSkeleton::BytesPerTexel(VpSkeleton::TexFormat::RG32F)) +
+				6ULL * static_cast<uint64_t>(VpSkeleton::BytesPerTexel(VpSkeleton::TexFormat::RGBA32F)) +
+				2ULL * static_cast<uint64_t>(VpSkeleton::BytesPerTexel(VpSkeleton::TexFormat::R16));
+			const uint64_t coded420And422Bytes = codedPoolPerPx6 * (
+				static_cast<uint64_t>(ChromaDetail::SubsampledDim(lumaW, 2)) * static_cast<uint64_t>(ChromaDetail::SubsampledDim(lumaH, 2)) +
+				static_cast<uint64_t>(ChromaDetail::SubsampledDim(lumaW, 2)) * static_cast<uint64_t>(lumaH));
+			Assert::AreEqual(estUnidRgb444 + coded420And422Bytes, estUnidAgnostic,
+				L"OPUS-M1: format-agnostic Unidentified EstimatedScratchVramBytes must equal deduplicated {4:2:0, 4:2:2, 4:4:4+reduce} union + 1 cell-grid set");
 			Assert::IsTrue(estUnidYuv444 > estId420HintOn444,
 				L"OPUS-M1: Unidentified full-grid 4:4:4 scratch must strictly exceed Identified 4:2:0-hint scratch");
 
 			const auto agnosticUnidReqs = TdV2ChromaGpuEngine::ArenaRequests(
 				ctx.gpu, lumaW, lumaH, ChromaSubsampling::Yuv420, kCanonicalBlockPx, ChromaGridStatus::Unidentified);
-			Assert::AreEqual(estUnidAgnostic, VpSkeleton::PlanArena(agnosticUnidReqs, VpSkeleton::Tier::T1).bytes,
+			const VpSkeleton::ArenaPlan agnosticUnidPlan = VpSkeleton::PlanArena(agnosticUnidReqs, VpSkeleton::Tier::T1);
+			Assert::AreEqual(estUnidAgnostic, agnosticUnidPlan.bytes,
 				L"OPUS-M1: format-agnostic Unidentified ArenaRequests must match EstimatedScratchVramBytes");
+			Assert::AreEqual(static_cast<size_t>(13u), agnosticUnidReqs.size(),
+				L"OPUS-M1: 96x96 Unidentified agnostic ArenaRequests must emit 3*3 coded + 4 cell = 13 unique shape requests");
+			Assert::AreEqual(agnosticUnidReqs.size(), agnosticUnidPlan.pools.size(),
+				L"OPUS-M1: 96x96 Unidentified agnostic ArenaRequests must have zero duplicate TexShape entries");
+			for (size_t a = 0; a < agnosticUnidReqs.size(); ++a)
+			{
+				for (size_t b = a + 1; b < agnosticUnidReqs.size(); ++b)
+					Assert::IsTrue(agnosticUnidReqs[a].shape != agnosticUnidReqs[b].shape);
+			}
+
+			// Verify lumaW == 1 / lumaH == 1 coded-grid collision deduplication (zero duplicate TexShape entries when dims collapse):
+			const int collapseCases[2][2] = { { 1, lumaH }, { lumaW, 1 } };
+			for (int ci = 0; ci < 2; ++ci)
+			{
+				const int cw1 = collapseCases[ci][0];
+				const int ch1 = collapseCases[ci][1];
+				const auto colReqs = TdV2ChromaGpuEngine::ArenaRequests(
+					ctx.gpu, cw1, ch1, ChromaSubsampling::Yuv420, kCanonicalBlockPx, ChromaGridStatus::Unidentified);
+				const VpSkeleton::ArenaPlan colPlan = VpSkeleton::PlanArena(colReqs, VpSkeleton::Tier::T1);
+				const uint64_t colEst = TdV2ChromaGpuEngine::EstimatedScratchVramBytes(
+					cw1, ch1, ChromaSubsampling::Yuv420, kCanonicalBlockPx, ChromaGridStatus::Unidentified);
+				Assert::AreEqual(colEst, colPlan.bytes,
+					L"OPUS-M1: collapsed-dim EstimatedScratchVramBytes must match PlanArena bytes");
+				Assert::AreEqual(static_cast<size_t>(10u), colReqs.size(),
+					L"OPUS-M1: lumaW==1 or lumaH==1 must deduplicate 3 coded grids into 2 (6 coded + 4 cell = 10 requests)");
+				Assert::AreEqual(colReqs.size(), colPlan.pools.size(),
+					L"OPUS-M1: collapsed-dim ArenaRequests must contain zero duplicate TexShape entries");
+				for (size_t a = 0; a < colReqs.size(); ++a)
+				{
+					for (size_t b = a + 1; b < colReqs.size(); ++b)
+					{
+						Assert::IsTrue(colReqs[a].shape != colReqs[b].shape,
+							L"OPUS-M1: no duplicate TexShape entries allowed when lumaW==1 or lumaH==1 collapses coded dims");
+					}
+				}
+				if (ci == 0)
+				{
+					const VpSkeleton::ArenaPool* pMerged = colPlan.FindPool(
+						VpSkeleton::TexShape{ 1u, static_cast<uint32_t>(lumaH), VpSkeleton::TexFormat::RG32F });
+					Assert::IsNotNull(pMerged);
+					Assert::AreEqual(static_cast<uint32_t>(9u), pMerged->capacity,
+						L"OPUS-M1: lumaW==1 must merge Yuv422(6) + Yuv444(9) into max(6,9)=9 RG32F (never 15)");
+				}
+				else
+				{
+					const VpSkeleton::ArenaPool* pMerged = colPlan.FindPool(
+						VpSkeleton::TexShape{ static_cast<uint32_t>(ChromaDetail::SubsampledDim(lumaW, 2)), 1u, VpSkeleton::TexFormat::RG32F });
+					Assert::IsNotNull(pMerged);
+					Assert::AreEqual(static_cast<uint32_t>(6u), pMerged->capacity,
+						L"OPUS-M1: lumaH==1 must merge Yuv420(6) + Yuv422(6) into max(6,6)=6 RG32F (never 12)");
+				}
+			}
+			{
+				const auto reqs1x1 = TdV2ChromaGpuEngine::ArenaRequests(
+					ctx.gpu, 1, 1, ChromaSubsampling::Yuv420, kCanonicalBlockPx, ChromaGridStatus::Unidentified);
+				const VpSkeleton::ArenaPlan plan1x1 = VpSkeleton::PlanArena(reqs1x1, VpSkeleton::Tier::T1);
+				const uint64_t est1x1 = TdV2ChromaGpuEngine::EstimatedScratchVramBytes(
+					1, 1, ChromaSubsampling::Yuv420, kCanonicalBlockPx, ChromaGridStatus::Unidentified);
+				const uint64_t est1x1Rgb = TdV2ChromaGpuEngine::EstimatedScratchVramBytesFor(
+					1, 1, ChromaSubsampling::Yuv420, DeliveredChromaFormat::Rgb444, kCanonicalBlockPx, ChromaGridStatus::Unidentified);
+				Assert::AreEqual(est1x1, plan1x1.bytes,
+					L"OPUS-M1: 1x1 EstimatedScratchVramBytes must match PlanArena bytes");
+				Assert::AreEqual(est1x1Rgb, est1x1,
+					L"OPUS-M1: 1x1 Unidentified agnostic scratch must deduplicate all 3 coded grids into 1 coded-grid set");
+				Assert::AreEqual(static_cast<size_t>(7u), reqs1x1.size(),
+					L"OPUS-M1: 1x1 Unidentified agnostic ArenaRequests must emit 3 coded + 4 cell = 7 requests");
+				const VpSkeleton::ArenaPool* p1x1Rg = plan1x1.FindPool(
+					VpSkeleton::TexShape{ 1u, 1u, VpSkeleton::TexFormat::RG32F });
+				Assert::IsNotNull(p1x1Rg);
+				Assert::AreEqual(static_cast<uint32_t>(10u), p1x1Rg->capacity,
+					L"OPUS-M1: 1x1 RG32F pool must hold 9 coded + 1 cell warpDiag = 10 textures (never 6+6+9+1=22)");
+			}
 
 			VpSkeleton::PlTexBackend backend(ctx.gpu);
 			const DeliveredChromaFormat delivFormats[2] = {
@@ -1851,6 +1931,170 @@ namespace TdV2Sota3ChromaGpuNs
 				Assert::IsFalse(siShortZc.IsActive(StandInKind::GpuPrivateScratchFallback),
 					L"Negative control: zero silent private scratch fallback allowed on ProcessChromaGpu");
 				Assert::AreEqual(static_cast<uint64_t>(0u), idArena.NestedScopes());
+			}
+
+			// 3. Reserve a real ScratchArena<PlTexBackend> from format-agnostic agnosticUnidReqs and execute
+			// ProcessChromaPlanes with gridStatus = ChromaGridStatus::Unidentified across ALL 4 delivered formats
+			// (Yuv420, Yuv422, Yuv444, Rgb444) on the shared format-agnostic arena:
+			VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> agnosticUnidArena(backend);
+			Assert::IsTrue(agnosticUnidArena.Reserve(agnosticUnidPlan),
+				L"OPUS-M1: ScratchArena Reserve must succeed for format-agnostic Unidentified union plan");
+
+			const std::vector<VpSkeleton::ArenaRequest> only444Reqs = TdV2ChromaGpuEngine::ArenaRequests(
+				ctx.gpu, lumaW, lumaH, ChromaSubsampling::Yuv420, DeliveredChromaFormat::Rgb444,
+				kCanonicalBlockPx, ChromaGridStatus::Unidentified);
+			VpSkeleton::ScratchArena<VpSkeleton::PlTexBackend> only444Arena(backend);
+			Assert::IsTrue(only444Arena.Reserve(VpSkeleton::PlanArena(only444Reqs, VpSkeleton::Tier::T1)),
+				L"OPUS-M1: single-shape 4:4:4 negative-control arena Reserve must succeed");
+
+			const DeliveredChromaFormat allFormats[4] = {
+				DeliveredChromaFormat::Yuv420,
+				DeliveredChromaFormat::Yuv422,
+				DeliveredChromaFormat::Yuv444,
+				DeliveredChromaFormat::Rgb444
+			};
+			for (int af = 0; af < 4; ++af)
+			{
+				const DeliveredChromaFormat afFmt = allFormats[af];
+				const bool afIsRgb = (afFmt == DeliveredChromaFormat::Rgb444);
+				const int afSubX = DeliveredSubsampleX(afFmt);
+				const int afSubY = DeliveredSubsampleY(afFmt);
+				const int afW = ChromaDetail::SubsampledDim(lumaW, afSubX);
+				const int afH = ChromaDetail::SubsampledDim(lumaH, afSubY);
+				const ActiveRect afFull = ActiveRect::Full(afW, afH);
+
+				TdV2Plane afMasterCb(afW, afH, 512.0), afMasterCr(afW, afH, 512.0);
+				TdV2Plane afCurCb(afW, afH, 512.0), afCurCr(afW, afH, 512.0);
+				TdV2Plane afLumaY(lumaW, lumaH, 500.0);
+				for (int y = 0; y < afH; ++y)
+				{
+					for (int x = 0; x < afW; ++x)
+					{
+						const double lowCb = 480.0 + 0.60 * static_cast<double>(x * afSubX) + 0.20 * static_cast<double>(y * afSubY);
+						const double lowCr = 544.0 - 0.55 * static_cast<double>(x * afSubX) - 0.18 * static_cast<double>(y * afSubY);
+						afMasterCb.at(x, y) = lowCb;
+						afMasterCr.at(x, y) = lowCr;
+						afCurCb.at(x, y) = std::nearbyint(lowCb / 20.0) * 20.0;
+						afCurCr.at(x, y) = std::nearbyint(lowCr / 20.0) * 20.0;
+					}
+				}
+
+				TdV2Plane afPrevCb = afMasterCb, afPrevCr = afMasterCr;
+				TdV2Plane afNextCb = afMasterCb, afNextCr = afMasterCr;
+				{
+					std::mt19937 rP(9801u + static_cast<uint32_t>(af)), rN(9811u + static_cast<uint32_t>(af));
+					std::normal_distribution<double> nd(0.0, 0.35);
+					for (size_t i = 0; i < afPrevCb.v.size(); ++i)
+					{
+						afPrevCb.v[i] += nd(rP); afPrevCr.v[i] += nd(rP);
+						afNextCb.v[i] += nd(rN); afNextCr.v[i] += nd(rN);
+					}
+				}
+
+				ChromaProcessInput afIn;
+				afIn.seq = static_cast<uint64_t>(750 + af);
+				afIn.lumaW = lumaW;
+				afIn.lumaH = lumaH;
+				afIn.deliveredFormat = afFmt;
+				afIn.codedSubsampling = ChromaSubsampling::Yuv420;
+				afIn.gridStatus = ChromaGridStatus::Unidentified;
+				afIn.siting = siting;
+				afIn.matrix = mat;
+				afIn.activeRect = lumaFull;
+				afIn.hasCleanSplit = true;
+				afIn.cleanCb = afCurCb;
+				afIn.cleanCr = afCurCr;
+				afIn.prevPeak = { &afPrevCb, &afPrevCr, &stillMf, false };
+				afIn.nextPeak = { &afNextCb, &afNextCr, &stillMf, false };
+				afIn.hasStepPrior = true;
+				afIn.estimatedStepDelta = 24.0;
+				afIn.deadZonePhi = kDeadZonePhiInter;
+				afIn.zeroCoeffFraction = 0.35;
+
+				if (afIsRgb)
+				{
+					afIn.receivedR = TdV2Plane(afW, afH, 0.0);
+					afIn.receivedG = TdV2Plane(afW, afH, 0.0);
+					afIn.receivedB = TdV2Plane(afW, afH, 0.0);
+					const double kR = 2.0 * (1.0 - mat.kr);
+					const double kB = 2.0 * (1.0 - mat.kb);
+					for (size_t i = 0; i < afCurCb.v.size(); ++i)
+					{
+						const double yv = afLumaY.v[i];
+						const double cb0 = afCurCb.v[i] - midCode;
+						const double cr0 = afCurCr.v[i] - midCode;
+						afIn.receivedR.v[i] = yv + kR * cr0;
+						afIn.receivedB.v[i] = yv + kB * cb0;
+						afIn.receivedG.v[i] = yv - (mat.kr * kR / mat.kg) * cr0 - (mat.kb * kB / mat.kg) * cb0;
+					}
+				}
+				else
+				{
+					afIn.receivedCb = afCurCb;
+					afIn.receivedCr = afCurCr;
+				}
+
+				TdV2ChromaEngine afCpuEng(cfg);
+				ChromaGpuGuard afGpuGuard(ctx.gpu, cfg);
+				StandInRegistry siAfCpu, siAfGpu;
+				agnosticUnidArena.BeginFrame();
+				const ChromaProcessResult afCpuRes = afCpuEng.ProcessFrame(afIn, &siAfCpu);
+				const ChromaGpuProcessResult afGpuRes =
+					afGpuGuard.engine.ProcessChromaPlanes(ctx.gpu, ctx.dispatch, afIn, &agnosticUnidArena, &siAfGpu);
+
+				Assert::IsTrue(afGpuRes.succeeded && !afGpuRes.scratchShort && !afGpuGuard.engine.ScratchShort(),
+					FmtMsg("OPUS-M1 agnosticUnidArena ProcessChromaPlanes must succeed on fmt=%.0f", static_cast<double>(af)).c_str());
+				Assert::IsTrue(afGpuRes.coarseBandOnly && afCpuRes.coarseBandOnly,
+					L"OPUS-M1: agnosticUnidArena run must set coarseBandOnly == true on every delivered format");
+				Assert::IsTrue(siAfGpu.IsActive(StandInKind::ChromaGridDetector) && siAfCpu.IsActive(StandInKind::ChromaGridDetector),
+					L"OPUS-M1: agnosticUnidArena run must visibly engage StandInKind::ChromaGridDetector on every format");
+				Assert::IsFalse(siAfGpu.IsActive(StandInKind::GpuScratchShortage),
+					L"OPUS-M1: agnosticUnidArena run must NOT engage StandInKind::GpuScratchShortage on any format");
+				Assert::IsFalse(siAfGpu.IsActive(StandInKind::GpuPrivateScratchFallback),
+					L"OPUS-M1: agnosticUnidArena run must NOT engage StandInKind::GpuPrivateScratchFallback on any format");
+				Assert::AreEqual(static_cast<uint64_t>(0u), agnosticUnidArena.NestedScopes(),
+					L"OPUS-M1: agnosticUnidArena scope must close cleanly on every format");
+				Assert::AreEqual(afW, afGpuRes.codedW, L"OPUS-M1: Unidentified codedW must match delivered width on every format");
+				Assert::AreEqual(afH, afGpuRes.codedH, L"OPUS-M1: Unidentified codedH must match delivered height on every format");
+
+				Assert::IsTrue(MaxAbsDiffRect(afCpuRes.deliveredDeltaCb, afGpuRes.deliveredDeltaCb, afFull) < 1e-2 &&
+				               MaxAbsDiffRect(afCpuRes.deliveredDeltaCr, afGpuRes.deliveredDeltaCr, afFull) < 1e-2 &&
+				               MaxAbsDiffRect(afCpuRes.codedDeltaCb, afGpuRes.codedDeltaCb, afFull) < 1e-2 &&
+				               MaxAbsDiffRect(afCpuRes.codedDeltaCr, afGpuRes.codedDeltaCr, afFull) < 1e-2,
+					FmtMsg("OPUS-M1 agnosticUnidArena fmt=%.0f CPU/GPU Branch-A parity failed", static_cast<double>(af)).c_str());
+				if (afIsRgb)
+				{
+					Assert::IsTrue(MaxAbsDiffRect(afCpuRes.outputR, afGpuRes.outputR, afFull) < 1e-2 &&
+					               MaxAbsDiffRect(afCpuRes.outputG, afGpuRes.outputG, afFull) < 1e-2 &&
+					               MaxAbsDiffRect(afCpuRes.outputB, afGpuRes.outputB, afFull) < 1e-2,
+						L"OPUS-M1: agnosticUnidArena Rgb444 output RGB must match CPU Branch-A within < 1e-2 codes");
+				}
+				else
+				{
+					Assert::IsTrue(MaxAbsDiffRect(afCpuRes.outputCb, afGpuRes.outputCb, afFull) < 1e-2 &&
+					               MaxAbsDiffRect(afCpuRes.outputCr, afGpuRes.outputCr, afFull) < 1e-2,
+						L"OPUS-M1: agnosticUnidArena YUV output Cb/Cr must match CPU Branch-A within < 1e-2 codes");
+				}
+
+				// Same-input negative control on Yuv420 & Yuv422: sizing an arena ONLY for 4:4:4 (without the 4:2:0/4:2:2 union)
+				// fails exact TexShape matching in ScratchArena::Acquire and visibly engages StandInKind::GpuScratchShortage!
+				if (af < 2)
+				{
+					ChromaGpuGuard only444Guard(ctx.gpu, cfg);
+					StandInRegistry siOnly444;
+					only444Arena.BeginFrame();
+					const ChromaGpuProcessResult rOnly444 =
+						only444Guard.engine.ProcessChromaPlanes(ctx.gpu, ctx.dispatch, afIn, &only444Arena, &siOnly444);
+					Assert::IsFalse(rOnly444.succeeded,
+						L"Negative control: 4:4:4-only arena must fail visibly on Unidentified Yuv420 / Yuv422 due to exact TexShape mismatch");
+					Assert::IsTrue(rOnly444.scratchShort && only444Guard.engine.ScratchShort(),
+						L"Negative control: 4:4:4-only arena on Unidentified Yuv420 / Yuv422 must report scratchShort == true");
+					Assert::IsTrue(siOnly444.IsActive(StandInKind::GpuScratchShortage),
+						L"Negative control: 4:4:4-only arena on Unidentified Yuv420 / Yuv422 must engage StandInKind::GpuScratchShortage");
+					Assert::IsFalse(siOnly444.IsActive(StandInKind::GpuPrivateScratchFallback),
+						L"Negative control: zero silent private scratch fallback allowed");
+					Assert::AreEqual(static_cast<uint64_t>(0u), only444Arena.NestedScopes());
+				}
 			}
 		}
 	};
