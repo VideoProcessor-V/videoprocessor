@@ -188,12 +188,16 @@ if (p.x < size.x && p.y < size.y) {
 			{ pl_var_vec4("nls_domain"), domain, true },
 			{ pl_var_float("grain_floor"), &grainFloor, true } };
 
-		const std::string header = std::string(mask ? "#define MASK\n" : "") + (grain ? "#define GRAIN\n" : "") +
-			MASK_HEADER;
+		static const std::string kHeaders[4] = {
+			std::string(MASK_HEADER),
+			std::string("#define MASK\n") + MASK_HEADER,
+			std::string("#define GRAIN\n") + MASK_HEADER,
+			std::string("#define MASK\n#define GRAIN\n") + MASK_HEADER };
+		const unsigned headerKey = (mask ? 1u : 0u) | (grain ? 2u : 0u);
 		pl_custom_shader custom{};
 		custom.description = grain ? "VideoProcessor occlusion mask and grain for the sigma-delta" :
 			"VideoProcessor occlusion mask for the sigma-delta";
-		custom.header = header.c_str();
+		custom.header = kHeaders[headerKey].c_str();
 		custom.body = MASK_BODY;
 		custom.input = PL_SHADER_SIG_NONE;
 		custom.output = PL_SHADER_SIG_NONE;

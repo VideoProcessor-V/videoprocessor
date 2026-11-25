@@ -8,6 +8,8 @@
 #include <libplacebo/shaders/custom.h>
 
 #include <cmath>
+#include <map>
+#include <mutex>
 #include <string>
 
 namespace DejudderRendered
@@ -135,7 +137,7 @@ if (q.x < size.x && q.y < size.y) {
 #ifdef OBJECT
                 vl = object_scale(vl);
 #endif
-                if (length(sc * vl - d) > LAND_A) m = 0.0;
+                if (length(sc * vl - d) > land_a) m = 0.0;
             }
 #endif
 #ifdef PIXEL_MOTION
@@ -294,13 +296,13 @@ if (b.x < size.x && b.y < size.y) {
 			return desc;
 		}
 
-		bool Compute(pl_dispatch dispatch, const char* description, const std::string& header, const char* body,
+		bool Compute(pl_dispatch dispatch, const char* description, const char* header, const char* body,
 			const pl_shader_desc* descriptors, int numDescriptors, const pl_shader_var* variables,
 			int numVariables, int w, int h)
 		{
 			pl_custom_shader custom{};
 			custom.description = description;
-			custom.header = header.empty() ? nullptr : header.c_str();
+			custom.header = (header && header[0]) ? header : nullptr;
 			custom.body = body;
 			custom.input = PL_SHADER_SIG_NONE;
 			custom.output = PL_SHADER_SIG_NONE;
@@ -414,7 +416,7 @@ if (b.x < size.x && b.y < size.y) {
 		else
 		{
 			const pl_shader_desc all[2] = { Sampled("src", src), Storage(tex) };
-			if (!Compute(params->dispatch, "VideoProcessor de-judder: cache A at PRE_OUTPUT", std::string(),
+			if (!Compute(params->dispatch, "VideoProcessor de-judder: cache A at PRE_OUTPUT", nullptr,
 				COPY_BODY, all, 2, nullptr, 0, w, h))
 			{
 				++failed;
@@ -530,20 +532,27 @@ if (b.x < size.x && b.y < size.y) {
 		const float objectStrength = ms.objectStrength;
 		const bool object = ms.objectStrength < 1.0f;
 		if (object) used[n++] = { pl_var_float("object_strength"), &objectStrength, true };
-		std::vector<pl_shader_desc> descriptors = {
-			Sampled("cached", cached), Sampled("field", field), Sampled("frame_trust", frameTrust), Storage(warped) };
-		if (subField) descriptors.push_back(Sampled("sub_field", subField));
-		if (object && camera) descriptors.push_back(Sampled("camera", camera));
+		pl_shader_desc descriptors[9];
+		int numDesc = 0;
+		descriptors[numDesc++] = Sampled("cached", cached);
+		descriptors[numDesc++] = Sampled("field", field);
+		descriptors[numDesc++] = Sampled("frame_trust", frameTrust);
+		descriptors[numDesc++] = Storage(warped);
+		if (subField) descriptors[numDesc++] = Sampled("sub_field", subField);
+		if (object && camera) descriptors[numDesc++] = Sampled("camera", camera);
 		// M6: the pixel weights (bilinear).
 		const bool pixel = ms.pixelTrust && pixelMask;
 		if (pixel)
 		{
 			pl_shader_desc mask = Sampled("pix_mask", pixelMask);
 			mask.binding.sample_mode = PL_TEX_SAMPLE_LINEAR;
-			descriptors.push_back(mask);
+			descriptors[numDesc++] = mask;
 			if (vectorOk)
-				descriptors.push_back(Sampled("vector_ok", vectorOk));
+				descriptors[numDesc++] = Sampled("vector_ok", vectorOk);
 		}
+		const bool landCheck = pixel && ms.landingCheck > 0.0f;
+		const float landA = ms.landingCheck;
+		if (landCheck) used[n++] = { pl_var_float("land_a"), &landA, true };
 		// Planner D2: the per-pixel displacement (rgba16f, the cache's size).
 		const bool writeDisp = displacementOut != nullptr;
 		if (writeDisp)
@@ -559,19 +568,44 @@ if (b.x < size.x && b.y < size.y) {
 			d.desc.type = PL_DESC_STORAGE_IMG;
 			d.desc.access = PL_DESC_ACCESS_WRITEONLY;
 			d.binding.object = displacement;
-			descriptors.push_back(d);
+			descriptors[numDesc++] = d;
 			used[n++] = { pl_var_float("step_fraction"), &stepFraction, true };
 		}
-		const std::string header = std::string(pixel ? "#define PIXEL_TRUST\n" : "") + (writeDisp ? "#define WRITE_DISP 1\n" : "") +
-			(pixel && ms.pixelTrustedVectors ? "#define PIXEL_TRUSTED_VECTORS 1\n" : "") +
-			(pixel && vectorOk ? "#define PIXEL_OWN_VECTORS 1\n" : "") +
-			(pixel && ms.pixelTrustMotion ? "#define PIXEL_MOTION 1\n" : "") +
-			(pixel && ms.landingCheck > 0.0f ? "#define LAND_A " + std::to_string(ms.landingCheck) + "\n" : std::string()) +
-			OcclusionMask::NlsMapGlsl() +
-			Dejudder::WarpHeader(ms, subField != nullptr, object && camera) + (g.numHolds > 0 ? HOLDS_GLSL : "") +
-			(pixel ? Dejudder::FieldAllGlsl() : "") + WARP_FUNCTIONS;
+		const uint32_t headerKey =
+			(pixel ? 1u : 0u) |
+			(writeDisp ? 2u : 0u) |
+			(pixel && ms.pixelTrustedVectors ? 4u : 0u) |
+			(pixel && vectorOk ? 8u : 0u) |
+			(pixel && ms.pixelTrustMotion ? 16u : 0u) |
+			(landCheck ? 32u : 0u) |
+			(object ? 64u : 0u) |
+			(object && camera ? 128u : 0u) |
+			(subField != nullptr ? 256u : 0u) |
+			(ms.holdFeatherPx > 0.0f ? 512u : 0u) |
+			(ms.blockTaper ? 1024u : 0u) |
+			(g.numHolds > 0 ? 2048u : 0u);
+		const char* header = nullptr;
+		{
+			static std::mutex cacheMutex;
+			static std::map<uint32_t, std::string> cache;
+			std::lock_guard<std::mutex> lock(cacheMutex);
+			auto it = cache.find(headerKey);
+			if (it == cache.end())
+			{
+				std::string assembled = std::string(pixel ? "#define PIXEL_TRUST\n" : "") + (writeDisp ? "#define WRITE_DISP 1\n" : "") +
+					(pixel && ms.pixelTrustedVectors ? "#define PIXEL_TRUSTED_VECTORS 1\n" : "") +
+					(pixel && vectorOk ? "#define PIXEL_OWN_VECTORS 1\n" : "") +
+					(pixel && ms.pixelTrustMotion ? "#define PIXEL_MOTION 1\n" : "") +
+					(landCheck ? "#define LAND_A 1\n" : "") +
+					OcclusionMask::NlsMapGlsl() +
+					Dejudder::WarpHeader(ms, subField != nullptr, object && camera) + (g.numHolds > 0 ? HOLDS_GLSL : "") +
+					(pixel ? Dejudder::FieldAllGlsl() : "") + WARP_FUNCTIONS;
+				it = cache.emplace(headerKey, std::move(assembled)).first;
+			}
+			header = it->second.c_str();
+		}
 		if (!Compute(dispatch, "VideoProcessor de-judder: warp the rendered picture (6d)", header, WARP_BODY,
-			descriptors.data(), static_cast<int>(descriptors.size()), used, n, w, h))
+			descriptors, numDesc, used, n, w, h))
 		{
 			error = "rendered warp rejected or failed";
 			return false;
@@ -683,16 +717,38 @@ if (b.x < size.x && b.y < size.y) {
 		const float objectStrength = fieldSettings.objectStrength;
 		const bool object = fieldSettings.objectStrength < 1.0f;
 		if (object) used[n++] = { pl_var_float("object_strength"), &objectStrength, true };
-		std::vector<pl_shader_desc> descriptors = {
-			Sampled("field", field), Sampled("frame_trust", frameTrust), Storage(vectors) };
-		if (subField) descriptors.push_back(Sampled("sub_field", subField));
-		if (object && camera) descriptors.push_back(Sampled("camera", camera));
-		const std::string header = std::string(toNext ? "#define TO_NEXT 1\n" : "") + OcclusionMask::NlsMapGlsl() +
-			Dejudder::WarpHeader(fieldSettings, subField != nullptr, object && camera) + (g.numHolds > 0 ? HOLDS_GLSL : "") +
-			WARP_FUNCTIONS_SOURCE_ONLY;
+		pl_shader_desc descriptors[5];
+		int numDesc = 0;
+		descriptors[numDesc++] = Sampled("field", field);
+		descriptors[numDesc++] = Sampled("frame_trust", frameTrust);
+		descriptors[numDesc++] = Storage(vectors);
+		if (subField) descriptors[numDesc++] = Sampled("sub_field", subField);
+		if (object && camera) descriptors[numDesc++] = Sampled("camera", camera);
+		const uint32_t headerKey =
+			(toNext ? 1u : 0u) |
+			(object ? 2u : 0u) |
+			(object && camera ? 4u : 0u) |
+			(subField != nullptr ? 8u : 0u) |
+			(fieldSettings.blockTaper ? 16u : 0u) |
+			(g.numHolds > 0 ? 32u : 0u);
+		const char* header = nullptr;
+		{
+			static std::mutex cacheMutex;
+			static std::map<uint32_t, std::string> cache;
+			std::lock_guard<std::mutex> lock(cacheMutex);
+			auto it = cache.find(headerKey);
+			if (it == cache.end())
+			{
+				std::string assembled = std::string(toNext ? "#define TO_NEXT 1\n" : "") + OcclusionMask::NlsMapGlsl() +
+					Dejudder::WarpHeader(fieldSettings, subField != nullptr, object && camera) + (g.numHolds > 0 ? HOLDS_GLSL : "") +
+					WARP_FUNCTIONS_SOURCE_ONLY;
+				it = cache.emplace(headerKey, std::move(assembled)).first;
+			}
+			header = it->second.c_str();
+		}
 		if (!Compute(dispatch, toNext ? "VideoProcessor sigma-delta vectors to the next frame (de-judder field)" :
 			"VideoProcessor sigma-delta vectors from the de-judder field (delta 8 R1)", header,
-			FIELD_BODY, descriptors.data(), static_cast<int>(descriptors.size()), used, n, bw, bh))
+			FIELD_BODY, descriptors, numDesc, used, n, bw, bh))
 		{
 			error = "vector field rejected or failed";
 			return false;

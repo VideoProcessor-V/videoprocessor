@@ -25,9 +25,11 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstring>
+#include <map>
+#include <mutex>
 #include <string>
 #include <vector>
-#include <cstring>
 
 namespace Dejudder
 {
@@ -2037,7 +2039,7 @@ if (q.x < size.x && q.y < size.y) {
 #ifdef OBJECT
             vl = object_scale(vl);
 #endif
-            if (length(from * luma_scale + sc * vl - lc) > LAND_A) m = 0.0;
+            if (length(from * luma_scale + sc * vl - lc) > land_a) m = 0.0;
         }
 #endif
 #ifdef PIXEL_MOTION
@@ -2095,7 +2097,7 @@ if (q.x < size.x && q.y < size.y) {
 #ifdef OBJECT
             vl = object_scale(vl);
 #endif
-            if (length(from * chroma_scale + sc * vl - c * chroma_scale) > LAND_A) m = 0.0;
+            if (length(from * chroma_scale + sc * vl - c * chroma_scale) > land_a) m = 0.0;
         }
 #endif
 #ifdef PIXEL_MOTION
@@ -2146,6 +2148,22 @@ if (q.x < size.x && q.y < size.y) {
 			desc.binding.object = tex;
 			return desc;
 		}
+
+		// GEM-147: thread-safe bitmask-keyed shader header cache (std::map node addresses stay stable across inserts).
+		struct ShaderHeaderCache
+		{
+			std::mutex mutex;
+			std::map<uint32_t, std::string> entries;
+			template <typename Builder>
+			const char* Get(uint32_t key, Builder&& build)
+			{
+				std::lock_guard<std::mutex> lock(mutex);
+				auto it = entries.find(key);
+				if (it == entries.end())
+					it = entries.emplace(key, build()).first;
+				return it->second.c_str();
+			}
+		};
 	}
 
 	MotionWarp::MotionWarp(pl_log logIn, pl_gpu gpuIn, const Settings& settingsIn)
@@ -2278,7 +2296,7 @@ if (q.x < size.x && q.y < size.y) {
 		pl_fmt vec4f = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 16, 16,
 			static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE));
 		if (!scalar || !vec4f) { error = "no storable float format"; return false; }
-		auto make = [this](pl_tex* tex, int w, int h, pl_fmt fmt, bool readable) -> bool
+		auto make = [this](pl_tex* tex, int w, int h, pl_fmt fmt, bool readable, bool blitDst = false) -> bool
 		{
 			pl_tex_params params{};
 			params.w = w;
@@ -2286,6 +2304,7 @@ if (q.x < size.x && q.y < size.y) {
 			params.format = fmt;
 			params.sampleable = true;
 			params.storable = true;
+			params.blit_dst = blitDst && (fmt->caps & PL_FMT_CAP_BLITTABLE) != 0;
 			params.host_readable = readable && (fmt->caps & PL_FMT_CAP_HOST_READABLE);
 			return pl_tex_recreate(gpu, tex, &params);
 		};
@@ -2300,7 +2319,7 @@ if (q.x < size.x && q.y < size.y) {
 			!ownLevel(&l2A, l2W, l2H) || !make(&l2B, l2W, l2H, scalar, readable) ||
 			!ownLevel(&halfK, halfW, halfH) || !ownLevel(&l1K, l1W, l1H) ||
 			!ownLevel(&l2K, l2W, l2H) ||
-			!make(&forward, blocksX, blocksY, vec4f, readable) || !make(&backward, blocksX, blocksY, vec4f, readable) ||
+			!make(&forward, blocksX, blocksY, vec4f, readable, true) || !make(&backward, blocksX, blocksY, vec4f, readable, true) ||
 			!make(&field, blocksX, blocksY, vec4f, readable) || !make(&frameTrust, 1, 1, vec4f, readable) ||
 			!make(&occlusion[0], blocksX, blocksY, vec4f, readable) || !make(&occlusion[1], blocksX, blocksY, vec4f, readable) ||
 			!make(&rawField, blocksX, blocksY, vec4f, readable) || !make(&fillOcclusion, blocksX, blocksY, vec4f, readable) ||
@@ -2423,6 +2442,13 @@ if (q.x < size.x && q.y < size.y) {
 		const bool inPlace = fieldTex->params.format && (fieldTex->params.format->caps & PL_FMT_CAP_READWRITE) != 0;
 		const int block = blockPixels;
 		const pl_shader_var vars[1] = { { pl_var_int("block_px"), &block, true } };
+		static ShaderHeaderCache headerCache;
+		const uint32_t headerKey = (inPlace ? 1u : 0u) | (subField ? 2u : 0u) | (same ? 4u : 0u) | (usePicture ? 8u : 0u);
+		const char* header = headerCache.Get(headerKey, [&]() {
+			return std::string(inPlace ? "#define IN_PLACE 1\n" : "") +
+				(subField ? "#define SUB_FIELD 1\n" : "") +
+				(same ? "#define luma_b luma_a\n" : "") + (usePicture ? "#define PICTURE 1\n" : "") + STILL_ZERO_HEADER;
+		});
 		if (inPlace)
 		{
 			pl_shader_desc fieldDesc{};
@@ -2430,19 +2456,16 @@ if (q.x < size.x && q.y < size.y) {
 			fieldDesc.desc.type = PL_DESC_STORAGE_IMG;
 			fieldDesc.desc.access = PL_DESC_ACCESS_READWRITE;
 			fieldDesc.binding.object = fieldTex;
-			std::vector<pl_shader_desc> desc;
-			desc.reserve(4);
-			desc.push_back(fieldDesc);
-			desc.push_back(Sampled("luma_a", a.luma, false));
+			pl_shader_desc desc[4];
+			int numDesc = 0;
+			desc[numDesc++] = fieldDesc;
+			desc[numDesc++] = Sampled("luma_a", a.luma, false);
 			if (!same)
-				desc.push_back(Sampled("luma_b", b.luma, false));
+				desc[numDesc++] = Sampled("luma_b", b.luma, false);
 			if (usePicture)
-				desc.push_back(Sampled("picture", picture, false));
-			const std::string header = std::string("#define IN_PLACE 1\n") +
-				(subField ? "#define SUB_FIELD 1\n" : "") +
-				(same ? "#define luma_b luma_a\n" : "") + (usePicture ? "#define PICTURE 1\n" : "") + STILL_ZERO_HEADER;
-			return Dispatch("VideoProcessor de-judder: identical blocks still", header.c_str(), STILL_ZERO_BODY,
-				desc.data(), static_cast<int>(desc.size()), vars, 1, w, h, 8);
+				desc[numDesc++] = Sampled("picture", picture, false);
+			return Dispatch("VideoProcessor de-judder: identical blocks still", header, STILL_ZERO_BODY,
+				desc, numDesc, vars, 1, w, h, 8);
 		}
 		pl_tex_params params = fieldTex->params;
 		if (!pl_tex_recreate(gpu, &scratch, &params))
@@ -2450,19 +2473,17 @@ if (q.x < size.x && q.y < size.y) {
 			error = "cannot create the still-block field";
 			return false;
 		}
-		std::vector<pl_shader_desc> desc;
-		desc.reserve(5);
-		desc.push_back(Sampled("src_field", fieldTex, false));
-		desc.push_back(Sampled("luma_a", a.luma, false));
+		pl_shader_desc desc[5];
+		int numDesc = 0;
+		desc[numDesc++] = Sampled("src_field", fieldTex, false);
+		desc[numDesc++] = Sampled("luma_a", a.luma, false);
 		if (!same)
-			desc.push_back(Sampled("luma_b", b.luma, false));
-		desc.push_back(Storage("dst", scratch));
+			desc[numDesc++] = Sampled("luma_b", b.luma, false);
+		desc[numDesc++] = Storage("dst", scratch);
 		if (usePicture)
-			desc.push_back(Sampled("picture", picture, false));
-		const std::string header = std::string(subField ? "#define SUB_FIELD 1\n" : "") +
-			(same ? "#define luma_b luma_a\n" : "") + (usePicture ? "#define PICTURE 1\n" : "") + STILL_ZERO_HEADER;
-		if (!Dispatch("VideoProcessor de-judder: identical blocks still", header.c_str(), STILL_ZERO_BODY,
-			desc.data(), static_cast<int>(desc.size()), vars, 1, w, h, 8))
+			desc[numDesc++] = Sampled("picture", picture, false);
+		if (!Dispatch("VideoProcessor de-judder: identical blocks still", header, STILL_ZERO_BODY,
+			desc, numDesc, vars, 1, w, h, 8))
 			return false;
 		// Copied back (not swapped): the published field / sub-field textures stay the same objects.
 		const pl_shader_desc copyDesc[2] = { Sampled("src", scratch, false), Storage("dst", fieldTex) };
@@ -2614,10 +2635,14 @@ if (q.x < size.x && q.y < size.y) {
 		const pl_shader_desc first[4] = { Sampled("src", luma, false), Storage("dst", half), Sampled("fade_state", fade, false),
 			Sampled("plain", plain, false) };
 		// The header carries the fade defines and the shared half-luma accessor (vpu_half_luma, unit U3).
-		const std::string header = std::string(withPlain ? "#define FADE_APPLY 1\n#define FADE_PLAIN 1\n" : fade ? "#define FADE_APPLY 1\n" : "") +
-			VpUnit::HalfLuma::Glsl();
+		static ShaderHeaderCache fadeApplyHeaders;
+		const uint32_t headerKey = (withPlain ? 1u : 0u) | (fade ? 2u : 0u);
+		const char* header = fadeApplyHeaders.Get(headerKey, [&]() {
+			return std::string(withPlain ? "#define FADE_APPLY 1\n#define FADE_PLAIN 1\n" : fade ? "#define FADE_APPLY 1\n" : "") +
+				VpUnit::HalfLuma::Glsl();
+		});
 		return Dispatch(fade ? "VideoProcessor de-judder: half-resolution luma after the fade (M4)" : "VideoProcessor de-judder: half-resolution luma",
-				header.c_str(), MatcherHalfPass().c_str(),
+				header, MatcherHalfPass().c_str(),
 				first, withPlain ? 4 : fade ? 3 : 2, variables, 1, halfW, halfH, 16) &&
 			Pyramid(half, l1, l2, 0, levels);
 	}
@@ -2865,17 +2890,27 @@ if (q.x < size.x && q.y < size.y) {
 		const bool two = globalTwo && settings.globalPrior;
 		if (cameraKeep || cameraStatic)
 		{
-			std::vector<pl_shader_desc> d(descriptors, descriptors + (two && !serialSearchForTest ? 11 : 10));
+			pl_shader_desc d[12];
+			int numD = two && !serialSearchForTest ? 11 : 10;
+			for (int i = 0; i < numD; ++i) d[i] = descriptors[i];
 			if (cameraKeep)
-				d.push_back(Sampled("camera_keep", cameraKeep, false));
-			const std::string defines = std::string(cameraKeep ? "#define CAMERA_KEEP 1\n" : "") + (cameraStatic ? "#define CAMERA_STATIC 1\n" : "");
+				d[numD++] = Sampled("camera_keep", cameraKeep, false);
+			static ShaderHeaderCache guidedSearchHeaders;
+			const uint32_t key = (serialSearchForTest ? 1u : 0u) | (two ? 2u : 0u) |
+				(cameraKeep ? 4u : 0u) | (cameraStatic ? 8u : 0u);
+			const char* h = guidedSearchHeaders.Get(key, [&]() {
+				const std::string defines = std::string(cameraKeep ? "#define CAMERA_KEEP 1\n" : "") +
+					(cameraStatic ? "#define CAMERA_STATIC 1\n" : "");
+				if (serialSearchForTest)
+					return defines + SEARCH_HEADER;
+				return std::string("#define SEARCH_NT 128\n") + (two ? "#define GLOBAL_TWO 1\n" : "") + defines +
+					SEARCH_HEADER + SEARCH_PARALLEL_HEADER;
+			});
 			if (serialSearchForTest)
-				return Dispatch("VideoProcessor de-judder: block search (serial reference)", (defines + SEARCH_HEADER).c_str(),
-					SEARCH_BODY_SERIAL, d.data(), static_cast<int>(d.size()), variables, 5, blocksX, blocksY, 8);
-			const std::string h = std::string("#define SEARCH_NT 128\n") + (two ? "#define GLOBAL_TWO 1\n" : "") + defines +
-				SEARCH_HEADER + SEARCH_PARALLEL_HEADER;
-			return DispatchPerBlock("VideoProcessor de-judder: block search", h.c_str(), SEARCH_BODY,
-				d.data(), static_cast<int>(d.size()), variables, 5, blocksX, blocksY, 16, 128 / 16);
+				return Dispatch("VideoProcessor de-judder: block search (serial reference)", h,
+					SEARCH_BODY_SERIAL, d, numD, variables, 5, blocksX, blocksY, 8);
+			return DispatchPerBlock("VideoProcessor de-judder: block search", h, SEARCH_BODY,
+				d, numD, variables, 5, blocksX, blocksY, 16, 128 / 16);
 		}
 		if (serialSearchForTest)
 			return Dispatch("VideoProcessor de-judder: block search (serial reference)", SEARCH_HEADER,
@@ -2919,23 +2954,35 @@ if (q.x < size.x && q.y < size.y) {
 		// Plan 19 phase 2 (camera guidance): only with a guidance frame; otherwise the dispatch below as before.
 		if (cameraKeep || cameraStatic)
 		{
-			std::vector<pl_shader_desc> d(descriptors, descriptors + 8);
+			pl_shader_desc d[9];
+			int numD = 8;
+			for (int i = 0; i < 8; ++i) d[i] = descriptors[i];
 			if (cameraKeep)
-				d.push_back(Sampled("camera_keep", cameraKeep, false));
-			const std::string defines = std::string(weightDefine) + (cameraKeep ? "#define CAMERA_KEEP 1\n" : "") +
-				(cameraStatic ? "#define CAMERA_STATIC 1\n" : "");
+				d[numD++] = Sampled("camera_keep", cameraKeep, false);
+			static ShaderHeaderCache guidedRefineHeaders;
+			const uint32_t key = (serialSearchForTest ? 1u : 0u) | (refineCarriesWeight ? 2u : 0u) |
+				(cameraKeep ? 4u : 0u) | (cameraStatic ? 8u : 0u);
+			const char* h = guidedRefineHeaders.Get(key, [&]() {
+				const std::string defines = std::string(weightDefine) + (cameraKeep ? "#define CAMERA_KEEP 1\n" : "") +
+					(cameraStatic ? "#define CAMERA_STATIC 1\n" : "");
+				if (serialSearchForTest)
+					return defines + SUBPEL_HEADER + GATE_GLSL + MEDIAN_GLSL;
+				return defines + SUBPEL_HEADER + GATE_GLSL + MEDIAN_GLSL + PERBLOCK_HEADER + REFINE_PAIR_HEADER;
+			});
 			if (serialSearchForTest)
 				return Dispatch("VideoProcessor de-judder: second sweep (11a E1, serial reference)",
-					(defines + SUBPEL_HEADER + GATE_GLSL + MEDIAN_GLSL).c_str(), REFINE_BODY_SERIAL,
-					d.data(), static_cast<int>(d.size()), variables, 6, blocksX, blocksY, 8);
-			const std::string h = defines + SUBPEL_HEADER + GATE_GLSL + MEDIAN_GLSL + PERBLOCK_HEADER + REFINE_PAIR_HEADER;
-			return DispatchPerBlock("VideoProcessor de-judder: second sweep (11a E1)", h.c_str(), REFINE_BODY,
-				d.data(), static_cast<int>(d.size()), variables, 6, (blocksX + 1) / 2, blocksY, 16, 2);
+					h, REFINE_BODY_SERIAL, d, numD, variables, 6, blocksX, blocksY, 8);
+			return DispatchPerBlock("VideoProcessor de-judder: second sweep (11a E1)", h, REFINE_BODY,
+				d, numD, variables, 6, (blocksX + 1) / 2, blocksY, 16, 2);
 		}
-		const std::string header = std::string(weightDefine) + SUBPEL_HEADER + GATE_GLSL + MEDIAN_GLSL;
 		if (serialSearchForTest)
-			return Dispatch("VideoProcessor de-judder: second sweep (11a E1, serial reference)", header.c_str(),
+		{
+			static const std::string serialPlain = std::string(SUBPEL_HEADER) + GATE_GLSL + MEDIAN_GLSL;
+			static const std::string serialWeighted = std::string("#define COST_W 1\n") + serialPlain;
+			return Dispatch("VideoProcessor de-judder: second sweep (11a E1, serial reference)",
+				refineCarriesWeight ? serialWeighted.c_str() : serialPlain.c_str(),
 				REFINE_BODY_SERIAL, descriptors, 8, variables, 6, blocksX, blocksY, 8);
+		}
 		static const std::string parallel = std::string(SUBPEL_HEADER) + GATE_GLSL + MEDIAN_GLSL + PERBLOCK_HEADER + REFINE_PAIR_HEADER;
 		static const std::string parallelWeighted = std::string("#define COST_W 1\n") + parallel;
 		return DispatchPerBlock("VideoProcessor de-judder: second sweep (11a E1)",
@@ -3009,14 +3056,23 @@ if (q.x < size.x && q.y < size.y) {
 			{ pl_var_float("cg_scale"), &scale, true }, { pl_var_float("cg_ratio"), &ratio, true },
 			{ pl_var_float("cg_sign"), &sign, true }, { pl_var_int("cg_radius"), &radius, false },
 			{ pl_var_float("cg_tol"), &tol, true }, { pl_var_float("cg_agree"), &agree, true } };
-		std::vector<pl_shader_desc> d = { Sampled("from_half", fromHalf, false), Sampled("to_half", toHalf, true),
-			Sampled("camera_guide", cgGuide, false), Sampled("camera_code", cgCode, false), Storage("dst", cgKeep[dir]) };
+		pl_shader_desc d[6];
+		int numD = 0;
+		d[numD++] = Sampled("from_half", fromHalf, false);
+		d[numD++] = Sampled("to_half", toHalf, true);
+		d[numD++] = Sampled("camera_guide", cgGuide, false);
+		d[numD++] = Sampled("camera_code", cgCode, false);
+		d[numD++] = Storage("dst", cgKeep[dir]);
 		if (e1)
-			d.push_back(Sampled("sweep", sweepIn, false));
-		const std::string header = std::string(e1 ? "#define CG_E1 1\n" : "") + (g.fadeNormalised ? "#define CG_FADE 1\n" : "") +
-			(e1 && refineCarriesWeight ? "#define COST_W 1\n" : "") + CameraModel::GuidedPassHeaderGlsl();
+			d[numD++] = Sampled("sweep", sweepIn, false);
+		static ShaderHeaderCache guidedPassHeaders;
+		const uint32_t key = (e1 ? 1u : 0u) | (g.fadeNormalised ? 2u : 0u) | (e1 && refineCarriesWeight ? 4u : 0u);
+		const char* header = guidedPassHeaders.Get(key, [&]() {
+			return std::string(e1 ? "#define CG_E1 1\n" : "") + (g.fadeNormalised ? "#define CG_FADE 1\n" : "") +
+				(e1 && refineCarriesWeight ? "#define COST_W 1\n" : "") + CameraModel::GuidedPassHeaderGlsl();
+		});
 		return Dispatch(e1 ? "VideoProcessor de-judder: camera guided E1 check (plan 19)" : "VideoProcessor de-judder: camera guided narrow search (plan 19)",
-			header.c_str(), CameraModel::GuidedPassBodyGlsl(), d.data(), static_cast<int>(d.size()), vars, 6, blocksX, blocksY, 8);
+			header, CameraModel::GuidedPassBodyGlsl(), d, numD, vars, 6, blocksX, blocksY, 8);
 	}
 
 	// The guided passes' accepted blocks, counted on the GPU into cgCounts (1x1): r/g = narrow accepted
@@ -3156,8 +3212,14 @@ if (li == 0) {
 		static const char* const fill = "ivec2 b = ivec2(gl_GlobalInvocationID.xy);\n"
 			"if (b.x < imageSize(dst).x && b.y < imageSize(dst).y) imageStore(dst, b, fillv);\n";
 		const float untrusted[4] = { 0.0f, 0.0f, 1.0e4f, 1.0f };
+		const union pl_clear_color clearColor = { { 0.0f, 0.0f, 1.0e4f, 1.0f } };
 		for (pl_tex t : { forward, backward })
 		{
+			if (t->params.blit_dst)
+			{
+				pl_tex_clear_ex(gpu, t, clearColor);
+				continue;
+			}
 			const pl_shader_desc out[1] = { Storage("dst", t) };
 			const pl_shader_var var[1] = { { pl_var_vec4("fillv"), untrusted, true } };
 			if (!Dispatch("VideoProcessor de-judder: searches skipped (camera model: cut / flash)", nullptr, fill, out, 1, var, 1,
@@ -3953,7 +4015,10 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		const bool withPicture = settings.pictureArea && picture;
 		const pl_shader_desc d[4] = { Sampled("l2_a", l2A, false), Sampled("l2_b", l2B, false), stateDesc,
 			Sampled("picture", picture, false) };
-		const std::string header = std::string(withPicture ? "#define PICTURE 1\n" : "") + VpUnit::CutFadeJudge::FadeKernelHeader();
+		static ShaderHeaderCache fadeMatchHeaders;
+		const char* header = fadeMatchHeaders.Get(withPicture ? 1u : 0u, [&]() {
+			return std::string(withPicture ? "#define PICTURE 1\n" : "") + VpUnit::CutFadeJudge::FadeKernelHeader();
+		});
 		// The test, then B's pyramid again with the gain applied (unchanged
 		// when the test fails).
 		// The window per frame: 0.75 to 24 codes per frame at the reference
@@ -3963,7 +4028,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		const VpUnit::CutFadeJudge::FadeParams fadeLaw;   // the unit's window (0.75 to 24 codes per reference frame)
 		const float fadeLo = fadeLaw.minStepCodes * perFrame, fadeHi = fadeLaw.maxStepCodes * perFrame;
 		const pl_shader_var fadeVars[2] = { { pl_var_float("fade_lo"), &fadeLo, true }, { pl_var_float("fade_hi"), &fadeHi, true } };
-		if (!Dispatch("VideoProcessor de-judder: fade test (M4)", header.c_str(), VpUnit::CutFadeJudge::FadeKernelBody(), d, withPicture ? 4 : 3, fadeVars, 2, 16, 16, 16))
+		if (!Dispatch("VideoProcessor de-judder: fade test (M4)", header, VpUnit::CutFadeJudge::FadeKernelBody(), d, withPicture ? 4 : 3, fadeVars, 2, 16, 16, 16))
 			return false;
 		// The uncorrected B stays in the K set for the next pair's A.
 		const int levels = keptLevels;
@@ -4317,36 +4382,46 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			// The consistency pass writes `field` directly, or a raw field that
 			// E3 (quarter-pel) and D3 (smoothing) refine into `field`.
 			const bool refined = settings.vectorSmooth || settings.estQpel;
-			std::vector<pl_shader_desc> descriptors = {
-				Sampled("fwd", forward, false), Sampled("bwd", backward, false),
-				Storage("dst", refined ? rawField : field) };
+			pl_shader_desc descriptors[6];
+			int numDescriptors = 0;
+			descriptors[numDescriptors++] = Sampled("fwd", forward, false);
+			descriptors[numDescriptors++] = Sampled("bwd", backward, false);
+			descriptors[numDescriptors++] = Storage("dst", refined ? rawField : field);
 			// Delta 9 H3: marginal blocks (up to taper_sad) pass the consistency
 			// check as trusted; the warp tapers them.
 			const float taperSad = settings.taperSad > 0.0f ? settings.taperSad : 2.0f * settings.matchTolerance;
 			const bool textureTol = settings.textureTolerance > 0.0f;
 			const float textureTolValue = settings.textureTolerance;
-			std::vector<pl_shader_var> consistencyVars = { variables[0], variables[1] };
+			pl_shader_var consistencyVars[5];
+			int numConsistencyVars = 0;
+			consistencyVars[numConsistencyVars++] = variables[0];
+			consistencyVars[numConsistencyVars++] = variables[1];
 			if (settings.blockTaper)
-				consistencyVars.push_back({ pl_var_float("taper_sad"), &taperSad, true });
+				consistencyVars[numConsistencyVars++] = { pl_var_float("taper_sad"), &taperSad, true };
 			if (textureTol)
-				consistencyVars.push_back({ pl_var_float("texture_tol"), &textureTolValue, true });
+				consistencyVars[numConsistencyVars++] = { pl_var_float("texture_tol"), &textureTolValue, true };
 			// The engine's trust weights (in the searches' w; 1 everywhere else): a weight of 0
 			// adds twice the pass limit to the block's error.
 			const bool ofTrust = settings.opticalFlow && (settings.opticalFlowCostTrust || settings.opticalFlowFbCheck);
 			const float ofPenalty = 2.0f * (settings.blockTaper ? taperSad : tolerance);
 			if (ofTrust)
-				consistencyVars.push_back({ pl_var_float("of_penalty"), &ofPenalty, true });
+				consistencyVars[numConsistencyVars++] = { pl_var_float("of_penalty"), &ofPenalty, true };
 			if (textureTol)
-				descriptors.push_back(Sampled("from_half", halfA, false));
+				descriptors[numDescriptors++] = Sampled("from_half", halfA, false);
 			const bool withPicture = settings.pictureArea && picture;
 			if (withPicture)
-				descriptors.push_back(Sampled("picture", picture, false));
-			const std::string consistencyHeader = std::string(settings.blockTaper ? "#define TAPER 1\n" : "") +
-				(textureTol ? "#define TEXTURE_TOL 1\n" : "") + (withPicture ? "#define PICTURE 1\n" : "") +
-				(ofTrust ? "#define OF_TRUST 1\n" : "");
-			if (!Dispatch("VideoProcessor de-judder: consistency", consistencyHeader.empty() ? nullptr : consistencyHeader.c_str(),
-				CONSISTENCY_BODY, descriptors.data(), static_cast<int>(descriptors.size()), consistencyVars.data(),
-				static_cast<int>(consistencyVars.size()), blocksX, blocksY, 8))
+				descriptors[numDescriptors++] = Sampled("picture", picture, false);
+			static ShaderHeaderCache consistencyHeaders;
+			const uint32_t cKey = (settings.blockTaper ? 1u : 0u) | (textureTol ? 2u : 0u) |
+				(withPicture ? 4u : 0u) | (ofTrust ? 8u : 0u);
+			const char* consistencyHeader = consistencyHeaders.Get(cKey, [&]() {
+				return std::string(settings.blockTaper ? "#define TAPER 1\n" : "") +
+					(textureTol ? "#define TEXTURE_TOL 1\n" : "") + (withPicture ? "#define PICTURE 1\n" : "") +
+					(ofTrust ? "#define OF_TRUST 1\n" : "");
+			});
+			if (!Dispatch("VideoProcessor de-judder: consistency", consistencyHeader[0] ? consistencyHeader : nullptr,
+				CONSISTENCY_BODY, descriptors, numDescriptors, consistencyVars,
+				numConsistencyVars, blocksX, blocksY, 8))
 				return false;
 			if (settings.estQpel)
 			{
@@ -4397,7 +4472,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 				// texels per block), then A's sub-blocks are checked against B's.
 				const float splitSad = settings.estSplitSad > 0.0f ? settings.estSplitSad : settings.matchTolerance;
 				const pl_shader_var splitVars[1] = { { pl_var_float("split_sad"), &splitSad, true } };
-				const std::string header = std::string(SUBPEL_HEADER) + SPLIT_SEARCH_BODY;
+				static const std::string header = std::string(SUBPEL_HEADER) + SPLIT_SEARCH_BODY;
 				for (int dir = 0; dir < 2; ++dir)
 				{
 					const pl_shader_desc splitDesc[4] = {
@@ -4453,37 +4528,43 @@ if (b.x < blocks.x && b.y < blocks.y) {
 					return false;
 				}
 			}
-			std::vector<pl_shader_desc> trustDescs = { Sampled("field", field, false), Storage("dst", frameTrust), stateDesc };
+			pl_shader_desc trustDescs[10];
+			int numTrustDescs = 0;
+			trustDescs[numTrustDescs++] = Sampled("field", field, false);
+			trustDescs[numTrustDescs++] = Storage("dst", frameTrust);
+			trustDescs[numTrustDescs++] = stateDesc;
 			if (settings.regionalHold)
 			{
-				trustDescs.push_back(Sampled("hist_a", l2A, false));
-				trustDescs.push_back(Sampled("hist_b", l2B, false));
+				trustDescs[numTrustDescs++] = Sampled("hist_a", l2A, false);
+				trustDescs[numTrustDescs++] = Sampled("hist_b", l2B, false);
 			}
 			const pl_tex activeFade = FadeStateTexture();
 			const bool fadeOn = settings.fadeMatch && activeFade != nullptr;
 			if (fadeOn)
-				trustDescs.push_back(Sampled("fade_state", activeFade, false));
+				trustDescs[numTrustDescs++] = Sampled("fade_state", activeFade, false);
 			if (rolloffGlobal || cameraOut)
-				trustDescs.push_back(Sampled("global_vec", globalVector[0], false));
+				trustDescs[numTrustDescs++] = Sampled("global_vec", globalVector[0], false);
 			if (cameraOut)
-				trustDescs.push_back(Storage("camera_out", camera));
+				trustDescs[numTrustDescs++] = Storage("camera_out", camera);
 			const bool trustPicture = settings.pictureArea && picture;
 			if (trustPicture)
-				trustDescs.push_back(Sampled("picture", picture, false));
+				trustDescs[numTrustDescs++] = Sampled("picture", picture, false);
 			const float rollLo = settings.rollLo, rollHi = settings.rollHi, rollFloor = std::min(1.0f, std::max(0.0f, settings.rollFloor));
-			std::vector<pl_shader_var> trustVarList(trustVars, trustVars + 5);
+			pl_shader_var trustVarList[15];
+			int numTrustVars = 5;
+			for (int vi = 0; vi < 5; ++vi) trustVarList[vi] = trustVars[vi];
 			const float cutHist = settings.cutHistogram;
 			if (settings.regionalHold)
-				trustVarList.push_back({ pl_var_float("cut_hist"), &cutHist, true });
+				trustVarList[numTrustVars++] = { pl_var_float("cut_hist"), &cutHist, true };
 			const float fadeFloor = std::min(1.0f, std::max(0.0f, settings.fadeFloor));
 			if (fadeOn || u7Known)
-				trustVarList.push_back({ pl_var_float("fade_floor"), &fadeFloor, true });
+				trustVarList[numTrustVars++] = { pl_var_float("fade_floor"), &fadeFloor, true };
 			const int u7CutVar = u7Cut ? 1 : 0;
 			const int u7FadeVar = u7Fade ? 1 : 0;
 			if (u7Known)
 			{
-				trustVarList.push_back({ pl_var_int("u7_cut"), &u7CutVar, true });
-				trustVarList.push_back({ pl_var_int("u7_fade"), &u7FadeVar, true });
+				trustVarList[numTrustVars++] = { pl_var_int("u7_cut"), &u7CutVar, true };
+				trustVarList[numTrustVars++] = { pl_var_int("u7_fade"), &u7FadeVar, true };
 			}
 			// The refinement's window: the global moves in half-texel steps (4 px at full size,
 			// 8 px when the low-resolution matcher searched); wider than half a step, 6 px minimum.
@@ -4491,21 +4572,26 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			// Fixed-constant batch B4 (2026-10-18, general_rate_fixes): continuous in the height.
 			const float cameraWindow = DejudderPolicy::CameraWindowPixels(SearchHalvings(), height, settings.generalRates);
 			if (rolloffGlobal || cameraOut)
-				trustVarList.push_back({ pl_var_float("camera_window"), &cameraWindow, true });
+				trustVarList[numTrustVars++] = { pl_var_float("camera_window"), &cameraWindow, true };
 			if (settings.motionRolloff)
 			{
-				trustVarList.push_back({ pl_var_float("roll_lo"), &rollLo, true });
-				trustVarList.push_back({ pl_var_float("roll_hi"), &rollHi, true });
-				trustVarList.push_back({ pl_var_float("roll_floor"), &rollFloor, true });
+				trustVarList[numTrustVars++] = { pl_var_float("roll_lo"), &rollLo, true };
+				trustVarList[numTrustVars++] = { pl_var_float("roll_hi"), &rollHi, true };
+				trustVarList[numTrustVars++] = { pl_var_float("roll_floor"), &rollFloor, true };
 			}
-			const std::string trustHeader = std::string(settings.motionRolloff ? "#define ROLLOFF 1\n" : "") +
-				(rolloffGlobal ? "#define ROLLOFF_GLOBAL 1\n" : "") + (cameraOut ? "#define CAMERA_OUT 1\n" : "") +
-				(settings.regionalHold ? "#define REGIONAL 1\n" : "") + (fadeOn ? "#define FADE 1\n" : "") +
-				(u7Known ? "#define U7_SCENE 1\n" : "") +
-				(trustPicture ? "#define PICTURE 1\n" : "") + FrameTrustHeader();
-			const pl_shader_desc* trustDesc = trustDescs.data();
-			if (!Dispatch("VideoProcessor de-judder: frame trust", trustHeader.c_str(), FrameTrustBody().c_str(),
-				trustDesc, static_cast<int>(trustDescs.size()), trustVarList.data(), static_cast<int>(trustVarList.size()), 16, 16, 16))
+			static ShaderHeaderCache trustHeaders;
+			const uint32_t tKey = (settings.motionRolloff ? 1u : 0u) | (rolloffGlobal ? 2u : 0u) |
+				(cameraOut ? 4u : 0u) | (settings.regionalHold ? 8u : 0u) | (fadeOn ? 16u : 0u) |
+				(u7Known ? 32u : 0u) | (trustPicture ? 64u : 0u);
+			const char* trustHeader = trustHeaders.Get(tKey, [&]() {
+				return std::string(settings.motionRolloff ? "#define ROLLOFF 1\n" : "") +
+					(rolloffGlobal ? "#define ROLLOFF_GLOBAL 1\n" : "") + (cameraOut ? "#define CAMERA_OUT 1\n" : "") +
+					(settings.regionalHold ? "#define REGIONAL 1\n" : "") + (fadeOn ? "#define FADE 1\n" : "") +
+					(u7Known ? "#define U7_SCENE 1\n" : "") +
+					(trustPicture ? "#define PICTURE 1\n" : "") + FrameTrustHeader();
+			});
+			if (!Dispatch("VideoProcessor de-judder: frame trust", trustHeader, FrameTrustBody().c_str(),
+				trustDescs, numTrustDescs, trustVarList, numTrustVars, 16, 16, 16))
 				return false;
 			if (settings.holdHysteresis > 1)
 			{
@@ -4604,13 +4690,19 @@ if (b.x < blocks.x && b.y < blocks.y) {
 				if (!Dispatch("VideoProcessor de-judder: pixel trust vectors (M6)", nullptr, VECTOR_OK_BODY, okDesc, 3, okVars, 2, blocksX, blocksY, 8))
 					return false;
 			}
-			std::vector<pl_shader_desc> maskDescs(maskDesc, maskDesc + 4);
+			pl_shader_desc maskDescs[5];
+			int numMaskDescs = 4;
+			for (int mi = 0; mi < 4; ++mi) maskDescs[mi] = maskDesc[mi];
 			if (own)
-				maskDescs.push_back(Sampled("vector_ok", vectorOk, false));
-			const std::string maskHeader = std::string(settings.pixelTrustedVectors ? "#define PIXEL_TRUSTED_VECTORS 1\n" : "") +
-				(own ? "#define PIXEL_OWN_VECTORS 1\n" : "") + (fast ? "#define PIXEL_FAST 1\n" : "") + PIXEL_MASK_HEADER;
-			if (!Dispatch("VideoProcessor de-judder: pixel trust (M6)", maskHeader.c_str(), PIXEL_MASK_BODY, maskDescs.data(),
-					static_cast<int>(maskDescs.size()), maskVars, fast ? 6 : 4, halfW, halfH, 16))
+				maskDescs[numMaskDescs++] = Sampled("vector_ok", vectorOk, false);
+			static ShaderHeaderCache pixelMaskHeaders;
+			const uint32_t mKey = (settings.pixelTrustedVectors ? 1u : 0u) | (own ? 2u : 0u) | (fast ? 4u : 0u);
+			const char* maskHeader = pixelMaskHeaders.Get(mKey, [&]() {
+				return std::string(settings.pixelTrustedVectors ? "#define PIXEL_TRUSTED_VECTORS 1\n" : "") +
+					(own ? "#define PIXEL_OWN_VECTORS 1\n" : "") + (fast ? "#define PIXEL_FAST 1\n" : "") + PIXEL_MASK_HEADER;
+			});
+			if (!Dispatch("VideoProcessor de-judder: pixel trust (M6)", maskHeader, PIXEL_MASK_BODY, maskDescs,
+					numMaskDescs, maskVars, fast ? 6 : 4, halfW, halfH, 16))
 				return false;
 			pixelMaskReady = true;
 		}
@@ -4807,48 +4899,73 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		const bool withCamera = Camera() != nullptr;
 		// M6: the pixel weights (source warp).
 		const bool pixel = settings.pixelTrust && pixelMaskReady && pixelMask;
-		const std::string header = std::string(fill ? "#define FILL\n" : "") + (pixel ? "#define PIXEL_TRUST\n" : "") +
-			(pixel && settings.pixelTrustedVectors ? "#define PIXEL_TRUSTED_VECTORS 1\n" : "") +
-			(pixel && PixelOwnVectors() ? "#define PIXEL_OWN_VECTORS 1\n" : "") +
-			(pixel && settings.pixelTrustMotion ? "#define PIXEL_MOTION 1\n" : "") +
-			(pixel && settings.landingCheck > 0.0f ? "#define LAND_A " + std::to_string(settings.landingCheck) + "\n" : std::string()) +
-			WarpHeader(settings, split, withCamera) + (fill ? FILL_HEADER : "") + (pixel ? FIELD_ALL_GLSL : "") +
-			(settings.sourceWarpCatmull ? std::string(GrainPreserve::CatmullGlsl()) + WARP_SAMPLE_CATMULL : std::string(WARP_SAMPLE_BILINEAR));
+		const bool ownVectors = pixel && PixelOwnVectors();
+		const bool landCheck = pixel && settings.landingCheck > 0.0f;
+		const float landA = settings.landingCheck;
+		static ShaderHeaderCache warpHeaders;
+		const uint32_t wKey =
+			(fill ? 1u : 0u) |
+			(pixel ? 2u : 0u) |
+			(pixel && settings.pixelTrustedVectors ? 4u : 0u) |
+			(ownVectors ? 8u : 0u) |
+			(pixel && settings.pixelTrustMotion ? 16u : 0u) |
+			(landCheck ? 32u : 0u) |
+			(settings.objectStrength < 1.0f ? 64u : 0u) |
+			(withCamera ? 128u : 0u) |
+			(split ? 256u : 0u) |
+			(settings.holdFeatherPx > 0.0f ? 512u : 0u) |
+			(settings.blockTaper ? 1024u : 0u) |
+			(settings.sourceWarpCatmull ? 2048u : 0u);
+		const char* header = warpHeaders.Get(wKey, [&]() {
+			return std::string(fill ? "#define FILL\n" : "") + (pixel ? "#define PIXEL_TRUST\n" : "") +
+				(pixel && settings.pixelTrustedVectors ? "#define PIXEL_TRUSTED_VECTORS 1\n" : "") +
+				(ownVectors ? "#define PIXEL_OWN_VECTORS 1\n" : "") +
+				(pixel && settings.pixelTrustMotion ? "#define PIXEL_MOTION 1\n" : "") +
+				(landCheck ? "#define LAND_A 1\n" : "") +
+				WarpHeader(settings, split, withCamera) + (fill ? FILL_HEADER : "") + (pixel ? FIELD_ALL_GLSL : "") +
+				(settings.sourceWarpCatmull ? std::string(GrainPreserve::CatmullGlsl()) + WARP_SAMPLE_CATMULL : std::string(WARP_SAMPLE_BILINEAR));
+		});
 		const float objectStrength = settings.objectStrength;
 		// Delta 9: H1 in luma (source) pixels; H3 thresholds.
 		const float featherPx = settings.holdFeatherPx;
 		const float taperTol = settings.matchTolerance;
 		const float taperSadW = settings.taperSad > 0.0f ? settings.taperSad : 2.0f * settings.matchTolerance;
-		std::vector<pl_shader_desc> lumaDesc = {
-			Sampled("src", a.luma, true), Sampled("field", field, false),
-			Sampled("frame_trust", frameTrust, false), Storage("dst", dstLuma) };
+		pl_shader_desc lumaDesc[11];
+		int numLumaDesc = 0;
+		lumaDesc[numLumaDesc++] = Sampled("src", a.luma, true);
+		lumaDesc[numLumaDesc++] = Sampled("field", field, false);
+		lumaDesc[numLumaDesc++] = Sampled("frame_trust", frameTrust, false);
+		lumaDesc[numLumaDesc++] = Storage("dst", dstLuma);
 		if (fill)
 		{
-			lumaDesc.push_back(Sampled("src_b", lastB.luma, true));
-			lumaDesc.push_back(Sampled("fill_bwd", backward, false));
-			lumaDesc.push_back(Sampled("fill_occ", activeFillOcclusion, false));
+			lumaDesc[numLumaDesc++] = Sampled("src_b", lastB.luma, true);
+			lumaDesc[numLumaDesc++] = Sampled("fill_bwd", backward, false);
+			lumaDesc[numLumaDesc++] = Sampled("fill_occ", activeFillOcclusion, false);
 		}
 		if (split)
-			lumaDesc.push_back(Sampled("sub_field", subField, false));
+			lumaDesc[numLumaDesc++] = Sampled("sub_field", subField, false);
 		if (pixel)
-			lumaDesc.push_back(Sampled("pix_mask", pixelMask, true));
-		if (pixel && PixelOwnVectors())
-			lumaDesc.push_back(Sampled("vector_ok", vectorOk, false));
+			lumaDesc[numLumaDesc++] = Sampled("pix_mask", pixelMask, true);
+		if (ownVectors)
+			lumaDesc[numLumaDesc++] = Sampled("vector_ok", vectorOk, false);
 		if (withCamera)
-			lumaDesc.push_back(Sampled("camera", camera, false));
-		std::vector<pl_shader_var> lumaVars = { { pl_var_float("shift"), &shift, true },
-			{ pl_var_vec2("luma_scale"), lumaScale, true },
-			{ pl_var_float("min_trusted_share"), &minShare, true } };
-		if (fill) lumaVars.push_back({ pl_var_float("fill_tolerance"), &tolerance, true });
-		if (settings.holdFeatherPx > 0.0f) lumaVars.push_back({ pl_var_float("feather_px"), &featherPx, true });
+			lumaDesc[numLumaDesc++] = Sampled("camera", camera, false);
+		pl_shader_var lumaVars[10];
+		int numLumaVars = 0;
+		lumaVars[numLumaVars++] = { pl_var_float("shift"), &shift, true };
+		lumaVars[numLumaVars++] = { pl_var_vec2("luma_scale"), lumaScale, true };
+		lumaVars[numLumaVars++] = { pl_var_float("min_trusted_share"), &minShare, true };
+		if (fill) lumaVars[numLumaVars++] = { pl_var_float("fill_tolerance"), &tolerance, true };
+		if (settings.holdFeatherPx > 0.0f) lumaVars[numLumaVars++] = { pl_var_float("feather_px"), &featherPx, true };
 		if (settings.blockTaper)
 		{
-			lumaVars.push_back({ pl_var_float("taper_tol"), &taperTol, true });
-			lumaVars.push_back({ pl_var_float("taper_sad"), &taperSadW, true });
+			lumaVars[numLumaVars++] = { pl_var_float("taper_tol"), &taperTol, true };
+			lumaVars[numLumaVars++] = { pl_var_float("taper_sad"), &taperSadW, true };
 		}
-		if (settings.objectStrength < 1.0f) lumaVars.push_back({ pl_var_float("object_strength"), &objectStrength, true });
-		if (!Dispatch("VideoProcessor de-judder: warp luma", header.c_str(), WARP_LUMA_BODY,
-			lumaDesc.data(), static_cast<int>(lumaDesc.size()), lumaVars.data(), static_cast<int>(lumaVars.size()),
+		if (settings.objectStrength < 1.0f) lumaVars[numLumaVars++] = { pl_var_float("object_strength"), &objectStrength, true };
+		if (landCheck) lumaVars[numLumaVars++] = { pl_var_float("land_a"), &landA, true };
+		if (!Dispatch("VideoProcessor de-judder: warp luma", header, WARP_LUMA_BODY,
+			lumaDesc, numLumaDesc, lumaVars, numLumaVars,
 			a.luma->params.w, a.luma->params.h, 16))
 			return false;
 		// Estimate (luma) px per chroma px: the subsampling, or on a processed target the real
@@ -4856,37 +4973,42 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		const float chromaScale[2] = {
 			processedTarget ? static_cast<float>(width) / static_cast<float>(a.chroma->params.w) : static_cast<float>(1 << a.chromaShiftX),
 			processedTarget ? static_cast<float>(height) / static_cast<float>(a.chroma->params.h) : static_cast<float>(1 << a.chromaShiftY) };
-		std::vector<pl_shader_desc> chromaDesc = {
-			Sampled("src", a.chroma, true), Sampled("field", field, false),
-			Sampled("frame_trust", frameTrust, false), Storage("dst", dstChroma) };
+		pl_shader_desc chromaDesc[11];
+		int numChromaDesc = 0;
+		chromaDesc[numChromaDesc++] = Sampled("src", a.chroma, true);
+		chromaDesc[numChromaDesc++] = Sampled("field", field, false);
+		chromaDesc[numChromaDesc++] = Sampled("frame_trust", frameTrust, false);
+		chromaDesc[numChromaDesc++] = Storage("dst", dstChroma);
 		if (fill)
 		{
-			chromaDesc.push_back(Sampled("src_b", lastB.chroma, true));
-			chromaDesc.push_back(Sampled("fill_bwd", backward, false));
-			chromaDesc.push_back(Sampled("fill_occ", activeFillOcclusion, false));
+			chromaDesc[numChromaDesc++] = Sampled("src_b", lastB.chroma, true);
+			chromaDesc[numChromaDesc++] = Sampled("fill_bwd", backward, false);
+			chromaDesc[numChromaDesc++] = Sampled("fill_occ", activeFillOcclusion, false);
 		}
 		if (split)
-			chromaDesc.push_back(Sampled("sub_field", subField, false));
+			chromaDesc[numChromaDesc++] = Sampled("sub_field", subField, false);
 		if (pixel)
-			chromaDesc.push_back(Sampled("pix_mask", pixelMask, true));
-		if (pixel && PixelOwnVectors())
-			chromaDesc.push_back(Sampled("vector_ok", vectorOk, false));
+			chromaDesc[numChromaDesc++] = Sampled("pix_mask", pixelMask, true);
+		if (ownVectors)
+			chromaDesc[numChromaDesc++] = Sampled("vector_ok", vectorOk, false);
 		if (withCamera)
-			chromaDesc.push_back(Sampled("camera", camera, false));
-		std::vector<pl_shader_var> chromaVars = {
-			{ pl_var_float("shift"), &shift, true },
-			{ pl_var_vec2("chroma_scale"), chromaScale, true },
-			{ pl_var_float("min_trusted_share"), &minShare, true } };
-		if (fill) chromaVars.push_back({ pl_var_float("fill_tolerance"), &tolerance, true });
-		if (settings.holdFeatherPx > 0.0f) chromaVars.push_back({ pl_var_float("feather_px"), &featherPx, true });
+			chromaDesc[numChromaDesc++] = Sampled("camera", camera, false);
+		pl_shader_var chromaVars[10];
+		int numChromaVars = 0;
+		chromaVars[numChromaVars++] = { pl_var_float("shift"), &shift, true };
+		chromaVars[numChromaVars++] = { pl_var_vec2("chroma_scale"), chromaScale, true };
+		chromaVars[numChromaVars++] = { pl_var_float("min_trusted_share"), &minShare, true };
+		if (fill) chromaVars[numChromaVars++] = { pl_var_float("fill_tolerance"), &tolerance, true };
+		if (settings.holdFeatherPx > 0.0f) chromaVars[numChromaVars++] = { pl_var_float("feather_px"), &featherPx, true };
 		if (settings.blockTaper)
 		{
-			chromaVars.push_back({ pl_var_float("taper_tol"), &taperTol, true });
-			chromaVars.push_back({ pl_var_float("taper_sad"), &taperSadW, true });
+			chromaVars[numChromaVars++] = { pl_var_float("taper_tol"), &taperTol, true };
+			chromaVars[numChromaVars++] = { pl_var_float("taper_sad"), &taperSadW, true };
 		}
-		if (settings.objectStrength < 1.0f) chromaVars.push_back({ pl_var_float("object_strength"), &objectStrength, true });
-		if (!Dispatch("VideoProcessor de-judder: warp chroma", header.c_str(), WARP_CHROMA_BODY,
-			chromaDesc.data(), static_cast<int>(chromaDesc.size()), chromaVars.data(), static_cast<int>(chromaVars.size()),
+		if (settings.objectStrength < 1.0f) chromaVars[numChromaVars++] = { pl_var_float("object_strength"), &objectStrength, true };
+		if (landCheck) chromaVars[numChromaVars++] = { pl_var_float("land_a"), &landA, true };
+		if (!Dispatch("VideoProcessor de-judder: warp chroma", header, WARP_CHROMA_BODY,
+			chromaDesc, numChromaDesc, chromaVars, numChromaVars,
 			a.chroma->params.w, a.chroma->params.h, 16))
 			return false;
 		out.luma = dstLuma;

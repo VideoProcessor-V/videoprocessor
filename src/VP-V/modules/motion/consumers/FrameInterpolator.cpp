@@ -459,17 +459,17 @@ if (q.x < size.x && q.y < size.y)
 			return true;
 		}
 
-		bool Compute(pl_dispatch dispatch, const char* description, const std::string& header, const char* body,
-			const std::vector<pl_shader_desc>& desc, const pl_shader_var* vars, int numVars, int groupsX, int groupsY)
+		bool Compute(pl_dispatch dispatch, const char* description, const char* header, const char* body,
+			const pl_shader_desc* desc, int numDesc, const pl_shader_var* vars, int numVars, int groupsX, int groupsY)
 		{
 			pl_custom_shader custom{};
 			custom.description = description;
-			custom.header = header.c_str();
+			custom.header = header;
 			custom.body = body;
 			custom.input = PL_SHADER_SIG_NONE;
 			custom.output = PL_SHADER_SIG_NONE;
-			custom.descriptors = desc.data();
-			custom.num_descriptors = static_cast<int>(desc.size());
+			custom.descriptors = desc;
+			custom.num_descriptors = numDesc;
 			custom.variables = vars;
 			custom.num_variables = numVars;
 			custom.compute = true;
@@ -560,21 +560,22 @@ if (q.x < size.x && q.y < size.y)
 		const int w = half->params.w, h = half->params.h;
 		const int gx = (w + 15) / 16, gy = (h + 15) / 16;
 		const std::string& header = BandLowGlsl(src->params.h);
-		static const std::string halfHeader = VpUnit::HalfLuma::GlslRgbaAt();
-		const std::vector<pl_shader_desc> passHalf = { Sampled("src", src, false), Storage("dst", half) };
-		if (!Compute(dispatch, description, halfHeader, LOW_HALF_BODY, passHalf, nullptr, 0, gx, gy))
+		static const std::string halfHeaderStr = VpUnit::HalfLuma::GlslRgbaAt();
+		const char* const halfHeader = halfHeaderStr.c_str();
+		const pl_shader_desc passHalf[2] = { Sampled("src", src, false), Storage("dst", half) };
+		if (!Compute(dispatch, description, halfHeader, LOW_HALF_BODY, passHalf, 2, nullptr, 0, gx, gy))
 		{
 			error = std::string("grain low band (half) failed: ") + description;
 			return false;
 		}
-		const std::vector<pl_shader_desc> passH = { Sampled("src", half, false), Storage("dst", tmp) };
-		if (!Compute(dispatch, description, header, LOW_H_BODY, passH, nullptr, 0, gx, gy))
+		const pl_shader_desc passH[2] = { Sampled("src", half, false), Storage("dst", tmp) };
+		if (!Compute(dispatch, description, header.c_str(), LOW_H_BODY, passH, 2, nullptr, 0, gx, gy))
 		{
 			error = std::string("grain low band (across) failed: ") + description;
 			return false;
 		}
-		const std::vector<pl_shader_desc> passV = { Sampled("tmp", tmp, false), Storage("dst", low) };
-		if (!Compute(dispatch, description, header, LOW_V_BODY, passV, nullptr, 0, gx, gy))
+		const pl_shader_desc passV[2] = { Sampled("tmp", tmp, false), Storage("dst", low) };
+		if (!Compute(dispatch, description, header.c_str(), LOW_V_BODY, passV, 2, nullptr, 0, gx, gy))
 		{
 			error = std::string("grain low band (down) failed: ") + description;
 			return false;
@@ -655,22 +656,24 @@ if (q.x < size.x && q.y < size.y)
 		const bool same = srcA == srcB;
 		const bool hasBands = lowA != nullptr;
 		const bool sameLow = hasBands && (same || lowA == lowB);
-		std::vector<pl_shader_desc> desc = { Sampled("src_a", srcA, false) };
+		pl_shader_desc desc[9];
+		int numDesc = 0;
+		desc[numDesc++] = Sampled("src_a", srcA, false);
 		if (!same)
-			desc.push_back(Sampled("src_b", srcB, false));
-		desc.push_back(Sampled("field", motion.field, false));
-		desc.push_back(Sampled("frame_trust", motion.frameTrust, false));
-		desc.push_back(Storage("dst", dst));
+			desc[numDesc++] = Sampled("src_b", srcB, false);
+		desc[numDesc++] = Sampled("field", motion.field, false);
+		desc[numDesc++] = Sampled("frame_trust", motion.frameTrust, false);
+		desc[numDesc++] = Storage("dst", dst);
 		if (motion.subField)
-			desc.push_back(Sampled("sub_field", motion.subField, false));
+			desc[numDesc++] = Sampled("sub_field", motion.subField, false);
 		if (motion.occlusionB)
-			desc.push_back(Sampled("occ_b", motion.occlusionB, false));
+			desc[numDesc++] = Sampled("occ_b", motion.occlusionB, false);
 		// interpolation_grain preserve: the bands of A and B (aliased when identical).
 		if (hasBands)
 		{
-			desc.push_back(Sampled("low_a", lowA, false));
+			desc[numDesc++] = Sampled("low_a", lowA, false);
 			if (!sameLow)
-				desc.push_back(Sampled("low_b", lowB, false));
+				desc[numDesc++] = Sampled("low_b", lowB, false);
 		}
 		const float minShare = motion.minTrustedShare;
 		const float gainLo = static_cast<float>(GrainPreserve::kGainMin);
@@ -685,15 +688,29 @@ if (q.x < size.x && q.y < size.y)
 			{ pl_var_float("gain_min_pixels"), &gainMinPixels, true } };
 		pl_custom_shader custom{};
 		custom.description = description;
-		const std::string fullHeader = std::string(same ? "#define src_b src_a\n" : "") +
-			(sameLow ? "#define low_b low_a\n" : "") + header +
-			(hasBands ? std::string(GrainPreserve::CatmullGlsl()) + PRESERVE_HEADER : std::string());
-		custom.header = fullHeader.c_str();
+		const char* fullHeader = nullptr;
+		{
+			const uint32_t planeMask = (same ? 1u : 0u) | (sameLow ? 2u : 0u) | (hasBands ? 4u : 0u);
+			const std::pair<const void*, uint32_t> key(static_cast<const void*>(&header), planeMask);
+			static std::mutex cacheMutex;
+			static std::map<std::pair<const void*, uint32_t>, std::string> cache;
+			std::lock_guard<std::mutex> lock(cacheMutex);
+			auto it = cache.find(key);
+			if (it == cache.end())
+			{
+				std::string assembled = std::string(same ? "#define src_b src_a\n" : "") +
+					(sameLow ? "#define low_b low_a\n" : "") + header +
+					(hasBands ? std::string(GrainPreserve::CatmullGlsl()) + PRESERVE_HEADER : std::string());
+				it = cache.emplace(key, std::move(assembled)).first;
+			}
+			fullHeader = it->second.c_str();
+		}
+		custom.header = fullHeader;
 		custom.body = hasBands ? PRESERVE_BODY : INTERPOLATE_BODY;
 		custom.input = PL_SHADER_SIG_NONE;
 		custom.output = PL_SHADER_SIG_NONE;
-		custom.descriptors = desc.data();
-		custom.num_descriptors = static_cast<int>(desc.size());
+		custom.descriptors = desc;
+		custom.num_descriptors = numDesc;
 		custom.variables = vars;
 		custom.num_variables = hasBands ? 6 : 3;
 		custom.compute = true;
@@ -759,14 +776,31 @@ if (q.x < size.x && q.y < size.y)
 		}
 		if (!Ensure(outLuma, a.luma) || (a.chroma && !Ensure(outChroma, a.chroma)))
 			return false;
-		const std::string header = std::string(estimateWidth > 0 && estimateHeight > 0 ? "#define EXACT_EQUAL 1\n" : "") +
-			std::string(fallback == InterpolationPolicy::Fallback::Blend ? "#define FALLBACK_BLEND 1\n" : "") +
-			(use.occlusionB ? "#define OCCLUSION 1\n" : "") +
-			(use.subField ? Dejudder::FieldVectorGlslSplit() : Dejudder::FieldVectorGlsl()) + BILERP_HEADER;
+		const bool processed = estimateWidth > 0 && estimateHeight > 0;
+		const bool blendFallback = fallback == InterpolationPolicy::Fallback::Blend;
+		const uint32_t runHeaderKey =
+			(processed ? 1u : 0u) |
+			(blendFallback ? 2u : 0u) |
+			(use.occlusionB ? 4u : 0u) |
+			(use.subField ? 8u : 0u);
+		const std::string& header = [&]() -> const std::string& {
+			static std::mutex cacheMutex;
+			static std::map<uint32_t, std::string> cache;
+			std::lock_guard<std::mutex> lock(cacheMutex);
+			auto it = cache.find(runHeaderKey);
+			if (it == cache.end())
+			{
+				std::string assembled = std::string(processed ? "#define EXACT_EQUAL 1\n" : "") +
+					std::string(blendFallback ? "#define FALLBACK_BLEND 1\n" : "") +
+					(use.occlusionB ? "#define OCCLUSION 1\n" : "") +
+					(use.subField ? Dejudder::FieldVectorGlslSplit() : Dejudder::FieldVectorGlsl()) + BILERP_HEADER;
+				it = cache.emplace(runHeaderKey, std::move(assembled)).first;
+			}
+			return it->second;
+		}();
 		// interpolation_grain preserve: each plane's low band of A and B
 		// first (blend: today's pass alone, byte for byte).
 		const bool preserve = grain == InterpolationPolicy::Grain::Preserve;
-		const bool processed = estimateWidth > 0 && estimateHeight > 0;
 		auto resolvePlaneBands = [&](int planeIndex, pl_tex srcA, pl_tex srcB,
 			VpSkeleton::AcquireResult& pinA, VpSkeleton::AcquireResult& pinB, pl_tex& lowA, pl_tex& lowB) -> bool {
 			lowA = nullptr;
