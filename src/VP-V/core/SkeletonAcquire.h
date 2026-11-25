@@ -622,6 +622,14 @@ public:
         presentKnown_ = true;
         presentNoted_ = true;
     }
+    // POD1-H3: clear monotonic presented tracking across sequence restarts / discontinuities / Clear().
+    void ResetPresented()
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        presented_ = 0;
+        presentKnown_ = false;
+        presentNoted_ = false;
+    }
     // A DROPPED frame (never rendered): its spots are released, every other frame is untouched (design s2.5).
     void Discard(uint64_t seq)
     {
@@ -678,6 +686,9 @@ public:
         haveReleased_ = false;          // the numbering may restart after a discontinuity: nothing older is refused
         releasedThrough_ = 0;
         numberingMayRestart_ = true;    // the next seal may go back without releasing this epoch's fills
+        presented_ = 0;                 // POD1-H3: sequence numbering may restart; drop stale monotonic presented_
+        presentKnown_ = false;
+        presentNoted_ = false;
     }
     void Invalidate(InvalidateCause cause) { BumpEpoch(cause); }
     uint64_t Discontinuities() const
@@ -953,6 +964,7 @@ public:
                         ++c.aheadReused;   // an ahead fill reused once its frame renders (or later): the same spot
                         e->aheadReuseCounted = true;
                     }
+                    Served(id);   // POD1-H6: clear stale lastCause_ on G2(b) cache hit so FallbackCatalog releases cleanly
                     return ResultOf(e, AcquireStatus::Reused);
                 }
                 // Declined for this frame: the same cause, the owner is not asked twice for one frame.
@@ -962,22 +974,9 @@ public:
         }
 
         // Admission (design s2.3): a fill for a frame beyond the queue window is refused, never run.
-        if (windowSet_ && haveSealed_ && seq > lastSeal_ + uint64_t(ahead_))
-            return Fail(c, id, seq, AcquireCause::NotQueued);
-        // amendment 3: inside the queue but beyond the computed depth: not yet; computed once when it comes within aheadCompute.
-        if (windowSet_ && haveSealed_ && seq > lastSeal_ + uint64_t(window_.aheadCompute))
-            return Fail(c, id, seq, AcquireCause::NotPlannedAhead);
-        if (planSet_ && haveSealed_ && seq > lastSeal_) {
-            uint16_t d = 0;
-            if (plan_.Has(uint16_t(id), v.Hash(), &d) && seq - lastSeal_ > uint64_t(d))
-                return Fail(c, id, seq, AcquireCause::NotPlannedAhead);
-        }
-        // Stalled presents (audit S3): the presented frame lags the render by more than the queue holds by structure (H + R + 1 + ahead;
-        // P itself grows in a stall, so it is not the yardstick): ahead demand stops (visible), nothing is evicted.
-        if (windowSet_ && presentKnown_ && haveSealed_ && seq > lastSeal_ && lastSeal_ > presented_
-            && lastSeal_ - presented_ > uint64_t(window_.history) + uint64_t(window_.renderAhead) + 1u + uint64_t(ahead_)) {
-            return Fail(c, id, seq, AcquireCause::PresentsStalled);
-        }
+        AcquireCause aheadCause = AcquireCause::None;
+        if (!CheckAheadAdmittedLocked(id, seq, v, aheadCause))
+            return Fail(c, id, seq, aheadCause);
         if (renderThread && lane_.dropped && lane_.dropped(id))
             return Fail(c, id, seq, AcquireCause::RegulatorDropped);
         // QKP slice C: a lane product AHEAD of the render frame (admitted above) is made by the lane's own claim, not twice.
@@ -1235,6 +1234,19 @@ public:
         std::memcpy(dst, it->second->bytes.data(), n);
         return true;
     }
+    // Non-mutating check: true when a Ready CPU memo entry exists in the current epoch (zero Fail() / lastCause_ mutation).
+    bool HasReadyCpu(ProductId id, uint64_t seq, VariantKey v = VariantKey()) const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        const auto it = memo_.find(Key{ id, seq, uint8_t(AcquireForm::Cpu), v });
+        return it != memo_.end() && it->second->state == Entry::Ready && it->second->epoch == epoch_;
+    }
+    // Non-mutating ahead admission check sharing the exact single source of truth with Acquire() (POD1-M7, HIGH-3).
+    bool CheckAheadAdmitted(ProductId id, uint64_t seq, AcquireCause& causeOut, VariantKey v = VariantKey()) const
+    {
+        std::lock_guard<std::mutex> g(mutex_);
+        return CheckAheadAdmittedLocked(id, seq, v, causeOut);
+    }
 
     // Lifetime: frame `seq` is sealed; memos of frames <= seq - 1 - keepFrames are released (pinned results stay valid; GPU spots
     // under a read fence are retired when it completes). Frame numbers going back (a new epoch) release everything first,
@@ -1244,10 +1256,15 @@ public:
         std::vector<std::shared_ptr<Entry>> drop;
         {
             std::lock_guard<std::mutex> g(mutex_);
-            if (haveSealed_ && seq < lastSeal_ && !numberingMayRestart_) {
-                ReleaseIfLocked([](const Entry&) { return true; }, drop);   // the old numbering: nothing kept, nothing refused
-                haveReleased_ = false;
-                releasedThrough_ = 0;
+            if (haveSealed_ && seq < lastSeal_) {
+                if (!numberingMayRestart_) {
+                    ReleaseIfLocked([](const Entry&) { return true; }, drop);   // the old numbering: nothing kept, nothing refused
+                    haveReleased_ = false;
+                    releasedThrough_ = 0;
+                }
+                presented_ = 0;   // POD1-H3: backward sequence restart invalidates monotonic presented_
+                presentKnown_ = false;
+                presentNoted_ = false;
             }
             numberingMayRestart_ = false;   // after a BumpEpoch the older epoch's spots go below; this epoch's fills stay
             haveSealed_ = true;
@@ -1260,8 +1277,14 @@ public:
                 return e.frameScoped || e.epoch != ep || (edge > 0 && e.seq < EdgeLocked(seq, e.keep));
             }, drop);
             bumpedThisInterval_ = false;
-            for (auto& s : stale_)
-                drop.push_back(s);
+            // POD1-M2: stale GPU entries with incomplete read fences must defer through retired_, never drop immediately.
+            const uint64_t done = fenceCompleted_ ? fenceCompleted_() : 0u;
+            for (auto& s : stale_) {
+                if (s && s->gpuForm && s->state == Entry::Ready && s->readFence > done)
+                    retired_.push_back(std::move(s));
+                else
+                    drop.push_back(std::move(s));
+            }
             stale_.clear();
             if (edge > 0) {
                 if (!haveReleased_ || edge - 1u > releasedThrough_)
@@ -1279,11 +1302,22 @@ public:
         {
             std::lock_guard<std::mutex> g(mutex_);
             ReleaseIfLocked([](const Entry&) { return true; }, drop);
+            const uint64_t done = fenceCompleted_ ? fenceCompleted_() : 0u;
+            for (auto& s : stale_) {
+                if (s && s->gpuForm && s->state == Entry::Ready && s->readFence > done)
+                    retired_.push_back(std::move(s));
+                else
+                    drop.push_back(std::move(s));
+            }
+            stale_.clear();
             RetireCompletedLocked(drop);
             fillsPerFrame_.clear();   // a new graph measures its own occupancy (r2 MUST-1)
             haveReleased_ = false;
             releasedThrough_ = 0;
             haveSealed_ = false;
+            presented_ = 0;   // POD1-H3: reset presented tracking on Clear()
+            presentKnown_ = false;
+            presentNoted_ = false;
         }
         drop.clear();
     }
@@ -1574,6 +1608,32 @@ private:
         return r;
     }
     void Served(ProductId id) { lastCause_.erase(id); }
+
+    bool CheckAheadAdmittedLocked(ProductId id, uint64_t seq, const VariantKey& v, AcquireCause& causeOut) const
+    {
+        causeOut = AcquireCause::None;
+        if (windowSet_ && haveSealed_ && seq > lastSeal_ + uint64_t(ahead_)) {
+            causeOut = AcquireCause::NotQueued;
+            return false;
+        }
+        if (windowSet_ && haveSealed_ && seq > lastSeal_ + uint64_t(window_.aheadCompute)) {
+            causeOut = AcquireCause::NotPlannedAhead;
+            return false;
+        }
+        if (planSet_ && haveSealed_ && seq > lastSeal_) {
+            uint16_t d = 0;
+            if (plan_.Has(uint16_t(id), v.Hash(), &d) && seq - lastSeal_ > uint64_t(d)) {
+                causeOut = AcquireCause::NotPlannedAhead;
+                return false;
+            }
+        }
+        if (windowSet_ && presentKnown_ && haveSealed_ && seq > lastSeal_ && lastSeal_ > presented_
+            && lastSeal_ - presented_ > uint64_t(window_.history) + uint64_t(window_.renderAhead) + 1u + uint64_t(ahead_)) {
+            causeOut = AcquireCause::PresentsStalled;
+            return false;
+        }
+        return true;
+    }
 
     void EvictStaleLocked(std::map<Key, std::shared_ptr<Entry>>::iterator it)
     {

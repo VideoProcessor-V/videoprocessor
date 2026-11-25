@@ -11,6 +11,7 @@
 #include <DisplayRefreshRatePolicy.h>
 #include <GeneralRateLog.h>
 #include <VP-V/modules/control/diagnostics/DiagnosticHistory.h>
+#include <VP-V/modules/control/skeleton/SkeletonAccess.h>
 #include <VP-V/modules/input/queue_timing/AlphaQueuePolicyVpCompat.h>
 #include <VP-V/modules/input/signal/ResyncCallSites.h>
 #include <VP-V/modules/output/dither/CustomHookChain.h>
@@ -899,10 +900,24 @@ namespace Vpv
 						if (!frameInterpolator)
 							frameInterpolator = std::make_unique<Interpolator::FrameInterpolator>(log, d3d11->gpu);
 						frameInterpolator->SetGrain(activeSettings.interpolationGrain);
-						if (!(processedFrame ?
-							frameInterpolator->Run(processedA, processedB, motion, shift, activeSettings.interpolationFallback, warped,
-								a.luma->params.w, a.luma->params.h) :
-							frameInterpolator->Run(a, b, motion, shift, activeSettings.interpolationFallback, warped)))
+						bool interpOk = false;
+						if (processedFrame)
+						{
+							interpOk = frameInterpolator->Run(processedA, processedB, motion, shift, activeSettings.interpolationFallback, warped,
+								a.luma->params.w, a.luma->params.h);
+						}
+						else
+						{
+							// POD1-H1: pass live SkeletonMemo + (sourceSequence, nextSourceSequence) for shared kBandMemo acquisition.
+							const Vpv::Skeleton::FrameMemo fm = Vpv::Skeleton::MemoForHost(h.host, f.sourceSequence);
+							interpOk = frameInterpolator->Run(a, b, motion, shift, activeSettings.interpolationFallback, warped,
+								0, 0, fm.memo.get(), f.sourceSequence, f.nextSourceSequence);
+							const std::string& bmWhy = frameInterpolator->LastBandMemoFallback();
+							calls.SyncFallback(bmWhy.empty()
+								? FallbackCatalog::Released("product.interpolator")
+								: FallbackCatalog::ProductFallback("product.interpolator", bmWhy));
+						}
+						if (!interpOk)
 						{
 							if (++dejudderExtras.interpolationFailures == 1 || dejudderExtras.interpolationFailures % 2400 == 0)
 								DebugLog::Log("Interpolation: failed (%s; %llu failures)", frameInterpolator->LastError().c_str(),

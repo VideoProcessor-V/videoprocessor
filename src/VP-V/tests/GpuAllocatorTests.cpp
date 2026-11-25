@@ -1418,5 +1418,24 @@ namespace GpuAllocatorTestsNs
 			Assert::AreEqual(uint8_t(4), GrainSplit::LedgerBlockShiftFor(0),
 				L"non-positive height falls back to BlockSizeFor(0) == 16 -> shift 4");
 		}
+
+		// W23-Audit-Fix1 POD1-M3: unbound ScratchArena::Acquire increments atomic outsideScope_ AND records Fail(owner).
+		TEST_METHOD(ScratchArenaUnboundAcquireRecordsAtomicOutsideScopeAndVisibleFail)
+		{
+			FakeBackend be;
+			ScratchArena<FakeBackend> arena(be);
+			const TexShape s = Shape(16, 16, TexFormat::R32F);
+			// Negative control: before any Acquire, FrameDecision is released and OutsideScopeAcquires == 0.
+			Assert::IsFalse(arena.FrameDecision().engaged, L"negative control: clean arena has no fallback engaged");
+			Assert::AreEqual(uint64_t(0), arena.OutsideScopeAcquires());
+
+			// Acquire on unbound arena (never Reserved / BeginScope): returns null handle, counts outsideScope_, and engages FrameDecision with owner name.
+			const int h = arena.Acquire("deband_unbound", s);
+			Assert::AreEqual(0, h, L"unbound Acquire returns null handle");
+			Assert::AreEqual(uint64_t(1), arena.OutsideScopeAcquires(), L"unbound Acquire increments atomic outsideScope_");
+			const FallbackCatalog::Decision d = arena.FrameDecision();
+			Assert::IsTrue(d.engaged, L"POD1-M3: unbound Acquire must surface visible FrameDecision (never silent)");
+			Assert::IsTrue(d.reason.find("deband_unbound") != std::string::npos, L"POD1-M3: FrameDecision names the failing owner");
+		}
 	};
 }

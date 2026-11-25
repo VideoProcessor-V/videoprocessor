@@ -16,27 +16,12 @@
 
 bool LibplaceboVideoRenderer::Impl::RunVpPhaseInterpolation()
 {
-	if (!frameInterpolator)
-		frameInterpolator = std::make_unique<Interpolator::FrameInterpolator>(log, d3d11->gpu);
-	frameInterpolator->SetGrain(activeSettings.interpolationGrain);
-	const bool ran = frameInterpolator->Run(vpPhaseA, vpPhaseB, vpPhaseMotion, vpPhaseT, activeSettings.interpolationFallback,
-		vpPhasePlanes);
-	SyncFallback(dejudderExtras.motionConsumerFailures.Note(GetTickCount64(), ran ? nullptr : "interpolation failed"));   // D3
-	if (!ran)
-	{
-		if (++dejudderExtras.interpolationFailures == 1 || dejudderExtras.interpolationFailures % 2400 == 0)
-			DebugLog::Log("Interpolation: failed (%s; %llu failures); the source frame is shown",
-				frameInterpolator->LastError().c_str(), dejudderExtras.interpolationFailures);
-		return false;
-	}
-	return true;
+	return Vpv::MotionHost::RunVpPhaseInterpolationHost(frameInterpolator, log, d3d11->gpu, activeSettings, vpPhaseA, vpPhaseB, vpPhaseMotion, vpPhaseT, vpPhasePlanes, vectorEngine, dejudderExtras, GetTickCount64(), [this](const FallbackCatalog::Decision& d) { SyncFallback(d); });
 }
 
 double LibplaceboVideoRenderer::Impl::TimelineDisplayHz() const
 {
-	const double measured = presentationTelemetry.Snapshot().measuredDisplayHz;
-	return dejudderPolicy.timelineDisplayRateHold.Update(measured, renderLoadDisplayRefreshHz.load(std::memory_order_acquire),
-		activeSettings.timingContinuityFixes);
+	return dejudderPolicy.timelineDisplayRateHold.Update(presentationTelemetry.Snapshot().measuredDisplayHz, renderLoadDisplayRefreshHz.load(std::memory_order_acquire), activeSettings.timingContinuityFixes);
 }
 
 bool LibplaceboVideoRenderer::Impl::VpTimelineWanted() const
@@ -108,78 +93,18 @@ void LibplaceboVideoRenderer::Impl::PrepareVpPhasePicture(uint64_t sourceSequenc
 	// samples and the field's first vector for the first 40 pictures between frames.
 	{
 		static int debugCount = 0;
-		if (debugCount < 40 && debugPhaseAb &&
-			a.luma && b.luma && a.luma->params.w == b.luma->params.w && a.luma->params.h == b.luma->params.h)
+		if (debugCount < 40 && debugPhaseAb && a.luma && b.luma && a.luma->params.w == b.luma->params.w && a.luma->params.h == b.luma->params.h)
 		{
 			++debugCount;
 			EnsureRebaseDispatch();
-			// A host-readable copy of each luma plane (a plain copy pass), then a byte compare.
-			auto readBack = [&](pl_tex src, std::vector<uint8_t>& out) {
-				pl_tex_params tp{};
-				tp.w = src->params.w; tp.h = src->params.h; tp.format = src->params.format;
-				if (src->params.format->type == PL_FMT_FLOAT)   // the field: a renderable, readable float format
-					tp.format = pl_find_fmt(d3d11->gpu, PL_FMT_FLOAT, 4, 32, 32,
-						static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
-				if (!tp.format) return false;
-				tp.sampleable = true; tp.renderable = true; tp.host_readable = true;
-				pl_tex copy = pl_tex_create(d3d11->gpu, &tp);
-				if (!copy) return false;
-				pl_shader sh = pl_dispatch_begin(rebaseDispatch);
-				pl_sample_src sample{};
-				sample.tex = src;
-				sample.components = src->params.format->num_components;
-				bool ok = pl_shader_sample_direct(sh, &sample);
-				if (ok)
-				{
-					pl_dispatch_params dp{};
-					dp.shader = &sh;
-					dp.target = copy;
-					ok = pl_dispatch_finish(rebaseDispatch, &dp);
-				}
-				else
-					pl_dispatch_abort(rebaseDispatch, &sh);
-				if (ok)
-				{
-					out.resize(static_cast<size_t>(tp.w) * tp.h * tp.format->texel_size);
-					pl_tex_transfer_params t{};
-					t.tex = copy;
-					t.ptr = out.data();
-					ok = pl_tex_download(d3d11->gpu, &t);
-				}
-				pl_tex_destroy(d3d11->gpu, &copy);
-				return ok; };
-			std::vector<uint8_t> da, db;
-			size_t differing = 0;
-			const bool ok = readBack(a.luma, da) && readBack(b.luma, db) && da.size() == db.size();
-			if (ok)
-				for (size_t i = 0; i < da.size(); ++i) differing += da[i] != db[i] ? 1 : 0;
-			// The field's vectors (rgba32f: vx, vy, trust, error) - mean and max length of trusted blocks.
-			double meanLen = 0.0, maxLen = 0.0, gx = 0.0, gy = 0.0;
-			size_t trusted = 0, blocks = 0;
-			if (motion.field)
-			{
-				std::vector<uint8_t> df;
-				if (readBack(motion.field, df) && df.size() == static_cast<size_t>(motion.field->params.w) * motion.field->params.h * 16)
-				{
-					const float* f = reinterpret_cast<const float*>(df.data());
-					blocks = df.size() / 16;
-					for (size_t i = 0; i < blocks; ++i)
-						if (f[i * 4 + 2] > 0.5f)
-						{
-							const double l = std::sqrt(double(f[i * 4]) * f[i * 4] + double(f[i * 4 + 1]) * f[i * 4 + 1]);
-							meanLen += l; maxLen = (std::max)(maxLen, l); gx += f[i * 4]; gy += f[i * 4 + 1]; ++trusted;
-						}
-					if (trusted) { meanLen /= trusted; gx /= trusted; gy /= trusted; }
-				}
-			}
-			DebugLog::Log("DEBUG phase A/B: sequence %llu next %llu phase %.3f vectors %d: luma bytes differing %zu of %zu%s; field: %zu of %zu blocks trusted, |v| mean %.3f max %.3f, mean v (%.3f, %.3f)",
-				static_cast<unsigned long long>(sourceSequence), static_cast<unsigned long long>(nextSourceSequence),
-				vpOutputPhase, vectors ? 1 : 0, differing, da.size(), ok ? "" : " (readback failed)", trusted, blocks, meanLen, maxLen, gx, gy);
+			Vpv::MotionHost::LogDebugPhaseAb(d3d11->gpu, rebaseDispatch, a.luma, b.luma, motion.field, sourceSequence, nextSourceSequence, vpOutputPhase, vectors);
 		}
 	}
 	// Bug hunt 3 F5: a standalone gap pair on an active de-judder at its strength.
 	vpPhaseA = a;
 	vpPhaseB = b;
+	dejudderExtras.vpPhaseSeqA = sourceSequence;
+	dejudderExtras.vpPhaseSeqB = nextSourceSequence;
 	vpPhaseMotion = motion;
 	vpPhaseT = static_cast<float>(vpOutputPhase) * (vpGapFillStandalone ? dejudderPolicy.vpGapPhaseScale : 1.0f);
 	Vpv::MotionHost::PrepareDejudderCamera(dejudderPolicy.cameraBindings, this, sourceSequence, vpPhaseT);
@@ -537,27 +462,22 @@ void LibplaceboVideoRenderer::Impl::RegisterDejudderCacheFrame(const pl_frame& t
 {
     if (pipelineSlots.OriginalPathway()) return;   // PHASE 1: no cache stage, no geometry (Bill's hooks only)
     dejudderExtras.dejudderSubtitleComposed = subtitleCompositionSucceeded;
-    {
-        const pl_tex framebuffer = target.planes[0].texture;
-        const SubtitleBoxRect subtitleHolds[] = { relocatedSubtitle.source, relocatedSubtitle.generatedCleanup,
-            relocatedSubtitle.destination, relocatedSubtitle.layoutCoverage };
-        DejudderCacheStage::Frame cacheFrame;
-        cacheFrame.extrasMayFollow = dejudderReason == DejudderPolicy::Reason::Active &&
-            dejudderExtrasAllowed && dejudder && !cadenceRepeat && sourceSequence != 0;
-        cacheFrame.geometryForVectors = !cacheFrame.extrasMayFollow && vectorDemand.Serves(VectorDemand::Consumer::SigmaDelta) &&
-            dejudder && !cadenceRepeat && sourceSequence != 0 && !interpolating && !vpTimelineActive;   // vector engine: the sigma-delta's vectors need the geometry
-        cacheFrame.sourceSequence = sourceSequence;
-        cacheFrame.sourceCrop = renderImage.crop;
-        cacheFrame.targetCrop = target.crop;
-        cacheFrame.framebufferW = framebuffer ? static_cast<float>(framebuffer->params.w) : 0.0f;
-        cacheFrame.framebufferH = framebuffer ? static_cast<float>(framebuffer->params.h) : 0.0f;
-        cacheFrame.nlsSubmitted = nlsSubmitted;
-        cacheFrame.warpRendered = activeSettings.dejudderWarpRendered;
-        cacheFrame.interpolating = interpolating;
-        cacheFrame.subtitleHolds = subtitleCompositionSucceeded ? subtitleHolds : nullptr;
-        cacheFrame.numSubtitleHolds = 4;
-        dejudderCacheStage.Register(cacheFrame, [this]() { return KnownNlsMapping(); }, frameHooks);
-    }
+    const pl_tex framebuffer = target.planes[0].texture;
+    const SubtitleBoxRect subtitleHolds[] = { relocatedSubtitle.source, relocatedSubtitle.generatedCleanup, relocatedSubtitle.destination, relocatedSubtitle.layoutCoverage };
+    DejudderCacheStage::Frame cacheFrame;
+    cacheFrame.extrasMayFollow = dejudderReason == DejudderPolicy::Reason::Active && dejudderExtrasAllowed && dejudder && !cadenceRepeat && sourceSequence != 0;
+    cacheFrame.geometryForVectors = !cacheFrame.extrasMayFollow && vectorDemand.Serves(VectorDemand::Consumer::SigmaDelta) && dejudder && !cadenceRepeat && sourceSequence != 0 && !interpolating && !vpTimelineActive;
+    cacheFrame.sourceSequence = sourceSequence;
+    cacheFrame.sourceCrop = renderImage.crop;
+    cacheFrame.targetCrop = target.crop;
+    cacheFrame.framebufferW = framebuffer ? static_cast<float>(framebuffer->params.w) : 0.0f;
+    cacheFrame.framebufferH = framebuffer ? static_cast<float>(framebuffer->params.h) : 0.0f;
+    cacheFrame.nlsSubmitted = nlsSubmitted;
+    cacheFrame.warpRendered = activeSettings.dejudderWarpRendered;
+    cacheFrame.interpolating = interpolating;
+    cacheFrame.subtitleHolds = subtitleCompositionSucceeded ? subtitleHolds : nullptr;
+    cacheFrame.numSubtitleHolds = 4;
+    dejudderCacheStage.Register(cacheFrame, [this]() { return KnownNlsMapping(); }, frameHooks);
 }
 // M2 P5b-5 (audit F1): after the R10 call. Not planned (no binding / hub, or the plan threw): no stale timeline
 // flags, Bill's draw of the host's list, and the visible "timeline" fallback; planned: released.

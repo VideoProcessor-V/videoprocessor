@@ -1,6 +1,7 @@
 #include "pch.h"
 #include <VP-V/modules/control/skeleton/SceneRecordReader.h>
 #include <VP-V/modules/input/signal/HdrInference.h>
+#include <VP-V/modules/input/signal/HdrVetoCaptureGate.h>
 #include <VP-V/modules/input/source_analysis/events/shared/CutFadeJudge.h>
 #include <VP-V/modules/input/source_analysis/lane/shared/SourceStats.h>
 
@@ -428,23 +429,95 @@ bool SampleHdrVetoGrid(const AnalysisLumaSource& source, int columns, int rows,
 bool HdrVetoCutDetector::Observe(const HdrVetoFrameStats& stats)
 {
 	const uint64_t sequence = m_pendingSequence;
+	const char* const unkeyedReason = m_pendingUnkeyedReason;
 	m_pendingSequence = 0;
+	m_pendingUnkeyedReason = nullptr;
 	if (!stats.measured)
 		return false;
 	bool cut = false;
 	m_lastGrid = 0.0f;
 	m_lastHistogram = 0.0f;
+	m_atomicLastHist.store(0.0f, std::memory_order_release);
 	m_lastUsedFallback = false;
 	if (m_havePrevious)
 	{
 		bool answered = false;
 		const char* why = nullptr;
-		if (sequence != 0)
+		if (sequence == 0)
 		{
-			if (m_sceneReader)
-				answered = m_sceneReader(sequence, cut, &why);
-			else
-				answered = VpSkeleton::SceneRecordReader::CutOf(sequence, cut);
+			++m_fallbackCutCount;
+			m_lastFallbackWhy = unkeyedReason ? unkeyedReason : "unkeyed capture frame (sequence 0)";
+			m_lastUsedFallback = true;
+		}
+		else if (m_previousSequence == 0)
+		{
+			++m_fallbackCutCount;
+			m_lastFallbackWhy = "previous frame unkeyed";
+			m_lastUsedFallback = true;
+		}
+		else if (sequence <= m_previousSequence)
+		{
+			++m_fallbackCutCount;
+			m_lastFallbackWhy = "renderer sequence reset or repeated";
+			m_lastUsedFallback = true;
+		}
+		else
+		{
+			// BLOCKER-2: scan every renderer sequence in (m_previousSequence, sequence] so cuts on
+			// skipped 20 Hz unarmed frames are never missed. Any confirmed cut in the interval wins;
+			// any unsealed/evicted frame without an earlier confirmed cut falls back visibly to GridHistCut.
+			bool spanExceeded = false;
+			if (!m_sceneReader)
+			{
+				FrameAnalysis::Store* const store = VpFrameAnalysis::SourceFrameTap::SingleStore();
+				if (!store)
+				{
+					why = "no frame analysis store";
+					spanExceeded = true;
+				}
+				else if (sequence - m_previousSequence > store->Depth())
+				{
+					why = "u7 scene ring span exceeded";
+					spanExceeded = true;
+				}
+			}
+			if (!spanExceeded)
+			{
+				bool anyCut = false;
+				bool anyMissing = false;
+				for (uint64_t s = m_previousSequence + 1; s <= sequence; ++s)
+				{
+					bool frameCut = false;
+					const char* frameWhy = nullptr;
+					const bool ok = m_sceneReader
+						? m_sceneReader(s, frameCut, &frameWhy)
+						: VpSkeleton::SceneRecordReader::CutOf(s, frameCut);
+					if (ok)
+					{
+						if (frameCut)
+						{
+							anyCut = true;
+							break;
+						}
+					}
+					else
+					{
+						anyMissing = true;
+						if (!why)
+							why = frameWhy;
+					}
+				}
+				if (anyCut)
+				{
+					answered = true;
+					cut = true;
+				}
+				else if (!anyMissing)
+				{
+					answered = true;
+					cut = false;
+				}
+			}
 			if (answered)
 			{
 				++m_sharedCutHits;
@@ -457,12 +530,6 @@ bool HdrVetoCutDetector::Observe(const HdrVetoFrameStats& stats)
 				m_lastFallbackWhy = why ? why : "u7 scene not sealed for frame";
 				m_lastUsedFallback = true;
 			}
-		}
-		else
-		{
-			++m_fallbackCutCount;
-			m_lastFallbackWhy = "unkeyed capture frame (sequence 0)";
-			m_lastUsedFallback = true;
 		}
 		if (!answered)
 		{
@@ -477,6 +544,7 @@ bool HdrVetoCutDetector::Observe(const HdrVetoFrameStats& stats)
 					stats.histogram.size(), 1.0f, 1.0f);
 				m_lastGrid = grid;
 				m_lastHistogram = distance;
+				m_atomicLastHist.store(distance, std::memory_order_release);
 				VpUnit::CutFadeJudge::GridHistThresholds limits;
 				limits.gridDifference = GRID_DIFFERENCE;
 				limits.histogramDistance = HISTOGRAM_DISTANCE;
@@ -487,6 +555,103 @@ bool HdrVetoCutDetector::Observe(const HdrVetoFrameStats& stats)
 	}
 	m_previous = stats;
 	m_previousActive = stats.activePicture;
+	m_previousSequence = sequence;
 	m_havePrevious = true;
 	return cut;
+}
+
+void HdrVetoCaptureGate::Arm(uint64_t generation, const VideoStateComPtr& sdrState)
+{
+	std::lock_guard<std::mutex> guard(m_mutex);
+	m_armed = sdrState != nullptr;
+	m_generation = generation;
+	m_sdrState = sdrState;
+}
+
+void HdrVetoCaptureGate::Disarm()
+{
+	std::lock_guard<std::mutex> guard(m_mutex);
+	m_armed = false;
+	m_sdrState = nullptr;
+}
+
+bool HdrVetoCaptureGate::Armed(uint64_t generation) const
+{
+	std::lock_guard<std::mutex> guard(m_mutex);
+	return m_armed && m_generation == generation;
+}
+
+bool HdrVetoCaptureGate::WantsSample(uint64_t generation, uint64_t nowMs)
+{
+	std::lock_guard<std::mutex> guard(m_mutex);
+	if (generation != m_captureGeneration || !m_captureGenerationKnown)
+	{
+		m_captureGeneration = generation;
+		m_captureGenerationKnown = true;
+		DetReset();
+		m_diag = HdrVetoCutDiag();
+		m_lastSampleMs = 0;
+		m_haveSample = false;
+	}
+	const bool armed = m_armed && m_generation == generation;
+	if (!armed && m_haveSample && nowMs - m_lastSampleMs < UNARMED_INTERVAL_MS)
+		return false;
+	m_lastSampleMs = nowMs;
+	m_haveSample = true;
+	return true;
+}
+
+HdrVetoCaptureGate::Observation HdrVetoCaptureGate::Observe(uint64_t generation, const HdrVetoFrameStats& stats, uint64_t sequence)
+{
+	std::lock_guard<std::mutex> guard(m_mutex);
+	Observation result;
+	const bool armedNow = m_armed && m_generation == generation && m_sdrState != nullptr;
+	const char* const unkeyedWhy = armedNow ? "armed before renderer ingress (u7 not yet sealed)" : nullptr;
+	result.cut = DetObserve(stats, sequence, m_sceneReader, &m_diag, unkeyedWhy);
+	result.gridDifference = DetGrid();
+	result.usedFallback = m_diag.usedFallback;
+	result.fallbackReason = m_diag.lastFallbackReason;
+	if (result.cut && armedNow)
+	{
+		result.switchState = m_sdrState;
+		m_armed = false;
+		m_sdrState = nullptr;
+	}
+	return result;
+}
+
+void HdrVetoCaptureGate::SetSceneReader(HdrVetoSceneReaderFn reader)
+{
+	std::lock_guard<std::mutex> guard(m_mutex);
+	m_sceneReader = reader;
+}
+
+float HdrVetoCaptureGate::LastGridDifference() const
+{
+	std::lock_guard<std::mutex> guard(m_mutex);
+	return DetGrid();
+}
+
+uint64_t HdrVetoCaptureGate::SharedCutHits() const
+{
+	std::lock_guard<std::mutex> guard(m_mutex);
+	return m_diag.sharedHits;
+}
+
+uint64_t HdrVetoCaptureGate::FallbackCutCount() const
+{
+	std::lock_guard<std::mutex> guard(m_mutex);
+	return m_diag.fallbackCount;
+}
+
+const char* HdrVetoCaptureGate::LastFallbackReason() const
+{
+	std::lock_guard<std::mutex> guard(m_mutex);
+	return m_diag.lastFallbackReason;
+}
+
+bool HdrVetoCaptureGate::UsedFallbackOnLastObserve() const
+{
+	std::lock_guard<std::mutex> guard(m_mutex);
+	return m_diag.usedFallback;
 }

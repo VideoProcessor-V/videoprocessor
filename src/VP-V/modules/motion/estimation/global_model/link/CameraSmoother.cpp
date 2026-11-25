@@ -8,8 +8,10 @@
 #include <VP-V/modules/motion/estimation/global_model/GlobalModelGeometry.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
+#include <map>
 
 namespace CameraLink
 {
@@ -138,6 +140,74 @@ namespace CameraLink
 			p.type = highest;
 			out = p;
 			return true;
+		}
+
+		// CE-WATER-C2 (C6): shared leave-one-out symmetric innovation spike detector + symmetric centre-excluded
+		// LOO substitution used by both CameraSmoother::Query and MakeP9OwnerFill (HIGH-3 parity).
+		struct LooEval
+		{
+			bool haveLoo = false;
+			double innovationPx = 0.0;
+			bool spikeFlagged = false;
+			CameraModel::Params looHat;
+		};
+
+		template <class FindPtrFn>
+		LooEval EvaluateLooInnovation(uint64_t seq, const CameraModel::CameraMotion& causal, FindPtrFn&& findPtr)
+		{
+			LooEval eval;
+			if (seq == 0 || !(causal.pairSeconds > 0.0) || causal.picture.Empty())
+				return eval;
+			const CameraModel::CameraMotion* prev1 = findPtr(seq - 1);
+			const CameraModel::CameraMotion* next1 = findPtr(seq + 1);
+			if (prev1 && next1 && SameSegmentUsable(*prev1, causal) && SameSegmentUsable(*next1, causal))
+			{
+				std::vector<WeightedMember> pair1;
+				pair1.push_back({ prev1, 1.0 });
+				pair1.push_back({ next1, 1.0 });
+				if (InterpolateMembers(pair1, causal, eval.looHat))
+				{
+					eval.haveLoo = true;
+					const double diag = std::hypot(static_cast<double>(causal.picture.Width()),
+						static_cast<double>(causal.picture.Height()));
+					eval.innovationPx = CameraModel::MaxCornerDifference(causal.params, eval.looHat, causal.picture) * diag;
+					const double looThrPx = (causal.blocks && causal.blocks->absThresholdPx > 0.0f)
+						? static_cast<double>(causal.blocks->absThresholdPx)
+						: kLooDefaultAbsThresholdPx;
+					if (eval.innovationPx > looThrPx)
+						eval.spikeFlagged = true;
+				}
+			}
+			return eval;
+		}
+
+		template <class FindPtrFn>
+		CameraModel::Params SubstituteLooSpike(uint64_t seq, const CameraModel::CameraMotion& causal, int effectiveLead,
+			const CameraModel::Params& looHat, FindPtrFn&& findPtr)
+		{
+			std::vector<WeightedMember> symMembers;
+			bool pastBroken = false, futureBroken = false;
+			for (int d = 1; d <= effectiveLead; ++d)
+			{
+				if (pastBroken || futureBroken || seq < static_cast<uint64_t>(d))
+					break;
+				const CameraModel::CameraMotion* rp = findPtr(seq - static_cast<uint64_t>(d));
+				const CameraModel::CameraMotion* rn = findPtr(seq + static_cast<uint64_t>(d));
+				if (rp && BreaksSegment(*rp, causal)) pastBroken = true;
+				if (rn && BreaksSegment(*rn, causal)) futureBroken = true;
+				if (pastBroken || futureBroken)
+					break;
+				if (rp && rn && SameSegmentUsable(*rp, causal) && SameSegmentUsable(*rn, causal))
+				{
+					const double w = static_cast<double>(effectiveLead + 1 - d);
+					symMembers.push_back({ rp, w });
+					symMembers.push_back({ rn, w });
+				}
+			}
+			CameraModel::Params looSub;
+			if (!symMembers.empty() && InterpolateMembers(symMembers, causal, looSub))
+				return looSub;
+			return looHat;
 		}
 	}
 
@@ -328,67 +398,24 @@ namespace CameraLink
 			return true;
 		}
 
-		// CE-WATER-C2 (C6): leave-one-out symmetric innovation H_hat_t = 0.5 * (H_{t-1} + H_{t+1}) when both
-		// immediate neighbours t-1 and t+1 are usable same-segment records (avoids centre-frame L+1 self-attenuation).
-		CameraModel::Params looHat;
-		bool haveLooHat = false;
-		if (seq > 0 && causal->pairSeconds > 0.0 && !causal->picture.Empty())
-		{
-			const std::shared_ptr<const CameraModel::CameraMotion> prev1 = findRec(seq - 1);
-			const std::shared_ptr<const CameraModel::CameraMotion> next1 = findRec(seq + 1);
-			if (prev1 && next1 && SameSegmentUsable(*prev1, *causal) && SameSegmentUsable(*next1, *causal))
-			{
-				std::vector<WeightedMember> pair1;
-				pair1.push_back({ prev1.get(), 1.0 });
-				pair1.push_back({ next1.get(), 1.0 });
-				if (InterpolateMembers(pair1, *causal, looHat))
-				{
-					haveLooHat = true;
-					out.haveLoo = true;
-					const double diag = std::hypot(static_cast<double>(causal->picture.Width()),
-						static_cast<double>(causal->picture.Height()));
-					out.looInnovationPx = CameraModel::MaxCornerDifference(causal->params, looHat, causal->picture) * diag;
-					const double looThrPx = (causal->blocks && causal->blocks->absThresholdPx > 0.0f)
-						? static_cast<double>(causal->blocks->absThresholdPx)
-						: kLooDefaultAbsThresholdPx;
-					if (out.looInnovationPx > looThrPx)
-						out.looSpikeFlagged = true;
-				}
-			}
-		}
+		// CE-WATER-C2 (C6): leave-one-out symmetric innovation H_hat_t = 0.5 * (H_{t-1} + H_{t+1}).
+		auto findPtr = [&](uint64_t s) -> const CameraModel::CameraMotion* {
+			for (size_t i = m_records.size(); i > 0; --i)
+				if (m_records[i - 1] && m_records[i - 1]->seq == s)
+					return m_records[i - 1].get();
+			return nullptr;
+		};
+		const LooEval loo = EvaluateLooInnovation(seq, *causal, findPtr);
+		out.haveLoo = loo.haveLoo;
+		out.looInnovationPx = loo.innovationPx;
+		out.looSpikeFlagged = loo.spikeFlagged;
 
 		CameraModel::Params sp;
 		if (m_smoother.Smoothed(seq, sp))
 		{
-			if (out.looSpikeFlagged && haveLooHat)
+			if (loo.spikeFlagged && loo.haveLoo)
 			{
-				// Substitute the flagged single-frame spike with the symmetric centre-excluded LOO interpolation
-				// over all usable same-segment symmetric pairs (t-d, t+d) for d = 1..m_effectiveLead (reduces
-				// identically to looHat = 0.5 * (H_{t-1} + H_{t+1}) when lead == 1 or when d >= 2 hits a boundary).
-				std::vector<WeightedMember> symMembers;
-				bool pastBroken = false, futureBroken = false;
-				for (int d = 1; d <= m_effectiveLead; ++d)
-				{
-					if (pastBroken || futureBroken || seq < static_cast<uint64_t>(d))
-						break;
-					const std::shared_ptr<const CameraModel::CameraMotion> rp = findRec(seq - static_cast<uint64_t>(d));
-					const std::shared_ptr<const CameraModel::CameraMotion> rn = findRec(seq + static_cast<uint64_t>(d));
-					if (rp && BreaksSegment(*rp, *causal)) pastBroken = true;
-					if (rn && BreaksSegment(*rn, *causal)) futureBroken = true;
-					if (pastBroken || futureBroken)
-						break;
-					if (rp && rn && SameSegmentUsable(*rp, *causal) && SameSegmentUsable(*rn, *causal))
-					{
-						const double w = static_cast<double>(m_effectiveLead + 1 - d);
-						symMembers.push_back({ rp.get(), w });
-						symMembers.push_back({ rn.get(), w });
-					}
-				}
-				CameraModel::Params looSub;
-				if (!symMembers.empty() && InterpolateMembers(symMembers, *causal, looSub))
-					sp = looSub;
-				else
-					sp = looHat;
+				sp = SubstituteLooSpike(seq, *causal, m_effectiveLead, loo.looHat, findPtr);
 				m_counters.looSpikes.fetch_add(1, std::memory_order_relaxed);
 			}
 			auto rec = std::make_shared<CameraModel::CameraMotion>(*causal);
@@ -484,20 +511,55 @@ namespace CameraLink
 			CameraModel::CameraMotion result = centre;
 			result.smoothed = false;
 			uint8_t usedLead = 0;
-			if (effectiveLead > 0 && centre.valid && CameraModel::ReasonUsable(centre.reason))
+			int activeLead = effectiveLead;
+			// HIGH-3: respect the memo's queue window on short queues / Games so out-of-range [seq-4..seq+4]
+			// neighbours are never polled (avoiding SkeletonMemo::Fail() pollution of lastCause_[kP7CameraFit]).
+			const VpSkeleton::QueueWindow w = memo.Window();
+			const bool hasWindow = (w.wired != 0 || w.current != 0 || w.ahead != 0 || w.back != 0);
+			if (hasWindow && activeLead > 0)
 			{
-				CameraModel::FixedLagSmoother smoother(effectiveLead);
-				const uint64_t lag = static_cast<uint64_t>(effectiveLead);
+				const uint16_t maxAhead = w.ahead < w.aheadCompute ? w.ahead : w.aheadCompute;
+				if (int(maxAhead) < activeLead)
+					activeLead = int(maxAhead);
+			}
+			if (activeLead > 0 && centre.valid && CameraModel::ReasonUsable(centre.reason))
+			{
+				CameraModel::FixedLagSmoother smoother(activeLead);
+				const uint64_t lag = static_cast<uint64_t>(activeLead);
 				const uint64_t lo = req.seq > lag ? (req.seq - lag) : 0u;
 				const uint64_t hi = req.seq <= ((std::numeric_limits<uint64_t>::max)() - lag)
 					? (req.seq + lag) : (std::numeric_limits<uint64_t>::max)();
+				constexpr size_t kMaxWindow = static_cast<size_t>(VpSkeleton::kMaxCameraLead) * 2u + 1u;
+				std::array<CameraModel::CameraMotion, kMaxWindow> windowRecs{};
+				std::array<bool, kMaxWindow> windowValid{};
 				for (uint64_t s = lo; s <= hi; ++s)
 				{
+					const size_t idx = static_cast<size_t>(s - lo);
 					if (s == req.seq)
 					{
+						if (idx < kMaxWindow) { windowRecs[idx] = centre; windowValid[idx] = true; }
 						smoother.Push(centre);
 						if (s == hi) break;
 						continue;
+					}
+					// Non-mutating guard before Acquire: never trigger Fail() for released or unadmitted ahead frames.
+					const bool ready = memo.HasReadyCpu(VpSkeleton::kP7CameraFit, s);
+					if (!ready)
+					{
+						if (memo.Released(s))
+						{
+							if (s == hi) break;
+							continue;
+						}
+						if (memo.AheadOfSeal(s))
+						{
+							VpSkeleton::AcquireCause why = VpSkeleton::AcquireCause::None;
+							if (!memo.CheckAheadAdmitted(VpSkeleton::kP7CameraFit, s, why))
+							{
+								if (s == hi) break;
+								continue;
+							}
+						}
 					}
 					const VpSkeleton::AcquireResult nr = memo.Acquire(
 						VpSkeleton::kP7CameraFit, s, VpSkeleton::AcquireForm::Cpu);
@@ -505,16 +567,28 @@ namespace CameraLink
 					{
 						CameraModel::CameraMotion nrec;
 						if (DecodeRecordPod(nr.cpu, nr.cpuBytes, nrec))
+						{
+							if (idx < kMaxWindow) { windowRecs[idx] = nrec; windowValid[idx] = true; }
 							smoother.Push(nrec);
+						}
 					}
 					if (s == hi) break;
 				}
 				CameraModel::Params smoothedParams;
 				if (smoother.Smoothed(req.seq, smoothedParams))
 				{
+					// HIGH-3: CE-WATER-C2 LOO spike filter parity with CameraSmoother::Query.
+					auto findWindowRec = [&](uint64_t s) -> const CameraModel::CameraMotion* {
+						if (s < lo || s > hi) return nullptr;
+						const size_t idx = static_cast<size_t>(s - lo);
+						return (idx < kMaxWindow && windowValid[idx]) ? &windowRecs[idx] : nullptr;
+					};
+					const LooEval loo = EvaluateLooInnovation(req.seq, centre, findWindowRec);
+					if (loo.spikeFlagged && loo.haveLoo)
+						smoothedParams = SubstituteLooSpike(req.seq, centre, activeLead, loo.looHat, findWindowRec);
 					result.smoothed = true;
 					result.smoothedParams = smoothedParams;
-					usedLead = static_cast<uint8_t>(effectiveLead);
+					usedLead = static_cast<uint8_t>(activeLead);
 				}
 			}
 
@@ -571,10 +645,25 @@ namespace CameraLink
 		{
 		public:
 			const char* Name() const override { return "motion.estimation.p9_camera_smoothed"; }
+			void OnLifecycle(RendererExtension::LifecycleFacts& f) override
+			{
+				if (!f.host)
+					return;
+				if (f.kind == RendererExtension::Lifecycle::Shutdown || f.kind == RendererExtension::Lifecycle::GpuReleased)
+				{
+					std::lock_guard<std::mutex> lock(m_mutex);
+					m_hostProblems.erase(f.host);
+					const auto it = m_hostMemo.find(f.host);
+					if (it != m_hostMemo.end())
+					{
+						m_memoDeclines.erase(it->second);
+						m_hostMemo.erase(it);
+					}
+				}
+			}
 			bool OnFrame(RendererExtension::FrameContext& c) override
 			{
 				if (c.phase != RendererExtension::FramePhase::Entrance
-					|| m_registered.load(std::memory_order_acquire)
 					|| Vpv::Hub::ExtensionHub::Instance().OriginalPathway(c.host))
 					return false;
 				auto* demand = static_cast<Vpv::Skeleton::IExternalDemand*>(
@@ -582,47 +671,84 @@ namespace CameraLink
 				if (demand == nullptr)
 				{
 					std::lock_guard<std::mutex> lock(m_mutex);
-					m_problem = "no skeleton to register with (retried at next frame)";
+					m_hostProblems[c.host] = "no skeleton to register with (retried at next frame)";
 					return false;
 				}
+				{
+					const Vpv::Skeleton::FrameMemo fm = demand->MemoFor(c.host, static_cast<uint64_t>(c.seq > 0 ? c.seq : 0));
+					if (fm.Valid())
+					{
+						std::lock_guard<std::mutex> lock(m_mutex);
+						m_hostMemo[c.host] = fm.memo.get();
+					}
+				}
+				if (m_registered.load(std::memory_order_acquire))
+				{
+					std::lock_guard<std::mutex> lock(m_mutex);
+					m_hostProblems.erase(c.host);
+					return false;
+				}
+				VpSkeleton::OwnerFill fill = MakeP9OwnerFill(int(VpSkeleton::kMaxCameraLead), nullptr);
+				auto baseFill = std::move(fill.fill);
+				fill.fill = [this, baseFill](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo& memo,
+					VpSkeleton::OwnerFillOutput& out) -> bool {
+					const bool ok = baseFill(req, memo, out);
+					if (!ok)
+					{
+						std::lock_guard<std::mutex> lock(m_mutex);
+						++m_memoDeclines[&memo];
+					}
+					return ok;
+				};
 				const VpSkeleton::SkeletonMemo::Registration r = demand->RegisterOwnerFill(
-					VpSkeleton::kP9CameraSmoothed, VpSkeleton::AcquireForm::Cpu, kP9OwnerUnit,
-					MakeP9OwnerFill(int(VpSkeleton::kMaxCameraLead), &m_counters));
+					VpSkeleton::kP9CameraSmoothed, VpSkeleton::AcquireForm::Cpu, kP9OwnerUnit, std::move(fill));
 				if (r == VpSkeleton::SkeletonMemo::Registration::Registered
 					|| r == VpSkeleton::SkeletonMemo::Registration::AlreadyRegistered)
 				{
 					m_registered.store(true, std::memory_order_release);
 					std::lock_guard<std::mutex> lock(m_mutex);
-					m_problem.clear();
+					m_hostProblems.erase(c.host);
 				}
 				else
 				{
 					std::lock_guard<std::mutex> lock(m_mutex);
-					m_problem = "P9 owner fill " + P9RegistrationText(r);
+					m_hostProblems[c.host] = "P9 owner fill " + P9RegistrationText(r);
 				}
 				return false;
 			}
-			void OnStatus(const RendererExtension::Context&, RendererExtension::StatusKind kind,
+			void OnStatus(const RendererExtension::Context& c, RendererExtension::StatusKind kind,
 				std::vector<std::string>& lines, const char*, const char*) override
 			{
-				if (kind != RendererExtension::StatusKind::Fallbacks)
+				// HIGH-3: guard OnStatus with OriginalPathway(c.host) and report per-host counters only.
+				if (kind != RendererExtension::StatusKind::Fallbacks
+					|| Vpv::Hub::ExtensionHub::Instance().OriginalPathway(c.host))
 					return;
 				std::string problem;
+				uint64_t dec = 0;
 				{
 					std::lock_guard<std::mutex> lock(m_mutex);
-					problem = m_problem;
+					const auto pit = m_hostProblems.find(c.host);
+					if (pit != m_hostProblems.end())
+						problem = pit->second;
+					const auto mit = m_hostMemo.find(c.host);
+					if (mit != m_hostMemo.end())
+					{
+						const auto dit = m_memoDeclines.find(mit->second);
+						if (dit != m_memoDeclines.end())
+							dec = dit->second;
+					}
 				}
 				if (!problem.empty())
 					lines.push_back("p9_camera_smoothed_unregistered: " + problem);
-				const uint64_t dec = m_counters.declines.load(std::memory_order_relaxed);
 				if (dec > 0)
 					lines.push_back("p9_camera_smoothed_declined: " + std::to_string(dec) + " owner fill declines");
 			}
 		private:
 			mutable std::mutex m_mutex;
-			std::string m_problem;
+			std::map<const void*, std::string> m_hostProblems;
+			std::map<const void*, const void*> m_hostMemo;
+			std::map<const void*, uint64_t> m_memoDeclines;
 			std::atomic<bool> m_registered{ false };
-			P9OwnerCounters m_counters;
 		};
 	}
 

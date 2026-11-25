@@ -66,7 +66,7 @@ if (q.x < size.x && q.y < size.y) {
                 // B's content where the B sample lands is new (not seen in A): not the
                 // same content as the A sample - the A sample alone.
                 ivec2 osize = textureSize(occ_b, 0);
-                if (texelFetch(occ_b, clamp(ivec2(floor(lb / 16.0)), ivec2(0), osize - ivec2(1)), 0).r < 0.5)
+                if (texelFetch(occ_b, clamp(ivec2(floor(lb / occ_pitch)), ivec2(0), osize - ivec2(1)), 0).r < 0.5)
                     wb = 0.0;
 #endif
                 outv = mix(sa, sb, wb);
@@ -91,9 +91,9 @@ if (q.x < size.x && q.y < size.y) {
             // match (new in B, but nothing moving away) keeps the fallback above.
             {
                 ivec2 osize = textureSize(occ_b, 0);
-                if (texelFetch(occ_b, clamp(ivec2(floor(lp / 16.0)), ivec2(0), osize - ivec2(1)), 0).r < 0.5) {
+                if (texelFetch(occ_b, clamp(ivec2(floor(lp / occ_pitch)), ivec2(0), osize - ivec2(1)), 0).r < 0.5) {
                     ivec2 fsize = textureSize(field, 0);
-                    ivec2 own = clamp(ivec2(floor(lp / 16.0)), ivec2(0), fsize - ivec2(1));
+                    ivec2 own = clamp(ivec2(floor(lp / field_pitch)), ivec2(0), fsize - ivec2(1));
                     bool uncovered = false;
                     for (int dy = -1; dy <= 1; dy++)
                         for (int dx = -1; dx <= 1; dx++) {
@@ -101,7 +101,7 @@ if (q.x < size.x && q.y < size.y) {
                             if ((dx == 0 && dy == 0) || c.x < 0 || c.y < 0 || c.x >= fsize.x || c.y >= fsize.y)
                                 continue;
                             vec4 f = texelFetch(field, c, 0);
-                            vec2 centre = (vec2(c) + vec2(0.5)) * 16.0;
+                            vec2 centre = (vec2(c) + vec2(0.5)) * field_pitch;
                             if (f.z > 0.5 && dot(f.xy, centre - lp) > 0.0 && phase * length(f.xy) >= 2.0)
                                 uncovered = true;
                         }
@@ -236,7 +236,7 @@ if (inside) {
 #ifdef OCCLUSION
                 vec2 lb = lp + (1.0 - phase) * v;
                 ivec2 osize = textureSize(occ_b, 0);
-                if (texelFetch(occ_b, clamp(ivec2(floor(lb / 16.0)), ivec2(0), osize - ivec2(1)), 0).r < 0.5)
+                if (texelFetch(occ_b, clamp(ivec2(floor(lb / occ_pitch)), ivec2(0), osize - ivec2(1)), 0).r < 0.5)
                     wb = 0.0;
 #endif
                 vec4 la = LOW_A(pa);
@@ -284,9 +284,9 @@ if (inside) {
 #ifdef OCCLUSION
             {
                 ivec2 osize = textureSize(occ_b, 0);
-                if (texelFetch(occ_b, clamp(ivec2(floor(lp / 16.0)), ivec2(0), osize - ivec2(1)), 0).r < 0.5) {
+                if (texelFetch(occ_b, clamp(ivec2(floor(lp / occ_pitch)), ivec2(0), osize - ivec2(1)), 0).r < 0.5) {
                     ivec2 fsize = textureSize(field, 0);
-                    ivec2 own = clamp(ivec2(floor(lp / 16.0)), ivec2(0), fsize - ivec2(1));
+                    ivec2 own = clamp(ivec2(floor(lp / field_pitch)), ivec2(0), fsize - ivec2(1));
                     bool uncovered = false;
                     for (int dy = -1; dy <= 1; dy++)
                         for (int dx = -1; dx <= 1; dx++) {
@@ -294,7 +294,7 @@ if (inside) {
                             if ((dx == 0 && dy == 0) || c.x < 0 || c.y < 0 || c.x >= fsize.x || c.y >= fsize.y)
                                 continue;
                             vec4 f = texelFetch(field, c, 0);
-                            vec2 centre = (vec2(c) + vec2(0.5)) * 16.0;
+                            vec2 centre = (vec2(c) + vec2(0.5)) * field_pitch;
                             if (f.z > 0.5 && dot(f.xy, centre - lp) > 0.0 && phase * length(f.xy) >= 2.0)
                                 uncovered = true;
                         }
@@ -457,6 +457,26 @@ if (q.x < size.x && q.y < size.y)
 			}
 			texOut = t;
 			return true;
+		}
+
+		// POD1-M6: derive exact grid cell pitch in estimate pixels from estimate & grid texture dimensions (zero hardcoded 16.0).
+		void DeriveGridPitch(int estW, int estH, int gridW, int gridH, float pitchOut[2])
+		{
+			if (gridW <= 0 || gridH <= 0 || estW <= 0 || estH <= 0)
+			{
+				pitchOut[0] = pitchOut[1] = 1.0f;
+				return;
+			}
+			for (int b = 1; b <= 256; b <<= 1)
+			{
+				if ((estW + b - 1) / b == gridW && (estH + b - 1) / b == gridH)
+				{
+					pitchOut[0] = pitchOut[1] = static_cast<float>(b);
+					return;
+				}
+			}
+			pitchOut[0] = static_cast<float>(estW) / static_cast<float>(gridW);
+			pitchOut[1] = static_cast<float>(estH) / static_cast<float>(gridH);
 		}
 
 		bool Compute(pl_dispatch dispatch, const char* description, const char* header, const char* body,
@@ -679,10 +699,24 @@ if (q.x < size.x && q.y < size.y)
 		const float gainLo = static_cast<float>(GrainPreserve::kGainMin);
 		const float gainHi = static_cast<float>(GrainPreserve::kGainMax);
 		const float gainMinPixels = static_cast<float>(GrainPreserve::kGainMinPixels);
+		const int estW = static_cast<int>(std::lround(static_cast<double>(srcA->params.w) * planeScale[0]));
+		const int estH = static_cast<int>(std::lround(static_cast<double>(srcA->params.h) * planeScale[1]));
+		float fieldPitch[2] = { 1.0f, 1.0f };
+		float occPitch[2] = { 1.0f, 1.0f };
+		DeriveGridPitch(estW, estH, motion.field->params.w, motion.field->params.h, fieldPitch);
+		if (motion.occlusionB)
+			DeriveGridPitch(estW, estH, motion.occlusionB->params.w, motion.occlusionB->params.h, occPitch);
+		else
+		{
+			occPitch[0] = fieldPitch[0];
+			occPitch[1] = fieldPitch[1];
+		}
 		const pl_shader_var vars[] = {
 			{ pl_var_float("phase"), &t, true },
 			{ pl_var_float("min_trusted_share"), &minShare, true },
 			{ pl_var_vec2("plane_scale"), planeScale, true },
+			{ pl_var_vec2("field_pitch"), fieldPitch, true },
+			{ pl_var_vec2("occ_pitch"), occPitch, true },
 			{ pl_var_float("gain_lo"), &gainLo, true },
 			{ pl_var_float("gain_hi"), &gainHi, true },
 			{ pl_var_float("gain_min_pixels"), &gainMinPixels, true } };
@@ -712,7 +746,7 @@ if (q.x < size.x && q.y < size.y)
 		custom.descriptors = desc;
 		custom.num_descriptors = numDesc;
 		custom.variables = vars;
-		custom.num_variables = hasBands ? 6 : 3;
+		custom.num_variables = hasBands ? 8 : 5;
 		custom.compute = true;
 		custom.compute_group_size[0] = 16;
 		custom.compute_group_size[1] = 16;
@@ -801,12 +835,26 @@ if (q.x < size.x && q.y < size.y)
 		// interpolation_grain preserve: each plane's low band of A and B
 		// first (blend: today's pass alone, byte for byte).
 		const bool preserve = grain == InterpolationPolicy::Grain::Preserve;
+		lastBandMemoFallback.clear();
 		auto resolvePlaneBands = [&](int planeIndex, pl_tex srcA, pl_tex srcB,
 			VpSkeleton::AcquireResult& pinA, VpSkeleton::AcquireResult& pinB, pl_tex& lowA, pl_tex& lowB) -> bool {
 			lowA = nullptr;
 			lowB = nullptr;
 			if (!preserve)
 				return true;
+			// kBandMemo serves single-component luma (plane 0); multi-component chroma (plane 1) uses PrepareFallbackLow
+			// directly without clobbering luma's live BandMemo fallback status (POD1-H1).
+			if (planeIndex != 0)
+			{
+				if (!PrepareFallbackLow(planeIndex, false, srcA, lowA))
+					return false;
+				if (srcB == srcA)
+				{
+					lowB = lowA;
+					return true;
+				}
+				return PrepareFallbackLow(planeIndex, true, srcB, lowB);
+			}
 			std::string why;
 			if (TryAcquireBandMemo(memo, seqA, planeIndex, processed, srcA, pinA, lowA, why))
 			{

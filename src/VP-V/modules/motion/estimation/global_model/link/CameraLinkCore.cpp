@@ -457,6 +457,8 @@ namespace CameraLink
 				// era's marks (a stale "rejected" verdict would count a new pair as Stale / R; a stale on-time mark would pass cause b),
 				// the bridge's retired marks included, and the worker's render position and parked results belong to the old numbering.
 				ClearAheadMarks();
+				if (m_ring)
+					m_ring->Clear();   // POD1-H5: transition in-flight native slots to Draining on renumber/reset
 				if (m_worker)
 					m_worker->ResetRenderPosition(0);
 				if (renumber)
@@ -502,7 +504,9 @@ namespace CameraLink
 			dt = std::chrono::duration<double>(now - m_lastFrameAt).count();
 		m_lastFrameAt = now;
 		m_haveFrameAt = true;
-		// (2) poll the ring, (3) request the copy of each new verified field
+		// (2) frame-boundary ring maintenance + poll the ring, (3) request the copy of each new verified field
+		if (m_ring)
+			m_ring->OnFrameStart();   // POD1-H5: drain parked/draining slots at frame boundary
 		OnPostSubmitGap();
 		if (m_ring && m_engine)
 		{
@@ -565,6 +569,8 @@ namespace CameraLink
 			}
 			if (latest > m_lastRequestedField)
 				m_lastRequestedField = latest;
+			// POD1-H5: submit queued native readbacks immediately (1 batched pl_gpu_flush instead of stalling until next Poll()).
+			m_ring->FlushPending();
 		}
 		if (ahead)
 		{

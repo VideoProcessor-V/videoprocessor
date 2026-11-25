@@ -6,6 +6,7 @@
 #include <VP-V/modules/drive/led_compensation/DynamicDriveFrame.h>
 #include <VP-V/modules/drive/led_compensation/DynamicDriveHost.h>
 #include <VP-V/modules/drive/led_compensation/LedDriveModule.h>
+#include <VP-V/modules/drive/led_measure/LedLookahead.h>
 #include <VP-V/modules/drive/projector_control/SerialPort.h>
 #include <ConfigFile.h>
 #include <MainConfigSchema.h>
@@ -1747,6 +1748,92 @@ namespace VideoProcessorTest
 				L"fallbacks.Heading() must release \"projector framing\" after Clear()");
 			Assert::AreEqual(std::string("Fallbacks engaged: none"), f.fallbacks.Heading(),
 				L"fallbacks.Heading() must return to none after Clear()");
+		}
+
+		// POD1-M4 + POD1-M7: synchronized ParkForHoldover/ResumeAfterCalibration, LookaheadObserver caches Config() by ConfigGeneration,
+		// and FallbackStatus::Registry::EntriesInto preserves vector capacity across repeated merges.
+		TEST_METHOD(Group9AuditDriveHostSyncLookaheadCacheAndFallbackScratch)
+		{
+			// 1. POD1-M4: concurrent ParkForHoldover / ResumeAfterCalibration / SuspendForCalibration under stateMutex.
+			{
+				std::mutex state;
+				LedDrive::DynamicDriveHost host(state);
+				LedDrive::HostContext ctx;
+				std::atomic<bool> stop{ false };
+				std::thread t1([&]() {
+					for (int i = 0; i < 64 && !stop.load(std::memory_order_relaxed); ++i)
+						host.ParkForHoldover(ctx);
+				});
+				std::thread t2([&]() {
+					for (int i = 0; i < 64 && !stop.load(std::memory_order_relaxed); ++i)
+					{
+						host.SuspendForCalibration(ctx);
+						host.ResumeAfterCalibration(ctx);
+					}
+				});
+				t1.join();
+				t2.join();
+				Assert::IsFalse(host.Suspended(), L"concurrent park/calibration cycle leaves host unsuspended");
+			}
+
+			// 2. POD1-M7: LookaheadObserver calls IPredictionSink::Config() once per ConfigGeneration (not 2x per frame).
+			{
+				struct CountingSink : LedDrive::IPredictionSink
+				{
+					mutable std::atomic<int> configCalls{ 0 };
+					std::atomic<uint64_t> gen{ 1 };
+					std::shared_ptr<const LedDrive::RawTransfer> xfer =
+						std::make_shared<LedDrive::RawTransfer>(LedDrive::IdentityRawTransfer());
+					bool WantsPredictions() const override { return true; }
+					void SetLookaheadDepth(size_t) override {}
+					uint64_t ConfigGeneration() const override { return gen.load(); }
+					uint64_t LookaheadEpoch() const override { return 1; }
+					LedDrive::LedDriveConfig Config() const override { configCalls.fetch_add(1); return LedDrive::LedDriveConfig(); }
+					std::shared_ptr<const LedDrive::RawTransfer> CurrentRawTransfer() const override { return xfer; }
+					double DisplayGamma() const override { return 2.2; }
+					int SourceRange() const override { return 0; }
+					double SourceFramePeriodMs() const override { return 41.7; }
+					void SubmitPrediction(uint64_t, const LedDrive::FrameStats&) override {}
+				};
+				CountingSink sink;
+				LedDrive::LookaheadObserver observer(sink);
+				std::vector<uint8_t> plane(64 * 32 * 2, 128);
+				AnalysisLumaSource luma{};
+				luma.data = plane.data();
+				luma.dataBytes = plane.size();
+				luma.width = 64;
+				luma.height = 32;
+				luma.rowBytes = 64 * 2;
+				luma.format = AnalysisLumaFormat::NativeYuv422;
+				luma.encoding = VideoFrameEncoding::UYVY;
+				QueuedFrameStatistics::PictureRect rect;
+				rect.left = 0;
+				rect.top = 0;
+				rect.right = 64;
+				rect.bottom = 32;
+				for (uint64_t seq = 1; seq <= 6; ++seq)
+					observer.ObserveFrame(seq, 1, luma, rect);
+				Assert::AreEqual(1, sink.configCalls.load(),
+					L"LookaheadObserver must cache LedDriveConfig across steady-state frames (1 call, not 2*N)");
+				// Negative control: bumping ConfigGeneration triggers exactly one refresh call.
+				sink.gen.store(2);
+				observer.ObserveFrame(7, 1, luma, rect);
+				Assert::AreEqual(2, sink.configCalls.load(),
+					L"bumping ConfigGeneration refreshes cached LedDriveConfig exactly once");
+			}
+
+			// 3. POD1-M7: EntriesInto reuses caller vector buffer without shrinking capacity.
+			{
+				FallbackStatus::Registry reg;
+				reg.Engage("test.a", "reason a");
+				reg.Engage("test.b", "reason b");
+				std::vector<FallbackStatus::Entry> buf;
+				buf.reserve(8);
+				const auto* dataPtr = buf.data();
+				reg.EntriesInto(buf);
+				Assert::AreEqual(size_t(2), buf.size());
+				Assert::IsTrue(buf.data() == dataPtr, L"EntriesInto reuses pre-reserved storage without reallocating");
+			}
 		}
 	};
 }

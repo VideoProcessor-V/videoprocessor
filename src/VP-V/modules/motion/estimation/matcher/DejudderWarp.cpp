@@ -1843,6 +1843,39 @@ float hold_weight(vec2 lp, float feather)
         }
     return smoothstep(0.0, f, d);
 }
+// POD1-M5: anisotropic per-axis feather (output feather mapped through per-axis source slope).
+float hold_weight_xy(vec2 lp, vec2 feather)
+{
+    ivec2 fsize = textureSize(field, 0);
+    ivec2 own = clamp(ivec2(floor(lp / 16.0)), ivec2(0), fsize - ivec2(1));
+    vec2 f = max(feather, vec2(1e-3));
+    vec2 local = lp - vec2(own) * 16.0;
+    if (local.x >= f.x && 16.0 - local.x >= f.x && local.y >= f.y && 16.0 - local.y >= f.y)
+        return 1.0;
+    float d = 1e9;
+    for (int dy = -1; dy <= 1; dy++)
+        for (int dx = -1; dx <= 1; dx++) {
+            if (dx == 0 && dy == 0) continue;
+            ivec2 c = own + ivec2(dx, dy);
+            if (c.x < 0 || c.y < 0 || c.x >= fsize.x || c.y >= fsize.y) continue;
+            bool held = texelFetch(field, c, 0).z < 0.5;
+#ifdef SPLIT
+            if (held && texelFetch(sub_field, c * 2, 0).w > 0.5) {
+                held = false;
+                for (int k = 0; k < 4; k++)
+                    if (texelFetch(sub_field, c * 2 + ivec2(k % 2, k / 2), 0).z < 0.5) {
+                        vec2 slo = vec2(c * 2 + ivec2(k % 2, k / 2)) * 8.0;
+                        d = min(d, length((lp - clamp(lp, slo, slo + vec2(8.0))) / f));
+                    }
+            }
+#endif
+            if (held) {
+                vec2 lo = vec2(c) * 16.0;
+                d = min(d, length((lp - clamp(lp, lo, lo + vec2(16.0))) / f));
+            }
+        }
+    return smoothstep(0.0, 1.0, d);
+}
 #endif
 )GLSL";
 
@@ -3177,7 +3210,8 @@ barrier();
 if (li == 0) {
     float tz = 0.0, tf = 0.0, tb_ = 0.0;
     for (int k = 0; k < 256; k++) { tz += gs_sz[k]; tf += gs_sf[k]; tb_ += gs_sb[k]; }
-    imageStore(dst, ivec2(0), vec4(tz, tf, tb_, 1.0));
+    float beats = (tz > 0.0 && tf < gs_max_ratio * tz && tb_ < gs_max_ratio * tz) ? 1.0 : 0.0;
+    imageStore(dst, ivec2(0), vec4(tz, tf, tb_, beats));
 }
 )GLSL";
 		if (!halfA || !halfB)
@@ -3185,7 +3219,7 @@ if (li == 0) {
 		if (!seedCheck)
 		{
 			pl_fmt fmt = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
-				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE | PL_FMT_CAP_HOST_READABLE));
+				static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE));
 			if (!fmt)
 				return false;
 			pl_tex_params params{};
@@ -3193,25 +3227,24 @@ if (li == 0) {
 			params.format = fmt;
 			params.sampleable = true;
 			params.storable = true;
-			params.host_readable = true;
 			if (!pl_tex_recreate(gpu, &seedCheck, &params))
 				return false;
 		}
 		const float seedVar[4] = { searchSeed[0][0], searchSeed[0][1], searchSeed[1][0], searchSeed[1][1] };
-		const pl_shader_var vars[1] = { { pl_var_vec4("gs_seed"), seedVar, true } };
+		const float maxRatio = VpMotion::GapSeed::kMaxSadVsZero;
+		const pl_shader_var vars[2] = {
+			{ pl_var_vec4("gs_seed"), seedVar, true },
+			{ pl_var_float("gs_max_ratio"), &maxRatio, true }
+		};
 		const pl_shader_desc d[3] = { Sampled("gs_ta", halfA, false), Sampled("gs_tb", halfB, false), Storage("dst", seedCheck) };
-		if (!DispatchPerBlock("VideoProcessor de-judder: gap seed check (SAD vs zero)", header, body, d, 3, vars, 1, 1, 1, 16, 16))
+		if (!DispatchPerBlock("VideoProcessor de-judder: gap seed check (SAD vs zero)", header, body, d, 3, vars, 2, 1, 1, 16, 16))
 		{
 			error.clear();
 			return false;
 		}
-		float sums[4] = {};
-		pl_tex_transfer_params download{};
-		download.tex = seedCheck;
-		download.ptr = sums;
-		if (!pl_tex_download(gpu, &download))
-			return false;
-		return VpMotion::GapSeed::Beats(sums[0], sums[1], sums[2]);
+		// HIGH-1 / G6: zero blocking pl_tex_download on the render thread; seedCheck.w carries the GPU-evaluated
+		// GapSeed::Beats verdict consumed directly by ExecutePairGlobalGpu's GPU-side conditional mux.
+		return true;
 	}
 
 	// A cut / flash pair (camera guidance skipMatcher): both searches untrusted (a match error far above any
@@ -4286,6 +4319,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 			pgCtx.bothSad2 = &globalBothSad2;
 			pgCtx.bothSad1 = &globalBothSad1;
 			pgCtx.bothPick = &globalBothPick;
+			pgCtx.gapSeedCheckTex = &seedCheck;
 			pgCtx.dispatch = [this](const char* description, const char* header, const char* body,
 				const pl_shader_desc* descriptors, int numDescriptors,
 				const pl_shader_var* variables, int numVariables, int w, int h, int group) -> bool

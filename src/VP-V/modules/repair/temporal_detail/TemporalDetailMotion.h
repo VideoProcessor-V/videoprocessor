@@ -28,6 +28,7 @@ namespace TemporalDetail
 		bool valid = false;
 		int gridW = 0, gridH = 0;
 		double blockPx = 16.0;
+		double blockPxY = 0.0;              // vertical block pitch (0 = square, uses blockPx)
 		std::vector<float> vx, vy, trust;   // gridW x gridH, raster; trust 0..1
 		double originX = 0.0, originY = 0.0; // the reader's coordinate origin in the grid's plane (an active-picture crop)
 

@@ -1590,8 +1590,12 @@ bool VpvDolbyVisionTunnelFormatter::FormatVideoFrame(
 void VpvDolbyVisionTunnelFormatter::ConvertPicture(
 	const uint8_t* source, uint16_t* outputWords, bool leftAligned)
 {
+	// MED-3: derive parallelisation threshold from worker count (>= 64 rows and >= 512 KiPx per worker)
+	// rather than hardcoding a display resolution.
+	const uint32_t segments = m_workerCount + 1u;
 	if (m_workerCount > 0 &&
-		static_cast<uint64_t>(m_width) * m_height >= 1920ULL * 1080ULL)
+		m_height >= segments * 64u &&
+		static_cast<uint64_t>(m_width) * m_height >= static_cast<uint64_t>(segments) * (1ULL << 19))
 	{
 		m_workerSource = source;
 		m_workerOutput = outputWords;

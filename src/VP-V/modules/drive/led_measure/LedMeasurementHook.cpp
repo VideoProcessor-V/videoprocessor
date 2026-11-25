@@ -82,7 +82,7 @@ float grain_at(vec2 picture_px)
 {
     vec2 s = src_crop.xy + (picture_px - pic_rect.xy) * src_crop.zw / pic_rect.zw;
     ivec2 gs = textureSize(grain_map, 0);
-    vec4 m = texelFetch(grain_map, clamp(ivec2(floor(s / 16.0)), ivec2(0), gs - ivec2(1)), 0);
+    vec4 m = texelFetch(grain_map, clamp(ivec2(floor(s / max(grain_pitch, vec2(1.0)))), ivec2(0), gs - ivec2(1)), 0);
     return m.g > 0.5 ? clamp((1.0 - m.r) / max(1.0 - grain_floor, 1e-3), 0.0, 1.0) : 0.0;
 }
 )GLSL";
@@ -413,6 +413,21 @@ if (i < READBACK_WORDS) {
 		}
 		const float srcCrop[4] = { crop.x0, crop.y0, crop.x1 - crop.x0, crop.y1 - crop.y0 };
 		const float picRect[4] = { r.x0, r.y0, rw, rh };
+		// POD1-M6: derive grain-map cell pitch from source extent vs grain texture dimensions (never hardcoded 16).
+		float grainPitch[2] = { 16.0f, 16.0f };
+		if (useGrain && grain->params.w > 0 && grain->params.h > 0)
+		{
+			auto derivePitch = [](float span, int grid) -> float {
+				if (grid <= 0 || span <= 0.0f) return 16.0f;
+				const int spanPx = static_cast<int>(std::lround(span));
+				for (int p = 1; p <= 64; p <<= 1)
+					if ((spanPx + p - 1) / p == grid)
+						return static_cast<float>(p);
+				return (std::max)(1.0f, span / static_cast<float>(grid));
+			};
+			grainPitch[0] = derivePitch(crop.x0 + crop.x1, grain->params.w);
+			grainPitch[1] = derivePitch(crop.y0 + crop.y1, grain->params.h);
+		}
 		// Hunt 2: the masks in hooked-texture pixels (all zero = unused).
 		static_assert(MAX_MASK_RECTS == 6, "MASK_HEADER names six masks");
 		float maskPx[MAX_MASK_RECTS][4] = {};
@@ -430,7 +445,7 @@ if (i < READBACK_WORDS) {
 		const float peakBoxes[2] = { static_cast<float>(peakGrid.boxesX), static_cast<float>(peakGrid.boxesY) };
 		const float peakBox[2] = { static_cast<float>(peakGrid.boxW), static_cast<float>(peakGrid.boxH) };
 
-		const pl_shader_var variables[14] = {
+		const pl_shader_var variables[15] = {
 			{ pl_var_vec4("rect_px"), rectPx, true },
 			{ pl_var_vec2("blocks"), blocks, true },
 			{ pl_var_vec2("block_step"), step, true },
@@ -444,7 +459,8 @@ if (i < READBACK_WORDS) {
 			{ pl_var_vec4("mask5"), maskPx[5], true },
 			{ pl_var_vec4("src_crop"), srcCrop, true },
 			{ pl_var_vec4("pic_rect"), picRect, true },
-			{ pl_var_float("grain_floor"), &grainFloorValue, true } };
+			{ pl_var_float("grain_floor"), &grainFloorValue, true },
+			{ pl_var_vec2("grain_pitch"), grainPitch, true } };
 
 		const bool fullPeak = peakFullCoverage;
 		static const std::string headers[4] = {
@@ -462,7 +478,7 @@ if (i < READBACK_WORDS) {
 		custom.descriptors = descriptors;
 		custom.num_descriptors = useGrain ? 3 : 2;
 		custom.variables = variables;
-		custom.num_variables = useGrain ? 14 : 11;
+		custom.num_variables = useGrain ? 15 : 11;
 		custom.compute = true;
 		custom.compute_group_size[0] = 16;
 		custom.compute_group_size[1] = 16;

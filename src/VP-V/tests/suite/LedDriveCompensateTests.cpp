@@ -1837,5 +1837,48 @@ namespace VideoProcessorTest
 				kFrames, totalUs / kFrames, totalUs / 1000.0, static_cast<unsigned long long>(detA));
 			Logger::WriteMessage(report);
 		}
+
+		// POD1-L3: fadeToBlack when previousApl <= 16.0 must ramp down at maxDown instead of stalling forever (ratio = 0.0, not 1.0).
+		TEST_METHOD(FadeToBlackRampsDownWhenPreviousAplAtOrBelowBlack)
+		{
+			LedDriveConfig config = Compensate();
+			config.ledFloor = 40;
+			CompensateController ctrl(config);
+			ctrl.Reset(200);
+
+			// First tick at black (apl = 16.0, fade = false) seeds previousApl = 16.0.
+			FrameStats black;
+			black.apl = black.sustainedApl = 16.0;
+			black.highlight = black.sustainedHighlight = black.maximum = 16.0;
+			black.fade = false;
+			const ControllerOutput seed = ctrl.Tick(black, 16.7);
+			const int afterSeed = seed.light;
+			Assert::IsTrue(afterSeed > config.ledFloor, L"seed tick still above floor");
+
+			// Subsequent ticks with fade = true while previousApl <= 16.0 must keep ramping down to ledFloor.
+			black.fade = true;
+			int prev = afterSeed;
+			bool steppedDown = false;
+			for (int i = 0; i < 60; ++i)
+			{
+				const ControllerOutput out = ctrl.Tick(black, 16.7);
+				if (out.light < prev) steppedDown = true;
+				prev = out.light;
+			}
+			Assert::IsTrue(steppedDown, L"fadeToBlack with previousApl <= 16 must step down instead of stalling");
+			Assert::IsTrue(prev < afterSeed, L"LED level must decrease toward ledFloor during fade on black");
+
+			// Negative control: when previousApl > 16 and current apl == previousApl (flat fade), ratio == 1.0 holds level.
+			CompensateController ctrlNc(config);
+			ctrlNc.Reset(200);
+			FrameStats mid;
+			mid.apl = mid.sustainedApl = 40.0;
+			mid.highlight = mid.sustainedHighlight = mid.maximum = 40.0;
+			mid.fade = false;
+			const int midSeed = ctrlNc.Tick(mid, 16.7).light;
+			mid.fade = true;
+			const int midFlat = ctrlNc.Tick(mid, 16.7).light;
+			Assert::AreEqual(midSeed, midFlat, L"negative control: constant non-black APL during fade keeps ratio == 1.0");
+		}
 	};
 }

@@ -41,343 +41,343 @@
 
 //!PARAM dv_slope
 //!DESC Trim slope (1 = neutral)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 2.0
 1.0
 
 //!PARAM dv_offset
 //!DESC Trim offset (0 = neutral)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -1.0
 //!MAXIMUM 1.0
 0.0
 
 //!PARAM dv_power
 //!DESC Trim power (1 = neutral)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 2.0
 1.0
 
 //!PARAM dv_chroma_weight
 //!DESC Trim chroma weight (0 = neutral)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -1.0
 //!MAXIMUM 1.0
 0.0
 
 //!PARAM dv_sat_gain
 //!DESC Trim saturation gain (1 = neutral)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 2.0
 1.0
 
 //!PARAM dv_signal_pq
 //!DESC 1 = PQ output signal, 0 = gamma
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 1.0
 1.0
 
 //!PARAM dv_gamma
 //!DESC Output gamma (gamma signal)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 1.0
 //!MAXIMUM 3.0
 2.2
 
 //!PARAM dv_trc_kind
 //!DESC Output transfer of a gamma signal: 0 power (dv_gamma), 1 BT.1886, 2 sRGB
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 2.0
 0.0
 
 //!PARAM dv_trc_param
 //!DESC BT.1886 black offset b (0 = pure 2.4)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 100.0
 0.0
 
 //!PARAM dv_peak_nits
 //!DESC Display peak (nits)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 1.0
 //!MAXIMUM 10000.0
 1000.0
 
 //!PARAM dv_peak_pq
 //!DESC PQ of the display peak (set by the host)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 1.0
 0.751827
 
 //!PARAM dv_near_black_nits
 //!DESC Luminance of the near-black PQ code 64 (set by the host)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 1.0
 0.00535808
 
 //!PARAM dv_kr
 //!DESC Luminance coefficient R
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 1.0
 0.2627
 
 //!PARAM dv_kb
 //!DESC Luminance coefficient B
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 1.0
 0.0593
 
 //!PARAM dv_ext
 //!DESC L8 extras active (feat/dv-l8)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 1.0
 0.0
 
 //!PARAM dv_rotate
 //!DESC L8 hue vector active
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 1.0
 0.0
 
 //!PARAM dv_mid_contrast
 //!DESC L8 mid contrast (0 = neutral)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -0.5
 //!MAXIMUM 0.5
 0.0
 
 //!PARAM dv_clip_trim
 //!DESC L8 clip trim (0 = neutral)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -0.5
 //!MAXIMUM 0.5
 0.0
 
 //!PARAM dv_sat_r
 //!DESC L8 saturation at red (1 = neutral)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 2.0
 1.0
 
 //!PARAM dv_sat_y
 //!DESC L8 saturation at yellow (1 = neutral)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 2.0
 1.0
 
 //!PARAM dv_sat_g
 //!DESC L8 saturation at green (1 = neutral)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 2.0
 1.0
 
 //!PARAM dv_sat_c
 //!DESC L8 saturation at cyan (1 = neutral)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 2.0
 1.0
 
 //!PARAM dv_sat_b
 //!DESC L8 saturation at blue (1 = neutral)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 2.0
 1.0
 
 //!PARAM dv_sat_m
 //!DESC L8 saturation at magenta (1 = neutral)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 2.0
 1.0
 
 //!PARAM dv_hue_r
 //!DESC L8 hue rotation at red in degrees (0 = neutral)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -45.0
 //!MAXIMUM 45.0
 0.0
 
 //!PARAM dv_hue_y
 //!DESC L8 hue rotation at yellow in degrees (0 = neutral)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -45.0
 //!MAXIMUM 45.0
 0.0
 
 //!PARAM dv_hue_g
 //!DESC L8 hue rotation at green in degrees (0 = neutral)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -45.0
 //!MAXIMUM 45.0
 0.0
 
 //!PARAM dv_hue_c
 //!DESC L8 hue rotation at cyan in degrees (0 = neutral)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -45.0
 //!MAXIMUM 45.0
 0.0
 
 //!PARAM dv_hue_b
 //!DESC L8 hue rotation at blue in degrees (0 = neutral)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -45.0
 //!MAXIMUM 45.0
 0.0
 
 //!PARAM dv_hue_m
 //!DESC L8 hue rotation at magenta in degrees (0 = neutral)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -45.0
 //!MAXIMUM 45.0
 0.0
 
 //!PARAM dv_space
 //!DESC 0: luminance trims; 1: ICtCp trims (dv_tone_mapping dolby_style)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM 0.0
 //!MAXIMUM 1.0
 0.0
 
 //!PARAM dv_lms00
 //!DESC Output RGB -> LMS (BT.2100) row 0 col 0
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -4.0
 //!MAXIMUM 4.0
 0.4120
 
 //!PARAM dv_lms01
 //!DESC Output RGB -> LMS (BT.2100) row 0 col 1
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -4.0
 //!MAXIMUM 4.0
 0.5239
 
 //!PARAM dv_lms02
 //!DESC Output RGB -> LMS (BT.2100) row 0 col 2
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -4.0
 //!MAXIMUM 4.0
 0.0640
 
 //!PARAM dv_lms10
 //!DESC Output RGB -> LMS (BT.2100) row 1 col 0
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -4.0
 //!MAXIMUM 4.0
 0.1667
 
 //!PARAM dv_lms11
 //!DESC Output RGB -> LMS (BT.2100) row 1 col 1
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -4.0
 //!MAXIMUM 4.0
 0.7204
 
 //!PARAM dv_lms12
 //!DESC Output RGB -> LMS (BT.2100) row 1 col 2
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -4.0
 //!MAXIMUM 4.0
 0.1128
 
 //!PARAM dv_lms20
 //!DESC Output RGB -> LMS (BT.2100) row 2 col 0
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -4.0
 //!MAXIMUM 4.0
 0.0241
 
 //!PARAM dv_lms21
 //!DESC Output RGB -> LMS (BT.2100) row 2 col 1
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -4.0
 //!MAXIMUM 4.0
 0.0755
 
 //!PARAM dv_lms22
 //!DESC Output RGB -> LMS (BT.2100) row 2 col 2
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -4.0
 //!MAXIMUM 4.0
 0.9004
 
 //!PARAM dv_ilms00
 //!DESC LMS -> output RGB row 0 col 0 (the inverse of dv_lms)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -8.0
 //!MAXIMUM 8.0
 3.437555
 
 //!PARAM dv_ilms01
 //!DESC LMS -> output RGB row 0 col 1 (the inverse of dv_lms)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -8.0
 //!MAXIMUM 8.0
 -2.50722
 
 //!PARAM dv_ilms02
 //!DESC LMS -> output RGB row 0 col 2 (the inverse of dv_lms)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -8.0
 //!MAXIMUM 8.0
 0.06975897
 
 //!PARAM dv_ilms10
 //!DESC LMS -> output RGB row 1 col 0 (the inverse of dv_lms)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -8.0
 //!MAXIMUM 8.0
 -0.7914317
 
 //!PARAM dv_ilms11
 //!DESC LMS -> output RGB row 1 col 1 (the inverse of dv_lms)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -8.0
 //!MAXIMUM 8.0
 1.983825
 
 //!PARAM dv_ilms12
 //!DESC LMS -> output RGB row 1 col 2 (the inverse of dv_lms)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -8.0
 //!MAXIMUM 8.0
 -0.1922744
 
 //!PARAM dv_ilms20
 //!DESC LMS -> output RGB row 2 col 0 (the inverse of dv_lms)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -8.0
 //!MAXIMUM 8.0
 -0.02564634
 
 //!PARAM dv_ilms21
 //!DESC LMS -> output RGB row 2 col 1 (the inverse of dv_lms)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -8.0
 //!MAXIMUM 8.0
 -0.09923901
 
 //!PARAM dv_ilms22
 //!DESC LMS -> output RGB row 2 col 2 (the inverse of dv_lms)
-//!TYPE float
+//!TYPE DYNAMIC float
 //!MINIMUM -8.0
 //!MAXIMUM 8.0
 1.124873

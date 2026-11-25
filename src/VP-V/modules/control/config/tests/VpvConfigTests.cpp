@@ -1690,17 +1690,17 @@ namespace
 		offset->setValue(40);
 		QCoreApplication::processEvents();
 		require(control<QPushButton>(window, QStringLiteral("applyConfiguration"))->isEnabled(), "editing a moved row did not mark the document edited");
-		// MUST-C (G-CC4 P2 review): each card says only what the runtime does. capture_display_fixes is off on Original
-		// (CaptureDisplayFixes::Enabled); magewell_recover_faults is not gated (Bill's Magewell code, owner item).
+		// MUST-C (G-CC4 P2 review) + POD1-H2: each card says only what the runtime does. Both capture_display_fixes
+		// (CaptureDisplayFixes::Enabled) and magewell_recover_faults (VideoProcessorDlg.cpp SetRecoverFaults gate) are off on Original.
 		auto* captureNote = control<QLabel>(window, QStringLiteral("vpv.input.capture_fixes.note"));
 		require(captureNote->text().contains(QStringLiteral("On the Original pathway this is off")) &&
 			captureNote->text().contains(QStringLiteral("the target-only full-screen session included")),
 			"the capture fixes note does not state the Original off from the start-up configuration on");
 		require(!captureNote->text().contains(QStringLiteral("both are off")), "the capture fixes note still says both are off");
 		auto* magewellNote = control<QLabel>(window, QStringLiteral("vpv.both.magewell_recovery.note"));
-		require(magewellNote->text().contains(QStringLiteral("switching this off is PENDING")) &&
-			magewellNote->text().contains(QStringLiteral("still applies on Original")),
-			"the Magewell card does not say its Original switch-off is pending");
+		require(magewellNote->text().contains(QStringLiteral("Original pathway: forced off")) &&
+			!magewellNote->text().contains(QStringLiteral("PENDING")),
+			"POD1-H2: the Magewell card must state that Original forces magewell_recover_faults off");
 		// Original pathway: the capture / display fix is greyed; Magewell recovery, Room lights and File playback stay live.
 		require(magewell->isEnabled() && displayFixes->isEnabled(), "the capture fixes are greyed on the VP-V pathway");
 		control<QComboBox>(window, Vpv::ObjectName("pathway"))->setCurrentIndex(1);

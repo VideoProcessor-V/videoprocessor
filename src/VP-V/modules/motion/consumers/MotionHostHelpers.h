@@ -123,5 +123,17 @@ namespace Vpv
 		void AppendDejudderStatusExtras(std::string& text, bool pulldown, uint32_t pulldownCadence, double pulldownFilmHz,
 			unsigned long long pulldownSkipped, bool occlusionMask, uint64_t maskUsedTick, uint64_t now,
 			const std::string& maskState, const VpMotion::DejudderCameraState& cameraBindings);
+
+		// POD1-H1: compiled helper for Stage B RunVpPhaseInterpolation wiring live SkeletonMemo + kBandMemo fallback status.
+		bool RunVpPhaseInterpolationHost(std::unique_ptr<Interpolator::FrameInterpolator>& frameInterpolator,
+			pl_log log, pl_gpu gpu, const VpvRenderer::Fields& activeSettings,
+			const ::Dejudder::Planes& a, const ::Dejudder::Planes& b, const Interpolator::Motion& motion,
+			float t, ::Dejudder::Planes& out, VpMotion::VectorEngine& vectorEngine,
+			Dejudder::ExtrasState& dejudderExtras, uint64_t nowTickMs,
+			const std::function<void(const FallbackCatalog::Decision&)>& syncFallback);
+		void SyncEstimatorFallbacks(const ::Dejudder::MotionWarp& dejudder,
+			const std::function<void(const FallbackCatalog::Decision&)>& syncFallback);
+		void LogDebugPhaseAb(pl_gpu gpu, pl_dispatch dispatch, pl_tex aLuma, pl_tex bLuma, pl_tex motionField,
+			uint64_t sourceSequence, uint64_t nextSourceSequence, double vpOutputPhase, bool vectors);
 	}
 }

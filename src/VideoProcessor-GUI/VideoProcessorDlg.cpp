@@ -4824,7 +4824,7 @@ void CVideoProcessorDlg::PublishStagedRuntimeSettings()
 			m_rendererResetAutoCheck.SetCheck(m_queueAutoResetConfigured ? BST_CHECKED : BST_UNCHECKED);
 	}
 	// Restore switch 2026-10-17: [general] magewell_recover_faults (logged on change).
-	MagewellBackend::SetRecoverFaults(m_stagedRuntimeSettings.magewellRecoverFaults);
+	MagewellBackend::SetRecoverFaults(m_dvTunnelOriginalPathway ? false : m_stagedRuntimeSettings.magewellRecoverFaults);
 	// Restore switch (post-merge audit 2026-10-17): [general] capture_display_fixes.
 	if (CaptureDisplayFixes::Set(m_stagedRuntimeSettings.captureDisplayFixes))
 		DebugLog::Log("capture_display_fixes: %s (display mode ranking, DeckLink Rec.601 lines)",

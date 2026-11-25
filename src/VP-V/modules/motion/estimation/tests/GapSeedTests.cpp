@@ -8,11 +8,14 @@
 #include <VP-V/tests/VpLutGpuTestSupport.h>
 #include <VP-V/modules/motion/estimation/GapSeed.h>
 #include <VP-V/modules/motion/estimation/global_model/MatcherGlobalD1.h>
+#include <VP-V/modules/motion/estimation/global_model/PairGlobalGpu.h>
 
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -45,6 +48,94 @@ namespace VideoProcessorTest
 			Assert::IsFalse(GapSeed::Beats(1000.0f, 900.0f, 10.0f), L"worse than zero in one direction: dropped");
 			Assert::IsFalse(GapSeed::Beats(1000.0f, 1100.0f, 1100.0f), L"worse than zero: dropped");
 			Assert::IsFalse(GapSeed::Beats(0.0f, 0.0f, 0.0f), L"identical frames: nothing to seed");
+		}
+
+		// W23-Audit-Fix1 HIGH-1 / G6: GapSeedHolds must never issue a blocking pl_tex_download on the render thread,
+		// and ExecutePairGlobalGpu with gapSeedCheckTex runs D1 + GPU-side conditional mux using gs_check.
+		BEGIN_TEST_METHOD_ATTRIBUTE(GapSeedGpuMuxHasZeroBlockingReadbackAndConditionalDispatches)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"GpuWarp")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(GapSeedGpuMuxHasZeroBlockingReadbackAndConditionalDispatches)
+		{
+			// 1. Source invariant: MotionWarp::GapSeedHolds body contains zero pl_tex_download( calls.
+			const std::string repoRoot = [&]() {
+				std::string dir = __FILE__;
+				const size_t pos = dir.find("\\src\\VP-V\\");
+				return pos != std::string::npos ? dir.substr(0, pos) : std::string(".");
+			}();
+			std::ifstream inFile(repoRoot + "\\src\\VP-V\\modules\\motion\\estimation\\matcher\\DejudderWarp.cpp");
+			Assert::IsTrue(inFile.is_open(), L"DejudderWarp.cpp must be readable");
+			std::ostringstream ss;
+			ss << inFile.rdbuf();
+			const std::string src = ss.str();
+			const size_t fnStart = src.find("bool MotionWarp::GapSeedHolds()");
+			Assert::IsTrue(fnStart != std::string::npos, L"locate MotionWarp::GapSeedHolds");
+			const size_t fnEnd = src.find("bool MotionWarp::CameraSkipSearches()", fnStart);
+			Assert::IsTrue(fnEnd != std::string::npos && fnEnd > fnStart);
+			const std::string fnBody = src.substr(fnStart, fnEnd - fnStart);
+			Assert::IsTrue(fnBody.find("pl_tex_download(") == std::string::npos,
+				L"HIGH-1: GapSeedHolds must contain zero blocking pl_tex_download( calls");
+			Assert::IsTrue(fnBody.find("gs_max_ratio") != std::string::npos,
+				L"GapSeedHolds must evaluate GapSeed::Beats ratio on GPU");
+
+			// 2. Dispatch contract: with gapSeedCheckTex != nullptr, ExecutePairGlobalGpu runs D1 + conditional gs_check mux.
+			static const unsigned char kSent[16] = {};
+			pl_tex outVec[2] = { reinterpret_cast<pl_tex>(&kSent[1]), reinterpret_cast<pl_tex>(&kSent[2]) };
+			pl_tex outSec[2] = { reinterpret_cast<pl_tex>(&kSent[3]), reinterpret_cast<pl_tex>(&kSent[4]) };
+			pl_tex bSad2 = reinterpret_cast<pl_tex>(&kSent[5]);
+			pl_tex bSad1 = reinterpret_cast<pl_tex>(&kSent[6]);
+			pl_tex bPick = reinterpret_cast<pl_tex>(&kSent[7]);
+			pl_tex checkTex = reinterpret_cast<pl_tex>(&kSent[8]);
+
+			int d1Calls = 0, muxCallsWithCheck = 0, muxCallsUnconditional = 0;
+			VpMotion::PairGlobalGpuContext ctx;
+			ctx.gpu = reinterpret_cast<pl_gpu>(&kSent[0]);
+			ctx.twoCandidates = true;
+			ctx.l1A = reinterpret_cast<pl_tex>(&kSent[9]);
+			ctx.l1B = reinterpret_cast<pl_tex>(&kSent[10]);
+			ctx.l2A = reinterpret_cast<pl_tex>(&kSent[11]);
+			ctx.l2B = reinterpret_cast<pl_tex>(&kSent[12]);
+			ctx.globalVector = outVec;
+			ctx.globalSecond = outSec;
+			ctx.bothSad2 = &bSad2;
+			ctx.bothSad1 = &bSad1;
+			ctx.bothPick = &bPick;
+			ctx.gapSeedCheckTex = &checkTex;
+			ctx.dispatch = [&](const char*, const char*, const char* body,
+				const pl_shader_desc* descs, int nDesc, const pl_shader_var*, int, int, int, int) -> bool {
+				const bool hasCheck = nDesc >= 2 && descs && std::string(descs[0].desc.name) == "gs_check"
+					&& body && std::string(body).find("texelFetch(gs_check") != std::string::npos;
+				if (hasCheck) ++muxCallsWithCheck; else ++muxCallsUnconditional;
+				return true;
+			};
+			ctx.dispatchPerBlock = [&](const char*, const char*, const char*,
+				const pl_shader_desc*, int, const pl_shader_var*, int, int, int, int, int) -> bool {
+				++d1Calls;
+				return true;
+			};
+
+			VpMotion::PairGlobalSelectionInput pgIn;
+			pgIn.globalPrior = true;
+			pgIn.gapSeedCandidate = true;
+			pgIn.gapSeedVec[0][0] = 2.0f; pgIn.gapSeedVec[0][3] = 1.0f;
+			pgIn.gapSeedVec[1][0] = -2.0f; pgIn.gapSeedVec[1][3] = 1.0f;
+
+			VpMotion::PairGlobal rec;
+			VpMotion::PairGlobalSelectionOutcome outcome;
+			FallbackCatalog::Decision fb;
+			std::string err;
+			Assert::IsTrue(VpMotion::ExecutePairGlobalGpu(pgIn, ctx, rec, outcome, fb, err));
+			Assert::AreEqual(4, d1Calls, L"GPU mux path runs all 4 parallel D1 passes first");
+			Assert::AreEqual(4, muxCallsWithCheck, L"GPU mux path conditionally overwrites 2 vectors + 2 seconds via gs_check");
+			Assert::AreEqual(0, muxCallsUnconditional);
+
+			// Negative control on exact same PairGlobalSelectionInput: without gapSeedCheckTex, no D1 and no gs_check mux.
+			d1Calls = muxCallsWithCheck = muxCallsUnconditional = 0;
+			ctx.gapSeedCheckTex = nullptr;
+			Assert::IsTrue(VpMotion::ExecutePairGlobalGpu(pgIn, ctx, rec, outcome, fb, err));
+			Assert::AreEqual(0, d1Calls, L"negative control: null gapSeedCheckTex skips D1");
+			Assert::AreEqual(0, muxCallsWithCheck, L"negative control: null gapSeedCheckTex skips gs_check mux");
+			Assert::AreEqual(4, muxCallsUnconditional);
 		}
 
 		BEGIN_TEST_METHOD_ATTRIBUTE(SeededFillPairIsNoWorseThanUnseededAndAnInvalidSeedIsByteIdentical)

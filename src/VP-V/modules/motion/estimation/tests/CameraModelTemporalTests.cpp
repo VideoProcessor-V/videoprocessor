@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "pch.h"
 #include <VP-V/core/SkeletonAcquire.h>
+#include <VP-V/core/hub/ExtensionHub.h>
 #include <VP-V/modules/motion/estimation/global_model/GlobalModelTemporal.h>
 #include <VP-V/modules/motion/estimation/global_model/GlobalModelObjects.h>
 #include <VP-V/modules/motion/estimation/global_model/PixelResidualReference.h>
@@ -421,20 +422,23 @@ namespace VideoProcessorTest
 			};
 
 			// 5-frame noisy pan sequence (seq = 10..14): centre seq = 12 carries a +96 px/s (+4 px) jitter spike.
+			// HIGH-3: MakeP9OwnerFill applies CE-WATER-C2 LOO spike filtering in exact parity with CameraSmoother::Query.
 			std::map<uint64_t, CameraMotion> p7;
 			const double txList[5] = { 240.0, 232.0, 336.0, 248.0, 240.0 };
 			const double tyList[5] = { -48.0, -44.0, -96.0, -52.0, -48.0 };
-			FixedLagSmoother refSmoother(2);
+			CameraLink::CameraSmoother refSmoother(2);
 			for (int i = 0; i < 5; ++i)
 			{
 				const uint64_t seq = 10u + static_cast<uint64_t>(i);
 				CameraMotion m = TransRecord(seq, txList[i], tyList[i], dt);
 				m.confidence = 0.9;
 				p7[seq] = m;
-				refSmoother.Push(m);
+				refSmoother.Push(std::make_shared<CameraMotion>(m));
 			}
-			Params refParams;
-			Assert::IsTrue(refSmoother.Smoothed(12u, refParams), L"independent FixedLagSmoother(2) smooths seq=12");
+			CameraLink::SmoothQueryResult refQuery;
+			Assert::IsTrue(refSmoother.Query(12u, refQuery) && refQuery.smoothed && refQuery.looSpikeFlagged,
+				L"independent CameraSmoother(2) smooths seq=12 with CE-WATER-C2 LOO spike filter");
+			const Params& refParams = refQuery.record->smoothedParams;
 
 			VpSkeleton::SkeletonMemo memo;
 			registerP7Map(memo, p7);
@@ -442,7 +446,7 @@ namespace VideoProcessorTest
 			Assert::IsTrue(memo.RegisterOwnerFill(VpSkeleton::kP9CameraSmoothed, VpSkeleton::AcquireForm::Cpu,
 				CameraLink::kP9OwnerUnit, CameraLink::MakeP9OwnerFill(2, &counters)) == Reg::Registered);
 
-			// 1. Centre frame seq = 12: smoothed == true, effectiveLead == 2, matches FixedLagSmoother(2) to <= 1e-6.
+			// 1. Centre frame seq = 12: smoothed == true, effectiveLead == 2, matches CameraSmoother(2) (incl. LOO) to <= 1e-6.
 			const VpSkeleton::AcquireResult res12 = memo.Acquire(VpSkeleton::kP9CameraSmoothed, 12u, VpSkeleton::AcquireForm::Cpu);
 			Assert::IsTrue(res12.Ok() && res12.cpu != nullptr && res12.cpuBytes > 0, L"P9 acquire seq=12 ok");
 			CameraMotion dec12;
@@ -452,7 +456,7 @@ namespace VideoProcessorTest
 			Assert::AreEqual(2, int(lead12), L"effectiveLead == 2");
 			Assert::IsTrue(dec12.smoothedParams.type == refParams.type, L"smoothed model type matches");
 			for (int i = 0; i < 9; ++i)
-				Assert::AreEqual(refParams.h[i], dec12.smoothedParams.h[i], 1e-6, L"smoothedParams matches FixedLagSmoother(2)");
+				Assert::AreEqual(refParams.h[i], dec12.smoothedParams.h[i], 1e-6, L"smoothedParams matches CameraSmoother(2) LOO parity");
 			Assert::AreEqual(uint64_t(1), counters.fills.load());
 			Assert::AreEqual(uint64_t(1), counters.smoothed.load());
 
@@ -532,6 +536,119 @@ namespace VideoProcessorTest
 					Assert::AreEqual(cutRef.h[i], decCut.smoothedParams.h[i], 1e-6, L"cut-bounded P9 matches FixedLagSmoother");
 				Assert::IsTrue(std::fabs(decCut.smoothedParams.h[2] - noCutRef.h[2]) > 5.0,
 					L"negative control: cut at seq=13 blocks post-cut motion from leaking into seq=12");
+			}
+		}
+
+		// W23-Audit-Fix1 HIGH-3:
+		//  1. LOO spike parity: MakeP9OwnerFill eliminates a +4 px centre spike (matching CameraSmoother::Query),
+		//     while the naive FixedLagSmoother negative control leaks > 1.0 px of spike error.
+		//  2. Short-queue zero pollution: on a queue with ahead == 0, MakeP9OwnerFill(kMaxCameraLead) serves causal P7
+		//     without calling Acquire on out-of-range [seq-4..seq+4] and leaves memo.LastCause(kP7CameraFit) empty.
+		//  3. Original pathway isolation: P9OwnerModule::OnStatus emits zero lines on OriginalPathway(host).
+		TEST_METHOD(P9OwnerFillLooSpikeParityShortQueueZeroPollutionAndOriginalIsolation)
+		{
+			using Reg = VpSkeleton::SkeletonMemo::Registration;
+			const double dt = 1.0 / 24.0;
+
+			// 1. LOO spike parity + naive FixedLagSmoother negative control.
+			{
+				std::map<uint64_t, CameraMotion> p7;
+				const double txList[5] = { 240.0, 240.0, 336.0, 240.0, 240.0 };
+				FixedLagSmoother naiveSmoother(2);
+				CameraLink::CameraSmoother looSmoother(2);
+				for (int i = 0; i < 5; ++i)
+				{
+					const uint64_t s = 10u + static_cast<uint64_t>(i);
+					CameraMotion m = TransRecord(s, txList[i], 0.0, dt);
+					m.confidence = 0.9;
+					p7[s] = m;
+					naiveSmoother.Push(m);
+					looSmoother.Push(std::make_shared<CameraMotion>(m));
+				}
+				Params naiveOut;
+				Assert::IsTrue(naiveSmoother.Smoothed(12u, naiveOut));
+				CameraLink::SmoothQueryResult looOut;
+				Assert::IsTrue(looSmoother.Query(12u, looOut) && looOut.smoothed && looOut.looSpikeFlagged);
+
+				VpSkeleton::SkeletonMemo memo;
+				VpSkeleton::OwnerFill p7Fill;
+				p7Fill.fill = [&](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+					const auto it = p7.find(req.seq);
+					if (it == p7.end()) return false;
+					uint8_t buf[CameraLink::kRecordPodMaxBytes]{};
+					const size_t n = CameraLink::EncodeRecordPod(it->second, buf, sizeof(buf));
+					if (n == 0) return false;
+					out.bytes.assign(buf, buf + n);
+					return true;
+				};
+				Assert::IsTrue(memo.RegisterOwnerFill(VpSkeleton::kP7CameraFit, VpSkeleton::AcquireForm::Cpu,
+					VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP7CameraFit), std::move(p7Fill)) == Reg::Registered);
+				Assert::IsTrue(memo.RegisterOwnerFill(VpSkeleton::kP9CameraSmoothed, VpSkeleton::AcquireForm::Cpu,
+					CameraLink::kP9OwnerUnit, CameraLink::MakeP9OwnerFill(2, nullptr)) == Reg::Registered);
+
+				const VpSkeleton::AcquireResult r = memo.Acquire(VpSkeleton::kP9CameraSmoothed, 12u, VpSkeleton::AcquireForm::Cpu);
+				Assert::IsTrue(r.Ok());
+				CameraMotion dec;
+				Assert::IsTrue(CameraLink::DecodeSmoothedPod(r.cpu, r.cpuBytes, dec, nullptr));
+				Assert::IsTrue(dec.smoothed);
+				Assert::AreEqual(looOut.record->smoothedParams.h[2], dec.smoothedParams.h[2], 1e-6,
+					L"HIGH-3: MakeP9OwnerFill matches CameraSmoother::Query LOO spike removal");
+				Assert::IsTrue(std::fabs(naiveOut.h[2] - 10.0) > 1.0,
+					L"negative control: naive FixedLagSmoother leaks > 1.0 px of the +4 px centre spike");
+			}
+
+			// 2. Short queue (ahead == 0): zero out-of-range P7 Acquire calls, zero LastCause(kP7CameraFit) pollution.
+			{
+				VpSkeleton::SkeletonMemo memo;
+				int p7Calls = 0;
+				VpSkeleton::OwnerFill p7Fill;
+				p7Fill.fill = [&](const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo&, VpSkeleton::OwnerFillOutput& out) {
+					++p7Calls;
+					if (req.seq != 10u) return false;
+					CameraMotion m = TransRecord(10u, 240.0, 0.0, dt);
+					uint8_t buf[CameraLink::kRecordPodMaxBytes]{};
+					const size_t n = CameraLink::EncodeRecordPod(m, buf, sizeof(buf));
+					out.bytes.assign(buf, buf + n);
+					return true;
+				};
+				Assert::IsTrue(memo.RegisterOwnerFill(VpSkeleton::kP7CameraFit, VpSkeleton::AcquireForm::Cpu,
+					VpSkeleton::SkeletonMemo::OwnerUnitOf(VpSkeleton::kP7CameraFit), std::move(p7Fill)) == Reg::Registered);
+				Assert::IsTrue(memo.RegisterOwnerFill(VpSkeleton::kP9CameraSmoothed, VpSkeleton::AcquireForm::Cpu,
+					CameraLink::kP9OwnerUnit, CameraLink::MakeP9OwnerFill(int(VpSkeleton::kMaxCameraLead), nullptr)) == Reg::Registered);
+				VpSkeleton::QueueWindow w;
+				w.wired = VpSkeleton::QueueWindowTerms::kRenderAhead;
+				w.current = 10u;
+				w.ahead = 0u;
+				w.aheadCompute = 0u;
+				w.back = 0u;
+				memo.SetWindow(w);
+				memo.OnSeal(10u);
+
+				const VpSkeleton::AcquireResult r = memo.Acquire(VpSkeleton::kP9CameraSmoothed, 10u, VpSkeleton::AcquireForm::Cpu);
+				Assert::IsTrue(r.Ok(), L"short-queue P9 succeeds causally");
+				Assert::AreEqual(1, p7Calls, L"short-queue P9 must NOT poll out-of-range [seq-4..seq+4] P7 neighbours");
+				Assert::IsTrue(memo.LastCause(VpSkeleton::kP7CameraFit).empty(),
+					L"HIGH-3: short-queue P9 must leave SkeletonMemo::LastCause(kP7CameraFit) completely empty");
+			}
+
+			// 3. P9OwnerModule::OnStatus Original pathway guard.
+			{
+				CameraLink::RegisterP9OwnerModule();
+				int origHost = 0;
+				RendererExtension::LifecycleFacts lf;
+				lf.host = &origHost;
+				lf.kind = RendererExtension::Lifecycle::SettingsApplied;
+				lf.code = 1;   // Original pathway
+				Vpv::Hub::ExtensionHub::Instance().OnLifecycle(lf);
+				RendererExtension::Context ctx;
+				ctx.host = &origHost;
+				std::vector<std::string> fbLines;
+				Vpv::Hub::ExtensionHub::Instance().OnStatus(ctx, RendererExtension::StatusKind::Fallbacks, fbLines, nullptr, nullptr);
+				for (const std::string& line : fbLines)
+					Assert::IsTrue(line.find("p9_camera_smoothed") == std::string::npos,
+						L"HIGH-3: P9OwnerModule::OnStatus must emit zero lines on OriginalPathway(host)");
+				lf.kind = RendererExtension::Lifecycle::Shutdown;
+				Vpv::Hub::ExtensionHub::Instance().OnLifecycle(lf);
 			}
 		}
 	};

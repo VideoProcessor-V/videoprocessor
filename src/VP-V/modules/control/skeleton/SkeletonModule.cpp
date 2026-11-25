@@ -24,6 +24,7 @@
 #include <VP-V/modules/input/source_analysis/lane/shared/TapSource.h>
 #include <VP-V/core/FrameAnalysisStore.h>
 #include <VP-V/modules/input/source_analysis/SourceFrameTap.h>
+#include <VP-V/modules/control/skeleton/SceneRecordReader.h>
 #include <VP-V/modules/input/source_analysis/VpFrameAnalysis.h>
 #include <VP-V/modules/control/skeleton/gpu/OwnerGpuDevice.h>
 #include <VP-V/modules/input/source_analysis/FrameQuiet.h>
@@ -42,6 +43,7 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -673,8 +675,7 @@ namespace Vpv
 				// SceneFactsFor Acquire): a PEEK of that publication (SkeletonMemo::CopyPublished: no compute, no cause, nothing counted).
 				if (!b.memo)
 					return false;
-				const size_t statsBytes = VpLaneProducts::kStatsBytes;   // the P4 stats record (not a pixel buffer)
-				std::vector<uint8_t> record(statsBytes);
+				std::array<uint8_t, VpLaneProducts::kStatsBytes> record{};   // POD1-M7: stack buffer (zero per-frame heap alloc)
 				return b.memo->CopyPublished(VpSkeleton::kP4SourceStats, seq, record.data(), record.size())
 					&& VpLaneProducts::ReadSourceStats(record.data(), record.size(), out);
 			}
@@ -1118,6 +1119,8 @@ namespace Vpv
 			std::atomic<uint64_t> lastBeginUs{ 0 };                        // the previous Begin (the period for the stale test)
 			std::atomic<uint64_t> periodUs{ 0 };
 			std::atomic<uint64_t> lastPresentedSeq{ 0 };                   // AfterPresent: the last presented source seq (0 = none)
+			std::atomic<bool> resetPresentLag{ false };                    // POD1-H3: clear presentLag on discontinuity/restart
+			uint64_t lastBeginSeq = 0;                                     // render thread: detect backward seq restart
 			VpSkeleton::WindowPeak presentLag{ static_cast<uint64_t>(VpSkeleton::kLeadWindowSeconds * 1e6) };   // render thread: P
 			VpSkeleton::QueueWindowBoard board;                            // written once per Begin, any thread reads
 			// OnQueue Drop (any thread): dropped frames past kMaxDropsPerEvent in one event are not discarded from the memo; counted and
@@ -1844,6 +1847,7 @@ namespace Vpv
 				EraseExternal(f.host);   // a renderer recreated at this address never inherits the old one's external demand
 				// 15c-c8: with the demand goes its raise of the store; version 0 = the next Begin looks again (a later declaration raises anew).
 				VpFrameAnalysis::SourceFrameTap::SetStoreDemand(f.host, false, std::string());
+				VpSkeleton::SceneRecordReader::ClearCaptureSequences(f.host);
 				NoteRaiseApplied(f.host, 0, std::string(), false);
 				break;
 			}
@@ -2009,7 +2013,13 @@ namespace Vpv
 							if (const std::shared_ptr<Bundle> b = std::atomic_load(&s2->bundle))
 								b->lane.BindIndicator(ind);
 							// G0 S4: a new resync era is a discontinuity: the renderer's memo spots are released (Clear).
-							if (const std::shared_ptr<VpSkeleton::SkeletonMemo> m = MemoHostOf(host, false))
+							if (const std::shared_ptr<MemoHost> mhq = memoHosts_.Find(host))
+							{
+								mhq->lastPresentedSeq.store(0, std::memory_order_release);
+								mhq->resetPresentLag.store(true, std::memory_order_release);
+								mhq->memo->Clear();
+							}
+							else if (const std::shared_ptr<VpSkeleton::SkeletonMemo> m = MemoHostOf(host, false))
 								m->Clear();
 						}
 					});
@@ -2363,18 +2373,17 @@ namespace Vpv
 			const std::shared_ptr<HostState> st = hosts_.Find(host);
 			if (!st || !st->dispatcher)
 				return;
-			// Change-only key so LightLevelKernel's LUT generation only bumps when display facts actually change.
-			char keyBuf[256];
-			std::snprintf(keyBuf, sizeof(keyBuf), "%d|%.3f|%.3f|%.4f|%.4f|%.4f|%.3f|%d|%d|%.2f|%.3f|%.2f|%.2f|%.4f|%d|%.3f|%d|%.3f|%.3f|%.3f|",
+			// Change-only key so LightLevelKernel's LUT generation only bumps when display facts actually change (POD1-M7: zero per-frame heap alloc).
+			char keyBuf[384];
+			std::snprintf(keyBuf, sizeof(keyBuf), "%d|%.3f|%.3f|%.4f|%.4f|%.4f|%.3f|%d|%d|%.2f|%.3f|%.2f|%.2f|%.4f|%d|%.3f|%d|%.3f|%.3f|%.3f|%s|%s",
 				facts.regionTransfer, facts.sdrWhiteNits, facts.displayPeakNits, facts.displayBlackNits, facts.ambientNits,
 				facts.weber, facts.sdrGamma, facts.llContextKind, facts.llFullRange ? 1 : 0, facts.llSourcePeakNits,
 				facts.llSourceMinNits, facts.llDynamicPeakNits, facts.llSdrTargetNits, facts.llSdrBlackNits, facts.llTransfer,
 				facts.llGammaPower, facts.llSdrToneKnee ? 1 : 0, facts.llSdrToneHeadroom, facts.llSdrToneKneeStart,
-				facts.llSdrToneKneeStrength);
-			const std::string key = std::string(keyBuf) + facts.llToneMapping + "|" + facts.llQuality;
-			if (key == st->lastDisplayFactsKey)
+				facts.llSdrToneKneeStrength, facts.llToneMapping.c_str(), facts.llQuality.c_str());
+			if (st->lastDisplayFactsKey == keyBuf)
 				return;
-			st->lastDisplayFactsKey = key;
+			st->lastDisplayFactsKey.assign(keyBuf);
 
 			if (VpLaneProducts::IProductKernel* k11 = st->dispatcher->KernelOf(VpSkeleton::kP11RegionBlockStats))
 			{
@@ -3317,8 +3326,20 @@ namespace Vpv
 
 
 		// ---- queue (capture / queue threads) ----------------------------------------------------------
+		void SkeletonModule::OnIngress(RE::IngressContext& c)
+		{
+			if (!c.host || c.fromFile || c.seq <= 0 || c.frameCounter <= 0)
+				return;
+			if (Hub::ExtensionHub::Instance().OriginalPathway(c.host) || RecordedPathway(c.host) == 1)
+				return;
+			VpSkeleton::SceneRecordReader::RecordCaptureSequence(
+				c.host, static_cast<uint64_t>(c.frameCounter), c.timestamp, static_cast<uint64_t>(c.seq));
+		}
+
 		void SkeletonModule::OnQueue(const RE::QueueFacts& f)
 		{
+			if (f.host && f.kind != RE::QueueEvent::Drop && f.kind != RE::QueueEvent::BacklogFlush)
+				VpSkeleton::SceneRecordReader::ClearCaptureSequences(f.host);
 			// QKP B (design s3 / amendment M5): the memo's epoch moves AT the call (any thread, coalesced per Begin interval); a Drop discards
 			// its frames' spots. BacklogFlush is a timing restart, not a generation: nothing is released. Memo-only hosts included.
 			if (const std::shared_ptr<MemoHost> mhq = memoHosts_.Find(f.host))
@@ -3348,8 +3369,13 @@ namespace Vpv
 				// P13 source ring: the epoch AT the fact (any thread), so the next Feed flushes the ring even before the next Begin's
 				// window publish. Not the board: it has one writer (Begin).
 				if (f.kind != RE::QueueEvent::Drop && f.kind != RE::QueueEvent::BacklogFlush)
+				{
+					// POD1-H3: clear monotonic presented tracking on discontinuity/epoch bump so restarts never collapse QueueWindow.
+					mhq->lastPresentedSeq.store(0, std::memory_order_release);
+					mhq->resetPresentLag.store(true, std::memory_order_release);
 					if (const std::shared_ptr<Vpv::Capture::HostEntry> capture = Vpv::Capture::Find(f.host))
 						capture->sourceRing.OnQueueFact(mhq->memo->Epoch());
+				}
 			}
 			if (f.kind != RE::QueueEvent::Drop || f.seq <= 0 || f.frames == 0)
 				return;
@@ -3407,7 +3433,20 @@ namespace Vpv
 			if (q.wired & QueueShape::kRenderAhead) { t.renderAhead = uint16_t(CappedRenderAhead(q.renderAhead)); t.wired = uint8_t(t.wired | VpSkeleton::QueueWindowTerms::kRenderAhead); }
 			if (q.wired & QueueShape::kLaneLead) { t.laneLead = uint16_t((std::min<unsigned>)(q.laneLead, LaneLeadCap(q.renderAhead))); t.wired = uint8_t(t.wired | VpSkeleton::QueueWindowTerms::kLaneLead); }
 			if (q.wired & QueueShape::kLookAhead) { t.lookAheadWalk = q.lookAheadWalk; t.wired = uint8_t(t.wired | VpSkeleton::QueueWindowTerms::kLookAhead); }
-			const uint64_t presented = mh->lastPresentedSeq.load(std::memory_order_relaxed);
+			// POD1-H3: reset presented tracking on epoch bump / Clear / backward sequence restart.
+			const bool seqRestart = (mh->lastBeginSeq != 0 && seq != 0 && seq < mh->lastBeginSeq);
+			if (mh->resetPresentLag.exchange(false, std::memory_order_acq_rel) || seqRestart)
+			{
+				mh->presentLag.Reset();
+				if (seqRestart)
+				{
+					mh->lastPresentedSeq.store(0, std::memory_order_release);
+					memo->ResetPresented();
+				}
+			}
+			if (seq != 0)
+				mh->lastBeginSeq = seq;
+			const uint64_t presented = mh->lastPresentedSeq.load(std::memory_order_acquire);
 			if (presented != 0)
 			{
 				mh->presentLag.Sample(now, uint16_t(seq > presented ? (std::min<uint64_t>)(seq - presented, 255u) : 0u));
@@ -3745,7 +3784,15 @@ namespace Vpv
 					st.oldBundleJobsJoined = true;
 				}
 				if (current)
+				{
+					if (const std::shared_ptr<MemoHost> mhq = memoHosts_.Find(st.host))
+					{
+						mhq->lastPresentedSeq.store(0, std::memory_order_release);
+						mhq->resetPresentLag.store(true, std::memory_order_release);
+						mhq->lastBeginSeq = 0;
+					}
 					hostMemo->Clear();   // G0 S4: a graph rebuild is a discontinuity: every memo spot of the old graph is released
+				}
 				b = std::make_shared<Bundle>(dims, seq, nowUs_, wiring, hostMemo, std::move(leaseOf),
 					qualityP15_.load(std::memory_order_acquire), qualityP15c_.load(std::memory_order_acquire),
 					&st.entranceLiveDriven);

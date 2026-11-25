@@ -1780,5 +1780,115 @@ namespace SkeletonAcquireTestsNs
 			Assert::AreEqual(size_t(12), rRetry.cpuBytes);
 			Assert::AreEqual(uint8_t(0x7B), rRetry.cpu[0]);
 		}
+
+		// W23-Audit-Fix1 POD1-H3/H6/M2/M7:
+		//  - POD1-H3: BumpEpoch / Clear / backward sequence restart reset presented_ so QueueWindow never collapses.
+		//  - POD1-H6: G2(b) Entry::Ready cache hit calls Served(id) so stale LastCause clears cleanly.
+		//  - POD1-M2: stale GPU entries evicted across BumpEpoch defer destruction via retired_ while readFence > completed.
+		BEGIN_TEST_METHOD_ATTRIBUTE(SkeletonMemoRestartResetCacheHitServedAndStaleGpuFenceRetire)
+			TEST_METHOD_ATTRIBUTE(L"Category", L"Cpu")
+		END_TEST_METHOD_ATTRIBUTE()
+		TEST_METHOD(SkeletonMemoRestartResetCacheHitServedAndStaleGpuFenceRetire)
+		{
+			// 1. POD1-H6: G2(b) cache hit clears stale LastCause (negative control: before hit, LastCause is non-empty).
+			{
+				SkeletonMemo memo;
+				OwnerFill fill;
+				fill.fill = [](const OwnerFillRequest& r, SkeletonMemo&, OwnerFillOutput& out) {
+					if (r.seq == 5) { out.declineReason = "transient miss"; return false; }
+					out.bytes.assign(4u, 0x2Au);
+					return true;
+				};
+				Assert::IsTrue(memo.RegisterOwnerFill(kP10GrainSplit, AcquireForm::Cpu, kGrainUnit, fill) == SkeletonMemo::Registration::Registered);
+				Assert::IsTrue(memo.Acquire(kP10GrainSplit, 4u, AcquireForm::Cpu).Ok(), L"populate seq 4 in memo");
+				Assert::IsFalse(memo.Acquire(kP10GrainSplit, 5u, AcquireForm::Cpu).Ok(), L"seq 5 declines, setting LastCause");
+				Assert::IsFalse(memo.LastCause(kP10GrainSplit).empty(), L"negative control: LastCause populated after failure");
+				const AcquireResult hit = memo.Acquire(kP10GrainSplit, 4u, AcquireForm::Cpu);
+				Assert::IsTrue(hit.Ok() && hit.status == AcquireStatus::Reused, L"G2(b) Entry::Ready cache hit");
+				Assert::IsTrue(memo.LastCause(kP10GrainSplit).empty(), L"POD1-H6: G2(b) cache hit calls Served(id) and clears LastCause");
+			}
+
+			// 2. POD1-H3: BumpEpoch, Clear, and backward OnSeal reset presented_ so restarted low sequences are never evicted prematurely.
+			{
+				SkeletonMemo memo;
+				OwnerFill fill;
+				fill.fill = [](const OwnerFillRequest&, SkeletonMemo&, OwnerFillOutput& out) {
+					out.bytes.assign(4u, 0x33u);
+					return true;
+				};
+				Assert::IsTrue(memo.RegisterOwnerFill(kP10GrainSplit, AcquireForm::Cpu, kGrainUnit, fill) == SkeletonMemo::Registration::Registered);
+				QueueWindow w;
+				w.wired = QueueWindowTerms::kRenderAhead | QueueWindowTerms::kPresentLag;
+				w.current = 100;
+				w.ahead = 4;
+				w.aheadCompute = 4;
+				w.back = 2;
+				w.presentKnown = true;
+				w.presented = 99;
+				memo.SetWindow(w);
+				memo.NotePresented(100);
+				memo.OnSeal(100);
+				memo.BumpEpoch(SkeletonMemo::InvalidateCause::Flush);
+				memo.OnSeal(1);
+				Assert::IsTrue(memo.Acquire(kP10GrainSplit, 1u, AcquireForm::Cpu).Ok(), L"frame 1 after BumpEpoch restart fills");
+				memo.OnSeal(2);
+				// If stale presented_=100 had survived BumpEpoch, EdgeLocked would collapse and evict frame 1 immediately!
+				Assert::IsTrue(memo.HasReadyCpu(kP10GrainSplit, 1u), L"POD1-H3: frame 1 kept after restart (stale presented_=100 cleared)");
+
+				// Backward OnSeal without BumpEpoch (seek restart) also resets presented_.
+				memo.NotePresented(50);
+				memo.OnSeal(50);
+				memo.OnSeal(2);
+				Assert::IsTrue(memo.Acquire(kP10GrainSplit, 2u, AcquireForm::Cpu).Ok());
+				memo.OnSeal(3);
+				Assert::IsTrue(memo.HasReadyCpu(kP10GrainSplit, 2u), L"POD1-H3: backward OnSeal resets presented_ cleanly");
+
+				// Clear() resets presented_ cleanly.
+				memo.NotePresented(80);
+				memo.Clear();
+				memo.OnSeal(1);
+				Assert::IsTrue(memo.Acquire(kP10GrainSplit, 1u, AcquireForm::Cpu).Ok());
+				memo.OnSeal(2);
+				Assert::IsTrue(memo.HasReadyCpu(kP10GrainSplit, 1u), L"POD1-H3: Clear() resets presented_ cleanly");
+			}
+
+			// 3. POD1-M2: stale GPU spot with readFence > completed defers destruction via retired_ at OnSeal().
+			{
+				SkeletonMemo memo;
+				uint64_t completedFence = 0;
+				memo.SetFenceCompleted([&completedFence]() { return completedFence; });
+				bool destroyed = false;
+				int dummyTex = 1;
+				OwnerFill gpuFill;
+				gpuFill.reserveBytes = 64;
+				gpuFill.fill = [&](const OwnerFillRequest&, SkeletonMemo&, OwnerFillOutput& out) {
+					out.gpu.resource = &dummyTex;
+					out.gpu.width = 4;
+					out.gpu.height = 4;
+					out.gpu.bytes = 64;
+					out.gpu.keepAlive = std::shared_ptr<void>(&dummyTex, [&destroyed](void*) { destroyed = true; });
+					return true;
+				};
+				Assert::IsTrue(memo.RegisterOwnerFill(kP10GrainSplit, AcquireForm::Gpu, kGrainUnit, gpuFill) == SkeletonMemo::Registration::Registered);
+				memo.OnSeal(10);
+				{
+					AcquireResult r = memo.Acquire(kP10GrainSplit, 10u, AcquireForm::Gpu);
+					Assert::IsTrue(r.Ok());
+					memo.NoteGpuRead(r, 5u);
+				}
+				// BumpEpoch + Acquire moves entry into stale_ (EvictStaleLocked).
+				memo.BumpEpoch(SkeletonMemo::InvalidateCause::Flush);
+				Assert::IsTrue(memo.Acquire(kP10GrainSplit, 10u, AcquireForm::Gpu).Ok());
+				// Seal while fence 5 is still in flight (completed == 4): stale GPU entry MUST move to retired_, NOT destroy!
+				completedFence = 4;
+				memo.OnSeal(11);
+				Assert::IsFalse(destroyed, L"POD1-M2: stale GPU spot with incomplete readFence must NOT be destroyed at OnSeal");
+				Assert::IsTrue(memo.RetiredPending() >= 1u, L"POD1-M2: stale GPU spot deferred into retired_");
+				// Once fence completes (completed == 5), next OnSeal releases it cleanly.
+				completedFence = 5;
+				memo.OnSeal(12);
+				Assert::IsTrue(destroyed, L"POD1-M2: retired stale GPU spot destroyed once readFence completes");
+			}
+		}
 	};
 }

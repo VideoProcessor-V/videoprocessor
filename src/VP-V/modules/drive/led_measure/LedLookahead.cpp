@@ -267,7 +267,8 @@ namespace LedDrive
 		const uint64_t generation = module.ConfigGeneration() + 1;
 		if (generation != builderGeneration)
 		{
-			builder = StatsBuilder(module.Config());
+			cachedConfig = module.Config();
+			builder = StatsBuilder(cachedConfig);
 			builderGeneration = generation;
 			transfer.reset();
 		}
@@ -278,7 +279,7 @@ namespace LedDrive
 		if (epoch != streamEpoch)
 		{
 			streamEpoch = epoch;
-			builder = StatsBuilder(module.Config());
+			builder = StatsBuilder(cachedConfig);
 			lastSequence = 0;
 			haveStreamTime = false;
 		}
@@ -287,7 +288,7 @@ namespace LedDrive
 			lastSequence - sourceSequence < 1000)
 			return;
 		const std::shared_ptr<const RawTransfer> current = module.CurrentRawTransfer();
-		const double boost = BoostExponentUnderAppearance(module.Config().gammaBoost, module.DisplayGamma(), module.BoostReplaced());
+		const double boost = BoostExponentUnderAppearance(cachedConfig.gammaBoost, module.DisplayGamma(), module.BoostReplaced());
 		if (current != transfer || boost != boostedExponent)
 		{
 			transfer = current;
@@ -301,9 +302,8 @@ namespace LedDrive
 			std::lock_guard<std::mutex> lock(geometryMutex);
 			options = geometry;
 		}
-		const LedDriveConfig& config = module.Config();
-		options.peakFullCoverage = config.peakFullCoverage;
-		if (!config.pictureOnly) options.maskCount = 0;
+		options.peakFullCoverage = cachedConfig.peakFullCoverage;
+		if (!cachedConfig.pictureOnly) options.maskCount = 0;
 		RawMeasurement raw;
 		if (!MeasureRawFrame(luma, activePicture, boosted, raw, module.SourceRange(), &options)) return;
 		// The builder's windows are in real time: one source frame apart.
@@ -322,7 +322,7 @@ namespace LedDrive
 		else
 		{
 			if (sourceSequence != 0 && sourceSequence < lastSequence)
-				builder = StatsBuilder(module.Config());
+				builder = StatsBuilder(cachedConfig);
 			streamTimeMs += periodMs;
 		}
 		lastSequence = sourceSequence;

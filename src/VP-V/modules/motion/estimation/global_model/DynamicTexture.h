@@ -9,6 +9,7 @@
 // deterministic, CPU, O(blocks) (one pass over the block field plus one pass over the previous residuals).
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <vector>
 
@@ -67,9 +68,21 @@ namespace CameraModel
 		int gridW = 0, gridH = 0;
 		Rect picture;
 		double seconds = 0;
-		DynTextureBuffers prev;        // the previous pair (valid when have)
-		DynTextureBuffers cur;         // scratch, swapped with prev after each computed pair (no per-pair allocation once sized)
-		void Reset() { have = false; seconds = 0; }   // keeps the buffers
+		uint64_t lastPairTo = 0;            // continuity guard: reset water persistence on sequence jump
+		DynTextureBuffers prev;             // the previous pair (valid when have)
+		DynTextureBuffers cur;              // scratch, swapped with prev after each computed pair (no per-pair allocation once sized)
+		std::vector<float> waterProb;       // CE-WATER: per-block motion-advected water probability in [0, 1]
+		std::vector<float> scratchProb;     // reused per-frame scratch (zero steady-state heap allocs)
+		std::vector<uint8_t> scratchValid;  // POD1-M7: reused valid mask scratch
+		std::vector<uint8_t> scratchRawMask;// reused pre-fill mask scratch for 3x3 neighbor fill
+		void Reset()
+		{
+			have = false;
+			seconds = 0;
+			lastPairTo = 0;
+			std::fill(waterProb.begin(), waterProb.end(), 0.0f);
+			std::fill(scratchProb.begin(), scratchProb.end(), 0.0f);
+		}
 	};
 
 	// Evaluates one pair against `model` and the previous residuals in `state`, then stores this pair's residuals in
@@ -90,9 +103,14 @@ namespace CameraModel
 	{
 		double curvatureSigmas = 3.0;            // 3-sigma contract matching Config::absThresholdSigmas (no arbitrary rel * |v|)
 		// Remaining-rigid-support guard (CE-WATER-C1): when waterExcludedShare exceeds this elementary 1-quadrant ratio
-		// (1/4 of trusted blocks), remaining rigid support must still cover >= 3 quadrants (Config::quadrantMinShare) AND
+		// (1/4 of trusted blocks), remaining rigid support must still cover >= 2 quadrants (Config::quadrantMinShare) AND
 		// retain border-ring support >= Config::borderVetoRatio, else demote cleanly to Reason::Ambiguous | kVerdictDynamicTexture.
 		double supportGuardMinWaterShare = 0.25; // 1/4 = 1 quadrant of the 4-quadrant picture
+		// Short motion-advected water persistence time constant (seconds, matches Config::layerSwapSeconds = 0.25 s;
+		// OnePole::AlphaFor decay exp(-dt / tau) gives half-life tau * ln(2) ~= 0.173 s at p >= 0.5). <= 0 disables persistence.
+		double persistenceSeconds = 0.25;
+		// 3x3 cell-grid neighbor fill threshold: simple 3/4 majority (6 of 8 immediate in-picture neighbors).
+		int neighborFillMin = 6;
 	};
 
 	struct WaterExcludeStats
@@ -102,9 +120,9 @@ namespace CameraModel
 	};
 
 	// Writes per-block mask (size gridW * gridH; 1 = incoherent dynamic-texture / water block, 0 = keep).
-	// Pure, deterministic, O(blocks). Does not mutate `prevState`.
+	// Pure, deterministic, O(blocks). Reuses scratch buffers on `state` (zero steady-state heap allocations).
 	WaterExcludeStats ComputeWaterExclusionMask(const DynTextureExcludeConfig& cfg, const PairInput& in,
-		const DynTextureState& prevState, double precPx, std::vector<uint8_t>& maskOut);
+		DynTextureState& state, double precPx, std::vector<uint8_t>& maskOut);
 
 	// Stores this pair's raw forward vector field into `state.prev` for the next pair's temporal water-exclusion check.
 	void RecordRawFieldForWaterExclusion(const PairInput& in, DynTextureState& state);

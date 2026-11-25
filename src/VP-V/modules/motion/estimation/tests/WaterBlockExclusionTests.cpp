@@ -779,5 +779,293 @@ namespace VideoProcessorTest
 			Assert::AreEqual<uint64_t>(1u, smoother.Counters().causalWindowShort.load(),
 				L"causalWindowShort counter remains 1 from the earlier short-window query");
 		}
+
+		// Owner CE-WATER refinement (a): short motion-advected water persistence (time-domain OnePole decay,
+		// zero per-frame scratch reallocation) keeps a momentary coherent wave crest flagged, decays back
+		// to rigid after > 0.173 s, and resets immediately on scene cut.
+		TEST_METHOD(MotionAdvectedWaterPersistenceHoldsWaveCrestAndResetsOnCut)
+		{
+			SyntheticGrid g(32, 20);
+			const int waterStartRow = 8;
+			CameraModel::DynTextureExcludeConfig cfgPersist;
+			CameraModel::DynTextureExcludeConfig cfgNoPersist;
+			cfgNoPersist.persistenceSeconds = 0.0;   // NC: without persistence
+
+			CameraModel::DynTextureState statePersist, stateNoPersist, stateCut;
+			std::vector<uint8_t> maskPersist, maskNoPersist, maskCut;
+
+			auto fillWaterWithPan = [&](uint64_t seq) {
+				for (int by = 0; by < g.gh; ++by)
+					for (int bx = 0; bx < g.gw; ++bx)
+					{
+						const size_t i = size_t(by) * g.gw + bx;
+						if (by >= waterStartRow)
+						{
+							float rx = 0.0f, ry = 0.0f;
+							WaterRipple(seq, bx, by, rx, ry);
+							g.fx[i] = 16.0f + rx;   // 1-block horizontal pan + choppy water
+							g.fy[i] = ry;
+						}
+						else
+						{
+							g.fx[i] = 16.0f;
+							g.fy[i] = 0.0f;
+						}
+					}
+			};
+
+			// Frames 1..2: active choppy water under 1-block pan seeds waterProb = 1.0 on water blocks.
+			const uint8_t* scratchPtrAfter1 = nullptr;
+			for (uint64_t s = 1; s <= 2; ++s)
+			{
+				fillWaterWithPan(s);
+				const CameraModel::PairInput in = g.Input(s);
+				CameraModel::ComputeWaterExclusionMask(cfgPersist, in, statePersist, 0.25, maskPersist);
+				CameraModel::RecordRawFieldForWaterExclusion(in, statePersist);
+				CameraModel::ComputeWaterExclusionMask(cfgNoPersist, in, stateNoPersist, 0.25, maskNoPersist);
+				CameraModel::RecordRawFieldForWaterExclusion(in, stateNoPersist);
+				CameraModel::ComputeWaterExclusionMask(cfgPersist, in, stateCut, 0.25, maskCut);
+				CameraModel::RecordRawFieldForWaterExclusion(in, stateCut);
+				if (s == 1)
+					scratchPtrAfter1 = statePersist.scratchValid.data();
+				else
+					Assert::IsTrue(statePersist.scratchValid.data() == scratchPtrAfter1,
+						L"POD1-M7: ComputeWaterExclusionMask reuses hoisted scratchValid without reallocating");
+			}
+
+			// Frame 3: momentary coherent wave crest (entire grid briefly matches rigid pan (16, 0), zero curvature).
+			for (size_t i = 0; i < g.fx.size(); ++i) { g.fx[i] = 16.0f; g.fy[i] = 0.0f; }
+			const CameraModel::PairInput crest3 = g.Input(3);
+			const auto stPersist3 = CameraModel::ComputeWaterExclusionMask(cfgPersist, crest3, statePersist, 0.25, maskPersist);
+			CameraModel::RecordRawFieldForWaterExclusion(crest3, statePersist);
+			const auto stNoPersist3 = CameraModel::ComputeWaterExclusionMask(cfgNoPersist, crest3, stateNoPersist, 0.25, maskNoPersist);
+
+			Assert::IsTrue(stPersist3.excluded > 250,
+				L"motion-advected persistence keeps momentarily coherent water blocks flagged across wave crest");
+			// Verify motion advection moved the water sheet +1 block right (bx=0 came from off-screen so unflagged; bx>=1 flagged).
+			Assert::AreEqual<uint8_t>(1u, maskPersist[size_t(12) * g.gw + 10],
+				L"interior wave-crest block stays flagged via motion-advected water probability");
+			Assert::AreEqual<uint8_t>(0u, maskPersist[size_t(4) * g.gw + 10],
+				L"rigid shoreline block never gets falsely flagged by water persistence");
+
+			// Negative Control 1 (same input, persistence disabled): crest immediately drops to 0 excluded.
+			Assert::AreEqual(0, stNoPersist3.excluded,
+				L"NC: without persistence, momentary coherent wave crest immediately flips back to rigid");
+
+			// Negative Control 2 (same input, scene cut): persistence resets immediately on cut.
+			CameraModel::PairInput cutIn = crest3;
+			cutIn.cut = true;
+			const auto stCut3 = CameraModel::ComputeWaterExclusionMask(cfgPersist, cutIn, stateCut, 0.25, maskCut);
+			Assert::AreEqual(0, stCut3.excluded,
+				L"NC: scene cut immediately clears water persistence (zero bleed into new shot)");
+
+			// Sustained calm beyond half-life (tau * ln(2) ~= 0.173 s -> 5 frames = 0.208 s at 24 fps) clears back to rigid.
+			CameraModel::WaterExcludeStats stLate;
+			for (uint64_t s = 4; s <= 7; ++s)
+			{
+				const CameraModel::PairInput calm = g.Input(s);
+				stLate = CameraModel::ComputeWaterExclusionMask(cfgPersist, calm, statePersist, 0.25, maskPersist);
+				CameraModel::RecordRawFieldForWaterExclusion(calm, statePersist);
+			}
+			Assert::AreEqual(0, stLate.excluded,
+				L"water persistence decays below 0.5 and clears back to rigid after > 0.173 s of sustained calm");
+		}
+
+		// Owner CE-WATER refinement (b): 3x3 cell-grid neighbor fill closes lone rigid islands (>= 6/8 flagged
+		// valid neighbors), preserves <= 5/8 shoreline cells, and never bleeds from blanked/active-rect borders.
+		TEST_METHOD(ThreeByThreeNeighborFillClosesOceanIslandWithoutBorderBleed)
+		{
+			SyntheticGrid g(20, 16);
+			// Active picture leaves a 2-block blanked letterbox/pillarbox border: valid bx in [2..17], by in [2..13].
+			g.pic = { 2 * 16.0, 2 * 16.0, 18 * 16.0, 14 * 16.0 };
+
+			// Build checkerboard +-8 px water inside active picture, then carve exact zero-curvature test islands:
+			//  1. (10, 8): 8/8 flagged neighbors -> MUST be filled.
+			//  2. (5, 8):  6/8 flagged neighbors (U=(5,7) and D=(5,9) calm, 6 others flagged) -> MUST be filled.
+			//  3. (14, 4): 5/8 flagged neighbors (L, R, and 3 diagonals flagged; U, D, and 1 diag calm) -> MUST stay unflagged (NC).
+			//  4. (10, 2): top active-picture border row (by=1 is blanked outside pic; 5 in-pic neighbors flagged) -> MUST stay unflagged (NC).
+			for (int by = 0; by < g.gh; ++by)
+				for (int bx = 0; bx < g.gw; ++bx)
+				{
+					const size_t i = size_t(by) * g.gw + bx;
+					g.fx[i] = (((bx + by) & 1) != 0) ? 8.0f : -8.0f;
+					g.fy[i] = 0.0f;
+				}
+			auto setVec = [&](int bx, int by, float vx, float vy) {
+				const size_t i = size_t(by) * g.gw + bx;
+				g.fx[i] = vx;
+				g.fy[i] = vy;
+			};
+
+			// Island 1 at (10, 8): 8/8 flagged neighbors, zero curvature at (10, 8).
+			setVec(10, 8, 0.0f, 0.0f);
+			setVec(9, 8, 8.0f, 0.0f);
+			setVec(11, 8, -8.0f, 0.0f);
+			setVec(10, 7, 0.0f, 8.0f);
+			setVec(10, 9, 0.0f, -8.0f);
+
+			// Island 2 at (5, 8): exactly 6/8 flagged neighbors (4 diagonals + L + R), zero curvature at (5, 8).
+			setVec(5, 8, 0.0f, 0.0f);
+			setVec(5, 7, 0.0f, 0.0f);
+			setVec(5, 9, 0.0f, 0.0f);
+			setVec(5, 6, 0.0f, 0.0f);
+			setVec(5, 10, 0.0f, 0.0f);
+			setVec(4, 8, 8.0f, 0.0f);
+			setVec(6, 8, -8.0f, 0.0f);
+			setVec(4, 7, -8.0f, 0.0f);
+			setVec(6, 7, 8.0f, 0.0f);
+			setVec(4, 9, -8.0f, 0.0f);
+			setVec(6, 9, 8.0f, 0.0f);
+
+			// NC 1 at (14, 4): exact zero-curvature cell with 5/8 flagged neighbors and 3 zero-curvature calm neighbors
+			// (14,3), (15,3), (14,5): each of the 3 calm neighbors has balanced opposing cardinal neighbours (avg == 0).
+			setVec(14, 4, 0.0f, 0.0f);
+			setVec(13, 4, 8.0f, 0.0f);
+			setVec(15, 4, -8.0f, 0.0f);
+			setVec(14, 3, 0.0f, 0.0f);
+			setVec(15, 3, 0.0f, 0.0f);
+			setVec(16, 3, 0.0f, 0.0f);
+			setVec(13, 3, -8.0f, 0.0f);
+			setVec(14, 2, 8.0f, 0.0f);
+			setVec(15, 2, 8.0f, 0.0f);
+			setVec(14, 5, 0.0f, 0.0f);
+			setVec(14, 6, 0.0f, 0.0f);
+			setVec(13, 5, -8.0f, 0.0f);
+			setVec(15, 5, 8.0f, 0.0f);
+			setVec(16, 4, 8.0f, 0.0f);
+			setVec(16, 5, -8.0f, 0.0f);
+			// Neighbors of (14, 4): flagged = (13,3), (13,4), (15,4), (13,5), (15,5) -> 5/8; calm = (14,3), (15,3), (14,5).
+
+			// NC 2 at (10, 2): top active-picture edge (by=1 is outside active picture rect); L=(+8,0), R=(-8,0) -> curv == 0.
+			setVec(10, 2, 0.0f, 0.0f);
+			setVec(9, 2, 8.0f, 0.0f);
+			setVec(11, 2, -8.0f, 0.0f);
+
+			const CameraModel::PairInput in = g.Input(1);
+			CameraModel::DynTextureExcludeConfig cfgFill, cfgNoFill;
+			cfgNoFill.neighborFillMin = 0;   // NC: disable 3x3 fill
+
+			CameraModel::DynTextureState stFill, stNoFill;
+			std::vector<uint8_t> maskFill, maskNoFill;
+			CameraModel::ComputeWaterExclusionMask(cfgFill, in, stFill, 0.25, maskFill);
+			CameraModel::ComputeWaterExclusionMask(cfgNoFill, in, stNoFill, 0.25, maskNoFill);
+
+			// Verify Pass-1 baseline (no fill): islands are genuinely unflagged without the 3x3 pass.
+			Assert::AreEqual<uint8_t>(0u, maskNoFill[size_t(8) * g.gw + 10], L"NC: 8/8 island is unflagged without 3x3 fill");
+			Assert::AreEqual<uint8_t>(0u, maskNoFill[size_t(8) * g.gw + 5], L"NC: 6/8 island is unflagged without 3x3 fill");
+
+			// With 3x3 fill enabled: >= 6/8 islands are filled; <= 5/8 and active-rect edge cells stay unflagged.
+			Assert::AreEqual<uint8_t>(1u, maskFill[size_t(8) * g.gw + 10], L"8/8 surrounded ocean island gets filled");
+			Assert::AreEqual<uint8_t>(1u, maskFill[size_t(8) * g.gw + 5], L"6/8 surrounded ocean island gets filled");
+			Assert::AreEqual<uint8_t>(0u, maskFill[size_t(4) * g.gw + 14], L"NC: <= 5/8 neighbors stays unflagged");
+			Assert::AreEqual<uint8_t>(0u, maskFill[size_t(2) * g.gw + 10], L"NC: active-picture border cell never bleeds from blanking");
+			Assert::AreEqual<uint8_t>(0u, maskFill[size_t(1) * g.gw + 10], L"blanked cell outside active picture stays unflagged");
+		}
+
+		// Owner CE-WATER refinement (c): 2x2 spatial covariance eigenvalue ratio (lambdaMin / lambdaMax) steps down
+		// a thin horizontal skyline strip from 8-DOF perspective homography to 4-DOF Similarity / 2-DOF Translation
+		// so corners never swing > 1.5 px, while a full 2D-spread rigid scene keeps 8-DOF Homography.
+		TEST_METHOD(SpatialSpreadLeverageCheckStepsDownThinStripAndKeepsFull2DHomography)
+		{
+			auto maxCornerErrAgainstPan = [](const CameraModel::Params& p, const CameraModel::Rect& pic, double tx, double ty) {
+				const double hw = 0.5 * pic.Width(), hh = 0.5 * pic.Height();
+				const double cx[4] = { -hw, hw, hw, -hw };
+				const double cy[4] = { -hh, -hh, hh, hh };
+				double worst = 0.0;
+				for (int k = 0; k < 4; ++k)
+				{
+					double dx = 0.0, dy = 0.0;
+					CameraModel::Displacement(p, cx[k], cy[k], &dx, &dy);
+					worst = std::max(worst, std::hypot(dx - tx, dy - ty));
+				}
+				return worst;
+			};
+
+			// 1. Thin horizontal skyline strip (rows 8..11 of 20 = 20% height, straddling horizon so all 4 quadrants
+			//    are populated, lambdaMin/lambdaMax = 0.04 < 1/9) carrying subtle perspective noise within 3*prec on
+			//    the strip that extrapolates to > 3 px corner swing under 8-DOF Homography.
+			{
+				SyntheticGrid g(32, 20);
+				CameraModel::Params pert = CameraModel::IdentityParams(CameraModel::ModelType::Homography);
+				pert.h[2] = 6.0;
+				pert.h[7] = 8e-5;   // <= 0.48 px on rows 8..11 (|y| <= 24), extrapolates to ~3.3 px at y = +-160
+				for (int by = 0; by < g.gh; ++by)
+					for (int bx = 0; bx < g.gw; ++bx)
+					{
+						const size_t i = size_t(by) * g.gw + bx;
+						if (by >= 8 && by <= 11)
+						{
+							double x = 0.0, y = 0.0, dx = 0.0, dy = 0.0;
+							CameraModel::BlockCentre(bx, by, g.blockSize, g.pic, &x, &y);
+							CameraModel::Displacement(pert, x, y, &dx, &dy);
+							g.fx[i] = static_cast<float>(dx);
+							g.fy[i] = static_cast<float>(dy);
+							g.ft[i] = 1.0f;
+						}
+						else
+						{
+							g.fx[i] = 0.0f;
+							g.fy[i] = 0.0f;
+							g.ft[i] = 0.0f;   // untrusted flat sky / flat ocean
+						}
+					}
+
+				CameraModel::Config cfgOff, cfgOn;
+				cfgOff.waterBlockExclude = false;
+				cfgOn.waterBlockExclude = true;
+				CameraModel::Fitter fOff(cfgOff), fOn(cfgOn);
+				const CameraModel::PairInput in = g.Input(1);
+				const CameraModel::CameraMotion rOff = fOff.Fit(in);
+				const CameraModel::CameraMotion rOn = fOn.Fit(in);
+
+				// Negative Control: without spatial-spread leverage check, 8-DOF Homography fits the 4-quadrant thin strip
+				// and swings picture corners by > 1.5 px!
+				Assert::IsTrue(rOff.valid && rOff.params.type == CameraModel::ModelType::Homography,
+					L"NC: unprotected fitter chooses 8-DOF Homography on 4-quadrant thin strip");
+				const double offCornerErr = maxCornerErrAgainstPan(rOff.params, g.pic, 6.0, 0.0);
+				Assert::IsTrue(offCornerErr > 1.5,
+					L"NC: unprotected 8-DOF Homography on noisy thin strip swings corners > 1.5 px");
+
+				// Protected path: low lambdaMin/lambdaMax steps down to Similarity / Translation -> tight corners (< 0.5 px)!
+				Assert::IsTrue(rOn.valid, L"protected thin-strip fit stays valid");
+				Assert::IsTrue(rOn.params.type == CameraModel::ModelType::Similarity ||
+					rOn.params.type == CameraModel::ModelType::Translation,
+					L"low lambdaMin/lambdaMax steps down from 8-DOF Homography to Similarity or Translation");
+				const double onCornerErr = maxCornerErrAgainstPan(rOn.params, g.pic, 6.0, 0.0);
+				Assert::IsTrue(onCornerErr < 0.5,
+					L"stepped-down Similarity/Translation keeps corner error strictly tight (< 0.5 px)");
+			}
+
+			// 2. Full 2D-spread rigid scene with true 8-DOF perspective homography keeps Homography under waterBlockExclude!
+			{
+				SyntheticGrid g(32, 20);
+				CameraModel::Params trueHom = CameraModel::IdentityParams(CameraModel::ModelType::Homography);
+				trueHom.h[2] = 6.0;
+				trueHom.h[6] = 1.2e-4;
+				trueHom.h[7] = 8e-5;
+				for (int by = 0; by < g.gh; ++by)
+					for (int bx = 0; bx < g.gw; ++bx)
+					{
+						const size_t i = size_t(by) * g.gw + bx;
+						double x = 0.0, y = 0.0, dx = 0.0, dy = 0.0;
+						CameraModel::BlockCentre(bx, by, g.blockSize, g.pic, &x, &y);
+						CameraModel::Displacement(trueHom, x, y, &dx, &dy);
+						g.fx[i] = static_cast<float>(dx);
+						g.fy[i] = static_cast<float>(dy);
+						g.ft[i] = 1.0f;
+					}
+				CameraModel::Config cfgOn;
+				cfgOn.waterBlockExclude = true;
+				CameraModel::Fitter fOn(cfgOn);
+				const CameraModel::CameraMotion rHom = fOn.Fit(g.Input(1));
+				Assert::IsTrue(CameraLink::Usable(rHom), L"full 2D-spread perspective scene is usable");
+				Assert::AreEqual(0.0, rHom.signals.waterExcludedShare, 1e-12, L"smooth perspective field excludes zero blocks");
+				Assert::IsTrue(rHom.params.type == CameraModel::ModelType::Homography,
+					L"full 2D-spread rigid scene retains 8-DOF perspective Homography");
+				const double cornerDiff = CameraModel::MaxCornerDifference(rHom.params, trueHom, g.pic)
+					* std::hypot(g.pic.Width(), g.pic.Height());
+				Assert::IsTrue(cornerDiff < 0.25, L"full 2D-spread Homography recovers exact corner motion");
+			}
+		}
 	};
 }

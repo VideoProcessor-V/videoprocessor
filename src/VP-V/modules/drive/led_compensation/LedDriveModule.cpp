@@ -398,6 +398,13 @@ namespace LedDrive
 
 	std::vector<FallbackStatus::Entry> LedDriveModule::FallbackEntries() const
 	{
+		std::vector<FallbackStatus::Entry> out;
+		FallbackEntriesInto(out);
+		return out;
+	}
+
+	void LedDriveModule::FallbackEntriesInto(std::vector<FallbackStatus::Entry>& out) const
+	{
 		bool hasDriver = false;
 		bool framingDowngraded = false;
 		{
@@ -410,7 +417,7 @@ namespace LedDrive
 		}
 		if (hasDriver)
 			SyncDriverFallbacks(framingDowngraded);
-		return fallbacks.Entries();
+		fallbacks.EntriesInto(out);
 	}
 
 	void LedDriveModule::SetIntentLimits(double shadowMinimumShare, double ambientBlackNits)
@@ -987,6 +994,7 @@ namespace LedDrive
 		predictions.clear();
 		lastMeasuredSequence = 0;
 		lastFrameSequence = 0;
+		lastBrightCutSequence = 0;   // POD1-L2: reset bright-cut dedup sequence across stream restarts
 		restartSequence = 0;
 		walkAheadSeen = 0;   // GF-P3: a new stream re-measures the walk depth (the next walk re-declares only if the need moved)
 		walkLowSinceMs = -1.0;
