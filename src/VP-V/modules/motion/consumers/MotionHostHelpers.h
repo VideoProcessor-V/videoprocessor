@@ -133,5 +133,7 @@ namespace Vpv
 			const std::function<void(const FallbackCatalog::Decision&)>& syncFallback);
 		void SyncEstimatorFallbacks(const ::Dejudder::MotionWarp& dejudder,
 			const std::function<void(const FallbackCatalog::Decision&)>& syncFallback);
+		void LogDebugPhaseAb(pl_gpu gpu, pl_dispatch dispatch, pl_tex aLuma, pl_tex bLuma, pl_tex motionField,
+			uint64_t sourceSequence, uint64_t nextSourceSequence, double vpOutputPhase, bool vectors);
 	}
 }

@@ -437,6 +437,7 @@ bool HdrVetoCutDetector::Observe(const HdrVetoFrameStats& stats)
 	bool cut = false;
 	m_lastGrid = 0.0f;
 	m_lastHistogram = 0.0f;
+	m_atomicLastHist.store(0.0f, std::memory_order_release);
 	m_lastUsedFallback = false;
 	if (m_havePrevious)
 	{
@@ -543,6 +544,7 @@ bool HdrVetoCutDetector::Observe(const HdrVetoFrameStats& stats)
 					stats.histogram.size(), 1.0f, 1.0f);
 				m_lastGrid = grid;
 				m_lastHistogram = distance;
+				m_atomicLastHist.store(distance, std::memory_order_release);
 				VpUnit::CutFadeJudge::GridHistThresholds limits;
 				limits.gridDifference = GRID_DIFFERENCE;
 				limits.histogramDistance = HISTOGRAM_DISTANCE;
@@ -556,42 +558,6 @@ bool HdrVetoCutDetector::Observe(const HdrVetoFrameStats& stats)
 	m_previousSequence = sequence;
 	m_havePrevious = true;
 	return cut;
-}
-
-bool HdrVetoCutDetector::Observe(const HdrVetoFrameStats& stats, uint64_t sequence)
-{
-	m_pendingSequence = sequence;
-	m_pendingUnkeyedReason = nullptr;
-	return Observe(stats);
-}
-
-bool HdrVetoCutDetector::Observe(const HdrVetoFrameStats& stats, uint64_t sequence, SceneReaderFn reader,
-	HdrVetoCutDiag* diagOut, const char* unkeyedReason)
-{
-	m_sceneReader = reader;
-	m_pendingSequence = sequence;
-	m_pendingUnkeyedReason = unkeyedReason;
-	const bool c = Observe(stats);
-	if (diagOut)
-	{
-		diagOut->sharedHits = m_sharedCutHits;
-		diagOut->fallbackCount = m_fallbackCutCount;
-		diagOut->lastFallbackReason = m_lastFallbackWhy;
-		diagOut->usedFallback = m_lastUsedFallback;
-	}
-	return c;
-}
-
-void HdrVetoCutDetector::Reset()
-{
-	m_havePrevious = false;
-	m_previousSequence = 0;
-	m_pendingSequence = 0;
-	m_pendingUnkeyedReason = nullptr;
-	m_sharedCutHits = 0;
-	m_fallbackCutCount = 0;
-	m_lastFallbackWhy = nullptr;
-	m_lastUsedFallback = false;
 }
 
 void HdrVetoCaptureGate::Arm(uint64_t generation, const VideoStateComPtr& sdrState)
@@ -622,7 +588,7 @@ bool HdrVetoCaptureGate::WantsSample(uint64_t generation, uint64_t nowMs)
 	{
 		m_captureGeneration = generation;
 		m_captureGenerationKnown = true;
-		m_cutDetector.Reset();
+		DetReset();
 		m_diag = HdrVetoCutDiag();
 		m_lastSampleMs = 0;
 		m_haveSample = false;
@@ -641,9 +607,8 @@ HdrVetoCaptureGate::Observation HdrVetoCaptureGate::Observe(uint64_t generation,
 	Observation result;
 	const bool armedNow = m_armed && m_generation == generation && m_sdrState != nullptr;
 	const char* const unkeyedWhy = armedNow ? "armed before renderer ingress (u7 not yet sealed)" : nullptr;
-	result.cut = m_cutDetector.Observe(stats, sequence, m_sceneReader, &m_diag, unkeyedWhy);
-	result.gridDifference = m_cutDetector.LastGridDifference();
-	result.histogramDistance = m_cutDetector.LastHistogramDistance();
+	result.cut = DetObserve(stats, sequence, m_sceneReader, &m_diag, unkeyedWhy);
+	result.gridDifference = DetGrid();
 	result.usedFallback = m_diag.usedFallback;
 	result.fallbackReason = m_diag.lastFallbackReason;
 	if (result.cut && armedNow)
@@ -664,13 +629,7 @@ void HdrVetoCaptureGate::SetSceneReader(HdrVetoSceneReaderFn reader)
 float HdrVetoCaptureGate::LastGridDifference() const
 {
 	std::lock_guard<std::mutex> guard(m_mutex);
-	return m_cutDetector.LastGridDifference();
-}
-
-float HdrVetoCaptureGate::LastHistogramDistance() const
-{
-	std::lock_guard<std::mutex> guard(m_mutex);
-	return m_cutDetector.LastHistogramDistance();
+	return DetGrid();
 }
 
 uint64_t HdrVetoCaptureGate::SharedCutHits() const

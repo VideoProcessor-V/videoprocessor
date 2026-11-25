@@ -14,8 +14,11 @@
 #include <VP-V/modules/output/dither/DitherSlot.h>
 #include <VP-V/modules/output/dither/SigmaDeltaVectors.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <libplacebo/dispatch.h>
+#include <libplacebo/shaders/sampling.h>
 
 namespace Vpv
 {
@@ -309,6 +312,75 @@ namespace Vpv
 			syncFallback(u7Why.empty()
 				? FallbackCatalog::Released("motion.u7_scene")
 				: FallbackCatalog::Engaged("motion.u7_scene", u7Why));
+		}
+
+		void LogDebugPhaseAb(pl_gpu gpu, pl_dispatch dispatch, pl_tex aLuma, pl_tex bLuma, pl_tex motionField,
+			uint64_t sourceSequence, uint64_t nextSourceSequence, double vpOutputPhase, bool vectors)
+		{
+			if (!gpu || !dispatch || !aLuma || !bLuma ||
+				aLuma->params.w != bLuma->params.w || aLuma->params.h != bLuma->params.h)
+				return;
+			auto readBack = [&](pl_tex src, std::vector<uint8_t>& out) {
+				pl_tex_params tp{};
+				tp.w = src->params.w; tp.h = src->params.h; tp.format = src->params.format;
+				if (src->params.format->type == PL_FMT_FLOAT)
+					tp.format = pl_find_fmt(gpu, PL_FMT_FLOAT, 4, 32, 32,
+						static_cast<enum pl_fmt_caps>(PL_FMT_CAP_RENDERABLE | PL_FMT_CAP_HOST_READABLE));
+				if (!tp.format) return false;
+				tp.sampleable = true; tp.renderable = true; tp.host_readable = true;
+				pl_tex copy = pl_tex_create(gpu, &tp);
+				if (!copy) return false;
+				pl_shader sh = pl_dispatch_begin(dispatch);
+				pl_sample_src sample{};
+				sample.tex = src;
+				sample.components = src->params.format->num_components;
+				bool ok = pl_shader_sample_direct(sh, &sample);
+				if (ok)
+				{
+					pl_dispatch_params dp{};
+					dp.shader = &sh;
+					dp.target = copy;
+					ok = pl_dispatch_finish(dispatch, &dp);
+				}
+				else
+					pl_dispatch_abort(dispatch, &sh);
+				if (ok)
+				{
+					out.resize(static_cast<size_t>(tp.w) * tp.h * tp.format->texel_size);
+					pl_tex_transfer_params t{};
+					t.tex = copy;
+					t.ptr = out.data();
+					ok = pl_tex_download(gpu, &t);
+				}
+				pl_tex_destroy(gpu, &copy);
+				return ok;
+			};
+			std::vector<uint8_t> da, db;
+			size_t differing = 0;
+			const bool ok = readBack(aLuma, da) && readBack(bLuma, db) && da.size() == db.size();
+			if (ok)
+				for (size_t i = 0; i < da.size(); ++i) differing += da[i] != db[i] ? 1 : 0;
+			double meanLen = 0.0, maxLen = 0.0, gx = 0.0, gy = 0.0;
+			size_t trusted = 0, blocks = 0;
+			if (motionField)
+			{
+				std::vector<uint8_t> df;
+				if (readBack(motionField, df) && df.size() == static_cast<size_t>(motionField->params.w) * motionField->params.h * 16)
+				{
+					const float* f = reinterpret_cast<const float*>(df.data());
+					blocks = df.size() / 16;
+					for (size_t i = 0; i < blocks; ++i)
+						if (f[i * 4 + 2] > 0.5f)
+						{
+							const double l = std::sqrt(double(f[i * 4]) * f[i * 4] + double(f[i * 4 + 1]) * f[i * 4 + 1]);
+							meanLen += l; maxLen = (std::max)(maxLen, l); gx += f[i * 4]; gy += f[i * 4 + 1]; ++trusted;
+						}
+					if (trusted) { meanLen /= trusted; gx /= trusted; gy /= trusted; }
+				}
+			}
+			DebugLog::Log("DEBUG phase A/B: sequence %llu next %llu phase %.3f vectors %d: luma bytes differing %zu of %zu%s; field: %zu of %zu blocks trusted, |v| mean %.3f max %.3f, mean v (%.3f, %.3f)",
+				static_cast<unsigned long long>(sourceSequence), static_cast<unsigned long long>(nextSourceSequence),
+				vpOutputPhase, vectors ? 1 : 0, differing, da.size(), ok ? "" : " (readback failed)", trusted, blocks, meanLen, maxLen, gx, gy);
 		}
 	}
 }

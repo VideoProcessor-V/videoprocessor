@@ -213,7 +213,7 @@ VideoStateComPtr CVideoProcessorDlg::MeasureHdrVetoPicture(const VideoStateComPt
 		const HdrVetoCaptureGate::Observation observed = m_hdrVetoGate.Observe(generation, stats, rendererSequence);
 		message->observation.cut = observed.cut;
 		message->gridDifference = observed.gridDifference;
-		message->histogramDistance = observed.histogramDistance;
+		message->histogramDistance = m_hdrVetoGate.LastHistogramDistance();
 		message->cutUsedFallback = observed.usedFallback;
 		message->cutFallbackReason = observed.fallbackReason;
 		switchState = observed.switchState;

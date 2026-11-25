@@ -28,7 +28,6 @@ public:
 		bool cut = false;
 		VideoStateComPtr switchState;
 		float gridDifference = 0.0f;
-		float histogramDistance = 0.0f;
 		bool usedFallback = false;
 		const char* fallbackReason = nullptr;
 	};
@@ -36,13 +35,16 @@ public:
 	Observation Observe(uint64_t generation, const HdrVetoFrameStats& stats, uint64_t sequence = 0);
 	void SetSceneReader(HdrVetoSceneReaderFn reader);
 	float LastGridDifference() const;
-	float LastHistogramDistance() const;
+	float LastHistogramDistance() const { return m_cutDetector.LastHistogramDistance(); }
 	uint64_t SharedCutHits() const;
 	uint64_t FallbackCutCount() const;
 	const char* LastFallbackReason() const;
 	bool UsedFallbackOnLastObserve() const;
 
 private:
+	void DetReset() { m_cutDetector.Reset(); }
+	bool DetObserve(const HdrVetoFrameStats& s, uint64_t q, HdrVetoSceneReaderFn r, HdrVetoCutDiag* d, const char* w) { return m_cutDetector.Observe(s, q, r, d, w); }
+	float DetGrid() const { return m_cutDetector.LastGridDifference(); }
 	mutable std::mutex m_mutex;
 	bool m_armed = false;
 	uint64_t m_generation = 0;

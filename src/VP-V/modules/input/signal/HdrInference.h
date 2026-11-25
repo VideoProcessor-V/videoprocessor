@@ -11,6 +11,7 @@
 #include <EOTF.h>
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -233,17 +234,22 @@ public:
 	using SceneReaderFn = HdrVetoSceneReaderFn;
 	void SetSceneReader(SceneReaderFn reader) { m_sceneReader = reader; }
 	bool Observe(const HdrVetoFrameStats& stats);
-	bool Observe(const HdrVetoFrameStats& stats, uint64_t sequence);
-	bool Observe(const HdrVetoFrameStats& stats, uint64_t sequence, SceneReaderFn reader, HdrVetoCutDiag* diagOut,
-		const char* unkeyedReason = nullptr);
-	void Reset();
+	bool Observe(const HdrVetoFrameStats& stats, uint64_t sequence) { m_pendingSequence = sequence; m_pendingUnkeyedReason = nullptr; return Observe(stats); }
+	bool Observe(const HdrVetoFrameStats& stats, uint64_t sequence, SceneReaderFn reader, HdrVetoCutDiag* diagOut, const char* unkeyedReason = nullptr)
+	{
+		m_sceneReader = reader; m_pendingSequence = sequence; m_pendingUnkeyedReason = unkeyedReason;
+		const bool c = Observe(stats);
+		if (diagOut) { diagOut->sharedHits = m_sharedCutHits; diagOut->fallbackCount = m_fallbackCutCount; diagOut->lastFallbackReason = m_lastFallbackWhy; diagOut->usedFallback = m_lastUsedFallback; }
+		return c;
+	}
+	void Reset() { m_havePrevious = false; m_previousSequence = m_pendingSequence = m_sharedCutHits = m_fallbackCutCount = 0; m_pendingUnkeyedReason = m_lastFallbackWhy = nullptr; m_lastUsedFallback = false; }
 
 	static constexpr float GRID_DIFFERENCE = VpUnit::CutFadeJudge::kGridDifference;
 	static constexpr float HISTOGRAM_DISTANCE = VpUnit::CutFadeJudge::kHistogramDistance;
 	static constexpr float HISTOGRAM_DISTANCE_ALONE = VpUnit::CutFadeJudge::kHistogramDistanceAlone;
 
 	float LastGridDifference() const { return m_lastGrid; }
-	float LastHistogramDistance() const { return m_lastHistogram; }
+	float LastHistogramDistance() const { return m_atomicLastHist.load(std::memory_order_acquire); }
 	uint64_t SharedCutHits() const { return m_sharedCutHits; }
 	uint64_t FallbackCutCount() const { return m_fallbackCutCount; }
 	const char* LastFallbackReason() const { return m_lastFallbackWhy; }
@@ -254,6 +260,7 @@ private:
 	HdrVetoFrameStats m_previous;
 	float m_lastGrid = 0.0f;
 	float m_lastHistogram = 0.0f;
+	std::atomic<float> m_atomicLastHist{ 0.0f };
 	SceneReaderFn m_sceneReader = nullptr;
 	uint64_t m_previousSequence = 0, m_pendingSequence = 0, m_sharedCutHits = 0, m_fallbackCutCount = 0;
 	const char* m_pendingUnkeyedReason = nullptr;
