@@ -2626,8 +2626,8 @@ for (int s = 128; s > 0; s >>= 1)
     if (tid < s)
     {
         td_eb_acc[tid] += td_eb_acc[tid + s];
-        td_eb_mm[tid].x = min(td_eb_mm[tid].x, td_eb_mm[tid + s].x);
-        td_eb_mm[tid].y = max(td_eb_mm[tid].y, td_eb_mm[tid + s].y);
+        td_eb_mm[tid] = vec2(min(td_eb_mm[tid].x, td_eb_mm[tid + s].x),
+                             max(td_eb_mm[tid].y, td_eb_mm[tid + s].y));
     }
     memoryBarrierShared();
     barrier();
@@ -2698,11 +2698,12 @@ for (int iter = 0; iter < 24; ++iter)
     {
         if (tid < s)
         {
-            td_eb_acc[tid].x += td_eb_acc[tid + s].x;
-            td_eb_acc[tid].y += td_eb_acc[tid + s].y;
-            td_eb_acc[tid].z = max(td_eb_acc[tid].z, td_eb_acc[tid + s].z);
-            td_eb_acc[tid].w = min(td_eb_acc[tid].w, td_eb_acc[tid + s].w);
-            td_eb_mm[tid].x += td_eb_mm[tid + s].x;
+            td_eb_acc[tid] = vec4(
+                td_eb_acc[tid].x + td_eb_acc[tid + s].x,
+                td_eb_acc[tid].y + td_eb_acc[tid + s].y,
+                max(td_eb_acc[tid].z, td_eb_acc[tid + s].z),
+                min(td_eb_acc[tid].w, td_eb_acc[tid + s].w));
+            td_eb_mm[tid] = vec2(td_eb_mm[tid].x + td_eb_mm[tid + s].x, 0.0);
         }
         memoryBarrierShared();
         barrier();
@@ -2723,9 +2724,9 @@ for (int iter = 0; iter < 24; ++iter)
             float gMinG = td_eb_acc[0].w;
             int halfN = nInt / 2;
             if (lessI > halfN)
-                td_eb_state.y = (gMaxL > -1e29) ? gMaxL : mid;
+                td_eb_state = vec4(st.x, (gMaxL > -1e29) ? gMaxL : mid, st.z, st.w);
             else if (grtrI > halfN)
-                td_eb_state.x = (gMinG < 1e29) ? gMinG : mid;
+                td_eb_state = vec4((gMinG < 1e29) ? gMinG : mid, st.y, st.z, st.w);
             else
             {
                 float med = mid;
@@ -3380,7 +3381,7 @@ for (int s = 128; s > 0; s >>= 1)
     if (tid < s)
     {
         td_anc_s1[tid] += td_anc_s1[tid + s];
-        td_anc_s2[tid].x += td_anc_s2[tid + s].x;
+        td_anc_s2[tid] = vec2(td_anc_s2[tid].x + td_anc_s2[tid + s].x, 0.0);
     }
     memoryBarrierShared();
     barrier();
@@ -4242,6 +4243,13 @@ for (int subY = 0; subY < subTiles; ++subY)
 
         // Step 1: Cooperative load of 22x22 active-clamped (recY, candOut, ownGrain) into LDS.
         // Sanitize non-finite samples upfront so a single NaN/Inf pixel NEVER spreads across the 7x7 fine halo!
+        // PROD-GPU-BUG-11: Subtract workgroup DC anchor from td_sh_r & td_sh_d for G_fine mantissa precision
+        // (sum(TD_TAP_FINE) == 1.0 so high-pass is algebraically invariant while recovering ~32x FP32 precision!).
+        int dcSx = validRect ? clamp(baseX, xMin, xMax) : clamp(baseX, 0, TD_W - 1);
+        int dcSy = validRect ? clamp(baseY, yMin, yMax) : clamp(baseY, 0, TD_H - 1);
+        float rawDcAnchor = texelFetch(rec_y, ivec2(dcSx, dcSy), 0).x;
+        float dcAnchor = td_is_bad(rawDcAnchor) ? 0.0 : rawDcAnchor;
+
         for (int idx = tid; idx < tileN; idx += 256)
         {
             int ty = idx / tileDim;
@@ -4251,16 +4259,18 @@ for (int subY = 0; subY < subTiles; ++subY)
             int sx = validRect ? clamp(gx, xMin, xMax) : clamp(gx, 0, TD_W - 1);
             int sy = validRect ? clamp(gy, yMin, yMax) : clamp(gy, 0, TD_H - 1);
             ivec2 sp = ivec2(sx, sy);
-            float rv = texelFetch(rec_y, sp, 0).x;
-            float cv = sameCleanRec ? rv : texelFetch(cur_clean, sp, 0).x;
-            float dv = texelFetch(delta_tex, sp, 0).x;
-            if (td_is_bad(rv)) rv = 0.0;
-            if (td_is_bad(cv)) cv = 0.0;
-            if (td_is_bad(dv)) dv = 0.0;
+            float rawRv = texelFetch(rec_y, sp, 0).x;
+            float rawCv = sameCleanRec ? rawRv : texelFetch(cur_clean, sp, 0).x;
+            float rawDv = texelFetch(delta_tex, sp, 0).x;
+            bool badAny = td_is_bad(rawRv) || td_is_bad(rawCv) || td_is_bad(rawDv);
+            float rv = td_is_bad(rawRv) ? 0.0 : rawRv;
+            float cv = td_is_bad(rawCv) ? 0.0 : rawCv;
+            float dv = badAny ? 0.0 : rawDv;
             float og = rv - cv;
-            float candOut = (cv + dv) + og;
-            td_sh_r[idx] = rv;
-            td_sh_d[idx] = candOut;
+            float rShifted = rv - dcAnchor;
+            float candShifted = (badAny || dv == 0.0) ? rShifted : (((cv - dcAnchor) + dv) + og);
+            td_sh_r[idx] = rShifted;
+            td_sh_d[idx] = candShifted;
             td_sh_g[idx] = og;
         }
         memoryBarrierShared();
@@ -4326,8 +4336,8 @@ for (int subY = 0; subY < subTiles; ++subY)
             {
                 // Step 3: Separable vertical G_fine from LDS + immediate grain-free out_clean & carry_clean store.
                 int centerIdx = (ly + TD_RAD_FINE) * tileDim + (lx + TD_RAD_FINE);
-                float rv = td_sh_r[centerIdx];
-                float candOut = td_sh_d[centerIdx];
+                float rvShifted = td_sh_r[centerIdx];
+                float candShifted = td_sh_d[centerIdx];
                 float og = td_sh_g[centerIdx];
                 vec2 dTex = texelFetch(delta_tex, p, 0).xy;
                 int dFlags = int(round(dTex.y));
@@ -4359,8 +4369,8 @@ for (int subY = 0; subY < subTiles; ++subY)
                     gg += w * td_sh_gh[hIdx];
                 }
 
-                float inFullH = rv - gr;
-                float outFullH = candOut - gd;
+                float inFullH = rvShifted - gr;
+                float outFullH = candShifted - gd;
                 float ogFineH = og - gg;
 
                 sumOgE += og * og;
@@ -4376,8 +4386,8 @@ for (int subY = 0; subY < subTiles; ++subY)
 
                 if (subTiles == 1)
                 {
-                    regRecY = rv;
-                    regCandOut = (badRecOrClean || badD) ? rv : candOut;
+                    regRecY = recV;
+                    regCandOut = (badRecOrClean || badD || dRaw == 0.0) ? recV : (newClean + (recV - cleanV));
                     regFineDiff = inFullH - outFullH;
                     regInCellPx = true;
                     regInActive = true;
@@ -4530,6 +4540,10 @@ else
             int baseX = cell.x * TD_CELL_PX + subX * 16;
             int baseY = cell.y * TD_CELL_PX + subY * 16;
             ivec2 p = ivec2(baseX + lx, baseY + ly);
+            int dcSx2 = validRect ? clamp(baseX, xMin, xMax) : clamp(baseX, 0, TD_W - 1);
+            int dcSy2 = validRect ? clamp(baseY, yMin, yMax) : clamp(baseY, 0, TD_H - 1);
+            float rawDc2 = texelFetch(rec_y, ivec2(dcSx2, dcSy2), 0).x;
+            float dcAnchor2 = td_is_bad(rawDc2) ? 0.0 : rawDc2;
 
             for (int idx = tid; idx < tileN; idx += 256)
             {
@@ -4544,13 +4558,15 @@ else
                     int sx = validRect ? clamp(gx, xMin, xMax) : clamp(gx, 0, TD_W - 1);
                     int sy = validRect ? clamp(gy, yMin, yMax) : clamp(gy, 0, TD_H - 1);
                     ivec2 sp = ivec2(sx, sy);
-                    rVal = texelFetch(rec_y, sp, 0).x;
-                    float cv = sameCleanRec ? rVal : texelFetch(cur_clean, sp, 0).x;
-                    float dv = texelFetch(delta_tex, sp, 0).x;
-                    if (td_is_bad(rVal)) rVal = 0.0;
-                    if (td_is_bad(cv)) cv = 0.0;
-                    if (td_is_bad(dv)) dv = 0.0;
-                    cOutVal = (cv + dv) + (rVal - cv);
+                    float rawR = texelFetch(rec_y, sp, 0).x;
+                    float rawC = sameCleanRec ? rawR : texelFetch(cur_clean, sp, 0).x;
+                    float rawD = texelFetch(delta_tex, sp, 0).x;
+                    bool badAny = td_is_bad(rawR) || td_is_bad(rawC) || td_is_bad(rawD);
+                    float rv = td_is_bad(rawR) ? 0.0 : rawR;
+                    float cv = td_is_bad(rawC) ? 0.0 : rawC;
+                    float dv = badAny ? 0.0 : rawD;
+                    rVal = rv - dcAnchor2;
+                    cOutVal = (badAny || dv == 0.0) ? rVal : (((cv - dcAnchor2) + dv) + (rv - cv));
                 }
                 td_sh_r[idx] = rVal;
                 td_sh_d[idx] = cOutVal;
@@ -4593,7 +4609,7 @@ else
                 float rv = td_is_bad(rawR) ? 0.0 : rawR;
                 float cv = td_is_bad(rawC) ? 0.0 : rawC;
                 float dv = badPx ? 0.0 : rawD;
-                float outVal = badPx ? rv : ((cv + dv) + (rv - cv));
+                float outVal = (badPx || dv == 0.0) ? rv : ((cv + dv) + (rv - cv));
                 if (applyAddBack)
                 {
                     float gr = 0.0;
@@ -4606,8 +4622,9 @@ else
                         gr += w * td_sh_rh[hIdx];
                         gd += w * td_sh_dh[hIdx];
                     }
-                    float inFullH = rv - gr;
-                    float outFullH = outVal - gd;
+                    int cIdx2 = cyBase * tileDim + (lx + TD_RAD_FINE);
+                    float inFullH = td_sh_r[cIdx2] - gr;
+                    float outFullH = td_sh_d[cIdx2] - gd;
                     outVal += cellAddBack * (inFullH - outFullH);
                 }
                 imageStore(out_y, p, vec4(outVal, 0.0, 0.0, 0.0));
@@ -4653,6 +4670,12 @@ int xMax = max(ax0, ax1 - 1);
 int yMin = ay0;
 int yMax = max(ay0, ay1 - 1);
 
+// PROD-GPU-BUG-11: Subtract workgroup DC anchor from td_sg_r & td_sg_o for G_fine mantissa precision (curOut stays unshifted!).
+int dcSx = validRect ? clamp(baseX, xMin, xMax) : clamp(baseX, 0, TD_W - 1);
+int dcSy = validRect ? clamp(baseY, yMin, yMax) : clamp(baseY, 0, TD_H - 1);
+float rawDcAnchor = texelFetch(rec_y, ivec2(dcSx, dcSy), 0).x;
+float dcAnchor = td_is_bad(rawDcAnchor) ? 0.0 : rawDcAnchor;
+
 int tileDim = 16 + 2 * TD_RAD_FINE;
 int tileN = tileDim * tileDim;
 for (int idx = tid; idx < tileN; idx += 256)
@@ -4665,8 +4688,8 @@ for (int idx = tid; idx < tileN; idx += 256)
     int sy = validRect ? clamp(gy, yMin, yMax) : clamp(gy, 0, TD_H - 1);
     float rv = texelFetch(rec_y, ivec2(sx, sy), 0).x;
     float ov = texelFetch(cand_out, ivec2(sx, sy), 0).x;
-    td_sg_r[idx] = td_is_bad(rv) ? 0.0 : rv;
-    td_sg_o[idx] = td_is_bad(ov) ? 0.0 : ov;
+    td_sg_r[idx] = td_is_bad(rv) ? 0.0 : (rv - dcAnchor);
+    td_sg_o[idx] = td_is_bad(ov) ? 0.0 : (ov - dcAnchor);
 }
 memoryBarrierShared();
 barrier();

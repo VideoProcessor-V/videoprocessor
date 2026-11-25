@@ -1237,10 +1237,11 @@ for (int chIdx = 0; chIdx < 2; ++chIdx)
     {
         if (tid < stride)
         {
-            td_cflat_red4[tid].x += td_cflat_red4[tid + stride].x;
-            td_cflat_red4[tid].y += td_cflat_red4[tid + stride].y;
-            td_cflat_red4[tid].z = min(td_cflat_red4[tid].z, td_cflat_red4[tid + stride].z);
-            td_cflat_red4[tid].w += td_cflat_red4[tid + stride].w;
+            td_cflat_red4[tid] = vec4(
+                td_cflat_red4[tid].x + td_cflat_red4[tid + stride].x,
+                td_cflat_red4[tid].y + td_cflat_red4[tid + stride].y,
+                min(td_cflat_red4[tid].z, td_cflat_red4[tid + stride].z),
+                td_cflat_red4[tid].w + td_cflat_red4[tid + stride].w);
         }
         memoryBarrierShared();
         barrier();
@@ -1444,8 +1445,8 @@ for (int stride = 128; stride > 0; stride >>= 1)
     if (tid < stride)
     {
         td_ceb_acc[tid] += td_ceb_acc[tid + stride];
-        td_ceb_mm[tid].x = min(td_ceb_mm[tid].x, td_ceb_mm[tid + stride].x);
-        td_ceb_mm[tid].y = max(td_ceb_mm[tid].y, td_ceb_mm[tid + stride].y);
+        td_ceb_mm[tid] = vec2(min(td_ceb_mm[tid].x, td_ceb_mm[tid + stride].x),
+                              max(td_ceb_mm[tid].y, td_ceb_mm[tid + stride].y));
     }
     memoryBarrierShared();
     barrier();
@@ -1515,11 +1516,12 @@ for (int iter = 0; iter < 24; ++iter)
     {
         if (tid < stride)
         {
-            td_ceb_acc[tid].x += td_ceb_acc[tid + stride].x;
-            td_ceb_acc[tid].y += td_ceb_acc[tid + stride].y;
-            td_ceb_acc[tid].z = max(td_ceb_acc[tid].z, td_ceb_acc[tid + stride].z);
-            td_ceb_acc[tid].w = min(td_ceb_acc[tid].w, td_ceb_acc[tid + stride].w);
-            td_ceb_mm[tid].x += td_ceb_mm[tid + stride].x;
+            td_ceb_acc[tid] = vec4(
+                td_ceb_acc[tid].x + td_ceb_acc[tid + stride].x,
+                td_ceb_acc[tid].y + td_ceb_acc[tid + stride].y,
+                max(td_ceb_acc[tid].z, td_ceb_acc[tid + stride].z),
+                min(td_ceb_acc[tid].w, td_ceb_acc[tid + stride].w));
+            td_ceb_mm[tid] = vec2(td_ceb_mm[tid].x + td_ceb_mm[tid + stride].x, 0.0);
         }
         memoryBarrierShared();
         barrier();
@@ -1540,9 +1542,9 @@ for (int iter = 0; iter < 24; ++iter)
             float gMinG = td_ceb_acc[0].w;
             int halfN = nInt / 2;
             if (lessI > halfN)
-                td_ceb_state.y = (gMaxL > -1e29) ? gMaxL : mid;
+                td_ceb_state = vec4(st.x, (gMaxL > -1e29) ? gMaxL : mid, st.z, st.w);
             else if (grtrI > halfN)
-                td_ceb_state.x = (gMinG < 1e29) ? gMinG : mid;
+                td_ceb_state = vec4((gMinG < 1e29) ? gMinG : mid, st.y, st.z, st.w);
             else
             {
                 float med = mid;
