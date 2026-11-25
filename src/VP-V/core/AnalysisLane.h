@@ -1186,14 +1186,20 @@ public:
             // B3 X1: a lagged-seal product is sealed at its final seal only in a deterministic run: no wait at N; the wait (same
             // bound, same missed-bound count) is for its frame N = seq - sealLag, finalised at this render start (ResolveLagged).
             uint64_t waitSeq = seq;
+            const SlotSet& set = st->table->At(i);
             if (n.sealLag > 0) {
                 if (seq < n.sealLag || seq - n.sealLag < st->firstSeq)
                     continue;   // no frame of this graph to finalise yet
                 waitSeq = seq - n.sealLag;
+                // X1 SHOULD (102b:255): skip deterministic final-seal wait when the runner holds no active job
+                // for waitSeq and the slot is not Writing (e.g. P2(0) whose inputs can never arrive), while
+                // preserving waiting for in-flight jobs (e.g. P2(1)).
+                const SlotState stateAtN = set.StateOf(waitSeq);
+                if (!st->runner->HasActiveJobFor(n.id, waitSeq) && stateAtN != SlotState::Writing)
+                    continue;
             }
             uint32_t m = 0;
             const Variants v = st->info[i].identical ? Variants::Identical : Variants::NonIdentical;
-            const SlotSet& set = st->table->At(i);
             const WaitDecision d = DecideWait(v, set.LaneGranted(), set.StateOf(waitSeq), p, waitedUs_, &m);
             if (d == WaitDecision::Wait)
                 more = std::max(more, m);

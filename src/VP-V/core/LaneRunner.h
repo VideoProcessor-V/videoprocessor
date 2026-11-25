@@ -165,6 +165,18 @@ public:
         const State* st = StateOf(id);
         return st && st->producer ? st->producer->PredictChunkUs() : 0u;
     }
+    // X1 SHOULD (102b:255): true iff this product's lane runner currently has a job in flight
+    // (Running or Completing) for `seq`. Thread-safe (atomic phase + activeSeq).
+    bool HasActiveJobFor(ProductId id, uint64_t seq) const
+    {
+        const State* st = StateOf(id);
+        if (!st)
+            return false;
+        const Phase p = st->phase.load(std::memory_order_acquire);
+        if (p != Phase::Running && p != Phase::Completing)
+            return false;
+        return st->activeSeq.load(std::memory_order_acquire) == seq;
+    }
 
     // ---- render thread (pure-CPU cooperative handoff; Backend::Cpu ONLY, zero driver/GPU calls) ----
 
@@ -200,6 +212,7 @@ public:
                 }
                 st.counters.chunkFailures.fetch_add(1, std::memory_order_relaxed);
                 st.phase.store(Phase::Abandoning, std::memory_order_release);
+                st.activeSeq.store(~uint64_t(0), std::memory_order_release);
                 AbandonJobLocked(st, &droppedSrc);
                 return true;
             }
@@ -228,6 +241,7 @@ public:
                     st.producer->Cancel(st.job);
                     st.counters.cancelled.fetch_add(1, std::memory_order_relaxed);
                     st.phase.store(Phase::Abandoning, std::memory_order_release);
+                    st.activeSeq.store(~uint64_t(0), std::memory_order_release);
                 } else if (p == Phase::Claimed) {
                     st.phase.store(Phase::Abandoning, std::memory_order_release);
                 }
@@ -241,6 +255,7 @@ public:
                     st.producer->Cancel(st.job);
                     st.counters.cancelled.fetch_add(1, std::memory_order_relaxed);
                     st.phase.store(Phase::Abandoning, std::memory_order_release);
+                    st.activeSeq.store(~uint64_t(0), std::memory_order_release);
                 } else if (p == Phase::Claimed) {
                     st.phase.store(Phase::Abandoning, std::memory_order_release);
                 }
@@ -282,6 +297,7 @@ private:
         std::mutex cpuChunkMutex;
         // lane-thread private (for Backend::Cpu, synchronized by cpuChunkMutex across Running/Completing/Abandoning)
         std::atomic<Phase> phase{ Phase::Idle };
+        std::atomic<uint64_t> activeSeq{ ~uint64_t(0) };   // X1 SHOULD (102b:255): seq of the Running/Completing job (~0 = none)
         uint64_t nextSeq = 0;
         uint64_t seq = 0;
         LaneTicket ticket;
@@ -446,6 +462,7 @@ private:
         if (adopt_ && st.node->backend == Backend::Cpu && job.out != nullptr && job.outBytes != 0
             && adopt_(st.node->id, st.seq, job.out, job.outBytes)) {
             st.counters.workerAdopted.fetch_add(1, std::memory_order_relaxed);
+            st.activeSeq.store(st.seq, std::memory_order_release);
             st.phase.store(Phase::Completing, std::memory_order_release);   // began stays false: nothing was submitted (the default fence values apply)
             return true;
         }
@@ -467,6 +484,7 @@ private:
             VPV_COMPUTE_ONCE_AT(("lane:" + std::to_string(int(st.node->id))).c_str(), job.seq, ::ComputeOnce::Variant(0));   // compute-once: the lane worker compute (one per product, frame)
             if (hdr.chainReduced)   // counted once the job really started (not on a failed Begin)
                 st.counters.chainCarryForward.fetch_add(1, std::memory_order_relaxed);
+            st.activeSeq.store(st.seq, std::memory_order_release);
             st.phase.store(Phase::Running, std::memory_order_release);
             return true;
         };
@@ -486,6 +504,7 @@ private:
             st.producer->Cancel(st.job);
             st.counters.cancelled.fetch_add(1, std::memory_order_relaxed);
             st.phase.store(Phase::Abandoning, std::memory_order_release);
+            st.activeSeq.store(~uint64_t(0), std::memory_order_release);
             return AbandonJobLocked(st, droppedOut);
         }
         const uint64_t t0 = Now();
@@ -503,6 +522,7 @@ private:
         }
         st.counters.chunkFailures.fetch_add(1, std::memory_order_relaxed);
         st.phase.store(Phase::Abandoning, std::memory_order_release);
+        st.activeSeq.store(~uint64_t(0), std::memory_order_release);
         return AbandonJobLocked(st, droppedOut);
     }
 
@@ -532,6 +552,7 @@ private:
         ReleaseSource(st, droppedOut);
         st.nextSeq = st.seq + 1u;
         st.phase.store(Phase::Idle, std::memory_order_release);
+        st.activeSeq.store(~uint64_t(0), std::memory_order_release);
         if (r == PublishResult::Published) {
             if (st.node->orderedChain)
                 st.chain.Published(st.seq);
@@ -564,6 +585,7 @@ private:
         ReleaseSource(st, droppedOut);
         st.nextSeq = st.seq + 1u;
         st.phase.store(Phase::Idle, std::memory_order_release);
+        st.activeSeq.store(~uint64_t(0), std::memory_order_release);
         st.counters.abandoned.fetch_add(1, std::memory_order_relaxed);
         return StepOutcome::Abandoned;
     }

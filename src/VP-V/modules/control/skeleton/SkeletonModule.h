@@ -20,6 +20,7 @@
 // form is deferred until the Entrance phase (M2 P4): declined and shown.
 
 #include <VP-V/core/AnalysisLane.h>
+#include <VP-V/modules/control/skeleton/P2LaneFeed.h>
 #include <VP-V/core/hub/ExtensionHub.h>
 #include <VP-V/core/hub/HostSlots.h>
 #include <VP-V/modules/control/skeleton/SkeletonSettings.h>
@@ -193,6 +194,8 @@ namespace Vpv
 			// for the frame being rendered). Another thread that needs the numbers reads the status lines (Ctrl+I, the command), which are
 			// published under the status mutex. SceneFactsOf goes through the memo's Acquire, which serves a published copy off the render thread (see SceneOf).
 			FeedCounters FeedCountersOf(const void* host) const;
+			// Y1b: the P2 publish sink's counters (atomic reads: any thread). Zero when no sink is installed.
+			P2LaneFeed::Counters P2FeedCountersOf(const void* host) const;
 			bool EngineFieldFactsOf(const void* host, uint64_t seq, EngineFieldFacts& out) const;
 			// Tests: the retry step the module runs at every Begin and AfterRender (the P1 inputs are published by the lane's own threads).
 			void RetryEngineFeedForTesting(const void* host);

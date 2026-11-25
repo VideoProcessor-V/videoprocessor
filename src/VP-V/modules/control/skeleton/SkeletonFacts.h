@@ -123,6 +123,10 @@ namespace Vpv
 			uint64_t abandoned = 0;       // fields given up after the retries
 			uint64_t eraResets = 0;       // the engine's numbering restarted (seek, resync, format change)
 			uint64_t lastSeq = 0;         // the last frame published
+			uint64_t overwritten = 0;     // Y1b: fields pushed out of the pending ring (oldest goes) before they were published
+			// Y1b: per-product AHEAD counters, from the frame results the seal returns at Begin (P2 / P3 only): sealed ahead vs absent (the reader
+			// goes live, or the product was unavailable). A lagged-seal pending result is neither.
+			uint64_t p2Ahead = 0, p2Absent = 0, p3Ahead = 0, p3Absent = 0;
 		};
 
 		// The EXTERNAL DEMAND entry of the skeleton module (SK-W stage D), for a component beside the lane that does not include the module
