@@ -418,6 +418,9 @@ if (b.x < size.x && b.y < size.y) {
 		}
 		else
 		{
+			// W23-IR-M4: ensure cache compute pass is attributed when ComputeOnce profiling is enabled.
+			if (::ComputeOnce::Enabled())
+				GpuAttribution::Watch(params->dispatch, "dejudder_cache");
 			const pl_shader_desc all[2] = { Sampled("src", src), Storage(tex) };
 			if (!Compute(params->dispatch, "VideoProcessor de-judder: cache A at PRE_OUTPUT", nullptr,
 				COPY_BODY, all, 2, nullptr, 0, w, h))

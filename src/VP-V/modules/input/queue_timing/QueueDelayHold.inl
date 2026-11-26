@@ -39,8 +39,10 @@ const QueueTimingPolicy::IQueueTimingPolicy& LibplaceboVideoRenderer::QueuePolic
 	if (VpQueueTiming::Select(slotOff, original, true) == VpQueueTiming::Selection::Upstream)
 		return m_upstreamQueuePolicy;
 	const bool lowLatency = m_impl && m_impl->lowLatencyQueueActive.load(std::memory_order_acquire);
+	const double cadenceLeadMs = (!original && m_pulldownFixes.load(std::memory_order_relaxed)) ?
+		m_pulldownCadenceLatenessMaxMs.load(std::memory_order_relaxed) : 0.0;
 	const_cast<VpQueueTiming::VpFixedBudgetPolicy&>(m_vpQueuePolicy).SetOptions({
-		original, m_queueTimingFixes.load(std::memory_order_relaxed), lowLatency });
+		original, m_queueTimingFixes.load(std::memory_order_relaxed), lowLatency, cadenceLeadMs });
 	return m_vpQueuePolicy;
 }
 
@@ -85,9 +87,13 @@ void LibplaceboVideoRenderer::UpdateQueueDelayHold(double sourceRateHz, double s
 			m_impl->ReleaseFallback("delay budget");
 		else
 			m_impl->EngageFallback("delay budget", budgetNote);
-		// WP-23: the store's ring follows the budget (queue + look-ahead + 2), never a fixed count.
-		const int analysisFrames = next.active ? plan.queueFrames : static_cast<int>(AlphaQueuePolicy::DEFAULT_DESIRED_DEPTH);
-		m_impl->frameAnalysis.SetRingDepth(analysisFrames, analysisFrames);
+		// WP-23 + W23-DV-L2: size the store ring from actual reachable queue/lookahead depth (never hardcoded 4).
+		const size_t lookaheadFloor = m_queueTargetFloor.load(std::memory_order_relaxed);
+		const size_t fallbackDepth = (std::min)(context.queueCapacity, (std::max)(m_frameQueueDesiredDepth,
+			(std::max)(lookaheadFloor, AlphaQueuePolicy::DEFAULT_DESIRED_DEPTH)));
+		const int analysisQueue = next.active ? (std::max)(plan.queueFrames, static_cast<int>(plan.targetFrames)) : static_cast<int>(fallbackDepth);
+		const int analysisLookahead = (std::max)(analysisQueue, static_cast<int>(lookaheadFloor));
+		m_impl->frameAnalysis.SetRingDepth(analysisQueue, analysisLookahead);
 		// The frame fallback ladder (owner 2026-10-20/24): below the design depth every look-ahead
 		// consumer uses what is queued (shorter look-ahead, never waiting, never adding delay);
 		// visible, not silent.

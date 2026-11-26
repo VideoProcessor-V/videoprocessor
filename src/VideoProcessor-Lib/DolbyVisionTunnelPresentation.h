@@ -20,16 +20,18 @@
 enum class DolbyVisionTunnelPresentation { Picture, SdrPassthrough, Black };
 
 inline bool DolbyVisionTunnelSdrPassthrough(VideoFrameEncoding encoding,
-	const DolbyVisionTunnelFrameMetadata& dolby)
+	const DolbyVisionTunnelFrameMetadata& dolby, bool acceptR10 = false)
 {
-	return DolbyVisionTunnelEncodingSupported(encoding) && !dolby.valid && dolby.allowSdrFallback &&
+	const bool containerOk = DolbyVisionTunnelEncodingSupported(encoding) ||
+		(acceptR10 && (encoding == VideoFrameEncoding::R10b || encoding == VideoFrameEncoding::R10l));
+	return containerOk && !dolby.valid && dolby.allowSdrFallback &&
 		(dolby.rgbBitAlignment == 1 || dolby.rgbBitAlignment == 2);
 }
 
 inline DolbyVisionTunnelPresentation DecideDolbyVisionTunnelPresentation(
-	VideoFrameEncoding encoding, const DolbyVisionTunnelFrameMetadata& dolby)
+	VideoFrameEncoding encoding, const DolbyVisionTunnelFrameMetadata& dolby, bool acceptR10 = false)
 {
-	if (DolbyVisionTunnelSdrPassthrough(encoding, dolby))
+	if (DolbyVisionTunnelSdrPassthrough(encoding, dolby, acceptR10))
 		return DolbyVisionTunnelPresentation::SdrPassthrough;
 	if (!dolby.valid || dolby.requiresBlackFrame)
 		return DolbyVisionTunnelPresentation::Black;

@@ -458,12 +458,13 @@ namespace Pulldown
 		// cycles of the history are periodic for the shortest period, with at least one new and at least one repeated frame per cycle. This is
 		// the lock's own periodicity test without its two-second wait. Isolated repeats or drops (hiccups on a video-rate source) never repeat
 		// at one spacing three times, and a frozen picture (all repeats) or all-new frames is not a pulldown, so none of them starts it.
-		bool Acquiring() const
+		bool Acquiring(double signalHz = 0.0) const
 		{
 			if (m_locked)
 				return false;
+			const double hz = signalHz > 0.0 ? signalHz : m_signalHz;
 			const int size = static_cast<int>(m_history.size());
-			const int maxCycle = MaxCycle(m_signalHz);
+			const int maxCycle = MaxCycle(hz);
 			for (int cycle = 2; cycle <= maxCycle; ++cycle)
 			{
 				const int need = cycle * kCyclesToLock;
@@ -474,10 +475,18 @@ namespace Pulldown
 					periodic = m_history[i] == m_history[i - cycle];
 				if (!periodic)
 					continue;
+				// W23-DV-H3: match Decide()'s exact lockability guards (IsEvenPattern, IsMaximallyEvenPattern,
+				// AboveFilmFloor) so <= 15.15 fps holds and mixed cadences never pin standing NVOF demand warm.
+				const std::string pattern(m_history.end() - cycle, m_history.end());
 				int unique = 0;
-				for (int i = size - cycle; i < size; ++i)
-					unique += m_history[i] == 'N' ? 1 : 0;
-				return unique >= 1 && unique < cycle;   // the shortest period decides (a longer one is only it repeated)
+				for (char c : pattern)
+					unique += c == 'N' ? 1 : 0;
+				if (!(unique >= 1 && unique < cycle))
+					return false;
+				if (!IsEvenPattern(pattern) || (m_settings.maximallyEvenPattern && !IsMaximallyEvenPattern(pattern)))
+					return false;
+				const double filmHz = hz * unique / cycle;
+				return !(hz > 0.0) || AboveFilmFloor(filmHz, m_settings.exclusiveFilmFloor);
 			}
 			return false;
 		}

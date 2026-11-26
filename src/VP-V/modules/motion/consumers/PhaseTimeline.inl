@@ -106,7 +106,18 @@ void LibplaceboVideoRenderer::Impl::PrepareVpPhasePicture(uint64_t sourceSequenc
 	dejudderExtras.vpPhaseSeqA = sourceSequence;
 	dejudderExtras.vpPhaseSeqB = nextSourceSequence;
 	vpPhaseMotion = motion;
-	vpPhaseT = static_cast<float>(vpOutputPhase) * (vpGapFillStandalone ? dejudderPolicy.vpGapPhaseScale : 1.0f);
+	if (vpGapFillStandalone && dejudderPolicy.vpGapPhaseScale < 1.0f && vpFillGapFrames >= 1)
+	{
+		// W23-IR-M3: multi-period standalone gap fill traverses whole missed periods at unit rate and applies
+		// partial de-judder strength only to the sub-period fractional phase (eliminating end-of-gap snap).
+		const double k = static_cast<double>(vpFillGapFrames + 1u);
+		const double u = vpOutputPhase * k;
+		const double whole = std::floor(u);
+		const double frac = u - whole;
+		vpPhaseT = static_cast<float>((whole + frac * static_cast<double>(dejudderPolicy.vpGapPhaseScale)) / k);
+	}
+	else
+		vpPhaseT = static_cast<float>(vpOutputPhase) * (vpGapFillStandalone ? dejudderPolicy.vpGapPhaseScale : 1.0f);
 	Vpv::MotionHost::PrepareDejudderCamera(dejudderPolicy.cameraBindings, this, sourceSequence, vpPhaseT);
 	// B3: made in the draw from the processed planes (the same inputs).
 	vpPhaseDeferred = EntranceOnce();
@@ -262,7 +273,9 @@ void LibplaceboVideoRenderer::Impl::ReleaseDejudder()
 	frameInterpolator.reset();
 	dejudder.reset();
 	VpSkeleton::VramUsers::Instance().Release(this, VpSkeleton::kUserMotionMatcher);   // W2-C1 C1-3: the matcher's memory is freed
+	VpSkeleton::VramUsers::Instance().Release(this, VpSkeleton::kUserInterpolator);    // W23-IR-H5
 	SyncFallback(FallbackCatalog::Released("product.motion_warp"));   // GF-P4 S4: no matcher, no own pyramid (the row goes with it)
+	SyncFallback(FallbackCatalog::Released("product.interpolator"));  // W23-IR-H4: no interpolator -> clear stale product row
 	dejudderLiveFieldFrom = 0;
 	motionSegment.Retract(VpMotion::Direction::Forward);
 	vectorEstimate.dejudderMotionSourceKey = -1;
@@ -348,15 +361,23 @@ bool LibplaceboVideoRenderer::Impl::DrawVpPhasePicture(const pl_frame& source, c
     if (phasePicture && vpPhaseDeferred)
     {
         const OwnedEntrance* heldA = nullptr;
+        const unsigned long long interpFailBefore = dejudderExtras.interpolationFailures;
+        const bool hadInterp = frameInterpolator != nullptr;
         entranceOnceDone = EntranceOncePhasePicture(source, sourceSequence, nextSourceSequence, &image, frame, &heldA);
         bAlreadyA = bAsADone();
-        if (!entranceOnceDone && bAlreadyA && heldA && !(rebaseFade < 1.0 && !temporalRenderer.Active()))
+        // W23-IR-H4: if EntranceOncePhasePicture failed inside frameInterpolator->Run (not a decline for crossfade / identity),
+        // do not dispatch frameInterpolator->Run a second time on the same draw; hold processed A or raw A cleanly.
+        const bool interpFailed = hadInterp && frameInterpolator && !frameInterpolator->LastError().empty() && heldA != nullptr && !entranceOnceDone && !bAlreadyA;
+        (void)interpFailBefore;
+        if (!entranceOnceDone && (bAlreadyA || interpFailed) && heldA && !(rebaseFade < 1.0 && !temporalRenderer.Active()))
         {
             frame = EntranceSegment::OwnedFrame(*heldA, source);   // the processed A, held (no stage runs)
             entranceOnceDone = true;
         }
-        else if (!entranceOnceDone && !RunVpPhaseInterpolation())
+        else if (!entranceOnceDone && !interpFailed && !RunVpPhaseInterpolation())
             phasePicture = false;   // A (never waiting)
+        else if (interpFailed)
+            phasePicture = false;
     }
     if (phasePicture && !entranceOnceDone)
     {
@@ -441,6 +462,38 @@ namespace
 bool LibplaceboVideoRenderer::Impl::PlanVpOutputs(RendererExtension::OutputPlan& plan)   // VPV-GATED
 {
 	if (pipelineSlots.OriginalPathway()) return false;   // PHASE 1: not planned, Bill's list is drawn
+	// W23-IR-H3: refresh InterpolationPolicy::Decide for THIS frame's actual rates before PlanVpTimeline reads
+	// VpTimelineWanted(), eliminating 1-frame-stale false->true startup drops and true->false 24p->60p stalls.
+	if (!vpGapFillStandalone)
+	{
+		if (activeSettings.interpolation == InterpolationPolicy::Mode::Off)
+		{
+			interpolating = false;
+			dejudderPolicy.interpolationDecision = InterpolationPolicy::Decision();
+		}
+		else
+		{
+			InterpolationPolicy::Input ii;
+			ii.mode = activeSettings.interpolation;
+			ii.sourceHz = plan.filmHz > 0.0 ? plan.filmHz : (plan.captureHz > 0.0 ? plan.captureHz : dejudderPolicy.vpCaptureRateHz);
+			ii.displayHz = TimelineDisplayHz();
+			ii.pulldownLocked = plan.filmHz > 0.0;
+			ii.dejudderStrength = activeSettings.dejudderStrength;
+			ii.dejudderStrengthEven = activeSettings.dejudderStrengthEven;
+			ii.dejudderEvenIncludes1001 = activeSettings.dejudderEvenIncludes1001;
+			ii.smoothMotion = smoothMotionEngine;
+			ii.lowLatency = lowLatencyQueueActive.load(std::memory_order_acquire);
+			ii.interlaced = false;
+			ii.nativeRgb = dejudderRgbLuma != nullptr;
+			ii.subtitleComposed = false;
+			ii.haveNext = plan.ptsB > 0.0;
+			ii.perVsyncAvailable = true;
+			ii.classFixes = activeSettings.cadenceClassFixes;
+			ii.generalRates = activeSettings.generalRateFixes;
+			dejudderPolicy.interpolationDecision = InterpolationPolicy::Decide(ii);
+			interpolating = dejudderPolicy.interpolationDecision.Interpolates();
+		}
+	}
 	if(temporalRenderer.Mixing()!=dejudderPolicy.smoothMotionMixingLogged) {
 	    RequestMotionInvalidate(MotionValidity::Cause::SmoothMotionMix);
 	    dejudderPolicy.smoothMotionMixingLogged=temporalRenderer.Mixing();

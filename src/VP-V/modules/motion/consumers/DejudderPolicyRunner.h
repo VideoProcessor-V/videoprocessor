@@ -254,18 +254,8 @@ namespace VpMotion
 			reason == DejudderPolicy::Reason::SmoothMotion ||
 			(reason == DejudderPolicy::Reason::UnknownRates && activeSettings.interpolationFillGaps)))
 		{
-			// W2-C1 (H3Idle): rates not known yet (the first frames of a source) is a reason a gap pair can still be repaired
-			// under, so the idle engine is warmed then instead of the warm-up waiting for the rates to settle.
-
-			// Bug hunt 3 F4 (owner 2026-10-18): with hiccup repair on, the motion engine stays
-			// loaded and idle for every reason a gap pair can still be repaired under (the
-			// standalone repair needs no low latency, interlacing, smooth motion or native RGB):
-			// no create at a hiccup, no release after it, nothing run per frame. Low video memory
-			// (an allocation failed, or DXGI reports budget pressure) releases it; the next gap
-			// pair recreates it once the pressure has passed (MotionEngineIdle).
-			// W2-C1 (coordinator 2026-11-11, doc 91 C: competitive low latency is motion-free): the standalone gap repair never runs
-			// under the low-latency queue (vpGapFillStandalone above requires !in.lowLatency), so no engine is kept or warmed for it
-			// there; a held idle engine is released when the low-latency queue starts.
+			// W23-IR-H5: IneligibleCadence covers both source-matches-display and unselected even-cadence sources;
+			// when keepForGaps retains only the idle matcher, release non-matcher consumer textures immediately below.
 			const bool repairPossible = !in.lowLatency && (reason == DejudderPolicy::Reason::Off ||
 				reason == DejudderPolicy::Reason::VideoRateMaskOnly || reason == DejudderPolicy::Reason::IneligibleCadence ||
 				reason == DejudderPolicy::Reason::UnknownRates);   // W2-C1: reached only with hiccup repair on

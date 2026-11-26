@@ -111,8 +111,8 @@ namespace MainConfigSchema
 		// The renderer profile reader's unknown-section check (RendererProfileConfig.h).
 		inline bool OwnsRendererSection(const std::string& section)
 		{
-			// The VP-V section (ADR-0023): [vpv] / [vpv.*] hold VP-V's own namespaced keys.
-			return section == "vpv" || section.rfind("vpv.", 0) == 0;
+			// W23-CFG-H2: exact allowlist (never wildcard "vpv.*") so typo sections like [vpv.camra] are rejected.
+			return section == "vpv" || section == "vpv.camera" || section == "vpv.skeleton";
 		}
 
 		// The VP-V keys of one startup rule list ("general", "queue", "shortcuts", "decklink", "logging"),

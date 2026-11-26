@@ -14150,12 +14150,9 @@ struct LibplaceboVideoRenderer::Impl
 		const int height = static_cast<int>(state.displayMode->FrameHeight());
 		DolbyVisionLuminanceStatus frameDvLuminance;
 		AlphaNativeRgbLayout nativeRgbLayout;
-		const bool tunnelRgbFallback = state.dolbyVisionTunnel &&
-			DolbyVisionTunnelEncodingSupported(state.videoFrameEncoding) &&
-			convertedPayload && !convertedPayload->dolby.valid &&
-			convertedPayload->dolby.allowSdrFallback &&
-			(convertedPayload->dolby.rgbBitAlignment == 1 ||
-				convertedPayload->dolby.rgbBitAlignment == 2);
+		const bool tunnelRgbFallback = state.dolbyVisionTunnel && convertedPayload &&
+			DolbyVisionTunnelSdrPassthrough(state.videoFrameEncoding, convertedPayload->dolby,
+				activeSettings.dvTunnelFixes && !pipelineSlots.OriginalPathway());
 		const bool tunnelActive =
 			state.dolbyVisionTunnel && !tunnelRgbFallback;
 		// Hunt 2 (08 #3): the SDR picture shown on the DV-tunnel wrapper is SDR
@@ -28320,9 +28317,9 @@ void LibplaceboVideoRenderer::RenderLoop()
 			}
 			m_impl->pulldownFilmHz = frameFilmHz;
 			m_impl->fileFrameSource = currentFileFrame;
-			m_impl->pulldownCadence = m_pulldownCadence.load(std::memory_order_relaxed);
-			m_impl->pulldownAcquiring = m_pulldownAcquiring.load(std::memory_order_relaxed);
-			m_impl->pulldownSkipped = m_pulldownSkipped.load(std::memory_order_relaxed);
+			m_impl->pulldownCadence = m_impl->pipelineSlots.OriginalPathway() ? 0 : m_pulldownCadence.load(std::memory_order_relaxed);
+			m_impl->pulldownAcquiring = !m_impl->pipelineSlots.OriginalPathway() && m_pulldownAcquiring.load(std::memory_order_relaxed);
+			m_impl->pulldownSkipped = m_impl->pipelineSlots.OriginalPathway() ? 0 : m_pulldownSkipped.load(std::memory_order_relaxed);
 		}
 		const SteadyClock::time_point renderCycleStart = SteadyClock::now();
         if (invalidDvAnalysisGap && m_impl)
@@ -28631,7 +28628,8 @@ void LibplaceboVideoRenderer::RenderLoop()
                 for(size_t motionDraw=0;motionDraw<motionDraws;++motionDraw) {
                     // Pacing releases renderMutex. Do not reuse temporal slots
                     // or source-upload state after an output/control change.
-                    if (!WaitForDisplaySlot(renderGuard, frameGeneration) || !currentMotionOutput()) {
+                    if (!WaitForDisplaySlot(renderGuard, frameGeneration) || !currentMotionOutput() ||
+                        (motionDraw > 0 && !m_impl->temporalRenderer.Active() && m_impl->pipelineSlots.OriginalPathway())) {
                         staleGeneration = true; break;
                     }
                     if(!motionOutputs.empty())m_impl->temporalRenderer.outputPts=motionOutputs[motionDraw];

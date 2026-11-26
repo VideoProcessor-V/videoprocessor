@@ -229,7 +229,14 @@ namespace ComputeOnce
 				detail::AddCaller(row.dupCallers, caller);
 			}
 			row.maxPerFrame = (std::max)(row.maxPerFrame, cell.calls);
-			if (seq > newest_)
+			// W23-SK-H3: on sequence restart / seek backwards beyond the keep window, reset newest_ and
+			// drop old-era cells so Prune() never evicts freshly noted low-sequence frames (blinding Detector 2).
+			if (newest_ >= 0 && seq >= 0 && seq + kKeepFrames < newest_)
+			{
+				cells_.clear();
+				newest_ = seq;
+			}
+			else if (seq > newest_)
 				newest_ = seq;
 			if (cells_.size() > kPruneAbove)
 				Prune();

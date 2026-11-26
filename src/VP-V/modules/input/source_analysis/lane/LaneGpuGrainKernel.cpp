@@ -67,6 +67,18 @@ namespace VpLaneProducts
 			m_error = c.error = sp.LastError();
 			return false;
 		}
+		// W23-SK-H1: record actual allocated working bytes for whichever splitter ran at c.dims.
+		const uint64_t one = GrainSplit::Gpu::WorkingBytes(int(c.dims.width), int(c.dims.height), B, GrainSplit::Params().subBlocks);
+		if (c.live)
+		{
+			m_liveAllocDims = c.dims;
+			m_liveAllocBytes = one;
+		}
+		else
+		{
+			m_laneAllocDims = c.dims;
+			m_laneAllocBytes = one;
+		}
 		return true;
 	}
 
@@ -80,10 +92,24 @@ namespace VpLaneProducts
 		return laneForm ? 2u * one : one;
 	}
 
+	uint64_t GrainSplitKernel::ActualPrivateBytes(VpSkeleton::Dims dims) const
+	{
+		uint64_t held = 0;
+		if (m_laneAllocBytes != 0 && m_laneAllocDims.width == dims.width && m_laneAllocDims.height == dims.height)
+			held += m_laneAllocBytes;
+		if (m_liveAllocBytes != 0 && m_liveAllocDims.width == dims.width && m_liveAllocDims.height == dims.height)
+			held += m_liveAllocBytes;
+		return held;
+	}
+
 	void GrainSplitKernel::Release(pl_gpu gpu)
 	{
 		m_lane.Release(gpu);
 		m_live.Release(gpu);
+		m_laneAllocDims = VpSkeleton::Dims{ 0, 0 };
+		m_liveAllocDims = VpSkeleton::Dims{ 0, 0 };
+		m_laneAllocBytes = 0;
+		m_liveAllocBytes = 0;
 	}
 
 	std::vector<FallbackCatalog::Decision> GrainSplitKernel::Fallbacks() const

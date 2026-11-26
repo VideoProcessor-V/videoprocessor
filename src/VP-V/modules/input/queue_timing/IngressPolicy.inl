@@ -250,7 +250,7 @@ bool LibplaceboVideoRenderer::IngressPulldown(RendererExtension::IngressContext&
 		}
 		const int cadence = decision.locked ? (decision.cycle << 16) | decision.unique : 0;
 		m_pulldownFrameFacts = Vpv::Ingress::FactsOf(decision, m_pulldownFrameFacts);   // C7b: the cadence group of this frame's store record (CadenceFeed.h)
-		m_pulldownAcquiring.store(!decision.locked && m_pulldown.Acquiring(), std::memory_order_relaxed);   // SK-MV warm engine
+		m_pulldownAcquiring.store(!decision.locked && m_pulldown.Acquiring(signalHz), std::memory_order_relaxed);   // SK-MV warm engine (W23-DV-H3)
 		// Hunt 2 (06-interp M3): the queue target follows the lock (PrefillTargetLocked): wake
 		// the waiters when it changes.
 		if (m_pulldownCadence.exchange(cadence, std::memory_order_relaxed) != cadence && classFixes)
@@ -301,11 +301,13 @@ bool LibplaceboVideoRenderer::IngressPulldown(RendererExtension::IngressContext&
 		if (decision.locked)
 		{
 			filmHz = decision.filmHz;
+			m_pulldownCadenceLatenessMaxMs.store(fixes ? decision.cadenceLatenessMax * 1000.0 : 0.0, std::memory_order_relaxed);
 			if (decision.update && m_pulldownFilmQpc > 0)
 			{
-				// Option b: the same film frame, updated - at its time.
+				// Option b: the same film frame, updated - at its time (W23-DV-M1: preserve anchor frame-start semantics).
 				filmUpdate = true;
 				arrivalQpc = m_pulldownFilmQpc;
+				m_enqueueArrivalIsFrameStart = m_pulldownFilmIsFrameStart;
 			}
 			else
 			{
@@ -314,6 +316,7 @@ bool LibplaceboVideoRenderer::IngressPulldown(RendererExtension::IngressContext&
 				const double qpcPerSecond = static_cast<double>(frequency.QuadPart);
 				const int64_t arrived = arrivalQpc > 0 ? arrivalQpc : callbackQpc;
 				m_enqueueArrivalIsFrameStart = arrivalQpc > 0;   // the film clock keeps its anchor's meaning
+				m_pulldownFilmIsFrameStart = m_enqueueArrivalIsFrameStart;
 				arrivalQpc = static_cast<int64_t>((fixes ? m_pulldownClock.Time(decision.filmIndex,
 					static_cast<double>(arrived) / qpcPerSecond, filmHz, decision.cadenceLateness, decision.cadenceLatenessMax) :
 					m_pulldownClock.Time(decision.filmIndex, static_cast<double>(arrived) / qpcPerSecond, filmHz)) * qpcPerSecond);
@@ -321,7 +324,11 @@ bool LibplaceboVideoRenderer::IngressPulldown(RendererExtension::IngressContext&
 			}
 		}
 		else
+		{
 			m_pulldownFilmQpc = 0;
+			m_pulldownFilmIsFrameStart = false;
+			m_pulldownCadenceLatenessMaxMs.store(0.0, std::memory_order_relaxed);
+		}
 	}
 	else if (ClearPulldownWhenOff())   // W1-A4: also clears a stuck acquiring flag (no lock held, detector idle); the gap only for a lock
 	{

@@ -38,14 +38,25 @@ namespace TextureRestore
 {
 	namespace
 	{
+		// W23-IR-L1: FXC-safe finite check so corrupt float NaN/Inf texels cannot poison tile/EMA state.
+		const char* const FINITE_GLSL = R"GLSL(
+float tr_finite(float x)
+{
+    uint u = floatBitsToUint(x);
+    return ((u & 0x7F800000u) == 0x7F800000u) ? 0.0 : x;
+}
+)GLSL";
+
 		const char* const HALF_BODY = R"GLSL(
 ivec2 q = ivec2(gl_GlobalInvocationID.xy);
 ivec2 size = imageSize(dst);
 if (q.x < size.x && q.y < size.y) {
     ivec2 hi = textureSize(src, 0) - ivec2(1);
     ivec2 p = q * 2;
-    float acc = texelFetch(src, clamp(p, ivec2(0), hi), 0).r + texelFetch(src, clamp(p + ivec2(1, 0), ivec2(0), hi), 0).r +
-                texelFetch(src, clamp(p + ivec2(0, 1), ivec2(0), hi), 0).r + texelFetch(src, clamp(p + ivec2(1, 1), ivec2(0), hi), 0).r;
+    float acc = tr_finite(texelFetch(src, clamp(p, PIC_LO(hi), PIC_HI(hi)), 0).r) +
+                tr_finite(texelFetch(src, clamp(p + ivec2(1, 0), PIC_LO(hi), PIC_HI(hi)), 0).r) +
+                tr_finite(texelFetch(src, clamp(p + ivec2(0, 1), PIC_LO(hi), PIC_HI(hi)), 0).r) +
+                tr_finite(texelFetch(src, clamp(p + ivec2(1, 1), PIC_LO(hi), PIC_HI(hi)), 0).r);
     imageStore(dst, q, vec4(0.25 * acc, 0.0, 0.0, 1.0));
 }
 )GLSL";
@@ -57,9 +68,9 @@ if (q.x < size.x && q.y < size.y) {
     ivec2 hi = textureSize(src, 0) - ivec2(1);
     vec2 acc = vec2(0.0);
     for (int i = -R2; i <= R2; i++)
-        acc.x += w2(i) * texelFetch(src, clamp(q + ivec2(i, 0), ivec2(0), hi), 0).r;
+        acc.x += w2(i) * texelFetch(src, clamp(q + ivec2(i, 0), PIC_HLO(hi), PIC_HHI(hi)), 0).r;
     for (int i = -R3; i <= R3; i++)
-        acc.y += w3(i) * texelFetch(src, clamp(q + ivec2(i, 0), ivec2(0), hi), 0).r;
+        acc.y += w3(i) * texelFetch(src, clamp(q + ivec2(i, 0), PIC_HLO(hi), PIC_HHI(hi)), 0).r;
     imageStore(dst, q, vec4(acc, 0.0, 1.0));
 }
 )GLSL";
@@ -71,9 +82,9 @@ if (q.x < size.x && q.y < size.y) {
     ivec2 hi = textureSize(src, 0) - ivec2(1);
     vec2 acc = vec2(0.0);
     for (int i = -R2; i <= R2; i++)
-        acc.x += w2(i) * texelFetch(src, clamp(q + ivec2(0, i), ivec2(0), hi), 0).x;
+        acc.x += w2(i) * texelFetch(src, clamp(q + ivec2(0, i), PIC_HLO(hi), PIC_HHI(hi)), 0).x;
     for (int i = -R3; i <= R3; i++)
-        acc.y += w3(i) * texelFetch(src, clamp(q + ivec2(0, i), ivec2(0), hi), 0).y;
+        acc.y += w3(i) * texelFetch(src, clamp(q + ivec2(0, i), PIC_HLO(hi), PIC_HHI(hi)), 0).y;
     imageStore(dst, q, vec4(acc, 0.0, 1.0));
 }
 )GLSL";
@@ -234,7 +245,7 @@ for (int cy = 0; cy < TPX; cy += CH) {
         ivec2 org = torg + ivec2(cx, cy);
         barrier();
         for (uint i = li; i < uint(AP * AP); i += 256u)
-            s_y[i] = texelFetch(src, clamp(org - ivec2(R1) + ivec2(int(i % uint(AP)), int(i / uint(AP))), ivec2(0), hi), 0).r;
+            s_y[i] = tr_finite(texelFetch(src, clamp(org - ivec2(R1) + ivec2(int(i % uint(AP)), int(i / uint(AP))), PIC_LO(hi), PIC_HI(hi)), 0).r);
         barrier();
         for (uint i = li; i < uint(AP * CH); i += 256u) {
             int r = int(i / uint(CH)), c = int(i % uint(CH));
@@ -250,7 +261,7 @@ for (int cy = 0; cy < TPX; cy += CH) {
             float y = s_y[(lid.y + R1) * AP + lid.x + R1];
             vec2 l = low_at(p);
             float d1 = y - g1, d2 = g1 - l.x, d3 = l.x - l.y;
-            bool inside = p.x < sz.x && p.y < sz.y && cx + lid.x < TPX && cy + lid.y < TPX;
+            bool inside = p.x < sz.x && p.y < sz.y && cx + lid.x < TPX && cy + lid.y < TPX && PIC_IN(p);
             s_px[li] = inside ? vec4(d1 * d1, d2 * d2, d3 * d3, l.x) : vec4(-1.0);
             float chg = 0.0;
 #ifdef PREV
@@ -297,8 +308,14 @@ if (li == 0u) {
         e1[i] = s_cnt[i] > 0.0 ? s_sub[i].x / s_cnt[i] : -1.0;
         e2[i] = s_cnt[i] > 0.0 ? s_sub[i].y / s_cnt[i] : -1.0;
     }
-    imageStore(stats_a, tile, tot / max(n, 1.0));
-    imageStore(stats_b, tile, vec4(quiet_mean(e1), quiet_mean(e2), totc / max(n, 1.0), 1.0));
+    if (n <= 0.0) {
+        // W23-IR-H1: tile wholly outside active picture (black bar) -> sentinel -1.0 so GRAIN_BODY & REF_BODY skip it.
+        imageStore(stats_a, tile, vec4(0.0));
+        imageStore(stats_b, tile, vec4(-1.0, -1.0, 0.0, 0.0));
+    } else {
+        imageStore(stats_a, tile, tot / n);
+        imageStore(stats_b, tile, vec4(quiet_mean(e1), quiet_mean(e2), totc / n, 1.0));
+    }
 }
 )GLSL";
 
@@ -306,15 +323,26 @@ if (li == 0u) {
 ivec2 t = ivec2(gl_GlobalInvocationID.xy);
 ivec2 ts = textureSize(stats_b, 0);
 if (t.x < ts.x && t.y < ts.y) {
-    float m1 = 3.0e38, m2 = 3.0e38;
-    for (int dy = -NG; dy <= NG; dy++)
-        for (int dx = -NG; dx <= NG; dx++) {
-            vec2 r = texelFetch(stats_b, clamp(t + ivec2(dx, dy), ivec2(0), ts - ivec2(1)), 0).xy;
-            m1 = min(m1, r.x);
-            m2 = min(m2, r.y);
-        }
-    // z: the tile's own low-band change energy, passed on.
-    imageStore(grain_out, t, vec4(CAL1 * m1, CAL2 * m2, texelFetch(stats_b, t, 0).z, 1.0));
+    vec4 self = texelFetch(stats_b, t, 0);
+    if (self.x < 0.0) {
+        imageStore(grain_out, t, vec4(-1.0, -1.0, 0.0, 0.0));
+    } else {
+        float m1 = 3.0e38, m2 = 3.0e38;
+        bool anyValid = false;
+        for (int dy = -NG; dy <= NG; dy++)
+            for (int dx = -NG; dx <= NG; dx++) {
+                vec2 r = texelFetch(stats_b, clamp(t + ivec2(dx, dy), ivec2(0), ts - ivec2(1)), 0).xy;
+                if (r.x >= 0.0 && r.y >= 0.0) {
+                    m1 = min(m1, r.x);
+                    m2 = min(m2, r.y);
+                    anyValid = true;
+                }
+            }
+        if (!anyValid)
+            imageStore(grain_out, t, vec4(-1.0, -1.0, 0.0, 0.0));
+        else
+            imageStore(grain_out, t, vec4(CAL1 * m1, CAL2 * m2, self.z, 1.0));
+    }
 }
 )GLSL";
 
@@ -363,49 +391,61 @@ DEFINE_TILEBI(ref_bi, ref_old)
 ivec2 t = ivec2(gl_GlobalInvocationID.xy);
 ivec2 ts = textureSize(stats_cur, 0);
 if (t.x < ts.x && t.y < ts.y) {
-    ivec2 tm = ts - ivec2(1);
-    vec3 sE = vec3(0.0);
-    vec2 sN = vec2(0.0);
-    for (int dy = -1; dy <= 1; dy++)
-        for (int dx = -1; dx <= 1; dx++) {
-            float wgt = (dx == 0 ? 0.5 : 0.25) * (dy == 0 ? 0.5 : 0.25);
-            ivec2 q = clamp(t + ivec2(dx, dy), ivec2(0), tm);
-            sE += wgt * texelFetch(stats_cur, q, 0).xyz;
-            sN += wgt * texelFetch(grain, q, 0).xy;
-        }
-    float T1 = max(0.0, sE.x - EXCESS * sN.x);
-    float T2 = max(0.0, sE.y - EXCESS * sN.y);
-    float F = T2 / (T2 + sE.z + ft);
     vec4 gt = texelFetch(grain, t, 0);
-    bool restart = texelFetch(state_new, ivec2(0), 0).x > 0.5;
-    vec4 old = vec4(0.0);
-    if (!restart) {
-        old = texelFetch(ref_old, clamp(t, ivec2(0), textureSize(ref_old, 0) - ivec2(1)), 0);
+    if (gt.x < 0.0) {
+        // W23-IR-H1: tile wholly outside active picture -> neutral unit gains, zero reference energy.
+        imageStore(ref_out, t, vec4(0.0));
+        imageStore(gains_out, t, vec4(1.0, 1.0, 1.0, 0.0));
+    } else {
+        ivec2 tm = ts - ivec2(1);
+        vec3 sE = vec3(0.0);
+        vec2 sN = vec2(0.0);
+        float wSum = 0.0;
+        for (int dy = -1; dy <= 1; dy++)
+            for (int dx = -1; dx <= 1; dx++) {
+                float wgt = (dx == 0 ? 0.5 : 0.25) * (dy == 0 ? 0.5 : 0.25);
+                ivec2 q = clamp(t + ivec2(dx, dy), ivec2(0), tm);
+                vec2 gn = texelFetch(grain, q, 0).xy;
+                if (gn.x >= 0.0) {
+                    sE += wgt * texelFetch(stats_cur, q, 0).xyz;
+                    sN += wgt * gn;
+                    wSum += wgt;
+                }
+            }
+        if (wSum > 0.0) { sE /= wSum; sN /= wSum; }
+        float T1 = max(0.0, sE.x - EXCESS * sN.x);
+        float T2 = max(0.0, sE.y - EXCESS * sN.y);
+        float F = T2 / (T2 + sE.z + ft);
+        bool restart = texelFetch(state_new, ivec2(0), 0).x > 0.5;
+        vec4 old = vec4(0.0);
+        if (!restart) {
+            old = texelFetch(ref_old, clamp(t, ivec2(0), textureSize(ref_old, 0) - ivec2(1)), 0);
 #ifdef FIELD
-        vec2 uv;
-        if (!carry(t, uv))
-            restart = true;
-        else
-            old = ref_bi(uv);
+            vec2 uv;
+            if (!carry(t, uv))
+                restart = true;
+            else
+                old = ref_bi(uv);
 #endif
-        old *= dec;
-        old.xyz *= fade_keep2;   // U7 v3 partial reset: the energies only (w = F is a focus ratio, contrast-free); 1 off a fade
-        if (gt.z > allow2 + LOWN * gt.y) restart = true;
-        if (F < PULL_LO * old.w) restart = true;
-        if (T2 + ft < MID_LO * (old.z + ft)) restart = true;
+            old *= dec;
+            old.xyz *= fade_keep2;   // U7 v3 partial reset: the energies only (w = F is a focus ratio, contrast-free); 1 off a fade
+            if (gt.z > allow2 + LOWN * gt.y) restart = true;
+            if (F < PULL_LO * old.w) restart = true;
+            if (T2 + ft < MID_LO * (old.z + ft)) restart = true;
+        }
+        vec4 cur = vec4(sN.x, T1, T2, F);
+        vec4 r = restart ? cur : max(cur, old);
+        imageStore(ref_out, t, r);
+        float gG = clamp(sqrt((r.x + fg) / ((sN.x + fg) * (1.0 + GRAIN_MARGIN))), 1.0, cap);
+        float gT1 = clamp(sqrt((r.y + ft) / (T1 + TEX_MARGIN * sN.x + ft)), 1.0, cap);
+        float gT2 = clamp(sqrt((r.z + ft) / (T2 + TEX_MARGIN * sN.y + ft)), 1.0, cap);
+        float w = smoothstep(FOCUS_LO, FOCUS_HI, F) * smoothstep(FOCUS_LO, FOCUS_HI, r.w) *
+                  smoothstep(PULL_LO, PULL_HI, F / max(r.w, 1e-30)) *
+                  smoothstep(MID_LO, MID_HI, (T2 + ft) / (r.z + ft)) *
+                  smoothstep(SIG_LO, SIG_HI, r.z / (sN.y + sig_floor)) *
+                  smoothstep(SIG_LO, SIG_HI, T2 / (sN.y + sig_floor));
+        imageStore(gains_out, t, vec4(gG, 1.0 + (gT1 - 1.0) * w, 1.0 + (gT2 - 1.0) * w, sN.x));
     }
-    vec4 cur = vec4(sN.x, T1, T2, F);
-    vec4 r = restart ? cur : max(cur, old);
-    imageStore(ref_out, t, r);
-    float gG = clamp(sqrt((r.x + fg) / ((sN.x + fg) * (1.0 + GRAIN_MARGIN))), 1.0, cap);
-    float gT1 = clamp(sqrt((r.y + ft) / (T1 + TEX_MARGIN * sN.x + ft)), 1.0, cap);
-    float gT2 = clamp(sqrt((r.z + ft) / (T2 + TEX_MARGIN * sN.y + ft)), 1.0, cap);
-    float w = smoothstep(FOCUS_LO, FOCUS_HI, F) * smoothstep(FOCUS_LO, FOCUS_HI, r.w) *
-              smoothstep(PULL_LO, PULL_HI, F / max(r.w, 1e-30)) *
-              smoothstep(MID_LO, MID_HI, (T2 + ft) / (r.z + ft)) *
-              smoothstep(SIG_LO, SIG_HI, r.z / (sN.y + sig_floor)) *
-              smoothstep(SIG_LO, SIG_HI, T2 / (sN.y + sig_floor));
-    imageStore(gains_out, t, vec4(gG, 1.0 + (gT1 - 1.0) * w, 1.0 + (gT2 - 1.0) * w, sN.x));
 }
 )GLSL";
 
@@ -444,7 +484,7 @@ ivec2 sz = textureSize(src, 0);
 ivec2 hi = sz - ivec2(1);
 ivec2 org = ivec2(gl_WorkGroupID.xy) * CH - ivec2(1 + R1);
 for (uint i = li; i < uint(AA * AA); i += 256u)
-    s_y[i] = texelFetch(src, clamp(org + ivec2(int(i % uint(AA)), int(i / uint(AA))), ivec2(0), hi), 0).r;
+    s_y[i] = tr_finite(texelFetch(src, clamp(org + ivec2(int(i % uint(AA)), int(i / uint(AA))), PIC_LO(hi), PIC_HI(hi)), 0).r);
 barrier();
 for (uint i = li; i < uint(AA * AW); i += 256u) {
     int r = int(i / uint(AW)), c = int(i % uint(AW));
@@ -462,24 +502,43 @@ for (uint i = li; i < uint(AW * AW); i += 256u) {
 barrier();
 ivec2 p = ivec2(gl_WorkGroupID.xy) * CH + lid;
 if (p.x < sz.x && p.y < sz.y) {
-    int ci = (lid.y + 1) * AW + lid.x + 1;
-    float e1 = 0.0;
-    for (int dy = -1; dy <= 1; dy++)
-        for (int dx = -1; dx <= 1; dx++) {
-            float v = s_d[ci + dy * AW + dx];
-            e1 += v * v;
-        }
-    e1 /= 9.0;
-    float d1 = s_d[ci];
-    float y = s_y[(lid.y + 1 + R1) * AA + lid.x + 1 + R1];
-    float d2 = (y - d1) - low_at(p).x;
-    vec4 g = gain_at(p);
-    float f = clamp(1.0 - KAPPA * g.w / (e1 + eps), 0.0, 1.0);
-    float o = y + (g.x - 1.0) * (1.0 - f) * d1 + (g.y - 1.0) * f * d1 + (g.z - 1.0) * f * d2;
     vec4 c = texelFetch(src, p, 0);
-    imageStore(dst, p, vec4(o, c.yzw));
+    if (!PIC_IN(p)) {
+        imageStore(dst, p, c);
+    } else {
+        int ci = (lid.y + 1) * AW + lid.x + 1;
+        float e1 = 0.0;
+        for (int dy = -1; dy <= 1; dy++)
+            for (int dx = -1; dx <= 1; dx++) {
+                float v = s_d[ci + dy * AW + dx];
+                e1 += v * v;
+            }
+        e1 /= 9.0;
+        float d1 = s_d[ci];
+        float y = s_y[(lid.y + 1 + R1) * AA + lid.x + 1 + R1];
+        float d2 = (y - d1) - low_at(p).x;
+        vec4 g = gain_at(p);
+        float f = clamp(1.0 - KAPPA * g.w / (e1 + eps), 0.0, 1.0);
+        float o = y + (g.x - 1.0) * (1.0 - f) * d1 + (g.y - 1.0) * f * d1 + (g.z - 1.0) * f * d2;
+        imageStore(dst, p, vec4(o, c.yzw));
+    }
 }
 )GLSL";
+
+		std::string PictureDefGlsl(const pl_rect2df& r, int w, int h)
+		{
+			int b[4]{};
+			if (!PictureBounds(r, w, h, b))
+				return "#define PIC_LO(hi) ivec2(0)\n#define PIC_HI(hi) (hi)\n"
+					"#define PIC_HLO(hi) ivec2(0)\n#define PIC_HHI(hi) (hi)\n#define PIC_IN(p) true\n";
+			const int hx0 = b[0] / 2, hy0 = b[1] / 2, hx1 = b[2] / 2, hy1 = b[3] / 2;
+			return "#define PIC_LO(hi) ivec2(" + std::to_string(b[0]) + "," + std::to_string(b[1]) + ")\n"
+				"#define PIC_HI(hi) ivec2(" + std::to_string(b[2]) + "," + std::to_string(b[3]) + ")\n"
+				"#define PIC_HLO(hi) ivec2(" + std::to_string(hx0) + "," + std::to_string(hy0) + ")\n"
+				"#define PIC_HHI(hi) ivec2(" + std::to_string(hx1) + "," + std::to_string(hy1) + ")\n"
+				"#define PIC_IN(p) ((p).x >= " + std::to_string(b[0]) + " && (p).x <= " + std::to_string(b[2]) +
+				" && (p).y >= " + std::to_string(b[1]) + " && (p).y <= " + std::to_string(b[3]) + ")\n";
+		}
 
 		std::string Num(double v)
 		{
@@ -826,14 +885,15 @@ if (p.x < sz.x && p.y < sz.y) {
 		const double s2 = VpUnit::BandFromBase::kSigmaBase * scale, s3 = VpUnit::BandFromBase::kSigmaLow * scale;
 		const std::string w23 = WeightsGlsl("w2", "R2", HalfRadius(s2), [&](int k) { return HalfWeight(k, s2); }) +
 			WeightsGlsl("w3", "R3", HalfRadius(s3), [&](int k) { return HalfWeight(k, s3); });
+		const std::string picDef = PictureDefGlsl(params.picture, w, h);
 		{
 			const int gx = (hw + 15) / 16, gy = (hh + 15) / 16;
 			const pl_shader_desc dh[2] = { Sampled("src", luma), Storage("dst", fHalfTex) };
 			const pl_shader_desc dx[2] = { Sampled("src", fHalfTex), Storage("dst", fTmpTex) };
 			const pl_shader_desc dy[2] = { Sampled("src", fTmpTex), Storage("dst", fLowTex) };
-			if (!Pass(dispatch, "VideoProcessor texture restore: half (other geometry)", std::string(), HALF_BODY, dh, 2, nullptr, 0, gx, gy, 0) ||
-				!Pass(dispatch, "VideoProcessor texture restore: low bands across (other geometry)", w23, LOWH_BODY, dx, 2, nullptr, 0, gx, gy, 0) ||
-				!Pass(dispatch, "VideoProcessor texture restore: low bands down (other geometry)", w23, LOWV_BODY, dy, 2, nullptr, 0, gx, gy, 0))
+			if (!Pass(dispatch, "VideoProcessor texture restore: half (other geometry)", picDef + FINITE_GLSL, HALF_BODY, dh, 2, nullptr, 0, gx, gy, 0) ||
+				!Pass(dispatch, "VideoProcessor texture restore: low bands across (other geometry)", picDef + w23, LOWH_BODY, dx, 2, nullptr, 0, gx, gy, 0) ||
+				!Pass(dispatch, "VideoProcessor texture restore: low bands down (other geometry)", picDef + w23, LOWV_BODY, dy, 2, nullptr, 0, gx, gy, 0))
 			{
 				error = "the low band passes failed";
 				++failures;
@@ -845,7 +905,7 @@ if (p.x < sz.x && p.y < sz.y) {
 			const float eps = static_cast<float>(kEnergyEps * cu * cu);
 			const float ratio[2] = { static_cast<float>(m.w) / w, static_cast<float>(m.h) / h };
 			const std::string header = "#define XGEO 1\n#define TPX " + std::to_string(m.tile) + "\n#define KAPPA " + Num(kWienerKappa) + "\n" +
-				w1 + LOW_AT_GLSL + APPLY_HEADER;
+				picDef + FINITE_GLSL + w1 + LOW_AT_GLSL + APPLY_HEADER;
 			const int aw = 18, aa = aw + 2 * r1;
 			const size_t shmem = sizeof(float) * (aa * aa + aa * aw + aw * aw);
 			const pl_shader_desc d[4] = { Sampled("src", luma), Sampled("low", fLowTex), Sampled("gains", m.gains), Storage("dst", m.fOut) };
@@ -876,7 +936,10 @@ if (p.x < sz.x && p.y < sz.y) {
 		if (!(cap > 1.0))
 		{
 			// cap 1.0: the input itself, bit for bit; the references restart when it rises.
+			// W23-IR-B1: clear sceneUnavailable so "texture restore scene judge" does not stay stuck when cap == 1.0.
 			if (impl) impl->forget = true;
+			sceneUnavailable = false;
+			sceneWhy = nullptr;
 			result = source;
 			return true;
 		}
@@ -958,6 +1021,7 @@ if (p.x < sz.x && p.y < sz.y) {
 		const std::string w23 = WeightsGlsl("w2", "R2", HalfRadius(s2), [&](int k) { return HalfWeight(k, s2); }) +
 			WeightsGlsl("w3", "R3", HalfRadius(s3), [&](int k) { return HalfWeight(k, s3); });
 		const std::string tileDef = "#define TPX " + std::to_string(T) + "\n";
+		const std::string picDef = PictureDefGlsl(params.picture, w, h);
 
 		// The frame's own textures: a new frame writes the other set and reads the previous one;
 		// a repeat reuses its frame's gains with its own low bands (hunt 3 F7: its picture may be
@@ -973,9 +1037,9 @@ if (p.x < sz.x && p.y < sz.y) {
 			const pl_shader_desc dh[2] = { Sampled("src", luma), Storage("dst", halfTex) };
 			const pl_shader_desc dx[2] = { Sampled("src", halfTex), Storage("dst", tmpTex) };
 			const pl_shader_desc dy[2] = { Sampled("src", tmpTex), Storage("dst", low) };
-			if (!Pass(dispatch, "VideoProcessor texture restore: half", std::string(), HALF_BODY, dh, 2, nullptr, 0, gx, gy, 0) ||
-				!Pass(dispatch, "VideoProcessor texture restore: low bands (across)", w23, LOWH_BODY, dx, 2, nullptr, 0, gx, gy, 0) ||
-				!Pass(dispatch, "VideoProcessor texture restore: low bands (down)", w23, LOWV_BODY, dy, 2, nullptr, 0, gx, gy, 0))
+			if (!Pass(dispatch, "VideoProcessor texture restore: half", picDef + FINITE_GLSL, HALF_BODY, dh, 2, nullptr, 0, gx, gy, 0) ||
+				!Pass(dispatch, "VideoProcessor texture restore: low bands (across)", picDef + w23, LOWH_BODY, dx, 2, nullptr, 0, gx, gy, 0) ||
+				!Pass(dispatch, "VideoProcessor texture restore: low bands (down)", picDef + w23, LOWV_BODY, dy, 2, nullptr, 0, gx, gy, 0))
 				return fail("the low band passes failed");
 		}
 
@@ -1089,7 +1153,7 @@ if (p.x < sz.x && p.y < sz.y) {
 				++p11EnergyFallbacks;
 				lastP11EnergyFallback = p11Why;
 				const std::string header = tileDef + fieldDef + (restartAll ? "" : "#define PREV 1\n") + "#define QUIET " +
-					std::to_string(kQuietSubBlocks) + "\n" + w1 + LOW_AT_GLSL + LOW_PREV_FIELD_GLSL + BAND_FALLBACK_HEADER;
+					std::to_string(kQuietSubBlocks) + "\n" + picDef + FINITE_GLSL + w1 + LOW_AT_GLSL + LOW_PREV_FIELD_GLSL + BAND_FALLBACK_HEADER;
 				const int ap = 16 + 2 * r1;
 				const size_t shmem = sizeof(float) * (ap * ap + ap * 16 + 256 * 4 + 256 + 16 * 4 + 16 + 16);
 				pl_shader_desc d[6];
@@ -1160,7 +1224,7 @@ if (p.x < sz.x && p.y < sz.y) {
 		// 8: APPLY.
 		{
 			const float eps = static_cast<float>(kEnergyEps * cu * cu);
-			const std::string header = tileDef + "#define KAPPA " + Num(kWienerKappa) + "\n" + w1 + LOW_AT_GLSL + APPLY_HEADER;
+			const std::string header = tileDef + "#define KAPPA " + Num(kWienerKappa) + "\n" + picDef + FINITE_GLSL + w1 + LOW_AT_GLSL + APPLY_HEADER;
 			const int aw = 18, aa = aw + 2 * r1;
 			const size_t shmem = sizeof(float) * (aa * aa + aa * aw + aw * aw);
 			const pl_shader_desc d[4] = { Sampled("src", luma), Sampled("low", low), Sampled("gains", m.gains), Storage("dst", m.out) };

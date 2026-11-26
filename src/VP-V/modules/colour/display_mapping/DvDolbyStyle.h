@@ -152,14 +152,14 @@ namespace DvDolbyStyle
 		return c;
 	}
 
-	// The curve for a DM and a target (nits). Source anchors: L1 min / avg / max, else the
-	// source (mastering) range from the DM.
+	// The curve for a DM and a target (nits). Source anchors: static mastering sourceMinPq (matching
+	// DolbyVisionLuminancePolicy + GPU MapLut, W23-DV-M2) and L1 scene avg/max when present, else sourceMaxPq.
 	inline Curve ForDm(const DolbyVisionTunnelFrameMetadata& dm, double targetMinNits, double targetMaxNits)
 	{
-		double sMin = dm.sourceMinPq / 4095.0, sMax = dm.sourceMaxPq / 4095.0, sAvg = 0.0;
+		const double sMin = dm.sourceMinPq / 4095.0;
+		double sMax = dm.sourceMaxPq / 4095.0, sAvg = 0.0;
 		if (dm.hasSceneMetadata && dm.sceneMaxPq > dm.sceneMinPq)
 		{
-			sMin = dm.sceneMinPq / 4095.0;
 			sMax = dm.sceneMaxPq / 4095.0;
 			sAvg = dm.sceneAvgPq / 4095.0;
 		}

@@ -107,16 +107,21 @@ namespace VpLaneProducts
 		return true;
 	}
 
-	bool LightLevelKernel::Prepare(pl_gpu gpu, pl_dispatch, VpSkeleton::Dims)
+	bool LightLevelKernel::Prepare(pl_gpu gpu, pl_dispatch, VpSkeleton::Dims dims)
 	{
 		m_header = HeaderGlsl();
 		m_body = BodyGlsl();
 		if (!EnsureDummy(gpu))
 			return false;   // m_error says why
-		m_builtGeneration = 0;   // rebuild and upload the LUT
+		// W23-SK-M2: rebuild the LUT only when settings/context generation changed or no LUT is uploaded yet;
+		// preserve one-pole frame history across same-dims graph re-plans (only clear on size or LUT change).
 		if (!EnsureLut(gpu))
 			return false;   // m_error says why
-		m_history.clear();   // also on a size change
+		if (m_preparedDims.width != dims.width || m_preparedDims.height != dims.height)
+		{
+			m_history.clear();
+			m_preparedDims = dims;
+		}
 		m_error.clear();
 		return true;
 	}

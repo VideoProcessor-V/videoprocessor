@@ -434,5 +434,8 @@ namespace VpvRenderer
 		AdaptiveDownscale::Settings adaptive;
 		bool debandGrain = false;   // deband_grain: libplacebo's deband adds grain (off: VP's dither does that job)
 		EdgeBlanking::Insets edgeBlanking;
+		// W23-CFG-H1: canonicalized snapshots of [vpv.camera] and [vpv.skeleton] so live edits trigger SettingsApplied.
+		std::string vpvCameraSnapshot;
+		std::string vpvSkeletonSnapshot;
 	};
 }

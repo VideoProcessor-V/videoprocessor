@@ -186,6 +186,8 @@ public:
 		return std::exchange(m_trimsEvaluated, false) ? &m_trimsSelection : nullptr;
 	}
 	double TrimsTargetNits() const { return m_trimsTargetNits; }
+	// W23-DV-H1: authored target peak of the selected/interpolated trim (used by AppearanceStage Lw_ref).
+	double TrimAuthoredTargetNits() const { return m_trimAuthoredTargetNits; }
 	// FIX1 SHOULD 2 / S2-M1: the trim's largest saturation gain this frame (1 = none) and whether the shader will run.
 	double TrimsSaturationGain() const { return m_trimsSaturationGain; } bool TrimsWillRun() const { return m_trimsWillRun; }
 
@@ -268,7 +270,7 @@ public:
 	void PrepareToneAndTrims(const Frame& f, pl_color_map_params& colorMapParams,
 		const CustomHookChain::TemplateValues& hookTemplates, bool& trimsWanted, ParameterList& trimsParams)
 	{
-		m_pending = Pending(); m_trimsWillRun = false; m_trimsSaturationGain = 1.0;
+		m_pending = Pending(); m_trimsWillRun = false; m_trimsSaturationGain = 1.0; m_trimAuthoredTargetNits = 0.0;
 		trimsWanted = false; trimsParams.clear();   // GEM-016: the caller may hand in last frame's buffer (TrimsParameterBuffer)
 		m_pending.trims = f.trims;
 		m_pending.trimsStageRuns = f.trimsStageRuns;   // GEM-004 part 2 (AMEND: the dm_trims slot, CF-1 P3)
@@ -305,9 +307,12 @@ public:
 			DmCurve::LutChoice lutChoice;
 			if (m_toneDolbyRunning)
 			{
+				// W23-DV-M2: infer src & screen together via pl_color_space_infer_map so ChooseLutSize hashes
+				// the exact inferred src.min_luma / max_luma that libplacebo hands to DvDolbyStyle::MapLut.
+				pl_color_space srcSpace = renderImage.color;
 				pl_color_space screen = target.color;
-				pl_color_space_infer(&screen);
-				const pl_hdr_metadata& src = renderImage.color.hdr;
+				pl_color_space_infer_map(&srcSpace, &screen);
+				const pl_hdr_metadata& src = srcSpace.hdr;
 				const double sMax = src.max_pq_y > 0.0f ? src.max_pq_y : DvMath::PqFromNits(src.max_luma);
 				const double key[5] = { DvMath::PqFromNits(src.min_luma), src.avg_pq_y, sMax,
 					DvMath::PqFromNits(screen.hdr.min_luma), DvMath::PqFromNits(screen.hdr.max_luma) };
@@ -381,6 +386,7 @@ public:
 					m_trimsHook.Ensure(hookTemplates);
 					const bool trimsLoaded = m_trimsHook.SubmittedCount(false) > 0;
 					m_trimsWillRun = trimsLoaded; m_trimsSaturationGain = trimsLoaded ? DvTrimSelection::PeakSaturationGain(selection.params) : 1.0;   // S2-M1 / FIX1 SHOULD 2
+					m_trimAuthoredTargetNits = trimsLoaded ? selection.targetMaxNits : 0.0;   // W23-DV-H1
 					// Review C4: the luminance coefficients of the output's own primaries.
 					// GEM-016 (Gemini colour-dv-hdr PERF-6, as written): kr / kg / kb and the toLms / fromLms parameters
 					// cached, keyed by display.primaries (and the ICtCp switch), instead of recomputed (a matrix inversion) per frame.
@@ -545,6 +551,7 @@ private:
 	DvTrimSelection::Selection m_trimsSelection;
 	bool m_trimsEvaluated = false, m_trimsWillRun = false;
 	double m_trimsTargetNits = 0.0;
+	double m_trimAuthoredTargetNits = 0.0;
 	double m_trimsSaturationGain = 1.0;
 	// feat/dv-l8 task 5: the Dolby-style DV tone mapping (dv_tone_mapping), its status, and the
 	// reference viewing conditions of the last DV picture (for the later CAM16 stage).

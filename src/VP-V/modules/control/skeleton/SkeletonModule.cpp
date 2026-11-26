@@ -289,21 +289,23 @@ namespace Vpv
 				VpSkeleton::LaneGpuHandleOf gpuHandleOf;
 				if (SkeletonGpuDispatcher* disp = wiring.dispatcher)
 				{
-					// A GPU lane product reused through Acquire names the dispatcher's texture of that slot (term 0) and the fence to wait on.
+					// W23-SK-B1: pin the shared GpuProductTextures set in keepAlive so a concurrent Configure()
+					// cannot destroy the pl_tex backing while a reader still holds the AcquireResult.
 					gpuHandleOf = [disp](VpSkeleton::ProductId id, bool ring, int index, uint64_t fence, VpSkeleton::GpuMemoHandle* out) {
-						const VpLaneProducts::GpuProductTextures* set = disp->TexturesOf(id);
-						if (set == nullptr || index < 0)
+						const std::shared_ptr<const VpLaneProducts::GpuProductTextures> set = disp->SharedTexturesOf(id);
+						if (!set || index < 0)
 							return false;
 						const pl_tex tex = ring ? set->Ring(size_t(index), 0) : set->Live(size_t(index), 0);
 						if (tex == nullptr)
 							return false;
 						out->resource = const_cast<void*>(static_cast<const void*>(tex));
-						out->textureSet = set;
+						out->textureSet = set.get();
 						out->index = index;
 						out->ringSlot = ring;
 						out->fence = fence;
 						out->width = uint32_t(tex->params.w);
 						out->height = uint32_t(tex->params.h);
+						out->keepAlive = std::const_pointer_cast<void>(std::static_pointer_cast<const void>(set));
 						return true;
 					};
 				}
@@ -518,6 +520,7 @@ namespace Vpv
 			uint8_t shownQueueWired = 0xFF;   // the queue-delivery state the cached status text was built for
 			Vpv::Skeleton::SlotBudgetFeed budgetFeed;   // S0: feeds spare.SetBudget once per source frame + Presenter::spareSlotMs (SlotBudgetFeed.h)
 			VpSkeleton::SpareHost spare;       // B3-Z Z2: the post-present spare slot, driven by R12 AfterPresent (OnAfterPresent)
+			std::atomic<bool> resetSparePending{ false };   // W23-SK-H4: deferred render-thread spare/budgetFeed reset on queue/resync discontinuities
 			uint64_t shownQueueKey = ~uint64_t(0);   // the queue-in-use / starve state the cached status text was built for
 
 			// S5 regulator feed (render thread): the module's own clock between its Begin and AfterRender of one frame.
@@ -2036,6 +2039,7 @@ namespace Vpv
 							if (const std::shared_ptr<Bundle> b = std::atomic_load(&s2->bundle))
 								b->lane.BindIndicator(ind);
 							// G0 S4: a new resync era is a discontinuity: the renderer's memo spots are released (Clear).
+							s2->resetSparePending.store(true, std::memory_order_release);
 							if (const std::shared_ptr<MemoHost> mhq = memoHosts_.Find(host))
 							{
 								mhq->lastPresentedSeq.store(0, std::memory_order_release);
@@ -2103,6 +2107,11 @@ namespace Vpv
 			st->shownEntranceLiveDriven = false;
 			st->lastDisplayFactsKey.clear();
 			st->feedRingCount = 0;
+			// W23-SK-H4: clear spare-slot state and budget on teardown / switch to Original so zero stale budget survives.
+			st->spare.Reset();
+			st->spare.SetBudget(0.0, 0.0);
+			st->budgetFeed.ResetSource();
+			st->resetSparePending.store(false, std::memory_order_release);
 			StopBundle(*st);
 			ReleaseDispatcher(*st, gpuAlive);   // 70b G5: the GPU textures go with the lane (GpuReleased / switched off)
 			{
@@ -3447,6 +3456,8 @@ namespace Vpv
 					// POD1-H3: clear monotonic presented tracking on discontinuity/epoch bump so restarts never collapse QueueWindow.
 					mhq->lastPresentedSeq.store(0, std::memory_order_release);
 					mhq->resetPresentLag.store(true, std::memory_order_release);
+					if (const std::shared_ptr<HostState> hst = hosts_.Find(f.host))
+						hst->resetSparePending.store(true, std::memory_order_release);
 					if (const std::shared_ptr<Vpv::Capture::HostEntry> capture = Vpv::Capture::Find(f.host))
 						capture->sourceRing.OnQueueFact(mhq->memo->Epoch());
 				}
@@ -3741,7 +3752,18 @@ namespace Vpv
 					}
 				}
 			if (!st || !st->active.load(std::memory_order_acquire) || c.seq <= 0)
+			{
+				// W23-SK-H4: if lane is inactive (e.g. switched live to Original), ensure presenter->spareSlotMs is zeroed.
+				if (p.presenter != nullptr && p.presenter->originalPathway)
+					p.presenter->spareSlotMs.store(0.0, std::memory_order_release);
 				return;
+			}
+			if (st->resetSparePending.exchange(false, std::memory_order_acq_rel))
+			{
+				st->spare.Reset();
+				st->spare.SetBudget(0.0, 0.0);
+				st->budgetFeed.ResetSource(p.presenter);
+			}
 			const VpSkeleton::SpareTrigger trigger = p.kind == RE::AfterPresentKind::AfterLastExtra ? VpSkeleton::SpareTrigger::AfterLastExtra :
 				p.kind == RE::AfterPresentKind::NoExtras ? VpSkeleton::SpareTrigger::PostPresentNoExtras : VpSkeleton::SpareTrigger::BeforeDequeueWait;
 			st->budgetFeed.OnAfterPresent(st->spare, Vpv::Skeleton::FactsOf(c, p, trigger, st->timing.lastRenderOnlyMs, st->periodMs), p.presenter);   // S0
@@ -3823,16 +3845,20 @@ namespace Vpv
 			bool preKnown = false;
 			CardProfile preCard;
 			std::string preWhy;
-			if (needPreCheck && st.dispatcher != nullptr && st.gpuMemoryNote.empty() && !st.dispatcher->HoldsVideoMemory())
+			if (needPreCheck && st.dispatcher != nullptr && st.gpuMemoryNote.empty())
 			{
 				preQueried = true;
 				if (cardOverride_)
 					preCard = card_;
 				preKnown = cardOverride_ || QueryCard(hosts_.Aux(st.host), preCard, preWhy);
-				const uint64_t priv = st.dispatcher->PrivateBytes(dims, wantGapAhead);
-				if (preKnown && priv > preCard.FreeVram())
+				// W23-SK-H1: compare ONLY the unallocated delta of private working memory at `dims` against FreeVram,
+				// so 1080p -> 4K upshifts and lazy allocations are never bypassed by HoldsVideoMemory().
+				const uint64_t needPriv = st.dispatcher->PrivateBytes(dims, wantGapAhead);
+				const uint64_t heldPriv = st.dispatcher->ActualPrivateBytes(dims);
+				const uint64_t privDelta = needPriv > heldPriv ? needPriv - heldPriv : 0u;
+				if (preKnown && privDelta > preCard.FreeVram())
 				{
-					st.gpuMemoryNote = "GPU products not made: private working memory " + std::to_string(priv >> 20) +
+					st.gpuMemoryNote = "GPU products not made: private working memory " + std::to_string(privDelta >> 20) +
 						" MiB exceeds the free video memory " + std::to_string(preCard.FreeVram() >> 20) + " MiB (" +
 						Dimensions(dims) + ")";
 				}
@@ -3872,6 +3898,9 @@ namespace Vpv
 						mhq->lastBeginSeq = 0;
 					}
 					hostMemo->Clear();   // G0 S4: a graph rebuild is a discontinuity: every memo spot of the old graph is released
+					st.spare.Reset();
+					st.spare.SetBudget(0.0, 0.0);
+					st.budgetFeed.ResetSource();
 				}
 				b = std::make_shared<Bundle>(dims, seq, nowUs_, wiring, hostMemo, std::move(leaseOf),
 					qualityP15_.load(std::memory_order_acquire), qualityP15c_.load(std::memory_order_acquire),
@@ -4024,17 +4053,18 @@ namespace Vpv
 				// declarations the governor plans: count it as used, and refuse the GPU products when it alone does not fit.
 				if (wiring.dispatcher != nullptr)
 				{
-					// Counted only while the dispatcher holds nothing yet: afterwards the device query (CurrentUsage) already
-					// includes the textures it allocated, and counting them again would shed more than needed.
-					const bool held = wiring.dispatcher->HoldsVideoMemory();
-					const uint64_t priv = held ? 0 : wiring.dispatcher->PrivateBytes(dims, wiring.gapAhead);
-					if (known && !held && priv > card.FreeVram())
+					// W23-SK-H1: charge only the unallocated delta of private working memory at `dims`, so upshifts
+					// (e.g. 1080p -> 4K) and lazily allocated splitters are budgeted without double-counting held taps.
+					const uint64_t needPriv = wiring.dispatcher->PrivateBytes(dims, wiring.gapAhead);
+					const uint64_t heldPriv = wiring.dispatcher->ActualPrivateBytes(dims);
+					const uint64_t privDelta = needPriv > heldPriv ? needPriv - heldPriv : 0u;
+					if (known && privDelta > card.FreeVram())
 					{
-						st.gpuMemoryNote = "GPU products not made: private working memory " + std::to_string(priv >> 20) +
+						st.gpuMemoryNote = "GPU products not made: private working memory " + std::to_string(privDelta >> 20) +
 							" MiB exceeds the free video memory " + std::to_string(card.FreeVram() >> 20) + " MiB (" +
 							Dimensions(dims) + ")";
 					}
-					card.vramUsageBytes += priv;
+					card.vramUsageBytes += privDelta;
 				}
 				// The registry is the Bundle's: the tap form (TapFormProducts) when a GPU dispatcher is wired, else the plain one;
 				// either way built with the measured source period and the queue frames: the record histories

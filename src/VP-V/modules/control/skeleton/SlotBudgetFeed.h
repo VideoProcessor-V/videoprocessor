@@ -49,10 +49,25 @@ namespace Vpv
 				hostFedPresenter_ = presenter != nullptr && !original;
 				if (original)
 				{
-					// Bill's pathway: the slot is never budgeted and the Presenter is not written (nothing registered either).
+					// W23-SK-H4: Bill's pathway never budgets the spare slot, never fires spare work, and clears any
+					// previously published spareSlotMs so a live switch VP-V -> Original leaks zero spare state.
 					originalSeen_ = true;
-					host.NotePresented(f.sourceSequence, f.cadenceRepeat);
-					return host.Fire(f.trigger);
+					sourceSeen_ = false;
+					budgetFed_ = false;
+					lastSource_ = 0;
+					budgetMs_ = 0.0;
+					usedSeen_ = false;
+					usedEwmaMs_ = 0.0;
+					sharedMs_ = 0.0;
+					host.SetBudget(0.0, 0.0);
+					host.Reset();
+					if (presenter != nullptr)
+						presenter->spareSlotMs.store(0.0, std::memory_order_release);
+					VpSkeleton::SpareReport off;
+					off.outcome = VpSkeleton::SpareOutcome::Off;
+					off.trigger = f.trigger;
+					last_ = off;
+					return off;
 				}
 				originalSeen_ = false;
 				// R1: a render sample only from a frame that rendered a new source frame.
@@ -97,7 +112,17 @@ namespace Vpv
 			// The slice share the slot declares for the TD (R5: a Configure-time value; 0 until the admission table exists).
 			void SetDeclaredSliceMs(double ms) { declaredSliceMs_ = ms > 0.0 ? ms : 0.0; }
 			// A new source / resync: the slot's own use starts over; the render EWMA stays (the renderer did not change).
-			void ResetSource() { sourceSeen_ = false; budgetFed_ = false; lastSource_ = 0; usedSeen_ = false; usedEwmaMs_ = 0.0; sharedMs_ = 0.0; }
+			void ResetSource(RenderAhead::Presenter* presenter = nullptr)
+			{
+				sourceSeen_ = false;
+				budgetFed_ = false;
+				lastSource_ = 0;
+				usedSeen_ = false;
+				usedEwmaMs_ = 0.0;
+				sharedMs_ = 0.0;
+				if (presenter != nullptr)
+					presenter->spareSlotMs.store(0.0, std::memory_order_release);
+			}
 
 			// The per-source-frame numbers, as IC-2 SlotBudget.
 			VpSkeleton::SlotBudget Budget() const

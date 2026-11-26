@@ -1355,6 +1355,40 @@ public:
         return out;
     }
 
+    // W23-SK-B1: pin a lane ring/live slot for the lifetime of an AcquireResult (calls SlotSet::Unpin on release,
+    // keeping both the LaneState buffers and the slot pin alive so the producer cannot overwrite a pinned ring slot).
+    std::shared_ptr<const void> PinSlotRead(ProductId id, uint64_t seq) const
+    {
+        const std::shared_ptr<LaneState> st = renderState_;
+        if (!st)
+            return {};
+        const int idx = st->IndexOf(id);
+        if (idx < 0)
+            return {};
+        AncestorRef ref{};
+        int liveIndex = -1;
+        SlotSet& set = st->table->At(size_t(idx));
+        if (!set.PinRef(seq, &ref, &liveIndex, false))
+            return std::shared_ptr<const void>(st);
+        struct SlotPinGuard {
+            std::shared_ptr<LaneState> state;
+            size_t tableIndex = 0;
+            uint64_t seq = 0;
+            int liveIndex = -1;
+            ~SlotPinGuard()
+            {
+                if (state && state->table && tableIndex < state->table->Count())
+                    state->table->At(tableIndex).Unpin(seq, liveIndex);
+            }
+        };
+        auto guard = std::make_shared<SlotPinGuard>();
+        guard->state = st;
+        guard->tableIndex = size_t(idx);
+        guard->seq = seq;
+        guard->liveIndex = liveIndex;
+        return std::shared_ptr<const void>(std::move(guard));
+    }
+
     // The source view of frame `seq` (render thread, lock-free mirror; no keepAlive: the render holds the frame).
     bool SourceOf(uint64_t seq, SourceFrameView* out) const
     {

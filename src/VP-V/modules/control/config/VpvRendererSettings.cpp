@@ -924,9 +924,14 @@ namespace VpvRendererSettings
 			std::make_pair("blank_bottom", &settings.edgeBlanking.bottom) })
 		{
 			int parsed = 0;
-			if (readViewportString(blank.first, raw) &&
-				ParseInteger(raw, 0, EdgeBlanking::MAX_INSET_PIXELS, parsed))
-				*blank.second = parsed;
+			if (readViewportString(blank.first, raw))
+			{
+				if (ParseInteger(raw, 0, EdgeBlanking::MAX_INSET_PIXELS, parsed))
+					*blank.second = parsed;
+				else
+					DebugLog::Log("profile '%s': invalid %s '%s' (must be 0..%d); retaining %d",
+						rule.section.c_str(), blank.first, raw.c_str(), EdgeBlanking::MAX_INSET_PIXELS, *blank.second);
+			}
 		}
 	}
 
@@ -952,10 +957,35 @@ namespace VpvRendererSettings
 			std::make_pair("blank_bottom", &settings.edgeBlanking.bottom) })
 		{
 			int parsed = 0;
-			if (TryGetDisplayString(config, blank.first, rawValue) &&
-				ParseInteger(rawValue, 0, EdgeBlanking::MAX_INSET_PIXELS, parsed))
-				*blank.second = parsed;
+			if (TryGetDisplayString(config, blank.first, rawValue))
+			{
+				if (ParseInteger(rawValue, 0, EdgeBlanking::MAX_INSET_PIXELS, parsed))
+					*blank.second = parsed;
+				else
+					DebugLog::Log("libplacebo: invalid %s '%s' (must be 0..%d); retaining %d",
+						blank.first, rawValue.c_str(), EdgeBlanking::MAX_INSET_PIXELS, *blank.second);
+			}
 		}
+		// W23-CFG-H1: capture canonicalized [vpv.camera] and [vpv.skeleton] snapshots so live edits
+		// change EffectiveSettingsFingerprint and trigger UpdatePipelineSlots -> SettingsApplied.
+		auto snapshotSection = [&config](const char* sec) -> std::string {
+			const auto* vals = config.GetSectionValues(sec);
+			if (!vals || vals->empty()) return {};
+			std::vector<std::pair<std::string, std::string>> sorted;
+			sorted.reserve(vals->size());
+			for (const auto& kv : *vals)
+				sorted.emplace_back(ConfigFile::NormalizeName(kv.first), ConfigFile::NormalizeName(kv.second));
+			std::sort(sorted.begin(), sorted.end());
+			std::string out;
+			for (const auto& kv : sorted)
+			{
+				if (!out.empty()) out.push_back(';');
+				out += kv.first + '=' + kv.second;
+			}
+			return out;
+		};
+		settings.vpvCameraSnapshot = snapshotSection("vpv.camera");
+		settings.vpvSkeletonSnapshot = snapshotSection("vpv.skeleton");
 	}
 
 	// ---- ReadGlobal: the global pipeline keys ([vpv] first, then [vprenderer]) ----
@@ -1409,7 +1439,9 @@ namespace VpvRendererSettings
 			// Planner Q4: the applied profiles' raw values (structural: any key, present or
 			// future). Not in the rebuild / transport fingerprint (includeLive off),
 			// so they never force a restart by themselves.
-			stream << settings.profileValues << '|';
+			stream << settings.profileValues << '|'
+				<< settings.vpvCameraSnapshot << '|'
+				<< settings.vpvSkeletonSnapshot << '|';
 		}
 		// The host's text ends without a separator and this text starts with one; drop the trailing one so
 		// the join adds no empty field (the host's own part stays byte-identical to Bill's).
@@ -1488,6 +1520,8 @@ namespace VpvRendererSettings
 		currentTransport.adaptive = next.adaptive;
 		currentTransport.debandGrain = next.debandGrain;
 		currentTransport.debandVpExclusive = next.debandVpExclusive;
+		currentTransport.vpvCameraSnapshot = next.vpvCameraSnapshot;
+		currentTransport.vpvSkeletonSnapshot = next.vpvSkeletonSnapshot;
 	}
 
 	// Names of the VP-V settings that differ (appended after the host's own; the order differs from the old interleaved one).
@@ -1518,6 +1552,8 @@ namespace VpvRendererSettings
 		changed(current.outputSegmentsMerged != next.outputSegmentsMerged, "output_segments_merged");
 		changed(current.entranceGpuDrain != next.entranceGpuDrain, "entrance_gpu_drain");
 		changed(current.ditherNeed != next.ditherNeed, "dither_need");
+		changed(current.vpvCameraSnapshot != next.vpvCameraSnapshot, "vpv.camera");
+		changed(current.vpvSkeletonSnapshot != next.vpvSkeletonSnapshot, "vpv.skeleton");
 		changed(current.adaptive.cnnResidualStabilise != next.adaptive.cnnResidualStabilise ||
 			current.adaptive.ssimResidualStabilise != next.adaptive.ssimResidualStabilise, "residual_stabilise");
 		changed(current.ssimBitrateAware != next.ssimBitrateAware || current.ssimBitrateFloor != next.ssimBitrateFloor, "ssim_bitrate_aware");

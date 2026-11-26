@@ -2142,8 +2142,8 @@ namespace Vpv
                 showIn(dejudderEstimationForm, landing, isOn(pixelTrust, true));
                 showIn(dejudderEstimationForm, verifyShare, isOn(verify, false));
                 showIn(dejudderExperimentsForm, taperSad, isOn(taper, false));
-                // Filling uncovered areas works on the source path only.
-                const bool sourcePath = warpStage->currentData().toString() == QStringLiteral("source");
+                // Filling uncovered areas works on the source path only (W23-CFG-M1: honour inherited value).
+                const bool sourcePath = effectiveChoiceValue(warpStage) == QStringLiteral("source");
                 occlusionFill->setProperty("greyedOff", !sourcePath);
                 occlusionFill->setEnabled(sourcePath);
                 // Estimation and experiments matter only with a strength.
@@ -2478,8 +2478,8 @@ namespace Vpv
             adaptiveRows.push_back(adaptiveMap);
             auto greyAdaptive = [adaptiveOn, adaptiveMap, adaptiveRows, adaptiveMapSmooth]()
             {
-                const bool on = adaptiveOn->currentData().toString() == QStringLiteral("on");
-                const QString map = adaptiveMap->currentData().toString();
+                const bool on = effectiveChoiceValue(adaptiveOn) == QStringLiteral("on");
+                const QString map = effectiveChoiceValue(adaptiveMap);
                 for (QWidget* row : adaptiveRows) { row->setProperty("greyedOff", !on); row->setEnabled(on); }
                 const bool smooth = on && map != QStringLiteral("off");
                 adaptiveMapSmooth->setProperty("greyedOff", !smooth);
@@ -2487,6 +2487,9 @@ namespace Vpv
             };
             for (QComboBox* combo : { adaptiveOn, adaptiveMap })
                 QObject::connect(combo, qOverload<int>(&QComboBox::currentIndexChanged), receiver, [greyAdaptive](int) { greyAdaptive(); });
+            auto* adaptiveRefresh = new QAction(adaptiveOn);
+            adaptiveRefresh->setObjectName(controlName(sectionPrefix, QStringLiteral("adaptive_downscale_refresh")));
+            QObject::connect(adaptiveRefresh, &QAction::triggered, receiver, [greyAdaptive]() { greyAdaptive(); });
             greyAdaptive();
         }
 
@@ -2546,7 +2549,7 @@ namespace Vpv
         {
             auto greyUpscale = [upscaleOn, upscaleWBase, upscaleSuperres, upscaleLight]()
             {
-                const bool on = upscaleOn->currentData().toString() == QStringLiteral("on");
+                const bool on = effectiveChoiceValue(upscaleOn) == QStringLiteral("on");
                 for (QWidget* row : { static_cast<QWidget*>(upscaleWBase), static_cast<QWidget*>(upscaleSuperres),
                         static_cast<QWidget*>(upscaleLight) })
                 {
@@ -2555,6 +2558,9 @@ namespace Vpv
                 }
             };
             QObject::connect(upscaleOn, qOverload<int>(&QComboBox::currentIndexChanged), receiver, [greyUpscale](int) { greyUpscale(); });
+            auto* upscaleRefresh = new QAction(upscaleOn);
+            upscaleRefresh->setObjectName(controlName(sectionPrefix, QStringLiteral("adaptive_upscale_refresh")));
+            QObject::connect(upscaleRefresh, &QAction::triggered, receiver, [greyUpscale]() { greyUpscale(); });
             greyUpscale();
         }
 
@@ -2681,7 +2687,7 @@ namespace Vpv
         {
             auto greySdr = [sdrShape, sdrKneeStart, sdrKneeStrength, sdrRecovery]()
             {
-                const bool knee = sdrShape->currentData().toString() == QStringLiteral("knee");
+                const bool knee = effectiveChoiceValue(sdrShape) == QStringLiteral("knee");
                 for (QWidget* row : { sdrKneeStart, sdrKneeStrength, sdrRecovery })
                 {
                     row->setProperty("greyedOff", !knee);
@@ -2689,6 +2695,9 @@ namespace Vpv
                 }
             };
             QObject::connect(sdrShape, qOverload<int>(&QComboBox::currentIndexChanged), receiver, [greySdr](int) { greySdr(); });
+            auto* sdrRefresh = new QAction(sdrShape);
+            sdrRefresh->setObjectName(controlName(kit.sectionPrefix, QStringLiteral("sdr_tone_refresh")));
+            QObject::connect(sdrRefresh, &QAction::triggered, receiver, [greySdr]() { greySdr(); });
             greySdr();
         }
         form = processingForm;
@@ -2815,7 +2824,8 @@ namespace Vpv
         for (const char* name : { "motion_preset_refresh", "picture_preset_refresh",
                 "adaptive_faithful_refresh", "adaptive_motion_refresh", "optical_flow_refresh", "interpolation_refresh",
                 "temporal_dither_refresh", "intent_content_refresh", "detail_restore_refresh",
-                "intent_adaptive_refresh", "greyed_state_refresh" })
+                "intent_adaptive_refresh", "greyed_state_refresh",
+                "adaptive_downscale_refresh", "adaptive_upscale_refresh", "sdr_tone_refresh" })
             if (auto* refresh = findProfileAction(controlName(sectionPrefix, QString::fromLatin1(name))))
                 refresh->trigger();
         {

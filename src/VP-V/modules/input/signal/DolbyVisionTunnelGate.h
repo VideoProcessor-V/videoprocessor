@@ -59,11 +59,12 @@ inline bool DolbyVisionTunnelGateContainer(const DolbyVisionTunnelGateInput& in)
 			in.bytesPreserved);
 }
 
-// A capture the HDMI tunnel can never arrive in (YCbCr 4:2:2).
+// A capture the HDMI tunnel can never arrive in (YCbCr 4:2:2 or 12-bit 36-bit/px RGB: W23-DV-H2).
 inline bool DolbyVisionTunnelImpossibleEncoding(VideoFrameEncoding encoding)
 {
 	return encoding == VideoFrameEncoding::V210 || encoding == VideoFrameEncoding::UYVY ||
-		encoding == VideoFrameEncoding::HDYC;
+		encoding == VideoFrameEncoding::HDYC || encoding == VideoFrameEncoding::R12B ||
+		encoding == VideoFrameEncoding::R12L;
 }
 
 // The tunnel formatter would take this capture if it were not handed off:

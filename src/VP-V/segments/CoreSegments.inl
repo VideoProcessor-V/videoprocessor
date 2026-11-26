@@ -354,7 +354,7 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
             appearance.screenWhiteNits = activeSettings.appearanceScreenWhiteNits;
             appearance.screenWhiteMeasured = activeSettings.appearanceScreenWhiteMeasured;
             appearance.trimApplied = dvStage.TrimsWillRun();
-            appearance.trimTargetNits = dvStage.TrimsTargetNits();
+            appearance.trimTargetNits = dvStage.TrimAuthoredTargetNits();
             appearance.trimSaturationGain = dvStage.TrimsSaturationGain();   // FIX1 SHOULD 2: the trim x Hunt cap
             appearance.toeKnee = dynamicDrive.PublishedParams().boostKnee;   // FIX1 SHOULD 3: gamma_boost_knee, not a fixed 0
             const ExtendedRange::OutputTransfer appTrc = ExtendedRange::DescribeOutputTransfer(target.color);
@@ -632,6 +632,12 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
                 DebugLog::Log("De-judder occlusion mask: used on %llu source frames (hook applied %llu, failed %llu)",
                     dejudderMaskFrames, occlusionMaskHook.Applied(), occlusionMaskHook.Failed());
         }
+        // W23-IR-M1: surface occlusionMaskHook GPU failures visibly for both occlusion-mask and grain-map modes.
+        if ((install || grainInstall) && occlusionMaskHook.Failed() > 0)
+            SyncFallback(FallbackCatalog::Engaged("occlusion mask hook",
+                "occlusion / grain map hook failed (" + std::to_string(occlusionMaskHook.Failed()) + " frame(s))"));
+        else
+            ReleaseFallback("occlusion mask hook");
     }
     // Stage 10: BTB/WTW through libplacebo for SDR. Decided on this
     // frame's source and target; libplacebo is then told the source is in
@@ -774,7 +780,25 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
             dmCollected = frameHooks.size() - start;
             if (dmCollected > 0) {
                 TagSlotHooks(start, PipelineSlots::Id::ColourDmPre);
-                const auto dmParams = DmPreDeband::ShaderParameters(dmDec, height, false, DmPreDeband::IntersectNormalizedActiveRect(renderImage.crop.x0, renderImage.crop.y0, renderImage.crop.x1, renderImage.crop.y1, hdrTrustedPicture.available, hdrTrustedPicture.left, hdrTrustedPicture.top, hdrTrustedPicture.right, hdrTrustedPicture.bottom, hdrTrustedPicture.rasterWidth, hdrTrustedPicture.rasterHeight, width, height));
+                double dmCropX0 = renderImage.crop.x0, dmCropY0 = renderImage.crop.y0;
+                double dmCropX1 = renderImage.crop.x1, dmCropY1 = renderImage.crop.y1;
+                // W23-DV-L1: intersect authoritative per-frame DV L5 active area when present so letterbox/pillarbox
+                // bars are excluded even before hdrTrustedPicture qualifies after an aspect-ratio cut.
+                if (convertedPayload && convertedPayload->dolby.valid && convertedPayload->dolby.hasActiveArea) {
+                    const double l5x0 = static_cast<double>(convertedPayload->dolby.activeAreaLeft);
+                    const double l5y0 = static_cast<double>(convertedPayload->dolby.activeAreaTop);
+                    const double l5x1 = static_cast<double>(width) - static_cast<double>(convertedPayload->dolby.activeAreaRight);
+                    const double l5y1 = static_cast<double>(height) - static_cast<double>(convertedPayload->dolby.activeAreaBottom);
+                    if (l5x1 > l5x0 && l5y1 > l5y0) {
+                        if (!(dmCropX1 > dmCropX0) || !(dmCropY1 > dmCropY0)) {
+                            dmCropX0 = l5x0; dmCropY0 = l5y0; dmCropX1 = l5x1; dmCropY1 = l5y1;
+                        } else {
+                            dmCropX0 = (std::max)(dmCropX0, l5x0); dmCropY0 = (std::max)(dmCropY0, l5y0);
+                            dmCropX1 = (std::min)(dmCropX1, l5x1); dmCropY1 = (std::min)(dmCropY1, l5y1);
+                        }
+                    }
+                }
+                const auto dmParams = DmPreDeband::ShaderParameters(dmDec, height, false, DmPreDeband::IntersectNormalizedActiveRect(dmCropX0, dmCropY0, dmCropX1, dmCropY1, hdrTrustedPicture.available, hdrTrustedPicture.left, hdrTrustedPicture.top, hdrTrustedPicture.right, hdrTrustedPicture.bottom, hdrTrustedPicture.rasterWidth, hdrTrustedPicture.rasterHeight, width, height));
                 for (size_t i = start; i < frameHooks.size(); ++i)
                     for (const auto& kv : dmParams) CustomHookChain::SetHookParameter(frameHooks[i], kv.first, kv.second);
             }

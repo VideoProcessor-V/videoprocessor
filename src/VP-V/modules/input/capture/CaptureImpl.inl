@@ -109,6 +109,19 @@ bool LibplaceboVideoRenderer::Impl::CaptureConvert(RendererExtension::ConvertCon
 	// Original pathway runs Bill's a591ad3b5 CRGBDolbyVisionTunnelFormatter untouched.
 	if (pipelineSlots.OriginalPathway() && state->dolbyVisionTunnel)
 		return false;
+	// W23-DV-H2: 12-bit RGB (R12B/R12L) can never carry an HDMI 8-bit RGB DV tunnel. Bypass VpvDvTunnelSession
+	// so it never throws std::runtime_error into RENDERSTATE_FAILED; present black cleanly with !dolby.valid.
+	if (state->dolbyVisionTunnel &&
+		(state->videoFrameEncoding == VideoFrameEncoding::R12B || state->videoFrameEncoding == VideoFrameEncoding::R12L))
+	{
+		converted = host->AcquireConversionPayload();
+		converted->pixels.clear();
+		converted->contract = {};
+		converted->dolby = {};
+		converted->dolby.valid = false;
+		converted->dolby.requiresBlackFrame = true;
+		return true;
+	}
 	const bool vpDvCpu = route == Vpv::Capture::ConvertRoute::CpuFormatter &&
 		state->dolbyVisionTunnel && !pipelineSlots.OriginalPathway();
 	if (route == Vpv::Capture::ConvertRoute::CpuFormatter && !vpDvCpu)

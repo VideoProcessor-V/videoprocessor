@@ -60,7 +60,9 @@ namespace Vpv
 				if (m_dispatch == nullptr && m_gpu != nullptr)
 				{
 					m_dispatch = pl_dispatch_create(m_gpu->log, m_gpu);
-					GpuAttribution::Watch(m_dispatch, "owner_gpu");   // GF-P5 S11: compute-once detector 3 sees GPU owner fills too
+					// W23-SK-M3: register with GpuAttribution only when ComputeOnce profiling is enabled.
+					if (::ComputeOnce::Enabled())
+						GpuAttribution::Watch(m_dispatch, "owner_gpu");   // GF-P5 S11: compute-once detector 3 sees GPU owner fills too
 				}
 				return static_cast<void*>(m_dispatch);
 			}

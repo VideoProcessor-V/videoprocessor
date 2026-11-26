@@ -24,6 +24,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -34,7 +35,8 @@ namespace Vpv
 		class SkeletonGpuDispatcher : public VpSkeleton::IGpuDispatcher
 		{
 		public:
-			static constexpr size_t kTapRing = 3;   // live + up to two lane frames in flight
+			static constexpr size_t kTapRing = 3;      // minimum: live + up to two lane frames in flight
+			static constexpr size_t kMaxTapRing = 7;   // W23-SK-H2: live + up to 6 lane-lead frames in flight
 
 			struct Counters
 			{
@@ -83,6 +85,9 @@ namespace Vpv
 
 			// Diagnostics and tests.
 			const VpLaneProducts::GpuProductTextures* TexturesOf(VpSkeleton::ProductId id) const;
+			// W23-SK-B1: shared ownership pin for AcquireResult::gpu.keepAlive so Configure() cannot destroy
+			// backing pl_tex handles while a reader holds the handle.
+			std::shared_ptr<const VpLaneProducts::GpuProductTextures> SharedTexturesOf(VpSkeleton::ProductId id) const;
 			pl_tex TapOf(uint64_t seq, bool extended) const;
 			uint64_t AllocatedBytes() const;
 			uint64_t GraveyardBytes() const;
@@ -97,6 +102,8 @@ namespace Vpv
 			// Video memory the dispatcher holds OUTSIDE the product textures (the governor does not see it): the tap ring
 			// (tap + extended plane, R16, per in-flight frame) and the kernels' working textures. Analytic (no allocation).
 			uint64_t PrivateBytes(VpSkeleton::Dims dims, bool laneForm) const;
+			// W23-SK-H1: private video memory CURRENTLY allocated at `dims` (0 when lazy/unallocated or dims changed).
+			uint64_t ActualPrivateBytes(VpSkeleton::Dims dims) const;
 			// G5 + FIX-S0-COST (S0, registered fix lead8/FIX-S0-COST.md): the measured device time of a product per FRAME in ms
 			// (pl_timer; the mean over the timed frames of the SUM of all passes), 0 = not measured yet. The lane job's predictedMs and
 			// the gap planner read it (a conservative derived default is used until then). It used to be the LAST single pass, which
@@ -118,13 +125,22 @@ namespace Vpv
 				pl_tex extended = nullptr;
 				uint64_t seq = 0;
 				bool used = false;
+				bool pinned = false;       // W23-SK-H2: true while chunked P10 job is mid-flight (never evict)
 				uint32_t bands = 0;        // bands uploaded (rows [0, bands * rowsPerBand))
 				bool extendedDone = false;
 				RegionEvidence::Rect picture;
 			};
+			struct TexPool
+			{
+				VpLaneProducts::GpuTexBackend backend;
+				std::mutex mutex;
+				std::vector<std::unique_ptr<VpLaneProducts::GpuProductTextures>> retired;
+				bool abandoned = false;
+				TexPool(pl_gpu g, bool readable) : backend(g, readable) {}
+			};
 			struct ProductState
 			{
-				std::unique_ptr<VpLaneProducts::GpuProductTextures> tex;
+				std::shared_ptr<VpLaneProducts::GpuProductTextures> tex;
 				uint32_t history = 0;
 				std::string refusal;
 				pl_timer timer = nullptr;
@@ -132,8 +148,11 @@ namespace Vpv
 				GpuProductCost cost;       // every pass of every frame (lastNs is the last single pass only)
 			};
 
+			std::shared_ptr<VpLaneProducts::GpuProductTextures> MakeProductTextures();
+			void DrainRetiredTextures();
+			void WatchAttributionIfEnabled();
 			Tap* TapFor(uint64_t seq, bool create);   // null: m_tapError says why (not there, no format, the GPU refused)
-			bool EnsureTap(Tap& t, const VpSkeleton::SourceFrameView& view, const RegionEvidence::Rect& picture);
+			bool EnsureTap(Tap& t, const VpSkeleton::SourceFrameView& view, const RegionEvidence::Rect& picture, pl_timer timer = nullptr);
 			bool BuildContext(VpLaneProducts::KernelContext& c, const VpSkeleton::Node& node, uint64_t seq, bool live,
 				const VpSkeleton::LaneJobContext* job, uint32_t missing);
 			bool Fail(const std::string& why);
@@ -159,15 +178,16 @@ namespace Vpv
 
 			pl_gpu m_gpu = nullptr;
 			pl_dispatch m_dispatch = nullptr;
+			bool m_attributionWatched = false;
 			StaticStore m_statics{ &m_gpu };
 			std::string m_tapError;
-			VpLaneProducts::GpuTexBackend m_backend;
+			std::shared_ptr<TexPool> m_texPool;
 			const VpSkeleton::AnalysisLane* m_lane = nullptr;
 			std::function<bool(uint64_t, VpSkeleton::SourceFrameView*)> m_liveSource;
 			std::vector<std::unique_ptr<VpLaneProducts::IProductKernel>> m_kernels;
 			std::map<VpSkeleton::ProductId, ProductState> m_products;
-			std::vector<std::unique_ptr<VpLaneProducts::GpuProductTextures>> m_graveyard;
-			std::array<Tap, kTapRing> m_taps;
+			std::vector<std::shared_ptr<VpLaneProducts::GpuProductTextures>> m_graveyard;
+			std::vector<Tap> m_taps;
 			VpSkeleton::Dims m_dims;
 			uint64_t m_graphKey = 0;
 			uint32_t m_settingsGen = 0;

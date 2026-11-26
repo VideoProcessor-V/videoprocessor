@@ -325,6 +325,14 @@ QString effectCategory(const std::string& section)
         return QStringLiteral("Actions");
     if (normalized == "shortcuts") return QStringLiteral("Shortcuts");
     if (normalized == "logging") return QStringLiteral("Logging");
+    // VPV-HOOK (W23-CFG-B1): classify VP-V sections cleanly for the Save/Apply review banner.
+    if (normalized == "vpv" || ConfigurationApplyPolicy::HasPrefix(normalized, "vpv."))
+        return QStringLiteral("VP-V");
+    if (normalized == "led_drive" || ConfigurationApplyPolicy::HasPrefix(normalized, "led_drive.") ||
+        normalized == "dynamic_drive" || ConfigurationApplyPolicy::HasPrefix(normalized, "dynamic_drive.") ||
+        normalized == "projector" || ConfigurationApplyPolicy::HasPrefix(normalized, "projector."))
+        return QStringLiteral("Dynamic Drive");
+    if (normalized == "ambient") return QStringLiteral("Ambient");
     if (normalized == "general" || normalized == "command_line" ||
         normalized == "renderer_alias" || normalized == "decklink" ||
         normalized == "p010_conversion" || normalized == "ppm_correction" ||

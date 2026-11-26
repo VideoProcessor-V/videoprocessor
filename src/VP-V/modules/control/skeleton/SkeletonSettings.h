@@ -80,6 +80,23 @@ namespace Vpv
 		inline Settings Parse(const ConfigFile& config)
 		{
 			Settings s;
+			// W23-CFG-H2: surface unknown keys in [vpv.skeleton] visibly via laneProblems (never silently ignored).
+			if (const auto* sectionValues = config.GetSectionValues(kSection))
+			{
+				static const char* const kKnownKeys[] = {
+					"analysis_lane", "analysis_lane_chunk_us", "analysis_lane_deterministic",
+					"analysis_lane_test_wait_ms", "skeleton_gpu_gap", "grain_split_storage",
+					"lane_tap_source", "camera_link"
+				};
+				for (const auto& kv : *sectionValues)
+				{
+					bool known = false;
+					for (const char* k : kKnownKeys)
+						known = known || kv.first == k;
+					if (!known)
+						s.laneProblems.push_back("unknown key '" + kv.first + "' in [vpv.skeleton]");
+				}
+			}
 			static const char* const kLaneKeys[] = { "analysis_lane", "analysis_lane_chunk_us", "analysis_lane_deterministic",
 				"analysis_lane_test_wait_ms" };
 			for (const char* key : kLaneKeys)

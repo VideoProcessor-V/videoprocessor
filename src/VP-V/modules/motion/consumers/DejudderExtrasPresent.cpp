@@ -657,6 +657,9 @@ namespace Vpv
 			// Interpolation renders the source path only (the interpolated planes go through
 			// the whole chain); a composed or RGB picture holds (owner).
 			const pl_tex cached = interpolating ? nullptr : dejudderExtras.dejudderCache.Texture(f.sourceSequence);
+			// W23-IR-M1: surface DejudderRendered::Cache::Apply GPU failures visibly instead of silently degrading to source warp.
+			if (!interpolating && !cached && dejudderExtras.dejudderCache.Failed() > 0 && activeSettings.dejudderWarpRendered)
+				calls.SyncFallback(dejudderExtras.motionConsumerFailures.Note(GetTickCount64(), "rendered picture cache failed (using source warp)"));
 			// The composed picture exists only as the cache: without it the source
 			// warp would show the subtitle where it was.
 			if (!sourcePlanes && !cached)
@@ -905,6 +908,8 @@ namespace Vpv
 						{
 							interpOk = frameInterpolator->Run(processedA, processedB, motion, shift, activeSettings.interpolationFallback, warped,
 								a.luma->params.w, a.luma->params.h);
+							// W23-IR-H4: processed S1 planes intentionally carry post-entrance luma -> release stale product.interpolator.
+							calls.SyncFallback(FallbackCatalog::Released("product.interpolator"));
 						}
 						else
 						{

@@ -3,6 +3,7 @@
 
 #include <VP-V/core/EntranceEpoch.h>
 #include <VP-V/modules/control/diagnostics/DiagnosticOverrides.h>
+#include <VP-V/modules/control/skeleton/SkeletonAccess.h>
 #include <VP-V/core/FallbackCatalog.h>
 #include <VP-V/core/GpuAttributionPl.h>
 
@@ -830,14 +831,55 @@ namespace EntranceSegment
 	// Never while smooth motion / deinterlacing runs (those flags are false then).
 	void Segment::Detail(StageRun& run, pl_frame& frame)
 	{
+		// W23-IR-B1: always release inactive stage FallbackCatalog entries BEFORE early-returning.
+		if (!detailPulseRuns())
+		{
+			host.ReleaseFallback("detail pulse");
+			host.ReleaseFallback("detail pulse scene judge");
+			host.ReleaseFallback("product.detail_pulse");
+		}
+		if (!textureRestoreRuns())
+		{
+			host.ReleaseFallback("texture restore");
+			host.ReleaseFallback("texture restore scene judge");
+			host.ReleaseFallback("product.texture_restore");
+		}
 		if (!detailPulseRuns() && !textureRestoreRuns())
 			return;
 		DetailPulse::Module& detailPulse = *b.detailPulse;
 		TextureRestore::Module& textureRestore = *b.textureRestore;
-		const DetailPulse::Params& detailPulseParams = *b.detailPulseParams;
-		const TextureRestore::Params& textureRestoreParams = *b.textureRestoreParams;
+		// W23-IR-H2: bind the host's live SkeletonMemo so DetailPulse and TextureRestore acquire shared
+		// kBandMemo / P11 band energies instead of always running private passes; sync product.* fallbacks.
+		const Vpv::Skeleton::FrameMemo frameMemo = Vpv::Skeleton::CurrentFrameMemo();
+		DetailPulse::Params detailPulseParams = *b.detailPulseParams;
+		TextureRestore::Params textureRestoreParams = *b.textureRestoreParams;
+		if (frameMemo.memo)
+		{
+			if (!detailPulseParams.memo) detailPulseParams.memo = frameMemo.memo.get();
+			if (!textureRestoreParams.memo) textureRestoreParams.memo = frameMemo.memo.get();
+		}
 		const pl_dispatch dispatch = host.Dispatch();
 		const pl_gpu gpu = host.Gpu();
+		auto syncPulseFail = [&]() {
+			if (detailPulse.LastError() != detailPulseFailLogged)
+				DebugLog::Log("Detail pulse stabilise: not applied (%s; %llu frames so far); the frame is rendered without it",
+					detailPulse.LastError().c_str(), detailPulse.Failures());
+			detailPulseFailLogged = detailPulse.LastError();
+			*b.detailPulseInactive = detailPulse.LastError();
+			const FallbackCatalog::Decision d = FallbackCatalog::DetailPulseFailed(true, detailPulse.LastError());
+			host.EngageFallback(d.id, d.reason);
+			host.ReleaseFallback("detail pulse scene judge");
+		};
+		auto syncRestoreFail = [&]() {
+			if (textureRestore.LastError() != textureRestoreFailLogged)
+				DebugLog::Log("Texture restore: not applied (%s; %llu frames so far); the frame is rendered without it",
+					textureRestore.LastError().c_str(), textureRestore.Failures());
+			textureRestoreFailLogged = textureRestore.LastError();
+			*b.textureRestoreInactive = textureRestore.LastError();
+			const FallbackCatalog::Decision d = FallbackCatalog::TextureRestoreFailed(true, textureRestore.LastError());
+			host.EngageFallback(d.id, d.reason);
+			host.ReleaseFallback("texture restore scene judge");
+		};
 		if (run.path == Path::CrossfadeFrom)
 		{
 			// The decision of this source frame on the picture's own bands (ApplyForeign: another
@@ -850,6 +892,8 @@ namespace EntranceSegment
 				pl_frame pulsed{};
 				if (detailPulse.ApplyForeign(gpu, dispatch, frame, p, pulsed))
 					frame = pulsed;
+				else
+					syncPulseFail();   // W23-IR-L2: never swallow CrossfadeFrom failure
 			}
 			if (textureRestoreRuns() && run.sequence != 0 && textureRestore.HistorySequence() == run.sequence)
 			{
@@ -858,6 +902,8 @@ namespace EntranceSegment
 				pl_frame restored{};
 				if (textureRestore.ApplyForeign(gpu, dispatch, frame, p, restored))
 					frame = restored;
+				else
+					syncRestoreFail();   // W23-IR-L2: never swallow CrossfadeFrom failure
 			}
 			return;
 		}
@@ -872,6 +918,8 @@ namespace EntranceSegment
 				pl_frame pulsed{};
 				if (detailPulse.Apply(gpu, dispatch, frame, detailPulseParams, pulsed))
 					frame = pulsed;
+				else
+					syncPulseFail();   // W23-IR-L2: never swallow Extra failure
 			}
 			if (textureRestoreRuns() && textureRestoreParams.sequence == run.sequence &&
 				textureRestore.HistorySequence() == run.sequence && run.sequence != 0)
@@ -879,6 +927,8 @@ namespace EntranceSegment
 				pl_frame restored{};
 				if (textureRestore.Apply(gpu, dispatch, frame, textureRestoreParams, restored))
 					frame = restored;
+				else
+					syncRestoreFail();   // W23-IR-L2: never swallow Extra failure
 			}
 			return;
 		}
@@ -915,25 +965,26 @@ namespace EntranceSegment
 					const FallbackCatalog::Decision sj = FallbackCatalog::SceneJudgeUnavailable("detail pulse", detailPulse.SceneJudgeUnavailable(), detailPulse.SceneJudgeWhy());
 					if (sj.engaged) host.EngageFallback(sj.id, sj.reason); else host.ReleaseFallback(sj.id.c_str());
 				}
+				const std::string& pWhy = !detailPulse.LastBandMemoFallback().empty() ? detailPulse.LastBandMemoFallback() : detailPulse.LastP11EnergyFallback();
+				if (!pWhy.empty())
+				{
+					const FallbackCatalog::Decision pd = FallbackCatalog::ProductFallback("product.detail_pulse", pWhy);
+					host.EngageFallback(pd.id, pd.reason);
+				}
+				else
+					host.ReleaseFallback("product.detail_pulse");
 			}
 			else
 			{
-				// Hunt 3 F8: counted and reported ("inactive (...)" in the status), logged
-				// whenever the reason changes.
-				if (detailPulse.LastError() != detailPulseFailLogged)
-					DebugLog::Log("Detail pulse stabilise: not applied (%s; %llu frames so far); the frame is rendered without it",
-						detailPulse.LastError().c_str(), detailPulse.Failures());
-				detailPulseFailLogged = detailPulse.LastError();
-				*b.detailPulseInactive = detailPulse.LastError();
-				const FallbackCatalog::Decision d = FallbackCatalog::DetailPulseFailed(true, detailPulse.LastError());
-				host.EngageFallback(d.id, d.reason);
-				host.ReleaseFallback("detail pulse scene judge");   // the module did not run: its judge status is stale
+				syncPulseFail();
+				host.ReleaseFallback("product.detail_pulse");
 			}
 		}
 		else
 		{
-			host.ReleaseFallback("detail pulse");   // switched off or not applicable: nothing failed
+			host.ReleaseFallback("detail pulse");
 			host.ReleaseFallback("detail pulse scene judge");
+			host.ReleaseFallback("product.detail_pulse");
 		}
 		if (textureRestoreRuns())
 		{
@@ -947,23 +998,26 @@ namespace EntranceSegment
 					const FallbackCatalog::Decision sj = FallbackCatalog::SceneJudgeUnavailable("texture restore", textureRestore.SceneJudgeUnavailable(), textureRestore.SceneJudgeWhy());
 					if (sj.engaged) host.EngageFallback(sj.id, sj.reason); else host.ReleaseFallback(sj.id.c_str());
 				}
+				const std::string& pWhy = textureRestore.LastP11EnergyFallback();
+				if (!pWhy.empty())
+				{
+					const FallbackCatalog::Decision pd = FallbackCatalog::ProductFallback("product.texture_restore", pWhy);
+					host.EngageFallback(pd.id, pd.reason);
+				}
+				else
+					host.ReleaseFallback("product.texture_restore");
 			}
 			else
 			{
-				if (textureRestore.LastError() != textureRestoreFailLogged)
-					DebugLog::Log("Texture restore: not applied (%s; %llu frames so far); the frame is rendered without it",
-						textureRestore.LastError().c_str(), textureRestore.Failures());
-				textureRestoreFailLogged = textureRestore.LastError();
-				*b.textureRestoreInactive = textureRestore.LastError();
-				const FallbackCatalog::Decision d = FallbackCatalog::TextureRestoreFailed(true, textureRestore.LastError());
-				host.EngageFallback(d.id, d.reason);
-				host.ReleaseFallback("texture restore scene judge");   // the module did not run: its judge status is stale
+				syncRestoreFail();
+				host.ReleaseFallback("product.texture_restore");
 			}
 		}
 		else
 		{
 			host.ReleaseFallback("texture restore");
 			host.ReleaseFallback("texture restore scene judge");
+			host.ReleaseFallback("product.texture_restore");
 		}
 	}
 

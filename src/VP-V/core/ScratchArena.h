@@ -185,7 +185,13 @@ public:
         return true;
     }
 
-    void EndScope() { scopeOpen_ = false; }
+    void EndScope()
+    {
+        // W23-SK-L1: only the owning thread that opened the scope may close it.
+        if (!owner_.BoundToCaller())
+            return;
+        scopeOpen_ = false;
+    }
 
     // True when the arena is bound to a thread other than the caller's (its Acquires would be refused): a caller
     // that runs on another thread (a lane producer) must use its own arena.

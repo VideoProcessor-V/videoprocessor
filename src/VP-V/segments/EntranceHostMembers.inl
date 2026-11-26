@@ -102,10 +102,16 @@ bool LibplaceboVideoRenderer::Impl::EntranceOncePhasePicture(const pl_frame& sou
 	if (!frameInterpolator)
 		frameInterpolator = std::make_unique<Interpolator::FrameInterpolator>(log, d3d11->gpu);
 	frameInterpolator->SetGrain(activeSettings.interpolationGrain);
-	if (!frameInterpolator->Run(a, b, vpPhaseMotion, vpPhaseT, activeSettings.interpolationFallback, out,
-		vpPhaseA.luma->params.w, vpPhaseA.luma->params.h))
+	// W23-IR-H4: processed S1 planes intentionally differ from raw P13 luma; keep "product.interpolator" and
+	// "motion consumers" fallbacks synced on every EntranceOnce call (never leaving stale entries stuck).
+	const bool ran = frameInterpolator->Run(a, b, vpPhaseMotion, vpPhaseT, activeSettings.interpolationFallback, out,
+		vpPhaseA.luma->params.w, vpPhaseA.luma->params.h);
+	SyncFallback(dejudderExtras.motionConsumerFailures.Note(GetTickCount64(), ran ? nullptr : "interpolation failed"));
+	SyncFallback(FallbackCatalog::Released("product.interpolator"));
+	if (!ran)
 	{
 		entrance.OnceFallback("interpolation on the processed planes failed (" + frameInterpolator->LastError() + ")");
+		if (heldA) *heldA = pa;
 		return false;
 	}
 	frame = drawnA;

@@ -2456,13 +2456,17 @@ namespace RendererProfileConfig
 				{
 					error = "[event_actions] unknown key '" + value.first + "'"; return false;
 				}
+		// VPV-HOOK (W23-CFG-H2): validate [vpv], [vpv.camera], [vpv.skeleton] and allow them in non-target unified configs.
+		if (!ProfileSchemaHooks::ValidateSections(config, error))
+			return false;
 		for (const std::string& section : config.GetSectionNames())
 			if (expectedSections.find(section) == expectedSections.end() &&
 				!MainConfigSchema::OwnsSection(section) &&
 				!RendererConfigView::OwnsSection(section) &&
 				section != "output_display" && section.rfind("output_display.", 0) != 0 &&
                 !ColorOutputProfileMigration::IsArchive(section) &&
-                !CalibrationProfileMigration::IsArchive(section))
+                !CalibrationProfileMigration::IsArchive(section) &&
+				!MainConfigSchema::SchemaHooks::OwnsRendererSection(section))   // VPV-HOOK
 			{
 				error = "unified renderer configuration has unknown or orphan section [" + section + "]";
 				return false;

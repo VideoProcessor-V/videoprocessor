@@ -36,6 +36,7 @@ namespace VpQueueTiming
 		bool originalPathway = false;     // pipeline_original_pathway: budget off (ADR-0019)
 		bool queueTimingFixes = true;     // queue_timing_fixes (H1 stale beyond target, M3 floor)
 		bool lowLatency = false;          // R30: low-latency queue active (delay hold off; enables sustained excess shed)
+		double cadenceLeadMs = 0.0;       // W23-DV-M1: locked pulldown FilmClock +cadenceLatenessMax shift (ms)
 	};
 
 	class VpFixedBudgetPolicy final : public IQueueTimingPolicy
@@ -49,12 +50,14 @@ namespace VpQueueTiming
 			m_originalPathway.store(options.originalPathway, std::memory_order_relaxed);
 			m_queueTimingFixes.store(options.queueTimingFixes, std::memory_order_relaxed);
 			m_lowLatency.store(options.lowLatency, std::memory_order_relaxed);
+			m_cadenceLeadMs.store(options.cadenceLeadMs > 0.0 ? options.cadenceLeadMs : 0.0, std::memory_order_relaxed);
 		}
 		Options GetOptions() const
 		{
 			return Options{ m_originalPathway.load(std::memory_order_relaxed),
 				m_queueTimingFixes.load(std::memory_order_relaxed),
-				m_lowLatency.load(std::memory_order_relaxed) };
+				m_lowLatency.load(std::memory_order_relaxed),
+				m_cadenceLeadMs.load(std::memory_order_relaxed) };
 		}
 
 		// S1 amendment (TD design (a)4/(b)6; RenderAhead::FloorPolicy::RaiseQueue): the look-ahead
@@ -79,6 +82,7 @@ namespace VpQueueTiming
 		std::atomic<bool> m_queueTimingFixes{ true };
 		std::atomic<bool> m_lowLatency{ false };
 		std::atomic<bool> m_raiseQueueForAnalysis{ false };
+		std::atomic<double> m_cadenceLeadMs{ 0.0 };
 	};
 
 	// The either/or selection (owner 2026-10-24): queue_policy = vp (default) | upstream. The

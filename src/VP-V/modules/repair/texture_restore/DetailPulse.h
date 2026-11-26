@@ -150,7 +150,7 @@ namespace DetailPulse
 		VpDetailRestore::SceneReaderFn sceneReader = nullptr;
 		// cut_soft_reset (default on): soft reset on high-confidence non-cut candidate (SceneRestart.h).
 		bool softReset = VpDetailRestore::kDefaultCutSoftReset;
-		bool vectorVeto = true;  // B6-D8-VECTOR-VETO: veto false pan cuts when P7/P2 vectors are trusted
+		bool vectorVeto = false;  // W23-IR-H2: default OFF per SceneRestart.h:7 and 115:1435
 		VpDetailRestore::VectorTrustReaderFn vectorTrustReader = nullptr;  // null = query memo P7/P2
 		VpSkeleton::SkeletonMemo* memo = nullptr;   // optional: acquire shared kBandMemo GPU wide low band
 	};

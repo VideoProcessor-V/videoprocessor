@@ -52,11 +52,20 @@ namespace GpuAttribution
 			r.owner = "pathway:libplacebo_render";
 			rules.push_back(r);
 		}
-		// VP render-pass hooks inside pl_render_image (PassTimerHook has no per-hook defaultOwner).
+		// VP render-pass hooks inside pl_render_image (PassTimerHook has no per-hook defaultOwner)
+		// and stage-level VP passes sharing the entrance dispatch (W23-IR-M4).
+		static const char* const kOwned[][2] = {
+			{ "VP extended range:", "extended_range" },
+			{ "VideoProcessor de-judder: cache A", "dejudder_cache" },
+			{ "VideoProcessor occlusion mask", "occlusion_mask" },
+			{ "VideoProcessor deband", "deband" },
+			{ "VideoProcessor detail pulse", "detail_pulse" },
+			{ "VideoProcessor texture restore", "texture_restore" } };
+		for (const auto& p : kOwned)
 		{
 			Rule r;
-			r.pattern = "VP extended range:";
-			r.owner = "extended_range";
+			r.pattern = p[0];
+			r.owner = p[1];
 			rules.insert(rules.begin(), r);
 		}
 		// VP passes that recompute a shared unit privately (hidden copies, tools/check_shared_units.py ids).

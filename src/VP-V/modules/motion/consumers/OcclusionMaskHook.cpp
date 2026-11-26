@@ -1,6 +1,7 @@
 #include <pch.h>
 #include "OcclusionMaskHook.h"
 
+#include <VP-V/core/GpuAttributionPl.h>
 #include <libplacebo/dispatch.h>
 #include <libplacebo/shaders/custom.h>
 
@@ -220,6 +221,8 @@ if (p.x < size.x && p.y < size.y) {
 		compute.dispatch_size[0] = (w + 15) / 16;
 		compute.dispatch_size[1] = (h + 15) / 16;
 		compute.dispatch_size[2] = 1;
+		if (::ComputeOnce::Enabled())
+			GpuAttribution::Watch(params->dispatch, "occlusion_mask");
 		if (!pl_dispatch_compute(params->dispatch, &compute))
 		{
 			++failed;

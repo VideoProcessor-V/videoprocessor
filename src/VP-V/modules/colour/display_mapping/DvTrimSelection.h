@@ -203,6 +203,7 @@ namespace DvTrimSelection
 		int upperIndex = -1;         // dm.trims[] index at or above the display
 		double weight = 0.0;         // toward upper (0 = lower only)
 		double displayPq = 0.0;      // 12-bit PQ code of the display peak
+		double targetMaxNits = 0.0;  // W23-DV-H1: authored target peak nits of the chosen/interpolated trim
 		int l8Present = 0;           // valid L8 blocks in the DM
 		int l8Unresolved = 0;        // ... of which the target is unknown (skipped)
 		int firstUnresolvedIndex = -1;
@@ -302,16 +303,19 @@ namespace DvTrimSelection
 			const double lo = cands[lower].targetPq, hi = cands[upper].targetPq;
 			s.weight = hi > lo ? (s.displayPq - lo) / (hi - lo) : 0.0;
 			s.params = Lerp(cands[lower].params, cands[upper].params, s.weight);
+			s.targetMaxNits = DolbyVisionTrims::NitsFromPq((lo + (hi - lo) * s.weight) / 4095.0);
 			s.reason = lower == upper || hi <= lo ? "trim at the display peak" : "interpolated between two trims";
 		}
 		else if (upper >= 0)
 		{
 			s.params = cands[upper].params;
+			s.targetMaxNits = DolbyVisionTrims::NitsFromPq(static_cast<double>(cands[upper].targetPq) / 4095.0);
 			s.reason = "display below every trim target: the lowest-target trim";
 		}
 		else
 		{
 			const double lo = cands[lower].targetPq;
+			s.targetMaxNits = DolbyVisionTrims::NitsFromPq(lo / 4095.0);
 			if (sourcePeak && dm.sourceMaxPq > lo)
 			{
 				s.weight = (s.displayPq - lo) / (dm.sourceMaxPq - lo);

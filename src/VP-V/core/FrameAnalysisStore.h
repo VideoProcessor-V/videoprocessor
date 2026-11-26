@@ -296,12 +296,24 @@ namespace FrameAnalysis
 	public:
 		explicit Store(size_t depth = RingDepth(4, 4)) { Resize(depth); }
 
-		// A new depth (from the delay budget) forgets every record; the epoch moves on.
+		// W23-DV-L2: capacity changes (e.g. ladder rate steps) re-home live in-flight records into the new
+		// ring without discarding queued frames or bumping m_epoch (keeping temporal continuity intact).
 		void Resize(size_t depth)
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
-			m_slots.assign((std::max)(static_cast<size_t>(3), depth), Slot{});
-			++m_epoch;
+			const size_t target = (std::max)(static_cast<size_t>(3), depth);
+			if (target == m_slots.size())
+				return;
+			std::vector<Slot> next(target);
+			for (Slot& slot : m_slots)
+			{
+				if (!slot.used)
+					continue;
+				Slot& dst = next[slot.record.id.seq % target];
+				if (!dst.used || slot.record.id.seq > dst.record.id.seq)
+					dst = std::move(slot);
+			}
+			m_slots.swap(next);
 		}
 
 		size_t Depth() const

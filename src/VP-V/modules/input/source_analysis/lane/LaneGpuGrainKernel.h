@@ -34,6 +34,7 @@ namespace VpLaneProducts
 		// planes, the rgba32f `part` partial sums and the block grid, the same for both layouts; the lane form counts two
 		// Splitters (lane + live).
 		uint64_t PrivateBytes(VpSkeleton::Dims dims, bool laneForm) const override;
+		uint64_t ActualPrivateBytes(VpSkeleton::Dims dims) const override;
 		std::vector<FallbackCatalog::Decision> Fallbacks() const override;
 
 		// The storage the layout really uses (a refused Compact is Full, shown through Fallbacks()).
@@ -48,6 +49,10 @@ namespace VpLaneProducts
 		GrainSplit::Gpu::StorageChoice Choice() const;
 		GrainSplit::Storage m_requested;
 		GrainSplit::Gpu::Splitter m_lane, m_live;
+		VpSkeleton::Dims m_laneAllocDims{ 0, 0 };
+		VpSkeleton::Dims m_liveAllocDims{ 0, 0 };
+		uint64_t m_laneAllocBytes = 0;
+		uint64_t m_liveAllocBytes = 0;
 		std::string m_error;
 	};
 }

@@ -1707,7 +1707,11 @@ struct VpvDvTunnelSession::State
 		if (!videoState ||
 			videoState->colorspace != state->colorspace ||
 			videoState->videoFrameEncoding != state->videoFrameEncoding ||
-			videoState->displayMode != state->displayMode)
+			videoState->displayMode != state->displayMode ||
+			videoState->tunnelSdrRgbRange != state->tunnelSdrRgbRange ||
+			videoState->rgbTunnelBytesPreserved != state->rgbTunnelBytesPreserved ||
+			videoState->BytesPerRow() != state->BytesPerRow() ||
+			videoState->invertedVertical != state->invertedVertical)
 		{
 			formatter->OnVideoState(state);
 			videoState = state;

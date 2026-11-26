@@ -154,6 +154,7 @@ namespace VpLaneProducts
 		float m_gate = 1.0f;
 		uint32_t m_generation = 1;
 		uint32_t m_builtGeneration = 0;
+		VpSkeleton::Dims m_preparedDims{ 0, 0 };
 		bool m_defaultFacts = true;
 		bool m_lastFull = true;
 		bool m_lastUsedPrev = false;

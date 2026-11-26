@@ -1103,7 +1103,14 @@ public:
             c2.gpuAllocRefused += gpuContext->Refused();
         }
         AcquireCause cause = ok ? AcquireCause::None : (out.pending ? AcquireCause::ReadbackPending : AcquireCause::OwnerDeclined);
-        if (ok && form == AcquireForm::Gpu && !e->orphaned && out.gpu.bytes > e->reserved
+        // W23-SK-M1: if the memo invalidated / bumped epoch / discarded this entry while the fill ran unlocked,
+        // refuse the stale result cleanly (never publish stale epoch data, never increment filledAtRead, never call Served).
+        if (cause == AcquireCause::None && (e->orphaned || e->epoch != epoch_)) {
+            cause = AcquireCause::FrameReleased;
+            if (out.declineReason.empty())
+                out.declineReason = "frame invalidated while filling";
+        }
+        if (ok && cause == AcquireCause::None && form == AcquireForm::Gpu && !e->orphaned && out.gpu.bytes > e->reserved
             && gpuBytes_ - e->reserved + out.gpu.bytes > gpuBudget_)
             cause = AcquireCause::OverBudget;
         if (!e->orphaned) {

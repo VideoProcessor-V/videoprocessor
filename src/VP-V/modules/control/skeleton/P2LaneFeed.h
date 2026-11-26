@@ -121,7 +121,7 @@ namespace Vpv
 				for (size_t i = 0; i < n; ++i)
 				{
 					retried_.fetch_add(1, std::memory_order_relaxed);
-					if (Attempt(take[i]) == Outcome::Parked)
+					if (Attempt(take[i], true) == Outcome::Parked)
 						ring_[count_++] = take[i];
 				}
 				pendingApprox_.store(count_, std::memory_order_release);
@@ -159,7 +159,9 @@ namespace Vpv
 			void Reset()
 			{
 				{
-					std::lock_guard<std::mutex> lock(ringMutex_);
+					// W23-SK-M4: match Drain()'s lock order (ringMutex_ -> claimMutex_) so Reset() never races an in-flight Attempt().
+					std::lock_guard<std::mutex> ringLock(ringMutex_);
+					std::lock_guard<std::mutex> claimLock(claimMutex_);
 					head_ = 0;
 					count_ = 0;
 					pendingApprox_.store(0, std::memory_order_release);
@@ -176,7 +178,7 @@ namespace Vpv
 			}
 
 		private:
-			Outcome Attempt(const VpMotion::P2Published& p)
+			Outcome Attempt(const VpMotion::P2Published& p, bool retry = false)
 			{
 				if (generation_ && generation_() != p.generation)
 				{
@@ -194,7 +196,8 @@ namespace Vpv
 				VpSkeleton::LaneInputs pins;
 				if (!lease.table->LaneAncestors(VpSkeleton::kP2VectorPair, p.to, scratch, pins))
 				{
-					parked_.fetch_add(1, std::memory_order_relaxed);   // an input (P1) is not published yet: nothing was claimed
+					if (!retry)
+						parked_.fetch_add(1, std::memory_order_relaxed);   // an input (P1) is not published yet: nothing was claimed
 					return Outcome::Parked;
 				}
 				VpSkeleton::LaneTicket ticket;
@@ -202,7 +205,8 @@ namespace Vpv
 				if (cr == VpSkeleton::ClaimResult::TooEarly || cr == VpSkeleton::ClaimResult::ReleasePending)
 				{
 					pins.Unpin();
-					parked_.fetch_add(1, std::memory_order_relaxed);
+					if (!retry)
+						parked_.fetch_add(1, std::memory_order_relaxed);
 					return Outcome::Parked;
 				}
 				if (cr != VpSkeleton::ClaimResult::Claimed)
@@ -217,7 +221,8 @@ namespace Vpv
 					pins.Unpin();
 					if (unclaimed)
 					{
-						parked_.fetch_add(1, std::memory_order_relaxed);
+						if (!retry)
+							parked_.fetch_add(1, std::memory_order_relaxed);
 						return Outcome::Parked;
 					}
 					stale_.fetch_add(1, std::memory_order_relaxed);

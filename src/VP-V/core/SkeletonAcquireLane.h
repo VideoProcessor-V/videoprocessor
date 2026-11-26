@@ -97,7 +97,11 @@ inline void BindLaneToMemo(AnalysisLane& lane, SkeletonMemo& memo, LaneGpuHandle
                     || !out->gpu.Valid())
                     return LaneSlotSource::State::NoHandle;
             }
-            out->pin = std::shared_ptr<const void>(l->State());   // the lane state (its buffers) outlives the read
+            // W23-SK-B1: pin both LaneState buffers AND the SlotSet ring/live slot so background producers
+            // cannot overwrite a pinned slot while the AcquireResult reader holds `out->pin`.
+            out->pin = l->PinSlotRead(id, seq);
+            if (!out->pin)
+                out->pin = std::shared_ptr<const void>(l->State());
             return LaneSlotSource::State::Present;
         case AnalysisLane::ProductRead::None: break;
         }

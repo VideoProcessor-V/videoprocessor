@@ -28,6 +28,7 @@ namespace DelayBudget
 		double processingMs = kProcessingAllowanceMs;
 		bool captureTransfer = true;        // one SIGNAL frame of HDMI transfer (O1)
 		double renderAheadMs = 0.0;
+		double cadenceLeadMs = 0.0;         // W23-DV-M1: locked pulldown FilmClock +cadenceLatenessMax shift
 	};
 
 	// signalFps: the HDMI signal's rate when it differs from the content rate (a pulldown lock: the
@@ -42,6 +43,7 @@ namespace DelayBudget
 		in.swapchainFrames = m.swapchainFrames;
 		in.processingMs = m.processingMs;
 		in.renderAheadMs = m.renderAheadMs;
+		in.cadenceLeadMs = m.cadenceLeadMs;
 		const double transferFps = signalFps > 0.0 ? signalFps : sourceFps;
 		in.captureTransferMs = m.captureTransfer && transferFps > 0.0 ? 1000.0 / transferFps : 0.0;
 		return in;

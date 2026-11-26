@@ -42,6 +42,7 @@ namespace VpQueueTiming
 					model.renderAheadMs = (std::max)(0.0, lead - static_cast<double>(credit) * ps) * 1000.0;
 					budgetNote = "render-ahead on: the total across frame rates is not verified yet (PENDING-RA)";
 				}
+				model.cadenceLeadMs = m_cadenceLeadMs.load(std::memory_order_relaxed);
 				const DelayBudget::Inputs budgetInputs = DelayBudget::InputsFor(budgetMs, c.sourceRateHz, model, c.signalRateHz);
 				transferMs = budgetInputs.captureTransferMs;
 				plan = DelayBudget::Compute(budgetInputs);

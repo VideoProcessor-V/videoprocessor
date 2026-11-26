@@ -76,14 +76,15 @@ namespace AppearanceStage
 	inline double ReferenceWhite(const Inputs& in)
 	{
 		// Keep Lw_ref in matched diffuse-white units (never a 1000-nit HDR specular peak against
-		// 48-nit diffuse screen white): SDR -> 100 nits; configured sdr_target_nits when set;
-		// DV trim target capped to ITU-R BT.2408 diffuse white (203 nits); fallback 100 nits.
+		// 48-nit diffuse screen white): SDR -> 100 nits; DV authored trim target (capped to
+		// ITU-R BT.2408 diffuse white, 203 nits) takes precedence over sdr_target_nits when a
+		// trim ran (refs/125 s3-4, W23-DV-H1); else configured sdr_target_nits; fallback 100 nits.
 		if (in.sourceSdr)
 			return 100.0;
-		if (in.sdrTargetNits > 0.0)
-			return in.sdrTargetNits;
 		if (in.trimApplied && in.trimTargetNits > 0.0)
 			return (std::min)(in.trimTargetNits, 203.0);
+		if (in.sdrTargetNits > 0.0)
+			return in.sdrTargetNits;
 		return 100.0;
 	}
 

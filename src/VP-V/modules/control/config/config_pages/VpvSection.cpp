@@ -2206,6 +2206,14 @@ namespace Vpv
 			previewNote->setProperty("help", true);
 			card.Add(previewNote);
 
+			// W23-CFG-H3: surface inline guidance whenever camera_model = on while [vpv.skeleton] camera_link is off.
+			auto* linkWarn = Help(QStringLiteral(
+				"Camera link is currently off ([vpv.skeleton] camera_link = off), so the camera fit will stay detached. "
+				"Enable Camera link = Report in Developer > Pipeline & Diagnostics to attach it."));
+			linkWarn->setObjectName(ObjectName(QStringLiteral("camera.camera_link_warning")));
+			linkWarn->setVisible(false);
+			card.Add(linkWarn);
+
 			QObject::connect(model, &QCheckBox::toggled, model, [state, camSection](bool on)
 			{
 				if (state->refreshing || !state->host.setValue) return;
@@ -2213,24 +2221,26 @@ namespace Vpv
 				state->RefreshAll();   // the dependants in Developer > Camera diagnostics grey or un-grey at once
 			});
 
-			state->refreshers.push_back([model, camSection](const std::shared_ptr<State>& state)
+			state->refreshers.push_back([model, linkWarn, camSection](const std::shared_ptr<State>& state)
 			{
 				const auto get = [&](const QString& section, const QString& key)
 				{
 					return state->host.value ? state->host.value(section, key).trimmed() : QString();
 				};
 				const auto isOn = [](const QString& v) { return v.compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0; };
-				const bool original = isOn(get(Q(TierTable().section), QStringLiteral("pipeline_original_pathway")));
+				const bool original = !state->vpvOn;   // W23-CFG-L2
 				std::string vd = state->Get("vector_demand");
 				if (vd.empty()) vd = TierTable().Default("vector_demand");
 				const bool motionOff = SameValue(vd, "off");
 				const bool modelOn = isOn(get(camSection, QStringLiteral("camera_model")));
+				const bool linkOn = get(QStringLiteral("vpv.skeleton"), QStringLiteral("camera_link")).compare(QStringLiteral("report"), Qt::CaseInsensitive) == 0;
 				const QString originalReason = QStringLiteral("Greyed: the Original pathway is on (VP's additions are off).");
 				const QString motionOffReason = QStringLiteral("Used only when the motion engine is on.");
 				const QSignalBlocker blocker(model);
 				model->setChecked(modelOn);
 				model->setEnabled(!original && !motionOff);
 				SetGreyReason(model, original ? originalReason : motionOff ? motionOffReason : QString());
+				linkWarn->setVisible(!original && !motionOff && modelOn && !linkOn);
 			});
 			return card;
 		}
@@ -2316,7 +2326,7 @@ namespace Vpv
 					return state->host.value ? state->host.value(section, key).trimmed() : QString();
 				};
 				const auto isOn = [](const QString& v) { return v.compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0; };
-				const bool original = isOn(get(Q(TierTable().section), QStringLiteral("pipeline_original_pathway")));
+				const bool original = !state->vpvOn;   // W23-CFG-L2
 				std::string vd = state->Get("vector_demand");
 				if (vd.empty()) vd = TierTable().Default("vector_demand");
 				const bool motionOff = SameValue(vd, "off");
@@ -2573,7 +2583,7 @@ namespace Vpv
 				state->refreshers.push_back([ditherNeed, lutStage, vpvSec](const std::shared_ptr<State>& state)
 				{
 					const auto get = [&](const char* key) { return state->host.value ? state->host.value(vpvSec, QString::fromLatin1(key)).trimmed() : QString(); };
-					const bool original = get("pipeline_original_pathway").compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0;
+					const bool original = !state->vpvOn;   // W23-CFG-L2
 					const QString origReason = original ? QStringLiteral("Greyed: the Original pathway is on (VP's additions are off).") : QString();
 					{
 						const QSignalBlocker blocker(ditherNeed);
@@ -2835,53 +2845,121 @@ namespace Vpv
 				state->RefreshAll();
 			});
 
-			state->refreshers.push_back([entranceOnce, merged, drain, analysis, resync, hdrInference, order, slotsOff, section](const std::shared_ptr<State>& state)
+			// W23-CFG-H3: expose [vpv.skeleton] analysis_lane & camera_link and [vpv.camera] camera_ahead_fit on
+			// Developer > Pipeline & Diagnostics (all strictly default OFF) so camera model / guidance gates are reachable in UI.
+			const QString skelSection = QStringLiteral("vpv.skeleton");
+			const QString camSection = QStringLiteral("vpv.camera");
+			auto* analysisLane = new QComboBox;
+			analysisLane->setObjectName(ObjectName(QStringLiteral("expert.analysis_lane")));
+			analysisLane->addItem(QStringLiteral("Off (default)"), QString());
+			analysisLane->addItem(QStringLiteral("Shadow (CPU lane only)"), QStringLiteral("shadow"));
+			analysisLane->addItem(QStringLiteral("On (CPU + GPU lane)"), QStringLiteral("on"));
+			analysisLane->setToolTip(QStringLiteral("Key analysis_lane ([vpv.skeleton]). Off by default; required for ahead camera guidance."));
+			form->addRow(QStringLiteral("Analysis lane"), analysisLane);
+			QObject::connect(analysisLane, qOverload<int>(&QComboBox::currentIndexChanged), analysisLane, [state, analysisLane, skelSection](int i)
+			{
+				if (state->refreshing || i < 0 || !state->host.setValue) return;
+				state->host.setValue(skelSection, QStringLiteral("analysis_lane"), analysisLane->itemData(i).toString());
+				state->RefreshAll();
+			});
+
+			auto* cameraLink = new QComboBox;
+			cameraLink->setObjectName(ObjectName(QStringLiteral("expert.camera_link")));
+			cameraLink->addItem(QStringLiteral("Off (default)"), QString());
+			cameraLink->addItem(QStringLiteral("Report (attach camera link)"), QStringLiteral("report"));
+			cameraLink->setToolTip(QStringLiteral("Key camera_link ([vpv.skeleton]). Off by default; required for Global Camera Model to attach."));
+			form->addRow(QStringLiteral("Camera link"), cameraLink);
+			QObject::connect(cameraLink, qOverload<int>(&QComboBox::currentIndexChanged), cameraLink, [state, cameraLink, skelSection](int i)
+			{
+				if (state->refreshing || i < 0 || !state->host.setValue) return;
+				state->host.setValue(skelSection, QStringLiteral("camera_link"), cameraLink->itemData(i).toString());
+				state->RefreshAll();
+			});
+
+			auto* cameraAheadFit = new QCheckBox(QStringLiteral("Ahead camera fit (default off)"));
+			cameraAheadFit->setObjectName(ObjectName(QStringLiteral("expert.camera_ahead_fit")));
+			cameraAheadFit->setToolTip(QStringLiteral("Key camera_ahead_fit ([vpv.camera]). Off by default; feeds the camera fit from ahead NVOF pairs."));
+			form->addRow(QStringLiteral("Camera ahead fit"), cameraAheadFit);
+			QObject::connect(cameraAheadFit, &QCheckBox::toggled, cameraAheadFit, [state, camSection](bool on)
+			{
+				if (state->refreshing || !state->host.setValue) return;
+				state->host.setValue(camSection, QStringLiteral("camera_ahead_fit"), on ? QStringLiteral("on") : QString());
+				state->RefreshAll();
+			});
+
+			state->refreshers.push_back([entranceOnce, merged, drain, analysis, resync, hdrInference, order, slotsOff,
+				analysisLane, cameraLink, cameraAheadFit, section, skelSection, camSection](const std::shared_ptr<State>& state)
 			{
 				const auto get = [&](const char* key) { return state->host.value ? state->host.value(section, QString::fromLatin1(key)).trimmed() : QString(); };
+				const auto getSec = [&](const QString& sec, const char* key) { return state->host.value ? state->host.value(sec, QString::fromLatin1(key)).trimmed() : QString(); };
+				// W23-CFG-L2: use !state->vpvOn (ConfigOriginalPathwayOn) and cover all expert controls in Original tooltip loop.
+				const bool original = !state->vpvOn;
+				const QString origTip = original ? QStringLiteral("Greyed: the Original pathway is on (VP's additions are off).") : QString();
 				{
 					const QSignalBlocker blocker(entranceOnce);
 					const QString value = get("pipeline_entrance_once");
 					entranceOnce->setChecked(value.isEmpty() || value.compare(QStringLiteral("off"), Qt::CaseInsensitive) != 0);
-					const bool original = get("pipeline_original_pathway").compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0;
 					entranceOnce->setEnabled(!original);
-					SetGreyReason(entranceOnce, original ? QStringLiteral("Greyed: the Original pathway is on (VP's additions are off).") : QString());
+					SetGreyReason(entranceOnce, origTip);
 				}
 				{
 					const QSignalBlocker blocker(merged);
 					merged->setChecked(get("output_segments_merged").compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0);
-					const bool original = get("pipeline_original_pathway").compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0;
 					merged->setEnabled(!original);
-					SetGreyReason(merged, original ? QStringLiteral("Greyed: the Original pathway is on (VP's additions are off).") : QString());
+					SetGreyReason(merged, origTip);
 				}
 				{
 					const QSignalBlocker blocker(drain);
 					const QString value = get("entrance_gpu_drain").toLower();
 					drain->setCurrentIndex(value == QStringLiteral("finish") ? 2 : value == QStringLiteral("flush") ? 1 : 0);
+					drain->setEnabled(!original);
+					SetGreyReason(drain, origTip);
 				}
 				{
 					const QSignalBlocker blocker(resync);
 					const QString value = get("resync_event").toLower();
 					resync->setCurrentIndex(value == QStringLiteral("on") ? 2 : value == QStringLiteral("shadow") ? 1 : 0);
-					const bool original = get("pipeline_original_pathway").compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0;
 					resync->setEnabled(!original);
-					SetGreyReason(resync, original ? QStringLiteral("Greyed: the Original pathway is on (VP's additions are off).") : QString());
+					SetGreyReason(resync, origTip);
 				}
 				{
 					const QSignalBlocker blocker(analysis);
 					analysis->setChecked(get("frame_analysis_store").compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0);
-					const bool original = get("pipeline_original_pathway").compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0;
 					analysis->setEnabled(!original);
-					SetGreyReason(analysis, original ? QStringLiteral("Greyed: the Original pathway is on (VP's additions are off).") : QString());
+					SetGreyReason(analysis, origTip);
 				}
 				{
 					const QSignalBlocker blocker(hdrInference);
 					hdrInference->setCurrentIndex(get("hdr_inference").compare(QStringLiteral("original"), Qt::CaseInsensitive) == 0 ? 1 : 0);
-					const bool original = get("pipeline_original_pathway").compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0;
 					hdrInference->setEnabled(!original);
 					SetGreyReason(hdrInference, original ? QStringLiteral("Greyed: the Original pathway always uses Bill's heuristic (the stored value is unchanged).") : QString());
 				}
+				{
+					const QSignalBlocker blocker(analysisLane);
+					const QString value = getSec(skelSection, "analysis_lane").toLower();
+					analysisLane->setCurrentIndex(value == QStringLiteral("on") ? 2 : value == QStringLiteral("shadow") ? 1 : 0);
+					analysisLane->setEnabled(!original);
+					SetGreyReason(analysisLane, origTip);
+				}
+				{
+					const QSignalBlocker blocker(cameraLink);
+					const QString value = getSec(skelSection, "camera_link").toLower();
+					cameraLink->setCurrentIndex(value == QStringLiteral("report") ? 1 : 0);
+					cameraLink->setEnabled(!original);
+					SetGreyReason(cameraLink, origTip);
+				}
+				{
+					const QSignalBlocker blocker(cameraAheadFit);
+					cameraAheadFit->setChecked(getSec(camSection, "camera_ahead_fit").compare(QStringLiteral("on"), Qt::CaseInsensitive) == 0);
+					cameraAheadFit->setEnabled(!original);
+					SetGreyReason(cameraAheadFit, origTip);
+				}
 				if (!order->hasFocus()) order->setText(get("pipeline_order"));
+				order->setEnabled(!original);
+				SetGreyReason(order, origTip);
 				if (!slotsOff->hasFocus()) slotsOff->setText(get("pipeline_slots_off"));
+				slotsOff->setEnabled(!original);
+				SetGreyReason(slotsOff, origTip);
 			});
 		}
 	}
@@ -5005,12 +5083,23 @@ namespace Vpv
 				for (const Preset& p : u.presets)
 					for (const KeyValue& kv : p.set)
 						keys.erase(kv.key);
+			// W23-CFG-M2: upscale_sharp_antiring has its authoritative spinbox on VP-V > Scaling > Advanced.
+			keys.insert("upscale_sharp_antiring");
 			return keys;
 		}();
-		if (!kManagedToggles.count(key.toStdString())) return;
 		const bool vpvOn = !ConfigOriginalPathwayOn(
 			[&api](const QString& s, const QString& k) { return api.value(s, k); });
-		if (!vpvOn) return;
+		if (!vpvOn)
+		{
+			// W23-CFG-M2: disable VP-V-only rows on Tone Mapping when Original pathway is selected.
+			if (!IsVpvOnlyKey(key)) return;
+			const QString origPrefix = QStringLiteral("Disabled on the Original pathway (VP-V addition; overridden at runtime).");
+			widget->setEnabled(false);
+			if (!widget->toolTip().startsWith(origPrefix))
+				widget->setToolTip(origPrefix + (widget->toolTip().isEmpty() ? QString() : QStringLiteral("\n\n") + widget->toolTip()));
+			return;
+		}
+		if (!kManagedToggles.count(key.toStdString())) return;
 		const QString prefix = QStringLiteral("Managed by VP-V: change it on the VP-V page (or switch VP-V to the "
 			"Original pathway).");
 		if (!widget->property("vpvManaged").toBool())

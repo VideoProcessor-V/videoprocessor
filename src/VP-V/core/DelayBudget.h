@@ -48,6 +48,7 @@ namespace DelayBudget
 		double renderAheadMs = 0.0;        // counted inside the budget, never on top
 		double processingMs = 0.0;         // processing + present allowance
 		double captureTransferMs = 0.0;    // one input frame's transfer, if the budget covers it (O1)
+		double cadenceLeadMs = 0.0;        // W23-DV-M1: locked pulldown FilmClock +cadenceLatenessMax shift
 		// The frame shown at its refresh: once due it waits up to one refresh for its vblank, and
 		// the queue's steering oscillates about it (delay-gate measurement 2026-10-24: the worst
 		// case is one refresh above the hold at every rate).
@@ -63,7 +64,8 @@ namespace DelayBudget
 	{
 		const double refreshPeriod = in.refreshHz > 0.0 ? 1000.0 / in.refreshHz : 0.0;
 		return ((std::max)(0, in.swapchainFrames) + (std::max)(0, in.displayPhaseRefreshes)) * refreshPeriod +
-			(std::max)(0.0, in.renderAheadMs) + (std::max)(0.0, in.processingMs) + (std::max)(0.0, in.captureTransferMs);
+			(std::max)(0.0, in.renderAheadMs) + (std::max)(0.0, in.processingMs) +
+			(std::max)(0.0, in.captureTransferMs) + (std::max)(0.0, in.cadenceLeadMs);
 	}
 
 	struct Plan

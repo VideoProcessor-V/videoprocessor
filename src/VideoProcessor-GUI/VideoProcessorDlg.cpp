@@ -3454,6 +3454,9 @@ bool CVideoProcessorDlg::ApplySavedConfiguration(bool alreadyStaged)
 			"Configuration transaction accepted: action=apply-display state=published");
 		break;
 	default:
+		// VPV-HOOK (W23-CFG-B1): keep baseline snapshot fresh on SaveOnly so subsequent diffs never drift.
+		if (m_stagedConfiguration && !m_stagedConfiguration->snapshot.empty())
+			m_configurationSnapshot = m_stagedConfiguration->snapshot;
 		DebugLog::Log(
 			"Configuration transaction complete: identity=%s action=save-only runtime=retained shortcuts=retained",
 			m_stagedConfigurationIdentity.c_str());

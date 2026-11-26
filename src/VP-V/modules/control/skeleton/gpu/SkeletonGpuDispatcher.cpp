@@ -5,6 +5,7 @@
 #define NOMINMAX
 #endif
 #include <VP-V/modules/control/skeleton/gpu/SkeletonGpuDispatcher.h>
+#include <VP-V/core/ComputeOnce.h>
 #include <VP-V/core/GpuAttributionPl.h>
 
 #include <algorithm>
@@ -48,18 +49,66 @@ namespace Vpv
 		}
 
 		SkeletonGpuDispatcher::SkeletonGpuDispatcher(pl_gpu gpu, bool hostReadable)
-			: m_gpu(gpu), m_backend(gpu, hostReadable)
+			: m_gpu(gpu), m_texPool(std::make_shared<TexPool>(gpu, hostReadable)), m_taps(kTapRing)
 		{
 			if (m_gpu)
 				m_dispatch = pl_dispatch_create(m_gpu->log, m_gpu);
-			GpuAttribution::Watch(m_dispatch, "lane_gpu");
+			WatchAttributionIfEnabled();
 		}
 
 		SkeletonGpuDispatcher::~SkeletonGpuDispatcher()
 		{
 			Release();
+			if (m_texPool)
+			{
+				// Any external Acquire keepAlive still surviving past ~SkeletonGpuDispatcher must never invoke
+				// libplacebo on a destroyed/gone device.
+				std::lock_guard<std::mutex> lk(m_texPool->mutex);
+				m_texPool->backend.gpu = nullptr;
+				m_texPool->abandoned = true;
+			}
 			if (m_dispatch)
 				pl_dispatch_destroy(&m_dispatch);
+		}
+
+		void SkeletonGpuDispatcher::WatchAttributionIfEnabled()
+		{
+			if (!m_attributionWatched && m_dispatch != nullptr && ::ComputeOnce::Enabled())
+			{
+				GpuAttribution::Watch(m_dispatch, "lane_gpu");
+				m_attributionWatched = true;
+			}
+		}
+
+		std::shared_ptr<GpuProductTextures> SkeletonGpuDispatcher::MakeProductTextures()
+		{
+			const std::shared_ptr<TexPool> pool = m_texPool;
+			GpuProductTextures* raw = new GpuProductTextures(pool->backend);
+			return std::shared_ptr<GpuProductTextures>(raw, [pool](GpuProductTextures* p) {
+				if (!p)
+					return;
+				std::lock_guard<std::mutex> lk(pool->mutex);
+				if (pool->abandoned)
+				{
+					// backend.gpu is nullptr: free CPU wrapper without touching libplacebo.
+					delete p;
+					return;
+				}
+				pool->retired.emplace_back(p);
+			});
+		}
+
+		void SkeletonGpuDispatcher::DrainRetiredTextures()
+		{
+			if (!m_texPool)
+				return;
+			std::vector<std::unique_ptr<GpuProductTextures>> dead;
+			{
+				std::lock_guard<std::mutex> lk(m_texPool->mutex);
+				dead.swap(m_texPool->retired);
+			}
+			// Destroy outside lock on render thread (GPU-legal phase).
+			dead.clear();
 		}
 
 		void SkeletonGpuDispatcher::AddKernel(std::unique_ptr<VpLaneProducts::IProductKernel> kernel)
@@ -92,11 +141,19 @@ namespace Vpv
 			if (!Valid())
 				return Fail("no GPU device for the analysis products");
 			uint64_t key = Mix(Mix(0xCBF29CE484222325ull, dims.width), dims.height);
+			size_t maxGpuRing = 0;
 			for (const Node& n : graph.nodes)
 				if (n.backend == VpSkeleton::Backend::GpuCompute && KernelOf(n.id))
+				{
 					key = Mix(Mix(Mix(Mix(key, n.id), n.ring), n.livePool), plan.Laned(n.id) ? 1u : 0u);
+					if (plan.Laned(n.id) && size_t(n.ring) > maxGpuRing)
+						maxGpuRing = size_t(n.ring);
+				}
+			// W23-SK-H2: size the tap ring from the backing lane-lead depth (at least kTapRing, capped at kMaxTapRing)
+			// so chunked P10 taps never evict an in-flight frame prematurely.
+			const size_t wantTaps = (std::min<size_t>)(kMaxTapRing, (std::max<size_t>)(kTapRing, 1u + maxGpuRing));
 			const bool sizeChanged = dims.width != m_dims.width || dims.height != m_dims.height;
-			if (key == m_graphKey && settingsGen == m_settingsGen && !m_products.empty())
+			if (key == m_graphKey && settingsGen == m_settingsGen && !m_products.empty() && m_taps.size() == wantTaps)
 				return true;
 			const bool rebuildTextures = key != m_graphKey || m_products.empty();
 			m_graphKey = key;
@@ -105,21 +162,39 @@ namespace Vpv
 			if (rebuildTextures)
 			{
 				NotePeakBytes();
+				// W23-SK-M2: preserve measured per-product GPU cost across same-dims graph re-plans so the gap
+				// scheduler never loses its measured cost history on non-size reconfigures.
+				std::map<ProductId, std::pair<GpuProductCost, uint64_t>> savedCosts;
+				if (!sizeChanged)
+				{
+					for (const auto& kv : m_products)
+						savedCosts[kv.first] = std::make_pair(kv.second.cost, kv.second.lastNs);
+				}
 				if (oldJobsJoined)
 				{
-					// K#12 (PERF-6): old workers/jobs are already joined; release graveyard and old textures BEFORE
-					// allocating replacements so peak VRAM stays <= max(old, new) instead of old + new.
+					// K#12 (PERF-6) + W23-SK-B1: old workers/jobs are already joined; drop unpinned textures before
+					// allocating replacements so peak VRAM stays <= max(old, new). If an external Acquire reader still
+					// holds keepAlive (use_count > 1), move to m_graveyard so its pl_tex stays valid until released.
 					FlushReleases();
 					for (auto& kv : m_products)
 					{
 						if (kv.second.tex)
 						{
-							kv.second.tex.reset();
-							++m_counters.releasesDone;
+							if (kv.second.tex.use_count() > 1)
+							{
+								m_graveyard.push_back(std::move(kv.second.tex));
+								++m_counters.releasesQueued;
+							}
+							else
+							{
+								kv.second.tex.reset();
+								++m_counters.releasesDone;
+							}
 						}
 						if (kv.second.timer)
 							pl_timer_destroy(m_gpu, &kv.second.timer);
 					}
+					DrainRetiredTextures();
 				}
 				else
 				{
@@ -145,14 +220,21 @@ namespace Vpv
 						continue;
 					ProductState& ps = m_products[n.id];
 					ps.history = n.history;
-					ps.tex.reset(new GpuProductTextures(m_backend));
-					m_backend.lastError.clear();
+					const auto sc = savedCosts.find(n.id);
+					if (sc != savedCosts.end())
+					{
+						ps.cost = sc->second.first;
+						ps.lastNs = sc->second.second;
+					}
+					ps.tex = MakeProductTextures();
+					m_texPool->backend.lastError.clear();
 					if (!ps.tex->Allocate(n, reg.Get(n.id), k->Layout(dims), dims, plan))
 					{
 						ps.refusal = ps.tex->LastRefusal().empty()
-							? std::string("video memory could not be allocated: ") + (m_backend.lastError.empty() ? "unknown reason" : m_backend.lastError)
+							? std::string("video memory could not be allocated: ") + (m_texPool->backend.lastError.empty() ? "unknown reason" : m_texPool->backend.lastError)
 							: ps.tex->LastRefusal();
 						ps.tex.reset();
+						DrainRetiredTextures();
 						ok = false;
 						continue;
 					}
@@ -166,6 +248,7 @@ namespace Vpv
 				for (Tap& t : m_taps)
 				{
 					t.used = false;
+					t.pinned = false;
 					if (t.tap)
 						pl_tex_destroy(m_gpu, &t.tap);
 					if (t.extended)
@@ -173,11 +256,40 @@ namespace Vpv
 				}
 				m_dims = dims;
 			}
+			if (m_taps.size() != wantTaps)
+			{
+				if (wantTaps < m_taps.size())
+				{
+					for (size_t i = wantTaps; i < m_taps.size(); ++i)
+					{
+						if (m_taps[i].tap)
+							pl_tex_destroy(m_gpu, &m_taps[i].tap);
+						if (m_taps[i].extended)
+							pl_tex_destroy(m_gpu, &m_taps[i].extended);
+					}
+				}
+				m_taps.resize(wantTaps);
+			}
 			for (const auto& k : m_kernels)
 				if (m_products.count(k->Product()) != 0 && !k->Prepare(m_gpu, m_dispatch, dims))
 				{
-					m_products[k->Product()].refusal = "preparation failed: " + k->LastError();
-					m_products[k->Product()].tex.reset();
+					ProductState& ps = m_products[k->Product()];
+					ps.refusal = "preparation failed: " + k->LastError();
+					// W23-SK-M2 / B1: account for released textures cleanly on Prepare() failure.
+					if (ps.tex)
+					{
+						if (!oldJobsJoined || ps.tex.use_count() > 1)
+						{
+							m_graveyard.push_back(std::move(ps.tex));
+							++m_counters.releasesQueued;
+						}
+						else
+						{
+							ps.tex.reset();
+							DrainRetiredTextures();
+							++m_counters.releasesDone;
+						}
+					}
 					ok = false;
 				}
 			if (!ok)
@@ -264,8 +376,20 @@ namespace Vpv
 		void SkeletonGpuDispatcher::FlushReleases()
 		{
 			NotePeakBytes();
-			m_counters.releasesDone += m_graveyard.size();
-			m_graveyard.clear();   // ~ProductTextures destroys through the backend
+			// W23-SK-B1: keep any graveyard entry still pinned by an external Acquire keepAlive until released.
+			std::vector<std::shared_ptr<GpuProductTextures>> stillPinned;
+			for (auto& tex : m_graveyard)
+			{
+				if (tex && tex.use_count() > 1)
+					stillPinned.push_back(std::move(tex));
+				else if (tex)
+				{
+					tex.reset();
+					++m_counters.releasesDone;
+				}
+			}
+			m_graveyard.swap(stillPinned);
+			DrainRetiredTextures();
 		}
 
 		void SkeletonGpuDispatcher::Release()
@@ -275,15 +399,21 @@ namespace Vpv
 			for (auto& kv : m_products)
 			{
 				if (kv.second.tex)
-					++m_counters.releasesDone;
-				kv.second.tex.reset();
+				{
+					if (kv.second.tex.use_count() == 1)
+						++m_counters.releasesDone;
+					kv.second.tex.reset();
+				}
 				if (kv.second.timer && m_gpu)
 					pl_timer_destroy(m_gpu, &kv.second.timer);
 			}
 			m_products.clear();
+			m_graveyard.clear();
+			DrainRetiredTextures();
 			for (Tap& t : m_taps)
 			{
 				t.used = false;
+				t.pinned = false;
 				if (t.tap && m_gpu)
 					pl_tex_destroy(m_gpu, &t.tap);
 				if (t.extended && m_gpu)
@@ -301,6 +431,12 @@ namespace Vpv
 		{
 			const auto it = m_products.find(id);
 			return it == m_products.end() ? nullptr : it->second.tex.get();
+		}
+
+		std::shared_ptr<const GpuProductTextures> SkeletonGpuDispatcher::SharedTexturesOf(ProductId id) const
+		{
+			const auto it = m_products.find(id);
+			return it == m_products.end() ? std::shared_ptr<const GpuProductTextures>() : std::shared_ptr<const GpuProductTextures>(it->second.tex);
 		}
 
 		bool SkeletonGpuDispatcher::Available(ProductId id) const
@@ -323,8 +459,15 @@ namespace Vpv
 		{
 			// The renderer's device is gone: nothing may be handed to libplacebo any more (its objects died with it).
 			m_gpu = nullptr;
-			m_backend.gpu = nullptr;
+			if (m_texPool)
+			{
+				std::lock_guard<std::mutex> lk(m_texPool->mutex);
+				m_texPool->backend.gpu = nullptr;
+				m_texPool->abandoned = true;
+				m_texPool->retired.clear();
+			}
 			m_dispatch = nullptr;
+			m_attributionWatched = false;
 			m_lane = nullptr;
 			m_statics.Abandon();
 			for (Tap& t : m_taps)
@@ -332,9 +475,15 @@ namespace Vpv
 				t.tap = nullptr;
 				t.extended = nullptr;
 				t.used = false;
+				t.pinned = false;
 			}
 			for (auto& kv : m_products)
 				kv.second.timer = nullptr;
+			// W23-SK-M4: clear dead-device product maps and graveyard immediately (with backend.gpu == nullptr).
+			m_graveyard.clear();
+			m_products.clear();
+			m_graphKey = 0;
+			m_dims = Dims{ 0, 0 };
 		}
 
 		uint64_t SkeletonGpuDispatcher::AllocatedBytes() const
@@ -349,9 +498,16 @@ namespace Vpv
 		uint64_t SkeletonGpuDispatcher::GraveyardBytes() const
 		{
 			uint64_t b = 0;
-			for (const std::unique_ptr<GpuProductTextures>& tex : m_graveyard)
+			for (const std::shared_ptr<GpuProductTextures>& tex : m_graveyard)
 				if (tex)
 					b += tex->Bytes();
+			if (m_texPool)
+			{
+				std::lock_guard<std::mutex> lk(m_texPool->mutex);
+				for (const std::unique_ptr<GpuProductTextures>& tex : m_texPool->retired)
+					if (tex)
+						b += tex->Bytes();
+			}
 			return b;
 		}
 
@@ -375,12 +531,13 @@ namespace Vpv
 			for (Tap& t : m_taps)
 				if (t.used && t.seq == seq)
 					return &t;
-			if (!create)
+			if (!create || m_taps.empty())
 			{
 				m_tapError = "the tap plane of frame " + std::to_string(seq) + " is not there (evicted, or its first chunk did not run)";
 				return nullptr;
 			}
-			Tap* victim = &m_taps[0];
+			// W23-SK-H2: prefer an unused slot, then the lowest-seq unpinned slot; only evict a pinned slot if all are pinned.
+			Tap* victim = nullptr;
 			m_tapError.clear();
 			for (Tap& t : m_taps)
 			{
@@ -389,11 +546,18 @@ namespace Vpv
 					victim = &t;
 					break;
 				}
-				if (t.seq < victim->seq)
+				if (!t.pinned && (victim == nullptr || t.seq < victim->seq))
 					victim = &t;
 			}
+			if (victim == nullptr)
+			{
+				victim = &m_taps[0];
+				for (Tap& t : m_taps)
+					if (t.seq < victim->seq)
+						victim = &t;
+			}
 			const int w = int(m_dims.width), h = int(m_dims.height);
-			const bool readable = m_backend.hostReadable;
+			const bool readable = m_texPool && m_texPool->backend.hostReadable;
 			std::string why;
 			if (!CreateR16(m_gpu, victim->tap, w, h, readable, why) || !CreateR16(m_gpu, victim->extended, w, h, readable, why))
 			{
@@ -401,13 +565,14 @@ namespace Vpv
 				return nullptr;
 			}
 			victim->used = true;
+			victim->pinned = false;
 			victim->seq = seq;
 			victim->bands = 0;
 			victim->extendedDone = false;
 			return victim;
 		}
 
-		bool SkeletonGpuDispatcher::EnsureTap(Tap& t, const VpSkeleton::SourceFrameView& view, const RegionEvidence::Rect& picture)
+		bool SkeletonGpuDispatcher::EnsureTap(Tap& t, const VpSkeleton::SourceFrameView& view, const RegionEvidence::Rect& picture, pl_timer timer)
 		{
 			const Dims d = m_dims;
 			const uint32_t rpb = VpLaneProducts::TapRowsPerBand(d);
@@ -424,8 +589,10 @@ namespace Vpv
 			if (!t.extendedDone)
 			{
 				t.picture = picture;
-				if (!VpLaneProducts::ExtendTap(m_dispatch, t.tap, t.extended, picture))
+				// W23-SK-M3: time the extend pass with the owning product's timer, and record ComputeOnce (W23-SK-H2).
+				if (!VpLaneProducts::ExtendTap(m_dispatch, t.tap, t.extended, picture, timer))
 					return Fail("the extend pass failed");
+				::ComputeOnce::Note("lane_tap_extend", int64_t(t.seq), 0, nullptr, "SkeletonGpuDispatcher::EnsureTap");
 				t.extendedDone = true;
 				++m_counters.extends;
 			}
@@ -510,6 +677,7 @@ namespace Vpv
 		{
 			if (!Valid() || job.node == nullptr)
 				return Fail("no GPU device");
+			WatchAttributionIfEnabled();
 			const Node& node = *job.node;
 			VpLaneProducts::IProductKernel* k = KernelOf(node.id);
 			if (!k)
@@ -548,25 +716,38 @@ namespace Vpv
 				if (chunk == 0)
 				{
 					// A new job for this seq (a graph swap hands an unfinished job to the next runner, possibly for the same
-					// frame): the tap's upload progress restarts with it.
+					// frame): the tap's upload progress restarts with it, and stays pinned until P10 finishes.
 					t->bands = 0;
 					t->extendedDone = false;
+					t->pinned = true;
 				}
 				if (chunk < bands)
 				{
 					if (t->bands != chunk)
+					{
+						t->pinned = false;
 						return Fail("the tap bands are out of order");
+					}
 					const uint32_t rpb = VpLaneProducts::TapRowsPerBand(m_dims);
 					const uint32_t y0 = chunk * rpb;
 					if (!VpLaneProducts::UploadTapRows(m_gpu, t->tap, *job.source, y0, (std::min)(m_dims.height, y0 + rpb), m_scratch))
+					{
+						t->pinned = false;
 						return Fail("the tap plane could not be uploaded");
+					}
 					++t->bands;
 					++m_counters.tapBands;
 					return true;
 				}
 				t->extendedDone = false;
-				return EnsureTap(*t, *job.source, picture);
+				if (!EnsureTap(*t, *job.source, picture, ps.timer))
+				{
+					t->pinned = false;
+					return false;
+				}
+				return true;
 			}
+			Tap* usedTap = nullptr;
 			if (k->NeedsTap())
 			{
 				Tap* t = TapFor(job.seq, !ownsTap);
@@ -576,9 +757,10 @@ namespace Vpv
 				{
 					if (job.source == nullptr || !job.source->Valid())
 						return Fail("the lane job has no source frame");
-					if (!EnsureTap(*t, *job.source, picture))
+					if (!EnsureTap(*t, *job.source, picture, ps.timer))
 						return false;
 				}
+				usedTap = t;
 				c.tap = t->tap;
 				c.extended = t->extendedDone ? t->extended : nullptr;
 				c.picture = t->picture;
@@ -586,9 +768,17 @@ namespace Vpv
 			else
 				c.picture = picture;
 			if (!k->Step(c, chunk - prefix))
+			{
+				if (ownsTap && usedTap)
+					usedTap->pinned = false;
 				return Fail(c.error.empty() ? k->LastError() : c.error);
+			}
 			if (chunk + 1u == chunkCount)
+			{
+				if (ownsTap && usedTap)
+					usedTap->pinned = false;
 				ps.cost.NoteFrameDone();
+			}
 			return true;
 		}
 
@@ -597,6 +787,7 @@ namespace Vpv
 		{
 			if (!Valid())
 				return Fail("no GPU device");
+			WatchAttributionIfEnabled();
 			VpLaneProducts::IProductKernel* k = KernelOf(node.id);
 			if (!k)
 				return Fail("no kernel for the product");
@@ -609,7 +800,8 @@ namespace Vpv
 				++c.outCount;
 			if (c.outCount == 0)
 				return Fail("the live buffer has no textures");
-			PollTimer(m_products[node.id]);
+			ProductState& ps = m_products[node.id];
+			PollTimer(ps);
 			const VpLaneProducts::GpuInput* p4 = c.Input(VpSkeleton::kP4SourceStats);
 			c.picture = VpLaneProducts::PictureFromStats(p4 && !p4->missing ? p4->cpu : nullptr, p4 ? p4->cpuBytes : 0u,
 				int(m_dims.width), int(m_dims.height));
@@ -622,7 +814,7 @@ namespace Vpv
 				Tap* t = TapFor(seq, true);
 				if (!t)
 					return Fail("the tap plane could not be made: " + m_tapError);
-				if (!EnsureTap(*t, view, c.picture))
+				if (!EnsureTap(*t, view, c.picture, ps.timer))
 					return Fail(m_error.empty() ? "the tap plane could not be made" : m_error);
 				c.tap = t->tap;
 				c.extended = t->extended;
@@ -633,7 +825,7 @@ namespace Vpv
 				if (!k->Step(c, i))
 					return Fail(c.error.empty() ? k->LastError() : c.error);
 			++m_counters.liveFills;
-			m_products[node.id].cost.NoteFrameDone();
+			ps.cost.NoteFrameDone();
 			return true;
 		}
 
@@ -658,10 +850,30 @@ namespace Vpv
 
 		uint64_t SkeletonGpuDispatcher::PrivateBytes(VpSkeleton::Dims dims, bool laneForm) const
 	{
-		uint64_t total = uint64_t(kTapRing) * 2u * uint64_t(dims.width) * dims.height * 2u;
+		const size_t tapSlots = m_taps.empty() ? kTapRing : m_taps.size();
+		uint64_t total = uint64_t(tapSlots) * 2u * uint64_t(dims.width) * dims.height * 2u;
 		for (const std::unique_ptr<VpLaneProducts::IProductKernel>& k : m_kernels)
 			total += k->PrivateBytes(dims, laneForm);
 		return total;
+	}
+
+		uint64_t SkeletonGpuDispatcher::ActualPrivateBytes(VpSkeleton::Dims dims) const
+	{
+		uint64_t held = 0;
+		if (dims.width == m_dims.width && dims.height == m_dims.height)
+		{
+			const uint64_t planeBytes = uint64_t(dims.width) * dims.height * 2u;
+			for (const Tap& t : m_taps)
+			{
+				if (t.tap != nullptr)
+					held += planeBytes;
+				if (t.extended != nullptr)
+					held += planeBytes;
+			}
+		}
+		for (const std::unique_ptr<VpLaneProducts::IProductKernel>& k : m_kernels)
+			held += k->ActualPrivateBytes(dims);
+		return held;
 	}
 
 	std::vector<FallbackCatalog::Decision> SkeletonGpuDispatcher::Fallbacks() const

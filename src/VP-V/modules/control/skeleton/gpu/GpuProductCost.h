@@ -34,10 +34,12 @@ namespace Vpv
 				if (ns > maxPassNs)
 					maxPassNs = ns;
 			}
-			// Called after each poll: the frames done so far are the divisor (results lag the passes by up to a frame or two).
+			// Called after each poll: advance the divisor only when at least one timer result has landed
+			// (W23-SK-M3: polling before async results return must not inflate timedFrames over 0 ns).
 			void NotePoll()
 			{
-				timedFrames = frames;
+				if (results > 0)
+					timedFrames = frames;
 			}
 			void NoteFrameDone()
 			{

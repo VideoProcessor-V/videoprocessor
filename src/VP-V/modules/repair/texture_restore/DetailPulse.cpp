@@ -57,15 +57,22 @@ shared float sh[SW * BLK];
 shared float slow[HL * HL];
 shared float rd[1024];
 
+// W23-IR-L1: FXC-safe non-finite input guard so NaN/Inf texels cannot poison ring/EMA tile state.
+float dp_finite(float x)
+{
+    uint u = floatBitsToUint(x);
+    return ((u & 0x7F800000u) == 0x7F800000u) ? 0.0 : x;
+}
+
 // The plane's code at p: the luma plane's sample, or (one-plane RGB) the luma of R, G, B in
 // the source's codes.
 float code_at(ivec2 p)
 {
 #ifdef DP_RGB
     vec4 t = texelFetch(src, p, 0);
-    return luma_mul * dot(t.rgb, luma_w) + luma_add;
+    return dp_finite(luma_mul * dot(t.rgb, luma_w) + luma_add);
 #else
-    return code_scale * texelFetch(src, p, 0).r;
+    return dp_finite(code_scale * texelFetch(src, p, 0).r);
 #endif
 }
 
@@ -453,13 +460,19 @@ for (int q = 0; q < 4; q++) {
 		// Shared memory: one array carved by offsets; the reduction scratch reuses the codes'.
 		constexpr int kLowTile = 32;   // LT in the low pass
 		const char* const QUAD_FUNCS = R"GLSL(
+float dp_finite(float x)
+{
+    uint u = floatBitsToUint(x);
+    return ((u & 0x7F800000u) == 0x7F800000u) ? 0.0 : x;
+}
+
 float code_at(ivec2 p)
 {
 #ifdef DP_RGB
     vec4 t = texelFetch(src, p, 0);
-    return luma_mul * dot(t.rgb, luma_w) + luma_add;
+    return dp_finite(luma_mul * dot(t.rgb, luma_w) + luma_add);
 #else
-    return code_scale * texelFetch(src, p, 0).r;
+    return dp_finite(code_scale * texelFetch(src, p, 0).r);
 #endif
 }
 
@@ -480,13 +493,13 @@ vec4 quad_codes(ivec2 p, vec2 isz)
     vec4 g = textureGather(src, uv, 1);
     vec4 b = textureGather(src, uv, 2);
     // textureGather: x (0,1), y (1,1), z (1,0), w (0,0)
-    return vec4(luma_mul * dot(vec3(r.w, g.w, b.w), luma_w) + luma_add,
-                luma_mul * dot(vec3(r.z, g.z, b.z), luma_w) + luma_add,
-                luma_mul * dot(vec3(r.x, g.x, b.x), luma_w) + luma_add,
-                luma_mul * dot(vec3(r.y, g.y, b.y), luma_w) + luma_add);
+    return vec4(dp_finite(luma_mul * dot(vec3(r.w, g.w, b.w), luma_w) + luma_add),
+                dp_finite(luma_mul * dot(vec3(r.z, g.z, b.z), luma_w) + luma_add),
+                dp_finite(luma_mul * dot(vec3(r.x, g.x, b.x), luma_w) + luma_add),
+                dp_finite(luma_mul * dot(vec3(r.y, g.y, b.y), luma_w) + luma_add));
 #else
     vec4 t = textureGather(src, uv, 0);
-    return vec4(code_scale * t.w, code_scale * t.z, code_scale * t.x, code_scale * t.y);
+    return vec4(dp_finite(code_scale * t.w), dp_finite(code_scale * t.z), dp_finite(code_scale * t.x), dp_finite(code_scale * t.y));
 #endif
 #else
     ivec2 hi = textureSize(src, 0) - ivec2(1);
@@ -1773,7 +1786,8 @@ for (int q = 0; q < 4; q++) {
 				lastHistoryKeep = 0.0f;
 			}
 			bool aheadAllowed = false;
-			float aheadKeep2 = historyKeep2;
+			// W23-IR-M2: aheadKeep2 is the attenuation across t -> t+1 (independent of historyKeep2 for t-1 -> t).
+			float aheadKeep2 = 1.0f;
 			if (aheadValid && nValid > 0 && sceneRestart == 0)
 			{
 				const VpDetailRestore::SceneRestartAnswer aheadScene = VpDetailRestore::SceneRestartOf(m.aheadSequence,
@@ -1797,8 +1811,8 @@ for (int q = 0; q < 4; q++) {
 					++aheadSceneHits;
 					lastAheadSceneFallback.clear();
 					aheadKeep2 = (aheadScene.fadePartial || aheadScene.softPartial)
-						? (std::min)(historyKeep2, aheadScene.historyKeep * aheadScene.historyKeep)
-						: historyKeep2;
+						? (aheadScene.historyKeep * aheadScene.historyKeep)
+						: 1.0f;
 				}
 			}
 			VpSkeleton::AcquireResult memoP11;

@@ -93,7 +93,22 @@ namespace Vpv
 		m_cadenceClassFixes.store(f.cadenceClassFixes, std::memory_order_relaxed);
 		queueTimingFixes.store(f.queueTimingFixes, std::memory_order_relaxed);
 		motionHistoryFixes.store(f.motionHistoryFixes, std::memory_order_relaxed);
-		return m_originalPathway.exchange(f.originalPathway, std::memory_order_acq_rel) != f.originalPathway;
+		const bool prevOriginal = m_originalPathway.exchange(f.originalPathway, std::memory_order_acq_rel);
+		// W23-DV-H4: live VP-V <-> Original switch clears pulldown & FilmClock cleanly on the capture thread so
+		// Original leaks zero stale cadence/acquiring state and returning to VP-V starts fresh without a 1s clamp.
+		if (f.originalPathway)
+		{
+			ClearPulldownWhenOff();
+			m_captureStaleGapPending = false;
+			m_captureStaleGapCause = nullptr;
+			m_pulldownFrameFacts = CadenceFacts{};
+		}
+		else if (prevOriginal)
+		{
+			m_pulldownResetRequested.store(true, std::memory_order_release);
+			m_pulldownForceGap = true;
+		}
+		return prevOriginal != f.originalPathway;
 	}
 	bool m_pulldownForceGap = false;          // capture thread: a toggle restarted the film clock (06-interp L1)
 	// Q1 (queue stress 2026-10-18, queue_timing_fixes): stale-frame arrivals and their
@@ -117,6 +132,8 @@ namespace Vpv
 	uint64_t m_pulldownSignature = 0;
 	CaptureSignature m_captureSignature;   // C8-PROD: the always-on capture compare (pulldown on or off), capture thread
 	int64_t m_pulldownFilmQpc = 0;   // the last film frame's even time (QPC)
+	bool m_pulldownFilmIsFrameStart = false;   // W23-DV-M1: whether m_pulldownFilmQpc was anchored to hardware frame-start
+	std::atomic<double> m_pulldownCadenceLatenessMaxMs{0.0};   // W23-DV-M1: locked FilmClock +latenessMax shift (ms)
 	// M2 P10-5: OnVideoFrame's locals shared by its three ingress blocks (IngressPolicy.inl), per frame on the capture
 	// thread (callbacks are serial). Written by blocks 1-2, read by the R15 call site and block 3.
 	int64_t m_ingressArrivalQpc = 0, m_ingressHardwareQpc = 0, m_ingressCallbackQpc = 0;
@@ -140,6 +157,8 @@ namespace Vpv
 		m_pulldownSignature = 0;
 		m_captureSignature.Reset();
 		m_pulldownFilmQpc = 0;
+		m_pulldownFilmIsFrameStart = false;
+		m_pulldownCadenceLatenessMaxMs.store(0.0, std::memory_order_relaxed);
 		m_pulldownAcquiring.store(false, std::memory_order_relaxed);
 	}
 
