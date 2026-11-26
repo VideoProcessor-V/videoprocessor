@@ -148,6 +148,7 @@
     <ClInclude Include="..\VP-V\modules\motion\estimation\fast_objects\FastObjectRefineRef.h" />
     <ClInclude Include="..\VP-V\modules\motion\estimation\fast_objects\FastObjectOverlay.h" />
     <ClInclude Include="..\VP-V\modules\motion\estimation\fast_objects\FastObjectTracker.h" />
+    <ClInclude Include="..\VP-V\modules\motion\estimation\fast_objects\FastObjectGpu.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\VP-V\modules\control\config\VpvProfileQueueAdvice.cpp" />
@@ -249,6 +250,9 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="..\VP-V\modules\motion\estimation\fast_objects\FastObjectTracker.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="..\VP-V\modules\motion\estimation\fast_objects\FastObjectGpu.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
   </ItemGroup>

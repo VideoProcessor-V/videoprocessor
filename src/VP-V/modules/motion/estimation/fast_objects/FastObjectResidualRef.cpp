@@ -760,7 +760,19 @@ namespace FastObjects
 
 							bool accept = ((nm & kSampleGrow) != 0);
 							if (!accept && nInStreakCell && ((nm & kSampleStreakEligible) != 0))
-								accept = true;
+							{
+								// On pure matched-filter diluted streak cells (no >= seedSigma peak, triggered
+								// solely by coherent luma |zCell| >= seedSigma), require weak 1..3 sigma pixels
+								// to share the streak's coherent luma polarity so opposite-polarity noise cannot
+								// attach, while leaving isoluminant chroma streaks and dual-polarity textured
+								// balls (maxAbsZ >= seedSigma) intact.
+								const CellDescriptor& nc = ws.cells[ncidx];
+								const bool pureLumaStreak =
+									(nc.maxAbsZ < static_cast<float>(seedSigma)) &&
+									(std::fabs(nc.zCell) >= static_cast<float>(seedSigma));
+								if (!pureLumaStreak || (ws.zMapY[nidx] * nc.zCell > 0.0f))
+									accept = true;
+							}
 							if (!accept)
 								continue;
 

@@ -2166,6 +2166,7 @@ namespace FastObjects
 			outSet.abstainReason |= AbstainReason::CausalNoLookAhead;
 
 		const uint32_t maxOutTracks = std::min(std::max(cfg.maxTracks, 1u), kMaxTracksHardCap);
+		uint32_t outSrcTrackIdx[kMaxTracksHardCap] = {};
 
 		for (uint32_t ti = 0; ti < kMaxTracksHardCap; ++ti)
 		{
@@ -2327,6 +2328,7 @@ namespace FastObjects
 			if (outSet.count >= maxOutTracks)
 				continue;
 
+			outSrcTrackIdx[outSet.count] = ti;
 			FastObjectTrack& outTrk = outSet.tracks[outSet.count++];
 			outTrk = FastObjectTrack{};
 			outTrk.id = trk.id;
@@ -2431,8 +2433,6 @@ namespace FastObjects
 			else
 			{
 				outTrk.state = ValidityState::Valid;
-				if (cfg.enableSessionPrior)
-					UpdateSessionPrior(trk);
 			}
 		}
 
@@ -2486,6 +2486,8 @@ namespace FastObjects
 				if (outTrk.type == TrajectoryType::Ballistic) ++outSet.diag.ballisticTracks;
 				else if (outTrk.type == TrajectoryType::LinearGlide) ++outSet.diag.linearGlideTracks;
 				else if (outTrk.type == TrajectoryType::Impulse) ++outSet.diag.impulseTracks;
+				if (cfg.enableSessionPrior)
+					UpdateSessionPrior(tracks_[outSrcTrackIdx[i]]);
 			}
 			else
 			{
