@@ -637,7 +637,6 @@ namespace TdV2
 		const std::vector<uint8_t>* explicitDefocusedCells = nullptr,
 		const std::vector<double>* cellStepScales = nullptr)
 	{
-		(void)sourceBits;
 		if (standIns != nullptr)
 			standIns->Engage(StandInKind::FocusMapK32);
 
@@ -645,10 +644,11 @@ namespace TdV2
 		std::vector<FocusCellInfo> info(numCells);
 		// Map full-spectrum noise variance into the exact (M + D3) band-energy domain via BandFromBase's
 		// 2D white-noise transfer gain gainMD3 = ||M||_2^2 + ||D3||_2^2 (~= 0.05589), floored by the exact
-		// 1-LSB uniform quantization noise variance (1.0^2 / 12 = 1/12 code^2), at the exact 0-dB SNR boundary (2 * N).
+		// bit-depth-scaled 1-LSB uniform quantization noise variance (DepthScale(sourceBits)^2 / 12), at 0-dB SNR (2 * N).
 		const BandWhiteNoiseGains focusGains = ComputeBandWhiteNoiseGains();
 		const double gainMD3 = focusGains.mid + focusGains.d3;
-		const double baseQuantVar = (kDefaultStepPriorLsb * kDefaultStepPriorLsb) / 12.0;
+		const double depthScale = DepthScale(sourceBits);
+		const double baseQuantVar = (kDefaultStepPriorLsb * depthScale * kDefaultStepPriorLsb * depthScale) / 12.0;
 		const double stepNoiseVar = (std::max)(0.0, stepTotalVar);
 		const double effNoiseVar = (std::max)(baseQuantVar, stepNoiseVar);
 		const double structureFloor = 2.0 * gainMD3 * effNoiseVar;
@@ -1468,7 +1468,7 @@ namespace TdV2
 			{
 				if (!a2InputNonFinite)
 				{
-					effStepDelta = kDefaultStepPriorLsb; // True 1-LSB quantization step in native integer code units
+					effStepDelta = kDefaultStepPriorLsb * DepthScale(cfg_.sourceBits); // True 1-LSB quantization step scaled for sourceBits
 					effPhi = kUniformRoundingPhi;        // Unbiased uniform output rounding (phi = 0.5 -> V1 = 1/12)
 					effZeroFrac = 0.0;                   // Uniform rounding cell without invented pi0
 					if (standIns != nullptr)

@@ -479,7 +479,7 @@ namespace Gpu
 
 		inline ResolvedA2StepPrior ResolveA2StepPrior(
 			bool hasStepPrior, double estimatedStepDelta, double deadZonePhi, double zeroCoeffFraction,
-			StandInRegistry* standIns)
+			StandInRegistry* standIns, int sourceBits = 10)
 		{
 			ResolvedA2StepPrior r{};
 			r.effStepDelta = estimatedStepDelta;
@@ -490,7 +490,7 @@ namespace Gpu
 			{
 				if (!r.inputNonFinite)
 				{
-					r.effStepDelta = kDefaultStepPriorLsb; // True 1-LSB quantization step in native integer code units
+					r.effStepDelta = kDefaultStepPriorLsb * DepthScale(sourceBits); // True 1-LSB quantization step scaled for sourceBits
 					r.effPhi = kUniformRoundingPhi;        // Unbiased uniform output rounding (phi = 0.5 -> V1 = 1/12)
 					r.effZeroFrac = 0.0;                   // Uniform rounding cell without invented pi0
 					if (standIns != nullptr)
@@ -1510,7 +1510,7 @@ namespace Gpu
 
 			// Validate coding step prior upfront (mirrors TdV2ReferenceEngine.h !a2Stats.valid early closure 1:1).
 			const Detail::ResolvedA2StepPrior a2 = Detail::ResolveA2StepPrior(
-				in.hasStepPrior, in.estimatedStepDelta, in.deadZonePhi, in.zeroCoeffFraction, standIns);
+				in.hasStepPrior, in.estimatedStepDelta, in.deadZonePhi, in.zeroCoeffFraction, standIns, cfg_.sourceBits);
 			if (!a2.stats.valid)
 			{
 				if (standIns != nullptr)
@@ -1950,7 +1950,7 @@ namespace Gpu
 
 			// Validate coding step prior upfront (mirrors TdV2ReferenceEngine.h !a2Stats.valid early closure 1:1).
 			const Detail::ResolvedA2StepPrior a2 = Detail::ResolveA2StepPrior(
-				in.hasStepPrior, in.estimatedStepDelta, in.deadZonePhi, in.zeroCoeffFraction, standIns);
+				in.hasStepPrior, in.estimatedStepDelta, in.deadZonePhi, in.zeroCoeffFraction, standIns, cfg_.sourceBits);
 			if (!a2.stats.valid)
 			{
 				if (standIns != nullptr)
