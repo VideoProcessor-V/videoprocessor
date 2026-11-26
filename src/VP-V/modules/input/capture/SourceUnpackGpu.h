@@ -60,6 +60,7 @@ namespace SourceUnpack
 		BadGeometry,        // size, stride or width the packing cannot take
 		DvContainer,        // a tunnel container outside DolbyVisionTunnelUnpackReference::SupportsContainer
 		DvAlignment,        // RGB8 alignment is neither 1 (high) nor 2 (low)
+		FullRangeYuv,       // W23-NEON-L2: fullRange is DvTunnel-only (YUV full range stays on the CPU path)
 		NoFormat,           // no rgba8 / storable r16 format on this device
 		RawUploadFailed,    // the host-bytes path could not create or upload the raw texture
 		UploadedSizeDiffers,// the early-upload texture is not rowBytes / 4 x height

@@ -115,7 +115,7 @@ bool OriginalPathwayForConfig(TryGet&& tryGet)
 {
 	std::string pathway;
 	const bool known = tryGet("vpv", "pipeline_original_pathway", pathway) ||
-		tryGet("vprenderer", "pipeline_original_pathway", pathway);
+		tryGet("vprenderer", "pipeline_original_pathway", pathway) || tryGet("display", "pipeline_original_pathway", pathway);
 	return known && ConfigFile::NormalizeName(pathway) == "on";
 }
 

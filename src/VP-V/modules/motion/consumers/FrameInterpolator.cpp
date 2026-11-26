@@ -550,7 +550,9 @@ if (q.x < size.x && q.y < size.y)
 
 	bool FrameInterpolator::EnsureFloat(pl_tex& tex, int w, int h, int components)
 	{
-		if (tex && tex->params.w == w && tex->params.h == h && tex->params.format->num_components == components)
+		// W23-NEON-M3: accept widened 4-component RGBA32F fallback for 3-component planes so textures are reused every frame.
+		if (tex && tex->params.w == w && tex->params.h == h &&
+			(tex->params.format->num_components == components || (components == 3 && tex->params.format->num_components == 4)))
 			return true;
 		pl_tex_destroy(gpu, &tex);
 		const enum pl_fmt_caps caps = static_cast<enum pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_STORABLE);

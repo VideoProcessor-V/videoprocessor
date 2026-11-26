@@ -869,7 +869,7 @@ namespace Vpv
 			else if (st->core)
 			{
 				const RE::DrawJob* job = RE::PayloadOf<RE::DrawJob>(c);
-				if (!job || job->retireSourceFrame)
+				if (!job || (job->retireSourceFrame && job->runPostSubmitGap))
 				{
 					st->core->OnPostSubmitGap();
 					if (st->labelFill && st->liveBuilt)

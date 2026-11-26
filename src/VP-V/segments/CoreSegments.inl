@@ -840,6 +840,7 @@ void LibplaceboVideoRenderer::Impl::CollectFrameHooks(pl_frame& baseTarget, pl_f
     // W23-4p (G-T1): live dither_need GPU block pass + HookGuard bind (default off; never Original; NLS guarded).
     {
         OutputSegments::DitherNeedGpuRequest dnReq;
+        dnReq.gpu = d3d11 ? d3d11->gpu : nullptr;   // W23-NEON-B1: always pass live gpu so off/Original teardown never sees null on live device
         SourceIdentity::QualityView dnQuality;
         if (activeSettings.ditherNeed == "auto" && !pipelineSlots.OriginalPathway()) {
             dnQuality = vpv.sourceAnalysis.sourceMonitor.QualityView();

@@ -160,6 +160,8 @@ if (blk.x < cm_grid.x && blk.y < cm_grid.y) {
 		k.blockSize = static_cast<float>(in.blockSize);
 		if (rec.blocks && rec.blocks->absThresholdPx > 0.0f && IsFiniteBits(rec.blocks->absThresholdPx))
 			k.absThr = rec.blocks->absThresholdPx;
+		else if (rec.absThresholdPx > 0.0 && IsFiniteBits(rec.absThresholdPx))
+			k.absThr = static_cast<float>(rec.absThresholdPx);
 		else
 		{
 			const double base = in.precisionPx > 0 ? in.precisionPx : 0.25 * in.blockSize / 16.0;

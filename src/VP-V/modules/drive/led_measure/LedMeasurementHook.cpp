@@ -580,6 +580,7 @@ if (i < READBACK_WORDS) {
 		{
 			DebugLog::Log("Dynamic Drive: the non-blocking measurement readback is unavailable; libplacebo's readback");
 			nativeTried = true;
+			nativeFailed = true;   // W23-NEON-H4: surface blocking D3D11 fallback visibly in FallbackCatalog
 			return false;
 		}
 		native = std::move(created);

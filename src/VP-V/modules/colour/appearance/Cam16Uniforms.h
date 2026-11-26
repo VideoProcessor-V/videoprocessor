@@ -107,7 +107,7 @@ namespace Cam16
 	// FIX1 MUST 5 (refs/125 s4: the veil enters the SCREEN side as flare on the inverse). The flare is part of the screen
 	// viewing conditions (the eye adapts to the screen light plus the reflected room light), and the displayed light is
 	// brought down by a flare TOE, never a subtract-and-clip: g(o) = o (o + f) / (o + 2 f), normalised so g(u) = u
-	// (u = upper: 1.0 for SDR, 10000 / screenWhiteNits for ST.2084 PQ).
+	// (u = upper: 1.0 for SDR, 10000 / referenceWhiteNits for ST.2084 PQ).
 	// For o >> f, g(o) + f ~ o (the seen light keeps the intended contrast); near black g has slope 1/2 and reaches 0 only
 	// at 0, so every displayed level stays distinct (no shadow crush, low-level grain kept). Monotonic on [0, u] with
 	// 0 < g(o) < o < g(o) + f on (0, u); f = 0 is the identity. The shader's ap_flare (shaders/vp_cam16_appearance.glsl) is

@@ -221,44 +221,42 @@ if (tile < int(tiles) && g.y < ts) {
 		if (to > from && !u7AheadHistory.empty())
 		{
 			uint64_t expect = from + 1u;
-			bool anyCut = false;
-			bool anyUnresolved = false;
+			bool anyConfirmedCut = false;
+			bool anyPendingCut = false;
 			for (const U7AheadEntry& entry : u7AheadHistory)
 			{
 				if (entry.seq < expect)
 					continue;
 				if (entry.seq > expect)
 					break;   // gap in (from, to]: not consecutively covered
-				if (entry.fromFrameJudge)
+				U7AheadEntry::Verdict v = entry.verdict;
+				if (entry.fromFrameJudge && v != U7AheadEntry::Verdict::Cancelled && v != U7AheadEntry::Verdict::Confirmed)
 				{
-					bool isPending = false;
-					bool isCancelled = frameJudge.Cancelled(entry.seq);
-					for (const auto& c : frameJudge.Candidates())
+					if (frameJudge.Cancelled(entry.seq))
+						v = U7AheadEntry::Verdict::Cancelled;
+					else
 					{
-						if (c.sequence == entry.seq)
+						for (const auto& c : frameJudge.Candidates())
 						{
-							if (c.cancelled)
-								isCancelled = true;
-							else if (!c.confirmed)
-								isPending = true;
-							break;
+							if (c.sequence == entry.seq)
+							{
+								v = c.cancelled ? U7AheadEntry::Verdict::Cancelled
+									: (c.confirmed ? U7AheadEntry::Verdict::Confirmed : U7AheadEntry::Verdict::Pending);
+								break;
+							}
 						}
 					}
-					if (isPending)
-						anyUnresolved = true;
-					else if (entry.cut && !isCancelled)
-						anyCut = true;
 				}
-				else if (entry.cut)
-				{
-					anyCut = true;
-				}
+				if (v == U7AheadEntry::Verdict::Confirmed)
+					anyConfirmedCut = true;
+				else if (v == U7AheadEntry::Verdict::Pending)
+					anyPendingCut = true;
 				if (expect == to)
 				{
 					SourceResolution::FrameEvidence e;
 					e.covered = true;
-					e.cut = anyCut;
-					e.unresolved = !anyCut && anyUnresolved;
+					e.cut = anyConfirmedCut || anyPendingCut;
+					e.unresolved = !anyConfirmedCut && anyPendingCut;
 					return e;
 				}
 				++expect;
@@ -486,11 +484,51 @@ if (tile < int(tiles) && g.y < ts) {
 		}
 		{
 			std::lock_guard<std::mutex> judgeLock(frameJudgeMutex);
+			// W23-NEON-H1: reconcile existing fallback entries against frameJudge before Reset() so cancelled
+			// flashes stay Cancelled and unconfirmed pending flashes are never falsely promoted to Confirmed.
+			for (U7AheadEntry& entry : u7AheadHistory)
+			{
+				if (!entry.fromFrameJudge || entry.verdict == U7AheadEntry::Verdict::Cancelled || entry.verdict == U7AheadEntry::Verdict::Confirmed)
+					continue;
+				if (frameJudge.Cancelled(entry.seq))
+					entry.verdict = U7AheadEntry::Verdict::Cancelled;
+				else
+				{
+					for (const auto& c : frameJudge.Candidates())
+					{
+						if (c.sequence == entry.seq)
+						{
+							entry.verdict = c.cancelled ? U7AheadEntry::Verdict::Cancelled
+								: (c.confirmed ? U7AheadEntry::Verdict::Confirmed : U7AheadEntry::Verdict::Pending);
+							break;
+						}
+					}
+				}
+			}
+			const bool fromFallback = !haveU7 && fixes && CutFixes();
+			U7AheadEntry::Verdict newVerdict = cut ? U7AheadEntry::Verdict::Confirmed : U7AheadEntry::Verdict::None;
+			if (fromFallback)
+			{
+				if (frameJudge.Cancelled(sequence))
+					newVerdict = U7AheadEntry::Verdict::Cancelled;
+				else
+				{
+					for (const auto& c : frameJudge.Candidates())
+					{
+						if (c.sequence == sequence)
+						{
+							newVerdict = c.cancelled ? U7AheadEntry::Verdict::Cancelled
+								: (c.confirmed ? U7AheadEntry::Verdict::Confirmed : U7AheadEntry::Verdict::Pending);
+							break;
+						}
+					}
+				}
+			}
 			if (haveU7)
 				frameJudge.Reset();
 			if (!u7AheadHistory.empty() && sequence <= u7AheadHistory.back().seq)
 				u7AheadHistory.clear();
-			u7AheadHistory.push_back(U7AheadEntry{ sequence, cut, !haveU7 && fixes && CutFixes() });
+			u7AheadHistory.push_back(U7AheadEntry{ sequence, newVerdict, fromFallback });
 			while (u7AheadHistory.size() > kU7AheadHistoryCap)
 				u7AheadHistory.pop_front();
 		}
@@ -638,6 +676,7 @@ if (tile < int(tiles) && g.y < ts) {
 			native->Release(g);
 		nativeHolder.reset();
 		nativeTried = false;
+		nativeReadbackFailed.store(false, std::memory_order_release);
 		gpu = nullptr;
 	}
 
@@ -684,6 +723,7 @@ if (tile < int(tiles) && g.y < ts) {
 			plain.p4StatsShared = p4Shared;
 			plain.p4StatsFallback = p4Fallback;
 			plain.p4StatsFallbackWhy = p4Why;
+			plain.nativeReadbackFailed = nativeReadbackFailed.load(std::memory_order_acquire);
 			plain.waitsMissed = waitsMissed.load(std::memory_order_relaxed);
 			plain.lastWaitMissCause = lastWaitMissCause;
 			plain.lastWaitMissFramesLate = lastWaitMissFramesLate;
@@ -703,6 +743,7 @@ if (tile < int(tiles) && g.y < ts) {
 		out.p4StatsShared = p4Shared;
 		out.p4StatsFallback = p4Fallback;
 		out.p4StatsFallbackWhy = p4Why;
+		out.nativeReadbackFailed = nativeReadbackFailed.load(std::memory_order_acquire);
 		out.notRead = snapshot.notRead;
 		out.error = snapshot.error;
 		out.frameBound = true;
@@ -1214,12 +1255,20 @@ if (tile < int(tiles) && g.y < ts) {
 		{
 			// D3D11: two native staging slots of the whole tile buffer (once per GPU).
 			nativeTried = true;
+			const bool isD3d11 = gpu && pl_d3d11_get(gpu) != nullptr;
 			std::shared_ptr<LedDrive::NativeTexReadback> created = std::make_shared<LedDrive::NativeTexReadback>();
 			const int rows = (kMaxTiles * kPixels + kReadbackWidth - 1) / kReadbackWidth;
 			if (created->Create(gpu, 2, kReadbackWidth, rows, DXGI_FORMAT_R32_FLOAT))
+			{
 				nativeHolder = created;
+				nativeReadbackFailed.store(false, std::memory_order_release);
+			}
 			else
+			{
+				if (isD3d11)
+					nativeReadbackFailed.store(true, std::memory_order_release);
 				DebugLog::Log("Source resolution: the non-blocking tile readback is unavailable (not D3D11 or no staging); libplacebo's readback");
+			}
 		}
 	}
 
@@ -3393,6 +3442,8 @@ if (tile < int(tiles) && g.y < ts) {
 		if (s.p4StatsFallback > 0)
 			text += "; P4 stats fallback " + std::to_string(s.p4StatsFallback) +
 				(s.p4StatsFallbackWhy.empty() ? std::string() : " (" + s.p4StatsFallbackWhy + ")");
+		if (s.nativeReadbackFailed)
+			text += "; D3D11 non-blocking readback failed (blocking libplacebo readback)";
 		if (!s.historyNote.empty()) text += "; " + s.historyNote;
 		if (!s.chainNote.empty()) text += "; " + s.chainNote;
 		if (autoSelected && !s.conventionNote.empty()) text += "; " + s.conventionNote;   // AutoFactors refreshes it only under auto

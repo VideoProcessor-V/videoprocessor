@@ -288,12 +288,12 @@ namespace GrainSplit
 		return true;
 	}
 	// Apply the cap to N_local (block grid), in place. blockLuma = the half-res base at each block centre.
-	inline void ApplyLevelCap(std::vector<double>& N, const std::vector<double>& quiet, const std::vector<double>& blockLuma, const Params& p)
+	inline void ApplyLevelCap(std::vector<double>& N, const std::vector<double>& quiet, const std::vector<double>& blockLuma, const Params& p, bool isChroma = false)
 	{
 		if (!p.levelCap || p.levelBins <= 0) return;
 		std::vector<double> level(static_cast<size_t>(p.levelBins));
 		std::unique_ptr<bool[]> valid(new bool[static_cast<size_t>(p.levelBins)]);
-		GrainLevelTable(quiet, blockLuma, p, level.data(), valid.get());
+		GrainLevelTable(quiet, blockLuma, p, level.data(), valid.get(), isChroma);
 		const double cs = DepthScale(p.sourceBits), es = cs * cs;
 		for (size_t i = 0; i < N.size(); ++i)
 		{
@@ -382,7 +382,7 @@ namespace GrainSplit
 	//   resolution bilinearly (V3LowAt). G1 (sigmaFine s) stays at full resolution.
 	//   base = Gb(p), d1 = Y - G1, d2 = G1 - base, d3 = base - G6(p), D = d1 + d2 = Y - base.
 	// sigmaBase s and sigmaLow s must be >= kV3MinLowSigma (the GPU form refuses the law otherwise).
-	inline Split Compute(const Plane& y, double scale, int B, const Params& p = Params())
+	inline Split Compute(const Plane& y, double scale, int B, const Params& p = Params(), bool isChroma = false)
 	{
 		Split a;
 		VPV_COMPUTE_ONCE("U1", ::ComputeOnce::Variant(y.w, y.h, B, 1));
@@ -443,7 +443,7 @@ namespace GrainSplit
 			for (int by = 0; by < a.bh; ++by)
 				for (int bx = 0; bx < a.bw; ++bx)
 					blockLuma[static_cast<size_t>(by) * a.bw + bx] = V3LowAt(gbh, (std::min)(bx * B + B / 2, y.w - 1), (std::min)(by * B + B / 2, y.h - 1));
-			ApplyLevelCap(a.N, quiet, blockLuma, p);
+			ApplyLevelCap(a.N, quiet, blockLuma, p, isChroma);
 		}
 		const double floorE = p.energyFloor * DepthScale(p.sourceBits) * DepthScale(p.sourceBits);
 		BlockMeans(a, a.d1, a.d2, a.d3);

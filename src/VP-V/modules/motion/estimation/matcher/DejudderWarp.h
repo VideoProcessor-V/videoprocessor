@@ -790,7 +790,7 @@ namespace Dejudder
 		pl_tex globalBothSad2 = nullptr, globalBothSad1 = nullptr, globalBothPick = nullptr;
 		pl_tex globalSecond[2] = { nullptr, nullptr };   // M2: D1's second candidate (l1 texels, -, -, valid)
 		pl_tex fadeState = nullptr;   // M4: gain, offset, active, the last mean change (rgba32f, persists)
-		bool FadeMatch(const Planes& b);
+		bool FadeMatch(const Planes& b, bool u7FadeConfirmed = false);
 		// Black bars: the picture rectangle (x0, y0, x1, y1 in input pixels,
 		// rgba32f), written each Estimate.
 		pl_tex picture = nullptr;

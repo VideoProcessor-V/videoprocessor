@@ -269,23 +269,9 @@ vec3 preserve_extended(vec3 result, vec3 original, float lift)
     if (!anyAbove && !anyBelow)
         return result;
     float y = dot(original, vec3(0.2126, 0.7152, 0.0722));
-    if (btb && (!(y > 0.0) || all(below)))
-        return original;                       // true BTB, every grey: bit-identical
-    if (wtw && (y > 1.0 || all(above))) {
-        if (gain > 1.0) {
-            // POD2-M1: anchor WTW continuation continuously at compensate_gain(1.0, lift, gain)
-            // so the soft-knee ceiling joins true WTW with exact C0 continuity at y = 1.0 and (1,1,1).
-            vec3 c1 = compensate_gain(vec3(1.0), lift, gain);
-            vec3 e1 = original - vec3(1.0);
-            vec3 up1 = (vec3(extended_ceiling) - c1) / max(e1, vec3(1e-6));
-            vec3 dn1 = (c1 - vec3(extended_floor)) / max(-e1, vec3(1e-6));
-            vec3 kv1 = mix(vec3(1.0), up1, vec3(greaterThan(e1, vec3(1e-6))));
-            kv1 = mix(kv1, dn1, vec3(lessThan(e1, vec3(-1e-6))));
-            float k1 = clamp(min(kv1.r, min(kv1.g, kv1.b)), 0.0, 1.0);
-            return c1 + k1 * e1;
-        }
-        return original;                       // true WTW under gain <= 1.0: bit-identical
-    }
+    // W23-NEON-H2: true BTB and true WTW pass bit-identically for all gains (owner rule).
+    if ((wtw && (y > 1.0 || all(above))) || (btb && (!(y > 0.0) || all(below))))
+        return original;
     vec3 d = original - vec3(y);
     // Above white: d > 0 and 1 - y >= 0; below black: d < 0 and y > 0. Every quotient is finite.
     vec3 tvAbove = vec3(1.0);
@@ -296,12 +282,13 @@ vec3 preserve_extended(vec3 result, vec3 original, float lift)
         tv = mix(tv, vec3(y) / max(-d, vec3(1e-6)), vec3(below));
     float t = clamp(min(tv.r, min(tv.g, tv.b)), 0.0, 1.0);
     vec3 p = vec3(y) + t * d;
-    // GEM-LED-UP-SMOOTH: unique minimal C1 cubic Hermite spline h(u) = u^2 * (3 - 2u) over u = 1 - tAbove.
+    // GEM-LED-UP-SMOOTH + W23-NEON-H2: unique minimal C1 cubic Hermite spline h(u) = u^2 * (3 - 2u) over u = 1 - tAbove.
     // Boundary constraints: h(0) = 0, h'(0) = 0 at max(o) = 1+ (in-range edge); h(1) = 1, h'(1) = 0 at y = 1- (true WTW).
+    // Blending eff_gain -> 1.0 for any gain != 1.0 joins partly-above-white continuously to true WTW (`return original`).
     float tAbove = clamp(min(tvAbove.r, min(tvAbove.g, tvAbove.b)), 0.0, 1.0);
     float u = 1.0 - tAbove;
     float s = u * u * (3.0 - 2.0 * u);
-    float eff_gain = (anyAbove && gain < 1.0) ? mix(gain, 1.0, s) : gain;
+    float eff_gain = (anyAbove && gain != 1.0) ? mix(gain, 1.0, s) : gain;
     vec3 c = compensate_gain(p, lift, eff_gain);
     float f = (anyAbove && eff_gain < 1.0) ? compensate_gain(vec3(1.0), lift, eff_gain).x : 1.0;
     vec3 e = (original - p) * f;

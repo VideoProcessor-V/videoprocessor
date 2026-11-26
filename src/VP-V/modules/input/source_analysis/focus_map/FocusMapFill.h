@@ -210,11 +210,16 @@ namespace FocusMap
 				const bool prevGeomSame = cfg.geometry(prevSeq, pw, ph) && pw == w && ph == h;
 				const AcquireResult pp = prevGeomSame ? memo.Acquire(kP11RegionBlockStats, prevSeq, AcquireForm::Cpu) : AcquireResult();
 				Geometry gPrev = g;
-				if (prevGeomSame && cfg.activeRect)
+				if (prevGeomSame)
 				{
-					int pax0 = 0, pay0 = 0, pax1 = pw, pay1 = ph;
-					if (cfg.activeRect(prevSeq, pax0, pay0, pax1, pay1))
-						gPrev.SetActiveRect(pax0, pay0, pax1, pay1);
+					// W23-NEON-L2: reset gPrev to full-frame when cfg.activeRect returns false (never inherit sampleSeq's crop).
+					gPrev.SetActiveRect(0, 0, pw, ph);
+					if (cfg.activeRect)
+					{
+						int pax0 = 0, pay0 = 0, pax1 = pw, pay1 = ph;
+						if (cfg.activeRect(prevSeq, pax0, pay0, pax1, pay1))
+							gPrev.SetActiveRect(pax0, pay0, pax1, pay1);
+					}
 				}
 				const bool havePrevEdge = prevGeomSame && rp.Ok() && IsValidEdgePayload(gPrev, rp.cpu, rp.cpuBytes);
 				const bool havePrevP11 = prevGeomSame && CopyP11(pp, g.Blocks(), prev);

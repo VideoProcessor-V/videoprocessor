@@ -3724,8 +3724,10 @@ namespace Vpv
 				const RE::DrawJob* job = RE::PayloadOf<RE::DrawJob>(c);
 				const bool retireSourceFrame = !job || job->retireSourceFrame;
 				const bool retireOnly = job && job->retireOnly;
+				const bool runPostSubmitGap = !job || job->runPostSubmitGap;
+				const bool secondaryDraw = job && job->secondaryDraw;
 				const uint64_t releaseFenceValue = job ? job->releaseFenceValue : 0u;
-				AfterRender(*st, c.seq, retireSourceFrame, retireOnly, releaseFenceValue);
+				AfterRender(*st, c.seq, retireSourceFrame, retireOnly, releaseFenceValue, runPostSubmitGap, secondaryDraw);
 			}
 			return false;   // observation only: never a take-over
 		}
@@ -4224,14 +4226,14 @@ namespace Vpv
 			Refresh(st);
 		}
 
-		void SkeletonModule::AfterRender(HostState& st, int64_t seqIn, bool retireSourceFrame, bool retireOnly, uint64_t releaseFenceValue)
+		void SkeletonModule::AfterRender(HostState& st, int64_t seqIn, bool retireSourceFrame, bool retireOnly, uint64_t releaseFenceValue, bool runPostSubmitGap, bool secondaryDraw)
 		{
 			const uint64_t afterUs = nowUs_();   // first: the render-only time ends before this module's own AfterRender work
 			const std::shared_ptr<Bundle> b = std::atomic_load(&st.bundle);
 			if (!b)
 				return;
 			const uint64_t seq = static_cast<uint64_t>(seqIn);
-			if (!retireOnly)
+			if (!retireOnly && !secondaryDraw)
 			{
 				// S5: the span from the end of Begin to the entry of AfterRender is OBSERVED and shown (skeleton_regulator: observe only); the regulator is
 				// fed only through NoteRenderOnlyMs. A frame without a Begin of its own, or with the period unmeasured, observes nothing (counted).
@@ -4278,13 +4280,16 @@ namespace Vpv
 				// writes queued by OnPostSubmitGap execute in strict FIFO submission order on the same D3D11 immediate
 				// context (so releaseFenceValue == 0 is sound on D3D11; multi-queue backends pass a real monotonic fence).
 				b->lane.OnFrameRetired(seq, releaseFenceValue);
-				if (st.periodMs > 0.0)
+				if (runPostSubmitGap)
 				{
-					b->lane.OnPostSubmitGap(nowUs_() + static_cast<uint64_t>(st.periodMs * 500.0));   // half the measured period
-					++st.gapsRun;
+					if (st.periodMs > 0.0)
+					{
+						b->lane.OnPostSubmitGap(nowUs_() + static_cast<uint64_t>(st.periodMs * 500.0));   // half the measured period
+						++st.gapsRun;
+					}
+					else
+						++st.gapsSkipped;   // the frame period is not measured yet: no gap is promised
 				}
-				else
-					++st.gapsSkipped;   // the frame period is not measured yet: no gap is promised
 			}
 		}
 

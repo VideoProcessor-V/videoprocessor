@@ -186,11 +186,12 @@ namespace DitherNeedSeam
 		}
 
 		// Converts an Evaluate() == On outcome to Unavailable when the subsequent GPU pass/bind fails.
-		void RecordGpuFailure(Outcome& o, unsigned gpuMissing)
+		// undoCountedOn: false when called from a secondary-draw reuse path that did not increment counters_.framesOn.
+		void RecordGpuFailure(Outcome& o, unsigned gpuMissing, bool undoCountedOn = true)
 		{
 			const unsigned m = gpuMissing ? gpuMissing : DitherNeed::kPassFailed;
-			if (o.result == DitherNeed::Result::On && counters_.framesOn > 0) --counters_.framesOn;
-			if (o.result == DitherNeed::Result::On && o.classicalQuality && counters_.framesClassicalQuality > 0) --counters_.framesClassicalQuality;
+			if (undoCountedOn && o.result == DitherNeed::Result::On && counters_.framesOn > 0) --counters_.framesOn;
+			if (undoCountedOn && o.result == DitherNeed::Result::On && o.classicalQuality && counters_.framesClassicalQuality > 0) --counters_.framesClassicalQuality;
 			o.classicalQuality = false; o.missing |= m; o.result = DitherNeed::Result::Unavailable; o.extraAllowed = false;
 			o.decision.result = o.result; o.decision.off = true; o.decision.reset = false; o.decision.missing = o.missing;
 			o.status = o.decision.status = DitherNeed::StatusOf(true, o.missing, true);

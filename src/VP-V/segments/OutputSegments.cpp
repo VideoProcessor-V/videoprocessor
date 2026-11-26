@@ -248,6 +248,7 @@ namespace OutputSegments
 		int lastSteppedGridH = 0;
 		int lastSteppedBlockPx = 0;
 		int lastSteppedColorBits = 0;
+		int lastSteppedSourceBits = 0;
 		double lastSteppedABase = 0.0;
 		DitherNeedSeam::Outcome lastSteppedOutcome;
 
@@ -260,6 +261,7 @@ namespace OutputSegments
 			lastSteppedGridH = 0;
 			lastSteppedBlockPx = 0;
 			lastSteppedColorBits = 0;
+			lastSteppedSourceBits = 0;
 			lastSteppedABase = 0.0;
 			lastSteppedOutcome = DitherNeedSeam::Outcome();
 		}
@@ -269,7 +271,7 @@ namespace OutputSegments
 			guard.Release();
 			ResetSteppedSequence();
 			pl_gpu activeGpu = gpu;
-			if (activeGpu != nullptr && (releaseGpu == nullptr || releaseGpu == activeGpu))
+			if (activeGpu != nullptr && releaseGpu == activeGpu)
 			{
 				pass.Release(activeGpu);
 				if (lutTex) pl_tex_destroy(activeGpu, &lutTex);
@@ -282,7 +284,7 @@ namespace OutputSegments
 			}
 			else
 			{
-				// Device changed or already gone: forget handles without calling libplacebo on a dead device.
+				// Device changed or already gone (releaseGpu == nullptr): forget handles without calling libplacebo on a dead device.
 				pass.Release(nullptr);
 				lutTex = nullptr;
 				lutOutTex = nullptr;
@@ -582,12 +584,10 @@ namespace OutputSegments
 			return inactive;
 		}
 
-		// GEM-224: non-linear stretch invalidates affine VPDN placement — visibly decline and count.
+		// GEM-224 + W23-NEON-H3: non-linear stretch invalidates affine VPDN placement — release GPU VRAM, visibly decline and count.
 		if (req.nlsActive)
 		{
-			st.guard.Release();
-			st.pass.Invalidate();
-			st.ResetSteppedSequence();
+			st.ReleaseGpuResources(req.gpu);
 			st.ClearDemand(this);
 			st.SyncVram(this);
 			DitherNeedSeam::Feed nlsFeed;
@@ -635,7 +635,13 @@ namespace OutputSegments
 		}
 
 		const LightLevel::Lut& lut = st.lutCache.Get(req.lightSettings, req.lightContext);
-		if (req.gpu != nullptr)
+		if (!req.domainSupported)
+		{
+			// W23-NEON-H3: unsupported domain must neither reuse prior VPDN maps nor allocate/retain LUT+dispatch VRAM.
+			st.ReleaseGpuResources(req.gpu);
+			st.SyncVram(this);
+		}
+		else if (req.gpu != nullptr)
 		{
 			st.gpu = req.gpu;
 			if (!st.dispatch)
@@ -656,11 +662,12 @@ namespace OutputSegments
 			const bool gridMatchesOverride = !req.overrideInputs ||
 				(req.overrideGrid.gw == st.lastSteppedGridW && req.overrideGrid.gh == st.lastSteppedGridH &&
 					(req.overrideGrid.B > 0 ? req.overrideGrid.B : 16) == st.lastSteppedBlockPx);
-			if (req.sourceSequence > 0 && st.hasSteppedSequence &&
+			if (req.domainSupported && req.sourceSequence > 0 && st.hasSteppedSequence &&
 				st.lastSteppedSourceSequence == req.sourceSequence &&
 				!req.discontinuity &&
 				st.lastSteppedLutFingerprint == lut.fingerprint &&
 				st.lastSteppedColorBits == req.colorBits &&
+				st.lastSteppedSourceBits == req.sourceBits &&
 				st.lastSteppedABase == req.aBase &&
 				gridMatchesOverride &&
 				st.pass.Current() != nullptr)
@@ -677,7 +684,7 @@ namespace OutputSegments
 					st.pass.Invalidate();
 					st.ResetSteppedSequence();
 					st.SyncVram(this);
-					ditherNeed.RecordGpuFailure(reuseOutcome, DitherNeed::kPassFailed);
+					ditherNeed.RecordGpuFailure(reuseOutcome, DitherNeed::kPassFailed, false);
 					return reuseOutcome;
 				}
 				if (req.requireBind)
@@ -687,7 +694,7 @@ namespace OutputSegments
 						st.pass.Invalidate();
 						st.ResetSteppedSequence();
 						st.SyncVram(this);
-						ditherNeed.RecordGpuFailure(reuseOutcome, DitherNeed::Gpu::HookGuard::MissingAfterApply());
+						ditherNeed.RecordGpuFailure(reuseOutcome, DitherNeed::Gpu::HookGuard::MissingAfterApply(), false);
 						return reuseOutcome;
 					}
 					if (attachRelease)
@@ -827,6 +834,7 @@ namespace OutputSegments
 			st.lastSteppedGridH = args.gridH;
 			st.lastSteppedBlockPx = args.blockPx;
 			st.lastSteppedColorBits = req.colorBits;
+			st.lastSteppedSourceBits = req.sourceBits;
 			st.lastSteppedABase = req.aBase;
 			st.lastSteppedOutcome = outcome;
 		}

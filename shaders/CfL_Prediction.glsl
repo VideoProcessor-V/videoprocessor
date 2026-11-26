@@ -55,7 +55,7 @@ vec4 hook() {
     float luma_sum = 0.0;
     vec2 pos = luma_pos;
 
-    for (float dx = start.x; dx <= end.x; dx++) {
+    for (float dx = start; dx <= end; dx++) {
         pos.x = LUMA_pt.x * (dx + 0.5);
         vec2 dist = (pos - luma_pos) * CHROMA_size;
         float wd = comp_wd(dist);
@@ -64,8 +64,8 @@ vec4 hook() {
         wt += wd;
     }
 
-    vec4 output_pix = vec4(luma_sum /= wt, 0.0, 0.0, 1.0);
-    return clamp(output_pix, 0.0, 1.0);
+    vec4 output_pix = vec4(luma_sum / max(wt, 1e-6), 0.0, 0.0, 1.0);
+    return output_pix;
 }
 
 //!HOOK CHROMA
@@ -75,7 +75,7 @@ vec4 hook() {
 //!SAVE LUMA_LR
 //!WIDTH CHROMA.w
 //!HEIGHT CHROMA.h
-//!WHEN CHROMA.w LUMA.w <
+//!WHEN CHROMA.h LUMA.h <
 //!DESC Chroma From Luma Prediction (Hermite 2nd step, Downscaling Luma)
 
 float comp_wd(vec2 v) {
@@ -102,8 +102,8 @@ vec4 hook() {
         wt += wd;
     }
 
-    vec4 output_pix = vec4(luma_sum /= wt, 0.0, 0.0, 1.0);
-    return clamp(output_pix, 0.0, 1.0);
+    vec4 output_pix = vec4(luma_sum / max(wt, 1e-6), 0.0, 0.0, 1.0);
+    return output_pix;
 }
 
 //!HOOK CHROMA
@@ -226,8 +226,8 @@ vec4 hook() {
         ct += wd[i] * chroma_pixels[i];
     }
 
-    vec2 chroma_spatial = ct / wt;
-    chroma_spatial = clamp(mix(chroma_spatial, clamp(chroma_spatial, chroma_min, chroma_max), ar_strength), 0.0, 1.0);
+    vec2 chroma_spatial = ct / max(wt, 1e-6);
+    chroma_spatial = mix(chroma_spatial, clamp(chroma_spatial, chroma_min, chroma_max), ar_strength);
 #endif
 
 #if (USE_12_TAP_REGRESSION == 1 || USE_8_TAP_REGRESSIONS == 1)
@@ -263,9 +263,11 @@ vec4 hook() {
     for (int i = 0; i < 12; i++) {
         luma_min_12 = min(luma_min_12, luma_pixels[i12[i]]);
         luma_max_12 = max(luma_max_12, luma_pixels[i12[i]]);
-        luma_var_12 += pow(luma_pixels[i12[i]] - luma_avg_12, 2.0);
-        chroma_var_12 += pow(chroma_pixels[i12[i]] - chroma_avg_12, vec2(2.0));
-        luma_chroma_cov_12 += (luma_pixels[i12[i]] - luma_avg_12) * (chroma_pixels[i12[i]] - chroma_avg_12);
+        float dl = luma_pixels[i12[i]] - luma_avg_12;
+        vec2 dc = chroma_pixels[i12[i]] - chroma_avg_12;
+        luma_var_12 += dl * dl;
+        chroma_var_12 += dc * dc;
+        luma_chroma_cov_12 += dl * dc;
     }
 
     vec2 corr = clamp(abs(luma_chroma_cov_12 / max(sqrt(luma_var_12 * chroma_var_12), 1e-6)), 0.0, 1.0);
@@ -279,7 +281,7 @@ vec4 hook() {
 #if (USE_12_TAP_REGRESSION == 1)
     vec2 alpha_12 = luma_chroma_cov_12 / max(luma_var_12, 1e-6);
     vec2 beta_12 = chroma_avg_12 - alpha_12 * luma_avg_12;
-    vec2 chroma_pred_12 = clamp(alpha_12 * luma_zero + beta_12, 0.0, 1.0);
+    vec2 chroma_pred_12 = clamp(alpha_12 * luma_zero + beta_12, chroma_min, chroma_max);
 #endif
 
 #if (USE_8_TAP_REGRESSIONS == 1)
@@ -296,18 +298,20 @@ vec4 hook() {
     vec2 luma_chroma_cov_8x = vec2(0.0);
 
     for (int i = 0; i < 8; i++) {
-        luma_var_8y += pow(luma_pixels[i8y[i]] - luma_avg_8y, 2.0);
-        luma_var_8x += pow(luma_pixels[i8x[i]] - luma_avg_8x, 2.0);
-        luma_chroma_cov_8y += (luma_pixels[i8y[i]] - luma_avg_8y) * (chroma_pixels[i8y[i]] - chroma_avg_8y);
-        luma_chroma_cov_8x += (luma_pixels[i8x[i]] - luma_avg_8x) * (chroma_pixels[i8x[i]] - chroma_avg_8x);
+        float dly = luma_pixels[i8y[i]] - luma_avg_8y;
+        float dlx = luma_pixels[i8x[i]] - luma_avg_8x;
+        luma_var_8y += dly * dly;
+        luma_var_8x += dlx * dlx;
+        luma_chroma_cov_8y += dly * (chroma_pixels[i8y[i]] - chroma_avg_8y);
+        luma_chroma_cov_8x += dlx * (chroma_pixels[i8x[i]] - chroma_avg_8x);
     }
 
     vec2 alpha_8y = luma_chroma_cov_8y / max(luma_var_8y, 1e-6);
     vec2 alpha_8x = luma_chroma_cov_8x / max(luma_var_8x, 1e-6);
     vec2 beta_8y = chroma_avg_8y - alpha_8y * luma_avg_8y;
     vec2 beta_8x = chroma_avg_8x - alpha_8x * luma_avg_8x;
-    vec2 chroma_pred_8y = clamp(alpha_8y * luma_zero + beta_8y, 0.0, 1.0);
-    vec2 chroma_pred_8x = clamp(alpha_8x * luma_zero + beta_8x, 0.0, 1.0);
+    vec2 chroma_pred_8y = clamp(alpha_8y * luma_zero + beta_8y, chroma_min, chroma_max);
+    vec2 chroma_pred_8x = clamp(alpha_8x * luma_zero + beta_8x, chroma_min, chroma_max);
     vec2 chroma_pred_8 = mix(chroma_pred_8y, chroma_pred_8x, 0.5);
 #endif
 
@@ -321,7 +325,6 @@ vec4 hook() {
     output_pix.xy = chroma_spatial;
 #endif
 
-    output_pix.xy = clamp(output_pix.xy, 0.0, 1.0);
     return output_pix;
 }
 
@@ -342,7 +345,8 @@ vec4 hook() {
 //!DESC Chroma From Luma Prediction (Smoothing Chroma)
 
 float comp_w(vec2 spatial_distance, float intensity_distance) {
-    return max(100.0 * exp(-distance_coeff * pow(length(spatial_distance), 2.0) - intensity_coeff * pow(intensity_distance, 2.0)), 1e-32);
+    float sd2 = dot(spatial_distance, spatial_distance);
+    return max(100.0 * exp(-distance_coeff * sd2 - intensity_coeff * (intensity_distance * intensity_distance)), 1e-32);
 }
 
 vec4 hook() {
@@ -361,6 +365,6 @@ vec4 hook() {
         }
     }
 
-    output_pix.xy = clamp(ct / wt, 0.0, 1.0);
+    output_pix.xy = ct / max(wt, 1e-32);
     return output_pix;
 }

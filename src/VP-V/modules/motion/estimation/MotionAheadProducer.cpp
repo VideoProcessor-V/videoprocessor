@@ -62,6 +62,8 @@ namespace MotionAhead
 						fn = fn_;
 						rows = totalRows_;
 						total = totalWorkers_;
+						if (workerIdx < 64)
+							claimedMask_ |= (1ull << workerIdx);
 						++activeCallbacks_;
 					}
 					if (fn && rows > 0)
@@ -125,6 +127,7 @@ namespace MotionAhead
 				fn_ = &fn;
 				totalRows_ = totalRows;
 				remaining_ = workerCount_;
+				claimedMask_ = 1ull;   // caller runs slice 0
 				total = totalWorkers_;
 				++generation_;
 			}
@@ -137,9 +140,29 @@ namespace MotionAhead
 		workCv_.notify_all();
 		const int chunk = (totalRows + total - 1) / total;
 		fn(0, (std::min)(totalRows, chunk));
-		std::unique_lock<std::mutex> lock(mutex_);
-		doneCv_.wait(lock, [this] { return (remaining_ == 0 || stop_) && activeCallbacks_ == 0; });
-		fn_ = nullptr;
+		uint64_t claimed = 0;
+		bool interrupted = false;
+		{
+			std::unique_lock<std::mutex> lock(mutex_);
+			doneCv_.wait(lock, [this] { return (remaining_ == 0 || stop_) && activeCallbacks_ == 0; });
+			interrupted = stop_ && remaining_ > 0;
+			claimed = claimedMask_;
+			fn_ = nullptr;
+		}
+		// W23-NEON-L3: if Stop() interrupted Run() before some workers claimed their slice, finish
+		// the unstarted row slices inline on the caller thread so HalfLuma8 never returns a partial buffer.
+		if (interrupted)
+		{
+			for (int workerIdx = 1; workerIdx < total; ++workerIdx)
+			{
+				if (workerIdx < 64 && (claimed & (1ull << workerIdx)) != 0)
+					continue;
+				const int fromY = (std::min)(totalRows, workerIdx * chunk);
+				const int toY = (std::min)(totalRows, (workerIdx + 1) * chunk);
+				if (fromY < toY)
+					fn(fromY, toY);
+			}
+		}
 	}
 
 	bool HalfLuma8(const AnalysisLumaSource& source, std::vector<uint8_t>& out, int& halfW, int& halfH, HalfLumaPool* pool) // PRECISION-OK NVOF-8BIT: NVOF optical-flow 8-bit luma input contract
@@ -1874,12 +1897,22 @@ namespace MotionAhead
 			hintSequence = rq.to;
 			hintGeneration = rq.generation;
 		}
-		// The chain now holds `to` (Chain / Adopt); an off-chain run leaves it for the walk.
+		// W23-NEON-H2: only advance the chain (and update previousLuma) when SubmitPairAsync succeeded;
+		// on failure clear previousLuma so the next walk pair never mixes frame N with N+2.
 		if (mode != Mode::OffChain)
 		{
-			havePrevious = true;
-			previousSequence = rq.to;
-			previousGeneration = rq.generation;
+			if (ok && setIdx != Pipeline::StagingRing<kStagingSets>::kNoSlot)
+			{
+				havePrevious = true;
+				previousSequence = rq.to;
+				previousGeneration = rq.generation;
+				previousLuma = CameraConsumes() ? std::make_shared<const std::vector<uint8_t>>(lumaBuffer) : nullptr;
+			}
+			else
+			{
+				havePrevious = false;
+				previousLuma.reset();
+			}
 		}
 		{
 			std::lock_guard<std::mutex> lock(mutex);

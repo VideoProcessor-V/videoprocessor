@@ -179,12 +179,17 @@ if (p.x < sz.x && p.y < sz.y) {
 ivec2 q = ivec2(gl_GlobalInvocationID.xy);
 ivec2 size = imageSize(dst);
 if (q.x < size.x && q.y < size.y) {
-    ivec2 hi = textureSize(src, 0) - ivec2(1);
     ivec2 p = q * 2;
-    vec4 acc = texelFetch(src, clamp(p, ivec2(0), hi), 0) + texelFetch(src, clamp(p + ivec2(1, 0), ivec2(0), hi), 0) +
-               texelFetch(src, clamp(p + ivec2(0, 1), ivec2(0), hi), 0) + texelFetch(src, clamp(p + ivec2(1, 1), ivec2(0), hi), 0);
+    vec4 acc = texelFetch(src, clamp(p, active_lo, active_hi), 0) + texelFetch(src, clamp(p + ivec2(1, 0), active_lo, active_hi), 0) +
+               texelFetch(src, clamp(p + ivec2(0, 1), active_lo, active_hi), 0) + texelFetch(src, clamp(p + ivec2(1, 1), active_lo, active_hi), 0);
     imageStore(dst, q, 0.25 * acc);
 }
+)GLSL";
+		const char* const CROP_CLAMP_BODY = R"GLSL(
+ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+ivec2 size = imageSize(dst);
+if (q.x < size.x && q.y < size.y)
+    imageStore(dst, q, texelFetch(src, clamp(q, active_lo, active_hi), 0));
 )GLSL";
 		const char* const SPLIT_H_BODY = R"GLSL(
 ivec2 q = ivec2(gl_GlobalInvocationID.xy);
@@ -226,16 +231,18 @@ if (b.x < size.x && b.y < size.y) {
                 continue;
 #ifdef P10_GRAIN
             vec2 sp = vec2(float(q.x) * 2.0 + 1.0, float(q.y) * 2.0 + 1.0);
+            vec2 spLo = vec2(active_lo) + vec2(0.5);
+            vec2 spHi = vec2(active_hi) + vec2(0.5);
 #ifdef P10_GRAIN_DUAL
-            vec4 gx = 0.5 * code_scale * mask * (p10_base_dual_at(sp + vec2(2.0, 0.0), hi, p10_cu, p10_cu_cr) - p10_base_dual_at(sp - vec2(2.0, 0.0), hi, p10_cu, p10_cu_cr));
-            vec4 gy = 0.5 * code_scale * mask * (p10_base_dual_at(sp + vec2(0.0, 2.0), hi, p10_cu, p10_cu_cr) - p10_base_dual_at(sp - vec2(0.0, 2.0), hi, p10_cu, p10_cu_cr));
+            vec4 gx = 0.5 * code_scale * mask * (p10_base_dual_at(clamp(sp + vec2(2.0, 0.0), spLo, spHi), hi, p10_cu, p10_cu_cr) - p10_base_dual_at(clamp(sp - vec2(2.0, 0.0), spLo, spHi), hi, p10_cu, p10_cu_cr));
+            vec4 gy = 0.5 * code_scale * mask * (p10_base_dual_at(clamp(sp + vec2(0.0, 2.0), spLo, spHi), hi, p10_cu, p10_cu_cr) - p10_base_dual_at(clamp(sp - vec2(0.0, 2.0), spLo, spHi), hi, p10_cu, p10_cu_cr));
 #else
-            vec4 gx = 0.5 * code_scale * mask * (p10_base_at(sp + vec2(2.0, 0.0), hi, p10_cu) - p10_base_at(sp - vec2(2.0, 0.0), hi, p10_cu));
-            vec4 gy = 0.5 * code_scale * mask * (p10_base_at(sp + vec2(0.0, 2.0), hi, p10_cu) - p10_base_at(sp - vec2(0.0, 2.0), hi, p10_cu));
+            vec4 gx = 0.5 * code_scale * mask * (p10_base_at(clamp(sp + vec2(2.0, 0.0), spLo, spHi), hi, p10_cu) - p10_base_at(clamp(sp - vec2(2.0, 0.0), spLo, spHi), hi, p10_cu));
+            vec4 gy = 0.5 * code_scale * mask * (p10_base_at(clamp(sp + vec2(0.0, 2.0), spLo, spHi), hi, p10_cu) - p10_base_at(clamp(sp - vec2(0.0, 2.0), spLo, spHi), hi, p10_cu));
 #endif
 #else
-            vec4 gx = 0.5 * code_scale * mask * (texelFetch(src, clamp(q + ivec2(1, 0), ivec2(0), lhi), 0) - texelFetch(src, clamp(q - ivec2(1, 0), ivec2(0), lhi), 0));
-            vec4 gy = 0.5 * code_scale * mask * (texelFetch(src, clamp(q + ivec2(0, 1), ivec2(0), lhi), 0) - texelFetch(src, clamp(q - ivec2(0, 1), ivec2(0), lhi), 0));
+            vec4 gx = 0.5 * code_scale * mask * (texelFetch(src, clamp(q + ivec2(1, 0), ah_lo, ah_hi), 0) - texelFetch(src, clamp(q - ivec2(1, 0), ah_lo, ah_hi), 0));
+            vec4 gy = 0.5 * code_scale * mask * (texelFetch(src, clamp(q + ivec2(0, 1), ah_lo, ah_hi), 0) - texelFetch(src, clamp(q - ivec2(0, 1), ah_lo, ah_hi), 0));
 #endif
             acc += vec3(dot(gx, gx), dot(gy, gy), dot(gx, gy));
             n += 1.0;
@@ -460,7 +467,7 @@ vec4 p10_base_dual_at(vec2 sp, ivec2 hi, float cu0, float cu1)
 	}
 
 	bool Module::SplitLowBand(pl_gpu gpu, pl_dispatch dispatch, pl_tex in, int slot, int plane, double scale,
-		pl_tex acquiredLow, pl_tex& splitLowOut)
+		const float activeRect[4], pl_tex acquiredLow, pl_tex& splitLowOut)
 	{
 		splitLowOut = nullptr;
 		if (acquiredLow != nullptr)
@@ -504,10 +511,19 @@ vec4 p10_base_dual_at(vec2 sp, ivec2 hi, float cu0, float cu1)
 			cachedBandScale[pIdx] = scale;
 		}
 		static const std::string kEmptyHeader;
+		const int ax0 = (std::max)(0, (std::min)(in->params.w - 1, static_cast<int>(std::floor(activeRect[0]))));
+		const int ay0 = (std::max)(0, (std::min)(in->params.h - 1, static_cast<int>(std::floor(activeRect[1]))));
+		const int ax1 = (std::max)(ax0, (std::min)(in->params.w - 1, static_cast<int>(std::ceil(activeRect[2])) - 1));
+		const int ay1 = (std::max)(ay0, (std::min)(in->params.h - 1, static_cast<int>(std::ceil(activeRect[3])) - 1));
+		const int activeLo[2] = { ax0, ay0 };
+		const int activeHi[2] = { ax1, ay1 };
+		const pl_shader_var halfVars[2] = {
+			{ pl_var_ivec2("active_lo"), activeLo, true },
+			{ pl_var_ivec2("active_hi"), activeHi, true } };
 		const pl_shader_desc dh[2] = { Sampled("src", in, false), Storage("dst", splitHalf[slot][plane]) };
 		const pl_shader_desc dx[2] = { Sampled("src", splitHalf[slot][plane], false), Storage("dst", splitTmp[slot][plane]) };
 		const pl_shader_desc dy[2] = { Sampled("src", splitTmp[slot][plane], false), Storage("dst", splitLow[slot][plane]) };
-		if (!Pass(dispatch, "VideoProcessor deband: grain split (half)", kEmptyHeader, SPLIT_HALF_BODY, dh, 2, nullptr, 0, gx, gy) ||
+		if (!Pass(dispatch, "VideoProcessor deband: grain split (half)", kEmptyHeader, SPLIT_HALF_BODY, dh, 2, halfVars, 2, gx, gy) ||
 			!Pass(dispatch, "VideoProcessor deband: grain split (across)", cachedBandWeights[pIdx], SPLIT_H_BODY, dx, 2, nullptr, 0, gx, gy) ||
 			!Pass(dispatch, "VideoProcessor deband: grain split (down)", cachedBandWeights[pIdx], SPLIT_V_BODY, dy, 2, nullptr, 0, gx, gy))
 		{
@@ -569,10 +585,11 @@ vec4 p10_base_dual_at(vec2 sp, ivec2 hi, float cu0, float cu1)
 				return false;
 			}
 			const int w = in->params.w, h = in->params.h;
-			// POD2-H4: derive one code of the signal in THIS plane's normalised texture units.
+			// POD2-H4 + W23-NEON-L3: derive one code of the signal in THIS plane's normalised texture units (guard colorDepth <= 0).
+			const int safeDepth = (params.colorDepth > 0 && params.colorDepth < 256) ? params.colorDepth : GrainSplit::DefaultParams().sourceBits;
 			const int sampleDepth = source.repr.bits.sample_depth > 0 ? source.repr.bits.sample_depth : in->params.format->component_depth[0];
 			const double codeUnit = in->params.format->type == PL_FMT_FLOAT ?
-				1.0 / (std::pow(2.0, params.colorDepth) - 1.0) :
+				1.0 / (std::pow(2.0, safeDepth) - 1.0) :
 				std::pow(2.0, source.repr.bits.bit_shift) / (std::pow(2.0, sampleDepth) - 1.0);
 			const float thr = static_cast<float>(params.thresholdCodes * codeUnit);
 			// Active picture rect in this plane's pixel coordinates (empty source.crop -> full plane).
@@ -687,9 +704,7 @@ vec4 p10_base_dual_at(vec2 sp, ivec2 hi, float cu0, float cu1)
 				// 15b A3: acquire shared P10 (luma) / P10c (planar Cb/Cr or semi-planar P010/P210 CbCr) grain split and P11 contour tensor (re_s1).
 				if (params.memo != nullptr && params.sequence != 0u && ycbcr)
 				{
-					const int bits = params.colorDepth > 0 && params.colorDepth < 256
-						? params.colorDepth : GrainSplit::DefaultParams().sourceBits;
-					const double planeCu = VpvGpu::CodeUnit(in, source.repr.bits, bits);
+					const double planeCu = VpvGpu::CodeUnit(in, source.repr.bits, safeDepth);
 					const int expectedB = GrainSplit::Gpu::BlockFor(splitScale);
 					auto tryAcquireP10 = [&](VpSkeleton::ProductId grainProd, const VpSkeleton::VariantKey& gKey, int comp,
 						const char* prodName, VpSkeleton::AcquireResult& slotRes, const GrainSplit::Gpu::Frame*& outFrame, float& outCu) -> bool {
@@ -867,14 +882,20 @@ vec4 p10_base_dual_at(vec2 sp, ivec2 hi, float cu0, float cu1)
 						else
 							lastBandMemoFallback = "frame sequence 0 (unkeyed)";
 					}
-					if (!SplitLowBand(gpu, dispatch, in, slot, plane, splitScale, acquiredLow, splitLowTex))
+					if (!SplitLowBand(gpu, dispatch, in, slot, plane, splitScale, activeRect, acquiredLow, splitLowTex))
 						return false;
 				}
 			}
-			const float lapMin = static_cast<float>(GrainPreserve::GuardLaplacianCodes(params.thresholdCodes, params.colorDepth) * codeUnit);
-			const float extMin = static_cast<float>(GrainPreserve::GuardExtremumCodes(params.thresholdCodes, params.colorDepth) * codeUnit);
+			const float lapMin = static_cast<float>(GrainPreserve::GuardLaplacianCodes(params.thresholdCodes, safeDepth) * codeUnit);
+			const float extMin = static_cast<float>(GrainPreserve::GuardExtremumCodes(params.thresholdCodes, safeDepth) * codeUnit);
 			const float vetoLo = static_cast<float>(GrainPreserve::kVetoLo);
 			const float vetoHi = static_cast<float>(GrainPreserve::kVetoHi);
+			const int activePxLo[2] = {
+				(std::max)(0, (std::min)(w - 1, static_cast<int>(std::floor(activeRect[0])))),
+				(std::max)(0, (std::min)(h - 1, static_cast<int>(std::floor(activeRect[1])))) };
+			const int activePxHi[2] = {
+				(std::max)(activePxLo[0], (std::min)(w - 1, static_cast<int>(std::ceil(activeRect[2])) - 1)),
+				(std::max)(activePxLo[1], (std::min)(h - 1, static_cast<int>(std::ceil(activeRect[3])) - 1)) };
 			if (useGuard)
 			{
 				pl_tex_params gp{};
@@ -891,7 +912,20 @@ vec4 p10_base_dual_at(vec2 sp, ivec2 hi, float cu0, float cu1)
 					++failures;
 					return false;
 				}
-				const pl_shader_desc gd[2] = { Sampled("bz_src", in, false), Storage("bz_out", guard[slot][plane]) };
+				pl_tex guardSrc = in;
+				// W23-NEON-M1: when source.crop excludes bars, clamp in -> out[slot][plane] (already allocated,
+				// zero extra VRAM, overwritten by BODY below) so BusyShare never computes Laplacians across bars.
+				if (hasSourceCrop && (activePxLo[0] > 0 || activePxLo[1] > 0 || activePxHi[0] < w - 1 || activePxHi[1] < h - 1))
+				{
+					static const std::string kEmptyHdr;
+					const pl_shader_desc cd[2] = { Sampled("src", in, false), Storage("dst", out[slot][plane]) };
+					const pl_shader_var cv[2] = {
+						{ pl_var_ivec2("active_lo"), activePxLo, true },
+						{ pl_var_ivec2("active_hi"), activePxHi, true } };
+					if (Pass(dispatch, "VideoProcessor deband: active crop clamp", kEmptyHdr, CROP_CLAMP_BODY, cd, 2, cv, 2, (w + 15) / 16, (h + 15) / 16))
+						guardSrc = out[slot][plane];
+				}
+				const pl_shader_desc gd[2] = { Sampled("bz_src", guardSrc, false), Storage("bz_out", guard[slot][plane]) };
 				// The owner kernel: one 16 x 16 workgroup per 16 px cell, the plane's components (bz_ncomp),
 				// taps in the plane's normalised units (scale 1), thresholds in the same units.
 				const int busyBlock = 16;
@@ -970,7 +1004,13 @@ vec4 p10_base_dual_at(vec2 sp, ivec2 hi, float cu0, float cu1)
 					descScratch.push_back(Sampled("src", splitLowTex, false));
 				descScratch.push_back(Storage("dst", splitTensor[slot][plane]));
 
-				pl_shader_var tv[6];
+				const int ahLo[2] = {
+					(std::max)(0, (std::min)(hw - 1, activePxLo[0] / 2)),
+					(std::max)(0, (std::min)(hh - 1, activePxLo[1] / 2)) };
+				const int ahHi[2] = {
+					(std::max)(ahLo[0], (std::min)(hw - 1, activePxHi[0] / 2)),
+					(std::max)(ahLo[1], (std::min)(hh - 1, activePxHi[1] / 2)) };
+				pl_shader_var tv[8];
 				int ntv = 0;
 				tv[ntv++] = { pl_var_float("code_scale"), &codeScale, true };
 				tv[ntv++] = { pl_var_int("tb"), &tb, true };
@@ -979,8 +1019,15 @@ vec4 p10_base_dual_at(vec2 sp, ivec2 hi, float cu0, float cu1)
 					tv[ntv++] = { pl_var_float("p10_cu"), &p10Cu, true };
 					tv[ntv++] = { pl_var_int("full_w"), &w, true };
 					tv[ntv++] = { pl_var_int("full_h"), &h, true };
+					tv[ntv++] = { pl_var_ivec2("active_lo"), activePxLo, true };
+					tv[ntv++] = { pl_var_ivec2("active_hi"), activePxHi, true };
 					if (useP10Dual)
 						tv[ntv++] = { pl_var_float("p10_cu_cr"), &p10CuCr, true };
+				}
+				else
+				{
+					tv[ntv++] = { pl_var_ivec2("ah_lo"), ahLo, true };
+					tv[ntv++] = { pl_var_ivec2("ah_hi"), ahHi, true };
 				}
 				headerScratch.clear();
 				headerScratch += NcompDefine(ncomp);

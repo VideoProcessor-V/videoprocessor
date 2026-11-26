@@ -1394,6 +1394,10 @@ namespace VpvRendererSettings
 			<< settings.motionHistoryFixes << '|'
 			<< settings.vectorDemand << '|'
 			<< settings.engineOffForced << '|'
+			<< settings.presentEveryVsyncWithheld << '|'
+			<< settings.ambientAdaptReplaced << '|'
+			<< settings.saturationReplaced << '|'
+			<< settings.saturationConfigured << '|'
 			<< settings.queueTimingFixes << '|'
 			<< settings.generalRateFixes << '|'
 			<< settings.efficiencyFixes << '|'
@@ -1454,6 +1458,8 @@ namespace VpvRendererSettings
 	void CopyLive(VpvRenderer::Fields& currentTransport, const VpvRenderer::Fields& next)
 	{
 		currentTransport.saturation = next.saturation;
+		currentTransport.saturationReplaced = next.saturationReplaced;
+		currentTransport.saturationConfigured = next.saturationConfigured;
 		currentTransport.dejudderStrength = next.dejudderStrength;
 		currentTransport.dejudderStrengthEven = next.dejudderStrengthEven;
 		currentTransport.dejudderEvenIncludes1001 = next.dejudderEvenIncludes1001;
@@ -1532,7 +1538,12 @@ namespace VpvRendererSettings
 			if (differs)
 				fields.push_back(name);
 		};
-		changed(current.saturation != next.saturation, "saturation");
+		changed(current.saturation != next.saturation || current.saturationReplaced != next.saturationReplaced ||
+			current.saturationConfigured != next.saturationConfigured, "saturation");
+		changed(current.pipelineSettingsProblems != next.pipelineSettingsProblems, "pipeline_settings_problems");
+		changed(current.engineOffForced != next.engineOffForced, "engine_off_forced");
+		changed(current.presentEveryVsyncWithheld != next.presentEveryVsyncWithheld, "present_every_vsync_withheld");
+		changed(current.ambientAdaptReplaced != next.ambientAdaptReplaced, "ambient_adapt_replaced");
 		changed(current.captureUpload != next.captureUpload, "capture_upload");
 		changed(current.sourceRange != next.sourceRange, "source_range");
 		changed(current.sourceResolution != next.sourceResolution ||
@@ -1645,7 +1656,6 @@ namespace VpvRendererSettings
 		changed(current.dejudderLowRes != next.dejudderLowRes, "dejudder_low_res");
 		changed(current.dejudderEstimateAhead != next.dejudderEstimateAhead, "dejudder_estimate_ahead");
 		changed(current.capturePath != next.capturePath, "capture_path");
-		changed(current.captureUpload != next.captureUpload, "capture_upload");
 		changed(current.dejudderMotionRolloff != next.dejudderMotionRolloff || current.dejudderRollLo != next.dejudderRollLo ||
 			current.dejudderRollHi != next.dejudderRollHi || current.dejudderRollFloor != next.dejudderRollFloor,
 			"dejudder_motion_rolloff");

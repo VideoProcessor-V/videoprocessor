@@ -1866,8 +1866,16 @@ namespace CameraModel
 			if (fullCells > 0 || photoMoved)
 			{
 				// The refine moved the model: the inliers, the share and every signal Finish publishes are rebuilt on the refined model.
+				// W23-NEON-H3: preserve two-layer border & continuity signals computed above (BuildCand resets Signals to 0.5).
+				const double savedBorder = cam->sg.border;
+				const double savedContinuity = cam->sg.continuity;
 				const Params refined = cam->model;
 				BuildCand(f, c, in, cellsTotal, refined, *cam);
+				if (c.twoLayer)
+				{
+					cam->sg.border = savedBorder;
+					cam->sg.continuity = savedContinuity;
+				}
 			}
 			Finish(F, in, c, f, temporalRead, *cam, ambiguity, rec);
 			rec.signals.waterExcludedShare = waterExcludedShare;
@@ -2302,6 +2310,7 @@ namespace CameraModel
 						rec.hypotheses = seed.hypotheses;
 						rec.objects = seed.objects;
 						rec.blocks = seed.blocks;
+						rec.absThresholdPx = seed.absThresholdPx;   // W23-NEON-M2: preserve R2F threshold across CRD2 POD serialization
 						rec.labelsOnGpu = seed.labelsOnGpu;   // GEM-131: the labels' home follows the blocks that are carried over
 						m_previous = rec;
 						m_havePrevious = true;
@@ -2368,6 +2377,7 @@ namespace CameraModel
 							rec.signals = nx.signals;
 							rec.samples = nx.samples;
 							rec.hypotheses = nx.hypotheses;
+							rec.absThresholdPx = (std::max)(m_previous.absThresholdPx, nx.absThresholdPx);   // W23-NEON-M2
 						}
 					}
 					else if (nx.verdictFlags != 0)

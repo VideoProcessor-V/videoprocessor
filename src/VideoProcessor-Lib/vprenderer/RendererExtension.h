@@ -160,6 +160,8 @@ namespace RendererExtension
 		DrawResult result = DrawResult::Continue;         // Draw: out
 		bool retireSourceFrame = true;                    // AfterRender: true when `seq`'s final presentation use is over (default true preserves legacy callers/tests)
 		bool retireOnly = false;                          // AfterRender: true when called after all motionDraws/repeats strictly to retire `seq`
+		bool runPostSubmitGap = true;                     // AfterRender: true only when the frame rendered on a healthy GPU (false on gpuFailed / aborted retire)
+		bool secondaryDraw = false;                       // AfterRender: true on secondary motionDraw / cadenceRepeat draws (no duplicate timing/skipped count)
 		uint64_t releaseFenceValue = 0;                   // AfterRender: render-side fence value for OnFrameRetired (0 = single-queue D3D11 immediate-context FIFO)
 	};
 	struct QueueView { const void* queue = nullptr; size_t size = 0; };
@@ -529,18 +531,20 @@ namespace RendererExtension
 		Frame(c);
 	}
 	inline void NotifyAfterRender(const void* host, int64_t seq, int64_t generation, int errors, int retried, bool rendered,
-		const pl_render_errors* renderErrors = nullptr, bool retireSourceFrame = true, uint64_t releaseFenceValue = 0) noexcept
+		const pl_render_errors* renderErrors = nullptr, bool retireSourceFrame = true, uint64_t releaseFenceValue = 0,
+		bool secondaryDraw = false) noexcept
 	{
 		if (!Any()) return;
 		DrawJob job; job.errors = errors; job.retried = retried; job.rendered = rendered; job.renderErrors = renderErrors;
-		job.retireSourceFrame = retireSourceFrame; job.releaseFenceValue = releaseFenceValue;
+		job.retireSourceFrame = retireSourceFrame; job.secondaryDraw = secondaryDraw; job.releaseFenceValue = releaseFenceValue;
 		FrameContext c; c.host = host; c.phase = FramePhase::AfterRender; c.seq = seq; c.generation = generation; c.phaseData = &job;
 		Frame(c);
 	}
-	inline void NotifySourceFrameRetired(const void* host, int64_t seq, int64_t generation, uint64_t releaseFenceValue = 0) noexcept
+	inline void NotifySourceFrameRetired(const void* host, int64_t seq, int64_t generation, uint64_t releaseFenceValue = 0,
+		bool runPostSubmitGap = true) noexcept
 	{
 		if (!Any()) return;
-		DrawJob job; job.retireSourceFrame = true; job.retireOnly = true; job.releaseFenceValue = releaseFenceValue;
+		DrawJob job; job.retireSourceFrame = true; job.retireOnly = true; job.runPostSubmitGap = runPostSubmitGap; job.releaseFenceValue = releaseFenceValue;
 		FrameContext c; c.host = host; c.phase = FramePhase::AfterRender; c.seq = seq; c.generation = generation; c.phaseData = &job;
 		Frame(c);
 	}

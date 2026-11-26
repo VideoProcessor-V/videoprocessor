@@ -147,6 +147,7 @@ namespace SourceResolutionMonitor
 		std::string u7SceneFallbackWhy;
 		unsigned long long p4StatsShared = 0, p4StatsFallback = 0;
 		std::string p4StatsFallbackWhy;
+		bool nativeReadbackFailed = false;   // W23-NEON-M5: D3D11 staging creation failed -> blocking libplacebo readback
 	};
 
 	class Monitor
@@ -439,6 +440,7 @@ namespace SourceResolutionMonitor
 		// false before the first frame, on another API, or when the staging could not be made on
 		// D3D11 (then libplacebo's readback, which waits there: the renderer can show it).
 		bool NativeReadback() const { return nativeHolder != nullptr; }
+		bool NativeReadbackFailed() const { return nativeReadbackFailed.load(std::memory_order_acquire); }
 
 		// Render thread: the re-base factor auto wants for a native height
 		// (1 = native), and why ("" when unchanged). Planner Q2 (2026-10-16): back to
@@ -721,6 +723,7 @@ namespace SourceResolutionMonitor
 		static constexpr int kReadbackWidth = 1024;
 		std::shared_ptr<void> nativeHolder;   // LedDrive::NativeTexReadback (kept out of this header)
 		bool nativeTried = false;
+		std::atomic<bool> nativeReadbackFailed{ false };   // W23-NEON-M5: D3D11 staging creation failed
 		Job pendingMeta[2];
 		int nextSlot = 0;
 		double lastSubmit = -1e9;
@@ -859,8 +862,9 @@ namespace SourceResolutionMonitor
 		SourceResolution::FrameCutJudge frameJudge;
 		struct U7AheadEntry
 		{
-			uint64_t seq;
-			bool cut;
+			enum class Verdict : uint8_t { None = 0, Pending = 1, Confirmed = 2, Cancelled = 3 };
+			uint64_t seq = 0;
+			Verdict verdict = Verdict::None;
 			bool fromFrameJudge = false;   // true when judged by fallback frameJudge (flash-cancellable)
 		};
 		std::deque<U7AheadEntry> u7AheadHistory;   // guarded by `frameJudgeMutex` (MED-3: consecutive U7 verdicts for LookAheadEvidence)

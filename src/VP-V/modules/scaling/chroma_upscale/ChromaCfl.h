@@ -278,9 +278,12 @@ namespace ChromaUpscale
 		Plane yc = yCrop, ccB = cbCrop, ccR = crCrop, gB(cbCrop.w, cbCrop.h), gR(crCrop.w, crCrop.h);
 		if (p.grainGuard)
 		{
-			yc = GrainSplit::Compute(yCrop, Scale(lines), BlockPx(lines)).clean;
+			// W23-NEON-H5: derive GrainSplit sourceBits from actual colorDepth (never hardcoded 10-bit) and pass isChroma=true for Cb/Cr.
+			GrainSplit::Params gp;
+			gp.sourceBits = (colorDepth >= 8 && colorDepth <= 16) ? colorDepth : 10;
+			yc = GrainSplit::Compute(yCrop, Scale(lines), BlockPx(lines), gp, false).clean;
 			const double cl = lines / fy;
-			const GrainSplit::Split sb = GrainSplit::Compute(cbCrop, Scale(cl), BlockPx(cl)), sr = GrainSplit::Compute(crCrop, Scale(cl), BlockPx(cl));
+			const GrainSplit::Split sb = GrainSplit::Compute(cbCrop, Scale(cl), BlockPx(cl), gp, true), sr = GrainSplit::Compute(crCrop, Scale(cl), BlockPx(cl), gp, true);
 			ccB = sb.clean; gB = sb.grain;
 			ccR = sr.clean; gR = sr.grain;
 		}

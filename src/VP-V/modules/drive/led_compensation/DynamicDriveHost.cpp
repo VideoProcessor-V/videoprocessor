@@ -433,7 +433,14 @@ namespace LedDrive
 			if (!context.projectorAllowed)
 				stopped = DetachLocked(context);
 			else
+			{
+				// W23-NEON-H1: when live-switching Original -> VP-V (or re-enabling drive.projector_control),
+				// ApplySnapshot may have run while the outgoing Original Impl still had projectorAllowed == false.
+				// Re-evaluate the saved configuration here on Attach() so Dynamic Drive starts cleanly.
+				if (!suspended && configuration && !std::atomic_load(&module))
+					Update(*configuration, context);
 				attached = std::atomic_load(&module);
+			}
 			publishedParams = params;
 			publishedRejection = rejection;
 		}

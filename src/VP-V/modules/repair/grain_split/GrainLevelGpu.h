@@ -183,7 +183,9 @@ if (gv_li == 0u)
     }
     else
     {
-        imageStore(gv_out, gv_blk, vec4(0.0, 0.0, 0.0, -1.0));
+        // W23-NEON-M2: extend border active block grain level N_b (not 0.0) into bar blocks so
+        // bilinear sampling across letterbox edges in AdaptiveDownscale never creates sharpening halos.
+        imageStore(gv_out, gv_blk, vec4(gs_blocks(gv_blk).x, 0.0, 0.0, -1.0));
     }
 }
 )GLSL";

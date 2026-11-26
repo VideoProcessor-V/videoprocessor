@@ -56,7 +56,8 @@ namespace DmCurve
 		for (long code = first; code <= last; ++code)
 		{
 			const double x = static_cast<double>(code) / kCodeScale;
-			const double pos = (x - c.sMin) / span * static_cast<double>(size - 1);
+			double pos = (x - c.sMin) / span * static_cast<double>(size - 1);
+			if (pos < 0.0) pos = 0.0;
 			size_t i = static_cast<size_t>(pos);
 			if (i >= size - 1) i = size - 2;
 			const double f = pos - static_cast<double>(i);
@@ -124,10 +125,10 @@ namespace DmCurve
 				m_configuredRecovery = params.contrast_recovery;
 			if (active)
 			{
-				if (lutSize > 0)
-					params.lut_size = static_cast<decltype(params.lut_size)>(lutSize);
-				if (setRecovery)
-					params.contrast_recovery = static_cast<decltype(params.contrast_recovery)>(recovery);
+				// W23-NEON-M2: restore configured baseline whenever lutSize == 0 or !setRecovery so a
+				// previous non-identity scene's override never leaks into an identity / unmeasured scene.
+				params.lut_size = lutSize > 0 ? static_cast<decltype(params.lut_size)>(lutSize) : m_configuredLut;
+				params.contrast_recovery = setRecovery ? static_cast<decltype(params.contrast_recovery)>(recovery) : m_configuredRecovery;
 				m_appliedLut = params.lut_size;
 				m_appliedRecovery = params.contrast_recovery;
 				m_overridden = true;

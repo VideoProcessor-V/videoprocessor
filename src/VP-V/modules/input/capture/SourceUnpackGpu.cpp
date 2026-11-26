@@ -106,6 +106,7 @@ namespace SourceUnpack
 		case Cause::BadGeometry: return "geometry";
 		case Cause::DvContainer: return "dv container";
 		case Cause::DvAlignment: return "dv alignment";
+		case Cause::FullRangeYuv: return "full-range yuv";
 		case Cause::NoFormat: return "no format";
 		case Cause::RawUploadFailed: return "raw upload";
 		case Cause::UploadedSizeDiffers: return "uploaded size";
@@ -146,6 +147,10 @@ namespace SourceUnpack
 				return Cause::DvAlignment;
 			if ((request.width & 1) != 0)
 				return Cause::BadGeometry;
+		}
+		else if (request.fullRange)
+		{
+			return Cause::FullRangeYuv;
 		}
 		return Cause::None;
 	}

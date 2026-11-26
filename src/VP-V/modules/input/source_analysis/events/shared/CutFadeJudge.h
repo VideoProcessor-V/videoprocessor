@@ -875,7 +875,11 @@ if (i == 0u) {
     float g = sb / max(sa, 1e-3);
     float black = abs(1.0 - g) > 0.01 ? (mb - g * ma) / (1.0 - g) : 1e9;
     bool scaled = abs(1.0 - g) > 0.01 && black > -12.0 && black < 48.0;
+#ifdef U7_FADE_CONFIRMED
+    bool fade_on = scaled && abs(d) > fade_lo && abs(d) < fade_hi && sa > 1.0 && sb > 1.0;
+#else
     bool fade_on = scaled && abs(d) > fade_lo && abs(d) < fade_hi && abs(prev.w) > fade_lo && sign(d) == sign(prev.w) && sa > 1.0 && sb > 1.0;
+#endif
     float gain = clamp(sa / max(sb, 1e-3), 0.5, 2.0);
     imageStore(state_io, ivec2(0), vec4(gain, ma - gain * mb, fade_on ? 1.0 : 0.0, d));
 }

@@ -95,7 +95,8 @@ vec2 low_s(ivec2 p, ivec2 lo)
     vec2 h = (vec2(p) + vec2(0.5)) * 0.5 - vec2(0.5);
     ivec2 i0 = ivec2(floor(h));
     vec2 f = h - vec2(i0);
-    ivec2 a = i0 - lo;
+    // W23-NEON-B1: clamp tile index into [0, LA - 2] so cropped/letterbox bar workgroups never read OOB in s_l.
+    ivec2 a = clamp(i0 - lo, ivec2(0), ivec2(LA - 2));
     vec2 v00 = s_l[a.y * LA + a.x], v10 = s_l[a.y * LA + a.x + 1];
     vec2 v01 = s_l[(a.y + 1) * LA + a.x], v11 = s_l[(a.y + 1) * LA + a.x + 1];
     vec2 top = v00 + (v10 - v00) * f.x, bot = v01 + (v11 - v01) * f.x;

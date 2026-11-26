@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
-// The writers of the running-pathway latch (RunningPathway.h): the profile runtime's VP-V unit latches it; tests set it.
+// The writers of the running-pathway state (RunningPathway.h): Owner Option A live in-process switch —
+// updated on configuration commit / renderer rebuild via Store(); tests set it via SetForTesting().
 // Not for Bill's translation units. Declarations only (RunningPathway.cpp). C++14.
 
 #include <VP-V/core/RunningPathway.h>

@@ -421,7 +421,7 @@ namespace MotionAhead
 				discarded_ += dropped;
 				queue_.clear();
 				spaceCv_.notify_all();
-				if (dropped && !busy_)
+				if (dropped && !busy_ && externalBusy_ == 0)
 					idleCv_.notify_all();
 				return dropped;
 			}
@@ -430,7 +430,7 @@ namespace MotionAhead
 			void WaitIdle()
 			{
 				std::unique_lock<std::mutex> lock(mutex_);
-				idleCv_.wait(lock, [this] { return (queue_.empty() && !busy_ && externalBusy_ == 0) || closed_; });
+				idleCv_.wait(lock, [this] { return !busy_ && externalBusy_ == 0 && (queue_.empty() || closed_); });
 			}
 
 			void MarkBusy(bool busy)

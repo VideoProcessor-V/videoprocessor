@@ -599,7 +599,7 @@ bool HdrVetoCaptureGate::WantsSample(uint64_t generation, uint64_t nowMs)
 		m_haveSample = false;
 	}
 	const bool armed = m_armed && m_generation == generation;
-	if (!armed && m_haveSample && nowMs - m_lastSampleMs < UNARMED_INTERVAL_MS)
+	if (!armed && m_haveSample && nowMs >= m_lastSampleMs && nowMs - m_lastSampleMs < UNARMED_INTERVAL_MS)
 		return false;
 	m_lastSampleMs = nowMs;
 	m_haveSample = true;

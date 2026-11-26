@@ -133,19 +133,15 @@ namespace ShortcutObserverStatus
 			ConfigFile config;
 			if (!m_load || !m_load(config))
 				return false;
-			if (!m_pathwayKnown)
-			{
-				m_originalPathway = OriginalPathwayOf(config);
-				m_pathwayKnown = true;
-			}
-			facts = FromConfig(config, m_originalPathway);
+			// W23-NEON-M1: Owner Option A live in-process switch — evaluate pathway on every tick
+			// so switching VP-V <-> Original starts/stops the default global keyboard hook within 1 s.
+			const bool originalPathway = OriginalPathwayOf(config);
+			facts = FromConfig(config, originalPathway);
 			return true;
 		}
 
 	private:
 		Loader m_load;
-		bool m_pathwayKnown = false;
-		bool m_originalPathway = false;
 	};
 
 	// What the hook does: observe the report key's chord, or nothing.

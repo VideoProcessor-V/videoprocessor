@@ -6565,6 +6565,7 @@ struct LibplaceboVideoRenderer::Impl
 				if (rebaseDispatch) pl_dispatch_destroy(&rebaseDispatch);
 				extendedRangeHooks.Release();   // Stage 10: its textures
 				calibrationHost.ReleaseGpu(d3d11->gpu);  // the VP calibration stage's LUT, the patch texture
+				outputFinish.ReleaseGpu(d3d11->gpu);     // W23-NEON-B1: dither_need GPU textures/dispatch/demand before pl_d3d11_destroy
 				if (outputMerger) { outputMerger->Release(); outputMerger.reset(); }
 				dejudderExtras.dejudderOutput.Release();
 				dejudderExtras.dejudderOutputSwapchain = nullptr;
@@ -6579,6 +6580,7 @@ struct LibplaceboVideoRenderer::Impl
 					dejudderReasonChangesNotLogged = 0;
 				}
 			}
+			else outputFinish.ReleaseGpu(nullptr);   // W23-NEON-B1: forget handles safely when d3d11 is already gone
 			pl_swapchain_destroy(&swapchain);
 			vpOwnedSwapchain.Release();
 			gpuFrameTimer.ReleaseResources();
@@ -21359,7 +21361,7 @@ releaseDriftBaseRetention =
             renderParams.num_hooks = 0;
         }
         if (!pipelineSlots.OriginalPathway()) { ReportRenderErrors(); dynamicDrive.CollectMeasurements(); }   // VPV-HOOK P4-4: after-render reports (CoreSegments.inl), then Dynamic Drive stats out (finished measurements, a few frames old; never waits); nothing in Original
-        RendererExtension::NotifyAfterRender(this, sourceSequence, frameGeneration, static_cast<int>(hookRender.errors), hookRender.retried ? 1 : 0, rendered, nullptr, false); // VPV-HOOK: retired once after motionDraws & cadenceRepeat complete
+        RendererExtension::NotifyAfterRender(this, sourceSequence, frameGeneration, static_cast<int>(hookRender.errors), hookRender.retried ? 1 : 0, rendered, nullptr, false, 0, cadenceRepeat); // VPV-HOOK: retired once after motionDraws & cadenceRepeat complete; secondaryDraw avoids inflating skipped counter
         if (hookRender.retried)
             DebugLog::Log("VP anamorphic hook recovery: schema=1 sequence=%llu generation=%llu hook=%llu errors=0x%x retry=1 rendered=%d lens=%.6f latch=until_shader_selection_change",
                 sourceSequence, frameGeneration, hookRender.failedSignature, hookRender.errors,
@@ -24006,14 +24008,14 @@ bool LibplaceboVideoRenderer::ApplyApplicationState(
 		if (m_impl)
 			m_impl->lowLatencyQueueActive.store(m_lowLatencyQueue, std::memory_order_release);
 	};
-	if (snapshot.configuration)
-	{
-		// Dynamic Drive (WP-15): the LED drive's settings; the hold-over is for file playback only.
+	auto applyDynamicDriveSnapshot = [&](bool allowFromConfig) {
+		if (!snapshot.configuration) return;
 		std::string sourceKind;
-		if (!snapshot.LookupVariable("source", sourceKind))
-			sourceKind.clear();
-		m_dynamicDrive.ApplySnapshot(snapshot.configuration, sourceKind, DynamicDriveContext());
-	}
+		if (!snapshot.LookupVariable("source", sourceKind)) sourceKind.clear();
+		auto ctx = DynamicDriveContext();
+		if (allowFromConfig) ctx.projectorAllowed = true;
+		m_dynamicDrive.ApplySnapshot(snapshot.configuration, sourceKind, ctx);
+	};
 	VideoStateComPtr state = m_videoState;
 	auto candidateConfiguration = m_rendererConfiguration;
 	if (!candidateConfiguration || snapshot.configuration != m_applicationConfiguration)
@@ -24039,6 +24041,7 @@ bool LibplaceboVideoRenderer::ApplyApplicationState(
 		m_rendererConfiguration = candidateConfiguration;
 		m_applicationConfiguration = snapshot.configuration;
 		if (state) Vpv::Ingress::SyncRunningPathway(this, candidateSettings.pipelineOriginalPathway); else Vpv::Ingress::SyncRunningPathwayFromConfig(this, candidateConfiguration.get());   // VPV-HOOK: Owner Option A
+		applyDynamicDriveSnapshot(true);   // VPV-HOOK (W23-NEON-H1): apply after acceptance with new config governing
 		rendererRestartRequired = true;
 		activeState = TEXT("Renderer initialization superseded by profile change");
 		DebugLog::Log(
@@ -24172,6 +24175,7 @@ bool LibplaceboVideoRenderer::ApplyApplicationState(
 	m_rendererConfiguration = candidateConfiguration;
 	m_applicationConfiguration = snapshot.configuration;
 	if (state) Vpv::Ingress::SyncRunningPathway(this, candidateSettings.pipelineOriginalPathway); else Vpv::Ingress::SyncRunningPathwayFromConfig(this, candidateConfiguration.get());   // VPV-HOOK: Owner Option A
+	applyDynamicDriveSnapshot(rendererRestartRequired);   // VPV-HOOK (W23-NEON-H1): apply only once accepted; rebuild lets new config govern
 	DebugLog::Log("Renderer configuration snapshot accepted: generation=%llu identity=%llu",
 		static_cast<unsigned long long>(snapshot.generation),
 		static_cast<unsigned long long>(candidateConfiguration->GetContentIdentity()));
@@ -28240,8 +28244,8 @@ void LibplaceboVideoRenderer::RenderLoop()
 		// bounded preparation window even when no new capture has arrived.
 		m_queueChanged.notify_all();
 		m_fileSlotGate.Notify();   // ABI 37: a file source may queue its next frame
-		// VPV-HOOK: retire sourceSequence once after all motionDraws & cadence-repeat decisions (disarmed when repeatQueued)
-		struct SourceFrameRetireGuard { Impl* impl; uint64_t seq; uint64_t gen; bool armed; ~SourceFrameRetireGuard() { if (armed && impl) { std::lock_guard<std::mutex> g(impl->renderMutex); RendererExtension::NotifySourceFrameRetired(impl, static_cast<int64_t>(seq), static_cast<int64_t>(gen)); } } } sourceFrameRetire{ m_impl.get(), sourceSequence, frameGeneration, true };
+		// VPV-HOOK: retire sourceSequence once after all motionDraws & cadence-repeat decisions (disarmed when repeatQueued; runGap only on healthy rendered frame)
+		struct SourceFrameRetireGuard { Impl* impl; uint64_t seq; uint64_t gen; bool armed; bool runGap; ~SourceFrameRetireGuard() { if (armed && impl) { std::lock_guard<std::mutex> g(impl->renderMutex); RendererExtension::NotifySourceFrameRetired(impl, static_cast<int64_t>(seq), static_cast<int64_t>(gen), 0, runGap); } } } sourceFrameRetire{ m_impl.get(), sourceSequence, frameGeneration, true, false };
 
 		if (prefillReleased)
 		{
@@ -28840,7 +28844,10 @@ void LibplaceboVideoRenderer::RenderLoop()
 							while (m_frameQueue.size() > recoveryTarget && droppedFrames < heldDrop)
 							{
 								if (m_frameQueue.front().cadenceRepeat)
+								{
 									++canceledRepeats;
+									if (m_impl) RendererExtension::NotifyQueue(RendererExtension::QueueEvent::Drop, m_impl.get(), static_cast<int64_t>(m_frameQueue.front().sourceSequence + 1), static_cast<int64_t>(m_frameQueue.front().generation), 1, 0); // VPV-HOOK (W23-NEON-L1): release unretired sourceSequence when queued repeat is canceled
+								}
 								m_activePictureTimeline.MarkDiscarded(
 									m_frameQueue.front().activePictureIdentity,
 									m_frameQueue.front().frame.GetCounter(),
@@ -29185,6 +29192,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 			continue;
 		}
 		consecutiveFailures = 0;
+		sourceFrameRetire.runGap = true;   // VPV-HOOK (W23-NEON-H2): frame rendered on healthy GPU; post-submit gap work is safe
         presentationPauseLogged=false;
 		m_hasPresentedLiveFrame.store(true, std::memory_order_release);
 
@@ -29446,6 +29454,7 @@ void LibplaceboVideoRenderer::ClearQueueLocked(const char* reason)
 			queuedFrame.activePictureIdentity);
 		if (queuedFrame.cadenceRepeat)
 		{
+			if (m_impl) RendererExtension::NotifyQueue(RendererExtension::QueueEvent::Drop, m_impl.get(), static_cast<int64_t>(queuedFrame.sourceSequence + 1), static_cast<int64_t>(queuedFrame.generation), 1, 0); // VPV-HOOK (W23-NEON-L1): release unretired sourceSequence when queued repeat is canceled
 			DebugLog::Log(
 				"Alpha cadence native: action_id=%llu action=repeat outcome=repeat_queue_canceled success=0 policy_generation=%llu detector_generation=%llu queue_generation=%llu source=%llu present_id=%u deadline_s=%+.6f debt=%llu counter=%llu rollback=deferred_to_policy_generation ownership=released cancel_reason=%s",
 				static_cast<unsigned long long>(

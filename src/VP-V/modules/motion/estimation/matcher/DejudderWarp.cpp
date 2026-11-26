@@ -4034,7 +4034,7 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		return Dispatch("VideoProcessor de-judder: picture area (black bars)", VpUnit::PictureRect::KernelHeader(), VpUnit::PictureRect::KernelBody(), d, 2, v, 4, 16, 16, 16);
 	}
 
-	bool MotionWarp::FadeMatch(const Planes& b)
+	bool MotionWarp::FadeMatch(const Planes& b, bool u7FadeConfirmed)
 	{
 		if (!fadeState)
 		{
@@ -4064,8 +4064,13 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		const pl_shader_desc d[4] = { Sampled("l2_a", l2A, false), Sampled("l2_b", l2B, false), stateDesc,
 			Sampled("picture", picture, false) };
 		static ShaderHeaderCache fadeMatchHeaders;
-		const char* header = fadeMatchHeaders.Get(withPicture ? 1u : 0u, [&]() {
-			return std::string(withPicture ? "#define PICTURE 1\n" : "") + VpUnit::CutFadeJudge::FadeKernelHeader();
+		const uint32_t headerKey = (withPicture ? 1u : 0u) | (u7FadeConfirmed ? 2u : 0u);
+		const char* header = fadeMatchHeaders.Get(headerKey, [&]() {
+			std::string h;
+			if (withPicture) h += "#define PICTURE 1\n";
+			if (u7FadeConfirmed) h += "#define U7_FADE_CONFIRMED 1\n";
+			h += VpUnit::CutFadeJudge::FadeKernelHeader();
+			return h;
 		});
 		// The test, then B's pyramid again with the gain applied (unchanged
 		// when the test fails).
@@ -4213,9 +4218,14 @@ if (b.x < blocks.x && b.y < blocks.y) {
 		}
 		if (settings.fadeMatch && !outerOfLowRes && (!u7Known || u7Fade))
 		{
-			if (!FadeMatch(b))
+			if (!FadeMatch(b, u7Known && u7Fade))
 				return false;
 			fadeMatchApplied = true;
+		}
+		else if (u7Known && !u7Fade && fadeState)
+		{
+			// W23-NEON-M4: clear stale fadeState.w when transitioning out of a U7 fade episode.
+			pl_tex_destroy(gpu, &fadeState);
 		}
 		if (HalvesForSearch())
 		{

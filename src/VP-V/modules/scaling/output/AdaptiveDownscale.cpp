@@ -313,10 +313,12 @@ if (b.x < blocks.x && b.y < blocks.y) {
     float conf = (frame_ok && f_xy_ok) ? ad_unit_safe(f.z) : 0.0;
     float fl = ad_unit_safe(motion_floor);
     // 4-neighbor cardinal motion-boundary shear weighted by each neighbor's continuous confidence.
-    vec4 fn0 = texelFetch(field, clamp(b + ivec2(-1, 0), ivec2(0), lim), 0);
-    vec4 fn1 = texelFetch(field, clamp(b + ivec2( 1, 0), ivec2(0), lim), 0);
-    vec4 fn2 = texelFetch(field, clamp(b + ivec2( 0,-1), ivec2(0), lim), 0);
-    vec4 fn3 = texelFetch(field, clamp(b + ivec2( 0, 1), ivec2(0), lim), 0);
+    // W23-NEON-M3: clamp neighbor & temporal advection taps inside active crop blocks [crop_blk_lo, crop_blk_hi]
+    // so static letterbox/pillarbox bars never cause false shear during rigid pans.
+    vec4 fn0 = texelFetch(field, clamp(b + ivec2(-1, 0), crop_blk_lo, crop_blk_hi), 0);
+    vec4 fn1 = texelFetch(field, clamp(b + ivec2( 1, 0), crop_blk_lo, crop_blk_hi), 0);
+    vec4 fn2 = texelFetch(field, clamp(b + ivec2( 0,-1), crop_blk_lo, crop_blk_hi), 0);
+    vec4 fn3 = texelFetch(field, clamp(b + ivec2( 0, 1), crop_blk_lo, crop_blk_hi), 0);
     float max_dv = 0.0;
     max_dv = max(max_dv, ad_neighbor_dv(fn0, f.xy, f_xy_ok));
     max_dv = max(max_dv, ad_neighbor_dv(fn1, f.xy, f_xy_ok));
@@ -337,10 +339,10 @@ if (b.x < blocks.x && b.y < blocks.y) {
     vec2 pc = (conf > 0.0 && f_xy_ok) ? c - fxy : c;
     if (ad_nonfinite(pc.x) || ad_nonfinite(pc.y))
         pc = c;
-    // Bilinear temporal advection across block centres in map_in.
-    vec2 ppos = clamp(pc / bpx - vec2(0.5), vec2(0.0), vec2(lim));
+    // Bilinear temporal advection across block centres in map_in (clamped within active crop blocks).
+    vec2 ppos = clamp(pc / bpx - vec2(0.5), vec2(crop_blk_lo), vec2(crop_blk_hi));
     ivec2 p0 = ivec2(floor(ppos));
-    ivec2 p1 = min(p0 + ivec2(1), lim);
+    ivec2 p1 = min(p0 + ivec2(1), crop_blk_hi);
     vec2 pt = ppos - vec2(p0);
     float m00 = texelFetch(map_in, p0, 0).r;
     float m10 = texelFetch(map_in, ivec2(p1.x, p0.y), 0).r;
@@ -1459,7 +1461,19 @@ float rs_slope(float y)
 			Sampled("state", state, false), Sampled("map_in", motionMap[motionIndex], false), Storage("map_out", motionMap[next]) };
 		const float fieldBlockPx = static_cast<float>(motion.fieldBlockPx > 0 ? motion.fieldBlockPx : 16);
 		const float fieldVecScale = (motion.scaleToSourcePx > 0.0f && std::isfinite(motion.scaleToSourcePx)) ? motion.scaleToSourcePx : 1.0f;
-		const pl_shader_var v[11] = {
+		// W23-NEON-M3: active crop block bounds [cropBlkLo, cropBlkHi] in field block coordinates.
+		int cropBlkLo[2] = { 0, 0 };
+		int cropBlkHi[2] = { (std::max)(0, bw - 1), (std::max)(0, bh - 1) };
+		if (motion.sourceCrop.x1 > motion.sourceCrop.x0 && motion.sourceCrop.y1 > motion.sourceCrop.y0)
+		{
+			const int lx = (std::max)(0, (std::min)(bw - 1, static_cast<int>(std::floor(motion.sourceCrop.x0 / fieldBlockPx))));
+			const int ly = (std::max)(0, (std::min)(bh - 1, static_cast<int>(std::floor(motion.sourceCrop.y0 / fieldBlockPx))));
+			const int hx = (std::max)(lx, (std::min)(bw - 1, static_cast<int>(std::ceil(motion.sourceCrop.x1 / fieldBlockPx)) - 1));
+			const int hy = (std::max)(ly, (std::min)(bh - 1, static_cast<int>(std::ceil(motion.sourceCrop.y1 / fieldBlockPx)) - 1));
+			cropBlkLo[0] = lx; cropBlkLo[1] = ly;
+			cropBlkHi[0] = hx; cropBlkHi[1] = hy;
+		}
+		const pl_shader_var v[13] = {
 			{ pl_var_float("min_trusted_share"), &motion.minTrustedShare, true },
 			{ pl_var_float("first_map"), &firstF, true },
 			{ pl_var_float("crop_h"), &cropH, true },
@@ -1470,8 +1484,10 @@ float rs_slope(float y)
 			{ pl_var_float("smooth_alpha_attack"), &alphaAttack, true },
 			{ pl_var_float("smooth_alpha_release"), &alphaRelease, true },
 			{ pl_var_float("field_block_px"), &fieldBlockPx, true },
-			{ pl_var_float("field_vec_scale"), &fieldVecScale, true } };
-		if (!Compute(dispatch, "VideoProcessor adaptive scaling: motion-adapted weights", MotionHeader().c_str(), MOTION_BODY, d, 5, v, 11,
+			{ pl_var_float("field_vec_scale"), &fieldVecScale, true },
+			{ pl_var_ivec2("crop_blk_lo"), cropBlkLo, true },
+			{ pl_var_ivec2("crop_blk_hi"), cropBlkHi, true } };
+		if (!Compute(dispatch, "VideoProcessor adaptive scaling: motion-adapted weights", MotionHeader().c_str(), MOTION_BODY, d, 5, v, 13,
 			(bw + 15) / 16, (bh + 15) / 16))
 		{
 			motionReady = false;

@@ -582,7 +582,7 @@ if (p.x < cfl_size.x && p.y < cfl_size.y) {
 				bool stale = false, shedNow = false;
 				auto pick = [&](const GrainSplit::Gpu::Frame* shared, GrainSplit::Gpu::Splitter& own, pl_tex srcTex, pl_tex& cropDst,
 					bool& usedCrop, bool isWhole, int x0, int y0, int tw, int th, const char* what, int comp, double cu, double ln,
-					const GrainSplit::Gpu::Frame*& outF) -> bool {
+					bool isChroma, const GrainSplit::Gpu::Frame*& outF) -> bool {
 					const GrainSplit::Gpu::FitResult fit = GrainSplit::Gpu::CheckFit(shared, tw, th, BlockPx(ln), Scale(ln), cu, comp,
 						params.grainSeq);
 					if (fit == GrainSplit::Gpu::FitResult::Fits && !params.grainShed) { outF = shared; return true; }
@@ -601,12 +601,13 @@ if (p.x < cfl_size.x && p.y < cfl_size.y) {
 						}
 						tex = cropDst;
 					}
-					// With an arena the split's intermediates come from it (its own scope, closed before ours opens); without, the call is
-					// the one without options, byte for byte.
+					// W23-NEON-H5: pass actual colorDepth into GrainSplit::Params and isChroma for Cb/Cr fallback splits.
+					GrainSplit::Params gp;
+					gp.sourceBits = (params.colorDepth >= 8 && params.colorDepth <= 16) ? params.colorDepth : 10;
 					GrainSplit::Gpu::Options splitOptions;
 					splitOptions.arena = params.arena;
-					const bool splitOk = params.arena ? own.Compute(gpu, dispatch, tex, comp, cu, Scale(ln), BlockPx(ln), GrainSplit::Params(), splitOptions)
-						: own.Compute(gpu, dispatch, tex, comp, cu, Scale(ln), BlockPx(ln));
+					splitOptions.isChroma = isChroma;
+					const bool splitOk = own.Compute(gpu, dispatch, tex, comp, cu, Scale(ln), BlockPx(ln), gp, splitOptions);
 					if (!splitOk)
 					{
 						if (own.ScratchShort()) m_scratchShort = true;
@@ -616,9 +617,9 @@ if (p.x < cfl_size.x && p.y < cfl_size.y) {
 					return true;
 				};
 				using RegionEvidence::GrainPlane;
-				if (!pick(params.grain.Gpu(GrainPlane::Luma), m.splitL, luma, m.cropL, usedCropL, whole, r.left, r.top, rw, rh, "luma", 0, cuL, lines, gL)) return false;
-				if (!pick(params.grain.Gpu(GrainPlane::Cb), m.splitB, cbTex, m.cropB, usedCropB, chromaWhole, cRect.x0, cRect.y0, pcw, pch, "chroma", cbComp, cuC, linesC, gB)) return false;
-				if (!pick(params.grain.Gpu(GrainPlane::Cr), m.splitR, crTex, sameTex ? m.cropB : m.cropR, sameTex ? usedCropB : usedCropR, chromaWhole, cRect.x0, cRect.y0, pcw, pch, "chroma", crComp, cuC, linesC, gR)) return false;
+				if (!pick(params.grain.Gpu(GrainPlane::Luma), m.splitL, luma, m.cropL, usedCropL, whole, r.left, r.top, rw, rh, "luma", 0, cuL, lines, false, gL)) return false;
+				if (!pick(params.grain.Gpu(GrainPlane::Cb), m.splitB, cbTex, m.cropB, usedCropB, chromaWhole, cRect.x0, cRect.y0, pcw, pch, "chroma", cbComp, cuC, linesC, true, gB)) return false;
+				if (!pick(params.grain.Gpu(GrainPlane::Cr), m.splitR, crTex, sameTex ? m.cropB : m.cropR, sameTex ? usedCropB : usedCropR, chromaWhole, cRect.x0, cRect.y0, pcw, pch, "chroma", crComp, cuC, linesC, true, gR)) return false;
 			}
 			if (!usedCropL && m.cropL) pl_tex_destroy(gpu, &m.cropL);
 			if (!usedCropB && m.cropB) pl_tex_destroy(gpu, &m.cropB);

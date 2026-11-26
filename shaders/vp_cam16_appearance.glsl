@@ -6,9 +6,9 @@
  * forward with the reference side, inverse with the screen side (M compressed hue-preservingly
  * when a channel would leave the range: a hard 6-step bisection to the gamut boundary, not a soft roll-off).
  * Installed by the renderer only when appearance is on. Hooked at PREOUTPUT after the DV trims (the host's
- * slot order). Codes below black and above white (BTB / WTW) are kept: a pixel wholly outside passes unchanged,
- * a pixel with some channels outside is adapted on its in-range colour and each channel's excess is restored
- * (no gamut-edge discontinuity). The model blends out below apx_knee (gamma_boost_knee, the delta-11 toe).
+ * slot order). Codes below black and above white (BTB / WTW) are kept: a pixel wholly below black passes unchanged,
+ * and pixels with channels outside [0, 1] are adapted on their clamped in-range colour with each channel's excess
+ * restored (exact C0 continuity across every gamut face, including white). The model blends out below apx_knee (gamma_boost_knee, the delta-11 toe).
  * The CPU reference is src/VP-V/modules/colour/appearance/Cam16.h and Cam16Uniforms.h packs these
  * params; the two must stay identical.
  *
@@ -386,7 +386,7 @@ float ap_trc_lin(float v)
     if (apx_trc_kind < 1.5) {
         float b = max(apx_trc_param, 0.0);
         float k = pow(b, 2.4);
-        r = (pow(a + b, 2.4) - k) / (pow(1.0 + b, 2.4) - k);
+        r = (pow(a + b, 2.4) - k) / max(pow(1.0 + b, 2.4) - k, 1e-6);
     } else {
         r = a <= 0.04045 ? a * (1.0 / 12.92) : pow((a + 0.055) * (1.0 / 1.055), 2.4);
     }
@@ -467,7 +467,7 @@ vec3 ap_forward(vec3 xyz)
     float h = (a == 0.0 && b == 0.0) ? 0.0 : atan(b, a);
     if (h < 0.0)
         h += 2.0 * AP_PI;
-    float J = 100.0 * pow(max(aa / apr_aw, 0.0), apr_cz);
+    float J = 100.0 * pow(max(aa / max(apr_aw, 1e-12), 0.0), apr_cz);
     float denom = ra + ga + 1.05 * ba;
     float t = abs(denom) > 1e-12 ? (50000.0 / 13.0 * apr_nc * apr_nbb * ap_ecc(h) * sqrt(a * a + b * b)) / denom : 0.0;
     float C = pow(max(t, 0.0), 0.9) * sqrt(J / 100.0) * apr_t;
@@ -484,7 +484,7 @@ vec3 ap_inverse(float J, float M, float h)
     float et = ap_ecc(h);
     float aa = aps_aw * pow(jr, 1.0 / max(aps_cz, 1e-12));
     float p1 = t > 1e-12 ? (50000.0 / 13.0 * aps_nc * aps_nbb * et) / t : 0.0;
-    float p2 = aa / aps_nbb + 0.305;
+    float p2 = aa / max(aps_nbb, 1e-12) + 0.305;
     float p3 = 21.0 / 20.0;
     float sn = sin(h);
     float cs = cos(h);
@@ -591,13 +591,16 @@ vec4 hook()
     }
 
     // Room light reflected by the screen (flare): a toe, never a subtract-and-clip (FIX1 MUST 5; Cam16::FlareToDisplayed).
-    outLin = vec3(ap_flare(outLin.r, apx_veil), ap_flare(outLin.g, apx_veil), ap_flare(outLin.b, apx_veil));
+    // W23-NEON-H3: on ST.2084 PQ, outLin is in nominal-white (apx_ref_nits) units while apx_veil = veilNits / apx_screen_nits;
+    // convert veil into apx_ref_nits units so room flare matches physical veilNits without 4x over-crush.
+    float veil_rel = apx_pq > 0.5 ? apx_veil * (apx_screen_nits / max(apx_ref_nits, 1e-6)) : apx_veil;
+    outLin = vec3(ap_flare(outLin.r, veil_rel), ap_flare(outLin.g, veil_rel), ap_flare(outLin.b, veil_rel));
 
     // Blend out below the toe knee, and by strength.
     // FIX1 SHOULD 3: the luma weights are the output primaries' own (the Y row of apm), the knee the configured
     // gamma_boost_knee (an encoded level, taken to relative light).
     float luma = dot(lin, vec3(apm_10, apm_11, apm_12));
-    float toe = apx_knee > 0.0 ? smoothstep(0.0, ap_to_rel(apx_knee), luma) : 1.0;
+    float toe = apx_knee > 0.0 ? smoothstep(0.0, max(ap_to_rel(apx_knee), 1e-12), luma) : 1.0;
     float w = clamp(apx_strength, 0.0, 1.0) * toe;
 
     // The identity side on the nominal scale: both PQ and gamma preserve their nominal white at w = 0.

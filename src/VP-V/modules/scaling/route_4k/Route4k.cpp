@@ -579,8 +579,10 @@ if (p.x < sz.x && p.y < sz.y) {
 			desc[2].desc.access = PL_DESC_ACCESS_WRITEONLY;
 			desc[2].binding.object = blendTex[slot];
 
+			// W23-NEON-M4: never classify single-plane packed YCbCr (e.g. AYUV/Y410) as RGB.
 			const int rgbLumaOnly = (lumaIn->params.format->num_components >= 3 &&
-				(source.num_planes == 1 || source.repr.sys == PL_COLOR_SYSTEM_RGB)) ? 1 : 0;
+				(source.repr.sys == PL_COLOR_SYSTEM_RGB ||
+					(source.num_planes == 1 && source.repr.sys == PL_COLOR_SYSTEM_UNKNOWN))) ? 1 : 0;
 			double kwD[3] = {};
 			LumaCoeff::ForSystem(source.repr.sys, source.color.primaries, kwD);
 			const float kw[3] = {
@@ -645,10 +647,13 @@ if (p.x < sz.x && p.y < sz.y) {
 			pl_tex cSampleTex = cIn;
 			if (!clampPlaneToActiveCrop(cIn, plane, cSampleTex))
 				return fail("active crop edge clamp failed for plane " + std::to_string(plane));
+			// W23-NEON-H4: sample the full input chroma span [0, cInW] x [0, cInH] -> [0, cw] x [0, ch] so
+			// output chroma matches libplacebo's plane-dimension mapping (dstW/cw, dstH/ch) + ShiftAfterResample
+			// with zero progressive drift when cInW * fx is non-integer.
 			const ScalerPass::Source cSrc = {
 				cSampleTex, 0.0f, 0.0f,
-				static_cast<float>(static_cast<double>(cw) / fx),
-				static_cast<float>(static_cast<double>(ch) / fy)
+				static_cast<float>(cIn->params.w),
+				static_cast<float>(cIn->params.h)
 			};
 			ScalerPass::Settings cs;
 			cs.filter = plan.oneAxis ? cfg.safeFilter : cfg.sharpFilter;

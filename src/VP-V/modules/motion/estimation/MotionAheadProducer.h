@@ -238,6 +238,7 @@ namespace MotionAhead
 		int activeCallbacks_ = 0;
 		uint64_t generation_ = 0;
 		int remaining_ = 0;
+		uint64_t claimedMask_ = 0;
 		bool stop_ = false;
 	};
 
