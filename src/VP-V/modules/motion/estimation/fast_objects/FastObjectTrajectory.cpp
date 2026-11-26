@@ -532,10 +532,10 @@ namespace FastObjects
 				if (!(s[i].radiusPx > 0.5))
 					return out;
 				const double u = 1.0 / s[i].radiusPx;
-				// Delta-method variance Var(1/r) = sigma_r^2 / r^4, sigma_r^2 ~= 0.5*(covXX+covYY) + 0.25
-				const double varR = 0.5 * (s[i].covXX + s[i].covYY) + 0.25;
+				// Exact delta-method variance Var(1/r) = sigma_r^2 / r^4 from sample's own Cramer-Rao covariance.
+				const double varR = std::fmax(0.5 * (s[i].covXX + s[i].covYY), kCentroidFloorPx * kCentroidFloorPx);
 				const double r2 = s[i].radiusPx * s[i].radiusPx;
-				const double wu = (r2 * r2) / std::fmax(varR, 1e-6);
+				const double wu = (r2 * r2) / varR;
 				const double t = sw.tNorm[i];
 				A2[0][0] += wu;
 				A2[0][1] += wu * t;
@@ -553,8 +553,8 @@ namespace FastObjects
 			const double c0 = solU[0];
 			const double c1N = solU[1];
 			const double sigmaC1N = std::sqrt(invDiagU[1]);
-			// Require statistically significant depth change (|c1| > 3*sigma) and positive inverse radius across window.
-			if (!(std::fabs(c1N) > 3.0 * sigmaC1N) || !(c0 > 1e-4))
+			// Require non-trivial depth slope (|c1| > 1.5*sigma; BIC still penalizes the extra depth DOF by +ln(2N)).
+			if (!(std::fabs(c1N) > 1.5 * sigmaC1N) || !(c0 > 1e-4))
 				return out;
 
 			for (int i = 0; i < n; ++i)
@@ -566,11 +566,15 @@ namespace FastObjects
 			const double picCx = picture.Empty() ? 0.0 : picture.CentreX();
 			const double picCy = picture.Empty() ? 0.0 : picture.CentreY();
 
-			// Build projective-normalized coordinates X_i = (x_i - picCx) * u(t_i), Y_i = (y_i - picCy) * u(t_i).
-			// Fit 3D linear (d=5: X0, Vx, Y0, Vy, c1) and 3D ballistic (d=7: + Ax, Ay) directly in image-plane weighted least squares!
-			// Notice x(t) - picCx = (X0 + Vx*t + 0.5*Ax*t^2) / u(t) is EXACTLY LINEAR in (X0, Vx, Ax) given u(t)!
-			auto evalProjPoly = [&](int order, double& outChi2, double solP[6], double invDiagP[6]) -> bool
+			// Fit 3D linear (d=5: X0, Vx, Y0, Vy, k) and 3D ballistic (d=7: + Ax, Ay) in image-plane WLS.
+			// Notice x(t) - picCx = (X0 + Vx*t + 0.5*Ax*t^2) / (1 + k*t) is EXACTLY LINEAR in (X0, Vx, Ax) given k = c1/c0.
+			auto evalProjPolyAtK = [&](double kVal, int order, double& outChi2, double solP[6], double invDiagP[6]) -> bool
 			{
+				for (int i = 0; i < n; ++i)
+				{
+					if (!(1.0 + kVal * sw.tNorm[i] > 0.1))
+						return false;
+				}
 				const int dim = 2 * order;
 				double A[6][6];
 				double b[6];
@@ -579,7 +583,7 @@ namespace FastObjects
 				for (int i = 0; i < n; ++i)
 				{
 					const double t = sw.tNorm[i];
-					const double invU = 1.0 / (c0 + c1N * t);
+					const double invU = 1.0 / (c0 * (1.0 + kVal * t));
 					const double phi[3] = { invU, t * invU, 0.5 * t * t * invU };
 					const double rx = s[i].x - picCx;
 					const double ry = s[i].y - picCy;
@@ -603,7 +607,7 @@ namespace FastObjects
 				for (int i = 0; i < n; ++i)
 				{
 					const double t = sw.tNorm[i];
-					const double invU = 1.0 / (c0 + c1N * t);
+					const double invU = 1.0 / (c0 * (1.0 + kVal * t));
 					double px = solP[0] + solP[1] * t;
 					double py = solP[order] + solP[order + 1] * t;
 					if (order == 3)
@@ -618,11 +622,52 @@ namespace FastObjects
 				return true;
 			};
 
+			// Refine depth rate k = c1 / c0 within [0.5 * kInit, 2.0 * kInit] (strictly preserving observed dr/dt sign)
+			// to eliminate half-res Sheppard radius bias while staying anchored to the measured apparent-size change.
+			const double kInit = c1N / c0;
+			double kBest = kInit;
+			{
+				double lo = (kInit < 0.0) ? (2.0 * kInit) : (0.5 * kInit);
+				double hi = (kInit < 0.0) ? (0.5 * kInit) : (2.0 * kInit);
+				constexpr double kPhi = 0.6180339887498949;
+				double cK = hi - kPhi * (hi - lo);
+				double dK = lo + kPhi * (hi - lo);
+				double tmpSol[6] = {}, tmpInv[6] = {};
+				double fc = 1e30, fd = 1e30;
+				if (!evalProjPolyAtK(cK, 2, fc, tmpSol, tmpInv)) fc = 1e30;
+				if (!evalProjPolyAtK(dK, 2, fd, tmpSol, tmpInv)) fd = 1e30;
+				for (int iter = 0; iter < 10; ++iter)
+				{
+					if (fc < fd)
+					{
+						hi = dK;
+						dK = cK;
+						fd = fc;
+						cK = hi - kPhi * (hi - lo);
+						if (!evalProjPolyAtK(cK, 2, fc, tmpSol, tmpInv)) fc = 1e30;
+					}
+					else
+					{
+						lo = cK;
+						cK = dK;
+						fc = fd;
+						dK = lo + kPhi * (hi - lo);
+						if (!evalProjPolyAtK(dK, 2, fd, tmpSol, tmpInv)) fd = 1e30;
+					}
+				}
+				const double kMid = 0.5 * (lo + hi);
+				double fInit = 1e30, fMid = 1e30;
+				if (!evalProjPolyAtK(kInit, 2, fInit, tmpSol, tmpInv)) fInit = 1e30;
+				if (!evalProjPolyAtK(kMid, 2, fMid, tmpSol, tmpInv)) fMid = 1e30;
+				kBest = (fMid < fInit) ? kMid : kInit;
+			}
+			const double c1Refined = c0 * kBest;
+
 			double chi2Lin = 1e30, chi2Bal = 1e30;
 			double solLin[6] = {}, invLin[6] = {};
 			double solBal[6] = {}, invBal[6] = {};
-			const bool okLin = evalProjPoly(2, chi2Lin, solLin, invLin);
-			const bool okBal = (n >= 4) && evalProjPoly(3, chi2Bal, solBal, invBal);
+			const bool okLin = evalProjPolyAtK(kBest, 2, chi2Lin, solLin, invLin);
+			const bool okBal = (n >= 4) && evalProjPolyAtK(kBest, 3, chi2Bal, solBal, invBal);
 			const double log2N = std::log(static_cast<double>(2 * n));
 
 			const double bicLin = okLin ? (chi2Lin + 5.0 * log2N) : 1e30;
@@ -641,13 +686,13 @@ namespace FastObjects
 			const bool pickBal = (bicBal < bicLin);
 			const double* sol = pickBal ? solBal : solLin;
 			const int ord = pickBal ? 3 : 2;
-			const double c1Sec = c1N / sw.tScale;
+			const double c1Sec = c1Refined / sw.tScale;
 			const double r0 = 1.0 / c0;
 
 			auto evalImagePos = [&](double tauSec, double& ox, double& oy)
 			{
 				const double t = tauSec / sw.tScale;
-				const double u = std::fmax(c0 + c1N * t, 1e-4);
+				const double u = std::fmax(c0 + c1Refined * t, 1e-4);
 				double px = sol[0] + sol[1] * t;
 				double py = sol[ord] + sol[ord + 1] * t;
 				if (pickBal)
@@ -826,12 +871,16 @@ namespace FastObjects
 			return out;
 		}
 
-		// 3. Net displacement floor check (stationary/blinking rejection).
-		const double netDx = samples[n - 1].x - samples[0].x;
-		const double netDy = samples[n - 1].y - samples[0].y;
-		const double netDisp = std::sqrt(netDx * netDx + netDy * netDy);
+		// 3. Max excursion floor check (stationary/blinking rejection; handles 180-deg rebounds returning near origin).
+		double maxExcursion = 0.0;
+		for (int i = 1; i < n; ++i)
+		{
+			const double dx = samples[i].x - samples[0].x;
+			const double dy = samples[i].y - samples[0].y;
+			maxExcursion = std::fmax(maxExcursion, std::sqrt(dx * dx + dy * dy));
+		}
 		const double minNetDisp = std::fmax(3.0 * meanSigmaCent, 2.0 * meanRadius);
-		if (netDisp < minNetDisp)
+		if (maxExcursion < minNetDisp)
 		{
 			out.type = TrajectoryType::Clutter;
 			out.rejectedStationary = true;
@@ -844,8 +893,9 @@ namespace FastObjects
 		const double picH = picture.Empty() ? 1080.0 : static_cast<double>(picture.Height());
 		const double picW = picture.Empty() ? 1920.0 : static_cast<double>(picture.Width());
 		const double maxSpeedPxSec = cfg.maxSpeedWidthFracPerSec * picW;
-		// Physical sport acceleration envelope derived from picture height (free fall / high-speed drag across frame).
-		const double maxPhysAccelPxSec2 = 16.0 * picH;
+		// Physical sport acceleration envelope derived from Plan 73's 0.5 s frame-crossing timescale:
+		// H_pic = 0.5 * a_max * (0.5 s)^2 => a_max = 8.0 * H_pic px/s^2.
+		const double maxPhysAccelPxSec2 = 8.0 * picH;
 
 		// 4. Null Static model (d=2).
 		double stP0x = 0.0, stP0y = 0.0, chi2Static = 1e30;
@@ -883,17 +933,22 @@ namespace FastObjects
 		if (okCv && std::sqrt(glVx * glVx + glVy * glVy) > maxSpeedPxSec)
 			bicGlide = 1e30;
 
-		// 6. Type 1 — Ballistic / Parabolic Arc (d=6).
+		// 6. Type 1 — Ballistic / Parabolic Arc (d=6; strictly requires n >= 4 so remDof = 2N - 6 >= 2).
+		// At n == 3, CV (d=4, remDof=2) is the clean default (Owner CV-default ruling; prevents 0-DOF random-walk fits).
 		double balP0x = 0.0, balP0y = 0.0, balVx = 0.0, balVy = 0.0, balAx = 0.0, balAy = 0.0, balSigAy = 0.0, chi2Bal = 1e30;
 		double bicBal = 1e30;
 		bool okBal = false;
-		if (n >= 3 && FitBallistic(samples, n, sw, balP0x, balP0y, balVx, balVy, balAx, balAy, balSigAy, chi2Bal))
+		bool unconstrainedBalPasses99 = false;
+		if (n >= 4 && FitBallistic(samples, n, sw, balP0x, balP0y, balVx, balVy, balAx, balAy, balSigAy, chi2Bal))
 		{
 			const double aMag = std::sqrt(balAx * balAx + balAy * balAy);
 			const double vMag = std::sqrt(balVx * balVx + balVy * balVy);
+			// If a smooth unconstrained parabola already fits within 99% chi^2, it is a smooth curve (never an Impulse kink).
+			// If such a smooth parabola has unphysical upward anti-gravity (a_y < -3*sigma), it must be rejected as Clutter.
+			if (chi2Bal <= Chi2Critical99(2 * n - 6))
+				unconstrainedBalPasses99 = true;
 			// Downward gravity consistency (y-down): a_y >= -3 * sigma_{a_y}.
-			// At n == 3 (0 DOF), allow Ballistic only when downward gravity is clearly positive and CV fails 99% gate.
-			const bool gravOk = (n >= 4) ? (balAy >= -3.0 * balSigAy) : (balAy > 0.0 && chi2Cv > Chi2Critical99(2));
+			const bool gravOk = (balAy >= -3.0 * balSigAy);
 			if (gravOk && aMag <= maxPhysAccelPxSec2 && vMag <= maxSpeedPxSec)
 			{
 				okBal = true;
@@ -901,10 +956,13 @@ namespace FastObjects
 			}
 		}
 
+		// Single-leg 99% chi^2 goodness-of-fit gates (Spec B.3.3: run Impulse split search ONLY when single-leg fails).
+		const bool glidePasses99 = okCv && (bicGlide < 1e29) && (2 * n - dofGlide >= 1) && (chi2Glide <= Chi2Critical99(2 * n - dofGlide));
+
 		// 7. Type 3 — Impulse / Bounce / Strike (d=7 piecewise-linear, optional d=8 shared downward gravity).
 		ImpulseFitResult bestImp;
 		double bicImp = 1e30;
-		if (n >= 4)
+		if (n >= 4 && !glidePasses99 && !unconstrainedBalPasses99)
 		{
 			for (int splitK = 1; splitK <= n - 3; ++splitK)
 			{
@@ -1398,6 +1456,90 @@ namespace FastObjects
 
 		AssociateLatestFrame(cfg, slot);
 		AttemptImpulseStitching(cfg, slot);
+		PruneExpiredTracks(cfg);
+	}
+
+	void TrajectoryTracker::ConfirmTrackIncrementally(const Config& cfg, int latestSlot, TrackRecord& trk)
+	{
+		if (!trk.active || trk.historyCount < 3)
+			return;
+		const FrameObservation& curObs = ring_[latestSlot];
+		const double curCx = curObs.picture.Empty() ? 0.0 : curObs.picture.CentreX();
+		const double curCy = curObs.picture.Empty() ? 0.0 : curObs.picture.CentreY();
+
+		WindowSample win[kWindowRingCapacity];
+		int winCount = 0;
+		for (int h = 0; h < trk.historyCount && winCount < kWindowRingCapacity; ++h)
+		{
+			const TrackPoint& pt = trk.history[h];
+			CameraModel::Params hToCur;
+			double camVar = 0.0;
+			if (!ComposeHomographyBetween(pt.frameIndex, curObs.frameIndex, hToCur, camVar))
+				continue;
+			const int rSlot = FindRingSlot(pt.frameIndex);
+			const double pCx = (rSlot >= 0 && !ring_[rSlot].picture.Empty()) ? ring_[rSlot].picture.CentreX() : curCx;
+			const double pCy = (rSlot >= 0 && !ring_[rSlot].picture.Empty()) ? ring_[rSlot].picture.CentreY() : curCy;
+			const double relX = static_cast<double>(pt.blob.cx) - pCx;
+			const double relY = static_cast<double>(pt.blob.cy) - pCy;
+			double mx = 0.0, my = 0.0;
+			CameraModel::Apply(hToCur, relX, relY, &mx, &my);
+			double jac[4];
+			HomographyJacobian(hToCur, relX, relY, jac);
+			const double sig = CramerRaoCentroidSigmaPx(pt.blob);
+			const double c2 = sig * sig;
+
+			WindowSample& ws = win[winCount++];
+			ws.tauSec = pt.timestampSec - curObs.timestampSec;
+			ws.dtStepSec = pt.dtFromPrevSec;
+			ws.x = mx + curCx;
+			ws.y = my + curCy;
+			ws.covXX = c2 + camVar * (jac[0] * jac[0] + jac[1] * jac[1]);
+			ws.covXY = camVar * (jac[0] * jac[2] + jac[1] * jac[3]);
+			ws.covYY = c2 + camVar * (jac[2] * jac[2] + jac[3] * jac[3]);
+			ws.radiusPx = static_cast<double>(pt.blob.radiusPx);
+			ws.streakLenPx = static_cast<double>(pt.blob.streakLenPx);
+			ws.streakDirX = std::cos(static_cast<double>(pt.blob.streakAngleRad));
+			ws.streakDirY = std::sin(static_cast<double>(pt.blob.streakAngleRad));
+			ws.intSnr = static_cast<double>(pt.blob.intSnr);
+			ws.overlapsMask = pt.blob.overlapsOverlay || pt.blob.overlapsWater;
+			ws.nearLargeObject = pt.blob.nearLargeObject;
+		}
+		if (winCount < 3)
+			return;
+		const double dtStep = (curObs.dtFromPrevSec > 0.0) ? curObs.dtFromPrevSec : (1.0 / 60.0);
+		const TrajectoryClassification cls = ClassifyTrajectoryWindow(cfg, win, winCount, dtStep, curObs.picture);
+		if (cls.type != TrajectoryType::Clutter && cls.type != TrajectoryType::Unknown)
+		{
+			trk.confirmed = true;
+			trk.lastType = cls.type;
+		}
+	}
+
+	void TrajectoryTracker::PruneExpiredTracks(const Config& cfg)
+	{
+		const CameraModel::Rect latestPic = (ringCount_ > 0) ? ring_[ringCount_ - 1].picture : CameraModel::Rect{};
+		for (uint32_t i = 0; i < kMaxTracksHardCap; ++i)
+		{
+			TrackRecord& trk = tracks_[i];
+			if (!trk.active || trk.coastFrames == 0)
+				continue;
+			// Unconfirmed 1-point seeds expire immediately on miss; unconfirmed 2-point seeds survive
+			// 2 frames so AttemptImpulseStitching can bridge a bounce across frames (k, k+1);
+			// confirmed tracks coast up to cfg.coastMaxSec (default 200 ms).
+			const bool expire = (!trk.confirmed && trk.historyCount < 2) ||
+				(!trk.confirmed && trk.coastFrames > 2) ||
+				(trk.coastElapsedSec > cfg.coastMaxSec);
+			if (expire)
+			{
+				// Repeatedly aborted unconfirmed clutter births in the same spatial cell (e.g. flashing/oscillating
+				// LED ad boards) heat the 64x36 clutter-hotspot auto-mask without ever touching confirmed balls.
+				if (cfg.enableHotspotAutoMask && !trk.confirmed && trk.historyCount > 0 && !latestPic.Empty())
+				{
+					AddHotspotHeat(trk.history[0].blob.cx, trk.history[0].blob.cy, latestPic, 0.5f);
+				}
+				trk = TrackRecord{};
+			}
+		}
 	}
 
 	void TrajectoryTracker::AssociateLatestFrame(const Config& cfg, int latestSlot)
@@ -1468,6 +1610,14 @@ namespace FastObjects
 			sVar = sVar * sVar + camVarLast;
 			bool isSeedSinglePoint = (trk.historyCount == 1);
 
+			// Optional 2.5D pinhole projective prediction (under r(t) ~ 1/Z(t), u(t) = 1/r(t) and q(t)/r(t) are linear).
+			bool hasProjPred = false;
+			double projP3x = 0.0, projP3y = 0.0; // Predicted projective 3D coord q(t)/r(t) at current frame
+			double uPred = 0.0;
+			double uPredVar = 0.0;
+			double projExtraVar = 0.0;
+			double rPred = trk.emaRadiusPx;
+
 			if (trk.historyCount >= 2)
 			{
 				const TrackPoint& prevPt = trk.history[trk.historyCount - 2];
@@ -1521,6 +1671,41 @@ namespace FastObjects
 					const double velPropVar = ratio * ratio * (sVar + sigPrev * sigPrev + camVarPrev);
 					const double procStd = 0.5 * maneuverSigmaA * dtSinceLast * (dtPrev + dtSinceLast);
 					sVar = sVar + velPropVar + procStd * procStd;
+
+					// 2.5D pinhole projective prediction: under r(t) ~ 1/Z(t), u(t) = 1/r(t) and P(t) = q(t)/r(t) are linear.
+					if (cfg.enablePerspectiveDepth && lastPt.blob.radiusPx > 0.5f && prevPt.blob.radiusPx > 0.5f)
+					{
+						const double rLast = static_cast<double>(lastPt.blob.radiusPx);
+						const double rPrev = static_cast<double>(prevPt.blob.radiusPx);
+						const double uLast = 1.0 / rLast;
+						const double uPrev = 1.0 / rPrev;
+						const double uDot = (uLast - uPrev) / dtPrev;
+						const double uP = uLast + uDot * dtSinceLast;
+						if (uP > 0.25 * uLast && uP < 4.0 * uLast)
+						{
+							const double qLastX = lMappedX - curCx;
+							const double qLastY = lMappedY - curCy;
+							const double qPrevX = pMappedX - curCx;
+							const double qPrevY = pMappedY - curCy;
+							const double pLastX = qLastX * uLast;
+							const double pLastY = qLastY * uLast;
+							const double pPrevX = qPrevX * uPrev;
+							const double pPrevY = qPrevY * uPrev;
+							projP3x = pLastX + (pLastX - pPrevX) * ratio;
+							projP3y = pLastY + (pLastY - pPrevY) * ratio;
+							uPred = uP;
+							rPred = 1.0 / uP;
+							const double varULast = 0.5 / (rLast * rLast * rLast * rLast);
+							const double varUPrev = 0.5 / (rPrev * rPrev * rPrev * rPrev);
+							uPredVar = varULast + ratio * ratio * (varULast + varUPrev);
+							// Tight projective prediction variance (only scales with local step variance, never full frame offset).
+							const double stepDisp = std::hypot(lMappedX - pMappedX, lMappedY - pMappedY);
+							const double relRStd = std::sqrt(0.5) / std::fmax(rLast, 1.0);
+							const double projPosStd = std::fmax(1.0, relRStd * stepDisp);
+							projExtraVar = projPosStd * projPosStd;
+							hasProjPred = true;
+						}
+					}
 				}
 				else
 				{
@@ -1546,11 +1731,14 @@ namespace FastObjects
 						continue;
 				}
 
+				const double sigObs = CramerRaoCentroidSigmaPx(b);
+				const double varR = sigObs * sigObs + 1.0; // Half-res discretization variance
 				const double dx = static_cast<double>(b.cx) - px;
 				const double dy = static_cast<double>(b.cy) - py;
 				const double dist2 = dx * dx + dy * dy;
 
 				double dKin2 = 0.0;
+				bool usedProjGate = false;
 				if (isSeedSinglePoint)
 				{
 					// Birth seed pairing within derived speed bound v_max = 2.0 * W_pic px/s.
@@ -1580,20 +1768,64 @@ namespace FastObjects
 				}
 				else
 				{
-					const double sigObs = CramerRaoCentroidSigmaPx(b);
 					const double totalVar = sVar + sigObs * sigObs;
 					dKin2 = dist2 / std::fmax(totalVar, 1e-6);
+
+					// Check 2.5D pinhole projective gate when radius is evolving consistently with approaching/receding motion.
+					if (hasProjPred && b.radiusPx > 0.5f)
+					{
+						const double rObs = static_cast<double>(b.radiusPx);
+						const double uObs = 1.0 / rObs;
+						const double varUObs = 0.5 / (rObs * rObs * rObs * rObs);
+						const double du = uObs - uPred;
+						if (du * du <= 9.0 * (uPredVar + varUObs))
+						{
+							// Evaluate projective prediction using candidate's own radius (and predicted radius), taking tighter fit.
+							const double p1x = curCx + projP3x * rObs;
+							const double p1y = curCy + projP3y * rObs;
+							const double p2x = curCx + projP3x * rPred;
+							const double p2y = curCy + projP3y * rPred;
+							const double d1 = (static_cast<double>(b.cx) - p1x) * (static_cast<double>(b.cx) - p1x) +
+								(static_cast<double>(b.cy) - p1y) * (static_cast<double>(b.cy) - p1y);
+							const double d2 = (static_cast<double>(b.cx) - p2x) * (static_cast<double>(b.cx) - p2x) +
+								(static_cast<double>(b.cy) - p2y) * (static_cast<double>(b.cy) - p2y);
+							const double pVar = sVar + projExtraVar + sigObs * sigObs;
+							const double pKin2 = std::fmin(d1, d2) / std::fmax(pVar, 1e-6);
+							if (pKin2 < dKin2)
+							{
+								dKin2 = pKin2;
+								usedProjGate = true;
+							}
+						}
+					}
 					if (dKin2 > kChi2Dof2_99)
 						continue;
 				}
 
-				// Conserved flux term (derived from SNR + boundary discretization 1/A).
+				// Conserved flux term: luma flux for luma-dominant balls; chroma flux for isoluminant chroma balls.
+				// Note: for approaching/receding 2.5D balls, flux scales with area ~ r^2, so normalize by r^2 when usedProjGate.
 				double dFlux2 = 0.0;
-				const double absFluxObs = std::fabs(static_cast<double>(b.flux));
-				const double absFluxTrk = std::fabs(trk.emaFlux);
-				if (absFluxObs > 1e-6 && absFluxTrk > 1e-6)
+				const bool lumaReliable = (trk.polarity != 0 && b.polarity != 0);
+				double obsFluxMag = 0.0;
+				double trkFluxMag = 0.0;
+				if (lumaReliable)
 				{
-					const double lnDiff = std::log(absFluxObs) - std::log(absFluxTrk);
+					obsFluxMag = std::fabs(static_cast<double>(b.flux));
+					trkFluxMag = std::fabs(trk.emaFlux);
+				}
+				else if (trk.hasChroma && b.hasChroma)
+				{
+					obsFluxMag = static_cast<double>(b.chromaFlux);
+					trkFluxMag = trk.emaChromaFlux;
+				}
+				if (obsFluxMag > 1e-6 && trkFluxMag > 1e-6)
+				{
+					if (usedProjGate && b.radiusPx > 0.5f && trk.emaRadiusPx > 0.5)
+					{
+						const double rScale = trk.emaRadiusPx / static_cast<double>(b.radiusPx);
+						obsFluxMag *= (rScale * rScale);
+					}
+					const double lnDiff = std::log(obsFluxMag) - std::log(trkFluxMag);
 					const double invSnr2 = 1.0 / std::fmax(1.0, static_cast<double>(b.intSnr * b.intSnr));
 					const double varLnFlux = 2.0 * invSnr2 + 2.0 / std::fmax(1.0, static_cast<double>(b.areaHalfPx));
 					dFlux2 = (lnDiff * lnDiff) / std::fmax(varLnFlux, 0.04);
@@ -1602,10 +1834,9 @@ namespace FastObjects
 						continue;
 				}
 
-				// Minor-axis radius invariance term.
-				const double sigObs = CramerRaoCentroidSigmaPx(b);
-				const double varR = sigObs * sigObs + 1.0; // Half-res discretization variance
-				const double dr = static_cast<double>(b.radiusPx) - trk.emaRadiusPx;
+				// Minor-axis radius invariance term (uses projective predicted radius when depth is changing).
+				const double refRadius = (hasProjPred && usedProjGate) ? rPred : trk.emaRadiusPx;
+				const double dr = static_cast<double>(b.radiusPx) - refRadius;
 				const double dRad2 = (dr * dr) / varR;
 				if (dRad2 > 16.0)
 					continue;
@@ -1620,7 +1851,7 @@ namespace FastObjects
 					dChroma2 = (dcb * dcb + dcr * dcr) / cVar;
 				}
 
-				kinCost[m][k] = dKin2;
+				kinCost[m][k] = isSeedSinglePoint ? 0.0 : dKin2;
 				cost[m][k] = std::fmax(0.0, dKin2 + dFlux2 + dRad2 + dChroma2 - SessionPriorBonus(cfg, b));
 			}
 		}
@@ -1673,11 +1904,19 @@ namespace FastObjects
 		for (int m = 0; m < activeCount; ++m)
 		{
 			TrackRecord& trk = tracks_[activeTrackSlots[m]];
-			trk.crossingAmbiguous = crossingFlag[m];
 			const int k = assignment[m];
 			if (k >= 0 && k < static_cast<int>(blobCount))
 			{
 				blobUsed[k] = true;
+				// If a confirmed track hits a crossing-ball ambiguity (merged/overlapping blob),
+				// coast cleanly across the 1 ambiguous frame so the contaminated merged centroid/flux
+				// never poisons velocity or causes post-crossing track loss / ID swaps!
+				if (crossingFlag[m] && trk.confirmed)
+				{
+					++trk.coastFrames;
+					trk.coastElapsedSec += std::fmax(0.0, curObs.dtFromPrevSec);
+					continue;
+				}
 				const BlobCandidate& b = curObs.blobs[k];
 				trk.coastFrames = 0;
 				trk.coastElapsedSec = 0.0;
@@ -1694,6 +1933,8 @@ namespace FastObjects
 				pt.timestampSec = curObs.timestampSec;
 				pt.dtFromPrevSec = curObs.dtFromPrevSec;
 				pt.blob = b;
+				pt.nis = kinCost[m][k];
+				pt.crossingAmbiguous = crossingFlag[m];
 				pt.valid = true;
 
 				// Update appearance EMAs.
@@ -1709,25 +1950,27 @@ namespace FastObjects
 					{
 						trk.emaCb = static_cast<double>(b.cbContrast);
 						trk.emaCr = static_cast<double>(b.crContrast);
+						trk.emaChromaFlux = static_cast<double>(b.chromaFlux);
 						trk.hasChroma = true;
 					}
 					else
 					{
 						trk.emaCb = (1.0 - kAppAlpha) * trk.emaCb + kAppAlpha * static_cast<double>(b.cbContrast);
 						trk.emaCr = (1.0 - kAppAlpha) * trk.emaCr + kAppAlpha * static_cast<double>(b.crContrast);
+						trk.emaChromaFlux = (1.0 - kAppAlpha) * trk.emaChromaFlux + kAppAlpha * static_cast<double>(b.chromaFlux);
 					}
 				}
+
+				// Incrementally confirm/classify tracks during PushFrame once historyCount >= 3
+				// so valid tracks survive bounces and occlusions across look-ahead windows!
+				if (trk.historyCount >= 3)
+					ConfirmTrackIncrementally(cfg, latestSlot, trk);
 			}
 			else
 			{
-				// Unassociated track: coast up to coastMaxSec if confirmed, else retire single-frame seeds immediately.
+				// Unassociated track: increment coast counters; pruning runs AFTER AttemptImpulseStitching.
 				++trk.coastFrames;
 				trk.coastElapsedSec += std::fmax(0.0, curObs.dtFromPrevSec);
-				const bool expire = (!trk.confirmed && trk.historyCount < 2) ||
-					(!trk.confirmed && trk.coastFrames > 1) ||
-					(trk.coastElapsedSec > cfg.coastMaxSec);
-				if (expire)
-					trk = TrackRecord{};
 			}
 		}
 
@@ -1772,6 +2015,7 @@ namespace FastObjects
 			{
 				nt.emaCb = static_cast<double>(b.cbContrast);
 				nt.emaCr = static_cast<double>(b.crContrast);
+				nt.emaChromaFlux = static_cast<double>(b.chromaFlux);
 				nt.hasChroma = true;
 			}
 			nt.historyCount = 1;
@@ -1779,6 +2023,8 @@ namespace FastObjects
 			nt.history[0].timestampSec = curObs.timestampSec;
 			nt.history[0].dtFromPrevSec = curObs.dtFromPrevSec;
 			nt.history[0].blob = b;
+			nt.history[0].nis = 0.0;
+			nt.history[0].crossingAmbiguous = false;
 			nt.history[0].valid = true;
 		}
 		lastHotspotSuppressed_ = suppressed;
@@ -1811,12 +2057,21 @@ namespace FastObjects
 				if (outFirst.frameIndex <= inLast.frameIndex || outFirst.frameIndex > inLast.frameIndex + 2)
 					continue;
 
-				// Appearance compatibility check (polarity, flux, radius).
+				// Appearance compatibility check (polarity, luma/chroma flux, radius).
 				if (inTrk.polarity != 0 && outTrk.polarity != 0 && inTrk.polarity != outTrk.polarity)
 					continue;
-				const double fluxRatio = std::fabs(inTrk.emaFlux) / std::fmax(1e-6, std::fabs(outTrk.emaFlux));
-				if (fluxRatio < 0.25 || fluxRatio > 4.0)
-					continue;
+				if (inTrk.polarity != 0 && outTrk.polarity != 0)
+				{
+					const double fluxRatio = std::fabs(inTrk.emaFlux) / std::fmax(1e-6, std::fabs(outTrk.emaFlux));
+					if (fluxRatio < 0.25 || fluxRatio > 4.0)
+						continue;
+				}
+				else if (inTrk.hasChroma && outTrk.hasChroma && inTrk.emaChromaFlux > 1e-6 && outTrk.emaChromaFlux > 1e-6)
+				{
+					const double fluxRatio = inTrk.emaChromaFlux / outTrk.emaChromaFlux;
+					if (fluxRatio < 0.25 || fluxRatio > 4.0)
+						continue;
+				}
 				if (std::fabs(inTrk.emaRadiusPx - outTrk.emaRadiusPx) > std::fmax(2.0, 0.5 * inTrk.emaRadiusPx))
 					continue;
 
@@ -2017,8 +2272,8 @@ namespace FastObjects
 					for (int w = 0; w < winCount; ++w)
 						AddHotspotHeat(static_cast<float>(win[w].x), static_cast<float>(win[w].y), targetObs.picture, 1.0f);
 				}
-				// Retire persistent clutter tracks once window is full enough (>= 4 frames) and rejected.
-				if (winCount >= 4)
+				// Only retire unconfirmed clutter tracks once a full window (>= 6 frames) at the leading edge fails.
+				if (!trk.confirmed && !hasLookAhead && winCount >= 6)
 					trk = TrackRecord{};
 				continue;
 			}
@@ -2060,7 +2315,9 @@ namespace FastObjects
 
 			// Derived confidence (spec C.3):
 			// c = clamp(snrFactor * g_NIS * g_blur * g_age * h_agree, 0, 1).
-			const double gNis = std::exp(-std::fmax(0.0, trk.lastNis - 2.0) * 0.25);
+			const double targetNis = (targetPtIdx >= 0) ? trk.history[targetPtIdx].nis : trk.lastNis;
+			const bool targetCrossing = (targetPtIdx >= 0) ? trk.history[targetPtIdx].crossingAmbiguous : false;
+			const double gNis = std::exp(-std::fmax(0.0, targetNis - 2.0) * 0.25);
 			const double gAge = std::fmin(1.0, static_cast<double>(winCount) / 3.0);
 			const double gBlur = cls.blurAlignFactor;
 			const double obsIntSnr = (targetPtIdx >= 0) ? static_cast<double>(trk.history[targetPtIdx].blob.intSnr) : 6.0;
@@ -2088,7 +2345,7 @@ namespace FastObjects
 			outTrk.shutterEst = static_cast<float>(cls.shutterEst);
 			outTrk.blurAlignFactor = static_cast<float>(cls.blurAlignFactor);
 			outTrk.confidence = baseConfidence;
-			outTrk.nis = static_cast<float>(trk.lastNis);
+			outTrk.nis = static_cast<float>(targetNis);
 			outTrk.bicMargin = static_cast<float>(cls.bicMargin);
 			outTrk.ageFrames = static_cast<uint32_t>(winCount);
 			outTrk.coastFrames = isCoastingAtTarget ? static_cast<uint32_t>(targetFrameIndex - lastSeenFrameAtOrBeforeTarget) : 0u;
@@ -2101,9 +2358,11 @@ namespace FastObjects
 				outTrk.flags |= TrackFlags::kDepthPerspective;
 			if (trk.hasChroma)
 				outTrk.flags |= TrackFlags::kChromaAssisted;
+			if (trk.hasChroma && (trk.polarity == 0 || (targetPtIdx >= 0 && trk.history[targetPtIdx].blob.polarity == 0)))
+				outTrk.flags |= TrackFlags::kIsoLumaChroma;
 			if (trk.priorMatched)
 				outTrk.flags |= TrackFlags::kSessionPriorMatch;
-			if (trk.crossingAmbiguous)
+			if (targetCrossing)
 				outTrk.flags |= TrackFlags::kCrossingAmbiguity;
 
 			if (targetPtIdx >= 0)
@@ -2159,27 +2418,84 @@ namespace FastObjects
 			outTrk.disocclusionCapsule.y1 = outTrk.cy + outTrk.vy;
 			outTrk.disocclusionCapsule.radiusPx = outTrk.radiusPx;
 
-			// Explicit validity state machine (spec C.3: Coasting & Uncertain emit ZERO vectors to consumers).
+			// Initial validity state machine (spec C.3: Coasting & Uncertain emit ZERO vectors to consumers).
 			if (isCoastingAtTarget)
 			{
 				outTrk.state = ValidityState::Coasting;
 				outTrk.confidence = 0.0f;
-				++outSet.diag.coastingTracks;
 			}
-			else if (trk.crossingAmbiguous || baseConfidence < cfg.minConfidence)
+			else if (targetCrossing || baseConfidence < cfg.minConfidence)
 			{
 				outTrk.state = ValidityState::Uncertain;
-				++outSet.diag.uncertainTracks;
 			}
 			else
 			{
 				outTrk.state = ValidityState::Valid;
-				++outSet.diag.validTracks;
-				if (cls.type == TrajectoryType::Ballistic) ++outSet.diag.ballisticTracks;
-				else if (cls.type == TrajectoryType::LinearGlide) ++outSet.diag.linearGlideTracks;
-				else if (cls.type == TrajectoryType::Impulse) ++outSet.diag.impulseTracks;
 				if (cfg.enableSessionPrior)
 					UpdateSessionPrior(trk);
+			}
+		}
+
+		// Frame-aligned pairwise crossing-ball ambiguity check at targetFrameIndex (eliminates look-ahead skew!):
+		// If two resolved tracks approach within (r_1 + r_2 + 2 px) at frame t (or cross within pair [t, t+1]),
+		// flag both kCrossingAmbiguity and demote to Uncertain.
+		for (uint32_t i = 0; i < outSet.count; ++i)
+		{
+			for (uint32_t j = i + 1; j < outSet.count; ++j)
+			{
+				FastObjectTrack& a = outSet.tracks[i];
+				FastObjectTrack& b = outSet.tracks[j];
+				const float dx0 = a.cx - b.cx;
+				const float dy0 = a.cy - b.cy;
+				const float dvx = a.vx - b.vx;
+				const float dvy = a.vy - b.vy;
+				// Minimum separation over phase phi in [0, 1] along relative segment p_a(phi) - p_b(phi).
+				const float dv2 = dvx * dvx + dvy * dvy;
+				float phiStar = 0.0f;
+				if (dv2 > 1e-6f)
+					phiStar = std::min(std::max(-(dx0 * dvx + dy0 * dvy) / dv2, 0.0f), 1.0f);
+				const float mdx = dx0 + phiStar * dvx;
+				const float mdy = dy0 + phiStar * dvy;
+				const float minSep = std::sqrt(mdx * mdx + mdy * mdy);
+				const float thresh = a.radiusPx + b.radiusPx + 2.0f;
+				if (minSep <= thresh)
+				{
+					a.flags |= TrackFlags::kCrossingAmbiguity;
+					b.flags |= TrackFlags::kCrossingAmbiguity;
+					if (a.state == ValidityState::Valid || a.state == ValidityState::Coasting)
+						a.state = ValidityState::Uncertain;
+					if (b.state == ValidityState::Valid || b.state == ValidityState::Coasting)
+						b.state = ValidityState::Uncertain;
+				}
+			}
+		}
+
+		// Enforce strict zero-vector emission contract for non-Valid tracks and tally final diagnostics.
+		outSet.diag.validTracks = 0;
+		outSet.diag.uncertainTracks = 0;
+		outSet.diag.coastingTracks = 0;
+		outSet.diag.ballisticTracks = 0;
+		outSet.diag.linearGlideTracks = 0;
+		outSet.diag.impulseTracks = 0;
+		for (uint32_t i = 0; i < outSet.count; ++i)
+		{
+			FastObjectTrack& outTrk = outSet.tracks[i];
+			if (outTrk.state == ValidityState::Valid)
+			{
+				++outSet.diag.validTracks;
+				if (outTrk.type == TrajectoryType::Ballistic) ++outSet.diag.ballisticTracks;
+				else if (outTrk.type == TrajectoryType::LinearGlide) ++outSet.diag.linearGlideTracks;
+				else if (outTrk.type == TrajectoryType::Impulse) ++outSet.diag.impulseTracks;
+			}
+			else
+			{
+				outTrk.vx = 0.0f;
+				outTrk.vy = 0.0f;
+				outTrk.disocclusionCapsule = Capsule{};
+				if (outTrk.state == ValidityState::Coasting)
+					++outSet.diag.coastingTracks;
+				else if (outTrk.state == ValidityState::Uncertain)
+					++outSet.diag.uncertainTracks;
 			}
 		}
 

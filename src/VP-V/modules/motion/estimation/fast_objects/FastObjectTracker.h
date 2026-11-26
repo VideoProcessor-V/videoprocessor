@@ -88,7 +88,23 @@ namespace FastObjects
 		const TrajectoryTracker& Trajectory() const { return trajectory_; }
 
 	private:
+		struct StageADiagRecord
+		{
+			uint64_t frameIndex = 0;
+			uint32_t activeCells = 0;
+			uint32_t blobCount = 0;
+			uint32_t droppedBlobs = 0;
+			uint32_t abstainReason = AbstainReason::None;
+			bool clutterOverflow = false;
+			bool scanSkippedDormant = false;
+			float noiseSigmaEst = 0.0f;
+			SchedulerMode mode = SchedulerMode::Off;
+			bool valid = false;
+		};
+
 		bool CheckFastOffGate(const Config& cfg, FastObjectTrackSet* outTrackSet) const;
+		void RecordStageADiag(const StageADiagRecord& rec);
+		const StageADiagRecord* FindStageADiag(uint64_t frameIndex) const;
 
 		ResidualWorkspace residualWs_;
 		RefineWorkspace refineWs_;
@@ -102,13 +118,9 @@ namespace FastObjects
 		uint32_t dormantTick_ = 0;
 		uint32_t totalClutterOverflows_ = 0;
 
-		// Last Stage A diagnostics carried into ResolveAt.
-		uint32_t lastActiveCells_ = 0;
-		uint32_t lastBlobCount_ = 0;
-		uint32_t lastDroppedBlobs_ = 0;
-		uint32_t lastStageAAbstain_ = AbstainReason::None;
-		bool lastClutterOverflow_ = false;
-		bool lastScanSkippedDormant_ = false;
-		float lastNoiseSigmaEst_ = 0.0f;
+		// Per-frame Stage A diagnostics ring (eliminates look-ahead diag skew across [t, t + W_a]).
+		StageADiagRecord stageARing_[kWindowRingCapacity];
+		int stageARingCount_ = 0;
+		StageADiagRecord lastStageADiag_;
 	};
 }

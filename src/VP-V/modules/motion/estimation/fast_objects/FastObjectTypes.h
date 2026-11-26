@@ -75,14 +75,41 @@ namespace FastObjects
 		return std::erfc(std::sqrt(halfX)) + std::sqrt((2.0 * x) / kPi) * std::exp(-halfX);
 	}
 
-	// Exact chi^2(3) threshold whose upper tail equals the 1-DOF two-sided normal tail erfc(k / sqrt(2)).
+	// Exact two-sided bivariate standard normal same-sign exceedance tail for correlation rho = 1/2:
+	//   P_FA(k; rho = 1/2) = 2 * P(Z_1 > k, Z_2 > k | rho = 1/2)
+	// Using the exact latent-factor decomposition Z_i = (U + V_i) / sqrt(2) with independent standard normals:
+	//   P(Z_1 > k, Z_2 > k) = integral phi(u) * [0.5 * erfc((sqrt(2)*k - u) / sqrt(2))]^2 du.
+	// Evaluated by 64-point deterministic midpoint quadrature over u in [-6, 12] (exact to < 1e-10 for k in [0, 8]).
+	// Matches Spec sA.3: P_FA(4.0; 0.5) = 1.32e-5, P_FA(3.0; 0.5) = 4.61e-4.
+	inline double BivariateSameSignTailRhoHalf(double k)
+	{
+		if (!(k > 0.0))
+			return 0.5;
+		constexpr int kSteps = 64;
+		const double uMin = -6.0;
+		const double uMax = std::fmax(12.0, kSqrt2 * k + 6.0);
+		const double du = (uMax - uMin) / static_cast<double>(kSteps);
+		const double invSqrt2Pi = 1.0 / std::sqrt(2.0 * kPi);
+		const double invSqrt2 = 1.0 / kSqrt2;
+		double integral = 0.0;
+		for (int i = 0; i < kSteps; ++i)
+		{
+			const double u = uMin + (static_cast<double>(i) + 0.5) * du;
+			const double phi = invSqrt2Pi * std::exp(-0.5 * u * u);
+			const double tail1 = 0.5 * std::erfc((kSqrt2 * k - u) * invSqrt2);
+			integral += phi * tail1 * tail1;
+		}
+		return 2.0 * integral * du;
+	}
+
+	// Exact chi^2(3) threshold whose upper tail matches the bivariate same-sign residual tail P_FA(k; rho = 0.5).
 	inline double Chi2Dof3ThresholdForSigma(double k)
 	{
 		if (!(k > 0.0))
 			return 0.0;
-		const double target = std::erfc(k / kSqrt2);
-		double x = k * k + 2.0;
-		for (int iter = 0; iter < 12; ++iter)
+		const double target = BivariateSameSignTailRhoHalf(k);
+		double x = k * k + 4.0;
+		for (int iter = 0; iter < 16; ++iter)
 		{
 			const double s = Chi2Dof3Survival(x);
 			const double pdf = std::sqrt(x / (2.0 * kPi)) * std::exp(-0.5 * x);
@@ -225,6 +252,7 @@ namespace FastObjects
 		constexpr uint32_t kChromaAssisted = 1u << 5;    // Chroma residual contributed to detection/association
 		constexpr uint32_t kCrossingAmbiguity = 1u << 6; // Gate overlap < 2 sigma separation (forced Uncertain)
 		constexpr uint32_t kSessionPriorMatch = 1u << 7; // Softly prioritized by session ball appearance prior
+		constexpr uint32_t kIsoLumaChroma = 1u << 8;     // Isoluminant chroma-driven track (skips luma-only ZNCC)
 	}
 
 	// -------------------------------------------------------------------------
@@ -420,6 +448,7 @@ namespace FastObjects
 		float lumaIntSnr = 0.0f;       // Luma-only integrated SNR (for polarity reliability check)
 		float cbContrast = 0.0f;       // Mean signed 3-frame Cb residual inside blob
 		float crContrast = 0.0f;       // Mean signed 3-frame Cr residual inside blob
+		float chromaFlux = 0.0f;       // Conserved chroma contrast flux sqrt(sumCb^2 + sumCr^2)
 		float chromaSigma = 0.0f;      // Local chroma noise RMS inside blob
 		float meanBgLuma = 0.0f;       // Mean background luma around blob (polarity-crossing check)
 		bool hasChroma = false;
@@ -515,20 +544,22 @@ namespace FastObjects
 		{
 			if ((abstainReason & AbstainReason::OriginalPathway) != 0u)
 				return "fast_objects: off (original pathway)";
-			if ((abstainReason & AbstainReason::Disabled) != 0u || mode == SchedulerMode::Off)
+			if ((abstainReason & AbstainReason::Disabled) != 0u)
 				return "fast_objects: off";
 			if ((abstainReason & AbstainReason::BudgetShed) != 0u || mode == SchedulerMode::ShedBudget)
 				return "fast_objects: off (budget)";
-			if ((abstainReason & AbstainReason::SceneDiscontinuity) != 0u)
-				return "fast_objects: paused (scene cut/flash)";
-			if ((abstainReason & AbstainReason::NoUsableCamera) != 0u)
-				return "fast_objects: paused (camera model unusable)";
 			if ((abstainReason & AbstainReason::ClutterOverflow) != 0u || diag.clutterOverflow)
 			{
 				char buf[96];
 				std::snprintf(buf, sizeof(buf), "fast_objects: clutter overflow (%u cells)", diag.activeCells);
 				return std::string(buf);
 			}
+			if ((abstainReason & AbstainReason::SceneDiscontinuity) != 0u)
+				return "fast_objects: paused (scene cut/flash)";
+			if ((abstainReason & AbstainReason::NoUsableCamera) != 0u)
+				return "fast_objects: paused (camera model unusable)";
+			if (mode == SchedulerMode::Off)
+				return "fast_objects: off";
 			if (mode == SchedulerMode::Dormant)
 			{
 				char buf[96];

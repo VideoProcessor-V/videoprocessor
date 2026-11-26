@@ -123,8 +123,11 @@ namespace FastObjects
 		std::vector<float> signedResY;
 		std::vector<float> zMapY;
 		std::vector<float> sigmaDiffY;
+		std::vector<float> bilinErrY;
 		std::vector<float> signedResCb;
 		std::vector<float> signedResCr;
+		std::vector<float> bilinErrCb;
+		std::vector<float> bilinErrCr;
 		std::vector<float> chi2Map;
 		std::vector<float> bgLuma;
 		std::vector<uint8_t> sampleMask;       // Bit 0: valid, Bit 1: seed, Bit 2: grow, Bit 3: overlay, Bit 4: water, Bit 5: nearLargeObj

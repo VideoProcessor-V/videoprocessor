@@ -51,6 +51,68 @@ namespace FastObjects
 			return (v - offset) / gain;
 		}
 
+		// Exact physics-derived bilinear 2nd-order Taylor truncation error bound on the warped source image:
+		//   |I_bilin(x0+fx, y0+fy) - I(x, y)| <= 0.5 * min(fx, 1-fx) * |I_xx| + 0.5 * min(fy, 1-fy) * |I_yy|.
+		// Evaluated on the warped source image (prev/next), so static panning pitch/rink lines & textured peaks
+		// (present in prev & next) are cleanly bounded while real moving balls (absent at cur's pos in prev/next)
+		// incur zero SNR penalty. Returns 0 identically for integer shifts (fx == 0 && fy == 0).
+		inline double BilinearCurvatureBound(
+			const float* img, int w, int h, double sx, double sy,
+			bool fade, double fadeGain)
+		{
+			if (sx < 0.0) sx = 0.0;
+			else if (sx > static_cast<double>(w - 1)) sx = static_cast<double>(w - 1);
+			if (sy < 0.0) sy = 0.0;
+			else if (sy > static_cast<double>(h - 1)) sy = static_cast<double>(h - 1);
+			const int x0 = static_cast<int>(std::floor(sx));
+			const int y0 = static_cast<int>(std::floor(sy));
+			const double fx = sx - static_cast<double>(x0);
+			const double fy = sy - static_cast<double>(y0);
+			const double wx = 0.5 * std::fmin(fx, 1.0 - fx);
+			const double wy = 0.5 * std::fmin(fy, 1.0 - fy);
+			if (!(wx > 1e-9) && !(wy > 1e-9))
+				return 0.0;
+
+			const int x1 = (x0 + 1 < w) ? (x0 + 1) : (w - 1);
+			const int y1 = (y0 + 1 < h) ? (y0 + 1) : (h - 1);
+
+			auto sampleAt = [&](int ix, int iy) -> double
+			{
+				const int cx = std::min(std::max(ix, 0), w - 1);
+				const int cy = std::min(std::max(iy, 0), h - 1);
+				return static_cast<double>(img[static_cast<size_t>(cy) * static_cast<size_t>(w) + static_cast<size_t>(cx)]);
+			};
+
+			double maxD2x = 0.0;
+			double maxD2y = 0.0;
+			const int xs[2] = { x0, x1 };
+			const int ys[2] = { y0, y1 };
+			for (int yi = 0; yi < 2; ++yi)
+			{
+				const int ky = ys[yi];
+				for (int xi = 0; xi < 2; ++xi)
+				{
+					const int kx = xs[xi];
+					const double c = sampleAt(kx, ky);
+					if (wx > 1e-9)
+					{
+						const double d2x = std::fabs(sampleAt(kx - 1, ky) - 2.0 * c + sampleAt(kx + 1, ky));
+						if (d2x > maxD2x) maxD2x = d2x;
+					}
+					if (wy > 1e-9)
+					{
+						const double d2y = std::fabs(sampleAt(kx, ky - 1) - 2.0 * c + sampleAt(kx, ky + 1));
+						if (d2y > maxD2y) maxD2y = d2y;
+					}
+				}
+			}
+
+			double bound = wx * maxD2x + wy * maxD2y;
+			if (fade && std::fabs(fadeGain) > 1e-6)
+				bound /= std::fabs(fadeGain);
+			return bound;
+		}
+
 		// Exact same-polarity symmetric 3-frame residual (eliminates single-pair ghosts and opposite-sign flicker).
 		inline double SamePolarityResidual(double dm, double dp)
 		{
@@ -204,8 +266,11 @@ namespace FastObjects
 		signedResY.reserve(n);
 		zMapY.reserve(n);
 		sigmaDiffY.reserve(n);
+		bilinErrY.reserve(n);
 		signedResCb.reserve(n);
 		signedResCr.reserve(n);
+		bilinErrCb.reserve(n);
+		bilinErrCr.reserve(n);
 		chi2Map.reserve(n);
 		bgLuma.reserve(n);
 		sampleMask.reserve(n);
@@ -310,12 +375,15 @@ namespace FastObjects
 		ws.signedResY.assign(n, 0.0f);
 		ws.zMapY.assign(n, 0.0f);
 		ws.sigmaDiffY.assign(n, 0.0f);
+		ws.bilinErrY.assign(n, 0.0f);
 		ws.bgLuma.assign(n, 0.0f);
 		ws.sampleMask.assign(n, 0);
 		if (hasChroma)
 		{
 			ws.signedResCb.assign(n, 0.0f);
 			ws.signedResCr.assign(n, 0.0f);
+			ws.bilinErrCb.assign(n, 0.0f);
+			ws.bilinErrCr.assign(n, 0.0f);
 			ws.chi2Map.assign(n, 0.0f);
 		}
 
@@ -394,9 +462,12 @@ namespace FastObjects
 				const double dm = curY - prevY;
 				const double dp = curY - nextY;
 				const double rY = SamePolarityResidual(dm, dp);
+				const double bPrevY = BilinearCurvatureBound(in.lumaPrev, w, h, hPrevX, hPrevY, in.fadePrev, in.fadeGainPrev);
+				const double bNextY = BilinearCurvatureBound(in.lumaNext, w, h, hNextX, hNextY, in.fadeNext, in.fadeGainNext);
 
 				ws.diffMinus[idx] = static_cast<float>(dm);
 				ws.signedResY[idx] = static_cast<float>(rY);
+				ws.bilinErrY[idx] = static_cast<float>(std::fmin(bPrevY, bNextY));
 				ws.bgLuma[idx] = static_cast<float>(0.5 * (prevY + nextY));
 				ws.sampleMask[idx] = static_cast<uint8_t>(sflags | kSampleValid);
 
@@ -411,6 +482,9 @@ namespace FastObjects
 					const double dmCb = curCb - prevCb;
 					const double dpCb = curCb - nextCb;
 					ws.signedResCb[idx] = static_cast<float>(SamePolarityResidual(dmCb, dpCb));
+					const double bPrevCb = BilinearCurvatureBound(in.cbPrev, w, h, hPrevX, hPrevY, in.fadePrev, in.fadeGainPrev);
+					const double bNextCb = BilinearCurvatureBound(in.cbNext, w, h, hNextX, hNextY, in.fadeNext, in.fadeGainNext);
+					ws.bilinErrCb[idx] = static_cast<float>(std::fmin(bPrevCb, bNextCb));
 
 					const double curCr = static_cast<double>(in.crCur[idx]);
 					const double prevCr = ApplyFadeNorm(BilinearSafe(in.crPrev, w, h, hPrevX, hPrevY), in.fadePrev, in.fadeGainPrev, in.fadeOffsetPrev);
@@ -418,6 +492,9 @@ namespace FastObjects
 					const double dmCr = curCr - prevCr;
 					const double dpCr = curCr - nextCr;
 					ws.signedResCr[idx] = static_cast<float>(SamePolarityResidual(dmCr, dpCr));
+					const double bPrevCr = BilinearCurvatureBound(in.crPrev, w, h, hPrevX, hPrevY, in.fadePrev, in.fadeGainPrev);
+					const double bNextCr = BilinearCurvatureBound(in.crNext, w, h, hNextX, hNextY, in.fadeNext, in.fadeGainNext);
+					ws.bilinErrCr[idx] = static_cast<float>(std::fmin(bPrevCr, bNextCr));
 
 					if (needMadChroma && isCameraBlock && ((hx & 1) == 0) && ((hy & 1) == 0))
 					{
@@ -519,7 +596,8 @@ namespace FastObjects
 
 						const double gradY = in.edgeMagMap ? static_cast<double>(in.edgeMagMap[idx]) : SobelGradMag(in.lumaCur, w, h, hx, hy);
 						const double regTermY = sigmaHInSamples * gradY;
-						const double sigmaY = std::sqrt(std::fmax(diffVar + regTermY * regTermY, 1e-24));
+						const double bilinY = static_cast<double>(ws.bilinErrY[idx]);
+						const double sigmaY = std::sqrt(std::fmax(diffVar + regTermY * regTermY + bilinY * bilinY, 1e-24));
 						const double zY = static_cast<double>(ws.signedResY[idx]) / sigmaY;
 						const double absZY = std::fabs(zY);
 
@@ -543,8 +621,10 @@ namespace FastObjects
 							const double cVarCr = hasGrainGrid ? diffVar : baseDiffVarCr;
 							const double regCb = sigmaHInSamples * gradCb;
 							const double regCr = sigmaHInSamples * gradCr;
-							const double sigmaCb = std::sqrt(std::fmax(cVarCb + regCb * regCb, 1e-24));
-							const double sigmaCr = std::sqrt(std::fmax(cVarCr + regCr * regCr, 1e-24));
+							const double bilinCb = static_cast<double>(ws.bilinErrCb[idx]);
+							const double bilinCr = static_cast<double>(ws.bilinErrCr[idx]);
+							const double sigmaCb = std::sqrt(std::fmax(cVarCb + regCb * regCb + bilinCb * bilinCb, 1e-24));
+							const double sigmaCr = std::sqrt(std::fmax(cVarCr + regCr * regCr + bilinCr * bilinCr, 1e-24));
 							const double zCb = static_cast<double>(ws.signedResCb[idx]) / sigmaCb;
 							const double zCr = static_cast<double>(ws.signedResCr[idx]) / sigmaCr;
 							const double chi2 = zY * zY + zCb * zCb + zCr * zCr;
@@ -648,9 +728,6 @@ namespace FastObjects
 					if (!canSeed)
 						continue;
 
-					const float seedZY = ws.zMapY[seedIdx];
-					const int seedSignY = (seedZY > 0.0f) ? 1 : ((seedZY < 0.0f) ? -1 : 0);
-
 					ws.bfsQueue.clear();
 					ws.componentIndices.clear();
 					ws.visited[seedIdx] = 1;
@@ -686,14 +763,6 @@ namespace FastObjects
 								accept = true;
 							if (!accept)
 								continue;
-
-							// Enforce same luma polarity inside a luma-driven component so opposite-polarity neighbors do not merge.
-							if (seedSignY != 0 && std::fabs(ws.zMapY[nidx]) >= static_cast<float>(streakSampleSigma))
-							{
-								const int nSignY = (ws.zMapY[nidx] > 0.0f) ? 1 : -1;
-								if (nSignY != seedSignY)
-									continue;
-							}
 
 							ws.visited[nidx] = 1;
 							ws.bfsQueue.push_back(static_cast<int>(nidx));
@@ -829,10 +898,21 @@ namespace FastObjects
 					{
 						blob.cbContrast = static_cast<float>(sumCb / static_cast<double>(area));
 						blob.crContrast = static_cast<float>(sumCr / static_cast<double>(area));
+						blob.chromaFlux = static_cast<float>(std::hypot(sumCb, sumCr));
 						blob.chromaSigma = static_cast<float>(std::sqrt(0.5 * (baseDiffVarCb + baseDiffVarCr)));
 					}
 					blob.meanBgLuma = static_cast<float>(sumBg / static_cast<double>(area));
 					blob.nearLargeObject = nearLarge;
+					if (hasGuardGrid)
+					{
+						const int cgbx = std::min(std::max(static_cast<int>(std::floor(centX * invGuardBlock)), 0), in.guardGridW - 1);
+						const int cgby = std::min(std::max(static_cast<int>(std::floor(centY * invGuardBlock)), 0), in.guardGridH - 1);
+						const size_t cgidx = static_cast<size_t>(cgby) * static_cast<size_t>(in.guardGridW) + static_cast<size_t>(cgbx);
+						if (in.blockLabels && in.blockLabels[cgidx] == static_cast<uint8_t>(CameraModel::Label::Overlay))
+							blob.overlapsOverlay = true;
+						if (in.waterProb && static_cast<double>(in.waterProb[cgidx]) >= kWaterProbThreshold)
+							blob.overlapsWater = true;
+					}
 
 					blob.maskBox.left = static_cast<int>(std::floor(static_cast<double>(minHx) * scale));
 					blob.maskBox.top = static_cast<int>(std::floor(static_cast<double>(minHy) * scale));

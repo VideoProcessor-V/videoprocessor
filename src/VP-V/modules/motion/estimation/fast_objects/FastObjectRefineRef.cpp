@@ -53,30 +53,34 @@ namespace FastObjects
 			return std::min(std::max(off, -0.5f), 0.5f);
 		}
 
-		// Convolve a 2D patch with a unit-area 1D line PSF of length `lenSamples` along unit vector (ax, ay).
-		void Apply1DLineBlur(
-			const float* src, int w, int h,
+		// Convolve an ROI patch with a unit-area 1D line PSF of length `lenSamples` along unit vector (ax, ay),
+		// sampling directly from the full source plane (offset originX, originY) so blur wings never truncate at ROI borders.
+		void Apply1DLineBlurFromPlane(
+			const float* fullPlane, int fullW, int fullH,
+			int originX, int originY, int roiW, int roiH,
 			float lenSamples, float ax, float ay,
 			std::vector<float>& dst)
 		{
-			const size_t n = static_cast<size_t>(w) * static_cast<size_t>(h);
+			const size_t n = static_cast<size_t>(roiW) * static_cast<size_t>(roiH);
 			dst.resize(n);
 			const int halfTaps = std::max(1, static_cast<int>(std::ceil(0.5f * lenSamples)));
 			const int numTaps = 2 * halfTaps + 1;
 			const float step = lenSamples / static_cast<float>(numTaps - 1);
 			const float invTaps = 1.0f / static_cast<float>(numTaps);
 
-			for (int y = 0; y < h; ++y)
+			for (int y = 0; y < roiH; ++y)
 			{
-				for (int x = 0; x < w; ++x)
+				const float py = static_cast<float>(originY + y);
+				for (int x = 0; x < roiW; ++x)
 				{
+					const float px = static_cast<float>(originX + x);
 					float sum = 0.0f;
 					for (int t = -halfTaps; t <= halfTaps; ++t)
 					{
 						const float s = static_cast<float>(t) * step;
-						sum += SampleBilinearClamp(src, w, h, static_cast<float>(x) + s * ax, static_cast<float>(y) + s * ay);
+						sum += SampleBilinearClamp(fullPlane, fullW, fullH, px + s * ax, py + s * ay);
 					}
-					dst[static_cast<size_t>(y) * static_cast<size_t>(w) + static_cast<size_t>(x)] = sum * invTaps;
+					dst[static_cast<size_t>(y) * static_cast<size_t>(roiW) + static_cast<size_t>(x)] = sum * invTaps;
 				}
 			}
 		}
@@ -107,13 +111,15 @@ namespace FastObjects
 			}
 		}
 
-		void DownsampleMask2x(
-			const uint8_t* src, int sw, int sh,
-			std::vector<uint8_t>& dst, int& dw, int& dh)
+		// Mask-weighted 2x2 box downsample for template A so exterior zeroed pixels never pollute boundary averages.
+		void DownsampleMasked2x(
+			const float* src, const uint8_t* mask, int sw, int sh,
+			std::vector<float>& dst, std::vector<uint8_t>& dstMask, int& dw, int& dh)
 		{
 			dw = std::max(1, sw / 2);
 			dh = std::max(1, sh / 2);
 			dst.resize(static_cast<size_t>(dw) * static_cast<size_t>(dh));
+			dstMask.resize(static_cast<size_t>(dw) * static_cast<size_t>(dh));
 			for (int y = 0; y < dh; ++y)
 			{
 				const int sy0 = std::min(y * 2, sh - 1);
@@ -122,12 +128,27 @@ namespace FastObjects
 				{
 					const int sx0 = std::min(x * 2, sw - 1);
 					const int sx1 = std::min(sx0 + 1, sw - 1);
-					const uint8_t anyOn = static_cast<uint8_t>(
-						(src[static_cast<size_t>(sy0) * static_cast<size_t>(sw) + static_cast<size_t>(sx0)] |
-						 src[static_cast<size_t>(sy0) * static_cast<size_t>(sw) + static_cast<size_t>(sx1)] |
-						 src[static_cast<size_t>(sy1) * static_cast<size_t>(sw) + static_cast<size_t>(sx0)] |
-						 src[static_cast<size_t>(sy1) * static_cast<size_t>(sw) + static_cast<size_t>(sx1)]) ? 1 : 0);
-					dst[static_cast<size_t>(y) * static_cast<size_t>(dw) + static_cast<size_t>(x)] = anyOn;
+					const size_t idx4[4] = {
+						static_cast<size_t>(sy0) * static_cast<size_t>(sw) + static_cast<size_t>(sx0),
+						static_cast<size_t>(sy0) * static_cast<size_t>(sw) + static_cast<size_t>(sx1),
+						static_cast<size_t>(sy1) * static_cast<size_t>(sw) + static_cast<size_t>(sx0),
+						static_cast<size_t>(sy1) * static_cast<size_t>(sw) + static_cast<size_t>(sx1)
+					};
+					float sumM = 0.0f;
+					int cntM = 0;
+					float sumAll = 0.0f;
+					for (int k = 0; k < 4; ++k)
+					{
+						sumAll += src[idx4[k]];
+						if (mask[idx4[k]] != 0)
+						{
+							sumM += src[idx4[k]];
+							++cntM;
+						}
+					}
+					const size_t oidx = static_cast<size_t>(y) * static_cast<size_t>(dw) + static_cast<size_t>(x);
+					dst[oidx] = (cntM > 0) ? (sumM / static_cast<float>(cntM)) : (0.25f * sumAll);
+					dstMask[oidx] = (cntM > 0) ? static_cast<uint8_t>(1) : static_cast<uint8_t>(0);
 				}
 			}
 		}
@@ -303,7 +324,8 @@ namespace FastObjects
 		}
 		out.usedBackgroundSub = useBgSub;
 
-		// Extract ROI template patch A and binary support mask (dilated by 1 sample for clean silhouette gradient).
+		// Extract ROI template patch A and binary support mask strictly over M_t (no exterior collar).
+		// Spec B.5: subtract camera-warped background STRICTLY outside M_t (never inside the opaque ball).
 		ws.patchA.resize(static_cast<size_t>(wA) * static_cast<size_t>(hA));
 		ws.maskA.assign(static_cast<size_t>(wA) * static_cast<size_t>(hA), 0);
 		int maskCount = 0;
@@ -317,9 +339,16 @@ namespace FastObjects
 				const float sx = (static_cast<float>(px) + 0.5f) * scale;
 				const size_t idx = static_cast<size_t>(y) * static_cast<size_t>(wA) + static_cast<size_t>(x);
 
+				const bool onMask = MaskContainsPoint(box, in.maskBits, in.hasMaskBits, sx, sy);
 				float valA = SampleBilinearClamp(in.lumaA, in.width, in.height, static_cast<float>(px), static_cast<float>(py));
-				if (useBgSub)
+				if (onMask)
 				{
+					ws.maskA[idx] = 1;
+					++maskCount;
+				}
+				else if (useBgSub)
+				{
+					// Subtract camera-warped background strictly outside M_t.
 					double wx = 0.0, wy = 0.0;
 					CameraModel::Apply(in.camAToB, static_cast<double>(sx) - picCx, static_cast<double>(sy) - picCy, &wx, &wy);
 					const float bx = static_cast<float>((wx + picCx) * invScale - 0.5);
@@ -327,22 +356,6 @@ namespace FastObjects
 					valA -= SampleBilinearClamp(in.lumaB, in.width, in.height, bx, by);
 				}
 				ws.patchA[idx] = valA;
-
-				// Include pixel if inside support mask (or within 1-sample collar around maskBox for silhouette).
-				bool onMask = MaskContainsPoint(box, in.maskBits, in.hasMaskBits, sx, sy);
-				if (!onMask && in.hasMaskBits)
-				{
-					// Check 4-connected neighbors at +/- scale to add a 1-sample silhouette collar.
-					onMask = MaskContainsPoint(box, in.maskBits, true, sx - scale, sy) ||
-						MaskContainsPoint(box, in.maskBits, true, sx + scale, sy) ||
-						MaskContainsPoint(box, in.maskBits, true, sx, sy - scale) ||
-						MaskContainsPoint(box, in.maskBits, true, sx, sy + scale);
-				}
-				if (onMask)
-				{
-					ws.maskA[idx] = 1;
-					++maskCount;
-				}
 			}
 		}
 
@@ -352,27 +365,16 @@ namespace FastObjects
 			return;
 		}
 
-		// Extract target ROI patch B.
+		// Extract target ROI patch B (unmodified I_B so opaque ball pixels inside M_t match I_A cleanly).
 		ws.patchB.resize(static_cast<size_t>(wB) * static_cast<size_t>(hB));
 		for (int y = 0; y < hB; ++y)
 		{
 			const int py = by0 + y;
-			const float sy = (static_cast<float>(py) + 0.5f) * scale;
 			for (int x = 0; x < wB; ++x)
 			{
 				const int px = bx0 + x;
-				const float sx = (static_cast<float>(px) + 0.5f) * scale;
 				const size_t idx = static_cast<size_t>(y) * static_cast<size_t>(wB) + static_cast<size_t>(x);
-				float valB = SampleBilinearClamp(in.lumaB, in.width, in.height, static_cast<float>(px), static_cast<float>(py));
-				if (useBgSub)
-				{
-					double wx = 0.0, wy = 0.0;
-					CameraModel::Apply(invCam, static_cast<double>(sx) - picCx, static_cast<double>(sy) - picCy, &wx, &wy);
-					const float ax = static_cast<float>((wx + picCx) * invScale - 0.5);
-					const float ay = static_cast<float>((wy + picCy) * invScale - 0.5);
-					valB -= SampleBilinearClamp(in.lumaA, in.width, in.height, ax, ay);
-				}
-				ws.patchB[idx] = valB;
+				ws.patchB[idx] = SampleBilinearClamp(in.lumaB, in.width, in.height, static_cast<float>(px), static_cast<float>(py));
 			}
 		}
 
@@ -388,12 +390,12 @@ namespace FastObjects
 			const float uy = (axisNorm > 1e-6f) ? (in.blurAxisY / axisNorm) : std::sin(in.streakAngleRad);
 			if (deltaBlurSamples > 0.0f)
 			{
-				Apply1DLineBlur(ws.patchA.data(), wA, hA, deltaBlurSamples, ux, uy, ws.patchABlurred);
+				Apply1DLineBlurFromPlane(in.lumaA, in.width, in.height, ax0, ay0, wA, hA, deltaBlurSamples, ux, uy, ws.patchABlurred);
 				fullA = ws.patchABlurred.data();
 			}
 			else
 			{
-				Apply1DLineBlur(ws.patchB.data(), wB, hB, -deltaBlurSamples, ux, uy, ws.patchBBlurred);
+				Apply1DLineBlurFromPlane(in.lumaB, in.width, in.height, bx0, by0, wB, hB, -deltaBlurSamples, ux, uy, ws.patchBBlurred);
 				fullB = ws.patchBBlurred.data();
 			}
 			out.usedDifferentialBlur = true;
@@ -407,9 +409,8 @@ namespace FastObjects
 		if (searchSamples >= 4 && wA >= 8 && hA >= 8)
 		{
 			int hwA = 0, hhA = 0, hwB = 0, hhB = 0;
-			Downsample2x(fullA, wA, hA, ws.halfA, hwA, hhA);
+			DownsampleMasked2x(fullA, ws.maskA.data(), wA, hA, ws.halfA, ws.halfMask, hwA, hhA);
 			Downsample2x(fullB, wB, hB, ws.halfB, hwB, hhB);
-			DownsampleMask2x(ws.maskA.data(), wA, hA, ws.halfMask, hwA, hhA);
 
 			int bestHalfX = 0;
 			int bestHalfY = 0;
@@ -418,9 +419,8 @@ namespace FastObjects
 			if (searchSamples >= 8 && hwA >= 4 && hhA >= 4)
 			{
 				int qwA = 0, qhA = 0, qwB = 0, qhB = 0;
-				Downsample2x(ws.halfA.data(), hwA, hhA, ws.quarterA, qwA, qhA);
+				DownsampleMasked2x(ws.halfA.data(), ws.halfMask.data(), hwA, hhA, ws.quarterA, ws.quarterMask, qwA, qhA);
 				Downsample2x(ws.halfB.data(), hwB, hhB, ws.quarterB, qwB, qhB);
-				DownsampleMask2x(ws.halfMask.data(), hwA, hhA, ws.quarterMask, qwA, qhA);
 
 				const int qSearch = std::max(1, searchSamples / 4);
 				const int qCenter = searchSamples / 4;
@@ -520,8 +520,22 @@ namespace FastObjects
 		float sumCost = 0.0f;
 		int validCount = 0;
 
-		const int seedFullX = std::min(std::max(bestDx, -searchSamples), searchSamples);
-		const int seedFullY = std::min(std::max(bestDy, -searchSamples), searchSamples);
+		// Guard against coarse-pyramid aliasing on thin streaks: compare coarse seed against trajectory prediction (0, 0) at full res.
+		int seedFullX = std::min(std::max(bestDx, -searchSamples), searchSamples);
+		int seedFullY = std::min(std::max(bestDy, -searchSamples), searchSamples);
+		if (seedFullX != 0 || seedFullY != 0)
+		{
+			float rhoCoarse = -2.0f, rhoZero = -2.0f;
+			const bool okCoarse = EvalMaskedZncc(fullA, ws.maskA.data(), wA, hA,
+				fullB, wB, hB, searchSamples + seedFullX, searchSamples + seedFullY, rhoCoarse);
+			const bool okZero = EvalMaskedZncc(fullA, ws.maskA.data(), wA, hA,
+				fullB, wB, hB, searchSamples, searchSamples, rhoZero);
+			if (okZero && (!okCoarse || rhoZero > rhoCoarse))
+			{
+				seedFullX = 0;
+				seedFullY = 0;
+			}
+		}
 
 		for (int ly = -kRefineRange; ly <= kRefineRange; ++ly)
 		{
@@ -589,15 +603,24 @@ namespace FastObjects
 				curvY);
 		}
 
-		// Textureless/flat curvature floor check (spec B.5).
+		const float meanCost = sumCost / static_cast<float>(validCount);
+		const float matchMargin = (meanCost > 1e-6f)
+			? std::min(std::max(1.0f - bestCost / meanCost, 0.0f), 1.0f)
+			: 0.0f;
+
+		// Textureless/flat curvature or flat 5x5 peak check (spec B.5):
+		// On smooth motion-blurred streaks or textureless discs where the 5x5 ZNCC surface lacks peak contrast
+		// (< kDefaultMinConfidence = 0.25), fall back transparently to trajectory centroid vector instead of
+		// overwriting accurate trajectory kinematics with a noisy flat-ridge shift.
 		const bool interior = (bestLocalX > -kRefineRange && bestLocalX < kRefineRange &&
 			bestLocalY > -kRefineRange && bestLocalY < kRefineRange);
-		if (interior && !(curvX > 1e-6f) && !(curvY > 1e-6f))
+		if ((interior && !(curvX > 1e-6f) && !(curvY > 1e-6f)) || matchMargin < kDefaultMinConfidence)
 		{
 			out.usedCentroidFallback = true;
 			out.bestZncc = bestZncc;
 			out.bestCost = bestCost;
-			out.meanCost = sumCost / static_cast<float>(validCount);
+			out.meanCost = meanCost;
+			out.matchMargin = matchMargin;
 			return;
 		}
 
@@ -607,10 +630,8 @@ namespace FastObjects
 		out.vy = finalDySamples * scale;
 		out.bestZncc = bestZncc;
 		out.bestCost = bestCost;
-		out.meanCost = sumCost / static_cast<float>(validCount);
-		out.matchMargin = (out.meanCost > 1e-6f)
-			? std::min(std::max(1.0f - out.bestCost / out.meanCost, 0.0f), 1.0f)
-			: 0.0f;
+		out.meanCost = meanCost;
+		out.matchMargin = matchMargin;
 		out.usedCentroidFallback = false;
 	}
 }

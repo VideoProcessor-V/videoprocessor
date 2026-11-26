@@ -31,13 +31,10 @@ namespace FastObjects
 		trajectory_.ResetScene();
 		quietFrames_ = 0;
 		dormantTick_ = 0;
-		lastActiveCells_ = 0;
-		lastBlobCount_ = 0;
-		lastDroppedBlobs_ = 0;
-		lastStageAAbstain_ = AbstainReason::None;
-		lastClutterOverflow_ = false;
-		lastScanSkippedDormant_ = false;
-		lastNoiseSigmaEst_ = 0.0f;
+		stageARingCount_ = 0;
+		for (int i = 0; i < kWindowRingCapacity; ++i)
+			stageARing_[i] = StageADiagRecord{};
+		lastStageADiag_ = StageADiagRecord{};
 	}
 
 	void FastObjectTracker::ResetSession()
@@ -47,6 +44,39 @@ namespace FastObjects
 		hasResyncGeneration_ = false;
 		lastResyncGeneration_ = 0;
 		totalClutterOverflows_ = 0;
+	}
+
+	void FastObjectTracker::RecordStageADiag(const StageADiagRecord& rec)
+	{
+		lastStageADiag_ = rec;
+		for (int i = 0; i < stageARingCount_; ++i)
+		{
+			if (stageARing_[i].valid && stageARing_[i].frameIndex == rec.frameIndex)
+			{
+				stageARing_[i] = rec;
+				return;
+			}
+		}
+		if (stageARingCount_ < kWindowRingCapacity)
+		{
+			stageARing_[stageARingCount_++] = rec;
+		}
+		else
+		{
+			for (int i = 0; i < kWindowRingCapacity - 1; ++i)
+				stageARing_[i] = stageARing_[i + 1];
+			stageARing_[kWindowRingCapacity - 1] = rec;
+		}
+	}
+
+	const FastObjectTracker::StageADiagRecord* FastObjectTracker::FindStageADiag(uint64_t frameIndex) const
+	{
+		for (int i = stageARingCount_ - 1; i >= 0; --i)
+		{
+			if (stageARing_[i].valid && stageARing_[i].frameIndex == frameIndex)
+				return &stageARing_[i];
+		}
+		return lastStageADiag_.valid ? &lastStageADiag_ : nullptr;
 	}
 
 	bool FastObjectTracker::CheckFastOffGate(const Config& cfg, FastObjectTrackSet* outTrackSet) const
@@ -83,6 +113,13 @@ namespace FastObjects
 			return false;
 		}
 
+		// Transition immediately out of Off once enabled & within budget (so Frame-0 ClutterOverflow reports accurately).
+		const SchedulerMode activeTier = (budgetTier_ == SchedulerMode::Dormant)
+			? SchedulerMode::Dormant
+			: ((budgetTier_ == SchedulerMode::ActiveT2) ? SchedulerMode::ActiveT2 : SchedulerMode::ActiveT1);
+		if (currentMode_ == SchedulerMode::Off || currentMode_ == SchedulerMode::ShedBudget)
+			currentMode_ = activeTier;
+
 		// Instant reset on U10 resync generation change or P4 cut/flash discontinuity.
 		if (hasResyncGeneration_ && in.resyncGeneration != lastResyncGeneration_)
 		{
@@ -94,8 +131,13 @@ namespace FastObjects
 		if (in.residual.sceneDiscontinuity)
 		{
 			ResetScene();
-			lastStageAAbstain_ = AbstainReason::SceneDiscontinuity;
-			currentMode_ = (budgetTier_ == SchedulerMode::ActiveT2) ? SchedulerMode::ActiveT2 : SchedulerMode::ActiveT1;
+			currentMode_ = activeTier;
+			StageADiagRecord rec;
+			rec.frameIndex = in.frameIndex;
+			rec.abstainReason = AbstainReason::SceneDiscontinuity;
+			rec.mode = currentMode_;
+			rec.valid = true;
+			RecordStageADiag(rec);
 			if (outStageA)
 				outStageA->abstainReason = AbstainReason::SceneDiscontinuity;
 			return false;
@@ -112,13 +154,14 @@ namespace FastObjects
 			const bool skipThisFrame = ((dormantTick_++ & 1u) != 0u);
 			if (skipThisFrame)
 			{
-				lastScanSkippedDormant_ = true;
-				lastActiveCells_ = 0;
-				lastBlobCount_ = 0;
-				lastDroppedBlobs_ = 0;
-				lastStageAAbstain_ = in.residual.causalTwoBack ? AbstainReason::CausalNoLookAhead : AbstainReason::None;
-				lastClutterOverflow_ = false;
 				++quietFrames_;
+				StageADiagRecord rec;
+				rec.frameIndex = in.frameIndex;
+				rec.abstainReason = in.residual.causalTwoBack ? AbstainReason::CausalNoLookAhead : AbstainReason::None;
+				rec.scanSkippedDormant = true;
+				rec.mode = SchedulerMode::Dormant;
+				rec.valid = true;
+				RecordStageADiag(rec);
 
 				FrameObservation emptyObs;
 				emptyObs.frameIndex = in.frameIndex;
@@ -135,7 +178,6 @@ namespace FastObjects
 				return true;
 			}
 		}
-		lastScanSkippedDormant_ = false;
 
 		// Stage A: camera-compensated 3-frame residual + streak blob extraction.
 		ResidualOutput stageA;
@@ -143,20 +185,33 @@ namespace FastObjects
 		if (outStageA)
 			*outStageA = stageA;
 
-		lastActiveCells_ = stageA.activeCells;
-		lastBlobCount_ = stageA.blobCount;
-		lastDroppedBlobs_ = stageA.droppedBlobs;
-		lastStageAAbstain_ = stageA.abstainReason;
-		lastClutterOverflow_ = stageA.clutterOverflow;
-		lastNoiseSigmaEst_ = stageA.noiseSigmaEst;
-
 		if (stageA.clutterOverflow)
 		{
 			++totalClutterOverflows_;
+			currentMode_ = activeTier;
+			StageADiagRecord rec;
+			rec.frameIndex = in.frameIndex;
+			rec.activeCells = stageA.activeCells;
+			rec.blobCount = stageA.blobCount;
+			rec.droppedBlobs = stageA.droppedBlobs;
+			rec.abstainReason = stageA.abstainReason;
+			rec.clutterOverflow = true;
+			rec.noiseSigmaEst = stageA.noiseSigmaEst;
+			rec.mode = currentMode_;
+			rec.valid = true;
+			RecordStageADiag(rec);
 			return false;
 		}
 		if (!stageAOk)
 		{
+			StageADiagRecord rec;
+			rec.frameIndex = in.frameIndex;
+			rec.activeCells = stageA.activeCells;
+			rec.abstainReason = stageA.abstainReason;
+			rec.noiseSigmaEst = stageA.noiseSigmaEst;
+			rec.mode = currentMode_;
+			rec.valid = true;
+			RecordStageADiag(rec);
 			return false;
 		}
 
@@ -165,9 +220,7 @@ namespace FastObjects
 		{
 			quietFrames_ = 0;
 			dormantTick_ = 0;
-			currentMode_ = (budgetTier_ == SchedulerMode::Dormant)
-				? SchedulerMode::Dormant
-				: ((budgetTier_ == SchedulerMode::ActiveT2) ? SchedulerMode::ActiveT2 : SchedulerMode::ActiveT1);
+			currentMode_ = activeTier;
 		}
 		else
 		{
@@ -175,10 +228,21 @@ namespace FastObjects
 			if (cfg.enableDormantScheduler && quietFrames_ >= cfg.dormantIdleFrames)
 				currentMode_ = SchedulerMode::Dormant;
 			else
-				currentMode_ = (budgetTier_ == SchedulerMode::Dormant)
-					? SchedulerMode::Dormant
-					: ((budgetTier_ == SchedulerMode::ActiveT2) ? SchedulerMode::ActiveT2 : SchedulerMode::ActiveT1);
+				currentMode_ = activeTier;
 		}
+
+		StageADiagRecord rec;
+		rec.frameIndex = in.frameIndex;
+		rec.activeCells = stageA.activeCells;
+		rec.blobCount = stageA.blobCount;
+		rec.droppedBlobs = stageA.droppedBlobs;
+		rec.abstainReason = stageA.abstainReason;
+		rec.clutterOverflow = false;
+		rec.scanSkippedDormant = false;
+		rec.noiseSigmaEst = stageA.noiseSigmaEst;
+		rec.mode = currentMode_;
+		rec.valid = true;
+		RecordStageADiag(rec);
 
 		// Stage B ingestion: push blobs into 13-frame ring and advance Hungarian association + bounce stitching.
 		FrameObservation obs;
@@ -216,18 +280,26 @@ namespace FastObjects
 		if (CheckFastOffGate(cfg, &outTrackSet))
 			return false;
 
-		outTrackSet.Clear(currentMode_, lastStageAAbstain_);
-		outTrackSet.diag.activeCells = lastActiveCells_;
-		outTrackSet.diag.blobCount = lastBlobCount_;
-		outTrackSet.diag.droppedBlobs = lastDroppedBlobs_;
-		outTrackSet.diag.clutterOverflow = lastClutterOverflow_;
+		const StageADiagRecord* frameDiag = FindStageADiag(targetFrameIndex);
+		const SchedulerMode resolvedMode = frameDiag ? frameDiag->mode : currentMode_;
+		const uint32_t resolvedAbstain = frameDiag ? frameDiag->abstainReason : AbstainReason::None;
+		const bool resolvedOverflow = frameDiag ? frameDiag->clutterOverflow : false;
+
+		outTrackSet.Clear(resolvedMode, resolvedAbstain);
+		if (frameDiag)
+		{
+			outTrackSet.diag.activeCells = frameDiag->activeCells;
+			outTrackSet.diag.blobCount = frameDiag->blobCount;
+			outTrackSet.diag.droppedBlobs = frameDiag->droppedBlobs;
+			outTrackSet.diag.clutterOverflow = frameDiag->clutterOverflow;
+			outTrackSet.diag.scanSkippedDormant = frameDiag->scanSkippedDormant;
+			outTrackSet.diag.noiseSigmaEst = frameDiag->noiseSigmaEst;
+		}
 		outTrackSet.diag.clutterOverflowCount = totalClutterOverflows_;
 		outTrackSet.diag.quietFrames = quietFrames_;
-		outTrackSet.diag.scanSkippedDormant = lastScanSkippedDormant_;
-		outTrackSet.diag.noiseSigmaEst = lastNoiseSigmaEst_;
 
-		if (lastClutterOverflow_ ||
-			(lastStageAAbstain_ & (AbstainReason::SceneDiscontinuity | AbstainReason::NoUsableCamera)) != 0u)
+		if (resolvedOverflow ||
+			(resolvedAbstain & (AbstainReason::SceneDiscontinuity | AbstainReason::NoUsableCamera)) != 0u)
 		{
 			return false;
 		}
@@ -258,71 +330,100 @@ namespace FastObjects
 
 			if (trk.state == ValidityState::Valid && canRefine)
 			{
-				RefineInput rin;
-				rin.lumaA = refinePlanes->lumaA;
-				rin.lumaB = refinePlanes->lumaB;
-				rin.width = refinePlanes->width;
-				rin.height = refinePlanes->height;
-				rin.planeScale = refinePlanes->planeScale;
-				rin.camAToB = refinePlanes->camAToB;
-				rin.camUsable = refinePlanes->camUsable;
-				rin.picture = refinePlanes->picture;
-				rin.cx = trk.cx;
-				rin.cy = trk.cy;
-				rin.predVx = trk.vx;
-				rin.predVy = trk.vy;
-				rin.radiusPx = trk.radiusPx;
-				rin.streakLenPx = trk.streakLenPx;
-				rin.streakAngleRad = trk.streakAngleRad;
-				// Search uncertainty radius: ceil(3 * sigma_pred) + ceil(r_est), with sigma_pred derived from NIS/radius.
-				const float sigmaPred = std::max(1.0f, std::sqrt(std::max(trk.nis, 1.0f)) * std::max(0.5f, 0.25f * trk.radiusPx));
-				rin.searchRadiusPx = std::ceil(3.0f * sigmaPred) + std::ceil(trk.radiusPx);
-				// Differential motion blur DeltaL = (||v_t|| - ||v_{t-1}||) * tau_s ~= a_parallel * dt^2 * tau_s.
-				const float vMag = std::sqrt(trk.velXPerSec * trk.velXPerSec + trk.velYPerSec * trk.velYPerSec);
-				if (vMag > 1e-3f && trk.shutterEst > 0.0f)
+				// Isoluminant chroma-driven tracks have no luma signal for luma-only ZNCC, and Impulse bounce-bracketing
+				// pairs undergo discontinuous streak-angle changes across the bounce vertex: transparently keep the
+				// trajectory-filtered centroid / two-leg chord displacement (kCentroidVector).
+				if ((trk.flags & (TrackFlags::kIsoLumaChroma | TrackFlags::kImpulsePair)) != 0u)
 				{
-					rin.blurAxisX = trk.velXPerSec / vMag;
-					rin.blurAxisY = trk.velYPerSec / vMag;
-					const float aPar = trk.ax * rin.blurAxisX + trk.ay * rin.blurAxisY;
-					rin.deltaBlurLenPx = aPar * trk.pairSeconds * trk.pairSeconds * trk.shutterEst;
-				}
-				rin.maskBox = trk.maskBox;
-				for (int bi = 0; bi < 4; ++bi)
-					rin.maskBits[bi] = trk.maskBits[bi];
-				rin.hasMaskBits = trk.hasMaskBits;
-
-				RefineOutput rout;
-				RefineFastObjectVector(rin, refineWs_, rout);
-
-				const float gNis = std::exp(-std::max(0.0f, trk.nis - 2.0f) * 0.25f);
-				const float gAge = std::min(1.0f, static_cast<float>(trk.ageFrames) / 3.0f);
-
-				if (rout.usedCentroidFallback)
-				{
-					// Transparent kCentroidVector fallback with calibrated lower confidence (spec B.5 & C.3).
 					trk.flags |= TrackFlags::kCentroidVector;
 					trk.confidence = std::min(std::max(trk.confidence * 0.75f, 0.0f), 1.0f);
 					++outTrackSet.diag.centroidFallbackTracks;
 				}
 				else
 				{
-					// Update vector & swept capsule with sub-pel refined ZNCC displacement.
-					trk.vx = rout.vx;
-					trk.vy = rout.vy;
-					trk.disocclusionCapsule.x1 = trk.cx + trk.vx;
-					trk.disocclusionCapsule.y1 = trk.cy + trk.vy;
+					RefineInput rin;
+					rin.lumaA = refinePlanes->lumaA;
+					rin.lumaB = refinePlanes->lumaB;
+					rin.width = refinePlanes->width;
+					rin.height = refinePlanes->height;
+					rin.planeScale = refinePlanes->planeScale;
+					rin.camAToB = refinePlanes->camAToB;
+					rin.camUsable = refinePlanes->camUsable;
+					rin.picture = refinePlanes->picture;
+					rin.cx = trk.cx;
+					rin.cy = trk.cy;
+					rin.predVx = trk.vx;
+					rin.predVy = trk.vy;
+					rin.radiusPx = trk.radiusPx;
+					rin.streakLenPx = trk.streakLenPx;
+					rin.streakAngleRad = trk.streakAngleRad;
+					// Search uncertainty radius: ceil(3 * sigma_pred) + ceil(r_est), with sigma_pred derived from NIS/radius.
+					const float sigmaPred = std::max(1.0f, std::sqrt(std::max(trk.nis, 1.0f)) * std::max(0.5f, 0.25f * trk.radiusPx));
+					rin.searchRadiusPx = std::ceil(3.0f * sigmaPred) + std::ceil(trk.radiusPx);
+					// Differential motion blur DeltaL = (||v_t|| - ||v_{t-1}||) * tau_s ~= a_parallel * dt^2 * tau_s.
+					const float vMag = std::sqrt(trk.velXPerSec * trk.velXPerSec + trk.velYPerSec * trk.velYPerSec);
+					if (vMag > 1e-3f && trk.shutterEst > 0.0f)
+					{
+						rin.blurAxisX = trk.velXPerSec / vMag;
+						rin.blurAxisY = trk.velYPerSec / vMag;
+						const float aPar = trk.ax * rin.blurAxisX + trk.ay * rin.blurAxisY;
+						rin.deltaBlurLenPx = aPar * trk.pairSeconds * trk.pairSeconds * trk.shutterEst;
+					}
+					rin.maskBox = trk.maskBox;
+					for (int bi = 0; bi < 4; ++bi)
+						rin.maskBits[bi] = trk.maskBits[bi];
+					rin.hasMaskBits = trk.hasMaskBits;
 
-					// Spec C.3 confidence: clamp((1 - cost_best / cost_mean) * g_NIS * g_blur * g_age * h_agree, 0, 1).
-					const float predDiffX = rout.vx - rin.predVx;
-					const float predDiffY = rout.vy - rin.predVy;
-					const float predDiff = std::sqrt(predDiffX * predDiffX + predDiffY * predDiffY);
-					const float hAgree = (predDiff > 2.0f * std::max(sigmaPred, 1.0f)) ? 0.5f : 1.0f;
-					const float refinedConf = std::min(std::max(rout.matchMargin * gNis * trk.blurAlignFactor * gAge * hAgree, 0.0f), 1.0f);
-					trk.confidence = refinedConf;
+					RefineOutput rout;
+					RefineFastObjectVector(rin, refineWs_, rout);
+
+					const float gNis = std::exp(-std::max(0.0f, trk.nis - 2.0f) * 0.25f);
+					const float gAge = std::min(1.0f, static_cast<float>(trk.ageFrames) / 3.0f);
+
+					if (rout.usedCentroidFallback)
+					{
+						// Transparent kCentroidVector fallback with calibrated lower confidence (spec B.5 & C.3).
+						trk.flags |= TrackFlags::kCentroidVector;
+						trk.confidence = std::min(std::max(trk.confidence * 0.75f, 0.0f), 1.0f);
+						++outTrackSet.diag.centroidFallbackTracks;
+					}
+					else
+					{
+						// Spec C.3 confidence: clamp((1 - cost_best / cost_mean) * g_NIS * g_blur * g_age * h_agree, 0, 1).
+						const float predDiffX = rout.vx - rin.predVx;
+						const float predDiffY = rout.vy - rin.predVy;
+						const float predDiff = std::sqrt(predDiffX * predDiffX + predDiffY * predDiffY);
+						const float hAgree = (predDiff > 2.0f * std::max(sigmaPred, 1.0f)) ? 0.5f : 1.0f;
+						const float refinedConf = std::min(std::max(rout.matchMargin * gNis * trk.blurAlignFactor * gAge * hAgree, 0.0f), 1.0f);
+
+						// If ZNCC slid along a motion-blurred streak OR matched globally (bestZncc >= 0.25) with weak
+						// 5x5 peak sharpness (refinedConf < minConfidence while trajectory fit is solid), keep the
+						// trajectory-filtered centroid displacement transparently (kCentroidVector).
+						if (((trk.flags & TrackFlags::kBlurStretched) != 0u && hAgree < 1.0f) ||
+							(refinedConf < cfg.minConfidence && rout.bestZncc >= 0.25f && trk.confidence * 0.75f >= cfg.minConfidence))
+						{
+							trk.flags |= TrackFlags::kCentroidVector;
+							trk.confidence = std::min(std::max(trk.confidence * 0.75f, 0.0f), 1.0f);
+							++outTrackSet.diag.centroidFallbackTracks;
+						}
+						else
+						{
+							trk.vx = rout.vx;
+							trk.vy = rout.vy;
+							trk.disocclusionCapsule.x1 = trk.cx + trk.vx;
+							trk.disocclusionCapsule.y1 = trk.cy + trk.vy;
+							trk.confidence = refinedConf;
+						}
+					}
 				}
 
 				if (trk.confidence < cfg.minConfidence)
+				{
 					trk.state = ValidityState::Uncertain;
+					trk.vx = 0.0f;
+					trk.vy = 0.0f;
+					trk.disocclusionCapsule = Capsule{};
+				}
 			}
 			else if (trk.state == ValidityState::Valid && !canRefine)
 			{
@@ -365,13 +466,17 @@ namespace FastObjects
 		}
 		if (!PushFrame(cfg, in, nullptr))
 		{
-			outTrackSet.Clear(currentMode_, lastStageAAbstain_);
-			outTrackSet.diag.activeCells = lastActiveCells_;
-			outTrackSet.diag.blobCount = lastBlobCount_;
-			outTrackSet.diag.clutterOverflow = lastClutterOverflow_;
+			const StageADiagRecord* frameDiag = FindStageADiag(in.frameIndex);
+			outTrackSet.Clear(frameDiag ? frameDiag->mode : currentMode_, frameDiag ? frameDiag->abstainReason : AbstainReason::None);
+			if (frameDiag)
+			{
+				outTrackSet.diag.activeCells = frameDiag->activeCells;
+				outTrackSet.diag.blobCount = frameDiag->blobCount;
+				outTrackSet.diag.clutterOverflow = frameDiag->clutterOverflow;
+				outTrackSet.diag.noiseSigmaEst = frameDiag->noiseSigmaEst;
+			}
 			outTrackSet.diag.clutterOverflowCount = totalClutterOverflows_;
 			outTrackSet.diag.quietFrames = quietFrames_;
-			outTrackSet.diag.noiseSigmaEst = lastNoiseSigmaEst_;
 			return false;
 		}
 		return ResolveAt(cfg, in.frameIndex, refinePlanes, outTrackSet);

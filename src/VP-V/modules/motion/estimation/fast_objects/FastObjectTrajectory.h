@@ -164,6 +164,8 @@ namespace FastObjects
 			double timestampSec = 0.0;
 			double dtFromPrevSec = 0.0;
 			BlobCandidate blob;
+			double nis = 0.0;
+			bool crossingAmbiguous = false;
 			bool valid = false;
 		};
 
@@ -172,7 +174,6 @@ namespace FastObjects
 			uint32_t id = 0;
 			bool active = false;
 			bool confirmed = false;
-			bool crossingAmbiguous = false;
 			bool priorMatched = false;
 			TrajectoryType lastType = TrajectoryType::Unknown;
 			double lastNis = 0.0;
@@ -180,6 +181,7 @@ namespace FastObjects
 			uint32_t coastFrames = 0;
 			int8_t polarity = 0;
 			double emaFlux = 0.0;
+			double emaChromaFlux = 0.0;
 			double emaRadiusPx = 0.0;
 			double emaCb = 0.0;
 			double emaCr = 0.0;
@@ -197,8 +199,10 @@ namespace FastObjects
 		bool IsHotspotSuppressed(float x, float y, const CameraModel::Rect& picture) const;
 		void UpdateSessionPrior(const TrackRecord& trk);
 		double SessionPriorBonus(const Config& cfg, const BlobCandidate& b) const;
+		void ConfirmTrackIncrementally(const Config& cfg, int latestSlot, TrackRecord& trk);
 		void AssociateLatestFrame(const Config& cfg, int latestSlot);
 		void AttemptImpulseStitching(const Config& cfg, int latestSlot);
+		void PruneExpiredTracks(const Config& cfg);
 
 		FrameObservation ring_[kWindowRingCapacity];
 		int ringCount_ = 0;
