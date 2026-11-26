@@ -27,7 +27,7 @@ Physics-derived, zero-neural-network detector, multi-hypothesis trajectory class
 | `Chi2Dof3ThresholdForSigma(k)` | Exact Newton solve of `S_3(x) = erfc(k / sqrt(2))` | Exact 3-DOF `chi^2(3)` threshold for `z_Y^2 + z_Cb^2 + z_Cr^2` matching the 1-DOF `k sigma` false-alarm tail. |
 | `kCellSizeHalfPx` | `4` | `4x4` half-luma tile = `8x8` source px, aligned with `P2` NVOF and `FieldRefine` block grid. |
 | `kStreakPixelSigma` | `kSeedSigma / kCellSizeHalfPx = 1.0` | Exact uniform per-pixel floor of a streak triggering the `4x4` Neyman-Pearson matched filter `z_cell >= kSeedSigma`. |
-| `kMaxActiveCells` | `256` | Bounded `256 x 8 B = 2048 B` GPU->CPU staging cap; overflow triggers explicit `AbstainReason::ClutterOverflow`. |
+| `kMaxActiveCells` | `256` | Bounded `(256 + 2) x 16 B = 4,128 B` GPU->CPU staging cap (header + active cells + MAD noise slot); overflow triggers explicit `AbstainReason::ClutterOverflow`. |
 | `kMinBlobAreaHalfPx` | `4` | `2x2` Nyquist sampling minimum at half resolution. |
 | `kMaxMinorAxisFrac` | `0.03` | `3%` of active picture height (32 px @ 1080p, 64 px @ 2160p); applied to deconvolved minor axis `2 * r_est` so long motion streaks are never rejected. |
 | `kMaxSpeedWidthFracPerSec` | `2.0` | `2.0 * W_pic px/s` (covers a 160 mph serve crossing a broadcast court in 0.5 s). |

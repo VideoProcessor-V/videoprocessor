@@ -142,6 +142,9 @@ namespace FastObjects
 		std::vector<float> madScratchCb;
 		std::vector<float> madScratchCr;
 		std::vector<BlobCandidate> candidateScratch;
+		std::vector<uint8_t> cellPopulated;    // Sparse GPU extraction: 1 if 4x4 cell was populated on-demand this frame
+		std::vector<uint32_t> populatedCells;  // Sparse GPU extraction: list of populated cells to clean at frame end
+		bool gpuSparseClean = false;           // True only when sampleMask/visited/cellPopulated are all-zero outside active cells
 
 		void Reserve(int width, int height, int guardGridW = 0, int guardGridH = 0);
 	};

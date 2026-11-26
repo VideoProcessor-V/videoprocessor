@@ -371,6 +371,7 @@ namespace FastObjects
 
 		BuildLargeObjectMasks(in, maxLargeObjAreaSrcPx2, ws);
 
+		ws.gpuSparseClean = false;
 		ws.diffMinus.assign(n, 0.0f);
 		ws.signedResY.assign(n, 0.0f);
 		ws.zMapY.assign(n, 0.0f);

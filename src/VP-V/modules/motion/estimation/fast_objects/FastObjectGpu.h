@@ -74,6 +74,7 @@ namespace FastObjects
 		constexpr uint32_t kNearLargeObj = 1u << 1;   // Within 1 block of a large P8 Label::Object
 		constexpr uint32_t kOverlay = 1u << 2;        // P8 Label::Overlay
 		constexpr uint32_t kWater = 1u << 3;          // CE-WATER waterProb >= 0.5
+		constexpr uint32_t kNonCamera = 1u << 4;      // P8 blockLabels != Label::Camera (excluded from MAD noise floor)
 	}
 
 	// GPU Stage A inputs (D3D11 SRVs on the caller's device; zero private copies required).
@@ -108,7 +109,8 @@ namespace FastObjects
 		bool sceneDiscontinuity = false;
 		bool causalTwoBack = false;
 		bool dormantCoarseMode = false; // True -> 2x2 decimated coarse wake-up pass (~1/4 threads, <= 0.06 ms @ 4K)
-		bool writeZMap = true;          // True -> writes R32_FLOAT half-res z-map UAV (disable to save 8.3 MB @ 4K)
+		bool writeZMap = false;         // Optional R32_FLOAT half-res z-map UAV (default false: saves 8.3 MB VRAM & writes @ 4K)
+		bool writeCellGrid = false;     // Optional R32G32B32A32_FLOAT cell-grid UAV (default false: saves 2.07 MB VRAM & writes @ 4K)
 
 		// Optional P4 fade normalization.
 		bool fadePrev = false;
@@ -123,9 +125,9 @@ namespace FastObjects
 		int grainGridW = 0;
 		int grainGridH = 0;
 		double grainBlockSrcPx = 16.0;
-		// Scalar baseline diff noise variance fallback when grainVarSrv == nullptr (sigma_g in input luma units).
-		double uniformGrainSigma = 0.0;
-		double uniformChromaGrainSigma = -1.0; // < 0 reuses uniformGrainSigma
+		// Optional scalar grain std (in input luma units); < 0 triggers GPU Camera-block MAD fallback when grainVarSrv == nullptr.
+		double uniformGrainSigma = -1.0;
+		double uniformChromaGrainSigma = -1.0; // < 0 computes GPU chroma MAD when uniformGrainSigma < 0, else reuses uniformGrainSigma
 
 		// Optional packed guard grid SRV (DXGI_FORMAT_R32_UINT, GpuGuardBits, guardGridW x guardGridH).
 		ID3D11ShaderResourceView* guardMapSrv = nullptr;
@@ -153,7 +155,9 @@ namespace FastObjects
 		bool chromaUsed = false;
 		bool causalMode = false;
 		bool dormantCoarse = false;
-		float noiseSigmaEst = 0.0f;
+		float noiseSigmaEst = 0.0f;    // Estimated baseline diff noise floor sqrt(baseDiffVarLuma) (incl. GPU MAD)
+		float noiseSigmaCbEst = 0.0f;  // Estimated baseline Cb diff noise floor sqrt(baseDiffVarCb)
+		float noiseSigmaCrEst = 0.0f;  // Estimated baseline Cr diff noise floor sqrt(baseDiffVarCr)
 		GpuTiming timing;
 		GpuActiveCell cells[kMaxActiveCells];
 
@@ -170,6 +174,8 @@ namespace FastObjects
 			causalMode = false;
 			dormantCoarse = false;
 			noiseSigmaEst = 0.0f;
+			noiseSigmaCbEst = 0.0f;
+			noiseSigmaCrEst = 0.0f;
 			timing = GpuTiming{};
 		}
 	};
@@ -216,7 +222,13 @@ namespace FastObjects
 
 		// Explicit VRAM accounting helper (bytes) for VpSkeleton::VramUsers.
 		// Returns 0 when enabled == false or dimensions <= 0.
-		static size_t EstimatedVramBytes(int width, int height, bool writeZMap = true, bool enabled = true);
+		// With default writeZMap=false & writeCellGrid=false, allocates only ~16.8 KB total even at 4K!
+		static size_t EstimatedVramBytes(
+			int width,
+			int height,
+			bool writeZMap = false,
+			bool enabled = true,
+			bool writeCellGrid = false);
 
 		void EnableTiming(bool on) { timingEnabled_ = on; }
 		bool TimingEnabled() const { return timingEnabled_; }
@@ -256,7 +268,7 @@ namespace FastObjects
 		FastObjectGpu(const FastObjectGpu&) = delete;
 		FastObjectGpu& operator=(const FastObjectGpu&) = delete;
 
-		bool EnsureFrameResources(int width, int height, bool writeZMap);
+		bool EnsureFrameResources(int width, int height, bool writeZMap, bool writeCellGrid);
 		void SetFailure(GpuFailure f, const std::string& msg);
 
 		struct Impl;

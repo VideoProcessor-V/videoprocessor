@@ -45,7 +45,7 @@ struct GpuActiveCell
 cbuffer FastObjectCB : register(b0)
 {
     uint4 dims;       // x: width, y: height, z: cellW, w: cellH
-    uint4 flags;      // x: hasChroma, y: hasGrainMap, z: hasGuardMap, w: bit0=dormantCoarse, bit1=writeZMap, bit2=fadePrev, bit3=fadeNext
+    uint4 flags;      // x: hasChroma, y: hasGrainMap, z: hasGuardMap, w: bit0=dormantCoarse, bit1=writeZMap, bit2=fadePrev, bit3=fadeNext, bit4=writeCellGrid, bit5=needMadLuma, bit6=needMadChroma
     uint4 grids;      // x: grainGridW, y: grainGridH, z: guardGridW, w: guardGridH
     uint4 limits;     // x: maxActiveCellsCap, y: stride (1 or 2), z: outCellW, w: outCellH
 
@@ -58,7 +58,7 @@ cbuffer FastObjectCB : register(b0)
 
     float4 mapPrev0;  // h[0..3]
     float4 mapPrev1;  // h[4..7]
-    float4 mapPrev2;  // h[8], invW, invH, 0
+    float4 mapPrev2;  // h[8], invW, invH, kMadToSigma
 
     float4 mapNext0;  // h[0..3]
     float4 mapNext1;  // h[4..7]
@@ -79,10 +79,12 @@ Texture2D<float> gCrNext   : register(t8);
 Texture2D<float> gGrainVar : register(t9);
 Texture2D<uint>  gGuardMap : register(t10);
 Texture2D<float4> gCellGridSrv : register(t11);
+StructuredBuffer<float4> gNoiseSrv : register(t12);
 
 RWTexture2D<float>  gZMapUav     : register(u0);
 RWTexture2D<float4> gCellGridUav : register(u1);
 RWStructuredBuffer<GpuActiveCell> gCompactUav : register(u2);
+RWStructuredBuffer<float4> gNoiseUav : register(u3);
 
 float2 ApplyHomog(float4 m0, float4 m1, float4 m2, float2 p)
 {
@@ -194,7 +196,7 @@ float BilinearCurvFast(
     return bnd;
 }
 
-// Pass 0: Clear exact active-cell atomic counter header slot 0.
+// Pass 0a: Clear exact active-cell atomic counter header slot 0 and publish baseline noise variances.
 )HLSL";
 
 		const char* const kFastObjectGpuHlslPart2 = R"HLSL(
@@ -207,8 +209,188 @@ void CSClearHeader(uint3 dtid : SV_DispatchThreadID)
     hdr.maxAbsZ = 0.0;
     hdr.zCell = 0.0;
     gCompactUav[0] = hdr;
+
+    gNoiseUav[0] = float4(noiseCfg.x, noiseCfg.y, noiseCfg.z, 0.0);
+
+    GpuActiveCell nrec;
+    nrec.cellXY = asuint(noiseCfg.z);
+    nrec.flagsGrow = 0u;
+    nrec.maxAbsZ = noiseCfg.x;
+    nrec.zCell = noiseCfg.y;
+    gCompactUav[257] = nrec;
 }
 
+groupshared float sMadBuf[512];
+groupshared uint  sMadCnt;
+groupshared float sMadOut[4]; // 0: diffVarLuma, 1: diffVarCb, 2: diffVarCr, 3: lumaCnt
+
+void BitonicSort512(uint tid)
+{
+    for (uint k = 2u; k <= 512u; k <<= 1u)
+    {
+        for (uint j = k >> 1u; j > 0u; j >>= 1u)
+        {
+            uint block = tid / j;
+            uint rem = tid - block * j;
+            uint i = block * (2u * j) + rem;
+            uint ixj = i + j;
+            bool asc = ((i & k) == 0u);
+            float a = sMadBuf[i];
+            float b = sMadBuf[ixj];
+            if ((a > b) == asc)
+            {
+                sMadBuf[i] = b;
+                sMadBuf[ixj] = a;
+            }
+            GroupMemoryBarrierWithGroupSync();
+        }
+    }
+}
+
+void ComputeChannelMad512(
+    Texture2D<float> curTex, Texture2D<float> prevTex,
+    int w, int h, float2 invDims,
+    int hxMin, int hxSpan, int hyMin, int hySpan,
+    bool hasGuard, bool fadePrev, uint tid, uint outSlot, uint writeCountSlot)
+{
+    if (tid == 0u)
+        sMadCnt = 0u;
+    sMadBuf[tid] = 1e30;
+    sMadBuf[tid + 256u] = 1e30;
+    GroupMemoryBarrierWithGroupSync();
+
+    float scale = picScale.z;
+    float invScale = picScale.w;
+    float maxX = (float)(w - 1);
+    float maxY = (float)(h - 1);
+
+    for (uint stepIdx = 0u; stepIdx < 2u; ++stepIdx)
+    {
+        uint sid = tid + stepIdx * 256u;
+        uint gx = sid & 31u;
+        uint gy = sid >> 5u;
+        int hx = clamp(hxMin + (int)floor((((float)gx + 0.5) / 32.0) * (float)hxSpan), 0, w - 1);
+        int hy = clamp(hyMin + (int)floor((((float)gy + 0.5) / 16.0) * (float)hySpan), 0, h - 1);
+        float sx = ((float)hx + 0.5) * scale;
+        float sy = ((float)hy + 0.5) * scale;
+        bool ok = (sx >= picRect.x && sx < picRect.z && sy >= picRect.y && sy < picRect.w);
+        if (ok && hasGuard)
+        {
+            int gbx = clamp((int)floor(sx * regCfg.z), 0, (int)grids.z - 1);
+            int gby = clamp((int)floor(sy * regCfg.z), 0, (int)grids.w - 1);
+            uint gbits = gGuardMap.Load(int3(gbx, gby, 0));
+            // Exclude bars/overlays/water/large-objects (bit 0) AND non-Camera blocks (bit 4) for pure background MAD.
+            if ((gbits & 17u) != 0u)
+                ok = false;
+        }
+        if (ok)
+        {
+            float2 pc = float2(sx - picScale.x, sy - picScale.y);
+            float2 prevC = ApplyHomog(mapPrev0, mapPrev1, mapPrev2, pc);
+            float2 hPrev = (prevC + picScale.xy) * invScale - 0.5;
+            if (hPrev.x >= 0.0 && hPrev.x <= maxX && hPrev.y >= 0.0 && hPrev.y <= maxY)
+            {
+                float curV = curTex.Load(int3(hx, hy, 0));
+                float prevV; float4 qP; int2 bP; float2 fP;
+                SampleBilinFast(prevTex, w, h, invDims, hPrev.x, hPrev.y, fadePrev, fadeCfg.x, fadeCfg.y, prevV, qP, bP, fP);
+                float d = abs(curV - prevV);
+                uint slot = 0u;
+                InterlockedAdd(sMadCnt, 1u, slot);
+                if (slot < 512u)
+                    sMadBuf[slot] = d;
+            }
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    BitonicSort512(tid);
+
+    if (tid == 0u)
+    {
+        uint cnt = min(sMadCnt, 512u);
+        float diffVar = noiseCfg.w;
+        if (cnt >= 16u)
+        {
+            float med = sMadBuf[cnt >> 1u];
+            float madSig = mapPrev2.w * med;
+            diffVar = max(madSig * madSig, noiseCfg.w);
+        }
+        sMadOut[outSlot] = diffVar;
+        if (writeCountSlot != 0u)
+            sMadOut[3] = (float)cnt;
+    }
+    GroupMemoryBarrierWithGroupSync();
+}
+
+// Pass 0b: Single-group stratified Camera-block MAD noise estimator + active-cell counter clear.
+// Invoked ONLY when !hasGrain && uniformGrainSigma < 0.0 (matching CPU ComputeBackgroundMad).
+[numthreads(256, 1, 1)]
+void CSComputeMadAndClear(uint3 gtid : SV_GroupThreadID)
+{
+    uint tid = gtid.x;
+    int w = (int)dims.x;
+    int h = (int)dims.y;
+    float2 invDims = mapPrev2.yz;
+    bool hasChroma = (flags.x != 0u);
+    bool hasGuard = (flags.z != 0u);
+    bool fadePrev = (flags.w & 4u) != 0u;
+    bool needMadLuma = (flags.w & 32u) != 0u;
+    bool needMadChroma = (flags.w & 64u) != 0u;
+
+    if (tid == 0u)
+    {
+        sMadOut[0] = noiseCfg.x;
+        sMadOut[1] = noiseCfg.y;
+        sMadOut[2] = noiseCfg.z;
+        sMadOut[3] = 0.0;
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    float invScale = picScale.w;
+    int hxMin = clamp((int)floor(picRect.x * invScale), 0, w - 1);
+    int hxMax = clamp((int)ceil(picRect.z * invScale), hxMin + 1, w);
+    int hyMin = clamp((int)floor(picRect.y * invScale), 0, h - 1);
+    int hyMax = clamp((int)ceil(picRect.w * invScale), hyMin + 1, h);
+    int hxSpan = max(hxMax - hxMin, 1);
+    int hySpan = max(hyMax - hyMin, 1);
+
+    if (needMadLuma)
+    {
+        ComputeChannelMad512(gLumaCur, gLumaPrev, w, h, invDims, hxMin, hxSpan, hyMin, hySpan, hasGuard, fadePrev, tid, 0u, 1u);
+    }
+    if (hasChroma && needMadChroma)
+    {
+        ComputeChannelMad512(gCbCur, gCbPrev, w, h, invDims, hxMin, hxSpan, hyMin, hySpan, hasGuard, fadePrev, tid, 1u, 0u);
+        ComputeChannelMad512(gCrCur, gCrPrev, w, h, invDims, hxMin, hxSpan, hyMin, hySpan, hasGuard, fadePrev, tid, 2u, 0u);
+    }
+
+    if (tid == 0u)
+    {
+        float dvY = sMadOut[0];
+        float dvCb = (hasChroma && needMadChroma) ? sMadOut[1] : ((flags.w & 64u) != 0u ? dvY : noiseCfg.y);
+        float dvCr = (hasChroma && needMadChroma) ? sMadOut[2] : ((flags.w & 64u) != 0u ? dvY : noiseCfg.z);
+        uint cnt = (uint)(sMadOut[3] + 0.5);
+
+        GpuActiveCell hdr;
+        hdr.cellXY = 0u;
+        hdr.flagsGrow = (limits.z & 0xFFFFu) | ((limits.w & 0xFFFFu) << 16);
+        hdr.maxAbsZ = 0.0;
+        hdr.zCell = 0.0;
+        gCompactUav[0] = hdr;
+
+        gNoiseUav[0] = float4(dvY, dvCb, dvCr, (float)cnt);
+
+        GpuActiveCell nrec;
+        nrec.cellXY = asuint(dvCr);
+        nrec.flagsGrow = cnt;
+        nrec.maxAbsZ = dvY;
+        nrec.zCell = dvCb;
+        gCompactUav[257] = nrec;
+    }
+}
+)HLSL";
+
+		const char* const kFastObjectGpuHlslPart3 = R"HLSL(
 #ifndef FAST_OBJ_HAS_CHROMA
 #define FAST_OBJ_HAS_CHROMA 1
 #endif
@@ -222,7 +404,6 @@ void CSClearHeader(uint3 dtid : SV_DispatchThreadID)
 #if FAST_OBJ_TILE_FAST
 // 100%-overlapped 3-frame shared tiles with odd bank-conflict-free strides (19 and 23):
 // cur 19x10 (190) + prev 23x14 (322) + next 23x14 (322) = 3,336 B TGSM.
-// Loaded concurrently before ONE single barrier -> zero global loads in math & curvature!
 groupshared float sCurT[190];
 groupshared float sPrevT[322];
 groupshared float sNextT[322];
@@ -230,13 +411,19 @@ groupshared float sNextT[322];
 groupshared float sCurY[190];
 #endif
 groupshared float sMaxZ[128];
-groupshared float sSumZ[128];
+groupshared float sPosY[128];  // Stage 1: max(uY, 0); Stage 2: exact zY
+groupshared float sNegY[128];  // Stage 1: max(-uY, 0)
 #if FAST_OBJ_HAS_CHROMA
 groupshared float sMaxChi2[128];
-groupshared float sSumZCb[128];
-groupshared float sSumZCr[128];
+groupshared float sPosCb[128]; // Stage 1: max(uCb, 0); Stage 2: exact zCb
+groupshared float sNegCb[128];
+groupshared float sPosCr[128]; // Stage 1: max(uCr, 0); Stage 2: exact zCr
+groupshared float sNegCr[128];
 #endif
 groupshared uint  sActGrow[128]; // Packed: (act << 16) | grow
+groupshared uint  sCellPass[8];  // 1 if 4x4 cell's exact upper bound could possibly trigger
+groupshared uint  sGroupAnyPass; // Threadgroup-wide OR of sCellPass[] (uniform early-out)
+groupshared uint  sGroupAnyOk;   // Threadgroup-wide OR of ok after guard check (uniform early-out)
 
 #if FAST_OBJ_TILE_FAST
 float CurvFromTilePrev(uint r0, float4 abcd, float fx, float fy, bool doFade, float fadeGain)
@@ -298,17 +485,11 @@ float CurvFromTileNext(uint r0, float4 abcd, float fx, float fy, bool doFade, fl
         bnd /= abs(fadeGain);
     return bnd;
 }
-
-float2 ApplyAffine(float4 m0, float4 m1, float invW, float2 p)
-{
-    return float2((m0.x * p.x + m0.y * p.y + m0.z) * invW,
-                  (m0.w * p.x + m1.x * p.y + m1.y) * invW);
-}
 #endif
 
-// Pass 1: Camera-compensated 3-frame same-polarity residual + noise/gradient/bilinear-curvature
-// normalization + optional half-res Cb/Cr 3-DOF chi^2 + 4x4 cell groupshared reduction
-// + fused InterlockedAdd active-cell compaction into bounded <= 4 KB buffer.
+// Pass 1: Camera-compensated 3-frame same-polarity residual + exact 4x4 cell upper-bound
+// curvature/Sobel gate + optional half-res Cb/Cr 3-DOF chi^2 + single-barrier 4x4 reduction
+// + fused bounded InterlockedAdd active-cell compaction into <= 4 KB buffer.
 [numthreads(16, 8, 1)]
 void CSResidualAndReduce(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID)
 {
@@ -317,6 +498,7 @@ void CSResidualAndReduce(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupI
     float2 invDims = mapPrev2.yz;
     uint stride = limits.y;
     bool writeZ = (flags.w & 2u) != 0u;
+    bool writeCellGrid = (flags.w & 16u) != 0u;
     bool fadePrev = (flags.w & 4u) != 0u;
     bool fadeNext = (flags.w & 8u) != 0u;
 #if FAST_OBJ_HAS_CHROMA
@@ -325,41 +507,64 @@ void CSResidualAndReduce(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupI
     bool hasGrain = (flags.y != 0u);
     bool hasGuard = (flags.z != 0u);
 
+    float scale = picScale.z;
+    float invScale = picScale.w;
+
+    // Speedup #3a: Uniform threadgroup-wide picRect early-out (skips ~25% letterbox bars with 0 loads & 0 barriers!).
+    // Uses uniform `groupActive` guard (zero mid-shader `return;` before later barriers — strict WARP & HW safe!).
+    bool fastSparseOut = (!writeZ && !writeCellGrid);
+    bool groupActive = true;
+    if (fastSparseOut)
+    {
+        float grpMinX = ((float)(gid.x * 16u * stride) + 0.5) * scale;
+        float grpMaxX = ((float)((gid.x * 16u + 15u) * stride) + 0.5) * scale;
+        float grpMinY = ((float)(gid.y * 8u * stride) + 0.5) * scale;
+        float grpMaxY = ((float)((gid.y * 8u + 7u) * stride) + 0.5) * scale;
+        if (grpMaxX < picRect.x || grpMinX >= picRect.z || grpMaxY < picRect.y || grpMinY >= picRect.w)
+            groupActive = false;
+    }
+
+    if (groupActive)
+    {
     int hx = (int)(dtid.x * stride);
     int hy = (int)(dtid.y * stride);
     bool inBounds = (hx < w && hy < h);
-
-    float scale = picScale.z;
-    float invScale = picScale.w;
     float sx = ((float)hx + 0.5) * scale;
     float sy = ((float)hy + 0.5) * scale;
     bool ok = inBounds && (sx >= picRect.x && sx < picRect.z && sy >= picRect.y && sy < picRect.w);
 
-    if (ok && hasGuard)
+    uint tid = gtid.y * 16u + gtid.x;
+    if (hasGuard)
     {
-        int gbx = clamp((int)floor(sx * regCfg.z), 0, (int)grids.z - 1);
-        int gby = clamp((int)floor(sy * regCfg.z), 0, (int)grids.w - 1);
-        uint gbits = gGuardMap.Load(int3(gbx, gby, 0));
-        if ((gbits & 1u) != 0u)
-            ok = false;
+        if (ok)
+        {
+            int gbx = clamp((int)floor(sx * regCfg.z), 0, (int)grids.z - 1);
+            int gby = clamp((int)floor(sy * regCfg.z), 0, (int)grids.w - 1);
+            uint gbits = gGuardMap.Load(int3(gbx, gby, 0));
+            if ((gbits & 1u) != 0u)
+                ok = false;
+        }
+        if (fastSparseOut)
+        {
+            if (tid == 0u) sGroupAnyOk = 0u;
+            GroupMemoryBarrierWithGroupSync();
+            if (ok) InterlockedOr(sGroupAnyOk, 1u);
+            GroupMemoryBarrierWithGroupSync();
+            if (sGroupAnyOk == 0u)
+                groupActive = false;
+        }
     }
+
+    if (groupActive)
+    {
 
     float2 hPrev = float2(-1.0, -1.0);
     float2 hNext = float2(-1.0, -1.0);
-#if FAST_OBJ_TILE_FAST
-    float invWPrev = 1.0 / mapPrev2.x;
-    float invWNext = 1.0 / mapNext2.x;
-#endif
     if (ok)
     {
         float2 pc = float2(sx - picScale.x, sy - picScale.y);
-#if FAST_OBJ_TILE_FAST
-        float2 prevC = ApplyAffine(mapPrev0, mapPrev1, invWPrev, pc);
-        float2 nextC = ApplyAffine(mapNext0, mapNext1, invWNext, pc);
-#else
         float2 prevC = ApplyHomog(mapPrev0, mapPrev1, mapPrev2, pc);
         float2 nextC = ApplyHomog(mapNext0, mapNext1, mapNext2, pc);
-#endif
         hPrev = (prevC + picScale.xy) * invScale - 0.5;
         hNext = (nextC + picScale.xy) * invScale - 0.5;
 
@@ -372,23 +577,12 @@ void CSResidualAndReduce(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupI
         }
     }
 
-    float zY = 0.0;
-    float absZY = 0.0;
-#if FAST_OBJ_HAS_CHROMA
-    float zCb = 0.0;
-    float zCr = 0.0;
-    float chi2Val = 0.0;
-#endif
-    uint isValid = 0u;
-    uint isGrow = 0u;
-
 #if FAST_OBJ_TILE_FAST
-    // Concurrent 3-frame GatherRed load before ONE single barrier (overlaps all 3 DRAM fetches!).
-    uint tid = gtid.y * 16u + gtid.x;
+    // Concurrent 3-frame GatherRed load before ONE single barrier (supports full 8-DOF homographies!).
     float2 t0Src = (float2((float)(gid.x * 16u), (float)(gid.y * 8u)) + 0.5) * scale;
     float2 t0Pc = t0Src - picScale.xy;
-    float2 t0PrevH = (ApplyAffine(mapPrev0, mapPrev1, invWPrev, t0Pc) + picScale.xy) * invScale - 0.5;
-    float2 t0NextH = (ApplyAffine(mapNext0, mapNext1, invWNext, t0Pc) + picScale.xy) * invScale - 0.5;
+    float2 t0PrevH = (ApplyHomog(mapPrev0, mapPrev1, mapPrev2, t0Pc) + picScale.xy) * invScale - 0.5;
+    float2 t0NextH = (ApplyHomog(mapNext0, mapNext1, mapNext2, t0Pc) + picScale.xy) * invScale - 0.5;
     int prevOx = (int)floor(clamp(t0PrevH.x, 0.0, (float)(w - 1))) - 2;
     int prevOy = (int)floor(clamp(t0PrevH.y, 0.0, (float)(h - 1))) - 2;
     int nextOx = (int)floor(clamp(t0NextH.x, 0.0, (float)(w - 1))) - 2;
@@ -428,7 +622,6 @@ void CSResidualAndReduce(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupI
     }
     GroupMemoryBarrierWithGroupSync();
 #elif !FAST_OBJ_DORMANT
-    uint tid = gtid.y * 16u + gtid.x;
     if (tid < 45u)
     {
         uint qy = tid / 9u;
@@ -443,23 +636,51 @@ void CSResidualAndReduce(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupI
     GroupMemoryBarrierWithGroupSync();
 #endif
 
-    if (ok)
-    {
-        isValid = 1u;
-        float diffVar = noiseCfg.x;
-        bool grainLoaded = false;
+    // Stage 1: Exact raw residuals rY (and rCb, rCr) + variance-only upper bounds u = r / sqrt(diffVar).
+    float4 baseNoise = gNoiseSrv[0];
+    float diffVar = baseNoise.x;
+    float rY = 0.0;
+    float uY = 0.0;
+    uint isValid = ok ? 1u : 0u;
 
 #if FAST_OBJ_TILE_FAST
-        uint lx = gtid.x + 1u;
-        uint ly = gtid.y + 1u;
-        float curY = sCurT[ly * 19u + lx];
+    uint pr0 = 0u, nr0 = 0u;
+    float4 pQuad = float4(0.0, 0.0, 0.0, 0.0);
+    float4 nQuad = float4(0.0, 0.0, 0.0, 0.0);
+    float pfx = 0.0, pfy = 0.0, nfx = 0.0, nfy = 0.0;
+#else
+    float4 qPrevY = float4(0.0, 0.0, 0.0, 0.0), qNextY = float4(0.0, 0.0, 0.0, 0.0);
+    int2 bPrevXY = int2(0, 0), bNextXY = int2(0, 0);
+    float2 fPrevXY = float2(0.0, 0.0), fNextXY = float2(0.0, 0.0);
+#endif
+#if FAST_OBJ_HAS_CHROMA
+    float rCb = 0.0, rCr = 0.0, uCb = 0.0, uCr = 0.0, uChi2 = 0.0;
+    float4 qPrevCb = float4(0.0, 0.0, 0.0, 0.0), qNextCb = float4(0.0, 0.0, 0.0, 0.0);
+    int2 bPrevCb = int2(0, 0), bNextCb = int2(0, 0);
+    float2 fPrevCb = float2(0.0, 0.0), fNextCb = float2(0.0, 0.0);
+    float4 qPrevCr = float4(0.0, 0.0, 0.0, 0.0), qNextCr = float4(0.0, 0.0, 0.0, 0.0);
+    int2 bPrevCr = int2(0, 0), bNextCr = int2(0, 0);
+    float2 fPrevCr = float2(0.0, 0.0), fNextCr = float2(0.0, 0.0);
+#endif
 
+    if (ok)
+    {
+        if (hasGrain)
+        {
+            int gx = clamp((int)floor(sx * regCfg.y), 0, (int)grids.x - 1);
+            int gy = clamp((int)floor(sy * regCfg.y), 0, (int)grids.y - 1);
+            float gv = max(0.0, gGrainVar.Load(int3(gx, gy, 0)));
+            diffVar = 2.0 * gv + noiseCfg.w;
+        }
+
+#if FAST_OBJ_TILE_FAST
+        float curY = sCurT[(gtid.y + 1u) * 19u + (gtid.x + 1u)];
         float cpx = clamp(hPrev.x, 0.0, (float)(w - 1));
         float cpy = clamp(hPrev.y, 0.0, (float)(h - 1));
         int px0 = (int)floor(cpx), py0 = (int)floor(cpy);
-        float pfx = cpx - (float)px0, pfy = cpy - (float)py0;
-        uint pr0 = (uint)(py0 - prevOy) * 23u + (uint)(px0 - prevOx);
-        float4 pQuad = float4(sPrevT[pr0], sPrevT[pr0 + 1u], sPrevT[pr0 + 23u], sPrevT[pr0 + 24u]);
+        pfx = cpx - (float)px0; pfy = cpy - (float)py0;
+        pr0 = (uint)(py0 - prevOy) * 23u + (uint)(px0 - prevOx);
+        pQuad = float4(sPrevT[pr0], sPrevT[pr0 + 1u], sPrevT[pr0 + 23u], sPrevT[pr0 + 24u]);
         float prevY = (pQuad.x * (1.0 - pfx) + pQuad.y * pfx) * (1.0 - pfy) +
                       (pQuad.z * (1.0 - pfx) + pQuad.w * pfx) * pfy;
         if (fadePrev && abs(fadeCfg.x) > 1e-6) prevY = (prevY - fadeCfg.y) / fadeCfg.x;
@@ -467,24 +688,144 @@ void CSResidualAndReduce(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupI
         float cnx = clamp(hNext.x, 0.0, (float)(w - 1));
         float cny = clamp(hNext.y, 0.0, (float)(h - 1));
         int nx0 = (int)floor(cnx), ny0 = (int)floor(cny);
-        float nfx = cnx - (float)nx0, nfy = cny - (float)ny0;
-        uint nr0 = (uint)(ny0 - nextOy) * 23u + (uint)(nx0 - nextOx);
-        float4 nQuad = float4(sNextT[nr0], sNextT[nr0 + 1u], sNextT[nr0 + 23u], sNextT[nr0 + 24u]);
+        nfx = cnx - (float)nx0; nfy = cny - (float)ny0;
+        nr0 = (uint)(ny0 - nextOy) * 23u + (uint)(nx0 - nextOx);
+        nQuad = float4(sNextT[nr0], sNextT[nr0 + 1u], sNextT[nr0 + 23u], sNextT[nr0 + 24u]);
         float nextY = (nQuad.x * (1.0 - nfx) + nQuad.y * nfx) * (1.0 - nfy) +
                       (nQuad.z * (1.0 - nfx) + nQuad.w * nfx) * nfy;
         if (fadeNext && abs(fadeCfg.z) > 1e-6) nextY = (nextY - fadeCfg.w) / fadeCfg.z;
+#else
+#if !FAST_OBJ_DORMANT
+        float curY = sCurY[(gtid.y + 1u) * 19u + (gtid.x + 1u)];
+#else
+        float curY = gLumaCur.Load(int3(hx, hy, 0));
+#endif
+        float prevY, nextY;
+        SampleBilinFast(gLumaPrev, w, h, invDims, hPrev.x, hPrev.y, fadePrev, fadeCfg.x, fadeCfg.y, prevY, qPrevY, bPrevXY, fPrevXY);
+        SampleBilinFast(gLumaNext, w, h, invDims, hNext.x, hNext.y, fadeNext, fadeCfg.z, fadeCfg.w, nextY, qNextY, bNextXY, fNextXY);
+#endif
+        rY = SamePolarityResidual(curY - prevY, curY - nextY);
+        uY = (rY != 0.0) ? (rY * rsqrt(max(diffVar, 1e-24))) : 0.0;
 
-        float rY = SamePolarityResidual(curY - prevY, curY - nextY);
+#if FAST_OBJ_HAS_CHROMA
+        if (hasChroma)
+        {
+            float curCb = gCbCur.Load(int3(hx, hy, 0));
+            float prevCb, nextCb;
+            SampleBilinFast(gCbPrev, w, h, invDims, hPrev.x, hPrev.y, fadePrev, fadeCfg.x, fadeCfg.y, prevCb, qPrevCb, bPrevCb, fPrevCb);
+            SampleBilinFast(gCbNext, w, h, invDims, hNext.x, hNext.y, fadeNext, fadeCfg.z, fadeCfg.w, nextCb, qNextCb, bNextCb, fNextCb);
+            rCb = SamePolarityResidual(curCb - prevCb, curCb - nextCb);
+            float varCb = hasGrain ? diffVar : baseNoise.y;
+            uCb = (rCb != 0.0) ? (rCb * rsqrt(max(varCb, 1e-24))) : 0.0;
+
+            float curCr = gCrCur.Load(int3(hx, hy, 0));
+            float prevCr, nextCr;
+            SampleBilinFast(gCrPrev, w, h, invDims, hPrev.x, hPrev.y, fadePrev, fadeCfg.x, fadeCfg.y, prevCr, qPrevCr, bPrevCr, fPrevCr);
+            SampleBilinFast(gCrNext, w, h, invDims, hNext.x, hNext.y, fadeNext, fadeCfg.z, fadeCfg.w, nextCr, qNextCr, bNextCr, fNextCr);
+            rCr = SamePolarityResidual(curCr - prevCr, curCr - nextCr);
+            float varCr = hasGrain ? diffVar : baseNoise.z;
+            uCr = (rCr != 0.0) ? (rCr * rsqrt(max(varCr, 1e-24))) : 0.0;
+
+            uChi2 = uY * uY + uCb * uCb + uCr * uCr;
+        }
+#endif
+    }
+)HLSL";
+
+		const char* const kFastObjectGpuHlslPart4 = R"HLSL(
+    uint subX = gtid.x >> 2u;
+    uint subY = gtid.y >> 2u;
+    uint subId = subY * 4u + subX;
+    uint lane = (gtid.y & 3u) * 4u + (gtid.x & 3u);
+    uint subBase = subId * 16u;
+    uint idx = subBase + lane;
+
+    // Speedup #2: Exact mathematical 4x4 cell upper-bound gate before BilinearCurvFast & SobelGrad!
+    // Since sigma >= sqrt(diffVar), |z| <= |u| and |sum(z)| <= max(sum(max(u,0)), sum(max(-u,0))).
+    // Skipping curvature + Sobel whenever no cell in the 16x8 group can trigger is 100% bit-exact.
+    bool needExact = true;
+    if (fastSparseOut)
+    {
+        sMaxZ[idx] = abs(uY);
+        sPosY[idx] = max(uY, 0.0);
+        sNegY[idx] = max(-uY, 0.0);
+#if FAST_OBJ_HAS_CHROMA
+        sMaxChi2[idx] = uChi2;
+        sPosCb[idx] = max(uCb, 0.0);
+        sNegCb[idx] = max(-uCb, 0.0);
+        sPosCr[idx] = max(uCr, 0.0);
+        sNegCr[idx] = max(-uCr, 0.0);
+#endif
+        sActGrow[idx] = isValid;
+        if (tid == 0u) sGroupAnyPass = 0u;
+        GroupMemoryBarrierWithGroupSync();
+
+        if (lane == 0u)
+        {
+            float cMaxU = sMaxZ[subBase];
+            float posY = sPosY[subBase], negY = sNegY[subBase];
+#if FAST_OBJ_HAS_CHROMA
+            float cMaxChi2 = sMaxChi2[subBase];
+            float posCb = sPosCb[subBase], negCb = sNegCb[subBase];
+            float posCr = sPosCr[subBase], negCr = sNegCr[subBase];
+#endif
+            uint act = sActGrow[subBase];
+            [unroll]
+            for (uint k = 1u; k < 16u; ++k)
+            {
+                uint o = subBase + k;
+                cMaxU = max(cMaxU, sMaxZ[o]);
+                posY += sPosY[o];
+                negY += sNegY[o];
+#if FAST_OBJ_HAS_CHROMA
+                cMaxChi2 = max(cMaxChi2, sMaxChi2[o]);
+                posCb += sPosCb[o]; negCb += sNegCb[o];
+                posCr += sPosCr[o]; negCr += sNegCr[o];
+#endif
+                act += sActGrow[o];
+            }
+            bool passCell = false;
+            if (act > 0u)
+            {
+                float invSqrtN = rsqrt((float)act);
+                float maxAbsZCell = max(posY, negY) * invSqrtN;
+                passCell = (cMaxU >= threshCfg.x) || (maxAbsZCell >= threshCfg.x);
+#if FAST_OBJ_HAS_CHROMA
+                if (!passCell && hasChroma)
+                {
+                    float maxCbCell = max(posCb, negCb) * invSqrtN;
+                    float maxCrCell = max(posCr, negCr) * invSqrtN;
+                    float maxChi2Cell = maxAbsZCell * maxAbsZCell + maxCbCell * maxCbCell + maxCrCell * maxCrCell;
+                    passCell = (cMaxChi2 >= threshCfg.z) || (maxChi2Cell >= threshCfg.z);
+                }
+#endif
+            }
+            sCellPass[subId] = passCell ? 1u : 0u;
+            if (passCell) InterlockedOr(sGroupAnyPass, 1u);
+        }
+        GroupMemoryBarrierWithGroupSync();
+        if (sGroupAnyPass == 0u)
+            groupActive = false;
+        needExact = (sCellPass[subId] != 0u);
+    }
+
+    if (groupActive)
+    {
+    // Stage 2: Exact curvature + Sobel normalization ONLY for candidate cells (or when zMap/cellGrid requested).
+    float zY = 0.0;
+    float absZY = 0.0;
+#if FAST_OBJ_HAS_CHROMA
+    float zCb = 0.0;
+    float zCr = 0.0;
+    float chi2Val = 0.0;
+#endif
+    uint isGrow = 0u;
+
+    if (ok && needExact)
+    {
         if (rY != 0.0)
         {
-            if (hasGrain)
-            {
-                int gx = clamp((int)floor(sx * regCfg.y), 0, (int)grids.x - 1);
-                int gy = clamp((int)floor(sy * regCfg.y), 0, (int)grids.y - 1);
-                float gv = max(0.0, gGrainVar.Load(int3(gx, gy, 0)));
-                diffVar = 2.0 * gv + noiseCfg.w;
-                grainLoaded = true;
-            }
+#if FAST_OBJ_TILE_FAST
             float bPrevY = CurvFromTilePrev(pr0, pQuad, pfx, pfy, fadePrev, fadeCfg.x);
             float bilinY = 0.0;
             if (bPrevY > 0.0)
@@ -495,6 +836,8 @@ void CSResidualAndReduce(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupI
             float regY = 0.0;
             if (regCfg.x > 0.0)
             {
+                uint lx = gtid.x + 1u;
+                uint ly = gtid.y + 1u;
                 uint r0 = (ly - 1u) * 19u;
                 uint r1 = ly * 19u;
                 uint r2 = (ly + 1u) * 19u;
@@ -506,35 +849,7 @@ void CSResidualAndReduce(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupI
                              (sCurT[r2 + lx + 1u] - sCurT[r0 + lx + 1u])) * 0.125;
                 regY = regCfg.x * sqrt(gxv * gxv + gyv * gyv);
             }
-            float sigmaY = sqrt(max(diffVar + regY * regY + bilinY * bilinY, 1e-24));
-            zY = rY / sigmaY;
-            absZY = abs(zY);
-            isGrow = (absZY >= threshCfg.y) ? 1u : 0u;
-        }
 #else
-#if !FAST_OBJ_DORMANT
-        float curY = sCurY[(gtid.y + 1u) * 19u + (gtid.x + 1u)];
-#else
-        float curY = gLumaCur.Load(int3(hx, hy, 0));
-#endif
-        float prevY, nextY;
-        float4 qPrevY, qNextY;
-        int2 bPrevXY, bNextXY;
-        float2 fPrevXY, fNextXY;
-        SampleBilinFast(gLumaPrev, w, h, invDims, hPrev.x, hPrev.y, fadePrev, fadeCfg.x, fadeCfg.y, prevY, qPrevY, bPrevXY, fPrevXY);
-        SampleBilinFast(gLumaNext, w, h, invDims, hNext.x, hNext.y, fadeNext, fadeCfg.z, fadeCfg.w, nextY, qNextY, bNextXY, fNextXY);
-
-        float rY = SamePolarityResidual(curY - prevY, curY - nextY);
-        if (rY != 0.0)
-        {
-            if (hasGrain)
-            {
-                int gx = clamp((int)floor(sx * regCfg.y), 0, (int)grids.x - 1);
-                int gy = clamp((int)floor(sy * regCfg.y), 0, (int)grids.y - 1);
-                float gv = max(0.0, gGrainVar.Load(int3(gx, gy, 0)));
-                diffVar = 2.0 * gv + noiseCfg.w;
-                grainLoaded = true;
-            }
             float bPrevY = BilinearCurvFast(gLumaPrev, w, h, invDims, qPrevY, bPrevXY, fPrevXY, fadePrev, fadeCfg.x);
             float bilinY = 0.0;
             if (bPrevY > 0.0)
@@ -562,37 +877,18 @@ void CSResidualAndReduce(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupI
                 regY = regCfg.x * SobelGradDirect(gLumaCur, w, h, hx, hy);
 #endif
             }
+#endif
             float sigmaY = sqrt(max(diffVar + regY * regY + bilinY * bilinY, 1e-24));
             zY = rY / sigmaY;
             absZY = abs(zY);
             isGrow = (absZY >= threshCfg.y) ? 1u : 0u;
         }
-#endif
 
 #if FAST_OBJ_HAS_CHROMA
-)HLSL";
-
-		const char* const kFastObjectGpuHlslPart3 = R"HLSL(
         if (hasChroma)
         {
-            float curCb = gCbCur.Load(int3(hx, hy, 0));
-            float prevCb, nextCb;
-            float4 qPrevCb, qNextCb;
-            int2 bPrevCb, bNextCb;
-            float2 fPrevCb, fNextCb;
-            SampleBilinFast(gCbPrev, w, h, invDims, hPrev.x, hPrev.y, fadePrev, fadeCfg.x, fadeCfg.y, prevCb, qPrevCb, bPrevCb, fPrevCb);
-            SampleBilinFast(gCbNext, w, h, invDims, hNext.x, hNext.y, fadeNext, fadeCfg.z, fadeCfg.w, nextCb, qNextCb, bNextCb, fNextCb);
-            float rCb = SamePolarityResidual(curCb - prevCb, curCb - nextCb);
             if (rCb != 0.0)
             {
-                if (hasGrain && !grainLoaded)
-                {
-                    int gx = clamp((int)floor(sx * regCfg.y), 0, (int)grids.x - 1);
-                    int gy = clamp((int)floor(sy * regCfg.y), 0, (int)grids.y - 1);
-                    float gv = max(0.0, gGrainVar.Load(int3(gx, gy, 0)));
-                    diffVar = 2.0 * gv + noiseCfg.w;
-                    grainLoaded = true;
-                }
                 float bPrevC = BilinearCurvFast(gCbPrev, w, h, invDims, qPrevCb, bPrevCb, fPrevCb, fadePrev, fadeCfg.x);
                 float bilinCb = 0.0;
                 if (bPrevC > 0.0)
@@ -602,29 +898,12 @@ void CSResidualAndReduce(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupI
                 }
                 float gradCb = (regCfg.x > 0.0) ? SobelGradDirect(gCbCur, w, h, hx, hy) : 0.0;
                 float regCb = regCfg.x * gradCb;
-                float varCb = hasGrain ? diffVar : noiseCfg.y;
+                float varCb = hasGrain ? diffVar : baseNoise.y;
                 float sigmaCb = sqrt(max(varCb + regCb * regCb + bilinCb * bilinCb, 1e-24));
                 zCb = rCb / sigmaCb;
             }
-
-            float curCr = gCrCur.Load(int3(hx, hy, 0));
-            float prevCr, nextCr;
-            float4 qPrevCr, qNextCr;
-            int2 bPrevCr, bNextCr;
-            float2 fPrevCr, fNextCr;
-            SampleBilinFast(gCrPrev, w, h, invDims, hPrev.x, hPrev.y, fadePrev, fadeCfg.x, fadeCfg.y, prevCr, qPrevCr, bPrevCr, fPrevCr);
-            SampleBilinFast(gCrNext, w, h, invDims, hNext.x, hNext.y, fadeNext, fadeCfg.z, fadeCfg.w, nextCr, qNextCr, bNextCr, fNextCr);
-            float rCr = SamePolarityResidual(curCr - prevCr, curCr - nextCr);
             if (rCr != 0.0)
             {
-                if (hasGrain && !grainLoaded)
-                {
-                    int gx = clamp((int)floor(sx * regCfg.y), 0, (int)grids.x - 1);
-                    int gy = clamp((int)floor(sy * regCfg.y), 0, (int)grids.y - 1);
-                    float gv = max(0.0, gGrainVar.Load(int3(gx, gy, 0)));
-                    diffVar = 2.0 * gv + noiseCfg.w;
-                    grainLoaded = true;
-                }
                 float bPrevR = BilinearCurvFast(gCrPrev, w, h, invDims, qPrevCr, bPrevCr, fPrevCr, fadePrev, fadeCfg.x);
                 float bilinCr = 0.0;
                 if (bPrevR > 0.0)
@@ -634,11 +913,10 @@ void CSResidualAndReduce(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupI
                 }
                 float gradCr = (regCfg.x > 0.0) ? SobelGradDirect(gCrCur, w, h, hx, hy) : 0.0;
                 float regCr = regCfg.x * gradCr;
-                float varCr = hasGrain ? diffVar : noiseCfg.z;
+                float varCr = hasGrain ? diffVar : baseNoise.z;
                 float sigmaCr = sqrt(max(varCr + regCr * regCr + bilinCr * bilinCr, 1e-24));
                 zCr = rCr / sigmaCr;
             }
-
             chi2Val = zY * zY + zCb * zCb + zCr * zCr;
             if (chi2Val >= threshCfg.w)
                 isGrow = 1u;
@@ -653,56 +931,44 @@ void CSResidualAndReduce(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupI
     }
 #endif
 
-    // 4x4 sub-tile 2-step reduction (4x2 = 8 tiles per 16x8 threadgroup).
-    uint subX = gtid.x >> 2u;
-    uint subY = gtid.y >> 2u;
-    uint subId = subY * 4u + subX;
-    uint lane = (gtid.y & 3u) * 4u + (gtid.x & 3u);
-    uint subBase = subId * 16u;
-    uint idx = subBase + lane;
+    // Speedup #3b: Single-barrier 4x4 cell reduction + optional cellGrid write + fused compaction.
     sMaxZ[idx] = absZY;
-    sSumZ[idx] = zY;
+    sPosY[idx] = zY;
 #if FAST_OBJ_HAS_CHROMA
     sMaxChi2[idx] = chi2Val;
-    sSumZCb[idx] = zCb;
-    sSumZCr[idx] = zCr;
+    sPosCb[idx] = zCb;
+    sPosCr[idx] = zCr;
 #endif
     sActGrow[idx] = (isValid << 16) | isGrow;
     GroupMemoryBarrierWithGroupSync();
 
-    // Step 1: 4 threads per cell reduce 4 columns into lanes [0..3].
-    if (lane < 4u)
-    {
-        uint b0 = idx;
-        uint b1 = idx + 4u;
-        uint b2 = idx + 8u;
-        uint b3 = idx + 12u;
-        sMaxZ[b0] = max(max(sMaxZ[b0], sMaxZ[b1]), max(sMaxZ[b2], sMaxZ[b3]));
-        sSumZ[b0] = (sSumZ[b0] + sSumZ[b1]) + (sSumZ[b2] + sSumZ[b3]);
-#if FAST_OBJ_HAS_CHROMA
-        sMaxChi2[b0] = max(max(sMaxChi2[b0], sMaxChi2[b1]), max(sMaxChi2[b2], sMaxChi2[b3]));
-        sSumZCb[b0] = (sSumZCb[b0] + sSumZCb[b1]) + (sSumZCb[b2] + sSumZCb[b3]);
-        sSumZCr[b0] = (sSumZCr[b0] + sSumZCr[b1]) + (sSumZCr[b2] + sSumZCr[b3]);
-#endif
-        sActGrow[b0] = (sActGrow[b0] + sActGrow[b1]) + (sActGrow[b2] + sActGrow[b3]);
-    }
-    GroupMemoryBarrierWithGroupSync();
-
-    // Step 2: lane 0 reduces lanes [0..3] and writes cell + fused InterlockedAdd compaction.
-    if (lane == 0u)
+    if (lane == 0u && needExact)
     {
         uint outCellX = gid.x * 4u + subX;
         uint outCellY = gid.y * 2u + subY;
         if (outCellX < limits.z && outCellY < limits.w)
         {
-            float cellMaxZ = max(max(sMaxZ[subBase], sMaxZ[subBase + 1u]), max(sMaxZ[subBase + 2u], sMaxZ[subBase + 3u]));
-            float sumZ = (sSumZ[subBase] + sSumZ[subBase + 1u]) + (sSumZ[subBase + 2u] + sSumZ[subBase + 3u]);
+            float cellMaxZ = sMaxZ[subBase];
+            float sumZ = sPosY[subBase];
 #if FAST_OBJ_HAS_CHROMA
-            float cellMaxChi2 = max(max(sMaxChi2[subBase], sMaxChi2[subBase + 1u]), max(sMaxChi2[subBase + 2u], sMaxChi2[subBase + 3u]));
-            float sumZCb = (sSumZCb[subBase] + sSumZCb[subBase + 1u]) + (sSumZCb[subBase + 2u] + sSumZCb[subBase + 3u]);
-            float sumZCr = (sSumZCr[subBase] + sSumZCr[subBase + 1u]) + (sSumZCr[subBase + 2u] + sSumZCr[subBase + 3u]);
+            float cellMaxChi2 = sMaxChi2[subBase];
+            float sumZCb = sPosCb[subBase];
+            float sumZCr = sPosCr[subBase];
 #endif
-            uint ag = (sActGrow[subBase] + sActGrow[subBase + 1u]) + (sActGrow[subBase + 2u] + sActGrow[subBase + 3u]);
+            uint ag = sActGrow[subBase];
+            [unroll]
+            for (uint k = 1u; k < 16u; ++k)
+            {
+                uint o = subBase + k;
+                cellMaxZ = max(cellMaxZ, sMaxZ[o]);
+                sumZ += sPosY[o];
+#if FAST_OBJ_HAS_CHROMA
+                cellMaxChi2 = max(cellMaxChi2, sMaxChi2[o]);
+                sumZCb += sPosCb[o];
+                sumZCr += sPosCr[o];
+#endif
+                ag += sActGrow[o];
+            }
             uint act = ag >> 16;
             uint grow = ag & 0xFFFFu;
 
@@ -739,9 +1005,11 @@ void CSResidualAndReduce(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupI
 #else
             float outMaxZ = cellMaxZ;
 #endif
-            gCellGridUav[int2(outCellX, outCellY)] = float4(outMaxZ, zCell, (float)grow, (float)cellFlags);
+            if (writeCellGrid)
+            {
+                gCellGridUav[int2(outCellX, outCellY)] = float4(outMaxZ, zCell, (float)grow, (float)cellFlags);
+            }
 
-            // Fused bounded InterlockedAdd active-cell compaction (eliminates Pass 2 full-grid readback).
             if ((cellFlags & 1u) != 0u)
             {
                 uint slot = 0u;
@@ -758,6 +1026,9 @@ void CSResidualAndReduce(uint3 dtid : SV_DispatchThreadID, uint3 gid : SV_GroupI
             }
         }
     }
+    } // if (groupActive) Stage 2
+    } // if (groupActive) Stage 1
+    } // if (groupActive) picRect
 }
 
 // Pass 2: Compact active cells from coarse 4x4 cell grid via InterlockedAdd into bounded <= 4 KB buffer.
@@ -926,6 +1197,7 @@ void CSCompactActiveCells(uint3 dtid : SV_DispatchThreadID)
 		std::string s(kFastObjectGpuHlslPart1);
 		s += kFastObjectGpuHlslPart2;
 		s += kFastObjectGpuHlslPart3;
+		s += kFastObjectGpuHlslPart4;
 		return s;
 	}
 
@@ -953,14 +1225,19 @@ void CSCompactActiveCells(uint3 dtid : SV_DispatchThreadID)
 		const double maxMinorDiam = maxMinorAxisFrac * picH;
 		const double maxLargeObjArea = maxMinorDiam * maxMinorDiam;
 
-		// 1. Mark bar/text excluded, P8 Overlay, and CE-WATER >= 0.5 blocks.
+		// 1. Mark bar/text excluded, P8 Overlay, CE-WATER >= 0.5, and non-Camera blocks (for GPU MAD).
 		for (size_t i = 0; i < gcount; ++i)
 		{
 			uint32_t bits = 0u;
 			if (in.blockExcluded && in.blockExcluded[i] != 0)
 				bits |= GpuGuardBits::kExcluded;
-			if (in.blockLabels && in.blockLabels[i] == static_cast<uint8_t>(CameraModel::Label::Overlay))
-				bits |= (GpuGuardBits::kExcluded | GpuGuardBits::kOverlay);
+			if (in.blockLabels)
+			{
+				if (in.blockLabels[i] == static_cast<uint8_t>(CameraModel::Label::Overlay))
+					bits |= (GpuGuardBits::kExcluded | GpuGuardBits::kOverlay);
+				if (in.blockLabels[i] != static_cast<uint8_t>(CameraModel::Label::Camera))
+					bits |= GpuGuardBits::kNonCamera;
+			}
 			if (in.waterProb && static_cast<double>(in.waterProb[i]) >= kWaterProbThreshold)
 				bits |= (GpuGuardBits::kExcluded | GpuGuardBits::kWater);
 			outGuardGrid[i] = bits;
@@ -1124,10 +1401,16 @@ void CSCompactActiveCells(uint3 dtid : SV_DispatchThreadID)
 			baseDiffVarLuma = 2.0 * in.uniformGrainSigma * in.uniformGrainSigma + twoSigmaQ2;
 		else if (gpuRes.noiseSigmaEst > 0.0f)
 			baseDiffVarLuma = std::fmax(static_cast<double>(gpuRes.noiseSigmaEst) * static_cast<double>(gpuRes.noiseSigmaEst), twoSigmaQ2);
-		const double baseDiffVarCb = (in.uniformChromaGrainSigma >= 0.0)
-			? (2.0 * in.uniformChromaGrainSigma * in.uniformChromaGrainSigma + twoSigmaQ2)
-			: baseDiffVarLuma;
-		const double baseDiffVarCr = baseDiffVarCb;
+		double baseDiffVarCb = baseDiffVarLuma;
+		if (in.uniformChromaGrainSigma >= 0.0)
+			baseDiffVarCb = 2.0 * in.uniformChromaGrainSigma * in.uniformChromaGrainSigma + twoSigmaQ2;
+		else if (gpuRes.noiseSigmaCbEst > 0.0f)
+			baseDiffVarCb = std::fmax(static_cast<double>(gpuRes.noiseSigmaCbEst) * static_cast<double>(gpuRes.noiseSigmaCbEst), twoSigmaQ2);
+		double baseDiffVarCr = baseDiffVarCb;
+		if (in.uniformChromaGrainSigma >= 0.0)
+			baseDiffVarCr = 2.0 * in.uniformChromaGrainSigma * in.uniformChromaGrainSigma + twoSigmaQ2;
+		else if (gpuRes.noiseSigmaCrEst > 0.0f)
+			baseDiffVarCr = std::fmax(static_cast<double>(gpuRes.noiseSigmaCrEst) * static_cast<double>(gpuRes.noiseSigmaCrEst), twoSigmaQ2);
 
 		const double seedSigma = cfg.seedSigma;
 		const double growSigma = cfg.growSigma;
@@ -1150,15 +1433,16 @@ void CSCompactActiveCells(uint3 dtid : SV_DispatchThreadID)
 		const int cellH = (h + kCellSizeHalfPx - 1) / kCellSizeHalfPx;
 		const size_t cellCountTotal = static_cast<size_t>(cellW) * static_cast<size_t>(cellH);
 
-		// Ensure workspace storage (touched ONLY on sparse halo cells — zero full-frame scan!).
+		// Ensure workspace storage & one-time sanitization if workspace was dirtied by CPU DetectFastObjectBlobs (HIGH-3).
 		if (ws.sampleMask.size() < n)
 		{
 			ws.signedResY.resize(n, 0.0f);
 			ws.zMapY.resize(n, 0.0f);
 			ws.sigmaDiffY.resize(n, 0.0f);
 			ws.bgLuma.resize(n, 0.0f);
-			ws.sampleMask.resize(n, 0);
-			ws.visited.resize(n, 0);
+			ws.sampleMask.assign(n, 0);
+			ws.visited.assign(n, 0);
+			ws.gpuSparseClean = false;
 		}
 		if (hasChroma && ws.chi2Map.size() < n)
 		{
@@ -1167,74 +1451,23 @@ void CSCompactActiveCells(uint3 dtid : SV_DispatchThreadID)
 			ws.chi2Map.resize(n, 0.0f);
 		}
 		if (ws.cells.size() < cellCountTotal)
+		{
 			ws.cells.resize(cellCountTotal);
-
-		// Collect unique sparse cells covering each GPU active cell + 1-cell border halo for BFS connectivity.
-		ws.activeCellIndices.clear();
-		std::vector<uint32_t> sparseCells;
-		sparseCells.reserve(static_cast<size_t>(gpuRes.cellCount) * 9u);
-		const uint32_t cellScale = gpuRes.dormantCoarse ? 2u : 1u;
-
-		for (uint32_t i = 0; i < gpuRes.cellCount; ++i)
-		{
-			const GpuActiveCell& gc = gpuRes.cells[i];
-			const int baseCx = static_cast<int>(gc.CellX() * cellScale);
-			const int baseCy = static_cast<int>(gc.CellY() * cellScale);
-			for (int dy = 0; dy < static_cast<int>(cellScale); ++dy)
-			{
-				for (int dx = 0; dx < static_cast<int>(cellScale); ++dx)
-				{
-					const int acx = baseCx + dx;
-					const int acy = baseCy + dy;
-					if (acx < 0 || acx >= cellW || acy < 0 || acy >= cellH)
-						continue;
-					const uint32_t acIdx = static_cast<uint32_t>(acy * cellW + acx);
-					ws.activeCellIndices.push_back(acIdx);
-					for (int oy = -1; oy <= 1; ++oy)
-					{
-						const int ny = acy + oy;
-						if (ny < 0 || ny >= cellH) continue;
-						for (int ox = -1; ox <= 1; ++ox)
-						{
-							const int nx = acx + ox;
-							if (nx < 0 || nx >= cellW) continue;
-							sparseCells.push_back(static_cast<uint32_t>(ny * cellW + nx));
-						}
-					}
-				}
-			}
+			ws.gpuSparseClean = false;
 		}
-
-		std::sort(sparseCells.begin(), sparseCells.end());
-		sparseCells.erase(std::unique(sparseCells.begin(), sparseCells.end()), sparseCells.end());
-
-		// Clear sparse cell metadata before populating active-cell descriptors (zero stale flags across frames).
-		for (uint32_t sc : sparseCells)
+		if (ws.cellPopulated.size() < cellCountTotal)
 		{
-			ws.cells[sc].flags = 0;
-			ws.cells[sc].maxAbsZ = 0.0f;
-			ws.cells[sc].zCell = 0.0f;
+			ws.cellPopulated.assign(cellCountTotal, 0);
+			ws.gpuSparseClean = false;
 		}
-		for (uint32_t i = 0; i < gpuRes.cellCount; ++i)
+		if (!ws.gpuSparseClean)
 		{
-			const GpuActiveCell& gc = gpuRes.cells[i];
-			const int baseCx = static_cast<int>(gc.CellX() * cellScale);
-			const int baseCy = static_cast<int>(gc.CellY() * cellScale);
-			for (int dy = 0; dy < static_cast<int>(cellScale); ++dy)
-			{
-				for (int dx = 0; dx < static_cast<int>(cellScale); ++dx)
-				{
-					const int acx = baseCx + dx;
-					const int acy = baseCy + dy;
-					if (acx < 0 || acx >= cellW || acy < 0 || acy >= cellH)
-						continue;
-					const uint32_t acIdx = static_cast<uint32_t>(acy * cellW + acx);
-					ws.cells[acIdx].flags = static_cast<uint8_t>(gc.Flags() & 0xFFu);
-					ws.cells[acIdx].maxAbsZ = gc.maxAbsZ;
-					ws.cells[acIdx].zCell = gc.zCell;
-				}
-			}
+			std::fill(ws.sampleMask.begin(), ws.sampleMask.begin() + static_cast<ptrdiff_t>(n), static_cast<uint8_t>(0));
+			std::fill(ws.visited.begin(), ws.visited.begin() + static_cast<ptrdiff_t>(n), static_cast<uint8_t>(0));
+			std::fill(ws.cellPopulated.begin(), ws.cellPopulated.begin() + static_cast<ptrdiff_t>(cellCountTotal), static_cast<uint8_t>(0));
+			ws.gpuSparseClean = true;
 		}
+		ws.populatedCells.clear();
 
 		constexpr uint8_t kValid = 1u << 0;
 		constexpr uint8_t kSeed = 1u << 1;
@@ -1244,15 +1477,29 @@ void CSCompactActiveCells(uint3 dtid : SV_DispatchThreadID)
 		const double maxValidX = static_cast<double>(w - 1);
 		const double maxValidY = static_cast<double>(h - 1);
 
-		// Populate sparse residual & mask values ONLY inside the <= 9 * 256 halo cells!
-		for (uint32_t cidx : sparseCells)
+		// Lazy on-demand 4x4 cell populator (HIGH-3): computes exact pixel residuals AND exact luma-only
+		// ws.cells[cidx].maxAbsZ / zCell / flags for any active cell or arbitrarily distant BFS halo cell!
+		auto populateCell = [&](uint32_t cidx)
 		{
+			if (ws.cellPopulated[cidx] != 0)
+				return;
+			ws.cellPopulated[cidx] = 1;
+			ws.populatedCells.push_back(cidx);
+
 			const int cy = static_cast<int>(cidx) / cellW;
 			const int cx = static_cast<int>(cidx) % cellW;
 			const int y0 = cy * kCellSizeHalfPx;
 			const int y1 = std::min(y0 + kCellSizeHalfPx, h);
 			const int x0 = cx * kCellSizeHalfPx;
 			const int x1 = std::min(x0 + kCellSizeHalfPx, w);
+
+			double cellMaxAbsZY = 0.0;
+			double cellSumZY = 0.0;
+			double cellMaxChi2 = 0.0;
+			double cellSumZCb = 0.0;
+			double cellSumZCr = 0.0;
+			uint16_t actCnt = 0;
+			uint16_t growCnt = 0;
 
 			for (int hy = y0; hy < y1; ++hy)
 			{
@@ -1323,6 +1570,10 @@ void CSCompactActiveCells(uint3 dtid : SV_DispatchThreadID)
 					ws.sigmaDiffY[idx] = static_cast<float>(sigmaY);
 					ws.bgLuma[idx] = static_cast<float>(0.5 * (prevY + nextY));
 
+					if (absZY > cellMaxAbsZY) cellMaxAbsZY = absZY;
+					cellSumZY += zY;
+					++actCnt;
+
 					bool isSeed = (absZY >= seedSigma);
 					bool isGrow = (absZY >= growSigma);
 					bool isStreakPx = (absZY >= streakSampleSigma);
@@ -1355,11 +1606,15 @@ void CSCompactActiveCells(uint3 dtid : SV_DispatchThreadID)
 						ws.signedResCb[idx] = static_cast<float>(rCb);
 						ws.signedResCr[idx] = static_cast<float>(rCr);
 						ws.chi2Map[idx] = static_cast<float>(chi2);
+						if (chi2 > cellMaxChi2) cellMaxChi2 = chi2;
+						cellSumZCb += zCb;
+						cellSumZCr += zCr;
 						if (chi2 >= seedChi2Dof3) isSeed = true;
 						if (chi2 >= growChi2Dof3) isGrow = true;
 						if (chi2 >= streakChi2Dof3) isStreakPx = true;
 					}
 
+					if (isGrow) ++growCnt;
 					uint8_t mask = static_cast<uint8_t>(sflags | kValid);
 					if (isSeed) mask |= kSeed;
 					if (isGrow) mask |= kGrow;
@@ -1367,9 +1622,62 @@ void CSCompactActiveCells(uint3 dtid : SV_DispatchThreadID)
 					ws.sampleMask[idx] = mask;
 				}
 			}
+
+			CellDescriptor desc{};
+			desc.maxAbsZ = static_cast<float>(cellMaxAbsZY);
+			desc.growCount = growCnt;
+			desc.activeCount = actCnt;
+			if (actCnt > 0)
+			{
+				const double invSqrtN = 1.0 / std::sqrt(static_cast<double>(actCnt));
+				const double zCell = cellSumZY * invSqrtN;
+				desc.zCell = static_cast<float>(zCell);
+				double cellChi2 = zCell * zCell;
+				if (hasChroma)
+				{
+					const double zCellCb = cellSumZCb * invSqrtN;
+					const double zCellCr = cellSumZCr * invSqrtN;
+					cellChi2 += zCellCb * zCellCb + zCellCr * zCellCr;
+				}
+				desc.maxChi2 = static_cast<float>(cellMaxChi2);
+				desc.cellChi2 = static_cast<float>(cellChi2);
+				const bool peakTrig = (cellMaxAbsZY >= seedSigma) || (hasChroma && cellMaxChi2 >= seedChi2Dof3);
+				const bool streakTrig = (std::fabs(zCell) >= seedSigma) || (hasChroma && cellChi2 >= seedChi2Dof3);
+				desc.flags = 4u;
+				if (peakTrig || streakTrig)
+				{
+					desc.flags |= 1u;
+					if (streakTrig)
+						desc.flags |= 2u;
+				}
+			}
+			ws.cells[cidx] = desc;
+		};
+
+		// Populate active GPU cells (and dedupe activeCellIndices in raster order).
+		ws.activeCellIndices.clear();
+		const uint32_t cellScale = gpuRes.dormantCoarse ? 2u : 1u;
+		for (uint32_t i = 0; i < gpuRes.cellCount; ++i)
+		{
+			const GpuActiveCell& gc = gpuRes.cells[i];
+			const int baseCx = static_cast<int>(gc.CellX() * cellScale);
+			const int baseCy = static_cast<int>(gc.CellY() * cellScale);
+			for (int dy = 0; dy < static_cast<int>(cellScale); ++dy)
+			{
+				for (int dx = 0; dx < static_cast<int>(cellScale); ++dx)
+				{
+					const int acx = baseCx + dx;
+					const int acy = baseCy + dy;
+					if (acx < 0 || acx >= cellW || acy < 0 || acy >= cellH)
+						continue;
+					const uint32_t acIdx = static_cast<uint32_t>(acy * cellW + acx);
+					ws.activeCellIndices.push_back(acIdx);
+					populateCell(acIdx);
+				}
+			}
 		}
 
-		// Sparse 8-connected hysteresis BFS & exact second-moment deconvolution (matching FastObjectResidualRef.cpp).
+		// Sparse 8-connected hysteresis BFS with lazy on-demand halo cell population (zero >1-cell truncation!).
 		ws.candidateScratch.clear();
 		const int dx8[8] = { -1, 0, 1, -1, 1, -1, 0, 1 };
 		const int dy8[8] = { -1, -1, -1, 0, 0, 1, 1, 1 };
@@ -1413,12 +1721,12 @@ void CSCompactActiveCells(uint3 dtid : SV_DispatchThreadID)
 							const int nx = px + dx8[k];
 							const int ny = py + dy8[k];
 							if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+							const uint32_t ncidx = static_cast<uint32_t>((ny / kCellSizeHalfPx) * cellW + (nx / kCellSizeHalfPx));
+							populateCell(ncidx);
 							const size_t nidx = static_cast<size_t>(ny) * static_cast<size_t>(w) + static_cast<size_t>(nx);
 							if (ws.visited[nidx] != 0) continue;
 							const uint8_t nm = ws.sampleMask[nidx];
 							if ((nm & kValid) == 0) continue;
-							const size_t ncidx = static_cast<size_t>(ny / kCellSizeHalfPx) * static_cast<size_t>(cellW) +
-								static_cast<size_t>(nx / kCellSizeHalfPx);
 							const bool nInStreak = (ws.cells[ncidx].flags & 2u) != 0u;
 							bool accept = ((nm & kGrow) != 0);
 							if (!accept && nInStreak && ((nm & kStreak) != 0))
@@ -1572,10 +1880,11 @@ void CSCompactActiveCells(uint3 dtid : SV_DispatchThreadID)
 			}
 		}
 
-		// Clean sparse mask/cell flags so next frame starts strictly zeroed with O(sparseCells) cost!
-		for (uint32_t cidx : sparseCells)
+		// Clean ALL populated sparse cells (including dynamically expanded BFS halo cells) in O(populated)!
+		for (uint32_t cidx : ws.populatedCells)
 		{
-			ws.cells[cidx].flags = 0;
+			ws.cellPopulated[cidx] = 0;
+			ws.cells[cidx] = CellDescriptor{};
 			const int cy = static_cast<int>(cidx) / cellW;
 			const int cx = static_cast<int>(cidx) % cellW;
 			const int y0 = cy * kCellSizeHalfPx;
@@ -1592,6 +1901,7 @@ void CSCompactActiveCells(uint3 dtid : SV_DispatchThreadID)
 				}
 			}
 		}
+		ws.populatedCells.clear();
 
 		std::sort(ws.candidateScratch.begin(), ws.candidateScratch.end(), CompareBlobBySnr);
 		const uint32_t keep = static_cast<uint32_t>(std::min<size_t>(ws.candidateScratch.size(), kMaxBlobs));
@@ -1602,7 +1912,7 @@ void CSCompactActiveCells(uint3 dtid : SV_DispatchThreadID)
 		return true;
 	}
 
-	size_t FastObjectGpu::EstimatedVramBytes(int width, int height, bool writeZMap, bool enabled)
+	size_t FastObjectGpu::EstimatedVramBytes(int width, int height, bool writeZMap, bool enabled, bool writeCellGrid)
 	{
 		if (!enabled || width <= 0 || height <= 0)
 			return 0;
@@ -1611,11 +1921,12 @@ void CSCompactActiveCells(uint3 dtid : SV_DispatchThreadID)
 		const size_t cellW = (w + static_cast<size_t>(kCellSizeHalfPx) - 1u) / static_cast<size_t>(kCellSizeHalfPx);
 		const size_t cellH = (h + static_cast<size_t>(kCellSizeHalfPx) - 1u) / static_cast<size_t>(kCellSizeHalfPx);
 		const size_t zMapBytes = writeZMap ? (w * h * 4u) : 0u;           // DXGI_FORMAT_R32_FLOAT
-		const size_t cellGridBytes = cellW * cellH * 16u;                 // DXGI_FORMAT_R32G32B32A32_FLOAT
-		const size_t compactBytes = static_cast<size_t>(kMaxActiveCells + 1u) * sizeof(GpuActiveCell); // 4,112 B
+		const size_t cellGridBytes = writeCellGrid ? (cellW * cellH * 16u) : 0u; // DXGI_FORMAT_R32G32B32A32_FLOAT
+		const size_t compactBytes = static_cast<size_t>(kMaxActiveCells + 2u) * sizeof(GpuActiveCell); // 4,128 B
 		const size_t stagingBytes = compactBytes * static_cast<size_t>(kStagingRingSlots);
+		const size_t noiseBufBytes = 16u;                                 // 1x float4 MAD noise buffer
 		const size_t cbBytes = sizeof(GpuParamsCB);
-		return zMapBytes + cellGridBytes + compactBytes + stagingBytes + cbBytes;
+		return zMapBytes + cellGridBytes + compactBytes + stagingBytes + noiseBufBytes + cbBytes;
 	}
 
 #ifdef _WIN32
@@ -1641,19 +1952,26 @@ void CSCompactActiveCells(uint3 dtid : SV_DispatchThreadID)
 			bool causalMode = false;
 			bool dormantCoarse = false;
 			float noiseSigmaEst = 0.0f;
+			float noiseSigmaCbEst = 0.0f;
+			float noiseSigmaCrEst = 0.0f;
 		};
 
 		ComPtr<ID3D11Device> device;
 		ComPtr<ID3D11ComputeShader> csClear;
+		ComPtr<ID3D11ComputeShader> csComputeMad;
 		ComPtr<ID3D11ComputeShader> csResidualLuma;
 		ComPtr<ID3D11ComputeShader> csResidualLumaTile;
 		ComPtr<ID3D11ComputeShader> csResidualChroma;
 		ComPtr<ID3D11ComputeShader> csResidualDormant;
+		ComPtr<ID3D11ComputeShader> csResidualDormantChroma;
 		ComPtr<ID3D11ComputeShader> csCompact;
 		ComPtr<ID3D11SamplerState> pointClampSampler;
 		ComPtr<ID3D11Buffer> cbParams;
 		ComPtr<ID3D11Buffer> compactBuf;
 		ComPtr<ID3D11UnorderedAccessView> compactUav;
+		ComPtr<ID3D11Buffer> noiseBuf;
+		ComPtr<ID3D11UnorderedAccessView> noiseUav;
+		ComPtr<ID3D11ShaderResourceView> noiseSrv;
 
 		ComPtr<ID3D11Texture2D> zMapTex;
 		ComPtr<ID3D11UnorderedAccessView> zMapUav;
@@ -1666,6 +1984,7 @@ void CSCompactActiveCells(uint3 dtid : SV_DispatchThreadID)
 		int allocW = 0;
 		int allocH = 0;
 		bool allocZMap = false;
+		bool allocCellGrid = false;
 
 		RingSlot ring[kStagingRingSlots];
 		int writeHead = 0;
@@ -1683,11 +2002,11 @@ void CSCompactActiveCells(uint3 dtid : SV_DispatchThreadID)
 			allocW = 0;
 			allocH = 0;
 			allocZMap = false;
+			allocCellGrid = false;
 		}
 
-		void ReleaseAll()
+		void ReleasePersistentBuffers()
 		{
-			ReleaseFrameResources();
 			for (int i = 0; i < kStagingRingSlots; ++i)
 			{
 				ring[i].staging.Reset();
@@ -1698,20 +2017,31 @@ void CSCompactActiveCells(uint3 dtid : SV_DispatchThreadID)
 				ring[i].inFlight = false;
 				ring[i].timingQueried = false;
 			}
+			noiseSrv.Reset();
+			noiseUav.Reset();
+			noiseBuf.Reset();
 			compactUav.Reset();
 			compactBuf.Reset();
 			cbParams.Reset();
+			writeHead = 0;
+			readHead = 0;
+			pending = 0;
+		}
+
+		void ReleaseAll()
+		{
+			ReleaseFrameResources();
+			ReleasePersistentBuffers();
 			pointClampSampler.Reset();
 			csCompact.Reset();
+			csResidualDormantChroma.Reset();
 			csResidualDormant.Reset();
 			csResidualChroma.Reset();
 			csResidualLumaTile.Reset();
 			csResidualLuma.Reset();
+			csComputeMad.Reset();
 			csClear.Reset();
 			device.Reset();
-			writeHead = 0;
-			readHead = 0;
-			pending = 0;
 		}
 	};
 
@@ -1824,12 +2154,20 @@ void CSCompactActiveCells(uint3 dtid : SV_DispatchThreadID)
 			{ "FAST_OBJ_TILE_FAST", "0" },
 			{ nullptr, nullptr }
 		};
+		const D3D_SHADER_MACRO macrosDormantChroma[] = {
+			{ "FAST_OBJ_HAS_CHROMA", "1" },
+			{ "FAST_OBJ_DORMANT", "1" },
+			{ "FAST_OBJ_TILE_FAST", "0" },
+			{ nullptr, nullptr }
+		};
 
 		if (!compileKernel("CSClearHeader", nullptr, impl_->csClear) ||
+			!compileKernel("CSComputeMadAndClear", nullptr, impl_->csComputeMad) ||
 			!compileKernel("CSResidualAndReduce", macrosLuma, impl_->csResidualLuma) ||
 			!compileKernel("CSResidualAndReduce", macrosLumaTile, impl_->csResidualLumaTile) ||
 			!compileKernel("CSResidualAndReduce", macrosChroma, impl_->csResidualChroma) ||
 			!compileKernel("CSResidualAndReduce", macrosDormant, impl_->csResidualDormant) ||
+			!compileKernel("CSResidualAndReduce", macrosDormantChroma, impl_->csResidualDormantChroma) ||
 			!compileKernel("CSCompactActiveCells", nullptr, impl_->csCompact))
 		{
 			Release();
@@ -1857,28 +2195,35 @@ void CSCompactActiveCells(uint3 dtid : SV_DispatchThreadID)
 		return true;
 	}
 
-	bool FastObjectGpu::EnsureFrameResources(int width, int height, bool writeZMap)
+	bool FastObjectGpu::EnsureFrameResources(int width, int height, bool writeZMap, bool writeCellGrid)
 	{
 		if (!ready_ || !impl_->device || width <= 0 || height <= 0)
 			return false;
 
 		ID3D11Device* dev = impl_->device.Get();
 
-		// Allocate constant buffer, 4,112-byte compact RWStructuredBuffer, and 3-slot staging ring once.
+		// Allocate constant buffer, 4,128-byte compact RWStructuredBuffer, 16-byte MAD noise buffer, and 3-slot staging ring once.
+		// Atomic cleanup on any partial creation failure (HIGH-3).
 		if (!impl_->cbParams)
 		{
+			auto failPersistent = [&](const char* msg) -> bool
+			{
+				impl_->ReleaseFrameResources();
+				impl_->ReleasePersistentBuffers();
+				allocatedVramBytes_ = 0;
+				SetFailure(GpuFailure::ResourceCreate, msg);
+				return false;
+			};
+
 			D3D11_BUFFER_DESC cbd = {};
 			cbd.ByteWidth = sizeof(GpuParamsCB);
 			cbd.Usage = D3D11_USAGE_DYNAMIC;
 			cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
 			cbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
 			if (FAILED(dev->CreateBuffer(&cbd, nullptr, &impl_->cbParams)))
-			{
-				SetFailure(GpuFailure::ResourceCreate, "CreateBuffer(cbParams) failed");
-				return false;
-			}
+				return failPersistent("CreateBuffer(cbParams) failed");
 
-			const UINT elemCount = kMaxActiveCells + 1u;
+			const UINT elemCount = kMaxActiveCells + 2u; // Slot 0 header + [1..256] cells + slot 257 MAD noise
 			D3D11_BUFFER_DESC sbd = {};
 			sbd.ByteWidth = elemCount * sizeof(GpuActiveCell);
 			sbd.Usage = D3D11_USAGE_DEFAULT;
@@ -1886,10 +2231,7 @@ void CSCompactActiveCells(uint3 dtid : SV_DispatchThreadID)
 			sbd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
 			sbd.StructureByteStride = sizeof(GpuActiveCell);
 			if (FAILED(dev->CreateBuffer(&sbd, nullptr, &impl_->compactBuf)))
-			{
-				SetFailure(GpuFailure::ResourceCreate, "CreateBuffer(compactBuf) failed");
-				return false;
-			}
+				return failPersistent("CreateBuffer(compactBuf) failed");
 
 			D3D11_UNORDERED_ACCESS_VIEW_DESC uavd = {};
 			uavd.Format = DXGI_FORMAT_UNKNOWN;
@@ -1897,9 +2239,29 @@ void CSCompactActiveCells(uint3 dtid : SV_DispatchThreadID)
 			uavd.Buffer.FirstElement = 0;
 			uavd.Buffer.NumElements = elemCount;
 			if (FAILED(dev->CreateUnorderedAccessView(impl_->compactBuf.Get(), &uavd, &impl_->compactUav)))
+				return failPersistent("CreateUnorderedAccessView(compactBuf) failed");
+
+			D3D11_BUFFER_DESC nbd = {};
+			nbd.ByteWidth = 16u;
+			nbd.Usage = D3D11_USAGE_DEFAULT;
+			nbd.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
+			nbd.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+			nbd.StructureByteStride = 16u;
+			D3D11_UNORDERED_ACCESS_VIEW_DESC nuavd = {};
+			nuavd.Format = DXGI_FORMAT_UNKNOWN;
+			nuavd.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+			nuavd.Buffer.FirstElement = 0;
+			nuavd.Buffer.NumElements = 1u;
+			D3D11_SHADER_RESOURCE_VIEW_DESC nsrvd = {};
+			nsrvd.Format = DXGI_FORMAT_UNKNOWN;
+			nsrvd.ViewDimension = D3D11_SRV_DIMENSION_BUFFER;
+			nsrvd.Buffer.FirstElement = 0;
+			nsrvd.Buffer.NumElements = 1u;
+			if (FAILED(dev->CreateBuffer(&nbd, nullptr, &impl_->noiseBuf)) ||
+				FAILED(dev->CreateUnorderedAccessView(impl_->noiseBuf.Get(), &nuavd, &impl_->noiseUav)) ||
+				FAILED(dev->CreateShaderResourceView(impl_->noiseBuf.Get(), &nsrvd, &impl_->noiseSrv)))
 			{
-				SetFailure(GpuFailure::ResourceCreate, "CreateUnorderedAccessView(compactBuf) failed");
-				return false;
+				return failPersistent("CreateBuffer/Views(noiseBuf) failed");
 			}
 
 			D3D11_BUFFER_DESC stgDesc = {};
@@ -1924,13 +2286,13 @@ void CSCompactActiveCells(uint3 dtid : SV_DispatchThreadID)
 					FAILED(dev->CreateQuery(&tsDesc, &impl_->ring[i].tsStart)) ||
 					FAILED(dev->CreateQuery(&tsDesc, &impl_->ring[i].tsEnd)))
 				{
-					SetFailure(GpuFailure::ResourceCreate, "CreateBuffer/CreateQuery(stagingRing) failed");
-					return false;
+					return failPersistent("CreateBuffer/CreateQuery(stagingRing) failed");
 				}
 			}
 		}
 
-		if (impl_->allocW == width && impl_->allocH == height && impl_->allocZMap == writeZMap)
+		if (impl_->allocW == width && impl_->allocH == height &&
+			impl_->allocZMap == writeZMap && impl_->allocCellGrid == writeCellGrid)
 			return true;
 
 		impl_->ReleaseFrameResources();
@@ -1954,33 +2316,39 @@ void CSCompactActiveCells(uint3 dtid : SV_DispatchThreadID)
 				FAILED(dev->CreateShaderResourceView(impl_->zMapTex.Get(), nullptr, &impl_->zMapSrv)))
 			{
 				impl_->ReleaseFrameResources();
+				allocatedVramBytes_ = EstimatedVramBytes(1, 1, false, true, false);
 				SetFailure(GpuFailure::ResourceCreate, "CreateTexture2D(zMap) failed");
 				return false;
 			}
 		}
 
-		D3D11_TEXTURE2D_DESC cd = {};
-		cd.Width = static_cast<UINT>(cellW);
-		cd.Height = static_cast<UINT>(cellH);
-		cd.MipLevels = 1;
-		cd.ArraySize = 1;
-		cd.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
-		cd.SampleDesc.Count = 1;
-		cd.Usage = D3D11_USAGE_DEFAULT;
-		cd.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
-		if (FAILED(dev->CreateTexture2D(&cd, nullptr, &impl_->cellGridTex)) ||
-			FAILED(dev->CreateUnorderedAccessView(impl_->cellGridTex.Get(), nullptr, &impl_->cellGridUav)) ||
-			FAILED(dev->CreateShaderResourceView(impl_->cellGridTex.Get(), nullptr, &impl_->cellGridSrv)))
+		if (writeCellGrid)
 		{
-			impl_->ReleaseFrameResources();
-			SetFailure(GpuFailure::ResourceCreate, "CreateTexture2D(cellGrid) failed");
-			return false;
+			D3D11_TEXTURE2D_DESC cd = {};
+			cd.Width = static_cast<UINT>(cellW);
+			cd.Height = static_cast<UINT>(cellH);
+			cd.MipLevels = 1;
+			cd.ArraySize = 1;
+			cd.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+			cd.SampleDesc.Count = 1;
+			cd.Usage = D3D11_USAGE_DEFAULT;
+			cd.BindFlags = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE;
+			if (FAILED(dev->CreateTexture2D(&cd, nullptr, &impl_->cellGridTex)) ||
+				FAILED(dev->CreateUnorderedAccessView(impl_->cellGridTex.Get(), nullptr, &impl_->cellGridUav)) ||
+				FAILED(dev->CreateShaderResourceView(impl_->cellGridTex.Get(), nullptr, &impl_->cellGridSrv)))
+			{
+				impl_->ReleaseFrameResources();
+				allocatedVramBytes_ = EstimatedVramBytes(1, 1, false, true, false);
+				SetFailure(GpuFailure::ResourceCreate, "CreateTexture2D(cellGrid) failed");
+				return false;
+			}
 		}
 
 		impl_->allocW = width;
 		impl_->allocH = height;
 		impl_->allocZMap = writeZMap;
-		allocatedVramBytes_ = EstimatedVramBytes(width, height, writeZMap, true);
+		impl_->allocCellGrid = writeCellGrid;
+		allocatedVramBytes_ = EstimatedVramBytes(width, height, writeZMap, true, writeCellGrid);
 		return true;
 	}
 
@@ -1999,11 +2367,17 @@ void CSCompactActiveCells(uint3 dtid : SV_DispatchThreadID)
 			SetFailure(GpuFailure::Unavailable, "FastObjectGpu not initialized or null context");
 			return false;
 		}
-		if (in.sceneDiscontinuity || !in.camPrevUsable || !in.camNextUsable ||
-			!in.lumaPrevSrv || !in.lumaCurSrv || !in.lumaNextSrv ||
+		// Normal operational abstentions (scene cut/flash or unusable camera) are NOT GPU failures (LOW-1).
+		if (in.sceneDiscontinuity || !in.camPrevUsable || !in.camNextUsable)
+		{
+			lastFailure_ = GpuFailure::None;
+			lastError_.clear();
+			return false;
+		}
+		if (!in.lumaPrevSrv || !in.lumaCurSrv || !in.lumaNextSrv ||
 			in.width <= 0 || in.height <= 0 || !(in.sourceScale > 0.0f))
 		{
-			SetFailure(GpuFailure::InvalidInput, "unusable camera, discontinuity, or missing luma SRVs");
+			SetFailure(GpuFailure::InvalidInput, "missing luma SRVs or non-positive dimensions");
 			return false;
 		}
 
@@ -2032,7 +2406,9 @@ void CSCompactActiveCells(uint3 dtid : SV_DispatchThreadID)
 			abstain |= AbstainReason::CausalNoLookAhead;
 		}
 
-		if (!EnsureFrameResources(in.width, in.height, in.writeZMap))
+		const bool wantZMap = in.writeZMap && !in.dormantCoarseMode;
+		const bool wantCellGrid = in.writeCellGrid;
+		if (!EnsureFrameResources(in.width, in.height, wantZMap, wantCellGrid))
 			return false;
 
 		// If the 3-slot staging ring is full, drop the oldest slot cleanly to prevent stall/overwrite.
@@ -2069,6 +2445,8 @@ void CSCompactActiveCells(uint3 dtid : SV_DispatchThreadID)
 
 		const double sigmaQ = cfg.QuantizationSigma();
 		const double twoSigmaQ2 = 2.0 * sigmaQ * sigmaQ;
+		const bool needMadLuma = (!hasGrain && in.uniformGrainSigma < 0.0);
+		const bool needMadChroma = (hasChroma && !hasGrain && in.uniformChromaGrainSigma < 0.0 && in.uniformGrainSigma < 0.0);
 		const double grainSig = std::fmax(0.0, in.uniformGrainSigma);
 		const double baseDiffVarLuma = 2.0 * grainSig * grainSig + twoSigmaQ2;
 		const double cGrainSig = (in.uniformChromaGrainSigma >= 0.0) ? in.uniformChromaGrainSigma : grainSig;
@@ -2087,9 +2465,12 @@ void CSCompactActiveCells(uint3 dtid : SV_DispatchThreadID)
 		cb.flags[1] = hasGrain ? 1u : 0u;
 		cb.flags[2] = hasGuard ? 1u : 0u;
 		cb.flags[3] = (in.dormantCoarseMode ? 1u : 0u) |
-			(in.writeZMap ? 2u : 0u) |
+			(wantZMap ? 2u : 0u) |
 			(in.fadePrev ? 4u : 0u) |
-			(in.fadeNext ? 8u : 0u);
+			(in.fadeNext ? 8u : 0u) |
+			(wantCellGrid ? 16u : 0u) |
+			(needMadLuma ? 32u : 0u) |
+			(needMadChroma ? 64u : 0u);
 		cb.grids[0] = hasGrain ? static_cast<uint32_t>(in.grainGridW) : 1u;
 		cb.grids[1] = hasGrain ? static_cast<uint32_t>(in.grainGridH) : 1u;
 		cb.grids[2] = hasGuard ? static_cast<uint32_t>(in.guardGridW) : 1u;
@@ -2134,6 +2515,7 @@ void CSCompactActiveCells(uint3 dtid : SV_DispatchThreadID)
 		cb.mapPrev2[0] = static_cast<float>(mapToPrev.h[8]);
 		cb.mapPrev2[1] = 1.0f / static_cast<float>(in.width);
 		cb.mapPrev2[2] = 1.0f / static_cast<float>(in.height);
+		cb.mapPrev2[3] = static_cast<float>(kMadToSigma);
 
 		for (int i = 0; i < 4; ++i) cb.mapNext0[i] = static_cast<float>(mapToNext.h[i]);
 		for (int i = 0; i < 4; ++i) cb.mapNext1[i] = static_cast<float>(mapToNext.h[4 + i]);
@@ -2157,17 +2539,46 @@ void CSCompactActiveCells(uint3 dtid : SV_DispatchThreadID)
 		}
 
 		ID3D11Buffer* cbs[1] = { impl_->cbParams.Get() };
+		ID3D11SamplerState* samplers[1] = { impl_->pointClampSampler.Get() };
 		context->CSSetConstantBuffers(0, 1, cbs);
+		context->CSSetSamplers(0, 1, samplers);
 
-		// Pass 0: Clear active-cell counter header.
-		ID3D11UnorderedAccessView* uavs0[3] = { nullptr, nullptr, impl_->compactUav.Get() };
-		context->CSSetUnorderedAccessViews(0, 3, uavs0, nullptr);
-		context->CSSetShader(impl_->csClear.Get(), nullptr, 0);
-		context->Dispatch(1, 1, 1);
+		// Pass 0: Clear counter header + publish baseline noise (or run 1-group stratified Camera-block MAD).
+		ID3D11UnorderedAccessView* uavs0[4] = { nullptr, nullptr, impl_->compactUav.Get(), impl_->noiseUav.Get() };
+		if (needMadLuma)
+		{
+			ID3D11ShaderResourceView* srvs0[12] = {
+				in.lumaPrevSrv,
+				in.lumaCurSrv,
+				nullptr,
+				hasChroma ? in.cbPrevSrv : nullptr,
+				hasChroma ? in.cbCurSrv : nullptr,
+				nullptr,
+				hasChroma ? in.crPrevSrv : nullptr,
+				hasChroma ? in.crCurSrv : nullptr,
+				nullptr,
+				nullptr,
+				hasGuard ? in.guardMapSrv : nullptr,
+				nullptr
+			};
+			context->CSSetShaderResources(0, 12, srvs0);
+			context->CSSetUnorderedAccessViews(0, 4, uavs0, nullptr);
+			context->CSSetShader(impl_->csComputeMad.Get(), nullptr, 0);
+			context->Dispatch(1, 1, 1);
+		}
+		else
+		{
+			context->CSSetUnorderedAccessViews(0, 4, uavs0, nullptr);
+			context->CSSetShader(impl_->csClear.Get(), nullptr, 0);
+			context->Dispatch(1, 1, 1);
+		}
 
-		// Pass 1 (fused): 3-frame residual + Sobel + bilinear curvature + 4x4 groupshared reduce
-		// + inline bounded InterlockedAdd active-cell compaction (<= 4,112 B, zero Pass 2 stall).
-		ID3D11ShaderResourceView* srvs1[12] = {
+		// Unbind noiseUav before binding noiseSrv at t12 in Pass 1 (strict D3D11 hazard rule).
+		ID3D11UnorderedAccessView* nullUavs4[4] = { nullptr, nullptr, nullptr, nullptr };
+		context->CSSetUnorderedAccessViews(0, 4, nullUavs4, nullptr);
+
+		// Pass 1 (fused): 3-frame residual + upper-bound gate + Sobel/curvature + 4x4 reduce + compaction.
+		ID3D11ShaderResourceView* srvs1[13] = {
 			in.lumaPrevSrv,
 			in.lumaCurSrv,
 			in.lumaNextSrv,
@@ -2179,35 +2590,63 @@ void CSCompactActiveCells(uint3 dtid : SV_DispatchThreadID)
 			hasChroma ? in.crNextSrv : nullptr,
 			hasGrain ? in.grainVarSrv : nullptr,
 			hasGuard ? in.guardMapSrv : nullptr,
-			nullptr
+			nullptr,
+			impl_->noiseSrv.Get()
 		};
 		ID3D11UnorderedAccessView* uavs1[3] = {
-			(in.writeZMap && !in.dormantCoarseMode) ? impl_->zMapUav.Get() : nullptr,
-			impl_->cellGridUav.Get(),
+			wantZMap ? impl_->zMapUav.Get() : nullptr,
+			wantCellGrid ? impl_->cellGridUav.Get() : nullptr,
 			impl_->compactUav.Get()
 		};
-		ID3D11SamplerState* samplers1[1] = { impl_->pointClampSampler.Get() };
-		context->CSSetSamplers(0, 1, samplers1);
-		context->CSSetShaderResources(0, 12, srvs1);
+		context->CSSetShaderResources(0, 13, srvs1);
 		context->CSSetUnorderedAccessViews(0, 3, uavs1, nullptr);
-		// Tight mathematical check: does every 16x8 tile map strictly inside its 22x14 shared tile?
-		// For affine (h6==h7==0) with |a-1|<=0.04, |b|<=0.04, |d|<=0.04, |e-1|<=0.04,
-		// max drift across a 16x8 tile is <= 15*0.04 + 7*0.04 = 0.88 px (< 1 px margin on every side).
-		auto fitsSharedTile = [](const CameraModel::Params& hm) -> bool
+
+		// Speedup #4: Widened 8-DOF homography check across all 4 picture corners.
+		// Verifies every 16x8 half-res tile fits strictly inside its 22x14 shared GatherRed tile (drift < 0.95 half-px).
+		auto fitsSharedTile = [&](const CameraModel::Params& hm) -> bool
 		{
-			const double w8 = hm.h[8];
-			if (std::fabs(w8) < 1e-12) return false;
-			const double invW = 1.0 / w8;
-			if (std::fabs(hm.h[6] * invW) > 1e-8 || std::fabs(hm.h[7] * invW) > 1e-8) return false;
-			if (std::fabs(hm.h[0] * invW - 1.0) > 0.04 || std::fabs(hm.h[4] * invW - 1.0) > 0.04) return false;
-			if (std::fabs(hm.h[1] * invW) > 0.04 || std::fabs(hm.h[3] * invW) > 0.04) return false;
+			const double picCx = pic.CentreX();
+			const double picCy = pic.CentreY();
+			const double invSc = 1.0 / scale;
+			const double cornerX[2] = { static_cast<double>(pic.left), static_cast<double>(pic.right) - 16.0 * scale };
+			const double cornerY[2] = { static_cast<double>(pic.top), static_cast<double>(pic.bottom) - 8.0 * scale };
+			for (int iy = 0; iy < 2; ++iy)
+			{
+				for (int ix = 0; ix < 2; ++ix)
+				{
+					const double bx = std::fmax(static_cast<double>(pic.left), cornerX[ix]);
+					const double by = std::fmax(static_cast<double>(pic.top), cornerY[iy]);
+					const double tx0 = bx - picCx;
+					const double ty0 = by - picCy;
+					const double w0 = hm.h[6] * tx0 + hm.h[7] * ty0 + hm.h[8];
+					if (!(w0 > 1e-6)) return false;
+					double ox0 = 0.0, oy0 = 0.0;
+					CameraModel::Apply(hm, tx0, ty0, &ox0, &oy0);
+					const double h0x = (ox0 + picCx) * invSc - 0.5;
+					const double h0y = (oy0 + picCy) * invSc - 0.5;
+					const double offs[3][2] = { { 15.0, 0.0 }, { 0.0, 7.0 }, { 15.0, 7.0 } };
+					for (int c = 0; c < 3; ++c)
+					{
+						const double cx = tx0 + offs[c][0] * scale;
+						const double cy = ty0 + offs[c][1] * scale;
+						const double wc = hm.h[6] * cx + hm.h[7] * cy + hm.h[8];
+						if (!(wc > 1e-6)) return false;
+						double oxc = 0.0, oyc = 0.0;
+						CameraModel::Apply(hm, cx, cy, &oxc, &oyc);
+						const double dx = ((oxc + picCx) * invSc - 0.5) - h0x - offs[c][0];
+						const double dy = ((oyc + picCy) * invSc - 0.5) - h0y - offs[c][1];
+						if (std::fabs(dx) > 0.95 || std::fabs(dy) > 0.95)
+							return false;
+					}
+				}
+			}
 			return true;
 		};
 		const bool useTileFast = !in.dormantCoarseMode && !hasChroma &&
 			fitsSharedTile(mapToPrev) && fitsSharedTile(mapToNext);
 
 		ID3D11ComputeShader* pass1Cs = in.dormantCoarseMode
-			? impl_->csResidualDormant.Get()
+			? (hasChroma ? impl_->csResidualDormantChroma.Get() : impl_->csResidualDormant.Get())
 			: (hasChroma ? impl_->csResidualChroma.Get()
 				: (useTileFast ? impl_->csResidualLumaTile.Get() : impl_->csResidualLuma.Get()));
 		context->CSSetShader(pass1Cs, nullptr, 0);
@@ -2216,12 +2655,11 @@ void CSCompactActiveCells(uint3 dtid : SV_DispatchThreadID)
 		context->Dispatch(groupsX1, groupsY1, 1);
 
 		// Cleanly unbind all samplers, SRVs & UAVs so caller pipeline sees zero lingering state.
-		ID3D11UnorderedAccessView* nullUavs[3] = { nullptr, nullptr, nullptr };
 		ID3D11SamplerState* nullSamplers[1] = { nullptr };
-		ID3D11ShaderResourceView* nullSrvs[12] = {};
+		ID3D11ShaderResourceView* nullSrvs[13] = {};
 		context->CSSetSamplers(0, 1, nullSamplers);
-		context->CSSetUnorderedAccessViews(0, 3, nullUavs, nullptr);
-		context->CSSetShaderResources(0, 12, nullSrvs);
+		context->CSSetUnorderedAccessViews(0, 4, nullUavs4, nullptr);
+		context->CSSetShaderResources(0, 13, nullSrvs);
 		context->CSSetShader(nullptr, nullptr, 0);
 
 		if (timingEnabled_)
@@ -2230,7 +2668,7 @@ void CSCompactActiveCells(uint3 dtid : SV_DispatchThreadID)
 			context->End(slot.tsDisjoint.Get());
 		}
 
-		// Async copy <= 4,112 B into staging ring slot and record completion event query.
+		// Async copy <= 4,128 B into staging ring slot and record completion event query.
 		context->CopyResource(slot.staging.Get(), impl_->compactBuf.Get());
 		context->End(slot.eventQuery.Get());
 
@@ -2244,9 +2682,13 @@ void CSCompactActiveCells(uint3 dtid : SV_DispatchThreadID)
 		slot.causalMode = in.causalTwoBack;
 		slot.dormantCoarse = in.dormantCoarseMode;
 		slot.noiseSigmaEst = static_cast<float>(std::sqrt(baseDiffVarLuma));
+		slot.noiseSigmaCbEst = static_cast<float>(std::sqrt(baseDiffVarChroma));
+		slot.noiseSigmaCrEst = static_cast<float>(std::sqrt(baseDiffVarChroma));
 
 		impl_->writeHead = (impl_->writeHead + 1) % kStagingRingSlots;
 		++impl_->pending;
+		lastFailure_ = GpuFailure::None;
+		lastError_.clear();
 		return true;
 	}
 
@@ -2287,6 +2729,13 @@ void CSCompactActiveCells(uint3 dtid : SV_DispatchThreadID)
 		const uint32_t totalActive = raw[0].cellXY;
 		const uint32_t stored = std::min(totalActive, std::min(slot.maxActiveCells, kMaxActiveCells));
 
+		// Read back exact GPU MAD/baseline noise variances from slot 257 (HIGH-1).
+		const GpuActiveCell& nrec = raw[kMaxActiveCells + 1u];
+		float dvY = nrec.maxAbsZ;
+		float dvCb = nrec.zCell;
+		float dvCr = 0.0f;
+		std::memcpy(&dvCr, &nrec.cellXY, sizeof(float));
+
 		out.frameIndex = slot.frameIndex;
 		out.totalActiveCells = totalActive;
 		out.cellCount = stored;
@@ -2296,7 +2745,9 @@ void CSCompactActiveCells(uint3 dtid : SV_DispatchThreadID)
 		out.chromaUsed = slot.chromaUsed;
 		out.causalMode = slot.causalMode;
 		out.dormantCoarse = slot.dormantCoarse;
-		out.noiseSigmaEst = slot.noiseSigmaEst;
+		out.noiseSigmaEst = (dvY > 0.0f) ? std::sqrt(dvY) : slot.noiseSigmaEst;
+		out.noiseSigmaCbEst = (dvCb > 0.0f) ? std::sqrt(dvCb) : slot.noiseSigmaCbEst;
+		out.noiseSigmaCrEst = (dvCr > 0.0f) ? std::sqrt(dvCr) : slot.noiseSigmaCrEst;
 
 		if (totalActive > slot.maxActiveCells)
 		{
@@ -2335,6 +2786,8 @@ void CSCompactActiveCells(uint3 dtid : SV_DispatchThreadID)
 		slot.inFlight = false;
 		impl_->readHead = (impl_->readHead + 1) % kStagingRingSlots;
 		--impl_->pending;
+		lastFailure_ = GpuFailure::None;
+		lastError_.clear();
 		return true;
 	}
 
@@ -2349,21 +2802,29 @@ void CSCompactActiveCells(uint3 dtid : SV_DispatchThreadID)
 		out.frameIndex = frameIndex;
 		if (cfg.originalPathway)
 		{
+			lastFailure_ = GpuFailure::None;
+			lastError_.clear();
 			out.abstainReason = AbstainReason::OriginalPathway;
 			return false;
 		}
 		if (!cfg.enabled)
 		{
+			lastFailure_ = GpuFailure::None;
+			lastError_.clear();
 			out.abstainReason = AbstainReason::Disabled;
 			return false;
 		}
 		if (in.sceneDiscontinuity)
 		{
+			lastFailure_ = GpuFailure::None;
+			lastError_.clear();
 			out.abstainReason = AbstainReason::SceneDiscontinuity;
 			return false;
 		}
 		if (!in.camPrevUsable || !in.camNextUsable)
 		{
+			lastFailure_ = GpuFailure::None;
+			lastError_.clear();
 			out.abstainReason = AbstainReason::NoUsableCamera;
 			return false;
 		}
@@ -2611,7 +3072,8 @@ void CSCompactActiveCells(uint3 dtid : SV_DispatchThreadID)
 			outGpuIn.grainGridH = cpuIn.grainGridH;
 			outGpuIn.grainBlockSrcPx = cpuIn.grainBlockSrcPx;
 		}
-		outGpuIn.uniformGrainSigma = (cpuIn.uniformGrainSigma >= 0.0) ? cpuIn.uniformGrainSigma : 0.0;
+		// Preserve negative sentinel (< 0.0) so GPU runs its Camera-block MAD fallback (HIGH-1).
+		outGpuIn.uniformGrainSigma = cpuIn.uniformGrainSigma;
 		outGpuIn.uniformChromaGrainSigma = cpuIn.uniformChromaGrainSigma;
 		if (wantGuard)
 		{
@@ -2634,7 +3096,7 @@ void CSCompactActiveCells(uint3 dtid : SV_DispatchThreadID)
 		if (why) *why = lastError_;
 		return false;
 	}
-	bool FastObjectGpu::EnsureFrameResources(int, int, bool) { return false; }
+	bool FastObjectGpu::EnsureFrameResources(int, int, bool, bool) { return false; }
 	bool FastObjectGpu::Submit(ID3D11DeviceContext*, const Config&, const GpuResidualInput&, uint64_t) { return false; }
 	bool FastObjectGpu::Collect(ID3D11DeviceContext*, bool, GpuReadbackResult& out) { out.Clear(); return false; }
 	bool FastObjectGpu::RunSync(ID3D11DeviceContext*, const Config&, const GpuResidualInput&, GpuReadbackResult& out, uint64_t) { out.Clear(); return false; }
