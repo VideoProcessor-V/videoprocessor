@@ -2411,7 +2411,7 @@ bool isDefocused = ((fFlags & 2) != 0);
 bool isFace = (fInfo.w > 0.5);
 
 vec4 priorT = texelFetch(cell_prior, cell, 0);
-bool cellNonFin = td_is_bad(priorT.x) || priorT.x < 0.0;
+bool cellNonFin = false;
 if (u_cell_prior_has_step_scale > 0.5)
 {
     if (td_is_bad(priorT.z) || !(priorT.z > 0.0))
@@ -2423,7 +2423,7 @@ for (int kk = 0; kk < K; ++kk)
         cellNonFin = true;
 }
 
-float retG = cellNonFin ? 0.0 : max(0.0, priorT.x);
+float retG = (td_is_bad(priorT.x) || priorT.x < 0.0) ? 0.0 : priorT.x;
 float mVar = max(0.0, texelFetch(cell_stats, ivec2(TD_CW + cell.x, 2 * TD_CH + cell.y), 0).z);
 float hVar = fInfo.z * fInfo.z;
 float cleanTexMH = max(0.0, mVar - retG * TD_GAIN_MID * u_psd_mid) +

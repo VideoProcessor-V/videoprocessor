@@ -3852,6 +3852,12 @@ namespace TdV2
 									cellDiagC[b][activeIdx[ai]][cIdx] = (std::min)(ownDiag, cm.C[ai][ai]);
 								}
 
+								const double collinearFloorC = 0.01 * baseQuantVarC * bandTransfer[b];
+								auto refsCollinear = [collinearFloorC](double ckk, double cjj, double ckj) -> bool
+								{
+									const double mx = (std::max)(ckk, cjj);
+									return (mx > kEngineNumFloor) && ((ckk + cjj - 2.0 * ckj) <= (collinearFloorC + 1e-6 * mx));
+								};
 								const double psdScale = in.psdShape.ForBand(b);
 								const double nEff = EffectiveSamplesForBand(b, static_cast<double>(cm.sampleCount));
 								bool contributed = false;
@@ -3867,6 +3873,8 @@ namespace TdV2
 										if (!candAnchor) { partner = cand; break; }
 										if (!selfAnchor && candAnchor) partner = cand;
 									}
+									if (partner >= 0 && refsCollinear(cm.C[ai][ai], cm.C[partner][partner], cm.C[ai][partner]))
+										partner = -1;
 									cm.partner[ai] = partner;
 									if (partner >= 0)
 									{
@@ -4019,9 +4027,13 @@ namespace TdV2
 										standIns->Engage(StandInKind::SingleRefA1ToA2Fallback);
 									if (cm.activeK >= 2)
 									{
+										const double collinearFloorB = 0.01 * baseQuantVarC * bandTransfer[b];
 										for (int j = 0; j < cm.activeK; ++j)
 										{
 											if (j == ai || refs[static_cast<size_t>(cm.activeIdx[j])].isExactCopy)
+												continue;
+											const double mxKJ = (std::max)(cm.C[ai][ai], cm.C[j][j]);
+											if (mxKJ > kEngineNumFloor && (cm.C[ai][ai] + cm.C[j][j] - 2.0 * cm.C[ai][j]) <= (collinearFloorB + 1e-6 * mxKJ))
 												continue;
 											const double cap = EstimateC_A1(cm.C[ai][j], cm.C[ai][ai], cm.C[j][j],
 											                                cellGrainVar, bandTransfer[b], 1.0, psdScale);

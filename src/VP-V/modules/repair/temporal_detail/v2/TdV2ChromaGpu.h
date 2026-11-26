@@ -1339,10 +1339,11 @@ int fBits = int(round(pT.y));
 bool focusChange = ((fBits & 1) != 0) || (texelFetch(cell_own_grain, cell, 0).w > 0.5);
 bool isDefoc = ((fBits & 2) != 0);
 
-// PROD-GPU-BUG-19: Exclude non-finite / negative-grain / invalid-step-scale / bad-warp cells from EB/A2e prior prep.
+// PROD-GPU-BUG-19: Exclude invalid-step-scale / bad-motion-gate cells from EB/A2e prior prep;
+// sanitize NaN/+Inf/negative retained grain to 0.0 without skipping the cell (1:1 with CPU TdV2ReferenceEngine.h:1866-1882).
 float rawGvCb = pT.x;
 float rawGvCr = (u_cell_prior_has_cr_grain > 0.5) ? pT.w : pT.x;
-bool cellNonFin = td_is_bad(rawGvCb) || rawGvCb < 0.0 || td_is_bad(rawGvCr) || rawGvCr < 0.0;
+bool cellNonFin = false;
 if (u_cell_prior_has_step_scale > 0.5)
 {
     if (td_is_bad(pT.z) || !(pT.z > 0.0))
@@ -1357,7 +1358,8 @@ for (int kk = 0; kk < K; ++kk)
 for (int chIdx = 0; chIdx < 2; ++chIdx)
 {
     // PROD-GPU-BUG-18: Classify activity (flat vs textured) BEFORE unsplit Projection-IR grain estimation (TdV2Chroma.h:3637).
-    float retG = cellNonFin ? 0.0 : ((chIdx == 0) ? max(0.0, rawGvCb) : max(0.0, rawGvCr));
+    float rawG = (chIdx == 0) ? rawGvCb : rawGvCr;
+    float retG = (td_is_bad(rawG) || rawG < 0.0) ? 0.0 : rawG;
     float mVar = (chIdx == 0) ? max(0.0, texelFetch(cell_stats_cb, ivec2(TD_CW + cell.x, 2 * TD_CH + cell.y), 0).z)
                               : max(0.0, texelFetch(cell_stats_cr, ivec2(TD_CW + cell.x, 2 * TD_CH + cell.y), 0).z);
     float hVar = (chIdx == 0) ? max(0.0, texelFetch(cell_stats_cb, ivec2(2 * TD_CW + cell.x, 2 * TD_CH + cell.y), 0).z)
@@ -1873,6 +1875,7 @@ vec2 ownGrainVar = (ogCntPool > 0.5) ? max(vec2(0.0), ogSumPool / ogCntPool) : v
                     for (int j = 0; j < K; ++j)
                     {
                         if (j == k || td_is_exact_copy(j)) continue;
+                        if (td_refs_collinear(C[k][k], C[j][j], C[k][j], bGain)) continue;
                         float cCap = td_est_c_a1(C[k][j], C[k][k], C[j][j], chRetGVar, bGain, psdScale, 0.0);
                         cA1 = min(cA1, cCap);
                     }
