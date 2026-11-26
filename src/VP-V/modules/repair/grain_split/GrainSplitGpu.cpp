@@ -43,7 +43,7 @@ ivec2 lid = ivec2(gl_LocalInvocationID.xy);
 ivec2 org = ivec2(gl_WorkGroupID.xy) * ivec2(TW, TH);
 for (uint i = li; i < uint(TH * SW); i += uint(TW * TH)) {
     int r = int(i / uint(SW)), c = int(i % uint(SW));
-    ivec2 q = ivec2(clamp(org.x - RL + c, 0, GS_HW - 1), clamp(org.y + r, 0, GS_HH - 1));
+    ivec2 q = ivec2(clamp(org.x - RL + c, GS_AHX0, GS_AHX1 - 1), clamp(org.y + r, GS_AHY0, GS_AHY1 - 1));
     s_r[i] = vpu_half_luma_comp(src, q, GS_COMP) * GS_INV_CU;
 }
 barrier();
@@ -70,7 +70,7 @@ ivec2 lid = ivec2(gl_LocalInvocationID.xy);
 ivec2 org = ivec2(gl_WorkGroupID.xy) * ivec2(TC, TR);
 for (uint i = li; i < uint(SH * TC); i += 256u) {
     int r = int(i / uint(TC)), c = int(i % uint(TC));
-    ivec2 q = ivec2(clamp(org.x + c, 0, GS_HW - 1), clamp(org.y - RL + r, 0, GS_HH - 1));
+    ivec2 q = ivec2(clamp(org.x + c, GS_AHX0, GS_AHX1 - 1), clamp(org.y - RL + r, GS_AHY0, GS_AHY1 - 1));
     s_c[i] = texelFetch(tmp, q, 0).xy;
 }
 barrier();
@@ -128,11 +128,11 @@ ivec2 org = blk * GS_B + ivec2(cx, cy);
 ivec2 lo = org / 2 - ivec2(1);
 for (uint i = li; i < uint(AP * AP); i += 256u) {
     int r = int(i / uint(AP)), c = int(i % uint(AP));
-    s_y[i] = gs_y(clamp(org.x - R1 + c, 0, GS_W - 1), clamp(org.y - R1 + r, 0, GS_H - 1));
+    s_y[i] = gs_y(clamp(org.x - R1 + c, GS_AX0, GS_AX1 - 1), clamp(org.y - R1 + r, GS_AY0, GS_AY1 - 1));
 }
 for (uint i = li; i < uint(LA * LA); i += 256u) {
     int r = int(i / uint(LA)), c = int(i % uint(LA));
-    s_l[i] = texelFetch(low, clamp(lo + ivec2(c, r), ivec2(0), ivec2(GS_HW - 1, GS_HH - 1)), 0).xy;
+    s_l[i] = texelFetch(low, clamp(lo + ivec2(c, r), ivec2(GS_AHX0, GS_AHY0), ivec2(GS_AHX1 - 1, GS_AHY1 - 1)), 0).xy;
 }
 barrier();
 for (uint i = li; i < uint(AP * CH); i += 256u) {
@@ -149,7 +149,7 @@ if (lid.x < CH && lid.y < CH) {
     float y = s_y[(lid.y + R1) * AP + lid.x + R1];
     vec2 l = low_s(p, lo);
     float d1 = y - g1, d2 = g1 - l.x, d3 = l.x - l.y, dd = d1 + d2;
-    bool inside = p.x < GS_W && p.y < GS_H;
+    bool inside = p.x >= GS_AX0 && p.x < GS_AX1 && p.y >= GS_AY0 && p.y < GS_AY1;
     s_px[lid.y * CH + lid.x] = inside ? vec4(dd * dd, d1 * d1, d2 * d2, d3 * d3) : vec4(-1.0);
 }
 barrier();
@@ -162,7 +162,8 @@ if (li < uint(NSUB)) {
         vec4 acc = vec4(0.0);
         for (int yy = y0; yy < y1; yy++)
             for (int xx = x0; xx < x1; xx++) {
-                if (blk.x * GS_B + xx < GS_W && blk.y * GS_B + yy < GS_H)
+                int px = blk.x * GS_B + xx, py = blk.y * GS_B + yy;
+                if (px >= GS_AX0 && px < GS_AX1 && py >= GS_AY0 && py < GS_AY1)
                     acc += s_px[(yy - cy) * CH + (xx - cx)];
             }
         ivec2 o = kc - ivec2(sx0 / CH, sy0 / CH);
@@ -172,7 +173,7 @@ if (li < uint(NSUB)) {
 )GLSL";
 
 			// 3b. REDUCE (unit 5): one thread per block. Per sub-block (fixed order) the chunk partials of its span (chunk order
-			// of unit 4) and its in-plane pixel count (analytic: the sub-block rectangle clipped to the plane); then the
+			// of unit 4) and its in-plane pixel count (analytic: the sub-block rectangle clipped to the active picture); then the
 			// quietest sub-block energies (sorted) x CAL and the block means -> quiet = (quiet, e3, e1, e2).
 			const char* const REDUCE_BODY = R"GLSL(
 ivec2 blk = ivec2(gl_GlobalInvocationID.xy);
@@ -193,7 +194,7 @@ if (blk.x < GS_BW && blk.y < GS_BH) {
             for (int ky = y0 / CH; ky <= (y1 - 1) / CH; ky++)
                 for (int kx = x0 / CH; kx <= (x1 - 1) / CH; kx++)
                     s += texelFetch(part, ivec2((blk.x * GS_SUB + si) * GS_S + kx - x0 / CH, (blk.y * GS_SUB + sj) * GS_S + ky - y0 / CH), 0);
-            c = float(max(0, min(borg.x + x1, GS_W) - (borg.x + x0)) * max(0, min(borg.y + y1, GS_H) - (borg.y + y0)));
+            c = float(max(0, min(borg.x + x1, GS_AX1) - max(borg.x + x0, GS_AX0)) * max(0, min(borg.y + y1, GS_AY1) - max(borg.y + y0, GS_AY0)));
         }
         if ((floatBitsToUint(s.x) & 0x7f800000u) == 0x7f800000u) badBlock = true;
         if (c > 0.0) { e[n] = s.x / c; n++; }
@@ -230,13 +231,13 @@ shared uint s_hist[GS_LEVEL_BINS * GS_KEYS];
 shared uint s_n[GS_LEVEL_BINS];
 float gs_block_luma(ivec2 b)
 {
-    ivec2 p = ivec2(min(b.x * GS_B + GS_B / 2, GS_W - 1), min(b.y * GS_B + GS_B / 2, GS_H - 1));
+    ivec2 p = ivec2(clamp(b.x * GS_B + GS_B / 2, GS_AX0, GS_AX1 - 1), clamp(b.y * GS_B + GS_B / 2, GS_AY0, GS_AY1 - 1));
     vec2 h = (vec2(p) + vec2(0.5)) * 0.5 - vec2(0.5);
     ivec2 i0 = ivec2(floor(h));
     vec2 f = h - vec2(i0);
-    ivec2 hm = ivec2(GS_HW - 1, GS_HH - 1);
-    float a = texelFetch(low, clamp(i0, ivec2(0), hm), 0).x, bb = texelFetch(low, clamp(i0 + ivec2(1, 0), ivec2(0), hm), 0).x;
-    float c = texelFetch(low, clamp(i0 + ivec2(0, 1), ivec2(0), hm), 0).x, d = texelFetch(low, clamp(i0 + ivec2(1, 1), ivec2(0), hm), 0).x;
+    ivec2 hlo = ivec2(GS_AHX0, GS_AHY0), hhi = ivec2(GS_AHX1 - 1, GS_AHY1 - 1);
+    float a = texelFetch(low, clamp(i0, hlo, hhi), 0).x, bb = texelFetch(low, clamp(i0 + ivec2(1, 0), hlo, hhi), 0).x;
+    float c = texelFetch(low, clamp(i0 + ivec2(0, 1), hlo, hhi), 0).x, d = texelFetch(low, clamp(i0 + ivec2(1, 1), hlo, hhi), 0).x;
     float top = a + (bb - a) * f.x, bot = c + (d - c) * f.x;
     return top + (bot - top) * f.y;
 }
@@ -252,6 +253,7 @@ if (li < uint(GS_LEVEL_BINS)) s_n[li] = 0u;
 barrier();
 for (uint i = li; i < uint(GS_BW * GS_BH); i += 256u) {
     ivec2 b = ivec2(int(i % uint(GS_BW)), int(i / uint(GS_BW)));
+    if (b.x < GS_ABX0 || b.x >= GS_ABX1 || b.y < GS_ABY0 || b.y >= GS_ABY1) continue;
     float q = texelFetch(quiet, b, 0).x / (GS_CODE_SCALE * GS_CODE_SCALE);
     float lumaTen = gs_block_luma(b) / GS_CODE_SCALE;
     // IEEE-754 bit check for NaN/Inf (immune to FXC fast-math eliding isnan()/isinf() without /Gis).
@@ -259,7 +261,9 @@ for (uint i = li; i < uint(GS_BW * GS_BH); i += 256u) {
     bool lBad = (floatBitsToUint(lumaTen) & 0x7f800000u) == 0x7f800000u || lumaTen < -1e30 || lumaTen >= 1e30;
     if (qBad || lBad) continue;
     int bin = gs_level_bin(lumaTen);
-    if ((bin == 0 || bin == GS_LEVEL_BINS - 1) && !(q > GS_LEVEL_ZERO_FLOOR)) continue;
+    bool isGuardBin = (bin == 0 || bin == GS_LEVEL_BINS - 1) ||
+        (GS_IS_CHROMA != 0 && (bin == GS_LEVEL_BINS / 2 || bin == (GS_LEVEL_BINS / 2) - 1));
+    if (isGuardBin && !(q > GS_LEVEL_ZERO_FLOOR)) continue;
     int key = clamp(int(floatBitsToUint(max(q, 0.015625)) >> 20) - 968, 0, GS_KEYS - 1);
     atomicAdd(s_hist[bin * GS_KEYS + key], 1u);
     atomicAdd(s_n[bin], 1u);
@@ -283,7 +287,7 @@ if (li < uint(GS_LEVEL_BINS)) {
 }
 )GLSL";
 
-			// 4b. NMIN: per block, the minimum of quiet over (2 n + 1)^2 blocks, then (unit 4) capped by the frame level function
+			// 4b. NMIN: per block, the minimum of quiet over (2 n + 1)^2 active-rect blocks, then (unit 4) capped by the frame level function
 			// at the block's luma (piecewise linear over the valid bin centres, constant beyond) -> blocks = (N, e3, e1, e2).
 			const char* const NMIN_BODY = R"GLSL(
 ivec2 b = ivec2(gl_GlobalInvocationID.xy);
@@ -291,7 +295,7 @@ if (b.x < GS_BW && b.y < GS_BH) {
     float m = 1e30;
     for (int j = -GS_NG; j <= GS_NG; j++)
         for (int i = -GS_NG; i <= GS_NG; i++)
-            m = min(m, texelFetch(quiet, ivec2(clamp(b.x + i, 0, GS_BW - 1), clamp(b.y + j, 0, GS_BH - 1)), 0).x);
+            m = min(m, texelFetch(quiet, ivec2(clamp(b.x + i, GS_ABX0, GS_ABX1 - 1), clamp(b.y + j, GS_ABY0, GS_ABY1 - 1)), 0).x);
 #if GS_LEVEL_ON
     float lumaTen = gs_block_luma(b) / GS_CODE_SCALE;
     float pos = lumaTen * float(GS_LEVEL_BINS) / 1024.0 - 0.5;
@@ -318,7 +322,7 @@ if (b.x < GS_BW && b.y < GS_BH) {
 )GLSL";
 
 			// 5. APPLY: 16 x 16 output px per workgroup; the plane with a 1 px border and the R1 apron in shared memory,
-			// G1 for the 16 x 16 centre, D = Y - Gb over the 18 x 18 (positions clamped, as GrainSplit's d.get), the 3 x 3
+			// G1 for the 16 x 16 centre, D = Y - Gb over the 18 x 18 (positions clamped to active rect, as GrainSplit's d.get), the 3 x 3
 			// energy, f = clamp(1 - kappa N / max(e, floor), 0, 1) -> the product (Full: split rgba32f; Compact: A, B).
 			const char* const APPLY_HEADER = R"GLSL(
 #define AC 16
@@ -338,11 +342,11 @@ ivec2 so = org - ivec2(1 + R1);
 ivec2 lo = org / 2 - ivec2(1);
 for (uint i = li; i < uint(AA * AA); i += 256u) {
     int r = int(i / uint(AA)), c = int(i % uint(AA));
-    s_y[i] = gs_y(clamp(so.x + c, 0, GS_W - 1), clamp(so.y + r, 0, GS_H - 1));
+    s_y[i] = gs_y(clamp(so.x + c, GS_AX0, GS_AX1 - 1), clamp(so.y + r, GS_AY0, GS_AY1 - 1));
 }
 for (uint i = li; i < uint(LA * LA); i += 256u) {
     int r = int(i / uint(LA)), c = int(i % uint(LA));
-    s_l[i] = texelFetch(low, clamp(lo + ivec2(c, r), ivec2(0), ivec2(GS_HW - 1, GS_HH - 1)), 0).xy;
+    s_l[i] = texelFetch(low, clamp(lo + ivec2(c, r), ivec2(GS_AHX0, GS_AHY0), ivec2(GS_AHX1 - 1, GS_AHY1 - 1)), 0).xy;
 }
 barrier();
 for (uint i = li; i < uint(AA * AC); i += 256u) {
@@ -353,8 +357,8 @@ for (uint i = li; i < uint(AA * AC); i += 256u) {
 }
 for (uint i = li; i < uint(AW * AW); i += 256u) {
     int r = int(i / uint(AW)), c = int(i % uint(AW));
-    ivec2 q = clamp(org - ivec2(1) + ivec2(c, r), ivec2(0), ivec2(GS_W - 1, GS_H - 1));
-    ivec2 sq = q - so;
+    ivec2 q = clamp(org - ivec2(1) + ivec2(c, r), ivec2(GS_AX0, GS_AY0), ivec2(GS_AX1 - 1, GS_AY1 - 1));
+    ivec2 sq = clamp(q - so, ivec2(0), ivec2(AA - 1));
     s_d[i] = s_y[sq.y * AA + sq.x] - low_s(q, lo).x;
 }
 barrier();
@@ -373,7 +377,8 @@ if (p.x < GS_W && p.y < GS_H) {
     float y = s_y[(lid.y + 1 + R1) * AA + lid.x + 1 + R1];
     float gb = low_s(p, lo).x;
     float d1 = y - g1, d2 = g1 - gb;
-    float nn = texelFetch(blocks, p / GS_B, 0).x;
+    ivec2 ab = clamp(p / GS_B, ivec2(GS_ABX0, GS_ABY0), ivec2(GS_ABX1 - 1, GS_ABY1 - 1));
+    float nn = texelFetch(blocks, ab, 0).x;
     float f = clamp(1.0 - GS_KAPPA * nn / max(e, GS_FLOOR), 0.0, 1.0);
 #ifdef GS_COMPACT
     imageStore(split_a, p, vec4(f * d1, f * d2, 0.0, 0.0));
@@ -720,7 +725,8 @@ if (p.x < GS_W && p.y < GS_H) {
 		}
 
 		bool Splitter::Compute(VpSkeleton::OwnerGpuContext& ctx, pl_tex plane, int component, double codeUnit, double scale, int B,
-			const Params& params, uint64_t seq, ContextHold& hold)
+			const Params& params, uint64_t seq, ContextHold& hold,
+			int activeX0, int activeY0, int activeX1, int activeY1, bool isChroma)
 		{
 			hold = ContextHold();
 			m_run = Run();
@@ -751,6 +757,11 @@ if (p.x < GS_W && p.y < GS_H) {
 			Options o;
 			o.storage = GrainSplit::Storage::Full;
 			o.seq = seq;
+			o.activeX0 = activeX0;
+			o.activeY0 = activeY0;
+			o.activeX1 = activeX1;
+			o.activeY1 = activeY1;
+			o.isChroma = isChroma;
 			struct Want
 			{
 				const VpSkeleton::TexShape* shape;
@@ -801,12 +812,44 @@ if (p.x < GS_W && p.y < GS_H) {
 				std::string geo, w1, wlow, yread;
 				int r1 = 1, rb = 1, r6 = 1;
 			};
-			PassText MakePassText(int w, int h, int B, int bw, int bh, int component, double codeUnit, double scale, const Params& params)
+			PassText MakePassText(int w, int h, int B, int bw, int bh, int component, double codeUnit, double scale, const Params& params, const Options& options)
 			{
 				using namespace VpvGpu;
 				static const char* const kComp[4] = { "x", "y", "z", "w" };
+				const int hw = HalfOf(w), hh = HalfOf(h);
+				int ax0 = 0, ay0 = 0, ax1 = w, ay1 = h;
+				if (options.activeX1 > options.activeX0 && options.activeY1 > options.activeY0)
+				{
+					ax0 = (std::max)(0, (std::min)(w - 1, options.activeX0));
+					ay0 = (std::max)(0, (std::min)(h - 1, options.activeY0));
+					ax1 = (std::max)(ax0 + 1, (std::min)(w, options.activeX1));
+					ay1 = (std::max)(ay0 + 1, (std::min)(h, options.activeY1));
+				}
+				int ahx0 = 0, ahy0 = 0, ahx1 = hw, ahy1 = hh;
+				if (ax0 > 0 || ax1 < w)
+				{
+					ahx0 = (ax1 - ax0 >= 2) ? (ax0 + 1) / 2 : ax0 / 2;
+					ahx1 = (ax1 - ax0 >= 2) ? ax1 / 2 : ahx0 + 1;
+					ahx0 = (std::max)(0, (std::min)(hw - 1, ahx0));
+					ahx1 = (std::max)(ahx0 + 1, (std::min)(hw, ahx1));
+				}
+				if (ay0 > 0 || ay1 < h)
+				{
+					ahy0 = (ay1 - ay0 >= 2) ? (ay0 + 1) / 2 : ay0 / 2;
+					ahy1 = (ay1 - ay0 >= 2) ? ay1 / 2 : ahy0 + 1;
+					ahy0 = (std::max)(0, (std::min)(hh - 1, ahy0));
+					ahy1 = (std::max)(ahy0 + 1, (std::min)(hh, ahy1));
+				}
+				const int abx0 = (std::max)(0, (std::min)(bw - 1, ax0 / B));
+				const int aby0 = (std::max)(0, (std::min)(bh - 1, ay0 / B));
+				const int abx1 = (std::max)(abx0 + 1, (std::min)(bw, (ax1 + B - 1) / B));
+				const int aby1 = (std::max)(aby0 + 1, (std::min)(bh, (ay1 + B - 1) / B));
 				PassText t;
-				t.geo = DefineInt("GS_W", w) + DefineInt("GS_H", h) + DefineInt("GS_HW", HalfOf(w)) + DefineInt("GS_HH", HalfOf(h)) +
+				t.geo = DefineInt("GS_W", w) + DefineInt("GS_H", h) + DefineInt("GS_HW", hw) + DefineInt("GS_HH", hh) +
+					DefineInt("GS_AX0", ax0) + DefineInt("GS_AY0", ay0) + DefineInt("GS_AX1", ax1) + DefineInt("GS_AY1", ay1) +
+					DefineInt("GS_AHX0", ahx0) + DefineInt("GS_AHY0", ahy0) + DefineInt("GS_AHX1", ahx1) + DefineInt("GS_AHY1", ahy1) +
+					DefineInt("GS_ABX0", abx0) + DefineInt("GS_ABY0", aby0) + DefineInt("GS_ABX1", abx1) + DefineInt("GS_ABY1", aby1) +
+					DefineInt("GS_IS_CHROMA", options.isChroma ? 1 : 0) +
 					DefineInt("GS_B", B) + DefineInt("GS_BW", bw) + DefineInt("GS_BH", bh) + DefineInt("GS_UNIT_VERSION", GrainSplit::kUnitVersion) +
 					DefineInt("GS_LEVEL_BINS", params.levelBins) + DefineInt("GS_LEVEL_PCT", params.levelPercentile) +
 					DefineInt("GS_LEVEL_MINB", params.levelMinBlocks) + DefineInt("GS_LEVEL_ON", params.levelCap ? 1 : 0) +
@@ -875,7 +918,7 @@ if (p.x < GS_W && p.y < GS_H) {
 			const Run r = m_run;
 			const int w = r.w, h = r.h, bw = r.bw, bh = r.bh, hw = HalfOf(w), hh = HalfOf(h);
 			const bool compact = r.compact;
-			const PassText txt = MakePassText(w, h, B, bw, bh, component, codeUnit, scale, params);
+			const PassText txt = MakePassText(w, h, B, bw, bh, component, codeUnit, scale, params, options);
 			const int rl = (std::max)(txt.rb, txt.r6);
 			auto fail = [&](const char* why) {
 				m_error = why;

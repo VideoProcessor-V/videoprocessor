@@ -32,6 +32,15 @@ if (p.x < sz.x && p.y < sz.y) {
     vec2 inv = 1.0 / vec2(textureSize(src, 0));
     vec2 pos = vec2(p) + vec2(0.5);
     vec4 c = texture(src, pos * inv);
+    // POD2-H4: skip texels outside active picture rect and clamp ring/along taps inside active rect.
+    if (pos.x < active_rect.x || pos.x > active_rect.z || pos.y < active_rect.y || pos.y > active_rect.w) {
+        imageStore(dst, p, c);
+        if (write_w != 0)
+            imageStore(w_out, p, vec4(0.0, 0.0, 0.0, 1.0));
+        return;
+    }
+    vec2 ar_lo = active_rect.xy + vec2(0.5);
+    vec2 ar_hi = max(ar_lo, active_rect.zw - vec2(0.5));
     uint h = uint(p.x) * 1973u + uint(p.y) * 9277u + 26699u;
     h = (h ^ (h >> 13u)) * 1540483477u;
     h ^= h >> 15u;
@@ -40,6 +49,10 @@ if (p.x < sz.x && p.y < sz.y) {
     float d = mix(1.0, radius, r1);
     vec2 o = vec2(cos(r2 * 6.2831853), sin(r2 * 6.2831853)) * d;
     vec2 q = vec2(-o.y, o.x);
+    vec2 po1 = clamp(pos + o, ar_lo, ar_hi);
+    vec2 po2 = clamp(pos - o, ar_lo, ar_hi);
+    vec2 pq1 = clamp(pos + q, ar_lo, ar_hi);
+    vec2 pq2 = clamp(pos - q, ar_lo, ar_hi);
 #ifdef SPLIT
     // Shared grain guard (15b A3): reads P10/P10c via gs_fetch (when P10_GRAIN) and P11
     // structure tensor re_s1 = (jxx, jyy, jxy, lap_e) (when P11_TENSOR); visibly falls back
@@ -49,18 +62,18 @@ if (p.x < sz.x && p.y < sz.y) {
 #ifdef P10_GRAIN
 #ifdef P10_GRAIN_DUAL
     vec4 lowc = vec4(gs_fetch(p).w * p10_cu, gs_fetch_cr(p).w * p10_cu_cr, 0.0, 0.0);
-    vec4 avg = (p10_base_dual_at(pos + o, hi, p10_cu, p10_cu_cr) + p10_base_dual_at(pos - o, hi, p10_cu, p10_cu_cr) +
-                p10_base_dual_at(pos + q, hi, p10_cu, p10_cu_cr) + p10_base_dual_at(pos - q, hi, p10_cu, p10_cu_cr)) / 4.0;
+    vec4 avg = (p10_base_dual_at(po1, hi, p10_cu, p10_cu_cr) + p10_base_dual_at(po2, hi, p10_cu, p10_cu_cr) +
+                p10_base_dual_at(pq1, hi, p10_cu, p10_cu_cr) + p10_base_dual_at(pq2, hi, p10_cu, p10_cu_cr)) / 4.0;
 #else
     vec4 lowc = vec4(gs_fetch(p).w * p10_cu, 0.0, 0.0, 0.0);
-    vec4 avg = (p10_base_at(pos + o, hi, p10_cu) + p10_base_at(pos - o, hi, p10_cu) +
-                p10_base_at(pos + q, hi, p10_cu) + p10_base_at(pos - q, hi, p10_cu)) / 4.0;
+    vec4 avg = (p10_base_at(po1, hi, p10_cu) + p10_base_at(po2, hi, p10_cu) +
+                p10_base_at(pq1, hi, p10_cu) + p10_base_at(pq2, hi, p10_cu)) / 4.0;
 #endif
 #else
     vec2 linv = 0.5 / vec2(textureSize(split_low, 0));
     vec4 lowc = texture(split_low, pos * linv);
-    vec4 avg = 0.25 * (texture(split_low, (pos + o) * linv) + texture(split_low, (pos - o) * linv) +
-                       texture(split_low, (pos + q) * linv) + texture(split_low, (pos - q) * linv));
+    vec4 avg = 0.25 * (texture(split_low, po1 * linv) + texture(split_low, po2 * linv) +
+                       texture(split_low, pq1 * linv) + texture(split_low, pq2 * linv));
 #endif
 #ifdef P11_TENSOR
     // P11 re_s1 stores (jxx, jyy, jxy, lap_e) per block in codes^2.
@@ -75,7 +88,7 @@ if (p.x < sz.x && p.y < sz.y) {
     vec2 along = vec2(-sin(theta), cos(theta)) * along_step;
     vec4 ra = vec4(0.0), ra2 = vec4(0.0);
     for (int k = -ALONG_N; k <= ALONG_N; k++) {
-        vec2 sp = pos + float(k) * along;
+        vec2 sp = clamp(pos + float(k) * along, ar_lo, ar_hi);
 #ifdef P10_GRAIN
 #ifdef P10_GRAIN_DUAL
         vec4 rv = vec4(texture(src, sp * inv).xy, 0.0, 0.0) - p10_base_dual_at(sp, hi, p10_cu, p10_cu_cr);
@@ -93,8 +106,8 @@ if (p.x < sz.x && p.y < sz.y) {
     vec4 base = lowc + ra * (smoothstep(coh_lo, coh_hi, coh) * smoothstep(rho_lo, rho_hi, rho));
     vec4 diff = abs(base - avg);
 #else
-    vec4 avg = 0.25 * (texture(src, (pos + o) * inv) + texture(src, (pos - o) * inv) +
-                       texture(src, (pos + q) * inv) + texture(src, (pos - q) * inv));
+    vec4 avg = 0.25 * (texture(src, po1 * inv) + texture(src, po2 * inv) +
+                       texture(src, pq1 * inv) + texture(src, pq2 * inv));
     vec4 diff = abs(c - avg);
 #endif
     float m = diff.x;
@@ -439,8 +452,11 @@ vec4 p10_base_dual_at(vec2 sp, ivec2 hi, float cu0, float cu1)
 		weightSequence = 0;
 		prevValid = false;
 		lastFailureError.clear();
-		cachedBandScale = -1.0;
-		cachedBandWeights.clear();
+		for (int p = 0; p < PL_MAX_PLANES; ++p)
+		{
+			cachedBandScale[p] = -1.0;
+			cachedBandWeights[p].clear();
+		}
 	}
 
 	bool Module::SplitLowBand(pl_gpu gpu, pl_dispatch dispatch, pl_tex in, int slot, int plane, double scale,
@@ -473,7 +489,8 @@ vec4 p10_base_dual_at(vec2 sp, ivec2 hi, float cu0, float cu1)
 			return false;
 		}
 		const int gx = (hw + 15) / 16, gy = (hh + 15) / 16;
-		if (cachedBandScale != scale || cachedBandWeights.empty())
+		const int pIdx = (std::max)(0, (std::min)(plane, PL_MAX_PLANES - 1));
+		if (cachedBandScale[pIdx] != scale || cachedBandWeights[pIdx].empty())
 		{
 			VpUnit::BandMemo::BandKey key;
 			key.resolution = VpUnit::BandMemo::Stage::Half;
@@ -483,16 +500,16 @@ vec4 p10_base_dual_at(vec2 sp, ivec2 hi, float cu0, float cu1)
 			key.sigmaPx = VpUnit::BandFromBase::kSigmaLow * scale;
 			key.law = VpUnit::BandMemo::Law::Low;
 			key.edge = VpUnit::BandFromBase::EdgeMode::Replicate;
-			cachedBandWeights = VpUnit::BandMemo::GlslOf(key);
-			cachedBandScale = scale;
+			cachedBandWeights[pIdx] = VpUnit::BandMemo::GlslOf(key);
+			cachedBandScale[pIdx] = scale;
 		}
 		static const std::string kEmptyHeader;
 		const pl_shader_desc dh[2] = { Sampled("src", in, false), Storage("dst", splitHalf[slot][plane]) };
 		const pl_shader_desc dx[2] = { Sampled("src", splitHalf[slot][plane], false), Storage("dst", splitTmp[slot][plane]) };
 		const pl_shader_desc dy[2] = { Sampled("src", splitTmp[slot][plane], false), Storage("dst", splitLow[slot][plane]) };
 		if (!Pass(dispatch, "VideoProcessor deband: grain split (half)", kEmptyHeader, SPLIT_HALF_BODY, dh, 2, nullptr, 0, gx, gy) ||
-			!Pass(dispatch, "VideoProcessor deband: grain split (across)", cachedBandWeights, SPLIT_H_BODY, dx, 2, nullptr, 0, gx, gy) ||
-			!Pass(dispatch, "VideoProcessor deband: grain split (down)", cachedBandWeights, SPLIT_V_BODY, dy, 2, nullptr, 0, gx, gy))
+			!Pass(dispatch, "VideoProcessor deband: grain split (across)", cachedBandWeights[pIdx], SPLIT_H_BODY, dx, 2, nullptr, 0, gx, gy) ||
+			!Pass(dispatch, "VideoProcessor deband: grain split (down)", cachedBandWeights[pIdx], SPLIT_V_BODY, dy, 2, nullptr, 0, gx, gy))
 		{
 			error = "the grain split passes failed";
 			lastFailureError = error;
@@ -533,12 +550,11 @@ vec4 p10_base_dual_at(vec2 sp, ivec2 hi, float cu0, float cu1)
 		else if (consecutive) readIndex = curIndex;
 		const bool hold = haveField && readIndex >= 0;
 		const int next = writeIndex;
-		// One code of the signal in the plane texture's normalised units.
-		const int sampleDepth = source.repr.bits.sample_depth > 0 ? source.repr.bits.sample_depth : luma->params.format->component_depth[0];
-		const double codeUnit = luma->params.format->type == PL_FMT_FLOAT ?
-			1.0 / (std::pow(2.0, params.colorDepth) - 1.0) :
-			std::pow(2.0, source.repr.bits.bit_shift) / (std::pow(2.0, sampleDepth) - 1.0);
-		const float thr = static_cast<float>(params.thresholdCodes * codeUnit);
+		const float rawCx0 = (std::min)(source.crop.x0, source.crop.x1);
+		const float rawCx1 = (std::max)(source.crop.x0, source.crop.x1);
+		const float rawCy0 = (std::min)(source.crop.y0, source.crop.y1);
+		const float rawCy1 = (std::max)(source.crop.y0, source.crop.y1);
+		const bool hasSourceCrop = (rawCx1 > rawCx0) && (rawCy1 > rawCy0);
 
 		pl_frame frame = source;
 		bool anyHeld = false;   // a plane really read the previous weights (finding D5)
@@ -553,6 +569,27 @@ vec4 p10_base_dual_at(vec2 sp, ivec2 hi, float cu0, float cu1)
 				return false;
 			}
 			const int w = in->params.w, h = in->params.h;
+			// POD2-H4: derive one code of the signal in THIS plane's normalised texture units.
+			const int sampleDepth = source.repr.bits.sample_depth > 0 ? source.repr.bits.sample_depth : in->params.format->component_depth[0];
+			const double codeUnit = in->params.format->type == PL_FMT_FLOAT ?
+				1.0 / (std::pow(2.0, params.colorDepth) - 1.0) :
+				std::pow(2.0, source.repr.bits.bit_shift) / (std::pow(2.0, sampleDepth) - 1.0);
+			const float thr = static_cast<float>(params.thresholdCodes * codeUnit);
+			// Active picture rect in this plane's pixel coordinates (empty source.crop -> full plane).
+			float activeRect[4] = { 0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h) };
+			if (hasSourceCrop && luma->params.w > 0 && luma->params.h > 0)
+			{
+				const float sx = static_cast<float>(w) / static_cast<float>(luma->params.w);
+				const float sy = static_cast<float>(h) / static_cast<float>(luma->params.h);
+				const float ax0 = (std::max)(0.0f, (std::min)(static_cast<float>(w - 1), rawCx0 * sx));
+				const float ay0 = (std::max)(0.0f, (std::min)(static_cast<float>(h - 1), rawCy0 * sy));
+				const float ax1 = (std::max)(ax0 + 1.0f, (std::min)(static_cast<float>(w), rawCx1 * sx));
+				const float ay1 = (std::max)(ay0 + 1.0f, (std::min)(static_cast<float>(h), rawCy1 * sy));
+				activeRect[0] = ax0;
+				activeRect[1] = ay0;
+				activeRect[2] = ax1;
+				activeRect[3] = ay1;
+			}
 			pl_tex_params tp{};
 			tp.w = w;
 			tp.h = h;
@@ -1000,11 +1037,12 @@ vec4 p10_base_dual_at(vec2 sp, ivec2 hi, float cu0, float cu1)
 					descScratch.push_back(Sampled("split_tensor", splitTensor[slot][plane], true));
 			}
 			const int writeW = weightOut ? 1 : 0;
-			pl_shader_var v[24];
+			pl_shader_var v[26];
 			int nv = 0;
 			v[nv++] = { pl_var_float("thr"), &thr, true };
 			v[nv++] = { pl_var_float("radius"), &radius, true };
 			v[nv++] = { pl_var_int("write_w"), &writeW, true };
+			v[nv++] = { pl_var_vec4("active_rect"), activeRect, true };
 			if (useHold || useGrain) v[nv++] = { pl_var_vec2("to_field"), toField, true };
 			if (useHold) v[nv++] = { pl_var_float("hold_alpha"), &alpha, true };
 			if (useGrain) v[nv++] = { pl_var_float("grain_codes"), &grainCodes, true };

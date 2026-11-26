@@ -425,8 +425,10 @@ if (i < READBACK_WORDS) {
 						return static_cast<float>(p);
 				return (std::max)(1.0f, span / static_cast<float>(grid));
 			};
-			grainPitch[0] = derivePitch(crop.x0 + crop.x1, grain->params.w);
-			grainPitch[1] = derivePitch(crop.y0 + crop.y1, grain->params.h);
+			const float spanW = grainSourceW > 0 ? static_cast<float>(grainSourceW) : (crop.x0 + crop.x1);
+			const float spanH = grainSourceH > 0 ? static_cast<float>(grainSourceH) : (crop.y0 + crop.y1);
+			grainPitch[0] = derivePitch(spanW, grain->params.w);
+			grainPitch[1] = derivePitch(spanH, grain->params.h);
 		}
 		// Hunt 2: the masks in hooked-texture pixels (all zero = unused).
 		static_assert(MAX_MASK_RECTS == 6, "MASK_HEADER names six masks");

@@ -116,8 +116,10 @@ namespace VpDebander
 		bool prevValid = false;                  // weight[1 - curIndex] = weightSequence - 1's
 		uint64_t weightSequence = 0;
 		int weightW[PL_MAX_PLANES] = {}, weightH[PL_MAX_PLANES] = {};
-		std::string error, lastFailureError, lastBandMemoFallback, lastGrainGuardFallback, headerScratch, cachedBandWeights;
-		std::vector<pl_shader_desc> descScratch; double cachedBandScale = -1.0;
+		std::string error, lastFailureError, lastBandMemoFallback, lastGrainGuardFallback, headerScratch;
+		std::string cachedBandWeights[PL_MAX_PLANES];
+		std::vector<pl_shader_desc> descScratch;
+		double cachedBandScale[PL_MAX_PLANES] = { -1.0, -1.0, -1.0, -1.0 };
 		TdProducts::ReadResult tdRead;
 		unsigned long long failures = 0, held = 0, bandMemoHits = 0, bandMemoFallbacks = 0, grainGuardHits = 0, grainGuardFallbacks = 0;
 	};

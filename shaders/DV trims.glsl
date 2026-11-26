@@ -414,8 +414,10 @@ float dv_trc_lin(float v)
     float a = abs(v);
     float r = a;
     if (dv_trc_kind < 1.5) {
-        float k = pow(dv_trc_param, 2.4);
-        r = (pow(a + dv_trc_param, 2.4) - k) / (pow(1.0 + dv_trc_param, 2.4) - k);
+        float b = max(dv_trc_param, 0.0);
+        float k = pow(b, 2.4);
+        float denom = max(pow(1.0 + b, 2.4) - k, 1e-6);
+        r = (pow(a + b, 2.4) - k) / denom;
     } else {
         r = a <= 0.04045 ? a * (1.0 / 12.92) : pow((a + 0.055) * (1.0 / 1.055), 2.4);
     }
@@ -427,8 +429,10 @@ float dv_trc_enc(float l)
     float a = abs(l);
     float r = a;
     if (dv_trc_kind < 1.5) {
-        float k = pow(dv_trc_param, 2.4);
-        r = pow(a * (pow(1.0 + dv_trc_param, 2.4) - k) + k, 1.0 / 2.4) - dv_trc_param;
+        float b = max(dv_trc_param, 0.0);
+        float k = pow(b, 2.4);
+        float span = max(pow(1.0 + b, 2.4) - k, 1e-6);
+        r = pow(a * span + k, 1.0 / 2.4) - b;
     } else {
         r = a <= 0.0031308 ? a * 12.92 : 1.055 * pow(a, 1.0 / 2.4) - 0.055;
     }
@@ -437,20 +441,24 @@ float dv_trc_enc(float l)
 
 float to_nits(float v)
 {
+    float peak = max(dv_peak_nits, 1e-6);
+    float gam = max(dv_gamma, 1e-6);
     if (dv_signal_pq > 0.5)
         return sign(v) * nits_from_pq(abs(v));   // below-black kept
     if (dv_trc_kind > 0.5)
-        return dv_trc_lin(v) * dv_peak_nits;     // GEM-008: BT.1886 / sRGB
-    return sign(v) * pow(abs(v), dv_gamma) * dv_peak_nits;
+        return dv_trc_lin(v) * peak;     // GEM-008: BT.1886 / sRGB
+    return sign(v) * pow(abs(v), gam) * peak;
 }
 
 float from_nits(float n)
 {
+    float peak = max(dv_peak_nits, 1e-6);
+    float gam = max(dv_gamma, 1e-6);
     if (dv_signal_pq > 0.5)
         return sign(n) * pq_from_nits(abs(n));
     if (dv_trc_kind > 0.5)
-        return dv_trc_enc(n / dv_peak_nits);     // GEM-008: BT.1886 / sRGB
-    return sign(n) * pow(abs(n) / dv_peak_nits, 1.0 / dv_gamma);
+        return dv_trc_enc(n / peak);     // GEM-008: BT.1886 / sRGB
+    return sign(n) * pow(abs(n) / peak, 1.0 / gam);
 }
 
 // DolbyVisionTrims constants: the offset fade-in (16 PQ codes), the near-black
@@ -512,10 +520,10 @@ vec4 dv_hook_ext(vec4 color)
     float Y = dv_kr * L.r + kg * L.g + dv_kb * L.b;
     if (!(Y > 0.0))
         return color;
-    float peak_pq = dv_peak_pq;   // GEM-012: per frame on the CPU
+    float peak_pq = max(dv_peak_pq, 1e-6);   // GEM-012: per frame on the CPU
     float t = pq_from_nits(Y) / peak_pq;
     float inside = min(t, 1.0);
-    float fade = clamp(inside / (DV_OFFSET_FADE_PQ / peak_pq), 0.0, 1.0);
+    float fade = clamp(inside / max(DV_OFFSET_FADE_PQ / peak_pq, 1e-6), 0.0, 1.0);
     float v = inside * dv_slope + dv_offset * fade;
     v = dv_shoulder(max(v, 0.0), dv_slope + dv_offset);
     v = clamp(v, 0.0, 1.0);
@@ -550,7 +558,7 @@ vec4 dv_hook_ext(vec4 color)
         }
     }
     float sat = clamp(dv_sat_gain * hue_sat * (dv_chroma_weight == 0.0 ? 1.0 : pow(max(r, 1e-6), dv_chroma_weight)), 0.0, 2.0);
-    float y_near = dv_near_black_nits;   // GEM-012: the CPU reference's value
+    float y_near = max(dv_near_black_nits, 1e-6);   // GEM-012: the CPU reference's value
     float w = clamp((Y - y_near) / y_near, 0.0, 1.0);
     float additive = 1.0 + (sat - 1.0) * clamp(Y / y_near, 0.0, 1.0);
     float multiplicative = sat * min(r, DV_MAX_CHROMA_RATIO);
@@ -617,10 +625,10 @@ vec4 dv_hook_ictcp(vec4 color)
     vec3 ictcp = dv_lms_to_ictcp(lmspq);
     if (!(ictcp.x > 0.0))
         return color;
-    float peak_pq = dv_peak_pq;   // GEM-012: per frame on the CPU
+    float peak_pq = max(dv_peak_pq, 1e-6);   // GEM-012: per frame on the CPU
     float t = ictcp.x / peak_pq;
     float inside = min(t, 1.0);
-    float fade = clamp(inside / (DV_OFFSET_FADE_PQ / peak_pq), 0.0, 1.0);
+    float fade = clamp(inside / max(DV_OFFSET_FADE_PQ / peak_pq, 1e-6), 0.0, 1.0);
     float v = inside * dv_slope + dv_offset * fade;
     v = dv_shoulder(max(v, 0.0), dv_slope + dv_offset);
     v = clamp(v, 0.0, 1.0);
@@ -698,10 +706,10 @@ vec4 hook()
     float Y = dv_kr * L.r + kg * L.g + dv_kb * L.b;
     if (!(Y > 0.0))
         return color;
-    float peak_pq = dv_peak_pq;   // GEM-012: per frame on the CPU
+    float peak_pq = max(dv_peak_pq, 1e-6);   // GEM-012: per frame on the CPU
     float t = pq_from_nits(Y) / peak_pq;
     float inside = min(t, 1.0);
-    float fade = clamp(inside / (DV_OFFSET_FADE_PQ / peak_pq), 0.0, 1.0);
+    float fade = clamp(inside / max(DV_OFFSET_FADE_PQ / peak_pq, 1e-6), 0.0, 1.0);
     float v = inside * dv_slope + dv_offset * fade;
     v = dv_shoulder(max(v, 0.0), dv_slope + dv_offset);
     v = clamp(v, 0.0, 1.0);
@@ -712,7 +720,7 @@ vec4 hook()
     float Y2 = nits_from_pq(v * peak_pq);
     float r = Y2 / Y;
     float sat = clamp(dv_sat_gain * (dv_chroma_weight == 0.0 ? 1.0 : pow(max(r, 1e-6), dv_chroma_weight)), 0.0, 2.0);
-    float y_near = dv_near_black_nits;   // GEM-012: the CPU reference's value
+    float y_near = max(dv_near_black_nits, 1e-6);   // GEM-012: the CPU reference's value
     float w = clamp((Y - y_near) / y_near, 0.0, 1.0);
     float additive = 1.0 + (sat - 1.0) * clamp(Y / y_near, 0.0, 1.0);
     float multiplicative = sat * min(r, DV_MAX_CHROMA_RATIO);

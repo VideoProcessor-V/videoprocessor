@@ -80,19 +80,21 @@ namespace FocusMap
 		defocus = T(0);
 		confidence = T(0);
 		if (!(s[kCoverage] >= T(p.minCoverage))) return;
+		if (!std::isfinite(sum2) || !std::isfinite(sum4) || !(sum2 >= T(0)) || !(sum4 >= T(0))) return;
 		const T n = s[kStatN];
-		const bool haveSplit = n >= T(0);
+		const bool haveSplit = std::isfinite(n) && n >= T(0);
 		if (!haveSplit) flags |= kNoSplit;
-		const T e1 = s[kE1] > T(0) ? s[kE1] : T(0);
-		const T e2 = s[kE2] > T(0) ? s[kE2] : T(0);
-		const T e3 = s[kE3] > T(0) ? s[kE3] : T(0);
+		const T e1 = (std::isfinite(s[kE1]) && s[kE1] > T(0)) ? s[kE1] : T(0);
+		const T e2 = (std::isfinite(s[kE2]) && s[kE2] > T(0)) ? s[kE2] : T(0);
+		const T e3 = (std::isfinite(s[kE3]) && s[kE3] > T(0)) ? s[kE3] : T(0);
 		T fine = haveSplit ? e1 - n : e1;
 		if (fine < T(0)) fine = T(0);
 		const T total = fine + e2 + e3;
-		const T peak = sum2 > T(0) ? sum4 / sum2 : T(0);
+		const T peak = (sum2 > T(0) && std::isfinite(sum4 / sum2)) ? (sum4 / sum2) : T(0);
 		T sharp = peak - (haveSplit ? T(kSobelPeakNoiseGain) * n : T(0));
 		if (sharp < T(0)) sharp = T(0);
 		const T ratio = sharp / (T(kSobelPeakNoiseGain) * total + T(p.eps));
+		if (!std::isfinite(ratio) || !std::isfinite(total)) return;
 		defocus = T(1) - RampMath::Ramp<T>(ratio, T(p.edgeLo), T(p.edgeHi));
 		confidence = RampMath::Ramp<T>(total, T(p.energyLo), T(p.energyHi));
 		flags |= kValid;
@@ -126,9 +128,16 @@ namespace FocusMap
 	// ---- 8-byte packed form (the CPU form of the product) ----
 	inline void Pack(const Block& b, uint8_t* out)
 	{
-		auto u16 = [](float v) { return static_cast<uint16_t>(std::lround((std::min)((std::max)(v, 0.0f), 1.0f) * 65535.0f)); };
+		auto u16 = [](float v) {
+			if (!std::isfinite(v) || !(v > 0.0f)) return uint16_t(0);
+			return static_cast<uint16_t>(std::lround((std::min)(v, 1.0f) * 65535.0f));
+		};
+		auto i16 = [](float v) {
+			if (!std::isfinite(v)) return int16_t(0);
+			return static_cast<int16_t>(std::lround((std::min)((std::max)(v, -1.0f), 1.0f) * 32767.0f));
+		};
 		const uint16_t d = u16(b.defocus), c = u16(b.confidence);
-		const int16_t dl = static_cast<int16_t>(std::lround((std::min)((std::max)(b.delta, -1.0f), 1.0f) * 32767.0f));
+		const int16_t dl = i16(b.delta);
 		std::memcpy(out, &d, 2);
 		std::memcpy(out + 2, &dl, 2);
 		std::memcpy(out + 4, &c, 2);
@@ -350,7 +359,7 @@ namespace FocusMap
 	inline BlockMotion CameraMotionOf(const float* p7)
 	{
 		BlockMotion m;
-		if (p7[3] < 0.5f) return m;
+		if (!std::isfinite(p7[0]) || !std::isfinite(p7[1]) || !std::isfinite(p7[3]) || p7[3] < 0.5f) return m;
 		m.dx = -p7[0];   // content moved by +t from the previous frame: it was at p - t
 		m.dy = -p7[1];
 		m.source = MotionSource::Camera;
@@ -405,11 +414,26 @@ namespace FocusMap
 				if (m.source == MotionSource::None && p7) m = CameraMotionOf(p7);
 				if (m.source == MotionSource::None) f |= kNoMotion;
 				else if (m.source == MotionSource::Camera) f |= kCameraMotion;
-				const float px = (bx + 0.5f) * g.block + m.dx, py = (by + 0.5f) * g.block + m.dy;
-				const int sx = static_cast<int>(std::floor(px / g.block)), sy = static_cast<int>(std::floor(py / g.block));
-				bool pok = prevStats && sx >= 0 && sy >= 0 && sx < g.gw && sy < g.gh;
-				const size_t j = pok ? static_cast<size_t>(sy) * g.gw + sx : 0;
-				pok = pok && pv[j];
+				const bool finiteM = std::isfinite(m.dx) && std::isfinite(m.dy) && g.block > 0;
+				bool pok = false;
+				size_t j = 0;
+				if (prevStats && finiteM)
+				{
+					const double bxPrev = (static_cast<double>(bx) + 0.5) + static_cast<double>(m.dx) / static_cast<double>(g.block);
+					const double byPrev = (static_cast<double>(by) + 0.5) + static_cast<double>(m.dy) / static_cast<double>(g.block);
+					if (std::isfinite(bxPrev) && std::isfinite(byPrev) &&
+						bxPrev >= 0.0 && byPrev >= 0.0 &&
+						bxPrev < static_cast<double>(g.gw) && byPrev < static_cast<double>(g.gh))
+					{
+						const int sx = static_cast<int>(std::floor(bxPrev));
+						const int sy = static_cast<int>(std::floor(byPrev));
+						if (sx >= 0 && sy >= 0 && sx < g.gw && sy < g.gh)
+						{
+							j = static_cast<size_t>(sy) * g.gw + sx;
+							pok = pv[j] != 0;
+						}
+					}
+				}
 				float delta;
 				uint32_t fo;
 				ChangeBlock<float>(p, d, c, f, pok, pok ? pd[j] : 0.0f, pok ? pc[j] : 0.0f, delta, fo);

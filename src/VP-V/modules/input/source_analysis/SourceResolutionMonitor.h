@@ -861,6 +861,7 @@ namespace SourceResolutionMonitor
 		{
 			uint64_t seq;
 			bool cut;
+			bool fromFrameJudge = false;   // true when judged by fallback frameJudge (flash-cancellable)
 		};
 		std::deque<U7AheadEntry> u7AheadHistory;   // guarded by `frameJudgeMutex` (MED-3: consecutive U7 verdicts for LookAheadEvidence)
 		mutable std::mutex frameJudgeMutex;

@@ -295,6 +295,7 @@ namespace CameraLink
 	FieldReadbackRing::Entry* FieldReadbackRing::FreeSlot()
 	{
 		DrainParked();
+		DrainDraining();
 		for (Entry& e : m_entries)
 			if (e.state == State::Free)
 				return &e;

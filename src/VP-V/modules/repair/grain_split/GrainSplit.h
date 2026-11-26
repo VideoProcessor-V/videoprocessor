@@ -236,14 +236,16 @@ namespace GrainSplit
 		const int j = static_cast<int>(std::floor(lumaTen * p.levelBins / 1024.0));
 		return j < 0 ? 0 : (j >= p.levelBins ? p.levelBins - 1 : j);
 	}
-	// GS 155 boundary-bin zero-energy exclusion (NaN-safe, strictly energy-gated, never by code value).
-	inline bool LevelBlockExcluded(int bin, double quiet10, const Params& p)
+	// GS 155 / POD2-H1 boundary-bin (and neutral-chroma) zero-energy exclusion (NaN-safe, strictly energy-gated, never by code value).
+	inline bool LevelBlockExcluded(int bin, double quiet10, const Params& p, bool isChroma = false)
 	{
-		return (bin == 0 || bin == p.levelBins - 1) && !(quiet10 > kLevelZeroEnergyFloor);
+		const bool boundary = (bin == 0 || bin == p.levelBins - 1) ||
+			(isChroma && (bin == p.levelBins / 2 || bin == (p.levelBins / 2) - 1));
+		return boundary && !(quiet10 > kLevelZeroEnergyFloor);
 	}
 	// The per-bin table: quiet and blockLuma in the plane's own codes; level[] in ten-bit-equivalent codes^2; valid[j]
 	// false for a bin with fewer than levelMinBlocks blocks. level / valid hold at least p.levelBins entries.
-	inline void GrainLevelTable(const std::vector<double>& quiet, const std::vector<double>& blockLuma, const Params& p, double* level, bool* valid)
+	inline void GrainLevelTable(const std::vector<double>& quiet, const std::vector<double>& blockLuma, const Params& p, double* level, bool* valid, bool isChroma = false)
 	{
 		const double cs = DepthScale(p.sourceBits), es = cs * cs;
 		std::vector<std::vector<int>> keys(static_cast<size_t>(p.levelBins));
@@ -251,7 +253,7 @@ namespace GrainSplit
 		{
 			const int bin = LevelBin(blockLuma[i] / cs, p);
 			const double q = quiet[i] / es;
-			if (LevelBlockExcluded(bin, q, p)) continue;
+			if (LevelBlockExcluded(bin, q, p, isChroma)) continue;
 			keys[static_cast<size_t>(bin)].push_back(LevelKey(q));
 		}
 		for (int j = 0; j < p.levelBins; ++j)

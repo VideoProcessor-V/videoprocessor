@@ -1674,7 +1674,7 @@ bool ReadMemoVectorTrust(VpSkeleton::SkeletonMemo* memo, uint64_t seq, double* t
             bool enumsOk = mtype <= CameraLink::kRecordPodLastModelType
                 && reasonByte <= CameraLink::kRecordPodLastReason
                 && smoothedType <= CameraLink::kRecordPodLastModelType;
-            // Full CRD2 tail (CameraRecordPool.h:84-100 -> full 595 B CRD2 layout).
+            // Full CRD2 tail (CameraRecordPool.h:84-103 -> full 603 B CRD2 layout).
             if (magic == CameraLink::kRecordPodMagic)
             {
                 (void)r.Get<uint8_t>(); (void)r.Get<uint8_t>(); (void)r.Get<uint32_t>();
@@ -1686,6 +1686,7 @@ bool ReadMemoVectorTrust(VpSkeleton::SkeletonMemo* memo, uint64_t seq, double* t
                 (void)r.Get<uint32_t>();
                 (void)r.Get<double>(); (void)r.Get<double>();
                 for (int i = 0; i < 6; ++i) (void)r.Get<double>();
+                (void)r.Get<double>();   // absThresholdPx
             }
             if (r.ok && enumsOk)
             {

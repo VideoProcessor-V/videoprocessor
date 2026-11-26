@@ -531,20 +531,25 @@ bool HdrVetoCutDetector::Observe(const HdrVetoFrameStats& stats)
 				m_lastUsedFallback = true;
 			}
 		}
+		float grid = 0.0f;
+		float distance = 0.0f;
+		if (m_previousActive && stats.activePicture)
+		{
+			// U7 / U6: always populate diagnostic grid & histogram differences (even when shared U7 answers)
+			// so SDR-veto cut logs report real gridDifference instead of 0.0.
+			grid = VpUnit::CutFadeJudge::MeanAbsDifference(stats.grid.data(), m_previous.grid.data(), stats.grid.size());
+			distance = VpUnit::SourceStats::HalfL1Distance<float>(stats.histogram.data(), m_previous.histogram.data(),
+				stats.histogram.size(), 1.0f, 1.0f);
+			m_lastGrid = grid;
+			m_lastHistogram = distance;
+			m_atomicLastHist.store(distance, std::memory_order_release);
+		}
 		if (!answered)
 		{
 			if (m_previousActive != stats.activePicture)
 				cut = true;   // entering or leaving black
 			else if (stats.activePicture)
 			{
-				// U7 / U6: the mean cell difference and the half-L1 histogram distance (the signature histograms are
-				// already fractions: total 1), judged by the unit's grid + histogram rule with this detector's thresholds.
-				const float grid = VpUnit::CutFadeJudge::MeanAbsDifference(stats.grid.data(), m_previous.grid.data(), stats.grid.size());
-				const float distance = VpUnit::SourceStats::HalfL1Distance<float>(stats.histogram.data(), m_previous.histogram.data(),
-					stats.histogram.size(), 1.0f, 1.0f);
-				m_lastGrid = grid;
-				m_lastHistogram = distance;
-				m_atomicLastHist.store(distance, std::memory_order_release);
 				VpUnit::CutFadeJudge::GridHistThresholds limits;
 				limits.gridDifference = GRID_DIFFERENCE;
 				limits.histogramDistance = HISTOGRAM_DISTANCE;

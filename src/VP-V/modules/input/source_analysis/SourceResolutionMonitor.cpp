@@ -215,30 +215,56 @@ if (tile < int(tiles) && g.y < ts) {
 	SourceResolution::FrameEvidence Monitor::LookAheadEvidence(uint64_t from, uint64_t to) const
 	{
 		std::lock_guard<std::mutex> lock(frameJudgeMutex);
+		const SourceResolution::FrameEvidence fallbackEv = frameJudge.Evidence(from, to);
+		if (fallbackEv.covered)
+			return fallbackEv;
 		if (to > from && !u7AheadHistory.empty())
 		{
 			uint64_t expect = from + 1u;
 			bool anyCut = false;
+			bool anyUnresolved = false;
 			for (const U7AheadEntry& entry : u7AheadHistory)
 			{
 				if (entry.seq < expect)
 					continue;
 				if (entry.seq > expect)
-					break;   // gap in (from, to]: not consecutively covered by U7
-				if (entry.cut)
+					break;   // gap in (from, to]: not consecutively covered
+				if (entry.fromFrameJudge)
+				{
+					bool isPending = false;
+					bool isCancelled = frameJudge.Cancelled(entry.seq);
+					for (const auto& c : frameJudge.Candidates())
+					{
+						if (c.sequence == entry.seq)
+						{
+							if (c.cancelled)
+								isCancelled = true;
+							else if (!c.confirmed)
+								isPending = true;
+							break;
+						}
+					}
+					if (isPending)
+						anyUnresolved = true;
+					else if (entry.cut && !isCancelled)
+						anyCut = true;
+				}
+				else if (entry.cut)
+				{
 					anyCut = true;
+				}
 				if (expect == to)
 				{
 					SourceResolution::FrameEvidence e;
 					e.covered = true;
 					e.cut = anyCut;
-					e.unresolved = false;
+					e.unresolved = !anyCut && anyUnresolved;
 					return e;
 				}
 				++expect;
 			}
 		}
-		return frameJudge.Evidence(from, to);
+		return fallbackEv;
 	}
 
 	Monitor::AheadState Monitor::Ahead() const
@@ -453,10 +479,18 @@ if (tile < int(tiles) && g.y < ts) {
 		}
 		if (haveU7)
 		{
+			// Reset fallback cut-judge continuity whenever shared U7 answers so a subsequent
+			// fallback frame re-seeds cleanly instead of diffing against a stale earlier shot.
+			aheadLastPattern.clear();
+			aheadCutJudge = SourceResolution::Tracker::CutJudge();
+		}
+		{
 			std::lock_guard<std::mutex> judgeLock(frameJudgeMutex);
+			if (haveU7)
+				frameJudge.Reset();
 			if (!u7AheadHistory.empty() && sequence <= u7AheadHistory.back().seq)
 				u7AheadHistory.clear();
-			u7AheadHistory.push_back(U7AheadEntry{ sequence, cut });
+			u7AheadHistory.push_back(U7AheadEntry{ sequence, cut, !haveU7 && fixes && CutFixes() });
 			while (u7AheadHistory.size() > kU7AheadHistoryCap)
 				u7AheadHistory.pop_front();
 		}

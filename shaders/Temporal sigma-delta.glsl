@@ -508,15 +508,19 @@ float dn_extra(vec2 posOut)
 // and reads RESID_NEXT/PREV_NEXT; false the other way round.
 bool write_a_;
 
+// IEEE-754 bit-pattern non-finite check (immune to D3D11/FXC fast-math eliding isnan()/isinf() without /Gis).
+bool tsd_nonfinite(float v) { return (floatBitsToUint(v) & 0x7f800000u) == 0x7f800000u; }
+bool tsd_nonfinite3(vec3 v) { return tsd_nonfinite(v.x) || tsd_nonfinite(v.y) || tsd_nonfinite(v.z); }
+bool tsd_nonfinite4(vec4 v) { return tsd_nonfinite3(v.xyz) || tsd_nonfinite(v.w); }
+
 bool carried(ivec2 from, vec3 x, float gate_scale, float amp, out vec3 r)
 {
     r = vec3(0.0);
     vec4 rs = write_a_ ? imageLoad(RESID_NEXT, from) : imageLoad(RESID, from);
     vec4 ps = write_a_ ? imageLoad(PREV_NEXT, from) : imageLoad(PREV, from);
-    // NaN-safe tag check and finite-state guard: uninitialised rgba16f VRAM can hold
+    // NaN-safe tag check and bit-pattern finite-state guard: uninitialised rgba16f VRAM can hold
     // NaN or Inf, and `abs(NaN - VALID_TAG) >= 1e-3` evaluates to false.
-    if (!(abs(rs.a - VALID_TAG) < 1e-3) || any(isnan(rs)) || any(isinf(rs.rgb)) ||
-        any(isnan(ps.rgb)) || any(isinf(ps.rgb)))
+    if (tsd_nonfinite4(rs) || tsd_nonfinite3(ps.rgb) || !(abs(rs.a - VALID_TAG) < 1e-3))
         return false;
     // motion_threshold is in 8-bit codes; x is in output codes.
     // Negated <= so NaN in x, ps.rgb, or the gate threshold cannot pass as valid.
@@ -656,9 +660,12 @@ void hook()
             // Planner D2: this pixel's own displacement from the warp.
             if (vector_pixel > 0.5 && vector_source > 0.5) {
                 vec4 e = texelFetch(VPPIX, min(pos, textureSize(VPPIX, 0) - ivec2(1)), 0);
-                mv = any(isnan(e.xyz)) ? vec4(0.0) : vec4(e.xy, e.z > 0.5 ? 1.0 : 0.0, 0.0);
+                mv = tsd_nonfinite3(e.xyz) ? vec4(0.0) : vec4(e.xy, e.z > 0.5 ? 1.0 : 0.0, 0.0);
             }
-            ivec2 v = ivec2(round(mv.xy));   // full pixels
+            if (tsd_nonfinite3(mv.xyz))
+                mv = vec4(0.0);
+            vec2 mv_clamped = clamp(mv.xy, -vec2(state_size), vec2(state_size));
+            ivec2 v = ivec2(round(mv_clamped));   // full pixels
             ivec2 from = pos - v;
             if (mv.z > 0.5 && v != ivec2(0) &&
                 all(greaterThanEqual(from, ivec2(0))) && all(lessThan(from, state_size)))

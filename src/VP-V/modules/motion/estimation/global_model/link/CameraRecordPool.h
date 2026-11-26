@@ -51,6 +51,7 @@ namespace CameraLink
 				return v;
 			}
 		};
+		inline void PutFadeFields(Writer& w, const CameraModel::CameraMotion& m) { w.Put(m.fadeGain); w.Put(m.fadeOffset); }
 		inline void GetFadeFields(Reader& r, CameraModel::CameraMotion& x) { x.fadeGain = r.Get<double>(); x.fadeOffset = r.Get<double>(); }
 	}
 
@@ -95,9 +96,12 @@ namespace CameraLink
 		for (int i = 0; i < 9; ++i) w.Put(m.objectLayer.h[i]);
 		w.Put(m.objectLayer.blocks);
 		w.Put(m.objectLayer.cx); w.Put(m.objectLayer.cy);
-		// CE-WATER / C4 diagnostics tail (appended to CRD2; total 595 B <= 1024 B).
+		// CE-WATER / C4 diagnostics tail + fit absThresholdPx (appended to CRD2; total 603 B <= 1024 B).
 		w.Put(s.dynCurvature); w.Put(s.dynRhoTemp);
 		w.Put(s.rawShare); w.Put(s.shearEnergy); w.Put(s.dipoleTB); w.Put(s.dipoleLR);
+		const double absThrPx = (m.blocks && m.blocks->absThresholdPx > 0.0f)
+			? static_cast<double>(m.blocks->absThresholdPx) : m.absThresholdPx;
+		w.Put(absThrPx);
 		return w.ok ? w.n : 0;
 	}
 

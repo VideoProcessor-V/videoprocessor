@@ -59,6 +59,7 @@ namespace Vpv
 			std::array<pl_tex, 4> tex{ { nullptr, nullptr, nullptr, nullptr } };
 			std::array<int, 4> components{ { 0, 0, 0, 0 } };
 			pl_color_repr repr{};
+			pl_rect2df crop{ 0.0f, 0.0f, 0.0f, 0.0f };   // active picture rect in luma-plane pixels (empty = full plane)
 			bool rgb = false;         // repr.sys == RGB: no luma plane
 			bool fullRange = false;   // repr.levels == FULL
 			const char* origin = "";  // "render frame" (Entrance image) or the offering unit
@@ -192,6 +193,7 @@ namespace Vpv
 					s.components[size_t(i)] = image.planes[i].components;
 				}
 				s.repr = image.repr;
+				s.crop = image.crop;
 				s.rgb = image.repr.sys == PL_COLOR_SYSTEM_RGB;
 				s.fullRange = image.repr.levels == PL_COLOR_LEVELS_FULL;
 				s.origin = "render frame";

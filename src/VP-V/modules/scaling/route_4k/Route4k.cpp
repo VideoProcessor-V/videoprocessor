@@ -41,6 +41,15 @@ namespace Route4k
 			dst += entry;
 		}
 
+		const char* const CROP_CLAMP_BODY = R"GLSL(
+ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+ivec2 sz = imageSize(dst_img);
+if (p.x < sz.x && p.y < sz.y) {
+    ivec2 q = clamp(p, clamp_lo, clamp_hi);
+    imageStore(dst_img, p, texelFetch(src_tex, q, 0));
+}
+)GLSL";
+
 		// Compute body for the hybrid luma blend. Uses hb_weight from HybridBlend::WeightGlsl()
 		// directly (single source of truth) and writes unclamped float output so BTB (< 0.0)
 		// and WTW (> 1.0) pass through untouched. On single-plane RGB/RGBA inputs (`rgb_luma_only != 0`),
@@ -297,13 +306,22 @@ if (p.x < sz.x && p.y < sz.y) {
 			if (blendTex[s] && gpu)
 				pl_tex_destroy(gpu, &blendTex[s]);
 			blendTex[s] = nullptr;
+			for (int p = 0; p < PL_MAX_PLANES; ++p)
+			{
+				if (cropClampTex[s][p] && gpu)
+					pl_tex_destroy(gpu, &cropClampTex[s][p]);
+				cropClampTex[s][p] = nullptr;
+			}
 		}
+		staticWeightsActive = false;
 	}
 
 	FallbackCatalog::Decision Module::Fallback() const
 	{
 		if (!error.empty())
 			return FallbackCatalog::Engaged("4K route", "4K route: off (" + error + ")");
+		if (staticWeightsActive)
+			return FallbackCatalog::Engaged("4K route", "4K route: static hybrid weights (live e/g/m maps not wired)");
 		return FallbackCatalog::Released("4K route");
 	}
 
@@ -311,6 +329,7 @@ if (p.x < sz.x && p.y < sz.y) {
 		const Config& cfg, pl_frame& out, int slot)
 	{
 		error.clear();
+		staticWeightsActive = false;
 		if (!plan.shouldRun)
 		{
 			formatNote.clear();
@@ -320,6 +339,7 @@ if (p.x < sz.x && p.y < sz.y) {
 		}
 		auto fail = [this](const std::string& why) {
 			error = why;
+			staticWeightsActive = false;
 			status = "4K route: off (" + why + ")";
 			++failures;
 			return false;
@@ -360,6 +380,93 @@ if (p.x < sz.x && p.y < sz.y) {
 		std::string note;
 		pl_frame result = source;
 
+		// POD2-H3: clamp input planes to active source.crop before Lanczos/Hermite resampling
+		// so letterbox/pillarbox bar borders never ring into the active picture (or vice versa).
+		const float rawCx0 = (std::min)(source.crop.x0, source.crop.x1);
+		const float rawCx1 = (std::max)(source.crop.x0, source.crop.x1);
+		const float rawCy0 = (std::min)(source.crop.y0, source.crop.y1);
+		const float rawCy1 = (std::max)(source.crop.y0, source.crop.y1);
+		const bool hasActiveCrop = (rawCx1 > rawCx0) && (rawCy1 > rawCy0) &&
+			(rawCx0 > 0.5f || rawCy0 > 0.5f || rawCx1 < static_cast<float>(srcW) - 0.5f || rawCy1 < static_cast<float>(srcH) - 0.5f);
+		auto clampPlaneToActiveCrop = [&](pl_tex inTex, int planeIdx, pl_tex& clampedOut) -> bool {
+			clampedOut = inTex;
+			if (!hasActiveCrop || !inTex || planeIdx < 0 || planeIdx >= PL_MAX_PLANES)
+				return true;
+			const int pw = inTex->params.w;
+			const int ph = inTex->params.h;
+			const double sx = static_cast<double>(pw) / static_cast<double>(srcW);
+			const double sy = static_cast<double>(ph) / static_cast<double>(srcH);
+			const int ax0 = (std::max)(0, (std::min)(pw - 1, static_cast<int>(std::floor(static_cast<double>(rawCx0) * sx + 1e-6))));
+			const int ay0 = (std::max)(0, (std::min)(ph - 1, static_cast<int>(std::floor(static_cast<double>(rawCy0) * sy + 1e-6))));
+			const int ax1 = (std::max)(ax0 + 1, (std::min)(pw, static_cast<int>(std::ceil(static_cast<double>(rawCx1) * sx - 1e-6))));
+			const int ay1 = (std::max)(ay0 + 1, (std::min)(ph, static_cast<int>(std::ceil(static_cast<double>(rawCy1) * sy - 1e-6))));
+			if (ax0 == 0 && ay0 == 0 && ax1 == pw && ay1 == ph)
+				return true;
+			pl_fmt cFmt = ((inTex->params.format->caps & PL_FMT_CAP_STORABLE) != 0 &&
+				(inTex->params.format->caps & PL_FMT_CAP_SAMPLEABLE) != 0)
+				? inTex->params.format
+				: SelectBlendFormat(gpu, inTex->params.format->num_components, cfg.preferFloat32, note);
+			if (!cFmt)
+				return false;
+			pl_tex_params tp{};
+			tp.w = pw;
+			tp.h = ph;
+			tp.format = cFmt;
+			tp.sampleable = true;
+			tp.storable = true;
+			tp.renderable = (cFmt->caps & PL_FMT_CAP_RENDERABLE) != 0;
+			tp.blit_src = (cFmt->caps & PL_FMT_CAP_BLITTABLE) != 0;
+			tp.blit_dst = (cFmt->caps & PL_FMT_CAP_BLITTABLE) != 0;
+			if (!pl_tex_recreate(gpu, &cropClampTex[slot][planeIdx], &tp))
+				return false;
+			pl_shader_desc cDesc[2] = {};
+			cDesc[0].desc.name = "src_tex";
+			cDesc[0].desc.type = PL_DESC_SAMPLED_TEX;
+			cDesc[0].binding.object = inTex;
+			cDesc[0].binding.address_mode = PL_TEX_ADDRESS_CLAMP;
+			cDesc[0].binding.sample_mode = PL_TEX_SAMPLE_NEAREST;
+			cDesc[1].desc.name = "dst_img";
+			cDesc[1].desc.type = PL_DESC_STORAGE_IMG;
+			cDesc[1].desc.access = PL_DESC_ACCESS_WRITEONLY;
+			cDesc[1].binding.object = cropClampTex[slot][planeIdx];
+			const int clampLo[2] = { ax0, ay0 };
+			const int clampHi[2] = { ax1 - 1, ay1 - 1 };
+			const pl_shader_var cVars[2] = {
+				{ pl_var_ivec2("clamp_lo"), clampLo, true },
+				{ pl_var_ivec2("clamp_hi"), clampHi, true }
+			};
+			pl_custom_shader cCustom{};
+			cCustom.description = "VideoProcessor 4K route: active crop edge clamp";
+			cCustom.body = CROP_CLAMP_BODY;
+			cCustom.input = PL_SHADER_SIG_NONE;
+			cCustom.output = PL_SHADER_SIG_NONE;
+			cCustom.descriptors = cDesc;
+			cCustom.num_descriptors = 2;
+			cCustom.variables = cVars;
+			cCustom.num_variables = 2;
+			cCustom.compute = true;
+			cCustom.compute_group_size[0] = 16;
+			cCustom.compute_group_size[1] = 16;
+			pl_shader sh = pl_dispatch_begin(dispatch);
+			if (!pl_shader_custom(sh, &cCustom))
+			{
+				if (sh) pl_dispatch_abort(dispatch, &sh);
+				return false;
+			}
+			pl_dispatch_compute_params cp{};
+			cp.shader = &sh;
+			cp.dispatch_size[0] = (pw + 15) / 16;
+			cp.dispatch_size[1] = (ph + 15) / 16;
+			cp.dispatch_size[2] = 1;
+			if (!pl_dispatch_compute(dispatch, &cp))
+			{
+				if (sh) pl_dispatch_abort(dispatch, &sh);
+				return false;
+			}
+			clampedOut = cropClampTex[slot][planeIdx];
+			return true;
+		};
+
 		// Plane 0 (luma / RGB): sharp branch, alias-safe branch, or HybridBlend of both.
 		const float wBase = HybridBlend::SanitizeUnit(cfg.wBase);
 		const float edgeTerm = HybridBlend::SanitizeUnit(cfg.edgeTerm);
@@ -375,8 +482,11 @@ if (p.x < sz.x && p.y < sz.y) {
 		const bool sameBranch = SameKernel(cfg.sharpFilter, cfg.safeFilter) &&
 			std::fabs(cfg.sharpAntiring - cfg.safeAntiring) < 1e-6f;
 		const bool sharpOnly = !safeOnly && (effW >= 1.0f || sameBranch);
+		pl_tex lumaSampleTex = lumaIn;
+		if (!clampPlaneToActiveCrop(lumaIn, 0, lumaSampleTex))
+			return fail("active crop edge clamp failed for plane 0");
 		const ScalerPass::Source lumaSrc = {
-			lumaIn, 0.0f, 0.0f, static_cast<float>(srcW), static_cast<float>(srcH)
+			lumaSampleTex, 0.0f, 0.0f, static_cast<float>(srcW), static_cast<float>(srcH)
 		};
 
 		pl_tex lumaOut = nullptr;
@@ -532,8 +642,13 @@ if (p.x < sz.x && p.y < sz.y) {
 
 			const int cw = (std::max)(1, static_cast<int>(std::lround(static_cast<double>(cIn->params.w) * fx)));
 			const int ch = (std::max)(1, static_cast<int>(std::lround(static_cast<double>(cIn->params.h) * fy)));
+			pl_tex cSampleTex = cIn;
+			if (!clampPlaneToActiveCrop(cIn, plane, cSampleTex))
+				return fail("active crop edge clamp failed for plane " + std::to_string(plane));
 			const ScalerPass::Source cSrc = {
-				cIn, 0.0f, 0.0f, static_cast<float>(cIn->params.w), static_cast<float>(cIn->params.h)
+				cSampleTex, 0.0f, 0.0f,
+				static_cast<float>(static_cast<double>(cw) / fx),
+				static_cast<float>(static_cast<double>(ch) / fy)
 			};
 			ScalerPass::Settings cs;
 			cs.filter = plan.oneAxis ? cfg.safeFilter : cfg.sharpFilter;
@@ -563,6 +678,7 @@ if (p.x < sz.x && p.y < sz.y) {
 
 		out = result;
 		formatNote = note;
+		staticWeightsActive = !safeOnly;
 		char buf[256];
 		std::snprintf(buf, sizeof buf, "4K route: %s (%s, w=%.2f, static e/g/m), %dx%d -> %dx%d",
 			ModeName(cfg.mode), branchLabel, static_cast<double>(effW), srcW, srcH, dstW, dstH);

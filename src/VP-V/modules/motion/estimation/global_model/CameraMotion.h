@@ -197,6 +197,8 @@ namespace CameraModel
 		// FULL-RESOLUTION FINAL REFINE (owner, ahead fit): the cells the final IRLS refine of the chosen model weighted (> 0) over EVERY
 		// cell of the field; 0 = not run (the seed / live path: the final refine stays on the sampled cells, unchanged).
 		uint32_t finalRefineCells = 0;
+		// Fit's absolute agreement threshold (3*sigma, source px; copied from BlockData::absThresholdPx and serialized in CRD2 P7 POD).
+		double absThresholdPx = 0.0;
 	};
 
 	// Map a point (picture-centred, source px) through Params.

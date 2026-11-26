@@ -980,6 +980,7 @@ namespace CameraLink
 			x.objectLayer.cx = r.Get<double>(); x.objectLayer.cy = r.Get<double>();
 			s.dynCurvature = r.Get<double>(); s.dynRhoTemp = r.Get<double>();
 			s.rawShare = r.Get<double>(); s.shearEnergy = r.Get<double>(); s.dipoleTB = r.Get<double>(); s.dipoleLR = r.Get<double>();
+			x.absThresholdPx = r.Get<double>();
 		}
 		if (!r.ok)
 			return false;

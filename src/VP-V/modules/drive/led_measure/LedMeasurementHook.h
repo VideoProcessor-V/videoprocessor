@@ -101,11 +101,13 @@ namespace LedDrive
 		// 3x3 blocks around it, so grain averages out while a real highlight,
 		// which spans a region, survives. The APL sums and the block maximum
 		// (script mode, SF-4) are unchanged. Call every frame.
-		void SetGrain(pl_tex map, float grainFloor, const pl_rect2df& sourceCrop)
+		void SetGrain(pl_tex map, float grainFloor, const pl_rect2df& sourceCrop, int sourceWidth = 0, int sourceHeight = 0)
 		{
 			grain = map;
 			grainFloorValue = grainFloor;
 			crop = sourceCrop;
+			grainSourceW = sourceWidth;
+			grainSourceH = sourceHeight;
 		}
 		// After rendering: finished measurements in frame order, and their
 		// sequences when asked. wait > 0 blocks up to that many milliseconds
@@ -157,6 +159,8 @@ namespace LedDrive
 		pl_tex grain = nullptr;
 		float grainFloorValue = 0.4f;
 		pl_rect2df crop{};
+		int grainSourceW = 0;
+		int grainSourceH = 0;
 		int dropped = 0;
 		int measured = 0;
 		uint64_t frames = 0;   // measurement passes queued (the schedule's clock)

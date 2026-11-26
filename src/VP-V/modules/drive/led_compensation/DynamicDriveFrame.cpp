@@ -255,9 +255,11 @@ namespace LedDrive
 					shownH > 0.0 && cropH > 0.0 ? screenH * cropH / shownH : 0.0,
 					sourceMasks, maskCount);
 			}
-			// Delta 8 R2: the grain map (the previous source frame's, as for S1) for
-			// grain-suppressed highlight statistics.
-			measurement.SetGrain(config.highlightGrainSuppress ? in.grainMap : nullptr, in.grainFloor, image.crop);
+			// Delta 8 R2 / POD1 HIGH-1: pass actual source luma raster dimensions so grainPitch never
+			// relies on the symmetric (crop.x0 + crop.x1) heuristic under asymmetric/zoomed crops.
+			const pl_tex srcPlane0 = image.num_planes > 0 ? image.planes[0].texture : nullptr;
+			measurement.SetGrain(config.highlightGrainSuppress ? in.grainMap : nullptr, in.grainFloor, image.crop,
+				srcPlane0 ? srcPlane0->params.w : 0, srcPlane0 ? srcPlane0->params.h : 0);
 			// S2 pushes the measurement hook (and tags it) when its slot runs.
 			colour.ledMeasure = in.measureSlotRuns;
 		}

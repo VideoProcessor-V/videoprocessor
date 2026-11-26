@@ -2036,6 +2036,7 @@ namespace CameraModel
 				bd->excluded = f.excluded;
 				bd->absThresholdPx = static_cast<float>(f.absThr);
 				bd->relThreshold = static_cast<float>(f.rel);
+				rec.absThresholdPx = f.absThr;
 				rec.labelsOnGpu = true;
 				rec.blocks = bd;
 				return;
@@ -2050,6 +2051,7 @@ namespace CameraModel
 			bd->excluded = f.excluded;
 			bd->absThresholdPx = static_cast<float>(f.absThr);
 			bd->relThreshold = static_cast<float>(f.rel);
+			rec.absThresholdPx = f.absThr;
 
 			// One pass over the blocks computes the model, residual and label of every block. The zero-motion
 			// cluster test (Overlay, which takes precedence over every other label) needs the neighbours'

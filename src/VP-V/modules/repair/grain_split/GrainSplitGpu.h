@@ -160,6 +160,10 @@ namespace GrainSplit
 			Targets targets;
 			uint64_t seq = 0;   // the source frame this split is for: stamped into Frame::seq
 			pl_timer timer = nullptr;   // optional: device time of every pass (the skeleton dispatcher's cost measurement)
+			// Active picture rect in plane pixels ([activeX0, activeX1) x [activeY0, activeY1)); empty = full plane.
+			int activeX0 = 0, activeY0 = 0, activeX1 = 0, activeY1 = 0;
+			// True for chroma planes (Cb/Cr): guards neutral-chroma bins (bin == levelBins/2, levelBins/2 - 1) against zero-energy bar collapse.
+			bool isChroma = false;
 		};
 
 		// THE size law of a Compute made through a fill's GPU context (Full layout): every texture it makes. The four working
@@ -228,7 +232,8 @@ namespace GrainSplit
 			// `hold` is then empty. Out() is valid while `hold` is held. Byte-identical to Compute(gpu, dispatch, plane, ...,
 			// Options{seq}) on the same inputs (GrainUnitGpuTests::GrainUnitContextEntryEqualsCompute).
 			bool Compute(VpSkeleton::OwnerGpuContext& ctx, pl_tex plane, int component, double codeUnit, double scale, int B,
-				const Params& params, uint64_t seq, ContextHold& hold);
+				const Params& params, uint64_t seq, ContextHold& hold,
+				int activeX0 = 0, int activeY0 = 0, int activeX1 = 0, int activeY1 = 0, bool isChroma = false);
 			// The seven passes of Compute as separate calls (70b lane form: one chunk per pass): Step(0..6) with the SAME arguments
 			// and options on every call records exactly Compute's dispatches in order (half, low, grain level per chunk, per-block reduce, noise level, minimum, Wiener
 			// share), so Compute == the step loop byte for byte. sigmaBase and sigmaLow x scale must be >= GrainSplit::kV3MinLowSigma

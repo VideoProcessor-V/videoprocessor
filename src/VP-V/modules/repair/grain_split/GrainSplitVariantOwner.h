@@ -216,6 +216,30 @@ namespace GrainSplit
 				return false;
 			}
 
+			static void ActiveRectForPlane(const Vpv::Capture::SourcePlaneSet& facts, pl_tex plane, int& ax0, int& ay0, int& ax1, int& ay1)
+			{
+				const int pw = plane ? plane->params.w : 0;
+				const int ph = plane ? plane->params.h : 0;
+				ax0 = 0; ay0 = 0; ax1 = pw; ay1 = ph;
+				if (pw <= 0 || ph <= 0)
+					return;
+				const float cx0 = (std::min)(facts.crop.x0, facts.crop.x1);
+				const float cx1 = (std::max)(facts.crop.x0, facts.crop.x1);
+				const float cy0 = (std::min)(facts.crop.y0, facts.crop.y1);
+				const float cy1 = (std::max)(facts.crop.y0, facts.crop.y1);
+				if (!(cx1 > cx0) || !(cy1 > cy0))
+					return;
+				const int lw = (facts.tex[0] && facts.tex[0]->params.w > 0) ? facts.tex[0]->params.w : pw;
+				const int lh = (facts.tex[0] && facts.tex[0]->params.h > 0) ? facts.tex[0]->params.h : ph;
+				const double sx = static_cast<double>(pw) / static_cast<double>(lw);
+				const double sy = static_cast<double>(ph) / static_cast<double>(lh);
+				const int x0 = (std::max)(0, (std::min)(pw - 1, static_cast<int>(std::floor(static_cast<double>(cx0) * sx + 1e-6))));
+				const int y0 = (std::max)(0, (std::min)(ph - 1, static_cast<int>(std::floor(static_cast<double>(cy0) * sy + 1e-6))));
+				const int x1 = (std::max)(x0 + 1, (std::min)(pw, static_cast<int>(std::ceil(static_cast<double>(cx1) * sx - 1e-6))));
+				const int y1 = (std::max)(y0 + 1, (std::min)(ph, static_cast<int>(std::ceil(static_cast<double>(cy1) * sy - 1e-6))));
+				ax0 = x0; ay0 = y0; ax1 = x1; ay1 = y1;
+			}
+
 			bool Fill(const VpSkeleton::OwnerFillRequest& req, VpSkeleton::SkeletonMemo& memo, VpSkeleton::OwnerFillOutput& out)
 			{
 				const VpSkeleton::VariantKey& v = req.variant;
@@ -239,9 +263,11 @@ namespace GrainSplit
 				const double cu = VpvGpu::CodeUnit(plane, facts->repr.bits, bits);
 				Params law = DefaultParams();
 				law.sourceBits = bits;
+				int ax0 = 0, ay0 = 0, ax1 = 0, ay1 = 0;
+				ActiveRectForPlane(*facts, plane, ax0, ay0, ax1, ay1);
 				const std::shared_ptr<Held> held = std::make_shared<Held>();
 				Splitter splitter;   // holds no texture: every one is the context's (held->textures)
-				if (!splitter.Compute(*req.gpu, plane, 0, cu, scale, B, law, req.seq, held->textures))
+				if (!splitter.Compute(*req.gpu, plane, 0, cu, scale, B, law, req.seq, held->textures, ax0, ay0, ax1, ay1, false))
 					return Decline(out, "grain split variant: " + splitter.LastError());
 				held->frame = splitter.Out();
 				out.gpu.resource = &held->frame;
@@ -311,8 +337,10 @@ namespace GrainSplit
 				Params law = DefaultParams();
 				law.sourceBits = bits;
 				const std::shared_ptr<Held> held = std::make_shared<Held>();
+				int ax0 = 0, ay0 = 0, ax1 = 0, ay1 = 0;
+				ActiveRectForPlane(*facts, chromaTex, ax0, ay0, ax1, ay1);
 				Splitter splitter;
-				if (!splitter.Compute(*req.gpu, chromaTex, component, cu, scale, B, law, req.seq, held->textures))
+				if (!splitter.Compute(*req.gpu, chromaTex, component, cu, scale, B, law, req.seq, held->textures, ax0, ay0, ax1, ay1, true))
 					return DeclineChroma(out, "grain split chroma variant: " + splitter.LastError());
 				held->frame = splitter.Out();
 				out.gpu.resource = &held->frame;

@@ -35,6 +35,7 @@ namespace MotionAhead
 			return;
 		std::lock_guard<std::mutex> lock(mutex_);
 		stop_ = false;
+		workerCount_ = workers;
 		totalWorkers_ = workers + 1;
 		for (int i = 0; i < workers; ++i)
 		{
@@ -50,11 +51,18 @@ namespace MotionAhead
 						std::unique_lock<std::mutex> lk(mutex_);
 						workCv_.wait(lk, [this, seen] { return stop_ || generation_ != seen; });
 						if (stop_)
+						{
+							if (generation_ != seen && remaining_ > 0)
+								--remaining_;
+							if (remaining_ == 0 || activeCallbacks_ == 0)
+								doneCv_.notify_all();
 							return;
+						}
 						seen = generation_;
 						fn = fn_;
 						rows = totalRows_;
 						total = totalWorkers_;
+						++activeCallbacks_;
 					}
 					if (fn && rows > 0)
 					{
@@ -65,8 +73,12 @@ namespace MotionAhead
 							(*fn)(fromY, toY);
 					}
 					std::lock_guard<std::mutex> lk(mutex_);
-					if (--remaining_ == 0)
-						doneCv_.notify_one();
+					if (activeCallbacks_ > 0)
+						--activeCallbacks_;
+					if (remaining_ > 0)
+						--remaining_;
+					if (remaining_ == 0 || (stop_ && activeCallbacks_ == 0))
+						doneCv_.notify_all();
 				}
 			});
 		}
@@ -79,17 +91,24 @@ namespace MotionAhead
 			stop_ = true;
 		}
 		workCv_.notify_all();
+		doneCv_.notify_all();
 		for (std::thread& t : threads_)
 			if (t.joinable()) t.join();
 		threads_.clear();
-		std::lock_guard<std::mutex> lock(mutex_);
-		fn_ = nullptr;
-		remaining_ = 0;
+		{
+			std::lock_guard<std::mutex> lock(mutex_);
+			fn_ = nullptr;
+			remaining_ = 0;
+			activeCallbacks_ = 0;
+			workerCount_ = 0;
+			totalWorkers_ = 1;
+		}
+		doneCv_.notify_all();
 	}
 
 	void HalfLumaPool::Run(int totalRows, const std::function<void(int, int)>& fn)
 	{
-		if (threads_.empty() || totalRows < 256)
+		if (totalRows < 256)
 		{
 			fn(0, totalRows);
 			return;
@@ -97,17 +116,29 @@ namespace MotionAhead
 		int total = 1;
 		{
 			std::lock_guard<std::mutex> lock(mutex_);
-			fn_ = &fn;
-			totalRows_ = totalRows;
-			remaining_ = static_cast<int>(threads_.size());
-			total = totalWorkers_;
-			++generation_;
+			if (stop_ || workerCount_ <= 0)
+			{
+				total = 0;
+			}
+			else
+			{
+				fn_ = &fn;
+				totalRows_ = totalRows;
+				remaining_ = workerCount_;
+				total = totalWorkers_;
+				++generation_;
+			}
+		}
+		if (total <= 0)
+		{
+			fn(0, totalRows);
+			return;
 		}
 		workCv_.notify_all();
 		const int chunk = (totalRows + total - 1) / total;
 		fn(0, (std::min)(totalRows, chunk));
 		std::unique_lock<std::mutex> lock(mutex_);
-		doneCv_.wait(lock, [this] { return remaining_ == 0 || stop_; });
+		doneCv_.wait(lock, [this] { return (remaining_ == 0 || stop_) && activeCallbacks_ == 0; });
 		fn_ = nullptr;
 	}
 
@@ -539,8 +570,13 @@ namespace MotionAhead
 				const auto submitTime = item.submitTime;
 				const StageSample baseStage = item.stage;
 				const std::thread::id submitter = std::this_thread::get_id();
+				backQueue.AcquireExternalBusy();
+				std::shared_ptr<void> externalBusyToken(nullptr, [this](void*) {
+					backQueue.ReleaseExternalBusy();
+				});
 				r6ExtrasWorker.Submit([this, flow, fromSeq, toSeq, gen, entryGen, entryEpoch, entryIgnoreGen,
-						general, hinted, submitTime, baseStage, submitter]() mutable {
+						general, hinted, submitTime, baseStage, submitter, externalBusyToken = std::move(externalBusyToken)]() mutable {
+					(void)externalBusyToken;
 					if (!backQueue.IsLive(entryGen, entryEpoch, entryIgnoreGen))
 						return;
 					const auto voteStart = std::chrono::steady_clock::now();
@@ -631,7 +667,8 @@ namespace MotionAhead
 			}
 			else
 			{
-				if (item.publishToSlot && !item.forceOffChain)
+				if (item.publishToSlot && !item.forceOffChain &&
+					publishGate.Accept(item.generation, item.fromSeq, item.toSeq))
 					slot->Publish(item.fromSeq, item.toSeq, item.generation, item.flow);
 				engineReady = true;
 				if (item.hinted)
@@ -1743,7 +1780,8 @@ namespace MotionAhead
 			if (rq.Adjacent() && !forceOffChain)
 			{
 				FlushR6ExtrasIfStarted();
-				slot->Publish(rq.from, rq.to, rq.generation, flow);
+				if (publishGate.Accept(rq.generation, rq.from, rq.to))
+					slot->Publish(rq.from, rq.to, rq.generation, flow);
 			}
 			engineReady = true;
 			result.flow = flow;

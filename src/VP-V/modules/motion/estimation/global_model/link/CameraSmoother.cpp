@@ -20,9 +20,16 @@ namespace CameraLink
 		// Keep enough causal records to rebuild the +-kMaxCameraLead smoother window and answer recent queries.
 		constexpr size_t kRetainedRecords = static_cast<size_t>(VpSkeleton::kMaxCameraLead) * 4u + 16u;
 
-		// Derived LOO innovation spike threshold fallback when BlockData is not attached (e.g. POD-decoded P7):
-		// matches Config::absThresholdSigmas (3.0) * nominal 16-px precision (1/4 px) = 0.75 source px.
-		constexpr double kLooDefaultAbsThresholdPx = 3.0 / 4.0;
+		// Derived LOO innovation spike base threshold fallback when neither BlockData nor CRD2 carries
+		// absThresholdPx: matches Config::absThresholdSigmas (3.0) * PairPrecision (0.25 * blockSize / 16),
+		// where nominal blockSize scales with picture raster from 16 px at 1080p (32 px at 4K, 64 px at 8K).
+		inline double DerivedLooBaseThresholdPx(const CameraModel::Rect& picture)
+		{
+			const double w = static_cast<double>(picture.Width());
+			const double h = static_cast<double>(picture.Height());
+			const double scale = (std::max)(1.0, (std::max)(w / 1920.0, h / 1080.0));
+			return 3.0 * (0.25 * scale);
+		}
 
 		inline bool BreaksSegment(const CameraModel::CameraMotion& r, const CameraModel::CameraMotion& centre)
 		{
@@ -171,9 +178,14 @@ namespace CameraLink
 					const double diag = std::hypot(static_cast<double>(causal.picture.Width()),
 						static_cast<double>(causal.picture.Height()));
 					eval.innovationPx = CameraModel::MaxCornerDifference(causal.params, eval.looHat, causal.picture) * diag;
-					const double looThrPx = (causal.blocks && causal.blocks->absThresholdPx > 0.0f)
+					const double baseThrPx = (causal.blocks && causal.blocks->absThresholdPx > 0.0f)
 						? static_cast<double>(causal.blocks->absThresholdPx)
-						: kLooDefaultAbsThresholdPx;
+						: (causal.absThresholdPx > 0.0
+							? causal.absThresholdPx
+							: DerivedLooBaseThresholdPx(causal.picture));
+					// Variance of symmetric LOO residual d_t - 0.5*(d_{t-1} + d_{t+1}) for independent pairs
+					// is (1 + 1/4 + 1/4) * sigma^2 = 1.5 * sigma^2 -> scale 3-sigma threshold by sqrt(1.5).
+					const double looThrPx = baseThrPx * std::sqrt(1.5);
 					if (eval.innovationPx > looThrPx)
 						eval.spikeFlagged = true;
 				}
@@ -233,6 +245,17 @@ namespace CameraLink
 		w.Put(int32_t(m.picture.top));
 		w.Put(int32_t(m.picture.right));
 		w.Put(int32_t(m.picture.bottom));
+		w.Put(m.pairFrom);
+		w.Put(m.pairTo);
+		w.Put(m.resyncGeneration);
+		w.Put(m.rebaseGeneration);
+		w.Put(m.rates.logScale);
+		w.Put(m.rates.angle);
+		w.Put(m.rates.tx);
+		w.Put(m.rates.ty);
+		w.Put(uint8_t(m.inFade ? 1 : 0));
+		detail::PutFadeFields(w, m);
+		w.Put(m.absThresholdPx);
 		return w.ok ? w.n : 0;
 	}
 
@@ -265,6 +288,17 @@ namespace CameraLink
 		x.picture.top = r.Get<int32_t>();
 		x.picture.right = r.Get<int32_t>();
 		x.picture.bottom = r.Get<int32_t>();
+		x.pairFrom = r.Get<uint64_t>();
+		x.pairTo = r.Get<uint64_t>();
+		x.resyncGeneration = r.Get<uint64_t>();
+		x.rebaseGeneration = r.Get<uint64_t>();
+		x.rates.logScale = r.Get<double>();
+		x.rates.angle = r.Get<double>();
+		x.rates.tx = r.Get<double>();
+		x.rates.ty = r.Get<double>();
+		x.inFade = r.Get<uint8_t>() != 0;
+		detail::GetFadeFields(r, x);
+		x.absThresholdPx = r.Get<double>();
 		if (!r.ok)
 			return false;
 		x.params = active;

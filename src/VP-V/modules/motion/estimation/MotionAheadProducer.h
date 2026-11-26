@@ -234,6 +234,8 @@ namespace MotionAhead
 		const std::function<void(int, int)>* fn_ = nullptr;
 		int totalRows_ = 0;
 		int totalWorkers_ = 1;
+		int workerCount_ = 0;
+		int activeCallbacks_ = 0;
 		uint64_t generation_ = 0;
 		int remaining_ = 0;
 		bool stop_ = false;

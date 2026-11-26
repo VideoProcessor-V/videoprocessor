@@ -84,7 +84,7 @@ vec4 hook()
         // increasing, slope >= exp(-1)) instead of squeezing the source's
         // above-white toward peak. Mirrors SdrToneShape::Knee.
         float white = 1.0 - headroom;
-        float k = 1.0 - knee_start;
+        float k = max(1.0 - knee_start, 1e-6);
         vec3 yc = min(y, vec3(white));
         vec3 e = exp(-(max(yc, vec3(knee_start)) - vec3(knee_start)) / k);
         vec3 rolled = vec3(knee_start) + vec3(k) * (vec3(1.0) - e);
@@ -103,6 +103,8 @@ vec4 hook()
                     blur += (i == 0 && j == 0) ? L : to_linear(HOOKED_texOff(vec2(2 * i, 2 * j)).rgb);   // GEM-015 (AMEND): centre reused, sum order kept
             vec3 detail = L - blur / 9.0;
             shaped += recovery * (vec3(1.0) - slope) * (1.0 - headroom) * detail;
+            // POD2-M2: prevent positive inputs from inverting into negative BTB under large negative detail.
+            shaped = mix(shaped, max(shaped, vec3(0.0)), vec3(greaterThanEqual(color.rgb, vec3(0.0))));
         }
     }
     color.rgb = sign(shaped) * pow(abs(shaped), vec3(1.0 / eotf));

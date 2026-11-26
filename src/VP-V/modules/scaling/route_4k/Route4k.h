@@ -171,9 +171,11 @@ namespace Route4k
 		ScalerPass::Module safePass;
 		ScalerPass::Module chromaPasses[PL_MAX_PLANES];
 		pl_tex blendTex[kSlots] = {};
+		pl_tex cropClampTex[kSlots][PL_MAX_PLANES] = {};
 		std::string error;
 		std::string formatNote;
 		std::string status;
+		bool staticWeightsActive = false;
 		unsigned long long failures = 0;
 	};
 }

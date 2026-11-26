@@ -245,6 +245,7 @@ namespace MotionAhead
 			{
 				if (toSeq <= fromSeq)
 					return false;
+				std::lock_guard<std::mutex> lock(mutex_);
 				if (!haveGeneration_ || generation != generation_)
 				{
 					if (haveGeneration_ && generation < generation_)
@@ -264,6 +265,7 @@ namespace MotionAhead
 
 			void Reset()
 			{
+				std::lock_guard<std::mutex> lock(mutex_);
 				haveGeneration_ = false;
 				generation_ = 0;
 				havePublished_ = false;
@@ -272,17 +274,31 @@ namespace MotionAhead
 
 			void SetGeneration(uint64_t generation)
 			{
+				std::lock_guard<std::mutex> lock(mutex_);
 				haveGeneration_ = true;
 				generation_ = generation;
 				havePublished_ = false;
 				lastTo_ = 0;
 			}
 
-			uint64_t Generation() const { return generation_; }
-			uint64_t LastPublishedTo() const { return lastTo_; }
-			bool HasPublished() const { return havePublished_; }
+			uint64_t Generation() const
+			{
+				std::lock_guard<std::mutex> lock(mutex_);
+				return generation_;
+			}
+			uint64_t LastPublishedTo() const
+			{
+				std::lock_guard<std::mutex> lock(mutex_);
+				return lastTo_;
+			}
+			bool HasPublished() const
+			{
+				std::lock_guard<std::mutex> lock(mutex_);
+				return havePublished_;
+			}
 
 		private:
+			mutable std::mutex mutex_;
 			bool haveGeneration_ = false;
 			uint64_t generation_ = 0;
 			bool havePublished_ = false;
@@ -410,18 +426,33 @@ namespace MotionAhead
 				return dropped;
 			}
 
-			// Wait until the queue is empty and BACK is idle (called before changing engine size or stopping).
+			// Wait until the queue is empty and BACK (including any handed-off R6 extras) is idle.
 			void WaitIdle()
 			{
 				std::unique_lock<std::mutex> lock(mutex_);
-				idleCv_.wait(lock, [this] { return (queue_.empty() && !busy_) || closed_; });
+				idleCv_.wait(lock, [this] { return (queue_.empty() && !busy_ && externalBusy_ == 0) || closed_; });
 			}
 
 			void MarkBusy(bool busy)
 			{
 				std::lock_guard<std::mutex> lock(mutex_);
 				busy_ = busy;
-				if (!busy_ && queue_.empty())
+				if (!busy_ && externalBusy_ == 0 && queue_.empty())
+					idleCv_.notify_all();
+			}
+
+			void AcquireExternalBusy()
+			{
+				std::lock_guard<std::mutex> lock(mutex_);
+				++externalBusy_;
+			}
+
+			void ReleaseExternalBusy()
+			{
+				std::lock_guard<std::mutex> lock(mutex_);
+				if (externalBusy_ > 0)
+					--externalBusy_;
+				if (!busy_ && externalBusy_ == 0 && queue_.empty())
 					idleCv_.notify_all();
 			}
 
@@ -456,6 +487,7 @@ namespace MotionAhead
 				std::lock_guard<std::mutex> lock(mutex_);
 				closed_ = false;
 				busy_ = false;
+				externalBusy_ = 0;
 				generationPinned_ = false;
 				queue_.clear();
 			}
@@ -490,6 +522,7 @@ namespace MotionAhead
 			bool generationPinned_ = false;
 			bool closed_ = false;
 			bool busy_ = false;
+			int externalBusy_ = 0;
 			uint64_t discarded_ = 0;
 		};
 	}

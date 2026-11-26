@@ -129,13 +129,25 @@ namespace GrainSplit
 			std::string LastDecline() const { std::lock_guard<std::mutex> g(mutex); return lastDecline; }
 		};
 
-		// The pass: one workgroup per block. Each invocation sums f^2 of its pixels of the block (gs_fetch .z = the Wiener share),
-		// the group reduces in shared memory and invocation 0 writes the block texel. GV_B / GV_W / GV_H are the frame's block edge
-		// and size (defines, so the text is fixed per geometry).
-		inline std::string HeaderGlsl(const Gpu::Frame& f)
+		// The pass: one workgroup per block. Each invocation sums f^2 of its active-rect pixels of the block (gs_fetch .z = the Wiener share),
+		// the group reduces in shared memory and invocation 0 writes the block texel. GV_B / GV_W / GV_H / GV_AX0..GV_AY1 are the frame's
+		// block edge, size, and active picture rect (defines, so the text is fixed per geometry).
+		inline std::string HeaderGlsl(const Gpu::Frame& f, int ax0 = 0, int ay0 = 0, int ax1 = 0, int ay1 = 0)
 		{
+			if (ax1 <= ax0 || ay1 <= ay0)
+			{
+				ax0 = 0; ay0 = 0; ax1 = f.w; ay1 = f.h;
+			}
+			else
+			{
+				ax0 = (std::max)(0, (std::min)(f.w - 1, ax0));
+				ay0 = (std::max)(0, (std::min)(f.h - 1, ay0));
+				ax1 = (std::max)(ax0 + 1, (std::min)(f.w, ax1));
+				ay1 = (std::max)(ay0 + 1, (std::min)(f.h, ay1));
+			}
 			return Gpu::ViewGlsl(f.storage, f.codeUnit) + "#define GV_B " + std::to_string(f.B) + "\n#define GV_W " + std::to_string(f.w) +
-				"\n#define GV_H " + std::to_string(f.h) + "\nshared vec2 gv_sum[256];\n";
+				"\n#define GV_H " + std::to_string(f.h) + "\n#define GV_AX0 " + std::to_string(ax0) + "\n#define GV_AY0 " + std::to_string(ay0) +
+				"\n#define GV_AX1 " + std::to_string(ax1) + "\n#define GV_AY1 " + std::to_string(ay1) + "\nshared vec2 gv_sum[256];\n";
 		}
 		constexpr const char* kBodyGlsl = R"GLSL(
 ivec2 gv_blk = ivec2(gl_WorkGroupID.xy);
@@ -146,7 +158,7 @@ for (int y = int(gl_LocalInvocationID.y); y < GV_B; y += 16)
     for (int x = int(gl_LocalInvocationID.x); x < GV_B; x += 16)
     {
         ivec2 p = gv_org + ivec2(x, y);
-        if (p.x < GV_W && p.y < GV_H)
+        if (p.x >= GV_AX0 && p.x < GV_AX1 && p.y >= GV_AY0 && p.y < GV_AY1)
         {
             float f = gs_fetch(p).z;
             gv_acc += vec2(f * f, 1.0);
@@ -163,9 +175,16 @@ for (uint s = 128u; s > 0u; s >>= 1u)
 if (gv_li == 0u)
 {
     vec2 t = gv_sum[0];
-    float n = gs_blocks(gv_blk).x;
-    float mf2 = t.y > 0.0 ? t.x / t.y : 0.0;
-    imageStore(gv_out, gv_blk, vec4(n, 0.0, mf2 * n, -1.0));
+    if (t.y > 0.0)
+    {
+        float n = gs_blocks(gv_blk).x;
+        float mf2 = t.x / t.y;
+        imageStore(gv_out, gv_blk, vec4(n, 0.0, mf2 * n, -1.0));
+    }
+    else
+    {
+        imageStore(gv_out, gv_blk, vec4(0.0, 0.0, 0.0, -1.0));
+    }
 }
 )GLSL";
 
@@ -238,7 +257,21 @@ if (gv_li == 0u)
 				std::vector<pl_shader_desc> desc;
 				Gpu::BindView(*gs, desc);   // THE ONE READ ACCESSOR's descriptors
 				desc.push_back(VpvGpu::Storage("gv_out", dst));
-				const std::string header = HeaderGlsl(*gs);
+				int ax0 = 0, ay0 = 0, ax1 = w, ay1 = h;
+				{
+					const float cx0 = facts->crop.x0 < facts->crop.x1 ? facts->crop.x0 : facts->crop.x1;
+					const float cx1 = facts->crop.x0 < facts->crop.x1 ? facts->crop.x1 : facts->crop.x0;
+					const float cy0 = facts->crop.y0 < facts->crop.y1 ? facts->crop.y0 : facts->crop.y1;
+					const float cy1 = facts->crop.y0 < facts->crop.y1 ? facts->crop.y1 : facts->crop.y0;
+					if (cx1 > cx0 && cy1 > cy0)
+					{
+						ax0 = static_cast<int>(std::floor(static_cast<double>(cx0) + 1e-6));
+						ay0 = static_cast<int>(std::floor(static_cast<double>(cy0) + 1e-6));
+						ax1 = static_cast<int>(std::ceil(static_cast<double>(cx1) - 1e-6));
+						ay1 = static_cast<int>(std::ceil(static_cast<double>(cy1) - 1e-6));
+					}
+				}
+				const std::string header = HeaderGlsl(*gs, ax0, ay0, ax1, ay1);
 				const size_t shmem = size_t(kGroupEdge) * size_t(kGroupEdge) * 2u * sizeof(float);
 				if (!VpvGpu::Pass(static_cast<pl_dispatch>(req.gpu->Dispatch()), "VP-V grain level (single-frame)", header, kBodyGlsl,
 						desc.data(), int(desc.size()), nullptr, 0, gs->bw, gs->bh, shmem, kGroupEdge, kGroupEdge))

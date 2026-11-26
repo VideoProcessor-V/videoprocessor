@@ -417,12 +417,12 @@ float ap_to_rel(float v)
     return pow(max(v, 0.0), apx_gamma);
 }
 
-// Light relative to the SCREEN white -> encoded code.
+// Light relative to the nominal white -> encoded code (for ST.2084 PQ, preserve absolute nominal white scale).
 float ap_from_rel(float r)
 {
     r = max(r, 0.0);
     if (apx_pq > 0.5)
-        return ap_pq_from_nits(r * apx_screen_nits);
+        return ap_pq_from_nits(r * max(apx_ref_nits, 1e-6));
     if (apx_trc_kind > 0.5)
         return ap_trc_enc(r);
     return pow(r, 1.0 / apx_gamma);
@@ -512,10 +512,10 @@ vec3 ap_inverse(float J, float M, float h)
     return AP_M16_INV * rgb;
 }
 
-// Signal ceiling in screen-white-relative linear light: ST.2084 peaks at 10000 nits for PQ, 1.0 for SDR.
+// Signal ceiling in nominal-white-relative linear light: ST.2084 peaks at 10000 nits for PQ, 1.0 for SDR.
 float ap_upper()
 {
-    return apx_pq > 0.5 ? 10000.0 / max(apx_screen_nits, 1e-6) : 1.0;
+    return apx_pq > 0.5 ? 10000.0 / max(apx_ref_nits, 1e-6) : 1.0;
 }
 
 // Flare toe: g(o) = o (o + f) / (o + 2 f), normalised to g(u) = u (u = ap_upper()). Monotonic, no level crushed to 0, f = 0 identity.
@@ -542,15 +542,14 @@ vec4 hook()
     vec4 color = HOOKED_texOff(0);
     if (apx_strength <= 0.0)
         return color;
-    // BTB / WTW (below black, above white), FIX1 SHOULD 4: a pixel wholly below black or wholly above white passes
-    // exactly; otherwise the model runs on the in-range colour and each channel's excess is restored afterwards, so a
-    // colour that just leaves the range on one channel is adapted like its neighbours (no gamut-edge discontinuity).
+    // BTB / WTW (below black, above white), FIX1 SHOULD 4 / POD2-H2: a pixel wholly below black passes
+    // exactly (allBelow -> inRange = 0, outLin = 0, excess < 0); WTW pixels (excess > 0) run the model on
+    // the clamped boundary and restore excess afterwards for exact C^0 continuity across all faces/edges/corners of [0, 1]^3.
     vec3 inRange = clamp(color.rgb, 0.0, 1.0);
     vec3 excess = color.rgb - inRange;
     bool outside = excess.r != 0.0 || excess.g != 0.0 || excess.b != 0.0;
     bool allBelow = color.r <= 0.0 && color.g <= 0.0 && color.b <= 0.0;
-    bool allAbove = color.r >= 1.0 && color.g >= 1.0 && color.b >= 1.0;
-    if (outside && (allBelow || allAbove))
+    if (outside && allBelow)
         return color;
 
     // Row-major published values, column-major constructor: transpose by listing columns. The inverse is published
@@ -601,8 +600,8 @@ vec4 hook()
     float toe = apx_knee > 0.0 ? smoothstep(0.0, ap_to_rel(apx_knee), luma) : 1.0;
     float w = clamp(apx_strength, 0.0, 1.0) * toe;
 
-    // The identity side on the screen scale: a PQ picture keeps its nits, a gamma picture its relative light.
-    vec3 inScreen = apx_pq > 0.5 ? lin * (apx_ref_nits / max(apx_screen_nits, 1e-6)) : lin;
+    // The identity side on the nominal scale: both PQ and gamma preserve their nominal white at w = 0.
+    vec3 inScreen = lin;
     vec3 res = mix(inScreen, outLin, w);
     color.rgb = vec3(ap_from_rel(res.r), ap_from_rel(res.g), ap_from_rel(res.b)) + excess;   // the BTB / WTW excess kept
     return color;

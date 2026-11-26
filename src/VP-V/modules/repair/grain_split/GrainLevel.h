@@ -535,7 +535,9 @@ namespace GrainLevel
 				{
 					const size_t i = static_cast<size_t>(ry) * reg.rw + rx;
 					if (!reg.trusted[i] || reg.skip[i]) continue;
-					const double g = (std::max)(0.0, (std::min)(1.0, (reg.rho[i] - p_.gateA) / (p_.gateB - p_.gateA)));
+					const double g = (p_.gateB > p_.gateA)
+						? (std::max)(0.0, (std::min)(1.0, (reg.rho[i] - p_.gateA) / (p_.gateB - p_.gateA)))
+						: (reg.rho[i] >= p_.gateB ? 1.0 : 0.0);
 					gReg[i] = g;
 					if (g > 0.0) ++r.gatedRegions;
 					if (p_.mirrorGate)
@@ -918,7 +920,7 @@ namespace GrainLevel
 							if (keffI[i] >= p.minNeighbours) { kt += keffI[i]; ++kc; }
 							nt += t1.Nb[static_cast<size_t>(yy / B) * bw + static_cast<size_t>(xx / B)];
 						}
-					if (kc == 0) { for (int y = 0; y < 8; ++y) for (int x = 0; x < 8; ++x) { const int xx = tx + x, yy = ty + y; if (xx >= 0 && yy >= 0 && xx < w && yy < h) acc.at(xx, yy) += gridW * m.at(xx, yy); } continue; }
+					if (kc == 0 || !(kt > 0.0)) { for (int y = 0; y < 8; ++y) for (int x = 0; x < 8; ++x) { const int xx = tx + x, yy = ty + y; if (xx >= 0 && yy >= 0 && xx < w && yy < h) acc.at(xx, yy) += gridW * m.at(xx, yy); } continue; }
 					kt /= kc; nt /= 64.0;
 					Dct8x8(in, co);
 					for (int k = 0; k < 64; ++k)

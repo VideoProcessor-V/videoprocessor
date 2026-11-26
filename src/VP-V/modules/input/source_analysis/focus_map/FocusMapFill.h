@@ -247,7 +247,7 @@ namespace FocusMap
 				if (r7.Ok() && r7.cpu && r7.cpuBytes >= kP7Bytes)
 				{
 					std::memcpy(p7, r7.cpu, sizeof(p7));
-					haveP7 = p7[3] >= 0.5f;
+					haveP7 = std::isfinite(p7[0]) && std::isfinite(p7[1]) && std::isfinite(p7[3]) && p7[3] >= 0.5f;
 				}
 			}
 

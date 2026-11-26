@@ -269,8 +269,23 @@ vec3 preserve_extended(vec3 result, vec3 original, float lift)
     if (!anyAbove && !anyBelow)
         return result;
     float y = dot(original, vec3(0.2126, 0.7152, 0.0722));
-    if ((wtw && (y > 1.0 || all(above))) || (btb && (!(y > 0.0) || all(below))))
-        return original;                       // true WTW / BTB, every grey: bit-identical
+    if (btb && (!(y > 0.0) || all(below)))
+        return original;                       // true BTB, every grey: bit-identical
+    if (wtw && (y > 1.0 || all(above))) {
+        if (gain > 1.0) {
+            // POD2-M1: anchor WTW continuation continuously at compensate_gain(1.0, lift, gain)
+            // so the soft-knee ceiling joins true WTW with exact C0 continuity at y = 1.0 and (1,1,1).
+            vec3 c1 = compensate_gain(vec3(1.0), lift, gain);
+            vec3 e1 = original - vec3(1.0);
+            vec3 up1 = (vec3(extended_ceiling) - c1) / max(e1, vec3(1e-6));
+            vec3 dn1 = (c1 - vec3(extended_floor)) / max(-e1, vec3(1e-6));
+            vec3 kv1 = mix(vec3(1.0), up1, vec3(greaterThan(e1, vec3(1e-6))));
+            kv1 = mix(kv1, dn1, vec3(lessThan(e1, vec3(-1e-6))));
+            float k1 = clamp(min(kv1.r, min(kv1.g, kv1.b)), 0.0, 1.0);
+            return c1 + k1 * e1;
+        }
+        return original;                       // true WTW under gain <= 1.0: bit-identical
+    }
     vec3 d = original - vec3(y);
     // Above white: d > 0 and 1 - y >= 0; below black: d < 0 and y > 0. Every quotient is finite.
     vec3 tvAbove = vec3(1.0);
