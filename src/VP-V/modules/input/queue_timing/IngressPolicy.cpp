@@ -6,8 +6,11 @@
 #include "IngressState.h"
 
 #include <VP-V/core/RunningPathway.h>
+#include <VP-V/core/RunningPathwayLatch.h>
 #include <VP-V/core/hub/HostSlots.h>
+#include <ConfigFile.h>
 #include <DebugLog.h>
+#include <ShortcutDefaults.h>
 
 #include <atomic>
 #include <memory>
@@ -177,6 +180,22 @@ namespace Vpv
 		{
 			if (const std::shared_ptr<Entry> entry = Slots().Find(host))
 				StorePathway(*entry, original);
+		}
+
+		void SyncRunningPathway(const void* rendererHost, bool original)
+		{
+			Vpv::RunningPathway::Store(original);
+			if (rendererHost)
+				NoteOriginalPathway(rendererHost, original);
+		}
+
+		void SyncRunningPathwayFromConfig(const void* rendererHost, const ConfigFile* config)
+		{
+			if (!config)
+				return;
+			const bool original = OriginalPathwayForConfig(
+				[config](const char* section, const char* key, std::string& out) { return config->TryGetString(section, key, out); });
+			SyncRunningPathway(rendererHost, original);
 		}
 
 		bool OriginalPathwayOf(const void* host)

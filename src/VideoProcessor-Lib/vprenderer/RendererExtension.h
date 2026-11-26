@@ -158,6 +158,9 @@ namespace RendererExtension
 		const pl_frame* destination = nullptr;            // Draw: the target
 		const pl_render_params* params = nullptr;         // Draw: this frame's parameters
 		DrawResult result = DrawResult::Continue;         // Draw: out
+		bool retireSourceFrame = true;                    // AfterRender: true when `seq`'s final presentation use is over (default true preserves legacy callers/tests)
+		bool retireOnly = false;                          // AfterRender: true when called after all motionDraws/repeats strictly to retire `seq`
+		uint64_t releaseFenceValue = 0;                   // AfterRender: render-side fence value for OnFrameRetired (0 = single-queue D3D11 immediate-context FIFO)
 	};
 	struct QueueView { const void* queue = nullptr; size_t size = 0; };
 
@@ -526,10 +529,18 @@ namespace RendererExtension
 		Frame(c);
 	}
 	inline void NotifyAfterRender(const void* host, int64_t seq, int64_t generation, int errors, int retried, bool rendered,
-		const pl_render_errors* renderErrors = nullptr) noexcept
+		const pl_render_errors* renderErrors = nullptr, bool retireSourceFrame = true, uint64_t releaseFenceValue = 0) noexcept
 	{
 		if (!Any()) return;
 		DrawJob job; job.errors = errors; job.retried = retried; job.rendered = rendered; job.renderErrors = renderErrors;
+		job.retireSourceFrame = retireSourceFrame; job.releaseFenceValue = releaseFenceValue;
+		FrameContext c; c.host = host; c.phase = FramePhase::AfterRender; c.seq = seq; c.generation = generation; c.phaseData = &job;
+		Frame(c);
+	}
+	inline void NotifySourceFrameRetired(const void* host, int64_t seq, int64_t generation, uint64_t releaseFenceValue = 0) noexcept
+	{
+		if (!Any()) return;
+		DrawJob job; job.retireSourceFrame = true; job.retireOnly = true; job.releaseFenceValue = releaseFenceValue;
 		FrameContext c; c.host = host; c.phase = FramePhase::AfterRender; c.seq = seq; c.generation = generation; c.phaseData = &job;
 		Frame(c);
 	}

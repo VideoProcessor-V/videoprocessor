@@ -7,12 +7,14 @@
 // LibplaceboVideoRenderer.cpp right after the Impl struct. It is not a stand-alone header and no other translation unit may include it.
 // Render thread (renderMutex held; Initialize and ApplyProfileSettingsLiveLocked), as before.
 #pragma once
+#include <VP-V/core/RunningPathwayLatch.h>
 #include <VP-V/modules/scaling/chroma_upscale/CflHookOffsets.h>
 #include <VP-V/segments/CoreSegmentCaches.h>
 static bool ReadHookListTraceEnv() { char f[4] = {}; return GetEnvironmentVariableA("VP_HOOK_LIST_TRACE", f, sizeof(f)) != 0 && f[0] == '1'; }
 
 void LibplaceboVideoRenderer::Impl::UpdatePipelineSlots(const RendererSettings& settings)
 {
+	Vpv::RunningPathway::Store(settings.pipelineOriginalPathway);   // Owner Option A: keep process pathway in sync with active renderer settings
 	PipelineSlots::Registry next;
 	if (settings.pipelineOriginalPathway)
 		next.ApplyOriginalPathway();

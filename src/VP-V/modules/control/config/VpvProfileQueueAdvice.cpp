@@ -17,9 +17,10 @@ namespace Vpv
 	{
 		bool BillQueueOnOriginal(const ConfigFile* config, RendererProfileConfig::ResolvedQueue& queue)
 		{
-			// CC W4 B2: the pathway the process RUNS: the first configuration the runtime builds a snapshot from latches it
-			// (Vpv::RunningPathway); a later configuration with the other pathway applies at the next start.
-			const bool original = config && Vpv::RunningPathway::Latch(OriginalPathwayForConfig(
+			// Owner Option A (live in-process VP-V <-> Original switch): update RunningPathway atomically on every
+			// committed configuration snapshot so queue, lookahead, capture/display fixes, ingress policy, Dynamic Drive,
+			// and the rebuilt renderer switch together with zero split-brain.
+			const bool original = config && Vpv::RunningPathway::Store(OriginalPathwayForConfig(
 				[config](const char* section, const char* key, std::string& out) { return config->TryGetString(section, key, out); }));
 			if (!original)
 				return false;

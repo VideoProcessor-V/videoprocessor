@@ -140,6 +140,10 @@ namespace DmCurve
 			}
 		}
 
+		// Live ConfigureRenderParams replaced `params` with a fresh configured baseline: clear the override latch
+		// without overwriting `params` so a new configured value equal to the old applied override is never missed.
+		void Reset() { m_overridden = false; }
+
 		// The profile's own contrast_recovery: the stored one while our override is in place, else the live one.
 		float ConfiguredRecovery(const pl_color_map_params& params) const
 		{

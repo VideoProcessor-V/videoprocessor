@@ -316,7 +316,7 @@ namespace Vpv
 			void Teardown(const std::shared_ptr<HostState>& st, bool releaseSlot, bool gpuAlive = true);
 			size_t EraseExternal(const void* host);   // every external-demand entry of `host` (returns how many)
 			void Begin(HostState& st, int64_t seq);
-			void AfterRender(HostState& st, int64_t seq);
+			void AfterRender(HostState& st, int64_t seq, bool retireSourceFrame = true, bool retireOnly = false, uint64_t releaseFenceValue = 0);
 			void Refresh(HostState& st);
 			void OnCollectAhead(HostState& st, const RE::QueueView& view);
 			void FeedEngine(HostState& st, bool retryOnly);

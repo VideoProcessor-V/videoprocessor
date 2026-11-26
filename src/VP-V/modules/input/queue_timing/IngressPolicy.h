@@ -23,6 +23,8 @@
 #include <atomic>
 #include <cstdint>
 
+class ConfigFile;
+
 namespace Vpv
 {
 	namespace Ingress
@@ -63,6 +65,9 @@ namespace Vpv
 		struct IngressState;
 		void BindImplHost(const void* rendererHost, const void* implHost);
 		void NoteOriginalPathway(const void* host, bool original);
+		// Owner Option A: atomically publish a live pathway transition to both RunningPathway and this renderer's binding.
+		void SyncRunningPathway(const void* rendererHost, bool original);
+		void SyncRunningPathwayFromConfig(const void* rendererHost, const ConfigFile* config);
 		bool OriginalPathwayOf(const void* host);
 		void SyncHostFromImpl(const void* rendererHost, const void* implHost, IngressState& state, std::atomic<bool>& queueTimingFixes, std::atomic<bool>& motionHistoryFixes);
 

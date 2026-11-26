@@ -512,6 +512,10 @@ namespace DvDolbyStyle
 			}
 		}
 
+		// Live ConfigureRenderParams replaced `params` with a fresh configured baseline: clear the override latch
+		// without overwriting `params` so a new configured curve equal to the old applied fallback is never missed.
+		void Reset() { m_overridden = false; }
+
 	private:
 		const pl_tone_map_function* m_configured = nullptr;
 		const pl_tone_map_function* m_applied = nullptr;

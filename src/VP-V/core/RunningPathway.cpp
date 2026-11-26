@@ -72,6 +72,14 @@ namespace Vpv
 			return Latched();
 		}
 
+		bool Store(bool original)
+		{
+			std::lock_guard<std::mutex> lock(StartupMutex());
+			StartupTried().store(true, std::memory_order_release);
+			Value().store(original ? kOriginal : kVpv, std::memory_order_release);
+			return original;
+		}
+
 		bool LatchFromConfigurationFile(const std::string& path)
 		{
 			if (Value().load(std::memory_order_acquire) != kUnknown)

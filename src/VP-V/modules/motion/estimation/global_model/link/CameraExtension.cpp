@@ -868,12 +868,16 @@ namespace Vpv
 			}
 			else if (st->core)
 			{
-				st->core->OnPostSubmitGap();
-				if (st->labelFill && st->liveBuilt)
+				const RE::DrawJob* job = RE::PayloadOf<RE::DrawJob>(c);
+				if (!job || job->retireSourceFrame)
 				{
-					VpSkeleton::IGapWork* gap = st->labelFill->GapWork();
-					if (gap->HasWork())
-						gap->RunChunk(0);   // P8 in the post-submit gap, before the seal (one chunk: the upload of one frame's labels)
+					st->core->OnPostSubmitGap();
+					if (st->labelFill && st->liveBuilt)
+					{
+						VpSkeleton::IGapWork* gap = st->labelFill->GapWork();
+						if (gap->HasWork())
+							gap->RunChunk(0);   // P8 in the post-submit gap, before the seal (one chunk: the upload of one frame's labels)
+					}
 				}
 			}
 			return false;   // reporting only: never a take-over, never feeds a consumer

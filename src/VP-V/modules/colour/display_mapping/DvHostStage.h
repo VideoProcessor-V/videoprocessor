@@ -155,6 +155,9 @@ public:
 	// The hooks go with the device.
 	void ReleaseHooks() { m_trimsHook.Clear(); m_trimsConfigured = false; m_dmPreHook.Clear(); m_dmPreConfigured = false; m_appearanceHook.Clear(); m_appearanceConfigured = false; m_trimsShaderMissing = false; }
 
+	// Called right after ConfigureRenderParams replaces colorMapParams with a fresh configured projection.
+	void ResetParameterSwitches() { m_toneSwitch.Reset(); m_mapSwitch.Reset(); }
+
 	// CF-DV P5 (colour.dm_pre): post-decode I-only DV debander (DmPreDeband.h, shaders/vp_dm_pre_deband.glsl).
 	CustomHookChain::Chain& DmPreDebandHook() { return m_dmPreHook; }
 	const std::string& DmPreDebandStatus() const { return m_dmPreStatus; }

@@ -3709,7 +3709,13 @@ namespace Vpv
 			if (c.phase == RE::FramePhase::Begin)
 				Begin(*st, c.seq);
 			else
-				AfterRender(*st, c.seq);
+			{
+				const RE::DrawJob* job = RE::PayloadOf<RE::DrawJob>(c);
+				const bool retireSourceFrame = !job || job->retireSourceFrame;
+				const bool retireOnly = job && job->retireOnly;
+				const uint64_t releaseFenceValue = job ? job->releaseFenceValue : 0u;
+				AfterRender(*st, c.seq, retireSourceFrame, retireOnly, releaseFenceValue);
+			}
 			return false;   // observation only: never a take-over
 		}
 
@@ -4188,64 +4194,68 @@ namespace Vpv
 			Refresh(st);
 		}
 
-		void SkeletonModule::AfterRender(HostState& st, int64_t seqIn)
+		void SkeletonModule::AfterRender(HostState& st, int64_t seqIn, bool retireSourceFrame, bool retireOnly, uint64_t releaseFenceValue)
 		{
 			const uint64_t afterUs = nowUs_();   // first: the render-only time ends before this module's own AfterRender work
 			const std::shared_ptr<Bundle> b = std::atomic_load(&st.bundle);
 			if (!b)
 				return;
 			const uint64_t seq = static_cast<uint64_t>(seqIn);
-			// S5: the span from the end of Begin to the entry of AfterRender is OBSERVED and shown (skeleton_regulator: observe only); the regulator is
-			// fed only through NoteRenderOnlyMs. A frame without a Begin of its own, or with the period unmeasured, observes nothing (counted).
-			if (st.renderBeginSeq == seqIn && st.periodMs > 0.0 && afterUs >= st.renderBeginUs)
+			if (!retireOnly)
 			{
-				const double renderMs = static_cast<double>(afterUs - st.renderBeginUs) / 1000.0;
-				const double slackMs = st.periodMs - renderMs;
-				const bool missed = renderMs > st.periodMs;
-				// OBSERVED ONLY: Begin..AfterRender includes the render lock wait and the pacing sleeps, so it is not a render-only time and the
-				// regulator is NOT fed with it (it would shed on waits). The regulator acts on NoteRenderOnlyMs (a span the host measured).
-				++st.timing.frames;
-				st.timing.missed += missed ? 1u : 0u;
-				st.timing.lastSlackMs = slackMs;
-				st.timing.lastRenderOnlyMs = renderMs;
-				st.timing.lastPeriodMs = st.periodMs;
-				st.timing.lastMissed = missed;
+				// S5: the span from the end of Begin to the entry of AfterRender is OBSERVED and shown (skeleton_regulator: observe only); the regulator is
+				// fed only through NoteRenderOnlyMs. A frame without a Begin of its own, or with the period unmeasured, observes nothing (counted).
+				if (st.renderBeginSeq == seqIn && st.periodMs > 0.0 && afterUs >= st.renderBeginUs)
+				{
+					const double renderMs = static_cast<double>(afterUs - st.renderBeginUs) / 1000.0;
+					const double slackMs = st.periodMs - renderMs;
+					const bool missed = renderMs > st.periodMs;
+					// OBSERVED ONLY: Begin..AfterRender includes the render lock wait and the pacing sleeps, so it is not a render-only time and the
+					// regulator is NOT fed with it (it would shed on waits). The regulator acts on NoteRenderOnlyMs (a span the host measured).
+					++st.timing.frames;
+					st.timing.missed += missed ? 1u : 0u;
+					st.timing.lastSlackMs = slackMs;
+					st.timing.lastRenderOnlyMs = renderMs;
+					st.timing.lastPeriodMs = st.periodMs;
+					st.timing.lastMissed = missed;
+				}
+				else
+					++st.timing.skipped;
+				st.renderBeginSeq = 0;
+				FeedEngine(st, false);   // the pair the engine just estimated: its slots are sealed at the Begin of its frame
+				if (st.dispatcher && b->wiring.dispatcher == st.dispatcher.get() && st.gpuMemoryNote.empty())
+				{
+					// GPU-legal (before the flush and the gap): destroy what a size / graph change queued, then (re)allocate the
+					// product textures for the lane's current graph (a no-op while nothing changed). Never at Begin (no render
+					// lock there). A refused product shows through the dispatcher's Fallbacks().
+					st.dispatcher->FlushReleases();
+					if (const std::shared_ptr<VpSkeleton::LaneState> ls = b->lane.State())
+						if (ls->graph.valid)
+							st.dispatcher->Configure(ls->graph, b->registry, ls->plan, b->dims, b->configuredGen, st.oldBundleJobsJoined);
+				}
+				else if (st.dispatcher && !st.gpuMemoryNote.empty() && st.dispatcher->HoldsVideoMemory())
+				{
+					// The memory refusal took effect after the frame that already allocated: give it all back now (GPU-legal).
+					st.dispatcher->Release();
+				}
 			}
-			else
-				++st.timing.skipped;
-			st.renderBeginSeq = 0;
-			FeedEngine(st, false);   // the pair the engine just estimated: its slots are sealed at the Begin of its frame
-			if (st.dispatcher && b->wiring.dispatcher == st.dispatcher.get() && st.gpuMemoryNote.empty())
+			if (retireSourceFrame)
 			{
-				// GPU-legal (before the flush and the gap): destroy what a size / graph change queued, then (re)allocate the
-				// product textures for the lane's current graph (a no-op while nothing changed). Never at Begin (no render
-				// lock there). A refused product shows through the dispatcher's Fallbacks().
-				st.dispatcher->FlushReleases();
-				if (const std::shared_ptr<VpSkeleton::LaneState> ls = b->lane.State())
-					if (ls->graph.valid)
-						st.dispatcher->Configure(ls->graph, b->registry, ls->plan, b->dims, b->configuredGen, st.oldBundleJobsJoined);
+				// R22 / FIX3-D4 / W23-HOST-WIRING: retire this source frame ONCE after its final draw (all motionDraws
+				// and any cadenceRepeat complete) before the post-submit gap so reclaimed ring slots are available to
+				// GPU-compute gap work for seq + 1 while secondary draws never lose P10/P11/source ring slots.
+				// Single-queue D3D11 immediate-context FIFO: all consumer reads of frame `seq` and all subsequent gap
+				// writes queued by OnPostSubmitGap execute in strict FIFO submission order on the same D3D11 immediate
+				// context (so releaseFenceValue == 0 is sound on D3D11; multi-queue backends pass a real monotonic fence).
+				b->lane.OnFrameRetired(seq, releaseFenceValue);
+				if (st.periodMs > 0.0)
+				{
+					b->lane.OnPostSubmitGap(nowUs_() + static_cast<uint64_t>(st.periodMs * 500.0));   // half the measured period
+					++st.gapsRun;
+				}
+				else
+					++st.gapsSkipped;   // the frame period is not measured yet: no gap is promised
 			}
-			else if (st.dispatcher && !st.gpuMemoryNote.empty() && st.dispatcher->HoldsVideoMemory())
-			{
-				// The memory refusal took effect after the frame that already allocated: give it all back now (GPU-legal).
-				st.dispatcher->Release();
-			}
-			// R22 / FIX3-D4: retire this completed frame before the post-submit gap so reclaimed ring slots are
-			// available to GPU-compute gap work for seq + 1. Every lag-k input declares history >= k
-			// (ProductGraph.h), so ReleaseThrough(seq - (h + K)) never frees any input needed by seq + 1.
-			// Single-queue D3D11 immediate-context FIFO assumption: all consumer reads of frame `seq` and all
-			// subsequent gap writes queued by OnPostSubmitGap execute in strict FIFO submission order on the
-			// same D3D11 immediate context, so GPU reads of a reclaimed slot complete before any newly queued
-			// gap write touches that slot, making releaseFenceValue == 0 sound on this backend. A future
-			// multi-queue or async-compute backend must pass a real monotonic render-side fence value here.
-			b->lane.OnFrameRetired(seq, 0);
-			if (st.periodMs > 0.0)
-			{
-				b->lane.OnPostSubmitGap(nowUs_() + static_cast<uint64_t>(st.periodMs * 500.0));   // half the measured period
-				++st.gapsRun;
-			}
-			else
-				++st.gapsSkipped;   // the frame period is not measured yet: no gap is promised
 		}
 
 		// ---- status -----------------------------------------------------------------------------------

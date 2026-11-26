@@ -142,7 +142,7 @@ bool LibplaceboVideoRenderer::GetModuleStatus(const char* module, CString& statu
 			take(lines.fallbacks, GetFallbacksStatus(line));
 			take(lines.ledDrive, GetLedDriveStatus(line));
 			take(lines.sourceResolution, GetSourceResolutionStatus(line));
-			if (m_impl)   // CF-1 FIX1 SHOULD 5: colour.appearance in Ctrl+I, OFF included (never Config-only)
+			if (m_impl && !m_impl->pipelineSlots.OriginalPathway())   // CF-1 FIX1 SHOULD 5: colour.appearance in Ctrl+I, OFF included (never Config-only; silent on Original)
 				lines.appearance.Set(true, CString(m_impl->dvStage.AppearanceStatusShown().c_str()).GetString());
 			std::vector<std::string> extensionLines; RendererExtension::CollectStatusLines(RendererExtension::StatusKind::Lines, m_impl.get(), extensionLines); // VPV-HOOK
 			VpStatusText::SetExtensionLines(lines, extensionLines, [](const std::string& text) { return std::wstring(CString(text.c_str()).GetString()); }); // VPV-HOOK

@@ -1411,7 +1411,9 @@ namespace
 				<< settings.scopeSubtitleEngageDriftMs << '|'
 				<< settings.scopeSubtitleReleaseDriftMs << '|'
 				<< settings.scopeSubtitlePaddingPixels << '|'
-				<< settings.scopeSubtitleTargetBufferPixels << '|';
+				<< settings.scopeSubtitleTargetBufferPixels << '|'
+				<< settings.edgeBlanking.left << '|' << settings.edgeBlanking.top << '|'
+				<< settings.edgeBlanking.right << '|' << settings.edgeBlanking.bottom << '|';
 		}
 		stream
 			<< settings.calibrationLutEnabled << '|'
@@ -7332,6 +7334,7 @@ struct LibplaceboVideoRenderer::Impl
         ++pictureProcessingEpoch;
         InvalidateHdrStatus();
 		colorMapParams = projection.colorMapParams;
+		dvStage.ResetParameterSwitches();   // VPV-HOOK: fresh projection is the new configured baseline
 		peakDetectParams = projection.peakDetectParams;
 		sigmoidParams = projection.sigmoidParams;
 		debandParams = projection.debandParams;
@@ -10163,6 +10166,10 @@ struct LibplaceboVideoRenderer::Impl
 			current.scopeSubtitlePaddingPixels != next.scopeSubtitlePaddingPixels ||
 			current.scopeSubtitleTargetBufferPixels !=
 				next.scopeSubtitleTargetBufferPixels, "viewport");
+		changed(current.edgeBlanking.left != next.edgeBlanking.left, "blank_left");
+		changed(current.edgeBlanking.top != next.edgeBlanking.top, "blank_top");
+		changed(current.edgeBlanking.right != next.edgeBlanking.right, "blank_right");
+		changed(current.edgeBlanking.bottom != next.edgeBlanking.bottom, "blank_bottom");
 		if (fields.empty())
 			return "none";
 		std::ostringstream description;
@@ -21355,7 +21362,7 @@ releaseDriftBaseRetention =
             renderParams.num_hooks = 0;
         }
         if (!pipelineSlots.OriginalPathway()) { ReportRenderErrors(); dynamicDrive.CollectMeasurements(); }   // VPV-HOOK P4-4: after-render reports (CoreSegments.inl), then Dynamic Drive stats out (finished measurements, a few frames old; never waits); nothing in Original
-        RendererExtension::NotifyAfterRender(this, sourceSequence, frameGeneration, static_cast<int>(hookRender.errors), hookRender.retried ? 1 : 0, rendered); // VPV-HOOK
+        RendererExtension::NotifyAfterRender(this, sourceSequence, frameGeneration, static_cast<int>(hookRender.errors), hookRender.retried ? 1 : 0, rendered, nullptr, false); // VPV-HOOK: retired once after motionDraws & cadenceRepeat complete
         if (hookRender.retried)
             DebugLog::Log("VP anamorphic hook recovery: schema=1 sequence=%llu generation=%llu hook=%llu errors=0x%x retry=1 rendered=%d lens=%.6f latch=until_shader_selection_change",
                 sourceSequence, frameGeneration, hookRender.failedSignature, hookRender.errors,
@@ -23654,6 +23661,7 @@ void LibplaceboVideoRenderer::Build()
 	m_ingressGate.CloseAndDrain();   // P10-8: the old Impl (if any) has no callback inside   // VPV-HOOK
 	m_impl.swap(builtImpl); builtImpl.reset();   // VPV-HOOK
 	m_ingressGate.Open();   // VPV-HOOK
+	Vpv::Ingress::SyncRunningPathwayFromConfig(this, m_buildConfiguration.get());   // VPV-HOOK: Owner Option A sync before Impl::Initialize runs
 	m_impl->diagRendererGeneration = m_callbackGeneration;   // report-a-problem rows
 	DiagnosticHistory::Global().RecordDecision("renderer-build", "renderer constructed",
 		static_cast<int64_t>(m_callbackGeneration));
@@ -24033,6 +24041,7 @@ bool LibplaceboVideoRenderer::ApplyApplicationState(
 		m_manualUnifiedProfiles = next;
 		m_rendererConfiguration = candidateConfiguration;
 		m_applicationConfiguration = snapshot.configuration;
+		if (state) Vpv::Ingress::SyncRunningPathway(this, candidateSettings.pipelineOriginalPathway); else Vpv::Ingress::SyncRunningPathwayFromConfig(this, candidateConfiguration.get());   // VPV-HOOK: Owner Option A
 		rendererRestartRequired = true;
 		activeState = TEXT("Renderer initialization superseded by profile change");
 		DebugLog::Log(
@@ -24165,6 +24174,7 @@ bool LibplaceboVideoRenderer::ApplyApplicationState(
 	m_manualUnifiedProfiles = next;
 	m_rendererConfiguration = candidateConfiguration;
 	m_applicationConfiguration = snapshot.configuration;
+	if (state) Vpv::Ingress::SyncRunningPathway(this, candidateSettings.pipelineOriginalPathway); else Vpv::Ingress::SyncRunningPathwayFromConfig(this, candidateConfiguration.get());   // VPV-HOOK: Owner Option A
 	DebugLog::Log("Renderer configuration snapshot accepted: generation=%llu identity=%llu",
 		static_cast<unsigned long long>(snapshot.generation),
 		static_cast<unsigned long long>(candidateConfiguration->GetContentIdentity()));
@@ -27990,7 +28000,8 @@ void LibplaceboVideoRenderer::RenderLoop()
 				m_frameQueue.front().cadenceDeadlineSeconds;
 			currentFileFrame = m_frameQueue.front().fileFrame;
 			currentFileMotionOff = m_frameQueue.front().fileMotionOff;
-			RendererExtension::NotifyFrame(RendererExtension::FramePhase::Begin, m_impl.get(), static_cast<int64_t>(sourceSequence)); // VPV-HOOK: the one FrameSeal (resync), then the readers at their sites
+			if (!cadenceRepeat) // VPV-HOOK: cadence repeat keeps sourceSequence sealed & unretired until final draw
+				RendererExtension::NotifyFrame(RendererExtension::FramePhase::Begin, m_impl.get(), static_cast<int64_t>(sourceSequence)); // VPV-HOOK: the one FrameSeal (resync), then the readers at their sites
 			const auto& dequeued = m_frameQueue.front();
 			if (dequeued.state && dequeued.state->dolbyVisionTunnel)
 			{
@@ -28232,6 +28243,8 @@ void LibplaceboVideoRenderer::RenderLoop()
 		// bounded preparation window even when no new capture has arrived.
 		m_queueChanged.notify_all();
 		m_fileSlotGate.Notify();   // ABI 37: a file source may queue its next frame
+		// VPV-HOOK: retire sourceSequence once after all motionDraws & cadence-repeat decisions (disarmed when repeatQueued)
+		struct SourceFrameRetireGuard { Impl* impl; uint64_t seq; uint64_t gen; bool armed; ~SourceFrameRetireGuard() { if (armed && impl) { std::lock_guard<std::mutex> g(impl->renderMutex); RendererExtension::NotifySourceFrameRetired(impl, static_cast<int64_t>(seq), static_cast<int64_t>(gen)); } } } sourceFrameRetire{ m_impl.get(), sourceSequence, frameGeneration, true };
 
 		if (prefillReleased)
 		{
@@ -28297,11 +28310,14 @@ void LibplaceboVideoRenderer::RenderLoop()
 			m_queueTargetFloor.store(m_impl->activeSettings.opticalFlow && m_impl->activeSettings.motionAheadFrames > 0 ?
 				MotionAhead::QueueFramesFor(MotionAhead::DepthAt(m_impl->activeSettings.motionAheadFrames, captureRateHz,
 					m_impl->activeSettings.generalRateFixes)) : 0, std::memory_order_relaxed);
-			UpdateQueueDelayHold(captureRateHz, measuredCaptureRateHz > 0.0 ? measuredCaptureRateHz :
-				(state && state->displayMode ? state->displayMode->RefreshRateHz() : 0.0));   // VP-V delay budget (ADR-0020)
-			m_impl->contentIntent->Configure(m_impl->activeSettings.intentContent,
-				m_impl->activeSettings.intentContentHoldSeconds);
-			m_impl->ConfigureIntentInterpreter();
+			if (!m_impl->pipelineSlots.OriginalPathway()) // VPV-HOOK: Original == Bill
+			{
+				UpdateQueueDelayHold(captureRateHz, measuredCaptureRateHz > 0.0 ? measuredCaptureRateHz :
+					(state && state->displayMode ? state->displayMode->RefreshRateHz() : 0.0));   // VP-V delay budget (ADR-0020)
+				m_impl->contentIntent->Configure(m_impl->activeSettings.intentContent,
+					m_impl->activeSettings.intentContentHoldSeconds);
+				m_impl->ConfigureIntentInterpreter();
+			}
 			m_impl->pulldownFilmHz = frameFilmHz;
 			m_impl->fileFrameSource = currentFileFrame;
 			m_impl->pulldownCadence = m_pulldownCadence.load(std::memory_order_relaxed);
@@ -29295,6 +29311,7 @@ void LibplaceboVideoRenderer::RenderLoop()
 						repeatCount);
 				}
 				m_queueChanged.notify_all();
+				sourceFrameRetire.armed = false; // VPV-HOOK: keep sourceSequence unretired across queued cadenceRepeat
 				continue;
 			}
 			{

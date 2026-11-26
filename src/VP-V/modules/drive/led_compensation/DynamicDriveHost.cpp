@@ -11,6 +11,7 @@
 #include <ConfigFile.h>
 #include <DebugLog.h>
 #include <RendererConfigView.h>
+#include <ShortcutDefaults.h>
 
 #include <Windows.h>
 
@@ -493,6 +494,31 @@ namespace LedDrive
 
 	void DynamicDriveHost::Update(const ConfigFile& config, const HostContext& context)
 	{
+		// Original == Bill: inert on pipeline_original_pathway: on — no [led_drive.*] parsing,
+		// no validation rejections/fallbacks, no gamma boost/shadow lift, stop any active LED module.
+		if (OriginalPathwayForConfig([&config](const char* section, const char* key, std::string& out)
+			{ return config.TryGetString(section, key, out); }))
+		{
+			if (!rejection.empty())
+			{
+				rejection.clear();
+				std::atomic_store(&statusRejection, std::shared_ptr<const std::string>());
+			}
+			params = DynamicDriveParams();
+			aliasConflict.clear();
+			signature.clear();
+			std::shared_ptr<LedDriveModule> previous = std::atomic_load(&module);
+			if (previous)
+				lifecycleWorker->EnqueueStop(previous);
+			std::atomic_store(&module, std::shared_ptr<LedDriveModule>());
+			if (context.frame)
+			{
+				context.frame->Clear();
+				context.frame->PublishRejection(std::string());
+				context.frame->PublishParams(DynamicDriveParams());
+			}
+			return;
+		}
 		// Only [projector.default] and [led_drive.default] (or its alias [dynamic_drive.default])
 		// matter; any other configuration change leaves a running module alone.
 		std::string next;

@@ -239,6 +239,58 @@ namespace OutputSegments
 		bool demandActive = false;
 		const void* demandHost = nullptr;
 		uint64_t demandErasures = 0;
+		// Per-source-frame reuse state so secondary motionDraws / cadenceRepeat draws of the same
+		// sourceSequence reuse st.pass.Current() without re-stepping temporal EMA or calling Invalidate().
+		bool hasSteppedSequence = false;
+		uint64_t lastSteppedSourceSequence = 0;
+		std::string lastSteppedLutFingerprint;
+		int lastSteppedGridW = 0;
+		int lastSteppedGridH = 0;
+		int lastSteppedBlockPx = 0;
+		int lastSteppedColorBits = 0;
+		double lastSteppedABase = 0.0;
+		DitherNeedSeam::Outcome lastSteppedOutcome;
+
+		void ResetSteppedSequence()
+		{
+			hasSteppedSequence = false;
+			lastSteppedSourceSequence = 0;
+			lastSteppedLutFingerprint.clear();
+			lastSteppedGridW = 0;
+			lastSteppedGridH = 0;
+			lastSteppedBlockPx = 0;
+			lastSteppedColorBits = 0;
+			lastSteppedABase = 0.0;
+			lastSteppedOutcome = DitherNeedSeam::Outcome();
+		}
+
+		void ReleaseGpuResources(pl_gpu releaseGpu)
+		{
+			guard.Release();
+			ResetSteppedSequence();
+			pl_gpu activeGpu = gpu;
+			if (activeGpu != nullptr && (releaseGpu == nullptr || releaseGpu == activeGpu))
+			{
+				pass.Release(activeGpu);
+				if (lutTex) pl_tex_destroy(activeGpu, &lutTex);
+				if (lutOutTex) pl_tex_destroy(activeGpu, &lutOutTex);
+				if (dispatch) pl_dispatch_destroy(&dispatch);
+			}
+			else if (activeGpu == nullptr && releaseGpu != nullptr)
+			{
+				pass.Release(releaseGpu);
+			}
+			else
+			{
+				// Device changed or already gone: forget handles without calling libplacebo on a dead device.
+				pass.Release(nullptr);
+				lutTex = nullptr;
+				lutOutTex = nullptr;
+				dispatch = nullptr;
+			}
+			gpu = nullptr;
+			lutCache.Reset();
+		}
 
 		static bool UploadLut1024(pl_gpu g, pl_tex& tex, const std::vector<float>& rgba)
 		{
@@ -372,30 +424,8 @@ namespace OutputSegments
 		if (!ditherNeedGpu)
 			return;
 		DitherNeedGpuState& st = *ditherNeedGpu;
-		st.guard.Release();
 		st.ClearDemand(this);
-		pl_gpu activeGpu = st.gpu;
-		if (activeGpu != nullptr && (releaseGpu == nullptr || releaseGpu == activeGpu))
-		{
-			st.pass.Release(activeGpu);
-			if (st.lutTex) pl_tex_destroy(activeGpu, &st.lutTex);
-			if (st.lutOutTex) pl_tex_destroy(activeGpu, &st.lutOutTex);
-			if (st.dispatch) pl_dispatch_destroy(&st.dispatch);
-		}
-		else if (activeGpu == nullptr && releaseGpu != nullptr)
-		{
-			st.pass.Release(releaseGpu);
-		}
-		else
-		{
-			// Device changed or already gone: forget handles without calling libplacebo on a dead device.
-			st.pass.Release(nullptr);
-			st.lutTex = nullptr;
-			st.lutOutTex = nullptr;
-			st.dispatch = nullptr;
-		}
-		st.gpu = nullptr;
-		st.lutCache.Reset();
+		st.ReleaseGpuResources(releaseGpu);
 		VpSkeleton::VramUsers::Instance().Release(this, VpSkeleton::kUserDitherNeed);
 	}
 
@@ -520,13 +550,12 @@ namespace OutputSegments
 		const pl_hook* const* hooks, int numHooks,
 		const std::function<void(std::function<void()>)>& attachRelease)
 	{
-		// Off or Original pathway: immediate no-op (zero GPU calls, zero demand, zero counters).
+		// Off or Original pathway: immediate no-op (zero GPU calls, zero demand, zero counters, zero retained VRAM).
 		if (!req.requested || req.originalPathway)
 		{
 			if (ditherNeedGpu)
 			{
-				ditherNeedGpu->guard.Release();
-				ditherNeedGpu->pass.Invalidate();
+				ditherNeedGpu->ReleaseGpuResources(req.gpu);
 				ditherNeedGpu->ClearDemand(this);
 				ditherNeedGpu->SyncVram(this);
 			}
@@ -537,11 +566,10 @@ namespace OutputSegments
 			ditherNeedGpu = std::make_unique<DitherNeedGpuState>();
 		DitherNeedGpuState& st = *ditherNeedGpu;
 
-		// auto asked for, but sigma-delta is not running by configuration: visible inactive fallback.
+		// auto asked for, but sigma-delta is not running by configuration: release GPU resources + visible inactive fallback.
 		if (!req.sigmaDeltaActive)
 		{
-			st.guard.Release();
-			st.pass.Invalidate();
+			st.ReleaseGpuResources(req.gpu);
 			st.ClearDemand(this);
 			st.SyncVram(this);
 			ditherNeed.Evaluate(false, false, DitherNeedSeam::Feed(), RegionEvidence::Grid());
@@ -559,6 +587,7 @@ namespace OutputSegments
 		{
 			st.guard.Release();
 			st.pass.Invalidate();
+			st.ResetSteppedSequence();
 			st.ClearDemand(this);
 			st.SyncVram(this);
 			DitherNeedSeam::Feed nlsFeed;
@@ -595,6 +624,7 @@ namespace OutputSegments
 		if (st.gpu != nullptr && req.gpu != st.gpu)
 		{
 			st.guard.Release();
+			st.ResetSteppedSequence();
 			st.pass.Release(nullptr);
 			st.lutTex = nullptr;
 			st.lutOutTex = nullptr;
@@ -617,6 +647,53 @@ namespace OutputSegments
 			{
 				DitherNeedGpuState::UploadLut1024(req.gpu, st.lutTex, LightLevel::PackTexels(lut));
 				DitherNeedGpuState::UploadLut1024(req.gpu, st.lutOutTex, LightLevel::PackOutputTexels(lut));
+			}
+		}
+
+		// Secondary motionDraw / cadenceRepeat draws of the same sourceSequence reuse the already-stepped
+		// dither-need map without re-stepping temporal EMA or invalidating state.
+		{
+			const bool gridMatchesOverride = !req.overrideInputs ||
+				(req.overrideGrid.gw == st.lastSteppedGridW && req.overrideGrid.gh == st.lastSteppedGridH &&
+					(req.overrideGrid.B > 0 ? req.overrideGrid.B : 16) == st.lastSteppedBlockPx);
+			if (req.sourceSequence > 0 && st.hasSteppedSequence &&
+				st.lastSteppedSourceSequence == req.sourceSequence &&
+				!req.discontinuity &&
+				st.lastSteppedLutFingerprint == lut.fingerprint &&
+				st.lastSteppedColorBits == req.colorBits &&
+				st.lastSteppedABase == req.aBase &&
+				gridMatchesOverride &&
+				st.pass.Current() != nullptr)
+			{
+				st.guard.Release();
+				DitherNeed::Gpu::Placement reusePlacement;
+				const bool reusePlacementOk = DitherNeed::Gpu::PlacementFromCrops(
+					req.sourceCrop.x0, req.sourceCrop.y0, req.sourceCrop.x1, req.sourceCrop.y1,
+					req.targetCrop.x0, req.targetCrop.y0, req.targetCrop.x1, req.targetCrop.y1,
+					st.lastSteppedBlockPx > 0 ? st.lastSteppedBlockPx : 16, reusePlacement);
+				DitherNeedSeam::Outcome reuseOutcome = st.lastSteppedOutcome;
+				if (!reusePlacementOk)
+				{
+					st.pass.Invalidate();
+					st.ResetSteppedSequence();
+					st.SyncVram(this);
+					ditherNeed.RecordGpuFailure(reuseOutcome, DitherNeed::kPassFailed);
+					return reuseOutcome;
+				}
+				if (req.requireBind)
+				{
+					if (!st.guard.Apply(hooks, numHooks, st.pass.Current(), reusePlacement))
+					{
+						st.pass.Invalidate();
+						st.ResetSteppedSequence();
+						st.SyncVram(this);
+						ditherNeed.RecordGpuFailure(reuseOutcome, DitherNeed::Gpu::HookGuard::MissingAfterApply());
+						return reuseOutcome;
+					}
+					if (attachRelease)
+						attachRelease([this]() { ReleaseDitherNeedBind(); });
+				}
+				return reuseOutcome;
 			}
 		}
 
@@ -701,6 +778,7 @@ namespace OutputSegments
 		{
 			st.guard.Release();
 			st.pass.Invalidate();
+			st.ResetSteppedSequence();
 			st.SyncVram(this);
 			return outcome;
 		}
@@ -722,6 +800,7 @@ namespace OutputSegments
 		st.SyncVram(this);
 		if (!step.ran || st.pass.Current() == nullptr)
 		{
+			st.ResetSteppedSequence();
 			ditherNeed.RecordGpuFailure(outcome, step.missing ? step.missing : DitherNeed::kPassFailed);
 			return outcome;
 		}
@@ -731,6 +810,7 @@ namespace OutputSegments
 			if (!st.guard.Apply(hooks, numHooks, st.pass.Current(), placement))
 			{
 				st.pass.Invalidate();
+				st.ResetSteppedSequence();
 				st.SyncVram(this);
 				ditherNeed.RecordGpuFailure(outcome, DitherNeed::Gpu::HookGuard::MissingAfterApply());
 				return outcome;
@@ -738,6 +818,20 @@ namespace OutputSegments
 			if (attachRelease)
 				attachRelease([this]() { ReleaseDitherNeedBind(); });
 		}
+		if (req.sourceSequence > 0)
+		{
+			st.hasSteppedSequence = true;
+			st.lastSteppedSourceSequence = req.sourceSequence;
+			st.lastSteppedLutFingerprint = lut.fingerprint;
+			st.lastSteppedGridW = args.gridW;
+			st.lastSteppedGridH = args.gridH;
+			st.lastSteppedBlockPx = args.blockPx;
+			st.lastSteppedColorBits = req.colorBits;
+			st.lastSteppedABase = req.aBase;
+			st.lastSteppedOutcome = outcome;
+		}
+		else
+			st.ResetSteppedSequence();
 		return outcome;
 	}
 

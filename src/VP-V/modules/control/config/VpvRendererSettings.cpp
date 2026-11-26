@@ -944,6 +944,18 @@ namespace VpvRendererSettings
 			else
 				DebugLog::Log("libplacebo: deband_grain must be on or off; retaining %s", settings.debandGrain ? "on" : "off");
 		}
+		// Bill's [vprenderer] base edge blanking (base=1 in VpvSchemaKeys.h); profile/viewport rules override in ReadProfile.
+		for (const auto& blank : {
+			std::make_pair("blank_left", &settings.edgeBlanking.left),
+			std::make_pair("blank_top", &settings.edgeBlanking.top),
+			std::make_pair("blank_right", &settings.edgeBlanking.right),
+			std::make_pair("blank_bottom", &settings.edgeBlanking.bottom) })
+		{
+			int parsed = 0;
+			if (TryGetDisplayString(config, blank.first, rawValue) &&
+				ParseInteger(rawValue, 0, EdgeBlanking::MAX_INSET_PIXELS, parsed))
+				*blank.second = parsed;
+		}
 	}
 
 	// ---- ReadGlobal: the global pipeline keys ([vpv] first, then [vprenderer]) ----
@@ -1272,11 +1284,14 @@ namespace VpvRendererSettings
 			<< settings.pipelineOrder << '|'
 			<< settings.pipelineSlotsOff << '|'
 			<< settings.calibrationLutStage << '|'
+			<< settings.calibrationLutStageConfigured << '|'
 			<< settings.pipelineEntranceOnce << '|'
 			<< settings.frameAnalysisStore << '|'
 			<< settings.resyncEvent << '|'
 			<< settings.entranceGpuDrain << '|'
 			<< settings.ditherNeed << '|'
+			<< settings.pipelineSettingsProblems << '|'
+			<< settings.repeatRenderReuse << '|'
 			<< settings.hdrInference << '|'
 			<< settings.adaptive.cnnResidualStabilise << '|'
 			<< settings.adaptive.ssimResidualStabilise << '|'
@@ -1413,6 +1428,7 @@ namespace VpvRendererSettings
 		currentTransport.dejudderMatchTolerance = next.dejudderMatchTolerance;
 		currentTransport.dejudderFrameTrust = next.dejudderFrameTrust;
 		currentTransport.occlusionMask = next.occlusionMask;
+		currentTransport.repeatRenderReuse = next.repeatRenderReuse;
 		currentTransport.dejudderGlobalPrior = next.dejudderGlobalPrior;
 		currentTransport.dejudderMotionScaleLo = next.dejudderMotionScaleLo;
 		currentTransport.dejudderMotionScaleHi = next.dejudderMotionScaleHi;
@@ -1578,6 +1594,7 @@ namespace VpvRendererSettings
 		changed(current.dejudderMatchTolerance != next.dejudderMatchTolerance, "dejudder_match_tolerance");
 		changed(current.dejudderFrameTrust != next.dejudderFrameTrust, "dejudder_frame_trust");
 		changed(current.occlusionMask != next.occlusionMask, "occlusion_mask");
+		changed(current.repeatRenderReuse != next.repeatRenderReuse, "repeat_render_reuse");
 		changed(current.dejudderGlobalPrior != next.dejudderGlobalPrior, "dejudder_global_prior");
 		changed(current.dejudderMotionScaleLo != next.dejudderMotionScaleLo, "dejudder_motion_scale_lo");
 		changed(current.dejudderMotionScaleHi != next.dejudderMotionScaleHi, "dejudder_motion_scale_hi");
