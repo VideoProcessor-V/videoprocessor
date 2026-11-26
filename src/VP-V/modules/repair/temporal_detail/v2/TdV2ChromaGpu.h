@@ -63,6 +63,54 @@ namespace Gpu
 			return s;
 		}
 
+		// Pass 3A (SC-07): Exact U2 BandFromBase HalfSigma(kSigmaBase) taps for half-res RealTime Chroma L band (M & H stay 100% full coded res!).
+		inline std::string BuildChromaHalfBaseTapHeader()
+		{
+			const double hsBase = VpUnit::BandFromBase::HalfSigma(VpUnit::BandFromBase::kSigmaBase);
+			const auto tHBase = VpUnit::BandFromBase::Taps<double>(hsBase, 3.0, true, 0.0);
+			const int rHBase = static_cast<int>(tHBase.size() / 2);
+			std::string s;
+			s += VpvGpu::DefineInt("TD_RAD_CH_HBASE", rHBase);
+			s += VpvGpu::ConstArray("TD_TAP_CH_HBASE", static_cast<int>(tHBase.size()),
+				[&](int i) { return tHBase[static_cast<size_t>(i)]; });
+			return s;
+		}
+
+		// Pass 3A (SC-06 + SC-07): Chroma L band fetch helper supporting full-res or half-res L and optional RG16 norm16 unpack.
+		constexpr const char* kChromaLFetchHelper = R"GLSL(
+vec2 td_ch_unpack_l(vec2 raw)
+{
+    return vec2(td_unpack_band_l(raw.x), td_unpack_band_l(raw.y));
+}
+
+vec2 td_ch_pack_l(vec2 val)
+{
+    return vec2(td_pack_band_l(val.x), td_pack_band_l(val.y));
+}
+
+vec2 td_ch_fetch_l(sampler2D lTex, ivec2 p, ivec4 cHalfActive)
+{
+#if defined(TD_CH_HALF_L) && TD_CH_HALF_L
+    vec2 hc = (vec2(p) - vec2(0.5)) / 2.0;
+    vec2 lo = vec2(cHalfActive.xy);
+    vec2 hi = vec2(max(cHalfActive.xy, cHalfActive.zw - ivec2(1)));
+    vec2 cl = clamp(hc, lo, hi);
+    ivec2 i0 = ivec2(floor(cl));
+    ivec2 i1 = min(ivec2(hi), i0 + ivec2(1));
+    vec2 f = cl - vec2(i0);
+    vec2 v00 = td_ch_unpack_l(texelFetch(lTex, ivec2(i0.x, i0.y), 0).xy);
+    vec2 v10 = td_ch_unpack_l(texelFetch(lTex, ivec2(i1.x, i0.y), 0).xy);
+    vec2 v01 = td_ch_unpack_l(texelFetch(lTex, ivec2(i0.x, i1.y), 0).xy);
+    vec2 v11 = td_ch_unpack_l(texelFetch(lTex, ivec2(i1.x, i1.y), 0).xy);
+    vec2 top = v00 + (v10 - v00) * f.x;
+    vec2 bot = v01 + (v11 - v01) * f.x;
+    return top * (1.0 - f.y) + bot * f.y;
+#else
+    return td_ch_unpack_l(texelFetch(lTex, p, 0).xy);
+#endif
+}
+)GLSL";
+
 		// Shared sited coordinate helpers (exact algebraic match to SitingSpec::CodedToLumaX/Y & LumaToCodedX/Y).
 		constexpr const char* kSitedCoordHelpers = R"GLSL(
 float td_coded_to_luma_x(float cx)
@@ -232,6 +280,33 @@ void td_ch_bicubic_direct(vec2 sLocal, ivec4 cActive, ivec2 p, out vec2 outUv, o
 {
     ivec2 sz = cActive.zw - cActive.xy;
     outFlags = 0;
+#if defined(TD_BILINEAR_WARP) && TD_BILINEAR_WARP
+    if (sLocal.x >= 0.0 && sLocal.y >= 0.0 && sLocal.x <= float(sz.x - 1) && sLocal.y <= float(sz.y - 1))
+    {
+        bool anyBad = false;
+        vec2 bv = td_ch_bilinear_active(sLocal, cActive, anyBad);
+        bool isBorder = !(sLocal.x >= 1.0 && sLocal.y >= 1.0 && sLocal.x < float(sz.x) - 2.0 && sLocal.y < float(sz.y) - 2.0);
+        int bBit = isBorder ? 2 : 0;
+        if (td_is_bad(bv.x) || td_is_bad(bv.y))
+        {
+            outUv = td_ch_cur_fallback(p);
+            outFlags = bBit | 4;
+        }
+        else
+        {
+            outUv = bv;
+            outFlags = bBit | (anyBad ? 4 : 1);
+        }
+    }
+    else
+    {
+        vec2 fb = (u_same_ref_cur > 0.5) ? texelFetch(ref_uv, p, 0).xy : texelFetch(cur_uv, p, 0).xy;
+        bool anyBad = false;
+        vec2 bv = td_ch_bilinear_active(sLocal, cActive, anyBad);
+        outUv = vec2(td_is_bad(fb.x) ? bv.x : fb.x, td_is_bad(fb.y) ? bv.y : fb.y);
+        outFlags = 0;
+    }
+#else
     if (sLocal.x >= 1.0 && sLocal.y >= 1.0 && sLocal.x < float(sz.x) - 2.0 && sLocal.y < float(sz.y) - 2.0)
     {
         ivec2 i0 = ivec2(floor(sLocal));
@@ -286,6 +361,7 @@ void td_ch_bicubic_direct(vec2 sLocal, ivec4 cActive, ivec2 p, out vec2 outUv, o
         outUv = vec2(td_is_bad(fb.x) ? bv.x : fb.x, td_is_bad(fb.y) ? bv.y : fb.y);
         outFlags = 0;
     }
+#endif
 }
 )GLSL";
 
@@ -308,6 +384,21 @@ int motionSlot = clamp(int(round(u_motion_slot)), 0, 2);
 bool flagsClear = (u_flags_clear > 0.5);
 bool useH = (u_use_homography > 0.5);
 bool enableSmoothWarp = (u_enable_smooth_warp > 0.5);
+
+#if defined(TD_PHASE_A_EARLY_OUT) && TD_PHASE_A_EARLY_OUT
+if (!validRect || (baseX + 15 < cax0) || (baseX >= cax1) || (baseY + 15 < cay0) || (baseY >= cay1))
+{
+    if (p.x < TD_CH_W && p.y < TD_CH_H)
+    {
+        uint prevP = flagsClear ? 0u : uint(round(texelFetch(ref_flags_in, p, 0).x * 65535.0));
+        vec2 fb = td_ch_cur_fallback(p);
+        uint np = td_pack_ref_flags(prevP, refIdx, 0);
+        imageStore(warped_uv, p, vec4(fb, 0.0, 0.0));
+        imageStore(ref_flags_out, p, vec4(float(np) / 65535.0, 0.0, 0.0, 0.0));
+    }
+    return;
+}
+#endif
 
 // Workgroup-uniform 4x4 luma cell MV cache + 24x24 LDS tile eligibility (supports enableSmoothWarp == true!).
 ivec2 c00 = td_coded_to_luma_cell(ivec2(min(TD_CH_W - 1, baseX), min(TD_CH_H - 1, baseY)));
@@ -569,6 +660,7 @@ bool ldsInBounds = false;
 ivec2 ldsI0 = ivec2(0);
 int ldsRx = 0;
 int ldsRy = 0;
+#if !(defined(TD_BILINEAR_WARP) && TD_BILINEAR_WARP)
 if (useLds &&
     sLocal.x >= 1.0 && sLocal.y >= 1.0 &&
     sLocal.x < float(sz.x) - 2.0 && sLocal.y < float(sz.y) - 2.0)
@@ -578,6 +670,7 @@ if (useLds &&
     ldsRy = (ldsI0.y - 1) - tileBaseY;
     ldsInBounds = (ldsRx >= 0 && ldsRx + 3 < 24 && ldsRy >= 0 && ldsRy + 3 < 24);
 }
+#endif
 if (ldsInBounds)
 {
     vec4 wx = td_cubic_weights(sLocal.x - float(ldsI0.x));
@@ -708,7 +801,7 @@ if (p.x >= TD_CH_W || p.y >= TD_CH_H)
 
 if (!validRect || p.x < cax0 || p.x >= cax1 || p.y < cay0 || p.y >= cay1)
 {
-    imageStore(bands_l, p, vec4(0.0));
+    imageStore(bands_l, p, vec4(td_ch_pack_l(vec2(0.0)), 0.0, 0.0));
     imageStore(bands_mh, p, vec4(0.0));
     return;
 }
@@ -729,8 +822,205 @@ for (int k = -TD_RAD_BASE; k <= TD_RAD_BASE; ++k)
 vec2 bL = gBase;
 vec2 bM = gFine - bL;
 vec2 bH = srcVal - gFine;
-imageStore(bands_l, p, vec4(bL, 0.0, 0.0));
+imageStore(bands_l, p, vec4(td_ch_pack_l(bL), 0.0, 0.0));
 imageStore(bands_mh, p, vec4(bM.x, bM.y, bH.x, bH.y));
+)GLSL";
+
+		// ---- PASS C1-OPT3 (SC-07): Half-Res Chroma L + Full-Coded-Res M/H (1-pass 2D LDS G_fine + 2x2 downsample -> 1-pass 2D LDS half-L) ----
+		// Chroma M & H stay 100% full coded resolution (bands_mh stores (gFineCb, gFineCr, HCb, HCr); M = gFine - L in 1 sub!).
+		constexpr const char* kPassChromaFineDownHeader = R"GLSL(
+shared vec2 td_ch_fd0[16 + 2 * TD_RAD_FINE][16 + 2 * TD_RAD_FINE + 1];
+shared vec2 td_ch_fd1[16 + 2 * TD_RAD_FINE][17];
+)GLSL";
+
+		constexpr const char* kPassChromaFineDown = R"GLSL(
+int wgX = int(gl_WorkGroupID.x);
+int wgY = int(gl_WorkGroupID.y);
+int baseX = wgX * 16;
+int baseY = wgY * 16;
+int lx = int(gl_LocalInvocationID.x);
+int ly = int(gl_LocalInvocationID.y);
+int tid = ly * 16 + lx;
+ivec2 p = ivec2(baseX + lx, baseY + ly);
+
+int cax0 = int(round(u_cax0));
+int cay0 = int(round(u_cay0));
+int cax1 = int(round(u_cax1));
+int cay1 = int(round(u_cay1));
+int chax0 = int(round(u_chax0));
+int chay0 = int(round(u_chay0));
+int chax1 = int(round(u_chax1));
+int chay1 = int(round(u_chay1));
+bool validRect = (cax1 > cax0) && (cay1 > cay0);
+bool validHalf = (chax1 > chax0) && (chay1 > chay0);
+int xMin = cax0;
+int xMax = max(cax0, cax1 - 1);
+int yMin = cay0;
+int yMax = max(cay0, cay1 - 1);
+
+#if defined(TD_PHASE_A_EARLY_OUT) && TD_PHASE_A_EARLY_OUT
+if (!validRect || (baseX + 15 < cax0) || (baseX >= cax1) || (baseY + 15 < cay0) || (baseY >= cay1))
+{
+    if (lx < 8 && ly < 8)
+    {
+        ivec2 hp = ivec2(wgX * 8 + lx, wgY * 8 + ly);
+        if (hp.x < TD_CH_HALF_W && hp.y < TD_CH_HALF_H)
+            imageStore(half_area_out, hp, vec4(td_ch_pack_l(vec2(0.0)), 0.0, 0.0));
+    }
+    if (p.x < TD_CH_W && p.y < TD_CH_H)
+        imageStore(bands_mh, p, vec4(0.0));
+    return;
+}
+#endif
+
+int tileDim = 16 + 2 * TD_RAD_FINE;
+int tileN = tileDim * tileDim;
+for (int idx = tid; idx < tileN; idx += 256)
+{
+    int ty = idx / tileDim;
+    int tx = idx % tileDim;
+    int gx = baseX - TD_RAD_FINE + tx;
+    int gy = baseY - TD_RAD_FINE + ty;
+    int sx = validRect ? clamp(gx, xMin, xMax) : clamp(gx, 0, TD_CH_W - 1);
+    int sy = validRect ? clamp(gy, yMin, yMax) : clamp(gy, 0, TD_CH_H - 1);
+    vec2 sv = texelFetch(src_uv, ivec2(sx, sy), 0).xy;
+    td_ch_fd0[ty][tx] = vec2(td_is_bad(sv.x) ? 0.0 : sv.x, td_is_bad(sv.y) ? 0.0 : sv.y);
+}
+memoryBarrierShared();
+barrier();
+
+if (lx < 8 && ly < 8)
+{
+    ivec2 hp = ivec2(wgX * 8 + lx, wgY * 8 + ly);
+    if (hp.x < TD_CH_HALF_W && hp.y < TD_CH_HALF_H)
+    {
+        if (!validRect || !validHalf || hp.x < chax0 || hp.x >= chax1 || hp.y < chay0 || hp.y >= chay1)
+        {
+            imageStore(half_area_out, hp, vec4(td_ch_pack_l(vec2(0.0)), 0.0, 0.0));
+        }
+        else
+        {
+            int bx = TD_RAD_FINE + 2 * lx;
+            int by = TD_RAD_FINE + 2 * ly;
+            vec2 s00 = td_ch_fd0[by][bx];
+            vec2 s10 = td_ch_fd0[by][bx + 1];
+            vec2 s01 = td_ch_fd0[by + 1][bx];
+            vec2 s11 = td_ch_fd0[by + 1][bx + 1];
+            vec2 avg = (s00 + s10 + s01 + s11) / 4.0;
+            imageStore(half_area_out, hp, vec4(td_ch_pack_l(avg), 0.0, 0.0));
+        }
+    }
+}
+
+int hN = tileDim * 16;
+for (int idx = tid; idx < hN; idx += 256)
+{
+    int ty = idx / 16;
+    int tx = idx % 16;
+    int c = tx + TD_RAD_FINE;
+    vec2 acc = vec2(0.0);
+    for (int k = -TD_RAD_FINE; k <= TD_RAD_FINE; ++k)
+        acc += TD_TAP_FINE[k + TD_RAD_FINE] * td_ch_fd0[ty][c + k];
+    td_ch_fd1[ty][tx] = acc;
+}
+memoryBarrierShared();
+barrier();
+
+if (p.x >= TD_CH_W || p.y >= TD_CH_H)
+    return;
+
+if (!validRect || p.x < cax0 || p.x >= cax1 || p.y < cay0 || p.y >= cay1)
+{
+    imageStore(bands_mh, p, vec4(0.0));
+    return;
+}
+
+int cyCenter = ly + TD_RAD_FINE;
+vec2 gFine = vec2(0.0);
+for (int k = -TD_RAD_FINE; k <= TD_RAD_FINE; ++k)
+    gFine += TD_TAP_FINE[k + TD_RAD_FINE] * td_ch_fd1[cyCenter + k][lx];
+
+vec2 srcVal = td_ch_fd0[cyCenter][lx + TD_RAD_FINE];
+vec2 bH = srcVal - gFine;
+imageStore(bands_mh, p, vec4(gFine.x, gFine.y, bH.x, bH.y));
+)GLSL";
+
+		constexpr const char* kPassChromaHalfL2DHeader = R"GLSL(
+shared vec2 td_ch_hl0[16 + 2 * TD_RAD_CH_HBASE][16 + 2 * TD_RAD_CH_HBASE + 1];
+shared vec2 td_ch_hl1[16 + 2 * TD_RAD_CH_HBASE][17];
+)GLSL";
+
+		constexpr const char* kPassChromaHalfL2D = R"GLSL(
+int baseX = int(gl_WorkGroupID.x) * 16;
+int baseY = int(gl_WorkGroupID.y) * 16;
+int lx = int(gl_LocalInvocationID.x);
+int ly = int(gl_LocalInvocationID.y);
+int tid = ly * 16 + lx;
+ivec2 hp = ivec2(baseX + lx, baseY + ly);
+
+int chax0 = int(round(u_chax0));
+int chay0 = int(round(u_chay0));
+int chax1 = int(round(u_chax1));
+int chay1 = int(round(u_chay1));
+bool validHalf = (chax1 > chax0) && (chay1 > chay0);
+int hxMin = chax0;
+int hxMax = max(chax0, chax1 - 1);
+int hyMin = chay0;
+int hyMax = max(chay0, chay1 - 1);
+
+#if defined(TD_PHASE_A_EARLY_OUT) && TD_PHASE_A_EARLY_OUT
+if (!validHalf || (baseX + 15 < chax0) || (baseX >= chax1) || (baseY + 15 < chay0) || (baseY >= chay1))
+{
+    if (hp.x < TD_CH_HALF_W && hp.y < TD_CH_HALF_H)
+        imageStore(bands_l, hp, vec4(td_ch_pack_l(vec2(0.0)), 0.0, 0.0));
+    return;
+}
+#endif
+
+int tileDim = 16 + 2 * TD_RAD_CH_HBASE;
+int tileN = tileDim * tileDim;
+for (int idx = tid; idx < tileN; idx += 256)
+{
+    int ty = idx / tileDim;
+    int tx = idx % tileDim;
+    int ghx = baseX - TD_RAD_CH_HBASE + tx;
+    int ghy = baseY - TD_RAD_CH_HBASE + ty;
+    int sx = validHalf ? clamp(ghx, hxMin, hxMax) : clamp(ghx, 0, TD_CH_HALF_W - 1);
+    int sy = validHalf ? clamp(ghy, hyMin, hyMax) : clamp(ghy, 0, TD_CH_HALF_H - 1);
+    td_ch_hl0[ty][tx] = td_ch_unpack_l(texelFetch(half_area_in, ivec2(sx, sy), 0).xy);
+}
+memoryBarrierShared();
+barrier();
+
+int hN = tileDim * 16;
+for (int idx = tid; idx < hN; idx += 256)
+{
+    int ty = idx / 16;
+    int tx = idx % 16;
+    int c = tx + TD_RAD_CH_HBASE;
+    vec2 accBase = vec2(0.0);
+    for (int k = -TD_RAD_CH_HBASE; k <= TD_RAD_CH_HBASE; ++k)
+        accBase += TD_TAP_CH_HBASE[k + TD_RAD_CH_HBASE] * td_ch_hl0[ty][c + k];
+    td_ch_hl1[ty][tx] = accBase;
+}
+memoryBarrierShared();
+barrier();
+
+if (hp.x >= TD_CH_HALF_W || hp.y >= TD_CH_HALF_H)
+    return;
+
+if (!validHalf || hp.x < chax0 || hp.x >= chax1 || hp.y < chay0 || hp.y >= chay1)
+{
+    imageStore(bands_l, hp, vec4(td_ch_pack_l(vec2(0.0)), 0.0, 0.0));
+    return;
+}
+
+int cyCenter = ly + TD_RAD_CH_HBASE;
+vec2 gBase = vec2(0.0);
+for (int k = -TD_RAD_CH_HBASE; k <= TD_RAD_CH_HBASE; ++k)
+    gBase += TD_TAP_CH_HBASE[k + TD_RAD_CH_HBASE] * td_ch_hl1[cyCenter + k][lx];
+
+imageStore(bands_l, hp, vec4(td_ch_pack_l(gBase), 0.0, 0.0));
 )GLSL";
 
 		// ---- PASS C1B/C1C (Branch A Unidentified): Exact Separable Coarse-Only Blur (sigma = 32 luma px, M = H = 0) ----
@@ -913,7 +1203,13 @@ for (int sy = 0; sy < subY; ++sy)
         int ox = sx * 8 + lx;
         int py = cellStartY + oy;
         int px = cellStartX + ox;
-        if (oy < cellH && ox < cellW && py >= cy0 && py < cy1 && px >= cx0 && px < cx1)
+        ivec4 cHalfActive = ivec4(int(round(u_chax0)), int(round(u_chay0)), int(round(u_chax1)), int(round(u_chay1)));
+#if defined(TD_CHECKERBOARD_STATS) && TD_CHECKERBOARD_STATS
+        bool cbTake = (((ox ^ oy) & 1) == 0);
+#else
+        bool cbTake = true;
+#endif
+        if (cbTake && oy < cellH && ox < cellW && py >= cy0 && py < cy1 && px >= cx0 && px < cx1)
         {
             ivec2 p = ivec2(px, py);
             if (td_coded_to_luma_cell(p) == cell)
@@ -925,8 +1221,11 @@ for (int sy = 0; sy < subY; ++sy)
                     if (!td_is_bad(rv.x) && !td_is_bad(cv.x)) { float d = rv.x - cv.x; ogCb2 += d * d; }
                     if (!td_is_bad(rv.y) && !td_is_bad(cv.y)) { float d = rv.y - cv.y; ogCr2 += d * d; }
                 }
-                vec2 cLp = texelFetch(cur_l, p, 0).xy;
+                vec2 cLp = td_ch_fetch_l(cur_l, p, cHalfActive);
                 vec4 cMHp = texelFetch(cur_mh, p, 0);
+#if defined(TD_CH_HALF_L) && TD_CH_HALF_L
+                cMHp.xy = cMHp.xy - cLp;
+#endif
                 if (!td_is_bad(cLp.x) && !td_is_bad(cLp.y)) { curLSum += cLp; curL2Sum += cLp * cLp; }
                 if (!td_is_bad(cMHp.x) && !td_is_bad(cMHp.y)) curMidE += cMHp.xy * cMHp.xy;
                 if (!td_is_bad(cMHp.z) && !td_is_bad(cMHp.w)) curFineE += cMHp.zw * cMHp.zw;
@@ -943,8 +1242,19 @@ for (int sy = 0; sy < subY; ++sy)
                     if ((fl & 1) != 0)
                     {
                         refValidMask |= 1;
-                        if (needAutoFocus || (cellGateMaskL & 1) != 0) rL0 = texelFetch(ref_l_0, p, 0).xy;
-                        if (needAutoFocus || (cellGateMaskMH & 1) != 0) rMH0 = texelFetch(ref_mh_0, p, 0);
+                        bool needL0 = needAutoFocus || (cellGateMaskL & 1) != 0
+#if defined(TD_CH_HALF_L) && TD_CH_HALF_L
+                            || ((cellGateMaskMH & 1) != 0)
+#endif
+                            ;
+                        if (needL0) rL0 = td_ch_fetch_l(ref_l_0, p, cHalfActive);
+                        if (needAutoFocus || (cellGateMaskMH & 1) != 0)
+                        {
+                            rMH0 = texelFetch(ref_mh_0, p, 0);
+#if defined(TD_CH_HALF_L) && TD_CH_HALF_L
+                            rMH0.xy = rMH0.xy - rL0;
+#endif
+                        }
                         if (needAutoFocus)
                         {
                             if (!td_is_bad(rL0.x) && !td_is_bad(rL0.y)) { refLSum0 += rL0; refL2Sum0 += rL0 * rL0; }
@@ -960,8 +1270,19 @@ for (int sy = 0; sy < subY; ++sy)
                     if ((fl & 1) != 0)
                     {
                         refValidMask |= 2;
-                        if (needAutoFocus || (cellGateMaskL & 2) != 0) rL1 = texelFetch(ref_l_1, p, 0).xy;
-                        if (needAutoFocus || (cellGateMaskMH & 2) != 0) rMH1 = texelFetch(ref_mh_1, p, 0);
+                        bool needL1 = needAutoFocus || (cellGateMaskL & 2) != 0
+#if defined(TD_CH_HALF_L) && TD_CH_HALF_L
+                            || ((cellGateMaskMH & 2) != 0)
+#endif
+                            ;
+                        if (needL1) rL1 = td_ch_fetch_l(ref_l_1, p, cHalfActive);
+                        if (needAutoFocus || (cellGateMaskMH & 2) != 0)
+                        {
+                            rMH1 = texelFetch(ref_mh_1, p, 0);
+#if defined(TD_CH_HALF_L) && TD_CH_HALF_L
+                            rMH1.xy = rMH1.xy - rL1;
+#endif
+                        }
                         if (needAutoFocus)
                         {
                             if (!td_is_bad(rL1.x) && !td_is_bad(rL1.y)) { refLSum1 += rL1; refL2Sum1 += rL1 * rL1; }
@@ -977,8 +1298,19 @@ for (int sy = 0; sy < subY; ++sy)
                     if ((fl & 1) != 0)
                     {
                         refValidMask |= 4;
-                        if (needAutoFocus || (cellGateMaskL & 4) != 0) rL2 = texelFetch(ref_l_2, p, 0).xy;
-                        if (needAutoFocus || (cellGateMaskMH & 4) != 0) rMH2 = texelFetch(ref_mh_2, p, 0);
+                        bool needL2 = needAutoFocus || (cellGateMaskL & 4) != 0
+#if defined(TD_CH_HALF_L) && TD_CH_HALF_L
+                            || ((cellGateMaskMH & 4) != 0)
+#endif
+                            ;
+                        if (needL2) rL2 = td_ch_fetch_l(ref_l_2, p, cHalfActive);
+                        if (needAutoFocus || (cellGateMaskMH & 4) != 0)
+                        {
+                            rMH2 = texelFetch(ref_mh_2, p, 0);
+#if defined(TD_CH_HALF_L) && TD_CH_HALF_L
+                            rMH2.xy = rMH2.xy - rL2;
+#endif
+                        }
                         if (needAutoFocus)
                         {
                             if (!td_is_bad(rL2.x) && !td_is_bad(rL2.y)) { refLSum2 += rL2; refL2Sum2 += rL2 * rL2; }
@@ -988,7 +1320,9 @@ for (int sy = 0; sy < subY; ++sy)
                     if ((fl & 2) != 0) borderCnt += 1.0;
                     if ((fl & 4) != 0) badMask |= 4u;
                 }
+)GLSL";
 
+		constexpr const char* kPassChromaCellStatsPart1b = R"GLSL(
                 if (cellGateMaskL != 0 && (refValidMask & cellGateMaskL) == cellGateMaskL)
                 {
                     vec3 db = vec3(0.0), dr = vec3(0.0); bool ok = true;
@@ -1363,7 +1697,7 @@ else
 
 		inline std::string BuildPassChromaCellStatsBody()
 		{
-			return std::string(kPassChromaCellStatsPart1) + kPassChromaCellStatsPart2;
+			return std::string(kPassChromaCellStatsPart1) + kPassChromaCellStatsPart1b + kPassChromaCellStatsPart2;
 		}
 
 		// ---- PROD-GPU-BUG-18: Exact Unsplit Chroma Projection-IR Helper (1:1 with CPU TdV2Chroma.h:3697-3722) ----
@@ -2233,10 +2567,11 @@ float td_c3_accum_ref(bool refOk, int k, int wSlot, bool reuseLumaW, int ownActi
     if (enableHuber)
     {
         float diffSq = diff * diff;
-        t00 *= td_huber_taper(diffSq, td_vec_comp(d00, k));
-        t10 *= td_huber_taper(diffSq, td_vec_comp(d10, k));
-        t01 *= td_huber_taper(diffSq, td_vec_comp(d01, k));
-        t11 *= td_huber_taper(diffSq, td_vec_comp(d11, k));
+        int dSlot = (u_lean_luma_reuse > 0.5) ? wSlot : k;
+        t00 *= td_huber_taper(diffSq, td_vec_comp(d00, dSlot));
+        t10 *= td_huber_taper(diffSq, td_vec_comp(d10, dSlot));
+        t01 *= td_huber_taper(diffSq, td_vec_comp(d01, dSlot));
+        t11 *= td_huber_taper(diffSq, td_vec_comp(d11, dSlot));
     }
     float top = t00 + (t10 - t00) * tx;
     float bot = t01 + (t11 - t01) * tx;
@@ -2255,6 +2590,22 @@ ivec2 p = ivec2(baseX + loc.x, baseY + loc.y);
 
 int K = int(round(u_k));
 bool reuseLumaW = (u_reuse_luma_weights > 0.5);
+bool leanLumaReuse = (u_lean_luma_reuse > 0.5);
+
+#if defined(TD_PHASE_A_EARLY_OUT) && TD_PHASE_A_EARLY_OUT
+{
+    int cax0E = int(round(u_cax0));
+    int cay0E = int(round(u_cay0));
+    int cax1E = int(round(u_cax1));
+    int cay1E = int(round(u_cay1));
+    if (cax1E <= cax0E || cay1E <= cay0E || (baseX + 15 < cax0E) || (baseX >= cax1E) || (baseY + 15 < cay0E) || (baseY >= cay1E))
+    {
+        if (p.x < TD_CH_W && p.y < TD_CH_H)
+            imageStore(coded_delta_raw, p, vec4(0.0));
+        return;
+    }
+}
+#endif
 
 // Workgroup-uniform 4x4 luma cell grid LDS cache (replaces ~64 global cell fetches/px with 1 fetch/px!).
 ivec2 c00 = td_coded_to_luma_cell(ivec2(min(TD_CH_W - 1, baseX), min(TD_CH_H - 1, baseY)));
@@ -2282,7 +2633,8 @@ if (cellCacheOk)
         if (!reuseLumaW)
             td_c3_cw_cr[slot] = texelFetch(cell_weights_cr, ivec2(bIdx * TD_CW + ncx, ncy), 0);
         td_c3_cd_cb[slot] = texelFetch(cell_diag_cb, ivec2(bIdx * TD_CW + ncx, ncy), 0);
-        td_c3_cd_cr[slot] = texelFetch(cell_diag_cr, ivec2(bIdx * TD_CW + ncx, ncy), 0);
+        if (!leanLumaReuse)
+            td_c3_cd_cr[slot] = texelFetch(cell_diag_cr, ivec2(bIdx * TD_CW + ncx, ncy), 0);
         if (reuseLumaW && bIdx < K)
             td_c3_mg[slot] = texelFetch(motion_gate, ivec2(bIdx * TD_CW + ncx, ncy), 0).xy;
     }
@@ -2349,7 +2701,7 @@ float cellStepScale = (td_is_bad(rawScale) || !(rawScale > 0.0)) ? 0.0 : clamp(r
 float cellStepScaleSq = cellStepScale * cellStepScale;
 int expFocusBits = int(round(priorT.y));
 float diagCb0W = useCache ? td_c3_cd_cb[ciOwn].w : texelFetch(cell_diag_cb, ivec2(cx, cy), 0).w;
-bool cellFocusVeto = ((expFocusBits & 1) != 0) || (diagCb0W < -0.5);
+bool cellFocusVeto = ((expFocusBits & 1) != 0) || (!leanLumaReuse && (diagCb0W < -0.5));
 bool cellDefoc = ((expFocusBits & 2) != 0);
 bool bokehAllowL = (u_bokeh_mode > 0.5);
 
@@ -2359,14 +2711,21 @@ bool refOk0 = (K > 0) && ((td_unpack_ref_flags(packedFl, 0) & 1) != 0);
 bool refOk1 = (K > 1) && ((td_unpack_ref_flags(packedFl, 1) & 1) != 0);
 bool refOk2 = (K > 2) && ((td_unpack_ref_flags(packedFl, 2) & 1) != 0);
 
-vec2 curL  = texelFetch(cur_l, p, 0).xy;
+ivec4 cHalfActive = ivec4(int(round(u_chax0)), int(round(u_chay0)), int(round(u_chax1)), int(round(u_chay1)));
+vec2 curL  = td_ch_fetch_l(cur_l, p, cHalfActive);
 vec4 curMH = texelFetch(cur_mh, p, 0);
-vec2 refL0 = refOk0 ? texelFetch(ref_l_0, p, 0).xy : vec2(0.0);
-vec2 refL1 = refOk1 ? texelFetch(ref_l_1, p, 0).xy : vec2(0.0);
-vec2 refL2 = refOk2 ? texelFetch(ref_l_2, p, 0).xy : vec2(0.0);
+vec2 refL0 = refOk0 ? td_ch_fetch_l(ref_l_0, p, cHalfActive) : vec2(0.0);
+vec2 refL1 = refOk1 ? td_ch_fetch_l(ref_l_1, p, cHalfActive) : vec2(0.0);
+vec2 refL2 = refOk2 ? td_ch_fetch_l(ref_l_2, p, cHalfActive) : vec2(0.0);
 vec4 refMH0 = refOk0 ? texelFetch(ref_mh_0, p, 0) : vec4(0.0);
 vec4 refMH1 = refOk1 ? texelFetch(ref_mh_1, p, 0) : vec4(0.0);
 vec4 refMH2 = refOk2 ? texelFetch(ref_mh_2, p, 0) : vec4(0.0);
+#if defined(TD_CH_HALF_L) && TD_CH_HALF_L
+curMH.xy = curMH.xy - curL;
+if (refOk0) refMH0.xy = refMH0.xy - refL0;
+if (refOk1) refMH1.xy = refMH1.xy - refL1;
+if (refOk2) refMH2.xy = refMH2.xy - refL2;
+#endif
 
 vec2 mgOwn0 = reuseLumaW ? (useCache ? td_c3_mg[0 * 16 + ciOwn] : texelFetch(motion_gate, ivec2(0 * TD_CW + cx, cy), 0).xy) : vec2(1.0);
 vec2 mgOwn1 = (reuseLumaW && K > 1) ? (useCache ? td_c3_mg[1 * 16 + ciOwn] : texelFetch(motion_gate, ivec2(1 * TD_CW + cx, cy), 0).xy) : vec2(1.0);
@@ -2394,35 +2753,36 @@ for (int b = 0; b < 3; ++b)
     for (int chIdx = 0; chIdx < 2; ++chIdx)
     {
         bool useCbWeights = (chIdx == 0) || reuseLumaW;
+        bool useCbDiag = (chIdx == 0) || leanLumaReuse;
         vec4 ownW, ownD, w00, w10, w01, w11, d00, d10, d01, d11;
         if (useCache)
         {
             ownW = useCbWeights ? td_c3_cw_cb[bOff + ciOwn] : td_c3_cw_cr[bOff + ciOwn];
-            ownD = (chIdx == 0) ? td_c3_cd_cb[bOff + ciOwn] : td_c3_cd_cr[bOff + ciOwn];
+            ownD = useCbDiag ? td_c3_cd_cb[bOff + ciOwn] : td_c3_cd_cr[bOff + ciOwn];
             w00  = useCbWeights ? td_c3_cw_cb[bOff + ci00]  : td_c3_cw_cr[bOff + ci00];
             w10  = useCbWeights ? td_c3_cw_cb[bOff + ci10]  : td_c3_cw_cr[bOff + ci10];
             w01  = useCbWeights ? td_c3_cw_cb[bOff + ci01]  : td_c3_cw_cr[bOff + ci01];
             w11  = useCbWeights ? td_c3_cw_cb[bOff + ci11]  : td_c3_cw_cr[bOff + ci11];
-            d00  = (chIdx == 0) ? td_c3_cd_cb[bOff + ci00]  : td_c3_cd_cr[bOff + ci00];
-            d10  = (chIdx == 0) ? td_c3_cd_cb[bOff + ci10]  : td_c3_cd_cr[bOff + ci10];
-            d01  = (chIdx == 0) ? td_c3_cd_cb[bOff + ci01]  : td_c3_cd_cr[bOff + ci01];
-            d11  = (chIdx == 0) ? td_c3_cd_cb[bOff + ci11]  : td_c3_cd_cr[bOff + ci11];
+            d00  = useCbDiag ? td_c3_cd_cb[bOff + ci00]  : td_c3_cd_cr[bOff + ci00];
+            d10  = useCbDiag ? td_c3_cd_cb[bOff + ci10]  : td_c3_cd_cr[bOff + ci10];
+            d01  = useCbDiag ? td_c3_cd_cb[bOff + ci01]  : td_c3_cd_cr[bOff + ci01];
+            d11  = useCbDiag ? td_c3_cd_cb[bOff + ci11]  : td_c3_cd_cr[bOff + ci11];
         }
         else
         {
             ownW = useCbWeights ? texelFetch(cell_weights_cb, ivec2(b * TD_CW + cx, cy), 0) : texelFetch(cell_weights_cr, ivec2(b * TD_CW + cx, cy), 0);
-            ownD = (chIdx == 0) ? texelFetch(cell_diag_cb, ivec2(b * TD_CW + cx, cy), 0) : texelFetch(cell_diag_cr, ivec2(b * TD_CW + cx, cy), 0);
+            ownD = useCbDiag ? texelFetch(cell_diag_cb, ivec2(b * TD_CW + cx, cy), 0) : texelFetch(cell_diag_cr, ivec2(b * TD_CW + cx, cy), 0);
             w00 = useCbWeights ? texelFetch(cell_weights_cb, ivec2(b * TD_CW + x0, y0), 0) : texelFetch(cell_weights_cr, ivec2(b * TD_CW + x0, y0), 0);
             w10 = useCbWeights ? texelFetch(cell_weights_cb, ivec2(b * TD_CW + x1, y0), 0) : texelFetch(cell_weights_cr, ivec2(b * TD_CW + x1, y0), 0);
             w01 = useCbWeights ? texelFetch(cell_weights_cb, ivec2(b * TD_CW + x0, y1), 0) : texelFetch(cell_weights_cr, ivec2(b * TD_CW + x0, y1), 0);
             w11 = useCbWeights ? texelFetch(cell_weights_cb, ivec2(b * TD_CW + x1, y1), 0) : texelFetch(cell_weights_cr, ivec2(b * TD_CW + x1, y1), 0);
-            d00 = (chIdx == 0) ? texelFetch(cell_diag_cb, ivec2(b * TD_CW + x0, y0), 0) : texelFetch(cell_diag_cr, ivec2(b * TD_CW + x0, y0), 0);
-            d10 = (chIdx == 0) ? texelFetch(cell_diag_cb, ivec2(b * TD_CW + x1, y0), 0) : texelFetch(cell_diag_cr, ivec2(b * TD_CW + x1, y0), 0);
-            d01 = (chIdx == 0) ? texelFetch(cell_diag_cb, ivec2(b * TD_CW + x0, y1), 0) : texelFetch(cell_diag_cr, ivec2(b * TD_CW + x0, y1), 0);
-            d11 = (chIdx == 0) ? texelFetch(cell_diag_cb, ivec2(b * TD_CW + x1, y1), 0) : texelFetch(cell_diag_cr, ivec2(b * TD_CW + x1, y1), 0);
+            d00 = useCbDiag ? texelFetch(cell_diag_cb, ivec2(b * TD_CW + x0, y0), 0) : texelFetch(cell_diag_cr, ivec2(b * TD_CW + x0, y0), 0);
+            d10 = useCbDiag ? texelFetch(cell_diag_cb, ivec2(b * TD_CW + x1, y0), 0) : texelFetch(cell_diag_cr, ivec2(b * TD_CW + x1, y0), 0);
+            d01 = useCbDiag ? texelFetch(cell_diag_cb, ivec2(b * TD_CW + x0, y1), 0) : texelFetch(cell_diag_cr, ivec2(b * TD_CW + x0, y1), 0);
+            d11 = useCbDiag ? texelFetch(cell_diag_cb, ivec2(b * TD_CW + x1, y1), 0) : texelFetch(cell_diag_cr, ivec2(b * TD_CW + x1, y1), 0);
         }
 
-        float ownU = max(0.0, ownD.w);
+        float ownU = leanLumaReuse ? 0.0 : max(0.0, ownD.w);
         float bandVar = (ownU > 0.0) ? ownU : fallbackBandVar;
         if (chIdx == 0) sumBandVar.x += bandVar;
         else            sumBandVar.y += bandVar;
@@ -2510,7 +2870,8 @@ bool storeFineDiff = (u_store_fine_diff > 0.5);
 
 vec4 priorTexel = texelFetch(cell_prior, cell, 0);
 int expFocusBits = int(round(priorTexel.y));
-bool allBandVeto = ((expFocusBits & 1) != 0) || (texelFetch(cell_own_grain, cell, 0).w > 0.5) || (((expFocusBits & 2) != 0) && !bokehAllowL);
+bool leanLumaReuse = (u_lean_luma_reuse > 0.5);
+bool allBandVeto = ((expFocusBits & 1) != 0) || (!leanLumaReuse && (texelFetch(cell_own_grain, cell, 0).w > 0.5)) || (((expFocusBits & 2) != 0) && !bokehAllowL);
 bool cellIsFace = (u_has_face_mask > 0.5) && (texelFetch(face_mask, cell, 0).x > 0.5);
 bool cellVetoed = cellIsFace || allBandVeto;
 
@@ -2983,7 +3344,7 @@ vec4 priorT = texelFetch(cell_prior, ivec2(cx, cy), 0);
 int expFocusBits = int(round(priorT.y));
 bool bokehAllowL = (u_bokeh_mode > 0.5);
 bool cellVetoed = ((u_has_face_mask > 0.5) && (texelFetch(face_mask, ivec2(cx, cy), 0).x > 0.5)) ||
-                  ((expFocusBits & 1) != 0) || (texelFetch(cell_own_grain, ivec2(cx, cy), 0).w > 0.5) ||
+                  ((expFocusBits & 1) != 0) || (!(u_lean_luma_reuse > 0.5) && (texelFetch(cell_own_grain, ivec2(cx, cy), 0).w > 0.5)) ||
                   (((expFocusBits & 2) != 0) && !bokehAllowL);
 if (cellVetoed)
 {
@@ -3094,10 +3455,12 @@ imageStore(warp_diag, cell, vec4(0.0));
 		double fadeKeep = 1.0;                   // Upstream U7 gradual retention keep in [0, 1] (default 1.0 = bit-identical; <=0 or NaN closes delta to 0)
 		PsdShape psdShape;                       // Optional P10g grain PSD shape multipliers (default 1.0 white-noise identity)
 
-		// Optional precomputed luma cell weights & diagonal variance textures (3*cw x ch RGBA32F) for Plan 6.6
-		// (`cfg_.chromaReuseLumaWeights`): when enabled and valid, skips Pass C2A & C2B completely!
+		// Optional precomputed luma cell weights, diagonal variance, and motion-gate textures (3*cw x ch RGBA32F) for Plan 6.6 + Pass 3A:
+		//   - lumaCellWeightsTex + lumaCellDiagCTex + cfg_.enableLeanChromaLumaReuse => skips C2A / C2EB / C2B completely!
+		//   - lumaMotionGateTex => directly reuses Luma's motionGate and skips c1_motion_gate completely!
 		pl_tex lumaCellWeightsTex = nullptr;
 		pl_tex lumaCellDiagCTex = nullptr;
+		pl_tex lumaMotionGateTex = nullptr;
 		const RefRole* lumaRefRoles = nullptr;
 		int lumaActiveRefCount = 0;
 		QualityPattern::FrameRole frameRole = QualityPattern::FrameRole::Unknown;
@@ -3134,6 +3497,10 @@ imageStore(warp_diag, cell, vec4(0.0));
 		size_t motionStandInRefs = 0;
 		size_t borderBilinearPixels = 0;
 		bool coarseBandOnly = false;
+		bool usedHalfResChromaL = false;         // Pass 3A SC-07: true when half-res Chroma L band was active (M & H full coded res)
+		bool usedNorm16ChromaL = false;          // Pass 3A SC-06: true when RG16 normalized integer Chroma L bands were used
+		bool usedLeanLumaReuse = false;          // Pass 3A: true when lean chromaReuseLumaWeights skipped C2A/C2EB/C2B
+		bool reusedLumaMotionGate = false;       // Pass 3A: true when Luma's motionGate skipped c1_motion_gate
 		bool scratchShort = false;
 		bool succeeded = false;
 		std::string lastError;
@@ -3167,6 +3534,10 @@ imageStore(warp_diag, cell, vec4(0.0));
 		size_t motionStandInRefs = 0;
 		size_t borderBilinearPixels = 0;
 		bool coarseBandOnly = false;
+		bool usedHalfResChromaL = false;         // Pass 3A SC-07: true when half-res Chroma L band was active (M & H full coded res)
+		bool usedNorm16ChromaL = false;          // Pass 3A SC-06: true when RG16 normalized integer Chroma L bands were used
+		bool usedLeanLumaReuse = false;          // Pass 3A: true when lean chromaReuseLumaWeights skipped C2A/C2EB/C2B
+		bool reusedLumaMotionGate = false;       // Pass 3A: true when Luma's motionGate skipped c1_motion_gate
 		bool scratchShort = false;
 		bool succeeded = false;
 		std::string lastError;
@@ -3287,6 +3658,73 @@ imageStore(warp_diag, cell, vec4(0.0));
 			pushReq(ucw, uch, VpSkeleton::TexFormat::RGBA32F, 3u);
 			return reqs;
 		}
+
+		// Pass 3A lean config-aware chroma arena requests (drops dead bandTmpCr 6->5 RGBA32F, supports SC-07 half-res L
+		// and SC-06 RG16 norm16 L when enabled in RealTime; M & H stay 100% full coded resolution!).
+		inline std::vector<VpSkeleton::ArenaRequest> BuildChromaArenaRequestsForConfig(
+			int lumaW, int lumaH, ChromaSubsampling codedSubsampling, const Config& cfg,
+			bool includeReduceScratch = true, bool coarseOnly = false)
+		{
+			std::vector<VpSkeleton::ArenaRequest> reqs;
+			if (lumaW <= 0 || lumaH <= 0)
+				return reqs;
+			const int effCellPx = cfg.cellPx > 0 ? cfg.cellPx : kCanonicalBlockPx;
+			const int cW = ChromaDetail::SubsampledDim(lumaW, SubsampleX(codedSubsampling));
+			const int cH = ChromaDetail::SubsampledDim(lumaH, SubsampleY(codedSubsampling));
+			const int cHalfW = (cW + 1) / 2;
+			const int cHalfH = (cH + 1) / 2;
+			const uint32_t ucw = static_cast<uint32_t>((lumaW + effCellPx - 1) / effCellPx);
+			const uint32_t uch = static_cast<uint32_t>((lumaH + effCellPx - 1) / effCellPx);
+			const uint32_t ucW = static_cast<uint32_t>(cW);
+			const uint32_t ucH = static_cast<uint32_t>(cH);
+			const uint32_t ucHalfW = static_cast<uint32_t>(cHalfW);
+			const uint32_t ucHalfH = static_cast<uint32_t>(cHalfH);
+
+			const bool halfChromaL = (!coarseOnly && cfg.preset == Preset::RealTime && cfg.enableHalfResChromaL);
+			const bool norm16L = (!coarseOnly && ShouldUseNorm16Bands(cfg));
+			const VpSkeleton::TexFormat lFmt = norm16L ? VpSkeleton::TexFormat::RG16 : VpSkeleton::TexFormat::RG32F;
+
+			auto pushOrMergeReq = [&](uint32_t rw, uint32_t rh, VpSkeleton::TexFormat fmt, uint8_t count)
+			{
+				const VpSkeleton::TexShape sh{ rw, rh, fmt };
+				for (VpSkeleton::ArenaRequest& ex : reqs)
+				{
+					if (ex.shape == sh)
+					{
+						ex.count = static_cast<uint8_t>(ex.count + count);
+						return;
+					}
+				}
+				VpSkeleton::ArenaRequest r;
+				r.scope = kChromaArenaScope;
+				r.owner = kChromaArenaOwner;
+				r.tier = VpSkeleton::Tier::T1;
+				r.shape = sh;
+				r.count = count;
+				reqs.push_back(r);
+			};
+
+			// Full coded-grid RG32F: warpedUv, codedDeltaRaw (+ optional 3 reduce scratch)
+			pushOrMergeReq(ucW, ucH, VpSkeleton::TexFormat::RG32F, includeReduceScratch ? 5u : 2u);
+			// Chroma L bands: curL, refL[0..2] (+ halfAreaTmp when halfChromaL)
+			if (halfChromaL)
+				pushOrMergeReq(ucHalfW, ucHalfH, lFmt, 5u);
+			else
+				pushOrMergeReq(ucW, ucH, lFmt, 4u);
+			// Coded-grid RGBA32F (5 — dead bandTmpCr eliminated, freeing 33-133 MiB!): curMH, refMH[0..2], bandTmpCb
+			pushOrMergeReq(ucW, ucH, VpSkeleton::TexFormat::RGBA32F, 5u);
+			// Coded-grid R16 (2): refFlags[0..1]
+			pushOrMergeReq(ucW, ucH, VpSkeleton::TexFormat::R16, 2u);
+			// Cell-grid 3*cw x ch RGBA32F (5): motionGate, weightsCb, weightsCr, diagCb, diagCr
+			pushOrMergeReq(3u * ucw, uch, VpSkeleton::TexFormat::RGBA32F, 5u);
+			// Cell-grid 3*cw x 3*ch RGBA32F (2): statsCb, statsCr
+			pushOrMergeReq(3u * ucw, 3u * uch, VpSkeleton::TexFormat::RGBA32F, 2u);
+			// Cell-grid cw x ch RG32F (1): warpDiag
+			pushOrMergeReq(ucw, uch, VpSkeleton::TexFormat::RG32F, 1u);
+			// Cell-grid cw x ch RGBA32F (3): ownGrain, diagFlags, guardCell
+			pushOrMergeReq(ucw, uch, VpSkeleton::TexFormat::RGBA32F, 3u);
+			return reqs;
+		}
 	} // namespace ChromaGpuDetail
 
 	// ---- Modular Fused RG32F GPU Coded-Grid Chroma Fusion Engine (SOTA #3) ----
@@ -3330,9 +3768,9 @@ imageStore(warp_diag, cell, vec4(0.0));
 			else
 			{
 				for (pl_tex* t : {
-					&privCurL_, &privRefL_[0], &privRefL_[1], &privRefL_[2],
+					&privCurL_, &privRefL_[0], &privRefL_[1], &privRefL_[2], &privHalfAreaTmp_,
 					&privWarpedUv_, &privCodedDeltaRaw_, &privReducedRec_, &privReducedClean_, &privReducedRef_,
-					&privCurMH_, &privRefMH_[0], &privRefMH_[1], &privRefMH_[2], &privBandTmpCb_, &privBandTmpCr_,
+					&privCurMH_, &privRefMH_[0], &privRefMH_[1], &privRefMH_[2], &privBandTmpCb_,
 					&privRefFlags_[0], &privRefFlags_[1],
 					&privMotionGate_, &privWeightsCb_, &privWeightsCr_, &privDiagCb_, &privDiagCr_,
 					&privStatsCb_, &privStatsCr_, &privOwnGrain_, &privWarpDiag_, &privDiagFlags_, &privGuardCell_,
@@ -3436,6 +3874,43 @@ imageStore(warp_diag, cell, vec4(0.0));
 			return total;
 		}
 
+		// Pass 3A lean config-aware chroma arena requests & VRAM estimation (5 RGBA32F without dead bandTmpCr + SC-06/SC-07).
+		static std::vector<VpSkeleton::ArenaRequest> ArenaRequestsForConfig(
+			pl_gpu gpu, int lumaW, int lumaH, ChromaSubsampling codedSubsampling,
+			DeliveredChromaFormat deliveredFormat, const Config& cfg,
+			ChromaGridStatus gridStatus = ChromaGridStatus::Identified)
+		{
+			if (!gpu || lumaW <= 0 || lumaH <= 0)
+				return {};
+			if (!VpSkeleton::PlTexBackend::FindFormat(gpu, VpSkeleton::TexFormat::R16) ||
+			    !VpSkeleton::PlTexBackend::FindFormat(gpu, VpSkeleton::TexFormat::RG32F) ||
+			    !VpSkeleton::PlTexBackend::FindFormat(gpu, VpSkeleton::TexFormat::RGBA32F))
+				return {};
+			const ChromaSubsampling delivSub = DeliveredSubsampling(deliveredFormat);
+			const bool coarseOnly = (gridStatus == ChromaGridStatus::Unidentified);
+			const ChromaSubsampling effCodedSub = coarseOnly ? delivSub : codedSubsampling;
+			const bool needReduce = (deliveredFormat == DeliveredChromaFormat::Rgb444) || (effCodedSub != delivSub);
+			return ChromaGpuDetail::BuildChromaArenaRequestsForConfig(lumaW, lumaH, effCodedSub, cfg, needReduce, coarseOnly);
+		}
+
+		static uint64_t EstimatedScratchVramBytesForConfig(
+			int lumaW, int lumaH, ChromaSubsampling codedSubsampling,
+			DeliveredChromaFormat deliveredFormat, const Config& cfg,
+			ChromaGridStatus gridStatus = ChromaGridStatus::Identified)
+		{
+			const ChromaSubsampling delivSub = DeliveredSubsampling(deliveredFormat);
+			const bool coarseOnly = (gridStatus == ChromaGridStatus::Unidentified);
+			const ChromaSubsampling effCodedSub = coarseOnly ? delivSub : codedSubsampling;
+			const bool needReduce = (deliveredFormat == DeliveredChromaFormat::Rgb444) || (effCodedSub != delivSub);
+			uint64_t total = 0;
+			for (const VpSkeleton::ArenaRequest& r : ChromaGpuDetail::BuildChromaArenaRequestsForConfig(
+				lumaW, lumaH, effCodedSub, cfg, needReduce, coarseOnly))
+			{
+				total += VpSkeleton::ShapeBytes(r.shape) * static_cast<uint64_t>(r.count);
+			}
+			return total;
+		}
+
 		// Zero-copy GPU-resident coded-grid chroma fusion (+ optional zero-copy delivered apply!).
 		bool ProcessChromaGpu(
 			pl_gpu gpu,
@@ -3461,6 +3936,10 @@ imageStore(warp_diag, cell, vec4(0.0));
 			out.motionStandInRefs = 0;
 			out.borderBilinearPixels = 0;
 			out.coarseBandOnly = false;
+			out.usedHalfResChromaL = false;
+			out.usedNorm16ChromaL = false;
+			out.usedLeanLumaReuse = false;
+			out.reusedLumaMotionGate = false;
 			out.scratchShort = false;
 			out.succeeded = false;
 			out.lastError.clear();
@@ -3594,11 +4073,22 @@ imageStore(warp_diag, cell, vec4(0.0));
 				return failVisible("TdV2ChromaGpuEngine delivered output texture dimension mismatch", StandInKind::GpuDispatchFailed);
 
 			const pl_fmt fmtR16 = VpSkeleton::PlTexBackend::FindFormat(gpu, VpSkeleton::TexFormat::R16);
+			const pl_fmt fmtRG16 = VpSkeleton::PlTexBackend::FindFormat(gpu, VpSkeleton::TexFormat::RG16);
 			const pl_fmt fmtR32 = VpSkeleton::PlTexBackend::FindFormat(gpu, VpSkeleton::TexFormat::R32F);
 			const pl_fmt fmtRG32 = VpSkeleton::PlTexBackend::FindFormat(gpu, VpSkeleton::TexFormat::RG32F);
 			const pl_fmt fmtRGBA32 = VpSkeleton::PlTexBackend::FindFormat(gpu, VpSkeleton::TexFormat::RGBA32F);
 			if (!fmtR16 || !fmtR32 || !fmtRG32 || !fmtRGBA32)
 				return failVisible("TdV2ChromaGpuEngine required FP32/R16 texture formats unsupported", StandInKind::GpuDispatchFailed);
+			const bool halfChromaL = (!coarseOnly && cfg_.preset == Preset::RealTime && cfg_.enableHalfResChromaL);
+			const bool norm16ChromaL = (!coarseOnly && ShouldUseNorm16Bands(cfg_) && (fmtRG16 != nullptr));
+			const int cHalfW = (cW + 1) / 2;
+			const int cHalfH = (cH + 1) / 2;
+			const int lTexW = halfChromaL ? cHalfW : cW;
+			const int lTexH = halfChromaL ? cHalfH : cH;
+			const pl_fmt fmtChromaL = norm16ChromaL ? fmtRG16 : fmtRG32;
+			const VpSkeleton::TexFormat texFmtChromaL = norm16ChromaL ? VpSkeleton::TexFormat::RG16 : VpSkeleton::TexFormat::RG32F;
+			out.usedHalfResChromaL = halfChromaL;
+			out.usedNorm16ChromaL = norm16ChromaL;
 
 			// Assemble references with strict H9 missing-motion skip (NEVER whole-frame Still blend!).
 			struct ChromaRefSpec
@@ -3842,7 +4332,7 @@ imageStore(out_coded_delta, p, vec4(0.0));
 
 			// Validate coding step prior upfront (1:1 parity with TdV2ChromaEngine / TdV2GpuEngine).
 			const Detail::ResolvedA2StepPrior a2 = Detail::ResolveA2StepPrior(
-				in.hasStepPrior, in.estimatedStepDelta, in.deadZonePhi, in.zeroCoeffFraction, standIns);
+				in.hasStepPrior, in.estimatedStepDelta, in.deadZonePhi, in.zeroCoeffFraction, standIns, cfg_.sourceBits);
 			if (!a2.stats.valid)
 			{
 				if (standIns != nullptr)
@@ -3880,9 +4370,12 @@ imageStore(out_coded_delta, p, vec4(0.0));
 				DestroyPrivateScratch(gpu);
 				const uint32_t ucW = static_cast<uint32_t>(cW);
 				const uint32_t ucH = static_cast<uint32_t>(cH);
+				const uint32_t ulW = static_cast<uint32_t>(lTexW);
+				const uint32_t ulH = static_cast<uint32_t>(lTexH);
 				const uint32_t ucw = static_cast<uint32_t>(cw);
 				const uint32_t uch = static_cast<uint32_t>(ch);
 				const VpSkeleton::TexShape shRG{ ucW, ucH, VpSkeleton::TexFormat::RG32F };
+				const VpSkeleton::TexShape shChL{ ulW, ulH, texFmtChromaL };
 				const VpSkeleton::TexShape shRGBA{ ucW, ucH, VpSkeleton::TexFormat::RGBA32F };
 				const VpSkeleton::TexShape shR16{ ucW, ucH, VpSkeleton::TexFormat::R16 };
 				const VpSkeleton::TexShape shCell3RGBA{ 3u * ucw, uch, VpSkeleton::TexFormat::RGBA32F };
@@ -3893,9 +4386,11 @@ imageStore(out_coded_delta, p, vec4(0.0));
 				bool ok = scopeGuard.opened;
 				if (ok)
 				{
-					sc.curL = arena->Acquire(kChromaArenaOwner, shRG);
+					sc.curL = arena->Acquire(kChromaArenaOwner, shChL);
 					for (int i = 0; i < kMaxChromaGpuRefs; ++i)
-						sc.refL[i] = arena->Acquire(kChromaArenaOwner, shRG);
+						sc.refL[i] = arena->Acquire(kChromaArenaOwner, shChL);
+					if (halfChromaL)
+						sc.halfAreaTmp = arena->Acquire(kChromaArenaOwner, shChL);
 					sc.warpedUv = arena->Acquire(kChromaArenaOwner, shRG);
 					sc.codedDeltaRaw = arena->Acquire(kChromaArenaOwner, shRG);
 					if (needReduceRec)
@@ -3909,7 +4404,7 @@ imageStore(out_coded_delta, p, vec4(0.0));
 					for (int i = 0; i < kMaxChromaGpuRefs; ++i)
 						sc.refMH[i] = arena->Acquire(kChromaArenaOwner, shRGBA);
 					sc.bandTmpCb = arena->Acquire(kChromaArenaOwner, shRGBA);
-					sc.bandTmpCr = arena->Acquire(kChromaArenaOwner, shRGBA);
+					// Carbon LOW-1 + Pass 3A: dead sc.bandTmpCr eliminated (frees 33-133 MiB VRAM!).
 
 					sc.refFlags[0] = arena->Acquire(kChromaArenaOwner, shR16);
 					sc.refFlags[1] = arena->Acquire(kChromaArenaOwner, shR16);
@@ -3927,7 +4422,7 @@ imageStore(out_coded_delta, p, vec4(0.0));
 					sc.warpDiag = arena->Acquire(kChromaArenaOwner, shCellRG);
 					sc.diagFlags = arena->Acquire(kChromaArenaOwner, shCellRGBA);
 					sc.guardCell = arena->Acquire(kChromaArenaOwner, shCellRGBA);
-					ok = sc.AllNonNull(needReduceRec, needReduceClean, needReduceRef);
+					ok = sc.AllNonNull(needReduceRec, needReduceClean, needReduceRef, halfChromaL);
 				}
 				if (!ok)
 				{
@@ -3940,8 +4435,8 @@ imageStore(out_coded_delta, p, vec4(0.0));
 			{
 				if (standIns != nullptr)
 					standIns->Engage(StandInKind::GpuPrivateScratchFallback, "TdV2ChromaGpuEngine arena == nullptr; using owned priv* scratch");
-				if (!EnsurePrivateScratch(gpu, cW, cH, cw, ch, fmtR16, fmtRG32, fmtRGBA32,
-				                          needReduceRec, needReduceClean, needReduceRef, sc))
+				if (!EnsurePrivateScratch(gpu, cW, cH, lTexW, lTexH, cw, ch, fmtR16, fmtChromaL, fmtRG32, fmtRGBA32,
+				                          needReduceRec, needReduceClean, needReduceRef, halfChromaL, sc))
 					return failVisible("TdV2ChromaGpuEngine private scratch allocation failed", StandInKind::GpuDispatchFailed);
 			}
 
@@ -4117,10 +4612,35 @@ imageStore(out_coded_delta, p, vec4(0.0));
 			std::string chromaGeom = Detail::StaticGeomDefines(in.lumaW, in.lumaH, cw, ch, cellPx);
 			chromaGeom += VpvGpu::DefineInt("TD_CH_W", cW);
 			chromaGeom += VpvGpu::DefineInt("TD_CH_H", cH);
+			chromaGeom += VpvGpu::DefineInt("TD_CH_HALF_W", cHalfW);
+			chromaGeom += VpvGpu::DefineInt("TD_CH_HALF_H", cHalfH);
 			chromaGeom += VpvGpu::DefineInt("TD_CSUB_X", cSubX);
 			chromaGeom += VpvGpu::DefineInt("TD_CSUB_Y", cSubY);
 			chromaGeom += VpvGpu::DefineInt("TD_DSUB_X", dSubX);
 			chromaGeom += VpvGpu::DefineInt("TD_DSUB_Y", dSubY);
+
+			const int chax0 = (std::max)(0, (std::min)(cHalfW, cActive.x0 / 2));
+			const int chay0 = (std::max)(0, (std::min)(cHalfH, cActive.y0 / 2));
+			const int chax1 = (std::max)(chax0, (std::min)(cHalfW, (cActive.x1 + 1) / 2));
+			const int chay1 = (std::max)(chay0, (std::min)(cHalfH, (cActive.y1 + 1) / 2));
+			const float uCHAx0 = static_cast<float>(chax0), uCHAy0 = static_cast<float>(chay0);
+			const float uCHAx1 = static_cast<float>(chax1), uCHAy1 = static_cast<float>(chay1);
+			const int cHalfGx = Detail::GroupsFor(cHalfW, 16);
+			const int cHalfGy = Detail::GroupsFor(cHalfH, 16);
+
+			const bool phaseAEarlyOut = cfg_.enablePhaseATileEarlyOut;
+			const bool checkerboardStats = cfg_.enableCheckerboardCellStats;
+			const bool bilinearWarp = (cfg_.preset == Preset::RealTime) && cfg_.enableBilinearHardwareWarp;
+			std::string chOpt3Defines;
+			if (norm16ChromaL)
+			{
+				chOpt3Defines += VpvGpu::DefineInt("TD_BAND_NORM16", 1);
+				chOpt3Defines += VpvGpu::Define("TD_NORM16_PEAK", PeakCodeForBits(cfg_.sourceBits));
+			}
+			if (halfChromaL)
+				chOpt3Defines += VpvGpu::DefineInt("TD_CH_HALF_L", 1);
+			if (phaseAEarlyOut)
+				chOpt3Defines += VpvGpu::DefineInt("TD_PHASE_A_EARLY_OUT", 1);
 
 			int dispatches = 0;
 			auto runPass = [&](const char* desc, const std::string& hdr, const char* body,
@@ -4189,7 +4709,32 @@ imageStore(out_coded_delta, p, vec4(0.0));
 				standIns->Engage(StandInKind::P10gGrainSeparator, "TdV2ChromaGpuEngine no upstream chroma split");
 			}
 
-			// ---- Motion Gate (reuses exact luma kPass1MotionGate shader!) ----
+			// ---- Motion Gate (Pass 3A: directly reuse Luma's motionGate when provided & role-aligned, else run kPass1MotionGate!) ----
+			bool canReuseLumaMg = (in.lumaMotionGateTex != nullptr &&
+			                       in.lumaMotionGateTex->params.w == 3 * cw &&
+			                       in.lumaMotionGateTex->params.h == ch);
+			if (canReuseLumaMg && in.lumaRefRoles != nullptr && in.lumaActiveRefCount > 0)
+			{
+				if (in.lumaActiveRefCount < K)
+					canReuseLumaMg = false;
+				else
+				{
+					for (int k = 0; k < K; ++k)
+					{
+						const int rInt = refSpecs[static_cast<size_t>(k)].refRole;
+						const RefRole cRole = (rInt == 0) ? RefRole::PrevPeak
+							: ((rInt == 1) ? RefRole::NextPeak : ((rInt == 2) ? RefRole::PrevPeak2 : RefRole::Carry));
+						if (in.lumaRefRoles[k] != cRole)
+						{
+							canReuseLumaMg = false;
+							break;
+						}
+					}
+				}
+			}
+			pl_tex activeMotionGateTex = canReuseLumaMg ? in.lumaMotionGateTex : sc.motionGate;
+			out.reusedLumaMotionGate = canReuseLumaMg;
+			if (!canReuseLumaMg)
 			{
 				std::string mgHdr = Detail::StaticGeomDefines(in.lumaW, in.lumaH, cw, ch, cellPx);
 				mgHdr += VpvGpu::DefineInt("TD_CLS_OBJECT", static_cast<int>(RegionMotionClass::Object));
@@ -4221,11 +4766,13 @@ imageStore(out_coded_delta, p, vec4(0.0));
 				}
 			}
 
-			// ---- PASS C1B/C1C Helper: Packed RG32F Separable L/M/H Band Split (or Branch-A Coarse-Only sigma = 32 luma px) ----
+			// ---- PASS C1B/C1C Helper: Packed Separable L/M/H Band Split (or SC-07 Half-Res L + Full-Res M/H, or Branch-A Coarse-Only) ----
 			if (standIns != nullptr)
 				standIns->Engage(StandInKind::BandMemoW2);
 			const int rBase = VpUnit::BandFromBase::BandRadius(VpUnit::BandFromBase::kSigmaBase);
 			const int rFine = VpUnit::BandFromBase::BandRadius(VpUnit::BandFromBase::kSigmaFine);
+			const double hsChBase = VpUnit::BandFromBase::HalfSigma(VpUnit::BandFromBase::kSigmaBase);
+			const int rChHBase = VpUnit::BandFromBase::Radius(hsChBase, 3.0, true, 0.0);
 			const double coarseSigmaX = kUnidentifiedChromaSigmaLumaPx / static_cast<double>(cSubX);
 			const double coarseSigmaY = kUnidentifiedChromaSigmaLumaPx / static_cast<double>(cSubY);
 			const int coarseRadX = VpUnit::BandFromBase::BandRadius(coarseSigmaX);
@@ -4251,10 +4798,16 @@ imageStore(out_coded_delta, p, vec4(0.0));
 			const float uCoarseRadY = static_cast<float>(coarseRadY);
 			const std::string cCoarseHdr = coarseOnly ? (chromaGeom + Shaders::kCoreHelpers) : std::string();
 			const std::string cBandTaps = coarseOnly ? std::string() : ChromaShaders::BuildChromaBandTapsHeader();
-			const std::string cBandHdrH = coarseOnly ? std::string() : (chromaGeom + cBandTaps + Shaders::kCoreHelpers + ChromaShaders::kPassChromaBandHHeader);
-			const std::string cBandHdrV = coarseOnly ? std::string() : (chromaGeom + cBandTaps + Shaders::kCoreHelpers + ChromaShaders::kPassChromaBandVHeader);
+			const std::string cBandHdrH = (coarseOnly || halfChromaL) ? std::string() : (chromaGeom + chOpt3Defines + cBandTaps + Shaders::kCoreHelpers + ChromaShaders::kPassChromaBandHHeader);
+			const std::string cBandHdrV = (coarseOnly || halfChromaL) ? std::string() : (chromaGeom + chOpt3Defines + cBandTaps + Shaders::kCoreHelpers + ChromaShaders::kChromaLFetchHelper + ChromaShaders::kPassChromaBandVHeader);
+			const std::string cFineDownHdr = halfChromaL ? (chromaGeom + chOpt3Defines + Shaders::BuildFineTapHeader() + Shaders::kCoreHelpers + ChromaShaders::kChromaLFetchHelper + ChromaShaders::kPassChromaFineDownHeader) : std::string();
+			const std::string cHalfL2DHdr = halfChromaL ? (chromaGeom + chOpt3Defines + ChromaShaders::BuildChromaHalfBaseTapHeader() + Shaders::kCoreHelpers + ChromaShaders::kChromaLFetchHelper + ChromaShaders::kPassChromaHalfL2DHeader) : std::string();
 			const size_t shBandH = static_cast<size_t>(16 * (16 + 2 * rBase)) * 2u * sizeof(float);
 			const size_t shBandV = static_cast<size_t>((16 + 2 * rBase) * 16) * 4u * sizeof(float);
+			const size_t chFineTile = static_cast<size_t>(16 + 2 * rFine);
+			const size_t shChFineDown = (chFineTile * (chFineTile + 1u) + chFineTile * 17u) * 2u * sizeof(float);
+			const size_t chHalfTile = static_cast<size_t>(16 + 2 * rChHBase);
+			const size_t shChHalfL = (chHalfTile * (chHalfTile + 1u) + chHalfTile * 17u) * 2u * sizeof(float);
 
 			auto runChromaBands = [&](pl_tex srcUv, pl_tex dstL, pl_tex dstMH) -> bool
 			{
@@ -4285,6 +4838,32 @@ imageStore(out_coded_delta, p, vec4(0.0));
 					};
 					return runPass("td_v2_c1_coarse_v", cCoarseHdr, ChromaShaders::kPassChromaCoarseV, dcv, 3, rcv, 6, cGx, cGy);
 				}
+				if (halfChromaL)
+				{
+					// SC-07: 1-pass full coded-res G_fine (M/H full res!) + 2x2 downsample -> 1-pass 2D half-res L!
+					pl_shader_var rvF[8] = {
+						VpvGpu::Var("u_cax0", &uCAx0), VpvGpu::Var("u_cay0", &uCAy0),
+						VpvGpu::Var("u_cax1", &uCAx1), VpvGpu::Var("u_cay1", &uCAy1),
+						VpvGpu::Var("u_chax0", &uCHAx0), VpvGpu::Var("u_chay0", &uCHAy0),
+						VpvGpu::Var("u_chax1", &uCHAx1), VpvGpu::Var("u_chay1", &uCHAy1)
+					};
+					pl_shader_desc df[3] = {
+						VpvGpu::Sampled("src_uv", srcUv),
+						VpvGpu::Storage("bands_mh", dstMH),
+						VpvGpu::Storage("half_area_out", sc.halfAreaTmp)
+					};
+					if (!runPass("td_v2_c1_fine_down", cFineDownHdr, ChromaShaders::kPassChromaFineDown, df, 3, rvF, 8, cGx, cGy, 16, 16, shChFineDown))
+						return false;
+					pl_shader_var rvH[4] = {
+						VpvGpu::Var("u_chax0", &uCHAx0), VpvGpu::Var("u_chay0", &uCHAy0),
+						VpvGpu::Var("u_chax1", &uCHAx1), VpvGpu::Var("u_chay1", &uCHAy1)
+					};
+					pl_shader_desc dh2[2] = {
+						VpvGpu::Sampled("half_area_in", sc.halfAreaTmp),
+						VpvGpu::Storage("bands_l", dstL)
+					};
+					return runPass("td_v2_c1_half_l_2d", cHalfL2DHdr, ChromaShaders::kPassChromaHalfL2D, dh2, 2, rvH, 4, cHalfGx, cHalfGy, 16, 16, shChHalfL);
+				}
 				pl_shader_var rv[4] = {
 					VpvGpu::Var("u_cax0", &uCAx0), VpvGpu::Var("u_cay0", &uCAy0),
 					VpvGpu::Var("u_cax1", &uCAx1), VpvGpu::Var("u_cay1", &uCAy1)
@@ -4309,6 +4888,8 @@ imageStore(out_coded_delta, p, vec4(0.0));
 
 			// ---- PASS C1A + C1B/C: Warp each reference + Band Split ----
 			const std::string cWarpHdr = chromaGeom +
+				(phaseAEarlyOut ? VpvGpu::DefineInt("TD_PHASE_A_EARLY_OUT", 1) : std::string()) +
+				(bilinearWarp ? VpvGpu::DefineInt("TD_BILINEAR_WARP", 1) : std::string()) +
 				VpvGpu::DefineInt("TD_CLS_CAMERA", static_cast<int>(RegionMotionClass::Camera)) +
 				Shaders::kCoreHelpers + ChromaShaders::kSitedCoordHelpers + ChromaShaders::kPassChromaWarpHeader;
 			const size_t shChWarp = (24u * 24u * 3u + 64u + 4u) * sizeof(float);
@@ -4410,6 +4991,16 @@ imageStore(out_coded_delta, p, vec4(0.0));
 				}
 			}
 			const float uReuseLumaWeights = reuseLumaWeightsGpu ? 1.0f : 0.0f;
+			// Pass 3A: True lean chromaReuseLumaWeights fast-path skips C2A / C2EB / C2B + GPU-CPU sync stall completely!
+			const bool leanLumaReuseGpu =
+				reuseLumaWeightsGpu &&
+				cfg_.enableLeanChromaLumaReuse &&
+				in.lumaCellDiagCTex != nullptr &&
+				in.lumaCellDiagCTex->params.w == 3 * cw && in.lumaCellDiagCTex->params.h == ch;
+			const float uLeanLumaReuse = leanLumaReuseGpu ? 1.0f : 0.0f;
+			out.usedLeanLumaReuse = leanLumaReuseGpu;
+			if (leanLumaReuseGpu && standIns != nullptr)
+				standIns->Engage(StandInKind::ChromaLeanLumaReuse, "TdV2ChromaGpuEngine lean luma-weight reuse (C2 stats & solve skipped)");
 			const double maxAllowedStepScale = cfg_.enableAqStepScaling ? kCellStepScaleMax : 1.0;
 
 			// Derived physics for standalone chroma focus guard (CHR-MEDIUM-3) & M+H activity classification (CHR-HIGH-1).
@@ -4433,6 +5024,11 @@ imageStore(out_coded_delta, p, vec4(0.0));
 			const float uUseA2ePrior = (!in.hasStepPrior && cfg_.enableA2eEmpiricalPrior && !in.transformIdentified8x8) ? 1.0f : 0.0f;
 			const float uUseEmpiricalU = (cfg_.enableA2eEmpiricalPrior && (coarseOnly || !in.transformIdentified8x8)) ? 1.0f : 0.0f;
 
+			const bool sameCleanRec = (codedCleanTex == codedRecTex);
+			const float uSameCleanRec = sameCleanRec ? 1.0f : 0.0f;
+
+			if (!leanLumaReuseGpu)
+			{
 			// Always ensure 6x2 RGBA32F ebPriorTex_, 3*cw x 2*ch RGBA32F ebScratchTex_, & 2*cw x 2*ch RGBA32F chProjIrTex_ are allocated!
 			if (!Detail::EnsureTex(gpu, ebPriorTex_, 6, 2, fmtRGBA32, true, true, true, true) ||
 			    !Detail::EnsureTex(gpu, ebScratchTex_, 3 * cw, 2 * ch, fmtRGBA32, true, true, false, false) ||
@@ -4440,10 +5036,10 @@ imageStore(out_coded_delta, p, vec4(0.0));
 				return failVisible("TdV2ChromaGpuEngine ebPrior/ebScratch/chProjIr alloc failed", StandInKind::GpuDispatchFailed);
 
 			// ---- PASS C2A: LDS Cell-Moment Reduction + Standalone Focus Fallback for Cb & Cr ----
-			const bool sameCleanRec = (codedCleanTex == codedRecTex);
-			const float uSameCleanRec = sameCleanRec ? 1.0f : 0.0f;
 			{
-				std::string c2aHdr = chromaGeom;
+				std::string c2aHdr = chromaGeom + chOpt3Defines;
+				if (checkerboardStats)
+					c2aHdr += VpvGpu::DefineInt("TD_CHECKERBOARD_STATS", 1);
 				c2aHdr += VpvGpu::Define("TD_GAIN_MID", gains.mid);
 				c2aHdr += VpvGpu::Define("TD_GAIN_D3", gains.d3);
 				c2aHdr += VpvGpu::Define("TD_F_SHARP", fSharpCh);
@@ -4454,6 +5050,7 @@ imageStore(out_coded_delta, p, vec4(0.0));
 				c2aHdr += VpvGpu::Define("TD_STEP_SCALE_MIN", kCellStepScaleMin);
 				c2aHdr += VpvGpu::Define("TD_STEP_SCALE_MAX", maxAllowedStepScale);
 				c2aHdr += Shaders::kCoreHelpers;
+				c2aHdr += ChromaShaders::kChromaLFetchHelper;
 				c2aHdr += ChromaShaders::kSitedCoordHelpers;
 				c2aHdr += ChromaShaders::kPassChromaCellStatsHeader;
 				pl_shader_desc d2a[19] = {
@@ -4461,7 +5058,7 @@ imageStore(out_coded_delta, p, vec4(0.0));
 					VpvGpu::Sampled("ref_l_0", sc.refL[0]), VpvGpu::Sampled("ref_l_1", sc.refL[1]), VpvGpu::Sampled("ref_l_2", sc.refL[2]),
 					VpvGpu::Sampled("ref_mh_0", sc.refMH[0]), VpvGpu::Sampled("ref_mh_1", sc.refMH[1]), VpvGpu::Sampled("ref_mh_2", sc.refMH[2]),
 					VpvGpu::Sampled("ref_flags", finalFlagsTex),
-					VpvGpu::Sampled("motion_gate", sc.motionGate),
+					VpvGpu::Sampled("motion_gate", activeMotionGateTex),
 					VpvGpu::Sampled("cell_prior", cellPriorTex),
 					VpvGpu::Sampled("face_mask", faceMaskBind),
 					VpvGpu::Sampled("rec_uv", codedRecTex),
@@ -4472,10 +5069,12 @@ imageStore(out_coded_delta, p, vec4(0.0));
 					VpvGpu::Storage("warp_diag", dstWarpDiag),
 					VpvGpu::Storage("proj_ir", chProjIrTex_)
 				};
-				pl_shader_var v2a[16] = {
+				pl_shader_var v2a[20] = {
 					VpvGpu::Var("u_k", &uK),
 					VpvGpu::Var("u_cax0", &uCAx0), VpvGpu::Var("u_cay0", &uCAy0),
 					VpvGpu::Var("u_cax1", &uCAx1), VpvGpu::Var("u_cay1", &uCAy1),
+					VpvGpu::Var("u_chax0", &uCHAx0), VpvGpu::Var("u_chay0", &uCHAy0),
+					VpvGpu::Var("u_chax1", &uCHAx1), VpvGpu::Var("u_chay1", &uCHAy1),
 					VpvGpu::Var("u_cshift_x", &uCShiftX), VpvGpu::Var("u_cshift_y", &uCShiftY),
 					VpvGpu::Var("u_has_face_mask", &uHasFaceMask),
 					VpvGpu::Var("u_has_clean_split", &uHasSplit),
@@ -4489,7 +5088,7 @@ imageStore(out_coded_delta, p, vec4(0.0));
 				};
 				const size_t sh2a = (1950u + 480u + 64u + 60u + 8u) * sizeof(float);
 				const std::string c2aBody = ChromaShaders::BuildPassChromaCellStatsBody();
-				if (!runPass("td_v2_c2a_cell_stats", c2aHdr, c2aBody.c_str(), d2a, 19, v2a, 16, cw, ch, 8, 8, sh2a))
+				if (!runPass("td_v2_c2a_cell_stats", c2aHdr, c2aBody.c_str(), d2a, 19, v2a, 20, cw, ch, 8, 8, sh2a))
 					return failVisible("td_v2_c2a_cell_stats dispatch failed", StandInKind::GpuDispatchFailed);
 
 				// ---- PASS C2EB (PROD-GPU-BUG-1 / PROD-GPU-BUG-4 / PROD-GPU-BUG-18): Parallel Prep + Torben 24-Step Median ----
@@ -4514,7 +5113,7 @@ imageStore(out_coded_delta, p, vec4(0.0));
 				pl_shader_desc d2ebPrep[9] = {
 					VpvGpu::Sampled("cell_stats_cb", sc.statsCb),
 					VpvGpu::Sampled("cell_stats_cr", sc.statsCr),
-					VpvGpu::Sampled("motion_gate", sc.motionGate),
+					VpvGpu::Sampled("motion_gate", activeMotionGateTex),
 					VpvGpu::Sampled("motion_vec", motionVecTex),
 					VpvGpu::Sampled("cell_prior", cellPriorTex),
 					VpvGpu::Sampled("face_mask", faceMaskBind),
@@ -4635,7 +5234,7 @@ imageStore(out_coded_delta, p, vec4(0.0));
 				pl_shader_desc d2b[14] = {
 					VpvGpu::Sampled("cell_stats_cb", sc.statsCb),
 					VpvGpu::Sampled("cell_stats_cr", sc.statsCr),
-					VpvGpu::Sampled("motion_gate", sc.motionGate),
+					VpvGpu::Sampled("motion_gate", activeMotionGateTex),
 					VpvGpu::Sampled("motion_vec", motionVecTex),
 					VpvGpu::Sampled("cell_prior", cellPriorTex),
 					VpvGpu::Sampled("face_mask", faceMaskBind),
@@ -4679,6 +5278,17 @@ imageStore(out_coded_delta, p, vec4(0.0));
 					return failVisible("td_v2_c2b_merge_solve dispatch failed", StandInKind::GpuDispatchFailed);
 				}
 			}
+			} // end if (!leanLumaReuseGpu)
+			else if (out.readbackCellDiagnostics)
+			{
+				pl_shader_desc dzd[2] = {
+					VpvGpu::Storage("cell_diag_flags", dstDiagFlags),
+					VpvGpu::Storage("warp_diag", dstWarpDiag)
+				};
+				if (!runPass("td_v2_c2_zero_diag", chromaGeom, ChromaShaders::kPassChromaZeroDiag, dzd, 2, nullptr, 0,
+				             Detail::GroupsFor(cw, 8), Detail::GroupsFor(ch, 8), 8, 8))
+					return failVisible("td_v2_c2_zero_diag dispatch failed", StandInKind::GpuDispatchFailed);
+			}
 
 			// ---- PASS C3: Coded-Grid Chroma Blend + 3-Sigma Huber + Honest Output Limit (TD-U3) ----
 			{
@@ -4688,7 +5298,7 @@ imageStore(out_coded_delta, p, vec4(0.0));
 				const float uLumaSlot1 = static_cast<float>(lumaSlotForChroma[1]);
 				const float uLumaSlot2 = static_cast<float>(lumaSlotForChroma[2]);
 
-				std::string c3Hdr = chromaGeom;
+				std::string c3Hdr = chromaGeom + chOpt3Defines;
 				c3Hdr += VpvGpu::Define("TD_GAIN_LOW", effLowGain);
 				c3Hdr += VpvGpu::Define("TD_GAIN_MID", gains.mid);
 				c3Hdr += VpvGpu::Define("TD_GAIN_FINE", gains.fine);
@@ -4696,6 +5306,7 @@ imageStore(out_coded_delta, p, vec4(0.0));
 				c3Hdr += VpvGpu::Define("TD_STEP_SCALE_MIN", kCellStepScaleMin);
 				c3Hdr += VpvGpu::Define("TD_STEP_SCALE_MAX", maxAllowedStepScale);
 				c3Hdr += Shaders::kCoreHelpers;
+				c3Hdr += ChromaShaders::kChromaLFetchHelper;
 				c3Hdr += ChromaShaders::kSitedCoordHelpers;
 				c3Hdr += R"GLSL(
 float td_band_gain(int b) { if (b == 0) return TD_GAIN_LOW; if (b == 1) return TD_GAIN_MID; return TD_GAIN_FINE; }
@@ -4710,11 +5321,11 @@ float td_huber_taper(float diffSq, float diagC)
 )GLSL";
 				c3Hdr += ChromaShaders::kPassChromaBlendHeader;
 
-				// RED-BUG-6 + libplacebo non-aliasing: bind in.lumaCellWeightsTex ONLY on cell_weights_cb (never duplicate
-				// on cell_weights_cr!) and ALWAYS bind chroma's own sc.diagCb / sc.diagCr for Huber & U3 bounds!
+				// RED-BUG-6 + Pass 3A lean reuse + libplacebo non-aliasing: bind in.lumaCellWeightsTex ONLY on cell_weights_cb
+				// and in.lumaCellDiagCTex ONLY on cell_diag_cb (when leanLumaReuseGpu), never duplicating SRVs!
 				pl_tex bindWeightsCb = reuseLumaWeightsGpu ? in.lumaCellWeightsTex : sc.weightsCb;
 				pl_tex bindWeightsCr = sc.weightsCr;
-				pl_tex bindDiagCb = sc.diagCb;
+				pl_tex bindDiagCb = leanLumaReuseGpu ? in.lumaCellDiagCTex : sc.diagCb;
 				pl_tex bindDiagCr = sc.diagCr;
 
 				pl_shader_desc d3[17] = {
@@ -4722,16 +5333,18 @@ float td_huber_taper(float diffSq, float diagC)
 					VpvGpu::Sampled("ref_l_0", sc.refL[0]), VpvGpu::Sampled("ref_l_1", sc.refL[1]), VpvGpu::Sampled("ref_l_2", sc.refL[2]),
 					VpvGpu::Sampled("ref_mh_0", sc.refMH[0]), VpvGpu::Sampled("ref_mh_1", sc.refMH[1]), VpvGpu::Sampled("ref_mh_2", sc.refMH[2]),
 					VpvGpu::Sampled("ref_flags", finalFlagsTex),
-					VpvGpu::Sampled("motion_gate", sc.motionGate),
+					VpvGpu::Sampled("motion_gate", activeMotionGateTex),
 					VpvGpu::Sampled("cell_weights_cb", bindWeightsCb), VpvGpu::Sampled("cell_weights_cr", bindWeightsCr),
 					VpvGpu::Sampled("cell_diag_cb", bindDiagCb), VpvGpu::Sampled("cell_diag_cr", bindDiagCr),
 					VpvGpu::Sampled("cell_prior", cellPriorTex), VpvGpu::Sampled("face_mask", faceMaskBind),
 					VpvGpu::Storage("coded_delta_raw", sc.codedDeltaRaw)
 				};
-				pl_shader_var v3[19] = {
+				pl_shader_var v3[24] = {
 					VpvGpu::Var("u_k", &uK),
 					VpvGpu::Var("u_cax0", &uCAx0), VpvGpu::Var("u_cay0", &uCAy0),
 					VpvGpu::Var("u_cax1", &uCAx1), VpvGpu::Var("u_cay1", &uCAy1),
+					VpvGpu::Var("u_chax0", &uCHAx0), VpvGpu::Var("u_chay0", &uCHAy0),
+					VpvGpu::Var("u_chax1", &uCHAx1), VpvGpu::Var("u_chay1", &uCHAy1),
 					VpvGpu::Var("u_cshift_x", &uCShiftX), VpvGpu::Var("u_cshift_y", &uCShiftY),
 					VpvGpu::Var("u_a2_valid", &uA2Valid), VpvGpu::Var("u_a2_total_var", &uA2Total),
 					VpvGpu::Var("u_enable_per_corner_huber", &uEnableHuber),
@@ -4740,13 +5353,14 @@ float td_huber_taper(float diffSq, float diagC)
 					VpvGpu::Var("u_pixel_bound_kappa", &uPixelBoundKappa),
 					VpvGpu::Var("u_enable_joint_bound", &uEnableJointBound),
 					VpvGpu::Var("u_reuse_luma_weights", &uReuseLumaWeights),
+					VpvGpu::Var("u_lean_luma_reuse", &uLeanLumaReuse),
 					VpvGpu::Var("u_bokeh_mode", &uBokehMode),
 					VpvGpu::Var("u_luma_slot_0", &uLumaSlot0),
 					VpvGpu::Var("u_luma_slot_1", &uLumaSlot1),
 					VpvGpu::Var("u_luma_slot_2", &uLumaSlot2)
 				};
 				const size_t shC3 = (48u * 16u + 48u * 2u + 16u * 5u) * sizeof(float);
-				if (!runPass("td_v2_c3_blend_bound", c3Hdr, ChromaShaders::kPassChromaBlendBound, d3, 17, v3, 19, cGx, cGy, 16, 16, shC3))
+				if (!runPass("td_v2_c3_blend_bound", c3Hdr, ChromaShaders::kPassChromaBlendBound, d3, 17, v3, 24, cGx, cGy, 16, 16, shC3))
 					return failVisible("td_v2_c3_blend_bound dispatch failed", StandInKind::GpuDispatchFailed);
 				if (standIns != nullptr)
 					standIns->Engage(StandInKind::TransformUnknownBound);
@@ -4781,7 +5395,7 @@ float td_huber_taper(float diffSq, float diagC)
 					VpvGpu::Storage("out_coded_delta", smoothGuard ? sc.warpedUv : out.outCodedDeltaTex),
 					VpvGpu::Storage("guard_cell", dstGuardCell)
 				};
-				pl_shader_var v4[13] = {
+				pl_shader_var v4[14] = {
 					VpvGpu::Var("u_cax0", &uCAx0), VpvGpu::Var("u_cay0", &uCAy0),
 					VpvGpu::Var("u_cax1", &uCAx1), VpvGpu::Var("u_cay1", &uCAy1),
 					VpvGpu::Var("u_cshift_x", &uCShiftX), VpvGpu::Var("u_cshift_y", &uCShiftY),
@@ -4789,10 +5403,11 @@ float td_huber_taper(float diffSq, float diagC)
 					VpvGpu::Var("u_bokeh_mode", &uBokehMode), VpvGpu::Var("u_has_face_mask", &uHasFaceMask),
 					VpvGpu::Var("u_cell_prior_has_cr_grain", &uPriorHasCrGrain),
 					VpvGpu::Var("u_fade_keep", &uFadeKeep),
-					VpvGpu::Var("u_store_fine_diff", &uStoreFineDiff)
+					VpvGpu::Var("u_store_fine_diff", &uStoreFineDiff),
+					VpvGpu::Var("u_lean_luma_reuse", &uLeanLumaReuse)
 				};
 				const std::string c4Body = ChromaShaders::BuildPassChromaGuardBody();
-				if (!runPass("td_v2_c4_guard_delta", c4Hdr, c4Body.c_str(), d4, 8, v4, 13, cw, ch, 8, 8, shC4))
+				if (!runPass("td_v2_c4_guard_delta", c4Hdr, c4Body.c_str(), d4, 8, v4, 14, cw, ch, 8, 8, shC4))
 					return failVisible("td_v2_c4_guard_delta dispatch failed", StandInKind::GpuDispatchFailed);
 
 				if (smoothGuard)
@@ -4807,14 +5422,15 @@ float td_huber_taper(float diffSq, float diagC)
 						VpvGpu::Sampled("cell_own_grain", sc.ownGrain),
 						VpvGpu::Storage("out_coded_delta", out.outCodedDeltaTex)
 					};
-					pl_shader_var v4b[9] = {
+					pl_shader_var v4b[10] = {
 						VpvGpu::Var("u_cax0", &uCAx0), VpvGpu::Var("u_cay0", &uCAy0),
 						VpvGpu::Var("u_cax1", &uCAx1), VpvGpu::Var("u_cay1", &uCAy1),
 						VpvGpu::Var("u_cshift_x", &uCShiftX), VpvGpu::Var("u_cshift_y", &uCShiftY),
 						VpvGpu::Var("u_bokeh_mode", &uBokehMode), VpvGpu::Var("u_has_face_mask", &uHasFaceMask),
-						VpvGpu::Var("u_fade_keep", &uFadeKeep)
+						VpvGpu::Var("u_fade_keep", &uFadeKeep),
+						VpvGpu::Var("u_lean_luma_reuse", &uLeanLumaReuse)
 					};
-					if (!runPass("td_v2_c4b_smooth_guard", c4bHdr, ChromaShaders::kPassChromaSmoothGuard, d4b, 7, v4b, 9, cGx, cGy))
+					if (!runPass("td_v2_c4b_smooth_guard", c4bHdr, ChromaShaders::kPassChromaSmoothGuard, d4b, 7, v4b, 10, cGx, cGy))
 						return failVisible("td_v2_c4b_smooth_guard dispatch failed", StandInKind::GpuDispatchFailed);
 				}
 				if (standIns != nullptr)
@@ -5139,6 +5755,10 @@ float td_huber_taper(float diffSq, float diagC)
 			res.motionStandInRefs = gOut.motionStandInRefs;
 			res.borderBilinearPixels = gOut.borderBilinearPixels;
 			res.coarseBandOnly = gOut.coarseBandOnly;
+			res.usedHalfResChromaL = gOut.usedHalfResChromaL;
+			res.usedNorm16ChromaL = gOut.usedNorm16ChromaL;
+			res.usedLeanLumaReuse = gOut.usedLeanLumaReuse;
+			res.reusedLumaMotionGate = gOut.reusedLumaMotionGate;
 			res.scratchShort = gOut.scratchShort;
 			res.lastError = gOut.lastError;
 			if (!ok)
@@ -5217,6 +5837,7 @@ float td_huber_taper(float diffSq, float diagC)
 		{
 			pl_tex curL = nullptr;
 			pl_tex refL[kMaxChromaGpuRefs] = {};
+			pl_tex halfAreaTmp = nullptr;
 			pl_tex warpedUv = nullptr;
 			pl_tex codedDeltaRaw = nullptr;
 			pl_tex reducedRec = nullptr;
@@ -5225,7 +5846,6 @@ float td_huber_taper(float diffSq, float diagC)
 			pl_tex curMH = nullptr;
 			pl_tex refMH[kMaxChromaGpuRefs] = {};
 			pl_tex bandTmpCb = nullptr;
-			pl_tex bandTmpCr = nullptr;
 			pl_tex refFlags[2] = {};
 			pl_tex motionGate = nullptr;
 			pl_tex weightsCb = nullptr;
@@ -5239,11 +5859,12 @@ float td_huber_taper(float diffSq, float diagC)
 			pl_tex diagFlags = nullptr;
 			pl_tex guardCell = nullptr;
 
-			bool AllNonNull(bool needReduceRec = true, bool needReduceClean = true, bool needReduceRef = true) const
+			bool AllNonNull(bool needReduceRec = true, bool needReduceClean = true, bool needReduceRef = true,
+			                bool needHalfArea = false) const
 			{
-				if (!curL || !warpedUv || !codedDeltaRaw ||
+				if (!curL || (needHalfArea && !halfAreaTmp) || !warpedUv || !codedDeltaRaw ||
 				    (needReduceRec && !reducedRec) || (needReduceClean && !reducedClean) || (needReduceRef && !reducedRef) ||
-				    !curMH || !bandTmpCb || !bandTmpCr || !refFlags[0] || !refFlags[1] ||
+				    !curMH || !bandTmpCb || !refFlags[0] || !refFlags[1] ||
 				    !motionGate || !weightsCb || !weightsCr || !diagCb || !diagCr ||
 				    !statsCb || !statsCr || !ownGrain || !warpDiag || !diagFlags || !guardCell)
 					return false;
@@ -5253,12 +5874,13 @@ float td_huber_taper(float diffSq, float diagC)
 			}
 		};
 
-		bool EnsurePrivateScratch(pl_gpu gpu, int cW, int cH, int cw, int ch,
-		                          pl_fmt fmtR16, pl_fmt fmtRG32, pl_fmt fmtRGBA32,
+		bool EnsurePrivateScratch(pl_gpu gpu, int cW, int cH, int lTexW, int lTexH, int cw, int ch,
+		                          pl_fmt fmtR16, pl_fmt fmtChromaL, pl_fmt fmtRG32, pl_fmt fmtRGBA32,
 		                          bool needReduceRec, bool needReduceClean, bool needReduceRef,
-		                          ChromaScratchSet& out)
+		                          bool needHalfArea, ChromaScratchSet& out)
 		{
-			bool ok = Detail::EnsureTex(gpu, privCurL_, cW, cH, fmtRG32, true, true, false, false) &&
+			bool ok = Detail::EnsureTex(gpu, privCurL_, lTexW, lTexH, fmtChromaL, true, true, false, false) &&
+			          (!needHalfArea || Detail::EnsureTex(gpu, privHalfAreaTmp_, lTexW, lTexH, fmtChromaL, true, true, false, false)) &&
 			          Detail::EnsureTex(gpu, privWarpedUv_, cW, cH, fmtRG32, true, true, false, false) &&
 			          Detail::EnsureTex(gpu, privCodedDeltaRaw_, cW, cH, fmtRG32, true, true, false, false) &&
 			          (!needReduceRec || Detail::EnsureTex(gpu, privReducedRec_, cW, cH, fmtRG32, true, true, false, false)) &&
@@ -5266,7 +5888,6 @@ float td_huber_taper(float diffSq, float diagC)
 			          (!needReduceRef || Detail::EnsureTex(gpu, privReducedRef_, cW, cH, fmtRG32, true, true, false, false)) &&
 			          Detail::EnsureTex(gpu, privCurMH_, cW, cH, fmtRGBA32, true, true, false, false) &&
 			          Detail::EnsureTex(gpu, privBandTmpCb_, cW, cH, fmtRGBA32, true, true, false, false) &&
-			          Detail::EnsureTex(gpu, privBandTmpCr_, cW, cH, fmtRGBA32, true, true, false, false) &&
 			          Detail::EnsureTex(gpu, privRefFlags_[0], cW, cH, fmtR16, true, true, false, false) &&
 			          Detail::EnsureTex(gpu, privRefFlags_[1], cW, cH, fmtR16, true, true, false, false) &&
 			          Detail::EnsureTex(gpu, privMotionGate_, 3 * cw, ch, fmtRGBA32, true, true, false, false) &&
@@ -5282,11 +5903,12 @@ float td_huber_taper(float diffSq, float diagC)
 			          Detail::EnsureTex(gpu, privGuardCell_, cw, ch, fmtRGBA32, true, true, false, true);
 			for (int i = 0; i < kMaxChromaGpuRefs && ok; ++i)
 			{
-				ok = Detail::EnsureTex(gpu, privRefL_[i], cW, cH, fmtRG32, true, true, false, false) &&
+				ok = Detail::EnsureTex(gpu, privRefL_[i], lTexW, lTexH, fmtChromaL, true, true, false, false) &&
 				     Detail::EnsureTex(gpu, privRefMH_[i], cW, cH, fmtRGBA32, true, true, false, false);
 			}
 			if (!ok) return false;
 			out.curL = privCurL_;
+			out.halfAreaTmp = needHalfArea ? privHalfAreaTmp_ : nullptr;
 			out.warpedUv = privWarpedUv_;
 			out.codedDeltaRaw = privCodedDeltaRaw_;
 			out.reducedRec = needReduceRec ? privReducedRec_ : nullptr;
@@ -5294,7 +5916,6 @@ float td_huber_taper(float diffSq, float diagC)
 			out.reducedRef = needReduceRef ? privReducedRef_ : nullptr;
 			out.curMH = privCurMH_;
 			out.bandTmpCb = privBandTmpCb_;
-			out.bandTmpCr = privBandTmpCr_;
 			out.refFlags[0] = privRefFlags_[0];
 			out.refFlags[1] = privRefFlags_[1];
 			out.motionGate = privMotionGate_;
@@ -5320,9 +5941,9 @@ float td_huber_taper(float diffSq, float diagC)
 		{
 			if (!gpu) return;
 			for (pl_tex* t : {
-				&privCurL_, &privRefL_[0], &privRefL_[1], &privRefL_[2],
+				&privCurL_, &privRefL_[0], &privRefL_[1], &privRefL_[2], &privHalfAreaTmp_,
 				&privWarpedUv_, &privCodedDeltaRaw_, &privReducedRec_, &privReducedClean_, &privReducedRef_,
-				&privCurMH_, &privRefMH_[0], &privRefMH_[1], &privRefMH_[2], &privBandTmpCb_, &privBandTmpCr_,
+				&privCurMH_, &privRefMH_[0], &privRefMH_[1], &privRefMH_[2], &privBandTmpCb_,
 				&privRefFlags_[0], &privRefFlags_[1],
 				&privMotionGate_, &privWeightsCb_, &privWeightsCr_, &privDiagCb_, &privDiagCr_,
 				&privStatsCb_, &privStatsCr_, &privOwnGrain_, &privWarpDiag_, &privDiagFlags_, &privGuardCell_ })
@@ -5334,6 +5955,7 @@ float td_huber_taper(float diffSq, float diagC)
 		Config cfg_;
 		pl_tex privCurL_ = nullptr;
 		pl_tex privRefL_[kMaxChromaGpuRefs] = {};
+		pl_tex privHalfAreaTmp_ = nullptr;
 		pl_tex privWarpedUv_ = nullptr;
 		pl_tex privCodedDeltaRaw_ = nullptr;
 		pl_tex privReducedRec_ = nullptr;
@@ -5342,7 +5964,6 @@ float td_huber_taper(float diffSq, float diagC)
 		pl_tex privCurMH_ = nullptr;
 		pl_tex privRefMH_[kMaxChromaGpuRefs] = {};
 		pl_tex privBandTmpCb_ = nullptr;
-		pl_tex privBandTmpCr_ = nullptr;
 		pl_tex privRefFlags_[2] = {};
 		pl_tex privMotionGate_ = nullptr;
 		pl_tex privWeightsCb_ = nullptr;

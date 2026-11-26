@@ -55,6 +55,16 @@ namespace TdV2
 	// bits 0..2 remain L/M/H active bands (0..7); bit 3 (8) marks direct L-band region-aware debanding active (Stage A4-1).
 	constexpr unsigned kTdMapsBandMaskRegionDebandBit = 8u;
 
+	// Pass 3A derived RealTime budget-protection constants (Rule 1: derived from UHD geometry, 50/60p frame budget, and dyadic fractions):
+	// - UHD 4K pixel count (3840 x 2160) & high-frame-rate cutoff (50.0 Hz => <= 20 ms frame budget vs 24/30p 33-41.7 ms).
+	constexpr int kAuto4k60MinPixels = 3840 * 2160;
+	constexpr double kAuto4k60MinHz = 50.0;
+	// - Coverage-adaptive K=2->1 hysteresis bounds in [0, 1] active-tile coverage (elementary dyadic 3/4 enter, 5/8 exit => 1/8 deadband).
+	constexpr double kCoverageAdaptiveEnterFraction = 0.75;
+	constexpr double kCoverageAdaptiveExitFraction = 0.625;
+	// - Maximum source bit depth eligible for 16-bit normalized integer RealTime band storage (SC-06: 16 bits preserves >= 3.4 sub-LSB bits at 12-bit!).
+	constexpr int kNorm16BandsMaxSourceBits = 12;
+
 	// Top-level operating mode. Default is strictly Off.
 	enum class Mode : uint8_t
 	{
@@ -190,7 +200,12 @@ namespace TdV2
 			{ "SC-02", "Long-reach I-anchor y_4: enabled when drift-audited (Reference) vs local peaks+carry only (RealTime)", false, true },
 			{ "SC-03", "Cell projection iterations: 2 POCS steps (Reference) vs 1 POCS step (RealTime)", false, true },
 			{ "SC-04", "Weight upsampling: optional clean-luma-guided edge-aware bilinear (enableEdgeAwareWeightUpsample) vs spatial bilinear with per-corner 3-sigma Huber taper (default)", false, true },
-			{ "SC-05", "GPU band split: full-res FP32 L/D3/M/H (Reference) vs half-res FP32 (L, D3) band split with full-res FP32 (M, H) (RealTime)", false, true }
+			{ "SC-05", "GPU band split: full-res FP32 L/D3/M/H (Reference) vs half-res FP32 (L, D3) band split with full-res FP32 (M, H) (RealTime)", false, true },
+			{ "SC-06", "Optional 16-bit normalized integer RealTime bands (RG16 UNORM, BTB/WTW [-0.25, +1.25] affine map) for sourceBits <= 12 (never FP16; >12-bit & Reference stay FP32)", false, true },
+			{ "SC-07", "Optional half-res Chroma L band in RealTime (Chroma M and H remain 100% full coded resolution)", false, true },
+			{ "SC-08", "Optional 50% checkerboard pixel subsampling in cell-moment stats (p2a_cell_stats / c2a_cell_stats)", false, true },
+			{ "SC-09", "Optional bilinear reference warp in RealTime (vs 4x4 Catmull-Rom bicubic)", false, true },
+			{ "SC-10", "Optional adaptive K budget protection in RealTime (4K60 auto K=1, Role-Adaptive K=0/1/2, Coverage-Adaptive K=2->1 with hysteresis)", false, true }
 		};
 		count = sizeof(kLedger) / sizeof(kLedger[0]);
 		return kLedger;
@@ -292,12 +307,143 @@ namespace TdV2
 		double bokehMatchDelta = 0.0;
 		bool enableRegionDeband = false;
 
+		// Pass 3A — 100% Native Direct3D 11 CS 5.0 RealTime Speed & Budget-Protection Levers (all strictly DEFAULT OFF):
+		//   - enableNorm16RealTimeBands (SC-06): 16-bit normalized integer (RG16) band storage for Preset::RealTime & sourceBits <= 12
+		//     (incl. 12-bit tunneled DV; BTB/WTW-safe [-0.25, +1.25]*peak; >12-bit & Reference stay strictly FP32; NEVER FP16!).
+		//   - enableHalfResChromaL (SC-07): half-res Chroma L band in RealTime (Chroma M & H stay 100% full coded resolution).
+		//   - enablePhaseATileEarlyOut: zero-loss Phase A skips (bars outside activeRect, motion-rejected/face/zero-weight tiles,
+		//     clean-peak K=0 passthrough, skip redundant 4K outClean/carryClean writes when unused).
+		//   - enableBandRingCache: 3-frame decoded-frame band ring cache keyed by (srcTex, seq, w, h, activeRect, format) —
+		//     splits each unique frame once instead of 3x; hard-flushed on cut/resync/size/preset change.
+		//   - enableLeanChromaLumaReuse: true lean chromaReuseLumaWeights fast-path reusing Luma motionGate + cellWeights +
+		//     cellDiagC directly and skipping Chroma C2A / C2EB / C2B dispatches + GPU-CPU sync stall completely.
+		//   - enableCheckerboardCellStats (SC-08): 50% checkerboard pixel subsampling in p2a_cell_stats / c2a_cell_stats.
+		//   - enableBilinearHardwareWarp (SC-09): bilinear warp option vs 4x4 Catmull-Rom bicubic in RealTime.
+		//   - enableAuto4k60SingleRef (SC-10a): automatic K=2 -> K=1 cap when w*h >= 3840*2160 && sourceHz >= 50 Hz.
+		//   - enableRoleAdaptiveK (SC-10b): K=0 clean confirmed peak, K=1 shallow dip (Reference), K=2 deep valley (NonReference).
+		//   - enableCoverageAdaptiveK (SC-10c): activeTileFraction with [0.75, 0.625] hysteresis capping K=2 -> K=1 visibly.
+		bool enableNorm16RealTimeBands = false;
+		bool enableHalfResChromaL = false;
+		bool enablePhaseATileEarlyOut = false;
+		bool enableBandRingCache = false;
+		bool enableLeanChromaLumaReuse = false;
+		bool enableCheckerboardCellStats = false;
+		bool enableBilinearHardwareWarp = false;
+		bool enableAuto4k60SingleRef = false;
+		bool enableRoleAdaptiveK = false;
+		bool enableCoverageAdaptiveK = false;
+
 		// Measured source rate in Hz (used to express any temporal horizon in seconds, never hardcoded frame counts).
 		double sourceHz = kDefaultSourceHz;
 
 		bool IsEnabled() const { return mode != Mode::Off; }
 		bool ModifiesPixels() const { return mode == Mode::On; }
 	};
+
+	// Exact guard for SC-06 16-bit normalized integer RealTime bands (NEVER activates in Reference or sourceBits > 12).
+	inline bool ShouldUseNorm16Bands(const Config& cfg)
+	{
+		return cfg.preset == Preset::RealTime &&
+		       cfg.enableNorm16RealTimeBands &&
+		       cfg.sourceBits > 0 &&
+		       cfg.sourceBits <= kNorm16BandsMaxSourceBits;
+	}
+
+	// Deterministic stateful hysteresis controller for Coverage-Adaptive K (SC-10c: enter >= 0.75, exit <= 0.625).
+	struct CoverageAdaptiveKState
+	{
+		bool capped = false;
+		double lastActiveTileFraction = 0.0;
+
+		void Reset()
+		{
+			capped = false;
+			lastActiveTileFraction = 0.0;
+		}
+
+		bool Update(double activeTileFraction)
+		{
+			const double frac = (std::isfinite(activeTileFraction) && activeTileFraction >= 0.0)
+				? (activeTileFraction > 1.0 ? 1.0 : activeTileFraction)
+				: 0.0;
+			lastActiveTileFraction = frac;
+			if (!capped && frac >= kCoverageAdaptiveEnterFraction)
+				capped = true;
+			else if (capped && frac <= kCoverageAdaptiveExitFraction)
+				capped = false;
+			return capped;
+		}
+	};
+
+	// Unified Pass 3A effective-K cap decision shared 1:1 between CPU (TdV2ReferenceEngine) and GPU (TdV2GpuEngine).
+	// frameRoleInt matches QualityPattern::FrameRole (0=Unknown, 1=Peak, 2=Reference, 3=NonReference) without adding a header include.
+	struct AdaptiveKDecision
+	{
+		int maxExternalRefs = 3; // 0 = clean-peak K=0 passthrough, 1 = single-ref K=1 cap, 2+ = unrestricted
+		bool auto4k60Active = false;
+		bool roleAdaptiveReduced = false;
+		bool coverageAdaptiveCapped = false;
+		double activeTileFraction = 1.0;
+	};
+
+	inline AdaptiveKDecision ResolveAdaptiveKCap(
+		const Config& cfg,
+		int w,
+		int h,
+		int frameRoleInt,
+		bool isConfirmedPeak,
+		double activeTileFraction,
+		CoverageAdaptiveKState& coverageState)
+	{
+		AdaptiveKDecision d;
+		d.activeTileFraction = (std::isfinite(activeTileFraction) && activeTileFraction >= 0.0)
+			? (activeTileFraction > 1.0 ? 1.0 : activeTileFraction)
+			: 0.0;
+
+		// Only RealTime (or explicit opt-in toggles) activate Pass 3A adaptive-K caps; default all-OFF returns maxExternalRefs = 3.
+		if (cfg.enableRoleAdaptiveK)
+		{
+			// FrameRole::Peak == 1 (or explicit isConfirmedPeak) -> K=0 clean peak passthrough;
+			// FrameRole::Reference == 2 -> K=1 shallow dip; FrameRole::NonReference == 3 / Unknown -> K=2 deep valley.
+			if (isConfirmedPeak || frameRoleInt == 1)
+			{
+				d.maxExternalRefs = 0;
+				d.roleAdaptiveReduced = true;
+				return d;
+			}
+			if (frameRoleInt == 2)
+			{
+				if (d.maxExternalRefs > 1)
+					d.maxExternalRefs = 1;
+				d.roleAdaptiveReduced = true;
+			}
+		}
+
+		if (cfg.enableAuto4k60SingleRef &&
+		    static_cast<int64_t>(w) * static_cast<int64_t>(h) >= static_cast<int64_t>(kAuto4k60MinPixels) &&
+		    std::isfinite(cfg.sourceHz) && cfg.sourceHz >= kAuto4k60MinHz)
+		{
+			if (d.maxExternalRefs > 1)
+				d.maxExternalRefs = 1;
+			d.auto4k60Active = true;
+		}
+
+		if (cfg.enableCoverageAdaptiveK)
+		{
+			if (coverageState.Update(d.activeTileFraction))
+			{
+				if (d.maxExternalRefs > 1)
+					d.maxExternalRefs = 1;
+				d.coverageAdaptiveCapped = true;
+			}
+		}
+		else
+		{
+			coverageState.lastActiveTileFraction = d.activeTileFraction;
+		}
+
+		return d;
+	}
 
 	// Code-domain scale relative to 10-bit reference (2^(bits - 10)); energy scale is DepthScale^2.
 	// Identical law to GrainSplit::DepthScale without creating a header coupling.

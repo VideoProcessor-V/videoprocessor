@@ -59,6 +59,13 @@ namespace TdV2
 		FaceMaskSizeMismatch,
 		GpuPrivateScratchFallback,
 		RegionMapsDerived,
+		CoverageAdaptiveKCapped,
+		RoleAdaptiveKReduced,
+		Auto4k60SingleRefCap,
+		FlashFrameAbstained,
+		CadenceSuspendedFade,
+		VoterCarryVetoed,
+		ChromaLeanLumaReuse,
 		Count
 	};
 
@@ -150,7 +157,21 @@ namespace TdV2
 			{ StandInKind::GpuPrivateScratchFallback, "td.gpu.private_scratch_fallback",
 			  "GPU private scratch fallback (arena == nullptr)", "Shared ScratchArena kUserTemporalDetail" },
 			{ StandInKind::RegionMapsDerived, "td.standin.region_maps_derived",
-			  "region maps: derived from clean bands (P11/P12/kEdgeMap absent)", "Shared P11 focus, P12 texture, kEdgeMap products" }
+			  "region maps: derived from clean bands (P11/P12/kEdgeMap absent)", "Shared P11 focus, P12 texture, kEdgeMap products" },
+			{ StandInKind::CoverageAdaptiveKCapped, "td.opt3.coverage_adaptive_k",
+			  "coverage-adaptive K=2->1 cap active (high active-tile coverage)", "Full-budget K=2 multi-reference blend" },
+			{ StandInKind::RoleAdaptiveKReduced, "td.opt3.role_adaptive_k",
+			  "role-adaptive K reduction active (peak/shallow-dip budget)", "Fixed K=2 multi-reference blend" },
+			{ StandInKind::Auto4k60SingleRefCap, "td.opt3.auto_4k60_k1",
+			  "4K60p auto K=1 frame-budget cap active", "24/30p K=2 multi-reference blend" },
+			{ StandInKind::FlashFrameAbstained, "td.trans.flash_abstained",
+			  "1-frame flash detected (K=0 abstained, keyframe bank preserved)", "Stable shot frame" },
+			{ StandInKind::CadenceSuspendedFade, "td.trans.fade_suspended",
+			  "fade transition active (cadence & keyframe bank writes suspended)", "Stable exposure shot" },
+			{ StandInKind::VoterCarryVetoed, "td.dpb.voter_carry_veto",
+			  "coarse-band 2-vs-1 voter vetoed disagreeing carry", "Consensus carry blend" },
+			{ StandInKind::ChromaLeanLumaReuse, "td.opt3.chroma_lean_reuse",
+			  "chroma lean luma-weight reuse fast-path active (C2 stats/solve skipped)", "Standalone chroma C2 stats & solver" }
 		};
 		const size_t idx = static_cast<size_t>(kind);
 		if (idx < static_cast<size_t>(StandInKind::Count))

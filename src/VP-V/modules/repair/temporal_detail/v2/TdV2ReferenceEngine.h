@@ -828,6 +828,9 @@ namespace TdV2
 		const std::vector<double>* p12TextureDensity = nullptr;    // Per-cell (cellsW * cellsH) P12 texture/detail density in [0, 1]
 		const std::vector<double>* edgeMapCells = nullptr;         // Per-cell (cellsW * cellsH) kEdgeMap edge strength in [0, 1]
 		const TdV2Plane* edgeMapPlane = nullptr;                   // Optional per-pixel (w x h) kEdgeMap edge strength in [0, 1]
+
+		// Pass 3A optional explicit active-tile coverage override in [0, 1] (< 0.0 => computed from activeRect/faceMask/motion).
+		double activeTileFractionOverride = -1.0;
 	};
 
 	struct FrameProcessResult
@@ -862,6 +865,13 @@ namespace TdV2
 		std::array<std::array<std::vector<double>, kMaxBlendRefs>, 3> lumaCellWeights;
 		RefRole lumaRefRoles[kMaxBlendRefs] = {};
 		int lumaActiveRefCount = 0;
+
+		// Pass 3A adaptive-K & budget-protection telemetry (always visible, zero silent reductions).
+		double activeTileFraction = 1.0;
+		int effectiveKCap = 3;
+		bool auto4k60SingleRefActive = false;
+		bool roleAdaptiveKReduced = false;
+		bool coverageAdaptiveKCapped = false;
 	};
 
 	// ---- Corner-Tapered Spatial-Only Bilinear Weight Interpolation (Zero New Constants) ----
@@ -1186,6 +1196,7 @@ namespace TdV2
 			lastSeq_ = 0;
 			elapsedSec_ = 0.0;
 			a2eHistory_.Reset();
+			coverageAdaptiveState_.Reset();
 			for (auto& slot : sameRoleStats_)
 				slot.Reset();
 		}
@@ -1375,13 +1386,64 @@ namespace TdV2
 				anchorReseedCells_.clear();
 			}
 
-			if (!effectiveCut)
+			// Pass 3A adaptive-K & budget-protection controller (4K60 auto K=1, Role-Adaptive K=0/1/2, Coverage-Adaptive K=2->1).
+			// Strictly inert (maxExternalRefs == 3) when all Pass 3A adaptive toggles are default OFF!
+			const ActiveRect effActiveForCov = in.activeRect.Empty()
+				? ActiveRect::Full(w, h)
+				: in.activeRect.ClampedTo(w, h);
+			double activeTileFrac = 1.0;
+			if (in.activeTileFractionOverride >= 0.0 && std::isfinite(in.activeTileFractionOverride))
 			{
-				if (in.prevPeak.cleanPlane != nullptr)
+				activeTileFrac = RampMath::Clamp01(in.activeTileFractionOverride);
+			}
+			else if (numCells > 0)
+			{
+				size_t activeCells = 0;
+				for (int cy = 0; cy < res.cellsH; ++cy)
+				{
+					const int py0 = cy * cellPx;
+					const int py1 = (std::min)(h, py0 + cellPx);
+					if (py1 <= effActiveForCov.y0 || py0 >= effActiveForCov.y1)
+						continue;
+					for (int cx = 0; cx < res.cellsW; ++cx)
+					{
+						const int px0 = cx * cellPx;
+						const int px1 = (std::min)(w, px0 + cellPx);
+						if (px1 <= effActiveForCov.x0 || px0 >= effActiveForCov.x1)
+							continue;
+						const size_t ci = static_cast<size_t>(cy) * res.cellsW + cx;
+						if (in.faceMask != nullptr && ci < in.faceMask->size() && (*in.faceMask)[ci] != 0u)
+							continue;
+						++activeCells;
+					}
+				}
+				activeTileFrac = static_cast<double>(activeCells) / static_cast<double>(numCells);
+			}
+			const AdaptiveKDecision adaptiveK = ResolveAdaptiveKCap(
+				cfg_, w, h, static_cast<int>(in.frameRole), in.isConfirmedPeak, activeTileFrac, coverageAdaptiveState_);
+			res.activeTileFraction = adaptiveK.activeTileFraction;
+			res.effectiveKCap = adaptiveK.maxExternalRefs;
+			res.auto4k60SingleRefActive = adaptiveK.auto4k60Active;
+			res.roleAdaptiveKReduced = adaptiveK.roleAdaptiveReduced;
+			res.coverageAdaptiveKCapped = adaptiveK.coverageAdaptiveCapped;
+			if (standIns != nullptr)
+			{
+				if (adaptiveK.auto4k60Active)
+					standIns->Engage(StandInKind::Auto4k60SingleRefCap, "4K50/60p auto K=1 cap active");
+				if (adaptiveK.roleAdaptiveReduced)
+					standIns->Engage(StandInKind::RoleAdaptiveKReduced,
+						adaptiveK.maxExternalRefs == 0 ? "clean peak K=0 passthrough" : "shallow-dip K=1 cap");
+				if (adaptiveK.coverageAdaptiveCapped)
+					standIns->Engage(StandInKind::CoverageAdaptiveKCapped, "active-tile coverage hysteresis K=2->1 cap");
+			}
+
+			if (!effectiveCut && adaptiveK.maxExternalRefs > 0)
+			{
+				if (in.prevPeak.cleanPlane != nullptr && static_cast<int>(refSpecs.size()) < adaptiveK.maxExternalRefs)
 					tryAddRefSpec(in.prevPeak.cleanPlane, in.prevPeak.motion, in.prevPeak.isExactCopyOfCurrent, RefRole::PrevPeak, in.prevPeak.cameraHomography, in.prevPeak.focusConfidence);
-				if (in.nextPeak.cleanPlane != nullptr)
+				if (in.nextPeak.cleanPlane != nullptr && static_cast<int>(refSpecs.size()) < adaptiveK.maxExternalRefs)
 					tryAddRefSpec(in.nextPeak.cleanPlane, in.nextPeak.motion, in.nextPeak.isExactCopyOfCurrent, RefRole::NextPeak, in.nextPeak.cameraHomography, in.nextPeak.focusConfidence);
-				if (in.prevPeak2.cleanPlane != nullptr)
+				if (in.prevPeak2.cleanPlane != nullptr && static_cast<int>(refSpecs.size()) < adaptiveK.maxExternalRefs)
 					tryAddRefSpec(in.prevPeak2.cleanPlane, in.prevPeak2.motion, in.prevPeak2.isExactCopyOfCurrent, RefRole::PrevPeak2, in.prevPeak2.cameraHomography, in.prevPeak2.focusConfidence);
 				// TD-U5 (H-4 / Owner D2 / UPG-HIGH-1 / RED-BUG-7a): Single-resample anchored carry from last confirmed peak
 				// along composed vector, treated as a second past peak (PrevPeak2) for A1 (NEVER chained resample).
@@ -3711,6 +3773,7 @@ namespace TdV2
 		uint64_t lastSeq_ = 0;
 		double elapsedSec_ = 0.0;
 		A2ePriorHistory a2eHistory_;
+		CoverageAdaptiveKState coverageAdaptiveState_;
 		std::array<SameRoleStatsSlot, 3> sameRoleStats_;
 	};
 }

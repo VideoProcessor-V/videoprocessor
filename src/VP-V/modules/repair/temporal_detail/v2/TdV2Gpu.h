@@ -89,6 +89,14 @@ namespace Gpu
 		bool scratchShort = false;
 		bool usedExternalBandMemo = false;       // True when caller-supplied kBandMemo curLowBandTex skipped current-frame low-band blur
 		bool externalBandMemoRejected = false;   // True when non-null curLowBandTex failed dimension/format validation (visible fail-closed)
+		double activeTileFraction = 1.0;         // Pass 3A: active non-bar/non-face tile coverage in [0, 1]
+		int effectiveKCap = 3;                   // Pass 3A: effective reference cap after 4K60/role/coverage controllers
+		bool auto4k60SingleRefActive = false;
+		bool roleAdaptiveKReduced = false;
+		bool coverageAdaptiveKCapped = false;
+		bool usedNorm16Bands = false;            // Pass 3A SC-06: true when RG16 normalized integer bands were used
+		uint64_t bandRingHits = 0;               // Pass 3A: 3-frame band ring cache hits this frame
+		uint64_t bandRingMisses = 0;             // Pass 3A: 3-frame band ring cache misses this frame
 		bool succeeded = false;
 		std::string lastError;
 	};
@@ -176,6 +184,9 @@ namespace Gpu
 		const std::vector<double>* p12TextureDensity = nullptr;
 		const std::vector<double>* edgeMapCells = nullptr;
 		const TdV2Plane* edgeMapPlane = nullptr;
+
+		// Pass 3A optional explicit active-tile coverage override in [0, 1] (< 0.0 => computed from activeRect/faceMask).
+		double activeTileFractionOverride = -1.0;
 	};
 
 	struct GpuFrameOutput
@@ -190,6 +201,8 @@ namespace Gpu
 		pl_tex guardCellTex = nullptr;           // Optional: cw x ch RG32F (storable)
 		pl_tex warpDiagTex = nullptr;            // Optional: cw x ch RG32F (storable)
 		pl_tex lumaCellWeightsTex = nullptr;     // Optional (or populated from engine persistent copy): 3*cw x ch RGBA32F for Plan 6.6 chroma reuse_luma
+		pl_tex lumaCellDiagCTex = nullptr;       // Optional Pass 3A lean chroma reuse: 3*cw x ch RGBA32F
+		pl_tex lumaMotionGateTex = nullptr;      // Optional Pass 3A shared motion gate: 3*cw x ch RGBA32F
 
 		// When true, reads back tiny cell-grid diagnostics to populate counters, tdMaps, and StandInRegistry.
 		// When false (zero-copy realtime render loop), performs ZERO GPU->CPU downloads!
@@ -219,6 +232,14 @@ namespace Gpu
 		bool scratchShort = false;
 		bool usedExternalBandMemo = false;       // True when caller-supplied kBandMemo curLowBandTex skipped current-frame low-band blur
 		bool externalBandMemoRejected = false;   // True when non-null curLowBandTex failed dimension/format validation (visible fail-closed)
+		double activeTileFraction = 1.0;         // Pass 3A: active non-bar/non-face tile coverage in [0, 1]
+		int effectiveKCap = 3;                   // Pass 3A: effective reference cap after 4K60/role/coverage controllers
+		bool auto4k60SingleRefActive = false;
+		bool roleAdaptiveKReduced = false;
+		bool coverageAdaptiveKCapped = false;
+		bool usedNorm16Bands = false;            // Pass 3A SC-06: true when RG16 normalized integer bands were used
+		uint64_t bandRingHits = 0;               // Pass 3A: 3-frame band ring cache hits this frame
+		uint64_t bandRingMisses = 0;             // Pass 3A: 3-frame band ring cache misses this frame
 		bool succeeded = false;
 		std::string lastError;
 		std::vector<TdMapsView::Block> tdMaps;
@@ -518,13 +539,15 @@ namespace Gpu
 		// Canonical per-frame scratch-arena request list (single source of truth shared by ArenaRequests
 		// and EstimatedScratchVramBytes so VRAM accounting can NEVER drift from arena allocations).
 		inline std::vector<VpSkeleton::ArenaRequest> BuildArenaRequests(
-			int w, int h, int cellPx = kCanonicalBlockPx, Preset preset = Preset::Reference)
+			int w, int h, int cellPx = kCanonicalBlockPx, Preset preset = Preset::Reference,
+			bool useNorm16Bands = false)
 		{
 			std::vector<VpSkeleton::ArenaRequest> reqs;
 			if (w <= 0 || h <= 0)
 				return reqs;
 
 			const bool compact = (preset == Preset::RealTime);
+			const bool norm16 = compact && useNorm16Bands;
 			const int effCellPx = cellPx > 0 ? cellPx : kCanonicalBlockPx;
 			const uint32_t uw = static_cast<uint32_t>(w);
 			const uint32_t uh = static_cast<uint32_t>(h);
@@ -546,8 +569,18 @@ namespace Gpu
 
 			if (compact)
 			{
-				pushReq(uw, uh, VpSkeleton::TexFormat::RG32F, 5);        // curBandsMH, refBandsMH[0..2], deltaScratch (strictly FP32 per plan L60)
-				pushReq(wHalf, hHalf, VpSkeleton::TexFormat::RG32F, 5);  // curBandsLD3, refBandsLD3[0..2], bandHalfTmp (FP32)
+				if (norm16)
+				{
+					// SC-06: 16-bit normalized integer (RG16) band storage for sourceBits <= 12 (50% less band VRAM & bandwidth; NEVER FP16!).
+					pushReq(uw, uh, VpSkeleton::TexFormat::RG16, 4);         // curBandsMH, refBandsMH[0..2]
+					pushReq(wHalf, hHalf, VpSkeleton::TexFormat::RG16, 5);   // curBandsLD3, refBandsLD3[0..2], bandHalfTmp
+					pushReq(uw, uh, VpSkeleton::TexFormat::RG32F, 1);        // deltaScratch (strictly FP32)
+				}
+				else
+				{
+					pushReq(uw, uh, VpSkeleton::TexFormat::RG32F, 5);        // curBandsMH, refBandsMH[0..2], deltaScratch (strictly FP32 per plan L60)
+					pushReq(wHalf, hHalf, VpSkeleton::TexFormat::RG32F, 5);  // curBandsLD3, refBandsLD3[0..2], bandHalfTmp (FP32)
+				}
 			}
 			else
 			{
@@ -603,6 +636,8 @@ namespace Gpu
 			lastSeq_ = 0;
 			elapsedSec_ = 0.0;
 			a2eHistory_.Reset();
+			coverageAdaptiveState_.Reset();
+			FlushBandRingCache(gpu);
 			for (int r = 0; r < 3; ++r)
 			{
 				hasPrevRoleStats_[r] = false;
@@ -638,6 +673,7 @@ namespace Gpu
 					&inRegionFocusTex_, &inRegionPriorsTex_, &inEdgeMapTex_, &cellRegionAuxTex_,
 					&outYTex_, &outCleanTex_, &outDeltaTex_, &outTdMapsTex_,
 					&outDiagFlagsTex_, &outGuardCellTex_, &outWarpDiagTex_, &outLumaCellWeightsTex_,
+					&outLumaCellDiagCTex_, &outLumaMotionGateTex_,
 					&ebPriorTex_, &ebScratchTex_, &counterSummaryTex_, &prevRoleStatsTex_[0], &prevRoleStatsTex_[1], &prevRoleStatsTex_[2],
 					&dummySampledTex_[0], &dummySampledTex_[1], &dummySampledTex_[2], &dummySampledTex_[3],
 					&anchorCleanTex_, &anchorBarredTex_[0], &anchorBarredTex_[1], &cellDriftTex_,
@@ -666,10 +702,17 @@ namespace Gpu
 					&inRegionFocusTex_, &inRegionPriorsTex_, &inEdgeMapTex_, &cellRegionAuxTex_,
 					&outYTex_, &outCleanTex_, &outDeltaTex_, &outTdMapsTex_,
 					&outDiagFlagsTex_, &outGuardCellTex_, &outWarpDiagTex_, &outLumaCellWeightsTex_,
+					&outLumaCellDiagCTex_, &outLumaMotionGateTex_,
 					&chromaCodedDeltaTex_, &chromaDelivUvTex_, &chromaDelivRgbTex_,
 					&chromaOutUvTex_, &chromaOutRgbTex_, &chromaOutDeltaTex_ })
 				{
 					*t = nullptr;
+				}
+				for (BandRingSlot& s : bandRing_)
+				{
+					s.fullTex = nullptr;
+					s.mhTex = nullptr;
+					s.ld3Tex = nullptr;
 				}
 			}
 		}
@@ -684,7 +727,8 @@ namespace Gpu
 		//   Preset::Reference: full-res RGBA32F bands (strict <= 1e-3 10-bit CPU parity).
 		//   Preset::RealTime:  compact full-res FP32 RG32F (M,H) + half-res FP32 RG32F (L,D3) (SC-05; strictly FP32 per plan L60!).
 		static std::vector<VpSkeleton::ArenaRequest> ArenaRequests(
-			pl_gpu gpu, int w, int h, int cellPx = kCanonicalBlockPx, Preset preset = Preset::Reference)
+			pl_gpu gpu, int w, int h, int cellPx = kCanonicalBlockPx, Preset preset = Preset::Reference,
+			bool useNorm16Bands = false)
 		{
 			if (!gpu || w <= 0 || h <= 0)
 				return {};
@@ -695,17 +739,32 @@ namespace Gpu
 			{
 				return {};
 			}
-			return Detail::BuildArenaRequests(w, h, cellPx, preset);
+			const bool effNorm16 = (preset == Preset::RealTime) && useNorm16Bands &&
+			                       (VpSkeleton::PlTexBackend::FindFormat(gpu, VpSkeleton::TexFormat::RG16) != nullptr);
+			return Detail::BuildArenaRequests(w, h, cellPx, preset, effNorm16);
+		}
+
+		// Config-aware ScratchArena requests (automatically selects SC-06 RG16 norm16 RealTime bands when enabled & sourceBits <= 12).
+		static std::vector<VpSkeleton::ArenaRequest> ArenaRequestsForConfig(
+			pl_gpu gpu, int w, int h, const Config& cfg)
+		{
+			return ArenaRequests(gpu, w, h, cfg.cellPx, cfg.preset, ShouldUseNorm16Bands(cfg));
 		}
 
 		// Exact scratch-arena VRAM bytes derived directly from Detail::BuildArenaRequests (single source of truth — zero drift!).
 		static uint64_t EstimatedScratchVramBytes(
-			int w, int h, int cellPx = kCanonicalBlockPx, Preset preset = Preset::Reference)
+			int w, int h, int cellPx = kCanonicalBlockPx, Preset preset = Preset::Reference,
+			bool useNorm16Bands = false)
 		{
 			uint64_t total = 0;
-			for (const VpSkeleton::ArenaRequest& r : Detail::BuildArenaRequests(w, h, cellPx, preset))
+			for (const VpSkeleton::ArenaRequest& r : Detail::BuildArenaRequests(w, h, cellPx, preset, useNorm16Bands))
 				total += VpSkeleton::ShapeBytes(r.shape) * static_cast<uint64_t>(r.count);
 			return total;
+		}
+
+		static uint64_t EstimatedScratchVramBytesForConfig(int w, int h, const Config& cfg)
+		{
+			return EstimatedScratchVramBytes(w, h, cfg.cellPx, cfg.preset, ShouldUseNorm16Bands(cfg));
 		}
 
 		// Exact worst-case persistent VRAM bytes for all 6 cached chroma textures allocated by ApplyChromaDeltaGpu
@@ -922,18 +981,54 @@ namespace Gpu
 				inRegionFocusTex_, inRegionPriorsTex_, inEdgeMapTex_, cellRegionAuxTex_,
 				outYTex_, outCleanTex_, outDeltaTex_, outTdMapsTex_,
 				outDiagFlagsTex_, outGuardCellTex_, outWarpDiagTex_, outLumaCellWeightsTex_,
+				outLumaCellDiagCTex_, outLumaMotionGateTex_,
 				ebPriorTex_, ebScratchTex_, counterSummaryTex_, prevRoleStatsTex_[0], prevRoleStatsTex_[1], prevRoleStatsTex_[2],
 				dummySampledTex_[0], dummySampledTex_[1], dummySampledTex_[2], dummySampledTex_[3] })
 			{
 				total += VpSkeleton::TexBytesOf(t);
 			}
+			for (const BandRingSlot& slot : bandRing_)
+			{
+				total += VpSkeleton::TexBytesOf(slot.fullTex);
+				total += VpSkeleton::TexBytesOf(slot.mhTex);
+				total += VpSkeleton::TexBytesOf(slot.ld3Tex);
+			}
 			return total;
 		}
 
-		// Plan 6.6 / CHR-HIGH-3: Accessors for persistent post-gate luma cell weights & explicit RefRole mapping.
+		// Plan 6.6 / CHR-HIGH-3 / Pass 3A: Accessors for persistent post-gate luma cell weights, diagC, motionGate & explicit RefRole mapping.
 		pl_tex LastLumaCellWeightsTex() const { return outLumaCellWeightsTex_; }
+		pl_tex LastLumaCellDiagCTex() const { return outLumaCellDiagCTex_; }
+		pl_tex LastLumaMotionGateTex() const { return outLumaMotionGateTex_; }
 		int LastLumaActiveRefCount() const { return lastLumaActiveRefCount_; }
 		int LastLumaRefRole(int slot) const { return (slot >= 0 && slot < 3) ? lastLumaRefRoles_[slot] : -1; }
+
+		// Pass 3A: Explicitly flush the 3-frame decoded-frame band ring cache (also called automatically on cut/resync/size/preset change).
+		void FlushBandRingCache(pl_gpu gpu = nullptr)
+		{
+			for (BandRingSlot& s : bandRing_)
+			{
+				s.valid = false;
+				s.seq = 0;
+				s.srcTex = nullptr;
+				s.w = 0;
+				s.h = 0;
+				s.active = ActiveRect{};
+				s.compact = false;
+				s.norm16 = false;
+				s.lruTick = 0;
+				if (gpu != nullptr)
+				{
+					if (s.fullTex != nullptr) pl_tex_destroy(gpu, &s.fullTex);
+					if (s.mhTex != nullptr) pl_tex_destroy(gpu, &s.mhTex);
+					if (s.ld3Tex != nullptr) pl_tex_destroy(gpu, &s.ld3Tex);
+				}
+				else
+				{
+					// Note: preserve allocated pl_tex handles for reuse on non-Release flush; zeroed in Release(nullptr).
+				}
+			}
+		}
 
 		// Live allocated byte introspection over ALL 6 persistent chroma pl_tex members (exact 1:1 match with Release(gpu)).
 		uint64_t AllocatedPersistentChromaVramBytes() const
@@ -1288,13 +1383,59 @@ namespace Gpu
 				anchorH_ = 0;
 				anchorAgeFrames_ = 0;
 			}
-			if (!effectiveCut)
+
+			// Pass 3A adaptive-K & budget-protection controller (4K60 auto K=1, Role-Adaptive K=0/1/2, Coverage-Adaptive K=2->1).
+			const ActiveRect effActCovGpu = in.activeRect.Empty() ? ActiveRect::Full(w, h) : in.activeRect.ClampedTo(w, h);
+			double activeTileFracGpu = 1.0;
+			if (in.activeTileFractionOverride >= 0.0 && std::isfinite(in.activeTileFractionOverride))
 			{
-				if (in.prevPeak.cleanTex != nullptr)
+				activeTileFracGpu = RampMath::Clamp01(in.activeTileFractionOverride);
+			}
+			else if (numCells > 0)
+			{
+				size_t actC = 0;
+				for (int cy = 0; cy < out.cellsH; ++cy)
+				{
+					const int py0 = cy * cellPx;
+					const int py1 = (std::min)(h, py0 + cellPx);
+					if (py1 <= effActCovGpu.y0 || py0 >= effActCovGpu.y1) continue;
+					for (int cx = 0; cx < out.cellsW; ++cx)
+					{
+						const int px0 = cx * cellPx;
+						const int px1 = (std::min)(w, px0 + cellPx);
+						if (px1 <= effActCovGpu.x0 || px0 >= effActCovGpu.x1) continue;
+						const size_t ci = static_cast<size_t>(cy) * out.cellsW + cx;
+						if (in.faceMask != nullptr && ci < in.faceMask->size() && (*in.faceMask)[ci] != 0u) continue;
+						++actC;
+					}
+				}
+				activeTileFracGpu = static_cast<double>(actC) / static_cast<double>(numCells);
+			}
+			const AdaptiveKDecision adaptiveKGpu = ResolveAdaptiveKCap(
+				cfg_, w, h, static_cast<int>(in.frameRole), in.isConfirmedPeak, activeTileFracGpu, coverageAdaptiveState_);
+			out.activeTileFraction = adaptiveKGpu.activeTileFraction;
+			out.effectiveKCap = adaptiveKGpu.maxExternalRefs;
+			out.auto4k60SingleRefActive = adaptiveKGpu.auto4k60Active;
+			out.roleAdaptiveKReduced = adaptiveKGpu.roleAdaptiveReduced;
+			out.coverageAdaptiveKCapped = adaptiveKGpu.coverageAdaptiveCapped;
+			if (standIns != nullptr)
+			{
+				if (adaptiveKGpu.auto4k60Active)
+					standIns->Engage(StandInKind::Auto4k60SingleRefCap, "4K50/60p auto K=1 cap active");
+				if (adaptiveKGpu.roleAdaptiveReduced)
+					standIns->Engage(StandInKind::RoleAdaptiveKReduced,
+						adaptiveKGpu.maxExternalRefs == 0 ? "clean peak K=0 passthrough" : "shallow-dip K=1 cap");
+				if (adaptiveKGpu.coverageAdaptiveCapped)
+					standIns->Engage(StandInKind::CoverageAdaptiveKCapped, "active-tile coverage hysteresis K=2->1 cap");
+			}
+
+			if (!effectiveCut && adaptiveKGpu.maxExternalRefs > 0)
+			{
+				if (in.prevPeak.cleanTex != nullptr && static_cast<int>(refSpecs.size()) < adaptiveKGpu.maxExternalRefs)
 					tryAddGpuRef(in.prevPeak.cleanTex, false, 0, 0, in.prevPeak.motion, in.prevPeak.isExactCopyOfCurrent, in.prevPeak.cameraHomography, in.prevPeak.focusConfidence);
-				if (in.nextPeak.cleanTex != nullptr)
+				if (in.nextPeak.cleanTex != nullptr && static_cast<int>(refSpecs.size()) < adaptiveKGpu.maxExternalRefs)
 					tryAddGpuRef(in.nextPeak.cleanTex, false, 1, 1, in.nextPeak.motion, in.nextPeak.isExactCopyOfCurrent, in.nextPeak.cameraHomography, in.nextPeak.focusConfidence);
-				if (in.prevPeak2.cleanTex != nullptr)
+				if (in.prevPeak2.cleanTex != nullptr && static_cast<int>(refSpecs.size()) < adaptiveKGpu.maxExternalRefs)
 				{
 					if (hasPrepackedMotion)
 					{
@@ -1575,6 +1716,8 @@ namespace Gpu
 			p.outGuardCellTex = out.guardCellTex;
 			p.outWarpDiagTex = out.warpDiagTex;
 			p.outLumaCellWeightsTex = out.lumaCellWeightsTex;
+			p.outLumaCellDiagCTex = out.lumaCellDiagCTex;
+			p.outLumaMotionGateTex = out.lumaMotionGateTex;
 			p.readbackCellDiag = out.readbackCellDiagnostics;
 
 			CoreDispatchOutcome oc{};
@@ -1598,11 +1741,18 @@ namespace Gpu
 			out.cellsLimited = oc.cellsLimited;
 			out.driftReducedSearchUsed = oc.driftReducedSearchUsed;
 			out.usedExternalBandMemo = oc.usedExternalBandMemo;
+			out.usedNorm16Bands = oc.usedNorm16Bands;
+			out.bandRingHits = oc.bandRingHits;
+			out.bandRingMisses = oc.bandRingMisses;
 			out.lumaActiveRefCount = lastLumaActiveRefCount_;
 			for (int i = 0; i < 3; ++i)
 				out.lumaRefRoles[i] = lastLumaRefRoles_[i];
 			if (out.lumaCellWeightsTex == nullptr && outLumaCellWeightsTex_ != nullptr)
 				out.lumaCellWeightsTex = outLumaCellWeightsTex_;
+			if (out.lumaCellDiagCTex == nullptr && outLumaCellDiagCTex_ != nullptr)
+				out.lumaCellDiagCTex = outLumaCellDiagCTex_;
+			if (out.lumaMotionGateTex == nullptr && outLumaMotionGateTex_ != nullptr)
+				out.lumaMotionGateTex = outLumaMotionGateTex_;
 			if (out.readbackCellDiagnostics)
 				out.tdMaps = std::move(oc.tdMaps);
 			out.succeeded = true;
@@ -1849,13 +1999,58 @@ namespace Gpu
 				anchorH_ = 0;
 				anchorAgeFrames_ = 0;
 			}
-			if (!effectiveCut)
+
+			// Pass 3A adaptive-K & budget-protection controller (1:1 CPU parity!).
+			double activeTileFracCpu = 1.0;
+			if (in.activeTileFractionOverride >= 0.0 && std::isfinite(in.activeTileFractionOverride))
 			{
-				if (in.prevPeak.cleanPlane != nullptr)
+				activeTileFracCpu = RampMath::Clamp01(in.activeTileFractionOverride);
+			}
+			else if (numCells > 0)
+			{
+				size_t actC = 0;
+				for (int cy = 0; cy < res.cellsH; ++cy)
+				{
+					const int py0 = cy * cellPx;
+					const int py1 = (std::min)(h, py0 + cellPx);
+					if (py1 <= active.y0 || py0 >= active.y1) continue;
+					for (int cx = 0; cx < res.cellsW; ++cx)
+					{
+						const int px0 = cx * cellPx;
+						const int px1 = (std::min)(w, px0 + cellPx);
+						if (px1 <= active.x0 || px0 >= active.x1) continue;
+						const size_t ci = static_cast<size_t>(cy) * res.cellsW + cx;
+						if (in.faceMask != nullptr && ci < in.faceMask->size() && (*in.faceMask)[ci] != 0u) continue;
+						++actC;
+					}
+				}
+				activeTileFracCpu = static_cast<double>(actC) / static_cast<double>(numCells);
+			}
+			const AdaptiveKDecision adaptiveKCpu = ResolveAdaptiveKCap(
+				cfg_, w, h, static_cast<int>(in.frameRole), in.isConfirmedPeak, activeTileFracCpu, coverageAdaptiveState_);
+			res.activeTileFraction = adaptiveKCpu.activeTileFraction;
+			res.effectiveKCap = adaptiveKCpu.maxExternalRefs;
+			res.auto4k60SingleRefActive = adaptiveKCpu.auto4k60Active;
+			res.roleAdaptiveKReduced = adaptiveKCpu.roleAdaptiveReduced;
+			res.coverageAdaptiveKCapped = adaptiveKCpu.coverageAdaptiveCapped;
+			if (standIns != nullptr)
+			{
+				if (adaptiveKCpu.auto4k60Active)
+					standIns->Engage(StandInKind::Auto4k60SingleRefCap, "4K50/60p auto K=1 cap active");
+				if (adaptiveKCpu.roleAdaptiveReduced)
+					standIns->Engage(StandInKind::RoleAdaptiveKReduced,
+						adaptiveKCpu.maxExternalRefs == 0 ? "clean peak K=0 passthrough" : "shallow-dip K=1 cap");
+				if (adaptiveKCpu.coverageAdaptiveCapped)
+					standIns->Engage(StandInKind::CoverageAdaptiveKCapped, "active-tile coverage hysteresis K=2->1 cap");
+			}
+
+			if (!effectiveCut && adaptiveKCpu.maxExternalRefs > 0)
+			{
+				if (in.prevPeak.cleanPlane != nullptr && static_cast<int>(refSpecs.size()) < adaptiveKCpu.maxExternalRefs)
 					tryAddRefSpec(in.prevPeak.cleanPlane, false, 0, 0, in.prevPeak.motion, in.prevPeak.isExactCopyOfCurrent, in.prevPeak.cameraHomography, nullptr, in.prevPeak.focusConfidence);
-				if (in.nextPeak.cleanPlane != nullptr)
+				if (in.nextPeak.cleanPlane != nullptr && static_cast<int>(refSpecs.size()) < adaptiveKCpu.maxExternalRefs)
 					tryAddRefSpec(in.nextPeak.cleanPlane, false, 1, 1, in.nextPeak.motion, in.nextPeak.isExactCopyOfCurrent, in.nextPeak.cameraHomography, nullptr, in.nextPeak.focusConfidence);
-				if (in.prevPeak2.cleanPlane != nullptr)
+				if (in.prevPeak2.cleanPlane != nullptr && static_cast<int>(refSpecs.size()) < adaptiveKCpu.maxExternalRefs)
 				{
 					const int p2Slot = pickUnusedSlot(1, 2, 0);
 					tryAddRefSpec(in.prevPeak2.cleanPlane, false, p2Slot, static_cast<int>(RefRole::PrevPeak2), in.prevPeak2.motion, in.prevPeak2.isExactCopyOfCurrent, in.prevPeak2.cameraHomography, nullptr, in.prevPeak2.focusConfidence);
@@ -2128,6 +2323,9 @@ namespace Gpu
 			res.singularCells = oc.singularCells;
 			res.singleRefA2Cells = oc.singleRefA2Cells;
 			res.borderBilinearPixels = oc.borderBilinearPixels;
+			res.usedNorm16Bands = oc.usedNorm16Bands;
+			res.bandRingHits = oc.bandRingHits;
+			res.bandRingMisses = oc.bandRingMisses;
 			res.tdMaps = std::move(oc.tdMaps);
 
 			// Download full-res planes (Mode::Shadow skips outYTex_ download since outputY == receivedY bit-exact!).
@@ -2584,6 +2782,8 @@ namespace Gpu
 			pl_tex outGuardCellTex = nullptr;
 			pl_tex outWarpDiagTex = nullptr;
 			pl_tex outLumaCellWeightsTex = nullptr;
+			pl_tex outLumaCellDiagCTex = nullptr;
+			pl_tex outLumaMotionGateTex = nullptr;
 			bool readbackCellDiag = false;
 		};
 
@@ -2602,6 +2802,9 @@ namespace Gpu
 			bool scratchShort = false;
 			bool usedExternalBandMemo = false;
 			bool driftReducedSearchUsed = false;
+			bool usedNorm16Bands = false;
+			uint64_t bandRingHits = 0;
+			uint64_t bandRingMisses = 0;
 			std::vector<TdMapsView::Block> tdMaps;
 		};
 
@@ -2688,6 +2891,7 @@ namespace Gpu
 			};
 
 			const pl_fmt fmtR16 = VpSkeleton::PlTexBackend::FindFormat(gpu, VpSkeleton::TexFormat::R16);
+			const pl_fmt fmtRG16 = VpSkeleton::PlTexBackend::FindFormat(gpu, VpSkeleton::TexFormat::RG16);
 			const pl_fmt fmtR32 = VpSkeleton::PlTexBackend::FindFormat(gpu, VpSkeleton::TexFormat::R32F);
 			const pl_fmt fmtRG32 = VpSkeleton::PlTexBackend::FindFormat(gpu, VpSkeleton::TexFormat::RG32F);
 			const pl_fmt fmtRGBA32 = VpSkeleton::PlTexBackend::FindFormat(gpu, VpSkeleton::TexFormat::RGBA32F);
@@ -2696,6 +2900,10 @@ namespace Gpu
 				resetCarryIfActive();
 				return failCore("TdV2GpuEngine required FP32/R16 texture formats unsupported on pl_gpu", StandInKind::GpuDispatchFailed);
 			}
+			const bool useNorm16Bands = compactBands && ShouldUseNorm16Bands(cfg_) && (fmtRG16 != nullptr);
+			const pl_fmt fmtBandRG = useNorm16Bands ? fmtRG16 : fmtRG32;
+			const VpSkeleton::TexFormat texFmtBandRG = useNorm16Bands ? VpSkeleton::TexFormat::RG16 : VpSkeleton::TexFormat::RG32F;
+			oc.usedNorm16Bands = useNorm16Bands;
 
 			// Acquire per-frame scratch via RAII ArenaScopeGuard (or private fallback ONLY when arena == nullptr).
 			Detail::ArenaScopeGuard scopeGuard(arena, kArenaScope);
@@ -2712,7 +2920,8 @@ namespace Gpu
 				const uint32_t uch = static_cast<uint32_t>(ch);
 
 				const VpSkeleton::TexShape shFullRGBA{ uw, uh, VpSkeleton::TexFormat::RGBA32F };
-				const VpSkeleton::TexShape shHalfRG32{ uwH, uhH, VpSkeleton::TexFormat::RG32F };
+				const VpSkeleton::TexShape shHalfBand{ uwH, uhH, texFmtBandRG };
+				const VpSkeleton::TexShape shFullBand{ uw, uh, texFmtBandRG };
 				const VpSkeleton::TexShape shFullRG{ uw, uh, VpSkeleton::TexFormat::RG32F };
 				const VpSkeleton::TexShape shFullR32{ uw, uh, VpSkeleton::TexFormat::R32F };
 				const VpSkeleton::TexShape shFullR16{ uw, uh, VpSkeleton::TexFormat::R16 };
@@ -2725,14 +2934,14 @@ namespace Gpu
 				{
 					if (compactBands)
 					{
-						// H7: ALL band storage and moment inputs strictly FP32 RG32F (plan L60 — never FP16!).
-						sc.curBandsMH = arena->Acquire(kArenaOwner, shFullRG);
+						// H7 + SC-06: FP32 RG32F by default; optional 16-bit normalized integer RG16 in RealTime for sourceBits <= 12 (NEVER FP16!).
+						sc.curBandsMH = arena->Acquire(kArenaOwner, shFullBand);
 						for (int i = 0; i < kMaxGpuRefs; ++i)
-							sc.refBandsMH[i] = arena->Acquire(kArenaOwner, shFullRG);
-						sc.curBandsLD3 = arena->Acquire(kArenaOwner, shHalfRG32);
+							sc.refBandsMH[i] = arena->Acquire(kArenaOwner, shFullBand);
+						sc.curBandsLD3 = arena->Acquire(kArenaOwner, shHalfBand);
 						for (int i = 0; i < kMaxGpuRefs; ++i)
-							sc.refBandsLD3[i] = arena->Acquire(kArenaOwner, shHalfRG32);
-						sc.bandHalfTmp = arena->Acquire(kArenaOwner, shHalfRG32);
+							sc.refBandsLD3[i] = arena->Acquire(kArenaOwner, shHalfBand);
+						sc.bandHalfTmp = arena->Acquire(kArenaOwner, shHalfBand);
 					}
 					else
 					{
@@ -2766,7 +2975,7 @@ namespace Gpu
 				if (standIns != nullptr)
 					standIns->Engage(StandInKind::GpuPrivateScratchFallback, "TdV2GpuEngine arena == nullptr; using owned priv* scratch textures");
 				if (!EnsurePrivateScratch(gpu, w, h, wHalf, hHalf, cw, ch, compactBands,
-				                          fmtR16, fmtR32, fmtRG32, fmtRGBA32, sc))
+				                          fmtR16, fmtR32, fmtBandRG, fmtRG32, fmtRGBA32, sc))
 				{
 					resetCarryIfActive();
 					return failCore("TdV2GpuEngine private scratch texture allocation failed", StandInKind::GpuDispatchFailed);
@@ -3278,16 +3487,43 @@ namespace Gpu
 					resetCarryIfActive();
 					return failCore("td_v2_p1_motion_gate dispatch failed", StandInKind::GpuDispatchFailed);
 				}
+				// Pass 3A: Export lifetime-safe persistent luma motion gate for Chroma reuse (avoids redundant c1_motion_gate!).
+				if ((cfg_.chromaReuseLumaWeights && cfg_.enableLeanChromaLumaReuse) || p.outLumaMotionGateTex != nullptr)
+				{
+					pl_tex dstMg = p.outLumaMotionGateTex;
+					if (!dstMg && Detail::EnsureTex(gpu, outLumaMotionGateTex_, 3 * cw, ch, fmtRGBA32, true, true, false, false))
+						dstMg = outLumaMotionGateTex_;
+					if (dstMg != nullptr && dstMg->params.w == 3 * cw && dstMg->params.h == ch)
+					{
+						pl_shader_desc dmg[2] = {
+							VpvGpu::Sampled("src_w", sc.motionGate),
+							VpvGpu::Storage("dst_w", dstMg)
+						};
+						runPass("td_v2_p1_copy_motion_gate", staticGeom, Shaders::kPass2CopyCellWeights, dmg, 2, nullptr, 0,
+						        Detail::GroupsFor(3 * cw, 8), Detail::GroupsFor(ch, 8), 8, 8);
+					}
+				}
 			}
 
-			// ---- PASS 1C Helper: Reference (LDS single-loop H+V) OR RealTime (half-res FP32 L/D3 + 1-pass LDS FP32 RG32F M/H) ----
+			// ---- PASS 1C Helper: Reference (LDS single-loop H+V) OR RealTime (half-res L/D3 + 1-pass LDS M/H, optional SC-06 RG16) ----
 			if (standIns != nullptr)
 				standIns->Engage(StandInKind::BandMemoW2);
 
+			const bool phaseAEarlyOut = cfg_.enablePhaseATileEarlyOut;
+			const bool checkerboardStats = cfg_.enableCheckerboardCellStats;
+			const bool bilinearWarp = (cfg_.preset == Preset::RealTime) && cfg_.enableBilinearHardwareWarp;
+			std::string norm16Defines;
+			if (useNorm16Bands)
+			{
+				norm16Defines += VpvGpu::DefineInt("TD_BAND_NORM16", 1);
+				norm16Defines += VpvGpu::Define("TD_NORM16_PEAK", PeakCodeForBits(cfg_.sourceBits));
+			}
+			const std::string phaseADefine = phaseAEarlyOut ? VpvGpu::DefineInt("TD_PHASE_A_EARLY_OUT", 1) : std::string();
+
 			const std::string refBandHdrH = compactBands ? std::string() : (staticGeom + Shaders::BuildBandTapsHeader() + Shaders::kCoreHelpers + Shaders::kPass1BandHHeader);
 			const std::string refBandHdrV = compactBands ? std::string() : (staticGeom + Shaders::BuildBandTapsHeader() + Shaders::kPass1BandVHeader);
-			const std::string rtCurFineHdr = compactBands ? (staticGeom + Shaders::BuildFineTapHeader() + Shaders::kCoreHelpers + Shaders::kPass1FullMHHeader) : std::string();
-			const std::string rtHalf2DHdr = compactBands ? (staticGeom + Shaders::BuildHalfBandTapsHeader() + Shaders::kPass1Half2DHeader) : std::string();
+			const std::string rtCurFineHdr = compactBands ? (staticGeom + norm16Defines + phaseADefine + Shaders::BuildFineTapHeader() + Shaders::kCoreHelpers + Shaders::kPass1FullMHHeader) : std::string();
+			const std::string rtHalf2DHdr = compactBands ? (staticGeom + norm16Defines + phaseADefine + Shaders::BuildHalfBandTapsHeader() + Shaders::kCoreHelpers + Shaders::kPass1Half2DHeader) : std::string();
 
 			const size_t shmemBandH = static_cast<size_t>(16 * (16 + 2 * rLow)) * sizeof(float);
 			const size_t shmemBandV = static_cast<size_t>((16 + 2 * rLow) * 16) * 4u * sizeof(float);
@@ -3356,6 +3592,85 @@ namespace Gpu
 				return runHalf2D(sc.bandHalfTmp, dstRtLD3);
 			};
 
+			// Pass 3A: 3-frame decoded-frame band ring cache helper (zero-copy pl_tex only; flushed on cut/resync/size/preset/norm16).
+			const bool bandRingActive = cfg_.enableBandRingCache &&
+				(p.curCleanTex != inRecYTex_ && p.curCleanTex != inCleanYTex_ && p.curCleanTex != inRefCleanTex_);
+			if (bandRingActive)
+			{
+				for (BandRingSlot& s : bandRing_)
+				{
+					if (s.valid && (s.w != w || s.h != h || s.compact != compactBands || s.norm16 != useNorm16Bands ||
+					                s.active.x0 != ar.x0 || s.active.y0 != ar.y0 || s.active.x1 != ar.x1 || s.active.y1 != ar.y1))
+					{
+						s.valid = false;
+						s.srcTex = nullptr;
+					}
+				}
+			}
+			auto findBandRingSlot = [&](pl_tex srcTex) -> int
+			{
+				if (!bandRingActive || srcTex == nullptr)
+					return -1;
+				for (int i = 0; i < 3; ++i)
+				{
+					if (bandRing_[i].valid && bandRing_[i].srcTex == srcTex)
+					{
+						bandRing_[i].lruTick = ++bandRingTick_;
+						return i;
+					}
+				}
+				return -1;
+			};
+			auto allocBandRingSlot = [&](pl_tex srcTex) -> int
+			{
+				if (!bandRingActive || srcTex == nullptr)
+					return -1;
+				int pick = 0;
+				uint64_t bestTick = UINT64_MAX;
+				for (int i = 0; i < 3; ++i)
+				{
+					if (!bandRing_[i].valid) { pick = i; break; }
+					if (bandRing_[i].lruTick < bestTick) { bestTick = bandRing_[i].lruTick; pick = i; }
+				}
+				BandRingSlot& slot = bandRing_[pick];
+				bool okAlloc = false;
+				if (compactBands)
+				{
+					okAlloc = Detail::EnsureTex(gpu, slot.mhTex, w, h, fmtBandRG, true, true, false, false) &&
+					          Detail::EnsureTex(gpu, slot.ld3Tex, wHalf, hHalf, fmtBandRG, true, true, false, false);
+				}
+				else
+				{
+					okAlloc = Detail::EnsureTex(gpu, slot.fullTex, w, h, fmtRGBA32, true, true, false, false);
+				}
+				if (!okAlloc)
+				{
+					slot.valid = false;
+					slot.srcTex = nullptr;
+					return -1;
+				}
+				slot.valid = false; // Marked valid only after runBandDecomp succeeds!
+				slot.srcTex = srcTex;
+				slot.seq = p.seq;
+				slot.w = w;
+				slot.h = h;
+				slot.active = ar;
+				slot.compact = compactBands;
+				slot.norm16 = useNorm16Bands;
+				slot.lruTick = ++bandRingTick_;
+				return pick;
+			};
+			int boundRingSlotForCur = -1;
+			int boundRingSlotForRef[kMaxGpuRefs] = { -1, -1, -1 };
+			auto ringSlotAlreadyBound = [&](int slotIdx) -> bool
+			{
+				if (slotIdx < 0) return true;
+				if (boundRingSlotForCur == slotIdx) return true;
+				for (int j = 0; j < kMaxGpuRefs; ++j)
+					if (boundRingSlotForRef[j] == slotIdx) return true;
+				return false;
+			};
+
 			// Decompose current frame grain-free clean into curBands.
 			// SOTA #10 (kBandMemo): when caller supplies a valid precomputed low band L = G(kSigmaBase),
 			// skip the current-frame coarse low-band H+V blur passes in ONE single fused shader pass!
@@ -3385,7 +3700,7 @@ namespace Gpu
 					             hDiffDim * hDiffDim + hDiffDim * 10u + 100u) * sizeof(float);
 				}
 
-				std::string memoHdr = staticGeom;
+				std::string memoHdr = staticGeom + norm16Defines;
 				memoHdr += VpvGpu::DefineInt("TD_MEMO_COMPACT", compactBands ? 1 : 0);
 				memoHdr += VpvGpu::DefineInt("TD_MEMO_IS_HALF", memoIsHalf ? 1 : 0);
 				memoHdr += VpvGpu::DefineInt("TD_MEMO_FULL_D3", memoFullD3 ? 1 : 0);
@@ -3434,15 +3749,47 @@ namespace Gpu
 				}
 				oc.usedExternalBandMemo = true;
 			}
-			else if (!runBandDecomp(p.curCleanTex, sc.curBands, sc.curBandsMH, sc.curBandsLD3))
+			else
 			{
-				resetCarryIfActive();
-				return failCore("td_v2_p1_band current clean dispatch failed", StandInKind::GpuDispatchFailed);
+				const int curRingHit = findBandRingSlot(p.curCleanTex);
+				if (curRingHit >= 0)
+				{
+					boundRingSlotForCur = curRingHit;
+					if (compactBands) { sc.curBandsMH = bandRing_[curRingHit].mhTex; sc.curBandsLD3 = bandRing_[curRingHit].ld3Tex; }
+					else              { sc.curBands = bandRing_[curRingHit].fullTex; }
+					++oc.bandRingHits;
+				}
+				else
+				{
+					const int curRingNew = allocBandRingSlot(p.curCleanTex);
+					if (curRingNew >= 0)
+					{
+						++oc.bandRingMisses;
+						pl_tex dstFull = compactBands ? sc.curBands : bandRing_[curRingNew].fullTex;
+						pl_tex dstMH = compactBands ? bandRing_[curRingNew].mhTex : sc.curBandsMH;
+						pl_tex dstLD3 = compactBands ? bandRing_[curRingNew].ld3Tex : sc.curBandsLD3;
+						if (!runBandDecomp(p.curCleanTex, dstFull, dstMH, dstLD3))
+						{
+							resetCarryIfActive();
+							return failCore("td_v2_p1_band current clean dispatch failed", StandInKind::GpuDispatchFailed);
+						}
+						bandRing_[curRingNew].valid = true;
+						boundRingSlotForCur = curRingNew;
+						if (compactBands) { sc.curBandsMH = dstMH; sc.curBandsLD3 = dstLD3; }
+						else              { sc.curBands = dstFull; }
+					}
+					else if (!runBandDecomp(p.curCleanTex, sc.curBands, sc.curBandsMH, sc.curBandsLD3))
+					{
+						resetCarryIfActive();
+						return failCore("td_v2_p1_band current clean dispatch failed", StandInKind::GpuDispatchFailed);
+					}
+				}
 			}
 
 			// ---- PASS 1B + 1C: Reverse-Order Warp (k = K-1 .. 0) + Band Decomp ----
 			// Hardware-profiled RTX 3050 Ti optimal: separate p1_warp (zero halo duplication) + 2-pass p1_cur_fine_down/p1_half_2d!
-			const std::string warpHdr = staticGeom +
+			const std::string warpHdr = staticGeom + phaseADefine +
+				(bilinearWarp ? VpvGpu::DefineInt("TD_BILINEAR_WARP", 1) : std::string()) +
 				VpvGpu::DefineInt("TD_CLS_CAMERA", static_cast<int>(RegionMotionClass::Camera)) +
 				Shaders::kCoreHelpers + Shaders::kPass1WarpHeader;
 			const size_t shmemWarp = (24u * 24u * 2u + 30u) * sizeof(float);
@@ -3515,7 +3862,88 @@ namespace Gpu
 				}
 				curFlagsSlot = dstFlagsSlot;
 
-				if (!runBandDecomp(sc.warpedVal, sc.refBands[k], sc.refBandsMH[k], sc.refBandsLD3[k]))
+				// Pass 3A 3-frame band ring cache for zero-motion / exact-copy GPU refs (exact identity: warpedVal == refSrcTex!).
+				bool refZeroMotionExact = false;
+				if (bandRingActive && refSrcTex != nullptr && refSrcTex != inRefCleanTex_ && !rSpec.cameraHomography.valid)
+				{
+					if (rSpec.isExactCopy)
+					{
+						refZeroMotionExact = true;
+					}
+					else if (!p.motionVecTex && rSpec.motion.IsWellFormed(cw, ch))
+					{
+						refZeroMotionExact = true;
+						for (size_t ci = 0; ci < numCells; ++ci)
+						{
+							if (rSpec.motion.valid[ci] == 0u ||
+							    std::fabs(rSpec.motion.vx[ci]) > 1e-6 ||
+							    std::fabs(rSpec.motion.vy[ci]) > 1e-6)
+							{
+								refZeroMotionExact = false;
+								break;
+							}
+						}
+					}
+				}
+				bool refSplitDone = false;
+				if (refZeroMotionExact)
+				{
+					const int rHit = findBandRingSlot(refSrcTex);
+					if (rHit >= 0 && !ringSlotAlreadyBound(rHit))
+					{
+						boundRingSlotForRef[k] = rHit;
+						if (compactBands) { sc.refBandsMH[k] = bandRing_[rHit].mhTex; sc.refBandsLD3[k] = bandRing_[rHit].ld3Tex; }
+						else              { sc.refBands[k] = bandRing_[rHit].fullTex; }
+						++oc.bandRingHits;
+						refSplitDone = true;
+					}
+					else if (rHit < 0)
+					{
+						// Evict only an unbound LRU slot so we never overwrite cur or an already-bound ref!
+						int pick = -1;
+						uint64_t bestTick = UINT64_MAX;
+						for (int si = 0; si < 3; ++si)
+						{
+							if (ringSlotAlreadyBound(si)) continue;
+							if (!bandRing_[si].valid) { pick = si; break; }
+							if (bandRing_[si].lruTick < bestTick) { bestTick = bandRing_[si].lruTick; pick = si; }
+						}
+						if (pick >= 0)
+						{
+							BandRingSlot& slot = bandRing_[pick];
+							const bool okA = compactBands
+								? (Detail::EnsureTex(gpu, slot.mhTex, w, h, fmtBandRG, true, true, false, false) &&
+								   Detail::EnsureTex(gpu, slot.ld3Tex, wHalf, hHalf, fmtBandRG, true, true, false, false))
+								: Detail::EnsureTex(gpu, slot.fullTex, w, h, fmtRGBA32, true, true, false, false);
+							if (okA)
+							{
+								++oc.bandRingMisses;
+								pl_tex dstFull = compactBands ? sc.refBands[k] : slot.fullTex;
+								pl_tex dstMH = compactBands ? slot.mhTex : sc.refBandsMH[k];
+								pl_tex dstLD3 = compactBands ? slot.ld3Tex : sc.refBandsLD3[k];
+								if (!runBandDecomp(sc.warpedVal, dstFull, dstMH, dstLD3))
+								{
+									resetCarryIfActive();
+									return failCore("td_v2_p1_band ref dispatch failed", StandInKind::GpuDispatchFailed);
+								}
+								slot.valid = true;
+								slot.srcTex = refSrcTex;
+								slot.seq = p.seq;
+								slot.w = w;
+								slot.h = h;
+								slot.active = ar;
+								slot.compact = compactBands;
+								slot.norm16 = useNorm16Bands;
+								slot.lruTick = ++bandRingTick_;
+								boundRingSlotForRef[k] = pick;
+								if (compactBands) { sc.refBandsMH[k] = dstMH; sc.refBandsLD3[k] = dstLD3; }
+								else              { sc.refBands[k] = dstFull; }
+								refSplitDone = true;
+							}
+						}
+					}
+				}
+				if (!refSplitDone && !runBandDecomp(sc.warpedVal, sc.refBands[k], sc.refBandsMH[k], sc.refBandsLD3[k]))
 				{
 					resetCarryIfActive();
 					return failCore("td_v2_p1_band ref dispatch failed", StandInKind::GpuDispatchFailed);
@@ -3557,7 +3985,7 @@ namespace Gpu
 					const float uAncIdx = static_cast<float>(p.anchoredCarryRefIdx);
 					const float uMidNoiseF = static_cast<float>(2.0 * gains.mid * baseQuantVar);
 					const float uBaseQuantF = static_cast<float>(baseQuantVar);
-					std::string ancHdr = staticGeom;
+					std::string ancHdr = staticGeom + norm16Defines;
 					ancHdr += VpvGpu::DefineInt("TD_COMPACT_BANDS", compactBands ? 1 : 0);
 					ancHdr += VpvGpu::Define("TD_GAIN_LOW", gains.low);
 					ancHdr += VpvGpu::Define("TD_STEP_SCALE_MIN", kCellStepScaleMin);
@@ -3715,7 +4143,9 @@ namespace Gpu
 			const bool sameCleanRec = (p.curCleanTex == p.recYTex);
 			const float uSameCleanRec = sameCleanRec ? 1.0f : 0.0f;
 			{
-				std::string p2aHdr = staticGeom;
+				std::string p2aHdr = staticGeom + norm16Defines + phaseADefine;
+				if (checkerboardStats)
+					p2aHdr += VpvGpu::DefineInt("TD_CHECKERBOARD_STATS", 1);
 				p2aHdr += VpvGpu::DefineInt("TD_COMPACT_BANDS", compactBands ? 1 : 0);
 				p2aHdr += VpvGpu::DefineInt("TD_NEED_LUMA_STATS", (cfg_.enableEdgeAwareWeightUpsample || cfg_.enableRegionTailoring || cfg_.enableRegionDeband) ? 1 : 0);
 				p2aHdr += VpvGpu::DefineInt("TD_NEED_REGION_AUX", anyRegionFeature ? 1 : 0);
@@ -4101,6 +4531,21 @@ namespace Gpu
 						        Detail::GroupsFor(3 * cw, 8), Detail::GroupsFor(ch, 8), 8, 8);
 					}
 				}
+				if ((cfg_.chromaReuseLumaWeights && cfg_.enableLeanChromaLumaReuse) || p.outLumaCellDiagCTex != nullptr)
+				{
+					pl_tex dstLd = p.outLumaCellDiagCTex;
+					if (!dstLd && Detail::EnsureTex(gpu, outLumaCellDiagCTex_, 3 * cw, ch, fmtRGBA32, true, true, false, false))
+						dstLd = outLumaCellDiagCTex_;
+					if (dstLd != nullptr && dstLd->params.w == 3 * cw && dstLd->params.h == ch)
+					{
+						pl_shader_desc dld[2] = {
+							VpvGpu::Sampled("src_w", sc.cellDiagC),
+							VpvGpu::Storage("dst_w", dstLd)
+						};
+						runPass("td_v2_p2_copy_diagc", staticGeom, Shaders::kPass2CopyCellWeights, dld, 2, nullptr, 0,
+						        Detail::GroupsFor(3 * cw, 8), Detail::GroupsFor(ch, 8), 8, 8);
+					}
+				}
 
 				// Save unmerged current frame cell statistics for optional 2-frame same-role pooling (NEVER chains recursively!).
 				if (roleSlot >= 0)
@@ -4133,7 +4578,7 @@ namespace Gpu
 			{
 				const bool needNbrClamp = cfg_.enableNeighborhoodSoftClamp;
 				const bool needDerivedPxEdge = cfg_.enableRegionTailoring && !hasEdgeMapPlane;
-				std::string bHdr = staticGeom;
+				std::string bHdr = staticGeom + norm16Defines + phaseADefine;
 				bHdr += VpvGpu::DefineInt("TD_COMPACT_BANDS", compactBands ? 1 : 0);
 				bHdr += VpvGpu::DefineInt("TD_NEED_NBR_CLAMP", needNbrClamp ? 1 : 0);
 				bHdr += VpvGpu::DefineInt("TD_NEED_DERIVED_PX_EDGE", needDerivedPxEdge ? 1 : 0);
@@ -4280,8 +4725,13 @@ namespace Gpu
 				const float uSmoothGuard = runSmoothGuard ? 1.0f : 0.0f;
 				pl_tex p4OutY = runSmoothGuard ? sc.deltaScratch : dstOutY;
 
-				std::string p4Hdr = staticGeom;
+				const bool p4WriteOutClean = !phaseAEarlyOut || (p.outCleanTex != nullptr) || (p.isConfirmedPeak && cfg_.enableAnchoredCarry);
+				const bool p4WriteCarryClean = !phaseAEarlyOut || cfg_.enableCarryForward || cfg_.enableAnchoredCarry;
+
+				std::string p4Hdr = staticGeom + phaseADefine;
 				p4Hdr += VpvGpu::DefineInt("TD_SAME_CLEAN_REC", sameCleanRec ? 1 : 0);
+				p4Hdr += VpvGpu::DefineInt("TD_P4_WRITE_OUT_CLEAN", p4WriteOutClean ? 1 : 0);
+				p4Hdr += VpvGpu::DefineInt("TD_P4_WRITE_CARRY_CLEAN", p4WriteCarryClean ? 1 : 0);
 				p4Hdr += Shaders::BuildFineTapHeader();
 				p4Hdr += VpvGpu::Define("TD_GAIN_FINE", gains.fine);
 				p4Hdr += VpvGpu::Define("TD_MIN_VAR_RETENTION", TdGuardPort::kMinVarianceRetention);
@@ -4596,7 +5046,7 @@ namespace Gpu
 		}
 
 		bool EnsurePrivateScratch(pl_gpu gpu, int w, int h, int wHalf, int hHalf, int cw, int ch, bool compactBands,
-		                          pl_fmt fmtR16, pl_fmt fmtR32, pl_fmt fmtRG32, pl_fmt fmtRGBA32, ScratchSet& out)
+		                          pl_fmt fmtR16, pl_fmt fmtR32, pl_fmt fmtBandRG, pl_fmt fmtRG32, pl_fmt fmtRGBA32, ScratchSet& out)
 		{
 			bool ok = Detail::EnsureTex(gpu, privWarpedVal_, w, h, fmtR32, true, true, false, false) &&
 			          Detail::EnsureTex(gpu, privRefFlags_[0], w, h, fmtR16, true, true, false, false) &&
@@ -4609,14 +5059,14 @@ namespace Gpu
 			          Detail::EnsureTex(gpu, privCellFocus_, cw, ch, fmtRGBA32, true, true, false, false);
 			if (ok && compactBands)
 			{
-				// H7: ALL band storage strictly FP32 RG32F per plan L60 (never FP16).
-				ok = Detail::EnsureTex(gpu, privCurBandsMH_, w, h, fmtRG32, true, true, false, false) &&
-				     Detail::EnsureTex(gpu, privCurBandsLD3_, wHalf, hHalf, fmtRG32, true, true, false, false) &&
-				     Detail::EnsureTex(gpu, privBandHalfTmp_, wHalf, hHalf, fmtRG32, true, true, false, false);
+				// H7 + SC-06: FP32 RG32F by default, or 16-bit normalized integer RG16 in RealTime when sourceBits <= 12 (never FP16).
+				ok = Detail::EnsureTex(gpu, privCurBandsMH_, w, h, fmtBandRG, true, true, false, false) &&
+				     Detail::EnsureTex(gpu, privCurBandsLD3_, wHalf, hHalf, fmtBandRG, true, true, false, false) &&
+				     Detail::EnsureTex(gpu, privBandHalfTmp_, wHalf, hHalf, fmtBandRG, true, true, false, false);
 				for (int i = 0; i < kMaxGpuRefs && ok; ++i)
 				{
-					ok = Detail::EnsureTex(gpu, privRefBandsMH_[i], w, h, fmtRG32, true, true, false, false) &&
-					     Detail::EnsureTex(gpu, privRefBandsLD3_[i], wHalf, hHalf, fmtRG32, true, true, false, false);
+					ok = Detail::EnsureTex(gpu, privRefBandsMH_[i], w, h, fmtBandRG, true, true, false, false) &&
+					     Detail::EnsureTex(gpu, privRefBandsLD3_[i], wHalf, hHalf, fmtBandRG, true, true, false, false);
 				}
 			}
 			else if (ok)
@@ -4930,6 +5380,24 @@ float td_fine_hp_warp_gain(vec2 mv)
 		uint64_t lastSeq_ = 0;
 		double elapsedSec_ = 0.0;
 		A2ePriorHistory a2eHistory_;
+		CoverageAdaptiveKState coverageAdaptiveState_;
+		struct BandRingSlot
+		{
+			bool valid = false;
+			uint64_t seq = 0;
+			pl_tex srcTex = nullptr;
+			int w = 0;
+			int h = 0;
+			ActiveRect active;
+			bool compact = false;
+			bool norm16 = false;
+			uint64_t lruTick = 0;
+			pl_tex fullTex = nullptr;
+			pl_tex mhTex = nullptr;
+			pl_tex ld3Tex = nullptr;
+		};
+		BandRingSlot bandRing_[3] = {};
+		uint64_t bandRingTick_ = 0;
 		pl_tex carryCleanTex_ = nullptr;
 		pl_tex anchorCleanTex_ = nullptr;
 		pl_tex anchorBarredTex_[2] = {};
@@ -4977,6 +5445,8 @@ float td_fine_hp_warp_gain(vec2 mv)
 		pl_tex outGuardCellTex_ = nullptr;
 		pl_tex outWarpDiagTex_ = nullptr;
 		pl_tex outLumaCellWeightsTex_ = nullptr;
+		pl_tex outLumaCellDiagCTex_ = nullptr;
+		pl_tex outLumaMotionGateTex_ = nullptr;
 		int lastLumaRefRoles_[3] = { 0, 1, 2 };
 		int lastLumaActiveRefCount_ = 0;
 

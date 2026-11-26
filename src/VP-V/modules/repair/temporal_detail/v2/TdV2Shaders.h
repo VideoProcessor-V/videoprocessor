@@ -88,11 +88,50 @@ int td_unpack_ref_flags(uint packed, int refIdx)
 {
     return int((packed >> uint(3 * refIdx)) & 7u);
 }
+
+// Pass 3A (SC-06): 16-bit normalized integer (RG16 UNORM) BTB/WTW-safe band pack/unpack for Preset::RealTime & sourceBits <= 12.
+// - L / gFine maps [-0.25*peak, +1.25*peak] linearly to [0, 1] (step <= 0.0234 10-bit code; 0.0937 12-bit code).
+// - Signed H / D3 maps [-0.75*peak, +0.75*peak] with exact integer zero-point 32767/65535 so 0.0 round-trips bit-exact!
+// - When TD_BAND_NORM16 == 0 (default / Reference / >12-bit), all helpers compile to pure FP32 identity.
+#if defined(TD_BAND_NORM16) && TD_BAND_NORM16
+float td_pack_band_l(float v)
+{
+    float span = 1.5 * TD_NORM16_PEAK;
+    return clamp((v + 0.25 * TD_NORM16_PEAK) / span, 0.0, 1.0);
+}
+float td_unpack_band_l(float u)
+{
+    return u * (1.5 * TD_NORM16_PEAK) - 0.25 * TD_NORM16_PEAK;
+}
+float td_pack_band_s(float v)
+{
+    float halfSpan = 0.75 * TD_NORM16_PEAK;
+    return clamp((v / halfSpan) * (32767.0 / 65535.0) + (32767.0 / 65535.0), 0.0, 1.0);
+}
+float td_unpack_band_s(float u)
+{
+    float halfSpan = 0.75 * TD_NORM16_PEAK;
+    return (u * 65535.0 - 32767.0) * (halfSpan / 32767.0);
+}
+vec2 td_pack_band_mh(vec2 mh) { return vec2(td_pack_band_l(mh.x), td_pack_band_s(mh.y)); }
+vec2 td_unpack_band_mh(vec2 u) { return vec2(td_unpack_band_l(u.x), td_unpack_band_s(u.y)); }
+vec2 td_pack_band_ld3(vec2 ld3) { return vec2(td_pack_band_l(ld3.x), td_pack_band_s(ld3.y)); }
+vec2 td_unpack_band_ld3(vec2 u) { return vec2(td_unpack_band_l(u.x), td_unpack_band_s(u.y)); }
+#else
+float td_pack_band_l(float v) { return v; }
+float td_unpack_band_l(float u) { return u; }
+float td_pack_band_s(float v) { return v; }
+float td_unpack_band_s(float u) { return u; }
+vec2 td_pack_band_mh(vec2 mh) { return mh; }
+vec2 td_unpack_band_mh(vec2 u) { return u; }
+vec2 td_pack_band_ld3(vec2 ld3) { return ld3; }
+vec2 td_unpack_band_ld3(vec2 u) { return u; }
+#endif
 )GLSL";
 
 	// Shared half-res (L, D3) bilinear sampler clamped strictly inside halfActive (zero bar bleed, no PL_FMT_CAP_LINEAR needed).
 	constexpr const char* kHalfBandSamplerHelper = R"GLSL(
-vec2 td_sample_half_ld3(sampler2D halfTex, ivec2 p, ivec4 halfActive)
+vec2 td_sample_half_ld3_raw(sampler2D halfTex, ivec2 p, ivec4 halfActive)
 {
     vec2 hc = (vec2(p) - vec2(0.5)) / 2.0;
     vec2 lo = vec2(halfActive.xy);
@@ -105,6 +144,24 @@ vec2 td_sample_half_ld3(sampler2D halfTex, ivec2 p, ivec4 halfActive)
     vec2 v10 = texelFetch(halfTex, ivec2(i1.x, i0.y), 0).xy;
     vec2 v01 = texelFetch(halfTex, ivec2(i0.x, i1.y), 0).xy;
     vec2 v11 = texelFetch(halfTex, ivec2(i1.x, i1.y), 0).xy;
+    vec2 top = v00 + (v10 - v00) * f.x;
+    vec2 bot = v01 + (v11 - v01) * f.x;
+    return top * (1.0 - f.y) + bot * f.y;
+}
+
+vec2 td_sample_half_ld3(sampler2D halfTex, ivec2 p, ivec4 halfActive)
+{
+    vec2 hc = (vec2(p) - vec2(0.5)) / 2.0;
+    vec2 lo = vec2(halfActive.xy);
+    vec2 hi = vec2(max(halfActive.xy, halfActive.zw - ivec2(1)));
+    vec2 cl = clamp(hc, lo, hi);
+    ivec2 i0 = ivec2(floor(cl));
+    ivec2 i1 = min(ivec2(hi), i0 + ivec2(1));
+    vec2 f = cl - vec2(i0);
+    vec2 v00 = td_unpack_band_ld3(texelFetch(halfTex, ivec2(i0.x, i0.y), 0).xy);
+    vec2 v10 = td_unpack_band_ld3(texelFetch(halfTex, ivec2(i1.x, i0.y), 0).xy);
+    vec2 v01 = td_unpack_band_ld3(texelFetch(halfTex, ivec2(i0.x, i1.y), 0).xy);
+    vec2 v11 = td_unpack_band_ld3(texelFetch(halfTex, ivec2(i1.x, i1.y), 0).xy);
     vec2 top = v00 + (v10 - v00) * f.x;
     vec2 bot = v01 + (v11 - v01) * f.x;
     return top * (1.0 - f.y) + bot * f.y;
@@ -441,6 +498,33 @@ void td_sample_bicubic_active_direct(vec2 sLocal, ivec4 activeRect, ivec2 p, out
 {
     ivec2 sz = activeRect.zw - activeRect.xy;
     outFlags = 0;
+#if defined(TD_BILINEAR_WARP) && TD_BILINEAR_WARP
+    if (sLocal.x >= 0.0 && sLocal.y >= 0.0 &&
+        sLocal.x <= float(sz.x - 1) && sLocal.y <= float(sz.y - 1))
+    {
+        bool anyBad = false;
+        float bVal = td_sample_bilinear_active(sLocal, activeRect, anyBad);
+        bool isBorder = !(sLocal.x >= 1.0 && sLocal.y >= 1.0 && sLocal.x < float(sz.x) - 2.0 && sLocal.y < float(sz.y) - 2.0);
+        int bBit = isBorder ? 2 : 0;
+        if (td_is_bad(bVal))
+        {
+            outVal = td_fetch_cur_fallback(p);
+            outFlags = bBit | 4;
+        }
+        else
+        {
+            outVal = bVal;
+            outFlags = bBit | (anyBad ? 4 : 1);
+        }
+    }
+    else
+    {
+        bool anyBad = false;
+        float bVal = td_sample_bilinear_active(sLocal, activeRect, anyBad);
+        outVal = td_is_bad(bVal) ? td_fetch_cur_fallback(p) : bVal;
+        outFlags = (anyBad || td_is_bad(bVal)) ? 4 : 0;
+    }
+#else
     if (sLocal.x >= 1.0 && sLocal.y >= 1.0 &&
         sLocal.x < float(sz.x) - 2.0 && sLocal.y < float(sz.y) - 2.0)
     {
@@ -495,6 +579,7 @@ void td_sample_bicubic_active_direct(vec2 sLocal, ivec4 activeRect, ivec2 p, out
         outVal = td_is_bad(bVal) ? td_fetch_cur_fallback(p) : bVal;
         outFlags = (anyBad || td_is_bad(bVal)) ? 4 : 0;
     }
+#endif
 }
 )GLSL";
 
@@ -514,6 +599,22 @@ bool validRect = (ax1 > ax0) && (ay1 > ay0);
 int refIdx = int(round(u_ref_idx));
 int motionSlot = clamp(int(round(u_motion_slot)), 0, 2);
 bool flagsClear = (u_flags_clear > 0.5);
+
+// Pass 3A Phase A zero-loss tile early-out (strictly workgroup-uniform BEFORE any LDS load or barrier!).
+#if defined(TD_PHASE_A_EARLY_OUT) && TD_PHASE_A_EARLY_OUT
+if (!validRect || (baseX + 15 < ax0) || (baseX >= ax1) || (baseY + 15 < ay0) || (baseY >= ay1))
+{
+    if (p.x < TD_W && p.y < TD_H)
+    {
+        uint prevP = flagsClear ? 0u : uint(round(texelFetch(ref_flags_in, p, 0).x * 65535.0));
+        float fb = td_fetch_cur_fallback(p);
+        uint np = td_pack_ref_flags(prevP, refIdx, 0);
+        imageStore(warped_val, p, vec4(fb, 0.0, 0.0, 0.0));
+        imageStore(ref_flags_out, p, vec4(float(np) / 65535.0, 0.0, 0.0, 0.0));
+    }
+    return;
+}
+#endif
 
 // Workgroup-uniform 24x24 LDS tile fill + 3x3 cell MV cache for canonical TD_CELL_PX == 16 (supports BOTH nearest & smooth warp!).
 // Disabled on Camera cells when P7 per-pixel homography is active so zooms/rotations/perspective have zero 16-px tile seams.
@@ -763,6 +864,7 @@ bool ldsBicubicOk = false;
 ivec2 ldsI0 = ivec2(0);
 int ldsRx = 0;
 int ldsRy = 0;
+#if !(defined(TD_BILINEAR_WARP) && TD_BILINEAR_WARP)
 if (useLds &&
     sLocal.x >= 1.0 && sLocal.y >= 1.0 &&
     sLocal.x < float(sz.x) - 2.0 && sLocal.y < float(sz.y) - 2.0)
@@ -772,6 +874,7 @@ if (useLds &&
     ldsRy = (ldsI0.y - 1) - tileBaseY;
     ldsBicubicOk = (ldsRx >= 0 && ldsRx + 3 < 24 && ldsRy >= 0 && ldsRy + 3 < 24);
 }
+#endif
 if (ldsBicubicOk)
 {
     vec4 wx = td_cubic_weights(sLocal.x - float(ldsI0.x));
@@ -821,15 +924,17 @@ else if (useLds &&
         float top = v00 + (v10 - v00) * f.x;
         float bot = v01 + (v11 - v01) * f.x;
         float bVal = top * (1.0 - f.y) + bot * f.y;
+        bool isBorder = !(sLocal.x >= 1.0 && sLocal.y >= 1.0 && sLocal.x < float(sz.x) - 2.0 && sLocal.y < float(sz.y) - 2.0);
+        int bBit = isBorder ? 2 : 0;
         if (td_is_bad(bVal))
         {
             outVal = td_fetch_cur_fallback(p);
-            outFlags = 2 | 4;
+            outFlags = bBit | 4;
         }
         else
         {
             outVal = bVal;
-            outFlags = 2 | ((badOr != 0u) ? 4 : 1);
+            outFlags = bBit | ((badOr != 0u) ? 4 : 1);
         }
     }
     else
@@ -1206,6 +1311,21 @@ int xMax = max(ax0, ax1 - 1);
 int yMin = ay0;
 int yMax = max(ay0, ay1 - 1);
 
+#if defined(TD_PHASE_A_EARLY_OUT) && TD_PHASE_A_EARLY_OUT
+if (!validRect || (baseX + 15 < ax0) || (baseX >= ax1) || (baseY + 15 < ay0) || (baseY >= ay1))
+{
+    if (lx < 8 && ly < 8)
+    {
+        ivec2 hp = ivec2(wgX * 8 + lx, wgY * 8 + ly);
+        if (hp.x < TD_HALF_W && hp.y < TD_HALF_H)
+            imageStore(half_area_out, hp, vec4(td_pack_band_l(0.0), 0.0, 0.0, 0.0));
+    }
+    if (p.x < TD_W && p.y < TD_H)
+        imageStore(bands_mh_out, p, vec4(td_pack_band_mh(vec2(0.0)), 0.0, 0.0));
+    return;
+}
+#endif
+
 int tileDim = 16 + 2 * TD_RAD_FINE;
 int tileN = tileDim * tileDim;
 for (int idx = tid; idx < tileN; idx += 256)
@@ -1229,7 +1349,7 @@ if (lx < 8 && ly < 8)
     {
         if (!validRect || !validHalf || hp.x < hax0 || hp.x >= hax1 || hp.y < hay0 || hp.y >= hay1)
         {
-            imageStore(half_area_out, hp, vec4(0.0));
+            imageStore(half_area_out, hp, vec4(td_pack_band_l(0.0), 0.0, 0.0, 0.0));
         }
         else
         {
@@ -1239,7 +1359,7 @@ if (lx < 8 && ly < 8)
             float s10 = td_sh_f0[by][bx + 1];
             float s01 = td_sh_f0[by + 1][bx];
             float s11 = td_sh_f0[by + 1][bx + 1];
-            imageStore(half_area_out, hp, vec4((s00 + s10 + s01 + s11) / 4.0, 0.0, 0.0, 0.0));
+            imageStore(half_area_out, hp, vec4(td_pack_band_l((s00 + s10 + s01 + s11) / 4.0), 0.0, 0.0, 0.0));
         }
     }
 }
@@ -1263,7 +1383,7 @@ if (p.x >= TD_W || p.y >= TD_H)
 
 if (!validRect || p.x < ax0 || p.x >= ax1 || p.y < ay0 || p.y >= ay1)
 {
-    imageStore(bands_mh_out, p, vec4(0.0));
+    imageStore(bands_mh_out, p, vec4(td_pack_band_mh(vec2(0.0)), 0.0, 0.0));
     return;
 }
 
@@ -1273,7 +1393,7 @@ for (int k = -TD_RAD_FINE; k <= TD_RAD_FINE; ++k)
     gFine += TD_TAP_FINE[k + TD_RAD_FINE] * td_sh_f1[cyCenter + k][lx];
 
 float srcVal = td_sh_f0[cyCenter][lx + TD_RAD_FINE];
-imageStore(bands_mh_out, p, vec4(gFine, srcVal - gFine, 0.0, 0.0));
+imageStore(bands_mh_out, p, vec4(td_pack_band_mh(vec2(gFine, srcVal - gFine)), 0.0, 0.0));
 )GLSL";
 
 	// kPass1Half2D: 1-pass 2D LDS half-res Gaussian (L, D3) from half_area_in.x (9.2 KB LDS, eliminates H+V split!).
@@ -1300,6 +1420,15 @@ int hxMax = max(hax0, hax1 - 1);
 int hyMin = hay0;
 int hyMax = max(hay0, hay1 - 1);
 
+#if defined(TD_PHASE_A_EARLY_OUT) && TD_PHASE_A_EARLY_OUT
+if (!validHalf || (baseX + 15 < hax0) || (baseX >= hax1) || (baseY + 15 < hay0) || (baseY >= hay1))
+{
+    if (hp.x < TD_HALF_W && hp.y < TD_HALF_H)
+        imageStore(bands_ld3_out, hp, vec4(td_pack_band_ld3(vec2(0.0)), 0.0, 0.0));
+    return;
+}
+#endif
+
 int tileDim = 16 + 2 * TD_RAD_HLOW;
 int tileN = tileDim * tileDim;
 for (int idx = tid; idx < tileN; idx += 256)
@@ -1310,7 +1439,7 @@ for (int idx = tid; idx < tileN; idx += 256)
     int ghy = baseY - TD_RAD_HLOW + ty;
     int sx = validHalf ? clamp(ghx, hxMin, hxMax) : clamp(ghx, 0, TD_HALF_W - 1);
     int sy = validHalf ? clamp(ghy, hyMin, hyMax) : clamp(ghy, 0, TD_HALF_H - 1);
-    td_sh_h2d0[ty][tx] = texelFetch(half_area_in, ivec2(sx, sy), 0).x;
+    td_sh_h2d0[ty][tx] = td_unpack_band_l(texelFetch(half_area_in, ivec2(sx, sy), 0).x);
 }
 memoryBarrierShared();
 barrier();
@@ -1340,7 +1469,7 @@ if (hp.x >= TD_HALF_W || hp.y >= TD_HALF_H)
 
 if (!validHalf || hp.x < hax0 || hp.x >= hax1 || hp.y < hay0 || hp.y >= hay1)
 {
-    imageStore(bands_ld3_out, hp, vec4(0.0));
+    imageStore(bands_ld3_out, hp, vec4(td_pack_band_ld3(vec2(0.0)), 0.0, 0.0));
     return;
 }
 
@@ -1355,7 +1484,7 @@ for (int k = -TD_RAD_HLOW; k <= TD_RAD_HLOW; ++k)
         gBase += TD_TAP_HBASE[k + TD_RAD_HBASE] * v.x;
 }
 
-imageStore(bands_ld3_out, hp, vec4(gBase, gBase - gLow, 0.0, 0.0));
+imageStore(bands_ld3_out, hp, vec4(td_pack_band_ld3(vec2(gBase, gBase - gLow)), 0.0, 0.0));
 )GLSL";
 
 	// ---- PASS 1C (SOTA #10 — kBandMemo Shared Current-Frame Low-Band Zero-Duplicate Reuse) ----
@@ -1521,13 +1650,13 @@ if (lx < 8 && ly < 8)
     {
         if (!validHalf || hp.x < hax0 || hp.x >= hax1 || hp.y < hay0 || hp.y >= hay1)
         {
-            imageStore(bands_ld3_out, hp, vec4(0.0));
+            imageStore(bands_ld3_out, hp, vec4(td_pack_band_ld3(vec2(0.0)), 0.0, 0.0));
         }
         else
         {
             float lH = td_sh_mh0[ly + 1 + TD_RAD_HDIFF][lx + 1 + TD_RAD_HDIFF];
             float gLowH = td_sh_ml[ly + 1][lx + 1];
-            imageStore(bands_ld3_out, hp, vec4(lH, lH - gLowH, 0.0, 0.0));
+            imageStore(bands_ld3_out, hp, vec4(td_pack_band_ld3(vec2(lH, lH - gLowH)), 0.0, 0.0));
         }
     }
 }
@@ -1539,7 +1668,7 @@ if (p.x >= TD_W || p.y >= TD_H)
 if (!validRect || p.x < ax0 || p.x >= ax1 || p.y < ay0 || p.y >= ay1)
 {
 #if TD_MEMO_COMPACT
-    imageStore(bands_mh_out, p, vec4(0.0));
+    imageStore(bands_mh_out, p, vec4(td_pack_band_mh(vec2(0.0)), 0.0, 0.0));
 #else
     imageStore(bands_out, p, vec4(0.0));
 #endif
@@ -1555,7 +1684,7 @@ float srcVal = td_sh_m0[cyCenter][lx + TD_RAD_FINE];
 #if TD_MEMO_FULL_D3
 float bL = td_sh_fd0[ly + TD_RAD_FDIFF][lx + TD_RAD_FDIFF];
 #elif TD_MEMO_IS_HALF
-float rawL = td_sample_half_ld3(cur_low_band, p, halfActive).x;
+float rawL = td_sample_half_ld3_raw(cur_low_band, p, halfActive).x;
 float bL = td_is_bad(rawL) ? 0.0 : rawL;
 #else
 float rawL = texelFetch(cur_low_band, p, 0).x;
@@ -1565,7 +1694,7 @@ float bM = gFine - bL;
 float bH = srcVal - gFine;
 
 #if TD_MEMO_COMPACT
-imageStore(bands_mh_out, p, vec4(gFine, bH, 0.0, 0.0));
+imageStore(bands_mh_out, p, vec4(td_pack_band_mh(vec2(gFine, bH)), 0.0, 0.0));
 #elif TD_MEMO_FULL_D3
 int fdCenter = ly + TD_RAD_FDIFF;
 float gLow = 0.0;
@@ -1601,7 +1730,7 @@ imageStore(bands_out, p, vec4(bL, bM, bH, bL - gLow));
 vec4 td_fetch_cur_band(ivec2 p, ivec4 halfActive)
 {
 #if TD_COMPACT_BANDS
-    vec2 mh = texelFetch(cur_bands_mh, p, 0).xy;
+    vec2 mh = td_unpack_band_mh(texelFetch(cur_bands_mh, p, 0).xy);
     vec2 ld3 = td_sample_half_ld3(cur_bands_ld3, p, halfActive);
     return vec4(ld3.x, mh.x - ld3.x, mh.y, ld3.y);
 #else
@@ -1614,9 +1743,9 @@ vec4 td_fetch_ref_band(int k, ivec2 p, ivec4 halfActive)
 #if TD_COMPACT_BANDS
     vec2 mh = vec2(0.0);
     vec2 ld3 = vec2(0.0);
-    if (k == 0) { mh = texelFetch(ref_bands_mh_0, p, 0).xy; ld3 = td_sample_half_ld3(ref_bands_ld3_0, p, halfActive); }
-    else if (k == 1) { mh = texelFetch(ref_bands_mh_1, p, 0).xy; ld3 = td_sample_half_ld3(ref_bands_ld3_1, p, halfActive); }
-    else { mh = texelFetch(ref_bands_mh_2, p, 0).xy; ld3 = td_sample_half_ld3(ref_bands_ld3_2, p, halfActive); }
+    if (k == 0) { mh = td_unpack_band_mh(texelFetch(ref_bands_mh_0, p, 0).xy); ld3 = td_sample_half_ld3(ref_bands_ld3_0, p, halfActive); }
+    else if (k == 1) { mh = td_unpack_band_mh(texelFetch(ref_bands_mh_1, p, 0).xy); ld3 = td_sample_half_ld3(ref_bands_ld3_1, p, halfActive); }
+    else { mh = td_unpack_band_mh(texelFetch(ref_bands_mh_2, p, 0).xy); ld3 = td_sample_half_ld3(ref_bands_ld3_2, p, halfActive); }
     return vec4(ld3.x, mh.x - ld3.x, mh.y, ld3.y);
 #else
     if (k == 0) return texelFetch(ref_bands_0, p, 0);
@@ -1711,27 +1840,6 @@ ivec2 hLo = halfActive.xy;
 ivec2 hHi = max(halfActive.xy, halfActive.zw - ivec2(1));
 ivec2 hBase = ivec2(cell.x * 8 - 1, cell.y * 8 - 1);
 
-#if TD_COMPACT_BANDS && (TD_CELL_PX == 16)
-bool ldsHalfOk = (hBase.x <= hHi.x && hBase.x + 9 >= hLo.x && hBase.y <= hHi.y && hBase.y + 9 >= hLo.y);
-if (ldsHalfOk)
-{
-    for (int idx = tid; idx < 100; idx += 64)
-    {
-        int hy = idx / 10;
-        int hx = idx - hy * 10;
-        ivec2 hq = clamp(ivec2(hBase.x + hx, hBase.y + hy), hLo, hHi);
-        vec2 cLd = texelFetch(cur_bands_ld3, hq, 0).xy;
-        td_p2a_sh[idx] = cLd.x;
-        td_p2a_sh[400 + idx] = cLd.y;
-        if (K > 0) { vec2 r0 = texelFetch(ref_bands_ld3_0, hq, 0).xy; td_p2a_sh[100 + idx] = r0.x; td_p2a_sh[500 + idx] = r0.y; }
-        if (K > 1) { vec2 r1 = texelFetch(ref_bands_ld3_1, hq, 0).xy; td_p2a_sh[200 + idx] = r1.x; td_p2a_sh[600 + idx] = r1.y; }
-        if (K > 2) { vec2 r2 = texelFetch(ref_bands_ld3_2, hq, 0).xy; td_p2a_sh[300 + idx] = r2.x; td_p2a_sh[700 + idx] = r2.y; }
-    }
-}
-memoryBarrierShared();
-barrier();
-#endif
-
 int x0 = max(ax0, cell.x * TD_CELL_PX);
 int y0 = max(ay0, cell.y * TD_CELL_PX);
 int x1 = min(ax1, (cell.x + 1) * TD_CELL_PX);
@@ -1744,6 +1852,56 @@ int cellGateMaskMH = 0;
 if (K > 0 && !(0 == ancIdx && cellAncBarred)) { vec2 mg = texelFetch(motion_gate, ivec2(cell.x, cell.y), 0).xy; if (mg.x > 0.0) cellGateMaskL |= 1; if (mg.y > 0.0) cellGateMaskMH |= 1; }
 if (K > 1 && !(1 == ancIdx && cellAncBarred)) { vec2 mg = texelFetch(motion_gate, ivec2(TD_CW + cell.x, cell.y), 0).xy; if (mg.x > 0.0) cellGateMaskL |= 2; if (mg.y > 0.0) cellGateMaskMH |= 2; }
 if (K > 2 && !(2 == ancIdx && cellAncBarred)) { vec2 mg = texelFetch(motion_gate, ivec2(2 * TD_CW + cell.x, cell.y), 0).xy; if (mg.x > 0.0) cellGateMaskL |= 4; if (mg.y > 0.0) cellGateMaskMH |= 4; }
+
+// Pass 3A Phase A zero-loss cell early-out (strictly workgroup-uniform BEFORE any LDS load or barrier!).
+#if defined(TD_PHASE_A_EARLY_OUT) && TD_PHASE_A_EARLY_OUT
+{
+    bool earlyBar = (x0 >= x1) || (y0 >= y1);
+    bool earlyFace = (u_has_face_mask > 0.5) && (texelFetch(face_mask, cell, 0).x > 0.5);
+    bool earlyNoGate = (cellGateMaskL == 0 && cellGateMaskMH == 0 && !TD_NEED_LUMA_STATS && !TD_NEED_REGION_AUX);
+    if (earlyBar || earlyFace || earlyNoGate)
+    {
+        if (tid == 0)
+        {
+            imageStore(cell_focus, cell, vec4(0.0, 0.0, 0.0, earlyFace ? 1.0 : 0.0));
+            imageStore(warp_diag, cell, vec4(0.0, earlyFace ? 8.0 : 0.0, 0.0, 0.0));
+#if TD_NEED_REGION_AUX
+            imageStore(cell_region_aux, ivec2(cell.x, cell.y), vec4(1.0, 0.0, 0.0, 0.0));
+            imageStore(cell_region_aux, ivec2(TD_CW + cell.x, cell.y), vec4(0.0));
+#endif
+        }
+        if (tid < 3)
+        {
+            int b = tid;
+            imageStore(cell_stats, ivec2(b * TD_CW + cell.x, cell.y), vec4(0.0));
+            imageStore(cell_stats, ivec2(b * TD_CW + cell.x, TD_CH + cell.y), vec4(0.0));
+            imageStore(cell_stats, ivec2(b * TD_CW + cell.x, 2 * TD_CH + cell.y), vec4(0.0));
+        }
+        return;
+    }
+}
+#endif
+
+#if TD_COMPACT_BANDS && (TD_CELL_PX == 16)
+bool ldsHalfOk = (hBase.x <= hHi.x && hBase.x + 9 >= hLo.x && hBase.y <= hHi.y && hBase.y + 9 >= hLo.y);
+if (ldsHalfOk)
+{
+    for (int idx = tid; idx < 100; idx += 64)
+    {
+        int hy = idx / 10;
+        int hx = idx - hy * 10;
+        ivec2 hq = clamp(ivec2(hBase.x + hx, hBase.y + hy), hLo, hHi);
+        vec2 cLd = td_unpack_band_ld3(texelFetch(cur_bands_ld3, hq, 0).xy);
+        td_p2a_sh[idx] = cLd.x;
+        td_p2a_sh[400 + idx] = cLd.y;
+        if (K > 0) { vec2 r0 = td_unpack_band_ld3(texelFetch(ref_bands_ld3_0, hq, 0).xy); td_p2a_sh[100 + idx] = r0.x; td_p2a_sh[500 + idx] = r0.y; }
+        if (K > 1) { vec2 r1 = td_unpack_band_ld3(texelFetch(ref_bands_ld3_1, hq, 0).xy); td_p2a_sh[200 + idx] = r1.x; td_p2a_sh[600 + idx] = r1.y; }
+        if (K > 2) { vec2 r2 = td_unpack_band_ld3(texelFetch(ref_bands_ld3_2, hq, 0).xy); td_p2a_sh[300 + idx] = r2.x; td_p2a_sh[700 + idx] = r2.y; }
+    }
+}
+memoryBarrierShared();
+barrier();
+#endif
 
 float curM2 = 0.0, curD3_2 = 0.0, curH2 = 0.0, curOg2 = 0.0;
 float activeCnt = 0.0, borderCnt = 0.0;
@@ -1765,12 +1923,15 @@ for (int oy = ly; oy < TD_CELL_PX; oy += 4)
     if (py < y0 || py >= y1) continue;
     for (int ox = lx; ox < TD_CELL_PX; ox += 16)
     {
+#if defined(TD_CHECKERBOARD_STATS) && TD_CHECKERBOARD_STATS
+        if (((ox ^ oy) & 1) != 0) continue;
+#endif
         int px = cell.x * TD_CELL_PX + ox;
         if (px < x0 || px >= x1) continue;
 
         ivec2 p = ivec2(px, py);
 #if TD_COMPACT_BANDS && (TD_CELL_PX == 16)
-        vec2 cMh = texelFetch(cur_bands_mh, p, 0).xy;
+        vec2 cMh = td_unpack_band_mh(texelFetch(cur_bands_mh, p, 0).xy);
         vec2 cLd3 = ldsHalfOk ? td_p2a_ld3_lds_base(0, p, hBase, hLo, hHi)
                               : td_sample_half_ld3(cur_bands_ld3, p, halfActive);
         vec4 cb = vec4(cLd3.x, cMh.x - cLd3.x, cMh.y, cLd3.y);
@@ -1803,7 +1964,7 @@ for (int oy = ly; oy < TD_CELL_PX; oy += 4)
         if (K > 0)
         {
 #if TD_COMPACT_BANDS && (TD_CELL_PX == 16)
-            vec2 rMh = texelFetch(ref_bands_mh_0, p, 0).xy;
+            vec2 rMh = td_unpack_band_mh(texelFetch(ref_bands_mh_0, p, 0).xy);
             vec2 rLd = ldsHalfOk ? td_p2a_ld3_lds_base(100, p, hBase, hLo, hHi) : td_sample_half_ld3(ref_bands_ld3_0, p, halfActive);
             rb0 = vec4(rLd.x, rMh.x - rLd.x, rMh.y, rLd.y);
 #else
@@ -1818,7 +1979,7 @@ for (int oy = ly; oy < TD_CELL_PX; oy += 4)
         if (K > 1)
         {
 #if TD_COMPACT_BANDS && (TD_CELL_PX == 16)
-            vec2 rMh = texelFetch(ref_bands_mh_1, p, 0).xy;
+            vec2 rMh = td_unpack_band_mh(texelFetch(ref_bands_mh_1, p, 0).xy);
             vec2 rLd = ldsHalfOk ? td_p2a_ld3_lds_base(200, p, hBase, hLo, hHi) : td_sample_half_ld3(ref_bands_ld3_1, p, halfActive);
             rb1 = vec4(rLd.x, rMh.x - rLd.x, rMh.y, rLd.y);
 #else
@@ -1833,7 +1994,7 @@ for (int oy = ly; oy < TD_CELL_PX; oy += 4)
         if (K > 2)
         {
 #if TD_COMPACT_BANDS && (TD_CELL_PX == 16)
-            vec2 rMh = texelFetch(ref_bands_mh_2, p, 0).xy;
+            vec2 rMh = td_unpack_band_mh(texelFetch(ref_bands_mh_2, p, 0).xy);
             vec2 rLd = ldsHalfOk ? td_p2a_ld3_lds_base(300, p, hBase, hLo, hHi) : td_sample_half_ld3(ref_bands_ld3_2, p, halfActive);
             rb2 = vec4(rLd.x, rMh.x - rLd.x, rMh.y, rLd.y);
 #else
@@ -4364,7 +4525,7 @@ shared float td_p3_step_scale;
 vec4 td_fetch_cur_band(ivec2 p, ivec4 halfActive)
 {
 #if TD_COMPACT_BANDS
-    vec2 mh = texelFetch(cur_bands_mh, p, 0).xy;
+    vec2 mh = td_unpack_band_mh(texelFetch(cur_bands_mh, p, 0).xy);
     vec2 ld3 = td_sample_half_ld3(cur_bands_ld3, p, halfActive);
     return vec4(ld3.x, mh.x - ld3.x, mh.y, ld3.y);
 #else
@@ -4377,9 +4538,9 @@ vec4 td_fetch_ref_band(int k, ivec2 p, ivec4 halfActive)
 #if TD_COMPACT_BANDS
     vec2 mh = vec2(0.0);
     vec2 ld3 = vec2(0.0);
-    if (k == 0) { mh = texelFetch(ref_bands_mh_0, p, 0).xy; ld3 = td_sample_half_ld3(ref_bands_ld3_0, p, halfActive); }
-    else if (k == 1) { mh = texelFetch(ref_bands_mh_1, p, 0).xy; ld3 = td_sample_half_ld3(ref_bands_ld3_1, p, halfActive); }
-    else { mh = texelFetch(ref_bands_mh_2, p, 0).xy; ld3 = td_sample_half_ld3(ref_bands_ld3_2, p, halfActive); }
+    if (k == 0) { mh = td_unpack_band_mh(texelFetch(ref_bands_mh_0, p, 0).xy); ld3 = td_sample_half_ld3(ref_bands_ld3_0, p, halfActive); }
+    else if (k == 1) { mh = td_unpack_band_mh(texelFetch(ref_bands_mh_1, p, 0).xy); ld3 = td_sample_half_ld3(ref_bands_ld3_1, p, halfActive); }
+    else { mh = td_unpack_band_mh(texelFetch(ref_bands_mh_2, p, 0).xy); ld3 = td_sample_half_ld3(ref_bands_ld3_2, p, halfActive); }
     return vec4(ld3.x, mh.x - ld3.x, mh.y, ld3.y);
 #else
     if (k == 0) return texelFetch(ref_bands_0, p, 0);
@@ -4508,6 +4669,16 @@ bool validRect = (ax1 > ax0) && (ay1 > ay0);
 bool enableNbrClamp = (u_enable_nbr_soft_clamp > 0.5);
 bool enableRegionTailoring = (u_enable_region_tailoring > 0.5);
 
+// Pass 3A Phase A zero-loss outside-active tile early-out BEFORE any LDS load or barrier!
+#if defined(TD_PHASE_A_EARLY_OUT) && TD_PHASE_A_EARLY_OUT
+if (!validRect || (baseX + 15 < ax0) || (baseX >= ax1) || (baseY + 15 < ay0) || (baseY >= ay1))
+{
+    if (p.x < TD_W && p.y < TD_H)
+        imageStore(delta_out, p, vec4(0.0));
+    return;
+}
+#endif
+
 // Workgroup-uniform cooperative LDS loads BEFORE any early return (FXC cs_5_0 barrier safe!).
 // M1/H3/OPT: Both td_sh_mh and td_p3_clean_y are compiled out when OFF (drops default-OFF LDS 6,356 B -> 2,468 B = 100% occupancy!).
 #if TD_NEED_NBR_CLAMP || TD_NEED_DERIVED_PX_EDGE
@@ -4525,7 +4696,7 @@ bool enableRegionTailoring = (u_enable_region_tailoring > 0.5);
         int sx = validRect ? clamp(gx, xMin, xMax) : clamp(gx, 0, TD_W - 1);
         int sy = validRect ? clamp(gy, yMin, yMax) : clamp(gy, 0, TD_H - 1);
 #if TD_COMPACT_BANDS
-        vec2 mhS = texelFetch(cur_bands_mh, ivec2(sx, sy), 0).xy;
+        vec2 mhS = td_unpack_band_mh(texelFetch(cur_bands_mh, ivec2(sx, sy), 0).xy);
 #if TD_NEED_NBR_CLAMP
         {
             float lS = td_sample_half_ld3(cur_bands_ld3, ivec2(sx, sy), halfActive).x;
@@ -4577,10 +4748,10 @@ if (ldsHalfOk && tid < 100)
     int hy = tid / 10;
     int hx = tid % 10;
     ivec2 hq = clamp(ivec2(hBase.x + hx, hBase.y + hy), hLo, hHi);
-    td_p3_l[tid] = texelFetch(cur_bands_ld3, hq, 0).x;
-    if (K > 0) td_p3_l[100 + tid] = texelFetch(ref_bands_ld3_0, hq, 0).x;
-    if (K > 1) td_p3_l[200 + tid] = texelFetch(ref_bands_ld3_1, hq, 0).x;
-    if (K > 2) td_p3_l[300 + tid] = texelFetch(ref_bands_ld3_2, hq, 0).x;
+    td_p3_l[tid] = td_unpack_band_l(texelFetch(cur_bands_ld3, hq, 0).x);
+    if (K > 0) td_p3_l[100 + tid] = td_unpack_band_l(texelFetch(ref_bands_ld3_0, hq, 0).x);
+    if (K > 1) td_p3_l[200 + tid] = td_unpack_band_l(texelFetch(ref_bands_ld3_1, hq, 0).x);
+    if (K > 2) td_p3_l[300 + tid] = td_unpack_band_l(texelFetch(ref_bands_ld3_2, hq, 0).x);
 }
 #endif
 memoryBarrierShared();
@@ -4594,6 +4765,18 @@ if (p.x < ax0 || p.x >= ax1 || p.y < ay0 || p.y >= ay1)
     imageStore(delta_out, p, vec4(0.0));
     return;
 }
+
+#if (TD_CELL_PX == 16) && defined(TD_PHASE_A_EARLY_OUT) && TD_PHASE_A_EARLY_OUT
+{
+    vec3 wMax = max(td_p3_cw[4].xyz, max(td_p3_cw[13].xyz, td_p3_cw[22].xyz));
+    bool hasExtEdge = enableRegionTailoring && ((u_has_edge_map_plane > 0.5) || (u_has_edge_map_cells > 0.5));
+    if (!hasExtEdge && !(wMax.x > 0.0) && !(wMax.y > 0.0) && !(wMax.z > 0.0))
+    {
+        imageStore(delta_out, p, vec4(0.0));
+        return;
+    }
+}
+#endif
 
 bool enableHuber = (u_enable_per_corner_huber > 0.5);
 int bx0 = int(round(u_bx0));
@@ -4640,7 +4823,7 @@ float curL = ldsHalfOk ? td_p3_sample_l_lds(0, p, hBase, hLo, hHi) : td_sample_h
 vec2 curMh = td_sh_mh[ly + 1][lx + 1];
 vec4 curB = vec4(curL, curMh.x, curMh.y, 0.0);
 #else
-vec2 curMh = texelFetch(cur_bands_mh, p, 0).xy;
+vec2 curMh = td_unpack_band_mh(texelFetch(cur_bands_mh, p, 0).xy);
 vec4 curB = vec4(curL, curMh.x - curL, curMh.y, 0.0);
 #endif
 #else
@@ -4659,7 +4842,7 @@ if (refOk0)
 #endif
 {
 #if TD_COMPACT_BANDS && (TD_CELL_PX == 16)
-    vec2 rMh = texelFetch(ref_bands_mh_0, p, 0).xy;
+    vec2 rMh = td_unpack_band_mh(texelFetch(ref_bands_mh_0, p, 0).xy);
     float rL = ldsHalfOk ? td_p3_sample_l_lds(100, p, hBase, hLo, hHi) : td_sample_half_ld3(ref_bands_ld3_0, p, halfActive).x;
     refB0 = vec4(rL, rMh.x - rL, rMh.y, 0.0);
 #else
@@ -4673,7 +4856,7 @@ if (refOk1)
 #endif
 {
 #if TD_COMPACT_BANDS && (TD_CELL_PX == 16)
-    vec2 rMh = texelFetch(ref_bands_mh_1, p, 0).xy;
+    vec2 rMh = td_unpack_band_mh(texelFetch(ref_bands_mh_1, p, 0).xy);
     float rL = ldsHalfOk ? td_p3_sample_l_lds(200, p, hBase, hLo, hHi) : td_sample_half_ld3(ref_bands_ld3_1, p, halfActive).x;
     refB1 = vec4(rL, rMh.x - rL, rMh.y, 0.0);
 #else
@@ -4687,7 +4870,7 @@ if (refOk2)
 #endif
 {
 #if TD_COMPACT_BANDS && (TD_CELL_PX == 16)
-    vec2 rMh = texelFetch(ref_bands_mh_2, p, 0).xy;
+    vec2 rMh = td_unpack_band_mh(texelFetch(ref_bands_mh_2, p, 0).xy);
     float rL = ldsHalfOk ? td_p3_sample_l_lds(300, p, hBase, hLo, hHi) : td_sample_half_ld3(ref_bands_ld3_2, p, halfActive).x;
     refB2 = vec4(rL, rMh.x - rL, rMh.y, 0.0);
 #else
@@ -5262,6 +5445,51 @@ bool deferSmoothGuard = (u_smooth_guard > 0.5);
 // Workgroup-uniform Pass-1 face/non-rigid mask flag from cell_focus.w (H13: strict bit-exact passthrough).
 bool cellIsFace = (texelFetch(cell_focus, cell, 0).w > 0.5);
 
+// Pass 3A Phase A zero-loss outside-active or face-masked cell early-out BEFORE 22x22 LDS load & G_fine!
+#if defined(TD_PHASE_A_EARLY_OUT) && TD_PHASE_A_EARLY_OUT
+{
+    int cBaseX = cell.x * TD_CELL_PX;
+    int cBaseY = cell.y * TD_CELL_PX;
+    bool cellOutside = !validRect || (cBaseX + TD_CELL_PX <= ax0) || (cBaseX >= ax1) ||
+                       (cBaseY + TD_CELL_PX <= ay0) || (cBaseY >= ay1);
+    if (cellOutside || cellIsFace)
+    {
+        int subT = (TD_CELL_PX + 15) / 16;
+        for (int sy = 0; sy < subT; ++sy)
+        {
+            for (int sx = 0; sx < subT; ++sx)
+            {
+                int lcx = sx * 16 + lx;
+                int lcy = sy * 16 + ly;
+                ivec2 ep = ivec2(cBaseX + lcx, cBaseY + lcy);
+                if (lcx < TD_CELL_PX && lcy < TD_CELL_PX && ep.x < TD_W && ep.y < TD_H)
+                {
+                    float rRaw = texelFetch(rec_y, ep, 0).x;
+#if TD_SAME_CLEAN_REC
+                    float cRaw = rRaw;
+#else
+                    float cRaw = texelFetch(cur_clean, ep, 0).x;
+#endif
+                    float rV = td_is_bad(rRaw) ? 0.0 : rRaw;
+                    float cV = td_is_bad(cRaw) ? 0.0 : cRaw;
+#if !defined(TD_P4_WRITE_OUT_CLEAN) || TD_P4_WRITE_OUT_CLEAN
+                    imageStore(out_clean, ep, vec4(cV, 0.0, 0.0, 0.0));
+#endif
+#if !defined(TD_P4_WRITE_CARRY_CLEAN) || TD_P4_WRITE_CARRY_CLEAN
+                    imageStore(carry_clean, ep, vec4(cV, 0.0, 0.0, 0.0));
+#endif
+                    if (!shadowMode)
+                        imageStore(out_y, ep, vec4(rV, 0.0, 0.0, 0.0));
+                }
+            }
+        }
+        if (tid == 0)
+            imageStore(guard_cell, cell, vec4(0.0));
+        return;
+    }
+}
+#endif
+
 int tileDim = 16 + 2 * TD_RAD_FINE;
 int tileN = tileDim * tileDim;
 int hN = tileDim * 16;
@@ -5387,8 +5615,12 @@ for (int subY = 0; subY < subTiles; ++subY)
             if (!inAct || cellIsFace)
             {
                 // Bars and Pass-1 face-masked cells: bit-exact copy of cur_clean to out_clean/carry_clean and rec_y to out_y.
+#if !defined(TD_P4_WRITE_OUT_CLEAN) || TD_P4_WRITE_OUT_CLEAN
                 imageStore(out_clean, p, vec4(cleanV, 0.0, 0.0, 0.0));
+#endif
+#if !defined(TD_P4_WRITE_CARRY_CLEAN) || TD_P4_WRITE_CARRY_CLEAN
                 imageStore(carry_clean, p, vec4(cleanV, 0.0, 0.0, 0.0));
+#endif
                 if (deferSmoothGuard && !shadowMode)
                 {
                     imageStore(out_y, p, vec4(recV, 0.0, 0.0, 0.0));
@@ -5432,8 +5664,12 @@ for (int subY = 0; subY < subTiles; ++subY)
                     : newClean;
 
                 // Write strictly grain-free out_clean & carry_clean NOW (BLOCKER-2: NEVER receives Layer-4 add-back!).
+#if !defined(TD_P4_WRITE_OUT_CLEAN) || TD_P4_WRITE_OUT_CLEAN
                 imageStore(out_clean, p, vec4(newClean, 0.0, 0.0, 0.0));
+#endif
+#if !defined(TD_P4_WRITE_CARRY_CLEAN) || TD_P4_WRITE_CARRY_CLEAN
                 imageStore(carry_clean, p, vec4(carryCleanVal, 0.0, 0.0, 0.0));
+#endif
 
                 float gr = 0.0;
                 float gd = 0.0;
