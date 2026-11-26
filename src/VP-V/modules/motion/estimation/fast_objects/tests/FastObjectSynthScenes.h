@@ -1506,9 +1506,9 @@ namespace VideoProcessorTest
 			b.id = 1;
 			b.expectedType = FastObjects::TrajectoryType::Ballistic;
 			b.radiusPx = 6.0; // 12 px diameter soccer ball
-			b.x0 = 420.0;
+			b.x0 = (fps >= 50.0) ? 420.0 : 360.0;
 			b.y0 = 560.0;
-			b.vx0 = (fps >= 50.0) ? 1860.0 : 990.0;
+			b.vx0 = (fps >= 50.0) ? 1860.0 : 1380.0;
 			b.vy0 = (fps >= 50.0) ? -780.0 : -450.0;
 			b.ax = 0.0;
 			b.ay = (fps >= 50.0) ? 4500.0 : 1900.0; // Downward gravity arc
