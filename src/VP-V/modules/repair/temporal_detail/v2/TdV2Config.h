@@ -15,6 +15,7 @@
 // (Rule 1: zero arbitrary constants). Header-only, C++14/17, no Windows headers.
 #pragma once
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -333,6 +334,18 @@ namespace TdV2
 		bool enableRoleAdaptiveK = false;
 		bool enableCoverageAdaptiveK = false;
 
+		// Pass 3B — Forensic Blind Keyframe / Peak Detector (TD-GOP-PEAK-V2, strictly DEFAULT OFF):
+		//   - enableForensicGopPeakV2: master toggle for forensic blind peak detection & Mini-GOP cadence lock.
+		//   - enablePeakV2SkipGrainFreeze: Signal 1 — SKIP-block / temporal grain-freeze fraction vs P10g noise floor.
+		//   - enablePeakV2AcSparsity: Signal 2 — grain-free 8x8 AC transform sparsity (pi_0, immune to HEVC/AV1 deblocking).
+		//   - enablePeakV2InnovationBidir: Signal 3 — motion-compensated clean-band innovation reset + bidirectional asymmetry.
+		//   - enablePeakV2CadenceLock: Signal 4 — U7 post-cut I-frame seeding + nested Mini-GOP (4/8/16) rhythm lock.
+		bool enableForensicGopPeakV2 = false;
+		bool enablePeakV2SkipGrainFreeze = true;
+		bool enablePeakV2AcSparsity = true;
+		bool enablePeakV2InnovationBidir = true;
+		bool enablePeakV2CadenceLock = true;
+
 		// Measured source rate in Hz (used to express any temporal horizon in seconds, never hardcoded frame counts).
 		double sourceHz = kDefaultSourceHz;
 
@@ -489,6 +502,30 @@ namespace TdV2
 		}
 		return cfg;
 	}
+
+	// Active picture rectangle [x0, x1) x [y0, y1). Bar pixels outside are bit-exact copied and never crossed by warps.
+	struct ActiveRect
+	{
+		int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+
+		static ActiveRect Full(int w, int h) { return { 0, 0, w, h }; }
+
+		ActiveRect ClampedTo(int w, int h) const
+		{
+			ActiveRect r;
+			r.x0 = (std::max)(0, (std::min)(w, x0));
+			r.y0 = (std::max)(0, (std::min)(h, y0));
+			r.x1 = (std::max)(r.x0, (std::min)(w, x1));
+			r.y1 = (std::max)(r.y0, (std::min)(h, y1));
+			return r;
+		}
+
+		int Width() const { return x1 - x0; }
+		int Height() const { return y1 - y0; }
+		bool Contains(int x, int y) const { return x >= x0 && x < x1 && y >= y0 && y < y1; }
+		bool Empty() const { return x1 <= x0 || y1 <= y0; }
+		bool IsValid(int w, int h) const { return x0 >= 0 && y0 >= 0 && x1 > x0 && y1 > y0 && x1 <= w && y1 <= h; }
+	};
 
 	// Original pathway law: forces TD strictly Off so Original == Bill bit-exact.
 	inline void ApplyOriginalPathwayOverride(Config& cfg)

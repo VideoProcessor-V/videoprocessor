@@ -988,6 +988,712 @@ namespace TdV2
 		return out;
 	}
 
+	// =========================================================================
+	// Pass 3B — Forensic Blind Keyframe / Peak Detector (TD-GOP-PEAK-V2)
+	// Pure physics/quantization math, zero bitstream side data, zero neural net.
+	// Every signal is bit-depth scale-invariant (10-bit == 12-bit via DepthScale)
+	// and independently toggleable (strictly default OFF at enableForensicGopPeakV2).
+	// =========================================================================
+
+	struct ForensicPeakV2Config
+	{
+		bool enableForensicGopPeakV2 = false;
+		bool enableSkipGrainFreeze = true;
+		bool enableAcSparsity = true;
+		bool enableInnovationBidir = true;
+		bool enableCadenceLock = true;
+
+		static ForensicPeakV2Config FromConfig(const Config& cfg)
+		{
+			ForensicPeakV2Config c;
+			c.enableForensicGopPeakV2 = cfg.enableForensicGopPeakV2;
+			c.enableSkipGrainFreeze = cfg.enablePeakV2SkipGrainFreeze;
+			c.enableAcSparsity = cfg.enablePeakV2AcSparsity;
+			c.enableInnovationBidir = cfg.enablePeakV2InnovationBidir;
+			c.enableCadenceLock = cfg.enablePeakV2CadenceLock;
+			return c;
+		}
+	};
+
+	struct ForensicFrameSignals
+	{
+		// Signal 1: SKIP-block / temporal grain-freeze fraction in [0, 1].
+		// High -> deep B-frame freezing film grain; Low -> fresh grain / Peak.
+		double skipGrainFreezeFrac = 0.0;
+		size_t grainActiveCells = 0;
+		bool hasSkipGrainFreeze = false;
+
+		// Signal 2: Grain-free 8x8 AC transform sparsity pi_0 in [0, 1].
+		// Immune to HEVC/AV1 in-loop deblocking + SAO/CDEF; tracks relative QP directly.
+		double acSparsityPi0 = 0.0;
+		size_t texturedAcBlocks = 0;
+		bool hasAcSparsity = false;
+
+		// Signal 3a: Motion-compensated grain-free innovation reset (median cell RMS / quantSigma).
+		// Signal 3b: Bidirectional clean-band prediction asymmetry ratio in [0, 1]:
+		//   |X_clean(t) - 0.5*(warp(t-1) + warp(t+1))| / (0.5*(|X_clean(t) - warp(t-1)| + |X_clean(t) - warp(t+1)|)).
+		double innovationResetRatio = 0.0;
+		double bidirAsymmetryRatio = 0.0;
+		size_t innovationCells = 0;
+		bool hasInnovation = false;
+		bool hasBidirAsymmetry = false;
+
+		// Composite forensic peak score in [0, 1] (equal-weight average over active valid cues).
+		double compositePeakScore = 0.5;
+		int activeCueCount = 0;
+		bool valid = false;
+	};
+
+	// Signal 1: SKIP-block / temporal grain-freeze fraction.
+	// Physics derivation (Rule 1):
+	//   For two frames with independent photochemical grain of variance sigma_g^2 (from P10g),
+	//   Var(g_t - g_{t-1}) = 2 * sigma_g^2. On a SKIP/MERGE block where the encoder froze the
+	//   residual to zero, temporal diff variance collapses below the exact -3 dB half-power
+	//   point: Var_cell(Y_t - warp(Y_{t-1})) <= sigma_g^2 = 0.5 * (2 * sigma_g^2).
+	//   Only evaluates active cells where sigma_g^2 > baseQuantVar (grain exceeds 1-LSB noise).
+	inline bool MeasureSkipGrainFreezeFraction(
+		const double* curRawY,
+		const double* prevWarpedRawY,
+		int w,
+		int h,
+		const double* cellGrainVarP10g,
+		double scalarGrainVar,
+		int cellPx,
+		int sourceBits,
+		double& outFreezeFrac,
+		size_t& outGrainActiveCells,
+		const ActiveRect* activeRect = nullptr,
+		const uint8_t* trustedCellMask = nullptr)
+	{
+		outFreezeFrac = 0.0;
+		outGrainActiveCells = 0;
+		if (curRawY == nullptr || prevWarpedRawY == nullptr || w <= 0 || h <= 0)
+			return false;
+		if (!(PeakCodeForBits(sourceBits) > 0.0))
+			return false;
+
+		const int step = cellPx > 0 ? cellPx : kCanonicalBlockPx;
+		const int cellsW = (w + step - 1) / step;
+		const int cellsH = (h + step - 1) / step;
+		const double dScale = DepthScale(sourceBits);
+		const double baseQuantVar = (dScale * dScale) / 12.0;
+
+		const int rx0 = (activeRect != nullptr && activeRect->IsValid(w, h)) ? activeRect->x0 : 0;
+		const int ry0 = (activeRect != nullptr && activeRect->IsValid(w, h)) ? activeRect->y0 : 0;
+		const int rx1 = (activeRect != nullptr && activeRect->IsValid(w, h)) ? activeRect->x1 : w;
+		const int ry1 = (activeRect != nullptr && activeRect->IsValid(w, h)) ? activeRect->y1 : h;
+
+		size_t activeCount = 0;
+		size_t frozenCount = 0;
+
+		for (int cy = 0; cy < cellsH; ++cy)
+		{
+			const int y0 = (std::max)(cy * step, ry0);
+			const int y1 = (std::min)((cy + 1) * step, ry1);
+			if (y0 >= y1)
+				continue;
+			for (int cx = 0; cx < cellsW; ++cx)
+			{
+				const int x0 = (std::max)(cx * step, rx0);
+				const int x1 = (std::min)((cx + 1) * step, rx1);
+				if (x0 >= x1)
+					continue;
+				const size_t cIdx = static_cast<size_t>(cy) * static_cast<size_t>(cellsW) + static_cast<size_t>(cx);
+				if (trustedCellMask != nullptr && trustedCellMask[cIdx] == 0)
+					continue;
+
+				const double gVar = (cellGrainVarP10g != nullptr) ? cellGrainVarP10g[cIdx] : scalarGrainVar;
+				if (!std::isfinite(gVar) || gVar <= baseQuantVar)
+					continue;
+
+				double sumD = 0.0;
+				double sumD2 = 0.0;
+				size_t cnt = 0;
+				bool cellFinite = true;
+				for (int y = y0; y < y1 && cellFinite; ++y)
+				{
+					const size_t row = static_cast<size_t>(y) * static_cast<size_t>(w);
+					for (int x = x0; x < x1; ++x)
+					{
+						const double a = curRawY[row + static_cast<size_t>(x)];
+						const double b = prevWarpedRawY[row + static_cast<size_t>(x)];
+						if (!std::isfinite(a) || !std::isfinite(b))
+						{
+							cellFinite = false;
+							break;
+						}
+						const double d = a - b;
+						sumD += d;
+						sumD2 += d * d;
+						++cnt;
+					}
+				}
+				if (!cellFinite || cnt < 4u)
+					continue;
+
+				const double invN = 1.0 / static_cast<double>(cnt);
+				const double meanD = sumD * invN;
+				const double varD = (std::max)(0.0, sumD2 * invN - meanD * meanD);
+				++activeCount;
+				// Exact -3 dB half-power threshold below independent-grain Var(g_t - g_{t-1}) = 2 * gVar:
+				if (varD <= gVar)
+					++frozenCount;
+			}
+		}
+
+		outGrainActiveCells = activeCount;
+		if (activeCount == 0)
+			return false;
+		outFreezeFrac = static_cast<double>(frozenCount) / static_cast<double>(activeCount);
+		return std::isfinite(outFreezeFrac);
+	}
+
+	// Signal 2: Grain-free 8x8 orthonormal DCT-II AC transform sparsity (pi_0).
+	// Physics derivation (Rule 1):
+	//   Orthonormal 8x8 DCT-II preserves variance (Parseval): 1-LSB rounding noise contributes
+	//   63 * baseQuantVar across the 63 AC coefficients. On textured 8x8 blocks (acEnergy > 63 * baseQuantVar),
+	//   an AC coefficient quantized to zero sits inside the exact half-LSB rounding dead-zone
+	//   |c_uv| <= 0.5 * DepthScale(sourceBits). Immune to HEVC/AV1 in-loop deblocking and SAO/CDEF.
+	inline bool MeasureCleanAcSparsityPi0(
+		const double* curCleanY,
+		int w,
+		int h,
+		int sourceBits,
+		double& outSparsityPi0,
+		size_t& outTexturedBlocks,
+		const ActiveRect* activeRect = nullptr)
+	{
+		outSparsityPi0 = 0.0;
+		outTexturedBlocks = 0;
+		if (curCleanY == nullptr || w < 8 || h < 8)
+			return false;
+		if (!(PeakCodeForBits(sourceBits) > 0.0))
+			return false;
+
+		static const std::array<std::array<double, 8>, 8> kDctBasis = []() {
+			std::array<std::array<double, 8>, 8> m{};
+			constexpr double kPi = 3.14159265358979323846;
+			const double s0 = 1.0 / std::sqrt(8.0);
+			const double sk = 0.5;
+			for (int u = 0; u < 8; ++u)
+			{
+				const double a = (u == 0) ? s0 : sk;
+				for (int x = 0; x < 8; ++x)
+					m[u][x] = a * std::cos(kPi * (2.0 * static_cast<double>(x) + 1.0) * static_cast<double>(u) / 16.0);
+			}
+			return m;
+		}();
+
+		const double dScale = DepthScale(sourceBits);
+		const double halfLsb = 0.5 * dScale;
+		const double minTexturedAcEnergy = 63.0 * (dScale * dScale) / 12.0;
+
+		const int rx0 = (activeRect != nullptr && activeRect->IsValid(w, h)) ? activeRect->x0 : 0;
+		const int ry0 = (activeRect != nullptr && activeRect->IsValid(w, h)) ? activeRect->y0 : 0;
+		const int rx1 = (activeRect != nullptr && activeRect->IsValid(w, h)) ? activeRect->x1 : w;
+		const int ry1 = (activeRect != nullptr && activeRect->IsValid(w, h)) ? activeRect->y1 : h;
+
+		size_t texturedBlocks = 0;
+		uint64_t zeroedAcTotal = 0;
+
+		double rowTmp[8][8];
+		for (int by = ry0; by + 8 <= ry1; by += 8)
+		{
+			for (int bx = rx0; bx + 8 <= rx1; bx += 8)
+			{
+				bool blockFinite = true;
+				for (int y = 0; y < 8 && blockFinite; ++y)
+				{
+					const double* srcRow = curCleanY + static_cast<size_t>(by + y) * static_cast<size_t>(w) + static_cast<size_t>(bx);
+					for (int x = 0; x < 8; ++x)
+					{
+						if (!std::isfinite(srcRow[x]))
+						{
+							blockFinite = false;
+							break;
+						}
+					}
+					if (!blockFinite)
+						break;
+					for (int u = 0; u < 8; ++u)
+					{
+						double acc = 0.0;
+						for (int x = 0; x < 8; ++x)
+							acc += kDctBasis[u][x] * srcRow[x];
+						rowTmp[y][u] = acc;
+					}
+				}
+				if (!blockFinite)
+					continue;
+
+				double acEnergy = 0.0;
+				uint64_t zeroAc = 0;
+				for (int v = 0; v < 8; ++v)
+				{
+					for (int u = 0; u < 8; ++u)
+					{
+						if (u == 0 && v == 0)
+							continue;
+						double coeff = 0.0;
+						for (int y = 0; y < 8; ++y)
+							coeff += kDctBasis[v][y] * rowTmp[y][u];
+						acEnergy += coeff * coeff;
+						if (std::fabs(coeff) <= halfLsb)
+							++zeroAc;
+					}
+				}
+
+				if (acEnergy > minTexturedAcEnergy)
+				{
+					++texturedBlocks;
+					zeroedAcTotal += zeroAc;
+				}
+			}
+		}
+
+		outTexturedBlocks = texturedBlocks;
+		if (texturedBlocks == 0)
+			return false;
+		outSparsityPi0 = static_cast<double>(zeroedAcTotal) / (63.0 * static_cast<double>(texturedBlocks));
+		return std::isfinite(outSparsityPi0);
+	}
+
+	// Signal 3: Motion-compensated grain-free innovation reset spike + bidirectional prediction asymmetry.
+	// Physics derivation (Rule 1):
+	//   - Innovation reset: per-cell RMS |X_clean(t) - warp(X_clean(t-1))| normalized by quantSigma = DepthScale/sqrt(12).
+	//   - Bidirectional asymmetry: RMS |X_clean(t) - 0.5*(warp(t-1)+warp(t+1))| / (0.5*(RMS_prev + RMS_next)).
+	//     By the triangle inequality, an interpolated B-frame sitting between neighbors has ratio near 0,
+	//     whereas a fresh I/Peak frame carrying detail absent from both neighbors has ratio near 1.0.
+	inline bool MeasureCleanInnovationAndBidirAsymmetry(
+		const double* curCleanY,
+		const double* prevWarpedCleanY,
+		const double* nextWarpedCleanY,
+		int w,
+		int h,
+		int cellPx,
+		int sourceBits,
+		double& outInnovationRatio,
+		double& outBidirAsymmetryRatio,
+		bool& outHasBidir,
+		size_t& outCellCount,
+		const ActiveRect* activeRect = nullptr,
+		const uint8_t* trustedCellMask = nullptr)
+	{
+		outInnovationRatio = 0.0;
+		outBidirAsymmetryRatio = 0.0;
+		outHasBidir = false;
+		outCellCount = 0;
+		if (curCleanY == nullptr || prevWarpedCleanY == nullptr || w <= 0 || h <= 0)
+			return false;
+		if (!(PeakCodeForBits(sourceBits) > 0.0))
+			return false;
+
+		const int step = cellPx > 0 ? cellPx : kCanonicalBlockPx;
+		const int cellsW = (w + step - 1) / step;
+		const int cellsH = (h + step - 1) / step;
+		const double dScale = DepthScale(sourceBits);
+		const double quantSigma = dScale / std::sqrt(12.0);
+		if (!(quantSigma > 0.0))
+			return false;
+
+		const int rx0 = (activeRect != nullptr && activeRect->IsValid(w, h)) ? activeRect->x0 : 0;
+		const int ry0 = (activeRect != nullptr && activeRect->IsValid(w, h)) ? activeRect->y0 : 0;
+		const int rx1 = (activeRect != nullptr && activeRect->IsValid(w, h)) ? activeRect->x1 : w;
+		const int ry1 = (activeRect != nullptr && activeRect->IsValid(w, h)) ? activeRect->y1 : h;
+
+		std::vector<double> innovRatios;
+		std::vector<double> bidirRatios;
+		innovRatios.reserve(static_cast<size_t>(cellsW) * static_cast<size_t>(cellsH));
+		if (nextWarpedCleanY != nullptr)
+			bidirRatios.reserve(static_cast<size_t>(cellsW) * static_cast<size_t>(cellsH));
+
+		for (int cy = 0; cy < cellsH; ++cy)
+		{
+			const int y0 = (std::max)(cy * step, ry0);
+			const int y1 = (std::min)((cy + 1) * step, ry1);
+			if (y0 >= y1)
+				continue;
+			for (int cx = 0; cx < cellsW; ++cx)
+			{
+				const int x0 = (std::max)(cx * step, rx0);
+				const int x1 = (std::min)((cx + 1) * step, rx1);
+				if (x0 >= x1)
+					continue;
+				const size_t cIdx = static_cast<size_t>(cy) * static_cast<size_t>(cellsW) + static_cast<size_t>(cx);
+				if (trustedCellMask != nullptr && trustedCellMask[cIdx] == 0)
+					continue;
+
+				double sumPrev2 = 0.0;
+				double sumNext2 = 0.0;
+				double sumMid2 = 0.0;
+				size_t cnt = 0;
+				bool cellFinite = true;
+				for (int y = y0; y < y1 && cellFinite; ++y)
+				{
+					const size_t row = static_cast<size_t>(y) * static_cast<size_t>(w);
+					for (int x = x0; x < x1; ++x)
+					{
+						const size_t p = row + static_cast<size_t>(x);
+						const double c = curCleanY[p];
+						const double pv = prevWarpedCleanY[p];
+						if (!std::isfinite(c) || !std::isfinite(pv))
+						{
+							cellFinite = false;
+							break;
+						}
+						const double dp = c - pv;
+						sumPrev2 += dp * dp;
+						if (nextWarpedCleanY != nullptr)
+						{
+							const double nv = nextWarpedCleanY[p];
+							if (!std::isfinite(nv))
+							{
+								cellFinite = false;
+								break;
+							}
+							const double dn = c - nv;
+							const double dm = c - 0.5 * (pv + nv);
+							sumNext2 += dn * dn;
+							sumMid2 += dm * dm;
+						}
+						++cnt;
+					}
+				}
+				if (!cellFinite || cnt < 4u)
+					continue;
+
+				const double invN = 1.0 / static_cast<double>(cnt);
+				const double rmsPrev = std::sqrt(sumPrev2 * invN);
+				innovRatios.push_back(rmsPrev / quantSigma);
+
+				if (nextWarpedCleanY != nullptr)
+				{
+					const double rmsNext = std::sqrt(sumNext2 * invN);
+					const double rmsMid = std::sqrt(sumMid2 * invN);
+					const double avgSide = 0.5 * (rmsPrev + rmsNext);
+					if (avgSide > quantSigma)
+						bidirRatios.push_back(RampMath::Clamp01(rmsMid / avgSide));
+				}
+			}
+		}
+
+		outCellCount = innovRatios.size();
+		if (innovRatios.empty())
+			return false;
+		outInnovationRatio = RobustStats::Median(innovRatios, RobustStats::MedianRule::MeanOfMiddle);
+		if (!bidirRatios.empty())
+		{
+			outBidirAsymmetryRatio = RobustStats::Median(bidirRatios, RobustStats::MedianRule::MeanOfMiddle);
+			outHasBidir = std::isfinite(outBidirAsymmetryRatio);
+		}
+		return std::isfinite(outInnovationRatio);
+	}
+
+	// Combines whichever Pass 3B forensic cues are enabled and valid via exact equal-weight (1/N) average into [0, 1].
+	inline ForensicFrameSignals ComputeForensicFrameSignals(
+		const ForensicPeakV2Config& cfg,
+		const double* curRawY,
+		const double* prevWarpedRawY,
+		const double* curCleanY,
+		const double* prevWarpedCleanY,
+		const double* nextWarpedCleanY,
+		int w,
+		int h,
+		const double* cellGrainVarP10g,
+		double scalarGrainVar,
+		int cellPx = kCanonicalBlockPx,
+		int sourceBits = 10,
+		const ActiveRect* activeRect = nullptr,
+		const uint8_t* trustedCellMask = nullptr)
+	{
+		ForensicFrameSignals sig;
+		double scoreSum = 0.0;
+		int cueCount = 0;
+
+		if (cfg.enableSkipGrainFreeze)
+		{
+			sig.hasSkipGrainFreeze = MeasureSkipGrainFreezeFraction(
+				curRawY, prevWarpedRawY, w, h, cellGrainVarP10g, scalarGrainVar, cellPx, sourceBits,
+				sig.skipGrainFreezeFrac, sig.grainActiveCells, activeRect, trustedCellMask);
+			if (sig.hasSkipGrainFreeze)
+			{
+				scoreSum += RampMath::Clamp01(1.0 - sig.skipGrainFreezeFrac);
+				++cueCount;
+			}
+		}
+
+		if (cfg.enableAcSparsity)
+		{
+			sig.hasAcSparsity = MeasureCleanAcSparsityPi0(
+				curCleanY, w, h, sourceBits, sig.acSparsityPi0, sig.texturedAcBlocks, activeRect);
+			if (sig.hasAcSparsity)
+			{
+				scoreSum += RampMath::Clamp01(1.0 - sig.acSparsityPi0);
+				++cueCount;
+			}
+		}
+
+		if (cfg.enableInnovationBidir)
+		{
+			sig.hasInnovation = MeasureCleanInnovationAndBidirAsymmetry(
+				curCleanY, prevWarpedCleanY, nextWarpedCleanY, w, h, cellPx, sourceBits,
+				sig.innovationResetRatio, sig.bidirAsymmetryRatio, sig.hasBidirAsymmetry,
+				sig.innovationCells, activeRect, trustedCellMask);
+			if (sig.hasInnovation)
+			{
+				// Map innovation SNR into [0, 1] using derived 3-sigma scale (kBlockingRatioSigma = 3.0).
+				scoreSum += RampMath::Clamp01(std::tanh((std::max)(0.0, sig.innovationResetRatio) / kBlockingRatioSigma));
+				++cueCount;
+			}
+			if (sig.hasBidirAsymmetry)
+			{
+				scoreSum += RampMath::Clamp01(sig.bidirAsymmetryRatio);
+				++cueCount;
+			}
+		}
+
+		sig.activeCueCount = cueCount;
+		if (cueCount > 0)
+		{
+			sig.compositePeakScore = RampMath::Clamp01(scoreSum / static_cast<double>(cueCount));
+			sig.valid = std::isfinite(sig.compositePeakScore);
+		}
+		return sig;
+	}
+
+	// Nested Mini-GOP (4 / 8 / 16 unique frames) phase-folded rhythm lock + U7 post-cut I-frame seeding,
+	// fully wired to the mandatory s3.5 cut / fade / flash / resync / pulldown-repeat contract.
+	class ForensicGopCadenceLock
+	{
+	public:
+		static constexpr int kNumCandidatePeriods = 3;
+		static constexpr int kCandidatePeriods[kNumCandidatePeriods] = { 4, 8, 16 };
+		static constexpr size_t kMaxHistorySamples = 32; // >= 2 full cycles of longest period (16)
+		// 2-sigma statistical separation between peak phase mean and non-peak phase mean (95% confidence).
+		static constexpr double kMinLockSeparationZ = 2.0;
+
+		void ResetAll()
+		{
+			samples_.clear();
+			uniqueFrameIndex_ = 0;
+			lockedPeriod_ = 0;
+			lockedPhase_ = -1;
+			lockSeparationZ_ = 0.0;
+			postCutIFramePending_ = false;
+			fadeSuspended_ = false;
+			cutResetCount_ = 0;
+			fadeSuspendCount_ = 0;
+			flashSkipCount_ = 0;
+			resyncResetCount_ = 0;
+			pulldownRepeatSkipCount_ = 0;
+		}
+
+		// s3.5 Hard Cut (U7): wipe previous shot's lock completely, reset unique index to 0,
+		// and seed frame 0 post-cut as a high-prior new-shot I-frame anchor.
+		void OnHardCut()
+		{
+			samples_.clear();
+			uniqueFrameIndex_ = 0;
+			lockedPeriod_ = 0;
+			lockedPhase_ = -1;
+			lockSeparationZ_ = 0.0;
+			postCutIFramePending_ = true;
+			fadeSuspended_ = false;
+			++cutResetCount_;
+		}
+
+		// s3.5 Resync / Discontinuity / Seek: cold-start wipe WITHOUT blindly seeding frame 0 as an I-frame!
+		void OnResync()
+		{
+			samples_.clear();
+			uniqueFrameIndex_ = 0;
+			lockedPeriod_ = 0;
+			lockedPhase_ = -1;
+			lockSeparationZ_ = 0.0;
+			postCutIFramePending_ = false;
+			fadeSuspended_ = false;
+			++resyncResetCount_;
+		}
+
+		// s3.5 Fade / Dissolve: suspend cadence-lock updates & peak scoring until fade clears.
+		void OnFade()
+		{
+			fadeSuspended_ = true;
+			++fadeSuspendCount_;
+		}
+
+		// s3.5 Flash / Strobe (P4): skip flash frame in accumulator, advancing uniqueFrameIndex_ ONLY
+		// so a locked Mini-GOP 4/8/16 phase stays 100% intact across a 1-frame flash!
+		void OnFlash()
+		{
+			++uniqueFrameIndex_;
+			++flashSkipCount_;
+		}
+
+		// s3.5 3:2 Pulldown Repeat (dt == 0 / exact-copy): NEVER advance uniqueFrameIndex_ or push into accumulator!
+		void OnPulldownRepeat()
+		{
+			++pulldownRepeatSkipCount_;
+		}
+
+		// Push a unique non-fade, non-flash, non-repeat frame score and return its assigned unique source-frame index.
+		uint64_t PushUniqueFrame(double score, int sourceBits, bool& outWasPostCutSeed)
+		{
+			fadeSuspended_ = false;
+			const uint64_t assignedIdx = uniqueFrameIndex_;
+			++uniqueFrameIndex_;
+			outWasPostCutSeed = postCutIFramePending_ && (assignedIdx == 0);
+			postCutIFramePending_ = false;
+
+			if (std::isfinite(score))
+			{
+				samples_.push_back(CadenceSample{ assignedIdx, RampMath::Clamp01(score) });
+				if (samples_.size() > kMaxHistorySamples)
+					samples_.pop_front();
+				RecomputeLock(sourceBits);
+			}
+			return assignedIdx;
+		}
+
+		bool IsLocked() const { return lockedPeriod_ > 0 && lockedPhase_ >= 0; }
+		int LockedPeriod() const { return lockedPeriod_; }
+		int LockedPhase() const { return lockedPhase_; }
+		double LockSeparationZ() const { return lockSeparationZ_; }
+		bool IsFadeSuspended() const { return fadeSuspended_; }
+		uint64_t UniqueFrameIndex() const { return uniqueFrameIndex_; }
+
+		bool IsPeakPhase(uint64_t uniqueIdx) const
+		{
+			if (!IsLocked())
+				return false;
+			return static_cast<int>(uniqueIdx % static_cast<uint64_t>(lockedPeriod_)) == lockedPhase_;
+		}
+
+		uint64_t CutResetCount() const { return cutResetCount_; }
+		uint64_t FadeSuspendCount() const { return fadeSuspendCount_; }
+		uint64_t FlashSkipCount() const { return flashSkipCount_; }
+		uint64_t ResyncResetCount() const { return resyncResetCount_; }
+		uint64_t PulldownRepeatSkipCount() const { return pulldownRepeatSkipCount_; }
+
+	private:
+		struct CadenceSample
+		{
+			uint64_t uniqueIdx = 0;
+			double score = 0.0;
+		};
+
+		void RecomputeLock(int sourceBits)
+		{
+			const double peakCode = PeakCodeForBits(sourceBits);
+			const double quantFloor = (peakCode > 0.0) ? (0.5 / peakCode) : kRoleNumFloor;
+
+			int bestPeriod = 0;
+			int bestPhase = -1;
+			double bestZ = 0.0;
+
+			for (int pi = 0; pi < kNumCandidatePeriods; ++pi)
+			{
+				const int P = kCandidatePeriods[pi];
+				if (samples_.size() < static_cast<size_t>(2 * P))
+					continue;
+
+				double sumPhase[16] = {};
+				int cntPhase[16] = {};
+				for (const auto& s : samples_)
+				{
+					const int ph = static_cast<int>(s.uniqueIdx % static_cast<uint64_t>(P));
+					sumPhase[ph] += s.score;
+					++cntPhase[ph];
+				}
+
+				int populatedBins = 0;
+				int peakPh = -1;
+				double peakMean = -1.0;
+				for (int ph = 0; ph < P; ++ph)
+				{
+					if (cntPhase[ph] > 0)
+						++populatedBins;
+					if (cntPhase[ph] >= 2)
+					{
+						const double m = sumPhase[ph] / static_cast<double>(cntPhase[ph]);
+						if (m > peakMean)
+						{
+							peakMean = m;
+							peakPh = ph;
+						}
+					}
+				}
+				if (peakPh < 0 || populatedBins < P - 1)
+					continue;
+
+				double otherSum = 0.0;
+				int otherCnt = 0;
+				for (int ph = 0; ph < P; ++ph)
+				{
+					if (ph != peakPh)
+					{
+						otherSum += sumPhase[ph];
+						otherCnt += cntPhase[ph];
+					}
+				}
+				if (otherCnt < 2)
+					continue;
+				const double otherMean = otherSum / static_cast<double>(otherCnt);
+				if (peakMean <= otherMean + quantFloor)
+					continue;
+
+				double ssPeak = 0.0;
+				double ssOther = 0.0;
+				for (const auto& s : samples_)
+				{
+					const int ph = static_cast<int>(s.uniqueIdx % static_cast<uint64_t>(P));
+					if (ph == peakPh)
+					{
+						const double d = s.score - peakMean;
+						ssPeak += d * d;
+					}
+					else
+					{
+						const double d = s.score - otherMean;
+						ssOther += d * d;
+					}
+				}
+				const double varPeak = (cntPhase[peakPh] > 1) ? (ssPeak / static_cast<double>(cntPhase[peakPh] - 1)) : 0.0;
+				const double varOther = (otherCnt > 1) ? (ssOther / static_cast<double>(otherCnt - 1)) : 0.0;
+				const double se = std::sqrt(varPeak / static_cast<double>(cntPhase[peakPh]) + varOther / static_cast<double>(otherCnt));
+				const double z = (peakMean - otherMean) / (std::max)(se, quantFloor);
+
+				if (z >= kMinLockSeparationZ)
+				{
+					// Prefer smallest fundamental period (4 < 8 < 16) unless a longer period beats it by > 1 sigma.
+					if (bestPeriod == 0 || z > bestZ + 1.0)
+					{
+						bestPeriod = P;
+						bestPhase = peakPh;
+						bestZ = z;
+					}
+				}
+			}
+
+			lockedPeriod_ = bestPeriod;
+			lockedPhase_ = bestPhase;
+			lockSeparationZ_ = bestZ;
+		}
+
+		std::deque<CadenceSample> samples_;
+		uint64_t uniqueFrameIndex_ = 0;
+		int lockedPeriod_ = 0;
+		int lockedPhase_ = -1;
+		double lockSeparationZ_ = 0.0;
+		bool postCutIFramePending_ = false;
+		bool fadeSuspended_ = false;
+		uint64_t cutResetCount_ = 0;
+		uint64_t fadeSuspendCount_ = 0;
+		uint64_t flashSkipCount_ = 0;
+		uint64_t resyncResetCount_ = 0;
+		uint64_t pulldownRepeatSkipCount_ = 0;
+	};
+
 	// Picture-only evidence supplied per unique frame (ZERO bitstream/encoder side data).
 	struct FrameRoleEvidence
 	{
@@ -1000,8 +1706,13 @@ namespace TdV2
 		uint16_t periodY = 0;
 		double exactCopyFracPrev1 = 0.0;  // Fraction of cells matching N-1
 		double exactCopyFracPrev2 = 0.0;  // Fraction of cells matching N-2
-		bool isCut = false;               // External P4 / MotionValidity transition flag
-		bool isFade = false;              // External P4 fade flag
+		bool isCut = false;               // External P4 / U7 hard-cut flag
+		bool isFade = false;              // External P4 / U7 fade flag
+		bool isFlash = false;             // External P4 1-frame flash/strobe flag (s3.5)
+		bool isResyncOrDiscontinuity = false; // External VpIndicator kFull|kContinuity / seek / span-invalid flag (s3.5)
+		bool isPulldownRepeat = false;    // External 3:2 pulldown repeat / dt == 0 flag (s3.5)
+		double forensicPeakScore = -1.0;  // Optional Pass 3B compositePeakScore in [0, 1]
+		bool hasForensicScore = false;    // True when forensicPeakScore was populated by ComputeForensicFrameSignals
 		int sourceBits = 10;
 
 		static FrameRoleEvidence FromCodingGrid(
@@ -1126,6 +1837,8 @@ namespace TdV2
 		InsufficientWindow,
 		LowRhythmContrast,
 		NonFiniteEvidence,
+		FlashAbstained,
+		ResyncReset,
 		Count
 	};
 
@@ -1139,6 +1852,8 @@ namespace TdV2
 		case AbstainReason::InsufficientWindow: return "insufficient window";
 		case AbstainReason::LowRhythmContrast: return "low rhythm contrast";
 		case AbstainReason::NonFiniteEvidence: return "non-finite evidence";
+		case AbstainReason::FlashAbstained: return "flash abstained";
+		case AbstainReason::ResyncReset: return "resync reset";
 		case AbstainReason::Count: break;
 		}
 		return "unknown";
@@ -1151,6 +1866,12 @@ namespace TdV2
 		bool produced = false;
 		// Pending frames flushed in sequence order before a cut or lead reduction with available reduced lead (marked provisional; zero silent drops).
 		std::vector<FrameRoleDecision> flushedBeforeCut;
+		// Pass 3B forensic cadence observability (always default-inert when enableForensicGopPeakV2 == false).
+		bool cadenceLocked = false;
+		int lockedGopPeriod = 0;
+		int lockedGopPhase = -1;
+		bool postCutIFrameSeeded = false;
+		bool cadencePromotedPeak = false;
 	};
 
 	class TdV2FrameRoleDetector
@@ -1160,10 +1881,17 @@ namespace TdV2
 		static constexpr size_t kMaxWindowFrames = 9;
 		static constexpr uint8_t kMaxLeadFrames = 2;
 
-		explicit TdV2FrameRoleDetector(uint8_t leadFrames = kMaxLeadFrames)
+		explicit TdV2FrameRoleDetector(
+			uint8_t leadFrames = kMaxLeadFrames,
+			const ForensicPeakV2Config& forensicCfg = ForensicPeakV2Config{})
 			: leadFrames_(leadFrames > kMaxLeadFrames ? kMaxLeadFrames : leadFrames)
+			, forensicCfg_(forensicCfg)
 		{
 		}
+
+		void SetForensicConfig(const ForensicPeakV2Config& cfg) { forensicCfg_ = cfg; }
+		const ForensicPeakV2Config& ForensicConfig() const { return forensicCfg_; }
+		const ForensicGopCadenceLock& CadenceLock() const { return cadenceLock_; }
 
 		void SetLeadFrames(uint8_t leadFrames, std::vector<FrameRoleDecision>* flushedOut = nullptr)
 		{
@@ -1197,6 +1925,7 @@ namespace TdV2
 					++droppedCount_;
 			}
 			window_.clear();
+			cadenceLock_.ResetAll();
 			hasEmittedSeq_ = false;
 			lastEmittedSeq_ = 0;
 		}
@@ -1228,6 +1957,7 @@ namespace TdV2
 			if (!std::isfinite(ev.qualityScore) || !std::isfinite(ev.stepMean) ||
 			    !std::isfinite(ev.stepP90) || !std::isfinite(ev.stepMax) ||
 			    !std::isfinite(ev.exactCopyFracPrev1) || !std::isfinite(ev.exactCopyFracPrev2) ||
+			    (ev.hasForensicScore && !std::isfinite(ev.forensicPeakScore)) ||
 			    PeakCodeForBits(ev.sourceBits) <= 0.0)
 			{
 				if (standIns != nullptr)
@@ -1247,6 +1977,55 @@ namespace TdV2
 				}
 				Abstain(dec, AbstainReason::NonFiniteEvidence, ev.seq, leadFrames_, /*emitRecord=*/true);
 				dec.flushedBeforeCut = std::move(pendingFlushed);
+				return dec;
+			}
+
+			// s3.5 Resync / Discontinuity / Seek: full cold-start wipe of window & cadence lock
+			// WITHOUT blindly seeding frame 0 as a confirmed I-frame! Takes precedence over isCut.
+			if (ev.isResyncOrDiscontinuity)
+			{
+				std::vector<FrameRoleDecision> flushed;
+				for (size_t i = 0; i < window_.size(); ++i)
+				{
+					if (window_[i].emitted)
+						continue;
+					const size_t remAhead = window_.size() - 1 - i;
+					const uint8_t availLead = (remAhead < static_cast<size_t>(kMaxLeadFrames))
+						? static_cast<uint8_t>(remAhead)
+						: kMaxLeadFrames;
+					FrameRoleDecision fd = ClassifyTargetWithLead(i, window_[i].ev, availLead, /*forceProvisional=*/true);
+					window_[i].emitted = true;
+					flushed.push_back(std::move(fd));
+				}
+				window_.clear();
+				cadenceLock_.OnResync();
+				const bool emitNow = (leadFrames_ == 0);
+				WindowEntry entry{};
+				entry.ev = ev;
+				entry.emitted = emitNow;
+				if (forensicCfg_.enableForensicGopPeakV2 && forensicCfg_.enableCadenceLock && !ev.isFade && !ev.isFlash)
+				{
+					uint8_t cf = 0;
+					if (ev.isPulldownRepeat || IsExactCopy(ev, cf))
+					{
+						cadenceLock_.OnPulldownRepeat();
+					}
+					else
+					{
+						bool wasSeed = false;
+						entry.uniqueIdx = cadenceLock_.PushUniqueFrame(EffectiveScore(ev), ev.sourceBits, wasSeed);
+						entry.hasUniqueIdx = true;
+						entry.isPostCutIFrameSeed = false; // NEVER seed on resync/seek
+					}
+				}
+				window_.push_back(entry);
+				if (emitNow)
+				{
+					hasEmittedSeq_ = true;
+					lastEmittedSeq_ = ev.seq;
+				}
+				Abstain(dec, AbstainReason::ResyncReset, ev.seq, leadFrames_, emitNow);
+				dec.flushedBeforeCut = std::move(flushed);
 				return dec;
 			}
 
@@ -1271,8 +2050,37 @@ namespace TdV2
 					flushed.push_back(std::move(fd));
 				}
 				window_.clear();
+				cadenceLock_.OnHardCut();
+
 				const bool emitNow = (leadFrames_ == 0);
-				window_.push_back(WindowEntry{ ev, emitNow });
+				WindowEntry entry{};
+				entry.ev = ev;
+				entry.emitted = emitNow;
+				if (forensicCfg_.enableForensicGopPeakV2 && forensicCfg_.enableCadenceLock && !ev.isFade && !ev.isFlash)
+				{
+					uint8_t cf = 0;
+					if (ev.isPulldownRepeat || IsExactCopy(ev, cf))
+					{
+						cadenceLock_.OnPulldownRepeat();
+					}
+					else
+					{
+						bool wasSeed = false;
+						entry.uniqueIdx = cadenceLock_.PushUniqueFrame(EffectiveScore(ev), ev.sourceBits, wasSeed);
+						entry.hasUniqueIdx = true;
+						entry.isPostCutIFrameSeed = wasSeed;
+					}
+				}
+				window_.push_back(entry);
+
+				// Pass 3B U7 post-cut I-frame seeding when causal (leadFrames_ == 0): emit frame 0 immediately as Peak!
+				if (emitNow && entry.isPostCutIFrameSeed)
+				{
+					FrameRoleDecision seedDec = ClassifyTargetWithLead(0, window_[0].ev, 0, /*forceProvisional=*/true);
+					seedDec.flushedBeforeCut = std::move(flushed);
+					return seedDec;
+				}
+
 				if (emitNow)
 				{
 					hasEmittedSeq_ = true;
@@ -1283,7 +2091,39 @@ namespace TdV2
 				return dec;
 			}
 
-			window_.push_back(WindowEntry{ ev, false });
+			// Feed Pass 3B cadence lock & s3.5 event counters for arriving frame.
+			WindowEntry newEntry{};
+			newEntry.ev = ev;
+			newEntry.emitted = false;
+			if (ev.isFlash)
+			{
+				if (standIns != nullptr)
+					standIns->Engage(StandInKind::FlashFrameAbstained, "P4 flash abstained in TdV2FrameRoleDetector");
+				cadenceLock_.OnFlash();
+			}
+			else if (ev.isFade)
+			{
+				if (forensicCfg_.enableForensicGopPeakV2 && standIns != nullptr)
+					standIns->Engage(StandInKind::CadenceSuspendedFade, "U7 fade suspended forensic cadence lock");
+				cadenceLock_.OnFade();
+			}
+			else
+			{
+				uint8_t copyFlags = 0;
+				if (ev.isPulldownRepeat || IsExactCopy(ev, copyFlags))
+				{
+					cadenceLock_.OnPulldownRepeat();
+				}
+				else if (forensicCfg_.enableForensicGopPeakV2 && forensicCfg_.enableCadenceLock)
+				{
+					bool wasSeed = false;
+					newEntry.uniqueIdx = cadenceLock_.PushUniqueFrame(EffectiveScore(ev), ev.sourceBits, wasSeed);
+					newEntry.hasUniqueIdx = true;
+					newEntry.isPostCutIFrameSeed = wasSeed;
+				}
+			}
+
+			window_.push_back(newEntry);
 			if (window_.size() > kMaxWindowFrames)
 			{
 				if (!window_.front().emitted)
@@ -1390,7 +2230,27 @@ namespace TdV2
 		{
 			FrameRoleEvidence ev;
 			bool emitted = false;
+			uint64_t uniqueIdx = 0;
+			bool hasUniqueIdx = false;
+			bool isPostCutIFrameSeed = false;
 		};
+
+		double EffectiveScore(const FrameRoleEvidence& e) const
+		{
+			if (forensicCfg_.enableForensicGopPeakV2 && e.hasForensicScore && std::isfinite(e.forensicPeakScore))
+				return RampMath::Clamp01(e.forensicPeakScore);
+			return RampMath::Clamp01(e.qualityScore);
+		}
+
+		void StampCadenceTelemetry(FrameRoleDecision& dec) const
+		{
+			if (forensicCfg_.enableForensicGopPeakV2 && forensicCfg_.enableCadenceLock)
+			{
+				dec.cadenceLocked = cadenceLock_.IsLocked();
+				dec.lockedGopPeriod = cadenceLock_.LockedPeriod();
+				dec.lockedGopPhase = cadenceLock_.LockedPhase();
+			}
+		}
 
 		static uint16_t ToQ88(double v)
 		{
@@ -1431,6 +2291,7 @@ namespace TdV2
 			dec.record.causal = (leadUsed == 0) ? 1u : 0u;
 			if (forceProvisional || leadUsed < kMaxLeadFrames)
 				dec.record.validityBits |= QualityPattern::kProvisional;
+			StampCadenceTelemetry(dec);
 			if (emitRecord)
 			{
 				hasEmittedSeq_ = true;
@@ -1456,7 +2317,8 @@ namespace TdV2
 			r.seq = target.seq;
 			r.leadUsed = leadUsed;
 			r.causal = (leadUsed == 0) ? 1u : 0u;
-			r.score = static_cast<float>(RampMath::Clamp01(target.qualityScore));
+			const double tScore = EffectiveScore(target);
+			r.score = static_cast<float>(tScore);
 			r.stepMean = ToQ88(target.stepMean);
 			r.stepP90 = ToQ88(target.stepP90);
 			r.stepMax = ToQ88(target.stepMax);
@@ -1467,6 +2329,13 @@ namespace TdV2
 				r.validityBits |= QualityPattern::kValidGrid;
 			if (forceProvisional || leadUsed < kMaxLeadFrames)
 				r.validityBits |= QualityPattern::kProvisional;
+			StampCadenceTelemetry(dec);
+
+			// s3.5 Flash active -> abstain cleanly without contaminating cadence lock or neighbors.
+			if (target.isFlash)
+			{
+				return Abstain(dec, AbstainReason::FlashAbstained, target.seq, leadUsed, /*emitRecord=*/true, forceProvisional);
+			}
 
 			// Fade active -> abstain visibly rather than guessing peaks during a ramp.
 			if (target.isFade)
@@ -1476,8 +2345,10 @@ namespace TdV2
 
 			// Cadence repeat check (3:2 pulldown): ExactCopy MUST NEVER be promoted to Peak!
 			uint8_t copyFlags = 0;
-			if (IsExactCopy(target, copyFlags))
+			if (target.isPulldownRepeat || IsExactCopy(target, copyFlags))
 			{
+				if (copyFlags == 0)
+					copyFlags = QualityPattern::kCopyOfPrev1;
 				r.exactCopyFlags = copyFlags;
 				r.role = static_cast<uint8_t>(QualityPattern::FrameRole::ExactCopy);
 				r.peakValley = static_cast<uint8_t>(QualityPattern::PeakValley::None);
@@ -1489,7 +2360,22 @@ namespace TdV2
 				return dec;
 			}
 
-			// Collect unique (non-ExactCopy, non-fade) frames in window for ranking and neighbor comparison.
+			// Pass 3B U7 post-cut I-frame seeding: frame 0 after a confirmed U7 hard cut is a high-prior I-frame anchor!
+			const WindowEntry& targetEntry = window_[targetIdx];
+			if (forensicCfg_.enableForensicGopPeakV2 && forensicCfg_.enableCadenceLock && targetEntry.isPostCutIFrameSeed)
+			{
+				r.role = static_cast<uint8_t>(QualityPattern::FrameRole::Peak);
+				r.peakValley = static_cast<uint8_t>(QualityPattern::PeakValley::Peak);
+				r.validityBits |= QualityPattern::kValidRole;
+				dec.abstain = AbstainReason::None;
+				dec.produced = true;
+				dec.postCutIFrameSeeded = true;
+				hasEmittedSeq_ = true;
+				lastEmittedSeq_ = target.seq;
+				return dec;
+			}
+
+			// Collect unique (non-ExactCopy, non-fade, non-flash) frames in window for ranking and neighbor comparison.
 			std::vector<double> uniqueScores;
 			uniqueScores.reserve(window_.size());
 			double prevUniqueScore = 0.0;
@@ -1500,12 +2386,12 @@ namespace TdV2
 			for (size_t i = 0; i < window_.size(); ++i)
 			{
 				const FrameRoleEvidence& we = window_[i].ev;
-				if (we.isFade)
+				if (we.isFade || we.isFlash)
 					continue;
 				uint8_t cf = 0;
-				if (i != targetIdx && IsExactCopy(we, cf))
+				if (i != targetIdx && (we.isPulldownRepeat || IsExactCopy(we, cf)))
 					continue;
-				const double sc = RampMath::Clamp01(we.qualityScore);
+				const double sc = EffectiveScore(we);
 				uniqueScores.push_back(sc);
 				if (i < targetIdx)
 				{
@@ -1527,7 +2413,6 @@ namespace TdV2
 			}
 
 			// Compute rank (0 = highest score) and robust spread via U24 RobustStats.
-			const double tScore = RampMath::Clamp01(target.qualityScore);
 			uint16_t betterCount = 0;
 			double minSc = uniqueScores[0], maxSc = uniqueScores[0];
 			for (double s : uniqueScores)
@@ -1610,6 +2495,18 @@ namespace TdV2
 					isValley = true;
 			}
 
+			// Pass 3B Mini-GOP (4/8/16) cadence lock promotion: when cadence is statistically locked (>= 2 sigma)
+			// and this frame lands on the locked peak phase WITHOUT contradicting the window median (not a valley),
+			// recover peaks whose single-frame contrast fell slightly below the sliding-window margin.
+			if (!isPeak && !isValley &&
+			    forensicCfg_.enableForensicGopPeakV2 && forensicCfg_.enableCadenceLock &&
+			    targetEntry.hasUniqueIdx && cadenceLock_.IsPeakPhase(targetEntry.uniqueIdx) &&
+			    tScore >= medScore - quantScoreFloor)
+			{
+				isPeak = true;
+				dec.cadencePromotedPeak = true;
+			}
+
 			if (isPeak)
 			{
 				r.role = static_cast<uint8_t>(QualityPattern::FrameRole::Peak);
@@ -1635,6 +2532,8 @@ namespace TdV2
 		}
 
 		uint8_t leadFrames_ = kMaxLeadFrames;
+		ForensicPeakV2Config forensicCfg_{};
+		ForensicGopCadenceLock cadenceLock_{};
 		std::deque<WindowEntry> window_;
 		std::array<uint64_t, static_cast<size_t>(AbstainReason::Count)> abstainCounts_{};
 		bool hasEmittedSeq_ = false;

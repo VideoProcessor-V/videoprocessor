@@ -91,30 +91,7 @@ namespace TdV2
 		double at(int x, int y) const { return v[static_cast<size_t>(y) * w + x]; }
 	};
 
-	// Active picture rectangle [x0, x1) x [y0, y1). Bar pixels outside are bit-exact copied and never crossed by warps.
-	struct ActiveRect
-	{
-		int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
-
-		static ActiveRect Full(int w, int h) { return { 0, 0, w, h }; }
-
-		ActiveRect ClampedTo(int w, int h) const
-		{
-			ActiveRect r;
-			r.x0 = (std::max)(0, (std::min)(w, x0));
-			r.y0 = (std::max)(0, (std::min)(h, y0));
-			r.x1 = (std::max)(r.x0, (std::min)(w, x1));
-			r.y1 = (std::max)(r.y0, (std::min)(h, y1));
-			return r;
-		}
-
-		int Width() const { return x1 - x0; }
-		int Height() const { return y1 - y0; }
-		bool Contains(int x, int y) const { return x >= x0 && x < x1 && y >= y0 && y < y1; }
-		bool Empty() const { return x1 <= x0 || y1 <= y0; }
-	};
-
-	// Sub-plane view over ActiveRect so VpComposed::SampleBicubic enforces hard bar boundaries automatically
+	// Sub-plane view over ActiveRect (defined in TdV2Config.h) so VpComposed::SampleBicubic enforces hard bar boundaries automatically
 	// (all 16 bicubic taps must lie strictly inside [x0, x1) x [y0, y1)).
 	struct ActiveSubPlaneView
 	{
