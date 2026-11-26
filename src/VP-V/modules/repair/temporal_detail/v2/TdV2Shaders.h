@@ -3200,7 +3200,7 @@ for (int b = 0; b < 3; ++b)
             if (bandWSum > TD_NUM_FLOOR)
                 activeBandBits |= (1 << b);
             cellWeightSumAll += bandWSum;
-            cellResEnergy += C[0][0];
+            cellResEnergy += ((cellActMask & 1) != 0) ? C[0][0] : 0.0;
         }
     }
 

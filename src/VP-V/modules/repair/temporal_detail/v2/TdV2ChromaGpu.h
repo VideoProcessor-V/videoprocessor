@@ -789,11 +789,17 @@ vec2 curL2Sum = vec2(0.0);
 vec2 refMidE[3];
 vec2 refLSum[3];
 vec2 refL2Sum[3];
+float pHCnt = 0.0;
+vec2 pCurH2 = vec2(0.0);
+vec2 pRefH2[3];
+vec2 pCrossH[3];
 for (int k = 0; k < 3; ++k)
 {
     refMidE[k] = vec2(0.0);
     refLSum[k] = vec2(0.0);
     refL2Sum[k] = vec2(0.0);
+    pRefH2[k] = vec2(0.0);
+    pCrossH[k] = vec2(0.0);
 }
 
 vec3 sumCb[3];
@@ -889,6 +895,28 @@ for (int sy = 0; sy < subY; ++sy)
                     singleCb[b] = dCb;
                     singleCr[b] = dCr;
                 }
+            }
+        }
+
+        // PROD-GPU-BUG-18: Accumulate unsplit H-band Projection-IR moments (matching CPU TdV2Chroma.h:3669-3693).
+        int fullMaskH = (K > 0) ? ((1 << K) - 1) : 0;
+        if (u_has_clean_split < 0.5 && u_coarse_only < 0.5 && fullMaskH != 0 &&
+            cellGateMaskMH == fullMaskH && (refValidMask & fullMaskH) == fullMaskH &&
+            !td_is_bad(cMHp.z) && !td_is_bad(cMHp.w))
+        {
+            vec2 rh0 = td_ch_fetch_ref_b(0, p, 2);
+            vec2 rh1 = (K > 1) ? td_ch_fetch_ref_b(1, p, 2) : vec2(0.0);
+            vec2 rh2 = (K > 2) ? td_ch_fetch_ref_b(2, p, 2) : vec2(0.0);
+            bool hFin = !td_is_bad(rh0.x) && !td_is_bad(rh0.y) &&
+                        (K <= 1 || (!td_is_bad(rh1.x) && !td_is_bad(rh1.y))) &&
+                        (K <= 2 || (!td_is_bad(rh2.x) && !td_is_bad(rh2.y)));
+            if (hFin)
+            {
+                pHCnt += 1.0;
+                pCurH2 += cMHp.zw * cMHp.zw;
+                pRefH2[0] += rh0 * rh0; pCrossH[0] += cMHp.zw * rh0;
+                if (K > 1) { pRefH2[1] += rh1 * rh1; pCrossH[1] += cMHp.zw * rh1; }
+                if (K > 2) { pRefH2[2] += rh2 * rh2; pCrossH[2] += cMHp.zw * rh2; }
             }
         }
     }
@@ -1170,6 +1198,42 @@ for (int chIdx = 0; chIdx < 2; ++chIdx)
         barrier();
     }
 }
+
+// PROD-GPU-BUG-18: Reduce unsplit H-band Projection-IR stats into proj_ir (2*TD_CW x 2*TD_CH RGBA32F).
+bool skipProjIr = cellIsFace || cellFocusChange || cellIsDefocused || (u_has_clean_split > 0.5) || (u_coarse_only > 0.5);
+for (int chIdx = 0; chIdx < 2; ++chIdx)
+{
+    vec4 pA = skipProjIr ? vec4(0.0) : vec4(pHCnt,
+        (chIdx == 0) ? pCurH2.x : pCurH2.y,
+        (chIdx == 0) ? pRefH2[0].x : pRefH2[0].y,
+        (chIdx == 0) ? pCrossH[0].x : pCrossH[0].y);
+    vec4 pB = skipProjIr ? vec4(0.0) : vec4(
+        (chIdx == 0) ? pRefH2[1].x : pRefH2[1].y,
+        (chIdx == 0) ? pCrossH[1].x : pCrossH[1].y,
+        (chIdx == 0) ? pRefH2[2].x : pRefH2[2].y,
+        (chIdx == 0) ? pCrossH[2].x : pCrossH[2].y);
+    td_cs_red4[tid] = pA;
+    td_cs_red4b[tid] = pB;
+    memoryBarrierShared();
+    barrier();
+    for (int stride = 128; stride > 0; stride >>= 1)
+    {
+        if (tid < stride)
+        {
+            td_cs_red4[tid] += td_cs_red4[tid + stride];
+            td_cs_red4b[tid] += td_cs_red4b[tid + stride];
+        }
+        memoryBarrierShared();
+        barrier();
+    }
+    if (tid == 0)
+    {
+        imageStore(proj_ir, ivec2(cell.x, chIdx * TD_CH + cell.y), td_cs_red4[0]);
+        imageStore(proj_ir, ivec2(TD_CW + cell.x, chIdx * TD_CH + cell.y), td_cs_red4b[0]);
+    }
+    memoryBarrierShared();
+    barrier();
+}
 )GLSL";
 
 		inline std::string BuildPassChromaCellStatsBody()
@@ -1177,91 +1241,87 @@ for (int chIdx = 0; chIdx < 2; ++chIdx)
 			return std::string(kPassChromaCellStatsPart1) + kPassChromaCellStatsPart2;
 		}
 
-		// ---- PASS C2EB-FLAT (CHR-LOW-1): 1-WG 16x16 Unsplit Grain Floor Reduction (dispatched ONLY when !hasCleanSplit && !coarseOnly) ----
-		// Output: eb_flat (1 x 2 R32F): (0, chIdx) -> unsplitGrainVar for Cb/Cr.
-		constexpr const char* kPassChromaEbFlatHeader = R"GLSL(
-#define TD_EB_TILES ((TD_CW * TD_CH + 255) / 256)
-shared vec4 td_cflat_red4[256];
-
-void td_ceb_cell_flat(int idx, int chIdx,
-                      inout float flatHSum, inout float flatHCnt, inout float anyMinH, inout float anyHCnt)
+		// ---- PROD-GPU-BUG-18: Exact Unsplit Chroma Projection-IR Helper (1:1 with CPU TdV2Chroma.h:3697-3722) ----
+		constexpr const char* kChromaProjIrHelpers = R"GLSL(
+float td_compute_projection_ir(float E, float C, float Eprev, float warpBeta)
 {
-    int cx = idx % TD_CW;
-    int cy = idx / TD_CW;
-    ivec2 cell = ivec2(cx, cy);
-    if (u_has_face_mask > 0.5 && texelFetch(face_mask, cell, 0).x > 0.5) return;
-    vec4 pT = texelFetch(cell_prior, cell, 0);
-    int fBits = int(round(pT.y));
-    bool focusChange = ((fBits & 1) != 0) || (texelFetch(cell_own_grain, cell, 0).w > 0.5);
-    bool isDefoc = ((fBits & 2) != 0);
-    if (focusChange || isDefoc) return;
-    float retG = (chIdx == 0) ? max(0.0, pT.x) : max(0.0, (u_cell_prior_has_cr_grain > 0.5) ? pT.w : pT.x);
-    float mVar = (chIdx == 0) ? max(0.0, texelFetch(cell_stats_cb, ivec2(TD_CW + cx, 2 * TD_CH + cy), 0).z)
-                              : max(0.0, texelFetch(cell_stats_cr, ivec2(TD_CW + cx, 2 * TD_CH + cy), 0).z);
-    float hVar = (chIdx == 0) ? max(0.0, texelFetch(cell_stats_cb, ivec2(2 * TD_CW + cx, 2 * TD_CH + cy), 0).z)
-                              : max(0.0, texelFetch(cell_stats_cr, ivec2(2 * TD_CW + cx, 2 * TD_CH + cy), 0).z);
-    float cleanTexMH = max(0.0, mVar - retG * TD_GAIN_MID * u_psd_mid) +
-                       max(0.0, hVar - retG * TD_GAIN_FINE * u_psd_fine);
-    if (cleanTexMH <= u_activity_tex_floor)
+    if (td_is_bad(E) || td_is_bad(C) || td_is_bad(Eprev) || td_is_bad(warpBeta) ||
+        E < 0.0 || Eprev < 0.0 || warpBeta < 0.0)
+        return 0.0;
+    if (Eprev <= TD_NUM_FLOOR || C <= 0.0)
+        return E;
+    float det = E * Eprev - C * C;
+    if (det <= 0.0)
+        return 0.0;
+    float bE = warpBeta * E;
+    float diff = Eprev - bE;
+    float disc = diff * diff + 4.0 * warpBeta * C * C;
+    float denom = (Eprev + bE) + sqrt(disc);
+    if (!(denom > TD_NUM_FLOOR * TD_NUM_FLOOR))
+        return 0.0;
+    float ir = (2.0 * det) / denom;
+    return (ir > 0.0) ? ir : 0.0;
+}
+
+float td_chroma_unsplit_proj_ir(ivec2 cell, int chIdx, int K, int hPoolR)
+{
+    if (K <= 0 || TD_GAIN_FINE <= TD_NUM_FLOOR)
+        return 0.0;
+    float hCnt = 0.0;
+    float sumCurH2 = 0.0;
+    float sumRefH2[3]; sumRefH2[0] = 0.0; sumRefH2[1] = 0.0; sumRefH2[2] = 0.0;
+    float sumCrossH[3]; sumCrossH[0] = 0.0; sumCrossH[1] = 0.0; sumCrossH[2] = 0.0;
+    for (int dy = -2; dy <= 2; ++dy)
     {
-        flatHSum += hVar;
-        flatHCnt += 1.0;
+        if (abs(dy) > hPoolR) continue;
+        int ncy = cell.y + dy;
+        if (ncy < 0 || ncy >= TD_CH) continue;
+        for (int dx = -2; dx <= 2; ++dx)
+        {
+            if (abs(dx) > hPoolR) continue;
+            int ncx = cell.x + dx;
+            if (ncx < 0 || ncx >= TD_CW) continue;
+            vec4 a0 = texelFetch(proj_ir, ivec2(ncx, chIdx * TD_CH + ncy), 0);
+            if (a0.x <= 0.5) continue;
+            vec4 a1 = texelFetch(proj_ir, ivec2(TD_CW + ncx, chIdx * TD_CH + ncy), 0);
+            hCnt += a0.x;
+            sumCurH2 += a0.y;
+            sumRefH2[0] += a0.z;
+            sumCrossH[0] += a0.w;
+            sumRefH2[1] += a1.x;
+            sumCrossH[1] += a1.y;
+            sumRefH2[2] += a1.z;
+            sumCrossH[2] += a1.w;
+        }
     }
-    anyMinH = min(anyMinH, hVar);
-    anyHCnt += 1.0;
+    if (hCnt <= 0.5)
+        return 0.0;
+    float invH = 1.0 / hCnt;
+    float meanCur = sumCurH2 * invH;
+    float refQuantFloor = (1.0 / 12.0) * TD_GAIN_FINE;
+    float sumProj = 0.0;
+    float validRefCnt = 0.0;
+    for (int k = 0; k < K; ++k)
+    {
+        float meanRef = sumRefH2[k] * invH;
+        float cross = sumCrossH[k] * invH;
+        int mSlot = clamp(td_p2b_motion_slot(k), 0, 2);
+        vec2 mv = texelFetch(motion_vec, ivec2(mSlot * TD_CW + cell.x, cell.y), 0).xy;
+        vec2 mvC = (td_is_bad(mv.x) || td_is_bad(mv.y))
+            ? vec2(0.0)
+            : vec2(mv.x / float(TD_CSUB_X), mv.y / float(TD_CSUB_Y));
+        float warpBeta = td_fine_hp_warp_gain(mvC);
+        if (meanRef > refQuantFloor)
+        {
+            sumProj += td_compute_projection_ir(meanCur, cross, meanRef, warpBeta);
+            validRefCnt += 1.0;
+        }
+    }
+    return (validRefCnt > 0.5) ? ((sumProj / validRefCnt) / TD_GAIN_FINE) : 0.0;
 }
 )GLSL";
 
-		constexpr const char* kPassChromaEbFlatFloor = R"GLSL(
-int tid = int(gl_LocalInvocationID.y) * 16 + int(gl_LocalInvocationID.x);
-int totalCells = TD_CW * TD_CH;
-
-for (int chIdx = 0; chIdx < 2; ++chIdx)
-{
-    float flatHSum = 0.0;
-    float flatHCnt = 0.0;
-    float anyMinH = 1e30;
-    float anyHCnt = 0.0;
-    for (int tile = 0; tile < TD_EB_TILES; ++tile)
-    {
-        int idx = tile * 256 + tid;
-        if (idx < totalCells)
-            td_ceb_cell_flat(idx, chIdx, flatHSum, flatHCnt, anyMinH, anyHCnt);
-    }
-    td_cflat_red4[tid] = vec4(flatHSum, flatHCnt, anyMinH, anyHCnt);
-    memoryBarrierShared();
-    barrier();
-    for (int stride = 128; stride > 0; stride >>= 1)
-    {
-        if (tid < stride)
-        {
-            td_cflat_red4[tid] = vec4(
-                td_cflat_red4[tid].x + td_cflat_red4[tid + stride].x,
-                td_cflat_red4[tid].y + td_cflat_red4[tid + stride].y,
-                min(td_cflat_red4[tid].z, td_cflat_red4[tid + stride].z),
-                td_cflat_red4[tid].w + td_cflat_red4[tid + stride].w);
-        }
-        memoryBarrierShared();
-        barrier();
-    }
-    if (tid == 0)
-    {
-        float unsplitG = 0.0;
-        if (TD_GAIN_FINE > TD_NUM_FLOOR)
-        {
-            if (td_cflat_red4[0].y > 0.5)
-                unsplitG = (td_cflat_red4[0].x / td_cflat_red4[0].y) / TD_GAIN_FINE;
-            else if (td_cflat_red4[0].w > 0.5 && td_cflat_red4[0].z < 1e29)
-                unsplitG = td_cflat_red4[0].z / TD_GAIN_FINE;
-        }
-        imageStore(eb_flat, ivec2(0, chIdx), vec4(max(0.0, unsplitG), 0.0, 0.0, 0.0));
-    }
-    memoryBarrierShared();
-    barrier();
-}
-)GLSL";
-
-		// ---- PASS C2EB-PREP (PROD-GPU-BUG-1 / PROD-GPU-BUG-4 / PROD-GPU-BUG-5): Per-Cell Band-Pooled Chroma c_IV Prep ----
+		// ---- PASS C2EB-PREP (PROD-GPU-BUG-1 / PROD-GPU-BUG-4 / PROD-GPU-BUG-5 / PROD-GPU-BUG-18): Per-Cell Band-Pooled Chroma c_IV Prep ----
 		// Dispatch: ceil(TD_CW / 8) x ceil(TD_CH / 8), group 8x8 (100% parallel across SMs, zero barriers, constant -2..2 loops).
 		// Output: eb_scratch (3*cw x 2*ch RGBA32F): (b*TD_CW+cx, chIdx*TD_CH+cy) -> (clipC, rawC, vSample, valid ? (ac+1) : 0).
 		constexpr const char* kPassChromaEbPriorPrep = R"GLSL(
@@ -1270,6 +1330,7 @@ if (cell.x >= TD_CW || cell.y >= TD_CH)
     return;
 
 int K = int(round(u_k));
+int hPoolR = int(round(u_pool_r_h));
 bool bokehAllowL = (u_bokeh_mode > 0.5);
 bool coarseOnly = (u_coarse_only > 0.5);
 bool isFace = (u_has_face_mask > 0.5) && (texelFetch(face_mask, cell, 0).x > 0.5);
@@ -1280,13 +1341,8 @@ bool isDefoc = ((fBits & 2) != 0);
 
 for (int chIdx = 0; chIdx < 2; ++chIdx)
 {
+    // PROD-GPU-BUG-18: Classify activity (flat vs textured) BEFORE unsplit Projection-IR grain estimation (TdV2Chroma.h:3637).
     float retG = (chIdx == 0) ? max(0.0, pT.x) : max(0.0, (u_cell_prior_has_cr_grain > 0.5) ? pT.w : pT.x);
-    if (u_has_clean_split < 0.5 && retG <= TD_NUM_FLOOR && !coarseOnly)
-    {
-        float unsplitG = texelFetch(eb_flat, ivec2(0, chIdx), 0).x;
-        if (!td_is_bad(unsplitG) && unsplitG > TD_NUM_FLOOR)
-            retG = unsplitG;
-    }
     float mVar = (chIdx == 0) ? max(0.0, texelFetch(cell_stats_cb, ivec2(TD_CW + cell.x, 2 * TD_CH + cell.y), 0).z)
                               : max(0.0, texelFetch(cell_stats_cr, ivec2(TD_CW + cell.x, 2 * TD_CH + cell.y), 0).z);
     float hVar = (chIdx == 0) ? max(0.0, texelFetch(cell_stats_cb, ivec2(2 * TD_CW + cell.x, 2 * TD_CH + cell.y), 0).z)
@@ -1294,6 +1350,8 @@ for (int chIdx = 0; chIdx < 2; ++chIdx)
     float cleanTexMH = max(0.0, mVar - retG * TD_GAIN_MID * u_psd_mid) +
                        max(0.0, hVar - retG * TD_GAIN_FINE * u_psd_fine);
     int cellAc = (cleanTexMH > u_activity_tex_floor) ? 1 : 0;
+    if (u_has_clean_split < 0.5 && retG <= TD_NUM_FLOOR && !coarseOnly && !isFace && !focusChange && !isDefoc)
+        retG = td_chroma_unsplit_proj_ir(cell, chIdx, K, hPoolR);
 
     for (int b = 0; b < 3; ++b)
     {
@@ -1563,8 +1621,7 @@ for (int iter = 0; iter < 24; ++iter)
 if (tid == 0)
 {
     float outU = max(0.0, (td_ceb_state.z > 0.5) ? td_ceb_state.w : (0.5 * (td_ceb_state.x + td_ceb_state.y)));
-    float extraW = (slot == 0) ? max(0.0, texelFetch(eb_flat, ivec2(0, chIdx), 0).x) : 0.0;
-    imageStore(eb_prior, ivec2(slot, chIdx), vec4(outU, td_ceb_tau_out, p1Cnt, extraW));
+    imageStore(eb_prior, ivec2(slot, chIdx), vec4(outU, td_ceb_tau_out, p1Cnt, 0.0));
 }
 )GLSL";
 
@@ -1640,14 +1697,8 @@ vec2 ownGrainVar = (ogCntPool > 0.5) ? max(vec2(0.0), ogSumPool / ogCntPool) : v
 {
     vec4 bandW[3];
     bandW[0] = vec4(0.0); bandW[1] = vec4(0.0); bandW[2] = vec4(0.0);
+    // PROD-GPU-BUG-18: Classify activity (flat vs textured) BEFORE unsplit Projection-IR grain estimation (TdV2Chroma.h:3637).
     float chRetGVar = retGVar[chIdx];
-    // CHR-LOW-1: Unsplit grainy chroma without retainedGrainVar falls back to flat-cell fine-band floor.
-    if (u_has_clean_split < 0.5 && chRetGVar <= TD_NUM_FLOOR && !coarseOnly)
-    {
-        float estG = texelFetch(eb_prior, ivec2(0, chIdx), 0).w;
-        if (!td_is_bad(estG) && estG > TD_NUM_FLOOR)
-            chRetGVar = estG;
-    }
     float chOwnGVar = (chIdx == 0) ? ownGrainVar.x : ownGrainVar.y;
     float mVarCell = (chIdx == 0) ? max(0.0, texelFetch(cell_stats_cb, ivec2(TD_CW + cell.x, 2 * TD_CH + cell.y), 0).z)
                                   : max(0.0, texelFetch(cell_stats_cr, ivec2(TD_CW + cell.x, 2 * TD_CH + cell.y), 0).z);
@@ -1656,6 +1707,8 @@ vec2 ownGrainVar = (ogCntPool > 0.5) ? max(vec2(0.0), ogSumPool / ogCntPool) : v
     float cleanTexMH = max(0.0, mVarCell - chRetGVar * TD_GAIN_MID * u_psd_mid) +
                        max(0.0, hVarCell - chRetGVar * TD_GAIN_FINE * u_psd_fine);
     int cellAc = (cleanTexMH > u_activity_tex_floor) ? 1 : 0;
+    if (u_has_clean_split < 0.5 && chRetGVar <= TD_NUM_FLOOR && !coarseOnly && !isFace && !focusChange && !isDefocused)
+        chRetGVar = td_chroma_unsplit_proj_ir(cell, chIdx, K, hPoolR);
 
     for (int b = 0; b < 3; ++b)
     {
@@ -2893,7 +2946,7 @@ imageStore(warp_diag, cell, vec4(0.0));
 					&inRecUvTex_, &inRecRgbTex_, &inCleanUvTex_, &inRefUvTex_,
 					&inMotionVecTex_, &inMotionMetaTex_, &inCellPriorTex_, &inFaceMaskTex_,
 					&outCodedDeltaTex_, &outDelivUvTex_, &outDelivRgbTex_, &outDelivDeltaTex_,
-					&outDiagFlagsTex_, &outGuardCellTex_, &outWarpDiagTex_, &ebPriorTex_, &ebScratchTex_, &ebFlatTex_, &inLumaCellWeightsTex_ })
+					&outDiagFlagsTex_, &outGuardCellTex_, &outWarpDiagTex_, &ebPriorTex_, &ebScratchTex_, &chProjIrTex_, &inLumaCellWeightsTex_ })
 				{
 					if (*t != nullptr)
 						pl_tex_destroy(gpu, t);
@@ -2911,7 +2964,7 @@ imageStore(warp_diag, cell, vec4(0.0));
 					&inRecUvTex_, &inRecRgbTex_, &inCleanUvTex_, &inRefUvTex_,
 					&inMotionVecTex_, &inMotionMetaTex_, &inCellPriorTex_, &inFaceMaskTex_,
 					&outCodedDeltaTex_, &outDelivUvTex_, &outDelivRgbTex_, &outDelivDeltaTex_,
-					&outDiagFlagsTex_, &outGuardCellTex_, &outWarpDiagTex_, &ebPriorTex_, &ebScratchTex_, &ebFlatTex_, &inLumaCellWeightsTex_ })
+					&outDiagFlagsTex_, &outGuardCellTex_, &outWarpDiagTex_, &ebPriorTex_, &ebScratchTex_, &chProjIrTex_, &inLumaCellWeightsTex_ })
 				{
 					*t = nullptr;
 				}
@@ -2925,7 +2978,7 @@ imageStore(warp_diag, cell, vec4(0.0));
 				inRecUvTex_, inRecRgbTex_, inCleanUvTex_, inRefUvTex_,
 				inMotionVecTex_, inMotionMetaTex_, inCellPriorTex_, inFaceMaskTex_,
 				outCodedDeltaTex_, outDelivUvTex_, outDelivRgbTex_, outDelivDeltaTex_,
-				outDiagFlagsTex_, outGuardCellTex_, outWarpDiagTex_, ebPriorTex_, ebScratchTex_, ebFlatTex_, inLumaCellWeightsTex_ })
+				outDiagFlagsTex_, outGuardCellTex_, outWarpDiagTex_, ebPriorTex_, ebScratchTex_, chProjIrTex_, inLumaCellWeightsTex_ })
 			{
 				total += VpSkeleton::TexBytesOf(t);
 			}
@@ -4006,12 +4059,11 @@ imageStore(out_coded_delta, p, vec4(0.0));
 			const float uUseA2ePrior = (!in.hasStepPrior && cfg_.enableA2eEmpiricalPrior && !in.transformIdentified8x8) ? 1.0f : 0.0f;
 			const float uUseEmpiricalU = (cfg_.enableA2eEmpiricalPrior && (coarseOnly || !in.transformIdentified8x8)) ? 1.0f : 0.0f;
 
-			// Always ensure 6x2 RGBA32F ebPriorTex_, 3*cw x 2*ch RGBA32F ebScratchTex_, & 1x2 R32F ebFlatTex_ are allocated!
-			const bool r32BlitCh = ((fmtR32->caps & PL_FMT_CAP_BLITTABLE) != 0);
+			// Always ensure 6x2 RGBA32F ebPriorTex_, 3*cw x 2*ch RGBA32F ebScratchTex_, & 2*cw x 2*ch RGBA32F chProjIrTex_ are allocated!
 			if (!Detail::EnsureTex(gpu, ebPriorTex_, 6, 2, fmtRGBA32, true, true, true, true) ||
 			    !Detail::EnsureTex(gpu, ebScratchTex_, 3 * cw, 2 * ch, fmtRGBA32, true, true, false, false) ||
-			    !Detail::EnsureTex(gpu, ebFlatTex_, 1, 2, fmtR32, true, true, true, false, r32BlitCh))
-				return failVisible("TdV2ChromaGpuEngine ebPrior/ebScratch/ebFlat alloc failed", StandInKind::GpuDispatchFailed);
+			    !Detail::EnsureTex(gpu, chProjIrTex_, 2 * cw, 2 * ch, fmtRGBA32, true, true, false, false))
+				return failVisible("TdV2ChromaGpuEngine ebPrior/ebScratch/chProjIr alloc failed", StandInKind::GpuDispatchFailed);
 
 			// ---- PASS C2A: LDS Cell-Moment Reduction + Standalone Focus Fallback for Cb & Cr ----
 			const bool sameCleanRec = (codedCleanTex == codedRecTex);
@@ -4030,7 +4082,7 @@ imageStore(out_coded_delta, p, vec4(0.0));
 				c2aHdr += Shaders::kCoreHelpers;
 				c2aHdr += ChromaShaders::kSitedCoordHelpers;
 				c2aHdr += ChromaShaders::kPassChromaCellStatsHeader;
-				pl_shader_desc d2a[18] = {
+				pl_shader_desc d2a[19] = {
 					VpvGpu::Sampled("cur_l", sc.curL), VpvGpu::Sampled("cur_mh", sc.curMH),
 					VpvGpu::Sampled("ref_l_0", sc.refL[0]), VpvGpu::Sampled("ref_l_1", sc.refL[1]), VpvGpu::Sampled("ref_l_2", sc.refL[2]),
 					VpvGpu::Sampled("ref_mh_0", sc.refMH[0]), VpvGpu::Sampled("ref_mh_1", sc.refMH[1]), VpvGpu::Sampled("ref_mh_2", sc.refMH[2]),
@@ -4043,7 +4095,8 @@ imageStore(out_coded_delta, p, vec4(0.0));
 					VpvGpu::Storage("cell_stats_cb", sc.statsCb),
 					VpvGpu::Storage("cell_stats_cr", sc.statsCr),
 					VpvGpu::Storage("cell_own_grain", sc.ownGrain),
-					VpvGpu::Storage("warp_diag", dstWarpDiag)
+					VpvGpu::Storage("warp_diag", dstWarpDiag),
+					VpvGpu::Storage("proj_ir", chProjIrTex_)
 				};
 				pl_shader_var v2a[16] = {
 					VpvGpu::Var("u_k", &uK),
@@ -4062,41 +4115,10 @@ imageStore(out_coded_delta, p, vec4(0.0));
 				};
 				const size_t sh2a = (256u * 9u + 9u) * sizeof(float);
 				const std::string c2aBody = ChromaShaders::BuildPassChromaCellStatsBody();
-				if (!runPass("td_v2_c2a_cell_stats", c2aHdr, c2aBody.c_str(), d2a, 18, v2a, 16, cw, ch, 16, 16, sh2a))
+				if (!runPass("td_v2_c2a_cell_stats", c2aHdr, c2aBody.c_str(), d2a, 19, v2a, 16, cw, ch, 16, 16, sh2a))
 					return failVisible("td_v2_c2a_cell_stats dispatch failed", StandInKind::GpuDispatchFailed);
 
-				// ---- PASS C2EB (PROD-GPU-BUG-1 / PROD-GPU-BUG-4): Flat Grain Floor + Parallel Prep + Torben 24-Step Median ----
-				if (!in.hasCleanSplit && !coarseOnly)
-				{
-					std::string c2flatHdr = chromaGeom;
-					c2flatHdr += VpvGpu::Define("TD_GAIN_MID", gains.mid);
-					c2flatHdr += VpvGpu::Define("TD_GAIN_FINE", gains.fine);
-					c2flatHdr += Shaders::kCoreHelpers;
-					c2flatHdr += ChromaShaders::kPassChromaEbFlatHeader;
-					pl_shader_desc dFlat[6] = {
-						VpvGpu::Sampled("cell_stats_cb", sc.statsCb),
-						VpvGpu::Sampled("cell_stats_cr", sc.statsCr),
-						VpvGpu::Sampled("cell_prior", cellPriorTex),
-						VpvGpu::Sampled("face_mask", faceMaskBind),
-						VpvGpu::Sampled("cell_own_grain", sc.ownGrain),
-						VpvGpu::Storage("eb_flat", ebFlatTex_)
-					};
-					pl_shader_var vFlat[5] = {
-						VpvGpu::Var("u_has_face_mask", &uHasFaceMask),
-						VpvGpu::Var("u_cell_prior_has_cr_grain", &uPriorHasCrGrain),
-						VpvGpu::Var("u_psd_mid", &uPsdMid),
-						VpvGpu::Var("u_psd_fine", &uPsdFine),
-						VpvGpu::Var("u_activity_tex_floor", &uActivityTexFloor)
-					};
-					const size_t shFlat = 256u * 4u * sizeof(float);
-					if (!runPass("td_v2_c2eb_flat_floor", c2flatHdr, ChromaShaders::kPassChromaEbFlatFloor, dFlat, 6, vFlat, 5, 1, 1, 16, 16, shFlat))
-						return failVisible("td_v2_c2eb_flat_floor dispatch failed", StandInKind::GpuDispatchFailed);
-				}
-				else
-				{
-					Detail::ClearTexZeroR32(gpu, ebFlatTex_, 1, 2);
-				}
-
+				// ---- PASS C2EB (PROD-GPU-BUG-1 / PROD-GPU-BUG-4 / PROD-GPU-BUG-18): Parallel Prep + Torben 24-Step Median ----
 				std::string c2ebPrepHdr = chromaGeom;
 				c2ebPrepHdr += VpvGpu::Define("TD_GAIN_LOW", effLowGain);
 				c2ebPrepHdr += VpvGpu::Define("TD_GAIN_MID", gains.mid);
@@ -4113,15 +4135,17 @@ imageStore(out_coded_delta, p, vec4(0.0));
 				c2ebPrepHdr += Shaders::BuildFineTapHeader();
 				c2ebPrepHdr += Shaders::kCoreHelpers;
 				c2ebPrepHdr += Shaders::kPass2MergeSolveHeader;
+				c2ebPrepHdr += ChromaShaders::kChromaProjIrHelpers;
 
-				pl_shader_desc d2ebPrep[8] = {
+				pl_shader_desc d2ebPrep[9] = {
 					VpvGpu::Sampled("cell_stats_cb", sc.statsCb),
 					VpvGpu::Sampled("cell_stats_cr", sc.statsCr),
 					VpvGpu::Sampled("motion_gate", sc.motionGate),
+					VpvGpu::Sampled("motion_vec", motionVecTex),
 					VpvGpu::Sampled("cell_prior", cellPriorTex),
 					VpvGpu::Sampled("face_mask", faceMaskBind),
 					VpvGpu::Sampled("cell_own_grain", sc.ownGrain),
-					VpvGpu::Sampled("eb_flat", ebFlatTex_),
+					VpvGpu::Sampled("proj_ir", chProjIrTex_),
 					VpvGpu::Storage("eb_scratch", ebScratchTex_)
 				};
 				pl_shader_var v2ebPrep[22] = {
@@ -4137,18 +4161,17 @@ imageStore(out_coded_delta, p, vec4(0.0));
 					VpvGpu::Var("u_coarse_only", &uCoarseOnly),
 					VpvGpu::Var("u_activity_tex_floor", &uActivityTexFloor)
 				};
-				if (!runPass("td_v2_c2eb_prep", c2ebPrepHdr, ChromaShaders::kPassChromaEbPriorPrep, d2ebPrep, 8, v2ebPrep, 22,
+				if (!runPass("td_v2_c2eb_prep", c2ebPrepHdr, ChromaShaders::kPassChromaEbPriorPrep, d2ebPrep, 9, v2ebPrep, 22,
 				             Detail::GroupsFor(cw, 8), Detail::GroupsFor(ch, 8), 8, 8))
 					return failVisible("td_v2_c2eb_prep dispatch failed", StandInKind::GpuDispatchFailed);
 
 				std::string c2ebRedHdr = chromaGeom + ChromaShaders::kPassChromaEbPriorHeader;
-				pl_shader_desc d2eb[3] = {
+				pl_shader_desc d2eb[2] = {
 					VpvGpu::Sampled("eb_scratch", ebScratchTex_),
-					VpvGpu::Sampled("eb_flat", ebFlatTex_),
 					VpvGpu::Storage("eb_prior", ebPriorTex_)
 				};
 				const size_t sh2eb = (256u * 6u + 6u) * sizeof(float);
-				if (!runPass("td_v2_c2eb_prior_reduce", c2ebRedHdr, ChromaShaders::kPassChromaEbPriorReduce, d2eb, 3, nullptr, 0, 6, 2, 16, 16, sh2eb))
+				if (!runPass("td_v2_c2eb_prior_reduce", c2ebRedHdr, ChromaShaders::kPassChromaEbPriorReduce, d2eb, 2, nullptr, 0, 6, 2, 16, 16, sh2eb))
 					return failVisible("td_v2_c2eb_prior_reduce dispatch failed", StandInKind::GpuDispatchFailed);
 
 				// Apply CPU-identical empty-class fallback + temporal rolling-median A2e cap & one-sided K=1 hold on host (192 B!).
@@ -4230,17 +4253,20 @@ imageStore(out_coded_delta, p, vec4(0.0));
 				c2bHdr += Shaders::kCoreHelpers;
 				c2bHdr += Shaders::kPass2MergeSolveHeader;
 				c2bHdr += Shaders::BuildPass2SolverHeader();
+				c2bHdr += ChromaShaders::kChromaProjIrHelpers;
 
 				float uSolverMode = (cfg_.solverMode == SolverMode::LegacyClipRescale) ? 1.0f : 0.0f;
 
-				pl_shader_desc d2b[12] = {
+				pl_shader_desc d2b[14] = {
 					VpvGpu::Sampled("cell_stats_cb", sc.statsCb),
 					VpvGpu::Sampled("cell_stats_cr", sc.statsCr),
 					VpvGpu::Sampled("motion_gate", sc.motionGate),
+					VpvGpu::Sampled("motion_vec", motionVecTex),
 					VpvGpu::Sampled("cell_prior", cellPriorTex),
 					VpvGpu::Sampled("face_mask", faceMaskBind),
 					VpvGpu::Sampled("cell_own_grain", sc.ownGrain),
 					VpvGpu::Sampled("eb_prior", ebPriorTex_),
+					VpvGpu::Sampled("proj_ir", chProjIrTex_),
 					VpvGpu::Storage("cell_weights_cb", sc.weightsCb),
 					VpvGpu::Storage("cell_weights_cr", sc.weightsCr),
 					VpvGpu::Storage("cell_diag_cb", sc.diagCb),
@@ -4272,7 +4298,7 @@ imageStore(out_coded_delta, p, vec4(0.0));
 					VpvGpu::Var("u_reuse_luma_weights", &uReuseLumaWeights)
 				};
 				const std::string c2bBody = ChromaShaders::BuildPassChromaMergeSolveBody();
-				if (!runPass("td_v2_c2b_merge_solve", c2bHdr, c2bBody.c_str(), d2b, 12, v2b, 33,
+				if (!runPass("td_v2_c2b_merge_solve", c2bHdr, c2bBody.c_str(), d2b, 14, v2b, 33,
 				             Detail::GroupsFor(cw, 8), Detail::GroupsFor(2 * ch, 8), 8, 8))
 				{
 					return failVisible("td_v2_c2b_merge_solve dispatch failed", StandInKind::GpuDispatchFailed);
@@ -4965,7 +4991,7 @@ float td_huber_taper(float diffSq, float diagC)
 		pl_tex outWarpDiagTex_ = nullptr;
 		pl_tex ebPriorTex_ = nullptr;
 		pl_tex ebScratchTex_ = nullptr;
-		pl_tex ebFlatTex_ = nullptr;
+		pl_tex chProjIrTex_ = nullptr;
 		pl_tex inLumaCellWeightsTex_ = nullptr;
 
 		A2ePriorHistory a2eHistoryCb_;
