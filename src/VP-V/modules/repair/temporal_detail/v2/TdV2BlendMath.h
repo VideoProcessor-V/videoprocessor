@@ -1335,4 +1335,151 @@ namespace TdV2
 			return hasPos && hasNeg;
 		}
 	};
+
+	// ---- Stage A4-1: Continuous C^1 Hermite Smoothstep & Per-Region Descriptor Math (Rule 1) ----
+
+	// Canonical C^1 cubic Hermite smoothstep delegating to shared U25 RampMath::Smoothstep (StepWhenEqual),
+	// safely returning 0.0 on non-finite inputs and matching GLSL td_smoothstep_c1 1:1.
+	inline double SmoothstepC1(double edge0, double edge1, double x)
+	{
+		if (!std::isfinite(edge0) || !std::isfinite(edge1) || !std::isfinite(x))
+			return 0.0;
+		const double span = edge1 - edge0;
+		if (!(std::fabs(span) > kSolvePivotFloor))
+			return (x >= edge1) ? 1.0 : 0.0;
+		return RampMath::Smoothstep(edge0, edge1, x, RampMath::SmoothRule::StepWhenEqual);
+	}
+
+	// Clamp matched-focus bokeh tolerance to [0.0, kBokehMatchDeltaMax] (0.0 = OFF / disabled).
+	inline double ClampBokehMatchDelta(double delta)
+	{
+		if (!std::isfinite(delta) || !(delta > 0.0))
+			return 0.0;
+		return delta > kBokehMatchDeltaMax ? kBokehMatchDeltaMax : delta;
+	}
+
+	// Per-cell continuous region descriptors derived from P11 (focus confidence), P12 (texture density),
+	// kEdgeMap (edge strength), and P10g (grain level), with physics-derived internal fallbacks when absent.
+	struct CellRegionDescriptors
+	{
+		double focusConf = 1.0;          // P11 in [0, 1]: 0 = defocused bokeh, 1 = crisp in-focus (or flat neutral)
+		double textureDensity = 0.0;     // P12 in [0, 1]: 0 = flat/smooth, 1 = dense real texture
+		double edgeStrength = 0.0;       // kEdgeMap in [0, 1]: 0 = smooth interior, 1 = strong structural edge
+		double p10gShare = 0.0;          // P10g in [0, 1]: 0 = grain-free, 1 = strong film grain
+		bool curIsOutOfFocus = false;    // True when current cell is optically defocused or explicit bokeh
+		std::array<double, kMaxBlendRefs> focusDelta{}; // |focus_ref_k - focus_cur| in [0, 1] per reference
+	};
+
+	struct CellRegionInputs
+	{
+		double curFDebiased = 1.0;
+		double curEnergy = 0.0;
+		std::array<double, kMaxBlendRefs> refFDebiased = { 1.0, 1.0, 1.0, 1.0 };
+		std::array<double, kMaxBlendRefs> refEnergy = {};
+		int refCount = 0;
+		double curMVar = 0.0;
+		double curHVar = 0.0;
+		double cellRetainedGrainVar = 0.0;
+		double cellOwnGrainVar = 0.0;
+		double cellStepScaleSq = 1.0;
+		double effNoiseVar = 1.0 / 12.0;
+		double baseQuantVar = 1.0 / 12.0;
+		double fDefocus = 0.0;
+		double fSharp = 1.0;
+		double gainMid = 0.0;
+		double gainFine = 0.0;
+		double gainD3 = 0.0;
+		double psdMid = 1.0;
+		double psdFine = 1.0;
+		bool isExplicitBokeh = false;
+		bool opticalIsDefocused = false;
+		// Optional external shared maps (< 0.0 means absent => derive internally from clean bands).
+		double extCurFocus = -1.0;
+		std::array<double, kMaxBlendRefs> extRefFocus = { -1.0, -1.0, -1.0, -1.0 };
+		double extTextureDensity = -1.0;
+		double extCellEdge = -1.0;
+	};
+
+	// Evaluate continuous [0, 1] per-cell region descriptors using exact +/- 3 dB (0.5x..2x) and 1-sigma..3-sigma
+	// C^1 Hermite smoothsteps derived from BandFromBase noise transfer gains and quantization physics (Rule 1).
+	inline CellRegionDescriptors EvaluateCellRegionDescriptors(const CellRegionInputs& in)
+	{
+		CellRegionDescriptors out;
+		const double stepSq = (std::isfinite(in.cellStepScaleSq) && in.cellStepScaleSq > 0.0) ? in.cellStepScaleSq : 1.0;
+		const double effNoise = (std::isfinite(in.effNoiseVar) && in.effNoiseVar > 0.0) ? in.effNoiseVar : in.baseQuantVar;
+		const double gainMD3 = in.gainMid + in.gainD3;
+		const double cellStructFloor = 2.0 * gainMD3 * effNoise * stepSq;
+
+		// 1) P11 focus confidence in [0, 1]: 0 = defocused bokeh, 1 = sharp or flat neutral.
+		const double rawCurF = SmoothstepC1(in.fDefocus, in.fSharp, in.curFDebiased);
+		if (std::isfinite(in.extCurFocus) && in.extCurFocus >= 0.0)
+		{
+			out.focusConf = RampMath::Clamp01(in.extCurFocus);
+		}
+		else if (in.isExplicitBokeh)
+		{
+			out.focusConf = 0.0;
+		}
+		else
+		{
+			const double eConf = SmoothstepC1(0.5 * cellStructFloor, 2.0 * cellStructFloor, in.curEnergy);
+			out.focusConf = 1.0 - eConf * (1.0 - rawCurF);
+		}
+		out.curIsOutOfFocus = in.isExplicitBokeh || in.opticalIsDefocused || (out.focusConf < 0.5);
+
+		// 2) Per-reference |focus_ref_k - focus_cur| in [0, 1] focus space (for matched-focus bokeh tailoring).
+		const int K = in.refCount < 0 ? 0 : (in.refCount > kMaxBlendRefs ? kMaxBlendRefs : in.refCount);
+		const bool hasExtCurF = std::isfinite(in.extCurFocus) && in.extCurFocus >= 0.0;
+		for (int k = 0; k < K; ++k)
+		{
+			const bool hasExtRefF = std::isfinite(in.extRefFocus[k]) && in.extRefFocus[k] >= 0.0;
+			if (hasExtCurF && hasExtRefF)
+			{
+				out.focusDelta[k] = std::fabs(RampMath::Clamp01(in.extRefFocus[k]) - RampMath::Clamp01(in.extCurFocus));
+			}
+			else
+			{
+				const double pairE = in.curEnergy > in.refEnergy[k] ? in.curEnergy : in.refEnergy[k];
+				const double pairConf = SmoothstepC1(0.5 * cellStructFloor, 2.0 * cellStructFloor, pairE);
+				const double fCur = hasExtCurF ? RampMath::Clamp01(in.extCurFocus) : rawCurF;
+				const double fRef = hasExtRefF ? RampMath::Clamp01(in.extRefFocus[k])
+				                               : SmoothstepC1(in.fDefocus, in.fSharp, in.refFDebiased[k]);
+				out.focusDelta[k] = pairConf * std::fabs(fRef - fCur);
+			}
+		}
+
+		// 3) P12 texture/detail density in [0, 1] (+/- 3 dB around 0-dB (M+H) quantization floor).
+		if (std::isfinite(in.extTextureDensity) && in.extTextureDensity >= 0.0)
+		{
+			out.textureDensity = RampMath::Clamp01(in.extTextureDensity);
+		}
+		else
+		{
+			const double retG = (std::isfinite(in.cellRetainedGrainVar) && in.cellRetainedGrainVar > 0.0) ? in.cellRetainedGrainVar : 0.0;
+			const double cleanM = (in.curMVar - retG * in.gainMid * in.psdMid) > 0.0 ? (in.curMVar - retG * in.gainMid * in.psdMid) : 0.0;
+			const double cleanH = (in.curHVar - retG * in.gainFine * in.psdFine) > 0.0 ? (in.curHVar - retG * in.gainFine * in.psdFine) : 0.0;
+			const double texFloor = 2.0 * (in.gainMid + in.gainFine) * effNoise * stepSq;
+			out.textureDensity = SmoothstepC1(0.5 * texFloor, 2.0 * texFloor, cleanM + cleanH);
+		}
+
+		// 4) kEdgeMap cell edge strength in [0, 1] (1-sigma to 3-sigma (M+D3) step-edge amplitude above noise floor).
+		if (std::isfinite(in.extCellEdge) && in.extCellEdge >= 0.0)
+		{
+			out.edgeStrength = RampMath::Clamp01(in.extCellEdge);
+		}
+		else
+		{
+			const double md3NoiseVar = gainMD3 * effNoise * stepSq;
+			const double edgeFloor = std::sqrt(md3NoiseVar > kSolveNumericalFloor ? md3NoiseVar : kSolveNumericalFloor);
+			const double edgeProxy = std::sqrt((in.curEnergy - md3NoiseVar) > 0.0 ? (in.curEnergy - md3NoiseVar) : 0.0);
+			out.edgeStrength = SmoothstepC1(edgeFloor, std::sqrt(kHuberKneeSq) * edgeFloor, edgeProxy);
+		}
+
+		// 5) P10g grain share in [0, 1] (0.5x to 9x base 1-LSB quantization variance = 0.7x to 3-sigma RMS).
+		const double ownG = (std::isfinite(in.cellOwnGrainVar) && in.cellOwnGrainVar > 0.0) ? in.cellOwnGrainVar : 0.0;
+		const double retG = (std::isfinite(in.cellRetainedGrainVar) && in.cellRetainedGrainVar > 0.0) ? in.cellRetainedGrainVar : 0.0;
+		out.p10gShare = SmoothstepC1(0.5 * in.baseQuantVar, kHuberKneeSq * in.baseQuantVar, ownG + retG);
+
+		return out;
+	}
 }

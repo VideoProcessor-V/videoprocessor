@@ -223,6 +223,9 @@ namespace VpvRendererSettings
 		readChoice("td_subpixel_debias", settings.tdSubpixelDebias, { "off", "on" });
 		readChoice("td_edge_upsample", settings.tdEdgeUpsample, { "off", "on" });
 		readChoice("td_neighborhood_clamp", settings.tdNeighborhoodClamp, { "off", "on" });
+		readChoice("td_region_tailoring", settings.tdRegionTailoring, { "off", "on" });
+		readChoice("td_bokeh_match_delta", settings.tdBokehMatchDelta, { "off", "0.125", "0.25", "0.375" });
+		readChoice("td_region_deband", settings.tdRegionDeband, { "off", "on" });
 		{
 			// native | auto | any height in lines (general, owner's standing rule).
 			std::string value;
@@ -1140,6 +1143,9 @@ namespace VpvRendererSettings
 		settings.tdSubpixelDebias = "off";
 		settings.tdEdgeUpsample = "off";
 		settings.tdNeighborhoodClamp = "off";
+		settings.tdRegionTailoring = "off";
+		settings.tdBokehMatchDelta = "off";
+		settings.tdRegionDeband = "off";
 	}
 
 	// deband_vp_exclusive: see LibplaceboDebandYieldsToVp in the host (settings = the host's settings struct).
@@ -1344,7 +1350,10 @@ namespace VpvRendererSettings
 			<< settings.tdSmoothGrainGuard << '|'
 			<< settings.tdSubpixelDebias << '|'
 			<< settings.tdEdgeUpsample << '|'
-			<< settings.tdNeighborhoodClamp << '|';
+			<< settings.tdNeighborhoodClamp << '|'
+			<< settings.tdRegionTailoring << '|'
+			<< settings.tdBokehMatchDelta << '|'
+			<< settings.tdRegionDeband << '|';
 		if (includeLive)
 		{
 			// Planner Q4: the applied profiles' raw values (structural: any key, present or
@@ -1439,6 +1448,9 @@ namespace VpvRendererSettings
 		currentTransport.tdSubpixelDebias = next.tdSubpixelDebias;
 		currentTransport.tdEdgeUpsample = next.tdEdgeUpsample;
 		currentTransport.tdNeighborhoodClamp = next.tdNeighborhoodClamp;
+		currentTransport.tdRegionTailoring = next.tdRegionTailoring;
+		currentTransport.tdBokehMatchDelta = next.tdBokehMatchDelta;
+		currentTransport.tdRegionDeband = next.tdRegionDeband;
 	}
 
 	// Names of the VP-V settings that differ (appended after the host's own; the order differs from the old interleaved one).
@@ -1472,6 +1484,9 @@ namespace VpvRendererSettings
 		changed(current.tdSubpixelDebias != next.tdSubpixelDebias, "td_subpixel_debias");
 		changed(current.tdEdgeUpsample != next.tdEdgeUpsample, "td_edge_upsample");
 		changed(current.tdNeighborhoodClamp != next.tdNeighborhoodClamp, "td_neighborhood_clamp");
+		changed(current.tdRegionTailoring != next.tdRegionTailoring, "td_region_tailoring");
+		changed(current.tdBokehMatchDelta != next.tdBokehMatchDelta, "td_bokeh_match_delta");
+		changed(current.tdRegionDeband != next.tdRegionDeband, "td_region_deband");
 		changed(current.pipelineOriginalPathway != next.pipelineOriginalPathway, "pipeline_original_pathway");
 		changed(current.pipelineOrder != next.pipelineOrder, "pipeline_order");
 		changed(current.pipelineSlotsOff != next.pipelineSlotsOff, "pipeline_slots_off");
@@ -1785,7 +1800,10 @@ namespace VpvRendererSettings
 		<< "td_smooth_grain_guard=" << s.tdSmoothGrainGuard << "\n"
 		<< "td_subpixel_debias=" << s.tdSubpixelDebias << "\n"
 		<< "td_edge_upsample=" << s.tdEdgeUpsample << "\n"
-		<< "td_neighborhood_clamp=" << s.tdNeighborhoodClamp << "\n";
+		<< "td_neighborhood_clamp=" << s.tdNeighborhoodClamp << "\n"
+		<< "td_region_tailoring=" << s.tdRegionTailoring << "\n"
+		<< "td_bokeh_match_delta=" << s.tdBokehMatchDelta << "\n"
+		<< "td_region_deband=" << s.tdRegionDeband << "\n";
 		return o.str();
 	}
 

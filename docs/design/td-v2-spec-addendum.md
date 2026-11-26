@@ -15,7 +15,7 @@
 Every upgrade in `TD-U1..TD-U5` and Phase 6 is modularly toggleable in `TdV2::Config` (`TdV2Config.h`) and exposed in the VP-V Settings UI using proper select controls (`K::Toggle`, fixing `L-5`), so real-clip diagnostic/ablation (`TD-U0`) and RTX 3050 Ti timing (`TD-U6`) can isolate every mechanism without code edits:
 
 - **Main VP-V page (`VP-V > Repair > Main > Temporal detail`):** `temporal_detail` (`off` default | `shadow` | `on`), `td_limit_kappa` (`1.0` default, range `1.0..3.0`), `td_mode` (`cell` default | `strict`), `td_overlay` (`off` default | `weights` | `maps` | `focus` | `motion`).
-- **Advanced / Developer card (`VP-V > Repair > Advanced > Temporal detail: tuning`, locked by `temporal_detail`):** `td_solver`, `td_quality_signal`, `td_stats_pooling`, `td_anchored_carry`, `td_smooth_warp`, `td_hard_fb_gate`, `td_chroma_weights`, `td_smooth_grain_guard`, `td_subpixel_debias`, `td_edge_upsample`, `td_neighborhood_clamp`.
+- **Advanced / Developer card (`VP-V > Repair > Advanced > Temporal detail: tuning`, locked by `temporal_detail`):** `td_solver`, `td_quality_signal`, `td_stats_pooling`, `td_anchored_carry`, `td_smooth_warp`, `td_hard_fb_gate`, `td_chroma_weights`, `td_smooth_grain_guard`, `td_subpixel_debias`, `td_edge_upsample`, `td_neighborhood_clamp`, `td_region_tailoring`, `td_bokeh_match_delta`, `td_region_deband`.
 - **Original pathway & off-state invariance:** `temporal_detail = off` and the `Original` pathway keep all TD v2 modules completely inert (`TdProducts::kEngineRequestedToday = false`, library-ready until Wave 4–6 integration).
 
 ---
@@ -119,3 +119,23 @@ Both estimators are wired identically on CPU (`TdV2FrameRole.h`, `TdV2ReferenceE
   - Split oversized raw GLSL literals (`kPass2SolverHeader`, `kPass2MergeAndSolve`, `kPassChromaEbPriorReduce`, `kPassChromaMergeSolve`) so every raw GLSL literal across `v2/*.h` stays `<= 12,090 B` CRLF (well below MSVC's `16,380 B` `C2026` limit).
   - Replaced the bogus `E_H / E_M == 1.345` `dzStep` and 4-px stride in `TdV2NonBlockStepEstimator` / `kPassQualityEvidenceReduce` with a per-row/per-column monotonic 3-px-plateau quantization staircase check excluding `Overlay` cells and aggregating by median.
   - Added GPU `kPassAnchorHeldOutCheck` + `kPassAnchorDriftAudit` writing real `kDrift` into `td.maps slice2.z`, wired `ebPriorTex_` into GPU `kPass2MergeAndSolve` (always zero-initialized when EB is off), and prevented `anchorAgeFrames_ <= 1` self-instrumentation vs `prevPeak`.
+
+---
+
+## 9. Stage A4-1 — Modular Per-Region Tailoring ("Climb to A4", All Default OFF)
+
+All three Stage A4-1 controls are strictly modular (`Config` defaults `false` / `0.0`), exposed as proper select (`K::Toggle`) controls on `VP-V > Repair > Advanced > Temporal detail: tuning` (locked by `temporal_detail`), preserve bit-identical default/Original behavior, and achieve `<= 1e-3` CPU (`TdV2ReferenceEngine.h`) vs GPU (`TdV2Shaders.h` + `TdV2Gpu.h`) parity within D3D11 CS 5.0 limits (`<= 16` SRVs, `< 32 KB` LDS, strictly FP32):
+
+1. **Continuous Per-Region Smoothstep Management & Pass 3A Edge-Aware Blending (`td_region_tailoring = off | on`, default `off`):**
+   - Evaluates continuous `[0, 1]` per-cell region descriptors (`EvaluateCellRegionDescriptors`) using canonical $C^1$ cubic Hermite smoothsteps (`SmoothstepC1`) derived strictly from `BandFromBase` transfer gains and quantization physics (`+/- 3 dB` SNR brackets `[0.5x, 2x]` and `1..3 sigma` noise-floor ramps; Rule 1):
+     - `P11` focus confidence (`focusConf`), `P12` texture density (`textureDensity`), `kEdgeMap` edge strength (`edgeStrength`), and `P10g` grain level (`grainLevel`), accepting optional shared upstream maps or deriving them internally with visible `StandInKind::RegionMapsDerived` notice.
+   - Replaces hard binary flat/textured activity switching with continuous `P12` blending of `ebPriorU`/`ebTauSq`, and modulates `M`/`H` band weights continuously (`regionBandGain = {1, focusConf, focusConf * (1 - grainLevel * (1 - textureDensity))}`).
+   - **Pass 3A Edge-Aware Blending (`SpatialEdgeAwareBilinearWeight` / `kPass3BlendAndBound`):** Stops cross-edge temporal weight bleed across neighboring 2×2 cells using BOTH clean-luma range affinity and the $C^1$ edge barrier `(1 - pxEdge) * (1 - SmoothstepC1(1, 3, |m_q - m_own| / sigPair))`, keeping smooth interiors seamless with zero cell-grid blocking and sharp silhouettes halo-free.
+2. **Matched-Focus Bokeh Tailoring (`td_bokeh_match_delta = off | 0.125 | 0.25 | 0.375`, default `off`):**
+   - Tolerance in `[0, 1]` focus space (elementary dyadic fractions `1/8, 1/4, 3/8`, bounded `<= 1/2`) on per-reference focus delta `|focus_ref - focus_cur|`.
+   - On rack-focus mismatch (`|focus_ref - focus_cur| >= td_bokeh_match_delta`): vetoes cross-frame import (`matchGate = 1 - SmoothstepC1(0.5*delta, delta, focusDelta) == 0`) BEFORE QP solve so sharp edges are never imported into defocused bokeh or vice versa.
+   - On matched out-of-focus depth (`|focus_ref - focus_cur| < td_bokeh_match_delta`): allows clean `L`-band stabilization while keeping `M = H = 0` so bokeh is never smeared or falsely sharpened.
+3. **Direct `L`-Band Region-Aware Debanding (`td_region_deband = off | on`, default `off`) -> `td.maps`:**
+   - Identifies flat/shallow-gradient banded regions via `(1 - edgeStrength) * (1 - textureDensity) * (1 - grainLevel) * (1 - SmoothstepC1(quantStep, 3 * quantStep, cellStdCleanY))`.
+   - Applies step-consistent MMSE `L`-band temporal averaging (`agree_k / (1 + sum agree)` where `rmsDiff <= quantStep`) bounded strictly by the quantization half-step `debandApplied * 0.5 * quantStep` (respecting Layer-2/Layer-4 grain protection and `fadeKeep`).
+   - Publishes continuous `[0, 1]` deband coordination guidance into U19 `td.maps` (`kStability = max(baseStability, debandApplied)` read directly by `TdMapsView::Reader::Deband`, plus packed reason bit `kTdMapsBandMaskRegionDebandBit = 8` in `kBandMask`, readable via `ReadRegionDebandGuidanceFromMaps`) without altering `TdMapsView::kUnitVersion` (`1`) or field count (`12`).

@@ -134,8 +134,11 @@ namespace ProfileSchemaHooks
 			if (key == "td_chroma_weights") return V(IsChoice(value, { "independent", "reuse_luma" }));
 			if (key == "td_anchored_carry" || key == "td_smooth_warp" || key == "td_hard_fb_gate" ||
 				key == "td_smooth_grain_guard" || key == "td_subpixel_debias" ||
-				key == "td_edge_upsample" || key == "td_neighborhood_clamp")
+				key == "td_edge_upsample" || key == "td_neighborhood_clamp" ||
+				key == "td_region_tailoring" || key == "td_region_deband")
 				return V(IsChoice(value, { "on", "off" }));
+			if (key == "td_bokeh_match_delta")
+				return V(IsChoice(value, { "off", "0.125", "0.25", "0.375" }));
 			if (key == "cnn_residual_stabilise" || key == "ssim_residual_stabilise" || key == "ssim_bitrate_aware") return V(IsChoice(value, { "on", "off" }));
 			if (key == "ssim_bitrate_floor") return V(IsNumberInRange(value, 0.0, 1.0));
 			// docs/VP-nvof-ahead.md (owner 2026-10-16): optical-flow frames ahead, 0..4 (whole frames).

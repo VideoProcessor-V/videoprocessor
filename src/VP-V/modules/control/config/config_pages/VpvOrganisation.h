@@ -161,7 +161,8 @@ namespace Vpv
 				{ K::Toggle, "td_solver" }, { K::Toggle, "td_quality_signal" }, { K::Toggle, "td_stats_pooling" },
 				{ K::Toggle, "td_anchored_carry" }, { K::Toggle, "td_smooth_warp" }, { K::Toggle, "td_hard_fb_gate" },
 				{ K::Toggle, "td_chroma_weights" }, { K::Toggle, "td_smooth_grain_guard" }, { K::Toggle, "td_subpixel_debias" },
-				{ K::Toggle, "td_edge_upsample" }, { K::Toggle, "td_neighborhood_clamp" } },
+				{ K::Toggle, "td_edge_upsample" }, { K::Toggle, "td_neighborhood_clamp" },
+				{ K::Toggle, "td_region_tailoring" }, { K::Toggle, "td_bokeh_match_delta" }, { K::Toggle, "td_region_deband" } },
 				{ L::Feature, "Temporal detail", "temporal_detail", nullptr, "off", "off" } },
 
 			// ---- Scaling ----

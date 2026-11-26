@@ -100,7 +100,10 @@
     "td_smooth_grain_guard": "on",
     "td_subpixel_debias": "off",
     "td_edge_upsample": "off",
-    "td_neighborhood_clamp": "off"
+    "td_neighborhood_clamp": "off",
+    "td_region_tailoring": "off",
+    "td_bokeh_match_delta": "off",
+    "td_region_deband": "off"
   },
   "units": [
     {
@@ -566,6 +569,35 @@
         {
           "key": "td_neighborhood_clamp",
           "label": "3x3 neighborhood soft clamp on M/H refs (SOTA-5)",
+          "values": [
+            "off",
+            "on"
+          ],
+          "slot": "repair.encoding"
+        },
+        {
+          "key": "td_region_tailoring",
+          "label": "Continuous per-region smoothstep & edge-aware blending (A4-1)",
+          "values": [
+            "off",
+            "on"
+          ],
+          "slot": "repair.encoding"
+        },
+        {
+          "key": "td_bokeh_match_delta",
+          "label": "Matched-focus bokeh tolerance |dfocus| (A4-1)",
+          "values": [
+            "off",
+            "0.125",
+            "0.25",
+            "0.375"
+          ],
+          "slot": "repair.encoding"
+        },
+        {
+          "key": "td_region_deband",
+          "label": "Direct L-band region-aware debanding -> td.maps (A4-1)",
           "values": [
             "off",
             "on"

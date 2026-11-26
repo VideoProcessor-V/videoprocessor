@@ -47,6 +47,7 @@
     "tools": [],
     "config_keys": [
       "td_anchored_carry",
+      "td_bokeh_match_delta",
       "td_chroma_weights",
       "td_edge_upsample",
       "td_hard_fb_gate",
@@ -55,6 +56,8 @@
       "td_neighborhood_clamp",
       "td_overlay",
       "td_quality_signal",
+      "td_region_deband",
+      "td_region_tailoring",
       "td_smooth_grain_guard",
       "td_smooth_warp",
       "td_solver",

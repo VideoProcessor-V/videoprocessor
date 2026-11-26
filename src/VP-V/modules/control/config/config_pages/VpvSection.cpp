@@ -552,6 +552,12 @@ namespace Vpv
 					return QStringLiteral("Default off. Clean-luma-guided edge-aware weight upsampling in Pass 3A (SOTA-4).\n\n");
 				if (k == "td_neighborhood_clamp")
 					return QStringLiteral("Default off. Grain-free 3x3 neighborhood 3-sigma C^1 soft clamp on warped reference M/H bands (SOTA-5).\n\n");
+				if (k == "td_region_tailoring")
+					return QStringLiteral("Default off. Enables continuous C^1 smoothstep per-region band modulation (P11 focus, P12 texture, kEdgeMap edge, P10g grain) and Pass 3A edge-aware bilateral/edge-stopped weight blending (Stage A4-1).\n\n");
+				if (k == "td_bokeh_match_delta")
+					return QStringLiteral("Default off. Matched-focus bokeh tailoring tolerance on |focus_ref - focus_cur| in [0, 1] focus space (off | 0.125 | 0.25 | 0.375): vetoes high-band import on rack-focus mismatch while allowing clean L-band stabilization on matched out-of-focus depth (Stage A4-1).\n\n");
+				if (k == "td_region_deband")
+					return QStringLiteral("Default off. Direct L-band region-aware temporal debanding on flat/shallow-gradient regions bounded by the quantization step, publishing coordination guidance to td.maps for downstream debanders (Stage A4-1).\n\n");
 				return QString();
 			};
 			const QString what = toggleHelp(toggle.key);

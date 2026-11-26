@@ -174,6 +174,9 @@ namespace VpvRenderer
 		std::string tdSubpixelDebias = "off";
 		std::string tdEdgeUpsample = "off";
 		std::string tdNeighborhoodClamp = "off";
+		std::string tdRegionTailoring = "off";
+		std::string tdBokehMatchDelta = "off";
+		std::string tdRegionDeband = "off";
 		// Delta 15 S8-2: the SSIM weight (and the CNN's, 2c) lowered at a low
 		// bitrate quality, down to the floor; the faithful anti-ringing raised.
 		bool ssimBitrateAware = true;

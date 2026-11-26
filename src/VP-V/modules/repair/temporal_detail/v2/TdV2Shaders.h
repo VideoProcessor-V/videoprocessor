@@ -54,6 +54,18 @@ float td_hermite_ramp(float e0, float e1, float x)
     return t * t * (3.0 - 2.0 * t);
 }
 
+// Stage A4-1: Canonical C^1 cubic Hermite smoothstep supporting both ascending and descending edges (1:1 CPU SmoothstepC1).
+float td_smoothstep_c1(float e0, float e1, float x)
+{
+    if (td_is_bad(e0) || td_is_bad(e1) || td_is_bad(x))
+        return 0.0;
+    float d = e1 - e0;
+    if (!(abs(d) > 1e-12))
+        return (x >= e1) ? 1.0 : 0.0;
+    float t = clamp((x - e0) / d, 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
 vec4 td_cubic_weights(float t)
 {
     float t2 = t * t;
@@ -1618,7 +1630,7 @@ for (int oy = ly; oy < TD_CELL_PX; oy += 4)
         vec4 cb = td_fetch_cur_band(p, halfActive);
 #endif
         activeCnt += 1.0;
-#if TD_EDGE_AWARE_UPSAMPLE
+#if TD_NEED_LUMA_STATS
         {
             float cleanYVal = cb.x + cb.y + cb.z;
             float dY = cleanYVal - muY;
@@ -1731,7 +1743,7 @@ td_p2a_sh[8 * 64 + tid] = refM2_2;
 td_p2a_sh[9 * 64 + tid] = refD3_2;
 td_p2a_sh[10 * 64 + tid] = borderCnt;
 td_p2a_sh[11 * 64 + tid] = curOg2;
-#if TD_EDGE_AWARE_UPSAMPLE
+#if TD_NEED_LUMA_STATS
 td_p2a_sh[12 * 64 + tid] = activeCnt;
 td_p2a_sh[13 * 64 + tid] = muY;
 td_p2a_sh[14 * 64 + tid] = sY;
@@ -1757,7 +1769,7 @@ else if (tid < 26)
     for (int i = 0; i < 32; ++i) ma |= td_p2a_m[bo + i];
     td_p2a_m[bo] = ma;
 }
-#if TD_EDGE_AWARE_UPSAMPLE
+#if TD_NEED_LUMA_STATS
 else if (tid < 34)
 {
     int g = tid - 26;
@@ -1800,7 +1812,7 @@ if (tid == 0)
 
     float cellMeanCleanY = 0.0;
     float cellStdCleanY = 0.0;
-#if TD_EDGE_AWARE_UPSAMPLE
+#if TD_NEED_LUMA_STATS
     {
         float tNY = 0.0, tMuY = 0.0, tSY = 0.0;
         for (int g = 0; g < 8; ++g)
@@ -1845,14 +1857,14 @@ if (tid == 0)
     float cleanM2 = max(0.0, cM2 - cellStepNoiseVar * TD_GAIN_MID);
     float cleanM3 = max(0.0, cM3Val - cellStepNoiseVar * TD_GAIN_D3);
     float curFDebiased = (cleanM2 + cleanM3 > TD_NUM_FLOOR) ? (cleanM2 / (cleanM2 + cleanM3 + TD_NUM_FLOOR)) : curF;
+    bool opticalDefoc = (curEnergy > cellStructureFloor && curFDebiased <= TD_F_DEFOCUS);
 
-    bool focusChange = false;
     int expFocusBits = int(round(priorT.y));
-    if ((expFocusBits & 1) != 0)
-    {
-        focusChange = true;
-    }
-    else if (totAct > 0.5 && K > 0)
+    bool explicitFocusChange = ((expFocusBits & 1) != 0);
+    bool focusChange = explicitFocusChange;
+    float rFDeb0 = 1.0, rFDeb1 = 1.0, rFDeb2 = 1.0;
+    float rE0 = 0.0, rE1 = 0.0, rE2 = 0.0;
+    if (totAct > 0.5 && K > 0)
     {
         float invC = 1.0 / totAct;
         for (int k = 0; k < K; ++k)
@@ -1864,23 +1876,28 @@ if (tid == 0)
             float cleanRefM2 = max(0.0, rM2 - TD_BASE_QUANT_VAR * TD_GAIN_MID);
             float cleanRefM3 = max(0.0, rM3 - TD_BASE_QUANT_VAR * TD_GAIN_D3);
             float refFDebiased = (cleanRefM2 + cleanRefM3 > TD_NUM_FLOOR) ? (cleanRefM2 / (cleanRefM2 + cleanRefM3 + TD_NUM_FLOOR)) : rF;
-            if (rEnergy > cellStructureFloor && cM2 < rM2 && curFDebiased < TD_F_SHARP &&
+            if (k == 0) { rFDeb0 = refFDebiased; rE0 = rEnergy; }
+            else if (k == 1) { rFDeb1 = refFDebiased; rE1 = rEnergy; }
+            else { rFDeb2 = refFDebiased; rE2 = rEnergy; }
+            if (!focusChange && rEnergy > cellStructureFloor && cM2 < rM2 && curFDebiased < TD_F_SHARP &&
                 (refFDebiased - curFDebiased) > TD_F_SHIFT_DELTA &&
                 (sqrt(rM2) - sqrt(cM2)) > quantMidRmsBound)
             {
                 focusChange = true;
-                break;
             }
         }
     }
 
     bool isDefocused = ((expFocusBits & 2) != 0);
     bool isFace = (u_has_face_mask > 0.5) && (texelFetch(face_mask, cell, 0).x > 0.5);
-    float focusFlags = (focusChange ? 1.0 : 0.0) + (isDefocused ? 2.0 : 0.0);
+    float focusFlags = (focusChange ? 1.0 : 0.0) + (isDefocused ? 2.0 : 0.0) +
+                       (explicitFocusChange ? 4.0 : 0.0) + (opticalDefoc ? 8.0 : 0.0);
     imageStore(cell_focus, cell, vec4(focusFlags, cellOwnGrainVar, spatialDetailRms, isFace ? 1.0 : 0.0));
+    imageStore(cell_region_aux, ivec2(cell.x, cell.y), vec4(curFDebiased, rFDeb0, rFDeb1, rFDeb2));
+    imageStore(cell_region_aux, ivec2(TD_CW + cell.x, cell.y), vec4(curEnergy, rE0, rE1, rE2));
     uint diagMask = (totBadMask & 7u) | (isFace ? 8u : 0u) | (totBadMask & 16u);
     imageStore(warp_diag, cell, vec4(t10, float(diagMask), 0.0, 0.0));
-    td_p2a_m[0] = (focusChange ? 1u : 0u) | (isFace ? 2u : 0u) | (isDefocused ? 4u : 0u);
+    td_p2a_m[0] = (focusChange ? 1u : 0u) | (isFace ? 2u : 0u) | (isDefocused ? 4u : 0u) | (explicitFocusChange ? 8u : 0u);
     td_p2a_meta[0] = cellMeanCleanY;
     td_p2a_meta[1] = cellStdCleanY;
     td_p2a_meta[2] = cM2;
@@ -1932,8 +1949,12 @@ if (tid < 3)
     bool cellFocusChange = (cellMaskFlags & 1u) != 0u;
     bool cellIsFace = (cellMaskFlags & 2u) != 0u;
     bool cellIsDefocused = (cellMaskFlags & 4u) != 0u;
+    bool cellExpFocusChange = (cellMaskFlags & 8u) != 0u;
     bool bokehAllowL = (u_bokeh_mode > 0.5);
-    bool skipMoments = cellIsFace || cellFocusChange || (cellIsDefocused && (b >= 1 || !bokehAllowL));
+    bool useBokehMatch = (u_bokeh_match_delta > 0.0);
+    bool skipMoments = cellIsFace || (useBokehMatch
+        ? (cellExpFocusChange || (cellIsDefocused && b >= 1))
+        : (cellFocusChange || (cellIsDefocused && (b >= 1 || !bokehAllowL))));
 
     float fMaskL = float(cellGateMaskL);
     float fMaskMH = float(cellGateMaskMH);
@@ -2527,6 +2548,8 @@ vec4 fInfo = texelFetch(cell_focus, cell, 0);
 int fFlags = int(round(fInfo.x));
 bool focusChange = ((fFlags & 1) != 0);
 bool isDefocused = ((fFlags & 2) != 0);
+bool expFocusChange = ((fFlags & 4) != 0);
+bool useBokehMatch = (u_bokeh_match_delta > 0.0);
 bool isFace = (fInfo.w > 0.5);
 
 vec4 priorT = texelFetch(cell_prior, cell, 0);
@@ -2568,7 +2591,10 @@ if (lowMotionForMerge)
 for (int b = 0; b < 3; ++b)
 {
     vec4 outRec = vec4(0.0);
-    if (!cellNonFin && !isFace && !focusChange && !(isDefocused && (b >= 1 || !bokehAllowL)))
+    bool focusSkipEb = useBokehMatch
+        ? (expFocusChange || (isDefocused && b >= 1))
+        : (focusChange || (isDefocused && (b >= 1 || !bokehAllowL)));
+    if (!cellNonFin && !isFace && !focusSkipEb)
     {
         int centerMask = 0;
         for (int kk = 0; kk < K; ++kk)
@@ -3026,7 +3052,13 @@ vec4 fInfo = texelFetch(cell_focus, cell, 0);
 int fFlags = int(round(fInfo.x));
 bool focusChange = ((fFlags & 1) != 0);
 bool isDefocused = ((fFlags & 2) != 0);
+bool expFocusChange = ((fFlags & 4) != 0);
+bool opticalDefoc = ((fFlags & 8) != 0);
 bool bokehAllowL = (u_bokeh_mode > 0.5);
+bool enableRegionTailoring = (u_enable_region_tailoring > 0.5);
+bool enableRegionDeband = (u_enable_region_deband > 0.5);
+float bokehMatchDelta = max(0.0, u_bokeh_match_delta);
+bool anyRegionFeature = enableRegionTailoring || (bokehMatchDelta > 0.0) || enableRegionDeband;
 float cellOwnGrainVar = max(0.0, fInfo.y);
 float spatialDetailRms = fInfo.z;
 bool isFace = (fInfo.w > 0.5);
@@ -3069,10 +3101,101 @@ vec2 cellLumaStat = texelFetch(cell_stats, ivec2(cell.x, 2 * TD_CH + cell.y), 0)
 float cellMeanCleanY = cellLumaStat.x;
 float cellStdCleanY = cellLumaStat.y;
 
+// Stage A4-1: Continuous per-cell region descriptors (P11, P12, kEdgeMap, P10g) matching CPU EvaluateCellRegionDescriptors 1:1.
+float regFocusConf = 1.0;
+float regTexDensity = 0.0;
+float regEdgeStrength = 0.0;
+float regP10gShare = 0.0;
+bool regCurOutOfFocus = isDefocused || opticalDefoc;
+float regFocusDelta0 = 0.0, regFocusDelta1 = 0.0, regFocusDelta2 = 0.0;
+if (anyRegionFeature)
+{
+    vec4 fAux = texelFetch(cell_region_aux, ivec2(cell.x, cell.y), 0);
+    vec4 eAux = texelFetch(cell_region_aux, ivec2(TD_CW + cell.x, cell.y), 0);
+    vec4 extF = (u_has_region_focus > 0.5) ? texelFetch(region_focus_in, cell, 0) : vec4(-1.0);
+    vec4 extP = (u_has_region_priors > 0.5) ? texelFetch(region_priors_in, cell, 0) : vec4(-1.0);
+    if (u_has_region_focus > 0.5 && (td_is_bad(extF.x) || (K > 0 && td_is_bad(extF.y)) || (K > 1 && td_is_bad(extF.z)) || (K > 2 && td_is_bad(extF.w))))
+        cellNonFinite = true;
+    if (u_has_region_priors > 0.5 && (td_is_bad(extP.x) || td_is_bad(extP.y)))
+        cellNonFinite = true;
+
+    float stepSqEff = (cellStepScaleSq > 0.0) ? cellStepScaleSq : 1.0;
+    float effNoiseV = max(TD_BASE_QUANT_VAR, (u_a2_valid > 0.5) ? max(0.0, u_a2_total_var) : 0.0);
+    float gainMD3 = TD_GAIN_MID + TD_GAIN_D3;
+    float cellStructFloor = 2.0 * gainMD3 * effNoiseV * stepSqEff;
+
+    float rawCurF = td_smoothstep_c1(TD_F_DEFOCUS, TD_F_SHARP, fAux.x);
+    bool hasExtCurF = (!td_is_bad(extF.x) && extF.x >= 0.0);
+    if (hasExtCurF)
+        regFocusConf = clamp(extF.x, 0.0, 1.0);
+    else if (isDefocused)
+        regFocusConf = 0.0;
+    else
+    {
+        float eConf = td_smoothstep_c1(0.5 * cellStructFloor, 2.0 * cellStructFloor, eAux.x);
+        regFocusConf = 1.0 - eConf * (1.0 - rawCurF);
+    }
+    regCurOutOfFocus = isDefocused || opticalDefoc || (regFocusConf < 0.5);
+
+    float fCurBase = hasExtCurF ? clamp(extF.x, 0.0, 1.0) : rawCurF;
+    if (K > 0)
+    {
+        bool hR = (!td_is_bad(extF.y) && extF.y >= 0.0);
+        if (hasExtCurF && hR) regFocusDelta0 = abs(clamp(extF.y, 0.0, 1.0) - fCurBase);
+        else { float pC = td_smoothstep_c1(0.5 * cellStructFloor, 2.0 * cellStructFloor, max(eAux.x, eAux.y)); float fR = hR ? clamp(extF.y, 0.0, 1.0) : td_smoothstep_c1(TD_F_DEFOCUS, TD_F_SHARP, fAux.y); regFocusDelta0 = pC * abs(fR - fCurBase); }
+    }
+    if (K > 1)
+    {
+        bool hR = (!td_is_bad(extF.z) && extF.z >= 0.0);
+        if (hasExtCurF && hR) regFocusDelta1 = abs(clamp(extF.z, 0.0, 1.0) - fCurBase);
+        else { float pC = td_smoothstep_c1(0.5 * cellStructFloor, 2.0 * cellStructFloor, max(eAux.x, eAux.z)); float fR = hR ? clamp(extF.z, 0.0, 1.0) : td_smoothstep_c1(TD_F_DEFOCUS, TD_F_SHARP, fAux.z); regFocusDelta1 = pC * abs(fR - fCurBase); }
+    }
+    if (K > 2)
+    {
+        bool hR = (!td_is_bad(extF.w) && extF.w >= 0.0);
+        if (hasExtCurF && hR) regFocusDelta2 = abs(clamp(extF.w, 0.0, 1.0) - fCurBase);
+        else { float pC = td_smoothstep_c1(0.5 * cellStructFloor, 2.0 * cellStructFloor, max(eAux.x, eAux.w)); float fR = hR ? clamp(extF.w, 0.0, 1.0) : td_smoothstep_c1(TD_F_DEFOCUS, TD_F_SHARP, fAux.w); regFocusDelta2 = pC * abs(fR - fCurBase); }
+    }
+
+    if (!td_is_bad(extP.x) && extP.x >= 0.0)
+    {
+        regTexDensity = clamp(extP.x, 0.0, 1.0);
+    }
+    else
+    {
+        float curMVarR = max(0.0, texelFetch(cell_stats, ivec2(TD_CW + cell.x, 2 * TD_CH + cell.y), 0).z);
+        float curHVarR = spatialDetailRms * spatialDetailRms;
+        float cleanMR = max(0.0, curMVarR - cellRetGVar * TD_GAIN_MID * u_psd_mid);
+        float cleanHR = max(0.0, curHVarR - cellRetGVar * TD_GAIN_FINE * u_psd_fine);
+        float texFloor = 2.0 * (TD_GAIN_MID + TD_GAIN_FINE) * effNoiseV * stepSqEff;
+        regTexDensity = td_smoothstep_c1(0.5 * texFloor, 2.0 * texFloor, cleanMR + cleanHR);
+    }
+
+    if (!td_is_bad(extP.y) && extP.y >= 0.0)
+    {
+        regEdgeStrength = clamp(extP.y, 0.0, 1.0);
+    }
+    else
+    {
+        float md3NV = gainMD3 * effNoiseV * stepSqEff;
+        float edgeFloor = sqrt(max(TD_NUM_FLOOR, md3NV));
+        float edgeProxy = sqrt(max(0.0, eAux.x - md3NV));
+        regEdgeStrength = td_smoothstep_c1(edgeFloor, 3.0 * edgeFloor, edgeProxy);
+    }
+
+    regP10gShare = td_smoothstep_c1(0.5 * TD_BASE_QUANT_VAR, 9.0 * TD_BASE_QUANT_VAR, cellOwnGrainVar + cellRetGVar);
+}
+float regBandGain0 = 1.0;
+float regBandGain1 = enableRegionTailoring ? regFocusConf : 1.0;
+float regBandGain2 = enableRegionTailoring ? (regFocusConf * (1.0 - regP10gShare * (1.0 - regTexDensity))) : 1.0;
+
 float cellWeightSumAll = 0.0;
 float midWeightSum = 0.0;
 float cellResEnergy = 0.0;
 int activeBandBits = 0;
+float cellDebandRegionVal = 0.0;
+float cellDebandQuantStep = 0.0;
+vec4 diagB1Out = vec4(0.0);
 vec4 bandW[3];
 bandW[0] = vec4(0.0);
 bandW[1] = vec4(0.0);
@@ -3258,15 +3381,21 @@ for (int b = 0; b < 3; ++b)
         float cleanTexMH = max(0.0, curMVar - cellRetGVar * TD_GAIN_MID * u_psd_mid) +
                            max(0.0, curHVar - cellRetGVar * TD_GAIN_FINE * u_psd_fine);
         int cellAc = (cleanTexMH > u_activity_tex_floor) ? 1 : 0;
-        vec4 ebInfo = texelFetch(eb_prior, ivec2(b, cellAc), 0);
-        float ebPriorU = max(0.0, ebInfo.x);
-        float ebTauSq = max(0.0, ebInfo.y);
+        vec4 ebInfo0 = texelFetch(eb_prior, ivec2(b, 0), 0);
+        vec4 ebInfo1 = texelFetch(eb_prior, ivec2(b, 1), 0);
+        vec4 ebInfo = (cellAc == 1) ? ebInfo1 : ebInfo0;
+        float ebPriorU = enableRegionTailoring
+            ? mix(max(0.0, ebInfo0.x), max(0.0, ebInfo1.x), regTexDensity)
+            : max(0.0, ebInfo.x);
+        float ebTauSq = enableRegionTailoring
+            ? mix(max(0.0, ebInfo0.y), max(0.0, ebInfo1.y), regTexDensity)
+            : max(0.0, ebInfo.y);
         bool ebValid = (ebInfo.z > 0.5);
         bool useA2ePrior = (u_use_a2e_prior > 0.5) && ebValid;
         float nEff = td_effective_samples_for_band(b, nPool);
 
-        // RED-BUG-7b: Compute per-ref effective motion gate (including anchor drift/held-out bar) BEFORE A1/QP
-        // so barred or occluded refs NEVER instrument, cross-cap, or steal simplex weight from valid references!
+        // RED-BUG-7b + Stage A4-1: Compute per-ref effective gate (motion + anchor bar + matched-focus bokeh) BEFORE A1/QP
+        // so barred, occluded, or rack-focus-mismatched refs NEVER instrument, cross-cap, or steal simplex weight!
         int ancRefIdx = int(round(u_anchor_ref_idx));
         bool ancBarred = (ancRefIdx >= 0) && (texelFetch(cell_drift, cell, 0).y > 0.5);
         float cellMGate[3];
@@ -3278,6 +3407,19 @@ for (int b = 0; b < 3; ++b)
             float mGate = (b == 0) ? mg.x : mg.y;
             if (k == ancRefIdx && ancBarred)
                 mGate = 0.0;
+            if (bokehMatchDelta > 0.0)
+            {
+                if (expFocusChange || (regCurOutOfFocus && b >= 1))
+                {
+                    mGate = 0.0;
+                }
+                else
+                {
+                    float fDeltaK = (k == 0) ? regFocusDelta0 : ((k == 1) ? regFocusDelta1 : regFocusDelta2);
+                    float matchGate = 1.0 - td_smoothstep_c1(0.5 * bokehMatchDelta, bokehMatchDelta, fDeltaK);
+                    mGate *= matchGate;
+                }
+            }
             cellMGate[k] = mGate;
             if (mGate > 0.0)
                 cellActMask |= (1 << k);
@@ -3417,21 +3559,58 @@ for (int b = 0; b < 3; ++b)
         }
         else
         {
-            // Focus & Bokeh Rule (H8 & Q4):
-            // - focusChange == true: hard-veto ALL 3 bands (L, M, H).
-            // - !focusChange && isDefocused: hard-veto M/H always; L allowed ONLY in BokehMode::LowBandCellOnly.
-            // - !focusChange && !isDefocused (sharp or curved smooth sky): focusGate = 1.0 on all bands.
-            bool bandFocusVeto = focusChange || (isDefocused && (b >= 1 || !bokehAllowL));
+            // Focus & Bokeh Rule (H8 & Q4) + Stage A4-1 continuous per-region modulation & L-band debanding.
+            bool bandFocusVeto = (bokehMatchDelta > 0.0)
+                ? (expFocusChange || (isDefocused && b >= 1))
+                : (focusChange || (isDefocused && (b >= 1 || !bokehAllowL)));
             float focusGate = bandFocusVeto ? 0.0 : 1.0;
+            float regGain = (b == 0) ? regBandGain0 : ((b == 1) ? regBandGain1 : regBandGain2);
 
             float bandWSum = 0.0;
             float wFinal[3];
             wFinal[0] = 0.0; wFinal[1] = 0.0; wFinal[2] = 0.0;
             for (int k = 0; k < K; ++k)
             {
-                wFinal[k] = solvedW[k] * cellMGate[k] * focusGate;
+                wFinal[k] = solvedW[k] * cellMGate[k] * focusGate * regGain;
                 bandWSum += wFinal[k];
             }
+
+            if (enableRegionDeband && b == 0 && focusGate > 0.0)
+            {
+                float impliedVarL = (TD_GAIN_LOW > TD_NUM_FLOOR) ? (blockOwnU / TD_GAIN_LOW) : 0.0;
+                float a2VarCell = (u_a2_valid > 0.5) ? (u_a2_total_var * cellStepScaleSq) : 0.0;
+                float effStepVar = max(TD_BASE_QUANT_VAR * cellStepScaleSq, max(a2VarCell, impliedVarL));
+                float quantStep = max(cellStepScale,
+                    (u_has_step_prior > 0.5 && u_step_delta > 0.0) ? (u_step_delta * cellStepScale) : sqrt(12.0 * effStepVar));
+                float smoothL = 1.0 - td_smoothstep_c1(quantStep, 3.0 * quantStep, cellStdCleanY);
+                float debandRegion = (1.0 - regEdgeStrength) * (1.0 - regTexDensity) * (1.0 - regP10gShare) * smoothL;
+                if (debandRegion > TD_NUM_FLOOR)
+                {
+                    float ag0 = 0.0, ag1 = 0.0, ag2 = 0.0;
+                    if (K > 0 && (cellActMask & 1) != 0 && !td_is_exact_copy(0))
+                        ag0 = cellMGate[0] * (1.0 - td_smoothstep_c1(0.5 * quantStep, quantStep, sqrt(max(0.0, C[0][0]))));
+                    if (K > 1 && (cellActMask & 2) != 0 && !td_is_exact_copy(1))
+                        ag1 = cellMGate[1] * (1.0 - td_smoothstep_c1(0.5 * quantStep, quantStep, sqrt(max(0.0, C[1][1]))));
+                    if (K > 2 && (cellActMask & 4) != 0 && !td_is_exact_copy(2))
+                        ag2 = cellMGate[2] * (1.0 - td_smoothstep_c1(0.5 * quantStep, quantStep, sqrt(max(0.0, C[2][2]))));
+                    float nAgree = ag0 + ag1 + ag2;
+                    if (nAgree > TD_NUM_FLOOR)
+                    {
+                        float invDen = 1.0 / (1.0 + nAgree);
+                        float wDebandSum = nAgree * invDen;
+                        if (wDebandSum > bandWSum)
+                        {
+                            wFinal[0] = max(0.0, wFinal[0] + debandRegion * (ag0 * invDen - wFinal[0]));
+                            wFinal[1] = max(0.0, wFinal[1] + debandRegion * (ag1 * invDen - wFinal[1]));
+                            wFinal[2] = max(0.0, wFinal[2] + debandRegion * (ag2 * invDen - wFinal[2]));
+                            bandWSum = wFinal[0] + wFinal[1] + wFinal[2];
+                        }
+                        cellDebandRegionVal = debandRegion;
+                        cellDebandQuantStep = quantStep;
+                    }
+                }
+            }
+
             wOut = vec4(wFinal[0], wFinal[1], wFinal[2], 0.0);
             if (bandWSum > TD_NUM_FLOOR)
                 activeBandBits |= (1 << b);
@@ -3442,10 +3621,19 @@ for (int b = 0; b < 3; ++b)
 
     bandW[b] = wOut;
     if (b == 0)
+    {
         diagOut.w = cellStdCleanY;
-    else if (b == 2)
+        imageStore(cell_diag_c, ivec2(cell.x, cell.y), diagOut);
+    }
+    else if (b == 1)
+    {
+        diagB1Out = diagOut;
+    }
+    else
+    {
         diagOut.w = bandU[2];
-    imageStore(cell_diag_c, ivec2(b * TD_CW + cell.x, cell.y), diagOut);
+        imageStore(cell_diag_c, ivec2(2 * TD_CW + cell.x, cell.y), diagOut);
+    }
 }
 )GLSL";
 
@@ -3518,7 +3706,22 @@ if (u_fade_keep < 1.0)
     }
 }
 
+float lowWeightSum = bandW[0].x + bandW[0].y + bandW[0].z;
 midWeightSum = bandW[1].x + bandW[1].y + bandW[1].z;
+float stabilityOut = clamp(cellWeightSumAll / 3.0, 0.0, 1.0);
+diagB1Out.w = 0.0;
+if (enableRegionDeband && cellDebandRegionVal > TD_NUM_FLOOR && lowWeightSum > TD_NUM_FLOOR)
+{
+    float debandApplied = clamp(cellDebandRegionVal * lowWeightSum, 0.0, 1.0);
+    if (debandApplied > TD_NUM_FLOOR)
+    {
+        diagB1Out.w = debandApplied * 0.5 * cellDebandQuantStep;
+        stabilityOut = max(stabilityOut, debandApplied);
+        activeBandBits |= 8;
+    }
+}
+imageStore(cell_diag_c, ivec2(TD_CW + cell.x, cell.y), diagB1Out);
+
 bandW[0].w = cellMeanCleanY;
 bandW[1].w = bandU[0];
 bandW[2].w = bandU[1];
@@ -3535,7 +3738,7 @@ vec4 slice0 = vec4(
     cellResEnergy / 3.0);
 vec4 slice1 = vec4(
     spatialDetailRms,
-    clamp(cellWeightSumAll / 3.0, 0.0, 1.0),
+    stabilityOut,
     sqrt(max(0.0, cellRetGVar)),
     sqrt(max(0.0, u_a2_total_var * cellStepScaleSq)));
 vec4 slice2 = vec4(1.0, 0.0, measuredDriftPx, float(activeBandBits));
@@ -3817,6 +4020,7 @@ imageStore(anchor_barred_out, cell, vec4((drift > TD_ANCHOR_DRIFT_BAR_PX) ? 1.0 
 	// Output: delta_out (w x h RG32F: .x = delta, .y = 1.0 when pixel-domain bound engaged).
 	constexpr const char* kPass3BlendHeader = R"GLSL(
 shared vec2 td_sh_mh[18][18];
+shared float td_p3_clean_y[18][18];
 #if TD_COMPACT_BANDS && (TD_CELL_PX == 16)
 shared float td_p3_l[400];
 #endif
@@ -3952,7 +4156,8 @@ float td_p3_accum_ref(bool activeRef, float ownWk, float curV, float refV, bool 
 }
 )GLSL";
 
-	constexpr const char* kPass3BlendAndBound = R"GLSL(
+	// Split into Part1 + Part2 to stay well below MSVC's 16,380-byte raw string literal limit (C2026).
+	constexpr const char* kPass3BlendAndBoundPart1 = R"GLSL(
 int wgX = int(gl_WorkGroupID.x);
 int wgY = int(gl_WorkGroupID.y);
 int baseX = wgX * 16;
@@ -3970,9 +4175,11 @@ int ay1 = int(round(u_ay1));
 ivec4 halfActive = ivec4(int(round(u_hax0)), int(round(u_hay0)), int(round(u_hax1)), int(round(u_hay1)));
 bool validRect = (ax1 > ax0) && (ay1 > ay0);
 bool enableNbrClamp = (u_enable_nbr_soft_clamp > 0.5);
+bool enableRegionTailoring = (u_enable_region_tailoring > 0.5);
+bool needDerivedPxEdge = enableRegionTailoring && (u_has_edge_map_plane < 0.5) && (u_has_edge_map_cells < 0.5);
 
 // Workgroup-uniform cooperative LDS loads BEFORE any early return (FXC cs_5_0 barrier safe!).
-if (enableNbrClamp)
+if (enableNbrClamp || needDerivedPxEdge)
 {
     int xMin = ax0;
     int xMax = max(ax0, ax1 - 1);
@@ -3987,9 +4194,20 @@ if (enableNbrClamp)
         int sx = validRect ? clamp(gx, xMin, xMax) : clamp(gx, 0, TD_W - 1);
         int sy = validRect ? clamp(gy, yMin, yMax) : clamp(gy, 0, TD_H - 1);
 #if TD_COMPACT_BANDS
-        td_sh_mh[ty][tx] = texelFetch(cur_bands_mh, ivec2(sx, sy), 0).xy;
+        vec2 mhS = texelFetch(cur_bands_mh, ivec2(sx, sy), 0).xy;
+        if (enableNbrClamp)
+            td_sh_mh[ty][tx] = mhS;
+        if (needDerivedPxEdge)
+        {
+            float lS = td_sample_half_ld3(cur_bands_ld3, ivec2(sx, sy), halfActive).x;
+            td_p3_clean_y[ty][tx] = lS + mhS.x + mhS.y;
+        }
 #else
-        td_sh_mh[ty][tx] = texelFetch(cur_bands, ivec2(sx, sy), 0).yz;
+        vec4 cbS = texelFetch(cur_bands, ivec2(sx, sy), 0);
+        if (enableNbrClamp)
+            td_sh_mh[ty][tx] = cbS.yz;
+        if (needDerivedPxEdge)
+            td_p3_clean_y[ty][tx] = cbS.x + cbS.y + cbS.z;
 #endif
     }
 }
@@ -4136,12 +4354,83 @@ if (refOk2)
 #endif
 }
 
-// Compute spatial (or SOTA #4 clean-luma-guided edge-aware) 2x2 corner interpolation weights once per pixel.
+// Compute spatial (or Stage A4-1 edge-aware / SOTA #4 clean-luma-guided) 2x2 corner interpolation weights once per pixel.
 float a00 = (1.0 - tx) * (1.0 - ty);
 float a10 = tx * (1.0 - ty);
 float a01 = (1.0 - tx) * ty;
 float a11 = tx * ty;
-if (u_enable_edge_aware_upsample > 0.5)
+)GLSL";
+
+	constexpr const char* kPass3BlendAndBoundPart2 = R"GLSL(
+if (enableRegionTailoring)
+{
+    float curCleanY = curB.x + curB.y + curB.z;
+    float baseQVar = 1.0 / 12.0;
+    float a2PxVar = (u_a2_valid > 0.5) ? (u_a2_total_var * cellStepScaleSq) : 0.0;
+    float effNoiseFloor = sqrt(max(baseQVar, a2PxVar));
+    float pxEdge = 0.0;
+    if (u_has_edge_map_plane > 0.5)
+    {
+        float ev = texelFetch(edge_map, p, 0).x;
+        pxEdge = td_is_bad(ev) ? 0.0 : clamp(ev, 0.0, 1.0);
+    }
+    else if (u_has_edge_map_cells > 0.5)
+    {
+        float ev = texelFetch(region_priors, ivec2(cx, cy), 0).y;
+        pxEdge = td_is_bad(ev) ? 0.0 : clamp(ev, 0.0, 1.0);
+    }
+    else
+    {
+        float gxY = 0.5 * (td_p3_clean_y[ly + 1][lx + 2] - td_p3_clean_y[ly + 1][lx]);
+        float gyY = 0.5 * (td_p3_clean_y[ly + 2][lx + 1] - td_p3_clean_y[ly][lx + 1]);
+        pxEdge = td_smoothstep_c1(effNoiseFloor, 3.0 * effNoiseFloor, length(vec2(gxY, gyY)));
+    }
+#if TD_CELL_PX == 16
+    float mOwn = td_p3_cw[4].w;
+    float sdOwn = td_p3_cd[4].w;
+    float m00 = td_p3_cw[q00].w, m10 = td_p3_cw[q10].w, m01 = td_p3_cw[q01].w, m11 = td_p3_cw[q11].w;
+    float sd00 = td_p3_cd[q00].w, sd10 = td_p3_cd[q10].w, sd01 = td_p3_cd[q01].w, sd11 = td_p3_cd[q11].w;
+#else
+    float mOwn = texelFetch(cell_weights, ivec2(cx, cy), 0).w;
+    float sdOwn = texelFetch(cell_diag_c, ivec2(cx, cy), 0).w;
+    float m00 = texelFetch(cell_weights, ivec2(x0, y0), 0).w;
+    float m10 = texelFetch(cell_weights, ivec2(x1, y0), 0).w;
+    float m01 = texelFetch(cell_weights, ivec2(x0, y1), 0).w;
+    float m11 = texelFetch(cell_weights, ivec2(x1, y1), 0).w;
+    float sd00 = texelFetch(cell_diag_c, ivec2(x0, y0), 0).w;
+    float sd10 = texelFetch(cell_diag_c, ivec2(x1, y0), 0).w;
+    float sd01 = texelFetch(cell_diag_c, ivec2(x0, y1), 0).w;
+    float sd11 = texelFetch(cell_diag_c, ivec2(x1, y1), 0).w;
+#endif
+    float s00 = max(sd00, effNoiseFloor), s10 = max(sd10, effNoiseFloor), s01 = max(sd01, effNoiseFloor), s11 = max(sd11, effNoiseFloor);
+    float dL00 = curCleanY - m00, dL10 = curCleanY - m10, dL01 = curCleanY - m01, dL11 = curCleanY - m11;
+    bool own00 = (x0 == cx && y0 == cy);
+    bool own10 = (x1 == cx && y0 == cy);
+    bool own01 = (x0 == cx && y1 == cy);
+    bool own11 = (x1 == cx && y1 == cy);
+    float es00 = own00 ? 1.0 : ((1.0 - pxEdge) * (1.0 - td_smoothstep_c1(1.0, 3.0, abs(m00 - mOwn) / max(max(sdOwn, sd00), effNoiseFloor))));
+    float es10 = own10 ? 1.0 : ((1.0 - pxEdge) * (1.0 - td_smoothstep_c1(1.0, 3.0, abs(m10 - mOwn) / max(max(sdOwn, sd10), effNoiseFloor))));
+    float es01 = own01 ? 1.0 : ((1.0 - pxEdge) * (1.0 - td_smoothstep_c1(1.0, 3.0, abs(m01 - mOwn) / max(max(sdOwn, sd01), effNoiseFloor))));
+    float es11 = own11 ? 1.0 : ((1.0 - pxEdge) * (1.0 - td_smoothstep_c1(1.0, 3.0, abs(m11 - mOwn) / max(max(sdOwn, sd11), effNoiseFloor))));
+    float sw00 = a00 * exp(-(dL00 * dL00) / (2.0 * s00 * s00)) * es00;
+    float sw10 = a10 * exp(-(dL10 * dL10) / (2.0 * s10 * s10)) * es10;
+    float sw01 = a01 * exp(-(dL01 * dL01) / (2.0 * s01 * s01)) * es01;
+    float sw11 = a11 * exp(-(dL11 * dL11) / (2.0 * s11 * s11)) * es11;
+    float swSum = sw00 + sw10 + sw01 + sw11;
+    if (swSum > TD_NUM_FLOOR)
+    {
+        float invSw = 1.0 / swSum;
+        a00 = sw00 * invSw; a10 = sw10 * invSw; a01 = sw01 * invSw; a11 = sw11 * invSw;
+    }
+    else
+    {
+        a00 = own00 ? 1.0 : 0.0;
+        a10 = (!own00 && own10) ? 1.0 : 0.0;
+        a01 = (!own00 && !own10 && own01) ? 1.0 : 0.0;
+        a11 = (!own00 && !own10 && !own01) ? 1.0 : 0.0;
+    }
+}
+else if (u_enable_edge_aware_upsample > 0.5)
 {
     float curCleanY = curB.x + curB.y + curB.z;
     float baseQVar = 1.0 / 12.0;
@@ -4210,11 +4499,18 @@ if (enableNbrClamp)
 float cellU0 = max(0.0, td_p3_cw[13].w);
 float cellU1 = max(0.0, td_p3_cw[22].w);
 float cellU2 = max(0.0, td_p3_cd[22].w);
+float cellDebandBoundL = max(0.0, td_p3_cd[13].w);
 #else
 float cellU0 = max(0.0, texelFetch(cell_weights, ivec2(1 * TD_CW + cx, cy), 0).w);
 float cellU1 = max(0.0, texelFetch(cell_weights, ivec2(2 * TD_CW + cx, cy), 0).w);
 float cellU2 = max(0.0, texelFetch(cell_diag_c,  ivec2(2 * TD_CW + cx, cy), 0).w);
+float cellDebandBoundL = max(0.0, texelFetch(cell_diag_c, ivec2(1 * TD_CW + cx, cy), 0).w);
 #endif
+if (u_enable_region_deband > 0.5 && cellDebandBoundL > 0.0 && u_pixel_bound_kappa > TD_NUM_FLOOR)
+{
+    float debRatio = cellDebandBoundL / u_pixel_bound_kappa;
+    cellU0 = max(cellU0, debRatio * debRatio);
+}
 
 float totalDelta = 0.0;
 float boundedDelta = 0.0;
@@ -4294,6 +4590,11 @@ float outX = td_is_bad(totalDelta) ? 0.0 : totalDelta;
 float outY = inFull8x8 ? (td_is_bad(boundedDelta) ? 0.0 : boundedDelta) : boundEngaged;
 imageStore(delta_out, p, vec4(outX, outY, 0.0, 0.0));
 )GLSL";
+
+	inline std::string BuildPass3BlendAndBoundBody()
+	{
+		return std::string(kPass3BlendAndBoundPart1) + kPass3BlendAndBoundPart2;
+	}
 
 	// ---- PASS 3B: Optional Codec-Grid-Aligned 8x8 DCT-II STRICT/CELL POCS (Speedup 7: Empty-Block Fetch Skip) ----
 	// Dispatch: ceil(TD_W / 8) x ceil(TD_H / 8), group 8x8 (1 workgroup per codec-aligned 8x8 block).

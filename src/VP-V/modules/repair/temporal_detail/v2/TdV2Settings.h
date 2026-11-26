@@ -103,6 +103,9 @@ namespace TdV2
 		bool subpixelDebias = false;       // SOTA-2
 		bool edgeUpsample = false;         // SOTA-4
 		bool neighborhoodClamp = false;    // SOTA-5
+		bool regionTailoring = false;      // Stage A4-1: continuous smoothstep region modulation + Pass 3A edge-aware blending
+		double bokehMatchDelta = 0.0;      // Stage A4-1: matched-focus bokeh gating tolerance (0.0 = off, else 0.125/0.25/0.375)
+		bool regionDeband = false;         // Stage A4-1: direct L-band region-aware debanding + td.maps guidance
 	};
 
 	namespace Detail
@@ -232,6 +235,17 @@ namespace TdV2
 		if (k == "td_subpixel_debias") return parseOnOff("td_subpixel_debias", settings.subpixelDebias);
 		if (k == "td_edge_upsample") return parseOnOff("td_edge_upsample", settings.edgeUpsample);
 		if (k == "td_neighborhood_clamp") return parseOnOff("td_neighborhood_clamp", settings.neighborhoodClamp);
+		if (k == "td_region_tailoring") return parseOnOff("td_region_tailoring", settings.regionTailoring);
+		if (k == "td_region_deband") return parseOnOff("td_region_deband", settings.regionDeband);
+		if (k == "td_bokeh_match_delta")
+		{
+			if (v == "off") { settings.bokehMatchDelta = 0.0; return true; }
+			if (v == "0.125") { settings.bokehMatchDelta = kBokehMatchDeltaTight; return true; }
+			if (v == "0.25") { settings.bokehMatchDelta = kBokehMatchDeltaNormal; return true; }
+			if (v == "0.375") { settings.bokehMatchDelta = kBokehMatchDeltaWide; return true; }
+			problem = "invalid td_bokeh_match_delta value '" + value + "' (expected off|0.125|0.25|0.375)";
+			return false;
+		}
 
 		problem = "unknown temporal detail key '" + key + "'";
 		return false;
@@ -267,6 +281,9 @@ namespace TdV2
 		cfg.enableSubpixelHAttenuationDebias = s.subpixelDebias;
 		cfg.enableEdgeAwareWeightUpsample = s.edgeUpsample;
 		cfg.enableNeighborhoodSoftClamp = s.neighborhoodClamp;
+		cfg.enableRegionTailoring = s.regionTailoring;
+		cfg.bokehMatchDelta = ClampBokehMatchDelta(s.bokehMatchDelta);
+		cfg.enableRegionDeband = s.regionDeband;
 		if (originalPathway)
 			ApplyOriginalPathwayOverride(cfg);
 		return cfg;

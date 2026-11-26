@@ -44,6 +44,17 @@ namespace TdV2
 	// catches sustained >= 0.05 px/frame composed-vector drift cleanly within one 8-frame GOP span.
 	constexpr double kAnchorDriftBarPx = 0.25;
 
+	// Stage A4-1 matched-focus bokeh tolerance constants in normalized [0, 1] focus space (Rule 1: elementary dyadic fractions):
+	// upper bound 0.5 = half of [0, 1] focus span so a full sharp (1.0) vs defocused (0.0) rack-focus jump can never match.
+	constexpr double kBokehMatchDeltaTight = 0.125;   // 1/8 of [0, 1] focus span
+	constexpr double kBokehMatchDeltaNormal = 0.25;   // 1/4 of [0, 1] focus span
+	constexpr double kBokehMatchDeltaWide = 0.375;    // 3/8 of [0, 1] focus span
+	constexpr double kBokehMatchDeltaMax = 0.5;       // 1/2 of [0, 1] focus span
+
+	// Packed reason bit 3 in U19 TdMapsView::kBandMask ("active-band mask + reason"):
+	// bits 0..2 remain L/M/H active bands (0..7); bit 3 (8) marks direct L-band region-aware debanding active (Stage A4-1).
+	constexpr unsigned kTdMapsBandMaskRegionDebandBit = 8u;
+
 	// Top-level operating mode. Default is strictly Off.
 	enum class Mode : uint8_t
 	{
@@ -269,6 +280,17 @@ namespace TdV2
 
 		// Grain-free 3x3 LDS neighborhood 3-sigma soft clamp on warped reference M/H bands (SOTA #5; default false).
 		bool enableNeighborhoodSoftClamp = false;
+
+		// Stage A4-1 ("Climb to A4" Modular Per-Region Tailoring — all strictly DEFAULT OFF):
+		// - enableRegionTailoring (td_region_tailoring): continuous C^1 Hermite smoothstep per-region band modulation
+		//   (P11 focus confidence, P12 texture density, kEdgeMap edge strength, P10g grain level) + Pass 3A edge-aware blending.
+		// - bokehMatchDelta (td_bokeh_match_delta): matched-focus bokeh gating tolerance on |focus_ref - focus_cur| in [0, 0.5];
+		//   0.0 = OFF (baseline preservation); > 0 vetoes mismatched high-band import and allows matched-depth L-band stabilization.
+		// - enableRegionDeband (td_region_deband): direct L-band region-aware temporal debanding on flat/shallow-gradient
+		//   regions bounded by the quantization step, publishing continuous guidance to td.maps (kStability + kBandMask bit 3).
+		bool enableRegionTailoring = false;
+		double bokehMatchDelta = 0.0;
+		bool enableRegionDeband = false;
 
 		// Measured source rate in Hz (used to express any temporal horizon in seconds, never hardcoded frame counts).
 		double sourceHz = kDefaultSourceHz;

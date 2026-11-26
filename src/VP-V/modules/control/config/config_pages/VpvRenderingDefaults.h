@@ -528,6 +528,7 @@ inline bool IsVpvOnlyKey(const QString& key)
         "target_transfer",
         "target_white_percent",
         "td_anchored_carry",
+        "td_bokeh_match_delta",
         "td_chroma_weights",
         "td_edge_upsample",
         "td_hard_fb_gate",
@@ -536,6 +537,8 @@ inline bool IsVpvOnlyKey(const QString& key)
         "td_neighborhood_clamp",
         "td_overlay",
         "td_quality_signal",
+        "td_region_deband",
+        "td_region_tailoring",
         "td_smooth_grain_guard",
         "td_smooth_warp",
         "td_solver",
@@ -710,6 +713,9 @@ inline bool VpvRenderingDefault(const QString& key, QString& out)
     if (key == QStringLiteral("td_subpixel_debias")) { out = QStringLiteral("off"); return true; }       // SOTA-2
     if (key == QStringLiteral("td_edge_upsample")) { out = QStringLiteral("off"); return true; }         // SOTA-4
     if (key == QStringLiteral("td_neighborhood_clamp")) { out = QStringLiteral("off"); return true; }    // SOTA-5
+    if (key == QStringLiteral("td_region_tailoring")) { out = QStringLiteral("off"); return true; }      // Stage A4-1
+    if (key == QStringLiteral("td_bokeh_match_delta")) { out = QStringLiteral("off"); return true; }     // Stage A4-1
+    if (key == QStringLiteral("td_region_deband")) { out = QStringLiteral("off"); return true; }         // Stage A4-1
         // The renderer's own defaults (LibplaceboVideoRenderer.cpp's
         // settings, AdaptiveDownscale.h), so an unset choice says what
         // it really is (audit 2026-10-14c: these all showed "Auto").

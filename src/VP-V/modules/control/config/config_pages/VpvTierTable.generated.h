@@ -79,6 +79,9 @@ namespace Vpv
             t.defaults.push_back({ "td_subpixel_debias", "off" });
             t.defaults.push_back({ "td_edge_upsample", "off" });
             t.defaults.push_back({ "td_neighborhood_clamp", "off" });
+            t.defaults.push_back({ "td_region_tailoring", "off" });
+            t.defaults.push_back({ "td_bokeh_match_delta", "off" });
+            t.defaults.push_back({ "td_region_deband", "off" });
             t.slotList.push_back({ "input.capture", "Capture", "input", "built", 10, "capture GPU unpack: CPU formatters for the session: <error> | native RGB GPU unpack: CPU conversion to 10-bit 4:2:0 for the session: <error> | early upload: the render upload (<error>)" });
             t.slotList.push_back({ "input.signal", "Signal", "input", "built", 20, "Dolby Vision GPU unpack: CPU unpack for the session: <error> | DV metadata: <held | static>" });
             t.slotList.push_back({ "input.queue_timing", "Queue + timing", "input", "built", 30, "look-ahead: <n> of 4 queued frames (delay budget <ms>); delay budget: <why the total is not exact>" });
@@ -239,6 +242,9 @@ namespace Vpv
                 u.toggles.push_back({ "td_subpixel_debias", "Sub-pixel H-band warp attenuation debias (SOTA-2)", { "off", "on" }, "repair.encoding" });
                 u.toggles.push_back({ "td_edge_upsample", "Luma-guided edge-aware weight upsampling (SOTA-4)", { "off", "on" }, "repair.encoding" });
                 u.toggles.push_back({ "td_neighborhood_clamp", "3x3 neighborhood soft clamp on M/H refs (SOTA-5)", { "off", "on" }, "repair.encoding" });
+                u.toggles.push_back({ "td_region_tailoring", "Continuous per-region smoothstep & edge-aware blending (A4-1)", { "off", "on" }, "repair.encoding" });
+                u.toggles.push_back({ "td_bokeh_match_delta", "Matched-focus bokeh tolerance |dfocus| (A4-1)", { "off", "0.125", "0.25", "0.375" }, "repair.encoding" });
+                u.toggles.push_back({ "td_region_deband", "Direct L-band region-aware debanding -> td.maps (A4-1)", { "off", "on" }, "repair.encoding" });
                 u.planned.push_back({ "encoding_repair", "Encoding repair (net A or VP restore)", "repair.encoding" });
                 t.units.push_back(u);
             }

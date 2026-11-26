@@ -58,6 +58,7 @@ namespace TdV2
 		MissingMotionNoWholeBlend,
 		FaceMaskSizeMismatch,
 		GpuPrivateScratchFallback,
+		RegionMapsDerived,
 		Count
 	};
 
@@ -147,7 +148,9 @@ namespace TdV2
 			{ StandInKind::FaceMaskSizeMismatch, "td.fallback.face_mask_size_mismatch",
 			  "Pass-1 face mask size mismatch (trailing cells masked fail-closed)", "Matching cell-grid faceMask vector / pl_tex" },
 			{ StandInKind::GpuPrivateScratchFallback, "td.gpu.private_scratch_fallback",
-			  "GPU private scratch fallback (arena == nullptr)", "Shared ScratchArena kUserTemporalDetail" }
+			  "GPU private scratch fallback (arena == nullptr)", "Shared ScratchArena kUserTemporalDetail" },
+			{ StandInKind::RegionMapsDerived, "td.standin.region_maps_derived",
+			  "region maps: derived from clean bands (P11/P12/kEdgeMap absent)", "Shared P11 focus, P12 texture, kEdgeMap products" }
 		};
 		const size_t idx = static_cast<size_t>(kind);
 		if (idx < static_cast<size_t>(StandInKind::Count))
