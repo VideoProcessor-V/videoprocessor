@@ -3753,6 +3753,17 @@ namespace TdV2
 								const int px1 = (std::min)(codedActive.x1, ((cx + bandPoolR + 1) * cellPx + cSubX - 1) / cSubX);
 
 								const TdV2Plane& curB = bandPlaneOf(curBands, b);
+								int centerMask = 0;
+								for (int ai = 0; ai < activeK; ++ai)
+								{
+									const WarpedChromaRef& wr = refs[static_cast<size_t>(activeIdx[ai])];
+									const double cGate = (b == 0) ? wr.motionGate.gateL[cIdx] : wr.motionGate.gateMH[cIdx];
+									if (cGate > 0.0)
+										centerMask |= (1 << ai);
+								}
+								if (centerMask == 0)
+									continue;
+
 								MomentAccumulatorFp32 acc(activeK);
 								double ownSumSq[kMaxBlendRefs] = {};
 								size_t ownSampleCount = 0;
@@ -3761,12 +3772,26 @@ namespace TdV2
 								{
 									const double ly = in.siting.CodedToLumaY(static_cast<double>(y), cSubY);
 									const int pcy = (std::max)(0, (std::min)(res.cellsH - 1, static_cast<int>(std::floor(ly)) / cellPx));
+									if (std::abs(pcy - cy) > bandPoolR)
+										continue;
 									for (int x = px0; x < px1; ++x)
 									{
 										const double lx = in.siting.CodedToLumaX(static_cast<double>(x), cSubX);
 										const int pcx = (std::max)(0, (std::min)(res.cellsW - 1, static_cast<int>(std::floor(lx)) / cellPx));
+										if (std::abs(pcx - cx) > bandPoolR)
+											continue;
 										const size_t pCell = static_cast<size_t>(pcy) * res.cellsW + pcx;
 										if (isFaceMaskedCell(pCell) || isFocusVetoedBand(pCell, b))
+											continue;
+										int nbrMask = 0;
+										for (int ai = 0; ai < activeK; ++ai)
+										{
+											const WarpedChromaRef& wr = refs[static_cast<size_t>(activeIdx[ai])];
+											const double pGate = (b == 0) ? wr.motionGate.gateL[pCell] : wr.motionGate.gateMH[pCell];
+											if (pGate > 0.0)
+												nbrMask |= (1 << ai);
+										}
+										if ((nbrMask & centerMask) != centerMask)
 											continue;
 										const size_t pIdx = static_cast<size_t>(y) * cW + x;
 
@@ -3775,16 +3800,26 @@ namespace TdV2
 										const double curV = curB.at(x, y);
 										for (int ai = 0; ai < activeK; ++ai)
 										{
+											if ((nbrMask & (1 << ai)) == 0)
+											{
+												diffs[ai] = 0.0f;
+												continue;
+											}
 											const int k = activeIdx[ai];
 											const WarpedChromaRef& wr = refs[static_cast<size_t>(k)];
-											const double pGate = (b == 0) ? wr.motionGate.gateL[pCell] : wr.motionGate.gateMH[pCell];
-											if (wr.validPx[pIdx] == 0u || pGate <= 0.0)
+											if (wr.validPx[pIdx] == 0u)
 											{
 												allValid = false;
 												break;
 											}
 											const ThreeBandPlanes& rBands = isCb ? wr.bandsCb : wr.bandsCr;
-											diffs[ai] = static_cast<float>(curV - bandPlaneOf(rBands, b).at(x, y));
+											const double dVal = curV - bandPlaneOf(rBands, b).at(x, y);
+											if (!std::isfinite(dVal))
+											{
+												allValid = false;
+												break;
+											}
+											diffs[ai] = ((centerMask & (1 << ai)) != 0) ? static_cast<float>(dVal) : 0.0f;
 										}
 										if (allValid)
 										{

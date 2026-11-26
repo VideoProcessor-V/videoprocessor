@@ -440,9 +440,7 @@ else
                          (!td_is_bad(c00m.x)) && (!td_is_bad(c00m.y)) &&
                          (!td_is_bad(c10m.x)) && (!td_is_bad(c10m.y)) &&
                          (!td_is_bad(c01m.x)) && (!td_is_bad(c01m.y)) &&
-                         (!td_is_bad(c11m.x)) && (!td_is_bad(c11m.y)) &&
-                         (int(round(m00m.x)) == mvCls) && (int(round(m10m.x)) == mvCls) &&
-                         (int(round(m01m.x)) == mvCls) && (int(round(m11m.x)) == mvCls);
+                         (!td_is_bad(c11m.x)) && (!td_is_bad(c11m.y));
         if (cornersOk)
         {
             vec2 topM = c00m + (c10m - c00m) * tx;
@@ -1571,10 +1569,12 @@ if (tid == 0)
 )GLSL";
 
 		// ---- PASS C2B: Chan-Pebay Merge + Blind A1/A2/A2e/A3 + EB Shrinkage + Active-Set Solve (Cb & Cr) ----
-		// Split into Part1 + Part2 for MSVC C2026 headroom (<= 10 KB each).
+		// PROD-GPU-PERF-16: Parallelize chIdx across gl_GlobalInvocationID.y (2*TD_CH rows) so FXC cs_5_0
+		// compiles 1 channel loop (3 bands) instead of 2x3 = 6 unrolled Cholesky solvers (~15x faster FXC compile!).
 		constexpr const char* kPassChromaMergeSolvePart1 = R"GLSL(
-ivec2 cell = ivec2(gl_GlobalInvocationID.xy);
-if (cell.x >= TD_CW || cell.y >= TD_CH)
+int chIdx = int(gl_GlobalInvocationID.y) / TD_CH;
+ivec2 cell = ivec2(int(gl_GlobalInvocationID.x), int(gl_GlobalInvocationID.y) % TD_CH);
+if (chIdx >= 2 || cell.x >= TD_CW || cell.y >= TD_CH)
     return;
 
 int K = int(round(u_k));
@@ -1637,7 +1637,6 @@ vec2 ownGrainVar = (ogCntPool > 0.5) ? max(vec2(0.0), ogSumPool / ogCntPool) : v
 )GLSL";
 
 		constexpr const char* kPassChromaMergeSolvePart2 = R"GLSL(
-for (int chIdx = 0; chIdx < 2; ++chIdx)
 {
     vec4 bandW[3];
     bandW[0] = vec4(0.0); bandW[1] = vec4(0.0); bandW[2] = vec4(0.0);
@@ -1922,11 +1921,14 @@ for (int chIdx = 0; chIdx < 2; ++chIdx)
     }
 }
 
-imageStore(cell_diag_flags, cell, vec4(
-    (focusChange || isDefocused) ? 1.0 : 0.0,
-    cellNonFinite ? 1.0 : 0.0,
-    cellSingular ? 1.0 : 0.0,
-    cellSingleRefA2 ? 1.0 : 0.0));
+if (chIdx == 0)
+{
+    imageStore(cell_diag_flags, cell, vec4(
+        (focusChange || isDefocused) ? 1.0 : 0.0,
+        cellNonFinite ? 1.0 : 0.0,
+        cellSingular ? 1.0 : 0.0,
+        cellSingleRefA2 ? 1.0 : 0.0));
+}
 )GLSL";
 
 		inline std::string BuildPassChromaMergeSolveBody()
@@ -4271,7 +4273,7 @@ imageStore(out_coded_delta, p, vec4(0.0));
 				};
 				const std::string c2bBody = ChromaShaders::BuildPassChromaMergeSolveBody();
 				if (!runPass("td_v2_c2b_merge_solve", c2bHdr, c2bBody.c_str(), d2b, 12, v2b, 33,
-				             Detail::GroupsFor(cw, 8), Detail::GroupsFor(ch, 8), 8, 8))
+				             Detail::GroupsFor(cw, 8), Detail::GroupsFor(2 * ch, 8), 8, 8))
 				{
 					return failVisible("td_v2_c2b_merge_solve dispatch failed", StandInKind::GpuDispatchFailed);
 				}

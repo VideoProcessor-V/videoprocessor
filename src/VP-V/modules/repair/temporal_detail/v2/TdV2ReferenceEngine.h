@@ -1985,11 +1985,16 @@ namespace TdV2
 						// so a drift-barred / held-out-rejected anchor (or occluded ref) NEVER zeroes out valid peers!
 						bool cellRefActive[kMaxBlendRefs] = {};
 						bool anyCellRefActive = false;
+						int centerMask = 0;
 						for (int k = 0; k < K; ++k)
 						{
 							const double cGate = (b == 0) ? refs[k].motionGate.gateL[cIdx] : refs[k].motionGate.gateMH[cIdx];
 							cellRefActive[k] = (cGate > 0.0);
-							if (cellRefActive[k]) anyCellRefActive = true;
+							if (cellRefActive[k])
+							{
+								anyCellRefActive = true;
+								centerMask |= (1 << k);
+							}
 						}
 						if (!anyCellRefActive)
 							continue;
@@ -2004,19 +2009,28 @@ namespace TdV2
 								if (isFaceMaskedCell(pCell) || isFocusVetoedBand(pCell, b))
 									continue;
 
+								int nbrMask = 0;
+								for (int k = 0; k < K; ++k)
+								{
+									const double pGate = (b == 0) ? refs[k].motionGate.gateL[pCell] : refs[k].motionGate.gateMH[pCell];
+									if (pGate > 0.0)
+										nbrMask |= (1 << k);
+								}
+								if ((nbrMask & centerMask) != centerMask)
+									continue;
+
 								const size_t pIdx = static_cast<size_t>(y) * w + x;
 								bool allValid = true;
 								double diffs[kMaxBlendRefs] = {};
 								const double curV = curB.at(x, y);
 								for (int k = 0; k < K; ++k)
 								{
-									if (!cellRefActive[k])
+									if ((nbrMask & (1 << k)) == 0)
 									{
 										diffs[k] = 0.0;
 										continue;
 									}
-									const double pGate = (b == 0) ? refs[k].motionGate.gateL[pCell] : refs[k].motionGate.gateMH[pCell];
-									if (refs[k].validPx[pIdx] == 0u || pGate <= 0.0)
+									if (refs[k].validPx[pIdx] == 0u)
 									{
 										allValid = false;
 										break;
@@ -2027,7 +2041,7 @@ namespace TdV2
 										allValid = false;
 										break;
 									}
-									diffs[k] = dVal;
+									diffs[k] = cellRefActive[k] ? dVal : 0.0;
 								}
 								if (allValid)
 								{
@@ -2255,6 +2269,8 @@ namespace TdV2
 								for (int j = 0; j < K; ++j)
 									cm.C[i][j] = wCur * cm.C[i][j] + wPrev * pm.C[i][j];
 							}
+							for (int k = 0; k < K; ++k)
+								cellDiagC[b][k][ci] = (std::min)(cellDiagC[b][k][ci], cm.C[k][k]);
 							cm.sampleCount = cm.sampleCount + pm.sampleCount;
 							const double nEffMerged = EffectiveSamplesForBand(b, static_cast<double>(cm.sampleCount));
 							bool cellContributed = false;

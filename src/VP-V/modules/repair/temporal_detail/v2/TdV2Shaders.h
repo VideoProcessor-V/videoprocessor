@@ -3456,7 +3456,7 @@ if (tid == 0)
         if (varCurM > u_mid_noise_floor && varAncM > u_mid_noise_floor)
         {
             float ncc = covM / sqrt(varCurM * varAncM);
-            float nEffM = max(1.0, totN / (4.0 * 3.14159265358979323846 * 1.0 * 1.0));
+            float nEffM = max(1.0, totN / 6.283185307179586);
             float nccMin = min(0.5, 3.0 / sqrt(nEffM));
             if (td_is_bad(ncc) || ncc < nccMin)
                 ok = false;

@@ -3022,7 +3022,7 @@ namespace Gpu
 			const float uXform8x8 = runDctPocs ? 1.0f : 0.0f;
 			const float uPixelBoundKappa = static_cast<float>(ClampPixelBoundKappa(cfg_.pixelBoundKappa));
 			const float uEnableJointBound = cfg_.enableJointCrossBandBound ? 1.0f : 0.0f;
-			const float uUseEmpiricalU = (cfg_.enableA2eEmpiricalPrior && !runDctPocs) ? 1.0f : 0.0f;
+			const float uUseEmpiricalU = (cfg_.enableA2eEmpiricalPrior && !p.transformIdentified8x8) ? 1.0f : 0.0f;
 			const float uUseA2ePrior = (cfg_.enableA2eEmpiricalPrior && !p.transformIdentified8x8 && !p.hasStepPrior) ? 1.0f : 0.0f;
 			const float uPocsIters = static_cast<float>((std::max)(1, (std::min)(2, cfg_.cellProjIterations)));
 			const float uResidualMode = (cfg_.residualMode == ResidualMode::Strict) ? 1.0f : 0.0f;
