@@ -225,7 +225,18 @@
     "src/VP-V/modules/motion/estimation/DitherVectorSource.h",
     "src/VP-V/modules/motion/estimation/tests/OutputDomainSearchTests.cpp",
     "src/VP-V/modules/motion/estimation/tests/DitherVectorSourceTests.cpp",
-    "src/VP-V/modules/motion/estimation/tests/CameraTestSeamTests.cpp"
+    "src/VP-V/modules/motion/estimation/tests/CameraTestSeamTests.cpp",
+    "src/VP-V/modules/motion/estimation/fast_objects/README.md",
+    "src/VP-V/modules/motion/estimation/fast_objects/FastObjectTypes.h",
+    "src/VP-V/modules/motion/estimation/fast_objects/FastObjectResidualRef.h",
+    "src/VP-V/modules/motion/estimation/fast_objects/FastObjectResidualRef.cpp",
+    "src/VP-V/modules/motion/estimation/fast_objects/FastObjectTrajectory.h",
+    "src/VP-V/modules/motion/estimation/fast_objects/FastObjectTrajectory.cpp",
+    "src/VP-V/modules/motion/estimation/fast_objects/FastObjectRefineRef.h",
+    "src/VP-V/modules/motion/estimation/fast_objects/FastObjectRefineRef.cpp",
+    "src/VP-V/modules/motion/estimation/fast_objects/FastObjectOverlay.h",
+    "src/VP-V/modules/motion/estimation/fast_objects/FastObjectTracker.h",
+    "src/VP-V/modules/motion/estimation/fast_objects/FastObjectTracker.cpp"
   ],
   "forwarding_headers": [
     "src/VideoProcessor-Lib/MotionAhead.h",
